@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>训练中心 - SELF-LNN 全液态神经网络AGI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/api-service.js"></script>
+    <script src="js/selflnn-chart.js"></script>
+    <script>
+        /* 页面加载完成后检查后端连接状态 */
+        document.addEventListener('DOMContentLoaded', function() {
+            var api = window.SelfLnnApi;
+            api.checkConnection().then(function(status) {
+                if (!status.connected) {
+                    document.querySelectorAll('[id]').forEach(function(el) {
+                        if (el.textContent && el.textContent.trim() === '等待连接') {
+                            el.textContent = '离线';
+                        }
+                    });
+                }
+            }).catch(function() {
+                document.querySelectorAll('[id]').forEach(function(el) {
+                    if (el.textContent && el.textContent.trim() === '等待连接') {
+                        el.textContent = '离线';
+                    }
+                });
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo"><h1>训练中心</h1></div>
+            <nav class="nav">
+                <ul>
+                    <li><a href="index.html">仪表盘</a></li>
+                    <li><a href="training-center.html" class="active">训练中心</a></li>
+                    <li><a href="programming-workbench.html">编程工作台</a></li>
+                    <li><a href="multimodal-learn.html">多模态学习</a></li>
+                    <li><a href="simulation-control.html">仿真控制</a></li>
+                    <li><a href="device-control.html">设备控制</a></li>
+                    <li><a href="hardware-setup.html">硬件设置</a></li>
+                    <li><a href="safety.html">安全监控</a></li>
+                    <li><a href="knowledge-graph.html">知识图谱</a></li>
+                    <li><a href="skills.html">技能库</a></li>
+                    <li><a href="teach.html">示教学习</a></li>
+                    <li><a href="voice-control.html">语音控制</a></li>
+                    <li><a href="api-keys.html">API密钥</a></li>
+                    <li><a href="api-docs.html">API文档</a></li>
+                    <li><a href="usage-logs.html">使用日志</a></li>
+                </ul>
+            </nav>
+        </header>
+        <div style="padding:8px 20px;background:rgba(0,0,0,0.2);display:flex;align-items:center;gap:8px;font-size:0.8rem;">
+            <span>WS连接:</span>
+            <span id="ws-status" style="color:#888;">未连接</span>
+        </div>
+        <main class="main-content">
+            <div class="section-header">
+                <h2>模型训练控制中心</h2>
+                <p>管理训练任务、监控训练进度和性能</p>
+            </div>
+            <div class="dashboard-grid">
+                <div class="card">
+                    <div class="card-header"><h3>新建训练任务</h3></div>
+                    <div class="card-content">
+                        <div class="form-group">
+                            <label>训练模式</label>
+                            <select id="train-mode" class="form-input">
+                                <option value="pretrain">预训练</option>
+                                <option value="finetune">微调</option>
+                                <option value="rl">强化学习</option>
+                                <option value="contrastive">对比学习</option>
+                                <option value="curriculum">课程学习</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>学习率</label>
+                            <input type="number" id="train-lr" value="0.001" step="0.0001" class="form-input">
+                        </div>
+                        <div class="form-group">
+                            <label>批次大小</label>
+                            <input type="number" id="train-batch" value="64" min="1" class="form-input">
+                        </div>
+                        <div class="form-group">
+                            <label>训练轮数</label>
+                            <input type="number" id="train-epochs" value="100" min="1" class="form-input">
+                        </div>
+                        <div class="form-group">
+                            <label>数据集路径</label>
+                            <input type="text" id="train-data" value="./data/training" class="form-input">
+                        </div>
+                        <button onclick="startTraining()" class="btn btn-primary">开始训练</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>训练进度</h3></div>
+                    <div class="card-content">
+                        <div class="chart-container" style="height:250px">
+                            <canvas id="training-chart"></canvas>
+                        </div>
+                        <div class="metrics-grid" style="margin-top:12px">
+                            <div class="metric"><span class="metric-label">当前轮次</span><span class="metric-value" id="current-epoch">-</span></div>
+                            <div class="metric"><span class="metric-label">训练损失</span><span class="metric-value" id="train-loss">-</span></div>
+                            <div class="metric"><span class="metric-label">验证损失</span><span class="metric-value" id="val-loss">-</span></div>
+                            <div class="metric"><span class="metric-label">准确率</span><span class="metric-value" id="train-accuracy">-</span></div>
+                            <div class="metric"><span class="metric-label">已用时间</span><span class="metric-value" id="train-time">-</span></div>
+                        </div>
+                        <div class="form-group" style="margin-top:12px">
+                            <button onclick="pauseTraining()" class="btn btn-warning">暂停</button>
+                            <button onclick="resumeTraining()" class="btn btn-success">恢复</button>
+                            <button onclick="stopTraining()" class="btn btn-danger">停止</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card full-width">
+                    <div class="card-header"><h3>训练历史</h3></div>
+                    <div class="card-content">
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr><th>任务ID</th><th>模式</th><th>状态</th><th>损失</th><th>准确率</th><th>用时</th><th>操作</th></tr>
+                                </thead>
+                                <tbody id="history-list">
+                                    <tr><td colspan="7" class="pending-text">等待连接</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="js/training-center.js"></script>
+</body>
+</html>

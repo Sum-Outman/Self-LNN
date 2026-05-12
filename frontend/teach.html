@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>示教学习 - SELF-LNN 全液态神经网络AGI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/api-service.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo"><h1>实物示教学习</h1></div>
+            <nav class="nav"><ul>
+                <li><a href="index.html">仪表盘</a></li>
+                <li><a href="training-center.html">训练中心</a></li>
+                <li><a href="programming-workbench.html">编程工作台</a></li>
+                <li><a href="multimodal-learn.html">多模态学习</a></li>
+                <li><a href="simulation-control.html">仿真控制</a></li>
+                <li><a href="device-control.html">设备控制</a></li>
+                <li><a href="hardware-setup.html">硬件设置</a></li>
+                <li><a href="safety.html">安全监控</a></li>
+                <li><a href="knowledge-graph.html">知识图谱</a></li>
+                <li><a href="skills.html">技能库</a></li>
+                <li><a href="teach.html" class="active">示教学习</a></li>
+                <li><a href="voice-control.html">语音控制</a></li>
+                <li><a href="api-keys.html">API密钥</a></li>
+                <li><a href="api-docs.html">API文档</a></li>
+                <li><a href="usage-logs.html">使用日志</a></li>
+            </ul></nav>
+        </header>
+        <main class="main-content">
+            <div class="section-header"><h2>实物示教 — 像教儿童一样教机器人</h2><p>通过展示实物让机器人学习多模态认知（发音+文字+图形+传感器+形状+数量）</p></div>
+            <div class="dashboard-grid">
+                <div class="card">
+                    <div class="card-header"><h3>示教输入</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>概念名称</label><input type="text" id="concept-name" placeholder="例如: 苹果" class="form-input"></div>
+                        <div class="form-group"><label>概念标签（可选）</label><input type="text" id="concept-label" placeholder="例如: Apple / 红苹果" class="form-input"></div>
+                        <div class="form-group"><label>输入模态</label>
+                            <select id="teach-modality" class="form-input">
+                                <option value="vision">视觉</option><option value="audio">语音</option><option value="text">文本</option><option value="sensor">传感器</option><option value="multimodal">多模态</option>
+                            </select>
+                        </div>
+                        <div class="form-group"><label>学习模式</label>
+                            <select id="learn-mode" class="form-input">
+                                <option value="single">单次学习</option><option value="repeat">重复强化</option><option value="context">上下文关联</option>
+                            </select>
+                        </div>
+                        <button onclick="startTeaching()" class="btn btn-primary" style="width:100%">开始示教</button>
+                        <button onclick="testTeaching()" class="btn" style="width:100%;margin-top:8px">测试已学概念</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>示教状态</h3></div>
+                    <div class="card-content">
+                        <div class="metric"><span class="metric-label">已学概念</span><span class="metric-value" id="concepts-learned">0</span></div>
+                        <div class="metric"><span class="metric-label">教学准确率</span><span class="metric-value" id="teach-accuracy">-</span></div>
+                        <div class="metric"><span class="metric-label">最近概念</span><span class="metric-value" id="last-concept">-</span></div>
+                        <div class="metric"><span class="metric-label">活跃输入模态数</span><span class="metric-value" id="fused-modalities">0</span></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>模仿学习</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>动作序列（关节角度JSON）</label><textarea id="demo-actions" placeholder='[{"joint":"arm","angle":0.5},{"joint":"wrist","angle":-0.3}]' class="form-input" rows="3"></textarea></div>
+                        <div class="form-group"><label>演示标签</label><input type="text" id="demo-label" placeholder="例如: 抓取动作" class="form-input"></div>
+                        <button onclick="recordDemo()" class="btn btn-primary" style="width:100%">记录演示</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script>
+        async function startTeaching() {
+            var name = document.getElementById('concept-name').value;
+            var label = document.getElementById('concept-label').value || name;
+            var modality = document.getElementById('teach-modality').value;
+            var learnMode = document.getElementById('learn-mode').value;
+            if (!name) { alert('请输入概念名称'); return; }
+            try {
+                /* 根据模态选择对应的示教API */
+                var resp;
+                if (modality === 'vision') {
+                    resp = await SelfLnnApi.teachLookAndLearn(name, label, null);
+                } else if (modality === 'audio') {
+                    resp = await SelfLnnApi.teachSayAndAssociate(name, label, null, null);
+                } else if (modality === 'sensor') {
+                    resp = await SelfLnnApi.teachTouchAndUnderstand(name, label, null);
+                } else {
+                    resp = await SelfLnnApi.teachLookAndLearn(name, label, null);
+                }
+                if (resp && resp.success) {
+                    document.getElementById('last-concept').textContent = name;
+                    document.getElementById('concepts-learned').textContent = parseInt(document.getElementById('concepts-learned').textContent||0)+1;
+                    alert('示教成功: '+(resp.message||'已发送'));
+                } else { alert('示教失败: '+((resp&&resp.error)||'未知错误')); }
+            } catch(e) { alert('连接失败: '+e.message); }
+        }
+        async function testTeaching() {
+            try {
+                var data = await SelfLnnApi.teachGetConcepts();
+                if (data && data.success) {
+                    var concepts = data.data ? (data.data.concepts||data.data.results||[]) : [];
+                    var count = concepts.length || (data.data && data.data.count) || 0;
+                    document.getElementById('concepts-learned').textContent = count;
+                    document.getElementById('teach-accuracy').textContent = count > 0 ? '已学习' : '-';
+                    document.getElementById('fused-modalities').textContent = data.data ? (data.data.modalities||0) : 0;
+                    alert('已学'+count+'个概念');
+                }
+            } catch(e) { console.warn('示教测试失败:', e.message); }
+        }
+        function recordDemo() {
+            var label = document.getElementById('demo-label').value;
+            var actions = document.getElementById('demo-actions').value;
+            if (!label) { alert('请输入演示标签'); return; }
+            SelfLnnApi.request('/robot/command', { method:'POST', body:JSON.stringify({command:'record_demo',params:{label:label,actions:actions}}) }, 1)
+                .then(function(r){ return r.json(); })
+                .then(function(d){ alert(d.success?'演示已记录':'记录失败'); }).catch(function(){ alert('连接失败'); });
+        }
+    </script>
+</body>
+</html>

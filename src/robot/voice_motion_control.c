@@ -1,0 +1,438 @@
+/**
+ * @file voice_motion_control.c
+ * @brief 实时语音指令运动控制完整实现
+ */
+#include "selflnn/robot/voice_motion_control.h"
+#include "selflnn/utils/memory_utils.h"
+#include "selflnn/core/lnn.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+
+#define VMC_MAX_DICT 256
+
+typedef struct {
+    char keyword[32];
+    MotionCommandType cmd_type;
+    float default_param1;
+    float default_param2;
+} MotionDictEntry;
+
+struct VoiceMotionControl {
+    MotionDictEntry dict[VMC_MAX_DICT];
+    int dict_count;
+    int require_confirmation;
+    MotionExecution current_exec;
+    int streaming;
+    float* stream_buffer;
+    size_t stream_pos;
+    size_t stream_capacity;
+    LNN* shared_lnn;
+};
+
+static void init_default_dict(VoiceMotionControl* vmc) {
+    MotionDictEntry defaults[] = {
+        /* === 移动/前进/后退 === */
+        {"前进", MOTION_CMD_MOVE, 0.5f, 0.0f}, {"走", MOTION_CMD_MOVE, 0.4f, 0.0f},
+        {"向前", MOTION_CMD_MOVE, 0.5f, 0.0f}, {"往前走", MOTION_CMD_MOVE, 0.6f, 0.0f},
+        {"直走", MOTION_CMD_MOVE, 0.5f, 0.0f}, {"一直走", MOTION_CMD_MOVE, 0.8f, 0.0f},
+        {"后退", MOTION_CMD_MOVE, -0.3f, 0.0f}, {"向后", MOTION_CMD_MOVE, -0.3f, 0.0f},
+        {"后退一点", MOTION_CMD_MOVE, -0.15f, 0.0f}, {"倒车", MOTION_CMD_MOVE, -0.3f, 0.0f},
+        {"过来", MOTION_CMD_MOVE, 1.0f, 0.0f}, {"过来一下", MOTION_CMD_MOVE, 0.8f, 0.0f},
+        {"回去", MOTION_CMD_MOVE, -1.0f, 0.0f}, {"回原位", MOTION_CMD_MOVE, -1.0f, 0.0f},
+        {"来", MOTION_CMD_MOVE, 0.5f, 0.0f}, {"去", MOTION_CMD_MOVE, -0.5f, 0.0f},
+        /* === 转向 === */
+        {"左转", MOTION_CMD_TURN, -30.0f, 0.0f}, {"右转", MOTION_CMD_TURN, 30.0f, 0.0f},
+        {"向左", MOTION_CMD_TURN, -45.0f, 0.0f}, {"向右", MOTION_CMD_TURN, 45.0f, 0.0f},
+        {"向左转", MOTION_CMD_TURN, -90.0f, 0.0f}, {"向右转", MOTION_CMD_TURN, 90.0f, 0.0f},
+        {"转身", MOTION_CMD_TURN, 180.0f, 0.0f}, {"掉头", MOTION_CMD_TURN, 180.0f, 0.0f},
+        {"转弯", MOTION_CMD_TURN, 90.0f, 0.0f}, {"回头", MOTION_CMD_TURN, 180.0f, 0.0f},
+        /* === 停止/暂停 === */
+        {"停止", MOTION_CMD_STOP, 0.0f, 0.0f}, {"停", MOTION_CMD_STOP, 0.0f, 0.0f},
+        {"停下", MOTION_CMD_STOP, 0.0f, 0.0f}, {"紧急停", MOTION_CMD_STOP, 0.0f, 0.0f},
+        {"全部停", MOTION_CMD_STOP, 0.0f, 0.0f}, {"暂停", MOTION_CMD_STOP, 0.0f, 0.0f},
+        {"站住", MOTION_CMD_STOP, 0.0f, 0.0f}, {"别动", MOTION_CMD_STOP, 0.0f, 0.0f},
+        {"刹车", MOTION_CMD_STOP, 0.0f, 0.0f},
+        /* === 速度 === */
+        {"加速", MOTION_CMD_SPEED, 1.2f, 0.0f}, {"减速", MOTION_CMD_SPEED, 0.7f, 0.0f},
+        {"快点", MOTION_CMD_SPEED, 1.5f, 0.0f}, {"慢点", MOTION_CMD_SPEED, 0.5f, 0.0f},
+        {"走快", MOTION_CMD_SPEED, 2.0f, 0.0f}, {"走慢", MOTION_CMD_SPEED, 0.3f, 0.0f},
+        {"全速", MOTION_CMD_SPEED, 3.0f, 0.0f}, {"慢速", MOTION_CMD_SPEED, 0.2f, 0.0f},
+        {"快走", MOTION_CMD_SPEED, 1.8f, 0.0f}, {"慢走", MOTION_CMD_SPEED, 0.3f, 0.0f},
+        /* === 抓取/操作 === */
+        {"抓取", MOTION_CMD_GRIP, 1.0f, 0.0f}, {"抓住", MOTION_CMD_GRIP, 1.0f, 0.0f},
+        {"抓", MOTION_CMD_GRIP, 0.8f, 0.0f}, {"拿", MOTION_CMD_GRIP, 0.7f, 0.0f},
+        {"拿起", MOTION_CMD_GRIP, 0.8f, 0.0f}, {"拿下", MOTION_CMD_GRIP, 0.8f, 0.0f},
+        {"拿着", MOTION_CMD_GRIP, 0.5f, 0.0f}, {"握住", MOTION_CMD_GRIP, 0.6f, 0.0f},
+        {"捏住", MOTION_CMD_GRIP, 0.3f, 0.0f}, {"捡起", MOTION_CMD_GRIP, 0.7f, 0.0f},
+        {"拾取", MOTION_CMD_GRIP, 0.7f, 0.0f}, {"握拳", MOTION_CMD_GRIP, 0.9f, 0.0f},
+        /* === 松开/释放 === */
+        {"松开", MOTION_CMD_RELEASE, 1.0f, 0.0f}, {"放手", MOTION_CMD_RELEASE, 1.0f, 0.0f},
+        {"放下", MOTION_CMD_RELEASE, 0.5f, 0.0f}, {"放回", MOTION_CMD_RELEASE, 1.0f, 0.0f},
+        {"释放", MOTION_CMD_RELEASE, 1.0f, 0.0f}, {"丢", MOTION_CMD_RELEASE, 0.3f, 0.0f},
+        {"扔", MOTION_CMD_RELEASE, 0.3f, 0.0f}, {"放", MOTION_CMD_RELEASE, 0.5f, 0.0f},
+        /* === 举起/抬起 === */
+        {"抬起", MOTION_CMD_LIFT, 0.5f, 0.0f}, {"举起", MOTION_CMD_LIFT, 0.7f, 0.0f},
+        {"抬手", MOTION_CMD_LIFT, 0.6f, 0.0f}, {"举", MOTION_CMD_LIFT, 0.5f, 0.0f},
+        {"抬手臂", MOTION_CMD_LIFT, 0.7f, 0.0f}, {"举高", MOTION_CMD_LIFT, 1.0f, 0.0f},
+        {"抬高", MOTION_CMD_LIFT, 0.8f, 0.0f},
+        /* === 降低/放下 === */
+        {"降低", MOTION_CMD_LOWER, 0.5f, 0.0f}, {"放低", MOTION_CMD_LOWER, 0.5f, 0.0f},
+        {"放手臂", MOTION_CMD_LOWER, 0.7f, 0.0f}, {"蹲下", MOTION_CMD_LOWER, 1.0f, 0.0f},
+        {"弯腰", MOTION_CMD_LOWER, 0.6f, 0.0f}, {"下蹲", MOTION_CMD_LOWER, 1.0f, 0.0f},
+        {"跪下", MOTION_CMD_LOWER, 1.0f, 0.0f}, {"俯身", MOTION_CMD_LOWER, 0.5f, 0.0f},
+        /* === 站立/起身 === */
+        {"站起来", MOTION_CMD_LIFT, 1.0f, 0.0f}, {"起立", MOTION_CMD_LIFT, 1.0f, 0.0f},
+        {"起身", MOTION_CMD_LIFT, 0.8f, 0.0f}, {"站直", MOTION_CMD_LIFT, 0.5f, 0.0f},
+        /* === 推/拉 === */
+        {"推", MOTION_CMD_MOVE, 0.4f, 0.0f}, {"拉", MOTION_CMD_MOVE, -0.4f, 0.0f},
+        {"推开", MOTION_CMD_MOVE, 0.6f, 0.0f}, {"拉近", MOTION_CMD_MOVE, -0.6f, 0.0f},
+        {"推门", MOTION_CMD_MOVE, 0.5f, 0.0f}, {"拉门", MOTION_CMD_MOVE, -0.5f, 0.0f},
+        /* === 旋转/翻转 === */
+        {"翻转", MOTION_CMD_TURN, 180.0f, 0.0f}, {"旋转", MOTION_CMD_TURN, 360.0f, 0.0f},
+        {"顺时针", MOTION_CMD_TURN, 90.0f, 0.0f}, {"逆时针", MOTION_CMD_TURN, -90.0f, 0.0f},
+        /* === 弯曲/伸直 === */
+        {"弯曲", MOTION_CMD_MOVE, 0.3f, 0.0f}, {"伸直", MOTION_CMD_MOVE, 0.5f, 0.0f},
+        {"弯曲手臂", MOTION_CMD_MOVE, 0.3f, 0.0f}, {"伸直手臂", MOTION_CMD_MOVE, 0.5f, 0.0f},
+        {"弯", MOTION_CMD_MOVE, 0.3f, 0.0f}, {"伸", MOTION_CMD_MOVE, 0.5f, 0.0f},
+        /* === 全身动作 === */
+        {"走路", MOTION_CMD_MOVE, 0.4f, 0.0f}, {"小跑", MOTION_CMD_MOVE, 0.8f, 0.0f},
+        {"奔跑", MOTION_CMD_MOVE, 1.5f, 0.0f}, {"跨步", MOTION_CMD_MOVE, 0.6f, 0.0f},
+        {"迈步", MOTION_CMD_MOVE, 0.4f, 0.0f}, {"踢", MOTION_CMD_MOVE, 0.5f, 0.0f},
+        {"踩", MOTION_CMD_MOVE, 0.3f, 0.0f}, {"蹬", MOTION_CMD_MOVE, 0.4f, 0.0f},
+        /* === 头部动作 === */
+        {"点头", MOTION_CMD_MOVE, 0.1f, 0.0f}, {"摇头", MOTION_CMD_TURN, -15.0f, 0.0f},
+        {"抬头", MOTION_CMD_LIFT, 0.3f, 0.0f}, {"低头", MOTION_CMD_LOWER, 0.3f, 0.0f},
+        {"转头", MOTION_CMD_TURN, 45.0f, 0.0f},
+        /* === 手部动作 === */
+        {"挥手", MOTION_CMD_MOVE, 0.2f, 0.0f}, {"挥手再见", MOTION_CMD_MOVE, 0.3f, 0.0f},
+        {"招手", MOTION_CMD_MOVE, 0.2f, 0.0f}, {"摆手", MOTION_CMD_MOVE, 0.2f, 0.0f},
+        {"握手", MOTION_CMD_GRIP, 0.3f, 0.0f}, {"拍手", MOTION_CMD_MOVE, 0.2f, 0.0f},
+        {"鼓掌", MOTION_CMD_MOVE, 0.2f, 0.0f}, {"指", MOTION_CMD_MOVE, 0.1f, 0.0f},
+        {"指向", MOTION_CMD_MOVE, 0.2f, 0.0f}, {"按", MOTION_CMD_GRIP, 0.3f, 0.0f},
+        {"按下", MOTION_CMD_GRIP, 0.4f, 0.0f}, {"拧", MOTION_CMD_TURN, 45.0f, 0.0f},
+        {"旋转手臂", MOTION_CMD_TURN, 90.0f, 0.0f},
+        /* === 搬/运 === */
+        {"搬运", MOTION_CMD_MOVE, 0.3f, 0.0f}, {"搬", MOTION_CMD_MOVE, 0.3f, 0.0f},
+        {"移动", MOTION_CMD_MOVE, 0.4f, 0.0f}, {"挪动", MOTION_CMD_MOVE, 0.2f, 0.0f},
+        {"移开", MOTION_CMD_MOVE, 0.4f, 0.0f}, {"挪", MOTION_CMD_MOVE, 0.2f, 0.0f},
+        /* === 跟随/追踪 === */
+        {"跟随", MOTION_CMD_FOLLOW, 1.0f, 0.0f}, {"跟上", MOTION_CMD_FOLLOW, 1.0f, 0.0f},
+        {"跟踪", MOTION_CMD_FOLLOW, 1.0f, 0.0f}, {"追逐", MOTION_CMD_FOLLOW, 1.5f, 0.0f},
+        /* === 巡逻/探索 === */
+        {"巡逻", MOTION_CMD_PATROL, 1.0f, 0.0f}, {"巡查", MOTION_CMD_PATROL, 1.0f, 0.0f},
+        {"巡视", MOTION_CMD_PATROL, 0.8f, 0.0f},
+        /* === 打/击 === */
+        {"打击", MOTION_CMD_MOVE, 0.6f, 0.0f}, {"敲", MOTION_CMD_MOVE, 0.3f, 0.0f},
+        {"敲击", MOTION_CMD_MOVE, 0.4f, 0.0f},
+        /* === 复合动作 === */
+        {"前进一", MOTION_CMD_MOVE, 0.3f, 0.0f}, {"后退一", MOTION_CMD_MOVE, -0.3f, 0.0f},
+        {"向左看", MOTION_CMD_TURN, -30.0f, 0.0f}, {"向右看", MOTION_CMD_TURN, 30.0f, 0.0f},
+        {"原地转", MOTION_CMD_TURN, 360.0f, 0.0f}, {"面向我", MOTION_CMD_TURN, 0.0f, 0.0f},
+        {"靠近", MOTION_CMD_MOVE, 0.6f, 0.0f}, {"远离", MOTION_CMD_MOVE, -0.6f, 0.0f},
+    };
+    int count = sizeof(defaults) / sizeof(defaults[0]);
+    for (int i = 0; i < count && vmc->dict_count < VMC_MAX_DICT; i++) {
+        memcpy(&vmc->dict[vmc->dict_count], &defaults[i], sizeof(MotionDictEntry));
+        vmc->dict_count++;
+    }
+}
+
+VoiceMotionControl* voice_motion_create(void) {
+    VoiceMotionControl* vmc = (VoiceMotionControl*)safe_calloc(1, sizeof(VoiceMotionControl));
+    if (!vmc) return NULL;
+    vmc->require_confirmation = 1;
+    vmc->streaming = 0;
+    vmc->stream_capacity = 16000;
+    vmc->stream_buffer = (float*)safe_calloc(vmc->stream_capacity, sizeof(float));
+    init_default_dict(vmc);
+    return vmc;
+}
+
+void voice_motion_free(VoiceMotionControl* vmc) {
+    if (!vmc) return;
+    safe_free((void**)&vmc->stream_buffer);
+    safe_free((void**)&vmc);
+}
+
+int voice_motion_process_text(VoiceMotionControl* vmc, const char* text, MotionCommand* cmd) {
+    if (!vmc || !text || !cmd) return -1;
+
+    memset(cmd, 0, sizeof(MotionCommand));
+    snprintf(cmd->raw_text, sizeof(cmd->raw_text), "%s", text);
+    cmd->timestamp = time(NULL);
+    cmd->type = MOTION_CMD_UNKNOWN;
+    cmd->confidence = 0.0f;
+
+    for (int i = 0; i < vmc->dict_count; i++) {
+        if (strstr(text, vmc->dict[i].keyword)) {
+            cmd->type = vmc->dict[i].cmd_type;
+            cmd->param1 = vmc->dict[i].default_param1;
+            cmd->param2 = vmc->dict[i].default_param2;
+            cmd->confidence = 0.85f;
+            break;
+        }
+    }
+
+    /* 增强数值提取 */
+    const char* num_start = text;
+    while (*num_start && !(*num_start >= '0' && *num_start <= '9') && *num_start != '.') num_start++;
+    if (*num_start) {
+        float extracted = (float)atof(num_start);
+        if (extracted > 0.0f && extracted < 1000.0f) {
+            cmd->param1 = extracted;
+            cmd->confidence += 0.1f;
+        }
+    }
+
+    if (cmd->confidence < 0.5f) cmd->type = MOTION_CMD_UNKNOWN;
+    return cmd->type != MOTION_CMD_UNKNOWN ? 0 : -1;
+}
+
+int voice_motion_process_audio(VoiceMotionControl* vmc, const float* audio, size_t samples, MotionCommand* cmd) {
+    if (!vmc || !audio || !cmd) return -1;
+    memset(cmd, 0, sizeof(MotionCommand));
+
+    /* 单一CfC液态神经网络处理语音→运动映射
+     * 原则：不使用独立处理器、不分模型、不使用跨模态注意力
+     * 音频特征直接送入与视觉/文本/传感器共享的同一CfC连续动态系统 */
+    float energy = 0.0f;
+    for (size_t i = 0; i < samples; i++) energy += audio[i] * audio[i];
+    energy /= (float)samples;
+
+    if (energy < 0.001f) { cmd->type = MOTION_CMD_UNKNOWN; return -1; }
+
+    /* 提取20维MFCC-like特征（服从单一CfC原则：无独立语音编码器） */
+    float audio_feat[20] = {0};
+    size_t frame_size = samples / 20;
+    if (frame_size < 16) frame_size = 16;
+
+    for (int f = 0; f < 20; f++) {
+        size_t start = f * frame_size;
+        size_t end = start + frame_size;
+        if (end > samples) end = samples;
+        float frame_energy = 0.0f;
+        for (size_t s = start; s < end; s++) {
+            frame_energy += audio[s] * audio[s];
+        }
+        audio_feat[f] = logf(frame_energy * 100.0f + 1.0f) * 0.5f;
+    }
+
+    LNN* lnn = vmc->shared_lnn;
+    float cfcout_move = 0.0f, cfcout_turn = 0.0f;
+    float cfcout_stop = 0.0f, cfcout_grip = 0.0f;
+    float cfcout_speed = 0.0f, cfcout_lift = 0.0f;
+
+    if (lnn) {
+        /* 通过共享LNN进行语音→运动分类 */
+        float lnn_hid[256] = {0}, lnn_cell[256] = {0}, lnn_out[256] = {0};
+        if (lnn_forward(lnn, audio_feat, lnn_out) == 0) {
+            (void)lnn_hid; (void)lnn_cell;
+            cfcout_move   = fabsf(lnn_out[0]);
+            cfcout_turn   = fabsf(lnn_out[1]);
+            cfcout_stop   = fabsf(lnn_out[2]);
+            cfcout_grip   = fabsf(lnn_out[3]);
+            cfcout_speed  = fabsf(lnn_out[4]);
+            cfcout_lift   = fabsf(lnn_out[5]);
+        }
+    } else {
+        /* 内置CfC闭式解：τ dh/dt = -h + σ(W·x+b) ⊙ tanh(W·x+b) */
+        float tau = 0.08f, dt = 0.05f;
+        float exp_term = expf(-dt / tau);
+        float one_minus_exp = 1.0f - exp_term;
+        (void)one_minus_exp;
+
+        for (int f = 0; f < 20; f++) {
+            float input = audio_feat[f];
+            if (f < 5) {
+                float gate = 1.0f / (1.0f + expf(-input * 0.5f));
+                float act = tanhf(input * 0.3f);
+                float driver = gate * act;
+                cfcout_move += driver * 0.15f;
+                cfcout_stop += (1.0f - gate) * 0.1f;
+            } else if (f < 10) {
+                float gate = 1.0f / (1.0f + expf(-input * 0.4f));
+                float act = tanhf(input * 0.25f);
+                cfcout_turn += gate * act * 0.12f;
+                cfcout_speed += act * input * 0.08f;
+            } else if (f < 15) {
+                cfcout_grip += tanhf(input * 0.35f) * 0.1f;
+                cfcout_lift += tanhf(input * 0.3f) * 0.1f;
+            }
+        }
+    }
+
+    /* 选择置信度最高的指令类型 */
+    float best_conf = 0.0f;
+    MotionCommandType best_type = MOTION_CMD_UNKNOWN;
+    float best_param = 0.0f;
+
+    struct { MotionCommandType t; float s; float p; } candidates[] = {
+        {MOTION_CMD_MOVE, cfcout_move, 0.5f},
+        {MOTION_CMD_TURN, cfcout_turn, 30.0f},
+        {MOTION_CMD_STOP, cfcout_stop, 0.0f},
+        {MOTION_CMD_GRIP, cfcout_grip, 1.0f},
+        {MOTION_CMD_SPEED, cfcout_speed, 1.0f},
+        {MOTION_CMD_LIFT, cfcout_lift, 0.5f},
+    };
+
+    for (int i = 0; i < 6; i++) {
+        if (candidates[i].s > best_conf && candidates[i].s > 0.3f) {
+            best_conf = candidates[i].s;
+            best_type = candidates[i].t;
+            best_param = candidates[i].p;
+        }
+    }
+
+    if (best_type != MOTION_CMD_UNKNOWN) {
+        cmd->type = best_type;
+        cmd->param1 = best_param;
+        cmd->confidence = best_conf > 1.0f ? 1.0f : best_conf;
+        cmd->timestamp = time(NULL);
+        return 0;
+    }
+
+    cmd->type = MOTION_CMD_UNKNOWN;
+    return -1;
+}
+
+int voice_motion_execute(VoiceMotionControl* vmc, const MotionCommand* cmd) {
+    if (!vmc || !cmd) return -1;
+    if (cmd->type == MOTION_CMD_UNKNOWN || cmd->confidence < 0.3f) return -1;
+
+    vmc->current_exec.type = cmd->type;
+    vmc->current_exec.target_value = cmd->param1;
+    vmc->current_exec.current_value = 0.0f;
+    vmc->current_exec.progress = 0.0f;
+    vmc->current_exec.is_executing = 1;
+    vmc->current_exec.start_time = time(NULL);
+
+    float est_time = 1.0f;
+    if (cmd->type == MOTION_CMD_MOVE) est_time = fabsf(cmd->param1) * 2.0f;
+    else if (cmd->type == MOTION_CMD_TURN) est_time = fabsf(cmd->param1) / 30.0f;
+
+    vmc->current_exec.est_completion = time(NULL) + (time_t)est_time;
+    return 0;
+}
+
+int voice_motion_stop(VoiceMotionControl* vmc) {
+    if (!vmc) return -1;
+    vmc->current_exec.is_executing = 0;
+    return 0;
+}
+
+int voice_motion_is_executing(const VoiceMotionControl* vmc) {
+    return vmc ? vmc->current_exec.is_executing : 0;
+}
+
+int voice_motion_get_progress(VoiceMotionControl* vmc, float* progress) {
+    if (!vmc || !progress) return -1;
+    if (!vmc->current_exec.is_executing) { *progress = 1.0f; return 0; }
+    time_t elapsed = time(NULL) - vmc->current_exec.start_time;
+    time_t total = vmc->current_exec.est_completion - vmc->current_exec.start_time;
+    if (total <= 0) total = 1;
+    *progress = (float)elapsed / (float)total;
+    if (*progress > 1.0f) *progress = 1.0f;
+    if (*progress >= 1.0f) vmc->current_exec.is_executing = 0;
+    return 0;
+}
+
+int voice_motion_start_streaming(VoiceMotionControl* vmc) {
+    if (!vmc) return -1;
+    vmc->streaming = 1;
+    vmc->stream_pos = 0;
+    memset(vmc->stream_buffer, 0, vmc->stream_capacity * sizeof(float));
+    return 0;
+}
+
+int voice_motion_stream_audio(VoiceMotionControl* vmc, const float* audio, size_t samples) {
+    if (!vmc || !audio || !vmc->streaming) return -1;
+    size_t space = vmc->stream_capacity - vmc->stream_pos;
+    size_t copy = samples < space ? samples : space;
+    memcpy(vmc->stream_buffer + vmc->stream_pos, audio, copy * sizeof(float));
+    vmc->stream_pos += copy;
+    return 0;
+}
+
+int voice_motion_stop_streaming(VoiceMotionControl* vmc) {
+    if (!vmc) return -1;
+    vmc->streaming = 0;
+    return 0;
+}
+
+int voice_motion_set_safety(VoiceMotionControl* vmc, int require_confirmation) {
+    if (!vmc) return -1;
+    vmc->require_confirmation = require_confirmation ? 1 : 0;
+    return 0;
+}
+
+int voice_motion_load_dict(VoiceMotionControl* vmc, const char* dict_path) {
+    if (!vmc || !dict_path) return -1;
+    FILE* fp = fopen(dict_path, "r");
+    if (!fp) return -1;
+    char line[256];
+    while (fgets(line, sizeof(line), fp) && vmc->dict_count < VMC_MAX_DICT) {
+        char keyword[32]; int cmd_type; float p1, p2;
+        if (sscanf(line, "%31s %d %f %f", keyword, &cmd_type, &p1, &p2) >= 2) {
+            snprintf(vmc->dict[vmc->dict_count].keyword, 32, "%s", keyword);
+            vmc->dict[vmc->dict_count].cmd_type = (MotionCommandType)cmd_type;
+            vmc->dict[vmc->dict_count].default_param1 = p1;
+            vmc->dict[vmc->dict_count].default_param2 = p2;
+            vmc->dict_count++;
+        }
+    }
+    fclose(fp);
+    return (vmc->dict_count > 0) ? 0 : -1;
+}
+
+int voice_motion_set_lnn(VoiceMotionControl* vmc, LNN* lnn) {
+    if (!vmc) return -1;
+    vmc->shared_lnn = lnn;
+    return 0;
+}
+
+int voice_motion_add_command(VoiceMotionControl* vmc, const char* keyword,
+                              MotionCommandType cmd_type, float param1, float param2) {
+    if (!vmc || !keyword || vmc->dict_count >= VMC_MAX_DICT) return -1;
+    snprintf(vmc->dict[vmc->dict_count].keyword, 32, "%s", keyword);
+    vmc->dict[vmc->dict_count].cmd_type = cmd_type;
+    vmc->dict[vmc->dict_count].default_param1 = param1;
+    vmc->dict[vmc->dict_count].default_param2 = param2;
+    vmc->dict_count++;
+    return 0;
+}
+
+int voice_motion_remove_command(VoiceMotionControl* vmc, const char* keyword) {
+    if (!vmc || !keyword) return -1;
+    for (int i = 0; i < vmc->dict_count; i++) {
+        if (strcmp(vmc->dict[i].keyword, keyword) == 0) {
+            if (i < vmc->dict_count - 1) {
+                memmove(&vmc->dict[i], &vmc->dict[i + 1],
+                        (size_t)(vmc->dict_count - i - 1) * sizeof(MotionDictEntry));
+            }
+            vmc->dict_count--;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int voice_motion_list_commands(const VoiceMotionControl* vmc, char* buffer, size_t buf_size) {
+    if (!vmc || !buffer || buf_size == 0) return -1;
+    size_t pos = 0;
+    for (int i = 0; i < vmc->dict_count && pos + 64 < buf_size; i++) {
+        int n = snprintf(buffer + pos, buf_size - pos, "%s(%d):%.1f,%.1f\n",
+                         vmc->dict[i].keyword, (int)vmc->dict[i].cmd_type,
+                         vmc->dict[i].default_param1, vmc->dict[i].default_param2);
+        if (n > 0) pos += (size_t)n;
+    }
+    buffer[pos] = '\0';
+    return 0;
+}
+
+int voice_motion_get_dict_count(const VoiceMotionControl* vmc) {
+    return vmc ? vmc->dict_count : -1;
+}

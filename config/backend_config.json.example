@@ -1,0 +1,41 @@
+{
+    "_format": "selflnn_config",
+    "_version": 1,
+    "_comment": "SELF-LNN AGI 系统配置文件示例。复制为 selflnn_config.json 后使用。",
+
+    "port": 8080,
+    "max_connections": 10,
+
+    "enable_logging": 1,
+    "enable_multimodal": 1,
+    "enable_reasoning": 1,
+    "enable_learning": 1,
+    "enable_self_evolution": 1,
+    "enable_robotics": 1,
+    "enable_cognition": 1,
+    "enable_self_decision": 1,
+    "enable_self_execution": 0,
+    "enable_self_learning": 1,
+    "enable_self_evolution_ability": 1,
+    "enable_imitation_learning": 0,
+    "enable_self_correction": 1,
+    "enable_rate_limiting": 0,
+    "enable_ip_whitelist": 0,
+    "enable_ip_blacklist": 0,
+    "enable_multi_robot": 0,
+    "enable_gpu": 0,
+    "enable_gpu_training": 0,
+    "enable_dialogue": 0,
+    "enable_vision": 0,
+    "enable_slam": 0,
+    "enable_tts": 0,
+    "enable_planning": 0,
+
+    "api_key": "",
+    "rate_limit_per_minute": 60,
+
+    "ip_whitelist_entries": [
+        "192.168.1.0/24"
+    ],
+    "ip_blacklist_entries": []
+}

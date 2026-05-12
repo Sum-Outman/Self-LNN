@@ -1,0 +1,60 @@
+/**
+ * SELF-LNN AGI 文字指令控制系统
+ * 在对话中输入文字指令，直接控制机器人和设备
+ * 支持自然语言解析和结构化命令
+ */
+
+class TextCommandSystem {
+    constructor() {
+        this.commandEngine = null;
+        this.enabled = true;
+        this.onCommandResult = null;
+        this.commandPrefix = '';
+    }
+
+    setCommandEngine(engine) {
+        this.commandEngine = engine;
+    }
+
+    processText(text) {
+        if (!this.enabled || !this.commandEngine) {
+            return { success: false, error: '文字指令系统未就绪', isCommand: false };
+        }
+        if (!text || text.trim().length === 0) {
+            return { success: false, error: '输入为空', isCommand: false };
+        }
+        const trimmed = text.trim();
+        const parsed = this.commandEngine.parseCommand(trimmed);
+        if (parsed.command) {
+            parsed.isCommand = true;
+            this.commandEngine.executeCommand(parsed).then(result => {
+                if (this.onCommandResult) {
+                    this.onCommandResult(parsed, result);
+                }
+            });
+            return parsed;
+        }
+        return { success: true, command: null, isCommand: false, rawText: trimmed };
+    }
+
+    isCommandText(text) {
+        if (!text) return false;
+        const trimmed = text.trim().toLowerCase();
+        const prefixes = ['控制', '机器人', '电脑', '计算机', '打开', '关闭', '开始', '停止', '系统'];
+        return prefixes.some(p => trimmed.startsWith(p));
+    }
+
+    enable() {
+        this.enabled = true;
+    }
+
+    disable() {
+        this.enabled = false;
+    }
+
+    setPrefix(prefix) {
+        this.commandPrefix = prefix || '';
+    }
+}
+
+window.TextCommandSystem = TextCommandSystem;

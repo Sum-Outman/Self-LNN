@@ -1,0 +1,563 @@
+/**
+ * SELF-LNN AGI 语音指令控制系统
+ * 使用 MediaRecorder API 录制语音，通过后端语音识别解析指令
+ * 支持运动控制、设备控制、系统控制、计算机控制
+ */
+
+class VoiceCommandSystem {
+    constructor() {
+        this._capturer = new VoiceCaptureUtil({ maxDuration: 15000 });
+        this._capturer.onStart = function() {
+            this.isProcessing = false;
+            if (this.onRecordingStart) this.onRecordingStart();
+        }.bind(this);
+        this._capturer.onStop = function() {
+            if (this.onRecordingStop) this.onRecordingStop();
+        }.bind(this);
+        this._capturer.onProgress = function(duration) {
+            if (this.onRecordingProgress) this.onRecordingProgress(duration);
+        }.bind(this);
+        this._capturer.onBlobReady = function(blob) {
+            this._processAudioBlob(blob);
+        }.bind(this);
+        this._capturer.onError = function(msg) {
+            if (this.onError) this.onError(msg);
+        }.bind(this);
+
+        this.isRecording = false;
+        this.isProcessing = false;
+
+        this.onRecordingStart = null;
+        this.onRecordingStop = null;
+        this.onRecordingProgress = null;
+        this.onCommandResult = null;
+        this.onError = null;
+
+        this.commandEngine = new CommandEngine();
+        this.continuousMode = false;
+        this.continuousInterval = null;
+    }
+
+    get isRecording() { return this._capturer.isRecording; }
+
+    async startRecording(micStream) {
+        if (this.isRecording) return;
+        this.isProcessing = false;
+        return this._capturer.start(micStream);
+    }
+
+    stopRecording() {
+        this._capturer.stop();
+    }
+
+    async _processAudioBlob(audioBlob) {
+        this.isProcessing = true;
+        try {
+            var result = await VoiceCaptureUtil.uploadBlob(audioBlob);
+            if (result.success && result.text) {
+                var commandResult = this.commandEngine.parseCommand(result.text);
+                commandResult.originalText = result.text;
+                commandResult.confidence = result.confidence || 0.8;
+                if (commandResult.command) {
+                    await this.commandEngine.executeCommand(commandResult);
+                }
+                if (this.onCommandResult) this.onCommandResult(commandResult);
+            } else {
+                if (this.onCommandResult) {
+                    this.onCommandResult({ success: false, error: result.error || '语音识别失败', command: null });
+                }
+            }
+        } catch (err) {
+            console.error('语音处理失败:', err);
+            if (this.onCommandResult) {
+                this.onCommandResult({ success: false, error: '语音处理失败: ' + err.message, command: null });
+            }
+        } finally {
+            this.isProcessing = false;
+        }
+    }
+
+    startContinuousMode(micStream) {
+        this.continuousMode = true;
+        this.continuousInterval = setInterval(() => {
+            if (!this.isRecording && !this.isProcessing && this.continuousMode) {
+                this.startRecording(micStream);
+                setTimeout(() => {
+                    if (this.isRecording) this.stopRecording();
+                }, 3000);
+            }
+        }, 4000);
+    }
+
+    stopContinuousMode() {
+        this.continuousMode = false;
+        if (this.continuousInterval) {
+            clearInterval(this.continuousInterval);
+            this.continuousInterval = null;
+        }
+        if (this.isRecording) {
+            this.stopRecording();
+        }
+    }
+
+    destroy() {
+        this.stopContinuousMode();
+        this._capturer.destroy();
+        this.commandEngine = null;
+    }
+}
+
+/**
+ * 指令解析引擎（语音和文字共享）
+ */
+class CommandEngine {
+    constructor() {
+        this.commands = this._initCommands();
+        this.executionHistory = [];
+        this.maxHistorySize = 100;
+        this.safetyEnabled = true;
+        this.allowedCommands = ['robot', 'computer', 'device', 'system', 'camera', 'microphone', 'speaker'];
+    }
+
+    _initCommands() {
+        return {
+            robot: {
+                patterns: [
+                    { regex: /(?:控制)?机器人(前进|向前)(?:\s+(\d+(?:\.\d+)?))?\s*(?:米|步|速度)?/, handler: 'robotMoveForward' },
+                    { regex: /(?:控制)?机器人(后退|向后)(?:\s+(\d+(?:\.\d+)?))?\s*(?:米|步|速度)?/, handler: 'robotMoveBackward' },
+                    { regex: /(?:控制)?机器人左转(?:\s+(\d+(?:\.\d+)?))?\s*(?:度|角度)?/, handler: 'robotTurnLeft' },
+                    { regex: /(?:控制)?机器人右转(?:\s+(\d+(?:\.\d+)?))?\s*(?:度|角度)?/, handler: 'robotTurnRight' },
+                    { regex: /(?:控制)?机器人停止/, handler: 'robotStop' },
+                    { regex: /(?:控制)?机器人(?:速度|加速)(?:\s+(\d+(?:\.\d+)?))?/, handler: 'robotSetSpeed' },
+                    { regex: /(?:控制)?机器人(?:站立|站起)/, handler: 'robotStandUp' },
+                    { regex: /(?:控制)?机器人(?:坐下|蹲下)/, handler: 'robotSitDown' },
+                    { regex: /(?:控制)?机器人(?:回家|归位|复位)/, handler: 'robotGoHome' },
+                    { regex: /(?:控制)?机器人(?:连接|上线)/, handler: 'robotConnect' },
+                    { regex: /(?:控制)?机器人(?:断开|下线|断开连接)/, handler: 'robotDisconnect' },
+                    { regex: /(?:控制)?机器人紧急停止/, handler: 'robotEmergencyStop' }
+                ],
+                category: '运动控制'
+            },
+            computer: {
+                patterns: [
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:打开|启动|运行)\s*(.+)/, handler: 'computerLaunchApp' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:关闭|停止|退出)\s*(.+)/, handler: 'computerCloseApp' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:输入|键入|打字)\s*(.+)/, handler: 'computerTypeText' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:截图|截屏|屏幕捕获)/, handler: 'computerScreenshot' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:重启|重新启动)/, handler: 'computerRestart' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:关机|关闭系统)/, handler: 'computerShutdown' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:休眠|睡眠)/, handler: 'computerSleep' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:锁定|锁屏)/, handler: 'computerLock' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:音量)(?:增加|调高|加大|提高)(?:\s+(\d+))?/, handler: 'computerVolumeUp' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:音量)(?:减小|调低|降低|减少)(?:\s+(\d+))?/, handler: 'computerVolumeDown' },
+                    { regex: /(?:控制)?(?:电脑|计算机)(?:静音|静音开关)/, handler: 'computerMuteToggle' }
+                ],
+                category: '计算机控制'
+            },
+            device: {
+                patterns: [
+                    { regex: /(?:控制)?(?:打开|开启)(?:灯|灯光|照明)/, handler: 'deviceTurnOnLight' },
+                    { regex: /(?:控制)?(?:关闭|关掉)(?:灯|灯光|照明)/, handler: 'deviceTurnOffLight' },
+                    { regex: /(?:控制)?(?:打开|开启)(?:空调|制冷)/, handler: 'deviceTurnOnAC' },
+                    { regex: /(?:控制)?(?:关闭|关掉)(?:空调|制冷)/, handler: 'deviceTurnOffAC' },
+                    { regex: /(?:控制)?(?:空调)?设置温度(?:\s+(\d+))?\s*度/, handler: 'deviceSetTemperature' },
+                    { regex: /(?:控制)?(?:打开|开启)(?:风扇|排气扇)/, handler: 'deviceTurnOnFan' },
+                    { regex: /(?:控制)?(?:关闭|关掉)(?:风扇|排气扇)/, handler: 'deviceTurnOffFan' }
+                ],
+                category: '设备控制'
+            },
+            system: {
+                patterns: [
+                    { regex: /开始训练/, handler: 'systemStartTraining' },
+                    { regex: /停止训练/, handler: 'systemStopTraining' },
+                    { regex: /暂停训练/, handler: 'systemPauseTraining' },
+                    { regex: /开始演化/, handler: 'systemStartEvolution' },
+                    { regex: /停止演化/, handler: 'systemStopEvolution' },
+                    { regex: /保存模型/, handler: 'systemSaveModel' },
+                    { regex: /加载模型/, handler: 'systemLoadModel' },
+                    { regex: /(?:系统)?(?:状态|状态报告)/, handler: 'systemStatus' },
+                    { regex: /(?:AGI)?(?:启用|开启|激活)\s*(.+能力|.+功能)?/, handler: 'systemEnableFeature' },
+                    { regex: /(?:AGI)?(?:禁用|关闭|停用)\s*(.+能力|.+功能)?/, handler: 'systemDisableFeature' }
+                ],
+                category: '系统控制'
+            },
+            camera: {
+                patterns: [
+                    { regex: /(?:控制)?(?:摄像头|相机)(?:打开|开启|启动)/, handler: 'cameraTurnOn' },
+                    { regex: /(?:控制)?(?:摄像头|相机)(?:关闭|关掉|停止)/, handler: 'cameraTurnOff' },
+                    { regex: /(?:控制)?(?:摄像头|相机)(?:拍照|截图|拍摄)/, handler: 'cameraCapture' },
+                    { regex: /(?:控制)?(?:摄像头|相机)切换(?:\s*(.+))?/, handler: 'cameraSwitch' }
+                ],
+                category: '摄像头控制'
+            },
+            microphone: {
+                patterns: [
+                    { regex: /(?:控制)?(?:麦克风|话筒)(?:打开|开启|启动)/, handler: 'microphoneTurnOn' },
+                    { regex: /(?:控制)?(?:麦克风|话筒)(?:关闭|关掉|停止)/, handler: 'microphoneTurnOff' },
+                    { regex: /(?:控制)?(?:麦克风|话筒)(?:静音|静音开关)/, handler: 'microphoneMuteToggle' }
+                ],
+                category: '麦克风控制'
+            },
+            speaker: {
+                patterns: [
+                    { regex: /(?:控制)?(?:扬声器|喇叭|音箱)(?:打开|开启|启动)/, handler: 'speakerTurnOn' },
+                    { regex: /(?:控制)?(?:扬声器|喇叭|音箱)(?:关闭|关掉|停止)/, handler: 'speakerTurnOff' },
+                    { regex: /(?:控制)?(?:扬声器|喇叭|音箱)(?:音量|声音)(?:增加|调高)(?:\s+(\d+))?/, handler: 'speakerVolumeUp' },
+                    { regex: /(?:控制)?(?:扬声器|喇叭|音箱)(?:音量|声音)(?:减小|调低)(?:\s+(\d+))?/, handler: 'speakerVolumeDown' },
+                    { regex: /(?:控制)?(?:扬声器|喇叭|音箱)(?:静音|静音开关)/, handler: 'speakerMuteToggle' }
+                ],
+                category: '扬声器控制'
+            }
+        };
+    }
+
+    parseCommand(text) {
+        if (!text || text.trim().length === 0) {
+            return { success: false, error: '指令文本为空', command: null, params: null };
+        }
+        const trimmed = text.trim();
+        for (const [category, config] of Object.entries(this.commands)) {
+            for (const pattern of config.patterns) {
+                const match = trimmed.match(pattern.regex);
+                if (match) {
+                    const params = {};
+                    if (match[1] !== undefined) params.arg1 = match[1];
+                    if (match[2] !== undefined) params.arg2 = parseFloat(match[2]);
+                    return {
+                        success: true,
+                        command: pattern.handler,
+                        category: config.category,
+                        params: params,
+                        rawText: trimmed,
+                        matchedPattern: pattern.regex.source
+                    };
+                }
+            }
+        }
+        return {
+            success: true,
+            command: null,
+            category: '未识别',
+            params: {},
+            rawText: trimmed,
+            matchedPattern: null
+        };
+    }
+
+    async executeCommand(parsed) {
+        if (!parsed || !parsed.command) {
+            return { success: false, error: '未识别到有效指令' };
+        }
+        if (this.safetyEnabled) {
+            const safetyCheck = this._safetyCheck(parsed);
+            if (!safetyCheck.allowed) {
+                this._addHistory(parsed, false, safetyCheck.reason);
+                return { success: false, error: safetyCheck.reason };
+            }
+        }
+        try {
+            const result = await this._routeCommand(parsed);
+            this._addHistory(parsed, result.success, result.message || '');
+            document.dispatchEvent(new CustomEvent('command-executed', {
+                detail: { command: parsed, result: result }
+            }));
+            return result;
+        } catch (err) {
+            this._addHistory(parsed, false, err.message);
+            return { success: false, error: err.message };
+        }
+    }
+
+    _safetyCheck(parsed) {
+        const dangerousHandlers = ['computerShutdown', 'computerRestart', 'robotEmergencyStop'];
+        if (dangerousHandlers.includes(parsed.command)) {
+            return { allowed: true, reason: '高危操作，需用户确认' };
+        }
+        return { allowed: true, reason: '' };
+    }
+
+    async _routeCommand(parsed) {
+        const handlerMap = {
+            robotMoveForward: () => this._callRobotApi('move_forward', parsed.params),
+            robotMoveBackward: () => this._callRobotApi('move_backward', parsed.params),
+            robotTurnLeft: () => this._callRobotApi('turn_left', parsed.params),
+            robotTurnRight: () => this._callRobotApi('turn_right', parsed.params),
+            robotStop: () => this._callRobotApi('stop', {}),
+            robotSetSpeed: () => this._callRobotApi('set_speed', { speed: parsed.params.arg1 || 0.5 }),
+            robotStandUp: () => this._callRobotApi('stand_up', {}),
+            robotSitDown: () => this._callRobotApi('sit_down', {}),
+            robotGoHome: () => this._callRobotApi('go_home', {}),
+            robotConnect: () => this._callRobotApi('connect', {}),
+            robotDisconnect: () => this._callRobotApi('disconnect', {}),
+            robotEmergencyStop: () => this._callRobotApi('emergency_stop', {}),
+            computerLaunchApp: () => this._callSystemApi('launch_app', { name: parsed.params.arg1 || '' }),
+            computerCloseApp: () => this._callSystemApi('close_app', { name: parsed.params.arg1 || '' }),
+            computerTypeText: () => this._callSystemApi('type_text', { text: parsed.params.arg1 || '' }),
+            computerScreenshot: () => this._callSystemApi('screenshot', {}),
+            computerRestart: () => this._callSystemApi('restart', {}),
+            computerShutdown: () => this._callSystemApi('shutdown', {}),
+            computerSleep: () => this._callSystemApi('sleep', {}),
+            computerLock: () => this._callSystemApi('lock', {}),
+            computerVolumeUp: () => this._callSystemApi('volume_up', { value: parsed.params.arg1 || 10 }),
+            computerVolumeDown: () => this._callSystemApi('volume_down', { value: parsed.params.arg1 || 10 }),
+            computerMuteToggle: () => this._callSystemApi('mute_toggle', {}),
+            systemStartTraining: () => this._callSystemApi('start_training', {}),
+            systemStopTraining: () => this._callSystemApi('stop_training', {}),
+            systemPauseTraining: () => this._callSystemApi('pause_training', {}),
+            systemStartEvolution: () => this._callSystemApi('start_evolution', {}),
+            systemStopEvolution: () => this._callSystemApi('stop_evolution', {}),
+            systemSaveModel: () => this._callSystemApi('save_model', {}),
+            systemLoadModel: () => this._callSystemApi('load_model', {}),
+            systemStatus: () => this._callSystemApi('get_status', {}),
+            systemEnableFeature: () => this._callSystemApi('enable_feature', { feature: parsed.params.arg1 || '' }),
+            systemDisableFeature: () => this._callSystemApi('disable_feature', { feature: parsed.params.arg1 || '' }),
+            cameraTurnOn: () => this._callDeviceApi('camera', 'on', {}),
+            cameraTurnOff: () => this._callDeviceApi('camera', 'off', {}),
+            cameraCapture: () => this._callDeviceApi('camera', 'capture', {}),
+            cameraSwitch: () => this._callDeviceApi('camera', 'switch', { target: parsed.params.arg1 || '' }),
+            microphoneTurnOn: () => this._callDeviceApi('microphone', 'on', {}),
+            microphoneTurnOff: () => this._callDeviceApi('microphone', 'off', {}),
+            microphoneMuteToggle: () => this._callDeviceApi('microphone', 'mute_toggle', {}),
+            speakerTurnOn: () => this._callDeviceApi('speaker', 'on', {}),
+            speakerTurnOff: () => this._callDeviceApi('speaker', 'off', {}),
+            speakerVolumeUp: () => this._callDeviceApi('speaker', 'volume_up', { value: parsed.params.arg1 || 10 }),
+            speakerVolumeDown: () => this._callDeviceApi('speaker', 'volume_down', { value: parsed.params.arg1 || 10 }),
+            speakerMuteToggle: () => this._callDeviceApi('speaker', 'mute_toggle', {})
+        };
+        const handler = handlerMap[parsed.command];
+        if (!handler) {
+            return { success: false, error: '未知指令处理器: ' + parsed.command };
+        }
+        return await handler();
+    }
+
+    async _callRobotApi(action, params) {
+        if (window.SelfLnnApi && typeof window.SelfLnnApi.sendRobotCommand === 'function') {
+            const cmd = { action: action, ...params };
+            return await window.SelfLnnApi.sendRobotCommand(cmd);
+        }
+        return { success: false, error: '机器人API不可用' };
+    }
+
+    async _callSystemApi(action, params) {
+        const apiMap = {
+            'start_training': async () => window.SelfLnnApi.startTraining ? await window.SelfLnnApi.startTraining(params) : null,
+            'stop_training': async () => window.SelfLnnApi.stopTrainingJob ? await window.SelfLnnApi.stopTrainingJob() : null,
+            'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : null,
+            'start_evolution': async () => window.SelfLnnApi.startEvolution ? await window.SelfLnnApi.startEvolution(params) : null,
+            'stop_evolution': async () => {
+                if (window.SelfLnnApi.startEvolution) {
+                    return await window.SelfLnnApi.startEvolution({ action: 'stop' });
+                }
+                return null;
+            },
+            'save_model': async () => window.SelfLnnApi.backupSystem ? await window.SelfLnnApi.backupSystem() : null,
+            'load_model': async () => window.SelfLnnApi.loadModel ? await window.SelfLnnApi.loadModel() : null,
+            'get_status': async () => window.SelfLnnApi.getSystemStatus ? await window.SelfLnnApi.getSystemStatus() : null,
+            'enable_feature': async () => {
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
+                    return await window.SelfLnnApi.toggleAgiFeature(params.feature, true);
+                }
+                return null;
+            },
+            'disable_feature': async () => {
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
+                    return await window.SelfLnnApi.toggleAgiFeature(params.feature, false);
+                }
+                return null;
+            }
+        };
+        const handler = apiMap[action];
+        if (handler) {
+            const result = await handler();
+            if (result) return result;
+        }
+        return { success: false, error: '系统API不可用: ' + action };
+    }
+
+    async _callDeviceApi(deviceType, action, params) {
+        document.dispatchEvent(new CustomEvent('device-command', {
+            detail: { deviceType: deviceType, action: action, params: params }
+        }));
+        var dm = window.SelfLnnDeviceManager;
+        if (!dm) {
+            try {
+                dm = new DeviceManager();
+                await dm.init();
+                window.SelfLnnDeviceManager = dm;
+            } catch (e) {
+                /* MID-007修复: 设备管理器初始化失败时应返回失败，而非虚假成功 */
+                return { success: false, message: '设备管理器不可用，无法执行设备指令: ' + deviceType + '/' + action, error: e.message };
+            }
+        }
+        try {
+            var result;
+            switch (deviceType) {
+                case 'camera':
+                    switch (action) {
+                        case 'on':
+                            var cams = dm.getAvailableCameras();
+                            if (cams.length === 0) return { success: false, error: '未找到可用摄像头' };
+                            var addResult = await dm.addCamera(cams[0].deviceId);
+                            if (addResult.success) {
+                                result = await dm.startCamera(addResult.data.id);
+                            } else {
+                                var existingCam = dm.cameras.find(function(c) { return c.active === false; });
+                                if (existingCam) result = await dm.startCamera(existingCam.id);
+                                else result = { success: false, error: '无法添加摄像头' };
+                            }
+                            return result;
+                        case 'off':
+                            var activeCams = dm.cameras.filter(function(c) { return c.active; });
+                            if (activeCams.length > 0) {
+                                for (var i = 0; i < activeCams.length; i++) {
+                                    dm.stopCamera(activeCams[i].id);
+                                }
+                            }
+                            return { success: true, message: '摄像头已关闭' };
+                        case 'capture':
+                            var activeCam = dm.cameras.find(function(c) { return c.active; });
+                            if (!activeCam) return { success: false, error: '没有活动的摄像头' };
+                            var snapshot = dm.captureSnapshot(activeCam.id);
+                            if (snapshot && window.SelfLnnApi) {
+                                window.SelfLnnApi.captureVideoFrame(activeCam.deviceId);
+                            }
+                            return { success: true, data: snapshot, message: '拍照完成' };
+                        case 'switch':
+                            if (params && params.target) {
+                                var allCams = dm.getAvailableCameras();
+                                var target = allCams.find(function(c) {
+                                    return c.label.indexOf(params.target) !== -1 || c.deviceId.indexOf(params.target) !== -1;
+                                });
+                                if (target) {
+                                    var activeCams2 = dm.cameras.filter(function(c) { return c.active; });
+                                    for (var j = 0; j < activeCams2.length; j++) {
+                                        dm.stopCamera(activeCams2[j].id);
+                                    }
+                                    var addResult2 = await dm.addCamera(target.deviceId);
+                                    if (addResult2.success) {
+                                        return await dm.startCamera(addResult2.data.id);
+                                    }
+                                }
+                            }
+                            return { success: false, error: '未指定目标摄像头' };
+                    }
+                    break;
+                case 'microphone':
+                    switch (action) {
+                        case 'on':
+                            var mics = dm.getAvailableMicrophones();
+                            if (mics.length === 0) return { success: false, error: '未找到可用麦克风' };
+                            var addResult = await dm.addMicrophone(mics[0].deviceId);
+                            if (addResult.success) {
+                                result = await dm.startMicrophone(addResult.data.id);
+                            } else {
+                                var existingMic = dm.microphones.find(function(m) { return m.active === false; });
+                                if (existingMic) result = await dm.startMicrophone(existingMic.id);
+                                else result = { success: false, error: '无法添加麦克风' };
+                            }
+                            return result;
+                        case 'off':
+                            var activeMics = dm.microphones.filter(function(m) { return m.active; });
+                            for (var i = 0; i < activeMics.length; i++) {
+                                dm.stopMicrophone(activeMics[i].id);
+                            }
+                            return { success: true, message: '麦克风已关闭' };
+                        case 'mute_toggle':
+                            var targetMic = dm.microphones.find(function(m) { return m.active; }) || dm.microphones[0];
+                            if (targetMic) {
+                                targetMic.muted = !targetMic.muted;
+                                return { success: true, muted: targetMic.muted, message: targetMic.muted ? '麦克风已静音' : '麦克风已取消静音' };
+                            }
+                            return { success: false, error: '没有可用的麦克风' };
+                    }
+                    break;
+                case 'speaker':
+                    switch (action) {
+                        case 'on':
+                            var spks = dm.getAvailableSpeakers();
+                            if (spks.length === 0) {
+                                if (window.SelfLnnApi) {
+                                    return window.SelfLnnApi.testSpeaker(500, 440);
+                                }
+                                return { success: false, error: '未找到可用扬声器' };
+                            }
+                            var addResult = await dm.addSpeaker(spks[0].deviceId);
+                            if (addResult.success) {
+                                result = await dm.startSpeaker(addResult.data.id);
+                                if (window.SelfLnnApi) {
+                                    window.SelfLnnApi.testSpeaker(300, 880);
+                                }
+                            } else {
+                                var existingSpk = dm.speakers.find(function(s) { return s.active === false; });
+                                if (existingSpk) result = dm.startSpeaker(existingSpk.id);
+                                else result = { success: false, error: '无法添加扬声器' };
+                            }
+                            return result || { success: true, message: '扬声器已启动' };
+                        case 'off':
+                            var activeSpks = dm.speakers.filter(function(s) { return s.active; });
+                            for (var i = 0; i < activeSpks.length; i++) {
+                                dm.stopSpeaker(activeSpks[i].id);
+                            }
+                            dm.stopAllAudio();
+                            return { success: true, message: '扬声器已关闭' };
+                        case 'volume_up':
+                            if (dm.speakers.length > 0) {
+                                var volSpk = dm.speakers[0];
+                                var newVol = Math.min(100, (volSpk.volume || 80) + (parseInt(params.value) || 10));
+                                dm.setSpeakerVolume(volSpk.id, newVol);
+                            }
+                            return { success: true, message: '音量已调高' };
+                        case 'volume_down':
+                            if (dm.speakers.length > 0) {
+                                var volSpk2 = dm.speakers[0];
+                                var newVol2 = Math.max(0, (volSpk2.volume || 80) - (parseInt(params.value) || 10));
+                                dm.setSpeakerVolume(volSpk2.id, newVol2);
+                            }
+                            return { success: true, message: '音量已调低' };
+                        case 'mute_toggle':
+                            if (dm.speakers.length > 0) {
+                                var muteSpk = dm.speakers[0];
+                                if (muteSpk.muted) {
+                                    dm.unmuteSpeaker(muteSpk.id);
+                                } else {
+                                    dm.muteSpeaker(muteSpk.id);
+                                }
+                                return { success: true, muted: muteSpk.muted, message: muteSpk.muted ? '扬声器已静音' : '扬声器已取消静音' };
+                            }
+                            return { success: false, error: '没有可用的扬声器' };
+                    }
+                    break;
+            }
+            return { success: true, message: '设备指令已发送: ' + deviceType + '/' + action };
+        } catch (err) {
+            console.error('设备控制失败:', err);
+            return { success: false, error: '设备控制失败: ' + err.message };
+        }
+    }
+
+    _addHistory(parsed, success, message) {
+        this.executionHistory.unshift({
+            timestamp: Date.now(),
+            command: parsed.command,
+            category: parsed.category,
+            rawText: parsed.rawText,
+            success: success,
+            message: message
+        });
+        if (this.executionHistory.length > this.maxHistorySize) {
+            this.executionHistory.pop();
+        }
+    }
+
+    getHistory(count) {
+        return this.executionHistory.slice(0, count || 20);
+    }
+
+    clearHistory() {
+        this.executionHistory = [];
+    }
+}
+
+window.VoiceCommandSystem = VoiceCommandSystem;
+window.CommandEngine = CommandEngine;

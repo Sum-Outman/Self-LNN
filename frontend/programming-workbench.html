@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>编程工作台 - SELF-LNN 全液态神经网络AGI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/api-service.js"></script>
+    <style>
+        .pw-layout { display: flex; flex-direction: column; gap: 16px; padding: 24px 32px; max-width: 100%; }
+        .pw-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .pw-header h2 { margin: 0; font-size: 22px; color: #e0e0e0; }
+        .pw-tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 12px; }
+        .pw-tab-btn { padding: 8px 18px; background: #1a1a2e; border: 1px solid #333; border-radius: 4px 4px 0 0; color: #aaa; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+        .pw-tab-btn:hover { background: #2a2a3e; color: #fff; }
+        .pw-tab-btn.active { background: #2d8a4e; border-color: #2d8a4e; color: #fff; }
+        .pw-content { display: flex; flex-direction: column; gap: 12px; }
+        .pw-editor-section { display: flex; gap: 12px; }
+        .pw-editor-wrapper { flex: 1; min-width: 0; }
+        .pw-output-wrapper { width: 380px; flex-shrink: 0; }
+        .pw-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+        .pw-code-editor { width: 100%; height: 380px; background: #0d0d1a; border: 1px solid #2a2a3e; border-radius: 4px; color: #e0e0e0; font-family: 'Consolas','Courier New',monospace; font-size: 13px; padding: 12px; resize: vertical; tab-size: 4; line-height: 1.5; }
+        .pw-code-editor:focus { outline: none; border-color: #2d8a4e; }
+        .pw-output { width: 100%; height: 380px; background: #0d0d1a; border: 1px solid #2a2a3e; border-radius: 4px; color: #2ecc71; font-family: 'Consolas','Courier New',monospace; font-size: 12px; padding: 12px; resize: none; }
+        .pw-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .pw-toolbar button { padding: 6px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+        .pw-btn-primary { background: #2d8a4e; color: #fff; }
+        .pw-btn-primary:hover { background: #36a35e; }
+        .pw-btn-secondary { background: #2a2a3e; color: #ccc; }
+        .pw-btn-secondary:hover { background: #3a3a4e; color: #fff; }
+        .pw-btn-danger { background: #7a1a1a; color: #fff; }
+        .pw-btn-danger:hover { background: #9a2a2a; }
+        .pw-btn-info { background: #1a3a6a; color: #fff; }
+        .pw-btn-info:hover { background: #2a4a8a; }
+        .pw-result-area { background: #0d0d1a; border: 1px solid #2a2a3e; border-radius: 4px; padding: 16px; min-height: 100px; }
+        .pw-section-title { font-size: 14px; color: #2d8a4e; margin-bottom: 10px; font-weight: 500; border-bottom: 1px solid #1a3a2e; padding-bottom: 6px; }
+        .pw-metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-bottom: 12px; }
+        .pw-metric-card { background: #111; border: 1px solid #2a2a3e; border-radius: 4px; padding: 12px; text-align: center; }
+        .pw-metric-value { font-size: 22px; font-weight: 600; color: #2ecc71; }
+        .pw-metric-label { font-size: 11px; color: #888; margin-top: 4px; }
+        .pw-metric-error .pw-metric-value { color: #e74c3c; }
+        .pw-metric-warning .pw-metric-value { color: #f39c12; }
+        .pw-suggestion-list { list-style: none; padding: 0; }
+        .pw-suggestion-list li { padding: 6px 10px; margin-bottom: 4px; background: #111a11; border-left: 3px solid #2d8a4e; border-radius: 0 4px 4px 0; color: #ccc; font-size: 13px; }
+        .pw-error { color: #e74c3c; padding: 12px; text-align: center; }
+        .pw-gen-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 12px; }
+        .pw-gen-form .pw-form-group { display: flex; flex-direction: column; gap: 4px; }
+        .pw-gen-form label { font-size: 12px; color: #888; }
+        .pw-gen-form input { padding: 6px 10px; background: #0d0d1a; border: 1px solid #2a2a3e; border-radius: 4px; color: #e0e0e0; font-size: 13px; }
+        .pw-gen-form input:focus { outline: none; border-color: #2d8a4e; }
+        .pw-exec-input { width: 100%; padding: 8px 12px; background: #0d0d1a; border: 1px solid #2a2a3e; border-radius: 4px; color: #e0e0e0; font-family: 'Consolas','Courier New',monospace; font-size: 13px; margin-bottom: 8px; }
+        .pw-exec-input:focus { outline: none; border-color: #2d8a4e; }
+        .pw-status-bar { margin-top: 8px; padding: 6px 12px; border-radius: 4px; font-size: 13px; display: none; }
+        .pw-spacer { flex: 1; }
+        @media (max-width: 800px) { .pw-editor-section { flex-direction: column; } .pw-output-wrapper { width: 100%; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo"><h1>编程工作台</h1></div>
+            <nav class="nav">
+                <ul>
+                    <li><a href="index.html">仪表盘</a></li>
+                    <li><a href="training-center.html">训练中心</a></li>
+                    <li><a href="programming-workbench.html" class="active">编程工作台</a></li>
+                    <li><a href="multimodal-learn.html">多模态学习</a></li>
+                    <li><a href="simulation-control.html">仿真控制</a></li>
+                    <li><a href="device-control.html">设备控制</a></li>
+                    <li><a href="hardware-setup.html">硬件设置</a></li>
+                    <li><a href="safety.html">安全监控</a></li>
+                    <li><a href="knowledge-graph.html">知识图谱</a></li>
+                    <li><a href="skills.html">技能库</a></li>
+                    <li><a href="teach.html">示教学习</a></li>
+                    <li><a href="voice-control.html">语音控制</a></li>
+                    <li><a href="api-keys.html">API密钥</a></li>
+                    <li><a href="api-docs.html">API文档</a></li>
+                    <li><a href="usage-logs.html">使用日志</a></li>
+                </ul>
+            </nav>
+        </header>
+        <div class="pw-layout">
+            <div class="pw-header">
+                <h2>自我编程工作台</h2>
+                <div>
+                    <button onclick="checkProgrammingStatus()" class="pw-btn-info" style="padding:6px 16px;border:none;border-radius:4px;cursor:pointer;">检查引擎状态</button>
+                </div>
+            </div>
+            <div class="pw-tabs">
+                <button class="pw-tab-btn active" data-tab="editor" onclick="switchTab('editor')">代码编辑</button>
+                <button class="pw-tab-btn" data-tab="analyze" onclick="switchTab('analyze')">代码分析</button>
+                <button class="pw-tab-btn" data-tab="generate" onclick="switchTab('generate')">代码生成</button>
+                <button class="pw-tab-btn" data-tab="optimize" onclick="switchTab('optimize')">代码优化</button>
+                <button class="pw-tab-btn" data-tab="compile" onclick="switchTab('compile')">编译验证</button>
+                <button class="pw-tab-btn" data-tab="execute" onclick="switchTab('execute')">沙箱执行</button>
+            </div>
+            <div class="pw-content">
+                <div id="pw-tab-editor" class="pw-tab-content" style="display:block">
+                    <div class="pw-editor-section">
+                        <div class="pw-editor-wrapper">
+                            <div class="pw-label">源代码编辑器</div>
+                            <textarea id="pw-code-editor" class="pw-code-editor" placeholder="在此输入C语言代码..."></textarea>
+                        </div>
+                        <div class="pw-output-wrapper">
+                            <div class="pw-label">输出日志</div>
+                            <textarea id="pw-output" class="pw-output" readonly placeholder="操作输出将显示在此处..."></textarea>
+                        </div>
+                    </div>
+                    <div class="pw-toolbar" style="margin-top:6px">
+                        <button onclick="loadSampleCode()" class="pw-btn-secondary">加载示例</button>
+                        <button onclick="clearEditor()" class="pw-btn-danger">清空</button>
+                        <span class="pw-spacer"></span>
+                        <button onclick="runCodeAnalysis()" class="pw-btn-primary">分析代码</button>
+                        <button onclick="runCodeCompilation()" class="pw-btn-info">编译验证</button>
+                        <button onclick="runCodeExecution()" class="pw-btn-secondary">沙箱执行</button>
+                    </div>
+                </div>
+                <div id="pw-tab-analyze" class="pw-tab-content" style="display:none">
+                    <div class="pw-toolbar" style="margin-bottom:12px">
+                        <button onclick="runCodeAnalysis()" class="pw-btn-primary">分析当前代码</button>
+                        <button onclick="document.getElementById('pw-analysis-result').innerHTML=''" class="pw-btn-secondary">清除结果</button>
+                    </div>
+                    <div id="pw-analysis-result" class="pw-result-area">
+                        <div style="color:#888;text-align:center;padding:20px">点击"分析当前代码"查看代码分析结果</div>
+                    </div>
+                </div>
+                <div id="pw-tab-generate" class="pw-tab-content" style="display:none">
+                    <div class="pw-gen-form">
+                        <div class="pw-form-group">
+                            <label>函数名称</label>
+                            <input type="text" id="pw-gen-funcname" value="my_function" placeholder="函数名">
+                        </div>
+                        <div class="pw-form-group" style="flex:1;min-width:200px">
+                            <label>功能描述</label>
+                            <input type="text" id="pw-gen-desc" value="" placeholder="描述函数功能">
+                        </div>
+                        <div class="pw-form-group">
+                            <label>参数数量</label>
+                            <input type="number" id="pw-gen-paramcount" value="0" min="0" max="16" style="width:60px">
+                        </div>
+                        <button onclick="runCodeGeneration()" class="pw-btn-primary" style="padding:6px 20px;border:none;border-radius:4px;cursor:pointer;">生成代码</button>
+                    </div>
+                    <div class="pw-toolbar">
+                        <span style="color:#888;font-size:12px">生成的代码将自动填入编辑器</span>
+                    </div>
+                </div>
+                <div id="pw-tab-optimize" class="pw-tab-content" style="display:none">
+                    <div class="pw-toolbar" style="margin-bottom:12px">
+                        <label style="color:#888;font-size:12px;margin-right:8px">迭代次数:</label>
+                        <input type="number" id="pw-opt-iterations" value="1" min="1" max="10" style="width:60px;padding:4px 8px;background:#0d0d1a;border:1px solid #2a2a3e;border-radius:4px;color:#e0e0e0;">
+                        <button onclick="runCodeOptimization()" class="pw-btn-primary" style="padding:6px 20px;border:none;border-radius:4px;cursor:pointer;">优化代码</button>
+                    </div>
+                    <div class="pw-toolbar">
+                        <span style="color:#888;font-size:12px">优化后的代码将自动填入编辑器</span>
+                    </div>
+                </div>
+                <div id="pw-tab-compile" class="pw-tab-content" style="display:none">
+                    <div class="pw-toolbar" style="margin-bottom:12px">
+                        <button onclick="runCodeCompilation()" class="pw-btn-info" style="padding:6px 20px;border:none;border-radius:4px;cursor:pointer;">编译验证当前代码</button>
+                        <button onclick="clearOutput()" class="pw-btn-secondary">清除输出</button>
+                    </div>
+                </div>
+                <div id="pw-tab-execute" class="pw-tab-content" style="display:none">
+                    <div style="margin-bottom:8px">
+                        <div class="pw-label">标准输入</div>
+                        <input type="text" id="pw-exec-input" class="pw-exec-input" placeholder="输入参数（可选）">
+                    </div>
+                    <div class="pw-toolbar">
+                        <button onclick="runCodeExecution()" class="pw-btn-secondary" style="padding:6px 20px;border:none;border-radius:4px;cursor:pointer;">沙箱执行代码</button>
+                        <button onclick="clearOutput()" class="pw-btn-danger">清除输出</button>
+                    </div>
+                </div>
+            </div>
+            <div id="pw-status" class="pw-status-bar"></div>
+        </div>
+    </div>
+    <script src="js/programming-workbench.js"></script>
+</body>
+</html>

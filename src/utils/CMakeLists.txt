@@ -1,0 +1,41 @@
+# 实用工具库
+add_library(utils
+    math_utils.c
+    memory_utils.c
+    perf.c
+    platform.c
+    string_utils.c
+    json_parser.c
+    xml_parser.c
+    energy_efficiency.c
+    logging.c
+    secure_random.c
+    xorshift_prng.c
+    time_utils.c
+    config_loader.c
+)
+
+target_include_directories(utils PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+
+# Windows下需要链接Winsock库和版本信息库
+if(WIN32)
+    target_link_libraries(utils PUBLIC ws2_32 version)
+    set_source_files_properties(math_utils.c PROPERTIES COMPILE_FLAGS "/FImath.h")
+endif()
+
+# 为兼容性添加别名
+add_library(selflnn_utils ALIAS utils)
+
+# 安装规则
+install(TARGETS utils
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+    RUNTIME DESTINATION bin
+)
+
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/utils/
+    DESTINATION include/selflnn/utils
+    FILES_MATCHING PATTERN "*.h"
+)

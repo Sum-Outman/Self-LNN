@@ -1,0 +1,57 @@
+[Unit]
+Description=SELF-LNN AGI System Service
+Documentation=https://github.com/self-lnn/self-lnn
+After=network.target
+Wants=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+# 指定运行服务的用户和组，建议创建一个专用用户
+User=slnn
+Group=slnn
+# 设置工作目录为SELF-LNN安装目录
+WorkingDirectory=/opt/slnn
+# 设置环境变量
+Environment="PATH=/opt/slnn/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="LD_LIBRARY_PATH=/opt/slnn/lib"
+Environment="SLNN_HOME=/opt/slnn"
+Environment="SLNN_CONFIG=/opt/slnn/config/selflnn_config.json"
+Environment="SLNN_DATA=/opt/slnn/data"
+Environment="SLNN_MODELS=/opt/slnn/models"
+Environment="SLNN_LOGS=/opt/slnn/logs"
+# 主服务命令（默认端口8080，可通过--port修改）
+ExecStart=/opt/slnn/bin/selflnn --port 8080 --config /opt/slnn/config/selflnn_config.json
+# 重新加载命令
+ExecReload=/bin/kill -HUP $MAINPID
+# 重启策略
+Restart=on-failure
+RestartSec=5s
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=infinity
+LimitCORE=infinity
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/slnn/data /opt/slnn/logs /opt/slnn/models
+# 标准输出和错误输出
+StandardOutput=append:/opt/slnn/logs/slnn.log
+StandardError=append:/opt/slnn/logs/slnn-error.log
+# 系统日志标识
+SyslogIdentifier=slnn
+
+[Install]
+WantedBy=multi-user.target
+
+# 使用说明：
+# 1. 将文件复制到 /etc/systemd/system/slnn.service
+# 2. 创建专用用户和组：sudo useradd -r -s /bin/false slnn
+# 3. 设置目录权限：sudo chown -R slnn:slnn /opt/slnn
+# 4. 重新加载systemd配置：sudo systemctl daemon-reload
+# 5. 启用服务：sudo systemctl enable slnn
+# 6. 启动服务：sudo systemctl start slnn
+# 7. 查看状态：sudo systemctl status slnn
+# 8. 查看日志：sudo journalctl -u slnn -f

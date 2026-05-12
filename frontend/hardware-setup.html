@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>硬件设置 - SELF-LNN 全液态神经网络AGI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/api-service.js"></script>
+    <script src="js/hardware-util.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo"><h1>硬件检测与设置</h1></div>
+            <nav class="nav"><ul>
+                <li><a href="index.html">仪表盘</a></li>
+                <li><a href="training-center.html">训练中心</a></li>
+                <li><a href="programming-workbench.html">编程工作台</a></li>
+                <li><a href="multimodal-learn.html">多模态学习</a></li>
+                <li><a href="simulation-control.html">仿真控制</a></li>
+                <li><a href="device-control.html">设备控制</a></li>
+                <li><a href="hardware-setup.html" class="active">硬件设置</a></li>
+                <li><a href="safety.html">安全监控</a></li>
+                <li><a href="knowledge-graph.html">知识图谱</a></li>
+                <li><a href="skills.html">技能库</a></li>
+                <li><a href="teach.html">示教学习</a></li>
+                <li><a href="voice-control.html">语音控制</a></li>
+                <li><a href="api-keys.html">API密钥</a></li>
+                <li><a href="api-docs.html">API文档</a></li>
+                <li><a href="usage-logs.html">使用日志</a></li>
+            </ul></nav>
+        </header>
+        <main class="main-content">
+            <div class="section-header"><h2>硬件配置 — 真实硬件检测与GPU后端选择</h2><p>检测CPU/GPU/内存/传感器，配置计算后端，建立硬件通信</p></div>
+            <div class="dashboard-grid">
+                <div class="card">
+                    <div class="card-header"><h3>硬件扫描</h3></div>
+                    <div class="card-content">
+                        <button onclick="scanHardware()" class="btn btn-primary" style="width:100%">扫描全部硬件</button>
+                        <button onclick="scanGpuDiagnostic()" class="btn btn-secondary" style="width:100%;margin-top:8px">GPU完整诊断</button>
+                        <div style="margin-top:10px"><label>检测结果</label>
+                            <div id="hw-result" style="padding:0.5rem;background:rgba(255,255,255,0.05);border-radius:4px;min-height:6rem;font-family:monospace;font-size:12px;max-height:200px;overflow-y:auto">点击扫描按钮检测硬件</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>GPU后端</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>选择计算后端</label>
+                            <select id="gpu-backend" class="form-input">
+                                <option value="CPU">CPU (自动检测)</option><option value="CUDA">NVIDIA CUDA</option>
+                                <option value="OpenCL">OpenCL</option><option value="Vulkan">Vulkan</option>
+                                <option value="Metal">Apple Metal</option><option value="ROCm">AMD ROCm</option>
+                                <option value="Intel">Intel oneAPI</option><option value="Ascend">华为Ascend</option>
+                                <option value="TPU">Google TPU</option><option value="Cambricon">寒武纪Cambricon</option>
+                            </select>
+                        </div>
+                        <button onclick="configureGpu()" class="btn btn-primary" style="width:100%">应用GPU配置</button>
+                        <div style="margin-top:8px">
+                            <div class="metric"><span class="metric-label">当前后端</span><span class="metric-value" id="gpu-current">未知</span></div>
+                            <div class="metric"><span class="metric-label">设备数量</span><span class="metric-value" id="gpu-devices">0</span></div>
+                            <div class="metric"><span class="metric-label">显存总量</span><span class="metric-value" id="gpu-memory">0 MB</span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>音频设备(麦克风)</h3></div>
+                    <div class="card-content">
+                        <button onclick="enumerateAudioDevices()" class="btn btn-primary" style="width:100%">枚举音频设备</button>
+                        <div style="margin-top:8px">
+                            <div class="metric"><span class="metric-label">设备数量</span><span class="metric-value" id="audio-count">0</span></div>
+                            <div class="metric"><span class="metric-label">默认设备</span><span class="metric-value" id="audio-default">未选择</span></div>
+                        </div>
+                        <div style="margin-top:8px">
+                            <select id="audio-device-select" class="form-input" style="margin-top:4px">
+                                <option value="">请先枚举设备</option>
+                            </select>
+                        </div>
+                        <button onclick="startAudioCapture()" class="btn btn-success" style="width:100%;margin-top:8px">启动音频采集</button>
+                        <button onclick="stopAudioCapture()" class="btn btn-danger" style="width:100%;margin-top:4px">停止音频采集</button>
+                        <div class="metric" style="margin-top:4px"><span class="metric-label">采集状态</span><span class="metric-value" id="audio-capture-status">未启动</span></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>摄像头设备</h3></div>
+                    <div class="card-content">
+                        <button onclick="enumerateCameraDevices()" class="btn btn-primary" style="width:100%">枚举摄像头设备</button>
+                        <div style="margin-top:8px">
+                            <div class="metric"><span class="metric-label">设备数量</span><span class="metric-value" id="camera-count">0</span></div>
+                            <div class="metric"><span class="metric-label">分辨率</span><span class="metric-value" id="camera-resolution">未选择</span></div>
+                        </div>
+                        <div style="margin-top:8px">
+                            <select id="camera-device-select" class="form-input" style="margin-top:4px">
+                                <option value="">请先枚举设备</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-top:4px">
+                            <label>分辨率</label>
+                            <select id="camera-resolution-select" class="form-input">
+                                <option value="640x480">640x480</option>
+                                <option value="1280x720">1280x720</option>
+                                <option value="1920x1080">1920x1080</option>
+                            </select>
+                        </div>
+                        <button onclick="startCameraCapture()" class="btn btn-success" style="width:100%;margin-top:8px">启动摄像头采集</button>
+                        <button onclick="stopCameraCapture()" class="btn btn-danger" style="width:100%;margin-top:4px">停止摄像头采集</button>
+                        <div class="metric" style="margin-top:4px"><span class="metric-label">采集状态</span><span class="metric-value" id="camera-capture-status">未启动</span></div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header"><h3>设备连接状态</h3></div>
+                    <div class="card-content">
+                        <div class="metric"><span class="metric-label">摄像头</span><span class="metric-value" id="cam-status">未检测</span></div>
+                        <div class="metric"><span class="metric-label">麦克风</span><span class="metric-value" id="mic-status">未检测</span></div>
+                        <div class="metric"><span class="metric-label">扬声器</span><span class="metric-value" id="spk-status">未检测</span></div>
+                        <div class="metric"><span class="metric-label">机器人接口</span><span class="metric-value" id="robot-iface">未连接</span></div>
+                        <div class="metric"><span class="metric-label">ROS节点</span><span class="metric-value" id="ros-status">未连接</span></div>
+                        <div class="metric"><span class="metric-label">串口设备</span><span class="metric-value" id="serial-status">未连接</span></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>训练数据集</h3></div>
+                    <div class="card-content">
+                        <button onclick="listDatasets()" class="btn btn-primary" style="width:100%">列出数据集</button>
+                        <div style="margin-top:8px">
+                            <div class="metric"><span class="metric-label">数据集数量</span><span class="metric-value" id="dataset-count">0</span></div>
+                            <div class="metric"><span class="metric-label">支持格式</span><span class="metric-value" id="dataset-formats">--</span></div>
+                        </div>
+                        <button onclick="createDataset()" class="btn btn-success" style="width:100%;margin-top:8px">创建新数据集</button>
+                        <button onclick="augmentDataset()" class="btn btn-warning" style="width:100%;margin-top:4px">数据增强</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script>
+        var g_audioDevices = [];
+        var g_cameraDevices = [];
+        var g_audioCapturing = false;
+        var g_cameraCapturing = false;
+
+        /* ===== 硬件扫描 ===== */
+        async function scanHardware() {
+            var el = document.getElementById('hw-result');
+            el.textContent = '扫描中...';
+            var result = await HardwareScanUtil.scanAll(true);
+            el.textContent = result.diagnosticLines.join('\n');
+        }
+
+        /* ===== GPU诊断 ===== */
+        async function scanGpuDiagnostic() {
+            var el = document.getElementById('hw-result');
+            el.textContent = 'GPU诊断中...';
+            var d = await HardwareScanUtil.gpuDiagnostic();
+            if (d.success) {
+                document.getElementById('gpu-current').textContent = d.backend;
+                document.getElementById('gpu-devices').textContent = d.devices;
+                document.getElementById('gpu-memory').textContent = d.totalMemoryMb + ' MB';
+            }
+            el.textContent = d.lines.join('\n');
+        }
+
+        /* ===== 音频设备枚举 ===== */
+        async function enumerateAudioDevices() {
+            try {
+                var resp = await SelfLnnApi.request('/audio/devices', { method:'GET' }, 1);
+                var data = await resp.json();
+                if (data.success && data.audio_devices) {
+                    g_audioDevices = data.audio_devices;
+                    document.getElementById('audio-count').textContent = g_audioDevices.length;
+                    var sel = document.getElementById('audio-device-select');
+                    sel.innerHTML = '';
+                    g_audioDevices.forEach(function(d, i) {
+                        var opt = document.createElement('option');
+                        opt.value = d.id;
+                        opt.textContent = d.name + ' (' + d.rate + 'Hz, ' + d.channels + '声道)';
+                        sel.appendChild(opt);
+                    });
+                    if (g_audioDevices.length > 0) {
+                        sel.selectedIndex = 0;
+                        document.getElementById('audio-default').textContent = g_audioDevices[0].name;
+                    }
+                    document.getElementById('mic-status').textContent = g_audioDevices.length > 0 ? '已检测('+g_audioDevices.length+'个)' : '无设备';
+                }
+            } catch(e) { alert('音频设备枚举失败: ' + e.message); }
+        }
+
+        async function startAudioCapture() {
+            try {
+                var resp = await SelfLnnApi.request('/audio/capture/start', { method:'POST', body:'{}' }, 1);
+                var data = await resp.json();
+                if (data.success) {
+                    g_audioCapturing = true;
+                    document.getElementById('audio-capture-status').textContent = '采集中...';
+                    document.getElementById('audio-capture-status').style.color = '#00ff88';
+                }
+            } catch(e) { alert('启动失败: ' + e.message); }
+        }
+
+        async function stopAudioCapture() {
+            try {
+                var resp = await SelfLnnApi.request('/audio/capture/stop', { method:'POST', body:'{}' }, 1);
+                var data = await resp.json();
+                if (data.success) {
+                    g_audioCapturing = false;
+                    document.getElementById('audio-capture-status').textContent = '已停止';
+                    document.getElementById('audio-capture-status').style.color = '#ff4444';
+                }
+            } catch(e) { alert('停止失败: ' + e.message); }
+        }
+
+        /* ===== 摄像头设备枚举 ===== */
+        async function enumerateCameraDevices() {
+            try {
+                var resp = await SelfLnnApi.request('/camera/devices', { method:'GET' }, 1);
+                var data = await resp.json();
+                if (data.success && data.camera_devices) {
+                    g_cameraDevices = data.camera_devices;
+                    document.getElementById('camera-count').textContent = g_cameraDevices.length;
+                    var sel = document.getElementById('camera-device-select');
+                    sel.innerHTML = '';
+                    g_cameraDevices.forEach(function(d, i) {
+                        var opt = document.createElement('option');
+                        opt.value = d.id;
+                        opt.textContent = d.name + ' (' + d.max_width + 'x' + d.max_height + ')';
+                        sel.appendChild(opt);
+                    });
+                    if (g_cameraDevices.length > 0) {
+                        sel.selectedIndex = 0;
+                        document.getElementById('camera-resolution').textContent = g_cameraDevices[0].max_width + 'x' + g_cameraDevices[0].max_height;
+                    }
+                    document.getElementById('cam-status').textContent = g_cameraDevices.length > 0 ? '已检测('+g_cameraDevices.length+'个)' : '无设备';
+                }
+            } catch(e) { alert('摄像头枚举失败: ' + e.message); }
+        }
+
+        async function startCameraCapture() {
+            try {
+                var resp = await SelfLnnApi.request('/camera/capture/start', { method:'POST', body:'{}' }, 1);
+                var data = await resp.json();
+                if (data.success) {
+                    g_cameraCapturing = true;
+                    document.getElementById('camera-capture-status').textContent = '采集中...';
+                    document.getElementById('camera-capture-status').style.color = '#00ff88';
+                }
+            } catch(e) { alert('启动失败: ' + e.message); }
+        }
+
+        async function stopCameraCapture() {
+            try {
+                var resp = await SelfLnnApi.request('/camera/capture/stop', { method:'POST', body:'{}' }, 1);
+                var data = await resp.json();
+                if (data.success) {
+                    g_cameraCapturing = false;
+                    document.getElementById('camera-capture-status').textContent = '已停止';
+                    document.getElementById('camera-capture-status').style.color = '#ff4444';
+                }
+            } catch(e) { alert('停止失败: ' + e.message); }
+        }
+
+        /* ===== 数据集管理 ===== */
+        async function listDatasets() {
+            try {
+                var resp = await SelfLnnApi.request('/dataset/list', { method:'GET' }, 1);
+                var data = await resp.json();
+                if (data.success) {
+                    document.getElementById('dataset-count').textContent = data.count || 0;
+                    document.getElementById('dataset-formats').textContent = (data.formats_supported || []).join(', ');
+                }
+            } catch(e) { alert('列出失败: ' + e.message); }
+        }
+
+        async function createDataset() {
+            try {
+                var resp = await SelfLnnApi.request('/dataset/create', { method:'POST', body:'{}' }, 1);
+                var data = await resp.json();
+                if (data.success) alert('数据集已创建: ' + (data.dataset_id || ''));
+            } catch(e) { alert('创建失败: ' + e.message); }
+        }
+
+        async function augmentDataset() {
+            try {
+                var resp = await SelfLnnApi.request('/dataset/augment', { method:'POST', body:'{}' }, 1);
+                var data = await resp.json();
+                if (data.success) alert('数据增强完成，增强样本数: ' + (data.augmented_samples || 0));
+            } catch(e) { alert('增强失败: ' + e.message); }
+        }
+
+        /* ===== GPU配置 ===== */
+        async function configureGpu() {
+            var backend = document.getElementById('gpu-backend').value;
+            try {
+                var resp = await SelfLnnApi.request('/hardware/config', { method:'POST', body:JSON.stringify({backend:backend}) }, 1);
+                var data = await resp.json();
+                document.getElementById('gpu-current').textContent = data.success ? backend : '配置失败';
+            } catch(e) { alert('连接失败: ' + e.message); }
+        }
+
+        /* ===== 页面初始化 ===== */
+        document.addEventListener('DOMContentLoaded', function(){
+            /* 浏览器媒体设备检测 */
+            if (navigator.mediaDevices) {
+                navigator.mediaDevices.enumerateDevices().then(function(devs){
+                    devs.forEach(function(d){
+                        if (d.kind === 'videoinput') document.getElementById('cam-status').textContent = '浏览器已检测';
+                        if (d.kind === 'audioinput') document.getElementById('mic-status').textContent = '浏览器已检测';
+                        if (d.kind === 'audiooutput') document.getElementById('spk-status').textContent = '浏览器已检测';
+                    });
+                }).catch(function(){});
+            }
+            /* 自动检测后端状态 */
+            setTimeout(function() {
+                scanGpuDiagnostic();
+                enumerateAudioDevices();
+                enumerateCameraDevices();
+                listDatasets();
+            }, 500);
+        });
+    </script>
+</body>
+</html>

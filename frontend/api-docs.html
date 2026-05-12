@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API文档 - SELF-LNN 全液态神经网络AGI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/api-docs.css">
+    <script src="js/api-service.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo"><h1>API 文档</h1></div>
+            <nav class="nav"><ul>
+                <li><a href="index.html">仪表盘</a></li>
+                <li><a href="training-center.html">训练中心</a></li>
+                <li><a href="programming-workbench.html">编程工作台</a></li>
+                <li><a href="multimodal-learn.html">多模态学习</a></li>
+                <li><a href="simulation-control.html">仿真控制</a></li>
+                <li><a href="device-control.html">设备控制</a></li>
+                <li><a href="hardware-setup.html">硬件设置</a></li>
+                <li><a href="safety.html">安全监控</a></li>
+                <li><a href="knowledge-graph.html">知识图谱</a></li>
+                <li><a href="skills.html">技能库</a></li>
+                <li><a href="teach.html">示教学习</a></li>
+                <li><a href="voice-control.html">语音控制</a></li>
+                <li><a href="api-keys.html">API密钥</a></li>
+                <li><a href="api-docs.html" class="active">API文档</a></li>
+                <li><a href="usage-logs.html">使用日志</a></li>
+            </ul></nav>
+        </header>
+        <main class="main-content">
+
+        <div class="api-page-title">
+            <h1>SELF-LNN API 文档</h1>
+            <p>全部 74 个 REST API 端点 · HTTP/WebSocket 端口 <span id="api-port">8080</span></p>
+        </div>
+
+        <div class="summary">
+            <div class="summary-card">
+                <div class="num">74</div>
+                <div class="label">API 端点总数</div>
+            </div>
+            <div class="summary-card">
+                <div class="num">8</div>
+                <div class="label">系统管理</div>
+            </div>
+            <div class="summary-card">
+                <div class="num">14</div>
+                <div class="label">机器人/ROS/串口</div>
+            </div>
+            <div class="summary-card">
+                <div class="num">11</div>
+                <div class="label">多模态/对话</div>
+            </div>
+            <div class="summary-card">
+                <div class="num">11</div>
+                <div class="label">设备/音频/视频</div>
+            </div>
+            <div class="summary-card">
+                <div class="num">6</div>
+                <div class="label">文件/计算机控制</div>
+            </div>
+            <div class="summary-card">
+                <div class="num">8</div>
+                <div class="label">AGI/知识/学习</div>
+            </div>
+            <div class="summary-card">
+                <div class="num">16</div>
+                <div class="label">扩展控制</div>
+            </div>
+        </div>
+
+        <div class="feature-panel" id="feature-panel">
+            <div class="feature-header">
+                <h2>系统能力状态</h2>
+                <span class="feature-status" id="feature-status">正在检测服务...</span>
+            </div>
+            <div class="feature-grid" id="feature-grid">
+                <div class="feature-loading">连接后端服务以加载能力列表...</div>
+            </div>
+        </div>
+
+        <div id="api-list"></div>
+    </div>
+
+    <div class="nav-bar" id="nav-bar"></div>
+
+    <script>
+        var PORT = window.SELFLNN_CONFIG ? window.SELFLNN_CONFIG.port : 8080;
+        document.getElementById('api-port').textContent = PORT;
+
+        var apiData = [
+            // ===== 系统管理 =====
+            {
+                category: '系统管理',
+                endpoints: [
+                    { id: 0, method: 'GET', path: '/api/status', desc: '获取系统状态', params: [], response: '{"status":"ok","uptime":...,"connections":...,"requests":...}' },
+                    { id: 8, method: 'POST', path: '/api/training', desc: '训练请求', params: [{n:'action',t:'string',d:'start/stop/pause/resume'}], response: '{"success":true,"task_id":"..."}' },
+                    { id: 9, method: 'POST', path: '/api/evolution', desc: '演化请求', params: [{n:'action',t:'string',d:'start/stop/status'}], response: '{"success":true,"generation":...}' },
+                    { id: 10, method: 'POST', path: '/api/reset', desc: '重置系统', params: [], response: '{"success":true}' },
+                    { id: 11, method: 'POST', path: '/api/shutdown', desc: '关闭系统', params: [], response: '{"success":true}' },
+                    { id: 17, method: 'POST', path: '/api/backup', desc: '系统备份', params: [{n:'path',t:'string',d:'备份路径',o:true}], response: '{"success":true,"backup_path":"..."}' },
+                    { id: 42, method: 'GET', path: '/api/stats', desc: '获取服务器统计', params: [], response: '{"total_requests":...,"uptime":...,"active_connections":...}' }
+                ]
+            },
+            // ===== 状态与内存 =====
+            {
+                category: '状态与内存',
+                endpoints: [
+                    { id: 1, method: 'GET', path: '/api/memory', desc: '获取内存状态', params: [], response: '{"total":...,"used":...,"free":...,"utilization":...}' },
+                    { id: 2, method: 'GET', path: '/api/reasoning', desc: '执行推理', params: [{n:'query',t:'string',d:'推理查询内容'}], response: '{"result":"...","confidence":...,"tokens_used":...}' },
+                    { id: 3, method: 'GET', path: '/api/learning', desc: '执行学习', params: [{n:'mode',t:'string',d:'学习模式',o:true}], response: '{"status":"...","progress":...,"loss":...}' },
+                    { id: 22, method: 'GET', path: '/api/agi/features', desc: '获取AGI功能状态', params: [], response: '{"features":{...}}' },
+                ]
+            },
+            // ===== 多模态输入 =====
+            {
+                category: '多模态输入',
+                endpoints: [
+                    { id: 4, method: 'POST', path: '/api/vision', desc: '处理视觉输入', params: [{n:'image',t:'base64',d:'Base64编码图像'}], response: '{"description":"...","objects":[...]}' },
+                    { id: 5, method: 'POST', path: '/api/audio', desc: '处理音频输入', params: [{n:'audio',t:'blob',d:'音频数据'}], response: '{"transcript":"...","intent":"..."}' },
+                    { id: 6, method: 'POST', path: '/api/text', desc: '处理文本输入', params: [{n:'text',t:'string',d:'文本内容'}], response: '{"response":"...","sentiment":"..."}' },
+                    { id: 7, method: 'POST', path: '/api/sensor', desc: '处理传感器输入', params: [{n:'sensor_type',t:'string',d:'传感器类型'},{n:'data',t:'object',d:'传感器数据'}], response: '{"processed":true,"action":"..."}' },
+                    { id: 33, method: 'GET', path: '/api/sensor-pipeline/status', desc: '获取传感器管道状态', params: [], response: '{"pipeline":"...","active_sensors":[...]}' }
+                ]
+            },
+            // ===== 知识库 =====
+            {
+                category: '知识库',
+                endpoints: [
+                    { id: 20, method: 'GET', path: '/api/knowledge', desc: '查询知识库', params: [{n:'query',t:'string',d:'查询内容'},{n:'limit',t:'int',d:'返回条数',o:true}], response: '{"results":[...],"total":...}' },
+                    { id: 21, method: 'POST', path: '/api/knowledge', desc: '添加知识到知识库', params: [{n:'content',t:'string',d:'知识内容'},{n:'category',t:'string',d:'分类',o:true}], response: '{"success":true,"id":"..."}' }
+                ]
+            },
+            // ===== 对话系统 =====
+            {
+                category: '对话系统',
+                endpoints: [
+                    { id: 19, method: 'POST', path: '/api/dialogue', desc: '对话处理', params: [{n:'message',t:'string',d:'用户消息'},{n:'context',t:'object',d:'上下文',o:true}], response: '{"response":"...","confidence":...}' },
+                    { id: 24, method: 'GET', path: '/api/dialogue/history', desc: '获取对话历史', params: [{n:'limit',t:'int',d:'条数限制',o:true}], response: '{"history":[...]}' },
+                    { id: 25, method: 'POST', path: '/api/dialogue/clear', desc: '清除对话历史', params: [], response: '{"success":true,"cleared":...}' },
+                    { id: 36, method: 'POST', path: '/api/audio/recognize', desc: '语音识别', params: [{n:'audio',t:'blob',d:'音频文件(form-data)'}], response: '{"text":"...","confidence":...}' },
+                    { id: 37, method: 'POST', path: '/api/tts/synthesize', desc: '语音合成', params: [{n:'text',t:'string',d:'合成文本'},{n:'speed',t:'float',d:'语速',o:true}], response: 'audio/wav blob' },
+                    { id: 38, method: 'POST', path: '/api/dialogue/multimodal', desc: '多模态对话', params: [{n:'message',t:'string',d:'文本消息'},{n:'image',t:'base64',d:'图像数据',o:true},{n:'audio',t:'blob',d:'音频数据',o:true}], response: '{"response":"...","modalities":[...]}' }
+                ]
+            },
+            // ===== 模型管理 =====
+            {
+                category: '模型管理',
+                endpoints: [
+                    { id: 18, method: 'POST', path: '/api/model/load', desc: '模型加载', params: [{n:'model_path',t:'string',d:'模型路径'},{n:'config',t:'object',d:'配置参数',o:true}], response: '{"success":true,"model_id":"..."}' }
+                ]
+            },
+            // ===== 机器人控制 =====
+            {
+                category: '机器人控制',
+                endpoints: [
+                    { id: 12, method: 'GET', path: '/api/robot/status', desc: '获取机器人状态', params: [{n:'robot_id',t:'string',d:'机器人ID',o:true}], response: '{"status":"...","battery":...,"position":{...}}' },
+                    { id: 13, method: 'POST', path: '/api/robot/command', desc: '发送机器人控制命令', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'command',t:'string',d:'控制指令'}], response: '{"success":true,"executed":"..."}' },
+                    { id: 14, method: 'GET', path: '/api/robot/sensor', desc: '获取传感器数据', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'sensor',t:'string',d:'传感器类型',o:true}], response: '{"sensors":{...}}' },
+                    { id: 15, method: 'POST', path: '/api/robot/trajectory', desc: '执行机器人轨迹', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'waypoints',t:'array',d:'路径点列表'}], response: '{"success":true,"trajectory_id":"..."}' },
+                    { id: 16, method: 'POST', path: '/api/robot/emergency_stop', desc: '机器人紧急停止', params: [{n:'robot_id',t:'string',d:'机器人ID',o:true}], response: '{"success":true,"stopped":true}' },
+                    { id: 26, method: 'POST', path: '/api/robot/connect', desc: '连接机器人', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'connection_type',t:'string',d:'连接类型(serial/ros/tcp)'},{n:'config',t:'object',d:'连接配置'}], response: '{"success":true,"session_id":"..."}' },
+                    { id: 27, method: 'POST', path: '/api/robot/disconnect', desc: '断开机器人连接', params: [{n:'robot_id',t:'string',d:'机器人ID'}], response: '{"success":true}' },
+                    { id: 28, method: 'GET', path: '/api/robot/list', desc: '获取机器人列表(含ROS)', params: [], response: '{"robots":[...],"ros_nodes":[...]}' },
+                    { id: 49, method: 'POST', path: '/api/robot/parameters', desc: '设置机器人参数', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'parameters',t:'object',d:'参数字典'}], response: '{"success":true,"updated":[...]}' },
+                    { id: 50, method: 'POST', path: '/api/robot/coordinate', desc: '机器人坐标控制', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'x',t:'float',d:'X坐标'},{n:'y',t:'float',d:'Y坐标'},{n:'z',t:'float',d:'Z坐标',o:true}], response: '{"success":true,"position":{...}}' },
+                    { id: 35, method: 'POST', path: '/api/robot/training', desc: '机器人训练控制', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'action',t:'string',d:'操作(start/stop)'},{n:'config',t:'object',d:'训练配置',o:true}], response: '{"success":true,"training_id":"..."}' }
+                ]
+            },
+            // ===== ROS控制 =====
+            {
+                category: 'ROS控制',
+                endpoints: [
+                    { id: 29, method: 'GET', path: '/api/ros/status', desc: '获取ROS Master状态', params: [], response: '{"master_uri":"...","online":true,"nodes":...}' },
+                    { id: 30, method: 'POST', path: '/api/ros/configure', desc: '配置ROS Master连接', params: [{n:'master_uri',t:'string',d:'ROS Master URI'},{n:'timeout',t:'int',d:'超时秒数',o:true}], response: '{"success":true,"connected":true}' },
+                    { id: 31, method: 'GET', path: '/api/ros/nodes', desc: '获取ROS节点列表', params: [], response: '{"nodes":["/rosout","/talker",...]}' },
+                    { id: 32, method: 'GET', path: '/api/ros/topics', desc: '获取ROS主题列表', params: [], response: '{"topics":[{"name":"...","type":"..."},...]}' },
+                    { id: 64, method: 'POST', path: '/api/ros/publish', desc: 'ROS话题发布', params: [{n:'topic',t:'string',d:'话题名称'},{n:'message_type',t:'string',d:'消息类型'},{n:'data',t:'object',d:'消息数据'}], response: '{"success":true,"topic":"..."}' },
+                    { id: 65, method: 'POST', path: '/api/ros/subscribe', desc: 'ROS话题订阅', params: [{n:'topic',t:'string',d:'话题名称'},{n:'message_type',t:'string',d:'消息类型'},{n:'callback',t:'string',d:'回调标识',o:true}], response: '{"success":true,"subscription_id":"..."}' },
+                    { id: 66, method: 'POST', path: '/api/ros/service', desc: 'ROS服务调用', params: [{n:'service',t:'string',d:'服务名称'},{n:'request',t:'object',d:'服务请求数据'}], response: '{"success":true,"response":{...}}' }
+                ]
+            },
+            // ===== 串口控制 =====
+            {
+                category: '串口控制',
+                endpoints: [
+                    { id: 67, method: 'GET', path: '/api/serial/list', desc: '获取串口设备列表', params: [], response: '{"ports":[{"name":"COM3","description":"..."},...]}' },
+                    { id: 68, method: 'POST', path: '/api/serial/open', desc: '打开串口连接', params: [{n:'port',t:'string',d:'串口名称'},{n:'baudrate',t:'int',d:'波特率'},{n:'data_bits',t:'int',d:'数据位',o:true},{n:'stop_bits',t:'int',d:'停止位',o:true},{n:'parity',t:'string',d:'校验位',o:true}], response: '{"success":true,"session_id":"..."}' },
+                    { id: 69, method: 'POST', path: '/api/serial/close', desc: '关闭串口连接', params: [{n:'session_id',t:'string',d:'串口会话ID'}], response: '{"success":true}' },
+                    { id: 70, method: 'POST', path: '/api/serial/send', desc: '串口数据发送', params: [{n:'session_id',t:'string',d:'串口会话ID'},{n:'data',t:'string',d:'发送数据(hex或text)'},{n:'encoding',t:'string',d:'编码方式',o:true}], response: '{"success":true,"bytes_sent":...,"response":"..."}' }
+                ]
+            },
+            // ===== 多机器人同步 =====
+            {
+                category: '多机器人同步',
+                endpoints: [
+                    { id: 71, method: 'POST', path: '/api/multi_robot/sync', desc: '多机器人同步协调', params: [{n:'robot_ids',t:'array',d:'机器人ID列表'},{n:'action',t:'string',d:'同步动作'},{n:'sync_mode',t:'string',d:'同步模式(master/follower/group)'}], response: '{"success":true,"sync_id":"...","robots_ready":...}' },
+                    { id: 34, method: 'POST', path: '/api/gazebo/control', desc: 'Gazebo仿真控制', params: [{n:'action',t:'string',d:'控制动作(start/stop/pause/reset)'},{n:'world',t:'string',d:'世界文件路径',o:true}], response: '{"success":true,"gazebo_status":"..."}' }
+                ]
+            },
+            // ===== 设备控制 =====
+            {
+                category: '设备管理',
+                endpoints: [
+                    { id: 51, method: 'POST', path: '/api/device/control', desc: '设备开关控制', params: [{n:'device_id',t:'string',d:'设备ID'},{n:'action',t:'string',d:'控制动作(on/off/toggle)'}], response: '{"success":true,"device_status":"..."}' },
+                    { id: 41, method: 'POST', path: '/api/device/command', desc: '设备控制命令', params: [{n:'device_id',t:'string',d:'设备ID'},{n:'command',t:'string',d:'命令'},{n:'params',t:'object',d:'参数',o:true}], response: '{"success":true,"result":"..."}' },
+                    { id: 56, method: 'GET', path: '/api/devices/list', desc: '列出所有可用设备', params: [], response: '{"devices":{"audioinput":[...],"audiooutput":[...],"videoinput":[...]}}' },
+                    { id: 57, method: 'POST', path: '/api/devices/register', desc: '注册前端设备', params: [{n:'device_id',t:'string',d:'设备ID'},{n:'type',t:'string',d:'设备类型'},{n:'name',t:'string',d:'设备名称'}], response: '{"success":true}' },
+                    { id: 58, method: 'POST', path: '/api/devices/unregister', desc: '注销前端设备', params: [{n:'device_id',t:'string',d:'设备ID'}], response: '{"success":true}' },
+                    { id: 59, method: 'GET', path: '/api/devices/status', desc: '获取设备状态', params: [{n:'device_id',t:'string',d:'设备ID',o:true}], response: '{"device_id":"...","active":true,"streaming":false}' }
+                ]
+            },
+            // ===== 音频视频 =====
+            {
+                category: '音频/视频流',
+                endpoints: [
+                    { id: 60, method: 'POST', path: '/api/audio/stream', desc: '处理实时语音流', params: [{n:'audio_chunk',t:'blob',d:'音频数据块'},{n:'session_id',t:'string',d:'会话ID',o:true}], response: '{"success":true,"processed":true,"text":"..."}' },
+                    { id: 61, method: 'POST', path: '/api/audio/command', desc: '语音指令识别与执行', params: [{n:'audio',t:'blob',d:'音频数据'},{n:'text',t:'string',d:'指令文本',o:true}], response: '{"text":"...","intent":"...","category":"...","confidence":...,"safe":true,"will_execute":true,"params":{...}}' },
+                    { id: 62, method: 'POST', path: '/api/video/stream', desc: '处理实时视频流', params: [{n:'video_chunk',t:'blob',d:'视频数据块'},{n:'session_id',t:'string',d:'会话ID',o:true}], response: '{"success":true,"frames_processed":...,"events":[...]}' },
+                    { id: 63, method: 'POST', path: '/api/video/capture', desc: '视频帧捕获与处理', params: [{n:'image',t:'base64',d:'Base64编码图像'},{n:'analyze',t:'bool',d:'是否分析',o:true}], response: '{"success":true,"objects":[...],"scene":"..."}' }
+                ]
+            },
+            // ===== 计算机控制 =====
+            {
+                category: '计算机控制',
+                endpoints: [
+                    { id: 43, method: 'POST', path: '/api/computer/launch', desc: '启动应用程序', params: [{n:'app_name',t:'string',d:'应用名称或路径'},{n:'args',t:'string',d:'启动参数',o:true}], response: '{"success":true,"pid":...}' },
+                    { id: 44, method: 'POST', path: '/api/computer/close', desc: '关闭应用程序', params: [{n:'app_name',t:'string',d:'应用名称'},{n:'force',t:'bool',d:'强制关闭',o:true}], response: '{"success":true}' },
+                    { id: 45, method: 'POST', path: '/api/computer/type', desc: '键盘输入仿真', params: [{n:'text',t:'string',d:'要输入的文本'}], response: '{"success":true,"chars":...}' },
+                    { id: 46, method: 'POST', path: '/api/computer/screenshot', desc: '截取屏幕', params: [{n:'format',t:'string',d:'格式(png/jpeg)',o:true}], response: '{"success":true,"image":"base64..."}' },
+                    { id: 47, method: 'POST', path: '/api/computer/execute', desc: '执行系统命令', params: [{n:'command',t:'string',d:'系统命令'},{n:'timeout',t:'int',d:'超时秒数',o:true}], response: '{"success":true,"stdout":"...","stderr":"...","exit_code":...}' },
+                    { id: 48, method: 'POST', path: '/api/computer/volume', desc: '系统音量控制', params: [{n:'action',t:'string',d:'up/down/mute/unmute/set'},{n:'value',t:'int',d:'音量值(0-100)',o:true}], response: '{"success":true,"volume":...}' }
+                ]
+            },
+            // ===== 文件系统 =====
+            {
+                category: '文件系统',
+                endpoints: [
+                    { id: 52, method: 'POST', path: '/api/files/read', desc: '读取文件', params: [{n:'path',t:'string',d:'文件路径'}], response: '{"success":true,"content":"...","size":...}' },
+                    { id: 53, method: 'POST', path: '/api/files/write', desc: '写入文件', params: [{n:'path',t:'string',d:'文件路径'},{n:'content',t:'string',d:'文件内容'},{n:'mode',t:'string',d:'写入模式(overwrite/append)',o:true}], response: '{"success":true,"bytes_written":...}' },
+                    { id: 54, method: 'POST', path: '/api/files/delete', desc: '删除文件', params: [{n:'path',t:'string',d:'文件路径'}], response: '{"success":true}' },
+                    { id: 55, method: 'GET', path: '/api/files/list', desc: '列出目录文件', params: [{n:'path',t:'string',d:'目录路径'}], response: '{"files":[...],"directories":[...]}' }
+                ]
+            },
+            // ===== AGI系统 =====
+            {
+                category: 'AGI 系统控制',
+                endpoints: [
+                    { id: 39, method: 'POST', path: '/api/agi/execute', desc: 'AGI任务执行', params: [{n:'task',t:'string',d:'任务描述'},{n:'type',t:'string',d:'任务类型(computer/robot/device/system/file)'},{n:'params',t:'object',d:'任务参数',o:true}], response: '{"success":true,"task_id":"...","result":{...}}' },
+                    { id: 40, method: 'GET', path: '/api/agi/task/status', desc: 'AGI任务状态查询', params: [{n:'task_id',t:'string',d:'任务ID'}], response: '{"task_id":"...","status":"...","progress":...,"result":{...}}' },
+                    { id: 72, method: 'GET', path: '/api/agi/feature_list', desc: '获取所有AGI功能状态列表(含描述)', params: [], response: '{"features":{"self_learning":{...},"self_decision":{...},...}}' },
+                    { id: 23, method: 'POST', path: '/api/agi/feature/toggle', desc: '切换AGI功能启用状态', params: [{n:'feature',t:'string',d:'功能名称'},{n:'enabled',t:'bool',d:'是否启用'}], response: '{"success":true,"feature":"...","enabled":true}' },
+                    { id: 73, method: 'POST', path: '/api/agi/self_correction', desc: '触发自我修正', params: [{n:'scope',t:'string',d:'修正范围(all/learning/reasoning/memory)',o:true}], response: '{"success":true,"corrections_applied":...,"details":{...}}' }
+                ]
+            }
+        ];
+
+        function render() {
+            var container = document.getElementById('api-list');
+            var navBar = document.getElementById('nav-bar');
+            var html = '';
+            var navHtml = '';
+            var totalEndpoints = 0;
+
+            apiData.forEach(function(cat, ci) {
+                totalEndpoints += cat.endpoints.length;
+                html += '<div class="category" id="cat-' + ci + '">';
+                html += '<h2 onclick="toggleCategory(' + ci + ')">' + cat.category + ' <span class="count">' + cat.endpoints.length + ' 个端点</span></h2>';
+                html += '<div class="category-body">';
+                cat.endpoints.forEach(function(ep, ei) {
+                    html += '<div class="endpoint" id="ep-' + ci + '-' + ei + '">';
+                    html += '<div class="endpoint-header" onclick="toggleEndpoint(' + ci + ',' + ei + ')">';
+                    html += '<span class="method ' + ep.method.toLowerCase() + '">' + ep.method + '</span>';
+                    html += '<span class="endpoint-id">#' + ep.id + '</span>';
+                    html += '<span class="path">' + ep.path + '</span>';
+                    html += '<span class="desc">' + ep.desc + '</span>';
+                    html += '<span class="toggle-icon">&#9654;</span>';
+                    html += '</div>';
+                    html += '<div class="endpoint-body">';
+
+                    if (ep.params && ep.params.length > 0) {
+                        html += '<h4>请求参数</h4>';
+                        html += '<table class="param-table">';
+                        html += '<tr><th>参数名</th><th>类型</th><th>说明</th></tr>';
+                        ep.params.forEach(function(p) {
+                            var optClass = p.o ? ' class="optional"' : '';
+                            html += '<tr' + optClass + '><td>' + p.n + '</td><td>' + p.t + '</td><td>' + p.d + (p.o ? ' (可选)' : '') + '</td></tr>';
+                        });
+                        html += '</table>';
+                    } else {
+                        html += '<h4>请求参数</h4><pre>无参数</pre>';
+                    }
+
+                    html += '<h4>响应示例</h4>';
+                    html += '<pre>' + ep.response + '</pre>';
+
+                    html += '</div>';
+                    html += '</div>';
+                });
+                html += '</div></div>';
+                navHtml += '<a href="#cat-' + ci + '">' + cat.category + '</a>';
+            });
+
+            var sourceLabel = apiDataLoaded ? '后端API (/api/key/docs) 实时数据' : '内置静态数据 (后端未连接)';
+            html += '<div style="text-align:center;padding:2rem;color:rgba(255,255,255,0.3);font-size:0.8rem;">';
+            html += '共计 ' + totalEndpoints + ' 个API端点 &middot; ' + sourceLabel + ' &middot; SELF-LNN AGI';
+            html += '</div>';
+
+            container.innerHTML = html;
+            navBar.innerHTML = navHtml;
+        }
+
+        /* 从后端动态加载API文档 */
+        var apiDataLoaded = false;
+        (function loadFromBackend() {
+            SelfLnnApi.getApiDocs().then(function(result) {
+                if (!result.success) throw new Error('后端不可用');
+                var data = result.data;
+                var endpointsList = data.endpoints || (data.api_docs && data.api_docs.endpoints) || (data.api_key_docs && data.api_key_docs.endpoints) || [];
+                if (endpointsList.length > 0) {
+                    var dynamicData = [];
+                    endpointsList.forEach(function(ep) {
+                        var catName = ep.category || '通用';
+                        var found = false;
+                        for (var i = 0; i < dynamicData.length; i++) {
+                            if (dynamicData[i].category === catName) {
+                                dynamicData[i].endpoints.push({
+                                    id: dynamicData[i].endpoints.length,
+                                    method: ep.method || 'GET',
+                                    path: ep.path,
+                                    desc: ep.description || '',
+                                    params: ep.params || [],
+                                    response: ep.response_example || '{}'
+                                });
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            dynamicData.push({
+                                category: catName,
+                                endpoints: [{
+                                    id: 0,
+                                    method: ep.method || 'GET',
+                                    path: ep.path,
+                                    desc: ep.description || '',
+                                    params: ep.params || [],
+                                    response: ep.response_example || '{}'
+                                }]
+                            });
+                        }
+                    });
+                    if (dynamicData.length > 0) {
+                        apiData = dynamicData;
+                        apiDataLoaded = true;
+                        updateSummaryCard(dynamicData);
+                    }
+                }
+                render();
+            }).catch(function() {
+                render();
+            });
+        })();
+
+        function updateSummaryCard(dataArr) {
+            var total = 0;
+            dataArr.forEach(function(c) { total += c.endpoints.length; });
+            var el = document.getElementById('total-endpoints');
+            if (el) el.textContent = total;
+        }
+
+        function toggleCategory(ci) {
+            var body = document.querySelector('#cat-' + ci + ' .category-body');
+            if (body) {
+                body.style.display = body.style.display === 'none' ? '' : 'none';
+            }
+        }
+
+        function toggleEndpoint(ci, ei) {
+            var ep = document.getElementById('ep-' + ci + '-' + ei);
+            if (ep) {
+                ep.classList.toggle('active');
+                ep.classList.toggle('expanded');
+                var icon = ep.querySelector('.toggle-icon');
+                if (icon) icon.innerHTML = ep.classList.contains('active') ? '&#9660;' : '&#9654;';
+            }
+        }
+
+        render();
+        
+        (function fetchFeatures() {
+            var grid = document.getElementById('feature-grid');
+            var statusEl = document.getElementById('feature-status');
+            var panel = document.getElementById('feature-panel');
+            
+            Promise.all([
+                SelfLnnApi.request('/agi/features', {method:'GET'}).catch(function() { return null; }),
+                SelfLnnApi.request('/agi/feature_list', {method:'GET'}).catch(function() { return null; }),
+                SelfLnnApi.request('/knowledge', {method:'GET'}).catch(function() { return null; }),
+                SelfLnnApi.request('/status', {method:'GET'}).catch(function() { return null; })
+            ]).then(function(results) {
+                var features = results[0];
+                var featureList = results[1];
+                var knowledge = results[2];
+                var status = results[3];
+                
+                if (featureList && featureList.features) {
+                    statusEl.textContent = '已连接 | ' + Object.keys(featureList.features).length + ' 项能力';
+                    statusEl.style.color = '#00ff88';
+                    
+                    var html = '';
+                    var list = featureList.features;
+                    var knownFeatures = {
+                        self_learning: { label: '自我学习', desc: '从交互和数据中持续学习新知识' },
+                        self_decision: { label: '自我决策', desc: '自主分析并做出最佳决策' },
+                        self_execute: { label: '自主执行', desc: '无需人工干预执行复杂任务' },
+                        self_evolution: { label: '自我演化', desc: '模型结构和参数自适应进化' },
+                        self_correction: { label: '自我修正', desc: '自动检测并纠正错误行为' },
+                        imitation_learning: { label: '模仿学习', desc: '通过观察示范进行学习' },
+                        self_cognition: { label: '自我认知', desc: '对自身状态和能力的认知' },
+                        planning: { label: '计划能力', desc: '制定多步执行计划' },
+                        dialogue: { label: '对话能力', desc: '自然语言多轮对话交互' },
+                        knowledge_base: { label: '知识库', desc: '结构化知识存储与检索' },
+                        speech_recognition: { label: '语音识别', desc: '将语音转换为文本指令' },
+                        image_recognition: { label: '图像识别', desc: '识别和理解视觉信息' },
+                        binocular_vision: { label: '双目视觉', desc: '立体视觉空间感知' },
+                        multimodal: { label: '多模态统一处理', desc: '多模态信息经同一LNN统一处理' }
+                    };
+                    
+                    for (var key in list) {
+                        var item = list[key];
+                        var info = knownFeatures[key] || { label: key, desc: '' };
+                        var enabled = item.enabled !== undefined ? item.enabled : (item.status === 'running' || item.active);
+                        var enabledClass = enabled ? 'on' : 'off';
+                        var enabledText = enabled ? '已启用' : '已关闭';
+                        
+                        html += '<div class="feature-card">';
+                        html += '<div class="fc-name">' + info.label + '</div>';
+                        html += '<div class="fc-desc">' + (item.description || info.desc || '') + '</div>';
+                        html += '<span class="fc-badge ' + enabledClass + '">' + enabledText + '</span>';
+                        html += '</div>';
+                    }
+                    
+                    if (html) grid.innerHTML = html;
+                    else grid.innerHTML = '<div class="feature-loading">后端未返回能力列表数据</div>';
+                } else if (features && features.features) {
+                    statusEl.textContent = '已连接 (基础模式)';
+                    statusEl.style.color = '#00c8ff';
+                    
+                    var html = '';
+                    var feat = features.features;
+                    for (var key in feat) {
+                        var val = feat[key];
+                        var enabled = val === true || (typeof val === 'object' && val !== null && (val.enabled || val.status === 'running'));
+                        var enabledClass = enabled ? 'on' : 'off';
+                        var enabledText = enabled ? '已启用' : '已关闭';
+                        
+                        html += '<div class="feature-card">';
+                        html += '<div class="fc-name">' + key + '</div>';
+                        html += '<div class="fc-desc">' + (typeof val === 'object' && val.description ? val.description : '') + '</div>';
+                        html += '<span class="fc-badge ' + enabledClass + '">' + enabledText + '</span>';
+                        html += '</div>';
+                    }
+                    if (html) grid.innerHTML = html;
+                    else grid.innerHTML = '<div class="feature-loading">后端返回数据格式不支持直接显示</div>';
+                } else if (knowledge && knowledge.knowledge) {
+                    statusEl.textContent = '已连接 (知识库模式)';
+                    statusEl.style.color = '#00c8ff';
+                    var caps = knowledge.knowledge.capabilities || [];
+                    var html = caps.map(function(c) {
+                        return '<div class="feature-card"><div class="fc-name">' + c + '</div><div class="fc-desc">知识库能力</div><span class="fc-badge on">可用</span></div>';
+                    }).join('');
+                    grid.innerHTML = html || '<div class="feature-loading">知识库无能力列表数据</div>';
+                } else if (status && status.status === 'ok') {
+                    statusEl.textContent = '已连接 (服务运行中)';
+                    statusEl.style.color = '#00c8ff';
+                    grid.innerHTML = '<div class="feature-loading">服务运行正常，正在获取AGI能力状态...</div>';
+                } else {
+                    statusEl.textContent = '服务未连接';
+                    statusEl.style.color = '#ff4444';
+                    grid.innerHTML = '<div class="feature-loading">无法连接到后端服务，请确保SELF-LNN服务器已启动 (端口 ' + PORT + ')</div>';
+                }
+            }).catch(function() {
+                statusEl.textContent = '服务未连接';
+                statusEl.style.color = '#ff4444';
+                grid.innerHTML = '<div class="feature-loading">无法连接到后端服务，请确保SELF-LNN服务器已启动 (端口 ' + PORT + ')</div>';
+            });
+        })();
+    </script>
+        <div class="category" style="margin-top:2rem; padding-bottom:4rem;">
+            <h2 style="border-left:none;background:none;cursor:default;">API 使用示例 / Examples</h2>
+        </div>
+        <div class="endpoint">
+            <div class="endpoint-header"><span class="method get">GET</span><span class="path">/api/system/diagnostic</span></div>
+            <div class="endpoint-body" style="display:block;padding:1rem;">
+                <h4 style="color:#00c8ff;margin-bottom:0.5rem;">cURL</h4>
+                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">curl -H "X-API-Key: YOUR_KEY" http://localhost:8080/api/system/diagnostic</pre>
+                <h4 style="color:#00c8ff;margin:1rem 0 0.5rem;">Python</h4>
+                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">import requests
+r = requests.get("http://localhost:8080/api/system/diagnostic",
+    headers={"X-API-Key": "YOUR_KEY"})
+print(r.json())</pre>
+                <h4 style="color:#00c8ff;margin:1rem 0 0.5rem;">JavaScript (fetch)</h4>
+                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">fetch("http://localhost:8080/api/system/diagnostic", {
+    headers: { "X-API-Key": "YOUR_KEY" }
+}).then(r => r.json()).then(d => console.log(d));</pre>
+            </div>
+        </div>
+        <div class="endpoint">
+            <div class="endpoint-header"><span class="method post">POST</span><span class="path">/api/multimodal/learn</span></div>
+            <div class="endpoint-body" style="display:block;padding:1rem;">
+                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">curl -X POST http://localhost:8080/api/multimodal/learn \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_KEY" \
+  -d '{"fusion":"concat","mode":"joint","modalities":"vision,audio,text"}'</pre>
+            </div>
+        </div>
+        <div class="endpoint">
+            <div class="endpoint-header"><span class="method get">GET</span><span class="path">/api/capability/diagnose</span></div>
+            <div class="endpoint-body" style="display:block;padding:1rem;">
+                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">curl -H "X-API-Key: YOUR_KEY" http://localhost:8080/api/capability/diagnose</pre>
+                <p style="color:rgba(255,255,255,0.4);font-size:0.75rem;margin-top:0.5rem;">返回12项AGI能力开关状态：自我认知/决策/执行/学习/演化/模仿/修正/反思/好奇心/规划/对话/并发</p>
+            </div>
+        </div>
+        <div class="endpoint">
+            <div class="endpoint-header"><span class="method get">GET</span><span class="path">/api/devices/discover</span></div>
+            <div class="endpoint-body" style="display:block;padding:1rem;">
+                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">curl -H "X-API-Key: YOUR_KEY" http://localhost:8080/api/devices/discover</pre>
+                <p style="color:rgba(255,255,255,0.4);font-size:0.75rem;margin-top:0.5rem;">扫描摄像头/音频/串口/ROS/Gazebo等所有可用设备</p>
+            </div>
+        </div>
+    </main>
+</div>
+</body>
+</html>

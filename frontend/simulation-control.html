@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>仿真控制 - SELF-LNN 全液态神经网络AGI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/api-service.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo"><h1>仿真控制与3D重建</h1></div>
+            <nav class="nav"><ul>
+                <li><a href="index.html">仪表盘</a></li>
+                <li><a href="training-center.html">训练中心</a></li>
+                <li><a href="programming-workbench.html">编程工作台</a></li>
+                <li><a href="multimodal-learn.html">多模态学习</a></li>
+                <li><a href="simulation-control.html" class="active">仿真控制</a></li>
+                <li><a href="device-control.html">设备控制</a></li>
+                <li><a href="hardware-setup.html">硬件设置</a></li>
+                <li><a href="safety.html">安全监控</a></li>
+                <li><a href="knowledge-graph.html">知识图谱</a></li>
+                <li><a href="skills.html">技能库</a></li>
+                <li><a href="teach.html">示教学习</a></li>
+                <li><a href="voice-control.html">语音控制</a></li>
+                <li><a href="api-keys.html">API密钥</a></li>
+                <li><a href="api-docs.html">API文档</a></li>
+                <li><a href="usage-logs.html">使用日志</a></li>
+            </ul></nav>
+        </header>
+        <main class="main-content">
+            <div class="section-header"><h2>仿真环境控制与空间感知</h2><p>管理机器人仿真、训练、测试环境及3D空间重建</p></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <div class="card-header"><h3>3D仿真视图 (WebGL实时渲染)</h3></div>
+                    <div class="card-content">
+                        <canvas id="sim3d-canvas" width="800" height="400" style="width:100%;height:400px;background:#0a0a1a;border-radius:4px"></canvas>
+                        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+                            <button onclick="sim3dResetView()" class="btn btn-sm">重置视角</button>
+                            <button onclick="sim3dToggleGrid()" class="btn btn-sm">切换网格</button>
+                            <button onclick="sim3dAddRobot()" class="btn btn-sm">添加机器人</button>
+                            <button onclick="sim3dClearAll()" class="btn btn-sm btn-danger">清空场景</button>
+                            <span style="margin-left:auto;color:rgba(255,255,255,0.5);font-size:12px">鼠标拖拽旋转 | 滚轮缩放 | 右键平移</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>仿真引擎</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>仿真引擎</label>
+                            <select id="sim-engine" class="form-input">
+                                <option value="internal">内部物理引擎</option>
+                                <option value="gazebo">Gazebo</option>
+                                <option value="pybullet">PyBullet</option>
+                            </select>
+                        </div>
+                        <div class="form-group"><label>场景文件</label><input type="text" id="scene-file" class="form-input" placeholder="scene.world 或 scene.sdf"></div>
+                        <div class="form-group"><label>仿真时间步长(ms)</label><input type="number" id="sim-dt" value="10" min="1" class="form-input"></div>
+                        <button onclick="startSimulation()" class="btn btn-primary" style="width:100%">启动仿真</button>
+                        <button onclick="stopSimulation()" class="btn btn-danger" style="width:100%;margin-top:8px">停止仿真</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>仿真状态</h3></div>
+                    <div class="card-content">
+                        <div class="metric"><span class="metric-label">状态</span><span class="metric-value" id="sim-status">未启动</span></div>
+                        <div class="metric"><span class="metric-label">运行时间</span><span class="metric-value" id="sim-time">0s</span></div>
+                        <div class="metric"><span class="metric-label">仿真步数</span><span class="metric-value" id="sim-steps">0</span></div>
+                        <div class="metric"><span class="metric-label">实时因子</span><span class="metric-value" id="sim-realtime">1.0x</span></div>
+                        <div class="metric"><span class="metric-label">机器人数量</span><span class="metric-value" id="sim-robots">0</span></div>
+                        <div class="metric"><span class="metric-label">激光雷达</span><span class="metric-value" id="lidar-status">未连接</span></div>
+                        <div class="metric"><span class="metric-label">深度相机</span><span class="metric-value" id="depth-status">未连接</span></div>
+                        <div class="metric"><span class="metric-label">IMU</span><span class="metric-value" id="imu-status">未连接</span></div>
+                        <div class="metric"><span class="metric-label">里程计</span><span class="metric-value" id="odom-status">未连接</span></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>3D空间重建</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>重建模式</label>
+                            <select id="recon-mode" class="form-input">
+                                <option value="stereo">双目立体视觉</option>
+                                <option value="mono">单目深度估计</option>
+                                <option value="lidar">激光雷达点云</option>
+                            </select>
+                        </div>
+                        <button onclick="start3DReconstruction()" class="btn btn-primary" style="width:100%">开始3D重建</button>
+                        <div style="margin-top:8px">
+                            <div class="metric"><span class="metric-label">点云点数</span><span class="metric-value" id="recon-points">0</span></div>
+                            <div class="metric"><span class="metric-label">物体数</span><span class="metric-value" id="recon-objects">0</span></div>
+                            <div class="metric"><span class="metric-label">帧率</span><span class="metric-value" id="recon-fps">0</span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>电脑操作</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>执行命令</label><input type="text" id="cmd-input" class="form-input" placeholder="输入系统命令..."></div>
+                        <button onclick="executeCommand()" class="btn btn-primary" style="width:100%">执行命令</button>
+                        <div style="margin-top:8px">
+                            <div id="cmd-output" style="background:rgba(0,0,0,0.3);padding:8px;border-radius:4px;font-family:monospace;font-size:12px;max-height:120px;overflow-y:auto;color:rgba(255,255,255,0.7);">等待命令...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>路径规划</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>目标X</label><input type="number" id="goal-x" value="5.0" step="0.1" class="form-input"></div>
+                        <div class="form-group"><label>目标Y</label><input type="number" id="goal-y" value="5.0" step="0.1" class="form-input"></div>
+                        <button onclick="planPath()" class="btn btn-primary" style="width:100%">规划路径</button>
+                    </div>
+                </div>
+                <div class="card full-width">
+                    <div class="card-header"><h3>机器人列表</h3></div>
+                    <div class="card-content">
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead><tr><th>ID</th><th>名称</th><th>类型</th><th>位置(X,Y,Z)</th><th>速度</th><th>控制</th></tr></thead>
+                                <tbody id="sim-robot-list"><tr><td colspan="6" class="pending-text">仿真未启动</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="js/simulation-control.js"></script>
+</body>
+</html>

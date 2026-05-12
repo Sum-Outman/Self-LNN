@@ -1,0 +1,291 @@
+/**
+ * @file cfc_network.h
+ * @brief CfC（闭合形式连续时间）液态神经网络接口
+ * 
+ * 由多个CfC细胞单元组成的完整液态神经网络，提供完整的前向传播和反向传播功能。
+ * 实现文件：src/core/cfc_network.c（命名一致性：头文件 cfc_network.h ↔ 实现文件 cfc_network.c）
+ */
+
+#ifndef SELFLNN_CFC_NETWORK_H
+#define SELFLNN_CFC_NETWORK_H
+
+#include <stddef.h>
+#include <stdio.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief CfC网络配置
+ */
+typedef struct {
+    size_t input_size;
+    size_t hidden_size;
+    size_t output_size;
+    float learning_rate;
+    float time_constant;
+    float noise_std;
+    int enable_training;
+    int enable_adaptation;
+    int num_layers;
+    float dropout_rate;
+    int use_batch_norm;
+    int ode_solver_type;
+} CfCNetworkConfig;
+
+typedef struct CfCNetwork CfCNetwork;
+
+CfCNetwork* cfc_create(const CfCNetworkConfig* config);
+void cfc_free(CfCNetwork* network);
+int cfc_forward(CfCNetwork* network, const float* input, 
+                float* hidden_state, float* cell_state, float* output);
+int cfc_backward(CfCNetwork* network, const float* error, 
+                 float* gradient, float learning_rate);
+int cfc_accumulate_gradients(CfCNetwork* network, const float* error, 
+                            float* gradient,
+                            float* weight_gradients, float* bias_gradients);
+int cfc_save(const CfCNetwork* network, FILE* file);
+int cfc_load(CfCNetwork* network, FILE* file);
+int cfc_set_config(CfCNetwork* network, const CfCNetworkConfig* config);
+int cfc_get_config(const CfCNetwork* network, CfCNetworkConfig* config);
+void cfc_reset(CfCNetwork* network);
+int cfc_get_stats(const CfCNetwork* network, float* avg_activation,
+                  float* max_activation, float* gradient_norm);
+int cfc_get_weight_matrix(CfCNetwork* network, float** weight_matrix, size_t* weight_count);
+int cfc_get_bias_vector(CfCNetwork* network, float** bias_vector, size_t* bias_count);
+
+/* ============================================================================
+ * 长时连续动态系统求解器
+ *
+ * 为液态神经网络提供完整的连续时间动力学支持：
+ *   - 可变时间步长前向传播（cfc_forward_dt 已存在）
+ *   - 长时轨迹积分（dt累积，记录中间状态）
+ *   - 任意时刻状态插值（Hermite三次插值）
+ *   - 网络级自适应步长 + 刚度检测 + 自动求解器切换
+ *   - 连续动力学RHS暴露（用于外部ODE积分器）
+ * ============================================================================ */
+
+/**
+ * @brief 连续时间轨迹记录
+ * 存储长时演化过程中各时间点的网络状态快照
+ */
+typedef struct {
+    float* state_buffer;        /**< 状态快照缓冲区 [capacity × (state_dim + 1)] */
+    float* timestamps;          /**< 时间戳数组 [capacity] */
+    int capacity;               /**< 最大快照数 */
+    int count;                  /**< 当前快照数 */
+    float t_start;              /**< 轨迹起始时间 */
+    float t_end;                /**< 轨迹结束时间 */
+    size_t state_dim;           /**< 每个快照的状态维度 */
+} CfCTrajectory;
+
+/**
+ * @brief 长时连续演化配置
+ */
+typedef struct {
+    float t_start;              /**< 起始时间 */
+    float t_end;                /**< 结束时间 */
+    float dt_init;              /**< 初始时间步长 */
+    float dt_min;               /**< 最小允许步长 */
+    float dt_max;               /**< 最大允许步长 */
+    float rel_tol;              /**< 相对误差容限 */
+    float abs_tol;              /**< 绝对误差容限 */
+    int max_steps;              /**< 最大步数限制 */
+    int trajectory_capacity;    /**< 轨迹缓冲区容量 */
+    int enable_stiffness_detect; /**< 是否启用刚度检测自动切换求解器 */
+    int enable_trajectory_output; /**< 是否输出完整轨迹 */
+    float trajectory_sample_dt; /**< 轨迹采样间隔（0=每步都记录） */
+} CfCContinuousConfig;
+
+/**
+ * @brief 连续动力学右端函数上下文
+ * 将CfC网络的ODE系统暴露为可调用的RHS函数，
+ * 兼容 ode_solvers.h 中定义的 ODERHSFunc 类型。
+ */
+typedef struct {
+    CfCNetwork* network;        /**< 目标CfC网络 */
+    const float* input;         /**< 固定输入（零阶保持） */
+    float* temp_buffer1;        /**< 临时缓冲区1 [hidden_size] */
+    float* temp_buffer2;        /**< 临时缓冲区2 [hidden_size] */
+    int current_layer;          /**< 当前层索引 */
+} CfCRHSContext;
+
+/**
+ * @brief 长时连续演化结果统计
+ */
+typedef struct {
+    int total_steps;            /**< 总步数 */
+    int accepted_steps;         /**< 接受步数 */
+    int rejected_steps;         /**< 拒绝步数 */
+    int solver_switches;        /**< 求解器切换次数 */
+    float final_t;              /**< 最终时间 */
+    float avg_dt;               /**< 平均步长 */
+    float min_dt_used;          /**< 最窄步长 */
+    float max_dt_used;          /**< 最宽步长 */
+    float stiffness_ratio;      /**< 刚度比（max|Re(λ)| / min|Re(λ)|） */
+    int used_stiff_solver;      /**< 是否使用了刚性求解器 */
+} CfCContinuousStats;
+
+/**
+ * @brief 获取默认长时连续演化配置
+ */
+CfCContinuousConfig cfc_continuous_default_config(void);
+
+/**
+ * @brief 创建连续时间轨迹记录器
+ * @param capacity 最大快照数
+ * @param state_dim 每个快照的状态维度
+ * @return 轨迹对象，失败返回NULL
+ */
+CfCTrajectory* cfc_trajectory_create(int capacity, size_t state_dim);
+
+/**
+ * @brief 销毁轨迹对象
+ */
+void cfc_trajectory_free(CfCTrajectory* traj);
+
+/**
+ * @brief 将状态快照追加到轨迹
+ * @param traj 轨迹对象
+ * @param t 时间戳
+ * @param state 状态向量 [state_dim]
+ * @return 0成功，-1轨迹满
+ */
+int cfc_trajectory_append(CfCTrajectory* traj, float t, const float* state);
+
+/**
+ * @brief 在轨迹中插值任意时刻的状态（Hermite三次插值）
+ * @param traj 轨迹对象
+ * @param t_query 查询时间
+ * @param state_out 输出状态 [state_dim]
+ * @return 0成功，-1失败（t超出范围或缺数据）
+ */
+int cfc_trajectory_interpolate(const CfCTrajectory* traj, float t_query, float* state_out);
+
+/**
+ * @brief 长时连续演化：从t_start到t_end积分网络动态
+ *
+ * 使用自适应步长ODE求解器对CfC网络进行长时连续积分。
+ * 支持刚度检测自动切换求解器（显式→隐式/Rosenbrock）。
+ * 可选输出完整状态轨迹。
+ *
+ * @param network CfC网络
+ * @param input 固定输入向量（零阶保持，随时间不变）[input_size]
+ * @param hidden_state 输入/输出隐藏状态 [hidden_size]
+ * @param cell_state 输入/输出细胞状态 [hidden_size]
+ * @param output 输出向量 [output_size]（可为NULL仅演化不发散）
+ * @param config 连续演化配置
+ * @param stats 输出统计信息（可为NULL）
+ * @return 0成功，-1失败
+ */
+int cfc_continuous_evolve(CfCNetwork* network, const float* input,
+                          float* hidden_state, float* cell_state,
+                          float* output,
+                          const CfCContinuousConfig* config,
+                          CfCContinuousStats* stats);
+
+/**
+ * @brief 长时连续演化（带轨迹输出）
+ * 与 cfc_continuous_evolve 相同，但将完整轨迹写入 traj。
+ *
+ * @param traj 轨迹输出对象（由调用者预创建）
+ * @return 0成功，-1失败
+ */
+int cfc_continuous_evolve_with_trajectory(CfCNetwork* network, const float* input,
+                                          float* hidden_state, float* cell_state,
+                                          float* output,
+                                          const CfCContinuousConfig* config,
+                                          CfCTrajectory* traj,
+                                          CfCContinuousStats* stats);
+
+/**
+ * @brief 构建CfC网络的连续ODE右端函数上下文
+ *
+ * 将网络动态表示为 dy/dt = f(t, y) 形式，
+ * 其中 y = [hidden_state] 为状态向量。
+ * 返回的ctx可直接传入 ode_solvers.h 中定义的ODE积分器。
+ *
+ * @param network CfC网络
+ * @param input 固定输入 [input_size]
+ * @return CfCRHSContext* 可为NULL（内存不足）
+ */
+CfCRHSContext* cfc_create_rhs_context(CfCNetwork* network, const float* input);
+
+/**
+ * @brief 销毁RHS上下文
+ */
+void cfc_free_rhs_context(CfCRHSContext* ctx);
+
+/**
+ * @brief CfC网络连续RHS求值：计算 dy/dt = f(t, y)
+ *
+ * 兼容 ODERHSFunc 签名：
+ *   int (*)(float t, const float* y, float* dydt, void* ctx)
+ *
+ * 其中 ctx 为 CfCRHSContext*。
+ *
+ * @param t 当前时间
+ * @param y 当前状态 [hidden_size]
+ * @param dydt 输出导数 [hidden_size]
+ * @param ctx CfCRHSContext*
+ * @return 0成功，-1失败
+ */
+int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx);
+
+/**
+ * @brief 网络级刚度检测：估算ODE系统的刚度比
+ *
+ * 使用有限差分逼近雅可比矩阵，计算最大/最小特征值实部之比。
+ * 刚度比 > 10 建议切换刚性求解器，> 100 必须使用刚性求解器。
+ *
+ * @param network CfC网络
+ * @param input 当前输入 [input_size]
+ * @param state 当前状态 [hidden_size]
+ * @param stiffness_ratio 输出刚度比
+ * @return 0成功，-1失败
+ */
+int cfc_detect_stiffness(CfCNetwork* network, const float* input,
+                         const float* state, float* stiffness_ratio);
+
+/**
+ * @brief 设置网络级ODE求解器类型（为所有层统一设置）
+ * @param network CfC网络
+ * @param solver_type 求解器类型（参见ODE_SOLVER_*常量）
+ * @return 0成功，-1失败
+ */
+int cfc_set_solver_type(CfCNetwork* network, int solver_type);
+
+/**
+ * @brief 启用网络级自适应时间步长
+ * @param network CfC网络
+ * @param enable 1=启用, 0=禁用
+ * @return 0成功，-1失败
+ */
+int cfc_set_adaptive_step(CfCNetwork* network, int enable);
+
+#ifdef SELFLNN_IMPLEMENTATION
+typedef struct CfCCell CfCCell;
+struct CfCNetwork {
+    CfCNetworkConfig config;
+    CfCCell** layers;
+    float* layer_outputs;
+    float* layer_gradients;
+    float* weight_matrix;
+    float* bias_vector;
+    float* weight_gradients;
+    float* bias_gradients;
+    float* activation_buffer;
+    float* dropout_mask;
+    int is_initialized;
+    float current_avg_activation;
+    float current_max_activation;
+    float current_gradient_norm;
+};
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

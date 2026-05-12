@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>设备控制面板 - SELF-LNN 全液态神经网络AGI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/api-service.js"></script>
+    <script src="js/hardware-util.js"></script>
+    <script>
+        /* 页面加载完成后检查后端连接状态 */
+        document.addEventListener('DOMContentLoaded', function() {
+            var api = window.SelfLnnApi;
+            api.checkConnection().then(function(status) {
+                if (!status.connected) {
+                    document.querySelectorAll('[id]').forEach(function(el) {
+                        if (el.textContent && el.textContent.trim() === '等待连接') {
+                            el.textContent = '离线';
+                        }
+                    });
+                    var pendingDivs = document.querySelectorAll('.pending-text');
+                    pendingDivs.forEach(function(el) {
+                        if (el.textContent && el.textContent.trim() === '等待连接...') {
+                            el.textContent = '离线';
+                        }
+                    });
+                }
+            }).catch(function() {
+                document.querySelectorAll('[id]').forEach(function(el) {
+                    if (el.textContent && el.textContent.trim() === '等待连接') {
+                        el.textContent = '离线';
+                    }
+                });
+                var pendingDivs = document.querySelectorAll('.pending-text');
+                pendingDivs.forEach(function(el) {
+                    if (el.textContent && el.textContent.trim() === '等待连接...') {
+                        el.textContent = '离线';
+                    }
+                });
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo"><h1>设备控制面板</h1></div>
+            <nav class="nav"><ul>
+                <li><a href="index.html">仪表盘</a></li>
+                <li><a href="training-center.html">训练中心</a></li>
+                <li><a href="programming-workbench.html">编程工作台</a></li>
+                <li><a href="multimodal-learn.html">多模态学习</a></li>
+                <li><a href="simulation-control.html">仿真控制</a></li>
+                <li><a href="device-control.html" class="active">设备控制</a></li>
+                <li><a href="hardware-setup.html">硬件设置</a></li>
+                <li><a href="safety.html">安全监控</a></li>
+                <li><a href="knowledge-graph.html">知识图谱</a></li>
+                <li><a href="skills.html">技能库</a></li>
+                <li><a href="teach.html">示教学习</a></li>
+                <li><a href="voice-control.html">语音控制</a></li>
+                <li><a href="api-keys.html">API密钥</a></li>
+                <li><a href="api-docs.html">API文档</a></li>
+                <li><a href="usage-logs.html">使用日志</a></li>
+            </ul></nav>
+        </header>
+        <main class="main-content">
+            <div class="section-header"><h2>多设备控制中心</h2><p>统一控制和管理所有连接的机器人和设备</p></div>
+            <div class="dashboard-grid">
+                <div class="card">
+                    <div class="card-header"><h3>硬件检测</h3></div>
+                    <div class="card-content">
+                        <button onclick="scanHardware()" class="btn btn-primary" style="width:100%">扫描硬件</button>
+                        <div style="margin-top:12px">
+                            <div class="metric"><span class="metric-label">GPU数量</span><span class="metric-value" id="gpu-count">等待检测</span></div>
+                            <div class="metric"><span class="metric-label">CPU核心数</span><span class="metric-value" id="cpu-cores">等待检测</span></div>
+                            <div class="metric"><span class="metric-label">内存总量</span><span class="metric-value" id="total-memory">等待检测</span></div>
+                            <div class="metric"><span class="metric-label">摄像头</span><span class="metric-value" id="camera-status">等待检测</span></div>
+                            <div class="metric"><span class="metric-label">麦克风</span><span class="metric-value" id="mic-status">等待检测</span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>计算后端配置</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>主计算后端</label>
+                            <select id="compute-backend" class="form-input">
+                                <option value="cpu">CPU</option>
+                                <option value="cuda">CUDA (NVIDIA)</option>
+                                <option value="rocm">ROCm (AMD)</option>
+                                <option value="opencl">OpenCL</option>
+                                <option value="metal">Metal (Apple)</option>
+                                <option value="vulkan">Vulkan</option>
+                            </select>
+                        </div>
+                        <div class="form-group"><label>设备编号</label><input type="number" id="device-id" value="0" min="0" class="form-input"></div>
+                        <button onclick="applyConfig()" class="btn btn-primary" style="width:100%">应用配置</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>设备概览</h3></div>
+                    <div class="card-content">
+                        <div class="metric"><span class="metric-label">在线设备</span><span class="metric-value" id="online-count">等待连接</span></div>
+                        <div class="metric"><span class="metric-label">离线设备</span><span class="metric-value" id="offline-count">等待连接</span></div>
+                        <div class="metric"><span class="metric-label">总设备数</span><span class="metric-value" id="total-count">等待连接</span></div>
+                        <button onclick="refreshDevices()" class="btn btn-primary" style="margin-top:12px;width:100%">刷新设备列表</button>
+                        <button onclick="registerDevice()" class="btn" style="margin-top:8px;width:100%">注册新设备</button>
+                        <button onclick="unregisterDevice()" class="btn btn-danger" style="margin-top:4px;width:100%">注销设备</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>全局控制</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>控制模式</label>
+                            <select id="control-mode" class="form-input">
+                                <option value="manual">手动控制</option>
+                                <option value="auto">自主控制</option>
+                                <option value="semi">半自主</option>
+                                <option value="swarm">集群控制</option>
+                            </select>
+                        </div>
+                        <button onclick="setGlobalMode()" class="btn btn-primary" style="width:100%">应用全局模式</button>
+                        <hr style="margin:12px 0">
+                        <button onclick="emergencyStop()" class="btn btn-danger" style="width:100%">紧急停止所有设备</button>
+                    </div>
+                </div>
+                <div class="card full-width">
+                    <div class="card-header"><h3>设备列表</h3></div>
+                    <div class="card-content">
+                        <div id="device-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
+                            <div class="pending-text" style="text-align:center;padding:20px">等待连接...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script>
+        var devicePollTimer = null;
+
+        async function refreshDevices() {
+            try {
+                var data = await SelfLnnApi.devicesList();
+                var devices = data.devices || [];
+                var online = 0, offline = 0;
+                devices.forEach(function(d) { if (d.online) online++; else offline++; });
+                document.getElementById('online-count').textContent = online;
+                document.getElementById('offline-count').textContent = offline;
+                document.getElementById('total-count').textContent = devices.length;
+
+                var container = document.getElementById('device-cards');
+                if (devices.length === 0) {
+                    container.innerHTML = '<div class="pending-text" style="text-align:center;padding:20px">暂无设备</div>';
+                    return;
+                }
+                container.innerHTML = devices.map(function(d) {
+                    var name = d.name||'未知设备';
+                    var type = d.type||'-';
+                    var statusClass = d.online ? 'active' : 'inactive';
+                    var statusText = d.online ? '在线' : '离线';
+                    var battery = d.battery != null ? d.battery+'%' : '-';
+                    var conn = d.connection||'-';
+                    return '<div class="card" style="margin:0">' +
+                        '<div class="card-header"><h3>' + name + '</h3></div>' +
+                        '<div class="card-content">' +
+                            '<div class="metric"><span class="metric-label">类型</span><span class="metric-value">' + type + '</span></div>' +
+                            '<div class="metric"><span class="metric-label">状态</span><span class="metric-value"><span class="status-badge ' + statusClass + '">' + statusText + '</span></span></div>' +
+                            '<div class="metric"><span class="metric-label">电池</span><span class="metric-value">' + battery + '</span></div>' +
+                            '<div class="metric"><span class="metric-label">连接方式</span><span class="metric-value">' + conn + '</span></div>' +
+                            '<div style="margin-top:8px;display:flex;gap:4px">' +
+                                '<button onclick="sendDeviceCmd(\'' + d.id + '\',\'start\')" class="btn btn-sm">启动</button>' +
+                                '<button onclick="sendDeviceCmd(\'' + d.id + '\',\'stop\')" class="btn btn-sm btn-danger">停止</button>' +
+                                '<button onclick="setDeviceMode(\'' + d.id + '\')" class="btn btn-sm">模式</button>' +
+                            '</div>' +
+                        '</div>' +
+                    '</div>';
+                }).join('');
+            } catch(e) { /* 静默 */ }
+        }
+
+        window.sendDeviceCmd = async function(deviceId, command) {
+            try {
+                var data = await SelfLnnApi.deviceCommand(deviceId, command);
+                if (!data.success) alert('命令执行失败: '+(data.error||''));
+            } catch(e) { alert('连接失败'); }
+        };
+
+        window.setDeviceMode = async function(deviceId) {
+            var mode = prompt('输入模式 (manual/auto/semi/swarm):', 'auto');
+            if (!mode) return;
+            try {
+                var data = await SelfLnnApi.deviceSetMode(deviceId, mode);
+                alert(data.success ? '模式已切换' : '切换失败: '+(data.error||''));
+            } catch(e) { alert('连接失败'); }
+        };
+
+        async function setGlobalMode() {
+            var mode = document.getElementById('control-mode').value;
+            try {
+                var data = await SelfLnnApi.deviceSetMode('all', mode);
+                alert(data.success ? '全局模式已切换为 ' + mode : '切换失败');
+            } catch(e) { alert('连接失败'); }
+        }
+
+        async function emergencyStop() {
+            if (!confirm('确认紧急停止所有设备？')) return;
+            try {
+                var data = await SelfLnnApi.emergencyStop('device');
+                alert(data.success ? '已发送紧急停止信号' : '操作失败');
+            } catch(e) { alert('操作失败'); }
+        }
+
+        window.setGlobalMode = setGlobalMode;
+        window.emergencyStop = emergencyStop;
+
+        async function scanHardware() {
+            var result = await HardwareScanUtil.scanAll(false);
+            document.getElementById('gpu-count').textContent = result.gpu.count;
+            document.getElementById('cpu-cores').textContent = result.cpu.cores;
+            document.getElementById('total-memory').textContent = result.memory.total_gb > 0 ? result.memory.total_gb.toFixed(1) + ' GB' : 'N/A';
+            document.getElementById('camera-status').textContent = result.camera.detected ? result.camera.count + '个' : '未检测';
+            document.getElementById('mic-status').textContent = result.microphone.detected ? result.microphone.count + '个' : '未检测';
+        }
+
+        async function applyConfig() {
+            var backend = document.getElementById('compute-backend').value;
+            var devId = document.getElementById('device-id').value;
+            try {
+                var data = await SelfLnnApi.hardwareConfig({backend: backend, device_id: parseInt(devId)});
+                alert(data.success ? '配置已应用' : '配置应用失败: '+(data.error||''));
+            } catch(e) { alert('连接失败'); }
+        }
+
+        async function registerDevice() {
+            var name = prompt('输入设备名称:', '新设备');
+            if (!name) return;
+            var type = prompt('输入设备类型 (robot/sensor/camera/mic/speaker/other):', 'robot');
+            if (!type) return;
+            try {
+                var data = await SelfLnnApi.request('/devices/register', {
+                    method: 'POST',
+                    body: JSON.stringify({name: name, type: type})
+                }, 1);
+                alert(data.success ? '设备注册成功' : '注册失败: '+(data.error||''));
+                if (data.success) refreshDevices();
+            } catch(e) { alert('连接失败'); }
+        }
+
+        async function unregisterDevice() {
+            var id = prompt('输入要注销的设备ID:');
+            if (!id) return;
+            try {
+                var data = await SelfLnnApi.request('/devices/unregister', {
+                    method: 'POST',
+                    body: JSON.stringify({device_id: id})
+                }, 1);
+                alert(data.success ? '设备已注销' : '注销失败: '+(data.error||''));
+                if (data.success) refreshDevices();
+            } catch(e) { alert('连接失败'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshDevices();
+            scanHardware();
+            devicePollTimer = setInterval(refreshDevices, 5000);
+        });
+
+        window.addEventListener('beforeunload', function() {
+            if (devicePollTimer) clearInterval(devicePollTimer);
+        });
+    </script>
+</body>
+</html>

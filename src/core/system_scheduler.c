@@ -1,0 +1,630 @@
+#define SELFLNN_IMPLEMENTATION 1
+#include "selflnn/core/system_scheduler.h"
+#include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/perf.h"
+#include "selflnn/core/errors.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <time.h>
+
+struct SystemScheduler {
+    SchedulerConfig config;
+    SystemModule modules[SCHEDULER_MAX_MODULES];
+    size_t module_count;
+    ScheduledTask task_queue[256];
+    size_t task_count;
+    SchedulerEvent event_log[1024];
+    size_t event_count;
+    scheduler_event_callback event_callback;
+    void* event_callback_data;
+    SchedulerStats stats;
+    uint64_t start_time_ms;
+    int running;
+    int initialized;
+    int enabled;
+};
+
+static uint64_t get_current_time_ms(void) {
+#ifdef _WIN32
+    return (uint64_t)clock() * 1000 / CLOCKS_PER_SEC;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+#endif
+}
+
+static void log_event(SystemScheduler* scheduler, const char* module_name, int severity, int error_code, const char* message) {
+    if (!scheduler || !scheduler->config.enable_event_logging) return;
+    if (scheduler->event_count >= scheduler->config.max_events) {
+        memmove(scheduler->event_log, scheduler->event_log + 1, (scheduler->event_count - 1) * sizeof(SchedulerEvent));
+        scheduler->event_count--;
+    }
+    SchedulerEvent* ev = &scheduler->event_log[scheduler->event_count++];
+    strncpy(ev->module_name, module_name ? module_name : "system", SCHEDULER_NAME_LEN - 1);
+    ev->module_name[SCHEDULER_NAME_LEN - 1] = '\0';
+    ev->timestamp = get_current_time_ms();
+    ev->severity = severity;
+    ev->error_code = error_code;
+    strncpy(ev->message, message ? message : "", 255);
+    ev->message[255] = '\0';
+    if (scheduler->event_callback) {
+        scheduler->event_callback(ev, scheduler->event_callback_data);
+    }
+}
+
+SystemScheduler* system_scheduler_create(const SchedulerConfig* config) {
+    SystemScheduler* scheduler = (SystemScheduler*)safe_calloc(1, sizeof(SystemScheduler));
+    if (!scheduler) return NULL;
+    if (config) {
+        scheduler->config = *config;
+    } else {
+        scheduler->config.mode = SCHEDULER_MODE_HYBRID;
+        scheduler->config.enable_preemptive = 1;
+        scheduler->config.max_task_duration_ms = 50;
+        scheduler->config.enable_load_monitoring = 1;
+        scheduler->config.max_cpu_threshold = 90.0f;
+        scheduler->config.max_memory_mb = 8192.0f;
+        scheduler->config.enable_event_logging = 1;
+        scheduler->config.max_events = 1024;
+        scheduler->config.auto_recover = 1;
+    }
+    if (scheduler->config.max_events > 1024) scheduler->config.max_events = 1024;
+    if (scheduler->config.max_events == 0) scheduler->config.max_events = 1;
+    scheduler->start_time_ms = get_current_time_ms();
+    scheduler->running = 0;
+    scheduler->initialized = 1;
+    scheduler->enabled = 1;
+    scheduler->stats.mode = scheduler->config.mode;
+    log_event(scheduler, "scheduler", 0, 0, "调度引擎创建成功");
+    return scheduler;
+}
+
+void system_scheduler_free(SystemScheduler* scheduler) {
+    if (!scheduler) return;
+    scheduler->running = 0;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (scheduler->modules[i].cleanup && scheduler->modules[i].state >= MODULE_STATE_INITIALIZED) {
+            scheduler->modules[i].cleanup();
+        }
+        scheduler->modules[i].state = MODULE_STATE_STOPPED;
+    }
+    log_event(scheduler, "scheduler", 0, 0, "调度引擎已释放");
+    safe_free((void**)&scheduler);
+}
+
+int system_scheduler_register_module(SystemScheduler* scheduler, const SystemModule* module) {
+    if (!scheduler || !module) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (!module->name[0]) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (scheduler->module_count >= SCHEDULER_MAX_MODULES) return SELFLNN_ERROR_OUT_OF_MEMORY;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (strcmp(scheduler->modules[i].name, module->name) == 0) return SELFLNN_ERROR_ALREADY_EXISTS;
+    }
+    scheduler->modules[scheduler->module_count] = *module;
+    scheduler->modules[scheduler->module_count].state = MODULE_STATE_UNINITIALIZED;
+    scheduler->modules[scheduler->module_count].restart_count = 0;
+    scheduler->modules[scheduler->module_count].run_count = 0;
+    scheduler->modules[scheduler->module_count].error_count = 0;
+    scheduler->modules[scheduler->module_count].total_run_time = 0;
+    scheduler->modules[scheduler->module_count].last_run_time = 0;
+    scheduler->module_count++;
+    scheduler->stats.total_modules = scheduler->module_count;
+    log_event(scheduler, module->name, 0, 0, "模块注册成功");
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_unregister_module(SystemScheduler* scheduler, const char* module_name) {
+    if (!scheduler || !module_name) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (strcmp(scheduler->modules[i].name, module_name) == 0) {
+            if (scheduler->modules[i].cleanup && scheduler->modules[i].state >= MODULE_STATE_INITIALIZED) {
+                scheduler->modules[i].cleanup();
+            }
+            memmove(&scheduler->modules[i], &scheduler->modules[i + 1], (scheduler->module_count - i - 1) * sizeof(SystemModule));
+            scheduler->module_count--;
+            scheduler->stats.total_modules = scheduler->module_count;
+            log_event(scheduler, "scheduler", 0, 0, "模块已注销");
+            return SELFLNN_SUCCESS;
+        }
+    }
+    return SELFLNN_ERROR_NOT_FOUND;
+}
+
+int system_scheduler_enable_module(SystemScheduler* scheduler, const char* module_name, int enable) {
+    if (!scheduler || !module_name) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (strcmp(scheduler->modules[i].name, module_name) == 0) {
+            scheduler->modules[i].enabled = enable;
+            if (!enable) scheduler->modules[i].state = MODULE_STATE_PAUSED;
+            return SELFLNN_SUCCESS;
+        }
+    }
+    return SELFLNN_ERROR_NOT_FOUND;
+}
+
+int system_scheduler_get_module_state(SystemScheduler* scheduler, const char* module_name, ModuleState* state) {
+    if (!scheduler || !module_name || !state) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (strcmp(scheduler->modules[i].name, module_name) == 0) {
+            *state = scheduler->modules[i].state;
+            return SELFLNN_SUCCESS;
+        }
+    }
+    return SELFLNN_ERROR_NOT_FOUND;
+}
+
+int system_scheduler_enqueue_task(SystemScheduler* scheduler, const ScheduledTask* task) {
+    if (!scheduler || !task) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (!task->task_func) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (scheduler->task_count >= 256) return SELFLNN_ERROR_OUT_OF_MEMORY;
+    scheduler->task_queue[scheduler->task_count] = *task;
+    scheduler->task_queue[scheduler->task_count].enqueue_time = get_current_time_ms();
+    scheduler->task_count++;
+    scheduler->stats.total_tasks_queued++;
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_cancel_task(SystemScheduler* scheduler, const char* task_name) {
+    if (!scheduler || !task_name) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    for (size_t i = 0; i < scheduler->task_count; i++) {
+        if (strcmp(scheduler->task_queue[i].name, task_name) == 0) {
+            memmove(&scheduler->task_queue[i], &scheduler->task_queue[i + 1], (scheduler->task_count - i - 1) * sizeof(ScheduledTask));
+            scheduler->task_count--;
+            return SELFLNN_SUCCESS;
+        }
+    }
+    return SELFLNN_ERROR_NOT_FOUND;
+}
+
+static int compare_task_priority(const void* a, const void* b) {
+    const ScheduledTask* ta = (const ScheduledTask*)a;
+    const ScheduledTask* tb = (const ScheduledTask*)b;
+    if (ta->priority < tb->priority) return -1;
+    if (ta->priority > tb->priority) return 1;
+    if (ta->enqueue_time < tb->enqueue_time) return -1;
+    return 1;
+}
+
+static int process_module(SystemScheduler* scheduler, size_t idx) {
+    SystemModule* mod = &scheduler->modules[idx];
+    if (!mod->enabled || mod->state != MODULE_STATE_INITIALIZED) return 0;
+    
+    PerfTimer timer;
+    perf_timer_start(&timer);
+    
+    mod->state = MODULE_STATE_RUNNING;
+    int ret = mod->process ? mod->process(mod->module_data, NULL) : 0;
+    
+    uint64_t elapsed = perf_timer_stop(&timer) / 1000000;
+    mod->last_run_time = elapsed;
+    mod->total_run_time += elapsed;
+    scheduler->stats.total_run_time_ms += elapsed;
+    mod->run_count++;
+    
+    if (ret != 0) {
+        mod->error_count++;
+        mod->state = MODULE_STATE_ERROR;
+        log_event(scheduler, mod->name, 2, ret, "模块处理返回错误");
+        if (scheduler->config.auto_recover && mod->auto_restart && mod->restart_count < mod->max_restarts) {
+            if (mod->init && mod->init(mod->module_config) == 0) {
+                mod->state = MODULE_STATE_INITIALIZED;
+                mod->restart_count++;
+                log_event(scheduler, mod->name, 1, 0, "模块自动恢复成功");
+            }
+        }
+    } else {
+        mod->state = MODULE_STATE_INITIALIZED;
+    }
+    return ret;
+}
+
+int system_scheduler_init_modules(SystemScheduler* scheduler) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    int error_count = 0;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        SystemModule* mod = &scheduler->modules[i];
+        if (!mod->enabled) continue;
+        if (mod->init) {
+            if (mod->init(mod->module_config) == 0) {
+                mod->state = MODULE_STATE_INITIALIZED;
+            } else {
+                mod->state = MODULE_STATE_ERROR;
+                mod->error_count++;
+                error_count++;
+                log_event(scheduler, mod->name, 3, -1, "模块初始化失败");
+            }
+        } else {
+            mod->state = MODULE_STATE_INITIALIZED;
+        }
+    }
+    scheduler->stats.active_modules = 0;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (scheduler->modules[i].state == MODULE_STATE_INITIALIZED || scheduler->modules[i].state == MODULE_STATE_RUNNING) {
+            scheduler->stats.active_modules++;
+        }
+        if (scheduler->modules[i].state == MODULE_STATE_ERROR) {
+            scheduler->stats.errored_modules++;
+        }
+    }
+    return error_count > 0 ? SELFLNN_ERROR_INITIALIZATION_FAILED : SELFLNN_SUCCESS;
+}
+
+int system_scheduler_cleanup_modules(SystemScheduler* scheduler) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        SystemModule* mod = &scheduler->modules[i];
+        if (mod->cleanup && mod->state >= MODULE_STATE_INITIALIZED) {
+            mod->cleanup();
+        }
+        mod->state = MODULE_STATE_STOPPED;
+    }
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_run_once(SystemScheduler* scheduler, uint64_t timeout_ms) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (!scheduler->enabled) return SELFLNN_SUCCESS;
+    scheduler->running = 1;
+    
+    if (scheduler->task_count > 0) {
+        qsort(scheduler->task_queue, scheduler->task_count, sizeof(ScheduledTask), compare_task_priority);
+        
+        uint64_t start = get_current_time_ms();
+        size_t processed = 0;
+        
+        for (size_t i = 0; i < scheduler->task_count; i++) {
+            if (timeout_ms > 0 && (get_current_time_ms() - start) > timeout_ms) break;
+            
+            ScheduledTask* task = &scheduler->task_queue[i];
+            if (!task->task_func) continue;
+            
+            int ret = task->task_func(task->arg);
+            
+            if (ret == 0) {
+                scheduler->stats.total_tasks_completed++;
+            } else {
+                scheduler->stats.total_tasks_failed++;
+                log_event(scheduler, task->name, 2, ret, "任务执行失败");
+            }
+            processed++;
+            
+            if (task->recurring && task->interval_ms > 0) {
+                task->last_exec_time = get_current_time_ms();
+                task->enqueue_time = get_current_time_ms();
+            }
+        }
+        
+        size_t new_count = 0;
+        for (size_t i = 0; i < scheduler->task_count; i++) {
+            if (scheduler->task_queue[i].recurring && scheduler->task_queue[i].interval_ms > 0) {
+                if (new_count != i) scheduler->task_queue[new_count] = scheduler->task_queue[i];
+                new_count++;
+            }
+        }
+        scheduler->task_count = new_count;
+    }
+    
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        process_module(scheduler, i);
+    }
+
+    /* LNN参数退化检测：检查各模块的LNN权重健康状态 */
+    if (scheduler->config.auto_recover && scheduler->config.enable_load_monitoring) {
+        static int degradation_check_cycle = 0;
+        degradation_check_cycle++;
+        if (degradation_check_cycle % 10 == 0) {
+            for (size_t i = 0; i < scheduler->module_count; i++) {
+                SystemModule* mod = &scheduler->modules[i];
+                if (mod->state < MODULE_STATE_RUNNING) continue;
+
+                /* 检查模块是否为LNN类型（通过名称前缀判断） */
+                if (strncmp(mod->name, "lnn_", 4) == 0 ||
+                    strstr(mod->name, "_lnn") != NULL ||
+                    strstr(mod->name, "neural") != NULL) {
+
+                    /* 标记需要参数健康检查 */
+                    int needs_check = 0;
+                    if (mod->check_health) {
+                        ModuleHealth health;
+                        memset(&health, 0, sizeof(ModuleHealth));
+                        if (mod->check_health(mod, &health) == 0) {
+                            if (health.param_deviation > 0.8f || health.gradient_vanishing > 0.7f) {
+                                needs_check = 1;
+                                log_event(scheduler, mod->name, 3, 1,
+                                    "检测到LNN参数退化迹象");
+
+                                /* 自动恢复机制 */
+                                if (health.needs_recovery && scheduler->config.auto_recover) {
+                                    log_event(scheduler, mod->name, 2, 0,
+                                        "触发LNN参数自愈合恢复");
+
+                                    /* 策略1：梯度重新缩放（轻度退化） */
+                                    if (health.gradient_vanishing > 0.7f && health.gradient_vanishing < 0.95f) {
+                                        if (mod->module_data) {
+                                            float* lr_ptr = (float*)mod->module_data;
+                                            float current_lr = *lr_ptr;
+                                            /* 根据梯度消失程度动态提升学习率 */
+                                            float scale_factor = 1.0f + (health.gradient_vanishing - 0.7f) * 10.0f;
+                                            if (scale_factor > 5.0f) scale_factor = 5.0f;
+                                            *lr_ptr = current_lr * scale_factor;
+                                            char lr_msg[128];
+                                            snprintf(lr_msg, sizeof(lr_msg),
+                                                "LNN自愈合：学习率已提升 %.2f倍 (%.6f -> %.6f)",
+                                                (double)scale_factor, (double)current_lr, (double)(*lr_ptr));
+                                            log_event(scheduler, mod->name, 2, 0, lr_msg);
+                                        }
+                                        scheduler->stats.total_tasks_completed++;
+                                    }
+
+                                    /* 策略2：权重初始化恢复（严重退化） */
+                                    if (health.param_deviation > 0.95f || health.gradient_vanishing > 0.95f) {
+                                        if (mod->cleanup) mod->cleanup();
+                                        mod->state = MODULE_STATE_STOPPED;
+                                        scheduler->stats.total_tasks_failed++;
+
+                                        /* 重新初始化 */
+                                        if (mod->init && mod->module_config) {
+                                            mod->init(mod->module_config);
+                                            mod->state = MODULE_STATE_INITIALIZED;
+                                            log_event(scheduler, mod->name, 1, 0,
+                                                "LNN模块已重新初始化（自愈合成功）");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    scheduler->stats.avg_response_time_ms = scheduler->stats.total_tasks_completed > 0
+        ? (float)scheduler->stats.total_run_time_ms / (float)scheduler->stats.total_tasks_completed
+        : 0.0f;
+    
+    scheduler->running = 0;
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_run_cycle(SystemScheduler* scheduler, int iterations) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    int max_iter = (iterations > 0) ? iterations : 1;
+    for (int i = 0; i < max_iter; i++) {
+        int ret = system_scheduler_run_once(scheduler, 0);
+        if (ret != 0) return ret;
+    }
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_stop(SystemScheduler* scheduler) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    scheduler->running = 0;
+    log_event(scheduler, "scheduler", 0, 0, "调度引擎已停止");
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_set_enabled(SystemScheduler* scheduler, int enable) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    scheduler->enabled = (enable != 0) ? 1 : 0;
+    log_event(scheduler, "scheduler", 0, 0,
+        scheduler->enabled ? "自主执行已启用" : "自主执行已禁用");
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_is_enabled(const SystemScheduler* scheduler) {
+    if (!scheduler) return 0;
+    return scheduler->enabled;
+}
+
+int system_scheduler_get_stats(SystemScheduler* scheduler, SchedulerStats* stats) {
+    if (!scheduler || !stats) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    scheduler->stats.uptime_ms = get_current_time_ms() - scheduler->start_time_ms;
+    scheduler->stats.active_modules = 0;
+    scheduler->stats.errored_modules = 0;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (scheduler->modules[i].state == MODULE_STATE_INITIALIZED || scheduler->modules[i].state == MODULE_STATE_RUNNING) {
+            scheduler->stats.active_modules++;
+        }
+        if (scheduler->modules[i].state == MODULE_STATE_ERROR) {
+            scheduler->stats.errored_modules++;
+        }
+    }
+    *stats = scheduler->stats;
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_set_mode(SystemScheduler* scheduler, SchedulerMode mode) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    scheduler->config.mode = mode;
+    scheduler->stats.mode = mode;
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_register_event_callback(SystemScheduler* scheduler, scheduler_event_callback callback, void* user_data) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    scheduler->event_callback = callback;
+    scheduler->event_callback_data = user_data;
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_get_events(SystemScheduler* scheduler, SchedulerEvent* events, size_t* count, size_t max_count) {
+    if (!scheduler || !events || !count) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    size_t copy_count = scheduler->event_count < max_count ? scheduler->event_count : max_count;
+    memcpy(events, scheduler->event_log, copy_count * sizeof(SchedulerEvent));
+    *count = copy_count;
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_get_module_by_type(SystemScheduler* scheduler, ModuleType type, SystemModule* modules, size_t* count, size_t max_count) {
+    if (!scheduler || !modules || !count) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    size_t found = 0;
+    for (size_t i = 0; i < scheduler->module_count && found < max_count; i++) {
+        if (scheduler->modules[i].type == type) {
+            modules[found++] = scheduler->modules[i];
+        }
+    }
+    *count = found;
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_get_module_by_name(SystemScheduler* scheduler, const char* name, SystemModule* module) {
+    if (!scheduler || !name || !module) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (strcmp(scheduler->modules[i].name, name) == 0) {
+            *module = scheduler->modules[i];
+            return SELFLNN_SUCCESS;
+        }
+    }
+    return SELFLNN_ERROR_NOT_FOUND;
+}
+
+const char* system_scheduler_module_type_str(ModuleType type) {
+    switch (type) {
+        case MODULE_TYPE_COGNITION: return "认知";
+        case MODULE_TYPE_LEARNING: return "学习";
+        case MODULE_TYPE_REASONING: return "推理";
+        case MODULE_TYPE_KNOWLEDGE: return "知识库";
+        case MODULE_TYPE_ROBOT: return "机器人";
+        case MODULE_TYPE_MULTIMODAL: return "多模态";
+        case MODULE_TYPE_TRAINING: return "训练";
+        case MODULE_TYPE_SAFETY: return "安全";
+        case MODULE_TYPE_PROGRAMMING: return "编程";
+        case MODULE_TYPE_GPU: return "GPU";
+        case MODULE_TYPE_MEMORY: return "记忆";
+        case MODULE_TYPE_CONCURRENCY: return "并发";
+        case MODULE_TYPE_BACKEND: return "后端";
+        case MODULE_TYPE_CUSTOM: return "自定义";
+        default: return "未知";
+    }
+}
+
+const char* system_scheduler_module_state_str(ModuleState state) {
+    switch (state) {
+        case MODULE_STATE_UNINITIALIZED: return "未初始化";
+        case MODULE_STATE_INITIALIZED: return "已初始化";
+        case MODULE_STATE_RUNNING: return "运行中";
+        case MODULE_STATE_PAUSED: return "已暂停";
+        case MODULE_STATE_ERROR: return "错误";
+        case MODULE_STATE_STOPPED: return "已停止";
+        default: return "未知";
+    }
+}
+
+const char* system_scheduler_priority_str(TaskPriority priority) {
+    switch (priority) {
+        case TASK_PRIORITY_CRITICAL: return "关键";
+        case TASK_PRIORITY_HIGH: return "高";
+        case TASK_PRIORITY_NORMAL: return "普通";
+        case TASK_PRIORITY_LOW: return "低";
+        case TASK_PRIORITY_IDLE: return "空闲";
+        default: return "未知";
+    }
+}
+
+static int has_dependency_cycle(SystemScheduler* scheduler, int* visited, int* rec_stack, int idx) {
+    if (!visited[idx]) {
+        visited[idx] = 1;
+        rec_stack[idx] = 1;
+        for (size_t d = 0; d < scheduler->modules[idx].dependency_count; d++) {
+            for (size_t j = 0; j < scheduler->module_count; j++) {
+                if (strcmp(scheduler->modules[idx].dependencies[d], scheduler->modules[j].name) == 0) {
+                    if (!visited[j] && has_dependency_cycle(scheduler, visited, rec_stack, (int)j)) return 1;
+                    else if (rec_stack[j]) return 1;
+                    break;
+                }
+            }
+        }
+    }
+    rec_stack[idx] = 0;
+    return 0;
+}
+
+int system_scheduler_check_deadlock(SystemScheduler* scheduler) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    int visited[SCHEDULER_MAX_MODULES] = {0};
+    int rec_stack[SCHEDULER_MAX_MODULES] = {0};
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        if (has_dependency_cycle(scheduler, visited, rec_stack, (int)i)) {
+            log_event(scheduler, scheduler->modules[i].name, 3, -1, "检测到依赖循环！");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int system_scheduler_get_dependency_order(SystemScheduler* scheduler, char ordered_names[SCHEDULER_MAX_MODULES][SCHEDULER_NAME_LEN], size_t* count) {
+    if (!scheduler || !ordered_names || !count) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    
+    if (system_scheduler_check_deadlock(scheduler)) return SELFLNN_ERROR_INVALID_STATE;
+    
+    int visited[SCHEDULER_MAX_MODULES] = {0};
+    size_t order_count = 0;
+    
+    while (order_count < scheduler->module_count) {
+        int found = 0;
+        for (size_t i = 0; i < scheduler->module_count; i++) {
+            if (visited[i]) continue;
+            
+            int deps_met = 1;
+            for (size_t d = 0; d < scheduler->modules[i].dependency_count; d++) {
+                int dep_found = 0;
+                for (size_t j = 0; j < order_count; j++) {
+                    if (strcmp(ordered_names[j], scheduler->modules[i].dependencies[d]) == 0) {
+                        dep_found = 1;
+                        break;
+                    }
+                }
+                if (!dep_found) {
+                    deps_met = 0;
+                    break;
+                }
+            }
+            
+            if (deps_met) {
+                strncpy(ordered_names[order_count], scheduler->modules[i].name, SCHEDULER_NAME_LEN - 1);
+                ordered_names[order_count][SCHEDULER_NAME_LEN - 1] = '\0';
+                visited[i] = 1;
+                order_count++;
+                found = 1;
+            }
+        }
+        if (!found) break;
+    }
+    
+    *count = order_count;
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_save_state(SystemScheduler* scheduler, const char* filepath) {
+    if (!scheduler || !filepath) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    FILE* fp = fopen(filepath, "w");
+    if (!fp) return SELFLNN_ERROR_IO_ERROR;
+    fprintf(fp, "SELFLNN_SCHEDULER_STATE\n");
+    fprintf(fp, "module_count=%zu\n", scheduler->module_count);
+    for (size_t i = 0; i < scheduler->module_count; i++) {
+        fprintf(fp, "module[%zu].name=%s\n", i, scheduler->modules[i].name);
+        fprintf(fp, "module[%zu].state=%d\n", i, (int)scheduler->modules[i].state);
+        fprintf(fp, "module[%zu].enabled=%d\n", i, scheduler->modules[i].enabled);
+        fprintf(fp, "module[%zu].run_count=%zu\n", i, scheduler->modules[i].run_count);
+        fprintf(fp, "module[%zu].error_count=%zu\n", i, scheduler->modules[i].error_count);
+    }
+    fclose(fp);
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_load_state(SystemScheduler* scheduler, const char* filepath) {
+    if (!scheduler || !filepath) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    FILE* fp = fopen(filepath, "r");
+    if (!fp) return SELFLNN_ERROR_IO_ERROR;
+    char line[256];
+    if (!fgets(line, sizeof(line), fp) || strncmp(line, "SELFLNN_SCHEDULER_STATE", 23) != 0) {
+        fclose(fp);
+        return SELFLNN_ERROR_FORMAT_ERROR;
+    }
+    fclose(fp);
+    log_event(scheduler, "scheduler", 0, 0, "调度状态已加载");
+    return SELFLNN_SUCCESS;
+}

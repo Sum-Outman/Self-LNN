@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 服务标识 -->
+    <key>Label</key>
+    <string>com.selflnn.slnn</string>
+    
+    <!-- 程序参数 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/slnn/bin/backend_server</string>
+        <string>--config</string>
+        <string>/opt/slnn/config/backend_config.json</string>
+    </array>
+    
+    <!-- 工作目录 -->
+    <key>WorkingDirectory</key>
+    <string>/opt/slnn</string>
+    
+    <!-- 环境变量 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/slnn/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LD_LIBRARY_PATH</key>
+        <string>/opt/slnn/lib</string>
+        <key>SLNN_HOME</key>
+        <string>/opt/slnn</string>
+        <key>SLNN_CONFIG</key>
+        <string>/opt/slnn/config/backend_config.json</string>
+        <key>SLNN_DATA</key>
+        <string>/opt/slnn/data</string>
+        <key>SLNN_MODELS</key>
+        <string>/opt/slnn/models</string>
+        <key>SLNN_LOGS</key>
+        <string>/opt/slnn/logs</string>
+    </dict>
+    
+    <!-- 运行权限 -->
+    <key>UserName</key>
+    <string>_slnn</string>
+    <key>GroupName</key>
+    <string>_slnn</string>
+    
+    <!-- 启动时机 -->
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <!-- 保持运行 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+        <key>AfterInitialDemand</key>
+        <true/>
+    </dict>
+    
+    <!-- 重启策略 -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    
+    <!-- 标准输出和错误输出 -->
+    <key>StandardOutPath</key>
+    <string>/opt/slnn/logs/slnn.log</string>
+    <key>StandardErrorPath</key>
+    <string>/opt/slnn/logs/slnn-error.log</string>
+    
+    <!-- 进程类型 -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    
+    <!-- 会话类型 -->
+    <key>LimitLoadToSessionType</key>
+    <array>
+        <string>System</string>
+    </array>
+    
+    <!-- 资源限制 -->
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+    
+    <!-- 安全设置 -->
+    <key>EnableGlobbing</key>
+    <false/>
+    <key>EnableTransactions</key>
+    <true/>
+    
+    <!-- 调试模式 -->
+    <key>Debug</key>
+    <false/>
+    <key>WaitForDebugger</key>
+    <false/>
+    
+    <!-- 退出超时 -->
+    <key>ExitTimeOut</key>
+    <integer>15</integer>
+</dict>
+</plist>
+
+<!-- 使用说明：
+1. 将文件复制到 /Library/LaunchDaemons/ 目录：
+   sudo cp com.selflnn.slnn.plist.example /Library/LaunchDaemons/com.selflnn.slnn.plist
+   
+2. 创建专用用户和组：
+   sudo dscl . -create /Users/_slnn
+   sudo dscl . -create /Users/_slnn UserShell /usr/bin/false
+   sudo dscl . -create /Users/_slnn RealName "SELF-LNN Service"
+   sudo dscl . -create /Groups/_slnn
+   sudo dscl . -append /Groups/_slnn GroupMembership _slnn
+   
+3. 设置目录权限：
+   sudo chown -R _slnn:_slnn /opt/slnn
+   
+4. 加载服务：
+   sudo launchctl load -w /Library/LaunchDaemons/com.selflnn.slnn.plist
+   
+5. 启动服务：
+   sudo launchctl start com.selflnn.slnn
+   
+6. 查看服务状态：
+   sudo launchctl list | grep selflnn
+   sudo launchctl print system/com.selflnn.slnn
+   
+7. 停止服务：
+   sudo launchctl stop com.selflnn.slnn
+   
+8. 卸载服务：
+   sudo launchctl unload /Library/LaunchDaemons/com.selflnn.slnn.plist
+   
+9. 查看日志：
+   tail -f /opt/slnn/logs/slnn.log
+   tail -f /opt/slnn/logs/slnn-error.log
+   console log show --predicate 'sender == "com.selflnn.slnn"' --info
+-->

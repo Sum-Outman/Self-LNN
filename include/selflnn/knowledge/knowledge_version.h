@@ -1,0 +1,132 @@
+/**
+ * @file knowledge_version.h
+ * @brief 知识版本管理系统接口
+ */
+
+#ifndef SELFLNN_KNOWLEDGE_VERSION_H
+#define SELFLNN_KNOWLEDGE_VERSION_H
+
+#include <stddef.h>
+#include <time.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define KV_MAX_SNAPSHOTS 100
+#define KV_MAX_DIFFS 50
+#define KV_MAX_BRANCH_NAME 64
+#define KV_MAX_MESSAGE 256
+#define KV_MAX_ENTRIES_PER_SNAPSHOT 5000
+#define KV_MAX_DIFF_DETAILS 200
+#define KV_MAX_HISTORY 500
+
+/* 差异条目类型 */
+typedef enum {
+    KV_DIFF_ADD = 0,
+    KV_DIFF_REMOVE = 1,
+    KV_DIFF_MODIFY = 2
+} KVDiffType;
+
+/* 详细差异条目 */
+typedef struct {
+    KVDiffType change_type;
+    int entry_id;
+    char subject[256];
+    char predicate[256];
+    char object_before[256];
+    char object_after[256];
+    float confidence_before;
+    float confidence_after;
+} KVDiffEntry;
+
+/* 版本快照 */
+typedef struct {
+    int snapshot_id;
+    char message[KV_MAX_MESSAGE];
+    time_t created_at;
+    size_t entry_count;
+    size_t total_size;
+    char branch[KV_MAX_BRANCH_NAME];
+    int parent_id;
+    int is_checkpoint;
+} KnowledgeSnapshot;
+
+/* 版本差异 */
+typedef struct {
+    int from_snapshot;
+    int to_snapshot;
+    size_t added_count;
+    size_t removed_count;
+    size_t modified_count;
+    time_t diff_time;
+    KVDiffEntry details[KV_MAX_DIFF_DETAILS];
+    int detail_count;
+} KnowledgeDiff;
+
+/* 知识条目历史 */
+typedef struct {
+    int entry_id;
+    char subject[256];
+    char predicate[256];
+    int snapshot_ids[KV_MAX_HISTORY];
+    int history_count;
+    int last_snapshot_id;
+    time_t first_seen;
+    time_t last_modified;
+    int modification_count;
+} KnowledgeEntryHistory;
+
+/* 知识版本管理器句柄 */
+typedef struct KnowledgeVersionManager KnowledgeVersionManager;
+
+KnowledgeVersionManager* knowledge_version_create(const char* storage_dir);
+void knowledge_version_free(KnowledgeVersionManager* kvm);
+
+/* 快照管理 */
+int kv_create_snapshot(KnowledgeVersionManager* kvm, const char* message);
+int kv_list_snapshots(const KnowledgeVersionManager* kvm, KnowledgeSnapshot* out, int max_count);
+int kv_get_snapshot(const KnowledgeVersionManager* kvm, int snapshot_id, KnowledgeSnapshot* out);
+int kv_restore_snapshot(KnowledgeVersionManager* kvm, int snapshot_id, void* knowledge_base);
+
+/* 详细差异分析 */
+int kv_diff_snapshots(const KnowledgeVersionManager* kvm, int from_id, int to_id, KnowledgeDiff* diff);
+
+/* 分支管理 */
+int kv_create_branch(KnowledgeVersionManager* kvm, const char* branch_name, int from_snapshot);
+int kv_switch_branch(KnowledgeVersionManager* kvm, const char* branch_name);
+int kv_merge_branch(KnowledgeVersionManager* kvm, const char* source_branch, const char* target_branch);
+int kv_list_branches(const KnowledgeVersionManager* kvm, char* branches, int max_count);
+
+/* 知识溯源 */
+int kv_trace_entry(const KnowledgeVersionManager* kvm, int entry_id, char* history, size_t max_len);
+
+/* 自动快照 */
+int kv_set_auto_snapshot(KnowledgeVersionManager* kvm, int interval_minutes, int max_snapshots);
+
+/* ===== P4.4 新增增强功能 ===== */
+
+/* 获取快照中保存的条目总数 */
+int kv_get_snapshot_entry_count(const KnowledgeVersionManager* kvm, int snapshot_id);
+
+/* 跨分支快照比较 */
+int kv_compare_branch_snapshots(const KnowledgeVersionManager* kvm,
+                                const char* branch_a, int snapshot_a_id,
+                                const char* branch_b, int snapshot_b_id,
+                                KnowledgeDiff* diff);
+
+/* 获取知识条目的完整版本历史 */
+int kv_get_entry_history(const KnowledgeVersionManager* kvm, int entry_id,
+                         KnowledgeEntryHistory* history);
+
+/* 快照差异导出为文本报告 */
+int kv_diff_export_report(const KnowledgeVersionManager* kvm, int from_id, int to_id,
+                          char* report, size_t max_len);
+
+/* 清理过期快照 */
+int kv_cleanup_old_snapshots(KnowledgeVersionManager* kvm, int keep_count);
+
+#ifdef __cplusplus
+}
+#endif
+#endif

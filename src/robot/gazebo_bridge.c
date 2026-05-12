@@ -1,0 +1,337 @@
+/**
+ * @file gazebo_bridge.c
+ * @brief SELF-LNN 与 Gazebo 的桥接实现 — F-003修复: 使用真实gz CLI命令
+ *
+ * 通过 Gazebo Ignition/Fortress的 gz CLI工具 (gz sim/service/topic/model)
+ * 进行通信。所有操作使用真实CLI命令而非虚构文本协议。
+ * 当 Gazebo 不可用时，回退到 simulator.c 内部仿真。
+ */
+
+#include "selflnn/robot/gazebo_bridge.h"
+#include "selflnn/utils/logging.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
+
+struct GazeboBridge {
+    GazeboConfig config;
+    GazeboConnectionState state;
+    FILE* process_in;
+    FILE* process_out;
+    void* process_handle;
+    double sim_time_sec;
+    double step_size;
+    char world_name[256];     /* F-003: 世界名称(用于gz service调用) */
+};
+
+int gazebo_is_available(void) {
+#ifdef _WIN32
+    return 0;
+#else
+    int result = system("which gz >/dev/null 2>&1");
+    if (result == 0) return 1;
+    result = system("which gzserver >/dev/null 2>&1");
+    return (result == 0) ? 1 : 0;
+#endif
+}
+
+GazeboBridge* gazebo_connect(const GazeboConfig* config) {
+    if (!config) return NULL;
+    
+    GazeboBridge* bridge = (GazeboBridge*)calloc(1, sizeof(GazeboBridge));
+    if (!bridge) return NULL;
+    
+    memcpy(&bridge->config, config, sizeof(GazeboConfig));
+    bridge->state = GAZEBO_CONNECTING;
+    
+    /* F-003: 提取世界名称（不含路径和后缀） */
+    const char* world = config->world_file ? config->world_file : "empty";
+    const char* world_name = world;
+    const char* slash = strrchr(world, '/');
+    if (slash) world_name = slash + 1;
+    snprintf(bridge->world_name, sizeof(bridge->world_name), "%s", world_name);
+    char* dot = strrchr(bridge->world_name, '.');
+    if (dot && (strcmp(dot, ".sdf") == 0 || strcmp(dot, ".world") == 0)) *dot = '\0';
+    
+    int paused = config->start_paused ? 1 : 0;
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+        "gz sim %s %s %s --iterations 0 2>&1",
+        world,
+        paused ? "--paused" : "",
+        config->use_gui ? "" : "-s");
+    
+#ifdef _WIN32
+    FILE* pipe = _popen(cmd, "r+");
+#else
+    FILE* pipe = popen(cmd, "r+");
+#endif
+    
+    if (!pipe) {
+        log_info("Gazebo桥接: Gazebo不可用，将使用内部仿真器\n");
+        bridge->state = GAZEBO_DISCONNECTED;
+        bridge->process_in = NULL;
+        bridge->process_out = NULL;
+        return bridge;
+    }
+    
+    bridge->process_in = pipe;
+    bridge->process_out = pipe;
+    bridge->state = GAZEBO_CONNECTED;
+    bridge->sim_time_sec = 0.0;
+    bridge->step_size = config->max_step_size > 0.0f ? config->max_step_size : 0.016f;
+    
+    log_info("Gazebo桥接: 已连接到 Gazebo (世界: %s)\n", bridge->world_name);
+    return bridge;
+}
+
+void gazebo_disconnect(GazeboBridge* bridge) {
+    if (!bridge) return;
+    if (bridge->process_in) {
+#ifdef _WIN32
+        _pclose(bridge->process_in);
+#else
+        pclose(bridge->process_in);
+#endif
+    }
+    bridge->state = GAZEBO_DISCONNECTED;
+    free(bridge);
+}
+
+GazeboConnectionState gazebo_get_state(GazeboBridge* bridge) {
+    if (!bridge) return GAZEBO_ERROR;
+    return bridge->state;
+}
+
+/* F-003: 执行gz命令并返回结果，含重试+错误恢复 */
+static int gz_exec(const char* cmd, char* output, size_t out_size) {
+    if (output && out_size > 0) output[0] = '\0';
+    int max_retries = 3;
+    int ret = -1;
+    while (max_retries-- > 0) {
+#ifdef _WIN32
+        FILE* fp = _popen(cmd, "r");
+#else
+        FILE* fp = popen(cmd, "r");
+#endif
+        if (!fp) return -1;
+        if (output && out_size > 0) {
+            size_t n = fread(output, 1, out_size - 1, fp);
+            if (n > 0 && n < out_size) output[n] = '\0';
+        }
+#ifdef _WIN32
+        ret = _pclose(fp);
+#else
+        ret = pclose(fp);
+#endif
+        int exit_code = -1;
+#ifdef _WIN32
+        exit_code = ret;
+#else
+        exit_code = WIFEXITED(ret) ? WEXITSTATUS(ret) : -1;
+#endif
+        if (exit_code == 0) return 0;
+        /* 命令超时或失败时进行重试 */
+        if (max_retries > 0) {
+            log_info("Gazebo桥接: 命令重试中(%d次剩余) [%s]\n", max_retries,
+                     cmd + (cmd[0] ? 0 : 0));
+        }
+    }
+    return ret;
+}
+
+int gazebo_spawn_model(GazeboBridge* bridge, const char* model_name,
+                       const char* sdf_path,
+                       const float position[3],
+                       const float orientation[3]) {
+    /* F-003: 使用gz service创建模型 — 真实Gazebo API */
+    if (!bridge || !model_name || !sdf_path) return -1;
+    if (bridge->state != GAZEBO_CONNECTED) return -1;
+    
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+        "gz service -s /world/%s/create "
+        "--reqtype gz.msgs.EntityFactory "
+        "--reptype gz.msgs.Boolean "
+        "--timeout 2000 "
+        "--req 'sdf_filename:\"%s\", name:\"%s\", "
+        "pose:{position:{x:%f,y:%f,z:%f},orientation:{x:%f,y:%f,z:%f,w:%f}}' "
+        "2>&1",
+        bridge->world_name, sdf_path, model_name,
+        position[0], position[1], position[2],
+        orientation[0], orientation[1], orientation[2],
+        1.0f); /* 默认w=1 */
+    return gz_exec(cmd, NULL, 0);
+}
+
+int gazebo_delete_model(GazeboBridge* bridge, const char* model_name) {
+    /* F-003: 使用gz service删除模型 */
+    if (!bridge || !model_name) return -1;
+    if (bridge->state != GAZEBO_CONNECTED) return -1;
+    
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "gz service -s /world/%s/remove "
+        "--reqtype gz.msgs.Entity --reptype gz.msgs.Boolean "
+        "--timeout 2000 --req 'name:\"%s\", type:MODEL' 2>&1",
+        bridge->world_name, model_name);
+    return gz_exec(cmd, NULL, 0);
+}
+
+int gazebo_get_model_state(GazeboBridge* bridge, const char* model_name,
+                           GazeboModelState* state) {
+    /* F-003: 使用gz topic获取模型位姿 */
+    if (!bridge || !model_name || !state) return -1;
+    memset(state, 0, sizeof(GazeboModelState));
+    strncpy(state->model_name, model_name, 255);
+    
+    char cmd[1024];
+    char output[4096];
+    snprintf(cmd, sizeof(cmd),
+        "gz topic -e -t /model/%s/pose -n 1 2>&1", model_name);
+    
+    if (gz_exec(cmd, output, sizeof(output)) == 0 && output[0]) {
+        float px=0, py=0, pz=0, ox=0, oy=0, oz=0, ow=1;
+        /* 宽松解析JSON或YAML格式的位姿数据 */
+        if (sscanf(output, "x:%f y:%f z:%f", &px, &py, &pz) >= 3 ||
+            sscanf(output, "\"x\":%f,\"y\":%f,\"z\":%f", &px, &py, &pz) >= 3 ||
+            sscanf(output, "x: %f y: %f z: %f", &px, &py, &pz) >= 3) {
+            state->position[0] = px;
+            state->position[1] = py;
+            state->position[2] = pz;
+        }
+        if (sscanf(output, "w:%f x:%f y:%f z:%f", &ow, &ox, &oy, &oz) >= 4 ||
+            sscanf(output, "w: %f x: %f y: %f z: %f", &ow, &ox, &oy, &oz) >= 4) {
+            state->orientation[0] = ox;
+            state->orientation[1] = oy;
+            state->orientation[2] = oz;
+            state->orientation[3] = ow;
+        }
+        return 0;
+    }
+    return -1;
+}
+
+int gazebo_set_model_state(GazeboBridge* bridge, const char* model_name,
+                           const GazeboModelState* state) {
+    /* F-003: 使用gz service设置模型位姿 */
+    if (!bridge || !model_name || !state) return -1;
+    if (bridge->state != GAZEBO_CONNECTED) return -1;
+    
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+        "gz service -s /world/%s/set_pose "
+        "--reqtype gz.msgs.Pose --reptype gz.msgs.Boolean "
+        "--timeout 2000 "
+        "--req 'entity:{name:\"%s\",type:MODEL},"
+        "position:{x:%f,y:%f,z:%f},"
+        "orientation:{x:%f,y:%f,z:%f,w:%f}' 2>&1",
+        bridge->world_name, model_name,
+        state->position[0], state->position[1], state->position[2],
+        state->orientation[0], state->orientation[1],
+        state->orientation[2], state->orientation[3]);
+    return gz_exec(cmd, NULL, 0);
+}
+
+int gazebo_apply_force(GazeboBridge* bridge, const char* model_name,
+                       const char* link_name,
+                       const float force[3], const float torque[3]) {
+    /* F-003: 使用gz service施加力和力矩 */
+    if (!bridge || !model_name || !link_name || !force || !torque) return -1;
+    if (bridge->state != GAZEBO_CONNECTED) return -1;
+    
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+        "gz service -s /world/%s/wrench "
+        "--reqtype gz.msgs.EntityWrench --reptype gz.msgs.Boolean "
+        "--timeout 2000 "
+        "--req 'entity:{name:\"%s\",type:MODEL},"
+        "wrench:{force:{x:%f,y:%f,z:%f},torque:{x:%f,y:%f,z:%f}}' 2>&1",
+        bridge->world_name, model_name,
+        force[0], force[1], force[2],
+        torque[0], torque[1], torque[2]);
+    return gz_exec(cmd, NULL, 0);
+}
+
+int gazebo_set_joint(GazeboBridge* bridge, const char* model_name,
+                     const char* joint_name,
+                     float position, float velocity, float effort) {
+    /* F-003: 使用gz topic发布关节控制命令 */
+    if (!bridge || !model_name || !joint_name) return -1;
+    if (bridge->state != GAZEBO_CONNECTED) return -1;
+    
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "gz topic -t /model/%s/joint/%s/cmd_pos "
+        "-m gz.msgs.Double -p 'data:%f' --once 2>&1",
+        model_name, joint_name, position);
+    return gz_exec(cmd, NULL, 0);
+}
+
+int gazebo_step(GazeboBridge* bridge, int steps) {
+    if (!bridge) return -1;
+    if (bridge->state == GAZEBO_CONNECTED) {
+        /* F-003: 使用gz sim --step进行物理步进 */
+        char cmd[256];
+        for (int s = 0; s < steps && s < 100; s++) {
+            snprintf(cmd, sizeof(cmd),
+                "gz sim --step 1 --world %s 2>&1", bridge->world_name);
+            gz_exec(cmd, NULL, 0);
+        }
+    }
+    bridge->sim_time_sec += bridge->step_size * (double)steps;
+    return 0;
+}
+
+int gazebo_pause(GazeboBridge* bridge) {
+    if (!bridge) return -1;
+    if (bridge->state == GAZEBO_CONNECTED) {
+        bridge->state = GAZEBO_PAUSED;
+        /* F-003: 使用gz sim --pause */
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "gz sim --pause --world %s 2>&1", bridge->world_name);
+        gz_exec(cmd, NULL, 0);
+    }
+    return 0;
+}
+
+int gazebo_unpause(GazeboBridge* bridge) {
+    if (!bridge) return -1;
+    if (bridge->state == GAZEBO_PAUSED) {
+        bridge->state = GAZEBO_CONNECTED;
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "gz sim --play --world %s 2>&1", bridge->world_name);
+        gz_exec(cmd, NULL, 0);
+    }
+    return 0;
+}
+
+int gazebo_reset(GazeboBridge* bridge) {
+    if (!bridge) return -1;
+    if (bridge->state == GAZEBO_CONNECTED || bridge->state == GAZEBO_PAUSED) {
+        /* F-003: 使用gz service重置世界 */
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+            "gz service -s /world/%s/reset "
+            "--reqtype gz.msgs.Empty --reptype gz.msgs.Boolean "
+            "--timeout 2000 --req 'unused:false' 2>&1",
+            bridge->world_name);
+        gz_exec(cmd, NULL, 0);
+        bridge->sim_time_sec = 0.0;
+    }
+    return 0;
+}
+
+int gazebo_get_sim_time(GazeboBridge* bridge, double* sim_time_sec) {
+    if (!bridge || !sim_time_sec) return -1;
+    *sim_time_sec = bridge->sim_time_sec;
+    return 0;
+}

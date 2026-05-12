@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<service>
+    <id>SELF-LNN</id>
+    <name>SELF-LNN AGI System</name>
+    <description>全液态神经网络AGI大模型系统服务，提供多模态认知、自主决策、机器人控制等功能。</description>
+    
+    <!-- 执行路径 -->
+    <executable>%BASE%\bin\backend_server.exe</executable>
+    <arguments>--config "%BASE%\config\backend_config.json"</arguments>
+    
+    <!-- 工作目录 -->
+    <workingdirectory>%BASE%</workingdirectory>
+    
+    <!-- 日志配置 -->
+    <logpath>%BASE%\logs</logpath>
+    <log mode="roll-by-size">
+        <sizeThreshold>10240</sizeThreshold>
+        <keepFiles>10</keepFiles>
+    </log>
+    
+    <!-- 启动模式 -->
+    <startmode>Automatic</startmode>
+    
+    <!-- 延迟启动 -->
+    <delayedAutoStart>true</delayedAutoStart>
+    
+    <!-- 服务账户 -->
+    <serviceaccount>
+        <domain>NT AUTHORITY</domain>
+        <user>LocalSystem</user>
+        <allowservicelogon>true</allowservicelogon>
+    </serviceaccount>
+    
+    <!-- 优先级 -->
+    <priority>Normal</priority>
+    
+    <!-- 停止超时 -->
+    <stoptimeout>15sec</stoptimeout>
+    
+    <!-- 重启策略 -->
+    <onfailure action="restart" delay="5 sec"/>
+    <onfailure action="restart" delay="10 sec"/>
+    <onfailure action="none" delay="15 sec"/>
+    
+    <!-- 环境变量 -->
+    <env name="PATH" value="%BASE%\bin;%PATH%"/>
+    <env name="SLNN_HOME" value="%BASE%"/>
+    <env name="SLNN_CONFIG" value="%BASE%\config\backend_config.json"/>
+    <env name="SLNN_DATA" value="%BASE%\data"/>
+    <env name="SLNN_MODELS" value="%BASE%\models"/>
+    <env name="SLNN_LOGS" value="%BASE%\logs"/>
+    
+    <!-- 资源限制 -->
+    <resources>
+        <memory limit="2048m"/>
+        <cpu limit="80"/>
+    </resources>
+    
+    <!-- 服务依赖 -->
+    <dependencies>
+        <dependency>tcpip</dependency>
+    </dependencies>
+    
+    <!-- 服务恢复 -->
+    <service recovery>
+        <reset>86400</reset>
+        <actions>
+            <action type="restart" delay="5000"/>
+            <action type="restart" delay="10000"/>
+            <action type="run" delay="30000" program="cmd.exe" arguments="/c echo SELF-LNN 服务恢复于 %DATE% %TIME% >> &quot;%BASE%\logs\service_recovery.log&quot;"/>
+        </actions>
+    </service recovery>
+</service>
+
+<!-- 使用说明：
+1. 安装Windows Service Wrapper (winsw):
+   - 下载 winsw.exe 从 https://github.com/winsw/winsw/releases
+   - 重命名为 slnn-service.exe
+   - 将此XML配置文件重命名为 slnn-service.xml（与exe同名）
+   
+2. 部署SELF-LNN到目录（例如：C:\SELF-LNN）
+
+3. 修改配置文件中的 %BASE% 为实际路径（例如：C:\SELF-LNN）
+
+4. 以管理员身份运行命令：
+   slnn-service.exe install
+   
+5. 启动服务：
+   sc start SELF-LNN
+   或
+   slnn-service.exe start
+   
+6. 其他命令：
+   - 停止服务: slnn-service.exe stop
+   - 卸载服务: slnn-service.exe uninstall
+   - 查看状态: slnn-service.exe status
+   
+7. 查看日志：
+   - 服务日志: C:\SELF-LNN\logs\*.log
+   - Windows事件查看器: 应用程序和服务日志 -> SELF-LNN
+-->

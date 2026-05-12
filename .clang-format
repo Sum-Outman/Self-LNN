@@ -1,0 +1,56 @@
+# 基于LLVM风格，适配纯C语言项目
+BasedOnStyle: LLVM
+
+# 语言设置
+Language: Cpp
+# 由于.clang-format没有纯C选项，使用Cpp但调整以适应C
+
+# 缩进设置
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+IndentCaseLabels: false
+IndentWrappedFunctionNames: false
+
+# 括号设置
+BreakBeforeBraces: Allman
+AllowShortBlocksOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+
+# 空格设置
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInAngles: false
+SpacesInCStyleCastParentheses: false
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+
+# 换行设置
+ColumnLimit: 100
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
+
+# 注释设置
+ReflowComments: true
+SortIncludes: false
+
+# 对齐设置
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignEscapedNewlines: Right
+AlignOperands: true
+AlignTrailingComments: true
+
+# 指针和引用对齐
+PointerAlignment: Left
+
+# 函数声明和定义
+BinPackParameters: false
+BinPackArguments: false
+
+# 命名约定（注释说明，实际不生效）
+# 项目使用中文注释，保持原样
