@@ -452,9 +452,14 @@ static int npu_common_memcpy_d2h_fallback(GpuContext* ctx, void* dst, const void
 }
 
 static void npu_common_get_memory_info_fallback(GpuContext* ctx, size_t* total, size_t* free) {
+    /* M-032修复：优先从ctx中获取设备专用内存，回退系统RAM */
+    if (ctx && ctx->device_memory_override > 0) {
+        if (total) *total = ctx->device_memory_override;
+        if (free)  *free  = ctx->device_memory_override;
+        return;
+    }
     if (total) *total = npu_common_get_system_memory_total();
     if (free)  *free  = npu_common_get_system_memory_free();
-    (void)ctx;
 }
 
 static int npu_common_device_reset_fallback(GpuContext* ctx) {

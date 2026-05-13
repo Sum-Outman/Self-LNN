@@ -82,6 +82,12 @@ typedef struct {
     int use_friction_compensation;
     int use_feedforward;
     float feedforward_torques[6];
+    /* M-012修复：从配置读取物理参数替代硬编码 */
+    float joint_mass_kg[6];           /**< 各关节质量(kg)，默认{2.0,1.5,1.0,0.5,0.3,0.2} */
+    float link_length_m[6];           /**< 连杆长度(m)，默认{0,0.3,0.25,0,0.15,0} */
+    float coulomb_friction[6];        /**< 库仑摩擦系数，默认{0.5,0.4,0.3,0.15,0.1,0.05} */
+    float viscous_friction[6];        /**< 粘滞摩擦系数，默认{0.2,0.15,0.12,0.08,0.05,0.03} */
+    float joint_inertia[6];           /**< 关节转动惯量，默认{0.5,0.3,0.2,0.1,0.05,0.02} */
 } AdvancedControlConfig;
 
 typedef struct {

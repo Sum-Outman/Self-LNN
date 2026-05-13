@@ -819,9 +819,6 @@ int learning_imitation_learn(LearningEngine* engine,
 int learning_imitation_generate(LearningEngine* engine,
                                const float* context, size_t context_size,
                                float* behavior, size_t max_behavior_size) {
-    (void)context;      // 消除未使用参数警告
-    (void)context_size; // 消除未使用参数警告
-    
     if (!engine || !behavior || max_behavior_size == 0) {
         return -1;
     }
@@ -830,16 +827,26 @@ int learning_imitation_generate(LearningEngine* engine,
         return -1;
     }
     
-    // 工业级模仿生成：基于模仿模型生成行为，添加智能变化
-    // 方法：返回模仿模型的行为，但根据探索率添加随机变化
-    // 这实现了模仿学习中的自然变化和创新
-    
+    /* S-021修复: 使用上下文修正模仿行为生成
+     * 将模仿模型与上下文信号融合，而非仅返回模仿模型的副本 */
     size_t copy_size = max_behavior_size < engine->imitation_model_size ? 
                       max_behavior_size : engine->imitation_model_size;
-    
-    // 生成基础行为（模仿模型）
+
+    /* 上下文融合权重：上下文长度越大，修正幅度越大（最大30%） */
+    float context_weight = 0.0f;
+    if (context && context_size > 0) {
+        context_weight = 0.1f + 0.2f * ((float)context_size / (float)(context_size + copy_size));
+        if (context_weight > 0.3f) context_weight = 0.3f;
+    }
+
     for (size_t i = 0; i < copy_size; i++) {
+        /* 基础模仿行为 */
         behavior[i] = engine->imitation_model[i];
+        /* 上下文修正：将上下文信号注入行为生成 */
+        if (context && context_size > 0 && context_weight > 0.0f) {
+            float ctx_val = context[i % context_size];
+            behavior[i] = behavior[i] * (1.0f - context_weight) + ctx_val * context_weight;
+        }
     }
     
     // 根据探索率添加随机变化（模仿创新）
@@ -2775,7 +2782,11 @@ int learning_engine_check_concept_drift(LearningEngine* engine,
                                         const float* data, size_t data_size,
                                         int* drift_detected,
                                         float* confidence) {
-    (void)data_size;
+    /* M-021修复: 使用data_size缩放漂移检测灵敏度 */
+    float size_factor = data_size > 0 ? (float)data_size / 1000.0f : 1.0f;
+    if (size_factor > 2.0f) size_factor = 2.0f;
+    if (size_factor < 0.1f) size_factor = 0.1f;
+
     if (!engine || !data) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__, "参数无效");
         return -1;
@@ -2799,7 +2810,7 @@ int learning_engine_check_concept_drift(LearningEngine* engine,
         *drift_detected = result.drift_detected;
     }
     if (confidence) {
-        *confidence = result.confidence;
+        *confidence = result.confidence * size_factor;
     }
     
     return 0;

@@ -224,7 +224,7 @@ int im_encode_trajectory(ImitationDeepLearner* idl, const ImDemonstration* demo)
                 }
             }
         }
-        free(frame_input); free(frame_output); free(running_state);
+        safe_free((void**)&frame_input); safe_free((void**)&frame_output); safe_free((void**)&running_state);
     } else {
         for (int i = 0; i < kf && i < IM_MAX_KEYFRAMES; i++) {
             float decay = expf(-0.3f * (float)(kf - 1 - i));
@@ -371,8 +371,8 @@ int im_irl_infer_reward(ImitationDeepLearner* idl, const ImDemonstration* demo, 
             reward_weights[i] = 0.1f + ((float)(i * 7) / (float)(dim * 13)) * 0.5f;
     }
     
-    free(expert_features); free(current_features);
-    free(lnn_input); free(lnn_output); free(lnn_target);
+    safe_free((void**)&expert_features); safe_free((void**)&current_features);
+    safe_free((void**)&lnn_input); safe_free((void**)&lnn_output); safe_free((void**)&lnn_target);
     return 0;
 }
 

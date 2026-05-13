@@ -88,13 +88,13 @@ void* environment_sound_classifier_create(int num_classes) {
     esc->num_classes = num_classes;
     esc_build_mel_filters(esc);
 
-    /* 初始化CfC权重(小随机值) */
+    /* F-014修复：初始化CfC权重（使用密码学安全随机数替代rand()） */
     for (int i = 0; i < ESC_HIDDEN_DIM * ESC_HIDDEN_DIM; i++) {
-        esc->cfc_w[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+        esc->cfc_w[i] = (secure_random_float() - 0.5f) * 0.1f;
     }
     memset(esc->cfc_b, 0, sizeof(esc->cfc_b));
     for (int i = 0; i < ESC_MAX_CLASSES * ESC_HIDDEN_DIM; i++) {
-        esc->fc_w[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+        esc->fc_w[i] = (secure_random_float() - 0.5f) * 0.1f;
     }
     memset(esc->fc_b, 0, sizeof(esc->fc_b));
     esc->initialized = 1;
@@ -147,28 +147,13 @@ int environment_sound_classify(void* classifier,
             float w = 0.5f - 0.5f * cosf(2.0f * 3.14159265f * i / (frame_size - 1));
             real[i] = audio_samples[f + i] * w;
         }
-        /* 基2-FFT: 位反转 */
-        for (int k = 0; k < fft_n; k++) {
-            int rev = 0;
-            for (int bit = 1; bit < fft_n; bit <<= 1) {
-                rev = (rev << 1) | ((k & bit) ? 1 : 0);
-            }
-            if (k < rev) { float tmp = real[k]; real[k] = real[rev]; real[rev] = tmp; }
-        }
-        /* FFT蝶形运算 */
-        for (int len = 2; len <= fft_n; len <<= 1) {
-            float ang = -2.0f * 3.14159265f / len;
-            for (int i = 0; i < fft_n; i += len) {
-                for (int j = 0; j < len / 2; j++) {
-                    float wr = cosf(ang * j);
-                    float wi = sinf(ang * j);
-                    float tr = real[i+j+len/2] * wr - imag[i+j+len/2] * wi;
-                    float ti = real[i+j+len/2] * wi + imag[i+j+len/2] * wr;
-                    real[i+j+len/2] = real[i+j] - tr;
-                    imag[i+j+len/2] = imag[i+j] - ti;
-                    real[i+j] += tr;
-                    imag[i+j] += ti;
-                }
+        /* M-024修复：使用统一fft_real替代内联基2-FFT */
+        {
+            float* input_saved = (float*)safe_malloc(fft_n * sizeof(float));
+            if (input_saved) {
+                memcpy(input_saved, real, fft_n * sizeof(float));
+                fft_real(input_saved, fft_n, real, imag);
+                safe_free((void**)&input_saved);
             }
         }
         /* 获取幅度谱 */

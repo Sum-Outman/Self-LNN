@@ -132,9 +132,13 @@ void vector_scale(const float* x, float* y, float alpha, size_t n) {
 void matrix_init_random(float* mat, size_t rows, size_t cols, float scale) {
     if (!mat) return;
     size_t n = rows * cols;
+    /* N-003修复: 使用时间混合种子替代纯确定性LCG */
+    unsigned int seed = (unsigned int)((uint64_t)clock() & 0xFFFFFFFF);
     for (size_t i = 0; i < n; i++) {
-        float u1 = (float)((unsigned int)(i * 1103515245 + 12345) % 10000) / 10000.0f;
-        float u2 = (float)((unsigned int)(i * 25214903917 + 11) % 10000) / 10000.0f;
+        seed = seed * 1103515245 + 12345;
+        float u1 = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+        seed = seed * 1103515245 + 12345;
+        float u2 = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
         mat[i] = sqrtf(-2.0f * logf(u1 + 1e-12f)) * cosf(6.28318530718f * u2) * scale;
     }
 }

@@ -140,10 +140,15 @@ struct SwarmEnhancedEngine {
     LiquidMessage* comm_message_buffer;
     int comm_buffer_size;
     int comm_buffer_capacity;
+    /* M-038修复: 多通道消息队列支持 */
+    LiquidMessage** comm_channel_buffers;
+    int* comm_channel_buffer_sizes;
+    int* comm_channel_buffer_caps;
 
     /* 自愈状态 */
     SelfHealingConfig healing_config;
     int* healing_node_status;
+    int* healing_node_last_seen;  /* M-039修复: 各节点最后心跳时间戳(微秒) */
     int healing_node_count;
     int healing_failure_count;
 };
@@ -164,6 +169,11 @@ SwarmEnhancedEngine* swarm_aco_enhanced_create(const ACOEnhancedConfig* config) 
     engine->aco_best_path_len = 0;
 
     engine->aco_cfc_state = (float*)safe_calloc(64, sizeof(float));
+    /* M-037修复: 用小幅随机扰动初始化CfC状态，确保ODE有非零初始条件 */
+    if (engine->aco_cfc_state) {
+        for (int s = 0; s < 64; s++)
+            engine->aco_cfc_state[s] = ((float)((s * 1103515245 + 12345) % 10000) / 10000.0f - 0.5f) * 0.1f;
+    }
 
     engine->is_initialized = 1;
     
@@ -217,7 +227,16 @@ void swarm_aco_enhanced_destroy(SwarmEnhancedEngine* engine) {
         safe_free((void**)&engine->comm_hidden);
     }
     safe_free((void**)&engine->comm_message_buffer);
+    /* M-038修复: 清理多通道队列 */
+    if (engine->comm_channel_buffers) {
+        for (int c = 0; c < engine->comm_channel_count; c++)
+            safe_free((void**)&engine->comm_channel_buffers[c]);
+        safe_free((void**)&engine->comm_channel_buffers);
+    }
+    safe_free((void**)&engine->comm_channel_buffer_sizes);
+    safe_free((void**)&engine->comm_channel_buffer_caps);
     safe_free((void**)&engine->healing_node_status);
+    safe_free((void**)&engine->healing_node_last_seen);
 
     safe_free((void**)&engine);
 }
@@ -466,6 +485,10 @@ SwarmEnhancedEngine* swarm_abc_enhanced_create(const ABCEnhancedConfig* config) 
     engine->abc_best_fitness = -SWARM_INF;
 
     engine->abc_cfc_state = (float*)safe_calloc(64, sizeof(float));
+    if (engine->abc_cfc_state) {
+        for (int s = 0; s < 64; s++)
+            engine->abc_cfc_state[s] = ((float)((s * 126543 + 998877) % 10000) / 10000.0f - 0.5f) * 0.15f;
+    }
     engine->abc_probabilities = (float*)safe_calloc(config->food_sources, sizeof(float));
 
     engine->is_initialized = 1;
@@ -825,48 +848,73 @@ int swarm_liquid_comm_create(SwarmEnhancedEngine* engine,
     engine->comm_message_buffer = (LiquidMessage*)
         safe_calloc(engine->comm_buffer_capacity, sizeof(LiquidMessage));
 
+    /* M-038修复: 初始化多通道消息队列 */
+    int ch = engine->comm_channel_count;
+    size_t new_cap = ch * sizeof(LiquidMessage*);
+    engine->comm_channel_buffers = (LiquidMessage**)safe_realloc(
+        engine->comm_channel_buffers, new_cap);
+    engine->comm_channel_buffer_sizes = (int*)safe_realloc(
+        engine->comm_channel_buffer_sizes, ch * sizeof(int));
+    engine->comm_channel_buffer_caps = (int*)safe_realloc(
+        engine->comm_channel_buffer_caps, ch * sizeof(int));
+    if (engine->comm_channel_buffers) {
+        engine->comm_channel_buffers[ch - 1] = (LiquidMessage*)
+            safe_calloc(256, sizeof(LiquidMessage));
+    }
+    if (engine->comm_channel_buffer_sizes) engine->comm_channel_buffer_sizes[ch - 1] = 0;
+    if (engine->comm_channel_buffer_caps) engine->comm_channel_buffer_caps[ch - 1] = 256;
+
     return channel;
 }
 
 int swarm_liquid_comm_send(SwarmEnhancedEngine* engine,
                             int channel_id, const LiquidMessage* message) {
     if (!engine || !message) return -1;
-    (void)channel_id;
 
-    if (engine->comm_buffer_size >= engine->comm_buffer_capacity) {
-        return -1;
+    /* M-038修复: 使用channel_id路由消息到对应通道 */
+    int ch_idx = channel_id - 1;
+    if (ch_idx < 0 || ch_idx >= engine->comm_channel_count ||
+        !engine->comm_channel_buffers || !engine->comm_channel_buffers[ch_idx]) {
+        /* 回退到全局缓冲区 */
+        if (engine->comm_buffer_size >= engine->comm_buffer_capacity) return -1;
+        int idx = engine->comm_buffer_size;
+        engine->comm_message_buffer[idx] = *message;
+        engine->comm_buffer_size++;
+        return 0;
     }
 
-    int idx = engine->comm_buffer_size;
-    engine->comm_message_buffer[idx] = *message;
+    int* sz = &engine->comm_channel_buffer_sizes[ch_idx];
+    int cap = engine->comm_channel_buffer_caps[ch_idx];
+    if (*sz >= cap) return -1;
+
+    engine->comm_channel_buffers[ch_idx][*sz] = *message;
     if (message->state_vector && message->state_dim > 0) {
-        engine->comm_message_buffer[idx].state_vector = (float*)
+        engine->comm_channel_buffers[ch_idx][*sz].state_vector = (float*)
             safe_calloc(message->state_dim, sizeof(float));
-        if (engine->comm_message_buffer[idx].state_vector) {
-            memcpy(engine->comm_message_buffer[idx].state_vector,
-                   message->state_vector,
-                   message->state_dim * sizeof(float));
-        }
+        if (engine->comm_channel_buffers[ch_idx][*sz].state_vector)
+            memcpy(engine->comm_channel_buffers[ch_idx][*sz].state_vector,
+                   message->state_vector, message->state_dim * sizeof(float));
     }
-    if (message->cfc_hidden && message->hidden_dim > 0) {
-        engine->comm_message_buffer[idx].cfc_hidden = (float*)
-            safe_calloc(message->hidden_dim, sizeof(float));
-        if (engine->comm_message_buffer[idx].cfc_hidden) {
-            memcpy(engine->comm_message_buffer[idx].cfc_hidden,
-                   message->cfc_hidden,
-                   message->hidden_dim * sizeof(float));
-        }
-    }
-    engine->comm_buffer_size++;
-
+    (*sz)++;
     return 0;
 }
 
 int swarm_liquid_comm_receive(SwarmEnhancedEngine* engine,
                                int channel_id, LiquidMessage* message, int block) {
     if (!engine || !message) return -1;
-    (void)channel_id;
-    (void)block;
+
+    /* M-038修复: 从对应通道队列读取消息 */
+    int ch_idx = channel_id - 1;
+    if (ch_idx >= 0 && ch_idx < engine->comm_channel_count &&
+        engine->comm_channel_buffers && engine->comm_channel_buffers[ch_idx]) {
+        int* sz = &engine->comm_channel_buffer_sizes[ch_idx];
+        if (*sz < 1) return 0;
+        *message = engine->comm_channel_buffers[ch_idx][0];
+        for (int i = 1; i < *sz; i++)
+            engine->comm_channel_buffers[ch_idx][i - 1] = engine->comm_channel_buffers[ch_idx][i];
+        (*sz)--;
+        return 1;
+    }
 
     if (engine->comm_buffer_size < 1) return 0;
 
@@ -881,7 +929,9 @@ int swarm_liquid_comm_receive(SwarmEnhancedEngine* engine,
 int swarm_liquid_comm_sync(SwarmEnhancedEngine* engine,
                             int channel_id, int sync_steps) {
     if (!engine || !engine->comm_states || !engine->comm_hidden) return -1;
-    (void)channel_id;
+
+    /* M-038修复: channel_id用于选择不同的耦合强度因子 */
+    float coupling = 0.005f + 0.005f * ((float)(channel_id % 8));
 
     int n = engine->comm_num_nodes;
 
@@ -890,7 +940,6 @@ int swarm_liquid_comm_sync(SwarmEnhancedEngine* engine,
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
                 if (i == j) continue;
-                float coupling = 0.01f;
                 int dim = engine->comm_state_dim;
                 for (int d = 0; d < dim; d++) {
                     float diff = engine->comm_states[j][d] - engine->comm_states[i][d];
@@ -921,9 +970,14 @@ int swarm_self_healing_configure(SwarmEnhancedEngine* engine,
     if (engine->healing_node_status) {
         safe_free((void**)&engine->healing_node_status);
     }
+    if (engine->healing_node_last_seen) {
+        safe_free((void**)&engine->healing_node_last_seen);
+    }
     engine->healing_node_count = engine->comm_num_nodes > 0 ?
         engine->comm_num_nodes : 64;
     engine->healing_node_status = (int*)
+        safe_calloc(engine->healing_node_count, sizeof(int));
+    engine->healing_node_last_seen = (int*)
         safe_calloc(engine->healing_node_count, sizeof(int));
 
     return 0;
@@ -947,10 +1001,22 @@ int swarm_self_healing_detect_failures(SwarmEnhancedEngine* engine,
     long heartbeat_timeout_us = 10 * 1000 * 1000;
     long current_time_us = (long)((double)clock() / (double)CLOCKS_PER_SEC * 1e6);
 
+    /* 确保last_seen数组已初始化 */
+    if (!engine->healing_node_last_seen) {
+        engine->healing_node_last_seen = (int*)
+            safe_calloc(engine->healing_node_count, sizeof(int));
+    }
+
     for (int i = 0; i < engine->healing_node_count && failures < max_failures; i++) {
         if (engine->healing_node_status[i] == 0) {
-            /* 基于当前时间判定节点故障 */
-            long node_last_seen = current_time_us;
+            /* M-039修复: 基于各节点真实的最后心跳时间判定故障
+             * 替代"当前时间-当前时间"恒为0的错误逻辑 */
+            long node_last_seen = engine->healing_node_last_seen[i];
+            /* 首次检测时初始化时间戳 */
+            if (node_last_seen == 0) {
+                engine->healing_node_last_seen[i] = current_time_us;
+                continue;
+            }
             long elapsed = current_time_us - node_last_seen;
 
             if (elapsed > heartbeat_timeout_us) {

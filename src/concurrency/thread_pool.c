@@ -3,6 +3,9 @@
  * @brief 线程池实现
  * 
  * 高性能线程池实现，支持任务队列和工作线程管理。
+ * I-014设计注记: thread_pool通过lock_free.h复用无锁队列作为任务队列；
+ * 与lock_free.c中第8项(Work Stealing Queue)存在概念重叠 —
+ * 后续统一为 thread_pool使用work_stealing_queue，消除两处任务调度路径。
  */
 
 #include "selflnn/concurrency/thread_pool.h"

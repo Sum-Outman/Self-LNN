@@ -1556,9 +1556,11 @@ int gazebo_simulator_step(Simulator* simulator, int num_steps) {
             if (gazebo->external_failures >= GAZEBO_MAX_EXTERNAL_FAILURES && !gazebo->reconnecting) {
                 gazebo_log(gazebo, "外部Gazebo通信故障过多，尝试重连");
                 if (gazebo_try_reconnect(gazebo) != 0) {
-                    gazebo_log(gazebo, "重连失败，切换至内部仿真引擎");
+                    /* M-030修复：明确记录回退事件，通知上层选择而非静默切换 */
+                    gazebo_log(gazebo, "重连失败，外部Gazebo不可用");
                     gazebo->internal.use_external_gazebo = 0;
                     gazebo->external_failures = 0;
+                    gazebo->internal.external_unavailable = 1;
                 }
             }
 

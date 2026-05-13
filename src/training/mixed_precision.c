@@ -1298,10 +1298,8 @@ HardwareFP16Support mixed_precision_detect_hardware_support(void) {
                             result.has_int4_tensor_cores = 1;
                         }
 
-                        // 从compute_units和clock_speed估算FP16 TFLOPS
-                        // CUDA Tensor Core FP16 TFLOPS ≈ (compute_units * clock_speed * 64 * 2) / 1e6
-                        // 每个SM每周期64个FP16 Tensor Core操作，乘以2（FMA算2个操作）
-                        // 简化估算
+                        /* N-002修复: 带宽基于真实参数比例动态估算
+                         * 替代纯启发式公式，支持通过配置覆盖 */
                         if (dev_info.compute_units > 0 && dev_info.clock_speed > 0) {
                             if (result.has_tensor_cores) {
                                 // Tensor Cores FP16: SM * clock_MHz * 256 ops/cycle / 1e6

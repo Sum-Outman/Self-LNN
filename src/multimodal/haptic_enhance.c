@@ -29,8 +29,9 @@
  * 内部辅助函数
  * ============================================================================ */
 
+/* M-027修复：使用统一activation_sigmoid替代_hc_sig */
 static inline float _hc_sig(float x) {
-    return 1.0f / (1.0f + expf(-x));
+    return activation_sigmoid(x);
 }
 
 static inline float _hc_tanh(float x) {

@@ -851,11 +851,12 @@ int ode_parallel_solve(float* y, float t, float delta_t,
         if (steps_used) *steps_used = local_steps;
         return ret;
 #else
+        /* I-010修复：MPI模式当前未编译，返回明确错误码而非静默回退 */
         (void)is_mpi_mode;
         (void)workspace_size;
         if (pcfg->mode == PARALLEL_MODE_MPI || pcfg->mode == PARALLEL_MODE_HYBRID) {
             (void)t_target;
-            return -5;
+            return -5; /* MPI未编译：返回明确错误码，上层可捕获并处理 */
         }
         return solver_func(y, t, delta_t, rhs, ctx, n, solver_cfg,
                           workspace, h_actual, steps_used);

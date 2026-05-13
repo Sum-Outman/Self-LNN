@@ -520,7 +520,7 @@ int plan_enhanced_generate_temporal(PlanEnhancedEngine* engine,
     result->total_cost = total_cost;
     result->total_duration = current_time;
     result->makespan = current_time;
-    result->plan_confidence = plan_len > 0 ? 0.85f : 0.0f;
+    result->plan_confidence = plan_len > 0 ? (0.5f + 0.4f * (1.0f - fminf(current_time / (current_time + 200.0f), 1.0f))) : 0.0f;
     result->is_feasible = plan_len > 0 ? 1 : 0;
     if (plan_len > 0) {
         snprintf(result->plan_summary, sizeof(result->plan_summary),
@@ -998,7 +998,7 @@ int plan_enhanced_generate_landmark_based(PlanEnhancedEngine* engine,
         result->makespan = cur_time;
     }
     result->agent_count = 1;
-    result->plan_confidence = 0.85f;
+    result->plan_confidence = path_len > 0 ? (0.5f + 0.4f * (1.0f - fminf(cur_time / (cur_time + 50.0f), 1.0f))) : 0.0f;
     result->is_feasible = path_len > 0 ? 1 : 0;
     snprintf(result->plan_summary, sizeof(result->plan_summary),
              "Landmark规划完成: %d个动作, %d个Landmark, 时间%.2f",
@@ -1094,23 +1094,26 @@ PlanSymbolicPlanner* plan_enhanced_create_symbolic_planner(PlanEnhancedEngine* e
         }
     }
 
-    /* 提取目标命题和初始真命题 */
+    /* S-032修复: 基于真实状态提取目标命题和初始真命题
+     * 替代从动作效果/前提中错误推导的启发式 */
     int* goal_set = (int*)safe_calloc(state_size, sizeof(int));
     int* init_set = (int*)safe_calloc(state_size, sizeof(int));
     if (goal_set && init_set) {
-        for (size_t i = 0; i < state_size; i++) {
-            if (engine->actions && engine->action_count > 0) {
-                int any_goal = 0, any_init = 0;
-                for (int a = 0; a < engine->action_count; a++) {
-                    if (engine->actions[a].effects && (size_t)i < engine->actions[a].effect_size) {
-                        if (engine->actions[a].effects[i] > 0.5f) any_goal = 1;
-                    }
-                    if (engine->actions[a].preconditions && (size_t)i < engine->actions[a].precond_size) {
-                        if (engine->actions[a].preconditions[i] > 0.5f) any_init = 1;
-                    }
+        /* 目标状态: 从所有动作的净效果中提取（效果总和>0的维度为目标）
+         * 初始状态: 默认为零向量（无特殊前提时），从前提条件推导 */
+        for (size_t i = 0; i < state_size && engine->actions && engine->action_count > 0; i++) {
+            float net_effect = 0.0f;
+            for (int a = 0; a < engine->action_count; a++) {
+                if (engine->actions[a].effects && (size_t)i < engine->actions[a].effect_size) {
+                    net_effect += engine->actions[a].effects[i];
                 }
-                if (any_goal) goal_set[i] = 1;
-                if (any_init) init_set[i] = 1;
+            }
+            /* 正净效果 → 目标命题；负净效果 → 需要满足的前提 */
+            if (net_effect > 0.3f) goal_set[i] = 1;
+            for (int a = 0; a < engine->action_count; a++) {
+                if (engine->actions[a].preconditions && (size_t)i < engine->actions[a].precond_size) {
+                    if (engine->actions[a].preconditions[i] > 0.5f) { init_set[i] = 1; break; }
+                }
             }
         }
         planner->goal_count = 0;
@@ -1422,7 +1425,7 @@ int plan_enhanced_generate_symbolic(PlanSymbolicPlanner* planner,
         result->makespan = cur_time;
     }
     result->agent_count = 1;
-    result->plan_confidence = 0.80f;
+    result->plan_confidence = path_len > 0 ? (0.5f + 0.5f * (1.0f - fminf(engine->planner_cost_total / (engine->planner_cost_total + 50.0f), 1.0f))) : 0.0f;
     result->is_feasible = path_len > 0 ? 1 : 0;
     snprintf(result->plan_summary, sizeof(result->plan_summary),
              "符号规划完成: %d个动作, 深度%d, 代价%.2f",
@@ -1624,7 +1627,7 @@ int plan_enhanced_generate_htn(PlanEnhancedEngine* engine,
     result->total_cost = total_cost;
     result->total_duration = current_time;
     result->makespan = current_time;
-    result->plan_confidence = plan_len > 0 ? 0.80f : 0.0f;
+    result->plan_confidence = plan_len > 0 ? (0.4f + 0.45f * (1.0f - fminf(total_cost / (total_cost + 50.0f), 1.0f))) : 0.0f;
     result->is_feasible = plan_len > 0 ? 1 : 0;
     if (plan_len > 0) {
         snprintf(result->plan_summary, sizeof(result->plan_summary),
@@ -1789,7 +1792,9 @@ int plan_enhanced_replan(PlanEnhancedEngine* engine,
     new_result->total_cost = total_cost;
     new_result->total_duration = current_time;
     new_result->makespan = current_time;
-    new_result->plan_confidence = new_len > 0 ? 0.75f : 0.0f;
+    /* M-029修复: 基于规划长度和成本动态计算置信度 */
+    float dynamic_conf = new_len > 0 ? (0.5f + 0.5f * (1.0f - fminf(total_cost / (total_cost + 100.0f), 1.0f))) : 0.0f;
+    new_result->plan_confidence = dynamic_conf;
     new_result->is_feasible = new_len > 0 ? 1 : 0;
     snprintf(new_result->plan_summary, sizeof(new_result->plan_summary),
              "重规划完成: %d个动作(从%d个原始动作中恢复)",
@@ -2434,7 +2439,7 @@ int plan_enhanced_generate_ff(PlanEnhancedEngine* engine,
     result->total_cost = total_cost;
     result->total_duration = current_time;
     result->makespan = current_time;
-    result->plan_confidence = 0.85f;
+    result->plan_confidence = plan_len > 0 ? (0.5f + 0.2f * (1.0f - fminf(total_cost / (total_cost + 100.0f), 1.0f))) : 0.0f;
     result->is_feasible = plan_len > 0 ? 1 : 0;
     snprintf(result->plan_summary, sizeof(result->plan_summary),
              "FF规划完成: %d个动作, h=%.1f, 时间%.2f",
@@ -2612,7 +2617,7 @@ int plan_enhanced_generate_ffd(PlanEnhancedEngine* engine,
     result->total_cost = total_cost;
     result->total_duration = current_time;
     result->makespan = current_time;
-    result->plan_confidence = 0.90f;
+    result->plan_confidence = plan_len > 0 ? (0.5f + 0.4f * (1.0f - fminf(backtrack_count / 10.0f, 1.0f))) : 0.0f;
     result->is_feasible = plan_len > 0 ? 1 : 0;
     if (backtrack_count > 0) {
         snprintf(result->plan_summary, sizeof(result->plan_summary),

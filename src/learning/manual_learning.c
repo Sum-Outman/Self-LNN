@@ -138,7 +138,6 @@ static int ml_is_list_item(const char* line, size_t len) {
 }
 
 static void ml_embed_text_simple(LNN* encoder, const char* text, size_t text_len, float* embed_out) {
-    (void)embed_out;
     float input[256] = {0};
     for (size_t i = 0; i < text_len && i < 256; i++) {
         input[i] = (float)(unsigned char)text[i] / 255.0f;

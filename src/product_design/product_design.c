@@ -318,55 +318,45 @@ static double estimate_complexity(const char** keywords, size_t count) {
 }
 
 /**
- * @brief 估算成本
+ * @brief 估算成本（M-018修复：PERT三点估算法替代硬编码基础值）
  */
 static double estimate_cost(ProductType type, double complexity) {
-    double base_cost = 0.0;
-    
+    /* PERT三点估算: E = (O + 4*M + P) / 6
+     * O=乐观, M=最可能, P=悲观, 基于复杂度修正 */
+    double o = 0, m = 0, p = 0;
     switch (type) {
         case PRODUCT_TYPE_HARDWARE:
-            base_cost = 10000.0;
-            break;
+            o = 3000.0;  m = 10000.0; p = 50000.0; break;
         case PRODUCT_TYPE_SOFTWARE:
-            base_cost = 5000.0;
-            break;
+            o = 1000.0;  m = 5000.0;  p = 20000.0; break;
         case PRODUCT_TYPE_SYSTEM:
-            base_cost = 20000.0;
-            break;
+            o = 5000.0;  m = 20000.0; p = 100000.0;break;
         case PRODUCT_TYPE_CUSTOM:
-            base_cost = 15000.0;
-            break;
+            o = 2000.0;  m = 15000.0; p = 80000.0; break;
         default:
-            base_cost = 10000.0;
+            o = 2000.0;  m = 10000.0; p = 50000.0;
     }
-    
-    return base_cost * complexity;
+    double base = (o + 4.0 * m + p) / 6.0;
+    /* 复杂度非线性缩放：cost ∝ complexity^1.3 */
+    return base * pow(complexity, 1.3);
 }
 
 /**
- * @brief 估算时间
+ * @brief 估算时间（M-018修复：COCOMO-II启发式月数估算）
  */
 static double estimate_time(ProductType type, double complexity) {
-    double base_time = 0.0;
-    
+    /* COCOMO-II启发式: PM = A * (KLOC)^B * Π(EM)
+     * 简化：PM = base_months * complexity^0.85 */
+    double base_months = 0;
     switch (type) {
-        case PRODUCT_TYPE_HARDWARE:
-            base_time = 6.0;  // 月
-            break;
-        case PRODUCT_TYPE_SOFTWARE:
-            base_time = 3.0;
-            break;
-        case PRODUCT_TYPE_SYSTEM:
-            base_time = 9.0;
-            break;
-        case PRODUCT_TYPE_CUSTOM:
-            base_time = 6.0;
-            break;
-        default:
-            base_time = 6.0;
+        case PRODUCT_TYPE_HARDWARE:  base_months = 6.0;  break;
+        case PRODUCT_TYPE_SOFTWARE:  base_months = 3.0;  break;
+        case PRODUCT_TYPE_SYSTEM:    base_months = 9.0;  break;
+        case PRODUCT_TYPE_CUSTOM:    base_months = 6.0;  break;
+        default:                     base_months = 6.0;
     }
-    
-    return base_time * complexity;
+    /* 非线性标度：时间随复杂度次线性增长（规模经济） */
+    return base_months * pow(complexity, 0.85);
 }
 
 /* ============================================================================

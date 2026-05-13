@@ -45,6 +45,7 @@ typedef struct {
 
     size_t entry_count;                      /**< 快照中的条目数 */
     size_t data_size;                        /**< 快照数据大小(字节) */
+    void* snapshot_data;                     /**< 快照数据（F-005修复：存储实际快照内容，不丢弃） */
 } KnowledgeVersion;
 
 /**

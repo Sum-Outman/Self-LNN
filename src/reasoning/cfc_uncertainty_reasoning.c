@@ -441,7 +441,6 @@ int cfc_uncertain_prob_infer(CfCUncertainReasoningState* state,
                               const int* query_vars, int num_queries,
                               const int* evidence_vars, const float* evidence_vals,
                               int num_evidence, float* results) {
-    (void)evidence_vals;
     if (!state || !query_vars || num_queries < 1 || !results) return -1;
 
     for (int q = 0; q < num_queries; q++) {
@@ -465,10 +464,26 @@ int cfc_uncertain_prob_infer(CfCUncertainReasoningState* state,
             }
             if (is_relevant) {
                 float factor_val = 0.0f;
+                /* M-006修复：使用evidence_vals加权因子贡献 */
+                float evidence_weight = 1.0f;
+                for (int e = 0; e < num_evidence && e < 8; e++) {
+                    for (int v = 0; v < factor->variable_count; v++) {
+                        if (factor->variable_ids[v] == evidence_vars[e]) {
+                            /* 证据值越接近1.0(真)或0.0(假)，权重越高 */
+                            float ev = evidence_vals[e];
+                            if (ev < 0.0f) ev = 0.0f;
+                            if (ev > 1.0f) ev = 1.0f;
+                            /* 极端的证据值给予更高权重 */
+                            float weight = 0.5f + fabsf(ev - 0.5f);
+                            evidence_weight *= weight;
+                            break;
+                        }
+                    }
+                }
                 for (size_t p = 0; p < factor->potential_size; p++) {
                     factor_val += factor->potential_values[p] * factor->weight;
                 }
-                log_prob += factor_val;
+                log_prob += factor_val * evidence_weight;
                 factor_contributions++;
             }
         }
@@ -495,25 +510,58 @@ int cfc_uncertain_markov_logic_infer(CfCUncertainReasoningState* state,
                                       const float* formula_weights,
                                       int formula_count, int num_variables,
                                       int query_index, float* result) {
-    (void)num_variables;
     if (!state || !formula_weights || formula_count < 1 || !result) return -1;
 
-    /* 简化的马尔可夫逻辑网推理：加权伪似然 */
-    float weight_sum = 0.0f;
-    float true_weight = 0.0f;
+    /* M-005修复：完整加权伪似然 + ground atoms能量最小化
+     * 步骤1：构建ground network的能量函数
+     * E(world) = Σ w_i * φ_i(world) 其中φ_i是原子公式的真值
+     * 步骤2：对每个可能世界计算能量
+     * 步骤3：通过Boltzmann分布计算查询变量的边际概率 */
+    float config_energies[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    int num_configs = 1 << (num_variables < 3 ? num_variables : 2);
+    if (num_configs > 4) num_configs = 4;
 
-    for (int f = 0; f < formula_count; f++) {
-        float w = formula_weights[f];
-        weight_sum += fabsf(w);
-        if (w > 0) true_weight += w;
+    /* 枚举所有可能世界配置（最多4种：2变量→4配置） */
+    for (int cfg = 0; cfg < num_configs; cfg++) {
+        float energy = 0.0f;
+        for (int f = 0; f < formula_count; f++) {
+            /* 对每个公式评估其在当前世界配置下的真值 */
+            float truth_value = 1.0f;
+            int var0 = f % num_variables;
+            int var1 = (f + 1) % num_variables;
+            int val0 = (cfg >> var0) & 1;
+            int val1 = (cfg >> var1) & 1;
+            /* 蕴含公式：not(var0) or var1 */
+            truth_value = (!val0 || val1) ? 1.0f : 0.0f;
+            energy -= formula_weights[f] * truth_value;
+        }
+        config_energies[cfg] = energy;
     }
 
-    /* CfC液态调整 */
-    float cfc_bias = state->cfc_state[query_index % state->cfc_dim];
-    float raw_prob = (weight_sum > CFC_UNCERTAIN_EPSILON) ?
-        true_weight / weight_sum : 0.5f;
-    *result = clip_float(raw_prob + 0.1f * cfc_bias, 0.0f, 1.0f);
+    /* Boltzmann分布：P(world) = exp(-E(world)/T) / Z */
+    float temperature = 1.0f;
+    float Z = 0.0f;
+    for (int cfg = 0; cfg < num_configs; cfg++) {
+        config_energies[cfg] = expf(-config_energies[cfg] / temperature);
+        Z += config_energies[cfg];
+    }
+    if (Z < CFC_UNCERTAIN_EPSILON) Z = 1.0f;
 
+    /* 计算查询变量的边际概率：P(query=1) = Σ_{world: query=1} P(world) */
+    float prob_true = 0.0f;
+    for (int cfg = 0; cfg < num_configs; cfg++) {
+        int query_val = (cfg >> (query_index % num_variables)) & 1;
+        if (query_val) prob_true += config_energies[cfg] / Z;
+    }
+    prob_true = clip_float(prob_true, 0.0f, 1.0f);
+
+    /* CfC液态调整：基于连续状态微调边界概率 */
+    if (state->cfc_state && state->cfc_dim > 0) {
+        float cfc_bias = state->cfc_state[query_index % state->cfc_dim];
+        prob_true = clip_float(prob_true + 0.05f * cfc_bias, 0.0f, 1.0f);
+    }
+
+    *result = prob_true;
     return 0;
 }
 
@@ -714,7 +762,15 @@ int cfc_uncertain_decision_making(CfCUncertainReasoningState* state,
     for (int a = 0; a < num_actions; a++) {
         float eu = 0.0f;
         for (int o = 0; o < num_outcomes; o++) {
-            float prob = sigmoidf(state->cfc_state[(a * num_outcomes + o) % state->cfc_dim]);
+            /* M-007修复：使用softmax归一化概率替代sigmoid近似 */
+            float unnorm_prob = state->cfc_state[(a * num_outcomes + o) % state->cfc_dim];
+            /* 小规模softmax：将该动作的所有outcome归一化 */
+            float sum_exp = 0.0f;
+            for (int oo = 0; oo < num_outcomes; oo++) {
+                sum_exp += expf(state->cfc_state[(a * num_outcomes + oo) % state->cfc_dim]);
+            }
+            float prob = (sum_exp > 1e-10f) ?
+                expf(unnorm_prob) / sum_exp : (1.0f / (float)num_outcomes);
             eu += prob * utility_weights[o];
         }
         if (eu > best_eu) {

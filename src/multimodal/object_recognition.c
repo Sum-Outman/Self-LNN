@@ -507,3 +507,151 @@ int or_detect_changes(ObjectRecognizer* or_obj, const float* prev, const float* 
     }
     return 0;
 }
+
+/* ====== 分类器训练/保存/加载（F-001修复：完整实现） ====== */
+
+/*
+ * or_train_classifier: 使用基于原型均值的分类器训练
+ * 对每个类别，计算所有属于该类别的样本的特征均值作为类别模板
+ * 采用Warmuth缩放增强小样本类别鲁棒性
+ */
+int or_train_classifier(ObjectRecognizer* or_obj, const float* features,
+                        const int* labels, int samples, int dim, int categories) {
+    if (!or_obj || !features || !labels) return -1;
+    if (samples <= 0 || dim <= 0 || categories <= 0) return -1;
+    if (categories > OR_MAX_CATEGORIES) categories = OR_MAX_CATEGORIES;
+    int feat_dim = dim < 128 ? dim : 128;
+
+    /* 统计每个类别的样本数 */
+    int category_samples[OR_MAX_CATEGORIES];
+    memset(category_samples, 0, sizeof(category_samples));
+
+    /* 清零所有类别模板 */
+    for (int c = 0; c < OR_MAX_CATEGORIES; c++) {
+        memset(or_obj->category_templates[c], 0, 128 * sizeof(float));
+    }
+
+    /* 累加每个类别的特征向量 */
+    for (int s = 0; s < samples; s++) {
+        int label = labels[s];
+        if (label < 0 || label >= categories) continue;
+        if (label >= OR_MAX_CATEGORIES) continue;
+        int offset = s * dim;
+        for (int i = 0; i < feat_dim; i++) {
+            or_obj->category_templates[label][i] += features[offset + i];
+        }
+        category_samples[label]++;
+    }
+
+    /* 计算每个类别的均值模板（Warmuth缩放） */
+    for (int c = 0; c < categories && c < OR_MAX_CATEGORIES; c++) {
+        int n = category_samples[c];
+        if (n < 1) {
+            /* 无样本的类别：使用所有类别的全局均值 */
+            float global_mean_sum[128] = {0};
+            int total_valid = 0;
+            for (int cc = 0; cc < categories && cc < OR_MAX_CATEGORIES; cc++) {
+                if (category_samples[cc] > 0) {
+                    for (int i = 0; i < feat_dim; i++)
+                        global_mean_sum[i] += or_obj->category_templates[cc][i] / (float)category_samples[cc];
+                    total_valid++;
+                }
+            }
+            if (total_valid > 0) {
+                for (int i = 0; i < feat_dim; i++)
+                    or_obj->category_templates[c][i] = global_mean_sum[i] / (float)total_valid;
+            }
+            continue;
+        }
+        /* Warmuth缩放：n/(n+1) 衰减，增强小样本鲁棒性 */
+        float scale = (float)n / (float)(n + 1);
+        for (int i = 0; i < feat_dim; i++) {
+            or_obj->category_templates[c][i] = (or_obj->category_templates[c][i] / (float)n) * scale;
+        }
+    }
+
+    /* 更新类别总数 */
+    if (categories > or_obj->category_count) {
+        or_obj->category_count = categories;
+    }
+
+    return 0;
+}
+
+/*
+ * or_save_model: 将分类器模型保存到文件
+ * 二进制格式: [魔数4字节][类别数4字节][每个类别的名称64字节+模板128*float]
+ * 魔数: "SLO2" = 0x324F4C53 (Self-LNN Object recognition v2)
+ */
+int or_save_model(const ObjectRecognizer* or_obj, const char* filepath) {
+    if (!or_obj || !filepath) return -1;
+    if (or_obj->category_count <= 0) return -1;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) return -1;
+
+    /* 写入魔数 */
+    const char magic[4] = {'S', 'L', 'O', '2'};
+    if (fwrite(magic, 1, 4, fp) != 4) { fclose(fp); return -1; }
+
+    /* 写入类别数量 */
+    int count = or_obj->category_count;
+    if (fwrite(&count, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    /* 写入每个类别的名称和模板 */
+    for (int c = 0; c < count && c < OR_MAX_CATEGORIES; c++) {
+        /* 类别名称（固定64字节） */
+        if (fwrite(or_obj->category_names[c], 1, 64, fp) != 64) { fclose(fp); return -1; }
+        /* 类别模板特征（128个float） */
+        if (fwrite(or_obj->category_templates[c], sizeof(float), 128, fp) != 128) { fclose(fp); return -1; }
+    }
+
+    /* 写入场景信息 */
+    int scene = (int)or_obj->last_scene;
+    if (fwrite(&scene, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    fclose(fp);
+    return 0;
+}
+
+/*
+ * or_load_model: 从文件加载分类器模型
+ */
+int or_load_model(ObjectRecognizer* or_obj, const char* filepath) {
+    if (!or_obj || !filepath) return -1;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return -1;
+
+    /* 读取并验证魔数 */
+    char magic[4];
+    if (fread(magic, 1, 4, fp) != 4) { fclose(fp); return -1; }
+    if (magic[0] != 'S' || magic[1] != 'L' || magic[2] != 'O' || magic[3] != '2') {
+        fclose(fp);
+        return -1;
+    }
+
+    /* 读取类别数量 */
+    int count = 0;
+    if (fread(&count, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (count <= 0 || count > OR_MAX_CATEGORIES) { fclose(fp); return -1; }
+
+    or_obj->category_count = count;
+
+    /* 读取每个类别的名称和模板 */
+    for (int c = 0; c < count && c < OR_MAX_CATEGORIES; c++) {
+        if (fread(or_obj->category_names[c], 1, 64, fp) != 64) { fclose(fp); return -1; }
+        or_obj->category_names[c][63] = '\0'; /* 确保字符串终止 */
+        if (fread(or_obj->category_templates[c], sizeof(float), 128, fp) != 128) { fclose(fp); return -1; }
+    }
+
+    /* 读取场景信息 */
+    int scene = SCENE_UNKNOWN;
+    if (fread(&scene, sizeof(int), 1, fp) == 1) {
+        or_obj->last_scene = (SceneType)scene;
+    }
+
+    or_obj->initialized = 1;
+    fclose(fp);
+    return 0;
+}

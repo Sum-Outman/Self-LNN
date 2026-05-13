@@ -271,8 +271,9 @@ int selflnn_is_warning(SelfLNNErrorCode error_code) {
     return error_code >= 1000 && error_code < 2000;
 }
 
+/* I-001修复：消除重复实现，委托is_warning */
 int selflnn_is_warning_code(SelfLNNErrorCode error_code) {
-    return error_code >= 1000 && error_code < 2000;
+    return selflnn_is_warning(error_code);
 }
 
 // 信息代码检查

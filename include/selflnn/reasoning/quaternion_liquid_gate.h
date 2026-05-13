@@ -124,6 +124,25 @@ float quaternion_liquid_gate_train_step(QuaternionLiquidGate* gate,
                                         size_t batch, size_t seq_len);
 
 /**
+ * @brief 训练步骤(解析梯度链式法则反向传播) — M-008修复
+ *
+ * 使用四元数链式法则计算解析梯度，替代逐参数数值梯度，
+ * 大幅减少前向传播次数（从 O(kernel_size) 降为 O(1)）。
+ * 需要前向传播缓存（cached_gate/cached_act），否则回退到数值梯度。
+ *
+ * @param gate 门控层指针
+ * @param input 输入 [batch][seq_len][input_dim]
+ * @param target 目标 [batch][seq_len][input_dim]
+ * @param batch 批大小
+ * @param seq_len 序列长度
+ * @return float 当前损失值
+ */
+float quaternion_liquid_gate_train_step_analytic(QuaternionLiquidGate* gate,
+                                                  const float* input,
+                                                  const float* target,
+                                                  size_t batch, size_t seq_len);
+
+/**
  * @brief 重置优化器状态
  *
  * @param gate 门控层指针

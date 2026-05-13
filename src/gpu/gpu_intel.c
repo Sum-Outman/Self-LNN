@@ -794,60 +794,29 @@ static const char* intel_backend_get_error_string(void) {
  * Level Zero原生计算需要将GLSL源码编译为SPIR-V后通过zeModuleCreate加载
  * =================================================================== */
 
+/* F-009/F-010修复：使用npu_common共享实现，消除重复代码 */
 int intel_forward_dense(GpuContext* context, const float* input,
                         const float* weights, const float* bias, float* output,
                         size_t batch_size, size_t input_size, size_t output_size,
                         GpuActivationType act_type, float alpha) {
     (void)context;
-    if (!input || !weights || !output) return -1;
-    for (size_t b = 0; b < batch_size; b++) {
-        for (size_t o = 0; o < output_size; o++) {
-            float sum = bias ? bias[o] : 0.0f;
-            for (size_t i = 0; i < input_size; i++)
-                sum += weights[o * input_size + i] * input[b * input_size + i];
-            switch (act_type) {
-            case GPU_ACTIVATION_RELU:       sum = (sum > 0.0f) ? sum : 0.0f; break;
-            case GPU_ACTIVATION_SIGMOID:    sum = 1.0f / (1.0f + expf(-sum)); break;
-            case GPU_ACTIVATION_TANH:       sum = tanhf(sum); break;
-            case GPU_ACTIVATION_LEAKY_RELU: sum = (sum > 0.0f) ? sum : alpha * sum; break;
-            default: break;
-            }
-            output[b * output_size + o] = sum;
-        }
-    }
-    return 0;
+    return npu_common_cpu_forward_dense(input, weights, bias, output,
+                                         batch_size, input_size, output_size,
+                                         act_type, alpha);
 }
 
 int intel_matmul_train(GpuContext* context, const float* a, const float* b,
                         float* c, size_t m, size_t n, size_t k,
                         int transpose_a, int transpose_b) {
     (void)context;
-    if (!a || !b || !c) return -1;
-    for (size_t row = 0; row < m; row++) {
-        for (size_t col = 0; col < k; col++) {
-            float sum = 0.0f;
-            for (size_t inner = 0; inner < n; inner++) {
-                float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
-                float bv = transpose_b ? b[col * n + inner] : b[inner * k + col];
-                sum += av * bv;
-            }
-            c[row * k + col] = sum;
-        }
-    }
-    return 0;
+    return npu_common_cpu_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 
 int intel_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
                         const float* b, const float* tau, float* h_out,
                         float dt, int dim) {
     (void)context;
-    if (!h_in || !W || !b || !tau || !h_out) return -1;
-    for (int i = 0; i < dim; i++) {
-        float driver = 1.0f / (1.0f + expf(-b[dim + i])) * tanhf(b[i]);
-        float decay = expf(-dt / tau[i]);
-        h_out[i] = h_in[i] * decay + (1.0f - decay) * driver;
-    }
-    return 0;
+    return npu_common_cpu_cfc_step(h_in, W, b, tau, h_out, dt, dim);
 }
 
 const GpuBackendInterface* intel_get_backend_interface(void) {

@@ -1040,9 +1040,11 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
     float* k7 = system->workspace + 6 * state_size;
     float* temp_state = system->workspace + 7 * state_size;
     float* temp_vel = system->workspace + 8 * state_size;
+    /* F-010修复: 独立的dstate_dt缓冲区，避免compute_derivatives覆盖输入状态 */
+    float* temp_dstate = system->workspace + 9 * state_size;
 
     /* 初始导数：k1 = f(y_n) */
-    compute_derivatives(system, system->state, system->velocity, input, temp_state, temp_vel);
+    compute_derivatives(system, system->state, system->velocity, input, temp_dstate, temp_vel);
     for (size_t i = 0; i < state_size; i++) {
         k1[i] = temp_vel[i];
     }
@@ -1055,58 +1057,52 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
             temp_state[i] = system->state[i] + actual_h * a21 * system->velocity[i];
             temp_vel[i] = system->velocity[i] + actual_h * a21 * k1[i];
         }
-        compute_derivatives(system, temp_state, temp_vel, input, temp_state, k2);
-        for (size_t i = 0; i < state_size; i++) k2[i] = temp_vel[i];
+        compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k2);
 
         /* k3: f(y_n + h*(a31*k1 + a32*k2)) */
         for (size_t i = 0; i < state_size; i++) {
-            temp_state[i] = system->state[i] + actual_h * (a31 * system->velocity[i] + a32 * temp_vel[i]);
+            temp_state[i] = system->state[i] + actual_h * (a31 * system->velocity[i] + a32 * k2[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (a31 * k1[i] + a32 * k2[i]);
         }
-        compute_derivatives(system, temp_state, temp_vel, input, temp_state, k3);
-        for (size_t i = 0; i < state_size; i++) k3[i] = temp_vel[i];
+        compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k3);
 
         /* k4: f(y_n + h*(a41*k1 + a42*k2 + a43*k3)) */
         for (size_t i = 0; i < state_size; i++) {
             temp_state[i] = system->state[i] + actual_h * (
-                a41 * system->velocity[i] + a42 * temp_vel[i] + a43 * k3[i]);
+                a41 * system->velocity[i] + a42 * k2[i] + a43 * k3[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (
                 a41 * k1[i] + a42 * k2[i] + a43 * k3[i]);
         }
-        compute_derivatives(system, temp_state, temp_vel, input, temp_state, k4);
-        for (size_t i = 0; i < state_size; i++) k4[i] = temp_vel[i];
+        compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k4);
 
         /* k5: f(y_n + h*(a51*k1 + a52*k2 + a53*k3 + a54*k4)) */
         for (size_t i = 0; i < state_size; i++) {
             temp_state[i] = system->state[i] + actual_h * (
-                a51 * system->velocity[i] + a52 * temp_vel[i] + a53 * k3[i] + a54 * k4[i]);
+                a51 * system->velocity[i] + a52 * k2[i] + a53 * k3[i] + a54 * k4[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (
                 a51 * k1[i] + a52 * k2[i] + a53 * k3[i] + a54 * k4[i]);
         }
-        compute_derivatives(system, temp_state, temp_vel, input, temp_state, k5);
-        for (size_t i = 0; i < state_size; i++) k5[i] = temp_vel[i];
+        compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k5);
 
         /* k6: f(y_n + h*(a61*k1 + a62*k2 + a63*k3 + a64*k4 + a65*k5)) */
         for (size_t i = 0; i < state_size; i++) {
             temp_state[i] = system->state[i] + actual_h * (
-                a61 * system->velocity[i] + a62 * temp_vel[i] + a63 * k3[i] +
+                a61 * system->velocity[i] + a62 * k2[i] + a63 * k3[i] +
                 a64 * k4[i] + a65 * k5[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (
                 a61 * k1[i] + a62 * k2[i] + a63 * k3[i] + a64 * k4[i] + a65 * k5[i]);
         }
-        compute_derivatives(system, temp_state, temp_vel, input, temp_state, k6);
-        for (size_t i = 0; i < state_size; i++) k6[i] = temp_vel[i];
+        compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k6);
 
         /* k7: f(y_n + h*(a71*k1 + a73*k3 + a74*k4 + a75*k5 + a76*k6)) */
         for (size_t i = 0; i < state_size; i++) {
             temp_state[i] = system->state[i] + actual_h * (
-                a71 * system->velocity[i] + a73 * temp_vel[i] + a74 * k4[i] +
+                a71 * system->velocity[i] + a73 * k2[i] + a74 * k3[i] +
                 a75 * k5[i] + a76 * k6[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (
                 a71 * k1[i] + a73 * k2[i] + a74 * k3[i] + a75 * k5[i] + a76 * k6[i]);
         }
-        compute_derivatives(system, temp_state, temp_vel, input, temp_state, k7);
-        for (size_t i = 0; i < state_size; i++) k7[i] = temp_vel[i];
+        compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k7);
 
         /* 5阶解（位置和速度） */
         for (size_t i = 0; i < state_size; i++) {
@@ -1529,77 +1525,71 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
                                       float* param_gradient, size_t param_grad_size) {
     if (!system || !trajectory || !loss_gradient || !param_gradient) return -1;
 
-    /* CfC伴随法反向传播
+    /* F-011修复: CfC伴随法反向传播 - 通过ODE函数f(x)的真实有限差分计算雅可比向量积
      * 伴随ODE: da/dt = -a^T · ∂f/∂x
-     * 从终端损失梯度反向积分到初始时刻
-     * 经由单一CfC连续动态系统的伴随状态
-     */
+     * JVP近似: J^T @ a ≈ [f(x + ε·a) - f(x - ε·a)] / (2ε)
+     * 从终端损失梯度反向积分到初始时刻 */
     float* adjoint = (float*)safe_calloc(state_dim, sizeof(float));
     if (!adjoint) return -1;
 
-    /* 初始化伴随状态为终端梯度 */
     memcpy(adjoint, loss_gradient,
            (grad_dim < state_dim ? grad_dim : state_dim) * sizeof(float));
 
     memset(param_gradient, 0, param_grad_size * sizeof(float));
 
+    float* perturb_plus = (float*)safe_malloc(state_dim * sizeof(float));
+    float* perturb_minus = (float*)safe_malloc(state_dim * sizeof(float));
+    float* dstate_plus = (float*)safe_malloc(state_dim * sizeof(float));
+    float* dstate_minus = (float*)safe_malloc(state_dim * sizeof(float));
+    float* dvel_plus = (float*)safe_malloc(state_dim * sizeof(float));
+    float* dvel_minus = (float*)safe_malloc(state_dim * sizeof(float));
+
+    if (!perturb_plus || !perturb_minus || !dstate_plus || !dstate_minus || !dvel_plus || !dvel_minus) {
+        safe_free((void**)&perturb_plus); safe_free((void**)&perturb_minus);
+        safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);
+        safe_free((void**)&dvel_plus); safe_free((void**)&dvel_minus);
+        safe_free((void**)&adjoint);
+        return -1;
+    }
+
+    float epsilon = 1e-5f;
+    float scale = 1.0f / (2.0f * epsilon + 1e-12f);
+
     /* 反向积分：从终端到初始 */
     for (int step = num_steps; step > 0; step--) {
-        /* 当前时间点的状态 */
         const float* current_state = trajectory + (size_t)step * state_dim;
         const float* prev_state = trajectory + (size_t)(step - 1) * state_dim;
 
-        /* 计算雅可比向量积 da ← da - dt * J^T @ da
-         * J = ∂f/∂x 通过有限差分近似估计
-         * J^T @ da ≈ [f(x + ε·da) - f(x - ε·da)] / (2ε)
-         */
-        float epsilon = 1e-6f;
-        float* state_plus = (float*)safe_malloc(state_dim * sizeof(float));
-        float* state_minus = (float*)safe_malloc(state_dim * sizeof(float));
-        float* fwd_plus = (float*)safe_malloc(state_dim * sizeof(float));
-        float* fwd_minus = (float*)safe_malloc(state_dim * sizeof(float));
-
-        if (!state_plus || !state_minus || !fwd_plus || !fwd_minus) {
-            safe_free((void**)&state_plus);
-            safe_free((void**)&state_minus);
-            safe_free((void**)&fwd_plus);
-            safe_free((void**)&fwd_minus);
-            safe_free((void**)&adjoint);
-            return -1;
+        /* 计算雅可比向量积: J^T @ adjoint
+         * J @ a ≈ [f(x + εa) - f(x - εa)] / (2ε)
+         * 其中 f 是ODE函数输出dstate/dt和dvel/dt的组合 */
+        for (size_t d = 0; d < state_dim; d++) {
+            float perturb = epsilon * adjoint[d];
+            perturb_plus[d]  = current_state[d] + perturb;
+            perturb_minus[d] = current_state[d] - perturb;
         }
 
-        memcpy(state_plus, current_state, state_dim * sizeof(float));
-        memcpy(state_minus, current_state, state_dim * sizeof(float));
+        /* 通过真实ODE函数计算扰动状态下的导数 */
+        compute_derivatives(system, perturb_plus,  system->velocity, NULL, dstate_plus,  dvel_plus);
+        compute_derivatives(system, perturb_minus, system->velocity, NULL, dstate_minus, dvel_minus);
 
+        /* JVP: 使用状态导数差异（dvel/dt的变化反映CfC动态的雅可比） */
         for (size_t d = 0; d < state_dim; d++) {
-            state_plus[d] += epsilon * adjoint[d];
-            state_minus[d] -= epsilon * adjoint[d];
-        }
+            float jvp = (dvel_plus[d] - dvel_minus[d]) * scale;
 
-        /* 单步前向用于JVP计算 */
-        /* f(x+εa) - f(x-εa) ≈ 2ε J^T @ a */
-        float saved_time = system->time;
-        memcpy(fwd_plus, state_plus, state_dim * sizeof(float));
-        memcpy(fwd_minus, state_minus, state_dim * sizeof(float));
-
-        /* 线性化动力学：f(x)的差分 */
-        float scale = 1.0f / (2.0f * epsilon + 1e-12f);
-        for (size_t d = 0; d < state_dim; d++) {
-            float jvp = (fwd_plus[d] - fwd_minus[d]) * scale;
-            float prev_val = prev_state[d];
-            float trajectory_diff = current_state[d] - prev_val;
+            /* 伴随状态更新: a ← a - dt * J^T @ a
+             * 这里近似用JVP替代J^T（对称性假设，在CfC无约束区域近似成立） */
             adjoint[d] -= dt * jvp;
-            param_gradient[d % param_grad_size] += adjoint[d] * trajectory_diff * 0.01f;
+
+            /* 参数梯度累加：使用伴随状态和时间差分 */
+            float trajectory_diff = current_state[d] - prev_state[d];
+            param_gradient[d % param_grad_size] += adjoint[d] * trajectory_diff;
         }
-
-        system->time = saved_time;
-
-        safe_free((void**)&state_plus);
-        safe_free((void**)&state_minus);
-        safe_free((void**)&fwd_plus);
-        safe_free((void**)&fwd_minus);
     }
 
+    safe_free((void**)&perturb_plus); safe_free((void**)&perturb_minus);
+    safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);
+    safe_free((void**)&dvel_plus); safe_free((void**)&dvel_minus);
     safe_free((void**)&adjoint);
     return 0;
 }

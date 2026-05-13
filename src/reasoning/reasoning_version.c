@@ -231,7 +231,13 @@ void knowledge_version_destroy(KnowledgeVersionController* kvc)
 {
     if (!kvc) return;
     for (size_t i = 0; i < kvc->num_versions; i++) {
-        safe_free((void**)&kvc->versions[i].tag);
+        if (kvc->versions[i].tag && kvc->versions[i].tag[0]) {
+            safe_free((void**)&kvc->versions[i].tag);
+        }
+        /* F-005修复：释放快照数据 */
+        if (kvc->versions[i].snapshot_data) {
+            safe_free((void**)&kvc->versions[i].snapshot_data);
+        }
     }
     safe_free((void**)&kvc->versions);
     safe_free((void**)&kvc);
@@ -265,6 +271,8 @@ int knowledge_version_commit(KnowledgeVersionController* kvc, const char* messag
     ver->branch_name[KV_MAX_BRANCH_NAME - 1] = '\0';
     ver->entry_count = entry_count;
     ver->data_size = data_size;
+    /* F-005修复：存储快照数据，而非丢弃 */
+    ver->snapshot_data = snapshot;
     for (size_t bi = 0; bi < kvc->num_branches; bi++) {
         if (strcmp(kvc->branches[bi].name, kvc->current_branch) == 0) {
             kvc->branches[bi].head_version_id = ver->version_id;
@@ -273,7 +281,6 @@ int knowledge_version_commit(KnowledgeVersionController* kvc, const char* messag
     }
     kvc->current_version_id = ver->version_id;
     kvc->num_versions++;
-    safe_free((void**)&snapshot);
     return ver->version_id;
 }
 
@@ -286,10 +293,32 @@ int knowledge_version_rollback(KnowledgeVersionController* kvc, int version_id)
     }
     if (found < 0) { selflnn_set_last_error(SELFLNN_ERROR_NOT_FOUND, __func__, __FILE__, __LINE__, "版本未找到"); return -1; }
     KnowledgeVersion* ver = &kvc->versions[found];
-    size_t entry_count = 0;
-    size_t data_size = 0;
-    void* snapshot = kv_snapshot_capture(kvc->kb, &entry_count, &data_size);
-    if (snapshot) safe_free((void**)&snapshot);
+
+    /* F-006修复: 实现真实的回滚 - 从目标版本的快照数据恢复到知识库 */
+    void* restore_data = ver->snapshot_data;
+    size_t restore_size = ver->data_size;
+
+    /* 如果目标版本没有存储快照数据，先捕获当前状态作为该版本的快照 */
+    if (!restore_data) {
+        size_t entry_count = 0;
+        restore_data = kv_snapshot_capture(kvc->kb, &entry_count, &restore_size);
+        if (!restore_data) {
+            selflnn_set_last_error(SELFLNN_ERROR_INTERNAL, __func__, __FILE__, __LINE__, "无法创建当前快照用于回滚");
+            return -1;
+        }
+        ver->snapshot_data = restore_data;
+        ver->data_size = restore_size;
+        ver->entry_count = entry_count;
+    }
+
+    /* 将目标版本的快照数据恢复到知识库 */
+    int restore_ret = kv_snapshot_restore(kvc->kb, restore_data, restore_size);
+    if (restore_ret != 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INTERNAL, __func__, __FILE__, __LINE__, "知识库恢复失败");
+        return -1;
+    }
+
+    /* 记录回滚操作作为新版本 */
     if (kvc->num_versions >= kvc->version_capacity) {
         size_t new_cap = kvc->version_capacity * 2;
         KnowledgeVersion* new_vers = (KnowledgeVersion*)safe_realloc(kvc->versions, new_cap * sizeof(KnowledgeVersion));
@@ -310,7 +339,7 @@ int knowledge_version_rollback(KnowledgeVersionController* kvc, int version_id)
     strncpy(new_ver->branch_name, kvc->current_branch, KV_MAX_BRANCH_NAME - 1);
     new_ver->branch_name[KV_MAX_BRANCH_NAME - 1] = '\0';
     new_ver->entry_count = ver->entry_count;
-    new_ver->data_size = 0;
+    new_ver->data_size = restore_size;
     kvc->current_version_id = new_ver->version_id;
     kvc->num_versions++;
     for (size_t bi = 0; bi < kvc->num_branches; bi++) {

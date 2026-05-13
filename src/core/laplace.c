@@ -151,6 +151,28 @@ Complex complex_transfer_function(const float* numerator,
 /**
  * @brief 创建拉普拉斯分析器
  */
+/* M-025修复：公共默认配置定义 */
+const LaplaceConfig LAPLACE_CONFIG_DEFAULT = {
+    256,       /* num_samples */
+    1000.0f,   /* sample_rate */
+    100.0f,    /* max_frequency */
+    0.1f,      /* min_frequency */
+    1,         /* enable_stability */
+    1,         /* enable_frequency */
+    1,         /* enable_optimization */
+    50.0f,     /* cutoff_frequency */
+    2,         /* filter_order */
+    0.95f,     /* alpha */
+    0.05f,     /* beta */
+    200.0f,    /* frequency_range */
+    0,         /* enable_auto_tuning */
+    0.1f       /* stability_threshold */
+};
+
+const LaplaceConfig* laplace_get_default_config(void) {
+    return &LAPLACE_CONFIG_DEFAULT;
+}
+
 LaplaceAnalyzer* laplace_analyzer_create(const LaplaceConfig* config) {
     if (!config) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, 
@@ -766,7 +788,11 @@ int laplace_analyze_matrix_stability(LaplaceAnalyzer* analyzer,
     
     int result_code = compute_eigenvalues_qr(state_matrix, state_size,
                                             poles, max_iterations, tolerance);
-    (void)result_code; // 标记未使用
+    /* I-006修复：检查QR算法结果 */
+    if (result_code != 0) {
+        /* QR算法未收敛：标记分析器状态，使用近似极点继续 */
+        analyzer->has_last_analysis = 0;
+    }
     
     int is_stable = 1;
     float min_real = FLT_MAX;

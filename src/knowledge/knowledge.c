@@ -1946,6 +1946,92 @@ int knowledge_base_infer(KnowledgeBase* kb, const char* rule_pattern,
     return (int)inference_count;
 }
 
+int knowledge_find_causal_path_length(KnowledgeBase* kb,
+                                      const char* from_entity,
+                                      const char* to_entity) {
+    if (!kb || !from_entity || !to_entity) return -1;
+    if (strcmp(from_entity, to_entity) == 0) return 0;
+
+    /* BFS因果路径搜索：在知识图谱中查找从from_entity到to_entity的最短路径
+     * 知识图谱边定义：entry.subject → entry.object（经由entry.predicate） */
+    #define CPL_QUEUE_SIZE 256
+    #define CPL_MAX_PATH 10
+
+    const char* queue[CPL_QUEUE_SIZE];
+    int queue_depth[CPL_QUEUE_SIZE];
+    int queue_head = 0, queue_tail = 0;
+
+    queue[queue_tail] = from_entity;
+    queue_depth[queue_tail] = 0;
+    queue_tail++;
+
+    /* 访问标记：使用简单的实体名记录，避免重复访问（最多256个已访问实体） */
+    const char* visited[256] = {NULL};
+    int visited_count = 0;
+
+    while (queue_head < queue_tail) {
+        const char* current = queue[queue_head];
+        int depth = queue_depth[queue_head];
+        queue_head++;
+
+        if (depth >= CPL_MAX_PATH) continue;
+
+        /* 检查是否已访问过 */
+        int already_visited = 0;
+        for (int v = 0; v < visited_count; v++) {
+            if (visited[v] && strcmp(visited[v], current) == 0) {
+                already_visited = 1;
+                break;
+            }
+        }
+        if (already_visited) continue;
+
+        /* 标记已访问 */
+        if (visited_count < 256) {
+            visited[visited_count++] = current;
+        }
+
+        /* 遍历知识库中所有条目，查找以current为subject的边 */
+        for (size_t i = 0; i < kb->size; i++) {
+            KnowledgeEntry* entry = &kb->entries[i].entry;
+
+            /* 检查是否为有效边：subject匹配current */
+            if (!entry->subject || !entry->object) continue;
+            if (strcmp(entry->subject, current) != 0) continue;
+
+            const char* next_entity = entry->object;
+
+            /* 找到目标实体 */
+            if (strcmp(next_entity, to_entity) == 0) {
+                return depth + 1;
+            }
+
+            /* 检查next_entity是否已在队列中或被访问过 */
+            int already_queued = 0;
+            for (int q = queue_head; q < queue_tail; q++) {
+                if (queue[q] && strcmp(queue[q], next_entity) == 0) {
+                    already_queued = 1;
+                    break;
+                }
+            }
+            for (int v = 0; v < visited_count && !already_queued; v++) {
+                if (visited[v] && strcmp(visited[v], next_entity) == 0) {
+                    already_queued = 1;
+                    break;
+                }
+            }
+
+            if (!already_queued && queue_tail < CPL_QUEUE_SIZE) {
+                queue[queue_tail] = next_entity;
+                queue_depth[queue_tail] = depth + 1;
+                queue_tail++;
+            }
+        }
+    }
+
+    return 0; /* 无路径 */
+}
+
 int knowledge_base_merge(KnowledgeBase* dest, KnowledgeBase* src, int conflict_resolution) {
     if (dest == NULL || src == NULL) {
         return -1;
@@ -5178,9 +5264,10 @@ void temporal_conflicts_free(TemporalConflict* conflicts, size_t count) {
 /* ============================================================================
  * 知识库预填充：预置基础常识知识
  * 
- * 根据需求"完整的知识库"，系统启动时预加载数学、物理、生物、地理、
- * 语言、计算机科学等领域的基础常识知识。
- * 所有知识以三元组（主体-谓词-客体）形式存储。
+ * N-015: 预置知识仅在编译宏SELFLNN_ALLOW_BOOTSTRAP_DATA定义时加载
+ * SOURCE_PRESET标记+低权重(0.5)确保可被用户学习/自动学习覆盖
+ * 严格真实数据模式下(knowledge_base_create)不调用此函数
+ * 所有知识以三元组（主体-谓词-客体）形式存储
  * ============================================================================ */
 
 #define PRESET_KNOWLEDGE_COUNT 300

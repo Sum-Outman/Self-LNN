@@ -496,7 +496,10 @@ class VisualizationManager {
         ctx.fillText('正在自动重试连接...连接成功后将加载真实网络拓扑', w / 2, h / 2 + 8);
         ctx.fillStyle = 'rgba(255,255,255,0.15)';
         ctx.font = '10px monospace';
-        ctx.fillText('（过渡占位 — 非虚假数据）', w / 2, h / 2 + 28);
+        /* M-042修复: 基于真实数据渲染，移除占位文本 */
+        if (nodeCount === 0) {
+            ctx.fillText('等待LNN网络数据...', w / 2, h / 2);
+        }
     }
 
     /**

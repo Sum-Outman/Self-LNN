@@ -363,9 +363,11 @@ static void memory_apply_decay(MemorySystem* system, float time_delta) {
                 float decay_factor = expf(-effective_decay * time_delta);
                 array[i]->strength *= decay_factor;
                 
-                // 如果强度太低，标记为完全遗忘（后续由垃圾回收清理）
-                if (array[i]->strength < 0.005f) {
-                    array[i]->strength = 0.0f;
+                /* M-017修复：渐进衰减至零（替代硬阈值0.005直接归零） */
+                if (array[i]->strength < 0.005f && array[i]->strength > 0.0f) {
+                    /* 最后阶段使用超级指数衰减平滑归零 */
+                    array[i]->strength *= expf(-base_decay_rate * time_delta * 10.0f);
+                    if (array[i]->strength < 1e-6f) array[i]->strength = 0.0f;
                 }
             }
         }
@@ -2437,17 +2439,9 @@ int memory_sample_training_batch(MemorySystem* system, MemoryType memory_type,
 /**
  * @brief 计算两个向量的点积相似度
  */
+/* F-023修复：使用统一余弦相似度替代本地实现 */
 static float compute_similarity(const float* v1, const float* v2, size_t dim) {
-    float dot = 0.0f;
-    float norm1 = 0.0f, norm2 = 0.0f;
-    for (size_t i = 0; i < dim; i++) {
-        dot += v1[i] * v2[i];
-        norm1 += v1[i] * v1[i];
-        norm2 += v2[i] * v2[i];
-    }
-    float denom = sqrtf(norm1 * norm2);
-    if (denom < 1e-10f) return 0.0f;
-    return dot / denom;
+    return math_cosine_similarity(v1, v2, dim);
 }
 
 /**

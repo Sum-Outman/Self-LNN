@@ -724,8 +724,64 @@ KSSelfCheckReport* ksc_run_self_check(KnowledgeBase* kb, KnowledgeGraph* kg,
         report->consistency_score = 1.0f;
     }
 
-    report->completeness_score = 0.85f;
-    report->freshness_score = 0.9f;
+    /* M-024修复: 基于实际数据计算完整性和新鲜度分数
+     * 替代硬编码固定值0.85和0.9 */
+    /* 完整性：基于知识覆盖度（条目数、类型分布） */
+    report->completeness_score = 0.5f;
+    if (report->total_entries_scanned > 0) {
+        /* 计算各类型知识条目覆盖度 */
+        int type_counts[8] = {0};
+        KnowledgeEntry* type_entries = (KnowledgeEntry*)safe_calloc(
+            (report->total_entries_scanned < 256 ? report->total_entries_scanned : 256), sizeof(KnowledgeEntry));
+        if (type_entries) {
+            KnowledgeQuery type_query;
+            memset(&type_query, 0, sizeof(type_query));
+            type_query.type_filter = -1;
+            int type_count = knowledge_base_query(kb, &type_query, type_entries,
+                report->total_entries_scanned < 256 ? report->total_entries_scanned : 256);
+            for (int t = 0; t < type_count; t++) {
+                if (type_entries[t].type >= 0 && type_entries[t].type < 8) {
+                    type_counts[type_entries[t].type]++;
+                }
+            }
+            /* 类型覆盖度：至少覆盖3种以上类型 */
+            int covered_types = 0;
+            for (int t = 0; t < 8; t++) if (type_counts[t] > 0) covered_types++;
+            float type_coverage = (float)covered_types / 5.0f; /* 目标5种类型 */
+            if (type_coverage > 1.0f) type_coverage = 1.0f;
+            /* 条目数饱和度：经验值500为良好 */
+            float size_score = report->total_entries_scanned < 500 ?
+                (float)report->total_entries_scanned / 500.0f : 1.0f;
+            report->completeness_score = 0.3f + 0.4f * type_coverage + 0.3f * size_score;
+            safe_free((void**)&type_entries);
+        }
+    }
+    /* 新鲜度：基于最近更新时间与当前时间的差异 */
+    {
+        time_t now = time(NULL);
+        time_t latest_update = 0;
+        KnowledgeEntry* fresh_entries = (KnowledgeEntry*)safe_calloc(256, sizeof(KnowledgeEntry));
+        if (fresh_entries) {
+            KnowledgeQuery fresh_query;
+            memset(&fresh_query, 0, sizeof(fresh_query));
+            int fresh_count = knowledge_base_query(kb, &fresh_query, fresh_entries, 256);
+            for (int t = 0; t < fresh_count; t++) {
+                if (fresh_entries[t].timestamp > latest_update) {
+                    latest_update = fresh_entries[t].timestamp;
+                }
+            }
+            safe_free((void**)&fresh_entries);
+        }
+        if (latest_update > 0) {
+            double hours_ago = difftime(now, latest_update) / 3600.0;
+            /* 24小时内更新=1.0，一周=0.7，一月=0.4 */
+            report->freshness_score = hours_ago < 24.0 ? 1.0f :
+                                      hours_ago < 168.0 ? (1.0f - (float)(hours_ago - 24.0) / 144.0 * 0.3f) :
+                                      hours_ago < 720.0 ? (0.7f - (float)(hours_ago - 168.0) / 552.0 * 0.3f) : 0.4f;
+        } else {
+            report->freshness_score = 0.9f;
+        }
+    }
 
     if (cfg.enable_auto_resolve && total_issues > 0) {
         ksc_auto_resolve(kb, report, total_issues);

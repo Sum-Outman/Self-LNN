@@ -483,14 +483,19 @@ int skill_library_execute(SkillLibrary* library, int skill_id,
     int stype = (int)skill.type;
     switch (stype) {
         case SKILL_TYPE_ATOMIC: {
-            /* F-008: 真实执行：通过system()调用技能命令 */
-            char exec_cmd[1024];
-            if (params && params[0]) {
-                snprintf(exec_cmd, sizeof(exec_cmd), "%s %s", skill.name, params);
+            /* M-004修复：内部能力调用替代system()（仅保留system()作为极简回退） */
+            int ret = -1;
+            if (skill.internal_handler) {
+                ret = skill.internal_handler(params);
             } else {
-                snprintf(exec_cmd, sizeof(exec_cmd), "%s", skill.name);
+                char exec_cmd[1024];
+                if (params && params[0]) {
+                    snprintf(exec_cmd, sizeof(exec_cmd), "%s %s", skill.name, params);
+                } else {
+                    snprintf(exec_cmd, sizeof(exec_cmd), "%s", skill.name);
+                }
+                ret = system(exec_cmd);
             }
-            int ret = system(exec_cmd);
             exec_success = (ret == 0) ? 1 : 0;
             snprintf(result->output_log, sizeof(result->output_log),
                     "执行原子技能: %s (系统返回=%d)", skill.name, ret);
@@ -501,10 +506,10 @@ int skill_library_execute(SkillLibrary* library, int skill_id,
                     "执行组合技能: %s (%d步骤): ", skill.name, skill.step_count);
             int all_ok = 1;
             for (int step = 0; step < skill.step_count && step < 32; step++) {
-                char step_cmd[256] = {0};
-                snprintf(step_cmd, sizeof(step_cmd), "%s_step%d", skill.name, step);
-                int ret = (params && params[0]) ? 
-                    system(step_cmd) : system(step_cmd);
+                int ret = -1;
+                if (skill.sub_skills && skill.sub_skills[step]) {
+                    ret = skill.sub_skills[step](params);
+                }
                 if (ret != 0) all_ok = 0;
                 char step_log[128];
                 int cur_len = (int)strlen(result->output_log);
@@ -516,13 +521,18 @@ int skill_library_execute(SkillLibrary* library, int skill_id,
             exec_success = all_ok;
             } break;
         case SKILL_TYPE_TASK: {
-            /* F-008: 真实执行：通过配置文件或脚本执行任务 */
+            /* M-004修复：优先内部任务执行器，回退shell */
+            int ret = -1;
+            if (skill.internal_handler) {
+                ret = skill.internal_handler(params);
+            } else {
+                char task_cmd[1024];
+                snprintf(task_cmd, sizeof(task_cmd), "sh execute_task.sh %s %s 2>&1",
+                        skill.name, params ? params : "");
+                ret = system(task_cmd);
+            }
             snprintf(result->output_log, sizeof(result->output_log),
-                    "执行任务技能: %s - 调用外部任务脚本", skill.name);
-            char task_cmd[1024];
-            snprintf(task_cmd, sizeof(task_cmd), "sh execute_task.sh %s %s 2>&1",
-                    skill.name, params ? params : "");
-            int ret = system(task_cmd);
+                    "执行任务技能: %s (返回=%d)", skill.name, ret);
             exec_success = (ret == 0) ? 1 : 0;
             } break;
         default: {

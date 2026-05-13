@@ -353,7 +353,8 @@ int robot_calibration_generate_excitation(RobotCalibration* calib,
                               * sinf((float)(k + 1) * w0 * t + calib->excitation.fourier_phases[k] + 0.5f * j);
                 }
             }
-            float J6[6*6] = {0};
+            /* M-035修复: J6需要6×max_cols空间（16列）而非6×6 */
+            float J6[6*16] = {0};
             build_identification_matrix(calib->nominal_dh, (int)n, q_eval, J6);
             for (int ri = 0; ri < 6; ri++)
                 for (int ci = 0; ci < 6; ci++)

@@ -18,6 +18,7 @@
 #include "selflnn/reasoning/planning.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/core/lnn.h"           /* F-017: LNN状态转移 */
 #include "selflnn/selflnn.h"           /* F-017: selflnn_get_lnn */
@@ -1986,8 +1987,8 @@ int planning_execute(PlanningSystem* system,
         for (size_t d = 0; d < state_dim && d < MAX_STATE_DIMENSION; d++) {
             float diff = target_state[d] - current_state[d];
             action[d] = diff * step_size;
-            /* 添加微扰动模拟执行不确定性 */
-            float noise = (float)((i * 31 + d * 17) % 1000) / 10000.0f - 0.05f;
+            /* M-010修复：使用密码学安全随机扰动替代确定性噪声 */
+            float noise = (secure_random_float() - 0.5f) * 2.0f * 0.05f;
             action[d] += noise * step_size * 0.1f;
         }
         

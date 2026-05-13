@@ -1504,24 +1504,43 @@ int semantic_analogy_find(const SemanticNetwork* net, const char* concept_a,
                            float* similarity) {
     if (!net || !concept_a || !concept_b || !target_a || !analog_b || !similarity) return -1;
 
+    /* M-003修复：深层类比推理
+     * 步骤1：找到源概念对的关系模式 */
     int src_rel_idx = -1;
+    float src_rel_strength = 0.0f;
     for (int i = 0; i < (int)net->relation_count; i++) {
         SemanticRelation* r = net->relations[i];
         if (r && r->source && r->target && r->source->name && r->target->name &&
             strcmp(r->source->name, concept_a) == 0 &&
             strcmp(r->target->name, concept_b) == 0) {
-            src_rel_idx = i; break;
+            src_rel_idx = i;
+            src_rel_strength = r->strength;
+            break;
         }
     }
     if (src_rel_idx < 0) return -1;
 
+    /* 步骤2：对目标概念的所有关系计算嵌入相似度 */
     int best_match = -1;
     float best_sim = 0.0f;
     for (int i = 0; i < (int)net->relation_count; i++) {
         SemanticRelation* r = net->relations[i];
-        if (r && r->source && r->source->name && strcmp(r->source->name, target_a) == 0) {
-            float sim = r->strength;
-            if (r->target && r->target->confidence > 0.0f) sim = r->target->confidence;
+        if (r && r->source && r->source->name &&
+            strcmp(r->source->name, target_a) == 0) {
+            /* 综合评分：关系强度 × 目标置信度 × 结构相似度 */
+            float structural_sim = 0.0f;
+            if (r->target && r->target->embedding && net->relations[src_rel_idx]->target &&
+                net->relations[src_rel_idx]->target->embedding) {
+                /* 使用嵌入向量的余弦相似度作为结构相似度 */
+                structural_sim = math_cosine_similarity(
+                    r->target->embedding,
+                    net->relations[src_rel_idx]->target->embedding,
+                    64);
+            }
+            float sim = r->strength * 0.4f;
+            if (r->target && r->target->confidence > 0.0f)
+                sim += r->target->confidence * 0.3f;
+            sim += structural_sim * 0.3f;
             if (sim > best_sim) { best_sim = sim; best_match = i; }
         }
     }
@@ -1529,7 +1548,7 @@ int semantic_analogy_find(const SemanticNetwork* net, const char* concept_a,
     if (best_match < 0) { *analog_b = NULL; *similarity = 0.0f; return 0; }
     *analog_b = (net->relations[best_match]->target && net->relations[best_match]->target->name)
                 ? net->relations[best_match]->target->name : NULL;
-    *similarity = best_sim * 0.5f;
+    *similarity = best_sim;
     return 0;
 }
 

@@ -15,6 +15,7 @@
 #include "selflnn/multimodal/sensor.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/utils/math_utils.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -46,9 +47,8 @@ static void _sf_quat_to_rotmat(const float q[4], float R[9]) {
  * 内部辅助函数
  * ============================================================================ */
 
-static float _sf_sig(float x) {
-    return 1.0f / (1.0f + expf(-x));
-}
+/* M-027修复：使用统一activation_sigmoid替代_sf_sig */
+#define _sf_sig(x) activation_sigmoid(x)
 
 static float _sf_tanh(float x) {
     return tanhf(x);

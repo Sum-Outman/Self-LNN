@@ -26,15 +26,17 @@
 /* 长期记忆条目内部追踪结构 */
 typedef struct {
     char key[256];
-    uint64_t creation_time;         /* 创建时间 */
-    uint64_t last_access_time;      /* 最后访问时间 */
-    uint64_t last_consolidation_time; /* 最后巩固时间 */
-    int access_count;               /* 总访问次数 */
-    int consolidation_count;        /* 巩固次数 */
-    float base_strength;            /* 基础强度 */
-    float current_strength;         /* 当前强度（含衰减） */
-    double repetition_interval;     /* 推荐复习间隔（秒） */
-    size_t data_size;               /* 数据大小 */
+    uint64_t creation_time;
+    uint64_t last_access_time;
+    uint64_t last_consolidation_time;
+    int access_count;
+    int repetition_count;          /* M-027: SM-2复习次数(n) */
+    float easiness_factor;         /* M-027: SM-2简易度因子(EF)，初始2.5 */
+    int consolidation_count;
+    float base_strength;
+    float current_strength;
+    double repetition_interval;
+    size_t data_size;
 } LTMAccessRecord;
 
 struct LongTermMemory {
@@ -84,17 +86,39 @@ static float ltm_hebbian_strengthen(float current_strength, int access_count, in
     return result > 1.0f ? 1.0f : result;
 }
 
-/* F-007: 间隔重复调度 — 计算最优复习间隔 */
-static double ltm_calculate_interval(float strength, float persistence) {
-    /* 基于SuperMemo SM-2简化算法
-     * I(n+1) = I(n) * EF
-     * EF' = EF + (0.1 - (5-q)*(0.08+(5-q)*0.02))
-     * 此处简化为：间隔 = 基数 * 强度 * 持久性
-     */
-    double base_interval = 3600.0; /* 1小时基础间隔 */
-    double interval = base_interval * (double)strength * (double)persistence * 24.0 * 7.0; /* 周级别 */
-    if (interval < 3600.0) interval = 3600.0;   /* 至少1小时 */
-    if (interval > 86400.0 * 365.0) interval = 86400.0 * 365.0; /* 最多1年 */
+/* M-027: SM-2完整算法 — 动态EF因子和间隔计算
+ * I(n+1) = I(n) * EF （若n=1则I(2)=6天，若n=2则I(3)=I(2)*EF）
+ * EF' = EF + (0.1 - (5-q)*(0.08+(5-q)*0.02))
+ * q=回忆质量(0-5)从strength映射，EF下限1.3 */
+static double ltm_calculate_interval(float strength, int rep_count, float* ef) {
+    /* 回忆质量q: 从strength(0-1)映射到SM-2的0-5分 */
+    int q = (int)(strength * 5.0f + 0.5f);
+    if (q < 0) q = 0; if (q > 5) q = 5;
+
+    /* 更新EF因子 */
+    float old_ef = *ef;
+    *ef = old_ef + (0.1f - (float)(5 - q) * (0.08f + (float)(5 - q) * 0.02f));
+    if (*ef < 1.3f) *ef = 1.3f;
+
+    /* SM-2间隔计算 */
+    double interval = 0.0;
+    if (rep_count == 0) {
+        interval = 60.0;           /* 首次：1分钟 */
+    } else if (rep_count == 1) {
+        interval = 86400.0;        /* n=1: 1天 */
+    } else if (rep_count == 2) {
+        interval = 86400.0 * 6.0;  /* n=2: 6天 */
+    } else {
+        interval = 86400.0 * 6.0;  /* 从6天基准开始 */
+        for (int i = 2; i < rep_count; i++)
+            interval *= old_ef;    /* EF的(n-2)次幂 */
+    }
+    /* 应用当前EF缩放 */
+    interval *= (*ef) / old_ef;
+
+    /* 约束范围 */
+    if (interval < 60.0) interval = 60.0;
+    if (interval > 86400.0 * 365.0) interval = 86400.0 * 365.0;
     return interval;
 }
 
@@ -112,9 +136,10 @@ static void ltm_apply_decay(LongTermMemory* memory) {
         float retention = ltm_ebbinghaus_decay(rec->base_strength, since_access, memory->config.persistence);
         rec->current_strength = rec->base_strength * retention;
         
-        /* 定期更新推荐复习间隔 */
+        /* 定期更新推荐复习间隔（SM-2完整算法） */
         if (since_access > rec->repetition_interval * 0.8) {
-            rec->repetition_interval = ltm_calculate_interval(rec->current_strength, memory->config.persistence);
+            rec->repetition_interval = ltm_calculate_interval(rec->current_strength,
+                rec->repetition_count, &rec->easiness_factor);
         }
         
         /* 极弱记忆自动清除 */
@@ -246,10 +271,13 @@ int long_term_memory_store(LongTermMemory* memory, const char* key,
         rec->last_access_time = now;
         rec->last_consolidation_time = now;
         rec->access_count = 1;
+        rec->repetition_count = 0;
+        rec->easiness_factor = 2.5f;
         rec->consolidation_count = 0;
         rec->base_strength = strength;
         rec->current_strength = strength;
-        rec->repetition_interval = ltm_calculate_interval(strength, memory->config.persistence);
+        rec->repetition_interval = ltm_calculate_interval(strength,
+            rec->repetition_count, &rec->easiness_factor);
         rec->data_size = data_size;
     }
     return result;
@@ -275,8 +303,11 @@ int long_term_memory_retrieve(LongTermMemory* memory, const char* key,
                 memory->access_records[idx].base_strength,
                 memory->access_records[idx].access_count,
                 memory->access_records[idx].consolidation_count);
+            memory->access_records[idx].repetition_count++;
             memory->access_records[idx].repetition_interval = ltm_calculate_interval(
-                memory->access_records[idx].current_strength, memory->config.persistence);
+                memory->access_records[idx].current_strength,
+                memory->access_records[idx].repetition_count,
+                &memory->access_records[idx].easiness_factor);
         }
     }
     return result;
@@ -302,7 +333,9 @@ int long_term_memory_update(LongTermMemory* memory, const char* key,
                 memory->access_records[idx].base_strength = 1.0f;
             memory->access_records[idx].current_strength = memory->access_records[idx].base_strength;
             memory->access_records[idx].repetition_interval = ltm_calculate_interval(
-                memory->access_records[idx].current_strength, memory->config.persistence);
+                memory->access_records[idx].current_strength,
+                memory->access_records[idx].repetition_count,
+                &memory->access_records[idx].easiness_factor);
         }
     }
     return result;

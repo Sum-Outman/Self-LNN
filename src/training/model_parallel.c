@@ -25,6 +25,32 @@ static void mp_matmul(const float* A, const float* B, float* C,
     }
 }
 
+/* F-009修复: 设备间AllReduce数据注册表
+ * 在单进程模型并行中，每个"设备"对应一个张量分区
+ * 注册表存储各设备分区的数据指针，用于真正的跨分区归约 */
+static struct {
+    float*  device_data[MP_MAX_DEVICES];
+    int     device_size[MP_MAX_DEVICES];
+    int     registered_count;
+} mp_reduce_registry = {0};
+
+static void mp_register_reduce_data(int device_id, float* data, int size) {
+    if (device_id >= 0 && device_id < MP_MAX_DEVICES && size > 0) {
+        mp_reduce_registry.device_data[device_id] = data;
+        mp_reduce_registry.device_size[device_id] = size;
+        if (device_id >= mp_reduce_registry.registered_count) {
+            mp_reduce_registry.registered_count = device_id + 1;
+        }
+    }
+}
+
+static void mp_unregister_reduce_data(int device_id) {
+    if (device_id >= 0 && device_id < MP_MAX_DEVICES) {
+        mp_reduce_registry.device_data[device_id] = NULL;
+        mp_reduce_registry.device_size[device_id] = 0;
+    }
+}
+
 static void mp_matmul_add(const float* A, const float* B, const float* C_in,
                            float* C_out, int M, int N, int K)
 {
@@ -202,20 +228,39 @@ int mp_tensor_allreduce(MPTensorPartition* tp, float* data, int count)
     if (reduce_size <= 0) return MP_ERROR_SIZE_MISMATCH;
 
     int num_devices = tp->num_devices;
+    int device_id = tp->device_id;
+
+    /* F-009修复: 注册当前设备的分区数据 */
+    mp_register_reduce_data(device_id, data, reduce_size);
+
+    /* 检查是否有多个设备已注册 */
+    int active_devices = 0;
+    for (int d = 0; d < mp_reduce_registry.registered_count && d < num_devices; d++) {
+        if (mp_reduce_registry.device_data[d] && mp_reduce_registry.device_size[d] >= reduce_size) {
+            active_devices++;
+        }
+    }
+
+    if (active_devices <= 1) {
+        /* 只有当前设备有数据，无需归约 */
+        return MP_ERROR_NONE;
+    }
+
     float* reduce_buffer = (float*)malloc((size_t)reduce_size * sizeof(float));
     if (!reduce_buffer) return MP_ERROR_ALLOC_FAILED;
 
-    for (int step = 0; step < num_devices; step++) {
-        if (step == 0) {
-            memcpy(reduce_buffer, data, (size_t)reduce_size * sizeof(float));
-        } else {
+    /* 将所有已注册设备的数据求和到reduce_buffer */
+    memset(reduce_buffer, 0, (size_t)reduce_size * sizeof(float));
+    for (int d = 0; d < mp_reduce_registry.registered_count && d < num_devices; d++) {
+        if (mp_reduce_registry.device_data[d]) {
             for (int i = 0; i < reduce_size; i++) {
-                reduce_buffer[i] += data[i];
+                reduce_buffer[i] += mp_reduce_registry.device_data[d][i];
             }
         }
     }
 
-    float inv_count = 1.0f / (float)num_devices;
+    /* 对所有设备的分区数据求平均并写回 */
+    float inv_count = 1.0f / (float)active_devices;
     for (int i = 0; i < reduce_size; i++) {
         data[i] = reduce_buffer[i] * inv_count;
     }
@@ -267,12 +312,18 @@ int mp_tensor_allgather(MPTensorPartition* tp, float* data, int count)
 
     float* full_buffer = (float*)malloc((size_t)full_rows * full_cols * sizeof(float));
     if (!full_buffer) { free(offsets); free(sizes); return MP_ERROR_ALLOC_FAILED; }
+    memset(full_buffer, 0, (size_t)full_rows * full_cols * sizeof(float));
 
+    /* F-009修复: 从注册表收集各设备分区数据实现真正的AllGather */
     for (int d = 0; d < num_devices; d++) {
         if (d == tp->device_id) {
             memcpy(full_buffer + offsets[d], data, (size_t)sizes[d] * sizeof(float));
         } else {
-            memset(full_buffer + offsets[d], 0, (size_t)sizes[d] * sizeof(float));
+            /* 从其他已注册设备的分区复制数据 */
+            float* other_data = mp_reduce_registry.device_data[d];
+            if (other_data && mp_reduce_registry.device_size[d] >= sizes[d]) {
+                memcpy(full_buffer + offsets[d], other_data, (size_t)sizes[d] * sizeof(float));
+            }
         }
     }
 

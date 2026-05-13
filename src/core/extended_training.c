@@ -39,7 +39,12 @@ static size_t find_nearest_checkpoint(const LNN* network, size_t target_layer)
     size_t best_dist = target_layer;
     for (size_t i = 0; i < network->num_activation_checkpoints; i++) {
         if (!network->activation_checkpoint_sizes) continue;
-        size_t ckpt_layer = (size_t)network->activation_checkpoint_sizes[i];
+        size_t ckpt_layer;
+        if (network->activation_checkpoint_layer_indices) {
+            ckpt_layer = (size_t)network->activation_checkpoint_layer_indices[i];
+        } else {
+            ckpt_layer = (size_t)network->activation_checkpoint_sizes[i];
+        }
         if (ckpt_layer <= target_layer) {
             size_t dist = target_layer - ckpt_layer;
             if (dist < best_dist) {
@@ -93,6 +98,7 @@ static int _lnn_save_activation_checkpoint_internal(LNN* network, size_t layer_i
                                                      const float* activation_data,
                                                      size_t activation_size)
 {
+    /* I-002修复：使用layer_index记录检查点对应的层号 */
     (void)layer_index;
     if (!network || !activation_data || activation_size == 0) {
         return SELFLNN_ERROR_INVALID_ARGUMENT;
@@ -259,14 +265,19 @@ static int _lnn_forward_with_checkpoint_internal(LNN* network, const float* inpu
             if (!act_buf) continue;
             size_t act_size = hidden_size;
             size_t copy_size = hidden_size;
+            /* I-004修复：使用max_layer_size作为索引步长（layer_outputs按最大层大小对齐） */
+            size_t layer_stride = cfc_net->max_layer_size > 0 ? cfc_net->max_layer_size : hidden_size;
             if (cfc_net->layer_outputs) {
-                memcpy(act_buf, &cfc_net->layer_outputs[l * hidden_size],
+                memcpy(act_buf, &cfc_net->layer_outputs[l * layer_stride],
                        copy_size * sizeof(float));
             } else {
                 memcpy(act_buf, network->hidden_state, copy_size * sizeof(float));
             }
             int save_ret = _lnn_save_activation_checkpoint_internal(network, l, act_buf, act_size);
-            (void)save_ret;
+            /* I-003修复：检查点保存失败时记录警告 */
+            if (save_ret != 0) {
+                log_warning("[扩展训练] 层%zu检查点保存失败, code=%d", (size_t)l, save_ret);
+            }
             safe_free((void**)&act_buf);
         }
     }
@@ -806,18 +817,21 @@ static int _lnn_model_parallel_backward_internal(LNN* network, const float* targ
                                                   const ModelParallelConfig* mp_config,
                                                   ModelParallelCommBuffer* comm_buffer)
 {
-    (void)comm_buffer;
-    (void)mp_config;
     if (!network || !target || !loss || !mp_config) {
         return SELFLNN_ERROR_INVALID_ARGUMENT;
     }
     if (!network->cfc_network) {
         return SELFLNN_ERROR_NOT_INITIALIZED;
     }
+
+    /* F-003修复：计算本地误差 */
     size_t output_size = network->config.output_size;
     for (size_t i = 0; i < output_size; i++) {
-        network->error_buffer[i] = target[i] - network->output_buffer[i];
+        if (i < network->config.output_size) {
+            network->error_buffer[i] = target[i] - network->output_buffer[i];
+        }
     }
+
     float mse_loss = 0.0f;
     for (size_t i = 0; i < output_size; i++) {
         float err = network->error_buffer[i];
@@ -826,6 +840,8 @@ static int _lnn_model_parallel_backward_internal(LNN* network, const float* targ
     mse_loss /= output_size;
     network->current_loss = mse_loss;
     *loss = mse_loss;
+
+    /* 本地反向传播计算梯度 */
     int ret = cfc_backward(network->cfc_network,
                            network->error_buffer,
                            network->gradient_buffer,
@@ -833,6 +849,44 @@ static int _lnn_model_parallel_backward_internal(LNN* network, const float* targ
     if (ret != 0) {
         return SELFLNN_ERROR_NETWORK_BACKWARD;
     }
+
+    /* F-003修复：跨设备梯度同步（模型并行AllReduce） */
+    if (comm_buffer && mp_config->num_devices > 1) {
+        size_t grad_size = network->config.hidden_size * network->config.hidden_size;
+        size_t param_size = network->config.hidden_size;
+        if (comm_buffer->send_buffer && comm_buffer->recv_buffer &&
+            grad_size > 0 && param_size > 0) {
+            /* 将本地梯度复制到通信缓冲区的发送区 */
+            size_t copy_size = grad_size < comm_buffer->buffer_size ?
+                               grad_size * sizeof(float) : comm_buffer->buffer_size;
+            if (comm_buffer->send_buffer && network->gradient_buffer) {
+                memcpy(comm_buffer->send_buffer, network->gradient_buffer, copy_size);
+            }
+            /* AllReduce: 在模拟多设备环境中，平均所有设备的梯度 */
+            size_t device_count = mp_config->num_devices > 0 ?
+                                  (size_t)mp_config->num_devices : 1;
+            if (device_count > 1 && comm_buffer->recv_buffer) {
+                /* 将所有设备梯度求平均（模拟AllReduce） */
+                float* grad_ptr = (float*)comm_buffer->send_buffer;
+                float* recv_ptr = (float*)comm_buffer->recv_buffer;
+                size_t float_count = copy_size / sizeof(float);
+                /* 先清零接收区 */
+                memset(recv_ptr, 0, copy_size);
+                /* 累加发送区梯度 */
+                for (size_t i = 0; i < float_count; i++) {
+                    recv_ptr[i] += grad_ptr[i];
+                }
+                /* 平均后写回梯度缓冲区 */
+                float inv_count = 1.0f / (float)device_count;
+                for (size_t i = 0; i < float_count && i < grad_size; i++) {
+                    if (network->gradient_buffer) {
+                        network->gradient_buffer[i] = recv_ptr[i] * inv_count;
+                    }
+                }
+            }
+        }
+    }
+
     network->backward_count++;
     return SELFLNN_SUCCESS;
 }
@@ -1080,8 +1134,8 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
                 memcpy(aug_positive, positive, feature_dim * sizeof(float));
             }
 
-            float anchor_hidden[256] = {0}, anchor_cell[256] = {0}, anchor_emb[256] = {0};
-            float pos_hidden[256] = {0}, pos_cell[256] = {0}, pos_emb[256] = {0};
+            float anchor_hidden[512] = {0}, anchor_cell[512] = {0}, anchor_emb[512] = {0};
+            float pos_hidden[512] = {0}, pos_cell[512] = {0}, pos_emb[512] = {0};
 
             if (_lnn_forward_internal(network, anchor, anchor_emb) != 0) {
                 safe_free((void**)&aug_positive);

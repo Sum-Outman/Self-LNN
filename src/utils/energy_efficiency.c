@@ -587,6 +587,10 @@ EnergyEfficiencyEngine* energy_efficiency_engine_create(void) {
     engine->total_saved_energy = 0.0;
     engine->avg_efficiency = 0.8;
 
+    /* M-011修复：初始化监控数据和优化规则 */
+    engine->monitoring_data = (float*)safe_calloc(64, sizeof(float));
+    engine->optimization_rules = (float*)safe_calloc(16, sizeof(float));
+
     return engine;
 }
 

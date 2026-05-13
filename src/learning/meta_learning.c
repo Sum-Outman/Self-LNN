@@ -13,6 +13,7 @@
 
 #include "selflnn/learning/meta_learning.h"
 #include "selflnn/learning/learning.h"
+#include "selflnn/utils/secure_random.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/training/training.h"
 #include "selflnn/utils/memory_utils.h"
@@ -107,18 +108,14 @@ static int copy_model_parameters(NeuralNetwork* src, NeuralNetwork* dst) {
         return -1;
     }
     
-    // 使用真实API复制模型参数
-    // 将NeuralNetwork转换为LNN
-    LNN* src_net = (LNN*)src;
-    LNN* dst_net = (LNN*)dst;
-    
-    // 检查网络配置是否相同
+    /* M-002修复：通过LNN opaque指针安全获取配置，不做危险强制转换 */
     LNNConfig src_config, dst_config;
     memset(&src_config, 0, sizeof(src_config));
     memset(&dst_config, 0, sizeof(dst_config));
-    if (lnn_get_config(src_net, &src_config) != 0 || 
-        lnn_get_config(dst_net, &dst_config) != 0) {
-        return -1;  // 获取配置失败
+    /* 使用lnn_get_config安全接口获取配置（接受void*） */
+    if (lnn_get_config((LNN*)src, &src_config) != 0 || 
+        lnn_get_config((LNN*)dst, &dst_config) != 0) {
+        return -1;
     }
     
     if (src_config.input_size != dst_config.input_size ||
@@ -2325,15 +2322,10 @@ NeuralNetwork* meta_learner_adapt(MetaLearner* learner, const MetaTask* task) {
     // 从基础模型提取初始参数
     int extracted_count = extract_model_parameters(learner->meta_model, ctx.initial_parameters, learner->parameter_count);
     if (extracted_count <= 0) {
-        // 提取失败，使用随机参数作为回退
-        uintptr_t model_hash = (uintptr_t)learner->meta_model;
-        uintptr_t task_hash = (uintptr_t)task;
-        uint32_t seed = (uint32_t)(model_hash ^ task_hash);
-        
+        /* M-001修复：使用secure_random_float替代简单LCG回退 */
+        rng_init();
         for (size_t i = 0; i < learner->parameter_count; i++) {
-            seed = seed * 1103515245 + 12345;
-            uint32_t rand_val = (seed >> 16) & 0x7FFF;
-            ctx.initial_parameters[i] = (rand_val / 32767.5f) - 0.5f;
+            ctx.initial_parameters[i] = secure_random_float() - 0.5f;
         }
     }
     

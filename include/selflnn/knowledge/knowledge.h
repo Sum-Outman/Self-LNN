@@ -351,6 +351,17 @@ int knowledge_base_infer(KnowledgeBase* kb, const char* rule_pattern,
                         KnowledgeEntry* inferred_entries, size_t max_entries);
 
 /**
+ * @brief 在知识图谱中查找两个实体间的因果路径长度（BFS搜索）
+ * @param kb 知识库句柄
+ * @param from_entity 起始实体名
+ * @param to_entity 目标实体名
+ * @return int 路径长度（1=直接连接），0表示无路径，-1表示错误
+ */
+int knowledge_find_causal_path_length(KnowledgeBase* kb,
+                                      const char* from_entity,
+                                      const char* to_entity);
+
+/**
  * @brief 合并两个知识库
  * 
  * @param dest 目标知识库

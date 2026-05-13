@@ -1309,6 +1309,10 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
     float last_sample_t = t;
     int max_attempts = config->max_steps * 10;
 
+    /* I-011修复：预分配旧状态缓冲区，避免每步malloc */
+    float* old_hidden_state = (float*)safe_malloc(hs * sizeof(float));
+    if (!old_hidden_state) return -1;
+
     while (sign * (t_end - t) > 1e-14f && stats->total_steps < config->max_steps &&
            stats->total_steps < max_attempts) {
         /* 计算剩余步长 */
@@ -1317,14 +1321,19 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
         if (h_step > h) h_step = h;
         if (h_step < config->dt_min) h_step = config->dt_min;
 
+        /* 保存前向传播前的旧状态 */
+        memcpy(old_hidden_state, hidden_state, hs * sizeof(float));
+
         /* 前向一步 */
         int ret = cfc_forward(network, input, hidden_state, cell_state, output ? output : hidden_state);
-        if (ret != 0) return ret;
+        if (ret != 0) { safe_free((void**)&old_hidden_state); return ret; }
 
-        /* 简单误差估计：状态变化率 */
+        /* F-006修复：新旧状态变化率误差估计 */
         float max_err = 0.0f;
         for (size_t i = 0; i < hs; i++) {
-            float chg = fabsf(hidden_state[i] - cell_state[i]) / (config->abs_tol + config->rel_tol * fmaxf(fabsf(hidden_state[i]), fabsf(cell_state[i])));
+            float chg = fabsf(hidden_state[i] - old_hidden_state[i]) /
+                       (config->abs_tol + config->rel_tol *
+                        fmaxf(fabsf(hidden_state[i]), fabsf(old_hidden_state[i])));
             if (chg > max_err) max_err = chg;
         }
 
@@ -1363,9 +1372,14 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
     if (stats->min_dt_used < 1e-12f) stats->min_dt_used = h;
     stats->used_stiff_solver = using_stiff_solver;
 
+    /* I-012修复：步数达到上限未完成时标记（外部可通过rejected_steps推断） */
+    if (stats->total_steps >= config->max_steps)
+        stats->rejected_steps = -(stats->rejected_steps + 1);
+
     /* 最终轨迹点 */
     if (traj) cfc_trajectory_append(traj, t, hidden_state);
 
+    safe_free((void**)&old_hidden_state);
     return 0;
 }
 

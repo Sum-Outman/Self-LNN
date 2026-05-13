@@ -92,6 +92,8 @@ struct ReasoningEngine {
     float* history_outputs;
     size_t history_capacity;
     size_t history_size;
+    size_t history_input_dim;   /* S-031修复: 存储历史输入维度 */
+    size_t history_output_dim;  /* S-031修复: 存储历史输出维度 */
     char* history_file_path;
 };
 
@@ -233,6 +235,9 @@ int reasoning_record_history(ReasoningEngine* engine, const float* input, size_t
                               const float* output, size_t output_size) {
     if (!engine || !input || !output) return -1;
     size_t total = input_size + output_size;
+    /* S-031修复: 记录实际的输入输出维度 */
+    engine->history_input_dim = total;
+    engine->history_output_dim = output_size;
     if (engine->history_capacity == 0) {
         engine->history_capacity = 256;
         engine->history_inputs = (float*)safe_malloc(engine->history_capacity * total * sizeof(float));
@@ -265,11 +270,16 @@ int reasoning_save_history(const ReasoningEngine* engine, const char* filepath) 
     if (!fp) return -1;
     int count = engine->inference_count;
     size_t hist_size = engine->history_size;
+    /* S-031修复: 保存实际维度信息 */
+    size_t in_dim = engine->history_input_dim > 0 ? engine->history_input_dim : 256;
+    size_t out_dim = engine->history_output_dim > 0 ? engine->history_output_dim : 256;
     fwrite(&count, sizeof(int), 1, fp);
     fwrite(&hist_size, sizeof(size_t), 1, fp);
+    fwrite(&in_dim, sizeof(size_t), 1, fp);
+    fwrite(&out_dim, sizeof(size_t), 1, fp);
     if (hist_size > 0 && engine->history_inputs && engine->history_outputs) {
-        fwrite(engine->history_inputs, sizeof(float), hist_size * 256, fp);
-        fwrite(engine->history_outputs, sizeof(float), hist_size * 256, fp);
+        fwrite(engine->history_inputs, sizeof(float), hist_size * in_dim, fp);
+        fwrite(engine->history_outputs, sizeof(float), hist_size * out_dim, fp);
     }
     fclose(fp);
     return 0;
@@ -284,18 +294,33 @@ int reasoning_load_history(ReasoningEngine* engine, const char* filepath) {
     if (!fp) return -1;
     int count = 0;
     size_t hist_size = 0;
+    size_t in_dim = 256, out_dim = 256;
     fread(&count, sizeof(int), 1, fp);
     fread(&hist_size, sizeof(size_t), 1, fp);
+    /* S-031修复: 尝试读取维度信息（兼容旧格式） */
+    long saved_pos = ftell(fp);
+    fseek(fp, 0, SEEK_END);
+    long file_end = ftell(fp);
+    fseek(fp, saved_pos, SEEK_SET);
+    size_t remaining = (size_t)(file_end - saved_pos);
+    size_t expected_min = hist_size * 256 * 2 * sizeof(float);
+    /* 如果文件足够大包含维度字段，读取它们 */
+    if (remaining > expected_min) {
+        fread(&in_dim, sizeof(size_t), 1, fp);
+        fread(&out_dim, sizeof(size_t), 1, fp);
+    }
     if (hist_size > 0 && hist_size < 65536) {
         safe_free((void**)&engine->history_inputs);
         safe_free((void**)&engine->history_outputs);
-        engine->history_inputs = (float*)safe_malloc(hist_size * 256 * sizeof(float));
-        engine->history_outputs = (float*)safe_malloc(hist_size * 256 * sizeof(float));
+        engine->history_inputs = (float*)safe_malloc(hist_size * in_dim * sizeof(float));
+        engine->history_outputs = (float*)safe_malloc(hist_size * out_dim * sizeof(float));
         if (engine->history_inputs && engine->history_outputs) {
-            fread(engine->history_inputs, sizeof(float), hist_size * 256, fp);
-            fread(engine->history_outputs, sizeof(float), hist_size * 256, fp);
+            fread(engine->history_inputs, sizeof(float), hist_size * in_dim, fp);
+            fread(engine->history_outputs, sizeof(float), hist_size * out_dim, fp);
             engine->history_size = hist_size;
             engine->history_capacity = hist_size;
+            engine->history_input_dim = in_dim;
+            engine->history_output_dim = out_dim;
             engine->inference_count = count;
         }
     }

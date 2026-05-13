@@ -259,8 +259,10 @@ int laplace_spectral_filter(LaplaceEnhancedSystem* system, const float* input,
 
 int laplace_enhance_gradients(LaplaceEnhancedSystem* system, float* gradients,
                              size_t grad_size, float learning_rate) {
-    (void)learning_rate;
     if (!system || !gradients || grad_size == 0) return -1;
+
+    /* I-008修复：使用learning_rate缩放频域增强梯度 */
+    float lr = learning_rate > 0.0f ? learning_rate : 1e-3f;
 
     /* 频域分析梯度 */
     LaplaceSpectralFeatures features;
@@ -286,8 +288,11 @@ int laplace_enhance_gradients(LaplaceEnhancedSystem* system, float* gradients,
 
     system->filter_config.cutoff_frequency = saved_cutoff;
 
-    /* 混合原始梯度和滤波梯度 */
+    /* 混合原始梯度和滤波梯度（I-008修复：使用learning_rate控制混合强度） */
     float alpha = system->filter_config.smoothing_alpha;
+    /* 学习率越高，滤波梯度贡献越大，帮助加速收敛 */
+    float lr_scale = fminf(lr * 100.0f, 1.0f);
+    alpha *= lr_scale;
     for (size_t i = 0; i < grad_size; i++) {
         gradients[i] = (1.0f - alpha) * gradients[i] + alpha * filtered[i];
     }

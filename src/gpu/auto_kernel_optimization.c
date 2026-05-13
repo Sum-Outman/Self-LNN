@@ -8,11 +8,18 @@
 
 
 #include "selflnn/gpu/auto_kernel_optimization.h"
+#include "selflnn/gpu/gpu.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <float.h>
@@ -518,12 +525,40 @@ AutoKernelOptimizer* auto_kernel_optimizer_create(int device_id, const char* dev
     optimizer->accumulated_speedup = 0.0;
     optimizer->cache_enabled = 1;
     optimizer->last_cache_cleanup = time(NULL);
-    optimizer->max_work_group_size = 256;
-    optimizer->supports_doubles = 0;
-    optimizer->supports_half = 1;
-    optimizer->compute_units = 8;
-    optimizer->clock_speed_mhz = 1000.0f;
-    optimizer->global_memory_size = 4ULL * 1024 * 1024 * 1024;
+
+    /* F-022修复：从实际GPU硬件查询设备参数，替代硬编码默认值 */
+    {
+        GpuDeviceInfo gpu_info;
+        memset(&gpu_info, 0, sizeof(gpu_info));
+        GpuBackend best = gpu_auto_select();
+        int found_gpu = gpu_get_device_info(best, 0, &gpu_info);
+        if (found_gpu == 0) {
+            /* 无GPU时使用CPU核心数作为compute_units */
+#ifdef _WIN32
+            SYSTEM_INFO si;
+            GetSystemInfo(&si);
+            gpu_info.compute_units = (int)si.dwNumberOfProcessors;
+#else
+            long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+            gpu_info.compute_units = nprocs > 0 ? (int)nprocs : 4;
+#endif
+            gpu_info.max_work_group_size = 256;
+            gpu_info.clock_speed_mhz = 0.0f;
+            gpu_info.global_mem_size = 0;
+            gpu_info.supports_fp16 = 0;
+            gpu_info.supports_fp64 = 0;
+        }
+        optimizer->max_work_group_size = gpu_info.max_work_group_size > 0 ?
+            gpu_info.max_work_group_size : 256;
+        optimizer->supports_doubles = gpu_info.supports_fp64 ? 1 : 0;
+        optimizer->supports_half = gpu_info.supports_fp16 ? 1 : 0;
+        optimizer->compute_units = gpu_info.compute_units > 0 ?
+            gpu_info.compute_units : 8;
+        optimizer->clock_speed_mhz = gpu_info.clock_speed_mhz > 0.0f ?
+            gpu_info.clock_speed_mhz : 1000.0f;
+        optimizer->global_memory_size = gpu_info.global_mem_size > 0 ?
+            gpu_info.global_mem_size : (4ULL * 1024 * 1024 * 1024);
+    }
 
     init_default_params(optimizer);
 

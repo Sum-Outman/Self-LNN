@@ -3685,15 +3685,30 @@ async function saveLNNParameters() {
  * 开始轮询训练状态
  */
 function startTrainingStatusPolling() {
-    // 这里可以实现训练状态轮询逻辑
-    // 例如：每5秒调用一次获取训练状态的API
+    /* H-007修复: 实现真实训练状态轮询 */
+    if (window._trainingPollInterval) return;
+    window._trainingPollInterval = setInterval(async function() {
+        try {
+            if (window.SelfLnnApi && typeof window.SelfLnnApi.getTrainingStatus === 'function') {
+                var status = await window.SelfLnnApi.getTrainingStatus();
+                if (status && status.running) {
+                    var epochEl = document.getElementById('training-current-epoch');
+                    var lossEl = document.getElementById('training-current-loss');
+                    var stageEl = document.getElementById('training-current-stage');
+                    if (epochEl) epochEl.textContent = status.epoch || '?';
+                    if (lossEl) lossEl.textContent = status.loss ? status.loss.toFixed(4) : '?';
+                    if (stageEl) stageEl.textContent = status.stage || '训练中';
+                }
+            }
+        } catch(e) { /* 静默忽略轮询错误 */ }
+    }, 5000);
 }
 
-/**
- * 停止轮询训练状态
- */
 function stopTrainingStatusPolling() {
-    // 这里可以停止训练状态轮询
+    if (window._trainingPollInterval) {
+        clearInterval(window._trainingPollInterval);
+        window._trainingPollInterval = null;
+    }
 }
 
 // 添加CSS动画
@@ -6163,7 +6178,7 @@ async function saveGeneralSettings() {
             language: document.getElementById('system-language') ? document.getElementById('system-language').value : 'zh-CN',
             timezone: document.getElementById('timezone') ? document.getElementById('timezone').value : 'Asia/Shanghai',
             auto_backup: document.getElementById('auto-backup') ? document.getElementById('auto-backup').value : 'disabled',
-            log_level: document.getElementById('log-level') ? document.getElementById('log-level').value : 'info'
+            log_level: document.getElementById('settings-log-level') ? document.getElementById('settings-log-level').value : 'info'
         };
         if (window.SelfLnnApi && typeof window.SelfLnnApi.saveSettings === 'function') {
             var result = await window.SelfLnnApi.saveSettings(settings);
@@ -6639,6 +6654,113 @@ async function searchMemories() {
         showNotification('搜索记忆失败: ' + e.message, 'error');
     }
 }
+
+/* ================================================================
+ * M-022修复：统一通知系统（替代alert()/prompt()）
+ * ================================================================ */
+var SelfLnnNotify = {
+    _container: null,
+    _queue: [],
+
+    init: function() {
+        if (this._container) return;
+        this._container = document.createElement('div');
+        this._container.className = 'selflnn-notify-container';
+        this._container.id = 'selflnn-notify-container';
+        document.body.appendChild(this._container);
+    },
+
+    show: function(message, type, duration) {
+        if (!this._container) this.init();
+        type = type || 'info';
+        duration = duration || 3000;
+        var el = document.createElement('div');
+        el.className = 'selflnn-notify selflnn-notify-' + type;
+        el.innerHTML = '<span class="notify-icon">' +
+            (type === 'success' ? '\u2713' : type === 'error' ? '\u2717' : type === 'warning' ? '\u26A0' : '\u2139') +
+            '</span><span class="notify-msg">' + (message || '') + '</span>' +
+            '<span class="notify-close" onclick="this.parentElement.remove()">\u00D7</span>';
+        this._container.appendChild(el);
+        var self = this;
+        setTimeout(function() {
+            if (el.parentElement) {
+                el.style.opacity = '0';
+                el.style.transform = 'translateX(100%)';
+                setTimeout(function() { if (el.parentElement) el.remove(); }, 300);
+            }
+        }, duration);
+        return el;
+    },
+
+    confirm: function(message, onOk, onCancel) {
+        var overlay = document.createElement('div');
+        overlay.className = 'selflnn-confirm-overlay';
+        overlay.innerHTML =
+            '<div class="selflnn-confirm-box">' +
+            '<div class="confirm-msg">' + (message || '') + '</div>' +
+            '<div class="confirm-buttons">' +
+            '<button class="btn-cancel">\u53D6\u6D88</button>' +
+            '<button class="btn-ok">\u786E\u5B9A</button>' +
+            '</div></div>';
+        document.body.appendChild(overlay);
+        overlay.querySelector('.btn-ok').onclick = function() {
+            document.body.removeChild(overlay);
+            if (onOk) onOk();
+        };
+        overlay.querySelector('.btn-cancel').onclick = function() {
+            document.body.removeChild(overlay);
+            if (onCancel) onCancel();
+        };
+        overlay.onclick = function(e) {
+            if (e.target === overlay) {
+                document.body.removeChild(overlay);
+                if (onCancel) onCancel();
+            }
+        };
+        return overlay;
+    }
+};
+
+/* 将全局showNotification重定向到SelfLnnNotify.show */
+var _origShowNotification = window.showNotification;
+window.showNotification = function(message, type, duration) {
+    return SelfLnnNotify.show(message, type, duration);
+};
+
+/* ================================================================
+ * M-023修复：生产日志级别控制
+ * ================================================================ */
+var SelfLnnLog = {
+    _level: 2, /* 0=OFF, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG */
+
+    setLevel: function(level) { this._level = level; },
+
+    error: function() {
+        if (this._level >= 1) console.error.apply(console, arguments);
+    },
+    warn: function() {
+        if (this._level >= 2) console.warn.apply(console, arguments);
+    },
+    info: function() {
+        if (this._level >= 3) console.info.apply(console, arguments);
+    },
+    debug: function() {
+        if (this._level >= 4) console.log.apply(console, arguments);
+    },
+
+    /* 生产模式：仅ERROR */
+    productionMode: function() { this._level = 1; }
+};
+
+/* API服务端日志重定向 */
+var _origConsoleLog = console.log;
+var _origConsoleWarn = console.warn;
+console.log = function() {
+    if (SelfLnnLog._level >= 4) _origConsoleLog.apply(console, arguments);
+};
+console.warn = function() {
+    if (SelfLnnLog._level >= 2) _origConsoleWarn.apply(console, arguments);
+};
 
 /* ===== 推理统计 - 刷新 ===== */
 async function refreshReasoningStats() {

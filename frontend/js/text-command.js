@@ -10,10 +10,33 @@ class TextCommandSystem {
         this.enabled = true;
         this.onCommandResult = null;
         this.commandPrefix = '';
+        /* M-034修复：默认前缀列表可从后端动态更新 */
+        this._dynamicPrefixes = null;
+        this._staticPrefixes = ['控制', '机器人', '电脑', '计算机', '打开', '关闭', '开始', '停止', '系统'];
     }
 
     setCommandEngine(engine) {
         this.commandEngine = engine;
+    }
+
+    /* M-034修复：从后端动态获取命令前缀列表 */
+    async fetchCommandPrefixes() {
+        try {
+            if (window.SelfLnnApi && window.SelfLnnApi.getCommandPrefixes) {
+                var result = await window.SelfLnnApi.getCommandPrefixes();
+                if (result && result.prefixes && result.prefixes.length > 0) {
+                    this._dynamicPrefixes = result.prefixes;
+                }
+            }
+        } catch (e) {
+            this._dynamicPrefixes = null;
+        }
+    }
+
+    setCommandPrefixes(prefixes) {
+        if (Array.isArray(prefixes)) {
+            this._dynamicPrefixes = prefixes;
+        }
     }
 
     processText(text) {
@@ -40,7 +63,7 @@ class TextCommandSystem {
     isCommandText(text) {
         if (!text) return false;
         const trimmed = text.trim().toLowerCase();
-        const prefixes = ['控制', '机器人', '电脑', '计算机', '打开', '关闭', '开始', '停止', '系统'];
+        const prefixes = this._dynamicPrefixes || this._staticPrefixes;
         return prefixes.some(p => trimmed.startsWith(p));
     }
 

@@ -1024,22 +1024,23 @@ int hardware_interface_connect(HardwareInterface* hw) {
         return smart_hardware_connect(hw, 3, 1);
     }
 
-    /* HW_MODE_AUTO：优先尝试真实硬件连接，失败时回退到仿真 */
-    int result = smart_hardware_connect(hw, 1, 1); /* 减少重试次数 */
+    /* F-021修复：HW_MODE_AUTO 尝试硬件连接，失败时报告状态而非静默回退 */
+    int result = smart_hardware_connect(hw, 1, 1);
     if (result == 0) {
-        hw->mode = 1; /* 真实硬件模式 */
+        hw->mode = 1;
         return 0;
     }
 
-    /* 真实硬件连接失败，自动回退到物理仿真模式 */
-    hw->mode = 2;
-    hw->is_connected = 1;
-    hw->health_status = 1; /* 警告状态表示使用仿真 */
-    hw->health_score = 0.5f;
-    hw->connection_count++;
+    /* 硬件不可用：保持HW_MODE_AUTO状态，报告当前状态由上层决策 */
+    hw->mode = 0; /* 保持AUTO模式 */
+    hw->is_connected = 0;
+    hw->health_status = 2; /* 错误状态：等待手动干预 */
+    hw->health_score = 0.3f;
     snprintf(hw->last_error, sizeof(hw->last_error),
-            "真实硬件不可用，已自动切换到物理仿真模式。所有传感器和执行器将使用仿真引擎。");
-    return 0;
+            "真实硬件不可用。系统未自动回退仿真（F-021修复：需显式配置仿真模式）。"
+            "请使用 --sim 参数进入仿真模式，或连接硬件后重试。");
+    log_warning("[硬件接口] %s", hw->last_error);
+    return -1;
 }
 
 /* ============================================================================

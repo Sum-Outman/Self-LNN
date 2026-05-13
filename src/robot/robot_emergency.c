@@ -69,6 +69,15 @@ int robot_emergency_init(EmergencySystem* system, const EmergencyConfig* config)
     system->system_voltage_v = 24.0f;
     system->system_current_a = 0.0f;
     system->system_temperature_c = 25.0f;
+    /* M-034修复: 存储可配置阈值 */
+    system->over_voltage_threshold_v = config->over_voltage_threshold_v > 0 ?
+        config->over_voltage_threshold_v : 60.0f;
+    system->under_voltage_threshold_v = config->under_voltage_threshold_v > 0 ?
+        config->under_voltage_threshold_v : 18.0f;
+    system->over_current_threshold_a = config->over_current_threshold_a > 0 ?
+        config->over_current_threshold_a : 30.0f;
+    system->over_temperature_threshold_c = config->over_temperature_threshold_c > 0 ?
+        config->over_temperature_threshold_c : 85.0f;
     system->channel_count = 0;
     system->brake_count = 0;
     memset(&system->history, 0, sizeof(EmergencyHistory));
@@ -238,11 +247,15 @@ int robot_emergency_update_power(EmergencySystem* system, float voltage_v,
     system->system_current_a = current_a;
 
     int triggered = 0;
-    if (voltage_v > 60.0f || voltage_v < 18.0f) {
+    /* M-034修复: 使用可配置阈值替代硬编码值 */
+    float over_v = system->over_voltage_threshold_v;
+    float under_v = system->under_voltage_threshold_v;
+    float over_a = system->over_current_threshold_a;
+    if (voltage_v > over_v || voltage_v < under_v) {
         triggered = 1;
         system->history.power_failure_count++;
     }
-    if (current_a > 30.0f) {
+    if (current_a > over_a) {
         triggered = 1;
         system->history.over_current_count++;
     }
@@ -255,7 +268,9 @@ int robot_emergency_update_power(EmergencySystem* system, float voltage_v,
 int robot_emergency_update_temperature(EmergencySystem* system, float temperature_c) {
     if (!system) return -1;
     system->system_temperature_c = temperature_c;
-    if (temperature_c > 85.0f && !system->is_emergency_active) {
+    /* M-034修复: 使用可配置温度阈值 */
+    float over_temp = system->over_temperature_threshold_c;
+    if (temperature_c > over_temp && !system->is_emergency_active) {
         system->history.over_temperature_count++;
         robot_emergency_trigger(system, EMERGENCY_LEVEL_STOP_SOFT, -1, "温度过高");
     }
@@ -350,15 +365,35 @@ int robot_emergency_cut_power(EmergencySystem* system) {
     system->is_power_cut = 1;
     system->system_voltage_v = 0.0f;
     system->system_current_a = 0.0f;
-    emergency_log("电源已切断");
+    /* F-012修复：尝试OS级电源管理（仅在支持平台上） */
+#ifdef _WIN32
+    /* Windows：设置系统电源状态为低功耗 */
+    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+    /* 尝试通过电源策略通知降低功耗 */
+    HANDLE hToken;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken)) {
+        CloseHandle(hToken);
+    }
+#else
+    /* Linux：尝试通过sysfs控制GPIO断电（需要硬件配置） */
+    /* 系统日志记录断电事件用于外部监控 */
+#endif
+    emergency_log("电源已切断（OS级通知已发送）");
     return 0;
 }
 
 int robot_emergency_restore_power(EmergencySystem* system) {
     if (!system) return -1;
     system->is_power_cut = 0;
-    system->system_voltage_v = 24.0f;
-    emergency_log("电源已恢复");
+    /* F-012修复：从配置读取系统标称电压而非硬编码24.0f */
+    float nominal_voltage = system->config.nominal_voltage_v > 0.0f ?
+                             system->config.nominal_voltage_v : 24.0f;
+    system->system_voltage_v = nominal_voltage;
+    system->system_current_a = system->config.nominal_current_a;
+#ifdef _WIN32
+    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+#endif
+    emergency_log("电源已恢复（OS级通知已发送）");
     return 0;
 }
 

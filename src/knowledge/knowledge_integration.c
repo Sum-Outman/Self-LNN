@@ -1055,15 +1055,52 @@ size_t knowledge_integration_check_consistency(KnowledgeIntegrationSystem* syste
                 }
             }
             
-            // 检查4: 调用知识库内部矛盾检测（如果可用）
-            // 注意：这里执行基本矛盾检测，支持扩展高级检测函数
+            // 检查4: 调用知识库内部矛盾检测
             if (total_entries > 100 && inconsistency_count < max_inconsistencies) {
-                char* msg = (char*)safe_malloc(256);
-                if (msg) {
-                    snprintf(msg, 256, "知识库 '%s' 包含 %zu 个条目，建议运行详细矛盾检测",
+                /* S-026修复: 执行真实矛盾检测而非仅建议
+                 * 抽样检查知识条目间是否存在明显的逻辑冲突 */
+                int conflict_found = 0;
+                KnowledgeQuery query;
+                memset(&query, 0, sizeof(query));
+                query.type_filter = -1;
+                query.max_confidence = 1.0f;
+
+                KnowledgeEntry* sample = (KnowledgeEntry*)safe_malloc(
+                    (total_entries < 256 ? total_entries : 256) * sizeof(KnowledgeEntry));
+                if (sample) {
+                    int sample_count = knowledge_base_query(kb, &query, sample,
+                        total_entries < 256 ? total_entries : 256);
+                    for (int a = 0; a < sample_count - 1 && !conflict_found; a++) {
+                        for (int b = a + 1; b < sample_count && !conflict_found; b++) {
+                            /* 检查冲突：相同主体+谓词但不同客体 */
+                            if (sample[a].subject && sample[b].subject &&
+                                sample[a].predicate && sample[b].predicate &&
+                                strcmp(sample[a].subject, sample[b].subject) == 0 &&
+                                strcmp(sample[a].predicate, sample[b].predicate) == 0 &&
+                                sample[a].object && sample[b].object &&
+                                strcmp(sample[a].object, sample[b].object) != 0) {
+                                conflict_found = 1;
+                                char* msg = (char*)safe_malloc(512);
+                                if (msg) {
+                                    snprintf(msg, 512, "知识库 '%s' 发现冲突: [%s %s %s] vs [%s %s %s]",
+                                        system->kbs[kb_idx].name ? system->kbs[kb_idx].name : "未知",
+                                        sample[a].subject, sample[a].predicate, sample[a].object,
+                                        sample[b].subject, sample[b].predicate, sample[b].object);
+                                    inconsistencies[inconsistency_count++] = msg;
+                                }
+                            }
+                        }
+                    }
+                    safe_free((void**)&sample);
+                }
+                if (!conflict_found && inconsistency_count < max_inconsistencies) {
+                    char* msg = (char*)safe_malloc(256);
+                    if (msg) {
+                        snprintf(msg, 256, "知识库 '%s' 一致性检查通过 (%zu条目)",
                             system->kbs[kb_idx].name ? system->kbs[kb_idx].name : "未知",
                             total_entries);
-                    inconsistencies[inconsistency_count++] = msg;
+                        inconsistencies[inconsistency_count++] = msg;
+                    }
                 }
             }
         } else {

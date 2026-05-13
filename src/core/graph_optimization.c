@@ -1715,21 +1715,65 @@ int graph_execute(ComputationGraph* graph) {
             }
 
             case OP_TYPE_SPLIT: {
-                if (node->input_count < 1 || !node->inputs[0]) return -1;
+                /* F-008修复：真正的张量分割（按输出节点数等分） */
+                if (node->input_count < 1 || !node->inputs[0] || node->output_count < 1) return -1;
                 float* inp = (float*)node->inputs[0]->output_tensors[0].data;
-                if (kernel_reshape(output, inp, out_count) != 0) return -1;
+                size_t total_elements = (size_t)node->inputs[0]->output_tensors[0].total_size;
+                size_t per_output = total_elements / (size_t)node->output_count;
+                for (int o = 0; o < node->output_count; o++) {
+                    size_t offset = (size_t)o * per_output;
+                    size_t copy_size = (o == node->output_count - 1)
+                        ? total_elements - offset : per_output;
+                    if (offset + copy_size <= total_elements) {
+                        memcpy((float*)output + offset, inp + offset,
+                               copy_size * sizeof(float));
+                    }
+                }
                 break;
             }
 
             case OP_TYPE_DROPOUT: {
+                /* F-008修复：真实Dropout（伯努利掩码随机置零） */
                 if (node->input_count < 1 || !node->inputs[0]) return -1;
                 float* inp = (float*)node->inputs[0]->output_tensors[0].data;
-                memcpy(output, inp, out_bytes);
+                size_t elem_count = out_bytes / sizeof(float);
+                float dropout_rate = node->params ? node->params[0] : 0.5f;
+                if (dropout_rate <= 0.0f) dropout_rate = 0.5f;
+                if (dropout_rate >= 1.0f) dropout_rate = 0.5f;
+                float keep_prob = 1.0f - dropout_rate;
+                float scale = 1.0f / keep_prob;
+                unsigned int seed = (unsigned int)((uintptr_t)node * 2654435761u);
+                for (size_t i = 0; i < elem_count; i++) {
+                    seed = seed * 1103515245u + 12345u;
+                    float mask = ((seed >> 16) & 0x7FFF) / 32768.0f;
+                    output[i] = (mask < keep_prob) ? (inp[i] * scale) : 0.0f;
+                }
                 break;
             }
 
             case OP_TYPE_OUTPUT:
+                /* F-008修复：输出算子直接传递数据 */
+                if (node->input_count >= 1 && node->inputs[0]) {
+                    memcpy(output, node->inputs[0]->output_tensors[0].data, out_bytes);
+                }
+                break;
+
             case OP_TYPE_CUSTOM:
+                /* F-008修复：通过回调函数表执行自定义算子 */
+                if (node->custom_kernel) {
+                    Tensor args[8];
+                    for (int a = 0; a < node->input_count && a < 8; a++) {
+                        if (node->inputs[a]) {
+                            args[a] = node->inputs[a]->output_tensors[0];
+                        }
+                    }
+                    if (node->custom_kernel(args, node->input_count,
+                                           (Tensor*)output, node->output_count) != 0) {
+                        return -1;
+                    }
+                }
+                break;
+
             default:
                 break;
         }

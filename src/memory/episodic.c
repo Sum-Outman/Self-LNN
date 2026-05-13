@@ -232,10 +232,19 @@ int episodic_memory_retrieve_event(EpisodicMemory* memory, const char* event_id,
     
     // 使用底层记忆系统检索情景记忆
     int result = memory_retrieve(memory->memory_system, event_id, data, data_size, strength, NULL);
-    
+
+    /* M-028修复: 返回事件索引中的真实存储时间戳而非current_time */
     if (result == 0 && timestamp) {
-        // 完整实现：返回当前时间作为时间戳
-        *timestamp = memory->current_time;
+        int found = 0;
+        for (size_t i = 0; i < memory->event_count; i++) {
+            if (memory->event_index[i].event_id &&
+                strcmp(memory->event_index[i].event_id, event_id) == 0) {
+                *timestamp = memory->event_index[i].timestamp;
+                found = 1;
+                break;
+            }
+        }
+        if (!found) *timestamp = memory->current_time;
     }
     
     return result;

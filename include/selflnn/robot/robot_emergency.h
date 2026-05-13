@@ -109,6 +109,11 @@ typedef struct {
     float system_voltage_v;
     float system_current_a;
     float system_temperature_c;
+    /* M-034修复: 存储可配置的紧急阈值 */
+    float over_voltage_threshold_v;
+    float under_voltage_threshold_v;
+    float over_current_threshold_a;
+    float over_temperature_threshold_c;
     uint64_t uptime_ms;
     uint64_t recovery_start_time_ms;
     int channel_count;
@@ -133,6 +138,9 @@ typedef struct {
     int brake_test_interval_s;
     int max_channel_count;
     int max_brake_count;
+    /* M-013修复：可配置标称电压/电流（替代restore_power中硬编码24.0f） */
+    float nominal_voltage_v;          /**< 标称系统电压(V)，默认24.0 */
+    float nominal_current_a;          /**< 标称系统电流(A)，默认0.0 */
 } EmergencyConfig;
 
 extern const EmergencyConfig EMERGENCY_CONFIG_DEFAULT;

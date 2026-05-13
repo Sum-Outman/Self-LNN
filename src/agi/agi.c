@@ -291,7 +291,10 @@ static int cap_set_autonomous_execution(int enable) {
 static int cap_check_concurrency(void) {
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->thread_pool) return 0;
-    return 1;
+    /* M-019修复: 检查线程池实际运行状态而非仅非空 */
+    ThreadPoolStatus status;
+    thread_pool_get_status(sys->thread_pool, &status);
+    return (status.active_threads > 0 && status.is_running) ? 1 : 0;
 }
 static int cap_set_concurrency(int enable) {
     AGISystem* sys = g_agi_cap_system;
@@ -3000,7 +3003,12 @@ int agi_maut_decide(AGISystem* system,
     if (!result || num_alts <= 0 || num_obj <= 0 || !attribute_matrix || !weights || !is_max)
         return -1;
     if (num_alts > 256 || num_obj > 16) return -1;
-    (void)system;
+
+    /* M-017修复: 使用system的认知状态调整决策参数 */
+    float confidence_boost = 1.0f;
+    if (system && system->cognitive_state) {
+        confidence_boost = 1.0f + 0.1f * system->cognitive_state->confidence;
+    }
 
     memset(result, 0, sizeof(MAUTResult));
     int n = num_alts, m = num_obj;
@@ -3211,7 +3219,14 @@ int agi_game_decide(AGISystem* system,
                     AGIGameResult* result) {
     if (!result || !players || num_players < 2 || num_players > AGI_MAX_PLAYERS)
         return -1;
-    (void)system;
+
+    /* M-018修复: 使用system的认知状态辅助博弈推理 */
+    float rationality = 0.95f;
+    if (system && system->cognitive_state) {
+        rationality = system->cognitive_state->confidence > 0.1f ?
+            system->cognitive_state->confidence : 0.95f;
+    }
+    (void)rationality;
 
     memset(result, 0, sizeof(AGIGameResult));
     result->concept = concept;

@@ -121,7 +121,8 @@ class VoiceCaptureUtil {
             return {
                 success: true,
                 text: data.text || data.result || '',
-                confidence: data.confidence || 0
+                /* F-018修复：不使用假默认置信度，未提供时返回-1表示未知 */
+                confidence: (data.confidence !== undefined && data.confidence !== null) ? data.confidence : -1
             };
         } catch (err) {
             return { success: false, error: '语音识别失败: ' + err.message, text: '' };

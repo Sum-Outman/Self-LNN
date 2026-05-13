@@ -43,6 +43,15 @@ typedef struct {
     float stability_threshold; /**< 稳定性阈值 */
 } LaplaceConfig;
 
+/* M-025修复：公共默认配置（消除6处重复初始化） */
+extern const LaplaceConfig LAPLACE_CONFIG_DEFAULT;
+
+/**
+ * @brief 获取拉普拉斯分析器的推荐默认配置
+ * @return LaplaceConfig 默认配置（num_samples=256, sample_rate=1000, cutoff=50Hz, order=2）
+ */
+const LaplaceConfig* laplace_get_default_config(void);
+
 /**
  * @brief 系统极点
  */

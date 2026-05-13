@@ -993,13 +993,15 @@ static int atomic_compare_exchange_size_t(volatile size_t* ptr, size_t expected,
     // Windows x64: 使用InterlockedCompareExchange64
     return InterlockedCompareExchange64((volatile LONGLONG*)ptr, (LONGLONG)desired, (LONGLONG)expected) == (LONGLONG)expected;
 #elif defined(__GNUC__) || defined(__clang__)
-    // GCC/Clang: 使用__sync_val_compare_and_swap内置函数
     return __sync_val_compare_and_swap(ptr, expected, desired) == expected;
 #else
-    // 根据项目要求"禁止任何降级处理"，在不支持原子操作的平台上不进行非原子操作
-    // 始终返回失败（安全但保守）
-    // 在实际生产环境中，应该确保平台支持原子操作
-    return 0;  // 始终返回失败，避免数据竞争
+    /* S-025修复: 在不支持原子操作的平台上使用互斥锁实现安全的CAS回退 */
+    static pthread_mutex_t g_cas_fallback_lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&g_cas_fallback_lock);
+    int result = (*ptr == expected);
+    if (result) *ptr = desired;
+    pthread_mutex_unlock(&g_cas_fallback_lock);
+    return result;
 #endif
 }
 
@@ -1912,9 +1914,19 @@ static int opencl_backend_get_device_info(int device_index, GpuDeviceInfo* info)
     }
     
     info->total_memory = (size_t)global_mem_size;
-    // 根据"禁止任何模拟值"原则，不使用百分比估计值
-    // 返回总内存作为最大可用内存（保守但真实）
-    info->free_memory = (size_t)global_mem_size;
+    /* M-031修复：尝试通过vendor扩展查询真实空闲内存 */
+    {
+        size_t free_mem = global_mem_size;
+#ifdef CL_DEVICE_GLOBAL_FREE_MEMORY_AMD
+        /* AMD扩展：CL_DEVICE_GLOBAL_FREE_MEMORY_AMD = 0x403E */
+        cl_ulong amd_free = 0;
+        cl_int ret = clGetDeviceInfo(device_id, 0x403E, sizeof(amd_free), &amd_free, NULL);
+        if (ret == CL_SUCCESS && amd_free > 0) {
+            free_mem = (size_t)amd_free;
+        }
+#endif
+        info->free_memory = free_mem;
+    }
     info->compute_units = (int)max_compute_units;
     info->max_work_group_size = (int)max_work_group_size;
     info->clock_speed = (float)max_clock_frequency;

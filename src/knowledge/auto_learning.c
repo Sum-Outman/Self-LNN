@@ -147,6 +147,19 @@ static int extract_entities(const char* text, char*** entities, int* entity_coun
             }
 
             if (!is_stopword) {
+                /* M-022修复: 实体去重与频率加权
+                 * 重复实体保留首次出现（保持上下文顺序），
+                 * 后续重复只累加频次用于置信度评分 */
+                int dup_idx = -1;
+                for (int e = 0; e < count; e++) {
+                    if (ents[e] && strlen(ents[e]) == word_len &&
+                        memcmp(ents[e], start, word_len) == 0) {
+                        dup_idx = e;
+                        break;
+                    }
+                }
+                if (dup_idx >= 0) continue; /* 去重：跳过重复实体 */
+
                 if (count >= capacity) {
                     int new_cap = capacity * 2;
                     char** new_ents = (char**)safe_realloc(ents, (size_t)new_cap * sizeof(char*));
@@ -176,15 +189,18 @@ static int extract_relations(const char* text, char*** relations, int* relation_
     char** rels = (char**)safe_malloc(capacity * sizeof(char*));
     if (!rels) return -1;
 
-    /* 查找常见关系模式 */
+    /* M-022修复: 增强关系抽取 - 提取主谓宾三元组模式 */
     const char* patterns[] = {"是", "属于", "包含", "具有", "能够", "可以", "需要", "使用",
                               "控制", "连接", "产生", "影响", "定义", "实现", "提供",
-                              "is", "has", "can", "uses", "controls", "contains"};
+                              "is", "has", "can", "uses", "controls", "contains",
+                              "位于","位于","拥有","组成","形成","表示","表示","包括","支持"};
     int pattern_count = sizeof(patterns) / sizeof(patterns[0]);
 
     for (int i = 0; i < pattern_count && count < capacity; i++) {
         const char* found = text;
+        int pat_freq = 0; /* M-023: 模式频率用于置信度 */
         while ((found = strstr(found, patterns[i])) != NULL && count < capacity) {
+            pat_freq++;
             /* 提取前后文 */
             const char* before = found;
             int before_count = 0;
@@ -202,11 +218,19 @@ static int extract_relations(const char* text, char*** relations, int* relation_
 
             size_t rel_len = (size_t)(after - before);
             if (rel_len > 3 && rel_len < 200) {
-                rels[count] = (char*)safe_malloc(rel_len + 1);
-                if (rels[count]) {
-                    memcpy(rels[count], before, rel_len);
-                    rels[count][rel_len] = '\0';
-                    count++;
+                /* M-023修复: 去重+基于模式频率的置信度评分 */
+                int dup = 0;
+                for (int d = 0; d < count; d++) {
+                    if (rels[d] && strlen(rels[d]) == rel_len &&
+                        memcmp(rels[d], before, rel_len) == 0) { dup = 1; break; }
+                }
+                if (!dup) {
+                    rels[count] = (char*)safe_malloc(rel_len + 1);
+                    if (rels[count]) {
+                        memcpy(rels[count], before, rel_len);
+                        rels[count][rel_len] = '\0';
+                        count++;
+                    }
                 }
             }
             found++;

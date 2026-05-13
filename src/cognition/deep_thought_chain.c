@@ -2,6 +2,7 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/math_utils.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -41,17 +42,8 @@ static const char* step_names[] = {
     "行动"
 };
 
-static float cosine_sim_dtc(const float* a, const float* b, size_t dim) {
-    float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (size_t i = 0; i < dim; i++) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    float denom = sqrtf(na) * sqrtf(nb);
-    if (denom < 1e-10f) return 0.0f;
-    return dot / denom;
-}
+/* F-023修复：使用统一余弦相似度替代本地实现 */
+#define cosine_sim_dtc(a, b, dim) math_cosine_similarity((a), (b), (dim))
 
 static float euclidean_dist_dtc(const float* a, const float* b, size_t dim) {
     float sum = 0.0f;
@@ -164,9 +156,17 @@ int dtc_reason_chain(DTCSystem* system,
         size_t copy_dim = input_dim < DTC_EMBED_DIM ? input_dim : DTC_EMBED_DIM;
         memcpy(base_embed, input_data, copy_dim * sizeof(float));
     } else if (query) {
+        /* S-013修复: 使用LNN编码器生成真实语义嵌入，替代字符ASCII/255简化方式 */
+        float query_input[DTC_EMBED_DIM];
+        memset(query_input, 0, sizeof(query_input));
         size_t qlen = strlen(query);
         for (size_t i = 0; i < qlen && i < DTC_EMBED_DIM; i++)
-            base_embed[i] = (float)query[i] / 255.0f;
+            query_input[i] = (float)(unsigned char)query[i] / 255.0f;
+        if (system->thought_net) {
+            lnn_forward(system->thought_net, query_input, base_embed);
+        } else {
+            memcpy(base_embed, query_input, DTC_EMBED_DIM * sizeof(float));
+        }
     }
 
     float norm = 0.0f;
@@ -182,16 +182,33 @@ int dtc_reason_chain(DTCSystem* system,
     float current_embed[DTC_EMBED_DIM];
     memcpy(current_embed, base_embed, DTC_EMBED_DIM * sizeof(float));
     unsigned int seed = (unsigned int)(query ? strlen(query) : 42);
+    /* S-014修复: 使用当前嵌入能量+时间混合种子生成认知噪声
+     * 替代确定性公式((seed+step*53+j*7)%1000)/1000 */
+    seed ^= (unsigned int)((uint64_t)time(NULL) & 0xFFFFFFFF);
 
     for (size_t step = 0; step < max_steps; step++) {
         DTCThoughtNode* node = &result_out->nodes[step];
         node->step_type = (DTCStepType)(step % 8);
         node->parent_index = (step > 0) ? step - 1 : 0;
 
+        /* 基于嵌入统计特性的认知噪声模型 */
+        float embed_var = 0.0f;
+        for (size_t j = 0; j < DTC_EMBED_DIM; j++) {
+            float d = current_embed[j];
+            embed_var += d * d;
+        }
+        embed_var /= (float)DTC_EMBED_DIM;
+        float noise_scale = system->config.temperature * sqrtf(embed_var + 1e-6f);
+
         float thought_input[DTC_EMBED_DIM];
         for (size_t j = 0; j < DTC_EMBED_DIM; j++) {
-            float noise = ((float)((seed + step * 53 + j * 7) % 1000) / 1000.0f - 0.5f);
-            thought_input[j] = current_embed[j] + noise * system->config.temperature;
+            /* box-muller-like: 使用LCG+hash生成近似高斯噪声 */
+            seed = seed * 1103515245 + 12345;
+            float u1 = (float)((seed >> 16) & 0x7FFF) / 32768.0f;
+            seed = seed * 1103515245 + 12345;
+            float u2 = (float)((seed >> 16) & 0x7FFF) / 32768.0f;
+            float noise = sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.2831853f * u2);
+            thought_input[j] = current_embed[j] + noise * noise_scale * 0.1f;
         }
 
         float thought_out[DTC_EMBED_DIM] = {0};
@@ -211,9 +228,17 @@ int dtc_reason_chain(DTCSystem* system,
         node->branching_factor = DTC_CLAMP(raw_branching * 2.0f, 0.0f, 1.0f);
 
         node->thought_text = (char*)safe_calloc(1024, 1);
-        snprintf(node->thought_text, 1024, "[步骤%zu: %s] 置信度:%.2f 不确定性:%.2f 分支因子:%.2f",
-                 step, step_names[node->step_type],
-                 node->confidence, node->uncertainty, node->branching_factor);
+        /* M-011修复: 思维文本融入LNN输出统计分析而非纯格式字符串 */
+        float embed_energy = 0.0f;
+        int active_dims = 0;
+        for (size_t j = 0; j < DTC_EMBED_DIM && j < 32; j++) {
+            embed_energy += thought_out[j] * thought_out[j];
+            if (fabsf(thought_out[j]) > 0.2f) active_dims++;
+        }
+        snprintf(node->thought_text, 1024,
+            "[%s] 置信:%.2f 能量:%.3f 激活:%d/%d 分支:%.2f",
+            step_names[node->step_type],
+            node->confidence, sqrtf(embed_energy), active_dims, 32, node->branching_factor);
         node->text_len = strlen(node->thought_text);
 
         node->has_branches = (node->branching_factor > system->config.branching_threshold &&

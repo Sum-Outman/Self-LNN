@@ -1380,12 +1380,30 @@ static pthread_mutex_t g_onto_cc_lock = PTHREAD_MUTEX_INITIALIZER;
 #define ONTO_CC_UNLOCK() pthread_mutex_unlock(&g_onto_cc_lock)
 #endif
 
-static OntoClass onto_classes[ONTO_MAX_CLASSES];
+/* M-029修复：动态增长替代静态128类限制 */
+static OntoClass* onto_classes = NULL;
 static int onto_class_count = 0;
+static int onto_class_capacity = 0;
+#define ONTO_INITIAL_CAPACITY 128
+#define ONTO_GROW_FACTOR 2
 
 int onto_add_class(const char* name, const float* embedding, int dim) {
     ONTO_CC_LOCK();
-    if (onto_class_count >= ONTO_MAX_CLASSES || !name) { ONTO_CC_UNLOCK(); return -1; }
+    if (!name) { ONTO_CC_UNLOCK(); return -1; }
+    /* 首次分配或容量不足时动态扩容 */
+    if (!onto_classes) {
+        onto_classes = (OntoClass*)safe_calloc(ONTO_INITIAL_CAPACITY, sizeof(OntoClass));
+        if (!onto_classes) { ONTO_CC_UNLOCK(); return -1; }
+        onto_class_capacity = ONTO_INITIAL_CAPACITY;
+    }
+    if (onto_class_count >= onto_class_capacity) {
+        int new_cap = onto_class_capacity * ONTO_GROW_FACTOR;
+        OntoClass* tmp = (OntoClass*)safe_realloc(onto_classes, (size_t)new_cap * sizeof(OntoClass));
+        if (!tmp) { ONTO_CC_UNLOCK(); return -1; }
+        memset(tmp + onto_class_capacity, 0, (size_t)(new_cap - onto_class_capacity) * sizeof(OntoClass));
+        onto_classes = tmp;
+        onto_class_capacity = new_cap;
+    }
     OntoClass* c = &onto_classes[onto_class_count++];
     ONTO_CC_UNLOCK();
     strncpy(c->class_name, name, 63);

@@ -41,19 +41,34 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
         return -1;
     }
 
-    void* generator = data_generator_create(&gen_config);
-    if (!generator) {
-        safe_free((void**)&inputs);
-        safe_free((void**)&targets);
-        return -1;
+    /* S-024修复: 优先从真实数据文件加载训练数据
+     * 只有在无法加载真实数据时才使用数据生成器合成数据
+     * 合成数据仅供引导训练(bootstrap)使用 */
+    int loaded_real = 0;
+    if (gen_config.data_path && gen_config.data_path[0] != '\0') {
+        DataLoader* loader = data_loader_create();
+        if (loader) {
+            loaded_real = data_loader_load(loader, gen_config.data_path,
+                                          inputs, targets, actual_samples);
+            data_loader_free(loader);
+        }
     }
 
-    int gen_ret = data_generator_generate(generator, inputs, targets, actual_samples);
-    data_generator_free(generator);
-    if (gen_ret != 0) {
-        safe_free((void**)&inputs);
-        safe_free((void**)&targets);
-        return -1;
+    if (!loaded_real) {
+        /* 回退到数据生成器合成训练数据（仅bootstrapping） */
+        void* generator = data_generator_create(&gen_config);
+        if (!generator) {
+            safe_free((void**)&inputs);
+            safe_free((void**)&targets);
+            return -1;
+        }
+        int gen_ret = data_generator_generate(generator, inputs, targets, actual_samples);
+        data_generator_free(generator);
+        if (gen_ret != 0) {
+            safe_free((void**)&inputs);
+            safe_free((void**)&targets);
+            return -1;
+        }
     }
 
     TrainingConfig train_cfg = training_config_default();
@@ -180,9 +195,69 @@ int training_pipeline_pretrain_all_sensors(LNN* sensor_fusion_net, LNN* slam_net
 }
 
 int training_pipeline_pretrain_all_modules(void* system_context) {
+    /* F-004修复：从system_context获取所有子网络并执行真实预训练
+     * system_context为SystemInitialization结构体指针，包含所有子LNN网络引用 */
+    if (!system_context) {
+        log_warning("[训练管线] system_context为NULL，无法执行预训练");
+        return -1;
+    }
+
+    /* 通过selflnn全局接口获取各子网络 */
+    LNN* lnn_network = (LNN*)selflnn_get_lnn_network();
+    if (!lnn_network) {
+        log_warning("[训练管线] 主LNN网络未初始化，跳过预训练");
+        return -1;
+    }
+
+    int total_ok = 0, total_fail = 0;
+
+    /* 视觉模块预训练 */
+    {
+        LNN* vision = (LNN*)selflnn_get_subsystem("vision_net");
+        LNN* deep_vision = (LNN*)selflnn_get_subsystem("deep_vision_net");
+        LNN* liquid_vision = (LNN*)selflnn_get_subsystem("liquid_vision_net");
+        LNN* image_recog = (LNN*)selflnn_get_subsystem("image_recognition_net");
+        if (vision || deep_vision || liquid_vision || image_recog) {
+            int r = training_pipeline_pretrain_all_vision(vision, deep_vision,
+                                                           liquid_vision, image_recog);
+            if (r == 0) total_ok++; else total_fail++;
+        }
+    }
+
+    /* 音频模块预训练 */
+    {
+        LNN* speech = (LNN*)selflnn_get_subsystem("speech_recognition_net");
+        LNN* audio_sem = (LNN*)selflnn_get_subsystem("audio_semantic_net");
+        LNN* vad = (LNN*)selflnn_get_subsystem("vad_net");
+        if (speech || audio_sem || vad) {
+            int r = training_pipeline_pretrain_all_audio(speech, audio_sem, vad);
+            if (r == 0) total_ok++; else total_fail++;
+        }
+    }
+
+    /* 传感器模块预训练 */
+    {
+        LNN* sensor_fusion = (LNN*)selflnn_get_subsystem("sensor_fusion_net");
+        LNN* slam = (LNN*)selflnn_get_subsystem("slam_net");
+        LNN* depth = (LNN*)selflnn_get_subsystem("depth_estimation_net");
+        LNN* ocr = (LNN*)selflnn_get_subsystem("ocr_net");
+        if (sensor_fusion || slam || depth || ocr) {
+            int r = training_pipeline_pretrain_all_sensors(sensor_fusion, slam, depth, ocr);
+            if (r == 0) total_ok++; else total_fail++;
+        }
+    }
+
+    /* 在主LNN上运行基础权重校准 */
+    {
+        void* main_network = selflnn_get_lnn_network();
+        if (main_network) {
+            int r = training_pipeline_train_multimodal((LNN*)main_network,
+                          "main_lnn", 128, 128, 2000, 30, 5e-4f);
+            if (r == 0) total_ok++; else total_fail++;
+        }
+    }
+
+    log_info("[训练管线] 全模块预训练完成: 成功%d组 失败%d组", total_ok, total_fail);
     (void)system_context;
-    log_info("[训练管线] 多模态模块预训练管线就绪");
-    log_info("[训练管线] 使用合成数据进行基础权重校准");
-    log_info("[训练管线] 预训练后CfC/LNN权重从随机转为有意义特征提取器");
-    return 0;
+    return total_fail > 0 ? -1 : 0;
 }

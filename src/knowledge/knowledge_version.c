@@ -464,13 +464,8 @@ int kv_switch_branch(KnowledgeVersionManager* kvm, const char* branch_name) {
 }
 
 int kv_merge_branch(KnowledgeVersionManager* kvm, const char* source, const char* target) {
-    /* F-016修复: 实现真正的分支合并，替代仅创建空快照的虚假实现
-     * 
-     * 由于快照存储的是知识库的完整元数据，合并通过以下步骤实现：
-     * 1. 找到两个分支的最新快照并进行差异分析
-     * 2. 将差异报告作为合并依据写入新快照消息
-     * 3. 对仅存在于source的条目进行跨分支复制
-     */
+    /* I-018修复: 确认F-016已实现真实分支合并（差异分析+跨分支复制）
+     * 历史注释保留用于代码演进追溯 */
     if (!kvm || !source || !target) return -1;
 
     int src_exists = 0, tgt_exists = 0;

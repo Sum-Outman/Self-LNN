@@ -40,10 +40,14 @@ static pthread_mutex_t g_ou_lock = PTHREAD_MUTEX_INITIALIZER;
 #define EXPLORE_EPSILON 1e-8f
 #define EXPLORE_RAND_MAX 2147483647
 
-/* 内部随机生成器 */
-static unsigned int explore_rand_seed = 12345;
+/* M-020修复: 使用时间混合种子替代纯LCG确定性伪随机 */
+static unsigned int explore_rand_seed = 0;
 
 static float explore_rand_float(void) {
+    if (explore_rand_seed == 0) {
+        explore_rand_seed = (unsigned int)time(NULL);
+        if (explore_rand_seed == 0) explore_rand_seed = 12345;
+    }
     explore_rand_seed = explore_rand_seed * 1103515245 + 12345;
     return (float)((explore_rand_seed >> 16) & 0x7FFF) / 32768.0f;
 }

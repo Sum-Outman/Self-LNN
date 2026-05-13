@@ -427,12 +427,11 @@ static float _ci_if_statement(CiInterpreter* ci) {
     if (truth > 0.5f) {
         result = _ci_parse_block(ci);
     } else {
-        if (_ci_match(ci, 'e')) {
-            if (_ci_current(ci)->type == CI_TOK_IDENT &&
-                strcmp(_ci_current(ci)->ident, "else") == 0) {
-                _ci_next(ci);
-                result = _ci_parse_block(ci);
-            }
+        /* N-010修复: 完整else检测（先peek检查"else"标识符） */
+        if (_ci_current(ci)->type == CI_TOK_IDENT &&
+            strcmp(_ci_current(ci)->ident, "else") == 0) {
+            _ci_next(ci);
+            result = _ci_parse_block(ci);
         }
     }
     return result;
@@ -440,14 +439,27 @@ static float _ci_if_statement(CiInterpreter* ci) {
 
 static float _ci_for_loop(CiInterpreter* ci) {
     if (!_ci_expect(ci, '(')) return 0.0f;
+    /* N-009修复: 完整for循环解析 init;cond;inc */
     _ci_statement(ci);
+    _ci_expect(ci, ';');
     float result = 0.0f;
     float cond = _ci_expr(ci);
     _ci_expect(ci, ';');
-    while (cond > 0.01f || cond < -0.01f) {
-        result = _ci_parse_block(ci);
+    if (cond > 0.01f || cond < -0.01f) {
+        /* 保存增量表达式位置 */
+        int saved_pos = ci->pos;
         _ci_expr(ci);
-        cond = _ci_expr(ci);
+        int inc_pos = ci->pos;
+        ci->pos = saved_pos;
+        while (cond > 0.01f || cond < -0.01f) {
+            result = _ci_parse_block(ci);
+            ci->pos = inc_pos;
+            _ci_expr(ci);
+            ci->pos = inc_pos;
+            /* 重新求值条件 */
+            ci->pos = saved_pos;
+            cond = _ci_expr(ci);
+        }
     }
     return result;
 }

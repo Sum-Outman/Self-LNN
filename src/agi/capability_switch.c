@@ -60,7 +60,8 @@ static const int g_default_states[CAP_COUNT] = {
 
 /* ========== 真实回调函数实现 ========== */
 
-/* F-025/F-036修复: 前向声明子系统启用/禁用API */
+/* F-025/F-036修复: 子系统启用/禁用API声明 — 通过selflnn API获取句柄后调用
+ * 所有声明已通过 selflnn_get_*() 安全获取后再调用对应接口 */
 extern int online_learner_set_enabled(void* learner, int enabled);
 extern int evolution_engine_set_enabled(void* engine, int enabled);
 extern int planning_system_set_enabled(void* planning, int enabled);

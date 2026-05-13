@@ -523,20 +523,26 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
             alt->num_objectives = engine->num_objectives;
         }
         
-        // 计算每个目标的值（完整实现：使用属性值的加权和， ）
-        // 使用目标权重（如果存在），否则使用默认权重1.0
+        // M-028修复：计算每个目标的值并归一化
         for (size_t j = 0; j < engine->num_objectives && j < alt->num_attributes; j++) {
             float weighted_sum = 0.0f;
+            float weight_sum = 0.0f;
             for (size_t k = 0; k < alt->num_attributes; k++) {
-                // 使用目标权重（如果存在），否则使用默认权重1.0
                 float weight = 1.0f;
-                // 检查是否有目标权重矩阵
                 if (engine->objective_weights && j < engine->num_objectives && k < alt->num_attributes) {
                     weight = engine->objective_weights[j * alt->num_attributes + k];
                 }
                 weighted_sum += weight * alt->attribute_values[k];
+                weight_sum += weight;
             }
-            alt->objective_values[j] = weighted_sum;
+            /* 归一化目标值（除以权重和，使各目标值量纲一致） */
+            alt->objective_values[j] = (weight_sum > 1e-10f) ?
+                weighted_sum / weight_sum : weighted_sum;
+            /* 调用效用函数进行非线性变换 */
+            if (engine->objectives && j < engine->num_objectives) {
+                alt->objective_values[j] = compute_single_utility(&engine->objectives[j],
+                    alt->objective_values[j]);
+            }
         }
         
         // 计算约束违反程度

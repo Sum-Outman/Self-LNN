@@ -1765,8 +1765,23 @@ PhysicalQuantity physical_quantity_divide(PhysicalQuantity a, PhysicalQuantity b
 
 PhysicalQuantity physical_quantity_convert(PhysicalQuantity q, PhysicalDimension target_dim)
 {
-    (void)target_dim;
-    return q;
+    /* F-005修复: 实现物理量纲一致性检查和转换
+     * 两个物理量只有在量纲一致(所有7个基本量纲指数相等)时才能直接转换
+     * 量纲一致的物理量值不变(均为SI单位制) */
+    if (q.dim.M == target_dim.M && q.dim.L == target_dim.L &&
+        q.dim.T == target_dim.T && q.dim.I == target_dim.I &&
+        q.dim.Th == target_dim.Th && q.dim.N == target_dim.N &&
+        q.dim.J == target_dim.J) {
+        PhysicalQuantity result = q;
+        result.dim = target_dim;
+        return result;
+    }
+    /* 量纲不一致：物理上不能直接转换，将值置零并标记目标量纲 */
+    PhysicalQuantity result = q;
+    result.dim = target_dim;
+    result.value = 0.0;
+    result.uncertainty = INFINITY;
+    return result;
 }
 
 static const char* dim_exponent_str(int exp)

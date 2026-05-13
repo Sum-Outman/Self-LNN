@@ -529,6 +529,156 @@ float quaternion_liquid_gate_train_step(QuaternionLiquidGate* gate,
     return loss;
 }
 
+/* ============================================================================
+ * M-008修复：解析梯度训练步（链式法则反向传播替代数值梯度）
+ *
+ * 计算图:
+ *   input → [gate_kernel] → gate_proj → sigmoid(·) → g
+ *   input → [act_kernel]  → act_proj  → tanh(·)    → a
+ *   g ⊙ a → modulation → [output_proj] → output
+ *
+ * 链式法则:
+ *   ∂L/∂gate_kernel = input^T · (σ'(gate_proj) ⊙ (∂mod/∂g)^T · output_proj^T · ∂L/∂output)
+ *   ∂L/∂act_kernel  = input^T · (tanh'(act_proj) ⊙ (∂mod/∂a)^T · output_proj^T · ∂L/∂output)
+ * ============================================================================ */
+float quaternion_liquid_gate_train_step_analytic(QuaternionLiquidGate* gate,
+                                                  const float* input,
+                                                  const float* target,
+                                                  size_t batch, size_t seq_len) {
+    if (!gate || !input || !target) return -1.0f;
+    if (!gate->cached_gate || !gate->cached_act || gate->cached_seq_len == 0) {
+        /* 无缓存时回退到数值梯度 */
+        return quaternion_liquid_gate_train_step(gate, input, target, batch, seq_len);
+    }
+
+    size_t input_dim = gate->config.input_dim;
+    size_t quat_dim = gate->config.quaternion_dim;
+    size_t n_elem = batch * seq_len * input_dim;
+    size_t kernel_size = input_dim * quat_dim * 4;
+    float lr = gate->config.learning_rate;
+
+    float* pred = (float*)safe_malloc(n_elem * sizeof(float));
+    if (!pred) return -1.0f;
+    if (quaternion_liquid_gate_forward_batch(gate, input, batch, seq_len, pred) != 0) {
+        safe_free((void**)&pred); return -1.0f;
+    }
+
+    float loss = mse_loss_f32(pred, target, n_elem);
+
+    /* ∂L/∂output = 2*(pred - target) / n_elem */
+    float* d_output = (float*)safe_malloc(n_elem * sizeof(float));
+    if (!d_output) { safe_free((void**)&pred); return loss; }
+    for (size_t i = 0; i < n_elem; i++) {
+        d_output[i] = 2.0f * (pred[i] - target[i]) / (float)n_elem;
+    }
+
+    /* 输出投影反向：∂L/∂modulation[4*q+j] = Σ_i d_output[i*q+j] * output_weight[i] */
+    size_t out_offset = get_output_offset(gate);
+    const float* out_weight = gate->adam_m + out_offset;
+    size_t mod_elem = batch * seq_len * quat_dim * 4;
+    float* d_mod = (float*)safe_calloc(mod_elem, sizeof(float));
+    if (!d_mod) { safe_free((void**)&d_output); safe_free((void**)&pred); return loss; }
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t t = 0; t < seq_len; t++) {
+            for (size_t q = 0; q < quat_dim; q++) {
+                for (size_t c = 0; c < 4; c++) {
+                    size_t mod_idx = ((b * seq_len + t) * quat_dim + q) * 4 + c;
+                    float grad = 0.0f;
+                    for (size_t i = 0; i < input_dim; i++) {
+                        float w = out_weight[i * quat_dim * 4 + q * 4 + c];
+                        size_t out_idx = ((b * seq_len + t) * input_dim) + i;
+                        grad += d_output[out_idx] * w;
+                    }
+                    d_mod[mod_idx] = grad;
+                }
+            }
+        }
+    }
+    safe_free((void**)&d_output);
+
+    /* 门控反向：∂g = ∂mod/∂g ⊙ a_hat, ∂a = g_hat ⊙ ∂mod/∂a
+     * 四元数Hamilton乘积偏导：∂(g⊙a)/∂g 取决于a的共轭矩阵 */
+    float* d_gate = (float*)safe_malloc(mod_elem * sizeof(float));
+    float* d_act = (float*)safe_malloc(mod_elem * sizeof(float));
+    if (!d_gate || !d_act) {
+        safe_free((void**)&d_gate); safe_free((void**)&d_act);
+        safe_free((void**)&d_mod); safe_free((void**)&pred); return loss;
+    }
+
+    for (size_t i = 0; i < (size_t)(batch * seq_len * quat_dim); i++) {
+        Quaternion* g = &gate->cached_gate[i];
+        Quaternion* a = &gate->cached_act[i];
+        /* ∂mod/∂g: 四元数左乘积矩阵 w.r.t g (a视为常数) */
+        float a_w = a->w, a_x = a->x, a_y = a->y, a_z = a->z;
+        float d_w = d_mod[i * 4], d_x = d_mod[i * 4 + 1],
+              d_y = d_mod[i * 4 + 2], d_z = d_mod[i * 4 + 3];
+        d_gate[i * 4]     = d_w * a_w - d_x * a_x - d_y * a_y - d_z * a_z;
+        d_gate[i * 4 + 1] = d_w * a_x + d_x * a_w + d_y * a_z - d_z * a_y;
+        d_gate[i * 4 + 2] = d_w * a_y - d_x * a_z + d_y * a_w + d_z * a_x;
+        d_gate[i * 4 + 3] = d_w * a_z + d_x * a_y - d_y * a_x + d_z * a_w;
+        /* ∂mod/∂a: 四元数右乘积矩阵 w.r.t a (g视为常数) */
+        float g_w = g->w, g_x = g->x, g_y = g->y, g_z = g->z;
+        d_act[i * 4]     = d_w * g_w - d_x * g_x - d_y * g_y - d_z * g_z;
+        d_act[i * 4 + 1] = d_w * g_x + d_x * g_w - d_y * g_z + d_z * g_y;
+        d_act[i * 4 + 2] = d_w * g_y + d_x * g_z + d_y * g_w - d_z * g_x;
+        d_act[i * 4 + 3] = d_w * g_z - d_x * g_y + d_y * g_x + d_z * g_w;
+    }
+    safe_free((void**)&d_mod);
+
+    /* σ'(x) = σ(x)·(1-σ(x)) */
+    for (size_t i = 0; i < mod_elem; i++) {
+        float sig = gate->cached_gate[i / 4].w;
+        if (i % 4 == 0) sig = gate->cached_gate[i / 4].w;
+        else if (i % 4 == 1) sig = gate->cached_gate[i / 4].x;
+        else if (i % 4 == 2) sig = gate->cached_gate[i / 4].y;
+        else sig = gate->cached_gate[i / 4].z;
+        d_gate[i] *= sig * (1.0f - sig);
+    }
+    /* tanh'(x) = 1 - tanh(x)² */
+    for (size_t i = 0; i < mod_elem; i++) {
+        float th = gate->cached_act[i / 4].w;
+        if (i % 4 == 0) th = gate->cached_act[i / 4].w;
+        else if (i % 4 == 1) th = gate->cached_act[i / 4].x;
+        else if (i % 4 == 2) th = gate->cached_act[i / 4].y;
+        else th = gate->cached_act[i / 4].z;
+        d_act[i] *= (1.0f - th * th);
+    }
+
+    /* ∂L/∂kernel = input^T · d_proj: 累加所有样本的梯度贡献 */
+    float* grad_gate_k = (float*)safe_calloc(kernel_size, sizeof(float));
+    float* grad_act_k  = (float*)safe_calloc(kernel_size, sizeof(float));
+    if (grad_gate_k && grad_act_k) {
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t t = 0; t < seq_len; t++) {
+                const float* inp = &input[(b * seq_len + t) * input_dim];
+                float* dg = &d_gate[(b * seq_len + t) * quat_dim * 4];
+                float* da = &d_act[(b * seq_len + t) * quat_dim * 4];
+                for (size_t i = 0; i < input_dim; i++) {
+                    for (size_t j = 0; j < quat_dim * 4; j++) {
+                        grad_gate_k[i * quat_dim * 4 + j] += inp[i] * dg[j];
+                        grad_act_k[i * quat_dim * 4 + j]  += inp[i] * da[j];
+                    }
+                }
+            }
+        }
+
+        /* Adam更新 */
+        adam_update_f32(gate->weights.gate_kernel, grad_gate_k,
+                        gate->adam_m, gate->adam_v,
+                        gate->adam_step, lr, kernel_size);
+        adam_update_f32(gate->weights.act_kernel, grad_act_k,
+                        &gate->adam_m[kernel_size], &gate->adam_v[kernel_size],
+                        gate->adam_step, lr, kernel_size);
+    }
+    safe_free((void**)&grad_gate_k); safe_free((void**)&grad_act_k);
+    safe_free((void**)&d_gate); safe_free((void**)&d_act);
+
+    gate->adam_step++;
+    safe_free((void**)&pred);
+    return loss;
+}
+
 /* ========== 辅助函数 ========== */
 
 void quaternion_liquid_gate_reset_optimizer(QuaternionLiquidGate* gate) {

@@ -18,6 +18,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/math_utils.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -74,13 +75,9 @@ struct CfcOdeLayer {
  * 辅助数学函数（纯C实现）
  * ============================================================================ */
 
+/* M-027修复：使用统一activation_sigmoid替代cfc_sigmoid */
 static float cfc_sigmoid(float x) {
-    if (x > 0.0f) {
-        return 1.0f / (1.0f + expf(-x));
-    } else {
-        float ex = expf(x);
-        return ex / (1.0f + ex);
-    }
+    return activation_sigmoid(x);
 }
 
 static void apply_sigmoid(float* data, int n) {

@@ -656,13 +656,22 @@ int pid_control_step(const PIDConfig* config,
 int advanced_control_gravity_compensation(const AdvancedControlConfig* config,
     const float* joint_positions, float* gravity_torque, int n_joints) {
     if (!config || !joint_positions || !gravity_torque || n_joints <= 0 || n_joints > 6) return -1;
-    /* 每关节质量(kg) × 重力加速度(9.81m/s²) × 力臂方向余弦 */
-    const float joint_mass[6] = {2.0f, 1.5f, 1.0f, 0.5f, 0.3f, 0.2f};
-    const float link_length[6] = {0.0f, 0.3f, 0.25f, 0.0f, 0.15f, 0.0f};
+    /* M-012修复：使用config中的物理参数替代硬编码值 */
+    const float* joint_mass = config->joint_mass_kg;
+    const float* link_length = config->link_length_m;
+    /* 如果config未设置（全零），使用合理的默认值 */
+    float default_mass[6] = {2.0f, 1.5f, 1.0f, 0.5f, 0.3f, 0.2f};
+    float default_len[6] = {0.0f, 0.3f, 0.25f, 0.0f, 0.15f, 0.0f};
+    int use_default = 1;
+    for (int i = 0; i < n_joints; i++) {
+        if (joint_mass[i] > 0.001f) { use_default = 0; break; }
+    }
     float cum_mass = 0.0f;
     for (int i = n_joints - 1; i >= 0; i--) {
-        cum_mass += joint_mass[i];
-        float arm = link_length[i] * 0.5f;
+        float m = use_default ? default_mass[i] : joint_mass[i];
+        float l = use_default ? default_len[i] : link_length[i];
+        cum_mass += m;
+        float arm = l * 0.5f;
         gravity_torque[i] = cum_mass * 9.81f * arm * cosf(joint_positions[i]);
     }
     return 0;
@@ -674,14 +683,23 @@ int advanced_control_gravity_compensation(const AdvancedControlConfig* config,
 int advanced_control_friction_compensation(const AdvancedControlConfig* config,
     const float* joint_velocities, float* friction_torque, int n_joints) {
     if (!config || !joint_velocities || !friction_torque || n_joints <= 0 || n_joints > 6) return -1;
-    const float coulomb_coeff[6] = {0.5f, 0.4f, 0.3f, 0.15f, 0.1f, 0.05f};
-    const float viscous_coeff[6] = {0.2f, 0.15f, 0.12f, 0.08f, 0.05f, 0.03f};
+    /* M-012修复：使用config中的物理参数替代硬编码值 */
+    const float* coulomb = config->coulomb_friction;
+    const float* viscous = config->viscous_friction;
+    float default_coulomb[6] = {0.5f, 0.4f, 0.3f, 0.15f, 0.1f, 0.05f};
+    float default_viscous[6] = {0.2f, 0.15f, 0.12f, 0.08f, 0.05f, 0.03f};
+    int use_default = 1;
+    for (int i = 0; i < n_joints; i++) {
+        if (coulomb[i] > 0.001f || viscous[i] > 0.001f) { use_default = 0; break; }
+    }
     for (int i = 0; i < n_joints; i++) {
         float v = joint_velocities[i];
+        float cc = use_default ? default_coulomb[i] : coulomb[i];
+        float vc = use_default ? default_viscous[i] : viscous[i];
         if (fabsf(v) < 1e-6f) {
             friction_torque[i] = 0.0f;
         } else {
-            friction_torque[i] = copysignf(coulomb_coeff[i], v) + viscous_coeff[i] * v;
+            friction_torque[i] = copysignf(cc, v) + vc * v;
         }
     }
     return 0;
@@ -695,11 +713,17 @@ int advanced_control_feedforward(const AdvancedControlConfig* config,
     const float* ref_acceleration, float* feedforward_torque, int n_joints) {
     if (!config || !ref_position || !ref_velocity || !ref_acceleration ||
         !feedforward_torque || n_joints <= 0 || n_joints > 6) return -1;
-    /* 简化拉格朗日惯性矩阵：对角近似M_ii = 关节i之后的累计转动惯量 */
-    const float inertia[6] = {0.5f, 0.3f, 0.2f, 0.1f, 0.05f, 0.02f};
+    /* M-012修复：使用config中的物理参数替代硬编码值 */
+    const float* inertia_cfg = config->joint_inertia;
+    float default_inertia[6] = {0.5f, 0.3f, 0.2f, 0.1f, 0.05f, 0.02f};
+    int use_default = 1;
     for (int i = 0; i < n_joints; i++) {
+        if (inertia_cfg[i] > 0.001f) { use_default = 0; break; }
+    }
+    for (int i = 0; i < n_joints; i++) {
+        float iner = use_default ? default_inertia[i] : inertia_cfg[i];
         /* 惯性项 */
-        feedforward_torque[i] = inertia[i] * ref_acceleration[i];
+        feedforward_torque[i] = iner * ref_acceleration[i];
         /* 科里奥利+离心力：简化模型 v_i * v_j * sin(q_i - q_j) */
         for (int j = 0; j < n_joints; j++) {
             if (j != i) {

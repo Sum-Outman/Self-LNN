@@ -1375,6 +1375,20 @@ void math_standardize(float* data, size_t n) {
     }
 }
 
+/* F-023修复：统一余弦相似度 */
+float math_cosine_similarity(const float* a, const float* b, size_t dim) {
+    if (!a || !b || dim == 0) return 0.0f;
+    float dot = 0.0f, na = 0.0f, nb = 0.0f;
+    for (size_t i = 0; i < dim; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    float denom = sqrtf(na) * sqrtf(nb);
+    if (denom < 1e-10f) return 0.0f;
+    return dot / denom;
+}
+
 /**
  * @brief 插值函数实现
  */

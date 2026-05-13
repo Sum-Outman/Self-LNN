@@ -163,7 +163,7 @@ DCCorrectionSystem* dc_correction_create(void) {
     dcs->verification_pipeline[2] = DC_VERIFY_EXECUTION;
     dcs->verification_pipeline[3] = DC_VERIFY_EFFECT;
 
-    /* 预置修正规则 */
+    /* S-015+M-013修复: 预置修正规则（初始success_rate=0.5，随使用动态学习） */
     const char* preset_patterns[] = {"空指针", "越界", "溢出", "死锁", "竞态", "内存泄漏", "精度损失", "初始化", "超时", "资源耗尽"};
     const char* preset_fixes[] = {"添加空指针检查", "添加边界检查", "使用更大的数据类型", "添加锁超时机制", "使用原子操作", "确保free配对", "使用double替代float", "初始化所有变量", "增加超时设置", "添加资源池限制"};
     for (int i = 0; i < 10; i++) {
@@ -172,8 +172,9 @@ DCCorrectionSystem* dc_correction_create(void) {
         snprintf(r->pattern, sizeof(r->pattern), "%s", preset_patterns[i]);
         snprintf(r->correction, sizeof(r->correction), "%s", preset_fixes[i]);
         r->target_type = (DCErrorType)(i % 6);
-        r->success_rate = 0.7f;
+        r->success_rate = 0.5f;
         r->created_at = time(NULL);
+        r->usage_count = 0;
         dcs->rule_count++;
     }
     
@@ -625,23 +626,39 @@ int dc_validate_multi_stage(DCCorrectionSystem* dcs, int hypothesis_id, DCVerifi
 
         switch (actual_stages[s]) {
             case DC_VERIFY_SYNTAX: {
-                /* 语法验证：检查修正方案的语法正确性 */
+                /* S-016修复: 结构化语法验证
+                 * 使用多维度加权评分替代纯关键词匹配 */
                 float syntax_score = 0.0f;
-                /* 基于修复描述的完整性 */
-                if (strlen(target_hyp->proposed_fix) > 0) syntax_score += 0.3f;
-                /* 基于是否包含明确的操作指令 */
-                if (strstr(target_hyp->proposed_fix, "检查") ||
-                    strstr(target_hyp->proposed_fix, "使用") ||
-                    strstr(target_hyp->proposed_fix, "添加") ||
-                    strstr(target_hyp->proposed_fix, "确保") ||
-                    strstr(target_hyp->proposed_fix, "增加") ||
-                    strstr(target_hyp->proposed_fix, "删除")) {
-                    syntax_score += 0.4f;
+                /* 修复描述真实性：长度>0且>3词 +0.25 */
+                size_t fix_len = strlen(target_hyp->proposed_fix);
+                int word_count = 0, in_word = 0;
+                for (size_t p = 0; p < fix_len; p++) {
+                    if (target_hyp->proposed_fix[p] > 32) { if (!in_word) word_count++; in_word = 1; }
+                    else in_word = 0;
                 }
-                /* 基于描述长度 */
+                if (fix_len > 0) syntax_score += 0.15f;
+                if (word_count >= 3) syntax_score += 0.10f;
+                /* 操作词匹配(检查/使用/添加/确保/增加/删除) +0.15f */
+                const char* op_words[] = {"检查","使用","添加","确保","增加","删除","修改","优化","调整","重构",NULL};
+                int op_match = 0;
+                for (const char** ow = op_words; *ow; ow++)
+                    if (strstr(target_hyp->proposed_fix, *ow)) { op_match = 1; break; }
+                if (op_match) syntax_score += 0.15f;
+                /* 描述信息密度 +0.15f */
+                float density = fix_len > 0 ? (float)word_count / (float)fix_len : 0;
+                if (density > 0.3f) syntax_score += 0.15f;
+                /* 描述长度归一化 +0.15f */
                 float desc_len_ratio = (float)strlen(target_hyp->description) / 100.0f;
                 if (desc_len_ratio > 1.0f) desc_len_ratio = 1.0f;
-                syntax_score += desc_len_ratio * 0.3f;
+                syntax_score += desc_len_ratio * 0.15f;
+                /* 假设置信度贡献 +0.10f */
+                syntax_score += target_hyp->confidence * 0.10f;
+                /* 历史规则成功率 +0.20f */
+                float best_syn_rate = 0.0f;
+                for (int r = 0; r < dcs->rule_count; r++)
+                    if (dcs->rules[r].success_rate > best_syn_rate)
+                        best_syn_rate = dcs->rules[r].success_rate;
+                syntax_score += best_syn_rate * 0.20f;
 
                 score = syntax_score;
                 passed = (score > 0.4f) ? 1 : 0;
@@ -649,81 +666,114 @@ int dc_validate_multi_stage(DCCorrectionSystem* dcs, int hypothesis_id, DCVerifi
             }
 
             case DC_VERIFY_LOGIC: {
-                /* 逻辑验证：检查修正方案与错误类型的一致性 */
+                /* S-017修复: 结构化逻辑验证
+                 * 使用错误类型一致性+假设合理性评分 */
                 float logic_score = 0.0f;
                 if (target_error) {
-                    /* 检查修正方案是否针对同一错误类型 */
+                    /* 错误类型关键词交叉匹配 +0.25f */
                     const char* type_keywords[] = {
-                        "语法", "类型", "格式", "参数",  /* SYNTAX */
-                        "推理", "逻辑", "循环", "归纳",  /* LOGIC */
-                        "知识", "信息", "数据", "学习",  /* KNOWLEDGE */
-                        "策略", "计划", "目标", "资源",  /* STRATEGY */
-                        "感知", "检测", "识别", "特征",  /* PERCEPTION */
-                        "执行", "运行", "并发", "超时"   /* EXECUTION */
+                        "语法", "类型", "格式", "参数",
+                        "推理", "逻辑", "循环", "归纳",
+                        "知识", "信息", "数据", "学习",
+                        "策略", "计划", "目标", "资源",
+                        "感知", "检测", "识别", "特征",
+                        "执行", "运行", "并发", "超时"
                     };
                     int base_idx = (int)target_error->type * 4;
-                    for (int k = 0; k < 4 && (base_idx + k) < 24; k++) {
-                        if (strstr(target_hyp->proposed_fix, type_keywords[base_idx + k])) {
-                            logic_score += 0.2f;
-                        }
-                    }
-                    /* 置信度贡献 */
-                    logic_score += target_hyp->confidence * 0.2f;
-                } else {
-                    logic_score = target_hyp->confidence * 0.5f;
+                    int type_matches = 0;
+                    for (int k = 0; k < 4 && (base_idx + k) < 24; k++)
+                        if (strstr(target_hyp->proposed_fix, type_keywords[base_idx + k])) type_matches++;
+                    logic_score += (float)type_matches / 4.0f * 0.25f;
+                    /* 严重度与置信度的一致性 +0.15f */
+                    float severity_conf_corr = 1.0f - fabsf(target_error->severity - target_hyp->confidence);
+                    logic_score += severity_conf_corr * 0.15f;
+                    /* 错误描述与假设的语义重叠 +0.15f */
+                    int char_overlap = 0, total = 0;
+                    for (const char* dc = target_error->description; *dc && total < 256; dc++, total++)
+                        if (strchr(target_hyp->proposed_fix, *dc)) char_overlap++;
+                    float overlap_ratio = total > 0 ? (float)char_overlap / (float)total : 0;
+                    logic_score += overlap_ratio * 0.15f;
                 }
+                /* 置信度独立贡献 +0.25f */
+                logic_score += target_hyp->confidence * 0.25f;
+                /* 估计影响 * 置信度 一致性 +0.20f */
+                logic_score += target_hyp->estimated_impact * 0.20f;
+
                 score = logic_score;
-                passed = (score > 0.3f) ? 1 : 0;
+                passed = (score > 0.35f) ? 1 : 0;
                 break;
             }
 
             case DC_VERIFY_EXECUTION: {
-                /* 执行验证：检查修正方案的可执行性 */
+                /* S-018修复: 结构化执行验证
+                 * 使用资源可行性+历史成功率+复杂度分析 */
                 float exec_score = 0.0f;
-                /* 基于修复描述的具体程度 */
-                if (strlen(target_hyp->proposed_fix) > 10) exec_score += 0.2f;
-                /* 基于历史规则的成功率 */
+                /* 修复复杂度评估：越简单的修复越可执行 +0.20f */
+                size_t fix_len = strlen(target_hyp->proposed_fix);
+                float complexity_score = fix_len < 50 ? 0.20f :
+                    fix_len < 100 ? 0.15f : fix_len < 200 ? 0.10f : 0.05f;
+                exec_score += complexity_score;
+                /* 历史规则成功率(加权) +0.25f */
                 float best_rate = 0.0f;
+                int matched_rules = 0;
                 for (int r = 0; r < dcs->rule_count; r++) {
                     if (strstr(target_hyp->proposed_fix, dcs->rules[r].correction)) {
-                        if (dcs->rules[r].success_rate > best_rate) {
-                            best_rate = dcs->rules[r].success_rate;
-                        }
+                        best_rate += dcs->rules[r].success_rate;
+                        matched_rules++;
                     }
                 }
-                exec_score += best_rate * 0.4f;
-                /* 基于影响评估 */
-                exec_score += target_hyp->estimated_impact * 0.4f;
+                float avg_rate = matched_rules > 0 ? best_rate / (float)matched_rules : 0.0f;
+                exec_score += avg_rate * 0.25f;
+                /* 影响评估 * (1-执行风险) +0.20f */
+                float risk = fix_len > 200 ? 0.3f : fix_len > 100 ? 0.15f : 0.05f;
+                exec_score += target_hyp->estimated_impact * (1.0f - risk) * 0.20f;
+                /* 解析次数(积累经验) +0.15f */
+                float history_bonus = dcs->resolved_count > 0 ?
+                    1.0f - expf(-(float)dcs->resolved_count / 10.0f) : 0.0f;
+                exec_score += history_bonus * 0.15f;
+                /* 置信度 +0.20f */
+                exec_score += target_hyp->confidence * 0.20f;
 
                 score = exec_score;
-                passed = (score > 0.3f) ? 1 : 0;
+                passed = (score > 0.35f) ? 1 : 0;
                 break;
             }
 
             case DC_VERIFY_EFFECT: {
-                /* 效果验证：预估修正效果 */
+                /* S-019修复: 结构化效果验证
+                 * 使用严重度×历史×置信度×影响力组合 */
                 float effect_score = 0.0f;
-                /* 基于严重度：越严重的问题修正效果越明显 */
-                if (target_error) {
-                    effect_score += target_error->severity * 0.3f;
-                }
-                /* 基于置信度和影响的组合 */
-                effect_score += target_hyp->confidence * target_hyp->estimated_impact * 0.4f;
-                /* 基于类似错误的修正历史 */
+                /* 严重度加权 +0.25f（越严重问题修正效果越大） */
+                if (target_error) effect_score += target_error->severity * 0.25f;
+                /* 置信度×影响 +0.20f */
+                effect_score += target_hyp->confidence * target_hyp->estimated_impact * 0.20f;
+                /* 修正历史加权平均 +0.25f */
                 float history_score = 0.0f;
                 int history_count = 0;
                 for (int c = 0; c < dcs->context_count; c++) {
                     if (dcs->contexts[c].error_id == target_hyp->error_id) {
-                        history_score += dcs->contexts[c].effectiveness_score;
+                        /* 时间衰减：越近的修正越有参考价值 */
+                        double age = difftime(time(NULL), dcs->contexts[c].timestamp);
+                        float decay = expf(-(float)age / 86400.0f); /* 天级衰减 */
+                        history_score += dcs->contexts[c].effectiveness_score * decay;
                         history_count++;
                     }
                 }
-                if (history_count > 0) {
-                    effect_score += (history_score / (float)history_count) * 0.3f;
-                }
+                if (history_count > 0)
+                    effect_score += (history_score / (float)history_count) * 0.25f;
+                /* 预设规则成功率 +0.15f */
+                float best_eff_rate = 0.0f;
+                for (int r = 0; r < dcs->rule_count; r++)
+                    if (dcs->rules[r].success_rate > best_eff_rate)
+                        best_eff_rate = dcs->rules[r].success_rate;
+                effect_score += best_eff_rate * 0.15f;
+                /* 全局解析率 +0.15f */
+                float global_rate = dcs->resolved_count > 0 ?
+                    (float)dcs->resolved_count / (float)(dcs->error_count + 1) : 0.0f;
+                effect_score += global_rate * 0.15f;
 
                 score = effect_score;
-                passed = (score > 0.3f) ? 1 : 0;
+                passed = (score > 0.35f) ? 1 : 0;
                 break;
             }
 
@@ -1151,8 +1201,12 @@ int dc_run_full_correction_pipeline(DCCorrectionSystem* dcs,
 
     if (out_hypothesis) *out_hypothesis = hyps[0];
 
-    /* Step 5: 验证修正效果 */
-    float effectiveness = hyps[0].confidence > 0.0f ? hyps[0].confidence : 0.5f;
+    /* M-014修复: 综合计算修正有效性（置信度与严重度加权）
+     * effectiveness = confidence * 0.6 + (1-severity) * 0.4
+     * 低严重度问题修正效果更好，高置信度假设更可靠 */
+    float norm_severity = severity / 10.0f;
+    if (norm_severity > 1.0f) norm_severity = 1.0f;
+    float effectiveness = hyps[0].confidence * 0.6f + (1.0f - norm_severity) * 0.4f;
 
     if (effectiveness > 0.5f) {
         dcs->resolved_count++;

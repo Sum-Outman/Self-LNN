@@ -11,8 +11,11 @@
  * 6. 无锁优先队列（Lock-free Priority Queue）
  * 7. 无锁跳表（Lock-free Skip List）
  * 8. 无锁工作窃取队列（Lock-free Work Stealing Queue）
- * 
- *  ，提供完整的无锁算法实现。
+ *
+ * I-013设计注记: 8种结构共3671行 → 后续可拆分为独立文件：
+ *   lock_free_queue.c / lock_free_stack.c / lock_free_htable.c /
+ *   lock_free_mempool.c / lock_free_ringbuf.c / lock_free_prioq.c /
+ *   lock_free_skiplist.c / lock_free_wsq.c
  */
 
 #include "selflnn/concurrency/lock_free.h"

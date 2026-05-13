@@ -57,7 +57,9 @@ class VoiceCommandSystem {
             if (result.success && result.text) {
                 var commandResult = this.commandEngine.parseCommand(result.text);
                 commandResult.originalText = result.text;
-                commandResult.confidence = result.confidence || 0.8;
+                /* F-019修复：不使用假默认置信度0.8，未提供时设为-1表示未知 */
+                commandResult.confidence = (result.confidence !== undefined && result.confidence !== null && result.confidence >= 0)
+                    ? result.confidence : -1;
                 if (commandResult.command) {
                     await this.commandEngine.executeCommand(commandResult);
                 }

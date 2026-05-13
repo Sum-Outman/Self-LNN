@@ -1358,6 +1358,17 @@ GpuContext* gpu_context_create(GpuBackend backend, int device_index) {
 
 #ifndef ENABLE_GPU
 void auto_kernel_optimizer_destroy(AutoKernelOptimizer* optimizer) {
+    /* F-011修复：释放优化器资源 */
+    if (!optimizer) return;
+    if (optimizer->kernel_cache) {
+        /* 释放缓存的内核数据 */
+        memset(optimizer->kernel_cache, 0, sizeof(AutoKernelCache));
+    }
+    if (optimizer->config_stats) {
+        free(optimizer->config_stats);
+        optimizer->config_stats = NULL;
+    }
+    free(optimizer);
 }
 #endif
 
@@ -1872,6 +1883,20 @@ GpuMultiGpuContext* gpu_multi_gpu_init(const GpuMultiGpuConfig* config) {
 }
 
 void gpu_multi_gpu_cleanup(GpuMultiGpuContext* mg_ctx) {
+    /* F-011修复：释放多GPU上下文资源 */
+    if (!mg_ctx) return;
+    struct GpuMultiGpuContext* ctx = (struct GpuMultiGpuContext*)mg_ctx;
+    if (ctx->devices) {
+        for (int i = 0; i < ctx->device_count && i < 8; i++) {
+            if (ctx->devices[i]) {
+                gpu_context_free(ctx->devices[i]);
+                ctx->devices[i] = NULL;
+            }
+        }
+        free(ctx->devices);
+        ctx->devices = NULL;
+    }
+    free(ctx);
 }
 
 int gpu_multi_gpu_get_device_count(GpuMultiGpuContext* mg_ctx) {

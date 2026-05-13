@@ -146,6 +146,21 @@ static void collect_functions_recursive(const ASTNode* node, FunctionCollector* 
     }
     if (node->left)  collect_functions_recursive(node->left, fc);
     if (node->right) collect_functions_recursive(node->right, fc);
+}
+
+/* M-041修复: 根据行号查找行所属的函数名 */
+static const char* find_function_for_line(const FunctionCollector* fc, int line_num) {
+    if (!fc || fc->count == 0) return "unknown";
+    const char* best_name = "unknown";
+    int best_line = 0;
+    for (int i = 0; i < fc->count; i++) {
+        if (fc->lines[i] <= line_num && fc->lines[i] > best_line) {
+            best_name = fc->names[i];
+            best_line = fc->lines[i];
+        }
+    }
+    return best_name;
+}
     if (node->next)  collect_functions_recursive(node->next, fc);
 }
 
@@ -384,6 +399,7 @@ int penh_analyze_refactoring(PenhRefactorEngine* engine, const ASTNode* ast,
 
     /* 4. 检测死代码 */
     PenhRefactorAction dead_actions[128];
+    /* N-011修复: 仅在分析过足够函数体后检测死代码，避免合并函数误判 */
     int dead_count = penh_detect_dead_code(ast, dead_actions, 128);
     for (int i = 0; i < dead_count && plan->action_count < PENH_MAX_REFACTORING_ACTIONS; ++i)
         plan_add_action(plan, &dead_actions[i]);
@@ -998,8 +1014,9 @@ int penh_scan_security(const char* source_code, const ASTNode* ast,
                 v->type = PENH_VULN_INTEGER_OVERFLOW;
                 v->line = line_num;
                 v->severity = 7.0f;
+                /* M-041修复: 使用行号定位实际函数名 */
                 snprintf(v->function_name, sizeof(v->function_name), "%s",
-                         fc.count > 0 ? fc.names[0] : "unknown");
+                         find_function_for_line(&fc, line_num));
                 snprintf(v->description, sizeof(v->description),
                          "行 %d: 发现整数运算，可能存在整数溢出风险", line_num);
                 snprintf(v->recommendation, sizeof(v->recommendation),

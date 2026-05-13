@@ -8684,3 +8684,99 @@ input:checked + .slider:before {
 .card.full-width {
     grid-column: 1 / -1;
 }
+
+/* ================================================================
+ * M-022修复：统一通知系统样式
+ * ================================================================ */
+.selflnn-notify-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 99999;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 420px;
+}
+.selflnn-notify {
+    background: rgba(10, 10, 20, 0.96);
+    border: 1px solid rgba(100, 180, 255, 0.3);
+    border-radius: 8px;
+    padding: 14px 18px;
+    color: #e0e8f0;
+    font-size: 14px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    box-shadow: 0 4px 24px rgba(0, 120, 255, 0.15);
+    animation: notifySlideIn 0.3s ease;
+    transition: opacity 0.3s, transform 0.3s;
+    backdrop-filter: blur(12px);
+}
+.selflnn-notify-success { border-left: 3px solid #00e676; }
+.selflnn-notify-error { border-left: 3px solid #ff5252; }
+.selflnn-notify-warning { border-left: 3px solid #ffab40; }
+.selflnn-notify-info { border-left: 3px solid #448aff; }
+.notify-icon { font-size: 18px; flex-shrink: 0; }
+.notify-msg { flex: 1; word-break: break-word; }
+.notify-close {
+    cursor: pointer;
+    font-size: 20px;
+    color: rgba(255,255,255,0.4);
+    flex-shrink: 0;
+    line-height: 1;
+}
+.notify-close:hover { color: #fff; }
+@keyframes notifySlideIn {
+    from { transform: translateX(120%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+.selflnn-confirm-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.65);
+    z-index: 100000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.selflnn-confirm-box {
+    background: rgba(15, 15, 30, 0.98);
+    border: 1px solid rgba(100, 180, 255, 0.25);
+    border-radius: 12px;
+    padding: 28px 32px;
+    max-width: 440px;
+    margin: 20px;
+    box-shadow: 0 8px 40px rgba(0, 120, 255, 0.2);
+    backdrop-filter: blur(16px);
+}
+.confirm-msg {
+    color: #d0d8e8;
+    font-size: 15px;
+    margin-bottom: 20px;
+    line-height: 1.6;
+}
+.confirm-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+}
+.confirm-buttons button {
+    padding: 8px 24px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s;
+}
+.btn-ok {
+    background: linear-gradient(135deg, #1565c0, #1976d2);
+    color: #fff;
+}
+.btn-ok:hover { background: linear-gradient(135deg, #1976d2, #2196f3); }
+.btn-cancel {
+    background: rgba(255,255,255,0.08);
+    color: #a0a8b8;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+.btn-cancel:hover { background: rgba(255,255,255,0.14); }

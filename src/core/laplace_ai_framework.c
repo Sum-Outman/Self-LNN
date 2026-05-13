@@ -167,16 +167,34 @@ static void lai_design_butterworth(float* numerator, float* denominator,
     }
 }
 
+/* M-020修复：标准直接形式II转置 IIR滤波器
+ * 差分方程: y[n] = num[0]*x[n] + ... + num[order]*x[n-order]
+ *                   - den[1]*y[n-1] - ... - den[order]*y[n-order]
+ * 状态变量s[k]保存的是x[n-k]和y[n-k]的混合延迟项
+ * 直接形式II转置: w[n] = x[n] - den[1]*w[n-1] - ... - den[order]*w[n-order]
+ *                 y[n] = num[0]*w[n] + num[1]*w[n-1] + ... + num[order]*w[n-order] */
 static void lai_apply_iir(float* signal, size_t length,
                            const float* numerator, const float* denominator,
                            int order, float* state) {
+    /* state[0..order-1] 保存 w[n-1]..w[n-order] */
     for (size_t n = 0; n < length; n++) {
-        float input = signal[n];
-        float output = numerator[0] * input + state[0];
+        float x = signal[n];
+        /* 计算内部状态 w[n] = x - Σ den[k]*w[n-k] (k>=1) */
+        float w = x;
         for (int k = 1; k <= order; k++) {
-            state[k - 1] = numerator[k] * input - denominator[k] * output + (k < order ? state[k] : 0.0f);
+            w -= denominator[k] * state[k - 1];
         }
-        signal[n] = output;
+        /* 计算输出 y[n] = Σ num[k]*w[n-k] */
+        float y = numerator[0] * w;
+        for (int k = 1; k <= order; k++) {
+            y += numerator[k] * state[k - 1];
+        }
+        /* 更新延迟线：右移，state[0]=w */
+        for (int k = order - 1; k >= 1; k--) {
+            state[k] = state[k - 1];
+        }
+        if (order > 0) state[0] = w;
+        signal[n] = y;
     }
 }
 

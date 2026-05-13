@@ -171,6 +171,8 @@ MetacognitionSystem* metacognition_system_create(
     memcpy(&system->prediction_config, prediction_config, sizeof(PredictiveSelfConfig));
     
     /* 初始化自我模型状态 */
+    /* M-015修复：初始化RNG后再调用随机函数 */
+    rng_init();
     size_t default_model_size = 256;
     system->self_model_state.model_parameters = (float*)safe_calloc(default_model_size, sizeof(float));
     system->self_model_state.uncertainty_estimates = (float*)safe_calloc(default_model_size, sizeof(float));
@@ -357,7 +359,11 @@ int metacognition_monitor(MetacognitionSystem* system,
     }
     
     /* 简单预测：基于趋势外推 */
-    result->predicted_value = result->current_value + result->trend * 10.0f;
+    /* M-004修复: 预测值基于自适应窗口而非硬编码魔术数字
+     * trend_scale由预测时间范围动态确定 */
+    float trend_scale = system->prediction_config.prediction_horizon > 0 ?
+        (float)system->prediction_config.prediction_horizon : 10.0f;
+    result->predicted_value = result->current_value + result->trend * trend_scale;
     
     /* 确定是否需要行动 */
     result->requires_action = requires_action_based_on_monitoring(system, result);
@@ -687,7 +693,7 @@ static int predict_performance(MetacognitionSystem* system,
         return -1;
     }
     (void)state_size;
-    
+
     float* history = system->self_model_state.performance_history;
     size_t hist_size = system->self_model_state.history_size;
     float decay_factor = expf(-prediction_horizon * 0.1f);
@@ -777,8 +783,7 @@ static int predict_failure(MetacognitionSystem* system,
         return -1;
     }
     (void)state_size;
-    (void)prediction_horizon;
-    
+
     result->type = PREDICTIVE_SELF_FAILURE;
     result->values_size = 1;
     result->predicted_values = (float*)safe_malloc(sizeof(float) * 1);
@@ -825,6 +830,11 @@ static int predict_failure(MetacognitionSystem* system,
     if (failure_prob < 0.0f) failure_prob = 0.0f;
     if (failure_prob > 1.0f) failure_prob = 1.0f;
     
+    /* S-002修复: 根据预测时间范围缩放失效概率 */
+    float horizon_factor = prediction_horizon > 0 ? (1.0f + prediction_horizon * 0.2f) : 1.0f;
+    failure_prob *= horizon_factor;
+    if (failure_prob > 1.0f) failure_prob = 1.0f;
+
     result->predicted_values[0] = failure_prob;
     result->expected_value = failure_prob;
     result->worst_case_value = failure_prob * 1.3f;
@@ -853,8 +863,7 @@ static int predict_learning_progress(MetacognitionSystem* system,
         return -1;
     }
     (void)state_size;
-    (void)prediction_horizon;
-    
+
     result->type = PREDICTIVE_SELF_LEARNING;
     result->values_size = 4;
     result->predicted_values = (float*)safe_malloc(4 * sizeof(float));
@@ -918,8 +927,7 @@ static int predict_resource_usage(MetacognitionSystem* system,
         return -1;
     }
     (void)state_size;
-    (void)prediction_horizon;
-    
+
     result->type = PREDICTIVE_SELF_RESOURCE;
     result->values_size = 5;
     result->predicted_values = (float*)safe_malloc(5 * sizeof(float));
@@ -994,8 +1002,7 @@ static int predict_adaptation_needs(MetacognitionSystem* system,
         return -1;
     }
     (void)state_size;
-    (void)prediction_horizon;
-    
+
     result->type = PREDICTIVE_SELF_ADAPTATION;
     result->values_size = 4;
     result->predicted_values = (float*)safe_malloc(4 * sizeof(float));
@@ -1066,7 +1073,10 @@ static int predict_adaptation_needs(MetacognitionSystem* system,
     result->best_case_value = adapt_score * 0.8f;
     
     float threshold = 0.35f;
-    result->requires_intervention = (adapt_score > threshold) ? 1 : 0;
+    /* S-005修复: 根据预测时间范围缩放自适应需求阈值 */
+    float horizon_factor = prediction_horizon > 0 ? (1.0f + prediction_horizon * 0.15f) : 1.0f;
+    float scaled_threshold = threshold / horizon_factor;
+    result->requires_intervention = (adapt_score > scaled_threshold) ? 1 : 0;
     snprintf(result->intervention_suggestion, sizeof(result->intervention_suggestion),
             "自适应需求:%.3f (差距:%.3f 不确定性:%.3f 波动率:%.3f 趋势:%.3f)",
             adapt_score, gap_score, unc_score, vol_score, trend_score);
@@ -1223,7 +1233,6 @@ int metacognition_neutral_self_assessment(MetacognitionSystem* system,
                                          size_t result_size) {
     
     if (!system || !assessment_result) {
-        (void)assessment_type;
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
                               "客观理性自我评估：参数为空");
         return -1;
@@ -1251,10 +1260,18 @@ int metacognition_neutral_self_assessment(MetacognitionSystem* system,
         }
     }
     
-    /* 基于系统状态生成客观理性评估 */
-    float overall_score = (system->self_model_state.model_confidence +
-                          system->self_model_state.model_accuracy +
-                          system->average_monitoring_confidence) / 3.0f;
+    /* M-002修复: 基于评估类型调整权重
+     * assessment_type 0=综合 1=性能 2=资源 3=安全性 */
+    float perf_weight = 0.34f, conf_weight = 0.33f, acc_weight = 0.33f;
+    switch (assessment_type) {
+        case 1: perf_weight = 0.6f; conf_weight = 0.2f; acc_weight = 0.2f; break;
+        case 2: perf_weight = 0.2f; conf_weight = 0.3f; acc_weight = 0.5f; break;
+        case 3: perf_weight = 0.3f; conf_weight = 0.5f; acc_weight = 0.2f; break;
+        default: break;
+    }
+    float overall_score = (system->self_model_state.model_confidence * conf_weight +
+                          system->self_model_state.model_accuracy * acc_weight +
+                          system->average_monitoring_confidence * perf_weight);
     
     const char* assessment = NULL;
     
@@ -1399,7 +1416,47 @@ int metacognition_self_correction(MetacognitionSystem* system,
              error_value * 0.8f,
              error_value * 0.7f,
              error_type, error_value);
-    
+
+    /* S-006修复: 执行实际的系统参数修正，而非仅生成文本计划 */
+    switch (error_type) {
+        case 0: /* 性能下降：调低学习率、增强正则化 */
+            system->model_update_config.learning_rate *= 0.8f;
+            system->model_update_config.regularization_strength *= 1.2f;
+            system->model_update_config.regularization_strength = 
+                system->model_update_config.regularization_strength > 10.0f ? 10.0f : 
+                system->model_update_config.regularization_strength;
+            break;
+        case 1: /* 高不确定性：降低模型复杂度、增加校准 */
+            if (system->prediction_model_size > 128) {
+                system->prediction_model_size = (size_t)(system->prediction_model_size * 0.9f);
+            }
+            system->monitoring_config.confidence_threshold = 
+                system->monitoring_config.confidence_threshold * 1.1f;
+            if (system->monitoring_config.confidence_threshold > 0.95f)
+                system->monitoring_config.confidence_threshold = 0.95f;
+            break;
+        case 2: /* 预测误差增加：缩短预测范围、增强反馈 */
+            system->prediction_config.prediction_horizon = 
+                (size_t)(system->prediction_config.prediction_horizon * 0.8f);
+            if (system->prediction_config.prediction_horizon < 1)
+                system->prediction_config.prediction_horizon = 1;
+            system->model_update_config.learning_rate *= 0.9f;
+            break;
+        case 3: /* 资源异常：应用资源限制 */
+            system->monitoring_config.resource_check_frequency *= 2;
+            if (system->monitoring_config.resource_check_frequency < 1)
+                system->monitoring_config.resource_check_frequency = 1;
+            system->monitoring_config.max_memory_usage = 
+                (size_t)(system->monitoring_config.max_memory_usage * 0.8f);
+            if (system->monitoring_config.max_memory_usage < 16 * 1024 * 1024)
+                system->monitoring_config.max_memory_usage = 16 * 1024 * 1024;
+            break;
+        default:
+            break;
+    }
+
+    /* 记录修正时间戳 */
+    system->last_monitoring_time = (size_t)time(NULL);
     return 0;
 }
 
@@ -2481,13 +2538,29 @@ static int perform_ensemble_update(MetacognitionSystem* system,
         system->self_model_state.uncertainty_estimates[i] = u;
     }
     
-    float bayesian_accuracy = system->self_model_state.model_accuracy;
-    float bayesian_confidence = system->self_model_state.model_confidence;
-    (void)bayesian_accuracy;
-    (void)bayesian_confidence;
-    system->self_model_state.model_accuracy = 0.0f;
-    system->self_model_state.model_confidence = 0.0f;
-    system->self_model_state.update_count = 0;
+    /* M-003修复: 使用集成分学习结果更新模型状态
+     * 而非丢弃已计算的bayesian/kalman/online参数 */
+    float bayesian_accuracy = 0.0f;
+    float kalman_accuracy = 0.0f;
+    float online_accuracy = 0.0f;
+    if (ground_truth && truth_size > 0 && n > 0) {
+        /* 计算各方法在最近truth上的准确度 */
+        for (size_t i = 0; i < n; i++) {
+            float gt = (i < truth_size) ? ground_truth[i] : 0.0f;
+            bayesian_accuracy += 1.0f - fminf(fabsf(bayesian_params[i] - gt), 1.0f);
+            kalman_accuracy   += 1.0f - fminf(fabsf(kalman_params[i] - gt), 1.0f);
+            online_accuracy   += 1.0f - fminf(fabsf(online_params[i] - gt), 1.0f);
+        }
+        bayesian_accuracy /= (float)n;
+        kalman_accuracy   /= (float)n;
+        online_accuracy   /= (float)n;
+    }
+    system->self_model_state.model_accuracy =
+        bayesian_accuracy * bayesian_weight +
+        kalman_accuracy   * kalman_weight +
+        online_accuracy   * online_weight;
+    system->self_model_state.model_confidence = 0.3f + 0.7f * system->self_model_state.model_accuracy;
+    system->self_model_state.update_count = update_count_before + 1;
     perform_bayesian_update(system, new_data, data_size, ground_truth, truth_size);
     float bayesian_acc2 = system->self_model_state.model_accuracy;
     float bayesian_conf2 = system->self_model_state.model_confidence;

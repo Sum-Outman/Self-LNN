@@ -352,6 +352,18 @@ void math_normalize(float* data, size_t n);
 void math_standardize(float* data, size_t n);
 
 /**
+ * @brief 统一余弦相似度（F-023修复：消除5处重复实现）
+ *
+ * 计算两个向量的余弦相似度：cos(θ) = (a·b) / (||a||·||b||)
+ *
+ * @param a 向量a
+ * @param b 向量b
+ * @param dim 向量维度
+ * @return float 余弦相似度 [-1, 1]，零向量返回0
+ */
+float math_cosine_similarity(const float* a, const float* b, size_t dim);
+
+/**
  * @brief 四元数基本运算
  */
 

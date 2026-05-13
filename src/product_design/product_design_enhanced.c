@@ -48,11 +48,13 @@ static pthread_mutex_t g_pde_rng_lock = PTHREAD_MUTEX_INITIALIZER;
 #define PDE_RNG_LOCK() pthread_mutex_lock(&g_pde_rng_lock)
 #define PDE_RNG_UNLOCK() pthread_mutex_unlock(&g_pde_rng_lock)
 #endif
-static unsigned int pde_rand_state = 12345;
+/* N-008修复: 使用时间混合种子替代固定12345 */
+static unsigned int pde_rand_state = 0;
 static void pde_srand(unsigned int seed) { PDE_RNG_LOCK(); pde_rand_state = seed; PDE_RNG_UNLOCK(); }
 static double pde_rand_double(void)
 {
     PDE_RNG_LOCK();
+    if (pde_rand_state == 0) pde_rand_state = (unsigned int)((uint64_t)clock() & 0xFFFFFFFF) | 1;
     pde_rand_state = pde_rand_state * 1103515245 + 12345;
     double r = (double)(pde_rand_state & 0x7FFFFFFF) / 2147483648.0;
     PDE_RNG_UNLOCK();

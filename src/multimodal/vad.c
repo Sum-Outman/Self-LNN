@@ -137,39 +137,13 @@ float vad_compute_spectral_entropy(const float* audio_frame, int frame_samples,
         fft_real[i] *= window;
     }
     
-    /* Cooley-Tukey FFT 实现（O(n log n) 位反转+蝶形运算） */
-    int N = fft_n;
-    int log2N = 0;
-    for (int t = N; t > 1; t >>= 1) log2N++;
-
-    /* 位反转置换 */
-    for (int i = 0; i < N; i++) {
-        int rev = 0;
-        for (int b = 0; b < log2N; b++)
-            if (i & (1 << b)) rev |= 1 << (log2N - 1 - b);
-        if (i < rev) {
-            float tr = fft_real[i]; fft_real[i] = fft_real[rev]; fft_real[rev] = tr;
-        }
-    }
-
-    /* 蝶形运算 */
-    for (int step = 1; step < N; step <<= 1) {
-        float angle_step = -3.14159265358979323846f / (float)step;
-        for (int group = 0; group < N; group += 2 * step) {
-            for (int pair = 0; pair < step; pair++) {
-                float angle = angle_step * (float)pair;
-                float wr = cosf(angle), wi = sinf(angle);
-                int even_idx = group + pair;
-                int odd_idx = group + pair + step;
-                float even_r = fft_real[even_idx], even_i = 0.0f;
-                float odd_r = fft_real[odd_idx], odd_i = 0.0f;
-                float tr = odd_r * wr - odd_i * wi;
-                float ti = odd_r * wi + odd_i * wr;
-                fft_real[odd_idx] = even_r - tr;
-                fft_real[even_idx] = even_r + tr;
-                fft_imag[odd_idx] = 0.0f - ti;
-                fft_imag[even_idx] = 0.0f + ti;
-            }
+    /* M-024修复：使用统一fft_real替代内联Cooley-Tukey FFT */
+    {
+        float* input_saved = (float*)safe_malloc(fft_n * sizeof(float));
+        if (input_saved) {
+            memcpy(input_saved, fft_real, fft_n * sizeof(float));
+            fft_real(input_saved, fft_n, fft_real, fft_imag);
+            safe_free((void**)&input_saved);
         }
     }
 

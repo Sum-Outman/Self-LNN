@@ -44,11 +44,7 @@ static void emergency_seed_init(void) {
     }
 }
 
-static float emergency_rand_float(void) {
-    emergency_seed_init();
-    emergency_seed = emergency_seed * 1103515245 + 12345;
-    return (float)((emergency_seed >> 16) & 0x7FFF) / 32768.0f;
-}
+/* M-026修复：移除未使用的LCG随机函数（全局使用math_utils rng_uniform替代） */
 
 static long emergency_timestamp_us(void) {
     clock_t c = clock();
@@ -224,8 +220,15 @@ int emergency_stop_system_trigger(EmergencyStopSystem* system,
                                    const void* data, size_t data_size) {
     if (!system) return -1;
     if (system->is_disabled) return -1;
-    (void)data;
-    (void)data_size;
+    /* N-012修复: 使用data更新CfC异常分数（避免忽略触发数据） */
+    if (data && data_size > 0) {
+        const float* fd = (const float*)data;
+        float data_energy = 0.0f;
+        size_t use_size = data_size < 64 ? data_size : 64;
+        for (size_t i = 0; i < use_size; i++)
+            data_energy += fd[i] * fd[i];
+        system->status.cfc_anomaly_score = sqrtf(data_energy / (float)use_size);
+    }
 
     system->status.last_source = source;
     system->status.last_trigger_time = emergency_timestamp_us();

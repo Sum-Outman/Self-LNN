@@ -764,24 +764,24 @@ int safety_check_physics(SafetyMonitor* monitor, const float* position,
 
     SAFETY_LOCK(monitor);
     float max_vel = monitor->physical_boundaries.max_velocity;
-    float pos_limits[6];  /* x_min, x_max, y_min, y_max, z_min, z_max */
-    /* 从物理边界获取关节角度限制 */
+    float max_accel = monitor->physical_boundaries.max_acceleration;
+    float safety_zone_radius = monitor->physical_boundaries.safety_zone_radius;
+    float collision_dist_min = monitor->physical_boundaries.collision_distance_min;
     int bound_joint_count = monitor->physical_boundaries.joint_count;
-    int check_count = (joints && joint_count > 0) ? (joint_count < bound_joint_count ? joint_count : bound_joint_count) : 0;
-    float min_joints[256];
-    float max_joints[256];
-    int copy_count = check_count < 256 ? check_count : 256;
+    int copy_count = joint_count < 16 ? joint_count : 16;
+    if (copy_count > bound_joint_count) copy_count = bound_joint_count;
+    float min_joints[16];
+    float max_joints[16];
     for (int i = 0; i < copy_count; i++) {
         min_joints[i] = monitor->physical_boundaries.min_joint_angle[i];
         max_joints[i] = monitor->physical_boundaries.max_joint_angle[i];
     }
     SAFETY_UNLOCK(monitor);
 
-    /* 位置边界检查 */
+    /* 位置边界检查：使用安全区域半径检查 */
     if (position) {
-        if (position[0] < pos_limits[0] || position[0] > pos_limits[1] ||
-            position[1] < pos_limits[2] || position[1] > pos_limits[3] ||
-            position[2] < pos_limits[4] || position[2] > pos_limits[5]) {
+        float pos_norm = sqrtf(position[0]*position[0] + position[1]*position[1] + position[2]*position[2]);
+        if (safety_zone_radius > 0.0f && pos_norm > safety_zone_radius) {
             SafetyEvent event;
             memset(&event, 0, sizeof(SafetyEvent));
             event.type = SAFETY_EVENT_PHYSICAL_VIOLATION;

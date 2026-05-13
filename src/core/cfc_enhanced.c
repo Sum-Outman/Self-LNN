@@ -414,6 +414,8 @@ int cfc_enhanced_state_reset(CfcEnhancedState* state)
 static int cfc_ensure_power_iter_buffers(CfcEnhancedState* state, size_t hidden_size)
 {
     if (!state || hidden_size == 0) return -1;
+    /* I-015修复：添加上限保护，防止超大hidden_size导致分配失败 */
+    if (hidden_size > 65536) return -1;
     if (state->power_iter_buffer_size >= (int)hidden_size && state->power_iter_buffer && state->power_iter_buffer2)
         return 0;
 
@@ -435,8 +437,6 @@ static int cfc_ensure_power_iter_buffers(CfcEnhancedState* state, size_t hidden_
 float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
                                     const float* state, CfcEnhancedState* estate)
 {
-    (void)input;
-    (void)state;
     if (!cell || !estate) return 1.0f;
 
     CfCCellConfig config;
@@ -446,9 +446,10 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
     if (hidden_size == 0) return 1.0f;
 
     float stiffness_ratio = 1.0f;
+
+    /* F-007修复：基于配置时间常数的基础刚度估计 */
     float time_const = config.time_constant;
     float delta_t_val = config.delta_t;
-
     if (config.use_multi_timescale) {
         float fast_tau = time_const * config.fast_tau_ratio;
         float slow_tau = time_const * config.slow_tau_ratio;
@@ -461,10 +462,12 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
         if (stiffness_ratio > 1e6f) stiffness_ratio = 1e6f;
     }
 
+    /* F-007修复：基于tau分布的刚度增强（从液态时间常数） */
     int tau_size = 0;
+    /* I-015修复：边界检查 + 获取液态时间常数 */
     float* tau_buffer = (float*)safe_malloc(hidden_size * sizeof(float));
     if (tau_buffer) {
-        if (cfc_cell_get_liquid_tau(cell, tau_buffer, &tau_size) == 0 && tau_size > 0) {
+        if (cfc_cell_get_liquid_tau(cell, tau_buffer, &tau_size) == 0 && tau_size > 0 && (size_t)tau_size <= hidden_size) {
             float min_tau = tau_buffer[0];
             float max_tau = tau_buffer[0];
             for (int i = 1; i < tau_size; i++) {
@@ -476,6 +479,55 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
             }
         }
         safe_free((void**)&tau_buffer);
+    }
+
+    /* F-007修复：基于真实input/state的雅可比矩阵近似条件数 */
+    if (input && state && hidden_size > 0) {
+        /* 使用有限差分估计雅可比矩阵的算子范数（谱半径近似） */
+        float eps = 1e-5f;
+        float* perturbed_state = (float*)safe_malloc(hidden_size * sizeof(float));
+        float* forward_original = (float*)safe_malloc(hidden_size * sizeof(float));
+        float* forward_perturbed = (float*)safe_malloc(hidden_size * sizeof(float));
+        if (perturbed_state && forward_original && forward_perturbed) {
+            /* 先执行原始前向 */
+            memcpy(perturbed_state, state, hidden_size * sizeof(float));
+            cfc_cell_forward(cell, input, perturbed_state, forward_original);
+
+            /* 随机方向扰动状态 */
+            float norm_perturb = 0.0f;
+            for (size_t i = 0; i < hidden_size; i++) {
+                /* 使用确定性的伪随机方向（基于状态值哈希） */
+                float direction = sinf(state[i] * 137.508f + 3.14159f) * eps;
+                perturbed_state[i] = state[i] + direction;
+                float diff = perturbed_state[i] - state[i];
+                norm_perturb += diff * diff;
+            }
+            norm_perturb = sqrtf(norm_perturb);
+
+            if (norm_perturb > 1e-12f) {
+                cfc_cell_forward(cell, input, perturbed_state, forward_perturbed);
+
+                /* 计算 ||F(x+δ) - F(x)|| / ||δ|| 作为局部Lipschitz常数估计 */
+                float norm_diff = 0.0f;
+                for (size_t i = 0; i < hidden_size; i++) {
+                    float d = forward_perturbed[i] - forward_original[i];
+                    norm_diff += d * d;
+                }
+                norm_diff = sqrtf(norm_diff);
+
+                float local_lipschitz = norm_diff / norm_perturb;
+                /* 将Lipschitz常数融入刚度比（高Lipschitz ≈ 高刚度） */
+                if (local_lipschitz > 1.0f) {
+                    stiffness_ratio *= cfc_enhanced_fminf(local_lipschitz, 100.0f);
+                }
+                /* 将局部刚度与时间尺度刚度做权重混合 */
+                float jac_stiffness = local_lipschitz * cfc_enhanced_fmaxf(time_const / delta_t_val, 1.0f);
+                stiffness_ratio = 0.7f * stiffness_ratio + 0.3f * jac_stiffness;
+            }
+        }
+        if (perturbed_state) safe_free((void**)&perturbed_state);
+        if (forward_original) safe_free((void**)&forward_original);
+        if (forward_perturbed) safe_free((void**)&forward_perturbed);
     }
 
     if (stiffness_ratio > 1e6f) stiffness_ratio = 1e6f;

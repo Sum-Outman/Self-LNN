@@ -635,16 +635,20 @@ static const char* ascend_backend_get_error_string(void) {
 
 /* ==================== 异步内存操作 ==================== */
 
+/* M-033修复：NPU后端异步拷贝（无SDK时直接执行同步拷贝+stream同步标记） */
 static int ascend_backend_memory_copy_to_device_async(GpuMemory* dst, const void* src,
                                                        size_t size, GpuStream* stream) {
-    (void)stream;
-    return ascend_backend_memory_copy_to_device(dst, src, size);
+    /* 无硬件DMA时：同步memcpy + stream同步标记保持接口一致性 */
+    int ret = ascend_backend_memory_copy_to_device(dst, src, size);
+    if (stream) npu_common_stream_synchronize(stream);
+    return ret;
 }
 
 static int ascend_backend_memory_copy_from_device_async(void* dst, GpuMemory* src,
                                                          size_t size, GpuStream* stream) {
-    (void)stream;
-    return ascend_backend_memory_copy_from_device(dst, src, size);
+    int ret = ascend_backend_memory_copy_from_device(dst, src, size);
+    if (stream) npu_common_stream_synchronize(stream);
+    return ret;
 }
 
 /* ==================== NPU接口实现 ==================== */
@@ -876,67 +880,29 @@ const NpuBackendInterface* ascend_get_npu_interface(void) {
  * 昇腾模型推理(aclmdlLoadFromFile/aclmdlExecute)独立于此路径
  * =================================================================== */
 
+/* F-009/F-010修复：使用npu_common共享实现，消除重复代码 */
 int ascend_forward_dense(GpuContext* context, const float* input,
                          const float* weights, const float* bias, float* output,
                          size_t batch_size, size_t input_size, size_t output_size,
                          GpuActivationType act_type, float alpha) {
     (void)context;
-    if (!input || !weights || !output) return -1;
-    for (size_t b = 0; b < batch_size; b++) {
-        for (size_t o = 0; o < output_size; o++) {
-            float sum = bias ? bias[o] : 0.0f;
-            for (size_t i = 0; i < input_size; i++) {
-                sum += weights[o * input_size + i] * input[b * input_size + i];
-            }
-            if (act_type == GPU_ACTIVATION_RELU) {
-                sum = (sum > 0.0f) ? sum : 0.0f;
-            } else if (act_type == GPU_ACTIVATION_SIGMOID) {
-                sum = 1.0f / (1.0f + expf(-sum));
-            } else if (act_type == GPU_ACTIVATION_TANH) {
-                sum = tanhf(sum);
-            } else if (act_type == GPU_ACTIVATION_LEAKY_RELU) {
-                sum = (sum > 0.0f) ? sum : alpha * sum;
-            }
-            output[b * output_size + o] = sum;
-        }
-    }
-    return 0;
+    return npu_common_cpu_forward_dense(input, weights, bias, output,
+                                         batch_size, input_size, output_size,
+                                         act_type, alpha);
 }
 
 int ascend_matmul_train(GpuContext* context, const float* a, const float* b,
                          float* c, size_t m, size_t n, size_t k,
                          int transpose_a, int transpose_b) {
     (void)context;
-    if (!a || !b || !c) return -1;
-    for (size_t row = 0; row < m; row++) {
-        for (size_t col = 0; col < k; col++) {
-            float sum = 0.0f;
-            for (size_t inner = 0; inner < n; inner++) {
-                float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
-                float bv = transpose_b ? b[col * n + inner] : b[inner * k + col];
-                sum += av * bv;
-            }
-            c[row * k + col] = sum;
-        }
-    }
-    return 0;
+    return npu_common_cpu_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 
 int ascend_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
                          const float* b, const float* tau, float* h_out,
                          float dt, int dim) {
     (void)context;
-    if (!h_in || !W || !b || !tau || !h_out) return -1;
-    for (int i = 0; i < dim; i++) {
-        float act_sum = b[i];
-        float gate_sum = b[dim + i];
-        float activation = tanhf(act_sum);
-        float gate = 1.0f / (1.0f + expf(-gate_sum));
-        float driver = gate * activation;
-        float decay = expf(-dt / tau[i]);
-        h_out[i] = h_in[i] * decay + (1.0f - decay) * driver;
-    }
-    return 0;
+    return npu_common_cpu_cfc_step(h_in, W, b, tau, h_out, dt, dim);
 }
 
 const GpuBackendInterface* ascend_get_backend_interface(void) {

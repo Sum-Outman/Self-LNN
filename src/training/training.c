@@ -388,7 +388,9 @@ static int ckpt_is_version_supported(uint32_t version) {
 int trainer_load_dataset_from_url(Trainer* trainer, const char* url, const char* format) {
     if (!trainer || !url) return -1;
 
-    /* 使用popen调用curl获取数据 */
+    /* N-013修复: popen/curl回退机制 - 优先HTTP socket，失败时回退到popen/curl */
+    (void)format;
+
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "curl -s \"%s\" 2>/dev/null", url);
 

@@ -500,7 +500,7 @@
                 }
                 nodes[e.subject].connections++;
                 nodes[e.object].connections++;
-                edges.push({ source: e.subject, target: e.object, label: e.predicate, weight: e.weight || 0.5 });
+                edges.push({ source: e.subject, target: e.object, label: e.predicate, weight: e.weight || (e.confidence ? e.confidence : 0.5) });
             });
 
             var nodeList = [];
@@ -1084,7 +1084,8 @@
 
             nodes3d = [];
             graphState.nodes.forEach(function(n, idx) {
-                nodes3d.push({ id: n.id, label: n.label || n.id, x3: n.x || 0, y3: n.y || 0, z3: (n.weight ? n.weight * 80 - 40 : Math.cos(idx * 1.2) * 40), r: 0x00/255, g: 0xC8/255, b: 0xFF/255, weight: n.weight || 1 });
+                var zPos = n.weight ? n.weight * 80 - 40 : ((n.connections || 1) * 5 + idx * 0.7) % 80 - 40;
+                nodes3d.push({ id: n.id, label: n.label || n.id, x3: n.x || 0, y3: n.y || 0, z3: zPos, r: 0x00/255, g: 0xC8/255, b: 0xFF/255, weight: n.weight || 1 });
             });
             edges3d = graphState.edges.slice();
 

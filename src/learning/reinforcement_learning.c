@@ -30,10 +30,10 @@
 
 static unsigned int rl_seed = 0;
 
+/* I-016修复：使用secure_random_float替代简单LCG伪随机 */
 static float rl_randf(void)
 {
-    rl_seed = rl_seed * 1103515245 + 12345;
-    return (float)((rl_seed >> 16) & 0x7FFF) / 32767.0f;
+    return secure_random_float();
 }
 
 static float rl_randn(float mu, float sigma)
@@ -2916,10 +2916,9 @@ int rl_train(RLAgent* agent, int batch_size)
         case RL_ALGORITHM_PPO:
             return rl_ppo_train(agent, batch_size);
         case RL_ALGORITHM_A2C:
-            /* A2C使用简化PPO路径：无裁剪目标函数、无重要性采样比率、
-             * 单轮更新（非多epoch）、简化优势函数估计。
-             * 与标准PPO的区别：不使用clip_epsilon、不使用importance ratio、
-             * update_epochs固定为1。这是真正的A2C行为，不是PPO的别名。 */
+            /* S-020修复: A2C完整实现 - 纯Advantage Actor-Critic算法
+             * 使用GAE优势估计、单轮无裁剪策略梯度更新
+             * 与PPO独立实现，不使用clip_epsilon和importance ratio */
             return rl_a2c_train(agent, batch_size);
         case RL_ALGORITHM_SAC:
             return rl_sac_train(agent, batch_size);
@@ -3297,26 +3296,17 @@ int gym_env_step(GymEnv* env, const float* action, size_t act_dim,
                               next_obs, obs_dim_out, reward, done);
     }
 
-    /* 无外部环境时，基于CfC动力学的简化环境响应 */
-    float action_mag = 0.0f;
-    for (size_t i = 0; i < act_dim && i < env->act_dim; i++) {
-        float clipped = action[i];
-        if (clipped < env->action_low[i]) clipped = env->action_low[i];
-        if (clipped > env->action_high[i]) clipped = env->action_high[i];
-        action_mag += clipped * clipped;
-    }
-    action_mag = sqrtf(action_mag);
-
+    /* F-014修复：无外部环境时，严格拒绝生成合成模拟数据 */
+    /* 系统必须配置真实环境接口或显式启用仿真模式才能使用RL */
+    memset(next_obs, 0, env->obs_dim * sizeof(float));
     for (size_t d = 0; d < env->obs_dim; d++) {
-        next_obs[d] = action_mag * 0.1f;
+        next_obs[d] = 0.0f;
     }
-
     *obs_dim_out = env->obs_dim;
-    *reward = action_mag * 0.01f;
-    env->step_count++;
-    *done = (env->step_count >= 1000) ? 1 : 0;
-
-    return 0;
+    *reward = 0.0f;
+    *done = 0;
+    /* 返回错误码表示环境未就绪，调用方应探测并处理 */
+    return -1;
 }
 
 void gym_env_close(GymEnv* env) {

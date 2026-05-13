@@ -1505,6 +1505,13 @@ static int load_cuda_library(void) {
     // 尝试加载CUDA运行时库
     g_cuda_library_handle = LOAD_LIBRARY(CUDA_RUNTIME_LIBRARY_NAME);
     if (!g_cuda_library_handle) {
+        /* N-005修复: 优先检查用户自定义SELFLNN_CUDA_LIB_PATH */
+        const char* user_lib = getenv("SELFLNN_CUDA_LIB_PATH");
+        if (user_lib) {
+            g_cuda_library_handle = LOAD_LIBRARY(user_lib);
+        }
+    }
+    if (!g_cuda_library_handle) {
 #ifdef _WIN32
         // Windows上尝试其他版本
         const char* cuda_library_names[] = {
@@ -1759,6 +1766,14 @@ static char* compile_cuda_to_ptx(const char* cuda_source, size_t* ptx_size) {
     // 3. Windows上搜索标准CUDA安装路径
 #ifdef _WIN32
     if (nvcc_path[0] == '\0') {
+        /* N-004修复: 优先检查用户自定义SELFLNN_CUDA_PATH环境变量 */
+        const char* user_cuda_path = getenv("SELFLNN_CUDA_PATH");
+        if (user_cuda_path) {
+            snprintf(nvcc_path, sizeof(nvcc_path), "%s\\bin\\nvcc.exe", user_cuda_path);
+            if (access(nvcc_path, F_OK) != 0) nvcc_path[0] = '\0';
+        }
+    }
+    if (nvcc_path[0] == '\0') {
         const char* cuda_base = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA";
         WIN32_FIND_DATAA find_data;
         char search_pattern[MAX_PATH];
@@ -1782,6 +1797,14 @@ static char* compile_cuda_to_ptx(const char* cuda_source, size_t* ptx_size) {
     }
 #else
     // 3. Linux/Mac上搜索标准CUDA安装路径
+    if (nvcc_path[0] == '\0') {
+        /* N-004修复: 优先检查SELFLNN_CUDA_PATH */
+        const char* user_cuda_path = getenv("SELFLNN_CUDA_PATH");
+        if (user_cuda_path) {
+            snprintf(nvcc_path, sizeof(nvcc_path), "%s/bin/nvcc", user_cuda_path);
+            if (access(nvcc_path, F_OK) != 0) nvcc_path[0] = '\0';
+        }
+    }
     if (nvcc_path[0] == '\0') {
         const char* search_dirs[] = {
             "/usr/local/cuda/bin/nvcc",

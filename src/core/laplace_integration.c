@@ -40,45 +40,36 @@ int cfc_cell_analyze_stability(const void* cell, CfcStabilityAnalysis* analysis)
     // 初始化分析结果
     memset(analysis, 0, sizeof(CfcStabilityAnalysis));
     
-    // 获取CfC单元参数
+    /* I-007修复：output_gain和B参与完整的传递函数分析 */
     float time_constant = cfc_cell->config.time_constant;
     float feedback_strength = cfc_cell->config.feedback_strength;
     float input_gain = cfc_cell->config.input_gain;
     float output_gain = cfc_cell->config.output_gain;
-    (void)output_gain;  // 目前未使用，保留供将来使用
     
-    // 计算传递函数系数
-    // CfC单元的一阶连续时间系统：dx/dt = -x/τ + f(x,u)
-    // 线性化后：sX(s) = -X(s)/τ + A*X(s) + B*U(s)
-    // 传递函数：G(s) = B / (s + 1/τ - A)
-    
-    // 计算线性化增益A和B（完整实现：基于CfC单元非线性特性计算雅可比矩阵）
-    // CfC单元非线性函数：f(x,u) = feedback_strength * tanh(x) + input_gain * u
-    // 在平衡点x0=0处线性化：A = ∂f/∂x = feedback_strength * (1 - tanh(0)^2) = feedback_strength
-    // B = ∂f/∂u = input_gain
-    // 注意：对于非零平衡点，需要计算实际的tanh(x0)值
-    float A = feedback_strength;  // 在x0=0处的线性化增益
+    /* CfC一阶系统传递函数: G(s) = output_gain * B / (s + 1/τ - A)
+     * A = ∂f/∂x ≈ feedback_strength, B = ∂f/∂u = input_gain */
+    float A = feedback_strength;
     float B = input_gain;
-    (void)B;  // 目前未使用，保留供将来使用
     
-    // 计算极点位置：s = -1/τ + A
+    /* 输出增益调节系统整体响应 */
+    float total_gain = fabsf(output_gain * B);
+    if (total_gain < 1e-8f) total_gain = B;
+    
     float pole_real = -1.0f / time_constant + A;
-    float pole_imag = 0.0f;  // 一阶系统，极点在实轴上
+    float pole_imag = 0.0f;
 
-    /* 完整Bode图分析：在关键频率点评估传递函数幅值和相位 */
     #define BODE_NUM_POINTS 20
     float bode_freqs[BODE_NUM_POINTS];
     float bode_mag_db[BODE_NUM_POINTS];
     float bode_phase_deg[BODE_NUM_POINTS];
-    float w_low = 0.01f / fmaxf(time_constant, 1e-6f);  /* 从低频开始 */
-    float w_high = 100.0f / fmaxf(time_constant, 1e-6f); /* 到高频截止 */
+    float w_low = 0.01f / fmaxf(time_constant, 1e-6f);
+    float w_high = 100.0f / fmaxf(time_constant, 1e-6f);
     for (int bi = 0; bi < BODE_NUM_POINTS; bi++) {
         float ratio = (float)bi / (float)(BODE_NUM_POINTS - 1);
         bode_freqs[bi] = w_low * powf(w_high / w_low, ratio);
-        /* G(jω) = B / (jω + 1/τ - A) */
         float denom_re = pole_real;
         float denom_im = bode_freqs[bi];
-        float mag = fabsf(B) / sqrtf(denom_re * denom_re + denom_im * denom_im);
+        float mag = total_gain / sqrtf(denom_re * denom_re + denom_im * denom_im);
         bode_mag_db[bi] = 20.0f * log10f(fmaxf(mag, 1e-12f));
         bode_phase_deg[bi] = -atan2f(denom_im, denom_re) * 180.0f / (float)M_PI;
     }

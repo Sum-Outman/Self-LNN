@@ -2,6 +2,7 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/math_utils.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -36,17 +37,8 @@ struct DeepReflectionEngine {
     int initialized;
 };
 
-static float cosine_sim_dr(const float* a, const float* b, size_t dim) {
-    float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (size_t i = 0; i < dim; i++) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    float denom = sqrtf(na) * sqrtf(nb);
-    if (denom < 1e-10f) return 0.0f;
-    return dot / denom;
-}
+/* F-023修复：使用统一余弦相似度替代本地实现 */
+#define cosine_sim_dr(a, b, dim) math_cosine_similarity((a), (b), (dim))
 
 static float euclidean_dist_dr(const float* a, const float* b, size_t dim) {
     float sum = 0.0f;
@@ -84,12 +76,20 @@ static void weighted_embedding_fusion(const float** embeddings, const float* wei
     }
 }
 
-static void generate_perspective_embedding(const float* base, int perspective_idx,
+static void generate_perspective_embedding(LNN* lnn, const float* base, int perspective_idx,
                                             float diversity, size_t dim, float* out) {
+    /* F-002修复: 使用LNN前向传播生成真实语义多视角嵌入
+     * 通过频域调制输入嵌入来产生不同视角，而非确定性数学噪声 */
+    float modulated_input[DR_EMBED_DIM];
     for (size_t j = 0; j < dim; j++) {
-        float noise = ((float)(perspective_idx * 7 + j * 31) / 997.0f) - 0.5f;
-        float shift = sinf((float)perspective_idx * 1.5f + (float)j * 0.1f) * diversity;
-        out[j] = base[j] + noise * diversity * 2.0f + shift;
+        float phase = (float)(perspective_idx) * 2.0f * 3.14159265f / 5.0f;
+        float modulator = 0.5f + 0.5f * cosf(phase + (float)j * 0.15f);
+        modulated_input[j] = base[j] * (0.3f + modulator * diversity);
+    }
+    if (lnn) {
+        lnn_forward(lnn, modulated_input, out);
+    } else {
+        memcpy(out, modulated_input, dim * sizeof(float));
     }
     float norm = 0.0f;
     for (size_t j = 0; j < dim; j++) norm += out[j] * out[j];
@@ -214,9 +214,17 @@ int dr_reflect(DeepReflectionEngine* engine,
         size_t copy_dim = (context_size < DR_EMBED_DIM) ? context_size : DR_EMBED_DIM;
         memcpy(base_embed, context_data, copy_dim * sizeof(float));
     } else if (topic) {
+        /* S-012修复: 使用LNN编码器生成真实语义嵌入，替代字符ASCII/255简化方式 */
+        float topic_input[DR_EMBED_DIM];
+        memset(topic_input, 0, sizeof(topic_input));
         size_t tlen = strlen(topic);
         for (size_t i = 0; i < tlen && i < DR_EMBED_DIM; i++) {
-            base_embed[i] = (float)topic[i] / 255.0f;
+            topic_input[i] = (float)(unsigned char)topic[i] / 255.0f;
+        }
+        if (engine->reflection_net) {
+            lnn_forward(engine->reflection_net, topic_input, base_embed);
+        } else {
+            memcpy(base_embed, topic_input, DR_EMBED_DIM * sizeof(float));
         }
     }
 
@@ -244,11 +252,21 @@ int dr_reflect(DeepReflectionEngine* engine,
             layer_input[j] *= inv_count;
         }
 
-        float perspective_count = 3.0f + (float)(layer % 3);
+        /* M-009修复: 基于内容嵌入方差确定视角数量（高方差需多视角） */
+        float embed_var = 0.0f, embed_mean = 0.0f;
+        for (size_t j = 0; j < edim; j++) embed_mean += layer_input[j];
+        embed_mean /= (float)edim;
+        for (size_t j = 0; j < edim; j++) {
+            float d = layer_input[j] - embed_mean;
+            embed_var += d * d;
+        }
+        embed_var /= (float)edim;
+        int num_perspectives = (embed_var > 0.1f) ? 6 : (embed_var > 0.01f ? 4 : 3);
+
         float multi_persp_in[DR_EMBED_DIM] = {0};
-        for (size_t p = 0; p < (size_t)perspective_count; p++) {
+        for (size_t p = 0; p < (size_t)num_perspectives; p++) {
             float persp_emb[DR_EMBED_DIM];
-            generate_perspective_embedding(layer_input, (int)p, 0.3f + (float)layer * 0.05f, edim, persp_emb);
+            generate_perspective_embedding(engine->reflection_net, layer_input, (int)p, 0.3f + embed_var * 2.0f, edim, persp_emb);
             float persp_out[DR_EMBED_DIM] = {0};
             lnn_forward(engine->reflection_net, persp_emb, persp_out);
             for (size_t j = 0; j < edim; j++) {
@@ -256,7 +274,7 @@ int dr_reflect(DeepReflectionEngine* engine,
             }
         }
         for (size_t j = 0; j < edim; j++) {
-            multi_persp_in[j] /= perspective_count;
+            multi_persp_in[j] /= (float)num_perspectives;
             lr->content_embedding[j] = multi_persp_in[j];
         }
 
@@ -449,7 +467,15 @@ int dr_reflect_multi_passage(DeepReflectionEngine* engine,
     memcpy(engine->layer_embeddings, fused_embed, edim * sizeof(float));
     engine->layer_embed_count = 1;
 
-    unsigned int seed = (unsigned int)(topic ? strlen(topic) : 42);
+    /* M-010修复: 使用content hash而非topic长度作为种子 */
+    unsigned int seed = 42;
+    if (topic) {
+        seed = 0;
+        size_t tlen = strlen(topic);
+        for (size_t si = 0; si < tlen; si++)
+            seed = seed * 31 + (unsigned char)topic[si];
+    }
+    seed ^= (unsigned int)time(NULL);
 
     for (int layer = 0; layer < max_layers; layer++) {
         DRLayerResult* lr = &chain_out->layers[layer];
