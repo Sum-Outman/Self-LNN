@@ -11,6 +11,8 @@
 
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/secure_random.h"
+#include "selflnn/utils/math_utils.h"
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/multimodal/environment_sound.h"

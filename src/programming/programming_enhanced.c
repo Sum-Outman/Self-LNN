@@ -146,6 +146,7 @@ static void collect_functions_recursive(const ASTNode* node, FunctionCollector* 
     }
     if (node->left)  collect_functions_recursive(node->left, fc);
     if (node->right) collect_functions_recursive(node->right, fc);
+    if (node->next)  collect_functions_recursive(node->next, fc);
 }
 
 /* M-041修复: 根据行号查找行所属的函数名 */
@@ -160,8 +161,6 @@ static const char* find_function_for_line(const FunctionCollector* fc, int line_
         }
     }
     return best_name;
-}
-    if (node->next)  collect_functions_recursive(node->next, fc);
 }
 
 /* 收集所有函数调用（用于递归检测） */

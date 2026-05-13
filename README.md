@@ -54,7 +54,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **记忆系统** | 5 层记忆体系（短期、长期、情景、语义、工作记忆）、Ebbinghaus 遗忘曲线、Hebbian 巩固 |
 | **知识库** | 知识图谱、三元组存储、多跳推理、本体工程、语义网络 |
 | **机器人控制** | DH 运动学、A*/RRT* 路径规划、ROS/ROS2 集成、PyBullet/Gazebo 仿真、多机器人协调 |
-| **GPU 加速** | 10 种 GPU 后端接口（CUDA、OpenCL、Vulkan、Metal、ROCm — 完整实现；Intel、Ascend、Cambricon、TPU — 模型推理通过dlsym动态加载SDK + CPU数学回退；CPU-SIMD） |
+| **GPU 加速** | 10 种 GPU 后端接口（CUDA、OpenCL、Vulkan、Metal、ROCm、CPU-SIMD — 完整内核调度+线程池并行；Intel、Ascend、Cambricon、TPU — 通过dlsym动态加载SDK + CPU自动回退；CPU 后端支持 27+ 种真实内核算子） |
 | **后端服务** | HTTP REST API（~180 端点）、WebSocket 实时通信、API 密钥认证、安全监控 |
 | **并发系统** | 线程池、无锁队列、读写锁、RCU 机制 |
 | **安全系统** | 紧急停止、熔断器、审计日志、内容过滤 |
@@ -74,7 +74,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **Memory System** | 5-layer memory hierarchy (short-term, long-term, episodic, semantic, working memory), Ebbinghaus forgetting curve, Hebbian consolidation |
 | **Knowledge Base** | Knowledge graph, triple store, multi-hop reasoning, ontology engineering, semantic network |
 | **Robot Control** | DH kinematics, A*/RRT* path planning, ROS/ROS2 integration, PyBullet/Gazebo simulation, multi-robot coordination |
-| **GPU Acceleration** | 10 GPU backend interfaces (CUDA, OpenCL, Vulkan, Metal, ROCm — fully implemented; Intel, Ascend, Cambricon, TPU — model inference via dlsym-loaded SDK + CPU math fallback; CPU-SIMD) |
+| **GPU Acceleration** | 10 GPU backend interfaces (CUDA, OpenCL, Vulkan, Metal, ROCm, CPU-SIMD — full kernel dispatch + thread pool parallelism; Intel, Ascend, Cambricon, TPU — dlsym-loaded SDK + CPU auto-fallback; CPU backend supports 27+ real kernel operators) |
 | **Backend Service** | HTTP REST API (~180 endpoints), WebSocket real-time communication, API key authentication, security monitoring |
 | **Concurrency System** | Thread pool, lock-free queue, read-write lock, RCU mechanism |
 | **Safety System** | Emergency stop, circuit breaker, audit log, content filtering |
@@ -170,7 +170,7 @@ The system is divided into four architectural layers:
 
 #### 中文
 - **操作系统**：Windows 10+, Linux (Ubuntu 18.04+), macOS 10.14+
-- **编译器**：GCC 7+, Clang 6+, MSVC 2017+
+- **编译器**：GCC 7+, Clang 6+, MSVC 2017+ (含 VS 2022/2026)
 - **构建工具**：CMake 3.10+
 - **内存**：最低 2GB，推荐 8GB+
 - **磁盘空间**：最低 500MB
@@ -180,11 +180,11 @@ The system is divided into four architectural layers:
   - 华为昇腾(Ascend)自定义内核编译：AscendCL (CANN)
   - 寒武纪(Cambricon)自定义内核编译：CNRT (Cambricon Neuware)
   - Google TPU 自定义内核编译：libtpu
-  - **注意**：上述SDK仅在需要编译GPU原生内核算子时使用。模型推理和通用计算均通过dlsym动态加载SDK自动适配，无SDK时自动使用CPU回退。CUDA/OpenCL/Vulkan/Metal/ROCm无需额外SDK。
+  - **注意**：上述SDK仅在需要编译GPU原生内核算子时使用。模型推理和通用计算均通过dlsym动态加载SDK自动适配，无SDK时自动使用CPU后端（支持27+种真实内核算子+线程池+SIMD并行）。CUDA/OpenCL/Vulkan/Metal/ROCm无需额外SDK。
 
 #### English
 - **OS**: Windows 10+, Linux (Ubuntu 18.04+), macOS 10.14+
-- **Compiler**: GCC 7+, Clang 6+, MSVC 2017+
+- **Compiler**: GCC 7+, Clang 6+, MSVC 2017+ (including VS 2022/2026)
 - **Build Tools**: CMake 3.10+
 - **Memory**: Minimum 2GB, recommended 8GB+
 - **Disk Space**: Minimum 500MB
@@ -194,15 +194,16 @@ The system is divided into four architectural layers:
   - Huawei Ascend custom kernel compilation: AscendCL (CANN)
   - Cambricon custom kernel compilation: CNRT (Cambricon Neuware)
   - Google TPU custom kernel compilation: libtpu
-  - **Note**: These SDKs are only required for compiling native GPU kernel operators. Model inference and general computation auto-adapt via dlsym-loaded SDK, falling back to CPU when SDK is absent. CUDA/OpenCL/Vulkan/Metal/ROCm require no additional SDK.
+  - **Note**: These SDKs are only required for compiling native GPU kernel operators. Model inference and general computation auto-adapt via dlsym-loaded SDK, falling back to CPU backend (27+ real kernel operators + thread pool + SIMD parallel) when SDK is absent. CUDA/OpenCL/Vulkan/Metal/ROCm require no additional SDK.
 
 ### 编译 / Build
 
 #### 中文
 ```bash
-# Windows (MSVC)
+# Windows (MSVC, VS 2017/2019/2022/2026)
 mkdir build && cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
+# 或 Visual Studio 2026: cmake .. -G "Visual Studio 18 2026" -A x64
 cmake --build . --config Release
 
 # Linux (GCC/Clang)
@@ -213,9 +214,10 @@ make -j$(nproc)
 
 #### English
 ```bash
-# Windows (MSVC)
+# Windows (MSVC, VS 2017/2019/2022/2026)
 mkdir build && cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
+# Or Visual Studio 2026: cmake .. -G "Visual Studio 18 2026" -A x64
 cmake --build . --config Release
 
 # Linux (GCC/Clang)
@@ -385,18 +387,18 @@ After starting the server, visit in your browser:
 ### 离线部署 / Offline Deployment
 
 #### 中文
-详细的离线部署指南请参考 `docs/离线部署指南.md`。
+详细的离线部署指南请参考 `docs/Offline_Deployment_Guide.md`。
 
 #### English
-For detailed offline deployment guide, please refer to `docs/离线部署指南.md`.
+For detailed offline deployment guide, please refer to `docs/Offline_Deployment_Guide.md`.
 
 ### 嵌入式平台部署 / Embedded Platform Deployment
 
 #### 中文
-嵌入式平台部署请参考 `docs/嵌入式平台部署指南_Embedded_Platform_Deployment_Guide.md`。
+嵌入式平台部署请参考 `docs/Embedded_Deployment_Guide.md`。
 
 #### English
-For embedded platform deployment, please refer to `docs/嵌入式平台部署指南_Embedded_Platform_Deployment_Guide.md`.
+For embedded platform deployment, please refer to `docs/Embedded_Deployment_Guide.md`.
 
 ---
 
@@ -571,7 +573,7 @@ For embedded platform deployment, please refer to `docs/嵌入式平台部署指
 
 **元学习系统（Meta-Learning）**：
 - **MAML（Model-Agnostic Meta-Learning）**：完整的元训练和元适应算法
-- **Reptile**：简化的元学习方法
+- **Reptile**：可扩展的元学习方法（一阶近似MAML）
 - **原型网络**：支持少数样本分类
 - **快速适应**：1-5步内即可适应新任务
 
@@ -652,7 +654,7 @@ The system provides comprehensive few-shot learning capabilities:
 
 **Meta-Learning System**:
 - **MAML (Model-Agnostic Meta-Learning)**: Complete meta-training and meta-adaptation algorithms
-- **Reptile**: Simplified meta-learning approach
+- **Reptile**: Scalable meta-learning approach (first-order approximation of MAML)
 - **Prototype Networks**: Support for few-shot classification
 - **Rapid Adaptation**: Adapt to new tasks within 1-5 steps
 
@@ -1005,7 +1007,7 @@ The system provides a complete 6-stage training pipeline for robot skill trainin
 |---------|---------|---------|
 | 服务器无法启动 | 端口被占用 | 更换端口或释放被占用端口 |
 | 内存不足 | 模型参数过大 | 减小 state_dimension |
-| GPU 不可用 | 驱动未安装 | 检查 GPU 驱动，回退到 CPU 模式 |
+| GPU 不可用 | 驱动未安装 | 检查 GPU 驱动或使用 CPU 后端（27+ 真实内核算子+线程池并行） |
 | 响应缓慢 | 并发任务过多 | 调整 max_concurrent_tasks |
 
 #### English
@@ -1013,19 +1015,19 @@ The system provides a complete 6-stage training pipeline for robot skill trainin
 |---------|---------------|----------|
 | Server cannot start | Port occupied | Change port or release occupied port |
 | Insufficient memory | Model parameters too large | Reduce state_dimension |
-| GPU unavailable | Driver not installed | Check GPU driver, fall back to CPU mode |
+| GPU unavailable | Driver not installed | Check GPU driver or use CPU backend (27+ real kernel operators + thread pool) |
 | Slow response | Too many concurrent tasks | Adjust max_concurrent_tasks |
 
 ### 性能优化 / Performance Optimization
 
 #### 中文
-- **GPU 加速**：启用并配置合适的 GPU 后端
+- **GPU 加速**：启用并配置合适的 GPU 后端，或使用 CPU 后端线程池+SIMD 加速
 - **批处理**：适当增大批处理大小
 - **内存管理**：及时清理不再需要的数据
 - **并发优化**：根据硬件调整线程池大小
 
 #### English
-- **GPU Acceleration**: Enable and configure appropriate GPU backend
+- **GPU Acceleration**: Enable and configure appropriate GPU backend, or use CPU backend thread pool + SIMD acceleration
 - **Batching**: Increase batch size appropriately
 - **Memory Management**: Timely clean up unneeded data
 - **Concurrency Optimization**: Adjust thread pool size based on hardware
@@ -1133,15 +1135,19 @@ A: SELF-LNN 采用单一 CfC 液态神经网络，不需要多模型融合、注
 
 **Q: 可以在没有 GPU 的机器上运行吗？**
 
-A: 可以。系统支持 CPU 模式和 SIMD 加速，可以在没有 GPU 的机器上正常运行。
+A: 可以。CPU 后端现已完整实现 27+ 种真实内核算子和线程池并行调度，支持 SIMD 加速（SSE/AVX/AVX2），可在无 GPU 环境下正常运行全部训练和推理任务。
 
 **Q: 如何启用 GPU 加速？**
 
-A: 确保已安装相应的 GPU 驱动，设置配置中的 `enable_gpu` 为 true，系统会自动检测并选择合适的 GPU 后端。NVIDIA(CUDA)、AMD(ROCm)、Apple(Metal)、通用(OpenCL/Vulkan)驱动安装后即可使用。华为昇腾(Ascend)、寒武纪(Cambricon)、Google TPU 需安装对应SDK（AscendCL/CNRT/libtpu），无SDK时通过dlsym自动回退CPU。
+A: 确保已安装相应的 GPU 驱动，设置配置中的 `enable_gpu` 为 true，系统会自动检测并选择合适的 GPU 后端。NVIDIA(CUDA)、AMD(ROCm)、Apple(Metal — 支持 GPU 原子归约批归一化)、通用(OpenCL/Vulkan — 支持 SVM 共享虚拟内存和 SPIR-V 运行时编译)驱动安装后即可使用。华为昇腾(Ascend)、寒武纪(Cambricon)、Google TPU 需安装对应SDK（AscendCL/CNRT/libtpu），无SDK时通过dlsym自动回退 CPU（27+ 真实内核算子+线程池并行）。
 
 **Q: 在没有连接真实硬件时，系统还能工作吗？**
 
-A: 可以。系统可以在仿真模式下运行，使用 PyBullet 或 Gazebo 进行仿真，不需要真实硬件。
+A: 可以。PyBullet 和 Gazebo 桥接已实现完整物理仿真数据（真实相机渲染、射线碰撞、深度图、点云），ROS/ROS2 节点支持完整 TCP/XMLRPC 通信。系统也内置纯 C 物理引擎作为回退。
+
+**Q: 严格真实数据模式是什么？**
+
+A: Release 构建默认启用 `SELFLNN_STRICT_REAL_DATA` 模式。在该模式下，所有合成数据生成函数返回错误，确保自主学习 100% 使用真实硬件/仿真数据。调试时可设置 `ALLOW_BOOTSTRAP_DATA=ON` 临时启用引导数据用于框架验证。
 
 ### English
 **Q: How is SELF-LNN different from other AI frameworks?**
@@ -1150,15 +1156,19 @@ A: SELF-LNN uses a single CfC Liquid Neural Network, eliminating the need for mu
 
 **Q: Can it run on machines without a GPU?**
 
-A: Yes. The system supports CPU mode and SIMD acceleration, and can run normally on machines without a GPU.
+A: Yes. The CPU backend is now fully implemented with 27+ real kernel operators and thread pool parallel scheduling, supporting SIMD acceleration (SSE/AVX/AVX2), capable of running all training and inference tasks without a GPU.
 
 **Q: How to enable GPU acceleration?**
 
-A: Ensure the appropriate GPU drivers are installed, set `enable_gpu` to true in the configuration, and the system will automatically detect and select the appropriate GPU backend. NVIDIA(CUDA), AMD(ROCm), Apple(Metal), and general (OpenCL/Vulkan) work with driver installation only. Huawei Ascend, Cambricon, and Google TPU require vendor SDKs (AscendCL/CNRT/libtpu); without SDK, the system auto-falls back to CPU via dlsym.
+A: Ensure the appropriate GPU drivers are installed, set `enable_gpu` to true in the configuration, and the system will automatically detect and select the appropriate GPU backend. NVIDIA(CUDA), AMD(ROCm), Apple(Metal — GPU atomic reduction for batch norm), and general (OpenCL/Vulkan — SVM shared virtual memory & SPIR-V runtime compilation) work with driver installation only. Huawei Ascend, Cambricon, and Google TPU require vendor SDKs (AscendCL/CNRT/libtpu); without SDK, the system auto-falls back to CPU (27+ real kernel operators + thread pool parallelism) via dlsym.
 
 **Q: Can the system still work without real hardware connected?**
 
-A: Yes. The system can run in simulation mode using PyBullet or Gazebo, no real hardware required.
+A: Yes. PyBullet and Gazebo bridges provide full physics simulation data (real camera rendering, ray collision, depth maps, point clouds). ROS/ROS2 nodes support full TCP/XMLRPC communication. The system also includes a pure C physics engine as fallback.
+
+**Q: What is Strict Real Data Mode?**
+
+A: Release builds default to `SELFLNN_STRICT_REAL_DATA` mode, where all synthetic data generation functions return errors, ensuring autonomous learning uses 100% real hardware/simulation data. Set `ALLOW_BOOTSTRAP_DATA=ON` in debug to temporarily enable bootstrap data for framework validation.
 
 ---
 

@@ -164,6 +164,11 @@ typedef struct {
     /* 执行上下文 */
     SkillStatus current_status;          /* 当前状态 */
     float progress;                      /* 执行进度 (0-1) */
+
+    /* 内部能力处理 */
+    int (*internal_handler)(const char* params);           /* 内部处理函数 */
+    int (*sub_skills[SKILL_MAX_STEPS])(const char* params); /* 子技能函数表 */
+    int sub_skill_count;                                   /* 子技能数量 */
 } SkillRecord;
 
 /* 技能库统计 */

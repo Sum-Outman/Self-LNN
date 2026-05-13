@@ -998,7 +998,7 @@ int plan_enhanced_generate_landmark_based(PlanEnhancedEngine* engine,
         result->makespan = cur_time;
     }
     result->agent_count = 1;
-    result->plan_confidence = path_len > 0 ? (0.5f + 0.4f * (1.0f - fminf(cur_time / (cur_time + 50.0f), 1.0f))) : 0.0f;
+    result->plan_confidence = path_len > 0 ? (0.5f + 0.4f * (1.0f - fminf(result->total_cost / (result->total_cost + 50.0f), 1.0f))) : 0.0f;
     result->is_feasible = path_len > 0 ? 1 : 0;
     snprintf(result->plan_summary, sizeof(result->plan_summary),
              "Landmark规划完成: %d个动作, %d个Landmark, 时间%.2f",
@@ -1425,7 +1425,7 @@ int plan_enhanced_generate_symbolic(PlanSymbolicPlanner* planner,
         result->makespan = cur_time;
     }
     result->agent_count = 1;
-    result->plan_confidence = path_len > 0 ? (0.5f + 0.5f * (1.0f - fminf(engine->planner_cost_total / (engine->planner_cost_total + 50.0f), 1.0f))) : 0.0f;
+    result->plan_confidence = path_len > 0 ? (0.5f + 0.5f * (1.0f - fminf(result->total_cost / (result->total_cost + 50.0f), 1.0f))) : 0.0f;
     result->is_feasible = path_len > 0 ? 1 : 0;
     snprintf(result->plan_summary, sizeof(result->plan_summary),
              "符号规划完成: %d个动作, 深度%d, 代价%.2f",

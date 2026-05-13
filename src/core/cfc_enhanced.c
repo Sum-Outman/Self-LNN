@@ -491,7 +491,7 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
         if (perturbed_state && forward_original && forward_perturbed) {
             /* 先执行原始前向 */
             memcpy(perturbed_state, state, hidden_size * sizeof(float));
-            cfc_cell_forward(cell, input, perturbed_state, forward_original);
+            cfc_cell_forward(cell, input, perturbed_state);
 
             /* 随机方向扰动状态 */
             float norm_perturb = 0.0f;
@@ -505,7 +505,7 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
             norm_perturb = sqrtf(norm_perturb);
 
             if (norm_perturb > 1e-12f) {
-                cfc_cell_forward(cell, input, perturbed_state, forward_perturbed);
+                cfc_cell_forward(cell, input, perturbed_state);
 
                 /* 计算 ||F(x+δ) - F(x)|| / ||δ|| 作为局部Lipschitz常数估计 */
                 float norm_diff = 0.0f;

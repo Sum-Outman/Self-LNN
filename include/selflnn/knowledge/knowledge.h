@@ -441,6 +441,10 @@ LearningResult* knowledge_self_learn(KnowledgeBase* kb, const void* config, cons
  */
 EvolutionResult* knowledge_self_evolve(KnowledgeBase* kb, const void* config, const char* description);
 
+void knowledge_set_lnn_network(KnowledgeBase* kb, void* lnn_network);
+void* knowledge_get_lnn_network(const KnowledgeBase* kb);
+int knowledge_has_lnn_integration(const KnowledgeBase* kb);
+
 /**
  * @brief 知识库自我修正
  * 

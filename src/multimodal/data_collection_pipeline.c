@@ -18,6 +18,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#pragma comment(lib, "ws2_32.lib")
+#endif
 #include <time.h>
 #include <stdarg.h>
 

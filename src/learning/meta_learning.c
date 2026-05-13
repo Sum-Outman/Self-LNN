@@ -131,8 +131,8 @@ static int copy_model_parameters(NeuralNetwork* src, NeuralNetwork* dst) {
     float* dst_weight_matrix = NULL;
     size_t src_weight_count = 0, dst_weight_count = 0;
     
-    CfCNetwork* src_cfc = lnn_get_cfc_network(src_net);
-    CfCNetwork* dst_cfc = lnn_get_cfc_network(dst_net);
+    CfCNetwork* src_cfc = lnn_get_cfc_network((LNN*)src);
+    CfCNetwork* dst_cfc = lnn_get_cfc_network((LNN*)dst);
     
     int src_weight_result = (src_cfc) ? cfc_get_weight_matrix(src_cfc, &src_weight_matrix, &src_weight_count) : -1;
     int dst_weight_result = (dst_cfc) ? cfc_get_weight_matrix(dst_cfc, &dst_weight_matrix, &dst_weight_count) : -1;
@@ -2323,7 +2323,7 @@ NeuralNetwork* meta_learner_adapt(MetaLearner* learner, const MetaTask* task) {
     int extracted_count = extract_model_parameters(learner->meta_model, ctx.initial_parameters, learner->parameter_count);
     if (extracted_count <= 0) {
         /* M-001修复：使用secure_random_float替代简单LCG回退 */
-        rng_init();
+        rng_init(NULL);
         for (size_t i = 0; i < learner->parameter_count; i++) {
             ctx.initial_parameters[i] = secure_random_float() - 0.5f;
         }

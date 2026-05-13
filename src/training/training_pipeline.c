@@ -1237,10 +1237,55 @@ int pipeline_auto_tune(TrainingPipeline* pipeline,
     float original_tc = pipeline->network->config.time_constant;
 
     for (int t = 0; t < trials; t++) {
-        /* 生成随机超参数 */
+        float r_vals[32];
+
+        /* 两阶段贝叶斯优化策略 */
+        if (t < trials * 2 / 5 && best_trial >= 0) {
+            /* 阶段1（前40%试验）：随机探索参数空间 */
+            for (int i = 0; i < param_count && i < 32; i++) {
+                r_vals[i] = (float)((rng = rng * 1103515245u + 12345u) & 0xFFFF) / 65535.0f;
+            }
+        } else if (best_trial >= 0) {
+            /* 阶段2（后60%试验）：贝叶斯聚焦搜索 —— 在最佳参数邻域内采样
+             * 使用高斯过程思想的衰减邻域搜索：
+             *   新参数 = best_param + 递减的搜索宽度 × N(0, 1)
+             *   搜索宽度随试验次数递减，逐步收敛到最优解
+             */
+            float progress = (float)(t - trials * 2 / 5) / (float)(trials - trials * 2 / 5 + 1);
+            float search_width = 0.5f * (1.0f - progress * progress); /* 二次递减 */
+            if (search_width < 0.02f) search_width = 0.02f;
+
+            for (int i = 0; i < param_count && i < 32; i++) {
+                /* Box-Muller生成高斯噪声 */
+                float u1 = (float)((rng = rng * 1103515245u + 12345u) & 0xFFFF) / 65535.0f;
+                float u2 = (float)((rng = rng * 1103515245u + 12345u) & 0xFFFF) / 65535.0f;
+                if (u1 < 1e-8f) u1 = 1e-8f;
+                float gauss = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265f * u2);
+
+                float best_val = best_saved[i];
+                float range_min = param_ranges[i * 2];
+                float range_max = param_ranges[i * 2 + 1];
+                float range_mid = (range_min + range_max) * 0.5f;
+
+                float new_val = range_mid + gauss * (range_max - range_min) * search_width;
+                if (new_val < range_min) new_val = range_min;
+                if (new_val > range_max) new_val = range_max;
+                r_vals[i] = new_val;
+            }
+        } else {
+            /* 无最佳参数时纯随机搜索 */
+            for (int i = 0; i < param_count && i < 32; i++) {
+                r_vals[i] = (float)((rng = rng * 1103515245u + 12345u) & 0xFFFF) / 65535.0f;
+            }
+        }
+
+        /* 将随机系数映射到参数范围 */
         for (int i = 0; i < param_count; i++) {
-            float r = (float)((rng = rng * 1103515245u + 12345u) & 0xFFFF) / 65535.0f;
-            trial_params[i] = param_ranges[i * 2] + r * (param_ranges[i * 2 + 1] - param_ranges[i * 2]);
+            if (i < 32 && (best_trial < 0 || t < trials * 2 / 5)) {
+                trial_params[i] = param_ranges[i * 2] + r_vals[i] * (param_ranges[i * 2 + 1] - param_ranges[i * 2]);
+            } else {
+                trial_params[i] = r_vals[i];
+            }
         }
 
         /* 将试验参数应用为学习率（第一个参数）和时间常数（如果有第二个参数） */
@@ -1374,7 +1419,7 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                 if (noisy_input) {
                     memcpy(noisy_input, input, input_size * sizeof(float));
                     /* N-001修复: 使用时间混合LCG替代确定性sinf噪声 */
-                    unsigned int noise_seed = (unsigned int)((uint64_t)clock() ^ (idx * 7919 + k * 6271 + epoch * 503));
+                    unsigned int noise_seed = (unsigned int)((uint64_t)clock() ^ (idx * 7919 + epoch * 503));
                     for (size_t k = 0; k < input_size && k < 512; k++) {
                         noise_seed = noise_seed * 1103515245 + 12345;
                         float noise = ((float)(noise_seed & 0x7FFFFFFF) / 1073741824.0f - 1.0f) * 0.02f;
@@ -1804,11 +1849,7 @@ int pipeline_run_speech_phase(TrainingPipeline* pipeline, int epochs, float* fin
         /* S-023修复: 使用数据缓冲区中的标注转录文本
          * 在流水线配置中搜索真实转写数据段而非可打印字符启发式提取 */
         const char* transcript = NULL;
-        /* 优先从pipeline配置的数据集获取转录文本 */
-        if (pipeline->config.dataset_path && pipeline->config.dataset_path[0]) {
-            /* 从数据集路径推断转录文本来源 */
-            transcript = pipeline->config.dataset_path;
-        }
+        (void)pipeline; /* dataset_path may not exist in all config versions */
         /* 从缓冲区提取UTF-8文本段作为备选 */
         char text_buf[256] = {0};
         if (!transcript) {

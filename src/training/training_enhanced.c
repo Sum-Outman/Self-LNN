@@ -500,7 +500,7 @@ DistillationTrainer* distillation_trainer_create(LNN* teacher, LNN* student,
                                                   float learning_rate)
 {
     if (!teacher || !student) return NULL;
-    if (temperature < 1.0f) temperature = 2.0f;
+    if (temperature <= 0.0f) temperature = 2.0f;
     if (alpha < 0.0f || alpha > 1.0f) alpha = 0.7f;
     if (learning_rate <= 0.0f) learning_rate = 0.001f;
 

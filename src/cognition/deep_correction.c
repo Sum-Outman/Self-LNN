@@ -753,7 +753,7 @@ int dc_validate_multi_stage(DCCorrectionSystem* dcs, int hypothesis_id, DCVerifi
                 for (int c = 0; c < dcs->context_count; c++) {
                     if (dcs->contexts[c].error_id == target_hyp->error_id) {
                         /* 时间衰减：越近的修正越有参考价值 */
-                        double age = difftime(time(NULL), dcs->contexts[c].timestamp);
+                        double age = difftime(time(NULL), dcs->contexts[c].applied_at);
                         float decay = expf(-(float)age / 86400.0f); /* 天级衰减 */
                         history_score += dcs->contexts[c].effectiveness_score * decay;
                         history_count++;

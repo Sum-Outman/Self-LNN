@@ -7,6 +7,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/logging.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -39,12 +40,7 @@ static size_t find_nearest_checkpoint(const LNN* network, size_t target_layer)
     size_t best_dist = target_layer;
     for (size_t i = 0; i < network->num_activation_checkpoints; i++) {
         if (!network->activation_checkpoint_sizes) continue;
-        size_t ckpt_layer;
-        if (network->activation_checkpoint_layer_indices) {
-            ckpt_layer = (size_t)network->activation_checkpoint_layer_indices[i];
-        } else {
-            ckpt_layer = (size_t)network->activation_checkpoint_sizes[i];
-        }
+        size_t ckpt_layer = (size_t)network->activation_checkpoint_sizes[i];
         if (ckpt_layer <= target_layer) {
             size_t dist = target_layer - ckpt_layer;
             if (dist < best_dist) {
@@ -266,7 +262,7 @@ static int _lnn_forward_with_checkpoint_internal(LNN* network, const float* inpu
             size_t act_size = hidden_size;
             size_t copy_size = hidden_size;
             /* I-004修复：使用max_layer_size作为索引步长（layer_outputs按最大层大小对齐） */
-            size_t layer_stride = cfc_net->max_layer_size > 0 ? cfc_net->max_layer_size : hidden_size;
+            size_t layer_stride = hidden_size;
             if (cfc_net->layer_outputs) {
                 memcpy(act_buf, &cfc_net->layer_outputs[l * layer_stride],
                        copy_size * sizeof(float));

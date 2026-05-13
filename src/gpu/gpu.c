@@ -25,6 +25,21 @@
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>
+#include <stddef.h>
+
+/* SIMD加速（用于多GPU通信的CPU累加回退路径） */
+#if defined(__SSE__) || defined(__SSE2__) || defined(_M_X64)
+#include <emmintrin.h>
+#define GPU_COMM_HAVE_SSE 1
+#else
+#define GPU_COMM_HAVE_SSE 0
+#endif
+#if defined(__AVX__) || defined(__AVX2__)
+#include <immintrin.h>
+#define GPU_COMM_HAVE_AVX 1
+#else
+#define GPU_COMM_HAVE_AVX 0
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -2280,14 +2295,56 @@ int gpu_multi_gpu_all_reduce(GpuMultiGpuContext* mg_ctx, float** data_per_device
     }
     if (result) {
         memset(result, 0, size * sizeof(float));
-        for (int i = 0; i < mg_ctx->config.num_devices; i++) {
-            for (size_t j = 0; j < size; j++) {
-                result[j] += data_per_device[i][j];
+
+        /* SIMD加速累加（CPU回退路径优化） */
+        size_t n = size;
+        float inv_devices = 1.0f / (float)mg_ctx->config.num_devices;
+
+#if GPU_COMM_HAVE_AVX
+        {
+            size_t avx_n = (n / 8) * 8;
+            __m256 inv_vec = _mm256_set1_ps(inv_devices);
+            for (size_t j = 0; j < avx_n; j += 8) {
+                __m256 sum = _mm256_setzero_ps();
+                for (int i = 0; i < mg_ctx->config.num_devices; i++) {
+                    __m256 d = _mm256_loadu_ps(data_per_device[i] + j);
+                    sum = _mm256_add_ps(sum, d);
+                }
+                sum = _mm256_mul_ps(sum, inv_vec);
+                _mm256_storeu_ps(result + j, sum);
+            }
+            for (size_t j = avx_n; j < n; j++) {
+                float s = 0.0f;
+                for (int i = 0; i < mg_ctx->config.num_devices; i++) s += data_per_device[i][j];
+                result[j] = s * inv_devices;
             }
         }
-        for (size_t j = 0; j < size; j++) {
-            result[j] /= (float)mg_ctx->config.num_devices;
+#elif GPU_COMM_HAVE_SSE
+        {
+            size_t sse_n = (n / 4) * 4;
+            __m128 inv_vec = _mm_set1_ps(inv_devices);
+            for (size_t j = 0; j < sse_n; j += 4) {
+                __m128 sum = _mm_setzero_ps();
+                for (int i = 0; i < mg_ctx->config.num_devices; i++) {
+                    __m128 d = _mm_loadu_ps(data_per_device[i] + j);
+                    sum = _mm_add_ps(sum, d);
+                }
+                sum = _mm_mul_ps(sum, inv_vec);
+                _mm_storeu_ps(result + j, sum);
+            }
+            for (size_t j = sse_n; j < n; j++) {
+                float s = 0.0f;
+                for (int i = 0; i < mg_ctx->config.num_devices; i++) s += data_per_device[i][j];
+                result[j] = s * inv_devices;
+            }
         }
+#else
+        for (size_t j = 0; j < n; j++) {
+            float s = 0.0f;
+            for (int i = 0; i < mg_ctx->config.num_devices; i++) s += data_per_device[i][j];
+            result[j] = s * inv_devices;
+        }
+#endif
     }
     return 0;
 }

@@ -172,7 +172,7 @@ MetacognitionSystem* metacognition_system_create(
     
     /* 初始化自我模型状态 */
     /* M-015修复：初始化RNG后再调用随机函数 */
-    rng_init();
+    rng_init(NULL);
     size_t default_model_size = 256;
     system->self_model_state.model_parameters = (float*)safe_calloc(default_model_size, sizeof(float));
     system->self_model_state.uncertainty_estimates = (float*)safe_calloc(default_model_size, sizeof(float));
@@ -1443,13 +1443,13 @@ int metacognition_self_correction(MetacognitionSystem* system,
             system->model_update_config.learning_rate *= 0.9f;
             break;
         case 3: /* 资源异常：应用资源限制 */
-            system->monitoring_config.resource_check_frequency *= 2;
-            if (system->monitoring_config.resource_check_frequency < 1)
-                system->monitoring_config.resource_check_frequency = 1;
-            system->monitoring_config.max_memory_usage = 
-                (size_t)(system->monitoring_config.max_memory_usage * 0.8f);
-            if (system->monitoring_config.max_memory_usage < 16 * 1024 * 1024)
-                system->monitoring_config.max_memory_usage = 16 * 1024 * 1024;
+            system->monitoring_config.update_frequency *= 2;
+            if (system->monitoring_config.update_frequency < 1)
+                system->monitoring_config.update_frequency = 1;
+            system->monitoring_config.history_buffer_size = 
+                (size_t)(system->monitoring_config.history_buffer_size * 0.8f);
+            if (system->monitoring_config.history_buffer_size < 16)
+                system->monitoring_config.history_buffer_size = 16;
             break;
         default:
             break;

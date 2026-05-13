@@ -159,6 +159,10 @@ const AutoLearnEntry* auto_learning_get_entry(const AutoLearningSystem* system, 
  */
 int auto_learning_export_to_knowledge_base(AutoLearningSystem* system, void* knowledge_base);
 
+void auto_learning_set_lnn_network(AutoLearningSystem* system, void* lnn);
+void* auto_learning_get_lnn_network(const AutoLearningSystem* system);
+int auto_learning_extract_features_with_lnn(AutoLearningSystem* system);
+
 /**
  * @brief 增量更新：学习新内容时检查相似已有条目，合并更新而非新建
  * @param system 自主学习系统

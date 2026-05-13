@@ -89,6 +89,8 @@ static struct {
     TLS_ERR_get_error_t ERR_get_error;
     TLS_ERR_error_string_n_t ERR_error_string_n;
     int available;
+} g_tls;
+
 /* I-017修复: TLS通过dlopen动态加载系统SSL库(OpenSSL/LibreSSL/BoringSSL)
  * 设计原则：零编译期硬编码 — 运行时探测多路径，失败时优雅降级到纯HTTP
  * ssl_lib_paths/crypto_lib_paths 在文件头部定义，按平台差异配置 */

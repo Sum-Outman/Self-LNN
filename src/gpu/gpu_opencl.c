@@ -162,6 +162,20 @@
 #define CL_RUNNING                                 0x2
 #define CL_COMPLETE                                0x3
 
+/* P3-005修复: OpenCL 2.0 SVM 常量定义 */
+#define CL_DEVICE_SVM_CAPABILITIES                  0x1053
+#define CL_DEVICE_SVM_COARSE_GRAIN_BUFFER           0x1054
+#define CL_DEVICE_SVM_FINE_GRAIN_BUFFER             0x1055
+#define CL_DEVICE_SVM_FINE_GRAIN_SYSTEM             0x1056
+#define CL_DEVICE_SVM_ATOMICS                       0x1057
+#define CL_MEM_SVM_FINE_GRAIN_BUFFER                (1 << 10)
+#define CL_MEM_SVM_ATOMICS                          (1 << 11)
+#define CL_MAP_WRITE                                0x2
+#define CL_MAP_READ                                 0x1
+typedef cl_bitfield cl_svm_mem_flags;
+typedef cl_bitfield cl_map_flags;
+typedef unsigned int cl_bool;
+
 /* ============================================================================
  * 预定义OpenCL内核源代码
  * 这些内核提供真实的GPU计算功能，符合项目"禁止任何降级处理"要求
@@ -914,6 +928,14 @@ static cl_int (*clReleaseEvent)(cl_event) = NULL;
 static cl_int (*clWaitForEvents)(cl_uint, const cl_event*) = NULL;
 static const char* (*clGetErrorString)(cl_int) = NULL;
 
+/* P3-005修复: OpenCL 2.0 SVM (共享虚拟内存) 函数指针 */
+static void* (*clSVMAlloc)(cl_context, cl_svm_mem_flags, size_t, unsigned int) = NULL;
+static void (*clSVMFree)(cl_context, void*) = NULL;
+static cl_int (*clEnqueueSVMMap)(cl_command_queue, cl_bool, cl_map_flags, void*, size_t, cl_uint, const cl_event*, cl_event*) = NULL;
+static cl_int (*clEnqueueSVMUnmap)(cl_command_queue, void*, cl_uint, const cl_event*, cl_event*) = NULL;
+static int g_opencl_svm_available = 0;
+static int g_opencl_svm_checked = 0;
+
 /* ============================================================================
  * OpenCL后端数据结构
  * =========================================================================== */
@@ -1016,8 +1038,10 @@ typedef struct OpenCLMemory {
     size_t size;
     GpuMemoryType type;
     cl_context context;          /**< OpenCL上下文句柄 */
-    OpenCLContext* opencl_context; /**< OpenCL上下文结构指针，用于访问默认命令队列 */
+    OpenCLContext* opencl_context; /**< OpenCL上下文结构指针 */
     int is_image;               /**< 是否为图像对象 */
+    void* svm_ptr;              /**< P3-005: SVM共享内存指针 (OpenCL 2.0+) */
+    int is_svm;                 /**< P3-005: 是否使用SVM分配 */
 } OpenCLMemory;
 
 /**
@@ -1243,6 +1267,14 @@ static void opencl_reset_function_pointers(void) {
     clReleaseEvent = NULL;
     clWaitForEvents = NULL;
     clGetErrorString = NULL;
+
+    /* P3-005修复: 重置SVM函数指针 */
+    clSVMAlloc = NULL;
+    clSVMFree = NULL;
+    clEnqueueSVMMap = NULL;
+    clEnqueueSVMUnmap = NULL;
+    g_opencl_svm_available = 0;
+    g_opencl_svm_checked = 0;
 }
 
 /**
@@ -1342,7 +1374,15 @@ static int opencl_load_library(void) {
     
     /* 可选加载 clCreateProgramWithBinary (OpenCL 1.1+) */
     clCreateProgramWithBinary = (void*)GET_PROC_ADDRESS(g_opencl_library, "clCreateProgramWithBinary");
-    /* 不可用时设置为NULL，后续代码会检查并回退源码编译 */
+
+    /* P3-005修复: 可选加载OpenCL 2.0 SVM函数 */
+    clSVMAlloc = (void*)GET_PROC_ADDRESS(g_opencl_library, "clSVMAlloc");
+    clSVMFree = (void*)GET_PROC_ADDRESS(g_opencl_library, "clSVMFree");
+    clEnqueueSVMMap = (void*)GET_PROC_ADDRESS(g_opencl_library, "clEnqueueSVMMap");
+    clEnqueueSVMUnmap = (void*)GET_PROC_ADDRESS(g_opencl_library, "clEnqueueSVMUnmap");
+    g_opencl_svm_available = (clSVMAlloc && clSVMFree && clEnqueueSVMMap && clEnqueueSVMUnmap) ? 1 : 0;
+    g_opencl_svm_checked = 1;
+    /* 不可用时设置为NULL，后续代码会检查并回退标准缓冲区 */
     
 #undef LOAD_OPENCL_FUNC
     
@@ -2109,6 +2149,33 @@ static GpuMemory* opencl_backend_memory_alloc(GpuContext* gpu_context, size_t si
     }
     
     memset(memory, 0, sizeof(OpenCLMemory));
+
+    /* P3-005修复: SVM共享虚拟内存路径 (OpenCL 2.0+) */
+    if (g_opencl_svm_available && context->device && (memory_type == GPU_MEMORY_UNIFIED || memory_type == GPU_MEMORY_DEVICE)) {
+        /* 检测设备SVM能力 */
+        cl_device_svm_capabilities svm_caps = 0;
+        cl_int svm_err = clGetDeviceInfo(context->device, CL_DEVICE_SVM_CAPABILITIES,
+                                          sizeof(svm_caps), &svm_caps, NULL);
+        if (svm_err == CL_SUCCESS && (svm_caps & CL_DEVICE_SVM_COARSE_GRAIN_BUFFER)) {
+            cl_svm_mem_flags svm_flags = CL_MEM_READ_WRITE;
+            void* svm_mem = clSVMAlloc(context->context, svm_flags, size, 0);
+            if (svm_mem) {
+                /* 释放之前创建的cl_mem，改用SVM */
+                clReleaseMemObject(mem_obj);
+                memory->svm_ptr = svm_mem;
+                memory->is_svm = 1;
+                memory->mem_obj = NULL;
+                memory->size = size;
+                memory->type = memory_type;
+                memory->context = context->context;
+                memory->opencl_context = context;
+                memory->is_image = 0;
+                context->free_memory -= size;
+                return (GpuMemory*)memory;
+            }
+        }
+    }
+
     memory->mem_obj = mem_obj;
     memory->size = size;
     memory->type = memory_type;
@@ -2128,12 +2195,17 @@ static void opencl_backend_memory_free(GpuMemory* memory) {
     }
     
     OpenCLMemory* mem = (OpenCLMemory*)memory;
-    
+
+    /* P3-005修复: SVM内存释放 */
+    if (mem->is_svm && mem->svm_ptr && g_opencl_svm_available) {
+        clSVMFree(mem->context, mem->svm_ptr);
+        mem->svm_ptr = NULL;
+    }
+
     // 释放OpenCL内存对象
     if (mem->mem_obj) {
         cl_int result = clReleaseMemObject(mem->mem_obj);
         if (result != 0) {
-            // 记录错误但不阻止清理
             opencl_check_error(result, "释放OpenCL内存对象");
         }
     }
@@ -2169,6 +2241,18 @@ static int opencl_backend_memory_copy_to_device(GpuMemory* dst, const void* src,
     }
     
     OpenCLMemory* mem = (OpenCLMemory*)dst;
+
+    /* P3-005修复: SVM共享内存零拷贝路径 */
+    if (mem->is_svm && mem->svm_ptr) {
+        if (size > mem->size) size = mem->size;
+        memcpy(mem->svm_ptr, src, size);
+        /* SVM内存在粗细粒度一致时自动可见，无需显式映射 */
+        if (g_opencl_svm_available && clEnqueueSVMMap && mem->opencl_context && mem->opencl_context->default_command_queue) {
+            clEnqueueSVMMap(mem->opencl_context->default_command_queue, CL_TRUE,
+                           CL_MAP_WRITE, mem->svm_ptr, size, 0, NULL, NULL);
+        }
+        return 0;
+    }
     
     cl_int result;
     cl_command_queue queue = NULL;
@@ -2254,6 +2338,16 @@ static int opencl_backend_memory_copy_from_device(void* dst, GpuMemory* src, siz
     }
     
     OpenCLMemory* mem = (OpenCLMemory*)src;
+
+    /* P3-005修复: SVM共享内存零拷贝路径 */
+    if (mem->is_svm && mem->svm_ptr) {
+        if (size > mem->size) size = mem->size;
+        if (g_opencl_svm_available && clEnqueueSVMUnmap && mem->opencl_context && mem->opencl_context->default_command_queue) {
+            clEnqueueSVMUnmap(mem->opencl_context->default_command_queue, mem->svm_ptr, 0, NULL, NULL);
+        }
+        memcpy(dst, mem->svm_ptr, size);
+        return 0;
+    }
     
     cl_int result;
     cl_command_queue queue = NULL;

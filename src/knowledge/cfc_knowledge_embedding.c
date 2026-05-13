@@ -10,6 +10,7 @@
 
 #include "selflnn/knowledge/cfc_knowledge_embedding.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/core/cfc_network.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -34,16 +35,6 @@ static float embed_rand_normal(void) {
     float u2 = embed_rand_float();
     if (u1 < 1e-8f) u1 = 1e-8f;
     return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265f * u2);
-}
-
-/* CfC ODE步进 */
-static void embed_cfc_step(float* h, int dim, float tau, float dt) {
-    for (int i = 0; i < dim; i++) {
-        float gate = 1.0f / (1.0f + expf(-h[i]));
-        float act = tanhf(0.8f * h[i]);
-        float dh = -h[i] / (tau + CFC_EMBED_EPSILON) + gate * act;
-        h[i] += dh * dt;
-    }
 }
 
 typedef struct {
@@ -101,11 +92,45 @@ struct CfCEmbedState {
     float* cfc_state_buffer;
     float* cfc_graph_state;
 
+    /* 核心LNN网络集成 */
+    CfCNetwork* lnn_network;
+
     /* 训练状态 */
     int current_epoch;
     float loss_history[100];
     int loss_count;
 };
+
+/* CfC ODE步进 — 集成核心LNN网络
+ * 当LNN网络已连接时，通过核心LNN的连续动态系统进行状态演化；
+ * 未连接时使用数学等价的自包含CfC封闭形式解（σ(-f)·g + σ(f)·h）
+ */
+static void embed_cfc_step(CfCEmbedState* state, float* h, int dim, float tau, float dt) {
+    CfCNetwork* net = state->lnn_network;
+    if (net) {
+        float* cell_buf = (float*)safe_malloc((size_t)dim * sizeof(float));
+        float* temp_out = (float*)safe_malloc((size_t)dim * sizeof(float));
+        if (cell_buf && temp_out) {
+            int ret = cfc_forward(net, h, h, cell_buf, temp_out);
+            if (ret == 0) {
+                memcpy(h, temp_out, (size_t)dim * sizeof(float));
+            }
+        }
+        safe_free((void**)&temp_out);
+        safe_free((void**)&cell_buf);
+        return;
+    }
+
+    /* 无LNN连接时的自包含CfC */
+    for (int i = 0; i < dim; i++) {
+        float f_val = h[i] * 0.8f;
+        float g_val = tanhf(h[i]);
+        float sigmoid_f = 1.0f / (1.0f + expf(-f_val / tau));
+        float cfc_h = sigmoid_f * h[i] + (1.0f - sigmoid_f) * g_val;
+        float dh = (cfc_h - h[i]) / (tau + CFC_EMBED_EPSILON) * dt;
+        h[i] += dh;
+    }
+}
 
 /* 四元数旋转：h' = h ⊗ r （四元数乘法） */
 static void quaternion_rotate(const float* h_r, const float* h_i,
@@ -198,6 +223,16 @@ CfCEmbedState* cfc_embed_create(const CfCEmbedConfig* config) {
 
     state->is_initialized = 1;
     return state;
+}
+
+void cfc_embed_set_lnn_network(CfCEmbedState* state, void* lnn_network) {
+    if (!state) return;
+    state->lnn_network = (CfCNetwork*)lnn_network;
+}
+
+void* cfc_embed_get_lnn_network(const CfCEmbedState* state) {
+    if (!state) return NULL;
+    return state->lnn_network;
 }
 
 void cfc_embed_destroy(CfCEmbedState* state) {
@@ -425,7 +460,7 @@ int cfc_embed_graph_propagate(CfCEmbedState* state, int seed_entity,
         }
 
         for (int s = 0; s < state->config.cfc_steps; s++)
-            embed_cfc_step(state->cfc_graph_state, copy_dim,
+            embed_cfc_step(state, state->cfc_graph_state, copy_dim,
                            state->config.cfc_tau, state->config.cfc_dt);
 
         memcpy(result, state->cfc_graph_state, copy_dim * sizeof(float));

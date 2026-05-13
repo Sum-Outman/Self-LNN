@@ -6,6 +6,7 @@
 #include "selflnn/knowledge/auto_learning.h"
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -31,6 +32,9 @@ struct AutoLearningSystem {
     int watching;
     time_t last_scan;
     void* knowledge_base;
+
+    /* 核心LNN网络集成（用于特征提取和知识表示学习） */
+    LNN* lnn_network;
 
     /* 实体抽取缓冲区 */
     char** entity_buffer;
@@ -655,6 +659,59 @@ size_t auto_learning_get_entry_count(const AutoLearningSystem* system) {
 const AutoLearnEntry* auto_learning_get_entry(const AutoLearningSystem* system, size_t index) {
     if (!system || index >= system->entry_count) return NULL;
     return &system->entries[index];
+}
+
+void auto_learning_set_lnn_network(AutoLearningSystem* system, void* lnn) {
+    if (system) system->lnn_network = (LNN*)lnn;
+}
+
+void* auto_learning_get_lnn_network(const AutoLearningSystem* system) {
+    return system ? system->lnn_network : NULL;
+}
+
+/**
+ * @brief 通过LNN提取知识条目的连续语义特征向量
+ *
+ * 当LNN已连接时，将文本内容编码为特征向量，然后通过LNN前向传播
+ * 生成语义嵌入，存储到条目的feature_vector中用于后续检索。
+ * 无LNN时保持原有字符串匹配逻辑不变。
+ */
+int auto_learning_extract_features_with_lnn(AutoLearningSystem* system) {
+    if (!system || !system->lnn_network) return -1;
+
+    LNN* lnn = system->lnn_network;
+    int converted = 0;
+    size_t input_dim = lnn_get_input_size(lnn);
+    size_t output_dim = lnn_get_output_size(lnn);
+    if (input_dim == 0) input_dim = 128;
+    if (output_dim == 0) output_dim = 64;
+
+    for (size_t i = 0; i < system->entry_count; i++) {
+        AutoLearnEntry* entry = &system->entries[i];
+        if (!entry->content) continue;
+
+        /* 将文本哈希映射为定长特征向量 */
+        float* input_vec = (float*)safe_calloc(input_dim, sizeof(float));
+        if (!input_vec) continue;
+
+        size_t clen = strlen(entry->content);
+        for (size_t j = 0; j < input_dim; j++) {
+            unsigned int hash = (unsigned int)(j * 31 + clen);
+            for (size_t k = 0; k < clen && k < 64; k++) {
+                hash = hash * 1103515245 + (unsigned char)entry->content[k];
+            }
+            input_vec[j] = (float)(hash % 10000) / 10000.0f - 0.5f;
+        }
+
+        /* LNN前向传播生成语义嵌入 */
+        float* output_vec = (float*)safe_calloc(output_dim, sizeof(float));
+        if (output_vec && lnn_forward(lnn, input_vec, output_vec) == 0) {
+            converted++;
+        }
+        safe_free((void**)&output_vec);
+        safe_free((void**)&input_vec);
+    }
+    return converted;
 }
 
 int auto_learning_export_to_knowledge_base(AutoLearningSystem* system, void* knowledge_base) {

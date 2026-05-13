@@ -303,7 +303,7 @@ int knowledge_version_rollback(KnowledgeVersionController* kvc, int version_id)
         size_t entry_count = 0;
         restore_data = kv_snapshot_capture(kvc->kb, &entry_count, &restore_size);
         if (!restore_data) {
-            selflnn_set_last_error(SELFLNN_ERROR_INTERNAL, __func__, __FILE__, __LINE__, "无法创建当前快照用于回滚");
+            selflnn_set_last_error(SELFLNN_ERROR_GENERIC, __func__, __FILE__, __LINE__, "无法创建当前快照用于回滚");
             return -1;
         }
         ver->snapshot_data = restore_data;
@@ -314,7 +314,7 @@ int knowledge_version_rollback(KnowledgeVersionController* kvc, int version_id)
     /* 将目标版本的快照数据恢复到知识库 */
     int restore_ret = kv_snapshot_restore(kvc->kb, restore_data, restore_size);
     if (restore_ret != 0) {
-        selflnn_set_last_error(SELFLNN_ERROR_INTERNAL, __func__, __FILE__, __LINE__, "知识库恢复失败");
+        selflnn_set_last_error(SELFLNN_ERROR_GENERIC, __func__, __FILE__, __LINE__, "知识库恢复失败");
         return -1;
     }
 

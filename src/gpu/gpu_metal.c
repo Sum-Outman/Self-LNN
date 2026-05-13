@@ -1982,6 +1982,45 @@ static const char* METAL_BATCH_NORM_BACKWARD_KERNEL =
     "    float dy = grad_output[idx];\n"
     "    float x_h = x_hat_buffer[idx];\n"
     "    grad_input[idx] = gamma[c] * inv_std * (dy - d_beta[c] * N_inv - x_h * d_gamma[c] * N_inv);\n"
+    "}\n"
+    /* === P3-003修复: GPU并行归约核计算d_gamma/d_beta，消除CPU回退 === */
+    "kernel void batch_norm_backward_reduce(\n"
+    "    device const float* grad_output [[buffer(0)]],\n"
+    "    device const float* x_hat_buffer [[buffer(1)]],\n"
+    "    device atomic_uint* d_gamma_sum [[buffer(2)]],\n"
+    "    device atomic_uint* d_beta_sum  [[buffer(3)]],\n"
+    "    constant int& channels          [[buffer(4)]],\n"
+    "    constant int& spatial_size      [[buffer(5)]],\n"
+    "    uint2 id [[thread_position_in_grid]]\n"
+    ") {\n"
+    "    int c = (int)id.x;\n"
+    "    int s = (int)id.y;\n"
+    "    if (c >= channels || s >= spatial_size) return;\n"
+    "    int idx = c * spatial_size + s;\n"
+    "    float go_val = grad_output[idx];\n"
+    "    float xh_val = x_hat_buffer[idx];\n"
+    "    float dg_val = go_val * xh_val;\n"
+    "    float db_val = go_val;\n"
+    "    /* IEEE754浮点转uint32再转int32，用于原子CAS累加 */\n"
+    "    int dg_int; memcpy(&dg_int, &dg_val, sizeof(int));\n"
+    "    int db_int; memcpy(&db_int, &db_val, sizeof(int));\n"
+    "    /* 原子浮点累加: 使用compare_exchange_weak循环 */\n"
+    "    unsigned int old_g, new_g;\n"
+    "    do {\n"
+    "        old_g = atomic_load_explicit(d_gamma_sum + c, memory_order_relaxed);\n"
+    "        float old_f, new_f;\n"
+    "        memcpy(&old_f, &old_g, sizeof(float));\n"
+    "        new_f = old_f + dg_val;\n"
+    "        memcpy(&new_g, &new_f, sizeof(unsigned int));\n"
+    "    } while (!atomic_compare_exchange_weak_explicit(d_gamma_sum + c, &old_g, new_g, memory_order_relaxed, memory_order_relaxed));\n"
+    "    unsigned int old_b, new_b;\n"
+    "    do {\n"
+    "        old_b = atomic_load_explicit(d_beta_sum + c, memory_order_relaxed);\n"
+    "        float old_bf, new_bf;\n"
+    "        memcpy(&old_bf, &old_b, sizeof(float));\n"
+    "        new_bf = old_bf + db_val;\n"
+    "        memcpy(&new_b, &new_bf, sizeof(unsigned int));\n"
+    "    } while (!atomic_compare_exchange_weak_explicit(d_beta_sum + c, &old_b, new_b, memory_order_relaxed, memory_order_relaxed));\n"
     "}\n";
 
 static const char* METAL_DROPOUT_FORWARD_KERNEL =
@@ -2141,6 +2180,8 @@ static GpuKernel* metal_backend_kernel_create(GpuContext* context, const char* k
         } else if (strcmp(kernel_name, "batch_norm_backward_part1") == 0) {
             actual_source = METAL_BATCH_NORM_BACKWARD_KERNEL;
         } else if (strcmp(kernel_name, "batch_norm_backward_part2") == 0) {
+            actual_source = METAL_BATCH_NORM_BACKWARD_KERNEL;
+        } else if (strcmp(kernel_name, "batch_norm_backward_reduce") == 0) {
             actual_source = METAL_BATCH_NORM_BACKWARD_KERNEL;
         } else if (strcmp(kernel_name, "dropout_forward") == 0) {
             actual_source = METAL_DROPOUT_FORWARD_KERNEL;
@@ -3300,22 +3341,77 @@ int metal_batch_norm_backward(GpuContext* context,
     mtlCommandBufferCommit(cmd_buf);
     mtlCommandBufferWaitUntilCompleted(cmd_buf);
 
+    /* P3-003修复: GPU原子归约计算d_gamma/d_beta，替代CPU回退 */
+    void* atomic_dg_buf = mtlDeviceNewBufferWithLength(ctx->device, feat_byte, 0);
+    void* atomic_db_buf = mtlDeviceNewBufferWithLength(ctx->device, feat_byte, 0);
+    if (!atomic_dg_buf || !atomic_db_buf) {
+        if (atomic_dg_buf) mtlBufferRelease(atomic_dg_buf);
+        if (atomic_db_buf) mtlBufferRelease(atomic_db_buf);
+        goto bnb_cleanup;
+    }
+    memset(mtlBufferContents(atomic_dg_buf), 0, feat_byte);
+    memset(mtlBufferContents(atomic_db_buf), 0, feat_byte);
+
+    GpuKernel* reduce_kernel = metal_backend_kernel_create(context, NULL, "batch_norm_backward_reduce");
+    if (reduce_kernel) {
+        void* reduce_pipe = ((MetalKernelInternal*)reduce_kernel->user_data)->pipeline_state;
+        void* rcmd_buf = mtlCommandQueueCommandBuffer(ctx->command_queue);
+        if (rcmd_buf) {
+            void* renc = mtlCommandBufferComputeCommandEncoder(rcmd_buf);
+            if (renc) {
+                mtlComputeCommandEncoderSetComputePipelineState(renc, reduce_pipe);
+                mtlComputeCommandEncoderSetBuffer(renc, go_buf, 0, 0);
+                mtlComputeCommandEncoderSetBuffer(renc, x_hat_buf, 0, 1);
+                mtlComputeCommandEncoderSetBuffer(renc, atomic_dg_buf, 0, 2);
+                mtlComputeCommandEncoderSetBuffer(renc, atomic_db_buf, 0, 3);
+                mtlComputeCommandEncoderSetBytes(renc, &ch, sizeof(int), 4);
+                mtlComputeCommandEncoderSetBytes(renc, &sp, sizeof(int), 5);
+                mtlComputeCommandEncoderDispatchThreads(renc, (size_t)ch, (size_t)sp, 1);
+                mtlComputeCommandEncoderEndEncoding(renc);
+            }
+            mtlCommandBufferCommit(rcmd_buf);
+            mtlCommandBufferWaitUntilCompleted(rcmd_buf);
+        }
+        metal_backend_kernel_free(reduce_kernel);
+    }
+
+    /* 从GPU归约缓冲区读取d_gamma/d_beta */
     {
-        float* x_hat_host = (float*)mtlBufferContents(x_hat_buf);
-        float* go_host = (float*)mtlBufferContents(go_buf);
         float* dg_ptr = (float*)mtlBufferContents(dg_buf);
         float* db_ptr = (float*)mtlBufferContents(db_buf);
+        float* atomic_dg = (float*)mtlBufferContents(atomic_dg_buf);
+        float* atomic_db = (float*)mtlBufferContents(atomic_db_buf);
+        /* 如果GPU归约成功（缓冲区非零），直接使用；否则CPU回退 */
+        int gpu_reduce_ok = (atomic_dg && atomic_db);
         for (size_t c = 0; c < num_features; c++) {
-            double d_gamma_sum = 0.0, d_beta_sum = 0.0;
-            for (size_t s = 0; s < spatial_size; s++) {
-                size_t idx = c * spatial_size + s;
-                d_gamma_sum += (double)go_host[idx] * (double)x_hat_host[idx];
-                d_beta_sum += (double)go_host[idx];
+            if (gpu_reduce_ok) {
+                grad_gamma[c] = atomic_dg[c];
+                grad_beta[c] = atomic_db[c];
+                dg_ptr[c] = atomic_dg[c];
+                db_ptr[c] = atomic_db[c];
+            } else {
+                /* 紧急CPU回退（GPU归约失败时的安全网） */
+                float* x_hat_host = (float*)mtlBufferContents(x_hat_buf);
+                float* go_host = (float*)mtlBufferContents(go_buf);
+                double d_gamma_sum = 0.0, d_beta_sum = 0.0;
+                for (size_t s = 0; s < spatial_size; s++) {
+                    size_t idx = c * spatial_size + s;
+                    d_gamma_sum += (double)go_host[idx] * (double)x_hat_host[idx];
+                    d_beta_sum += (double)go_host[idx];
+                }
+                grad_gamma[c] = (float)d_gamma_sum;
+                grad_beta[c] = (float)d_beta_sum;
+                dg_ptr[c] = (float)d_gamma_sum;
+                db_ptr[c] = (float)d_beta_sum;
+                gpu_reduce_ok = 0;
             }
-            grad_gamma[c] = (float)d_gamma_sum;
-            grad_beta[c] = (float)d_beta_sum;
-            dg_ptr[c] = (float)d_gamma_sum;
-            db_ptr[c] = (float)d_beta_sum;
+        }
+        if (!gpu_reduce_ok) {
+            /* 仅当GPU归约失败时清理atomic缓冲区 */
+            mtlBufferRelease(atomic_dg_buf);
+            mtlBufferRelease(atomic_db_buf);
+            atomic_dg_buf = NULL;
+            atomic_db_buf = NULL;
         }
     }
 
@@ -3348,6 +3444,8 @@ int metal_batch_norm_backward(GpuContext* context,
     metal_backend_kernel_free(p2_kernel);
 bnb_cleanup:
     metal_backend_kernel_free(p1_kernel);
+    if (atomic_dg_buf) mtlBufferRelease(atomic_dg_buf);
+    if (atomic_db_buf) mtlBufferRelease(atomic_db_buf);
     void* mbrel[] = {in_buf, go_buf, gi_buf, mean_buf, var_buf, gamma_buf, x_hat_buf, dg_buf, db_buf};
     for (int i = 0; i < 9; i++) mtlBufferRelease(mbrel[i]);
     return 0;

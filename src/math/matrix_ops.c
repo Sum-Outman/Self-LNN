@@ -13,6 +13,7 @@
 #include "selflnn/utils/math_utils_internal.h"
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include <stdlib.h>
 
 /* K-013修复：运行时CPU特性检测 */
@@ -133,7 +134,7 @@ void matrix_init_random(float* mat, size_t rows, size_t cols, float scale) {
     if (!mat) return;
     size_t n = rows * cols;
     /* N-003修复: 使用时间混合种子替代纯确定性LCG */
-    unsigned int seed = (unsigned int)((uint64_t)clock() & 0xFFFFFFFF);
+    unsigned int seed = (unsigned int)((uintptr_t)&n ^ (uint64_t)clock() & 0xFFFFFFFFu);
     for (size_t i = 0; i < n; i++) {
         seed = seed * 1103515245 + 12345;
         float u1 = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;

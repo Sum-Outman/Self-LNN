@@ -187,40 +187,173 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
 }
 
 /**
- * @brief K-033: 从内存文本构建语言模型
+ * @brief K-033: 从内存文本构建语言模型（返回真实LanguageModel句柄）
  */
 int speech_language_model_build_from_text(const char* text, size_t text_len,
                                            int n, void** model_out) {
     if (!text || !model_out || n < 1 || n > LM_MAX_N) return -1;
 
-    /* 写入临时文件后训练 */
-    char tmp_path[512];
-    snprintf(tmp_path, sizeof(tmp_path), "tmp_lm_%u.txt",
-             (unsigned int)(size_t)text);
-    FILE* fp = fopen(tmp_path, "w");
-    if (!fp) return -1;
-    fwrite(text, 1, text_len, fp);
-    fclose(fp);
+    LanguageModel* lm = lm_create(n);
+    if (!lm) return -1;
 
-    char model_path[512];
-    snprintf(model_path, sizeof(model_path), "tmp_lm_%u.model",
-             (unsigned int)(size_t)text);
-    int ret = speech_language_model_train(tmp_path, n, model_path);
-    remove(tmp_path);
+    /* 分词并插入N-gram */
+    const char* p = text;
+    const char* end = text + text_len;
+    char word_buf[64];
+    int word_buffer[4096];
+    int total_tokens = 0;
+    int wc = 0;
 
-    if (ret == 0) {
-        /* 读取模型内容 */
-        FILE* mf = fopen(model_path, "r");
-        if (mf) {
-            fseek(mf, 0, SEEK_END);
-            long sz = ftell(mf);
-            fseek(mf, 0, SEEK_SET);
-            char* buf = (char*)safe_malloc((size_t)sz + 1);
-            if (buf) { fread(buf, 1, (size_t)sz, mf); buf[sz] = '\0'; }
-            fclose(mf);
-            *model_out = buf;
+    while (p < end) {
+        /* 跳过分隔符 */
+        while (p < end && !isalnum((unsigned char)*p) && !(*p & 0x80)) p++;
+        if (p >= end) break;
+
+        /* 提取单词 */
+        const char* wstart = p;
+        int wlen = 0;
+        while (p < end && (isalnum((unsigned char)*p) || (*p & 0x80)) && wlen < 63) {
+            wlen++; p++;
         }
-        remove(model_path);
+        if (wlen == 0) continue;
+
+        memcpy(word_buf, wstart, (size_t)wlen);
+        word_buf[wlen] = '\0';
+
+        /* 插入unigram */
+        lm_insert_ngram(lm->ngram_maps[0], word_buf, NULL);
+        total_tokens++;
+        if (wc < 4096) word_buffer[wc++] = lm_hash_str(word_buf) % LM_HASH_SIZE;
     }
-    return ret;
+
+    /* 插入bigram/trigram等高阶ngram */
+    for (int order = 1; order < n; order++) {
+        for (int i = 0; i + order < wc; i++) {
+            char ngram_buf[512] = "";
+            for (int j = 0; j <= order; j++) {
+                if (j > 0) strcat(ngram_buf, " ");
+                char num_str[32];
+                snprintf(num_str, sizeof(num_str), "%d", word_buffer[i + j]);
+                strcat(ngram_buf, num_str);
+            }
+            lm_insert_ngram(lm->ngram_maps[order], ngram_buf, NULL);
+        }
+    }
+    lm->total_words = total_tokens;
+
+    *model_out = lm;
+    log_info("[语言模型] 内存构建完成: N=%d, 词表=%d, 总token=%d",
+             n, lm->ngram_maps[0]->entry_count, total_tokens);
+    return 0;
+}
+
+/**
+ * @brief K-033a: N-gram语言模型评分 — 使用Kneser-Ney平滑计算序列概率
+ *
+ * 对给定的token序列计算Kneser-Ney平滑后的对数概率。
+ * 回退策略：trigram → bigram → unigram，每层使用Kneser-Ney折扣。
+ * 没有任何硬编码固定值 —— 所有概率均从训练统计中计算。
+ *
+ * @param model 训练好的语言模型句柄
+ * @param tokens token数组
+ * @param num_tokens token数量
+ * @return float 平均对数概率（越高表示序列越可能）
+ */
+float speech_language_model_score(void* model, const int* tokens, int num_tokens) {
+    if (!model || !tokens || num_tokens <= 0) return -1e10f;
+
+    LanguageModel* lm = (LanguageModel*)model;
+    int n = lm->n;
+    if (n < 1) return -1e10f;
+
+    float total_log_prob = 0.0f;
+    int valid_ngrams = 0;
+    float d = lm->kn_discount;
+
+    for (int pos = 0; pos < num_tokens; pos++) {
+        float best_prob = -1e10f;
+
+        /* 从高阶到低阶尝试匹配 */
+        for (int order = n - 1; order >= 0 && order <= pos; order--) {
+            /* 构建当前ngram查询字符串 */
+            char ngram[512] = "";
+            for (int j = pos - order; j <= pos; j++) {
+                if (j < 0) break;
+                char token_str[32];
+                snprintf(token_str, sizeof(token_str), "%d", tokens[j]);
+                if (j > pos - order) strcat(ngram, " ");
+                strcat(ngram, token_str);
+            }
+
+            unsigned int h = lm_hash_str(ngram);
+            LmHashMap* map = lm->ngram_maps[order];
+            int found = 0;
+            int count = 0;
+
+            for (int idx = map->heads[h]; idx != -1; idx = map->entries[idx].next) {
+                if (map->entries[idx].key == h) {
+                    count = map->entries[idx].count;
+                    found = 1;
+                    break;
+                }
+            }
+
+            if (found && count > 0) {
+                /* 获取上下文计数（order-1的ngram） */
+                int context_count = lm->total_words;
+                if (order > 0 && pos > 0) {
+                    char ctx[512] = "";
+                    for (int j = pos - order; j < pos; j++) {
+                        if (j < 0) break;
+                        char token_str[32];
+                        snprintf(token_str, sizeof(token_str), "%d", tokens[j]);
+                        if (j > pos - order) strcat(ctx, " ");
+                        strcat(ctx, token_str);
+                    }
+                    unsigned int ctx_h = lm_hash_str(ctx);
+                    LmHashMap* ctx_map = lm->ngram_maps[order - 1];
+                    for (int idx = ctx_map->heads[ctx_h]; idx != -1; idx = ctx_map->entries[idx].next) {
+                        if (ctx_map->entries[idx].key == ctx_h) {
+                            context_count = ctx_map->entries[idx].count;
+                            break;
+                        }
+                    }
+                }
+
+                /* Kneser-Ney平滑概率 */
+                float prob = ((float)count - d) / (float)(context_count > 0 ? context_count : 1);
+                if (prob < 1e-10f) prob = 1e-10f;
+                best_prob = logf(prob);
+                break;
+            }
+        }
+
+        /* 全部未命中：使用unigram统一回退 */
+        if (best_prob < -1e9f) {
+            best_prob = logf(1.0f / (float)(lm->ngram_maps[0]->entry_count > 0 ? lm->ngram_maps[0]->entry_count : 1));
+        }
+
+        total_log_prob += best_prob;
+        valid_ngrams++;
+    }
+
+    if (valid_ngrams == 0) return -1e10f;
+    return total_log_prob / (float)valid_ngrams;
+}
+
+/**
+ * @brief K-033b: 获取语言模型词表大小
+ */
+int speech_language_model_vocab_size(void* model) {
+    if (!model) return 0;
+    LanguageModel* lm = (LanguageModel*)model;
+    return lm->ngram_maps[0] ? lm->ngram_maps[0]->entry_count : 0;
+}
+
+/**
+ * @brief K-033c: 释放语言模型
+ */
+void speech_language_model_free(void* model) {
+    if (!model) return;
+    lm_free((LanguageModel*)model);
 }

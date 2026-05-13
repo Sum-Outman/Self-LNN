@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <float.h>
+#include <time.h>
 
 #define DTC_SIGMOID(x) (1.0f / (1.0f + expf(-(x))))
 #define DTC_TANH(x) (tanhf(x))
@@ -184,7 +185,7 @@ int dtc_reason_chain(DTCSystem* system,
     unsigned int seed = (unsigned int)(query ? strlen(query) : 42);
     /* S-014修复: 使用当前嵌入能量+时间混合种子生成认知噪声
      * 替代确定性公式((seed+step*53+j*7)%1000)/1000 */
-    seed ^= (unsigned int)((uint64_t)time(NULL) & 0xFFFFFFFF);
+    seed ^= (unsigned int)((uint64_t)time(NULL) & 0xFFFFFFFFu);
 
     for (size_t step = 0; step < max_steps; step++) {
         DTCThoughtNode* node = &result_out->nodes[step];

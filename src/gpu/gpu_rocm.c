@@ -861,14 +861,63 @@ static int rocm_backend_get_memory_info(GpuContext* context, size_t* total_memor
     struct GpuContext* ctx = (struct GpuContext*)context;
     RocmContextInternal* rocm_ctx = (RocmContextInternal*)ctx->backend_data;
     if (!rocm_ctx) return -1;
+
     *total_memory = rocm_ctx->total_global_memory;
-    *free_memory = rocm_ctx->total_global_memory / 2;
+
+    /* 尝试通过HIP API查询真实空闲内存 */
+    size_t real_free = rocm_ctx->total_global_memory;
+    if (hipMemGetInfo) {
+        hipMemGetInfo(&real_free, NULL);
+        if (real_free > 0 && real_free <= rocm_ctx->total_global_memory) {
+            *free_memory = real_free;
+            return 0;
+        }
+    }
+
+    /* HIP API不可用时使用上下文追踪的分配量估算 */
+    size_t estimated_used = 0;
+    for (int i = 0; i < ROCM_MAX_ALLOCATIONS && i < rocm_ctx->allocation_count; i++) {
+        if (rocm_ctx->allocations[i].is_active) {
+            estimated_used += rocm_ctx->allocations[i].size;
+        }
+    }
+    if (rocm_ctx->total_global_memory > estimated_used) {
+        *free_memory = rocm_ctx->total_global_memory - estimated_used;
+    } else {
+        *free_memory = rocm_ctx->total_global_memory / 4; /* 更保守的默认值 */
+    }
     return 0;
 }
 
 static int rocm_backend_device_reset(GpuContext* context) {
     if (!context) return -1;
-    (void)context;
+    struct GpuContext* ctx = (struct GpuContext*)context;
+    RocmContextInternal* rocm_ctx = (RocmContextInternal*)ctx->backend_data;
+
+    /* 同步所有设备操作 */
+    if (rocm_ctx && rocm_ctx->hip_device >= 0) {
+        hipError_t err = hipDeviceSynchronize ? hipDeviceSynchronize() : hipSuccess;
+        if (err != hipSuccess) {
+            /* 尝试通过主设备重置 */
+            if (hipDeviceReset) {
+                hipSetDevice(rocm_ctx->hip_device);
+                err = hipDeviceReset();
+            }
+        }
+    }
+
+    /* 清理内核缓存 */
+    if (rocm_ctx) {
+        for (int i = 0; i < ROCM_MAX_ALLOCATIONS; i++) {
+            if (rocm_ctx->allocations[i].is_active && rocm_ctx->allocations[i].device_ptr) {
+                if (hipFree) hipFree(rocm_ctx->allocations[i].device_ptr);
+                rocm_ctx->allocations[i].device_ptr = NULL;
+                rocm_ctx->allocations[i].is_active = 0;
+            }
+        }
+        rocm_ctx->allocation_count = 0;
+    }
+
     return 0;
 }
 

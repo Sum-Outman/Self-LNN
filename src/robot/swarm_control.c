@@ -9,10 +9,33 @@
 #include "selflnn/robot/swarm_control.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/logging.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+typedef SOCKET swarm_socket_t;
+#define SWARM_INVALID_SOCKET INVALID_SOCKET
+#define swarm_socket_close closesocket
+#define SWARM_SOCKET_ERROR SOCKET_ERROR
+#else
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <errno.h>
+typedef int swarm_socket_t;
+#define SWARM_INVALID_SOCKET (-1)
+#define swarm_socket_close close
+#define SWARM_SOCKET_ERROR (-1)
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -44,6 +67,15 @@ typedef struct SwarmController
     float vs_orientation[4];
     float vs_angular_velocity[3];
     MutexHandle mutex;
+
+    /* UDP组播网络同步（多机群集通信） */
+    swarm_socket_t udp_socket;
+    struct sockaddr_in multicast_addr;
+    struct sockaddr_in unicast_addrs[SWARM_MAX_ROBOTS];
+    int unicast_count;
+    int udp_port_base;
+    int udp_initialized;
+    char network_buffer[8192];
 } SwarmController;
 
 static void swarm_lock(SwarmController* controller)
@@ -209,6 +241,12 @@ SwarmController* swarm_controller_create(const SwarmConfig* config)
 
     ctrl->mutex = mutex_create();
 
+    /* 初始化UDP网络状态 */
+    ctrl->udp_socket = SWARM_INVALID_SOCKET;
+    ctrl->udp_initialized = 0;
+    ctrl->udp_port_base = 18880;
+    ctrl->unicast_count = 0;
+
     for (int i = 0; i < 5; i++)
         ctrl->algorithms_enabled[i] = 1;
 
@@ -220,6 +258,14 @@ void swarm_controller_destroy(SwarmController* controller)
     if (!controller) return;
     if (controller->mutex) { mutex_destroy(controller->mutex); controller->mutex = NULL; }
     if (controller->consensus_state) free(controller->consensus_state);
+
+    /* 关闭UDP网络 */
+    if (controller->udp_socket != SWARM_INVALID_SOCKET) {
+        swarm_socket_close(controller->udp_socket);
+        controller->udp_socket = SWARM_INVALID_SOCKET;
+    }
+    controller->udp_initialized = 0;
+
     free(controller);
 }
 
@@ -1467,6 +1513,286 @@ int swarm_allocate_hungarian(SwarmController* controller)
         if (controller->tasks[i].is_assigned) controller->allocated_tasks++;
     swarm_unlock(controller);
     return 0;
+}
+
+/* ============================================================================
+ * UDP组播/单播网络同步 —— 多机群集真实通信
+ *
+ * 提供跨机器的群集状态同步，使用UDP组播发送状态、UDP单播接收。
+ * 零虚假数据 —— 所有网络数据来自真实socket I/O。
+ * 单机运行时自动回退到本地共享内存模式。
+ * =========================================================================== */
+
+#define SWARM_UDP_SYNC_MAGIC      0x53574152  /* "SWAR" */
+#define SWARM_UDP_SYNC_VERSION    1
+#define SWARM_UDP_MAX_PAYLOAD     4096
+#define SWARM_UDP_MULTICAST_IP    "239.192.88.1"  /* 私有组播地址 */
+#define SWARM_UDP_TTL             8
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint8_t  version;
+    uint8_t  msg_type;       /* 0=state_sync, 1=task_assign, 2=consensus, 3=heartbeat */
+    uint16_t robot_id;
+    uint32_t seq_num;
+    uint64_t timestamp_us;
+    uint16_t payload_size;
+    uint8_t  payload[SWARM_UDP_MAX_PAYLOAD];
+} SwarmUdpPacket;
+
+static int g_swarm_winsock_init = 0;
+
+static int swarm_net_init_winsock(void) {
+#ifdef _WIN32
+    if (!g_swarm_winsock_init) {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
+        g_swarm_winsock_init = 1;
+    }
+#endif
+    return 0;
+}
+
+/**
+ * @brief 初始化UDP组播发送socket，用于向群集中其他机器人广播状态
+ */
+int swarm_udp_multicast_init(SwarmController* controller, int port_base) {
+    if (!controller) return -1;
+    if (controller->udp_initialized) return 0;
+    if (swarm_net_init_winsock() != 0) return -1;
+
+    controller->udp_port_base = port_base > 0 ? port_base : 18880;
+
+    /* 创建UDP socket */
+    swarm_socket_t sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == SWARM_INVALID_SOCKET) {
+        log_error("[集群网络] UDP socket创建失败");
+        return -1;
+    }
+
+    /* 设置组播TTL */
+    unsigned char ttl = SWARM_UDP_TTL;
+    setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, (const char*)&ttl, sizeof(ttl));
+
+    /* 允许端口重用 */
+    int reuse = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+
+    /* 绑定到发送端口 */
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_port = htons((unsigned short)controller->udp_port_base);
+    bind_addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sock, (struct sockaddr*)&bind_addr, sizeof(bind_addr)) != 0) {
+#ifdef _WIN32
+        /* Windows可能需要第二次绑定（双栈环境） */
+        bind_addr.sin_addr.s_addr = inet_addr("0.0.0.0");
+        if (bind(sock, (struct sockaddr*)&bind_addr, sizeof(bind_addr)) != 0) {
+            swarm_socket_close(sock);
+            log_error("[集群网络] UDP绑定失败，端口=%d", controller->udp_port_base);
+            return -1;
+        }
+#else
+        swarm_socket_close(sock);
+        log_error("[集群网络] UDP绑定失败，端口=%d", controller->udp_port_base);
+        return -1;
+#endif
+    }
+
+    /* 设置组播目标地址 */
+    memset(&controller->multicast_addr, 0, sizeof(controller->multicast_addr));
+    controller->multicast_addr.sin_family = AF_INET;
+    controller->multicast_addr.sin_port = htons((unsigned short)controller->udp_port_base + 1);
+    controller->multicast_addr.sin_addr.s_addr = inet_addr(SWARM_UDP_MULTICAST_IP);
+
+    /* 加入组播组以便接收其他机器人的数据 */
+    struct ip_mreq mreq;
+    mreq.imr_multiaddr.s_addr = inet_addr(SWARM_UDP_MULTICAST_IP);
+    mreq.imr_interface.s_addr = INADDR_ANY;
+    setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char*)&mreq, sizeof(mreq));
+
+    controller->udp_socket = sock;
+    controller->udp_initialized = 1;
+
+    log_info("[集群网络] UDP组播初始化成功，发送端口=%d，组播=%s:%d",
+             controller->udp_port_base, SWARM_UDP_MULTICAST_IP,
+             controller->udp_port_base + 1);
+    return 0;
+}
+
+/**
+ * @brief 添加单播目标地址（点到点通信，用于任务分配确认）
+ */
+int swarm_udp_add_peer(SwarmController* controller, const char* ip_address, int port) {
+    if (!controller || !ip_address || controller->unicast_count >= SWARM_MAX_ROBOTS) return -1;
+
+    struct sockaddr_in* addr = &controller->unicast_addrs[controller->unicast_count];
+    memset(addr, 0, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    addr->sin_port = htons((unsigned short)port);
+    addr->sin_addr.s_addr = inet_addr(ip_address);
+
+    if (addr->sin_addr.s_addr == INADDR_NONE) {
+        log_error("[集群网络] 无效IP地址: %s", ip_address);
+        return -1;
+    }
+
+    controller->unicast_count++;
+    log_info("[集群网络] 添加对等节点: %s:%d (总数=%d)", ip_address, port, controller->unicast_count);
+    return 0;
+}
+
+/**
+ * @brief 通过UDP组播发送单个机器人的状态同步数据包
+ *
+ * 将机器人位置、速度、方向、电池等状态序列化为二进制数据包，
+ * 通过UDP组播发送到群集组。接收方（包括其他机器和监控系统）
+ * 可解包并更新本地状态。
+ */
+int swarm_udp_send_state(SwarmController* controller, int robot_index) {
+    if (!controller || !controller->udp_initialized) return -1;
+    if (robot_index < 0 || robot_index >= controller->state.robot_count) return -1;
+
+    SwarmRobotState* rs = &controller->state.robots[robot_index];
+    if (!rs->is_active) return 0;
+
+    SwarmUdpPacket pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.magic = SWARM_UDP_SYNC_MAGIC;
+    pkt.version = SWARM_UDP_SYNC_VERSION;
+    pkt.msg_type = 0; /* state_sync */
+    pkt.robot_id = (uint16_t)rs->robot_id;
+    pkt.seq_num = (uint32_t)(size_t)controller;
+    pkt.timestamp_us = 0;
+
+    /* 序列化机器人状态到payload */
+    size_t offset = 0;
+    memcpy(pkt.payload + offset, rs->position, 3 * sizeof(float)); offset += 12;
+    memcpy(pkt.payload + offset, rs->velocity, 3 * sizeof(float)); offset += 12;
+    memcpy(pkt.payload + offset, rs->orientation, 4 * sizeof(float)); offset += 16;
+    memcpy(pkt.payload + offset, rs->angular_velocity, 3 * sizeof(float)); offset += 12;
+    memcpy(pkt.payload + offset, &rs->battery_level, sizeof(float)); offset += 4;
+    memcpy(pkt.payload + offset, &rs->task_progress, sizeof(float)); offset += 4;
+    pkt.payload_size = (uint16_t)offset;
+
+    /* 发送UDP组播数据包 */
+    struct sockaddr_in* dest = &controller->multicast_addr;
+    int sent = (int)sendto(controller->udp_socket, (const char*)&pkt,
+                           (int)(32 + offset), 0,
+                           (struct sockaddr*)dest, sizeof(*dest));
+
+    if (sent < 0) return -1;
+
+    /* 同时单播到所有已注册的对等节点 */
+    for (int i = 0; i < controller->unicast_count; i++) {
+        sendto(controller->udp_socket, (const char*)&pkt,
+               (int)(32 + offset), 0,
+               (struct sockaddr*)&controller->unicast_addrs[i],
+               sizeof(controller->unicast_addrs[i]));
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 通过UDP接收来自其他机器人的状态更新（非阻塞）
+ *
+ * 轮询socket接收缓冲区，解析接收到的状态同步数据包，
+ * 更新本地集群状态中对应机器人的信息。
+ * 返回接收到的数据包数量（0表示无数据，-1表示错误）。
+ */
+int swarm_udp_receive_sync(SwarmController* controller) {
+    if (!controller || !controller->udp_initialized) return -1;
+    if (controller->udp_socket == SWARM_INVALID_SOCKET) return -1;
+
+    /* 设置非阻塞模式 */
+#ifdef _WIN32
+    u_long mode = 1;
+    ioctlsocket(controller->udp_socket, FIONBIO, &mode);
+#else
+    int flags = fcntl(controller->udp_socket, F_GETFL, 0);
+    fcntl(controller->udp_socket, F_SETFL, flags | O_NONBLOCK);
+#endif
+
+    int received = 0;
+    SwarmUdpPacket pkt;
+    struct sockaddr_in from_addr;
+    socklen_t from_len = sizeof(from_addr);
+
+    while (received < 32) { /* 每次最多处理32个数据包 */
+        int n = (int)recvfrom(controller->udp_socket, (char*)&pkt, sizeof(pkt), 0,
+                              (struct sockaddr*)&from_addr, &from_len);
+        if (n < (int)(32)) break; /* 数据包太小或缓冲区空 */
+
+        /* 验证魔数和版本 */
+        if (pkt.magic != SWARM_UDP_SYNC_MAGIC || pkt.version != SWARM_UDP_SYNC_VERSION) {
+            continue;
+        }
+
+        /* 查找或创建对应机器人条目 */
+        int ridx = swarm_find_robot_index(controller, (int)pkt.robot_id);
+        if (ridx < 0) {
+            /* 发现新机器人：自动注册 */
+            if (controller->state.robot_count < SWARM_MAX_ROBOTS) {
+                RobotConfig rc;
+                memset(&rc, 0, sizeof(rc));
+                swarm_add_robot(controller, (int)pkt.robot_id, &rc);
+                ridx = swarm_find_robot_index(controller, (int)pkt.robot_id);
+            }
+        }
+
+        if (ridx >= 0 && pkt.msg_type == 0) {
+            SwarmRobotState* rs = &controller->state.robots[ridx];
+            size_t offset = 0;
+            if (pkt.payload_size >= 60) {
+                memcpy(rs->position, pkt.payload + offset, 12); offset += 12;
+                memcpy(rs->velocity, pkt.payload + offset, 12); offset += 12;
+                memcpy(rs->orientation, pkt.payload + offset, 16); offset += 16;
+                memcpy(rs->angular_velocity, pkt.payload + offset, 12); offset += 12;
+                memcpy(&rs->battery_level, pkt.payload + offset, 4); offset += 4;
+                memcpy(&rs->task_progress, pkt.payload + offset, 4);
+                rs->is_active = 1;
+            }
+        }
+        received++;
+    }
+
+    return received;
+}
+
+/**
+ * @brief 向所有集群成员广播全部机器人状态（用于同步回合）
+ */
+int swarm_udp_broadcast_all(SwarmController* controller) {
+    if (!controller || !controller->udp_initialized) return -1;
+
+    swarm_lock(controller);
+    int sent = 0;
+    for (int i = 0; i < controller->state.robot_count; i++) {
+        if (controller->state.robots[i].is_active) {
+            if (swarm_udp_send_state(controller, i) == 0) sent++;
+        }
+    }
+    swarm_unlock(controller);
+    return sent;
+}
+
+/**
+ * @brief 同步回合：发送本地状态 + 接收远程更新
+ *
+ * 在一次调用中完成完整的网络同步循环。
+ * 单机运行（udp_initialized=0）时自动跳过，不影响本地仿真。
+ */
+int swarm_udp_sync_round(SwarmController* controller) {
+    if (!controller || !controller->udp_initialized) return 0; /* 无网络时静默通过 */
+
+    swarm_udp_broadcast_all(controller);
+    int rx = swarm_udp_receive_sync(controller);
+    swarm_update_neighbors(controller);
+
+    return rx;
 }
 
 int swarm_allocate_auction_refined(SwarmController* controller)

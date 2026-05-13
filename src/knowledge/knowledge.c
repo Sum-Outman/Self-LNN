@@ -5270,6 +5270,40 @@ void temporal_conflicts_free(TemporalConflict* conflicts, size_t count) {
  * 所有知识以三元组（主体-谓词-客体）形式存储
  * ============================================================================ */
 
+/* ============================================================================
+ * K-030: 核心LNN网络集成 —— 将知识库的CfC嵌入引擎连接到全局LNN
+ *
+ * 当连接到核心LNN时，知识嵌入将使用统一的连续动态系统进行状态演化，
+ * 而非独立的ODE求解器。这实现了"使用单一液态神经网络模型"的架构要求。
+ *
+ * 工作流程：
+ *   1. 知识条目 → 文本嵌入 → LNN状态演化 → 语义向量
+ *   2. 查询文本 → LNN编码 → 余弦相似度匹配 → 语义搜索结果
+ *   3. 知识图谱传播 → LNN连续动态 → 知识关系推理
+ * =========================================================================== */
+
+void knowledge_set_lnn_network(KnowledgeBase* kb, void* lnn_network) {
+    if (!kb) return;
+    if (kb->cfc_embed) {
+        cfc_embed_set_lnn_network(kb->cfc_embed, lnn_network);
+    }
+}
+
+void* knowledge_get_lnn_network(const KnowledgeBase* kb) {
+    if (!kb || !kb->cfc_embed) return NULL;
+    return cfc_embed_get_lnn_network(kb->cfc_embed);
+}
+
+int knowledge_has_lnn_integration(const KnowledgeBase* kb) {
+    if (!kb || !kb->cfc_embed) return 0;
+    return cfc_embed_get_lnn_network(kb->cfc_embed) != NULL;
+}
+
+/* ============================================================================
+ * 预置知识数据：当系统首次启动时加载的基础知识
+ * 所有知识以三元组（主体-谓词-客体）形式存储
+ * ============================================================================ */
+
 #define PRESET_KNOWLEDGE_COUNT 300
 
 typedef struct {

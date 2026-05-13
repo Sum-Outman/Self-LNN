@@ -15,6 +15,7 @@
 
 #include "selflnn/multimodal/vad.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/math_utils.h"
 #include "selflnn/multimodal/audio.h"
 #include "selflnn/core/lnn.h"
 
@@ -115,49 +116,48 @@ float vad_compute_spectral_entropy(const float* audio_frame, int frame_samples,
     }
     
     // 分配FFT缓冲区
-    float* fft_real = (float*)safe_calloc(fft_n, sizeof(float));
-    float* fft_imag = (float*)safe_calloc(fft_n, sizeof(float));
-    if (!fft_real || !fft_imag) {
-        safe_free((void**)&fft_real);
-        safe_free((void**)&fft_imag);
+    float* freq_r = (float*)safe_calloc(fft_n, sizeof(float));
+    float* freq_i = (float*)safe_calloc(fft_n, sizeof(float));
+    if (!freq_r || !freq_i) {
+        safe_free((void**)&freq_r);
+        safe_free((void**)&freq_i);
         return 0.0f;
     }
     
     // 复制音频数据到实部
     for (int i = 0; i < frame_samples; i++) {
-        fft_real[i] = audio_frame[i];
+        freq_r[i] = audio_frame[i];
     }
     for (int i = frame_samples; i < fft_n; i++) {
-        fft_real[i] = 0.0f;
+        freq_r[i] = 0.0f;
     }
     
-    // 应用汉宁窗
     for (int i = 0; i < frame_samples; i++) {
         float window = 0.5f * (1.0f - cosf(2.0f * 3.14159265358979323846f * i / (frame_samples - 1)));
-        fft_real[i] *= window;
+        freq_r[i] *= window;
     }
     
     /* M-024修复：使用统一fft_real替代内联Cooley-Tukey FFT */
     {
         float* input_saved = (float*)safe_malloc(fft_n * sizeof(float));
         if (input_saved) {
-            memcpy(input_saved, fft_real, fft_n * sizeof(float));
-            fft_real(input_saved, fft_n, fft_real, fft_imag);
+            memcpy(input_saved, freq_r, fft_n * sizeof(float));
+            fft_real(input_saved, fft_n, freq_r, freq_i);
             safe_free((void**)&input_saved);
         }
     }
 
     float total_power = 0.0f;
-    float* power_spectrum = (float*)safe_calloc(N/2 + 1, sizeof(float));
+    float* power_spectrum = (float*)safe_calloc(fft_n/2 + 1, sizeof(float));
     if (!power_spectrum) {
-        safe_free((void**)&fft_real);
-        safe_free((void**)&fft_imag);
+        safe_free((void**)&freq_r);
+        safe_free((void**)&freq_i);
         return 0.0f;
     }
 
-    int num_bins = N / 2 + 1;
+    int num_bins = fft_n / 2 + 1;
     for (int k = 0; k < num_bins; k++) {
-        float power = (fft_real[k] * fft_real[k] + fft_imag[k] * fft_imag[k]) / (float)(N * N);
+        float power = (freq_r[k] * freq_r[k] + freq_i[k] * freq_i[k]) / (float)(fft_n * fft_n);
         power_spectrum[k] = power;
         total_power += power;
     }
@@ -177,8 +177,8 @@ float vad_compute_spectral_entropy(const float* audio_frame, int frame_samples,
         entropy /= max_entropy;
     }
     
-    safe_free((void**)&fft_real);
-    safe_free((void**)&fft_imag);
+    safe_free((void**)&freq_r);
+    safe_free((void**)&freq_i);
     safe_free((void**)&power_spectrum);
     
     return entropy;
@@ -216,13 +216,13 @@ int vad_compute_features(const float* audio_frame, int frame_samples,
         }
         
         // 分配FFT缓冲区
-        float* fft_real = (float*)safe_calloc(fft_n, sizeof(float));
-        float* fft_imag = (float*)safe_calloc(fft_n, sizeof(float));
-        if (fft_real && fft_imag) {
+        float* freq2_r = (float*)safe_calloc(fft_n, sizeof(float));
+        float* freq2_i = (float*)safe_calloc(fft_n, sizeof(float));
+        if (freq2_r && freq2_i) {
             // 复制音频数据并应用汉宁窗
             for (int i = 0; i < frame_samples; i++) {
                 float window = 0.5f * (1.0f - cosf(2.0f * 3.14159265358979323846f * i / (frame_samples - 1)));
-                fft_real[i] = audio_frame[i] * window;
+                freq2_r[i] = audio_frame[i] * window;
             }
             
             // 计算功率谱
@@ -234,8 +234,8 @@ int vad_compute_features(const float* audio_frame, int frame_samples,
                     float real = 0.0f, imag = 0.0f;
                     for (int n = 0; n < fft_n; n++) {
                         float angle = 2.0f * 3.14159265358979323846f * k * n / fft_n;
-                        real += fft_real[n] * cosf(angle);
-                        imag -= fft_real[n] * sinf(angle);
+                        real += freq2_r[n] * cosf(angle);
+                        imag -= freq2_r[n] * sinf(angle);
                     }
                     float power = (real * real + imag * imag) / (fft_n * fft_n);
                     power_spectrum[k] = power;
@@ -266,8 +266,8 @@ int vad_compute_features(const float* audio_frame, int frame_samples,
             }
         }
         
-        safe_free((void**)&fft_real);
-        safe_free((void**)&fft_imag);
+        safe_free((void**)&freq2_r);
+        safe_free((void**)&freq2_i);
         
         features[3] = spectral_centroid;
         

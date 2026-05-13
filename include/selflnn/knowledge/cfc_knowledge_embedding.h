@@ -55,6 +55,9 @@ typedef struct CfCEmbedState CfCEmbedState;
 CfCEmbedState* cfc_embed_create(const CfCEmbedConfig* config);
 void cfc_embed_destroy(CfCEmbedState* state);
 
+void cfc_embed_set_lnn_network(CfCEmbedState* state, void* lnn_network);
+void* cfc_embed_get_lnn_network(const CfCEmbedState* state);
+
 int cfc_embed_add_entity(CfCEmbedState* state, const char* entity_name);
 int cfc_embed_add_relation(CfCEmbedState* state, const char* relation_name);
 int cfc_embed_add_triple(CfCEmbedState* state, int head_id, int rel_id, int tail_id);

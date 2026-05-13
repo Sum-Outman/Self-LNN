@@ -106,15 +106,19 @@ int sensor_sim_depth_camera(SensorSimContext* ctx,
     return -1;
 #else
     if (!mount_pos || !mount_quat || !pixels || max_pixels <= 0) return -1;
-    (void)pipeline;
+
     int w = ctx->depth_config.width, h = ctx->depth_config.height;
     int total = w * h;
     if (total > max_pixels) total = max_pixels;
     float max_d = ctx->depth_config.max_depth;
+
+    const SimPhysicsPipeline* pp = pipeline;
+
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             int idx = y * w + x;
             if (idx >= max_pixels) break;
+
             float u = ((float)x / (float)w - 0.5f) * 2.0f * tanf(ctx->depth_config.fov * 0.5f);
             float v = ((float)y / (float)h - 0.5f) * 2.0f * tanf(ctx->depth_config.fov * 0.5f);
             float dir[3] = {u, v, -1};
@@ -122,15 +126,52 @@ int sensor_sim_depth_camera(SensorSimContext* ctx,
             if (len > 0) { dir[0] /= len; dir[1] /= len; dir[2] /= len; }
             float world_dir[3];
             quat_rotate(mount_quat, dir, world_dir);
-            if (world_dir[2] < -0.01f) {
-                float t = -mount_pos[2] / world_dir[2];
-                if (t > 0 && t < max_d) {
-                    pixels[idx].point[0] = mount_pos[0] + world_dir[0] * t;
-                    pixels[idx].point[1] = mount_pos[1] + world_dir[1] * t;
-                    pixels[idx].point[2] = mount_pos[2] + world_dir[2] * t;
-                    pixels[idx].depth = t;
-                    pixels[idx].valid = 1;
+
+            /* 对物理管线中的碰撞体进行射线-球体相交检测 */
+            float min_t = max_d;
+            int hit = 0;
+
+            if (pp && pp->body_count > 0) {
+                for (int bi = 0; bi < pp->body_count && bi < 16; bi++) {
+                    float bc[3] = {
+                        pp->bodies[bi].position[0],
+                        pp->bodies[bi].position[1],
+                        pp->bodies[bi].position[2]
+                    };
+                    float br = pp->bodies[bi].radius > 0.0f ? pp->bodies[bi].radius : 0.3f;
+
+                    float oc[3] = {
+                        mount_pos[0] - bc[0],
+                        mount_pos[1] - bc[1],
+                        mount_pos[2] - bc[2]
+                    };
+                    float a_val = world_dir[0]*world_dir[0] + world_dir[1]*world_dir[1] + world_dir[2]*world_dir[2];
+                    float b_val = 2.0f * (oc[0]*world_dir[0] + oc[1]*world_dir[1] + oc[2]*world_dir[2]);
+                    float c_val = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - br*br;
+                    float disc = b_val*b_val - 4.0f*a_val*c_val;
+
+                    if (disc >= 0) {
+                        float t = (-b_val - sqrtf(disc)) / (2.0f * a_val);
+                        if (t > 0.001f && t < min_t) {
+                            min_t = t;
+                            hit = 1;
+                        }
+                    }
                 }
+            }
+
+            /* 如果物理管线没有交点，回退到地平面检测 */
+            if (!hit && world_dir[2] < -0.01f) {
+                float t = -mount_pos[2] / world_dir[2];
+                if (t > 0 && t < max_d) min_t = t;
+            }
+
+            if (min_t < max_d) {
+                pixels[idx].point[0] = mount_pos[0] + world_dir[0] * min_t;
+                pixels[idx].point[1] = mount_pos[1] + world_dir[1] * min_t;
+                pixels[idx].point[2] = mount_pos[2] + world_dir[2] * min_t;
+                pixels[idx].depth = min_t;
+                pixels[idx].valid = 1;
             }
         }
     }

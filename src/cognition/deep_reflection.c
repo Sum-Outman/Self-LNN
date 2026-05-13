@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <float.h>
+#include <time.h>
 
 #define DR_SIGMOID(x) (1.0f / (1.0f + expf(-(x))))
 #define DR_TANH(x) (tanhf(x))
@@ -475,7 +476,7 @@ int dr_reflect_multi_passage(DeepReflectionEngine* engine,
         for (size_t si = 0; si < tlen; si++)
             seed = seed * 31 + (unsigned char)topic[si];
     }
-    seed ^= (unsigned int)time(NULL);
+    seed ^= (unsigned int)((uint64_t)time(NULL) & 0xFFFFFFFFu);
 
     for (int layer = 0; layer < max_layers; layer++) {
         DRLayerResult* lr = &chain_out->layers[layer];

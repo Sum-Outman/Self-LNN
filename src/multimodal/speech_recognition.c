@@ -11,6 +11,7 @@
 #include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/core/lnn.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -98,6 +99,9 @@ struct SpeechRecognizer {
     int* decoded_tokens;
     int decoded_token_count;
     int decoded_token_capacity;
+
+    /* 核心LNN网络集成（用于状态演化） */
+    LNN* shared_lnn;
 
     /* Adam优化器状态（训练用） */
     float* adam_m_proj_w;
@@ -1047,32 +1051,51 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
     for (int t = 0; t < num_timesteps; t++) {
         const float* feat = recognizer->feature_buffer + (size_t)t * feature_dim;
 
-        /* CfC液态状态演化：
-         * τ·dh/dt = -h + σ(W_ix·x + b_i) ⊙ tanh(W_ax·x + b_a)
-         * 封闭形式解: h(t+dt) = e^(-dt/τ)·h(t) + (1-e^(-dt/τ))·非线性项 */
-        float nonlinear_term[256];
-        memset(nonlinear_term, 0, sizeof(nonlinear_term));
-
-        for (size_t i = 0; i < hs && i < 256; i++) {
-            double sum = 0.0;
-            if (input_proj) {
-                for (int j = 0; j < feature_dim && j < feature_dim; j++) {
-                    sum += (double)input_proj[i * (size_t)feature_dim + j] * feat[j];
+        /* CfC液态状态演化 — 集成核心LNN
+         * 当共享LNN网络已连接时，通过lnn_forward进行连续状态演化；
+         * 未连接时使用自包含CfC封闭形式解 */
+        if (recognizer->shared_lnn) {
+            /* 通过核心LNN的连续动态系统进行状态演化 */
+            float* lnn_input = (float*)safe_malloc((size_t)feature_dim * sizeof(float));
+            if (lnn_input) {
+                memcpy(lnn_input, feat, (size_t)feature_dim * sizeof(float));
+                float* lnn_out = (float*)safe_malloc((size_t)hs * sizeof(float));
+                if (lnn_out) {
+                    if (lnn_forward(recognizer->shared_lnn, lnn_input, lnn_out) == 0) {
+                        float decay = expf(-dt / tau);
+                        for (size_t i = 0; i < hs && i < 256; i++) {
+                            recognizer->hidden_state[i] = decay * recognizer->hidden_state[i] +
+                                                          (1.0f - decay) * lnn_out[i];
+                        }
+                    }
+                    safe_free((void**)&lnn_out);
                 }
-            } else {
-                if (i < (size_t)feature_dim) sum = (double)feat[i];
+                safe_free((void**)&lnn_input);
             }
-            /* sigmoid门控 × tanh激活 */
-            float gate = 1.0f / (1.0f + expf(-(float)sum * 0.5f));
-            float act = tanhf((float)sum * 0.3f);
-            nonlinear_term[i] = gate * act;
-        }
+        } else {
+            /* 自包含CfC封闭形式：τ·dh/dt = -h + σ(W_ix+b_i) ⊙ tanh(W_ax+b_a) */
+            float nonlinear_term[256];
+            memset(nonlinear_term, 0, sizeof(nonlinear_term));
 
-        /* CfC封闭形式状态更新 */
-        float decay = expf(-dt / tau);
-        for (size_t i = 0; i < hs && i < 256; i++) {
-            recognizer->hidden_state[i] = decay * recognizer->hidden_state[i] +
-                                           (1.0f - decay) * nonlinear_term[i];
+            for (size_t i = 0; i < hs && i < 256; i++) {
+                double sum = 0.0;
+                if (input_proj) {
+                    for (int j = 0; j < feature_dim && j < feature_dim; j++) {
+                        sum += (double)input_proj[i * (size_t)feature_dim + j] * feat[j];
+                    }
+                } else {
+                    if (i < (size_t)feature_dim) sum = (double)feat[i];
+                }
+                float gate = 1.0f / (1.0f + expf(-(float)sum * 0.5f));
+                float act = tanhf((float)sum * 0.3f);
+                nonlinear_term[i] = gate * act;
+            }
+
+            float decay = expf(-dt / tau);
+            for (size_t i = 0; i < hs && i < 256; i++) {
+                recognizer->hidden_state[i] = decay * recognizer->hidden_state[i] +
+                                               (1.0f - decay) * nonlinear_term[i];
+            }
         }
 
         float* logits = all_logits + (size_t)t * vocab_size;
@@ -1659,4 +1682,12 @@ int speech_recognizer_load_model(SpeechRecognizer* recognizer,
     if ((int)read_b != vs) return -1;
 
     return 0;
+}
+
+void speech_recognizer_set_lnn_network(SpeechRecognizer* recognizer, void* lnn) {
+    if (recognizer) recognizer->shared_lnn = (LNN*)lnn;
+}
+
+void* speech_recognizer_get_lnn_network(const SpeechRecognizer* recognizer) {
+    return recognizer ? recognizer->shared_lnn : NULL;
 }
