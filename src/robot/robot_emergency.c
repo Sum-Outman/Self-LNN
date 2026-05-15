@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifndef min
 #define min(a,b) (((a)<(b))?(a):(b))
@@ -385,11 +388,8 @@ int robot_emergency_cut_power(EmergencySystem* system) {
 int robot_emergency_restore_power(EmergencySystem* system) {
     if (!system) return -1;
     system->is_power_cut = 0;
-    /* F-012修复：从配置读取系统标称电压而非硬编码24.0f */
-    float nominal_voltage = system->config.nominal_voltage_v > 0.0f ?
-                             system->config.nominal_voltage_v : 24.0f;
-    system->system_voltage_v = nominal_voltage;
-    system->system_current_a = system->config.nominal_current_a;
+    system->system_voltage_v = 24.0f;
+    system->system_current_a = 5.0f;
 #ifdef _WIN32
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
 #endif

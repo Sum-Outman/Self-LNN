@@ -1780,7 +1780,7 @@ PhysicalQuantity physical_quantity_convert(PhysicalQuantity q, PhysicalDimension
     PhysicalQuantity result = q;
     result.dim = target_dim;
     result.value = 0.0;
-    result.uncertainty = INFINITY;
+    result.uncertainty = 3.4e38f;  /* FLT_MAX替换INFINITY，避免/fp:fast下溢出警告 */
     return result;
 }
 

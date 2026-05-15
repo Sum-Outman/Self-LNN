@@ -260,6 +260,17 @@ SELFLNN_API void* selflnn_get_metacognition(void);
 SELFLNN_API void* selflnn_get_dialogue_processor(void);
 
 /**
+ * @brief 获取全局统一信号处理器（单一模型原则）
+ * 
+ * P0-002修复: 全局唯一的多模态统一信号处理器，
+ * 所有模态信号通过此处理器统一处理后送入共享LNN。
+ * 任何模块禁止自行创建独立的UnifiedSignalProcessor。
+ *
+ * @return 统一信号处理器句柄，未初始化返回NULL
+ */
+SELFLNN_API void* selflnn_get_unified_signal_processor(void);
+
+/**
  * @brief 获取安全监控系统实例句柄
  * @return 安全监控句柄，未初始化返回NULL
  */
@@ -393,6 +404,19 @@ SELFLNN_API int selflnn_set_power_mode(PowerMode power_mode);
  * @return 采集到的数据点数量
  */
 SELFLNN_API size_t selflnn_monitor_energy(double duration, EnergyDataPoint* data_points, size_t max_points);
+
+/**
+ * @brief 模块层初始化（供CMake构建系统调用）
+ * 
+ * 执行SELF-LNN框架的轻量级初始化，设置默认配置参数，
+ * 记录启动时间等。不执行完整的系统初始化。
+ */
+SELFLNN_API void selflnn_module_init(void);
+
+/**
+ * @brief 模块层清理
+ */
+SELFLNN_API void selflnn_module_cleanup(void);
 
 #ifdef __cplusplus
 }

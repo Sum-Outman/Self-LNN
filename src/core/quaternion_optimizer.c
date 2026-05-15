@@ -284,6 +284,80 @@ int quat_optimizer_step(QuatOptimizer* optimizer, Quaternion* params,
             }
             break;
         }
+
+        /* M-003修复: 四元数RMSProp */
+        case QUAT_OPTIMIZER_RMSPROP: {
+            float rho = cfg->beta2 > 0.0f ? cfg->beta2 : 0.9f;
+            for (size_t i = 0; i < num_quaternions; i++) {
+                float g_w = working_grads[i].w, g_x = working_grads[i].x;
+                float g_y = working_grads[i].y, g_z = working_grads[i].z;
+                optimizer->velocity[i].w = rho * optimizer->velocity[i].w + (1.0f - rho) * g_w * g_w;
+                optimizer->velocity[i].x = rho * optimizer->velocity[i].x + (1.0f - rho) * g_x * g_x;
+                optimizer->velocity[i].y = rho * optimizer->velocity[i].y + (1.0f - rho) * g_y * g_y;
+                optimizer->velocity[i].z = rho * optimizer->velocity[i].z + (1.0f - rho) * g_z * g_z;
+                params[i].w -= lr * g_w / (sqrtf(optimizer->velocity[i].w) + cfg->epsilon);
+                params[i].x -= lr * g_x / (sqrtf(optimizer->velocity[i].x) + cfg->epsilon);
+                params[i].y -= lr * g_y / (sqrtf(optimizer->velocity[i].y) + cfg->epsilon);
+                params[i].z -= lr * g_z / (sqrtf(optimizer->velocity[i].z) + cfg->epsilon);
+            }
+            break;
+        }
+
+        /* M-003修复: 四元数AdaGrad */
+        case QUAT_OPTIMIZER_ADAGRAD: {
+            for (size_t i = 0; i < num_quaternions; i++) {
+                float g_w = working_grads[i].w, g_x = working_grads[i].x;
+                float g_y = working_grads[i].y, g_z = working_grads[i].z;
+                optimizer->velocity[i].w += g_w * g_w;
+                optimizer->velocity[i].x += g_x * g_x;
+                optimizer->velocity[i].y += g_y * g_y;
+                optimizer->velocity[i].z += g_z * g_z;
+                params[i].w -= lr * g_w / (sqrtf(optimizer->velocity[i].w) + cfg->epsilon);
+                params[i].x -= lr * g_x / (sqrtf(optimizer->velocity[i].x) + cfg->epsilon);
+                params[i].y -= lr * g_y / (sqrtf(optimizer->velocity[i].y) + cfg->epsilon);
+                params[i].z -= lr * g_z / (sqrtf(optimizer->velocity[i].z) + cfg->epsilon);
+            }
+            break;
+        }
+
+        /* M-003修复: 四元数LAMB（层自适应大Batch优化） */
+        case QUAT_OPTIMIZER_LAMB: {
+            float wd = cfg->weight_decay;
+            for (size_t i = 0; i < num_quaternions; i++) {
+                quat_adam_update(&params[i], &working_grads[i],
+                                &optimizer->momentum[i], &optimizer->velocity[i],
+                                lr, cfg->beta1, cfg->beta2, cfg->epsilon, wd, step);
+            }
+            /* LAMB信任比：trust_ratio = ||params|| / ||update||, 约束在[0, 10] */
+            float p_norm2 = 0.0f, u_norm2 = 0.0f;
+            for (size_t i = 0; i < num_quaternions; i++) {
+                p_norm2 += params[i].w * params[i].w + params[i].x * params[i].x +
+                           params[i].y * params[i].y + params[i].z * params[i].z;
+            }
+            float p_norm = sqrtf(p_norm2);
+            if (p_norm > 0.0f) {
+                for (size_t i = 0; i < num_quaternions; i++) {
+                    Quaternion update;
+                    update.w = optimizer->momentum[i].w / (sqrtf(optimizer->velocity[i].w) + cfg->epsilon);
+                    update.x = optimizer->momentum[i].x / (sqrtf(optimizer->velocity[i].x) + cfg->epsilon);
+                    update.y = optimizer->momentum[i].y / (sqrtf(optimizer->velocity[i].y) + cfg->epsilon);
+                    update.z = optimizer->momentum[i].z / (sqrtf(optimizer->velocity[i].z) + cfg->epsilon);
+                    u_norm2 += update.w * update.w + update.x * update.x +
+                                update.y * update.y + update.z * update.z;
+                }
+                float u_norm = sqrtf(u_norm2);
+                float trust_ratio = (u_norm > 0.0f && p_norm > 0.0f) ? p_norm / u_norm : 1.0f;
+                if (trust_ratio > 10.0f) trust_ratio = 10.0f;
+                if (trust_ratio < 0.1f) trust_ratio = 0.1f;
+                for (size_t i = 0; i < num_quaternions; i++) {
+                    params[i].w -= lr * trust_ratio * working_grads[i].w;
+                    params[i].x -= lr * trust_ratio * working_grads[i].x;
+                    params[i].y -= lr * trust_ratio * working_grads[i].y;
+                    params[i].z -= lr * trust_ratio * working_grads[i].z;
+                }
+            }
+            break;
+        }
         
         default:
             safe_free((void**)&clipped);

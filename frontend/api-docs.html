@@ -34,12 +34,12 @@
 
         <div class="api-page-title">
             <h1>SELF-LNN API 文档</h1>
-            <p>全部 74 个 REST API 端点 · HTTP/WebSocket 端口 <span id="api-port">8080</span></p>
+            <p>REST API 端点 · HTTP/WebSocket 端口 <span id="api-port">8080</span></p>
         </div>
 
         <div class="summary">
             <div class="summary-card">
-                <div class="num">74</div>
+                <div class="num" id="total-endpoints">—</div>
                 <div class="label">API 端点总数</div>
             </div>
             <div class="summary-card">
@@ -91,172 +91,9 @@
         var PORT = window.SELFLNN_CONFIG ? window.SELFLNN_CONFIG.port : 8080;
         document.getElementById('api-port').textContent = PORT;
 
-        var apiData = [
-            // ===== 系统管理 =====
-            {
-                category: '系统管理',
-                endpoints: [
-                    { id: 0, method: 'GET', path: '/api/status', desc: '获取系统状态', params: [], response: '{"status":"ok","uptime":...,"connections":...,"requests":...}' },
-                    { id: 8, method: 'POST', path: '/api/training', desc: '训练请求', params: [{n:'action',t:'string',d:'start/stop/pause/resume'}], response: '{"success":true,"task_id":"..."}' },
-                    { id: 9, method: 'POST', path: '/api/evolution', desc: '演化请求', params: [{n:'action',t:'string',d:'start/stop/status'}], response: '{"success":true,"generation":...}' },
-                    { id: 10, method: 'POST', path: '/api/reset', desc: '重置系统', params: [], response: '{"success":true}' },
-                    { id: 11, method: 'POST', path: '/api/shutdown', desc: '关闭系统', params: [], response: '{"success":true}' },
-                    { id: 17, method: 'POST', path: '/api/backup', desc: '系统备份', params: [{n:'path',t:'string',d:'备份路径',o:true}], response: '{"success":true,"backup_path":"..."}' },
-                    { id: 42, method: 'GET', path: '/api/stats', desc: '获取服务器统计', params: [], response: '{"total_requests":...,"uptime":...,"active_connections":...}' }
-                ]
-            },
-            // ===== 状态与内存 =====
-            {
-                category: '状态与内存',
-                endpoints: [
-                    { id: 1, method: 'GET', path: '/api/memory', desc: '获取内存状态', params: [], response: '{"total":...,"used":...,"free":...,"utilization":...}' },
-                    { id: 2, method: 'GET', path: '/api/reasoning', desc: '执行推理', params: [{n:'query',t:'string',d:'推理查询内容'}], response: '{"result":"...","confidence":...,"tokens_used":...}' },
-                    { id: 3, method: 'GET', path: '/api/learning', desc: '执行学习', params: [{n:'mode',t:'string',d:'学习模式',o:true}], response: '{"status":"...","progress":...,"loss":...}' },
-                    { id: 22, method: 'GET', path: '/api/agi/features', desc: '获取AGI功能状态', params: [], response: '{"features":{...}}' },
-                ]
-            },
-            // ===== 多模态输入 =====
-            {
-                category: '多模态输入',
-                endpoints: [
-                    { id: 4, method: 'POST', path: '/api/vision', desc: '处理视觉输入', params: [{n:'image',t:'base64',d:'Base64编码图像'}], response: '{"description":"...","objects":[...]}' },
-                    { id: 5, method: 'POST', path: '/api/audio', desc: '处理音频输入', params: [{n:'audio',t:'blob',d:'音频数据'}], response: '{"transcript":"...","intent":"..."}' },
-                    { id: 6, method: 'POST', path: '/api/text', desc: '处理文本输入', params: [{n:'text',t:'string',d:'文本内容'}], response: '{"response":"...","sentiment":"..."}' },
-                    { id: 7, method: 'POST', path: '/api/sensor', desc: '处理传感器输入', params: [{n:'sensor_type',t:'string',d:'传感器类型'},{n:'data',t:'object',d:'传感器数据'}], response: '{"processed":true,"action":"..."}' },
-                    { id: 33, method: 'GET', path: '/api/sensor-pipeline/status', desc: '获取传感器管道状态', params: [], response: '{"pipeline":"...","active_sensors":[...]}' }
-                ]
-            },
-            // ===== 知识库 =====
-            {
-                category: '知识库',
-                endpoints: [
-                    { id: 20, method: 'GET', path: '/api/knowledge', desc: '查询知识库', params: [{n:'query',t:'string',d:'查询内容'},{n:'limit',t:'int',d:'返回条数',o:true}], response: '{"results":[...],"total":...}' },
-                    { id: 21, method: 'POST', path: '/api/knowledge', desc: '添加知识到知识库', params: [{n:'content',t:'string',d:'知识内容'},{n:'category',t:'string',d:'分类',o:true}], response: '{"success":true,"id":"..."}' }
-                ]
-            },
-            // ===== 对话系统 =====
-            {
-                category: '对话系统',
-                endpoints: [
-                    { id: 19, method: 'POST', path: '/api/dialogue', desc: '对话处理', params: [{n:'message',t:'string',d:'用户消息'},{n:'context',t:'object',d:'上下文',o:true}], response: '{"response":"...","confidence":...}' },
-                    { id: 24, method: 'GET', path: '/api/dialogue/history', desc: '获取对话历史', params: [{n:'limit',t:'int',d:'条数限制',o:true}], response: '{"history":[...]}' },
-                    { id: 25, method: 'POST', path: '/api/dialogue/clear', desc: '清除对话历史', params: [], response: '{"success":true,"cleared":...}' },
-                    { id: 36, method: 'POST', path: '/api/audio/recognize', desc: '语音识别', params: [{n:'audio',t:'blob',d:'音频文件(form-data)'}], response: '{"text":"...","confidence":...}' },
-                    { id: 37, method: 'POST', path: '/api/tts/synthesize', desc: '语音合成', params: [{n:'text',t:'string',d:'合成文本'},{n:'speed',t:'float',d:'语速',o:true}], response: 'audio/wav blob' },
-                    { id: 38, method: 'POST', path: '/api/dialogue/multimodal', desc: '多模态对话', params: [{n:'message',t:'string',d:'文本消息'},{n:'image',t:'base64',d:'图像数据',o:true},{n:'audio',t:'blob',d:'音频数据',o:true}], response: '{"response":"...","modalities":[...]}' }
-                ]
-            },
-            // ===== 模型管理 =====
-            {
-                category: '模型管理',
-                endpoints: [
-                    { id: 18, method: 'POST', path: '/api/model/load', desc: '模型加载', params: [{n:'model_path',t:'string',d:'模型路径'},{n:'config',t:'object',d:'配置参数',o:true}], response: '{"success":true,"model_id":"..."}' }
-                ]
-            },
-            // ===== 机器人控制 =====
-            {
-                category: '机器人控制',
-                endpoints: [
-                    { id: 12, method: 'GET', path: '/api/robot/status', desc: '获取机器人状态', params: [{n:'robot_id',t:'string',d:'机器人ID',o:true}], response: '{"status":"...","battery":...,"position":{...}}' },
-                    { id: 13, method: 'POST', path: '/api/robot/command', desc: '发送机器人控制命令', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'command',t:'string',d:'控制指令'}], response: '{"success":true,"executed":"..."}' },
-                    { id: 14, method: 'GET', path: '/api/robot/sensor', desc: '获取传感器数据', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'sensor',t:'string',d:'传感器类型',o:true}], response: '{"sensors":{...}}' },
-                    { id: 15, method: 'POST', path: '/api/robot/trajectory', desc: '执行机器人轨迹', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'waypoints',t:'array',d:'路径点列表'}], response: '{"success":true,"trajectory_id":"..."}' },
-                    { id: 16, method: 'POST', path: '/api/robot/emergency_stop', desc: '机器人紧急停止', params: [{n:'robot_id',t:'string',d:'机器人ID',o:true}], response: '{"success":true,"stopped":true}' },
-                    { id: 26, method: 'POST', path: '/api/robot/connect', desc: '连接机器人', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'connection_type',t:'string',d:'连接类型(serial/ros/tcp)'},{n:'config',t:'object',d:'连接配置'}], response: '{"success":true,"session_id":"..."}' },
-                    { id: 27, method: 'POST', path: '/api/robot/disconnect', desc: '断开机器人连接', params: [{n:'robot_id',t:'string',d:'机器人ID'}], response: '{"success":true}' },
-                    { id: 28, method: 'GET', path: '/api/robot/list', desc: '获取机器人列表(含ROS)', params: [], response: '{"robots":[...],"ros_nodes":[...]}' },
-                    { id: 49, method: 'POST', path: '/api/robot/parameters', desc: '设置机器人参数', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'parameters',t:'object',d:'参数字典'}], response: '{"success":true,"updated":[...]}' },
-                    { id: 50, method: 'POST', path: '/api/robot/coordinate', desc: '机器人坐标控制', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'x',t:'float',d:'X坐标'},{n:'y',t:'float',d:'Y坐标'},{n:'z',t:'float',d:'Z坐标',o:true}], response: '{"success":true,"position":{...}}' },
-                    { id: 35, method: 'POST', path: '/api/robot/training', desc: '机器人训练控制', params: [{n:'robot_id',t:'string',d:'机器人ID'},{n:'action',t:'string',d:'操作(start/stop)'},{n:'config',t:'object',d:'训练配置',o:true}], response: '{"success":true,"training_id":"..."}' }
-                ]
-            },
-            // ===== ROS控制 =====
-            {
-                category: 'ROS控制',
-                endpoints: [
-                    { id: 29, method: 'GET', path: '/api/ros/status', desc: '获取ROS Master状态', params: [], response: '{"master_uri":"...","online":true,"nodes":...}' },
-                    { id: 30, method: 'POST', path: '/api/ros/configure', desc: '配置ROS Master连接', params: [{n:'master_uri',t:'string',d:'ROS Master URI'},{n:'timeout',t:'int',d:'超时秒数',o:true}], response: '{"success":true,"connected":true}' },
-                    { id: 31, method: 'GET', path: '/api/ros/nodes', desc: '获取ROS节点列表', params: [], response: '{"nodes":["/rosout","/talker",...]}' },
-                    { id: 32, method: 'GET', path: '/api/ros/topics', desc: '获取ROS主题列表', params: [], response: '{"topics":[{"name":"...","type":"..."},...]}' },
-                    { id: 64, method: 'POST', path: '/api/ros/publish', desc: 'ROS话题发布', params: [{n:'topic',t:'string',d:'话题名称'},{n:'message_type',t:'string',d:'消息类型'},{n:'data',t:'object',d:'消息数据'}], response: '{"success":true,"topic":"..."}' },
-                    { id: 65, method: 'POST', path: '/api/ros/subscribe', desc: 'ROS话题订阅', params: [{n:'topic',t:'string',d:'话题名称'},{n:'message_type',t:'string',d:'消息类型'},{n:'callback',t:'string',d:'回调标识',o:true}], response: '{"success":true,"subscription_id":"..."}' },
-                    { id: 66, method: 'POST', path: '/api/ros/service', desc: 'ROS服务调用', params: [{n:'service',t:'string',d:'服务名称'},{n:'request',t:'object',d:'服务请求数据'}], response: '{"success":true,"response":{...}}' }
-                ]
-            },
-            // ===== 串口控制 =====
-            {
-                category: '串口控制',
-                endpoints: [
-                    { id: 67, method: 'GET', path: '/api/serial/list', desc: '获取串口设备列表', params: [], response: '{"ports":[{"name":"COM3","description":"..."},...]}' },
-                    { id: 68, method: 'POST', path: '/api/serial/open', desc: '打开串口连接', params: [{n:'port',t:'string',d:'串口名称'},{n:'baudrate',t:'int',d:'波特率'},{n:'data_bits',t:'int',d:'数据位',o:true},{n:'stop_bits',t:'int',d:'停止位',o:true},{n:'parity',t:'string',d:'校验位',o:true}], response: '{"success":true,"session_id":"..."}' },
-                    { id: 69, method: 'POST', path: '/api/serial/close', desc: '关闭串口连接', params: [{n:'session_id',t:'string',d:'串口会话ID'}], response: '{"success":true}' },
-                    { id: 70, method: 'POST', path: '/api/serial/send', desc: '串口数据发送', params: [{n:'session_id',t:'string',d:'串口会话ID'},{n:'data',t:'string',d:'发送数据(hex或text)'},{n:'encoding',t:'string',d:'编码方式',o:true}], response: '{"success":true,"bytes_sent":...,"response":"..."}' }
-                ]
-            },
-            // ===== 多机器人同步 =====
-            {
-                category: '多机器人同步',
-                endpoints: [
-                    { id: 71, method: 'POST', path: '/api/multi_robot/sync', desc: '多机器人同步协调', params: [{n:'robot_ids',t:'array',d:'机器人ID列表'},{n:'action',t:'string',d:'同步动作'},{n:'sync_mode',t:'string',d:'同步模式(master/follower/group)'}], response: '{"success":true,"sync_id":"...","robots_ready":...}' },
-                    { id: 34, method: 'POST', path: '/api/gazebo/control', desc: 'Gazebo仿真控制', params: [{n:'action',t:'string',d:'控制动作(start/stop/pause/reset)'},{n:'world',t:'string',d:'世界文件路径',o:true}], response: '{"success":true,"gazebo_status":"..."}' }
-                ]
-            },
-            // ===== 设备控制 =====
-            {
-                category: '设备管理',
-                endpoints: [
-                    { id: 51, method: 'POST', path: '/api/device/control', desc: '设备开关控制', params: [{n:'device_id',t:'string',d:'设备ID'},{n:'action',t:'string',d:'控制动作(on/off/toggle)'}], response: '{"success":true,"device_status":"..."}' },
-                    { id: 41, method: 'POST', path: '/api/device/command', desc: '设备控制命令', params: [{n:'device_id',t:'string',d:'设备ID'},{n:'command',t:'string',d:'命令'},{n:'params',t:'object',d:'参数',o:true}], response: '{"success":true,"result":"..."}' },
-                    { id: 56, method: 'GET', path: '/api/devices/list', desc: '列出所有可用设备', params: [], response: '{"devices":{"audioinput":[...],"audiooutput":[...],"videoinput":[...]}}' },
-                    { id: 57, method: 'POST', path: '/api/devices/register', desc: '注册前端设备', params: [{n:'device_id',t:'string',d:'设备ID'},{n:'type',t:'string',d:'设备类型'},{n:'name',t:'string',d:'设备名称'}], response: '{"success":true}' },
-                    { id: 58, method: 'POST', path: '/api/devices/unregister', desc: '注销前端设备', params: [{n:'device_id',t:'string',d:'设备ID'}], response: '{"success":true}' },
-                    { id: 59, method: 'GET', path: '/api/devices/status', desc: '获取设备状态', params: [{n:'device_id',t:'string',d:'设备ID',o:true}], response: '{"device_id":"...","active":true,"streaming":false}' }
-                ]
-            },
-            // ===== 音频视频 =====
-            {
-                category: '音频/视频流',
-                endpoints: [
-                    { id: 60, method: 'POST', path: '/api/audio/stream', desc: '处理实时语音流', params: [{n:'audio_chunk',t:'blob',d:'音频数据块'},{n:'session_id',t:'string',d:'会话ID',o:true}], response: '{"success":true,"processed":true,"text":"..."}' },
-                    { id: 61, method: 'POST', path: '/api/audio/command', desc: '语音指令识别与执行', params: [{n:'audio',t:'blob',d:'音频数据'},{n:'text',t:'string',d:'指令文本',o:true}], response: '{"text":"...","intent":"...","category":"...","confidence":...,"safe":true,"will_execute":true,"params":{...}}' },
-                    { id: 62, method: 'POST', path: '/api/video/stream', desc: '处理实时视频流', params: [{n:'video_chunk',t:'blob',d:'视频数据块'},{n:'session_id',t:'string',d:'会话ID',o:true}], response: '{"success":true,"frames_processed":...,"events":[...]}' },
-                    { id: 63, method: 'POST', path: '/api/video/capture', desc: '视频帧捕获与处理', params: [{n:'image',t:'base64',d:'Base64编码图像'},{n:'analyze',t:'bool',d:'是否分析',o:true}], response: '{"success":true,"objects":[...],"scene":"..."}' }
-                ]
-            },
-            // ===== 计算机控制 =====
-            {
-                category: '计算机控制',
-                endpoints: [
-                    { id: 43, method: 'POST', path: '/api/computer/launch', desc: '启动应用程序', params: [{n:'app_name',t:'string',d:'应用名称或路径'},{n:'args',t:'string',d:'启动参数',o:true}], response: '{"success":true,"pid":...}' },
-                    { id: 44, method: 'POST', path: '/api/computer/close', desc: '关闭应用程序', params: [{n:'app_name',t:'string',d:'应用名称'},{n:'force',t:'bool',d:'强制关闭',o:true}], response: '{"success":true}' },
-                    { id: 45, method: 'POST', path: '/api/computer/type', desc: '键盘输入仿真', params: [{n:'text',t:'string',d:'要输入的文本'}], response: '{"success":true,"chars":...}' },
-                    { id: 46, method: 'POST', path: '/api/computer/screenshot', desc: '截取屏幕', params: [{n:'format',t:'string',d:'格式(png/jpeg)',o:true}], response: '{"success":true,"image":"base64..."}' },
-                    { id: 47, method: 'POST', path: '/api/computer/execute', desc: '执行系统命令', params: [{n:'command',t:'string',d:'系统命令'},{n:'timeout',t:'int',d:'超时秒数',o:true}], response: '{"success":true,"stdout":"...","stderr":"...","exit_code":...}' },
-                    { id: 48, method: 'POST', path: '/api/computer/volume', desc: '系统音量控制', params: [{n:'action',t:'string',d:'up/down/mute/unmute/set'},{n:'value',t:'int',d:'音量值(0-100)',o:true}], response: '{"success":true,"volume":...}' }
-                ]
-            },
-            // ===== 文件系统 =====
-            {
-                category: '文件系统',
-                endpoints: [
-                    { id: 52, method: 'POST', path: '/api/files/read', desc: '读取文件', params: [{n:'path',t:'string',d:'文件路径'}], response: '{"success":true,"content":"...","size":...}' },
-                    { id: 53, method: 'POST', path: '/api/files/write', desc: '写入文件', params: [{n:'path',t:'string',d:'文件路径'},{n:'content',t:'string',d:'文件内容'},{n:'mode',t:'string',d:'写入模式(overwrite/append)',o:true}], response: '{"success":true,"bytes_written":...}' },
-                    { id: 54, method: 'POST', path: '/api/files/delete', desc: '删除文件', params: [{n:'path',t:'string',d:'文件路径'}], response: '{"success":true}' },
-                    { id: 55, method: 'GET', path: '/api/files/list', desc: '列出目录文件', params: [{n:'path',t:'string',d:'目录路径'}], response: '{"files":[...],"directories":[...]}' }
-                ]
-            },
-            // ===== AGI系统 =====
-            {
-                category: 'AGI 系统控制',
-                endpoints: [
-                    { id: 39, method: 'POST', path: '/api/agi/execute', desc: 'AGI任务执行', params: [{n:'task',t:'string',d:'任务描述'},{n:'type',t:'string',d:'任务类型(computer/robot/device/system/file)'},{n:'params',t:'object',d:'任务参数',o:true}], response: '{"success":true,"task_id":"...","result":{...}}' },
-                    { id: 40, method: 'GET', path: '/api/agi/task/status', desc: 'AGI任务状态查询', params: [{n:'task_id',t:'string',d:'任务ID'}], response: '{"task_id":"...","status":"...","progress":...,"result":{...}}' },
-                    { id: 72, method: 'GET', path: '/api/agi/feature_list', desc: '获取所有AGI功能状态列表(含描述)', params: [], response: '{"features":{"self_learning":{...},"self_decision":{...},...}}' },
-                    { id: 23, method: 'POST', path: '/api/agi/feature/toggle', desc: '切换AGI功能启用状态', params: [{n:'feature',t:'string',d:'功能名称'},{n:'enabled',t:'bool',d:'是否启用'}], response: '{"success":true,"feature":"...","enabled":true}' },
-                    { id: 73, method: 'POST', path: '/api/agi/self_correction', desc: '触发自我修正', params: [{n:'scope',t:'string',d:'修正范围(all/learning/reasoning/memory)',o:true}], response: '{"success":true,"corrections_applied":...,"details":{...}}' }
-                ]
-            }
-        ];
+        /* API端点数据从后端动态加载，避免硬编码虚假数据 */
+        var apiData = [];
+        var apiDataLoaded = false;
 
         function render() {
             var container = document.getElementById('api-list');

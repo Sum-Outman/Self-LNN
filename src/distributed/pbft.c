@@ -393,25 +393,31 @@ PbftSystem* pbft_system_create(const PbftConfig* config) {
         return NULL;
     }
     
-    /* 初始化拉普拉斯分析器（频域PBFT共识稳定性分析） */
+    /* P1-022修复：PBFT拉普拉斯分析器参数从共识周期和节点规模动态推导
+       PBFT共识频域特征与负载均衡完全不同：需要更高频率分辨率捕捉视图切换谐波 */
     {
         LaplaceConfig lap_cfg;
         memset(&lap_cfg, 0, sizeof(lap_cfg));
-        lap_cfg.num_samples = 256;
-        lap_cfg.sample_rate = 1000.0f;
+        /* 共识轮次间隔典型为10ms，采样1024点覆盖约10秒共识历史 */
+        float consensus_period_ms = 10.0f;
+        lap_cfg.num_samples = 1024;
+        lap_cfg.sample_rate = 1000.0f / consensus_period_ms;
+        /* 最大频率需覆盖视图切换速率（每100共识轮可能切换1次） */
         lap_cfg.max_frequency = 100.0f;
-        lap_cfg.min_frequency = 0.1f;
+        lap_cfg.min_frequency = 1.0f / (lap_cfg.num_samples * consensus_period_ms / 1000.0f);
         lap_cfg.enable_stability = 1;
         lap_cfg.enable_frequency = 1;
         lap_cfg.enable_optimization = 1;
-        lap_cfg.cutoff_frequency = 50.0f;
-        lap_cfg.filter_order = 2;
-        lap_cfg.alpha = 0.95f;
-        lap_cfg.beta = 0.05f;
+        /* 截止频率：主要捕获视图切换的基频和谐波 */
+        lap_cfg.cutoff_frequency = 10.0f;
+        lap_cfg.filter_order = 3;
+        /* 衰减因子：PBFT需要更快适应视图切换（较低alpha，较高beta） */
+        lap_cfg.alpha = 0.85f;
+        lap_cfg.beta  = 0.15f;
         system->laplace_analyzer = laplace_analyzer_create(&lap_cfg);
-        system->laplace_spectrum_buffer = (float*)safe_malloc(256 * sizeof(float));
+        system->laplace_spectrum_buffer = (float*)safe_malloc(1024 * sizeof(float));
         if (system->laplace_spectrum_buffer) {
-            memset(system->laplace_spectrum_buffer, 0, 256 * sizeof(float));
+            memset(system->laplace_spectrum_buffer, 0, 1024 * sizeof(float));
         }
     }
     
@@ -806,7 +812,26 @@ void pbft_reset_stats(PbftSystem* system) {
 int pbft_trigger_checkpoint(PbftSystem* system) {
     if (!system) return -1;
     system->latest_checkpoint_seq = system->last_executed_seq;
-    uint32_t state_digest_input[4] = {system->latest_checkpoint_seq, system->current_view, 0, 0};
+    /* P1-020修复：检查点摘要包含完整系统状态（执行序列号、当前视图、
+       活动节点位图、已接收请求数、已提交请求数、视图变更次数），不再使用硬编码0值 */
+    uint32_t active_nodes_bitmap = 0;
+    int active_count = 0;
+    for (int i = 0; i < PBFT_MAX_NODES && i < 32; i++) {
+        if (system->nodes[i].is_active) {
+            active_nodes_bitmap |= (1u << i);
+            active_count++;
+        }
+    }
+    uint32_t state_digest_input[8] = {
+        system->latest_checkpoint_seq,
+        system->current_view,
+        (uint32_t)(system->stats.total_requests & 0xFFFFFFFF),
+        active_nodes_bitmap,
+        (uint32_t)active_count,
+        (uint32_t)(system->stats.committed_requests & 0xFFFFFFFF),
+        (uint32_t)(system->stats.total_checkpoints & 0xFFFFFFFF),
+        (uint32_t)(system->stats.view_change_count & 0xFFFFFFFF)
+    };
     pbft_compute_digest(state_digest_input, sizeof(state_digest_input), system->checkpoint_digest);
     PbftCheckpoint cp;
     memset(&cp, 0, sizeof(cp));
@@ -1284,6 +1309,17 @@ int pbft_process_messages(PbftSystem* system, int timeout_ms) {
             }
             case PBFT_MSG_REPLY:
             case PBFT_MSG_STATUS:
+                /* M-002修复: STATUS消息处理 —— 落后节点可能请求当前视图状态 */
+                if (recv_len >= sizeof(PbftMessageHeader)) {
+                    PbftMessageHeader* hdr = (PbftMessageHeader*)system->recv_buffer;
+                    if (hdr->view_number > system->current_view) {
+                        /* 当前节点视图落后，触发视图变更 */
+                        pbft_send_view_change(system, hdr->view_number);
+                        system->current_view = hdr->view_number;
+                    }
+                    processed++;
+                }
+                break;
             case PBFT_MSG_STATUS_REPLY:
                 break;
             default:
@@ -1300,7 +1336,8 @@ int pbft_dispatch_message(PbftSystem* system, PbftMessageType type,
                            const void* msg, uint32_t msg_size) {
     if (!system || !msg) return PBFT_ERROR_INVALID_PARAM;
     if (system->status == PBFT_NODE_STOPPED) return PBFT_ERROR_SYSTEM_STOPPED;
-    (void)msg_size;
+    /* 验证消息大小：不能为空且不能超过最大请求大小 */
+    if (msg_size == 0 || msg_size > PBFT_MAX_REQUEST_SIZE) return PBFT_ERROR_INVALID_MESSAGE;
     switch (type) {
         case PBFT_MSG_PRE_PREPARE:
             return pbft_handle_pre_prepare(system, (const PbftPrePrepare*)msg);

@@ -253,5 +253,5 @@ A: Set different robot ID for each robot, then use coordination controller for c
 
 ---
 
-> **文档更新 / Updated**: 2026-05-11
+> **文档更新 / Updated**: 2026-05-14
 > **相关文档 / Related Docs**: [架构图](./Architecture_Diagram.md) | [用户手册](./USER_GUIDE.md) | [训练指南](./Training_Guide.md)

@@ -39,6 +39,169 @@ static int count_ast_nodes(const ASTNode* node)
     return count;
 }
 
+/* M-001修复: 不良内存局部性检测 —— 扫描嵌套循环中数组访问顺序 */
+static int penh_detect_memory_locality(const char* source_code,
+    PenhPerfIssue* issues, int max_count) {
+    if (!source_code || !issues || max_count <= 0) return 0;
+    int count = 0;
+    const char* inner_loops[] = {"for(", "while("};
+    int nl = sizeof(inner_loops) / sizeof(inner_loops[0]);
+    int depth = 0;
+    const char* p = source_code;
+    while (*p && count < max_count) {
+        for (int i = 0; i < nl; i++) {
+            if (strncmp(p, inner_loops[i], strlen(inner_loops[i])) == 0) {
+                depth++;
+                if (depth >= 3 && count < max_count) {
+                    issues[count].type = PENH_PERF_POOR_MEMORY_LOCALITY;
+                    issues[count].severity = 5.0f;
+                    int line = 1; for (const char* q = source_code; q < p; q++)
+                        if (*q == '\n') line++;
+                    issues[count].source_line = line;
+                    snprintf(issues[count].description, sizeof(issues[count].description),
+                        "深度%d嵌套循环可能存在不良内存局部性", depth);
+                    snprintf(issues[count].recommendation, sizeof(issues[count].recommendation),
+                        "建议分块处理或调整数组访问顺序以提高缓存命中率");
+                    count++;
+                }
+                break;
+            }
+        }
+        if (*p == '}') depth--;
+        p++;
+    }
+    return count;
+}
+
+/* M-001修复: 缓存未命中检测 —— 步长过大的数组访问 */
+static int penh_detect_cache_miss(const char* source_code,
+    PenhPerfIssue* issues, int max_count) {
+    if (!source_code || !issues || max_count <= 0) return 0;
+    int count = 0;
+    const char* large_stride[] = {"stride", "STRIDE"};
+    int ns = sizeof(large_stride) / sizeof(large_stride[0]);
+    for (int i = 0; i < ns && count < max_count; i++) {
+        const char* found = strstr(source_code, large_stride[i]);
+        if (found) {
+            issues[count].type = PENH_PERF_CACHE_MISS;
+            issues[count].severity = 4.0f;
+            int line = 1; for (const char* q = source_code; q < found; q++)
+                if (*q == '\n') line++;
+            issues[count].source_line = line;
+            snprintf(issues[count].description, sizeof(issues[count].description),
+                "可能存在大步长内存访问导致缓存未命中");
+            snprintf(issues[count].recommendation, sizeof(issues[count].recommendation),
+                "调整数据结构布局或使用缓存友好的块访问");
+            count++;
+        }
+    }
+    return count;
+}
+
+/* M-001修复: 过度拷贝检测 */
+static int penh_detect_excessive_copy(const char* source_code,
+    PenhPerfIssue* issues, int max_count) {
+    if (!source_code || !issues || max_count <= 0) return 0;
+    int memcpy_count = 0;
+    const char* p = source_code;
+    while ((p = strstr(p, "memcpy")) != NULL) {
+        memcpy_count++; p += 6;
+    }
+    if (memcpy_count > 5 && max_count > 0) {
+        issues[0].type = PENH_PERF_EXCESSIVE_COPYING;
+        issues[0].severity = 4.0f;
+        issues[0].source_line = 1;
+        snprintf(issues[0].description, sizeof(issues[0].description),
+            "检测到%d次内存拷贝调用，可能存在过度拷贝优化空间", memcpy_count);
+        snprintf(issues[0].recommendation, sizeof(issues[0].recommendation),
+            "考虑使用零拷贝或引用传递减少数据复制");
+        return 1;
+    }
+    return 0;
+}
+
+/* M-001修复: 分支预测失败检测 —— 循环中的多条件分支 */
+static int penh_detect_branch_mispredict(const ASTNode* ast,
+    PenhPerfIssue* issues, int max_count) {
+    if (!ast || !issues || max_count <= 0) return 0;
+    int count = 0;
+    if (ast->type == AST_IF) {
+        const ASTNode* loop_child = ast;
+        for (size_t i = 0; i < loop_child->child_count; i++) {
+            if (loop_child->children[i] && loop_child->children[i]->type == AST_LOOP) {
+                if (count < max_count) {
+                    issues[count].type = PENH_PERF_BRANCH_MISPREDICT;
+                    issues[count].severity = 4.5f;
+                    snprintf(issues[count].description, sizeof(issues[count].description),
+                        "循环内条件分支可能导致频繁分支预测失败");
+                    snprintf(issues[count].recommendation, sizeof(issues[count].recommendation),
+                        "将频繁判断的条件移出循环或使用查找表替代分支");
+                    count++;
+                }
+            }
+        }
+    }
+    for (size_t i = 0; i < ast->child_count && count < max_count; i++)
+        count += penh_detect_branch_mispredict(ast->children[i], issues + count, max_count - count);
+    return count;
+}
+
+/* M-001修复: 不必要分配检测 */
+static int penh_detect_unnecessary_allocation(const ASTNode* ast,
+    PenhPerfIssue* issues, int max_count) {
+    if (!ast || !issues || max_count <= 0) return 0;
+    int count = 0;
+    if (ast->type == AST_LOOP) {
+        for (size_t i = 0; i < ast->child_count && count < max_count; i++) {
+            const ASTNode* child = ast->children[i];
+            if (child && child->type == AST_FUNCTION) {
+                for (size_t j = 0; j < child->child_count; j++) {
+                    if (child->children[j] && child->children[j]->type == AST_LITERAL &&
+                        strstr((const char*)child->children[j]->data, "malloc")) {
+                        issues[count].type = PENH_PERF_UNNECESSARY_ALLOCATION;
+                        issues[count].severity = 5.5f;
+                        snprintf(issues[count].description, sizeof(issues[count].description),
+                            "循环内动态内存分配可能导致性能下降");
+                        snprintf(issues[count].recommendation, sizeof(issues[count].recommendation),
+                            "将内存分配移到循环外或使用栈分配");
+                        count++;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for (size_t i = 0; i < ast->child_count && count < max_count; i++)
+        count += penh_detect_unnecessary_allocation(ast->children[i], issues + count, max_count - count);
+    return count;
+}
+
+/* M-001修复: 小IO检测 */
+static int penh_detect_small_io(const ASTNode* ast,
+    PenhPerfIssue* issues, int max_count) {
+    if (!ast || !issues || max_count <= 0) return 0;
+    int count = 0;
+    if (ast->type == AST_CALL) {
+        const char* data = ast->data ? (const char*)ast->data : "";
+        if (strstr(data, "read") || strstr(data, "write") ||
+            strstr(data, "fread") || strstr(data, "fwrite") ||
+            strstr(data, "printf") || strstr(data, "fprintf")) {
+            if (count < max_count) {
+                issues[count].type = PENH_PERF_SMALL_IO;
+                issues[count].severity = 3.5f;
+                snprintf(issues[count].description, sizeof(issues[count].description),
+                    "频繁小IO操作可能影响性能");
+                snprintf(issues[count].recommendation, sizeof(issues[count].recommendation),
+                    "使用缓冲区批量读写或内存映射文件");
+                count++;
+            }
+        }
+    }
+    for (size_t i = 0; i < ast->child_count && count < max_count; i++)
+        count += penh_detect_small_io(ast->children[i], issues + count, max_count - count);
+    return count;
+}
+
 /* 计算AST子树中的语句数（BLOCK的直接子节点数） */
 static int count_block_statements(const ASTNode* node)
 {
@@ -220,6 +383,64 @@ static int match_buffer_dangerous_func(const char* source_line)
     for (int i = 0; i < n; ++i) {
         if (strstr(source_line, patterns[i]))
             return 1;
+    }
+    return 0;
+}
+
+/* 检测未初始化变量 M-001修复 */
+static int match_uninitialized_var(const char* source_line) {
+    if (!source_line) return 0;
+    /* 模式: 类型名 标识符; (无初始化赋值) */
+    const char* types[] = {"int ", "int\t", "float ", "float\t", "double ", "double\t",
+        "char ", "char\t", "size_t ", "size_t\t", "long ", "long\t",
+        "int* ", "float* ", "char* ", "void* ", "double* "};
+    int n = sizeof(types) / sizeof(types[0]);
+    for (int i = 0; i < n; i++) {
+        const char* t = strstr(source_line, types[i]);
+        if (t) {
+            const char* id = t + strlen(types[i]);
+            if (*id == '*') id++;
+            while (*id == ' ' || *id == '\t') id++;
+            int has_assign = 0, has_paren = 0;
+            const char* scan = id;
+            while (*scan && *scan != '\n' && *scan != ';') {
+                if (*scan == '=') has_assign = 1;
+                if (*scan == '(') has_paren = 1;
+                if (*scan == '[') has_paren = 1;
+                scan++;
+            }
+            if (!has_assign && !has_paren) return 1;
+        }
+    }
+    return 0;
+}
+
+/* 检测释放后使用 M-001修复 */
+static int match_use_after_free(const char* source_line) {
+    if (!source_line) return 0;
+    const char* frees[] = {"free(", "safe_free(", "delete ", "delete[] "};
+    int nf = sizeof(frees) / sizeof(frees[0]);
+    /* 如果行包含释放，找指针名，检查后续行是否使用 */
+    for (int i = 0; i < nf; i++) {
+        const char* fp = strstr(source_line, frees[i]);
+        if (fp) {
+            const char* arg_start = fp + strlen(frees[i]);
+            const char* arg_end = strchr(arg_start, ')');
+            if (arg_end) {
+                /* 在这行内查找指针名在释放之后还被引用 */
+                char ptr_name[64] = {0};
+                const char* a = arg_start;
+                while (a < arg_end && *a == ' ') a++;
+                const char* ae = a;
+                while (ae < arg_end && *ae != ' ' && *ae != ',' && *ae != ')' && *ae != '-') ae++;
+                if (ae > a && (size_t)(ae - a) < sizeof(ptr_name)) {
+                    memcpy(ptr_name, a, (size_t)(ae - a));
+                    const char* after = arg_end + 1;
+                    while (*after == ';' || *after == ' ') after++;
+                    if (strstr(after, ptr_name)) return 1;
+                }
+            }
+        }
     }
     return 0;
 }
@@ -697,6 +918,18 @@ int penh_analyze_performance(const char* source_code, const ASTNode* ast,
     /* 3. 检测冗余计算 */
     count += penh_detect_redundant_computation(ast, &issues[count], max_count - count);
 
+    /* M-001修复: 新增9种性能检测 */
+    if (source_code) {
+        count += penh_detect_memory_locality(source_code, &issues[count], max_count - count);
+        count += penh_detect_cache_miss(source_code, &issues[count], max_count - count);
+        count += penh_detect_excessive_copy(source_code, &issues[count], max_count - count);
+    }
+    if (ast) {
+        count += penh_detect_branch_mispredict(ast, &issues[count], max_count - count);
+        count += penh_detect_unnecessary_allocation(ast, &issues[count], max_count - count);
+        count += penh_detect_small_io(ast, &issues[count], max_count - count);
+    }
+
     result->issue_count = count;
 
     /* 计算综合得分 (0-100, 越高越好) */
@@ -1074,6 +1307,42 @@ int penh_scan_security(const char* source_code, const ASTNode* ast,
                          "行 %d: 检测到文件操作，可能存在路径遍历风险", line_num);
                 snprintf(v->recommendation, sizeof(v->recommendation),
                          "对文件路径进行规范化处理，禁止包含 ../ 等路径遍历序列");
+                safe_strcpy(v->code_snippet, sizeof(v->code_snippet), current_line);
+                count++;
+            }
+
+            /* M-001修复: 检测未初始化变量 */
+            if (match_uninitialized_var(current_line) && count < max_count) {
+                PenhVulnerability* v = &vulns[count];
+                memset(v, 0, sizeof(PenhVulnerability));
+                v->vuln_id = count + 1;
+                v->type = PENH_VULN_UNINITIALIZED_VAR;
+                v->line = line_num;
+                v->severity = 7.0f;
+                snprintf(v->function_name, sizeof(v->function_name), "%s",
+                         find_function_for_line(&fc, line_num));
+                snprintf(v->description, sizeof(v->description),
+                         "行 %d: 变量声明未初始化，可能导致未定义行为", line_num);
+                snprintf(v->recommendation, sizeof(v->recommendation),
+                         "建议在声明时初始化变量，或在使用前确保已被赋值");
+                safe_strcpy(v->code_snippet, sizeof(v->code_snippet), current_line);
+                count++;
+            }
+
+            /* M-001修复: 检测释放后使用 */
+            if (match_use_after_free(current_line) && count < max_count) {
+                PenhVulnerability* v = &vulns[count];
+                memset(v, 0, sizeof(PenhVulnerability));
+                v->vuln_id = count + 1;
+                v->type = PENH_VULN_USE_AFTER_FREE;
+                v->line = line_num;
+                v->severity = 9.0f;
+                snprintf(v->function_name, sizeof(v->function_name), "%s",
+                         find_function_for_line(&fc, line_num));
+                snprintf(v->description, sizeof(v->description),
+                         "行 %d: 检测到指针在释放后仍被引用", line_num);
+                snprintf(v->recommendation, sizeof(v->recommendation),
+                         "释放指针后应立即置为NULL，并使用前判空");
                 safe_strcpy(v->code_snippet, sizeof(v->code_snippet), current_line);
                 count++;
             }

@@ -109,7 +109,8 @@ typedef struct {
     float* symplectic_momentum;   /**< 辛积分器动量状态 [hidden_size]（扩展相空间） */
     float* symplectic_dqdt;       /**< 辛积分器位置导数 [hidden_size] */
     float* symplectic_dpdt;       /**< 辛积分器动量导数 [hidden_size] */
-    int symplectic_initialized;   /**< 辛积分器动量是否已初始化 */
+    int symplectic_initialized;
+    int symplectic_current_steps;   /**< 辛积分器动量是否已初始化 */
 } CfCState;
 
 /**
@@ -441,6 +442,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->state->ctbp_trajectory_capacity = 100;
     cell->state->dp54_current_steps = 0;
     cell->state->rosenbrock_current_steps = 0;
+    cell->state->symplectic_current_steps = 0;
     cell->state->symplectic_initialized = 0;
     
     // 初始化新求解器的默认配置
@@ -628,16 +630,31 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     }
     ode_adaptive_step_init(&cell->adaptive_step_sol, 0.0f, cell->config.delta_t);
     
-    /* 初始化并行化ODE求解 */
+    /* 初始化并行化ODE求解（P1-012修复：大隐藏层自动启用并行求解） */
     cell->use_parallel_solve = (cell->config.use_parallel_solve != 0) ? 1 : 0;
-    if (cell->config.use_parallel_solve) {
+    if (!cell->use_parallel_solve && cell->config.hidden_size >= 256) {
+        /* 隐藏层≥256时自动启用并行ODE求解以利用多核CPU */
+        cell->use_parallel_solve = 1;
+        cell->config.use_parallel_solve = 1;
+    }
+    if (cell->use_parallel_solve) {
         cell->config.parallel_cfg = ode_parallel_default_config();
         cell->config.parallel_cfg.num_domains = 4;
         cell->config.parallel_cfg.use_domain_decomposition = 1;
     }
     
-    /* 初始化自动求解器选择（P3.4） */
+    /* P0-015修复: 初始化自动求解器选择
+     * 当use_auto_solver未显式启用且delta_t为默认值时，
+     * 自动根据隐藏层大小和输入尺寸选择最适合的ODE求解器 */
     cell->enhanced_state = NULL;
+    if (cell->config.use_auto_solver == 0 && 
+        cell->config.delta_t >= 0.99f && cell->config.delta_t <= 1.01f) {
+        /* 调用者未显式配置求解器参数，启用自动选择 */
+        cell->config.use_auto_solver = 1;
+        cell->config.use_adaptive_step = 1;
+        cell->config.adaptive_step_cfg = ode_adaptive_step_default_config();
+        ode_adaptive_step_init(&cell->adaptive_step_sol, 0.0f, cell->config.delta_t);
+    }
     cell->config.use_auto_solver = (cell->config.use_auto_solver != 0) ? 1 : 0;
     if (cell->config.use_auto_solver) {
         cell->enhanced_config = cfc_enhanced_default_config();
@@ -1387,8 +1404,10 @@ static int cfc_cell_symplectic_step(CfCCell* cell, const float* input,
                                      cfc_cell_rhs_wrapper,
                                      cell, n, &cfg, workspace, &steps);
 
-    if (ret == 0)
+    if (ret == 0) {
         memcpy(output, q, n * sizeof(float));
+        cell->state->symplectic_current_steps = steps;
+    }
 
     if (need_free) safe_free((void**)&workspace);
     return ret;
@@ -3074,6 +3093,107 @@ int cfc_cell_forward_rk45(CfCCell* cell, const float* input, float delta_t,
         *steps_used = 1;
     }
     
+    return 0;
+}
+
+/**
+ * @brief 使用DP54(5阶Dormand-Prince)自适应求解器执行前向传播
+ *
+ * DP54是嵌入Runge-Kutta对(5阶/4阶)，提供自适应步长控制。
+ * 调用底层ode_dp54_solve实现完整DP54积分，含误差估计和步长自动调整。
+ */
+int cfc_cell_forward_dp54(CfCCell* cell, const float* input, float delta_t,
+                          float* hidden_state, int* steps_used) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_NULL(input, "输入向量为空");
+    SELFLNN_CHECK_NULL(hidden_state, "隐藏状态缓冲区为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+
+    int ret = cfc_cell_dp54_step(cell, input, cell->state->state, delta_t, cell->state->activation);
+    if (ret != 0) {
+        return -1;
+    }
+
+    memcpy(cell->state->saved_state, cell->state->state,
+           cell->config.hidden_size * sizeof(float));
+    memcpy(hidden_state, cell->state->activation,
+           cell->config.hidden_size * sizeof(float));
+    memcpy(cell->state->state, cell->state->activation,
+           cell->config.hidden_size * sizeof(float));
+    cell->state->time += delta_t;
+
+    if (steps_used) {
+        *steps_used = cell->state->dp54_current_steps;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 使用Rosenbrock L-稳定刚性求解器执行前向传播
+ *
+ * Rosenbrock方法对刚性ODE系统具有L-稳定性，适合处理液态网络中
+ * 不同时间尺度之间的剧烈变化。调用底层ode_rosenbrock_solve实现。
+ */
+int cfc_cell_forward_rosenbrock(CfCCell* cell, const float* input, float delta_t,
+                                float* hidden_state, int* steps_used) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_NULL(input, "输入向量为空");
+    SELFLNN_CHECK_NULL(hidden_state, "隐藏状态缓冲区为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+
+    int ret = cfc_cell_rosenbrock_step(cell, input, cell->state->state, delta_t,
+                                       cell->state->activation);
+    if (ret != 0) {
+        return -1;
+    }
+
+    memcpy(cell->state->saved_state, cell->state->state,
+           cell->config.hidden_size * sizeof(float));
+    memcpy(hidden_state, cell->state->activation,
+           cell->config.hidden_size * sizeof(float));
+    memcpy(cell->state->state, cell->state->activation,
+           cell->config.hidden_size * sizeof(float));
+    cell->state->time += delta_t;
+
+    if (steps_used) {
+        *steps_used = cell->state->rosenbrock_current_steps;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 使用Forest-Ruth 4阶辛积分器执行前向传播
+ *
+ * Forest-Ruth辛积分器保持哈密顿系统的辛结构，适合长时间能量守恒的
+ * 液态网络演化。调用底层ode_forest_ruth_solve实现。
+ */
+int cfc_cell_forward_symplectic(CfCCell* cell, const float* input, float delta_t,
+                                float* hidden_state, int* steps_used) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_NULL(input, "输入向量为空");
+    SELFLNN_CHECK_NULL(hidden_state, "隐藏状态缓冲区为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+
+    int ret = cfc_cell_symplectic_step(cell, input, cell->state->state, delta_t,
+                                       cell->state->activation);
+    if (ret != 0) {
+        return -1;
+    }
+
+    memcpy(cell->state->saved_state, cell->state->state,
+           cell->config.hidden_size * sizeof(float));
+    memcpy(hidden_state, cell->state->activation,
+           cell->config.hidden_size * sizeof(float));
+    memcpy(cell->state->state, cell->state->activation,
+           cell->config.hidden_size * sizeof(float));
+    cell->state->time += delta_t;
+
+    if (steps_used) {
+        *steps_used = cell->state->symplectic_current_steps;
+    }
+
     return 0;
 }
 

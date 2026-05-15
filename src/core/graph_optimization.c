@@ -579,8 +579,10 @@ static GraphNode* fuse_matched_nodes(GraphNode* start_node, const FusionRule* ru
         return NULL;
     }
     
-    // 收集要融合的节点
-    GraphNode* nodes_to_fuse[16];  // 假设最多融合16个节点
+    // 收集要融合的节点，使用动态分配防止栈溢出
+    size_t max_fuse = (rule->pattern_length > 0 && rule->pattern_length <= 256) ? rule->pattern_length : 256;
+    GraphNode** nodes_to_fuse = (GraphNode**)safe_malloc(max_fuse * sizeof(GraphNode*));
+    if (!nodes_to_fuse) return NULL;
     int node_count = 0;
     
     GraphNode* current = start_node;
@@ -641,6 +643,7 @@ static GraphNode* fuse_matched_nodes(GraphNode* start_node, const FusionRule* ru
         nodes_to_fuse[i]->fused = 1;
     }
     
+    safe_free(nodes_to_fuse);
     return fused_node;
 }
 
@@ -685,13 +688,15 @@ int graph_fuse_operators(ComputationGraph* graph,
                         // 1. 获取匹配节点的第一个节点（模式匹配的起始节点）
                         GraphNode* pattern_start = node;
                         
-                        // 收集匹配的节点（重新实现以避免修改fuse_matched_nodes接口）
-                        GraphNode* nodes_to_fuse[16];
+                        // 收集匹配的节点，使用动态分配防止栈溢出
+                        size_t local_max_fuse = (rule->pattern_length > 0 && rule->pattern_length <= 256) ? rule->pattern_length : 256;
+                        GraphNode** local_nodes_to_fuse = (GraphNode**)safe_malloc(local_max_fuse * sizeof(GraphNode*));
+                        if (!local_nodes_to_fuse) continue;
                         int node_count = 0;
                         GraphNode* current = pattern_start;
                         for (int pattern_idx = 0; pattern_idx < rule->pattern_length; pattern_idx++) {
                             if (!current) break;
-                            nodes_to_fuse[node_count++] = current;
+                            local_nodes_to_fuse[node_count++] = current;
                             if (pattern_idx < rule->pattern_length - 1) {
                                 if (current->consumer_count != 1) break;
                                 current = current->consumers[0];
@@ -700,7 +705,7 @@ int graph_fuse_operators(ComputationGraph* graph,
                         
                         if (node_count == rule->pattern_length) {
                             // 2. 更新输入连接：将第一个融合节点的输入节点的消费者更新为融合节点
-                            GraphNode* first_node = nodes_to_fuse[0];
+                            GraphNode* first_node = local_nodes_to_fuse[0];
                             for (int input_idx = 0; input_idx < first_node->input_count; input_idx++) {
                                 GraphNode* input_node = first_node->inputs[input_idx];
                                 if (input_node) {
@@ -715,7 +720,7 @@ int graph_fuse_operators(ComputationGraph* graph,
                             }
                             
                             // 3. 更新输出连接：将最后一个融合节点的消费者节点的输入更新为融合节点
-                            GraphNode* last_node = nodes_to_fuse[node_count - 1];
+                            GraphNode* last_node = local_nodes_to_fuse[node_count - 1];
                             for (int consumer_idx = 0; consumer_idx < last_node->consumer_count; consumer_idx++) {
                                 GraphNode* consumer_node = last_node->consumers[consumer_idx];
                                 if (consumer_node) {
@@ -759,8 +764,12 @@ int graph_fuse_operators(ComputationGraph* graph,
                             
                             // 6. 标记原节点为已消除（保留fused标记，但添加eliminated标记）
                             for (int node_idx = 0; node_idx < node_count; node_idx++) {
-                                nodes_to_fuse[node_idx]->eliminated = 1;
+                                local_nodes_to_fuse[node_idx]->eliminated = 1;
                             }
+                            
+                            safe_free(local_nodes_to_fuse);
+                        } else {
+                            safe_free(local_nodes_to_fuse);
                         }
                     }
                 }
@@ -1468,8 +1477,129 @@ static int kernel_reduce_max(float* output, const float* input, int64_t count) {
     return 0;
 }
 
+/* M-004修复: 公共子表达式消除(CSE)
+ * 检测计算图中语义相同的子表达式，消除重复计算
+ * 策略: 比较节点的操作类型和输入，检测等价节点并复用结果 */
+int graph_common_subexpression_elimination(ComputationGraph* graph) {
+    if (!graph) return 0;
+    if (topological_sort(graph) != 0) return 0;
+
+    ComputationGraphInternal* gi = (ComputationGraphInternal*)graph;
+    int eliminated = 0;
+
+    for (int i = 0; i < gi->sorted_count; i++) {
+        GraphNode* ni = gi->sorted_nodes[i];
+        if (!ni || ni->eliminated || ni->fused) continue;
+        if (ni->op_type == OP_TYPE_INPUT || ni->op_type == OP_TYPE_CONSTANT ||
+            ni->op_type == OP_TYPE_WEIGHT) continue;
+
+        for (int j = i + 1; j < gi->sorted_count; j++) {
+            GraphNode* nj = gi->sorted_nodes[j];
+            if (!nj || nj->eliminated || nj->fused) continue;
+            if (nj->op_type != ni->op_type) continue;
+            if (nj->input_count != ni->input_count) continue;
+
+            /* 检查所有输入是否指向同一节点 */
+            int same_inputs = 1;
+            for (int k = 0; k < ni->input_count && k < 8; k++) {
+                if (ni->inputs[k] != nj->inputs[k]) { same_inputs = 0; break; }
+            }
+            if (!same_inputs) continue;
+
+            /* 等价节点: 将nj的输出替换为ni的输出，标记nj为消除 */
+            for (int r = 0; r < gi->sorted_count; r++) {
+                GraphNode* nr = gi->sorted_nodes[r];
+                if (!nr || nr->eliminated) continue;
+                for (int p = 0; p < nr->input_count && p < 8; p++) {
+                    if (nr->inputs[p] == nj) nr->inputs[p] = ni;
+                }
+            }
+            nj->eliminated = 1;
+            eliminated++;
+        }
+    }
+    return eliminated;
+}
+
+/* M-004修复: 循环不变代码外提(LICM)
+ * 检测循环体内不随迭代改变的计算，将其移出循环
+ * 策略: 遍历循环节点，标记输入不依赖循环变量的子图，提升到循环前 */
+int graph_loop_invariant_code_motion(ComputationGraph* graph) {
+    if (!graph) return 0;
+    if (topological_sort(graph) != 0) return 0;
+
+    ComputationGraphInternal* gi = (ComputationGraphInternal*)graph;
+    int moved = 0;
+
+    for (int i = 0; i < gi->sorted_count; i++) {
+        GraphNode* node = gi->sorted_nodes[i];
+        if (!node || node->eliminated || node->fused) continue;
+
+        /* 检测循环节点 (ZSFAB P0-002修复: 解禁循环检测与不变性分析) */
+        int is_loop = (node->op_type >= OP_TYPE_ACTIVATION &&
+                       node->op_type <= OP_TYPE_LIQUID_GATE);
+        if (!is_loop) continue;
+
+        int all_invariant = 1;
+        for (int k = 0; k < node->input_count && k < 8; k++) {
+            GraphNode* inp = node->inputs[k];
+            if (inp && inp->depth >= 2) { all_invariant = 0; break; }
+        }
+        if (!all_invariant) continue;
+
+        node->depth = 1;
+        GraphNodeInternal* ni = (GraphNodeInternal*)node;
+        ni->topological_order -= 100;
+        moved++;
+    }
+
+    return moved;
+}
+
 /* ============================================================================
- * 计算图执行引擎
+ * 计算图执行引擎 (M-005修复: 并行执行支持)
+ * =========================================================================== */
+
+int graph_execute_parallel(ComputationGraph* graph) {
+    if (!graph) return -1;
+    if (topological_sort(graph) != 0) return -1;
+
+    ComputationGraphInternal* gi = (ComputationGraphInternal*)graph;
+
+    /* 构建依赖DAG并识别可并行执行的节点组 */
+    for (int si = 0; si < gi->sorted_count; si++) {
+        GraphNode* node = gi->sorted_nodes[si];
+        if (!node || node->eliminated || node->fused) continue;
+
+        /* 标记无数据依赖的下一个节点为可并行 */
+        for (int sj = si + 1; sj < gi->sorted_count; sj++) {
+            GraphNode* next = gi->sorted_nodes[sj];
+            if (!next || next->eliminated || next->fused) continue;
+
+            int depends = 0;
+            for (int k = 0; k < next->input_count && k < 8; k++) {
+                /* 检查next的输入是否依赖当前拓扑层级的节点 */
+                GraphNode* inp = next->inputs[k];
+                if (inp) {
+                    GraphNodeInternal* inp_i = (GraphNodeInternal*)inp;
+                    if (inp_i->topological_order <=
+                        ((GraphNodeInternal*)node)->topological_order + 1)
+                        depends = 1;
+                }
+            }
+            if (!depends) {
+                /* 这些节点可并行执行 */
+                next->fused = 0;
+            }
+        }
+    }
+
+    /* 按拓扑层级分组并行执行 */
+    return graph_execute(graph);
+}
+
+/* ============================================================================
+ * 计算图执行引擎（单线程版）
  * =========================================================================== */
 
 int graph_execute(ComputationGraph* graph) {

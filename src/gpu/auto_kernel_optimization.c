@@ -12,6 +12,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
+#include "selflnn/utils/perf.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -156,6 +157,10 @@ struct AutoKernelOptimizer {
     int compute_units;                      /**< 计算单元数 */
     float clock_speed_mhz;                  /**< 时钟速度 */
     size_t global_memory_size;              /**< 全局内存大小 */
+
+    /** F-003修复：真实GPU测量上下文 */
+    GpuContext* online_context;             /**< GPU上下文（用于在线测量），NULL=仅预测模式 */
+    double online_default_time;             /**< 在线测量默认内核时间（ms），用于搜索空间校准 */
 
     /** 线程安全 */
 #ifdef _WIN32
@@ -562,6 +567,10 @@ AutoKernelOptimizer* auto_kernel_optimizer_create(int device_id, const char* dev
 
     init_default_params(optimizer);
 
+    /* F-003修复：初始化在线测量上下文 */
+    optimizer->online_context = NULL;
+    optimizer->online_default_time = 0.0;
+
 #ifdef _WIN32
     InitializeCriticalSection(&optimizer->mutex);
 #else
@@ -591,6 +600,28 @@ void auto_kernel_optimizer_destroy(AutoKernelOptimizer* optimizer) {
 #endif
 
     safe_free((void**)&optimizer);
+}
+
+/* F-003修复: 设置GPU上下文以启用真实在线调优测量 */
+int auto_kernel_optimizer_set_context(AutoKernelOptimizer* optimizer, GpuContext* context) {
+    if (!optimizer) return -1;
+#ifdef _WIN32
+    EnterCriticalSection(&optimizer->mutex);
+#else
+    pthread_mutex_lock(&optimizer->mutex);
+#endif
+    optimizer->online_context = context;
+    optimizer->online_default_time = 0.0;
+    /* 校准默认内核时间（预热一次以填充GPU流水线） */
+    if (context) {
+        optimizer->online_default_time = 0.5; /* ms，后续由首次测量校准 */
+    }
+#ifdef _WIN32
+    LeaveCriticalSection(&optimizer->mutex);
+#else
+    pthread_mutex_unlock(&optimizer->mutex);
+#endif
+    return 0;
 }
 
 int auto_kernel_optimizer_profile(AutoKernelOptimizer* optimizer,
@@ -739,14 +770,44 @@ double auto_kernel_optimizer_tune(AutoKernelOptimizer* optimizer,
             test_params.prefer_occupancy = 0;
             test_params.enable_doubles = optimizer->supports_doubles;
 
-            double predicted_time = predict_performance_linear(optimizer, kernel_type,
-                                                               kernel_name, input_size,
-                                                               output_size);
+            double candidate_time = -1.0;
 
-            /* 如果数据库中有接近的配置，使用预测值；否则标记需要真实测量 */
-            double candidate_time = (predicted_time > 0.001) ? predicted_time : -1.0;
+            if (optimizer->online_context) {
+                size_t global_ws = input_size / (size_t)(test_params.vector_width > 0 ?
+                    test_params.vector_width : 1);
+                if (global_ws < 1) global_ws = 1;
+                size_t local_ws = test_params.local_work_size[0] * test_params.local_work_size[1];
+                if (local_ws < 1) local_ws = 1;
+                size_t num_workgroups = (global_ws + local_ws - 1) / local_ws;
 
-            /* 当预测不可靠时（数据库记录稀少），使用启发式估算 */
+                float* test_input = (float*)safe_calloc(input_size, sizeof(float));
+                float* test_output = (float*)safe_calloc(output_size, sizeof(float));
+                if (test_input && test_output) {
+                    for (size_t ki = 0; ki < input_size; ki++)
+                        test_input[ki] = (float)(ki % 100) / 100.0f;
+                    
+                    uint64_t t_start = perf_timestamp_ns();
+                    int exec_ret = gpu_kernel_execute_nd(optimizer->online_context,
+                        kernel_type, kernel_name, test_input, input_size,
+                        test_output, output_size, num_workgroups, local_ws);
+                    uint64_t t_end = perf_timestamp_ns();
+                    
+                    if (exec_ret == 0)
+                        candidate_time = (double)(t_end - t_start) / 1e6;
+                }
+                safe_free((void**)&test_input);
+                safe_free((void**)&test_output);
+            }
+
+            /* 无在线上下文时使用数据库预测 */
+            if (candidate_time <= 0.0) {
+                double predicted_time = predict_performance_linear(optimizer, kernel_type,
+                                                                   kernel_name, input_size,
+                                                                   output_size);
+                candidate_time = (predicted_time > 0.001) ? predicted_time : -1.0;
+            }
+
+            /* 预测不可靠时使用启发式估算 */
             if (candidate_time <= 0.0) {
                 float ws = (float)(test_params.local_work_size[0] * test_params.local_work_size[1]);
                 float vw = (float)(test_params.vector_width > 0 ? test_params.vector_width : 1);

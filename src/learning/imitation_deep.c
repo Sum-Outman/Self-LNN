@@ -11,6 +11,7 @@
 #include "selflnn/learning/imitation_deep.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/secure_random.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -225,6 +226,7 @@ int im_encode_trajectory(ImitationDeepLearner* idl, const ImDemonstration* demo)
             }
         }
         safe_free((void**)&frame_input); safe_free((void**)&frame_output); safe_free((void**)&running_state);
+        return 0;
     } else {
         for (int i = 0; i < kf && i < IM_MAX_KEYFRAMES; i++) {
             float decay = expf(-0.3f * (float)(kf - 1 - i));
@@ -233,12 +235,14 @@ int im_encode_trajectory(ImitationDeepLearner* idl, const ImDemonstration* demo)
                     demo->keyframes[i].joint_positions[j] * decay / (float)kf;
             }
         }
-    return 0;
+        return 0;
+    }
 }
 
 int im_generalize_action(ImitationDeepLearner* idl, const ImActionSegment* action,
     float* new_start, float* new_goal, ImActionSegment* generalized) {
     if (!idl || !action || !generalized) return -1;
+
     /* BUG-018修复: 使用新起点/新目标进行轨迹自适应泛化 */
     memcpy(generalized, action, sizeof(ImActionSegment));
     float radius = idl->current_demo.generalization_radius > 0 ?

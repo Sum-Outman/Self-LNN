@@ -2,15 +2,18 @@
  * @file multimodal_manager.c
  * @brief 多模态管理器实现
  *
- * 多模态系统管理器实现，协调各模态通过统一信号处理器进入同一个LNN连续动态系统。
- * 严格遵循：所有模态→统一输入到同一个连续动态系统→统一状态演化→统一输出。
- * 不需要分开编码、不需要多模型融合、不需要跨模态注意力。
+ * P0-002修复: 统一多模态入口。
+ * 不再自建独立的UnifiedSignalProcessor，改为使用全局唯一实例。
+ * 所有模态→全局统一信号处理器→共享LNN连续动态系统→统一输出。
+ * 严格遵循：不需要分开编码、不需要多模型融合、不需要跨模态注意力。
  */
 
 #include "selflnn/multimodal/multimodal_manager.h"
 #include "selflnn/multimodal/unified_signal_processor.h"
+#include "selflnn/selflnn.h"               /* P0-002: selflnn_get_unified_signal_processor */
 #include "selflnn/multimodal/multimodal_unified_input.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"
 #include "selflnn/core/errors.h"
 
 #include <stdlib.h>
@@ -20,20 +23,20 @@
 /**
  * @brief 多模态管理器内部结构体
  *
- * 不包含独立模态处理器数组、不包含分辨率控制、不包含模态缺失检测。
- * 所有模态通过统一信号处理器直接处理后输入LNN动态系统。
+ * P0-002修复: unified_signal_processor现在引用全局单例，不再自建。
+ * 所有模态通过全局统一信号处理器处理后输入共享LNN动态系统。
  */
 struct MultimodalManager {
-    MultimodalManagerConfig config; /**< 管理器配置 */
-    int is_initialized;             /**< 是否已初始化 */
-    float* feature_buffer;          /**< 特征缓冲区 */
-    size_t buffer_size;             /**< 缓冲区大小 */
-    float* fused_features;          /**< 融合特征缓冲区 */
-    size_t fused_size;              /**< 融合特征大小 */
-    UnifiedSignalProcessor* unified_signal_processor; /**< 统一信号处理器实例 */
-    int unified_signal_processor_owned;      /**< 是否拥有统一信号处理器（需要释放） */
-    LNN* lnn_instance;              /**< 关联的LNN实例（不拥有，不释放） */
-    float modality_weights[4];      /**< 各模态权重（仅用于外部路由查询，不影响CfC内部状态演化） */
+    MultimodalManagerConfig config;       /**< 管理器配置 */
+    int is_initialized;                   /**< 是否已初始化 */
+    float* feature_buffer;                /**< 特征缓冲区 */
+    size_t buffer_size;                   /**< 缓冲区大小 */
+    float* fused_features;                /**< 融合特征缓冲区 */
+    size_t fused_size;                    /**< 融合特征大小 */
+    UnifiedSignalProcessor* unified_signal_processor; /**< P0-002: 引用全局统一信号处理器 */
+    int unified_signal_processor_owned;   /**< 是否拥有信号处理器（1=自建需释放，0=外部引用） */
+    LNN* lnn_instance;                    /**< 关联的LNN实例（不拥有，不释放） */
+    float modality_weights[4];            /**< 各模态权重（仅用于外部路由查询，不影响CfC内部状态演化） */
 };
 
 /**
@@ -53,7 +56,6 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
     manager->config = *config;
     manager->is_initialized = 1;
 
-    /* 分配特征缓冲区 */
     manager->buffer_size = 1024;
     manager->feature_buffer = (float*)safe_malloc(manager->buffer_size * sizeof(float));
     if (!manager->feature_buffer) {
@@ -69,31 +71,18 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
         return NULL;
     }
 
-    manager->unified_signal_processor = NULL;
-    manager->unified_signal_processor_owned = 0;
     manager->lnn_instance = NULL;
 
-    /* 如果启用统一信号处理器，创建统一信号处理器实例 */
+    /* P0-002修复: 使用全局唯一统一信号处理器替代自建独立实例
+     * 如果启用统一信号处理器模式，从全局系统获取共享实例 */
     if (manager->config.use_unified_signal_processor) {
-        UnifiedSignalProcessorConfig processor_config;
-        memset(&processor_config, 0, sizeof(UnifiedSignalProcessorConfig));
-
-        processor_config.vision_dimension = manager->config.enable_vision ? 512 : 0;
-        processor_config.audio_dimension = manager->config.enable_audio ? 128 : 0;
-        processor_config.text_dimension = manager->config.enable_text ? 256 : 0;
-        processor_config.sensor_dimension = manager->config.enable_sensor ? 64 : 0;
-        processor_config.unified_dimension = manager->config.unified_dimension > 0 ?
-                                          manager->config.unified_dimension : SELFLNN_UNIFIED_INPUT_DIM;
-        processor_config.learning_rate = 0.01f;
-        processor_config.enable_online_learning = 1;
-        processor_config.enable_cross_modal_fusion = 0;
-
-        manager->unified_signal_processor = unified_signal_processor_create(&processor_config);
+        manager->unified_signal_processor = (UnifiedSignalProcessor*)selflnn_get_unified_signal_processor();
         if (!manager->unified_signal_processor) {
-            multimodal_manager_free(manager);
-            return NULL;
+            /* 全局统一信号处理器尚未初始化，管理器仍可创建，但处理时将返回错误 */
+            log_warning("[多模态管理器] 全局统一信号处理器未初始化，处理请求将返回错误");
         }
-        manager->unified_signal_processor_owned = 1;
+    } else {
+        manager->unified_signal_processor = NULL;
     }
 
     return manager;
@@ -107,13 +96,7 @@ void multimodal_manager_free(MultimodalManager* manager) {
         return;
     }
 
-    /* 释放统一信号处理器（如果拥有） */
-    if (manager->unified_signal_processor_owned && manager->unified_signal_processor) {
-        unified_signal_processor_free(manager->unified_signal_processor);
-        manager->unified_signal_processor = NULL;
-        manager->unified_signal_processor_owned = 0;
-    }
-
+    /* P0-002修复: unified_signal_processor是全局共享引用，不在此释放 */
     if (manager->feature_buffer) {
         safe_free((void**)&manager->feature_buffer);
     }
@@ -162,8 +145,29 @@ int multimodal_manager_process(MultimodalManager* manager,
         return -1;
     }
     unified_output->signal_dimension = max_features;
-    unified_output->temporal_features = NULL;
-    unified_output->temporal_dimension = 0;
+    /* ZSFAB P2-006修复: 实现时序特征融合——计算帧间差分特征 */
+    {
+        static float prev_frame_features[256] = {0};
+        static int has_prev_frame = 0;
+        size_t tdim = (max_features < 256) ? max_features : 256;
+        unified_output->temporal_features = (float*)safe_malloc(tdim * sizeof(float));
+        if (unified_output->temporal_features && has_prev_frame) {
+            unified_output->temporal_dimension = tdim;
+            /* 计算当前帧与前一帧的特征差分 */
+            for (size_t d = 0; d < tdim; d++) {
+                unified_output->temporal_features[d] = unified_output->unified_signal[d] - prev_frame_features[d];
+            }
+        } else if (unified_output->temporal_features) {
+            /* 首帧：无前一帧，特征差分为0 */
+            unified_output->temporal_dimension = tdim;
+            memset(unified_output->temporal_features, 0, tdim * sizeof(float));
+        }
+        /* 保存当前帧作为下次的参考帧 */
+        for (size_t d = 0; d < tdim; d++) {
+            prev_frame_features[d] = unified_output->unified_signal[d];
+        }
+        has_prev_frame = 1;
+    }
     unified_output->encoding_quality = 0.0f;
     unified_output->cross_modal_alignment = 0.0f;
 
@@ -177,6 +181,7 @@ int multimodal_manager_process(MultimodalManager* manager,
                                        unified_output);
 
     if (result != 0) {
+        safe_free((void**)&unified_output->temporal_features);
         safe_free((void**)&unified_output->unified_signal);
         safe_free((void**)&unified_output);
         return -1;
@@ -186,6 +191,7 @@ int multimodal_manager_process(MultimodalManager* manager,
     if (lnn_get_config(manager->lnn_instance, &lnn_cfg) != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_STATE, __func__, __FILE__, __LINE__,
                               "多模态处理: 获取LNN配置失败");
+        safe_free((void**)&unified_output->temporal_features);
         safe_free((void**)&unified_output->unified_signal);
         safe_free((void**)&unified_output);
         return -1;
@@ -193,6 +199,7 @@ int multimodal_manager_process(MultimodalManager* manager,
 
     float* lnn_input = (float*)safe_malloc(lnn_cfg.input_size * sizeof(float));
     if (!lnn_input) {
+        safe_free((void**)&unified_output->temporal_features);
         safe_free((void**)&unified_output->unified_signal);
         safe_free((void**)&unified_output);
         return -1;
@@ -209,6 +216,7 @@ int multimodal_manager_process(MultimodalManager* manager,
     float* lnn_output = (float*)safe_malloc(lnn_cfg.output_size * sizeof(float));
     if (!lnn_output) {
         safe_free((void**)&lnn_input);
+        safe_free((void**)&unified_output->temporal_features);
         safe_free((void**)&unified_output->unified_signal);
         safe_free((void**)&unified_output);
         return -1;
@@ -217,6 +225,7 @@ int multimodal_manager_process(MultimodalManager* manager,
     if (lnn_forward(manager->lnn_instance, lnn_input, lnn_output) != 0) {
         safe_free((void**)&lnn_input);
         safe_free((void**)&lnn_output);
+        safe_free((void**)&unified_output->temporal_features);
         safe_free((void**)&unified_output->unified_signal);
         safe_free((void**)&unified_output);
         selflnn_set_last_error(SELFLNN_ERROR_NETWORK_FORWARD, __func__, __FILE__, __LINE__,
@@ -232,6 +241,7 @@ int multimodal_manager_process(MultimodalManager* manager,
 
     safe_free((void**)&lnn_input);
     safe_free((void**)&lnn_output);
+    safe_free((void**)&unified_output->temporal_features);
     safe_free((void**)&unified_output->unified_signal);
     safe_free((void**)&unified_output);
 

@@ -159,6 +159,7 @@ typedef struct CfCState {
     float* symplectic_dqdt;        /**< 辛dq/dt */
     float* symplectic_dpdt;        /**< 辛dp/dt */
     int symplectic_initialized;    /**< 辛积分器是否已初始化 */
+    int symplectic_current_steps;   /**< 辛求解器当前步数 */
 } CfCState;
 
 struct CfCCell {

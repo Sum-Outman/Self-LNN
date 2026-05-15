@@ -96,7 +96,6 @@ struct Robot {
     float sim_motor_torques[32];   /**< 仿真电机力矩 (Nm) */
     float sim_environment[10];    /**< 仿真环境参数 */
     float sim_last_update_time;   /**< 仿真最后更新时间 (秒) */
-    int simulation_mode;          /**< 仿真模式标志：0=关闭(无硬件返回错误)，1=开启(生成仿真数据) */
     int sim_data_warning;         /**< 仿真数据警告：1=当前含有仿真数据，禁止用于自主学习训练 */
     
     // IMU数据
@@ -235,7 +234,6 @@ Robot* robot_create(const RobotConfig* config) {
     }
     
     robot->sim_last_update_time = 0.0f;
-    robot->simulation_mode = 0;  /* 默认关闭仿真模式，无硬件时返回错误 */
     robot->sim_data_warning = 0; /* 仿真数据警告标记：1=含有仿真数据，禁止用于自主学习训练 */
     for (int i = 0; i < 3; i++) {
         robot->imu_accel[i] = 0.0f;
@@ -588,45 +586,17 @@ int robot_get_sensor_data(Robot* robot, int sensor_id, SensorData* sensor_data) 
         int hardware_result = robot_read_sensor_from_hardware(robot, sensor_id, sensor_data);
         
         if (hardware_result == 0) {
-            // 硬件接口读取成功，sensor_data已填充
-            // 不需要额外处理
+            /* 硬件接口读取成功，sensor_data已填充 */
         } else {
-            // 2. 检查仿真模式是否开启
-            if (!robot->simulation_mode) {
-                // 仿真模式关闭且无硬件接口：返回错误但AGI系统可继续运行
-                // 符合"不使用任何假数据"原则，避免自主学习被虚假数据污染
-                sensor_data->is_valid = 0;
-                sensor_data->data_size = 0;
-                robot->sensor_update_count++;
-                selflnn_set_last_error(SELFLNN_ERROR_HARDWARE_FAILURE, __func__, __FILE__, __LINE__,
-                                      "无硬件接口且仿真模式未开启（AGI可继续运行，调用者可启用simulation_mode获取仿真数据）：传感器类型=%d, ID=%d",
-                                      sensor->config.type, sensor_id);
-                
-                uint64_t elapsed_ns = perf_timer_stop(&timer);
-                (void)elapsed_ns;
-                return SELFLNN_ERROR_HARDWARE_FAILURE;
-            }
-            
-            // 3. 仿真模式已开启，使用物理传感器数据生成
-            int generated_size = robot_generate_physical_sensor_data(robot, sensor->config.type, 
-                                                                    sensor->data_buffer, sensor->buffer_size);
-            
-            if (generated_size > 0) {
-                sensor_data->data_size = generated_size;
-            } else {
-                sensor_data->is_valid = 0;
-                selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
-                                      "无法生成传感器数据（类型：%d，ID：%d）", 
-                                      sensor->config.type, sensor_id);
-                
-                sensor->data_count++;
-                sensor->last_timestamp = sensor_data->timestamp;
-                robot->sensor_update_count++;
-                
-                uint64_t elapsed_ns = perf_timer_stop(&timer);
-                (void)elapsed_ns;
-                return SELFLNN_ERROR_INVALID_ARGUMENT;
-            }
+            /* P0-007修复: 无硬件接口时直接返回错误，禁止生成任何仿真传感器数据
+             * AGI系统可继续正常运行，但传感器数据为空 */
+            sensor_data->is_valid = 0;
+            sensor_data->data_size = 0;
+            robot->sensor_update_count++;
+            selflnn_set_last_error(SELFLNN_ERROR_HARDWARE_FAILURE, __func__, __FILE__, __LINE__,
+                                  "无硬件接口——传感器数据不可用（AGI继续运行，不生成仿真数据）：传感器类型=%d, ID=%d",
+                                  sensor->config.type, sensor_id);
+            return SELFLNN_ERROR_HARDWARE_FAILURE;
         }
     }
     
@@ -1805,24 +1775,18 @@ int robot_is_hardware_enabled(const Robot* robot) {
 }
 
 /**
- * @brief 设置仿真模式
- * 
- * @param robot 机器人句柄
- * @param enable 1=开启仿真模式(无硬件时生成仿真数据)，0=关闭(无硬件时返回错误)
- * @return int 成功返回0，失败返回错误码
+ * @brief P0-007修复: simulation_mode已移除，无硬件时始终返回错误
+ * @deprecated 不再支持仿真模式，无硬件连接时所有传感器数据返回错误
  */
 int robot_set_simulation_mode(Robot* robot, int enable) {
-    SELFLNN_CHECK_NULL(robot, "机器人句柄为空");
-    robot->simulation_mode = enable ? 1 : 0;
-    robot->sim_data_warning = enable ? 1 : 0;
-    return 0;
+    (void)robot;
+    (void)enable;
+    return -1;
 }
 
 int robot_is_simulation_data_unsafe(Robot* robot) {
     if (!robot) return 1;
-    if (robot->simulation_mode && robot->sim_data_warning) {
-        return 1;
-    }
+    if (robot->sim_data_warning) return 1;
     return 0;
 }
 

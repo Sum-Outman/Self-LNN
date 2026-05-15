@@ -247,6 +247,116 @@ int quaternion_batchnorm_forward(QuaternionBatchNorm* layer,
     return 0;
 }
 
+/* S-010修复: 四元数协方差矩阵归一化
+ * 计算w,x,y,z分量间的4×4协方差矩阵，通过Cholesky分解实现Mahalanobis白化
+ * 替代独立分量假设，捕获四元数分量间的相关性 */
+int quaternion_batchnorm_forward_covariance(QuaternionBatchNorm* layer,
+                                             const float* input,
+                                             size_t batch_size,
+                                             float* output,
+                                             int is_training)
+{
+    if (!layer || !input || !output || batch_size < 4) {
+        return quaternion_batchnorm_forward(layer, input, batch_size, output, is_training);
+    }
+
+    size_t nf = layer->config.num_features;
+    float eps = layer->config.epsilon;
+    float momentum = layer->config.momentum;
+
+    /* 首先执行标准逐分量归一化 */
+    if (quaternion_batchnorm_forward(layer, input, batch_size, output, is_training) != 0)
+        return -1;
+
+    if (!is_training || !layer->saved_normalized) return 0;
+
+    size_t qsize = nf * 4;
+
+    /* 对每个四元数特征计算4×4协方差矩阵并白化 */
+    for (size_t f = 0; f < nf; f++) {
+        /* 收集该特征的batch中所有四元数分量 */
+        float cov[16] = {0}; /* 4×4协方差矩阵 */
+        size_t base = f * 4;
+
+        for (size_t b = 0; b < batch_size; b++) {
+            float w = layer->saved_normalized[b * qsize + base + 0] - layer->saved_mean[base + 0];
+            float x = layer->saved_normalized[b * qsize + base + 1] - layer->saved_mean[base + 1];
+            float y = layer->saved_normalized[b * qsize + base + 2] - layer->saved_mean[base + 2];
+            float z = layer->saved_normalized[b * qsize + base + 3] - layer->saved_mean[base + 3];
+            float vec[4] = {w, x, y, z};
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++)
+                    cov[i * 4 + j] += vec[i] * vec[j];
+        }
+
+        float inv_n = 1.0f / (float)batch_size;
+        for (int i = 0; i < 16; i++) cov[i] *= inv_n;
+
+        /* Cholesky分解 L: cov = L * L^T */
+        float L[16] = {0};
+        for (int i = 0; i < 4; i++) {
+            float diag = cov[i * 4 + i];
+            for (int k = 0; k < i; k++)
+                diag -= L[i * 4 + k] * L[i * 4 + k];
+            if (diag <= 0.0f) diag = eps;
+            L[i * 4 + i] = sqrtf(diag);
+
+            for (int j = i + 1; j < 4; j++) {
+                float sum = cov[j * 4 + i];
+                for (int k = 0; k < i; k++)
+                    sum -= L[j * 4 + k] * L[i * 4 + k];
+                L[j * 4 + i] = sum / (L[i * 4 + i] + eps);
+            }
+        }
+
+        /* L的逆矩阵 L_inv */
+        float L_inv[16] = {0};
+        for (int i = 0; i < 4; i++) {
+            L_inv[i * 4 + i] = 1.0f / (L[i * 4 + i] + eps);
+            for (int j = 0; j < i; j++) {
+                float sum = 0.0f;
+                for (int k = j; k < i; k++)
+                    sum += L[i * 4 + k] * L_inv[k * 4 + j];
+                L_inv[i * 4 + j] = -L_inv[i * 4 + i] * sum;
+            }
+        }
+
+        /* Mahalanobis白化: y = L_inv^T * x */
+        for (size_t b = 0; b < batch_size; b++) {
+            float vec[4] = {
+                layer->saved_normalized[b * qsize + base + 0] - layer->saved_mean[base + 0],
+                layer->saved_normalized[b * qsize + base + 1] - layer->saved_mean[base + 1],
+                layer->saved_normalized[b * qsize + base + 2] - layer->saved_mean[base + 2],
+                layer->saved_normalized[b * qsize + base + 3] - layer->saved_mean[base + 3]
+            };
+            float whitened[4] = {0};
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++)
+                    whitened[i] += L_inv[j * 4 + i] * vec[j];
+
+            output[b * qsize + base + 0] = whitened[0];
+            output[b * qsize + base + 1] = whitened[1];
+            output[b * qsize + base + 2] = whitened[2];
+            output[b * qsize + base + 3] = whitened[3];
+
+            if (layer->config.use_scale) {
+                output[b * qsize + base + 0] *= layer->gamma[base + 0];
+                output[b * qsize + base + 1] *= layer->gamma[base + 1];
+                output[b * qsize + base + 2] *= layer->gamma[base + 2];
+                output[b * qsize + base + 3] *= layer->gamma[base + 3];
+            }
+            if (layer->config.use_shift) {
+                output[b * qsize + base + 0] += layer->beta[base + 0];
+                output[b * qsize + base + 1] += layer->beta[base + 1];
+                output[b * qsize + base + 2] += layer->beta[base + 2];
+                output[b * qsize + base + 3] += layer->beta[base + 3];
+            }
+        }
+    }
+
+    return 0;
+}
+
 int quaternion_batchnorm_backward(QuaternionBatchNorm* layer,
                                    const float* output_grad,
                                    const float* input,

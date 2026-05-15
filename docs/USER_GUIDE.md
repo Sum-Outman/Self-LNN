@@ -1,7 +1,7 @@
 # SELF-LNN AGI系统用户手册
 # SELF-LNN AGI System User Guide
 
-> **版本 (Version):** 0.1.0 | **核心模型 (Core):** CfC液态神经网络 (Liquid Neural Network)
+> **版本 (Version):** 1.4.0 | **核心模型 (Core):** CfC液态神经网络 (Liquid Neural Network)
 > **构建系统 (Build):** CMake 3.10+ | **默认端口 (Default Port):** 8080
 
 ---
@@ -444,6 +444,6 @@ tasklist | findstr selflnn  # Windows
 
 ---
 
-> **更新 (Updated):** 2026-05-11
-> **版本 (Version):** SELF-LNN v0.3.0
+> **更新 (Updated):** 2026-05-14
+> **版本 (Version):** SELF-LNN v1.4.0
 > **相关文档 (Related Docs):** [架构图](./Architecture_Diagram.md) | [AGI机器人指南](./AGI_Robot_Guide.md) | [开发指南](./DEVELOPMENT_GUIDE_ZH.md)

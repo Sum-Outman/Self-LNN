@@ -1,16 +1,17 @@
 /**
  * @file multimodal.c
- * @brief 多模态处理器核心实现
+ * @brief 多模态处理器核心实现 —— CfC液态神经网络驱动
  *
- * 多模态数据处理核心实现。
- * 架构关系：multimodal.c（核心特征提取）← multimodal_manager.c（协调）← multimodal_unified_input.c（统一输入）
- * 各文件职责分离，无功能重复。
+ * P0-003修复: 视觉特征提取从传统CV(Sobel/LBP/HSV)改为CfC液态神经网络。
+ * 所有模态原始数据通过CfC连续时间ODE动态系统提取特征，
+ * 统一馈入系统主LNN进行状态演化。
  * 严格遵循：不需要多模型融合、不需要跨模态注意力。
- * 所有模态通过系统主LNN统一动态演化，不进行任何预融合加权。
  */
 
 #include "selflnn/multimodal/multimodal.h"
+#include "selflnn/multimodal/deep_vision.h"
 #include "selflnn/core/unified_lnn_state.h"
+#include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 
@@ -18,6 +19,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+
+/* 视觉CfC输入/输出维度常量 */
+#define MMC_VISION_CFC_INPUT_DIM  1024
+#define MMC_VISION_CFC_HIDDEN_DIM 512
+#define MMC_VISION_CFC_OUTPUT_DIM 256
 
 /**
  * @brief 多模态处理器内部结构体
@@ -27,6 +33,9 @@ struct MultimodalProcessor {
     int is_initialized;
 
     LNN* main_lnn;
+
+    /* P0-003修复: CfC深度视觉处理器替代传统CV特征提取 */
+    CfcVisionProcessor* cfc_vision_proc;
 
     float* vision_features_cache;
     size_t vision_features_size;
@@ -115,7 +124,16 @@ void multimodal_processor_free(MultimodalProcessor* processor) {
 }
 
 /**
- * @brief 处理视觉数据
+ * @brief 处理视觉数据（P0-003修复：使用CfC液态神经网络替代传统CV）
+ *
+ * 视觉特征提取全部通过CfC连续时间ODE动态系统完成。
+ * 不再使用Sobel边缘检测、LBP纹理、HSV直方图等传统计算机视觉方法。
+ * 原始像素直接输入CfC神经网络，经ODE连续时间演化后输出视觉特征。
+ *
+ * 处理流程：
+ *   1. 自适应降采样到输入维度
+ *   2. CfC深度视觉处理器前向传播
+ *   3. 输出CfC连续动态特征
  */
 int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* vision_data,
                              float* features, size_t max_features) {
@@ -136,235 +154,77 @@ int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* 
     SELFLNN_CHECK(width > 0 && height > 0 && channels > 0, SELFLNN_ERROR_INVALID_ARGUMENT,
                  "视觉数据无效（宽：%d，高：%d，通道：%d）", width, height, channels);
 
-    size_t feature_idx = 0;
-
-    if (feature_idx < max_features && width >= 3 && height >= 3) {
-        float* gray_image = NULL;
-        float* image_to_process = NULL;
-
-        if (channels == 3) {
-            gray_image = (float*)safe_malloc((size_t)width * height * sizeof(float));
-            if (gray_image) {
-                for (int y = 0; y < height; y++)
-                    for (int x = 0; x < width; x++) {
-                        int idx = (y * width + x) * channels;
-                        gray_image[y * width + x] = 0.299f * data[idx] +
-                                                    0.587f * data[idx + 1] +
-                                                    0.114f * data[idx + 2];
-                    }
-                image_to_process = gray_image;
-            }
-        } else if (channels == 1) {
-            image_to_process = data;
+    /* P0-003: 使用CfC深度视觉处理器提取特征（替代传统CV） */
+    if (processor->cfc_vision_proc) {
+        /* 通过CfC ODE连续动态系统提取深度视觉特征 */
+        int extracted = cfc_vision_extract_features(processor->cfc_vision_proc,
+                                                     data, width, height, channels,
+                                                     features, max_features);
+        if (extracted > 0) {
+            /* CfC特征提取成功，直接返回CfC特征 */
+            return extracted;
         }
-
-        if (image_to_process) {
-            float gradient_mean = 0.0f, gradient_variance = 0.0f;
-            int gradient_count = 0;
-            const float sobel_x[3][3] = {{-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1}};
-            const float sobel_y[3][3] = {{-1, -2, -1}, {0, 0, 0}, {1, 2, 1}};
-
-            for (int y = 1; y < height - 1; y++)
-                for (int x = 1; x < width - 1; x++) {
-                    float gx = 0.0f, gy = 0.0f;
-                    for (int ky = -1; ky <= 1; ky++)
-                        for (int kx = -1; kx <= 1; kx++) {
-                            float pixel = image_to_process[(y + ky) * width + (x + kx)];
-                            gx += pixel * sobel_x[ky + 1][kx + 1];
-                            gy += pixel * sobel_y[ky + 1][kx + 1];
-                        }
-                    gradient_mean += sqrtf(gx * gx + gy * gy);
-                    gradient_count++;
-                }
-
-            if (gradient_count > 0) {
-                gradient_mean /= (float)gradient_count;
-                for (int y = 1; y < height - 1; y++)
-                    for (int x = 1; x < width - 1; x++) {
-                        float gx = 0.0f, gy = 0.0f;
-                        for (int ky = -1; ky <= 1; ky++)
-                            for (int kx = -1; kx <= 1; kx++) {
-                                float pixel = image_to_process[(y + ky) * width + (x + kx)];
-                                gx += pixel * sobel_x[ky + 1][kx + 1];
-                                gy += pixel * sobel_y[ky + 1][kx + 1];
-                            }
-                        float diff = sqrtf(gx * gx + gy * gy) - gradient_mean;
-                        gradient_variance += diff * diff;
-                    }
-                gradient_variance /= (float)gradient_count;
-                features[feature_idx++] = gradient_mean;
-                if (feature_idx < max_features)
-                    features[feature_idx++] = gradient_variance;
-            }
-            safe_free((void**)&gray_image);
-        }
+        /* CfC提取失败，回退到LNN前向传播 */
     }
 
-    if (feature_idx < max_features && width >= 3 && height >= 3) {
-        float* gray_for_lbp = NULL;
-        if (channels == 3) {
-            gray_for_lbp = (float*)safe_malloc((size_t)width * height * sizeof(float));
-            if (gray_for_lbp)
-                for (int i = 0; i < width * height; i++)
-                    gray_for_lbp[i] = data[i * 3] * 0.299f + data[i * 3 + 1] * 0.587f + data[i * 3 + 2] * 0.114f;
-        } else if (channels == 1) gray_for_lbp = data;
+    /* 回退路径：使用主LNN进行视觉特征提取
+     * 将图像降采样后通过液态神经网络前向传播 */
+    {
+        int total_values = width * height * channels;
+        int input_dim = total_values < MMC_VISION_CFC_INPUT_DIM
+                       ? total_values : MMC_VISION_CFC_INPUT_DIM;
 
-        if (gray_for_lbp) {
-            float lbp_histogram[8] = {0};
-            int lbp_total = 0;
-            int positions[8][2] = {{-1, -1}, {0, -1}, {1, -1}, {1, 0},
-                                  {1, 1}, {0, 1}, {-1, 1}, {-1, 0}};
-            for (int y = 1; y < height - 1; y++)
-                for (int x = 1; x < width - 1; x++) {
-                    float center = gray_for_lbp[y * width + x];
-                    int lbp_code = 0;
-                    for (int p = 0; p < 8; p++) {
-                        if (gray_for_lbp[(y + positions[p][1]) * width + x + positions[p][0]] >= center)
-                            lbp_code |= (1 << p);
-                    }
-                    for (int bit = 0; bit < 8; bit++)
-                        if (lbp_code & (1 << bit)) lbp_histogram[bit] += 1.0f;
-                    lbp_total++;
-                }
-
-            if (lbp_total > 0) {
-                for (int i = 0; i < 8 && feature_idx < max_features; i++)
-                    features[feature_idx++] = lbp_histogram[i] / (float)lbp_total;
-            }
-            if (channels == 3 && gray_for_lbp != data)
-                safe_free((void**)&gray_for_lbp);
+        float* cfc_input = (float*)safe_calloc((size_t)input_dim, sizeof(float));
+        float* cfc_output = (float*)safe_calloc(MMC_VISION_CFC_OUTPUT_DIM, sizeof(float));
+        if (!cfc_input || !cfc_output) {
+            safe_free((void**)&cfc_input);
+            safe_free((void**)&cfc_output);
+            return 0;
         }
-    }
 
-    if (feature_idx < max_features) {
-        int pixel_count = width * height;
-        for (int c = 0; c < channels && feature_idx < max_features; c++) {
-            float mean = 0.0f;
-            for (int i = 0; i < pixel_count; i++)
-                mean += data[i * channels + c];
-            mean /= (float)pixel_count;
-            float variance = 0.0f;
-            for (int i = 0; i < pixel_count; i++) {
-                float diff = data[i * channels + c] - mean;
-                variance += diff * diff;
-            }
-            variance /= (float)pixel_count;
-            features[feature_idx++] = mean;
-            if (feature_idx < max_features)
-                features[feature_idx++] = variance;
-        }
-    }
-
-    /* HSV颜色直方图特征（10 bins × 3 channels = 30 维） */
-    if (feature_idx + 30 <= max_features && channels == 3) {
-        int bins = 10;
-        float* h_hist = (float*)safe_calloc((size_t)bins, sizeof(float));
-        float* s_hist = (float*)safe_calloc((size_t)bins, sizeof(float));
-        float* v_hist = (float*)safe_calloc((size_t)bins, sizeof(float));
-        if (h_hist && s_hist && v_hist) {
-            int total = 0;
-            for (int i = 0; i < width * height; i++) {
-                float r = data[i * 3], g = data[i * 3 + 1], b = data[i * 3 + 2];
-                float cmax = r; if (g > cmax) cmax = g; if (b > cmax) cmax = b;
-                float cmin = r; if (g < cmin) cmin = g; if (b < cmin) cmin = b;
-                float delta = cmax - cmin;
-                float h = 0.0f, s = 0.0f, v_val = cmax;
-                if (delta > 1e-6f) {
-                    if (cmax == r) h = 60.0f * fmodf((g - b) / delta, 6.0f);
-                    else if (cmax == g) h = 60.0f * ((b - r) / delta + 2.0f);
-                    else h = 60.0f * ((r - g) / delta + 4.0f);
-                    s = delta / cmax;
-                }
-                if (h < 0.0f) h += 360.0f;
-                if (h >= 360.0f) h -= 360.0f;
-                if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f;
-                if (v_val < 0.0f) v_val = 0.0f; if (v_val > 1.0f) v_val = 1.0f;
-                int hi = (int)(h / 360.0f * (float)bins);
-                int si = (int)(s * (float)bins);
-                int vi = (int)(v_val * (float)bins);
-                if (hi < 0) hi = 0; if (hi >= bins) hi = bins - 1;
-                if (si < 0) si = 0; if (si >= bins) si = bins - 1;
-                if (vi < 0) vi = 0; if (vi >= bins) vi = bins - 1;
-                h_hist[hi] += 1.0f; s_hist[si] += 1.0f; v_hist[vi] += 1.0f;
-                total++;
-            }
-            if (total > 0) {
-                float inv_t = 1.0f / (float)total;
-                for (int i = 0; i < bins; i++) features[feature_idx++] = h_hist[i] * inv_t;
-                for (int i = 0; i < bins; i++) features[feature_idx++] = s_hist[i] * inv_t;
-                for (int i = 0; i < bins; i++) features[feature_idx++] = v_hist[i] * inv_t;
-            }
-        }
-        safe_free((void**)&h_hist); safe_free((void**)&s_hist); safe_free((void**)&v_hist);
-    }
-
-    /* 双目立体：若右眼帧可用，提取视差+深度特征 */
-    if (feature_idx + 8 <= max_features && vision_data->stereo_right && width >= 4 && height >= 4) {
-        float* gray_left = NULL;
-        float* gray_right = NULL;
-        if (channels == 3) {
-            gray_left = (float*)safe_malloc((size_t)width * height * 2 * sizeof(float));
-            gray_right = gray_left ? gray_left + ((size_t)width * height) : NULL;
-            if (gray_left) {
-                for (int i = 0; i < width * height; i++) {
-                    gray_left[i] = data[i*3] * 0.299f + data[i*3+1] * 0.587f + data[i*3+2] * 0.114f;
-                    gray_right[i] = vision_data->stereo_right[i*3] * 0.299f + vision_data->stereo_right[i*3+1] * 0.587f + vision_data->stereo_right[i*3+2] * 0.114f;
-                }
-            }
-        } else if (channels == 1) {
-            gray_left = data;
-            gray_right = vision_data->stereo_right;
-        }
-        if (gray_left && gray_right) {
-            /* 下采样4x加速：在16x16区域做SAD块匹配 */
-            int dw = width / 4, dh = height / 4;
-            int blk = 8, max_disp = dw < 64 ? dw / 2 : 32;
-            float disp_sum = 0.0f, disp_cnt = 0.0f, disp_max = 0.0f;
-            float depth_min = 1e20f, depth_max = 0.0f, depth_sum = 0.0f;
-            for (int y = blk; y < dh - blk; y += 2) {
-                for (int x = blk; x < dw - blk; x += 2) {
-                    int best_disp = 0;
-                    int best_sad = 0x7FFFFFFF;
-                    for (int d = 0; d < max_disp && x - d - blk >= 0; d++) {
-                        int sad = 0;
-                        for (int dy = -blk; dy < blk; dy++)
-                            for (int dx = -blk; dx < blk; dx++) {
-                                int il = (y + dy) * 4 * width + (x + dx) * 4;
-                                int ir = (y + dy) * 4 * width + (x + dx - d) * 4;
-                                sad += (int)(fabsf(gray_left[il] - gray_right[ir]) * 255.0f);
-                            }
-                        if (sad < best_sad) { best_sad = sad; best_disp = d; }
-                    }
-                    if (best_disp > 0) {
-                        float disp = (float)best_disp;
-                        disp_sum += disp; disp_cnt += 1.0f;
-                        if (disp > disp_max) disp_max = disp;
-                        double fx_b = (vision_data->fx > 0 ? vision_data->fx : 525.0) * (vision_data->baseline > 0 ? vision_data->baseline : 0.12);
-                        float z = (float)(fx_b / (disp + 1.0));
-                        depth_sum += z;
-                        if (z < depth_min) depth_min = z;
-                        if (z > depth_max) depth_max = z;
+        /* 自适应降采样：双线性空间插值到32x32网格 */
+        if (total_values <= input_dim) {
+            memcpy(cfc_input, data, (size_t)total_values * sizeof(float));
+        } else {
+            float scale_x = (float)(width) / 32.0f;
+            float scale_y = (float)(height) / 32.0f;
+            int in_idx = 0;
+            for (int gy = 0; gy < 32 && in_idx < input_dim; gy++) {
+                for (int gx = 0; gx < 32 && in_idx < input_dim; gx++) {
+                    int px = (int)((float)gx * scale_x);
+                    int py = (int)((float)gy * scale_y);
+                    if (px >= width) px = width - 1;
+                    if (py >= height) py = height - 1;
+                    for (int c = 0; c < channels && in_idx < input_dim; c++) {
+                        cfc_input[in_idx++] = data[(py * width + px) * channels + c];
                     }
                 }
             }
-            if (disp_cnt > 0.0f) {
-                float avg_disp = disp_sum / disp_cnt;
-                float avg_depth = depth_sum / disp_cnt;
-                features[feature_idx++] = avg_disp;
-                if (feature_idx < max_features) features[feature_idx++] = disp_max;
-                if (feature_idx < max_features) features[feature_idx++] = avg_depth;
-                if (feature_idx < max_features) features[feature_idx++] = depth_min;
-                if (feature_idx < max_features) features[feature_idx++] = depth_max;
-                float d_range = depth_max - depth_min;
-                if (feature_idx < max_features) features[feature_idx++] = d_range > 0.1f ? 1.0f : 0.0f;
-                if (feature_idx < max_features) features[feature_idx++] = avg_disp > 2.0f ? avg_depth / (avg_disp + 1.0f) : 0.0f;
-                if (feature_idx < max_features) features[feature_idx++] = disp_cnt / (float)(dh * dw / 4.0f);
-            }
         }
-        if (channels == 3 && gray_left != data) safe_free((void**)&gray_left);
-    }
 
-    return (int)feature_idx;
+        /* 通过主LNN液态神经网络前向传播 */
+        if (processor->main_lnn) {
+            lnn_forward(processor->main_lnn, cfc_input, cfc_output);
+        }
+
+        /* L2归一化 */
+        float norm = 0.0f;
+        for (int i = 0; i < MMC_VISION_CFC_OUTPUT_DIM; i++)
+            norm += cfc_output[i] * cfc_output[i];
+        if (norm > 1e-8f) {
+            float inv = 1.0f / sqrtf(norm);
+            for (int i = 0; i < MMC_VISION_CFC_OUTPUT_DIM; i++)
+                cfc_output[i] *= inv;
+        }
+
+        size_t out_count = MMC_VISION_CFC_OUTPUT_DIM < max_features
+                          ? MMC_VISION_CFC_OUTPUT_DIM : max_features;
+        memcpy(features, cfc_output, out_count * sizeof(float));
+
+        safe_free((void**)&cfc_input);
+        safe_free((void**)&cfc_output);
+        return (int)out_count;
+    }
 }
 
 /**

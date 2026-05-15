@@ -22,6 +22,7 @@
 #include "selflnn/multimodal/multimodal_manager.h"
 #include "selflnn/multimodal/dialogue.h"
 #include "selflnn/training/training.h"
+#include "selflnn/training/training_pipeline.h"
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/robot/robot.h"
 #include "selflnn/robot/ros_robot_controller.h"
@@ -73,6 +74,7 @@ static int is_subsystem_healthy_int(const char* name, void* handle, int (*is_ini
 #define EVOLUTION_STEP_INTERVAL  600    /* 演化步每10分钟 */
 #define COGNITION_UPDATE_INTERVAL 5     /* 认知更新每5秒 */
 #define SAFETY_CHECK_INTERVAL     3     /* 安全检查每3秒 */
+#define TRAINING_STEP_INTERVAL    300   /* ZSFABC: 训练步每5分钟 */
 
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 4
@@ -90,6 +92,8 @@ static time_t g_last_evolution = 0;
 static time_t g_last_cognition = 0;
 static time_t g_last_safety = 0;
 static int g_bg_task_error_count = 0;
+static TrainingPipeline* g_training_pipeline = NULL;   /* ZSFABC: 训练管线 */
+static time_t g_last_training_step = 0;                 /* ZSFABC: 上次训练步时间 */
 
 /* AGI后台任务：在线学习循环 */
 static void agi_bg_online_learning(void) {
@@ -402,6 +406,43 @@ static int verify_lnn_initialized(void* h) {
     return (lnn_get_config((LNN*)h, &cfg) == 0);
 }
 
+/* ZSFABC: AGI后台训练步 —— 自动创建训练管线并执行训练步 */
+static void agi_bg_training_step(void) {
+    if (!g_training_pipeline) {
+        TrainingPipelineConfig tp_cfg;
+        memset(&tp_cfg, 0, sizeof(tp_cfg));
+        tp_cfg.pretrain_epochs = 50;
+        tp_cfg.deep_train_epochs = 100;
+        tp_cfg.multimodal_epochs = 80;
+        tp_cfg.fine_tune_epochs = 30;
+        tp_cfg.local_epochs = 20;
+        tp_cfg.pretrain_lr = 0.001f;
+        tp_cfg.deep_train_lr = 0.0005f;
+        tp_cfg.multimodal_lr = 0.001f;
+        tp_cfg.fine_tune_lr = 0.0001f;
+        tp_cfg.local_lr = 0.001f;
+        tp_cfg.batch_size = 32;
+        tp_cfg.use_gpu = 1;
+        tp_cfg.use_mixed_precision = 1;
+        tp_cfg.use_laplace_enhancement = 1;
+        tp_cfg.laplace_filter_cutoff = 10.0f;
+        tp_cfg.laplace_spectral_monitor = 1;
+        tp_cfg.laplace_stability_margin = 0.2f;
+        tp_cfg.use_early_stopping = 1;
+        tp_cfg.early_stopping_patience = 10;
+        tp_cfg.validation_split = 0.15f;
+        tp_cfg.optimizer_type = 4;   /* Adam */
+        tp_cfg.loss_function = 3;    /* Huber */
+        strncpy(tp_cfg.data_directory, "data/training", sizeof(tp_cfg.data_directory) - 1);
+        strncpy(tp_cfg.output_directory, "checkpoints", sizeof(tp_cfg.output_directory) - 1);
+        g_training_pipeline = training_pipeline_create(&tp_cfg);
+        if (!g_training_pipeline) return;
+        training_pipeline_load_data(g_training_pipeline, "data/training");
+    }
+    if (!g_training_pipeline) return;
+    training_pipeline_step(g_training_pipeline);
+}
+
 /* AGI后台任务主循环 */
 static void agi_background_loop_iteration(void) {
     time_t now = time(NULL);
@@ -462,6 +503,13 @@ static void agi_background_loop_iteration(void) {
                 had_error = 1;
             }
         }
+    }
+
+    /* ZSFABC: 训练步（受自我学习能力开关控制，每5分钟执行一步） */
+    if (capability_is_enabled(CAP_SELF_LEARNING) &&
+        now - g_last_training_step >= TRAINING_STEP_INTERVAL) {
+        agi_bg_training_step();
+        g_last_training_step = now;
     }
 
     /* 认知更新 */
@@ -561,7 +609,7 @@ static void print_banner(void)
     printf("  ║              SELF-LNN AGI 系统 v%d.%d.%d                  ║\n",
            VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
     printf("  ║       全液态神经网络通用人工智能系统                       ║\n");
-    printf("  ║       100%% 纯 C 实现 · 零外部依赖                        ║\n");
+    printf("  ║       100%% 纯 C 神经网络 · 无第三方ML/AI库                ║\n");
     printf("  ╚══════════════════════════════════════════════════════════╝\n");
     printf("\n");
 }
@@ -780,6 +828,8 @@ int main(int argc, char* argv[])
 
         if (selflnn_init(&sys_config) == 0) {
             printf("  SELF-LNN核心系统初始化成功\n");
+            /* ZSFABC: 初始化能力开关为默认启用状态 */
+            capability_reset_to_defaults();
             /* 创建在线学习器 */
             OnlineLearningConfig ol_config;
             memset(&ol_config, 0, sizeof(OnlineLearningConfig));
@@ -869,6 +919,11 @@ int main(int argc, char* argv[])
         backend_server_stop(g_server);
         backend_server_free(g_server);
         g_server = NULL;
+    }
+    /* ZSFABC: 释放训练管线 */
+    if (g_training_pipeline) {
+        training_pipeline_free(g_training_pipeline);
+        g_training_pipeline = NULL;
     }
 
     printf("SELF-LNN AGI 系统已停止。\n");

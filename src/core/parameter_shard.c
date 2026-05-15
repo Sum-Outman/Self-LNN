@@ -1028,3 +1028,78 @@ int shard_system_register_transfer_func(ParameterShardSystem* system, ShardTrans
     system->transfer_func = func;
     return SELFLNN_SUCCESS;
 }
+
+/* S-009修复: 基于TCP Socket的分片间梯度同步
+ * 替代纯进程内共享指针方式，支持跨进程/跨机器的参数分片同步
+ * 每个分片可在不同进程的网络节点上，通过TCP发送/接收梯度
+ *
+ * 协议格式: [shard_id:4][param_count:4][gradient_data:param_count*4]
+ */
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#endif
+
+int shard_system_sync_over_socket(ParameterShardSystem* system,
+    const char* peer_host, unsigned short peer_port, uint32_t shard_id)
+{
+    if (!system || !peer_host) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (!validate_shard_id(system, shard_id)) return SELFLNN_ERROR_INVALID_ARGUMENT;
+
+    size_t param_count = system->shards[shard_id].num_params;
+    if (param_count == 0) return SELFLNN_SUCCESS;
+
+    float* grads = system->shard_grad_ptrs[shard_id];
+    if (!grads) return SELFLNN_ERROR_INVALID_ARGUMENT;
+
+    /* 创建TCP客户端socket */
+    int sock = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return SELFLNN_ERROR_GENERIC;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(peer_port);
+    addr.sin_addr.s_addr = inet_addr(peer_host);
+
+    /* 连接并发送/接收梯度 */
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+        size_t payload_size = param_count * sizeof(float);
+        uint32_t header[2] = { shard_id, (uint32_t)param_count };
+
+        /* 发送本地梯度 */
+        if (send(sock, (const char*)header, sizeof(header), 0) == sizeof(header)) {
+            if (send(sock, (const char*)grads, (int)payload_size, 0) == (int)payload_size) {
+                /* 接收远程梯度并求平均 */
+                float* remote = (float*)malloc(param_count * sizeof(float));
+                if (remote) {
+                    size_t received = 0;
+                    char* rbuf = (char*)remote;
+                    while (received < payload_size) {
+                        int n = recv(sock, rbuf + received,
+                            (int)(payload_size - received), 0);
+                        if (n <= 0) break;
+                        received += (size_t)n;
+                    }
+                    if (received >= payload_size) {
+                        for (size_t i = 0; i < param_count; i++)
+                            grads[i] = (grads[i] + remote[i]) * 0.5f;
+                    }
+                    free(remote);
+                }
+            }
+        }
+    }
+
+#ifdef _WIN32
+    closesocket((SOCKET)sock);
+#else
+    close(sock);
+#endif
+    return SELFLNN_SUCCESS;
+}

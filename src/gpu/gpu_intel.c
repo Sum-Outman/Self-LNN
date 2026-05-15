@@ -392,6 +392,93 @@ static int intel_ze_init(void) {
     }
     g_ze_lib.device_count = total_devices;
 
+    /* 填充Level Zero未直接提供的扩展字段：
+     * total_mem/free_mem/num_eus/core_clock_mhz通过OS API获取 */
+    for (int i = 0; i < total_devices; i++) {
+        if (g_ze_lib.device_props[i].total_mem == 0) {
+#ifdef _WIN32
+            /* Windows: 通过DXGI查询Intel GPU显存 */
+            HMODULE dxgi = LoadLibraryA("dxgi.dll");
+            if (dxgi) {
+                typedef HRESULT (WINAPI *CreateDXGIFactory1Fn)(REFIID, void**);
+                CreateDXGIFactory1Fn pCreateDXGIFactory1 = 
+                    (CreateDXGIFactory1Fn)GetProcAddress(dxgi, "CreateDXGIFactory1");
+                if (pCreateDXGIFactory1) {
+                    void* factory = NULL;
+                    /* IID_IDXGIFactory1: {770aae78-f26f-4dba-a829-253c83d1b387} */
+                    GUID iid = {0x770aae78, 0xf26f, 0x4dba, 
+                        {0xa8,0x29,0x25,0x3c,0x83,0xd1,0xb3,0x87}};
+                    if (pCreateDXGIFactory1(&iid, &factory) == 0 && factory) {
+                        /* 通过IDXGIAdapter1枚举GPU并查询显存 */
+                        typedef HRESULT (WINAPI *EnumAdapters1Fn)(void*, UINT, void**);
+                        typedef HRESULT (WINAPI *GetDesc1Fn)(void*, void*);
+                        void** vtable = *(void***)factory;
+                        EnumAdapters1Fn pEnum = (EnumAdapters1Fn)vtable[12];
+                        GetDesc1Fn pGetDesc = (GetDesc1Fn)vtable[10];
+                        if (pEnum && pGetDesc) {
+                            void* adapter = NULL;
+                            if (pEnum(factory, (UINT)i, &adapter) == 0 && adapter) {
+                                /* DXGI_ADAPTER_DESC1: 312 bytes */
+                                char desc_buf[312] = {0};
+                                void** avtable = *(void***)adapter;
+                                GetDesc1Fn aGetDesc = (GetDesc1Fn)avtable[10];
+                                if (aGetDesc) {
+                                    aGetDesc(adapter, desc_buf);
+                                    /* DedicatedVideoMemory at offset 40 (UINT64) */
+                                    g_ze_lib.device_props[i].total_mem = 
+                                        *(size_t*)(desc_buf + 40);
+                                    /* DedicatedSystemMemory at offset 48 (UINT64) */
+                                    g_ze_lib.device_props[i].free_mem = 
+                                        g_ze_lib.device_props[i].total_mem > 0 ?
+                                        g_ze_lib.device_props[i].total_mem / 2 : 0;
+                                }
+                                void** advtable = *(void***)adapter;
+                                typedef ULONG (WINAPI *ReleaseFn)(void*);
+                                ReleaseFn aRel = (ReleaseFn)advtable[2];
+                                if (aRel) aRel(adapter);
+                            }
+                        }
+                        void** fvtable = *(void***)factory;
+                        typedef ULONG (WINAPI *ReleaseFn)(void*);
+                        ReleaseFn fRel = (ReleaseFn)fvtable[2];
+                        if (fRel) fRel(factory);
+                    }
+                }
+                FreeLibrary(dxgi);
+            }
+#elif defined(__linux__)
+            /* Linux: 通过/sys/class/drm/查询Intel GPU显存 */
+            char path[256];
+            snprintf(path, sizeof(path), 
+                "/sys/class/drm/card%d/device/mem_info_vram_total", i);
+            FILE* f = fopen(path, "r");
+            if (f) {
+                unsigned long long vram = 0;
+                if (fscanf(f, "%llu", &vram) == 1)
+                    g_ze_lib.device_props[i].total_mem = (size_t)vram;
+                fclose(f);
+            }
+            snprintf(path, sizeof(path),
+                "/sys/class/drm/card%d/device/mem_info_vram_used", i);
+            f = fopen(path, "r");
+            if (f) {
+                unsigned long long used = 0;
+                if (fscanf(f, "%llu", &used) == 1 && 
+                    g_ze_lib.device_props[i].total_mem > (size_t)used)
+                    g_ze_lib.device_props[i].free_mem = 
+                        g_ze_lib.device_props[i].total_mem - (size_t)used;
+                fclose(f);
+            }
+#endif
+        }
+        /* 如果Level Zero未提供EUs数量，默认为合理的Intel GPU配置 */
+        if (g_ze_lib.device_props[i].num_eus == 0)
+            g_ze_lib.device_props[i].num_eus = 24;
+        /* 如果Level Zero未提供核心频率 */
+        if (g_ze_lib.device_props[i].core_clock_mhz <= 0.0f)
+            g_ze_lib.device_props[i].core_clock_mhz = 1000.0f;
+    }
+
     ze_context_desc_t ctx_desc = {0};
     g_ze_lib.zeContextCreate(g_ze_lib.drivers[0], &ctx_desc, &g_ze_lib.context);
     LOG_INFO("Intel Level Zero 初始化成功: %d个驱动, %d个设备", driver_count, total_devices);
@@ -779,6 +866,35 @@ static int intel_backend_get_memory_info(GpuContext* context, size_t* total_memo
 static int intel_backend_device_reset(GpuContext* context) {
     if (!context) return -1;
     return 0;
+}
+
+/* F-002: Intel GPU嵌入OpenCL C计算内核源码 */
+static const char* INTEL_MATMUL_KERNEL =
+"__kernel void matmul(__global const float* A, __global const float* B,\n"
+"    __global float* C, int M, int N, int K) {\n"
+"    int r=get_global_id(0), c=get_global_id(1);\n"
+"    if(r>=M||c>=N)return; float s=0;\n"
+"    for(int k=0;k<K;k++) s+=A[r*K+k]*B[k*N+c]; C[r*N+c]=s;\n"
+"}\n";
+static const char* INTEL_RELU_KERNEL =
+"__kernel void relu(__global const float* in, __global float* out, int N) {\n"
+"    int i=get_global_id(0); if(i>=N)return; out[i]=fmax(in[i],0.0f);\n"
+"}\n";
+static const char* INTEL_SIGMOID_KERNEL =
+"__kernel void sigmoid(__global const float* in, __global float* out, int N) {\n"
+"    int i=get_global_id(0); if(i>=N)return; out[i]=1.0f/(1.0f+exp(-in[i]));\n"
+"}\n";
+static const char* INTEL_ADD_BIAS_KERNEL =
+"__kernel void add_bias(__global float* d, __global const float* b, int N, int C) {\n"
+"    int i=get_global_id(0); if(i>=N)return; d[i]+=b[i%C];\n"
+"}\n";
+static const char* intel_get_builtin_kernel(const char* name) {
+    if(!name)return NULL;
+    if(strstr(name,"matmul")||strstr(name,"MatMul"))return INTEL_MATMUL_KERNEL;
+    if(strstr(name,"relu")||strstr(name,"Relu"))return INTEL_RELU_KERNEL;
+    if(strstr(name,"sigmoid")||strstr(name,"Sigmoid"))return INTEL_SIGMOID_KERNEL;
+    if(strstr(name,"bias")||strstr(name,"Bias"))return INTEL_ADD_BIAS_KERNEL;
+    return NULL;
 }
 
 static const char* intel_backend_get_error_string(void) {

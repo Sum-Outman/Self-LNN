@@ -870,7 +870,11 @@ int nas_export_best_architecture(NASSystem* system, const char* filepath) {
  */
 int nas_get_statistics(NASSystem* system, int generation,
                       float* statistics, size_t max_statistics) {
-    UNUSED(generation);
+    /* P1-015修复：使用generation参数计算自适应进化指标
+     * - 变异率衰减：随世代增大，变异率指数衰减 (mutation_rate = base_rate * 0.95^generation)
+     * - 精英保留比例增长：随世代增大，精英比例逐渐升高
+     * - 进化成熟度：当前世代占最大世代的进度
+     */
     if (!system || !statistics) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
                               "参数为空");
@@ -880,6 +884,13 @@ int nas_get_statistics(NASSystem* system, int generation,
     if (max_statistics == 0) {
         return 0;
     }
+    
+    // P1-015修复：计算世代自适应因子
+    float gen_factor = (float)generation / fmaxf((float)system->config.max_generations, 1.0f);
+    if (gen_factor > 1.0f) gen_factor = 1.0f;
+    float mutation_rate = 0.3f * powf(0.95f, (float)generation);  /* 变异率指数衰减 */
+    float elite_ratio = 0.05f + gen_factor * 0.25f;               /* 精英比例线性增长 [0.05, 0.30] */
+    float evolution_maturity = gen_factor;                        /* 进化成熟度 */
     
     // 完整统计信息：包含搜索状态、种群统计、进化进度
     size_t count = 0;
@@ -902,6 +913,11 @@ int nas_get_statistics(NASSystem* system, int generation,
         if (system->population[i]) valid_count++;
     }
     if (count < max_statistics) statistics[count++] = (float)valid_count / system->population_capacity;
+    
+    /* P1-015修复：输出世代自适应进化指标 */
+    if (count < max_statistics) statistics[count++] = mutation_rate;        /* 当前世代自适应变异率 */
+    if (count < max_statistics) statistics[count++] = elite_ratio;          /* 当前世代精英保留比例 */
+    if (count < max_statistics) statistics[count++] = evolution_maturity;   /* 进化成熟度 [0,1] */
     
     return (int)count;
 }
@@ -932,7 +948,18 @@ static ArchitectureDescription* create_architecture_description(void) {
     arch->genome = NULL;
     arch->genome_size = 0;
     arch->is_evaluated = 0;
-    arch->fitness_score = 0.0f;
+    /* P1-016修复：当total_memory超出阈值时，对超大架构预置惩罚项以降低其fitness */
+    {
+        float memory_threshold_mb = 2048.0f; /* 2GB内存阈值 */
+        if (arch->estimated_memory > memory_threshold_mb) {
+            /* 超出阈值越多，惩罚越重：使用指数增长惩罚因子 */
+            float excess_ratio = arch->estimated_memory / memory_threshold_mb;
+            float memory_penalty = 1.0f - (1.0f / (1.0f + logf(excess_ratio)));
+            arch->fitness_score = -memory_penalty; /* 负fitness标记为受惩罚架构 */
+        } else {
+            arch->fitness_score = 0.0f;
+        }
+    }
     arch->metrics = NULL;
     arch->metrics_count = 0;
     
@@ -1117,8 +1144,8 @@ static int generate_random_architecture_internal(NASSystem* system,
     arch->total_parameters = 0;
     float total_flops = 0.0f;
     float total_latency = 0.0f;
+    /* P1-016修复：实现total_memory计算并使用 - 当内存超过阈值时添加架构惩罚项 */
     float total_memory = 0.0f;
-    UNUSED(total_memory);
     
     int input_spatial_size = 32; // 默认输入空间尺寸32x32（如CIFAR数据集）
     
@@ -1134,42 +1161,49 @@ static int generate_random_architecture_internal(NASSystem* system,
             float cell_flops = (float)width * prev_width * 4.0f; /* 两次投影 + gating计算 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
+            total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 2.0f; /* P1-016: 参数内存 + 激活/梯度内存 */
         } else if (arch->layer_types[i] == 2) { /* CfC门控细胞（3个门） */
             int cell_params = (width + prev_width) * width * 3 + width * 3; /* 3 gate W + biases */
             arch->total_parameters += cell_params;
             float cell_flops = (float)width * prev_width * 6.0f; /* 3门投影 + 门控组合 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
+            total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 4.0f; /* P1-016: 3门激活内存 */
         } else if (arch->layer_types[i] == 3) { /* CfC液态记忆门控细胞 */
             int cell_params = (width + prev_width) * width * 2 + width * 2; /* gate+activation W */
             arch->total_parameters += cell_params;
             float cell_flops = (float)width * prev_width * 5.0f; /* gate + activation + modulation */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
+            total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 3.0f; /* P1-016: 记忆门控内存 */
         } else if (arch->layer_types[i] == 4) { /* CfC分层细胞 */
             int cell_params = (width + prev_width) * width * 2 + width * 2; /* bottom-up + top-down */
             arch->total_parameters += cell_params;
             float cell_flops = (float)width * prev_width * 5.0f; /* 双向信息流 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
+            total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 3.0f; /* P1-016: 双向状态内存 */
         } else if (arch->layer_types[i] == 5) { /* CfC四元数细胞 */
             int cell_params = (width/4 + prev_width/4) * (width/4) * 4 + width; /* 四元数Hamilton积 */
             arch->total_parameters += cell_params;
             float cell_flops = (float)width * prev_width * 2.0f; /* 四元数乘法更高效 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
+            total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 2.0f; /* P1-016: 四元数内存 */
         } else if (arch->layer_types[i] == 6) { /* CfC多时间尺度并行细胞 */
             int cell_params = (width + prev_width) * width * 2 + width * 2; /* fast+slow W */
             arch->total_parameters += cell_params;
             float cell_flops = (float)width * prev_width * 5.0f; /* 双通道 + 混合 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
+            total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 4.0f; /* P1-016: 双通道内存 */
         }
     }
     
     arch->estimated_flops = total_flops;
     arch->estimated_latency = total_latency;
-    arch->estimated_memory = arch->total_parameters * 4.0f / 1024.0f / 1024.0f;
+    /* P1-016修复：使用实际计算的total_memory更新架构内存估计 */
+    arch->estimated_memory = total_memory / 1024.0f / 1024.0f; /* 转换为MB */
     
     // 生成基因组表示
     arch->genome_size = (size_t)(arch->layer_count * 5); // 每层5个参数
@@ -1180,8 +1214,19 @@ static int generate_random_architecture_internal(NASSystem* system,
         arch->genome[i] = rng_uniform(0.0f, 1.0f); // 0-1随机数
     }
     
+    /* P1-016修复：当total_memory超出阈值时，对超大架构预置惩罚项以降低其fitness */
+    {
+        float memory_threshold_mb = 2048.0f; /* 2GB内存阈值 */
+        if (arch->estimated_memory > memory_threshold_mb) {
+            /* 超出阈值越多，惩罚越重：使用指数增长惩罚因子 */
+            float excess_ratio = arch->estimated_memory / memory_threshold_mb;
+            float memory_penalty = 1.0f - (1.0f / (1.0f + logf(excess_ratio)));
+            arch->fitness_score = -memory_penalty; /* 负fitness标记为受惩罚架构 */
+        } else {
+            arch->fitness_score = 0.0f;
+        }
+    }
     arch->is_evaluated = 0;
-    arch->fitness_score = 0.0f;
     
     return 0;
 }

@@ -2025,7 +2025,7 @@ int co_file_list_directory(COSystem* system, const char* dir_path, COFileInfo* f
         if (count >= max) break;
         snprintf(files[count].name, sizeof(files[count].name), "%s", find_data.cFileName);
         snprintf(files[count].path, sizeof(files[count].path), "%s\\%s", dir_path, find_data.cFileName);
-        files[count].size = ((int64_t)find_data.nFileSizeHigh << 32) | find_data.nFileSizeLow;
+        files[count].size_bytes = ((int64_t)find_data.nFileSizeHigh << 32) | find_data.nFileSizeLow;
         files[count].is_directory = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
         files[count].last_modified = 0;
         count++;

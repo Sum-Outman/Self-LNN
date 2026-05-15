@@ -310,6 +310,18 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
 int reasoning_sync_knowledge(ReasoningEngine* engine);
 
 /**
+ * @brief P0-009: 检查推理引擎是否已从真实知识库同步数据
+ * 
+ * 引擎创建时内部知识缓冲区为零值占位，需通过
+ * reasoning_engine_set_knowledge_base 关联真实知识库后自动同步。
+ * 此函数检查引擎是否已加载真实知识数据。
+ *
+ * @param engine 推理引擎句柄
+ * @return int 1=知识就绪可推理, 0=未同步/空白状态
+ */
+int reasoning_engine_is_knowledge_ready(const ReasoningEngine* engine);
+
+/**
  * @brief 关联液态神经网络实例到推理引擎
  *
  * 将LNN实例连接到推理引擎，使推理引擎可以利用液态神经网络的

@@ -768,8 +768,7 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             }
         }
     } else if (use_omp) {
-        /* 多线程并行：对整个状态向量分段并行求解RHS */
-        /* 注意：rhs()作用于整个向量，不能每元素独立调用，使用分块策略 */
+        /* ZSFAB P1-002修复: 消除双重RHS调用 - 并行路径与串行回退互斥 */
 #ifdef _OPENMP
         #pragma omp parallel
         {
@@ -778,12 +777,10 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             int ret = rhs(t, local_y, local_dydt, ctx);
             if (ret != 0) { (void)ret; }
         }
+#else
+        int ret = rhs(t, y, dydt, ctx);
+        if (ret != 0) { (void)ret; }
 #endif
-        /* 单线程模式：序列调用一次rhs */
-        if (1) {
-            int ret = rhs(t, y, dydt, ctx);
-            if (ret != 0) { (void)ret; }
-        }
     } else {
         return rhs(t, y, dydt, ctx);
     }

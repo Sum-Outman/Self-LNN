@@ -77,8 +77,9 @@ struct ReasoningEngine {
     struct ReasoningStats stats;  /**< 推理统计信息 */
     
     /* 知识库集成 */
-    struct KnowledgeBase* external_kb; /**< 外部知识库引用 */
-    int kb_auto_sync;                 /**< 是否自动同步知识库 */
+    struct KnowledgeBase* external_kb;     /**< 外部知识库引用 */
+    int kb_auto_sync;                     /**< 是否自动同步知识库 */
+    int knowledge_ready;                  /**< P0-009: 知识是否已从真实数据源加载（1=已同步, 0=空白） */
     
     /* 液态神经网络集成 */
     LNN* lnn_instance;                /**< 关联的LNN实例 */
@@ -182,6 +183,7 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     /* 初始化知识库集成 */
     engine->external_kb = NULL;
     engine->kb_auto_sync = 1;
+    engine->knowledge_ready = 0;  /* P0-009: 空白状态，需从真实知识库同步后才就绪 */
     
     /* 初始化LNN集成 */
     engine->lnn_instance = NULL;
@@ -4532,6 +4534,21 @@ int reasoning_engine_set_knowledge_base(ReasoningEngine* engine, struct Knowledg
         return -1;
     }
     engine->external_kb = kb;
+    
+    /* P0-009修复: 关联知识库后立即自动同步真实数据
+     * 将外部知识库中的规则和事实同步到内部缓冲区，
+     * 告别零值占位数组，引擎真正获得推理能力 */
+    if (kb) {
+        int synced = reasoning_sync_knowledge(engine);
+        if (synced > 0) {
+            engine->knowledge_ready = 1;
+            log_info("[推理引擎] 从知识库同步 %d 条知识条目，引擎已就绪", synced);
+        } else if (synced == 0) {
+            log_info("[推理引擎] 知识库为空（0条），引擎将在后续知识注入时自动同步");
+        }
+    } else {
+        engine->knowledge_ready = 0;
+    }
     return 0;
 }
 
@@ -4543,6 +4560,14 @@ struct KnowledgeBase* reasoning_engine_get_knowledge_base(const ReasoningEngine*
         return NULL;
     }
     return engine->external_kb;
+}
+
+/**
+ * @brief P0-009: 检查推理引擎是否已从真实知识库同步数据
+ */
+int reasoning_engine_is_knowledge_ready(const ReasoningEngine* engine) {
+    if (!engine) return 0;
+    return engine->knowledge_ready;
 }
 
 /**
@@ -4575,12 +4600,15 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
         return -1;
     }
 
-    KnowledgeBase* kb = engine->external_kb;
-    size_t kb_size;
-    size_t kb_memory;
-    if (knowledge_base_get_stats(kb, &kb_size, &kb_memory) != 0) {
-        return -1;
-    }
+    /* P0-009修复: 知识同步成功后标记引擎已就绪 */
+    int result = 0;
+    {
+        KnowledgeBase* kb = engine->external_kb;
+        size_t kb_size;
+        size_t kb_memory;
+        if (knowledge_base_get_stats(kb, &kb_size, &kb_memory) != 0) {
+            return -1;
+        }
 
     if (kb_size == 0) {
         return 0;
@@ -4651,6 +4679,9 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
 
     /* 规则索引标记为需要重建 */
     engine->rule_index_built = 0;
+
+    /* P0-009: 同步完成后标记知识就绪 */
+    if (synced > 0) engine->knowledge_ready = 1;
 
     return (int)synced;
 }
@@ -4795,7 +4826,7 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
 }
 
 /* ========== P2-3: 贝叶斯推理网络实现 ========== */
-
+/* ZSFAB P0-001修复: 解禁完整贝叶斯网络实现，移除stub占位符，全平台启用 */
 BayesianNetwork* bayesian_network_create(size_t max_nodes) {
     if (max_nodes == 0 || max_nodes > 10000) return NULL;
 
@@ -4837,33 +4868,31 @@ BayesianNetwork* bayesian_network_create(size_t max_nodes) {
     return network;
 }
 
-void bayesian_network_free(BayesianNetwork* network) {
-    if (!network) return;
+void bayesian_network_free(BayesianNetwork* bn) {
+    if (!bn) return;
 
-    for (size_t i = 0; i < network->num_cpds; i++) {
-        safe_free((void**)&network->cpds[i].probabilities);
-        safe_free((void**)&network->cpds[i].parent_ids);
-        safe_free((void**)&network->cpds[i].parent_states);
+    for (size_t i = 0; i < bn->num_cpds; i++) {
+        free(bn->cpds[i].probabilities);
+        free(bn->cpds[i].parent_ids);
+        free(bn->cpds[i].parent_states);
     }
 
-    if (network->adjacency_matrix) {
-        for (size_t i = 0; i < network->node_capacity; i++) {
-            safe_free((void**)&network->adjacency_matrix[i]);
-        }
-        safe_free((void**)&network->adjacency_matrix);
+    if (bn->adjacency_matrix) {
+        for (size_t i = 0; i < bn->node_capacity; i++) free(bn->adjacency_matrix[i]);
+        free(bn->adjacency_matrix);
     }
 
-    safe_free((void**)&network->cpds);
-    safe_free((void**)&network->edges);
-    safe_free((void**)&network->nodes);
+    free(bn->cpds);
+    free(bn->edges);
+    free(bn->nodes);
 
-    network->num_nodes = 0;
-    network->num_edges = 0;
-    network->num_cpds = 0;
-    safe_free((void**)&network);
+    bn->num_nodes = 0;
+    bn->num_edges = 0;
+    bn->num_cpds = 0;
 }
 
-int bayesian_network_add_node(BayesianNetwork* network, const char* name, int num_states) {
+int bayesian_network_add_node(void* net_ptr, const char* name, int num_states) {
+    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !name) return -1;
     if (num_states < 2) return -1;
     if (network->num_nodes >= network->node_capacity) return -1;
@@ -4880,7 +4909,8 @@ int bayesian_network_add_node(BayesianNetwork* network, const char* name, int nu
     return id;
 }
 
-int bayesian_network_add_edge(BayesianNetwork* network, int parent_id, int child_id) {
+int bayesian_network_add_edge(void* net_ptr, int parent_id, int child_id) {
+    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network) return -1;
     if (parent_id < 0 || parent_id >= (int)network->num_nodes) return -1;
     if (child_id < 0 || child_id >= (int)network->num_nodes) return -1;
@@ -4905,9 +4935,10 @@ int bayesian_network_add_edge(BayesianNetwork* network, int parent_id, int child
     return 0;
 }
 
-int bayesian_network_set_cpd(BayesianNetwork* network, int var_id,
+int bayesian_network_set_cpd(void* net_ptr, int var_id,
                               const int* parent_ids, int num_parents,
                               const float* probabilities, size_t prob_size) {
+    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !probabilities) return -1;
     if (var_id < 0 || var_id >= (int)network->num_nodes) return -1;
     if (num_parents < 0) return -1;
@@ -4994,7 +5025,8 @@ static int bayesian_has_cycle_dfs(BayesianNetwork* network, int node_id,
     return 0;
 }
 
-int bayesian_network_is_valid(BayesianNetwork* network) {
+int bayesian_network_is_valid(void* net_ptr) {
+    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || network->num_nodes == 0) return 0;
 
     int* visited = (int*)safe_calloc(network->num_nodes, sizeof(int));
@@ -5133,7 +5165,7 @@ static int bayesian_sample_from_distribution(const float* probs, int num_states)
     return num_states - 1;
 }
 
-int bayesian_network_variable_elimination(BayesianNetwork* network,
+int bayesian_network_variable_elimination(void* net_ptr,
                                           const int* query_vars, int num_queries,
                                           const int* evidence_vars, const int* evidence_vals,
                                           int num_evidence,
@@ -5240,7 +5272,7 @@ int bayesian_network_variable_elimination(BayesianNetwork* network,
     return 0;
 }
 
-int bayesian_network_gibbs_sampling(BayesianNetwork* network,
+int bayesian_network_gibbs_sampling(void* net_ptr,
                                     const int* query_vars, int num_queries,
                                     const int* evidence_vars, const int* evidence_vals,
                                     int num_evidence,
@@ -5347,7 +5379,7 @@ int bayesian_network_gibbs_sampling(BayesianNetwork* network,
     return 0;
 }
 
-int bayesian_network_belief_propagation(BayesianNetwork* network,
+int bayesian_network_belief_propagation(void* net_ptr,
                                         const int* evidence_vars, const int* evidence_vals,
                                         int num_evidence,
                                         int max_iterations, float convergence_threshold,
@@ -5486,3 +5518,5 @@ BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* en
     if (!engine) return NULL;
     return engine->bayesian_network;
 }
+
+/* ZSFAB P1-001修复: 已删除重复stub，完整实现在上方 */

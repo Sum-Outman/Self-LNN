@@ -32,7 +32,10 @@ typedef enum {
     QUAT_OPTIMIZER_SGD = 0,        /**< 四元数SGD */
     QUAT_OPTIMIZER_MOMENTUM = 1,   /**< 四元数动量SGD */
     QUAT_OPTIMIZER_ADAM = 2,       /**< 四元数Adam */
-    QUAT_OPTIMIZER_ADAMW = 3       /**< 四元数AdamW（解耦权重衰减） */
+    QUAT_OPTIMIZER_ADAMW = 3,      /**< 四元数AdamW（解耦权重衰减） */
+    QUAT_OPTIMIZER_RMSPROP = 4,    /**< M-003: 四元数RMSProp */
+    QUAT_OPTIMIZER_ADAGRAD = 5,    /**< M-003: 四元数AdaGrad */
+    QUAT_OPTIMIZER_LAMB = 6        /**< M-003: 四元数LAMB（层自适应） */
 } QuatOptimizerType;
 
 /**

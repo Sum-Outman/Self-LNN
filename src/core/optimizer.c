@@ -141,10 +141,14 @@ static int ensure_buffers(Optimizer* optimizer, size_t num_params)
 int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradients,
                    size_t num_params, size_t step)
 {
-    (void)step;
     if (!optimizer || !parameters || !gradients || num_params == 0) return -1;
 
     if (ensure_buffers(optimizer, num_params) != 0) return -1;
+    /* P2-004修复：(void)step仅限于非RANGER优化器分支，
+       RANGER使用step进行预热调度，需保留该参数 */ 
+    if (optimizer->config.type != OPTIMIZER_RANGER) {
+        (void)step;
+    }
 
     float lr = optimizer->config.learning_rate;
     float eps = optimizer->config.epsilon > 0.0f ? optimizer->config.epsilon : 1e-8f;

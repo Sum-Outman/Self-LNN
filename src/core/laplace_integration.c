@@ -18,6 +18,17 @@
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
+
+/* 跨平台原子比较交换宏：MSVC用InterlockedCompareExchange，GCC/Clang用__sync_bool_compare_and_swap */
+#ifdef _MSC_VER
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#define atomic_cas(ptr, old, new) (InterlockedCompareExchange((LONG volatile*)(ptr), (LONG)(new), (LONG)(old)) == (LONG)(old))
+#else
+#define atomic_cas(ptr, old, new) __sync_bool_compare_and_swap((ptr), (old), (new))
+#endif
 #include <math.h>
 
 /**
@@ -156,10 +167,29 @@ int cfc_cell_analyze_stability(const void* cell, CfcStabilityAnalysis* analysis)
  * @param target_gain_margin 目标增益裕度（dB）
  * @return int 成功返回0，失败返回-1
  */
+/* P1-009修复：使用CAS原子操作保护并发参数修改，防止多线程竞态条件 */
+static volatile int g_cfc_opt_lock = 0;
+
 int cfc_cell_optimize_stability(void* cell, float target_phase_margin, float target_gain_margin) {
     if (!cell) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "CfC单元稳定性优化：参数无效");
+        return -1;
+    }
+    
+    /* P1-009修复：获取优化锁，防止并发修改单元参数导致分析结果混乱 */
+    int lock_acquired = 0;
+    int spin_count = 0;
+    while (spin_count < 1000) {
+        if (atomic_cas(&g_cfc_opt_lock, 0, 1)) {
+            lock_acquired = 1;
+            break;
+        }
+        spin_count++;
+    }
+    if (!lock_acquired) {
+        selflnn_set_last_error(SELFLNN_ERROR_MUTEX_LOCK, __func__, __FILE__, __LINE__,
+                              "CfC单元稳定性优化：无法获取并发锁，可能正被其他线程分析");
         return -1;
     }
     
@@ -169,6 +199,7 @@ int cfc_cell_optimize_stability(void* cell, float target_phase_margin, float tar
     // 分析当前稳定性
     CfcStabilityAnalysis analysis;
     if (cfc_cell_analyze_stability(cell, &analysis) != 0) {
+        atomic_cas(&g_cfc_opt_lock, 1, 0); /* P1-009修复：释放锁 */
         return -1;
     }
     
@@ -176,6 +207,7 @@ int cfc_cell_optimize_stability(void* cell, float target_phase_margin, float tar
     if (analysis.is_stable && 
         analysis.phase_margin >= target_phase_margin && 
         analysis.gain_margin >= target_gain_margin) {
+        atomic_cas(&g_cfc_opt_lock, 1, 0); /* P1-009修复：释放锁 */
         return 0;
     }
     
@@ -198,7 +230,7 @@ int cfc_cell_optimize_stability(void* cell, float target_phase_margin, float tar
         candidate_time_constant = fmaxf(0.01f, fminf(10.0f, candidate_time_constant));
         candidate_feedback = fmaxf(-2.0f, fminf(2.0f, candidate_feedback));
         
-        // 临时修改单元参数进行分析
+        /* P1-009修复：在CAS锁保护下安全地临时修改单元参数进行分析 */
         float saved_time_constant = cfc_cell->config.time_constant;
         float saved_feedback = cfc_cell->config.feedback_strength;
         
@@ -239,10 +271,12 @@ int cfc_cell_optimize_stability(void* cell, float target_phase_margin, float tar
     if (best_score > 0.0f) {
         cfc_cell->config.time_constant = best_time_constant;
         cfc_cell->config.feedback_strength = best_feedback;
+        atomic_cas(&g_cfc_opt_lock, 1, 0); /* P1-009修复：释放锁 */
         return 0;
     }
     
     // 没有找到改进的参数组合
+    atomic_cas(&g_cfc_opt_lock, 1, 0); /* P1-009修复：释放锁 */
     return -1;
 }
 

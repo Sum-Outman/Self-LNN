@@ -344,6 +344,9 @@ typedef struct {
     InternalTrainingState training;
     InternalPathPlanner planner;
     InternalGaitGenerator gait;
+
+    int external_failures;
+    int external_unavailable;
 } InternalSimulation;
 
 /* ============================================================================

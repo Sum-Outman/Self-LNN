@@ -448,6 +448,30 @@ static int cambricon_backend_device_reset(GpuContext* context) {
     (void)context; return 0;
 }
 
+/* F-002: 寒武纪BANG C嵌入计算内核源码 */
+static const char* CAMBRICON_MATMUL_KERNEL =
+"__mlu_func__ void matmul(half* A, half* B, half* C, int M, int N, int K) {\n"
+"    int r=taskIdX, c=taskIdY;\n"
+"    if(r>=M||c>=N)return; float s=0;\n"
+"    for(int k=0;k<K;k++) s+=(float)A[r*K+k]*(float)B[k*N+c];\n"
+"    C[r*N+c]=(half)s;\n"
+"}\n";
+static const char* CAMBRICON_RELU_KERNEL =
+"__mlu_func__ void relu(half* in, half* out, int N) {\n"
+"    int i=taskIdX; if(i>=N)return; out[i]=(float)in[i]>0?in[i]:0;\n"
+"}\n";
+static const char* CAMBRICON_ADD_BIAS_KERNEL =
+"__mlu_func__ void add_bias(half* d, const half* b, int N, int C) {\n"
+"    int i=taskIdX; if(i>=N)return; d[i]=(half)((float)d[i]+(float)b[i%C]);\n"
+"}\n";
+static const char* cambricon_get_builtin_kernel(const char* name) {
+    if(!name)return NULL;
+    if(strstr(name,"matmul")||strstr(name,"MatMul"))return CAMBRICON_MATMUL_KERNEL;
+    if(strstr(name,"relu")||strstr(name,"Relu"))return CAMBRICON_RELU_KERNEL;
+    if(strstr(name,"bias")||strstr(name,"Bias"))return CAMBRICON_ADD_BIAS_KERNEL;
+    return NULL;
+}
+
 static const char* cambricon_backend_get_error_string(void) {
     return g_cb_state.error_string;
 }

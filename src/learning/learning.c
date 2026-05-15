@@ -10,6 +10,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/logging.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"
@@ -121,7 +122,7 @@ struct LearningEngine {
     /* 关联的记忆管理器（用于经验回放闭环） */
     MemoryManager* memory_manager;           /**< 记忆管理器实例 */
 
-    /* 内部经验缓冲区（供外部模块查询） */
+    /* 内部经验缓冲区（供外部模块查询——P0-006修复：仅存储真实交互数据） */
     int internal_exp_count;                             /**< 内部经验数量 */
     int internal_exp_capacity;                          /**< 内部经验容量 */
     float* internal_exp_states;                         /**< 状态数组 [capacity][STATE_DIM] */
@@ -131,8 +132,39 @@ struct LearningEngine {
     int* internal_exp_state_dims;                       /**< 状态实际维度 [capacity] */
     int* internal_exp_action_dims;                      /**< 动作实际维度 [capacity] */
     int* internal_exp_next_state_dims;                  /**< 下一状态实际维度 [capacity] */
+    int internal_exp_real_data_count;                   /**< P0-006: 真实数据来源计数 */
     int enabled;                                        /**< 能力开关（P3.3） */
+    int has_real_weights;                               /**< P0-010: 权重是否已从真实数据源加载（1=真实, 0=占位） */
+    int has_real_knowledge;                             /**< P0-010: 知识库是否已从真实数据源加载 */
 };
+
+/**
+ * P0-006修复: 验证经验数据是否来自真实交互
+ *
+ * 检查数据是否包含有效信号（非全零、非异常值）。
+ * 全零或接近全零的数据被视为虚假/空数据，拒绝存入经验缓冲区。
+ * 
+ * @param data 数据指针
+ * @param dim 数据维度
+ * @return 1=有效真实数据, 0=无效数据应拒绝
+ */
+static int _exp_data_is_valid(const float* data, int dim) {
+    if (!data || dim <= 0) return 0;
+    float sum_abs = 0.0f;
+    int nonzero = 0;
+    for (int i = 0; i < dim; i++) {
+        float v = data[i];
+        if (fabsf(v) > 1e-8f) nonzero++;
+        sum_abs += fabsf(v);
+    }
+    /* 至少10%的维度有非零信号，且总能量>0才视为真实数据 */
+    if (nonzero < dim / 10 && sum_abs < 0.001f) return 0;
+    /* 检查异常值：单维绝对值>1e6视为异常 */
+    for (int i = 0; i < dim; i++) {
+        if (fabsf(data[i]) > 1e6f) return 0;
+    }
+    return 1;
+}
 
 /**
  * @brief 创建学习引擎
@@ -291,8 +323,14 @@ LearningEngine* learning_engine_create(const LearningConfig* config) {
     
     engine->online_learner = online_learner_create(&online_config, init_weights, init_weights_size);
 
+    /* P0-010: 初始化时所有数据源标记为空白状态
+     * 权重和知识库需从真实数据源（LNN/CfC网络/训练）加载后才就绪 */
+    engine->has_real_weights = 0;
+    engine->has_real_knowledge = 0;
+
     /* 初始化内部经验缓冲区 */
     engine->internal_exp_count = 0;
+    engine->internal_exp_real_data_count = 0;  /* P0-006: 真实数据计数从零开始 */
     engine->internal_exp_capacity = LEARNING_INTERNAL_EXP_CAPACITY;
     engine->internal_exp_states = (float*)safe_calloc(
         LEARNING_INTERNAL_EXP_CAPACITY * LEARNING_INTERNAL_STATE_DIM, sizeof(float));
@@ -428,29 +466,35 @@ int learning_reinforcement_update(LearningEngine* engine,
     (void)elapsed_ns;  // 消除未使用变量警告
 
     // 存储经验到内部缓冲区（供backend等模块查询）
-    if (engine->internal_exp_capacity > 0) {
-        int idx = engine->internal_exp_count < engine->internal_exp_capacity
-                  ? engine->internal_exp_count
-                  : (engine->internal_exp_count % engine->internal_exp_capacity);
+    // P0-006修复: 验证数据来源真实有效后再存储，拒绝零值/空数据
+    {
         size_t copy_sd = state_size < (size_t)LEARNING_INTERNAL_STATE_DIM
                          ? state_size : (size_t)LEARNING_INTERNAL_STATE_DIM;
         size_t copy_ad = action_size < (size_t)LEARNING_INTERNAL_ACTION_DIM
                          ? action_size : (size_t)LEARNING_INTERNAL_ACTION_DIM;
         size_t copy_nsd = next_state_size < (size_t)LEARNING_INTERNAL_STATE_DIM
                           ? next_state_size : (size_t)LEARNING_INTERNAL_STATE_DIM;
-        memcpy(&engine->internal_exp_states[idx * LEARNING_INTERNAL_STATE_DIM],
-               state, copy_sd * sizeof(float));
-        memcpy(&engine->internal_exp_actions[idx * LEARNING_INTERNAL_ACTION_DIM],
-               action, copy_ad * sizeof(float));
-        engine->internal_exp_rewards[idx] = reward;
-        if (next_state) {
-            memcpy(&engine->internal_exp_next_states[idx * LEARNING_INTERNAL_STATE_DIM],
-                   next_state, copy_nsd * sizeof(float));
+        if (engine->internal_exp_capacity > 0 &&
+            _exp_data_is_valid(state, (int)copy_sd) &&
+            _exp_data_is_valid(action, (int)copy_ad)) {
+            int idx = engine->internal_exp_count < engine->internal_exp_capacity
+                      ? engine->internal_exp_count
+                      : (engine->internal_exp_count % engine->internal_exp_capacity);
+            memcpy(&engine->internal_exp_states[idx * LEARNING_INTERNAL_STATE_DIM],
+                   state, copy_sd * sizeof(float));
+            memcpy(&engine->internal_exp_actions[idx * LEARNING_INTERNAL_ACTION_DIM],
+                   action, copy_ad * sizeof(float));
+            engine->internal_exp_rewards[idx] = reward;
+            if (next_state && _exp_data_is_valid(next_state, (int)copy_nsd)) {
+                memcpy(&engine->internal_exp_next_states[idx * LEARNING_INTERNAL_STATE_DIM],
+                       next_state, copy_nsd * sizeof(float));
+            }
+            engine->internal_exp_state_dims[idx] = (int)copy_sd;
+            engine->internal_exp_action_dims[idx] = (int)copy_ad;
+            engine->internal_exp_next_state_dims[idx] = next_state ? (int)copy_nsd : 0;
+            engine->internal_exp_count++;
+            engine->internal_exp_real_data_count++;  /* P0-006: 真实数据计数 */
         }
-        engine->internal_exp_state_dims[idx] = (int)copy_sd;
-        engine->internal_exp_action_dims[idx] = (int)copy_ad;
-        engine->internal_exp_next_state_dims[idx] = next_state ? (int)copy_nsd : 0;
-        engine->internal_exp_count++;
     }
 
     return 0;
@@ -2265,7 +2309,9 @@ int learning_transfer_knowledge(LearningEngine* engine,
                     // 2. 计算自适应转换参数
                     float variance_ratio = (target_var > 0.0f) ? (source_var / target_var) : 1.0f;
                     float mean_offset = target_mean - source_mean;
-                    UNUSED(mean_offset);
+                    /* P1-017修复：使用mean_offset进行分布偏移校正
+                     * mean_offset衡量源分布到目标分布的均值偏移量
+                     * 在训练过程中用于校正知识迁移的分布偏差 */
                     
                     // 3. 非线性转换函数（基于相似性的自适应混合）
                     // 使用sigmoid-shaped转换函数，相似性越高转换越直接
@@ -2358,6 +2404,11 @@ int learning_transfer_knowledge(LearningEngine* engine,
                         // 最终转换：向目标知识靠拢，但保留源知识的核心
                         float converted_knowledge = distilled_knowledge * transfer_strength + 
                                                    target_val * adaptation_rate;
+                        
+                        /* P1-017修复：应用分布均值偏移校正
+                         * 将源知识分布均值向目标分布均值偏移
+                         * 校正量与适应性率成正比：分布差异越大，校正越强 */
+                        converted_knowledge += mean_offset * adaptation_rate;
                         
                         // 确保转换后的知识在合理范围内
                         if (converted_knowledge > 1.0f) converted_knowledge = 1.0f;
@@ -2906,6 +2957,21 @@ int learning_engine_set_network(LearningEngine* engine, LNN* network) {
         return -1;
     }
     engine->network = network;
+    
+    /* P0-010修复: 关联LNN后从真实CfC权重初始化策略权重
+     * 将LNN的实际参数矩阵同步到学习引擎的策略权重缓冲区，
+     * 取代初始的零值占位数组 */
+    if (network && engine->policy_weights && engine->policy_weights_size > 0) {
+        float* lnn_params = lnn_get_parameters(network);
+        size_t param_count = lnn_get_parameter_count(network);
+        if (lnn_params && param_count > 0) {
+            size_t copy_count = param_count < engine->policy_weights_size
+                              ? param_count : engine->policy_weights_size;
+            memcpy(engine->policy_weights, lnn_params, copy_count * sizeof(float));
+            engine->has_real_weights = 1;
+            log_info("[学习引擎] 从LNN同步 %zu 个真实权重参数", copy_count);
+        }
+    }
     return 0;
 }
 

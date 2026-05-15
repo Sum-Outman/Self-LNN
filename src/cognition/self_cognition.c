@@ -722,7 +722,7 @@ int self_cognition_update(SelfCognitionSystem* system, SelfCognitionDimension di
     // 检查是否需要更新（基于时间间隔）
     if (system->config.enable_continuous_monitoring &&
         difftime(current_time, system->last_update_time) < system->config.update_interval_sec) {
-        return 0; // 未到更新时间
+        return -2; /* P2-002修复：未到更新时间，返回-2与成功(0)明确区分 */
     }
     
     // 根据维度更新相应数据
@@ -2481,7 +2481,7 @@ int self_cognition_stop_execution(SelfCognitionSystem* system) {
     }
     
     if (!system->is_executing) {
-        return 0; // 没有正在执行的决策
+        return -2; // 没有正在执行的决策
     }
     
     // 更新执行状态为取消

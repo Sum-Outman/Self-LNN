@@ -881,14 +881,15 @@ int quaternion_lnn_train_batch(QuaternionLNN* network,
         const float* input = &inputs[i * input_stride];
         const float* target = &targets[i * output_stride];
         
-        // 前向传播
-        float output[256];  // 假设输出大小不超过256
-        if (network->config.output_size > 256) {
-            return -1;  // 输出太大，需要动态分配
+        // 前向传播——动态分配输出缓冲区，支持任意维度
+        float* output = (float*)safe_malloc(output_stride * sizeof(float));
+        if (!output) {
+            return -1;
         }
         
         int forward_result = quaternion_lnn_forward(network, input, output, NULL);
         if (forward_result != 0) {
+            safe_free((void**)&output);
             return -1;
         }
         
@@ -896,11 +897,15 @@ int quaternion_lnn_train_batch(QuaternionLNN* network,
         QuaternionLNNResult batch_result;
         int backward_result = quaternion_lnn_backward(network, target, &batch_result);
         if (backward_result != 0) {
+            safe_free((void**)&output);
             return -1;
         }
         
         total_loss += batch_result.loss;
         total_rotation_loss += batch_result.rotation_loss;
+        
+        // 释放本样本的输出缓冲区
+        safe_free((void**)&output);
     }
     
     // 计算平均损失

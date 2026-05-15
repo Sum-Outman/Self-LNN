@@ -33,9 +33,16 @@ class VoiceCommandSystem {
         this.onCommandResult = null;
         this.onError = null;
 
-        this.commandEngine = new CommandEngine();
+        /* P2-006修复：不自行创建CommandEngine，改为检查外部注入
+         * main.js通过setCommandEngine()注入共享的CommandEngine实例 */
+        this.commandEngine = null;
         this.continuousMode = false;
         this.continuousInterval = null;
+    }
+
+    /* P2-006修复：添加setCommandEngine方法支持外部注入共享引擎 */
+    setCommandEngine(engine) {
+        this.commandEngine = engine;
     }
 
     get isRecording() { return this._capturer.isRecording; }
@@ -52,6 +59,15 @@ class VoiceCommandSystem {
 
     async _processAudioBlob(audioBlob) {
         this.isProcessing = true;
+        /* P2-006修复：检查commandEngine是否已被外部注入 */
+        if (!this.commandEngine) {
+            console.warn('语音指令：commandEngine未注入，跳过指令解析');
+            if (this.onCommandResult) {
+                this.onCommandResult({ success: false, error: '指令引擎未初始化', command: null });
+            }
+            this.isProcessing = false;
+            return;
+        }
         try {
             var result = await VoiceCaptureUtil.uploadBlob(audioBlob);
             if (result.success && result.text) {

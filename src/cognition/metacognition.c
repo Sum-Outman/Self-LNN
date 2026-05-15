@@ -13,6 +13,7 @@
  */
 
 #include "selflnn/metacognition.h"
+#include "selflnn/self_cognition.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -2176,16 +2177,11 @@ static int perform_bayesian_update(MetacognitionSystem* system,
 }
 
 /* ============================================================================
- * P1-05: 元认知→自我认知闭环桥接
+ * P1-05: 元认知→自我认知闭环桥接 (ZSFAB P1-003修复: 使用标准头文件代替extern声明)
  *
  * 将元认知系统的深度反思/深度思维链分析结果
  * 推送回自我认知系统进行闭环校准。
  * ============================================================================ */
-
-/* 前向声明：跨模块调用 self_cognition 的洞见集成接口 */
-extern int self_cognition_integrate_deep_insights(void*, const char* const*,
-                                                   const float*, size_t, size_t*);
-extern int self_cognition_closed_loop_feedback(void*, const float*, size_t, void*);
 
 /**
  * @brief 将元认知的深度分析结果桥接到自我认知闭环
@@ -2240,7 +2236,7 @@ int metacognition_bridge_to_self_cognition(MetacognitionSystem* system,
             if (ni > 0) {
                 /* 调用 self_cognition 的洞见集成 */
                 size_t applied = 0;
-                self_cognition_integrate_deep_insights(self_cog, insight_texts,
+                self_cognition_integrate_deep_insights((SelfCognitionSystem*)self_cog, insight_texts,
                                                        insight_scores, ni, &applied);
                 if (applied > 0) {
                     actions += (int)applied;
@@ -2284,7 +2280,7 @@ int metacognition_bridge_to_self_cognition(MetacognitionSystem* system,
             }
             if (ni > 0) {
                 size_t applied = 0;
-                self_cognition_integrate_deep_insights(self_cog, insight_texts,
+                self_cognition_integrate_deep_insights((SelfCognitionSystem*)self_cog, insight_texts,
                                                        insight_scores, ni, &applied);
                 if (applied > 0) {
                     actions += (int)applied;

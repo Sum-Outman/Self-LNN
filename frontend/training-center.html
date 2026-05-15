@@ -8,24 +8,18 @@
     <script src="js/api-service.js"></script>
     <script src="js/selflnn-chart.js"></script>
     <script>
-        /* 页面加载完成后检查后端连接状态 */
+        /* 页面加载完成后检查后端连接状态 —— 标准化 */
         document.addEventListener('DOMContentLoaded', function() {
-            var api = window.SelfLnnApi;
-            api.checkConnection().then(function(status) {
+            if (!window.SelfLnnApi) return;
+            window.SelfLnnApi.checkConnection().then(function(status) {
                 if (!status.connected) {
-                    document.querySelectorAll('[id]').forEach(function(el) {
-                        if (el.textContent && el.textContent.trim() === '等待连接') {
-                            el.textContent = '离线';
-                        }
+                    var pendingEls = document.querySelectorAll('.pending-text, [data-pending="true"]');
+                    pendingEls.forEach(function(el) { 
+                        var txt = el.textContent || '';
+                        if (txt.indexOf('等待') >= 0 || txt.indexOf('检测中') >= 0) el.textContent = '离线';
                     });
                 }
-            }).catch(function() {
-                document.querySelectorAll('[id]').forEach(function(el) {
-                    if (el.textContent && el.textContent.trim() === '等待连接') {
-                        el.textContent = '离线';
-                    }
-                });
-            });
+            }).catch(function() { /* 不重复处理 */ });
         });
     </script>
 </head>

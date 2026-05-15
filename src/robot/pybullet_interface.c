@@ -5,6 +5,7 @@
 #include "selflnn/core/port_config.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/xml_parser.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -363,6 +364,7 @@ static int pb_internal_dispatch(const char* cmd) {
     }
     
     /* ============ LOAD_URDF ============ */
+    /* F-006修复: 使用真实XML递归下降解析器解析URDF文件，不再硬编码16关节人形机器人 */
     if (strcmp(cmd_name, "LOAD_URDF") == 0) {
         if (nargs < 1) { pb_set_response("ERROR|缺少URDF路径"); return -1; }
         const char* urdf_path = args[0];
@@ -373,13 +375,42 @@ static int pb_internal_dispatch(const char* cmd) {
         (void)use_fixed;
         
         int body_id = g_pb.internal_body_count + 1;
+        int parsed_joint_count = 0;
+        int parsed_link_count = 0;
+        
+        /* 真实解析URDF XML文件 */
+        XmlNode* root = xml_parse_file(urdf_path);
+        if (root) {
+            /* 遍历所有<joint>元素，统计非固定关节 */
+            XmlNode* joint_node = xml_find_child_r(root, "joint", NULL, NULL);
+            while (joint_node) {
+                const char* jtype = xml_get_attr(joint_node, "type");
+                if (jtype && strcmp(jtype, "fixed") != 0) {
+                    parsed_joint_count++;
+                }
+                joint_node = joint_node->next;
+            }
+            
+            /* 遍历所有<link>元素统计连接数 */
+            XmlNode* link_node = xml_find_child_r(root, "link", NULL, NULL);
+            while (link_node) {
+                parsed_link_count++;
+                link_node = link_node->next;
+            }
+            
+            xml_free(root);
+        }
+        
+        /* 使用解析结果（未解析到则使用默认值） */
+        int actual_joints = parsed_joint_count > 0 ? parsed_joint_count : 6;
+        int actual_links = parsed_link_count > 0 ? parsed_link_count : 7;
         
         if (g_pb.internal_sim) {
             RobotConfig rc;
             memset(&rc, 0, sizeof(rc));
             rc.type = ROBOT_TYPE_HUMANOID;
             snprintf(rc.name, sizeof(rc.name), "body_%d", body_id);
-            rc.num_joints = 16;
+            rc.num_joints = actual_joints;
             float init_pose[7] = {bx, by, bz, 0.0f, 0.0f, 0.0f, 1.0f};
             simulator_load_robot(g_pb.internal_sim, &rc, init_pose);
         }
@@ -389,8 +420,8 @@ static int pb_internal_dispatch(const char* cmd) {
             PBRobotInfo* ri = &g_pb.robots[g_pb.robot_count];
             memset(ri, 0, sizeof(PBRobotInfo));
             ri->body_unique_id = body_id;
-            ri->num_joints = 12;
-            ri->num_links = 13;
+            ri->num_joints = actual_joints;
+            ri->num_links = actual_links;
             ri->base_position[0] = bx; ri->base_position[1] = by; ri->base_position[2] = bz;
             ri->base_orientation[0] = 0; ri->base_orientation[1] = 0;
             ri->base_orientation[2] = 0; ri->base_orientation[3] = 1;
@@ -402,8 +433,8 @@ static int pb_internal_dispatch(const char* cmd) {
         g_pb.internal_body_count++;
         
         char buf[256];
-        snprintf(buf, sizeof(buf), "OK|%d|12|13|%f|%f|%f|0.0|0.0|0.0|1.0",
-                 body_id, bx, by, bz);
+        snprintf(buf, sizeof(buf), "OK|%d|%d|%d|%f|%f|%f|0.0|0.0|0.0|1.0",
+                 body_id, actual_joints, actual_links, bx, by, bz);
         pb_set_response(buf);
         return 0;
     }
@@ -512,52 +543,13 @@ static int pb_internal_dispatch(const char* cmd) {
     
     /* ============ GET_CAMERA ============ */
     if (strcmp(cmd_name, "GET_CAMERA") == 0) {
-        /* 纯C物理引擎摄像头模拟：从仿真状态生成基本视觉帧 */
+        /* P0-008修复: 禁止生成模拟RGB像素数据
+         * 无真实摄像头硬件时返回零尺寸，不生成任何虚假视觉数据 */
         int width  = nargs > 0 ? atoi(args[0]) : 64;
         int height = nargs > 1 ? atoi(args[1]) : 48;
-        if (width > 640) width = 640;
-        if (height > 480) height = 480;
-        int total_pixels = width * height;
-
-        /* 生成模拟RGB像素数据：基于物体位置的渐变背景 */
-        char* pixel_data = (char*)safe_malloc((size_t)total_pixels * 3);
-        if (!pixel_data) {
-            pb_set_response("OK|0|0|0|");
-            return 0;
-        }
-
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int idx = (y * width + x) * 3;
-                float v = (float)y / (float)height;
-                pixel_data[idx + 0] = (char)((int)(100 + 80 * v) % 256);
-                pixel_data[idx + 1] = (char)((int)(120 + 60 * v) % 256);
-                pixel_data[idx + 2] = (char)((int)(150 + 40 * v) % 256);
-            }
-        }
-
-        /* 在模拟物体位置绘制标记 */
-        for (int b = 0; b < g_pb.internal_body_count && b < 10; b++) {
-            int bx = (int)((b + 1) * (float)width * 0.15f) % width;
-            int by = height / 2;
-            int mark_size = 5;
-            for (int dy = -mark_size; dy <= mark_size; dy++) {
-                for (int dx = -mark_size; dx <= mark_size; dx++) {
-                    int px = bx + dx, py = by + dy;
-                    if (px >= 0 && px < width && py >= 0 && py < height) {
-                        int pidx = (py * width + px) * 3;
-                        pixel_data[pidx + 0] = 255;
-                        pixel_data[pidx + 1] = 0;
-                        pixel_data[pidx + 2] = 0;
-                    }
-                }
-            }
-        }
-
-        char buf[512];
-        snprintf(buf, sizeof(buf), "OK|%d|%d|3|", width, height);
-        pb_set_response(buf);
-        free(pixel_data);
+        (void)width; (void)height;
+        /* 无真实摄像头硬件连接，返回空帧 */
+        pb_set_response("OK|0|0|0|");
         return 0;
     }
 
@@ -630,7 +622,7 @@ static int pb_internal_dispatch(const char* cmd) {
     }
     if (strcmp(cmd_name, "GET_BODY_INFO") == 0) {
         int bid = nargs > 0 ? atoi(args[0]) : 0;
-        RobotSimState state;
+        SimulatorRobotState state;
         int link_count = 6;
         int joint_count = 7;
         float pos[3] = {0, 0, 0};
@@ -910,12 +902,9 @@ static int pb_internal_dispatch(const char* cmd) {
                 }
             }
         } else {
-            point_count = max_points < 10 ? max_points : 10;
-            for (int i = 0; i < point_count; i++) {
-                g_pb.point_cloud_buffer[i * 3 + 0] = (float)((int)((size_t)time(NULL) * (i + 1)) % 100) / 100.0f;
-                g_pb.point_cloud_buffer[i * 3 + 1] = (float)((int)((size_t)time(NULL) * (i + 2)) % 100) / 100.0f;
-                g_pb.point_cloud_buffer[i * 3 + 2] = (float)((int)((size_t)time(NULL) * (i + 3)) % 100) / 100.0f;
-            }
+            /* F-005修复: 禁止生成虚假点云数据
+             * 无真实传感器/仿真物体时返回空点云，绝不生成time(NULL)伪随机数据 */
+            point_count = 0;
         }
         char buf[128];
         snprintf(buf, sizeof(buf), "OK|%d|", point_count);
@@ -923,48 +912,14 @@ static int pb_internal_dispatch(const char* cmd) {
         return 0;
     }
     if (strcmp(cmd_name, "GET_DEPTH") == 0) {
-        /* 纯C物理引擎深度图生成：基于模拟物体到虚拟相机的距离 */
+        /* P0-008修复: 禁止生成模拟深度图数据
+         * 无真实深度传感器时返回零尺寸，不生成虚假深度数据 */
         int dw = nargs > 0 ? atoi(args[0]) : 64;
         int dh = nargs > 1 ? atoi(args[1]) : 48;
-        if (dw > 640) dw = 640;
-        if (dh > 480) dh = 480;
-        int dpixels = dw * dh;
-
-        /* 默认深度值（远平面距离5米） */
-        float default_depth = 5.0f;
-
-        float* depth_data = (float*)safe_malloc((size_t)dpixels * sizeof(float));
-        if (!depth_data) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "OK|%d|%d|", dw, dh);
-            pb_set_response(buf);
-            return 0;
-        }
-
-        for (int i = 0; i < dpixels; i++) depth_data[i] = default_depth;
-
-        /* 按物体位置计算最近深度 */
-        for (int b = 0; b < g_pb.internal_body_count && b < 10; b++) {
-            float body_depth = 2.0f + (float)b * 0.5f;
-            int bx = (int)((b + 1) * (float)dw * 0.15f) % dw;
-            int by = dh / 2;
-            for (int dy = -8; dy <= 8; dy++) {
-                for (int dx = -8; dx <= 8; dx++) {
-                    int px = bx + dx, py = by + dy;
-                    if (px >= 0 && px < dw && py >= 0 && py < dh) {
-                        float edge_dist = sqrtf((float)(dx*dx + dy*dy)) / 8.0f;
-                        float d = body_depth + edge_dist * 0.1f;
-                        if (d < depth_data[py * dw + px])
-                            depth_data[py * dw + px] = d;
-                    }
-                }
-            }
-        }
-
-        char buf[256];
-        snprintf(buf, sizeof(buf), "OK|%d|%d|", dw, dh);
+        (void)dw; (void)dh;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "OK|0|0|");
         pb_set_response(buf);
-        free(depth_data);
         return 0;
     }
     

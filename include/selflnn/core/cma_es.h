@@ -102,6 +102,20 @@ int cmaes_optimize(CMAESState* state, CMAESFitnessFunction func, void* user_data
 
 int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user_data,
                          int max_restarts);
+
+/* === BIPOP (双种群) 重启策略 === */
+/* S-005修复: BIPOP在IPOP基础上交替使用小种群(更小λ)和大种群(更大λ)
+ *   小种群: 快速收敛到局部最优
+ *   大种群: 全局探索能力
+ *   交替策略: 每次重启后在大小种群间切换 */
+#define CMAES_BIPOP_MAX_RESTARTS 10
+#define CMAES_BIPOP_SMALL_POP_RATIO 0.5f   /* 小种群相对默认λ的比例 */
+#define CMAES_BIPOP_LARGE_POP_RATIO 2.0f   /* 大种群相对默认λ的比例 */
+#define CMAES_BIPOP_LAMBDA_DEFAULT 100
+
+int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user_data,
+                          int max_restarts);
+
 void cmaes_enable_active_cma(CMAESState* state, int enable);
 
 #ifdef __cplusplus

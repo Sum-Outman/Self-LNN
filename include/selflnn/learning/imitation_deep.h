@@ -35,6 +35,8 @@ typedef struct {
     char name[64];
     ImKeyframe start_frame;
     ImKeyframe end_frame;
+    float start_config[IM_MAX_JOINTS];
+    float target_config[IM_MAX_JOINTS];
     float duration_ms;
     int parent_action;
     float confidence;

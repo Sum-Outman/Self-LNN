@@ -390,17 +390,30 @@ void ws_push_server_destroy(WSPushServer* srv)
 int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
 {
     if (!srv || !srv->running || !data) return -1;
+    /* P1-023修复: 使用消息类型名称数组替代硬编码if-else-if链，支持动态扩展 */
+    static const char* msg_type_names[] = {
+        [WS_MSG_TRAINING_PROGRESS] = "training_progress",
+        [WS_MSG_SYSTEM_STATUS] = "system_status",
+        [WS_MSG_KNOWLEDGE_UPDATE] = "knowledge_update",
+        [WS_MSG_MODEL_OUTPUT] = "model_output",
+        [WS_MSG_ERROR] = "error",
+        [WS_MSG_LOG] = "log",
+        [WS_MSG_DIALOGUE_RESPONSE] = "dialogue_response",
+        [WS_MSG_DIALOGUE_TOKEN] = "dialogue_token",
+        [WS_MSG_EVOLUTION_EVENT] = "evolution_event",
+        [WS_MSG_SAFETY_ALERT] = "safety_alert",
+        [WS_MSG_ROBOT_STATUS] = "robot_status",
+        [WS_MSG_COGNITION_EVENT] = "cognition_event",
+        [WS_MSG_DIAGNOSTIC] = "diagnostic",
+        [WS_MSG_MULTIMODAL_DATA] = "multimodal_data",
+        [WS_MSG_TRAINING_METRICS] = "training_metrics",
+    };
+    static const size_t num_msg_types = sizeof(msg_type_names) / sizeof(msg_type_names[0]);
+    const char* type_name = (type < num_msg_types && msg_type_names[type]) ? msg_type_names[type] : "custom";
     char json[WS_MAX_MESSAGE_SIZE];
     int jlen = snprintf(json, sizeof(json),
         "{\"type\":\"%s\",\"time\":%ld,\"data\":%s}",
-        type == WS_MSG_TRAINING_PROGRESS ? "training_progress" :
-        type == WS_MSG_SYSTEM_STATUS ? "system_status" :
-        type == WS_MSG_KNOWLEDGE_UPDATE ? "knowledge_update" :
-        type == WS_MSG_MODEL_OUTPUT ? "model_output" :
-        type == WS_MSG_ERROR ? "error" :
-        type == WS_MSG_LOG ? "log" :
-        type == WS_MSG_DIALOGUE_RESPONSE ? "dialogue_response" :
-        type == WS_MSG_DIALOGUE_TOKEN ? "dialogue_token" : "custom",
+        type_name,
         (long)time(NULL), data);
     if (jlen <= 0 || jlen >= (int)sizeof(json)) return -1;
     int sent = 0;

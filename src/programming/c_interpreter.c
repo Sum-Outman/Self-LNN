@@ -396,14 +396,17 @@ static float _ci_statement(CiInterpreter* ci);
 static float _ci_parse_block(CiInterpreter* ci);
 static float _ci_if_statement(CiInterpreter* ci);
 static float _ci_for_loop(CiInterpreter* ci);
+static float _ci_while_loop(CiInterpreter* ci);
 
-/* ---- 控制流 区块/语句/if/for ---- */
+/* ---- 控制流 区块/语句/if/for/while ---- */
 static float _ci_statement(CiInterpreter* ci) {
     _ci_skip_spaces(ci);
     if (ci->source[ci->pos] == 'i' && ci->source[ci->pos+1] == 'f')
         return _ci_if_statement(ci);
     if (ci->source[ci->pos] == 'f' && ci->source[ci->pos+1] == 'o')
         return _ci_for_loop(ci);
+    if (ci->source[ci->pos] == 'w' && ci->source[ci->pos+1] == 'h')
+        return _ci_while_loop(ci);
     return _ci_expr(ci);
 }
 
@@ -460,6 +463,28 @@ static float _ci_for_loop(CiInterpreter* ci) {
             ci->pos = saved_pos;
             cond = _ci_expr(ci);
         }
+    }
+    return result;
+}
+
+/* ZSFABC: while循环实现 */
+static float _ci_while_loop(CiInterpreter* ci) {
+    if (!_ci_expect(ci, '(')) return 0.0f;
+    /* 保存条件表达式位置用于循环重新求值 */
+    int cond_pos = ci->pos;
+    float cond = _ci_expr(ci);
+    _ci_expect(ci, ')');
+    float result = 0.0f;
+    while (cond > 0.01f || cond < -0.01f) {
+        /* 保存块位置用于重新执行 */
+        int block_start = ci->pos;
+        result = _ci_parse_block(ci);
+        int block_end = ci->pos;
+        /* 重新求值条件 */
+        ci->pos = cond_pos;
+        cond = _ci_expr(ci);
+        /* 恢复条件位置和块入口，准备下一次迭代 */
+        ci->pos = block_end;
     }
     return result;
 }

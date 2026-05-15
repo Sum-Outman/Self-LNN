@@ -452,22 +452,18 @@ int robot_enable_hardware(Robot* robot, int enable);
 int robot_is_hardware_enabled(const Robot* robot);
 
 /**
- * @brief 设置仿真模式
- * 
- * @param robot 机器人句柄
- * @param enable 1=开启仿真模式(无硬件时生成仿真数据)，0=关闭(无硬件时返回错误)
- * @return int 成功返回0，失败返回错误码
+ * @brief P0-007修复: simulation_mode已移除，无硬件时始终返回错误
+ * @deprecated 不再支持仿真模式，无硬件连接时所有传感器数据返回错误
  */
 int robot_set_simulation_mode(Robot* robot, int enable);
 
 /**
  * @brief 检查机器人数据是否来自仿真模式（不可用于自主学习训练）
  *
- * 仿真数据（simulation_mode=1）可能导致自主学习系统学习到虚假模式。
- * 此函数用于在自主学习/训练管道中检查数据来源的安全性。
+ * P0-007修复: 仿真模式已移除，无硬件连接时所有数据为空，此函数保留用于兼容检查。
  *
  * @param robot 机器人句柄
- * @return int 1=仿真数据不安全（禁止用于训练），0=真实硬件数据或仿真模式关闭
+ * @return int 1=仿真数据不安全，0=真实硬件数据
  */
 int robot_is_simulation_data_unsafe(Robot* robot);
 

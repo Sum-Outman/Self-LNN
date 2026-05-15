@@ -433,6 +433,33 @@ static int tpu_backend_device_reset(GpuContext* context) {
     memset(&g_tpu_state, 0, sizeof(g_tpu_state));
     return tpu_backend_init();
 }
+/* F-002: Google TPU嵌入XLA计算内核源码 */
+static const char* TPU_MATMUL_KERNEL =
+"__xla_kernel__ void matmul(const float* A, const float* B, float* C,\n"
+"    int M, int N, int K) {\n"
+"    int r = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    int c = blockIdx.y * blockDim.y + threadIdx.y;\n"
+"    if(r>=M||c>=N)return; float s=0;\n"
+"    for(int k=0;k<K;k++) s+=A[r*K+k]*B[k*N+c]; C[r*N+c]=s;\n"
+"}\n";
+static const char* TPU_RELU_KERNEL =
+"__xla_kernel__ void relu(const float* in, float* out, int N) {\n"
+"    int i=blockIdx.x*blockDim.x+threadIdx.x;\n"
+"    if(i>=N)return; out[i]=fmaxf(in[i],0.0f);\n"
+"}\n";
+static const char* TPU_SGD_KERNEL =
+"__xla_kernel__ void sgd_update(float* p, const float* g, int N, float lr) {\n"
+"    int i=blockIdx.x*blockDim.x+threadIdx.x;\n"
+"    if(i>=N)return; p[i]-=lr*g[i];\n"
+"}\n";
+static const char* tpu_get_builtin_kernel(const char* name) {
+    if(!name)return NULL;
+    if(strstr(name,"matmul")||strstr(name,"MatMul"))return TPU_MATMUL_KERNEL;
+    if(strstr(name,"relu")||strstr(name,"Relu"))return TPU_RELU_KERNEL;
+    if(strstr(name,"sgd")||strstr(name,"SGD"))return TPU_SGD_KERNEL;
+    return NULL;
+}
+
 static const char* tpu_backend_get_error_string(void) { return g_tpu_state.error_string; }
 static int tpu_backend_memory_copy_to_device_async(GpuMemory* dst, const void* src, size_t sz, GpuStream* st) { (void)st; return tpu_backend_memory_copy_to_device(dst, src, sz); }
 static int tpu_backend_memory_copy_from_device_async(void* dst, GpuMemory* src, size_t sz, GpuStream* st) { (void)st; return tpu_backend_memory_copy_from_device(dst, src, sz); }

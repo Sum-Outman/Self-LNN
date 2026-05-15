@@ -277,8 +277,10 @@ int auth_generate_key(AuthSystem* auth, const char* name, AuthPermission permiss
     uint8_t random_bytes[32];
     generate_random_bytes(random_bytes, 32);
 
-    uint8_t master_salt[16] = {0x73,0x65,0x6c,0x66,0x6c,0x6e,0x6e,0x5f,
-                               0x61,0x75,0x74,0x68,0x5f,0x76,0x31,0x00};
+    /* P1-011修复: 使用随机盐替代硬编码主盐值，确保不同API密钥使用不同盐 */
+    uint8_t master_salt[16];
+    generate_random_bytes(master_salt, 16);
+    for (size_t i = 0; i < 16; i++) master_salt[i] = (uint8_t)(master_salt[i] ^ random_bytes[i % 32]);
     time_t now = time(NULL);
     uint8_t time_bytes[8];
     for (size_t i = 0; i < 8; i++)
@@ -421,7 +423,14 @@ AuthPermission auth_get_required_permission(AuthSystem* auth, const char* endpoi
 }
 
 int auth_check_rate_limit(AuthSystem* auth, TokenBucket* bucket) {
-    (void)auth;
+    if (!bucket) return 0;
+    /* 自适应限流：利用认证上下文全局负载状态动态调整限流粒度 */
+    if (auth && auth->initialized) {
+        /* 若全局令牌桶余量低于25%，触发更严格的限流：消耗双倍令牌 */
+        if (auth->global_bucket.tokens < auth->global_bucket.max_tokens / 4) {
+            return token_bucket_consume(bucket, 2) ? 1 : 0;
+        }
+    }
     return token_bucket_consume(bucket, 1) ? 1 : 0;
 }
 
@@ -435,16 +444,11 @@ int auth_check_request(AuthSystem* auth, const char* endpoint,
     if (!auth || !endpoint) return 0;
     
     if (!auth->auth_required) {
-        if (out_permission) *out_permission = AUTH_PERM_ADMIN;
+        if (out_permission) *out_permission = AUTH_PERM_READONLY;
         return 1;
     }
     
     AuthPermission required = auth_get_required_permission(auth, endpoint);
-    
-    if (!auth->auth_required && required == AUTH_PERM_NONE) {
-        if (out_permission) *out_permission = AUTH_PERM_READONLY;
-        return 1;
-    }
     
     if (!auth_header) return 0;
     

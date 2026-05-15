@@ -11,6 +11,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/xorshift_prng.h"
+#include "selflnn/utils/logging.h"
 
 /* Windows套接字头文件需要这些定义 */
 #if defined(_WIN32) || defined(_WIN64)

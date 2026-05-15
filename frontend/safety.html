@@ -116,12 +116,12 @@
             <div class="safety-card">
                 <h3>物理安全边界</h3>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;font-size:13px;">
-                    <div>最大速度: <strong>5.0 m/s</strong></div>
-                    <div>最大加速度: <strong>10.0 m/s²</strong></div>
-                    <div>最大扭矩: <strong>100 Nm</strong></div>
-                    <div>安全区半径: <strong>1.0 m</strong></div>
-                    <div>碰撞距离: <strong>0.1 m</strong></div>
-                    <div>关节范围: <strong>±180°</strong></div>
+                    <div>最大速度: <strong id="safety-max-speed">加载中...</strong></div>
+                    <div>最大加速度: <strong id="safety-max-accel">加载中...</strong></div>
+                    <div>最大扭矩: <strong id="safety-max-torque">加载中...</strong></div>
+                    <div>安全区半径: <strong id="safety-zone-radius">加载中...</strong></div>
+                    <div>碰撞距离: <strong id="safety-collision-dist">加载中...</strong></div>
+                    <div>关节范围: <strong id="safety-joint-range">加载中...</strong></div>
                 </div>
                 <div style="margin-top:15px;padding:10px;background:rgba(231,76,60,0.1);border:1px solid rgba(231,76,60,0.3);border-radius:6px;font-size:12px;">
                     ⚠ 安全规则：任何超出物理边界的操作将自动触发安全响应
@@ -219,19 +219,57 @@
         async function softStop() {
             if (!confirm('确认执行软停止？当前任务将完成后停止。')) return;
             try {
-                /* 软停止通过设置安全级别为'升级'实现 */
-                await SelfLnnApi.emergencyStop('safety', { level: 'elevated' });
-                alert('软停止已激活');
-                pollSafety();
+                var result = await SelfLnnApi.softStop('safety');
+                if (result.success) {
+                    alert('软停止已激活');
+                    pollSafety();
+                } else {
+                    alert('操作失败: ' + (result.error || '未知错误'));
+                }
             } catch(e) { alert('操作失败: ' + e.message); }
         }
 
         async function resetSafety() {
             try {
-                /* 重置通过重新获取安全状态实现 */
-                await pollSafety();
-                alert('安全状态已刷新');
+                var result = await SelfLnnApi.resetSafetyState();
+                if (result.success) {
+                    alert('安全状态已重置');
+                } else {
+                    alert('重置失败: ' + (result.error || '未知错误'));
+                }
+                pollSafety();
             } catch(e) { alert('操作失败: ' + e.message); }
+        }
+
+        /* 物理安全边界——必须从后端获取真实数据，不使用默认值 */
+        async function fetchSafetyBounds() {
+            try {
+                var resp = await SelfLnnApi.request('/safety/bounds', { method: 'GET' }, 3);
+                if (resp.ok) {
+                    var data = await resp.json();
+                    updateSafetyBoundsUI(data.bounds || data);
+                    return;
+                }
+            } catch(e) { console.warn('安全边界获取失败:', e.message); }
+            /* 后端不可用时显示离线状态，不使用虚假默认值 */
+            document.getElementById('bounds-status').textContent = '⚠ 后端未连接——安全边界数据不可用';
+            document.getElementById('bounds-status').style.color = '#ff6b6b';
+        }
+
+        function updateSafetyBoundsUI(bounds) {
+            if (!bounds) {
+                document.getElementById('bounds-status').textContent = '⚠ 后端未连接——安全边界数据不可用';
+                document.getElementById('bounds-status').style.color = '#ff6b6b';
+                return;
+            }
+            document.getElementById('bounds-status').textContent = '安全边界已加载';
+            document.getElementById('bounds-status').style.color = '#00ff88';
+            document.getElementById('safety-max-speed').textContent = bounds.maxSpeed.toFixed(1) + ' m/s';
+            document.getElementById('safety-max-accel').textContent = bounds.maxAccel.toFixed(1) + ' m/s²';
+            document.getElementById('safety-max-torque').textContent = bounds.maxTorque.toFixed(0) + ' Nm';
+            document.getElementById('safety-zone-radius').textContent = bounds.safetyZoneRadius.toFixed(1) + ' m';
+            document.getElementById('safety-collision-dist').textContent = bounds.collisionDistance.toFixed(2) + ' m';
+            document.getElementById('safety-joint-range').textContent = '±' + bounds.jointRange.toFixed(0) + '°';
         }
 
         async function checkConnection() {
@@ -259,6 +297,7 @@
             checkConnection();
             pollSafety();
             pollResources();
+            fetchSafetyBounds();
             pollTimer = setInterval(pollSafety, 3000);
             resTimer = setInterval(pollResources, 5000);
             setInterval(checkConnection, 30000);

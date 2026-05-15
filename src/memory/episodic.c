@@ -264,7 +264,7 @@ int episodic_memory_associate_events(EpisodicMemory* memory, const char* event_i
     }
     
     if (!memory->config.enable_chaining) {
-        return 0;  // 事件链未启用
+        return -2;  // 事件链未启用
     }
     
     // 完整实现：存储关联信息作为新的记忆项

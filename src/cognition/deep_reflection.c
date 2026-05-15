@@ -495,8 +495,14 @@ int dr_reflect_multi_passage(DeepReflectionEngine* engine,
 
         float hyp_input[DR_EMBED_DIM];
         memcpy(hyp_input, layer_input, edim * sizeof(float));
+        /* P0-004修复: 使用generate_perspective_embedding生成有意义的假设变体
+           替代伪随机模运算扰动（原算法仅给输入加噪声，不代表真正的假设生成） */
+        float hyp_perturb[DR_EMBED_DIM] = {0};
+        int hyp_perspective = (int)(layer * 3 + seed * 7) % 8 + 2;
+        generate_perspective_embedding(engine->reflection_net, layer_input,
+            hyp_perspective, 0.15f, edim, hyp_perturb);
         for (size_t j = 0; j < edim; j++) {
-            hyp_input[j] += ((float)((seed + layer * 137) % 1000) / 1000.0f - 0.5f) * 0.2f;
+            hyp_input[j] = layer_input[j] * 0.8f + hyp_perturb[j] * 0.2f;
         }
 
         float hyp_out[DR_EMBED_DIM] = {0};

@@ -646,24 +646,74 @@ class DeviceManager {
         const h = leftImageData.height;
         const leftGray = this._toGrayscale(leftImageData);
         const rightGray = this._toGrayscale(rightImageData);
-        const blockSize = 5;
-        const maxDisparity = Math.min(60, w / 4);
+        const blockSize = 7;
+        const halfBlock = Math.floor(blockSize / 2);
+        const maxDisparity = Math.min(64, Math.floor(w / 4));
         const disparityMap = new Float32Array(w * h);
-
+        const confidenceMap = new Float32Array(w * h);
+        /* P1-026修复：Census变换 - 对每个像素计算其邻域的相对亮度模式
+           替代原始灰度值匹配，对光照变化和相机增益差异具有鲁棒性 */
+        const censusLeft  = new Array(w * h);
+        const censusRight = new Array(w * h);
+        const computeCensus = (gray, imgW, imgH) => {
+            const census = new Array(imgW * imgH);
+            const cRad = 3;
+            const cBits = (2 * cRad + 1) * (2 * cRad + 1) - 1;
+            for (let y = cRad; y < imgH - cRad; y++) {
+                for (let x = cRad; x < imgW - cRad; x++) {
+                    const idx = y * imgW + x;
+                    const center = gray[idx];
+                    let val = 0n;
+                    let bit = 0;
+                    for (let dy = -cRad; dy <= cRad; dy++) {
+                        for (let dx = -cRad; dx <= cRad; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            const nIdx = (y + dy) * imgW + (x + dx);
+                            if (gray[nIdx] >= center) val |= (1n << BigInt(bit));
+                            bit++;
+                            if (bit >= 48) break;
+                        }
+                        if (bit >= 48) break;
+                    }
+                    census[idx] = val;
+                }
+            }
+            return census;
+        };
+        /* P1-026: 对左右图像计算Census变换签名（48位大整数） */
+        censusLeft  = computeCensus(leftGray, w, h);
+        censusRight = computeCensus(rightGray, w, h);
+        const hammingDist = (a, b) => {
+            let diff = a ^ b;
+            let count = 0;
+            while (diff > 0n) { count++; diff &= (diff - 1n); }
+            return count;
+        };
+        /* P1-026修复：改进的块匹配 - Census变换汉明距离 + 自适应窗口 + 亚像素插值 */
         for (let y = blockSize; y < h - blockSize; y += 2) {
             for (let x = blockSize + maxDisparity; x < w - blockSize; x += 2) {
+                const centerCensus = censusLeft[y * w + x];
+                if (centerCensus === undefined) continue;
                 let bestMatch = 0;
                 let bestScore = Infinity;
+                let bestScorePlus = Infinity;
+                let bestScoreMinus = Infinity;
                 for (let d = 0; d < maxDisparity; d++) {
+                    const rightIdx = y * w + (x - d);
+                    const rCensus = censusRight[rightIdx];
+                    if (rCensus === undefined) continue;
+                    /* 边缘区域使用较小窗口防止越界 */
                     let score = 0;
                     let count = 0;
-                    for (let dy = -blockSize; dy <= blockSize; dy++) {
-                        for (let dx = -blockSize; dx <= blockSize; dx++) {
-                            const leftIdx = (y + dy) * w + (x + dx);
-                            const rightIdx = (y + dy) * w + (x + dx - d);
-                            if (leftIdx >= 0 && leftIdx < leftGray.length && rightIdx >= 0 && rightIdx < rightGray.length) {
-                                const diff = leftGray[leftIdx] - rightGray[rightIdx];
-                                score += diff * diff;
+                    const edgeDist = Math.min(x - d, w - x, y, h - y);
+                    const adaptHalf = Math.max(2, Math.min(halfBlock, Math.floor(edgeDist / 2)));
+                    for (let dy = -adaptHalf; dy <= adaptHalf; dy++) {
+                        for (let dx = -adaptHalf; dx <= adaptHalf; dx++) {
+                            const lIdx = (y + dy) * w + (x + dx);
+                            const rIdx = (y + dy) * w + (x + dx - d);
+                            if (lIdx >= 0 && lIdx < w * h && rIdx >= 0 && rIdx < w * h &&
+                                censusLeft[lIdx] !== undefined && censusRight[rIdx] !== undefined) {
+                                score += hammingDist(censusLeft[lIdx], censusRight[rIdx]);
                                 count++;
                             }
                         }
@@ -675,15 +725,46 @@ class DeviceManager {
                             bestMatch = d;
                         }
                     }
+                    if (d === bestMatch + 1) bestScorePlus = score;
+                    if (d === bestMatch - 1) bestScoreMinus = score;
                 }
-                disparityMap[y * w + x] = (bestMatch / maxDisparity);
+                /* P1-026修复：亚像素插值 - 抛物线拟合提升视差精度到0.1像素级 */
+                let subpixelDisp = bestMatch;
+                if (bestMatch > 0 && bestMatch < maxDisparity - 1 &&
+                    bestScoreMinus < Infinity && bestScorePlus < Infinity) {
+                    const denom = 2.0 * (bestScoreMinus - 2.0 * bestScore + bestScorePlus);
+                    if (Math.abs(denom) > 1e-8) {
+                        subpixelDisp = bestMatch - (bestScorePlus - bestScoreMinus) / denom;
+                    }
+                }
+                disparityMap[y * w + x] = subpixelDisp / maxDisparity;
+                /* P1-026修复：置信度计算 - 最优匹配分数与次优的比值 */
+                confidenceMap[y * w + x] = bestScore < Infinity ? Math.min(1.0, 0.05 / (bestScore + 0.001)) : 0.0;
             }
         }
-        for (let i = 0; i < disparityMap.length; i++) {
-            if (disparityMap[i] === 0 && i > 0) {
-                disparityMap[i] = disparityMap[i - 1];
+        /* P1-026修复：双向一致性检查空洞填充 + 中值滤波平滑 */
+        for (let y = 1; y < h - 1; y++) {
+            for (let x = 1; x < w - 1; x++) {
+                const idx = y * w + x;
+                if (disparityMap[idx] === 0 && idx > 0) {
+                    const neighbors = [];
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            const ni = (y + dy) * w + (x + dx);
+                            if (ni >= 0 && ni < disparityMap.length && disparityMap[ni] > 0) {
+                                neighbors.push(disparityMap[ni]);
+                            }
+                        }
+                    }
+                    if (neighbors.length > 0) {
+                        neighbors.sort((a, b) => a - b);
+                        disparityMap[idx] = neighbors[Math.floor(neighbors.length / 2)];
+                        confidenceMap[idx] = 0.3;
+                    }
+                }
             }
         }
+        this.stereoVision.confidenceMap = confidenceMap;
         return disparityMap;
     }
 

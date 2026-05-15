@@ -572,6 +572,8 @@ static int gpu_cpu_backend_init(void) {
 }
 
 static void gpu_cpu_backend_cleanup(void) {
+    log_debug("CPU后端清理：释放CPU本地计算资源");
+    /* CPU后端无需GPU资源清理，线程池由调用方管理 */
 }
 
 static int gpu_cpu_backend_get_device_count(void) {

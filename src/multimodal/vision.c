@@ -1,6 +1,17 @@
+/**
+ * @file vision.c
+ * @brief 视觉处理系统 —— CfC液态神经网络驱动的全视觉管线
+ *
+ * P0-004修复: 动态可扩展类别系统。
+ *   保留80类COCO兼容类别作为初始默认类别，但系统完全动态可扩展。
+ *   通过多模态教学和学习过程可以动态注册新类别，
+ *   类别ID从80开始自动递增分配。
+ *   所有模型权重为本地原生模型，从零开始训练。
+ */
 #include "selflnn/multimodal/vision.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/platform.h"
 
 #include <stdlib.h>
 #include <stddef.h>
@@ -19,9 +30,6 @@ struct VisionProcessor {
 #define CFC_VISION_MAX_OBJECTS 50
 #define CFC_VISION_INPUT_DIM 1024
 #define CFC_VISION_HIDDEN_DIM 1024
-#define CFC_VISION_CLASS_MAX 80
-#define CFC_VISION_CLASS_LOGITS CFC_VISION_CLASS_MAX
-/* 每个检测: cx,cy,w,h,conf + 80类别logits = 85; 50*85=4250 ≤ 1024时每20输出一个 */
 
 /* Softmax稳定化计算——任意维度 */
 static void _softmax(float* logits, int dim) {
@@ -43,71 +51,299 @@ static void _softmax(float* logits, int dim) {
 }
 
 /* ================================================================
- * K-018: 视觉类别ID到名称映射表（中英文双语）
- * 默认80类COCO兼容类别 + 用户可扩展自定义类别
- * 
- * W-004说明: 此类别映射表仅为标签字典，用于将检测输出索引转换为
- * 可读类别名称。不包含任何预训练权重或模型参数。
- * 类别映射 ≠ 预训练模型。模型权重从零开始训练。
- * 需求"禁止使用任何预训练模型"仅约束模型权重，不约束标签映射。
+ * P0-004: 动态可扩展类别注册表
+ *
+ * 初始保留80类COCO兼容类别作为默认类别标签字典。
+ * 类别ID 0-79 为默认COCO兼容类别（标签字典，不含预训练权重）。
+ * 类别ID 80+ 为通过学习动态注册的类别。
+ * 所有模型权重为本地原生模型，从零开始训练。
  * ================================================================ */
-typedef struct {
-    int class_id;
-    const char* name_zh;
-    const char* name_en;
-} VisionClassNameEntry;
 
-static const VisionClassNameEntry g_vision_class_names[CFC_VISION_CLASS_MAX] = {
-    {0,  "人",           "person"},         {1,  "自行车",       "bicycle"},
-    {2,  "汽车",         "car"},            {3,  "摩托车",       "motorcycle"},
-    {4,  "飞机",         "airplane"},       {5,  "公共汽车",     "bus"},
-    {6,  "火车",         "train"},          {7,  "卡车",         "truck"},
-    {8,  "船",           "boat"},           {9,  "交通灯",       "traffic light"},
-    {10, "消防栓",       "fire hydrant"},   {11, "停止标志",     "stop sign"},
-    {12, "停车计时器",   "parking meter"},  {13, "长凳",         "bench"},
-    {14, "鸟",           "bird"},           {15, "猫",           "cat"},
-    {16, "狗",           "dog"},            {17, "马",           "horse"},
-    {18, "羊",           "sheep"},          {19, "牛",           "cow"},
-    {20, "大象",         "elephant"},       {21, "熊",           "bear"},
-    {22, "斑马",         "zebra"},          {23, "长颈鹿",       "giraffe"},
-    {24, "背包",         "backpack"},       {25, "伞",           "umbrella"},
-    {26, "手提包",       "handbag"},        {27, "领带",         "tie"},
-    {28, "手提箱",       "suitcase"},       {29, "飞盘",         "frisbee"},
-    {30, "滑雪板",       "skis"},           {31, "滑雪板雪板",   "snowboard"},
-    {32, "运动球",       "sports ball"},    {33, "风筝",         "kite"},
-    {34, "棒球棒",       "baseball bat"},   {35, "棒球手套",     "baseball glove"},
-    {36, "滑板",         "skateboard"},     {37, "冲浪板",       "surfboard"},
-    {38, "网球拍",       "tennis racket"},  {39, "瓶子",         "bottle"},
-    {40, "酒杯",         "wine glass"},     {41, "杯子",         "cup"},
-    {42, "叉子",         "fork"},           {43, "刀",           "knife"},
-    {44, "勺子",         "spoon"},          {45, "碗",           "bowl"},
-    {46, "香蕉",         "banana"},         {47, "苹果",         "apple"},
-    {48, "三明治",       "sandwich"},       {49, "橘子",         "orange"},
-    {50, "西兰花",       "broccoli"},       {51, "胡萝卜",       "carrot"},
-    {52, "热狗",         "hot dog"},        {53, "披萨",         "pizza"},
-    {54, "甜甜圈",       "donut"},          {55, "蛋糕",         "cake"},
-    {56, "椅子",         "chair"},          {57, "沙发",         "couch"},
-    {58, "盆栽",         "potted plant"},   {59, "床",           "bed"},
-    {60, "餐桌",         "dining table"},   {61, "马桶",         "toilet"},
-    {62, "电视",         "tv"},             {63, "笔记本电脑",   "laptop"},
-    {64, "鼠标",         "mouse"},          {65, "遥控器",       "remote"},
-    {66, "键盘",         "keyboard"},       {67, "手机",         "cell phone"},
-    {68, "微波炉",       "microwave"},      {69, "烤箱",         "oven"},
-    {70, "烤面包机",     "toaster"},        {71, "水槽",         "sink"},
-    {72, "冰箱",         "refrigerator"},   {73, "书",           "book"},
-    {74, "时钟",         "clock"},          {75, "花瓶",         "vase"},
-    {76, "剪刀",         "scissors"},       {77, "泰迪熊",       "teddy bear"},
-    {78, "吹风机",       "hair drier"},     {79, "牙刷",         "toothbrush"}
+/**
+ * @brief 默认COCO兼容80类中文名称列表
+ */
+static const char* g_default_coco_names_zh[VISION_CLASS_DEFAULT_COUNT] = {
+    "人",           "自行车",       "汽车",         "摩托车",
+    "飞机",         "公共汽车",     "火车",         "卡车",
+    "船",           "交通灯",       "消防栓",       "停止标志",
+    "停车计时器",   "长凳",         "鸟",           "猫",
+    "狗",           "马",           "羊",           "牛",
+    "大象",         "熊",           "斑马",         "长颈鹿",
+    "背包",         "伞",           "手提包",       "领带",
+    "手提箱",       "飞盘",         "滑雪板",       "滑雪板雪板",
+    "运动球",       "风筝",         "棒球棒",       "棒球手套",
+    "滑板",         "冲浪板",       "网球拍",       "瓶子",
+    "酒杯",         "杯子",         "叉子",         "刀",
+    "勺子",         "碗",           "香蕉",         "苹果",
+    "三明治",       "橘子",         "西兰花",       "胡萝卜",
+    "热狗",         "披萨",         "甜甜圈",       "蛋糕",
+    "椅子",         "沙发",         "盆栽",         "床",
+    "餐桌",         "马桶",         "电视",         "笔记本电脑",
+    "鼠标",         "遥控器",       "键盘",         "手机",
+    "微波炉",       "烤箱",         "烤面包机",     "水槽",
+    "冰箱",         "书",           "时钟",         "花瓶",
+    "剪刀",         "泰迪熊",       "吹风机",       "牙刷"
 };
 
-const char* vision_get_class_name_zh(int class_id) {
-    if (class_id < 0 || class_id >= CFC_VISION_CLASS_MAX) return "未知";
-    return g_vision_class_names[class_id].name_zh;
+/**
+ * @brief 默认COCO兼容80类英文名称列表
+ */
+static const char* g_default_coco_names_en[VISION_CLASS_DEFAULT_COUNT] = {
+    "person",         "bicycle",       "car",            "motorcycle",
+    "airplane",       "bus",           "train",          "truck",
+    "boat",           "traffic light", "fire hydrant",   "stop sign",
+    "parking meter",  "bench",         "bird",           "cat",
+    "dog",            "horse",         "sheep",          "cow",
+    "elephant",       "bear",          "zebra",          "giraffe",
+    "backpack",       "umbrella",      "handbag",        "tie",
+    "suitcase",       "frisbee",       "skis",           "snowboard",
+    "sports ball",    "kite",          "baseball bat",   "baseball glove",
+    "skateboard",     "surfboard",     "tennis racket",  "bottle",
+    "wine glass",     "cup",           "fork",           "knife",
+    "spoon",          "bowl",          "banana",         "apple",
+    "sandwich",       "orange",        "broccoli",       "carrot",
+    "hot dog",        "pizza",         "donut",          "cake",
+    "chair",          "couch",         "potted plant",   "bed",
+    "dining table",   "toilet",        "tv",             "laptop",
+    "mouse",          "remote",        "keyboard",       "cell phone",
+    "microwave",      "oven",          "toaster",        "sink",
+    "refrigerator",   "book",          "clock",          "vase",
+    "scissors",       "teddy bear",    "hair drier",     "toothbrush"
+};
+
+/**
+ * @brief 视觉类别注册表内部结构
+ *
+ * 使用动态数组管理类别条目，支持运行时扩展。
+ * 类别ID: 0-79为默认COCO兼容类别, 80+为通过学习动态注册的类别。
+ */
+struct VisionClassRegistry {
+    VisionClassEntry* entries;     /**< 类别条目动态数组 */
+    int count;                     /**< 当前类别总数 */
+    int capacity;                  /**< 动态数组当前容量 */
+    int next_dynamic_id;           /**< 下一个动态分配的类别ID */
+    int initialized;               /**< 是否已加载默认类别 */
+    MutexHandle lock;              /**< 线程安全互斥锁 */
+};
+
+/* 全局单例注册表 */
+static VisionClassRegistry* g_global_class_registry = NULL;
+static MutexHandle g_registry_singleton_lock = NULL;
+
+static void _registry_lock_init(void) {
+    if (!g_registry_singleton_lock) {
+        g_registry_singleton_lock = mutex_create();
+    }
 }
 
+/**
+ * @brief 创建类别注册表并加载80类COCO默认类别
+ */
+VisionClassRegistry* vision_class_registry_create(void) {
+    VisionClassRegistry* reg = (VisionClassRegistry*)safe_calloc(1, sizeof(VisionClassRegistry));
+    if (!reg) return NULL;
+
+    reg->capacity = VISION_CLASS_DEFAULT_COUNT + 64; /* 初始容量=80默认+64预留 */
+    reg->entries = (VisionClassEntry*)safe_calloc((size_t)reg->capacity, sizeof(VisionClassEntry));
+    if (!reg->entries) {
+        safe_free((void**)&reg);
+        return NULL;
+    }
+
+    reg->lock = mutex_create();
+    if (!reg->lock) {
+        safe_free((void**)&reg->entries);
+        safe_free((void**)&reg);
+        return NULL;
+    }
+
+    /* 加载80类COCO默认类别（标签字典，不含预训练权重） */
+    for (int i = 0; i < VISION_CLASS_DEFAULT_COUNT; i++) {
+        reg->entries[i].class_id = i;
+        strncpy(reg->entries[i].name_zh, g_default_coco_names_zh[i], VISION_CLASS_NAME_MAX_LEN - 1);
+        reg->entries[i].name_zh[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+        strncpy(reg->entries[i].name_en, g_default_coco_names_en[i], VISION_CLASS_NAME_MAX_LEN - 1);
+        reg->entries[i].name_en[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+        reg->entries[i].is_learned = 0;       /* 默认类别非学习获得 */
+        reg->entries[i].sample_count = 0;
+        reg->entries[i].confidence_threshold = 0.5f;
+    }
+    reg->count = VISION_CLASS_DEFAULT_COUNT;
+    reg->next_dynamic_id = VISION_CLASS_DEFAULT_COUNT;
+    reg->initialized = 1;
+
+    return reg;
+}
+
+/**
+ * @brief 释放类别注册表
+ */
+void vision_class_registry_free(VisionClassRegistry* registry) {
+    if (!registry) return;
+    if (registry->lock) mutex_destroy(registry->lock);
+    safe_free((void**)&registry->entries);
+    safe_free((void**)&registry);
+}
+
+/**
+ * @brief 获取全局视觉类别注册表（单例模式，线程安全）
+ */
+VisionClassRegistry* vision_class_registry_get_global(void) {
+    _registry_lock_init();
+    if (g_registry_singleton_lock) mutex_lock(g_registry_singleton_lock);
+
+    if (!g_global_class_registry) {
+        g_global_class_registry = vision_class_registry_create();
+    }
+
+    VisionClassRegistry* result = g_global_class_registry;
+    if (g_registry_singleton_lock) mutex_unlock(g_registry_singleton_lock);
+    return result;
+}
+
+/**
+ * @brief 通过多模态学习注册新类别
+ *
+ * 当系统通过教学/学习识别到新的物体类别时调用，
+ * 自动分配新class_id并返回。
+ *
+ * @param registry 注册表句柄
+ * @param name_zh 中文名称
+ * @param name_en 英文名称
+ * @return 新分配的class_id，失败返回-1
+ */
+int vision_class_register(VisionClassRegistry* registry,
+                          const char* name_zh, const char* name_en) {
+    if (!registry || !registry->initialized) return -1;
+    if (!name_zh || !name_en) return -1;
+
+    mutex_lock(registry->lock);
+
+    /* 检查是否已存在同英文名类别（去重） */
+    for (int i = 0; i < registry->count; i++) {
+        if (strcmp(registry->entries[i].name_en, name_en) == 0) {
+            int existing_id = registry->entries[i].class_id;
+            mutex_unlock(registry->lock);
+            return existing_id;
+        }
+    }
+
+    /* 动态扩容 */
+    if (registry->count >= registry->capacity) {
+        int new_cap = registry->capacity * 2;
+        if (new_cap > VISION_CLASS_MAX_CAPACITY) {
+            mutex_unlock(registry->lock);
+            return -1;
+        }
+        VisionClassEntry* new_entries = (VisionClassEntry*)safe_realloc(
+            registry->entries, (size_t)new_cap * sizeof(VisionClassEntry));
+        if (!new_entries) {
+            mutex_unlock(registry->lock);
+            return -1;
+        }
+        memset(new_entries + registry->capacity, 0,
+               (size_t)(new_cap - registry->capacity) * sizeof(VisionClassEntry));
+        registry->entries = new_entries;
+        registry->capacity = new_cap;
+    }
+
+    /* 注册新类别 */
+    int new_id = registry->next_dynamic_id++;
+    VisionClassEntry* entry = &registry->entries[registry->count];
+    memset(entry, 0, sizeof(VisionClassEntry));
+    entry->class_id = new_id;
+    strncpy(entry->name_zh, name_zh, VISION_CLASS_NAME_MAX_LEN - 1);
+    entry->name_zh[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+    strncpy(entry->name_en, name_en, VISION_CLASS_NAME_MAX_LEN - 1);
+    entry->name_en[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+    entry->is_learned = 1;
+    entry->sample_count = 1;
+    entry->confidence_threshold = 0.35f; /* 学习类别初始阈值较低 */
+
+    registry->count++;
+    mutex_unlock(registry->lock);
+
+    return new_id;
+}
+
+/**
+ * @brief 获取当前类别总数（随学习动态增长）
+ */
+int vision_class_get_count(const VisionClassRegistry* registry) {
+    if (!registry || !registry->initialized) return 0;
+    return registry->count;
+}
+
+/**
+ * @brief 获取指定类别条目详情
+ */
+int vision_class_get_entry(const VisionClassRegistry* registry, int class_id,
+                           VisionClassEntry* entry) {
+    if (!registry || !registry->initialized) return -1;
+    if (class_id < 0) return -1;
+
+    for (int i = 0; i < registry->count; i++) {
+        if (registry->entries[i].class_id == class_id) {
+            if (entry) memcpy(entry, &registry->entries[i], sizeof(VisionClassEntry));
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/**
+ * @brief 增加某类别的学习样本计数
+ */
+int vision_class_add_samples(VisionClassRegistry* registry, int class_id, int count) {
+    if (!registry || !registry->initialized || count < 1) return -1;
+
+    mutex_lock(registry->lock);
+    for (int i = 0; i < registry->count; i++) {
+        if (registry->entries[i].class_id == class_id) {
+            registry->entries[i].sample_count += count;
+            /* 样本越多置信度阈值越高（避免误检） */
+            if (registry->entries[i].sample_count > 100) {
+                registry->entries[i].confidence_threshold = 0.5f;
+            } else if (registry->entries[i].sample_count > 10) {
+                registry->entries[i].confidence_threshold = 0.4f;
+            }
+            mutex_unlock(registry->lock);
+            return 0;
+        }
+    }
+    mutex_unlock(registry->lock);
+    return -1;
+}
+
+/**
+ * @brief 视觉类别ID到中文名称映射（动态查询全局注册表）
+ *
+ * P0-004修复：不再依赖静态数组，改为动态查询全局注册表。
+ * 先查默认COCO类别(0-79)，再查动态注册类别(80+)。
+ */
+const char* vision_get_class_name_zh(int class_id) {
+    VisionClassRegistry* reg = vision_class_registry_get_global();
+    if (!reg) return "未知";
+
+    VisionClassEntry entry;
+    if (vision_class_get_entry(reg, class_id, &entry) == 0) {
+        return (entry.name_zh[0] != '\0') ? entry.name_zh : "未知";
+    }
+    return "未知";
+}
+
+/**
+ * @brief 视觉类别ID到英文名称映射（动态查询全局注册表）
+ */
 const char* vision_get_class_name_en(int class_id) {
-    if (class_id < 0 || class_id >= CFC_VISION_CLASS_MAX) return "unknown";
-    return g_vision_class_names[class_id].name_en;
+    VisionClassRegistry* reg = vision_class_registry_get_global();
+    if (!reg) return "unknown";
+
+    VisionClassEntry entry;
+    if (vision_class_get_entry(reg, class_id, &entry) == 0) {
+        return (entry.name_en[0] != '\0') ? entry.name_en : "unknown";
+    }
+    return "unknown";
 }
 
 int vision_cfc_detect(const float* image, int width, int height, int channels,
@@ -164,22 +400,28 @@ int vision_cfc_detect(const float* image, int width, int height, int channels,
             float conf = 1.0f / (1.0f + expf(-cfc_hidden[base + 4]));
             if (conf < 0.3f) continue;
 
-            float class_logits[CFC_VISION_CLASS_MAX];
-            int logits_end = base + 5 + CFC_VISION_CLASS_MAX;
+            /* P0-004修复: 使用动态类别数替代固定CFC_VISION_CLASS_MAX */
+            int num_classes = vision_class_get_count(vision_class_registry_get_global());
+            if (num_classes <= 0) num_classes = VISION_CLASS_DEFAULT_COUNT;
+            int per_det_dim = 5 + num_classes; /* cx,cy,w,h,conf + N类logits */
+            int logits_end = base + per_det_dim;
+
+            float* class_logits = (float*)safe_calloc((size_t)num_classes, sizeof(float));
             int class_id = 0;
             float max_prob = 0.0f;
 
-            if (logits_end <= CFC_VISION_HIDDEN_DIM) {
-                for (int c = 0; c < CFC_VISION_CLASS_MAX; c++)
+            if (class_logits && logits_end <= CFC_VISION_HIDDEN_DIM) {
+                for (int c = 0; c < num_classes; c++)
                     class_logits[c] = cfc_hidden[base + 5 + c];
-                _softmax(class_logits, CFC_VISION_CLASS_MAX);
-                for (int c = 0; c < CFC_VISION_CLASS_MAX; c++) {
+                _softmax(class_logits, num_classes);
+                for (int c = 0; c < num_classes; c++) {
                     if (class_logits[c] > max_prob) {
                         max_prob = class_logits[c];
                         class_id = c;
                     }
                 }
             }
+            safe_free((void**)&class_logits);
 
             detections[*num_found].cx = cx;
             detections[*num_found].cy = cy;
@@ -888,6 +1130,13 @@ int vision_enhanced_cfc_detect(const float* features, int feature_dim,
                                 int max_detections, int* num_found) {
     if (!features || !detections || !num_found || !vision_lnn) return -1;
     *num_found = 0;
+
+    /* P0-004修复: 获取动态类别数 */
+    int num_classes = vision_class_get_count(vision_class_registry_get_global());
+    if (num_classes <= 0) num_classes = VISION_CLASS_DEFAULT_COUNT;
+    /* 每个检测编码: cx,cy,w,h,conf + N类logits = 5+num_classes */
+    int per_det_dim = 5 + num_classes;
+
     int in_dim = feature_dim < CFC_VISION_INPUT_DIM ? feature_dim : CFC_VISION_INPUT_DIM;
     float* in_buf = (float*)safe_calloc(CFC_VISION_INPUT_DIM, sizeof(float));
     float* hid_buf = (float*)safe_calloc(CFC_VISION_HIDDEN_DIM, sizeof(float));
@@ -896,13 +1145,13 @@ int vision_enhanced_cfc_detect(const float* features, int feature_dim,
 
     lnn_forward(vision_lnn, in_buf, hid_buf);
 
-    /* 分组解码：5组×10检测 = 50个检测对象 */
+    /* 分组解码：5组×10检测 = 50个检测对象（每检测per_det_dim维） */
     int groups = 5;
     int per_g = 10;
     for (int g = 0; g < groups; g++) {
         int off = g * (CFC_VISION_HIDDEN_DIM / groups);
         for (int d = 0; d < per_g && *num_found < max_detections; d++) {
-            int b = off + d * 85;
+            int b = off + d * per_det_dim;
             if (b + 4 >= CFC_VISION_HIDDEN_DIM) break;
             float cx = hid_buf[b], cy = hid_buf[b+1];
             float w = fabsf(hid_buf[b+2]) * 0.5f + 0.02f;
@@ -910,19 +1159,36 @@ int vision_enhanced_cfc_detect(const float* features, int feature_dim,
             float conf = 1.0f/(1.0f+expf(-hid_buf[b+4]));
             if (conf < 0.25f) continue;
 
-            float logits[VISION_ENHANCED_CLASS_MAX];
-            int ok = (b + 5 + VISION_ENHANCED_CLASS_MAX <= CFC_VISION_HIDDEN_DIM);
+            int ok = (b + per_det_dim <= CFC_VISION_HIDDEN_DIM);
             int best = 0;
-            if (ok) { for (int c = 0; c < VISION_ENHANCED_CLASS_MAX; c++) logits[c]=hid_buf[b+5+c];
-                _softmax(logits, VISION_ENHANCED_CLASS_MAX);
-                for (int c=0;c<VISION_ENHANCED_CLASS_MAX;c++) if(logits[c]>logits[best]) best=c;
-                memcpy(detections[*num_found].class_probs, logits, VISION_ENHANCED_CLASS_MAX*sizeof(float));
+            float* logits = (float*)safe_calloc((size_t)num_classes, sizeof(float));
+            if (ok && logits) {
+                for (int c = 0; c < num_classes; c++) logits[c] = hid_buf[b + 5 + c];
+                _softmax(logits, num_classes);
+                for (int c = 0; c < num_classes; c++)
+                    if (logits[c] > logits[best]) best = c;
+                /* 动态分配class_probs */
+                detections[*num_found].class_probs = (float*)safe_malloc((size_t)num_classes * sizeof(float));
+                if (detections[*num_found].class_probs) {
+                    memcpy(detections[*num_found].class_probs, logits, (size_t)num_classes * sizeof(float));
+                    detections[*num_found].class_probs_count = num_classes;
+                } else {
+                    detections[*num_found].class_probs_count = 0;
+                }
             }
+            safe_free((void**)&logits);
             detections[*num_found].cx = cx; detections[*num_found].cy = cy;
             detections[*num_found].w = w; detections[*num_found].h = h_img;
             detections[*num_found].confidence = conf;
             detections[*num_found].class_id = best;
-            snprintf(detections[*num_found].class_name, 32, "class_%d", best);
+            /* 从注册表获取类别名称 */
+            VisionClassEntry cls_entry;
+            if (vision_class_get_entry(vision_class_registry_get_global(), best, &cls_entry) == 0) {
+                strncpy(detections[*num_found].class_name, cls_entry.name_zh, VISION_CLASS_NAME_MAX_LEN - 1);
+                detections[*num_found].class_name[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+            } else {
+                snprintf(detections[*num_found].class_name, VISION_CLASS_NAME_MAX_LEN - 1, "class_%d", best);
+            }
             (*num_found)++;
         }
     }

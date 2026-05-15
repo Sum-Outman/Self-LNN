@@ -339,6 +339,11 @@ int selflnn_init(const SystemConfig* config)
     if (g_system_state.planning_system) selflnn_register_module(MODULE_ID_PLANNING, g_system_state.planning_system, 1);
     if (g_system_state.auto_learning) selflnn_register_module(MODULE_ID_AUTO_LEARNING, g_system_state.auto_learning, 1);
     
+    /* P0-001修复: 所有子系统注册完毕后，强制执行单一LNN模式
+     * 此后所有模块的 lnn_create() 调用将被自动重定向到全局唯一LNN
+     * 确保 "所有模态 → 统一输入到同一个连续动态系统" 原则 */
+    selflnn_enforce_single_lnn();
+    
     log_info("SELF-LNN系统初始化成功（单一液态神经网络模型，%d个模块已注册）", MODULE_COUNT);
     log_info("状态维度: %d", config->state_dimension);
     log_info("记忆容量: %d", config->memory_capacity);
@@ -939,6 +944,13 @@ void* selflnn_get_dialogue_processor(void) {
 
 void* selflnn_get_safety_monitor(void) {
     return g_system_state.safety_monitor;
+}
+
+/* P0-002修复: 全局统一信号处理器访问器
+ * 所有多模态信号通过此统一处理器进入共享LNN，
+ * 禁止任何模块自行创建独立的UnifiedSignalProcessor */
+void* selflnn_get_unified_signal_processor(void) {
+    return g_system_state.unified_signal_processor;
 }
 
 /* selflnn_get_lnn 已在F-017单LNN强制执行区定义 */

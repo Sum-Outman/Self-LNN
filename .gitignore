@@ -97,6 +97,7 @@ docs/_site/
 .trae/rules/
 reports/
 examples/
+scripts/
 需求.txt
 build/
 data/

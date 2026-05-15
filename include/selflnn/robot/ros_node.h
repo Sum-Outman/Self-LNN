@@ -16,6 +16,8 @@ extern "C" {
 
 typedef struct RosNode RosNode;
 
+typedef void (*RosMessageCallback)(const void* data, size_t size, void* user_data);
+
 typedef struct {
     char master_host[256];
     int master_port;

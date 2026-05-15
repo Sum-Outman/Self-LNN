@@ -245,7 +245,7 @@ if(BUILD_FRONTEND)
     
     add_custom_target(check_frontend
         COMMAND ${CMAKE_COMMAND} -E echo "正在检查前端文件完整性..."
-        COMMAND ${CMAKE_COMMAND} -E echo "前端文件列表 (K-033: 完整16个JS文件):"
+        COMMAND ${CMAKE_COMMAND} -E echo "前端文件列表 (K-033: 完整17个JS文件):"
         COMMAND ${CMAKE_COMMAND} -E echo "  - index.html (主页面)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - api-docs.html (API文档)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - api-keys.html (API密钥)"
@@ -278,6 +278,7 @@ if(BUILD_FRONTEND)
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/voice-capture-util.js (语音采集)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/programming-workbench.js (编程工作台)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/main.js (主逻辑)"
+        COMMAND ${CMAKE_COMMAND} -E echo "  - js/hardware-util.js (硬件工具)"
         COMMAND ${CMAKE_COMMAND} -E echo "前端文件完整性检查完成"
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "检查前端文件完整性"

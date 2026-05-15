@@ -148,5 +148,5 @@ The system supports model saving, loading, checkpoint saving and recovery functi
 
 ---
 
-> **文档更新 / Updated**: 2026-05-11
+> **文档更新 / Updated**: 2026-05-14
 > **相关文档 / Related Docs**: [架构图](./Architecture_Diagram.md) | [用户手册](./USER_GUIDE.md) | [开发指南](./DEVELOPMENT_GUIDE_ZH.md)

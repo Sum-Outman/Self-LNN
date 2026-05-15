@@ -4,6 +4,20 @@
 #include <string.h>
 #include <stdio.h>
 
+/* ZSFAB P2-007修复: 跨平台互斥锁保护全局能力状态 */
+#ifdef _WIN32
+#include <windows.h>
+static CRITICAL_SECTION g_cap_lock;
+static int g_cap_lock_initialized = 0;
+#define CAP_LOCK()   do { if (!g_cap_lock_initialized) { InitializeCriticalSection(&g_cap_lock); g_cap_lock_initialized = 1; } EnterCriticalSection(&g_cap_lock); } while(0)
+#define CAP_UNLOCK() LeaveCriticalSection(&g_cap_lock)
+#else
+#include <pthread.h>
+static pthread_mutex_t g_cap_lock = PTHREAD_MUTEX_INITIALIZER;
+#define CAP_LOCK()   pthread_mutex_lock(&g_cap_lock)
+#define CAP_UNLOCK() pthread_mutex_unlock(&g_cap_lock)
+#endif
+
 /* 前向声明：子系统访问器（来自selflnn.h） */
 extern void* selflnn_get_self_cognition(void);
 extern void* selflnn_get_metacognition(void);
@@ -281,8 +295,12 @@ int capability_is_enabled(CapabilityType type)
 {
     if (type < 0 || type >= CAP_COUNT) return 0;
     ensure_callbacks_registered();
-    if (g_check_funcs[type]) return g_check_funcs[type]();
-    return g_capability_states[type];
+    CAP_LOCK();
+    int result;
+    if (g_check_funcs[type]) result = g_check_funcs[type]();
+    else result = g_capability_states[type];
+    CAP_UNLOCK();
+    return result;
 }
 
 int capability_set_enabled(CapabilityType type, int enabled)
@@ -290,7 +308,9 @@ int capability_set_enabled(CapabilityType type, int enabled)
     if (type < 0 || type >= CAP_COUNT) return -1;
     ensure_callbacks_registered();
     int val = (enabled != 0) ? 1 : 0;
+    CAP_LOCK();
     if (!val && g_capability_forced_on[type]) {
+        CAP_UNLOCK();
         log_warning("[能力开关] %s 被强制锁定，无法关闭", g_capability_names[type]);
         return -1;
     }
@@ -298,15 +318,18 @@ int capability_set_enabled(CapabilityType type, int enabled)
     if (g_set_funcs[type]) {
         g_set_funcs[type](val);
     }
+    CAP_UNLOCK();
     return 0;
 }
 
 int capability_force_on(CapabilityType type)
 {
     if (type < 0 || type >= CAP_COUNT) return -1;
+    CAP_LOCK();
     g_capability_forced_on[type] = 1;
     g_capability_states[type] = 1;
     if (g_set_funcs[type]) g_set_funcs[type](1);
+    CAP_UNLOCK();
     log_info("[能力开关] %s 已强制锁定为开启", g_capability_names[type]);
     return 0;
 }
@@ -314,7 +337,9 @@ int capability_force_on(CapabilityType type)
 int capability_unforce(CapabilityType type)
 {
     if (type < 0 || type >= CAP_COUNT) return -1;
+    CAP_LOCK();
     g_capability_forced_on[type] = 0;
+    CAP_UNLOCK();
     return 0;
 }
 
@@ -331,31 +356,37 @@ int capability_disable(CapabilityType type)
 int capability_toggle(CapabilityType type)
 {
     if (type < 0 || type >= CAP_COUNT) return -1;
+    CAP_LOCK();
     int current = g_capability_states[type];
+    CAP_UNLOCK();
     return capability_set_enabled(type, !current);
 }
 
 int capability_enable_all(void)
 {
     int i;
+    CAP_LOCK();
     for (i = 0; i < CAP_COUNT; i++) {
         g_capability_states[i] = 1;
         if (g_set_funcs[i]) {
             g_set_funcs[i](1);
         }
     }
+    CAP_UNLOCK();
     return 0;
 }
 
 int capability_disable_all(void)
 {
     int i;
+    CAP_LOCK();
     for (i = 0; i < CAP_COUNT; i++) {
         g_capability_states[i] = 0;
         if (g_set_funcs[i]) {
             g_set_funcs[i](0);
         }
     }
+    CAP_UNLOCK();
     return 0;
 }
 
@@ -411,8 +442,10 @@ int capability_register_module(CapabilityType type,
                                 CapabilitySetFunc set_func)
 {
     if (type < 0 || type >= CAP_COUNT) return -1;
+    CAP_LOCK();
     g_check_funcs[type] = check_func;
     g_set_funcs[type] = set_func;
+    CAP_UNLOCK();
     return 0;
 }
 

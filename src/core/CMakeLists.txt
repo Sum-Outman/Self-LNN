@@ -9,6 +9,7 @@ add_library(selflnn_core
     state.c
     errors.c
     laplace.c
+    laplace_fft.c
     laplace_enhanced.c
     quaternion_lnn.c
     quaternion_conv.c
@@ -23,6 +24,7 @@ add_library(selflnn_core
     decision_engine.c
     laplace_integration.c
     quaternion_cfc.c
+    quaternion_enhanced.c
     evolutionary_algorithms.c
     cma_es.c
     laplace_ai_framework.c
@@ -63,6 +65,7 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/network.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/errors.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_fft.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_enhanced.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_features.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_integration.h

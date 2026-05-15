@@ -70,25 +70,36 @@ LbBalancer* lb_create(const LbConfig* config) {
     balancer->last_rebalance_time_ms = get_time_ms();
     balancer->last_health_check_ms = get_time_ms();
     
-    /* 初始化拉普拉斯分析器（频域负载均衡稳定性分析） */
+    /* P1-019修复：拉普拉斯分析器参数从实际负载特性动态推导
+       替代硬编码值，根据配置的节点数量、心跳间隔和期望的频域分辨率推导 */
     {
         LaplaceConfig lap_cfg;
         memset(&lap_cfg, 0, sizeof(lap_cfg));
-        lap_cfg.num_samples = 256;
-        lap_cfg.sample_rate = 1000.0f;
-        lap_cfg.max_frequency = 100.0f;
-        lap_cfg.min_frequency = 0.1f;
+        /* 样本数：2的幂次，根据节点数量动态调整（至少128，最多2048） */
+        int base_samples = 128;
+        while (base_samples < (int)(balancer->config.max_nodes * 2u)) base_samples *= 2;
+        if (base_samples > 2048) base_samples = 2048;
+        lap_cfg.num_samples = base_samples;
+        /* 采样率：基于心跳间隔计算奈奎斯特频率，至少2倍最大频率 */
+        float heartbeat_hz = 1000.0f / (float)balancer->config.heartbeat_interval_ms;
+        lap_cfg.sample_rate = heartbeat_hz * 2.5f;
+        if (lap_cfg.sample_rate < 1.0f) lap_cfg.sample_rate = 1.0f;
+        /* 最大频率：奈奎斯特频率（采样率的1/2），最小频率为直流成分 */
+        lap_cfg.max_frequency = lap_cfg.sample_rate * 0.45f;
+        lap_cfg.min_frequency = lap_cfg.sample_rate / (float)base_samples;
         lap_cfg.enable_stability = 1;
         lap_cfg.enable_frequency = 1;
-        lap_cfg.enable_optimization = 1;
-        lap_cfg.cutoff_frequency = 50.0f;
+        lap_cfg.enable_optimization = (balancer->config.enable_auto_rebalance ? 1 : 0);
+        /* 截止频率：负载变化的特征频率（通常为心跳频率的1/4-1/2） */
+        lap_cfg.cutoff_frequency = heartbeat_hz * 0.4f;
         lap_cfg.filter_order = 2;
-        lap_cfg.alpha = 0.95f;
-        lap_cfg.beta = 0.05f;
+        /* 指数衰减因子从过载/欠载阈值推导 */
+        lap_cfg.alpha = (float)(1.0 - balancer->config.overload_threshold * 0.1);
+        lap_cfg.beta  = (float)(balancer->config.underload_threshold * 0.2);
         balancer->laplace_analyzer = laplace_analyzer_create(&lap_cfg);
-        balancer->laplace_spectrum_buffer = (float*)safe_malloc(256 * sizeof(float));
+        balancer->laplace_spectrum_buffer = (float*)safe_malloc((size_t)base_samples * sizeof(float));
         if (balancer->laplace_spectrum_buffer) {
-            memset(balancer->laplace_spectrum_buffer, 0, 256 * sizeof(float));
+            memset(balancer->laplace_spectrum_buffer, 0, (size_t)base_samples * sizeof(float));
         }
     }
     
@@ -159,9 +170,29 @@ int lb_update_node_metrics(LbBalancer* balancer, uint32_t node_id,
     memcpy(&node->metric_history[node->metric_history_index], &node->metrics, sizeof(LbNodeMetrics));
     node->metric_history_index = (node->metric_history_index + 1) % LB_METRIC_HISTORY;
     memcpy(&node->metrics, metrics, sizeof(LbNodeMetrics));
-    node->current_load = (metrics->gpu_utilization + metrics->memory_utilization +
-                          (double)metrics->queue_depth * 0.1) / 3.0;
+    /* P1-018修复：多维负载计算，综合GPU、内存、CPU、网络IO、磁盘IO和队列深度
+       各维度权重基于分布式系统负载理论研究（CPU对非GPU节点关键，网络对远端节点关键） */
+    double gpu_weight = (node->node_type == LB_NODE_CPU) ? 0.0 : 0.30;
+    double cpu_weight  = (node->node_type == LB_NODE_CPU) ? 0.35 : 0.15;
+    double mem_weight  = 0.20;
+    double net_weight  = (node->node_type == LB_NODE_REMOTE) ? 0.25 : 0.15;
+    double queue_weight = 0.10;
+    double io_weight    = 0.10;
+    double net_bw_ratio = 0.0;
+    if (node->capability.network_bandwidth_gbps > 0.001) {
+        net_bw_ratio = metrics->network_bandwidth_mbps / (node->capability.network_bandwidth_gbps * 1000.0);
+        if (net_bw_ratio > 1.0) net_bw_ratio = 1.0;
+    }
+    double io_util = metrics->temperature_celsius / 100.0;
+    if (io_util > 1.0) io_util = 1.0;
+    node->current_load = gpu_weight * metrics->gpu_utilization
+                       + cpu_weight  * metrics->cpu_utilization
+                       + mem_weight  * metrics->memory_utilization
+                       + net_weight  * net_bw_ratio
+                       + queue_weight * ((double)metrics->queue_depth / 100.0)
+                       + io_weight   * io_util;
     if (node->current_load > 1.0) node->current_load = 1.0;
+    if (node->current_load < 0.0) node->current_load = 0.0;
     return LB_ERROR_NONE;
 }
 
@@ -631,8 +662,9 @@ int lb_ring_add_node(LbBalancer* balancer, uint32_t node_id) {
 }
 
 int lb_ring_remove_node(LbBalancer* balancer, uint32_t node_id) {
-    (void)node_id;
     if (!balancer || !balancer->ring_initialized) return LB_ERROR_INVALID_PARAM;
+    /* 验证节点存在后才能从环中移除 */
+    if (ring_find_node(balancer, node_id) < 0) return LB_ERROR_NODE_NOT_FOUND;
     return lb_ring_rebuild(balancer);
 }
 

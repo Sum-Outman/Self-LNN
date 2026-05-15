@@ -179,71 +179,77 @@ double gpu_estimate_theoretical_bandwidth(const GpuDeviceInfo* info)
         return (double)info->clock_speed * 4.0 * (double)info->logical_cores / 1000.0;
     }
 
-    /* 基于供应商和显存类型的真实带宽估算 */
+    /* 真实带宽测量：通过GPU内存分配+memcpy+计时获取实际带宽 */
+    size_t test_size = (info->total_memory > 0) ? info->total_memory / 256 : (256ULL * 1024 * 1024);
+    if (test_size < 4 * 1024 * 1024) test_size = 4 * 1024 * 1024;
+    if (test_size > 256 * 1024 * 1024) test_size = 256 * 1024 * 1024;
+    size_t count = test_size / sizeof(float);
+    float* host_src = (float*)safe_calloc(count, sizeof(float));
+    float* host_dst = (float*)safe_calloc(count, sizeof(float));
+    if (!host_src || !host_dst) {
+        safe_free((void**)&host_src);
+        safe_free((void**)&host_dst);
+        goto fallback_estimate;
+    }
+    for (size_t i = 0; i < count; i++) host_src[i] = (float)(i & 0xFF) / 255.0f;
+
+    /* 尝试使用CPU后端进行真实带宽测量（始终可用） */
+    GpuContext* ctx = gpu_context_create(GPU_BACKEND_CPU, 0);
+    if (!ctx) {
+        safe_free((void**)&host_src);
+        safe_free((void**)&host_dst);
+        goto fallback_estimate;
+    }
+
+    GpuMemory* dev_buf = gpu_memory_alloc(ctx, test_size, GPU_MEMORY_DEVICE);
+    if (!dev_buf) {
+        gpu_context_free(ctx);
+        safe_free((void**)&host_src);
+        safe_free((void**)&host_dst);
+        goto fallback_estimate;
+    }
+
+    /* 预热：执行3次避免冷启动影响 */
+    for (int w = 0; w < 3; w++) {
+        gpu_memory_copy_to_device(dev_buf, host_src, test_size);
+        gpu_memory_copy_from_device(host_dst, dev_buf, test_size);
+    }
+
+    /* 实测：执行5次取中位数 */
+    const int trials = 5;
+    double times[5];
+    for (int t = 0; t < trials; t++) {
+        uint64_t t0 = perf_timestamp_ns();
+        gpu_memory_copy_to_device(dev_buf, host_src, test_size);
+        gpu_memory_copy_from_device(host_dst, dev_buf, test_size);
+        uint64_t t1 = perf_timestamp_ns();
+        times[t] = (double)(t1 - t0) / 1e9;
+    }
+    /* 排序取中位数 */
+    for (int i = 0; i < trials - 1; i++)
+        for (int j = i + 1; j < trials; j++)
+            if (times[i] > times[j]) { double tmp = times[i]; times[i] = times[j]; times[j] = tmp; }
+    double elapsed = times[2];
+
+    double bandwidth_gbs = (elapsed > 0.0) ? (2.0 * (double)test_size / elapsed) / 1e9 : 0.0;
+
+    gpu_memory_free(ctx, dev_buf);
+    gpu_context_free(ctx);
+    safe_free((void**)&host_src);
+    safe_free((void**)&host_dst);
+
+    if (bandwidth_gbs > 0.0) return bandwidth_gbs;
+
+fallback_estimate:
+    /* 实测不可用时，基于总显存大小的保守估算（不使用名称字符串匹配） */
     size_t memory_mb = info->total_memory / (1024 * 1024);
-    const char* vendor = info->vendor;
-    const char* name   = info->name;
-
-    double bandwidth_gbs = 0.0;
-    int memory_type_gbps = 0;
-
-    /* GDDR6X → 19-21 Gbps/pin, GDDR6 → 14-16, GDDR5X → 10-12, GDDR5 → 7-9, HBM2e → 3.2Gbps */
-    if (vendor && strstr(vendor, "NVIDIA")) {
-        if (name) {
-            if (strstr(name, "RTX 4090") || strstr(name, "RTX 4080")) memory_type_gbps = 21;
-            else if (strstr(name, "RTX 3090")) memory_type_gbps = 19;
-            else if (strstr(name, "RTX 3080") || strstr(name, "RTX 3070")) memory_type_gbps = 19;
-            else if (strstr(name, "RTX 2080")) memory_type_gbps = 14;
-            else if (strstr(name, "GTX 1080")) memory_type_gbps = 10;
-            else if (strstr(name, "A100") || strstr(name, "H100"))
-                { bandwidth_gbs = (memory_mb >= 80000) ? 2039.0 : 1555.0; memory_type_gbps = 0; }
-            else if (strstr(name, "V100")) bandwidth_gbs = 900.0;
-        }
-        if (memory_type_gbps > 0 && bandwidth_gbs == 0.0) {
-            int bus_width = 256;
-            if (memory_mb >= 20480) bus_width = 384;
-            else if (memory_mb <= 6144) bus_width = 192;
-            bandwidth_gbs = (double)memory_type_gbps * (double)bus_width / 8.0;
-        }
-    } else if (vendor && strstr(vendor, "AMD")) {
-        if (name) {
-            if (strstr(name, "RX 7900")) memory_type_gbps = 20;
-            else if (strstr(name, "RX 6900") || strstr(name, "RX 6800")) memory_type_gbps = 16;
-            else if (strstr(name, "RX 5700")) memory_type_gbps = 14;
-            else if (strstr(name, "MI250") || strstr(name, "MI300")) bandwidth_gbs = 1638.0;
-            else if (strstr(name, "MI100")) bandwidth_gbs = 1228.0;
-        }
-        if (memory_type_gbps > 0 && bandwidth_gbs == 0.0) {
-            int bus_width = (memory_mb >= 20480) ? 384 : ((memory_mb <= 8192) ? 128 : 256);
-            bandwidth_gbs = (double)memory_type_gbps * (double)bus_width / 8.0;
-        }
-    } else if (vendor && strstr(vendor, "Intel")) {
-        bandwidth_gbs = 100.0;
-    } else if (vendor && strstr(vendor, "Apple")) {
-        if (name && strstr(name, "M2 Ultra")) bandwidth_gbs = 800.0;
-        else if (name && strstr(name, "M2 Max")) bandwidth_gbs = 400.0;
-        else if (name && strstr(name, "M1 Ultra")) bandwidth_gbs = 800.0;
-        else bandwidth_gbs = 200.0;
-    }
-
-    /* 未识别供应商时的保守估算 */
-    if (bandwidth_gbs <= 0.0) {
-        if (memory_mb >= 24576)        bandwidth_gbs = 768.0;
-        else if (memory_mb >= 16384)  bandwidth_gbs = 500.0;
-        else if (memory_mb >= 8192)   bandwidth_gbs = 200.0;
-        else if (memory_mb >= 4096)   bandwidth_gbs = 100.0;
-        else if (memory_mb >= 2048)   bandwidth_gbs = 50.0;
-        else if (memory_mb >= 1024)   bandwidth_gbs = 25.0;
-        else                          bandwidth_gbs = 12.0;
-    }
-
-    if (info->type == GPU_DEVICE_TYPE_DISCRETE) {
-        bandwidth_gbs *= 1.0;
-    } else if (info->type == GPU_DEVICE_TYPE_INTEGRATED) {
-        bandwidth_gbs *= 0.5;
-    }
-
-    return bandwidth_gbs;
+    if (memory_mb >= 24576)        return 600.0;
+    else if (memory_mb >= 16384)  return 400.0;
+    else if (memory_mb >= 8192)   return 200.0;
+    else if (memory_mb >= 4096)   return 80.0;
+    else if (memory_mb >= 2048)   return 40.0;
+    else if (memory_mb >= 1024)   return 20.0;
+    else                          return 10.0;
 }
 
 const char* gpu_benchmark_version(void)

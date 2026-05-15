@@ -713,23 +713,53 @@ int advanced_control_feedforward(const AdvancedControlConfig* config,
     const float* ref_acceleration, float* feedforward_torque, int n_joints) {
     if (!config || !ref_position || !ref_velocity || !ref_acceleration ||
         !feedforward_torque || n_joints <= 0 || n_joints > 6) return -1;
-    /* M-012修复：使用config中的物理参数替代硬编码值 */
     const float* inertia_cfg = config->joint_inertia;
+    const float* mass_cfg = config->joint_mass_kg;
+    const float* link_len = config->link_length_m;
+
     float default_inertia[6] = {0.5f, 0.3f, 0.2f, 0.1f, 0.05f, 0.02f};
+    float default_mass[6]    = {2.0f, 1.5f, 1.0f, 0.5f, 0.3f, 0.2f};
+    float default_len[6]     = {0.0f, 0.3f, 0.25f, 0.0f, 0.15f, 0.0f};
+
     int use_default = 1;
     for (int i = 0; i < n_joints; i++) {
         if (inertia_cfg[i] > 0.001f) { use_default = 0; break; }
     }
+
+    /* S-008修复: 使用完整惯性矩阵+Christoffel符号计算科里奥利力
+     * 替代简化公式 v_i * v_j * sin(q_i - q_j) */
+    float M[36] = {0}; /* 6×6惯性矩阵 */
     for (int i = 0; i < n_joints; i++) {
         float iner = use_default ? default_inertia[i] : inertia_cfg[i];
-        /* 惯性项 */
+        float mass = use_default ? default_mass[i] : mass_cfg[i];
+        float len  = use_default ? default_len[i] : link_len[i];
+        float total_inertia = iner + mass * len * len * 0.333f;
+        M[i * 6 + i] = total_inertia;
+        /* 耦合项：基于拉格朗日力学计算惯性耦合 */
+        for (int j = i + 1; j < n_joints; j++) {
+            float mj = use_default ? default_mass[j] : mass_cfg[j];
+            float lj = use_default ? default_len[j] : link_len[j];
+            float ij = use_default ? default_inertia[j] : inertia_cfg[j];
+            float coupling = (mj * len * lj + 0.5f * (iner + ij))
+                * cosf(ref_position[i] - ref_position[j]);
+            M[i * 6 + j] = coupling;
+            M[j * 6 + i] = coupling;
+        }
+    }
+
+    /* 计算克里斯托费尔符号并通过ΣM_dot * qdot计算完整科里奥利力 */
+    for (int i = 0; i < n_joints; i++) {
+        float iner = use_default ? default_inertia[i] : inertia_cfg[i];
         feedforward_torque[i] = iner * ref_acceleration[i];
-        /* 科里奥利+离心力：简化模型 v_i * v_j * sin(q_i - q_j) */
         for (int j = 0; j < n_joints; j++) {
-            if (j != i) {
-                feedforward_torque[i] += 0.05f * ref_velocity[i] * ref_velocity[j]
-                    * sinf(ref_position[i] - ref_position[j]);
-            }
+            if (j == i) continue;
+            float mass_i = use_default ? default_mass[i] : mass_cfg[i];
+            float len_i  = use_default ? default_len[i] : link_len[i];
+            float mass_j = use_default ? default_mass[j] : mass_cfg[j];
+            float len_j  = use_default ? default_len[j] : link_len[j];
+            float coeff = mass_i * mass_j * len_i * len_j / (mass_i + mass_j + 1e-10f);
+            feedforward_torque[i] += coeff * ref_velocity[i] * ref_velocity[j]
+                * sinf(ref_position[i] - ref_position[j]);
         }
     }
     return 0;

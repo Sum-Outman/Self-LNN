@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <ctype.h>
 #include <math.h>
 #include <float.h>
@@ -968,8 +969,12 @@ int pde_moo_optimize(PdeMultiObjectiveOptimizer* optimizer,
     if (population_size <= 0 || population_size > PDE_MAX_PARETO_SOLUTIONS)
         population_size = 100;
     if (generations <= 0) generations = 50;
-    (void)constraints;
-    (void)constraint_count;
+
+    /* S-007修复: 约束违反惩罚函数
+     * 线性约束: violation = max(0, Σc_i*x_i - rhs) for LE 或 max(0, rhs - Σc_i*x_i) for GE
+     * 惩罚系数随代数递减，允许前期探索不可行区域，后期收敛到可行域
+     * 不等式约束: violation = |Σc_i*x_i - rhs| for EQ */
+    float constraint_penalty_coeff = 1000.0f;
 
     memset(result, 0, sizeof(PdeMultiObjectiveResult));
     for (int i = 0; i < optimizer->objective_count; ++i)
@@ -992,6 +997,25 @@ int pde_moo_optimize(PdeMultiObjectiveOptimizer* optimizer,
         pop[i].objective_count = optimizer->objective_count;
         pde_evaluate_design(requirement, pop[i].parameters, param_count,
                             pop[i].objective_values, optimizer->objective_count);
+        /* S-007: 约束违反惩罚 —— 违反约束则所有目标值加惩罚项 */
+        for (size_t ci = 0; ci < constraint_count; ci++) {
+            float viol = 0.0f;
+            float linear_sum = 0.0f;
+            for (size_t cj = 0; cj < constraints[ci].coefficient_count && cj < param_count; cj++) {
+                linear_sum += (float)(constraints[ci].coefficients[cj] *
+                    pop[i].parameters[cj].current_value);
+            }
+            if (constraints[ci].type == CONSTRAINT_LINEAR_LE)
+                viol = linear_sum - (float)constraints[ci].rhs;
+            else if (constraints[ci].type == CONSTRAINT_LINEAR_GE)
+                viol = (float)constraints[ci].rhs - linear_sum;
+            else if (constraints[ci].type == CONSTRAINT_LINEAR_EQ)
+                viol = fabsf(linear_sum - (float)constraints[ci].rhs);
+            if (viol > 0.0f) {
+                for (int oi = 0; oi < optimizer->objective_count; oi++)
+                    pop[i].objective_values[oi] += constraint_penalty_coeff * viol;
+            }
+        }
     }
 
     /* 进化循环 */
@@ -1052,6 +1076,28 @@ int pde_moo_optimize(PdeMultiObjectiveOptimizer* optimizer,
                                 offspring[i].objective_values, optimizer->objective_count);
             pde_evaluate_design(requirement, offspring[i+1].parameters, param_count,
                                 offspring[i+1].objective_values, optimizer->objective_count);
+            /* S-007: 子代约束违反惩罚，penalty系数随代数递减 */
+            float gen_penalty = constraint_penalty_coeff * (1.0f - 0.7f * (float)gen / (float)generations);
+            for (size_t ci = 0; ci < constraint_count; ci++) {
+                for (int io = 0; io < 2; io++) {
+                    float viol = 0.0f, linear_sum = 0.0f;
+                    PdeParetoSolution* os = io == 0 ? &offspring[i] : &offspring[i+1];
+                    for (size_t cj = 0; cj < constraints[ci].coefficient_count && cj < param_count; cj++) {
+                        linear_sum += (float)(constraints[ci].coefficients[cj] *
+                            os->parameters[cj].current_value);
+                    }
+                    if (constraints[ci].type == CONSTRAINT_LINEAR_LE)
+                        viol = linear_sum - (float)constraints[ci].rhs;
+                    else if (constraints[ci].type == CONSTRAINT_LINEAR_GE)
+                        viol = (float)constraints[ci].rhs - linear_sum;
+                    else if (constraints[ci].type == CONSTRAINT_LINEAR_EQ)
+                        viol = fabsf(linear_sum - (float)constraints[ci].rhs);
+                    if (viol > 0.0f) {
+                        for (int oi = 0; oi < optimizer->objective_count; oi++)
+                            os->objective_values[oi] += gen_penalty * viol;
+                    }
+                }
+            }
         }
 
         /* 精英保留：合并父代和子代 */
@@ -1238,11 +1284,11 @@ int pde_explore_design_space(const ProductRequirement* requirement,
 {
     if (!requirement || !params || !results || !result_count) return -1;
     if (sample_count <= 0 || sample_count > PDE_MAX_SAMPLES) sample_count = 100;
-    (void)constraints;
-    (void)constraint_count;
 
+    /* S-007修复: 探索结果约束筛选 —— 标记违反约束的设计变体 */
     int count = 0;
     DesignParameter* temp_params = pde_copy_params(params, param_count);
+    float constraint_penalty = 1000.0f;
 
     for (int s = 0; s < sample_count && count < PDE_MAX_SAMPLES; ++s) {
         if (method == PDE_SAMPLE_GRID) {
@@ -1287,8 +1333,19 @@ int pde_explore_design_space(const ProductRequirement* requirement,
 
         float obj_vals[PDE_MAX_OBJECTIVES];
         pde_evaluate_design(requirement, temp_params, param_count, obj_vals, 3);
+        /* S-007: 约束违反惩罚 */
+        float viol_score = 0.0f;
+        for (size_t ci = 0; ci < constraint_count; ci++) {
+            float viol = 0.0f, linear_sum = 0.0f;
+            for (size_t cj = 0; cj < constraints[ci].coefficient_count && cj < param_count; cj++)
+                linear_sum += (float)(constraints[ci].coefficients[cj] * temp_params[cj].current_value);
+            if (constraints[ci].type == CONSTRAINT_LINEAR_LE) viol = linear_sum - (float)constraints[ci].rhs;
+            else if (constraints[ci].type == CONSTRAINT_LINEAR_GE) viol = (float)constraints[ci].rhs - linear_sum;
+            else if (constraints[ci].type == CONSTRAINT_LINEAR_EQ) viol = fabsf(linear_sum - (float)constraints[ci].rhs);
+            if (viol > 0.0f) viol_score += viol;
+        }
         results[count].composite_score =
-            pde_compute_composite_score(requirement, obj_vals, 3);
+            pde_compute_composite_score(requirement, obj_vals, 3) + constraint_penalty * viol_score;
         count++;
     }
 
@@ -1309,8 +1366,8 @@ int pde_sensitivity_analysis(const ProductRequirement* requirement,
     if (!requirement || !params || !results || !result_count) return -1;
     if (param_count == 0) return -1;
     if (trajectories <= 0) trajectories = 10;
-    (void)constraints;
-    (void)constraint_count;
+
+    /* S-007修复: 敏感性分析约束处理 —— 标记违反约束的参数影响 */
 
     /* Morris 法 elementary effects */
     double* ee_sum = (double*)safe_calloc(param_count, sizeof(double));
@@ -1335,6 +1392,16 @@ int pde_sensitivity_analysis(const ProductRequirement* requirement,
         float base_vals[PDE_MAX_OBJECTIVES];
         pde_evaluate_design(requirement, base, param_count, base_vals, 1);
         float base_score = base_vals[0];
+        /* S-007: 约束惩罚 */
+        for (size_t ci = 0; ci < constraint_count; ci++) {
+            float viol = 0.0f, ls = 0.0f;
+            for (size_t cj = 0; cj < constraints[ci].coefficient_count && cj < param_count; cj++)
+                ls += (float)(constraints[ci].coefficients[cj] * base[cj].current_value);
+            if (constraints[ci].type == CONSTRAINT_LINEAR_LE && ls > (float)constraints[ci].rhs)
+                base_score += 1000.0f * (ls - (float)constraints[ci].rhs);
+            else if (constraints[ci].type == CONSTRAINT_LINEAR_GE && ls < (float)constraints[ci].rhs)
+                base_score += 1000.0f * ((float)constraints[ci].rhs - ls);
+        }
 
         for (size_t j = 0; j < param_count; ++j) {
             for (size_t k = 0; k < param_count; ++k)
@@ -1406,9 +1473,8 @@ int pde_local_search(const ProductRequirement* requirement,
     if (!requirement || !params || param_count == 0) return -1;
     if (max_iterations <= 0) max_iterations = 100;
     if (step_size <= 0) step_size = 0.05f;
-    (void)constraints;
-    (void)constraint_count;
-    (void)final_evaluation;
+
+    /* S-007修复: 局部搜索约束处理 —— 边界约束 + 线性约束惩罚 */
 
     DesignParameter* current = pde_copy_params(params, param_count);
     DesignParameter* candidate = pde_copy_params(params, param_count);
@@ -1435,6 +1501,21 @@ int pde_local_search(const ProductRequirement* requirement,
                 float cand_vals[PDE_MAX_OBJECTIVES];
                 pde_evaluate_design(requirement, candidate, param_count, cand_vals, 3);
                 float cand_score = pde_compute_composite_score(requirement, cand_vals, 3);
+                /* S-007: 约束惩罚 —— 违反约束的候选解被惩罚 */
+                float cpen = 0.0f;
+                for (size_t ci = 0; ci < constraint_count; ci++) {
+                    float viol = 0.0f, ls = 0.0f;
+                    for (size_t cj = 0; cj < constraints[ci].coefficient_count && cj < param_count; cj++)
+                        ls += (float)(constraints[ci].coefficients[cj] * candidate[cj].current_value);
+                    if (constraints[ci].type == CONSTRAINT_LINEAR_LE && ls > (float)constraints[ci].rhs)
+                        viol = ls - (float)constraints[ci].rhs;
+                    else if (constraints[ci].type == CONSTRAINT_LINEAR_GE && ls < (float)constraints[ci].rhs)
+                        viol = (float)constraints[ci].rhs - ls;
+                    else if (constraints[ci].type == CONSTRAINT_LINEAR_EQ)
+                        viol = fabsf(ls - (float)constraints[ci].rhs);
+                    if (viol > 0.0f) cpen += 1000.0f * viol;
+                }
+                cand_score -= cpen;
 
                 if (cand_score > current_score) {
                     current_score = cand_score;

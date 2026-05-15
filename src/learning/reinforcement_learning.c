@@ -3279,11 +3279,13 @@ int gym_env_reset(GymEnv* env, float* initial_obs, size_t* obs_dim_out) {
         return ret;
     }
 
-    /* 无外部环境时，初始化到零向量 */
-    memset(initial_obs, 0, env->obs_dim * sizeof(float));
-    *obs_dim_out = env->obs_dim;
-    env->step_count = 0;
-    return 0;
+    /* P0-006修复: 无外部环境时返回错误，拒绝填充零值/虚假观测数据
+     * 之前此处用memset填充零值观测并返回0，可能导致零值数据被用作
+     * 训练样本，污染自主学习管道。
+     * 现在与gym_env_step()保持一致，无环境时返回-1，
+     * 调用方应探测错误并暂停RL训练。 */
+    *obs_dim_out = 0;
+    return -1;
 }
 
 int gym_env_step(GymEnv* env, const float* action, size_t act_dim,
@@ -3296,16 +3298,13 @@ int gym_env_step(GymEnv* env, const float* action, size_t act_dim,
                               next_obs, obs_dim_out, reward, done);
     }
 
-    /* F-014修复：无外部环境时，严格拒绝生成合成模拟数据 */
-    /* 系统必须配置真实环境接口或显式启用仿真模式才能使用RL */
-    memset(next_obs, 0, env->obs_dim * sizeof(float));
-    for (size_t d = 0; d < env->obs_dim; d++) {
-        next_obs[d] = 0.0f;
-    }
-    *obs_dim_out = env->obs_dim;
+    /* P0-006修复：无外部环境时严格拒绝生成任何数据
+     * 不填充next_obs、不设置reward、不设置done标志。
+     * 调用方必须检查返回值(-1)并暂停RL训练。
+     * 零值数据如果进入经验缓冲区将污染自主学习管道。 */
+    *obs_dim_out = 0;
     *reward = 0.0f;
     *done = 0;
-    /* 返回错误码表示环境未就绪，调用方应探测并处理 */
     return -1;
 }
 

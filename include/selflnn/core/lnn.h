@@ -333,6 +333,17 @@ size_t lnn_get_max_activation_count(const LNN* network);
 float* lnn_get_parameters(LNN* network);
 
 /**
+ * @brief 获取当前梯度缓冲区指针
+ * 
+ * 返回最后一次反向传播计算得到的梯度数据指针，
+ * 用于自定义梯度更新（如IRL奖励权重更新）。
+ * 
+ * @param network 网络句柄
+ * @return float* 梯度缓冲区指针，失败返回NULL
+ */
+float* lnn_get_gradients(LNN* network);
+
+/**
  * @brief 批量前向传播
  * 
  * @param network 网络句柄

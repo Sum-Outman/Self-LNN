@@ -20,6 +20,23 @@
 #include <string.h>
 #include <time.h>
 
+/* ZSFAB P2-008修复: 跨平台互斥锁保护任务调度器并发访问 */
+#ifdef _WIN32
+#include <windows.h>
+#define TS_MUTEX_TYPE CRITICAL_SECTION
+#define TS_MUTEX_INIT(m) InitializeCriticalSection((CRITICAL_SECTION*)(m))
+#define TS_MUTEX_LOCK(m) EnterCriticalSection((CRITICAL_SECTION*)(m))
+#define TS_MUTEX_UNLOCK(m) LeaveCriticalSection((CRITICAL_SECTION*)(m))
+#define TS_MUTEX_DESTROY(m) DeleteCriticalSection((CRITICAL_SECTION*)(m))
+#else
+#include <pthread.h>
+#define TS_MUTEX_TYPE pthread_mutex_t
+#define TS_MUTEX_INIT(m) pthread_mutex_init((pthread_mutex_t*)(m), NULL)
+#define TS_MUTEX_LOCK(m) pthread_mutex_lock((pthread_mutex_t*)(m))
+#define TS_MUTEX_UNLOCK(m) pthread_mutex_unlock((pthread_mutex_t*)(m))
+#define TS_MUTEX_DESTROY(m) pthread_mutex_destroy((pthread_mutex_t*)(m))
+#endif
+
 #define TS_MAX_TASKS 1024
 #define TS_MAX_NAME 64
 #define TS_PRIORITY_LEVELS 4
@@ -80,6 +97,9 @@ struct TaskScheduler {
     void* thread_pool;
     int (*thread_pool_submit)(void* pool, void (*fn)(void*), void* arg);
     int use_thread_pool;
+
+    /* ZSFAB P2-008: 并发访问保护锁 */
+    TS_MUTEX_TYPE lock;
 };
 
 TaskScheduler* task_scheduler_create(void) {
@@ -94,11 +114,13 @@ TaskScheduler* task_scheduler_create(void) {
         s->queue_next[i] = -1;
     }
     s->running_task_id = -1;
+    TS_MUTEX_INIT(&s->lock);
     return s;
 }
 
 void task_scheduler_free(TaskScheduler* s) {
     if (!s) return;
+    TS_MUTEX_DESTROY(&s->lock);
     safe_free((void**)&s);
 }
 
@@ -136,6 +158,7 @@ int task_scheduler_submit(TaskScheduler* s, const char* name,
                            const int* depends_on, int dep_count) {
     if (!s || !func || s->task_count >= TS_MAX_TASKS) return -1;
 
+    TS_MUTEX_LOCK(&s->lock);
     int tid = s->task_count++;
     ScheduledTask* t = &s->tasks[tid];
     memset(t, 0, sizeof(ScheduledTask));
@@ -173,6 +196,7 @@ int task_scheduler_submit(TaskScheduler* s, const char* name,
 
     log_info("[调度器] 任务提交: %s (ID=%d, 优先级=%d, 超时=%ds)",
              t->name, tid, priority, t->timeout_seconds);
+    TS_MUTEX_UNLOCK(&s->lock);
     return tid;
 }
 
@@ -237,6 +261,8 @@ static int ts_try_preempt(TaskScheduler* s, int new_task_id) {
  */
 int task_scheduler_tick(TaskScheduler* s) {
     if (!s) return -1;
+
+    TS_MUTEX_LOCK(&s->lock);
 
     /* 检查当前运行任务是否超时 */
     if (s->running_task_id >= 0) {
@@ -322,6 +348,7 @@ int task_scheduler_tick(TaskScheduler* s) {
         }
     }
 
+    TS_MUTEX_UNLOCK(&s->lock);
     return executed;
 }
 

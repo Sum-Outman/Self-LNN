@@ -3369,6 +3369,29 @@ static int distributed_load_checkpoint(Trainer* trainer, float* parameters,
         return -1;
     }
 
+    /* P0-018修复: 检查点版本兼容性验证
+     * 拒绝加载不兼容版本的检查点文件，防止权重格式错乱 */
+    {
+        int version_ok = 0;
+        for (size_t vi = 0; vi < CKPT_NUM_SUPPORTED_VERSIONS; vi++) {
+            if (ckpt_version == g_ckpt_supported_versions[vi]) {
+                version_ok = 1;
+                break;
+            }
+        }
+        if (!version_ok) {
+            fclose(ckpt_file);
+            if (trainer->config.verbose) {
+                printf("检查点恢复 | 版本不兼容: 文件版本=%u, 支持版本=[", ckpt_version);
+                for (size_t vi = 0; vi < CKPT_NUM_SUPPORTED_VERSIONS; vi++) {
+                    printf("%s%u", vi > 0 ? "," : "", g_ckpt_supported_versions[vi]);
+                }
+                printf("]\n");
+            }
+            return -1;
+        }
+    }
+
     uint64_t ckpt_epoch = 0, ckpt_batch = 0, param_count = 0;
     if (fread(&ckpt_epoch, sizeof(uint64_t), 1, ckpt_file) != 1 ||
         fread(&ckpt_batch, sizeof(uint64_t), 1, ckpt_file) != 1 ||

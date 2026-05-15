@@ -1,10 +1,10 @@
 # SELF-LNN 全液态神经网络 AGI 系统架构图
 # SELF-LNN Full Liquid Neural Network AGI System Architecture Diagram
 
-> **版本 / Version:** 0.3.0 | **语言 / Language:** 100% Pure C (C11) | **构建 / Build:** CMake 3.10+
+> **版本 / Version:** 1.4.0 | **语言 / Language:** 100% Pure C (C11) | **构建 / Build:** CMake 3.10+
 > **核心模型 / Core Model:** CfC (Closed-form Continuous-time) LNN — Token-Free 连续信号架构 / Continuous Signal Architecture
 > **ODE求解器 / Solvers:** 7种/7 types (闭式解/Closed-Form, RK4, RK45, DP54, Rosenbrock, Symplectic, CTBP)
-> **GPU后端 / Backends:** 10种/10 types | **API端点 / Endpoints:** ~180 | **前端/Frontend:** 15 HTML + 16 JS
+> **GPU后端 / Backends:** 10种/10 types | **API端点 / Endpoints:** ~180 | **前端/Frontend:** 15 HTML + 17 JS
 > **项目信息 / Info:** [GitHub](https://github.com/Sum-Outman/Self-LNN) | [Email](mailto:silencecrowtom@qq.com)
 
 ---
@@ -17,7 +17,7 @@
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  层1 / Layer 1: 前端交互层 / Frontend Layer — 15 HTML + 16 JS        │  │
+│  │  层1 / Layer 1: 前端交互层 / Frontend Layer — 15 HTML + 17 JS        │  │
 │  │  仪表盘/Dashboard | LNN控制台/Console | 训练中心/Training             │  │
 │  │  机器人控制/Robot Ctrl | 仿真控制/Simulation | 多模态学习/Multimodal  │  │
 │  │  语音控制/Voice Ctrl | 对话界面/Dialogue | 安全面板/Safety Panel      │  │
@@ -342,5 +342,5 @@ CMakeLists.txt (根/Root)
 
 ---
 
-> **文档更新 / Updated**: 2026-05-11
+> **文档更新 / Updated**: 2026-05-14
 > **相关文档 / Related Docs**: [README](../README.md) | [AGI机器人指南](./AGI_Robot_Guide.md) | [开发指南](./DEVELOPMENT_GUIDE_ZH.md)

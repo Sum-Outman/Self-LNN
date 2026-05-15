@@ -19,6 +19,10 @@
 #include <time.h>
 #include <stdio.h>
 
+#ifndef safe_strdup
+#define safe_strdup(s) ((s) ? _strdup(s) : NULL)
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -277,7 +281,7 @@ int cfc_uncertain_add_fuzzy_var(CfCUncertainReasoningState* state,
     }
     for (int i = 0; i < var->num_terms; i++) {
         state->fuzzy_vars[idx].term_names[i] = var->term_names[i] ?
-            _strdup(var->term_names[i]) : NULL;
+            safe_strdup(var->term_names[i]) : NULL;
         state->fuzzy_vars[idx].term_types[i] = var->term_types[i];
         state->fuzzy_vars[idx].term_params[i] = (float*)safe_calloc(4, sizeof(float));
         if (state->fuzzy_vars[idx].term_params[i] && var->term_params[i]) {

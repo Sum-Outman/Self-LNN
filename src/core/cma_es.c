@@ -649,3 +649,85 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
 
     return 0;
 }
+
+/* S-005修复: BIPOP双种群重启策略
+ * 在IPOP基础上交替使用小种群(快速收敛)和大种群(全局探索)
+ * 小种群 → 快速找到局部最优 → 大种群跳出 → 小种群再精细搜索 */
+int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user_data,
+                          int max_restarts) {
+    if (!state || !func) return -1;
+    if (max_restarts <= 0) max_restarts = CMAES_BIPOP_MAX_RESTARTS;
+    if (max_restarts > CMAES_BIPOP_MAX_RESTARTS) max_restarts = CMAES_BIPOP_MAX_RESTARTS;
+
+    float global_best_fitness = FLT_MAX;
+    float* global_best_solution = (float*)malloc(state->dimension * sizeof(float));
+    if (!global_best_solution) return -1;
+
+    int base_lambda = CMAES_BIPOP_LAMBDA_DEFAULT;
+    float old_sigma = state->sigma;
+
+    for (int restart = 0; restart <= max_restarts; restart++) {
+        state->ipop_restart_count = restart;
+
+        if (restart > 0) {
+            /* BIPOP交替策略: 偶数重启用小种群(快速收敛)，奇数重启用大种群(全局探索) */
+            int new_lambda;
+            if (restart % 2 == 0) {
+                /* 小种群: λ = base * 0.5^(restart/2+1) */
+                new_lambda = (int)((float)base_lambda *
+                    powf(CMAES_BIPOP_SMALL_POP_RATIO, (float)(restart / 2 + 1)));
+            } else {
+                /* 大种群: λ = base * 2^(restart/2+1) */
+                new_lambda = (int)((float)base_lambda *
+                    powf(CMAES_BIPOP_LARGE_POP_RATIO, (float)((restart + 1) / 2)));
+            }
+
+            if (new_lambda > CMAES_MAX_POP) new_lambda = CMAES_MAX_POP;
+            if (new_lambda < CMAES_MIN_POP) new_lambda = CMAES_MIN_POP;
+            if (new_lambda == state->lambda) new_lambda = state->lambda + 1;
+
+            float* old_mean = (float*)malloc(state->dimension * sizeof(float));
+            if (old_mean) {
+                memcpy(old_mean, state->mean, state->dimension * sizeof(float));
+            }
+
+            int seed = (int)(state->rng_state + (unsigned int)restart * 67890u);
+            cmaes_free(state);
+            memset(state, 0, sizeof(CMAESState));
+
+            if (cmaes_init(state, state->dimension, old_sigma, new_lambda, seed) != 0) {
+                free(global_best_solution);
+                return -1;
+            }
+
+            state->enable_active = 1;
+            state->ipop_restart_count = restart;
+
+            if (old_mean) {
+                memcpy(state->mean, old_mean, state->dimension * sizeof(float));
+                free(old_mean);
+            }
+        }
+
+        (void)cmaes_optimize(state, func, user_data);
+
+        if (state->best_fitness < global_best_fitness) {
+            global_best_fitness = state->best_fitness;
+            memcpy(global_best_solution, state->best_solution, state->dimension * sizeof(float));
+        }
+
+        if (state->generation >= state->max_generations) break;
+
+        if (state->termination_reason == CMAES_TERM_TOLFUN &&
+            global_best_fitness <= state->stop_fitness) {
+            break;
+        }
+
+        if (restart >= max_restarts) break;
+    }
+
+    state->best_fitness = global_best_fitness;
+    memcpy(state->best_solution, global_best_solution, state->dimension * sizeof(float));
+    free(global_best_solution);
+    return 0;
+}

@@ -93,13 +93,6 @@
                     <button class="btn" onclick="refreshStats()">刷新统计</button>
                 </div>
                 <div id="add-status" class="status-msg"></div>
-                <div class="category-hint">
-                    <span onclick="fillExample('SELF-LNN','属于','全模态AGI系统')">SELF-LNN → 全模态AGI系统</span>
-                    <span onclick="fillExample('液态神经网络','使用','CfC细胞')">液态神经网络 → CfC细胞</span>
-                    <span onclick="fillExample('知识库','包含','语义网络')">知识库 → 语义网络</span>
-                    <span onclick="fillExample('视觉模块','处理','图像数据')">视觉模块 → 图像数据</span>
-                    <span onclick="fillExample('语音识别','生成','文本指令')">语音识别 → 文本指令</span>
-                </div>
             </div>
             <div class="tab-content" id="tab-list">
                 <div class="form-group">
@@ -204,19 +197,28 @@
                 };
                 kgWs.onclose = function() {
                     graphState.backendOnline = false;
-                    showConnectionBanner('知识图谱服务已断开，使用本地存储', 'disconnected');
-                    loadFromLocalStorage();
+                    showConnectionBanner('知识图谱服务已断开——知识库不可用', 'disconnected');
+                    knowledgeEntries = [];
+                    refreshStats();
+                    refreshGraph();
+                    renderEntryList();
                     setTimeout(connectKnowledgeWebSocket, 5000);
                 };
                 kgWs.onerror = function() {
                     graphState.backendOnline = false;
-                    showConnectionBanner('无法连接知识图谱服务，使用本地存储', 'disconnected');
-                    loadFromLocalStorage();
+                    showConnectionBanner('无法连接知识图谱服务——后端未连接', 'disconnected');
+                    knowledgeEntries = [];
+                    refreshStats();
+                    refreshGraph();
+                    renderEntryList();
                 };
             } catch(e) {
                 graphState.backendOnline = false;
-                showConnectionBanner('WebSocket连接失败，使用本地存储', 'disconnected');
-                loadFromLocalStorage();
+                showConnectionBanner('WebSocket连接失败——后端未连接', 'disconnected');
+                knowledgeEntries = [];
+                refreshStats();
+                refreshGraph();
+                renderEntryList();
             }
         }
 
@@ -254,10 +256,10 @@
                                 id: e.id || (e.s + '_' + e.p + '_' + e.o + '_' + Date.now())
                             };
                         });
-                        /* 同步到localStorage作为缓存 */
-                        syncToLocalStorage(knowledgeEntries);
+                        graphState.backendOnline = true;
                     } else {
-                        loadFromLocalStorage();
+                        knowledgeEntries = [];
+                        graphState.backendOnline = false;
                     }
                     graphState.loading = false;
                     refreshStats();
@@ -266,43 +268,16 @@
                 })
                 .catch(function() {
                     graphState.loading = false;
-                    loadFromLocalStorage();
+                    knowledgeEntries = [];
+                    graphState.backendOnline = false;
+                    showStatus('load-status', '后端未连接——知识库不可用（遵循禁止虚假数据原则）', 'error');
                     refreshStats();
                     refreshGraph();
                     renderEntryList();
                 });
         }
 
-        function loadFromLocalStorage() {
-            knowledgeEntries = [];
-            for (var i = 0; i < window.localStorage.length; i++) {
-                var key = window.localStorage.key(i);
-                if (key && key.indexOf('kg_entry_') === 0) {
-                    try {
-                        var entry = JSON.parse(window.localStorage.getItem(key));
-                        if (entry && entry.subject) knowledgeEntries.push(entry);
-                    } catch(e) { /* 跳过损坏项 */ }
-                }
-            }
-        }
 
-        function syncToLocalStorage(entries) {
-            /* 清除旧localStorage项 */
-            var keysToRemove = [];
-            for (var i = 0; i < window.localStorage.length; i++) {
-                var key = window.localStorage.key(i);
-                if (key && key.indexOf('kg_entry_') === 0) keysToRemove.push(key);
-            }
-            keysToRemove.forEach(function(k) {
-                try { window.localStorage.removeItem(k); } catch(e) { /* 跳过 */ }
-            });
-            /* 写入新条目 */
-            entries.forEach(function(e) {
-                try {
-                    if (e.id) window.localStorage.setItem('kg_entry_' + e.id, JSON.stringify(e));
-                } catch(storeErr) { /* localStorage满时忽略 */ }
-            });
-        }
 
         /* ==================== 页面交互 ==================== */
         function switchTab(name) {
@@ -354,7 +329,7 @@
                 id: 'pending_' + Date.now() + '_' + (++graphState.localSeq || (graphState.localSeq = 1))
             };
 
-            /* 先尝试后端API */
+            /* 通过后端API添加 */
             SelfLnnApi.addKnowledge({
                 subject: subject,
                 predicate: predicate,
@@ -367,48 +342,24 @@
                     graphState.backendOnline = true;
                     fetchKnowledgeFromBackend();
                 } else {
-                    fallbackAddLocal(entry);
+                    showStatus('add-status', '后端返回异常——知识添加失败', 'error');
                 }
             }).catch(function() {
-                fallbackAddLocal(entry);
+                showStatus('add-status', '后端未连接——知识添加失败（遵循禁止虚假数据原则，不写入本地存储）', 'error');
             });
 
             document.getElementById('input-subject').value = '';
             document.getElementById('input-object').value = '';
         }
 
-        function fallbackAddLocal(entry) {
-            knowledgeEntries.push(entry);
-            try {
-                window.localStorage.setItem('kg_entry_' + entry.id, JSON.stringify(entry));
-            } catch(e) { /* 存储满时忽略 */ }
-            showStatus('add-status', '离线模式: 已保存到本地存储', 'success');
-            refreshStats();
-            refreshGraph();
-            renderEntryList();
-        }
-
         function deleteEntry(id) {
-            /* 尝试后端删除 */
-            if (graphState.backendOnline) {
-                SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ entry_id: id }) })
-                    .then(function() {
-                        fetchKnowledgeFromBackend();
-                    })
-                    .catch(function() {
-                        fallbackDeleteLocal(id);
-                    });
-            } else {
-                fallbackDeleteLocal(id);
-            }
-        }
-
-        function fallbackDeleteLocal(id) {
-            knowledgeEntries = knowledgeEntries.filter(function(e) { return e.id !== id; });
-            try { window.localStorage.removeItem('kg_entry_' + id); } catch(e) { /* 忽略 */ }
-            refreshStats();
-            refreshGraph();
-            renderEntryList();
+            SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ entry_id: id }) })
+                .then(function() {
+                    fetchKnowledgeFromBackend();
+                })
+                .catch(function() {
+                    showStatus('add-status', '后端未连接——删除失败（遵循禁止虚假数据原则）', 'error');
+                });
         }
 
         function searchKnowledge() {
@@ -468,17 +419,14 @@
                         var mem = resp.knowledge.memory_usage_bytes || (knowledgeEntries.length * 128);
                         document.getElementById('stat-memory').textContent = formatBytes(mem);
                     } else {
-                        fallbackStats();
+                        document.getElementById('stat-entries').textContent = knowledgeEntries.length;
+                        document.getElementById('stat-memory').textContent = formatBytes(knowledgeEntries.length * 128);
                     }
                 })
                 .catch(function() {
-                    fallbackStats();
+                    document.getElementById('stat-entries').textContent = '离线';
+                    document.getElementById('stat-memory').textContent = '离线';
                 });
-        }
-
-        function fallbackStats() {
-            document.getElementById('stat-entries').textContent = knowledgeEntries.length;
-            document.getElementById('stat-memory').textContent = formatBytes(knowledgeEntries.length * 128);
         }
 
         function formatBytes(bytes) {
@@ -909,30 +857,15 @@
 
         function clearGraph() {
             if (confirm('确定要清空所有知识条目吗？')) {
-                if (graphState.backendOnline) {
-                    SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ clear_all: true }) })
-                        .then(function() { fetchKnowledgeFromBackend(); })
-                        .catch(function() { fallbackClearLocal(); });
-                } else {
-                    fallbackClearLocal();
-                }
+                SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ clear_all: true }) })
+                    .then(function() { fetchKnowledgeFromBackend(); })
+                    .catch(function() {
+                        showStatus('add-status', '后端未连接——清空失败（遵循禁止虚假数据原则）', 'error');
+                    });
             }
         }
 
-        function fallbackClearLocal() {
-            knowledgeEntries = [];
-            var keys = [];
-            for (var i = 0; i < window.localStorage.length; i++) {
-                var key = window.localStorage.key(i);
-                if (key && key.indexOf('kg_entry_') === 0) keys.push(key);
-            }
-            keys.forEach(function(k) { try { window.localStorage.removeItem(k); } catch(e) { /* 忽略 */ } });
-            refreshStats();
-            refreshGraph();
-            renderEntryList();
-        }
-
-        loadFromLocalStorage();
+        fetchKnowledgeFromBackend();
         refreshStats();
         renderEntryList();
         connectKnowledgeWebSocket();

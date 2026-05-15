@@ -449,6 +449,6 @@ slnn-offline-bundle/
 ---
 
 > **最后更新 (Last Updated):** 2026-05-04
-> **版本 (Version):** 1.0.0 (源码版本/Source version); CMake 0.1.0 (构建版本/Build version)
+> **版本 (Version):** 1.4.0
 > **外部依赖 (External Dependencies):** 无 (None)
 > **Python依赖 (Python Dependencies):** 无 (None) — Python脚本为可选工具 (Python scripts are optional utilities)

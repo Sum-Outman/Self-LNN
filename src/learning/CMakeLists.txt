@@ -4,7 +4,7 @@ add_library(selflnn_learning
     meta_learning.c
     online_learning.c
     imitation_learning.c
-    # imitation_deep.c -- MSVC C89兼容性问题(预存), API由imitation_learning.c提供
+    imitation_deep.c
     teach_by_showing.c
     manual_learning.c
     multi_agent.c

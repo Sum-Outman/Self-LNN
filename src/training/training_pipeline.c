@@ -272,6 +272,19 @@ static int check_data_directory(const char* dirpath) {
 
 static int validate_data_integrity(const float* data, size_t count) {
     if (!data || count == 0) return -1;
+    
+    /* P1-003强化: 检测全零数据（最常见的虚假数据来源） */
+    int all_zero = 1;
+    int has_nan = 0;
+    int has_inf = 0;
+    for (size_t i = 0; i < count && i < 10000; i++) {
+        if (fabsf(data[i]) > 1e-9f) all_zero = 0;
+        if (isnan(data[i])) has_nan = 1;
+        if (isinf(data[i])) has_inf = 1;
+    }
+    if (all_zero) return -1;
+    if (has_nan || has_inf) return -1;
+    
     size_t suspicious_patterns = 0;
     size_t total_checks = 0;
     for (size_t i = 1; i < count && i < 10000; i++) {
@@ -980,23 +993,99 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
     float epoch_loss = 0.0f;
     size_t samples_this_epoch = total_samples / pipeline->state.total_epochs;
     if (samples_this_epoch == 0) samples_this_epoch = total_samples;
+    size_t val_split = samples_this_epoch / 5;  /* 20%验证集 */
+
+    /* 阶段差异化训练策略 */
+    TrainingStage stage = pipeline->state.current_stage;
+    int is_eval_stage = (stage == TRAIN_STAGE_EVALUATION);
 
     for (size_t i = 0; i < samples_this_epoch; i += batch_samples) {
-        for (size_t b = 0; b < batch_samples && (i + b) < samples_this_epoch; b++) {
+        size_t actual_batch = (i + batch_samples <= samples_this_epoch) ? batch_samples : (samples_this_epoch - i);
+        float batch_loss = 0.0f;
+
+        for (size_t b = 0; b < actual_batch; b++) {
             size_t offset = ((i + b) % total_samples) * sample_size / sizeof(float);
             if (offset + input_dim + output_dim > pipeline->data_size / sizeof(float)) continue;
             memcpy(input, pipeline->data_buffer + offset, input_dim * sizeof(float));
             memcpy(target, pipeline->data_buffer + offset + input_dim, output_dim * sizeof(float));
 
+            /* ===== 阶段差异化前向传播 ===== */
             float loss = 0.0f;
-            lnn_forward(pipeline->network, input, output);
-            lnn_backward(pipeline->network, target, &loss);
-            pipeline_apply_optimizer(pipeline, pipeline->network,
-                pipeline->network->config.learning_rate);
-            epoch_loss += (pipeline->loss_function > 0)
+
+            if (stage == TRAIN_STAGE_PRETRAIN) {
+                /* 预训练：自监督掩码预测 */
+                float masked_input[512];
+                memcpy(masked_input, input, input_dim * sizeof(float));
+                for (size_t k = 0; k < input_dim / 3; k++)
+                    masked_input[(k * 3 + b) % input_dim] = 0.0f;
+                lnn_forward(pipeline->network, masked_input, output);
+                loss = compute_loss_value(output, input, input_dim < output_dim ? input_dim : output_dim,
+                    LOSS_MSE);
+                pipeline->network->config.learning_rate = pipeline->config.base_lr * 1.5f;
+            } else if (stage == TRAIN_STAGE_DEEP_TRAIN) {
+                /* 深度训练：增强梯度传播+更高正则化 */
+                lnn_forward(pipeline->network, input, output);
+                lnn_backward(pipeline->network, target, &loss);
+                if (pipeline->network->config.dropout_rate < 0.4f)
+                    pipeline->network->config.dropout_rate += 0.001f;
+                pipeline->network->config.learning_rate = pipeline->config.base_lr;
+                pipeline->network->config.weight_decay *= 1.0001f;
+            } else if (stage == TRAIN_STAGE_MULTIMODAL) {
+                /* 多模态联合训练：跨模态对比损失 */
+                float shifted_target[256];
+                memcpy(shifted_target, target, output_dim * sizeof(float));
+                for (size_t k = 0; k < output_dim / 4; k++)
+                    shifted_target[(k * 4 + b + 1) % output_dim] *= -0.5f;
+                lnn_forward(pipeline->network, input, output);
+                float mse_loss = compute_loss_value(output, target, output_dim, LOSS_MSE);
+                float contrast_loss = compute_loss_value(output, shifted_target, output_dim, LOSS_MSE);
+                loss = 0.7f * mse_loss + 0.3f * (1.0f / (1.0f + contrast_loss));
+                pipeline->network->config.learning_rate = pipeline->config.base_lr * 0.8f;
+            } else if (stage == TRAIN_STAGE_FINE_TUNE) {
+                /* 微调：小学习率+任务特定损失 */
+                lnn_forward(pipeline->network, input, output);
+                loss = compute_loss_value(output, target, output_dim, pipeline->loss_function);
+                pipeline->network->config.learning_rate = pipeline->config.base_lr * 0.1f;
+            } else if (stage == TRAIN_STAGE_LOCAL) {
+                /* 本地适配：域适应+一致性损失 */
+                float augmented_input[512];
+                memcpy(augmented_input, input, input_dim * sizeof(float));
+                for (size_t k = 0; k < input_dim / 10; k++)
+                    augmented_input[(k * 10 + b) % input_dim] += 0.01f;
+                float output_orig[256], output_aug[256];
+                lnn_forward(pipeline->network, input, output_orig);
+                lnn_forward(pipeline->network, augmented_input, output_aug);
+                float task_loss = compute_loss_value(output_orig, target, output_dim, pipeline->loss_function);
+                float consistency_loss = 0.0f;
+                for (size_t k = 0; k < output_dim; k++) {
+                    float d = output_orig[k] - output_aug[k];
+                    consistency_loss += d * d;
+                }
+                consistency_loss /= (float)output_dim;
+                loss = 0.8f * task_loss + 0.2f * consistency_loss;
+                pipeline->network->config.learning_rate = pipeline->config.base_lr * 0.05f;
+            } else if (stage == TRAIN_STAGE_EVALUATION) {
+                /* 评估：仅前向传播计算验证指标，不更新权重 */
+                lnn_forward(pipeline->network, input, output);
+                loss = compute_loss_value(output, target, output_dim, pipeline->loss_function);
+            } else {
+                /* IDLE/默认：标准训练 */
+                lnn_forward(pipeline->network, input, output);
+                lnn_backward(pipeline->network, target, &loss);
+            }
+
+            /* 评估阶段不执行反向传播和优化器 */
+            if (!is_eval_stage) {
+                if (stage != TRAIN_STAGE_PRETRAIN)
+                    lnn_backward(pipeline->network, target, &loss);
+                pipeline_apply_optimizer(pipeline, pipeline->network,
+                    pipeline->network->config.learning_rate);
+            }
+            batch_loss += (pipeline->loss_function > 0 && !is_eval_stage)
                 ? compute_loss_value(output, target, output_dim, pipeline->loss_function)
                 : loss;
         }
+        epoch_loss += batch_loss / (float)actual_batch;
     }
 
     /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */

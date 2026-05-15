@@ -4,6 +4,10 @@
  * 
  * 液态神经网络（Liquid Neural Network）连续时间递归神经网络实现。
  * 基于CfC（Closed-form Continuous-time）单元，使用微分方程描述动态。
+ *
+ * P0-001修复: lnn_create() 强制单一LNN原则
+ *   当 selflnn_enforce_single_lnn() 已调用后，所有 lnn_create() 调用
+ *   将被重定向到全局唯一LNN实例，禁止创建独立LNN。
  */
 
 #define SELFLNN_IMPLEMENTATION
@@ -18,6 +22,7 @@
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/selflnn.h"           /* P0-001: selflnn_is_single_lnn_enforced + selflnn_get_lnn */
 #include "selflnn/memory/memory.h"
 #include "selflnn/core/parameter_shard.h"
 
@@ -62,6 +67,22 @@ static inline uint32_t hash32(uint32_t x) {
 LNN* lnn_create(const LNNConfig* config) {
     if (!config) {
         return NULL;
+    }
+    
+    /* P0-001修复: 单一LNN原则强制执行
+     * 当 selflnn_enforce_single_lnn() 已调用后，
+     * 所有模块禁止创建独立LNN实例，必须使用全局唯一LNN。
+     * 全局LNN为全模态共享，所有状态在同一个连续动态系统中演化。 */
+    if (selflnn_is_single_lnn_enforced()) {
+        void* global_lnn = selflnn_get_lnn();
+        if (global_lnn) {
+            log_warning("[单一LNN] lnn_create()被拦截——系统已锁定为单一LNN模式，"
+                       "请求(input=%zu,hidden=%zu,output=%zu)被重定向到全局LNN",
+                       config->input_size, config->hidden_size, config->output_size);
+            return (LNN*)global_lnn;
+        }
+        /* 全局LNN尚未创建（首次调用），允许正常创建 */
+        log_info("[单一LNN] 首次创建全局LNN实例");
     }
     
     // 验证配置参数
@@ -991,6 +1012,14 @@ float* lnn_get_parameters(LNN* network) {
     return params;
 }
 
+float* lnn_get_gradients(LNN* network) {
+    if (!network) return NULL;
+    LNN_LOCK(network);
+    float* grads = network->gradient_buffer;
+    LNN_UNLOCK(network);
+    return grads;
+}
+
 /**
  * @brief 批量前向传播
  */
@@ -1164,6 +1193,22 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
         // 假设参数梯度缓冲区按权重在前、偏置在后的顺序排列
         accumulated_weight_gradients = parameter_gradients;
         accumulated_bias_gradients = parameter_gradients + weight_count;
+        
+        /* P1-010修复：运行时断言验证梯度缓冲区布局假设
+         * 验证：1)指针非空 2)权重/偏置不重叠 3)缓冲区边界正确 */
+        SELFLNN_CHECK(accumulated_weight_gradients != NULL,
+                     SELFLNN_ERROR_GRADIENT_SIZE,
+                     "梯度缓冲区布局错误：权重梯度指针为空");
+        SELFLNN_CHECK(accumulated_bias_gradients != NULL,
+                     SELFLNN_ERROR_GRADIENT_SIZE,
+                     "梯度缓冲区布局错误：偏置梯度指针为空");
+        SELFLNN_CHECK(accumulated_bias_gradients >= accumulated_weight_gradients + weight_count,
+                     SELFLNN_ERROR_GRADIENT_SIZE,
+                     "梯度缓冲区布局错误：偏置区域与权重区域重叠，权重数=%zu", weight_count);
+        SELFLNN_CHECK((size_t)((char*)accumulated_bias_gradients + bias_count * sizeof(float) -
+                              (char*)parameter_gradients) <= param_count * sizeof(float),
+                     SELFLNN_ERROR_GRADIENT_SIZE,
+                     "梯度缓冲区布局错误：偏置区域超出总参数缓冲区边界");
         
         LNN_DEBUG("lnn_backward_batch: 分配梯度缓冲区: weight_gradients=%p, bias_gradients=%p\n",
                 accumulated_weight_gradients, accumulated_bias_gradients);

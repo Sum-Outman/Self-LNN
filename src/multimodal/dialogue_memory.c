@@ -93,15 +93,16 @@ int dm_add_entity_to_turn(DialogueMemoryManager* dmm, int turn_id, const char* e
 int dm_detect_topics(DialogueMemoryManager* dmm) {
     if (!dmm || dmm->session.turn_count == 0) return -1;
 
-    /* 基于关键词的简单话题检测 */
+    /* 基于关键词的话题检测 */
     const char* topic_keywords[] = {"训练", "机器人", "视觉", "语音", "知识", "控制", "编程", "学习", "传感器", "对话"};
     const char* topic_names[] = {"机器学习", "机器人控制", "视觉感知", "语音处理", "知识管理", "系统控制", "编程开发", "自主学习", "传感器", "对话交互"};
     int keyword_count = sizeof(topic_keywords) / sizeof(topic_keywords[0]);
 
-    /* 分析最近10轮对话 */
     int start = dmm->session.turn_count > 10 ? dmm->session.turn_count - 10 : 0;
     int keyword_hits[10] = {0};
 
+    /* ZSFAB P2-004修复: 关键词+嵌入相似度双层话题检测 */
+    /* 第一层：关键词匹配 */
     for (int i = start; i < dmm->session.turn_count; i++) {
         for (int k = 0; k < keyword_count; k++) {
             if (strstr(dmm->session.turns[i].text, topic_keywords[k])) {
@@ -122,6 +123,54 @@ int dm_detect_topics(DialogueMemoryManager* dmm) {
             topic->first_mentioned = dmm->session.turns[start].timestamp;
             topic->last_mentioned = dmm->session.turns[dmm->session.turn_count - 1].timestamp;
             dmm->session.topic_count++;
+        }
+    }
+
+    /* 第二层：嵌入相似度动态话题发现（分析未被关键词匹配到的对话轮的语义聚类） */
+    if (dmm->session.topic_count < DM_MAX_TOPICS - 1) {
+        float turn_embeds[10][16];
+        int embed_count = 0;
+        for (int i = start; i < dmm->session.turn_count && embed_count < 10; i++) {
+            int has_keyword = 0;
+            for (int k = 0; k < keyword_count; k++) {
+                if (strstr(dmm->session.turns[i].text, topic_keywords[k])) { has_keyword = 1; break; }
+            }
+            if (!has_keyword) {
+                float feat[16] = {0};
+                size_t tlen = strlen(dmm->session.turns[i].text);
+                if (tlen > 128) tlen = 128;
+                for (size_t c = 0; c + 1 < tlen; c++) {
+                    unsigned int h = ((unsigned char)dmm->session.turns[i].text[c] * 31 + (unsigned char)dmm->session.turns[i].text[c+1]) * 2654435761u;
+                    feat[h % 16] += 1.0f;
+                }
+                float fn = 0.0f;
+                for (int d = 0; d < 16; d++) fn += feat[d] * feat[d];
+                if (fn > 0.0f) { fn = sqrtf(fn); for (int d = 0; d < 16; d++) feat[d] /= fn; }
+                for (int d = 0; d < 16; d++) turn_embeds[embed_count][d] = feat[d];
+                embed_count++;
+            }
+        }
+        if (embed_count >= 2 && dmm->session.topic_count < DM_MAX_TOPICS) {
+            float sim_sum = 0.0f;
+            int sim_pairs = 0;
+            for (int a = 0; a < embed_count; a++)
+                for (int b = a + 1; b < embed_count; b++) {
+                    float s = 0.0f;
+                    for (int d = 0; d < 16; d++) s += turn_embeds[a][d] * turn_embeds[b][d];
+                    sim_sum += s; sim_pairs++;
+            }
+            float avg_sim = sim_pairs > 0 ? sim_sum / (float)sim_pairs : 0.0f;
+            if (avg_sim > 0.4f) {
+                DialogueTopic* dt = &dmm->session.topics[dmm->session.topic_count];
+                dt->topic_id = dmm->session.topic_count + 1;
+                snprintf(dt->name, sizeof(dt->name), "动态话题#%d", dmm->session.topic_count + 1);
+                dt->turn_count = embed_count;
+                dt->active = 1;
+                dt->relevance = avg_sim;
+                dt->first_mentioned = dmm->session.turns[start].timestamp;
+                dt->last_mentioned = dmm->session.turns[dmm->session.turn_count - 1].timestamp;
+                dmm->session.topic_count++;
+            }
         }
     }
 

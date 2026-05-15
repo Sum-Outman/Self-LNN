@@ -475,7 +475,7 @@ class ApiService {
      */
     async getSystemStatus() {
         try {
-            const response = await this.request('/status');
+            const response = await this.request('/safety/status');
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
@@ -485,7 +485,7 @@ class ApiService {
                 data: data
             };
         } catch (error) {
-            console.error('获取系统状态失败:', error);
+            console.error('获取安全状态失败:', error);
             return {
                 success: false,
                 error: error.message,
@@ -1738,6 +1738,46 @@ class ApiService {
         } catch (error) {
             console.error('获取系统状态失败:', error);
             return { success: false, error: error.message, data: null };
+        }
+    }
+
+    async softStop(target) {
+        try {
+            var payload = JSON.stringify({ target: target || 'all' });
+            var resp = await this.request('/safety/soft_stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: payload
+            });
+            var d = await resp.json();
+            return { success: resp.ok, data: d };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    }
+
+    async resetSafetyState() {
+        try {
+            var resp = await this.request('/safety/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            var d = await resp.json();
+            return { success: resp.ok, data: d };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    }
+
+    async getSafetyEvents(limit) {
+        try {
+            var q = (limit && limit > 0) ? ('?limit=' + limit) : '';
+            var resp = await this.request('/safety/events' + q, { method: 'GET' });
+            var d = await resp.json();
+            return { success: resp.ok, data: d };
+        } catch (e) {
+            return { success: false, error: e.message };
         }
     }
 

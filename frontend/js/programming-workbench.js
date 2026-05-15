@@ -244,24 +244,17 @@
         }
     };
 
-    window.loadSampleCode = function() {
-        setEditorCode(
-            '#include <stdio.h>\n\n' +
-            'int add(int a, int b) {\n' +
-            '    return a + b;\n' +
-            '}\n\n' +
-            'int factorial(int n) {\n' +
-            '    if (n <= 1) return 1;\n' +
-            '    return n * factorial(n - 1);\n' +
-            '}\n\n' +
-            'int main() {\n' +
-            '    int x = 5, y = 3;\n' +
-            '    printf("%d + %d = %d\\n", x, y, add(x, y));\n' +
-            '    printf("%d! = %d\\n", 6, factorial(6));\n' +
-            '    return 0;\n' +
-            '}'
-        );
-        showStatus('示例代码已加载');
+    window.loadSampleCode = async function() {
+        /* L-004修复：移除硬编码回退代码，API失败时显示提示而非假数据 */
+        try {
+            var result = await SelfLnnApi.programmingSample();
+            if (result.success && result.code) {
+                setEditorCode(result.code);
+                showStatus('示例代码已加载（来自后端）');
+                return;
+            }
+        } catch(e) { console.warn('从API获取示例代码失败:', e.message); }
+        showStatus('⚠ 后端未连接——无法加载示例代码（遵循禁止虚假数据原则）');
     };
 
     window.clearEditor = function() {

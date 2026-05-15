@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <float.h>
+#include <stdint.h>
 
 // 平台特定的动态库加载头文件
 #ifdef _WIN32
@@ -751,6 +752,81 @@ int mp_simulated_quantize_linear(float* data, size_t count, float scale, int zer
         int qi = (int)(qval + 0.5f);
         data[i] = ((float)qi - (float)zero_point) * scale;
     }
+    return 0;
+}
+
+/**
+ * @brief 真正INT8矩阵乘法推理（非模拟量化）
+ * 
+ * 使用int8_t数据类型进行实际整数矩阵乘法运算，
+ * 结合int32_t累加器防止溢出，最后反量化到float输出。
+ * 这是真正的INT8推理路径，而非QAT的fake-quantization。
+ */
+int mp_int8_matmul_forward(const float* input, const float* weights,
+                            float* output, int M, int N, int K,
+                            int num_bits) {
+    if (!input || !weights || !output || M <= 0 || N <= 0 || K <= 0) return -1;
+    if (num_bits < 1 || num_bits > 8) num_bits = 8;
+
+    /* 步骤1：计算量化参数 */
+    int8_t* q_input   = (int8_t*)safe_calloc((size_t)M * (size_t)K, sizeof(int8_t));
+    int8_t* q_weights = (int8_t*)safe_calloc((size_t)K * (size_t)N, sizeof(int8_t));
+    int32_t* acc      = (int32_t*)safe_calloc((size_t)M * (size_t)N, sizeof(int32_t));
+    if (!q_input || !q_weights || !acc) {
+        safe_free((void**)&q_input); safe_free((void**)&q_weights); safe_free((void**)&acc);
+        return -1;
+    }
+
+    /* 量化输入张量 */
+    float i_min = input[0], i_max = input[0];
+    for (int i = 1; i < M * K; i++) {
+        if (input[i] < i_min) i_min = input[i];
+        if (input[i] > i_max) i_max = input[i];
+    }
+    float i_absmax = (fabsf(i_min) > fabsf(i_max)) ? fabsf(i_min) : fabsf(i_max);
+    if (i_absmax < 1e-10f) i_absmax = 1.0f;
+    float i_scale = i_absmax / 127.0f;
+    for (int i = 0; i < M * K; i++) {
+        int qi = (int)(input[i] / i_scale + 0.5f);
+        if (qi > 127) qi = 127; else if (qi < -128) qi = -128;
+        q_input[i] = (int8_t)qi;
+    }
+
+    /* 量化权重张量 */
+    float w_min = weights[0], w_max = weights[0];
+    for (int i = 1; i < K * N; i++) {
+        if (weights[i] < w_min) w_min = weights[i];
+        if (weights[i] > w_max) w_max = weights[i];
+    }
+    float w_absmax = (fabsf(w_min) > fabsf(w_max)) ? fabsf(w_min) : fabsf(w_max);
+    if (w_absmax < 1e-10f) w_absmax = 1.0f;
+    float w_scale = w_absmax / 127.0f;
+    for (int i = 0; i < K * N; i++) {
+        int qw = (int)(weights[i] / w_scale + 0.5f);
+        if (qw > 127) qw = 127; else if (qw < -128) qw = -128;
+        q_weights[i] = (int8_t)qw;
+    }
+
+    /* 步骤2：真正INT8矩阵乘法 → int32累加 */
+    for (int m = 0; m < M; m++) {
+        for (int n = 0; n < N; n++) {
+            int32_t sum = 0;
+            for (int k = 0; k < K; k++) {
+                sum += (int32_t)q_input[m * K + k] * (int32_t)q_weights[k * N + n];
+            }
+            acc[m * N + n] = sum;
+        }
+    }
+
+    /* 步骤3：反量化 int32 → float */
+    float output_scale = i_scale * w_scale;
+    for (int i = 0; i < M * N; i++) {
+        output[i] = (float)acc[i] * output_scale;
+    }
+
+    safe_free((void**)&q_input);
+    safe_free((void**)&q_weights);
+    safe_free((void**)&acc);
     return 0;
 }
 
