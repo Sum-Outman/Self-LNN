@@ -792,7 +792,14 @@ static int intel_backend_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t
 static int intel_backend_kernel_execute(GpuKernel* kernel, size_t global_work_size, size_t local_work_size) {
     if (!kernel) return -1;
 
-    /* Level Zero原生GPU路径 */
+    /* ================================================================
+     * Intel GPU设备端执行路径（oneAPI Level Zero运行时）
+     * 1. 优先尝试Level Zero原生GPU内核（需预编译SPIR-V，kernel->backend_data）
+     * 2. 若Level Zero可用但无预编译内核，使用设备内存中转
+     * 3. Level Zero不可用时回退到CPU直算（npu_common_cpu_kernel_execute）
+     * ================================================================ */
+
+    /* 路径A：Level Zero原生GPU内核（SPIR-V预编译） */
     if (g_intel_state.use_level_zero && g_ze_lib.init_called && kernel->backend_data) {
         ze_kernel_handle_t ze_ker = (ze_kernel_handle_t)kernel->backend_data;
         g_ze_lib.zeKernelSetGroupSize(ze_ker, (uint32_t)local_work_size, 1, 1);
@@ -800,19 +807,23 @@ static int intel_backend_kernel_execute(GpuKernel* kernel, size_t global_work_si
         uint32_t gws[3] = {(uint32_t)global_work_size, 1, 1};
         uint32_t lws[3] = {(uint32_t)local_work_size, 1, 1};
         int ret = g_ze_lib.zeCommandListAppendLaunchKernel(g_intel_state.list, ze_ker, gws, lws, NULL, 0, NULL);
-        if (ret != 0) return -1;
-
-        g_ze_lib.zeCommandListClose(g_intel_state.list);
-        ze_command_list_handle_t lists[] = {g_intel_state.list};
-        g_ze_lib.zeCommandQueueExecuteCommandLists(g_intel_state.queue, 1, lists, NULL);
-        g_ze_lib.zeCommandQueueSynchronize(g_intel_state.queue, UINT64_MAX);
-        g_ze_lib.zeCommandListReset(g_intel_state.list);
-        return 0;
+        if (ret == 0) {
+            g_ze_lib.zeCommandListClose(g_intel_state.list);
+            ze_command_list_handle_t lists[] = {g_intel_state.list};
+            g_ze_lib.zeCommandQueueExecuteCommandLists(g_intel_state.queue, 1, lists, NULL);
+            g_ze_lib.zeCommandQueueSynchronize(g_intel_state.queue, UINT64_MAX);
+            g_ze_lib.zeCommandListReset(g_intel_state.list);
+            LOG_INFO("Intel GPU Level Zero内核执行成功（global_ws=%zu）", global_work_size);
+            return 0;
+        }
+        /* Level Zero内核启动失败，降级 */
+        LOG_WARN("Intel GPU Level Zero内核启动失败，降级到CPU回退");
     }
 
     /* 统一CPU核执行回退 — 12+种操作 */
     (void)local_work_size;
     size_t count = global_work_size > 0 ? global_work_size : 64;
+    LOG_INFO("Intel GPU Level Zero不可用或无预编译内核，回退到CPU直算（count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 

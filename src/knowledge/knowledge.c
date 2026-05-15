@@ -10,6 +10,7 @@
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/knowledge/cfc_knowledge_embedding.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/deep_copy_utils.h"
@@ -5987,36 +5988,475 @@ KnowledgeBase* knowledge_base_create_with_preset(size_t max_entries) {
  * knowledge_self_improve — 知识库自改进：一致性检查→错误修正→新知识推导
  * ============================================================================ */
 
+/*
+ * 知识查询模板 —— 用于驱动LNN产生不同语义方向的输出
+ * 覆盖：因果、属性、空间、时间、分类、类比、数量、逻辑、行为、环境
+ */
+static const char* g_lnn_query_templates[] = {
+    "因果关系推导",
+    "对象属性识别",
+    "空间关系定位",
+    "时间序列预测",
+    "分类层级归纳",
+    "类比推理映射",
+    "数量关系计算",
+    "逻辑推理演绎",
+    "行为序列规划",
+    "环境状态感知"
+};
+
+/*
+ * 已知的谓词方向性类别 —— 用于冲突检测中判断谓词是否构成矛盾
+ * 每组内谓词含义互斥
+ */
+static const char* g_opposing_predicate_groups[][4] = {
+    {"是", "不是", "否定", "排除"},
+    {"包含", "不含", "排除", "缺失"},
+    {"大于", "小于", "等于", "不等"},
+    {"增加", "减少", "不变", "消失"},
+    {"激活", "抑制", "关闭", "休眠"},
+    {"正向", "反向", "中性", NULL},
+    {"存在", "不存在", "消失", "消亡"},
+    {"正确", "错误", "矛盾", "不一致"},
+    {NULL, NULL, NULL, NULL}
+};
+
+/*
+ * 对LNN输出向量计算激活统计信息
+ * 返回：激活比率（高激活维度占比）、平均激活强度、不确定性（归一化标准差）
+ */
+static void compute_lnn_activation_stats(const float* output, size_t dim,
+                                          float* out_activation_ratio,
+                                          float* out_mean_activation,
+                                          float* out_uncertainty) {
+    if (!output || dim == 0) {
+        *out_activation_ratio = 0.0f;
+        *out_mean_activation = 0.0f;
+        *out_uncertainty = 1.0f;
+        return;
+    }
+
+    float sum = 0.0f, sum_sq = 0.0f;
+    float max_val = -1e10f, min_val = 1e10f;
+    int high_count = 0;
+    float high_sum = 0.0f;
+
+    for (size_t i = 0; i < dim; i++) {
+        float v = output[i];
+        float av = fabsf(v);
+        sum += v;
+        sum_sq += v * v;
+        if (v > max_val) max_val = v;
+        if (v < min_val) min_val = v;
+        if (av > 0.25f) {
+            high_count++;
+            high_sum += av;
+        }
+    }
+
+    float mean = sum / (float)dim;
+    float variance = (sum_sq / (float)dim) - (mean * mean);
+    if (variance < 0.0f) variance = 0.0f;
+
+    float range = max_val - min_val;
+    float norm_std = (range > 1e-8f) ? sqrtf(variance) / range : 0.5f;
+
+    *out_activation_ratio = (float)high_count / (float)dim;
+    *out_mean_activation = (high_count > 0) ? high_sum / (float)high_count : 0.0f;
+    *out_uncertainty = (norm_std > 1.0f) ? 1.0f : norm_std;
+}
+
+/*
+ * 找出输出向量中激活值最高的前 top_k 个维度索引
+ * 按激活值降序排列
+ */
+static void find_top_k_activations(const float* output, size_t dim,
+                                    int* top_indices, float* top_values,
+                                    int top_k) {
+    if (!output || dim == 0 || !top_indices || !top_values || top_k <= 0) return;
+
+    for (int k = 0; k < top_k; k++) {
+        top_indices[k] = -1;
+        top_values[k] = -1e10f;
+    }
+
+    for (size_t i = 0; i < dim; i++) {
+        float av = fabsf(output[i]);
+
+        for (int k = 0; k < top_k; k++) {
+            if (av > top_values[k]) {
+                int already = 0;
+                for (int p = 0; p < k; p++) {
+                    if (top_indices[p] == (int)i) { already = 1; break; }
+                }
+                if (already) break;
+
+                for (int m = top_k - 1; m > k; m--) {
+                    top_indices[m] = top_indices[m - 1];
+                    top_values[m] = top_values[m - 1];
+                }
+                top_indices[k] = (int)i;
+                top_values[k] = av;
+                break;
+            }
+        }
+    }
+}
+
+/*
+ * 计算两个谓词是否互斥（属于已知的矛盾谓词组）
+ */
+static int are_predicates_opposing(const char* pred_a, const char* pred_b) {
+    if (!pred_a || !pred_b) return 0;
+
+    for (int g = 0; g_opposing_predicate_groups[g][0] != NULL; g++) {
+        int found_a = 0, found_b = 0;
+        int idx_a = -1, idx_b = -1;
+        for (int p = 0; p < 4 && g_opposing_predicate_groups[g][p] != NULL; p++) {
+            if (strcmp(pred_a, g_opposing_predicate_groups[g][p]) == 0) {
+                found_a = 1;
+                idx_a = p;
+            }
+            if (strcmp(pred_b, g_opposing_predicate_groups[g][p]) == 0) {
+                found_b = 1;
+                idx_b = p;
+            }
+        }
+        if (found_a && found_b && idx_a != idx_b) return 1;
+    }
+
+    return 0;
+}
+
+/*
+ * 文本特征编码 —— 将字符串转换为浮点特征向量
+ * 使用字符级编码 + 正弦位置编码 + 长度归一化
+ */
+static void text_to_feature_vector(const char* text, float* features, size_t dim) {
+    if (!text || !features || dim == 0) return;
+
+    size_t tlen = strlen(text);
+    memset(features, 0, dim * sizeof(float));
+
+    if (tlen == 0) return;
+
+    float len_factor = 1.0f / sqrtf((float)tlen);
+
+    for (size_t i = 0; i < tlen && i < dim; i++) {
+        float char_val = (float)(unsigned char)text[i % tlen] / 255.0f;
+        float pos_enc = sinf(((float)i + 1.0f) * 0.1591549f);
+
+        features[i] = (char_val * 0.6f + pos_enc * 0.4f) * len_factor;
+
+        if (i + tlen < dim) {
+            features[i + tlen] = char_val * 0.3f;
+        }
+    }
+}
+
 int knowledge_train_from_lnn(KnowledgeBase* kb, LNN* lnn, int epochs) {
     if (!kb || !lnn) return -1;
-    int count = 0;
-    size_t total, mem;
-    knowledge_base_get_stats(kb, &total, &mem);
 
-    for (int e = 0; e < epochs && e < 32; e++) {
+    LNNConfig cfg;
+    if (lnn_get_config(lnn, &cfg) != 0) {
+        log_error("[知识训练] 无法获取LNN配置");
+        return -1;
+    }
+
+    size_t input_size = cfg.input_size;
+    size_t output_size = cfg.output_size;
+    size_t hidden_size = cfg.hidden_size;
+    float learning_rate = cfg.learning_rate;
+
+    if (input_size == 0 || output_size == 0) {
+        log_error("[知识训练] LNN配置无效: input=%zu output=%zu", input_size, output_size);
+        return -1;
+    }
+
+    size_t pre_total = 0, pre_mem = 0;
+    knowledge_base_get_stats(kb, &pre_total, &pre_mem);
+
+    int added_count = 0;
+    int filtered_count = 0;
+    int pending_count = 0;
+    int conflict_count = 0;
+    int updated_count = 0;
+    int train_iterations = 0;
+
+    int max_epochs = (epochs < 1) ? 8 : ((epochs > 64) ? 64 : epochs);
+    int num_templates = (int)(sizeof(g_lnn_query_templates) / sizeof(g_lnn_query_templates[0]));
+
+    float* input_buf = (float*)safe_malloc(input_size * sizeof(float));
+    float* output_buf = (float*)safe_malloc(output_size * sizeof(float));
+    float* target_buf = (float*)safe_malloc(output_size * sizeof(float));
+
+    if (!input_buf || !output_buf || !target_buf) {
+        log_error("[知识训练] 内存分配失败");
+        safe_free((void**)&input_buf);
+        safe_free((void**)&output_buf);
+        safe_free((void**)&target_buf);
+        return -1;
+    }
+
+    log_info("[知识训练] 开始LNN知识提取: epochs=%d, input=%zu, output=%zu, hidden=%zu, lr=%.4f",
+             max_epochs, input_size, output_size, hidden_size, (double)learning_rate);
+
+    /* ---------- 主循环：每个epoch使用不同的知识查询模板驱动LNN前向传播 ---------- */
+    for (int e = 0; e < max_epochs; e++) {
+        int template_idx = e % num_templates;
+        const char* query_text = g_lnn_query_templates[template_idx];
+
+        /* 1. 将查询模板编码为LNN输入特征向量 */
+        text_to_feature_vector(query_text, input_buf, input_size);
+
+        /* 多模板混合编码 — 混合相邻模板增强语义多样性 */
+        if (e > 0 && num_templates > 1) {
+            int prev_idx = (e - 1) % num_templates;
+            float prev_weight = 0.2f;
+            for (size_t i = 0; i < input_size; i++) {
+                float prev_char = (float)(unsigned char)g_lnn_query_templates[prev_idx][i % strlen(g_lnn_query_templates[prev_idx])] / 255.0f;
+                input_buf[i] = input_buf[i] * (1.0f - prev_weight) + prev_char * prev_weight * 0.5f;
+            }
+        }
+
+        /* 2. LNN前向传播 —— 核心：通过LNN的连续动态系统处理查询 */
+        if (lnn_forward(lnn, input_buf, output_buf) != 0) {
+            log_warning("[知识训练] epoch %d: LNN前向传播失败", e);
+            continue;
+        }
+
+        /* 3. 分析LNN输出激活统计 —— 评估输出质量和不确定性 */
+        float activation_ratio = 0.0f;
+        float mean_activation = 0.0f;
+        float uncertainty = 0.0f;
+        compute_lnn_activation_stats(output_buf, output_size, 
+                                      &activation_ratio, &mean_activation, &uncertainty);
+
+        /* 4. 提取激活最强的特征维度 —— 作为知识条目的语义锚点 */
+        int top_k = 6;
+        int top_indices[6];
+        float top_values[6];
+        find_top_k_activations(output_buf, output_size, top_indices, top_values, top_k);
+
+        /* 5. 计算知识质量评分 (0.0 ~ 1.0) */
+        float quality_score = 0.0f;
+        quality_score += activation_ratio * 0.30f;
+        quality_score += fminf(mean_activation, 1.0f) * 0.25f;
+        quality_score += (1.0f - uncertainty) * 0.25f;
+        quality_score += (top_values[0] > 0.3f ? top_values[0] * 0.20f : 0.0f);
+
+        if (quality_score > 1.0f) quality_score = 1.0f;
+        if (quality_score < 0.0f) quality_score = 0.0f;
+
+        /* 6. 低质量/高不确定性过滤 —— 避免虚假知识入库 */
+        if (quality_score < 0.12f || (uncertainty > 0.8f && quality_score < 0.25f)) {
+            filtered_count++;
+            log_debug("[知识训练] epoch %d: 质量过低(%.3f) 不确定性过高(%.3f) -> 过滤",
+                      e, (double)quality_score, (double)uncertainty);
+            continue;
+        }
+
+        /* 7. 构建知识三元组 —— 基于LNN激活模式生成语义化知识 */
+        char subj[160], pred[192], obj[320];
+
+        snprintf(subj, sizeof(subj), "LNN语义概念_%s_epoch%d", query_text, e);
+        snprintf(pred, sizeof(pred), "激活特征_维度%d_强度%.2f",
+                 top_indices[0] >= 0 ? top_indices[0] : 0,
+                 (double)top_values[0]);
+        snprintf(obj, sizeof(obj), "模式编码_dim%d_%d_%d_激活率%.2f_不确定度%.2f_质量%.2f",
+                 top_indices[0] >= 0 ? top_indices[0] : 0,
+                 top_indices[1] >= 0 ? top_indices[1] : 0,
+                 top_indices[2] >= 0 ? top_indices[2] : 0,
+                 (double)activation_ratio, (double)uncertainty, (double)quality_score);
+
+        /* 8. 去重检查 —— 使用字符串相似度防止重复知识录入 */
+        KnowledgeEntry similar_results[8];
+        int similar_count = knowledge_base_search_similar(kb, subj, pred, obj, 0.65f, similar_results, 8);
+        int is_duplicate = 0;
+
+        for (int k = 0; k < similar_count && k < 8; k++) {
+            float sub_sim = knowledge_string_similarity(subj, similar_results[k].subject);
+            float pred_sim = knowledge_string_similarity(pred, similar_results[k].predicate);
+            float obj_sim = knowledge_string_similarity(obj, similar_results[k].object);
+            float avg_sim = (sub_sim + pred_sim + obj_sim) / 3.0f;
+
+            if (avg_sim > 0.75f) {
+                is_duplicate = 1;
+                log_debug("[知识训练] epoch %d: 重复知识(sim=%.3f) -> 跳过",
+                          e, (double)avg_sim);
+                break;
+            }
+        }
+        for (int k = 0; k < similar_count && k < 8; k++) {
+            knowledge_entry_free(&similar_results[k]);
+        }
+
+        if (is_duplicate) {
+            filtered_count++;
+            continue;
+        }
+
+        /* 9. 冲突检测和消解 —— 检查是否与已有知识存在矛盾 */
+        int has_conflict = 0;
+        for (size_t i = 0; i < kb->size; i++) {
+            KnowledgeEntry* existing = &kb->entries[i].entry;
+            if (!existing->subject || !existing->predicate) continue;
+
+            float subj_sim = knowledge_string_similarity(subj, existing->subject);
+            float pred_sim = knowledge_string_similarity(pred, existing->predicate);
+
+            if (subj_sim > 0.5f && pred_sim > 0.35f) {
+                float obj_sim = knowledge_string_similarity(obj, existing->object);
+
+                /* 相同或相近主体+谓词，但客体差异大 -> 可能冲突 */
+                if (obj_sim < 0.2f) {
+                    has_conflict = 1;
+                    conflict_count++;
+
+                    /* 冲突消解策略：高质量新知识覆盖低质量旧知识 */
+                    float existing_weight = existing->weight;
+                    if (quality_score > existing_weight + 0.2f) {
+                        safe_free((void**)&existing->subject);
+                        safe_free((void**)&existing->predicate);
+                        safe_free((void**)&existing->object);
+
+                        existing->subject = string_duplicate_nullable(subj);
+                        existing->predicate = string_duplicate_nullable(pred);
+                        existing->object = string_duplicate_nullable(obj);
+                        existing->weight = quality_score;
+                        existing->confidence = (quality_score > 0.6f) ? CONFIDENCE_HIGH : CONFIDENCE_MEDIUM;
+                        existing->source = SOURCE_LEARNING;
+                        existing->timestamp = (long)time(NULL);
+
+                        updated_count++;
+                        log_info("[知识训练] 冲突消解: 新知识(质量%.3f)覆盖旧知识(id=%d,质量%.3f)",
+                                 (double)quality_score, kb->entries[i].id, (double)existing_weight);
+                    } else {
+                        log_debug("[知识训练] 冲突保留: 旧知识(质量%.3f)优于新知识(质量%.3f)",
+                                  (double)existing_weight, (double)quality_score);
+                    }
+                    break;
+                }
+
+                /* 检查谓词是否互斥 —— 明确矛盾 */
+                if (are_predicates_opposing(pred, existing->predicate)) {
+                    has_conflict = 1;
+                    conflict_count++;
+
+                    if (quality_score > existing->weight + 0.15f) {
+                        safe_free((void**)&existing->predicate);
+                        safe_free((void**)&existing->object);
+                        existing->predicate = string_duplicate_nullable(pred);
+                        existing->object = string_duplicate_nullable(obj);
+                        existing->weight = quality_score;
+                        existing->confidence = (quality_score > 0.5f) ? CONFIDENCE_MEDIUM : CONFIDENCE_LOW;
+                        existing->source = SOURCE_LEARNING;
+                        existing->timestamp = (long)time(NULL);
+                        updated_count++;
+                        log_info("[知识训练] 谓词矛盾消解: \"%s\" vs \"%s\" -> 采用新谓词",
+                                 pred, existing->predicate);
+                    } else {
+                        log_debug("[知识训练] 谓词矛盾保留: 旧知识更可靠 -> 跳过");
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (has_conflict) {
+            continue;
+        }
+
+        /* 10. 创建知识条目并入库 */
         KnowledgeEntry ent;
         memset(&ent, 0, sizeof(ent));
-
-        char subj[128], pred[128], obj[256];
-        snprintf(subj, sizeof(subj), "LNN派生_%d", e);
-        snprintf(pred, sizeof(pred), "演化生成");
-        snprintf(obj, sizeof(obj), "CfC隐藏状态派生知识_类别%d", e % 8);
-
         ent.subject = string_duplicate_nullable(subj);
         ent.predicate = string_duplicate_nullable(pred);
         ent.object = string_duplicate_nullable(obj);
-        ent.type = KNOWLEDGE_CONCEPT;
-        ent.confidence = 0.6f + (float)e * 0.05f;
-        if (ent.confidence > 0.9f) ent.confidence = 0.9f;
-        ent.weight = 1.0f;
+        ent.type = (activation_ratio > 0.4f) ? KNOWLEDGE_CONCEPT : KNOWLEDGE_OBSERVATION;
+        ent.weight = quality_score;
+        ent.source = SOURCE_LEARNING;
+        ent.timestamp = (long)time(NULL);
 
-        if (knowledge_base_add(kb, &ent) == 0) count++;
+        /* 置信度映射 */
+        if (quality_score > 0.6f && uncertainty < 0.3f) {
+            ent.confidence = CONFIDENCE_HIGH;
+        } else if (quality_score > 0.3f) {
+            ent.confidence = CONFIDENCE_MEDIUM;
+        } else {
+            ent.confidence = CONFIDENCE_LOW;
+        }
+
+        /* 高不确定性标记为"待验证" */
+        if (uncertainty > 0.45f || quality_score < 0.2f) {
+            char pending_obj[384];
+            snprintf(pending_obj, sizeof(pending_obj), "[待验证]%s", obj);
+            safe_free((void**)&ent.object);
+            ent.object = string_duplicate_nullable(pending_obj);
+            ent.confidence = CONFIDENCE_LOW;
+            pending_count++;
+            log_debug("[知识训练] epoch %d: 高不确定性(%.3f) -> 标记为待验证",
+                      e, (double)uncertainty);
+        }
+
+        int add_result = knowledge_base_add(kb, &ent);
+        if (add_result >= 0) {
+            added_count++;
+            log_debug("[知识训练] epoch %d: 新增知识(id=%d,质量=%.3f,类型=%d)",
+                      e, add_result, (double)quality_score, (int)ent.type);
+        } else {
+            log_warning("[知识训练] epoch %d: 添加知识失败", e);
+        }
+
         safe_free((void**)&ent.subject);
         safe_free((void**)&ent.predicate);
         safe_free((void**)&ent.object);
+
+        /* 11. LNN权重更新 —— 基于提取知识的质量进行反向传播 */
+        if (quality_score > 0.25f && cfg.enable_training) {
+            for (size_t i = 0; i < output_size; i++) {
+                float boost = (fabsf(output_buf[i]) > 0.2f) ? (1.0f + learning_rate * quality_score) : 1.0f;
+                target_buf[i] = output_buf[i] * boost;
+
+                if (target_buf[i] > 1.0f) target_buf[i] = 1.0f;
+                if (target_buf[i] < -1.0f) target_buf[i] = -1.0f;
+            }
+
+            float loss = 0.0f;
+            if (lnn_backward(lnn, target_buf, &loss) == 0) {
+                train_iterations++;
+                log_debug("[知识训练] epoch %d: 权重更新完成 loss=%.6f", e, (double)loss);
+            } else {
+                log_warning("[知识训练] epoch %d: 权重更新失败", e);
+            }
+        } else if (quality_score > 0.25f && !cfg.enable_training) {
+            log_debug("[知识训练] epoch %d: LNN训练未启用，跳过权重更新", e);
+        }
     }
-    (void)total; (void)mem;
-    return count;
+
+    /* ---------- 清理 ---------- */
+    safe_free((void**)&input_buf);
+    safe_free((void**)&output_buf);
+    safe_free((void**)&target_buf);
+
+    /* ---------- 统计报告 ---------- */
+    size_t post_total = 0, post_mem = 0;
+    knowledge_base_get_stats(kb, &post_total, &post_mem);
+    size_t net_added = (post_total > pre_total) ? (post_total - pre_total) : 0;
+
+    log_info("[知识训练] ===== LNN知识提取报告 =====");
+    log_info("[知识训练]   - 总epoch: %d, 查询模板数: %d", max_epochs, num_templates);
+    log_info("[知识训练]   - 成功新增: %d 条", added_count);
+    log_info("[知识训练]   - 低质量过滤: %d 条", filtered_count);
+    log_info("[知识训练]   - 标记待验证: %d 条", pending_count);
+    log_info("[知识训练]   - 冲突检测+消解: %d 条", conflict_count);
+    log_info("[知识训练]   - 冲突更新：%d 条", updated_count);
+    log_info("[知识训练]   - LNN权重更新迭代: %d 次", train_iterations);
+    log_info("[知识训练]   - 知识库总条目: %zu -> %zu (净增 %zu)", pre_total, post_total, net_added);
+    log_info("[知识训练]   - 知识库内存: %zu 字节", post_mem);
+    log_info("[知识训练] ============================");
+
+    return added_count + updated_count;
 }
 
 int knowledge_self_improve(KnowledgeBase* kb) {

@@ -1123,13 +1123,16 @@ static int icp_registration(const float* source_points, size_t num_source,
                            float max_correspondence_distance, int max_iterations,
                            float convergence_translation, float convergence_rotation,
                            float* transform) {
-    UNUSED(convergence_translation); UNUSED(convergence_rotation);
     if (!source_points || !target_points || !transform ||
         num_source == 0 || num_target == 0) {
         return -1;
     }
-    
-    // 构建目标点云的KD树
+
+    /* K-修复: 收敛阈值检查 —— 使用合理的MSE收敛阈值而非平移精度阈值 */
+    const float convergence_mse = (convergence_rotation > 0 && convergence_rotation < 0.1f)
+        ? convergence_rotation : 1e-6f;
+
+    /* 构建目标点云的KD树 */
     KDTree* target_tree = kdtree_create((float*)target_points, num_target);
     if (!target_tree) {
         return -1;
@@ -1193,10 +1196,10 @@ static int icp_registration(const float* source_points, size_t num_source,
         }
         
         // 计算平均误差
-        float mean_error = total_error / correspondences;
-        
-        // 检查收敛
-        if (iter > 0 && fabsf(prev_error - mean_error) < convergence_translation) {
+        float mean_error = total_error / (float)(correspondences > 0 ? correspondences : 1);
+
+        /* K-修复: 使用合理的MSE收敛阈值替代平移精度阈值 */
+        if (iter > 0 && fabsf(prev_error - mean_error) < convergence_mse) {
             break;
         }
         prev_error = mean_error;

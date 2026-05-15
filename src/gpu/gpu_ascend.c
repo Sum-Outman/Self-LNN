@@ -537,74 +537,105 @@ static int ascend_backend_kernel_execute(GpuKernel* kernel,
                                           size_t global_work_size,
                                           size_t local_work_size) {
     if (!kernel) return -1;
-
+    (void)local_work_size;
     size_t count = global_work_size > 0 ? global_work_size : 64;
 
-    /* 昇腾NPU内核执行：当AscendCL可用时，使用NPU设备内存进行数据传输和计算
-     * 1. 通过aclrtMalloc在NPU上分配输入/输出缓冲区
-     * 2. 通过aclrtMemcpy传输数据到NPU设备
-     * 3. 在CPU上执行实际内核计算（AscendCL需预编译OM模型，无运行时内核编译）
-     * 4. 通过aclrtMemcpy将结果回传主机
-     * 5. 释放NPU设备内存
-     * 
-     * 当AscendCL不可用时，直接回退到CPU计算（npu_common_cpu_kernel_execute） */
-    (void)local_work_size;
-
-    if (kernel->arg_count < 2) return -1;
-    const float* host_input  = (const float*)kernel->arg_values[0];
-    float*       host_output = (float*)kernel->arg_values[1];
-    if (!host_input || !host_output) return -1;
+    /* ================================================================
+     * 昇腾NPU设备端执行路径（CANN AscendCL运行时）
+     * 1. 检查AscendCL运行时是否可用
+     * 2. 若有预编译OM模型（backend_data），通过aclmdlExecute执行真实NPU推理
+     * 3. 若无预编译模型但AscendCL可用，使用NPU设备内存中转计算
+     * 4. AscendCL不可用时回退到CPU直算（npu_common_cpu_kernel_execute）
+     * ================================================================ */
 
     if (g_ascend_state.ascendcl_available && g_ascend_cl.aclrtMalloc &&
         g_ascend_cl.aclrtMemcpy && g_ascend_cl.aclrtFree) {
-        void* dev_input = NULL;
-        void* dev_output = NULL;
-        size_t data_size = count * sizeof(float);
 
-        if (g_ascend_cl.aclrtMalloc(&dev_input, data_size, 1) != 0) goto cpu_fallback;
-        if (g_ascend_cl.aclrtMalloc(&dev_output, data_size, 1) != 0) {
-            g_ascend_cl.aclrtFree(dev_input);
-            goto cpu_fallback;
-        }
+        if (kernel->arg_count < 2) goto ascend_fallback;
+        const float* host_input  = (const float*)kernel->arg_values[0];
+        float*       host_output = (float*)kernel->arg_values[1];
+        if (!host_input || !host_output) goto ascend_fallback;
 
-        /* 将输入数据从主机复制到NPU设备 */
-        g_ascend_cl.aclrtMemcpy(dev_input, data_size, host_input, data_size, 1);
+        /* 路径A：预编译OM模型通过aclmdlExecute执行真实NPU推理 */
+        if (kernel->backend_data && g_ascend_cl.aclmdlExecute) {
+            void* dev_input  = NULL;
+            void* dev_output = NULL;
+            size_t data_size = count * sizeof(float);
 
-        /* 在CPU上执行实际内核计算（使用临时缓冲区） */
-        const float* saved_input = (const float*)kernel->arg_values[0];
-        float* saved_output = (float*)kernel->arg_values[1];
-        float* temp_output = (float*)safe_calloc(count, sizeof(float));
-        if (!temp_output) {
+            if (g_ascend_cl.aclrtMalloc(&dev_input, data_size, 1) != 0) goto ascend_fallback;
+            if (g_ascend_cl.aclrtMalloc(&dev_output, data_size, 1) != 0) {
+                g_ascend_cl.aclrtFree(dev_input);
+                goto ascend_fallback;
+            }
+
+            g_ascend_cl.aclrtMemcpy(dev_input, data_size, host_input, data_size, 1);
+
+            uint32_t model_id = (uint32_t)(uintptr_t)kernel->backend_data;
+            int ret = g_ascend_cl.aclmdlExecute(model_id, dev_input,
+                                                 (uint32_t)data_size,
+                                                 dev_output,
+                                                 (uint32_t)data_size);
+            if (ret == 0) {
+                g_ascend_cl.aclrtMemcpy(host_output, data_size, dev_output, data_size, 2);
+                g_ascend_cl.aclrtFree(dev_input);
+                g_ascend_cl.aclrtFree(dev_output);
+                kernel->is_compiled = 1;
+                LOG_INFO("昇腾NPU aclmdlExecute模型推理执行成功（count=%zu）", count);
+                return 0;
+            }
+
             g_ascend_cl.aclrtFree(dev_input);
             g_ascend_cl.aclrtFree(dev_output);
-            goto cpu_fallback;
+            /* 模型执行失败，降级到设备内存中转路径 */
         }
 
-        kernel->arg_values[1] = temp_output;
-        int result = npu_common_cpu_kernel_execute(kernel, count);
-        kernel->arg_values[0] = saved_input;
-        kernel->arg_values[1] = saved_output;
+        /* 路径B：AscendCL可用但无预编译模型，使用NPU设备内存 + CPU中转计算 */
+        {
+            void* dev_input  = NULL;
+            void* dev_output = NULL;
+            size_t data_size = count * sizeof(float);
 
-        if (result == 0) {
-            /* 将计算结果从主机回传到NPU设备，再从NPU设备回传到主机输出 */
-            g_ascend_cl.aclrtMemcpy(dev_output, data_size, temp_output, data_size, 2);
-            g_ascend_cl.aclrtMemcpy(host_output, data_size, dev_output, data_size, 2);
-        } else {
-            /* 内核执行失败，回退到主机直传 */
-            g_ascend_cl.aclrtMemcpy(dev_output, data_size, saved_input, data_size, 2);
-        }
+            if (g_ascend_cl.aclrtMalloc(&dev_input, data_size, 1) != 0) goto ascend_fallback;
+            if (g_ascend_cl.aclrtMalloc(&dev_output, data_size, 1) != 0) {
+                g_ascend_cl.aclrtFree(dev_input);
+                goto ascend_fallback;
+            }
 
-        safe_free((void**)&temp_output);
-        g_ascend_cl.aclrtFree(dev_input);
-        g_ascend_cl.aclrtFree(dev_output);
+            g_ascend_cl.aclrtMemcpy(dev_input, data_size, host_input, data_size, 1);
 
-        if (result == 0) {
-            kernel->is_compiled = 1;
-            return 0;
+            float* temp_output = (float*)safe_calloc(count, sizeof(float));
+            if (!temp_output) {
+                g_ascend_cl.aclrtFree(dev_input);
+                g_ascend_cl.aclrtFree(dev_output);
+                goto ascend_fallback;
+            }
+
+            const float* saved_input = (const float*)kernel->arg_values[0];
+            float* saved_output = (float*)kernel->arg_values[1];
+            kernel->arg_values[1] = temp_output;
+            int result = npu_common_cpu_kernel_execute(kernel, count);
+            kernel->arg_values[0] = saved_input;
+            kernel->arg_values[1] = saved_output;
+
+            if (result == 0) {
+                g_ascend_cl.aclrtMemcpy(dev_output, data_size, temp_output, data_size, 2);
+                g_ascend_cl.aclrtMemcpy(host_output, data_size, dev_output, data_size, 2);
+            }
+
+            safe_free((void**)&temp_output);
+            g_ascend_cl.aclrtFree(dev_input);
+            g_ascend_cl.aclrtFree(dev_output);
+
+            if (result == 0) {
+                kernel->is_compiled = 1;
+                LOG_INFO("昇腾NPU kernel执行成功（设备内存中转，count=%zu）", count);
+                return 0;
+            }
         }
     }
 
-cpu_fallback:
+ascend_fallback:
+    LOG_INFO("昇腾NPU AscendCL不可用，回退到CPU直算（count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 static int ascend_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,

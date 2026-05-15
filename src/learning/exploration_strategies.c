@@ -1018,3 +1018,171 @@ ExploreState* explore_load(ExploreStrategyType strategy_type, const char* filepa
     fclose(f);
     return state;
 }
+
+/* ============================================================================
+ * K-修复: UCB (Upper Confidence Bound) 探索策略
+ * 公式: a_t = argmax [ Q(a) + c * sqrt(ln(t) / N(a)) ]
+ * ============================================================================ */
+
+typedef struct {
+    float* Q;           /* 动作价值估计 [num_actions] */
+    int* N;             /* 动作选择次数 [num_actions] */
+    int total_steps;    /* 总步数 */
+    int num_actions;    /* 动作数 */
+    float c;            /* 探索系数 */
+} UCBState;
+
+void* exploration_ucb_create(int num_actions, float c) {
+    UCBState* s = (UCBState*)safe_calloc(1, sizeof(UCBState));
+    if (!s || num_actions <= 0) { safe_free((void**)&s); return NULL; }
+    s->num_actions = num_actions;
+    s->c = (c > 0.0f) ? c : 2.0f;
+    s->Q = (float*)safe_calloc((size_t)num_actions, sizeof(float));
+    s->N = (int*)safe_calloc((size_t)num_actions, sizeof(int));
+    if (!s->Q || !s->N) {
+        safe_free((void**)&s->Q); safe_free((void**)&s->N); safe_free((void**)&s);
+        return NULL;
+    }
+    s->total_steps = 0;
+    return (void*)s;
+}
+
+void exploration_ucb_free(void* state) {
+    if (!state) return;
+    UCBState* s = (UCBState*)state;
+    safe_free((void**)&s->Q);
+    safe_free((void**)&s->N);
+    safe_free((void**)&state);
+}
+
+int exploration_ucb_select(void* state, float* action_values, int num_actions) {
+    UCBState* s = (UCBState*)state;
+    if (!s || !action_values || num_actions <= 0) return -1;
+
+    s->total_steps++;
+    int best_a = 0;
+    float best_val = -1e10f;
+    float ln_t = logf((float)(s->total_steps > 0 ? s->total_steps : 1));
+
+    for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+        /* 每个动作至少选一次 */
+        if (s->N[a] == 0) { best_a = a; break; }
+        float ucb = s->Q[a] + s->c * sqrtf(ln_t / (float)s->N[a]);
+        if (ucb > best_val) { best_val = ucb; best_a = a; }
+    }
+
+    for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+        action_values[a] = s->Q[a];
+    }
+    return best_a;
+}
+
+void exploration_ucb_update(void* state, int action, float reward) {
+    UCBState* s = (UCBState*)state;
+    if (!s || action < 0 || action >= s->num_actions) return;
+    /* 增量平均更新 */
+    s->N[action]++;
+    s->Q[action] += (reward - s->Q[action]) / (float)s->N[action];
+}
+
+float exploration_ucb_get_best(void* state) {
+    UCBState* s = (UCBState*)state;
+    if (!s || s->num_actions <= 0) return 0.0f;
+    float best = s->Q[0];
+    for (int a = 1; a < s->num_actions; a++) {
+        if (s->Q[a] > best) best = s->Q[a];
+    }
+    return best;
+}
+
+/* ============================================================================
+ * K-修复: Thompson Sampling (贝叶斯) 探索策略
+ * 使用Beta分布共轭先验: Beta(α+success, β+failure)
+ * ============================================================================ */
+
+typedef struct {
+    float* alpha;       /* 成功计数+先验 [num_actions] */
+    float* beta;        /* 失败计数+先验 [num_actions] */
+    int num_actions;
+} ThompsonState;
+
+void* exploration_thompson_create(int num_actions) {
+    ThompsonState* s = (ThompsonState*)safe_calloc(1, sizeof(ThompsonState));
+    if (!s || num_actions <= 0) { safe_free((void**)&s); return NULL; }
+    s->num_actions = num_actions;
+    s->alpha = (float*)safe_calloc((size_t)num_actions, sizeof(float));
+    s->beta  = (float*)safe_calloc((size_t)num_actions, sizeof(float));
+    if (!s->alpha || !s->beta) {
+        safe_free((void**)&s->alpha); safe_free((void**)&s->beta); safe_free((void**)&s);
+        return NULL;
+    }
+    /* 均匀先验 Beta(1,1) */
+    for (int i = 0; i < num_actions; i++) {
+        s->alpha[i] = 1.0f;
+        s->beta[i] = 1.0f;
+    }
+    return (void*)s;
+}
+
+void exploration_thompson_free(void* state) {
+    if (!state) return;
+    ThompsonState* s = (ThompsonState*)state;
+    safe_free((void**)&s->alpha);
+    safe_free((void**)&s->beta);
+    safe_free((void**)&state);
+}
+
+int exploration_thompson_select(void* state, float* action_values, int num_actions) {
+    ThompsonState* s = (ThompsonState*)state;
+    if (!s || !action_values || num_actions <= 0) return -1;
+
+    int best_a = 0;
+    float best_sample = -1.0f;
+
+    for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+        /* Gamma近似: Beta(α,β) ~ Gamma(α,1) / (Gamma(α,1)+Gamma(β,1)) */
+        /* 简化：使用Beta均值+噪声近似 */
+        float u1 = explore_rand_float();
+        float u2 = explore_rand_float();
+        if (u1 < EXPLORE_EPSILON) u1 = EXPLORE_EPSILON;
+        if (u2 < EXPLORE_EPSILON) u2 = EXPLORE_EPSILON;
+
+        /* Box-Muller生成Gamma(α,1)近似（形状>1时合理） */
+        float g1 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+        float gamma_alpha = s->alpha[a] + s->alpha[a] * (g1 * 0.3f);
+        if (gamma_alpha < 0.0f) gamma_alpha = 0.0f;
+
+        u1 = explore_rand_float(); u2 = explore_rand_float();
+        if (u1 < EXPLORE_EPSILON) u1 = EXPLORE_EPSILON;
+        if (u2 < EXPLORE_EPSILON) u2 = EXPLORE_EPSILON;
+        float g2 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+        float gamma_beta = s->beta[a] + s->beta[a] * (g2 * 0.3f);
+        if (gamma_beta < 0.0f) gamma_beta = 0.0f;
+
+        float sample = (gamma_alpha + gamma_beta > 0.0f) ? gamma_alpha / (gamma_alpha + gamma_beta) : 0.5f;
+
+        action_values[a] = s->alpha[a] / (s->alpha[a] + s->beta[a]); /* 后验均值 */
+
+        if (sample > best_sample) { best_sample = sample; best_a = a; }
+    }
+    return best_a;
+}
+
+void exploration_thompson_update(void* state, int action, float reward) {
+    ThompsonState* s = (ThompsonState*)state;
+    if (!s || action < 0 || action >= s->num_actions) return;
+    float r = (reward > 1.0f) ? 1.0f : ((reward < 0.0f) ? 0.0f : reward);
+    s->alpha[action] += r;
+    s->beta[action] += (1.0f - r);
+}
+
+float exploration_thompson_get_best(void* state) {
+    ThompsonState* s = (ThompsonState*)state;
+    if (!s || s->num_actions <= 0) return 0.0f;
+    float best = 0.0f;
+    for (int a = 0; a < s->num_actions; a++) {
+        float mean = s->alpha[a] / (s->alpha[a] + s->beta[a]);
+        if (mean > best) best = mean;
+    }
+    return best;
+}

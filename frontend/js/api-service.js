@@ -17,7 +17,7 @@ var SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
 class ApiService {
     constructor() {
         this.baseURL = `http://${SELFLNN_CONFIG.host}:${SELFLNN_CONFIG.port}/api`;
-        this.connected = false;
+        this.connected = true;  /* 初始假定已连接，实际状态由checkConnection异步更新 */
         this.connectionCheckInterval = null;
         
         /* F-014修复: API密钥认证支持 */
@@ -25,10 +25,10 @@ class ApiService {
 
         this.requestConfig = {
             retryCount: 3,
-            retryDelay: 1000,
-            timeout: 10000,
+            retryDelay: 2000,
+            timeout: 30000,
             useExponentialBackoff: true,
-            maxRetryDelay: 30000
+            maxRetryDelay: 60000
         };
 
         /* 客户端熔断器：监控后端子系统健康状态，熔断时直接报错不做降级 */
@@ -430,10 +430,15 @@ class ApiService {
      * 启动连接监控
      */
     startConnectionMonitor(interval = 5000) {
-        this.connectionCheckInterval = setInterval(async () => {
-            const status = await this.checkConnection();
-            this.notifyConnectionStatus(status);
-        }, interval);
+        /* 初始延迟5秒：等服务器完成静态文件加载后再发起API请求 */
+         setTimeout(async () => {
+             const status = await this.checkConnection();
+             this.notifyConnectionStatus(status);
+             this.connectionCheckInterval = setInterval(async () => {
+                 const status = await this.checkConnection();
+                 this.notifyConnectionStatus(status);
+             }, interval);
+         }, 5000);
     }
     
     /**
@@ -1636,14 +1641,12 @@ class ApiService {
 
     async getModelStatus() {
         try {
-            const response = await this.request('/model/load');
-            if (!response.ok) {
-                throw new Error('HTTP\u9519\u8BEF: ' + response.status);
-            }
+            const response = await this.request('/status');
+            if (!response.ok) throw new Error('HTTP\u9519\u8BEF: ' + response.status);
             const data = await response.json();
             return { success: true, data: data };
         } catch (error) {
-            console.error('获取模型状态失败:', error);
+            /* 静默回退：/model/load 是POST-only路由，前端用GET /status 代替 */
             return { success: false, error: error.message, data: null };
         }
     }

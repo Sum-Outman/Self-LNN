@@ -22,12 +22,13 @@ var HardwareScanUtil = {
 
         var result = {
             success: false,
-            cpu: { cores: 'N/A', usage: 0, name: '' },
-            gpu: { count: 0, devices: [], usage: 0, memory_mb: 0 },
-            memory: { total_gb: 0, used_gb: 0, usage_pct: 0 },
-            camera: { detected: false, count: 0, devices: [] },
-            microphone: { detected: false, count: 0, devices: [] },
-            speaker: { detected: false, count: 0, devices: [] },
+            /* 初始化为"未连接"状态，拒绝填充假数据（usage=0可能误导用户视为真实0%使用率） */
+            cpu: { cores: '未连接', usage: -1, name: '', available: false },
+            gpu: { count: 0, devices: [], usage: -1, memory_mb: -1, available: false },
+            memory: { total_gb: -1, used_gb: -1, usage_pct: -1, available: false },
+            camera: { detected: false, count: 0, devices: [], available: false },
+            microphone: { detected: false, count: 0, devices: [], available: false },
+            speaker: { detected: false, count: 0, devices: [], available: false },
             backendOnline: false,
             diagnosticLines: [],
             raw: null
@@ -44,11 +45,14 @@ var HardwareScanUtil = {
                     var scan = apiResult.scan || {};
                     if (scan.cpu) {
                         if (typeof scan.cpu === 'object') {
-                            result.cpu.cores = scan.cpu.cores || scan.cpu.core_count || 'N/A';
-                            result.cpu.usage = scan.cpu.usage || 0;
+                            result.cpu.cores = scan.cpu.cores || scan.cpu.core_count || '未连接';
+                            /* 仅当API明确返回usage值时才覆盖初始-1，不使用||0制造假0% */
+                            result.cpu.usage = (scan.cpu.usage !== undefined && scan.cpu.usage !== null) ? scan.cpu.usage : -1;
                             result.cpu.name = scan.cpu.name || scan.cpu.model || '';
+                            result.cpu.available = true;
                         } else {
                             result.cpu.name = String(scan.cpu);
+                            result.cpu.available = true;
                         }
                     }
                     if (scan.gpu_count !== undefined) {
@@ -57,16 +61,24 @@ var HardwareScanUtil = {
                     if (scan.gpu && typeof scan.gpu === 'object') {
                         result.gpu.count = scan.gpu.count || scan.gpu.device_count || result.gpu.count;
                         result.gpu.devices = scan.gpu.devices || [];
-                        result.gpu.usage = scan.gpu.usage || scan.gpu.utilization || 0;
-                        result.gpu.memory_mb = scan.gpu.memory_mb || scan.gpu.vram_mb || 0;
+                        /* 仅当API明确返回usage/显存值时才覆盖初始-1 */
+                        result.gpu.usage = (scan.gpu.usage !== undefined && scan.gpu.usage !== null) ? scan.gpu.usage : -1;
+                        result.gpu.memory_mb = (scan.gpu.memory_mb !== undefined && scan.gpu.memory_mb !== null) ? scan.gpu.memory_mb :
+                                               (scan.gpu.vram_mb !== undefined && scan.gpu.vram_mb !== null) ? scan.gpu.vram_mb : -1;
+                        result.gpu.available = true;
                     }
                     if (scan.memory_gb !== undefined) {
-                        result.memory.total_gb = parseFloat(scan.memory_gb) || 0;
+                        result.memory.total_gb = parseFloat(scan.memory_gb);
+                        result.memory.available = true;
                     }
                     if (scan.memory && typeof scan.memory === 'object') {
-                        result.memory.total_gb = scan.memory.total_gb || (scan.memory.total ? scan.memory.total / 1024 / 1024 / 1024 : 0);
-                        result.memory.used_gb = scan.memory.used_gb || (scan.memory.used ? scan.memory.used / 1024 / 1024 / 1024 : 0);
-                        result.memory.usage_pct = scan.memory.usage_pct || scan.memory.utilization || 0;
+                        result.memory.total_gb = (scan.memory.total_gb !== undefined && scan.memory.total_gb !== null) ? scan.memory.total_gb :
+                                                  (scan.memory.total ? scan.memory.total / 1024 / 1024 / 1024 : result.memory.total_gb);
+                        result.memory.used_gb = (scan.memory.used_gb !== undefined && scan.memory.used_gb !== null) ? scan.memory.used_gb :
+                                                 (scan.memory.used ? scan.memory.used / 1024 / 1024 / 1024 : -1);
+                        result.memory.usage_pct = (scan.memory.usage_pct !== undefined && scan.memory.usage_pct !== null) ? scan.memory.usage_pct :
+                                                   (scan.memory.utilization !== undefined && scan.memory.utilization !== null) ? scan.memory.utilization : -1;
+                        result.memory.available = true;
                     }
 
                     var hasCam = scan.has_camera;
@@ -91,11 +103,14 @@ var HardwareScanUtil = {
                         });
                     }
 
-                    /* 生成诊断文本行 */
+                    /* 生成诊断文本行 — 后端在线时有数据则显示真实值，无数据则显式标注"未连接" */
                     result.diagnosticLines.push('✅ 硬件扫描完成');
-                    if (result.cpu.name) result.diagnosticLines.push('CPU: ' + result.cpu.name);
-                    if (result.gpu.count > 0) result.diagnosticLines.push('GPU: ' + result.gpu.count + ' 个设备');
-                    if (result.memory.total_gb > 0) result.diagnosticLines.push('内存: ' + result.memory.total_gb.toFixed(1) + ' GB');
+                    if (result.cpu.available && result.cpu.name) result.diagnosticLines.push('CPU: ' + result.cpu.name);
+                    else if (!result.cpu.available) result.diagnosticLines.push('CPU: 未连接');
+                    if (result.gpu.available && result.gpu.count > 0) result.diagnosticLines.push('GPU: ' + result.gpu.count + ' 个设备');
+                    else if (!result.gpu.available) result.diagnosticLines.push('GPU: 未连接');
+                    if (result.memory.available && result.memory.total_gb > 0) result.diagnosticLines.push('内存: ' + result.memory.total_gb.toFixed(1) + ' GB');
+                    else if (!result.memory.available) result.diagnosticLines.push('内存: 未连接');
                     result.diagnosticLines.push('摄像头: ' + (result.camera.detected ? '已检测' : '未检测'));
                     result.diagnosticLines.push('麦克风: ' + (result.microphone.detected ? '已检测' : '未检测'));
 
@@ -118,7 +133,8 @@ var HardwareScanUtil = {
         /* 第二步：浏览器端检测作为补充 */
         try {
             if (navigator.hardwareConcurrency) {
-                if (result.cpu.cores === 'N/A') result.cpu.cores = navigator.hardwareConcurrency;
+                // 浏览器硬件并发API作为后备，但仅当后端未返回数据时使用
+                if (result.cpu.cores === '未连接') result.cpu.cores = navigator.hardwareConcurrency;
             }
             if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
                 var browserDevices = await navigator.mediaDevices.enumerateDevices();
@@ -126,6 +142,7 @@ var HardwareScanUtil = {
                     var cams = browserDevices.filter(function(d) { return d.kind === 'videoinput'; });
                     result.camera.count = cams.length;
                     result.camera.detected = cams.length > 0;
+                    result.camera.available = cams.length > 0;
                     result.camera.devices = cams.map(function(d) {
                         return { name: d.label || '摄像头 #' + cams.indexOf(d), id: d.deviceId, available: true };
                     });
@@ -134,6 +151,7 @@ var HardwareScanUtil = {
                     var mics = browserDevices.filter(function(d) { return d.kind === 'audioinput'; });
                     result.microphone.count = mics.length;
                     result.microphone.detected = mics.length > 0;
+                    result.microphone.available = mics.length > 0;
                     result.microphone.devices = mics.map(function(d) {
                         return { name: d.label || '麦克风 #' + mics.indexOf(d), id: d.deviceId, available: true };
                     });
@@ -141,6 +159,7 @@ var HardwareScanUtil = {
                 var spks = browserDevices.filter(function(d) { return d.kind === 'audiooutput'; });
                 result.speaker.count = spks.length;
                 result.speaker.detected = spks.length > 0;
+                result.speaker.available = spks.length > 0;
                 result.speaker.devices = spks.map(function(d) {
                     return { name: d.label || '扬声器 #' + spks.indexOf(d), id: d.deviceId, available: true };
                 });

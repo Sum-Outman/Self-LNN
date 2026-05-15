@@ -46,6 +46,8 @@ typedef struct {
     float max_grad_norm;            /**< 梯度裁剪阈值（默认5.0），统一控制梯度裁剪 */
     int enable_laplace;             /**< 是否启用拉普拉斯频域分析增强（默认1=启用） */
     int enable_quaternion;          /**< 是否启用四元数增强（默认1=启用，兼容CfCCell） */
+    float dropout_rate;             /**< Dropout率（0.0-1.0，默认0.0=无dropout） */
+    float weight_decay;             /**< 权重衰减系数（L2正则化，默认0.0） */
 } LNNConfig;
 
 /**

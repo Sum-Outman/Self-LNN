@@ -324,6 +324,11 @@ void cfc_vision_mark_trained(CfcVisionProcessor* processor);
  */
 int cfc_vision_is_trained(const CfcVisionProcessor* processor);
 
+/* K-修复: 深度视觉网络训练（前向→L2损失→反向传播→SGD） */
+int cfc_vision_train_network(CfcVisionProcessor* processor,
+    const float* training_images, const float* target_features,
+    int num_samples, int num_epochs, float learning_rate);
+
 #ifdef __cplusplus
 }
 #endif

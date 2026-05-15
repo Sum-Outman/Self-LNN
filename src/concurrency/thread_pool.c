@@ -586,30 +586,36 @@ static void* worker_thread_func(void* arg)
                 pthread_mutex_unlock(&pool->lock);
 #endif
             } else {
-                // 等待任务或停止信号
+                /* K-修复: 添加5秒超时防止死锁 */
                 while (!got_task && pool->is_running) {
                     if (pool->is_paused) {
-                        // 线程池暂停，等待恢复
 #ifdef _WIN32
-                        SleepConditionVariableCS(&pool->task_cond, &pool->lock, INFINITE);
+                        DWORD wait_ret = SleepConditionVariableCS(&pool->task_cond, &pool->lock, 5000);
+                        if (!wait_ret && GetLastError() == ERROR_TIMEOUT) { break; }
 #else
-                        pthread_cond_wait(&pool->task_cond, &pool->lock);
+                        struct timespec ts;
+                        clock_gettime(CLOCK_REALTIME, &ts);
+                        ts.tv_sec += 5;
+                        int ret = pthread_cond_timedwait(&pool->task_cond, &pool->lock, &ts);
+                        (void)ret;
 #endif
                     } else {
-                        // 检查是否有任务到达
                         if (get_task_from_pool(pool, thread_index, &task) == 0) {
                             got_task = 1;
                             break;
                         }
                         
-                        // 没有任务，等待通知
 #ifdef _WIN32
-                        SleepConditionVariableCS(&pool->task_cond, &pool->lock, INFINITE);
+                        DWORD wait_ret = SleepConditionVariableCS(&pool->task_cond, &pool->lock, 5000);
+                        if (!wait_ret && GetLastError() == ERROR_TIMEOUT) { break; }
 #else
-                        pthread_cond_wait(&pool->task_cond, &pool->lock);
+                        struct timespec ts;
+                        clock_gettime(CLOCK_REALTIME, &ts);
+                        ts.tv_sec += 5;
+                        int ret = pthread_cond_timedwait(&pool->task_cond, &pool->lock, &ts);
+                        if (ret == ETIMEDOUT) { break; }
 #endif
                         
-                        // 被唤醒后再次检查
                         if (get_task_from_pool(pool, thread_index, &task) == 0) {
                             got_task = 1;
                             break;

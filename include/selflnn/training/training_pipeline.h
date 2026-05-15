@@ -44,6 +44,7 @@ typedef struct {
     char checkpoint_path[512];
     float gpu_utilization;
     float estimated_time_remaining;
+    TrainingStage current_stage;   /**< 当前训练阶段 */
 } TrainingPipelineState;
 
 typedef struct {
@@ -57,6 +58,7 @@ typedef struct {
     float multimodal_lr;
     float fine_tune_lr;
     float local_lr;
+    float base_lr;                   /**< 基础学习率 */
     size_t batch_size;
     int use_gpu;
     int use_mixed_precision;

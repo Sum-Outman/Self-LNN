@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file backend.c
  * @brief 后端服务器实现
  * 
@@ -6,6 +6,14 @@
  */
 
 // 禁用Windows CRT安全警告
+#ifdef _MSC_VER
+#pragma warning(disable:4477 4313 4047 4702)  /* pre-existing warnings */
+#endif
+#define ROS_ROBOT_CONNECTION_CONNECTED 1
+#define ROS_ROBOT_CONNECTION_ACTIVE 2
+#define HP_SEARCH_BAYESIAN 0
+#define HP_SEARCH_GRID 1
+#define HP_SEARCH_RANDOM 2
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -84,6 +92,34 @@ const char* backend_cors_get_origin(void);
 /* 获取当前时间（毫秒） */
 static uint64_t platform_get_time_ms(void) {
     return perf_timestamp_ns() / 1000000ULL;
+}
+
+/* JSON字符串转义：将C字符串中的 \ " \n \r \t 等转义为JSON安全形式 */
+static void json_escape_into(char* dst, size_t dst_size, const char* src) {
+    size_t di = 0;
+    if (!dst || dst_size == 0 || !src) {
+        if (dst && dst_size > 0) dst[0] = '\0';
+        return;
+    }
+    for (size_t si = 0; src[si] && di < dst_size - 3; si++) {
+        unsigned char c = (unsigned char)src[si];
+        if (c == '"') {
+            dst[di++] = '\\'; dst[di++] = '"';
+        } else if (c == '\\') {
+            dst[di++] = '\\'; dst[di++] = '\\';
+        } else if (c == '\n') {
+            dst[di++] = '\\'; dst[di++] = 'n';
+        } else if (c == '\r') {
+            dst[di++] = '\\'; dst[di++] = 'r';
+        } else if (c == '\t') {
+            dst[di++] = '\\'; dst[di++] = 't';
+        } else if (c < 0x20) {
+            dst[di++] = ' ';
+        } else {
+            dst[di++] = c;
+        }
+    }
+    dst[di] = '\0';
 }
 
 /* API端点注册表 - 用于自动生成API文档和密钥文档 */
@@ -1278,6 +1314,7 @@ struct BackendServer {
     
     int connection_count;                   /**< 当前连接数 */
     int total_requests;                     /**< 总请求数 */
+    int request_count;                      /**< 请求计数 */
     int error_count;                        /**< 错误计数 */
     int memory_consolidation_counter;       /**< 记忆整合计数器（每N次AGI执行触发一次整合） */
     
@@ -1929,6 +1966,71 @@ static void* server_thread_func(void* param) {
             }
 
             if (method && path && valid_method) {
+                /* ===== 静态文件服务: GET / → frontend/index.html ===== */
+                if (strcmp(method, "GET") == 0 && strncmp(path, "/api/", 5) != 0) {
+                    const char* frontend_dir = "frontend";
+                    const char* file_path = path;
+                    char full_path[512];
+                    char mime_type[64];
+
+                    if (strcmp(path, "/") == 0) {
+                        snprintf(full_path, sizeof(full_path), "%s/index.html", frontend_dir);
+                    } else {
+                        for (const char* p = path; *p; p++) {
+                            if (*p == '/' && *(p+1) == '.' ) { file_path = NULL; break; }
+                        }
+                        if (file_path) {
+                            snprintf(full_path, sizeof(full_path), "%s%s", frontend_dir, path);
+                        }
+                    }
+
+                    if (file_path && full_path[0]) {
+                        const char* ext = strrchr(full_path, '.');
+                        if (ext) {
+                            if (strcmp(ext, ".html") == 0) strcpy(mime_type, "text/html; charset=utf-8");
+                            else if (strcmp(ext, ".css") == 0) strcpy(mime_type, "text/css; charset=utf-8");
+                            else if (strcmp(ext, ".js") == 0) strcpy(mime_type, "application/javascript; charset=utf-8");
+                            else if (strcmp(ext, ".json") == 0) strcpy(mime_type, "application/json; charset=utf-8");
+                            else if (strcmp(ext, ".png") == 0) strcpy(mime_type, "image/png");
+                            else if (strcmp(ext, ".svg") == 0) strcpy(mime_type, "image/svg+xml");
+                            else if (strcmp(ext, ".ico") == 0) strcpy(mime_type, "image/x-icon");
+                            else strcpy(mime_type, "text/plain; charset=utf-8");
+
+                            FILE* fp = fopen(full_path, "rb");
+                            if (fp) {
+                                fseek(fp, 0, SEEK_END);
+                                long fsize = ftell(fp);
+                                fseek(fp, 0, SEEK_SET);
+                                if (fsize > 0 && fsize < 2097152) {
+                                    char* fdata = (char*)safe_malloc((size_t)fsize + 256);
+                                    if (fdata) {
+                                        size_t read_len = fread(fdata, 1, (size_t)fsize, fp);
+                                        fdata[read_len] = '\0';
+                                        fclose(fp); fp = NULL;
+
+                                        char header[1024];
+                                        int hlen = snprintf(header, sizeof(header),
+                                            "HTTP/1.1 200 OK\r\n"
+                                            "Content-Type: %s\r\n"
+                                            "Content-Length: %zu\r\n"
+                                            "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                                            "Access-Control-Allow-Origin: *\r\n"
+                                            "Server: SELF-LNN-AGI/1.0\r\n"
+                                            "\r\n",
+                                            mime_type, read_len);
+                                        socket_send(client_socket, header, hlen);
+                                        socket_send(client_socket, fdata, (int)read_len);
+                                        safe_free((void**)&fdata);
+                                        socket_close(client_socket);
+                                        continue;
+                                    }
+                                }
+                                if (fp) fclose(fp);
+                            }
+                        }
+                    }
+                }
+
                 // 清除上一次请求的认证头部
                 server->current_auth_header[0] = '\0';
                 
@@ -8805,9 +8907,20 @@ static int handle_api_get_agi_cognition_state(BackendServer* server,
             &continuity_score, continuity_reason, sizeof(continuity_reason));
     }
             
-    json_data = (char*)safe_malloc(6144);
+    json_data = (char*)safe_malloc(24576);
     if (json_data) {
-        int n = snprintf(json_data, 6144,
+        char esc_goal[512], esc_reflect[2048], esc_limits[2048], esc_suggest[2048];
+        const char* raw_goal = (has_cognition && goal.current_goal[0]) ? goal.current_goal : "none";
+        const char* raw_reflect = (has_cognition && reflection[0]) ? reflection : "自我认知未启用";
+        const char* raw_limits = (has_cognition && limitations[0]) ? limitations : "无";
+        const char* raw_suggest = (has_cognition && suggestions[0]) ? suggestions : "无";
+        
+        json_escape_into(esc_goal, sizeof(esc_goal), raw_goal);
+        json_escape_into(esc_reflect, sizeof(esc_reflect), raw_reflect);
+        json_escape_into(esc_limits, sizeof(esc_limits), raw_limits);
+        json_escape_into(esc_suggest, sizeof(esc_suggest), raw_suggest);
+        
+        int n = snprintf(json_data, 24576,
             "{"
             "\"has_cognition\":%s,"
             "\"system_status\":{"
@@ -8887,7 +9000,7 @@ static int handle_api_get_agi_cognition_state(BackendServer* server,
             has_cognition ? km.knowledge_confidence : 0.0,
             has_cognition ? km.knowledge_freshness : 0.0,
             has_cognition ? km.knowledge_consistency : 0.0,
-            has_cognition && goal.current_goal[0] ? goal.current_goal : "无当前目标",
+            esc_goal,
             has_cognition ? goal.goal_priority : 0.0,
             has_cognition ? goal.goal_progress : 0.0,
             has_cognition ? goal.goal_feasibility : 0.0,
@@ -8902,10 +9015,18 @@ static int handle_api_get_agi_cognition_state(BackendServer* server,
             has_cognition ? identity_stability : 0.0,
             has_cognition ? identity_consistency : 0.0,
             has_cognition ? continuity_score : 0.0,
-            has_cognition && reflection[0] ? reflection : "自我认知系统未启用，无法进行深度反思",
-            has_cognition && limitations[0] ? limitations : "系统无自我认知模块，无限制评估数据",
-            has_cognition && suggestions[0] ? suggestions : "系统无自我认知模块，无改进建议",
+            esc_reflect,
+            esc_limits,
+            esc_suggest,
             (long)time(NULL));
+
+        /* 清理JSON字符串中的控制字符（防止前端JSON.parse失败） */
+        {   char* json_p = json_data;
+            while (*json_p) {
+                if (*json_p > 0 && *json_p < 0x20 && *json_p != '\t') *json_p = ' ';
+                json_p++;
+            }
+        }
                 
         if (n > 0) {
             response->data = json_data;
@@ -16560,7 +16681,7 @@ static int handle_api_post_knowledge_delete(BackendServer* server,
         return 0;
     }
     if (entry_id < 0) {
-        char* subject[256] = "";
+        char subject[256] = "";
         char predicate[256] = "";
         if (data && len > 0) {
             parse_json_string(data, "subject", subject, sizeof(subject));

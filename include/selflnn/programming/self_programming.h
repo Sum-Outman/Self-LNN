@@ -107,6 +107,9 @@ struct ASTNode {
     char* name;                 /**< 节点名称（变量名、函数名等） */
     int line;                   /**< 源代码行号 */
     int column;                 /**< 源代码列号 */
+    void* data;                 /**< 通用数据指针 */
+    int child_count;            /**< 子节点数量 */
+    ASTNode** children;         /**< 子节点数组 */
 };
 
 /**

@@ -19,6 +19,8 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/core/lnn.h"
+#include "selflnn/selflnn.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1107,7 +1109,7 @@ int cfc_vision_extract_features(CfcVisionProcessor* processor,
         }
         /* 自举校准：从主LNN获取时间常数参考，调整CfC ODE层参数 */
         if (!processor->bootstrap_attempted) {
-            void* main_lnn = selflnn_get_lnn_network();
+            void* main_lnn = selflnn_get_shared_lnn();
             if (main_lnn) {
                 LNNConfig main_cfg;
                 if (lnn_get_config((LNN*)main_lnn, &main_cfg) == 0 && main_cfg.time_constant > 0.0f) {
@@ -1753,4 +1755,82 @@ void cfc_vision_mark_trained(CfcVisionProcessor* processor) {
 
 int cfc_vision_is_trained(const CfcVisionProcessor* processor) {
     return (processor && processor->training_completed) ? 1 : 0;
+}
+
+/* ============================================================================
+ * K-修复: 深度视觉训练函数（利用已有cfc_ode_layer_backward进行权重更新）
+ * 对每个ODE层运行前向→计算L2重建损失→反向传播→SGD更新
+ * ============================================================================ */
+
+int cfc_vision_train_network(CfcVisionProcessor* processor,
+    const float* training_images, const float* target_features,
+    int num_samples, int num_epochs, float learning_rate) {
+    float best_loss, epoch_loss, lr, sample_loss, diff;
+     int feat_dim;
+     float* current_out;
+    float* loss_grad;
+    int* indices;
+    int epoch, s, d, l, i, idx, tmp, j;
+
+    if (!processor || !processor->is_initialized || !training_images || !target_features) return -1;
+    if (num_samples <= 0 || num_epochs <= 0 || learning_rate <= 0.0f) return -1;
+
+    best_loss = 1e10f;
+    feat_dim = processor->config.output_dim;
+    current_out = (float*)safe_malloc((size_t)feat_dim * sizeof(float));
+    loss_grad = (float*)safe_malloc((size_t)feat_dim * sizeof(float));
+    if (!current_out || !loss_grad) {
+        safe_free((void**)&current_out); safe_free((void**)&loss_grad);
+        return -1;
+    }
+
+    indices = (int*)safe_malloc((size_t)num_samples * sizeof(int));
+    if (!indices) { safe_free((void**)&current_out); safe_free((void**)&loss_grad); return -1; }
+    for (i = 0; i < num_samples; i++) indices[i] = i;
+
+    for (epoch = 0; epoch < num_epochs; epoch++) {
+        for (i = num_samples - 1; i > 0; i--) {
+            j = (int)((unsigned int)(uintptr_t)processor * 2654435761U + (unsigned int)epoch * 1103515245U) % (unsigned int)(i + 1);
+            tmp = indices[i]; indices[i] = indices[j]; indices[j] = tmp;
+        }
+
+        epoch_loss = 0.0f;
+        lr = learning_rate * (1.0f - (float)epoch / (float)num_epochs) * 0.5f + learning_rate * 0.5f;
+
+        for (s = 0; s < num_samples; s++) {
+            idx = indices[s];
+            cfc_vision_extract_features(processor,
+                training_images + (size_t)idx * processor->config.image_width * processor->config.image_height * processor->config.image_channels,
+                processor->config.image_width, processor->config.image_height,
+                processor->config.image_channels, current_out, (size_t)feat_dim);
+
+            sample_loss = 0.0f;
+            for (d = 0; d < feat_dim; d++) {
+                diff = current_out[d] - target_features[idx * feat_dim + d];
+                sample_loss += diff * diff;
+                loss_grad[d] = 2.0f * diff / (float)feat_dim;
+            }
+            epoch_loss += sample_loss / (float)feat_dim;
+
+            for (l = 0; l < processor->config.num_ode_layers && l < 8; l++) {
+                if (processor->ode_layers[l]) {
+                    cfc_ode_layer_backward(processor->ode_layers[l],
+                        loss_grad, NULL, current_out, NULL, lr);
+                }
+            }
+        }
+
+        epoch_loss /= (float)num_samples;
+        if (epoch_loss < best_loss) best_loss = epoch_loss;
+        if ((epoch + 1) % 10 == 0 || epoch == 0) {
+            log_info("[视觉训练] Epoch %d/%d, Loss=%.6f, Best=%.6f, LR=%.6f",
+                epoch + 1, num_epochs, epoch_loss, best_loss, lr);
+        }
+    }
+
+    processor->training_completed = 1;
+    log_info("[视觉训练] 训练完成, 最佳损失=%.6f", best_loss);
+
+    safe_free((void**)&current_out); safe_free((void**)&loss_grad); safe_free((void**)&indices);
+    return 0;
 }

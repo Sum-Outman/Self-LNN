@@ -1529,7 +1529,8 @@ int swarm_allocate_hungarian(SwarmController* controller)
 #define SWARM_UDP_MULTICAST_IP    "239.192.88.1"  /* 私有组播地址 */
 #define SWARM_UDP_TTL             8
 
-typedef struct __attribute__((packed)) {
+#pragma pack(push, 1)
+typedef struct {
     uint32_t magic;
     uint8_t  version;
     uint8_t  msg_type;       /* 0=state_sync, 1=task_assign, 2=consensus, 3=heartbeat */
@@ -1539,6 +1540,7 @@ typedef struct __attribute__((packed)) {
     uint16_t payload_size;
     uint8_t  payload[SWARM_UDP_MAX_PAYLOAD];
 } SwarmUdpPacket;
+#pragma pack(pop)
 
 static int g_swarm_winsock_init = 0;
 

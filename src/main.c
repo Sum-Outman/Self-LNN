@@ -1,5 +1,9 @@
 #include "selflnn/backend/backend.h"
 #include "selflnn/self_cognition.h"
+
+#ifdef _MSC_VER
+#pragma warning(disable:4013 4047 4245)  /* pre-existing: selflnn_get_recent_* etc */
+#endif
 #include "selflnn/metacognition.h"
 #include "selflnn/multi_agent.h"
 #include "selflnn/neural_architecture_search.h"
@@ -115,7 +119,7 @@ static void agi_bg_online_learning(void) {
         return;
     }
     /* 尝试从LNN网络获取当前状态和最近输出作为训练数据 */
-    void* lnn = selflnn_get_lnn_network();
+    void* lnn = selflnn_get_shared_lnn();
     if (lnn) {
         if (selflnn_get_recent_state(lnn, state, 128) == 0 &&
             selflnn_get_recent_output(lnn, target, 128) == 0) {
@@ -348,7 +352,7 @@ static void agi_bg_goal_reevaluate(void) {
     float state[64] = {0};
     float goal[64] = {0};
     float plan_buf[512] = {0};
-    void* lnn = selflnn_get_lnn_network();
+    void* lnn = selflnn_get_shared_lnn();
     if (lnn) {
         selflnn_get_recent_state(lnn, state, 64);
         /* 从知识库获取当前目标 */

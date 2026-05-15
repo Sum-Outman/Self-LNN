@@ -44,6 +44,8 @@ typedef enum {
     OP_TYPE_REDUCE_MEAN,         /**< 平均归约 */
     OP_TYPE_REDUCE_MAX,          /**< 最大归约 */
     OP_TYPE_OUTPUT,              /**< 输出节点 */
+    OP_TYPE_ACTIVATION,          /**< 激活函数 */
+    OP_TYPE_LIQUID_GATE,         /**< 液态门控 */
     OP_TYPE_CUSTOM               /**< 自定义算子 */
 } OperatorType;
 
@@ -131,6 +133,7 @@ struct GraphNode {
     int fused;                   /**< 是否已融合 */
     int eliminated;              /**< 是否已消除 */
     int folded;                  /**< 是否已折叠（常量折叠标记） */
+    int depth;                   /**< 节点深度 */
     void* fusion_info;           /**< 融合信息指针，存储算子融合的详细信息 */
 };
 

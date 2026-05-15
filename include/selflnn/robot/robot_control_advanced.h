@@ -69,6 +69,15 @@ typedef struct {
     float derivative_filter_coeff;
 } PIDConfig;
 
+/* K-修复: 导纳控制配置结构体 */
+typedef struct {
+    float virtual_mass;           /**< 虚拟质量（kg），默认1.0 */
+    float virtual_damping;        /**< 虚拟阻尼（Ns/m），默认10.0 */
+    float virtual_stiffness;      /**< 虚拟刚度（N/m），默认100.0 */
+    float max_velocity;           /**< 最大速度限制 */
+    float force_deadzone;         /**< 力死区阈值 */
+} AdmittanceConfig;
+
 typedef struct {
     AdvancedControlMode mode;
     MPCConfig mpc;
@@ -88,6 +97,8 @@ typedef struct {
     float coulomb_friction[6];        /**< 库仑摩擦系数，默认{0.5,0.4,0.3,0.15,0.1,0.05} */
     float viscous_friction[6];        /**< 粘滞摩擦系数，默认{0.2,0.15,0.12,0.08,0.05,0.03} */
     float joint_inertia[6];           /**< 关节转动惯量，默认{0.5,0.3,0.2,0.1,0.05,0.02} */
+    /* K-修复: 导纳控制配置 */
+    AdmittanceConfig admittance;      /**< 导纳控制配置 */
 } AdvancedControlConfig;
 
 typedef struct {
@@ -108,6 +119,11 @@ typedef struct {
     float desired_stiffness[6];
     float desired_damping[6];
     float estimated_disturbance[6];
+    /* K-修复: 自适应控制和导纳控制状态字段 */
+    float adaptive_gains[12];         /**< MRAC自适应增益 [6 Kp + 6 Kd] */
+    float prev_error[6];              /**< 上一帧位置误差 */
+    float admittance_velocity[6];     /**< 导纳控制虚拟速度 */
+    float admittance_position[6];     /**< 导纳控制虚拟位置 */
     int control_count;
 } AdvancedControlState;
 

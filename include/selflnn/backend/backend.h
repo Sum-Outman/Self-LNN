@@ -52,6 +52,7 @@ typedef struct {
     /* 限流安全配置 */
     int enable_rate_limiting;     /**< 是否启用请求限流 */
     int rate_limit_per_minute;    /**< 每分钟最大请求数（默认60） */
+    int max_requests_per_minute;  /**< 每分钟最大请求数 */
     int enable_ip_whitelist;      /**< 是否启用IP白名单 */
     int enable_ip_blacklist;      /**< 是否启用IP黑名单 */
     char ip_whitelist_entries[16][64]; /**< IP白名单列表（最多16个条目） */

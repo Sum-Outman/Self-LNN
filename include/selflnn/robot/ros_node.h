@@ -14,6 +14,10 @@ extern "C" {
 #define ROS_NODE_MAX_SERVICES     16
 #define ROS_DEFAULT_MASTER_URI    "http://localhost:11311"
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable:4030)
+#endif
 typedef struct RosNode RosNode;
 
 typedef void (*RosMessageCallback)(const void* data, size_t size, void* user_data);

@@ -1440,7 +1440,9 @@ int dialogue_init_generator(DialogueProcessor* processor, size_t hidden_dim) {
         proj_cfg.input_size = hidden;
         proj_cfg.hidden_size = (hidden + vocab) / 2;
         if (proj_cfg.hidden_size < 16) proj_cfg.hidden_size = 16;
+        if (proj_cfg.hidden_size > 1024) proj_cfg.hidden_size = 1024;  /* 防止栈溢出 */
         proj_cfg.output_size = vocab;
+        if (proj_cfg.output_size > 4096) proj_cfg.output_size = 4096;   /* 防止栈溢出 */
         proj_cfg.num_layers = 2;
         proj_cfg.time_constant = 0.1f;
         proj_cfg.learning_rate = 0.001f;

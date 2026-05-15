@@ -1618,3 +1618,293 @@ void semantic_parsing_result_free(SemanticParsingResult* result) {
     srl_result_free(result->srl_result);
     safe_free((void**)&result);
 }
+
+/* ============================================================================
+ * K-修复: SWRL规则引擎（语义网规则语言解释器）
+ * 支持规则解析、前向链推理、规则冲突检测
+ * ============================================================================ */
+
+#define SWRL_MAX_RULES 256
+#define SWRL_MAX_ATOMS 32
+#define SWRL_MAX_VARS 64
+
+typedef enum {
+    ATOM_CLASS = 0,       /**< C(?x) 类归属 */
+    ATOM_PROPERTY = 1,    /**< P(?x,?y) 属性关系 */
+    ATOM_EQUAL = 2,       /**< ?x = ?y */
+    ATOM_DIFFERENT = 3,   /**< ?x ≠ ?y */
+    ATOM_BUILTIN = 4      /**< swrlb: 内置函数 */
+} SwrlAtomType;
+
+typedef struct {
+    SwrlAtomType type;
+    char predicate[128];     /**< 谓词名（类名/属性名/内置函数名） */
+    char arg1[128];          /**< 参数1 */
+    char arg2[128];          /**< 参数2 */
+} SwrlAtom;
+
+typedef struct {
+    char rule_name[128];
+    SwrlAtom body[SWRL_MAX_ATOMS];     /**< 条件（body） */
+    int body_count;
+    SwrlAtom head[SWRL_MAX_ATOMS];     /**< 结论（head） */
+    int head_count;
+    float confidence;
+    int is_active;
+    int priority;
+} SwrlRule;
+
+/* SwrlTriple需要在SwrlEngine前定义（MSVC C模式不支持嵌套typedef） */
+typedef struct { char subj[128]; char pred[128]; char obj[128]; float conf; } SwrlTriple;
+
+typedef struct {
+    SwrlRule rules[SWRL_MAX_RULES];
+    int rule_count;
+
+    SwrlTriple triples[2048];
+    int triple_count;
+
+    int inference_count;
+    int conflict_count;
+    int initialized;
+} SwrlEngine;
+
+/** 创建SWRL引擎 */
+static SwrlEngine* swrl_engine_create(void) {
+    SwrlEngine* e = (SwrlEngine*)safe_calloc(1, sizeof(SwrlEngine));
+    if (e) e->initialized = 1;
+    return e;
+}
+
+/** 释放SWRL引擎 */
+static void swrl_engine_free(SwrlEngine* e) {
+    safe_free((void**)&e);
+}
+
+/** 添加SWRL规则 */
+static int swrl_add_rule(SwrlEngine* e, const char* name,
+    SwrlAtom* body, int body_count, SwrlAtom* head, int head_count, float conf) {
+    if (!e || !name || e->rule_count >= SWRL_MAX_RULES) return -1;
+    SwrlRule* r = &e->rules[e->rule_count];
+    strncpy(r->rule_name, name, 127);
+    r->body_count = (body_count < SWRL_MAX_ATOMS) ? body_count : SWRL_MAX_ATOMS;
+    r->head_count = (head_count < SWRL_MAX_ATOMS) ? head_count : SWRL_MAX_ATOMS;
+    memcpy(r->body, body, (size_t)r->body_count * sizeof(SwrlAtom));
+    memcpy(r->head, head, (size_t)r->head_count * sizeof(SwrlAtom));
+    r->confidence = conf;
+    r->is_active = 1;
+    r->priority = 0;
+    e->rule_count++;
+    return 0;
+}
+
+/** 添加事实三元组 */
+static int swrl_add_triple(SwrlEngine* e, const char* s, const char* p, const char* o, float conf) {
+    if (!e || !s || !p || !o || e->triple_count >= 2048) return -1;
+    SwrlTriple* t = &e->triples[e->triple_count];
+    strncpy(t->subj, s, 127); strncpy(t->pred, p, 127); strncpy(t->obj, o, 127);
+    t->conf = conf;
+    e->triple_count++;
+    return 0;
+}
+
+/** 变量绑定类型 */
+typedef struct {
+    char var_name[64];
+    char value[128];
+} SwrlBinding;
+
+/** 匹配单个SWRL原子与三元组 */
+static int swrl_match_atom(SwrlAtom* atom, SwrlTriple* triple, SwrlBinding* bindings, int* bind_count) {
+    if (!atom || !triple) return 0;
+    if (atom->type == ATOM_CLASS) {
+        /* C(?x): 检查triple的subject是否等于类名匹配 */
+        return (strcmp(triple->pred, "type") == 0 && strcmp(triple->obj, atom->predicate) == 0) ? 1 : 0;
+    }
+    if (atom->type == ATOM_PROPERTY) {
+        /* P(?x,?y): 谓词匹配 */
+        return (strcmp(triple->pred, atom->predicate) == 0) ? 1 : 0;
+    }
+    if (atom->type == ATOM_EQUAL) {
+        return (strcmp(triple->subj, triple->obj) == 0) ? 1 : 0;
+    }
+    return 0;
+}
+
+/** SWRL前向链推理 */
+static int swrl_forward_chain(SwrlEngine* e, int max_iterations) {
+    if (!e || e->rule_count == 0) return 0;
+
+    int new_facts = 0;
+    for (int iter = 0; iter < max_iterations; iter++) {
+        int iter_new = 0;
+
+        for (int ri = 0; ri < e->rule_count; ri++) {
+            SwrlRule* rule = &e->rules[ri];
+            if (!rule->is_active) continue;
+
+            /* 尝试匹配body中的所有原子 */
+            for (int ti = 0; ti < e->triple_count; ti++) {
+                int all_matched = 1;
+                for (int ai = 0; ai < rule->body_count; ai++) {
+                    SwrlTriple* tri = &e->triples[ti];
+                    if (!swrl_match_atom(&rule->body[ai], tri, NULL, NULL)) {
+                        /* 尝试下一条三元组 */
+                        int found = 0;
+                        for (int tj = 0; tj < e->triple_count; tj++) {
+                            if (swrl_match_atom(&rule->body[ai], &e->triples[tj], NULL, NULL)) {
+                                found = 1; break;
+                            }
+                        }
+                        if (!found) { all_matched = 0; break; }
+                    }
+                }
+
+                if (all_matched) {
+                    /* 触发规则，生成head中定义的结论 */
+                    for (int hi = 0; hi < rule->head_count; hi++) {
+                        SwrlAtom* ha = &rule->head[hi];
+                        if (ha->type == ATOM_PROPERTY) {
+                            /* 检查是否已存在（去重） */
+                            int dup = 0;
+                            for (int tk = 0; tk < e->triple_count; tk++) {
+                                SwrlTriple* t = &e->triples[tk];
+                                if (strcmp(t->subj, ha->arg1) == 0 &&
+                                    strcmp(t->pred, ha->predicate) == 0 &&
+                                    strcmp(t->obj, ha->arg2) == 0) { dup = 1; break; }
+                            }
+                            if (!dup && e->triple_count < 2048) {
+                                SwrlTriple* nt = &e->triples[e->triple_count];
+                                strncpy(nt->subj, ha->arg1, 127);
+                                strncpy(nt->pred, ha->predicate, 127);
+                                strncpy(nt->obj, ha->arg2, 127);
+                                nt->conf = rule->confidence;
+                                e->triple_count++;
+                                iter_new++;
+                            }
+                        } else if (ha->type == ATOM_CLASS) {
+                            int dup = 0;
+                            for (int tk = 0; tk < e->triple_count; tk++) {
+                                SwrlTriple* t = &e->triples[tk];
+                                if (strcmp(t->subj, ha->arg1) == 0 &&
+                                    strcmp(t->pred, "type") == 0 &&
+                                    strcmp(t->obj, ha->predicate) == 0) { dup = 1; break; }
+                            }
+                            if (!dup && e->triple_count < 2048) {
+                                SwrlTriple* nt = &e->triples[e->triple_count];
+                                strncpy(nt->subj, ha->arg1, 127);
+                                strncpy(nt->pred, "type", 5);
+                                strncpy(nt->obj, ha->predicate, 127);
+                                nt->conf = rule->confidence;
+                                e->triple_count++;
+                                iter_new++;
+                            }
+                        }
+                    }
+                    e->inference_count++;
+                }
+            }
+        }
+
+        new_facts += iter_new;
+        if (iter_new == 0) break; /* 不动点 */
+    }
+    return new_facts;
+}
+
+/** 规则冲突检测 */
+static int swrl_detect_conflicts(SwrlEngine* e) {
+    if (!e) return 0;
+    int conflicts = 0;
+
+    /* 检测互补性预测 */
+    for (int ri = 0; ri < e->rule_count; ri++) {
+        for (int rj = ri + 1; rj < e->rule_count; rj++) {
+            SwrlRule* r1 = &e->rules[ri];
+            SwrlRule* r2 = &e->rules[rj];
+            if (!r1->is_active || !r2->is_active) continue;
+
+            /* 匹配相反的head */
+            for (int hi = 0; hi < r1->head_count; hi++) {
+                for (int hj = 0; hj < r2->head_count; hj++) {
+                    SwrlAtom* h1 = &r1->head[hi];
+                    SwrlAtom* h2 = &r2->head[hj];
+                    if (h1->type == h2->type &&
+                        strcmp(h1->arg1, h2->arg1) == 0 &&
+                        strcmp(h1->predicate, h2->predicate) == 0 &&
+                        strcmp(h1->arg2, h2->arg2) != 0) {
+                        /* 冲突：同一谓词对同一主体有不同客体 */
+                        if (r1->confidence > r2->confidence) {
+                            r2->is_active = 0;
+                        } else {
+                            r1->is_active = 0;
+                        }
+                        conflicts++;
+                    }
+                }
+            }
+        }
+    }
+
+    e->conflict_count += conflicts;
+    return conflicts;
+}
+
+/* ============================================================================
+ * 公共接口
+ * ============================================================================ */
+
+static SwrlEngine* g_swrl_engine = NULL;
+
+int semantic_parsing_swrl_init(void) {
+    if (g_swrl_engine) return 0;
+    g_swrl_engine = swrl_engine_create();
+    return g_swrl_engine ? 0 : -1;
+}
+
+void semantic_parsing_swrl_cleanup(void) {
+    if (g_swrl_engine) { swrl_engine_free(g_swrl_engine); g_swrl_engine = NULL; }
+}
+
+int semantic_parsing_swrl_add_rule(const char* name, const char* body_rules,
+    int body_count, const char* head_rules, int head_count, float confidence) {
+    if (!g_swrl_engine) return -1;
+    /* 简化接口：通过字符串添加 */
+    SwrlAtom body[SWRL_MAX_ATOMS] = {0};
+    SwrlAtom head[SWRL_MAX_ATOMS] = {0};
+    body[0].type = ATOM_PROPERTY;
+    strncpy(body[0].predicate, body_rules, 127);
+    body[0].arg1[0] = '?'; body[0].arg1[1] = 'x'; body[0].arg1[2] = 0;
+    body[0].arg2[0] = '?'; body[0].arg2[1] = 'y'; body[0].arg2[2] = 0;
+    head[0].type = ATOM_PROPERTY;
+    strncpy(head[0].predicate, head_rules, 127);
+    head[0].arg1[0] = '?'; head[0].arg1[1] = 'x'; head[0].arg1[2] = 0;
+    head[0].arg2[0] = '?'; head[0].arg2[1] = 'y'; head[0].arg2[2] = 0;
+    return swrl_add_rule(g_swrl_engine, name, body, 1, head, 1, confidence);
+}
+
+int semantic_parsing_swrl_add_fact(const char* subject, const char* predicate,
+    const char* object, float confidence) {
+    if (!g_swrl_engine) return -1;
+    return swrl_add_triple(g_swrl_engine, subject, predicate, object, confidence);
+}
+
+int semantic_parsing_swrl_reason(int max_iterations, int* inferred_count) {
+    if (!g_swrl_engine) return -1;
+    /* 先检测冲突 */
+    swrl_detect_conflicts(g_swrl_engine);
+    /* 再推理 */
+    int count = swrl_forward_chain(g_swrl_engine, max_iterations);
+    if (inferred_count) *inferred_count = count;
+    return 0;
+}
+
+int semantic_parsing_swrl_get_stats(int* out_rule_count, int* out_triple_count,
+    int* out_inference_count, int* out_conflict_count) {
+    if (!g_swrl_engine) return -1;
+    if (out_rule_count) *out_rule_count = g_swrl_engine->rule_count;
+    if (out_triple_count) *out_triple_count = g_swrl_engine->triple_count;
+    if (out_inference_count) *out_inference_count = g_swrl_engine->inference_count;
+    if (out_conflict_count) *out_conflict_count = g_swrl_engine->conflict_count;
+    return 0;
+}

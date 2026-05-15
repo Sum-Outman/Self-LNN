@@ -30,7 +30,15 @@ typedef enum {
     WS_MSG_LOG = 5,
     WS_MSG_CUSTOM = 6,
     WS_MSG_DIALOGUE_RESPONSE = 7,
-    WS_MSG_DIALOGUE_TOKEN = 8
+    WS_MSG_DIALOGUE_TOKEN = 8,
+    WS_MSG_EVOLUTION_EVENT = 9,
+    WS_MSG_SAFETY_ALERT = 10,
+    WS_MSG_ROBOT_STATUS = 11,
+    WS_MSG_COGNITION_EVENT = 12,
+    WS_MSG_DIAGNOSTIC = 13,
+    WS_MSG_MULTIMODAL_DATA = 14,
+    WS_MSG_TRAINING_METRICS = 15,
+    WS_MSG_COUNT
 } WSMessageType;
 
 WSPushServer* ws_push_server_create(int port);

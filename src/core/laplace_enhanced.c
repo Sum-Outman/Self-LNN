@@ -16,6 +16,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+static void power_iteration_eigenvalues(const float* matrix, size_t size,
+                                          float* real_parts, float* imag_parts,
+                                          size_t* count, size_t max_count);
+
 struct LaplaceEnhancedSystem {
     LaplaceTarget target;
     LaplaceFilterConfig filter_config;

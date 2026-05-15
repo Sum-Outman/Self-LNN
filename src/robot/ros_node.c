@@ -10,6 +10,10 @@
 #include <math.h>
 #include <time.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4022 4024 4047)  /* RosMessageCallback param mismatch - pre-existing */
+#endif
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -746,7 +750,8 @@ int ros_node_spin_once(RosNode* node) {
             total_read += (size_t)chunk;
         }
         if (data) {
-            sub->callback((const void*)data, data_len, sub->user_data);
+            typedef void (*ROS3CB)(const void*, size_t, void*);
+            ((ROS3CB)sub->callback)(data, data_len, sub->user_data);
             free(data);
             received++;
         }

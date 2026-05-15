@@ -1458,3 +1458,312 @@ int ki_multi_hop_reason(KnowledgeInferenceEngine* kie,
     safe_free((void**)&next);
     return 0;
 }
+
+/* ============================================================================
+ * K-修复: 贝叶斯网络变量消除法 (Variable Elimination)
+ * 算法：因子乘积 → 边缘化 → 归一化
+ * 用于精确概率推理查询 P(Query|Evidence)
+ * ============================================================================ */
+
+typedef struct {
+    int* variables;        /* 变量ID列表 */
+    int var_count;         /* 变量数 */
+    float* values;         /* 因子值（多维数组展平） */
+    int* strides;          /* 各维度的步长 */
+    int total_size;        /* 因子总大小 */
+} Factor;
+
+/** 创建因子 */
+static Factor* factor_create(int* variables, int var_count, int* cardinalities) {
+    Factor* f = (Factor*)safe_calloc(1, sizeof(Factor));
+    if (!f || var_count <= 0) { safe_free((void**)&f); return NULL; }
+
+    f->variables = (int*)safe_malloc((size_t)var_count * sizeof(int));
+    f->strides = (int*)safe_calloc((size_t)var_count, sizeof(int));
+    if (!f->variables || !f->strides) { safe_free((void**)&f->variables); safe_free((void**)&f->strides); safe_free((void**)&f); return NULL; }
+
+    memcpy(f->variables, variables, (size_t)var_count * sizeof(int));
+    f->var_count = var_count;
+    f->total_size = 1;
+    for (int i = 0; i < var_count; i++) {
+        f->strides[i] = f->total_size;
+        f->total_size *= cardinalities[variables[i]];
+    }
+
+    f->values = (float*)safe_calloc((size_t)f->total_size, sizeof(float));
+    if (!f->values) { factor_free(f); return NULL; }
+    return f;
+}
+
+void factor_free(Factor* f) {
+    if (!f) return;
+    safe_free((void**)&f->variables);
+    safe_free((void**)&f->strides);
+    safe_free((void**)&f->values);
+    safe_free((void**)&f);
+}
+
+/** 从线性索引解码为各变量赋值 */
+static void factor_index_to_assignments(Factor* f, int linear_idx, int* assignments) {
+    for (int d = 0; d < f->var_count; d++) {
+        assignments[f->variables[d]] = (linear_idx / f->strides[d]) % 0x7FFFFFFF;
+    }
+}
+
+/** 因子乘积：f12 = f1 * f2 */
+static Factor* factor_multiply(Factor* f1, Factor* f2, int* cardinalities) {
+    /* 合并变量列表 */
+    int merged_vars[64], merged_count = 0;
+    int all_vars[128] = {0};
+
+    for (int i = 0; i < f1->var_count; i++) {
+        int v = f1->variables[i];
+        if (!all_vars[v]) { merged_vars[merged_count++] = v; all_vars[v] = 1; }
+    }
+    for (int i = 0; i < f2->var_count; i++) {
+        int v = f2->variables[i];
+        if (!all_vars[v]) { merged_vars[merged_count++] = v; all_vars[v] = 1; }
+    }
+
+    for (int i = 0; i < f1->var_count; i++) {
+        int v = f1->variables[i];
+        if (!all_vars[v]) { merged_vars[merged_count++] = v; all_vars[v] = 1; }
+    }
+
+    Factor* result = factor_create(merged_vars, merged_count, cardinalities);
+    if (!result) return NULL;
+
+    int* assignments = (int*)safe_calloc(128, sizeof(int));
+    if (!assignments) { factor_free(result); return NULL; }
+
+    for (int idx = 0; idx < result->total_size; idx++) {
+        factor_index_to_assignments(result, idx, assignments);
+
+        int idx1 = 0;
+        for (int d = 0; d < f1->var_count; d++) {
+            idx1 += assignments[f1->variables[d]] * f1->strides[d];
+        }
+        int idx2 = 0;
+        for (int d = 0; d < f2->var_count; d++) {
+            idx2 += assignments[f2->variables[d]] * f2->strides[d];
+        }
+
+        result->values[idx] = f1->values[idx1] * f2->values[idx2];
+    }
+
+    safe_free((void**)&assignments);
+    return result;
+}
+
+/** 因子边缘化：对elim_var求和消去 */
+static Factor* factor_marginalize(Factor* f, int elim_var, int* cardinalities) {
+    int remaining_vars[64], rem_count = 0;
+    for (int i = 0; i < f->var_count; i++) {
+        if (f->variables[i] != elim_var) {
+            remaining_vars[rem_count++] = f->variables[i];
+        }
+    }
+    if (rem_count == f->var_count) return NULL;
+
+    Factor* result = factor_create(remaining_vars, rem_count, cardinalities);
+    if (!result) return NULL;
+
+    int card = cardinalities[elim_var];
+    int* assignments = (int*)safe_calloc(128, sizeof(int));
+    if (!assignments) { factor_free(result); return NULL; }
+
+    for (int idx = 0; idx < result->total_size; idx++) {
+        factor_index_to_assignments(result, idx, assignments);
+        float sum = 0.0f;
+        for (int v = 0; v < card; v++) {
+            assignments[elim_var] = v;
+            int src_idx = 0;
+            for (int d = 0; d < f->var_count; d++) {
+                src_idx += assignments[f->variables[d]] * f->strides[d];
+            }
+            sum += f->values[src_idx];
+        }
+        result->values[idx] = sum;
+    }
+
+    safe_free((void**)&assignments);
+    return result;
+}
+
+/** 因子归一化 */
+static void factor_normalize(Factor* f) {
+    if (!f || f->total_size <= 0) return;
+    float total = 0.0f;
+    for (int i = 0; i < f->total_size; i++) total += f->values[i];
+    if (total > 1e-15f) {
+        for (int i = 0; i < f->total_size; i++) f->values[i] /= total;
+    }
+}
+
+/* ============================================================================
+ * 公共API: 贝叶斯网络变量消除推理
+ * ============================================================================ */
+
+int ki_bayesian_variable_elimination(
+    int* query_vars, int query_count,
+    int* evidence_vars, int* evidence_values, int evidence_count,
+    int* all_vars, int* cardinalities, int var_count,
+    float** cpt_list, int* cpt_var_indices, int* cpt_var_counts, int cpt_count,
+    float* result_prob) {
+    if (!query_vars || !all_vars || !cardinalities || !cpt_list || !result_prob) return -1;
+    if (query_count <= 0 || var_count <= 0 || cpt_count <= 0) return -1;
+    if (!evidence_vars && evidence_count > 0) return -1;
+
+    /* 构建初始因子列表 */
+    Factor** factors = (Factor**)safe_calloc((size_t)cpt_count, sizeof(Factor*));
+    if (!factors) return -1;
+
+    for (int i = 0; i < cpt_count; i++) {
+        /* 为每个CPT创建因子 */
+        int cpt_vars[16];
+        int cv_count = cpt_var_counts ? cpt_var_counts[i] : 1;
+        if (cpt_var_indices) {
+            int offset = 0;
+            for (int j = 0; j < i; j++) offset += cpt_var_counts[j];
+            memcpy(cpt_vars, &cpt_var_indices[offset], (size_t)cv_count * sizeof(int));
+        } else {
+            cpt_vars[0] = i;
+        }
+
+        factors[i] = factor_create(cpt_vars, cv_count, cardinalities);
+        if (!factors[i]) { for (int j = 0; j < i; j++) factor_free(factors[j]); safe_free((void**)&factors); return -1; }
+
+        /* 从CPT填入值 */
+        int cpt_offset = 0;
+        for (int j = 0; j < i; j++) {
+            int cv_j = cpt_var_counts ? cpt_var_counts[j] : 1;
+            int sz = 1;
+            for (int k = 0; k < cv_j; k++) {
+                int v = cpt_var_indices ? cpt_var_indices[(j * 2) + k] : j;
+                sz *= cardinalities[v];
+            }
+            cpt_offset += sz;
+        }
+        int cpt_total = 1;
+        for (int j = 0; j < cv_count; j++) cpt_total *= cardinalities[cpt_vars[j]];
+        for (int j = 0; j < cpt_total && j < factors[i]->total_size; j++) {
+            factors[i]->values[j] = cpt_list[i][j];
+        }
+    }
+
+    /* 观察证据：将证据变量固定为其值 */
+    for (int e = 0; e < evidence_count; e++) {
+        int ev = evidence_vars[e];
+        int ev_val = evidence_values[e];
+        for (int i = 0; i < cpt_count; i++) {
+            if (!factors[i]) continue;
+            int has_var = 0;
+            for (int j = 0; j < factors[i]->var_count; j++) {
+                if (factors[i]->variables[j] == ev) { has_var = 1; break; }
+            }
+            if (!has_var) continue;
+
+            /* 简化因子：固定证据变量的值 */
+            Factor* reduced = factor_create(factors[i]->variables, factors[i]->var_count, cardinalities);
+            if (!reduced) continue;
+
+            int* assignments = (int*)safe_calloc(128, sizeof(int));
+            for (int idx = 0; idx < reduced->total_size; idx++) {
+                factor_index_to_assignments(reduced, idx, assignments);
+                assignments[ev] = ev_val;
+                int src_idx = 0;
+                for (int d = 0; d < factors[i]->var_count; d++) {
+                    src_idx += assignments[factors[i]->variables[d]] * factors[i]->strides[d];
+                }
+                reduced->values[idx] = (assignments[ev] == ev_val) ? factors[i]->values[src_idx] : 0.0f;
+            }
+            safe_free((void**)&assignments);
+            factor_free(factors[i]);
+            factors[i] = reduced;
+        }
+    }
+
+    /* 变量消除：逐个消去非查询且非证据的变量 */
+    int is_query_or_evidence[128] = {0};
+    for (int i = 0; i < query_count; i++) is_query_or_evidence[query_vars[i]] = 1;
+    for (int i = 0; i < evidence_count; i++) is_query_or_evidence[evidence_vars[i]] = 1;
+
+    int elimination_order[128];
+    int elim_count = 0;
+    for (int v = 0; v < var_count; v++) {
+        if (!is_query_or_evidence[v]) elimination_order[elim_count++] = v;
+    }
+
+    for (int e = 0; e < elim_count; e++) {
+        int elim_var = elimination_order[e];
+
+        /* 收集包含该变量的因子 */
+        Factor* included[64];
+        int inc_count = 0;
+        for (int i = 0; i < cpt_count; i++) {
+            if (!factors[i]) continue;
+            for (int j = 0; j < factors[i]->var_count; j++) {
+                if (factors[i]->variables[j] == elim_var) {
+                    included[inc_count++] = factors[i];
+                    factors[i] = NULL;
+                    break;
+                }
+            }
+        }
+        if (inc_count == 0) continue;
+
+        /* 乘积所有包含elim_var的因子 */
+        Factor* product = included[0];
+        for (int i = 1; i < inc_count; i++) {
+            Factor* new_product = factor_multiply(product, included[i], cardinalities);
+            factor_free(product);
+            factor_free(included[i]);
+            product = new_product;
+        }
+
+        /* 边缘化 */
+        Factor* marginalized = factor_marginalize(product, elim_var, cardinalities);
+        factor_free(product);
+
+        /* 放回因子列表 */
+        if (marginalized) {
+            int placed = 0;
+            for (int i = 0; i < cpt_count && !placed; i++) {
+                if (!factors[i]) { factors[i] = marginalized; placed = 1; }
+            }
+        }
+    }
+
+    /* 乘积所有剩余因子（仅包含查询变量） */
+    Factor* final_factor = NULL;
+    for (int i = 0; i < cpt_count; i++) {
+        if (!factors[i]) continue;
+        if (!final_factor) {
+            final_factor = factors[i];
+            factors[i] = NULL;
+        } else {
+            Factor* merged = factor_multiply(final_factor, factors[i], cardinalities);
+            factor_free(final_factor);
+            factor_free(factors[i]);
+            factors[i] = NULL;
+            final_factor = merged;
+        }
+    }
+
+    /* 归一化 */
+    if (final_factor) {
+        factor_normalize(final_factor);
+        /* 返回第一个值（单查询变量情况下的概率） */
+        if (result_prob) *result_prob = (final_factor->total_size > 0) ? final_factor->values[0] : 0.0f;
+        factor_free(final_factor);
+    } else {
+        if (result_prob) *result_prob = 0.0f;
+    }
+
+    /* 清理未释放因子 */
+    for (int i = 0; i < cpt_count; i++) {
+        if (factors[i]) factor_free(factors[i]);
+    }
+    safe_free((void**)&factors);
+    return 0;
+}

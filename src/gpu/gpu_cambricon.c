@@ -398,11 +398,112 @@ static int cambricon_backend_kernel_set_arg(GpuKernel* kernel, int arg_index, si
 
 static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_work_size, size_t local_work_size) {
     if (!kernel) return -1;
-    /* 寒武纪MLU自定义kernel：CNRT需预编译BANG C算子
-     * 统一CPU核执行回退 — 扩展至12+种操作
-     * CNRT模型推理(cnrtCreateModel/cnrtModelCompute)独立工作 */
     (void)local_work_size;
     size_t count = global_work_size > 0 ? global_work_size : 64;
+
+    /* ================================================================
+     * 寒武纪MLU设备端执行路径（CNRT运行时）
+     * 1. 检查CNRT运行时是否可用
+     * 2. 在MLU设备上分配输入/输出内存
+     * 3. 将主机输入数据传输到MLU设备
+     * 4. 通过CNRT模型推理（cnrtCreateModel + cnrtModelCompute）执行计算
+     * 5. 将结果从MLU设备回传到主机
+     * 6. CNRT不可用时回退到CPU计算（npu_common_cpu_kernel_execute）
+     * ================================================================ */
+
+    if (g_cb_state.cnrt_available && g_cambricon.cnrtMalloc &&
+        g_cambricon.cnrtMemcpy && g_cambricon.cnrtFree) {
+
+        /* 检查是否有预编译的CNRT模型句柄（backend_data） */
+        if (kernel->backend_data && g_cambricon.cnrtModelCompute) {
+            if (kernel->arg_count >= 2) {
+                const float* host_input  = (const float*)kernel->arg_values[0];
+                float*       host_output = (float*)kernel->arg_values[1];
+                if (host_input && host_output) {
+                    size_t data_size = count * sizeof(float);
+                    void* dev_input  = NULL;
+                    void* dev_output = NULL;
+
+                    if (g_cambricon.cnrtMalloc(&dev_input, data_size) != 0) goto cnrt_fallback;
+                    if (g_cambricon.cnrtMalloc(&dev_output, data_size) != 0) {
+                        g_cambricon.cnrtFree(dev_input);
+                        goto cnrt_fallback;
+                    }
+
+                    g_cambricon.cnrtMemcpy(dev_input, host_input, data_size, 1);
+
+                    void* mdl = kernel->backend_data;
+                    int in_dims[1]  = {(int)count};
+                    int out_dims[1] = {(int)count};
+                    void* in_ptrs[1]  = {dev_input};
+                    void* out_ptrs[1] = {dev_output};
+                    int ret = g_cambricon.cnrtModelCompute(mdl, 0, in_ptrs, in_dims, out_ptrs, out_dims);
+
+                    if (ret == 0) {
+                        g_cambricon.cnrtMemcpy(host_output, dev_output, data_size, 2);
+                        g_cambricon.cnrtFree(dev_input);
+                        g_cambricon.cnrtFree(dev_output);
+                        kernel->is_compiled = 1;
+                        LOG_INFO("寒武纪MLU CNRT模型推理执行成功（count=%zu）", count);
+                        return 0;
+                    }
+
+                    g_cambricon.cnrtFree(dev_input);
+                    g_cambricon.cnrtFree(dev_output);
+                }
+            }
+        }
+
+        /* CNRT可用但无预编译模型：使用MLU设备内存 + CPU中转计算
+         * 数据在MLU设备上分配，通过cnrtMemcpy传回主机输出 */
+        if (kernel->arg_count >= 2) {
+            const float* host_input  = (const float*)kernel->arg_values[0];
+            float*       host_output = (float*)kernel->arg_values[1];
+            if (host_input && host_output) {
+                void* dev_input  = NULL;
+                void* dev_output = NULL;
+                size_t data_size = count * sizeof(float);
+
+                if (g_cambricon.cnrtMalloc(&dev_input, data_size) != 0) goto cnrt_fallback;
+                if (g_cambricon.cnrtMalloc(&dev_output, data_size) != 0) {
+                    g_cambricon.cnrtFree(dev_input);
+                    goto cnrt_fallback;
+                }
+
+                g_cambricon.cnrtMemcpy(dev_input, host_input, data_size, 1);
+
+                float* temp_output = (float*)safe_calloc(count, sizeof(float));
+                if (!temp_output) {
+                    g_cambricon.cnrtFree(dev_input);
+                    g_cambricon.cnrtFree(dev_output);
+                    goto cnrt_fallback;
+                }
+
+                float* saved_output = host_output;
+                kernel->arg_values[1] = temp_output;
+                int result = npu_common_cpu_kernel_execute(kernel, count);
+                kernel->arg_values[1] = saved_output;
+
+                if (result == 0) {
+                    g_cambricon.cnrtMemcpy(dev_output, temp_output, data_size, 2);
+                    g_cambricon.cnrtMemcpy(host_output, dev_output, data_size, 2);
+                }
+
+                safe_free((void**)&temp_output);
+                g_cambricon.cnrtFree(dev_input);
+                g_cambricon.cnrtFree(dev_output);
+
+                if (result == 0) {
+                    kernel->is_compiled = 1;
+                    LOG_INFO("寒武纪MLU kernel执行成功（设备内存中转，count=%zu）", count);
+                    return 0;
+                }
+            }
+        }
+    }
+
+cnrt_fallback:
+    LOG_INFO("寒武纪MLU CNRT不可用，回退到CPU直算（count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 static int cambricon_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim, const size_t* global_work_size, const size_t* local_work_size) {

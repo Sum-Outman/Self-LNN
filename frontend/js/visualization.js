@@ -497,7 +497,7 @@ class VisualizationManager {
         ctx.fillStyle = 'rgba(255,255,255,0.15)';
         ctx.font = '10px monospace';
         /* M-042修复: 基于真实数据渲染，移除占位文本 */
-        if (nodeCount === 0) {
+        if (typeof nodeCount === 'undefined' || nodeCount === 0) {
             ctx.fillText('等待LNN网络数据...', w / 2, h / 2);
         }
     }

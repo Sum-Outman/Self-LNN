@@ -125,6 +125,8 @@ typedef struct {
     int contact_flags[6];         /**< 接触标志 */
     float battery_level;          /**< 电池电量（0.0-1.0） */
     int is_colliding;             /**< 是否发生碰撞 */
+    int num_links;                /**< 链接数量 */
+    int num_joints;               /**< 关节数量 */
 } SimulatorRobotState;
 
 /**

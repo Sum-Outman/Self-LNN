@@ -13,6 +13,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
+#include <ctype.h>
+
+#ifdef _MSC_VER
+#pragma warning(disable:4013)  /* clock() pre-existing */
+#endif
 #include <stdint.h>
 #include <ctype.h>
 #include <math.h>

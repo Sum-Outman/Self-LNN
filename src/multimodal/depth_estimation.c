@@ -204,6 +204,17 @@ static void cfc_depth_ode_step(const CfcDepthOdeLayer* layer,
                                float* output, float dt);
 static void cfc_depth_network_forward(CfcDepthNetwork* net,
                                       const float* image, float* depth_map);
+static void cfc_depth_network_backward_spsa(CfcDepthNetwork* net,
+                                            const float* image, const float* ground_truth,
+                                            float* temp_output, int width, int height,
+                                            float epsilon, float learning_rate);
+static void cfc_depth_ode_layer_apply_perturbation(CfcDepthOdeLayer* layer,
+                                                   float epsilon, int add);
+static void cfc_depth_ode_layer_sgd_update(CfcDepthOdeLayer* layer,
+                                           float scale, float momentum);
+static float cfc_depth_network_loss(CfcDepthNetwork* net, const float* image,
+                                    const float* ground_truth, float* temp_output,
+                                    int num_pixels);
 
 /* ==================== CfC ODE 层函数实现 ==================== */
 
@@ -518,6 +529,327 @@ static void cfc_depth_network_free(CfcDepthNetwork* net) {
     safe_free((void**)&net->state_buffer);
     safe_free((void**)&net->patch_buffer);
     memset(net, 0, sizeof(CfcDepthNetwork));
+}
+
+/**
+ * @brief 计算深度网络单样本 MSE 损失
+ *
+ * 执行前向传播并计算与真实深度图的均方误差。
+ */
+static float cfc_depth_network_loss(CfcDepthNetwork* net, const float* image,
+                                    const float* ground_truth, float* temp_output,
+                                    int num_pixels) {
+    if (!net || !image || !ground_truth || !temp_output || num_pixels <= 0) return 0.0f;
+    cfc_depth_network_forward(net, image, temp_output);
+    float loss = 0.0f;
+    for (int i = 0; i < num_pixels; i++) {
+        float diff = temp_output[i] - ground_truth[i];
+        loss += diff * diff;
+    }
+    return loss / (float)num_pixels;
+}
+
+/**
+ * @brief 对 CfC ODE 层的所有权重施加随机扰动（SPSA 方向）
+ *
+ * @param layer CfC ODE 层指针
+ * @param epsilon 扰动幅度
+ * @param add 1 表示加上扰动，0 表示减去扰动
+ */
+static void cfc_depth_ode_layer_apply_perturbation(CfcDepthOdeLayer* layer,
+                                                   float epsilon, int add) {
+    if (!layer || !layer->is_initialized) return;
+    int in_dim = layer->input_dim;
+    int hid = layer->hidden_dim;
+    float sign = add ? 1.0f : -1.0f;
+    unsigned int seed = (unsigned int)(uintptr_t)layer ^ 0x5A5A5A5A;
+
+#define PERTURB_TENSOR(tensor, size) do { \
+    for (int i = 0; i < (size); i++) { \
+        seed = seed * 1103515245 + 12345; \
+        float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f; \
+        (tensor)[i] += sign * epsilon * r; \
+    } \
+} while(0)
+
+    PERTURB_TENSOR(layer->w_input,   in_dim * hid);
+    PERTURB_TENSOR(layer->w_hidden,  hid * hid);
+    PERTURB_TENSOR(layer->b_hidden,  hid);
+    PERTURB_TENSOR(layer->w_gate,    in_dim * hid);
+    PERTURB_TENSOR(layer->u_gate,    hid * hid);
+    PERTURB_TENSOR(layer->b_gate,    hid);
+    PERTURB_TENSOR(layer->tau_weights, in_dim + hid);
+    layer->tau_bias += sign * epsilon * ((float)((seed >> 16) & 0x7FFF) / 32767.0f * 2.0f - 1.0f);
+
+#undef PERTURB_TENSOR
+}
+
+/**
+ * @brief 对 CfC ODE 层应用 SGD 动量更新
+ *
+ * 利用 SPSA 估计的梯度方向对权重进行缩放更新。
+ * @param layer CfC ODE 层指针
+ * @param scale 梯度缩放因子（即 learning_rate * (L_plus - L_minus) / (2*epsilon)）
+ * @param momentum 动量系数
+ */
+static void cfc_depth_ode_layer_sgd_update(CfcDepthOdeLayer* layer,
+                                           float scale, float momentum) {
+    if (!layer || !layer->is_initialized) return;
+    int in_dim = layer->input_dim;
+    int hid = layer->hidden_dim;
+    unsigned int seed = (unsigned int)(uintptr_t)layer ^ 0x5A5A5A5A;
+
+    /* 如未分配动量缓冲区，则分配之（第一次调用时） */
+    #define ALLOC_MOMENTUM_BUF(buf, size) do { \
+        if (!(buf)) { \
+            (buf) = (float*)safe_calloc((size_t)(size), sizeof(float)); \
+        } \
+    } while(0)
+    ALLOC_MOMENTUM_BUF(layer->adam_m_w, in_dim * hid);        /* w_input */
+    ALLOC_MOMENTUM_BUF(layer->adam_m_h, hid * hid);           /* w_hidden */
+    ALLOC_MOMENTUM_BUF(layer->adam_m_g, in_dim * hid);        /* w_gate */
+    ALLOC_MOMENTUM_BUF(layer->adam_m_u, hid * hid);           /* u_gate */
+    ALLOC_MOMENTUM_BUF(layer->adam_m_t, in_dim + hid + 1);    /* tau_weights + tau_bias */
+    #undef ALLOC_MOMENTUM_BUF
+
+    /* 动量更新宏：使用确定性随机种子生成与扰动一致的梯度方向 */
+    #define SGD_UPDATE_WITH_MOM(tensor, size, mom_buf) do { \
+        for (int i = 0; i < (size); i++) { \
+            seed = seed * 1103515245 + 12345; \
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f; \
+            float grad = scale * r; \
+            if (mom_buf) { \
+                (mom_buf)[i] = momentum * (mom_buf)[i] + (1.0f - momentum) * grad; \
+                (tensor)[i] -= (mom_buf)[i]; \
+            } else { \
+                (tensor)[i] -= grad; \
+            } \
+        } \
+    } while(0)
+
+    /* 无动量的 SGD 变体（用于无动量缓冲区的偏置） */
+    #define SGD_UPDATE_PLAIN(tensor, size) do { \
+        for (int i = 0; i < (size); i++) { \
+            seed = seed * 1103515245 + 12345; \
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f; \
+            (tensor)[i] -= scale * r; \
+        } \
+    } while(0)
+
+    SGD_UPDATE_WITH_MOM(layer->w_input,    in_dim * hid,  layer->adam_m_w);
+    SGD_UPDATE_WITH_MOM(layer->w_hidden,   hid * hid,     layer->adam_m_h);
+    SGD_UPDATE_PLAIN(   layer->b_hidden,   hid);               /* b_hidden 无动量缓冲区 */
+    SGD_UPDATE_WITH_MOM(layer->w_gate,     in_dim * hid,  layer->adam_m_g);
+    SGD_UPDATE_WITH_MOM(layer->u_gate,     hid * hid,     layer->adam_m_u);
+    SGD_UPDATE_PLAIN(   layer->b_gate,     hid);               /* b_gate 无动量缓冲区 */
+    SGD_UPDATE_WITH_MOM(layer->tau_weights, in_dim + hid, layer->adam_m_t);
+    /* tau_bias：使用 adam_m_t 的最后一个元素 */
+    {
+        seed = seed * 1103515245 + 12345;
+        float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+        float grad = scale * r;
+        if (layer->adam_m_t) {
+            int off = in_dim + hid;
+            layer->adam_m_t[off] = momentum * layer->adam_m_t[off] + (1.0f - momentum) * grad;
+            layer->tau_bias -= layer->adam_m_t[off];
+        } else {
+            layer->tau_bias -= grad;
+        }
+    }
+
+    #undef SGD_UPDATE_WITH_MOM
+    #undef SGD_UPDATE_PLAIN
+}
+
+/**
+ * @brief 使用 SPSA（同时扰动随机逼近）进行数值梯度估计与权重更新
+ *
+ * SPSA 算法：对所有权重同时施加随机扰动，仅需 2 次额外前向传播
+ * 即可估计所有参数的梯度方向。
+ *
+ * 步骤：
+ *   1. 计算基线损失 L0
+ *   2. 对所有参数施加 +epsilon 扰动，计算 L_plus
+ *   3. 对所有参数施加 -epsilon 扰动，计算 L_minus
+ *   4. 梯度估计：grad ≈ (L_plus - L_minus) / (2 * epsilon * perturbation)
+ *   5. 权重更新：W = W - lr * grad
+ *
+ * @param net CfC 深度网络
+ * @param image 输入图像
+ * @param ground_truth 真实深度图
+ * @param temp_output 临时缓冲区（与输出尺寸相同）
+ * @param width 图像宽度
+ * @param height 图像高度
+ * @param epsilon 扰动幅度
+ * @param learning_rate 学习率
+ */
+static void cfc_depth_network_backward_spsa(CfcDepthNetwork* net,
+                                            const float* image, const float* ground_truth,
+                                            float* temp_output, int width, int height,
+                                            float epsilon, float learning_rate) {
+    if (!net || !image || !ground_truth || !temp_output) return;
+    if (!net->is_initialized || width <= 0 || height <= 0) return;
+
+    int num_pixels = width * height;
+    int hid = net->hidden_dim;
+    int patch_dim = net->patch_dim;
+
+    /* 基线损失 */
+    float L0 = cfc_depth_network_loss(net, image, ground_truth, temp_output, num_pixels);
+
+    /* 步骤1：保存原始权重，施加 +epsilon 扰动 */
+    /* 保存 patch_embed_w 和 patch_embed_b 的原始值 */
+    size_t embed_size = (size_t)patch_dim * hid;
+    float* saved_embed_w = (float*)safe_malloc(embed_size * sizeof(float));
+    float* saved_embed_b = (float*)safe_malloc((size_t)hid * sizeof(float));
+    float* saved_output_w = (float*)safe_malloc((size_t)hid * sizeof(float));
+    float saved_output_b;
+
+    if (!saved_embed_w || !saved_embed_b || !saved_output_w) {
+        safe_free((void**)&saved_embed_w);
+        safe_free((void**)&saved_embed_b);
+        safe_free((void**)&saved_output_w);
+        return;
+    }
+
+    memcpy(saved_embed_w, net->patch_embed_w, embed_size * sizeof(float));
+    memcpy(saved_embed_b, net->patch_embed_b, (size_t)hid * sizeof(float));
+    memcpy(saved_output_w, net->output_proj_w, (size_t)hid * sizeof(float));
+    saved_output_b = net->output_proj_b;
+
+    /* 对 patch_embed 施加扰动 */
+    {
+        unsigned int seed = 0xABCD1234;
+        for (size_t i = 0; i < embed_size; i++) {
+            seed = seed * 1103515245 + 12345;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->patch_embed_w[i] += epsilon * r;
+        }
+        for (int i = 0; i < hid; i++) {
+            seed = seed * 1103515245 + 12346;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->patch_embed_b[i] += epsilon * r;
+        }
+        for (int i = 0; i < hid; i++) {
+            seed = seed * 1103515245 + 12347;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->output_proj_w[i] += epsilon * r;
+        }
+        {
+            seed = seed * 1103515245 + 12348;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->output_proj_b += epsilon * r;
+        }
+    }
+    for (int li = 0; li < net->num_layers; li++) {
+        cfc_depth_ode_layer_apply_perturbation(net->layers[li], epsilon, 1);
+    }
+
+    /* L_plus */
+    float L_plus = cfc_depth_network_loss(net, image, ground_truth, temp_output, num_pixels);
+
+    /* 步骤2：恢复权重并施加 -epsilon 扰动 */
+    memcpy(net->patch_embed_w, saved_embed_w, embed_size * sizeof(float));
+    memcpy(net->patch_embed_b, saved_embed_b, (size_t)hid * sizeof(float));
+    memcpy(net->output_proj_w, saved_output_w, (size_t)hid * sizeof(float));
+    net->output_proj_b = saved_output_b;
+
+    /* 再次从已保存的原始值施加 -epsilon 扰动 */
+    {
+        unsigned int seed = 0xABCD1234;
+        for (size_t i = 0; i < embed_size; i++) {
+            seed = seed * 1103515245 + 12345;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->patch_embed_w[i] -= epsilon * r;
+        }
+        for (int i = 0; i < hid; i++) {
+            seed = seed * 1103515245 + 12346;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->patch_embed_b[i] -= epsilon * r;
+        }
+        for (int i = 0; i < hid; i++) {
+            seed = seed * 1103515245 + 12347;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->output_proj_w[i] -= epsilon * r;
+        }
+        {
+            seed = seed * 1103515245 + 12348;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->output_proj_b -= epsilon * r;
+        }
+    }
+    /* 各层权重当前处于 +epsilon 扰动后的状态。 */
+    /* 施加 -2*epsilon 扰动使其跳转到 -epsilon（相对于原始值），用于计算 L_minus。 */
+    /* 因为扰动函数使用确定性的随机种子，相同层调用时的随机序列一致， */
+    /* -2*eps 抵消之前的 +eps 并再减 eps，得到 -eps 相对原始值。 */
+    for (int li = 0; li < net->num_layers; li++) {
+        cfc_depth_ode_layer_apply_perturbation(net->layers[li], 2.0f * epsilon, 0);
+    }
+
+    /* L_minus */
+    float L_minus = cfc_depth_network_loss(net, image, ground_truth, temp_output, num_pixels);
+
+    /* 步骤3：恢复原始权重 */
+    /* embed/output 权重复原 */
+    memcpy(net->patch_embed_w, saved_embed_w, embed_size * sizeof(float));
+    memcpy(net->patch_embed_b, saved_embed_b, (size_t)hid * sizeof(float));
+    memcpy(net->output_proj_w, saved_output_w, (size_t)hid * sizeof(float));
+    net->output_proj_b = saved_output_b;
+
+    /* 各层权重从 -epsilon 恢复至原始值：施加 +epsilon 扰动 */
+    for (int li = 0; li < net->num_layers; li++) {
+        cfc_depth_ode_layer_apply_perturbation(net->layers[li], epsilon, 1);
+    }
+
+    safe_free((void**)&saved_embed_w);
+    safe_free((void**)&saved_embed_b);
+    safe_free((void**)&saved_output_w);
+
+    /* 步骤4：SPSA 梯度缩放因子 */
+    /* SPSA: grad_estimate = (L_plus - L_minus) / (2 * epsilon) * perturbation_vector */
+    /* 然后 W = W - lr * grad_estimate */
+    /* 由于 perturbation_vector 已编码在随机种子中，scale 统一公式为: */
+    /* scale = learning_rate * (L_plus - L_minus) / (2.0f * epsilon) */
+    float diff = L_plus - L_minus;
+    float scale = learning_rate * diff / (2.0f * epsilon);
+
+    /* 梯度裁剪 */
+    float max_scale = 0.5f;
+    if (scale > max_scale) scale = max_scale;
+    if (scale < -max_scale) scale = -max_scale;
+
+    /* 步骤5：使用 SGD（动量）更新所有权重 */
+    float momentum = 0.9f;
+
+    /* 更新 patch_embed_w, patch_embed_b, output_proj_w, output_proj_b */
+    {
+        unsigned int seed = 0xABCD1234;
+        for (size_t i = 0; i < embed_size; i++) {
+            seed = seed * 1103515245 + 12345;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->patch_embed_w[i] -= scale * r;
+        }
+        for (int i = 0; i < hid; i++) {
+            seed = seed * 1103515245 + 12346;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->patch_embed_b[i] -= scale * r;
+        }
+        for (int i = 0; i < hid; i++) {
+            seed = seed * 1103515245 + 12347;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->output_proj_w[i] -= scale * r;
+        }
+        {
+            seed = seed * 1103515245 + 12348;
+            float r = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+            net->output_proj_b -= scale * r;
+        }
+    }
+
+    /* 更新每一层 */
+    for (int li = 0; li < net->num_layers; li++) {
+        cfc_depth_ode_layer_sgd_update(net->layers[li], scale, momentum);
+    }
 }
 
 /* ==================== 常量定义 ==================== */
@@ -1038,6 +1370,7 @@ int depth_estimate_train_monocular_network(DepthEstimator* estimator,
     size_t output_size = (size_t)width * height;
     int* indices = (int*)safe_malloc((size_t)num_samples * sizeof(int));
     float* net_output = (float*)safe_malloc(output_size * sizeof(float));
+    char model_path[512];
     if (!indices || !net_output) {
         safe_free((void**)&indices);
         safe_free((void**)&net_output);
@@ -1046,7 +1379,13 @@ int depth_estimate_train_monocular_network(DepthEstimator* estimator,
 
     for (int i = 0; i < num_samples; i++) indices[i] = i;
 
+    /* SPSA 扰动参数：随训练衰减以提高收敛稳定性 */
+    float spsa_base_epsilon = 1e-4f;
+    float best_loss = 1e10f;
+    float base_lr = learning_rate;
+
     for (int epoch = 0; epoch < num_epochs; epoch++) {
+        /* Fisher-Yates 洗牌 */
         for (int i = num_samples - 1; i > 0; i--) {
             int j = (int)((unsigned int)((rng_next() ^ (unsigned int)(uintptr_t)net)) % (unsigned int)(i + 1));
             int tmp = indices[i];
@@ -1057,6 +1396,14 @@ int depth_estimate_train_monocular_network(DepthEstimator* estimator,
         float epoch_loss = 0.0f;
         int epoch_batches = 0;
 
+        /* SPSA epsilon 随 epoch 衰减 */
+        float epsilon = spsa_base_epsilon / (1.0f + 0.01f * (float)epoch);
+
+        /* 学习率余弦退火调度 */
+        float progress = (float)epoch / (float)num_epochs;
+        float cos_lr = base_lr * 0.5f * (1.0f + cosf(progress * (float)M_PI));
+        float current_lr = base_lr * (1.0f - progress) * 0.3f + cos_lr * 0.7f;
+
         for (int start = 0; start < num_samples; start += effective_batch) {
             int current_batch = (start + effective_batch <= num_samples) ?
                                 effective_batch : (num_samples - start);
@@ -1064,8 +1411,15 @@ int depth_estimate_train_monocular_network(DepthEstimator* estimator,
             float batch_loss = 0.0f;
             for (int b = 0; b < current_batch; b++) {
                 int idx = indices[start + b];
-                cfc_depth_network_forward(net, training_images[idx], net_output);
 
+                /* SPSA 数值梯度估计：扰动所有权重 → 前向传播 → 梯度估计 → 权重更新 */
+                /* 此函数内部完成：保存权重 → +ε扰动 → L_plus → -ε扰动 → L_minus → 恢复权重 → SGD更新 */
+                cfc_depth_network_backward_spsa(net,
+                    training_images[idx], ground_truth_depths[idx],
+                    net_output, width, height, epsilon, current_lr);
+
+                /* 计算更新后的损失（用于监控） */
+                cfc_depth_network_forward(net, training_images[idx], net_output);
                 float sample_loss = 0.0f;
                 for (size_t p = 0; p < output_size; p++) {
                     float diff = net_output[p] - ground_truth_depths[idx][p];
@@ -1081,10 +1435,24 @@ int depth_estimate_train_monocular_network(DepthEstimator* estimator,
 
         float avg_epoch_loss = epoch_loss / (float)(epoch_batches > 0 ? epoch_batches : 1);
 
-        if ((epoch + 1) % 10 == 0 || epoch == 0) {
-            log_info("[训练] Epoch %d/%d, MSE Loss: %.6f, LR: %.6f\n",
-                    epoch + 1, num_epochs, avg_epoch_loss, learning_rate);
+        /* 追踪最佳损失 */
+        if (avg_epoch_loss < best_loss) {
+            best_loss = avg_epoch_loss;
         }
+
+        if ((epoch + 1) % 10 == 0 || epoch == 0) {
+            log_info("[训练] Epoch %d/%d, MSE Loss: %.6f, Best: %.6f, LR: %.6e, ε: %.6e\n",
+                    epoch + 1, num_epochs, avg_epoch_loss, best_loss, current_lr, epsilon);
+        }
+    }
+
+    /* 训练完成：保存模型 */
+    snprintf(model_path, sizeof(model_path), "models/depth_cfc_trained.bin");
+    int save_result = depth_estimate_save_model(estimator, model_path);
+    if (save_result == 0) {
+        log_info("[训练] 模型已保存到: %s (最终Loss: %.6f)\n", model_path, best_loss);
+    } else {
+        log_info("[训练] 模型保存失败，路径: %s\n", model_path);
     }
 
     safe_free((void**)&indices);
@@ -2679,7 +3047,78 @@ static void calibrate_camera_intrinsic(const float** images, int num_images,
         return;
     }
     
-    // 步骤5：非线性优化（使用Levenberg-Marquardt算法）
+    /* ===== 辅助函数：Rodrigues 向量 → 旋转矩阵 ===== */
+    /* 在 LM 循环内部使用，实现旋转参数的有限差分求导 */
+    #define LM_RODRIGUES_TO_MATRIX(rvec, Rmat) do { \
+        float _rx = (rvec)[0], _ry = (rvec)[1], _rz = (rvec)[2]; \
+        float _theta = sqrtf(_rx * _rx + _ry * _ry + _rz * _rz); \
+        if (_theta < 1e-10f) { \
+            (Rmat)[0] = 1.0f; (Rmat)[1] = 0.0f; (Rmat)[2] = 0.0f; \
+            (Rmat)[3] = 0.0f; (Rmat)[4] = 1.0f; (Rmat)[5] = 0.0f; \
+            (Rmat)[6] = 0.0f; (Rmat)[7] = 0.0f; (Rmat)[8] = 1.0f; \
+        } else { \
+            float _ux = _rx / _theta, _uy = _ry / _theta, _uz = _rz / _theta; \
+            float _c = cosf(_theta), _s = sinf(_theta), _omc = 1.0f - _c; \
+            (Rmat)[0] = _c + _ux * _ux * _omc; \
+            (Rmat)[1] = _ux * _uy * _omc - _uz * _s; \
+            (Rmat)[2] = _ux * _uz * _omc + _uy * _s; \
+            (Rmat)[3] = _uy * _ux * _omc + _uz * _s; \
+            (Rmat)[4] = _c + _uy * _uy * _omc; \
+            (Rmat)[5] = _uy * _uz * _omc - _ux * _s; \
+            (Rmat)[6] = _uz * _ux * _omc - _uy * _s; \
+            (Rmat)[7] = _uz * _uy * _omc + _ux * _s; \
+            (Rmat)[8] = _c + _uz * _uz * _omc; \
+        } \
+    } while(0)
+
+    /* ===== 将初始旋转矩阵转换为 Rodrigues 向量 ===== */
+    float** rvecs = (float**)safe_malloc((size_t)actual_valid * sizeof(float*));
+    if (!rvecs) {
+        for (int i = 0; i < actual_valid; i++) {
+            safe_free((void**)&rotations[i]);
+            safe_free((void**)&translations[i]);
+        }
+        safe_free((void**)&all_corners_x);
+        safe_free((void**)&all_corners_y);
+        safe_free((void**)&world_points);
+        safe_free((void**)&rotations);
+        safe_free((void**)&translations);
+        safe_free((void**)&valid_image_indices);
+        return;
+    }
+    for (int i = 0; i < actual_valid; i++) {
+        rvecs[i] = (float*)safe_malloc(3 * sizeof(float));
+        if (!rvecs[i]) {
+            for (int j = 0; j < i; j++) safe_free((void**)&rvecs[j]);
+            safe_free((void**)&rvecs);
+            for (int ii = 0; ii < actual_valid; ii++) {
+                safe_free((void**)&rotations[ii]);
+                safe_free((void**)&translations[ii]);
+            }
+            safe_free((void**)&all_corners_x);
+            safe_free((void**)&all_corners_y);
+            safe_free((void**)&world_points);
+            safe_free((void**)&rotations);
+            safe_free((void**)&translations);
+            safe_free((void**)&valid_image_indices);
+            return;
+        }
+        /* 旋转矩阵 → Rodrigues 向量 */
+        float* R = rotations[i];
+        float cos_theta = (R[0] + R[4] + R[8] - 1.0f) / 2.0f;
+        cos_theta = fmaxf(-1.0f, fminf(1.0f, cos_theta));
+        float theta = acosf(cos_theta);
+        if (theta < 1e-10f) {
+            rvecs[i][0] = 0.0f; rvecs[i][1] = 0.0f; rvecs[i][2] = 0.0f;
+        } else {
+            float s = theta / (2.0f * sinf(theta));
+            rvecs[i][0] = (R[7] - R[5]) * s;
+            rvecs[i][1] = (R[2] - R[6]) * s;
+            rvecs[i][2] = (R[3] - R[1]) * s;
+        }
+    }
+
+    // 步骤5：非线性优化（使用Levenberg-Marquardt算法，同时优化内参和外参）
     float current_fx = fx;
     float current_fy = fy;
     float current_cx = cx;
@@ -2689,154 +3128,204 @@ static void calibrate_camera_intrinsic(const float** images, int num_images,
     float current_k3 = 0.0f;
     float current_p1 = 0.0f;
     float current_p2 = 0.0f;
-    
-    float lambda = 0.001f;  // LM算法的阻尼因子
+
+    float lambda = 0.001f;
     int max_iterations = 100;
     float min_error = 1e6f;
-    
+
+    /* 外参有限差分步长 */
+    float fd_delta = 1e-5f;
+    /* 每个图像的外参雅可比：6 DOF（3旋转 + 3平移），按图像维度分配 */
+    /* 使用动态分配：每张图像 6 个雅可比分量 */
+
     for (int iter = 0; iter < max_iterations; iter++) {
-        // 计算当前参数下的误差和雅可比矩阵
         float total_error = 0.0f;
         int total_points = 0;
-        
-        // 计算残差向量和雅可比矩阵
-        // 完整实现：使用中心差分法计算雅可比矩阵，提供二阶精度
-        
-        float J[11];  // 内参参数数量：fx, fy, cx, cy, k1, k2, k3, p1, p2 (共9个)，加上两个外参相关参数
-        // 初始化雅可比矩阵
-        for (int i = 0; i < 11; i++) {
-            J[i] = 0.0f;
-        }
-        float residual = 0.0f;
-        
-        // 遍历所有有效图像
+
+        /* 内参雅可比（9个分量，全局累加） */
+        float J_intrinsic[9];
+        for (int i = 0; i < 9; i++) J_intrinsic[i] = 0.0f;
+
+        /* 遍历所有有效图像 */
         for (int img_idx = 0; img_idx < actual_valid; img_idx++) {
             int original_idx = valid_image_indices[img_idx];
             const float* corners_x = &all_corners_x[original_idx * num_corners];
             const float* corners_y = &all_corners_y[original_idx * num_corners];
-            
-            float* R = rotations[img_idx];
+
+            /* 将当前的 Rodrigues 向量转为旋转矩阵 */
+            float R[9];
+            LM_RODRIGUES_TO_MATRIX(rvecs[img_idx], R);
             float* t = translations[img_idx];
-            
+
+            /* 外参雅可比（每张图像 6 DOF） */
+            float J_extrinsic[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
             for (int pt_idx = 0; pt_idx < num_corners; pt_idx++) {
                 float X = world_points[pt_idx * 3];
                 float Y = world_points[pt_idx * 3 + 1];
                 float Z = world_points[pt_idx * 3 + 2];
-                
-                // 应用外参
+
+                /* --- 使用当前外参计算基准投影 --- */
                 float cam_x = R[0] * X + R[1] * Y + R[2] * Z + t[0];
                 float cam_y = R[3] * X + R[4] * Y + R[5] * Z + t[1];
                 float cam_z = R[6] * X + R[7] * Y + R[8] * Z + t[2];
-                
-                // 投影到归一化图像平面
+
                 float xn = cam_x / cam_z;
                 float yn = cam_y / cam_z;
-                
-                // 应用径向畸变
+
                 float r2 = xn * xn + yn * yn;
                 float r4 = r2 * r2;
                 float r6 = r4 * r2;
                 float radial_dist = 1.0f + current_k1 * r2 + current_k2 * r4 + current_k3 * r6;
-                
-                // 应用切向畸变
                 float tangential_x = 2.0f * current_p1 * xn * yn + current_p2 * (r2 + 2.0f * xn * xn);
                 float tangential_y = current_p1 * (r2 + 2.0f * yn * yn) + 2.0f * current_p2 * xn * yn;
-                
+
                 float xd = xn * radial_dist + tangential_x;
                 float yd = yn * radial_dist + tangential_y;
-                
-                // 应用内参
+
                 float projected_x = current_fx * xd + current_cx;
                 float projected_y = current_fy * yd + current_cy;
-                
-                // 计算误差
+
                 float error_x = projected_x - corners_x[pt_idx];
                 float error_y = projected_y - corners_y[pt_idx];
-                
-                // 完整实现：计算雅可比矩阵（ 解析导数）
-                // 误差对fx的导数 = xd
-                // 误差对fy的导数 = yd
-                // 误差对cx的导数 = 1
-                // 误差对cy的导数 = 1
-                // 误差对畸变参数的导数近似使用链式法则
-                
-                J[0] += error_x * xd;  // dE/dfx
-                J[1] += error_y * yd;  // dE/dfy
-                J[2] += error_x * 1.0f;  // dE/dcx
-                J[3] += error_y * 1.0f;  // dE/dcy
-                
-                // 完整实现：对畸变参数的导数（ ）
-                float dr2_dk1 = r2;
-                float dr2_dk2 = r4;
-                float dr2_dk3 = r6;
-                UNUSED(dr2_dk1); UNUSED(dr2_dk2); UNUSED(dr2_dk3);
-                float dradial_dk1 = r2;
-                float dradial_dk2 = r4;
-                float dradial_dk3 = r6;
-                
-                // 误差对k1,k2,k3的导数
-                J[4] += error_x * current_fx * xn * dradial_dk1 + error_y * current_fy * yn * dradial_dk1;
-                J[5] += error_x * current_fx * xn * dradial_dk2 + error_y * current_fy * yn * dradial_dk2;
-                J[6] += error_x * current_fx * xn * dradial_dk3 + error_y * current_fy * yn * dradial_dk3;
-                
-                // 对切向畸变参数的导数
-                float dtangential_x_dp1 = 2.0f * xn * yn;
-                float dtangential_x_dp2 = r2 + 2.0f * xn * xn;
-                float dtangential_y_dp1 = r2 + 2.0f * yn * yn;
-                float dtangential_y_dp2 = 2.0f * xn * yn;
-                
-                J[7] += error_x * current_fx * dtangential_x_dp1 + error_y * current_fy * dtangential_y_dp1;
-                J[8] += error_x * current_fx * dtangential_x_dp2 + error_y * current_fy * dtangential_y_dp2;
-                
-                // 完整实现：外参相关参数（ ，使用自适应权重）
-                J[9] += error_x * 0.01f;
-                J[10] += error_y * 0.01f;
-                
-                residual += error_x * error_x + error_y * error_y;
+
+                /* --- 内参雅可比累加（解析计算） --- */
+                J_intrinsic[0] += error_x * xd;               /* dE/dfx */
+                J_intrinsic[1] += error_y * yd;               /* dE/dfy */
+                J_intrinsic[2] += error_x * 1.0f;             /* dE/dcx */
+                J_intrinsic[3] += error_y * 1.0f;             /* dE/dcy */
+                J_intrinsic[4] += error_x * current_fx * xn * r2 + error_y * current_fy * yn * r2;  /* dE/dk1 */
+                J_intrinsic[5] += error_x * current_fx * xn * r4 + error_y * current_fy * yn * r4;  /* dE/dk2 */
+                J_intrinsic[6] += error_x * current_fx * xn * r6 + error_y * current_fy * yn * r6;  /* dE/dk3 */
+                J_intrinsic[7] += error_x * current_fx * (2.0f * xn * yn) + error_y * current_fy * (r2 + 2.0f * yn * yn); /* dE/dp1 */
+                J_intrinsic[8] += error_x * current_fx * (r2 + 2.0f * xn * xn) + error_y * current_fy * (2.0f * xn * yn); /* dE/dp2 */
+
+                /* --- 外参雅可比（有限差分法计算旋转和平移参数的导数） --- */
+                /* 对 Rodrigues 向量的每个分量计算投影误差的偏导数 */
+                for (int ri = 0; ri < 3; ri++) {
+                    float rvec_perturbed[3];
+                    rvec_perturbed[0] = rvecs[img_idx][0];
+                    rvec_perturbed[1] = rvecs[img_idx][1];
+                    rvec_perturbed[2] = rvecs[img_idx][2];
+                    rvec_perturbed[ri] += fd_delta;
+
+                    float Rp[9];
+                    LM_RODRIGUES_TO_MATRIX(rvec_perturbed, Rp);
+
+                    float pcx = Rp[0] * X + Rp[1] * Y + Rp[2] * Z + t[0];
+                    float pcy = Rp[3] * X + Rp[4] * Y + Rp[5] * Z + t[1];
+                    float pcz = Rp[6] * X + Rp[7] * Y + Rp[8] * Z + t[2];
+
+                    float pxn = pcx / pcz;
+                    float pyn = pcy / pcz;
+                    float pr2 = pxn * pxn + pyn * pyn;
+                    float pr4 = pr2 * pr2;
+                    float pr6 = pr4 * pr2;
+                    float pradial = 1.0f + current_k1 * pr2 + current_k2 * pr4 + current_k3 * pr6;
+                    float ptx = 2.0f * current_p1 * pxn * pyn + current_p2 * (pr2 + 2.0f * pxn * pxn);
+                    float pty = current_p1 * (pr2 + 2.0f * pyn * pyn) + 2.0f * current_p2 * pxn * pyn;
+                    float pxd = pxn * pradial + ptx;
+                    float pyd = pyn * pradial + pty;
+                    float ppx = current_fx * pxd + current_cx;
+                    float ppy = current_fy * pyd + current_cy;
+
+                    float pex = ppx - corners_x[pt_idx];
+                    float pey = ppy - corners_y[pt_idx];
+
+                    /* 中心差分：dE/dr_i ≈ (E(r+δ) - E(r)) / δ */
+                    J_extrinsic[ri] += ((pex * pex + pey * pey) - (error_x * error_x + error_y * error_y)) / fd_delta;
+                }
+
+                /* 对平移向量的每个分量计算偏导数 */
+                for (int ti = 0; ti < 3; ti++) {
+                    float tp[3];
+                    tp[0] = t[0]; tp[1] = t[1]; tp[2] = t[2];
+                    tp[ti] += fd_delta;
+
+                    float tcx = R[0] * X + R[1] * Y + R[2] * Z + tp[0];
+                    float tcy = R[3] * X + R[4] * Y + R[5] * Z + tp[1];
+                    float tcz = R[6] * X + R[7] * Y + R[8] * Z + tp[2];
+
+                    float txn = tcx / tcz;
+                    float tyn = tcy / tcz;
+                    float tr2 = txn * txn + tyn * tyn;
+                    float tr4 = tr2 * tr2;
+                    float tr6 = tr4 * tr2;
+                    float tradial = 1.0f + current_k1 * tr2 + current_k2 * tr4 + current_k3 * tr6;
+                    float ttx = 2.0f * current_p1 * txn * tyn + current_p2 * (tr2 + 2.0f * txn * txn);
+                    float tty = current_p1 * (tr2 + 2.0f * tyn * tyn) + 2.0f * current_p2 * txn * tyn;
+                    float txd = txn * tradial + ttx;
+                    float tyd = tyn * tradial + tty;
+                    float tpx = current_fx * txd + current_cx;
+                    float tpy = current_fy * tyd + current_cy;
+
+                    float tex = tpx - corners_x[pt_idx];
+                    float tey = tpy - corners_y[pt_idx];
+
+                    J_extrinsic[3 + ti] += ((tex * tex + tey * tey) - (error_x * error_x + error_y * error_y)) / fd_delta;
+                }
+
                 total_error += error_x * error_x + error_y * error_y;
                 total_points++;
+
+                /* --- 每完成一个角点，立即用此外参雅可比更新当前图像的外参 --- */
+                /* 注意：只在每个迭代的末尾统一更新外参，而非逐点更新 */
+            } /* end pt_idx */
+
+            /* 归一化外参雅可比并更新当前图像的外参 */
+            if (num_corners > 0) {
+                float inv_pts = 1.0f / (float)num_corners;
+                float ext_lr = 0.01f / (1.0f + (float)iter * 0.02f);
+                float ext_damping = lambda * 0.5f; /* 外参的阻尼系数略小于内参 */
+
+                for (int ri = 0; ri < 3; ri++) {
+                    rvecs[img_idx][ri] -= ext_lr * ext_damping * J_extrinsic[ri] * inv_pts;
+                }
+                for (int ti = 0; ti < 3; ti++) {
+                    translations[img_idx][ti] -= ext_lr * ext_damping * J_extrinsic[3 + ti] * inv_pts;
+                }
             }
-        }
-        
-        // 计算平均误差
+        } /* end img_idx */
+
+        /* --- 更新内参（基于所有图像累加的雅可比） --- */
         if (total_points > 0) {
-            float avg_error = total_error / total_points;
-            
-            // 如果误差小于最小误差，接受当前参数并减小lambda
+            float prev_min_error = min_error;
+            float avg_error = total_error / (float)total_points;
+
             if (avg_error < min_error) {
                 min_error = avg_error;
-                lambda *= 0.5f;  // 减小阻尼因子，更接近高斯牛顿法
+                lambda *= 0.5f;
             } else {
-                lambda *= 2.0f;  // 增大阻尼因子，更接近梯度下降法
+                lambda *= 2.0f;
             }
-            
-            // 使用雅可比矩阵进行LM算法更新
-            // 完整实现：计算梯度下降步长（完整LM更新， ）
-            float learning_rate = 0.01f / (1.0f + iter * 0.01f);  // 递减学习率
-            
-            // 使用雅可比矩阵计算梯度（J^T * error的近似）
-            // 注意：J已经累积了所有点的梯度，这里进行归一化
-            if (total_points > 0) {
-                float inv_points = 1.0f / total_points;
-                current_fx -= learning_rate * lambda * J[0] * inv_points;
-                current_fy -= learning_rate * lambda * J[1] * inv_points;
-                current_cx -= learning_rate * lambda * J[2] * inv_points;
-                current_cy -= learning_rate * lambda * J[3] * inv_points;
-                
-                // 更新畸变系数
-                current_k1 -= learning_rate * lambda * J[4] * inv_points * 0.1f;
-                current_k2 -= learning_rate * lambda * J[5] * inv_points * 0.1f;
-                current_k3 -= learning_rate * lambda * J[6] * inv_points * 0.1f;
-                current_p1 -= learning_rate * lambda * J[7] * inv_points * 0.1f;
-                current_p2 -= learning_rate * lambda * J[8] * inv_points * 0.1f;
-            }
-            
-            // 检查收敛条件
-            if (iter > 10 && fabsf(avg_error - min_error) < 1e-6f) {
+
+            float learning_rate = 0.01f / (1.0f + (float)iter * 0.01f);
+            float inv_points = 1.0f / (float)total_points;
+
+            current_fx -= learning_rate * lambda * J_intrinsic[0] * inv_points;
+            current_fy -= learning_rate * lambda * J_intrinsic[1] * inv_points;
+            current_cx -= learning_rate * lambda * J_intrinsic[2] * inv_points;
+            current_cy -= learning_rate * lambda * J_intrinsic[3] * inv_points;
+            current_k1 -= learning_rate * lambda * J_intrinsic[4] * inv_points * 0.1f;
+            current_k2 -= learning_rate * lambda * J_intrinsic[5] * inv_points * 0.1f;
+            current_k3 -= learning_rate * lambda * J_intrinsic[6] * inv_points * 0.1f;
+            current_p1 -= learning_rate * lambda * J_intrinsic[7] * inv_points * 0.1f;
+            current_p2 -= learning_rate * lambda * J_intrinsic[8] * inv_points * 0.1f;
+
+            if (iter > 10 && fabsf(avg_error - prev_min_error) < 1e-6f) {
                 break;
             }
         }
+    } /* end iter */
+
+    /* LM 优化完成后，将 Rodrigues 向量转回旋转矩阵 */
+    for (int i = 0; i < actual_valid; i++) {
+        LM_RODRIGUES_TO_MATRIX(rvecs[i], rotations[i]);
+        safe_free((void**)&rvecs[i]);
     }
+    safe_free((void**)&rvecs);
+
+    #undef LM_RODRIGUES_TO_MATRIX
     
     // 步骤6：设置标定结果
     calibration->fx = current_fx;

@@ -76,8 +76,7 @@ LNN* lnn_create(const LNNConfig* config) {
     if (selflnn_is_single_lnn_enforced()) {
         void* global_lnn = selflnn_get_lnn();
         if (global_lnn) {
-            log_warning("[单一LNN] lnn_create()被拦截——系统已锁定为单一LNN模式，"
-                       "请求(input=%zu,hidden=%zu,output=%zu)被重定向到全局LNN",
+            log_debug("[单一LNN] lnn_create()——重定向到全局LNN(input=%zu,hidden=%zu,output=%zu)",
                        config->input_size, config->hidden_size, config->output_size);
             return (LNN*)global_lnn;
         }

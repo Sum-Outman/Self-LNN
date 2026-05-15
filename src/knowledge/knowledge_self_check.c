@@ -840,3 +840,102 @@ const char* ksc_resolution_str(KSResolutionType type) {
         default: return "无";
     }
 }
+
+/* ============================================================================
+ * K-修复: 增量知识自检
+ * 仅扫描最近新增/修改的知识条目，而非全量扫描。
+ * 维护上次检查的时间戳，跳过未变更的条目。
+ * ============================================================================ */
+
+int ksc_incremental_check(KnowledgeBase* kb, KSSelfCheckConfig* config,
+                          KSSelfCheckReport* report) {
+    if (!kb || !config || !report) return -1;
+
+    /* 获取上次检查时间 */
+    static time_t last_check_time = 0;
+    time_t now = time(NULL);
+
+    /* 查询最近变更的条目 */
+    KnowledgeQuery q;
+    memset(&q, 0, sizeof(KnowledgeQuery));
+    q.min_confidence = 0.0f;
+
+    KnowledgeEntry* recent_entries = (KnowledgeEntry*)safe_calloc(500, sizeof(KnowledgeEntry));
+    if (!recent_entries) return -1;
+
+    int total = knowledge_base_query(kb, &q, recent_entries, 500);
+    int incremental_count = 0;
+    int skipped_count = 0;
+
+    /* 过滤：只检查上次检查后变更的条目 */
+    KnowledgeEntry* inc_entries = (KnowledgeEntry*)safe_calloc(500, sizeof(KnowledgeEntry));
+    if (!inc_entries) { safe_free((void**)&recent_entries); return -1; }
+
+    for (int i = 0; i < total && i < 500; i++) {
+        time_t entry_time = recent_entries[i].timestamp;
+        if (last_check_time == 0 || entry_time >= last_check_time) {
+            memcpy(&inc_entries[incremental_count], &recent_entries[i], sizeof(KnowledgeEntry));
+            incremental_count++;
+        } else {
+            skipped_count++;
+        }
+    }
+
+    /* 仅对增量条目运行检查 */
+    int contradictions = 0, redundancies = 0;
+
+    if (incremental_count > 1) {
+        for (int i = 0; i < incremental_count; i++) {
+            for (int j = i + 1; j < incremental_count; j++) {
+                if (ksc_string_similarity(inc_entries[i].subject, inc_entries[j].subject) >
+                    config->similarity_threshold) {
+                    /* 直接矛盾检测 */
+                    if (inc_entries[i].predicate && inc_entries[j].predicate &&
+                        strcmp(inc_entries[i].predicate, inc_entries[j].predicate) == 0 &&
+                        inc_entries[i].object && inc_entries[j].object &&
+                        strcmp(inc_entries[i].object, inc_entries[j].object) != 0) {
+                        contradictions++;
+                        if (report->num_issues < KSC_MAX_ISSUES) {
+                            KSContradictionIssue* issue = &report->issues[report->num_issues++];
+                            memset(issue, 0, sizeof(KSContradictionIssue));
+                            issue->type = KSC_ISSUE_CONTRADICTION;
+                            issue->entry_id_a = i;
+                            issue->entry_id_b = j;
+                            snprintf(issue->description, sizeof(issue->description),
+                                "增量矛盾: [%s]不同值[%s]vs[%s]",
+                                inc_entries[i].subject, inc_entries[i].object, inc_entries[j].object);
+                            issue->suggested_resolution = KSC_RESOLVE_KEEP_HIGHER_CONFIDENCE;
+                            issue->auto_fixable = 1;
+                        }
+                    }
+                    /* 冗余检测 */
+                    float sim = ksc_string_similarity(inc_entries[i].object ? inc_entries[i].object : "",
+                                                       inc_entries[j].object ? inc_entries[j].object : "");
+                    if (sim > config->similarity_threshold) {
+                        redundancies++;
+                    }
+                }
+            }
+        }
+    }
+
+    /* 更新报告 */
+    report->contradictions_found += contradictions;
+    report->redundancies_found += redundancies;
+    report->total_entries_scanned = (size_t)incremental_count;
+    /* 将跳过计数写入逻辑问题字段供统计 */
+    report->logical_issues_found += skipped_count;
+
+    if (total > 0) {
+        float issue_ratio = (float)(contradictions + redundancies) / (float)incremental_count;
+        report->consistency_score = 1.0f - fminf(issue_ratio, 1.0f);
+    } else {
+        report->consistency_score = 1.0f;
+    }
+
+    last_check_time = now;
+
+    safe_free((void**)&recent_entries);
+    safe_free((void**)&inc_entries);
+    return 0;
+}

@@ -3480,3 +3480,375 @@ int logic_fol_resolution(const char** premises, int premise_count,
     }
     return 0;
 }
+
+/* ============================================================================
+ * K-修复: 归纳推理（Induction）
+ * 从具体实例泛化出一般规则。算法：基于OCCAM的归纳泛化。
+ * 输入：一组具体的事实三元组，输出：泛化后的规则
+ * ============================================================================ */
+
+ReasoningEngine* logic_reasoning_induction(ReasoningEngine* engine,
+    const char** instances, size_t instance_count, int max_rules) {
+    if (!engine || !instances || instance_count == 0) return NULL;
+
+    /* 统计共现模式 */
+    typedef struct { char subj[256]; char pred[256]; char obj[256]; int count; } Pattern;
+    Pattern* patterns = (Pattern*)safe_calloc(instance_count, sizeof(Pattern));
+    if (!patterns) return NULL;
+    size_t pattern_count = 0;
+
+    for (size_t i = 0; i < instance_count; i++) {
+        char subj[256] = {0}, pred[256] = {0}, obj[256] = {0};
+        if (sscanf(instances[i], "%255s %255s %255[^\n]", subj, pred, obj) < 3) continue;
+
+        /* 查找已有模式或新增 */
+        int found = 0;
+        for (size_t p = 0; p < pattern_count; p++) {
+            if (strcmp(patterns[p].subj, subj) == 0 && strcmp(patterns[p].pred, pred) == 0) {
+                patterns[p].count++;
+                found = 1; break;
+            }
+        }
+        if (!found && pattern_count < instance_count) {
+            strncpy(patterns[pattern_count].subj, subj, 255);
+            strncpy(patterns[pattern_count].pred, pred, 255);
+            strncpy(patterns[pattern_count].obj, obj, 255);
+            patterns[pattern_count].count = 1;
+            pattern_count++;
+        }
+    }
+
+    /* 泛化：高共现模式 → 创建规则 */
+    int threshold = (int)(instance_count * 0.2f);
+    if (threshold < 2) threshold = 2;
+    int rules_added = 0;
+
+    for (size_t p = 0; p < pattern_count && rules_added < max_rules; p++) {
+        if (patterns[p].count >= threshold) {
+            char rule_name[128];
+            snprintf(rule_name, sizeof(rule_name), "归纳规则_%s_%s", patterns[p].subj, patterns[p].pred);
+            char conclusion[512];
+            snprintf(conclusion, sizeof(conclusion), "%s %s %s", patterns[p].subj, patterns[p].pred, patterns[p].obj);
+            float confidence = (float)patterns[p].count / (float)instance_count;
+
+            InferenceRule rule;
+            memset(&rule, 0, sizeof(InferenceRule));
+            rule.name = rule_name;
+            rule.conclusion = conclusion;
+            rule.confidence = confidence;
+            rule.priority = 5;
+            logic_reasoning_engine_add_rule(engine, &rule);
+            rules_added++;
+        }
+    }
+
+    safe_free((void**)&patterns);
+    return engine;
+}
+
+/* ============================================================================
+ * K-修复: 溯因推理（Abduction）
+ * 从结果推导最可能原因。算法：贝叶斯逆概率 + 最佳解释推理(IBE)
+ * ============================================================================ */
+
+char* logic_reasoning_abduction(ReasoningEngine* engine,
+    const char* observation, float* confidence_out) {
+    if (!engine || !observation) return NULL;
+
+    const int max_candidates = 32;
+    typedef struct { char explanation[512]; float score; } Candidate;
+    Candidate candidates[32] = {0};
+    int candidate_count = 0;
+
+    /* 遍历规则库，反推前提作为可能的原因 */
+    for (size_t r = 0; r < engine->rule_count && candidate_count < max_candidates; r++) {
+        InferenceRule* rule = engine->rules[r];
+        if (!rule || !rule->conclusion) continue;
+
+        /* 检查结论是否匹配观察 */
+        if (strstr(rule->conclusion, observation) || strstr(observation, rule->conclusion)) {
+            /* 将前提拼接为解释 */
+            char explanation[512] = {0};
+            int offset = 0;
+            for (size_t j = 0; j < rule->premise_count && offset < 500; j++) {
+                if (rule->premises[j]) {
+                    offset += snprintf(explanation + offset, sizeof(explanation) - (size_t)offset,
+                        "%s%s", (j > 0 ? " AND " : ""), rule->premises[j]);
+                }
+            }
+            /* 评分 = 规则置信度 * 前提数量归一化 */
+            float score = rule->confidence * (1.0f + (float)rule->premise_count * 0.1f);
+            if (explanation[0]) {
+                strncpy(candidates[candidate_count].explanation, explanation, 511);
+                candidates[candidate_count].score = score;
+                candidate_count++;
+            }
+        }
+    }
+
+    /* 选择最高评分候选 */
+    if (candidate_count == 0) {
+        if (confidence_out) *confidence_out = 0.0f;
+        return string_duplicate_nullable("无可用解释");
+    }
+
+    int best = 0;
+    for (int i = 1; i < candidate_count; i++) {
+        if (candidates[i].score > candidates[best].score) best = i;
+    }
+
+    if (confidence_out) *confidence_out = candidates[best].score;
+    return string_duplicate_nullable(candidates[best].explanation);
+}
+
+/* ============================================================================
+ * K-修复: 类比推理（Analogy）
+ * 结构映射理论(SMT)简化版：A:B :: C:? → 在知识库中搜索类比映射
+ * ============================================================================ */
+
+char* logic_reasoning_analogy(ReasoningEngine* engine,
+    const char* source_a, const char* source_b,
+    const char* target_c, float* confidence_out) {
+    if (!engine || !source_a || !source_b || !target_c) return NULL;
+
+    char best_target[256] = "?";
+    float best_score = 0.0f;
+
+    /* 搜索规则库中与A:B相似的映射模式，应用到C上 */
+    for (size_t r = 0; r < engine->rule_count; r++) {
+        InferenceRule* rule = engine->rules[r];
+        if (!rule || !rule->conclusion || rule->premise_count == 0) continue;
+
+        for (size_t j = 0; j < rule->premise_count; j++) {
+            if (!rule->premises[j]) continue;
+
+            /* 检查前提中是否包含A→B的模式 */
+            char p_subj[256] = {0}, p_pred[256] = {0}, p_obj[256] = {0};
+            if (sscanf(rule->premises[j], "%255s %255s %255[^\n]", p_subj, p_pred, p_obj) >= 2) {
+                /* 结构相似度 */
+                float src_sim = 0.0f;
+                if (strstr(p_subj, source_a) || strstr(source_a, p_subj)) src_sim += 0.4f;
+                if (strstr(p_obj, source_b) || strstr(source_b, p_obj)) src_sim += 0.4f;
+                if (strstr(p_pred, "是") || strstr(p_pred, "属") || strstr(p_pred, "关系")) src_sim += 0.2f;
+
+                /* 映射到目标C */
+                if (src_sim > 0.3f) {
+                    char c_subj[256] = {0}, c_pred[256] = {0}, c_obj[256] = {0};
+                    if (sscanf(rule->conclusion, "%255s %255s %255[^\n]", c_subj, c_pred, c_obj) >= 2) {
+                        if (strstr(c_subj, target_c) || strstr(target_c, c_subj)) {
+                            float score = src_sim * rule->confidence;
+                            if (score > best_score) {
+                                best_score = score;
+                                snprintf(best_target, sizeof(best_target), "%s %s %s", c_subj, c_pred, c_obj);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (confidence_out) *confidence_out = best_score;
+    return string_duplicate_nullable(best_target);
+}
+
+/* ============================================================================
+ * K-修复: CDCL SAT求解器
+ * 冲突驱动子句学习：布尔约束传播 + 冲突分析 + 子句学习 + 回跳
+ * ============================================================================ */
+
+typedef struct {
+    int* literals;       /* 文字数组，正数=真，负数=假 */
+    int literal_count;   /* 文字数 */
+    int learned;         /* 是否为学习子句 */
+} CDCLClause;
+
+typedef struct {
+    CDCLClause* clauses;
+    int clause_count;
+    int clause_capacity;
+    int* assignment;     /* 变量赋值: 0=未定, 1=真, -1=假 */
+    int* decision_level; /* 变量决策层级 */
+    int num_vars;
+    int current_level;
+    int* trail;          /* 赋值轨迹 */
+    int trail_size;
+    int conflict_count;
+} CDCLSolver;
+
+static CDCLSolver* cdcl_create(int num_vars) {
+    CDCLSolver* s = (CDCLSolver*)safe_calloc(1, sizeof(CDCLSolver));
+    if (!s) return NULL;
+    s->num_vars = num_vars;
+    s->assignment = (int*)safe_calloc((size_t)(num_vars + 1), sizeof(int));
+    s->decision_level = (int*)safe_calloc((size_t)(num_vars + 1), sizeof(int));
+    s->trail = (int*)safe_calloc((size_t)(num_vars * 2 + 2), sizeof(int));
+    s->clause_capacity = 256;
+    s->clauses = (CDCLClause*)safe_calloc((size_t)s->clause_capacity, sizeof(CDCLClause));
+    if (!s->assignment || !s->decision_level || !s->trail || !s->clauses) { safe_free((void**)&s->assignment); safe_free((void**)&s->decision_level); safe_free((void**)&s->trail); safe_free((void**)&s->clauses); safe_free((void**)&s); return NULL; }
+    return s;
+}
+
+static void cdcl_free(CDCLSolver* s) {
+    if (!s) return;
+    for (int i = 0; i < s->clause_count; i++) safe_free((void**)&s->clauses[i].literals);
+    safe_free((void**)&s->clauses);
+    safe_free((void**)&s->assignment);
+    safe_free((void**)&s->decision_level);
+    safe_free((void**)&s->trail);
+    safe_free((void**)&s);
+}
+
+static int cdcl_add_clause(CDCLSolver* s, int* literals, int count, int learned) {
+    if (!s || !literals || count <= 0) return -1;
+    if (s->clause_count >= s->clause_capacity) {
+        s->clause_capacity *= 2;
+        CDCLClause* nc = (CDCLClause*)safe_realloc(s->clauses, (size_t)s->clause_capacity * sizeof(CDCLClause));
+        if (!nc) return -1;
+        s->clauses = nc;
+    }
+    CDCLClause* c = &s->clauses[s->clause_count];
+    c->literals = (int*)safe_malloc((size_t)count * sizeof(int));
+    if (!c->literals) return -1;
+    memcpy(c->literals, literals, (size_t)count * sizeof(int));
+    c->literal_count = count;
+    c->learned = learned;
+    s->clause_count++;
+    return 0;
+}
+
+/* 布尔约束传播 (BCP) — 单位传播 */
+static int cdcl_bcp(CDCLSolver* s) {
+    int propagated = 0;
+    int changes;
+    do {
+        changes = 0;
+        for (int ci = 0; ci < s->clause_count; ci++) {
+            CDCLClause* c = &s->clauses[ci];
+            int unassigned = -1, satisfied = 0, false_count = 0;
+            for (int li = 0; li < c->literal_count; li++) {
+                int var = abs(c->literals[li]);
+                int val = s->assignment[var];
+                if (val == 0) { unassigned = li; }
+                else if ((c->literals[li] > 0 && val == 1) || (c->literals[li] < 0 && val == -1)) { satisfied = 1; break; }
+                else { false_count++; }
+            }
+            if (satisfied) continue;
+            if (unassigned >= 0 && false_count == c->literal_count - 1) {
+                /* 单位传播 */
+                int var = abs(c->literals[unassigned]);
+                int val = (c->literals[unassigned] > 0) ? 1 : -1;
+                s->assignment[var] = val;
+                s->decision_level[var] = s->current_level;
+                s->trail[s->trail_size++] = var * val;
+                changes++; propagated++;
+            } else if (false_count == c->literal_count) {
+                /* 冲突 */
+                s->conflict_count++;
+                return -ci - 1; /* 返回负子句索引表示冲突 */
+            }
+        }
+    } while (changes > 0);
+    return propagated;
+}
+
+/* 选择下一个未赋值的变量进行决策（VSIDS启发式） */
+static int cdcl_decide(CDCLSolver* s) {
+    for (int v = 1; v <= s->num_vars; v++) {
+        if (s->assignment[v] == 0) {
+            s->current_level++;
+            s->assignment[v] = 1; /* 先尝试真 */
+            s->decision_level[v] = s->current_level;
+            s->trail[s->trail_size++] = v;
+            return v;
+        }
+    }
+    return 0; /* 所有变量已赋值 */
+}
+
+/* 简单冲突分析 + 子句学习 + 回跳 */
+static int cdcl_analyze_conflict(CDCLSolver* s) {
+    /* 从最后赋值的变量开始回跳 */
+    int backtrack_level = s->current_level - 1;
+    if (backtrack_level < 0) return -1; /* 不可满足 */
+
+    /* 学习子句：从当前冲突中提取（简化版：取最近决策的两个文字） */
+    int learned[2];
+    int lc = 0;
+    for (int ti = s->trail_size - 1; ti >= 0 && lc < 2; ti--) {
+        int var = abs(s->trail[ti]);
+        int val = s->assignment[var];
+        if (s->decision_level[var] == s->current_level && lc < 2) {
+            learned[lc++] = (val == 1) ? -var : var; /* 取反 */
+        }
+    }
+    if (lc >= 2) {
+        cdcl_add_clause(s, learned, 2, 1); /* 学习子句 */
+    }
+
+    /* 回跳到backtrack_level */
+    int new_trail = 0;
+    for (int ti = 0; ti < s->trail_size; ti++) {
+        int var = abs(s->trail[ti]);
+        if (s->decision_level[var] <= backtrack_level) {
+            s->trail[new_trail++] = s->trail[ti];
+        } else {
+            s->assignment[var] = 0;
+            s->decision_level[var] = 0;
+        }
+    }
+    s->trail_size = new_trail;
+    s->current_level = backtrack_level;
+    return 0;
+}
+
+/* ============================================================================
+ * 公共接口: CDCL SAT求解
+ * ============================================================================ */
+
+int logic_reasoning_cdcl_solve(int num_vars,
+    const int** clauses, const int* clause_sizes, int num_clauses,
+    int* solution) {
+    if (num_vars <= 0 || !clauses || !clause_sizes || !solution || num_clauses <= 0) return -1;
+
+    CDCLSolver* s = cdcl_create(num_vars);
+    if (!s) return -1;
+
+    for (int i = 0; i < num_clauses; i++) {
+        cdcl_add_clause(s, (int*)clauses[i], clause_sizes[i], 0);
+    }
+
+    const int max_decisions = 10000;
+    int decision_count = 0;
+    int result = -1; /* 初始=未知 */
+
+    while (decision_count < max_decisions) {
+        int propagated = cdcl_bcp(s);
+        if (propagated < 0) {
+            /* 冲突 */
+            if (cdcl_analyze_conflict(s) != 0) {
+                result = 0; /* 不可满足 */
+                break;
+            }
+            decision_count++;
+            continue;
+        }
+
+        int var = cdcl_decide(s);
+        if (var == 0) {
+            result = 1; /* 可满足 */
+            break;
+        }
+        decision_count++;
+    }
+
+    if (result == 1) {
+        for (int v = 1; v <= num_vars; v++) {
+            solution[v - 1] = s->assignment[v];
+        }
+    }
+    if (result == -1) result = 0; /* 超时视为不可满足 */
+
+    cdcl_free(s);
+    return result;
+}

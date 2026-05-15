@@ -1094,6 +1094,10 @@ function updateSystemHealth(systemStatus) {
     const memoryElement = document.querySelector('.metric:nth-child(2) .metric-value');
     const uptimeElement = document.querySelector('.metric:nth-child(3) .metric-value');
     
+    // 在函数作用域声明，使进度条区域也能访问真实计算值
+    let cpuUsage = 0;
+    let memoryUsage = 0;
+    
     // 使用实际API数据或显示错误状态
     if (systemStatus.success && systemStatus.data && systemStatus.data.system) {
         // 使用实际API数据
@@ -1101,7 +1105,6 @@ function updateSystemHealth(systemStatus) {
         const systemData = systemStatus.data.system;
         
         // CPU使用率（优先使用后端返回的真实估算值）
-        let cpuUsage = 0;
         if (systemData.cpu_usage !== undefined && systemData.cpu_usage >= 0) {
             cpuUsage = systemData.cpu_usage;
         } else {
@@ -1109,13 +1112,31 @@ function updateSystemHealth(systemStatus) {
         }
         if (cpuElement) cpuElement.textContent = `${Math.round(cpuUsage)}%`;
         
-        // 内存使用（从内存统计中获取）
+        // 内存使用（从内存统计中获取，绝不使用假数据）
         const memoryData = systemData.modules.memory;
         if (memoryData && memoryData.total > 0) {
             const usedMB = memoryData.total / (1024 * 1024);
-            const totalMB = 4.0 * 1024; // 假设4GB总内存
-            const memoryUsage = Math.min(100, (usedMB / totalMB) * 100);
-            if (memoryElement) memoryElement.textContent = `${(usedMB / 1024).toFixed(1)} GB / ${(totalMB / 1024).toFixed(1)} GB`;
+            // 从多个来源获取真实系统总内存，拒绝硬编码假值
+            let totalMB = 0;
+            // 优先使用 navigator.deviceMemory (浏览器API，返回GB)
+            if (navigator.deviceMemory && navigator.deviceMemory > 0) {
+                totalMB = navigator.deviceMemory * 1024;
+            }
+            // 其次尝试系统中已缓存的总内存信息
+            if (totalMB <= 0 && typeof systemData.memory !== 'undefined' && systemData.memory.total_gb > 0) {
+                totalMB = systemData.memory.total_gb * 1024;
+            }
+            if (totalMB <= 0 && typeof systemData.memory !== 'undefined' && systemData.memory.total_mb > 0) {
+                totalMB = systemData.memory.total_mb;
+            }
+            if (totalMB > 0) {
+                // 基于真实总量和使用量计算百分比，绝不使用硬编码假值
+                memoryUsage = Math.min(100, (usedMB / totalMB) * 100);
+                if (memoryElement) memoryElement.textContent = `${(usedMB / 1024).toFixed(1)} GB / ${(totalMB / 1024).toFixed(1)} GB`;
+            } else {
+                // 无法获取系统总内存，只显示已用内存，不制造虚假总值
+                if (memoryElement) memoryElement.textContent = `${(usedMB / 1024).toFixed(1)} GB / --`;
+            }
         } else {
             if (memoryElement) memoryElement.textContent = '-- GB / -- GB';
         }
@@ -1135,12 +1156,12 @@ function updateSystemHealth(systemStatus) {
         if (uptimeElement) uptimeElement.textContent = '--';
     }
     
-    // 更新进度条
+    // 更新进度条 — 使用动态计算的真值替代硬编码假百分比
     const cpuBar = document.querySelector('.metric:nth-child(1) .metric-fill');
     const memoryBar = document.querySelector('.metric:nth-child(2) .metric-fill');
     
-    if (cpuBar) cpuBar.style.width = systemStatus.success ? '32%' : '0%';
-    if (memoryBar) memoryBar.style.width = systemStatus.success ? '30%' : '0%';
+    if (cpuBar) cpuBar.style.width = systemStatus.success ? `${Math.round(cpuUsage)}%` : '0%';
+    if (memoryBar) memoryBar.style.width = systemStatus.success ? `${Math.round(memoryUsage)}%` : '0%';
 }
 
 /**

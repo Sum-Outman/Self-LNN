@@ -349,7 +349,13 @@ static int tpu_backend_kernel_set_arg(GpuKernel* kernel, int idx, size_t sz, con
 static int tpu_backend_kernel_execute(GpuKernel* kernel, size_t gws, size_t lws) {
     if (!kernel) return -1;
     
-    /* TPU原生路径 */
+    /* ================================================================
+     * Google TPU设备端执行路径（libtpu运行时）
+     * 1. 优先尝试TPU原生执行（tpuExecute）
+     * 2. TPU不可用时回退到CPU直算（npu_common_cpu_kernel_execute）
+     * ================================================================ */
+
+    /* 路径A：TPU原生路径 */
     if (g_tpu_state.tpu_available && g_tpu.tpuExecute) {
         if (kernel->arg_count >= 4) {
             const float* input = (const float*)kernel->arg_values[0];
@@ -361,11 +367,16 @@ static int tpu_backend_kernel_execute(GpuKernel* kernel, size_t gws, size_t lws)
                 memcpy(tmp_in, input, count * sizeof(float));
                 int ret = g_tpu.tpuExecute(tmp_in, (size_t)(count * sizeof(float)),
                                              tmp_out, (size_t)(count * sizeof(float)));
-                if (ret == 0) memcpy(output, tmp_out, count * sizeof(float));
-                safe_free((void**)&tmp_in);
-                safe_free((void**)&tmp_out);
-                kernel->is_compiled = (ret == 0);
-                return ret;
+                if (ret == 0) {
+                    memcpy(output, tmp_out, count * sizeof(float));
+                    safe_free((void**)&tmp_in);
+                    safe_free((void**)&tmp_out);
+                    kernel->is_compiled = 1;
+                    LOG_INFO("Google TPU tpuExecute执行成功（count=%zu）", count);
+                    return 0;
+                }
+                /* TPU执行失败，降级 */
+                LOG_WARN("Google TPU tpuExecute执行失败，降级到CPU回退");
             }
             safe_free((void**)&tmp_in);
             safe_free((void**)&tmp_out);
@@ -375,6 +386,7 @@ static int tpu_backend_kernel_execute(GpuKernel* kernel, size_t gws, size_t lws)
     /* 统一CPU核执行回退 — 12+种操作 */
     (void)lws;
     size_t count = gws > 0 ? gws : 64;
+    LOG_INFO("Google TPU不可用，回退到CPU直算（count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 static int tpu_backend_kernel_execute_nd(GpuKernel* kernel, int dim, const size_t* gws, const size_t* lws) {

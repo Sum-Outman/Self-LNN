@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file training_pipeline.c
  * @brief 完整训练流水线实现 - 使用真实数据源，无任何伪随机数据
  */
@@ -11,6 +11,7 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/cfc_network.h"
+#include "selflnn/core/loss.h"
 
 extern void* selflnn_get_speech_recognizer(void);
 

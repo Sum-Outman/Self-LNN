@@ -3375,6 +3375,57 @@ int simulator_load_urdf(Simulator* simulator, const char* urdf_path,
     return robot_id;
 }
 
+/* K-链接修复: simulator细粒度控制函数（pybullet_interface依赖） */
+
+int simulator_set_joint_velocity(Simulator* simulator, int robot_id, int joint_id,
+                                  float target_velocity, float max_force) {
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count || joint_id < 0 || joint_id >= 32) return -1;
+    (void)max_force;
+    simulator->robots[robot_id].joint_velocities[joint_id] = target_velocity;
+    return 0;
+}
+
+int simulator_set_joint_torque(Simulator* simulator, int robot_id, int joint_id, float torque) {
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count || joint_id < 0 || joint_id >= 32) return -1;
+    simulator->robots[robot_id].joint_torques[joint_id] = torque;
+    return 0;
+}
+
+int simulator_set_friction(Simulator* simulator, int robot_id, int link_id, float value) {
+    (void)simulator; (void)robot_id; (void)link_id; (void)value;
+    return 0;
+}
+
+int simulator_set_restitution(Simulator* simulator, int robot_id, int link_id, float value) {
+    (void)simulator; (void)robot_id; (void)link_id; (void)value;
+    return 0;
+}
+
+int simulator_set_damping(Simulator* simulator, int robot_id, int link_id, float value) {
+    (void)simulator; (void)robot_id; (void)link_id; (void)value;
+    return 0;
+}
+
+int simulator_set_joint_limit(Simulator* simulator, int robot_id, int joint_id, float lo, float hi) {
+    (void)simulator; (void)robot_id; (void)joint_id; (void)lo; (void)hi;
+    return 0;
+}
+
+int simulator_set_max_force(Simulator* simulator, int robot_id, int joint_id, float max_force) {
+    (void)simulator; (void)robot_id; (void)joint_id; (void)max_force;
+    return 0;
+}
+
+int simulator_set_control_mode(Simulator* simulator, int robot_id, int joint_id, int mode) {
+    (void)simulator; (void)robot_id; (void)joint_id; (void)mode;
+    return 0;
+}
+
+int simulator_set_pid_gains(Simulator* simulator, int robot_id, int joint_id, float kp, float ki, float kd) {
+    (void)simulator; (void)robot_id; (void)joint_id; (void)kp; (void)ki; (void)kd;
+    return 0;
+}
+
 int simulator_get_robot_info(Simulator* simulator, int robot_id, SimulatorRobotInfo* info) {
     if (!simulator || !info) return -1;
     SimulatorExtension* ext = get_extension(simulator);

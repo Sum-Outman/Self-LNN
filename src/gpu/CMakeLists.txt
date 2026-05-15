@@ -7,6 +7,7 @@ if(ENABLE_GPU)
     # 完整GPU后端源文件
     set(GPU_SOURCES
         gpu.c
+        gpu_hardware_detect.c
         gpu_memory_pool.c
         auto_kernel_optimization.c
         gpu_opencl.c

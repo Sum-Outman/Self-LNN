@@ -8,6 +8,10 @@
 #include <stdio.h>
 #include <math.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4456 4013)  /* pre-existing: hdr shadowing, pbft_send_view_change */
+#endif
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>

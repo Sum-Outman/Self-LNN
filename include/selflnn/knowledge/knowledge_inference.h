@@ -208,6 +208,16 @@ int ki_multi_hop_reason(KnowledgeInferenceEngine* kie,
                         int max_facts,
                         int* fact_count);
 
+/* K-修复: 贝叶斯网络变量消除法推理 */
+int ki_bayesian_variable_elimination(
+    int* query_vars, int query_count,
+    int* evidence_vars, int* evidence_values, int evidence_count,
+    int* all_vars, int* cardinalities, int var_count,
+    float** cpt_list, int* cpt_var_indices, int* cpt_var_counts, int cpt_count,
+    float* result_prob);
+
+void factor_free(void* f);
+
 #ifdef __cplusplus
 }
 #endif

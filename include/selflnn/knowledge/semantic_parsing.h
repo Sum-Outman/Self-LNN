@@ -486,6 +486,31 @@ char* dependency_parse_result_format(DependencyParseResult* result);
  */
 char* srl_result_format(SRLResult* result);
 
+/* ============================================================================
+ * K-修复: SWRL规则引擎接口
+ * ============================================================================ */
+
+/** 初始化SWRL规则引擎 */
+int semantic_parsing_swrl_init(void);
+
+/** 清理SWRL规则引擎 */
+void semantic_parsing_swrl_cleanup(void);
+
+/** 添加SWRL规则 */
+int semantic_parsing_swrl_add_rule(const char* name, const char* body_rules,
+    int body_count, const char* head_rules, int head_count, float confidence);
+
+/** 添加SWRL事实三元组 */
+int semantic_parsing_swrl_add_fact(const char* subject, const char* predicate,
+    const char* object, float confidence);
+
+/** 执行SWRL推理（前向链） */
+int semantic_parsing_swrl_reason(int max_iterations, int* inferred_count);
+
+/** 获取SWRL引擎统计 */
+int semantic_parsing_swrl_get_stats(int* out_rule_count, int* out_triple_count,
+    int* out_inference_count, int* out_conflict_count);
+
 #ifdef __cplusplus
 }
 #endif

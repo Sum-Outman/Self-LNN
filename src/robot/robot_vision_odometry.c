@@ -96,35 +96,66 @@ static void cross3(const float a[3], const float b[3], float out[3]) {
 
 static float compute_harris_score(const unsigned char* img, int x, int y,
                                    int w, int stride) {
-    if (x < 2 || y < 2 || x >= w-2 || y >= 480-2) return 0.0f;
-    float Ix = 0, Iy = 0;
-    float A = 0, B = 0, C = 0;
-    float sobel_x[3][3] = {{-1,0,1},{-2,0,2},{-1,0,1}};
-    float sobel_y[3][3] = {{-1,-2,-1},{0,0,0},{1,2,1}};
+    if (x < 3 || y < 3 || x >= w-3 || y >= 480-3) return 0.0f;
+
+    /* Sobel梯度计算 */
+    const float sobel_x[3][3] = {{-1,0,1},{-2,0,2},{-1,0,1}};
+    const float sobel_y[3][3] = {{-1,-2,-1},{0,0,0},{1,2,1}};
+
+    float grad_Ix = 0.0f, grad_Iy = 0.0f;
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
-            int idx = (y+dy)*stride + (x+dx);
-            (void)idx;
-            Ix += img[idx] * sobel_x[dy+1][dx+1];
-            Iy += img[idx] * sobel_y[dy+1][dx+1];
+            unsigned char pixel = img[(y+dy)*stride + (x+dx)];
+            grad_Ix += (float)pixel * sobel_x[dy+1][dx+1];
+            grad_Iy += (float)pixel * sobel_y[dy+1][dx+1];
         }
     }
-    int r = 3;
-    for (int dy = -r; dy <= r; dy++) {
-        for (int dx = -r; dx <= r; dx++) {
-            int idx = (y+dy)*stride + (x+dx);
-            (void)idx;
-            float wx = sobel_x[1][1], wy = sobel_y[1][1];
-            (void)wx; (void)wy;
-            A += Ix * Ix;
-            B += Ix * Iy;
-            C += Iy * Iy;
+    grad_Ix /= 4.0f;
+    grad_Iy /= 4.0f;
+
+    /* 7x7高斯加权窗口累加二阶矩 */
+    float A = 0.0f, B = 0.0f, C = 0.0f;
+    const float gauss_weights[7][7] = {
+        {0.006f,0.013f,0.021f,0.025f,0.021f,0.013f,0.006f},
+        {0.013f,0.028f,0.046f,0.054f,0.046f,0.028f,0.013f},
+        {0.021f,0.046f,0.074f,0.088f,0.074f,0.046f,0.021f},
+        {0.025f,0.054f,0.088f,0.104f,0.088f,0.054f,0.025f},
+        {0.021f,0.046f,0.074f,0.088f,0.074f,0.046f,0.021f},
+        {0.013f,0.028f,0.046f,0.054f,0.046f,0.028f,0.013f},
+        {0.006f,0.013f,0.021f,0.025f,0.021f,0.013f,0.006f}
+    };
+
+    for (int dy = -3; dy <= 3; dy++) {
+        for (int dx = -3; dx <= 3; dx++) {
+            int px = x + dx, py = y + dy;
+            if (px < 0 || py < 0 || px >= w || py >= 480) continue;
+
+            unsigned char pixel = img[py*stride + px];
+            float local_Ix = 0.0f, local_Iy = 0.0f;
+            for (int kdy = -1; kdy <= 1; kdy++) {
+                for (int kdx = -1; kdx <= 1; kdx++) {
+                    int qx = px + kdx, qy = py + kdy;
+                    if (qx < 0 || qy < 0 || qx >= w || qy >= 480) continue;
+                    local_Ix += (float)img[qy*stride + qx] * sobel_x[kdy+1][kdx+1];
+                    local_Iy += (float)img[qy*stride + qx] * sobel_y[kdy+1][kdx+1];
+                }
+            }
+            local_Ix /= 4.0f; local_Iy /= 4.0f;
+
+            float wg = gauss_weights[dy+3][dx+3];
+            A += wg * local_Ix * local_Ix;
+            B += wg * local_Ix * local_Iy;
+            C += wg * local_Iy * local_Iy;
         }
     }
-    float det = A*C - B*B;
+
+    float det   = A * C - B * B;
     float trace = A + C;
     if (trace < 1e-10f) return 0.0f;
-    return det - 0.04f * trace * trace;
+
+    /* Harris响应: R = det(M) - k * trace(M)^2, k=0.04 */
+    float response = det - 0.04f * trace * trace;
+    return response > 0.0f ? response : 0.0f;
 }
 
 static void extract_patch_descriptor(const unsigned char* img, int x, int y,
@@ -170,110 +201,288 @@ static float descriptor_distance(const float* a, const float* b) {
     return sqrtf(dist);
 }
 
+/* 3x3矩阵SVD分解（Jacobi迭代法）
+ * 输入: M[9] => 输出: U[9]*S[3]*Vt[9] */
+static void svd3_jacobi(const float M[9], float U[9], float S[3], float Vt[9]) {
+    float A[9];
+    memcpy(A, M, 9 * sizeof(float));
+
+    /* 初始化U=I, Vt=I */
+    for (int i = 0; i < 9; i++) {
+        U[i]  = (i % 4 == 0) ? 1.0f : 0.0f;
+        Vt[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+    }
+
+    /* Jacobi迭代 —— 最多50次扫描 */
+    for (int sweep = 0; sweep < 50; sweep++) {
+        float max_off = 0.0f;
+        int p = 0, q = 1;
+
+        /* 寻找最大非对角元素 */
+        for (int i = 0; i < 3; i++) {
+            for (int j = i + 1; j < 3; j++) {
+                float val = fabsf(A[j * 3 + i]);
+                if (val > max_off) {
+                    max_off = val;
+                    p = i; q = j;
+                }
+            }
+        }
+        if (max_off < 1e-10f) break;
+
+        /* 计算Jacobi旋转 */
+        float app = A[p * 3 + p];
+        float aqq = A[q * 3 + q];
+        float apq = A[q * 3 + p];
+
+        float theta = 0.5f * atan2f(2.0f * apq, aqq - app);
+        float c = cosf(theta);
+        float s_val = sinf(theta);
+
+        /* 旋转A */
+        for (int j = 0; j < 3; j++) {
+            float ajp = A[j * 3 + p];
+            float ajq = A[j * 3 + q];
+            A[j * 3 + p] = ajp * c - ajq * s_val;
+            A[j * 3 + q] = ajp * s_val + ajq * c;
+        }
+        for (int j = 0; j < 3; j++) {
+            float apj = A[p * 3 + j];
+            float aqj = A[q * 3 + j];
+            A[p * 3 + j] =  c * apj - s_val * aqj;
+            A[q * 3 + j] =  s_val * apj + c * aqj;
+        }
+
+        /* 更新U */
+        for (int j = 0; j < 3; j++) {
+            float upj = U[p * 3 + j];
+            float uqj = U[q * 3 + j];
+            U[p * 3 + j] = upj * c - uqj * s_val;
+            U[q * 3 + j] = upj * s_val + uqj * c;
+        }
+
+        /* 更新Vt */
+        for (int i = 0; i < 3; i++) {
+            float vip = Vt[i * 3 + p];
+            float viq = Vt[i * 3 + q];
+            Vt[i * 3 + p] = vip * c - viq * s_val;
+            Vt[i * 3 + q] = vip * s_val + viq * c;
+        }
+    }
+
+    /* 提取奇异值（对角线元素）并归一化符号 */
+    for (int i = 0; i < 3; i++) {
+        S[i] = fabsf(A[i * 3 + i]);
+        if (A[i * 3 + i] < 0.0f) {
+            for (int j = 0; j < 3; j++) U[j * 3 + i] = -U[j * 3 + i];
+        }
+    }
+
+    /* 按奇异值降序排列 */
+    for (int i = 0; i < 2; i++) {
+        int max_idx = i;
+        for (int j = i + 1; j < 3; j++) {
+            if (S[j] > S[max_idx]) max_idx = j;
+        }
+        if (max_idx != i) {
+            float tmp = S[i]; S[i] = S[max_idx]; S[max_idx] = tmp;
+            for (int j = 0; j < 3; j++) {
+                float tu = U[j * 3 + i]; U[j * 3 + i] = U[j * 3 + max_idx]; U[j * 3 + max_idx] = tu;
+                float tv = Vt[i * 3 + j]; Vt[i * 3 + j] = Vt[max_idx * 3 + j]; Vt[max_idx * 3 + j] = tv;
+            }
+        }
+    }
+
+    /* 确保U的行列式为正 */
+    float detU = U[0] * (U[4] * U[8] - U[5] * U[7])
+               - U[1] * (U[3] * U[8] - U[5] * U[6])
+               + U[2] * (U[3] * U[7] - U[4] * U[6]);
+    if (detU < 0.0f) {
+        for (int j = 0; j < 3; j++) U[j * 3 + 2] = -U[j * 3 + 2];
+        S[2] = -S[2];
+        for (int j = 0; j < 3; j++) Vt[2 * 3 + j] = -Vt[2 * 3 + j];
+    }
+}
+
+/* 矩阵乘法: C = A * B (均为3x3) */
+static void mat3_mul(const float A[9], const float B[9], float C[9]) {
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            C[i * 3 + j] = A[i * 3 + 0] * B[0 * 3 + j]
+                         + A[i * 3 + 1] * B[1 * 3 + j]
+                         + A[i * 3 + 2] * B[2 * 3 + j];
+        }
+    }
+}
+
+/* 8点法计算本质矩阵 + RANSAC内点筛选 */
 static int essential_from_points(const float* pts1, const float* pts2,
                                   int n, float E[9], int* inliers,
                                   float threshold) {
     if (n < 8) return 0;
-    float A[9*8];
+
+    /* 构建8点法矩阵 A [8x9] */
+    float A[8 * 9];
     for (int i = 0; i < 8 && i < n; i++) {
-        float x1 = pts1[i*2], y1 = pts1[i*2+1];
-        float x2 = pts2[i*2], y2 = pts2[i*2+1];
-        A[i*9+0] = x1*x2; A[i*9+1] = x1*y2; A[i*9+2] = x1;
-        A[i*9+3] = y1*x2; A[i*9+4] = y1*y2; A[i*9+5] = y1;
-        A[i*9+6] = x2;    A[i*9+7] = y2;     A[i*9+8] = 1;
+        float x1 = pts1[i * 2],     y1 = pts1[i * 2 + 1];
+        float x2 = pts2[i * 2],     y2 = pts2[i * 2 + 1];
+        A[i * 9 + 0] = x1 * x2; A[i * 9 + 1] = x1 * y2; A[i * 9 + 2] = x1;
+        A[i * 9 + 3] = y1 * x2; A[i * 9 + 4] = y1 * y2; A[i * 9 + 5] = y1;
+        A[i * 9 + 6] = x2;      A[i * 9 + 7] = y2;       A[i * 9 + 8] = 1.0f;
     }
-    float U[64] = {0}, VT[64] = {0};
-    (void)VT;
+
+    /* 构建 A^T * A [9x9] 用于求最小特征值对应的特征向量（零空间） */
+    float AtA[81] = {0};
     for (int i = 0; i < 8; i++) {
         for (int j = 0; j < 9; j++) {
-            U[i*8 + j] = A[i*9 + j];
-        }
-    }
-    for (int i = 0; i < 8; i++) {
-        float max_val = 0;
-        int max_idx = i;
-        for (int k = i; k < 8; k++) {
-            float val = 0;
-            for (int j = i; j < 9; j++) val += fabsf(U[k*8 + j]);
-            if (val > max_val) { max_val = val; max_idx = k; }
-        }
-        if (max_idx != i) {
-            for (int j = 0; j < 9; j++) {
-                float tmp = U[i*8 + j];
-                U[i*8 + j] = U[max_idx*8 + j];
-                U[max_idx*8 + j] = tmp;
+            for (int k = 0; k < 9; k++) {
+                AtA[j * 9 + k] += A[i * 9 + j] * A[i * 9 + k];
             }
         }
-        float pivot = U[i*8 + i];
-        if (fabsf(pivot) < 1e-12f) continue;
-        for (int k = i+1; k < 8; k++) {
-            float factor = U[k*8 + i] / pivot;
-            for (int j = i; j < 9; j++) U[k*8 + j] -= factor * U[i*8 + j];
-        }
     }
-    for (int i = 0; i < 9; i++) E[i] = U[7*8 + i];
 
-    float norm_e = 0;
-    for (int i = 0; i < 9; i++) norm_e += E[i]*E[i];
+    /* 幂迭代法求最小特征值对应的特征向量（用逆迭代）
+     * QL迭代求所有特征值更可靠，这里使用QR分解近似最小特征向量 */
+    float v[9] = {1,1,1,1,1,1,1,1,1};
+    /* 逆迭代: 解 (AtA + eps*I)*v_new = v */
+    for (int iter = 0; iter < 20; iter++) {
+        /* 高斯消元求解 (AtA + 1e-6*I) * v_new = v */
+        float M[81];
+        memcpy(M, AtA, 81 * sizeof(float));
+        for (int i = 0; i < 9; i++) M[i * 9 + i] += 1e-6f;
+
+        float b[9];
+        memcpy(b, v, 9 * sizeof(float));
+
+        /* 部分主元高斯消元 */
+        for (int col = 0; col < 9; col++) {
+            float max_val = fabsf(M[col * 9 + col]);
+            int max_row = col;
+            for (int row = col + 1; row < 9; row++) {
+                if (fabsf(M[row * 9 + col]) > max_val) {
+                    max_val = fabsf(M[row * 9 + col]);
+                    max_row = row;
+                }
+            }
+            if (max_val < 1e-12f) continue;
+            if (max_row != col) {
+                for (int j = 0; j < 9; j++) {
+                    float t = M[col * 9 + j]; M[col * 9 + j] = M[max_row * 9 + j]; M[max_row * 9 + j] = t;
+                }
+                float t = b[col]; b[col] = b[max_row]; b[max_row] = t;
+            }
+            float pivot = M[col * 9 + col];
+            for (int row = col + 1; row < 9; row++) {
+                float factor = M[row * 9 + col] / pivot;
+                for (int j = col; j < 9; j++) M[row * 9 + j] -= factor * M[col * 9 + j];
+                b[row] -= factor * b[col];
+            }
+        }
+        /* 回代 */
+        for (int i = 8; i >= 0; i--) {
+            float sum = b[i];
+            for (int j = i + 1; j < 9; j++) sum -= M[i * 9 + j] * v[j];
+            v[i] = (fabsf(M[i * 9 + i]) > 1e-12f) ? sum / M[i * 9 + i] : 0.0f;
+        }
+        /* 归一化 */
+        float nv = 0.0f;
+        for (int i = 0; i < 9; i++) nv += v[i] * v[i];
+        nv = sqrtf(nv);
+        if (nv > 0.0f) for (int i = 0; i < 9; i++) v[i] /= nv;
+    }
+
+    for (int i = 0; i < 9; i++) E[i] = v[i];
+
+    /* 强制本质矩阵约束：E = U * diag(1,1,0) * V^T */
+    float Ue[9], Se[3], Vte[9];
+    svd3_jacobi(E, Ue, Se, Vte);
+
+    /* 本质矩阵的两个非零奇异值应相等，取平均值 */
+    float s_avg = (Se[0] + Se[1]) * 0.5f;
+    float Se_corrected[3] = {s_avg, s_avg, 0.0f};
+
+    /* 重建: E = U * diag(s_avg, s_avg, 0) * V^T */
+    float US[9] = {0};
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            US[i * 3 + j] = Ue[i * 3 + j] * Se_corrected[j];
+    mat3_mul(US, Vte, E);
+
+    /* 归一化 */
+    float norm_e = 0.0f;
+    for (int i = 0; i < 9; i++) norm_e += E[i] * E[i];
     norm_e = sqrtf(norm_e);
-    if (norm_e > 0) for (int i = 0; i < 9; i++) E[i] /= norm_e;
+    if (norm_e > 0.0f) for (int i = 0; i < 9; i++) E[i] /= norm_e;
 
-    float Ue[9], Ve[9], Se[3];
-    float ET[9], EET[9];
-    memcpy(ET, E, 9 * sizeof(float));
-    mat3_transpose(E, ET);
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            EET[i*3+j] = 0;
-            for (int k = 0; k < 3; k++) EET[i*3+j] += E[i*3+k] * ET[k*3+j];
-        }
-    }
-    for (int i = 0; i < 9; i++) Ue[i] = (float)((i%4==0)?1:0);
-    Se[0]=1.0f; Se[1]=1.0f; Se[2]=0.0f;
-    for (int i = 0; i < 9; i++) Ve[i] = (float)((i%4==0)?1:0);
-
+    /* 计算内点 */
     int inlier_count = 0;
     for (int i = 0; i < n; i++) {
-        float p1[3] = {pts1[i*2], pts1[i*2+1], 1.0f};
-        float p2[3] = {pts2[i*2], pts2[i*2+1], 1.0f};
+        float p1[3] = {pts1[i * 2], pts1[i * 2 + 1], 1.0f};
+        float p2[3] = {pts2[i * 2], pts2[i * 2 + 1], 1.0f};
         float Ep1[3];
         mat3_vec3_mul(E, p1, Ep1);
-        float err = fabsf(p2[0]*Ep1[0] + p2[1]*Ep1[1] + p2[2]*Ep1[2]);
-        if (inliers) inliers[i] = (err < threshold) ? 1 : 0;
-        if (err < threshold) inlier_count++;
+        float err = fabsf(p2[0] * Ep1[0] + p2[1] * Ep1[1] + p2[2] * Ep1[2]);
+
+        /* Sampson距离近似 */
+        float denom = Ep1[0] * Ep1[0] + Ep1[1] * Ep1[1] + 1e-10f;
+        float sampson_err = err * err / denom;
+
+        int is_inlier = (sampson_err < threshold * threshold) ? 1 : 0;
+        if (inliers) inliers[i] = is_inlier;
+        if (is_inlier) inlier_count++;
     }
     return inlier_count;
 }
 
+/* 从本质矩阵恢复旋转R和平移t（使用真正的SVD分解） */
 static void decompose_essential(const float E[9], float R[9], float t[3]) {
-    float U[9], VT[9], S[3];
-    memcpy(U, E, 9 * sizeof(float));
-    for (int i = 0; i < 9; i++) VT[i] = (float)((i%4==0)?1:0);
-    S[0] = 1.0f; S[1] = 1.0f; S[2] = 0.0f;
+    float U[9], Vt[9], S[3];
+    svd3_jacobi(E, U, S, Vt);
 
-    float W[9] = {0,-1,0, 1,0,0, 0,0,1};
-    float Wt[9] = {0,1,0, -1,0,0, 0,0,1};
-    float UW[9], UWt[9], UWVt[9];
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            UW[i*3+j] = 0; UWt[i*3+j] = 0;
-            for (int k = 0; k < 3; k++) {
-                UW[i*3+j] += U[i*3+k] * W[k*3+j];
-                UWt[i*3+j] += U[i*3+k] * Wt[k*3+j];
-            }
-        }
+    /* V = Vt^T */
+    float V[9];
+    mat3_transpose(Vt, V);
+
+    /* W 矩阵: 绕Z轴旋转90度 */
+    float W[9] = {0, -1, 0,
+                   1,  0, 0,
+                   0,  0, 1};
+    float Wt[9] = {0,  1, 0,
+                   -1, 0, 0,
+                    0, 0, 1};
+
+    /* 两种可能的旋转: R1 = U * W * Vt, R2 = U * Wt * Vt */
+    float UW[9], R1[9], R2[9];
+    mat3_mul(U, W, UW);
+    mat3_mul(UW, Vt, R1);
+    mat3_mul(U, Wt, UW);
+    mat3_mul(UW, Vt, R2);
+
+    /* 选择行列式为正的旋转矩阵 */
+    float detR1 = R1[0] * (R1[4] * R1[8] - R1[5] * R1[7])
+                - R1[1] * (R1[3] * R1[8] - R1[5] * R1[6])
+                + R1[2] * (R1[3] * R1[7] - R1[4] * R1[6]);
+
+    if (detR1 > 0.0f) {
+        memcpy(R, R1, 9 * sizeof(float));
+        /* 平移向量 = U的第三列 */
+        t[0] = U[2];
+        t[1] = U[5];
+        t[2] = U[8];
+    } else {
+        memcpy(R, R2, 9 * sizeof(float));
+        t[0] = -U[2];
+        t[1] = -U[5];
+        t[2] = -U[8];
     }
-    mat3_transpose(VT, VT);
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            UWVt[i*3+j] = 0;
-            for (int k = 0; k < 3; k++) UWVt[i*3+j] += UW[i*3+k] * VT[k*3+j];
-        }
+
+    /* 归一化平移向量 */
+    float tnorm = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+    if (tnorm > 1e-10f) {
+        t[0] /= tnorm;
+        t[1] /= tnorm;
+        t[2] /= tnorm;
     }
-    memcpy(R, UWVt, 9 * sizeof(float));
-    t[0] = U[2]; t[1] = U[5]; t[2] = U[8];
-    float tnorm = sqrtf(t[0]*t[0] + t[1]*t[1] + t[2]*t[2]);
-    if (tnorm > 0) { t[0]/=tnorm; t[1]/=tnorm; t[2]/=tnorm; }
 }
 
 VisualOdometry* visual_odometry_create(const CameraIntrinsics* intrinsics) {

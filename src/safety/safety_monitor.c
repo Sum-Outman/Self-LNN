@@ -323,18 +323,38 @@ int safety_approve_action(SafetyMonitor* monitor, const char* action_type, const
     if (!monitor || !action_type) return -1;
     (void)params;
 
+    /* K-修复: 双缓冲预检查 — 先在锁内获取快照，再验证，消除TOCTOU窗口 */
     SAFETY_LOCK(monitor);
-    if (monitor->emergency_stop_active) {
+    int emergency_stop_pre = monitor->emergency_stop_active;
+    if (emergency_stop_pre) {
         SAFETY_UNLOCK(monitor);
         return -1;
     }
-    int emergency_stop = monitor->emergency_stop_active;
     float safety_score = monitor->stats.current_safety_score;
     int audit_avail = (monitor->audit_count < monitor->audit_capacity);
     SAFETY_UNLOCK(monitor);
 
+    /* 主安全检查（hold期间的状态） */
     SafetyLevel level = safety_check_status(monitor);
-    if (emergency_stop || level >= SAFETY_LEVEL_CRITICAL) return -1;
+
+    /* K-修复: 二次验证锁 — 确保主检查和执行之间无紧急停止信号 */
+    SAFETY_LOCK(monitor);
+    int emergency_stop_post = monitor->emergency_stop_active;
+    if (emergency_stop_post || level >= SAFETY_LEVEL_CRITICAL) {
+        if (emergency_stop_post && audit_avail && monitor->audit_count < monitor->audit_capacity) {
+            AuditLogEntry* entry = &monitor->audit_log[monitor->audit_count++];
+            entry->timestamp = time(NULL);
+            entry->event_type = SAFETY_EVENT_BOUNDARY_CROSSING;
+            entry->level = SAFETY_LEVEL_EMERGENCY;
+            snprintf(entry->action, sizeof(entry->action), "动作审批: %s (紧急停止拦截)", action_type);
+            snprintf(entry->decision, sizeof(entry->decision), "拒绝");
+            snprintf(entry->result, sizeof(entry->result), "二次验证触发紧急停止");
+            entry->confidence = 1.0f;
+        }
+        SAFETY_UNLOCK(monitor);
+        return -1;
+    }
+    SAFETY_UNLOCK(monitor);
 
     if (audit_avail) {
         SAFETY_LOCK(monitor);

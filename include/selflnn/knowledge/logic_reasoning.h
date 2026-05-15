@@ -433,6 +433,24 @@ int logic_reasoning_engine_nonmonotonic_remove_fact(ReasoningEngine* engine, con
 LogicInferenceResult* logic_reasoning_engine_nonmonotonic_reason(ReasoningEngine* engine,
                                                                   const char** facts, size_t fact_count);
 
+/* K-修复: 归纳推理——从具体实例泛化出一般规则 */
+ReasoningEngine* logic_reasoning_induction(ReasoningEngine* engine,
+    const char** instances, size_t instance_count, int max_rules);
+
+/* K-修复: 溯因推理——从结果推导最可能原因 */
+char* logic_reasoning_abduction(ReasoningEngine* engine,
+    const char* observation, float* confidence_out);
+
+/* K-修复: 类比推理——A:B :: C:D 结构映射 */
+char* logic_reasoning_analogy(ReasoningEngine* engine,
+    const char* source_a, const char* source_b,
+    const char* target_c, float* confidence_out);
+
+/* K-修复: CDCL SAT求解器（冲突驱动子句学习） */
+int logic_reasoning_cdcl_solve(int num_vars,
+    const int** clauses, const int* clause_sizes, int num_clauses,
+    int* solution);
+
 #ifdef __cplusplus
 }
 #endif

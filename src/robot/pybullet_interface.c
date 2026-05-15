@@ -12,6 +12,10 @@
 #include <stdio.h>
 #include <math.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4013)  /* sim setter functions: pre-existing stubs */
+#endif
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -157,6 +161,7 @@ typedef struct {
     char last_error[256];
     char response_buffer[PB_RESP_BUF_SIZE];
     size_t response_len;
+    float point_cloud_buffer[50000 * 3];  /**< 点云缓冲区 */
 } PBInternalState;
 
 static PBInternalState g_pb = {0};

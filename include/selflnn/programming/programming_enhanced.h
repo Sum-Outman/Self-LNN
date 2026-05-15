@@ -137,15 +137,19 @@ typedef enum {
     PENH_PERF_INEFFICIENT_ALGORITHM,
     PENH_PERF_EXCESSIVE_INLINING,
     PENH_PERF_LARGE_STACK_FRAME,
+    PENH_PERF_SMALL_IO,
+    PENH_PERF_CACHE_MISS,
+    PENH_PERF_EXCESSIVE_COPYING,
+    PENH_PERF_BRANCH_MISPREDICT,
     PENH_PERF_CUSTOM
 } PenhPerfIssueType;
 
-/* 性能问题 */
 typedef struct {
     int issue_id;
     PenhPerfIssueType type;
     char function_name[128];
     int line;
+    int source_line;
     char description[256];
     float severity;
     char recommendation[256];

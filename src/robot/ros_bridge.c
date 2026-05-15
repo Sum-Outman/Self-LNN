@@ -12,6 +12,20 @@
 
 #include "selflnn/robot/ros_bridge.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/memory_utils.h"
+
+#ifdef _WIN32
+static void* memmem(const void* haystack, size_t haystack_len,
+    const void* needle, size_t needle_len) {
+    if (!haystack || !needle || haystack_len < needle_len) return NULL;
+    const unsigned char* h = (const unsigned char*)haystack;
+    const unsigned char* n = (const unsigned char*)needle;
+    for (size_t i = 0; i <= haystack_len - needle_len; i++) {
+        if (memcmp(h + i, n, needle_len) == 0) return (void*)(h + i);
+    }
+    return NULL;
+}
+#endif
 
 #include <stdlib.h>
 #include <string.h>

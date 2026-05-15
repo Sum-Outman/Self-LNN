@@ -703,30 +703,29 @@ static char recognize_character_by_features(const float* features, int num_featu
         return '?';
     }
     
-    // 步骤4：统计加权投票结果
-    float char_scores[256] = {0}; // 假设ASCII字符集
+    /* K-修复: 将投票数组从char[256]扩展为unsigned short[65536]支持双字节字符 */
+    float char_scores[65536] = {0};
     for (int i = 0; i < valid_neighbors; i++) {
-        int char_idx = (int)candidate_chars[i];
-        if (char_idx >= 0 && char_idx < 256) {
+        int char_idx = (int)(unsigned char)candidate_chars[i];
+        if (char_idx >= 0 && char_idx < 65536) {
             char_scores[char_idx] += candidate_weights[i];
         }
     }
     
-    // 找到最高得分的字符
+    /* 找到最高得分的字符 */
     char best_char = '?';
     float best_score = 0.0f;
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < 65536; i++) {
         if (char_scores[i] > best_score) {
             best_score = char_scores[i];
-            best_char = (char)i;
+            best_char = (char)(unsigned char)i;
         }
     }
     
-    // 步骤5：置信度检查（拒识机制）
-    // 计算top-2得分比率，如果太低则拒识
+    /* 步骤5：置信度检查（拒识机制） */
     float second_best_score = 0.0f;
-    for (int i = 0; i < 256; i++) {
-        if (i != (int)best_char && char_scores[i] > second_best_score) {
+    for (int i = 0; i < 65536; i++) {
+        if ((char)(unsigned char)i != best_char && char_scores[i] > second_best_score) {
             second_best_score = char_scores[i];
         }
     }
@@ -1674,7 +1673,7 @@ static int load_char_templates(OcrProcessor* processor) {
         if (fread(name_buf, 1, name_len, fp) != name_len) break;
         name_buf[name_len] = '\0';
 
-        /* CharTemplate.character 只存单个字符，取标签首字符 */
+        /* K-修复: 使用unsigned char正确处理首字节，便于在投票数组(65536)中索引 */
         tmpl->character = (name_buf[0] != '\0') ? name_buf[0] : '?';
 
         tmpl->num_features = (int)feature_dim;

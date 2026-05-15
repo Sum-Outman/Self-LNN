@@ -24,7 +24,6 @@ class VoiceCommandSystem {
             if (this.onError) this.onError(msg);
         }.bind(this);
 
-        this.isRecording = false;
         this.isProcessing = false;
 
         this.onRecordingStart = null;
@@ -364,8 +363,9 @@ class CommandEngine {
             'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : null,
             'start_evolution': async () => window.SelfLnnApi.startEvolution ? await window.SelfLnnApi.startEvolution(params) : null,
             'stop_evolution': async () => {
-                if (window.SelfLnnApi.startEvolution) {
-                    return await window.SelfLnnApi.startEvolution({ action: 'stop' });
+                // 使用 toggleAgiFeature 正确关闭自我演化功能，而非错误调用 startEvolution
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
+                    return await window.SelfLnnApi.toggleAgiFeature('self_evolution', false);
                 }
                 return null;
             },

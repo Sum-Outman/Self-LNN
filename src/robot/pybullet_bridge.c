@@ -17,6 +17,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#define usleep(us) Sleep(((us) + 999) / 1000)
 #else
 #include <unistd.h>
 #include <sys/wait.h>

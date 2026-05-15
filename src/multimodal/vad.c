@@ -1824,4 +1824,10 @@ int vad_segment_audio(VadProcessor* processor,
     
     return 0;
 }
+
+VadConfig vad_get_default_config(void) {
+    VadConfig config;
+    vad_default_config(&config);
+    return config;
+}
                 

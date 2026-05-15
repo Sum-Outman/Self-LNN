@@ -1392,4 +1392,77 @@ int dialogue_gen_set_knowledge_base(DialogueGenerator* gen,
     return 0;
 }
 
+/* ============================================================================
+ * K-修复: 对话策略TD学习训练函数
+ * 状态价值V(s)的时序差分学习 + 策略梯度更新
+ * ============================================================================ */
+
+int dialogue_deep_train_policy(DialogueProcessor* dp,
+    const float* state_features, const float* next_state_features,
+    float reward, int num_states, float learning_rate) {
+    if (!dp || !state_features || !next_state_features || num_states <= 0 || learning_rate <= 0.0f) return -1;
+
+    if (!dp->deep_initialized) return -1;
+
+    DialogueBeliefState* belief = dp->deep_belief;
+    DialoguePolicy* policy = dp->deep_policy;
+    if (!belief || !policy) return -1;
+
+    const int state_dim = (int)belief->belief_state_size;
+    if (state_dim <= 0 || state_dim > 256 || !policy->policy_weights) return -1;
+
+    float* v_current = (float*)safe_calloc((size_t)num_states, sizeof(float));
+    float* v_next    = (float*)safe_calloc((size_t)num_states, sizeof(float));
+    float* td_error  = (float*)safe_calloc((size_t)num_states, sizeof(float));
+    if (!v_current || !v_next || !td_error) {
+        safe_free((void**)&v_current); safe_free((void**)&v_next); safe_free((void**)&td_error);
+        return -1;
+    }
+
+    /* 前向: 评估当前和下一状态的价值 */
+    float gamma = 0.95f;
+    for (int i = 0; i < num_states; i++) {
+        float dot_cur = 0.0f, dot_next = 0.0f;
+        for (int d = 0; d < state_dim && d < (int)policy->policy_hidden_size && d < (int)belief->belief_state_size; d++) {
+            dot_cur  += state_features[i * state_dim + d] * policy->policy_weights[d];
+            dot_next += next_state_features[i * state_dim + d] * policy->policy_weights[d];
+        }
+        v_current[i] = tanhf(dot_cur);
+        v_next[i]    = tanhf(dot_next);
+    }
+
+    /* TD误差: δ = r + γ·V(s') - V(s) */
+    float total_loss = 0.0f;
+    for (int i = 0; i < num_states; i++) {
+        td_error[i] = reward + gamma * v_next[i] - v_current[i];
+        total_loss += td_error[i] * td_error[i];
+    }
+    total_loss /= (float)num_states;
+
+    /* 策略梯度更新: Δθ = α·δ·∇_θ V(s) */
+    float grad_clip = 1.0f;
+    for (int d = 0; d < state_dim && d < (int)policy->policy_hidden_size && d < 256; d++) {
+        float grad_sum = 0.0f;
+        for (int i = 0; i < num_states; i++) {
+            float dv = (1.0f - v_current[i] * v_current[i]) * state_features[i * state_dim + d];
+            grad_sum += td_error[i] * dv;
+        }
+        grad_sum /= (float)num_states;
+
+        if (fabsf(grad_sum) > grad_clip) {
+            grad_sum = (grad_sum > 0) ? grad_clip : -grad_clip;
+        }
+
+        policy->policy_weights[d] += learning_rate * grad_sum;
+    }
+
+    /* 更新信念状态统计 */
+    belief->belief_entropy = sqrtf(total_loss + 1e-8f);
+    belief->state_coherence = 1.0f / (1.0f + total_loss);
+    belief->belief_change_rate = total_loss;
+
+    safe_free((void**)&v_current); safe_free((void**)&v_next); safe_free((void**)&td_error);
+    return 0;
+}
+
 
