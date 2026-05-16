@@ -181,6 +181,7 @@ typedef struct {
     float aabb_max[3];
     float inv_mass;
     float inv_inertia[3];
+    float radius;              /* 碰撞体包围球半径（传感器模拟用） */
     int active;
 } SimCollisionObject;
 

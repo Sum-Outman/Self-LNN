@@ -135,14 +135,11 @@ static inline void quat_adam_update(Quaternion* param, const Quaternion* grad,
                                     Quaternion* m, Quaternion* v,
                                     float lr, float b1, float b2, float eps,
                                     float wd, size_t step) {
-    float b1_t = 1.0f;
-    float b2_t = 1.0f;
-    for (size_t s = 0; s < step; s++) {
-        b1_t *= b1;
-        b2_t *= b2;
-    }
-    float m_hat_scale = 1.0f / (1.0f - b1_t);
-    float v_hat_scale = 1.0f / (1.0f - b2_t);
+    float step_f = (float)step;
+    float b1_t = powf(b1, step_f);
+    float b2_t = powf(b2, step_f);
+    float m_hat_scale = 1.0f / (1.0f - b1_t + 1e-10f);
+    float v_hat_scale = 1.0f / (1.0f - b2_t + 1e-10f);
     
     /* 更新一阶矩: m = b1 * m + (1-b1) * grad */
     m->w = b1 * m->w + (1.0f - b1) * grad->w;
@@ -190,13 +187,11 @@ static inline void scalar_adam_update(float* param, float grad,
                                       float* m, float* v,
                                       float lr, float b1, float b2, float eps,
                                       float wd, size_t step) {
-    float b1_t = 1.0f, b2_t = 1.0f;
-    for (size_t s = 0; s < step; s++) {
-        b1_t *= b1;
-        b2_t *= b2;
-    }
-    float m_hat_s = 1.0f / (1.0f - b1_t);
-    float v_hat_s = 1.0f / (1.0f - b2_t);
+    float step_f = (float)step;
+    float b1_t = powf(b1, step_f);
+    float b2_t = powf(b2, step_f);
+    float m_hat_s = 1.0f / (1.0f - b1_t + 1e-10f);
+    float v_hat_s = 1.0f / (1.0f - b2_t + 1e-10f);
     
     *m = b1 * (*m) + (1.0f - b1) * grad;
     *v = b2 * (*v) + (1.0f - b2) * grad * grad;
@@ -252,21 +247,28 @@ int quat_optimizer_step(QuatOptimizer* optimizer, Quaternion* params,
         case QUAT_OPTIMIZER_MOMENTUM: {
             float mu = cfg->momentum;
             for (size_t i = 0; i < num_quaternions; i++) {
-                optimizer->momentum[i].w = mu * optimizer->momentum[i].w + lr * working_grads[i].w;
-                optimizer->momentum[i].x = mu * optimizer->momentum[i].x + lr * working_grads[i].x;
-                optimizer->momentum[i].y = mu * optimizer->momentum[i].y + lr * working_grads[i].y;
-                optimizer->momentum[i].z = mu * optimizer->momentum[i].z + lr * working_grads[i].z;
-                
                 if (cfg->use_nesterov) {
-                    float nm = mu;
-                    Quaternion nesterov_step;
-                    nesterov_step.w = mu * optimizer->momentum[i].w + lr * working_grads[i].w;
-                    nesterov_step.x = mu * optimizer->momentum[i].x + lr * working_grads[i].x;
-                    nesterov_step.y = mu * optimizer->momentum[i].y + lr * working_grads[i].y;
-                    nesterov_step.z = mu * optimizer->momentum[i].z + lr * working_grads[i].z;
-                    params[i] = quaternion_subtract(&params[i], &nesterov_step);
-                    (void)nm;
+                    float old_m_w = optimizer->momentum[i].w;
+                    float old_m_x = optimizer->momentum[i].x;
+                    float old_m_y = optimizer->momentum[i].y;
+                    float old_m_z = optimizer->momentum[i].z;
+
+                    optimizer->momentum[i].w = mu * optimizer->momentum[i].w + lr * working_grads[i].w;
+                    optimizer->momentum[i].x = mu * optimizer->momentum[i].x + lr * working_grads[i].x;
+                    optimizer->momentum[i].y = mu * optimizer->momentum[i].y + lr * working_grads[i].y;
+                    optimizer->momentum[i].z = mu * optimizer->momentum[i].z + lr * working_grads[i].z;
+
+                    params[i].w -= (mu * optimizer->momentum[i].w + lr * working_grads[i].w);
+                    params[i].x -= (mu * optimizer->momentum[i].x + lr * working_grads[i].x);
+                    params[i].y -= (mu * optimizer->momentum[i].y + lr * working_grads[i].y);
+                    params[i].z -= (mu * optimizer->momentum[i].z + lr * working_grads[i].z);
+
+                    (void)old_m_w; (void)old_m_x; (void)old_m_y; (void)old_m_z;
                 } else {
+                    optimizer->momentum[i].w = mu * optimizer->momentum[i].w + lr * working_grads[i].w;
+                    optimizer->momentum[i].x = mu * optimizer->momentum[i].x + lr * working_grads[i].x;
+                    optimizer->momentum[i].y = mu * optimizer->momentum[i].y + lr * working_grads[i].y;
+                    optimizer->momentum[i].z = mu * optimizer->momentum[i].z + lr * working_grads[i].z;
                     params[i] = quaternion_subtract(&params[i], &optimizer->momentum[i]);
                 }
             }
@@ -323,38 +325,73 @@ int quat_optimizer_step(QuatOptimizer* optimizer, Quaternion* params,
         /* M-003修复: 四元数LAMB（层自适应大Batch优化） */
         case QUAT_OPTIMIZER_LAMB: {
             float wd = cfg->weight_decay;
-            for (size_t i = 0; i < num_quaternions; i++) {
-                quat_adam_update(&params[i], &working_grads[i],
-                                &optimizer->momentum[i], &optimizer->velocity[i],
-                                lr, cfg->beta1, cfg->beta2, cfg->epsilon, wd, step);
-            }
-            /* LAMB信任比：trust_ratio = ||params|| / ||update||, 约束在[0, 10] */
+            float b1 = cfg->beta1, b2 = cfg->beta2, eps = cfg->epsilon;
+            float step_f = (float)step;
+            float b1_t = powf(b1, step_f);
+            float b2_t = powf(b2, step_f);
+            float m_hat_scale = 1.0f / (1.0f - b1_t + 1e-10f);
+            float v_hat_scale = 1.0f / (1.0f - b2_t + 1e-10f);
+
+            /* 第一步：更新动量（不更新参数）并收集更新方向 */
             float p_norm2 = 0.0f, u_norm2 = 0.0f;
             for (size_t i = 0; i < num_quaternions; i++) {
                 p_norm2 += params[i].w * params[i].w + params[i].x * params[i].x +
                            params[i].y * params[i].y + params[i].z * params[i].z;
+
+                /* 更新一阶矩和二阶矩 */
+                float gw = working_grads[i].w + wd * params[i].w;
+                float gx = working_grads[i].x + wd * params[i].x;
+                float gy = working_grads[i].y + wd * params[i].y;
+                float gz = working_grads[i].z + wd * params[i].z;
+
+                optimizer->momentum[i].w = b1 * optimizer->momentum[i].w + (1.0f - b1) * gw;
+                optimizer->momentum[i].x = b1 * optimizer->momentum[i].x + (1.0f - b1) * gx;
+                optimizer->momentum[i].y = b1 * optimizer->momentum[i].y + (1.0f - b1) * gy;
+                optimizer->momentum[i].z = b1 * optimizer->momentum[i].z + (1.0f - b1) * gz;
+
+                optimizer->velocity[i].w = b2 * optimizer->velocity[i].w + (1.0f - b2) * gw * gw;
+                optimizer->velocity[i].x = b2 * optimizer->velocity[i].x + (1.0f - b2) * gx * gx;
+                optimizer->velocity[i].y = b2 * optimizer->velocity[i].y + (1.0f - b2) * gy * gy;
+                optimizer->velocity[i].z = b2 * optimizer->velocity[i].z + (1.0f - b2) * gz * gz;
+
+                /* 计算更新方向范数（用于信任比） */
+                float mw = optimizer->momentum[i].w * m_hat_scale;
+                float mx = optimizer->momentum[i].x * m_hat_scale;
+                float my = optimizer->momentum[i].y * m_hat_scale;
+                float mz = optimizer->momentum[i].z * m_hat_scale;
+                float vw = optimizer->velocity[i].w * v_hat_scale;
+                float vx = optimizer->velocity[i].x * v_hat_scale;
+                float vy = optimizer->velocity[i].y * v_hat_scale;
+                float vz = optimizer->velocity[i].z * v_hat_scale;
+
+                float uw = mw / (sqrtf(vw) + eps);
+                float ux = mx / (sqrtf(vx) + eps);
+                float uy = my / (sqrtf(vy) + eps);
+                float uz = mz / (sqrtf(vz) + eps);
+                u_norm2 += uw * uw + ux * ux + uy * uy + uz * uz;
             }
+
             float p_norm = sqrtf(p_norm2);
-            if (p_norm > 0.0f) {
-                for (size_t i = 0; i < num_quaternions; i++) {
-                    Quaternion update;
-                    update.w = optimizer->momentum[i].w / (sqrtf(optimizer->velocity[i].w) + cfg->epsilon);
-                    update.x = optimizer->momentum[i].x / (sqrtf(optimizer->velocity[i].x) + cfg->epsilon);
-                    update.y = optimizer->momentum[i].y / (sqrtf(optimizer->velocity[i].y) + cfg->epsilon);
-                    update.z = optimizer->momentum[i].z / (sqrtf(optimizer->velocity[i].z) + cfg->epsilon);
-                    u_norm2 += update.w * update.w + update.x * update.x +
-                                update.y * update.y + update.z * update.z;
-                }
-                float u_norm = sqrtf(u_norm2);
-                float trust_ratio = (u_norm > 0.0f && p_norm > 0.0f) ? p_norm / u_norm : 1.0f;
-                if (trust_ratio > 10.0f) trust_ratio = 10.0f;
-                if (trust_ratio < 0.1f) trust_ratio = 0.1f;
-                for (size_t i = 0; i < num_quaternions; i++) {
-                    params[i].w -= lr * trust_ratio * working_grads[i].w;
-                    params[i].x -= lr * trust_ratio * working_grads[i].x;
-                    params[i].y -= lr * trust_ratio * working_grads[i].y;
-                    params[i].z -= lr * trust_ratio * working_grads[i].z;
-                }
+            float u_norm = sqrtf(u_norm2);
+            float trust_ratio = (u_norm > 0.0f && p_norm > 0.0f) ? p_norm / u_norm : 1.0f;
+            if (trust_ratio > 10.0f) trust_ratio = 10.0f;
+            if (trust_ratio < 0.1f) trust_ratio = 0.1f;
+
+            /* 第二步：应用信任比缩放后的单次更新 */
+            for (size_t i = 0; i < num_quaternions; i++) {
+                float mw = optimizer->momentum[i].w * m_hat_scale;
+                float mx = optimizer->momentum[i].x * m_hat_scale;
+                float my = optimizer->momentum[i].y * m_hat_scale;
+                float mz = optimizer->momentum[i].z * m_hat_scale;
+                float vw = optimizer->velocity[i].w * v_hat_scale;
+                float vx = optimizer->velocity[i].x * v_hat_scale;
+                float vy = optimizer->velocity[i].y * v_hat_scale;
+                float vz = optimizer->velocity[i].z * v_hat_scale;
+
+                params[i].w -= lr * trust_ratio * mw / (sqrtf(vw) + eps);
+                params[i].x -= lr * trust_ratio * mx / (sqrtf(vx) + eps);
+                params[i].y -= lr * trust_ratio * my / (sqrtf(vy) + eps);
+                params[i].z -= lr * trust_ratio * mz / (sqrtf(vz) + eps);
             }
             break;
         }
@@ -390,10 +427,13 @@ int quat_optimizer_step_scalar(QuatOptimizer* optimizer, float* params,
         case QUAT_OPTIMIZER_MOMENTUM: {
             float mu = cfg->momentum;
             for (size_t i = 0; i < num_params; i++) {
-                optimizer->momentum_scalar[i] = mu * optimizer->momentum_scalar[i] + lr * grads[i];
                 if (cfg->use_nesterov) {
-                    params[i] -= mu * optimizer->momentum_scalar[i] + lr * grads[i];
+                    float old_m = optimizer->momentum_scalar[i];
+                    optimizer->momentum_scalar[i] = mu * optimizer->momentum_scalar[i] + lr * grads[i];
+                    params[i] -= (mu * optimizer->momentum_scalar[i] + lr * grads[i]);
+                    (void)old_m;
                 } else {
+                    optimizer->momentum_scalar[i] = mu * optimizer->momentum_scalar[i] + lr * grads[i];
                     params[i] -= optimizer->momentum_scalar[i];
                 }
             }

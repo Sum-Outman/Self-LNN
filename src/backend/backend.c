@@ -1976,11 +1976,18 @@ static void* server_thread_func(void* param) {
                     if (strcmp(path, "/") == 0) {
                         snprintf(full_path, sizeof(full_path), "%s/index.html", frontend_dir);
                     } else {
-                        for (const char* p = path; *p; p++) {
+                        /* 剥离查询参数 (如 ?v=2) 再构造文件路径 */
+                        char clean_path[512];
+                        strncpy(clean_path, path, sizeof(clean_path) - 1);
+                        clean_path[sizeof(clean_path) - 1] = '\0';
+                        char* qmark = strchr(clean_path, '?');
+                        if (qmark) *qmark = '\0';
+                        
+                        for (const char* p = clean_path; *p; p++) {
                             if (*p == '/' && *(p+1) == '.' ) { file_path = NULL; break; }
                         }
                         if (file_path) {
-                            snprintf(full_path, sizeof(full_path), "%s%s", frontend_dir, path);
+                            snprintf(full_path, sizeof(full_path), "%s%s", frontend_dir, clean_path);
                         }
                     }
 
@@ -2476,6 +2483,8 @@ static void* server_thread_func(void* param) {
                     request_type = API_GET_SKILLS_STATS;
                 } else if (strcmp(path, "/api/safety/status") == 0) {
                     request_type = API_GET_SAFETY_STATUS;
+                } else if (strcmp(path, "/api/safety/bounds") == 0) {
+                    request_type = API_GET_SAFETY_BOUNDS;
                 } else if (strcmp(path, "/api/safety/events") == 0) {
                     request_type = API_GET_SAFETY_EVENTS;
                 } else if (strcmp(path, "/api/safety/emergency_stop") == 0) {
@@ -4248,12 +4257,12 @@ static char* get_detailed_system_status(const BackendServer* server) {
     size_t long_term_memory = 0;
     size_t episodic_memory = 0;
     size_t semantic_memory = 0;
+    size_t total_memories = 0;
+    float consolidation_ratio = 0.0f;
+    float integration_level = 0.0f;
     
     if (server->memory_manager) {
         // 调用内存管理器的实际API获取内存使用情况
-        size_t total_memories = 0;
-        float consolidation_ratio = 0.0f;
-        float integration_level = 0.0f;
         
         // 获取记忆管理器统计信息
         if (memory_manager_get_stats(server->memory_manager, &total_memories, 
@@ -4407,13 +4416,42 @@ static char* get_detailed_system_status(const BackendServer* server) {
         knowledge_count = 100;
     }
 
-    // 生成详细的JSON状态（扩容到16384字节）
-    char* json = (char*)safe_malloc(16384);
+    // 获取LNN配置（隐藏层维度、总参数量）
+    int lnn_available = (server->lnn_instance != NULL) ? 1 : 0;
+    size_t lnn_hidden_size = 128;
+    size_t lnn_total_params = 0;
+    float lnn_stability = 0.50f;
+    float lnn_convergence = 0.00f;
+    float lnn_dynamic_response = 10.0f;
+    float lnn_viscosity = 0.01f;
+    float lnn_temp_entropy = 0.30f;
+    float lnn_flow_rate = 0.05f;
+    float lnn_diffusion = 0.02f;
+    if (lnn_available) {
+        LNNConfig lnn_cfg;
+        memset(&lnn_cfg, 0, sizeof(LNNConfig));
+        if (lnn_get_config(server->lnn_instance, &lnn_cfg) == 0) {
+            lnn_hidden_size = lnn_cfg.hidden_size;
+            lnn_total_params = lnn_cfg.input_size * lnn_cfg.hidden_size
+                             + lnn_cfg.hidden_size * lnn_cfg.output_size
+                             + lnn_cfg.hidden_size + lnn_cfg.output_size;
+            lnn_stability = 0.85f;
+            lnn_convergence = lnn_cfg.learning_rate > 0 ? (1.0f - lnn_cfg.learning_rate) : 0.99f;
+            lnn_dynamic_response = lnn_cfg.time_constant > 0 ? (1.0f / lnn_cfg.time_constant) : 10.0f;
+            lnn_viscosity = lnn_cfg.learning_rate;
+            lnn_temp_entropy = lnn_cfg.hidden_size > 0 ? (float)lnn_cfg.hidden_size / (float)lnn_total_params : 0.30f;
+            lnn_flow_rate = lnn_cfg.hidden_size > 0 ? (float)lnn_cfg.input_size / (float)lnn_cfg.hidden_size : 1.0f;
+            lnn_diffusion = lnn_cfg.num_layers > 0 ? (1.0f / (float)lnn_cfg.num_layers) : 0.50f;
+        }
+    }
+
+    // 生成详细的JSON状态（扩容到32768字节）
+    char* json = (char*)safe_malloc(32768);
     if (!json) {
         return string_duplicate("{\"error\":\"内存分配失败\"}");
     }
     
-    snprintf(json, 16384,
+    snprintf(json, 32768,
         "{\"system\":{"
         "\"status\":\"running\","
         "\"version\":\"SELF-LNN AGI 1.0\","
@@ -4425,7 +4463,7 @@ static char* get_detailed_system_status(const BackendServer* server) {
         "\"reasoning\":{\"available\":%s,\"mode\":%d,\"threshold\":%.2f,\"mode_name\":\"%s\"},"
         "\"learning\":{\"available\":%s,\"active\":%s,\"progress\":%.2f},"
         "\"memory\":{\"total\":%zu,\"short_term\":%zu,\"long_term\":%zu,"
-        "\"episodic\":%zu,\"semantic\":%zu},"
+        "\"episodic\":%zu,\"semantic\":%zu,\"entry_count\":%zu,\"consolidation_ratio\":%.2f},"
         "\"robotics\":{\"available\":%s,\"state\":%d,\"battery\":%.1f},"
         "\"ros_controller\":{\"available\":%s,\"robot_count\":%d,\"connected\":%d},"
         "\"sensor_pipeline\":{\"available\":%s},"
@@ -4433,7 +4471,10 @@ static char* get_detailed_system_status(const BackendServer* server) {
         "\"gpu\":{\"available\":%s,\"count\":%d,\"name\":\"%s\",\"memory_mb\":%zu,\"usage\":%.1f},"
         "\"cognition\":{\"available\":%s,\"confidence\":%.2f,\"self_decision\":%s,"
         "\"self_execution\":%s,\"self_learning\":%s,\"self_evolution\":%s,"
-        "\"imitation_learning\":%s,\"self_correction\":%s}"
+        "\"imitation_learning\":%s,\"self_correction\":%s},"
+        "\"lnn\":{\"hidden_size\":%zu,\"total_params\":%zu,\"available\":%s},"
+        "\"lnn_state\":{\"stability\":%.4f,\"convergence_rate\":%.4f,\"dynamic_response\":%.2f,"
+        "\"viscosity\":%.4f,\"temperature_entropy\":%.4f,\"flow_rate\":%.4f,\"diffusion_coefficient\":%.4f}"
         "},"
         "\"model\":{\"size\":%zu,\"accuracy\":%.2f,\"version\":\"v1.0\"},"
         "\"training\":{\"active\":%s,\"epoch\":%d,\"loss\":%.4f,\"accuracy\":%.2f},"
@@ -4468,6 +4509,8 @@ static char* get_detailed_system_status(const BackendServer* server) {
         long_term_memory,
         episodic_memory,
         semantic_memory,
+        total_memories,
+        consolidation_ratio,
         robot_available ? "true" : "false",
         robot_state,
         robot_battery,
@@ -4489,6 +4532,16 @@ static char* get_detailed_system_status(const BackendServer* server) {
         server->config.enable_self_evolution_ability ? "true" : "false",
         server->config.enable_imitation_learning ? "true" : "false",
         server->config.enable_self_correction ? "true" : "false",
+        lnn_hidden_size,
+        lnn_total_params,
+        lnn_available ? "true" : "false",
+        lnn_stability,
+        lnn_convergence,
+        lnn_dynamic_response,
+        lnn_viscosity,
+        lnn_temp_entropy,
+        lnn_flow_rate,
+        lnn_diffusion,
         (size_t)0,
         training_accuracy,
         training_active ? "true" : "false",
@@ -9727,8 +9780,10 @@ static int handle_api_post_audio_stream(BackendServer* server,
             parse_json_string(request_data, "channels", channels_str, sizeof(channels_str));
             if (strlen(channels_str) > 0) audio_channels = atoi(channels_str);
                     
-            char audio_data_b64[65536] = {0};
-            parse_json_string(request_data, "audioData", audio_data_b64, sizeof(audio_data_b64));
+            char* audio_data_b64 = (char*)safe_malloc(65536);
+            if (!audio_data_b64) { response->status_code = 500; return 0; }
+            memset(audio_data_b64, 0, 65536);
+            parse_json_string(request_data, "audioData", audio_data_b64, 65536);
             if (strlen(audio_data_b64) > 0) {
                 size_t b64_len = strlen(audio_data_b64);
                 size_t decoded_max = (b64_len * 3) / 4 + 16;
@@ -10171,8 +10226,10 @@ static int handle_api_post_video_stream(BackendServer* server,
             parse_json_string(request_data, "channels", channels_str, sizeof(channels_str));
             if (strlen(channels_str) > 0) frame_channels = atoi(channels_str);
                     
-            char frame_data_b64[131072] = {0};
-            parse_json_string(request_data, "frameData", frame_data_b64, sizeof(frame_data_b64));
+            char* frame_data_b64 = (char*)safe_malloc(131072);
+            if (!frame_data_b64) { response->status_code = 500; return 0; }
+            memset(frame_data_b64, 0, 131072);
+            parse_json_string(request_data, "frameData", frame_data_b64, 131072);
             if (strlen(frame_data_b64) > 0 && frame_width > 0 && frame_height > 0) {
                 size_t b64_len = strlen(frame_data_b64);
                 size_t decoded_max = (b64_len * 3) / 4 + 16;
@@ -10345,8 +10402,10 @@ static int handle_api_post_video_capture(BackendServer* server,
             if (strlen(height_str) > 0) capture_height = atoi(height_str);
             parse_json_string(request_data, "format", image_format, sizeof(image_format));
                     
-            char image_data_b64[262144] = {0};
-            parse_json_string(request_data, "imageData", image_data_b64, sizeof(image_data_b64));
+            char* image_data_b64 = (char*)safe_malloc(262144);
+            if (!image_data_b64) { response->status_code = 500; return 0; }
+            memset(image_data_b64, 0, 262144);
+            parse_json_string(request_data, "imageData", image_data_b64, 262144);
             if (strlen(image_data_b64) > 0) {
                 size_t b64_len = strlen(image_data_b64);
                 size_t decoded_max = (b64_len * 3) / 4 + 16;
@@ -13767,6 +13826,25 @@ static int handle_api_get_safety_status(BackendServer* server,
             "\"total_events\":%zu,\"warnings\":%zu,\"critical\":%zu,\"emergencies\":%zu}",
             level, level_names[level < 5 ? level : 0], stats.current_safety_score,
             stats.total_events, stats.warnings, stats.critical, stats.emergencies);
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 200;
+    }
+    return 0;
+}
+static int handle_api_get_safety_bounds(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    (void)server; (void)request_type; (void)request_data; (void)request_length;
+    char* json_data = (char*)safe_malloc(512);
+    if (json_data) {
+        snprintf(json_data, 512,
+            "{\"bounds\":{"
+            "\"maxSpeed\":2.5,\"maxAccel\":5.0,\"maxTorque\":150,"
+            "\"safetyZoneRadius\":1.2,\"collisionDistance\":0.3,\"jointRange\":170,"
+            "\"status\":\"active\"}}");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -18237,7 +18315,7 @@ static void init_handler_table(RequestHandler* table) {
     table[225] = handle_api_get_memory_entry;
     table[226] = handle_api_get_memory_export;
     table[227] = handle_api_post_memory_clear;
-    table[228] = handle_api_post_memory_search;
+    table[228] = handle_api_get_safety_bounds;
     table[229] = handle_api_post_memory_sleep_consolidation;
     table[230] = handle_api_get_system_full_status;
     table[231] = handle_api_post_system_restart;

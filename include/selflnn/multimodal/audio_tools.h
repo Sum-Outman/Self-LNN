@@ -15,6 +15,7 @@
 #define SELFLNN_AUDIO_TOOLS_H
 
 #include <stddef.h>
+#include "selflnn/core/platform_types.h"
 
 #ifdef __cplusplus
 extern "C" {

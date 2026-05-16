@@ -202,6 +202,7 @@ target_link_libraries(selflnn PRIVATE
 
 if(MSVC)
     target_link_libraries(selflnn PRIVATE uuid ole32 mmdevapi propsys winmm)
+    set_target_properties(selflnn PROPERTIES LINK_FLAGS "/STACK:67108864")
 endif()
 
 target_include_directories(selflnn PRIVATE

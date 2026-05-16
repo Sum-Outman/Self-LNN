@@ -141,6 +141,7 @@ typedef struct {
     int tpu_available;
     int initialized;
     int device_count;
+    void* tpu_session;          /* TPU推理会话句柄 */
     char error_string[512];
 } TpuState;
 
@@ -293,7 +294,7 @@ static GpuKernel* tpu_backend_kernel_create(GpuContext* context, const char* ker
     k->arg_values = (void**)safe_calloc(8, sizeof(void*));
     k->arg_sizes = (size_t*)safe_calloc(8, sizeof(size_t));
     k->arg_count = 0;
-    k->max_args = 8;
+    k->arg_capacity = 8;
     k->is_compiled = 0;
     k->global_work_size[0] = 1; k->global_work_size[1] = 1; k->global_work_size[2] = 1;
     k->local_work_size[0] = 1; k->local_work_size[1] = 1; k->local_work_size[2] = 1;
@@ -305,7 +306,7 @@ static void tpu_backend_kernel_free(GpuKernel* kernel) {
     safe_free((void**)&kernel->kernel_source);
     safe_free((void**)&kernel->kernel_name);
     if (kernel->arg_values) {
-        for (size_t i = 0; i < kernel->arg_count && i < kernel->max_args; i++) {
+        for (size_t i = 0; i < kernel->arg_count && i < kernel->arg_capacity; i++) {
             safe_free((void**)&kernel->arg_values[i]);
         }
         safe_free((void**)&kernel->arg_values);
@@ -315,8 +316,8 @@ static void tpu_backend_kernel_free(GpuKernel* kernel) {
 }
 static int tpu_backend_kernel_set_arg(GpuKernel* kernel, int idx, size_t sz, const void* val) {
     if (!kernel || idx < 0) return -1;
-    if ((size_t)idx >= kernel->max_args) {
-        size_t new_max = kernel->max_args * 2;
+    if ((size_t)idx >= kernel->arg_capacity) {
+        size_t new_max = kernel->arg_capacity * 2;
         void** new_vals = (void**)safe_calloc(new_max, sizeof(void*));
         size_t* new_sizes = (size_t*)safe_calloc(new_max, sizeof(size_t));
         if (!new_vals || !new_sizes) {
@@ -331,7 +332,7 @@ static int tpu_backend_kernel_set_arg(GpuKernel* kernel, int idx, size_t sz, con
         safe_free((void**)&kernel->arg_sizes);
         kernel->arg_values = new_vals;
         kernel->arg_sizes = new_sizes;
-        kernel->max_args = new_max;
+        kernel->arg_capacity = new_max;
     }
     if (kernel->arg_values[idx]) safe_free((void**)&kernel->arg_values[idx]);
     if (sz > 0 && val) {

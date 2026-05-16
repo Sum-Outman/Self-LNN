@@ -2428,10 +2428,19 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         
         // 时间常数梯度（如果启用自适应时间常数）
         if (cell->use_adaptive_tau) {
-            // ∂h_new/∂τ = h_old * (Δt/τ²) * exp(-Δt/τ) - driver * (Δt/τ²) * exp(-Δt/τ)
-            // = (Δt/τ²) * exp(-Δt/τ) * (h_old - driver)
-            float dtau_coeff = (delta_t / (tau * tau)) * exp_term;
-            float dL_dtau = dL_dh_new * dtau_coeff * (prev_state[i] - driver);
+            /* P0-002修复：数值稳定的时间常数梯度计算
+             * ∂h_new/∂τ = h_old * (Δt/τ²) * exp(-Δt/τ) - driver * (Δt/τ²) * exp(-Δt/τ)
+             * = (Δt/τ²) * exp(-Δt/τ) * (h_old - driver)
+             * 
+             * 当 τ 很小时，Δt/τ² 极大而 exp(-Δt/τ) 极小，乘积容易下溢/上溢。
+             * 使用钳位保护数值稳定性。 */
+            float safe_dt = fmaxf(delta_t, 1e-8f);
+            float safe_tau_sq = fmaxf(tau * tau, 1e-12f);
+            float ratio = safe_dt / safe_tau_sq;
+            float stable_coeff = fminf(ratio, 1e6f) * exp_term;
+            float dL_dtau = dL_dh_new * stable_coeff * (prev_state[i] - driver);
+            /* 梯度钳位防止爆炸 */
+            if (fabsf(dL_dtau) > 1e4f) dL_dtau = copysignf(1e4f, dL_dtau);
             cell->time_constant_grad[i] = dL_dtau;
         }
     }

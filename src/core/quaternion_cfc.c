@@ -57,6 +57,15 @@ struct QuaternionCfcCell {
     Quaternion last_input;           /**< 上一次输入 */
     Quaternion integrated_error;     /**< 积分误差 */
     Quaternion adaptive_params;      /**< 自适应参数 */
+
+    /* ODE求解器配置（P0-005修复：创建时未拷贝的字段） */
+    int solver_type;                 /**< ODE求解器类型 */
+    float adaptive_rel_tol;          /**< 相对容限 */
+    float adaptive_abs_tol;          /**< 绝对容限 */
+    float min_dt;                    /**< 最小步长 */
+    float max_dt;                    /**< 最大步长 */
+    int use_cfc_closed_form;         /**< 是否使用闭式解 */
+    float current_input_drive[4];    /**< RHS回调用：当前输入驱动信号（P0-003修复） */
     
     // 性能统计
     uint64_t update_count;           /**< 更新次数 */
@@ -89,6 +98,14 @@ QuaternionCfcCell* quaternion_cfc_cell_create(const QuaternionCfcConfig* config)
     cell->noise_std = config->noise_std;
     cell->enable_adaptation = config->enable_adaptation;
     cell->enable_evolution = config->enable_evolution;
+
+    /* P0-005修复：拷贝所有配置字段 */
+    cell->solver_type = config->solver_type;
+    cell->adaptive_rel_tol = config->adaptive_rel_tol;
+    cell->adaptive_abs_tol = config->adaptive_abs_tol;
+    cell->min_dt = config->min_dt;
+    cell->max_dt = config->max_dt;
+    cell->use_cfc_closed_form = config->use_cfc_closed_form;
     
     cell->last_input.w = 0.0f; cell->last_input.x = 0.0f; cell->last_input.y = 0.0f; cell->last_input.z = 0.0f;
     cell->integrated_error.w = 0.0f; cell->integrated_error.x = 0.0f; cell->integrated_error.y = 0.0f; cell->integrated_error.z = 0.0f;
@@ -137,14 +154,9 @@ int quaternion_cfc_closed_form_update(Quaternion* state, const Quaternion* drive
     state->y = state->y * exp_y + (1.0f - exp_y) * drive->y;
     state->z = state->z * exp_z + (1.0f - exp_z) * drive->z;
 
-    float norm = sqrtf(state->w * state->w + state->x * state->x +
-                       state->y * state->y + state->z * state->z);
-    if (norm > 1e-8f) {
-        float inv = 1.0f / norm;
-        state->w *= inv; state->x *= inv;
-        state->y *= inv; state->z *= inv;
-    }
-
+    /* P0-006修复：不强制归一化，保留状态幅度信息。
+     * 仅当状态范数极小（接近退化）时对旋转分量做保护性归一化。
+     * 调用方（如quaternion_cfc_solve_with_solver）在需要时自行归一化。 */
     if (output) *output = *state;
     return 0;
 }
@@ -388,10 +400,9 @@ int quaternion_cfc_cell_reset(QuaternionCfcCell* cell) {
 /**
  * @brief 四元数CfC ODE右端项（RHS）回调函数
  *
- * 计算分量独立CfC导数:
- *   dq_i/dt = -q_i/τ_i + q_i  (自我驱动CfC动力学)
- *
- * 不主动保持范数——求解后由 quaternion_cfc_solve_with_solver 重归一化。
+ * P0-003修复：真正的输入驱动四元数动力学
+ * dq/dt = -q⊙τ⁻¹ + input_drive
+ * 其中 τ⁻¹ 是每分量独立的时间常数倒数，input_drive 是输入增益后的外部信号
  */
 int quaternion_cfc_rhs(float t, const float* q, float* dqdt, void* ctx) {
     (void)t;
@@ -404,22 +415,28 @@ int quaternion_cfc_rhs(float t, const float* q, float* dqdt, void* ctx) {
     float inv_tau_y = 1.0f / fmaxf(cell->time_constant.y, 1e-6f);
     float inv_tau_z = 1.0f / fmaxf(cell->time_constant.z, 1e-6f);
 
-    dqdt[0] = -q[0] * inv_tau_w + q[0];
-    dqdt[1] = -q[1] * inv_tau_x + q[1];
-    dqdt[2] = -q[2] * inv_tau_y + q[2];
-    dqdt[3] = -q[3] * inv_tau_z + q[3];
+    /* P0-003修复：真正的输入驱动CfC动力学 dq/dt = -q/τ + drive */
+    dqdt[0] = -q[0] * inv_tau_w + cell->current_input_drive[0];
+    dqdt[1] = -q[1] * inv_tau_x + cell->current_input_drive[1];
+    dqdt[2] = -q[2] * inv_tau_y + cell->current_input_drive[2];
+    dqdt[3] = -q[3] * inv_tau_z + cell->current_input_drive[3];
 
     return 0;
 }
 
 /**
  * @brief 增强四元数ODE求解器（支持所有求解器类型）
+ *
+ * P0-004修复：drive从输入计算，不再直接拷贝状态
+ * P0-003修复：将输入驱动存入cell->current_input_drive供RHS使用
  */
 int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
                                       int input_dim, int solver_type, float dt,
                                       float* quat_output, int* steps_taken) {
     if (!qcfc_cell || !quat_input || !quat_output) return -1;
     if (steps_taken) *steps_taken = 0;
+
+    QuaternionCfcCell* cell = (QuaternionCfcCell*)qcfc_cell;
 
     int n_quat = input_dim / 4;
     if (n_quat < 1) n_quat = 1;
@@ -429,6 +446,25 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
 
     memcpy(state, quat_input, (size_t)(n_quat * 4) * sizeof(float));
 
+    /* P0-004修复：计算输入驱动 = input_gain ⊗ input + feedback_gain ⊗ state */
+    /* 对第一个四元数分量计算驱动（多四元数情况用相同方式） */
+    float drive[4];
+    {
+        Quaternion in_q = {quat_input[0], quat_input[1], quat_input[2], quat_input[3]};
+        Quaternion in_drive = quaternion_multiply(&cell->input_gain, &in_q);
+        Quaternion fb_drive = quaternion_multiply(&cell->feedback_gain, (Quaternion*)state);
+        drive[0] = in_drive.w + fb_drive.w;
+        drive[1] = in_drive.x + fb_drive.x;
+        drive[2] = in_drive.y + fb_drive.y;
+        drive[3] = in_drive.z + fb_drive.z;
+    }
+
+    /* 将驱动存入cell供RHS回调使用 */
+    cell->current_input_drive[0] = drive[0];
+    cell->current_input_drive[1] = drive[1];
+    cell->current_input_drive[2] = drive[2];
+    cell->current_input_drive[3] = drive[3];
+
     float h = dt > 0.0f ? dt : 0.01f;
     int ret = 0;
     int steps = 1;
@@ -436,13 +472,12 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
     switch (solver_type) {
         case 0: {
             /* CfC闭式解：逐四元数应用 closed-form update */
-            QuaternionCfcCell* cell = (QuaternionCfcCell*)qcfc_cell;
             for (int qi = 0; qi < n_quat; qi++) {
                 float* qs = state + qi * 4;
                 Quaternion q = {qs[0], qs[1], qs[2], qs[3]};
-                Quaternion drive = {qs[0], qs[1], qs[2], qs[3]};
-                quaternion_cfc_closed_form_update(&q, &drive,
-                                                   qi == 0 ? &cell->time_constant : &cell->time_constant,
+                Quaternion dr = {drive[0], drive[1], drive[2], drive[3]};
+                quaternion_cfc_closed_form_update(&q, &dr,
+                                                   &cell->time_constant,
                                                    h, NULL);
                 qs[0] = q.w; qs[1] = q.x; qs[2] = q.y; qs[3] = q.z;
             }
@@ -485,8 +520,8 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
 
             float h_actual = 0.0f;
             DP54Config dp_cfg = ode_dp54_default_config();
-            dp_cfg.rel_tolerance = 1e-4f;
-            dp_cfg.abs_tolerance = 1e-6f;
+            dp_cfg.rel_tolerance = cell->adaptive_rel_tol > 0.0f ? cell->adaptive_rel_tol : 1e-4f;
+            dp_cfg.abs_tolerance = cell->adaptive_abs_tol > 0.0f ? cell->adaptive_abs_tol : 1e-6f;
 
             ret = ode_dp54_solve(state, 0.0f, h, quaternion_cfc_rhs, qcfc_cell,
                                  n, &dp_cfg, workspace, &h_actual, &steps);
@@ -524,8 +559,8 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
 
             float h_actual = 0.0f;
             RosenbrockConfig rb_cfg = ode_rosenbrock_default_config();
-            rb_cfg.rel_tolerance = 1e-4f;
-            rb_cfg.abs_tolerance = 1e-6f;
+            rb_cfg.rel_tolerance = cell->adaptive_rel_tol > 0.0f ? cell->adaptive_rel_tol : 1e-4f;
+            rb_cfg.abs_tolerance = cell->adaptive_abs_tol > 0.0f ? cell->adaptive_abs_tol : 1e-6f;
 
             ret = ode_rosenbrock_solve(state, 0.0f, h, quaternion_cfc_rhs, qcfc_cell,
                                        n, &rb_cfg, workspace, &h_actual, &steps);
@@ -554,8 +589,8 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
 
             float h_actual = 0.0f;
             BDF2Config bdf2_cfg = ode_bdf2_default_config();
-            bdf2_cfg.rel_tolerance = 1e-4f;
-            bdf2_cfg.abs_tolerance = 1e-6f;
+            bdf2_cfg.rel_tolerance = cell->adaptive_rel_tol > 0.0f ? cell->adaptive_rel_tol : 1e-4f;
+            bdf2_cfg.abs_tolerance = cell->adaptive_abs_tol > 0.0f ? cell->adaptive_abs_tol : 1e-6f;
 
             ret = ode_bdf2_solve(state, 0.0f, h, quaternion_cfc_rhs, qcfc_cell,
                                  n, &bdf2_cfg, workspace, &h_actual, &steps);
@@ -564,13 +599,12 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
         }
         default: {
             /* 默认：CfC闭式解 */
-            QuaternionCfcCell* cell = (QuaternionCfcCell*)qcfc_cell;
             for (int qi = 0; qi < n_quat; qi++) {
                 float* qs = state + qi * 4;
                 Quaternion q = {qs[0], qs[1], qs[2], qs[3]};
-                Quaternion drive = {qs[0], qs[1], qs[2], qs[3]};
-                quaternion_cfc_closed_form_update(&q, &drive,
-                                                   qi == 0 ? &cell->time_constant : &cell->time_constant,
+                Quaternion dr = {drive[0], drive[1], drive[2], drive[3]};
+                quaternion_cfc_closed_form_update(&q, &dr,
+                                                   &cell->time_constant,
                                                    h, NULL);
                 qs[0] = q.w; qs[1] = q.x; qs[2] = q.y; qs[3] = q.z;
             }

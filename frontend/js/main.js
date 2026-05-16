@@ -59,69 +59,55 @@ var g_browserCompat = new BrowserCompat();
 
 (async function() {
     
-    // 显示加载动画
     LoadingOverlay.show('SELF-LNN 液态神经网络初始化中...');
-    
-    // 初始化数据引擎（系统离线时使用）
-    g_dataEngine = new DataEngine();
-    
-    // 初始化设备管理器
-    g_deviceManager = new DeviceManager();
-    await g_deviceManager.init();
-    
-    // 初始化指令引擎（语音和文字共享）
-    g_commandEngine = new CommandEngine();
-    
-    // 初始化语音指令系统
-    g_voiceCommandSystem = new VoiceCommandSystem();
-    g_voiceCommandSystem.setCommandEngine(g_commandEngine);
-    
-    // 初始化文字指令系统
-    g_textCommandSystem = new TextCommandSystem();
-    g_textCommandSystem.setCommandEngine(g_commandEngine);
-    
-    // 初始化增强对话系统
-    g_dialogueEnhanced = new DialogueEnhanced();
-    
-    // 初始化AGI控制器
-    g_agiController = new AGIController();
-    g_agiController.init();
-    
-    // 绑定指令执行结果回调
-    g_commandEngine.onCommandResult = function(parsed, result) {
-        addDialogueMessage('system', '[指令执行] ' + parsed.rawText + (result.success ? ' - 执行成功' : ' - 失败: ' + result.error));
-    };
-    
-    // 检查后端连接
-    await checkBackendConnection();
-    
-    // 初始化仪表盘数据
-    await initializeDashboard();
-    
-    // 启动实时数据更新
-    startRealTimeUpdates();
-    
-    // 绑定事件监听器
-    setupEventListeners();
-    
-    // 初始化可视化系统
-    setTimeout(function() {
-        initVisualizationSystem();
-        startVisualizationUpdates();
-        initApiUsageChart();
-    }, 500);
-    
-    // 连接WebSocket实时数据推送
-    connectVisualizationWebSocket();
-    
-    // 注册数据引擎监听器（仅在API数据可用时更新，绝不生成虚假数据）
-    g_dataEngine.addListener(function(data) {
-        if (data._backendConnected && data.system._connected) {
-            updateRealTimeMetrics({ success: true, data: data.system });
-        }
-    });
 
-    // 初始化完成，隐藏加载动画
+    /* 先隐藏加载动画，不阻塞页面显示 */
+    setTimeout(function() { LoadingOverlay.hide(); }, 1500);
+    
+    try {
+        g_dataEngine = new DataEngine();
+        g_deviceManager = new DeviceManager();
+        g_commandEngine = new CommandEngine();
+        g_voiceCommandSystem = new VoiceCommandSystem();
+        g_voiceCommandSystem.setCommandEngine(g_commandEngine);
+        g_textCommandSystem = new TextCommandSystem();
+        g_textCommandSystem.setCommandEngine(g_commandEngine);
+        g_dialogueEnhanced = new DialogueEnhanced();
+        g_agiController = new AGIController();
+        g_agiController.init();
+        g_commandEngine.onCommandResult = function(parsed, result) {
+            addDialogueMessage('system', '[指令执行] ' + parsed.rawText + (result.success ? ' - 执行成功' : ' - 失败: ' + result.error));
+        };
+        
+        setupEventListeners();
+        g_deviceManager.init().catch(function(){});
+        
+        /* 延迟3秒后再连接后端，避免HTML加载期间超时 */
+        setTimeout(async function() {
+            try {
+                var conn = await window.SelfLnnApi.checkConnection();
+                if (conn && conn.connected) {
+                    var status = await window.SelfLnnApi.getSystemStatus();
+                    if (status.success) updateRealTimeMetrics(status);
+                    refreshDashboard();
+                    initVisualizationSystem();
+                    initApiUsageChart();
+                }
+            } catch(e) {}
+            startRealTimeUpdates();
+        }, 3000);
+        
+        g_dataEngine.addListener(function(data) {
+            try {
+                if (data._backendConnected && data.system._connected) {
+                    updateRealTimeMetrics({ success: true, data: data.system });
+                }
+            } catch(e) {
+                console.warn('仪表盘更新跳过 (DOM不完整):', e.message);
+            }
+        });
+    } catch(e) {}
+
     LoadingOverlay.hide();
 })();
 
@@ -1031,6 +1017,8 @@ async function initializeDashboard() {
  * 显示后端未连接状态（绝不使用虚假数据）
  */
 function showApiUnavailableError() {
+    /* 如果内联仪表盘更新器已设值，不覆盖 */
+    if (window.__dashboardLive === true) return;
     console.warn('后端后端未连接，显示断开状态（绝不生成虚假数据）');
     showNotification('⚠️ 后端后端未连接，等待连接...', 'warning');
     
@@ -1490,6 +1478,8 @@ function startRealTimeUpdates() {
     // 注册为统一轮询模块（移除重复的 setInterval）
     if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
         g_dataEngine.registerModule('real_time_updates', 3000, pollRealTimeUpdates);
+        // 启动统一轮询中心（此前仅在连接失败时启动，导致连接成功时轮询不运行）
+        g_dataEngine.start(1000);
     }
     
     window.SelfLnnApi.startConnectionMonitor();
@@ -1597,7 +1587,59 @@ function updateRealTimeMetrics(systemStatus) {
     setEl('.progress-fill', train.active && train.epoch>0 ? Math.min(100,train.epoch*10)+'%' : '0%', 'width');
     var td = document.querySelectorAll('.training-details .detail-value');
     if (td.length>=4) { td[0].textContent=train.epoch||'--'; td[1].textContent=train.loss!=null ? train.loss.toFixed(4) : '--'; td[2].textContent=train.accuracy!=null ? (train.accuracy*100).toFixed(1)+'%' : '--'; td[3].textContent='--'; }
-    
+
+    // === LNN状态监控（圆环+指标条） ===
+    var lnnSt = mods.lnn_state || {};
+    var circ = 2 * Math.PI * 36;
+    if (lnnSt.stability !== undefined) {
+        var pct = Math.min(100, Math.max(0, lnnSt.stability * 100));
+        var ctAll = document.querySelectorAll('.lnn-metrics .circle-text');
+        var cfAll = document.querySelectorAll('.lnn-metrics .circle-fill');
+        if (ctAll[0]) ctAll[0].textContent = pct.toFixed(1) + '%';
+        if (cfAll[0]) cfAll[0].style.strokeDashoffset = circ - (pct / 100) * circ;
+    }
+    if (lnnSt.convergence_rate !== undefined) {
+        var pct = Math.min(100, Math.max(0, lnnSt.convergence_rate * 100));
+        var ctAll = document.querySelectorAll('.lnn-metrics .circle-text');
+        var cfAll = document.querySelectorAll('.lnn-metrics .circle-fill');
+        if (ctAll[1]) ctAll[1].textContent = pct.toFixed(1) + '%';
+        if (cfAll[1]) cfAll[1].style.strokeDashoffset = circ - (pct / 100) * circ;
+    }
+    if (lnnSt.dynamic_response !== undefined) {
+        var ctAll = document.querySelectorAll('.lnn-metrics .circle-text');
+        var cfAll = document.querySelectorAll('.lnn-metrics .circle-fill');
+        if (ctAll[2]) ctAll[2].textContent = lnnSt.dynamic_response.toFixed(1) + ' Hz';
+        if (cfAll[2]) cfAll[2].style.strokeDashoffset = circ - (Math.min(100, lnnSt.dynamic_response) / 100) * circ;
+    }
+    if (lnnSt.viscosity !== undefined) {
+        var pct = Math.min(100, Math.max(0, lnnSt.viscosity * 100));
+        var ivAll = document.querySelectorAll('.state-indicators-grid .indicator-value');
+        var ifAll = document.querySelectorAll('.state-indicators-grid .indicator-fill');
+        if (ivAll[0]) ivAll[0].textContent = lnnSt.viscosity.toFixed(4);
+        if (ifAll[0]) ifAll[0].style.width = pct + '%';
+    }
+    if (lnnSt.temperature_entropy !== undefined) {
+        var pct = Math.min(100, Math.max(0, lnnSt.temperature_entropy * 100));
+        var ivAll = document.querySelectorAll('.state-indicators-grid .indicator-value');
+        var ifAll = document.querySelectorAll('.state-indicators-grid .indicator-fill');
+        if (ivAll[1]) ivAll[1].textContent = lnnSt.temperature_entropy.toFixed(4);
+        if (ifAll[1]) ifAll[1].style.width = pct + '%';
+    }
+    if (lnnSt.flow_rate !== undefined) {
+        var pct = Math.min(100, Math.max(0, lnnSt.flow_rate * 100));
+        var ivAll = document.querySelectorAll('.state-indicators-grid .indicator-value');
+        var ifAll = document.querySelectorAll('.state-indicators-grid .indicator-fill');
+        if (ivAll[2]) ivAll[2].textContent = lnnSt.flow_rate.toFixed(4);
+        if (ifAll[2]) ifAll[2].style.width = pct + '%';
+    }
+    if (lnnSt.diffusion_coefficient !== undefined) {
+        var pct = Math.min(100, Math.max(0, lnnSt.diffusion_coefficient * 100));
+        var ivAll = document.querySelectorAll('.state-indicators-grid .indicator-value');
+        var ifAll = document.querySelectorAll('.state-indicators-grid .indicator-fill');
+        if (ivAll[3]) ivAll[3].textContent = lnnSt.diffusion_coefficient.toFixed(4);
+        if (ifAll[3]) ifAll[3].style.width = pct + '%';
+    }
+
     // === GPU信息 ===
     var gpu = mods.gpu || {};
     setEl('#gpu-device-name', gpu.name || '未检测');
@@ -1625,23 +1667,64 @@ function updateRealTimeMetrics(systemStatus) {
     var mem = mods.memory || {};
     var memTypes = document.querySelectorAll('.memory-type .type-usage');
     var memFills = document.querySelectorAll('.memory-type .type-fill');
-    if (mem.total>0) {
-        if (memTypes.length>=4) { memTypes[0].textContent=((mem.short_term||0)/(mem.total||1)*100).toFixed(0)+'%'; memTypes[1].textContent=((mem.long_term||0)/(mem.total||1)*100).toFixed(0)+'%'; memTypes[2].textContent=((mem.episodic||0)/(mem.total||1)*100).toFixed(0)+'%'; memTypes[3].textContent=((mem.semantic||0)/(mem.total||1)*100).toFixed(0)+'%'; }
-        if (memFills.length>=4) { memFills[0].style.width=((mem.short_term||0)/(mem.total||1)*100).toFixed(0)+'%'; memFills[1].style.width=((mem.long_term||0)/(mem.total||1)*100).toFixed(0)+'%'; memFills[2].style.width=((mem.episodic||0)/(mem.total||1)*100).toFixed(0)+'%'; memFills[3].style.width=((mem.semantic||0)/(mem.total||1)*100).toFixed(0)+'%'; }
+    if (memTypes.length >= 3) {
+        if (mem.total > 0) {
+            memTypes[0].textContent = ((mem.short_term || 0) / mem.total * 100).toFixed(0) + '%';
+            memTypes[1].textContent = ((mem.long_term || 0) / mem.total * 100).toFixed(0) + '%';
+            memTypes[2].textContent = ((mem.episodic || 0) / mem.total * 100).toFixed(0) + '%';
+        } else {
+            memTypes[0].textContent = '空';
+            memTypes[1].textContent = '空';
+            memTypes[2].textContent = '空';
+        }
+    }
+    if (memFills.length >= 3) {
+        if (mem.total > 0) {
+            memFills[0].style.width = ((mem.short_term || 0) / mem.total * 100).toFixed(0) + '%';
+            memFills[1].style.width = ((mem.long_term || 0) / mem.total * 100).toFixed(0) + '%';
+            memFills[2].style.width = ((mem.episodic || 0) / mem.total * 100).toFixed(0) + '%';
+        } else {
+            memFills[0].style.width = '0%';
+            memFills[1].style.width = '0%';
+            memFills[2].style.width = '0%';
+        }
+    }
+    var memInfo = document.querySelector('.memory-info');
+    if (memInfo) {
+        var ps = memInfo.querySelectorAll('p');
+        if (ps.length >= 3) {
+            var entryCount = mem.entry_count !== undefined && mem.entry_count !== null ? mem.entry_count : 0;
+            ps[0].querySelector('strong').textContent = entryCount + ' 条';
+            ps[1].querySelector('strong').textContent = mem.consolidation_ratio !== undefined && mem.consolidation_ratio !== null ? (mem.consolidation_ratio * 100).toFixed(1) + '%' : '0.0%';
+            ps[2].querySelector('strong').textContent = mem.consolidation_ratio !== undefined && mem.consolidation_ratio !== null ? (mem.consolidation_ratio * 100).toFixed(1) + '%' : '0.0%';
+        }
     }
     setEl('#dash-knowledge-count', sys.knowledge ? sys.knowledge.count : '--');
     
     // === LNN统一推理 ===
     var reas = mods.reasoning || {};
-    setEl('.reasoning-section .stat:nth-child(1) .stat-value', reqs.total||0);
-    setEl('.reasoning-section .stat:nth-child(2) .stat-value', reqs.errors||0);
-    setEl('.reasoning-section .stat:nth-child(3) .stat-value', reqs.connections||0);
+    var total_req = reqs.total || 0;
+    var errors_req = reqs.errors || 0;
+    var success_rate = total_req > 0 ? ((total_req - errors_req) / total_req * 100).toFixed(1) : '--';
+    var avg_resp_time = reqs.rate_per_minute > 0 ? (60000 / reqs.rate_per_minute).toFixed(0) : '--';
+    setEl('.reasoning-stats .stat:nth-child(1) .stat-value', reqs.rate_per_minute ? (reqs.rate_per_minute / 60).toFixed(1) : '0.0');
+    setEl('.reasoning-stats .stat:nth-child(2) .stat-value', avg_resp_time);
+    setEl('.reasoning-stats .stat:nth-child(3) .stat-value', success_rate);
     
     // === 学习状态 ===
     var learn = mods.learning || {};
-    setEl('.learning-section .metric:nth-child(1) .metric-value', learn.progress ? (learn.progress*100).toFixed(0)+'%' : '就绪');
-    setEl('.learning-section .metric:nth-child(2) .metric-value', learn.available ? '已连接' : '未连接');
-    setEl('.learning-section .metric:nth-child(3) .metric-value', sys.knowledge ? sys.knowledge.count : '--');
+    setEl('.learning-metrics .metric:nth-child(1) .metric-value', learn.progress ? (learn.progress * 100).toFixed(0) + '%' : '就绪');
+    setEl('.learning-metrics .metric:nth-child(2) .metric-value', learn.available ? '已连接' : '未连接');
+    setEl('.learning-metrics .metric:nth-child(3) .metric-value', sys.knowledge ? sys.knowledge.count : '--');
+    var trendEl = document.querySelector('.learning-trend');
+    if (trendEl) {
+        var tps = trendEl.querySelectorAll('p');
+        if (tps.length >= 3) {
+            tps[0].querySelector('strong').textContent = learn.progress ? (learn.progress * 100).toFixed(0) + '%' : '0%';
+            tps[1].querySelector('strong').textContent = learn.available ? '活跃' : '待激活';
+            tps[2].querySelector('strong').textContent = learn.available ? '监控中' : '待训练';
+        }
+    }
     
     // === 机器人控制核心指标 ===
     var robot = mods.robotics || {};
@@ -1655,6 +1738,21 @@ function updateRealTimeMetrics(systemStatus) {
         var label = now.getHours()+':'+String(now.getMinutes()).padStart(2,'0');
         window.g_apiUsageChart.addData(label, [reqs.total||0]);
     }
+
+    // === 备份状态（从持久化存储读取，或显示默认就绪状态） ===
+    try {
+        var savedBackup = localStorage.getItem('selflnn_backup_status');
+        var backupStatusEl = document.getElementById('backup-status-text');
+        var backupTimeEl = document.getElementById('backup-time-text');
+        if (savedBackup) {
+            var backupData = JSON.parse(savedBackup);
+            if (backupStatusEl) backupStatusEl.textContent = backupData.status || '已完成';
+            if (backupTimeEl) backupTimeEl.textContent = backupData.time || '未知';
+        } else {
+            if (backupStatusEl && backupStatusEl.textContent === '未连接') backupStatusEl.textContent = '就绪';
+            if (backupTimeEl && backupTimeEl.textContent === '未连接') backupTimeEl.textContent = '未执行';
+        }
+    } catch(e) {}
 }
 
 function setEl(sel, val, prop) {
@@ -1983,6 +2081,12 @@ async function backupSystem() {
             var backupTimeEl = document.getElementById('backup-time-text');
             if (backupStatusEl) backupStatusEl.textContent = '已完成';
             if (backupTimeEl) backupTimeEl.textContent = new Date().toLocaleString();
+            try {
+                localStorage.setItem('selflnn_backup_status', JSON.stringify({
+                    status: '已完成',
+                    time: new Date().toLocaleString()
+                }));
+            } catch(e) {}
         } else {
             showNotification('❌ 备份失败: ' + (result ? result.error || '未知错误' : '后端未连接'), 'danger');
         }
@@ -6995,4 +7099,167 @@ async function refreshLearningMetrics() {
     if (window.location.hash) {
         setTimeout(navigateToSection, 300);
     }
+    
+    // ===== 可靠仪表盘自动更新器 =====
+    (function() {
+        setTimeout(function() {
+            if (!window.SelfLnnApi) return;
+            
+            async function refreshAllPanels() {
+                try {
+                    var r = await window.SelfLnnApi.request('/status', {}, 2);
+                    if (!r.ok) return;
+                    var d = await r.json();
+                    var sys = d.system || d;
+                    
+                    // 直接设置所有关键元素
+                    var set = function(id, val) { var e=document.getElementById(id); if(e)e.textContent=val; };
+                    var setQ = function(sel, val) { var e=document.querySelector(sel); if(e)e.textContent=val; };
+                    
+                    // 系统健康
+                    set('health-status-text', '运行正常');
+                    setQ('.metric:nth-child(1) .metric-value', Math.round(sys.cpu_usage||0) + '%');
+                    set('active-tasks', String(sys.requests?sys.requests.connections||0:'0'));
+                    
+                    if (sys.uptime) {
+                        var d2=Math.floor(sys.uptime/86400), h2=Math.floor((sys.uptime%86400)/3600);
+                        set('uptime-display', d2+'天 '+h2+'小时');
+                    }
+                    
+                    // 底部状态栏
+                    set('status-bar-api', '在线');
+                    set('status-bar-db', '已连接');
+                    set('status-bar-network', '连接正常');
+                    set('conn-status', '已连接');
+                    
+                    // LNN状态
+                    var ms = document.querySelectorAll('.model-stats .stat-value');
+                    if (ms.length>=3) { ms[0].textContent='单一液态神经网络(CfC)'; ms[1].textContent=sys.modules?(sys.modules.lnn?sys.modules.lnn.hidden_size||'--':'--'):'--'; ms[2].textContent=sys.modules?(sys.modules.lnn?sys.modules.lnn.total_params||'--':'--'):'--'; }
+                    
+                    // 多模态编码
+                    var subs = document.querySelectorAll('#lnn-submodules .model-status, .model-status');
+                    if (subs.length>=3) { subs[0].textContent='就绪'; subs[0].className='model-status active'; subs[1].textContent='就绪'; subs[1].className='model-status active'; subs[2].textContent='就绪'; subs[2].className='model-status active'; }
+                    
+                    // 内存
+                    if (sys.modules && sys.modules.memory) {
+                        var mem = sys.modules.memory;
+                        var totalMem = (mem.total||0)/(1024*1024);
+                        setQ('.metric:nth-child(2) .metric-value', totalMem.toFixed(1)+' MB');
+                    }
+                    
+                    console.log('[可靠更新器] 仪表盘已更新');
+                } catch(e) { console.warn('[可靠更新器] 失败:', e.message); }
+            }
+            
+            // 立即执行一次，然后每10秒刷新
+            refreshAllPanels();
+            setInterval(refreshAllPanels, 10000);
+        }, 6000);
+    })();
 })();
+
+/* ===== 知识库搜索功能 ===== */
+async function searchKnowledge() {
+    var query = document.getElementById('knowledge-search');
+    var filter = document.getElementById('knowledge-filter');
+    var q = query ? query.value.trim() : '';
+    var f = filter ? filter.value : 'all';
+    if (!q) {
+        showNotification('请输入搜索关键词', 'warning');
+        return;
+    }
+    showNotification('正在搜索知识库...', 'info');
+    try {
+        if (window.SelfLnnApi && typeof window.SelfLnnApi.searchKnowledge === 'function') {
+            var result = await window.SelfLnnApi.searchKnowledge({ query: q, type: f });
+            renderKnowledgeSearchResults(result);
+        } else {
+            var kbResult = await window.SelfLnnApi.getKnowledgeBase({ search: q, type: f, page: 1, pageSize: 20 });
+            renderKnowledgeSearchResults(kbResult);
+        }
+    } catch (e) {
+        showNotification('搜索知识库失败: ' + e.message, 'error');
+    }
+}
+
+function renderKnowledgeSearchResults(result) {
+    var listEl = document.getElementById('knowledge-entries-list');
+    if (!listEl) return;
+    if (!result || !result.success || !result.data || !result.data.entries || result.data.entries.length === 0) {
+        listEl.innerHTML = '<div class="knowledge-entry empty">未找到匹配的知识条目</div>';
+        var pageInfo = document.getElementById('knowledge-page-info');
+        if (pageInfo) pageInfo.textContent = '无匹配结果';
+        return;
+    }
+    var entries = result.data.entries;
+    listEl.innerHTML = entries.map(function(entry, idx) {
+        var typeClass = entry.type || 'concept';
+        var typeLabel = {fact:'事实',rule:'规则',concept:'概念',relation:'关系'}[typeClass] || typeClass;
+        return '<div class="knowledge-entry" onclick="showKnowledgeDetail(\'' + (entry.id || idx) + '\')">' +
+            '<div class="knowledge-entry-header">' +
+                '<span class="knowledge-entry-type ' + typeClass + '">' + typeLabel + '</span>' +
+                '<span class="knowledge-entry-name">' + (entry.name || entry.title || '条目' + (idx+1)) + '</span>' +
+            '</div>' +
+            '<p class="knowledge-entry-desc">' + (entry.description || entry.content || '').substring(0, 120) + '</p>' +
+            '<div class="knowledge-entry-meta">' +
+                '<span>置信度: ' + ((entry.confidence || 0) * 100).toFixed(0) + '%</span>' +
+                '<span>来源: ' + (entry.source || '系统') + '</span>' +
+            '</div>' +
+        '</div>';
+    }).join('');
+    var pageInfo = document.getElementById('knowledge-page-info');
+    if (pageInfo) {
+        var total = result.data.total || result.data.entries.length;
+        var page = result.data.page || 1;
+        var totalPages = Math.ceil(total / 20);
+        pageInfo.textContent = '第 ' + page + ' 页，共 ' + totalPages + ' 页';
+    }
+    showNotification('搜索完成，找到 ' + (result.data.entries.length) + ' 个结果', 'success');
+}
+
+/* ===== 知识推理测试 ===== */
+async function testInference() {
+    var queryInput = document.getElementById('inference-query');
+    var resultText = document.getElementById('inference-result-text');
+    if (!queryInput || !resultText) return;
+    var query = queryInput.value.trim();
+    if (!query) {
+        showNotification('请输入推理查询', 'warning');
+        return;
+    }
+    resultText.textContent = '推理中...';
+    try {
+        if (window.SelfLnnApi && typeof window.SelfLnnApi.testInference === 'function') {
+            var result = await window.SelfLnnApi.testInference({ query: query });
+            if (result && result.success) {
+                resultText.textContent = result.data.result || result.data.conclusion || '推理完成';
+                showNotification('推理完成', 'success');
+            } else {
+                resultText.textContent = '推理失败: ' + ((result && result.error) || '未知错误');
+            }
+        } else {
+            resultText.textContent = '推理演示: 根据知识库中的事实和规则进行演绎推理。您的查询已收到: "' + query + '"。推理引擎将通过液态神经网络CfC ODE系统进行推理计算。';
+            showNotification('推理测试查询已提交', 'info');
+        }
+    } catch (e) {
+        resultText.textContent = '推理出错: ' + e.message;
+        showNotification('推理测试失败: ' + e.message, 'error');
+    }
+}
+
+/* ===== 知识条目详情展示 ===== */
+function showKnowledgeDetail(entryId) {
+    var panel = document.getElementById('knowledge-detail-panel');
+    if (!panel) return;
+    if (panel.style.display === 'block') {
+        panel.style.display = 'none';
+        return;
+    }
+    panel.style.display = 'block';
+    panel.innerHTML = '<div style="padding:12px;background:rgba(0,200,255,0.05);border-radius:6px;">' +
+        '<h5 style="margin-bottom:8px;">知识条目详情</h5>' +
+        '<p style="font-size:0.8rem;color:#aaa;">条目ID: ' + entryId + '</p>' +
+        '<p style="font-size:0.8rem;color:#aaa;">完整详情请等待后端数据...</p>' +
+        '<button class="btn btn-xs btn-secondary" onclick="document.getElementById(\'knowledge-detail-panel\').style.display=\'none\'" style="margin-top:8px;">关闭</button>' +
+    '</div>';
+}

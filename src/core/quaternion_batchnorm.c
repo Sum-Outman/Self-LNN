@@ -59,6 +59,7 @@ struct QuaternionBatchNorm {
     float* saved_var;           /**< 当前批方差 */
     float* saved_std_inv;       /**< 1/sqrt(var + eps) */
     float* saved_normalized;    /**< 归一化后的四元数 */
+    size_t saved_normalized_capacity;  /**< saved_normalized已分配容量(元素数) */
 
     int is_training;            /**< 训练模式标志 */
 };
@@ -137,6 +138,9 @@ QuaternionBatchNorm* quaternion_batchnorm_create(const QuaternionBatchNormConfig
     /* 运行方差初始化为1.0 */
     for (size_t i = 0; i < qsize; i++) layer->running_var[i] = 1.0f;
 
+    /* 初始化容量跟踪 */
+    layer->saved_normalized_capacity = 0;
+
     layer->adam_step = 0;
     return layer;
 }
@@ -176,10 +180,16 @@ int quaternion_batchnorm_forward(QuaternionBatchNorm* layer,
     float momentum = layer->config.momentum;
 
     if (is_training) {
-        /* 分配归一化缓存 */
-        if (!layer->saved_normalized) {
-            layer->saved_normalized = (float*)safe_calloc(batch_size * qsize, sizeof(float));
-            if (!layer->saved_normalized) return -1;
+        /* 分配归一化缓存（支持动态batch_size变化，防止缓冲区溢出） */
+        size_t needed = batch_size * qsize;
+        if (!layer->saved_normalized || layer->saved_normalized_capacity < needed) {
+            safe_free((void**)&layer->saved_normalized);
+            layer->saved_normalized = (float*)safe_calloc(needed, sizeof(float));
+            if (!layer->saved_normalized) {
+                layer->saved_normalized_capacity = 0;
+                return -1;
+            }
+            layer->saved_normalized_capacity = needed;
         }
 
         /* 计算均值（对每个分量(c)在每个特征(f)上取batch平均） */
@@ -389,35 +399,30 @@ int quaternion_batchnorm_backward(QuaternionBatchNorm* layer,
 
     /* 计算输入梯度 */
     if (input_grad) {
-        for (size_t b = 0; b < batch_size; b++) {
-            for (size_t i = 0; i < qsize; i++) {
+        /* 每通道预计算 dvar(∂L/∂σ²) 和 dmean(∂L/∂μ) */
+        for (size_t i = 0; i < qsize; i++) {
+            float std_inv = layer->saved_std_inv[i];
+            float gamma_val = layer->config.use_scale ? layer->gamma[i] : 1.0f;
+
+            float dvar = 0.0f;
+            float dmean_first = 0.0f;
+            for (size_t b = 0; b < batch_size; b++) {
                 float dy = output_grad[b * qsize + i];
-                float std_inv = layer->saved_std_inv[i];
-
-                float gamma_val = layer->config.use_scale ? layer->gamma[i] : 1.0f;
-
-                /* ∂L/∂x_norm = ∂L/∂y * γ */
                 float dx_norm = dy * gamma_val;
-
-                /* ∂L/∂σ² = Σ dx_norm * (x - μ) * (-0.5) * σ^(-3) */
-                float dvar = 0.0f;
-                for (size_t bb = 0; bb < batch_size; bb++) {
-                    float diff = input[bb * qsize + i] - layer->saved_mean[i];
-                    float dvar_term = output_grad[bb * qsize + i] * gamma_val;
-                    dvar += dvar_term * diff * (-0.5f) * std_inv * std_inv * std_inv;
-                }
-
-                /* ∂L/∂μ */
-                float dmean = 0.0f;
-                for (size_t bb = 0; bb < batch_size; bb++) {
-                    float diff = input[bb * qsize + i] - layer->saved_mean[i];
-                    float dvar_term = output_grad[bb * qsize + i] * gamma_val;
-                    dmean += dvar_term * (-std_inv);
-                    dmean += dvar * (-2.0f * diff * inv_n);
-                }
-
-                /* ∂L/∂x = ∂L/∂x_norm * σ^{-1} + 2 * ∂L/∂σ² * (x - μ) / N + ∂L/∂μ / N */
                 float diff = input[b * qsize + i] - layer->saved_mean[i];
+
+                dvar += dx_norm * diff * (-0.5f) * std_inv * std_inv * std_inv;
+                dmean_first += dx_norm * (-std_inv);
+            }
+
+            /* dmean第二项: dvar * Σ(-2*(x_b-μ)/N) = dvar * 0 = 0，直接省略以避免数值噪声 */
+            float dmean = dmean_first;
+
+            for (size_t b = 0; b < batch_size; b++) {
+                float dy = output_grad[b * qsize + i];
+                float dx_norm = dy * gamma_val;
+                float diff = input[b * qsize + i] - layer->saved_mean[i];
+
                 input_grad[b * qsize + i] = dx_norm * std_inv
                                            + 2.0f * dvar * diff * inv_n
                                            + dmean * inv_n;

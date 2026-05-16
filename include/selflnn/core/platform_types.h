@@ -13,6 +13,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* 跨编译器兼容：MSVC 不定义 M_PI/M_E/M_SQRT2 */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#ifndef M_PI_2
+#define M_PI_2 1.57079632679489661923
+#endif
+#ifndef M_E
+#define M_E 2.71828182845904523536
+#endif
+#ifndef M_SQRT2
+#define M_SQRT2 1.41421356237309504880
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

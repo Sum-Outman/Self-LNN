@@ -2401,6 +2401,12 @@ int agi_system_save_state(AGISystem* system, const char* filepath)
     FILE* f = fopen(filepath, "wb");
     if (!f) return -1;
 
+    /* P1-032修复：写入魔数+版本号头部供加载时校验 */
+    uint32_t magic = 0x41474953;
+    uint32_t version = 1;
+    fwrite(&magic, sizeof(uint32_t), 1, f);
+    fwrite(&version, sizeof(uint32_t), 1, f);
+
     fwrite(&system->config, sizeof(AGIConfig), 1, f);
     fwrite(&system->current_state, sizeof(AGIState), 1, f);
     fwrite(&system->goal_count, sizeof(int), 1, f);
@@ -2423,6 +2429,17 @@ int agi_system_load_state(AGISystem* system, const char* filepath)
     FILE* f = fopen(filepath, "rb");
     if (!f) return -1;
 
+    /* P1-032修复：魔数+版本号头部校验防止损坏数据 */
+    uint32_t magic = 0, version = 0;
+    if (fread(&magic, sizeof(uint32_t), 1, f) != 1 || magic != 0x41474953) {
+        fclose(f);
+        return -1;
+    }
+    if (fread(&version, sizeof(uint32_t), 1, f) != 1 || version < 1 || version > 10) {
+        fclose(f);
+        return -1;
+    }
+
     fread(&system->config, sizeof(AGIConfig), 1, f);
     fread(&system->current_state, sizeof(AGIState), 1, f);
     fread(&system->goal_count, sizeof(int), 1, f);
@@ -2431,6 +2448,11 @@ int agi_system_load_state(AGISystem* system, const char* filepath)
     fread(&system->task_count, sizeof(int), 1, f);
     if (system->task_count > AGI_MAX_TASKS) system->task_count = AGI_MAX_TASKS;
     fread(system->tasks, sizeof(AGITask), (size_t)system->task_count, f);
+    /* P1-032修复：state_vector_dim边界检查防止缓冲区溢出 */
+    if (system->state_vector_dim > 1024 * 1024) {
+        fclose(f);
+        return -1;
+    }
     fread(system->state_vector, sizeof(float), (size_t)system->state_vector_dim, f);
     fread(&system->avg_reward, sizeof(float), 1, f);
     fread(&system->total_cycles, sizeof(int), 1, f);

@@ -38,7 +38,7 @@
  * @brief 字符模板结构体（用于字符识别）
  */
 typedef struct {
-    char character;           /**< 字符 */
+    unsigned short character;  /**< 字符（P0-026修复：char→unsigned short保留完整UTF-16） */
     float* features;          /**< 特征数组 */
     int num_features;         /**< 特征数量 */
     float avg_distance;       /**< 平均距离（用于分类） */
@@ -237,7 +237,8 @@ OcrProcessor* ocr_processor_create(const OcrConfig* config) {
             
             for (int i = 0; i < CHINESE_TEMPLATE_COUNT && i < basic_chinese; i++) {
                 int idx = basic_ascii + i;
-                processor->char_templates[idx].character = (char)(common_chinese[i] & 0xFF);
+                /* P0-026修复：使用完整 unsigned short 存储UTF-16码点 */
+                processor->char_templates[idx].character = common_chinese[i];
                 /* 存储完整UTF-16编码在features的高位 */
                 processor->char_templates[idx].num_features = 64;
                 processor->char_templates[idx].features = (float*)safe_calloc(64, sizeof(float));
@@ -703,44 +704,47 @@ static char recognize_character_by_features(const float* features, int num_featu
         return '?';
     }
     
-    /* K-修复: 将投票数组从char[256]扩展为unsigned short[65536]支持双字节字符 */
-    float char_scores[65536] = {0};
+    /* P0-026修复: char_scores堆分配替代栈上256KB数组，防止栈溢出 */
+    float* char_scores = (float*)safe_calloc(65536, sizeof(float));
+    if (!char_scores) {
+        safe_free((void**)&norm_features);
+        return '?';
+    }
     for (int i = 0; i < valid_neighbors; i++) {
-        int char_idx = (int)(unsigned char)candidate_chars[i];
+        int char_idx = (int)candidate_chars[i];
         if (char_idx >= 0 && char_idx < 65536) {
             char_scores[char_idx] += candidate_weights[i];
         }
     }
     
     /* 找到最高得分的字符 */
-    char best_char = '?';
+    unsigned short best_char = L'?';
     float best_score = 0.0f;
     for (int i = 0; i < 65536; i++) {
         if (char_scores[i] > best_score) {
             best_score = char_scores[i];
-            best_char = (char)(unsigned char)i;
+            best_char = (unsigned short)i;
         }
     }
     
     /* 步骤5：置信度检查（拒识机制） */
     float second_best_score = 0.0f;
     for (int i = 0; i < 65536; i++) {
-        if ((char)(unsigned char)i != best_char && char_scores[i] > second_best_score) {
+        if ((unsigned short)i != best_char && char_scores[i] > second_best_score) {
             second_best_score = char_scores[i];
         }
     }
     
     float confidence_ratio = (second_best_score > epsilon) ? best_score / second_best_score : 1000.0f;
     
-    // 如果置信度比率太低或得分太低，返回'?'表示不确定
     if (confidence_ratio < 1.5f || best_score < 0.1f) {
-        best_char = '?';
+        best_char = L'?';
     }
     
-    // 清理内存
+    safe_free((void**)&char_scores);
     safe_free((void**)&norm_features);
     
-    return best_char;
+    return (int)best_char;
 }
 
 /**

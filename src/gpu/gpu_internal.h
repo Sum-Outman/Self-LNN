@@ -51,6 +51,7 @@ struct GpuContext {
     size_t free_memory;          /**< 空闲内存（字节） */
     int is_initialized;          /**< 是否已初始化 */
     char device_name[256];       /**< 设备名称 */
+    size_t device_memory_override; /**< 设备内存覆盖值（0=使用真实值） */
     
     /** 后端私有数据指针（由具体后端实现使用） */
     void* backend_data;
@@ -100,6 +101,9 @@ struct GpuKernel {
     int arg_count;               /**< 参数数量 */
     int arg_capacity;            /**< 参数容量 */
     int work_dim;                /**< 工作维度（用于多维内核执行） */
+    int is_compiled;             /**< 内核是否已编译（P0-028修复：NPU后端使用） */
+    size_t global_work_size[3];  /**< 全局工作大小（P0-028修复：NPU后端使用） */
+    size_t local_work_size[3];   /**< 本地工作组大小（P0-028修复：NPU后端使用） */
     
     /** 后端私有数据指针（由具体后端实现使用） */
     void* backend_data;
@@ -113,6 +117,7 @@ struct GpuKernel {
 struct GpuStream {
     GpuContext* context;         /**< 所属上下文 */
     int is_completed;            /**< 是否完成 */
+    size_t enqueued_operations;  /**< 已入队操作计数（NPU/TPU后端使用） */
     
     /** 后端私有数据指针（由具体后端实现使用） */
     void* backend_data;

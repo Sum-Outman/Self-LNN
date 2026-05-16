@@ -20,6 +20,8 @@
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/logging.h"
 #include "npu_internal.h"
+#include "npu_common.h"
+#include "gpu_internal.h"
 
 #include <stdlib.h>
 #include <string.h>

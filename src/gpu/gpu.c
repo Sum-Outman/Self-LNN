@@ -661,7 +661,7 @@ static GpuContext* gpu_cpu_context_create(int device_index) {
     ThreadPoolConfig tcfg;
     memset(&tcfg, 0, sizeof(tcfg));
     tcfg.num_threads = logical_cores > 0 ? logical_cores : 4;
-    tcfg.max_queue_size = 1024;
+    tcfg.max_tasks = 1024;
     ctx->thread_pool = thread_pool_create(&tcfg);
     ctx->backend_data = NULL;
     return GPU_TO_INTERNAL(ctx);
@@ -861,7 +861,7 @@ static int gpu_cpu_device_reset(GpuContext* context) {
         ThreadPoolConfig tcfg;
         memset(&tcfg, 0, sizeof(tcfg));
         tcfg.num_threads = cpu_hw_get_logical_cores() > 0 ? cpu_hw_get_logical_cores() : 4;
-        tcfg.max_queue_size = 1024;
+        tcfg.max_tasks = 1024;
         ctx->thread_pool = thread_pool_create(&tcfg);
     }
     ctx->free_memory = ctx->total_memory;
@@ -2235,6 +2235,7 @@ struct GpuMultiGpuContext {
     GpuMultiGpuConfig config;
     GpuContext** contexts;
     int* device_ids;
+    float** device_memory;   /* 多GPU设备内存指针数组 */
     int initialized;
 };
 

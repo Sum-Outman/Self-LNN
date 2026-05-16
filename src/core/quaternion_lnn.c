@@ -681,13 +681,10 @@ int quaternion_lnn_forward(QuaternionLNN* network, const float* input,
     // 6. 时间演化：连续时间系统
     float dt = 1.0f / network->config.time_constant;
     for (size_t i = 0; i < hidden_quaternions; i++) {
-        // 真正的连续时间更新：使用四元数球面线性插值（SLERP）进行时间演化
-        // 从previous_state到hidden_quats的插值，插值参数为dt
-        // dt ∈ [0,1]，其中0表示完全保持previous_state，1表示完全到达hidden_quats
-        // 限制dt在合理范围内避免数值问题
         float t = dt;
         if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
+        /* P1-005修复：time_constant < 1.0 时 dt > 1.0 不应钳位，使用 exp(-dt) 衰减而非跳过 */
+        if (t > 1.0f) t = 1.0f - expf(-t);
         
         // 使用SLERP进行四元数插值
         hidden_quats[i] = quaternion_slerp(&network->previous_state[i], 
@@ -877,36 +874,32 @@ int quaternion_lnn_train_batch(QuaternionLNN* network,
     size_t input_stride = network->config.input_size;
     size_t output_stride = network->config.output_size;
     
+    /* P1-004修复：单次分配替代逐样本malloc/free */
+    float* output = (float*)safe_malloc(output_stride * sizeof(float));
+    if (!output) return -1;
+
     for (size_t i = 0; i < batch_size; i++) {
         const float* input = &inputs[i * input_stride];
         const float* target = &targets[i * output_stride];
-        
-        // 前向传播——动态分配输出缓冲区，支持任意维度
-        float* output = (float*)safe_malloc(output_stride * sizeof(float));
-        if (!output) {
-            return -1;
-        }
-        
+
         int forward_result = quaternion_lnn_forward(network, input, output, NULL);
         if (forward_result != 0) {
             safe_free((void**)&output);
             return -1;
         }
-        
-        // 反向传播
+
         QuaternionLNNResult batch_result;
         int backward_result = quaternion_lnn_backward(network, target, &batch_result);
         if (backward_result != 0) {
             safe_free((void**)&output);
             return -1;
         }
-        
+
         total_loss += batch_result.loss;
         total_rotation_loss += batch_result.rotation_loss;
-        
-        // 释放本样本的输出缓冲区
-        safe_free((void**)&output);
     }
+
+    safe_free((void**)&output);
     
     // 计算平均损失
     if (result) {

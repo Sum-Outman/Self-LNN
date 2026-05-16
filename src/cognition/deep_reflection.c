@@ -468,13 +468,12 @@ int dr_reflect_multi_passage(DeepReflectionEngine* engine,
     memcpy(engine->layer_embeddings, fused_embed, edim * sizeof(float));
     engine->layer_embed_count = 1;
 
-    /* M-010修复: 使用content hash而非topic长度作为种子 */
-    unsigned int seed = 42;
+    /* P1-035修复：使用时间混合种子替代固定42增加随机多样性 */
+    unsigned int seed = (unsigned int)(time(NULL) ^ (uintptr_t)&topic);
     if (topic) {
-        seed = 0;
         size_t tlen = strlen(topic);
-        for (size_t si = 0; si < tlen; si++)
-            seed = seed * 31 + (unsigned char)topic[si];
+        for (size_t i = 0; i < tlen; i++)
+            seed = seed * 31 + (unsigned char)topic[i];
     }
     seed ^= (unsigned int)((uint64_t)time(NULL) & 0xFFFFFFFFu);
 
@@ -757,7 +756,8 @@ int dr_generate_hypotheses(DeepReflectionEngine* engine,
     size_t count = 0;
     size_t max_h = (max_hypotheses < 16) ? max_hypotheses : 16;
 
-    unsigned int seed = 42;
+    /* P1-035修复：使用时间混合种子替代固定42 */
+    unsigned int seed = (unsigned int)(time(NULL) ^ (uintptr_t)chain ^ count);
     for (size_t i = 0; i < chain->num_layers && count < max_h; i++) {
         if (chain->layers[i].novelty_score < 0.3f) continue;
 

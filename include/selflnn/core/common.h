@@ -7,6 +7,20 @@
 #ifndef SELFLNN_CORE_COMMON_H
 #define SELFLNN_CORE_COMMON_H
 
+/* 跨编译器兼容：MSVC 默认不定义 M_PI */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#ifndef M_PI_2
+#define M_PI_2 1.57079632679489661923
+#endif
+#ifndef M_SQRT2
+#define M_SQRT2 1.41421356237309504880
+#endif
+#ifndef M_E
+#define M_E 2.71828182845904523536
+#endif
+
 #include "platform_types.h"
 
 /* 错误码定义（来自 errors.h，循环依赖已通过 platform_types.h 打破） */
@@ -343,18 +357,22 @@ typedef struct {
 // ============================================================
 // 编译时依赖完整性检查
 // ============================================================
-// C11 _Static_assert 兼容层：支持 C11+ / MSVC / GCC / Clang
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-    #define SELFLNN_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-#elif defined(_MSC_VER) && _MSC_VER >= 1600
-    #define SELFLNN_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-#elif defined(__GNUC__) && ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
-    #define SELFLNN_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+// C11 _Static_assert 兼容层
+// 检测 _Static_assert 是否真正可用（MSVC C 模式需 /std:c11 才支持）
+#if (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_STATIC_ASSERT__)) \
+    || (defined(__cplusplus) && __cplusplus >= 201103L)
+    #define SELFLNN_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#elif defined(__has_feature)
+    #if __has_feature(c_static_assert)
+        #define SELFLNN_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+    #else
+        #define SELFLNN_STATIC_ASSERT(cond, msg) \
+            typedef char SELFLNN_CONCAT(__sa_fail_, __LINE__)[(cond) ? 1 : -1]
+    #endif
 #else
-    // C99 回退：负大小数组触发编译错误
+    // 通用回退：负大小数组触发编译错误，兼容所有 C89+ 编译器
     #define SELFLNN_STATIC_ASSERT(cond, msg) \
-        typedef char SELFLNN_CONCAT(__static_assert_failed_, __LINE__) \
-            [(cond) ? 1 : -1]
+        typedef char SELFLNN_CONCAT(__sa_fail_, __LINE__)[(cond) ? 1 : -1]
 #endif
 
 // --- 类型大小检查 ---
@@ -377,7 +395,23 @@ SELFLNN_STATIC_ASSERT(FLT_RADIX == 2, "浮点基数必须为 2，需要 IEEE 754
 SELFLNN_STATIC_ASSERT(CHAR_BIT == 8, "CHAR_BIT 必须为 8");
 
 #if defined(SELFLNN_PLATFORM_WINDOWS) && SELFLNN_PLATFORM_WINDOWS
+    /* winsock2.h 必须在 windows.h 之前包含，防止 sockaddr/fd_set 重定义 */
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
     #include <windows.h>
+    /* windows.h 污染全局命名空间：interface→struct，undef 避免破坏项目代码 */
+    #ifdef interface
+    #undef interface
+    #endif
+    #ifdef IN
+    #undef IN
+    #endif
+    #ifdef OUT
+    #undef OUT
+    #endif
     // Windows 关键类型大小检查
     SELFLNN_STATIC_ASSERT(sizeof(DWORD) == 4, "Windows DWORD 必须为 4 字节");
     SELFLNN_STATIC_ASSERT(sizeof(BOOL) == 4, "Windows BOOL 必须为 4 字节");

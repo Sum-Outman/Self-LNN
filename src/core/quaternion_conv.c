@@ -502,11 +502,15 @@ int quaternion_conv2d_forward(QuaternionConv2D* layer,
 
                     for (size_t ii = 0; ii < ic; ii++) {
                         for (size_t kh_pos = 0; kh_pos < kh; kh_pos++) {
-                            size_t ih = oh * sh + kh_pos - cfg->pad_h;
+                            size_t base_h = oh * sh + kh_pos;
+                            if (base_h < (size_t)cfg->pad_h) continue;
+                            size_t ih = base_h - (size_t)cfg->pad_h;
+                            if (ih >= height) continue;
                             for (size_t kw_pos = 0; kw_pos < kw; kw_pos++) {
-                                size_t iw = ow * sw + kw_pos - cfg->pad_w;
-
-                                if (ih >= height || iw >= width) continue;
+                                size_t base_w = ow * sw + kw_pos;
+                                if (base_w < (size_t)cfg->pad_w) continue;
+                                size_t iw = base_w - (size_t)cfg->pad_w;
+                                if (iw >= width) continue;
 
                                 size_t in_idx = (((b * ic + ii) * height + ih) * width + iw) * 4;
                                 size_t w_idx = (((oi * ic + ii) * kh + kh_pos) * kw + kw_pos) * 4;
@@ -581,10 +585,15 @@ int quaternion_conv2d_backward(QuaternionConv2D* layer,
 
                     for (size_t ii = 0; ii < ic; ii++) {
                         for (size_t kh_pos = 0; kh_pos < kh; kh_pos++) {
-                            size_t ih = oh * sh + kh_pos - cfg->pad_h;
+                            size_t base_h = oh * sh + kh_pos;
+                            if (base_h < (size_t)cfg->pad_h) continue;
+                            size_t ih = base_h - (size_t)cfg->pad_h;
+                            if (ih >= height) continue;
                             for (size_t kw_pos = 0; kw_pos < kw; kw_pos++) {
-                                size_t iw = ow * sw + kw_pos - cfg->pad_w;
-                                if (ih >= height || iw >= width) continue;
+                                size_t base_w = ow * sw + kw_pos;
+                                if (base_w < (size_t)cfg->pad_w) continue;
+                                size_t iw = base_w - (size_t)cfg->pad_w;
+                                if (iw >= width) continue;
 
                                 size_t in_idx = (((b * ic + ii) * height + ih) * width + iw) * 4;
                                 size_t w_idx = (((oi * ic + ii) * kh + kh_pos) * kw + kw_pos) * 4;

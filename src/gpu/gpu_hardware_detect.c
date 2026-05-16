@@ -40,6 +40,7 @@
 #define CAMBRICON_CNRT_LIB  "cnrt.dll"
 #define QUALCOMM_LIB        "libOpenCL.dll"
 #define TPU_LIB             "libtpu.dll"
+#define INTEL_LEVELZERO_LIB "ze_loader.dll"
 #else
 #ifdef __APPLE__
 #define NVIDIA_CUDA_LIB     "/usr/local/cuda/lib/libcuda.dylib"

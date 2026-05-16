@@ -288,9 +288,9 @@ static GpuContext* cambricon_backend_context_create(int device_index) {
     ctx->device_index = device_index;
     ctx->is_initialized = 1;
     /* 从CNRT API获取真实设备内存信息 */
-    if (g_cambricon.cnrtGetDeviceMemInfo) {
+    if (g_cambricon.cnrtGetMemInfo) {
         size_t total = 0, free = 0;
-        g_cambricon.cnrtGetDeviceMemInfo(&total, &free);
+        g_cambricon.cnrtGetMemInfo(&total, &free);
         ctx->total_memory = total > 0 ? total : npu_common_get_system_memory_total();
         ctx->free_memory = free > 0 ? free : npu_common_get_system_memory_free();
     } else {
@@ -365,7 +365,7 @@ static GpuKernel* cambricon_backend_kernel_create(GpuContext* context, const cha
     if (kernel_source) { k->kernel_source = (char*)safe_malloc(strlen(kernel_source)+1); if (k->kernel_source) strcpy(k->kernel_source, kernel_source); }
     k->arg_values = (void**)safe_calloc(8, sizeof(void*));
     k->arg_sizes = (size_t*)safe_calloc(8, sizeof(size_t));
-    k->arg_count = 0; k->max_args = 8; k->is_compiled = 0;
+    k->arg_count = 0; k->arg_capacity = 8; k->is_compiled = 0;
     k->global_work_size[0]=1; k->global_work_size[1]=1; k->global_work_size[2]=1;
     k->local_work_size[0]=1; k->local_work_size[1]=1; k->local_work_size[2]=1;
     log_debug("[Cambricon] Kernel已创建: %s", kernel_name ? kernel_name : "unnamed");
@@ -374,20 +374,20 @@ static GpuKernel* cambricon_backend_kernel_create(GpuContext* context, const cha
 static void cambricon_backend_kernel_free(GpuKernel* kernel) {
     if (!kernel) return;
     safe_free((void**)&kernel->kernel_source); safe_free((void**)&kernel->kernel_name);
-    if (kernel->arg_values) { for (size_t i=0;i<kernel->arg_count && i<kernel->max_args;i++) safe_free((void**)&kernel->arg_values[i]); safe_free((void**)&kernel->arg_values); }
+    if (kernel->arg_values) { for (size_t i=0;i<kernel->arg_count && i<kernel->arg_capacity;i++) safe_free((void**)&kernel->arg_values[i]); safe_free((void**)&kernel->arg_values); }
     safe_free((void**)&kernel->arg_sizes);
     safe_free((void**)&kernel);
 }
 static int cambricon_backend_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t arg_size, const void* arg_value) {
     if (!kernel || arg_index < 0) return -1;
-    if ((size_t)arg_index >= kernel->max_args) {
-        size_t nm = kernel->max_args*2;
+    if ((size_t)arg_index >= kernel->arg_capacity) {
+        size_t nm = kernel->arg_capacity*2;
         void** nv = (void**)safe_calloc(nm, sizeof(void*));
         size_t* ns = (size_t*)safe_calloc(nm, sizeof(size_t));
         if (!nv || !ns) { safe_free((void**)&nv); safe_free((void**)&ns); return -1; }
         for (size_t i=0;i<kernel->arg_count;i++){nv[i]=kernel->arg_values[i];ns[i]=kernel->arg_sizes[i];}
         safe_free((void**)&kernel->arg_values); safe_free((void**)&kernel->arg_sizes);
-        kernel->arg_values=nv; kernel->arg_sizes=ns; kernel->max_args=nm;
+        kernel->arg_values=nv; kernel->arg_sizes=ns; kernel->arg_capacity=nm;
     }
     if (kernel->arg_values[arg_index]) safe_free((void**)&kernel->arg_values[arg_index]);
     if (arg_size > 0 && arg_value) { kernel->arg_values[arg_index]=safe_malloc(arg_size); if (!kernel->arg_values[arg_index]) return -1; memcpy(kernel->arg_values[arg_index], arg_value, arg_size); kernel->arg_sizes[arg_index]=arg_size; }

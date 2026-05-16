@@ -346,7 +346,8 @@ typedef enum {
     API_POST_DEVICE_UNREGISTER = 224,      /**< 注销设备 */
     API_GET_DEVICE_LIST = 225,             /**< 获取已注册设备列表 */
     API_POST_DEVICE_COMMAND = 226,         /**< 向设备发送控制命令 */
-    API_GET_DEVICE_STATUS = 227            /**< 获取设备实时状态 */
+    API_GET_DEVICE_STATUS = 227            /**< 获取设备实时状态 */,
+    API_GET_SAFETY_BOUNDS = 228            /**< 获取安全边界配置 */
 } ApiRequestType;
 
 /**

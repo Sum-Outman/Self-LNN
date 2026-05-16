@@ -6,6 +6,8 @@
 #include "selflnn/utils/logging.h"
 #include <stddef.h>
 
+#define NPU_MAX_IO_COUNT 32  /* NPU推理最大输入/输出数量 */
+
 /* NPU后端日志宏（兼容Ascend/Cambricon/TPU SDK风格） */
 #define LOG_WARN(...)  log_warning(__VA_ARGS__)
 #define LOG_INFO(...)  log_info(__VA_ARGS__)

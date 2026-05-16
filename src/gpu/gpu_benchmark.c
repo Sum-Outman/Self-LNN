@@ -10,6 +10,7 @@
 #include "selflnn/gpu/gpu_memory_pool.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/secure_random.h"
+#include "gpu_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -233,7 +234,7 @@ double gpu_estimate_theoretical_bandwidth(const GpuDeviceInfo* info)
 
     double bandwidth_gbs = (elapsed > 0.0) ? (2.0 * (double)test_size / elapsed) / 1e9 : 0.0;
 
-    gpu_memory_free(ctx, dev_buf);
+    gpu_memory_free(dev_buf);
     gpu_context_free(ctx);
     safe_free((void**)&host_src);
     safe_free((void**)&host_dst);

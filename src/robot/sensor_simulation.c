@@ -131,14 +131,14 @@ int sensor_sim_depth_camera(SensorSimContext* ctx,
             float min_t = max_d;
             int hit = 0;
 
-            if (pp && pp->body_count > 0) {
-                for (int bi = 0; bi < pp->body_count && bi < 16; bi++) {
+            if (pp && pp->object_count > 0) {
+                for (int bi = 0; bi < pp->object_count && bi < 16; bi++) {
                     float bc[3] = {
-                        pp->bodies[bi].position[0],
-                        pp->bodies[bi].position[1],
-                        pp->bodies[bi].position[2]
+                        pp->objects[bi].world_transform[0],
+                        pp->objects[bi].world_transform[1],
+                        pp->objects[bi].world_transform[2]
                     };
-                    float br = pp->bodies[bi].radius > 0.0f ? pp->bodies[bi].radius : 0.3f;
+                    float br = pp->objects[bi].radius > 0.0f ? pp->objects[bi].radius : 0.3f;
 
                     float oc[3] = {
                         mount_pos[0] - bc[0],
@@ -309,47 +309,43 @@ int sensor_sim_ray_intersect(const float* ray_origin, const float* ray_dir,
     float pos[3] = {object->world_transform[0],object->world_transform[1],object->world_transform[2]};
 
     switch (object->shape.type) {
-     case 0: { /* SPHERE */
-        float* c = object->shape.data.sphere.center;
+     case COLLISION_SHAPE_SPHERE: { /* SPHERE */
+        Vec3 sc = object->shape.data.sphere.center;
         float r = object->shape.data.sphere.radius;
-        float sp_c[3]={pos[0]+c->x,pos[1]+c->y,pos[2]+c->z};
+        float sp_c[3]={pos[0]+sc.x,pos[1]+sc.y,pos[2]+sc.z};
         if (ray_sphere_intersect(ray_origin,ray_dir,sp_c,r,&t)) found=1;
         break;
     }
-    case COLLISION_SHAPE_BOX:
-    case 1: {
-        float* he = object->shape.data.box.half_extents;
-        float* bc = object->shape.data.box.center;
-        float bmin[3]={pos[0]+bc->x-he->x,pos[1]+bc->y-he->y,pos[2]+bc->z-he->z};
-        float bmax[3]={pos[0]+bc->x+he->x,pos[1]+bc->y+he->y,pos[2]+bc->z+he->z};
+    case COLLISION_SHAPE_BOX: {
+        Vec3 he = object->shape.data.box.half_extents;
+        Vec3 bc = object->shape.data.box.center;
+        float bmin[3]={pos[0]+bc.x-he.x,pos[1]+bc.y-he.y,pos[2]+bc.z-he.z};
+        float bmax[3]={pos[0]+bc.x+he.x,pos[1]+bc.y+he.y,pos[2]+bc.z+he.z};
         if (ray_aabb_intersect(ray_origin,ray_dir,bmin,bmax,&t)) found=1;
         break;
     }
-    case COLLISION_SHAPE_CAPSULE:
-    case 2: {
-        float* cc = object->shape.data.capsule.center;
+    case COLLISION_SHAPE_CAPSULE: {
+        Vec3 cc = object->shape.data.capsule.center;
         float cr = object->shape.data.capsule.radius;
         float ch = object->shape.data.capsule.height;
-        float cp[3]={pos[0]+cc->x,pos[1]+cc->y,pos[2]+cc->z};
+        float cp[3]={pos[0]+cc.x,pos[1]+cc.y,pos[2]+cc.z};
         if (ray_capsule_intersect(ray_origin,ray_dir,cp,cr,ch,&t)) found=1;
         break;
     }
-    case COLLISION_SHAPE_CYLINDER:
-    case 3: {
-        float* cc = object->shape.data.cylinder.center;
+    case COLLISION_SHAPE_CYLINDER: {
+        Vec3 cc = object->shape.data.cylinder.center;
         float cr = object->shape.data.cylinder.radius;
         float ch = object->shape.data.cylinder.height;
-        float cp[3]={pos[0]+cc->x,pos[1]+cc->y,pos[2]+cc->z};
+        float cp[3]={pos[0]+cc.x,pos[1]+cc.y,pos[2]+cc.z};
         if (ray_capsule_intersect(ray_origin,ray_dir,cp,cr,ch,&t)) found=1;
         break;
     }
-    case COLLISION_SHAPE_PLANE:
-    case 5: {
-        float* n = object->shape.data.plane.normal;
+    case COLLISION_SHAPE_PLANE: {
+        Vec3 n = object->shape.data.plane.normal;
         float d = object->shape.data.plane.d;
-        float denom = n[0]*ray_dir[0]+n[1]*ray_dir[1]+n[2]*ray_dir[2];
+        float denom = n.x*ray_dir[0]+n.y*ray_dir[1]+n.z*ray_dir[2];
         if (fabsf(denom)>1e-8f) {
-            t = -(n[0]*ray_origin[0]+n[1]*ray_origin[1]+n[2]*ray_origin[2]+d)/denom;
+            t = -(n.x*ray_origin[0]+n.y*ray_origin[1]+n.z*ray_origin[2]+d)/denom;
             if (t>1e-6f) found=1;
         }
         break;

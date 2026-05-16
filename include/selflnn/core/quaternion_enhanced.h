@@ -8,14 +8,22 @@
 
 #include <stddef.h>
 
+/* MSVC 兼容：math.h 需要 _USE_MATH_DEFINES 才定义 M_PI */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* 四元数结构 */
+/* P0-034修复：使用 SELFLNN_QUATERNION_DEFINED 防止与 math_utils.h 重复定义 */
+#ifndef SELFLNN_QUATERNION_DEFINED
+#define SELFLNN_QUATERNION_DEFINED
 typedef struct {
     float w, x, y, z;
 } Quaternion;
+#endif
 
 /* 对偶四元数 */
 typedef struct {

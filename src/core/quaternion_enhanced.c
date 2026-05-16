@@ -24,7 +24,7 @@ int quat_dropout_forward(const Quaternion* input, size_t num_quats,
                          Quaternion* output, int* mask) {
     if (!input || !output || num_quats == 0) return -1;
     if (dropout_rate < 0.0f) dropout_rate = 0.0f;
-    if (dropout_rate > 1.0f) dropout_rate = 1.0f;
+    if (dropout_rate > 0.999f) dropout_rate = 0.999f;
 
     float scale = 1.0f / (1.0f - dropout_rate + 1e-10f);
     unsigned int rng = seed;

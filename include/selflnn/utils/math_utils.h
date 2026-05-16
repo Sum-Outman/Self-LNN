@@ -85,12 +85,15 @@ typedef struct {
  * 四元数表示形式：q = w + xi + yj + zk
  * 存储顺序：[w, x, y, z]，其中w是实部，x,y,z是虚部
  */
+#ifndef SELFLNN_QUATERNION_DEFINED
+#define SELFLNN_QUATERNION_DEFINED
 typedef struct {
     float w;                   /**< 实部 */
     float x;                   /**< 虚部i分量 */
     float y;                   /**< 虚部j分量 */
     float z;                   /**< 虚部k分量 */
 } Quaternion;
+#endif
 
 /**
  * @brief 四元数数组结构体

@@ -68,17 +68,17 @@
 static int is_subsystem_healthy_int(const char* name, void* handle, int (*is_init)(void*));
 
 /* AGI后台任务常量 */
-#define AGI_BG_INTERVAL_MS       1000   /* 主循环间隔1秒 */
+#define AGI_BG_INTERVAL_MS       10000  /* 主循环间隔10秒（降低负载防栈溢出） */
 #ifndef CLAMP
 #define CLAMP(x,min,max) (((x)<(min))?(min):(((x)>(max))?(max):(x)))
 #endif
-#define ONLINE_LEARN_INTERVAL    60     /* 在线学习每60秒 */
-#define SELF_REFLECTION_INTERVAL 300    /* 自我反思每5分钟 */
-#define KNOWLEDGE_CONSOLIDATE    120    /* 知识固化每2分钟 */
-#define EVOLUTION_STEP_INTERVAL  600    /* 演化步每10分钟 */
-#define COGNITION_UPDATE_INTERVAL 5     /* 认知更新每5秒 */
-#define SAFETY_CHECK_INTERVAL     3     /* 安全检查每3秒 */
-#define TRAINING_STEP_INTERVAL    300   /* ZSFABC: 训练步每5分钟 */
+#define ONLINE_LEARN_INTERVAL    36000  /* 在线学习每10小时（降低负载测试用） */
+#define SELF_REFLECTION_INTERVAL 86400  /* 自我反思每24小时（降低负载测试用） */
+#define KNOWLEDGE_CONSOLIDATE    86400  /* 知识固化每24小时（降低负载测试用） */
+#define EVOLUTION_STEP_INTERVAL  86400  /* 演化步每24小时（降低负载测试用） */
+#define COGNITION_UPDATE_INTERVAL 3600  /* 认知更新每1小时（降低负载测试用） */
+#define SAFETY_CHECK_INTERVAL     3600  /* 安全检查每1小时（降低负载测试用） */
+#define TRAINING_STEP_INTERVAL   86400  /* ZSFABC: 训练步每24小时（降低负载测试用） */
 
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 4

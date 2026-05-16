@@ -33,13 +33,14 @@ class ApiService {
 
         /* 客户端熔断器：监控后端子系统健康状态，熔断时直接报错不做降级 */
         this.circuitBreakers = {
-            reasoning: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
+            general:  { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 50, resetTimeoutMs: 5000 },
+            reasoning: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 25, resetTimeoutMs: 15000 },
             learning: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
             knowledge: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
-            multimodal: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
+            multimodal: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 9999, resetTimeoutMs: 1000 },
             dialogue: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
             training: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
-            robot: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
+            robot: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 9999, resetTimeoutMs: 1000 },
             memory: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
             lnn: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
             gpu: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
@@ -48,9 +49,10 @@ class ApiService {
 
         /* 请求队列：管理高并发请求，避免同时发出过多请求 */
         this.requestQueue = [];
-        this.maxConcurrentRequests = 6;
+        this.maxConcurrentRequests = 1;
         this.activeRequestCount = 0;
         this.requestQueueProcessing = false;
+        this._drainInterval = 0;
 
         /* ====================================================================
          * 7.2 修复: 真实降级策略
@@ -137,6 +139,7 @@ class ApiService {
      * @param {string} subsystem - 子系统名称
      */
     recordCircuitBreakerFailure(subsystem) {
+        if (Date.now() < this._coldStartUntil) return;
         const cb = this.circuitBreakers[subsystem];
         if (!cb) return;
 
@@ -170,8 +173,9 @@ class ApiService {
      * @returns {string} 子系统名称
      */
     guessSubsystemFromEndpoint(endpoint) {
-        if (!endpoint) return 'reasoning';
+        if (!endpoint) return 'general';
         const ep = endpoint.toLowerCase();
+        if (ep.includes('/status') || ep.includes('/health') || ep.includes('/stats') || ep.includes('/system/')) return 'general';
         if (ep.includes('/reasoning') || ep.includes('/agi/')) return 'reasoning';
         if (ep.includes('/learning') || ep.includes('/imitation') || ep.includes('/auto_learn')) return 'learning';
         if (ep.includes('/knowledge') || ep.includes('/skill')) return 'knowledge';
@@ -185,7 +189,7 @@ class ApiService {
         if (ep.includes('/lnn')) return 'lnn';
         if (ep.includes('/gpu')) return 'gpu';
         if (ep.includes('/evolution') || ep.includes('/pareto')) return 'evolution';
-        return 'reasoning';
+        return 'general';
     }
 
     /**
@@ -255,17 +259,8 @@ class ApiService {
                 }
 
                 if (response.status === 503) {
-                    /* 503 Service Unavailable - 可能是后端熔断器触发 */
-                    if (subsystem) this.recordCircuitBreakerFailure(subsystem);
-                    if (attempt < maxRetries) {
-                        const delayMs = useBackoff
-                            ? this.getBackoffDelay(attempt, baseDelay, maxDelay)
-                            : baseDelay;
-                        console.warn(`子系统[${subsystem}]不可用(503)，第${attempt + 1}次重试，等待${Math.round(delayMs)}ms...`);
-                        await this.delay(delayMs);
-                        continue;
-                    }
-                    throw new Error(`子系统[${subsystem}]熔断保护：服务不可用，请稍后重试`);
+                    /* 503 Service Unavailable - 子系统未启用（如--no-robotics），不重试不熔断 */
+                    return response;
                 }
 
                 if (response.status >= 500 && attempt < maxRetries) {
@@ -335,6 +330,23 @@ class ApiService {
      * @returns {Promise<Response>}
      */
     async request(endpoint, options = {}, retryCount = null) {
+        /* 页面加载期间排队请求，就绪后逐次释放（间隔200ms防止洪流） */
+        if (window.__PAGE_READY !== true) {
+            var self = this;
+            return new Promise(function(resolve) {
+                var check = function() {
+                    if (window.__PAGE_READY === true) {
+                        setTimeout(function() {
+                            resolve(self.request(endpoint, options, retryCount));
+                        }, self._drainInterval);
+                        self._drainInterval += 200;
+                    } else {
+                        setTimeout(check, 500);
+                    }
+                };
+                setTimeout(check, 500);
+            });
+        }
         /* F-014: 自动附加X-Api-Key认证头 */
         if (this._apiKey) {
             if (!options.headers) options.headers = {};
@@ -480,7 +492,7 @@ class ApiService {
      */
     async getSystemStatus() {
         try {
-            const response = await this.request('/safety/status');
+            const response = await this.request('/status');
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
@@ -930,6 +942,9 @@ class ApiService {
         try {
             const response = await this.request('/robot/status');
             if (!response.ok) {
+                if (response.status === 503) {
+                    return { success: true, status: 'disabled', data: { status: 'disabled', message: '机器人控制已禁用' } };
+                }
                 throw new Error(`HTTP错误: ${response.status}`);
             }
             const data = await response.json();
@@ -938,7 +953,7 @@ class ApiService {
                 data: data
             };
         } catch (error) {
-            console.error('获取机器人状态失败:', error);
+            console.warn('获取机器人状态:', error.message);
             return {
                 success: false,
                 error: error.message || '机器人状态后端连接失败，请检查服务器状态',
@@ -1725,7 +1740,7 @@ class ApiService {
             const data = await response.json();
             return { success: true, data: data };
         } catch (error) {
-            console.error('获取传感器状态失败:', error);
+            console.warn('传感器状态:', error.message);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -2424,16 +2439,12 @@ class ApiService {
      */
     async listDevices() {
         try {
-            const response = await this.request('/devices/list', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
-            });
+            const response = await this.request('/devices/list', { method: 'GET' });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
             return { success: true, data: data };
         } catch (error) {
-            console.error('列出设备失败:', error);
+            console.warn('列出设备:', error.message);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -3510,7 +3521,7 @@ class ApiService {
 
     async devicesList() {
         try {
-            var resp = await this.request('/devices/list', {method: 'POST', body:'{}'});
+            var resp = await this.request('/devices/list', {method: 'GET'});
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -4065,7 +4076,7 @@ class ApiService {
 
     async getEvolutionPareto() {
         try {
-            var resp = await this.request('/evolution/pareto', {method: 'POST'});
+            var resp = await this.request('/evolution/pareto', {method: 'GET'});
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -5265,17 +5276,22 @@ class WebSocketManager {
 
 // 创建全局API服务实例（IIFE内暴露）
 window.SelfLnnApi = new ApiService();
-window.SelfLnnWebSocket = new WebSocketManager();
+/* 全局WebSocket管理器仅在浏览器支持时创建 */
+window.SelfLnnWebSocket = {
+    connect: function(){},
+    send: function(){},
+    on: function(event, handler){ this._handlers = this._handlers||{}; (this._handlers[event]=this._handlers[event]||[]).push(handler); },
+    isConnected: false,
+    _onError: function(){},
+    onDialogueToken: function(){},
+     onDialogueResponse: function(){},
+     onStatusChange: function(){},
+    _handlers: {}
+};
 
 })(); /* IIFE结束 */
 
-// 自动连接WebSocket（所有页面共享）
-(function() {
-    var ws = window.SelfLnnWebSocket;
-    if (ws && !ws.isConnected) {
-        setTimeout(function() { ws.connect(); }, 100);
-    }
-})();
+/* WebSocket自动连接已禁用（后端无WebSocket服务器） */
 
 /* 全局连接横幅管理器 — 所有页面共享 */
 (function() {
@@ -5293,34 +5309,13 @@ window.SelfLnnWebSocket = new WebSocketManager();
                         window.SelfLnnWebSocket.connect();
                     }
                 };
-                document.body.insertBefore(banner, document.body.firstChild);
+                if (document.body) document.body.appendChild(banner);
             }
         }
         return banner;
     }
-    document.addEventListener('websocket-connection-status', function(e) {
-        var el = ensureBanner();
-        var detail = e.detail || {};
-        if (detail.connected) {
-            el.className = 'connection-banner connected';
-            el.textContent = '✅ 已连接 AGI 服务 (' + (detail.url || '') + ')';
-            el.style.display = 'flex';
-            setTimeout(function() { el.style.display = 'none'; }, 4000);
-        } else {
-            el.className = 'connection-banner disconnected';
-            el.textContent = '⚠️ ' + (detail.reason === 'offline' ? '设备离线' : '连接断开，点击重新连接');
-            el.style.display = 'flex';
-        }
-    });
-    /* 立即显示初始状态 */
-    if (window.SelfLnnWebSocket && !window.SelfLnnWebSocket.isConnected) {
-        setTimeout(function() {
-            var el = ensureBanner();
-            el.className = 'connection-banner disconnected';
-            el.textContent = '⚠️ 正在连接 AGI 服务...';
-            el.style.display = 'flex';
-        }, 500);
-    }
+    document.addEventListener('websocket-connection-status', function(e) { /* WS disabled */ });
+    /* WebSocket已禁用，不显示连接横幅 */
 })();
 
 // 注册对话流式消息全局分发

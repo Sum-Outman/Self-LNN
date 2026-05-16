@@ -491,7 +491,7 @@ static GpuKernel* ascend_backend_kernel_create(GpuContext* context,
     k->arg_values = (void**)safe_calloc(8, sizeof(void*));
     k->arg_sizes = (size_t*)safe_calloc(8, sizeof(size_t));
     k->arg_count = 0;
-    k->max_args = 8;
+    k->arg_capacity = 8;
     k->is_compiled = 0;
     k->global_work_size[0] = 1; k->global_work_size[1] = 1; k->global_work_size[2] = 1;
     k->local_work_size[0] = 1; k->local_work_size[1] = 1; k->local_work_size[2] = 1;
@@ -503,7 +503,7 @@ static void ascend_backend_kernel_free(GpuKernel* kernel) {
     safe_free((void**)&kernel->kernel_source);
     safe_free((void**)&kernel->kernel_name);
     if (kernel->arg_values) {
-        for (size_t i = 0; i < kernel->arg_count && i < kernel->max_args; i++)
+        for (size_t i = 0; i < kernel->arg_count && i < kernel->arg_capacity; i++)
             safe_free((void**)&kernel->arg_values[i]);
         safe_free((void**)&kernel->arg_values);
     }
@@ -513,15 +513,15 @@ static void ascend_backend_kernel_free(GpuKernel* kernel) {
 static int ascend_backend_kernel_set_arg(GpuKernel* kernel, int arg_index,
                                           size_t arg_size, const void* arg_value) {
     if (!kernel || arg_index < 0) return -1;
-    if ((size_t)arg_index >= kernel->max_args) {
-        size_t new_max = kernel->max_args * 2;
+    if ((size_t)arg_index >= kernel->arg_capacity) {
+        size_t new_max = kernel->arg_capacity * 2;
         void** nv = (void**)safe_calloc(new_max, sizeof(void*));
         size_t* ns = (size_t*)safe_calloc(new_max, sizeof(size_t));
         if (!nv || !ns) { safe_free((void**)&nv); safe_free((void**)&ns); return -1; }
         for (size_t i = 0; i < kernel->arg_count; i++) { nv[i] = kernel->arg_values[i]; ns[i] = kernel->arg_sizes[i]; }
         safe_free((void**)&kernel->arg_values);
         safe_free((void**)&kernel->arg_sizes);
-        kernel->arg_values = nv; kernel->arg_sizes = ns; kernel->max_args = new_max;
+        kernel->arg_values = nv; kernel->arg_sizes = ns; kernel->arg_capacity = new_max;
     }
     if (kernel->arg_values[arg_index]) safe_free((void**)&kernel->arg_values[arg_index]);
     if (arg_size > 0 && arg_value) {

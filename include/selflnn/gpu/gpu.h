@@ -135,6 +135,8 @@ typedef struct {
     size_t l2_cache;             /**< L2缓存大小（字节） */
     size_t l3_cache;             /**< L3缓存大小（字节），没有则填0 */
     unsigned int simd_flags;     /**< SIMD指令集支持标志位（CPU_SIMD_*位的组合） */
+    char driver_version[64];     /**< 驱动版本号 */
+    char runtime_version[64];    /**< 运行时版本号 */
 } GpuDeviceInfo;
 
 /**
@@ -764,6 +766,13 @@ typedef enum {
     GPU_LOSS_SCALE_ADAPTIVE = 2
 } GpuLossScaleStrategy;
 
+typedef enum {
+    GPU_LOSS_MSE = 0,       /**< 均方误差 */
+    GPU_LOSS_MAE = 1,       /**< 平均绝对误差 */
+    GPU_LOSS_CROSS_ENTROPY = 2, /**< 交叉熵 */
+    GPU_LOSS_KL_DIVERGENCE = 3  /**< KL散度 */
+} GpuLossType;
+
 /**
  * @brief GPU混合精度训练配置
  */
@@ -1072,6 +1081,7 @@ typedef struct {
     GpuMemory* back_buffer;       /**< 后端缓冲区（用于传输） */
     GpuStream* stream;            /**< 异步传输流 */
     size_t size;                  /**< 每个缓冲区大小（字节） */
+    GpuMemoryType memory_type;    /**< 内存类型 */
     int is_initialized;           /**< 是否已初始化 */
     int is_swapped;               /**< 是否已交换（用于跟踪状态） */
     GpuContext* context;          /**< 所属GPU上下文 */
@@ -1201,12 +1211,25 @@ typedef struct {
     float beta2;                   /**< Adam beta2 */
     float epsilon;                 /**< Adam epsilon */
     float weight_decay;            /**< 权重衰减 */
+    float gradient_clip_norm;      /**< 梯度裁剪范数（0=不裁剪） */
+    int loss_type;                 /**< 损失函数类型（GpuLossType枚举值） */
     int batch_size;                /**< 批大小 */
     int max_iterations;            /**< 最大迭代次数 */
     int enable_learning_rate_decay; /**< 是否启用学习率衰减 */
     float learning_rate_decay;     /**< 学习率衰减系数 */
     int decay_steps;               /**< 衰减步数间隔 */
+    int enable_mixed_precision;    /**< 是否启用混合精度训练 */
+    int enable_gradient_checkpointing; /**< 是否启用梯度检查点 */
+    int backend_flags;               /**< 后端训练标志位（GPU_TRAIN_USE_*组合） */
+    int precision_mode;              /**< 精度模式 */
 } GpuTrainConfig;
+
+typedef enum {
+    GPU_TRAIN_USE_SGD               = 1 << 0,
+    GPU_TRAIN_USE_ADAM              = 1 << 1,
+    GPU_TRAIN_USE_MIXED_PRECISION   = 1 << 2,
+    GPU_TRAIN_USE_GRADIENT_CLIP     = 1 << 3
+} GpuTrainFlags;
 
 /**
  * @brief 创建GPU训练配置（默认值）
@@ -1404,7 +1427,10 @@ typedef struct {
     int decay_steps;                     /**< 衰减步数间隔 */
     int total_steps;                     /**< 总步数 */
     float min_lr;                        /**< 最小学习率 */
+    float gamma;                         /**< 指数衰减gamma因子 */
     int warmup_steps;                    /**< 预热步数 */
+    float warmup_lr;                     /**< 预热初始学习率 */
+    int step_size;                       /**< 步长（用于Step/多项式衰减） */
     float power;                         /**< 多项式幂次 */
 } GpuLRConfig;
 
@@ -1664,6 +1690,8 @@ typedef struct {
     int device_index;                    /**< NPU设备索引 */
     int input_count;                     /**< 输入张量数量 */
     int output_count;                    /**< 输出张量数量 */
+    int input_dim;                       /**< 输入特征维度（单张量时有效） */
+    int output_dim;                      /**< 输出特征维度（单张量时有效） */
     size_t* input_sizes;                 /**< 每个输入张量的大小（字节） */
     size_t* output_sizes;                /**< 每个输出张量的大小（字节） */
     int enable_fp16;                     /**< 启用FP16推理（默认0=FP32） */

@@ -122,18 +122,23 @@ body {
 .nav ul {
     display: flex;
     list-style: none;
-    gap: 1.5rem;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 .nav a {
     color: #cccccc;
     text-decoration: none;
-    padding: 0.5rem 1rem;
+    padding: 0.4rem 0.7rem;
     border-radius: 4px;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.35rem;
     transition: all 0.3s ease;
+    font-size: 0.85rem;
+    white-space: nowrap;
 }
 
 .nav a:hover {
@@ -150,7 +155,8 @@ body {
     width: 100%;
     height: 1px;
     background: rgba(255, 255, 255, 0.06);
-    margin: 4px 0;
+    margin: 2px 0;
+    flex-basis: 100%;
 }
 
 .user-info {
@@ -676,33 +682,62 @@ body {
 }
 
 .btn-primary {
-    background: linear-gradient(135deg, #888888, #888888);
+    background: linear-gradient(135deg, #0066cc, #0052a3);
     color: white;
+    border: 1px solid rgba(0, 102, 204, 0.3);
 }
 
 .btn-secondary {
-    background: linear-gradient(135deg, #777777, #555555);
+    background: linear-gradient(135deg, #555555, #444444);
     color: white;
+    border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .btn-warning {
-    background: linear-gradient(135deg, #999999, #999999);
+    background: linear-gradient(135deg, #e67e22, #c0651f);
     color: white;
+    border: 1px solid rgba(230, 126, 34, 0.3);
 }
 
 .btn-danger {
-    background: linear-gradient(135deg, #777777, #777777);
+    background: linear-gradient(135deg, #c0392b, #96281b);
     color: white;
+    border: 1px solid rgba(192, 57, 43, 0.3);
 }
 
 .btn-success {
-    background: linear-gradient(135deg, #2d8a4e, #1e6b38);
+    background: linear-gradient(135deg, #27ae60, #1e8449);
     color: white;
+    border: 1px solid rgba(39, 174, 96, 0.3);
 }
 
 .btn-info {
-    background: linear-gradient(135deg, #888888, #666666);
+    background: linear-gradient(135deg, #2471a3, #1a5276);
     color: white;
+    border: 1px solid rgba(36, 113, 163, 0.3);
+}
+
+.btn-outline {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #cccccc;
+}
+
+.btn-outline:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.btn-xs {
+    padding: 0.2rem 0.5rem;
+    font-size: 0.7rem;
+    border-radius: 3px;
+}
+
+.btn-sm {
+    padding: 0.4rem 0.85rem;
+    font-size: 0.8rem;
+    border-radius: 4px;
 }
 
 /* 状态消息容器 */
@@ -8780,3 +8815,215 @@ input:checked + .slider:before {
     border: 1px solid rgba(255,255,255,0.1);
 }
 .btn-cancel:hover { background: rgba(255,255,255,0.14); }
+
+/* ===== 拨动开关(Toggle Switch) ===== */
+.switch { position:relative;display:inline-block;width:44px;height:24px;vertical-align:middle; }
+.switch input { opacity:0;width:0;height:0; }
+.slider { position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#555;transition:0.3s;border-radius:24px; }
+.slider:before { position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background-color:white;transition:0.3s;border-radius:50%; }
+input:checked+.slider { background-color:#2196F3; }
+input:checked+.slider:before { transform:translateX(20px); }
+input:focus+.slider { box-shadow:0 0 1px #2196F3; }
+.slider.round { border-radius:24px; }
+.slider.round:before { border-radius:50%; }
+
+/* ===== 知识条目列表 ===== */
+.knowledge-entry { padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:6px;margin-bottom:6px;cursor:pointer;transition:background 0.2s;border:1px solid transparent; }
+.knowledge-entry:hover { background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.1); }
+.knowledge-entry.empty { text-align:center;padding:20px;color:#888;cursor:default; }
+.knowledge-entry-header { display:flex;align-items:center;gap:8px;margin-bottom:4px; }
+.knowledge-entry-type { padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:600; }
+.knowledge-entry-type.fact { background:rgba(0,200,255,0.15);color:#00c8ff; }
+.knowledge-entry-type.rule { background:rgba(255,170,0,0.15);color:#ffaa00; }
+.knowledge-entry-type.concept { background:rgba(0,255,136,0.15);color:#00ff88; }
+.knowledge-entry-type.relation { background:rgba(255,68,136,0.15);color:#ff4488; }
+.knowledge-entry-name { font-weight:600;font-size:0.9rem; }
+.knowledge-entry-desc { font-size:0.8rem;color:#aaa;margin:4px 0;line-height:1.4; }
+.knowledge-entry-meta { display:flex;gap:12px;font-size:0.7rem;color:#888; }
+
+/* ===== 搜索框 ===== */
+.search-box { display:flex;gap:6px;margin-bottom:1rem;align-items:center; }
+.search-box .form-control { flex:1;padding:8px 12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;font-family:inherit;font-size:0.85rem; }
+.search-box .form-control:focus { outline:none;border-color:rgba(0,200,255,0.4); }
+
+/* ===== 推理任务/修正/演化 ===== */
+.reasoning-task { padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:6px;margin-bottom:4px; }
+.reasoning-task.empty { text-align:center;padding:16px;color:#888; }
+.inference-test { display:flex;flex-direction:column;gap:8px; }
+.inference-result { margin-top:8px;padding:10px;background:rgba(0,200,255,0.05);border-radius:6px;min-height:40px; }
+.inference-result h5 { font-size:0.8rem;color:#aaa;margin-bottom:4px; }
+.inference-result p { font-size:0.9rem;color:#ddd; }
+.correction-item { padding:8px 10px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:4px;font-size:0.8rem;color:#ccc; }
+.correction-item.empty { text-align:center;color:#888; }
+.evolution-stage { padding:12px;background:rgba(255,255,255,0.03);border-radius:6px;text-align:center;min-height:40px;display:flex;align-items:center;justify-content:center; }
+.evolution-stage.empty { color:#888;font-size:0.85rem; }
+
+/* ===== 记忆/任务队列 ===== */
+.memory-entry { padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:6px;margin-bottom:4px;font-size:0.85rem; }
+.memory-entry.empty { text-align:center;padding:16px;color:#888; }
+.memory-pagination { display:flex;align-items:center;justify-content:center;gap:12px;margin-top:12px;font-size:0.8rem;color:#aaa; }
+.page-info { color:#888; }
+.queue-item { padding:8px 12px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:4px;font-size:0.8rem; }
+.queue-item.empty { text-align:center;padding:12px;color:#888; }
+
+/* ===== 管道/训练/哨兵状态徽章 ===== */
+.pipeline-status-badge { padding:3px 10px;border-radius:10px;font-size:0.75rem;font-weight:500; }
+.pipeline-status-badge.online { background:rgba(46,204,113,0.15);color:#2ecc71; }
+.training-status-badge { padding:3px 10px;border-radius:10px;font-size:0.8rem;font-weight:500;background:rgba(100,100,100,0.15);color:#888; }
+.training-status-badge.active { background:rgba(46,204,113,0.15);color:#2ecc71; }
+.training-mode-btn { padding:4px 12px;border-radius:4px;font-size:0.8rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#ccc;cursor:pointer;transition:all 0.2s; }
+.training-mode-btn:hover { background:rgba(255,255,255,0.1); }
+.training-mode-btn.active { background:rgba(33,150,243,0.2);border-color:rgba(33,150,243,0.5);color:#64b5f6; }
+.sentinel-card { border:1px solid rgba(255,68,68,0.2); }
+.sentinel-card .card-header { background:rgba(255,68,68,0.08); }
+
+/* ===== ROS节点/传感器表格 ===== */
+.ros-node-list,.ros-topic-list { max-height:150px;overflow-y:auto;margin-top:6px;font-size:0.8rem; }
+.ros-list-empty { text-align:center;padding:12px;color:#888;font-size:0.8rem; }
+.ros-node-item,.ros-topic-item { padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px;margin-bottom:2px;display:flex;justify-content:space-between; }
+.sensor-table { width:100%;border-collapse:collapse;font-size:0.75rem; }
+.sensor-table th { text-align:left;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);color:#888;font-weight:500; }
+.sensor-table td { padding:5px 8px;border-bottom:1px solid rgba(255,255,255,0.03);color:#ccc; }
+.table-empty { text-align:center;color:#888;padding:12px; }
+
+/* ===== 监控区块 ===== */
+.monitor-section { margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.05); }
+.monitor-section h4 { font-size:0.9rem;color:#aaa;margin-bottom:8px; }
+
+/* ===== 连接状态点 ===== */
+.status-dot { display:inline-block;width:10px;height:10px;border-radius:50%; }
+.status-dot.online { background:#2ecc71;box-shadow:0 0 6px rgba(46,204,113,0.5); }
+.status-dot.offline { background:#e74c3c; }
+.status-dot.pending { background:#f39c12;animation:loading-pulse 1.5s ease-in-out infinite; }
+
+/* ===== 全宽卡片/卡片操作 ===== */
+.full-width { grid-column:1 / -1; }
+.card-actions { display:flex;gap:8px;align-items:center; }
+
+/* ===== API KEY/端点/代码块 ===== */
+.api-key-display { display:flex;gap:6px;align-items:center; }
+.api-key-input-row { display:flex;gap:6px;align-items:center; }
+.endpoint-list { margin-top:8px; }
+.endpoint-info { padding:8px;color:#888;font-size:0.8rem; }
+.endpoint-info.loading { animation:loading-pulse 1.5s ease-in-out infinite; }
+.code-block { margin:8px 0;padding:10px;background:rgba(0,0,0,0.3);border-radius:5px;font-size:0.8rem; }
+.code-block strong { color:#aaa;display:block;margin-bottom:4px; }
+.code-block pre { margin:0;overflow-x:auto; }
+.code-block code { color:#00ff88;font-family:'Consolas','Courier New',monospace;font-size:0.8rem; }
+
+/* ===== 进度条增强 ===== */
+.progress-bar { height:8px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden; }
+.progress-fill { height:100%;background:linear-gradient(90deg,#2196F3,#42a5f5);border-radius:4px;transition:width 0.6s ease; }
+
+/* ===== 机器人状态网格 ===== */
+.robot-status-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px; }
+.robot-info { margin-top:12px; }
+.robot-info h4 { font-size:0.9rem;color:#aaa;margin-bottom:8px; }
+.info-grid { display:grid;grid-template-columns:repeat(2,1fr);gap:6px; }
+.info-item { display:flex;justify-content:space-between;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:4px;font-size:0.8rem; }
+.info-label { color:#aaa; }
+.info-value { color:#ddd;font-weight:500; }
+
+/* ===== 传感器网格 ===== */
+.sensor-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px; }
+.sensor-item { display:flex;align-items:center;gap:10px;padding:10px;background:rgba(255,255,255,0.03);border-radius:6px; }
+.sensor-icon { font-size:1.3rem;width:32px;text-align:center; }
+.sensor-info { display:flex;flex-direction:column; }
+.sensor-name { font-size:0.85rem;font-weight:500; }
+.sensor-status { font-size:0.7rem;color:#888; }
+.sensor-data { font-size:0.7rem;color:#aaa; }
+
+/* ===== 图表控制 ===== */
+.chart-controls { display:flex;gap:4px;margin-top:8px; }
+.chart-controls .btn-xs { padding:3px 10px;font-size:0.7rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:4px;color:#ccc;cursor:pointer; }
+.chart-controls .btn-xs:hover { background:rgba(255,255,255,0.1); }
+.chart-controls .btn-xs.active { background:rgba(33,150,243,0.2);border-color:rgba(33,150,243,0.5);color:#64b5f6; }
+
+/* ===== 决策日志 ===== */
+.decision-log-empty { text-align:center;padding:20px;color:rgba(255,255,255,0.3);font-size:0.8rem; }
+
+/* ===== 安全性告警 ===== */
+.safety-alert-list { font-size:0.8rem; }
+.safety-alert-item { padding:8px 10px;background:rgba(255,68,68,0.06);border-left:3px solid rgba(255,68,68,0.3);border-radius:4px;margin-bottom:4px; }
+
+/* ===== 设备卡片 ===== */
+.device-cards-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px; }
+.pending-text { text-align:center;padding:20px;color:#888;font-size:0.85rem; }
+
+/* ===== 模型选中 ===== */
+.model-item.selected { border-color:#2196F3;background:rgba(33,150,243,0.1); }
+
+/* ===== 学习趋势 ===== */
+.metric-trend { display:flex;align-items:center;gap:4px;font-size:0.75rem; }
+.metric-trend .fas { font-size:0.7rem; }
+
+/* ===== 自我认知/TOM 布局优化 ===== */
+.cognition-grid { display:grid;grid-template-columns:1fr 1fr;gap:12px; }
+.cognition-subtitle { font-size:0.85rem;color:#aaa;margin-bottom:8px;font-weight:600; }
+.cognition-capability,.cognition-metrics,.cognition-knowledge,
+.cognition-goal,.cognition-learning,.cognition-identity,
+.cognition-text-box,.cognition-tom { padding:10px;background:rgba(255,255,255,0.03);border-radius:6px; }
+.cognition-text-box { min-height:60px; }
+.cog-text-content { font-size:0.8rem;color:#ccc;line-height:1.5; }
+.cognition-metric-list { display:flex;flex-direction:column;gap:6px; }
+.cog-metric { display:flex;align-items:center;gap:8px;font-size:0.8rem; }
+.cog-metric-label { color:#888;min-width:80px; }
+.cog-metric-value { color:#ddd;font-weight:500;min-width:50px; }
+.cog-metric-bar { flex:1;height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden; }
+.cog-metric-fill { height:100%;background:linear-gradient(90deg,#2196F3,#64b5f6);border-radius:2px;transition:width 0.5s ease; }
+.cognition-knowledge-stats { display:flex;flex-direction:column;gap:4px; }
+.cog-k-item { display:flex;align-items:center;gap:8px;font-size:0.8rem; }
+.cog-k-label { color:#888;min-width:70px; }
+.cog-k-value { color:#ddd;font-weight:500;min-width:40px; }
+.cognition-goal-content { display:flex;flex-direction:column;gap:6px; }
+.cog-goal-text { font-size:0.85rem;color:#ffd93d;font-weight:500; }
+.cog-goal-metrics { display:grid;grid-template-columns:repeat(4,1fr);gap:4px; }
+.cog-goal-item { text-align:center;padding:4px;background:rgba(255,255,255,0.03);border-radius:3px;font-size:0.7rem; }
+.cog-goal-label { color:#888;display:block; }
+.cog-goal-value { color:#ddd;display:block;font-weight:500; }
+.cognition-learning-stats { display:grid;grid-template-columns:repeat(2,1fr);gap:4px; }
+.cog-l-item { padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px;font-size:0.75rem; }
+.cog-l-label { color:#888; }
+.cog-l-value { color:#ddd;float:right;font-weight:500; }
+.cognition-identity-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:4px; }
+.cog-id-item { text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:4px; }
+.cog-id-value { font-size:1rem;font-weight:700;color:#64b5f6; }
+.cog-id-label { font-size:0.7rem;color:#888;margin-top:2px; }
+
+/* ===== ToM智能体卡片 ===== */
+.tom-agent-container { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px; }
+.tom-agent-card { padding:10px;background:rgba(255,255,255,0.03);border-radius:6px; }
+.tom-agent-header { display:flex;justify-content:space-between;align-items:center;margin-bottom:8px; }
+.tom-agent-name { font-size:0.85rem;font-weight:500; }
+.tom-agent-status { width:8px;height:8px;border-radius:50%;display:inline-block; }
+.tom-agent-status.online { background:#2ecc71; }
+.tom-agent-status.offline { background:#e74c3c; }
+.tom-dimension { display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:0.75rem; }
+.tom-dim-label { color:#888;min-width:30px; }
+.tom-dim-bar { flex:1;height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden; }
+.tom-dim-fill { height:100%;background:#2196F3;border-radius:2px;transition:width 0.5s ease; }
+.tom-dim-fill.tom-desire { background:#e91e63; }
+.tom-dim-fill.tom-intention { background:#ff9800; }
+.tom-dim-value { color:#ddd;min-width:30px;text-align:right; }
+.tom-belief-content { font-size:0.7rem;color:#888;margin-top:4px;padding:4px;background:rgba(0,0,0,0.2);border-radius:3px;min-height:20px; }
+.tom-summary { margin-top:8px;padding:8px;background:rgba(255,255,255,0.03);border-radius:4px;font-size:0.8rem; }
+.tom-summary-label { color:#aaa; }
+.tom-summary-value { color:#ddd; }
+
+/* ===== 修正趋势图 ===== */
+.correction-chart-legend { display:flex;gap:16px;margin-top:8px;font-size:0.75rem;color:#aaa; }
+.legend-dot { display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle; }
+.legend-dot.correction-before { background:#e74c3c; }
+.legend-dot.correction-after { background:#2ecc71; }
+.legend-dot.correction-improvement { background:#3498db; }
+
+/* ===== 对话增强 ===== */
+.dialogue-checkbox-label { display:flex;align-items:center;gap:4px;font-size:0.75rem;color:#aaa;cursor:pointer;user-select:none; }
+.voice-status-text { font-size:0.75rem;color:#888;margin-left:8px; }
+
+@media (max-width:768px) {
+    .cognition-grid { grid-template-columns:1fr; }
+    .cognition-identity-grid { grid-template-columns:repeat(2,1fr); }
+    .cog-goal-metrics { grid-template-columns:repeat(2,1fr); }
+    .tom-agent-container { grid-template-columns:1fr; }
+}

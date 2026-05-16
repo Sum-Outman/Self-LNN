@@ -10,6 +10,7 @@
 #define SELFLNN_LAPLACE_OPERATOR_H
 
 #include <stddef.h>
+#include "selflnn/core/common.h"
 
 #ifdef __cplusplus
 extern "C" {

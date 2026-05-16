@@ -1588,10 +1588,9 @@ GpuMemoryPool* gpu_memory_pool_create(GpuContext* context,
             
             // 初始化伙伴系统数据结构
             if (buddy_system_init(pool) != 0) {
-                // 伙伴系统初始化失败，回退到标准分配
+                GpuMemoryBlock* initial_block;
                 pool->config.strategy = GPU_POOL_STRATEGY_BEST_FIT;
-                // 创建初始空闲块作为回退
-                GpuMemoryBlock* initial_block = allocate_block_node();
+                initial_block = allocate_block_node();
                 if (initial_block) {
                     initial_block->address = NULL;  // 实际地址由后端分配
                     initial_block->size = pool->config.initial_size;
@@ -1601,6 +1600,7 @@ GpuMemoryPool* gpu_memory_pool_create(GpuContext* context,
                     pool->free_list = initial_block;
                 }
             }
+        
         } else {
             // 传统分配策略
             GpuMemoryBlock* initial_block = allocate_block_node();
@@ -1616,7 +1616,6 @@ GpuMemoryPool* gpu_memory_pool_create(GpuContext* context,
                 pool->stats.largest_free_block = pool->config.initial_size;
             }
         }
-    }
     
     return pool;
 }
@@ -2006,15 +2005,14 @@ int gpu_memory_pool_free(GpuMemoryPool* pool, void* ptr) {
     }
 
     /* 周期性深度压缩：每1000次释放触发一次全池压缩 */
-    pool->stats.alloc_count++;
-    if (pool->stats.alloc_count % 1000 == 0 && pool->config.enable_defragmentation) {
+    pool->stats.allocation_count++;
+    if (pool->stats.allocation_count % 1000 == 0 && pool->config.enable_defragmentation) {
         size_t total_free = pool->stats.free_memory;
         size_t total_capacity = pool->config.initial_size > 0 ?
                                 pool->config.initial_size : pool->stats.total_memory;
-        /* 当空闲内存超过总容量50%时执行深度压缩 */
         if (total_capacity > 0 && total_free > total_capacity / 2) {
             gpu_memory_pool_defragment(pool);
-            pool->stats.compaction_count++;
+            pool->stats.defrag_count++;
         }
     }
     
