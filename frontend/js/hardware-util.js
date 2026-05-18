@@ -130,6 +130,32 @@ var HardwareScanUtil = {
             result.diagnosticLines.push('后端扫描失败: ' + e.message);
         }
 
+        /* ZSFABC-025修复: 额外调用设备列表API获取后端管理的所有硬件(串口/ROS节点/GPU等) */
+        try {
+            if (window.SelfLnnApi && typeof window.SelfLnnApi.request === 'function') {
+                var devResp = await window.SelfLnnApi.request('/devices/list', { method: 'GET' });
+                if (devResp && devResp.ok) {
+                    var devData = await devResp.json();
+                    if (devData && devData.devices) {
+                        result.raw_devices = devData.devices;
+                        result.diagnosticLines.push('--- 后端管理设备 ---');
+                        var shown = 0;
+                        devData.devices.forEach(function(d) {
+                            if (shown < 30) {
+                                result.diagnosticLines.push('  [' + (d.type || d.kind || '未知') + '] ' + (d.name || d.id || '设备'));
+                                shown++;
+                            }
+                        });
+                        if (devData.devices.length > 30) {
+                            result.diagnosticLines.push('  ... 共 ' + devData.devices.length + ' 个设备');
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            /* 设备列表API失败不阻断扫描流程 */
+        }
+
         /* 第二步：浏览器端检测作为补充 */
         try {
             if (navigator.hardwareConcurrency) {

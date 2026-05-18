@@ -15,7 +15,6 @@
 - [快速开始 / Quick Start](#快速开始--quick-start)
 - [部署指南 / Deployment Guide](#部署指南--deployment-guide)
 - [功能说明 / Feature Description](#功能说明--feature-description)
-
 - [AGI 机器人功能 / AGI Robot Features](#agi-机器人功能--agi-robot-features)
 - [维护指南 / Maintenance Guide](#维护指南--maintenance-guide)
 - [开发指南 / Development Guide](#开发指南--development-guide)

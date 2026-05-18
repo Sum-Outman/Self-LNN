@@ -386,7 +386,7 @@ cd build && ctest && cd ..
 
 ### 8.3 WSL网络问题 / WSL Network Issues
 
-参见 (See): [WSL_网络故障排除.md](WSL_网络故障排除.md)
+参见 (See): [WSL_Network_Troubleshooting.md](WSL_Network_Troubleshooting.md)
 
 ## 9. 性能优化 / Performance Tuning
 
@@ -428,4 +428,4 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-march=native -mtune=
 
 > **更新 (Updated):** 2026-05-04
 > **版本 (Version):** SELF-LNN v1.0.0
-> **相关文档 (Related Docs):** [部署指南](../docs/DEPLOYMENT_GUIDE_ZH.md), [离线部署指南](离线部署指南.md), [WSL网络故障排除](WSL_网络故障排除.md)
+> **相关文档 (Related Docs):** [部署指南](DEPLOYMENT_GUIDE_ZH.md), [离线部署指南](Offline_Deployment_Guide.md), [WSL网络故障排除](WSL_Network_Troubleshooting.md)

@@ -398,4 +398,42 @@ function sim3dClearAll() { g_sim3d.robots=[]; g_sim3d.objects=[]; document.getEl
 
 /* ===== 额外仿真控制 ===== */
 async function start3DReconstruction() { const m=document.getElementById('recon-mode').value; try{var r=await SelfLnnApi.request('/simulation/reconstruct',{method:'POST',body:JSON.stringify({mode:m})},1);var d=await r.json();if(d.success){document.getElementById('recon-points').textContent=d.point_count||0;document.getElementById('recon-objects').textContent=d.object_count||0;}}catch(e){console.warn('3D重建失败:',e.message);} }
-async function executeCommand() { var c=document.getElementById('cmd-input').value;if(!c)return;var o=document.getElementById('cmd-output');if(c.length>256){o.textContent='命令过长(>256字符)';return;}if(/[;&|`$(){}<>\\]/.test(c)){o.textContent='包含不安全字符';return;}o.textContent='执行中...';try{var r=await SelfLnnApi.request('/computer/execute',{method:'POST',body:JSON.stringify({command:c})},1);var d=await r.json();o.textContent=d.output||d.error||'命令已执行';}catch(e){o.textContent=e.message;} }
+async function executeCommand() {
+    /* ZSFABC-020: 增强命令安全过滤 */
+    var c = document.getElementById('cmd-input').value.trim();
+    if (!c) return;
+    var o = document.getElementById('cmd-output');
+    if (c.length > 256) {
+        o.textContent = '命令过长(>256字符)';
+        return;
+    }
+    /* 危险命令黑名单 */
+    var dangerousPatterns = [
+        /rm\s+-rf/i, /dd\s+if=/i, /mkfs/i, />\s*\/dev\//i,
+        /shutdown/i, /reboot/i, /halt/i, /poweroff/i,
+        /:\(\)\s*\{/, /fork\s*bomb/i,
+        /chmod\s+777\s+\//i, /wget.*\|.*sh/i, /curl.*\|.*sh/i
+    ];
+    for (var i = 0; i < dangerousPatterns.length; i++) {
+        if (dangerousPatterns[i].test(c)) {
+            o.textContent = '⚠️ 安全拦截: 命令包含危险操作';
+            return;
+        }
+    }
+    /* 不安全字符过滤 */
+    if (/[;&|`$(){}<>\\]/.test(c)) {
+        o.textContent = '⚠️ 安全拦截: 包含不安全字符';
+        return;
+    }
+    o.textContent = '执行中...';
+    try {
+        var r = await SelfLnnApi.request('/computer/execute', {
+            method: 'POST',
+            body: JSON.stringify({ command: c })
+        }, 1);
+        var d = await r.json();
+        o.textContent = d.output || d.error || '命令已执行';
+    } catch (e) {
+        o.textContent = e.message;
+    }
+}

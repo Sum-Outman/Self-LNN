@@ -3,7 +3,7 @@
 
 > **版本 (Version):** 1.0.0 | **适用环境 (Environment):** WSL 2, Ubuntu 22.04/24.04
 > **核心系统 (Core System):** SELF-LNN AGI (CfC Liquid Neural Network)
-> **相关文档:** [UBUNTU_部署指南.md](UBUNTU_部署指南.md), [离线部署指南.md](离线部署指南.md)
+> **相关文档:** [Deployment_Ubuntu.md](Deployment_Ubuntu.md), [Offline_Deployment_Guide.md](Offline_Deployment_Guide.md)
 
 ---
 
@@ -371,4 +371,4 @@ python3 scripts/verify_project.py
 > **最后更新 (Last Updated):** 2026-05-04
 > **适用环境 (Environment):** WSL 2, Ubuntu 22.04/24.04
 > **SELF-LNN 外部依赖:** 无 (None) — 完全离线可运行 (Fully offline capable)
-> **相关文档:** [UBUNTU_部署指南.md](UBUNTU_部署指南.md), [离线部署指南.md](离线部署指南.md)
+> **相关文档:** [Deployment_Ubuntu.md](Deployment_Ubuntu.md), [Offline_Deployment_Guide.md](Offline_Deployment_Guide.md)

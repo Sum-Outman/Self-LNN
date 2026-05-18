@@ -146,9 +146,10 @@
         if (trainingWs && (trainingWs.readyState === WebSocket.CONNECTING || trainingWs.readyState === WebSocket.OPEN)) {
             return;
         }
+        /* ZSFABC-011修复: WebSocket端口统一使用SELFLNN_CONFIG.port，而非浏览器页面端口 */
         var scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        var port = window.location.port || '8080';
-        trainingWs = new WebSocket(scheme + '//' + window.location.hostname + ':' + port);
+        var port = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.port) || 8080;
+        trainingWs = new WebSocket(scheme + '//' + (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.host || window.location.hostname) + ':' + port + '/ws');
         trainingWs.onopen = function () {
             wsReconnectAttempt = 0;
             var el = document.getElementById('ws-status');

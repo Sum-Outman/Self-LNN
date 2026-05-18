@@ -55,7 +55,7 @@ sudo apt-get install -y build-essential cmake
 
 # 如果需要GPU支持（可选），安装对应驱动
 # For GPU support (optional), install appropriate drivers
-# See: docs/DEPLOYMENT_GUIDE_ZH.md
+# See: DEPLOYMENT_GUIDE_ZH.md
 ```
 
 #### Windows
@@ -108,8 +108,8 @@ cat > slnn-offline-bundle/README_OFFLINE.md << 'EOF'
 # SELF-LNN 离线部署包 / Offline Deployment Bundle
 # 完全自包含，无外部依赖
 # Fully self-contained, zero external dependencies
-# 部署步骤见 docs/离线部署指南.md
-# See docs/离线部署指南.md for deployment steps
+# 部署步骤见 Offline_Deployment_Guide.md
+# See Offline_Deployment_Guide.md for deployment steps
 EOF
 
 # 打包 (Package)

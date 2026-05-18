@@ -384,8 +384,10 @@ class DialogueEnhanced {
             return true;
         }
         if (!wsUrl) {
+            /* ZSFABC-008修复: WebSocket端口统一使用后端HTTP端口(8080)，
+             * 而非不存在的3090端口。pushPort从未在SELFLNN_CONFIG中定义 */
             var host = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.host) || 'localhost';
-            var port = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.pushPort) || 3090;
+            var port = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.port) || 8080;
             wsUrl = 'ws://' + host + ':' + port + '/ws';
         }
         this.wsUrl = wsUrl;

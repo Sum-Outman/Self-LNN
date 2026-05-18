@@ -36,7 +36,7 @@ class DataEngine {
 
         this._history = {};
         this._pollModules = new Map();
-        this._baseInterval = 5000;
+        this._baseInterval = 2000;  /* ZSFABC-018: 降低轮询间隔至2秒提升实时性 */
     }
 
     registerModule(name, intervalMs, callback) {

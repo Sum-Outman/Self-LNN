@@ -301,12 +301,18 @@ class AGIController {
         }
     }
 
+    /* ZSFABC-001修复: api-service.js.request()已自动添加baseURL(/api)前缀，
+     * 故此处传入endpoint不应再含/api前缀，否则产生双重/api/api/xxx导致404 */
     async _apiPost(endpoint, data) {
         try {
             if (!window.SelfLnnApi) {
                 throw new Error('API服务不可用');
             }
-            const response = await window.SelfLnnApi.request(endpoint, {
+            var fixedEndpoint = endpoint;
+            if (fixedEndpoint.indexOf('/api/') === 0) {
+                fixedEndpoint = fixedEndpoint.substring(4);
+            }
+            const response = await window.SelfLnnApi.request(fixedEndpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
@@ -329,7 +335,11 @@ class AGIController {
             if (!window.SelfLnnApi) {
                 throw new Error('API服务不可用');
             }
-            const response = await window.SelfLnnApi.request(endpoint, { method: 'GET' });
+            var fixedEndpoint = endpoint;
+            if (fixedEndpoint.indexOf('/api/') === 0) {
+                fixedEndpoint = fixedEndpoint.substring(4);
+            }
+            const response = await window.SelfLnnApi.request(fixedEndpoint, { method: 'GET' });
             if (!response.ok) {
                 throw new Error('请求失败: HTTP ' + response.status);
             }

@@ -115,6 +115,8 @@ var g_dataEngineFirstConnect = true;
 })();
 
 async function refreshAllSections() {
+    /* ZSFABC-016修复: 添加多模态状态刷新到定时更新周期中 */
+    /* ZSFABC-017修复: 所有刷新函数统一从DataEngine读取真实数据，互不覆盖 */
     var delayMs = 800;
     var sections = [
         { name: 'dashboard', fn: refreshDashboard },
@@ -123,6 +125,7 @@ async function refreshAllSections() {
         { name: 'consistency', fn: runConsistencyCheck },
         { name: 'learning', fn: refreshLearningMetrics },
         { name: 'memory', fn: refreshMemoryStats },
+        { name: 'multimodal', fn: refreshMultimodalStatus },
         { name: 'apiUsage', fn: refreshApiUsageStats },
         { name: 'lnn', fn: refreshLNNStatus },
         { name: 'sysInfo', fn: refreshSystemInfo },
@@ -144,12 +147,23 @@ async function refreshAllSections() {
             await new Promise(function(resolve) { setTimeout(resolve, delayMs); });
         }
     }
-    setEl('#dialogue-total-rounds', '就绪');
-    setEl('#dialogue-avg-time', '就绪');
-    setEl('#dialogue-model-status', '在线');
-    setEl('#dash-api-address', 'http://localhost:8080/api');
-    setEl('#cognition-status-badge', '就绪');
-    setEl('#health-status-text', '运行正常');
+    /* ZSFABC-002修复: 删除硬编码假数据，改为读取真实系统状态 */
+    var systemData = g_dataEngine ? g_dataEngine.getData() : null;
+    if (systemData && systemData.system && systemData.system._connected) {
+        setEl('#dialogue-total-rounds', systemData.dialogue ? (systemData.dialogue.total_rounds || '0') : '--');
+        setEl('#dialogue-avg-time', systemData.dialogue ? (systemData.dialogue.avg_response_time_ms ? systemData.dialogue.avg_response_time_ms + 'ms' : '--') : '--');
+        setEl('#dialogue-model-status', systemData.dialogue && systemData.dialogue.model_loaded ? '在线' : '离线');
+        setEl('#dash-api-address', (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.host ? 'http://' + window.SELFLNN_CONFIG.host + ':' + (window.SELFLNN_CONFIG.port || 8080) + '/api' : '未连接'));
+        setEl('#cognition-status-badge', systemData.agi && systemData.agi.cognition_active ? '活跃' : '待命中');
+        setEl('#health-status-text', systemData.system.healthy ? '运行正常' : '异常');
+    } else {
+        setEl('#dialogue-total-rounds', '--');
+        setEl('#dialogue-avg-time', '--');
+        setEl('#dialogue-model-status', '未连接');
+        setEl('#dash-api-address', '未连接');
+        setEl('#cognition-status-badge', '未连接');
+        setEl('#health-status-text', '后端未连接');
+    }
 }
 
 /**

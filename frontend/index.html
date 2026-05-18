@@ -51,7 +51,8 @@
         /* 前端配置 - 可在此处修改服务器地址和端口 */
         window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
             host: 'localhost',
-            port: 8080
+            port: 8080,
+            pushPort: 8080   /* ZSFABC-023: WebSocket推送端口，与HTTP端口一致 */
         };
         /* 全局保护：合并页面中hidden section的DOM引用安全 */
         window._e = function(id,fn) { var el=document.getElementById(id); if(el) try{fn(el)}catch(e){} };
@@ -4017,13 +4018,8 @@ response = requests.get(
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
 
-        async function emergencyStop() {
-            if (!confirm('确认紧急停止所有设备？')) return;
-            try {
-                var data = await SelfLnnApi.emergencyStop('device');
-                showNotification(data.success ? '已发送紧急停止信号' : '操作失败', data.success ? 'warning' : 'danger');
-            } catch(e) { showNotification('操作失败', 'danger'); }
-        }
+        /* ZSFABC-012修复: 统一调用main.js中的emergencyStop函数，避免重复定义 */
+        /* emergencyStop 已由 main.js 统一管理 */
 
         window.setGlobalMode = setGlobalMode;
         window.emergencyStop = emergencyStop;
@@ -4447,18 +4443,7 @@ response = requests.get(
             } catch(e) { console.warn('资源轮询失败:', e.message); }
         }
 
-        async function emergencyStop() {
-            if (!confirm('确认执行紧急停止？这将立即停止所有操作！')) return;
-            try {
-                var result = await SelfLnnApi.emergencyStop('safety');
-                if (result.success) {
-                    showNotification('紧急停止已激活', 'warning');
-                } else {
-                    showNotification('操作失败: ' + (result.error || '未知错误'), 'danger');
-                }
-                pollSafety();
-            } catch(e) { showNotification('操作失败: ' + e.message, 'danger'); }
-        }
+        /* ZSFABC-012修复: emergencyStop 已由 main.js 统一管理 */
 
         async function softStop() {
             if (!confirm('确认执行软停止？当前任务将完成后停止。')) return;
@@ -4632,6 +4617,26 @@ response = requests.get(
                 document.getElementById('exec-status').textContent = data.success ? '已执行' : '失败';
             } catch(e) { document.getElementById('exec-status').textContent = '连接失败'; }
         }
+    /* ZSFABC-024: 系统日志桥接 - 将console输出同步到页面日志面板 */
+    window._sysLog = function(level, msg) {
+        var panel = document.getElementById('sys-log-panel');
+        if (!panel) return;
+        var colors = {log:'#aaa',warn:'#e6a817',error:'#ff4444',info:'#3b9eff',debug:'#666'};
+        var color = colors[level] || '#aaa';
+        var time = new Date().toLocaleTimeString();
+        var entry = document.createElement('div');
+        entry.style.color = color;
+        entry.textContent = '[' + time + '] ' + msg;
+        panel.insertBefore(entry, panel.firstChild);
+        if (panel.children.length > 100) panel.removeChild(panel.lastChild);
+    };
+    /* 劫持console方法输出到日志面板 */
+    (function(){
+        var _log=console.log,_warn=console.warn,_err=console.error;
+        console.log=function(){ _log.apply(console,arguments); try{window._sysLog('log',Array.prototype.join.call(arguments,' '))}catch(e){} };
+        console.warn=function(){ _warn.apply(console,arguments); try{window._sysLog('warn',Array.prototype.join.call(arguments,' '))}catch(e){} };
+        console.error=function(){ _err.apply(console,arguments); try{window._sysLog('error',Array.prototype.join.call(arguments,' '))}catch(e){} };
+    })();
     </script>
 
             </section>
@@ -6413,6 +6418,29 @@ print(r.json())</pre>
                         <button onclick="toggleCameraPreview()" class="btn btn-sm btn-primary" style="width:100%;margin-top:8px">启动摄像头</button>
                     </div>
                 </div>
+                <!-- ZSFABC-019: 双目空间感知预览 -->
+                <div class="card">
+                    <div class="card-header"><h3>👁️ 双目空间感知</h3></div>
+                    <div class="card-content" style="text-align:center">
+                        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+                            <div>
+                                <div style="font-size:10px;color:#888;margin-bottom:4px">左目</div>
+                                <canvas id="camera-preview-left" width="160" height="120" style="background:#0a0a1a;border-radius:4px"></canvas>
+                            </div>
+                            <div>
+                                <div style="font-size:10px;color:#888;margin-bottom:4px">右目</div>
+                                <canvas id="camera-preview-right" width="160" height="120" style="background:#0a0a1a;border-radius:4px"></canvas>
+                            </div>
+                            <div>
+                                <div style="font-size:10px;color:#888;margin-bottom:4px">深度图</div>
+                                <canvas id="camera-preview-depth" width="160" height="120" style="background:#0a0a1a;border-radius:4px"></canvas>
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.4)" id="stereo-status">双目感知：待启动</div>
+                        <div style="margin-top:4px;font-size:11px;color:#666" id="stereo-depth-value">深度范围: --</div>
+                        <button onclick="if(window.g_deviceManager) g_deviceManager.enableDualCameraSpatialPerception('camera-left','camera-right',{});" class="btn btn-sm btn-primary" style="width:100%;margin-top:8px">启动双目感知</button>
+                    </div>
+                </div>
                 <div class="card">
                     <div class="card-header"><h3>🎵 音频波形</h3></div>
                     <div class="card-content" style="text-align:center">
@@ -7391,6 +7419,19 @@ print(r.json())</pre>
         });
     </script>
 
+        <!-- ZSFABC-024: 系统运行日志面板 -->
+        <section class="card full-width" style="margin-bottom:20px">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+                <h3>📋 系统运行日志</h3>
+                <button onclick="var p=document.getElementById('sys-log-panel');p.innerHTML='';" class="btn btn-sm" style="background:#333;color:#aaa;border:1px solid #555">清空</button>
+            </div>
+            <div class="card-content">
+                <div id="sys-log-panel" style="max-height:200px;overflow-y:auto;font-family:Consolas,monospace;font-size:11px;color:#aaa;background:#0a0a14;border-radius:4px;padding:8px;line-height:1.6">
+                    <div style="color:#666">等待系统事件...</div>
+                </div>
+            </div>
+        </section>
+
             </section></main>
 
         <!-- 底部状态栏 -->
@@ -7503,25 +7544,7 @@ print(r.json())</pre>
             }
         }
         
-        async function emergencyStop() {
-            try {
-                if (confirm('确定要紧急停止所有任务吗？这会导致所有正在进行的任务中断。')) {
-                    showLoading('正在停止所有任务...');
-                    var result = await SelfLnnApi.emergencyStop('system');
-                    if (result.success) {
-                        showInlineSuccess('紧急停止成功: 已停止' + ((result.data && result.data.stopped_tasks) || 0) + '个任务');
-                        updateSystemStatusAfterStop(result.data);
-                    } else {
-                        showInlineError('紧急停止失败: ' + (result.error || '未知错误'));
-                    }
-                }
-            } catch (error) {
-                showInlineError('紧急停止失败: ' + error.message);
-                console.error('紧急停止异常:', error);
-            } finally {
-                hideLoading();
-            }
-        }
+        /* ZSFABC-012修复: emergencyStop 已由 main.js 统一管理 */
         
         /* ===== API数据归一化——将后端嵌套格式转为dashboard期望的扁平格式 ===== */
         function _normMemory(d) {

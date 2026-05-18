@@ -225,4 +225,146 @@ sudo rm -rf /var/tmp/*
 sudo apt autoremove --purge
 ```
 
-### 阶段3：修复网络问题 / Phase
+### 阶段3：修复网络问题 / Phase 3: Repair Network Issues
+
+#### 3.1 重置网络配置 / Reset Network Configuration
+```bash
+# 停止网络管理器 / Stop network manager
+sudo systemctl stop NetworkManager
+sudo systemctl stop systemd-networkd
+
+# 清除网络配置 / Clear network configuration
+sudo rm -f /etc/netplan/*.yaml
+sudo rm -f /etc/network/interfaces.d/*
+sudo cp /etc/network/interfaces /etc/network/interfaces.bak
+
+# 恢复默认配置 / Restore default configuration
+cat > /etc/network/interfaces << 'EOF'
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+EOF
+
+# 重启网络 / Restart network
+sudo systemctl start systemd-networkd
+sudo systemctl enable systemd-networkd
+```
+
+#### 3.2 修复DNS配置 / Fix DNS Configuration
+```bash
+# 恢复DNS配置 / Restore DNS configuration
+sudo rm -f /etc/resolv.conf
+echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+echo "nameserver 8.8.4.4" | sudo tee -a /etc/resolv.conf
+sudo chattr +i /etc/resolv.conf
+```
+
+#### 3.3 修复hosts文件 / Fix Hosts File
+```bash
+# 确保localhost解析正常 / Ensure localhost resolution
+echo "127.0.0.1 localhost" | sudo tee -a /etc/hosts
+echo "127.0.1.1 $(hostname)" | sudo tee -a /etc/hosts
+```
+
+### 阶段4：修复系统服务 / Phase 4: Repair System Services
+
+#### 4.1 检查关键服务状态 / Check Critical Service Status
+```bash
+# 列出所有失败的服务 / List all failed services
+sudo systemctl --failed
+
+# 检查关键服务 / Check critical services
+sudo systemctl status ssh
+sudo systemctl status cron
+sudo systemctl status systemd-journald
+```
+
+#### 4.2 修复损坏的软件包 / Repair Broken Packages
+```bash
+# 修复dpkg状态 / Fix dpkg state
+sudo dpkg --configure -a
+
+# 修复依赖关系 / Fix dependencies
+sudo apt-get install -f -y
+
+# 更新软件包数据库 / Update package database
+sudo apt-get update
+sudo apt-get upgrade -y
+
+# 清理和自动修复 / Clean and auto-fix
+sudo apt-get autoremove -y
+sudo apt-get autoclean
+```
+
+### 阶段5：验证恢复 / Phase 5: Verify Recovery
+
+#### 5.1 系统功能验证 / System Function Verification
+```bash
+# 检查磁盘 / Check disk
+df -h
+df -i
+
+# 检查内存 / Check memory
+free -h
+
+# 检查系统正常运行时间 / Check system uptime
+uptime
+
+# 检查内核日志 / Check kernel logs
+sudo dmesg | tail -20
+```
+
+#### 5.2 网络连通性验证 / Network Connectivity Verification
+```bash
+# 测试本地回环 / Test local loopback
+ping -c 4 127.0.0.1
+
+# 测试外网连通（如果有） / Test external connectivity (if available)
+ping -c 4 8.8.8.8
+
+# 测试DNS解析 / Test DNS resolution
+nslookup google.com
+```
+
+#### 5.3 服务验证 / Service Verification
+```bash
+# 确认所有关键服务正常运行 / Confirm all critical services running
+sudo systemctl is-active ssh
+sudo systemctl is-active systemd-networkd
+sudo systemctl is-active cron
+```
+
+---
+
+## 🛡️ 预防措施 / Prevention Measures
+
+### 定期维护 / Regular Maintenance
+```bash
+# 每周检查磁盘空间 / Weekly disk space check
+df -h | grep -v tmpfs
+
+# 每周清理日志 / Weekly log cleanup
+sudo journalctl --vacuum-time=7d
+
+# 每月清理旧内核 / Monthly old kernel cleanup
+sudo apt autoremove --purge
+
+# 定期备份关键配置 / Regular critical config backup
+sudo tar -czf /backup/system-config-$(date +%Y%m%d).tar.gz /etc/
+```
+
+### 配置自动恢复 / Configure Automatic Recovery
+```bash
+# 编辑GRUB配置启用故障保护模式 / Edit GRUB config to enable failsafe mode
+sudo sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=10/' /etc/default/grub
+sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash panic=5"/' /etc/default/grub
+sudo update-grub
+```
+
+---
+
+> **最后更新 (Last Updated):** 2026-05-04
+> **适用环境 (Environment):** Ubuntu 22.04/24.04, WSL 2
+> **相关文档 (Related Docs):** [Deployment_Ubuntu.md](Deployment_Ubuntu.md), [WSL_Network_Troubleshooting.md](WSL_Network_Troubleshooting.md)
