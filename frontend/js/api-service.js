@@ -24,9 +24,9 @@ class ApiService {
         this._apiKey = localStorage.getItem('selflnn_api_key') || null;
 
         this.requestConfig = {
-            retryCount: 3,
-            retryDelay: 2000,
-            timeout: 30000,
+            retryCount: 1,
+            retryDelay: 3000,
+            timeout: 15000,
             useExponentialBackoff: true,
             maxRetryDelay: 60000
         };
@@ -49,7 +49,7 @@ class ApiService {
 
         /* 请求队列：管理高并发请求，避免同时发出过多请求 */
         this.requestQueue = [];
-        this.maxConcurrentRequests = 1;
+        this.maxConcurrentRequests = 3;
         this.activeRequestCount = 0;
         this.requestQueueProcessing = false;
         this._drainInterval = 0;
@@ -4838,40 +4838,6 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /**
-     * 发送对话消息
-     */
-    async sendDialogueMessage(message, sessionId) {
-        try {
-            const response = await this.request('/dialogue/send', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    message: message,
-                    session_id: sessionId || ''
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
-            const data = await response.json();
-            return {
-                success: true,
-                data: data
-            };
-        } catch (error) {
-            console.error('发送对话消息失败:', error);
-            return {
-                success: false,
-                error: error.message || '对话后端连接失败，请检查服务器状态',
-                data: null
-            };
-        }
-    }
 }
 
 /**

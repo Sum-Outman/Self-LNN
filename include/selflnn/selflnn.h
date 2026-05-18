@@ -360,6 +360,12 @@ SELFLNN_API void* selflnn_get_speech_recognizer(void);
 
 SELFLNN_API void selflnn_set_speech_recognizer(void* sr);
 
+/* ZSF-001修复: AGI后台任务所需的状态访问器 */
+SELFLNN_API void* selflnn_get_knowledge_base(void);
+SELFLNN_API int selflnn_get_recent_state(void* lnn, float* state, int dim);
+SELFLNN_API int selflnn_get_recent_output(void* lnn, float* output, int dim);
+SELFLNN_API int selflnn_get_active_goal(void* kb, float* goal, int dim);
+
 // ============================================
 // 高级功能API（用于示例程序）
 // ============================================

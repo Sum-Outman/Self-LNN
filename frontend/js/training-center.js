@@ -96,11 +96,11 @@
         try {
             var data = await SelfLnnApi[methodName](config);
             if (data.training && data.training.status !== 'error') {
-                alert('训练任务已启动');
+                window.showNotification('训练任务已启动', 'success');
                 startPolling();
                 pollTraining();
-            } else { alert('启动失败: ' + (data.error || '未知错误')); }
-        } catch (e) { alert('连接失败: ' + e.message); }
+            } else { window.showNotification('启动失败: ' + (data.error || '未知错误'), 'danger'); }
+        } catch (e) { window.showNotification('连接失败: ' + e.message, 'danger'); }
     }
 
     async function pollTraining() {

@@ -1,9 +1,5 @@
 #include "selflnn/backend/backend.h"
 #include "selflnn/self_cognition.h"
-
-#ifdef _MSC_VER
-#pragma warning(disable:4013 4047 4245)  /* pre-existing: selflnn_get_recent_* etc */
-#endif
 #include "selflnn/metacognition.h"
 #include "selflnn/multi_agent.h"
 #include "selflnn/neural_architecture_search.h"
@@ -17,11 +13,13 @@
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/planning.h"
 
+/* ZSF-018修复: 移除重复include，统一管理所有头文件引用 */
 /* 能力开关 */
 #include "selflnn/agi/capability_switch.h"
 #include "selflnn/learning/learning.h"
 #include "selflnn/learning/imitation_learning.h"
 #include "selflnn/learning/meta_learning.h"
+#include "selflnn/learning/online_learning.h"
 #include "selflnn/multimodal/multimodal.h"
 #include "selflnn/multimodal/multimodal_manager.h"
 #include "selflnn/multimodal/dialogue.h"
@@ -37,6 +35,9 @@
 #include "selflnn/core/port_config.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/selflnn.h"
+#include "selflnn/evolution/evolution_engine.h"
+#include "selflnn/safety/safety_monitor.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,17 +53,6 @@
 #include <unistd.h>
 #include <pthread.h>
 #endif
-
-/* AGI后台任务所需子系统引用（补充include：online_learning和evolution_engine） */
-#include "selflnn/selflnn.h"
-#include "selflnn/learning/online_learning.h"
-#include "selflnn/evolution/evolution_engine.h"
-#include "selflnn/self_cognition.h"
-#include "selflnn/metacognition.h"
-#include "selflnn/multimodal/dialogue.h"
-#include "selflnn/safety/safety_monitor.h"
-#include "selflnn/concurrency/thread_pool.h"
-#include "selflnn/reasoning/planning.h"
 
 /* 静态函数前向声明 */
 static int is_subsystem_healthy_int(const char* name, void* handle, int (*is_init)(void*));
@@ -326,7 +316,7 @@ static void agi_bg_metacognition(void) {
         /* 实际校准：降低在线学习率 */
         void* learner = selflnn_get_online_learner();
         if (learner) {
-            online_learner_adjust_learning_rate((OnlineLearner*)learner, NULL, -1);
+            online_learner_adjust_learning_rate((OnlineLearner*)learner, NULL, 0);
         }
     }
     if ((float)error_count / (float)(g_agi_self.online_learn_success + g_agi_self.evolution_success + 1) > 0.3f) {

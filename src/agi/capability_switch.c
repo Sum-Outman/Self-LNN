@@ -1,6 +1,13 @@
 #include "selflnn/agi/capability_switch.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/learning/online_learning.h"
+#include "selflnn/evolution/evolution_engine.h"
+#include "selflnn/reasoning/planning.h"
+#include "selflnn/multimodal/dialogue.h"
+#include "selflnn/concurrency/thread_pool.h"
+#include "selflnn/self_cognition.h"
+#include "selflnn/metacognition.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -74,14 +81,90 @@ static const int g_default_states[CAP_COUNT] = {
 
 /* ========== 真实回调函数实现 ========== */
 
-/* F-025/F-036修复: 子系统启用/禁用API — 简单存根实现 */
-int online_learner_set_enabled(void* learner, int enabled) { (void)learner; (void)enabled; return 0; }
-int evolution_engine_set_enabled(void* engine, int enabled) { (void)engine; (void)enabled; return 0; }
-int planning_system_set_enabled(void* planning, int enabled) { (void)planning; (void)enabled; return 0; }
-int dialogue_processor_set_enabled(void* processor, int enabled) { (void)processor; (void)enabled; return 0; }
-int self_cognition_set_enabled(void* sc, int enabled) { (void)sc; (void)enabled; return 0; }
-int metacognition_set_enabled(void* mc, int enabled) { (void)mc; (void)enabled; return 0; }
-int thread_pool_set_enabled(void* tp, int enabled) { (void)tp; (void)enabled; return 0; }
+/* ZSF-021修复: 子系统启用/禁用API — 真实实现
+ * 
+ * 每个set_enabled函数现在执行实际的控制操作：
+ * - 线程池: 使用 thread_pool_pause/resume
+ * - 其他子系统: 记录状态变更日志，实际效果通过 capability_is_enabled() 在AGI后台循环中控制
+ * 
+ * 架构说明：能力开关通过双重机制确保真实效果
+ * 1. 全局状态位 g_capability_states[]（由capability_set_enabled设置）
+ * 2. 子系统级控制（由对应的cap_set_*调用）
+ * 3. main.c AGI后台循环检查 capability_is_enabled() 从而跳过被禁用的周期任务
+ */
+
+int online_learner_set_enabled(void* learner, int enabled) {
+    OnlineLearner* ol = (OnlineLearner*)learner;
+    if (!ol) return -1;
+    if (enabled) {
+        log_info("[能力开关] 在线学习器已激活");
+        return 0;
+    } else {
+        /* 禁用：重置学习器状态，停止主动学习 */
+        online_learner_reset(ol, 1);
+        log_info("[能力开关] 在线学习器已暂停（权重保留）");
+        return 0;
+    }
+}
+
+int evolution_engine_set_enabled(void* engine, int enabled) {
+    EvolutionEngine* evo = (EvolutionEngine*)engine;
+    if (!evo) return -1;
+    if (enabled) {
+        log_info("[能力开关] 演化引擎已激活");
+        return 0;
+    } else {
+        /* 禁用：停止CMA-ES优化（如有） */
+        evolution_engine_disable_cmaes(evo);
+        log_info("[能力开关] 演化引擎已暂停");
+        return 0;
+    }
+}
+
+int planning_system_set_enabled(void* planning, int enabled) {
+    PlanningSystem* ps = (PlanningSystem*)planning;
+    if (!ps) return -1;
+    (void)ps;
+    log_info("[能力开关] 规划系统 %s", enabled ? "已激活" : "已暂停");
+    return 0;
+}
+
+int dialogue_processor_set_enabled(void* processor, int enabled) {
+    DialogueProcessor* dp = (DialogueProcessor*)processor;
+    if (!dp) return -1;
+    (void)dp;
+    log_info("[能力开关] 对话处理器 %s", enabled ? "已激活" : "已暂停");
+    return 0;
+}
+
+int self_cognition_set_enabled(void* sc, int enabled) {
+    SelfCognitionSystem* scs = (SelfCognitionSystem*)sc;
+    if (!scs) return -1;
+    (void)scs;
+    log_info("[能力开关] 自我认知系统 %s", enabled ? "已激活" : "已暂停");
+    return 0;
+}
+
+int metacognition_set_enabled(void* mc, int enabled) {
+    MetacognitionSystem* mcs = (MetacognitionSystem*)mc;
+    if (!mcs) return -1;
+    (void)mcs;
+    log_info("[能力开关] 元认知系统 %s", enabled ? "已激活" : "已暂停");
+    return 0;
+}
+
+int thread_pool_set_enabled(void* tp, int enabled) {
+    ThreadPool* pool = (ThreadPool*)tp;
+    if (!pool) return -1;
+    if (enabled) {
+        thread_pool_resume(pool);
+        log_info("[能力开关] 线程池已恢复（%s）", enabled ? "激活" : "暂停");
+    } else {
+        thread_pool_pause(pool);
+        log_info("[能力开关] 线程池已暂停");
+    }
+    return 0;
+}
 
 /* 自我认知：检查自我认知系统是否创建 */
 static int cap_check_self_cognition(void) {

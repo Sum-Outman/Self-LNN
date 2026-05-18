@@ -2300,3 +2300,42 @@ int lnn_shard_allreduce_gradients(LNN* net, float** shard_gradients,
 
     return active_shards;
 }
+
+/* ZSF-001修复: 获取LNN内部隐藏状态和最近输出
+ * 为AGI后台任务提供真实的系统状态数据。 */
+
+int lnn_get_state(const LNN* network, float* state_buffer, int buffer_dim) {
+    if (!network || !state_buffer || buffer_dim <= 0) return -1;
+    LNN* n = (LNN*)network;  /* 锁操作需非const */
+    LNN_LOCK(n);
+    size_t hdim = network->config.hidden_size > 0 ?
+                  network->config.hidden_size : 64;
+    if (!network->hidden_state) {
+        memset(state_buffer, 0, (size_t)buffer_dim * sizeof(float));
+        LNN_UNLOCK(n);
+        return -1;
+    }
+    int copy_n = buffer_dim < (int)hdim ? buffer_dim : (int)hdim;
+    memcpy(state_buffer, network->hidden_state, (size_t)copy_n * sizeof(float));
+    if (buffer_dim > (int)hdim) memset(state_buffer + hdim, 0, (size_t)(buffer_dim - (int)hdim) * sizeof(float));
+    LNN_UNLOCK(n);
+    return 0;
+}
+
+int lnn_get_output(const LNN* network, float* output_buffer, int buffer_dim) {
+    if (!network || !output_buffer || buffer_dim <= 0) return -1;
+    LNN* n = (LNN*)network;  /* 锁操作需非const */
+    LNN_LOCK(n);
+    size_t odim = network->config.output_size > 0 ?
+                  network->config.output_size : 64;
+    if (!network->output_buffer) {
+        memset(output_buffer, 0, (size_t)buffer_dim * sizeof(float));
+        LNN_UNLOCK(n);
+        return -1;
+    }
+    int copy_n = buffer_dim < (int)odim ? buffer_dim : (int)odim;
+    memcpy(output_buffer, network->output_buffer, (size_t)copy_n * sizeof(float));
+    if (buffer_dim > (int)odim) memset(output_buffer + odim, 0, (size_t)(buffer_dim - (int)odim) * sizeof(float));
+    LNN_UNLOCK(n);
+    return 0;
+}

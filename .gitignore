@@ -63,6 +63,8 @@ knowledge_data/
 
 # ====== 运行时数据 ======
 data/
+backups/
+selflnn_config.json
 *.dat
 !src/**/*.dat
 Thumbs.db

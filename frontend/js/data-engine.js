@@ -36,7 +36,7 @@ class DataEngine {
 
         this._history = {};
         this._pollModules = new Map();
-        this._baseInterval = 1000;
+        this._baseInterval = 5000;
     }
 
     registerModule(name, intervalMs, callback) {
@@ -95,7 +95,7 @@ class DataEngine {
     }
 
     /**
-     * 从后端获取所有数据
+     * 从后端获取所有数据（单一/status调用，避免11路并行超时）
      */
     async _fetchAllData() {
         if (!this._backendConnected) {
@@ -103,32 +103,32 @@ class DataEngine {
         }
 
         try {
-            const results = await Promise.allSettled([
-                this._fetchWithTimeout(window.SelfLnnApi.getSystemStatus(), 'system'),
-                this._fetchWithTimeout(window.SelfLnnApi.getMemoryStatus(), 'memory'),
-                this._fetchWithTimeout(window.SelfLnnApi.getLearningStatus(), 'learning'),
-                this._fetchWithTimeout(window.SelfLnnApi.getReasoningStatus(), 'reasoning'),
-                this._fetchWithTimeout(window.SelfLnnApi.getLNNStatus(), 'lnn'),
-                this._fetchWithTimeout(window.SelfLnnApi.getMultimodalStatus(), 'multimodal'),
-                this._fetchWithTimeout(window.SelfLnnApi.getRobotStatus(), 'robot'),
-                this._fetchWithTimeout(window.SelfLnnApi.getKnowledgeStats(), 'knowledge'),
-                this._fetchWithTimeout(window.SelfLnnApi.getModelStatus(), 'training'),
-                this._fetchWithTimeout(window.SelfLnnApi.getCognitionStatus(), 'cognition'),
-                this._fetchWithTimeout(window.SelfLnnApi.getEvolutionPareto(), 'evolution')
-            ]);
-
-            const keys = ['system', 'memory', 'learning', 'reasoning', 'lnn', 'multimodal', 'robot', 'knowledge', 'training', 'cognition', 'evolution'];
-
-            results.forEach((result, index) => {
-                const key = keys[index];
-                if (result.status === 'fulfilled' && result.value && result.value.success) {
-                    this._updateFromApi(key, result.value.data);
-                } else {
-                    const reason = result.status === 'rejected' ? result.reason : (result.value ? result.value.error : '未知错误');
-                    this.data[key]._connected = false;
-                    this.data[key]._error = String(reason);
+            var result = await this._fetchWithTimeout(window.SelfLnnApi.getSystemStatus(), 'system');
+            if (result && result.success && result.data) {
+                var data = result.data;
+                this._updateFromApi('system', data);
+                if (data.system && data.system.modules) {
+                    var mods = data.system.modules;
+                    this._updateFromApi('lnn', mods.lnn || {});
+                    this._updateFromApi('memory', mods.memory || {});
+                    this._updateFromApi('reasoning', mods.reasoning || {});
+                    this._updateFromApi('learning', mods.learning || {});
+                    this._updateFromApi('multimodal', { available: mods.multimodal === true || mods.multimodal === 'true' });
+                    this._updateFromApi('robot', mods.robotics || {});
+                    this._updateFromApi('cognition', mods.cognition || {});
                 }
-            });
+                if (data.system) {
+                    this._updateFromApi('knowledge', data.system.knowledge ? { count: data.system.knowledge.count } : {});
+                    this._updateFromApi('training', data.system.training || {});
+                    this._updateFromApi('resources', { cpu_usage: data.system.cpu_usage, requests: data.system.requests });
+                }
+                if (data.system && data.system.modules && data.system.modules.lnn_state) {
+                    this._updateFromApi('evolution', { lnn_state: data.system.modules.lnn_state });
+                }
+            } else {
+                this.data.system._connected = false;
+                this.data.system._error = result ? result.error : 'status API 返回空';
+            }
         } catch (error) {
             console.error('数据获取失败:', error);
             this._backendConnected = false;
@@ -141,7 +141,7 @@ class DataEngine {
      */
     async _fetchWithTimeout(promise, label) {
         const timeout = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(label + '请求超时')), 10000)
+            setTimeout(() => reject(new Error(label + '请求超时')), 20000)
         );
         return Promise.race([promise, timeout]);
     }
@@ -179,24 +179,26 @@ class DataEngine {
         }
 
         if (this._backendConnected) {
-            await this._fetchAllData();
-            this._saveCachedData();
+            try {
+                await this._fetchAllData();
+                this._saveCachedData();
+                this._consecutiveErrors = 0;
+            } catch (e) {
+                this._consecutiveErrors = (this._consecutiveErrors || 0) + 1;
+                if (this._consecutiveErrors > 3) {
+                    this._backendConnected = false;
+                }
+            }
+        } else {
+            // 指数退避：重连间隔逐渐增加
+            var backoffCount = this._consecutiveErrors || 0;
+            var skipInterval = Math.min(internalTick * Math.pow(2, Math.min(backoffCount, 6)), 120);
+            if (this._fetchCount % skipInterval !== 0) {
+                return;
+            }
         }
 
         this._notifyListeners();
-
-        if (this._fetchCount % (internalTick * 10) === 0 && this._backendConnected) {
-            try {
-                const status = await window.SelfLnnApi.checkConnection();
-                this._backendConnected = status.connected;
-                if (!status.connected) {
-                    this._lastError = status.message;
-                }
-            } catch (error) {
-                this._backendConnected = false;
-                this._lastError = error.message;
-            }
-        }
 
         for (const [name, mod] of this._pollModules) {
             var tickRatio = Math.round(mod.interval / this._baseInterval);
@@ -220,16 +222,22 @@ class DataEngine {
             return;
         }
         this.initialized = true;
+        var self = this;
         (async () => {
-            await this.checkConnection();
-            if (!this._backendConnected) {
+            var connected = false;
+            for (var attempt = 0; attempt < 5; attempt++) {
+                await self.checkConnection();
+                if (self._backendConnected) { connected = true; break; }
+                if (attempt < 4) await new Promise(function(r) { setTimeout(r, 2000); });
+            }
+            if (!connected) {
                 console.warn('数据引擎: 后端未连接，将显示断开状态（绝不生成虚假数据）');
-                this._loadCachedData();
-                this._notifyListeners();
+                self._loadCachedData();
+                self._notifyListeners();
             } else {
-                await this._fetchAllData();
-                this._saveCachedData();
-                this._notifyListeners();
+                await self._fetchAllData();
+                self._saveCachedData();
+                self._notifyListeners();
             }
         })();
 

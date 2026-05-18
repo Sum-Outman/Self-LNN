@@ -559,7 +559,16 @@ int socket_send(SocketHandle sock, const void* buf, size_t len) {
     if (len > INT_MAX) {
         return -1;  // 数据太大，无法发送
     }
-    return send(sock, buf, (int)len, 0);
+    int total = 0;
+    int remaining = (int)len;
+    const char* ptr = (const char*)buf;
+    while (remaining > 0) {
+        int sent = send(sock, ptr + total, remaining, 0);
+        if (sent <= 0) return (total > 0) ? total : -1;
+        total += sent;
+        remaining -= sent;
+    }
+    return total;
 }
 
 int socket_recv(SocketHandle sock, void* buf, size_t len) {
@@ -580,8 +589,37 @@ int socket_setsockopt(SocketHandle sock, int level, int optname, const void* opt
 
 void socket_close(SocketHandle sock) {
 #if defined(_WIN32) || defined(_WIN64)
+    {
+        struct linger l;
+        l.l_onoff = 1;
+        l.l_linger = 2;
+        setsockopt(sock, SOL_SOCKET, SO_LINGER, (const char*)&l, sizeof(l));
+    }
+    shutdown(sock, SD_SEND);
+    {
+        char discard[64];
+        int total = 0;
+        while (total < 200) {
+            int n = recv(sock, discard, sizeof(discard), 0);
+            if (n <= 0) break;
+            total++;
+        }
+    }
     closesocket(sock);
 #else
+    {
+        struct linger l;
+        l.l_onoff = 1;
+        l.l_linger = 2;
+        setsockopt(sock, SOL_SOCKET, SO_LINGER, &l, sizeof(l));
+    }
+    shutdown(sock, SHUT_WR);
+    {
+        char discard[64];
+        struct timeval tv = {0, 200000};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        while (recv(sock, discard, sizeof(discard), 0) > 0) {}
+    }
     close(sock);
 #endif
 }

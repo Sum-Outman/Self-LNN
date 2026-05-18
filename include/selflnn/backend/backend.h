@@ -336,17 +336,19 @@ typedef enum {
     API_POST_PROGRAMMING_EXECUTE = 218,    /**< 沙箱执行 */
     API_GET_PROGRAMMING_STATUS = 219,      /**< 获取编程引擎状态 */
 
-    /* ===== K-023: 能力开关诊断 ===== */
-    API_GET_CAPABILITY_DIAGNOSE = 220,     /**< 12项能力开关完整状态诊断 */
+    /* ===== K-023: 能力开关诊断 (实际dispatch使用260-266) ===== */
+    /* 注意：以下枚举值220-229在dispatch中被知识库/记忆路由复用，
+     * 能力开关/设备发现实际使用260-266号槽位，此处仅保留枚举名称引用 */
+    API_GET_CAPABILITY_DIAGNOSE = 260,     /**< 12项能力开关完整状态诊断 */
 
     /* ===== K-016: 设备发现与多系统控制 ===== */
-    API_GET_DEVICES_DISCOVER = 221,        /**< 扫描发现所有可用设备 */
-    API_POST_DEVICES_DISCOVER = 222,       /**< 触发设备扫描 */
-    API_POST_DEVICE_REGISTER = 223,        /**< 注册新设备 */
-    API_POST_DEVICE_UNREGISTER = 224,      /**< 注销设备 */
-    API_GET_DEVICE_LIST = 225,             /**< 获取已注册设备列表 */
-    API_POST_DEVICE_COMMAND = 226,         /**< 向设备发送控制命令 */
-    API_GET_DEVICE_STATUS = 227            /**< 获取设备实时状态 */,
+    API_GET_DEVICES_DISCOVER = 261,        /**< 扫描发现所有可用设备 */
+    API_POST_DEVICES_DISCOVER = 262,       /**< 触发设备扫描 */
+    API_POST_DEVICE_REGISTER = 263,        /**< 注册新设备 */
+    API_POST_DEVICE_UNREGISTER = 264,      /**< 注销设备 */
+    API_GET_DEVICE_LIST = 265,             /**< 获取已注册设备列表 */
+    API_POST_DEVICE_COMMAND = 266,         /**< 向设备发送控制命令（注意：区别于API_POST_DEVICE_COMMAND_V1=41） */
+    API_GET_DEVICE_STATUS = 267,            /**< 获取设备实时状态 */
     API_GET_SAFETY_BOUNDS = 228            /**< 获取安全边界配置 */
 } ApiRequestType;
 

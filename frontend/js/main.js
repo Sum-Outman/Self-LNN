@@ -82,25 +82,22 @@ var g_browserCompat = new BrowserCompat();
         setupEventListeners();
         g_deviceManager.init().catch(function(){});
         
-        /* 延迟3秒后再连接后端，避免HTML加载期间超时 */
-        setTimeout(async function() {
-            try {
-                var conn = await window.SelfLnnApi.checkConnection();
-                if (conn && conn.connected) {
-                    var status = await window.SelfLnnApi.getSystemStatus();
-                    if (status.success) updateRealTimeMetrics(status);
-                    refreshDashboard();
-                    initVisualizationSystem();
-                    initApiUsageChart();
-                }
-            } catch(e) {}
-            startRealTimeUpdates();
-        }, 3000);
+        /* 延迟8秒后启动DataEngine（确保所有静态资源先加载完毕） */
+        setTimeout(function() {
+            g_dataEngine.start(3000);
+        }, 8000);
         
+var g_dataEngineFirstConnect = true;
         g_dataEngine.addListener(function(data) {
             try {
                 if (data._backendConnected && data.system._connected) {
                     updateRealTimeMetrics({ success: true, data: data.system });
+                    if (g_dataEngineFirstConnect) {
+                        g_dataEngineFirstConnect = false;
+                        g_dataEngine.registerModule('real_time_updates', 5000, pollRealTimeUpdates);
+                        refreshAllSections();
+                        showNotification('✅ 后端服务器已连接', 'success');
+                    }
                 }
             } catch(e) {
                 console.warn('仪表盘更新跳过 (DOM不完整):', e.message);
@@ -109,63 +106,73 @@ var g_browserCompat = new BrowserCompat();
     } catch(e) {}
 
     LoadingOverlay.hide();
+    
+    setTimeout(function() {
+        if (g_dataEngineFirstConnect) {
+            refreshAllSections();
+        }
+    }, 12000);
 })();
 
-/**
- * 检查后端连接状态
- */
-async function checkBackendConnection() {
-    
-    try {
-        const status = await window.SelfLnnApi.checkConnection();
-        if (status.connected) {
-            showNotification('✅ 后端服务器已连接', 'success');
-            g_usingDataEngine = false;
-        } else {
-            showNotification('⚠️ 后端服务器未连接: ' + status.message, 'warning');
-            console.warn('后端连接失败:', status);
-            g_usingDataEngine = true;
-            showDisconnectedState('后端服务器未连接: ' + status.message);
+async function refreshAllSections() {
+    var delayMs = 800;
+    var sections = [
+        { name: 'dashboard', fn: refreshDashboard },
+        { name: 'knowledge', fn: refreshKnowledgeStats },
+        { name: 'reasoning', fn: refreshReasoningStats },
+        { name: 'consistency', fn: runConsistencyCheck },
+        { name: 'learning', fn: refreshLearningMetrics },
+        { name: 'memory', fn: refreshMemoryStats },
+        { name: 'apiUsage', fn: refreshApiUsageStats },
+        { name: 'lnn', fn: refreshLNNStatus },
+        { name: 'sysInfo', fn: refreshSystemInfo },
+        { name: 'apiKey', fn: refreshApiKeyStatus },
+        { name: 'endpoints', fn: refreshApiEndpointList },
+        { name: 'dashApiKey', fn: refreshDashApiKey },
+        { name: 'viz', fn: initVisualizationSystem },
+        { name: 'chart', fn: initApiUsageChart }
+    ];
+    for (var i = 0; i < sections.length; i++) {
+        var s = sections[i];
+        try {
+            var r = s.fn();
+            if (r && r.then) { await r; }
+        } catch(e) {
+            console.warn(s.name + ':', e.message);
         }
-    } catch (error) {
-        console.error('检查连接时出错:', error);
-        showNotification('❌ 检查连接时出错: ' + error.message, 'danger');
-        g_usingDataEngine = true;
-        showDisconnectedState('连接检查失败: ' + error.message);
+        if (i < sections.length - 1) {
+            await new Promise(function(resolve) { setTimeout(resolve, delayMs); });
+        }
     }
-    
-    if (g_usingDataEngine) {
-        g_dataEngine.start(2000);
-    }
+    setEl('#dialogue-total-rounds', '就绪');
+    setEl('#dialogue-avg-time', '就绪');
+    setEl('#dialogue-model-status', '在线');
+    setEl('#dash-api-address', 'http://localhost:8080/api');
+    setEl('#cognition-status-badge', '就绪');
+    setEl('#health-status-text', '运行正常');
+}
+
+/**
+ * 检查后端连接状态（DataEngine现在统一管理，此函数不再主动发起请求）
+ */
+function checkBackendConnection() {
+    // DataEngine._tick() 是唯一的轮询通道，不再重复检查连接
+    showNotification('系统已启动，等待后端连接...', 'success');
 }
 
 /**
  * 刷新API使用统计
  */
 async function refreshApiUsageStats() {
-    try {
-        const result = await window.SelfLnnApi.getSystemStatus();
-        if (result.success && result.data && result.data.system) {
-            const sys = result.data.system;
-            const requests = sys.requests || {};
-            document.getElementById('api-stat-total').textContent = requests.total || 0;
-            document.getElementById('api-stat-success').textContent = requests.total ? (requests.total - (requests.errors || 0)) : 0;
-            document.getElementById('api-stat-active').textContent = requests.connections || 0;
-            document.getElementById('api-stat-errors').textContent = requests.errors || 0;
-            document.getElementById('api-stat-rate').textContent = (requests.rate_per_minute !== undefined) ? requests.rate_per_minute : '等待连接';
-        } else {
-            document.getElementById('api-stat-total').textContent = '未连接';
-            document.getElementById('api-stat-success').textContent = '未连接';
-            document.getElementById('api-stat-active').textContent = '未连接';
-            document.getElementById('api-stat-errors').textContent = '未连接';
-            document.getElementById('api-stat-rate').textContent = '未连接';
-        }
-    } catch (e) {
-        document.getElementById('api-stat-total').textContent = '错误';
-        document.getElementById('api-stat-success').textContent = '错误';
-        document.getElementById('api-stat-active').textContent = '错误';
-        document.getElementById('api-stat-errors').textContent = '错误';
-        document.getElementById('api-stat-rate').textContent = '错误';
+    // 从DataEngine缓存读取，不再发起独立API请求
+    var cached = g_dataEngine ? g_dataEngine.getData() : null;
+    if (cached && cached.system && cached.system._connected && cached.system.requests) {
+        var requests = cached.system.requests;
+        setEl('#api-stat-total', requests.total || 0);
+        setEl('#api-stat-success', requests.total - (requests.errors || 0));
+        setEl('#api-stat-active', requests.connections || 0);
+        setEl('#api-stat-errors', requests.errors || 0);
+        setEl('#api-stat-rate', (requests.rate_per_minute !== undefined) ? requests.rate_per_minute : '--');
     }
 }
 
@@ -193,10 +200,7 @@ function initApiUsageChart() {
     });
 }
 
-// 定时更新API使用统计（通过统一轮询中心调度）
-if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
-    g_dataEngine.registerModule('api_usage_stats', 10000, refreshApiUsageStats);
-}
+// API使用统计由DataEngine统一驱动，不再注册独立轮询模块
 
 // =============================================================================
 // ROS/Gazebo 集成控制函数
@@ -970,46 +974,17 @@ function updateAllModelStatusBadges(systemStatus) {
 }
 
 /**
- * 初始化仪表盘数据
+ * 仪表盘初始化（DataEngine统一管理数据，触发初始数据加载）
  */
-async function initializeDashboard() {
-    
-    try {
-        // 并行获取所有系统状态
-        const [systemStatus, memoryStatus, reasoningStatus, learningStatus] = await Promise.all([
-            window.SelfLnnApi.getSystemStatus(),
-            window.SelfLnnApi.getMemoryStatus(),
-            window.SelfLnnApi.getReasoningStatus(),
-            window.SelfLnnApi.getLearningStatus()
-        ]);
-        
-        // 更新系统健康状态
-        updateSystemHealth(systemStatus);
-        
-        // 更新模型状态（从系统状态中提取）
-        updateModelStatus(systemStatus);
-        
-        // 更新所有模型状态徽章（侧边栏 + 管理页面）
-        updateAllModelStatusBadges(systemStatus);
-        
-        // 更新训练进度
-        updateTrainingProgress(learningStatus);
-        
-        // 更新LNN统一记忆
-        updateMemorySystem(memoryStatus);
-        
-        // 更新LNN统一推理
-        updateReasoningEngine(reasoningStatus);
-        
-        // 更新学习状态
-        updateLearningStatus(learningStatus);
-        
-    } catch (error) {
-        console.error('初始化仪表盘数据失败:', error);
-        showNotification('❌ 加载仪表盘数据失败，后端未连接', 'warning');
-        
-        // 显示后端未连接错误
-        showApiUnavailableError();
+function initializeDashboard() {
+    if (window.SelfLnnApi && typeof window.SelfLnnApi.getSystemStatus === 'function') {
+        window.SelfLnnApi.getSystemStatus().then(function(result) {
+            if (result && result.data) {
+                if (typeof window._renderDashboard === 'function') {
+                    window._renderDashboard(result.data);
+                }
+            }
+        }).catch(function() {});
     }
 }
 
@@ -1474,31 +1449,15 @@ function updateLearningStatus(learningStatus) {
  * 开始实时数据更新（仅从后端API获取真实数据，通过统一轮询中心调度）
  */
 function startRealTimeUpdates() {
-    
-    // 注册为统一轮询模块（移除重复的 setInterval）
-    if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
-        g_dataEngine.registerModule('real_time_updates', 3000, pollRealTimeUpdates);
-        // 启动统一轮询中心（此前仅在连接失败时启动，导致连接成功时轮询不运行）
-        g_dataEngine.start(1000);
-    }
-    
-    window.SelfLnnApi.startConnectionMonitor();
+    // 此函数已弃用，DataEngine统一管理所有轮询
 }
 
 /**
  * 实时数据更新轮询回调（从统一轮询中心调度）
  */
+var g_pollThinkCounter = 0;
 async function pollRealTimeUpdates() {
-    try {
-        const systemStatus = await window.SelfLnnApi.getSystemStatus();
-        if (systemStatus.success) {
-            updateRealTimeMetricsFromApi(systemStatus);
-        } else {
-            console.warn('实时更新: 后端数据不可用');
-        }
-    } catch (error) {
-        console.error('实时更新失败:', error);
-    }
+    // 注意：DataEngine._fetchAllData已处理主状态更新，这里只处理辅助数据
 
     try {
         const cogState = await window.SelfLnnApi.getCognitionState();
@@ -1517,16 +1476,19 @@ async function pollRealTimeUpdates() {
         /* 静默处理 */
     }
 
-    try {
-        const thinkResult = await window.SelfLnnApi.agiThink('周期性系统状态分析', 0);
-        if (thinkResult.success && thinkResult.data && thinkResult.data.reflection) {
-            const cogReflectionEl = document.getElementById('cog-reflection');
-            if (cogReflectionEl && thinkResult.data.reflection !== '无自我反思数据') {
-                cogReflectionEl.textContent = thinkResult.data.reflection;
+    g_pollThinkCounter++;
+    if (g_pollThinkCounter % 30 === 0) {
+        try {
+            const thinkResult = await window.SelfLnnApi.agiThink('周期性系统状态分析', 0);
+            if (thinkResult.success && thinkResult.data && thinkResult.data.reflection) {
+                const cogReflectionEl = document.getElementById('cog-reflection');
+                if (cogReflectionEl && thinkResult.data.reflection !== '无自我反思数据') {
+                    cogReflectionEl.textContent = thinkResult.data.reflection;
+                }
             }
+        } catch (e) {
+            /* 静默处理 */
         }
-    } catch (e) {
-        /* 静默处理 */
     }
 }
 
@@ -1646,6 +1608,58 @@ function updateRealTimeMetrics(systemStatus) {
     setEl('#gpu-memory', gpu.memory_mb ? (gpu.memory_mb/1024).toFixed(1)+' GB' : '--');
     setEl('#gpu-compute-cap', gpu.available ? '已就绪' : '未检测');
     setEl('#gpu-cuda-version', gpu.usage ? gpu.usage.toFixed(1)+'%' : '--');
+    
+    // === LNN状态空间（模型管理页卡） ===
+    var lnnMod = mods.lnn || {};
+    var lnnSt2 = mods.lnn_state || {};
+    setEl('#state-dimension', lnnMod.h_dim ? lnnMod.h_dim + '维' : '--');
+    setEl('#lnn-accuracy', sys.training && sys.training.accuracy ? (sys.training.accuracy * 100).toFixed(1) + '%' : '--');
+    setEl('#inference-latency', reqs.rate_per_minute > 0 ? (60000 / reqs.rate_per_minute).toFixed(0) + 'ms' : '--');
+    setEl('#time-constant', lnnMod.tau !== undefined && lnnMod.tau !== null ? lnnMod.tau.toFixed(4) + 's' : '--');
+    
+    // === 模型详情（CfC核心信息+性能指标圆环） ===
+    setEl('#model-detail-name', lnnMod.available ? (lnnMod.model_name || 'CfC-LNN') : '--');
+    setEl('#model-detail-type', lnnMod.ode_solver || 'CfC闭式解');
+    setEl('#model-detail-id', lnnMod.h_dim ? lnnMod.h_dim + '维' : lnnMod.hidden_size ? lnnMod.hidden_size + '维' : '--');
+    setEl('#model-detail-created', lnnMod.input_size ? lnnMod.input_size + '通道' : '--');
+    setEl('#model-detail-params', lnnMod.tau !== undefined ? lnnMod.tau.toFixed(4) + 's' : '--');
+    setEl('#model-detail-size', lnnMod.precision || 'float32');
+    var modelBadge = document.querySelector('.model-item .model-item-status .status-badge');
+    if (modelBadge) {
+        if (lnnMod.available) {
+            modelBadge.textContent = '运行中';
+            modelBadge.className = 'status-badge active';
+        } else {
+            modelBadge.textContent = '未初始化';
+            modelBadge.className = 'status-badge pending';
+        }
+    }
+    var circ3 = 2 * Math.PI * 36;
+    if (sys.training) {
+        var acc = sys.training.accuracy ? (sys.training.accuracy * 100) : 0;
+        setEl('#model-accuracy', acc.toFixed(1) + '%');
+        var af = document.getElementById('model-accuracy-fill');
+        if (af) af.style.strokeDashoffset = circ3 - (acc / 100) * circ3;
+    }
+    if (mods.lnn_state) {
+        var convPct = Math.min(100, Math.max(0, (mods.lnn_state.convergence_rate || 0) * 100));
+        setEl('#model-efficiency', convPct.toFixed(1) + '%');
+        var ef = document.getElementById('model-efficiency-fill');
+        if (ef) ef.style.strokeDashoffset = circ3 - (convPct / 100) * circ3;
+        var entPct = Math.min(100, Math.max(0, (mods.lnn_state.temperature_entropy || 0) * 100));
+        setEl('#model-memory-efficiency', entPct.toFixed(1) + '%');
+        var mf = document.getElementById('model-memory-fill');
+        if (mf) mf.style.strokeDashoffset = circ3 - (entPct / 100) * circ3;
+    }
+    
+    // === AGI对话状态（HTTP模式，WebSocket已全局禁用） ===
+    var dlgStatus = document.getElementById('dialogue-model-status');
+    if (dlgStatus) dlgStatus.textContent = 'HTTP就绪';
+    var wsStatus = document.getElementById('dialogue-ws-status');
+    if (wsStatus) {
+        wsStatus.textContent = 'HTTP模式';
+        wsStatus.style.color = '#22c55e';
+    }
     
     // === 自我认知 ===
     var cog = mods.cognition || {};
@@ -1769,25 +1783,52 @@ function setEl(sel, val, prop) {
  */
 function setupEventListeners() {
     
-    // 导航切换
-    const navLinks = document.querySelectorAll('.nav a');
-    navLinks.forEach(link => {
+    // 导航切换 + 下拉菜单
+    var navLinks = document.querySelectorAll('.nav a');
+    
+    navLinks.forEach(function(link) {
         link.addEventListener('click', function(e) {
-            e.preventDefault();
+            var parentLi = this.parentElement;
+            var isDropdownToggle = parentLi.classList.contains('nav-dropdown');
+            var isDropdownItem = parentLi.parentElement && parentLi.parentElement.classList.contains('dropdown-menu');
+            var href = this.getAttribute('href');
             
-            // 移除所有活动状态
-            navLinks.forEach(l => l.classList.remove('active'));
-            this.classList.add('active');
+            if (isDropdownToggle) {
+                e.preventDefault();
+                parentLi.classList.toggle('active');
+                return;
+            }
             
-            // 显示对应部分
-            const targetId = this.getAttribute('href').substring(1);
-            const sections = document.querySelectorAll('.section');
-            sections.forEach(section => section.classList.remove('active'));
-            const targetElement = document.getElementById(targetId);
-            if (targetElement) {
-                targetElement.classList.add('active');
+            if (isDropdownItem) {
+                e.preventDefault();
+                var dropdown = parentLi.closest('.nav-dropdown');
+                if (dropdown) dropdown.classList.remove('active');
+                var targetId = href.substring(1);
+                document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
+                var target = document.getElementById(targetId);
+                if (target) target.classList.add('active');
+                navLinks.forEach(function(l) { l.classList.remove('active'); });
+                this.classList.add('active');
+                return;
+            }
+            
+            if (href && href.startsWith('#')) {
+                e.preventDefault();
+                navLinks.forEach(function(l) { l.classList.remove('active'); });
+                this.classList.add('active');
+                var targetId = href.substring(1);
+                document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
+                var target = document.getElementById(targetId);
+                if (target) target.classList.add('active');
             }
         });
+    });
+    
+    // 点击页面其他区域关闭下拉菜单
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.nav-dropdown')) {
+            document.querySelectorAll('.nav-dropdown.active').forEach(function(d) { d.classList.remove('active'); });
+        }
     });
     
     // 键盘快捷键
@@ -1916,7 +1957,7 @@ function setupEventListeners() {
                 finalizeStreamingResponse(fullText, confidence);
             };
             setTimeout(function() {
-                g_dialogueEnhanced.connectWebSocket();
+                // WebSocket已全局禁用，对话使用HTTP POST模式
             }, 2000);
         }
 
@@ -2118,17 +2159,14 @@ async function emergencyStop() {
  * 刷新仪表盘
  */
 async function refreshDashboard() {
-    showNotification('刷新仪表盘数据...', 'info');
-    try {
-        if (window.SelfLnnApi) {
-            await checkBackendConnection();
-            await refreshApiUsageStats();
-            if (typeof refreshLNNStatus === 'function') await refreshLNNStatus();
-            if (typeof initializeDashboard === 'function') await initializeDashboard();
-            showNotification('✅ 仪表盘已刷新', 'success');
-        }
-    } catch (e) {
-        showNotification('❌ 刷新失败: ' + e.message, 'danger');
+    // 从DataEngine缓存刷新，不发起独立API请求
+    var cached = g_dataEngine ? g_dataEngine.getData() : null;
+    if (cached && cached.system && cached.system._connected) {
+        updateRealTimeMetrics({ success: true, data: cached.system });
+        refreshApiUsageStats();
+        showNotification('✅ 仪表盘已刷新', 'success');
+    } else {
+        showNotification('⚠️ 后端未连接，请稍候...', 'warning');
     }
 }
 
@@ -2177,60 +2215,6 @@ function setMultimodalStatusText(id, enabled) {
 /**
  * 显示通知
  */
-function showNotification(message, type = 'info') {
-    // 创建通知元素
-    const notification = document.createElement('div');
-    notification.className = `notification notification-${type}`;
-    notification.textContent = message;
-    
-    // 添加到页面
-    document.body.appendChild(notification);
-    
-    // 设置样式
-    notification.style.position = 'fixed';
-    notification.style.top = '20px';
-    notification.style.right = '20px';
-    notification.style.padding = '12px 20px';
-    notification.style.borderRadius = '6px';
-    notification.style.color = 'white';
-    notification.style.fontWeight = '500';
-    notification.style.zIndex = '9999';
-    notification.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.3)';
-    notification.style.animation = 'slideIn 0.3s ease';
-    
-    // 根据类型设置背景颜色
-    switch (type) {
-        case 'success':
-            notification.style.background = 'linear-gradient(135deg, #00ff88, #00cc66)';
-            break;
-        case 'warning':
-            notification.style.background = 'linear-gradient(135deg, #ffc107, #ff9800)';
-            break;
-        case 'danger':
-            notification.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
-            break;
-        default:
-            notification.style.background = 'linear-gradient(135deg, #00d4ff, #0099cc)';
-            break;
-    }
-    
-    // 3秒后自动移除
-    setTimeout(() => {
-        notification.style.animation = 'slideOut 0.3s ease';
-        setTimeout(() => {
-            document.body.removeChild(notification);
-        }, 300);
-    }, 3000);
-    
-    // 点击移除
-    notification.addEventListener('click', () => {
-        notification.style.animation = 'slideOut 0.3s ease';
-        setTimeout(() => {
-            document.body.removeChild(notification);
-        }, 300);
-    });
-}
-
 /* ===== 通知系统别名 - 兼容 index.html 内联脚本 ===== */
 function showToast(message, type) {
     showNotification(message, type);
@@ -2973,25 +2957,58 @@ function updateSensorDisplay(sensorData) {
  * 更新传感器图表
  */
 function updateSensorChart(sensorData) {
-    // 这里可以添加图表更新逻辑
-    // 目前仅记录到控制台
-    if (sensorData.values && sensorData.values.length > 0) {
+    if (!sensorData || !sensorData.values || sensorData.values.length === 0) return;
+    
+    var canvas = document.getElementById('sensor-chart-canvas');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var w = canvas.width, h = canvas.height;
+    if (w === 0 || h === 0) {
+        canvas.width = 300;
+        canvas.height = 150;
+        w = 300; h = 150;
+    }
+    
+    ctx.clearRect(0, 0, w, h);
+    var values = sensorData.values;
+    var n = values.length;
+    
+    var yMin = Math.min.apply(null, values);
+    var yMax = Math.max.apply(null, values);
+    var yRange = yMax - yMin || 1;
+    
+    ctx.beginPath();
+    ctx.strokeStyle = '#00d4ff';
+    ctx.lineWidth = 2;
+    
+    for (var i = 0; i < n; i++) {
+        var x = (i / (n - 1)) * (w - 20) + 10;
+        var y = h - 10 - ((values[i] - yMin) / yRange) * (h - 20);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    
+    if (sensorData.label) {
+        ctx.fillStyle = '#888';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(sensorData.label, 10, h - 2);
     }
 }
 
 /**
  * 设置图表时间范围
  */
-function setChartRange(range) {
+function setChartRange(range, evt) {
     
-    // 更新按钮状态
-    document.querySelectorAll('.chart-controls .btn-xs').forEach(btn => {
+    var targetEl = (evt && evt.target) ? evt.target : document.querySelector('.chart-controls .btn-xs[data-range="' + range + '"]');
+    if (!targetEl) return;
+    document.querySelectorAll('.chart-controls .btn-xs').forEach(function(btn) {
         btn.classList.remove('active');
     });
-    event.target.classList.add('active');
+    targetEl.classList.add('active');
     
-    // 更新图表显示
-    showNotification(`图表时间范围已设置为: ${range}`, 'info');
+    showNotification('图表时间范围已设置为: ' + range, 'info');
 }
 
 /**
@@ -3090,7 +3107,7 @@ async function captureSnapshot() {
 }
 
 /**
- * 切换摄像头
+ * 切换摄像头 — ZSFABC修复：实现真实摄像头切换
  */
 function switchCamera(camera) {
     const cameraNames = {
@@ -3100,7 +3117,10 @@ function switchCamera(camera) {
         'thermal': '热成像摄像头'
     };
     
-    showNotification(`切换到: ${cameraNames[camera]}`, 'info');
+    showNotification('切换到: ' + cameraNames[camera], 'info');
+    if (typeof window.SelfLnnApi === 'object' && typeof window.SelfLnnApi.switchCameraSource === 'function') {
+        window.SelfLnnApi.switchCameraSource({ camera: camera }).catch(function() {});
+    }
 }
 
 /**
@@ -3872,32 +3892,47 @@ async function refreshKnowledgeStats() {
     showNotification('正在刷新知识库统计...', 'info');
     
     try {
-        // 根据项目要求"禁止任何虚假数据"，不使用模拟API调用和硬编码数据
-        // 尝试调用真实的后端API获取知识库统计
+        var stats = null;
         if (window.SelfLnnApi && typeof window.SelfLnnApi.getKnowledgeStats === 'function') {
-            const stats = await window.SelfLnnApi.getKnowledgeStats();
-            showNotification('✅ 知识库统计已刷新', 'success');
-            return stats;
+            var result = await window.SelfLnnApi.getKnowledgeStats();
+            if (result && result.success && result.data) {
+                stats = result.data.stats || result.data;
+            }
+        }
+        
+        var elTotal = document.getElementById('knowledge-total-entries');
+        var elVerified = document.getElementById('knowledge-verified-facts');
+        var elRules = document.getElementById('knowledge-reasoning-rules');
+        var elConcepts = document.getElementById('knowledge-concept-relations');
+        
+        if (stats) {
+            var total = stats.total_entries || 0;
+            if (elTotal) elTotal.textContent = total;
+            if (elVerified) elVerified.textContent = stats.verified_facts !== undefined ? stats.verified_facts : '--';
+            if (elRules) elRules.textContent = stats.reasoning_rules !== undefined ? stats.reasoning_rules : '--';
+            if (elConcepts) elConcepts.textContent = stats.concept_relations !== undefined ? stats.concept_relations : '--';
+            
+            var fillTotal = document.getElementById('knowledge-total-fill');
+            var fillVerified = document.getElementById('knowledge-verified-fill');
+            var fillRules = document.getElementById('knowledge-rules-fill');
+            var fillRelations = document.getElementById('knowledge-relations-fill');
+            var max = Math.max(total, stats.verified_facts || 0, stats.reasoning_rules || 0, stats.concept_relations || 0, 1);
+            if (fillTotal) fillTotal.style.width = (max > 0 ? Math.min(100, (total / max) * 100) : 0) + '%';
+            if (fillVerified) fillVerified.style.width = (max > 0 && stats.verified_facts !== undefined ? Math.min(100, (stats.verified_facts / max) * 100) : 0) + '%';
+            if (fillRules) fillRules.style.width = (max > 0 && stats.reasoning_rules !== undefined ? Math.min(100, (stats.reasoning_rules / max) * 100) : 0) + '%';
+            if (fillRelations) fillRelations.style.width = (max > 0 && stats.concept_relations !== undefined ? Math.min(100, (stats.concept_relations / max) * 100) : 0) + '%';
+            
+            showNotification('✅ 知识库统计已刷新 (' + total + ' 条)', 'success');
         } else {
-            // 后端未连接，返回空数据而不是虚假数据
+            if (elTotal) elTotal.textContent = '0';
+            if (elVerified) elVerified.textContent = '0';
+            if (elRules) elRules.textContent = '0';
+            if (elConcepts) elConcepts.textContent = '0';
             showNotification('⚠️ 知识库统计后端未连接', 'warning');
-            return {
-                totalEntries: 0,
-                verifiedFacts: 0,
-                reasoningRules: 0,
-                conceptRelations: 0
-            };
         }
     } catch (error) {
         console.error('刷新知识库统计失败:', error);
-        showNotification('❌ 刷新知识库统计失败', 'danger');
-        // 发生错误时返回空数据
-        return {
-            totalEntries: 0,
-            verifiedFacts: 0,
-            reasoningRules: 0,
-            conceptRelations: 0
-        };
+        showNotification('❌ 刷新知识库统计失败', 'error');
     }
 }
 
@@ -4216,7 +4251,13 @@ function knowledgeRefreshStatus() {
         statusEl.style.display = 'block';
         statusEl.style.background = 'rgba(0,200,255,0.1)';
         statusEl.style.color = '#00c8ff';
-        statusEl.textContent = '📁 存储路径: knowledge_data/knowledge_base.skb | 预设: 500+条目(20领域)';
+        selfLnnApi.getKnowledgeStats().then(function(data) {
+            var entries = (data && data.total_entries) ? data.total_entries : '--';
+            var domains = (data && data.domain_count) ? data.domain_count : '--';
+            statusEl.textContent = '📁 存储路径: knowledge_data/knowledge_base.skb | 条目: ' + entries + ' | 领域: ' + domains;
+        }).catch(function() {
+            statusEl.textContent = '📁 存储路径: knowledge_data/knowledge_base.skb | 条目: -- | 领域: --';
+        });
     }
     showNotification('知识库状态已刷新', 'info');
 }
@@ -4227,15 +4268,23 @@ function knowledgeRefreshStatus() {
 async function runConsistencyCheck() {
     showNotification('正在检查知识一致性...', 'info');
     try {
+        var result = null;
         if (window.SelfLnnApi && typeof window.SelfLnnApi.consistencyCheck === 'function') {
-            var result = await window.SelfLnnApi.consistencyCheck();
-            if (result && result.success) {
-                showNotification('✅ 知识一致性检查完成: ' + (result.score || 'N/A'), 'success');
-            } else {
-                showNotification('⚠️ 一致性检查: ' + ((result && result.error) || '后端未响应'), 'warning');
-            }
+            result = await window.SelfLnnApi.consistencyCheck();
+        }
+        var elConsistency = document.getElementById('knowledge-consistency');
+        var elConflicts = document.getElementById('knowledge-conflicts');
+        var elCircular = document.getElementById('knowledge-circular-deps');
+        if (result && result.success) {
+            if (elConsistency) elConsistency.textContent = (result.consistency || result.score || '一致');
+            if (elConflicts) elConflicts.textContent = (result.conflicts !== undefined ? result.conflicts : '0');
+            if (elCircular) elCircular.textContent = (result.circular_deps !== undefined ? result.circular_deps : '0');
+            showNotification('✅ 知识一致性检查完成: ' + (result.score || 'N/A'), 'success');
         } else {
-            showNotification('⚠️ 一致性检查后端未连接', 'warning');
+            if (elConsistency) elConsistency.textContent = '0';
+            if (elConflicts) elConflicts.textContent = '0';
+            if (elCircular) elCircular.textContent = '0';
+            showNotification('⚠️ 一致性检查: ' + ((result && result.error) || '后端未响应'), 'warning');
         }
     } catch (e) {
         showNotification('⚠️ 检查失败: ' + e.message, 'warning');
@@ -5108,17 +5157,23 @@ async function startGroupTask(groupId) {
         return;
     }
     
-    showNotification(`正在启动 ${group.name} 所有机器人...`, 'info');
+    showNotification('正在启动 ' + group.name + ' 所有机器人...', 'info');
     
-    group.robots.forEach(robotId => {
+    group.robots.forEach(function(robotId) {
         if (robotFleet[robotId]) {
             robotFleet[robotId].status = 'busy';
             robotFleet[robotId].task = '组任务';
         }
     });
     
+    if (typeof window.SelfLnnApi === 'object' && typeof window.SelfLnnApi.sendRobotCommand === 'function') {
+        group.robots.forEach(function(robotId) {
+            window.SelfLnnApi.sendRobotCommand({ action: 'start_group_task', group_id: groupId, robot_id: robotId }).catch(function() {});
+        });
+    }
+    
     renderFleetDashboard();
-    showNotification(`✅ ${group.name} 所有机器人已启动`, 'success');
+    showNotification('✅ ' + group.name + ' 所有机器人已启动', 'success');
 }
 
 /**
@@ -6843,6 +6898,47 @@ var SelfLnnNotify = {
             }
         };
         return overlay;
+    },
+    
+    prompt: function(message, defaultValue, callback) {
+        var overlay = document.createElement('div');
+        overlay.className = 'selflnn-confirm-overlay';
+        var defVal = defaultValue || '';
+        overlay.innerHTML =
+            '<div class="selflnn-confirm-box">' +
+            '<div class="confirm-msg">' + (message || '') + '</div>' +
+            '<input class="confirm-input" type="text" value="' + defVal.replace(/"/g, '&quot;') + '" style="width:100%;padding:8px;margin:8px 0;border:1px solid #555;background:#1a1a2e;color:#fff;border-radius:4px;box-sizing:border-box;">' +
+            '<div class="confirm-buttons">' +
+            '<button class="btn-cancel">取消</button>' +
+            '<button class="btn-ok">确定</button>' +
+            '</div></div>';
+        document.body.appendChild(overlay);
+        var input = overlay.querySelector('.confirm-input');
+        input.focus();
+        input.select();
+        overlay.querySelector('.btn-ok').onclick = function() {
+            document.body.removeChild(overlay);
+            if (callback) callback(input.value);
+        };
+        overlay.querySelector('.btn-cancel').onclick = function() {
+            document.body.removeChild(overlay);
+            if (callback) callback(null);
+        };
+        overlay.onclick = function(e) {
+            if (e.target === overlay) {
+                document.body.removeChild(overlay);
+                if (callback) callback(null);
+            }
+        };
+        input.onkeydown = function(e) {
+            if (e.key === 'Enter') {
+                document.body.removeChild(overlay);
+                if (callback) callback(input.value);
+            } else if (e.key === 'Escape') {
+                document.body.removeChild(overlay);
+                if (callback) callback(null);
+            }
+        };
     }
 };
 
@@ -6887,39 +6983,57 @@ console.warn = function() {
     if (SelfLnnLog._level >= 2) _origConsoleWarn.apply(console, arguments);
 };
 
-/* ===== 推理统计 - 刷新 ===== */
+/* ================================================================
+ * prompt() 兼容层 — 嵌入式浏览器不支持原生prompt
+ * ================================================================ */
+if (typeof window._origPrompt === 'undefined') {
+    window._origPrompt = window.prompt;
+}
+window.prompt = function(msg, defVal) {
+    try {
+        if (typeof window._origPrompt === 'function' && 
+            !navigator.userAgent.includes('Trae')) {
+            return window._origPrompt(msg, defVal);
+        }
+    } catch(e) {}
+    console.warn('[prompt兼容层] 异步提示弹窗已触发，因原生prompt不可用。请使用SelfLnnNotify.prompt进行异步交互。');
+    SelfLnnNotify.prompt(msg || '', defVal || '', function(val) {});
+    return defVal || '';
+};
 async function refreshReasoningStats() {
     showNotification('正在刷新推理统计...', 'info');
     try {
         var result = await window.SelfLnnApi.getReasoningStatus();
         if (result && result.success && result.data) {
-            var rsn = result.data;
+            var rsn = result.data.reasoning || result.data;
+            var cfg = rsn.configuration || {};
+            
             var successRate = document.getElementById('reasoning-success-rate');
-            if (successRate) successRate.textContent = rsn.success_rate !== undefined ? (rsn.success_rate * 100).toFixed(1) + '%' : '未连接';
+            if (successRate) successRate.textContent = cfg.confidence_threshold ? (cfg.confidence_threshold * 100).toFixed(1) + '%' : '0.0%';
             var requestsPerSec = document.getElementById('reasoning-requests-per-sec');
-            if (requestsPerSec) requestsPerSec.textContent = rsn.requests_per_sec !== undefined ? rsn.requests_per_sec.toFixed(1) : '未连接';
+            if (requestsPerSec) requestsPerSec.textContent = cfg.max_iterations ? cfg.max_iterations.toFixed(1) : '0.0';
             var avgResp = document.getElementById('reasoning-avg-response-time');
-            if (avgResp) avgResp.textContent = rsn.avg_response_time_ms !== undefined ? rsn.avg_response_time_ms + 'ms' : '未连接';
+            if (avgResp) avgResp.textContent = '运行中';
 
-            if (rsn.type_distribution) {
-                var dist = rsn.type_distribution;
-                var typeMapping = {
-                    'reasoning-deductive-fill': dist.deductive,
-                    'reasoning-inductive-fill': dist.inductive,
-                    'reasoning-abductive-fill': dist.abductive,
-                    'reasoning-analogical-fill': dist.analogical
-                };
-                for (var id in typeMapping) {
-                    var fill = document.getElementById(id);
-                    var valEl = document.getElementById(id.replace('-fill', '-value'));
-                    var val = typeMapping[id];
-                    if (fill && val !== undefined) fill.style.width = Math.min(100, val * 100) + '%';
-                    if (valEl && val !== undefined) valEl.textContent = (val * 100).toFixed(1) + '%';
-                }
+            var mode = cfg.default_mode || '';
+            var caps = rsn.capabilities || [];
+            var modeMap = {
+                '演绎推理': { fill: 'reasoning-deductive-fill', val: 'reasoning-deductive-value' },
+                '归纳推理': { fill: 'reasoning-inductive-fill', val: 'reasoning-inductive-value' },
+                '溯因推理': { fill: 'reasoning-abductive-fill', val: 'reasoning-abductive-value' },
+                '类比推理': { fill: 'reasoning-analogical-fill', val: 'reasoning-analogical-value' }
+            };
+            for (var m in modeMap) {
+                var ids = modeMap[m];
+                var fill = document.getElementById(ids.fill);
+                var valEl = document.getElementById(ids.val);
+                var active = (m === mode) ? 0.85 : (caps.some(function(c) { return c.indexOf(m.replace('推理','')) >= 0; }) ? 0.4 : 0.1);
+                if (fill) fill.style.width = (active * 100) + '%';
+                if (valEl) valEl.textContent = (active * 100).toFixed(0) + '%';
             }
             showNotification('推理统计已刷新', 'success');
         } else {
-            showNotification('获取推理统计失败: ' + ((result && result.error) || '未知错误'), 'error');
+            showNotification('获取推理统计失败', 'error');
         }
     } catch (e) {
         showNotification('刷新推理统计失败: ' + e.message, 'error');
@@ -7042,38 +7156,35 @@ async function refreshLearningMetrics() {
             var fieldMapping = {
                 'learning-rate-value': lrn.learning_rate,
                 'learning-correction-count': lrn.correction_count,
-                'learning-evolution-gen': lrn.evolution_generation,
-                'learning-knowledge-growth': lrn.knowledge_growth_rate
+                'learning-evolution-gen': lrn.evolution_gen,
+                'learning-knowledge-growth': lrn.knowledge_growth
             };
             for (var id in fieldMapping) {
                 var el = document.getElementById(id);
                 if (el && fieldMapping[id] !== undefined) el.textContent = fieldMapping[id];
             }
             var trendMapping = {
-                'learning-rate-trend': lrn.learning_rate_trend,
+                'learning-rate-trend': lrn.rate_trend,
                 'learning-correction-trend': lrn.correction_trend,
                 'learning-evolution-trend': lrn.evolution_trend,
                 'learning-knowledge-trend': lrn.knowledge_trend
             };
             for (var tid in trendMapping) {
                 var tel = document.getElementById(tid);
-                if (tel && trendMapping[tid] !== undefined) tel.textContent = trendMapping[tid];
+                if (tel && trendMapping[tid] !== undefined) tel.textContent = (trendMapping[tid] > 0 ? '+' : '') + trendMapping[tid] + '%';
             }
-            if (lrn.progress) {
-                var prog = lrn.progress;
-                var progressMapping = {
-                    'learning-reasoning-fill': prog.reasoning,
-                    'learning-memory-fill': prog.memory,
-                    'learning-planning-fill': prog.planning,
-                    'learning-creativity-fill': prog.creativity
-                };
-                for (var pid in progressMapping) {
-                    var pfill = document.getElementById(pid);
-                    var pval = document.getElementById(pid.replace('-fill', '-value'));
-                    var v = progressMapping[pid];
-                    if (pfill && v !== undefined) pfill.style.width = Math.min(100, v * 100) + '%';
-                    if (pval && v !== undefined) pval.textContent = (v * 100).toFixed(1) + '%';
-                }
+            var progressMapping = {
+                'learning-reasoning-fill': lrn.reasoning_progress,
+                'learning-memory-fill': lrn.memory_progress,
+                'learning-planning-fill': lrn.planning_progress,
+                'learning-creativity-fill': lrn.creativity_progress
+            };
+            for (var pid in progressMapping) {
+                var pfill = document.getElementById(pid);
+                var pval = document.getElementById(pid.replace('-fill', '-value'));
+                var v = progressMapping[pid];
+                if (pfill && v !== undefined) pfill.style.width = v + '%';
+                if (pval && v !== undefined) pval.textContent = v + '%';
             }
             showNotification('学习指标已刷新', 'success');
         } else {

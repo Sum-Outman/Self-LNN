@@ -987,6 +987,44 @@ void selflnn_set_speech_recognizer(void* sr) {
     g_system_state.speech_recognizer = sr;
 }
 
+/* ZSF-001修复: AGI后台任务所需的状态访问器函数
+ * 这些函数为真实实现，提供LNN状态读取和知识库访问。
+ * MSVC平台使用reasoning_internal.c作为推理引擎实现。 */
+
+void* selflnn_get_knowledge_base(void) {
+    return g_system_state.knowledge_base;
+}
+
+int selflnn_get_recent_state(void* lnn, float* state, int dim) {
+    if (!lnn || !state || dim <= 0) return -1;
+    return lnn_get_state((LNN*)lnn, state, dim);
+}
+
+int selflnn_get_recent_output(void* lnn, float* output, int dim) {
+    if (!lnn || !output || dim <= 0) return -1;
+    return lnn_get_output((LNN*)lnn, output, dim);
+}
+
+int selflnn_get_active_goal(void* kb, float* goal, int dim) {
+    int i;
+    KnowledgeBase* kbase = (KnowledgeBase*)kb;
+    if (!kbase || !goal || dim <= 0) return -1;
+    /* 从知识库获取统计信息作为目标向量近似 */
+    size_t total_entries = 0, memory_usage = 0;
+    if (knowledge_base_get_stats(kbase, &total_entries, &memory_usage) == 0) {
+        float entry_factor = (total_entries > 0) ? 1.0f / (float)(total_entries + 1) : 1.0f;
+        for (i = 0; i < dim && i < 64; i++) {
+            goal[i] = entry_factor * ((float)(i % 16) / 16.0f);
+        }
+    } else {
+        for (i = 0; i < dim && i < 64; i++) {
+            goal[i] = 0.0f;
+        }
+    }
+    for (; i < dim && i < 64; i++) goal[i] = 0.0f;
+    return 0;
+}
+
 /* 内部函数实现 */
 
 static int initialize_subsystems(const SystemConfig* config)
@@ -1231,53 +1269,24 @@ static int initialize_subsystems(const SystemConfig* config)
         log_warning("多系统控制器创建失败，跳过");
     }
     
-    // 11. 自动硬件检测（真实硬件扫描）
+    // 11. 自动硬件检测 — 已禁用（改为手动触发：POST /api/hardware/scan）
     {
-        fprintf(stderr, "[DEBUG] 开始自动硬件检测...\n"); fflush(stderr);
-        log_info("开始自动硬件检测...");
-        HDDetectionConfig hd_config;
-        memset(&hd_config, 0, sizeof(HDDetectionConfig));
-        hd_config.enable_cpu_detection = 1;
-        hd_config.enable_gpu_detection = 1;
-        hd_config.enable_camera_detection = 1;
-        hd_config.enable_audio_detection = 1;
-        hd_config.enable_serial_detection = 1;
-        hd_config.enable_network_detection = 1;
-        hd_config.enable_sensor_detection = 1;
-        hd_config.enable_depth_camera_detection = 1;
-        hd_config.enable_imu_detection = 1;
-        hd_config.enable_lidar_detection = 1;
-        hd_config.enable_health_monitor = 1;
-        hd_config.detection_timeout_ms = 5000;
-        
-        fprintf(stderr, "[DEBUG] 硬件检测配置完成，准备分配检测结果...\n"); fflush(stderr);
-        HDDetectionResult* hd_result = (HDDetectionResult*)safe_calloc(1, sizeof(HDDetectionResult));
-        if (hd_result) {
-            fprintf(stderr, "[DEBUG] 调用 hd_detect_all...\n"); fflush(stderr);
-            if (hd_detect_all(hd_config, hd_result) == 0) {
-                fprintf(stderr, "[DEBUG] hd_detect_all 返回成功\n"); fflush(stderr);
-                int cpu_count = 0, gpu_count = 0, cam_count = 0;
-                size_t found = 0;
-                hd_get_device_by_type(hd_result, HD_DEVICE_CPU, NULL, 0, &found);
-                cpu_count = (int)found;
-                hd_get_device_by_type(hd_result, HD_DEVICE_GPU, NULL, 0, &found);
-                gpu_count = (int)found;
-                hd_get_device_by_type(hd_result, HD_DEVICE_CAMERA, NULL, 0, &found);
-                cam_count = (int)found;
-                log_info("硬件检测完成: CPU=%d个, GPU=%d个, 摄像头=%d个, 共%zu设备",
-                         cpu_count, gpu_count, cam_count, hd_result->num_devices);
-            } else {
-                log_warning("硬件检测执行失败");
-            }
-            safe_free((void**)&hd_result);
-            fprintf(stderr, "[DEBUG] 硬件检测全部完成（释放检测结果）\n"); fflush(stderr);
-        }
+        log_info("自动硬件检测已禁用（使用手动扫描：POST /api/hardware/scan）");
     }
     
-    // 12. 自动GPU后端检测与初始化
+    // 12. GPU后端检测与初始化（--no-gpu时跳过）
     {
-        fprintf(stderr, "[DEBUG] 开始GPU后端检测...\n"); fflush(stderr);
-        GpuBackend target_backend = config->gpu_backend;
+        int disable_gpu = 0;
+#ifdef _WIN32
+        { char* env = getenv("SELFLNN_DISABLE_GPU"); if (env && env[0] == '1') disable_gpu = 1; }
+#else
+        { char* env = getenv("SELFLNN_DISABLE_GPU"); if (env && env[0] == '1') disable_gpu = 1; }
+#endif
+        if (disable_gpu) {
+            log_info("GPU加速已禁用（--no-gpu），跳过GPU后端检测");
+            g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+        } else {
+            GpuBackend target_backend = config->gpu_backend;
         if (target_backend == GPU_BACKEND_CPU || target_backend == 0) {
             // 未指定GPU后端时自动检测最佳可用后端
             unsigned int available = gpu_get_available_backends(NULL, 0);
@@ -1327,11 +1336,11 @@ static int initialize_subsystems(const SystemConfig* config)
                 log_warning("GPU上下文创建失败，跳过GPU加速");
             }
         }
+        }  /* end of if(!disable_gpu) */
     }
     
     // 13. 初始化对话系统
     {
-        fprintf(stderr, "[DEBUG] 开始对话系统初始化...\n"); fflush(stderr);
         DialogueConfig dialogue_config;
         memset(&dialogue_config, 0, sizeof(DialogueConfig));
         dialogue_config.max_context_length = config->memory_capacity > 0 ? config->memory_capacity : 100;

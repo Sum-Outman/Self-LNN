@@ -253,6 +253,10 @@ LNN* lnn_load(const char* filepath);
  */
 SELFLNN_API int lnn_get_config(const LNN* network, LNNConfig* config);
 
+/* ZSF-001修复: 获取LNN内部隐藏状态和最近输出 */
+SELFLNN_API int lnn_get_state(const LNN* network, float* state_buffer, int buffer_dim);
+SELFLNN_API int lnn_get_output(const LNN* network, float* output_buffer, int buffer_dim);
+
 /**
  * @brief 获取LNN内部CfC网络句柄（高级用途：直接操作原始CfC反向传播）
  *

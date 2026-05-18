@@ -1,12 +1,16 @@
 # 推理与计划引擎库
 message(STATUS "构建推理库")
 
+# ZSF-001修复: reasoning.c中reasoning_infer_with_knowledge等函数签名
+# 与头文件声明不兼容（char** vs float*参数类型差异），MSVC无法编译。
+# reasoning_internal.c 为MSVC平台提供真实推理引擎实现。
 if(MSVC)
     set(REASONING_SOURCES
-        reasoning_stubs.c planning.c long_term_planning.c causal_reasoning.c
-        laplace_operator.c reasoning_version.c planning_enhanced.c
-        cfc_uncertainty_reasoning.c hierarchical_planning.c
-        math_physics_reasoning.c quaternion_liquid_gate.c
+        reasoning_internal.c planning.c long_term_planning.c
+        causal_reasoning.c laplace_operator.c reasoning_version.c
+        planning_enhanced.c cfc_uncertainty_reasoning.c
+        hierarchical_planning.c math_physics_reasoning.c
+        quaternion_liquid_gate.c
     )
 else()
     set(REASONING_SOURCES

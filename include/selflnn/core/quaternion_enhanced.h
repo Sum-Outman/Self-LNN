@@ -157,7 +157,7 @@ static inline void quat_to_euler(const Quaternion q, float* roll, float* pitch, 
 
     float sinp = 2.0f * (q.w * q.y - q.z * q.x);
     if (fabsf(sinp) >= 1.0f)
-        *pitch = copysignf(M_PI / 2.0f, sinp);
+        *pitch = copysignf((float)M_PI / 2.0f, sinp);
     else
         *pitch = asinf(sinp);
 

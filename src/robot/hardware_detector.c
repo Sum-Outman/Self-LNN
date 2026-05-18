@@ -914,111 +914,91 @@ int hd_detect_all(HDDetectionConfig config, HDDetectionResult* result) {
     double start = hd_timestamp_ms();
 
     if (config.enable_cpu_detection) {
-        fprintf(stderr, "[DEBUG_HD] CPU检测...\n"); fflush(stderr);
         HDDeviceInfo* info = &result->devices[result->num_devices];
         if (result->num_devices < HD_MAX_DEVICES && hd_detect_cpu(info) == 0) {
             result->num_devices++;
         }
-        fprintf(stderr, "[DEBUG_HD] CPU检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_gpu_detection) {
-        fprintf(stderr, "[DEBUG_HD] GPU检测...\n"); fflush(stderr);
         size_t gpu_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_gpu(&result->devices[result->num_devices], remaining, &gpu_count);
             result->num_devices += gpu_count;
         }
-        fprintf(stderr, "[DEBUG_HD] GPU检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_camera_detection) {
-        fprintf(stderr, "[DEBUG_HD] 摄像头检测...\n"); fflush(stderr);
         size_t cam_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_cameras(&result->devices[result->num_devices], remaining, &cam_count);
             result->num_devices += cam_count;
         }
-        fprintf(stderr, "[DEBUG_HD] 摄像头检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_audio_detection) {
-        fprintf(stderr, "[DEBUG_HD] 音频检测...\n"); fflush(stderr);
         size_t audio_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_audio_devices(&result->devices[result->num_devices], remaining, &audio_count);
             result->num_devices += audio_count;
         }
-        fprintf(stderr, "[DEBUG_HD] 音频检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_serial_detection) {
-        fprintf(stderr, "[DEBUG_HD] 串口检测...\n"); fflush(stderr);
         size_t port_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_serial_ports(&result->devices[result->num_devices], remaining, &port_count);
             result->num_devices += port_count;
         }
-        fprintf(stderr, "[DEBUG_HD] 串口检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_network_detection) {
-        fprintf(stderr, "[DEBUG_HD] 网络适配器检测...\n"); fflush(stderr);
         size_t net_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_network_adapters(&result->devices[result->num_devices], remaining, &net_count);
             result->num_devices += net_count;
         }
-        fprintf(stderr, "[DEBUG_HD] 网络适配器检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_sensor_detection) {
-        fprintf(stderr, "[DEBUG_HD] 传感器检测...\n"); fflush(stderr);
         size_t sensor_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_sensors(&result->devices[result->num_devices], remaining, &sensor_count);
             result->num_devices += sensor_count;
         }
-        fprintf(stderr, "[DEBUG_HD] 传感器检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_depth_camera_detection) {
-        fprintf(stderr, "[DEBUG_HD] 深度摄像头检测...\n"); fflush(stderr);
         size_t dc_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_depth_cameras(&result->devices[result->num_devices], remaining, &dc_count);
             result->num_devices += dc_count;
         }
-        fprintf(stderr, "[DEBUG_HD] 深度摄像头检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_imu_detection) {
-        fprintf(stderr, "[DEBUG_HD] IMU检测...\n"); fflush(stderr);
         size_t imu_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_imu_devices(&result->devices[result->num_devices], remaining, &imu_count);
             result->num_devices += imu_count;
         }
-        fprintf(stderr, "[DEBUG_HD] IMU检测完成\n"); fflush(stderr);
     }
 
     if (config.enable_lidar_detection) {
-        fprintf(stderr, "[DEBUG_HD] LiDAR检测...\n"); fflush(stderr);
         size_t lidar_count = 0;
         if (result->num_devices < HD_MAX_DEVICES) {
             size_t remaining = HD_MAX_DEVICES - result->num_devices;
             hd_detect_lidar_devices(&result->devices[result->num_devices], remaining, &lidar_count);
             result->num_devices += lidar_count;
         }
-        fprintf(stderr, "[DEBUG_HD] LiDAR检测完成\n"); fflush(stderr);
     }
 
     result->detection_complete = 1;

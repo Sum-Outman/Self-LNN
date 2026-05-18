@@ -59,7 +59,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **知识库** | 知识图谱、三元组存储、多跳推理、本体工程、语义网络 |
 | **机器人控制** | DH 运动学、A*/RRT* 路径规划、ROS/ROS2 集成、PyBullet/Gazebo 仿真、多机器人协调 |
 | **GPU 加速** | 10 种 GPU 后端接口（CUDA、OpenCL、Vulkan、Metal、ROCm、CPU-SIMD — 完整内核调度+线程池并行；Intel、Ascend、Cambricon、TPU — 通过dlsym动态加载SDK + CPU自动回退；CPU 后端支持 27+ 种真实内核算子） |
-| **后端服务** | HTTP REST API（~180 端点）、WebSocket 实时通信、API 密钥认证、安全监控 |
+| **后端服务** | HTTP REST API（278 端点，254 已实现 + 24 预留）、WebSocket 实时通信、API 密钥认证、安全监控 |
 | **并发系统** | 线程池、无锁队列、读写锁、RCU 机制 |
 | **安全系统** | 紧急停止、熔断器、审计日志、内容过滤 |
 | **前端界面** | 15 个 HTML 页面、17 个 JS 模块，完整的可视化控制台 |
@@ -79,7 +79,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **Knowledge Base** | Knowledge graph, triple store, multi-hop reasoning, ontology engineering, semantic network |
 | **Robot Control** | DH kinematics, A*/RRT* path planning, ROS/ROS2 integration, PyBullet/Gazebo simulation, multi-robot coordination |
 | **GPU Acceleration** | 10 GPU backend interfaces (CUDA, OpenCL, Vulkan, Metal, ROCm, CPU-SIMD — full kernel dispatch + thread pool parallelism; Intel, Ascend, Cambricon, TPU — dlsym-loaded SDK + CPU auto-fallback; CPU backend supports 27+ real kernel operators) |
-| **Backend Service** | HTTP REST API (~180 endpoints), WebSocket real-time communication, API key authentication, security monitoring |
+| **Backend Service** | HTTP REST API (278 endpoints, 254 implemented + 24 reserved), WebSocket real-time communication, API key authentication, security monitoring |
 | **Concurrency System** | Thread pool, lock-free queue, read-write lock, RCU mechanism |
 | **Safety System** | Emergency stop, circuit breaker, audit log, content filtering |
 | **Frontend Interface** | 15 HTML pages, 17 JS modules, complete visual console |
@@ -308,29 +308,13 @@ Configuration file `selflnn_config.json`:
 
 #### 中文
 启动服务器后，在浏览器中访问：
-- 主页：http://localhost:8080
-- 仪表盘：http://localhost:8080/index.html
-- 训练中心：http://localhost:8080/training-center.html
-- 机器人控制：http://localhost:8080/device-control.html
-- 仿真控制：http://localhost:8080/simulation-control.html
-- 多模态学习：http://localhost:8080/multimodal-learn.html
-- 知识图谱：http://localhost:8080/knowledge-graph.html
-- 语音控制：http://localhost:8080/voice-control.html
-- 安全面板：http://localhost:8080/safety.html
-- API 文档：http://localhost:8080/api-docs.html
+- 主页/仪表盘：http://localhost:8080/index.html (所有功能集成于单一页面)
+- API 端点：http://localhost:8080/api/status 等
 
 #### English
 After starting the server, visit in your browser:
-- Homepage: http://localhost:8080
-- Dashboard: http://localhost:8080/index.html
-- Training Center: http://localhost:8080/training-center.html
-- Robot Control: http://localhost:8080/device-control.html
-- Simulation Control: http://localhost:8080/simulation-control.html
-- Multimodal Learning: http://localhost:8080/multimodal-learn.html
-- Knowledge Graph: http://localhost:8080/knowledge-graph.html
-- Voice Control: http://localhost:8080/voice-control.html
-- Safety Panel: http://localhost:8080/safety.html
-- API Docs: http://localhost:8080/api-docs.html
+- Homepage/Dashboard: http://localhost:8080/index.html (all features in single page)
+- API Endpoints: http://localhost:8080/api/status etc.
 
 ---
 

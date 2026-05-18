@@ -40,7 +40,7 @@ if(MSVC)
     #   这两个警告会掩盖真正的未定义行为(UB)问题。
     #   保留的警告禁用主要针对: 未引用参数(4100)、类型转换(4244)、弃用API(4996)等风格问题。
     #   后续版本目标: 从13个禁用减少到6个以下。
-    add_compile_options(/W4 /WX /wd4100 /wd4152 /wd4211 /wd4028 /wd4029 /wd4026 /wd4244 /wd4189 /wd4142 /wd4032 /wd4996 /Oi- /FImath.h /FS /wd4205 /wd4210)
+    add_compile_options(/W4 /WX /EHa /wd4100 /wd4152 /wd4211 /wd4028 /wd4029 /wd4026 /wd4244 /wd4189 /wd4142 /wd4032 /wd4996 /Oi- /FImath.h /FS /wd4205 /wd4210)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_USE_MATH_DEFINES -DWIN32_LEAN_AND_MEAN -D_WINSOCK_DEPRECATED_NO_WARNINGS)
     
     # Release配置的优化选项
@@ -246,23 +246,8 @@ if(BUILD_FRONTEND)
     
     add_custom_target(check_frontend
         COMMAND ${CMAKE_COMMAND} -E echo "正在检查前端文件完整性..."
-        COMMAND ${CMAKE_COMMAND} -E echo "前端文件列表 (K-033: 完整17个JS文件):"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - index.html (主页面)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - api-docs.html (API文档)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - api-keys.html (API密钥)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - knowledge-graph.html (知识图谱)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - device-control.html (设备控制)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - hardware-setup.html (硬件配置)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - multimodal-learn.html (多模态学习)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - programming-workbench.html (编程工作台)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - safety.html (安全面板)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - simulation-control.html (仿真控制)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - skills.html (技能管理)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - teach.html (示教)" 
-        COMMAND ${CMAKE_COMMAND} -E echo "  - training-center.html (训练中心)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - usage-logs.html (使用日志)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - voice-control.html (语音控制)"
-        COMMAND ${CMAKE_COMMAND} -E echo "  - css/style.css (样式)"
+        COMMAND ${CMAKE_COMMAND} -E echo "前端文件列表 (ZSF-003修复: 所有功能集成于单页面架构):"
+        COMMAND ${CMAKE_COMMAND} -E echo "  - index.html (主页面, 含15个功能section)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/compatibility.js (浏览器兼容层)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/api-service.js (API服务)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/data-engine.js (数据引擎)"
@@ -280,6 +265,7 @@ if(BUILD_FRONTEND)
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/programming-workbench.js (编程工作台)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/main.js (主逻辑)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/hardware-util.js (硬件工具)"
+        COMMAND ${CMAKE_COMMAND} -E echo "  - css/style.css (样式)"
         COMMAND ${CMAKE_COMMAND} -E echo "前端文件完整性检查完成"
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "检查前端文件完整性"

@@ -21,7 +21,7 @@ body {
     overflow-x: hidden;
 }
 
-/* 连接状态横幅 - 页面顶部 */
+/* 连接状态横幅 - 页面顶部，JS就绪后由script控制显示 */
 .connection-banner {
     position: fixed;
     top: 0;
@@ -36,6 +36,10 @@ body {
     font-weight: 500;
     transition: all 0.3s ease;
     cursor: pointer;
+}
+/* JS未就绪时横幅也不显示，防止闪烁；连接状态由js/main.js动态管理 */
+.connection-banner.js-ready {
+    display: flex;
 }
 
 .connection-banner.connected {
@@ -78,25 +82,27 @@ body {
     50% { opacity: 0.3; }
 }
 
-/* 顶部导航栏 - 适配连接横幅 */
+/* 顶部导航栏 - 紧凑单行布局 */
 .header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 1rem 2rem;
-    margin-top: 36px;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(10px);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 0.5rem 1.5rem;
+    margin-top: 0;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(0, 255, 136, 0.10);
     position: sticky;
     top: 0;
     z-index: 1000;
+    gap: 1rem;
 }
 
 .logo {
     display: flex;
     align-items: center;
-    gap: 1rem;
+    gap: 0.5rem;
+    flex-shrink: 0;
 }
 
 .logo i {
@@ -111,52 +117,95 @@ body {
 }
 
 .logo h1 {
-    font-size: 1.5rem;
+    font-size: 1.2rem;
     font-weight: 700;
-    background: linear-gradient(90deg, #888888, #aaaaaa);
+    background: linear-gradient(90deg, #00ff88, #00cc6a);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
+    margin: 0;
 }
 
 .nav ul {
     display: flex;
     list-style: none;
     gap: 0.3rem;
-    flex-wrap: wrap;
-    max-height: 60vh;
-    overflow-y: auto;
+    align-items: center;
+}
+
+.nav li {
+    position: relative;
 }
 
 .nav a {
     color: #cccccc;
     text-decoration: none;
-    padding: 0.4rem 0.7rem;
-    border-radius: 4px;
+    padding: 0.5rem 0.8rem;
+    border-radius: 6px;
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    transition: all 0.3s ease;
+    transition: all 0.25s ease;
     font-size: 0.85rem;
     white-space: nowrap;
+    cursor: pointer;
 }
 
 .nav a:hover {
     color: #fff;
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(0, 255, 136, 0.10);
 }
 
 .nav a.active {
-    color: #888888;
-    background: rgba(255, 255, 255, 0.1);
+    color: #00cc6a;
+    background: rgba(0, 255, 136, 0.12);
+    font-weight: 600;
 }
 
-.nav-separator {
+/* 下拉菜单 */
+.nav-dropdown .dropdown-toggle {
+    user-select: none;
+}
+
+.dropdown-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    min-width: 180px;
+    background: rgba(10, 10, 20, 0.97);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(0, 255, 136, 0.15);
+    border-radius: 8px;
+    padding: 6px 0;
+    z-index: 2000;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 255, 136, 0.05) inset;
+    animation: dropdownIn 0.2s ease;
+}
+
+@keyframes dropdownIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.nav-dropdown.active > .dropdown-menu {
+    display: block;
+}
+
+.dropdown-menu li {
     width: 100%;
-    height: 1px;
-    background: rgba(255, 255, 255, 0.06);
-    margin: 2px 0;
-    flex-basis: 100%;
+}
+
+.dropdown-menu a {
+    padding: 0.55rem 1rem;
+    border-radius: 0;
+    font-size: 0.8rem;
+    display: block;
+}
+
+.dropdown-menu a:hover {
+    background: rgba(0, 255, 136, 0.08);
+    color: #00ff88;
 }
 
 .user-info {
@@ -200,6 +249,11 @@ body {
 
 .section-header {
     margin-bottom: 2rem;
+}
+/* ZSFABC-FIX: 空section-header不占空间 */
+.section-header:empty {
+    margin-bottom: 0;
+    display: none;
 }
 
 .section-header h2 {
@@ -808,8 +862,12 @@ body {
     }
     
     .nav ul {
-        flex-wrap: wrap;
         justify-content: center;
+    }
+    
+    .dropdown-menu {
+        left: auto;
+        right: 0;
     }
     
     .dashboard-grid {
