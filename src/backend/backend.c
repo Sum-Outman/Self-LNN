@@ -1747,6 +1747,77 @@ typedef struct {
     SocketHandle client_socket;
 } WebSocketContext;
 
+/* ZSFYGY-F004: 非阻塞socket接收函数 */
+static int socket_recv_nonblock(SocketHandle sock, char* buf, int max_len) {
+    if (sock < 0 || !buf || max_len <= 0) return -1;
+#ifdef _WIN32
+    u_long avail = 0;
+    if (ioctlsocket(sock, FIONREAD, &avail) == 0 && avail > 0) {
+        return recv(sock, buf, max_len > (int)avail ? (int)avail : max_len, 0);
+    } else if (avail == 0) {
+        return 0;
+    }
+    return recv(sock, buf, max_len, 0);
+#else
+    fd_set rfds;
+    struct timeval tv = {0, 100000};
+    FD_ZERO(&rfds);
+    FD_SET((int)sock, &rfds);
+    if (select((int)sock + 1, &rfds, NULL, NULL, &tv) > 0) {
+        ssize_t n = recv(sock, buf, (size_t)max_len, MSG_DONTWAIT);
+        return (int)n;
+    }
+    return 0;
+#endif
+}
+
+/* ZSFYGY-F004: 检查socket是否发生了致命错误 */
+static int socket_is_fatal_error(SocketHandle sock) {
+    (void)sock;
+#ifdef _WIN32
+    int err = WSAGetLastError();
+    return (err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAENOTCONN || err == WSAENETRESET);
+#else
+    return (errno == ECONNRESET || errno == ECONNABORTED || errno == EPIPE || errno == ENOTCONN);
+#endif
+}
+
+/* ZSFYGY-F004: 从WebSocket帧中提取文本载荷 */
+static const char* ws_extract_text_payload(const char* raw_frame, size_t frame_len) {
+    if (!raw_frame || frame_len < 2) return NULL;
+    const unsigned char* buf = (const unsigned char*)raw_frame;
+    int opcode = buf[0] & 0x0F;
+    if (opcode != WS_OPCODE_TEXT && opcode != WS_OPCODE_BINARY) return NULL;
+    int masked = (buf[1] & 0x80) ? 1 : 0;
+    size_t payload_len = buf[1] & 0x7F;
+    size_t offset = 2;
+    if (payload_len == 126) {
+        if (frame_len < 4) return NULL;
+        payload_len = ((size_t)buf[2] << 8) | buf[3];
+        offset = 4;
+    } else if (payload_len == 127) {
+        if (frame_len < 10) return NULL;
+        payload_len = 0;
+        for (int i = 0; i < 8; i++) payload_len = (payload_len << 8) | buf[2 + i];
+        offset = 10;
+    }
+    unsigned char mask_key[4] = {0};
+    if (masked) {
+        if (frame_len < offset + 4) return NULL;
+        memcpy(mask_key, buf + offset, 4);
+        offset += 4;
+    }
+    if (frame_len < offset + payload_len) return NULL;
+    if (payload_len > 65536) return NULL;
+    static char payload_buf[65536];
+    size_t copy_len = payload_len < sizeof(payload_buf) - 1 ? payload_len : sizeof(payload_buf) - 1;
+    for (size_t i = 0; i < copy_len; i++) {
+        payload_buf[i] = (char)(buf[offset + i] ^ (masked ? mask_key[i % 4] : 0));
+    }
+    payload_buf[copy_len] = '\0';
+    return payload_buf;
+}
+
 /* ZSFABC: WebSocket推送独立线程函数，不再阻塞主accept循环 */
 static void* ws_push_thread_func(void* arg) {
     WebSocketContext* ws_ctx = (WebSocketContext*)arg;
@@ -1817,6 +1888,59 @@ static void* ws_push_thread_func(void* arg) {
             if (tlen > 0 && tlen < (int)sizeof(tupdate)) ws_send_text_frame(client_socket, tupdate, tlen);
         }
         if (ulen > 0 && ws_send_text_frame(client_socket, update_json, ulen) != 0) break;
+        
+        /* ZSFYGY-F004修复: WebSocket双向通信 —— 读取客户端帧并路由到API处理器 */
+        {
+            SocketHandle check_socket = client_socket;
+            if (check_socket >= 0) {
+                char ws_recv_buf[65536];
+                int rlen = socket_recv_nonblock(client_socket, ws_recv_buf, (int)(sizeof(ws_recv_buf) - 1));
+                if (rlen > 0) {
+                    ws_recv_buf[rlen] = '\0';
+                    /* 解析WebSocket帧获取文本载荷 */
+                    const char* payload = ws_extract_text_payload(ws_recv_buf, (size_t)rlen);
+                    if (payload) {
+                        /* 将WebSocket消息作为API请求分发处理 */
+                        ApiRequestType ws_req_type = API_NOT_FOUND;
+                        /* 解析JSON中的"type"和"endpoint"字段确定请求类型 */
+                        char ws_endpoint[256] = {0};
+                        parse_json_string(payload, "endpoint", ws_endpoint, sizeof(ws_endpoint));
+                        if (ws_endpoint[0] != '\0') {
+                            /* 根据endpoint路径设置request_type */
+                            if (strcmp(ws_endpoint, "/api/status") == 0) ws_req_type = API_GET_STATUS;
+                            else if (strcmp(ws_endpoint, "/api/dialogue") == 0) ws_req_type = API_POST_DIALOGUE;
+                            else if (strcmp(ws_endpoint, "/api/dialogue/multimodal") == 0) ws_req_type = API_POST_DIALOGUE_MULTIMODAL;
+                            else if (strcmp(ws_endpoint, "/api/agi/think") == 0) ws_req_type = API_POST_AGI_THINK;
+                            else if (strcmp(ws_endpoint, "/api/agi/decide") == 0) ws_req_type = API_POST_AGI_DECIDE;
+                            else if (strcmp(ws_endpoint, "/api/agi/plan") == 0) ws_req_type = API_POST_AGI_PLAN;
+                            else if (strcmp(ws_endpoint, "/api/health") == 0) ws_req_type = API_GET_HEALTH;
+                            else if (strcmp(ws_endpoint, "/api/knowledge") == 0) ws_req_type = API_GET_KNOWLEDGE;
+                            else if (strcmp(ws_endpoint, "/api/memory") == 0) ws_req_type = API_GET_MEMORY;
+                            else if (strcmp(ws_endpoint, "/api/learning") == 0) ws_req_type = API_GET_LEARNING;
+                        }
+                        if (ws_req_type != API_NOT_FOUND) {
+                            ApiResponse* ws_resp = backend_handle_request(server, ws_req_type, payload, strlen(payload), "ws_client");
+                            if (ws_resp && ws_resp->data) {
+                                char ws_resp_json[16384];
+                                int rj_len = snprintf(ws_resp_json, sizeof(ws_resp_json),
+                                    "{\"type\":\"api_response\",\"request_type\":%d,\"status\":%d,\"data\":%s}",
+                                    (int)ws_req_type, ws_resp->status_code, (const char*)ws_resp->data);
+                                if (rj_len > 0 && rj_len < (int)sizeof(ws_resp_json)) {
+                                    ws_send_text_frame(client_socket, ws_resp_json, rj_len);
+                                }
+                            }
+                            if (ws_resp) {
+                                if (ws_resp->data) safe_free((void**)&ws_resp->data);
+                                safe_free((void**)&ws_resp);
+                            }
+                        }
+                    }
+                } else if (rlen < 0 && socket_is_fatal_error(client_socket)) {
+                    break;
+                }
+            }
+        }
+        
         push_counter++;
 #ifdef _WIN32
         Sleep(2000);
@@ -3914,6 +4038,17 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     if (!server->auto_learning) {
         selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
                               "创建自主学习系统失败");
+    } else {
+        /* ZSFYGY-F007修复: 设置默认知识库扫描目录，不存在则自动创建 */
+        {
+            #ifdef _WIN32
+            _mkdir("knowledge_base");
+            #else
+            mkdir("knowledge_base", 0755);
+            #endif
+        }
+        auto_learning_set_directory(server->auto_learning, "knowledge_base");
+        log_info("[后端] 自主学习系统已初始化，扫描目录: knowledge_base/");
     }
 
     /* 初始化硬件采集子系统（默认不启动，等待API调用） */
@@ -3924,6 +4059,89 @@ BackendServer* backend_server_create(const BackendConfig* config) {
 
     /* 初始化数据集管理 */
     server->active_dataset = NULL;
+
+    /* ZSFYGY-F002修复: 子系统初始化完成后的可用性验证报告 */
+    {
+        int ok_count = 0, fail_count = 0;
+        /* 验证各子系统并在需要时尝试延迟初始化 */
+        if (server->multimodal_manager) {
+            ok_count++;
+        } else {
+            log_warning("[后端] 多模态管理器初始化失败 - 视觉/音频/传感器API不可用");
+            fail_count++;
+        }
+        if (server->reasoning_engine) {
+            ok_count++;
+        } else {
+            log_warning("[后端] 推理引擎初始化失败 - 推理/规划API不可用");
+            fail_count++;
+        }
+        if (server->knowledge_base) {
+            ok_count++;
+        } else {
+            log_warning("[后端] 知识库初始化失败 - 知识库API不可用");
+            fail_count++;
+        }
+        if (server->memory_manager) {
+            ok_count++;
+        } else {
+            log_warning("[后端] 记忆管理器初始化失败 - 记忆API不可用");
+            fail_count++;
+        }
+        if (server->learning_engine || !server->config.enable_learning) {
+            ok_count++;
+        } else if (server->config.enable_learning) {
+            log_warning("[后端] 学习引擎初始化失败 - 学习API不可用");
+            fail_count++;
+        }
+        if (server->tts_engine) {
+            ok_count++;
+        } else {
+            log_warning("[后端] TTS引擎初始化失败 - 语音合成API不可用");
+            fail_count++;
+        }
+        if (server->cognition_system || !server->config.enable_cognition) {
+            ok_count++;
+        } else if (server->config.enable_cognition) {
+            log_warning("[后端] 自我认知系统初始化失败");
+            fail_count++;
+        }
+        if (server->metacognition_system || !server->config.enable_cognition) {
+            ok_count++;
+        } else if (server->config.enable_cognition) {
+            log_warning("[后端] 元认知系统初始化失败");
+            fail_count++;
+        }
+        if (server->skill_library) {
+            ok_count++;
+        } else {
+            log_warning("[后端] 技能库初始化失败");
+            fail_count++;
+        }
+        if (server->safety_monitor) {
+            ok_count++;
+        } else {
+            log_warning("[后端] 安全监控初始化失败");
+            fail_count++;
+        }
+        if (server->auto_learning) {
+            ok_count++;
+        } else {
+            log_warning("[后端] 自主学习系统初始化失败");
+            fail_count++;
+        }
+        if (server->lnn_instance) {
+            ok_count++;
+        } else {
+            log_error("[后端] 全局共享LNN不可用 - 系统核心功能无法工作");
+            fail_count++;
+        }
+        log_info("[后端] 子系统验证完成: %d个就绪, %d个不可用", ok_count, fail_count);
+        /* 如果LNN也不可用，系统无法工作 */
+        if (!server->lnn_instance) {
+            log_error("[后端] 关键依赖缺失，后端服务将以降级模式运行");
+        }
+    }
 
     return server;
 }

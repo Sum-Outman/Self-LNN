@@ -68,7 +68,7 @@ struct OcrProcessor {
 /* 静态函数声明 */
 static int extract_hybrid_features(const float* image, int width, int height, 
                                   float* features, int max_features);
-static char recognize_character_by_features(const float* features, int num_features,
+static unsigned short recognize_character_by_features(const float* features, int num_features,
                                            CharTemplate* templates, int num_templates);
 static float compute_feature_distance(const float* features, int num_features,
                                      CharTemplate* templates, int num_templates,
@@ -83,7 +83,7 @@ static int segment_characters(const float* image_data, int width, int height,
 static int extract_char_features(const float* char_image, int width, int height,
                                 float* features, int max_features, OcrProcessor* processor);
 static int load_char_templates(OcrProcessor* processor);
-static int compute_character_structural_features(char ch, float* features, int feature_dim);
+static int compute_character_structural_features(unsigned short ch, float* features, int feature_dim);
 static int create_basic_english_templates(OcrProcessor* processor);
 
 /**
@@ -455,7 +455,7 @@ int ocr_recognize(OcrProcessor* processor,
                                      char_w, char_h, char_features, processor->char_feature_dim, processor);
                 
                 // 识别字符
-                region_chars[c].character = recognize_character_by_features(
+                region_chars[c].character = (char)recognize_character_by_features(
                     char_features, processor->char_feature_dim,
                     processor->char_templates, processor->num_char_templates);
                 
@@ -566,7 +566,7 @@ static float compute_feature_distance(const float* features, int num_features,
  * 3. k-最近邻分类（k=3，带距离加权投票）
  * 4. 置信度计算和拒识机制
  */
-static char recognize_character_by_features(const float* features, int num_features,
+static unsigned short recognize_character_by_features(const float* features, int num_features,
                                            CharTemplate* templates, int num_templates) {
     if (!features || !templates || num_features <= 0 || num_templates <= 0) {
         return '?';
@@ -679,7 +679,7 @@ static char recognize_character_by_features(const float* features, int num_featu
     }
     
     // 步骤3：加权投票（完整实现，拒绝简单最近邻）
-    char candidate_chars[3] = {'?', '?', '?'};
+    unsigned short candidate_chars[3] = {L'?', L'?', L'?'};
     float candidate_weights[3] = {0.0f, 0.0f, 0.0f};
     int valid_neighbors = 0;
     
@@ -744,7 +744,7 @@ static char recognize_character_by_features(const float* features, int num_featu
     safe_free((void**)&char_scores);
     safe_free((void**)&norm_features);
     
-    return (int)best_char;
+    return best_char;
 }
 
 /**
@@ -1464,7 +1464,7 @@ static int extract_char_features(const float* char_image, int width, int height,
  *   - 8个方向梯度直方图特征
  *   - 剩余维度：网格单元二阶统计（相邻单元相关性）
  */
-static int compute_character_structural_features(char ch, float* features, int feature_dim) {
+static int compute_character_structural_features(unsigned short ch, float* features, int feature_dim) {
     if (!features || feature_dim < 32) {
         return -1;
     }
@@ -2251,7 +2251,7 @@ int ocr_recognize_chars(OcrProcessor* processor,
         
         if (features_extracted > 0) {
             // 使用模板匹配识别字符
-            result->characters[i] = recognize_character_by_features(
+            result->characters[i] = (char)recognize_character_by_features(
                 char_features, features_extracted,
                 processor->char_templates, processor->num_char_templates);
             

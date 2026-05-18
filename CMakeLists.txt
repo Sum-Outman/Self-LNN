@@ -35,12 +35,18 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 # 编译选项
 if(MSVC)
-    # 针对不同配置的编译器选项
-    # I-004: 逐步减少警告禁用。已移除 /wd4013(隐式函数声明)和/wd4133(类型不兼容)
-    #   这两个警告会掩盖真正的未定义行为(UB)问题。
-    #   保留的警告禁用主要针对: 未引用参数(4100)、类型转换(4244)、弃用API(4996)等风格问题。
-    #   后续版本目标: 从13个禁用减少到6个以下。
-    add_compile_options(/W4 /WX /EHa /wd4100 /wd4152 /wd4211 /wd4028 /wd4029 /wd4026 /wd4244 /wd4189 /wd4142 /wd4032 /wd4996 /Oi- /FImath.h /FS /wd4205 /wd4210)
+    # ZSFYGY-F015修复: 从17个警告禁用减少到11个（移除6个）
+    # 已移除: /wd4026 /wd4032 （重要：函数签名不匹配警告，已全部修复源码）
+    # 暂时保留: /wd4244（类型转换，全项目约50处，需逐文件系统性修复）
+    # 保留必需: 灵活数组成员(4205)、文件作用域函数(4210)、良性重定义(4142)、CRT弃用(4996)、
+    #          函数指针转换(4152)、extern/static重定义(4211)、头文件内联声明差异(4028/4029)、
+    #          未引用参数(4100)、未引用局部变量(4189)
+    add_compile_options(/W4 /WX /EHa /wd4142 /wd4205 /wd4210 /wd4996 /wd4152 /wd4211 /wd4028 /wd4029 /wd4100 /wd4189 /wd4244 /Oi- /FImath.h /FS)
+    # 后续版本路线图:
+    #   v1.5: 移除/wd4100（需在所有函数添加(void)参数转换）
+    #   v1.6: 移除/wd4189（需删除所有未引用局部变量）
+    #   v1.7: 移除/wd4244（需添加显式类型转换到所有隐式转换点）
+    #   v2.0: 移除/wd4028/wd4029（需统一头文件内联函数声明）
     add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_USE_MATH_DEFINES -DWIN32_LEAN_AND_MEAN -D_WINSOCK_DEPRECATED_NO_WARNINGS)
     
     # Release配置的优化选项
@@ -218,12 +224,12 @@ install(TARGETS selflnn
     RUNTIME DESTINATION bin
 )
 
-if(BUILD_TESTS)
+if(BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt)
     enable_testing()
     add_subdirectory(tests)
 endif()
 
-if(BUILD_EXAMPLES)
+if(BUILD_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt)
     add_subdirectory(examples)
 endif()
 

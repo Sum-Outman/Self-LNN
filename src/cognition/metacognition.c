@@ -1438,7 +1438,7 @@ int metacognition_self_correction(MetacognitionSystem* system,
             break;
         case 2: /* 预测误差增加：缩短预测范围、增强反馈 */
             system->prediction_config.prediction_horizon = 
-                (size_t)(system->prediction_config.prediction_horizon * 0.8f);
+                system->prediction_config.prediction_horizon * 0.8f;
             if (system->prediction_config.prediction_horizon < 1)
                 system->prediction_config.prediction_horizon = 1;
             system->model_update_config.learning_rate *= 0.9f;

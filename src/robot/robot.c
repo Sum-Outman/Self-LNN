@@ -3980,7 +3980,7 @@ int robot_update_reconnect_state_impl(int connection_ok) {
     return delay;
 }
 
-int robot_get_reconnect_delay_ms(void) { return recon_state.current_delay; }
+int robot_get_reconnect_delay_ms(Robot* robot) { (void)robot; return recon_state.current_delay; }
 
 /* ============================================================================
  * ROBOT-20: IMU/力/关节编码器完整EKF融合

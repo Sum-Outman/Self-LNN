@@ -80,7 +80,10 @@ var g_browserCompat = new BrowserCompat();
         };
         
         setupEventListeners();
-        g_deviceManager.init().catch(function(){});
+        g_deviceManager.init().catch(function(err) {
+            console.error('[SELF-LNN] 设备管理器初始化失败:', err && err.message ? err.message : err);
+            showNotification('⚠️ 设备管理器初始化失败，部分硬件功能可能不可用', 'warning');
+        });
         
         /* 延迟8秒后启动DataEngine（确保所有静态资源先加载完毕） */
         setTimeout(function() {
@@ -100,10 +103,15 @@ var g_dataEngineFirstConnect = true;
                     }
                 }
             } catch(e) {
-                console.warn('仪表盘更新跳过 (DOM不完整):', e.message);
+                console.error('[SELF-LNN] 仪表盘更新失败:', e.message);
+                showNotification('⚠️ 仪表盘数据更新异常: ' + e.message, 'warning');
             }
         });
-    } catch(e) {}
+    } catch(e) {
+        console.error('[SELF-LNN] 系统初始化严重失败:', e && e.message ? e.message : e);
+        showNotification('❌ 系统初始化失败: ' + (e && e.message ? e.message : '未知错误') + '。请刷新页面重试。', 'danger');
+        LoadingOverlay.hide();
+    }
 
     LoadingOverlay.hide();
     

@@ -140,7 +140,6 @@ static volatile int hazard_table_init_flag = 0;
 /* K-182: CAS确保hazard_table仅初始化一次 */
 static void hazard_table_ensure_init(void) {
     if (!hazard_table_init_flag) {
-        int expected = 0;
         if (compare_and_swap_uintptr((volatile LONG*)&hazard_table_init_flag, 0, 2)) {
             memset((void*)&hazard_table, 0, sizeof(hazard_table));
             atomic_thread_fence(0);

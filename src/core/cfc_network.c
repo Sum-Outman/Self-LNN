@@ -1368,7 +1368,7 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
     }
 
     stats->final_t = t;
-    stats->avg_dt = (float)fabs(t - config->t_start) / (float)fmaxf(stats->accepted_steps, 1);
+    stats->avg_dt = fabsf(t - config->t_start) / fmaxf((float)stats->accepted_steps, 1.0f);
     if (stats->min_dt_used < 1e-12f) stats->min_dt_used = h;
     stats->used_stiff_solver = using_stiff_solver;
 

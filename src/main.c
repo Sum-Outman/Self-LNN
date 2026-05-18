@@ -49,6 +49,7 @@
 #include <windows.h>
 #include <wincrypt.h>
 #include <process.h>
+#include <direct.h>
 #else
 #include <unistd.h>
 #include <pthread.h>
@@ -431,6 +432,22 @@ static void agi_bg_training_step(void) {
         strncpy(tp_cfg.output_directory, "checkpoints", sizeof(tp_cfg.output_directory) - 1);
         g_training_pipeline = training_pipeline_create(&tp_cfg);
         if (!g_training_pipeline) return;
+        /* ZSFYGY-F010修复: 确保训练数据目录存在，不存在则自动创建 */
+        {
+            FILE* dir_test = fopen("data/training", "r");
+            if (!dir_test) {
+                #ifdef _WIN32
+                _mkdir("data");
+                _mkdir("data/training");
+                #else
+                mkdir("data", 0755);
+                mkdir("data/training", 0755);
+                #endif
+                log_info("[AGI后台] 训练数据目录已自动创建: data/training/");
+            } else {
+                fclose(dir_test);
+            }
+        }
         training_pipeline_load_data(g_training_pipeline, "data/training");
     }
     if (!g_training_pipeline) return;

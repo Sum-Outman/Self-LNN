@@ -1720,6 +1720,7 @@ int planning_generate(PlanningSystem* system,
                     int branch_factor = 8; /* 每个节点8个候选动作方向 */
                     for (int b = 0; b < branch_factor && node_count < MCTS_MAX_NODES; b++) {
                         float angle = (float)b * 2.0f * 3.14159f / (float)branch_factor;
+                        (void)angle; /* MCTS方向角度保留用于后续动作空间扩展 */
                         int new_idx = node_count++;
                         MCTSNode* child = &nodes[new_idx];
                         

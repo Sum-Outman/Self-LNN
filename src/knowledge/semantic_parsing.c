@@ -1536,7 +1536,7 @@ static float hmm_emit_log_prob(const char* word, PartOfSpeech tag) {
 
     /* 多字词：Unicode范围特征 */
     char last_byte = word[len - 1];
-    char last_u8[4] = {0};
+    (void)last_byte;
     int u8_len = 0;
     if ((last_byte & 0x80) == 0) u8_len = 1;
     else if ((last_byte & 0xE0) == 0xC0) u8_len = 2;

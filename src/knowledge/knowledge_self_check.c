@@ -776,8 +776,8 @@ KSSelfCheckReport* ksc_run_self_check(KnowledgeBase* kb, KnowledgeGraph* kg,
             double hours_ago = difftime(now, latest_update) / 3600.0;
             /* 24小时内更新=1.0，一周=0.7，一月=0.4 */
             report->freshness_score = hours_ago < 24.0 ? 1.0f :
-                                      hours_ago < 168.0 ? (1.0f - (float)(hours_ago - 24.0) / 144.0 * 0.3f) :
-                                      hours_ago < 720.0 ? (0.7f - (float)(hours_ago - 168.0) / 552.0 * 0.3f) : 0.4f;
+                                      hours_ago < 168.0 ? (float)(1.0f - (float)(hours_ago - 24.0) / 144.0 * 0.3f) :
+                                      hours_ago < 720.0 ? (float)(0.7f - (float)(hours_ago - 168.0) / 552.0 * 0.3f) : 0.4f;
         } else {
             report->freshness_score = 0.9f;
         }
