@@ -6560,22 +6560,20 @@ static int handle_api_post_dialogue(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     (void)request_type;
-    /* ZSFABC-FIX: 安全对话响应 */
-    char* json_data = (char*)safe_malloc(512);
-    if (json_data) {
+    /* ZSFABC-024修复: 移除导致后续KB+LNN推理不可达的过早return；
+       对话处理先尝试回退响应，再执行真实知识库推理和LNN状态报告 */
+    char* json_data = NULL;
+    char* fallback_data = (char*)safe_malloc(512);
+    if (fallback_data) {
         char msg[256] = {0};
         if (request_data && request_length > 0) {
             parse_json_string(request_data, "message", msg, sizeof(msg));
         }
         if (msg[0] == '\0') strncpy(msg, "你好，我是SELF-LNN AGI", sizeof(msg)-1);
-        snprintf(json_data, 512,
+        snprintf(fallback_data, 512,
                 "{\"dialogue\":{\"reply\":\"%s\",\"status\":\"success\",\"tokens_used\":%d}}",
                 msg, (int)strlen(msg));
-        response->data = json_data;
-        response->data_length = strlen(json_data);
-        response->status_code = 200;
     }
-    return 0;
     char message[1024] = {0};
     int parse_result = -1;
             
@@ -6598,6 +6596,7 @@ static int handle_api_post_dialogue(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 200;
         }
+        safe_free((void**)&fallback_data);
         return 0;
     }
 
@@ -6664,29 +6663,39 @@ static int handle_api_post_dialogue(BackendServer* server,
         }
     }
     
-    json_data = (char*)safe_malloc(2048);
-    if (json_data) {
-        char escaped_msg[512];
-        char escaped_reply[2048];
-        json_escape_into(escaped_msg, sizeof(escaped_msg), message);
-        json_escape_into(escaped_reply, sizeof(escaped_reply), reply);
-        snprintf(json_data, 2048,
-            "{"
-            "\"success\":true,"
-            "\"reply\":\"%s\","
-            "\"message\":\"%s\","
-            "\"model\":\"CfC-LNN\","
-            "\"lnn_online\":%s,"
-            "\"kb_used\":%s,"
-            "\"confidence\":0.85"
-            "}",
-            escaped_reply, escaped_msg,
-            lnn_available ? "true" : "false",
-            kb_used ? "true" : "false");
-        response->data = json_data;
-        response->data_length = strlen(json_data);
-        response->status_code = 200;
+    if (reply[0] != '\0') {
+        json_data = (char*)safe_malloc(2048);
+        if (json_data) {
+            char escaped_msg[512];
+            char escaped_reply[2048];
+            json_escape_into(escaped_msg, sizeof(escaped_msg), message);
+            json_escape_into(escaped_reply, sizeof(escaped_reply), reply);
+            snprintf(json_data, 2048,
+                "{"
+                "\"success\":true,"
+                "\"reply\":\"%s\","
+                "\"message\":\"%s\","
+                "\"model\":\"CfC-LNN\","
+                "\"lnn_online\":%s,"
+                "\"kb_used\":%s,"
+                "\"confidence\":0.85"
+                "}",
+                escaped_reply, escaped_msg,
+                lnn_available ? "true" : "false",
+                kb_used ? "true" : "false");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 200;
+        }
     }
+    /* ZSFABC-024修复: 回退——当无KB/LNN推理结果时使用预生成的fallback响应 */
+    if (!response->data && fallback_data) {
+        response->data = fallback_data;
+        response->data_length = strlen(fallback_data);
+        response->status_code = 200;
+        fallback_data = NULL;
+    }
+    safe_free((void**)&fallback_data);
     return 0;
 }
 static int handle_api_get_dialogue_history(BackendServer* server,

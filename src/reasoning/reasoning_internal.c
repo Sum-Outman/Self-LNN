@@ -288,3 +288,45 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
     
     return conclusion_count;
 }
+
+/* ZSFABC-032: reasoning_infer 包装函数 — reasoning.c 中定义但在MSVC路径
+   (reasoning_internal.c) 中缺失，导致链接错误。
+   将 float* 前提转换为文本，委托给 reasoning_infer_with_knowledge，
+   再将文本结论转回 float* 输出。 */
+int reasoning_infer(ReasoningEngine* engine,
+                   const float* premises, size_t num_premises,
+                   float* conclusion, size_t max_conclusion_size,
+                   ReasoningMode mode) {
+    if (!engine || !premises || !conclusion || max_conclusion_size == 0 || num_premises == 0) {
+        return -1;
+    }
+
+    /* 编码: float* → char** 文本前提 */
+    char prem_buf[8][128];
+    const char* prem_strs[8];
+    int n = (int)(num_premises < 8 ? num_premises : 8);
+    for (int i = 0; i < n; i++) {
+        snprintf(prem_buf[i], sizeof(prem_buf[i]), "%.4f", premises[i]);
+        prem_strs[i] = prem_buf[i];
+    }
+
+    char* conclusions_str[16];
+    float confidences[16];
+    int count = reasoning_infer_with_knowledge(engine, prem_strs, n,
+                                               conclusions_str, 16, confidences);
+    if (count <= 0) return -1;
+
+    /* 解码: char** → float* 结论 */
+    size_t out = 0;
+    for (int i = 0; i < count && out < max_conclusion_size; i++) {
+        if (conclusions_str[i]) {
+            conclusion[out++] = confidences[i];
+        }
+    }
+    if (out == 0 && conclusions_str[0]) {
+        conclusion[0] = confidences[0] > 0 ? confidences[0] : 0.5f;
+        out = 1;
+    }
+
+    return (int)out > 0 ? 0 : -1;
+}

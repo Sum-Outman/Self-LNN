@@ -226,10 +226,10 @@ body {
     color: #aaaaaa;
 }
 
-/* 主要内容区域 */
+/* 主要内容区域 ZSFABC-008修复: 减小顶部内边距减少空白 */
 .main-content {
     flex: 1;
-    padding: 2rem;
+    padding: 0.25rem 1.5rem 2rem 1.5rem;
     overflow-y: auto;
 }
 
@@ -247,18 +247,19 @@ body {
     to { opacity: 1; }
 }
 
+/* ZSFABC-008修复: 减小section-header间距减少顶部空白 */
 .section-header {
-    margin-bottom: 2rem;
+    margin-bottom: 1rem;
 }
-/* ZSFABC-FIX: 空section-header不占空间 */
 .section-header:empty {
     margin-bottom: 0;
     display: none;
 }
 
 .section-header h2 {
-    font-size: 2rem;
-    margin-bottom: 0.5rem;
+    font-size: 1.6rem;
+    margin-top: 0;
+    margin-bottom: 0.3rem;
     display: flex;
     align-items: center;
     gap: 1rem;

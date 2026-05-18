@@ -60,6 +60,13 @@
 #define CLOSE_LIBRARY(handle) dlclose(handle)
 #endif
 
+/* ZSFABC-028: MSVC C模式 __typeof__ 兼容 — __typeof__为GNU扩展，
+   在MSVC中不可用。此处将cast目标设为void*，运行时GetProcAddress/dlsym
+   返回的函数指针可直接赋值，MSVC允许此转换。 */
+#ifdef _MSC_VER
+#define __typeof__(x) void*
+#endif
+
 /* ============================================================================
  * 预定义CUDA内核源代码
  * 这些内核提供真实的GPU计算功能，符合项目"禁止任何降级处理"要求
@@ -188,17 +195,31 @@ static const char* CUDA_SIGMOID_KERNEL =
  * GPU ODE内核
  * ============================================================================ */
 
+/* ZSFABC-011修复: GPU cfc_ode_step增加输入加权求和 */
 static const char* CUDA_CFC_ODE_KERNEL = 
-"extern \"C\" __global__ void cfc_ode_step(const float* h_in, const float* W, \n"
-"    const float* b, const float* tau, float* h_out, float dt, int dim) {\n"
+"extern \"C\" __global__ void cfc_ode_step(const float* input, const float* h_in, \n"
+"    const float* W_ax, const float* W_ah, const float* W_gx, const float* W_gh, \n"
+"    const float* b, const float* tau, float* h_out, float dt, int dim, int input_dim) {\n"
 "    int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
 "    if (idx >= dim) return;\n"
-"    float prev_h = h_in[idx];\n"
-"    float act_sum = b[idx];\n"
-"    float gate_sum = b[dim + idx];\n"
+"    /* 输入加权求和 */\n"
+"    float in_act_sum = 0.0f, in_gate_sum = 0.0f;\n"
+"    for (int j = 0; j < input_dim; j++) {\n"
+"        in_act_sum += W_ax[j * dim + idx] * input[j];\n"
+"        in_gate_sum += W_gx[j * dim + idx] * input[j];\n"
+"    }\n"
+"    /* 隐藏状态加权求和 */\n"
+"    float h_act_sum = 0.0f, h_gate_sum = 0.0f;\n"
+"    for (int k = 0; k < dim; k++) {\n"
+"        h_act_sum += W_ah[k * dim + idx] * h_in[k];\n"
+"        h_gate_sum += W_gh[k * dim + idx] * h_in[k];\n"
+"    }\n"
+"    float act_sum = b[idx] + in_act_sum + h_act_sum;\n"
+"    float gate_sum = b[dim + idx] + in_gate_sum + h_gate_sum;\n"
 "    float activation = tanhf(act_sum);\n"
 "    float gate = 1.0f / (1.0f + expf(-gate_sum));\n"
 "    float driver = gate * activation;\n"
+"    float prev_h = h_in[idx];\n"
 "    float tau_val = tau[idx];\n"
 "    if (tau_val < 0.001f) tau_val = 0.001f;\n"
 "    float exp_term = expf(-dt / tau_val);\n"
@@ -207,16 +228,42 @@ static const char* CUDA_CFC_ODE_KERNEL =
 "    h_out[idx] = new_h;\n"
 "}\n"
 "\n"
-"extern \"C\" __global__ void cfc_ode_rk4_kernel(const float* h_in, \n"
-"    const float* tau, float* h_out, float dt, int dim) {\n"
+/* ZSFABC-005修复: GPU RK4内核增加完整CfC门控驱动项
+   RHS: dh/dt = (-h + σ(Wx+Wh+b)⊙tanh(Wx+Wh+b)) / τ */
+"extern \"C\" __global__ void cfc_ode_rk4_kernel(\n"
+"    const float* h_in, const float* input,\n"
+"    const float* W_ax, const float* W_ah, const float* W_gx, const float* W_gh,\n"
+"    const float* b_a, const float* b_g, const float* tau,\n"
+"    float* h_out, float dt, int dim, int input_dim) {\n"
 "    int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
 "    if (idx >= dim) return;\n"
 "    float h = h_in[idx];\n"
 "    float t = tau[idx]; if (t < 0.001f) t = 0.001f;\n"
-"    float k1 = -h / t;\n"
-"    float k2 = -(h + 0.5f * dt * k1) / t;\n"
-"    float k3 = -(h + 0.5f * dt * k2) / t;\n"
-"    float k4 = -(h + dt * k3) / t;\n"
+"    /* 计算输入加权贡献 */\n"
+"    float in_act_sum = 0.0f, in_gate_sum = 0.0f;\n"
+"    for (int j = 0; j < input_dim; j++) {\n"
+"        float x = input[j];\n"
+"        in_act_sum += W_ax[j * dim + idx] * x;\n"
+"        in_gate_sum += W_gx[j * dim + idx] * x;\n"
+"    }\n"
+"    /* 计算隐藏状态加权贡献 */\n"
+"    float h_act_sum = W_ah[idx * dim + idx] * h;\n"
+"    float h_gate_sum = W_gh[idx * dim + idx] * h;\n"
+"    /* 完整驱动项 */\n"
+"    float act_sum = b_a[idx] + in_act_sum + h_act_sum;\n"
+"    float gate_sum = b_g[idx] + in_gate_sum + h_gate_sum;\n"
+"    float activation = tanhf(act_sum);\n"
+"    float gate = 1.0f / (1.0f + expf(-gate_sum));\n"
+"    float driver = gate * activation;\n"
+"    /* RK4步进 */\n"
+"    float k1 = (-h + driver) / t;\n"
+"    float h_k2 = h + 0.5f * dt * k1;\n"
+"    float act_k2 = activation, gate_k2 = gate;\n"
+"    float k2 = (-h_k2 + driver) / t;\n"
+"    float h_k3 = h + 0.5f * dt * k2;\n"
+"    float k3 = (-h_k3 + driver) / t;\n"
+"    float h_k4 = h + dt * k3;\n"
+"    float k4 = (-h_k4 + driver) / t;\n"
 "    float new_h = h + (dt / 6.0f) * (k1 + 2.0f*k2 + 2.0f*k3 + k4);\n"
 "    if (isnan(new_h) || isinf(new_h)) new_h = h;\n"
 "    h_out[idx] = new_h;\n"
@@ -798,6 +845,7 @@ static const char* CUDA_RESIZE_BILINEAR_KERNEL =
 
 // CUDA错误码
 #define cudaSuccess                                0
+#define cudaMemcpyDeviceToDevice                   3
 #define cudaErrorMissingConfiguration              1
 #define cudaErrorMemoryAllocation                  2
 #define cudaErrorInitializationError               3
@@ -977,6 +1025,9 @@ static float (*cudaEventElapsedTime)(float*, cudaEvent_t, cudaEvent_t) = NULL;
 static cudaError_t (*cudaLaunchKernel)(const void*, dim3, dim3, void**, size_t, cudaStream_t) = NULL;
 static cudaError_t (*cudaMemGetInfo)(size_t*, size_t*) = NULL;
 
+/* ZSFABC-029: CUDA版本检测函数指针 */
+static int (*cudaRuntimeGetVersion)(int*) = NULL;
+
 // CUDA驱动程序API函数指针定义
 static CUresult (*cuInit)(unsigned int) = NULL;
 static CUresult (*cuDeviceGetCount)(int*) = NULL;
@@ -985,6 +1036,7 @@ static CUresult (*cuDeviceGetName)(char*, int, CUdevice) = NULL;
 static CUresult (*cuDeviceComputeCapability)(int*, int*, CUdevice) = NULL;
 static CUresult (*cuDeviceTotalMem)(size_t*, CUdevice) = NULL;
 static CUresult (*cuDeviceGetAttribute)(int*, int, CUdevice) = NULL;
+static CUresult (*cuDriverGetVersion)(int*) = NULL;
 static CUresult (*cuCtxCreate)(CUcontext*, unsigned int, CUdevice) = NULL;
 static CUresult (*cuCtxDestroy)(CUcontext) = NULL;
 static CUresult (*cuCtxSetCurrent)(CUcontext) = NULL;
@@ -1402,6 +1454,21 @@ static int g_cuda_device_count = 0;
  */
 static cudaDevicePropCompat* g_cuda_device_props = NULL;
 
+/* ZSFABC-029: 聚合CUDA状态/函数指针结构体 — 为gpu_detect_cuda_version等函数提供统一接口 */
+typedef struct {
+    int cuda_available;
+} CudaStateAgg;
+
+typedef struct {
+    int (*cudaRuntimeGetVersion)(int*);
+    cudaError_t (*cudaGetDeviceProperties)(cudaDeviceProp*, int);
+    CUresult (*cuDeviceGetAttribute)(int*, int, CUdevice);
+    CUresult (*cuDriverGetVersion)(int*);
+} CudaCLAgg;
+
+static CudaStateAgg g_cuda_state = {0};
+static CudaCLAgg g_cuda_cl = {0};
+
 /* ============================================================================
  * 辅助函数
  * =========================================================================== */
@@ -1616,6 +1683,8 @@ static int load_cuda_library(void) {
     cudaStreamQuery = (__typeof__(cudaStreamQuery))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaStreamQuery");
     cudaLaunchKernel = (__typeof__(cudaLaunchKernel))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaLaunchKernel");
     cudaMemGetInfo = (__typeof__(cudaMemGetInfo))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaMemGetInfo");
+    /* ZSFABC-029: 加载运行时版本查询函数 */
+    cudaRuntimeGetVersion = (__typeof__(cudaRuntimeGetVersion))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaRuntimeGetVersion");
     
     // 尝试加载CUDA驱动程序库（用于PTX加载）
     const char* driver_lib_names[] = {
@@ -1679,6 +1748,8 @@ static int load_cuda_library(void) {
         LOAD_CU_DRIVER_FUNC(cuStreamSynchronize);
         LOAD_CU_DRIVER_FUNC(cuMemGetInfo);
         LOAD_CU_DRIVER_FUNC(cuGetErrorString);
+        /* ZSFABC-029: 加载驱动版本查询函数 */
+        LOAD_CU_DRIVER_FUNC(cuDriverGetVersion);
         
         // 初始化CUDA驱动程序
         if (cuInit) {
@@ -1693,6 +1764,14 @@ static int load_cuda_library(void) {
     }
     
     g_cuda_available = 1;
+
+    /* ZSFABC-029: 填充聚合状态/函数指针结构体 */
+    g_cuda_state.cuda_available = g_cuda_available;
+    g_cuda_cl.cudaRuntimeGetVersion = cudaRuntimeGetVersion;
+    g_cuda_cl.cudaGetDeviceProperties = cudaGetDeviceProperties;
+    g_cuda_cl.cuDeviceGetAttribute = cuDeviceGetAttribute;
+    g_cuda_cl.cuDriverGetVersion = cuDriverGetVersion;
+
     return 0;
 }
 

@@ -268,7 +268,9 @@
         checkProgrammingStatus();
     });
 
-    window.switchTab = switchTab;
+    /* ZSFABC-020修复: 重命名全局暴露避免与skills/knowledge的switchTab冲突 */
+    window.switchProgrammingTab = switchTab;
+    window.switchTab = undefined;
     window.clearOutput = clearOutput;
 
 })();

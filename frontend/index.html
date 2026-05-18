@@ -10,44 +10,22 @@
     <script src="js/selflnn-chart.js?v=1"></script>
     <script>
         window.__PAGE_READY = false;
-        /* ZSF-002修复: WebSocket实时推送管理器 — 连接后端WebSocket服务器 */
+        /* ZSFABC-001修复: _wsManager桥接到全局SelfLnnWebSocket，避免重复连接 */
         window._wsManager = {
-            ws: null,
-            reconnectTimer: null,
+            init: function() {
+                var self = this;
+                var gws = window.SelfLnnWebSocket;
+                if (!gws || typeof gws.on !== 'function') {
+                    setTimeout(function() { self.init(); }, 500);
+                    return;
+                }
+                gws.on('*', function(data) { self._notify({type:'ws_message', data:data}); });
+            },
             listeners: [],
-            connect: function() {
-                var self = this;
-                if (self.ws && (self.ws.readyState === WebSocket.OPEN || self.ws.readyState === WebSocket.CONNECTING)) return;
-                var cfg = window.SELFLNN_CONFIG || {host:'localhost',port:8080};
-                var url = 'ws://' + cfg.host + ':' + cfg.port + '/ws';
-                try {
-                    self.ws = new WebSocket(url);
-                    self.ws.onopen = function() {
-                        self._notify({type:'ws_open'});
-                    };
-                    self.ws.onmessage = function(evt) {
-                        try { var data = JSON.parse(evt.data); self._notify({type:'ws_message',data:data}); }
-                        catch(e) { self._notify({type:'ws_raw',data:evt.data}); }
-                    };
-                    self.ws.onclose = function() {
-                        self._notify({type:'ws_close'});
-                        self._scheduleReconnect();
-                    };
-                    self.ws.onerror = function() {};
-                } catch(e) { self._scheduleReconnect(); }
-            },
-            _scheduleReconnect: function() {
-                var self = this;
-                if (self.reconnectTimer) return;
-                self.reconnectTimer = setTimeout(function() {
-                    self.reconnectTimer = null;
-                    self.connect();
-                }, 5000);
-            },
             addListener: function(fn) { this.listeners.push(fn); },
             _notify: function(msg) { this.listeners.forEach(function(fn){try{fn(msg)}catch(e){}}); }
         };
-        setTimeout(function() { window._wsManager.connect(); }, 5000);
+        setTimeout(function() { window._wsManager.init(); }, 3000);
         /* 前端配置 - 可在此处修改服务器地址和端口 */
         window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
             host: 'localhost',
@@ -3878,9 +3856,6 @@ response = requests.get(
             <!-- ====== device-control (从 device-control.html 合并) ====== -->
             <section id="device-control" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
             <div class="section-header"><h2>多设备控制中心</h2><p>统一控制和管理所有连接的机器人和设备</p></div>
             <div class="dashboard-grid">
                 <div class="card">
@@ -3949,8 +3924,6 @@ response = requests.get(
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
     <script>
         var devicePollTimer = null;
 
@@ -4018,11 +3991,13 @@ response = requests.get(
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
 
-        /* ZSFABC-012修复: 统一调用main.js中的emergencyStop函数，避免重复定义 */
+        /* ZSFABC-012修复: emergencyStop全局暴露在DOMContentLoaded中执行,避免引用时序问题 */
         /* emergencyStop 已由 main.js 统一管理 */
 
         window.setGlobalMode = setGlobalMode;
-        window.emergencyStop = emergencyStop;
+        document.addEventListener('DOMContentLoaded', function() {
+            if (typeof emergencyStop !== 'undefined') window.emergencyStop = emergencyStop;
+        });
 
         async function scanHardware() {
             var result = await HardwareScanUtil.scanAll(false);
@@ -4085,8 +4060,6 @@ response = requests.get(
             <!-- ====== programming-workbench (从 programming-workbench.html 合并) ====== -->
             <section id="programming-workbench" class="section">
 
-    <div class="container">
-
         <div class="pw-layout">
             <div class="pw-header">
                 <h2>自我编程工作台</h2>
@@ -4095,12 +4068,12 @@ response = requests.get(
                 </div>
             </div>
             <div class="pw-tabs">
-                <button class="pw-tab-btn active" data-tab="editor" onclick="switchTab('editor')">代码编辑</button>
-                <button class="pw-tab-btn" data-tab="analyze" onclick="switchTab('analyze')">代码分析</button>
-                <button class="pw-tab-btn" data-tab="generate" onclick="switchTab('generate')">代码生成</button>
-                <button class="pw-tab-btn" data-tab="optimize" onclick="switchTab('optimize')">代码优化</button>
-                <button class="pw-tab-btn" data-tab="compile" onclick="switchTab('compile')">编译验证</button>
-                <button class="pw-tab-btn" data-tab="execute" onclick="switchTab('execute')">沙箱执行</button>
+                <button class="pw-tab-btn active" data-tab="editor" onclick="switchProgrammingTab('editor')">代码编辑</button>
+                <button class="pw-tab-btn" data-tab="analyze" onclick="switchProgrammingTab('analyze')">代码分析</button>
+                <button class="pw-tab-btn" data-tab="generate" onclick="switchProgrammingTab('generate')">代码生成</button>
+                <button class="pw-tab-btn" data-tab="optimize" onclick="switchProgrammingTab('optimize')">代码优化</button>
+                <button class="pw-tab-btn" data-tab="compile" onclick="switchProgrammingTab('compile')">编译验证</button>
+                <button class="pw-tab-btn" data-tab="execute" onclick="switchProgrammingTab('execute')">沙箱执行</button>
             </div>
             <div class="pw-content">
                 <div id="pw-tab-editor" class="pw-tab-content" style="display:block">
@@ -4181,16 +4154,12 @@ response = requests.get(
             </div>
             <div id="pw-status" class="pw-status-bar"></div>
         </div>
-    </div>
     <!-- page-specific script loaded via main.js -->
 
             </section>
             <!-- ====== simulation-control (从 simulation-control.html 合并) ====== -->
             <section id="simulation-control" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
             <div class="section-header"><h2>仿真环境控制与空间感知</h2><p>管理机器人仿真、训练、测试环境及3D空间重建</p></div>
             <div class="dashboard-grid">
                 <div class="card full-width">
@@ -4284,18 +4253,13 @@ response = requests.get(
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
     <!-- page-specific script loaded via main.js -->
 
             </section>
             <!-- ====== safety (从 safety.html 合并) ====== -->
             <section id="safety" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
-            <span id="conn-status" class="status-badge" style="display:none">检测中...</span>
+            <span id="safety-conn-status" class="status-badge" style="display:none">检测中...</span>
 
         <div class="safety-grid">
             <div class="safety-card">
@@ -4333,7 +4297,7 @@ response = requests.get(
             <div class="safety-card">
                 <h3>资源监控</h3>
                 <div class="resource-bar">
-                    <div class="resource-label"><span>CPU</span><span id="cpu-usage">-</span></div>
+                    <div class="resource-label"><span>CPU</span><span id="cog-cpu-usage">-</span></div>
                     <div style="height:12px;background:rgba(255,255,255,0.1);border-radius:6px;"><div class="resource-fill" id="cpu-bar" style="width:0%;background:#00c8ff;"></div></div>
                 </div>
                 <div class="resource-bar">
@@ -4368,7 +4332,6 @@ response = requests.get(
                 </div>
             </div>
         </div>
-    </main>
     <script>
         var pollTimer = null, resTimer = null;
 
@@ -4500,10 +4463,11 @@ response = requests.get(
             window._e('safety-joint-range', function(e) { e.textContent = '±' + bounds.jointRange.toFixed(0) + '°'; });
         }
 
-        async function checkConnection() {
+        /* ZSFABC-025修复: safety区独立checkConnection→checkSafetyConnection */
+        async function checkSafetyConnection() {
             try {
                 var status = await SelfLnnApi.checkConnection();
-                var badge = document.getElementById('conn-status');
+                var badge = document.getElementById('safety-conn-status');
                 if (status.connected) {
                     badge.textContent = '已连接';
                     badge.style.background = '#2ecc71';
@@ -4514,7 +4478,7 @@ response = requests.get(
                     badge.style.color = '#fff';
                 }
             } catch(e) {
-                var badge = document.getElementById('conn-status');
+                var badge = document.getElementById('safety-conn-status');
                 badge.textContent = '未连接';
                 badge.style.background = '#e74c3c';
                 badge.style.color = '#fff';
@@ -4522,24 +4486,20 @@ response = requests.get(
         }
 
         window.addEventListener('DOMContentLoaded', function() {
-            checkConnection();
+            checkSafetyConnection();
             pollSafety();
             pollResources();
             fetchSafetyBounds();
             pollTimer = setInterval(pollSafety, 3000);
             resTimer = setInterval(pollResources, 5000);
-            setInterval(checkConnection, 30000);
+            setInterval(checkSafetyConnection, 30000);
         });
     </script>
-    </div>
 
             </section>
             <!-- ====== voice-control (从 voice-control.html 合并) ====== -->
             <section id="voice-control" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
             <div class="section-header"><h2>语音指令 — CfC液态神经网络语义理解</h2><p>音频→CfC ODE→运动指令：不需关键词词典，语义级别理解</p></div>
             <div class="dashboard-grid">
                 <div class="card">
@@ -4566,8 +4526,6 @@ response = requests.get(
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
     <script>
         var _voiceCapture = null;
         var _voiceStream = null;
@@ -4642,10 +4600,6 @@ response = requests.get(
             </section>
             <!-- ====== api-docs (从 api-docs.html 合并) ====== -->
             <section id="api-docs" class="section">
-
-    <div class="container">
-
-        <main class="main-content">
 
         <div class="api-page-title">
             <h1>SELF-LNN API 文档</h1>
@@ -4962,62 +4916,14 @@ response = requests.get(
             });
         })();
     </script>
-        <div class="category" style="margin-top:2rem; padding-bottom:4rem;">
-            <h2 style="border-left:none;background:none;cursor:default;">API 使用示例 / Examples</h2>
-        </div>
-        <div class="endpoint">
-            <div class="endpoint-header"><span class="method get">GET</span><span class="path">/api/system/diagnostic</span></div>
-            <div class="endpoint-body" style="display:block;padding:1rem;">
-                <h4 style="color:#00c8ff;margin-bottom:0.5rem;">cURL</h4>
-                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">curl -H "X-API-Key: YOUR_KEY" http://localhost:8080/api/system/diagnostic</pre>
-                <h4 style="color:#00c8ff;margin:1rem 0 0.5rem;">Python</h4>
-                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">import requests
-r = requests.get("http://localhost:8080/api/system/diagnostic",
-    headers={"X-API-Key": "YOUR_KEY"})
-print(r.json())</pre>
-                <h4 style="color:#00c8ff;margin:1rem 0 0.5rem;">JavaScript (fetch)</h4>
-                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">fetch("http://localhost:8080/api/system/diagnostic", {
-    headers: { "X-API-Key": "YOUR_KEY" }
-}).then(r => r.json()).then(d => console.log(d));</pre>
-            </div>
-        </div>
-        <div class="endpoint">
-            <div class="endpoint-header"><span class="method post">POST</span><span class="path">/api/multimodal/learn</span></div>
-            <div class="endpoint-body" style="display:block;padding:1rem;">
-                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">curl -X POST http://localhost:8080/api/multimodal/learn \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: YOUR_KEY" \
-  -d '{"fusion":"concat","mode":"joint","modalities":"vision,audio,text"}'</pre>
-            </div>
-        </div>
-        <div class="endpoint">
-            <div class="endpoint-header"><span class="method get">GET</span><span class="path">/api/capability/diagnose</span></div>
-            <div class="endpoint-body" style="display:block;padding:1rem;">
-                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">curl -H "X-API-Key: YOUR_KEY" http://localhost:8080/api/capability/diagnose</pre>
-                <p style="color:rgba(255,255,255,0.4);font-size:0.75rem;margin-top:0.5rem;">返回12项AGI能力开关状态：自我认知/决策/执行/学习/演化/模仿/修正/反思/好奇心/规划/对话/并发</p>
-            </div>
-        </div>
-        <div class="endpoint">
-            <div class="endpoint-header"><span class="method get">GET</span><span class="path">/api/devices/discover</span></div>
-            <div class="endpoint-body" style="display:block;padding:1rem;">
-                <pre style="background:#111;padding:0.8rem;border-radius:4px;color:#0f0;font-size:0.8rem;overflow-x:auto;">curl -H "X-API-Key: YOUR_KEY" http://localhost:8080/api/devices/discover</pre>
-                <p style="color:rgba(255,255,255,0.4);font-size:0.75rem;margin-top:0.5rem;">扫描摄像头/音频/串口/ROS/Gazebo等所有可用设备</p>
-            </div>
-        </div>
-    </main>
-</div>
-
-            </section>
+    </section>
             <!-- ====== training-center (从 training-center.html 合并) ====== -->
             <section id="training-center" class="section">
-
-    <div class="container">
 
         <div style="padding:8px 20px;background:rgba(0,0,0,0.2);display:flex;align-items:center;gap:8px;font-size:0.8rem;">
             <span>WS连接:</span>
             <span id="ws-status" style="color:#888;">未连接</span>
         </div>
-        <main class="main-content">
             <div class="section-header">
                 <h2>模型训练控制中心</h2>
                 <p>管理训练任务、监控训练进度和性能</p>
@@ -5091,24 +4997,19 @@ print(r.json())</pre>
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
     <!-- page-specific script loaded via main.js -->
 
             </section>
             <!-- ====== skills (从 skills.html 合并) ====== -->
             <section id="skills" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
-            <span id="conn-status" class="status-badge" style="display:none">检测中...</span>
+            <span id="skills-conn-status" class="status-badge" style="display:none">检测中...</span>
 
         <div class="stat-grid">
             <div class="stat-card"><div class="stat-value" id="total-skills">-</div><div class="stat-label">总技能数</div></div>
             <div class="stat-card"><div class="stat-value" id="atomic-skills">-</div><div class="stat-label">原子技能</div></div>
-            <div class="stat-card"><div class="stat-value" id="success-rate">-</div><div class="stat-label">平均成功率</div></div>
-            <div class="stat-card"><div class="stat-value" id="active-tasks">-</div><div class="stat-label">活动任务</div></div>
+            <div class="stat-card"><div class="stat-value" id="skills-success-rate">-</div><div class="stat-label">平均成功率</div></div>
+            <div class="stat-card"><div class="stat-value" id="skills-active-tasks">-</div><div class="stat-label">活动任务</div></div>
         </div>
 
         <div class="skills-container">
@@ -5129,7 +5030,6 @@ print(r.json())</pre>
                 <div style="text-align:center;color:rgba(255,255,255,0.3);padding:50px;">选择一个技能查看详情</div>
             </div>
         </div>
-    </main>
 
     <script>
         var currentFilter = 'all';
@@ -5162,8 +5062,8 @@ print(r.json())</pre>
                     srCount++;
                 }
             });
-            document.getElementById('success-rate').textContent = srCount > 0 ? (totalSR/srCount*100).toFixed(1)+'%' : 'N/A';
-            document.getElementById('active-tasks').textContent = allSkills.filter(function(s) { return s.status === 'running'; }).length || 0;
+            document.getElementById('skills-success-rate').textContent = srCount > 0 ? (totalSR/srCount*100).toFixed(1)+'%' : 'N/A';
+            document.getElementById('skills-active-tasks').textContent = allSkills.filter(function(s) { return s.status === 'running'; }).length || 0;
         }
 
         function setFilter(filter, btn) {
@@ -5304,35 +5204,33 @@ print(r.json())</pre>
             }
         }
 
-        async function checkConnection() {
+        /* ZSFABC-025修复: skills区独立checkConnection→checkSkillsConnection */
+        async function checkSkillsConnection() {
             try {
                 var data = await SelfLnnApi.request('/status', {method: 'GET'});
-                var badge = document.getElementById('conn-status');
+                var badge = document.getElementById('skills-conn-status');
                 if (data) { badge.textContent = '已连接'; badge.style.background = '#2ecc71'; badge.style.color = '#000'; }
                 else { badge.textContent = '未连接'; badge.style.background = '#e74c3c'; badge.style.color = '#fff'; }
             } catch(e) {
-                var badge = document.getElementById('conn-status');
+                var badge = document.getElementById('skills-conn-status');
                 badge.textContent = '未连接';
                 badge.style.background = '#e74c3c';
                 badge.style.color = '#fff';
             }
         }
+        checkSkillsConnection();
 
         window.addEventListener('DOMContentLoaded', function() {
-            checkConnection();
+            checkSkillsConnection();
             loadSkills();
-            setInterval(checkConnection, 30000);
+            setInterval(checkSkillsConnection, 30000);
         });
     </script>
-    </div>
 
             </section>
             <!-- ====== knowledge-graph (从 knowledge-graph.html 合并) ====== -->
             <section id="knowledge-graph" class="section">
 
-    <div class="container">
-
-    </div>
     <div class="app-container" style="height:calc(100vh - 64px)">
         <div class="sidebar">
             <div class="sidebar-header">
@@ -5350,9 +5248,9 @@ print(r.json())</pre>
                 </div>
             </div>
             <div class="tab-bar">
-                <button class="tab-btn active" onclick="switchTab('add')">添加知识</button>
-                <button class="tab-btn" onclick="switchTab('list')">知识列表</button>
-                <button class="tab-btn" onclick="switchTab('graph')">图谱控制</button>
+                <button class="tab-btn active" onclick="switchKnowledgeTab('add')">添加知识</button>
+                <button class="tab-btn" onclick="switchKnowledgeTab('list')">知识列表</button>
+                <button class="tab-btn" onclick="switchKnowledgeTab('graph')">图谱控制</button>
             </div>
             <div class="tab-content active" id="tab-add">
                 <div class="form-group">
@@ -5455,6 +5353,16 @@ print(r.json())</pre>
     </div>
 
     <script>
+        /* ZSFABC-020修复: 知识图谱独立标签页切换（避免与programming-workbench的switchTab冲突） */
+        function switchKnowledgeTab(name) {
+            document.querySelectorAll('#knowledge .tab-btn').forEach(function(b) { b.classList.remove('active'); });
+            document.querySelectorAll('#knowledge .tab-content').forEach(function(c) { c.classList.remove('active'); });
+            var btn = document.querySelector('#knowledge .tab-btn[onclick*="' + name + '"]');
+            if (btn) btn.classList.add('active');
+            var tabEl = document.getElementById('tab-' + name);
+            if (tabEl) tabEl.classList.add('active');
+        }
+
         var graphState = {
             nodes: [],
             edges: [],
@@ -6345,9 +6253,6 @@ print(r.json())</pre>
             <!-- ====== multimodal-learn (从 multimodal-learn.html 合并) ====== -->
             <section id="multimodal-learn" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
             <div class="section-header"><h2>多模态统一学习</h2><p>所有模态经同一CfC液态神经网络统一学习与实物教学（无独立编码器、无融合层、无跨模态注意力）</p></div>
             <div class="dashboard-grid">
                 <div class="card">
@@ -6388,8 +6293,8 @@ print(r.json())</pre>
                                 <option value="vision-only">仅视觉（LNN子集教学）</option>
                             </select>
                         </div>
-                        <button onclick="startTeaching()" class="btn btn-primary" style="width:100%">开始教学</button>
-                        <button onclick="testTeaching()" class="btn btn-warning" style="width:100%;margin-top:8px">测试学习成果</button>
+                        <button onclick="startMultimodalLearnTeaching()" class="btn btn-primary" style="width:100%">开始教学</button>
+                        <button onclick="testMultimodalLearnTeaching()" class="btn btn-warning" style="width:100%;margin-top:8px">测试学习成果</button>
                     </div>
                 </div>
                 <div class="card">
@@ -6399,7 +6304,7 @@ print(r.json())</pre>
                             <div style="font-size:36px;margin-bottom:8px">🎤</div>
                             <div id="voice-display">点击按钮开始语音输入</div>
                         </div>
-                        <button onclick="toggleVoiceInput()" id="voice-btn" class="btn btn-primary" style="width:100%">开始录音</button>
+                        <button onclick="toggleMultimodalVoiceInput()" id="mm-voice-btn" class="btn btn-primary" style="width:100%">开始录音</button>
                         <div style="margin-top:10px">
                             <label>识别语言</label>
                             <select id="voice-lang" class="form-input">
@@ -6414,7 +6319,7 @@ print(r.json())</pre>
                     <div class="card-content" style="text-align:center">
                         <video id="camera-preview" width="320" height="240" autoplay playsinline muted style="background:#0a0a1a;border-radius:4px;max-width:100%;display:none"></video>
                         <canvas id="camera-preview-fallback" width="320" height="240" style="background:#0a0a1a;border-radius:4px;max-width:100%"></canvas>
-                        <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.4)" id="camera-status">点击下方按钮开始预览</div>
+                        <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.4)" id="mm-camera-status">点击下方按钮开始预览</div>
                         <button onclick="toggleCameraPreview()" class="btn btn-sm btn-primary" style="width:100%;margin-top:8px">启动摄像头</button>
                     </div>
                 </div>
@@ -6452,9 +6357,9 @@ print(r.json())</pre>
                     <div class="card-header"><h3>模态状态</h3></div>
                     <div class="card-content">
                         <div class="metric"><span class="metric-label">视觉输入通道</span><span class="metric-value" id="vis-status">就绪</span></div>
-                        <div class="metric"><span class="metric-label">语音输入通道</span><span class="metric-value" id="audio-status">就绪</span></div>
-                        <div class="metric"><span class="metric-label">文本输入通道</span><span class="metric-value" id="text-status">就绪</span></div>
-                        <div class="metric"><span class="metric-label">传感器输入通道</span><span class="metric-value" id="sensor-status">就绪</span></div>
+                        <div class="metric"><span class="metric-label">语音输入通道</span><span class="metric-value" id="mm-audio-status">就绪</span></div>
+                        <div class="metric"><span class="metric-label">文本输入通道</span><span class="metric-value" id="mm-text-status">就绪</span></div>
+                        <div class="metric"><span class="metric-label">传感器输入通道</span><span class="metric-value" id="mm-sensor-status">就绪</span></div>
                         <div class="metric"><span class="metric-label">LNN状态空间维度</span><span class="metric-value" id="unified-dim">加载中...</span></div>
                     </div>
                 </div>
@@ -6471,8 +6376,7 @@ print(r.json())</pre>
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
+        </div>
     <script>
         var multimodalPollTimer = null;
         var isRecording = false;
@@ -6505,9 +6409,9 @@ print(r.json())</pre>
             try {
                 var data = await SelfLnnApi.multimodalStatus();
                 document.getElementById('vis-status').textContent = data.vision_ready ? '就绪' : '未就绪';
-                document.getElementById('audio-status').textContent = data.audio_ready ? '就绪' : '未就绪';
-                document.getElementById('text-status').textContent = data.text_ready ? '就绪' : '未就绪';
-                document.getElementById('sensor-status').textContent = data.sensor_ready ? '就绪' : '未就绪';
+                document.getElementById('mm-audio-status').textContent = data.audio_ready ? '就绪' : '未就绪';
+                document.getElementById('mm-text-status').textContent = data.text_ready ? '就绪' : '未就绪';
+                document.getElementById('mm-sensor-status').textContent = data.sensor_ready ? '就绪' : '未就绪';
                 document.getElementById('unified-dim').textContent = data.unified_dim != null ? data.unified_dim : 512;
                 if (data.processing) {
                     if (multimodalPollTimer) clearInterval(multimodalPollTimer);
@@ -6532,10 +6436,10 @@ print(r.json())</pre>
                 video.srcObject = stream;
                 video.style.display = 'block';
                 fallback.style.display = 'none';
-                document.getElementById('camera-status').textContent = '摄像头运行中';
-                var btn = document.querySelector('#camera-status + button');
+                document.getElementById('mm-camera-status').textContent = '摄像头运行中';
+                var btn = document.querySelector('#mm-camera-status + button');
                 if (btn) { btn.textContent = '停止摄像头'; btn.className = 'btn btn-sm btn-danger'; }
-            } catch(e) { document.getElementById('camera-status').textContent = '摄像头访问失败: ' + e.message; }
+            } catch(e) { document.getElementById('mm-camera-status').textContent = '摄像头访问失败: ' + e.message; }
         }
 
         function stopCameraPreview() {
@@ -6546,8 +6450,8 @@ print(r.json())</pre>
             video.srcObject = null;
             video.style.display = 'none';
             fallback.style.display = 'block';
-            document.getElementById('camera-status').textContent = '已停止';
-            var btn = document.querySelector('#camera-status + button');
+            document.getElementById('mm-camera-status').textContent = '已停止';
+            var btn = document.querySelector('#mm-camera-status + button');
             if (btn) { btn.textContent = '启动摄像头'; btn.className = 'btn btn-sm btn-primary'; }
         }
 
@@ -6592,8 +6496,8 @@ print(r.json())</pre>
             frame();
         }
 
-        function toggleVoiceInput() {
-            var btn = document.getElementById('voice-btn');
+        function toggleMultimodalVoiceInput() {
+            var btn = document.getElementById('mm-voice-btn');
             if (window._mmLearnCapturer && window._mmLearnCapturer.isRecording) {
                 window._mmLearnCapturer.stop();
                 window._mmLearnCapturer = null;
@@ -6642,12 +6546,13 @@ print(r.json())</pre>
                 window._mmLearnCapturer = null;
             }
             isRecording = false;
-            var btn = document.getElementById('voice-btn');
+            var btn = document.getElementById('mm-voice-btn');
             btn.textContent = '开始录音';
             btn.style.background = '';
         }
 
-        async function startTeaching() {
+        /* ZSFABC-019修复: 重命名避免与teach section中startTeaching/testTeaching冲突 */
+        async function startMultimodalLearnTeaching() {
             var name = document.getElementById('teach-object-name').value;
             if (!name) { showNotification('请输入物体名称', 'warning'); return; }
             var method = document.getElementById('teach-method').value;
@@ -6665,7 +6570,8 @@ print(r.json())</pre>
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
 
-        async function testTeaching() {
+        /* ZSFABC-019修复: 重命名避免与teach section中testTeaching冲突 */
+        async function testMultimodalLearnTeaching() {
             var name = document.getElementById('teach-object-name').value;
             if (!name) { showNotification('请先教学一个物体', 'warning'); return; }
             try {
@@ -6689,9 +6595,6 @@ print(r.json())</pre>
             <!-- ====== teach (从 teach.html 合并) ====== -->
             <section id="teach" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
             <div class="section-header"><h2>实物示教 — 像教儿童一样教机器人</h2><p>通过展示实物让机器人学习多模态认知（发音+文字+图形+传感器+形状+数量）</p></div>
             <div class="dashboard-grid">
                 <div class="card">
@@ -6705,7 +6608,7 @@ print(r.json())</pre>
                             </select>
                         </div>
                         <div class="form-group"><label>学习模式</label>
-                            <select id="learn-mode" class="form-input">
+                            <select id="teach-learn-mode" class="form-input">
                                 <option value="single">单次学习</option><option value="repeat">重复强化</option><option value="context">上下文关联</option>
                             </select>
                         </div>
@@ -6731,14 +6634,13 @@ print(r.json())</pre>
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
     <script>
+        /* ZSFABC-022: teach section内联脚本 — 实物示教功能 */
         async function startTeaching() {
             var name = document.getElementById('concept-name').value;
             var label = document.getElementById('concept-label').value || name;
             var modality = document.getElementById('teach-modality').value;
-            var learnMode = document.getElementById('learn-mode').value;
+            var learnMode = document.getElementById('teach-learn-mode').value;
             if (!name) { showNotification('请输入概念名称', 'warning'); return; }
             try {
                 /* 根据模态选择对应的示教API */
@@ -6786,9 +6688,6 @@ print(r.json())</pre>
             <!-- ====== api-keys (从 api-keys.html 合并) ====== -->
             <section id="api-keys" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
             <div class="section-header">
                 <h2>API密钥管理系统</h2>
                 <p>管理API访问密钥、权限控制和速率限制</p>
@@ -6907,8 +6806,6 @@ print(r.json())</pre>
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
     <script>
         var lastGeneratedKey = '';
 
@@ -7046,9 +6943,6 @@ print(r.json())</pre>
             <!-- ====== usage-logs (从 usage-logs.html 合并) ====== -->
             <section id="usage-logs" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
             <div class="section-header"><h2>API调用统计与日志</h2><p>监控API调用频率、错误率和性能指标</p></div>
             <div class="card full-width">
                 <div class="card-header"><h3>调用记录</h3></div>
@@ -7066,7 +6960,7 @@ print(r.json())</pre>
                     <div class="card-header"><h3>统计摘要</h3></div>
                     <div class="card-content">
                         <div class="metric"><span class="metric-label">今日总数</span><span class="metric-value" id="today-total">-</span></div>
-                        <div class="metric"><span class="metric-label">成功率</span><span class="metric-value" id="success-rate">-</span></div>
+                        <div class="metric"><span class="metric-label">成功率</span><span class="metric-value" id="logs-success-rate">-</span></div>
                         <div class="metric"><span class="metric-label">平均延迟</span><span class="metric-value" id="avg-latency">-</span></div>
                         <div class="metric"><span class="metric-label">活跃用户</span><span class="metric-value" id="active-users">-</span></div>
                     </div>
@@ -7078,8 +6972,6 @@ print(r.json())</pre>
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
     <script>
         async function loadLogs() {
             try {
@@ -7088,7 +6980,7 @@ print(r.json())</pre>
                 var data = resp.success ? resp.data : null;
                 var stats = (data && data.system) ? data.system : {};
                 document.getElementById('today-total').textContent = (stats.requests && stats.requests.total) ? stats.requests.total : '-';
-                document.getElementById('success-rate').textContent = stats.success_rate ? (stats.success_rate*100).toFixed(1)+'%' : '-';
+                document.getElementById('logs-success-rate').textContent = stats.success_rate ? (stats.success_rate*100).toFixed(1)+'%' : '-';
                 document.getElementById('avg-latency').textContent = stats.avg_latency_ms ? stats.avg_latency_ms+'ms' : '-';
                 document.getElementById('active-users').textContent = stats.active_clients || '-';
                 
@@ -7128,15 +7020,12 @@ print(r.json())</pre>
             <!-- ====== hardware-setup (从 hardware-setup.html 合并) ====== -->
             <section id="hardware-setup" class="section">
 
-    <div class="container">
-
-        <main class="main-content">
             <div class="section-header"><h2>硬件配置 — 真实硬件检测与GPU后端选择</h2><p>检测CPU/GPU/内存/传感器，配置计算后端，建立硬件通信</p></div>
             <div class="dashboard-grid">
                 <div class="card">
                     <div class="card-header"><h3>硬件扫描</h3></div>
                     <div class="card-content">
-                        <button onclick="scanHardware()" class="btn btn-primary" style="width:100%">扫描全部硬件</button>
+                        <button onclick="scanHardwareFull()" class="btn btn-primary" style="width:100%">扫描全部硬件</button>
                         <button onclick="scanGpuDiagnostic()" class="btn btn-secondary" style="width:100%;margin-top:8px">GPU完整诊断</button>
                         <div style="margin-top:10px"><label>检测结果</label>
                             <div id="hw-result" style="padding:0.5rem;background:rgba(255,255,255,0.05);border-radius:4px;min-height:6rem;font-family:monospace;font-size:12px;max-height:200px;overflow-y:auto">点击扫描按钮检测硬件</div>
@@ -7159,7 +7048,7 @@ print(r.json())</pre>
                         <div style="margin-top:8px">
                             <div class="metric"><span class="metric-label">当前后端</span><span class="metric-value" id="gpu-current">未知</span></div>
                             <div class="metric"><span class="metric-label">设备数量</span><span class="metric-value" id="gpu-devices">0</span></div>
-                            <div class="metric"><span class="metric-label">显存总量</span><span class="metric-value" id="gpu-memory">0 MB</span></div>
+                            <div class="metric"><span class="metric-label">显存总量</span><span class="metric-value" id="hw-gpu-memory">0 MB</span></div>
                         </div>
                     </div>
                 </div>
@@ -7212,7 +7101,7 @@ print(r.json())</pre>
                     <div class="card-header"><h3>设备连接状态</h3></div>
                     <div class="card-content">
                         <div class="metric"><span class="metric-label">摄像头</span><span class="metric-value" id="cam-status">未检测</span></div>
-                        <div class="metric"><span class="metric-label">麦克风</span><span class="metric-value" id="mic-status">未检测</span></div>
+                        <div class="metric"><span class="metric-label">麦克风</span><span class="metric-value" id="hw-mic-status">未检测</span></div>
                         <div class="metric"><span class="metric-label">扬声器</span><span class="metric-value" id="spk-status">未检测</span></div>
                         <div class="metric"><span class="metric-label">机器人接口</span><span class="metric-value" id="robot-iface">未连接</span></div>
                         <div class="metric"><span class="metric-label">ROS节点</span><span class="metric-value" id="ros-status">未连接</span></div>
@@ -7232,16 +7121,14 @@ print(r.json())</pre>
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
     <script>
         var g_audioDevices = [];
         var g_cameraDevices = [];
         var g_audioCapturing = false;
         var g_cameraCapturing = false;
 
-        /* ===== 硬件扫描 ===== */
-        async function scanHardware() {
+        /* ZSFABC-018修复: 重命名避免与device-control中scanHardware冲突 */
+        async function scanHardwareFull() {
             var el = document.getElementById('hw-result');
             el.textContent = '扫描中...';
             var result = await HardwareScanUtil.scanAll(true);
@@ -7256,7 +7143,7 @@ print(r.json())</pre>
             if (d.success) {
                 document.getElementById('gpu-current').textContent = d.backend;
                 document.getElementById('gpu-devices').textContent = d.devices;
-                document.getElementById('gpu-memory').textContent = d.totalMemoryMb + ' MB';
+                document.getElementById('hw-gpu-memory').textContent = d.totalMemoryMb + ' MB';
             }
             el.textContent = d.lines.join('\n');
         }
@@ -7281,7 +7168,7 @@ print(r.json())</pre>
                         sel.selectedIndex = 0;
                         document.getElementById('audio-default').textContent = g_audioDevices[0].name;
                     }
-                    document.getElementById('mic-status').textContent = g_audioDevices.length > 0 ? '已检测('+g_audioDevices.length+'个)' : '无设备';
+                    document.getElementById('hw-mic-status').textContent = g_audioDevices.length > 0 ? '已检测('+g_audioDevices.length+'个)' : '无设备';
                 }
             } catch(e) { showNotification('音频设备枚举失败: ' + e.message, 'danger'); }
         }
@@ -7404,7 +7291,7 @@ print(r.json())</pre>
                 navigator.mediaDevices.enumerateDevices().then(function(devs){
                     devs.forEach(function(d){
                         if (d.kind === 'videoinput') document.getElementById('cam-status').textContent = '浏览器已检测';
-                        if (d.kind === 'audioinput') document.getElementById('mic-status').textContent = '浏览器已检测';
+                        if (d.kind === 'audioinput') document.getElementById('hw-mic-status').textContent = '浏览器已检测';
                         if (d.kind === 'audiooutput') document.getElementById('spk-status').textContent = '浏览器已检测';
                     });
                 }).catch(function(){});
@@ -7432,7 +7319,7 @@ print(r.json())</pre>
             </div>
         </section>
 
-            </section></main>
+    </main>
 
         <!-- 底部状态栏 -->
         <footer class="footer">

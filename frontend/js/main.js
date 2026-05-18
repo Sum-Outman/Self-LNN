@@ -1666,12 +1666,12 @@ function updateRealTimeMetrics(systemStatus) {
         if (mf) mf.style.strokeDashoffset = circ3 - (entPct / 100) * circ3;
     }
     
-    // === AGI对话状态（HTTP模式，WebSocket已全局禁用） ===
+    // === AGI对话状态（ZSFABC-015修复: WebSocket已启用，支持流式对话） ===
     var dlgStatus = document.getElementById('dialogue-model-status');
-    if (dlgStatus) dlgStatus.textContent = 'HTTP就绪';
+    if (dlgStatus) dlgStatus.textContent = 'WS就绪';
     var wsStatus = document.getElementById('dialogue-ws-status');
     if (wsStatus) {
-        wsStatus.textContent = 'HTTP模式';
+        wsStatus.textContent = 'WS流式模式';
         wsStatus.style.color = '#22c55e';
     }
     
@@ -5348,6 +5348,7 @@ async function sendDialogueMessage() {
     input.focus();
 }
 
+/* ZSFABC-002修复: 通过统一API服务发送多模态对话请求，获得完整认证/重试/熔断保护 */
 async function sendMultimodalRequest(message, imageData, audioData, params) {
     try {
         var tempVal = Math.round((params.temperature || 0.8) * 10);
@@ -5363,7 +5364,8 @@ async function sendMultimodalRequest(message, imageData, audioData, params) {
         if (imageData) payload.image = imageData;
         if (audioData) payload.audio = audioData;
 
-        const response = await fetch('http://' + window.SELFLNN_CONFIG.host + ':' + window.SELFLNN_CONFIG.port + '/api/dialogue/multimodal', {
+        /* ZSFABC-002修复: 使用统一API服务，自动附加X-Api-Key、指数退避重试、熔断保护 */
+        const response = await window.SelfLnnApi.request('/dialogue/multimodal', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)

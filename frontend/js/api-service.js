@@ -3487,12 +3487,13 @@ class ApiService {
 
     // ==================== 语音控制 API ====================
 
+    /* ZSFABC-026修复: 使用统一request()替代裸fetch，获得认证/重试/熔断保护 */
     async voiceRecognize(audioBlob, lang) {
         try {
             var formData = new FormData();
             formData.append('audio', audioBlob);
             formData.append('lang', lang);
-            var resp = await fetch(`${this.baseURL}/voice/recognize`, {method: 'POST', body: formData});
+            var resp = await this.request('/voice/recognize', {method: 'POST', body: formData});
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -5242,22 +5243,14 @@ class WebSocketManager {
 
 // 创建全局API服务实例（IIFE内暴露）
 window.SelfLnnApi = new ApiService();
-/* 全局WebSocket管理器仅在浏览器支持时创建 */
-window.SelfLnnWebSocket = {
-    connect: function(){},
-    send: function(){},
-    on: function(event, handler){ this._handlers = this._handlers||{}; (this._handlers[event]=this._handlers[event]||[]).push(handler); },
-    isConnected: false,
-    _onError: function(){},
-    onDialogueToken: function(){},
-     onDialogueResponse: function(){},
-     onStatusChange: function(){},
-    _handlers: {}
-};
+/* ZSFABC-001修复: 全局WebSocket管理器使用真实WebSocketManager实例，替代空壳 */
+window.SelfLnnWebSocket = new WebSocketManager(
+    'ws://' + SELFLNN_CONFIG.host + ':' + SELFLNN_CONFIG.port + '/ws'
+);
 
 })(); /* IIFE结束 */
 
-/* WebSocket自动连接已禁用（后端无WebSocket服务器） */
+/* ZSFABC-001修复: WebSocket自动连接已启用（延迟连接, 确保服务器就绪） */
 
 /* 全局连接横幅管理器 — 所有页面共享 */
 (function() {
@@ -5280,17 +5273,25 @@ window.SelfLnnWebSocket = {
         }
         return banner;
     }
-    document.addEventListener('websocket-connection-status', function(e) { /* WS disabled */ });
-    /* WebSocket已禁用，不显示连接横幅 */
+    document.addEventListener('websocket-connection-status', function(e) {
+        var b = ensureBanner();
+        if (e.detail && e.detail.connected) {
+            b.className = 'connection-banner js-ready connected';
+            b.innerHTML = '<span class="connection-dot connected"></span> WebSocket已连接';
+        } else {
+            b.className = 'connection-banner js-ready disconnected';
+            b.innerHTML = '<span class="connection-dot disconnected"></span> 点击重连WebSocket';
+        }
+    });
 })();
 
-// 注册对话流式消息全局分发
+/* ZSFABC-001修复: 注册对话流式消息全局分发（使用WebSocketManager.on接口） */
 (function() {
     var ws = window.SelfLnnWebSocket;
     if (!ws) return;
 
     /* 分发dialogue_token事件到全局和DialogueEnhanced */
-    ws.onDialogueToken(function(data) {
+    ws.on('dialogue_token', function(data) {
         var event = new CustomEvent('selflnn:dialogue-token', {
             detail: {
                 token: data.token || data.text || '',
@@ -5311,7 +5312,7 @@ window.SelfLnnWebSocket = {
     });
 
     /* 分发dialogue_response事件 */
-    ws.onDialogueResponse(function(data) {
+    ws.on('dialogue_response', function(data) {
         var event = new CustomEvent('selflnn:dialogue-response', {
             detail: {
                 response: data.text || data.response || '',
@@ -5329,8 +5330,8 @@ window.SelfLnnWebSocket = {
         }
     });
 
-    /* 延迟启动WebSocket连接 */
+    /* ZSFABC-001修复: 延迟启动WebSocket连接（确保服务器先完成初始化） */
     setTimeout(function() {
         ws.connect();
-    }, 1000);
+    }, 3000);
 })();

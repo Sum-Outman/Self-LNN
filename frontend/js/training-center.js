@@ -142,55 +142,33 @@
             '（符合\"禁止任何虚假数据\"原则，不显示模拟数据）';
     }
 
+    /* ZSFABC-016修复: 使用全局SelfLnnWebSocket替代独立WebSocket连接 */
     function connectTrainingWs() {
-        if (trainingWs && (trainingWs.readyState === WebSocket.CONNECTING || trainingWs.readyState === WebSocket.OPEN)) {
+        var gws = window.SelfLnnWebSocket;
+        if (!gws || typeof gws.on !== 'function') {
+            startPolling();
             return;
         }
-        /* ZSFABC-011修复: WebSocket端口统一使用SELFLNN_CONFIG.port，而非浏览器页面端口 */
-        var scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        var port = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.port) || 8080;
-        trainingWs = new WebSocket(scheme + '//' + (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.host || window.location.hostname) + ':' + port + '/ws');
-        trainingWs.onopen = function () {
-            wsReconnectAttempt = 0;
-            var el = document.getElementById('ws-status');
-            if (el) { el.textContent = 'WS已连接'; el.style.color = '#00ff88'; }
-            stopPolling();
-            startHeartbeat();
-        };
-        trainingWs.onmessage = function (evt) {
-            try {
-                var msg = JSON.parse(evt.data);
-                if (msg.type === 'pong') return;
-                if (msg.type === 'training_update') {
-                    updateTrainingUI(msg);
-                } else if (msg.type === 'system_status' && msg.data && msg.data.training) {
-                    var t = msg.data.training;
-                    updateTrainingUI({ current_epoch: t.epoch, train_loss: t.train_loss != null ? t.train_loss : null, val_loss: t.val_loss, accuracy: t.accuracy, elapsed_time: t.elapsed_time });
-                }
-            } catch (e) { /* WebSocket消息非JSON，忽略 */ }
-        };
-        trainingWs.onerror = function () {
-            stopHeartbeat();
-            var el = document.getElementById('ws-status');
-            if (el) { el.textContent = 'WS错误(轮询模式)'; el.style.color = '#ffaa00'; }
-            if (!trainingPolling && !window.g_dataEngine) { trainingPolling = setInterval(pollTraining, 2000); }
-            if (window.g_dataEngine) { startPolling(); }
-        };
-        trainingWs.onclose = function () {
-            stopHeartbeat();
-            var el = document.getElementById('ws-status');
-            if (el) { el.textContent = 'WS关闭(自动重连)'; el.style.color = '#888'; }
-            if (wsReconnectAttempt < wsReconnectMax) {
-                var delay = calcBackoff(wsReconnectAttempt);
-                wsReconnectAttempt++;
-                var el2 = document.getElementById('ws-status');
-                if (el2) el2.textContent = 'WS重连中(' + wsReconnectAttempt + '/' + wsReconnectMax + ')...';
-                setTimeout(connectTrainingWs, delay);
-            } else {
-                if (el) el.textContent = 'WS重连失败(已达最大次数)';
-                if (!trainingPolling) { trainingPolling = setInterval(pollTraining, 3000); }
+        var el = document.getElementById('ws-status');
+        if (el) { el.textContent = 'WS统一连接'; el.style.color = '#00ff88'; }
+
+        gws.on('training_update', function(msg) { updateTrainingUI(msg); });
+        gws.on('system_status', function(msg) {
+            if (msg.data && msg.data.training) {
+                var t = msg.data.training;
+                updateTrainingUI({ current_epoch: t.epoch, train_loss: t.train_loss != null ? t.train_loss : null, val_loss: t.val_loss, accuracy: t.accuracy, elapsed_time: t.elapsed_time });
             }
-        };
+        });
+        gws.on('training_progress', function(msg) { updateTrainingUI(msg); });
+        gws.on('training_log', function(msg) { if (msg && msg.message) console.log('[训练日志]', msg.message); });
+        gws.on('training_metrics', function(msg) { updateTrainingUI(msg); });
+        gws.on('gpu_status', function(msg) {
+            var gpuEl = document.getElementById('gpu-training-status');
+            if (gpuEl && msg.data) gpuEl.textContent = msg.data.device || msg.data.name || 'GPU在线';
+        });
+
+        if (!gws.isConnected) gws.connect();
+        stopPolling();
     }
 
     window.pauseTraining = async function() {
