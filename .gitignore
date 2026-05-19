@@ -59,6 +59,7 @@ desktop.ini
 
 # ====== 知识库数据 ======
 knowledge_data/
+knowledge_base/
 *.skb
 
 # ====== 运行时数据 ======

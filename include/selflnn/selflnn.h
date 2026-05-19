@@ -366,6 +366,10 @@ SELFLNN_API int selflnn_get_recent_state(void* lnn, float* state, int dim);
 SELFLNN_API int selflnn_get_recent_output(void* lnn, float* output, int dim);
 SELFLNN_API int selflnn_get_active_goal(void* kb, float* goal, int dim);
 
+/* S-008修复: 后端子系统共享访问器（单一LNN架构原则） */
+SELFLNN_API void* selflnn_get_reasoning_engine(void);
+SELFLNN_API void* selflnn_get_memory_manager(void);
+
 // ============================================
 // 高级功能API（用于示例程序）
 // ============================================

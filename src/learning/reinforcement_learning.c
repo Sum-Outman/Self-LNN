@@ -184,6 +184,7 @@ typedef struct {
     int use_pybullet;           /* 使用PyBullet还是内部sim */
     Simulator* sim;             /* 内部simulator实例 */
     unsigned int seed;          /* 随机种子 */
+    int is_valid;               /**< M-009修复: 环境是否有效（有真实物理后端） */
 } RLPhysicsEnv;
 
 /**
@@ -207,6 +208,8 @@ static RLPhysicsEnv* rl_physics_env_create(int connection_id, int robot_id,
     env->dt = dt > 0 ? dt : 0.004f;
     env->use_pybullet = (connection_id > 0) ? 1 : 0;
     env->seed = (unsigned int)time(NULL);
+    /* M-009修复: 仅当连接真实物理后端（PyBullet）时环境有效 */
+    env->is_valid = env->use_pybullet ? 1 : 0;
     return env;
 }
 
@@ -217,6 +220,9 @@ static void rl_physics_env_free(RLPhysicsEnv* env) {
 /**
  * @brief 重置物理环境到初始状态
  *
+ * M-009修复: 添加 is_valid 检查。当无真实物理后端时返回明确错误状态
+ * 而非静默填充零状态。
+ *
  * @param env 环境
  * @param state 输出初始状态 [state_dim]
  * @param state_dim 输出实际状态维度
@@ -224,6 +230,15 @@ static void rl_physics_env_free(RLPhysicsEnv* env) {
  */
 static int rl_physics_env_reset(RLPhysicsEnv* env, float* state, int* state_dim) {
     if (!env || !state || !state_dim) return -1;
+
+    /* M-009修复: 检查环境有效性，无物理后端时立即返回错误 */
+    if (!env->is_valid) {
+        *state_dim = 0;
+        memset(state, 0, (size_t)env->state_dim * sizeof(float));
+        fprintf(stderr, "[RL-物理环境] 环境重置失败: 无PyBullet且无内部模拟器\n");
+        return -1;
+    }
+
     *state_dim = env->state_dim;
     memset(state, 0, (size_t)(*state_dim) * sizeof(float));
     if (env->use_pybullet) {

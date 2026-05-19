@@ -30,6 +30,8 @@ typedef SOCKET ws_socket_t;
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/select.h>
+#include <pthread.h>
 typedef int ws_socket_t;
 #define WS_INVALID (-1)
 #define WS_ERROR (-1)
@@ -60,6 +62,7 @@ struct WSPushServer {
     int client_count;
     long last_tick;
     void* mutex;
+    void* accept_thread;
 };
 
 static int ws_global_init(void)
@@ -290,6 +293,15 @@ static int ws_send_pong(ws_socket_t sock, const unsigned char* data, size_t len)
     return ws_send_frame(sock, 0x0A, data, len);
 }
 
+static void ws_client_init(WSClientInternal* cli, ws_socket_t sock)
+{
+    if (!cli) return;
+    memset(cli, 0, sizeof(WSClientInternal));
+    cli->sock = sock;
+    cli->active = 1;
+    cli->last_active = (long)time(NULL);
+}
+
 static void ws_client_close(WSClientInternal* cli)
 {
     if (cli->sock == WS_INVALID) return;
@@ -319,6 +331,51 @@ static void ws_unlock(void* mutex)
     if (mutex) LeaveCriticalSection((CRITICAL_SECTION*)mutex);
 #else
     if (mutex) pthread_mutex_unlock((pthread_mutex_t*)mutex);
+#endif
+}
+
+/* WebSocket推送accept线程函数 */
+#ifdef _WIN32
+static DWORD WINAPI ws_push_accept_thread(LPVOID arg)
+#else
+static void* ws_push_accept_thread(void* arg)
+#endif
+{
+    WSPushServer* srv = (WSPushServer*)arg;
+    if (!srv) return 1;
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000;
+
+    while (srv->running) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(srv->listen_sock, &readfds);
+        int sel = select(0, &readfds, NULL, NULL, &tv);
+        if (sel <= 0) continue;
+
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
+        if (client == WS_INVALID) continue;
+
+        /* 查找空闲客户端槽位 */
+        int slot = -1;
+        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+            if (!srv->clients[i].active) { slot = i; break; }
+        }
+        if (slot < 0) { WS_CLOSE(client); continue; }
+
+        /* WebSocket握手 */
+        if (ws_do_handshake(client) != 0) { WS_CLOSE(client); continue; }
+
+        ws_set_nonblock(client, 1);
+        ws_client_init(&srv->clients[slot], client);
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
 #endif
 }
 
@@ -363,6 +420,17 @@ int ws_push_server_start(WSPushServer* srv)
     srv->listen_sock = sock;
     srv->running = 1;
     srv->last_tick = (long)time(NULL);
+#ifdef _WIN32
+    srv->accept_thread = CreateThread(NULL, 0, ws_push_accept_thread, srv, 0, NULL);
+#else
+    {
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, ws_push_accept_thread, srv) == 0) {
+            pthread_detach(tid);
+            srv->accept_thread = (void*)(uintptr_t)tid;
+        }
+    }
+#endif
     return 0;
 }
 

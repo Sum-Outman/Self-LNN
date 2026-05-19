@@ -394,6 +394,8 @@ void auto_learning_free(AutoLearningSystem* system) {
         for (int j = 0; j < system->entries[i].relation_count; j++) {
             safe_free((void**)&system->entries[i].extracted_relations[j]);
         }
+        safe_free((void**)&system->entries[i].feature_vector);
+        system->entries[i].feature_vector_dim = 0;
     }
     safe_free((void**)&system->entries);
 
@@ -627,6 +629,8 @@ int auto_learning_resolve_conflict(AutoLearningSystem* system, int conflict_inde
         /* 删除冲突条目 */
         safe_free((void**)&system->entries[conflict_index].topic);
         safe_free((void**)&system->entries[conflict_index].content);
+        safe_free((void**)&system->entries[conflict_index].feature_vector);
+        system->entries[conflict_index].feature_vector_dim = 0;
         memset(&system->entries[conflict_index], 0, sizeof(AutoLearnEntry));
     }
     system->stats.conflicts_resolved++;
@@ -706,9 +710,15 @@ int auto_learning_extract_features_with_lnn(AutoLearningSystem* system) {
         /* LNN前向传播生成语义嵌入 */
         float* output_vec = (float*)safe_calloc(output_dim, sizeof(float));
         if (output_vec && lnn_forward(lnn, input_vec, output_vec) == 0) {
+            /* 释放旧的特征向量（如果存在） */
+            safe_free((void**)&entry->feature_vector);
+            /* 存储新的语义嵌入特征向量 */
+            entry->feature_vector = output_vec;
+            entry->feature_vector_dim = (int)output_dim;
             converted++;
+        } else {
+            safe_free((void**)&output_vec);
         }
-        safe_free((void**)&output_vec);
         safe_free((void**)&input_vec);
     }
     return converted;
@@ -1013,6 +1023,8 @@ int auto_learning_fuse_knowledge(AutoLearningSystem* system, const char* topic,
         for (int j = 0; j < system->entries[del_idx].relation_count; j++) {
             safe_free((void**)&system->entries[del_idx].extracted_relations[j]);
         }
+        safe_free((void**)&system->entries[del_idx].feature_vector);
+        system->entries[del_idx].feature_vector_dim = 0;
 
         /* 将后续条目前移 */
         for (size_t k = (size_t)del_idx; k < system->entry_count - 1; k++) {

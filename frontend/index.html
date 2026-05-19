@@ -29,8 +29,7 @@
         /* 前端配置 - 可在此处修改服务器地址和端口 */
         window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
             host: 'localhost',
-            port: 8080,
-            pushPort: 8080   /* ZSFABC-023: WebSocket推送端口，与HTTP端口一致 */
+            port: 8080         /* HTTP端口，WebSocket通过HTTP Upgrade共用此端口 */
         };
         /* 全局保护：合并页面中hidden section的DOM引用安全 */
         window._e = function(id,fn) { var el=document.getElementById(id); if(el) try{fn(el)}catch(e){} };
@@ -5382,54 +5381,44 @@ response = requests.get(
         };
 
         var knowledgeEntries = [];
-        var kgWs = null;
 
-        /* ==================== WebSocket 连接管理 ==================== */
+        /* ZSFABC-F006修复: 知识图谱使用全局SelfLnnWebSocket，避免重复连接 */
         function connectKnowledgeWebSocket() {
-            if (kgWs && kgWs.readyState === WebSocket.OPEN) return;
-            var wsPort = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.port) || 8080;
-            var wsUrl = 'ws://' + (window.location.hostname || 'localhost') + ':' + wsPort + '/ws';
-            try {
-                kgWs = new WebSocket(wsUrl);
-                kgWs.onopen = function() {
+            var ws = window.SelfLnnWebSocket;
+            if (!ws) {
+                setTimeout(connectKnowledgeWebSocket, 2000);
+                return;
+            }
+            if (ws.isConnected) {
+                graphState.backendOnline = true;
+                showConnectionBanner('已连接知识图谱服务', 'connected');
+                fetchKnowledgeFromBackend();
+                return;
+            }
+            /* 注册知识图谱事件监听 */
+            ws.on('knowledge_update', function() { fetchKnowledgeFromBackend(); });
+            ws.on('knowledge_added', function() { fetchKnowledgeFromBackend(); });
+            ws.on('knowledge_deleted', function() { fetchKnowledgeFromBackend(); });
+            /* 监听全局WebSocket连接状态 */
+            document.addEventListener('websocket-connection-status', function(e) {
+                if (e.detail && e.detail.connected) {
                     graphState.backendOnline = true;
                     showConnectionBanner('已连接知识图谱服务', 'connected');
-                    kgWs.send(JSON.stringify({ type: 'subscribe', channel: 'knowledge' }));
                     fetchKnowledgeFromBackend();
-                };
-                kgWs.onmessage = function(evt) {
-                    try {
-                        var msg = JSON.parse(evt.data);
-                        if (msg.type === 'knowledge_update' || msg.type === 'knowledge_added' || msg.type === 'knowledge_deleted') {
-                            fetchKnowledgeFromBackend();
-                        }
-                    } catch(e) { /* 忽略非JSON消息 */ }
-                };
-                kgWs.onclose = function() {
+                } else {
                     graphState.backendOnline = false;
                     showConnectionBanner('知识图谱服务已断开——知识库不可用', 'disconnected');
                     knowledgeEntries = [];
                     refreshStats();
                     refreshGraph();
                     renderEntryList();
-                    setTimeout(connectKnowledgeWebSocket, 5000);
-                };
-                kgWs.onerror = function() {
-                    graphState.backendOnline = false;
-                    showConnectionBanner('无法连接知识图谱服务——后端未连接', 'disconnected');
-                    knowledgeEntries = [];
-                    refreshStats();
-                    refreshGraph();
-                    renderEntryList();
-                };
-            } catch(e) {
-                graphState.backendOnline = false;
-                showConnectionBanner('WebSocket连接失败——后端未连接', 'disconnected');
-                knowledgeEntries = [];
-                refreshStats();
-                refreshGraph();
-                renderEntryList();
+                }
+            });
+            /* 尝试连接 */
+            if (!ws.isConnected) {
+                ws.connect();
             }
+            graphState.backendOnline = ws.isConnected;
         }
 
         function showConnectionBanner(msg, status) {

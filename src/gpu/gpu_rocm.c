@@ -52,8 +52,11 @@
 #define CLOSE_LIBRARY(handle) dlclose(handle)
 #endif
 
-static LIBRARY_HANDLE g_hip_library = NULL;
+/* 运行时动态加载类型: HIP SDK类型在编译时不可用, 通过纯C兼容类型替代 */
+typedef int hipError_t;
+typedef struct { char name[256]; size_t totalGlobalMem; int major; int minor; int clockRate; int multiProcessorCount; } hipDeviceProp_t;
 
+static LIBRARY_HANDLE g_hip_library = NULL;
 static hipError_t (*hipGetDeviceCount)(int*) = NULL;
 static hipError_t (*hipGetDeviceProperties)(hipDeviceProp_t*, int) = NULL;
 static hipError_t (*hipSetDevice)(int) = NULL;
@@ -88,6 +91,8 @@ static hipError_t (*hipModuleUnload)(void*) = NULL;
 static hipError_t (*hipModuleGetFunction)(void**, void*, const char*) = NULL;
 static hipError_t (*hipModuleLaunchKernel)(void*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, void**, void**) = NULL;
 static hipError_t (*hipOccupancyMaxPotentialBlockSize)(int*, int*, const void*, size_t, int) = NULL;
+static hipError_t (*hipMemGetInfo)(size_t*, size_t*) = NULL;
+static hipError_t (*hipDeviceReset)(void) = NULL;
 
 #define hipMemcpyHostToDevice 1
 #define hipMemcpyDeviceToHost 2
@@ -286,6 +291,7 @@ static const char* ROCM_CFC_STEP_KERNEL =
 
 #define ROCM_CACHE_MAX_ENTRIES 64
 #define ROCM_CACHE_HASH_SIZE 32
+#define ROCM_MAX_ALLOCATIONS 256
 
 typedef struct {
     char hash_key[ROCM_CACHE_HASH_SIZE + 1];
@@ -298,6 +304,12 @@ typedef struct {
     int access_count;
     uint64_t compile_time_ms;
 } RocmCacheEntry;
+
+typedef struct {
+    void* device_ptr;           /**< 设备内存指针 */
+    size_t size;                /**< 分配大小（字节） */
+    int is_active;              /**< 是否活跃 */
+} RocmAllocation;
 
 typedef struct {
     int device_id;
@@ -314,6 +326,9 @@ typedef struct {
     int compute_capability_major;
     int compute_capability_minor;
     int shared_memory_per_block;
+    int hip_device;                                    /**< HIP设备索引 */
+    int allocation_count;                              /**< 活跃分配数量 */
+    RocmAllocation allocations[ROCM_MAX_ALLOCATIONS];  /**< 分配追踪表 */
 } RocmContextInternal;
 
 static int rocm_try_load_library(void) {
@@ -359,6 +374,8 @@ LOAD_HIP_SYMBOL(hipModuleUnload);
 LOAD_HIP_SYMBOL(hipModuleGetFunction);
 LOAD_HIP_SYMBOL(hipModuleLaunchKernel);
 LOAD_HIP_SYMBOL(hipOccupancyMaxPotentialBlockSize);
+LOAD_HIP_SYMBOL(hipMemGetInfo);
+LOAD_HIP_SYMBOL(hipDeviceReset);
 
 return 1;
 }
@@ -501,35 +518,39 @@ static int rocm_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
     } else {
         strncpy(info->name, "AMD GPU (未知型号)", sizeof(info->name) - 1);
     }
+    snprintf(info->vendor, sizeof(info->vendor), "AMD");
+
     int val = 0;
-    if (hipDeviceGetAttribute(&val, 0, device_index) == hipSuccess) info->type = (val ? GPU_DEVICE_TYPE_DISCRETE : GPU_DEVICE_TYPE_INTEGRATED);
-    else info->type = GPU_DEVICE_TYPE_UNKNOWN;
+    /* hipDeviceAttribute_t 0 = hipDeviceAttributeIntegrated */
+    if (hipDeviceGetAttribute(&val, 0, device_index) == hipSuccess)
+        info->type = (val ? GPU_DEVICE_TYPE_INTEGRATED : GPU_DEVICE_TYPE_DISCRETE);
+    else info->type = GPU_DEVICE_TYPE_DISCRETE;
+
+    /* hipDeviceAttribute_t 1 = hipDeviceAttributeMultiprocessorCount */
     if (hipDeviceGetAttribute(&val, 1, device_index) == hipSuccess) info->compute_units = val;
-    if (hipDeviceGetAttribute(&val, 2, device_index) == hipSuccess) info->max_clock_frequency = val;
+    /* hipDeviceAttribute_t 2 = hipDeviceAttributeClockRate (kHz -> MHz) */
+    if (hipDeviceGetAttribute(&val, 2, device_index) == hipSuccess) info->clock_speed = (float)val / 1000.0f;
+    /* hipDeviceAttribute_t 3 = hipDeviceAttributeMaxThreadsPerBlock */
     if (hipDeviceGetAttribute(&val, 3, device_index) == hipSuccess) info->max_work_group_size = val;
-    if (hipDeviceGetAttribute(&val, 4, device_index) == hipSuccess) info->max_threads_per_block = val;
-    if (hipDeviceGetAttribute(&val, 5, device_index) == hipSuccess) info->max_work_item_sizes[0] = val;
-    if (hipDeviceGetAttribute(&val, 6, device_index) == hipSuccess) info->max_work_item_sizes[1] = val;
-    if (hipDeviceGetAttribute(&val, 7, device_index) == hipSuccess) info->max_work_item_sizes[2] = val;
-    if (hipDeviceGetAttribute(&val, 8, device_index) == hipSuccess) info->shared_memory_per_block = val;
-    if (hipDeviceGetAttribute(&val, 9, device_index) == hipSuccess) info->constant_memory_size = val;
+
+    /* hipDeviceAttribute_t hipDeviceAttributeMemoryClockRate (kHz) = 11? */
+    /* 尝试通过hipMemGetInfo获取真实显存 */
     size_t free_mem = 0, total_mem = 0;
-    info->global_memory_size = (size_t)info->max_clock_frequency * 1024 * 1024;
-    size_t mem_size = 0;
-    if (hipDeviceGetAttribute(&val, 10, device_index) == hipSuccess) mem_size = (size_t)val * 1024 * 1024;
-    if (mem_size > 0) info->global_memory_size = mem_size;
-    info->local_memory_size = info->shared_memory_per_block;
-    info->max_allocatable_memory = info->global_memory_size / 2;
-    info->double_precision = 1;
-    info->half_precision = 1;
-    if (hipDeviceGetAttribute(&val, 11, device_index) == hipSuccess) info->ecc_supported = val;
-    if (hipDeviceGetAttribute(&val, 12, device_index) == hipSuccess) info->unified_memory = val;
-    if (hipDeviceGetAttribute(&val, 13, device_index) == hipSuccess) info->pci_bus_id = val;
-    info->vendor_id = 0x1002;
-    info->display_attached = 1;
-    info->driver_version = 0;
+    if (hipMemGetInfo) hipMemGetInfo(&free_mem, &total_mem);
+    info->total_memory = total_mem;
+    info->free_memory = free_mem;
+
+    /* 精度支持: AMD GPU通常支持FP16和FP64 */
+    info->supports_double = 1;
+    info->supports_half = 1;
+
+    /* 驱动版本号 */
     int runtime_ver = 0;
-    if (hipRuntimeGetVersion(&runtime_ver) == hipSuccess) info->driver_version = runtime_ver;
+    if (hipRuntimeGetVersion && hipRuntimeGetVersion(&runtime_ver) == hipSuccess) {
+        snprintf(info->driver_version, sizeof(info->driver_version), "%d", runtime_ver);
+        snprintf(info->runtime_version, sizeof(info->runtime_version), "%d", runtime_ver / 1000);
+    }
+
     return 0;
 }
 
@@ -539,7 +560,10 @@ static GpuContext* rocm_backend_context_create(int device_index) {
     RocmContextInternal* rocm_ctx = (RocmContextInternal*)safe_calloc(1, sizeof(RocmContextInternal));
     if (!rocm_ctx) return NULL;
     rocm_ctx->device_id = device_index;
+    rocm_ctx->hip_device = device_index;
     rocm_ctx->initialized = 1;
+    rocm_ctx->allocation_count = 0;
+    memset(rocm_ctx->allocations, 0, sizeof(rocm_ctx->allocations));
     void* stream = NULL;
     if (hipStreamCreate(&stream) == hipSuccess) rocm_ctx->default_stream = stream;
     hipDeviceGetAttribute(&rocm_ctx->max_work_group_size, 3, device_index);
@@ -600,12 +624,38 @@ static GpuMemory* rocm_backend_memory_alloc(GpuContext* context, size_t size, Gp
     mem->size = size;
     mem->type = memory_type;
     mem->is_device_memory = (memory_type != GPU_MEMORY_HOST) ? 1 : 0;
+
+    /* 追踪设备内存分配 */
+    if (memory_type != GPU_MEMORY_HOST && rocm_ctx->allocation_count < ROCM_MAX_ALLOCATIONS) {
+        rocm_ctx->allocations[rocm_ctx->allocation_count].device_ptr = device_ptr;
+        rocm_ctx->allocations[rocm_ctx->allocation_count].size = size;
+        rocm_ctx->allocations[rocm_ctx->allocation_count].is_active = 1;
+        rocm_ctx->allocation_count++;
+    }
+
     return (GpuMemory*)mem;
 }
 
 static void rocm_backend_memory_free(GpuMemory* memory) {
     if (!memory) return;
     struct GpuMemory* mem = (struct GpuMemory*)memory;
+
+    /* 从分配追踪表中移除 */
+    if (mem->context && mem->type != GPU_MEMORY_HOST) {
+        struct GpuContext* ctx = (struct GpuContext*)mem->context;
+        RocmContextInternal* rocm_ctx = (RocmContextInternal*)ctx->backend_data;
+        if (rocm_ctx) {
+            for (int i = 0; i < rocm_ctx->allocation_count; i++) {
+                if (rocm_ctx->allocations[i].device_ptr == mem->data &&
+                    rocm_ctx->allocations[i].is_active) {
+                    rocm_ctx->allocations[i].is_active = 0;
+                    rocm_ctx->allocations[i].device_ptr = NULL;
+                    break;
+                }
+            }
+        }
+    }
+
     if (mem->data) {
         if (mem->type == GPU_MEMORY_HOST && hipFreeHost) hipFreeHost(mem->data);
         else if (hipFree) hipFree(mem->data);

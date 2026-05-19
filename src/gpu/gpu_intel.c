@@ -237,6 +237,8 @@ typedef struct Zedevice_handle_t_ { uint32_t id; }* ze_device_handle_t;
 typedef struct Zedriver_handle_t_ { uint32_t id; }* ze_driver_handle_t;
 typedef struct Zemodule_handle_t_ { uint32_t id; }* ze_module_handle_t;
 typedef struct Zemodule_build_log_handle_t_ { uint32_t id; }* ze_module_build_log_handle_t;
+typedef struct Zeevent_handle_t_ { uint32_t id; }* ze_event_handle_t;
+typedef struct Zefence_handle_t_ { uint32_t id; }* ze_fence_handle_t;
 
 typedef int (*ZeInitFn)(uint32_t);
 typedef int (*ZeDriverGetFn)(uint32_t*, ze_driver_handle_t*);
@@ -251,6 +253,7 @@ typedef int (*ZeCommandListDestroyFn)(ze_command_list_handle_t);
 typedef int (*ZeCommandListResetFn)(ze_command_list_handle_t);
 typedef int (*ZeCommandListCloseFn)(ze_command_list_handle_t);
 typedef int (*ZeCommandListAppendLaunchKernelFn)(ze_command_list_handle_t, ze_kernel_handle_t, const uint32_t*, const uint32_t*, ze_fence_desc_t*, uint32_t, ze_event_handle_t);
+typedef int (*ZeCommandListAppendMemoryCopyFn)(ze_command_list_handle_t, void*, const void*, size_t, ze_fence_desc_t*, uint32_t, ze_event_handle_t);
 typedef int (*ZeCommandQueueExecuteCommandListsFn)(ze_command_queue_handle_t, uint32_t, ze_command_list_handle_t*, ze_fence_handle_t);
 typedef int (*ZeCommandQueueSynchronizeFn)(ze_command_queue_handle_t, uint64_t);
 typedef int (*ZeMemAllocDeviceFn)(ze_context_handle_t, const void*, size_t, size_t, ze_device_handle_t, void**);
@@ -287,6 +290,7 @@ static struct {
     ZeCommandListResetFn zeCommandListReset;
     ZeCommandListCloseFn zeCommandListClose;
     ZeCommandListAppendLaunchKernelFn zeCommandListAppendLaunchKernel;
+    ZeCommandListAppendMemoryCopyFn zeCommandListAppendMemoryCopy;
     ZeCommandQueueExecuteCommandListsFn zeCommandQueueExecuteCommandLists;
     ZeCommandQueueSynchronizeFn zeCommandQueueSynchronize;
     ZeMemAllocDeviceFn zeMemAllocDevice;
@@ -326,6 +330,7 @@ static int intel_try_load_library(void) {
     ZE_LOAD_SYM(CommandListReset);
     ZE_LOAD_SYM(CommandListClose);
     ZE_LOAD_SYM(CommandListAppendLaunchKernel);
+    g_ze_lib.zeCommandListAppendMemoryCopy = (ZeCommandListAppendMemoryCopyFn)ZE_DLSYM(g_ze_lib.handle, "zeCommandListAppendMemoryCopy");
     ZE_LOAD_SYM(CommandQueueExecuteCommandLists);
     ZE_LOAD_SYM(CommandQueueSynchronize);
     ZE_LOAD_SYM(MemAllocDevice);
@@ -580,7 +585,7 @@ static int intel_backend_get_device_info(int device_index, GpuDeviceInfo* info) 
         info->clock_speed = g_ze_lib.device_props[device_index].core_clock_mhz;
     }
     /* 如果Level Zero未提供内存信息，通过OS API获取Intel GPU显存
-     * Windows: 通过DXGI查询，Linux: 通过/sys/class/drm/card*/查询
+     * Windows: 通过DXGI查询，Linux: 通过/sys/class/drm/card查询
      * 都不可用时保持为0，表示无法获取真实值 */
     return 0;
 }
@@ -671,6 +676,17 @@ static void intel_backend_memory_free(GpuMemory* memory) {
 static int intel_backend_memory_copy_to_device(GpuMemory* dst, const void* src, size_t size) {
     if (!dst || !src || size == 0) return -1;
     if (g_intel_state.use_level_zero && g_ze_lib.init_called && dst->is_device_memory && dst->data) {
+        if (g_intel_state.list && g_ze_lib.zeCommandListAppendMemoryCopy) {
+            int ret = g_ze_lib.zeCommandListAppendMemoryCopy(g_intel_state.list, dst->data, src, size, NULL, 0, NULL);
+            if (ret == 0) {
+                g_ze_lib.zeCommandListClose(g_intel_state.list);
+                ze_command_list_handle_t lists[] = {g_intel_state.list};
+                g_ze_lib.zeCommandQueueExecuteCommandLists(g_intel_state.queue, 1, lists, NULL);
+                g_ze_lib.zeCommandQueueSynchronize(g_intel_state.queue, UINT64_MAX);
+                g_ze_lib.zeCommandListReset(g_intel_state.list);
+                return 0;
+            }
+        }
         memcpy((void*)(uintptr_t)dst->data, src, size);
         if (g_intel_state.queue && g_ze_lib.zeCommandQueueSynchronize) {
             g_ze_lib.zeCommandQueueSynchronize(g_intel_state.queue, UINT64_MAX);
@@ -770,21 +786,33 @@ static void intel_backend_kernel_free(GpuKernel* kernel) {
     }
     if (kernel->kernel_source) free(kernel->kernel_source);
     if (kernel->kernel_name) free(kernel->kernel_name);
-    if (kernel->arg_values) free(kernel->arg_values);
+    if (kernel->arg_values) {
+        for (int i = 0; i < kernel->arg_capacity; i++) {
+            if (kernel->arg_values[i]) free(kernel->arg_values[i]);
+        }
+        free(kernel->arg_values);
+    }
     if (kernel->arg_sizes) free(kernel->arg_sizes);
     free(kernel);
 }
 
 static int intel_backend_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t arg_size, const void* arg_value) {
-    if (!kernel || arg_index < 0) return -1;
-    if (arg_index >= kernel->arg_capacity) return -1;
-    kernel->arg_values[arg_index] = (void*)arg_value;
-    kernel->arg_sizes[arg_index] = arg_size;
+    if (!kernel || arg_index < 0 || arg_index >= kernel->arg_capacity) return -1;
+    if (kernel->arg_values[arg_index]) { free(kernel->arg_values[arg_index]); kernel->arg_values[arg_index] = NULL; }
+    if (arg_size > 0 && arg_value) {
+        kernel->arg_values[arg_index] = malloc(arg_size);
+        if (!kernel->arg_values[arg_index]) return -1;
+        memcpy(kernel->arg_values[arg_index], arg_value, arg_size);
+        kernel->arg_sizes[arg_index] = arg_size;
+    } else {
+        kernel->arg_values[arg_index] = NULL;
+        kernel->arg_sizes[arg_index] = 0;
+    }
     if (arg_index >= kernel->arg_count) kernel->arg_count = arg_index + 1;
 
     if (g_intel_state.use_level_zero && g_ze_lib.init_called && kernel->backend_data) {
         ze_kernel_handle_t ze_ker = (ze_kernel_handle_t)kernel->backend_data;
-        g_ze_lib.zeKernelSetArgumentValue(ze_ker, (uint32_t)arg_index, arg_size, arg_value);
+        g_ze_lib.zeKernelSetArgumentValue(ze_ker, (uint32_t)arg_index, arg_size, kernel->arg_values[arg_index] ? kernel->arg_values[arg_index] : arg_value);
     }
     return 0;
 }

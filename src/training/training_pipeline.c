@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file training_pipeline.c
  * @brief 完整训练流水线实现 - 使用真实数据源，无任何伪随机数据
  */
@@ -99,6 +99,10 @@ struct TrainingPipeline {
     size_t gradient_history_capacity;          /**< 梯度历史缓冲区容量 */
     size_t gradient_history_pos;               /**< 梯度历史缓冲区写入位置 */
     TrainingStabilityAnalysis last_stability;       /**< 上次稳定性分析结果 */
+
+    /* M-004修复: RC低通滤波器历史梯度存储 */
+    float* prev_gradients;                     /**< 上一步原始梯度快照（RC滤波用） */
+    size_t prev_gradients_size;                /**< 梯度快照容量 */
 };
 
 /** 计算配置的损失值 */
@@ -238,16 +242,30 @@ static void pipeline_apply_laplace_enhancement(TrainingPipeline* pipeline, LNN* 
     }
 
     /* 应用拉普拉斯梯度滤波：一阶RC低通滤波器（拉普拉斯域 s = 1/RC） */
-    if (pipeline->config.laplace_filter_cutoff > 0) {
+    if (pipeline->config.laplace_filter_cutoff > 0 && pipeline->prev_gradients) {
         float cutoff = pipeline->config.laplace_filter_cutoff;
         float dt = 0.001f;
         float rc = 1.0f / (2.0f * 3.14159265f * cutoff);
         float alpha = dt / (rc + dt);
 
-        for (size_t i = 0; i < wc && i < 2048; i++) {
-            /* S-022修复: 正确的RC低通滤波器 y[n] = α·x[n] + (1-α)·y[n-1]
-             * 拉普拉斯域传递函数 H(s) = 1/(1 + s·RC) */
-            wgrads[i] = wgrads[i] * alpha + pipeline->last_stability.is_stable * (1.0f - alpha) * wgrads[i];
+        size_t filter_n = wc < pipeline->prev_gradients_size ? wc : pipeline->prev_gradients_size;
+        for (size_t i = 0; i < filter_n && i < 2048; i++) {
+            /* M-004修复: 真正的RC低通滤波器 y[n] = α·x[n] + (1-α)·y[n-1]
+             *   y[n] = 当前输出（滤波后梯度）
+             *   x[n] = 当前输入（原始梯度 wgrads[i]）
+             *   y[n-1] = 上一步滤波后梯度 prev_gradients[i]
+             * 不稳定时(is_stable=0): 仅衰减泄漏，不注入新梯度 */
+            float prev_filtered = pipeline->prev_gradients[i];
+            float current_raw = wgrads[i];
+            if (pipeline->last_stability.is_stable) {
+                /* 稳定: 标准RC低通 y[n] = α·prev[n-1] + (1-α)·current[n] */
+                wgrads[i] = alpha * prev_filtered + (1.0f - alpha) * current_raw;
+            } else {
+                /* 不稳定: 仅衰减历史，不注入潜在爆炸性新梯度 */
+                wgrads[i] = alpha * prev_filtered;
+            }
+            /* 保存当前滤波结果作为下一步的历史值 y[n-1] */
+            pipeline->prev_gradients[i] = wgrads[i];
         }
     }
 
@@ -814,10 +832,14 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     tp->gradient_history = NULL;
     tp->gradient_history_capacity = 0;
     tp->gradient_history_pos = 0;
+    tp->prev_gradients = NULL;
+    tp->prev_gradients_size = 0;
     memset(&tp->last_stability, 0, sizeof(TrainingStabilityAnalysis));
     if (tp->config.use_laplace_enhancement) {
         tp->gradient_history_capacity = 4096;
         tp->gradient_history = (float*)safe_calloc(tp->gradient_history_capacity, sizeof(float));
+        tp->prev_gradients_size = 4096;
+        tp->prev_gradients = (float*)safe_calloc(tp->prev_gradients_size, sizeof(float));
     }
 
     memset(&tp->state, 0, sizeof(TrainingPipelineState));
@@ -845,6 +867,7 @@ void training_pipeline_free(TrainingPipeline* pipeline) {
         pipeline->optimizer = NULL;
     }
     safe_free((void**)&pipeline->gradient_history);
+    safe_free((void**)&pipeline->prev_gradients);
     safe_free((void**)&pipeline->data_buffer);
     safe_free((void**)&pipeline->val_buffer);
     for (int i = 0; i < pipeline->source_count; i++) {

@@ -995,6 +995,15 @@ void* selflnn_get_knowledge_base(void) {
     return g_system_state.knowledge_base;
 }
 
+/* S-008修复: 后端子系统共享访问器（单一LNN架构原则） */
+void* selflnn_get_reasoning_engine(void) {
+    return g_system_state.reasoning_engine;
+}
+
+void* selflnn_get_memory_manager(void) {
+    return g_system_state.memory_manager;
+}
+
 int selflnn_get_recent_state(void* lnn, float* state, int dim) {
     if (!lnn || !state || dim <= 0) return -1;
     return lnn_get_state((LNN*)lnn, state, dim);
@@ -1116,6 +1125,13 @@ static int initialize_subsystems(const SystemConfig* config)
         log_error("推理引擎创建失败");
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
+    }
+    
+    /* S-008修复: 连接推理引擎到知识库（实现知识驱动推理） */
+    if (g_system_state.knowledge_base && g_system_state.reasoning_engine) {
+        reasoning_engine_set_knowledge_base(
+            (ReasoningEngine*)g_system_state.reasoning_engine,
+            (KnowledgeBase*)g_system_state.knowledge_base);
     }
     
     // 4. 初始化统一信号处理器（真实实现）

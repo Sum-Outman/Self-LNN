@@ -129,11 +129,29 @@ int pybullet_connect(const PyBulletConfig* config) {
              gui_flag ? "--gui" : "",
              (double)ts, steps);
     /* 如果python3不可用，回退到python */
-    if (!script_path) {
-        snprintf(cmd, sizeof(cmd), "python %s %s --ts=%.6f --steps=%d 2>&1",
-                 script_path,
-                 gui_flag ? "--gui" : "",
-                 (double)ts, steps);
+    {
+        /* 测试python3是否可用 */
+        int python3_available = 0;
+#ifdef _WIN32
+        FILE* test_pipe = _popen("python3 --version 2>nul", "r");
+#else
+        FILE* test_pipe = popen("python3 --version 2>/dev/null", "r");
+#endif
+        if (test_pipe) {
+            char buf[64];
+            if (fgets(buf, sizeof(buf), test_pipe)) python3_available = 1;
+#ifdef _WIN32
+            _pclose(test_pipe);
+#else
+            pclose(test_pipe);
+#endif
+        }
+        if (!python3_available) {
+            snprintf(cmd, sizeof(cmd), "python %s %s --ts=%.6f --steps=%d 2>&1",
+                     script_path,
+                     gui_flag ? "--gui" : "",
+                     (double)ts, steps);
+        }
     }
     /* 启动子进程 */
 #ifdef _WIN32

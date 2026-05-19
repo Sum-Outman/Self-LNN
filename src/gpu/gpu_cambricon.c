@@ -540,8 +540,8 @@ static int cambricon_backend_get_memory_info(GpuContext* context, size_t* total,
     if (g_cb_state.cnrt_available && g_cambricon.cnrtGetMemInfo) {
         return (g_cambricon.cnrtGetMemInfo(total, free) == 0) ? 0 : -1;
     }
-    *total = 16ULL * 1024 * 1024 * 1024;
-    *free = 8ULL * 1024 * 1024 * 1024;
+    *total = 0;
+    *free = 0;
     return 0;
 }
 

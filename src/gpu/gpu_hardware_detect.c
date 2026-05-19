@@ -387,14 +387,43 @@ int gpu_hardware_detect(GpuHardwareInfo* info, int max_devices, int* num_found) 
             (*num_found)++;
         }
 
-        /* Qualcomm Adreno (通过OpenCL) */
+        /* Qualcomm Adreno (L-003修复: 增强检测精度，通过PCI设备ID或/sys/class/drm验证) */
         if (idx < max_devices) {
 #ifdef _WIN32
             if (try_load_library(QUALCOMM_LIB)) {
 #else
+            int qualcomm_detected = 0;
+            /* 优先通过drm/PCI检测Qualcomm Adreno
+             * 仅当确认vendor为Qualcomm(0x5143)或设备名含Adreno时才确认为Qualcomm
+             * 避免将其他厂商的OpenCL设备误认为Qualcomm */
             if (try_load_library("libOpenCL.so")) {
+                /* 检查/sys/class/drm下是否有Qualcomm设备 */
+                FILE* fp = fopen("/sys/class/drm/card0/device/vendor", "r");
+                if (fp) {
+                    char vendor_buf[16] = {0};
+                    if (fgets(vendor_buf, sizeof(vendor_buf), fp)) {
+                        unsigned long vendor_id = strtoul(vendor_buf, NULL, 16);
+                        if (vendor_id == 0x5143) qualcomm_detected = 1; /* Qualcomm PCI VID */
+                    }
+                    fclose(fp);
+                }
+                if (!qualcomm_detected) {
+                    /* 检查/proc/cpuinfo或设备树查找Qualcomm Snapdragon */
+                    fp = fopen("/proc/cpuinfo", "r");
+                    if (fp) {
+                        char line[256];
+                        while (fgets(line, sizeof(line), fp)) {
+                            if (strstr(line, "Qualcomm") || strstr(line, "Snapdragon")) {
+                                qualcomm_detected = 1;
+                                break;
+                            }
+                        }
+                        fclose(fp);
+                    }
+                }
+            }
+            if (qualcomm_detected) {
 #endif
-                /* 进一步检查是否为Qualcomm设备 */
                 GpuHardwareInfo* gpu = &info[idx];
                 memset(gpu, 0, sizeof(GpuHardwareInfo));
                 gpu->vendor = GPU_VENDOR_QUALCOMM;

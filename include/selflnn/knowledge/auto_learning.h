@@ -34,17 +34,19 @@ typedef enum {
 
 /* 学习条目 */
 typedef struct {
-    char* topic;                     /* 主题 */
-    char* content;                   /* 内容 */
+    char* topic;                     /**< 主题 */
+    char* content;                   /**< 内容 */
     KnowledgeSourceType source_type; /* 来源类型 */
-    char source_path[512];           /* 来源文件路径 */
-    time_t learned_at;               /* 学习时间 */
-    float confidence;                /* 置信度 */
-    int verified;                    /* 是否已验证 */
-    char* extracted_entities[16];    /* 抽取的实体 */
-    int entity_count;                /* 实体数量 */
-    char* extracted_relations[16];   /* 抽取的关系 */
-    int relation_count;              /* 关系数量 */
+    char source_path[512];           /**< 来源文件路径 */
+    time_t learned_at;               /**< 学习时间 */
+    float confidence;                /**< 置信度 */
+    int verified;                    /**< 是否已验证 */
+    char* extracted_entities[16];    /**< 抽取的实体 */
+    int entity_count;                /**< 实体数量 */
+    char* extracted_relations[16];   /**< 抽取的关系 */
+    int relation_count;              /**< 关系数量 */
+    float* feature_vector;           /**< LNN语义嵌入特征向量 */
+    int feature_vector_dim;          /**< 特征向量维度 */
 } AutoLearnEntry;
 
 /* 知识融合模式 */

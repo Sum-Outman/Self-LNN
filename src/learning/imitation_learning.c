@@ -3826,3 +3826,37 @@ void imitation_learner_disable(ImitationLearner* learner) {
 int imitation_learner_is_enabled(const ImitationLearner* learner) {
     return (learner && learner->enabled) ? 1 : 0;
 }
+
+/* ============================
+ * 自动采集演示数据（M-011）
+ * 当视觉/动作数据可用时自动填充演示缓冲区
+ * ============================ */
+
+int imitation_learner_auto_collect_demonstrations(ImitationLearner* learner,
+    const float* state_sequence, const float* action_sequence,
+    size_t sequence_length, size_t state_dim, size_t action_dim,
+    const char* description) {
+    if (!learner || !state_sequence || !action_sequence || sequence_length == 0) {
+        return -1;
+    }
+    if (!learner->enabled) {
+        return -1;
+    }
+
+    /* 创建专家演示数据（内部深拷贝状态和动作序列） */
+    ExpertDemonstration* demo = expert_demonstration_create(
+        state_sequence, action_sequence,
+        sequence_length, state_dim, action_dim,
+        description);
+
+    if (!demo) return -1;
+
+    /* 添加到学习器的演示缓冲区 */
+    int result = imitation_learner_add_demonstration(learner, demo);
+
+    /* 释放临时演示对象（add_demonstration内部已深拷贝） */
+    expert_demonstration_free(demo);
+    safe_free((void**)&demo);
+
+    return result;
+}

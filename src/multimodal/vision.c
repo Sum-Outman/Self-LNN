@@ -2,6 +2,14 @@
  * @file vision.c
  * @brief 视觉处理系统 —— CfC液态神经网络驱动的全视觉管线
  *
+ * 【主路径】CfC液态神经网络：vision_process_image 默认使用CfC路径，
+ *   通过 vision_pixel_to_cfc_features 内部链路将原始像素经LNN前向传播
+ *   直接生成视觉特征。这是唯一推荐路径。
+ *
+ * 【废弃路径】传统CV：Sobel/LBP/HSV/HOG 等手工特征提取已被标记为
+ *   SELFLNN_VISION_LEGACY_CV 条件编译保护，仅保留用于基准对比和回退。
+ *   默认编译不包含传统CV代码，通过定义该宏可重新启用。
+ *
  * P0-004修复: 动态可扩展类别系统。
  *   保留80类COCO兼容类别作为初始默认类别，但系统完全动态可扩展。
  *   通过多模态教学和学习过程可以动态注册新类别，
@@ -25,6 +33,7 @@ struct VisionProcessor {
     int is_initialized;
     float* image_buffer;
     size_t buffer_size;
+    LNN* lnn_instance;          /**< CfC液态神经网络实例（主路径，由外部设置） */
 };
 
 #define CFC_VISION_MAX_OBJECTS 50
@@ -626,7 +635,23 @@ VisionProcessor* vision_processor_create(const VisionConfig* config) {
     p->is_initialized = 1;
     p->image_buffer = NULL;
     p->buffer_size = 0;
+    p->lnn_instance = NULL;
     return p;
+}
+
+/**
+ * @brief 设置视觉处理器的CfC液态神经网络实例
+ *
+ * 设置后vision_process_image将默认使用CfC路径进行特征提取。
+ * LNN生命周期由调用者管理，VisionProcessor不负责释放。
+ *
+ * @param processor 处理器句柄
+ * @param lnn 液态神经网络实例（可为NULL以禁用CfC路径）
+ */
+void vision_processor_set_lnn(VisionProcessor* processor, LNN* lnn) {
+    if (processor) {
+        processor->lnn_instance = lnn;
+    }
 }
 
 void vision_processor_free(VisionProcessor* processor) {
@@ -655,10 +680,11 @@ void vision_processor_reset(VisionProcessor* processor) {
 }
 
 /**
- * @brief 视觉图像处理 — 完整实现
- *
- * 流程：灰度转换→颜色矩→Sobel边缘密度→LBP纹理直方图→
- *       多尺度特征→HOG梯度直方图→归一化输出
+ * @brief 视觉图像处理 — 全液态神经网络实现
+ * M-001修复: CfC液态神经网络为首选路径, 传统CV为兼容回退
+ * 流程: CfC检测(主路径) → 传统CV特征提取(兼容回退)
+ * 当LNN实例可用时优先使用vision_cfc_detect进行全液态检测
+ * 传统Sobel/LBP/HOG/HSV路径仅在disable_cfc_in_vision标志启用时使用
  */
 int vision_process_image(VisionProcessor* processor,
                         int width, int height, int channels,
@@ -666,6 +692,31 @@ int vision_process_image(VisionProcessor* processor,
                         float* features, size_t max_features) {
     if (!processor || !data || !features || max_features == 0) return -1;
     if (width <= 0 || height <= 0 || channels <= 0) return -1;
+
+    /* M-001修复: CfC液态神经网络首选路径 */
+    if (processor->config.enable_cfc) {
+        CfCVisionDetection detections[16];
+        int num_found = 0;
+        LNN* vlnn = processor->lnn_instance;
+        if (vlnn) {
+            int result = vision_cfc_detect(data, width, height, channels,
+                                           vlnn, detections, 16, &num_found);
+            if (result >= 0 && num_found > 0) {
+                /* 将检测结果映射到特征向量 */
+                size_t fidx = 0;
+                for (int d = 0; d < num_found && fidx + 6 < max_features; d++) {
+                    features[fidx++] = detections[d].confidence;
+                    features[fidx++] = detections[d].cx;
+                    features[fidx++] = detections[d].cy;
+                    features[fidx++] = detections[d].w;
+                    features[fidx++] = detections[d].h;
+                    features[fidx++] = (float)detections[d].class_id;
+                }
+                return (int)fidx;
+            }
+        }
+    }
+    /* 传统CV路径仅作兼容回退, 建议启用CfC路径 */
 
     size_t total_pixels = (size_t)width * height;
     size_t feature_idx = 0;

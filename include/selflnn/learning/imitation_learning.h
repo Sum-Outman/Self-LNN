@@ -425,6 +425,26 @@ void imitation_learner_disable(ImitationLearner* learner);
  */
 int imitation_learner_is_enabled(const ImitationLearner* learner);
 
+/**
+ * @brief 自动采集演示数据：当视觉/动作数据可用时自动填充演示缓冲区
+ * 
+ * 封装了expert_demonstration_create和imitation_learner_add_demonstration，
+ * 为自动数据采集管道提供便捷接口。
+ * 
+ * @param learner 模仿学习器
+ * @param state_sequence 状态序列（连续状态观测）
+ * @param action_sequence 动作序列（专家动作）
+ * @param sequence_length 序列长度（时间步）
+ * @param state_dim 状态维度
+ * @param action_dim 动作维度
+ * @param description 演示描述（可选，可为NULL）
+ * @return 成功返回0，失败返回-1
+ */
+int imitation_learner_auto_collect_demonstrations(ImitationLearner* learner,
+    const float* state_sequence, const float* action_sequence,
+    size_t sequence_length, size_t state_dim, size_t action_dim,
+    const char* description);
+
 #ifdef __cplusplus
 }
 #endif

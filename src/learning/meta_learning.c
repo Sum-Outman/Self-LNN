@@ -1066,62 +1066,28 @@ static float compute_task_loss(NeuralNetwork* model, const MetaTask* task) {
     return avg_loss;
 }
 
+/** M-005修复: 全局错误标志 —— 当默认准确率计算被触发时设置 */
+static int g_meta_default_accuracy_fallback = 0;
+
 /**
  * @brief 计算默认准确率值（基于模型和任务的确定性计算）
  * 
- * 当无法获取真实数据或计算真实准确率时，使用此函数计算一个基于模型和任务的可复现默认准确率值。
- * 这避免了返回固定示例值（如0.5f），符合"不接受任何简化处理"的要求。
+ * M-005修复: 不再返回伪随机准确率。当无法获取真实数据或计算真实准确率时，
+ * 返回 -1.0f 表示"无法计算"，并设置全局错误标志 g_meta_default_accuracy_fallback。
+ * 调用者应检查该标志并采取适当措施。
+ *
+ * @param model 神经网络模型（可为NULL）
+ * @param task 元任务（可为NULL）
+ * @return -1.0f 表示无法计算准确率
  */
 static float compute_default_accuracy_based_on_model(NeuralNetwork* model, const MetaTask* task) {
-    if (!model || !task) {
-        return 0.0f;
-    }
-    
-    // 使用模型指针和任务ID的哈希作为确定性种子
-    uintptr_t model_ptr = (uintptr_t)model;
-    uintptr_t task_ptr = (uintptr_t)task;
-    uint32_t seed = (uint32_t)((model_ptr >> 16) ^ (model_ptr & 0xFFFF) ^ 
-                              (task_ptr >> 16) ^ (task_ptr & 0xFFFF));
-    
-    // 如果有任务ID字符串，也加入计算
-    if (task->task_id) {
-        const char* id = task->task_id;
-        while (*id) {
-            seed = seed * 31 + (uint8_t)(*id);
-            id++;
-        }
-    }
-    
-    // 生成基于种子的伪随机准确率值，范围在[0.3, 0.8]之间
-    // 使用线性同余生成器
-    seed = seed * 1103515245 + 12345;
-    uint32_t rand_val1 = (seed >> 16) & 0x7FFF;
-    seed = seed * 1103515245 + 12345;
-    uint32_t rand_val2 = (seed >> 16) & 0x7FFF;
-    
-    // 计算浮点准确率值：基于两个随机数
-    float accuracy = 0.3f + 0.5f * ((rand_val1 + rand_val2) / 65534.0f);
-    
-    // 根据任务类型调整准确率范围
-    switch (task->task_type) {
-        case META_TASK_CLASSIFICATION:
-            accuracy = 0.4f + accuracy * 0.4f;  // 分类任务准确率通常中等
-            break;
-        case META_TASK_REGRESSION:
-            accuracy = 0.5f + accuracy * 0.3f;  // 回归任务R²分数可能较高
-            break;
-        case META_TASK_REINFORCEMENT:
-            accuracy = 0.2f + accuracy * 0.6f;  // 强化学习任务准确率范围较广
-            break;
-        default:
-            break;
-    }
-    
-    // 确保准确率在[0.0, 1.0]范围内
-    if (accuracy < 0.0f) accuracy = 0.0f;
-    if (accuracy > 1.0f) accuracy = 1.0f;
-    
-    return accuracy;
+    /* 设置全局错误标志，通知调用链该准确率是回退结果 */
+    g_meta_default_accuracy_fallback = 1;
+
+    /* 返回 -1.0f 表示准确率无法通过默认方法计算 */
+    (void)model;
+    (void)task;
+    return -1.0f;
 }
 
 /**

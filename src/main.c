@@ -1,4 +1,5 @@
 #include "selflnn/backend/backend.h"
+#include "selflnn/backend/websocket_push.h"
 #include "selflnn/self_cognition.h"
 #include "selflnn/metacognition.h"
 #include "selflnn/multi_agent.h"
@@ -76,6 +77,7 @@ static int is_subsystem_healthy_int(const char* name, void* handle, int (*is_ini
 #define VERSION_PATCH 0
 
 static BackendServer* g_server = NULL;
+static WSPushServer* g_ws_push_server = NULL;
 static void* g_online_learner_handle = NULL;
 static void* g_evolution_engine_handle = NULL;
 static volatile sig_atomic_t g_agi_running = 1;
@@ -535,6 +537,29 @@ static void agi_background_loop_iteration(void) {
         g_last_safety = now;
     }
 
+    /* ZSFABC-DEEP3修复: 每10个循环通过WebSocket推送系统状态 */
+    {
+        static int ws_broadcast_counter = 0;
+        ws_broadcast_counter++;
+        if (g_ws_push_server && (ws_broadcast_counter % 10 == 0)) {
+            char status_json[1024];
+            SystemStatus st;
+            memset(&st, 0, sizeof(st));
+            selflnn_get_status(&st);
+            snprintf(status_json, sizeof(status_json),
+                "{\"type\":\"system_status\",\"timestamp\":%lld,"
+                "\"active_tasks\":%d,\"total_memories\":%ld,"
+                "\"reflection_count\":%d,\"online_learn_ok\":%d,"
+                "\"evolution_ok\":%d,\"errors\":%d,\"uptime_sec\":%lld}",
+                (long long)now,
+                st.active_tasks, (long)st.total_memories,
+                g_agi_self.reflection_count, g_agi_self.online_learn_success,
+                g_agi_self.evolution_success, had_error ? 1 : 0,
+                (long long)(now - g_start_time));
+            ws_push_broadcast_json(g_ws_push_server, status_json);
+        }
+    }
+
     /* 元认知推理（受自我决策能力开关控制） */
     if (capability_is_enabled(CAP_SELF_DECISION) &&
         now - g_agi_self.last_metacognition >= COGNITION_UPDATE_INTERVAL * 2) {
@@ -629,7 +654,7 @@ static void print_usage(const char* prog)
 {
     printf("用法: %s [选项]\n", prog);
     printf("选项:\n");
-    printf("  --port <端口号>            设置服务器端口（默认: %d）\n", SELFLNN_HTTP_PORT);
+    printf("  --port <端口号>            设置服务器端口（默认: %d）\n", SELFLNN_DEFAULT_PORT);
     printf("  --max-connections <数量>   设置最大连接数（默认: 100）\n");
     printf("  --api-key <密钥>           设置API认证密钥\n");
     printf("  --log-file <文件路径>      设置日志文件路径\n");
@@ -706,7 +731,7 @@ static void signal_handler(int sig)
 static void print_system_info(void)
 {
     printf("系统信息:\n");
-    printf("  HTTP端口:     %d\n", SELFLNN_HTTP_PORT);
+    printf("  HTTP端口:     %d\n", SELFLNN_DEFAULT_PORT);
     printf("  WebSocket端口: %d\n", SELFLNN_WEBSOCKET_PORT);
     printf("  Gazebo端口:   %d\n", SELFLNN_GAZEBO_PORT);
     printf("  编译标准:      C11\n");
@@ -878,9 +903,26 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    /* ZSFABC-F002: 启动独立WebSocket推送服务器(端口9090) */
+    {
+        WSPushServer* ws_push = ws_push_server_create(SELFLNN_WEBSOCKET_PORT);
+        if (ws_push) {
+            if (ws_push_server_start(ws_push) == 0) {
+                printf("  WebSocket推送服务器已启动 (端口:%d)\n", SELFLNN_WEBSOCKET_PORT);
+                g_ws_push_server = ws_push;
+            } else {
+                printf("  WebSocket推送服务器启动失败 (端口:%d)\n", SELFLNN_WEBSOCKET_PORT);
+                ws_push_server_destroy(ws_push);
+            }
+        } else {
+            printf("  WebSocket推送服务器创建失败 (端口:%d)\n", SELFLNN_WEBSOCKET_PORT);
+        }
+    }
+
     printf("\n========================================\n");
     printf("SELF-LNN AGI 系统已成功启动!\n");
     printf("  API地址: http://localhost:%d/api\n", config.port);
+    printf("  WS推送: ws://localhost:%d\n", SELFLNN_WEBSOCKET_PORT);
     printf("  前端地址: http://localhost:%d\n", config.port);
     if (config.api_key[0] != '\0') {
         printf("  API密钥: %s\n", config.api_key);
@@ -930,6 +972,12 @@ int main(int argc, char* argv[])
         backend_server_stop(g_server);
         backend_server_free(g_server);
         g_server = NULL;
+    }
+    /* ZSFABC-F002: 停止并释放WebSocket推送服务器 */
+    if (g_ws_push_server) {
+        ws_push_server_stop(g_ws_push_server);
+        ws_push_server_destroy(g_ws_push_server);
+        g_ws_push_server = NULL;
     }
     /* ZSFABC: 释放训练管线 */
     if (g_training_pipeline) {

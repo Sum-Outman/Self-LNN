@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <math.h>
+#include <ctype.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -292,6 +293,163 @@ static int inverted_index_add_id(InvertedIndexItem* item, int entry_id) {
 }
 
 /**
+ * @brief 向倒排索引中添加键值对（查找或创建索引项）
+ * 
+ * 将指定的键字符串关联到目标条目ID。若键已存在则追加ID，
+ * 若不存在则创建新的索引项。
+ * 
+ * @param index 倒排索引
+ * @param key 索引键（字符串）
+ * @param entry_id 条目ID
+ * @return int 成功返回0，失败返回-1
+ */
+static int inverted_index_add_key(InvertedIndex* index, const char* key, int entry_id) {
+    if (!index || !key || entry_id < 0) return -1;
+
+    /* 查找已存在的键 */
+    for (size_t i = 0; i < index->size; i++) {
+        if (index->items[i].key && strcmp(index->items[i].key, key) == 0) {
+            return inverted_index_add_id(&index->items[i], entry_id);
+        }
+    }
+
+    /* 键不存在，创建新索引项 */
+    if (index->size >= index->capacity) {
+        size_t new_cap = (index->capacity > 0) ? index->capacity * 2 : 64;
+        InvertedIndexItem* new_items = (InvertedIndexItem*)safe_realloc(
+            index->items, new_cap * sizeof(InvertedIndexItem));
+        if (!new_items) return -1;
+        memset(new_items + index->capacity, 0,
+               (new_cap - index->capacity) * sizeof(InvertedIndexItem));
+        index->items = new_items;
+        index->capacity = new_cap;
+    }
+
+    InvertedIndexItem* new_item = &index->items[index->size];
+    memset(new_item, 0, sizeof(InvertedIndexItem));
+    new_item->key = string_duplicate(key);
+    if (!new_item->key) return -1;
+
+    if (inverted_index_add_id(new_item, entry_id) != 0) {
+        safe_free((void**)&new_item->key);
+        return -1;
+    }
+
+    index->size++;
+    return 0;
+}
+
+/**
+ * @brief 增强型文本匹配：支持大小写不敏感（ASCII）和中文子串匹配
+ *
+ * 对ASCII字符做大小写不敏感匹配，对中文字符做精确字节匹配。
+ * 同时尝试滑动窗口2-4字中文组合进行增强匹配，
+ * 提高中文查询中部分关键词的召回率。
+ *
+ * @param haystack 被搜索文本
+ * @param needle 搜索模式串
+ * @return int 匹配返回1，否则返回0
+ */
+static int match_text_enhanced(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return 0;
+    if (needle[0] == '\0') return 1;
+
+    /* 快速路径：标准strstr */
+    if (strstr(haystack, needle)) return 1;
+
+    /* 大小写不敏感匹配（逐字符比较，跳过中文部分） */
+    size_t hlen = strlen(haystack);
+    size_t nlen = strlen(needle);
+    if (nlen > hlen) return 0;
+
+    for (size_t i = 0; i <= hlen - nlen; i++) {
+        int matched = 1;
+        for (size_t j = 0; j < nlen; j++) {
+            unsigned char hc = (unsigned char)haystack[i + j];
+            unsigned char nc = (unsigned char)needle[j];
+            /* ASCII字母做大小写不敏感比较 */
+            if (hc < 128 && nc < 128) {
+                if (tolower((int)hc) != tolower((int)nc)) {
+                    matched = 0;
+                    break;
+                }
+            } else {
+                /* 非ASCII（含中文）做精确匹配 */
+                if (hc != nc) {
+                    matched = 0;
+                    break;
+                }
+            }
+        }
+        if (matched) return 1;
+    }
+
+    /* 中文滑动窗口匹配：对2-4字中文组合进行子串匹配提高召回率 */
+    size_t cn_chars = 0;
+    const char* p = needle;
+    while (*p) {
+        if ((unsigned char)*p >= 128) cn_chars++;
+        p++;
+    }
+    /* 仅当模式串包含多个中文字符时启用 */
+    if (cn_chars >= 2) {
+        const char* hp = haystack;
+        while (*hp) {
+            /* 找到中文字符位置 */
+            if ((unsigned char)*hp >= 128) {
+                const char* cp = hp;
+                int char_count = 0;
+                const char* cp_end = cp;
+                while (*cp_end && char_count < 4) {
+                    if ((unsigned char)*cp_end >= 128) {
+                        char_count++;
+                    }
+                    cp_end++;
+                    /* 补齐UTF-8编码边界 */
+                    while (*cp_end && ((unsigned char)*cp_end >= 128 && (unsigned char)*cp_end < 192)) {
+                        cp_end++;
+                    }
+                }
+                if (char_count >= 2) {
+                    size_t sub_len = (size_t)(cp_end - cp);
+                    char sub_buf[32];
+                    if (sub_len < sizeof(sub_buf)) {
+                        memcpy(sub_buf, cp, sub_len);
+                        sub_buf[sub_len] = '\0';
+                        for (size_t w = 2; w <= (size_t)char_count && w <= 4; w++) {
+                            const char* sp = needle;
+                            while (*sp) {
+                                const char* wsp = sp;
+                                int wc = 0;
+                                while (*wsp && wc < (int)w) {
+                                    if ((unsigned char)*wsp >= 128) wc++;
+                                    wsp++;
+                                    while (*wsp && ((unsigned char)*wsp >= 128 && (unsigned char)*wsp < 192)) wsp++;
+                                }
+                                if (wc == (int)w) {
+                                    size_t wlen = (size_t)(wsp - sp);
+                                    if (sub_len >= wlen && memcmp(cp, sp, wlen) == 0) return 1;
+                                }
+                                /* 移动一个字符 */
+                                if ((unsigned char)*sp >= 128) {
+                                    sp++;
+                                    while (*sp && ((unsigned char)*sp >= 128 && (unsigned char)*sp < 192)) sp++;
+                                } else {
+                                    sp++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            hp++;
+        }
+    }
+
+    return 0;
+}
+
+/**
  * @brief 检查查询是否匹配条目
  * 
  * @param entry 知识条目
@@ -308,7 +466,7 @@ static int entry_matches_query(const KnowledgeEntry* entry, const KnowledgeQuery
         if (entry->subject == NULL) {
             return 0;
         }
-        if (strstr(entry->subject, query->subject_pattern) == NULL) {
+        if (!match_text_enhanced(entry->subject, query->subject_pattern)) {
             return 0;
         }
     }
@@ -318,7 +476,7 @@ static int entry_matches_query(const KnowledgeEntry* entry, const KnowledgeQuery
         if (entry->predicate == NULL) {
             return 0;
         }
-        if (strstr(entry->predicate, query->predicate_pattern) == NULL) {
+        if (!match_text_enhanced(entry->predicate, query->predicate_pattern)) {
             return 0;
         }
     }
@@ -328,7 +486,7 @@ static int entry_matches_query(const KnowledgeEntry* entry, const KnowledgeQuery
         if (entry->object == NULL) {
             return 0;
         }
-        if (strstr(entry->object, query->object_pattern) == NULL) {
+        if (!match_text_enhanced(entry->object, query->object_pattern)) {
             return 0;
         }
     }
@@ -535,6 +693,17 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
         if (internal_entry->entry.object) {
             cfc_embed_add_entity(kb->cfc_embed, internal_entry->entry.object);
         }
+    }
+
+    /* 构建倒排索引：将条目的主题/谓词/客体加入对应倒排索引 */
+    if (internal_entry->entry.subject) {
+        inverted_index_add_key(&kb->subject_index, internal_entry->entry.subject, internal_entry->id);
+    }
+    if (internal_entry->entry.predicate) {
+        inverted_index_add_key(&kb->predicate_index, internal_entry->entry.predicate, internal_entry->id);
+    }
+    if (internal_entry->entry.object) {
+        inverted_index_add_key(&kb->object_index, internal_entry->entry.object, internal_entry->id);
     }
 
     return internal_entry->id;
@@ -1201,7 +1370,24 @@ KnowledgeBase* knowledge_base_load(const char* filename) {
         kb->cfc_embed_dim = 0;
         knowledge_base_enable_cfc_embedding(kb, 128);
     }
-    
+
+    /* 重建倒排索引：遍历所有已加载条目建立索引 */
+    {
+        size_t reindex_count = kb->size;
+        for (size_t i = 0; i < reindex_count; i++) {
+            KnowledgeEntry* entry = &kb->entries[i].entry;
+            if (entry->subject) {
+                inverted_index_add_key(&kb->subject_index, entry->subject, kb->entries[i].id);
+            }
+            if (entry->predicate) {
+                inverted_index_add_key(&kb->predicate_index, entry->predicate, kb->entries[i].id);
+            }
+            if (entry->object) {
+                inverted_index_add_key(&kb->object_index, entry->object, kb->entries[i].id);
+            }
+        }
+    }
+
     return kb;
 }
 

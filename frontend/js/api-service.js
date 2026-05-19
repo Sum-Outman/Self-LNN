@@ -3346,6 +3346,24 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* ZSFABC-F003修复: 编程工作台示例代码API */
+    async programmingSample() {
+        try {
+            var resp = await this.request('/programming/sample', {method: 'GET'});
+            var data = await resp.json();
+            return { success: resp.ok, code: data.code || '', language: data.language || 'c' };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* ZSFABC-F005修复: 从后端动态获取命令前缀列表 */
+    async getCommandPrefixes() {
+        try {
+            var resp = await this.request('/command/prefixes', {method: 'GET'});
+            var data = await resp.json();
+            return { success: resp.ok, prefixes: data.prefixes || [] };
+        } catch (e) { return { success: false, error: e.message, prefixes: [] }; }
+    }
+
     async hardwareResourcesAllocate() {
         try {
             var resp = await this.request('/hardware/resources/allocate', {method: 'POST'}, 1);
@@ -5243,9 +5261,9 @@ class WebSocketManager {
 
 // 创建全局API服务实例（IIFE内暴露）
 window.SelfLnnApi = new ApiService();
-/* ZSFABC-001修复: 全局WebSocket管理器使用真实WebSocketManager实例，替代空壳 */
+/* WebSocket通过HTTP Upgrade共用HTTP端口 */
 window.SelfLnnWebSocket = new WebSocketManager(
-    'ws://' + SELFLNN_CONFIG.host + ':' + SELFLNN_CONFIG.port + '/ws'
+    'ws://' + SELFLNN_CONFIG.host + ':' + (SELFLNN_CONFIG.port || 8080) + '/ws'
 );
 
 })(); /* IIFE结束 */

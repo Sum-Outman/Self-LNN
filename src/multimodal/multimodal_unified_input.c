@@ -339,10 +339,18 @@ int multimodal_unified_input_process(UnifiedInputState* state,
         SELFLNN_MAX_MODALITIES, unified_output, max_output_size);
 
     if (result_dim > 0) {
-        float quality = evaluate_process_quality_detailed(unified_output, (size_t)result_dim, NULL, 0);
+        /* M-003修复: 传入上一次输出实现真实的时序对比 */
+        float quality = evaluate_process_quality_detailed(
+            unified_output, (size_t)result_dim,
+            state->prev_output, state->prev_output_dim);
         state->historical_process_quality = 0.95f * state->historical_process_quality +
                                            0.05f * quality;
         state->total_process_count++;
+        /* 保存当前输出作为下一次的prev_output */
+        if (result_dim <= SELFLNN_MAX_CONTROL_DIM) {
+            memcpy(state->prev_output, unified_output, (size_t)result_dim * sizeof(float));
+            state->prev_output_dim = (size_t)result_dim;
+        }
     }
 
     *unified_size = (size_t)(result_dim > 0 ? (size_t)result_dim : 0);

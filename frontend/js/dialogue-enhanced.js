@@ -375,17 +375,20 @@ class DialogueEnhanced {
     // ================================================================
 
     /**
-     * 连接WebSocket流式推送服务器
+     * 连接WebSocket流式推送服务器（使用全局SelfLnnWebSocket避免重复连接）
      * @param {string} wsUrl - WebSocket服务器地址，默认 ws://host:port/ws
      * @returns {boolean} 是否成功启动连接
      */
     connectWebSocket(wsUrl) {
-        if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+        var gws = window.SelfLnnWebSocket;
+        if (!gws) {
+            console.error('DialogueEnhanced: 全局SelfLnnWebSocket不可用');
+            return false;
+        }
+        if (gws.isConnected) {
             return true;
         }
         if (!wsUrl) {
-            /* ZSFABC-008修复: WebSocket端口统一使用后端HTTP端口(8080)，
-             * 而非不存在的3090端口。pushPort从未在SELFLNN_CONFIG中定义 */
             var host = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.host) || 'localhost';
             var port = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.port) || 8080;
             wsUrl = 'ws://' + host + ':' + port + '/ws';
@@ -393,79 +396,25 @@ class DialogueEnhanced {
         this.wsUrl = wsUrl;
         this.wsReconnectAttempts = 0;
         this.wsMaxReconnect = 5;
-        this._wsConnect();
+        /* 使用全局SelfLnnWebSocket的connect方法 */
+        gws.connect();
         return true;
     }
 
     _wsConnect() {
-        var self = this;
-        if (this.ws) {
-            try { this.ws.close(); } catch (e) {}
-            this.ws = null;
-        }
-        try {
-            this.ws = new WebSocket(this.wsUrl);
-        } catch (err) {
-            console.error('WebSocket连接失败:', err);
-            if (this.onWsStatusChange) this.onWsStatusChange('error', err.message);
-            return;
-        }
-        this.ws.binaryType = 'arraybuffer';
-
-        this.ws.onopen = function() {
-            self.wsReconnectAttempts = 0;
-            if (self.onWsStatusChange) self.onWsStatusChange('connected');
-        };
-
-        this.ws.onmessage = function(event) {
-            try {
-                var msg = JSON.parse(event.data);
-                if (!msg || !msg.type) return;
-                if (msg.type === 'dialogue_token' || msg.type === 8) {
-                    var tokenText = msg.token || msg.data || '';
-                    var isFinal = msg.is_final || false;
-                    var progress = msg.progress || 0;
-                    if (self.onDialogueToken) {
-                        self.onDialogueToken(tokenText, progress, isFinal);
-                    }
-                } else if (msg.type === 'dialogue_response' || msg.type === 7) {
-                    var fullText = msg.response || msg.text || msg.data || '';
-                    var confidence = msg.confidence || 0;
-                    if (self.onDialogueResponse) {
-                        self.onDialogueResponse(fullText, confidence);
-                    }
-                }
-            } catch (e) {
-                // 非JSON消息忽略
-            }
-        };
-
-        this.ws.onerror = function(err) {
-            if (self.onWsStatusChange) self.onWsStatusChange('error', '连接错误');
-        };
-
-        this.ws.onclose = function(event) {
-            self.ws = null;
-            if (self.onWsStatusChange) self.onWsStatusChange('disconnected');
-            if (self.wsReconnectAttempts < self.wsMaxReconnect) {
-                self.wsReconnectAttempts++;
-                var delay = Math.min(1000 * Math.pow(2, self.wsReconnectAttempts), 30000);
-                setTimeout(function() { self._wsConnect(); }, delay);
-            }
-        };
+        /* 委托给全局SelfLnnWebSocket，不再自行创建WebSocket连接 */
+        var gws = window.SelfLnnWebSocket;
+        if (!gws) return;
+        gws.connect();
     }
 
     /**
-     * 断开WebSocket连接
+     * 断开WebSocket连接（使用全局SelfLnnWebSocket）
      */
     disconnectWebSocket() {
-        this.wsMaxReconnect = 0;
-        if (this.ws) {
-            try {
-                this.ws.onclose = null;
-                this.ws.close();
-            } catch (e) {}
-            this.ws = null;
+        var gws = window.SelfLnnWebSocket;
+        if (gws && gws.ws && gws.ws.readyState === WebSocket.OPEN) {
+            gws.ws.close();
         }
         if (this.onWsStatusChange) this.onWsStatusChange('disconnected');
     }
@@ -475,8 +424,9 @@ class DialogueEnhanced {
      * @returns {string} 'connected' | 'connecting' | 'disconnected' | 'error'
      */
     getWsStatus() {
-        if (!this.ws) return 'disconnected';
-        switch (this.ws.readyState) {
+        var gws = window.SelfLnnWebSocket;
+        if (!gws || !gws.ws) return 'disconnected';
+        switch (gws.ws.readyState) {
             case WebSocket.OPEN: return 'connected';
             case WebSocket.CONNECTING: return 'connecting';
             default: return 'disconnected';
@@ -513,7 +463,8 @@ class DialogueEnhanced {
                     type: 'dialogue_request',
                     data: payload
                 });
-                this.ws.send(wsPayload);
+                var gws = window.SelfLnnWebSocket;
+                if (gws && gws.send) gws.send(wsPayload);
                 return { success: true, streaming: true };
             } catch (err) {
                 console.warn('WebSocket发送失败，回退到HTTP:', err);

@@ -96,6 +96,7 @@ struct Robot {
     float sim_motor_torques[32];   /**< 仿真电机力矩 (Nm) */
     float sim_environment[10];    /**< 仿真环境参数 */
     float sim_last_update_time;   /**< 仿真最后更新时间 (秒) */
+    float last_update_time;       /**< 力矩控制上次更新时间（非static，避免线程数据竞争） */
     int sim_data_warning;         /**< 仿真数据警告：1=当前含有仿真数据，禁止用于自主学习训练 */
     
     // IMU数据
@@ -2188,11 +2189,10 @@ static void robot_sim_apply_command(Robot* robot, const RobotCommand* command) {
             const float inertia = 0.05f;           // 转动惯量 (kg·m²)
             const float static_friction = 0.2f;    // 静摩擦力 (Nm)
             
-            // 计算时间步长（假设为固定步长）
-            static float last_update_time = 0.0f;
+            // 计算时间步长（假设为固定步长，使用结构体字段替代static变量避免线程数据竞争）
             float current_time = robot->sim_last_update_time;
-            float dt = (current_time > last_update_time) ? (current_time - last_update_time) : 0.01f;
-            last_update_time = current_time;
+            float dt = (current_time > robot->last_update_time) ? (current_time - robot->last_update_time) : 0.01f;
+            robot->last_update_time = current_time;
             
             // 应用力矩控制到每个关节
             for (int i = 0; i < robot->config.num_joints && i < 32; i++) {
@@ -2200,12 +2200,11 @@ static void robot_sim_apply_command(Robot* robot, const RobotCommand* command) {
                 float joint_position = robot->sim_joint_positions[i];
                 float joint_velocity = robot->sim_joint_velocities[i];
                 
-                // 计算关节加速度（通过速度微分）
-                static float last_joint_velocities[32] = {0};
+                // 计算关节加速度（通过速度微分，使用结构体字段替代static数组避免线程数据竞争）
                 float joint_acceleration = 0.0f;
                 if (dt > 1e-6f) {
-                    joint_acceleration = (joint_velocity - last_joint_velocities[i]) / dt;
-                    last_joint_velocities[i] = joint_velocity;
+                    joint_acceleration = (joint_velocity - robot->prev_joint_velocities[i]) / dt;
+                    robot->prev_joint_velocities[i] = joint_velocity;
                 }
                 
                 // 1. 重力补偿：τ_gravity = m * g * l * sin(q)

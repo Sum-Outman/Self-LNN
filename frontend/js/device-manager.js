@@ -339,6 +339,19 @@ class DeviceManager {
         }
     }
 
+    /* ZSFABC-F004修复: 桥接方法 - voice-command.js需要的独立静音/取消静音API */
+    muteSpeaker(id) {
+        this.setSpeakerMuted(id, true);
+        const speaker = this.speakers.find(s => s.id === id);
+        if (speaker) speaker.muted = true;
+    }
+
+    unmuteSpeaker(id) {
+        this.setSpeakerMuted(id, false);
+        const speaker = this.speakers.find(s => s.id === id);
+        if (speaker) speaker.muted = false;
+    }
+
     async playAudioOnSpeaker(speakerId, audioBlob) {
         const speaker = this.speakers.find(s => s.id === speakerId);
         if (!speaker || !speaker.active) {
