@@ -98,6 +98,16 @@ typedef struct {
     int use_auto_solver;                   /**< 是否启用自动求解器选择，默认0=禁用（使用固定的ode_solver_type） */
     /* 四元数CfC集成（P2.4） */
     int use_quaternion;                    /**< 是否启用四元数CfC模式，默认0=禁用。启用后hidden_size和input_size需为4的倍数 */
+    /* P0-001修复: 权重初始化方法 */
+    int use_xavier_init;                   /**< 是否使用Xavier/Glorot初始化（默认1=启用），基于fan_in和fan_out自适应缩放，显著提升深层网络收敛性能 */
+    int use_kaiming_init;                  /**< 是否使用Kaiming/He初始化（默认0=禁用），适用于ReLU类激活函数。使用fan_in/2缩放 */
+    float weight_init_scale;               /**< 自定义权重初始化缩放因子（默认0.0=自动计算），>0时覆盖Xavier/Kaiming计算 */
+    /* P1-001: 层归一化（LayerNorm）配置 */
+    int use_cell_layer_norm;               /**< 是否启用层归一化（默认1=启用），对隐藏状态进行逐样本归一化，消除内部协变量偏移，显著提升深层网络训练稳定性 */
+    float layer_norm_epsilon;              /**< 层归一化epsilon（默认1e-5） */
+    /* P2-002: 残差连接配置 */
+    int use_residual;                      /**< 是否启用残差/跳跃连接（默认1=启用），h_new = CfC_update + α*h_prev，为深层网络提供梯度高速公路 */
+    float residual_scale;                  /**< 残差缩放因子（默认0.3），控制跳跃连接的强度。0=无残差，1=恒等映射 */
 } CfCCellConfig;
 
 /**

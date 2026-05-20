@@ -70,7 +70,7 @@ typedef struct {
     int early_stopping_patience;
     float validation_split;
     int optimizer_type;              /**< 优化器类型 0=SGD 1=Momentum 2=AdaGrad 3=RMSProp 4=Adam 5=AdamW 6=AdaDelta 7=LAMB 8=LARS 9=Ranger 10=NovoGrad */
-    int loss_function;               /**< 损失函数 0=MSE 1=MAE 2=CrossEntropy 3=Huber 4=LogCosh */
+    int loss_function;               /**< 损失函数（LossType枚举值, loss.h）: 0=MSE 1=MAE 2=Huber 3=CategoricalCrossEntropy 4=BinaryCrossEntropy 5=KLD 6=Cosine 7=Contrastive 8=Focal 9=Dice 10=Triplet 11=Quantile */
     char data_directory[512];
     char output_directory[512];
 } TrainingPipelineConfig;

@@ -11,6 +11,7 @@
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/ode_solvers.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/core/lnn_layer_norm.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
 
@@ -46,7 +47,12 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     
     // 复制配置
     memcpy(&network->config, config, sizeof(CfCNetworkConfig));
-    
+
+    /* P0-001: 层归一化默认启用 */
+    if (network->config.use_layer_norm == 0 && network->config.num_layers >= 1) {
+        network->config.use_layer_norm = 1;
+    }
+
     // 分配层数组
     network->layers = (CfCCell**)safe_calloc(config->num_layers, sizeof(CfCCell*));
     if (!network->layers) {
@@ -131,8 +137,14 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     if (out_proj_size > 0 && grad_block) {
         float* W_out = grad_block + weight_size + config->hidden_size;
         float* b_out = W_out + config->output_size * config->hidden_size;
+        /* FIX-005: 使用 He/Kaiming 自适应初始化，替代固定 U(-0.1, 0.1)。
+         * He 均匀分布: limit = sqrt(6 / fan_in)
+         * fan_in = hidden_size (投影层的输入是隐藏状态) */
+        float he_limit = sqrtf(6.0f / (float)config->hidden_size);
+        if (he_limit > 0.2f) he_limit = 0.2f;
+        if (he_limit < 0.001f) he_limit = 0.001f;
         for (size_t i = 0; i < config->output_size * config->hidden_size; i++) {
-            W_out[i] = rng_uniform(-0.1f, 0.1f);
+            W_out[i] = rng_uniform(-he_limit, he_limit);
         }
         for (size_t i = 0; i < config->output_size; i++) {
             b_out[i] = 0.0f;
@@ -147,9 +159,16 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         return NULL;
     }
     
-    // 初始化权重为小随机值
-    for (size_t i = 0; i < weight_size; i++) {
-        network->weight_matrix[i] = rng_uniform(-0.1f, 0.1f);
+    /* FIX-005: 使用 He/Kaiming 自适应初始化网络级权重矩阵。
+     * fan_in = input_size (第一层) 或 hidden_size (后续层已在 cell 中初始化)
+     * limit = sqrt(6 / fan_in)，对应均匀分布 He 初始化 */
+    {
+        float he_limit = sqrtf(6.0f / (float)config->input_size);
+        if (he_limit > 0.2f) he_limit = 0.2f;
+        if (he_limit < 0.001f) he_limit = 0.001f;
+        for (size_t i = 0; i < weight_size; i++) {
+            network->weight_matrix[i] = rng_uniform(-he_limit, he_limit);
+        }
     }
     
     // 初始化偏置为零
@@ -161,7 +180,33 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     for (size_t i = 0; i < max_layer_size; i++) {
         network->dropout_mask[i] = 1.0f;  // 初始全为1（不丢弃）
     }
-    
+
+    /* P0-001: 创建每层级联层归一化(LayerNorm)实例
+     * LayerNorm在特征维度上独立归一化，消除深层网络的内部协变量偏移。
+     * 与BatchNorm不同，LayerNorm不依赖batch size，训练/推理行为一致。 */
+    network->layer_norms = NULL;
+    network->ln_temp_buffer = NULL;
+    if (config->use_layer_norm) {
+        network->layer_norms = (void**)safe_calloc(config->num_layers, sizeof(void*));
+        network->ln_temp_buffer = (float*)safe_calloc(max_layer_size, sizeof(float));
+        if (network->layer_norms && network->ln_temp_buffer) {
+            LayerNormConfig ln_cfg = layer_norm_default_config(config->hidden_size);
+            ln_cfg.epsilon = 1e-5f;
+            ln_cfg.use_affine = 1;
+            for (int i = 0; i < config->num_layers; i++) {
+                network->layer_norms[i] = layer_norm_create(&ln_cfg);
+                if (!network->layer_norms[i]) {
+                    /* 清理已创建的LN */
+                    for (int j = 0; j < i; j++) {
+                        layer_norm_free((LayerNorm*)network->layer_norms[j]);
+                    }
+                    safe_free((void**)&network->layer_norms);
+                    safe_free((void**)&network->ln_temp_buffer);
+                }
+            }
+        }
+    }
+
     // 初始化统计信息
     network->is_initialized = 1;
     network->current_avg_activation = 0.0f;
@@ -193,7 +238,18 @@ void cfc_free(CfCNetwork* network) {
     safe_free((void**)&network->layer_gradients);
     safe_free((void**)&network->activation_buffer);
     safe_free((void**)&network->dropout_mask);
-    
+
+    /* P0-001: 释放层归一化实例 */
+    if (network->layer_norms) {
+        for (int i = 0; i < network->config.num_layers; i++) {
+            if (network->layer_norms[i]) {
+                layer_norm_free((LayerNorm*)network->layer_norms[i]);
+            }
+        }
+        safe_free((void**)&network->layer_norms);
+    }
+    safe_free((void**)&network->ln_temp_buffer);
+
     safe_free((void**)&network->weight_matrix);
     network->bias_vector = NULL;
     safe_free((void**)&network->weight_gradients);
@@ -264,6 +320,16 @@ int cfc_forward(CfCNetwork* network, const float* input,
         
         SELFLNN_CHECK(result == 0, SELFLNN_ERROR_CFC_CELL_CONFIG,
                      "第%d层CfC单元前向传播失败", layer);
+
+        /* P0-001: 层归一化应用于每层CfC输出
+         * 归一化后消除内部协变量偏移，显著提升深层网络训练稳定性。
+         * 每层独立LN，在特征维度上标准化到零均值单位方差。 */
+        if (network->layer_norms && network->layer_norms[layer] && network->ln_temp_buffer) {
+            layer_norm_forward((LayerNorm*)network->layer_norms[layer],
+                              layer_output, network->ln_temp_buffer,
+                              config->enable_training);
+            memcpy(layer_output, network->ln_temp_buffer, hidden_size * sizeof(float));
+        }
         
         // 应用Dropout（如果启用）
         if (config->dropout_rate > 0.0f && config->dropout_rate < 1.0f && config->enable_training) {
@@ -334,11 +400,48 @@ int cfc_forward(CfCNetwork* network, const float* input,
 }
 
 /**
+ * @brief P0-002深度修复: 清零所有cell级梯度缓冲区
+ * 
+ * 在batch训练开始时/单样本反向传播前调用一次，
+ * 确保随后的cfc_cell_backward→+=累积从零开始。
+ */
+void cfc_zero_cell_gradients(CfCNetwork* network) {
+    if (!network || !network->layers) return;
+    for (int cl = 0; cl < network->config.num_layers; cl++) {
+        CfCCell* cell = network->layers[cl];
+        if (!cell) continue;
+        size_t lw = (cl == 0 ? network->config.input_size : network->config.hidden_size)
+                   * network->config.hidden_size;
+        size_t hh = network->config.hidden_size * network->config.hidden_size;
+        if (cell->weight_grad) memset(cell->weight_grad, 0, lw * sizeof(float));
+        if (cell->bias_grad) memset(cell->bias_grad, 0, network->config.hidden_size * sizeof(float));
+        if (cell->input_gate_weight_grad) memset(cell->input_gate_weight_grad, 0, lw * sizeof(float));
+        if (cell->hidden_to_gate_weight_grad) memset(cell->hidden_to_gate_weight_grad, 0, hh * sizeof(float));
+        if (cell->hidden_to_activation_weight_grad) memset(cell->hidden_to_activation_weight_grad, 0, hh * sizeof(float));
+        if (cell->gate_bias_grad) memset(cell->gate_bias_grad, 0, network->config.hidden_size * 3 * sizeof(float));
+        if (cell->time_constant_grad) memset(cell->time_constant_grad, 0, network->config.hidden_size * sizeof(float));
+    }
+}
+
+/**
  * @brief 反向传播（训练）- 完整实现
  * 支持多层CfC网络和输出投影矩阵的完整梯度链
  */
 int cfc_backward(CfCNetwork* network, const float* error, 
                  float* gradient, float learning_rate) {
+    return cfc_backward_ex(network, error, gradient, learning_rate, 0);
+}
+
+/**
+ * @brief 反向传播（训练）——扩展版，支持跳过cell级参数更新（批量训练的+=累积模式）
+ * 
+ * P0-002修复: 新增skip_cell_update参数。
+ *   skip_cell_update=0: 单样本模式，cfc_backward内部在Step3直接更新cell参数（兼容旧行为）
+ *   skip_cell_update=1: 批量模式，仅累积梯度到cell->weight_grad等缓冲区，不更新cell参数。
+ *     调用方必须在批次结束后通过 cfc_apply_cell_gradients() 统一下发更新。
+ */
+int cfc_backward_ex(CfCNetwork* network, const float* error, 
+                    float* gradient, float learning_rate, int skip_cell_update) {
     SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
     SELFLNN_CHECK_NULL(error, "误差向量为空");
     SELFLNN_CHECK_NULL(gradient, "梯度缓冲区为空");
@@ -399,11 +502,26 @@ int cfc_backward(CfCNetwork* network, const float* error,
         memcpy(output_gradient, error, hidden_size * sizeof(float));
     }
 
+    /* P0-002深度修复: 单样本路径清零cell梯度。
+     * 批量路径(skip_cell_update=1)由调用方在batch开始时清零。 */
+    if (!skip_cell_update) {
+        cfc_zero_cell_gradients(network);
+    }
+
     // 步骤2: 逐层反向传播（从最后一层到第一层）
     for (int layer = num_layers - 1; layer >= 0; layer--) {
         float* layer_gradient = network->layer_gradients + (layer * max_layer_size);
         float* prev_gradient = (layer > 0) ? 
             network->layer_gradients + ((layer - 1) * max_layer_size) : gradient;
+
+        /* P0-001: 层归一化反向传播
+         * 前向时 output = LN(cfc_output)，所以反向需要先通过LN反向传播
+         * 将 dL/d(output_postLN) 转换为 dL/d(output_preLN)，然后传给cfc_cell_backward */
+        if (network->layer_norms && network->layer_norms[layer] && network->ln_temp_buffer) {
+            layer_norm_backward((LayerNorm*)network->layer_norms[layer],
+                               layer_gradient, network->ln_temp_buffer);
+            memcpy(layer_gradient, network->ln_temp_buffer, hidden_size * sizeof(float));
+        }
 
         // 清零上一层梯度（准备接收）
         // 对于外部梯度缓冲区(gradient/layer==0)，只清零 input_size 个元素
@@ -430,7 +548,10 @@ int cfc_backward(CfCNetwork* network, const float* error,
         }
     }
 
-    // 步骤3: 更新各层CfC单元的参数
+    /* P0-002: 步骤3 — 更新各层CfC单元的参数
+     * skip_cell_update=1时跳过直接参数更新，仅保留梯度在cell内部缓冲区。
+     * 调用方必须在批量结束后通过 cfc_apply_cell_gradients() 统一下发更新。 */
+    if (!skip_cell_update) {
     for (int layer = 0; layer < num_layers; layer++) {
         CfCCell* cell_layer = network->layers[layer];
         if (!cell_layer) continue;
@@ -474,6 +595,22 @@ int cfc_backward(CfCNetwork* network, const float* error,
                 if (cell_layer->time_constants[k] > cell_layer->max_time_constant)
                     cell_layer->time_constants[k] = cell_layer->max_time_constant;
             }
+        }
+    }
+    } /* if (!skip_cell_update) — 关闭P0-002批量模式cell参数延迟更新块 */
+
+    /* FIX-007/011: 步骤4 — 累积网络级输入预处理参数的梯度。
+     * 使用 += 而非 = 确保批量训练时多个样本的梯度正确累加。
+     * 调用方需在每批次开始前将 weight_gradients/bias_gradients 清零。 */
+    if (saved_input && num_layers == 1) {
+        for (size_t j = 0; j < hidden_size; j++) {
+            float dL_dh_j = gradient[j];
+            for (size_t k = 0; k < input_size; k++) {
+                network->weight_gradients[j * input_size + k] += dL_dh_j * saved_input[k];
+            }
+        }
+        for (size_t j = 0; j < hidden_size; j++) {
+            network->bias_gradients[j] += gradient[j];
         }
     }
 
@@ -532,20 +669,52 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
     
     // 计算输出层梯度（使用最大层大小作为步长）
     float* output_gradient = network->layer_gradients + ((num_layers - 1) * max_layer_size);
+    float* last_hidden = network->layer_outputs + ((num_layers - 1) * max_layer_size);
     
-    // 输出层梯度：误差乘以输出层激活函数导数
-    // 在实际实现中，这里应该包括激活函数的导数
-    size_t copy_size = (output_size < hidden_size) ? output_size : hidden_size;
-    for (size_t i = 0; i < copy_size; i++) {
-        output_gradient[i] = error[i];
+    /* FIX-015: 输出投影矩阵梯度累积。cfc_backward Step1 在此处计算W_out梯度
+     * 并直接更新，但 cfc_accumulate_gradients 完全跳过了W_out。
+     * 当 output_size != hidden_size 时，须将 error 通过 W_out^T 反向传播
+     * 得到 dL/dh，同时累积 W_out 和 b_out 梯度。 */
+    size_t w_size_for_out = input_size * hidden_size;
+    float* W_out_grad_region = network->weight_gradients + w_size_for_out + hidden_size;
+    float* b_out_grad_region = W_out_grad_region + output_size * hidden_size;
+    
+    if (output_size != hidden_size && network->weight_gradients) {
+        float* W_out = network->weight_gradients + w_size_for_out + hidden_size;
+        /* dL/dh = W_out^T · error */
+        memset(output_gradient, 0, hidden_size * sizeof(float));
+        for (size_t i = 0; i < output_size; i++) {
+            for (size_t j = 0; j < hidden_size; j++) {
+                output_gradient[j] += W_out[i * hidden_size + j] * error[i];
+            }
+        }
+        /* 累积W_out梯度: dL/dW_out[i][j] += error[i] * last_hidden[j] */
+        for (size_t i = 0; i < output_size; i++) {
+            for (size_t j = 0; j < hidden_size; j++) {
+                W_out_grad_region[i * hidden_size + j] += error[i] * last_hidden[j];
+            }
+            b_out_grad_region[i] += error[i];
+        }
+    } else {
+        size_t copy_size = (output_size < hidden_size) ? output_size : hidden_size;
+        for (size_t i = 0; i < copy_size; i++) {
+            output_gradient[i] = error[i];
+        }
     }
     
     // 反向传播通过各层
     for (int layer = num_layers - 1; layer >= 0; layer--) {
         float* layer_gradient = network->layer_gradients + (layer * max_layer_size);
         float* layer_output = network->layer_outputs + (layer * max_layer_size);
-        (void)layer_output; // 未使用，消除警告
-        
+        (void)layer_output;
+
+        /* P0-001: 层归一化反向传播（与cfc_backward_ex一致） */
+        if (network->layer_norms && network->layer_norms[layer] && network->ln_temp_buffer) {
+            layer_norm_backward((LayerNorm*)network->layer_norms[layer],
+                               layer_gradient, network->ln_temp_buffer);
+            memcpy(layer_gradient, network->ln_temp_buffer, hidden_size * sizeof(float));
+        }
+
         // 获取上一层梯度（对于第一层，使用输入梯度）
         float* prev_gradient = NULL;
         if (layer > 0) {
@@ -575,37 +744,20 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
     
     size_t total_weight_size = 0;
     if (num_layers == 1 && config->input_size > 0) {
-        // 计算权重梯度
-        // 使用保存的原始输入（如果可用，否则使用layer_gradients）
+        /* FIX-016: 单层网络直接复制cell->weight_grad/bias_grad到外部缓冲区。
+         * cfc_cell_backward已正确计算了CfC门控+激活+ODE链式的完整梯度。
+         * 旧代码用 gradient[i]*input[j] 重新计算→这是简单线性层梯度，完全
+         * 忽略了CfC内部的sigmoid/tanh/exp(-Δt/τ)导数链，导致外部梯度错误。
+         * 批量训练时使用+=累积（FIX-010），调用方已在批次前清零。 */
         total_weight_size = hidden_size * config->input_size;
-        float* input_signal = saved_input ? saved_input : network->layer_gradients;
-        
-        // 边界检查：确保索引在范围内
-        size_t max_weight_idx = total_weight_size;
-        size_t max_bias_idx = hidden_size;
-        
-        for (size_t i = 0; i < hidden_size; i++) {
-            for (size_t j = 0; j < config->input_size; j++) {
-                size_t idx = i * config->input_size + j;
-                if (idx >= max_weight_idx) {
-                    fprintf(stderr, "cfc_accumulate_gradients: 错误：权重索引越界 idx=%zu >= max=%zu\n", idx, max_weight_idx);
-                    if (saved_input) {
-                        safe_free((void**)&saved_input);
-                    }
-                    return SELFLNN_ERROR_INVALID_ARGUMENT;
-                }
-                weight_gradients[idx] = gradient[i] * input_signal[j];
+        CfCCell* cell0 = network->layers[0];
+        if (cell0 && cell0->weight_grad && cell0->bias_grad) {
+            for (size_t i = 0; i < total_weight_size; i++) {
+                weight_gradients[i] += cell0->weight_grad[i];
             }
-            
-            // 偏置梯度
-            if (i >= max_bias_idx) {
-                fprintf(stderr, "cfc_accumulate_gradients: 错误：偏置索引越界 i=%zu >= max=%zu\n", i, max_bias_idx);
-                if (saved_input) {
-                    safe_free((void**)&saved_input);
-                }
-                return SELFLNN_ERROR_INVALID_ARGUMENT;
+            for (size_t i = 0; i < hidden_size; i++) {
+                bias_gradients[i] += cell0->bias_grad[i];
             }
-            bias_gradients[i] = gradient[i];
         }
     } else {
         // 多层网络完整梯度计算
@@ -617,10 +769,9 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
         
         total_weight_size = config->hidden_size * config->hidden_size;
         
-        // 将共享权重矩阵的梯度清零
-        memset(weight_gradients, 0, total_weight_size * sizeof(float));
-        // 将共享偏置向量的梯度清零
-        memset(bias_gradients, 0, config->hidden_size * sizeof(float));
+        /* FIX-010: 不在此处清零共享梯度缓冲区。
+         * _lnn_backward_batch_internal 在逐样本循环前已清零一次，
+         * 此处再清零会导致之前样本的梯度全部丢失（仅保留最后一个样本）。 */
         
         // 逐层累积梯度到共享权重矩阵中
         for (int layer = 0; layer < num_layers; layer++) {
@@ -696,6 +847,179 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
         safe_free((void**)&saved_input);
     }
     
+    return 0;
+}
+
+/**
+ * @brief 应用各层CfC单元的cell级参数梯度
+ * 
+ * FIX-011: cfc_backward Step3 在单样本路径中直接更新cell级参数，
+ * 但 cfc_accumulate_gradients（批量训练路径）不处理这些参数。
+ * 此函数由批量训练循环在累积共享梯度后调用，应用各cell内部的门控/
+ * 时间常数梯度到对应参数。
+ * 
+ * 注意：当前cell级梯度来自最后一样本（cfc_cell_backward用=覆盖），
+ * 未来改进：在 cfc_accumulate_gradients 中为cell级梯度增加+=累积通道。
+ */
+int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate) {
+    SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
+    SELFLNN_CHECK_INITIALIZED(network, "CfC网络未初始化");
+    
+    size_t hidden_size = network->config.hidden_size;
+    size_t input_size = network->config.input_size;
+    int num_layers = network->config.num_layers;
+    
+    for (int layer = 0; layer < num_layers; layer++) {
+        CfCCell* cell = network->layers[layer];
+        if (!cell) continue;
+        
+        size_t layer_input = (layer == 0) ? input_size : hidden_size;
+        size_t cell_w_count = layer_input * hidden_size;
+        size_t hh_count = hidden_size * hidden_size;
+        size_t k;
+        
+        /* W_gx: 输入到门控权重 */
+        if (cell->input_gate_weight_grad && cell->input_gate_weights) {
+            for (k = 0; k < cell_w_count; k++) {
+                float g = cell->input_gate_weight_grad[k];
+                if (isfinite(g)) cell->input_gate_weights[k] -= learning_rate * g;
+            }
+        }
+        /* W_gh / W_ah: 隐藏到隐藏权重 */
+        for (k = 0; k < hh_count; k++) {
+            if (cell->hidden_to_gate_weight_grad && cell->hidden_to_gate_weights) {
+                float g = cell->hidden_to_gate_weight_grad[k];
+                if (isfinite(g)) cell->hidden_to_gate_weights[k] -= learning_rate * g;
+            }
+            if (cell->hidden_to_activation_weight_grad && cell->hidden_to_activation_weights) {
+                float g = cell->hidden_to_activation_weight_grad[k];
+                if (isfinite(g)) cell->hidden_to_activation_weights[k] -= learning_rate * g;
+            }
+        }
+        /* b_g: 门控偏置 */
+        if (cell->gate_bias_grad && cell->gate_biases) {
+            for (k = 0; k < hidden_size * 3; k++) {
+                float g = cell->gate_bias_grad[k];
+                if (isfinite(g)) cell->gate_biases[k] -= learning_rate * g;
+            }
+        }
+        /* τ: 自适应时间常数 */
+        if (cell->use_adaptive_tau && cell->time_constant_grad && cell->time_constants) {
+            for (k = 0; k < hidden_size; k++) {
+                float g = cell->time_constant_grad[k];
+                if (isfinite(g)) {
+                    cell->time_constants[k] -= cell->tau_learning_rate * g;
+                    if (cell->time_constants[k] < cell->min_time_constant)
+                        cell->time_constants[k] = cell->min_time_constant;
+                    if (cell->time_constants[k] > cell->max_time_constant)
+                        cell->time_constants[k] = cell->max_time_constant;
+                }
+            }
+        }
+    }
+
+    /* P0-001: 同步更新层归一化(γ, β)参数
+     * LN的γ/β梯度在 layer_norm_backward 中已通过+=累积，
+     * 此处统一在批量结束后更新。γ/β学习率自动减半以保证稳定性。 */
+    if (network->layer_norms) {
+        for (int layer = 0; layer < num_layers; layer++) {
+            if (network->layer_norms[layer]) {
+                layer_norm_update_params((LayerNorm*)network->layer_norms[layer], learning_rate);
+            }
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 应用输出投影矩阵(W_out+b_out)梯度
+ * 
+ * FIX-015: W_out/b_out 存储在 grad_block 尾部而非 param_block，
+ * 外部优化器路径无法触及。此函数在批量训练结束时应用累积梯度。
+ */
+int cfc_apply_out_proj_gradients(CfCNetwork* network, float learning_rate) {
+    SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
+    SELFLNN_CHECK_INITIALIZED(network, "CfC网络未初始化");
+    
+    size_t hidden_size = network->config.hidden_size;
+    size_t output_size = network->config.output_size;
+    size_t input_size = network->config.input_size;
+    
+    if (output_size == hidden_size || !network->weight_gradients) return 0;
+    
+    size_t w_size = input_size * hidden_size;
+    float* W_out_params = network->weight_gradients + w_size + hidden_size;
+    float* b_out_params = W_out_params + output_size * hidden_size;
+    /* W_out梯度区域与W_out参数区域相同（都在grad_block中） */
+    float* W_out_grads = W_out_params;
+    float* b_out_grads = b_out_params;
+    
+    /* 更新W_out */
+    for (size_t i = 0; i < output_size * hidden_size; i++) {
+        float g = W_out_grads[i];
+        if (isfinite(g)) W_out_params[i] -= learning_rate * g;
+    }
+    /* 更新b_out */
+    for (size_t i = 0; i < output_size; i++) {
+        float g = b_out_grads[i];
+        if (isfinite(g)) b_out_params[i] -= learning_rate * g;
+    }
+    return 0;
+}
+
+/**
+ * @brief 将共享参数块同步到各层CfC单元的活跃权重
+ * 
+ * FIX-017: cfc_forward 读取 cell->weight_matrix/bias_vector 做前向计算。
+ * optimizer_update 更新的是共享 param_block。此函数将优化后的参数
+ * 从共享块复制到各层 cell 权重，确保下一次前向传播使用最新参数。
+ * 
+ * 单层: cell->weight_matrix 从 param_block 复制 input*hidden 元素
+ *       cell->bias_vector 从 param_block+weight_size 复制 hidden 元素
+ * 多层: 每层 cell 都复制共享的 hidden*hidden 矩阵和偏置向量
+ */
+int cfc_sync_shared_to_cells(CfCNetwork* network) {
+    SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
+    SELFLNN_CHECK_INITIALIZED(network, "CfC网络未初始化");
+    
+    size_t hidden_size = network->config.hidden_size;
+    size_t input_size = network->config.input_size;
+    int num_layers = network->config.num_layers;
+    
+    float* shared_w = network->weight_matrix;
+    float* shared_b = network->bias_vector;
+    if (!shared_w || !shared_b) return -1;
+    
+    for (int layer = 0; layer < num_layers; layer++) {
+        CfCCell* cell = network->layers[layer];
+        if (!cell || !cell->weight_matrix || !cell->bias_vector) continue;
+        
+        if (num_layers == 1) {
+            /* 单层: shared_w 有 input*hidden 个元素 */
+            size_t w_count = input_size * hidden_size;
+            memcpy(cell->weight_matrix, shared_w, w_count * sizeof(float));
+            memcpy(cell->bias_vector, shared_b, hidden_size * sizeof(float));
+        } else {
+            /* 多层: shared_w 有 hidden*hidden 个元素，所有层共享 */
+            if (layer == 0) {
+                /* 第0层: shared_w 的前 input_size 列是输入投影 */
+                for (size_t i = 0; i < hidden_size; i++) {
+                    for (size_t j = 0; j < input_size; j++) {
+                        cell->weight_matrix[i * input_size + j] = shared_w[i * hidden_size + j];
+                    }
+                    for (size_t j = input_size; j < hidden_size; j++) {
+                        cell->weight_matrix[i * input_size + j] = 0.0f;
+                    }
+                }
+            } else {
+                /* 中间层: 直接复制 hidden*hidden 矩阵 */
+                size_t hh = hidden_size * hidden_size;
+                memcpy(cell->weight_matrix, shared_w, hh * sizeof(float));
+            }
+            memcpy(cell->bias_vector, shared_b, hidden_size * sizeof(float));
+        }
+    }
     return 0;
 }
 

@@ -31,6 +31,7 @@ typedef struct {
     int num_layers;
     float dropout_rate;
     int use_batch_norm;
+    int use_layer_norm;          /**< P0-001修复: 层归一化开关，默认启用，消除内部协变量偏移 */
     int ode_solver_type;
 } CfCNetworkConfig;
 
@@ -42,6 +43,24 @@ int cfc_forward(CfCNetwork* network, const float* input,
                 float* hidden_state, float* cell_state, float* output);
 int cfc_backward(CfCNetwork* network, const float* error, 
                  float* gradient, float learning_rate);
+
+/**
+ * @brief CfC网络反向传播（扩展版——支持批量训练梯度累积模式）
+ * 
+ * P0-002修复: skip_cell_update=1时跳过Step3的cell参数直接更新，
+ * 仅将梯度累积到cell内部缓冲区。调用方需在批量结束后调用
+ * cfc_apply_cell_gradients() 统一下发参数更新。
+ *
+ * @param network CfC网络句柄
+ * @param error 误差向量 [output_size]
+ * @param gradient 输入梯度输出缓冲区 [input_size]
+ * @param learning_rate 学习率
+ * @param skip_cell_update 0=单样本直接更新, 1=仅累积梯度不更新cell参数
+ * @return 0成功，负值失败
+ */
+int cfc_backward_ex(CfCNetwork* network, const float* error,
+                    float* gradient, float learning_rate, int skip_cell_update);
+
 int cfc_accumulate_gradients(CfCNetwork* network, const float* error, 
                             float* gradient,
                             float* weight_gradients, float* bias_gradients);
@@ -54,6 +73,50 @@ int cfc_get_stats(const CfCNetwork* network, float* avg_activation,
                   float* max_activation, float* gradient_norm);
 int cfc_get_weight_matrix(CfCNetwork* network, float** weight_matrix, size_t* weight_count);
 int cfc_get_bias_vector(CfCNetwork* network, float** bias_vector, size_t* bias_count);
+
+/**
+ * @brief 应用各层CfC单元的cell级参数梯度（门控权重、门控偏置、时间常数）
+ * 
+ * FIX-011: cfc_accumulate_gradients 只处理共享权重/偏置梯度到外部缓冲区，
+ * cell级参数（W_gx/W_gh/W_ah/gate_bias/time_constants）的梯度仅存储在各cell内部。
+ * 此函数将这些cell级梯度应用到对应参数上。
+ *
+ * @param network CfC网络
+ * @param learning_rate 学习率（用于门控权重/偏置更新）
+ * @return 0成功，-1失败
+ */
+int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate);
+
+/**
+ * @brief 应用输出投影矩阵(W_out+b_out)梯度
+ * 
+ * FIX-015: W_out 参数不在共享权重块(param_block)中，而是在grad_block尾部。
+ * 外部优化器(lnn_get_parameters→weight_matrix)无法触及W_out。
+ * 此函数在批量训练结束时将累积的W_out梯度应用至W_out参数。
+ *
+ * @param network CfC网络
+ * @param learning_rate 学习率
+ * @return 0成功，-1失败
+ */
+int cfc_apply_out_proj_gradients(CfCNetwork* network, float learning_rate);
+
+/**
+ * @brief P0-002深度修复: 清零所有cell级梯度缓冲区
+ * 在batch开始/单样本反向传播前调用，确保+=累积从零开始。
+ */
+void cfc_zero_cell_gradients(CfCNetwork* network);
+
+/**
+ * @brief 将共享参数块同步到各层CfC单元的活跃权重
+ * 
+ * FIX-017: cell->weight_matrix/bias_vector 是 cfc_forward 使用的活跃权重，
+ * 但 optimizer_update 更新的是共享 param_block（cfc_network->weight_matrix）。
+ * 此函数在优化器更新后将共享块参数复制到各层的活跃 cell 权重中。
+ *
+ * @param network CfC网络
+ * @return 0成功，-1失败
+ */
+int cfc_sync_shared_to_cells(CfCNetwork* network);
 
 /* ============================================================================
  * 长时连续动态系统求解器
@@ -281,6 +344,9 @@ struct CfCNetwork {
     float current_avg_activation;
     float current_max_activation;
     float current_gradient_norm;
+    /* P0-001: 每层级联层归一化，消除深层网络的内部协变量偏移 */
+    void** layer_norms;           /**< LayerNorm* 数组 [num_layers]，每层一个LN */
+    float* ln_temp_buffer;        /**< LN前向临時缓冲区 (max_layer_size) */
 };
 #endif
 

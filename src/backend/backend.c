@@ -464,30 +464,34 @@ static char* get_detailed_system_status(const BackendServer* server);
  * @return int 成功返回0，失败返回-1
  */
 static int parse_json_string(const char* json, const char* key, char* value, size_t max_length) {
-    // 参数检查
+    /* ZSFABC-F008: 添加详细错误诊断信息 */
     if (!json || !key || !value || max_length == 0) {
+        log_debug("[JSON解析] 参数无效: json=%p key=%p value=%p max_len=%zu",
+                 (const void*)json, (const void*)key, (void*)value, max_length);
         return -1;
     }
     
-    // 构建搜索模式 "key":"value"
     char pattern[128];
     snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
     
     const char* start = strstr(json, pattern);
     if (!start) {
-        return -1;
+        /* key不存在于JSON中 */
+        value[0] = '\0';
+        return -2;
     }
     
-    start += strlen(pattern); // 移动到引号之后
+    start += strlen(pattern);
     const char* end = start;
     
-    // 查找结束引号
     while (*end != '\0' && *end != '"') {
         end++;
     }
     
     if (*end != '"') {
-        return -1;
+        log_debug("[JSON解析] 键'%s'的值无闭合引号", key);
+        value[0] = '\0';
+        return -3;
     }
     
     // 计算长度并确保不超过缓冲区大小
@@ -1952,6 +1956,276 @@ static void* ws_push_thread_func(void* arg) {
     return NULL;
 }
 
+/* ============================================================================
+ * ZSFABC-B005: 线程池请求任务上下文与异步工作函数
+ * 将HTTP请求打包派发到线程池工作线程处理，实现真正高并发。
+ * thread_model=1时启用，主线程仅做accept和分发。
+ * ============================================================================ */
+typedef struct {
+    BackendServer* server;
+    SocketHandle client_socket;
+    char client_ip[64];
+    char method[16];
+    char path[1024];
+    char buffer[4096];
+    int bytes_received;
+    size_t content_length;
+    int content_too_large;
+    char* request_body;
+    char* request_body_copy;
+    char auth_header[256];
+} ThreadPoolRequestCtx;
+
+static void worker_process_api_request(void* arg) {
+    ThreadPoolRequestCtx* ctx = (ThreadPoolRequestCtx*)arg;
+    if (!ctx) return;
+    
+    BackendServer* server = ctx->server;
+    SocketHandle client_socket = ctx->client_socket;
+    int bytes_received = ctx->bytes_received;
+    char* buffer = ctx->buffer;
+    char* method = ctx->method;
+    char* path = ctx->path;
+    const char* client_ip = ctx->client_ip;
+    
+    size_t content_length = ctx->content_length;
+    int content_too_large = ctx->content_too_large;
+    char* request_body = ctx->request_body;
+    char* request_body_copy = ctx->request_body_copy;
+    
+    /* HTTP头部解析 */
+    char* headers_start = NULL;
+    {
+        char* req_line_end = buffer;
+        while (req_line_end < buffer + bytes_received && 
+               !(req_line_end[0] == '\r' && req_line_end[1] == '\n')) req_line_end++;
+        if (req_line_end + 2 < buffer + bytes_received) headers_start = req_line_end + 2;
+    }
+    
+    ctx->auth_header[0] = '\0';
+    
+    if (headers_start && headers_start < buffer + bytes_received) {
+        char* current = headers_start;
+        char* line_end;
+        while (current + 3 < buffer + bytes_received && 
+               !(current[0] == '\r' && current[1] == '\n' && current[2] == '\r' && current[3] == '\n')) {
+            line_end = current;
+            while (line_end + 1 < buffer + bytes_received && !(line_end[0] == '\r' && line_end[1] == '\n')) line_end++;
+            if (line_end - current >= 15 && (strncmp(current, "Content-Length:", 15) == 0 ||
+                 strncmp(current, "content-length:", 15) == 0)) {
+                char* value_start = current + 15;
+                while (value_start < line_end && (*value_start == ' ' || *value_start == ':')) value_start++;
+                if (value_start < line_end) { content_length = (size_t)atoi(value_start); if (content_length > 10485760) content_too_large = 1; }
+            }
+            if (line_end - current >= 14 && strncmp(current, "Authorization:", 14) == 0) {
+                char* value_start = current + 14;
+                while (value_start < line_end && (*value_start == ' ' || *value_start == ':')) value_start++;
+                size_t auth_len = (size_t)(line_end - value_start);
+                if (auth_len > 0 && auth_len < sizeof(ctx->auth_header)) {
+                    memcpy(ctx->auth_header, value_start, auth_len);
+                    ctx->auth_header[auth_len] = '\0';
+                }
+            }
+            if (line_end + 1 < buffer + bytes_received && line_end[0] == '\r' && line_end[1] == '\n') current = line_end + 2;
+            else break;
+        }
+        
+        /* 读取请求体 */
+        if (content_length > 0 && content_length <= 10485760) {
+            char* body_start = NULL;
+            for (size_t s = 0; s + 4 <= (size_t)bytes_received; s++) {
+                if (buffer[s]=='\r' && buffer[s+1]=='\n' && buffer[s+2]=='\r' && buffer[s+3]=='\n') { body_start = buffer + s + 4; break; }
+            }
+            if (!body_start) { for (size_t s = 0; s + 2 <= (size_t)bytes_received; s++) { if (buffer[s]=='\n' && buffer[s+1]=='\n') { body_start = buffer + s + 2; break; } } }
+            if (body_start && body_start + content_length <= buffer + bytes_received) {
+                request_body_copy = (char*)safe_malloc(content_length + 1);
+                if (request_body_copy) { memcpy(request_body_copy, body_start, content_length); request_body_copy[content_length] = '\0'; request_body = request_body_copy; }
+            }
+            if (!request_body) {
+                char* full_body = (char*)safe_malloc(content_length + 1);
+                if (full_body) {
+                    size_t got = 0;
+                    if (body_start && body_start < buffer + bytes_received) {
+                        got = (size_t)(buffer + bytes_received - body_start);
+                        if (got > content_length) got = content_length;
+                        memcpy(full_body, body_start, got);
+                    }
+                    while (got < content_length) { int n = socket_recv(client_socket, full_body + got, (int)(content_length - got)); if (n <= 0) break; got += (size_t)n; }
+                    if (got == content_length) { full_body[content_length] = '\0'; request_body = full_body; request_body_copy = full_body; }
+                    else { safe_free((void**)&full_body); }
+                }
+            }
+        }
+    }
+    
+    if (content_too_large) {
+        const char* err413 = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 45\r\nX-Content-Type-Options: nosniff\r\n\r\n{\"error\":\"请求体超过10MB大小限制\"}";
+        socket_send(client_socket, err413, (int)strlen(err413));
+        socket_close(client_socket);
+        safe_free((void**)&request_body_copy);
+        safe_free((void**)&ctx);
+        return;
+    }
+    
+    /* API路由匹配（精简版，仅匹配主要路由） */
+    {
+        ApiResponse* response = NULL;
+        const char* cors_origin = backend_cors_get_origin();
+        char* handler_path = path;
+        
+        /* ZSFABC: 直接写入路径和认证头部(worker线程中本地上下文已足够) */
+        strncpy(server->request_path, path, sizeof(server->request_path) - 1);
+        server->request_path[sizeof(server->request_path) - 1] = '\0';
+        if (ctx->auth_header[0]) {
+            strncpy(server->current_auth_header, ctx->auth_header, sizeof(server->current_auth_header) - 1);
+            server->current_auth_header[sizeof(server->current_auth_header) - 1] = '\0';
+        } else server->current_auth_header[0] = '\0';
+        
+        ApiRequestType request_type = API_NOT_FOUND;
+        /* 使用简化路由映射：匹配handler_path到ApiRequestType */
+        {
+            const char* p = handler_path;
+            if      (strcmp(p, "/api/status") == 0) request_type = API_GET_STATUS;
+            else if (strcmp(p, "/api/memory") == 0) request_type = API_GET_MEMORY;
+            else if (strcmp(p, "/api/health") == 0) request_type = API_GET_HEALTH;
+            else if (strcmp(p, "/api/stats") == 0) request_type = API_GET_STATS;
+            else if (strcmp(p, "/api/dialogue") == 0) request_type = API_POST_DIALOGUE;
+            else if (strcmp(p, "/api/vision") == 0) request_type = API_POST_VISION;
+            else if (strcmp(p, "/api/audio") == 0) request_type = API_POST_AUDIO;
+            else if (strcmp(p, "/api/text") == 0) request_type = API_POST_TEXT;
+            else if (strcmp(p, "/api/sensor") == 0) request_type = API_POST_SENSOR;
+            else if (strcmp(p, "/api/training") == 0) request_type = API_POST_TRAINING;
+            else if (strcmp(p, "/api/training/start") == 0) request_type = API_POST_TRAINING_START;
+            else if (strcmp(p, "/api/training/status") == 0) request_type = API_GET_TRAINING_STATUS;
+            else if (strcmp(p, "/api/training/pause") == 0) request_type = API_POST_TRAINING_PAUSE;
+            else if (strcmp(p, "/api/training/resume") == 0) request_type = API_POST_TRAINING_RESUME;
+            else if (strcmp(p, "/api/training/stop") == 0) request_type = API_POST_TRAINING_STOP;
+            else if (strcmp(p, "/api/lnn/status") == 0) request_type = API_GET_LNN_STATUS;
+            else if (strcmp(p, "/api/lnn/parameters") == 0) request_type = API_POST_LNN_PARAMETERS;
+            else if (strcmp(p, "/api/lnn/params") == 0) request_type = 233;
+            else if (strcmp(p, "/api/gpu/status") == 0) request_type = API_GET_GPU_STATUS;
+            else if (strcmp(p, "/api/robot/status") == 0) request_type = API_GET_ROBOT_STATUS;
+            else if (strcmp(p, "/api/robot/command") == 0) request_type = API_POST_ROBOT_COMMAND;
+            else if (strcmp(p, "/api/robot/list") == 0) request_type = API_GET_ROBOT_LIST;
+            else if (strcmp(p, "/api/robot/reboot") == 0) request_type = API_POST_ROBOT_REBOOT;
+            else if (strcmp(p, "/api/robot/calibrate") == 0) request_type = API_POST_ROBOT_CALIBRATE;
+            else if (strcmp(p, "/api/robot/parameters") == 0) request_type = API_POST_ROBOT_PARAMETERS;
+            else if (strcmp(p, "/api/robot/sensor") == 0) request_type = API_GET_ROBOT_SENSOR;
+            else if (strcmp(p, "/api/robot/emergency_stop") == 0) request_type = API_POST_ROBOT_EMERGENCY_STOP;
+            else if (strcmp(p, "/api/robot/config/save") == 0) request_type = API_POST_ROBOT_PARAMETERS;
+            else if (strcmp(p, "/api/knowledge") == 0) request_type = (method && strcmp(method, "POST") == 0) ? API_POST_KNOWLEDGE : API_GET_KNOWLEDGE;
+            else if (strcmp(p, "/api/knowledge/add") == 0) request_type = 220;
+            else if (strcmp(p, "/api/knowledge/stats") == 0) request_type = 222;
+            else if (strcmp(p, "/api/knowledge/export") == 0) request_type = 223;
+            else if (strcmp(p, "/api/knowledge/import") == 0) request_type = 223;
+            else if (strcmp(p, "/api/knowledge/save") == 0) request_type = API_POST_KNOWLEDGE;
+            else if (strcmp(p, "/api/knowledge/load") == 0) request_type = API_GET_KNOWLEDGE;
+            else if (strcmp(p, "/api/knowledge/search") == 0) request_type = API_POST_KNOWLEDGE;
+            else if (strncmp(p, "/api/knowledge/entry", 20) == 0) request_type = 221;
+            else if (strcmp(p, "/api/tts/synthesize") == 0) request_type = API_POST_TTS_SYNTHESIZE;
+            else if (strcmp(p, "/api/voice/synthesize") == 0) request_type = API_POST_VOICE_SYNTHESIZE;
+            else if (strcmp(p, "/api/audio/recognize") == 0) request_type = API_POST_AUDIO_RECOGNIZE;
+            else if (strcmp(p, "/api/voice/recognize") == 0) request_type = API_POST_VOICE_RECOGNIZE;
+            else if (strcmp(p, "/api/system/diagnostic") == 0) request_type = API_GET_SYSTEM_DIAGNOSTIC;
+            else if (strcmp(p, "/api/system/export_diagnostic") == 0) request_type = API_GET_SYSTEM_EXPORT_DIAGNOSTIC;
+            else if (strcmp(p, "/api/agi/diagnostic") == 0) request_type = 244;
+            else if (strcmp(p, "/api/agi/diagnostic/export") == 0) request_type = 245;
+            else if (strcmp(p, "/api/safety/status") == 0) request_type = API_GET_SAFETY_STATUS;
+            else if (strcmp(p, "/api/safety/emergency_stop") == 0) request_type = API_POST_SAFETY_EMERGENCY_STOP;
+            else if (strcmp(p, "/api/hardware/scan") == 0) request_type = API_POST_HARDWARE_SCAN;
+            else if (strcmp(p, "/api/hardware/info") == 0) request_type = API_GET_HARDWARE_INFO;
+            else if (strcmp(p, "/api/hardware/resources") == 0) request_type = API_GET_HARDWARE_RESOURCES;
+            else if (strcmp(p, "/api/devices/list") == 0) request_type = API_POST_DEVICES_LIST;
+            else if (strcmp(p, "/api/devices/status") == 0) request_type = API_POST_DEVICES_STATUS;
+            else if (strcmp(p, "/api/devices/register") == 0) request_type = API_POST_DEVICES_REGISTER;
+            else if (strcmp(p, "/api/camera/devices") == 0) request_type = API_GET_CAMERA_DEVICES;
+            else if (strcmp(p, "/api/camera/switch") == 0) request_type = API_POST_CAMERA_CAPTURE_START;
+            else if (strcmp(p, "/api/audio/devices") == 0) request_type = API_GET_AUDIO_DEVICES;
+            else if (strcmp(p, "/api/video/quality") == 0) request_type = API_POST_VIDEO_CAPTURE;
+            else if (strcmp(p, "/api/skills") == 0) request_type = API_GET_SKILLS;
+            else if (strcmp(p, "/api/multimodal/status") == 0) request_type = API_GET_MULTIMODAL_STATUS;
+            else if (strcmp(p, "/api/multimodal/teach") == 0) request_type = API_POST_MULTIMODAL_TEACH;
+            else if (strcmp(p, "/api/multimodal/learn") == 0) request_type = API_POST_MULTIMODAL_LEARN;
+            else if (strcmp(p, "/api/multimodal/config") == 0) request_type = API_POST_MULTIMODAL_CONFIG;
+            else if (strcmp(p, "/api/multimodal/test") == 0) request_type = 241;
+            else if (strcmp(p, "/api/agi/cognition/state") == 0) request_type = API_GET_AGI_COGNITION_STATE;
+            else if (strcmp(p, "/api/agi/think") == 0) request_type = API_POST_AGI_THINK;
+            else if (strcmp(p, "/api/agi/decide") == 0) request_type = API_POST_AGI_DECIDE;
+            else if (strcmp(p, "/api/agi/learn") == 0) request_type = API_POST_AGI_LEARN;
+            else if (strcmp(p, "/api/agi/plan") == 0) request_type = API_POST_AGI_PLAN;
+            else if (strcmp(p, "/api/agi/memory") == 0) request_type = API_POST_AGI_MEMORY;
+            else if (strcmp(p, "/api/agi/execute") == 0) request_type = API_POST_AGI_EXECUTE;
+            else if (strcmp(p, "/api/agi/tasks") == 0) request_type = 243;
+            else if (strcmp(p, "/api/task/create") == 0) request_type = 243;
+            else if (strcmp(p, "/api/programming/analyze") == 0) request_type = API_POST_PROGRAMMING_ANALYZE;
+            else if (strcmp(p, "/api/programming/generate") == 0) request_type = API_POST_PROGRAMMING_GENERATE;
+            else if (strcmp(p, "/api/programming/execute") == 0) request_type = API_POST_PROGRAMMING_EXECUTE;
+            else if (strcmp(p, "/api/programming/optimize") == 0) request_type = API_POST_PROGRAMMING_OPTIMIZE;
+            else if (strcmp(p, "/api/programming/compile") == 0) request_type = API_POST_PROGRAMMING_COMPILE;
+            else if (strcmp(p, "/api/programming/status") == 0) request_type = API_GET_PROGRAMMING_STATUS;
+            else if (strcmp(p, "/api/auto-learn/scan") == 0) request_type = API_POST_AUTO_LEARN_SCAN;
+            else if (strcmp(p, "/api/auto-learn/stats") == 0) request_type = API_GET_AUTO_LEARN_STATS;
+            else if (strcmp(p, "/api/auto-learn/toggle") == 0) request_type = API_POST_AUTO_LEARN_TOGGLE;
+            else if (strcmp(p, "/api/learning") == 0) request_type = API_GET_LEARNING;
+            else if (strcmp(p, "/api/reasoning") == 0) request_type = API_GET_REASONING;
+            else if (strcmp(p, "/api/reasoning/start") == 0) request_type = 254;
+            else if (strcmp(p, "/api/reasoning/stop_all") == 0) request_type = 255;
+            else if (strcmp(p, "/api/reasoning/pause") == 0) request_type = 256;
+            else if (strcmp(p, "/api/reasoning/test") == 0) request_type = API_GET_REASONING;
+            else if (strcmp(p, "/api/evolution") == 0) request_type = API_POST_EVOLUTION;
+            else if (strcmp(p, "/api/evolution/pareto") == 0) request_type = API_POST_EVOLUTION_PARETO;
+            else if (strcmp(p, "/api/simulation/start") == 0) request_type = API_POST_SIMULATION_START;
+            else if (strcmp(p, "/api/simulation/stop") == 0) request_type = API_POST_SIMULATION_STOP;
+            else if (strcmp(p, "/api/simulation/status") == 0) request_type = API_GET_SIMULATION_STATUS;
+            else if (strcmp(p, "/api/fleet/status") == 0) request_type = 239;
+            else if (strcmp(p, "/api/dialogue/multimodal") == 0) request_type = API_POST_DIALOGUE_MULTIMODAL;
+            else if (strcmp(p, "/api/dialogue/history") == 0) request_type = API_GET_DIALOGUE_HISTORY;
+            else if (strcmp(p, "/api/ros/status") == 0) request_type = API_GET_ROS_STATUS;
+            else if (strcmp(p, "/api/ros/configure") == 0) request_type = API_POST_ROS_CONFIGURE;
+            else if (strcmp(p, "/api/ros/nodes") == 0) request_type = API_GET_ROS_NODES;
+            else if (strcmp(p, "/api/ros/topics") == 0) request_type = API_GET_ROS_TOPICS;
+            else if (strcmp(p, "/api/gazebo/control") == 0) request_type = API_POST_GAZEBO_CONTROL;
+            else if (strcmp(p, "/api/robot/training") == 0) request_type = API_POST_ROBOT_TRAINING;
+            else if (strcmp(p, "/api/teach/look_and_learn") == 0) request_type = API_POST_TEACH_LOOK_AND_LEARN;
+            else if (strcmp(p, "/api/teach/say_and_associate") == 0) request_type = API_POST_TEACH_SAY_AND_ASSOCIATE;
+            else if (strcmp(p, "/api/data-collection/status") == 0) request_type = API_GET_SENSOR_PIPELINE_STATUS;
+        }
+        if (request_type != API_NOT_FOUND) {
+            response = backend_handle_request(server, request_type, request_body, content_length, client_ip);
+        }
+        
+        if (!response) {
+            /* 未匹配路由或处理失败：404 */
+            char nf[256];
+            int nfl = snprintf(nf, sizeof(nf),
+                "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 18\r\nConnection: close\r\nAccess-Control-Allow-Origin: %s\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n404 路由不存在", cors_origin);
+            socket_send(client_socket, nf, nfl);
+        } else {
+            /* 构建并发送HTTP响应 */
+            if (!response->data || response->data_length == 0) {
+                char* fb = (char*)safe_malloc(128);
+                if (fb) { snprintf(fb, 128, "{\"error\":\"empty_response\"}"); if (response->data) safe_free((void**)&response->data); response->data = fb; response->content_type = "application/json"; response->status_code = 500; }
+            }
+            if (response->data) response->data_length = strlen(response->data);
+            char header[512];
+            int hlen = snprintf(header, sizeof(header),
+                "HTTP/1.1 %d OK\r\nContent-Type: %s\r\nConnection: close\r\nAccess-Control-Allow-Origin: %s\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n",
+                response->status_code, response->content_type, cors_origin);
+            if (hlen > 0 && hlen < (int)sizeof(header)) {
+                socket_send(client_socket, header, hlen);
+                if (response->data && response->data_length > 0) socket_send(client_socket, response->data, (int)response->data_length);
+            }
+            backend_response_free(response);
+        }
+        
+        safe_free((void**)&request_body_copy);
+        socket_close(client_socket);
+        if (server->connection_count > 0) server->connection_count--;
+    }
+    
+    safe_free((void**)&ctx);
+}
+
 /**
  * @brief 服务器线程函数（跨平台）
  *
@@ -2146,13 +2420,36 @@ static void* server_thread_func(void* param) {
             if (method && path && valid_method) {
                 /* ===== 静态文件服务: GET / → frontend/index.html ===== */
                 if (strcmp(method, "GET") == 0 && strncmp(path, "/api/", 5) != 0) {
-                    const char* frontend_dir = "frontend";
+                    static const char* frontend_dirs[] = {
+                        "../../frontend",          /* build/bin/Release → 项目根 */
+                        "../frontend",             /* build/bin → 项目根 */
+                        "frontend"                 /* 当前目录 */
+                    };
+                    static char cached_frontend_path[256] = {0};
+                    if (cached_frontend_path[0] == '\0') {
+                        for (int di = 0; di < 3; di++) {
+                            char test_index[512];
+                            snprintf(test_index, sizeof(test_index), "%s/index.html", frontend_dirs[di]);
+                            FILE* tf = fopen(test_index, "r");
+                            if (tf) { 
+                                fclose(tf); 
+                                strncpy(cached_frontend_path, frontend_dirs[di], sizeof(cached_frontend_path)-1);
+                                log_info("[静态服务] 前端目录: %s", cached_frontend_path);
+                                break;
+                            }
+                        }
+                        if (cached_frontend_path[0] == '\0') {
+                            strcpy(cached_frontend_path, "frontend");
+                            log_warning("[静态服务] 未找到前端目录，使用默认: %s", cached_frontend_path);
+                        }
+                    }
+                    const char* best_dir = cached_frontend_path;
                     const char* file_path = path;
                     char full_path[512];
                     char mime_type[64];
 
                     if (strcmp(path, "/") == 0) {
-                        snprintf(full_path, sizeof(full_path), "%s/index.html", frontend_dir);
+                        snprintf(full_path, sizeof(full_path), "%s/index.html", best_dir);
                     } else {
                         /* 剥离查询参数 (如 ?v=2) 再构造文件路径 */
                         char clean_path[512];
@@ -2165,7 +2462,7 @@ static void* server_thread_func(void* param) {
                             if (*p == '/' && *(p+1) == '.' ) { file_path = NULL; break; }
                         }
                         if (file_path) {
-                            snprintf(full_path, sizeof(full_path), "%s%s", frontend_dir, clean_path);
+                            snprintf(full_path, sizeof(full_path), "%s%s", best_dir, clean_path);
                         }
                     }
 
@@ -2214,6 +2511,40 @@ static void* server_thread_func(void* param) {
                                 if (fp) fclose(fp);
                             }
                         }
+                    }
+                }
+
+                /* ===== ZSFABC-B005: 线程池并发派发 =====
+                 * thread_model=1 且线程池可用时，将API请求提交到线程池异步处理。
+                 * 主线程仅做accept和分发，不阻塞等待请求处理完成。
+                 * thread_model=0 或线程池不可用时回退到同步处理。 */
+                if (server->config.thread_model == 1 && server->thread_pool) {
+                    ThreadPoolRequestCtx* tp_ctx = (ThreadPoolRequestCtx*)safe_malloc(sizeof(ThreadPoolRequestCtx));
+                    if (tp_ctx) {
+                        memset(tp_ctx, 0, sizeof(ThreadPoolRequestCtx));
+                        tp_ctx->server = server;
+                        tp_ctx->client_socket = client_socket;
+                        strncpy(tp_ctx->client_ip, client_ip, sizeof(tp_ctx->client_ip) - 1);
+                        tp_ctx->client_ip[sizeof(tp_ctx->client_ip) - 1] = '\0';
+                        strncpy(tp_ctx->method, method, sizeof(tp_ctx->method) - 1);
+                        tp_ctx->method[sizeof(tp_ctx->method) - 1] = '\0';
+                        strncpy(tp_ctx->path, path, sizeof(tp_ctx->path) - 1);
+                        tp_ctx->path[sizeof(tp_ctx->path) - 1] = '\0';
+                        tp_ctx->bytes_received = bytes_received;
+                        memcpy(tp_ctx->buffer, buffer, (size_t)bytes_received);
+                        tp_ctx->content_length = 0;
+                        tp_ctx->content_too_large = 0;
+                        tp_ctx->request_body = NULL;
+                        tp_ctx->request_body_copy = NULL;
+                        tp_ctx->auth_header[0] = '\0';
+                        
+                        int submit_ret = thread_pool_submit(server->thread_pool, worker_process_api_request, tp_ctx, 0);
+                        if (submit_ret == 0) {
+                            /* 工作线程接管client_socket，主线程继续accept */
+                            continue;
+                        }
+                        /* 线程池已满：回退到同步处理 */
+                        safe_free((void**)&tp_ctx);
                     }
                 }
 
@@ -7391,23 +7722,45 @@ static int handle_api_post_tts_synthesize(BackendServer* server,
     tts_engine_set_pitch(server->tts_engine, pitch);
     tts_engine_set_volume(server->tts_engine, volume);
             
-    /* ZSF-022修复: TTS引擎安全包裹 — 防止内核崩溃
-     * tts_synthesize内部存在深层稳定性问题，
-     * 暂时返回安全JSON，防止服务器进程崩溃 */
+    /* ZSFABC: SEH保护 + 引擎完整性预检 双层保护TTS合成 */
     TTSAudio* audio = NULL;
-    /* ZSF-022: tts_synthesize内核崩溃, 跳过合成调用 */
+    {
+        if (!tts_engine_is_healthy(server->tts_engine)) {
+            json_data = (char*)safe_malloc(512);
+            if (json_data) {
+                snprintf(json_data, 512,
+                    "{\"tts\":{\"status\":\"error\",\"text_received\":\"%s\","
+                    "\"message\":\"TTS引擎未就绪,返回503\",\"sample_rate\":22050,\"num_samples\":0}}",
+                    tts_text);
+                response->data = json_data;
+                response->data_length = strlen(json_data);
+                response->status_code = 503;
+            }
+            return 0;
+        }
+    }
+#ifdef _WIN32
+    __try {
+        audio = tts_synthesize(server->tts_engine, tts_text);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        audio = NULL;
+        log_warning("[TTS] tts_synthesize 访问违例被SEH捕获，返回错误响应");
+    }
+#else
+    audio = tts_synthesize(server->tts_engine, tts_text);
+#endif
     if (!audio || !audio->samples || audio->num_samples <= 0) {
         tts_audio_free(audio);
         json_data = (char*)safe_malloc(512);
         if (json_data) {
             snprintf(json_data, 512,
-                "{\"tts\":{\"status\":\"ok\",\"text_received\":\"%s\","
-                "\"message\":\"TTS引擎已就绪，语音合成正在后台处理\","
+                "{\"tts\":{\"status\":\"error\",\"text_received\":\"%s\","
+                "\"message\":\"TTS合成失败，请检查语音合成引擎内部状态\","
                 "\"sample_rate\":22050,\"num_samples\":0}}",
                 tts_text);
             response->data = json_data;
             response->data_length = strlen(json_data);
-            response->status_code = 200;
+            response->status_code = 500;
         }
         return 0;
     }
@@ -8920,7 +9273,13 @@ static int handle_api_post_device_command_v1(BackendServer* server,
         }
     } else if (strcmp(device_type, "speaker") == 0 || strcmp(device_type, "扬声器") == 0) {
         if (server->tts_engine) {
-            TTSAudio* audio = tts_synthesize(server->tts_engine, command);
+            TTSAudio* audio = NULL;
+#ifdef _WIN32
+            __try { audio = tts_synthesize(server->tts_engine, command); }
+            __except(EXCEPTION_EXECUTE_HANDLER) { audio = NULL; }
+#else
+            audio = tts_synthesize(server->tts_engine, command);
+#endif
             if (audio) {
                 cmd_success = 1;
                 snprintf(cmd_result, sizeof(cmd_result), "扬声器文本已通过TTS合成语音(采样数:%d)", audio->num_samples);
@@ -13621,6 +13980,8 @@ static int handle_api_post_voice_synthesize(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
+
+    /* ZSFABC-B001修复: 同步TTS修复 —— 连接到真实TTS引擎 */
     if (!server->multimodal_manager) {
         json_data = (char*)safe_malloc(256);
         if (json_data) {
@@ -13631,13 +13992,76 @@ static int handle_api_post_voice_synthesize(BackendServer* server,
         }
         return 0;
     }
-    json_data = (char*)safe_malloc(256);
+
+    if (!server->tts_engine) {
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256, "{\"audio\":null,\"error\":\"TTS引擎未初始化\",\"status\":\"unavailable\"}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 503;
+        }
+        return 0;
+    }
+
+    char tts_text[4096] = {0};
+    if (request_data && request_length > 0) {
+        parse_json_string(request_data, "text", tts_text, sizeof(tts_text));
+    }
+    if (strlen(tts_text) == 0) {
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256, "{\"audio\":null,\"error\":\"文本内容为空\",\"status\":\"error\"}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 400;
+        }
+        return 0;
+    }
+
+    /* SEH保护TTS合成调用 —— 访问违例不会导致服务器崩溃 */
+    TTSAudio* audio = NULL;
+#ifdef _WIN32
+    __try {
+        audio = tts_synthesize(server->tts_engine, tts_text);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        audio = NULL;
+    }
+#else
+    audio = tts_synthesize(server->tts_engine, tts_text);
+#endif
+    if (!audio || !audio->samples || audio->num_samples <= 0) {
+        tts_audio_free(audio);
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                "{\"audio\":null,\"error\":\"TTS合成失败\",\"status\":\"error\"}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 500;
+        }
+        return 0;
+    }
+
+    /* 构建返回JSON，包含采样率、采样数和PCM数据 */
+    size_t hex_len = (size_t)audio->num_samples * 4 + 512;
+    json_data = (char*)safe_malloc(hex_len);
     if (json_data) {
-        snprintf(json_data, 256, "{\"audio\":\"base64_wav_data_would_be_here\",\"status\":\"ok\"}");
+        int offset = snprintf(json_data, hex_len,
+            "{\"audio\":{\"sample_rate\":%d,\"num_samples\":%d,\"pcm_hex\":\"",
+            audio->sample_rate, audio->num_samples);
+        int max_samples = audio->num_samples < 2000 ? audio->num_samples : 2000;
+        for (int i = 0; i < max_samples; i++) {
+            short pcm = (short)(audio->samples[i] * (audio->samples[i] >= 0 ? 32767.0f : 32768.0f));
+            offset += snprintf(json_data + offset, hex_len - (size_t)offset,
+                "%02x%02x", (unsigned char)(pcm & 0xFF), (unsigned char)((pcm >> 8) & 0xFF));
+        }
+        snprintf(json_data + offset, hex_len - (size_t)offset, "\",\"status\":\"ok\"}}");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
     }
+    tts_audio_free(audio);
     return 0;
 }
 static int handle_api_post_devices_mode(BackendServer* server,

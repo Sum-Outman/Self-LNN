@@ -14,6 +14,7 @@ add_library(selflnn_core
     quaternion_lnn.c
     quaternion_conv.c
     quaternion_batchnorm.c
+    lnn_layer_norm.c
     ../math/matrix_ops.c
 
     quaternion_optimizer.c
@@ -87,6 +88,7 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_lnn.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_conv.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_batchnorm.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/lnn_layer_norm.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_cfc.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_enhanced.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_optimizer.h

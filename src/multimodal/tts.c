@@ -131,6 +131,18 @@ struct TTSEngine {
     int token_capacity;
 };
 
+/* ZSFABC: TTS引擎完整性检查 —— 供后端调用前预检，避免深层崩溃 */
+int tts_engine_is_healthy(TTSEngine* engine) {
+    if (!engine) return 0;
+    if (!engine->initialized) return 0;
+    if (!engine->state_initialized) return 0;
+    if (!engine->token_buffer || engine->token_capacity <= 0) return 0;
+    if (!engine->hidden_state) return 0;
+    if (!engine->embedding_table || !engine->embedding_initialized) return 0;
+    if (!engine->waveform_projection_w) return 0;
+    return 1;
+}
+
 /* =============================================================== *
  * 辅助函数：UTF-8处理                                              *
  * =============================================================== */
@@ -521,12 +533,17 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
             glottal_pulse = 0.0f;
         }
 
-        /* 5阶共振峰滤波器级联（模拟声道传输函数） */
-        /* CfC隐藏状态投影到共振峰频率和带宽  */
+        /* ZSFABC-F006修复: 5阶共振峰滤波器级联
+         * 使用基于声道的标准共振峰频率范围替代均匀间隔。
+         * F1=250-900Hz(开口度), F2=850-2400Hz(舌位前后), 
+         * F3=1700-3400Hz, F4=3200-4000Hz, F5=4000-4900Hz
+         * CfC隐藏状态投影调制基准共振峰频率 */
         float formant_freq[5], formant_bw[5];
+        float base_freq[5] = {600.0f, 1500.0f, 2500.0f, 3600.0f, 4400.0f};
+        float base_bw[5] = {60.0f, 90.0f, 130.0f, 160.0f, 200.0f};
         for (int f = 0; f < 5; f++) {
-            formant_freq[f] = 200.0f + 2800.0f / (5.0f) * (float)f;
-            formant_bw[f] = 50.0f + 150.0f / (5.0f) * (float)f;
+            formant_freq[f] = base_freq[f];
+            formant_bw[f] = base_bw[f];
             float proj_sum = 0.0f;
             for (int h = 0; h < hs && h < 64; h++) {
                 proj_sum += engine->hidden_state[h] * (engine->embedding_table[((h+f) % ed)] * 0.1f);
@@ -698,6 +715,19 @@ TTSEngine* tts_engine_create(const TTSConfig* config) {
     engine->token_buffer = (int*)safe_malloc(
         (size_t)engine->token_capacity * sizeof(int));
     if (!engine->token_buffer) {
+        safe_free((void**)&engine->embedding_table);
+        if (engine->pinyin_table != (TTS_PinyinEntry*)(uintptr_t)1)
+            safe_free((void**)&engine->pinyin_table);
+        safe_free((void**)&engine);
+        return NULL;
+    }
+
+    /* ZSFABC: 创建时立即初始化状态缓冲区和投影权重。
+     * 原先采用惰性初始化(仅首次tts_synthesize调用时分配)，
+     * 导致健康检查(tts_engine_is_healthy)因state_initialized=0而拦截请求。
+     * 现在创建即完整，tts_synthesize内惰性检查变为恒真跳过。 */
+    if (init_tts_buffers(engine) != 0) {
+        safe_free((void**)&engine->token_buffer);
         safe_free((void**)&engine->embedding_table);
         if (engine->pinyin_table != (TTS_PinyinEntry*)(uintptr_t)1)
             safe_free((void**)&engine->pinyin_table);

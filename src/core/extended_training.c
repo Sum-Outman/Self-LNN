@@ -5,6 +5,7 @@
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/parameter_shard.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/core/loss.h"          /* FIX-009: loss_gradient_ex 支持 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
@@ -303,17 +304,19 @@ static int _lnn_backward_with_checkpoint_internal(LNN* network, const float* tar
         return SELFLNN_ERROR_NOT_INITIALIZED;
     }
     size_t output_size = network->config.output_size;
-    for (size_t i = 0; i < output_size; i++) {
-        network->error_buffer[i] = target[i] - network->output_buffer[i];
-    }
-    float mse_loss = 0.0f;
-    for (size_t i = 0; i < output_size; i++) {
-        float error = network->error_buffer[i];
-        mse_loss += error * error;
-    }
-    mse_loss /= output_size;
-    network->current_loss = mse_loss;
-    *loss = mse_loss;
+
+    /* FIX-009: 使用 loss_gradient_ex 计算正确梯度，替代硬编码MSE。
+     * 与 _lnn_backward_internal 保持一致，确保检查点模式下的梯度方向与配置损失函数匹配。 */
+    int loss_type = network->config.loss_function;
+    if (loss_type < 0 || loss_type > 11) loss_type = (int)LOSS_MSE;
+    loss_gradient_ex(network->output_buffer, target, (int)output_size,
+                     network->error_buffer, (LossType)loss_type, NULL);
+
+    float computed_loss = loss_compute_ex(network->output_buffer, target, (int)output_size,
+                                          (LossType)loss_type, NULL);
+    if (isnan(computed_loss) || isinf(computed_loss)) computed_loss = 1e6f;
+    network->current_loss = computed_loss;
+    *loss = computed_loss;
     int ret = cfc_backward(network->cfc_network,
                            network->error_buffer,
                            network->gradient_buffer,
@@ -820,22 +823,19 @@ static int _lnn_model_parallel_backward_internal(LNN* network, const float* targ
         return SELFLNN_ERROR_NOT_INITIALIZED;
     }
 
-    /* F-003修复：计算本地误差 */
+    /* FIX-009: 使用 loss_gradient_ex 计算正确梯度，替代硬编码MSE。
+     * 与 _lnn_backward_internal 保持一致，确保模型并行模式下的梯度方向与配置损失函数匹配。 */
     size_t output_size = network->config.output_size;
-    for (size_t i = 0; i < output_size; i++) {
-        if (i < network->config.output_size) {
-            network->error_buffer[i] = target[i] - network->output_buffer[i];
-        }
-    }
+    int loss_type = network->config.loss_function;
+    if (loss_type < 0 || loss_type > 11) loss_type = (int)LOSS_MSE;
+    loss_gradient_ex(network->output_buffer, target, (int)output_size,
+                     network->error_buffer, (LossType)loss_type, NULL);
 
-    float mse_loss = 0.0f;
-    for (size_t i = 0; i < output_size; i++) {
-        float err = network->error_buffer[i];
-        mse_loss += err * err;
-    }
-    mse_loss /= output_size;
-    network->current_loss = mse_loss;
-    *loss = mse_loss;
+    float computed_loss = loss_compute_ex(network->output_buffer, target, (int)output_size,
+                                          (LossType)loss_type, NULL);
+    if (isnan(computed_loss) || isinf(computed_loss)) computed_loss = 1e6f;
+    network->current_loss = computed_loss;
+    *loss = computed_loss;
 
     /* 本地反向传播计算梯度 */
     int ret = cfc_backward(network->cfc_network,

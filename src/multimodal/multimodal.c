@@ -393,20 +393,68 @@ int multimodal_process_audio(MultimodalProcessor* processor, const AudioData* au
         }
     }
 
+    /* ZSFABC-F004修复: 完整MFCC实现，含梅尔滤波器组+DCT
+     * 替代之前的分段log能量近似 */
     if (feature_idx < max_features && num_samples >= 512) {
         int mfcc_coeffs = 12;
         if (mfcc_coeffs > (int)(max_features - feature_idx))
             mfcc_coeffs = (int)(max_features - feature_idx);
-        for (int m = 0; m < mfcc_coeffs && feature_idx < max_features; m++) {
-            float energy = 0.0f;
-            int start = (int)((size_t)m * 100 % total_samples);
-            int end = start + 100;
-            if (end > (int)total_samples) end = (int)total_samples;
-            int cnt = 0;
-            for (int i = start; i < end && i < (int)total_samples; i++, cnt++)
-                energy += data[i] * data[i];
-            if (cnt > 0) energy /= (float)cnt;
-            features[feature_idx++] = (energy > 1e-6f) ? log10f(energy) : 0.0f;
+
+        /* 1. 计算功率谱 (取前一半FFT) */
+        int fft_n = 512;
+        if ((int)num_samples < fft_n) fft_n = (int)num_samples;
+        float power_spectrum[256];
+        int num_bins = fft_n / 2;
+        
+        /* 简化的FFT功率谱估计 (使用自相关+余弦变换) */
+        for (int k = 0; k < num_bins && k < 256; k++) {
+            float real = 0.0f, imag = 0.0f;
+            for (int n = 0; n < fft_n; n++) {
+                float angle = -2.0f * 3.14159265358979f * (float)k * (float)n / (float)fft_n;
+                real += data[n] * cosf(angle);
+                imag += data[n] * sinf(angle);
+            }
+            power_spectrum[k] = (real * real + imag * imag) / (float)fft_n;
+            if (power_spectrum[k] < 1e-10f) power_spectrum[k] = 1e-10f;
+        }
+
+        /* 2. 构建梅尔滤波器组 (26个三角滤波器) */
+        int num_mel_filters = 26;
+        float mel_points[28];
+        float mel_low = 1125.0f * logf(1.0f + 300.0f / 700.0f);
+        float mel_high = 1125.0f * logf(1.0f + (float)(sample_rate / 2) / 700.0f);
+        for (int m = 0; m < num_mel_filters + 2; m++) {
+            float mel = mel_low + (float)m * (mel_high - mel_low) / (float)(num_mel_filters + 1);
+            float freq = 700.0f * (expf(mel / 1125.0f) - 1.0f);
+            mel_points[m] = freq * (float)num_bins / (float)(sample_rate / 2);
+        }
+
+        float mel_energies[26] = {0};
+        for (int m = 1; m <= num_mel_filters; m++) {
+            float mel_energy = 0.0f;
+            for (int k = 0; k < num_bins; k++) {
+                float weight = 0.0f;
+                if ((float)k <= mel_points[m - 1]) weight = 0.0f;
+                else if ((float)k <= mel_points[m])
+                    weight = ((float)k - mel_points[m - 1]) / (mel_points[m] - mel_points[m - 1] + 1e-10f);
+                else if ((float)k <= mel_points[m + 1])
+                    weight = (mel_points[m + 1] - (float)k) / (mel_points[m + 1] - mel_points[m] + 1e-10f);
+                else weight = 0.0f;
+                mel_energy += weight * power_spectrum[k];
+            }
+            mel_energies[m - 1] = (mel_energy > 1e-10f) ? logf(mel_energy) : -23.0f;
+        }
+
+        /* 3. DCT-II变换: 梅尔频谱 → MFCC系数 */
+        for (int c = 0; c < mfcc_coeffs && feature_idx < max_features; c++) {
+            float mfcc = 0.0f;
+            for (int m = 0; m < num_mel_filters; m++) {
+                mfcc += mel_energies[m] * cosf(3.14159265358979f * (float)c * ((float)m + 0.5f) / (float)num_mel_filters);
+            }
+            /* 归一化 (DCT-II 正交化) */
+            if (c == 0) mfcc *= sqrtf(1.0f / (float)num_mel_filters);
+            else mfcc *= sqrtf(2.0f / (float)num_mel_filters);
+            features[feature_idx++] = mfcc;
         }
     }
 

@@ -162,10 +162,12 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
     {
         case OPTIMIZER_SGD:
         {
+            float wd = optimizer->config.weight_decay;
             for (i = 0; i < num_params; i++)
             {
-                float decay = optimizer->config.weight_decay * parameters[i];
-                parameters[i] -= lr * (gradients[i] + decay);
+                /* FIX-005: 解耦权重衰减，与AdamW一致 */
+                parameters[i] *= (1.0f - lr * wd);
+                parameters[i] -= lr * gradients[i];
             }
             break;
         }
@@ -173,14 +175,18 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
         case OPTIMIZER_MOMENTUM:
         {
             float mu = optimizer->config.momentum > 0.0f ? optimizer->config.momentum : 0.9f;
+            float wd = optimizer->config.weight_decay;
             for (i = 0; i < num_params; i++)
             {
-                float decay = optimizer->config.weight_decay * parameters[i];
-                optimizer->momentum_buffer[i] = mu * optimizer->momentum_buffer[i] -
-                                                lr * (gradients[i] + decay);
+                /* FIX-001: 解耦权重衰减：直接衰减参数，梯度不包含权重衰减项 */
+                parameters[i] *= (1.0f - lr * wd);
+                float v_old = optimizer->momentum_buffer[i];
+                optimizer->momentum_buffer[i] = mu * v_old - lr * gradients[i];
                 if (optimizer->config.use_nesterov)
                 {
-                    parameters[i] += optimizer->momentum_buffer[i] - mu * optimizer->momentum_buffer[i];
+                    /* 正确Nesterov：v = μ·v_old - lr·g; θ += v + μ·(v - v_old) */
+                    parameters[i] += optimizer->momentum_buffer[i] +
+                                     mu * (optimizer->momentum_buffer[i] - v_old);
                 }
                 else
                 {
@@ -192,12 +198,14 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
 
         case OPTIMIZER_ADAGRAD:
         {
+            float wd = optimizer->config.weight_decay;
             for (i = 0; i < num_params; i++)
             {
-                float decay = optimizer->config.weight_decay * parameters[i];
+                /* FIX-005: 解耦权重衰减 */
+                parameters[i] *= (1.0f - lr * wd);
                 optimizer->cache_buffer[i] += gradients[i] * gradients[i];
                 float adjusted_lr = lr / (sqrtf(optimizer->cache_buffer[i]) + eps);
-                parameters[i] -= adjusted_lr * (gradients[i] + decay);
+                parameters[i] -= adjusted_lr * gradients[i];
             }
             break;
         }
@@ -290,7 +298,10 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
             *optimizer->beta1_power *= b1;
             *optimizer->beta2_power *= b2;
 
+            /* FIX-004: 单次循环完成动量更新并累积范数，将update值暂存入velocity_buffer复用 */
             float param_norm = 0.0f, update_norm = 0.0f;
+            float inv_b1 = 1.0f / (1.0f - *optimizer->beta1_power);
+            float inv_b2 = 1.0f / (1.0f - *optimizer->beta2_power);
             for (i = 0; i < num_params; i++)
             {
                 optimizer->momentum_buffer[i] = b1 * optimizer->momentum_buffer[i] +
@@ -298,10 +309,12 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
                 optimizer->velocity_buffer[i] = b2 * optimizer->velocity_buffer[i] +
                                                 (1.0f - b2) * gradients[i] * gradients[i];
 
-                float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
-                float v_hat = optimizer->velocity_buffer[i] / (1.0f - *optimizer->beta2_power);
+                float m_hat = optimizer->momentum_buffer[i] * inv_b1;
+                float v_hat = optimizer->velocity_buffer[i] * inv_b2;
 
                 float update = m_hat / (sqrtf(v_hat) + eps) + wd * parameters[i];
+                /* 复用velocity_buffer暂存update值，避免第二遍循环重复计算 */
+                optimizer->velocity_buffer[i] = update;
                 param_norm += parameters[i] * parameters[i];
                 update_norm += update * update;
             }
@@ -312,10 +325,8 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
 
             for (i = 0; i < num_params; i++)
             {
-                float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
-                float v_hat = optimizer->velocity_buffer[i] / (1.0f - *optimizer->beta2_power);
-                float update = m_hat / (sqrtf(v_hat) + eps) + wd * parameters[i];
-                parameters[i] -= lr * trust_ratio * update;
+                /* 直接使用velocity_buffer中预存的update值，无需重新计算 */
+                parameters[i] -= lr * trust_ratio * optimizer->velocity_buffer[i];
             }
             break;
         }
@@ -357,19 +368,30 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
             *optimizer->beta1_power *= b1;
             *optimizer->beta2_power *= b2;
 
-            /* RAdam整流 */
+            /* RAdam整流因子计算 */
             float rho_inf = 2.0f / (1.0f - b2) - 1.0f;
             float beta2_t = *optimizer->beta2_power;
             float rho_t = rho_inf - 2.0f * (float)step * beta2_t / (1.0f - beta2_t + 1e-12f);
-            (void)rho_inf;
+
+            /* FIX-002: LookAhead慢权重初始化（首次调用时快照当前参数为慢权重） */
+            int k = optimizer->config.lookahead_k > 0 ? optimizer->config.lookahead_k : 5;
+            float alpha = optimizer->config.lookahead_alpha > 0.0f
+                          ? optimizer->config.lookahead_alpha : 0.5f;
+            int is_first_step = (step == 0);
+            if (is_first_step) {
+                for (i = 0; i < num_params; i++) {
+                    optimizer->cache_buffer[i] = parameters[i];
+                }
+            }
 
             for (i = 0; i < num_params; i++)
             {
-                float g = gradients[i] + wd * parameters[i];
+                /* FIX-003: 解耦权重衰减，梯度仅含原始梯度 */
+                parameters[i] *= (1.0f - lr * wd);
                 optimizer->momentum_buffer[i] = b1 * optimizer->momentum_buffer[i] +
-                                                (1.0f - b1) * g;
+                                                (1.0f - b1) * gradients[i];
                 optimizer->velocity_buffer[i] = b2 * optimizer->velocity_buffer[i] +
-                                                (1.0f - b2) * g * g;
+                                                (1.0f - b2) * gradients[i] * gradients[i];
 
                 float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
                 float v_hat = optimizer->velocity_buffer[i] / (1.0f - *optimizer->beta2_power);
@@ -387,15 +409,10 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
                 {
                     parameters[i] -= lr * m_hat;
                 }
-
-                /* LookAhead: 保存慢权重到cache_buffer（快照） */
-                optimizer->cache_buffer[i] = parameters[i];
+                /* 不在每步覆盖慢权重，慢权重仅在同步时更新 */
             }
 
-            /* LookAhead同步：每lookahead_k步 = 慢 → 快 */
-            int k = optimizer->config.lookahead_k > 0 ? optimizer->config.lookahead_k : 5;
-            float alpha = optimizer->config.lookahead_alpha > 0.0f
-                          ? optimizer->config.lookahead_alpha : 0.5f;
+            /* FIX-002: LookAhead同步：每k步将快权重向慢权重方向移动 */
             if ((step + 1) % k == 0)
             {
                 for (i = 0; i < num_params; i++)

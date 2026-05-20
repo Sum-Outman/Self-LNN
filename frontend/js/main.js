@@ -7373,8 +7373,8 @@ async function testInference() {
                 resultText.textContent = '推理失败: ' + ((result && result.error) || '未知错误');
             }
         } else {
-            resultText.textContent = '推理演示: 根据知识库中的事实和规则进行演绎推理。您的查询已收到: "' + query + '"。推理引擎将通过液态神经网络CfC ODE系统进行推理计算。';
-            showNotification('推理测试查询已提交', 'info');
+            resultText.textContent = '推理引擎未连接——无法执行推理。请确认后端推理服务已启动后重试。';
+            showNotification('推理引擎未连接', 'warning');
         }
     } catch (e) {
         resultText.textContent = '推理出错: ' + e.message;
@@ -7398,3 +7398,313 @@ function showKnowledgeDetail(entryId) {
         '<button class="btn btn-xs btn-secondary" onclick="document.getElementById(\'knowledge-detail-panel\').style.display=\'none\'" style="margin-top:8px;">关闭</button>' +
     '</div>';
 }
+
+/* ================================================================
+ * ZSFABC-F002修复: 设备管理+安全管理+技能管理+教学 内联函数迁移
+ * 从 index.html 内联 <script> 标签迁移到主JS模块
+ * ================================================================ */
+
+/* ---- 设备控制管理 (原HTML L3926-L4056) ---- */
+var _devicePollTimer = null;
+
+async function refreshDevices() {
+    try {
+        var data = await SelfLnnApi.devicesList();
+        var devices = data.devices || [];
+        var online = 0, offline = 0;
+        devices.forEach(function(d) { if (d.online) online++; else offline++; });
+        var oc = document.getElementById('online-count'); if (oc) oc.textContent = online;
+        var olc = document.getElementById('offline-count'); if (olc) olc.textContent = offline;
+        var tc = document.getElementById('total-count'); if (tc) tc.textContent = devices.length;
+        var container = document.getElementById('device-cards');
+        if (!container) return;
+        if (devices.length === 0) {
+            container.innerHTML = '<div class="pending-text" style="text-align:center;padding:20px">暂无设备</div>';
+            return;
+        }
+        container.innerHTML = devices.map(function(d) {
+            var name = d.name||'未知设备', type = d.type||'-';
+            var sc = d.online ? 'active' : 'inactive', st = d.online ? '在线' : '离线';
+            var bat = d.battery != null ? d.battery+'%' : '-', conn = d.connection||'-';
+            return '<div class="card" style="margin:0"><div class="card-header"><h3>' + name + '</h3></div>' +
+            '<div class="card-content">' +
+            '<div class="metric"><span class="metric-label">类型</span><span class="metric-value">' + type + '</span></div>' +
+            '<div class="metric"><span class="metric-label">状态</span><span class="metric-value"><span class="status-badge ' + sc + '">' + st + '</span></span></div>' +
+            '<div class="metric"><span class="metric-label">电池</span><span class="metric-value">' + bat + '</span></div>' +
+            '<div class="metric"><span class="metric-label">连接方式</span><span class="metric-value">' + conn + '</span></div>' +
+            '<div style="margin-top:8px;display:flex;gap:4px">' +
+            '<button onclick="sendDeviceCmd(\'' + d.id + '\',\'start\')" class="btn btn-sm">启动</button>' +
+            '<button onclick="sendDeviceCmd(\'' + d.id + '\',\'stop\')" class="btn btn-sm btn-danger">停止</button>' +
+            '<button onclick="setDeviceMode(\'' + d.id + '\')" class="btn btn-sm">模式</button></div></div></div>';
+        }).join('');
+    } catch(e) { /* 静默 */ }
+}
+
+async function sendDeviceCmd(deviceId, command) {
+    try {
+        var data = await SelfLnnApi.deviceCommand(deviceId, command);
+        if (!data.success) showNotification('命令执行失败: '+(data.error||''), 'danger');
+    } catch(e) { showNotification('连接失败', 'danger'); }
+}
+
+async function setDeviceMode(deviceId) {
+    var mode = prompt('输入模式 (manual/auto/semi/swarm):', 'auto');
+    if (!mode) return;
+    try {
+        var data = await SelfLnnApi.deviceSetMode(deviceId, mode);
+        showNotification(data.success ? '模式已切换' : '切换失败: '+(data.error||''), data.success ? 'success' : 'danger');
+    } catch(e) { showNotification('连接失败', 'danger'); }
+}
+
+async function setGlobalMode() {
+    var el = document.getElementById('control-mode');
+    if (!el) return;
+    var mode = el.value;
+    try {
+        var data = await SelfLnnApi.deviceSetMode('all', mode);
+        showNotification(data.success ? '全局模式已切换为 ' + mode : '切换失败', data.success ? 'success' : 'danger');
+    } catch(e) { showNotification('连接失败', 'danger'); }
+}
+
+async function scanHardware() {
+    if (typeof HardwareScanUtil === 'undefined') return;
+    var result = await HardwareScanUtil.scanAll(false);
+    var gpu = document.getElementById('gpu-count'); if (gpu) gpu.textContent = result.gpu.count;
+    var cpu = document.getElementById('cpu-cores'); if (cpu) cpu.textContent = result.cpu.cores;
+    var mem = document.getElementById('total-memory'); if (mem) mem.textContent = result.memory.total_gb > 0 ? result.memory.total_gb.toFixed(1) + ' GB' : 'N/A';
+}
+
+async function applyConfig() {
+    if (typeof HardwareScanUtil === 'undefined') return;
+    try {
+        await HardwareScanUtil.applyConfig();
+        showNotification('硬件配置已应用', 'success');
+    } catch(e) { showNotification('配置应用失败: ' + e.message, 'danger'); }
+}
+
+async function registerDevice() {
+    var name = prompt('设备名称:');
+    if (!name) return;
+    var type = prompt('设备类型 (robot/camera/sensor):', 'robot');
+    if (!type) return;
+    try {
+        var data = await SelfLnnApi.registerDevice({ name: name, type: type });
+        showNotification(data.success ? '设备注册成功' : '注册失败', data.success ? 'success' : 'danger');
+        refreshDevices();
+    } catch(e) { showNotification('连接失败', 'danger'); }
+}
+
+async function unregisterDevice() {
+    var id = prompt('设备ID:');
+    if (!id) return;
+    try {
+        var data = await SelfLnnApi.unregisterDevice(id);
+        showNotification(data.success ? '设备已注销' : '注销失败', data.success ? 'success' : 'danger');
+        refreshDevices();
+    } catch(e) { showNotification('连接失败', 'danger'); }
+}
+
+/* ---- 安全管理 (原HTML L4334-L4496) ---- */
+var _safetyPollTimer = null;
+
+async function pollSafety() {
+    try {
+        var data = await SelfLnnApi.getSecurityStatus ? SelfLnnApi.getSecurityStatus() : SelfLnnApi.request('/safety/status');
+        if (data && data.safety) updateSafetyUI(data.safety);
+    } catch(e) { /* 静默 */ }
+}
+
+function updateSafetyUI(safety) {
+    var lvl = document.getElementById('safety-level'); if (lvl) lvl.textContent = safety.level || safety.status || 'UNKNOWN';
+    var score = document.getElementById('safety-score'); if (score) score.textContent = (safety.score || 0).toFixed(2);
+    var el = document.getElementById('safety-events');
+    if (el && safety.events) {
+        el.innerHTML = safety.events.slice(0,10).map(function(ev) {
+            return '<div class="event-item">' + (ev.description||ev) + '</div>';
+        }).join('');
+    }
+}
+
+async function softStop() {
+    if (!confirm('确认执行软停止？')) return;
+    try {
+        var data = await SelfLnnApi.request('/safety/emergency_stop', { method: 'POST', body: JSON.stringify({ type: 'soft' }) });
+        showNotification(data && data.safety ? '软停止已执行' : '软停止请求已发送', data && data.safety ? 'success' : 'info');
+    } catch(e) { showNotification('连接失败', 'danger'); }
+}
+
+async function resetSafety() {
+    try {
+        var data = await SelfLnnApi.request('/safety/reset', { method: 'POST' });
+        showNotification('安全状态已重置', 'success');
+    } catch(e) { showNotification('连接失败', 'danger'); }
+}
+
+/* ---- 技能管理 (原HTML L5033-L5227) ---- */
+var skillsData = [];
+
+async function loadSkills() {
+    try {
+        var data = await SelfLnnApi.request('/skills');
+        if (data && data.skills) {
+            skillsData = data.skills;
+            renderSkillList();
+            updateStats(data);
+        }
+    } catch(e) { /* 静默 */ }
+}
+
+function updateStats(data) {
+    var total = document.getElementById('skills-total'); if (total) total.textContent = (data ? data.skills.length : skillsData.length);
+}
+
+function setFilter(type) {
+    renderSkillList(type);
+}
+
+function filterSkills() {
+    var sel = document.getElementById('skill-filter-select');
+    renderSkillList(sel ? sel.value : 'all');
+}
+
+function renderSkillList(filterType) {
+    var container = document.getElementById('skill-list');
+    if (!container) return;
+    var filtered = skillsData;
+    if (filterType && filterType !== 'all') {
+        filtered = skillsData.filter(function(s) { return s.type === filterType; });
+    }
+    if (filtered.length === 0) {
+        container.innerHTML = '<div style="text-align:center;padding:20px;color:rgba(255,255,255,0.4);">暂无技能数据</div>';
+        return;
+    }
+    container.innerHTML = filtered.map(function(s, i) {
+        return '<div class="skill-item" onclick="selectSkill(' + i + ')" style="cursor:pointer;padding:8px;border-bottom:1px solid rgba(255,255,255,0.05);">' +
+        '<span style="color:#00c8ff;">' + (s.name||'未知技能') + '</span>' +
+        '<span style="float:right;font-size:0.7rem;color:rgba(255,255,255,0.3);">' + (s.type||'') + '</span></div>';
+    }).join('');
+}
+
+function selectSkill(index) {
+    if (index < 0 || index >= skillsData.length) return;
+    var s = skillsData[index];
+    var panel = document.getElementById('skill-detail');
+    if (panel) {
+        panel.innerHTML = '<h4>' + (s.name||'未知技能') + '</h4>' +
+        '<p>类型: ' + (s.type||'-') + '</p>' +
+        '<p>描述: ' + (s.description||'无描述') + '</p>' +
+        '<button class="btn btn-sm btn-primary" onclick="testSkill(' + index + ')" style="margin-top:8px;">测试执行</button>';
+    }
+}
+
+async function testSkill(index) {
+    if (index < 0 || index >= skillsData.length) return;
+    var s = skillsData[index];
+    try {
+        var data = await SelfLnnApi.request('/skills/execute', { method: 'POST', body: JSON.stringify({ skill_id: s.id||index }) });
+        showNotification(data.success ? '技能执行成功' : '执行失败', data.success ? 'success' : 'warning');
+    } catch(e) { showNotification('执行出错: ' + e.message, 'danger'); }
+}
+
+/* ---- 全局暴露 (供onclick调用) ---- */
+window.refreshDevices = refreshDevices;
+window.sendDeviceCmd = sendDeviceCmd;
+window.setDeviceMode = setDeviceMode;
+window.setGlobalMode = setGlobalMode;
+window.scanHardware = scanHardware;
+window.applyConfig = applyConfig;
+window.registerDevice = registerDevice;
+window.unregisterDevice = unregisterDevice;
+window.pollSafety = pollSafety;
+window.softStop = softStop;
+window.resetSafety = resetSafety;
+window.loadSkills = loadSkills;
+window.setFilter = setFilter;
+window.filterSkills = filterSkills;
+window.renderSkillList = renderSkillList;
+window.selectSkill = selectSkill;
+window.testSkill = testSkill;
+
+/* ---- 语音控制迁移 (原HTML L4528-L4597) ---- */
+var _voiceCapturing = false;
+var _voiceRecorder = null;
+
+async function toggleVoice() {
+    if (typeof VoiceCaptureUtil === 'undefined') {
+        showNotification('语音采集模块未加载', 'warning');
+        return;
+    }
+    if (_voiceCapturing) {
+        _voiceCapturing = false;
+        if (_voiceRecorder) { try { _voiceRecorder.stop(); } catch(e) {} _voiceRecorder = null; }
+        var btn = document.getElementById('voice-toggle-btn');
+        if (btn) { btn.textContent = '开始录音'; btn.className = btn.className.replace('active',''); }
+        showNotification('录音已停止', 'info');
+    } else {
+        _voiceCapturing = true;
+        var btn = document.getElementById('voice-toggle-btn');
+        if (btn) { btn.textContent = '停止录音'; if (!btn.className.match(/active/)) btn.className += ' active'; }
+        try {
+            _voiceRecorder = await VoiceCaptureUtil.quickCapture(function(text) {
+                var inp = document.getElementById('voice-text-output');
+                if (inp) inp.value = text;
+                showNotification('语音识别: ' + text, 'success');
+            });
+            showNotification('录音已开始...', 'info');
+        } catch(e) { showNotification('麦克风访问失败: ' + e.message, 'danger'); _voiceCapturing = false; }
+    }
+}
+
+async function sendTextCommand() {
+    var inp = document.getElementById('text-command-input');
+    var text = inp ? inp.value.trim() : '';
+    if (!text) { showNotification('请输入指令', 'warning'); return; }
+    try {
+        var result = await SelfLnnApi.request('/device/command', { method: 'POST', body: JSON.stringify({ command: text }) });
+        showNotification(result && result.success ? '指令已执行' : '指令执行失败', result && result.success ? 'success' : 'warning');
+    } catch(e) { showNotification('连接失败', 'danger'); }
+}
+
+window.toggleVoice = toggleVoice;
+window.sendTextCommand = sendTextCommand;
+
+/* ---- 多模态学习 + 教学 迁移 (原HTML L6369-L6674) ---- */
+async function startMultimodalLearn() {
+    try {
+        var resp = await SelfLnnApi.multimodalLearn ? SelfLnnApi.multimodalLearn() : SelfLnnApi.request('/multimodal/learn');
+        showNotification('多模态统一学习已启动', 'success');
+    } catch(e) { showNotification('启动失败: ' + e.message, 'danger'); }
+}
+window.startMultimodalLearn = startMultimodalLearn;
+
+async function toggleMultimodalVoiceInput() {
+    showNotification('多模态语音输入功能待VoiceCaptureUtil加载', 'info');
+}
+window.toggleMultimodalVoiceInput = toggleMultimodalVoiceInput;
+
+async function startTeaching() {
+    try {
+        var resp = await SelfLnnApi.request('/teach/look_and_learn');
+        showNotification('实物示教已启动', 'success');
+    } catch(e) { showNotification('示教失败: ' + e.message, 'danger'); }
+}
+window.startTeaching = startTeaching;
+
+async function testTeaching() {
+    try {
+        var resp = await SelfLnnApi.request('/teach/test_concept');
+        showNotification('概念测试完成', 'success');
+    } catch(e) { showNotification('测试失败: ' + e.message, 'danger'); }
+}
+window.testTeaching = testTeaching;
+
+/* ---- 硬件设置迁移 (原HTML L7113-L7296) ---- */
+async function scanHardwareFull() {
+    try {
+        if (typeof HardwareScanUtil !== 'undefined') {
+            await HardwareScanUtil.scanAll(true);
+            showNotification('全硬件扫描完成', 'success');
+        }
+    } catch(e) { showNotification('硬件扫描失败', 'danger'); }
+}
+window.scanHardwareFull = scanHardwareFull;

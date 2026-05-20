@@ -4610,112 +4610,6 @@ class ApiService {
     }
 
     /**
-     * 启动训练任务
-     */
-    async startTrainingJob(config) {
-        try {
-            const response = await this.request('/training/start', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(config || {})
-            });
-            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
-            const data = await response.json();
-            return { success: true, data: data };
-        } catch (error) {
-            console.error('启动训练任务失败:', error);
-            return { success: false, error: error.message, data: null };
-        }
-    }
-
-    /**
-     * 认知系统健康检查
-     */
-    async getCognitionHealth() {
-        try {
-            var resp = await this.request('/cognition/health', {method: 'GET'});
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
-    }
-
-    /**
-     * 重启机器人
-     */
-    async rebootRobot() {
-        try {
-            const response = await this.request('/robot/reboot', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'reboot' })
-            });
-            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
-            const data = await response.json();
-            return { success: true, data: data };
-        } catch (error) {
-            console.error('重启机器人失败:', error);
-            return { success: false, error: error.message, data: null };
-        }
-    }
-
-    /**
-     * 校准传感器
-     */
-    async calibrateSensors() {
-        try {
-            const response = await this.request('/robot/calibrate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'calibrate' })
-            });
-            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
-            const data = await response.json();
-            return { success: true, data: data };
-        } catch (error) {
-            console.error('校准传感器失败:', error);
-            return { success: false, error: error.message, data: null };
-        }
-    }
-
-    /**
-     * 运行自诊断
-     */
-    async runSelfDiagnostic() {
-        try {
-            const response = await this.request('/agi/diagnostic', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'diagnostic' })
-            });
-            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
-            const data = await response.json();
-            return { success: true, data: data };
-        } catch (error) {
-            console.error('自诊断失败:', error);
-            return { success: false, error: error.message, data: null };
-        }
-    }
-
-    /**
-     * 导出诊断数据
-     */
-    async exportDiagnosticData() {
-        try {
-            const response = await this.request('/agi/diagnostic/export', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'export' })
-            });
-            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
-            const data = await response.json();
-            return { success: true, data: data };
-        } catch (error) {
-            console.error('导出诊断数据失败:', error);
-            return { success: false, error: error.message, data: null };
-        }
-    }
-
-    /**
      * 获取多模态处理状态
      */
     async getMultimodalStatus() {
@@ -4855,6 +4749,222 @@ class ApiService {
             const data = await response.json();
             return { success: response.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* ================================================================
+     * ZSFABC-B002修复: 补充10个前端缺失的API方法 + 恢复getCognitionHealth
+     * 以下方法在main.js中被安全校验调用（typeof === 'function'），
+     * 但因api-service.js中缺失定义而静默失败。
+     * ================================================================ */
+
+    /**
+     * 认知系统健康检查
+     */
+    async getCognitionHealth() {
+        try {
+            var resp = await this.request('/cognition/health', {method: 'GET'});
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /**
+     * 知识搜索
+     * @param {string} query - 搜索查询
+     */
+    async searchKnowledge(query) {
+        try {
+            const response = await this.request('/knowledge/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query || '' })
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识搜索失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 推理测试
+     * @param {object} testParams - 测试参数
+     */
+    async testInference(testParams) {
+        try {
+            const response = await this.request('/reasoning/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(testParams || {})
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('推理测试失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识保存
+     * @param {object} entry - 知识条目
+     */
+    async knowledgeSave(entry) {
+        try {
+            const response = await this.request('/knowledge/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(entry || {})
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识保存失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识加载
+     * @param {string} knowledgeId - 知识ID
+     */
+    async knowledgeLoad(knowledgeId) {
+        try {
+            const response = await this.request('/knowledge/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: knowledgeId || '' })
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识加载失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识导出JSON
+     */
+    async knowledgeExportJSON() {
+        try {
+            const response = await this.request('/knowledge/export', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ format: 'json' })
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识导出失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识导入JSON
+     * @param {object} importData - 导入数据
+     */
+    async knowledgeImportJSON(importData) {
+        try {
+            const response = await this.request('/knowledge/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(importData || {})
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识导入失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 保存机器人配置
+     * @param {object} config - 机器人配置
+     */
+    async saveRobotConfig(config) {
+        try {
+            const response = await this.request('/robot/config/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config || {})
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('保存机器人配置失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 创建任务
+     * @param {object} taskData - 任务数据
+     */
+    async createTask(taskData) {
+        try {
+            const response = await this.request('/task/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(taskData || {})
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('创建任务失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 切换摄像头源
+     * @param {string|number} cameraIndex - 摄像头索引
+     */
+    async switchCameraSource(cameraIndex) {
+        try {
+            const response = await this.request('/camera/switch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ camera_index: cameraIndex || 0 })
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('切换摄像头失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 设置视频质量
+     * @param {object} qualityParams - 质量参数 (width, height, fps等)
+     */
+    async setVideoQuality(qualityParams) {
+        try {
+            const response = await this.request('/video/quality', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(qualityParams || {})
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('设置视频质量失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
     }
 
 }

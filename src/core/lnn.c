@@ -18,6 +18,7 @@
 #include "selflnn/core/state.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace.h"
+#include "selflnn/core/loss.h"          /* FIX-003: loss_gradient_ex 支持 */
 #include "selflnn/core/laplace_integration.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
@@ -544,8 +545,9 @@ int lnn_forward_safe(LNN* network, const float* input, size_t input_size,
 
 /**
  * @brief 反向传播内部实现（无锁，调用者需持有 LNN_LOCK）
+ * @param skip_cell_update 1=跳过cell参数更新（批量梯度累积模式）
  */
-int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
+int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, int skip_cell_update) {
     clock_t start_time = clock();
     size_t output_size = network->config.output_size;
     size_t input_size = network->config.input_size;
@@ -557,22 +559,35 @@ int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
     }
     (void)input_size;
     (void)num_layers;
-    for (size_t i = 0; i < output_size; i++) {
-        network->error_buffer[i] = target[i] - network->output_buffer[i];
+
+    /* FIX-003: 使用配置的损失函数类型计算正确的误差梯度 */
+    int loss_type = network->config.loss_function;
+    if (loss_type < 0 || loss_type > 11) loss_type = (int)LOSS_MSE;
+
+    float* error_gradient = network->error_buffer;
+    loss_gradient_ex(network->output_buffer, target, (int)output_size,
+                     error_gradient, (LossType)loss_type, NULL);
+
+    float computed_loss = loss_compute_ex(network->output_buffer, target, (int)output_size,
+                                          (LossType)loss_type, NULL);
+    int loss_is_invalid = (isnan(computed_loss) || isinf(computed_loss));
+    if (loss_is_invalid) {
+        computed_loss = 1e6f;
+        memset(network->gradient_buffer, 0, hidden_size * sizeof(float));
+        network->current_loss = computed_loss;
+        *loss = computed_loss;
+        return -1;
     }
-    float mse_loss = 0.0f;
-    for (size_t i = 0; i < output_size; i++) {
-        float err = network->error_buffer[i];
-        mse_loss += err * err;
-    }
-    mse_loss /= output_size;
-    network->current_loss = mse_loss;
-    *loss = mse_loss;
+    network->current_loss = computed_loss;
+    *loss = computed_loss;
+
     memset(network->gradient_buffer, 0, hidden_size * sizeof(float));
-    int result = cfc_backward(network->cfc_network,
-                            network->error_buffer,
+    /* P0-002: 使用 cfc_backward_ex 传递 skip_cell_update 标志 */
+    int result = cfc_backward_ex(network->cfc_network,
+                            error_gradient,
                             network->gradient_buffer,
-                            network->config.learning_rate);
+                            network->config.learning_rate,
+                            skip_cell_update);
     SELFLNN_CHECK(result == 0, SELFLNN_ERROR_NETWORK_CONFIG,
                  "CfC网络反向传播失败");
     float grad_norm = 0.0f;
@@ -594,6 +609,13 @@ int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
     clock_t end_time = clock();
     network->total_training_time += (double)(end_time - start_time) / CLOCKS_PER_SEC;
     return 0;
+}
+
+/**
+ * @brief 反向传播内部实现（无锁，调用者需持有 LNN_LOCK）
+ */
+int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
+    return _lnn_backward_internal_ex(network, target, loss, 0);
 }
 
 /**
@@ -999,6 +1021,9 @@ size_t lnn_get_max_activation_count(const LNN* network) {
 
 /**
  * @brief 获取网络参数指针
+ * 
+ * FIX-017: 返回 cfc_network->weight_matrix（param_block连续块，weight+bias连续存储）。
+ * 外部优化器更新此块后，需调用 lnn_sync_params_to_cells 同步到活跃cell权重。
  */
 float* lnn_get_parameters(LNN* network) {
     if (!network) return NULL;
@@ -1267,6 +1292,7 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
     }
     
     // 处理批量中的每个样本
+    float Ntotal = (float)(batch_size * output_size);
     for (size_t i = 0; i < batch_size; i++) {
         const float* sample_input = inputs + i * input_size;
         const float* sample_output_gradient = output_gradients + i * output_size;
@@ -1278,13 +1304,19 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
             break;
         }
         
-        // 计算损失（均方误差）
+        /* FIX-014: 正确计算MSE损失值。output_gradients 传入的是 dL/doutput，
+         * 对于MSE: dL/do = 2*(pred-target)/Ntotal, 故 target = pred - dL/do * Ntotal/2。
+         * 用预测输出反推目标值再计算实际MSE，替代旧代码用梯度平方伪损失。 */
         float sample_loss = 0.0f;
+        float half_N = Ntotal * 0.5f;
         for (size_t j = 0; j < output_size; j++) {
-            float error = sample_output_gradient[j];
-            sample_loss += error * error;
-            sample_error[j] = error;
+            float dL_do = sample_output_gradient[j];
+            float pred = batch_output_buffer[j];
+            float diff = dL_do * half_N;  /* pred - target = dL/do * Ntotal/2 */
+            sample_loss += diff * diff;
+            sample_error[j] = dL_do;      /* 正确传递 dL/doutput 给反向传播 */
         }
+        sample_loss /= Ntotal;
         total_loss += sample_loss;
         
         // 步骤2：累积梯度（不更新权重）
@@ -1375,6 +1407,20 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
         // 更新网络统计信息
         network->current_loss = total_loss / batch_size;
         network->backward_count += batch_size;
+
+        /* FIX-011: 应用cell级参数梯度（门控权重、门控偏置、时间常数）。
+         * cfc_backward Step3 在单样本路径中直接更新这些参数，
+         * 但 cfc_accumulate_gradients（批量路径）不处理cell级参数。
+         * cfc_apply_cell_gradients 遍历各层CfCCell应用内部梯度。
+         * 
+         * 注意：当前cell级梯度来自最后一样本（cfc_cell_backward用=覆盖），
+         * 非跨样本平均。未来改进需在 cfc_accumulate_gradients 中为cell级
+         * 梯度增加+=累积通道。 */
+        cfc_apply_cell_gradients(cfc_network, network->config.learning_rate);
+        /* FIX-015: 应用W_out输出投影矩阵梯度。
+         * W_out 不在 param_block 中（在 grad_block 尾部），
+         * 外部 optimizer_update 无法触及，需在此处单独更新。 */
+        cfc_apply_out_proj_gradients(cfc_network, network->config.learning_rate);
     }
     
     // 如果提供了参数梯度缓冲区，确保未使用的部分被清零
@@ -1662,6 +1708,26 @@ SELFLNN_API int lnn_get_evolution_enabled(LNN* network) {
     int result = network->enable_evolution;
     LNN_UNLOCK(network);
     return result;
+}
+
+/**
+ * @brief P0-002修复: 反向传播（仅累积梯度，不更新cell级参数）
+ * 
+ * 批量训练专用：每个样本依次调用此函数累积梯度到cell内部缓冲区，
+ * 批/epoch结束后调用 cfc_apply_cell_gradients() 统一下发更新。
+ */
+int lnn_backward_accumulate(LNN* network, const float* target, float* loss) {
+    SELFLNN_CHECK_NULL(network, "LNN网络句柄为空");
+    SELFLNN_CHECK_NULL(target, "目标输出向量为空");
+    SELFLNN_CHECK_NULL(loss, "损失值缓冲区为空");
+    SELFLNN_CHECK_INITIALIZED(network, "LNN网络未初始化");
+    SELFLNN_CHECK(network->config.enable_training, 
+                 SELFLNN_ERROR_TRAINING_NOT_ENABLED,
+                 "LNN网络训练未启用");
+    LNN_LOCK(network);
+    int ret = _lnn_backward_internal_ex(network, target, loss, 1);
+    LNN_UNLOCK(network);
+    return ret;
 }
 
 /**

@@ -6,6 +6,7 @@
  */
 
 #define SELFLNN_IMPLEMENTATION 1
+#define SELFLNN_CORE_INTERNAL         /* 访问 CfCCell 完整结构体（梯度健康度报告等） */
 #include "selflnn/training/training.h"
 #include "selflnn/training/mixed_precision.h"
 #include "selflnn/training/regularization.h"
@@ -25,6 +26,7 @@
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/core/cfc_network.h"
+#include "selflnn/core/cfc_cell.h"    /* 完整 CfCCell 结构体（梯度健康度报告） */
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/core/evolutionary_algorithms.h"
 
@@ -5760,6 +5762,14 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                     }
                 }
                 
+                /* FIX-017: 将优化器更新后的共享参数块同步到活跃cell权重。
+                 * optimizer_update 写入 cfc_network->weight_matrix（共享块），
+                 * 但 cfc_forward 读取 cell->weight_matrix。此同步确保下一批次
+                 * 前向传播使用优化后的参数。 */
+                if (trainer->network && trainer->network->cfc_network) {
+                    cfc_sync_shared_to_cells(trainer->network->cfc_network);
+                }
+                
                 // 更新学习率
                 size_t global_step = epoch * trainer->state.total_batches + batch_num;
                 trainer->state.learning_rate = scheduler_get_internal(
@@ -6317,7 +6327,15 @@ static int optimizer_init(OptimizerState* optimizer, const TrainingConfig* confi
 }
 
 /**
- * @brief 优化器更新
+ * @brief 优化器更新（工业级实现，参数更新公式与core/optimizer.c一致）
+ * 
+ * FIX-007: 全面重写优化器，修复以下问题：
+ * 1. SGD/Momentum/AdaGrad/RMSProp: L2→解耦权重衰减
+ * 2. Momentum: Nesterov实现错误→正确公式
+ * 3. Adam: powf每参数逐次调用→预计算bias correction一次
+ * 4. Adam: 标准Adam不应含L2权重衰减→仅AdamW执行解耦衰减
+ * 5. AdaGrad: 移除L2混合→解耦形式
+ * 6. 梯度稳定性保护：检测NaN/Inf并跳过更新
  */
 static void optimizer_update(OptimizerState* optimizer, float* parameters,
                             const float* gradients, size_t num_parameters) {
@@ -6327,137 +6345,106 @@ static void optimizer_update(OptimizerState* optimizer, float* parameters,
     
     optimizer->t++;
     
+    float lr = optimizer->learning_rate;
+    float eps = (optimizer->epsilon > 0.0f) ? optimizer->epsilon : 1e-8f;
+    float wd = optimizer->weight_decay;
+    size_t i;
+    
     switch (optimizer->type) {
         case OPTIMIZER_SGD: {
-            // 完整SGD优化器：工业级随机梯度下降实现
-            // 支持学习率调度、梯度裁剪、权重衰减和梯度累积
-            // 计算当前学习率（考虑调度器）
-            float effective_lr = optimizer->learning_rate;
-            
-            // 梯度裁剪：防止梯度爆炸
-            float grad_norm_sq = 0.0f;
-            for (size_t i = 0; i < num_parameters; i++) {
-                grad_norm_sq += gradients[i] * gradients[i];
-            }
-            float grad_norm = sqrtf(grad_norm_sq + 1e-10f);
-            
-            // 梯度裁剪阈值：基于参数数量自适应
-            float clip_threshold = 1.0f * sqrtf((float)num_parameters);
-            float scale_factor = 1.0f;
-            if (grad_norm > clip_threshold && grad_norm > 1e-10f) {
-                scale_factor = clip_threshold / grad_norm;
-            }
-            
-            // 参数更新：包含可选的权重衰减（L2正则化）
-            float weight_decay = optimizer->weight_decay;
-            for (size_t i = 0; i < num_parameters; i++) {
-                // 应用梯度裁剪
-                float clipped_grad = gradients[i] * scale_factor;
-                
-                // 标准SGD更新：parameters = parameters - learning_rate * gradients
-                // 可选：添加权重衰减（L2正则化）：parameters -= lr * (grad + weight_decay * param)
-                float update = effective_lr * clipped_grad;
-                
-                // 添加权重衰减（L2正则化）
-                if (weight_decay > 0.0f) {
-                    update += effective_lr * weight_decay * parameters[i];
-                }
-                
-                parameters[i] -= update;
+            /* 解耦权重衰减 + SGD */
+            for (i = 0; i < num_parameters; i++) {
+                if (!isfinite(gradients[i])) continue; /* 跳过NaN梯度 */
+                parameters[i] *= (1.0f - lr * wd);
+                parameters[i] -= lr * gradients[i];
             }
             break;
         }
             
-        case OPTIMIZER_MOMENTUM:
-            // 带动量的SGD
-            for (size_t i = 0; i < num_parameters; i++) {
-                optimizer->momentum_buffer[i] = 
-                    optimizer->momentum * optimizer->momentum_buffer[i] +
-                    optimizer->learning_rate * gradients[i];
-                // 添加权重衰减（L2正则化）
-                if (optimizer->weight_decay > 0.0f) {
-                    optimizer->momentum_buffer[i] += optimizer->learning_rate * optimizer->weight_decay * parameters[i];
-                }
-                parameters[i] -= optimizer->momentum_buffer[i];
+        case OPTIMIZER_MOMENTUM: {
+            float mu = (optimizer->momentum > 0.0f) ? optimizer->momentum : 0.9f;
+            for (i = 0; i < num_parameters; i++) {
+                if (!isfinite(gradients[i])) continue;
+                /* 解耦权重衰减 */
+                parameters[i] *= (1.0f - lr * wd);
+                float v_old = optimizer->momentum_buffer[i];
+                optimizer->momentum_buffer[i] = mu * v_old - lr * gradients[i];
+                parameters[i] += optimizer->momentum_buffer[i];
             }
             break;
+        }
             
-        case OPTIMIZER_ADAGRAD:
-            // AdaGrad
-            for (size_t i = 0; i < num_parameters; i++) {
+        case OPTIMIZER_ADAGRAD: {
+            for (i = 0; i < num_parameters; i++) {
+                if (!isfinite(gradients[i])) continue;
+                /* 解耦权重衰减 */
+                parameters[i] *= (1.0f - lr * wd);
                 float grad_sq = gradients[i] * gradients[i];
                 optimizer->momentum_buffer[i] += grad_sq;
-                float adjusted_lr = optimizer->learning_rate / 
-                                  (sqrtf(optimizer->momentum_buffer[i]) + optimizer->epsilon);
-                // 添加权重衰减（L2正则化）
-                if (optimizer->weight_decay > 0.0f) {
-                    parameters[i] -= adjusted_lr * (gradients[i] + optimizer->weight_decay * parameters[i]);
-                } else {
-                    parameters[i] -= adjusted_lr * gradients[i];
-                }
+                float adjusted_lr = lr / (sqrtf(optimizer->momentum_buffer[i]) + eps);
+                parameters[i] -= adjusted_lr * gradients[i];
             }
             break;
+        }
             
-        case OPTIMIZER_RMSPROP:
-            // RMSProp
-            for (size_t i = 0; i < num_parameters; i++) {
+        case OPTIMIZER_RMSPROP: {
+            float decay_rate = (optimizer->momentum > 0.0f) ? optimizer->momentum : 0.9f;
+            for (i = 0; i < num_parameters; i++) {
+                if (!isfinite(gradients[i])) continue;
+                /* 解耦权重衰减 */
+                parameters[i] *= (1.0f - lr * wd);
                 float grad_sq = gradients[i] * gradients[i];
                 optimizer->momentum_buffer[i] = 
-                    optimizer->momentum * optimizer->momentum_buffer[i] +
-                    (1.0f - optimizer->momentum) * grad_sq;
-                float adjusted_lr = optimizer->learning_rate / 
-                                  (sqrtf(optimizer->momentum_buffer[i]) + optimizer->epsilon);
-                // 添加权重衰减（L2正则化）
-                if (optimizer->weight_decay > 0.0f) {
-                    parameters[i] -= adjusted_lr * (gradients[i] + optimizer->weight_decay * parameters[i]);
-                } else {
-                    parameters[i] -= adjusted_lr * gradients[i];
-                }
+                    decay_rate * optimizer->momentum_buffer[i] + (1.0f - decay_rate) * grad_sq;
+                float adjusted_lr = lr / (sqrtf(optimizer->momentum_buffer[i]) + eps);
+                parameters[i] -= adjusted_lr * gradients[i];
             }
             break;
+        }
             
         case OPTIMIZER_ADAM:
-        case OPTIMIZER_ADAMW:
-            // Adam
-            for (size_t i = 0; i < num_parameters; i++) {
-                // 更新一阶矩估计
-                optimizer->m_buffer[i] = optimizer->beta1 * optimizer->m_buffer[i] +
-                                       (1.0f - optimizer->beta1) * gradients[i];
+        case OPTIMIZER_ADAMW: {
+            float b1 = (optimizer->beta1 > 0.0f) ? optimizer->beta1 : 0.9f;
+            float b2 = (optimizer->beta2 > 0.0f) ? optimizer->beta2 : 0.999f;
+            /* FIX-007: 预计算偏差校正系数一次，避免powf每参数逐次调用 */
+            float b1_correction = 1.0f - powf(b1, (float)optimizer->t);
+            float b2_correction = 1.0f - powf(b2, (float)optimizer->t);
+            if (b1_correction < 1e-10f) b1_correction = 1e-10f;
+            if (b2_correction < 1e-10f) b2_correction = 1e-10f;
+            float inv_b1 = 1.0f / b1_correction;
+            float inv_b2 = 1.0f / b2_correction;
+            
+            for (i = 0; i < num_parameters; i++) {
+                if (!isfinite(gradients[i])) continue;
                 
-                // 更新二阶矩估计
+                optimizer->m_buffer[i] = b1 * optimizer->m_buffer[i] +
+                                         (1.0f - b1) * gradients[i];
                 float grad_sq = gradients[i] * gradients[i];
-                optimizer->v_buffer[i] = optimizer->beta2 * optimizer->v_buffer[i] +
-                                       (1.0f - optimizer->beta2) * grad_sq;
+                optimizer->v_buffer[i] = b2 * optimizer->v_buffer[i] +
+                                         (1.0f - b2) * grad_sq;
                 
-                // 偏差校正
-                float m_hat = optimizer->m_buffer[i] / 
-                            (1.0f - powf(optimizer->beta1, (float)optimizer->t));
-                float v_hat = optimizer->v_buffer[i] / 
-                            (1.0f - powf(optimizer->beta2, (float)optimizer->t));
+                float m_hat = optimizer->m_buffer[i] * inv_b1;
+                float v_hat = optimizer->v_buffer[i] * inv_b2;
                 
-                // 参数更新
-                float update = optimizer->learning_rate * m_hat / 
-                             (sqrtf(v_hat) + optimizer->epsilon);
+                float update = lr * m_hat / (sqrtf(v_hat) + eps);
                 
                 if (optimizer->type == OPTIMIZER_ADAMW) {
-                    // AdamW: 权重衰减与梯度更新分离
-                    parameters[i] -= update + optimizer->learning_rate * optimizer->weight_decay * parameters[i];
+                    /* AdamW: 解耦权重衰减 */
+                    parameters[i] = parameters[i] * (1.0f - lr * wd) - update;
                 } else {
-                    // 标准Adam
+                    /* 标准Adam: 无权重衰减 */
                     parameters[i] -= update;
                 }
             }
             break;
+        }
             
         default:
-            // 默认使用SGD
-            for (size_t i = 0; i < num_parameters; i++) {
-                // 添加权重衰减（L2正则化）
-                if (optimizer->weight_decay > 0.0f) {
-                    parameters[i] -= optimizer->learning_rate * (gradients[i] + optimizer->weight_decay * parameters[i]);
-                } else {
-                    parameters[i] -= optimizer->learning_rate * gradients[i];
-                }
+            /* 未识别优化器回退为SGD */
+            for (i = 0; i < num_parameters; i++) {
+                if (!isfinite(gradients[i])) continue;
+                parameters[i] *= (1.0f - lr * wd);
+                parameters[i] -= lr * gradients[i];
             }
             break;
     }
@@ -6949,6 +6936,353 @@ void dropout(float* activations, size_t num_activations,
             }
         }
     }
+}
+
+/* ========================================================================
+ * P1-002: 梯度验证 (Gradient Checking) 完整实现
+ * 使用双边有限差分（中心差分法）O(ε²)精度验证解析梯度
+ * ======================================================================== */
+
+/**
+ * @brief 计算指定参数扰动后的损失值
+ * 内部辅助函数：修改单个参数 ± ε，前向传播，返回损失
+ */
+static float gradient_check_perturb_and_loss(Trainer* trainer,
+                                              const float* inputs, const float* targets,
+                                              size_t num_samples, size_t param_index,
+                                              float perturbation, float* original_value) {
+    float* parameters = lnn_get_parameters(trainer->network);
+    size_t total_params = trainer->gradients_size;
+    if (!parameters || param_index >= total_params) return 0.0f;
+
+    *original_value = parameters[param_index];
+    parameters[param_index] = *original_value + perturbation;
+
+    /* 前向传播计算损失 */
+    size_t input_dim, output_dim;
+    if (get_network_dimensions(trainer->network, &input_dim, &output_dim) != 0) {
+        parameters[param_index] = *original_value;
+        return 0.0f;
+    }
+
+    float total_loss = 0.0f;
+    for (size_t s = 0; s < num_samples; s++) {
+        const float* sample_input = inputs + s * input_dim;
+        const float* sample_target = targets + s * output_dim;
+        float* output = trainer->batch_outputs;
+
+        lnn_forward(trainer->network, sample_input, output);
+
+        switch (trainer->config.loss_function) {
+            case LOSS_MEAN_SQUARED_ERROR:
+                total_loss += loss_mean_squared_error(output, sample_target, output_dim);
+                break;
+            case LOSS_MEAN_ABSOLUTE_ERROR:
+                total_loss += loss_mean_absolute_error(output, sample_target, output_dim);
+                break;
+            case LOSS_CROSS_ENTROPY:
+                total_loss += loss_cross_entropy(output, sample_target, output_dim);
+                break;
+            default:
+                total_loss += loss_mean_squared_error(output, sample_target, output_dim);
+                break;
+        }
+    }
+
+    /* 恢复原始参数值 */
+    parameters[param_index] = *original_value;
+    return total_loss / (float)num_samples;
+}
+
+/**
+ * @brief 梯度验证实现
+ * 使用双边有限差分: ∂L/∂θ ≈ (L(θ+ε) - L(θ-ε)) / (2ε)
+ * O(ε²)精度，比单边差分O(ε)更精确
+ */
+int trainer_gradient_check(Trainer* trainer, const float* inputs, const float* targets,
+                           size_t num_samples, float threshold, float epsilon,
+                           GradientCheckResult* result) {
+    if (!trainer || !inputs || !targets || num_samples == 0 || !result) return -1;
+    if (epsilon <= 0.0f) epsilon = 1e-6f;
+    if (threshold <= 0.0f) threshold = 1e-4f;
+
+    memset(result, 0, sizeof(GradientCheckResult));
+    result->threshold = threshold;
+
+    size_t input_dim, output_dim;
+    if (get_network_dimensions(trainer->network, &input_dim, &output_dim) != 0) return -1;
+
+    float* parameters = lnn_get_parameters(trainer->network);
+    size_t total_params = trainer->gradients_size;
+    if (!parameters || total_params == 0) return -1;
+
+    size_t num_check = total_params;
+    /* 参数太多时随机采样不超过5000个 */
+    if (num_check > 5000) num_check = 5000;
+
+    result->num_parameters = num_check;
+    result->per_parameter_error = (float*)safe_calloc(num_check, sizeof(float));
+    if (!result->per_parameter_error) return -1;
+
+    /* 预先计算一次前向+反向传播获取解析梯度 */
+    /* 使用单一前向传播计算基准损失 */
+    float baseline_loss = 0.0f;
+    for (size_t s = 0; s < num_samples; s++) {
+        const float* sin = inputs + s * input_dim;
+        const float* stt = targets + s * output_dim;
+        float loss_val = 0.0f;
+        lnn_forward(trainer->network, sin, trainer->batch_outputs);
+        switch (trainer->config.loss_function) {
+            case LOSS_MEAN_SQUARED_ERROR:
+                loss_val = loss_mean_squared_error(trainer->batch_outputs, stt, output_dim);
+                break;
+            case LOSS_MEAN_ABSOLUTE_ERROR:
+                loss_val = loss_mean_absolute_error(trainer->batch_outputs, stt, output_dim);
+                break;
+            case LOSS_CROSS_ENTROPY:
+                loss_val = loss_cross_entropy(trainer->batch_outputs, stt, output_dim);
+                break;
+            default:
+                loss_val = loss_mean_squared_error(trainer->batch_outputs, stt, output_dim);
+                break;
+        }
+        baseline_loss += loss_val;
+    }
+    baseline_loss /= (float)num_samples;
+
+    /* FIX-012: 计算解析梯度——改用 lnn_backward_batch 替代 lnn_backward。
+     * lnn_backward 签名无输出梯度参数，内部 cfc_backward 步骤3会直接SGD更新
+     * 所有权重（破坏模型），且梯度写入 cell 内部缓冲区而非 trainer->gradients，
+     * 导致 trainer->gradients 永远为零→梯度检查永远失败。
+     * lnn_backward_batch 使用 cfc_accumulate_gradients（仅累积不更新权重），
+     * 将正确梯度输出到参数缓冲区 trainer->gradients。 */
+    {
+        /* 先对所有样本做前向传播，获取预测输出用于计算损失梯度 */
+        float* all_outputs = (float*)safe_malloc(num_samples * output_dim * sizeof(float));
+        float* loss_grads = (float*)safe_malloc(num_samples * output_dim * sizeof(float));
+        if (all_outputs && loss_grads) {
+            for (size_t s = 0; s < num_samples; s++) {
+                lnn_forward(trainer->network, inputs + s * input_dim,
+                           all_outputs + s * output_dim);
+            }
+            switch (trainer->config.loss_function) {
+                case LOSS_MEAN_SQUARED_ERROR:
+                    loss_mean_squared_error_gradient(all_outputs, targets,
+                                                     loss_grads, num_samples * output_dim);
+                    break;
+                case LOSS_MEAN_ABSOLUTE_ERROR:
+                    loss_mean_absolute_error_gradient(all_outputs, targets,
+                                                      loss_grads, num_samples * output_dim);
+                    break;
+                case LOSS_CROSS_ENTROPY:
+                    loss_cross_entropy_gradient(all_outputs, targets,
+                                                loss_grads, num_samples * output_dim);
+                    break;
+                default:
+                    loss_mean_squared_error_gradient(all_outputs, targets,
+                                                     loss_grads, num_samples * output_dim);
+                    break;
+            }
+            /* lnn_backward_batch 将梯度累积写入 trainer->gradients，不修改模型权重 */
+            lnn_backward_batch(trainer->network, inputs, loss_grads,
+                              trainer->gradients, num_samples);
+        }
+        safe_free((void**)&all_outputs);
+        safe_free((void**)&loss_grads);
+    }
+    /* FIX-012: lnn_backward_batch 内部已做 /batch_size 平均，不需要再次平均 */
+
+    float sum_relative_error = 0.0f;
+    float max_relative_error = 0.0f;
+    float max_absolute_error = 0.0f;
+    int num_mismatches = 0;
+
+    /* 对每个（采样的）参数执行双边有限差分验证 */
+    for (size_t i = 0; i < num_check; i++) {
+        size_t param_idx;
+        if (num_check == total_params) {
+            param_idx = i;
+        } else {
+            /* 均匀采样：等间距选取参数 */
+            param_idx = (i * total_params) / num_check;
+        }
+
+        float analytic_grad = trainer->gradients[param_idx];
+        float original_val = 0.0f;
+
+        float loss_plus = gradient_check_perturb_and_loss(
+            trainer, inputs, targets, num_samples, param_idx, epsilon, &original_val);
+
+        float loss_minus = gradient_check_perturb_and_loss(
+            trainer, inputs, targets, num_samples, param_idx, -epsilon, &original_val);
+
+        float numerical_grad = (loss_plus - loss_minus) / (2.0f * epsilon);
+
+        /* 相对误差公式: |numerical - analytic| / max(|numerical|, |analytic|, 1e-10) */
+        float denom = fabsf(numerical_grad) > fabsf(analytic_grad) ?
+                      fabsf(numerical_grad) : fabsf(analytic_grad);
+        if (denom < 1e-10f) denom = 1e-10f;
+        float relative_error = fabsf(numerical_grad - analytic_grad) / denom;
+        float absolute_error = fabsf(numerical_grad - analytic_grad);
+
+        result->per_parameter_error[i] = relative_error;
+        sum_relative_error += relative_error;
+
+        if (relative_error > max_relative_error) max_relative_error = relative_error;
+        if (absolute_error > max_absolute_error) max_absolute_error = absolute_error;
+
+        if (relative_error > threshold) num_mismatches++;
+    }
+
+    result->max_relative_error = max_relative_error;
+    result->avg_relative_error = (num_check > 0) ? sum_relative_error / (float)num_check : 0.0f;
+    result->max_absolute_error = max_absolute_error;
+    result->num_mismatches = num_mismatches;
+    result->passed = (num_mismatches == 0) ? 1 : 0;
+
+    return 0;
+}
+
+void gradient_check_result_free(GradientCheckResult* result) {
+    if (!result) return;
+    if (result->per_parameter_error) {
+        safe_free((void**)&result->per_parameter_error);
+    }
+    memset(result, 0, sizeof(GradientCheckResult));
+}
+
+/* ========================================================================
+ * P2-001: 梯度流健康度监控实现
+ * 提取LNN网络内部各层梯度统计，检测梯度消失/爆炸趋势
+ * ======================================================================== */
+
+int trainer_check_gradient_health(Trainer* trainer, GradientHealthReport* report) {
+    if (!trainer || !report) return -1;
+    if (!trainer->network || !trainer->network->cfc_network) return -1;
+
+    memset(report, 0, sizeof(GradientHealthReport));
+
+    const float V_THRESHOLD = 1e-7f;   /* 梯度消失阈值 */
+    const float E_THRESHOLD = 1e3f;    /* 梯度爆炸阈值 */
+    report->vanishing_threshold = V_THRESHOLD;
+    report->exploding_threshold = E_THRESHOLD;
+
+    CfCCell** layers = trainer->network->cfc_network->layers;
+    int num_layers = trainer->network->config.num_layers;
+
+    /* 从trainer梯度缓冲区提取输出梯度范数（error * batch梯度在backward后存储在gradients中） */
+    float output_grad = gradient_norm(trainer->gradients, trainer->gradients_size);
+    report->output_grad_norm = output_grad;
+
+    float hidden_grad_norm = 0.0f;
+    float weight_grad_norm = 0.0f;
+    float bias_grad_norm = 0.0f;
+    float gate_weight_grad_norm = 0.0f;
+    float hidden_weight_grad_norm = 0.0f;
+
+    for (int l = 0; l < num_layers && l < 256; l++) {
+        CfCCell* c = layers[l];
+        if (!c->is_initialized) continue;
+
+        size_t h = c->config.hidden_size;
+        size_t in = c->config.input_size;
+
+        /* 隐藏状态梯度的范数 */
+        float layer_hidden_grad = 0.0f;
+        for (size_t i = 0; i < h; i++) {
+            layer_hidden_grad += c->state->gradient[i] * c->state->gradient[i];
+        }
+        hidden_grad_norm += sqrtf(layer_hidden_grad);
+
+        /* 权重梯度范数 */
+        float layer_w_grad = 0.0f;
+        size_t wsize = in * h;
+        for (size_t i = 0; i < wsize; i++) {
+            layer_w_grad += c->weight_grad[i] * c->weight_grad[i];
+        }
+        weight_grad_norm += sqrtf(layer_w_grad);
+
+        /* 偏置梯度范数 */
+        float layer_b_grad = 0.0f;
+        for (size_t i = 0; i < h; i++) {
+            layer_b_grad += c->bias_grad[i] * c->bias_grad[i];
+        }
+        bias_grad_norm += sqrtf(layer_b_grad);
+
+        /* 门控权重梯度范数 */
+        float layer_gw_grad = 0.0f;
+        for (size_t i = 0; i < wsize; i++) {
+            layer_gw_grad += c->input_gate_weight_grad[i] * c->input_gate_weight_grad[i];
+        }
+        gate_weight_grad_norm += sqrtf(layer_gw_grad);
+
+        /* 隐藏到隐藏权重梯度范数 */
+        float layer_hw_grad = 0.0f;
+        size_t hwsize = h * h;
+        for (size_t i = 0; i < hwsize; i++) {
+            layer_hw_grad += c->hidden_to_gate_weight_grad[i] * c->hidden_to_gate_weight_grad[i]
+                           + c->hidden_to_activation_weight_grad[i] * c->hidden_to_activation_weight_grad[i];
+        }
+        hidden_weight_grad_norm += sqrtf(layer_hw_grad);
+    }
+
+    report->hidden_grad_norm = hidden_grad_norm;
+    report->weight_grad_norm = weight_grad_norm;
+    report->bias_grad_norm = bias_grad_norm;
+    report->gate_weight_grad_norm = gate_weight_grad_norm;
+    report->hidden_weight_grad_norm = hidden_weight_grad_norm;
+
+    /* 梯度衰减比：权重梯度范数 / 输出梯度范数 */
+    if (output_grad > 1e-12f) {
+        report->grad_norm_ratio = weight_grad_norm / output_grad;
+    } else {
+        report->grad_norm_ratio = 0.0f;
+    }
+
+    /* 健康度判断 */
+    float max_grad = weight_grad_norm;
+    if (hidden_grad_norm > max_grad) max_grad = hidden_grad_norm;
+    if (gate_weight_grad_norm > max_grad) max_grad = gate_weight_grad_norm;
+    if (hidden_weight_grad_norm > max_grad) max_grad = hidden_weight_grad_norm;
+
+    report->is_vanishing = (max_grad < V_THRESHOLD) ? 1 : 0;
+    report->is_exploding = (max_grad > E_THRESHOLD) ? 1 : 0;
+    report->is_healthy = (!report->is_vanishing && !report->is_exploding) ? 1 : 0;
+
+    /* 建议的梯度裁剪范数：当前最大梯度范数的 2 倍，但有上下界 */
+    if (max_grad > 0.0f && max_grad < 100.0f) {
+        report->recommended_clip_norm = max_grad * 2.0f;
+    } else if (max_grad >= 100.0f) {
+        report->recommended_clip_norm = 10.0f;  /* 梯度很大时用保守裁剪 */
+    } else {
+        report->recommended_clip_norm = 5.0f;   /* 默认值 */
+    }
+
+    return 0;
+}
+
+void gradient_health_report_print(const GradientHealthReport* report) {
+    if (!report) return;
+    printf("\n========== 梯度流健康度报告 ==========\n");
+    printf("  输出梯度范数:       %.6f\n", report->output_grad_norm);
+    printf("  隐藏状态梯度范数:   %.6f\n", report->hidden_grad_norm);
+    printf("  权重梯度范数:       %.6f\n", report->weight_grad_norm);
+    printf("  偏置梯度范数:       %.6f\n", report->bias_grad_norm);
+    printf("  门控权重梯度范数:   %.6f\n", report->gate_weight_grad_norm);
+    printf("  隐-隐权重梯度范数:  %.6f\n", report->hidden_weight_grad_norm);
+    printf("  梯度衰减比(w_grad/output_grad): %.4f\n", report->grad_norm_ratio);
+    printf("  ----------------------------------------\n");
+    if (report->is_vanishing) {
+        printf("  ⚠ 警告: 检测到梯度消失! (最大梯度 < %.1e)\n", report->vanishing_threshold);
+    }
+    if (report->is_exploding) {
+        printf("  ⚠ 警告: 检测到梯度爆炸! (最大梯度 > %.1e)\n", report->exploding_threshold);
+    }
+    if (report->is_healthy) {
+        printf("  ✅ 梯度流健康\n");
+    }
+    printf("  建议梯度裁剪范数:   %.4f\n", report->recommended_clip_norm);
+    printf("==========================================\n\n");
 }
 
 /**

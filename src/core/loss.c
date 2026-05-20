@@ -211,7 +211,10 @@ float loss_compute_ex(const float* predictions, const float* targets, int n,
             break;
     }
 
-    if (isnan(loss) || isinf(loss)) return 1e6f;
+    if (isnan(loss) || isinf(loss)) {
+        /* FIX-006: NaN/Inf损失时返回大值作为哨兵，外部调用者应据此跳过批次 */
+        return 1e6f;
+    }
     return loss;
 }
 
@@ -422,6 +425,13 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
         }
         default:
             break;
+    }
+
+    /* FIX-006: 检测并清零所有非有限梯度值，防止NaN/Inf传播到参数更新 */
+    for (i = 0; i < n; i++) {
+        if (!isfinite(gradients[i])) {
+            gradients[i] = 0.0f;
+        }
     }
 }
 

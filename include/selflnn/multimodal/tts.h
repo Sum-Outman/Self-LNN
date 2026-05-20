@@ -196,6 +196,14 @@ int tts_engine_reset(TTSEngine* engine);
 int tts_engine_set_speed(TTSEngine* engine, float speed);
 
 /**
+ * @brief 检查TTS引擎完整性
+ * 在调用 tts_synthesize 前验证引擎内部状态完整，避免深层崩溃
+ * @param engine 引擎句柄
+ * @return int 1=引擎安全可用，0=内部状态不完整
+ */
+int tts_engine_is_healthy(TTSEngine* engine);
+
+/**
  * @brief 设置音高偏移
  * @param engine 引擎句柄
  * @param pitch 音高偏移（半音，范围[-12, 12]）

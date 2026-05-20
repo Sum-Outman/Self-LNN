@@ -556,6 +556,86 @@ void weight_decay(float* weights, size_t num_weights,
 void dropout(float* activations, size_t num_activations,
              float dropout_rate, int is_training, float* mask);
 
+/* ========================================================================
+ * P1-002: 梯度验证 (Gradient Checking)
+ * 通过有限差分数值梯度验证解析梯度的正确性
+ * ======================================================================== */
+
+/**
+ * @brief 梯度验证结果
+ */
+typedef struct {
+    float max_relative_error;        /**< 最大相对误差 */
+    float avg_relative_error;        /**< 平均相对误差 */
+    float max_absolute_error;        /**< 最大绝对误差 */
+    float* per_parameter_error;      /**< 每个参数的相对误差（需调用方释放） */
+    size_t num_parameters;           /**< 参数数量 */
+    int num_mismatches;              /**< 高误差参数数量（相对误差 > threshold） */
+    int passed;                      /**< 验证是否通过（1=通过, 0=失败） */
+    float threshold;                 /**< 使用的相对误差阈值 */
+} GradientCheckResult;
+
+/**
+ * @brief 执行梯度验证
+ * 对指定批次数据，用有限差分计算数值梯度，与解析梯度比较
+ *
+ * @param trainer 训练器句柄
+ * @param inputs 输入数据 (batch_size × input_dim)
+ * @param targets 目标数据 (batch_size × output_dim)
+ * @param num_samples 样本数
+ * @param threshold 相对误差阈值（建议1e-4到1e-3），超过此值标记为不匹配
+ * @param epsilon 有限差分步长（建议1e-6到1e-5）
+ * @param result 输出验证结果（调用方需调用gradient_check_result_free释放内部缓冲区）
+ * @return int 成功返回0，失败返回-1
+ */
+int trainer_gradient_check(Trainer* trainer, const float* inputs, const float* targets,
+                           size_t num_samples, float threshold, float epsilon,
+                           GradientCheckResult* result);
+
+/**
+ * @brief 释放梯度验证结果中的动态缓冲区
+ */
+void gradient_check_result_free(GradientCheckResult* result);
+
+/* ========================================================================
+ * P2-001: 梯度流健康度监控
+ * 监控各层梯度范数、检测梯度消失/爆炸、辅助训练诊断
+ * ======================================================================== */
+
+/**
+ * @brief 梯度流健康度报告
+ */
+typedef struct {
+    float output_grad_norm;          /**< 输出层梯度范数 */
+    float hidden_grad_norm;          /**< 隐藏层梯度范数 */
+    float weight_grad_norm;          /**< 权重梯度范数 */
+    float bias_grad_norm;            /**< 偏置梯度范数 */
+    float gate_weight_grad_norm;     /**< 门控权重梯度范数 */
+    float hidden_weight_grad_norm;   /**< 隐藏到隐藏权重梯度范数 */
+    float grad_norm_ratio;           /**< 梯度范数比（weight_grad / output_grad），衡量梯度衰减 */
+    int is_vanishing;                /**< 是否检测到梯度消失（各层梯度 < 1e-7） */
+    int is_exploding;                /**< 是否检测到梯度爆炸（各层梯度 > 1e3） */
+    int is_healthy;                  /**< 梯度流是否健康 */
+    float vanishing_threshold;       /**< 梯度消失阈值 */
+    float exploding_threshold;       /**< 梯度爆炸阈值 */
+    float recommended_clip_norm;     /**< 建议的梯度裁剪范数 */
+} GradientHealthReport;
+
+/**
+ * @brief 获取当前训练步骤的梯度流健康度报告
+ * 从LNN网络内部提取各层梯度统计并分析健康状态
+ *
+ * @param trainer 训练器句柄
+ * @param report 输出健康报告
+ * @return int 成功返回0，失败返回-1
+ */
+int trainer_check_gradient_health(Trainer* trainer, GradientHealthReport* report);
+
+/**
+ * @brief 打印梯度流健康度报告到控制台
+ */
+void gradient_health_report_print(const GradientHealthReport* report);
+
 /**
  * @brief 早停检查
  * 

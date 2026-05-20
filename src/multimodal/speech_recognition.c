@@ -72,10 +72,14 @@ struct SpeechRecognizer {
     float* output_projection_bias;     /* [vocab_size] */
     int output_projection_initialized;
 
+    /* ZSFABC-F007: 输入投影权重（特征→隐藏状态）改为实例成员
+     * 之前为static变量，多实例并发时共享同一组权重导致干扰 */
+    float* input_projection_weight;    /* [hidden_size x feature_dim] */
+    int input_projection_initialized;
+
     /* 梅尔滤波器组系数（预计算） */
     float* mel_filterbank;             /* [num_mel_bins x fft_size/2+1] */
-    float* mel_filterbank_initialized;
-    int mel_filterbank_num_mels;
+    int mel_filterbank_initialized;    /* ZSFABC: 梅尔滤波器组初始化标志 */
     float* hamming_window;             /* [frame_length] */
 
     /* 词汇表 */
@@ -972,6 +976,7 @@ void speech_recognizer_free(SpeechRecognizer* recognizer) {
 
     safe_free((void**)&recognizer->output_projection_weight);
     safe_free((void**)&recognizer->output_projection_bias);
+    safe_free((void**)&recognizer->input_projection_weight);
     safe_free((void**)&recognizer->mel_filterbank);
     safe_free((void**)&recognizer->hamming_window);
     safe_free((void**)&recognizer->audio_buffer);
@@ -1031,17 +1036,15 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
     float dt = 1.0f;
     float alpha_val = 1.0f - expf(-dt / tau);
 
-    /* 初始化输入投影权重（K-005修复：使用安全随机数库） */
-    static float* input_proj = NULL;
-    static int proj_initialized = 0;
-    if (!proj_initialized) {
-        input_proj = (float*)safe_malloc(hs * (size_t)feature_dim * sizeof(float));
-        if (input_proj) {
+    /* ZSFABC-F007: 输入投影权重改为实例成员，每个识别器独立分配 */
+    if (!recognizer->input_projection_initialized) {
+        recognizer->input_projection_weight = (float*)safe_malloc(hs * (size_t)feature_dim * sizeof(float));
+        if (recognizer->input_projection_weight) {
             float scale = sqrtf(2.0f / (float)(feature_dim + (int)hs));
             for (size_t i = 0; i < hs * (size_t)feature_dim; i++) {
-                input_proj[i] = (secure_random_float() * 2.0f - 1.0f) * scale;
+                recognizer->input_projection_weight[i] = (secure_random_float() * 2.0f - 1.0f) * scale;
             }
-            proj_initialized = 1;
+            recognizer->input_projection_initialized = 1;
         }
     }
 
@@ -1079,9 +1082,9 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
 
             for (size_t i = 0; i < hs && i < 256; i++) {
                 double sum = 0.0;
-                if (input_proj) {
+                if (recognizer->input_projection_weight) {
                     for (int j = 0; j < feature_dim && j < feature_dim; j++) {
-                        sum += (double)input_proj[i * (size_t)feature_dim + j] * feat[j];
+                        sum += (double)recognizer->input_projection_weight[i * (size_t)feature_dim + j] * feat[j];
                     }
                 } else {
                     if (i < (size_t)feature_dim) sum = (double)feat[i];

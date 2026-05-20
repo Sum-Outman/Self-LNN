@@ -124,32 +124,63 @@ int evolution_engine_set_enabled(void* engine, int enabled) {
 int planning_system_set_enabled(void* planning, int enabled) {
     PlanningSystem* ps = (PlanningSystem*)planning;
     if (!ps) return -1;
-    (void)ps;
-    log_info("[能力开关] 规划系统 %s", enabled ? "已激活" : "已暂停");
+    if (enabled) {
+        /* ZSFABC-F001修复: 激活规划系统 —— 重置状态以清空过期缓存计划 */
+        planning_system_reset(ps);
+        log_info("[能力开关] 规划系统已激活（状态已重置）");
+    } else {
+        /* 禁用：重置系统以清空当前计划队列，保持结构体存活 */
+        planning_system_reset(ps);
+        log_info("[能力开关] 规划系统已暂停（计划队列已清空）");
+    }
     return 0;
 }
 
 int dialogue_processor_set_enabled(void* processor, int enabled) {
     DialogueProcessor* dp = (DialogueProcessor*)processor;
     if (!dp) return -1;
-    (void)dp;
-    log_info("[能力开关] 对话处理器 %s", enabled ? "已激活" : "已暂停");
+    if (enabled) {
+        /* ZSFABC-F001修复: 激活对话处理器 —— 清空旧上下文后重新初始化 */
+        dialogue_reset_state(dp);
+        log_info("[能力开关] 对话处理器已激活（上下文已重置）");
+    } else {
+        /* 禁用：重置对话状态，保留处理器分配 */
+        dialogue_reset_state(dp);
+        log_info("[能力开关] 对话处理器已暂停（对话状态已清空）");
+    }
     return 0;
 }
 
 int self_cognition_set_enabled(void* sc, int enabled) {
     SelfCognitionSystem* scs = (SelfCognitionSystem*)sc;
     if (!scs) return -1;
-    (void)scs;
-    log_info("[能力开关] 自我认知系统 %s", enabled ? "已激活" : "已暂停");
+    if (enabled) {
+        /* ZSFABC-F001修复: 激活自我认知 —— 重置监控状态并触发更新 */
+        self_cognition_reset(scs);
+        self_cognition_update(scs, SELF_COGNITION_STATE);
+        log_info("[能力开关] 自我认知系统已激活（监控已重置并启动）");
+    } else {
+        /* 禁用：停止执行中任务，重置系统状态 */
+        self_cognition_stop_execution(scs);
+        self_cognition_reset(scs);
+        log_info("[能力开关] 自我认知已暂停（执行已停止，状态已重置）");
+    }
     return 0;
 }
 
 int metacognition_set_enabled(void* mc, int enabled) {
     MetacognitionSystem* mcs = (MetacognitionSystem*)mc;
     if (!mcs) return -1;
-    (void)mcs;
-    log_info("[能力开关] 元认知系统 %s", enabled ? "已激活" : "已暂停");
+    if (enabled) {
+        /* ZSFABC-F001修复: 激活元认知 —— 执行中性自评以恢复推理循环 */
+        char buf[512];
+        metacognition_neutral_self_assessment(mcs, 0, buf, sizeof(buf));
+        log_info("[能力开关] 元认知系统已激活（自评循环已恢复）");
+    } else {
+        /* 禁用：保存当前自我模型状态后暂停 */
+        metacognition_save_state(mcs, NULL);
+        log_info("[能力开关] 元认知已暂停（自我模型状态已保存）");
+    }
     return 0;
 }
 

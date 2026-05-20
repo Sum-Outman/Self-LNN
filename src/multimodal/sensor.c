@@ -475,12 +475,43 @@ static int mat_inv_gj(const float* a, float* inv, int n) {
 
 int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
     if (!ekf) return -1;
-    int n = ekf->config.state_dim; (void)control;
-    for (int i = 0; i < n; i++) {
-        float vel = (i + 1 < n) ? ekf->state[i + 1] * 0.1f * dt : 0.0f;
-        ekf->state[i] += vel;
+    int n = ekf->config.state_dim;
+    /* ZSFABC-F009: 改进EKF预测，使用非线性状态转移
+     * 之前的线性近似: state[i] += state[i+1] * 0.1 * dt
+     * 现在: 使用当前状态+控制输入+非线性动力学模拟
+     * 状态结构: [位置0, 速度0, 位置1, 速度1, ...] */
+    for (int i = 0; i < n; i += 2) {
+        float pos = ekf->state[i];
+        float vel = (i + 1 < n) ? ekf->state[i + 1] : 0.0f;
+        
+        /* 控制输入加速度项（有control时使用） */
+        float accel = 0.0f;
+        if (control && i < n) {
+            accel = control[i] * 0.5f;
+        }
+        
+        /* ZSFABC-F009: 非线性二阶运动模型
+         * 位置: p_new = p + v*dt + 0.5*a*dt^2
+         * 速度: v_new = v + a*dt (带轻微阻尼) */
+        ekf->state[i] = pos + vel * dt + 0.5f * accel * dt * dt;
+        if (i + 1 < n) {
+            /* 速度阻尼模拟真实物理摩擦 (0.995 = 轻微阻尼) */
+            ekf->state[i + 1] = vel * 0.995f + accel * dt;
+            /* 噪声驱动随机扰动 */
+            ekf->state[i + 1] += (secure_random_float() - 0.5f) * 0.01f * dt;
+        }
     }
-    for (int i = 0; i < n * n; i++) ekf->covariance[i] += ekf->process_noise[i] * dt;
+    
+    /* 过程噪声协方差传播: P = F*P*F' + Q*dt */
+    /* 简化处理: 对角膨胀 + 按状态对交叉相关 */
+    for (int i = 0; i < n; i++) {
+        ekf->covariance[i * n + i] += ekf->process_noise[i * n + i] * dt;
+        if (i + 1 < n) {
+            /* 位置-速度交叉协方差膨胀 */
+            ekf->covariance[i * n + i + 1] += ekf->process_noise[i * n + i + 1] * dt * 0.5f;
+            ekf->covariance[(i + 1) * n + i] += ekf->process_noise[(i + 1) * n + i] * dt * 0.5f;
+        }
+    }
     return 0;
 }
 

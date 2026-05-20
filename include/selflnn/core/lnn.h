@@ -48,6 +48,9 @@ typedef struct {
     int enable_quaternion;          /**< 是否启用四元数增强（默认1=启用，兼容CfCCell） */
     float dropout_rate;             /**< Dropout率（0.0-1.0，默认0.0=无dropout） */
     float weight_decay;             /**< 权重衰减系数（L2正则化，默认0.0） */
+    int loss_function;              /**< FIX-003: 损失函数类型（LossType枚举值，默认0=MSE）。
+                                        反向传播时使用此字段计算正确的误差梯度，
+                                        替代之前硬编码MSE梯度导致的所有损失类型均错误。 */
 } LNNConfig;
 
 /**
@@ -184,6 +187,21 @@ int lnn_forward_safe(LNN* network, const float* input, size_t input_size,
  * @return int 成功返回0，失败返回-1
  */
 int lnn_backward(LNN* network, const float* target, float* loss);
+
+/**
+ * @brief P0-002修复: 反向传播（仅累积梯度，不更新cell级参数）
+ * 
+ * 与 lnn_backward 的区别：
+ *   - 跳过 cfc_backward 的 Step3（cell参数直接更新）
+ *   - cell级梯度保留在各cell内部缓冲区中（用于随后批量统一下发）
+ *   - 调用方须在批/epoch结束后调用 cfc_apply_cell_gradients()
+ * 
+ * @param network LNN网络句柄
+ * @param target 目标输出 [output_size]
+ * @param loss 损失值输出
+ * @return 0成功，负值失败
+ */
+int lnn_backward_accumulate(LNN* network, const float* target, float* loss);
 
 /**
  * @brief 保存网络到文件
