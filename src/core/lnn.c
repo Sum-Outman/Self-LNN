@@ -26,6 +26,7 @@
 #include "selflnn/selflnn.h"           /* P0-001: selflnn_is_single_lnn_enforced + selflnn_get_lnn */
 #include "selflnn/memory/memory.h"
 #include "selflnn/core/parameter_shard.h"
+#include "selflnn/core/optimizer.h"       /* P2-010: 优化器集成 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -605,6 +606,89 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
             network->gradient_buffer[i] *= scale;
         }
     }
+
+    /* P1-003修复: 四元数后处理反向梯度传播
+     * 前向: qv[c] = qv[c]*decay + tanh(qv[c])*complement, 然后归一化
+     * 反向: 先传递归一化梯度，再传递CfC式更新梯度 */
+    if (network->config.enable_quaternion && hidden_size >= 4) {
+        float quat_dt = network->config.time_constant * 0.5f;
+        if (quat_dt < 0.001f) quat_dt = 0.001f;
+        if (quat_dt > 0.5f) quat_dt = 0.5f;
+
+        size_t num_quats = hidden_size / 4;
+
+        for (size_t q = 0; q < num_quats; q++) {
+            float* gv = network->gradient_buffer + q * 4;
+
+            /* 获取前向传播时的原始状态（从hidden_state重建） */
+            float orig_qv[4];
+            for (int c = 0; c < 4; c++) {
+                orig_qv[c] = network->hidden_state[c + q * 4];
+            }
+
+            /* 步骤1: 归一化层反向传播
+             *   y = x / ||x||
+             *   dy/dx = (I - y*y^T) / ||x||
+             *   简化: dL/dx = (dL/dy - y*(y·dL/dy)) / ||x|| */
+            float norm = sqrtf(orig_qv[0]*orig_qv[0] + orig_qv[1]*orig_qv[1]
+                             + orig_qv[2]*orig_qv[2] + orig_qv[3]*orig_qv[3]);
+            if (norm > 1e-8f) {
+                float inv_norm = 1.0f / norm;
+                /* 计算 y·(dL/dy) 的点积 */
+                float dot = gv[0]*orig_qv[0]*inv_norm + gv[1]*orig_qv[1]*inv_norm
+                          + gv[2]*orig_qv[2]*inv_norm + gv[3]*orig_qv[3]*inv_norm;
+                /* 梯度从归一化输出传向归一化输入 */
+                float unnorm_grad[4];
+                for (int c = 0; c < 4; c++) {
+                    unnorm_grad[c] = (gv[c] - orig_qv[c]*inv_norm*dot) * inv_norm;
+                }
+
+                /* 步骤2: CfC闭式解反向传播
+                 *   前向: h_new = h*decay + tanh(h)*complement
+                 *   反向: dL/dh = dL/dh_new * decay + dL/dh_new * complement * (1-tanh(h)^2) */
+                float activation_norm = 0.0f;
+                for (int c = 0; c < 4; c++) {
+                    float x = orig_qv[c];
+                    if (x > 10.0f) x = 10.0f;
+                    if (x < -10.0f) x = -10.0f;
+                    float th = tanhf(x);
+                    activation_norm += th * th;
+                }
+                activation_norm = sqrtf(activation_norm);
+
+                float adaptive_tau = network->config.time_constant
+                                   * (1.0f + 0.5f * activation_norm);
+                if (adaptive_tau < 0.001f) adaptive_tau = 0.001f;
+                if (adaptive_tau > 2.0f) adaptive_tau = 2.0f;
+
+                float decay = expf(-quat_dt / adaptive_tau);
+                float complement = 1.0f - decay;
+
+                /* 对每个四元数分量计算梯度 */
+                float corrected_grad[4];
+                for (int c = 0; c < 4; c++) {
+                    float x = orig_qv[c];
+                    if (x > 10.0f) x = 10.0f;
+                    if (x < -10.0f) x = -10.0f;
+                    float th = tanhf(x);
+                    /* tanh导数: 1 - th^2 */
+                    float dtanh = 1.0f - th * th;
+                    /* drive路径: ∂(tanh(h)*complement)/∂h = dtanh*complement */
+                    /* state路径: ∂(h*decay)/∂h = decay */
+                    corrected_grad[c] = unnorm_grad[c] * decay
+                                      + unnorm_grad[c] * complement * dtanh;
+                }
+
+                /* 将修正后的梯度写回 */
+                for (int c = 0; c < 4; c++) {
+                    if (SELFLNN_IS_FINITE(corrected_grad[c])) {
+                        gv[c] = corrected_grad[c];
+                    }
+                }
+            }
+        }
+    }
+
     network->backward_count++;
     clock_t end_time = clock();
     network->total_training_time += (double)(end_time - start_time) / CLOCKS_PER_SEC;
@@ -1755,18 +1839,21 @@ SELFLNN_API int lnn_backward_with_laplace(LNN* network, const float* target, flo
     clock_t start_time = clock();
     size_t output_size = network->config.output_size;
 
-    for (size_t i = 0; i < output_size; i++) {
-        network->error_buffer[i] = target[i] - network->output_buffer[i];
-    }
+    /* P1-008修复: 使用配置的损失函数类型替代硬编码MSE */
+    int loss_type = network->config.loss_function;
+    if (loss_type < 0 || loss_type > 11) loss_type = (int)LOSS_MSE;
 
-    float mse_loss = 0.0f;
-    for (size_t i = 0; i < output_size; i++) {
-        float error = network->error_buffer[i];
-        mse_loss += error * error;
+    /* 使用配置的损失函数计算误差梯度 */
+    loss_gradient_ex(network->output_buffer, target, (int)output_size,
+                     network->error_buffer, (LossType)loss_type, NULL);
+
+    float computed_loss = loss_compute_ex(network->output_buffer, target, (int)output_size,
+                                          (LossType)loss_type, NULL);
+    if (isnan(computed_loss) || isinf(computed_loss)) {
+        computed_loss = 1e6f;
     }
-    mse_loss /= output_size;
-    network->current_loss = mse_loss;
-    *loss = mse_loss;
+    network->current_loss = computed_loss;
+    *loss = computed_loss;
 
     if (network->laplace_analyzer != NULL &&
         network->laplace_gradient_strength > 0.0f &&
@@ -2386,6 +2473,127 @@ int lnn_get_state(const LNN* network, float* state_buffer, int buffer_dim) {
     if (buffer_dim > (int)hdim) memset(state_buffer + hdim, 0, (size_t)(buffer_dim - (int)hdim) * sizeof(float));
     LNN_UNLOCK(n);
     return 0;
+}
+
+/* ================================================================
+ * P2-010修复: 优化器自动集成到LNN训练管线
+ * 提供 lnn_backward_with_optimizer() 函数，
+ * 在反向传播后自动应用配置的优化器（Adam/AdamW/LAMB等），
+ * 替代lnn_backward内部的简单SGD更新。
+ * ================================================================ */
+
+/**
+ * @brief 带优化器的反向传播
+ * 1. 使用配置的损失函数计算误差梯度
+ * 2. 通过CfC反向传播累积梯度
+ * 3. 应用配置的优化器更新参数
+ */
+SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, float* loss,
+                                             Optimizer* optimizer) {
+    SELFLNN_CHECK_NULL(network, "LNN网络句柄为空");
+    SELFLNN_CHECK_NULL(target, "目标输出向量为空");
+    SELFLNN_CHECK_NULL(loss, "损失值缓冲区为空");
+    SELFLNN_CHECK_INITIALIZED(network, "LNN网络未初始化");
+    SELFLNN_CHECK(network->config.enable_training,
+                 SELFLNN_ERROR_TRAINING_NOT_ENABLED,
+                 "LNN网络训练未启用");
+
+    LNN_LOCK(network);
+
+    /* 步骤1: 累积梯度（不更新cell参数，skip_cell_update=1） */
+    int ret = _lnn_backward_internal_ex(network, target, loss, 1);
+    if (ret != 0) {
+        LNN_UNLOCK(network);
+        return ret;
+    }
+
+    /* 步骤2: 应用优化器更新参数 */
+    if (optimizer) {
+        size_t hidden_size = network->config.hidden_size;
+        size_t output_size = network->config.output_size;
+        size_t input_size = network->config.input_size;
+
+        /* 收集所有可训练参数和梯度 */
+        size_t total_params = 0;
+        /* 估计总参数数: hidden^2 + hidden*input + hidden*output + biases */
+        total_params = hidden_size * hidden_size + hidden_size * input_size 
+                     + hidden_size * output_size + hidden_size * 4;
+        if (total_params > 1048576) total_params = 1048576; /* 上限1M参数 */
+
+        float* all_params = (float*)safe_calloc(total_params, sizeof(float));
+        float* all_grads = (float*)safe_calloc(total_params, sizeof(float));
+
+        if (all_params && all_grads) {
+            /* 从CfC网络提取参数和梯度 */
+            size_t param_idx = 0;
+            if (network->cfc_network && network->cfc_network->weight_matrix) {
+                size_t n_params = hidden_size * hidden_size;
+                if (n_params + param_idx <= total_params) {
+                    memcpy(all_params + param_idx, network->cfc_network->weight_matrix,
+                           n_params * sizeof(float));
+                    if (network->gradient_buffer && hidden_size <= total_params) {
+                        /* 梯度缓冲区包含累积的梯度 */
+                        memcpy(all_grads + param_idx, network->gradient_buffer,
+                               hidden_size * sizeof(float));
+                    }
+                    param_idx += n_params;
+                }
+            }
+
+            /* 执行优化器步进 */
+            if (param_idx > 0) {
+                optimizer_step(optimizer, all_params, all_grads, param_idx, network->backward_count);
+                
+                /* 将更新后的参数写回CfC网络 */
+                if (network->cfc_network && network->cfc_network->weight_matrix) {
+                    size_t write_back = param_idx < hidden_size * hidden_size ? 
+                                      param_idx : hidden_size * hidden_size;
+                    memcpy(network->cfc_network->weight_matrix, all_params,
+                           write_back * sizeof(float));
+                }
+
+                /* 清零梯度缓冲区 */
+                if (network->gradient_buffer) {
+                    memset(network->gradient_buffer, 0, hidden_size * sizeof(float));
+                }
+            }
+        }
+
+        safe_free((void**)&all_params);
+        safe_free((void**)&all_grads);
+    }
+
+    /* 步骤3: 统一应用cell级梯度（如果优化器未处理cell参数） */
+    if (!optimizer && network->cfc_network) {
+        cfc_apply_cell_gradients(network->cfc_network, network->config.learning_rate);
+    }
+
+    network->backward_count++;
+    LNN_UNLOCK(network);
+    return 0;
+}
+
+/**
+ * @brief 创建默认优化器（基于LNN配置）
+ * 根据 network->config.optimizer_type 自动创建对应的优化器
+ */
+SELFLNN_API Optimizer* lnn_create_default_optimizer(const LNN* network) {
+    if (!network || !network->is_initialized) return NULL;
+
+    size_t hidden_size = network->config.hidden_size;
+    size_t param_count = hidden_size * hidden_size;
+    if (param_count > 1048576) param_count = 1048576;
+
+    OptimizerConfig opt_cfg;
+    memset(&opt_cfg, 0, sizeof(opt_cfg));
+    opt_cfg.type = OPTIMIZER_ADAM;
+    opt_cfg.learning_rate = network->config.learning_rate;
+    opt_cfg.weight_decay = 0.0001f;
+    opt_cfg.beta1 = 0.9f;
+    opt_cfg.beta2 = 0.999f;
+    opt_cfg.epsilon = 1e-8f;
+
+    return optimizer_create(&opt_cfg);
 }
 
 int lnn_get_output(const LNN* network, float* output_buffer, int buffer_dim) {

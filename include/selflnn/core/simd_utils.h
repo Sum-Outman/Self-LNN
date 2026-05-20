@@ -18,6 +18,12 @@ extern "C" {
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__SSE2__)
+/* P7-001修复: MSVC不支持C99 restrict，用__restrict替代 */
+#if defined(_MSC_VER)
+#define RESTRICT __restrict
+#else
+#define RESTRICT restrict
+#endif
 #include <emmintrin.h>
 #include <xmmintrin.h>
 #if defined(__AVX__) || defined(__AVX2__)
@@ -192,7 +198,7 @@ static inline void simd_gate_apply(const float* gate, const float* x,
     for (; i < n; i++) y[i] = gate[i] * x[i] + (1.0f - gate[i]) * state[i];
 }
 
-static inline void simd_sgd_update(float* restrict w, const float* restrict g,
+static inline void simd_sgd_update(float* RESTRICT w, const float* RESTRICT g,
                                     float lr, float wd, int n) {
     int i = 0;
 #if defined(__AVX__)

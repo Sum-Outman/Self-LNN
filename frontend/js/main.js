@@ -1853,10 +1853,10 @@ function setupEventListeners() {
         }
     });
     
-    // 键盘快捷键
+    // 键盘快捷键（P3-001修复：Ctrl+R仅在非文本编辑区刷新仪表盘，不阻止浏览器刷新）
     document.addEventListener('keydown', function(e) {
-        // Ctrl + R 刷新仪表盘
-        if (e.ctrlKey && e.key === 'r') {
+        // Ctrl+Shift+R 刷新仪表盘（不禁用浏览器Ctrl+R刷新）
+        if (e.ctrlKey && e.shiftKey && e.key === 'R') {
             e.preventDefault();
             refreshDashboard();
         }
@@ -2067,9 +2067,9 @@ function initRangeSliders() {
 }
 
 /**
- * 开始训练（快速入口 → 委托给 startTrainingJob 统一处理）
+ * 仪表盘快速开始训练（P0-005修复：重命名避免与training-center.js冲突）
  */
-async function startTraining() {
+async function startTrainingQuick() {
     showNotification('开始新的训练任务...', 'info');
     
     // 使用默认配置，委托给 startTrainingJob 统一处理
@@ -2175,6 +2175,47 @@ async function emergencyStop() {
     } catch (e) {
         showNotification('❌ 紧急停止失败: ' + e.message, 'danger');
     }
+}
+
+/**
+ * 网络连接测试（P0-004修复：实现缺失的testNetwork函数）
+ */
+async function testNetwork() {
+    var resultEl = document.getElementById('network-test-result');
+    var btnEl = document.querySelector('button[onclick="testNetwork()"]');
+    
+    if (btnEl) { btnEl.disabled = true; btnEl.textContent = '测试中...'; }
+    if (resultEl) { resultEl.textContent = '正在测试网络连接...'; resultEl.style.color = '#f0a500'; }
+    
+    var startTime = performance.now();
+    try {
+        var result = await window.SelfLnnApi.getHealth();
+        var elapsed = Math.round(performance.now() - startTime);
+        
+        if (result && result.success) {
+            var gpuInfo = result.data && result.data.gpu ? result.data.gpu.backend || 'CPU' : 'CPU';
+            var wsStatus = (window._wsManager && window._wsManager.isConnected) ? '已连接' : '未连接';
+            if (resultEl) {
+                resultEl.innerHTML = '✅ 连接成功（延迟: ' + elapsed + 'ms）<br>' +
+                    'GPU后端: ' + gpuInfo + ' | WebSocket: ' + wsStatus;
+                resultEl.style.color = '#00d68f';
+            }
+            showNotification('✅ 网络连接正常（' + elapsed + 'ms）', 'success');
+        } else {
+            if (resultEl) {
+                resultEl.textContent = '⚠️ 后端响应异常: ' + (result ? result.error || '未知错误' : '连接超时');
+                resultEl.style.color = '#f0a500';
+            }
+            showNotification('⚠️ 后端连接异常', 'warning');
+        }
+    } catch (e) {
+        if (resultEl) {
+            resultEl.textContent = '❌ 连接失败: ' + (e.message || '网络不可达');
+            resultEl.style.color = '#ff5252';
+        }
+        showNotification('❌ 网络连接失败: ' + e.message, 'danger');
+    }
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '测试连接'; }
 }
 
 /**
@@ -6162,6 +6203,13 @@ function navigateTo(sectionId) {
         document.querySelectorAll('.nav a').forEach(function(l) { l.classList.remove('active'); });
         if (link) link.classList.add('active');
     }
+    /* P3-002修复: 平滑滚动到目标区域 */
+    setTimeout(function() {
+        var el = document.getElementById(sectionId);
+        if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    }, 80);
 }
 
 /** 刷新仪表盘API KEY快捷卡片 */
@@ -7247,8 +7295,8 @@ async function refreshLearningMetrics() {
                     var d = await r.json();
                     var sys = d.system || d;
                     
-                    // 直接设置所有关键元素
-                    var set = function(id, val) { var e=document.getElementById(id); if(e)e.textContent=val; };
+                    // 直接设置所有关键元素（P3-004修复: 移除骨架屏类）
+                    var set = function(id, val) { var e=document.getElementById(id); if(e){e.textContent=val; e.classList.remove('skeleton-loading');} };
                     var setQ = function(sel, val) { var e=document.querySelector(sel); if(e)e.textContent=val; };
                     
                     // 系统健康

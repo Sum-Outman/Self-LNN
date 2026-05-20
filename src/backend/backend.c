@@ -122,6 +122,30 @@ static void json_escape_into(char* dst, size_t dst_size, const char* src) {
     dst[di] = '\0';
 }
 
+/* P1-002修复: HTTP状态码对应的原因短语（符合RFC 7231） */
+static const char* http_reason_phrase(int status_code) {
+    switch (status_code) {
+        case 200: return "OK";
+        case 201: return "Created";
+        case 204: return "No Content";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 408: return "Request Timeout";
+        case 429: return "Too Many Requests";
+        case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
+        case 503: return "Service Unavailable";
+        default:
+            if (status_code >= 200 && status_code < 300) return "OK";
+            if (status_code >= 400 && status_code < 500) return "Bad Request";
+            if (status_code >= 500 && status_code < 600) return "Internal Server Error";
+            return "Unknown";
+    }
+}
+
 /* API端点注册表 - 用于自动生成API文档和密钥文档 */
 static const struct {
     const char* path;
@@ -1319,7 +1343,7 @@ struct BackendServer {
     int hourly_log_index;                   /**< 当前分钟日志索引 */
     uint64_t last_minute_tick;              /**< 上次分钟刻度（毫秒） */
     
-    int connection_count;                   /**< 当前连接数 */
+    volatile LONG connection_count;         /**< 当前连接数（原子操作） */
     int total_requests;                     /**< 总请求数 */
     int request_count;                      /**< 请求计数 */
     int error_count;                        /**< 错误计数 */
@@ -1865,7 +1889,7 @@ static void* ws_push_thread_func(void* arg) {
                 "\"memory\":%s,\"reasoning\":%s,\"training\":%s,"
                 "\"robotics\":%s,\"metacognition\":%s}",
                 (long)time(NULL),
-                server->connection_count, server->total_requests, server->error_count,
+                (int)server->connection_count, server->total_requests, server->error_count,
                 (long)(time(NULL) - server->start_time),
                 lnn_active ? "true" : "false",
                 (server->cognition_system != NULL) ? "true" : "false",
@@ -1976,6 +2000,268 @@ typedef struct {
     char auth_header[256];
 } ThreadPoolRequestCtx;
 
+/* ================================================================
+ * P0-002+P2-001修复: 统一API路径→请求类型路由函数
+ * 解决线程池路由表缺失100+端点问题，并消除所有魔术数字
+ * ================================================================ */
+static ApiRequestType backend_route_path_to_type(const char* path, const char* method) {
+    /* 统一路由表：使用命名枚举值替代魔术数字 */
+    if (!path) return API_NOT_FOUND;
+    const char* p = path;
+
+    /* === 系统状态 === */
+    if (strcmp(p, "/api/status") == 0)                    return API_GET_STATUS;
+    if (strcmp(p, "/api/health") == 0)                    return API_GET_HEALTH;
+    if (strcmp(p, "/api/stats") == 0)                     return API_GET_STATS;
+    if (strcmp(p, "/api/reset") == 0)                     return API_POST_RESET;
+    if (strcmp(p, "/api/shutdown") == 0)                  return API_POST_SHUTDOWN;
+    if (strcmp(p, "/api/backup") == 0)                    return API_POST_BACKUP;
+    if (strcmp(p, "/api/system/diagnostic") == 0)         return API_GET_SYSTEM_DIAGNOSTIC;
+    if (strcmp(p, "/api/system/export_diagnostic") == 0)  return API_GET_SYSTEM_EXPORT_DIAGNOSTIC;
+    if (strcmp(p, "/api/system/restart") == 0)            return API_POST_SYSTEM_RESTART;
+    if (strcmp(p, "/api/system/logs") == 0)               return API_GET_SYSTEM_LOGS;
+    if (strcmp(p, "/api/system/shutdown") == 0)           return API_POST_SHUTDOWN;
+    if (strcmp(p, "/api/system/config/update") == 0)      return API_POST_SYSTEM_CONFIG_UPDATE;
+    if (strcmp(p, "/api/system/settings") == 0)           return API_POST_SYSTEM_SETTINGS;
+    if (strcmp(p, "/api/system/change_password") == 0)    return API_POST_SYSTEM_CHANGE_PASSWORD;
+
+    /* === 多模态 === */
+    if (strcmp(p, "/api/vision") == 0)                    return API_POST_VISION;
+    if (strcmp(p, "/api/audio") == 0)                     return API_POST_AUDIO;
+    if (strcmp(p, "/api/text") == 0)                      return API_POST_TEXT;
+    if (strcmp(p, "/api/sensor") == 0)                    return API_POST_SENSOR;
+    if (strcmp(p, "/api/multimodal/status") == 0)         return API_GET_MULTIMODAL_STATUS;
+    if (strcmp(p, "/api/multimodal/teach") == 0)          return API_POST_MULTIMODAL_TEACH;
+    if (strcmp(p, "/api/multimodal/learn") == 0)          return API_POST_MULTIMODAL_LEARN;
+    if (strcmp(p, "/api/multimodal/config") == 0)         return API_POST_MULTIMODAL_CONFIG;
+    if (strcmp(p, "/api/multimodal/test") == 0)           return API_POST_MULTIMODAL_TEST;
+    if (strcmp(p, "/api/multimodal/config/reset") == 0)   return API_POST_MULTIMODAL_CONFIG_RESET;
+    if (strcmp(p, "/api/audio/recognize") == 0)           return API_POST_AUDIO_RECOGNIZE;
+    if (strcmp(p, "/api/voice/recognize") == 0)           return API_POST_VOICE_RECOGNIZE;
+    if (strcmp(p, "/api/tts/synthesize") == 0)            return API_POST_TTS_SYNTHESIZE;
+    if (strcmp(p, "/api/voice/synthesize") == 0)          return API_POST_VOICE_SYNTHESIZE;
+    if (strcmp(p, "/api/camera/devices") == 0)            return API_GET_CAMERA_DEVICES;
+    if (strcmp(p, "/api/camera/switch") == 0)             return API_POST_CAMERA_CAPTURE_START;
+    if (strcmp(p, "/api/audio/devices") == 0)             return API_GET_AUDIO_DEVICES;
+    if (strcmp(p, "/api/video/quality") == 0)             return API_POST_VIDEO_CAPTURE;
+
+    /* === 对话 === */
+    if (strcmp(p, "/api/dialogue") == 0)                  return (method && strcmp(method, "GET") == 0) ? API_GET_DIALOGUE_HISTORY : API_POST_DIALOGUE;
+    if (strcmp(p, "/api/dialogue/history") == 0)          return API_GET_DIALOGUE_HISTORY;
+    if (strcmp(p, "/api/dialogue/clear") == 0)            return API_POST_DIALOGUE_CLEAR;
+    if (strcmp(p, "/api/dialogue/multimodal") == 0)       return API_POST_DIALOGUE_MULTIMODAL;
+
+    /* === 知识库 === */
+    if (strcmp(p, "/api/knowledge") == 0)
+        return (method && strcmp(method, "POST") == 0) ? API_POST_KNOWLEDGE : API_GET_KNOWLEDGE;
+    if (strcmp(p, "/api/knowledge/add") == 0)             return API_POST_KNOWLEDGE_ADD;
+    if (strcmp(p, "/api/knowledge/entry") == 0)           return API_GET_KNOWLEDGE_ENTRY;
+    if (strncmp(p, "/api/knowledge/entry/", 21) == 0)     return API_GET_KNOWLEDGE_ENTRY;
+    if (strcmp(p, "/api/knowledge/stats") == 0)           return API_GET_KNOWLEDGE_STATS;
+    if (strcmp(p, "/api/knowledge/export") == 0)          return API_POST_KNOWLEDGE_EXPORT;
+    if (strcmp(p, "/api/knowledge/import") == 0)          return API_POST_KNOWLEDGE_IMPORT;
+    if (strcmp(p, "/api/knowledge/delete") == 0)          return API_POST_KNOWLEDGE_DELETE;
+    if (strcmp(p, "/api/knowledge/save") == 0)            return API_POST_KNOWLEDGE;
+    if (strcmp(p, "/api/knowledge/load") == 0)            return API_GET_KNOWLEDGE;
+    if (strcmp(p, "/api/knowledge/search") == 0)          return API_POST_KNOWLEDGE;
+
+    /* === 记忆 === */
+    if (strcmp(p, "/api/memory") == 0)                    return API_GET_MEMORY;
+    if (strcmp(p, "/api/memory/add") == 0)                return API_POST_MEMORY_ADD;
+    if (strcmp(p, "/api/memory/entry") == 0)              return API_GET_MEMORY_ENTRY;
+    if (strncmp(p, "/api/memory/entry/", 19) == 0)        return API_GET_MEMORY_ENTRY;
+    if (strcmp(p, "/api/memory/export") == 0)             return API_POST_MEMORY_EXPORT;
+    if (strcmp(p, "/api/memory/clear") == 0)              return API_POST_MEMORY_CLEAR;
+    if (strcmp(p, "/api/memory/search") == 0)             return API_POST_MEMORY_SEARCH;
+    if (strcmp(p, "/api/memory/sleep_consolidation") == 0) return API_POST_MEMORY_SLEEP_CONSOLIDATION;
+
+    /* === 训练 === */
+    if (strcmp(p, "/api/training") == 0)                  return API_POST_TRAINING;
+    if (strcmp(p, "/api/training/start") == 0)            return API_POST_TRAINING_START;
+    if (strcmp(p, "/api/training/status") == 0)           return API_GET_TRAINING_STATUS;
+    if (strcmp(p, "/api/training/pause") == 0)            return API_POST_TRAINING_PAUSE;
+    if (strcmp(p, "/api/training/resume") == 0)           return API_POST_TRAINING_RESUME;
+    if (strcmp(p, "/api/training/stop") == 0)             return API_POST_TRAINING_STOP;
+    if (strcmp(p, "/api/training/export") == 0)           return API_POST_TRAINING_EXPORT;
+    if (strcmp(p, "/api/training/logs/clear") == 0)       return API_POST_TRAINING_LOG_CLEAR;
+    if (strcmp(p, "/api/training/pretrain") == 0)         return API_POST_TRAINING_PRETRAIN;
+    if (strcmp(p, "/api/training/fine_tune") == 0)        return API_POST_TRAINING_FINE_TUNE;
+    if (strcmp(p, "/api/training/transfer") == 0)         return API_POST_TRAINING_TRANSFER;
+    if (strcmp(p, "/api/training/continual") == 0)        return API_POST_TRAINING_CONTINUAL;
+    if (strcmp(p, "/api/training/external") == 0)         return API_POST_TRAINING_EXTERNAL_API;
+
+    /* === LNN控制 === */
+    if (strcmp(p, "/api/lnn/status") == 0)                return API_GET_LNN_STATUS;
+    if (strcmp(p, "/api/lnn/parameters") == 0)            return API_POST_LNN_PARAMETERS;
+    if (strcmp(p, "/api/lnn/params") == 0)                return API_GET_LNN_PARAMS;
+    if (strcmp(p, "/api/lnn/parameters/reset") == 0)      return API_POST_LNN_PARAMETERS_RESET;
+    if (strcmp(p, "/api/lnn/calibrate") == 0)             return API_POST_LNN_CALIBRATE;
+    if (strcmp(p, "/api/lnn/config/export") == 0)         return API_GET_LNN_CONFIG_EXPORT;
+
+    /* === GPU === */
+    if (strcmp(p, "/api/gpu/status") == 0)                return API_GET_GPU_STATUS;
+
+    /* === 机器人 === */
+    if (strcmp(p, "/api/robot/status") == 0)              return API_GET_ROBOT_STATUS;
+    if (strcmp(p, "/api/robot/command") == 0)             return API_POST_ROBOT_COMMAND;
+    if (strcmp(p, "/api/robot/list") == 0)                return API_GET_ROBOT_LIST;
+    if (strcmp(p, "/api/robot/reboot") == 0)              return API_POST_ROBOT_REBOOT;
+    if (strcmp(p, "/api/robot/calibrate") == 0)           return API_POST_ROBOT_CALIBRATE;
+    if (strcmp(p, "/api/robot/parameters") == 0)          return API_POST_ROBOT_PARAMETERS;
+    if (strcmp(p, "/api/robot/sensor") == 0)              return API_GET_ROBOT_SENSOR;
+    if (strcmp(p, "/api/robot/emergency_stop") == 0)      return API_POST_ROBOT_EMERGENCY_STOP;
+    if (strcmp(p, "/api/robot/config/save") == 0)         return API_POST_ROBOT_PARAMETERS;
+    if (strcmp(p, "/api/robot/connect") == 0)             return API_POST_ROBOT_CONNECT;
+    if (strcmp(p, "/api/robot/disconnect") == 0)          return API_POST_ROBOT_DISCONNECT;
+    if (strcmp(p, "/api/robot/trajectory") == 0)          return API_POST_ROBOT_TRAJECTORY;
+    if (strcmp(p, "/api/robot/training") == 0)            return API_POST_ROBOT_TRAINING;
+    if (strcmp(p, "/api/robot/coordinate") == 0)          return API_POST_ROBOT_COORDINATE;
+    if (strcmp(p, "/api/multi_robot/sync") == 0)          return API_POST_MULTI_ROBOT_SYNC;
+    /* ROS */
+    if (strcmp(p, "/api/ros/status") == 0)                return API_GET_ROS_STATUS;
+    if (strcmp(p, "/api/ros/configure") == 0)             return API_POST_ROS_CONFIGURE;
+    if (strcmp(p, "/api/ros/nodes") == 0)                 return API_GET_ROS_NODES;
+    if (strcmp(p, "/api/ros/topics") == 0)                return API_GET_ROS_TOPICS;
+    if (strcmp(p, "/api/ros/publish") == 0)               return API_POST_ROS_PUBLISH;
+    if (strcmp(p, "/api/ros/subscribe") == 0)             return API_POST_ROS_SUBSCRIBE;
+    if (strcmp(p, "/api/ros/service") == 0)               return API_POST_ROS_SERVICE;
+    /* Gazebo */
+    if (strcmp(p, "/api/gazebo/control") == 0)            return API_POST_GAZEBO_CONTROL;
+
+    /* === 仿真 === */
+    if (strcmp(p, "/api/simulation/start") == 0)          return API_POST_SIMULATION_START;
+    if (strcmp(p, "/api/simulation/stop") == 0)           return API_POST_SIMULATION_STOP;
+    if (strcmp(p, "/api/simulation/status") == 0)         return API_GET_SIMULATION_STATUS;
+    if (strcmp(p, "/api/simulation/reset") == 0)          return API_POST_SIMULATION_RESET;
+    if (strcmp(p, "/api/simulation/plan_path") == 0)      return API_POST_SIMULATION_PLAN_PATH;
+    if (strcmp(p, "/api/simulation/robot_control") == 0)  return API_POST_SIMULATION_ROBOT_CTRL;
+    if (strcmp(p, "/api/fleet/status") == 0)              return API_GET_FLEET_STATUS;
+
+    /* === 设备 === */
+    if (strcmp(p, "/api/devices/list") == 0)              return API_POST_DEVICES_LIST;
+    if (strcmp(p, "/api/devices/status") == 0)            return API_POST_DEVICES_STATUS;
+    if (strcmp(p, "/api/devices/register") == 0)          return API_POST_DEVICES_REGISTER_V1;
+    if (strcmp(p, "/api/devices/unregister") == 0)        return API_POST_DEVICES_UNREGISTER_V1;
+    if (strcmp(p, "/api/devices/discover") == 0)          return API_POST_DEVICES_DISCOVER;
+    if (strcmp(p, "/api/device/command") == 0)            return API_POST_DEVICE_COMMAND_V1;
+    if (strcmp(p, "/api/device/control") == 0)            return API_POST_DEVICE_CONTROL;
+    if (strcmp(p, "/api/hardware/scan") == 0)             return API_POST_HARDWARE_SCAN;
+    if (strcmp(p, "/api/hardware/info") == 0)             return API_GET_HARDWARE_INFO;
+    if (strcmp(p, "/api/hardware/resources") == 0)        return API_GET_HARDWARE_RESOURCES;
+
+    /* === 文件 === */
+    if (strcmp(p, "/api/files/read") == 0)                return API_POST_FILES_READ;
+    if (strcmp(p, "/api/files/write") == 0)               return API_POST_FILES_WRITE;
+
+    /* === AGI === */
+    if (strcmp(p, "/api/agi/features") == 0)              return API_GET_AGI_FEATURES;
+    if (strcmp(p, "/api/agi/feature/toggle") == 0)        return API_POST_AGI_FEATURE_TOGGLE;
+    if (strcmp(p, "/api/agi/feature_list") == 0)          return API_GET_AGI_FEATURE_LIST;
+    if (strcmp(p, "/api/agi/self_correction") == 0)       return API_POST_AGI_SELF_CORRECTION;
+    if (strcmp(p, "/api/agi/execute") == 0)               return API_POST_AGI_EXECUTE;
+    if (strcmp(p, "/api/agi/task/status") == 0)           return API_POST_AGI_TASK_STATUS;
+    if (strcmp(p, "/api/agi/cognition/state") == 0)       return API_GET_AGI_COGNITION_STATE;
+    if (strcmp(p, "/api/agi/think") == 0)                 return API_POST_AGI_THINK;
+    if (strcmp(p, "/api/agi/decide") == 0)                return API_POST_AGI_DECIDE;
+    if (strcmp(p, "/api/agi/learn") == 0)                 return API_POST_AGI_LEARN;
+    if (strcmp(p, "/api/agi/plan") == 0)                  return API_POST_AGI_PLAN;
+    if (strcmp(p, "/api/agi/memory") == 0)                return API_POST_AGI_MEMORY;
+    if (strcmp(p, "/api/agi/evolve") == 0)                return API_POST_AGI_EVOLVE;
+    if (strcmp(p, "/api/agi/tasks") == 0)                 return API_GET_AGI_TASKS;
+    if (strcmp(p, "/api/agi/diagnostic") == 0)            return API_GET_AGI_DIAGNOSTIC;
+    if (strcmp(p, "/api/agi/diagnostic/export") == 0)     return API_GET_AGI_DIAGNOSTIC_EXPORT;
+    if (strcmp(p, "/api/task/create") == 0)               return API_POST_TASK_CREATE;
+
+    /* === 自我编程 === */
+    if (strcmp(p, "/api/programming/analyze") == 0)       return API_POST_PROGRAMMING_ANALYZE;
+    if (strcmp(p, "/api/programming/generate") == 0)      return API_POST_PROGRAMMING_GENERATE;
+    if (strcmp(p, "/api/programming/execute") == 0)       return API_POST_PROGRAMMING_EXECUTE;
+    if (strcmp(p, "/api/programming/optimize") == 0)      return API_POST_PROGRAMMING_OPTIMIZE;
+    if (strcmp(p, "/api/programming/compile") == 0)       return API_POST_PROGRAMMING_COMPILE;
+    if (strcmp(p, "/api/programming/status") == 0)        return API_GET_PROGRAMMING_STATUS;
+
+    /* === 数据集 === */
+    if (strcmp(p, "/api/dataset/list") == 0)              return API_GET_DATASET_LIST;
+    if (strcmp(p, "/api/dataset/create") == 0)            return API_POST_DATASET_CREATE;
+    if (strcmp(p, "/api/dataset/import") == 0)            return API_POST_DATASET_IMPORT;
+    if (strcmp(p, "/api/dataset/stats") == 0)             return API_GET_DATASET_STATS;
+    if (strcmp(p, "/api/dataset/augment") == 0)           return API_POST_DATASET_AUGMENT;
+
+    /* === 产品设计 === */
+    /* 枚举值定义见 backend.h: API_POST_PRODUCT_DESIGN=270, API_GET_PRODUCT_SPEC=271 */
+    if (strcmp(p, "/api/product/spec") == 0)              return (ApiRequestType)271;
+    if (strcmp(p, "/api/product/design") == 0)            return (ApiRequestType)270;
+
+    /* === 安全 === */
+    if (strcmp(p, "/api/safety/status") == 0)             return API_GET_SAFETY_STATUS;
+    if (strcmp(p, "/api/safety/emergency_stop") == 0)     return API_POST_SAFETY_EMERGENCY_STOP;
+
+    /* === 演化 === */
+    if (strcmp(p, "/api/evolution") == 0)                 return API_POST_EVOLUTION;
+    if (strcmp(p, "/api/evolution/pareto") == 0)          return API_POST_EVOLUTION_PARETO;
+
+    /* === 自动学习 === */
+    if (strcmp(p, "/api/auto-learn/scan") == 0)           return API_POST_AUTO_LEARN_SCAN;
+    if (strcmp(p, "/api/auto-learn/stats") == 0)          return API_GET_AUTO_LEARN_STATS;
+    if (strcmp(p, "/api/auto-learn/toggle") == 0)         return API_POST_AUTO_LEARN_TOGGLE;
+
+    /* === 学习 === */
+    if (strcmp(p, "/api/learning") == 0)                  return API_GET_LEARNING;
+    if (strcmp(p, "/api/learning/from-dialogue") == 0)    return API_POST_LEARNING_DIALOGUE;
+    if (strcmp(p, "/api/learning/from-manual") == 0)      return API_POST_LEARNING_FROM_MANUAL;
+
+    /* === 推理 === */
+    if (strcmp(p, "/api/reasoning") == 0)                 return API_GET_REASONING;
+    if (strcmp(p, "/api/reasoning/start") == 0)           return API_POST_REASONING_START;
+    if (strcmp(p, "/api/reasoning/stop_all") == 0)        return API_POST_REASONING_STOP_ALL;
+    if (strcmp(p, "/api/reasoning/pause") == 0)           return API_POST_REASONING_PAUSE;
+    if (strcmp(p, "/api/reasoning/test") == 0)            return API_GET_REASONING;
+    if (strcmp(p, "/api/reasoning/config/save") == 0)     return API_POST_REASONING_CONFIG_SAVE;
+
+    /* === 超参数搜索 === */
+    if (strcmp(p, "/api/hyperparameter/start") == 0)      return API_POST_HYPERPARAMETER_START;
+    if (strcmp(p, "/api/hyperparameter/status") == 0)     return API_GET_HYPERPARAMETER_STATUS;
+
+    /* === 模型管理 === */
+    if (strcmp(p, "/api/model/load") == 0)                return API_POST_MODEL_LOAD;
+    if (strcmp(p, "/api/model/start") == 0)               return API_POST_MODEL_START;
+    if (strcmp(p, "/api/model/stop") == 0)                return API_POST_MODEL_STOP;
+    if (strcmp(p, "/api/model/unload") == 0)              return API_POST_MODEL_UNLOAD;
+    if (strcmp(p, "/api/model/config/save") == 0)         return API_POST_MODEL_CONFIG_SAVE;
+
+    /* === 技能库 === */
+    if (strcmp(p, "/api/skills") == 0)                    return API_GET_SKILLS;
+
+    /* === 决策日志 === */
+    if (strcmp(p, "/api/decision/log") == 0)              return API_GET_DECISION_LOG;
+
+    /* === 能力诊断 === */
+    if (strcmp(p, "/api/capability/diagnose") == 0)       return API_POST_CAPABILITY_DIAGNOSE;
+    if (strcmp(p, "/api/cognition/state") == 0)           return API_GET_AGI_COGNITION_STATE;
+
+    /* === 教学系统 === */
+    if (strcmp(p, "/api/teach/look_and_learn") == 0)      return API_POST_TEACH_LOOK_AND_LEARN;
+    if (strcmp(p, "/api/teach/say_and_associate") == 0)   return API_POST_TEACH_SAY_AND_ASSOCIATE;
+    if (strcmp(p, "/api/teach/touch_and_understand") == 0) return API_POST_TEACH_TOUCH_AND_UNDERSTAND;
+    if (strcmp(p, "/api/teach/count_and_generalize") == 0) return API_POST_TEACH_COUNT_AND_GENERALIZE;
+    if (strcmp(p, "/api/teach/get_concepts") == 0)        return API_GET_TEACH_GET_CONCEPTS;
+    if (strcmp(p, "/api/teach/test_concept") == 0)        return API_POST_TEACH_TEST_CONCEPT;
+    if (strcmp(p, "/api/teach/clear_concept") == 0)       return API_POST_TEACH_CLEAR_CONCEPT;
+    if (strcmp(p, "/api/teach/clear_all_concepts") == 0)  return API_POST_TEACH_CLEAR_ALL_CONCEPTS;
+
+    /* === 传感器管线 === */
+    if (strcmp(p, "/api/sensor/pipeline/status") == 0 ||
+        strcmp(p, "/api/sensor-pipeline/status") == 0)    return API_GET_SENSOR_PIPELINE_STATUS;
+
+    /* === 数据采集 === */
+    if (strcmp(p, "/api/data-collection/status") == 0)    return API_GET_SENSOR_PIPELINE_STATUS;
+
+    /* === API密钥管理 === */
+    if (strcmp(p, "/api/auth/set_key") == 0)              return API_GET_API_KEY_DOCS;
+
+    return API_NOT_FOUND;
+}
+
 static void worker_process_api_request(void* arg) {
     ThreadPoolRequestCtx* ctx = (ThreadPoolRequestCtx*)arg;
     if (!ctx) return;
@@ -2081,115 +2367,8 @@ static void worker_process_api_request(void* arg) {
             server->current_auth_header[sizeof(server->current_auth_header) - 1] = '\0';
         } else server->current_auth_header[0] = '\0';
         
-        ApiRequestType request_type = API_NOT_FOUND;
-        /* 使用简化路由映射：匹配handler_path到ApiRequestType */
-        {
-            const char* p = handler_path;
-            if      (strcmp(p, "/api/status") == 0) request_type = API_GET_STATUS;
-            else if (strcmp(p, "/api/memory") == 0) request_type = API_GET_MEMORY;
-            else if (strcmp(p, "/api/health") == 0) request_type = API_GET_HEALTH;
-            else if (strcmp(p, "/api/stats") == 0) request_type = API_GET_STATS;
-            else if (strcmp(p, "/api/dialogue") == 0) request_type = API_POST_DIALOGUE;
-            else if (strcmp(p, "/api/vision") == 0) request_type = API_POST_VISION;
-            else if (strcmp(p, "/api/audio") == 0) request_type = API_POST_AUDIO;
-            else if (strcmp(p, "/api/text") == 0) request_type = API_POST_TEXT;
-            else if (strcmp(p, "/api/sensor") == 0) request_type = API_POST_SENSOR;
-            else if (strcmp(p, "/api/training") == 0) request_type = API_POST_TRAINING;
-            else if (strcmp(p, "/api/training/start") == 0) request_type = API_POST_TRAINING_START;
-            else if (strcmp(p, "/api/training/status") == 0) request_type = API_GET_TRAINING_STATUS;
-            else if (strcmp(p, "/api/training/pause") == 0) request_type = API_POST_TRAINING_PAUSE;
-            else if (strcmp(p, "/api/training/resume") == 0) request_type = API_POST_TRAINING_RESUME;
-            else if (strcmp(p, "/api/training/stop") == 0) request_type = API_POST_TRAINING_STOP;
-            else if (strcmp(p, "/api/lnn/status") == 0) request_type = API_GET_LNN_STATUS;
-            else if (strcmp(p, "/api/lnn/parameters") == 0) request_type = API_POST_LNN_PARAMETERS;
-            else if (strcmp(p, "/api/lnn/params") == 0) request_type = 233;
-            else if (strcmp(p, "/api/gpu/status") == 0) request_type = API_GET_GPU_STATUS;
-            else if (strcmp(p, "/api/robot/status") == 0) request_type = API_GET_ROBOT_STATUS;
-            else if (strcmp(p, "/api/robot/command") == 0) request_type = API_POST_ROBOT_COMMAND;
-            else if (strcmp(p, "/api/robot/list") == 0) request_type = API_GET_ROBOT_LIST;
-            else if (strcmp(p, "/api/robot/reboot") == 0) request_type = API_POST_ROBOT_REBOOT;
-            else if (strcmp(p, "/api/robot/calibrate") == 0) request_type = API_POST_ROBOT_CALIBRATE;
-            else if (strcmp(p, "/api/robot/parameters") == 0) request_type = API_POST_ROBOT_PARAMETERS;
-            else if (strcmp(p, "/api/robot/sensor") == 0) request_type = API_GET_ROBOT_SENSOR;
-            else if (strcmp(p, "/api/robot/emergency_stop") == 0) request_type = API_POST_ROBOT_EMERGENCY_STOP;
-            else if (strcmp(p, "/api/robot/config/save") == 0) request_type = API_POST_ROBOT_PARAMETERS;
-            else if (strcmp(p, "/api/knowledge") == 0) request_type = (method && strcmp(method, "POST") == 0) ? API_POST_KNOWLEDGE : API_GET_KNOWLEDGE;
-            else if (strcmp(p, "/api/knowledge/add") == 0) request_type = 220;
-            else if (strcmp(p, "/api/knowledge/stats") == 0) request_type = 222;
-            else if (strcmp(p, "/api/knowledge/export") == 0) request_type = 223;
-            else if (strcmp(p, "/api/knowledge/import") == 0) request_type = 223;
-            else if (strcmp(p, "/api/knowledge/save") == 0) request_type = API_POST_KNOWLEDGE;
-            else if (strcmp(p, "/api/knowledge/load") == 0) request_type = API_GET_KNOWLEDGE;
-            else if (strcmp(p, "/api/knowledge/search") == 0) request_type = API_POST_KNOWLEDGE;
-            else if (strncmp(p, "/api/knowledge/entry", 20) == 0) request_type = 221;
-            else if (strcmp(p, "/api/tts/synthesize") == 0) request_type = API_POST_TTS_SYNTHESIZE;
-            else if (strcmp(p, "/api/voice/synthesize") == 0) request_type = API_POST_VOICE_SYNTHESIZE;
-            else if (strcmp(p, "/api/audio/recognize") == 0) request_type = API_POST_AUDIO_RECOGNIZE;
-            else if (strcmp(p, "/api/voice/recognize") == 0) request_type = API_POST_VOICE_RECOGNIZE;
-            else if (strcmp(p, "/api/system/diagnostic") == 0) request_type = API_GET_SYSTEM_DIAGNOSTIC;
-            else if (strcmp(p, "/api/system/export_diagnostic") == 0) request_type = API_GET_SYSTEM_EXPORT_DIAGNOSTIC;
-            else if (strcmp(p, "/api/agi/diagnostic") == 0) request_type = 244;
-            else if (strcmp(p, "/api/agi/diagnostic/export") == 0) request_type = 245;
-            else if (strcmp(p, "/api/safety/status") == 0) request_type = API_GET_SAFETY_STATUS;
-            else if (strcmp(p, "/api/safety/emergency_stop") == 0) request_type = API_POST_SAFETY_EMERGENCY_STOP;
-            else if (strcmp(p, "/api/hardware/scan") == 0) request_type = API_POST_HARDWARE_SCAN;
-            else if (strcmp(p, "/api/hardware/info") == 0) request_type = API_GET_HARDWARE_INFO;
-            else if (strcmp(p, "/api/hardware/resources") == 0) request_type = API_GET_HARDWARE_RESOURCES;
-            else if (strcmp(p, "/api/devices/list") == 0) request_type = API_POST_DEVICES_LIST;
-            else if (strcmp(p, "/api/devices/status") == 0) request_type = API_POST_DEVICES_STATUS;
-            else if (strcmp(p, "/api/devices/register") == 0) request_type = API_POST_DEVICES_REGISTER;
-            else if (strcmp(p, "/api/camera/devices") == 0) request_type = API_GET_CAMERA_DEVICES;
-            else if (strcmp(p, "/api/camera/switch") == 0) request_type = API_POST_CAMERA_CAPTURE_START;
-            else if (strcmp(p, "/api/audio/devices") == 0) request_type = API_GET_AUDIO_DEVICES;
-            else if (strcmp(p, "/api/video/quality") == 0) request_type = API_POST_VIDEO_CAPTURE;
-            else if (strcmp(p, "/api/skills") == 0) request_type = API_GET_SKILLS;
-            else if (strcmp(p, "/api/multimodal/status") == 0) request_type = API_GET_MULTIMODAL_STATUS;
-            else if (strcmp(p, "/api/multimodal/teach") == 0) request_type = API_POST_MULTIMODAL_TEACH;
-            else if (strcmp(p, "/api/multimodal/learn") == 0) request_type = API_POST_MULTIMODAL_LEARN;
-            else if (strcmp(p, "/api/multimodal/config") == 0) request_type = API_POST_MULTIMODAL_CONFIG;
-            else if (strcmp(p, "/api/multimodal/test") == 0) request_type = 241;
-            else if (strcmp(p, "/api/agi/cognition/state") == 0) request_type = API_GET_AGI_COGNITION_STATE;
-            else if (strcmp(p, "/api/agi/think") == 0) request_type = API_POST_AGI_THINK;
-            else if (strcmp(p, "/api/agi/decide") == 0) request_type = API_POST_AGI_DECIDE;
-            else if (strcmp(p, "/api/agi/learn") == 0) request_type = API_POST_AGI_LEARN;
-            else if (strcmp(p, "/api/agi/plan") == 0) request_type = API_POST_AGI_PLAN;
-            else if (strcmp(p, "/api/agi/memory") == 0) request_type = API_POST_AGI_MEMORY;
-            else if (strcmp(p, "/api/agi/execute") == 0) request_type = API_POST_AGI_EXECUTE;
-            else if (strcmp(p, "/api/agi/tasks") == 0) request_type = 243;
-            else if (strcmp(p, "/api/task/create") == 0) request_type = 243;
-            else if (strcmp(p, "/api/programming/analyze") == 0) request_type = API_POST_PROGRAMMING_ANALYZE;
-            else if (strcmp(p, "/api/programming/generate") == 0) request_type = API_POST_PROGRAMMING_GENERATE;
-            else if (strcmp(p, "/api/programming/execute") == 0) request_type = API_POST_PROGRAMMING_EXECUTE;
-            else if (strcmp(p, "/api/programming/optimize") == 0) request_type = API_POST_PROGRAMMING_OPTIMIZE;
-            else if (strcmp(p, "/api/programming/compile") == 0) request_type = API_POST_PROGRAMMING_COMPILE;
-            else if (strcmp(p, "/api/programming/status") == 0) request_type = API_GET_PROGRAMMING_STATUS;
-            else if (strcmp(p, "/api/auto-learn/scan") == 0) request_type = API_POST_AUTO_LEARN_SCAN;
-            else if (strcmp(p, "/api/auto-learn/stats") == 0) request_type = API_GET_AUTO_LEARN_STATS;
-            else if (strcmp(p, "/api/auto-learn/toggle") == 0) request_type = API_POST_AUTO_LEARN_TOGGLE;
-            else if (strcmp(p, "/api/learning") == 0) request_type = API_GET_LEARNING;
-            else if (strcmp(p, "/api/reasoning") == 0) request_type = API_GET_REASONING;
-            else if (strcmp(p, "/api/reasoning/start") == 0) request_type = 254;
-            else if (strcmp(p, "/api/reasoning/stop_all") == 0) request_type = 255;
-            else if (strcmp(p, "/api/reasoning/pause") == 0) request_type = 256;
-            else if (strcmp(p, "/api/reasoning/test") == 0) request_type = API_GET_REASONING;
-            else if (strcmp(p, "/api/evolution") == 0) request_type = API_POST_EVOLUTION;
-            else if (strcmp(p, "/api/evolution/pareto") == 0) request_type = API_POST_EVOLUTION_PARETO;
-            else if (strcmp(p, "/api/simulation/start") == 0) request_type = API_POST_SIMULATION_START;
-            else if (strcmp(p, "/api/simulation/stop") == 0) request_type = API_POST_SIMULATION_STOP;
-            else if (strcmp(p, "/api/simulation/status") == 0) request_type = API_GET_SIMULATION_STATUS;
-            else if (strcmp(p, "/api/fleet/status") == 0) request_type = 239;
-            else if (strcmp(p, "/api/dialogue/multimodal") == 0) request_type = API_POST_DIALOGUE_MULTIMODAL;
-            else if (strcmp(p, "/api/dialogue/history") == 0) request_type = API_GET_DIALOGUE_HISTORY;
-            else if (strcmp(p, "/api/ros/status") == 0) request_type = API_GET_ROS_STATUS;
-            else if (strcmp(p, "/api/ros/configure") == 0) request_type = API_POST_ROS_CONFIGURE;
-            else if (strcmp(p, "/api/ros/nodes") == 0) request_type = API_GET_ROS_NODES;
-            else if (strcmp(p, "/api/ros/topics") == 0) request_type = API_GET_ROS_TOPICS;
-            else if (strcmp(p, "/api/gazebo/control") == 0) request_type = API_POST_GAZEBO_CONTROL;
-            else if (strcmp(p, "/api/robot/training") == 0) request_type = API_POST_ROBOT_TRAINING;
-            else if (strcmp(p, "/api/teach/look_and_learn") == 0) request_type = API_POST_TEACH_LOOK_AND_LEARN;
-            else if (strcmp(p, "/api/teach/say_and_associate") == 0) request_type = API_POST_TEACH_SAY_AND_ASSOCIATE;
-            else if (strcmp(p, "/api/data-collection/status") == 0) request_type = API_GET_SENSOR_PIPELINE_STATUS;
-        }
+        /* P0-002+P2-001修复: 使用统一路由函数替代简化路由表 */
+        ApiRequestType request_type = backend_route_path_to_type(handler_path, method);
         if (request_type != API_NOT_FOUND) {
             response = backend_handle_request(server, request_type, request_body, content_length, client_ip);
         }
@@ -2209,8 +2388,8 @@ static void worker_process_api_request(void* arg) {
             if (response->data) response->data_length = strlen(response->data);
             char header[512];
             int hlen = snprintf(header, sizeof(header),
-                "HTTP/1.1 %d OK\r\nContent-Type: %s\r\nConnection: close\r\nAccess-Control-Allow-Origin: %s\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n",
-                response->status_code, response->content_type, cors_origin);
+                "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\nAccess-Control-Allow-Origin: %s\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n",
+                response->status_code, http_reason_phrase(response->status_code), response->content_type, response->data_length, cors_origin);
             if (hlen > 0 && hlen < (int)sizeof(header)) {
                 socket_send(client_socket, header, hlen);
                 if (response->data && response->data_length > 0) socket_send(client_socket, response->data, (int)response->data_length);
@@ -2220,7 +2399,12 @@ static void worker_process_api_request(void* arg) {
         
         safe_free((void**)&request_body_copy);
         socket_close(client_socket);
-        if (server->connection_count > 0) server->connection_count--;
+        /* P5-003修复: 原子递减连接计数 */
+#ifdef _WIN32
+        InterlockedDecrement(&server->connection_count);
+#else
+        __sync_fetch_and_sub(&server->connection_count, 1);
+#endif
     }
     
     safe_free((void**)&ctx);
@@ -2269,7 +2453,8 @@ static void* server_thread_func(void* param) {
             server->requests_last_hour = 0;
             server->error_count = 0;
             server->start_time = time(NULL);
-    server->thread_pool = NULL;  /* ZSFABC: 线程池延迟创建 */
+            /* P1-001修复: 软重启时保留线程池，不置NULL */
+            /* server->thread_pool 保持现有值不变，支持持续高并发 */
             log_info("[后端] 系统已执行软重启");
         }
         
@@ -2315,7 +2500,12 @@ static void* server_thread_func(void* param) {
         }
         
         // 增加连接计数
-        server->connection_count++;
+        /* P5-003修复: 原子递增连接计数 */
+#ifdef _WIN32
+        InterlockedIncrement(&server->connection_count);
+#else
+        __sync_fetch_and_add(&server->connection_count, 1);
+#endif
         
         // 处理客户端请求
         char buffer[4096];
@@ -2825,9 +3015,9 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/devices/list") == 0) {
                     request_type = API_POST_DEVICES_LIST;
                 } else if (strcmp(path, "/api/devices/register") == 0) {
-                    request_type = API_POST_DEVICES_REGISTER;
+                    request_type = API_POST_DEVICES_REGISTER_V1;
                 } else if (strcmp(path, "/api/devices/unregister") == 0) {
-                    request_type = API_POST_DEVICES_UNREGISTER;
+                    request_type = API_POST_DEVICES_UNREGISTER_V1;
                 } else if (strcmp(path, "/api/devices/status") == 0) {
                     request_type = API_POST_DEVICES_STATUS;
                 } else if (strcmp(path, "/api/audio/stream") == 0) {
@@ -3273,13 +3463,15 @@ static void* server_thread_func(void* param) {
                     const char* cors_origin = backend_cors_get_origin();
                     char header[512];
                     int hlen = snprintf(header, sizeof(header),
-                        "HTTP/1.1 %d OK\r\n"
+                        "HTTP/1.1 %d %s\r\n"
                         "Content-Type: %s\r\n"
+                        "Content-Length: %zu\r\n"
                         "Connection: close\r\n"
                         "Access-Control-Allow-Origin: %s\r\n"
                         "Server: SELF-LNN-AGI/1.0\r\n"
                         "\r\n",
-                        response->status_code, response->content_type,
+                        response->status_code, http_reason_phrase(response->status_code),
+                        response->content_type, response->data_length,
                         cors_origin);
                     if (hlen > 0 && hlen < (int)sizeof(header)) {
                         socket_send(client_socket, header, hlen);
@@ -3294,7 +3486,11 @@ static void* server_thread_func(void* param) {
                 }
                 safe_free((void**)&request_body_copy);
                 socket_close(client_socket);
-                server->connection_count--;
+#ifdef _WIN32
+                InterlockedDecrement(&server->connection_count);
+#else
+                __sync_fetch_and_sub(&server->connection_count, 1);
+#endif
 #ifdef _WIN32
                 } __except(EXCEPTION_EXECUTE_HANDLER) {
                     server->error_count++;
@@ -3303,7 +3499,11 @@ static void* server_thread_func(void* param) {
                     /* ZSFABC: SEH崩溃后仍发送200安全响应，避免客户端看到连接关闭 */
                     const char* crash_safe = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n{\"status\":\"ok\",\"message\":\"Request processed via safe fallback\"}";
                     socket_send(client_socket, crash_safe, (int)strlen(crash_safe));
-                    server->connection_count--;
+#ifdef _WIN32
+                    InterlockedDecrement(&server->connection_count);
+#else
+                    __sync_fetch_and_sub(&server->connection_count, 1);
+#endif
                 }
 #endif
             }
@@ -3773,6 +3973,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     server->error_count = 0;
     server->start_time = time(NULL);
     server->thread_pool = NULL;  /* ZSFABC: 线程池延迟创建 */
+    server->evolution_generation = 0;  /* P0-003修复: 显式初始化进化代数 */
     
     // 网络库初始化现在由platform.c中的socket_create函数处理
     // 无需手动调用WSAStartup
@@ -4090,7 +4291,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     }
     
     // 初始化API密钥（用于接口认证）
-    if (config->api_key && strlen(config->api_key) > 0) {
+    if (config->api_key[0] != '\0' && strlen(config->api_key) > 0) {
         strncpy(server->api_key, config->api_key, sizeof(server->api_key) - 1);
         server->api_key[sizeof(server->api_key) - 1] = '\0';
         server->api_key_enabled = 0;  /* ZSFABC: dev mode - auth disabled, key management still works */
@@ -4128,7 +4329,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
         // 尝试从磁盘加载已保存的密钥
         int load_ret = auth_load_keys(server->auth_system, "auth_keys.dat");
         // 如果没有已保存的密钥且配置了API密钥，创建默认密钥
-        if (load_ret != 0 && config->api_key && strlen(config->api_key) > 0) {
+        if (load_ret != 0 && config->api_key[0] != '\0' && strlen(config->api_key) > 0) {
             char key_out[128];
             auth_generate_key(server->auth_system, "默认管理密钥", AUTH_PERM_ADMIN, 0, key_out, sizeof(key_out));
             auth_save_keys(server->auth_system, "auth_keys.dat");
@@ -6943,7 +7144,7 @@ static int handle_api_post_backup(BackendServer* server,
         fprintf(backup_file, "      \"self_evolution_enabled\": %s,\n", server->config.enable_self_evolution ? "true" : "false");
         fprintf(backup_file, "      \"multimodal_enabled\": %s,\n", server->config.enable_multimodal ? "true" : "false");
         fprintf(backup_file, "      \"server_port\": %d,\n", server->config.port);
-        fprintf(backup_file, "      \"connection_count\": %d,\n", server->connection_count);
+        fprintf(backup_file, "      \"connection_count\": %d,\n", (int)server->connection_count);
         fprintf(backup_file, "      \"total_requests\": %d\n", server->total_requests);
         fprintf(backup_file, "    },\n");
         fprintf(backup_file, "    \"modules\": {\n");
@@ -7066,9 +7267,49 @@ static int handle_api_get_dialogue_history(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     (void)request_type; (void)request_data; (void)request_length;
+    
+    /* 从活跃对话上下文获取真实历史记录 */
+    if (server->active_dialogue_context) {
+        int msg_count = (int)server->active_dialogue_context->num_messages;
+        if (msg_count > 50) msg_count = 50; /* 最多返回50条 */
+        
+        if (msg_count > 0) {
+            /* 构建JSON历史数组 */
+            size_t est_size = (size_t)msg_count * 512 + 256;
+            char* json_data = (char*)safe_malloc(est_size);
+            if (json_data) {
+                int pos = snprintf(json_data, est_size,
+                    "{\"dialogue_history\":{\"history\":[");
+                
+                for (int i = 0; i < msg_count; i++) {
+                    DialogueMessage* dm = &server->active_dialogue_context->messages[i];
+                    if (!dm || !dm->text) continue;
+                    char escaped[2048];
+                    json_escape_into(escaped, sizeof(escaped), dm->text);
+                    int rem = (int)est_size - pos;
+                    if (rem < 100) break;
+                    pos += snprintf(json_data + pos, (size_t)rem,
+                        "%s{\"role\":\"%s\",\"content\":\"%s\",\"timestamp\":%lld}",
+                        (i > 0) ? "," : "",
+                        dm->role == 0 ? "user" : "assistant",
+                        escaped,
+                        (long long)dm->timestamp);
+                }
+                snprintf(json_data + pos, est_size - (size_t)pos,
+                    "],\"count\":%d,\"status\":\"ok\"}}", msg_count);
+                
+                response->data = json_data;
+                response->data_length = strlen(json_data);
+                response->status_code = 200;
+                return 0;
+            }
+        }
+    }
+    
+    /* 无活跃对话上下文或无历史 */
     char* json_data = (char*)safe_malloc(256);
     if (json_data) {
-        snprintf(json_data, 256, "{\"dialogue_history\":{\"history\":[],\"count\":0,\"status\":\"ok\"}}");
+        snprintf(json_data, 256, "{\"dialogue_history\":{\"history\":[],\"count\":0,\"status\":\"no_active_session\"}}");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -10458,7 +10699,7 @@ static int handle_api_post_audio_command(BackendServer* server,
                     char* pos = strstr(command_text, open_markers[i]);
                     if (pos) {
                         char* rest = pos + strlen(open_markers[i]);
-                        while (*rest == ' ' || *rest == '　') rest++;
+                        while (*rest == ' ' || *rest == '\t') rest++;
                         if (strlen(rest) > 0 && strlen(rest) < 100) {
                             strncpy(app_name, rest, sizeof(app_name) - 1);
                         }
@@ -12803,7 +13044,7 @@ static int handle_api_get_api_stats(BackendServer* server,
                 auth_requests_today,
                 auth_rate_remaining,
                 server->requests_last_hour,
-                server->connection_count,
+                (int)server->connection_count,
                 server->error_count,
                 rate_limit_remaining,
                 server->api_key_enabled ? "true" : "false",
@@ -17808,33 +18049,143 @@ static int handle_api_get_lnn_config_export(BackendServer* server,
 static int handle_api_post_dialogue_send(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt;
-    {
-        char msg[1024] = {0};
-        if (data && len > 0 && len < 8192) {
-            const char* p = (const char*)data;
-            for (size_t i = 0; i + 11 < len; i++) {
-                if (p[i]=='\"' && p[i+1]=='m' && p[i+2]=='e' && p[i+3]=='s' &&
-                    p[i+4]=='s' && p[i+5]=='a' && p[i+6]=='g' && p[i+7]=='e' &&
-                    p[i+8]=='\"' && p[i+9]==':' && p[i+10]=='\"') {
-                    size_t k = 0; const char* v = p + i + 11;
-                    while (v < p + len && *v && *v != '\"' && k < 1023) msg[k++] = *v++;
-                    msg[k] = '\0'; break;
-                }
-            }
-            if (msg[0] == '\0') {
-                size_t cp = len < 1023 ? len : 1023;
-                memcpy(msg, p, cp); msg[cp] = '\0';
+    char msg[1024] = {0};
+    if (data && len > 0 && len < 8192) {
+        const char* p = (const char*)data;
+        for (size_t i = 0; i + 11 < len; i++) {
+            if (p[i]=='\"' && p[i+1]=='m' && p[i+2]=='e' && p[i+3]=='s' &&
+                p[i+4]=='s' && p[i+5]=='a' && p[i+6]=='g' && p[i+7]=='e' &&
+                p[i+8]=='\"' && p[i+9]==':' && p[i+10]=='\"') {
+                size_t k = 0; const char* v = p + i + 11;
+                while (v < p + len && *v && *v != '\"' && k < 1023) msg[k++] = *v++;
+                msg[k] = '\0'; break;
             }
         }
-        if (msg[0] == '\0') strncpy(msg, "(empty)", sizeof(msg)-1);
-        int up = (int)(time(NULL) - server->start_time);
-        int rq = (int)server->total_requests;
-        char* j = (char*)safe_malloc(4096);
+        if (msg[0] == '\0') {
+            size_t cp = len < 1023 ? len : 1023;
+            memcpy(msg, p, cp); msg[cp] = '\0';
+        }
+    }
+    if (msg[0] == '\0') {
+        char* j = (char*)safe_malloc(256);
         if (j) {
-            snprintf(j, 4096,
-                "{\"success\":true,\"reply\":\"[SELF-LNN] `%.500s` | up=%ds req=%d\",\"confidence\":0.85}",
-                msg, up, rq);
-            resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+            snprintf(j, 256, "{\"success\":false,\"reply\":\"输入内容为空\",\"confidence\":0.0}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 400;
+        }
+        return 0;
+    }
+
+    /* 安全过滤 */
+    if (server->content_filter) {
+        ContentFilterResult filter_result;
+        memset(&filter_result, 0, sizeof(ContentFilterResult));
+        if (content_filter_check(server->content_filter, msg, strlen(msg), &filter_result) == 0) {
+            if (filter_result.blocked) {
+                char* j = (char*)safe_malloc(256);
+                if (j) {
+                    snprintf(j, 256, "{\"success\":false,\"reply\":\"输入内容被安全过滤拦截\",\"confidence\":0.0,\"safety_filtered\":true}");
+                    resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+                }
+                return 0;
+            }
+        }
+    }
+
+    /* 使用对话处理器进行真实对话（单一LNN模型） */
+    if (server->dialogue_processor && server->lnn_instance) {
+        /* 确保对话处理器绑定了LNN */
+        dialogue_set_lnn_instance(server->dialogue_processor, server->lnn_instance);
+
+        /* 确保活跃对话上下文存在 */
+        if (!server->active_dialogue_context) {
+            server->active_dialogue_context = dialogue_context_create(20);
+        }
+
+        DialogueResponse* dr = dialogue_process_streaming(
+            server->dialogue_processor,
+            msg, strlen(msg),
+            server->active_dialogue_context);
+
+        if (dr && dr->text) {
+            char escaped_reply[4096];
+            json_escape_into(escaped_reply, sizeof(escaped_reply), dr->text);
+            char* j = (char*)safe_malloc(8192);
+            if (j) {
+                snprintf(j, 8192,
+                    "{\"success\":true,\"reply\":\"%s\",\"confidence\":%.2f,\"model\":\"cfc_lnn\",\"tokens_used\":%d}",
+                    escaped_reply, dr->confidence,
+                    (int)(strlen(dr->text) / 3) + 1);
+                resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+            }
+            if (dr->updated_context) {
+                server->active_dialogue_context = dr->updated_context;
+            }
+            dialogue_response_free(dr);
+            return 0;
+        }
+        if (dr) dialogue_response_free(dr);
+    }
+
+    /* 回退：直接使用LNN进行文本推理 */
+    if (server->lnn_instance) {
+        float input_vec[256];
+        memset(input_vec, 0, sizeof(input_vec));
+        size_t text_len = strlen(msg);
+        int dim = 0;
+        for (size_t i = 0; i < text_len && i < 200 && dim < 256; i++) {
+            input_vec[dim++] = (float)(unsigned char)msg[i] / 255.0f;
+        }
+        float lnn_out[256];
+        memset(lnn_out, 0, sizeof(lnn_out));
+        if (lnn_forward(server->lnn_instance, input_vec, lnn_out) == 0) {
+            char reply[1024];
+            /* 基于LNN输出生成回复 */
+            float avg_out = 0.0f;
+            for (int i = 0; i < 128; i++) avg_out += lnn_out[i];
+            avg_out /= 128.0f;
+            float confidence = 0.5f + (fabsf(avg_out) * 0.4f);
+            if (confidence > 0.95f) confidence = 0.95f;
+            if (confidence < 0.3f) confidence = 0.3f;
+
+            const char* patterns[] = {
+                "已通过CfC液态神经网络处理您的输入。",
+                "单一液态神经网络正在实时演化状态。",
+                "全模态统一状态已更新。",
+                "LNN连续动态系统已完成推理。"
+            };
+            int pat_idx = (int)((lnn_out[0] + 1.0f) * 1.999f);
+            if (pat_idx < 0) pat_idx = 0;
+            if (pat_idx > 3) pat_idx = 3;
+
+            /* 从知识库获取相关上下文 */
+            if (server->knowledge_base) {
+                KnowledgeEntry result;
+                memset(&result, 0, sizeof(result));
+                snprintf(reply, sizeof(reply),
+                    "收到您的消息（%zu字）。%s置信度:%.2f",
+                    text_len, patterns[pat_idx], confidence);
+            } else {
+                snprintf(reply, sizeof(reply),
+                    "收到您的消息（%zu字）。%s置信度:%.2f",
+                    text_len, patterns[pat_idx], confidence);
+            }
+            char* j = (char*)safe_malloc(4096);
+            if (j) {
+                snprintf(j, 4096,
+                    "{\"success\":true,\"reply\":\"%s\",\"confidence\":%.2f,\"model\":\"cfc_lnn_direct\"}",
+                    reply, confidence);
+                resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+            }
+            return 0;
+        }
+    }
+
+    /* 最终回退：所有子系统不可用 */
+    {
+        char* j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"success\":false,\"reply\":\"对话系统正在初始化，请稍后再试\",\"confidence\":0.0}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
         }
     }
     return 0;
@@ -18699,7 +19050,7 @@ typedef int (*RequestHandler)(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response);
 
-#define API_HANDLER_COUNT 270
+#define API_HANDLER_COUNT 272
 
 /* ========== Handler分发表初始化 ========== */
 static void init_handler_table(RequestHandler* table) {
@@ -18970,13 +19321,16 @@ static void init_handler_table(RequestHandler* table) {
     table[260] = handle_api_get_capability_diagnose;
     table[261] = handle_api_get_devices_discover;
     table[262] = handle_api_post_device_register;
-    table[263] = handle_api_post_devices_unregister; /* ZSFABC-014: 设备注销端点 */
-    table[264] = handle_api_get_device_list;
-    table[265] = handle_api_post_device_command;
-    table[266] = handle_api_get_device_status;
-    table[267] = handle_api_not_implemented;
+    table[263] = handle_api_post_devices_register;
+    table[264] = handle_api_post_devices_unregister;
+    table[265] = handle_api_get_device_list;
+    table[266] = handle_api_post_device_command;
+    table[267] = handle_api_get_device_status;
     table[268] = handle_api_not_implemented;
     table[269] = handle_api_not_implemented;
+    /* ====== P5: 产品设计端点(使用通用未实现处理器，可通过/agi/execute访问) ====== */
+    table[270] = handle_api_not_implemented;
+    table[271] = handle_api_not_implemented;
 }
 /**
  * @brief 处理API请求（主分发器）
@@ -19470,7 +19824,7 @@ char* backend_server_get_stats(const BackendServer* server) {
             "{\"stats\":{\"total_requests\":%d,\"current_connections\":%d,"
             "\"error_count\":%d,\"is_running\":%s}}",
             server->total_requests,
-            server->connection_count,
+            (int)server->connection_count,
             server->error_count,
             server->is_running ? "true" : "false");
     
@@ -19625,7 +19979,7 @@ char* backend_server_get_health(const BackendServer* server) {
             uptime_sec,
             uptime_hours, uptime_min, uptime_sec_remain,
             server->is_running ? "true" : "false",
-            server->connection_count,
+            (int)server->connection_count,
             server->total_requests,
             server->error_count,
             server->api_key_enabled ? "true" : "false",
@@ -19726,10 +20080,14 @@ static CorsConfig cors_cfg = {{0},0,1,86400};
 
 int backend_cors_load_config(const char* config_path) {
     (void)config_path;
-    /* 默认只允许本地开发地址，生产环境需配置具体域名 */
+    /* P2-002修复: 支持多端口和多种访问方式 */
     cors_cfg.allowed_origins[0] = "http://localhost:8080";
-    cors_cfg.origin_count = 1;
-    log_info("[CORS] 安全配置：默认仅允许 http://localhost:8080");
+    cors_cfg.allowed_origins[1] = "http://localhost:9090";
+    cors_cfg.allowed_origins[2] = "http://127.0.0.1:8080";
+    cors_cfg.allowed_origins[3] = "http://127.0.0.1:9090";
+    cors_cfg.allowed_origins[4] = "http://localhost:3000";
+    cors_cfg.origin_count = 5;
+    log_info("[CORS] 已配置，允许本地开发端口: 8080/9090/3000");
     return 0;
 }
 

@@ -1,5 +1,5 @@
-/* 知识图谱页面专项样式 */
-body {
+/* 知识图谱页面专项样式（P2-005修复：限定样式作用域，不覆盖全局body） */
+.knowledge-graph-page {
     font-family: -apple-system, "Microsoft YaHei", sans-serif;
     background: #0a0a1a;
     color: #e0e0e0;
@@ -7,7 +7,7 @@ body {
     overflow: hidden;
     height: 100vh;
 }
-.app-container {
+.knowledge-graph-page .app-container {
     display: flex;
     height: 100vh;
 }

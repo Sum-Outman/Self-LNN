@@ -142,8 +142,8 @@ typedef enum {
     API_POST_FILES_DELETE = 54,       /**< 删除文件 */
     API_GET_FILES_LIST = 55,          /**< 列出目录文件 */
     API_POST_DEVICES_LIST = 56,       /**< 列出所有可用设备 */
-    API_POST_DEVICES_REGISTER = 57,   /**< 注册前端设备 */
-    API_POST_DEVICES_UNREGISTER = 58, /**< 注销前端设备 */
+    API_POST_DEVICES_REGISTER_V1 = 57, /**< 注册前端设备（V1，参见API_POST_DEVICES_REGISTER=263） */
+    API_POST_DEVICES_UNREGISTER_V1 = 58, /**< 注销前端设备（V1，参见API_POST_DEVICES_UNREGISTER=264） */
     API_POST_DEVICES_STATUS = 59,     /**< 获取设备状态 */
     API_POST_AUDIO_STREAM = 60,       /**< 处理实时语音流 */
     API_POST_AUDIO_COMMAND = 61,      /**< 语音指令识别与执行 */
@@ -336,20 +336,71 @@ typedef enum {
     API_POST_PROGRAMMING_EXECUTE = 218,    /**< 沙箱执行 */
     API_GET_PROGRAMMING_STATUS = 219,      /**< 获取编程引擎状态 */
 
+    /* ===== 知识库管理端点 (220-229) ===== */
+    API_POST_KNOWLEDGE_ADD = 220,          /**< 添加知识条目 */
+    API_GET_KNOWLEDGE_ENTRY = 221,         /**< 获取知识条目 */
+    API_GET_KNOWLEDGE_STATS = 222,         /**< 获取知识库统计 */
+    API_POST_KNOWLEDGE_EXPORT = 223,       /**< 导出知识库 */
+    API_POST_KNOWLEDGE_DELETE = 224,       /**< 删除知识条目 */
+    API_POST_KNOWLEDGE_SEARCH = 225,       /**< 搜索知识库 */
+    API_POST_KNOWLEDGE_IMPORT = 226,       /**< 导入知识库 */
+    API_GET_KNOWLEDGE_VERSION = 227,       /**< 获取知识库版本 */
+
+    /* ===== 记忆管理端点 (228-237) ===== */
+    API_GET_SAFETY_BOUNDS = 228,           /**< 获取安全边界配置 */
+    API_POST_MEMORY_ADD = 229,             /**< 添加记忆条目 */
+    API_GET_MEMORY_ENTRY = 230,            /**< 获取记忆条目 */
+    API_POST_MEMORY_EXPORT = 231,          /**< 导出记忆 */
+    API_POST_MEMORY_CLEAR = 232,           /**< 清空记忆 */
+    API_GET_LNN_PARAMS = 233,              /**< 获取LNN参数 */
+    API_POST_MEMORY_SEARCH = 234,          /**< 搜索记忆 */
+    API_POST_MEMORY_SLEEP_CONSOLIDATION = 235, /**< 睡眠记忆巩固 */
+    API_POST_LNN_PARAMETERS_RESET = 236,   /**< 重置LNN参数 */
+    API_POST_LNN_CALIBRATE = 237,          /**< 校准LNN */
+
+    /* ===== 系统管理端点 (238-245) ===== */
+    API_POST_SYSTEM_RESTART = 238,         /**< 重启系统 */
+    API_GET_SYSTEM_LOGS = 239,             /**< 获取系统日志 */
+    API_GET_FLEET_STATUS = 240,            /**< 获取机器人舰队状态 */
+    API_POST_MULTIMODAL_TEST = 241,        /**< 多模态系统测试 */
+    API_POST_MULTIMODAL_CONFIG_RESET = 242,/**< 重置多模态配置 */
+    API_GET_AGI_TASKS = 243,               /**< 获取AGI任务列表 */
+    API_GET_AGI_DIAGNOSTIC = 244,          /**< AGI诊断信息 */
+    API_GET_DECISION_LOG = 245,            /**< 获取决策日志 */
+
+    /* ===== 推理/训练端点 (246-259) ===== */
+    API_GET_DIALOGUE_SEND = 246,           /**< 获取对话响应 */
+    API_POST_MODEL_START = 247,            /**< 启动模型训练 */
+    API_POST_MODEL_STOP = 248,             /**< 停止模型训练 */
+    API_POST_MODEL_UNLOAD = 249,           /**< 卸载模型 */
+    API_POST_MODEL_CONFIG_SAVE = 250,      /**< 保存模型配置 */
+    API_GET_LNN_CONFIG_EXPORT = 251,       /**< 导出LNN配置 */
+    API_POST_TASK_CREATE = 252,            /**< 创建AGI任务 */
+    API_GET_AGI_DIAGNOSTIC_EXPORT = 253,   /**< 导出AGI诊断 */
+    API_POST_REASONING_START = 254,        /**< 启动推理 */
+    API_POST_REASONING_STOP_ALL = 255,     /**< 停止所有推理 */
+    API_POST_REASONING_PAUSE = 256,        /**< 暂停推理 */
+    API_POST_REASONING_CONFIG_SAVE = 257,  /**< 保存推理配置 */
+    API_POST_HYPERPARAMETER_START = 258,   /**< 启动超参数搜索 */
+    API_GET_HYPERPARAMETER_STATUS = 259,   /**< 获取超参数搜索状态 */
+
     /* ===== K-023: 能力开关诊断 (实际dispatch使用260-266) ===== */
-    /* 注意：以下枚举值220-229在dispatch中被知识库/记忆路由复用，
-     * 能力开关/设备发现实际使用260-266号槽位，此处仅保留枚举名称引用 */
-    API_GET_CAPABILITY_DIAGNOSE = 260,     /**< 12项能力开关完整状态诊断 */
+    API_POST_CAPABILITY_DIAGNOSE = 260,    /**< 12项能力开关完整状态诊断 */
 
     /* ===== K-016: 设备发现与多系统控制 ===== */
     API_GET_DEVICES_DISCOVER = 261,        /**< 扫描发现所有可用设备 */
     API_POST_DEVICES_DISCOVER = 262,       /**< 触发设备扫描 */
-    API_POST_DEVICE_REGISTER = 263,        /**< 注册新设备 */
-    API_POST_DEVICE_UNREGISTER = 264,      /**< 注销设备 */
+    API_POST_DEVICES_REGISTER = 263,       /**< 注册新设备 */
+    API_POST_DEVICES_UNREGISTER = 264,     /**< 注销设备 */
     API_GET_DEVICE_LIST = 265,             /**< 获取已注册设备列表 */
-    API_POST_DEVICE_COMMAND = 266,         /**< 向设备发送控制命令（注意：区别于API_POST_DEVICE_COMMAND_V1=41） */
-    API_GET_DEVICE_STATUS = 267,            /**< 获取设备实时状态 */
-    API_GET_SAFETY_BOUNDS = 228            /**< 获取安全边界配置 */
+    API_POST_DEVICE_COMMAND_V2 = 266,      /**< 向设备发送控制命令 */
+    API_GET_DEVICE_STATUS = 267,           /**< 获取设备实时状态 */
+    API_POST_DEVICE_STATUS = 268,          /**< 设置设备状态 */
+    API_GET_AUTH_STATUS = 269,             /**< 获取认证状态 */
+
+    /* ===== 产品设计 ===== */
+    API_POST_PRODUCT_DESIGN = 270,         /**< 产品设计生成 */
+    API_GET_PRODUCT_SPEC = 271,            /**< 获取产品规格 */
 } ApiRequestType;
 
 /**

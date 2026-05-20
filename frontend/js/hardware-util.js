@@ -22,8 +22,8 @@ var HardwareScanUtil = {
 
         var result = {
             success: false,
-            /* 初始化为"未连接"状态，拒绝填充假数据（usage=0可能误导用户视为真实0%使用率） */
-            cpu: { cores: '未连接', usage: -1, name: '', available: false },
+            /* P2-004修复: 统一初始值类型，全部使用数值-1表示未连接 */
+            cpu: { cores: -1, usage: -1, name: '', available: false },
             gpu: { count: 0, devices: [], usage: -1, memory_mb: -1, available: false },
             memory: { total_gb: -1, used_gb: -1, usage_pct: -1, available: false },
             camera: { detected: false, count: 0, devices: [], available: false },
@@ -45,7 +45,8 @@ var HardwareScanUtil = {
                     var scan = apiResult.scan || {};
                     if (scan.cpu) {
                         if (typeof scan.cpu === 'object') {
-                            result.cpu.cores = scan.cpu.cores || scan.cpu.core_count || '未连接';
+                            result.cpu.cores = (typeof scan.cpu.cores === 'number') ? scan.cpu.cores : 
+                                              (typeof scan.cpu.core_count === 'number') ? scan.cpu.core_count : -1;
                             /* 仅当API明确返回usage值时才覆盖初始-1，不使用||0制造假0% */
                             result.cpu.usage = (scan.cpu.usage !== undefined && scan.cpu.usage !== null) ? scan.cpu.usage : -1;
                             result.cpu.name = scan.cpu.name || scan.cpu.model || '';

@@ -554,10 +554,12 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     if (cell->use_quaternion) {
         size_t num_hidden_quats = hidden_size / 4;
         size_t num_input_quats = input_size / 4;
+        /* P2-013修复: 维度非4倍数时回退为禁用四元数模式，而非直接释放 */
         if (num_hidden_quats < 1 || num_input_quats < 1 ||
             hidden_size % 4 != 0 || input_size % 4 != 0) {
-            cfc_cell_free(cell);
-            return NULL;
+            cell->use_quaternion = 0;
+             /* 继续正常创建，跳过四元数分配和初始化 */
+             goto quaternion_init_end;
         }
         /* 分配四元数权重: [num_hidden_quats × num_input_quats × 4] */
         cell->quaternion_weights = (float*)safe_calloc(num_hidden_quats * num_input_quats * 4, sizeof(float));
@@ -568,6 +570,16 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         cell->quaternion_hidden_weight_grad = (float*)safe_calloc(num_hidden_quats * num_hidden_quats * 4, sizeof(float));
         cell->quaternion_time_constants = (float*)safe_calloc(num_hidden_quats, sizeof(float));
         cell->quaternion_workspace = (float*)safe_calloc(hidden_size, sizeof(float));
+
+        /* P5-001修复: 初始化前检查所有四元数缓冲区分配成功，防止NULL指针写入 */
+        if (!cell->quaternion_weights || !cell->quaternion_biases ||
+            !cell->quaternion_weight_grad || !cell->quaternion_bias_grad ||
+            !cell->quaternion_hidden_weights || !cell->quaternion_hidden_weight_grad ||
+            !cell->quaternion_time_constants || !cell->quaternion_workspace) {
+            cfc_cell_free(cell);
+            return NULL;
+        }
+
         /* P0-001: 四元数权重使用Xavier均匀分布初始化 */
         unsigned int seed = 42;
         float quat_limit = xavier_uniform_limit(num_input_quats * 4, num_hidden_quats * 4);
@@ -595,6 +607,8 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         cell->quaternion_time_constants = NULL;
         cell->quaternion_workspace = NULL;
     }
+
+quaternion_init_end: ;
 
     // 检查内存分配（包括新增的梯度缓冲区）
     if (!cell->state->state || !cell->state->adapted_params ||
@@ -2101,6 +2115,8 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
     }
     
     // 保存前向传播前的状态 h(t)，供反向传播使用
+    // 说明: ODE求解器读state为const输入，写activation为输出，
+    // state在后续line才被更新，此处saved_state正确保存的是h(t)
     memcpy(cell->state->saved_state, cell->state->state, hidden_size * sizeof(float));
 
     /* P2-002: 残差连接——在所有ODE求解器路径之后统一应用

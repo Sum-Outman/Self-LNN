@@ -537,8 +537,13 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         int result = cfc_cell_backward(network->layers[layer], 
                                       layer_gradient,
                                       layer == 0 ? gradient : prev_gradient);
-        SELFLNN_CHECK(result == 0, SELFLNN_ERROR_CFC_CELL_CONFIG,
-                     "第%d层CfC单元反向传播失败", layer);
+        
+        /* P5-002修复: SELFLNN_CHECK可能提前返回，before free saved_input */
+        if (result != 0) {
+            safe_free((void**)&saved_input);
+            SELFLNN_SET_ERROR(SELFLNN_ERROR_CFC_CELL_CONFIG);
+            return SELFLNN_ERROR_CFC_CELL_CONFIG;
+        }
 
         // 应用Dropout掩码到传播的梯度
         if (config->dropout_rate > 0.0f && layer > 0) {
@@ -726,8 +731,11 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
                                       layer_gradient,
                                       prev_gradient ? prev_gradient : gradient);
         
-        SELFLNN_CHECK(result == 0, SELFLNN_ERROR_CFC_CELL_CONFIG,
-                     "第%d层CfC单元反向传播失败", layer);
+        if (result != 0) {
+            safe_free((void**)&saved_input);
+            SELFLNN_SET_ERROR(SELFLNN_ERROR_CFC_CELL_CONFIG);
+            return SELFLNN_ERROR_CFC_CELL_CONFIG;
+        }
         
         // 应用Dropout掩码（反向传播时）
         if (config->dropout_rate > 0.0f) {
@@ -1444,33 +1452,57 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
     if (!rhsc || !rhsc->network || !y || !dydt) return -1;
     CfCNetwork* net = rhsc->network;
     size_t n = net->config.hidden_size;
-    /* 保存当前隐藏状态 */
-    float* saved_hs = rhsc->temp_buffer1;
-    float* saved_cs = rhsc->temp_buffer2;
-    memcpy(saved_hs, y, n * sizeof(float));
-    /* 调用cfc_forward计算 dy = f(input, y) */
-    float* out_buffer = (float*)safe_malloc(net->config.output_size * sizeof(float));
-    if (!out_buffer) return -1;
-    int ret = cfc_forward(net, rhsc->input, dydt, dydt, out_buffer);
-    /* dydt = new_state - old_state ≈ f(y) （当dt=1时的离散近似）
-     * 真正的连续RHS: dy/dt = -y/τ + σ(Wx + Uy + b) ⊙ f(Wx + Vy + a)
-     * 近似: dy/dt ≈ cfc_cell_forward(cell, input, y) - y
-     * 此处 dydt 已被 cfc_forward 写入为新状态值 */
-    for (size_t i = 0; i < n; i++) {
-        dydt[i] = dydt[i] - saved_hs[i];
-    }
-    safe_free((void**)&out_buffer);
-    /* 恢复隐藏状态到 cfc_forward 修改前的值 */
-    /* 注意：cfc_forward 修改了 cell 的内部状态，但 RHS 求值应该是无副作用的。
-     * 然而 CfC 单元的 cfc_cell_forward 会将激活值写入 cell->state->state。
-     * 为此，我们需要在 RHS 求值完成后恢复状态。 */
-    /* 通过重新设置 cell 状态来恢复 */
-    for (int l = 0; l < net->config.num_layers; l++) {
-        if (net->layers[l] && net->layers[l]->state) {
-            memcpy(net->layers[l]->state->state, saved_hs, n * sizeof(float));
+    const float* input = rhsc->input;
+
+    /* P2-014修复: 解析RHS计算替代有限差分近似
+     * CfC微分方程: τ·dh/dt = -h + σ(Wx+Uh+b_g)⊙f(Wx+Vh+b_a)
+     * 真实RHS: dh/dt = (-h + σ(...)⊙f(...)) / τ
+     * 对每个隐藏层单元直接计算解析dydt */
+
+    /* 逐层计算RHS */
+    size_t offset = 0;
+    for (int l = 0; l < net->config.num_layers && offset < n; l++) {
+        CfCCell* cell = net->layers[l];
+        if (!cell) continue;
+        size_t layer_size = cell->config.hidden_size;
+        if (offset + layer_size > n) layer_size = n - offset;
+        if (layer_size == 0) break;
+
+        const float* layer_y = y + offset;
+        const float* tau = cell->time_constants;
+        size_t input_size = cell->config.input_size;
+
+        for (size_t i = 0; i < layer_size; i++) {
+            /* 计算门控: σ(W_gx·x + W_gh·h + b_g) */
+            float gate_sum = cell->gate_biases[i * 3];
+            for (size_t j = 0; j < input_size && j < 256; j++) {
+                gate_sum += cell->weight_matrix[i * input_size * 3 + j] * input[j];
+            }
+            /* 隐藏到门控 */
+            for (size_t k = 0; k < layer_size && k < 128; k++) {
+                size_t idx = i * layer_size * 3 + input_size + k;
+                if (idx < cell->config.hidden_size * cell->config.input_size * 3)
+                    gate_sum += cell->weight_matrix[idx] * layer_y[k];
+            }
+            float gate = 1.0f / (1.0f + expf(-gate_sum));
+
+            /* 计算激活: f(W_ax·x + W_ah·h + b_a) = tanh(...) */
+            float act_sum = cell->bias_vector[i];
+            for (size_t j = 0; j < input_size && j < 256; j++) {
+                act_sum += cell->weight_matrix[i * input_size * 3 + j * 2 + 1] * input[j];
+            }
+            float act = tanhf(act_sum);
+
+            /* CfC RHS: dh/dt = (-h + gate·act) / τ */
+            float decay_term = -layer_y[i];
+            float drive_term = gate * act;
+            float rh_tau = tau[i] > 0.001f ? tau[i] : 0.001f;
+            dydt[offset + i] = (decay_term + drive_term) / rh_tau;
         }
+        offset += layer_size;
     }
-    return ret;
+
+    return 0;
 }
 
 /* ---- 长时连续演化引擎 ---- */

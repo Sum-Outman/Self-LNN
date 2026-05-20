@@ -85,6 +85,11 @@ Desktop.ini
 .idea/
 *.iml
 
+# ====== C/C++ 工具 ======
+.clangd
+.clang-tidy
+compile_commands.json
+
 # ====== 覆盖率 ======
 *.gcda
 *.gcno

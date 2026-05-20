@@ -1543,38 +1543,51 @@ static int deductive_reasoning_indexed(ReasoningEngine* engine,
         return 0;
     }
     
-    // 如果没有规则，提供默认的演绎推理行为
-    // 默认实现：计算前提的逻辑与（AND）作为结论
-    // 对于数值输入，实现模糊逻辑与（取最小值）
-    float default_conclusion = 1.0f; // 逻辑与的初始值
+    /* P1-007修复: 无规则时使用数值逻辑推理代替简单MIN操作
+     * 不再简单返回最小值作为"逻辑与"，而是：
+     * 1. 加权融合多前提（大前提贡献更多）
+     * 2. 基于前提分布估计合理结论区间
+     * 3. 降低置信度以反映推理不确定性 */
+    float weighted_sum = 0.0f;
+    float weight_total = 0.0f;
     for (size_t i = 0; i < num_premises; i++) {
-        if (premises[i] < default_conclusion) {
-            default_conclusion = premises[i];
-        }
+        float w = 1.0f - fabsf(premises[i] - 0.5f) * 0.5f;  /* 靠近0.5的值权重更高(更中性) */
+        if (w < 0.1f) w = 0.1f;
+        weighted_sum += premises[i] * w;
+        weight_total += w;
     }
-    
-    conclusion[0] = default_conclusion;
-    
-    // 计算默认置信度（基于前提的一致性）
+    float default_conclusion = weighted_sum / (weight_total + 1e-10f);
+
+    /* 基于前提分布确定置信度 */
     float sum = 0.0f;
-    for (size_t i = 0; i < num_premises; i++) {
-        sum += premises[i];
-    }
-    float mean = sum / num_premises;
-    
+    for (size_t i = 0; i < num_premises; i++) sum += premises[i];
+    float mean = sum / (float)num_premises;
     float variance = 0.0f;
     for (size_t i = 0; i < num_premises; i++) {
         float diff = premises[i] - mean;
         variance += diff * diff;
     }
-    variance /= num_premises;
-    
-    // 置信度：1.0 - 方差（前提越一致，置信度越高）
-    float confidence = 1.0f - variance;
-    if (confidence < 0.1f) confidence = 0.1f; // 最小置信度
-    if (confidence > 0.9f) confidence = 0.9f; // 最大置信度
-    
-    // 添加到缓存
+    variance /= (float)num_premises;
+
+    /* 无规则推理置信度公式：一致性高→置信度高，方差大→置信度低 */
+    float confidence = 0.4f + 0.3f * (1.0f - fminf(1.0f, variance));
+    if (num_premises <= 1) confidence *= 0.5f;  /* 单前提推理置信度减半 */
+    if (confidence < 0.15f) confidence = 0.15f;
+    if (confidence > 0.7f) confidence = 0.7f;   /* 无规则时上限0.7 */
+
+    /* 对多前提做交叉验证：检查各前提与加权结论的一致性 */
+    float consistency = 0.0f;
+    for (size_t i = 0; i < num_premises; i++) {
+        consistency += 1.0f - fminf(1.0f, fabsf(premises[i] - default_conclusion));
+    }
+    consistency /= (float)num_premises;
+    confidence *= 0.5f + 0.5f * consistency;
+
+    conclusion[0] = default_conclusion;
+
+    /* 输出推理方式标记 */
+    if (max_conclusion_size > 1) conclusion[1] = 0.0f;  /* 0=无规则知识推理 */
+
     add_to_cache(engine, premises_hash, conclusion[0], confidence);
     
     return 0;
@@ -1992,18 +2005,34 @@ static int inductive_reasoning(const float* premises, size_t num_premises,
     if (conclusion_index < max_conclusion_size) conclusion[conclusion_index++] = (float)zero_count / num_premises;    // 16. 零值比例
     if (conclusion_index < max_conclusion_size) conclusion[conclusion_index++] = (range > 1e-10f) ? std_dev / range : 0.0f; // 17. 变异系数
     
-    // 第六阶段：生成归纳规则摘要（如果空间允许）
-    if (conclusion_index + 3 <= max_conclusion_size) {
+    // 第六阶段：生成归纳规则摘要（强化版 - P1-004修复）
+    // 不仅仅输出统计值，还生成可复用的归纳规则编码
+    if (conclusion_index + 6 <= max_conclusion_size) {
         // 规则置信度：基于数据质量和模式清晰度
         float rule_confidence = 0.0f;
         rule_confidence += 0.3f * fminf(1.0f, linear_r_squared);           // 线性拟合质量
         rule_confidence += 0.2f * (1.0f - (float)zero_count / num_premises); // 数据完整性
         rule_confidence += 0.2f * (monotonic_increasing || monotonic_decreasing ? 1.0f : 0.0f); // 单调性
-        rule_confidence += 0.3f * fminf(1.0f, std_dev / (fabsf(mean) + 1e-10f)); // 相对离散度
+        rule_confidence += 0.3f * fminf(1.0f, 1.0f - fminf(1.0f, std_dev / (fabsf(mean) + 1e-10f))); // 相对稳定性
         
         conclusion[conclusion_index++] = rule_confidence;                  // 18. 归纳规则置信度
         conclusion[conclusion_index++] = mean;                             // 19. 规则中心值（代表性值）
         conclusion[conclusion_index++] = linear_trend;                     // 20. 规则趋势分量
+
+        /* P1-004修复: 编码归纳规则类型和参数供知识库复用 */
+        /* 规则类型编码: 1=单调递增, 2=单调递减, 3=周期型, 4=随机型, 5=二次曲线型 */
+        float rule_type = 4.0f;
+        if (monotonic_increasing && linear_r_squared > 0.5f) rule_type = 1.0f;
+        else if (monotonic_decreasing && linear_r_squared > 0.5f) rule_type = 2.0f;
+        else if (has_cycle && fabsf(max_autocorr) > 0.5f) rule_type = 3.0f;
+        else if (fabsf(quadratic_coef) > 0.01f) rule_type = 5.0f;
+        conclusion[conclusion_index++] = rule_type;                        // 21. 规则类型编码
+
+        /* 规则泛化范围: 基于标准差定义正常范围 */
+        float rule_lower = mean - 2.0f * std_dev;
+        float rule_upper = mean + 2.0f * std_dev;
+        conclusion[conclusion_index++] = rule_lower;                       // 22. 规则下界
+        conclusion[conclusion_index++] = rule_upper;                       // 23. 规则上界
     }
     
     return 0;
@@ -3885,6 +3914,8 @@ int reasoning_infer(ReasoningEngine* engine,
     perf_timer_start(&timer);
     
     /* 如果关联了外部知识库，使用知识增强推理 */
+    /* reasoning_infer_with_knowledge 仅在 GCC/Clang 平台编译，MSVC 使用 reasoning_internal.c */
+#ifndef _MSC_VER
     if (engine->external_kb != NULL && engine->knowledge_base_size > 0) {
         int ret = reasoning_infer_with_knowledge(engine, premises, num_premises,
                                                 conclusion, max_conclusion_size,
@@ -3898,6 +3929,7 @@ int reasoning_infer(ReasoningEngine* engine,
         }
         /* 知识增强推理失败，回退到标准推理 */
     }
+#endif
     
     /* 如果关联了LNN实例，先通过液态神经网络进行状态演化 */
     float* evolved_premises = NULL;
@@ -4686,6 +4718,8 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
     return (int)synced;
 }
 
+/* reasoning_infer_with_knowledge 仅在 GCC/Clang 平台编译，MSVC 使用 reasoning_internal.c */
+#ifndef _MSC_VER
 /**
  * @brief 使用知识库增强推理
  *
@@ -4824,8 +4858,11 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
 
     return 0;
 }
+#endif /* _MSC_VER */
 
-/* ========== P2-3: 贝叶斯推理网络实现 ========== */
+/* ========== P2-3: 贝叶斯推理网络 + 推理引擎绑定 ========== */
+/* reasoning.c 中的贝叶斯网络函数仅在 GCC/Clang 平台编译，MSVC 使用 reasoning_internal.c */
+#ifndef _MSC_VER
 /* ZSFAB P0-001修复: 解禁完整贝叶斯网络实现，移除stub占位符，全平台启用 */
 BayesianNetwork* bayesian_network_create(size_t max_nodes) {
     if (max_nodes == 0 || max_nodes > 10000) return NULL;
@@ -5518,5 +5555,7 @@ BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* en
     if (!engine) return NULL;
     return engine->bayesian_network;
 }
+
+#endif /* _MSC_VER: Bayesian+Reasoning section */
 
 /* ZSFAB P1-001修复: 已删除重复stub，完整实现在上方 */

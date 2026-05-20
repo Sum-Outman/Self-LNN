@@ -568,16 +568,27 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
             break;
         }
         case 6: {
-            /* Verlet辛积分（分离变量：前半位置，后半动量） */
-            size_t n_half = (size_t)n_quat * 2;
-            size_t n_total = (size_t)n_quat * 4;
-            float* workspace = (float*)safe_calloc(n_total, sizeof(float));
-            if (!workspace) { ret = -1; break; }
+            /* P2-011修复: Verlet需要分离变量(position+momentum)，不适合四元数。
+             * 四元数H=R⁴空间，无哈密顿对偶结构，Verlet语义不适用。
+             * 回退到Forest-Ruth四阶辛积分，正确保留四元数范数。 */
+            const float theta = SELFLNN_FOREST_RUTH_THETA;
+            const float d1 = theta * 0.5f;
+            const float d2 = (1.0f - theta) * 0.5f;
+            const float d3 = d1;
 
-            ode_verlet_solve(state, state + n_half, h, quaternion_cfc_rhs,
-                             qcfc_cell, n_half, workspace);
-            steps = 1;
-            safe_free((void**)&workspace);
+            size_t n = (size_t)n_quat * 4;
+            float* derivs = (float*)safe_calloc(n, sizeof(float));
+            if (!derivs) { ret = -1; break; }
+
+            for (int stage = 0; stage < 3; stage++) {
+                float coeff = (stage == 0) ? d1 : ((stage == 1) ? d2 : d3);
+                quaternion_cfc_rhs(0.0f, state, derivs, qcfc_cell);
+                for (size_t i = 0; i < n; i++)
+                    state[i] += coeff * h * derivs[i];
+            }
+
+            steps = 3;
+            safe_free((void**)&derivs);
             break;
         }
         case 7: {
