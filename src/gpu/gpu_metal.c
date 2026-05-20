@@ -637,6 +637,15 @@ static int metal_backend_get_device_info(int device_index, GpuDeviceInfo* info) 
 
 /**
  * @brief 创建Metal上下文（支持多设备）
+ *
+ * G-005修复: 完整的Metal内核调度实现，包括:
+ * 1. MTLDevice创建 - 通过MTLCreateSystemDefaultDevice或MTLCopyAllDevices
+ * 2. MTLCommandQueue创建 - MTLDevice的newCommandQueue方法
+ * 3. MTLComputePipelineState创建 - 在kernel_create中通过MSL编译
+ * 4. 内核参数设置 - setBuffer绑定到计算编码器
+ * 5. 内核调度执行 - dispatchThreadgroups/dipatchThreads
+ *
+ * 此函数确保MTLDevice和MTLCommandQueue在GPU上下文中正确初始化。
  */
 static GpuContext* metal_backend_context_create(int device_index) {
 #ifdef __APPLE__
@@ -654,10 +663,20 @@ static GpuContext* metal_backend_context_create(int device_index) {
         return NULL;
     }
     
-    // 使用已枚举的设备引用
+    /* 使用已枚举的设备引用 */
     void* device = g_metal_device_refs[device_index];
+
+    /* G-005: 设备能力查询 - 确认设备支持计算着色器 */
+    SEL supportsFamily_sel = sel_registerName("supportsFamily:");
+    if (supportsFamily_sel && device) {
+        BOOL supports = ((BOOL (*)(id, SEL, long))objc_msgSend)((id)(device), supportsFamily_sel, 1001L);
+        if (!supports) {
+            set_metal_error_string("GPU设备不支持Metal计算着色器");
+            return NULL;
+        }
+    }
     
-    // 分配上下文结构
+    /* 分配上下文结构 */
     MetalContextInternal* ctx = (MetalContextInternal*)safe_malloc(sizeof(MetalContextInternal));
     if (!ctx) {
         set_metal_error_string("内存分配失败");
@@ -668,17 +687,19 @@ static GpuContext* metal_backend_context_create(int device_index) {
     ctx->device = device;
     ctx->device_id = device_index;
     
-    // 创建命令队列（完整实现）
+    /* G-005: 创建命令队列（完整实现）
+     * MTLCommandQueue管理命令缓冲区的提交顺序，支持并发执行 */
     if (mtlDeviceNewCommandQueue) {
         ctx->command_queue = mtlDeviceNewCommandQueue(device);
         if (!ctx->command_queue) {
-            set_metal_error_string("创建Metal命令队列失败");
+            set_metal_error_string("创建Metal命令队列失败: MTLDeviceNewCommandQueue返回NULL");
             safe_free((void**)&ctx);
             return NULL;
         }
     } else {
-        ctx->command_queue = NULL;
-        set_metal_error_string("警告：Metal命令队列函数不可用，某些功能可能受限");
+        set_metal_error_string("致命错误: Metal命令队列函数不可用");
+        safe_free((void**)&ctx);
+        return NULL;
     }
     
     ctx->initialized = 1;

@@ -1321,6 +1321,7 @@ static int opencl_load_library(void) {
     if (!g_opencl_library) {
         snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), 
                 "无法加载任何OpenCL运行时库，已尝试所有已知的供应商库名");
+        fprintf(stderr, "[OpenCL警告] 无法加载任何OpenCL运行时库（已尝试所有已知供应商库名），将尝试其他GPU后端\n");
         return -1;
     }
     
@@ -1331,6 +1332,7 @@ static int opencl_load_library(void) {
         if (!name) { \
             snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), \
                     "无法加载OpenCL函数: %s", #name); \
+            fprintf(stderr, "[OpenCL警告] 无法加载核心函数 %s，OpenCL运行时可能不完整，将尝试其他GPU后端\n", #name); \
             opencl_reset_function_pointers(); \
             CLOSE_LIBRARY(g_opencl_library); \
             g_opencl_library = NULL; \
@@ -1773,38 +1775,48 @@ static int opencl_find_device_by_index(int device_index, cl_platform_id* out_pla
 static int opencl_backend_init(void) {
     if (!g_opencl_initialized) {
         if (opencl_load_library() != 0) {
+            /* G-007修复: 记录警告但允许调用方继续探测其他后端 */
+            fprintf(stderr, "[OpenCL警告] 运行时库加载失败: %s\n", g_opencl_error_string);
             return -1;
         }
         
-        // 检查是否有可用的OpenCL平台
+        /* 检查是否有可用的OpenCL平台 */
         cl_uint num_platforms = 0;
         cl_int result = clGetPlatformIDs(0, NULL, &num_platforms);
         if (opencl_check_error(result, "获取OpenCL平台数量") != 0) {
+            fprintf(stderr, "[OpenCL警告] 获取平台数量失败: %s (错误码: %d)\n",
+                    g_opencl_error_string, result);
             return -1;
         }
         
         if (num_platforms == 0) {
             snprintf(g_opencl_error_string, sizeof(g_opencl_error_string),
                     "未找到可用的OpenCL平台");
+            fprintf(stderr, "[OpenCL警告] 未找到任何OpenCL平台，系统可能未安装OpenCL运行时\n");
             return -1;
         }
         
-        // 检查是否有可用的OpenCL设备
+        /* 检查是否有可用的OpenCL设备 */
         cl_platform_id platform;
         result = clGetPlatformIDs(1, &platform, NULL);
         if (opencl_check_error(result, "获取OpenCL平台") != 0) {
+            fprintf(stderr, "[OpenCL警告] 获取OpenCL平台句柄失败: %s (错误码: %d)\n",
+                    g_opencl_error_string, result);
             return -1;
         }
         
         cl_uint num_devices = 0;
         result = clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 0, NULL, &num_devices);
         if (opencl_check_error(result, "获取OpenCL设备数量") != 0) {
+            fprintf(stderr, "[OpenCL警告] 获取OpenCL设备数量失败: %s (错误码: %d)\n",
+                    g_opencl_error_string, result);
             return -1;
         }
         
         if (num_devices == 0) {
             snprintf(g_opencl_error_string, sizeof(g_opencl_error_string),
                     "未找到可用的OpenCL设备");
+            fprintf(stderr, "[OpenCL警告] 检测到OpenCL平台但未找到任何设备（可能缺少GPU驱动程序）\n");
             return -1;
         }
         
@@ -2152,9 +2164,9 @@ static GpuMemory* opencl_backend_memory_alloc(GpuContext* gpu_context, size_t si
 
     /* P3-005修复: SVM共享虚拟内存路径 (OpenCL 2.0+) */
     if (g_opencl_svm_available && context->device && (memory_type == GPU_MEMORY_UNIFIED || memory_type == GPU_MEMORY_DEVICE)) {
-        /* 检测设备SVM能力 */
-        cl_device_svm_capabilities svm_caps = 0;
-        cl_int svm_err = clGetDeviceInfo(context->device, CL_DEVICE_SVM_CAPABILITIES,
+        /* 检测设备SVM能力 (cl_device_svm_capabilities = cl_uint) */
+        unsigned int svm_caps = 0;
+        cl_int svm_err = clGetDeviceInfo(context->device, 0x109B /* CL_DEVICE_SVM_CAPABILITIES */,
                                           sizeof(svm_caps), &svm_caps, NULL);
         if (svm_err == CL_SUCCESS && (svm_caps & CL_DEVICE_SVM_COARSE_GRAIN_BUFFER)) {
             cl_svm_mem_flags svm_flags = CL_MEM_READ_WRITE;
@@ -2988,7 +3000,7 @@ static int opencl_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
                 if (workgroup_product > 1) {
                     cl_device_id device = NULL;
                     cl_int dev_result = clGetCommandQueueInfo(opencl_kernel->command_queue,
-                        CL_QUEUE_DEVICE, sizeof(cl_device_id), &device, NULL);
+                        0x1090 /* CL_QUEUE_DEVICE */, sizeof(cl_device_id), &device, NULL);
                     if (dev_result == CL_SUCCESS && device) {
                         size_t max_workgroup_size = 0;
                         cl_int info_result = clGetDeviceInfo(device,

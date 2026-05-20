@@ -118,6 +118,11 @@ static inline int cpu_supports_avx2(void) {
 static int g_simd_avx_available = -1;  // -1=未检测, 0=不支持, 1=支持
 static int g_simd_avx2_available = -1;
 
+/* GPU→CPU回退跟踪（D-004） */
+static int g_fallback_single_thread_count = 0;
+static int g_fallback_scalar_count = 0;
+static int g_fallback_summary_logged = 0;
+
 /**
  * @brief 获取当前CPU的SIMD向量化宽度
  * @return 4(SSE), 8(AVX), 1(无SIMD)
@@ -1413,6 +1418,25 @@ GpuContext* gpu_context_create(GpuBackend backend, int device_index) {
     ctx->free_memory = dev_info.free_memory;
     strncpy(ctx->device_name, dev_info.name, sizeof(ctx->device_name) - 1);
 
+    /* D-004: 一次性总结日志 —— 列出CPU后端的SIMD能力与潜在回退点 */
+    if (!g_fallback_summary_logged) {
+        g_fallback_summary_logged = 1;
+        const char* simd_level = "无";
+#if SELFLNN_HAVE_AVX
+        if (cpu_supports_avx()) {
+            simd_level = cpu_supports_avx2() ? "AVX2" : "AVX";
+        }
+#endif
+#if SELFLNN_HAVE_SSE
+        if (strcmp(simd_level, "无") == 0) simd_level = "SSE";
+#endif
+        log_warning("[GPU→CPU] CPU后端初始化完成 —— SIMD加速级别: %s, 逻辑核心: %zu | "
+                    "注意: 高度并行内核可能回退至单线程执行, 非SIMD内核将使用标量实现",
+                    simd_level, (size_t)dev_info.logical_cores);
+        g_fallback_single_thread_count = 0;
+        g_fallback_scalar_count = 0;
+    }
+
     ThreadPoolConfig pool_cfg;
     memset(&pool_cfg, 0, sizeof(pool_cfg));
     pool_cfg.num_threads = dev_info.logical_cores > 0 ? (size_t)dev_info.logical_cores : 4;
@@ -1443,6 +1467,17 @@ void auto_kernel_optimizer_destroy(AutoKernelOptimizer* optimizer) {
 void gpu_context_free(GpuContext* context) {
     if (!context) return;
     struct GpuContext* ctx = (struct GpuContext*)context;
+
+    /* D-004: 回退总结日志 —— 输出本次运行中所有回退统计 */
+    if (g_fallback_single_thread_count > 0) {
+        log_warning("[GPU→CPU] 上下文释放 —— 本次运行共发生 %d 次GPU内核算子回退至CPU单线程执行",
+                    g_fallback_single_thread_count);
+    }
+    if (g_fallback_scalar_count > 0) {
+        log_warning("[GPU→CPU] 上下文释放 —— 本次运行共发生 %d 次GPU内核算子回退至CPU标量执行",
+                    g_fallback_scalar_count);
+    }
+
     if (ctx->thread_pool) {
         thread_pool_free(ctx->thread_pool);
         ctx->thread_pool = NULL;
@@ -1974,7 +2009,12 @@ int gpu_kernel_execute(GpuKernel* kernel, size_t global_work_size, size_t local_
         }
     }
 
-    /* 单线程回退 */
+    /* 单线程回退（D-004: 线程池不可用或工作量不足，回退到单线程执行） */
+    log_warning("[GPU→CPU] 内核算子 %s 回退至CPU单线程实现，性能可能降低（可用线程池: %s, 总工作量: %zu）",
+                k->kernel_name ? k->kernel_name : "unknown",
+                pool ? "是但工作量不足" : "否",
+                total);
+    g_fallback_single_thread_count++;
     return cpu_kernel_dispatch(k, total);
 }
 
@@ -1991,7 +2031,10 @@ int gpu_kernel_execute_nd(GpuKernel* kernel, int work_dim,
             total *= global_work_size[d];
         }
     }
-    /* 多维内核执行回退到一维并行执行 */
+    /* D-004: 多维内核执行回退到一维并行执行 */
+    log_warning("[GPU→CPU] 内核 %s ND执行回退至1D执行，性能可能降低（维度: %d）",
+                k->kernel_name ? k->kernel_name : "unknown",
+                work_dim);
     return gpu_kernel_execute(kernel, total, (local_work_size ? local_work_size[0] : 1));
 }
 

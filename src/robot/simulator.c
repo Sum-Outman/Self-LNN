@@ -551,8 +551,143 @@ static int sim_broadphase(SimPhysicsPipeline* pipe) {
 }
 
 /* ============================================================================
- * 增强物理引擎 — 狭阶段碰撞检测（GJK算法）
+ * 增强物理引擎 — 狭阶段碰撞检测（GJK算法 + EPA渗透深度）
+ *
+ * D-003修复: GJK检测碰撞后使用EPA（扩展多面体算法）精确计算穿透深度。
+ * EPA通过迭代扩展Minkowski差的多面体表面，找到最小穿透深度和法向量。
+ * 相比简化版GJK的单一方向采样穿透估计，EPA提供更准确的刚体碰撞响应。
  * ============================================================================ */
+
+/* EPA状态：维护一个三角面片列表，追踪最近的分离方向 */
+typedef struct {
+    Vec3 v[4];         /* 多面体顶点（Minkowski差空间） */
+    int nv;            /* 顶点数 */
+    Vec3 norm;         /* 最近面的法向量 */
+    float dist;        /* 最近面的距离 */
+    int converged;     /* 收敛标志 */
+} SimEPAData;
+
+/* EPA: 获取Minkowski差在给定方向上的最远点（支持函数） */
+static Vec3 sim_epa_support(const CollisionShape* a, const CollisionShape* b,
+                             const Vec3* direction) {
+    Vec3 sa = collision_shape_support(a, direction);
+    Vec3 dir_neg = { -direction->x, -direction->y, -direction->z };
+    Vec3 sb = collision_shape_support(b, &dir_neg);
+    Vec3 diff;
+    diff.x = sa.x - sb.x;
+    diff.y = sa.y - sb.y;
+    diff.z = sa.z - sb.z;
+    return diff;
+}
+
+/* EPA: 通过3个顶点计算三角形法向量（指向原点侧） */
+static Vec3 sim_epa_triangle_normal(const Vec3* a, const Vec3* b, const Vec3* c) {
+    Vec3 ab = { b->x - a->x, b->y - a->y, b->z - a->z };
+    Vec3 ac = { c->x - a->x, c->y - a->y, c->z - a->z };
+    Vec3 n;
+    n.x = ab.y * ac.z - ab.z * ac.y;
+    n.y = ab.z * ac.x - ab.x * ac.z;
+    n.z = ab.x * ac.y - ab.y * ac.x;
+    /* 确保法向量指向原点方向 */
+    float dot_to_origin = n.x * (-a->x) + n.y * (-a->y) + n.z * (-a->z);
+    if (dot_to_origin < 0.0f) {
+        n.x = -n.x; n.y = -n.y; n.z = -n.z;
+    }
+    /* 归一化 */
+    float len = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
+    if (len > 1e-10f) {
+        n.x /= len; n.y /= len; n.z /= len;
+    }
+    return n;
+}
+
+/* EPA: 迭代扩展多面体找到最小穿透深度和法向量 */
+static float sim_epa_penetration(const CollisionShape* a, const CollisionShape* b,
+                                  Vec3* out_normal, Vec3* out_point) {
+    /* 使用初始GJK单形体作为EPA种子 */
+    Vec3 simplex[64];
+    int simplex_count = 0;
+
+    /* 从多个方向构建初始多面体 */
+    Vec3 init_dirs[4] = {
+        { 1.0f, 0.0f, 0.0f },
+        { 0.0f, 1.0f, 0.0f },
+        { 0.0f, 0.0f, 1.0f },
+        { -0.577f, -0.577f, -0.577f }
+    };
+    for (int i = 0; i < 4 && simplex_count < 64; i++) {
+        simplex[simplex_count] = sim_epa_support(a, b, &init_dirs[i]);
+        simplex_count++;
+    }
+
+    /* EPA主循环：迭代找最近面并扩展 */
+    float best_dist = 1e30f;
+    Vec3 best_norm = { 0.0f, 1.0f, 0.0f };
+    Vec3 best_pt = { 0.0f, 0.0f, 0.0f };
+
+    for (int iter = 0; iter < 32; iter++) {
+        /* 遍历所有三角面片找最近的 */
+        float min_face_dist = 1e30f;
+        Vec3 min_face_norm = { 0.0f, 0.0f, 0.0f };
+        Vec3 min_face_pt = { 0.0f, 0.0f, 0.0f };
+
+        for (int i = 0; i < simplex_count - 2; i++) {
+            for (int j = i + 1; j < simplex_count - 1; j++) {
+                for (int k = j + 1; k < simplex_count; k++) {
+                    Vec3 norm = sim_epa_triangle_normal(
+                        &simplex[i], &simplex[j], &simplex[k]);
+                    /* 计算原点在法向量上的投影距离 */
+                    float dist = fabsf(norm.x * simplex[i].x +
+                                       norm.y * simplex[i].y +
+                                       norm.z * simplex[i].z);
+                    /* 计算面中心点 */
+                    Vec3 center;
+                    center.x = (simplex[i].x + simplex[j].x + simplex[k].x) / 3.0f;
+                    center.y = (simplex[i].y + simplex[j].y + simplex[k].y) / 3.0f;
+                    center.z = (simplex[i].z + simplex[j].z + simplex[k].z) / 3.0f;
+                    if (dist < min_face_dist && dist > 1e-8f) {
+                        min_face_dist = dist;
+                        min_face_norm = norm;
+                        min_face_pt = center;
+                    }
+                }
+            }
+        }
+
+        if (min_face_dist >= 1e29f) break;
+
+        /* 收敛判断 */
+        float improvement = best_dist - min_face_dist;
+        if (improvement < 1e-6f) {
+            break;
+        }
+
+        best_dist = min_face_dist;
+        best_norm = min_face_norm;
+        best_pt = min_face_pt;
+
+        /* 沿最近面法向量方向扩展多面体 */
+        Vec3 support_pt = sim_epa_support(a, b, &min_face_norm);
+        if (simplex_count < 64) {
+            simplex[simplex_count] = support_pt;
+            simplex_count++;
+        } else {
+            break;
+        }
+    }
+
+    if (out_normal) {
+        out_normal->x = best_norm.x;
+        out_normal->y = best_norm.y;
+        out_normal->z = best_norm.z;
+    }
+    if (out_point) {
+        out_point->x = best_pt.x;
+        out_point->y = best_pt.y;
+        out_point->z = best_pt.z;
+    }
+    return best_dist;
+}
 
 static int sim_narrowphase(SimPhysicsPipeline* pipe, float friction_coeff, float restitution) {
     if (!pipe) return -1;
@@ -562,35 +697,58 @@ static int sim_narrowphase(SimPhysicsPipeline* pipe, float friction_coeff, float
         int bi = pipe->pairs[p].b;
         SimCollisionObject* obj_a = &pipe->objects[ai];
         SimCollisionObject* obj_b = &pipe->objects[bi];
+
+        /* 先用GJK判定是否相交 */
         CollisionContact gjk_contact;
         memset(&gjk_contact, 0, sizeof(gjk_contact));
-        if (gjk_intersection(&obj_a->shape, &obj_b->shape, &gjk_contact)) {
-            if (pipe->contact_count >= SIM_MAX_CONTACTS) return pipe->contact_count;
-            SimContactPoint* cp = &pipe->contacts[pipe->contact_count];
-            cp->position[0] = gjk_contact.point.x;
-            cp->position[1] = gjk_contact.point.y;
-            cp->position[2] = gjk_contact.point.z;
+        if (!gjk_intersection(&obj_a->shape, &obj_b->shape, &gjk_contact)) {
+            continue;
+        }
+
+        if (pipe->contact_count >= SIM_MAX_CONTACTS) return pipe->contact_count;
+        SimContactPoint* cp = &pipe->contacts[pipe->contact_count];
+
+        /* EPA精确计算穿透深度和法向量 */
+        Vec3 epa_normal, epa_point;
+        float epa_depth = sim_epa_penetration(&obj_a->shape, &obj_b->shape,
+                                               &epa_normal, &epa_point);
+
+        /* 如果EPA失败（穿透距离过大或过小），回退到GJK结果 */
+        if (epa_depth < 1e-6f || epa_depth > 10.0f) {
+            cp->penetration = gjk_contact.penetration_depth;
             cp->normal[0] = gjk_contact.normal.x;
             cp->normal[1] = gjk_contact.normal.y;
             cp->normal[2] = gjk_contact.normal.z;
-            float nlen = sqrtf(cp->normal[0]*cp->normal[0] + cp->normal[1]*cp->normal[1] + cp->normal[2]*cp->normal[2]);
-            if (nlen > 1e-6f) {
-                cp->normal[0] /= nlen; cp->normal[1] /= nlen; cp->normal[2] /= nlen;
-            } else {
-                cp->normal[0] = 0.0f; cp->normal[1] = 1.0f; cp->normal[2] = 0.0f;
-            }
-            cp->penetration = gjk_contact.penetration_depth;
-            if (cp->penetration < 0.001f) cp->penetration = 0.001f;
-            cp->friction_coeff = friction_coeff;
-            cp->restitution = restitution;
-            cp->body_a = ai;
-            cp->body_b = bi;
-            cp->impulse_normal = 0.0f;
-            cp->impulse_tangent[0] = 0.0f;
-            cp->impulse_tangent[1] = 0.0f;
-            cp->active = 1;
-            pipe->contact_count++;
+            cp->position[0] = gjk_contact.point.x;
+            cp->position[1] = gjk_contact.point.y;
+            cp->position[2] = gjk_contact.point.z;
+        } else {
+            cp->penetration = epa_depth;
+            cp->normal[0] = epa_normal.x;
+            cp->normal[1] = epa_normal.y;
+            cp->normal[2] = epa_normal.z;
+            cp->position[0] = epa_point.x;
+            cp->position[1] = epa_point.y;
+            cp->position[2] = epa_point.z;
         }
+
+        /* 法向量归一化和安全处理 */
+        float nlen = sqrtf(cp->normal[0]*cp->normal[0] + cp->normal[1]*cp->normal[1] + cp->normal[2]*cp->normal[2]);
+        if (nlen > 1e-6f) {
+            cp->normal[0] /= nlen; cp->normal[1] /= nlen; cp->normal[2] /= nlen;
+        } else {
+            cp->normal[0] = 0.0f; cp->normal[1] = 1.0f; cp->normal[2] = 0.0f;
+        }
+        if (cp->penetration < 0.001f) cp->penetration = 0.001f;
+        cp->friction_coeff = friction_coeff;
+        cp->restitution = restitution;
+        cp->body_a = ai;
+        cp->body_b = bi;
+        cp->impulse_normal = 0.0f;
+        cp->impulse_tangent[0] = 0.0f;
+        cp->impulse_tangent[1] = 0.0f;
+        cp->active = 1;
+        pipe->contact_count++;
     }
     return pipe->contact_count;
 }
@@ -1043,6 +1201,18 @@ static void simulator_update_internal_physics(Simulator* sim, float dt) {
 
 static int simulator_step_internal(Simulator* sim, int num_steps) {
     if (!sim) return -1;
+
+    /* D-003: 日志记录使用内部增强物理引擎（GJK+EPA碰撞检测） */
+    static int engine_reported = 0;
+    if (!engine_reported) {
+        log_info("[仿真器] 外部仿真器不可用，启动内部纯C增强物理引擎");
+        log_info("[仿真器] 碰撞检测: GJK狭阶段 + EPA渗透深度计算 + AABB广阶段");
+        log_info("[仿真器] 约束求解: 顺序脉冲(SI)求解器 + Baumgarte稳定化");
+        log_info("[仿真器] 集成: 半隐式Euler + 4次子步进 + 地面弹簧阻尼模型");
+        log_info("[仿真器] 此引擎100%纯C实现，用于外部仿真器(PyBullet/Gazebo)不可用时的降级");
+        engine_reported = 1;
+    }
+
     for (int i = 0; i < num_steps; i++) {
         simulator_update_internal_physics(sim, sim->config.timestep);
     }

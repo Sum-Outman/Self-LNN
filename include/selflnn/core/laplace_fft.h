@@ -24,16 +24,24 @@ static inline void lfft_bit_reverse_order(LFFT_Complex* data, size_t n) {
     }
 }
 
-/* Cooley-Tukey基-2复数FFT（在位计算） */
+/* Cooley-Tukey基-2复数FFT（在位计算）
+ * B-005修复: 蝶形运算添加边界检查，防止索引溢出；
+ * 增加输入大小为2的幂的验证，n必须满足 (n & (n-1)) == 0 */
 static inline void lfft_complex_inplace(LFFT_Complex* data, size_t n, int inverse) {
+    /* B-005: 验证输入大小必须是2的幂，非2的幂时FFT索引计算无法保证安全 */
+    if (n == 0 || (n & (n - 1)) != 0) return;
     lfft_bit_reverse_order(data, n);
     for (size_t s = 2; s <= n; s <<= 1) {
         float angle = (inverse ? 2.0f : -2.0f) * (float)M_PI / (float)s;
         LFFT_Complex wm = { cosf(angle), sinf(angle) };
         for (size_t k = 0; k < n; k += s) {
             LFFT_Complex w = { 1.0f, 0.0f };
-            for (size_t j = 0; j < s / 2; j++) {
-                size_t idx_a = k + j, idx_b = k + j + s / 2;
+            size_t half = s / 2;
+            for (size_t j = 0; j < half; j++) {
+                size_t idx_a = k + j;
+                size_t idx_b = k + j + half;
+                /* B-005: 边界检查防止索引越界 */
+                if (idx_b >= n) break;
                 LFFT_Complex t = { w.re * data[idx_b].re - w.im * data[idx_b].im,
                                    w.re * data[idx_b].im + w.im * data[idx_b].re };
                 data[idx_b].re = data[idx_a].re - t.re;

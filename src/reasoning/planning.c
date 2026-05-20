@@ -1576,7 +1576,7 @@ PlanningSystem* planning_system_create(const PlanningConfig* config) {
     system->pareto_front_size = 0;
     system->pareto_front_indices = NULL;
     system->pareto_objectives = NULL;
-    plan_rng_state = EVOLUTION_DEFAULT_SEED + (uint64_t)time(NULL);
+    plan_rng_state = (uint64_t)secure_random_int(UINT32_MAX) ^ ((uint64_t)time(NULL) << 32);
 
     planning_temporal_constraint_network_create(system);
 

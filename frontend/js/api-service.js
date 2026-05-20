@@ -17,7 +17,8 @@ var SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
 class ApiService {
     constructor() {
         this.baseURL = `http://${SELFLNN_CONFIG.host}:${SELFLNN_CONFIG.port}/api`;
-        this.connected = true;  /* 初始假定已连接，实际状态由checkConnection异步更新 */
+        this.connected = false;  /* F-003修复: 初始状态必须为未连接，由checkConnection()异步确认后更新 */
+        this._connectionVerified = false;  /* 首次连接确认标记 */
         this.connectionCheckInterval = null;
         
         /* F-014修复: API密钥认证支持 */
@@ -427,6 +428,7 @@ class ApiService {
             
             if (response.ok) {
                 this.connected = true;
+                this._connectionVerified = true;  /* F-003修复: 只有服务器确认后才标记已验证 */
                 return { connected: true, message: '后端服务器已连接' };
             } else {
                 this.connected = false;

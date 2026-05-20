@@ -279,10 +279,14 @@ int im_irl_infer_reward(ImitationDeepLearner* idl, const ImDemonstration* demo, 
     
     LNNConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.input_size = demo->keyframe_count > 0 ? IM_MAX_JOINTS : 32;
-    cfg.hidden_size = 64;
+    cfg.hidden_size = 128;
     cfg.output_size = dim;
     cfg.learning_rate = 0.01f;
     cfg.enable_training = 1;
+    /* S-008修复: 判别器网络从两层升级为三层液态神经网络
+     * 输入层 → 隐层1(128) → 隐层2(64) → 隐层3(32) → 输出层
+     * 每层都是CfC液态神经元，具有时序记忆能力 */
+    cfg.num_layers = 3;
 
     if (!idl->irl_network) {
         idl->irl_network = lnn_create(&cfg);

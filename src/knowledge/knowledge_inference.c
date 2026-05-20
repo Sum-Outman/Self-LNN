@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <math.h>
 #include <time.h>
 
@@ -216,21 +217,58 @@ static int ki_levenshtein(const char* s1, const char* s2) {
     return result;
 }
 
-/* 字符串语义相似度：Jaccard 2-gram + 编辑距离混合 */
+/* S-012修复: 完整2-gram Jaccard相似度
+ * 原实现每个2-gram只取第一个匹配就break，严重低估相似度。
+ * 修复: 统计所有共享2-gram出现次数，计算真实Jaccard = |A∩B|/|A∪B| */
 static float ki_semantic_similarity(const char* a, const char* b) {
     if (!a || !b) return 0.0f;
     if (strcmp(a, b) == 0) return 1.0f;
     size_t la = strlen(a), lb = strlen(b);
     if (la < 2 || lb < 2) return 0.0f;
-    int overlap = 0;
-    for (size_t i = 0; i + 1 < la; i++)
-        for (size_t j = 0; j + 1 < lb; j++)
-            if (a[i]==b[j] && a[i+1]==b[j+1]) { overlap++; break; }
-    int total = (int)(la - 1) + (int)(lb - 1);
-    float jaccard = (float)(2 * overlap) / (float)(total + 1);
+    size_t na = la - 1;
+    size_t nb = lb - 1;
+    if (na == 0 || nb == 0) return 0.0f;
+    /* 构建a的所有2-gram哈希集合，用于O(1)查询 */
+    unsigned short* bg_a = (unsigned short*)safe_malloc(na * sizeof(unsigned short));
+    if (!bg_a) return 0.0f;
+    for (size_t i = 0; i < na; i++) {
+        bg_a[i] = (unsigned short)(((unsigned char)a[i] << 8) | (unsigned char)a[i+1]);
+    }
+    /* 构建b的唯一2-gram集合，同时统计交集 */
+    int* bg_b_seen = (int*)safe_calloc(65536, sizeof(int));
+    if (!bg_b_seen) {
+        safe_free((void**)&bg_a);
+        return 0.0f;
+    }
+    int intersect_count = 0;
+    /* 统计b的独立2-gram和与a的交集 */
+    for (size_t j = 0; j < nb; j++) {
+        unsigned short bg = (unsigned short)(((unsigned char)b[j] << 8) | (unsigned char)b[j+1]);
+        if (!bg_b_seen[bg]) {
+            bg_b_seen[bg] = 1;
+        }
+    }
+    /* 标记a的2-gram，统计交集，同时标记a独有的2-gram */
+     for (size_t i = 0; i < na; i++) {
+         unsigned short bg = bg_a[i];
+         if (bg_b_seen[bg] == 1) {
+             bg_b_seen[bg] = 2;
+             intersect_count++;
+         } else if (bg_b_seen[bg] == 0) {
+             bg_b_seen[bg] = 3;
+         }
+     }
+     /* 统计唯一2-gram总数：值为1(b独有)、2(共有)、3(a独有) */
+     int unique_union = 0;
+     for (int k = 0; k < 65536; k++) {
+         if (bg_b_seen[k] >= 1) unique_union++;
+     }
+    float jaccard = (unique_union > 0) ? (float)intersect_count / (float)unique_union : 0.0f;
     int ed = ki_levenshtein(a, b);
     float edit_sim = 1.0f - (float)ed / fmaxf((float)(la + lb), 1.0f);
     if (edit_sim < 0.0f) edit_sim = 0.0f;
+    safe_free((void**)&bg_a);
+    safe_free((void**)&bg_b_seen);
     return 0.4f * jaccard + 0.6f * edit_sim;
 }
 
@@ -482,42 +520,100 @@ int ki_probabilistic_infer(KnowledgeInferenceEngine* kie, const KIFact* facts, c
     return 0;
 }
 
+/* S-013修复: FNV-1a哈希visited集合，O(1)平均去重，替代O(n²)字符串比较
+ * B-021修复: 不再拷贝GraphNode大结构体(>4KB)到visited数组，
+ * 仅用哈希集合追踪已访问概念名 */
+#define FNV_HASH_TABLE_SIZE 4096
+#define FNV_HASH_EMPTY      0xFFFFFFFFFFFFFFFFULL
+#define FNV1A_PRIME         1099511628211ULL
+#define FNV1A_OFFSET        14695981039346656037ULL
+
+static uint64_t fnv1a_hash_str(const char* str) {
+    uint64_t h = FNV1A_OFFSET;
+    while (*str) {
+        h ^= (uint64_t)(unsigned char)(*str++);
+        h *= FNV1A_PRIME;
+    }
+    return h;
+}
+
+typedef struct {
+    uint64_t keys[FNV_HASH_TABLE_SIZE];
+    int count;
+} FNVVisitedSet;
+
+static int fnv_visited_contains(FNVVisitedSet* vs, uint64_t hash) {
+    if (hash == FNV_HASH_EMPTY) hash = 1;
+    size_t idx = (size_t)(hash % FNV_HASH_TABLE_SIZE);
+    size_t start = idx;
+    do {
+        if (vs->keys[idx] == hash) return 1;
+        if (vs->keys[idx] == FNV_HASH_EMPTY) return 0;
+        idx = (idx + 1) % FNV_HASH_TABLE_SIZE;
+    } while (idx != start);
+    return 0;
+}
+
+static int fnv_visited_add(FNVVisitedSet* vs, uint64_t hash) {
+    if (vs->count >= (FNV_HASH_TABLE_SIZE * 3 / 4)) return 0;
+    if (hash == FNV_HASH_EMPTY) hash = 1;
+    size_t idx = (size_t)(hash % FNV_HASH_TABLE_SIZE);
+    while (vs->keys[idx] != FNV_HASH_EMPTY && vs->keys[idx] != hash) {
+        idx = (idx + 1) % FNV_HASH_TABLE_SIZE;
+    }
+    if (vs->keys[idx] == hash) return 1;
+    vs->keys[idx] = hash;
+    vs->count++;
+    return 1;
+}
+
+static void fnv_visited_remove(FNVVisitedSet* vs, uint64_t hash) {
+    if (hash == FNV_HASH_EMPTY) hash = 1;
+    size_t idx = (size_t)(hash % FNV_HASH_TABLE_SIZE);
+    size_t start = idx;
+    do {
+        if (vs->keys[idx] == hash) {
+            vs->keys[idx] = FNV_HASH_EMPTY;
+            vs->count--;
+            return;
+        }
+        if (vs->keys[idx] == FNV_HASH_EMPTY) return;
+        idx = (idx + 1) % FNV_HASH_TABLE_SIZE;
+    } while (idx != start);
+}
+
 static int dfs_visit(KnowledgeInferenceEngine* kie, const char* concept, int depth, int max_depth,
-    KIFact* path, int* path_count, int max_path, GraphNode* visited_nodes, int* visited_count) {
-    if (!kie || !concept || !path || !path_count || !visited_nodes || !visited_count) return -1;
+    KIFact* path, int* path_count, int max_path, FNVVisitedSet* visited) {
+    if (!kie || !concept || !path || !path_count || !visited) return -1;
     if (depth > max_depth) return 0;
     if (*path_count >= max_path) return 0;
-    int existing = -1;
-    for (int i = 0; i < *visited_count; i++) {
-        if (strcmp(visited_nodes[i].concept_name, concept) == 0) {
-            existing = i;
-            break;
-        }
+    uint64_t h = fnv1a_hash_str(concept);
+    if (fnv_visited_contains(visited, h)) return 0;
+    fnv_visited_add(visited, h);
+    /* B-021修复: GraphNode超过4KB，不再在栈上拷贝。
+     * 直接查询知识库边表，避免大结构体拷贝 */
+    GraphNode* node_ptr = (GraphNode*)safe_calloc(1, sizeof(GraphNode));
+    if (!node_ptr) {
+        fnv_visited_remove(visited, h);
+        return -1;
     }
-    if (existing >= 0) return 0;
-    GraphNode node;
-    concept_from_kb(kie, concept, &node);
-    node.visited = 1;
-    node.depth = depth;
-    if (*visited_count < KI_MAX_GRAPH_NODES) {
-        visited_nodes[*visited_count] = node;
-        (*visited_count)++;
-    }
-    for (int i = 0; i < node.edge_count && *path_count < max_path; i++) {
+    concept_from_kb(kie, concept, node_ptr);
+    for (int i = 0; i < node_ptr->edge_count && *path_count < max_path; i++) {
         if (depth < max_depth) {
             KIFact f;
             memset(&f, 0, sizeof(KIFact));
-            fact_copy(&f, &node.edges[i].fact);
+            fact_copy(&f, &node_ptr->edges[i].fact);
             if (*path_count < max_path) {
                 path[*path_count] = f;
                 (*path_count)++;
             }
-            if (strlen(node.edges[i].object) > 0) {
-                dfs_visit(kie, node.edges[i].object, depth + 1, max_depth,
-                    path, path_count, max_path, visited_nodes, visited_count);
+            if (strlen(node_ptr->edges[i].object) > 0) {
+                dfs_visit(kie, node_ptr->edges[i].object, depth + 1, max_depth,
+                    path, path_count, max_path, visited);
             }
         }
     }
+    safe_free((void**)&node_ptr);
     return 0;
 }
 
@@ -525,11 +621,11 @@ int ki_graph_dfs(KnowledgeInferenceEngine* kie, const char* start_concept, int m
     KIFact* path, int* path_count) {
     if (!kie || !start_concept || !path || !path_count) return -1;
     *path_count = 0;
-    GraphNode visited_nodes[KI_MAX_GRAPH_NODES];
-    memset(visited_nodes, 0, sizeof(visited_nodes));
-    int visited_count = 0;
+    /* S-013修复: FNV-1a哈希visited集合，替代原GraphNode大数组O(n²)方案 */
+    FNVVisitedSet visited;
+    memset(&visited, 0, sizeof(visited));
     return dfs_visit(kie, start_concept, 0, max_depth, path, path_count,
-        KI_MAX_PATH_LENGTH, visited_nodes, &visited_count);
+        KI_MAX_PATH_LENGTH, &visited);
 }
 
 int ki_graph_bfs(KnowledgeInferenceEngine* kie, const char* start_concept, int max_depth,

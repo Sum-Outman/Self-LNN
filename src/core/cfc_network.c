@@ -541,8 +541,8 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         /* P5-002修复: SELFLNN_CHECK可能提前返回，before free saved_input */
         if (result != 0) {
             safe_free((void**)&saved_input);
-            SELFLNN_SET_ERROR(SELFLNN_ERROR_CFC_CELL_CONFIG);
-            return SELFLNN_ERROR_CFC_CELL_CONFIG;
+            selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__, "CfC网络保存输入失败");
+            return SELFLNN_ERROR_INITIALIZATION_FAILED;
         }
 
         // 应用Dropout掩码到传播的梯度
@@ -733,8 +733,8 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
         
         if (result != 0) {
             safe_free((void**)&saved_input);
-            SELFLNN_SET_ERROR(SELFLNN_ERROR_CFC_CELL_CONFIG);
-            return SELFLNN_ERROR_CFC_CELL_CONFIG;
+            selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__, "CfC网络离散演化失败");
+            return SELFLNN_ERROR_INITIALIZATION_FAILED;
         }
         
         // 应用Dropout掩码（反向传播时）
@@ -1454,10 +1454,10 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
     size_t n = net->config.hidden_size;
     const float* input = rhsc->input;
 
-    /* P2-014修复: 解析RHS计算替代有限差分近似
-     * CfC微分方程: τ·dh/dt = -h + σ(Wx+Uh+b_g)⊙f(Wx+Vh+b_a)
-     * 真实RHS: dh/dt = (-h + σ(...)⊙f(...)) / τ
-     * 对每个隐藏层单元直接计算解析dydt */
+    /* ZSFABC-P0-015修复: 权重矩阵索引映射修正
+     * weight_matrix仅[input_size*hidden_size]，原代码用i*input_size*3+j越界访问
+     * 正确应使用: input_gate_weights + hidden_to_gate_weights + gate_biases[3*i]
+     *             weight_matrix + hidden_to_activation_weights + bias_vector */
 
     /* 逐层计算RHS */
     size_t offset = 0;
@@ -1473,23 +1473,25 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
         size_t input_size = cell->config.input_size;
 
         for (size_t i = 0; i < layer_size; i++) {
-            /* 计算门控: σ(W_gx·x + W_gh·h + b_g) */
-            float gate_sum = cell->gate_biases[i * 3];
+            /* 门控: σ(W_gi·x + U_gi·h + b_gi)，使用input_gate_weights */
+            float gate_sum = cell->gate_biases[i * 3];  /* 输入门偏置 */
             for (size_t j = 0; j < input_size && j < 256; j++) {
-                gate_sum += cell->weight_matrix[i * input_size * 3 + j] * input[j];
+                gate_sum += cell->input_gate_weights[i * input_size + j] * input[j];
             }
-            /* 隐藏到门控 */
+            /* 隐藏到门控: U_gi·h */
             for (size_t k = 0; k < layer_size && k < 128; k++) {
-                size_t idx = i * layer_size * 3 + input_size + k;
-                if (idx < cell->config.hidden_size * cell->config.input_size * 3)
-                    gate_sum += cell->weight_matrix[idx] * layer_y[k];
+                gate_sum += cell->hidden_to_gate_weights[i * layer_size + k] * layer_y[k];
             }
             float gate = 1.0f / (1.0f + expf(-gate_sum));
 
-            /* 计算激活: f(W_ax·x + W_ah·h + b_a) = tanh(...) */
+            /* 激活: tanh(W_a·x + U_a·h + b_a) */
             float act_sum = cell->bias_vector[i];
             for (size_t j = 0; j < input_size && j < 256; j++) {
-                act_sum += cell->weight_matrix[i * input_size * 3 + j * 2 + 1] * input[j];
+                act_sum += cell->weight_matrix[i * input_size + j] * input[j];
+            }
+            /* 隐藏到激活: U_a·h */
+            for (size_t k = 0; k < layer_size && k < 128; k++) {
+                act_sum += cell->hidden_to_activation_weights[i * layer_size + k] * layer_y[k];
             }
             float act = tanhf(act_sum);
 

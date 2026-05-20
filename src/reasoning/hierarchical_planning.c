@@ -1131,7 +1131,7 @@ static int decompose_task_htn(HierarchicalPlanningSystem* system,
         int method_type;                /* 0=均匀分割, 1=加权分解, 2=特征分解, 3=递归分解 */
         int base_child_count;           /* 基础子任务数 */
         TaskDecompositionMethod decomposition;
-    } HTNMethod;
+    } HTNMethodLocal;
     
     /* 基于任务描述向量提取方法匹配特征 */
     float task_features[8];
@@ -1150,28 +1150,28 @@ static int decompose_task_htn(HierarchicalPlanningSystem* system,
     }
     
     /* 方法库：基于层次级别的不同分解策略 */
-    HTNMethod method_library[12];
+    HTNMethodLocal method_library[12];
     int method_count = 0;
     
     /* 战略层方法 */
-    method_library[method_count++] = (HTNMethod){{0.7f,0.3f,0.1f,0.1f,0.1f,0.1f,0.1f,0.1f}, 0, 3, DECOMPOSITION_SEQUENTIAL};
-    method_library[method_count++] = (HTNMethod){{0.3f,0.3f,0.3f,0.1f,0.0f,0.0f,0.0f,0.0f}, 1, 2, DECOMPOSITION_AND_OR};
-    method_library[method_count++] = (HTNMethod){{0.2f,0.2f,0.2f,0.2f,0.1f,0.1f,0.0f,0.0f}, 2, 4, DECOMPOSITION_PARALLEL};
+    method_library[method_count++] = (HTNMethodLocal){{0.7f,0.3f,0.1f,0.1f,0.1f,0.1f,0.1f,0.1f}, 0, 3, DECOMPOSITION_SEQUENTIAL};
+    method_library[method_count++] = (HTNMethodLocal){{0.3f,0.3f,0.3f,0.1f,0.0f,0.0f,0.0f,0.0f}, 1, 2, DECOMPOSITION_AND_OR};
+    method_library[method_count++] = (HTNMethodLocal){{0.2f,0.2f,0.2f,0.2f,0.1f,0.1f,0.0f,0.0f}, 2, 4, DECOMPOSITION_PARALLEL};
     
     /* 战术层方法 */
-    method_library[method_count++] = (HTNMethod){{0.5f,0.3f,0.1f,0.1f,0.0f,0.0f,0.0f,0.0f}, 3, 3, DECOMPOSITION_SEQUENTIAL};
-    method_library[method_count++] = (HTNMethod){{0.2f,0.2f,0.2f,0.2f,0.1f,0.1f,0.0f,0.0f}, 0, 4, DECOMPOSITION_PARALLEL};
-    method_library[method_count++] = (HTNMethod){{0.1f,0.1f,0.4f,0.3f,0.1f,0.0f,0.0f,0.0f}, 1, 5, DECOMPOSITION_CONDITIONAL};
+    method_library[method_count++] = (HTNMethodLocal){{0.5f,0.3f,0.1f,0.1f,0.0f,0.0f,0.0f,0.0f}, 3, 3, DECOMPOSITION_SEQUENTIAL};
+    method_library[method_count++] = (HTNMethodLocal){{0.2f,0.2f,0.2f,0.2f,0.1f,0.1f,0.0f,0.0f}, 0, 4, DECOMPOSITION_PARALLEL};
+    method_library[method_count++] = (HTNMethodLocal){{0.1f,0.1f,0.4f,0.3f,0.1f,0.0f,0.0f,0.0f}, 1, 5, DECOMPOSITION_CONDITIONAL};
     
     /* 操作层方法 */
-    method_library[method_count++] = (HTNMethod){{0.5f,0.5f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f}, 0, 2, DECOMPOSITION_SEQUENTIAL};
-    method_library[method_count++] = (HTNMethod){{0.3f,0.3f,0.2f,0.1f,0.1f,0.0f,0.0f,0.0f}, 3, 3, DECOMPOSITION_PARALLEL};
-    method_library[method_count++] = (HTNMethod){{0.2f,0.2f,0.2f,0.2f,0.1f,0.1f,0.0f,0.0f}, 2, 4, DECOMPOSITION_SEQUENTIAL};
+    method_library[method_count++] = (HTNMethodLocal){{0.5f,0.5f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f}, 0, 2, DECOMPOSITION_SEQUENTIAL};
+    method_library[method_count++] = (HTNMethodLocal){{0.3f,0.3f,0.2f,0.1f,0.1f,0.0f,0.0f,0.0f}, 3, 3, DECOMPOSITION_PARALLEL};
+    method_library[method_count++] = (HTNMethodLocal){{0.2f,0.2f,0.2f,0.2f,0.1f,0.1f,0.0f,0.0f}, 2, 4, DECOMPOSITION_SEQUENTIAL};
     
     /* 通用方法 */
-    method_library[method_count++] = (HTNMethod){{0.3f,0.2f,0.2f,0.1f,0.1f,0.1f,0.0f,0.0f}, 0, 2, DECOMPOSITION_SEQUENTIAL};
-    method_library[method_count++] = (HTNMethod){{0.1f,0.1f,0.1f,0.1f,0.3f,0.2f,0.1f,0.0f}, 1, 3, DECOMPOSITION_AND_OR};
-    method_library[method_count++] = (HTNMethod){{0.2f,0.2f,0.2f,0.2f,0.1f,0.1f,0.0f,0.0f}, 2, 5, DECOMPOSITION_PARALLEL};
+    method_library[method_count++] = (HTNMethodLocal){{0.3f,0.2f,0.2f,0.1f,0.1f,0.1f,0.0f,0.0f}, 0, 2, DECOMPOSITION_SEQUENTIAL};
+    method_library[method_count++] = (HTNMethodLocal){{0.1f,0.1f,0.1f,0.1f,0.3f,0.2f,0.1f,0.0f}, 1, 3, DECOMPOSITION_AND_OR};
+    method_library[method_count++] = (HTNMethodLocal){{0.2f,0.2f,0.2f,0.2f,0.1f,0.1f,0.0f,0.0f}, 2, 5, DECOMPOSITION_PARALLEL};
     
     /* 找到最佳匹配方法（余弦相似度最大） */
     float best_similarity = -1.0f;
@@ -1193,7 +1193,7 @@ static int decompose_task_htn(HierarchicalPlanningSystem* system,
         }
     }
     
-    HTNMethod* best_method = &method_library[best_method_idx];
+    HTNMethodLocal* best_method = &method_library[best_method_idx];
     int child_count = best_method->base_child_count;
     if (child_count < 2) child_count = 2;
     if (child_count > 5) child_count = 5;

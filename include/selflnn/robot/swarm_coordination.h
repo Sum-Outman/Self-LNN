@@ -124,6 +124,83 @@ int sw_load_balance(SwarmCoordinator* sc);
 int sw_cooperative_lift(SwarmCoordinator* sc, const int* robot_ids, int count, const float* object_pos, float weight);
 int sw_cooperative_transport(SwarmCoordinator* sc, const int* robot_ids, int count, const float* start, const float* end);
 
+/* ============================================================================
+ * V-028: Raft简化版分布式共识（领导者选举 + 日志复制）
+ * ============================================================================ */
+
+/* Raft节点句柄 */
+typedef struct RaftNode RaftNode;
+
+/* Raft日志条目（对外可见） */
+typedef struct {
+    int index;
+    int term;
+    char command[256];
+    int command_len;
+    int committed;
+} RaftLogEntry;
+
+/* Raft节点管理 */
+RaftNode* raft_node_create(int node_id, const int* peer_ids, int peer_count);
+void raft_node_free(RaftNode* node);
+
+/* Raft领导者选举 */
+int raft_tick(RaftNode* node);
+int raft_start_election(RaftNode* node);
+int raft_handle_vote_request(RaftNode* node, int candidate_id, int candidate_term,
+                              int candidate_log_index, int candidate_log_term);
+
+/* Raft日志复制 */
+int raft_append_log(RaftNode* node, const char* command, int command_len);
+int raft_handle_append_entries(RaftNode* node, int leader_id, int term,
+                                int prev_log_index, int prev_log_term,
+                                const RaftLogEntry* entries, int entry_count,
+                                int leader_commit);
+int raft_advance_commit(RaftNode* node);
+
+/* Raft心跳与查询 */
+int raft_handle_heartbeat(RaftNode* node, int leader_id, int term);
+int raft_get_leader(RaftNode* node);
+int raft_get_state(RaftNode* node);
+int raft_get_term(RaftNode* node);
+
+/* ============================================================================
+ * V-028: 分布式任务分配 —— 拍卖算法
+ * ============================================================================ */
+
+/**
+ * @brief 拍卖算法——基于能力匹配的竞价式任务分配
+ *
+ * @param sc 群体协调器
+ * @param task_ids 待分配任务ID数组
+ * @param task_count 任务数量
+ * @param robot_ids 可用机器人ID数组
+ * @param robot_count 可用机器人数量
+ * @param assignments 输出: assignments[t] = 分配的机器人ID (-1=未分配)
+ * @return int 成功分配的任务数
+ */
+int sw_auction_allocate_tasks(SwarmCoordinator* sc,
+                               const int* task_ids, int task_count,
+                               const int* robot_ids, int robot_count,
+                               int* assignments);
+
+/**
+ * @brief 多轮拍卖——处理超额任务（任务数 > 机器人数）
+ *
+ * @param sc 群体协调器
+ * @param task_ids 任务ID数组
+ * @param task_count 任务总数
+ * @param robot_ids 机器人ID数组
+ * @param robot_count 机器人总数
+ * @param assignments 输出分配结果
+ * @param rounds 输出实际拍卖轮数
+ * @return int 总分配任务数
+ */
+int sw_auction_multi_round(SwarmCoordinator* sc,
+                            const int* task_ids, int task_count,
+                            const int* robot_ids, int robot_count,
+                            int* assignments, int* rounds);
+
 #ifdef __cplusplus
 }
 #endif

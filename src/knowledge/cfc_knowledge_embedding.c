@@ -12,6 +12,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/cfc_network.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/platform.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -21,9 +22,24 @@
 
 static unsigned int embed_seed = 12345;
 
+/* B-022修复: 全局RNG互斥锁，保护embed_seed的多线程安全访问 */
+static MutexHandle g_embed_rng_mutex = NULL;
+static int g_embed_rng_mutex_inited = 0;
+
+static void embed_rng_ensure_mutex(void) {
+    if (!g_embed_rng_mutex_inited) {
+        g_embed_rng_mutex = mutex_create();
+        g_embed_rng_mutex_inited = 1;
+    }
+}
+
 static float embed_rand_float(void) {
+    embed_rng_ensure_mutex();
+    mutex_lock(g_embed_rng_mutex);
     embed_seed = embed_seed * 1103515245 + 12345;
-    return (float)((embed_seed >> 16) & 0x7FFF) / 32768.0f;
+    float result = (float)((embed_seed >> 16) & 0x7FFF) / 32768.0f;
+    mutex_unlock(g_embed_rng_mutex);
+    return result;
 }
 
 static int embed_rand_int(int min, int max) {

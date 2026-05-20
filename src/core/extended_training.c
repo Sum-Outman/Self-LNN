@@ -579,8 +579,9 @@ SELFLNN_API int lnn_gradient_compress(const float* gradients, size_t num_gradien
     if (top_k < 1) top_k = 1;
     if (top_k > num_gradients) top_k = num_gradients;
     if (top_k > ctx->compressed_size) {
-        float** new_vals = (float**)safe_malloc(top_k * sizeof(float));
-        int32_t** new_idx = (int32_t**)safe_malloc(top_k * sizeof(int32_t));
+        /* ZSFABC-P0-006修复: new_vals和new_idx应为float*和int32_t*而非float**和int32_t** */
+        float* new_vals = (float*)safe_malloc(top_k * sizeof(float));
+        int32_t* new_idx = (int32_t*)safe_malloc(top_k * sizeof(int32_t));
         if (!new_vals || !new_idx) {
             ET_CTX_UNLOCK(ctx);
             return SELFLNN_ERROR_OUT_OF_MEMORY;
@@ -589,8 +590,8 @@ SELFLNN_API int lnn_gradient_compress(const float* gradients, size_t num_gradien
         memcpy(new_idx, ctx->compressed_indices, ctx->compressed_size * sizeof(int32_t));
         safe_free((void**)&ctx->compressed_values);
         safe_free((void**)&ctx->compressed_indices);
-        ctx->compressed_values = *new_vals;
-        ctx->compressed_indices = *new_idx;
+        ctx->compressed_values = new_vals;
+        ctx->compressed_indices = new_idx;
         ctx->compressed_size = top_k;
     }
     if (ctx->error_feedback && ctx->error_feedback_capacity >= num_gradients) {
@@ -1201,20 +1202,31 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
             _lnn_forward_internal(student, sample, s_output);
             (void)s_hidden; (void)s_cell;
 
-            float kl_div = 0.0f;
+            /* ZSFABC-P0-007修复: KL散度公式修正
+             * 原代码错误: 单个值self-normalize(t_norm = t_soft/|t_soft|)并非softmax
+             * KL(P||Q) = Σ_i P(i)·log(P(i)/Q(i)) 其中P,Q是softmax归一化分布 */
             size_t out_dim = teacher->config.output_size;
             if (out_dim > 256) out_dim = 256;
             if (out_dim == 0) out_dim = 128;
 
+            /* 计算teacher/student softmax分布 */
+            float t_sum = 0.0f, s_sum = 0.0f;
+            float t_prob[256] = {0}, s_prob[256] = {0};
             for (size_t d = 0; d < out_dim; d++) {
-                float t_soft = expf(t_output[d] / temperature);
-                float s_soft = expf(s_output[d] / temperature);
+                t_prob[d] = expf(t_output[d] / temperature);
+                s_prob[d] = expf(s_output[d] / temperature);
+                t_sum += t_prob[d];
+                s_sum += s_prob[d];
+            }
+            t_sum = (t_sum > 1e-10f) ? t_sum : 1.0f;
+            s_sum = (s_sum > 1e-10f) ? s_sum : 1.0f;
 
-                float t_norm = t_soft / (fabsf(t_soft) + 1e-10f);
-                float s_norm = s_soft / (fabsf(s_soft) + 1e-10f);
-
-                if (t_norm > 1e-10f && s_norm > 1e-10f) {
-                    kl_div += t_norm * logf(t_norm / s_norm);
+            float kl_div = 0.0f;
+            for (size_t d = 0; d < out_dim; d++) {
+                float tp = t_prob[d] / t_sum;
+                float sp = s_prob[d] / s_sum;
+                if (tp > 1e-10f && sp > 1e-10f) {
+                    kl_div += tp * logf(tp / sp);
                 }
             }
 

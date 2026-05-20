@@ -427,6 +427,47 @@ int online_learner_update(OnlineLearner* learner,
                               "在线学习更新：无效参数");
         return -1;
     }
+
+    /* P0-013修复: 严格真实数据模式检查 —— 验证输入/目标数据完整性
+     * 禁止使用任何全零、全NaN、全Inf或方差为零的虚假数据
+     * 数据流为空或包含虚假数据时直接返回错误，绝不使用随机/合成数据 */
+    {
+        int input_valid = 0, target_valid = 0;
+        float in_min = FLT_MAX, in_max = -FLT_MAX;
+        float tg_min = FLT_MAX, tg_max = -FLT_MAX;
+        for (size_t i = 0; i < input_size; i++) {
+            if (isnan(input[i]) || isinf(input[i])) {
+                selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                      "在线学习更新：输入数据包含NaN/Inf，拒绝使用");
+                return -1;
+            }
+            if (fabsf(input[i]) > 1e-12f) input_valid++;
+            if (input[i] < in_min) in_min = input[i];
+            if (input[i] > in_max) in_max = input[i];
+        }
+        for (size_t i = 0; i < target_size; i++) {
+            if (isnan(target[i]) || isinf(target[i])) {
+                selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                      "在线学习更新：目标数据包含NaN/Inf，拒绝使用");
+                return -1;
+            }
+            if (fabsf(target[i]) > 1e-12f) target_valid++;
+            if (target[i] < tg_min) tg_min = target[i];
+            if (target[i] > tg_max) tg_max = target[i];
+        }
+        float in_range = in_max - in_min;
+        float tg_range = tg_max - tg_min;
+        if (input_valid == 0 || (in_range < 1e-12f && input_size > 1)) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "在线学习更新：输入数据全零或无效，拒绝使用虚假数据");
+            return -1;
+        }
+        if (target_valid == 0 || (tg_range < 1e-12f && target_size > 1)) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "在线学习更新：目标数据全零或无效，拒绝使用虚假数据");
+            return -1;
+        }
+    }
     
     // 实现完整的在线学习更新，使用线性模型计算真实梯度
     // 使用当前权重对输入进行预测，然后计算预测误差和梯度
@@ -617,6 +658,30 @@ int online_learner_update_batch(OnlineLearner* learner,
                               "批量在线学习更新：无效参数");
         return -1;
     }
+
+    /* P0-013修复: 批量数据快速完整性预检 —— 检测全零/NaN/Inf虚假数据
+     * 在批量开头对所有样本进行快速扫描，虚假数据直接拒绝，绝不学习 */
+    {
+        size_t total_elements = num_samples * (input_size + target_size);
+        size_t check_count = total_elements < 10000 ? total_elements : 10000;
+        int non_zero = 0, has_nan_inf = 0;
+        for (size_t i = 0; i < check_count; i++) {
+            float val = (i < num_samples * input_size) ?
+                        inputs[i] : targets[i - num_samples * input_size];
+            if (isnan(val) || isinf(val)) { has_nan_inf = 1; break; }
+            if (fabsf(val) > 1e-12f) non_zero++;
+        }
+        if (has_nan_inf) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "批量在线学习更新：数据包含NaN/Inf，拒绝虚假数据");
+            return -1;
+        }
+        if (non_zero == 0) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "批量在线学习更新：数据流为空或全零，拒绝虚假数据");
+            return -1;
+        }
+    }
     
     float total_loss = 0.0f;
     int success_count = 0;
@@ -751,7 +816,8 @@ int online_learner_reset(OnlineLearner* learner, int keep_weights) {
     
     // 重置权重（如果不保留）
     if (!keep_weights && learner->weights) {
-        // 将权重重置为小随机值
+        /* P0-013: 仅用于重置时的权重重新初始化（小随机值打破对称性），
+         * 非数据流填充。在线学习更新严格使用真实数据，绝不降级到随机数据 */
         for (size_t i = 0; i < learner->weights_size; i++) {
             learner->weights[i] = (rng_uniform(0.0f, 1.0f)) * 0.1f - 0.05f;
         }
@@ -852,7 +918,6 @@ float online_learner_adjust_learning_rate(OnlineLearner* learner,
     
     // 基于损失趋势调整学习率
     float old_lr = learner->current_learning_rate;
-    (void)old_lr;
     
     if (num_losses >= 2) {
         float loss_trend = recent_losses[num_losses - 1] - recent_losses[0];
@@ -872,6 +937,11 @@ float online_learner_adjust_learning_rate(OnlineLearner* learner,
     }
     if (learner->current_learning_rate > learner->config.max_learning_rate) {
         learner->current_learning_rate = learner->config.max_learning_rate;
+    }
+
+    /* P0-013修复: old_lr用于对比学习率实际变化，记录调整日志而非(void)抑制 */
+    if (fabsf(old_lr - learner->current_learning_rate) > 1e-6f) {
+        log_info("[在线学习] 学习率自动调整: %.6f → %.6f", (double)old_lr, (double)learner->current_learning_rate);
     }
     
     return learner->current_learning_rate;

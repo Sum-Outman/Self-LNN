@@ -16,6 +16,12 @@ class AGIController {
         this.activeRobots = new Map();
         this.computerControlEnabled = false;
         this.deviceControlEnabled = false;
+        /* F-006修复: 轮询结果验证相关 */
+        this._lastSystemStatusTime = 0;
+        this._lastSystemStatusHash = null;
+        this._systemStatusPollCount = 0;
+        this._cachedResultWarningCount = 0;
+        this.STALE_STATUS_THRESHOLD_MS = 10000;  /* 超过10秒未更新视为过期 */
     }
 
     init() {
@@ -236,7 +242,13 @@ class AGIController {
         switch (task.action) {
             case 'get_status':
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.getSystemStatus === 'function') {
-                    return await window.SelfLnnApi.getSystemStatus();
+                    var rawResult = await window.SelfLnnApi.getSystemStatus();
+                    /* F-006修复: 验证轮询结果，拒绝缓存/过期数据 */
+                    var verifiedResult = this._verifyStatusResult(rawResult);
+                    if (!verifiedResult.valid) {
+                        throw new Error('系统状态数据验证失败: ' + (verifiedResult.error || '数据不可用'));
+                    }
+                    return verifiedResult.status;
                 }
                 throw new Error('系统API不可用');
             case 'start_training':
@@ -353,6 +365,73 @@ class AGIController {
     _isHighRiskTask(task) {
         const highRisk = ['shutdown', 'restart', 'reboot', 'delete', 'emergency_stop'];
         return highRisk.includes(task.action);
+    }
+
+    /* F-006修复: 系统状态轮询结果验证逻辑 */
+    _verifyStatusResult(rawResult) {
+        if (!rawResult) {
+            return { valid: false, error: '返回值为空', status: null };
+        }
+        if (!rawResult.success) {
+            return { valid: false, error: rawResult.error || 'API返回失败状态', status: rawResult };
+        }
+        if (!rawResult.data) {
+            return { valid: false, error: '返回数据为空(data字段缺失)', status: rawResult };
+        }
+        /* 检测DataEngine缓存标记：_cached为true表示来自localStorage缓存而非实时数据 */
+        if (rawResult.data._cached === true || rawResult.data.system && rawResult.data.system._cached === true) {
+            this._cachedResultWarningCount++;
+            return {
+                valid: false,
+                error: '系统状态数据来自本地缓存(非实时)，已过期超过' + 
+                    (rawResult.data._cache_age || rawResult.data.system._cache_age || '未知') + '秒',
+                status: rawResult
+            };
+        }
+        /* 检测后端连接标记：_connected为false表示后端当时未连接 */
+        if (rawResult.data._connected === false || (rawResult.data.system && rawResult.data.system._connected === false)) {
+            return {
+                valid: false,
+                error: '系统状态数据获取时后端未连接(_connected=false)',
+                status: rawResult
+            };
+        }
+        /* 生成当前数据的简单哈希，与上次对比判断是否同一份缓存数据 */
+        var currentHash = this._deepHash(rawResult.data);
+        var now = Date.now();
+        /* 如果数据哈希与上次完全相同，且距离上次获取在阈值内，判定为重复缓存数据 */
+        if (this._lastSystemStatusHash === currentHash) {
+            if (now - this._lastSystemStatusTime < this.STALE_STATUS_THRESHOLD_MS) {
+                this._systemStatusPollCount++;
+                return {
+                    valid: false,
+                    error: '系统状态数据与上次轮询相同(疑似缓存重复)，间隔' + 
+                        (now - this._lastSystemStatusTime) + 'ms',
+                    status: rawResult
+                };
+            }
+        }
+        /* 更新最后有效状态记录 */
+        this._lastSystemStatusTime = now;
+        this._lastSystemStatusHash = currentHash;
+        this._systemStatusPollCount++;
+        return { valid: true, error: null, status: rawResult };
+    }
+
+    /* F-006修复: 对数据进行简单深度哈希用于对比检测缓存重复 */
+    _deepHash(obj) {
+        if (obj === null || obj === undefined) return 'null';
+        if (typeof obj !== 'object') return String(typeof obj) + ':' + String(obj);
+        var keys = Object.keys(obj).sort();
+        var parts = [];
+        for (var i = 0; i < keys.length; i++) {
+            /* 跳过内部标记字段避免干扰哈希 */
+            if (keys[i] === '_cached' || keys[i] === '_cache_age' || 
+                keys[i] === '_connected' || keys[i] === '_error' ||
+                keys[i] === 'uptime' || keys[i] === 'timestamp') continue;
+            parts.push(keys[i] + ':' + this._deepHash(obj[keys[i]]));
+        }
+        return parts.join('|');
     }
 
     registerRobot(robotId, info) {

@@ -741,11 +741,12 @@ int property_graph_save(PropertyGraph* pg, const char* filename) {
     fwrite(&magic, sizeof(magic), 1, fp);
     fwrite(&version, sizeof(version), 1, fp);
 
+    /* B-019修复: 遍历node_count而非node_capacity，避免写出稀疏数组空节点 */
     uint32_t nc = (uint32_t)pg->node_count;
     fwrite(&nc, sizeof(nc), 1, fp);
-    for (size_t i = 0; i < pg->node_capacity; i++) {
-        if (!pg->nodes[i]) continue;
+    for (size_t i = 0; i < pg->node_count; i++) {
         PGNode* n = pg->nodes[i];
+        if (!n) continue;
         int32_t nid = (int32_t)n->id;
         fwrite(&nid, sizeof(nid), 1, fp);
         uint8_t has_label = (n->label != NULL) ? 1 : 0;
@@ -1264,6 +1265,15 @@ static int spo_compare(const void* a, const void* b) {
     return ea->object_id - eb->object_id;
 }
 
+/* ZSFABC-P0-008修复: OSP索引必须按(object,subject,predicate)排序，不可复用spo_compare */
+static int osp_compare(const void* a, const void* b) {
+    const OSPEntry* ea = (const OSPEntry*)a;
+    const OSPEntry* eb = (const OSPEntry*)b;
+    if (ea->object_id != eb->object_id) return ea->object_id - eb->object_id;
+    if (ea->subject_id != eb->subject_id) return ea->subject_id - eb->subject_id;
+    return ea->predicate_id - eb->predicate_id;
+}
+
 static int pos_compare(const void* a, const void* b) {
     const POSEntry* ea = (const POSEntry*)a;
     const POSEntry* eb = (const POSEntry*)b;
@@ -1304,11 +1314,27 @@ int rdf_triple_store_add_triple(RDFTripleStore* store, int subject_id,
         store->spo_index = new_spo;
         store->spo_capacity = new_cap;
     }
-    store->spo_index[store->spo_count].subject_id = subject_id;
-    store->spo_index[store->spo_count].predicate_id = predicate_id;
-    store->spo_index[store->spo_count].object_id = object_id;
-    store->spo_count++;
-    qsort(store->spo_index, store->spo_count, sizeof(SPOEntry), spo_compare);
+    /* B-018修复: 二分查找插入位置 + memmove，避免每次qsort全量O(n log n) */
+    {
+        SPOEntry key;
+        key.subject_id = subject_id;
+        key.predicate_id = predicate_id;
+        key.object_id = object_id;
+        size_t lo = 0, hi = store->spo_count;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int cmp = spo_compare(&key, &store->spo_index[mid]);
+            if (cmp < 0) hi = mid;
+            else if (cmp > 0) lo = mid + 1;
+            else { lo = mid; hi = mid; break; }
+        }
+        if (lo < store->spo_count) {
+            memmove(&store->spo_index[lo + 1], &store->spo_index[lo],
+                    (store->spo_count - lo) * sizeof(SPOEntry));
+        }
+        store->spo_index[lo] = key;
+        store->spo_count++;
+    }
 
     if (store->osp_count >= store->osp_capacity) {
         size_t new_cap = store->osp_capacity * 2;
@@ -1318,13 +1344,27 @@ int rdf_triple_store_add_triple(RDFTripleStore* store, int subject_id,
         store->osp_index = new_osp;
         store->osp_capacity = new_cap;
     }
-    store->osp_index[store->osp_count].subject_id = subject_id;
-    store->osp_index[store->osp_count].predicate_id = predicate_id;
-    store->osp_index[store->osp_count].object_id = object_id;
-    store->osp_count++;
-    /* OSP索引直接使用spo_compare排序，因为字段布局相同 */
-    qsort(store->osp_index, store->osp_count, sizeof(OSPEntry),
-          spo_compare);
+    /* B-018修复: OSP索引二分查找插入位置 + memmove */
+    {
+        OSPEntry key;
+        key.subject_id = subject_id;
+        key.predicate_id = predicate_id;
+        key.object_id = object_id;
+        size_t lo = 0, hi = store->osp_count;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int cmp = osp_compare(&key, &store->osp_index[mid]);
+            if (cmp < 0) hi = mid;
+            else if (cmp > 0) lo = mid + 1;
+            else { lo = mid; hi = mid; break; }
+        }
+        if (lo < store->osp_count) {
+            memmove(&store->osp_index[lo + 1], &store->osp_index[lo],
+                    (store->osp_count - lo) * sizeof(OSPEntry));
+        }
+        store->osp_index[lo] = key;
+        store->osp_count++;
+    }
 
     if (store->pos_count >= store->pos_capacity) {
         size_t new_cap = store->pos_capacity * 2;
@@ -1334,11 +1374,27 @@ int rdf_triple_store_add_triple(RDFTripleStore* store, int subject_id,
         store->pos_index = new_pos;
         store->pos_capacity = new_cap;
     }
-    store->pos_index[store->pos_count].predicate_id = predicate_id;
-    store->pos_index[store->pos_count].object_id = object_id;
-    store->pos_index[store->pos_count].subject_id = subject_id;
-    store->pos_count++;
-    qsort(store->pos_index, store->pos_count, sizeof(POSEntry), pos_compare);
+    /* B-018修复: POS索引二分查找插入位置 + memmove */
+    {
+        POSEntry key;
+        key.predicate_id = predicate_id;
+        key.object_id = object_id;
+        key.subject_id = subject_id;
+        size_t lo = 0, hi = store->pos_count;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int cmp = pos_compare(&key, &store->pos_index[mid]);
+            if (cmp < 0) hi = mid;
+            else if (cmp > 0) lo = mid + 1;
+            else { lo = mid; hi = mid; break; }
+        }
+        if (lo < store->pos_count) {
+            memmove(&store->pos_index[lo + 1], &store->pos_index[lo],
+                    (store->pos_count - lo) * sizeof(POSEntry));
+        }
+        store->pos_index[lo] = key;
+        store->pos_count++;
+    }
 
     return tid;
 }
@@ -1949,7 +2005,7 @@ RDFTripleStore* rdf_triple_store_load(const char* filename) {
         store->pos_count++;
     }
     qsort(store->spo_index, store->spo_count, sizeof(SPOEntry), spo_compare);
-    qsort(store->osp_index, store->osp_count, sizeof(OSPEntry), spo_compare);
+    qsort(store->osp_index, store->osp_count, sizeof(OSPEntry), osp_compare);
     qsort(store->pos_index, store->pos_count, sizeof(POSEntry), pos_compare);
 
     uint32_t nsc;

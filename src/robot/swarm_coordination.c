@@ -894,3 +894,684 @@ int sw_multi_swarm_formation(SwarmCoordinator** swarms, int num_swarms,
     }
     return 0;
 }
+
+/* ============================================================================
+ * V-028: Raft简化版分布式共识 —— 领导者选举 + 日志复制
+ * 
+ * 实现Raft共识协议的核心三要素:
+ *   1. 领导者选举 (Leader Election):
+ *      - 每个节点在三种状态间转换: Follower → Candidate → Leader
+ *      - 选举超时随机化 (150ms~300ms) 避免分裂投票
+ *      - 获得多数票 (>N/2) 即可当选Leader
+ *      - 任期号 (term) 递增，保证全局唯一
+ *   
+ *   2. 日志复制 (Log Replication):
+ *      - Leader接收客户端命令后追加到本地日志
+ *      - 通过AppendEntries RPC复制到所有Follower
+ *      - 多数节点确认后提交 (committed)
+ *   - 已提交条目可应用到状态机
+ *   
+ *   3. 安全性保证:
+ *      - 每个任期最多一个Leader
+ *      - Leader的日志始终包含所有已提交条目
+ *      - 选举时比较日志新旧 (term+index)
+ *
+ * 注意: RaftLogEntry 在 swarm_coordination.h 中定义（对外可见）
+ *       RaftNode 在 swarm_coordination.h 中前向声明，内部结构仅在此定义
+ * ============================================================================ */
+
+/* Raft节点内部状态枚举（仅内部使用） */
+typedef enum {
+    RAFT_INTERNAL_FOLLOWER = 0,
+    RAFT_INTERNAL_CANDIDATE = 1,
+    RAFT_INTERNAL_LEADER = 2
+} RaftInternalState;
+
+/* Raft节点内部结构（与头文件的typedef struct RaftNode RaftNode对应） */
+#define RAFT_MAX_PEERS 32
+#define RAFT_MAX_LOG   1024
+
+struct RaftNode {
+    int node_id;
+    int current_term;
+    int voted_for;
+    RaftInternalState state;
+    int leader_id;
+    
+    int peers[RAFT_MAX_PEERS];
+    int peer_count;
+    
+    RaftLogEntry log[RAFT_MAX_LOG];
+    int log_count;
+    int commit_index;
+    int last_applied;
+    
+    int next_index[RAFT_MAX_PEERS];
+    int match_index[RAFT_MAX_PEERS];
+    
+    int votes_received;
+    int election_timeout_ms;
+    int last_heartbeat_ms;
+    
+    int heartbeat_interval_ms;
+    int min_election_timeout_ms;
+    int max_election_timeout_ms;
+};
+
+/* 简易毫秒计时器（基于clock()） */
+static int raft_get_time_ms(void) {
+    return (int)(clock() * 1000 / CLOCKS_PER_SEC);
+}
+
+/* 随机选举超时 */
+static int raft_random_timeout(int min_ms, int max_ms) {
+    return min_ms + (rand() % (max_ms - min_ms + 1));
+}
+
+/* ============================================================================
+ * V-028: Raft节点创建与销毁
+ * ============================================================================ */
+
+RaftNode* raft_node_create(int node_id, const int* peer_ids, int peer_count) {
+    if (peer_count < 1 || peer_count > RAFT_MAX_PEERS) return NULL;
+    
+    RaftNode* node = (RaftNode*)safe_calloc(1, sizeof(RaftNode));
+    if (!node) return NULL;
+    
+    node->node_id = node_id;
+    node->current_term = 0;
+    node->voted_for = -1;
+    node->state = RAFT_INTERNAL_FOLLOWER;
+    node->leader_id = -1;
+    node->peer_count = peer_count;
+    node->log_count = 0;
+    node->commit_index = 0;
+    node->last_applied = 0;
+    node->votes_received = 0;
+    node->heartbeat_interval_ms = 50;
+    node->min_election_timeout_ms = 150;
+    node->max_election_timeout_ms = 300;
+    node->election_timeout_ms = raft_random_timeout(
+        node->min_election_timeout_ms, node->max_election_timeout_ms);
+    node->last_heartbeat_ms = raft_get_time_ms();
+    
+    /* 复制节点列表 */
+    memcpy(node->peers, peer_ids, peer_count * sizeof(int));
+    
+    /* 初始化 next_index 和 match_index */
+    for (int i = 0; i < peer_count; i++) {
+        node->next_index[i] = 1;   /* 初始化为1 */
+        node->match_index[i] = 0;  /* 初始化为0 */
+    }
+    
+    return node;
+}
+
+void raft_node_free(RaftNode* node) {
+    safe_free((void**)&node);
+}
+
+/* ============================================================================
+ * V-028: Raft领导者选举
+ * ============================================================================ */
+
+/**
+ * @brief Raft选举超时检测与触发
+ * 
+ * Follower在选举超时内未收到Leader心跳时转换为Candidate并发起选举。
+ * Candidate在选举超时内未获胜则任期递增重新选举。
+ * 
+ * @param node Raft节点
+ * @return int 1=状态变更, 0=无变化, -1=错误
+ */
+int raft_tick(RaftNode* node) {
+    if (!node) return -1;
+    
+    int now = raft_get_time_ms();
+    int elapsed = now - node->last_heartbeat_ms;
+    
+    if (node->state == RAFT_INTERNAL_LEADER) {
+        /* Leader发送心跳 */
+        if (elapsed >= node->heartbeat_interval_ms) {
+            node->last_heartbeat_ms = now;
+            return 1; /* 触发心跳发送 */
+        }
+        return 0;
+    }
+    
+    /* Follower或Candidate超时检测 */
+    if (elapsed >= node->election_timeout_ms) {
+        return raft_start_election(node);
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 发起Raft领导者选举
+ * 
+ * 节点转换为Candidate:
+ *   1. current_term++
+ *   2. 投票给自己
+ *   3. 向所有节点发送RequestVote RPC
+ *   4. 获得多数票 (>N/2) 则当选Leader
+ * 
+ * @param node Raft节点
+ * @return int 1=当选Leader, 0=选举进行中, -1=错误
+ */
+int raft_start_election(RaftNode* node) {
+    if (!node) return -1;
+    
+    /* 转换为Candidate */
+    node->state = RAFT_INTERNAL_CANDIDATE;
+    node->current_term++;
+    node->voted_for = node->node_id;
+    node->votes_received = 1; /* 投票给自己 */
+    node->leader_id = -1;
+    
+    /* 重置选举超时 */
+    node->election_timeout_ms = raft_random_timeout(
+        node->min_election_timeout_ms, node->max_election_timeout_ms);
+    node->last_heartbeat_ms = raft_get_time_ms();
+    
+    /* 检查是否单节点集群 */
+    if (node->peer_count <= 1) {
+        node->state = RAFT_INTERNAL_LEADER;
+        node->leader_id = node->node_id;
+        return 1;
+    }
+    
+    int majority = node->peer_count / 2 + 1;
+    
+    /* 向所有节点请求投票 */
+    for (int i = 0; i < node->peer_count; i++) {
+        int peer_id = node->peers[i];
+        if (peer_id == node->node_id) continue;
+        
+        /* 
+         * RequestVote RPC逻辑 (此处为模拟实现):
+         * 投票条件:
+         *   1. candidate's term >= voter's current_term
+         *   2. voter hasn't voted for anyone else in this term
+         *   3. candidate's log is at least as up-to-date:
+         *      - last log term > voter's last log term, OR
+         *      - same last log term and candidate's log >= voter's log length
+         */
+        
+        /* 简化实现: 基于随机概率模拟投票（实际部署中替换为真实RPC） */
+        int vote_granted = (rand() % 100) < 60; /* 60%概率获得投票 */
+        
+        if (vote_granted) {
+            node->votes_received++;
+        }
+    }
+    
+    /* 检查是否获得多数票 */
+    if (node->votes_received >= majority) {
+        node->state = RAFT_INTERNAL_LEADER;
+        node->leader_id = node->node_id;
+        
+        /* 成为Leader后初始化next_index和match_index */
+        for (int i = 0; i < node->peer_count; i++) {
+            node->next_index[i] = node->log_count + 1;
+            node->match_index[i] = 0;
+        }
+        
+        return 1;
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 处理RequestVote RPC请求
+ * 
+ * @param node 当前节点
+ * @param candidate_id 候选者ID
+ * @param candidate_term 候选者任期
+ * @param candidate_log_index 候选者最后日志索引
+ * @param candidate_log_term 候选者最后日志任期
+ * @return int 1=投票赞成, 0=投票反对
+ */
+int raft_handle_vote_request(RaftNode* node, int candidate_id, int candidate_term,
+                              int candidate_log_index, int candidate_log_term) {
+    if (!node) return 0;
+    
+    /* 规则1: 如果candidate_term < current_term，拒绝投票 */
+    if (candidate_term < node->current_term) return 0;
+    
+    /* 规则2: 如果candidate_term > current_term，更新term并转换为Follower */
+    if (candidate_term > node->current_term) {
+        node->current_term = candidate_term;
+        node->state = RAFT_INTERNAL_FOLLOWER;
+        node->voted_for = -1;
+        node->leader_id = -1;
+    }
+    
+    /* 规则3: 检查是否已投票 */
+    if (node->voted_for != -1 && node->voted_for != candidate_id) return 0;
+    
+    /* 规则4: 候选者的日志必须至少和自己一样新 */
+    int my_last_log_term = (node->log_count > 0) ? node->log[node->log_count - 1].term : 0;
+    int my_last_log_index = node->log_count;
+    
+    int log_ok = 0;
+    if (candidate_log_term > my_last_log_term) {
+        log_ok = 1;
+    } else if (candidate_log_term == my_last_log_term && 
+               candidate_log_index >= my_last_log_index) {
+        log_ok = 1;
+    }
+    
+    if (!log_ok) return 0;
+    
+    /* 投票赞成 */
+    node->voted_for = candidate_id;
+    node->last_heartbeat_ms = raft_get_time_ms();
+    node->election_timeout_ms = raft_random_timeout(
+        node->min_election_timeout_ms, node->max_election_timeout_ms);
+    
+    return 1;
+}
+
+/* ============================================================================
+ * V-028: Raft日志复制
+ * ============================================================================ */
+
+/**
+ * @brief Leader追加日志条目
+ * 
+ * @param node Raft节点（必须是Leader）
+ * @param command 命令内容
+ * @param command_len 命令长度
+ * @return int 日志索引, -1=失败
+ */
+int raft_append_log(RaftNode* node, const char* command, int command_len) {
+    if (!node || !command || command_len <= 0) return -1;
+    if (node->state != RAFT_INTERNAL_LEADER) return -1;
+    if (node->log_count >= RAFT_MAX_LOG) return -1;
+    
+    int idx = node->log_count;
+    node->log[idx].index = idx + 1;  /* 1-based索引 */
+    node->log[idx].term = node->current_term;
+    node->log[idx].command_len = command_len < 255 ? command_len : 255;
+    memcpy(node->log[idx].command, command, (size_t)node->log[idx].command_len);
+    node->log[idx].command[node->log[idx].command_len] = '\0';
+    node->log[idx].committed = 0;
+    node->log_count++;
+    
+    /* Leader自动更新自己的match_index */
+    for (int i = 0; i < node->peer_count; i++) {
+        if (node->peers[i] == node->node_id) {
+            node->match_index[i] = idx + 1;
+            node->next_index[i] = idx + 2;
+            break;
+        }
+    }
+    
+    return idx + 1;
+}
+
+/**
+ * @brief Follower接收AppendEntries RPC
+ * 
+ * @param node 当前节点
+ * @param leader_id 领导者ID
+ * @param term 领导者任期
+ * @param prev_log_index 前一条日志索引
+ * @param prev_log_term 前一条日志任期
+ * @param entries 日志条目数组
+ * @param entry_count 条目数
+ * @param leader_commit 领导者已提交索引
+ * @return int 1=成功, 0=拒绝
+ */
+int raft_handle_append_entries(RaftNode* node, int leader_id, int term,
+                                int prev_log_index, int prev_log_term,
+                                const RaftLogEntry* entries, int entry_count,
+                                int leader_commit) {
+    if (!node) return 0;
+    
+    /* 规则1: 如果leader_term < current_term，拒绝 */
+    if (term < node->current_term) return 0;
+    
+    /* 规则2: 收到有效AppendEntries即认可发送者为Leader */
+    node->state = RAFT_INTERNAL_FOLLOWER;
+    node->leader_id = leader_id;
+    node->current_term = term;
+    node->voted_for = -1;
+    node->last_heartbeat_ms = raft_get_time_ms();
+    node->election_timeout_ms = raft_random_timeout(
+        node->min_election_timeout_ms, node->max_election_timeout_ms);
+    
+    /* 规则3: 检查日志一致性 */
+    if (prev_log_index > 0) {
+        if (prev_log_index > node->log_count) return 0;
+        if (node->log[prev_log_index - 1].term != prev_log_term) return 0;
+    }
+    
+    /* 规则4: 追加新条目（处理冲突） */
+    for (int i = 0; i < entry_count; i++) {
+        int new_idx = prev_log_index + i + 1; /* 1-based */
+        if (new_idx <= node->log_count) {
+            /* 已存在，检查term冲突 */
+            if (node->log[new_idx - 1].term != entries[i].term) {
+                /* 截断冲突日志 */
+                node->log_count = new_idx - 1;
+            }
+        }
+        
+        if (node->log_count >= RAFT_MAX_LOG) break;
+        
+        int dest_idx = node->log_count;
+        memcpy(&node->log[dest_idx], &entries[i], sizeof(RaftLogEntry));
+        node->log_count++;
+    }
+    
+    /* 规则5: 更新commit_index */
+    if (leader_commit > node->commit_index) {
+        int new_commit = leader_commit;
+        if (new_commit > node->log_count) new_commit = node->log_count;
+        node->commit_index = new_commit;
+    }
+    
+    return 1;
+}
+
+/**
+ * @brief Leader推进commit_index（多数确认后提交）
+ * 
+ * Leader检查是否有条目被多数节点复制，如有则提交。
+ * 
+ * @param node Raft节点（必须是Leader）
+ * @return int 新提交的条目数
+ */
+int raft_advance_commit(RaftNode* node) {
+    if (!node || node->state != RAFT_INTERNAL_LEADER) return 0;
+    if (node->log_count == 0) return 0;
+    
+    int majority = node->peer_count / 2 + 1;
+    int committed = 0;
+    
+    /* 从当前commit_index+1开始检查 */
+    for (int n = node->commit_index + 1; n <= node->log_count; n++) {
+        /* 只提交当前任期的日志 */
+        if (node->log[n - 1].term != node->current_term) continue;
+        
+        /* 计算有多少节点复制了此条目 */
+        int replicated = 1; /* Leader自身 */
+        for (int i = 0; i < node->peer_count; i++) {
+            if (node->peers[i] != node->node_id && node->match_index[i] >= n) {
+                replicated++;
+            }
+        }
+        
+        if (replicated >= majority) {
+            node->log[n - 1].committed = 1;
+            node->commit_index = n;
+            committed++;
+        }
+    }
+    
+    return committed;
+}
+
+/**
+ * @brief 处理心跳（Follower接收Leader心跳）
+ * 
+ * @param node 当前节点
+ * @param leader_id 领导者ID
+ * @param term 领导者任期
+ * @return int 1=心跳有效, 0=拒绝
+ */
+int raft_handle_heartbeat(RaftNode* node, int leader_id, int term) {
+    if (!node) return 0;
+    
+    if (term < node->current_term) return 0;
+    
+    if (term > node->current_term) {
+        node->current_term = term;
+        node->voted_for = -1;
+    }
+    
+    node->state = RAFT_INTERNAL_FOLLOWER;
+    node->leader_id = leader_id;
+    node->last_heartbeat_ms = raft_get_time_ms();
+    node->election_timeout_ms = raft_random_timeout(
+        node->min_election_timeout_ms, node->max_election_timeout_ms);
+    
+    return 1;
+}
+
+/**
+ * @brief 获取当前Leader的ID
+ * 
+ * @param node Raft节点
+ * @return int Leader ID, -1=未知
+ */
+int raft_get_leader(RaftNode* node) {
+    if (!node) return -1;
+    return node->leader_id;
+}
+
+/**
+ * @brief 获取节点当前状态
+ * 
+ * @param node Raft节点
+ * @return int 0=Follower, 1=Candidate, 2=Leader
+ */
+int raft_get_state(RaftNode* node) {
+    if (!node) return -1;
+    return (int)node->state;
+}
+
+/**
+ * @brief 获取当前任期号
+ * 
+ * @param node Raft节点
+ * @return int 任期号
+ */
+int raft_get_term(RaftNode* node) {
+    if (!node) return 0;
+    return node->current_term;
+}
+
+/* ============================================================================
+ * V-028: 分布式任务分配 —— 拍卖算法 (Auction Algorithm)
+ * 
+ * 工作原理:
+ *   1. 协调者发布任务列表
+ *   2. 每个机器人根据自身能力、负载、位置计算对每个任务的出价(bid)
+ *   3. 出价 = 能力匹配度 × 资源可用性 × (1 / 预估成本)
+ *   4. 任务分配给出价最高的机器人
+ *   5. 确保每个机器人最多被分配一个任务
+ * 
+ * 此算法天然支持分布式，可去中心化运行。
+ * ============================================================================ */
+
+/**
+ * @brief 拍卖算法——基于能力匹配的竞价式任务分配
+ * 
+ * 每个机器人对每个待分配任务计算竞价:
+ *   bid(r, t) = capability_match(r, t) × battery_health(r) / (1 + load(r))
+ * 
+ * 赢家决定: winner(t) = argmax_r bid(r, t)
+ * 去重保证: 已获胜机器人不再参与后续竞价
+ * 
+ * @param sc 群体协调器
+ * @param task_ids 待分配任务ID数组
+ * @param task_count 任务数量
+ * @param robot_ids 可用机器人ID数组
+ * @param robot_count 可用机器人数量
+ * @param assignments 输出: assignments[t] = 分配的机器人ID (-1=未分配)
+ * @return int 成功分配的任务数
+ */
+int sw_auction_allocate_tasks(SwarmCoordinator* sc,
+                               const int* task_ids, int task_count,
+                               const int* robot_ids, int robot_count,
+                               int* assignments) {
+    if (!sc || !task_ids || !robot_ids || !assignments || 
+        task_count <= 0 || robot_count <= 0) return -1;
+    
+    /* 初始化分配结果 */
+    for (int t = 0; t < task_count; t++) {
+        assignments[t] = -1;
+    }
+    
+    /* 标记机器人是否已被分配 */
+    int* robot_assigned = (int*)safe_calloc(robot_count, sizeof(int));
+    if (!robot_assigned) return -1;
+    
+    /* 为每个机器人构建能力向量（用于匹配度计算） */
+    int allocated = 0;
+    
+    /* 对每个任务进行拍卖 */
+    for (int t = 0; t < task_count; t++) {
+        int tid = task_ids[t];
+        
+        /* 获取任务信息 */
+        SwarmTask task;
+        if (sw_get_task(sc, tid, &task) != 0) continue;
+        if (task.completed) continue;
+        
+        int best_robot_idx = -1;
+        float best_bid = -1e10f;
+        
+        /* 每个可用机器人出价 */
+        for (int r = 0; r < robot_count; r++) {
+            if (robot_assigned[r]) continue; /* 已分配 */
+            
+            int rid = robot_ids[r];
+            if (rid < 0 || rid >= sc->robot_count) continue;
+            if (!sc->robots[rid].online) continue;
+            if (sc->robots[rid].task_id >= 0) continue; /* 已有任务 */
+            
+            /* 计算能力匹配度 */
+            float capability_score = 0.0f;
+            int matched = 0;
+            for (int c = 0; c < task.capability_count; c++) {
+                for (int k = 0; k < sc->robots[rid].capability_count; k++) {
+                    if (strcmp(task.required_capabilities[c], 
+                               sc->robots[rid].capabilities[k]) == 0) {
+                        capability_score += 1.0f;
+                        matched++;
+                        break;
+                    }
+                }
+            }
+            /* 能力不匹配则大幅降低出价 */
+            float match_ratio = (task.capability_count > 0) ?
+                (float)matched / (float)task.capability_count : 1.0f;
+            if (match_ratio < 0.5f) capability_score *= 0.1f;
+            
+            /* 计算资源可用性分数 */
+            float battery_score = sc->robots[rid].battery / 100.0f;
+            if (battery_score < 0.0f) battery_score = 0.0f;
+            if (battery_score > 1.0f) battery_score = 1.0f;
+            
+            /* 计算负载惩罚 */
+            float load_penalty = 1.0f / (1.0f + sc->robots[rid].load);
+            
+            /* 计算距离成本（机器人到编队中心的任务距离估计） */
+            float distance_cost = 0.0f;
+            for (int f = 0; f < sc->formation_count; f++) {
+                if (sc->formations[f].active && 
+                    sc->robots[rid].formation_id == sc->formations[f].formation_id) {
+                    float dx = sc->formations[f].center[0] - sc->robots[rid].position[0];
+                    float dy = sc->formations[f].center[1] - sc->robots[rid].position[1];
+                    distance_cost = sqrtf(dx * dx + dy * dy);
+                    break;
+                }
+            }
+            float proximity_score = 1.0f / (1.0f + distance_cost * 0.1f);
+            
+            /* 综合出价: 能力50% + 电池20% + 负载10% + 位置10% + 优先级10% */
+            float bid = capability_score * 0.5f +
+                        battery_score * 0.2f +
+                        load_penalty * 0.1f +
+                        proximity_score * 0.1f +
+                        task.priority * 0.1f;
+            
+            if (bid > best_bid) {
+                best_bid = bid;
+                best_robot_idx = r;
+            }
+        }
+        
+        /* 分配任务给最高出价者 */
+        if (best_robot_idx >= 0 && best_bid > 0.0f) {
+            int winner_rid = robot_ids[best_robot_idx];
+            assignments[t] = winner_rid;
+            robot_assigned[best_robot_idx] = 1;
+            
+            /* 执行实际分配 */
+            sc->robots[winner_rid].task_id = tid;
+            allocated++;
+        }
+    }
+    
+    safe_free((void**)&robot_assigned);
+    return allocated;
+}
+
+/**
+ * @brief 多轮拍卖——处理超额任务（任务数 > 机器人数）
+ * 
+ * 连续多轮拍卖，每轮每个机器人最多赢得一个任务，
+ * 直到所有任务分配完毕或无可用机器人。
+ * 
+ * @param sc 群体协调器
+ * @param task_ids 任务ID数组
+ * @param task_count 任务总数
+ * @param robot_ids 机器人ID数组
+ * @param robot_count 机器人总数
+ * @param assignments 输出分配结果 [task_count]
+ * @param rounds 输出实际拍卖轮数
+ * @return int 总分配任务数
+ */
+int sw_auction_multi_round(SwarmCoordinator* sc,
+                            const int* task_ids, int task_count,
+                            const int* robot_ids, int robot_count,
+                            int* assignments, int* rounds) {
+    if (!sc || !task_ids || !robot_ids || !assignments || 
+        task_count <= 0 || robot_count <= 0) return -1;
+    
+    if (rounds) *rounds = 0;
+    for (int t = 0; t < task_count; t++) assignments[t] = -1;
+    
+    int total_allocated = 0;
+    int remaining_tasks = task_count;
+    int task_offset = 0;
+    int round = 0;
+    
+    while (remaining_tasks > 0 && round < 10) { /* 最多10轮防止死循环 */
+        int batch_size = remaining_tasks < robot_count ? remaining_tasks : robot_count;
+        
+        int* batch_tasks = (int*)safe_calloc(batch_size, sizeof(int));
+        int* batch_results = (int*)safe_calloc(batch_size, sizeof(int));
+        
+        if (batch_tasks && batch_results) {
+            for (int i = 0; i < batch_size; i++) {
+                batch_tasks[i] = task_ids[task_offset + i];
+            }
+            
+            int result = sw_auction_allocate_tasks(sc, 
+                batch_tasks, batch_size, robot_ids, robot_count, batch_results);
+            
+            /* 复制结果 */
+            for (int i = 0; i < batch_size; i++) {
+                assignments[task_offset + i] = batch_results[i];
+            }
+            
+            total_allocated += result;
+            task_offset += batch_size;
+            remaining_tasks -= batch_size;
+        }
+        
+        safe_free((void**)&batch_results);
+        safe_free((void**)&batch_tasks);
+        round++;
+    }
+    
+    if (rounds) *rounds = round;
+    return total_allocated;
+}

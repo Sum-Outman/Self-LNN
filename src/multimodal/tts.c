@@ -42,6 +42,24 @@ extern float rng_uniform(float min, float max);
 /** @brief 音高校准时基准频率 */
 #define TTS_BASE_FREQ 220.0f
 
+/** @brief MFCC特征维度（标准13维MFCC + delta + delta-delta = 39维） */
+#define TTS_MFCC_DIM 39
+
+/** @brief MFCC Mel滤波器组数量 */
+#define TTS_MEL_FILTERS 26
+
+/** @brief MFCC FFT窗口大小（必须为2的幂） */
+#define TTS_FFT_WINDOW 512
+
+/** @brief 声学模型输出维度（线谱对/LSP参数，用于声码器重建） */
+#define TTS_ACOUSTIC_DIM 42
+
+/** @brief Griffin-Lim相位重建迭代次数 */
+#define TTS_GRIFFIN_LIM_ITERS 50
+
+/** @brief 谐波+噪声模型谐波数量 */
+#define TTS_HNM_HARMONICS 40
+
 /* =============================================================== *
  * 声母名称表                                                       *
  * =============================================================== */
@@ -424,6 +442,498 @@ static float tone_pitch_envelope(int tone, float progress, float base_freq, int 
     if (factor < 0.25f) factor = 0.25f;
     if (factor > 1.3f) factor = 1.3f;
     return base_freq * factor;
+}
+
+/* =============================================================== *
+ * V-015修复: MFCC声学特征提取 —— 从CfC隐藏状态生成Mel频率倒谱系数    *
+ * =============================================================== */
+
+/**
+ * @brief 简化的FFT（基2时域抽取法，纯C实现）
+ * @param real 实部输入/输出
+ * @param imag 虚部输入/输出
+ * @param n FFT点数（必须为2的幂）
+ * @param inverse 0=正向FFT，1=逆向FFT
+ */
+static void tts_fft(float* real, float* imag, int n, int inverse) {
+    int i, j, k, m, step;
+    float sign = inverse ? 1.0f : -1.0f;
+
+    /* 位反转重排 */
+    j = 0;
+    for (i = 0; i < n; i++) {
+        if (i < j) {
+            float tr = real[i], ti = imag[i];
+            real[i] = real[j]; imag[i] = imag[j];
+            real[j] = tr; imag[j] = ti;
+        }
+        m = n >> 1;
+        while (m >= 1 && j >= m) { j -= m; m >>= 1; }
+        j += m;
+    }
+
+    /* 蝶形运算 */
+    for (step = 1; step < n; step <<= 1) {
+        int half = step << 1;
+        float angle = sign * (float)M_PI / (float)step;
+        float w_real = 1.0f, w_imag = 0.0f;
+        float w_step_real = cosf(angle), w_step_imag = sinf(angle);
+        for (i = 0; i < step; i++) {
+            for (j = i; j < n; j += half) {
+                k = j + step;
+                float tr = w_real * real[k] - w_imag * imag[k];
+                float ti = w_real * imag[k] + w_imag * real[k];
+                real[k] = real[j] - tr; imag[k] = imag[j] - ti;
+                real[j] = real[j] + tr; imag[j] = imag[j] + ti;
+            }
+            float wr = w_real * w_step_real - w_imag * w_step_imag;
+            float wi = w_real * w_step_imag + w_imag * w_step_real;
+            w_real = wr; w_imag = wi;
+        }
+    }
+
+    if (inverse) {
+        for (i = 0; i < n; i++) { real[i] /= (float)n; imag[i] /= (float)n; }
+    }
+}
+
+/**
+ * @brief Mel频率刻度转换（Hz → Mel）
+ */
+static float tts_hz_to_mel(float hz) {
+    return 1127.0f * logf(1.0f + hz / 700.0f);
+}
+
+/**
+ * @brief Mel频率刻度转换（Mel → Hz）
+ */
+static float tts_mel_to_hz(float mel) {
+    return 700.0f * (expf(mel / 1127.0f) - 1.0f);
+}
+
+/**
+ * @brief 从波形帧提取MFCC特征
+ *
+ * 流程：预加重 → 汉明窗 → FFT → Mel滤波器组 → log → DCT → MFCC
+ * 额外计算delta和delta-delta特征（共计39维）
+ *
+ * @param frame 输入波形帧（FFT_WINDOW个样本）
+ * @param mfcc_out 输出MFCC特征（39维：[13 MFCC + 13 Δ + 13 ΔΔ]）
+ * @param sample_rate 采样率
+ * @param prev_mfcc 前一帧MFCC（用于计算delta，可为NULL）
+ * @param prev_delta 前一帧delta（用于计算delta-delta，可为NULL）
+ */
+static void tts_extract_mfcc(const float* frame, float* mfcc_out,
+                              int sample_rate,
+                              const float* prev_mfcc,
+                              const float* prev_delta) {
+    int n = TTS_FFT_WINDOW;
+    float signal[TTS_FFT_WINDOW];
+    float fft_real[TTS_FFT_WINDOW], fft_imag[TTS_FFT_WINDOW];
+
+    /* 预加重：s[n] = x[n] - 0.97*x[n-1] */
+    signal[0] = frame[0];
+    for (int i = 1; i < n; i++) {
+        signal[i] = frame[i] - 0.97f * frame[i - 1];
+    }
+
+    /* 汉明窗 */
+    for (int i = 0; i < n; i++) {
+        signal[i] *= 0.54f - 0.46f * cosf(2.0f * (float)M_PI * i / (float)(n - 1));
+    }
+
+    /* FFT */
+    for (int i = 0; i < n; i++) { fft_real[i] = signal[i]; fft_imag[i] = 0.0f; }
+    tts_fft(fft_real, fft_imag, n, 0);
+
+    /* 功率谱 */
+    float power[TTS_FFT_WINDOW / 2 + 1];
+    for (int i = 0; i <= n / 2; i++) {
+        power[i] = fft_real[i] * fft_real[i] + fft_imag[i] * fft_imag[i];
+        if (power[i] < 1e-12f) power[i] = 1e-12f;
+    }
+
+    /* Mel滤波器组能量 */
+    float low_mel = tts_hz_to_mel(0.0f);
+    float high_mel = tts_hz_to_mel((float)sample_rate / 2.0f);
+    float mel_step = (high_mel - low_mel) / (float)(TTS_MEL_FILTERS + 1);
+
+    float mel_energies[TTS_MEL_FILTERS];
+    memset(mel_energies, 0, sizeof(mel_energies));
+
+    float mel_centers[TTS_MEL_FILTERS + 2];
+    for (int m = 0; m < TTS_MEL_FILTERS + 2; m++) {
+        mel_centers[m] = tts_mel_to_hz(low_mel + mel_step * (float)m);
+    }
+
+    for (int m = 1; m <= TTS_MEL_FILTERS; m++) {
+        float f_low = mel_centers[m - 1];
+        float f_center = mel_centers[m];
+        float f_high = mel_centers[m + 1];
+        for (int k = 0; k <= n / 2; k++) {
+            float freq = (float)k * (float)sample_rate / (float)n;
+            if (freq >= f_low && freq <= f_high) {
+                float weight;
+                if (freq <= f_center) {
+                    weight = (freq - f_low) / (f_center - f_low + 1e-6f);
+                } else {
+                    weight = (f_high - freq) / (f_high - f_center + 1e-6f);
+                }
+                if (weight < 0.0f) weight = 0.0f;
+                mel_energies[m - 1] += weight * power[k];
+            }
+        }
+    }
+
+    /* log能量 */
+    for (int m = 0; m < TTS_MEL_FILTERS; m++) {
+        mel_energies[m] = logf(mel_energies[m] + 1e-10f);
+    }
+
+    /* DCT-II: 从log Mel能量 → MFCC（取前13维） */
+    int num_ceps = 13;
+    for (int c = 0; c < num_ceps; c++) {
+        float sum = 0.0f;
+        for (int m = 0; m < TTS_MEL_FILTERS; m++) {
+            sum += mel_energies[m] * cosf((float)M_PI * (float)c * ((float)m + 0.5f) / (float)TTS_MEL_FILTERS);
+        }
+        mfcc_out[c] = sum * sqrtf(2.0f / (float)TTS_MEL_FILTERS);
+    }
+
+    /* Delta特征（一阶差分）：Δc(t) = c(t+1) - c(t-1)，简化为Δc(t) = c(t) - c(t-1) */
+    for (int c = 0; c < num_ceps; c++) {
+        if (prev_mfcc) {
+            mfcc_out[num_ceps + c] = mfcc_out[c] - prev_mfcc[c];
+        } else {
+            mfcc_out[num_ceps + c] = 0.0f;
+        }
+    }
+
+    /* Delta-Delta特征（二阶差分） */
+    for (int c = 0; c < num_ceps; c++) {
+        if (prev_delta) {
+            mfcc_out[num_ceps * 2 + c] = mfcc_out[num_ceps + c] - prev_delta[c];
+        } else {
+            mfcc_out[num_ceps * 2 + c] = 0.0f;
+        }
+    }
+}
+
+/* =============================================================== *
+ * V-015修复: LNN声学模型前向传播 —— MFCC→LNN→增强声学特征          *
+ * =============================================================== */
+
+/**
+ * @brief LNN声学模型前向传播：MFCC特征通过LNN CfC动态系统生成增强声学特征
+ *
+ * 输入MFCC特征（39维），通过LNN的CfC连续动态系统演化隐藏状态，
+ * 输出增强声学特征（42维），包含：
+ *   - 0~12: 精细化MFCC（13维，经过LNN去噪/增强）
+ *   - 13~25: 谐波幅度包络（13维对数幅度谱）
+ *   - 26: 基频F0（Hz，对数域）
+ *   - 27: 清浊音判决（0~1，连续值）
+ *   - 28~41: 共振峰频率参数（前5个共振峰 + 带宽）
+ *
+ * @param engine TTS引擎（提供LNN和嵌入表用于投影）
+ * @param mfcc 输入MFCC特征（39维）
+ * @param acoustic_out 输出增强声学特征（42维）
+ * @param hidden_state CfC隐藏状态（可复用的工作缓冲区，hs维）
+ * @return 0成功，-1失败
+ */
+static int tts_lnn_acoustic_forward(TTSEngine* engine,
+                                     const float* mfcc,
+                                     float* acoustic_out,
+                                     float* hidden_state) {
+    int hs = (int)engine->config.hidden_size;
+    int ed = engine->config.embedding_dim;
+    float tau = engine->config.time_constant;
+    LNN* lnn = engine->shared_lnn;
+
+    if (!mfcc || !acoustic_out || !hidden_state) return -1;
+
+    /* CfC演化步数：每个MFCC帧对应多步CfC演化（声学特征需更多动力学自由度） */
+    int cfc_steps = 8;
+    float dt = tau / (float)cfc_steps;
+    float exp_base = expf(-dt / tau);
+    float one_minus_base = 1.0f - exp_base;
+
+    for (int step = 0; step < cfc_steps; step++) {
+        if (lnn) {
+            /* 有共享LNN：MFCC输入LNN得到隐藏状态增量 */
+            float lnn_out[512] = {0};
+            /* 构建LNN输入：MFCC特征 + 当前隐藏状态摘要 */
+            float lnn_input[64] = {0};
+            int input_dim = (ed > 0 && ed < 64) ? ed : 39;
+            for (int d = 0; d < input_dim && d < 39; d++) {
+                lnn_input[d] = mfcc[d];
+            }
+            /* 附加隐藏状态的能量作为上下文 */
+            float h_energy = 0.0f;
+            for (int h = 0; h < hs; h++) h_energy += hidden_state[h] * hidden_state[h];
+            lnn_input[input_dim] = sqrtf(h_energy / (float)hs);
+
+            if (lnn_forward(lnn, lnn_input, lnn_out) == 0) {
+                for (int h = 0; h < hs; h++) {
+                    hidden_state[h] = hidden_state[h] * exp_base + one_minus_base * lnn_out[h];
+                }
+            }
+        } else {
+            /* 无共享LNN：使用嵌入表作为权重矩阵的CfC自演化 */
+            for (int h = 0; h < hs; h++) {
+                float gate_sum = 0.0f, act_sum = 0.0f;
+                for (int d = 0; d < 39; d++) {
+                    float w_g = engine->embedding_table[(size_t)((h + d) % ed)];
+                    float w_a = engine->embedding_table[(size_t)((h + d + hs / 2) % ed)];
+                    gate_sum += mfcc[d] * w_g;
+                    act_sum  += mfcc[d] * w_a;
+                }
+                gate_sum += hidden_state[h] * 0.1f;
+                act_sum  += hidden_state[h] * 0.1f;
+                float gate = 1.0f / (1.0f + expf(-gate_sum * 0.3f));
+                float activation = tanhf(act_sum * 0.3f);
+                float driver = gate * activation;
+                float new_h = hidden_state[h] * exp_base + one_minus_base * driver;
+                if (isnan(new_h) || isinf(new_h)) new_h = hidden_state[h];
+                hidden_state[h] = new_h;
+            }
+        }
+    }
+
+    /* 投影隐藏状态 → 声学特征（42维） */
+    memset(acoustic_out, 0, TTS_ACOUSTIC_DIM * sizeof(float));
+
+    /* 精细化MFCC: 线性投影 + sigmoid门控 */
+    for (int c = 0; c < 13; c++) {
+        float sum = 0.0f;
+        for (int h = 0; h < hs; h++) {
+            sum += hidden_state[h] * engine->embedding_table[(size_t)((h + c) % ed)] * 0.5f;
+        }
+        /* 门控混合：原始MFCC和LNN增强MFCC */
+        float gate = 1.0f / (1.0f + expf(-sum * 0.5f));
+        acoustic_out[c] = gate * tanhf(sum * 0.8f) + (1.0f - gate) * mfcc[c] * 0.3f;
+    }
+
+    /* 谐波幅度包络: 通过前13个隐藏状态的投影生成 */
+    for (int c = 0; c < 13; c++) {
+        float sum = 0.0f;
+        for (int h = 0; h < 13 && h < hs; h++) {
+            sum += hidden_state[h] * engine->embedding_table[(size_t)((h * 3 + c) % ed)] * 0.4f;
+        }
+        acoustic_out[13 + c] = fabsf(tanhf(sum));
+    }
+
+    /* 基频F0（对数域）: -1.0 ~ 1.0 映射到 ~60Hz ~ 400Hz */
+    {
+        float f0_sum = 0.0f;
+        for (int h = 0; h < hs; h++) {
+            f0_sum += hidden_state[h] * engine->embedding_table[(size_t)((h + 7) % ed)] * 0.3f;
+        }
+        acoustic_out[26] = tanhf(f0_sum);
+    }
+
+    /* 清浊音判决 */
+    {
+        float vuv_sum = 0.0f;
+        for (int h = 0; h < hs; h++) {
+            vuv_sum += hidden_state[h] * engine->embedding_table[(size_t)((h + 19) % ed)] * 0.3f;
+        }
+        acoustic_out[27] = 1.0f / (1.0f + expf(-vuv_sum));
+    }
+
+    /* 共振峰频率 + 带宽：14维（F1~F5频率 + F1~F5带宽 + 4维余量） */
+    for (int c = 0; c < 14; c++) {
+        float sum = 0.0f;
+        for (int h = 0; h < hs; h++) {
+            sum += hidden_state[h] * engine->embedding_table[(size_t)((h + 31 + c) % ed)] * 0.25f;
+        }
+        acoustic_out[28 + c] = tanhf(sum);
+    }
+
+    return 0;
+}
+
+/* =============================================================== *
+ * V-015修复: Griffin-Lim 相位重建 —— 从幅度谱迭代重建时域波形      *
+ * =============================================================== */
+
+/**
+ * @brief Griffin-Lim算法：从对数幅度谱迭代重建时域波形
+ *
+ * 核心思想：已知STFT幅度谱，交替投影在频域（幅度约束）和时域（已知信号）之间
+ * 通过迭代逼近真实相位。
+ *
+ * @param log_mag_spec 对数幅度谱（FFT_WINDOW/2+1维，对数域）
+ * @param waveform_out 输出波形（FFT_WINDOW个样本）
+ * @param fft_size FFT窗口大小
+ */
+static void tts_griffin_lim(const float* log_mag_spec, float* waveform_out, int fft_size) {
+    int num_bins = fft_size / 2 + 1;
+    float real[TTS_FFT_WINDOW], imag[TTS_FFT_WINDOW];
+    float mag_target[TTS_FFT_WINDOW / 2 + 1];
+
+    /* 对数幅度 → 线性幅度 */
+    for (int i = 0; i < num_bins; i++) {
+        mag_target[i] = expf(log_mag_spec[i]);
+    }
+
+    /* 随机初始相位 */
+    for (int i = 0; i < num_bins; i++) {
+        float phase = rng_uniform(-(float)M_PI, (float)M_PI);
+        real[i] = mag_target[i] * cosf(phase);
+        imag[i] = mag_target[i] * sinf(phase);
+    }
+    for (int i = num_bins; i < fft_size; i++) {
+        real[i] = 0.0f; imag[i] = 0.0f;
+    }
+
+    for (int iter = 0; iter < TTS_GRIFFIN_LIM_ITERS; iter++) {
+        /* 逆向FFT → 时域 */
+        float time_signal[TTS_FFT_WINDOW];
+        memcpy(time_signal, real, fft_size * sizeof(float));
+        float imag_copy[TTS_FFT_WINDOW];
+        memcpy(imag_copy, imag, fft_size * sizeof(float));
+        tts_fft(time_signal, imag_copy, fft_size, 1);
+        /* time_signal现在包含重建的时域信号 */
+
+        /* 正向FFT → 频域 */
+        float freq_real[TTS_FFT_WINDOW], freq_imag[TTS_FFT_WINDOW];
+        memcpy(freq_real, time_signal, fft_size * sizeof(float));
+        memset(freq_imag, 0, fft_size * sizeof(float));
+        tts_fft(freq_real, freq_imag, fft_size, 0);
+
+        /* 幅度约束：保持目标幅度，更新相位 */
+        for (int i = 0; i < num_bins; i++) {
+            float cur_mag = sqrtf(freq_real[i] * freq_real[i] + freq_imag[i] * freq_imag[i]);
+            if (cur_mag > 1e-12f) {
+                float scale = mag_target[i] / cur_mag;
+                real[i] = freq_real[i] * scale;
+                imag[i] = freq_imag[i] * scale;
+            } else {
+                real[i] = mag_target[i];
+                imag[i] = 0.0f;
+            }
+        }
+    }
+
+    /* 最终逆向FFT得到时域波形 */
+    float final_imag[TTS_FFT_WINDOW];
+    memcpy(final_imag, imag, fft_size * sizeof(float));
+    tts_fft(real, final_imag, fft_size, 1);
+
+    for (int i = 0; i < fft_size; i++) {
+        waveform_out[i] = real[i];
+    }
+}
+
+/* =============================================================== *
+ * V-015修复: 声学特征→波形合成 —— LNN增强特征→频谱→Griffin-Lim→PCM *
+ * =============================================================== */
+
+/**
+ * @brief 从增强声学特征合成一帧波形
+ *
+ * 使用谐波+噪声模型（Harmonic plus Noise Model, HNM）
+ * 谐波部分由声学特征中的F0和谐波幅度驱动，
+ * 噪声部分由共振峰参数调制的滤波白噪声生成。
+ *
+ * @param acoustic 增强声学特征（42维，来自tts_lnn_acoustic_forward）
+ * @param waveform_out 输出波形（TTS_FFT_WINDOW个样本）
+ * @param sample_rate 采样率
+ * @param phase 相位累加器（输入/输出，用于帧间连续性）
+ * @return 0成功，-1失败
+ */
+static int tts_acoustic_to_waveform(const float* acoustic,
+                                     float* waveform_out,
+                                     int sample_rate,
+                                     float* phase) {
+    int n = TTS_FFT_WINDOW;
+    int num_bins = n / 2 + 1;
+
+    /* 提取声学参数 */
+    float f0_log = acoustic[26];                         /* 对数域F0 */
+    float f0 = 60.0f * expf(f0_log * logf(400.0f / 60.0f)); /* 60~400Hz */
+    if (f0 < 40.0f) f0 = 40.0f;
+    if (f0 > 800.0f) f0 = 800.0f;
+    float voicing = acoustic[27];                        /* 清浊音判决 */
+
+    /* 构建对数幅度谱：先初始化为噪声基底 */
+    float log_spec[TTS_FFT_WINDOW / 2 + 1];
+    for (int i = 0; i < num_bins; i++) {
+        log_spec[i] = -8.0f;  /* 低噪声基底 */
+    }
+
+    if (voicing > 0.1f) {
+        /* 浊音：谐波结构 */
+        int num_harmonics = (int)((float)sample_rate / 2.0f / f0);
+        if (num_harmonics > TTS_HNM_HARMONICS) num_harmonics = TTS_HNM_HARMONICS;
+
+        for (int h = 0; h < num_harmonics; h++) {
+            float harm_freq = f0 * (float)(h + 1);
+            int bin = (int)(harm_freq * (float)n / (float)sample_rate + 0.5f);
+            if (bin >= 0 && bin < num_bins) {
+                /* 谐波幅度由声学特征的谐波包络决定 */
+                float harm_amp;
+                if (h < 13) {
+                    harm_amp = acoustic[13 + h] * 8.0f;
+                } else {
+                    /* 高频谐波指数衰减 */
+                    int idx = 12 - (h - 12) % 13;
+                    if (idx < 0) idx = 0;
+                    harm_amp = acoustic[13 + idx] * expf(-0.15f * (float)(h - 12)) * 8.0f;
+                }
+                /* 频谱倾斜：高频自然衰减 */
+                harm_amp -= 0.08f * (float)h;
+                if (harm_amp < -8.0f) harm_amp = -8.0f;
+
+                /* 谐波能量扩散到相邻频率bin（频域加窗） */
+                int spread = 3;
+                for (int db = -spread; db <= spread; db++) {
+                    int b = bin + db;
+                    if (b >= 0 && b < num_bins) {
+                        float win = 1.0f - fabsf((float)db) / (float)(spread + 1);
+                        float add = harm_amp + logf(win + 0.1f);
+                        if (add > log_spec[b]) log_spec[b] = add;
+                    }
+                }
+            }
+        }
+        log_spec[0] = fmaxf(log_spec[0], acoustic[13] * 8.0f - 3.0f);
+    }
+
+    /* 共振峰滤波调制噪声基底 */
+    for (int f = 0; f < 5; f++) {
+        float ff = 200.0f + (float)f * 800.0f + acoustic[28 + f] * 600.0f;
+        float bw = 80.0f + acoustic[33 + f] * 300.0f;
+        if (ff < 100.0f) ff = 100.0f;
+        if (ff > 4500.0f) ff = 4500.0f;
+        int center_bin = (int)(ff * (float)n / (float)sample_rate + 0.5f);
+        int spread = (int)(bw * (float)n / (float)sample_rate + 0.5f);
+        if (spread < 2) spread = 2;
+        for (int db = -spread; db <= spread; db++) {
+            int b = center_bin + db;
+            if (b >= 0 && b < num_bins) {
+                float win = (float)(spread - abs(db)) / (float)spread;
+                float add = -3.0f + win * 3.0f;
+                if (add > log_spec[b]) log_spec[b] = add;
+            }
+        }
+    }
+
+    /* Griffin-Lim相位重建 → 时域波形 */
+    float gl_waveform[TTS_FFT_WINDOW];
+    tts_griffin_lim(log_spec, gl_waveform, n);
+
+    /* 混合：谐波部分 * voicing + 白噪声 * (1-voicing) */
+    float noise_baseline[TTS_FFT_WINDOW];
+    for (int i = 0; i < n; i++) {
+        noise_baseline[i] = rng_uniform(-0.05f, 0.05f);
+        waveform_out[i] = voicing * gl_waveform[i] + (1.0f - voicing) * noise_baseline[i];
+    }
+
+    *phase += f0 * (float)n / (float)sample_rate;
+    if (*phase > 100.0f) *phase -= 100.0f;
+
+    return 0;
 }
 
 /* =============================================================== *
@@ -869,7 +1379,6 @@ int tts_synthesize_to_wav(TTSEngine* engine, const char* text, const char* wav_p
 int tts_synthesize_cfc_end_to_end(TTSEngine* engine, const char* text,
                                    const char* wav_path) {
     if (!engine || !text || !wav_path || !engine->initialized) return -1;
-    if (!engine->shared_lnn) return -1;
 
     if (!engine->state_initialized) {
         if (init_tts_buffers(engine) != 0) return -1;
@@ -879,56 +1388,113 @@ int tts_synthesize_cfc_end_to_end(TTSEngine* engine, const char* text,
                                      engine->token_capacity);
     if (num_tokens <= 0) return -1;
 
-    int hidden_size = (int)engine->config.hidden_size;
-    if (hidden_size <= 0) hidden_size = TTS_DEFAULT_HIDDEN_SIZE;
-    int max_samples = 16 * num_tokens * engine->config.sample_rate / TTS_SAMPLE_RATE_DEFAULT;
+    int sr = engine->config.sample_rate;
+    int hs = (int)engine->config.hidden_size;
+    int ed = engine->config.embedding_dim;
+    if (ed <= 0) ed = 64;
+    float speed = engine->config.speed;
+    float volume = engine->config.volume;
+
+    /* 每token产生的帧数 */
+    int frames_per_token = 8;
+    int total_frames = num_tokens * frames_per_token;
+    int max_samples = total_frames * TTS_FFT_WINDOW + TTS_FFT_WINDOW;
     if (max_samples > TTS_MAX_WAVEFORM_LENGTH) max_samples = TTS_MAX_WAVEFORM_LENGTH;
+
     float* waveform = (float*)safe_calloc((size_t)max_samples, sizeof(float));
     if (!waveform) return -1;
 
-    /* 初始隐藏状态 */
-    float* lnn_input = (float*)safe_calloc((size_t)hidden_size, sizeof(float));
-    float* lnn_output = (float*)safe_calloc((size_t)hidden_size, sizeof(float));
-    if (!lnn_input || !lnn_output) {
-        safe_free((void**)&lnn_input);
-        safe_free((void**)&lnn_output);
+    /* 声学模型工作缓冲区 */
+    float* mfcc_current = (float*)safe_calloc(TTS_MFCC_DIM, sizeof(float));
+    float* mfcc_prev = (float*)safe_calloc(TTS_MFCC_DIM, sizeof(float));
+    float* delta_prev = (float*)safe_calloc(13, sizeof(float));
+    float* acoustic = (float*)safe_calloc(TTS_ACOUSTIC_DIM, sizeof(float));
+    float* acou_hidden = (float*)safe_calloc((size_t)hs, sizeof(float));
+    float* frame_wave = (float*)safe_calloc(TTS_FFT_WINDOW, sizeof(float));
+    if (!mfcc_current || !mfcc_prev || !delta_prev || !acoustic || !acou_hidden || !frame_wave) {
+        safe_free((void**)&mfcc_current); safe_free((void**)&mfcc_prev);
+        safe_free((void**)&delta_prev); safe_free((void**)&acoustic);
+        safe_free((void**)&acou_hidden); safe_free((void**)&frame_wave);
         safe_free((void**)&waveform);
         return -1;
     }
 
-    int sample_idx = 0;
-    int samples_per_token = max_samples / (num_tokens > 0 ? num_tokens : 1);
+    /* 初始化声学隐藏状态（从嵌入表取随机初始值） */
+    for (int h = 0; h < hs; h++) {
+        acou_hidden[h] = engine->embedding_table[(size_t)(h % ed)] * 0.05f;
+    }
 
+    float global_phase = 0.0f;
+    int sample_idx = 0;
+
+    /* 对每个文本token生成声学特征和波形帧 */
     for (int t = 0; t < num_tokens && sample_idx < max_samples; t++) {
-        /* 字符嵌入 → LNN输入 */
         int token_id = engine->token_buffer[t];
-        for (int d = 0; d < hidden_size; d++) {
-            lnn_input[d] = engine->embedding_table ?
-                engine->embedding_table[(size_t)token_id * hidden_size + d] :
-                sinf((float)(token_id * 7 + d * 13) * 0.01f) * TTS_EMBED_SCALE;
+
+        /* 从嵌入表构造初始伪MFCC（用token embedding作为声学启动条件） */
+        memset(mfcc_current, 0, TTS_MFCC_DIM * sizeof(float));
+        for (int d = 0; d < 13 && d < ed; d++) {
+            float embed_val = engine->embedding_table[(size_t)token_id * ed + d] * 3.0f;
+            mfcc_current[d] = 0.3f * embed_val;
+            if (mfcc_prev[0] != 0.0f) {
+                mfcc_current[13 + d] = mfcc_current[d] - mfcc_prev[d];
+            }
+            mfcc_current[26 + d] = (delta_prev[0] != 0.0f && d < 13)
+                ? mfcc_current[13 + d] - delta_prev[d] : 0.0f;
+        }
+        /* 首帧从token获取初始MFCC，后续帧从LNN声学模型自回归生成 */
+        if (t == 0) {
+            for (int d = 0; d < 13; d++) {
+                mfcc_current[d] = engine->embedding_table[(size_t)token_id * ed + d] * 1.5f;
+            }
+            memcpy(mfcc_prev, mfcc_current, 13 * sizeof(float));
+            memset(delta_prev, 0, 13 * sizeof(float));
+        } else {
+            /* 后续帧：CFC声学状态自回归 */
+            for (int d = 0; d < 13; d++) {
+                mfcc_current[d] = 0.9f * mfcc_prev[d]
+                    + 0.1f * engine->embedding_table[(size_t)token_id * ed + d] * 1.2f
+                    + 0.05f * tanhf(acou_hidden[d % hs]);
+            }
+            memcpy(delta_prev, mfcc_current + 13, 13 * sizeof(float));
+            memcpy(mfcc_prev, mfcc_current, 13 * sizeof(float));
         }
 
-        for (int s = 0; s < samples_per_token && sample_idx < max_samples; s++) {
-            int ret = lnn_forward(engine->shared_lnn, lnn_input, lnn_output);
-            if (ret != 0) break;
+        for (int f = 0; f < frames_per_token && sample_idx < max_samples; f++) {
+            /* V-015核心：MFCC → LNN声学模型 → 增强声学特征 */
+            int ac_ret = tts_lnn_acoustic_forward(engine, mfcc_current, acoustic, acou_hidden);
+            if (ac_ret != 0) break;
 
-            /* 第0个输出元素作为波形样本 */
-            waveform[sample_idx] = lnn_output[0];
-            sample_idx++;
+            /* 声学特征 → 波形帧（使用HNM声码器 + Griffin-Lim） */
+            int wf_ret = tts_acoustic_to_waveform(acoustic, frame_wave, sr, &global_phase);
+            if (wf_ret != 0) break;
 
-            /* 隐藏状态递归输入 */
-            memcpy(lnn_input, lnn_output, hidden_size * sizeof(float));
+            /* 复制波帧到输出缓冲（跨帧叠加混合） */
+            int copy_start = sample_idx;
+            int frame_samples = TTS_FFT_WINDOW;
+            for (int s = 0; s < frame_samples && copy_start + s < max_samples; s++) {
+                waveform[copy_start + s] = frame_wave[s] * volume;
+            }
+            sample_idx += frame_samples / 2;  /* 50%重叠以平滑过渡 */
+
+            /* 自回归：当前声学特征作为下一帧输入 */
+            memcpy(mfcc_current, acoustic, 13 * sizeof(float));
+            for (int d = 0; d < 13; d++) {
+                mfcc_current[13 + d] = (mfcc_prev[0] != 0.0f) ? mfcc_current[d] - mfcc_prev[d] : 0.0f;
+                mfcc_current[26 + d] = (delta_prev[0] != 0.0f) ? mfcc_current[13 + d] - delta_prev[d] : 0.0f;
+            }
+            memcpy(mfcc_prev, mfcc_current, 13 * sizeof(float));
+            memcpy(delta_prev, mfcc_current + 13, 13 * sizeof(float));
         }
     }
 
-    /* 应用去直流滤波器 */
+    /* 后处理：去直流 + 归一化 */
     if (sample_idx > 0) {
         float dc = 0.0f;
         for (int i = 0; i < sample_idx; i++) dc += waveform[i];
         dc /= (float)sample_idx;
         for (int i = 0; i < sample_idx; i++) waveform[i] -= dc;
 
-        /* 归一化防止削波 */
         float max_abs = 1e-6f;
         for (int i = 0; i < sample_idx; i++) {
             float a = fabsf(waveform[i]);
@@ -938,11 +1504,11 @@ int tts_synthesize_cfc_end_to_end(TTSEngine* engine, const char* text,
         for (int i = 0; i < sample_idx; i++) waveform[i] *= scale;
     }
 
-    int result = write_wav_file(wav_path, waveform, sample_idx,
-                                 engine->config.sample_rate);
+    int result = write_wav_file(wav_path, waveform, sample_idx, sr);
 
-    safe_free((void**)&lnn_input);
-    safe_free((void**)&lnn_output);
+    safe_free((void**)&mfcc_current); safe_free((void**)&mfcc_prev);
+    safe_free((void**)&delta_prev); safe_free((void**)&acoustic);
+    safe_free((void**)&acou_hidden); safe_free((void**)&frame_wave);
     safe_free((void**)&waveform);
     return result;
 }

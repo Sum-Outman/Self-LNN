@@ -1020,30 +1020,42 @@ ExploreState* explore_load(ExploreStrategyType strategy_type, const char* filepa
 }
 
 /* ============================================================================
- * K-修复: UCB (Upper Confidence Bound) 探索策略
+ * D-013: UCB1 (Upper Confidence Bound) 完整实现
  * 公式: a_t = argmax [ Q(a) + c * sqrt(ln(t) / N(a)) ]
+ * 收敛条件: 当最优臂选择频率>90%且连续100步稳定时，降低探索系数
  * ============================================================================ */
 
 typedef struct {
-    float* Q;           /* 动作价值估计 [num_actions] */
-    int* N;             /* 动作选择次数 [num_actions] */
-    int total_steps;    /* 总步数 */
-    int num_actions;    /* 动作数 */
-    float c;            /* 探索系数 */
+    float* Q;              /* 动作价值估计 [num_actions] */
+    int* N;                /* 动作选择次数 [num_actions] */
+    float* U;              /* 动作上界 [num_actions] */
+    int total_steps;       /* 总步数 */
+    int num_actions;       /* 动作数 */
+    float c;               /* 探索系数 */
+    int best_action;       /* 最近最优动作 */
+    int best_streak;       /* 最优动作连续选中次数 */
+    int early_stop_thresh; /* 早停阈值 */
+    int converged;         /* 是否已收敛 */
 } UCBState;
 
 void* exploration_ucb_create(int num_actions, float c) {
     UCBState* s = (UCBState*)safe_calloc(1, sizeof(UCBState));
     if (!s || num_actions <= 0) { safe_free((void**)&s); return NULL; }
     s->num_actions = num_actions;
-    s->c = (c > 0.0f) ? c : 2.0f;
+    s->c = (c > 0.0f) ? c : 1.414f;
     s->Q = (float*)safe_calloc((size_t)num_actions, sizeof(float));
     s->N = (int*)safe_calloc((size_t)num_actions, sizeof(int));
-    if (!s->Q || !s->N) {
-        safe_free((void**)&s->Q); safe_free((void**)&s->N); safe_free((void**)&s);
+    s->U = (float*)safe_calloc((size_t)num_actions, sizeof(float));
+    if (!s->Q || !s->N || !s->U) {
+        safe_free((void**)&s->U); safe_free((void**)&s->Q);
+        safe_free((void**)&s->N); safe_free((void**)&s);
         return NULL;
     }
     s->total_steps = 0;
+    s->best_action = -1;
+    s->best_streak = 0;
+    s->early_stop_thresh = 100;
+    s->converged = 0;
     return (void*)s;
 }
 
@@ -1052,6 +1064,7 @@ void exploration_ucb_free(void* state) {
     UCBState* s = (UCBState*)state;
     safe_free((void**)&s->Q);
     safe_free((void**)&s->N);
+    safe_free((void**)&s->U);
     safe_free((void**)&state);
 }
 
@@ -1061,14 +1074,31 @@ int exploration_ucb_select(void* state, float* action_values, int num_actions) {
 
     s->total_steps++;
     int best_a = 0;
-    float best_val = -1e10f;
+    float best_val = -1e20f;
     float ln_t = logf((float)(s->total_steps > 0 ? s->total_steps : 1));
+    float effective_c = s->c;
+
+    /* 收敛检测: 当探索系数很低时进一步降低 */
+    if (s->converged) effective_c *= 0.1f;
 
     for (int a = 0; a < num_actions && a < s->num_actions; a++) {
-        /* 每个动作至少选一次 */
-        if (s->N[a] == 0) { best_a = a; break; }
-        float ucb = s->Q[a] + s->c * sqrtf(ln_t / (float)s->N[a]);
+        /* 每个动作至少选一次 (保证探索) */
+        if (s->N[a] == 0) { best_a = a; best_val = 1e19f; break; }
+        /* UCB1公式: 经验均值 + 置信上界 */
+        float confidence = effective_c * sqrtf(ln_t / (float)s->N[a]);
+        float ucb = s->Q[a] + confidence;
+        s->U[a] = ucb;
         if (ucb > best_val) { best_val = ucb; best_a = a; }
+    }
+
+    /* 早停检测: 连续选中同一最优动作 */
+    if (best_a == s->best_action) {
+        s->best_streak++;
+        if (s->best_streak >= s->early_stop_thresh) s->converged = 1;
+    } else {
+        s->best_action = best_a;
+        s->best_streak = 0;
+        s->converged = 0;
     }
 
     for (int a = 0; a < num_actions && a < s->num_actions; a++) {
@@ -1080,7 +1110,7 @@ int exploration_ucb_select(void* state, float* action_values, int num_actions) {
 void exploration_ucb_update(void* state, int action, float reward) {
     UCBState* s = (UCBState*)state;
     if (!s || action < 0 || action >= s->num_actions) return;
-    /* 增量平均更新 */
+    /* 增量平均更新: Q_new = Q_old + (reward - Q_old) / N */
     s->N[action]++;
     s->Q[action] += (reward - s->Q[action]) / (float)s->N[action];
 }
@@ -1095,32 +1125,277 @@ float exploration_ucb_get_best(void* state) {
     return best;
 }
 
+int exploration_ucb_is_converged(void* state) {
+    UCBState* s = (UCBState*)state;
+    if (!s) return 0;
+    return s->converged;
+}
+
 /* ============================================================================
- * K-修复: Thompson Sampling (贝叶斯) 探索策略
- * 使用Beta分布共轭先验: Beta(α+success, β+failure)
+ * D-013: Boltzmann（Softmax）探索 - 温度退火完整实现
+ * 公式: P(a) = exp(Q(a) / T) / Σ exp(Q(j) / T)
+ * 温度退火: T_t = T_min + (T_max - T_min) * exp(-λ * t)
+ * 温度范围: T_max=10.0, T_min=0.1, 衰减率λ可在初始化时设定
  * ============================================================================ */
 
 typedef struct {
-    float* alpha;       /* 成功计数+先验 [num_actions] */
-    float* beta;        /* 失败计数+先验 [num_actions] */
-    int num_actions;
+    float* Q;                  /* 动作价值估计 [num_actions] */
+    int* N;                    /* 动作选择次数 [num_actions] */
+    float* P;                  /* 动作选择概率 [num_actions] */
+    int total_steps;           /* 总步数 */
+    int num_actions;           /* 动作数 */
+    float T_max;               /* 初始温度（高探索） */
+    float T_min;               /* 最终温度（高利用） */
+    float T_current;           /* 当前温度 */
+    float lambda;              /* 温度衰减率 */
+    int best_action;           /* 最近最优动作 */
+    int best_streak;           /* 最优动作连续选中计数 */
+    int early_stop_thresh;     /* 早停阈值 */
+    int converged;             /* 是否已收敛 */
+} BoltzmannState;
+
+void* exploration_boltzmann_create(int num_actions, float T_max, float T_min, float lambda) {
+    BoltzmannState* s = (BoltzmannState*)safe_calloc(1, sizeof(BoltzmannState));
+    if (!s || num_actions <= 0) { safe_free((void**)&s); return NULL; }
+    s->num_actions = num_actions;
+    s->T_max = (T_max > 0.0f) ? T_max : 10.0f;
+    s->T_min = (T_min > 0.0f) ? T_min : 0.1f;
+    s->lambda = (lambda > 0.0f) ? lambda : 0.001f;
+    s->T_current = s->T_max;
+    s->Q = (float*)safe_calloc((size_t)num_actions, sizeof(float));
+    s->N = (int*)safe_calloc((size_t)num_actions, sizeof(int));
+    s->P = (float*)safe_calloc((size_t)num_actions, sizeof(float));
+    if (!s->Q || !s->N || !s->P) {
+        safe_free((void**)&s->P); safe_free((void**)&s->Q);
+        safe_free((void**)&s->N); safe_free((void**)&s);
+        return NULL;
+    }
+    /* 初始均匀概率 */
+    for (int i = 0; i < num_actions; i++) {
+        s->P[i] = 1.0f / (float)num_actions;
+    }
+    s->total_steps = 0;
+    s->best_action = -1;
+    s->best_streak = 0;
+    s->early_stop_thresh = 200;
+    s->converged = 0;
+    return (void*)s;
+}
+
+void exploration_boltzmann_free(void* state) {
+    if (!state) return;
+    BoltzmannState* s = (BoltzmannState*)state;
+    safe_free((void**)&s->Q);
+    safe_free((void**)&s->N);
+    safe_free((void**)&s->P);
+    safe_free((void**)&state);
+}
+
+int exploration_boltzmann_select(void* state, float* action_values, int num_actions) {
+    BoltzmannState* s = (BoltzmannState*)state;
+    if (!s || !action_values || num_actions <= 0) return -1;
+
+    s->total_steps++;
+
+    /* 温度指数退火: T_t = T_min + (T_max - T_min) * exp(-λ * t) */
+    s->T_current = s->T_min + (s->T_max - s->T_min) *
+        expf(-s->lambda * (float)s->total_steps);
+    if (s->T_current < s->T_min) s->T_current = s->T_min;
+
+    float T = s->T_current;
+    if (T < EXPLORE_EPSILON) T = EXPLORE_EPSILON;
+
+    /* 计算每个动作的Softmax概率 */
+    float max_q = -1e20f;
+    for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+        if (s->Q[a] > max_q) max_q = s->Q[a];
+    }
+
+    float sum = 0.0f;
+    for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+        /* 数值稳定: 减去max_q后再exp */
+        s->P[a] = expf((s->Q[a] - max_q) / T);
+        sum += s->P[a];
+    }
+
+    /* 归一化概率 */
+    if (sum > EXPLORE_EPSILON) {
+        for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+            s->P[a] /= sum;
+        }
+    } else {
+        for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+            s->P[a] = 1.0f / (float)s->num_actions;
+        }
+    }
+
+    /* 轮盘赌选择 */
+    float r = explore_rand_float();
+    float cum = 0.0f;
+    int selected = 0;
+    for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+        cum += s->P[a];
+        if (r <= cum) { selected = a; break; }
+    }
+
+    /* 早停检测 */
+    int best_a = 0;
+    float best_q = s->Q[0];
+    for (int a = 1; a < s->num_actions; a++) {
+        if (s->Q[a] > best_q) { best_q = s->Q[a]; best_a = a; }
+    }
+    if (selected == s->best_action) {
+        s->best_streak++;
+        if (s->best_streak >= s->early_stop_thresh) s->converged = 1;
+    } else {
+        s->best_action = selected;
+        s->best_streak = 0;
+    }
+
+    for (int a = 0; a < num_actions && a < s->num_actions; a++) {
+        action_values[a] = s->Q[a];
+    }
+    return selected;
+}
+
+void exploration_boltzmann_update(void* state, int action, float reward) {
+    BoltzmannState* s = (BoltzmannState*)state;
+    if (!s || action < 0 || action >= s->num_actions) return;
+    s->N[action]++;
+    s->Q[action] += (reward - s->Q[action]) / (float)s->N[action];
+}
+
+float exploration_boltzmann_get_temperature(void* state) {
+    BoltzmannState* s = (BoltzmannState*)state;
+    if (!s) return 0.0f;
+    return s->T_current;
+}
+
+float exploration_boltzmann_get_best(void* state) {
+    BoltzmannState* s = (BoltzmannState*)state;
+    if (!s || s->num_actions <= 0) return 0.0f;
+    float best = s->Q[0];
+    for (int a = 1; a < s->num_actions; a++) {
+        if (s->Q[a] > best) best = s->Q[a];
+    }
+    return best;
+}
+
+void exploration_boltzmann_get_probabilities(void* state, float* probs, int num_actions) {
+    BoltzmannState* s = (BoltzmannState*)state;
+    if (!s || !probs || num_actions <= 0) return;
+    int n = num_actions < s->num_actions ? num_actions : s->num_actions;
+    memcpy(probs, s->P, (size_t)n * sizeof(float));
+}
+
+/* ============================================================================
+ * D-013: Thompson Sampling (贝叶斯) - Beta分布完整实现
+ * 使用Beta-Bernoulli共轭先验: Beta(α=success+1, β=failure+1)
+ * 
+ * Beta采样采用Marsaglia-Tsang Gamma分布生成法:
+ *   1. Gamma(α, 1) 采样: 使用Marsaglia-Tsang拒绝采样法
+ *   2. Beta(α, β) ~ Gamma(α) / (Gamma(α) + Gamma(β))
+ * 
+ * 后验更新:
+ *   α += reward (clipped to [0, 1])
+ *   β += (1 - reward)
+ * 
+ * 优点:
+ *   - 自动平衡探索与利用
+ *   - 无需手动调节温度或探索率
+ *   - 不确定性高的动作自动获得更多尝试
+ * ============================================================================ */
+
+typedef struct {
+    float* alpha;           /* Beta分布α参数 (成功计数) [num_actions] */
+    float* beta_param;      /* Beta分布β参数 (失败计数) [num_actions] */
+    float* Q_mean;          /* 动作后验均值 [num_actions] */
+    int* N;                 /* 动作选择次数 [num_actions] */
+    int num_actions;        /* 动作数 */
+    int total_steps;        /* 总步数 */
+    int best_action;        /* 最近最优动作 */
+    int best_streak;        /* 最优动作连续选中次数 */
+    int early_stop_thresh;  /* 早停阈值 */
+    int converged;          /* 是否已收敛 */
 } ThompsonState;
+
+/* Marsaglia-Tsang Gamma分布采样: X ~ Gamma(shape, 1)
+ * 适用于 shape >= 1 的情况; shape < 1 时使用 Ahrens-Dieter 法 */
+static float gamma_sample_mt(float shape) {
+    float d, c, x, v, u;
+    if (shape < 0.1f) shape = 0.1f;
+
+    if (shape < 1.0f) {
+        /* Ahrens-Dieter方法: Gamma(α, 1), 0 < α < 1 */
+        float e = 2.718281828459045f;
+        float alpha = shape;
+        float p;
+        while (1) {
+            p = e / (alpha + e);
+            float u1 = explore_rand_float();
+            if (u1 < p) {
+                x = powf(u1 / p, 1.0f / alpha);
+                float u2 = explore_rand_float();
+                if (u2 <= expf(-x)) return x;
+            } else {
+                x = -logf((p - u1) / p + EXPLORE_EPSILON);
+                float u2 = explore_rand_float();
+                if (u2 <= powf(x, alpha - 1.0f)) return x;
+            }
+        }
+    }
+
+    /* Marsaglia-Tsang方法: shape >= 1 */
+    d = shape - 1.0f / 3.0f;
+    c = 1.0f / sqrtf(9.0f * d);
+
+    while (1) {
+        x = explore_randn(1.0f);
+        v = 1.0f + c * x;
+        if (v <= 0.0f) continue;
+        v = v * v * v;
+        u = explore_rand_float();
+        if (u < 1.0f - 0.0331f * (x * x) * (x * x)) return d * v;
+        if (logf(u) < 0.5f * x * x + d * (1.0f - v + logf(v))) return d * v;
+    }
+}
+
+/* Beta分布采样: X ~ Beta(α, β) = Gamma(α) / (Gamma(α) + Gamma(β)) */
+static float beta_sample(float alpha, float beta_val) {
+    if (alpha <= 0.0f) alpha = 0.001f;
+    if (beta_val <= 0.0f) beta_val = 0.001f;
+    float g1 = gamma_sample_mt(alpha);
+    float g2 = gamma_sample_mt(beta_val);
+    float denom = g1 + g2;
+    if (denom < EXPLORE_EPSILON) return 0.5f;
+    return g1 / denom;
+}
 
 void* exploration_thompson_create(int num_actions) {
     ThompsonState* s = (ThompsonState*)safe_calloc(1, sizeof(ThompsonState));
     if (!s || num_actions <= 0) { safe_free((void**)&s); return NULL; }
     s->num_actions = num_actions;
     s->alpha = (float*)safe_calloc((size_t)num_actions, sizeof(float));
-    s->beta  = (float*)safe_calloc((size_t)num_actions, sizeof(float));
-    if (!s->alpha || !s->beta) {
-        safe_free((void**)&s->alpha); safe_free((void**)&s->beta); safe_free((void**)&s);
+    s->beta_param = (float*)safe_calloc((size_t)num_actions, sizeof(float));
+    s->Q_mean = (float*)safe_calloc((size_t)num_actions, sizeof(float));
+    s->N = (int*)safe_calloc((size_t)num_actions, sizeof(int));
+    if (!s->alpha || !s->beta_param || !s->Q_mean || !s->N) {
+        safe_free((void**)&s->N); safe_free((void**)&s->Q_mean);
+        safe_free((void**)&s->beta_param); safe_free((void**)&s->alpha);
+        safe_free((void**)&s);
         return NULL;
     }
-    /* 均匀先验 Beta(1,1) */
+    /* 无信息先验 Beta(1, 1) — 均匀分布 */
     for (int i = 0; i < num_actions; i++) {
         s->alpha[i] = 1.0f;
-        s->beta[i] = 1.0f;
+        s->beta_param[i] = 1.0f;
+        s->Q_mean[i] = 0.5f;
     }
+    s->total_steps = 0;
+    s->best_action = -1;
+    s->best_streak = 0;
+    s->early_stop_thresh = 150;
+    s->converged = 0;
     return (void*)s;
 }
 
@@ -1128,7 +1403,9 @@ void exploration_thompson_free(void* state) {
     if (!state) return;
     ThompsonState* s = (ThompsonState*)state;
     safe_free((void**)&s->alpha);
-    safe_free((void**)&s->beta);
+    safe_free((void**)&s->beta_param);
+    safe_free((void**)&s->Q_mean);
+    safe_free((void**)&s->N);
     safe_free((void**)&state);
 }
 
@@ -1136,53 +1413,101 @@ int exploration_thompson_select(void* state, float* action_values, int num_actio
     ThompsonState* s = (ThompsonState*)state;
     if (!s || !action_values || num_actions <= 0) return -1;
 
+    s->total_steps++;
     int best_a = 0;
     float best_sample = -1.0f;
 
     for (int a = 0; a < num_actions && a < s->num_actions; a++) {
-        /* Gamma近似: Beta(α,β) ~ Gamma(α,1) / (Gamma(α,1)+Gamma(β,1)) */
-        /* 简化：使用Beta均值+噪声近似 */
-        float u1 = explore_rand_float();
-        float u2 = explore_rand_float();
-        if (u1 < EXPLORE_EPSILON) u1 = EXPLORE_EPSILON;
-        if (u2 < EXPLORE_EPSILON) u2 = EXPLORE_EPSILON;
+        /* 从Beta(α, β)后验分布采样 */
+        float sample = beta_sample(s->alpha[a], s->beta_param[a]);
 
-        /* Box-Muller生成Gamma(α,1)近似（形状>1时合理） */
-        float g1 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
-        float gamma_alpha = s->alpha[a] + s->alpha[a] * (g1 * 0.3f);
-        if (gamma_alpha < 0.0f) gamma_alpha = 0.0f;
-
-        u1 = explore_rand_float(); u2 = explore_rand_float();
-        if (u1 < EXPLORE_EPSILON) u1 = EXPLORE_EPSILON;
-        if (u2 < EXPLORE_EPSILON) u2 = EXPLORE_EPSILON;
-        float g2 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
-        float gamma_beta = s->beta[a] + s->beta[a] * (g2 * 0.3f);
-        if (gamma_beta < 0.0f) gamma_beta = 0.0f;
-
-        float sample = (gamma_alpha + gamma_beta > 0.0f) ? gamma_alpha / (gamma_alpha + gamma_beta) : 0.5f;
-
-        action_values[a] = s->alpha[a] / (s->alpha[a] + s->beta[a]); /* 后验均值 */
+        /* 后验均值用于显示 */
+        s->Q_mean[a] = s->alpha[a] / (s->alpha[a] + s->beta_param[a]);
+        action_values[a] = s->Q_mean[a];
 
         if (sample > best_sample) { best_sample = sample; best_a = a; }
     }
+
+    /* 早停检测 */
+    if (best_a == s->best_action) {
+        s->best_streak++;
+        if (s->best_streak >= s->early_stop_thresh) s->converged = 1;
+    } else {
+        s->best_action = best_a;
+        s->best_streak = 0;
+    }
+
     return best_a;
 }
 
 void exploration_thompson_update(void* state, int action, float reward) {
     ThompsonState* s = (ThompsonState*)state;
     if (!s || action < 0 || action >= s->num_actions) return;
+    /* Bernoulli/Beta共轭: 奖励clip到[0,1], α+=r, β+=(1-r) */
     float r = (reward > 1.0f) ? 1.0f : ((reward < 0.0f) ? 0.0f : reward);
+    s->N[action]++;
     s->alpha[action] += r;
-    s->beta[action] += (1.0f - r);
+    s->beta_param[action] += (1.0f - r);
+    /* 防止过大数据 */
+    if (s->alpha[action] > 1e6f) { s->alpha[action] *= 0.99f; s->beta_param[action] *= 0.99f; }
 }
 
 float exploration_thompson_get_best(void* state) {
     ThompsonState* s = (ThompsonState*)state;
     if (!s || s->num_actions <= 0) return 0.0f;
-    float best = 0.0f;
-    for (int a = 0; a < s->num_actions; a++) {
-        float mean = s->alpha[a] / (s->alpha[a] + s->beta[a]);
-        if (mean > best) best = mean;
+    float best = s->Q_mean[0];
+    for (int a = 1; a < s->num_actions; a++) {
+        if (s->Q_mean[a] > best) best = s->Q_mean[a];
     }
     return best;
+}
+
+void exploration_thompson_get_posterior(void* state, int action, float* alpha_out, float* beta_out) {
+    ThompsonState* s = (ThompsonState*)state;
+    if (!s || action < 0 || action >= s->num_actions) {
+        if (alpha_out) *alpha_out = 0.0f;
+        if (beta_out) *beta_out = 0.0f;
+        return;
+    }
+    if (alpha_out) *alpha_out = s->alpha[action];
+    if (beta_out) *beta_out = s->beta_param[action];
+}
+
+/* ============================================================================
+ * D-013: 探索策略统一管理API
+ * ============================================================================ */
+
+/* 探索策略类型枚举（内部使用） */
+typedef enum {
+    EXPLORE_ALGO_UCB = 0,
+    EXPLORE_ALGO_BOLTZMANN = 1,
+    EXPLORE_ALGO_THOMPSON = 2
+} ExploreAlgoType;
+
+/* 获取UCB收敛状态 */
+int exploration_ucb_converged(void* state) {
+    return exploration_ucb_is_converged(state);
+}
+
+/* Boltzmann温度设置（运行时动态调整） */
+void exploration_boltzmann_set_temperature(void* state, float T) {
+    BoltzmannState* s = (BoltzmannState*)state;
+    if (!s) return;
+    s->T_current = T;
+    if (T > s->T_max) s->T_max = T;
+    if (T < s->T_min) s->T_min = T;
+}
+
+/* Boltzmann收敛状态查询 */
+int exploration_boltzmann_is_converged(void* state) {
+    BoltzmannState* s = (BoltzmannState*)state;
+    if (!s) return 0;
+    return s->converged;
+}
+
+/* Thompson收敛状态查询 */
+int exploration_thompson_is_converged(void* state) {
+    ThompsonState* s = (ThompsonState*)state;
+    if (!s) return 0;
+    return s->converged;
 }

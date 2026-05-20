@@ -63,6 +63,7 @@ typedef struct {
 /**
  * @brief CAN总线配置结构体
  */
+#define SELFLNN_HARDWARE_INTERFACE_CAN_CONFIG_DEFINED
 typedef struct {
     char interface[64];           /**< CAN接口名称（如can0） */
     int bitrate;                  /**< 比特率（如500000） */
@@ -75,6 +76,7 @@ typedef struct {
 /**
  * @brief Modbus配置结构体
  */
+#define SELFLNN_HARDWARE_INTERFACE_MODBUS_CONFIG_DEFINED
 typedef struct {
     int slave_id;                 /**< 从站ID */
     int function_code;            /**< 功能码 */

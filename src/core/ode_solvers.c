@@ -1173,6 +1173,29 @@ int ode_rosenbrock_adaptive_solve(ODERHSFunc rhs, void* ctx,
     return (total_steps > 0) ? 0 : -3;
 }
 
+/* ======================================================================
+ * Forest-Ruth 4阶辛积分器 (Forest & Ruth, 1990, Physica D)
+ *
+ * 完整的4阶可分辛积分算法，用于可分哈密顿系统 H(q,p)=T(p)+V(q)。
+ *
+ * Forest-Ruth 4阶辛方法使用7个子步（8次力/速度求值），
+ * 精确保持辛几何结构，能量误差 O(Δt⁴) 且无长期漂移。
+ *
+ * 积分步骤（单步 Δt = h）：
+ *   p_{n+1/8} = p_n + c1·h·dpdt(q_n)
+ *   q_{n+1/7} = q_n + d1·h·dqdt(p_{n+1/8})
+ *   p_{n+2/8} = p_{n+1/8} + c2·h·dpdt(q_{n+1/7})
+ *   q_{n+2/7} = q_{n+1/7} + d2·h·dqdt(p_{n+2/8})
+ *   ...
+ *   p_{n+1} = p_{n+7/8} + c4·h·dpdt(q_{n+6/7})
+ *   q_{n+1} = q_{n+6/7} + d4·h·dqdt(p_{n+1})  (d4=0，空操作)
+ *
+ * 系数来源：Forest & Ruth, "Fourth-order symplectic integration",
+ *          Physica D 43 (1990) 105-117
+ *
+ * 对称性：c_i = c_{5-i}, d_i = d_{4-i}
+ * 阶数条件已验证：Σc_i=1, Σd_i=1, 其余高阶条件满足 O(h⁴) 精度
+ * ====================================================================== */
 int ode_forest_ruth_solve(float* q, float* p, float delta_t,
                            ODERHSFunc dqdt, ODERHSFunc dpdt, void* ctx,
                            size_t n, const SymplecticConfig* cfg,
@@ -1180,56 +1203,108 @@ int ode_forest_ruth_solve(float* q, float* p, float delta_t,
 {
     if (!q || !p || !dqdt || !dpdt || !cfg || !workspace || n == 0) return -1;
 
+    /* Forest-Ruth 4阶辛积分器系数（硬编码，直接取自Forest & Ruth 1990） */
+    const float c1 =  0.6756035959798288f;
+    const float c2 = -0.1756035959798288f;
+    const float c3 = -0.1756035959798288f;
+    const float c4 =  0.6756035959798288f;
+    const float d1 =  1.3512071919596578f;
+    const float d2 = -1.7024143839193153f;
+    const float d3 =  1.3512071919596578f;
+    const float d4 =  0.0f;
+
+    /* 工作空间布局：
+     *   tmp = workspace[0..n-1]        临时RHS求值缓冲区
+     *   energy_save = workspace[n..2n-1] 能量守恒验证缓冲区 */
     float* tmp = workspace;
+    float* energy_save = workspace + n;
+
     int substeps = (cfg->num_substeps > 0) ? cfg->num_substeps : 1;
-    float h = delta_t / substeps;
+    float h = delta_t / (float)substeps;
     int total_steps = 0;
 
-    float theta = SELFLNN_FOREST_RUTH_THETA;
-    float c1 = theta * 0.5f;
-    float c2 = (1.0f - theta) * 0.5f;
-    float c3 = (1.0f - theta) * 0.5f;
-    float c4 = theta * 0.5f;
-    float d1 = theta;
-    float d2 = 1.0f - 2.0f * theta;
-    float d3 = theta;
-    float d4 = 0.0f;
+    /* 能量守恒验证：保存初始状态用于积分前后对比 */
+    if (cfg->enable_separable) {
+        for (size_t i = 0; i < n; i++) {
+            energy_save[i] = q[i] * q[i] + p[i] * p[i];
+        }
+    }
 
     for (int s = 0; s < substeps; s++)
     {
+        /* FR4 子步1: p += c1·h·∂p/∂t (力作用于动量) */
         if (dpdt(0.0f, q, tmp, ctx) != 0) return -2;
         for (size_t i = 0; i < n; i++)
-            p[i] = p[i] + c1 * h * tmp[i];
+            p[i] += c1 * h * tmp[i];
 
+        /* FR4 子步2: q += d1·h·∂q/∂t (速度作用于位置) */
         if (dqdt(0.0f, p, tmp, ctx) != 0) return -2;
         for (size_t i = 0; i < n; i++)
-            q[i] = q[i] + d1 * h * tmp[i];
+            q[i] += d1 * h * tmp[i];
 
+        /* FR4 子步3: p += c2·h·∂p/∂t */
         if (dpdt(0.0f, q, tmp, ctx) != 0) return -2;
         for (size_t i = 0; i < n; i++)
-            p[i] = p[i] + c2 * h * tmp[i];
+            p[i] += c2 * h * tmp[i];
 
+        /* FR4 子步4: q += d2·h·∂q/∂t */
         if (dqdt(0.0f, p, tmp, ctx) != 0) return -2;
         for (size_t i = 0; i < n; i++)
-            q[i] = q[i] + d2 * h * tmp[i];
+            q[i] += d2 * h * tmp[i];
 
+        /* FR4 子步5: p += c3·h·∂p/∂t */
         if (dpdt(0.0f, q, tmp, ctx) != 0) return -2;
         for (size_t i = 0; i < n; i++)
-            p[i] = p[i] + c3 * h * tmp[i];
+            p[i] += c3 * h * tmp[i];
 
+        /* FR4 子步6: q += d3·h·∂q/∂t */
         if (dqdt(0.0f, p, tmp, ctx) != 0) return -2;
         for (size_t i = 0; i < n; i++)
-            q[i] = q[i] + d3 * h * tmp[i];
+            q[i] += d3 * h * tmp[i];
 
+        /* FR4 子步7: p += c4·h·∂p/∂t */
         if (dpdt(0.0f, q, tmp, ctx) != 0) return -2;
         for (size_t i = 0; i < n; i++)
-            p[i] = p[i] + c4 * h * tmp[i];
+            p[i] += c4 * h * tmp[i];
 
-        if (dqdt(0.0f, p, tmp, ctx) != 0) return -2;
-        for (size_t i = 0; i < n; i++)
-            q[i] = q[i] + d4 * h * tmp[i];
+        /* FR4 子步8: q += d4·h·∂q/∂t — d4=0.0 为显式零，跳过求值 */
+        /* 保留条件分支以确保未来若使用非零 d4 变体时正确执行 */
+        if (d4 != 0.0f) {
+            if (dqdt(0.0f, p, tmp, ctx) != 0) return -2;
+            for (size_t i = 0; i < n; i++)
+                q[i] += d4 * h * tmp[i];
+        }
 
         total_steps++;
+    }
+
+    /* ==================================================================
+     * 能量守恒验证
+     *
+     * 对于可分的哈密顿系统 H=Σ(T_i+V_i)，Forest-Ruth 4阶辛积分器
+     * 精确保持"影子哈密顿量" Ẽ=H+O(Δt⁴)，无长期能量漂移。
+     *
+     * 使用欧几里得范数代理 E_approx = Σ(q_i² + p_i²) 进行快速验证。
+     * 对于谐振子型哈密顿系统（H = ½(p²+q²)），此代理等价于 2·H。
+     * 对于一般可分离系统，代理量提供哈密顿量有界性的有效度量。
+     *
+     * 结果存储在 workspace[n] = 相对能量变化 |ΔE|/E₀。
+     * 若 enable_separable=0 则跳过此验证。
+     * ================================================================== */
+    if (cfg->enable_separable) {
+        float energy_initial_sq = 0.0f;
+        float energy_final_sq = 0.0f;
+        for (size_t i = 0; i < n; i++) {
+            energy_initial_sq += energy_save[i];
+            energy_final_sq += q[i] * q[i] + p[i] * p[i];
+        }
+        if (energy_initial_sq > 1e-12f) {
+            float diff = energy_final_sq - energy_initial_sq;
+            float relative_change = (diff > 0.0f) ? diff : -diff;
+            energy_save[0] = relative_change / energy_initial_sq;
+        } else {
+            energy_save[0] = 0.0f;
+        }
     }
 
     if (steps_used) *steps_used = total_steps;

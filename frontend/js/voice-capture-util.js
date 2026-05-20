@@ -114,9 +114,13 @@ class VoiceCaptureUtil {
     }
 
     static async uploadBlob(blob) {
-        if (!window.SelfLnnApi) return { success: false, error: 'API服务不可用' };
+        if (!window.SelfLnnApi) return { success: false, error: 'API服务不可用', text: '', confidence: -1 };
         try {
             var result = await window.SelfLnnApi.voiceRecognize(blob);
+            /* F-004修复: 检查API返回的success状态，失败时不伪装成功 */
+            if (!result.success) {
+                return { success: false, error: result.error || '语音识别请求失败', text: '', confidence: -1 };
+            }
             var data = result.data || result;
             return {
                 success: true,
@@ -125,7 +129,7 @@ class VoiceCaptureUtil {
                 confidence: (data.confidence !== undefined && data.confidence !== null) ? data.confidence : -1
             };
         } catch (err) {
-            return { success: false, error: '语音识别失败: ' + err.message, text: '' };
+            return { success: false, error: '语音识别失败: ' + err.message, text: '', confidence: -1 };
         }
     }
 

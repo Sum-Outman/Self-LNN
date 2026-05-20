@@ -165,8 +165,9 @@ static void gr_cfc_rhs(const float* h, int dim, float tau, float* dh) {
     }
 }
 
-/* 4阶Runge-Kutta ODE步进：每个子步dt/(float)ode_steps */
-static void gr_cfc_step_deep(float* h, int dim, float tau, float dt, int ode_steps) {
+/* D-010修复: RK4 ODE步进失败时返回错误码而非静默降级Euler法
+ * 内存分配失败时上层可重试或优雅处理 */
+static int gr_cfc_step_deep(float* h, int dim, float tau, float dt, int ode_steps) {
     float* k1 = (float*)safe_malloc((size_t)dim * sizeof(float));
     float* k2 = (float*)safe_malloc((size_t)dim * sizeof(float));
     float* k3 = (float*)safe_malloc((size_t)dim * sizeof(float));
@@ -175,14 +176,7 @@ static void gr_cfc_step_deep(float* h, int dim, float tau, float dt, int ode_ste
     if (!k1 || !k2 || !k3 || !k4 || !tmp) {
         safe_free((void**)&k1); safe_free((void**)&k2); safe_free((void**)&k3);
         safe_free((void**)&k4); safe_free((void**)&tmp);
-        /* 内存不足时回退单步Euler */
-        for (int i = 0; i < dim; i++) {
-            float gate = 1.0f/(1.0f+expf(-h[i]));
-            float liq = tanhf(0.8f*h[i]+0.2f*h[(i+1)%dim]);
-            float dh = -h[i]/(tau+GR_EPSILON) + gate*liq - 0.1f*(1.0f-gate)*h[(i+dim-1)%dim];
-            h[i] += dh * dt;
-        }
-        return;
+        return -1;
     }
     float sub_dt = dt / (float)ode_steps;
     for (int s = 0; s < ode_steps; s++) {
@@ -203,6 +197,7 @@ static void gr_cfc_step_deep(float* h, int dim, float tau, float dt, int ode_ste
     }
     safe_free((void**)&k1); safe_free((void**)&k2); safe_free((void**)&k3);
     safe_free((void**)&k4); safe_free((void**)&tmp);
+    return 0;
 }
 
 /* ============ 图传播能量计算 ============ */
@@ -579,10 +574,13 @@ int graph_reasoner_predict_tail(GraphReasoner* reasoner,
             memcpy(prop_result, seed_emb, dim * sizeof(float));
 
             for (int step = 0; step < reasoner->config.graph_prop_steps; step++) {
-                gr_cfc_step_deep(prop_result, dim,
+                if (gr_cfc_step_deep(prop_result, dim,
                                  reasoner->config.cfc_tau,
                                  reasoner->config.cfc_dt,
-                                 reasoner->config.cfc_steps);
+                                 reasoner->config.cfc_steps) != 0) {
+                    safe_free((void**)&prop_result);
+                    return -1;
+                }
 
                 float* nb_emb = (float*)safe_calloc(dim, sizeof(float));
                 if (nb_emb) {
@@ -1221,17 +1219,21 @@ int graph_reasoner_multi_hop_reason(GraphReasoner* reasoner,
                         /* 使用gr_cfc_step_deep替代独立的cfc_cell_forward，
                          * 在单一LNN架构中所有连续态演化由同一动力学方程驱动 */
                         memcpy(current_emb, combined, dim * sizeof(float));
-                        gr_cfc_step_deep(current_emb, dim,
+                        if (gr_cfc_step_deep(current_emb, dim,
                                          reasoner->config.cfc_tau,
-                                         reasoner->config.cfc_dt, 1);
+                                         reasoner->config.cfc_dt, 1) != 0) {
+                            return -1;
+                        }
                     }
                 }
             }
 
-            gr_cfc_step_deep(current_emb, dim,
+            if (gr_cfc_step_deep(current_emb, dim,
                              reasoner->config.cfc_tau,
                              reasoner->config.cfc_dt,
-                             reasoner->config.cfc_steps);
+                             reasoner->config.cfc_steps) != 0) {
+                return -1;
+            }
         }
 
         float* all_scores = (float*)safe_malloc(reasoner->entity_count * sizeof(float));
@@ -1484,9 +1486,11 @@ int graph_reasoner_multi_hop_enhanced(GraphReasoner* reasoner,
                     combined[d] = current_emb[d] * 0.7f + cur_emb[d] * 0.3f;
                 }
                 memcpy(current_emb, combined, dim * sizeof(float));
-                gr_cfc_step_deep(current_emb, dim,
+                if (gr_cfc_step_deep(current_emb, dim,
                                  reasoner->config.cfc_tau,
-                                 reasoner->config.cfc_dt, 1);
+                                 reasoner->config.cfc_dt, 1) != 0) {
+                    return -1;
+                }
             }
         }
 
@@ -1607,7 +1611,11 @@ int graph_reasoner_lnn_infer(GraphReasoner* reasoner,
         for (int e = 0; e < batch_size; e++) {
             float* h = lnn_state + e * dim;
 
-            gr_cfc_step_deep(h, dim, tau, dt, reasoner->config.cfc_steps);
+            if (gr_cfc_step_deep(h, dim, tau, dt, reasoner->config.cfc_steps) != 0) {
+                safe_free((void**)&lnn_state);
+                safe_free((void**)&lnn_buffer);
+                return -1;
+            }
 
             if (reasoner->adjacency_list) {
                 int entity_id = start_id + e;
@@ -1681,7 +1689,12 @@ int graph_reasoner_lnn_infer(GraphReasoner* reasoner,
             memcpy(emb, origin_emb, dim * sizeof(float));
             float saved[CFC_EMBED_MAX_DIM];
             memcpy(saved, emb, dim * sizeof(float));
-            gr_cfc_step_deep(emb, dim, tau, dt, reasoner->config.cfc_steps * propagation_steps);
+            if (gr_cfc_step_deep(emb, dim, tau, dt, reasoner->config.cfc_steps * propagation_steps) != 0) {
+                safe_free((void**)&all_stable_scores);
+                safe_free((void**)&lnn_state);
+                safe_free((void**)&lnn_buffer);
+                return -1;
+            }
             float dist = 0.0f;
             for (int d = 0; d < dim; d++) {
                 float diff = emb[d] - saved[d];

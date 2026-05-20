@@ -157,13 +157,38 @@ static int unified_input_dynamic_process(
         return -1;
     }
 
+    /* B-015: 验证输出缓冲区大小 */
+    if (!unified_output || max_output_size == 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "统一输入动态处理: 输出缓冲区无效");
+        return -1;
+    }
+
     memset(state->unified_input_buffer, 0, state->unified_buffer_size * sizeof(float));
 
     for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        /* B-015: 验证模态索引偏移不超出缓冲区 */
         size_t base = (size_t)m * SELFLNN_MAX_CONTROL_DIM;
+        if (base >= state->unified_buffer_size) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "统一输入动态处理: 模态偏移超出缓冲区");
+            return -1;
+        }
+
         if (modality_present[m] && signals[m]) {
             size_t copy = signal_sizes[m];
-            if (copy > SELFLNN_MAX_CONTROL_DIM) copy = SELFLNN_MAX_CONTROL_DIM;
+            /* B-015: 信号大小边界检查 —— 确保不超过单个模态槽位 */
+            if (copy > SELFLNN_MAX_CONTROL_DIM) {
+                copy = SELFLNN_MAX_CONTROL_DIM;
+            }
+            /* B-015: 防止信号大小为0但仍标记为存在的边缘情况 */
+            if (copy == 0) {
+                continue;
+            }
+            /* B-015: 二次验证拷贝不越界 */
+            if (base + copy > state->unified_buffer_size) {
+                copy = state->unified_buffer_size - base;
+            }
             for (size_t d = 0; d < copy; d++) {
                 state->unified_input_buffer[base + d] = signals[m][d];
             }
@@ -171,8 +196,12 @@ static int unified_input_dynamic_process(
     }
 
     size_t output_dim = max_output_size;
+    /* B-015: 输出维度上限检查 */
     if (output_dim > SELFLNN_MAX_CONTROL_DIM * 2) {
         output_dim = SELFLNN_MAX_CONTROL_DIM * 2;
+    }
+    if (output_dim > state->unified_buffer_size) {
+        output_dim = state->unified_buffer_size;
     }
 
     if (state->lnn_instance) {
@@ -310,8 +339,23 @@ int multimodal_unified_input_process(UnifiedInputState* state,
         if (unified_size) *unified_size = 0;
         return -1;
     }
+    /* B-015: 输出大小上限验证 */
     if (max_output_size > SELFLNN_MAX_CONTROL_DIM)
         max_output_size = SELFLNN_MAX_CONTROL_DIM;
+
+    /* B-015: 输入维度边界检查 —— 各模态信号尺寸上限均为SELFLNN_MAX_CONTROL_DIM */
+    #define BOUND_CHECK_SIZE(size_var) \
+        if (size_var > SELFLNN_MAX_CONTROL_DIM) { size_var = SELFLNN_MAX_CONTROL_DIM; }
+    BOUND_CHECK_SIZE(vision_size);
+    BOUND_CHECK_SIZE(audio_size);
+    BOUND_CHECK_SIZE(text_size);
+    BOUND_CHECK_SIZE(sensor_size);
+    BOUND_CHECK_SIZE(tactile_size);
+    BOUND_CHECK_SIZE(proprioception_size);
+    BOUND_CHECK_SIZE(thermal_size);
+    BOUND_CHECK_SIZE(radar_size);
+    BOUND_CHECK_SIZE(motor_size);
+    #undef BOUND_CHECK_SIZE
 
     const float* signals[SELFLNN_MAX_MODALITIES];
     size_t signal_sizes[SELFLNN_MAX_MODALITIES];

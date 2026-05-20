@@ -222,11 +222,19 @@ static int ws_parse_frame(const unsigned char* frame, size_t len,
     if (header + *payload_len + (masked ? 4 : 0) > len) return -1;
     unsigned char* raw_payload = (unsigned char*)frame + header + (masked ? 4 : 0);
     if (masked) {
+        /* B-012修复: 分配独立缓冲区进行XOR解掩码，避免修改原始帧缓冲区。
+         * 若直接在raw_payload上原位XOR，多帧处理时后续帧解析会被破坏。
+         * 调用方需在帧处理完成后释放*payload指向的内存。 */
+        unsigned char* unmasked = (unsigned char*)safe_malloc(*payload_len);
+        if (!unmasked) return -1;
         unsigned char mask[4];
-        memcpy(mask, frame + header - (masked ? 4 : 0), 4);
-        for (size_t i = 0; i < *payload_len; i++) raw_payload[i] ^= mask[i % 4];
+        memcpy(mask, frame + header - 4, 4);
+        memcpy(unmasked, raw_payload, *payload_len);
+        for (size_t i = 0; i < *payload_len; i++) unmasked[i] ^= mask[i % 4];
+        *payload = unmasked;
+    } else {
+        *payload = raw_payload;
     }
-    *payload = raw_payload;
     return 0;
 }
 
@@ -603,15 +611,40 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
             size_t remain = n;
             unsigned char* ptr = buf;
             while (remain > 0) {
+                /* B-012修复: 从原始帧头计算帧总大小，而非依赖payload指针（因payload可能指向堆内存） */
+                size_t header_size = 2;
+                uint8_t raw_plen = ptr[1] & 0x7F;
+                if (raw_plen == 126) header_size += 2;
+                else if (raw_plen == 127) header_size += 8;
+                int masked = (ptr[1] & 0x80) ? 1 : 0;
+                if (masked) header_size += 4;
+                /* 从帧头预计算payload长度以确定帧总大小 */
+                size_t raw_payload_len;
+                if (raw_plen <= 125) raw_payload_len = raw_plen;
+                else if (raw_plen == 126)
+                    raw_payload_len = ((size_t)ptr[2] << 8) | (size_t)ptr[3];
+                else {
+                    raw_payload_len = 0;
+                    for (int m = 0; m < 8; m++)
+                        raw_payload_len = (raw_payload_len << 8) | (size_t)ptr[2 + m];
+                }
+                size_t frame_size = header_size + raw_payload_len;
+                if (frame_size > remain) break;
+
                 uint8_t opcode;
                 unsigned char* payload;
                 size_t payload_len;
                 if (ws_parse_frame(ptr, remain, &opcode, &payload, &payload_len) != 0) break;
-                size_t frame_size = (size_t)(payload + payload_len - ptr);
                 if (frame_size > remain) break;
-                if (opcode == 0x08) { ws_client_close(cli); break; }
+                if (opcode == 0x08) {
+                    if (masked) safe_free((void**)&payload);
+                    ws_client_close(cli);
+                    break;
+                }
                 else if (opcode == 0x09) { ws_send_pong(cli->sock, payload, payload_len); }
                 else if (opcode == 0x0A) { }
+                /* B-012修复: 若帧是掩码帧，释放ws_parse_frame中分配的独立缓冲区 */
+                if (masked) safe_free((void**)&payload);
                 remain -= frame_size;
                 ptr += frame_size;
             }

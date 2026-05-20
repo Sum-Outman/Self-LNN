@@ -106,6 +106,128 @@ static void inertia_transform(const float* I_body, const float* R, float* I_worl
     mat3_mul(R, tmp, I_world);
 }
 
+/* ================================================================
+ * B-028: 四元数万向节锁检测与回退
+ * 1. 四元数结构体与基本运算
+ * 2. 轴角→四元数→旋转矩阵转换
+ * 3. 万向节锁检测 (|cosθ| < 1e-6)
+ * 4. 旋转矩阵↔欧拉角来回转换一致性验证
+ * ================================================================ */
+
+typedef struct {
+    float w, x, y, z;
+} Quat;
+
+static void quat_identity(Quat* q)
+{
+    q->w = 1.0f; q->x = 0.0f; q->y = 0.0f; q->z = 0.0f;
+}
+
+static Quat quat_from_axis_angle(const float axis[3], float angle)
+{
+    Quat q;
+    float half_a = angle * 0.5f;
+    float s = sinf(half_a);
+    float norm = sqrtf(axis[0]*axis[0] + axis[1]*axis[1] + axis[2]*axis[2]);
+    if (norm < 1e-12f) { quat_identity(&q); return q; }
+    float inv = 1.0f / norm;
+    q.w = cosf(half_a);
+    q.x = axis[0] * inv * s;
+    q.y = axis[1] * inv * s;
+    q.z = axis[2] * inv * s;
+    return q;
+}
+
+static Quat quat_mul(const Quat* a, const Quat* b)
+{
+    Quat r;
+    r.w = a->w * b->w - a->x * b->x - a->y * b->y - a->z * b->z;
+    r.x = a->w * b->x + a->x * b->w + a->y * b->z - a->z * b->y;
+    r.y = a->w * b->y - a->x * b->z + a->y * b->w + a->z * b->x;
+    r.z = a->w * b->z + a->x * b->y - a->y * b->x + a->z * b->w;
+    return r;
+}
+
+static Quat quat_normalize_quat(const Quat* q)
+{
+    Quat r;
+    float norm = sqrtf(q->w*q->w + q->x*q->x + q->y*q->y + q->z*q->z);
+    if (norm < 1e-12f) { quat_identity(&r); return r; }
+    float inv = 1.0f / norm;
+    r.w = q->w * inv; r.x = q->x * inv; r.y = q->y * inv; r.z = q->z * inv;
+    return r;
+}
+
+static void quat_to_mat3(const Quat* q, float* m)
+{
+    float xx = q->x * q->x, yy = q->y * q->y, zz = q->z * q->z;
+    float xy = q->x * q->y, xz = q->x * q->z, yz = q->y * q->z;
+    float wx = q->w * q->x, wy = q->w * q->y, wz = q->w * q->z;
+    m[0] = 1.0f - 2.0f * (yy + zz);
+    m[1] = 2.0f * (xy - wz);
+    m[2] = 2.0f * (xz + wy);
+    m[3] = 2.0f * (xy + wz);
+    m[4] = 1.0f - 2.0f * (xx + zz);
+    m[5] = 2.0f * (yz - wx);
+    m[6] = 2.0f * (xz - wy);
+    m[7] = 2.0f * (yz + wx);
+    m[8] = 1.0f - 2.0f * (xx + yy);
+}
+
+/* 检测万向节锁条件: |cos(绕X轴旋转角)| < 阈值 */
+static int dynamics_detect_gimbal_lock(const float* R, float threshold)
+{
+    float R11 = R[0], R21 = R[3], R31 = R[6];
+    float R32 = R[7], R33 = R[8];
+    float cos_theta_y = sqrtf(R11*R11 + R21*R21);
+    float cos_theta_x = sqrtf(R32*R32 + R33*R33);
+    if (cos_theta_y < threshold || cos_theta_x < threshold) return 1;
+    return 0;
+}
+
+/* 旋转矩阵→欧拉角提取 (ZYX顺序: 偏航-俯仰-翻滚) */
+static void mat3_to_euler_zyx(const float* R, float* yaw, float* pitch, float* roll)
+{
+    float sy = -R[2];
+    if (sy > 1.0f) sy = 1.0f;
+    if (sy < -1.0f) sy = -1.0f;
+    *pitch = asinf(sy);
+    float cos_pitch = cosf(*pitch);
+    if (fabsf(cos_pitch) > 1e-6f) {
+        *yaw = atan2f(R[5], R[8]);
+        *roll = atan2f(R[1], R[0]);
+    } else {
+        *yaw = atan2f(-R[7], R[4]);
+        *roll = 0.0f;
+    }
+}
+
+/* 欧拉角→旋转矩阵 (ZYX顺序) */
+static void euler_zyx_to_mat3(float yaw, float pitch, float roll, float* R)
+{
+    float cy = cosf(yaw), sy = sinf(yaw);
+    float cp = cosf(pitch), sp = sinf(pitch);
+    float cr = cosf(roll), sr = sinf(roll);
+    R[0] = cy * cp;  R[1] = cy * sp * sr - sy * cr;  R[2] = cy * sp * cr + sy * sr;
+    R[3] = sy * cp;  R[4] = sy * sp * sr + cy * cr;  R[5] = sy * sp * cr - cy * sr;
+    R[6] = -sp;      R[7] = cp * sr;                  R[8] = cp * cr;
+}
+
+/* 验证旋转矩阵→欧拉角→旋转矩阵来回转换一致性 */
+static int dynamics_verify_roundtrip(const float* R_orig, float tolerance)
+{
+    float yaw, pitch, roll;
+    float R_test[9];
+    mat3_to_euler_zyx(R_orig, &yaw, &pitch, &roll);
+    euler_zyx_to_mat3(yaw, pitch, roll, R_test);
+    float max_diff = 0.0f;
+    for (int k = 0; k < 9; k++) {
+        float diff = fabsf(R_orig[k] - R_test[k]);
+        if (diff > max_diff) max_diff = diff;
+    }
+    return (max_diff < tolerance) ? 1 : 0;
+}
+
 static void build_rotation_z(float theta, float* m)
 {
     float c = (float)cos(theta);
@@ -113,6 +235,14 @@ static void build_rotation_z(float theta, float* m)
     mat3_identity(m);
     m[0] = c; m[1] = -s;
     m[3] = s; m[4] = c;
+}
+
+/* 绕任意轴旋转 — 使用四元数，天然避免万向节锁 */
+static void build_rotation_axis_angle(const float axis[3], float angle, float* m)
+{
+    Quat q = quat_from_axis_angle(axis, angle);
+    q = quat_normalize_quat(&q);
+    quat_to_mat3(&q, m);
 }
 
 DynamicsConfig dynamics_config_default(void)
@@ -206,22 +336,54 @@ static int compute_relative_transform(const DynamicsModel* model, int joint_idx,
     axis[2] = model->config.joint_axes[joint_idx * 3 + 2];
     if (model->config.joint_types[joint_idx] == JOINT_TYPE_REVOLUTE ||
         model->config.joint_types[joint_idx] == JOINT_TYPE_CONTINUOUS) {
+        /* B-028: 万向节锁检测 — 当旋转角度接近±90°时(|cosθ|<1e-6)
+         * 欧拉角旋转矩阵退化，使用四元数替代方案 */
         float Rz[9];
-        build_rotation_z(q, Rz);
+        float cos_q = cosf(q);
+        int gimbal_locked = (fabsf(cos_q) < 1e-6f) ? 1 : 0;
+
         mat3_identity(R);
-        {
-            float nx = DYNAMICS_ABS(axis[0]), ny = DYNAMICS_ABS(axis[1]), nz = DYNAMICS_ABS(axis[2]);
-            if (nz > nx && nz > ny) {
-                int k;
-                for (k = 0; k < 9; k++) R[k] = Rz[k];
-            } else if (nx > ny && nx > nz) {
-                R[0] = Rz[0]; R[1] = Rz[3]; R[2] = Rz[6];
-                R[3] = Rz[1]; R[4] = Rz[4]; R[5] = Rz[7];
-                R[6] = Rz[2]; R[7] = Rz[5]; R[8] = Rz[8];
-            } else {
-                R[0] = Rz[0]; R[1] = Rz[1]; R[2] = Rz[2];
-                R[3] = Rz[3]; R[4] = Rz[4]; R[5] = Rz[5];
-                R[6] = Rz[6]; R[7] = Rz[7]; R[8] = Rz[8];
+        if (gimbal_locked) {
+            /* 万向节锁情况下直接使用轴角→四元数→旋转矩阵
+             * 绕关节轴axis旋转角度q，避免欧拉角奇异 */
+            build_rotation_axis_angle(axis, q, R);
+            /* 验证来回转换一致性 */
+            if (!dynamics_verify_roundtrip(R, 1e-4f)) {
+                /* 一致性验证失败，回退到原始方法 */
+                build_rotation_z(q, Rz);
+                {
+                    float nx = DYNAMICS_ABS(axis[0]), ny = DYNAMICS_ABS(axis[1]), nz = DYNAMICS_ABS(axis[2]);
+                    if (nz > nx && nz > ny) {
+                        int k;
+                        for (k = 0; k < 9; k++) R[k] = Rz[k];
+                    } else if (nx > ny && nx > nz) {
+                        R[0] = Rz[0]; R[1] = Rz[3]; R[2] = Rz[6];
+                        R[3] = Rz[1]; R[4] = Rz[4]; R[5] = Rz[7];
+                        R[6] = Rz[2]; R[7] = Rz[5]; R[8] = Rz[8];
+                    } else {
+                        R[0] = Rz[0]; R[1] = Rz[1]; R[2] = Rz[2];
+                        R[3] = Rz[3]; R[4] = Rz[4]; R[5] = Rz[5];
+                        R[6] = Rz[6]; R[7] = Rz[7]; R[8] = Rz[8];
+                    }
+                }
+            }
+        } else {
+            /* 正常情况: 使用绕Z轴旋转 + 轴排列映射 */
+            build_rotation_z(q, Rz);
+            {
+                float nx = DYNAMICS_ABS(axis[0]), ny = DYNAMICS_ABS(axis[1]), nz = DYNAMICS_ABS(axis[2]);
+                if (nz > nx && nz > ny) {
+                    int k;
+                    for (k = 0; k < 9; k++) R[k] = Rz[k];
+                } else if (nx > ny && nx > nz) {
+                    R[0] = Rz[0]; R[1] = Rz[3]; R[2] = Rz[6];
+                    R[3] = Rz[1]; R[4] = Rz[4]; R[5] = Rz[7];
+                    R[6] = Rz[2]; R[7] = Rz[5]; R[8] = Rz[8];
+                } else {
+                    R[0] = Rz[0]; R[1] = Rz[1]; R[2] = Rz[2];
+                    R[3] = Rz[3]; R[4] = Rz[4]; R[5] = Rz[5];
+                    R[6] = Rz[6]; R[7] = Rz[7]; R[8] = Rz[8];
+                }
             }
         }
         dvec3_zero(p);

@@ -236,23 +236,35 @@ Individual* individual_crossover(const Individual* parent1, const Individual* pa
         return NULL;
     }
     
-    // 使用交叉率参数（目前未使用，但保留接口）
-    (void)crossover_rate;
-    
+    /* V-011: 根据crossover_rate选择多策略交叉 */
     Individual* child = individual_create(parent1->genome_size, parent1->auxiliary_size);
-    if (!child) {
-        return NULL;
-    }
-    
-    // 单点交叉
-    size_t crossover_point = (size_t)(uniform_random() * parent1->genome_size);
-    
-    for (size_t i = 0; i < parent1->genome_size; i++) {
-        if (i < crossover_point) {
-            child->genome[i] = parent1->genome[i];
-        } else {
-            child->genome[i] = parent2->genome[i];
+    if (!child) return NULL;
+
+    size_t n = parent1->genome_size;
+
+    if (crossover_rate >= 0.8f) {
+        /* BLX-α 混合交叉 */
+        float alpha = 0.5f;
+        for (size_t i = 0; i < n; i++) {
+            float diff = parent2->genome[i] - parent1->genome[i];
+            child->genome[i] = parent1->genome[i] + alpha * diff * uniform_random();
         }
+    } else if (crossover_rate >= 0.5f) {
+        /* 两点交叉 */
+        size_t p1 = (size_t)(uniform_random() * n);
+        size_t p2 = (size_t)(uniform_random() * n);
+        if (p1 > p2) { size_t t = p1; p1 = p2; p2 = t; }
+        for (size_t i = 0; i < n; i++)
+            child->genome[i] = (i >= p1 && i <= p2) ? parent2->genome[i] : parent1->genome[i];
+    } else if (crossover_rate >= 0.2f) {
+        /* 均匀交叉 */
+        for (size_t i = 0; i < n; i++)
+            child->genome[i] = (uniform_random() < crossover_rate) ? parent2->genome[i] : parent1->genome[i];
+    } else {
+        /* 单点交叉 */
+        size_t cx = (size_t)(uniform_random() * n);
+        for (size_t i = 0; i < n; i++)
+            child->genome[i] = (i < cx) ? parent1->genome[i] : parent2->genome[i];
     }
     
     // 初始化子代辅助数据

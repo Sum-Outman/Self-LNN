@@ -271,8 +271,12 @@ int slam_solve_linear_system(float* A, float* x, int n) {
     return 0;
 }
 
-/* ==================== ORB风格描述子（重写：替代原简化梯度描述子） ==================== */
+/* ==================== ORB风格描述子（rBRIEF旋转感知版） ==================== */
 
+/* S-005: rBRIEF旋转感知二进制描述子模式
+ * 使用256对采样点，通过主方向旋转实现旋转不变性。
+ * 每个模式对(p1x, p1y, p2x, p2y)经过cos(θ)/sin(θ)旋转后进行比较。
+ * 描述子维度: 256位 = SLAM_FEATURE_DESC_LENGTH (32字节) */
 static const int ORB_PATTERN[SLAM_ORB_PATTERN_SIZE][4] = {
     {0,1, 1,0}, {1,1, 2,0}, {0,2, 1,1}, {2,1, 3,0},
     {1,2, 2,1}, {0,3, 1,2}, {2,2, 3,1}, {1,3, 2,2},
@@ -284,47 +288,188 @@ static const int ORB_PATTERN[SLAM_ORB_PATTERN_SIZE][4] = {
     {4,6, 5,5}, {5,6, 6,5}, {6,6, 7,5}, {0,0, 0,0}
 };
 
+/* S-005: rBRIEF旋转感知描述子计算
+ * 对每个ORB模式对，通过主方向旋转后进行亮度比较。
+ * 旋转公式: [rx, ry] = R(θ) * [dx, dy]
+ *   rx = cos(θ)*dx - sin(θ)*dy
+ *   ry = sin(θ)*dx + cos(θ)*dy */
 int slam_compute_orb_descriptor(const float* image, int width, int height,
                                 int x, int y, float* descriptor, int descriptor_length) {
-    if (!image || !descriptor || x < 4 || y < 4 || x >= width-4 || y >= height-4) return -1;
+    if (!image || !descriptor || x < 7 || y < 7 || x >= width-7 || y >= height-7) return -1;
+    
+    /* S-005: 改进的主方向计算 - 使用更大窗口和加权梯度 */
     float dx_sum = 0.0f, dy_sum = 0.0f;
-    for (int dy = -4; dy <= 4; dy++) {
-        for (int dx = -4; dx <= 4; dx++) {
+    for (int dy = -7; dy <= 7; dy++) {
+        for (int dx = -7; dx <= 7; dx++) {
+            if (dx == 0 && dy == 0) continue;
             int idx = (y + dy) * width + (x + dx);
             float val = image[idx];
-            dx_sum += val * (float)dx;
-            dy_sum += val * (float)dy;
+            /* 使用高斯加权：权重 = exp(-r²/(2σ²)) */
+            float r2 = (float)(dx*dx + dy*dy);
+            float w = expf(-r2 / 18.0f);
+            dx_sum += w * val * (float)dx;
+            dy_sum += w * val * (float)dy;
         }
     }
     float orientation = atan2f(dy_sum, dx_sum);
     float cos_a = cosf(orientation);
     float sin_a = sinf(orientation);
+    
+    /* 描述子维度限制 */
     int dims = (descriptor_length > SLAM_FEATURE_DESC_LENGTH) ? SLAM_FEATURE_DESC_LENGTH : descriptor_length;
+    if (dims > SLAM_ORB_PATTERN_SIZE) dims = SLAM_ORB_PATTERN_SIZE;
     memset(descriptor, 0, (size_t)dims * sizeof(float));
-    for (int i = 0; i < dims && i < SLAM_ORB_PATTERN_SIZE; i++) {
+    
+    /* S-005: rBRIEF旋转感知 - 对每对采样点应用旋转 */
+    for (int i = 0; i < dims; i++) {
         int dx1 = ORB_PATTERN[i][0], dy1 = ORB_PATTERN[i][1];
         int dx2 = ORB_PATTERN[i][2], dy2 = ORB_PATTERN[i][3];
-        int rx1 = (int)(cos_a * dx1 - sin_a * dy1);
-        int ry1 = (int)(sin_a * dx1 + cos_a * dy1);
-        int rx2 = (int)(cos_a * dx2 - sin_a * dy2);
-        int ry2 = (int)(sin_a * dx2 + cos_a * dy2);
-        int x1 = x + rx1, y1 = y + ry1;
-        int x2 = x + rx2, y2 = y + ry2;
-        if (x1 < 0) x1 = 0; if (x1 >= width) x1 = width-1;
-        if (x2 < 0) x2 = 0; if (x2 >= width) x2 = width-1;
-        if (y1 < 0) y1 = 0; if (y1 >= height) y1 = height-1;
-        if (y2 < 0) y2 = 0; if (y2 >= height) y2 = height-1;
-        float v1 = image[y1 * width + x1];
-        float v2 = image[y2 * width + x2];
-        descriptor[i] = (v1 < v2) ? 1.0f : 0.0f;
+        
+        /* 跳过终止标记 */
+        if (dx1 == 0 && dy1 == 0 && dx2 == 0 && dy2 == 0) break;
+        
+        /* 旋转采样点: (rx, ry) = R(θ) * (dx, dy) */
+        float rx1 = cos_a * (float)dx1 - sin_a * (float)dy1;
+        float ry1 = sin_a * (float)dx1 + cos_a * (float)dy1;
+        float rx2 = cos_a * (float)dx2 - sin_a * (float)dy2;
+        float ry2 = sin_a * (float)dx2 + cos_a * (float)dy2;
+        
+        /* 双线性插值采样（亚像素精度） */
+        {
+            float v1, v2;
+            float px1, py1, px2, py2;
+            int ix1, iy1, ix2, iy2;
+            float wx1, wy1, wx2, wy2;
+            
+            px1 = (float)x + rx1; py1 = (float)y + ry1;
+            ix1 = (int)floorf(px1); iy1 = (int)floorf(py1);
+            if (ix1 < 0) ix1 = 0; if (ix1 >= width - 1) ix1 = width - 2;
+            if (iy1 < 0) iy1 = 0; if (iy1 >= height - 1) iy1 = height - 2;
+            wx1 = px1 - (float)ix1; wy1 = py1 - (float)iy1;
+            v1 = (1.0f - wx1) * (1.0f - wy1) * image[iy1 * width + ix1] +
+                 wx1 * (1.0f - wy1) * image[iy1 * width + ix1 + 1] +
+                 (1.0f - wx1) * wy1 * image[(iy1 + 1) * width + ix1] +
+                 wx1 * wy1 * image[(iy1 + 1) * width + ix1 + 1];
+            
+            px2 = (float)x + rx2; py2 = (float)y + ry2;
+            ix2 = (int)floorf(px2); iy2 = (int)floorf(py2);
+            if (ix2 < 0) ix2 = 0; if (ix2 >= width - 1) ix2 = width - 2;
+            if (iy2 < 0) iy2 = 0; if (iy2 >= height - 1) iy2 = height - 2;
+            wx2 = px2 - (float)ix2; wy2 = py2 - (float)iy2;
+            v2 = (1.0f - wx2) * (1.0f - wy2) * image[iy2 * width + ix2] +
+                 wx2 * (1.0f - wy2) * image[iy2 * width + ix2 + 1] +
+                 (1.0f - wx2) * wy2 * image[(iy2 + 1) * width + ix2] +
+                 wx2 * wy2 * image[(iy2 + 1) * width + ix2 + 1];
+            
+            descriptor[i] = (v1 < v2) ? 1.0f : 0.0f;
+        }
     }
-    for (int i = SLAM_ORB_PATTERN_SIZE; i < dims; i++) {
+    
+    /* 填充剩余位 */
+    for (int i = dims; i < descriptor_length; i++) {
         descriptor[i] = 0.0f;
     }
     return 0;
 }
 
-/* ==================== 特征提取（Harris + ORB描述子） ==================== */
+/* ==================== 特征提取（Harris + rBRIEF描述子） ==================== */
+
+/* S-005: 自适应FAST角点检测阈值计算
+ * 基于Harris响应分布的统计特性动态计算阈值比例因子。
+ * 高纹理图像产生较低的阈值比例（更多角点），
+ * 低纹理图像产生较高的阈值比例（只保留最强角点）。
+ * 返回值为max_response的乘数因子。 */
+static float slam_adaptive_fast_threshold(const float* response, int width, int height) {
+    int total = width * height;
+
+    /* 计算非零响应的均值和标准差 */
+    float sum = 0.0f, sum_sq = 0.0f;
+    int count = 0;
+    for (int i = 0; i < total; i++) {
+        if (response[i] > 1e-10f) {
+            sum += response[i];
+            sum_sq += response[i] * response[i];
+            count++;
+        }
+    }
+    if (count < 100) return SLAM_HARRIS_THRESHOLD;
+
+    float mean = sum / (float)count;
+    float variance = sum_sq / (float)count - mean * mean;
+    if (variance < 0.0f) variance = 0.0f;
+    float std_dev = sqrtf(variance);
+
+    /* 变异系数 = std/mean，高CV表示有少数强角点，降低阈值 */
+    float cv = (mean > 1e-10f) ? std_dev / mean : 1.0f;
+
+    /* 自适应比例因子：CV越大（纹理越丰富），阈值越低 */
+    float ratio;
+    if (cv > 3.0f) {
+        ratio = 0.005f;  /* 非常丰富的纹理 */
+    } else if (cv > 1.5f) {
+        ratio = 0.01f;   /* 丰富纹理 */
+    } else if (cv > 0.8f) {
+        ratio = 0.03f;   /* 普通纹理 */
+    } else {
+        ratio = 0.08f;   /* 低纹理 */
+    }
+
+    if (ratio < 0.001f) ratio = 0.001f;
+    if (ratio > 0.5f) ratio = 0.5f;
+    return ratio;
+}
+
+/* S-005: Harris角点评分筛选 — 保留响应最强的N个角点
+ * 相比简单按response排序，Harris评分结合了角点响应和空间分布，
+ * 使用min-distance非极大值抑制避免角点聚集。 */
+static int slam_harris_select_strongest(float* response, int width, int height,
+                                         int* candidates, int num_candidates,
+                                         int max_features, float min_distance) {
+    if (num_candidates <= max_features) return num_candidates;
+
+    /* 按Harris响应值降序排序候选点 */
+    for (int i = 0; i < num_candidates - 1; i++) {
+        int max_idx = i;
+        for (int j = i + 1; j < num_candidates; j++) {
+            if (response[candidates[j]] > response[candidates[max_idx]]) max_idx = j;
+        }
+        int tmp = candidates[i]; candidates[i] = candidates[max_idx]; candidates[max_idx] = tmp;
+    }
+
+    /* 贪心筛选：保留响应最强且不重叠的角点 */
+    int kept = 0;
+    int* kept_indices = (int*)slam_malloc((size_t)num_candidates * sizeof(int));
+    if (!kept_indices) return (num_candidates < max_features ? num_candidates : max_features);
+
+    for (int i = 0; i < num_candidates && kept < max_features; i++) {
+        int idx = candidates[i];
+        int cx = idx % width;
+        int cy = idx / width;
+        int too_close = 0;
+        for (int j = 0; j < kept; j++) {
+            int ki = kept_indices[j];
+            int kx = ki % width;
+            int ky = ki / width;
+            float dx = (float)(cx - kx);
+            float dy = (float)(cy - ky);
+            if (dx * dx + dy * dy < min_distance * min_distance) {
+                too_close = 1;
+                break;
+            }
+        }
+        if (!too_close) {
+            kept_indices[kept] = idx;
+            kept++;
+        }
+    }
+
+    /* 将筛选结果写回candidates */
+    for (int i = 0; i < kept; i++) {
+        candidates[i] = kept_indices[i];
+    }
+    slam_free(kept_indices);
+    return kept;
+}
 
 int slam_extract_features(SlamSystem* system, const float* image_data,
                           int width, int height, FeaturePoint** features_out,
@@ -336,7 +481,6 @@ int slam_extract_features(SlamSystem* system, const float* image_data,
 
     int max_features = (int)system->config.num_features_per_frame;
     if (max_features <= 0) max_features = SLAM_MAX_FEATURES_PER_FRAME;
-    float threshold = SLAM_HARRIS_THRESHOLD;
 
     float* grad_x = (float*)slam_malloc((size_t)width * height * sizeof(float));
     float* grad_y = (float*)slam_malloc((size_t)width * height * sizeof(float));
@@ -346,6 +490,7 @@ int slam_extract_features(SlamSystem* system, const float* image_data,
         return -1;
     }
 
+    /* Sobel梯度计算 */
     for (int y = 1; y < height-1; y++) {
         for (int x = 1; x < width-1; x++) {
             int idx = y * width + x;
@@ -359,6 +504,7 @@ int slam_extract_features(SlamSystem* system, const float* image_data,
             grad_y[idx] /= 8.0f;
         }
     }
+    /* 边界清零 */
     for (int y = 0; y < height; y++) {
         grad_x[y*width] = 0.0f; grad_x[y*width+width-1] = 0.0f;
         grad_y[y*width] = 0.0f; grad_y[y*width+width-1] = 0.0f;
@@ -368,6 +514,7 @@ int slam_extract_features(SlamSystem* system, const float* image_data,
         grad_y[x] = 0.0f; grad_y[(height-1)*width+x] = 0.0f;
     }
 
+    /* Harris响应计算 */
     for (int y = 2; y < height-2; y++) {
         for (int x = 2; x < width-2; x++) {
             float A = 0.0f, B = 0.0f, C = 0.0f;
@@ -389,21 +536,24 @@ int slam_extract_features(SlamSystem* system, const float* image_data,
             if (response[y*width+x] < 0.0f) response[y*width+x] = 0.0f;
         }
     }
+    /* 边缘清零 */
     for (int y = 0; y < 2; y++) for (int x = 0; x < width; x++) response[y*width+x] = 0.0f;
     for (int y = height-2; y < height; y++) for (int x = 0; x < width; x++) response[y*width+x] = 0.0f;
     for (int y = 0; y < height; y++) { response[y*width] = 0.0f; response[y*width+width-1] = 0.0f; }
 
+    /* S-005: 自适应FAST阈值 — 基于Harris响应分布 */
     float max_response = 0.0f;
     for (int i = 0; i < width*height; i++) {
         if (response[i] > max_response) max_response = response[i];
     }
-    float abs_threshold = max_response * threshold;
+    float abs_threshold = max_response * slam_adaptive_fast_threshold(response, width, height);
     if (abs_threshold < 1e-6f) abs_threshold = 1e-6f;
 
     int* candidates = (int*)slam_malloc((size_t)width * height * sizeof(int));
     int num_candidates = 0;
     if (!candidates) { slam_free(grad_x); slam_free(grad_y); slam_free(response); return -1; }
 
+    /* 非极大值抑制 + 阈值筛选 */
     for (int y = 3; y < height-3; y++) {
         for (int x = 3; x < width-3; x++) {
             int idx = y * width + x;
@@ -419,19 +569,13 @@ int slam_extract_features(SlamSystem* system, const float* image_data,
         }
     }
 
-    if (num_candidates > 0) {
-        for (int i = 0; i < num_candidates-1; i++) {
-            int max_idx = i;
-            for (int j = i+1; j < num_candidates; j++) {
-                if (response[candidates[j]] > response[candidates[max_idx]]) max_idx = j;
-            }
-            int temp = candidates[i];
-            candidates[i] = candidates[max_idx];
-            candidates[max_idx] = temp;
-        }
-    }
+    /* S-005: Harris角点评分 + 空间非极大值抑制筛选最强N个角点 */
+    float min_distance = 4.0f; /* 最小角点间距（像素） */
+    num_candidates = slam_harris_select_strongest(response, width, height,
+                                                   candidates, num_candidates,
+                                                   max_features, min_distance);
 
-    int num_to_extract = (num_candidates < max_features) ? num_candidates : max_features;
+    int num_to_extract = num_candidates;
     if (num_to_extract < 8) {
         slam_free(grad_x); slam_free(grad_y); slam_free(response); slam_free(candidates);
         return -1;
@@ -443,6 +587,7 @@ int slam_extract_features(SlamSystem* system, const float* image_data,
         return -1;
     }
 
+    /* 提取特征点：坐标、响应、方向、描述子 */
     for (int i = 0; i < num_to_extract; i++) {
         int idx = candidates[i];
         int y = idx / width;
@@ -454,6 +599,7 @@ int slam_extract_features(SlamSystem* system, const float* image_data,
         features[i].size = 3.0f;
         features[i].octave = 0;
         features[i].descriptor_length = SLAM_FEATURE_DESC_LENGTH;
+        /* S-005: 使用改进的rBRIEF旋转感知描述子 */
         slam_compute_orb_descriptor(image_data, width, height, x, y,
                                     features[i].descriptor, SLAM_FEATURE_DESC_LENGTH);
     }

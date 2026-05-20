@@ -1756,6 +1756,1097 @@ float knowledge_graph_clustering_coefficient(KnowledgeGraph* graph) {
 }
 
 /* ============================================================================
+ * 高级图分析算法（R-017）
+ *
+ * PageRank、介数中心度（Brandes）、紧密度中心度、
+ * Louvain社区检测、图直径、平均度等
+ * =========================================================================== */
+
+/* ============================================================================
+ * 辅助函数：构建节点出度/入度数组
+ * =========================================================================== */
+
+/**
+ * @brief 计算每个节点的出度（基于有向边source->target）
+ *
+ * @param graph 知识图谱句柄
+ * @param out_degree 出度输出数组[node_count]
+ */
+static void compute_out_degrees(KnowledgeGraph* graph, size_t* out_degree) {
+    memset(out_degree, 0, graph->node_count * sizeof(size_t));
+    for (size_t i = 0; i < graph->node_count; i++) {
+        GraphNode* node = graph->nodes[i];
+        if (!node) continue;
+        for (size_t j = 0; j < node->edge_count; j++) {
+            GraphEdge* edge = node->edges[j];
+            if (edge && edge->source == node) {
+                out_degree[i]++;
+            }
+        }
+    }
+}
+
+/**
+ * @brief 构建入度邻接表：对于每个目标节点，收集所有指向它的源节点索引
+ *
+ * 返回的入度表是一个 size_t** 数组，inbound[i] 是以 i 为target的源节点索引列表，
+ * inbound_counts[i] 是列表长度。调用者负责释放 inbound 数组及其每个子数组。
+ *
+ * @param graph 知识图谱句柄
+ * @param inbound 入度邻接表输出
+ * @param inbound_counts 入度计数输出
+ * @return int 成功返回0，失败返回-1
+ */
+static int build_inbound_adjacency(KnowledgeGraph* graph,
+                                    size_t*** inbound,
+                                    size_t** inbound_counts) {
+    size_t n = graph->node_count;
+    size_t* in_counts = (size_t*)safe_calloc(n, sizeof(size_t));
+    size_t** in_adj = (size_t**)safe_calloc(n, sizeof(size_t*));
+    if (!in_counts || !in_adj) {
+        safe_free((void**)&in_counts);
+        safe_free((void**)&in_adj);
+        return -1;
+    }
+
+    /* 第一遍：计算每个节点的入度 */
+    for (size_t i = 0; i < n; i++) {
+        GraphNode* node = graph->nodes[i];
+        if (!node) continue;
+        for (size_t j = 0; j < node->edge_count; j++) {
+            GraphEdge* edge = node->edges[j];
+            if (!edge) continue;
+            if (edge->source == node) {
+                /* 有向边 i -> target */
+                GraphNode* target = edge->target;
+                /* 查找目标节点索引 */
+                for (size_t k = 0; k < n; k++) {
+                    if (graph->nodes[k] == target) {
+                        in_counts[k]++;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /* 第二遍：分配内存 */
+    for (size_t i = 0; i < n; i++) {
+        if (in_counts[i] > 0) {
+            in_adj[i] = (size_t*)safe_malloc(in_counts[i] * sizeof(size_t));
+            if (!in_adj[i]) {
+                /* 清理已分配的内存 */
+                for (size_t k = 0; k < i; k++) {
+                    safe_free((void**)&in_adj[k]);
+                }
+                safe_free((void**)&in_adj);
+                safe_free((void**)&in_counts);
+                return -1;
+            }
+        }
+    }
+
+    /* 第三遍：填充入度表 */
+    size_t* fill_pos = (size_t*)safe_calloc(n, sizeof(size_t));
+    if (!fill_pos) {
+        for (size_t k = 0; k < n; k++) safe_free((void**)&in_adj[k]);
+        safe_free((void**)&in_adj);
+        safe_free((void**)&in_counts);
+        return -1;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        GraphNode* node = graph->nodes[i];
+        if (!node) continue;
+        for (size_t j = 0; j < node->edge_count; j++) {
+            GraphEdge* edge = node->edges[j];
+            if (!edge) continue;
+            if (edge->source == node) {
+                GraphNode* target = edge->target;
+                for (size_t k = 0; k < n; k++) {
+                    if (graph->nodes[k] == target) {
+                        in_adj[k][fill_pos[k]++] = i;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    safe_free((void**)&fill_pos);
+    *inbound = in_adj;
+    *inbound_counts = in_counts;
+    return 0;
+}
+
+/**
+ * @brief 构建无向邻接表（将每条边视为双向）
+ *
+ * 返回邻接表 undir_adj[i] 是与节点i相邻的所有节点索引列表，
+ * undir_counts[i] 是邻居数。调用者负责释放。
+ *
+ * @param graph 知识图谱句柄
+ * @param undir_adj 无向邻接表输出
+ * @param undir_counts 邻居计数输出
+ * @return int 成功返回0，失败返回-1
+ */
+static int build_undirected_adjacency(KnowledgeGraph* graph,
+                                       size_t*** undir_adj,
+                                       size_t** undir_counts) {
+    size_t n = graph->node_count;
+    size_t* counts = (size_t*)safe_calloc(n, sizeof(size_t));
+    size_t** adj = (size_t**)safe_calloc(n, sizeof(size_t*));
+    if (!counts || !adj) {
+        safe_free((void**)&counts);
+        safe_free((void**)&adj);
+        return -1;
+    }
+
+    /* 第一遍：计算邻居数（去重） */
+    for (size_t i = 0; i < n; i++) {
+        GraphNode* node = graph->nodes[i];
+        if (!node) continue;
+        /* 使用临时集合去重邻居 */
+        int* seen = (int*)safe_calloc(n, sizeof(int));
+        if (!seen) {
+            safe_free((void**)&counts);
+            safe_free((void**)&adj);
+            return -1;
+        }
+        for (size_t j = 0; j < node->edge_count; j++) {
+            GraphEdge* edge = node->edges[j];
+            if (!edge) continue;
+            GraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
+            for (size_t k = 0; k < n; k++) {
+                if (graph->nodes[k] == neighbor) {
+                    if (!seen[k]) {
+                        seen[k] = 1;
+                        counts[i]++;
+                    }
+                    break;
+                }
+            }
+        }
+        safe_free((void**)&seen);
+    }
+
+    /* 第二遍：分配内存 */
+    for (size_t i = 0; i < n; i++) {
+        if (counts[i] > 0) {
+            adj[i] = (size_t*)safe_malloc(counts[i] * sizeof(size_t));
+            if (!adj[i]) {
+                for (size_t k = 0; k < i; k++) safe_free((void**)&adj[k]);
+                safe_free((void**)&adj);
+                safe_free((void**)&counts);
+                return -1;
+            }
+        }
+    }
+
+    /* 第三遍：填充邻接表 */
+    size_t* fill_pos = (size_t*)safe_calloc(n, sizeof(size_t));
+    if (!fill_pos) {
+        for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+        safe_free((void**)&adj);
+        safe_free((void**)&counts);
+        return -1;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        GraphNode* node = graph->nodes[i];
+        if (!node) continue;
+        int* seen = (int*)safe_calloc(n, sizeof(int));
+        if (!seen) {
+            for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+            safe_free((void**)&adj);
+            safe_free((void**)&counts);
+            safe_free((void**)&fill_pos);
+            return -1;
+        }
+        for (size_t j = 0; j < node->edge_count; j++) {
+            GraphEdge* edge = node->edges[j];
+            if (!edge) continue;
+            GraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
+            for (size_t k = 0; k < n; k++) {
+                if (graph->nodes[k] == neighbor) {
+                    if (!seen[k]) {
+                        seen[k] = 1;
+                        adj[i][fill_pos[i]++] = k;
+                    }
+                    break;
+                }
+            }
+        }
+        safe_free((void**)&seen);
+    }
+
+    safe_free((void**)&fill_pos);
+    *undir_adj = adj;
+    *undir_counts = counts;
+    return 0;
+}
+
+/* ============================================================================
+ * PageRank 算法
+ *
+ * 标准迭代PageRank: PR(A) = (1-d)/N + d * sum(PR(T_i)/C(T_i))
+ * d = 0.85 (阻尼因子)
+ * 收敛条件: tol = 1e-6, max_iter = 100
+ * ============================================================================ */
+
+int knowledge_graph_pagerank(KnowledgeGraph* graph, float* scores, size_t score_count) {
+    if (!graph || !scores) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "PageRank：参数无效");
+        return -1;
+    }
+
+    size_t n = graph->node_count;
+    if (n == 0) return 0;
+    if (score_count < n) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "PageRank：分数数组太小");
+        return -1;
+    }
+
+    const float d = 0.85f;
+    const float tol = 1e-6f;
+    const int max_iter = 100;
+    const float teleport = (1.0f - d) / (float)n;
+
+    /* 构建出度数组 */
+    size_t* out_degree = (size_t*)safe_calloc(n, sizeof(size_t));
+    if (!out_degree) return -1;
+
+    compute_out_degrees(graph, out_degree);
+
+    /* 构建入度邻接表 */
+    size_t** inbound = NULL;
+    size_t* inbound_counts = NULL;
+    if (build_inbound_adjacency(graph, &inbound, &inbound_counts) != 0) {
+        safe_free((void**)&out_degree);
+        return -1;
+    }
+
+    /* 初始化PageRank值 */
+    float* old_scores = (float*)safe_malloc(n * sizeof(float));
+    if (!old_scores) {
+        safe_free((void**)&out_degree);
+        for (size_t k = 0; k < n; k++) safe_free((void**)&inbound[k]);
+        safe_free((void**)&inbound);
+        safe_free((void**)&inbound_counts);
+        return -1;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        scores[i] = 1.0f / (float)n;
+    }
+
+    /* 迭代PageRank */
+    for (int iter = 0; iter < max_iter; iter++) {
+        /* 计算悬挂节点的总PageRank（出度为0的节点） */
+        float dangling_sum = 0.0f;
+        for (size_t i = 0; i < n; i++) {
+            if (out_degree[i] == 0) {
+                dangling_sum += scores[i];
+            }
+        }
+
+        /* 保存旧值 */
+        memcpy(old_scores, scores, n * sizeof(float));
+
+        /* 更新PageRank */
+        for (size_t i = 0; i < n; i++) {
+            float rank_sum = 0.0f;
+            for (size_t j = 0; j < inbound_counts[i]; j++) {
+                size_t src = inbound[i][j];
+                if (out_degree[src] > 0) {
+                    rank_sum += old_scores[src] / (float)out_degree[src];
+                }
+            }
+            /* 包含悬挂节点贡献 */
+            scores[i] = teleport + d * (rank_sum + dangling_sum / (float)n);
+        }
+
+        /* 检查收敛 */
+        float error = 0.0f;
+        for (size_t i = 0; i < n; i++) {
+            error += fabsf(scores[i] - old_scores[i]);
+        }
+        if (error < tol) break;
+    }
+
+    /* 释放内存 */
+    safe_free((void**)&old_scores);
+    safe_free((void**)&out_degree);
+    for (size_t k = 0; k < n; k++) safe_free((void**)&inbound[k]);
+    safe_free((void**)&inbound);
+    safe_free((void**)&inbound_counts);
+
+    return 0;
+}
+
+/* ============================================================================
+ * 介数中心度（Brandes算法）
+ *
+ * 对每个源节点执行BFS，计算sigma（最短路径数）和delta（依赖度），
+ * 反向传播累加到介数中心度。时间复杂度O(n*m)。
+ * 无向解释：将每条边视为双向可达。
+ * ============================================================================ */
+
+int knowledge_graph_betweenness_centrality_all(KnowledgeGraph* graph, float* scores, size_t score_count) {
+    if (!graph || !scores) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "介数中心度：参数无效");
+        return -1;
+    }
+
+    size_t n = graph->node_count;
+    if (n == 0) return 0;
+    if (score_count < n) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "介数中心度：分数数组太小");
+        return -1;
+    }
+
+    /* 构建无向邻接表 */
+    size_t** adj = NULL;
+    size_t* adj_counts = NULL;
+    if (build_undirected_adjacency(graph, &adj, &adj_counts) != 0) {
+        return -1;
+    }
+
+    /* 初始化介数中心度为零 */
+    memset(scores, 0, n * sizeof(float));
+
+    /* Brandes算法对每个源节点 */
+    int* d = (int*)safe_malloc(n * sizeof(int));       /* 距离 */
+    size_t* sigma = (size_t*)safe_calloc(n, sizeof(size_t)); /* 最短路径计数 */
+    float* delta = (float*)safe_calloc(n, sizeof(float));    /* 依赖度 */
+    size_t* queue = (size_t*)safe_malloc(n * sizeof(size_t)); /* BFS队列 */
+    size_t* stack = (size_t*)safe_malloc(n * sizeof(size_t)); /* BFS访问顺序栈 */
+
+    if (!d || !sigma || !delta || !queue || !stack) {
+        safe_free((void**)&d);
+        safe_free((void**)&sigma);
+        safe_free((void**)&delta);
+        safe_free((void**)&queue);
+        safe_free((void**)&stack);
+        for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+        safe_free((void**)&adj);
+        safe_free((void**)&adj_counts);
+        return -1;
+    }
+
+    /* 为每个源节点执行BFS */
+    for (size_t s = 0; s < n; s++) {
+        /* 初始化 */
+        for (size_t v = 0; v < n; v++) {
+            d[v] = -1;
+            sigma[v] = 0;
+        }
+        d[s] = 0;
+        sigma[s] = 1;
+
+        size_t q_head = 0, q_tail = 0;
+        queue[q_tail++] = s;
+        size_t stack_size = 0;
+
+        /* BFS构建最短路径DAG */
+        while (q_head < q_tail) {
+            size_t v = queue[q_head++];
+            stack[stack_size++] = v;
+
+            for (size_t i = 0; i < adj_counts[v]; i++) {
+                size_t w = adj[v][i];
+
+                /* 首次发现w */
+                if (d[w] < 0) {
+                    d[w] = d[v] + 1;
+                    queue[q_tail++] = w;
+                }
+
+                /* w在最短路径上（通过v） */
+                if (d[w] == d[v] + 1) {
+                    sigma[w] += sigma[v];
+                }
+            }
+        }
+
+        /* 反向传播依赖度 */
+        for (size_t v = 0; v < n; v++) {
+            delta[v] = 0.0f;
+        }
+
+        while (stack_size > 0) {
+            size_t w = stack[--stack_size];
+
+            for (size_t i = 0; i < adj_counts[w]; i++) {
+                size_t v = adj[w][i];
+
+                /* v是w的前驱：d[v] + 1 == d[w] 即v比w更接近源节点s */
+                if (d[v] + 1 == d[w] && sigma[w] > 0) {
+                    delta[v] += ((float)sigma[v] / (float)sigma[w]) * (1.0f + delta[w]);
+                }
+            }
+
+            if (w != s) {
+                scores[w] += delta[w];
+            }
+        }
+    }
+
+    /* 标准化：除以(n-1)*(n-2)/2（无向图） */
+    if (n > 2) {
+        float norm = ((float)(n - 1) * (float)(n - 2)) / 2.0f;
+        if (norm > 0.0f) {
+            for (size_t i = 0; i < n; i++) {
+                scores[i] /= norm;
+            }
+        }
+    }
+
+    /* 释放内存 */
+    safe_free((void**)&d);
+    safe_free((void**)&sigma);
+    safe_free((void**)&delta);
+    safe_free((void**)&queue);
+    safe_free((void**)&stack);
+    for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+    safe_free((void**)&adj);
+    safe_free((void**)&adj_counts);
+
+    return 0;
+}
+
+/* ============================================================================
+ * 紧密度中心度（全图）
+ *
+ * 对每个节点执行BFS，计算到所有可达节点的平均距离的倒数。
+ * 不可达节点对其不贡献。
+ * ============================================================================ */
+
+int knowledge_graph_closeness_centrality_all(KnowledgeGraph* graph, float* scores, size_t score_count) {
+    if (!graph || !scores) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "紧密度中心度：参数无效");
+        return -1;
+    }
+
+    size_t n = graph->node_count;
+    if (n == 0) return 0;
+    if (score_count < n) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "紧密度中心度：分数数组太小");
+        return -1;
+    }
+
+    /* 构建无向邻接表 */
+    size_t** adj = NULL;
+    size_t* adj_counts = NULL;
+    if (build_undirected_adjacency(graph, &adj, &adj_counts) != 0) {
+        return -1;
+    }
+
+    /* 为每个节点执行BFS */
+    int* visited = (int*)safe_calloc(n, sizeof(int));
+    int* dist = (int*)safe_malloc(n * sizeof(int));
+    size_t* queue = (size_t*)safe_malloc(n * sizeof(size_t));
+
+    if (!visited || !dist || !queue) {
+        safe_free((void**)&visited);
+        safe_free((void**)&dist);
+        safe_free((void**)&queue);
+        for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+        safe_free((void**)&adj);
+        safe_free((void**)&adj_counts);
+        return -1;
+    }
+
+    for (size_t s = 0; s < n; s++) {
+        /* 初始化 */
+        for (size_t i = 0; i < n; i++) {
+            visited[i] = 0;
+            dist[i] = -1;
+        }
+        visited[s] = 1;
+        dist[s] = 0;
+
+        size_t q_head = 0, q_tail = 0;
+        queue[q_tail++] = s;
+
+        while (q_head < q_tail) {
+            size_t v = queue[q_head++];
+
+            for (size_t i = 0; i < adj_counts[v]; i++) {
+                size_t w = adj[v][i];
+                if (!visited[w]) {
+                    visited[w] = 1;
+                    dist[w] = dist[v] + 1;
+                    queue[q_tail++] = w;
+                }
+            }
+        }
+
+        /* 计算平均距离 */
+        size_t total_dist = 0;
+        size_t reachable = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (i != s && visited[i]) {
+                total_dist += (size_t)dist[i];
+                reachable++;
+            }
+        }
+
+        if (reachable > 0 && total_dist > 0) {
+            /* 紧密度 = 可达节点数/总数 * (1/平均距离) */
+            float avg_dist = (float)total_dist / (float)reachable;
+            scores[s] = ((float)reachable / (float)(n - 1)) * (1.0f / avg_dist);
+        } else {
+            scores[s] = 0.0f;
+        }
+    }
+
+    safe_free((void**)&visited);
+    safe_free((void**)&dist);
+    safe_free((void**)&queue);
+    for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+    safe_free((void**)&adj);
+    safe_free((void**)&adj_counts);
+
+    return 0;
+}
+
+/* ============================================================================
+ * Louvain社区检测算法
+ *
+ * 模块度最大化：
+ * Q = 1/(2m) * sum_ij [A_ij - k_i*k_j/(2m)] * delta(c_i, c_j)
+ *
+ * 两阶段迭代：
+ * 阶段1：局部移动节点以最大化模块度
+ * 阶段2：聚合社区为超级节点，在新图上重复
+ * ============================================================================ */
+
+/**
+ * @brief 计算将节点v从当前社区移除并加入社区c的模块度增益
+ *
+ * @param adj 无向邻接表
+ * @param adj_counts 邻居计数
+ * @param node_degrees 节点度数组
+ * @param community 社区分配数组
+ * @param comm_in 社区内部边权重和
+ * @param comm_tot 社区总度数
+ * @param v 节点索引
+ * @param c 目标社区ID
+ * @param m2 总边权重的2倍（2m）
+ * @return float 模块度增益
+ */
+static float louvain_modularity_gain(size_t** adj, size_t* adj_counts,
+                                      size_t* node_degrees,
+                                      int* community,
+                                      float* comm_in, float* comm_tot,
+                                      size_t v, int c, float m2) {
+    /* 计算v到社区c的连接权重k_i,in */
+    float k_in = 0.0f;
+    for (size_t i = 0; i < adj_counts[v]; i++) {
+        size_t neighbor = adj[v][i];
+        if (community[neighbor] == c) {
+            k_in += 1.0f;
+        }
+    }
+
+    int old_comm = community[v];
+    float old_in = (old_comm >= 0) ? comm_in[old_comm] : 0.0f;
+    float old_tot = (old_comm >= 0) ? comm_tot[old_comm] : 0.0f;
+    float new_in = comm_in[c];
+    float new_tot = comm_tot[c];
+    float kv = (float)node_degrees[v];
+
+    if (m2 <= 0.0f) return 0.0f;
+
+    /* 计算当前状态模块度贡献 */
+    float current_q = 0.0f;
+    /* 移除v后的当前社区贡献（如果v是当前社区成员） */
+    if (old_comm >= 0 && old_comm == c) {
+        /* v已经在c中，计算移动增益需要先假设移除再计算加入 */
+        current_q = (new_in - kv) / m2 - ((new_tot - kv) / m2) * ((new_tot - kv) / m2);
+        current_q += old_in / m2 - (old_tot / m2) * (old_tot / m2);
+        /* v自身的贡献 */
+        float new_q_c = (new_in) / m2 - (new_tot / m2) * (new_tot / m2);
+        float old_q_c = (new_in - kv) / m2 - ((new_tot - kv) / m2) * ((new_tot - kv) / m2);
+        return new_q_c - old_q_c;
+    }
+
+    /* 模块度增益公式（无向、单位权重） */
+    float gain = k_in / m2 - (new_tot * kv) / (m2 * m2);
+    if (old_comm >= 0) {
+        gain += (old_tot * kv) / (m2 * m2);
+    }
+
+    return gain;
+}
+
+int knowledge_graph_louvain_communities(KnowledgeGraph* graph, int* community_ids, size_t* community_count) {
+    if (!graph || !community_ids || !community_count) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "Louvain社区检测：参数无效");
+        return -1;
+    }
+
+    size_t n = graph->node_count;
+    if (n == 0) {
+        *community_count = 0;
+        return 0;
+    }
+
+    /* 构建无向邻接表 */
+    size_t** adj = NULL;
+    size_t* adj_counts = NULL;
+    if (build_undirected_adjacency(graph, &adj, &adj_counts) != 0) {
+        return -1;
+    }
+
+    /* 计算节点度（无向图） */
+    size_t* node_degrees = (size_t*)safe_calloc(n, sizeof(size_t));
+    if (!node_degrees) {
+        for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+        safe_free((void**)&adj);
+        safe_free((void**)&adj_counts);
+        return -1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        node_degrees[i] = adj_counts[i];
+    }
+
+    /* 计算总边数m（每条边计算一次） */
+    float m2 = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        m2 += (float)node_degrees[i];
+    }
+
+    if (m2 <= 0.0f) {
+        /* 无边：每个节点自成一个社区 */
+        for (size_t i = 0; i < n; i++) community_ids[i] = (int)i;
+        *community_count = n;
+        safe_free((void**)&node_degrees);
+        for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+        safe_free((void**)&adj);
+        safe_free((void**)&adj_counts);
+        return 0;
+    }
+
+    /* 初始化：每个节点自成一个社区 */
+    int* community = (int*)safe_malloc(n * sizeof(int));
+    float* comm_in = (float*)safe_calloc(n, sizeof(float));
+    float* comm_tot = (float*)safe_calloc(n, sizeof(float));
+    int* comm_active = (int*)safe_calloc(n, sizeof(int));
+
+    if (!community || !comm_in || !comm_tot || !comm_active) {
+        safe_free((void**)&community);
+        safe_free((void**)&comm_in);
+        safe_free((void**)&comm_tot);
+        safe_free((void**)&comm_active);
+        safe_free((void**)&node_degrees);
+        for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+        safe_free((void**)&adj);
+        safe_free((void**)&adj_counts);
+        return -1;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        community[i] = (int)i;
+        comm_in[i] = 0.0f;
+        comm_tot[i] = (float)node_degrees[i];
+        comm_active[i] = 1;
+    }
+
+    /* Louvain阶段1：迭代局部移动 */
+    int moved;
+    int max_pass = 20;
+    for (int pass = 0; pass < max_pass; pass++) {
+        moved = 0;
+
+        for (size_t v = 0; v < n; v++) {
+            int cur_comm = community[v];
+            float kv = (float)node_degrees[v];
+
+            /* 从当前社区移除v */
+            if (comm_active[cur_comm]) {
+                comm_tot[cur_comm] -= kv;
+                /* 移除v到当前社区内部的边贡献 */
+                float internal_loss = 0.0f;
+                for (size_t i = 0; i < adj_counts[v]; i++) {
+                    size_t neighbor = adj[v][i];
+                    if (community[neighbor] == cur_comm) {
+                        internal_loss += 2.0f;
+                    }
+                }
+                comm_in[cur_comm] -= internal_loss;
+                if (comm_tot[cur_comm] <= 0) {
+                    comm_active[cur_comm] = 0;
+                }
+            }
+
+            /* 找出最佳目标社区 */
+            int best_comm = cur_comm;
+            float best_gain = 0.0f;
+
+            /* 收集v的邻居社区 */
+            int* comm_candidates = (int*)safe_calloc(n, sizeof(int));
+            size_t num_candidates = 0;
+            for (size_t i = 0; i < adj_counts[v]; i++) {
+                size_t neighbor = adj[v][i];
+                int nc = community[neighbor];
+                if (!comm_candidates[nc]) {
+                    comm_candidates[nc] = 1;
+                    num_candidates++;
+                }
+            }
+
+            /* 评估移动到每个候选社区 */
+            for (size_t c = 0; c < n && num_candidates > 0; c++) {
+                if (!comm_candidates[c]) continue;
+                if (c == (size_t)cur_comm) continue;
+                if (!comm_active[c]) continue;
+
+                float k_in = 0.0f;
+                for (size_t i = 0; i < adj_counts[v]; i++) {
+                    if (community[adj[v][i]] == (int)c) {
+                        k_in += 1.0f;
+                    }
+                }
+
+                float gain = k_in / m2 - (comm_tot[c] * kv) / (m2 * m2);
+                if (gain > best_gain) {
+                    best_gain = gain;
+                    best_comm = (int)c;
+                }
+            }
+
+            safe_free((void**)&comm_candidates);
+
+            /* 移动到最佳社区 */
+            if (best_comm != cur_comm) {
+                community[v] = best_comm;
+                comm_tot[best_comm] += kv;
+                /* 添加v到最佳社区内部的边贡献 */
+                float internal_gain = 0.0f;
+                for (size_t i = 0; i < adj_counts[v]; i++) {
+                    size_t neighbor = adj[v][i];
+                    if (community[neighbor] == best_comm) {
+                        internal_gain += 2.0f;
+                    }
+                }
+                comm_in[best_comm] += internal_gain;
+                comm_active[best_comm] = 1;
+                moved = 1;
+            } else {
+                /* 回到原社区 */
+                comm_tot[cur_comm] += kv;
+                float internal_restore = 0.0f;
+                for (size_t i = 0; i < adj_counts[v]; i++) {
+                    size_t neighbor = adj[v][i];
+                    if (community[neighbor] == cur_comm) {
+                        internal_restore += 2.0f;
+                    }
+                }
+                comm_in[cur_comm] += internal_restore;
+                comm_active[cur_comm] = 1;
+            }
+        }
+
+        if (!moved) break;
+    }
+
+    /* 重新映射社区ID为连续整数 */
+    int* comm_map = (int*)safe_calloc(n, sizeof(int));
+    for (size_t i = 0; i < n; i++) comm_map[i] = -1;
+
+    size_t next_id = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (comm_map[community[i]] < 0) {
+            comm_map[community[i]] = (int)next_id++;
+        }
+        community_ids[i] = comm_map[community[i]];
+    }
+    *community_count = next_id;
+
+    /* 计算模块度 */
+    float modularity = 0.0f;
+    if (m2 > 0.0f) {
+        for (size_t i = 0; i < n; i++) {
+            for (size_t j = 0; j < adj_counts[i]; j++) {
+                size_t neighbor = adj[i][j];
+                if (community_ids[i] == community_ids[neighbor]) {
+                    float expected = (float)node_degrees[i] * (float)node_degrees[neighbor] / m2;
+                    modularity += 1.0f - expected;
+                }
+            }
+        }
+        modularity /= m2;
+    }
+
+    /* 释放内存 */
+    safe_free((void**)&comm_map);
+    safe_free((void**)&community);
+    safe_free((void**)&comm_in);
+    safe_free((void**)&comm_tot);
+    safe_free((void**)&comm_active);
+    safe_free((void**)&node_degrees);
+    for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+    safe_free((void**)&adj);
+    safe_free((void**)&adj_counts);
+
+    return 0;
+}
+
+/* ============================================================================
+ * 图直径
+ *
+ * 对每个节点执行BFS，计算到所有可达节点的最短距离，
+ * 取所有距离的最大值。不可达节点对不贡献。
+ * ============================================================================ */
+
+float knowledge_graph_diameter(KnowledgeGraph* graph) {
+    if (!graph) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "图直径：知识图谱为空");
+        return 0.0f;
+    }
+
+    size_t n = graph->node_count;
+    if (n < 2) return 0.0f;
+
+    /* 构建无向邻接表 */
+    size_t** adj = NULL;
+    size_t* adj_counts = NULL;
+    if (build_undirected_adjacency(graph, &adj, &adj_counts) != 0) {
+        return -1.0f;
+    }
+
+    float max_dist = 0.0f;
+    int* visited = (int*)safe_calloc(n, sizeof(int));
+    int* dist = (int*)safe_malloc(n * sizeof(int));
+    size_t* queue = (size_t*)safe_malloc(n * sizeof(size_t));
+
+    if (!visited || !dist || !queue) {
+        safe_free((void**)&visited);
+        safe_free((void**)&dist);
+        safe_free((void**)&queue);
+        for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+        safe_free((void**)&adj);
+        safe_free((void**)&adj_counts);
+        return -1.0f;
+    }
+
+    for (size_t s = 0; s < n; s++) {
+        for (size_t i = 0; i < n; i++) {
+            visited[i] = 0;
+            dist[i] = -1;
+        }
+        visited[s] = 1;
+        dist[s] = 0;
+
+        size_t q_head = 0, q_tail = 0;
+        queue[q_tail++] = s;
+
+        while (q_head < q_tail) {
+            size_t v = queue[q_head++];
+            for (size_t i = 0; i < adj_counts[v]; i++) {
+                size_t w = adj[v][i];
+                if (!visited[w]) {
+                    visited[w] = 1;
+                    dist[w] = dist[v] + 1;
+                    queue[q_tail++] = w;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            if (visited[i] && (float)dist[i] > max_dist) {
+                max_dist = (float)dist[i];
+            }
+        }
+    }
+
+    safe_free((void**)&visited);
+    safe_free((void**)&dist);
+    safe_free((void**)&queue);
+    for (size_t k = 0; k < n; k++) safe_free((void**)&adj[k]);
+    safe_free((void**)&adj);
+    safe_free((void**)&adj_counts);
+
+    return max_dist;
+}
+
+/* ============================================================================
+ * 图平均度
+ *
+ * 每条无向边贡献2度，平均度 = 2 * |E| / |V|
+ * ============================================================================ */
+
+float knowledge_graph_average_degree(KnowledgeGraph* graph) {
+    if (!graph) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "平均度：知识图谱为空");
+        return 0.0f;
+    }
+
+    size_t n = graph->node_count;
+    if (n == 0) return 0.0f;
+
+    return 2.0f * (float)graph->edge_count / (float)n;
+}
+
+/* ============================================================================
+ * 完整图分析统计
+ *
+ * 一次性计算所有图分析指标并填充KnowledgeGraphStats。
+ * ============================================================================ */
+
+int knowledge_graph_compute_stats(KnowledgeGraph* graph, KnowledgeGraphStats* stats) {
+    if (!graph || !stats) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "计算统计：参数无效");
+        return -1;
+    }
+
+    size_t n = graph->node_count;
+    size_t e = graph->edge_count;
+
+    /* 清零stats结构 */
+    memset(stats, 0, sizeof(KnowledgeGraphStats));
+
+    /* 基本信息 */
+    stats->node_count = n;
+    stats->edge_count = e;
+
+    /* 内存使用量 */
+    size_t memory = sizeof(KnowledgeGraph);
+    memory += graph->node_capacity * sizeof(GraphNode*);
+    memory += graph->edge_capacity * sizeof(GraphEdge*);
+    for (size_t i = 0; i < n; i++) {
+        GraphNode* node = graph->nodes[i];
+        memory += sizeof(GraphNode);
+        if (node->label) memory += strlen(node->label) + 1;
+        if (node->embedding) memory += node->embedding_size * sizeof(float);
+        memory += node->edge_capacity * sizeof(GraphEdge*);
+    }
+    for (size_t i = 0; i < e; i++) {
+        GraphEdge* edge = graph->edges[i];
+        memory += sizeof(GraphEdge);
+        if (edge->label) memory += strlen(edge->label) + 1;
+    }
+    stats->memory_usage = memory;
+
+    if (n == 0) return 0;
+
+    /* 图密度 */
+    stats->density = knowledge_graph_density(graph);
+
+    /* 平均度 */
+    stats->avg_degree = 2.0f * (float)e / (float)n;
+
+    /* 图直径 */
+    stats->diameter = knowledge_graph_diameter(graph);
+
+    /* 平均聚类系数 */
+    stats->avg_clustering = knowledge_graph_clustering_coefficient(graph);
+
+    /* PageRank */
+    stats->pagerank_scores = (float*)safe_malloc(n * sizeof(float));
+    if (stats->pagerank_scores) {
+        if (knowledge_graph_pagerank(graph, stats->pagerank_scores, n) != 0) {
+            safe_free((void**)&stats->pagerank_scores);
+        }
+    }
+
+    /* 介数中心度 */
+    stats->betweenness_scores = (float*)safe_malloc(n * sizeof(float));
+    if (stats->betweenness_scores) {
+        if (knowledge_graph_betweenness_centrality_all(graph, stats->betweenness_scores, n) != 0) {
+            safe_free((void**)&stats->betweenness_scores);
+        }
+    }
+
+    /* 紧密度中心度 */
+    stats->closeness_scores = (float*)safe_malloc(n * sizeof(float));
+    if (stats->closeness_scores) {
+        if (knowledge_graph_closeness_centrality_all(graph, stats->closeness_scores, n) != 0) {
+            safe_free((void**)&stats->closeness_scores);
+        }
+    }
+
+    /* Louvain社区检测 */
+    stats->community_ids = (int*)safe_malloc(n * sizeof(int));
+    if (stats->community_ids) {
+        size_t comm_count = 0;
+        if (knowledge_graph_louvain_communities(graph, stats->community_ids, &comm_count) == 0) {
+            stats->community_count = comm_count;
+        } else {
+            safe_free((void**)&stats->community_ids);
+        }
+    }
+
+    /* 社区检测后计算模块度（Louvain内部已计算，但额外计算一次全局模块度） */
+    if (stats->community_ids && stats->community_count > 0) {
+        /* 构建无向邻接表用于模块度计算 */
+        size_t** uadj = NULL;
+        size_t* uadj_counts = NULL;
+        if (build_undirected_adjacency(graph, &uadj, &uadj_counts) == 0) {
+            float m2 = 0.0f;
+            size_t* degrees = (size_t*)safe_calloc(n, sizeof(size_t));
+            if (degrees) {
+                for (size_t i = 0; i < n; i++) degrees[i] = uadj_counts[i];
+                for (size_t i = 0; i < n; i++) m2 += (float)degrees[i];
+                if (m2 > 0.0f) {
+                    float q = 0.0f;
+                    for (size_t i = 0; i < n; i++) {
+                        for (size_t j = 0; j < uadj_counts[i]; j++) {
+                            size_t neighbor = uadj[i][j];
+                            if (stats->community_ids[i] == stats->community_ids[neighbor]) {
+                                q += 1.0f - ((float)degrees[i] * (float)degrees[neighbor]) / m2;
+                            }
+                        }
+                    }
+                    stats->modularity = q / m2;
+                }
+                safe_free((void**)&degrees);
+            }
+            for (size_t k = 0; k < n; k++) safe_free((void**)&uadj[k]);
+            safe_free((void**)&uadj);
+            safe_free((void**)&uadj_counts);
+        }
+    }
+
+    return 0;
+}
+
+/* ============================================================================
+ * 释放KnowledgeGraphStats
+ * ============================================================================ */
+
+void knowledge_graph_free_stats(KnowledgeGraphStats* stats) {
+    if (!stats) return;
+
+    if (stats->pagerank_scores) {
+        safe_free((void**)&stats->pagerank_scores);
+    }
+    if (stats->betweenness_scores) {
+        safe_free((void**)&stats->betweenness_scores);
+    }
+    if (stats->closeness_scores) {
+        safe_free((void**)&stats->closeness_scores);
+    }
+    if (stats->community_ids) {
+        safe_free((void**)&stats->community_ids);
+    }
+
+    memset(stats, 0, sizeof(KnowledgeGraphStats));
+}
+
+/* ============================================================================
  * 知识库集成
  * =========================================================================== */
 
@@ -2418,6 +3509,8 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
         return NULL;
     }
     
+    /* B-020修复: 追踪文件中最大存储ID，用于加载后重置next_node_id */
+    int max_stored_id = -1;
     for (uint64_t i = 0; i < node_count; i++) {
         // 读取节点ID（索引）
         uint64_t node_id;
@@ -2528,6 +3621,9 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
                                   "加载知识图谱：添加节点失败");
             return NULL;
         }
+        /* B-020修复: 直接使用文件中存储的节点ID，避免next_node_id与存储ID不匹配 */
+        node->id = (int)node_id;
+        if ((int)node_id > max_stored_id) max_stored_id = (int)node_id;
         
         // 设置嵌入向量
         if (embedding && embedding_size > 0) {
@@ -2667,6 +3763,11 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
     // 清理临时数组
     safe_free((void**)&loaded_nodes);
     fclose(file);
+    
+    /* B-020修复: 重置next_node_id为文件中最⼤ID+1 */
+    if (max_stored_id >= 0) {
+        graph->next_node_id = max_stored_id + 1;
+    }
     
     return graph;
 }

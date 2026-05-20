@@ -12,6 +12,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/core/lnn.h"
+#include "selflnn/core/cfc_cell.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -106,6 +107,15 @@ struct SpeechRecognizer {
 
     /* 核心LNN网络集成（用于状态演化） */
     LNN* shared_lnn;
+
+    /* P0-014: 自包含CfC路径可学习参数 — 替代硬编码0.5/0.3缩放因子 */
+    float gate_scale;                 /* 门控缩放因子，Xavier初始化，替代硬编码0.5 */
+    float act_scale;                  /* 激活缩放因子，Xavier初始化，替代硬编码0.3 */
+
+    /* P0-014: 自包含CfC单元 — 独立于shared_lnn的完整CfC动态系统
+     * 当shared_lnn未连接时，使用此CfCCell进行更丰富的多时间尺度状态演化
+     * 若创建失败则为NULL，回退到可学习参数版简化路径 */
+    CfCCell* self_contained_cfc;
 
     /* Adam优化器状态（训练用） */
     float* adam_m_proj_w;
@@ -965,6 +975,41 @@ SpeechRecognizer* speech_recognizer_create(const SpeechRecognitionConfig* config
     /* 初始化基础中文词汇表 */
     init_base_vocabulary(sr);
 
+    /* P0-014: Xavier初始化自包含路径的可学习门控/激活缩放因子
+     * 使用与输入投影权重一致的Xavier缩放公式
+     * scale = sqrt(2/(fan_in+fan_out)) = sqrt(2/(feature_dim+hidden_size)) */
+    {
+        int feature_dim = sr->config.feature_dimension > 0 ? sr->config.feature_dimension : 80;
+        int hidden_dim = (int)sr->config.hidden_size;
+        float xavier_scale = sqrtf(2.0f / (float)(feature_dim + hidden_dim));
+        sr->gate_scale = rng_uniform(-xavier_scale, xavier_scale);
+        sr->act_scale = rng_uniform(-xavier_scale, xavier_scale);
+    }
+
+    /* P0-014: 尝试创建自包含CfC单元用于独立状态演化
+     * 当shared_lnn未连接时，此CfCCell提供完整的多时间尺度CfC动态 */
+    {
+        CfCCellConfig cfc_cfg;
+        memset(&cfc_cfg, 0, sizeof(CfCCellConfig));
+        cfc_cfg.input_size = (size_t)sr->config.feature_dimension;
+        cfc_cfg.hidden_size = sr->config.hidden_size;
+        cfc_cfg.time_constant = sr->config.time_constant > 0.0f ? sr->config.time_constant : 0.1f;
+        cfc_cfg.noise_std = 0.01f;
+        cfc_cfg.enable_adaptation = 1;
+        cfc_cfg.ode_solver_type = ODE_SOLVER_CLOSED_FORM;
+        cfc_cfg.delta_t = 1.0f;
+        cfc_cfg.use_xavier_init = 1;
+        cfc_cfg.use_cell_layer_norm = 1;
+        cfc_cfg.use_residual = 1;
+        cfc_cfg.residual_scale = 0.3f;
+
+        sr->self_contained_cfc = cfc_cell_create(&cfc_cfg);
+        if (!sr->self_contained_cfc) {
+            /* CfCCell创建失败，回退到可学习参数简化路径（gate_scale/act_scale） */
+            sr->self_contained_cfc = NULL;
+        }
+    }
+
     sr->is_initialized = 1;
     return sr;
 }
@@ -994,6 +1039,12 @@ void speech_recognizer_free(SpeechRecognizer* recognizer) {
     safe_free((void**)&recognizer->adam_v_proj_w);
     safe_free((void**)&recognizer->adam_m_proj_b);
     safe_free((void**)&recognizer->adam_v_proj_b);
+
+    /* P0-014: 释放自包含CfC单元 */
+    if (recognizer->self_contained_cfc) {
+        cfc_cell_free(recognizer->self_contained_cfc);
+        recognizer->self_contained_cfc = NULL;
+    }
 
     safe_free((void**)&recognizer);
 }
@@ -1050,6 +1101,10 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
 
     /* 重置隐藏状态 */
     memset(recognizer->hidden_state, 0, hs * sizeof(float));
+    /* P0-014: 同步重置自包含CfC单元内部状态 */
+    if (recognizer->self_contained_cfc) {
+        cfc_cell_reset(recognizer->self_contained_cfc);
+    }
 
     for (int t = 0; t < num_timesteps; t++) {
         const float* feat = recognizer->feature_buffer + (size_t)t * feature_dim;
@@ -1076,22 +1131,44 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
                 safe_free((void**)&lnn_input);
             }
         } else {
-            /* 自包含CfC封闭形式：τ·dh/dt = -h + σ(W_ix+b_i) ⊙ tanh(W_ax+b_a) */
+            /* P0-014: 自包含CfC状态演化 — 优先使用完整CfCCell动态系统
+             * CfCCell提供多时间尺度门控、液时域缩放、层归一化、残差连接等完整CfC特性
+             * 若CfCCell未创建成功，回退到可学习参数简化路径 */
             float nonlinear_term[256];
             memset(nonlinear_term, 0, sizeof(nonlinear_term));
 
-            for (size_t i = 0; i < hs && i < 256; i++) {
-                double sum = 0.0;
-                if (recognizer->input_projection_weight) {
-                    for (int j = 0; j < feature_dim && j < feature_dim; j++) {
-                        sum += (double)recognizer->input_projection_weight[i * (size_t)feature_dim + j] * feat[j];
-                    }
-                } else {
-                    if (i < (size_t)feature_dim) sum = (double)feat[i];
+            if (recognizer->self_contained_cfc) {
+                /* 主路径：通过完整CfCCell进行状态演化
+                 * cfc_cell_forward_with_dt内部执行：
+                 *   1. 输入投影（Xavier初始化权重）
+                 *   2. 多时间尺度门控动态
+                 *   3. 液时域缩放（输入依赖时间常数）
+                 *   4. CfC封闭形式ODE解
+                 *   5. 残差连接 + 层归一化
+                 * 比简化 σ(sum*scale)⊙tanh(sum*scale) 强大得多 */
+                if (cfc_cell_forward_with_dt(recognizer->self_contained_cfc,
+                     feat, dt, nonlinear_term) != 0) {
+                    /* CfCCell前向失败，回退到可学习参数简化路径 */
+                    goto fallback_self_contained;
                 }
-                float gate = 1.0f / (1.0f + expf(-(float)sum * 0.5f));
-                float act = tanhf((float)sum * 0.3f);
-                nonlinear_term[i] = gate * act;
+            } else {
+fallback_self_contained:
+                /* 回退路径：可学习参数版自包含CfC简化动态
+                 * τ·dh/dt = -h + σ(sum*gate_scale) ⊙ tanh(sum*act_scale)
+                 * gate_scale/act_scale为Xavier初始化的可学习参数，替代硬编码0.5/0.3 */
+                for (size_t i = 0; i < hs && i < 256; i++) {
+                    double sum = 0.0;
+                    if (recognizer->input_projection_weight) {
+                        for (int j = 0; j < feature_dim && j < feature_dim; j++) {
+                            sum += (double)recognizer->input_projection_weight[i * (size_t)feature_dim + j] * feat[j];
+                        }
+                    } else {
+                        if (i < (size_t)feature_dim) sum = (double)feat[i];
+                    }
+                    float gate = 1.0f / (1.0f + expf(-(float)sum * recognizer->gate_scale));
+                    float act = tanhf((float)sum * recognizer->act_scale);
+                    nonlinear_term[i] = gate * act;
+                }
             }
 
             float decay = expf(-dt / tau);
@@ -1283,6 +1360,10 @@ int speech_recognizer_recognize_stream(SpeechRecognizer* recognizer,
             memset(recognizer->hidden_state, 0,
                    recognizer->config.hidden_size * sizeof(float));
         }
+        /* P0-014: 流结束时同步重置自包含CfC单元内部状态 */
+        if (recognizer->self_contained_cfc) {
+            cfc_cell_reset(recognizer->self_contained_cfc);
+        }
     }
 
     return 0;
@@ -1307,6 +1388,10 @@ void speech_recognizer_reset(SpeechRecognizer* recognizer) {
     if (recognizer->hidden_state) {
         memset(recognizer->hidden_state, 0,
                recognizer->config.hidden_size * sizeof(float));
+    }
+    /* P0-014: 同步重置自包含CfC单元内部状态 */
+    if (recognizer->self_contained_cfc) {
+        cfc_cell_reset(recognizer->self_contained_cfc);
     }
     recognizer->decoded_token_count = 0;
 }
@@ -1518,6 +1603,10 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
             /* 前向传播 */
             memset(recognizer->hidden_state, 0,
                    recognizer->config.hidden_size * sizeof(float));
+            /* P0-014: 训练时同步重置自包含CfC单元内部状态 */
+            if (recognizer->self_contained_cfc) {
+                cfc_cell_reset(recognizer->self_contained_cfc);
+            }
 
             int num_frames = extract_mel_features(recognizer,
                 training_audio[s], (int)strlen(training_transcripts[s]) * 100 + SR_DEFAULT_FRAME_LENGTH,

@@ -7,7 +7,7 @@ message(STATUS "构建推理库")
 if(MSVC)
     set(REASONING_SOURCES
         reasoning_internal.c planning.c long_term_planning.c
-        causal_reasoning.c laplace_operator.c reasoning_version.c
+        causal_reasoning.c laplace_operator.c
         planning_enhanced.c cfc_uncertainty_reasoning.c
         hierarchical_planning.c math_physics_reasoning.c
         quaternion_liquid_gate.c
@@ -15,7 +15,7 @@ if(MSVC)
 else()
     set(REASONING_SOURCES
         reasoning.c planning.c long_term_planning.c causal_reasoning.c
-        laplace_operator.c reasoning_version.c planning_enhanced.c
+        laplace_operator.c planning_enhanced.c
         cfc_uncertainty_reasoning.c hierarchical_planning.c
         math_physics_reasoning.c quaternion_liquid_gate.c
     )

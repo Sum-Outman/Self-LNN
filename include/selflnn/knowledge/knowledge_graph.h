@@ -76,6 +76,29 @@ typedef struct GraphEdge {
 typedef struct KnowledgeGraph KnowledgeGraph;
 
 /**
+ * @brief 知识图谱完整统计结构
+ *
+ * 包含图分析算法的所有计算结果：
+ * PageRank、介数中心度、紧密度中心度、Louvain社区检测等。
+ * 调用 knowledge_graph_free_stats() 释放内部分配的内存。
+ */
+typedef struct {
+    size_t node_count;              /**< 节点数 */
+    size_t edge_count;              /**< 边数 */
+    size_t memory_usage;            /**< 内存使用量（字节） */
+    float density;                  /**< 图密度 [0,1] */
+    float avg_degree;               /**< 平均度 */
+    float diameter;                 /**< 图直径（最长最短路径），不可达时返回INFINITY */
+    float avg_clustering;           /**< 平均聚类系数 */
+    float* pagerank_scores;         /**< PageRank分数数组[节点数]，索引对应graph->nodes[] */
+    float* betweenness_scores;      /**< 介数中心度数组[节点数] */
+    float* closeness_scores;        /**< 紧密度中心度数组[节点数] */
+    int* community_ids;             /**< Louvain社区ID数组[节点数] */
+    size_t community_count;         /**< 检测到的社区数量 */
+    float modularity;               /**< 模块度 */
+} KnowledgeGraphStats;
+
+/**
  * @brief 路径结构
  */
 typedef struct {
@@ -285,6 +308,104 @@ SubgraphMatch* knowledge_graph_subgraph_match(KnowledgeGraph* graph,
  */
 float knowledge_graph_node_centrality(KnowledgeGraph* graph, GraphNode* node,
                                      int centrality_type);
+
+/* ================================================================
+ * 高级图分析算法（R-017）
+ * ================================================================ */
+
+/**
+ * @brief 计算PageRank分数（全图）
+ *
+ * 使用标准迭代PageRank算法，damping=0.85, max_iter=100, tol=1e-6。
+ * 基于有向边计算，考虑边权重。
+ *
+ * @param graph 知识图谱句柄
+ * @param scores 分数输出数组（大小必须 >= graph->node_count）
+ * @param score_count 分数数组大小
+ * @return int 成功返回0，失败返回-1
+ */
+int knowledge_graph_pagerank(KnowledgeGraph* graph, float* scores, size_t score_count);
+
+/**
+ * @brief 计算全图介数中心度（Brandes算法）
+ *
+ * 使用Brandes算法计算所有节点的介数中心度。
+ * 无向解释（每条边双向），时间复杂度O(n*m)。
+ * 结果已标准化（除以(n-1)*(n-2)/2）。
+ *
+ * @param graph 知识图谱句柄
+ * @param scores 分数输出数组（大小必须 >= graph->node_count）
+ * @param score_count 分数数组大小
+ * @return int 成功返回0，失败返回-1
+ */
+int knowledge_graph_betweenness_centrality_all(KnowledgeGraph* graph, float* scores, size_t score_count);
+
+/**
+ * @brief 计算全图紧密度中心度
+ *
+ * 对每个节点执行BFS，计算到所有可达节点的平均距离的倒数。
+ *
+ * @param graph 知识图谱句柄
+ * @param scores 分数输出数组（大小必须 >= graph->node_count）
+ * @param score_count 分数数组大小
+ * @return int 成功返回0，失败返回-1
+ */
+int knowledge_graph_closeness_centrality_all(KnowledgeGraph* graph, float* scores, size_t score_count);
+
+/**
+ * @brief Louvain社区检测算法
+ *
+ * 使用模块度最大化的Louvain算法进行社区检测。
+ * 将图视为无向图处理。
+ *
+ * @param graph 知识图谱句柄
+ * @param community_ids 社区ID输出数组（大小必须 >= graph->node_count）
+ * @param community_count 检测到的社区数量输出
+ * @return int 成功返回0，失败返回-1
+ */
+int knowledge_graph_louvain_communities(KnowledgeGraph* graph, int* community_ids, size_t* community_count);
+
+/**
+ * @brief 计算图直径
+ *
+ * 图直径 = 所有可达节点对之间最短路径的最大值。
+ * 对每个节点执行BFS，取所有找到的最短距离的最大值。
+ * 不可达时返回INFINITY。
+ *
+ * @param graph 知识图谱句柄
+ * @return float 图直径
+ */
+float knowledge_graph_diameter(KnowledgeGraph* graph);
+
+/**
+ * @brief 计算图平均度
+ *
+ * 平均度 = 总边数 * 2 / 节点数（无向解释）。
+ *
+ * @param graph 知识图谱句柄
+ * @return float 平均度
+ */
+float knowledge_graph_average_degree(KnowledgeGraph* graph);
+
+/**
+ * @brief 计算完整图分析统计
+ *
+ * 一次性计算所有图分析指标（PageRank、介数中心度、紧密度中心度、
+ * 社区检测、图密度、直径、平均度等），填充KnowledgeGraphStats结构。
+ * 完成后调用 knowledge_graph_free_stats() 释放内部分配的内存。
+ *
+ * @param graph 知识图谱句柄
+ * @param stats 统计结果输出
+ * @return int 成功返回0，失败返回-1
+ */
+int knowledge_graph_compute_stats(KnowledgeGraph* graph, KnowledgeGraphStats* stats);
+
+/**
+ * @brief 释放KnowledgeGraphStats中动态分配的内存
+ *
+ * @param stats 统计结果
+ */
+void knowledge_graph_free_stats(KnowledgeGraphStats* stats);
 
 /**
  * @brief 计算图密度

@@ -1,6 +1,12 @@
 #ifndef SELFLNN_CFC_ENHANCED_H
 #define SELFLNN_CFC_ENHANCED_H
 
+/* DUP-004: cfc_enhanced是cfc_cell的上层增强封装，无功能重复。
+ * 本模块提供：自动求解器选择、刚度检测、多速率、并行RHS/SIMD加速。
+ * cfc_cell提供：CfC单元核心创建/前向/反向/ODE求解器。
+ * 两者为互补层级关系，cfc_enhanced依赖cfc_cell。 */
+#define SELFLNN_CFC_ENHANCED_WRAPPER 1
+
 #include "selflnn/core/cfc_cell.h"
 
 #ifdef __cplusplus

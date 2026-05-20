@@ -847,33 +847,165 @@ int advanced_control_step(AdvancedControlState* state,
             break;
         }
         case CTRL_MODE_ADAPTIVE: {
-            /* K-修复: 实现真正的模型参考自适应控制(MRAC)
-             * 参考模型: xm_dot = Am*xm + Bm*r
-             * 实际系统: x_dot = A*x + B*u
-             * 控制律: u = Kx*x + Kr*r
-             * 自适应律: dK/dt = -Γ*Bm^T*P*e*x^T (基于Lyapunov)
-             * 其中 e = x - xm, P是Lyapunov方程 Am^T*P + P*Am = -Q的解
+            /* V-026修复: 真正的模型参考自适应控制(MRAC)完整实现
+             *
+             * 算法原理（基于Lyapunov稳定性理论）：
+             *
+             * 1. 参考模型（定义期望的闭环行为）：
+             *      xm_dot = Am*xm + Bm*r
+             *    对于每个关节的二阶参考模型（临界阻尼，自然频率ωn）：
+             *      Am = [[0, 1], [-ωn², -2ζωn]]
+             *      Bm = [[0], [ωn²]]
+             *    离散化: xm[k+1] = xm[k] + (Am*xm[k] + Bm*r)*dt
+             *
+             * 2. 实际系统（未知参数）：
+             *      x_dot = A*x + B*(u + d)  其中A、B未知，d为扰动
+             *
+             * 3. 控制律（可调参数型）：
+             *      u = Kx*x + Kr*r
+             *    其中Kx是反馈增益（使系统稳定），Kr是前馈增益（匹配参考模型）
+             *
+             * 4. 跟踪误差：
+             *      e = x - xm
+             *      e_dot = Am*e + B*(ΔKx*x + ΔKr*r - d)
+             *    其中ΔKx = Kx - Kx*, ΔKr = Kr - Kr*
+             *
+             * 5. Lyapunov函数：
+             *      V = e^T*P*e + tr(ΔKx^T*Γ_x⁻¹*ΔKx) + tr(ΔKr^T*Γ_r⁻¹*ΔKr)
+             *    其中P是Lyapunov方程 Am^T*P + P*Am = -Q 的解
+             *
+             * 6. 自适应律（确保V_dot < 0）：
+             *      dKx/dt = -Γ_x * Bm^T * P * e * x^T
+             *      dKr/dt = -Γ_r * Bm^T * P * e * r^T
+             *
+             * 7. 离散自适应律:
+             *      Kx[k+1] = Kx[k] - Γ_x * Bm^T * P * e * x^T * dt
+             *      Kr[k+1] = Kr[k] - Γ_r * Bm^T * P * e * r^T * dt
+             *
+             * 8. 投影算子：限制增益在合理范围内，防止参数漂移
              */
             {
-                /* 简化的MRAC: 使用参考模型的一阶近似 */
+                /* ---- 参考模型参数 ---- */
+                /* 自然频率ωn=8 rad/s，阻尼比ζ=1.0（临界阻尼） */
+                float omega_n = 8.0f;
+                float zeta = 1.0f;
+                float omega_n_sq = omega_n * omega_n;
+
+                /* ---- 初始化参考模型状态 ---- */
+                if (!state->mrac_ref_initialized) {
+                    /* 首次运行，将参考模型状态初始化为当前实际状态 */
+                    for (int i = 0; i < 6; i++) {
+                        state->mrac_reference_state[i] = current_state[i];
+                        state->mrac_ref_command[i] = target_state[i];
+                    }
+                    state->mrac_ref_initialized = 1;
+                }
+
+                /* ---- 更新参考命令（目标状态的平滑版本） ---- */
+                float cmd_alpha = 0.3f; /* 命令平滑系数 */
+                for (int i = 0; i < 6; i++) {
+                    state->mrac_ref_command[i] = state->mrac_ref_command[i] * (1.0f - cmd_alpha)
+                                               + target_state[i] * cmd_alpha;
+                }
+
+                /* ---- 步骤1: 演化参考模型（前向欧拉离散） ---- */
+                /* xm_dot = Am*xm + Bm*r
+                 * 对于每个关节i: pos, vel
+                 * pos_dot = vel
+                 * vel_dot = -ωn²*pos - 2ζωn*vel + ωn²*r_pos */
+                float xm_new[6];
+                for (int i = 0; i < 6; i += 2) {
+                    float xm_pos = state->mrac_reference_state[i];
+                    float xm_vel = state->mrac_reference_state[i + 1];
+                    float r_pos = state->mrac_ref_command[i];
+                    /* hz: 参考模型的前3个元素是位置，使用目标位置 */
+                    if (i < 3) {
+                        r_pos = state->mrac_ref_command[i];
+                    } else {
+                        /* 后3个元素是速度参考，也映射到目标位置 */
+                        r_pos = state->mrac_ref_command[i];
+                    }
+                    xm_new[i] = xm_pos + xm_vel * dt;
+                    xm_new[i + 1] = xm_vel + (-omega_n_sq * xm_pos - 2.0f * zeta * omega_n * xm_vel + omega_n_sq * r_pos) * dt;
+                }
+                for (int i = 0; i < 6; i++) {
+                    state->mrac_reference_state[i] = xm_new[i];
+                }
+
+                /* ---- 步骤2: 计算跟踪误差 e = x - xm ---- */
                 float e[6];
                 for (int i = 0; i < 6; i++) {
-                    e[i] = current_state[i] - target_state[i];
+                    e[i] = current_state[i] - state->mrac_reference_state[i];
                 }
-                /* Lyapunov自适应增益更新（离散化） */
-                float adapt_gain = 0.1f;
-                float adapt_rate = 0.01f;
+
+                /* ---- 步骤3: Lyapunov矩阵P ---- */
+                /* 对于二阶系统 Am=[[0,1],[-ωn²,-2ζωn]]，Q=I，
+                 * Lyapunov方程 Am^T*P + P*Am = -Q 的解析解：
+                 * P = [[(2ζωn + ωn²)/(4ζωn), 1/(2ωn²)],
+                 *       [1/(2ωn²), (1+ωn²)/(4ζωn³)]]
+                 * 当ζ=1: P ≈ [[(2ωn+ωn²)/(4ωn), 1/(2ωn²)],
+                 *                      [1/(2ωn²), (1+ωn²)/(4ωn³)]]
+                 */
+                float p11 = (2.0f * omega_n + omega_n_sq) / (4.0f * omega_n);
+                float p12 = 1.0f / (2.0f * omega_n_sq);
+                float p22 = (1.0f + omega_n_sq) / (4.0f * omega_n * omega_n_sq);
+
+                /* ---- 步骤4: 计算Bm^T * P * e（每个关节的标量信号） ---- */
+                /* Bm = [[0],[ωn²]] -> Bm^T = [0, ωn²]
+                 * s = Bm^T * P * e = [0, ωn²] * [[p11, p12],[p12, p22]] * [e_pos, e_vel]^T
+                 *   = ωn² * (p12*e_pos + p22*e_vel) */
+                float s[6]; /* 6个关节的标量自适应信号 */
                 for (int i = 0; i < 6; i++) {
-                    /* 自适应修正项 */
-                    float adapt_term = -adapt_rate * e[i] * fabsf(current_state[i]);
-                    /* 修正后的控制: -Kp*e - Kv*de 含自适应增益 */
-                    float Kp = adapt_gain * (1.0f + state->adaptive_gains[i]);
-                    float Kd = adapt_gain * 0.2f * (1.0f + state->adaptive_gains[i + 6]);
-                    control_output[i] = -Kp * e[i] - Kd * (e[i] - state->prev_error[i]) / (dt + 1e-6f);
-                    /* 自适应增益更新 */
-                    state->adaptive_gains[i] += adapt_term;
-                    if (state->adaptive_gains[i] < -0.5f) state->adaptive_gains[i] = -0.5f;
-                    if (state->adaptive_gains[i] > 5.0f) state->adaptive_gains[i] = 5.0f;
+                    s[i] = omega_n_sq * (p12 * e[i] + p22 * ((i < 5) ? e[i + 1] : 0.0f));
+                }
+
+                /* ---- 步骤5: 自适应增益更新 ---- */
+                /* 自适应增益矩阵 Γ（对角简化） */
+                float gamma_x = 0.5f;  /* Kx自适应率 */
+                float gamma_r = 0.1f;  /* Kr自适应率 */
+
+                /* Kx_diag: 反馈增益（6个对角线元素 = 6个关节位置误差增益） */
+                /* Kr_diag: 前馈增益（6个对角线元素 = 6个关节前馈增益） */
+                for (int i = 0; i < 6; i++) {
+                    /* Kx更新: dKx/dt = -Γ_x * s * x^T
+                     * 对角线简化: Kx_i = Kx_i - γ_x * s_i * x_i */
+                    float delta_kx = -gamma_x * s[i] * current_state[i] * dt;
+                    state->adaptive_gains[i] += delta_kx;
+                    /* 投影算子：限制Kx在[-2, 10]范围内 */
+                    if (state->adaptive_gains[i] < -2.0f) state->adaptive_gains[i] = -2.0f;
+                    if (state->adaptive_gains[i] > 10.0f) state->adaptive_gains[i] = 10.0f;
+
+                    /* Kr更新: dKr/dt = -Γ_r * s * r^T
+                     * 对角线简化: Kr_i = Kr_i - γ_r * s_i * r_i */
+                    float delta_kr = -gamma_r * s[i] * state->mrac_ref_command[i] * dt;
+                    state->adaptive_gains[i + 6] += delta_kr;
+                    /* 投影算子：限制Kr在[-5, 5]范围内 */
+                    if (state->adaptive_gains[i + 6] < -5.0f) state->adaptive_gains[i + 6] = -5.0f;
+                    if (state->adaptive_gains[i + 6] > 5.0f) state->adaptive_gains[i + 6] = 5.0f;
+                }
+
+                /* ---- 步骤6: 计算控制输出 ---- */
+                /* u = Kx*x + Kr*r + u_robust
+                 * 其中u_robust = -η*sign(e^T*P*Bm)是鲁棒项，处理未建模动态 */
+                for (int i = 0; i < 6; i++) {
+                    /* Kx_i * x_i */
+                    float u_kx = state->adaptive_gains[i] * current_state[i];
+                    /* Kr_i * r_i */
+                    float u_kr = state->adaptive_gains[i + 6] * state->mrac_ref_command[i];
+                    /* 鲁棒项（基于σ修正的泄漏项，防止参数漂移） */
+                    float u_robust = -0.01f * e[i];
+                    /* 合成控制信号 */
+                    control_output[i] = u_kx + u_kr + u_robust;
+                }
+
+                /* ---- 步骤7: 控制输出限幅 ---- */
+                for (int i = 0; i < 6; i++) {
+                    if (control_output[i] > 50.0f) control_output[i] = 50.0f;
+                    if (control_output[i] < -50.0f) control_output[i] = -50.0f;
+                }
+
+                /* 保存误差用于诊断 */
+                for (int i = 0; i < 6; i++) {
                     state->prev_error[i] = e[i];
                 }
             }

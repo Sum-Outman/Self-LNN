@@ -116,6 +116,10 @@
     function fetchKnowledgeFromBackend() {
         graphState.loading = true;
         SelfLnnApi.request('/knowledge', { method: 'GET' })
+            .then(function(response) {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                return response.json();
+            })
             .then(function(data) {
                 var resp = data.data || data;
                 if (resp && resp.knowledge && resp.knowledge.entries) {
@@ -229,10 +233,14 @@
 
     function deleteEntry(id) {
         SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ entry_id: id }) })
+            .then(function(response) {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                return response.json();
+            })
             .then(function() {
                 fetchKnowledgeFromBackend();
             })
-            .catch(function() {
+            .catch(function(err) {
                 showStatus('add-status', '后端未连接——删除失败（遵循禁止虚假数据原则）', 'error');
             });
     }
@@ -286,6 +294,10 @@
 
     function refreshStats() {
         SelfLnnApi.request('/knowledge', {method: 'GET'})
+            .then(function(response) {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                return response.json();
+            })
             .then(function(data) {
                 var resp = data.data || data;
                 if (resp && resp.knowledge) {
@@ -325,7 +337,9 @@
             }
             nodes[e.subject].connections++;
             nodes[e.object].connections++;
-            edges.push({ source: e.subject, target: e.object, label: e.predicate, weight: e.weight || (e.confidence ? e.confidence : 0.5) });
+            /* F-001修复: 优先使用后端返回的真实权重，回退到置信度，仅最后兜底使用0.5 */
+            var edgeWeight = (e.weight >= 0) ? e.weight : ((e.confidence >= 0) ? e.confidence : 0.5);
+            edges.push({ source: e.subject, target: e.object, label: e.predicate, weight: edgeWeight });
         });
 
         var nodeList = [];
@@ -729,6 +743,10 @@
     function clearGraph() {
         if (confirm('确定要清空所有知识条目吗？')) {
             SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ clear_all: true }) })
+                .then(function(response) {
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    return response.json();
+                })
                 .then(function() { fetchKnowledgeFromBackend(); })
                 .catch(function() {
                     showStatus('add-status', '后端未连接——清空失败（遵循禁止虚假数据原则）', 'error');

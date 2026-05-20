@@ -773,6 +773,203 @@ int quaternion_lnn_forward(QuaternionLNN* network, const float* input,
     return 0;
 }
 
+/* ================================================================
+ * S-003: 真正的四元数层归一化
+ *
+ * 核心思想：在四元数 SO(3) 流形上直接归一化，不转换到欧拉角
+ *
+ * 算法步骤：
+ * 1. Karcher均值 (最小弧长平均):
+ *    迭代求解 Σ log(μ^{-1} * q_i) = 0 的不动点
+ *    μ_{k+1} = μ_k * exp( (1/n) * Σ log(μ_k^{-1} * q_i) )
+ *
+ * 2. 测地方差 (geodesic variance):
+ *    σ² = (1/n) * Σ d_geodesic(q_i, μ)²
+ *    d_geodesic(p,q) = 2 * arccos(|p·q|)  （单位四元数）
+ *
+ * 3. 归一化:
+ *    q_norm_i = μ * exp( log(μ^{-1} * q_i) / max(√σ², ε) )
+ *
+ * 四元数对数映射 log: S³ → R³
+ *   q = (cosθ, sinθ*v), |v|=1
+ *   log(q) = θ*v = acos(w) * (x,y,z) / |(x,y,z)|
+ *
+ * 四元数指数映射 exp: R³ → S³
+ *   |v| = θ
+ *   exp(v) = (cosθ, sinθ * v/θ)
+ * ================================================================ */
+
+/* 四元数对数映射: 从四元数空间映射到切空间 R³
+ * 输入: 单位四元数 q = (w, (x,y,z))
+ * 输出: 切空间向量 (vx, vy, vz)
+ * 返回值: 切向量的范数（旋转角度） */
+static float quat_log_map(const Quaternion* q, float* vx, float* vy, float* vz)
+{
+    float vec_norm = sqrtf(q->x * q->x + q->y * q->y + q->z * q->z);
+    if (vec_norm < 1e-12f) {
+        *vx = 0.0f; *vy = 0.0f; *vz = 0.0f;
+        return 0.0f;
+    }
+    float w_clamped = q->w;
+    if (w_clamped > 1.0f) w_clamped = 1.0f;
+    if (w_clamped < -1.0f) w_clamped = -1.0f;
+    float theta = acosf(w_clamped);
+    float inv_vn = 1.0f / vec_norm;
+    *vx = q->x * inv_vn * theta;
+    *vy = q->y * inv_vn * theta;
+    *vz = q->z * inv_vn * theta;
+    return theta;
+}
+
+/* 四元数指数映射: 从切空间 R³ 映射回四元数空间
+ * 输入: 切空间向量 (vx, vy, vz)
+ * 输出: 单位四元数 q */
+static Quaternion quat_exp_map(float vx, float vy, float vz)
+{
+    Quaternion result;
+    float theta = sqrtf(vx * vx + vy * vy + vz * vz);
+    if (theta < 1e-12f) {
+        result = quaternion_create(1.0f, 0.0f, 0.0f, 0.0f);
+        return result;
+    }
+    float sin_theta_over = sinf(theta) / theta;
+    result.w = cosf(theta);
+    result.x = vx * sin_theta_over;
+    result.y = vy * sin_theta_over;
+    result.z = vz * sin_theta_over;
+    return result;
+}
+
+/* 测地距离: 两个单位四元数之间的最短弧长距离
+ * d(p, q) = 2 * arccos(|p·q|) */
+static float quat_geodesic_distance(const Quaternion* p, const Quaternion* q)
+{
+    float dot = p->w * q->w + p->x * q->x + p->y * q->y + p->z * q->z;
+    if (dot < -1.0f) dot = -1.0f;
+    if (dot > 1.0f) dot = 1.0f;
+    dot = fabsf(dot);
+    if (dot > 1.0f) dot = 1.0f;
+    return 2.0f * acosf(dot);
+}
+
+/* Karcher均值: 迭代求解四元数集合的最小弧长平均
+ * 不动点迭代: μ_{k+1} = μ_k * exp( (1/n) * Σ log(μ_k^{-1} * q_i) ) */
+static int quat_karcher_mean(const Quaternion* quats, size_t count,
+                              int max_iter, Quaternion* mean)
+{
+    if (count == 0) {
+        *mean = quaternion_create(1.0f, 0.0f, 0.0f, 0.0f);
+        return -1;
+    }
+    if (count == 1) {
+        *mean = quats[0];
+        return 0;
+    }
+
+    /* 初始猜测: 所有四元数的简单平均（欧氏空间）然后归一化 */
+    float sw = 0.0f, sx = 0.0f, sy = 0.0f, sz = 0.0f;
+    for (size_t i = 0; i < count; i++) {
+        sw += quats[i].w;
+        sx += quats[i].x;
+        sy += quats[i].y;
+        sz += quats[i].z;
+    }
+    float euc_norm = sqrtf(sw * sw + sx * sx + sy * sy + sz * sz);
+    if (euc_norm < 1e-10f) {
+        *mean = quaternion_create(1.0f, 0.0f, 0.0f, 0.0f);
+        return 0;
+    }
+    mean->w = sw / euc_norm;
+    mean->x = sx / euc_norm;
+    mean->y = sy / euc_norm;
+    mean->z = sz / euc_norm;
+
+    float convergence_threshold = 1e-6f;
+    for (int iter = 0; iter < max_iter; iter++) {
+        /* 计算在切空间的平均梯度: (1/n) * Σ log(μ^{-1} * q_i) */
+        float avg_vx = 0.0f, avg_vy = 0.0f, avg_vz = 0.0f;
+        for (size_t i = 0; i < count; i++) {
+            /* 计算 μ^{-1} * q_i */
+            Quaternion mu_inv = quaternion_conjugate(mean);
+            Quaternion delta = quaternion_multiply(&mu_inv, &quats[i]);
+            float dvx, dvy, dvz;
+            quat_log_map(&delta, &dvx, &dvy, &dvz);
+            avg_vx += dvx;
+            avg_vy += dvy;
+            avg_vz += dvz;
+        }
+        float inv_n = 1.0f / (float)count;
+        avg_vx *= inv_n;
+        avg_vy *= inv_n;
+        avg_vz *= inv_n;
+
+        float grad_norm = sqrtf(avg_vx * avg_vx + avg_vy * avg_vy + avg_vz * avg_vz);
+        if (grad_norm < convergence_threshold) break;
+
+        /* 更新: μ_{k+1} = μ_k * exp(gradient) */
+        Quaternion delta_mean = quat_exp_map(avg_vx, avg_vy, avg_vz);
+        Quaternion new_mean = quaternion_multiply(mean, &delta_mean);
+        *mean = quaternion_normalize(&new_mean);
+    }
+    return 0;
+}
+
+int quaternion_lnn_layer_normalize(Quaternion* quaternions, size_t count,
+                                    float epsilon, int max_iterations)
+{
+    if (!quaternions || count == 0) return -1;
+
+    if (epsilon <= 0.0f) epsilon = 1e-5f;
+    if (max_iterations <= 0) max_iterations = 20;
+
+    /* 步骤0: 确保所有输入四元数是单位的 */
+    for (size_t i = 0; i < count; i++) {
+        quaternions[i] = quaternion_normalize(&quaternions[i]);
+    }
+
+    /* 步骤1: 计算Karcher均值（最小弧长平均） */
+    Quaternion mean;
+    quat_karcher_mean(quaternions, count, max_iterations, &mean);
+
+    /* 步骤2: 计算测地方差
+     * σ² = (1/n) * Σ d_geodesic(q_i, μ)² */
+    float geodesic_var = 0.0f;
+    for (size_t i = 0; i < count; i++) {
+        float dist = quat_geodesic_distance(&quaternions[i], &mean);
+        geodesic_var += dist * dist;
+    }
+    geodesic_var /= (float)count;
+
+    /* 步骤3: 归一化每个四元数
+     * q_norm_i = μ * exp( log(μ^{-1} * q_i) / max(√σ², ε) ) */
+    float std_dev = sqrtf(geodesic_var);
+    if (std_dev < epsilon) std_dev = epsilon;
+
+    Quaternion mu_inv = quaternion_conjugate(&mean);
+    for (size_t i = 0; i < count; i++) {
+        /* 计算相对四元数: μ^{-1} * q_i */
+        Quaternion delta = quaternion_multiply(&mu_inv, &quaternions[i]);
+
+        /* 对数映射到切空间 */
+        float dvx, dvy, dvz;
+        quat_log_map(&delta, &dvx, &dvy, &dvz);
+
+        /* 除以标准差（在切空间中缩放） */
+        dvx /= std_dev;
+        dvy /= std_dev;
+        dvz /= std_dev;
+
+        /* 指数映射回四元数空间 */
+        Quaternion scaled_delta = quat_exp_map(dvx, dvy, dvz);
+
+        /* q_norm = μ * scaled_delta */
+        quaternions[i] = quaternion_multiply(&mean, &scaled_delta);
+        quaternions[i] = quaternion_normalize(&quaternions[i]);
+    }
+
+    return 0;
+}
+
 /**
  * @brief 四元数反向传播（训练）
  */

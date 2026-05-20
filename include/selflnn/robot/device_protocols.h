@@ -36,6 +36,9 @@ typedef enum {
     MODBUS_FC_WRITE_MULTI_REG = 16
 } ModbusFunctionCode;
 
+/* 以下类型若已在 hardware_interface.h 中定义则跳过 */
+#ifndef SELFLNN_HARDWARE_INTERFACE_MODBUS_CONFIG_DEFINED
+#define SELFLNN_HARDWARE_INTERFACE_MODBUS_CONFIG_DEFINED
 typedef struct {
     char port[64];
     int baud_rate;
@@ -46,13 +49,17 @@ typedef struct {
     int timeout_ms;
     int retries;
 } ModbusConfig;
+#endif
 
+#ifndef SELFLNN_HARDWARE_INTERFACE_CAN_CONFIG_DEFINED
+#define SELFLNN_HARDWARE_INTERFACE_CAN_CONFIG_DEFINED
 typedef struct {
     char interface[64];
     int bit_rate;
     int is_extended_id;
     int timeout_ms;
 } CanConfig;
+#endif
 
 typedef struct {
     char endpoint_url[256];

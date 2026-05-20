@@ -120,10 +120,14 @@ typedef struct {
     float desired_damping[6];
     float estimated_disturbance[6];
     /* K-修复: 自适应控制和导纳控制状态字段 */
-    float adaptive_gains[12];         /**< MRAC自适应增益 [6 Kp + 6 Kd] */
+    float adaptive_gains[12];         /**< MRAC自适应增益 [6 Kx_diag + 6 Kr_diag] */
     float prev_error[6];              /**< 上一帧位置误差 */
     float admittance_velocity[6];     /**< 导纳控制虚拟速度 */
     float admittance_position[6];     /**< 导纳控制虚拟位置 */
+    /* V-026: MRAC参考模型状态 */
+    float mrac_reference_state[6];    /**< 参考模型状态向量 xm = [pos, vel] */
+    float mrac_ref_command[6];        /**< 参考模型输入命令 r（即目标状态） */
+    int mrac_ref_initialized;         /**< 参考模型是否已初始化 */
     int control_count;
 } AdvancedControlState;
 

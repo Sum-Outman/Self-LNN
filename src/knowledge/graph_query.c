@@ -725,73 +725,76 @@ SubgraphMatchSet* graph_query_match_pattern(AdjacencyList* al,
             continue;
         }
 
-        /* 多节点模式：从起始节点做DFS匹配 */
-        int depth_unused = 1;
-        (void)depth_unused;
+        /* 多节点模式：从起始节点做递归DFS VF2匹配 */
         int* stack_nodes = (int*)safe_malloc(
             (size_t)pattern->node_count * sizeof(int));
         int* stack_pat = (int*)safe_malloc(
             (size_t)pattern->node_count * sizeof(int));
-        int* stack_ni = (int*)safe_malloc(
-            (size_t)pattern->node_count * sizeof(int));
-        if (!stack_nodes || !stack_pat || !stack_ni) {
+        int* dfs_stack = (int*)safe_malloc(
+            (size_t)pattern->node_count * 3 * sizeof(int));
+        if (!stack_nodes || !stack_pat || !dfs_stack) {
             safe_free((void**)&stack_nodes);
             safe_free((void**)&stack_pat);
-            safe_free((void**)&stack_ni);
+            safe_free((void**)&dfs_stack);
             safe_free((void**)&matched_ids);
             break;
         }
 
-        /* 选择下一个未匹配的模式节点 */
-        int next_pat = -1;
-        for (int j = 1; j < pattern->node_count; j++) {
-            if (!used_pattern[j]) { next_pat = j; break; }
-        }
+        /* VF2递归深度优先匹配：stack[3*d]={graph_node, pat_node, next_nb_idx} */
+        int dfs_depth = 0;
+        dfs_stack[0] = matched_ids[0]; dfs_stack[1] = 0; dfs_stack[2] = 0;
+        used_pattern[0] = 1;
+        int all_matched = 0;
 
-        if (next_pat < 0) {
-            safe_free((void**)&stack_nodes);
-            safe_free((void**)&stack_pat);
-            safe_free((void**)&stack_ni);
-            if (set->match_count >= set->capacity) {
-                size_t new_cap = set->capacity == 0 ? 16 : set->capacity * 2;
-                SubgraphMatchResult* new_m = (SubgraphMatchResult*)safe_realloc(
-                    set->matches, new_cap * sizeof(SubgraphMatchResult));
-                if (!new_m) { safe_free((void**)&matched_ids); break; }
-                set->matches = new_m;
-                set->capacity = new_cap;
+        while (dfs_depth >= 0 && !all_matched) {
+            int cur_g = dfs_stack[dfs_depth * 3];
+            int cur_p = dfs_stack[dfs_depth * 3 + 1];
+            int nb_start = dfs_stack[dfs_depth * 3 + 2];
+
+            /* 获取当前图谱节点的邻居 */
+            int nb[1024];
+            int nb_count = adjacency_list_get_out_neighbors(al, cur_g, nb, NULL, 1024);
+
+            int found_next = 0;
+            for (int ni = nb_start; ni < nb_count && !found_next; ni++) {
+                int cand = nb[ni];
+                const ALNode* cn = adjacency_list_get_node(al, cand);
+                if (!cn) continue;
+
+                /* 寻找未匹配的模式节点中与邻居标签匹配的 */
+                for (int pj = 0; pj < pattern->node_count && !found_next; pj++) {
+                    if (used_pattern[pj]) continue;
+                    const char* want = pattern->node_labels[pj];
+                    int ok = (want[0] == '\0') ? 1 : 0;
+                    if (!ok && cn->label) ok = (strcmp(cn->label, want) == 0);
+                    if (!ok) continue;
+
+                    /* 找到匹配：推进深度 */
+                    dfs_stack[dfs_depth * 3 + 2] = ni + 1;
+                    dfs_depth++;
+                    dfs_stack[dfs_depth * 3] = cand;
+                    dfs_stack[dfs_depth * 3 + 1] = pj;
+                    dfs_stack[dfs_depth * 3 + 2] = 0;
+                    used_pattern[pj] = 1;
+                    matched_ids[dfs_depth] = cand;
+                    found_next = 1;
+
+                    if (dfs_depth + 1 >= (int)pattern->node_count) {
+                        all_matched = 1;
+                    }
+                }
             }
-            set->matches[set->match_count].matched_node_ids = matched_ids;
-            set->matches[set->match_count].node_count = (size_t)pattern->node_count;
-            set->matches[set->match_count].source_engine_type = 0;
-            set->matches[set->match_count].similarity = 1.0f;
-            set->matches[set->match_count].matched_labels = NULL;
-            set->match_count++;
-            safe_free((void**)&stack_nodes);
-            safe_free((void**)&stack_pat);
-            safe_free((void**)&stack_ni);
-            continue;
+
+            if (!found_next && !all_matched) {
+                /* 回溯 */
+                used_pattern[cur_p] = 0;
+                dfs_depth--;
+            }
         }
 
-        int found_match = 0;
-        int nb[1024];
-        int nb_count = adjacency_list_get_out_neighbors(al, start_ids[si],
-                                                        nb, NULL, 1024);
-        for (int ni = 0; ni < nb_count && !found_match; ni++) {
-            int cand = nb[ni];
-            const ALNode* cn = adjacency_list_get_node(al, cand);
-            if (!cn) continue;
-            const char* want_label = pattern->node_labels[next_pat];
-            int label_match = (want_label[0] == '\0') ? 1 : 0;
-            if (!label_match && cn->label)
-                label_match = (strcmp(cn->label, want_label) == 0);
-            if (!label_match) continue;
+        safe_free((void**)&dfs_stack);
 
-            matched_ids[1] = cand;
-            used_pattern[next_pat] = 1;
-            found_match = 1;
-        }
-
-        if (found_match) {
+        if (all_matched) {
             if (set->match_count >= set->capacity) {
                 size_t new_cap = set->capacity == 0 ? 16 : set->capacity * 2;
                 SubgraphMatchResult* new_m = (SubgraphMatchResult*)safe_realloc(
@@ -799,7 +802,6 @@ SubgraphMatchSet* graph_query_match_pattern(AdjacencyList* al,
                 if (!new_m) {
                     safe_free((void**)&stack_nodes);
                     safe_free((void**)&stack_pat);
-                    safe_free((void**)&stack_ni);
                     safe_free((void**)&matched_ids);
                     break;
                 }
@@ -818,7 +820,6 @@ SubgraphMatchSet* graph_query_match_pattern(AdjacencyList* al,
 
         safe_free((void**)&stack_nodes);
         safe_free((void**)&stack_pat);
-        safe_free((void**)&stack_ni);
 
         if (set->match_count >= opt.max_results) break;
     }

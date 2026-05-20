@@ -1298,13 +1298,25 @@ static float maml_inner_loop(AdaptationContext* ctx, float inner_learning_rate) 
 /**
  * @brief 执行MAML外循环更新（完整算法实现）
  * 
- * 支持一阶MAML（FOMAML）和二阶MAML：
- * - 一阶：θ = θ - β * ∇L_query(θ')
- * - 二阶：θ = θ - β * (∇L_query(θ') - α * ∇²L_train(θ) · ∇L_query(θ'))
+ * S-009修复: 正确的MAML二阶梯度计算
+ * 
+ * MAML元梯度公式:
+ *   ∇_meta L = ∇L_query(θ') - α·∇²L_support(θ)·∇L_query(θ')
+ * 
+ * 其中:
+ *   θ   = 初始元模型参数
+ *   θ'  = 内循环适应后的参数: θ' = θ - α·∇L_support(θ)
+ *   v   = ∇L_query(θ')  → 查询集损失在适应后模型上的梯度
+ *   HVP = ∇²L_support(θ)·v → 支持集损失在初始参数处的Hessian-向量积
+ * 
+ * 支持一阶MAML（FOMAML）近似：
+ *   - 一阶：θ = θ - β·∇L_query(θ')  （忽略Hessian项）
+ *   - 二阶：θ = θ - β·(∇L_query(θ') - α·∇²L_support(θ)·∇L_query(θ'))
  * 
  * 二阶更新使用中心差分法计算Hessian-向量积（HVP）：
- *   HVP = ∇²L_train(θ) · v ≈ (g(θ+εv̂) - g(θ-εv̂)) / (2ε)
- *   其中 v = ∇L_query(θ'), v̂ = v/|v|, g(θ) = ∇L_train(θ)
+ *   HVP = ∇²L_support(θ)·v ≈ (g(θ+εv̂) - g(θ-εv̂)) / (2ε)
+ *   其中 g(θ) = ∇L_support(θ), v̂ = v/|v|
+ *   注意: g(θ) 是在初始参数θ上评估支持集损失梯度，不是适应后参数θ'
  */
 static float maml_outer_update(MetaLearner* learner, AdaptationContext* ctx,
                               float query_loss) {
@@ -2576,16 +2588,32 @@ float meta_learner_maml_step(MetaLearner* learner, const MetaTask* task) {
         return 0.0f;
     }
     
-    // 7. 计算查询损失（直接使用已有的适应后模型，无需重新创建）
+    // 7. S-009修复: 计算查询集梯度（在适应后模型上）
+    //    MAML的正确二阶梯度要求：
+    //    外循环梯度 = ∇L_query(θ') - α·∇²L_support(θ)·∇L_query(θ')
+    //    需要分别计算：v_query = ∇L_query(θ') 在适应后模型上
+    //                 HVP = ∇²L_support(θ)·v_query 在初始模型上
+    float* query_gradients = init_parameter_array(learner->parameter_count, 0.0f);
+    if (query_gradients) {
+        int qgrad_result = compute_model_gradients(adapted_model, task,
+                                                 0.0f, query_gradients, learner->parameter_count);
+        if (qgrad_result == 0) {
+            /* 将查询集梯度复制到task_gradients，供外循环使用 */
+            memcpy(ctx.task_gradients, query_gradients, learner->parameter_count * sizeof(float));
+        }
+        safe_free((void**)&query_gradients);
+    }
+    
+    // 8. 计算查询损失（在适应后模型上评估）
     float query_loss = compute_task_loss(adapted_model, task);
     ctx.query_loss = query_loss;
     
-    // 8. 执行MAML外循环更新（此时task_gradients仍然有效）
+    // 9. 执行MAML外循环更新（task_gradients现在是查询集梯度）
     // 注意：外循环更新需要task_gradients计算Hessian-向量积，
     // 因此在完成外循环更新之前不能释放梯度缓冲区
     float meta_loss = maml_outer_update(learner, &ctx, query_loss);
     
-    // 9. 清理适应后模型和梯度缓冲区
+    // 10. 清理适应后模型和梯度缓冲区
     safe_free((void**)&ctx.task_gradients);
     lnn_free((LNN*)adapted_model);
     

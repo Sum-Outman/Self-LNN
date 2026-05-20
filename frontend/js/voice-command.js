@@ -68,26 +68,67 @@ class VoiceCommandSystem {
             return;
         }
         try {
-            var result = await VoiceCaptureUtil.uploadBlob(audioBlob);
-            if (result.success && result.text) {
-                var commandResult = this.commandEngine.parseCommand(result.text);
-                commandResult.originalText = result.text;
-                /* F-019修复：不使用假默认置信度0.8，未提供时设为-1表示未知 */
-                commandResult.confidence = (result.confidence !== undefined && result.confidence !== null && result.confidence >= 0)
-                    ? result.confidence : -1;
-                if (commandResult.command) {
-                    await this.commandEngine.executeCommand(commandResult);
-                }
-                if (this.onCommandResult) this.onCommandResult(commandResult);
-            } else {
+            var uploadResult = await VoiceCaptureUtil.uploadBlob(audioBlob);
+            /* F-004修复: 严格区分三层返回状态：API失败 / 识别无内容 / 识别成功 */
+            if (!uploadResult.success) {
                 if (this.onCommandResult) {
-                    this.onCommandResult({ success: false, error: result.error || '语音识别失败', command: null });
+                    this.onCommandResult({
+                        success: false,
+                        error: uploadResult.error || '语音上传/识别失败，服务器未响应',
+                        command: null,
+                        originalText: null,
+                        confidence: -1
+                    });
                 }
+                this.isProcessing = false;
+                return;
             }
+            /* API成功但未识别到任何文本内容 */
+            if (!uploadResult.text || (typeof uploadResult.text === 'string' && uploadResult.text.trim().length === 0)) {
+                if (this.onCommandResult) {
+                    this.onCommandResult({
+                        success: false,
+                        error: '语音未识别到有效文本内容',
+                        command: null,
+                        originalText: null,
+                        confidence: -1
+                    });
+                }
+                this.isProcessing = false;
+                return;
+            }
+            /* 识别成功，解析指令 */
+            var commandResult = this.commandEngine.parseCommand(uploadResult.text);
+            commandResult.originalText = uploadResult.text;
+            /* F-019修复：不使用假默认置信度0.8，未提供时设为-1表示未知 */
+            commandResult.confidence = (uploadResult.confidence !== undefined && uploadResult.confidence !== null && uploadResult.confidence >= 0)
+                ? uploadResult.confidence : -1;
+            /* 验证parseCommand返回格式 */
+            if (commandResult.success && commandResult.command) {
+                var execResult = await this.commandEngine.executeCommand(commandResult);
+                /* 附加执行结果到commandResult */
+                commandResult.execSuccess = execResult ? execResult.success : false;
+                commandResult.execMessage = execResult ? execResult.message : null;
+                commandResult.execError = execResult ? execResult.error : null;
+            } else if (commandResult.success && !commandResult.command) {
+                /* 识别到文本但未匹配到指令 */
+                commandResult._noCommand = true;
+            } else {
+                /* parseCommand返回了失败状态 */
+                commandResult.success = false;
+                commandResult.error = commandResult.error || '指令解析异常';
+            }
+            if (this.onCommandResult) this.onCommandResult(commandResult);
         } catch (err) {
             console.error('语音处理失败:', err);
             if (this.onCommandResult) {
-                this.onCommandResult({ success: false, error: '语音处理失败: ' + err.message, command: null });
+                this.onCommandResult({
+                    success: false,
+                    error: '语音处理异常: ' + (err.message || '未知错误'),
+                    command: null,
+                    originalText: null,
+                    confidence: -1
+                });
             }
         } finally {
             this.isProcessing = false;

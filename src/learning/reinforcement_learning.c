@@ -979,37 +979,49 @@ static int rl_ppo_train(RLAgent* agent, int batch_size)
     }
 
     /*
-     * 完整GAE (Generalized Advantage Estimation) 实现
+     * S-007修复: 完整GAE (Generalized Advantage Estimation) 实现
      * Schulman et al. 2016
      *
+     * 步骤0：计算所有样本的旧策略对数概率（用于PPO重要性采样比例）
      * 步骤1：前向计算所有状态值V(s_t)和V(s_{t+1})
      * 步骤2：计算TD残差 δ_t = r_t + γ·V(s_{t+1})·(1-done_t) - V(s_t)
      * 步骤3：反向递推 GAE_t = δ_t + γ·λ·(1-done_t)·GAE_{t+1}
      * 步骤4：标准化优势函数（均值0，标准差1）
      */
+
+    /* 步骤0: 计算所有样本的旧策略对数概率（PPO重要性采样所需） */
+    for (int i = 0; i < actual; i++) {
+        float probs[RL_MAX_ACTION_DIM];
+        int sel_a = 0;
+        old_log_probs[i] = rl_ppo_get_action_probs(agent, samples[i].state,
+            samples[i].state_dim, probs, &sel_a);
+    }
+
+    /* 步骤1: 前向计算所有状态值V(s_t) */
     for (int i = 0; i < actual; i++) {
         float v = 0.0f;
         lnn_forward(critic, samples[i].state, &v);
         values[i] = v;
     }
 
-    /* 反向递推GAE */
+    /* 步骤2-3: 反向递推GAE */
     float last_gae = 0.0f;
     for (int i = actual - 1; i >= 0; i--) {
+        /* TD残差: δ_t = r_t + γ·V(s_{t+1})·(1-done_t) - V(s_t) */
         float delta = samples[i].reward - values[i];
         if (!samples[i].done) {
             float next_v = 0.0f;
             lnn_forward(critic, samples[i].next_state, &next_v);
             delta += pc->gamma * next_v;
-            last_gae = delta + pc->gamma * pc->gae_lambda * last_gae;
-        } else {
-            last_gae = delta;
         }
+        /* GAE递推: A_t^{GAE(γ,λ)} = δ_t + γ·λ·(1-done_t)·A_{t+1}^{GAE(γ,λ)} */
+        float done_mask = samples[i].done ? 0.0f : 1.0f;
+        last_gae = delta + pc->gamma * pc->gae_lambda * done_mask * last_gae;
         advantages[i] = last_gae;
         returns[i] = advantages[i] + values[i];
     }
 
-    /* 优势函数标准化 */
+    /* 步骤4: 优势函数标准化（零均值、单位方差，提升训练稳定性） */
     float adv_mean = 0.0f, adv_std = 0.0f;
     for (int i = 0; i < actual; i++) adv_mean += advantages[i];
     adv_mean /= (float)actual;

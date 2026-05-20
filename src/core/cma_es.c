@@ -87,34 +87,47 @@ static void cmaes_jacobi_eigen(float* C, size_t n, float* diag, float* Q) {
     }
 }
 
+/* ZSFABC-P0-005修复: 矩阵平方根/逆平方根公式修正
+ * 原理: 矩阵C的特征分解 C = Q * D * Q^T
+ * sqrt(C) = Q * sqrt(D) * Q^T
+ * inv_sqrt(C) = Q * inv_sqrt(D) * Q^T
+ * 原代码错误: sqrt_d_i被用于所有k而非sqrt_d_k，且Q^T用Q[k][i]替代Q[i][k] */
 static void cmaes_sym_matrix_sqrt(const float* C, size_t n, float* sqrt_C, float* inv_sqrt_C) {
     float* work = (float*)malloc(n * n * sizeof(float));
     float* diag = (float*)malloc(n * sizeof(float));
     float* Q = (float*)malloc(n * n * sizeof(float));
-    if (!work || !diag || !Q) {
-        free(work); free(diag); free(Q);
+    float* temp_inv = (float*)malloc(n * n * sizeof(float));
+    if (!work || !diag || !Q || !temp_inv) {
+        free(work); free(diag); free(Q); free(temp_inv);
         return;
     }
     memcpy(work, C, n * n * sizeof(float));
     cmaes_jacobi_eigen(work, n, diag, Q);
 
+    /* 步骤1: 计算 Q * sqrt(D) 存入 work, Q * inv_sqrt(D) 存入 temp_inv */
     for (size_t i = 0; i < n; i++) {
-        float d = diag[i];
-        float sqrt_d = sqrtf(d > 0 ? d : 0);
-        float inv_sqrt_d = d > 1e-15f ? 1.0f / sqrtf(d) : 0;
+        float sd = sqrtf(diag[i] > 0 ? diag[i] : 0);
+        float isd = (diag[i] > 1e-15f) ? 1.0f / sqrtf(diag[i]) : 0;
         for (size_t j = 0; j < n; j++) {
-            work[j * n + i] = Q[j * n + i] * sqrt_d;
-        }
-        for (size_t j = 0; j < n; j++) {
-            sqrt_C[j * n + i] = 0;
-            inv_sqrt_C[j * n + i] = 0;
-            for (size_t k = 0; k < n; k++) {
-                sqrt_C[j * n + i] += Q[j * n + k] * work[k * n + i];
-                inv_sqrt_C[j * n + i] += Q[j * n + k] * work[k * n + i] * inv_sqrt_d;
-            }
+            work[j * n + i] = Q[j * n + i] * sd;
+            temp_inv[j * n + i] = Q[j * n + i] * isd;
         }
     }
-    free(work); free(diag); free(Q);
+
+    /* 步骤2: sqrt_C = (Q * sqrt(D)) * Q^T, inv_sqrt_C = (Q * inv_sqrt(D)) * Q^T */
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = 0; j < n; j++) {
+            float sum_sqrt = 0, sum_inv = 0;
+            for (size_t k = 0; k < n; k++) {
+                sum_sqrt += work[i * n + k] * Q[j * n + k];
+                sum_inv += temp_inv[i * n + k] * Q[j * n + k];
+            }
+            sqrt_C[i * n + j] = sum_sqrt;
+            inv_sqrt_C[i * n + j] = sum_inv;
+        }
+    }
+
+    free(work); free(diag); free(Q); free(temp_inv);
 }
 
 CMAESState* cmaes_alloc(size_t dimension, float sigma, int lambda, int seed) {
@@ -580,8 +593,17 @@ void cmaes_enable_active_cma(CMAESState* state, int enable) {
 /**
  * @brief IPOP重启（增量种群优化）
  * 
- * 当CMA-ES收敛到局部最优时，将种群大小翻倍并重新启动。
- * 这有助于跳出局部最优并探索更广阔的搜索空间。
+ * S-002修复: 完整的IPOP(Increasing Population)策略实现。
+ * 
+ * IPOP策略原理:
+ * - CMA-ES收敛到局部最优时，将种群大小翻倍并重新启动
+ * - 每次重启: λ_new = λ_base * (IPOP_MULTIPLIER)^restart
+ * - 更大的种群提供更全局的搜索能力，有助于跳出局部最优
+ * 
+ * 修复要点:
+ * - 保存dimension在cmaes_free之前（避免zero-out丢失维度信息）
+ * - 保存旧的最优均值作为重启起点
+ * - 递增种群倍数保证搜索空间逐步扩大
  */
 int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user_data,
                          int max_restarts) {
@@ -595,34 +617,44 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
 
     int old_lambda = state->lambda;
     float old_sigma = state->sigma;
+    /* S-002: 保存dimension，防止cmaes_free清零 */
+    size_t saved_dim = state->dimension;
 
     for (int restart = 0; restart <= max_restarts; restart++) {
         state->ipop_restart_count = restart;
 
         if (restart > 0) {
+            /* IPOP策略: 每次重启种群大小翻倍 */
             int new_lambda = (int)((float)old_lambda * powf(CMAES_IPOP_POP_MULTIPLIER, (float)restart));
             if (new_lambda > CMAES_MAX_POP) new_lambda = CMAES_MAX_POP;
             if (new_lambda <= state->lambda) new_lambda = state->lambda + CMAES_MIN_POP;
 
-            float* old_mean = (float*)malloc(state->dimension * sizeof(float));
+            /* 保存当前最优均值作为重启种子 */
+            float* old_mean = (float*)malloc(saved_dim * sizeof(float));
             if (old_mean) {
-                memcpy(old_mean, state->mean, state->dimension * sizeof(float));
+                memcpy(old_mean, state->mean, saved_dim * sizeof(float));
             }
 
+            /* S-002: 保存sigma，因为在cmaes_free中会清零 */
+            float saved_sigma_restart = state->sigma;
             int seed = (int)(state->rng_state + (unsigned int)restart * 12345u);
+
+            /* 释放旧状态（会清零整个结构体） */
             cmaes_free(state);
 
-            memset(state, 0, sizeof(CMAESState));
-            if (cmaes_init(state, state->dimension, old_sigma, new_lambda, seed) != 0) {
+            /* S-002: 使用保存的dimension初始化新状态 */
+            if (cmaes_init(state, saved_dim, saved_sigma_restart, new_lambda, seed) != 0) {
                 free(global_best_solution);
+                if (old_mean) free(old_mean);
                 return -1;
             }
 
             state->enable_active = 1;
             state->ipop_restart_count = restart;
 
+            /* 从旧最优均值继续搜索 */
             if (old_mean) {
-                memcpy(state->mean, old_mean, state->dimension * sizeof(float));
+                memcpy(state->mean, old_mean, saved_dim * sizeof(float));
                 free(old_mean);
             }
         }
@@ -631,28 +663,41 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
 
         if (state->best_fitness < global_best_fitness) {
             global_best_fitness = state->best_fitness;
-            memcpy(global_best_solution, state->best_solution, state->dimension * sizeof(float));
+            memcpy(global_best_solution, state->best_solution, saved_dim * sizeof(float));
         }
 
+        /* 终止条件检查 */
         if (state->generation >= state->max_generations) break;
 
         if (state->termination_reason == CMAES_TERM_TOLFUN && global_best_fitness <= state->stop_fitness) {
             break;
         }
 
+        /* S-002: 如果未收敛到足够好的解，继续增加种群 */
         if (restart >= max_restarts) break;
+
+        /* 更新保存的尺寸引用，sigma在cmaes_init内已初始化无需手动更新 */
     }
 
     state->best_fitness = global_best_fitness;
-    memcpy(state->best_solution, global_best_solution, state->dimension * sizeof(float));
+    memcpy(state->best_solution, global_best_solution, saved_dim * sizeof(float));
     free(global_best_solution);
 
     return 0;
 }
 
-/* S-005修复: BIPOP双种群重启策略
- * 在IPOP基础上交替使用小种群(快速收敛)和大种群(全局探索)
- * 小种群 → 快速找到局部最优 → 大种群跳出 → 小种群再精细搜索 */
+/* S-002修复: BIPOP双种群重启策略
+ *
+ * BIPOP (BI-Population) 策略原理:
+ * - 在IPOP基础上交替使用小种群(快速收敛)和大种群(全局探索)
+ * - 偶数重启: 小种群 → λ = base * (0.5)^(restart/2+1) → 快速找到局部最优
+ * - 奇数重启: 大种群 → λ = base * 2^((restart+1)/2) → 跳出局部最优搜索全局
+ * - 交替策略确保既有局部精细化又有全局探索能力
+ *
+ * 修复要点:
+ * - 保存dimension在cmaes_free之前（避免zero-out丢失维度信息）
+ * - 保存旧的最优均值作为重启起点
+ * - 小种群比例递减、大种群比例递增 */
 int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user_data,
                           int max_restarts) {
     if (!state || !func) return -1;
@@ -665,6 +710,8 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
 
     int base_lambda = CMAES_BIPOP_LAMBDA_DEFAULT;
     float old_sigma = state->sigma;
+    /* S-002: 保存dimension，防止cmaes_free清零 */
+    size_t saved_dim = state->dimension;
 
     for (int restart = 0; restart <= max_restarts; restart++) {
         state->ipop_restart_count = restart;
@@ -684,27 +731,35 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
 
             if (new_lambda > CMAES_MAX_POP) new_lambda = CMAES_MAX_POP;
             if (new_lambda < CMAES_MIN_POP) new_lambda = CMAES_MIN_POP;
+            if (new_lambda <= base_lambda / 4) new_lambda = base_lambda / 4;
             if (new_lambda == state->lambda) new_lambda = state->lambda + 1;
 
-            float* old_mean = (float*)malloc(state->dimension * sizeof(float));
+            /* 保存当前最优均值作为重启种子 */
+            float* old_mean = (float*)malloc(saved_dim * sizeof(float));
             if (old_mean) {
-                memcpy(old_mean, state->mean, state->dimension * sizeof(float));
+                memcpy(old_mean, state->mean, saved_dim * sizeof(float));
             }
 
+            /* S-002: 保存sigma，因为在cmaes_free中会清零 */
+            float saved_sigma = state->sigma;
             int seed = (int)(state->rng_state + (unsigned int)restart * 67890u);
-            cmaes_free(state);
-            memset(state, 0, sizeof(CMAESState));
 
-            if (cmaes_init(state, state->dimension, old_sigma, new_lambda, seed) != 0) {
+            /* 释放旧状态（会清零整个结构体） */
+            cmaes_free(state);
+
+            /* S-002: 使用保存的dimension初始化新状态 */
+            if (cmaes_init(state, saved_dim, saved_sigma, new_lambda, seed) != 0) {
                 free(global_best_solution);
+                if (old_mean) free(old_mean);
                 return -1;
             }
 
             state->enable_active = 1;
             state->ipop_restart_count = restart;
 
+            /* 从旧最优均值继续搜索 */
             if (old_mean) {
-                memcpy(state->mean, old_mean, state->dimension * sizeof(float));
+                memcpy(state->mean, old_mean, saved_dim * sizeof(float));
                 free(old_mean);
             }
         }
@@ -713,9 +768,10 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
 
         if (state->best_fitness < global_best_fitness) {
             global_best_fitness = state->best_fitness;
-            memcpy(global_best_solution, state->best_solution, state->dimension * sizeof(float));
+            memcpy(global_best_solution, state->best_solution, saved_dim * sizeof(float));
         }
 
+        /* 终止条件检查 */
         if (state->generation >= state->max_generations) break;
 
         if (state->termination_reason == CMAES_TERM_TOLFUN &&
@@ -723,11 +779,14 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
             break;
         }
 
+        /* S-002: 如果未收敛到足够好的解，继续交替大小种群 */
         if (restart >= max_restarts) break;
+
+        /* sigma在cmaes_init内已初始化无需手动更新 */
     }
 
     state->best_fitness = global_best_fitness;
-    memcpy(state->best_solution, global_best_solution, state->dimension * sizeof(float));
+    memcpy(state->best_solution, global_best_solution, saved_dim * sizeof(float));
     free(global_best_solution);
     return 0;
 }

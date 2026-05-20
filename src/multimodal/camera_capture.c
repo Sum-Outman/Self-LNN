@@ -595,6 +595,7 @@ static void mf_camera_free(void* ctx_ptr) {
 #include <linux/videodev2.h>
 #include <dirent.h>
 #include <errno.h>
+#include <pthread.h>
 
 #define V4L2_BUFFER_COUNT 4
 
@@ -623,6 +624,9 @@ typedef struct {
     /* 回调 */
     void (*on_frame)(const uint8_t* rgb_data, int width, int height, void* user_data);
     void* callback_user_data;
+    /* B-014: 互斥锁保护帧缓冲区的多线程竞态访问 */
+    pthread_mutex_t frame_lock;
+    int lock_initialized;
 } V4L2CameraContext;
 
 /**
@@ -674,6 +678,13 @@ V4L2CameraContext* v4l2_camera_create(const char* device_path,
 
     V4L2CameraContext* ctx = (V4L2CameraContext*)safe_calloc(1, sizeof(V4L2CameraContext));
     if (!ctx) return NULL;
+
+    /* B-014: 初始化帧缓冲区互斥锁 */
+    if (pthread_mutex_init(&ctx->frame_lock, NULL) != 0) {
+        safe_free((void**)&ctx);
+        return NULL;
+    }
+    ctx->lock_initialized = 1;
 
     ctx->width = width > 0 ? width : CAMERA_DEFAULT_WIDTH;
     ctx->height = height > 0 ? height : CAMERA_DEFAULT_HEIGHT;
@@ -790,8 +801,13 @@ int v4l2_camera_start(V4L2CameraContext* ctx,
                        void* user_data) {
     if (!ctx || !callback) return -1;
 
+    /* B-014: 互斥锁保护回调设置的竞态 */
+    pthread_mutex_lock(&ctx->frame_lock);
+
     ctx->on_frame = callback;
     ctx->callback_user_data = user_data;
+
+    pthread_mutex_unlock(&ctx->frame_lock);
 
     /* 入队所有缓冲区 */
     for (int i = 0; i < ctx->num_buffers; i++) {
@@ -834,7 +850,10 @@ int v4l2_camera_process(V4L2CameraContext* ctx) {
 
     if (ioctl(ctx->fd, VIDIOC_DQBUF, &buf) < 0) return -1;
 
-    if (buf.bytesused > 0 && ctx->buffers[buf.index].start) {
+    /* B-014: 互斥锁保护帧缓冲区和回调的竞态访问 */
+    pthread_mutex_lock(&ctx->frame_lock);
+
+    if (buf.bytesused > 0 && ctx->buffers[buf.index].start && ctx->is_capturing) {
         size_t copy_len = buf.bytesused < ctx->rgb_buffer_size ? buf.bytesused : ctx->rgb_buffer_size;
         memcpy(ctx->rgb_buffer, ctx->buffers[buf.index].start, copy_len);
 
@@ -842,6 +861,8 @@ int v4l2_camera_process(V4L2CameraContext* ctx) {
             ctx->on_frame(ctx->rgb_buffer, ctx->width, ctx->height, ctx->callback_user_data);
         }
     }
+
+    pthread_mutex_unlock(&ctx->frame_lock);
 
     ioctl(ctx->fd, VIDIOC_QBUF, &buf);
     return 1;
@@ -852,7 +873,12 @@ int v4l2_camera_process(V4L2CameraContext* ctx) {
  */
 int v4l2_camera_stop(V4L2CameraContext* ctx) {
     if (!ctx) return -1;
+
+    /* B-014: 互斥锁保护停止序列，防止与采集线程竞态 */
+    pthread_mutex_lock(&ctx->frame_lock);
     ctx->is_capturing = 0;
+    ctx->on_frame = NULL;
+    pthread_mutex_unlock(&ctx->frame_lock);
 
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     ioctl(ctx->fd, VIDIOC_STREAMOFF, &type);
@@ -875,6 +901,12 @@ void v4l2_camera_free(V4L2CameraContext* ctx) {
     safe_free((void**)&ctx->buffers);
     safe_free((void**)&ctx->rgb_buffer);
     if (ctx->fd >= 0) close(ctx->fd);
+
+    /* B-014: 销毁互斥锁 */
+    if (ctx->lock_initialized) {
+        pthread_mutex_destroy(&ctx->frame_lock);
+    }
+
     safe_free((void**)&ctx);
 }
 

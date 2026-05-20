@@ -7025,12 +7025,6 @@ response = requests.get(
             if (!data) return;
             setText('backup-status-text', data.status || (data.last_backup || '未连接'));
             setText('backup-time-text', data.last_backup_time || data.last_backup || '未连接');
-            try {
-                localStorage.setItem('selflnn_backup_status', JSON.stringify({
-                    status: data.status || '已完成',
-                    time: data.last_backup_time || data.last_backup || new Date().toLocaleString()
-                }));
-            } catch(e) {}
             console.log('更新备份状态:', data);
         }
         

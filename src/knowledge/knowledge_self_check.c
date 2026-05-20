@@ -437,7 +437,6 @@ int ksc_check_logical_contradictions(KnowledgeBase* kb,
                                        KSSelfCheckConfig* config,
                                        KSSelfCheckReport* report) {
     if (!kb || !config || !report) return -1;
-    (void)kg;
 
     KnowledgeQuery q;
     memset(&q, 0, sizeof(q));
@@ -508,6 +507,36 @@ int ksc_check_logical_contradictions(KnowledgeBase* kb,
                 found++;
             }
             check_count++;
+        }
+    }
+
+    /* 使用知识图谱进行跨图一致性验证 */
+    if (kg && found < config->max_issues) {
+        for (int i = 0; i < total && found < config->max_issues; i++) {
+            KnowledgeEntry* e = &all_entries[i];
+            if (!e->subject || !e->object) continue;
+            int subj_id = knowledge_graph_find_node_by_label(kg, e->subject);
+            int obj_id = knowledge_graph_find_node_by_label(kg, e->object);
+            if (subj_id >= 0 && obj_id >= 0) {
+                /* 检测图中是否有否定边 */
+                int has_negated_edge = knowledge_graph_has_edge_between(kg, subj_id, obj_id, "isNot");
+                int has_affirming_edge = knowledge_graph_has_edge_between(kg, subj_id, obj_id, e->predicate);
+                if (has_negated_edge && has_affirming_edge) {
+                    KSContradictionIssue* issue = &report->issues[report->num_issues];
+                    memset(issue, 0, sizeof(KSContradictionIssue));
+                    issue->issue_id = report->num_issues;
+                    issue->type = KSC_ISSUE_LOGICAL_INCONSISTENCY;
+                    issue->contra_type = KSC_CONTRA_GRAPH_EDGE;
+                    issue->entry_id_a = i;
+                    snprintf(issue->description, sizeof(issue->description),
+                             "图谱边矛盾: %s-%s->%s 同时存在is和isNot边",
+                             e->subject, e->predicate, e->object);
+                    issue->suggested_resolution = KSC_RESOLVE_FLAG_REVIEW;
+                    issue->auto_fixable = 0;
+                    report->num_issues++;
+                    found++;
+                }
+            }
         }
     }
 
@@ -659,7 +688,6 @@ int ksc_resolve_issue(KnowledgeBase* kb, KSContradictionIssue* issue) {
 
 KSSelfCheckReport* ksc_run_self_check(KnowledgeBase* kb, KnowledgeGraph* kg,
                                         void* reasoner, KSSelfCheckConfig* config) {
-    (void)reasoner;
     if (!kb) return NULL;
 
     KSSelfCheckReport* report = (KSSelfCheckReport*)safe_calloc(1, sizeof(KSSelfCheckReport));
@@ -711,6 +739,23 @@ KSSelfCheckReport* ksc_run_self_check(KnowledgeBase* kb, KnowledgeGraph* kg,
 
     if (cfg.enable_logical_check) {
         ksc_check_logical_contradictions(kb, kg, &cfg, report);
+    }
+
+    /* 使用推理引擎对检测到的问题进行二次验证 */
+    if (reasoner && report->num_issues > 0) {
+        for (int i = 0; i < report->num_issues && i < KSC_MAX_ISSUES; i++) {
+            KSContradictionIssue* iss = &report->issues[i];
+            if (iss->type == KSC_ISSUE_LOGICAL_INCONSISTENCY) {
+                /* 通过推理引擎验证矛盾是否真实存在 */
+                float verify_confidence = 0.5f;
+                knowledge_base_reasoner_verify_contradiction(reasoner, kb,
+                    iss->entry_id_a, iss->entry_id_b, &verify_confidence);
+                if (verify_confidence < 0.3f) {
+                    /* 低置信度矛盾 -> 降级为复查建议 */
+                    iss->suggested_resolution = KSC_RESOLVE_FLAG_REVIEW;
+                }
+            }
+        }
     }
 
     int total_issues = report->contradictions_found + report->redundancies_found +

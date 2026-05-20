@@ -398,6 +398,31 @@ typedef enum {
     API_POST_DEVICE_STATUS = 268,          /**< 设置设备状态 */
     API_GET_AUTH_STATUS = 269,             /**< 获取认证状态 */
 
+    /* ===== P0-002: 认知/元认知端点 ===== */
+    API_GET_METACOGNITION_STATE = 93,       /**< 获取元认知系统状态 */
+    API_POST_METACOGNITION_REFLECT = 94,    /**< 触发元认知反思 */
+    API_POST_METACOGNITION_CALIBRATE = 95,  /**< 校准元认知参数 */
+    /* ===== P0-002: 知识版本控制 ===== */
+    API_GET_KNOWLEDGE_VERSION_HISTORY = 97,  /**< 获取知识库版本历史 */
+    /* ===== P0-002: 训练数据管线 ===== */
+    API_POST_TRAINING_PIPELINE = 129,       /**< 训练数据管线处理 */
+    /* ===== P0-002: 模型并行/数据并行 ===== */
+    API_GET_MODEL_PARALLEL_STATUS = 138,    /**< 获取模型并行状态 */
+    API_GET_DATA_PARALLEL_STATUS = 139,     /**< 获取数据并行状态 */
+    /* ===== P0-002: 多系统控制端点 ===== */
+    API_POST_MULTI_SYSTEM_STATUS = 145,     /**< 多系统状态批量查询 */
+    API_POST_MULTI_SYSTEM_COMMAND = 146,    /**< 多系统命令广播 */
+    API_POST_MULTI_SYSTEM_SYNC = 147,       /**< 多系统同步协议 */
+    API_GET_MULTI_SYSTEM_TOPOLOGY = 148,    /**< 获取多系统拓扑 */
+    API_POST_MULTI_SYSTEM_HEARTBEAT = 149,  /**< 多系统心跳信号 */
+    /* ===== P0-002: 编程工作台端点 ===== */
+    API_POST_PROGRAMMING_PROJECT_CREATE = 154, /**< 创建编程项目 */
+    API_POST_PROGRAMMING_PROJECT_BUILD = 155,  /**< 构建项目 */
+    API_POST_PROGRAMMING_PROJECT_DEBUG = 156,  /**< 调试代码 */
+    API_POST_PROGRAMMING_PROJECT_TEST = 157,   /**< 运行测试 */
+    API_POST_PROGRAMMING_PROJECT_DEPLOY = 158, /**< 部署发布 */
+    API_GET_PROGRAMMING_PROJECTS = 159,        /**< 获取项目列表 */
+
     /* ===== 产品设计 ===== */
     API_POST_PRODUCT_DESIGN = 270,         /**< 产品设计生成 */
     API_GET_PRODUCT_SPEC = 271,            /**< 获取产品规格 */

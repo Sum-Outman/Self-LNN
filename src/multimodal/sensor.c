@@ -2,6 +2,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/core/cfc.h"
+#include "selflnn/utils/platform.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -10,12 +11,21 @@
 
 /* ============ 传感器处理器基础实现 ============ */
 
+/* B-016: 环形缓冲区四种状态检测宏 */
+#define RINGBUF_EMPTY(p)    ((p)->buffer_count == 0)
+#define RINGBUF_FULL(p)     ((p)->buffer_count >= (p)->buffer_size)
+#define RINGBUF_HAS_DATA(p) ((p)->buffer_count > 0)
+#define RINGBUF_HAS_SPACE(p) ((p)->buffer_count < (p)->buffer_size)
+
 struct SensorProcessor {
     SensorConfig config;
     int is_initialized;
     float* data_buffer;
     size_t buffer_size;
-    size_t buffer_head;
+    size_t buffer_head;                    /* 写入索引 (生产者) */
+    size_t buffer_tail;                    /* 读取索引 (消费者) */
+    size_t buffer_count;                   /* 当前缓冲区元素计数 */
+    MutexHandle buffer_lock;               /* B-016: 线程安全互斥锁 */
     long last_timestamp;
     float* stat_workspace;
     float* calibration_offset;
@@ -37,6 +47,11 @@ SensorProcessor* sensor_processor_create(const SensorConfig* config) {
     processor->buffer_size = window_size;
     processor->data_buffer = (float*)safe_calloc((size_t)window_size, sizeof(float));
     if (!processor->data_buffer) { sensor_processor_free(processor); return NULL; }
+    processor->buffer_head = 0;
+    processor->buffer_tail = 0;
+    processor->buffer_count = 0;
+    processor->buffer_lock = mutex_create();
+    if (!processor->buffer_lock) { sensor_processor_free(processor); return NULL; }
     processor->stat_workspace = (float*)safe_calloc(6, sizeof(float));
     processor->calibration_offset = (float*)safe_calloc(3, sizeof(float));
     processor->calibration_scale = (float*)safe_calloc(3, sizeof(float));
@@ -49,6 +64,7 @@ SensorProcessor* sensor_processor_create(const SensorConfig* config) {
 
 void sensor_processor_free(SensorProcessor* processor) {
     if (!processor) return;
+    if (processor->buffer_lock) mutex_destroy(processor->buffer_lock);
     safe_free((void**)&processor->data_buffer);
     safe_free((void**)&processor->stat_workspace);
     safe_free((void**)&processor->calibration_offset);
@@ -84,6 +100,70 @@ static int sensor_is_outlier(const float* values, size_t n, size_t idx, float th
     return (deviation > threshold) ? 1 : 0;
 }
 
+/* ================================================================
+ * B-016: 线程安全的环形缓冲区原子操作
+ * push: 生产者写入数据，缓冲区满时覆盖最旧数据
+ * pop:  消费者读取数据，缓冲区空时返回0
+ * peek: 查看指定偏移量处的数据（不消费）
+ * ================================================================ */
+
+static void ringbuf_push(SensorProcessor* processor, float value)
+{
+    mutex_lock(processor->buffer_lock);
+    processor->data_buffer[processor->buffer_head] = value;
+    processor->buffer_head = (processor->buffer_head + 1) % processor->buffer_size;
+    if (RINGBUF_FULL(processor)) {
+        /* 缓冲区已满，覆盖最旧数据（tail前移） */
+        processor->buffer_tail = (processor->buffer_tail + 1) % processor->buffer_size;
+    } else {
+        processor->buffer_count++;
+    }
+    mutex_unlock(processor->buffer_lock);
+}
+
+static float ringbuf_pop(SensorProcessor* processor)
+{
+    float val = 0.0f;
+    mutex_lock(processor->buffer_lock);
+    if (!RINGBUF_EMPTY(processor)) {
+        val = processor->data_buffer[processor->buffer_tail];
+        processor->buffer_tail = (processor->buffer_tail + 1) % processor->buffer_size;
+        processor->buffer_count--;
+    }
+    mutex_unlock(processor->buffer_lock);
+    return val;
+}
+
+/* 查看环形缓冲区中偏移量为offset的元素（0=最新, 1=次新, ..., count-1=最旧）
+ * 空缓冲区返回0.0f */
+static float ringbuf_peek(const SensorProcessor* processor, size_t offset)
+{
+    float val = 0.0f;
+    mutex_lock(((SensorProcessor*)processor)->buffer_lock);
+    if (!RINGBUF_EMPTY(((SensorProcessor*)processor)) && offset < processor->buffer_count) {
+        size_t idx = (processor->buffer_head + processor->buffer_size - 1 - offset) % processor->buffer_size;
+        val = processor->data_buffer[idx];
+    }
+    mutex_unlock(((SensorProcessor*)processor)->buffer_lock);
+    return val;
+}
+
+/* 查看环形缓冲区中最新的元素 */
+static float ringbuf_peek_latest(const SensorProcessor* processor)
+{
+    return ringbuf_peek(processor, 0);
+}
+
+/* 获取环形缓冲区当前元素数量 */
+static size_t ringbuf_count(const SensorProcessor* processor)
+{
+    size_t cnt = 0;
+    mutex_lock(((SensorProcessor*)processor)->buffer_lock);
+    cnt = processor->buffer_count;
+    mutex_unlock(((SensorProcessor*)processor)->buffer_lock);
+    return cnt;
+}
+
 /**
  * @brief 处理传感器数据 — 完整流水线实现
  * 流程：异常检测→校准补偿→EMA去噪→环形缓冲→统计特征输出
@@ -113,32 +193,30 @@ int sensor_process_data(SensorProcessor* processor,
         int cal_idx = (int)(i % 3);
         v = (v - processor->calibration_offset[cal_idx]) * processor->calibration_scale[cal_idx];
 
-        /* EMA去噪 */
-        size_t buf_idx = processor->buffer_head % processor->buffer_size;
-        if (processor->buffer_head > 0) {
-            float prev = processor->data_buffer[(buf_idx > 0 ? buf_idx - 1 : processor->buffer_size - 1)];
+        /* B-016: EMA去噪 — 使用线程安全的环形缓冲区peek获取前值 */
+        if (ringbuf_count(processor) > 0) {
+            float prev = ringbuf_peek_latest(processor);
             v = alpha * v + (1.0f - alpha) * prev;
         }
-        processor->data_buffer[buf_idx] = v;
-        processor->buffer_head++;
+        /* B-016: 线程安全的环形缓冲区push */
+        ringbuf_push(processor, v);
 
         /* 输出特征：当前值+一阶差分+二阶差分+能量+过零率 */
         if (feature_idx < max_features) {
             features[feature_idx++] = v;
-            if (processor->buffer_head >= 2 && feature_idx < max_features) {
-                float prev_val = processor->data_buffer[(buf_idx > 0 ? buf_idx - 1 : processor->buffer_size - 1)];
+            if (ringbuf_count(processor) >= 2 && feature_idx < max_features) {
+                float prev_val = ringbuf_peek(processor, 1);
                 features[feature_idx++] = (v - prev_val) / (dt > 0.001f ? dt : 0.01f);
-                if (processor->buffer_head >= 3 && feature_idx < max_features) {
-                    size_t prev2_idx = (buf_idx > 1 ? buf_idx - 2 : (buf_idx > 0 ? processor->buffer_size - 1 : processor->buffer_size - 2));
-                    float prev2_val = processor->data_buffer[prev2_idx];
+                if (ringbuf_count(processor) >= 3 && feature_idx < max_features) {
+                    float prev2_val = ringbuf_peek(processor, 2);
                     float d1 = (v - prev_val) / dt;
                     float d2 = (prev_val - prev2_val) / dt;
                     features[feature_idx++] = (d1 - d2) / dt;
                 }
             }
             if (feature_idx < max_features) features[feature_idx++] = v * v;
-            if (processor->buffer_head >= 3 && feature_idx < max_features) {
-                float prev_val = processor->data_buffer[(buf_idx > 0 ? buf_idx - 1 : processor->buffer_size - 1)];
+            if (ringbuf_count(processor) >= 2 && feature_idx < max_features) {
+                float prev_val = ringbuf_peek(processor, 1);
                 features[feature_idx++] = (v * prev_val < 0.0f) ? 1.0f : 0.0f;
             }
         }
@@ -208,9 +286,16 @@ int sensor_detect_event(SensorProcessor* processor,
     energy = sqrtf(energy / (float)num_values);
 
     float hist_mean = 0.0f;
-    size_t hist_count = (processor->buffer_head < processor->buffer_size) ? processor->buffer_head : processor->buffer_size;
+    /* B-016: 使用线程安全的ringbuf_count获取缓冲区大小 */
+    size_t hist_count = ringbuf_count(processor);
     if (hist_count > 0) {
-        for (size_t i = 0; i < hist_count; i++) hist_mean += processor->data_buffer[i];
+        mutex_lock(processor->buffer_lock);
+        size_t tail = processor->buffer_tail;
+        for (size_t i = 0; i < hist_count; i++) {
+            size_t idx = (tail + i) % processor->buffer_size;
+            hist_mean += processor->data_buffer[idx];
+        }
+        mutex_unlock(processor->buffer_lock);
         hist_mean /= (float)hist_count;
     }
     float current_mean = 0.0f;
@@ -258,9 +343,13 @@ int sensor_processor_set_config(SensorProcessor* processor, const SensorConfig* 
 
 void sensor_processor_reset(SensorProcessor* processor) {
     if (!processor) return;
+    mutex_lock(processor->buffer_lock);
     if (processor->data_buffer)
         memset(processor->data_buffer, 0, processor->buffer_size * sizeof(float));
     processor->buffer_head = 0;
+    processor->buffer_tail = 0;
+    processor->buffer_count = 0;
+    mutex_unlock(processor->buffer_lock);
     processor->last_timestamp = 0;
     processor->outlier_consecutive_count = 0;
 }

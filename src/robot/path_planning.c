@@ -26,6 +26,88 @@
 #define PLAN_SQ(x) ((x)*(x))
 #define PLAN_DIST2(x1,y1,x2,y2) (PLAN_SQ((x1)-(x2))+PLAN_SQ((y1)-(y2)))
 #define PLAN_DIST(x1,y1,x2,y2) (sqrtf(PLAN_DIST2(x1,y1,x2,y2)))
+#define PLAN_WRAP_ANGLE(a) \
+    do { \
+        while ((a) > (float)M_PI) (a) -= 2.0f*(float)M_PI; \
+        while ((a) < -(float)M_PI) (a) += 2.0f*(float)M_PI; \
+    } while(0)
+
+/* S-010修复: 考虑运动学约束的真实距离函数 */
+
+/**
+ * @brief 计算Dubins曲线长度的可接受下界（用于A*启发式）
+ * 
+ * 对于具有最小转弯半径ρ的Dubins车辆，从(x1,y1)到(x2,y2,θ_goal)的最短路径
+ * 长度至少为: max(欧氏距离, ρ·|Δθ|)
+ * 其中Δθ是当前位置到目标朝向所需的最小角度变化。
+ * 
+ * 该启发式满足可接受性（不低估真实代价）。
+ */
+static float plan_dubins_heuristic(float x1, float y1, float gx, float gy, float goal_yaw, float min_radius) {
+    float euclidean = PLAN_DIST(x1, y1, gx, gy);
+    if (min_radius <= 0.0f) return euclidean;
+    
+    /* 估计当前朝向：从(x1,y1)到(gx,gy)的直线方向 */
+    float estimated_heading = atan2f(gy - y1, gx - x1);
+    float heading_diff = goal_yaw - estimated_heading;
+    PLAN_WRAP_ANGLE(heading_diff);
+    
+    /* Dubins下界：需要至少min_radius * |Δθ|的距离来转弯 */
+    float turning_cost = min_radius * fabsf(heading_diff);
+    
+    return PLAN_MAX(euclidean, turning_cost);
+}
+
+/**
+ * @brief 计算考虑运动学约束的SE(2)加权距离
+ * 
+ * d_SE2 = sqrt(dx² + dy² + w_θ·(min_radius·Δθ)²)
+ * 
+ * 该距离度量同时考虑了平移距离和朝向差异，
+ * 其中朝向差异通过最小转弯半径缩放以保持单位一致。
+ * 适用于RRT/RRT*的代价函数。
+ * 
+ * @param x1,y1 点1坐标
+ * @param heading1 点1朝向（若无朝向信息，传任意值）
+ * @param x2,y2 点2坐标
+ * @param heading2 点2朝向（若无朝向信息，传任意值）
+ * @param min_radius 最小转弯半径（>0启用运动学约束，<=0回退为欧氏距离）
+ * @param use_heading 是否使用朝向信息（0=纯欧氏距离，1=考虑朝向）
+ * @return SE(2)加权距离
+ */
+static float plan_kinematic_distance(float x1, float y1, float heading1,
+                                      float x2, float y2, float heading2,
+                                      float min_radius, int use_heading) {
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float euclidean_sq = dx * dx + dy * dy;
+    
+    if (!use_heading || min_radius <= 1e-6f) {
+        return sqrtf(euclidean_sq);
+    }
+    
+    /* 朝向差异（归一化到[-π, π]） */
+    float dtheta = heading2 - heading1;
+    PLAN_WRAP_ANGLE(dtheta);
+    
+    /* SE(2)加权距离: 位置差异 + 朝向差异缩放
+     * 权重w_θ控制朝向在总代价中的比重
+     * 使用min_radius缩放使朝向代价与平移代价单位一致 */
+    float w_theta = 0.3f;
+    float angular_cost_sq = (min_radius * dtheta) * (min_radius * dtheta);
+    
+    return sqrtf(euclidean_sq + w_theta * angular_cost_sq);
+}
+
+/**
+ * @brief 基于父节点方向推断当前节点朝向
+ * @param parent_x,parent_y 父节点坐标
+ * @param child_x,child_y 当前节点坐标
+ * @return 推断的朝向角（弧度）
+ */
+static float plan_infer_heading(float parent_x, float parent_y, float child_x, float child_y) {
+    return atan2f(child_y - parent_y, child_x - parent_x);
+}
 
 PlanConfig plan_config_default(void)
 {
@@ -138,7 +220,9 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
 
     int start_idx = sy * map->width + sx;
     nodes[start_idx].g = 0.0f;
-    nodes[start_idx].f = PLAN_DIST((float)sx, (float)sy, (float)gx, (float)gy);
+    /* S-010修复: 使用Dubins运动学感知启发式替代纯欧氏距离 */
+    nodes[start_idx].f = plan_dubins_heuristic((float)sx, (float)sy, (float)gx, (float)gy,
+        config->goal.yaw, config->min_turning_radius);
     nodes[start_idx].in_open = 1;
 
     int* open_list = (int*)malloc(total_cells * sizeof(int));
@@ -185,7 +269,10 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
             if (tent_g < nodes[nidx].g)
             {
                 nodes[nidx].g = tent_g;
-                nodes[nidx].f = tent_g + PLAN_DIST((float)nx, (float)ny, (float)gx, (float)gy);
+                /* S-010修复: 使用Dubins运动学感知启发式 */
+                float h_val = plan_dubins_heuristic((float)nx, (float)ny,
+                    (float)gx, (float)gy, config->goal.yaw, config->min_turning_radius);
+                nodes[nidx].f = tent_g + h_val;
                 nodes[nidx].parent_idx = current;
                 if (!nodes[nidx].in_open)
                 {
@@ -420,10 +507,30 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
         }
 
         int nearest = 0;
-        float nearest_dist = PLAN_DIST2(nodes[0].x, nodes[0].y, rx, ry);
+        /* S-010修复: 使用运动学SE(2)距离进行最近邻搜索 */
+        /* 采样点的朝向：使用随机方向（无朝向信息时） */
+        float sample_heading = atan2f(ry - nodes[0].y, rx - nodes[0].x);
+        float nearest_dist;
+        /* 根节点的朝向：从起点朝向goal推断 */
+        if (node_count > 0 && nodes[0].parent_idx < 0) {
+            nearest_dist = plan_kinematic_distance(nodes[0].x, nodes[0].y,
+                config->start.yaw, rx, ry, sample_heading,
+                config->min_turning_radius, 1);
+        } else {
+            nearest_dist = PLAN_DIST2(nodes[0].x, nodes[0].y, rx, ry);
+        }
         for (int i = 1; i < node_count; i++)
         {
-            float d = PLAN_DIST2(nodes[i].x, nodes[i].y, rx, ry);
+            float heading_i;
+            if (config->min_turning_radius > 0.0f && nodes[i].parent_idx >= 0) {
+                heading_i = plan_infer_heading(nodes[nodes[i].parent_idx].x,
+                    nodes[nodes[i].parent_idx].y, nodes[i].x, nodes[i].y);
+            } else {
+                heading_i = 0.0f;
+            }
+            float d = plan_kinematic_distance(nodes[i].x, nodes[i].y, heading_i,
+                rx, ry, sample_heading, config->min_turning_radius,
+                config->min_turning_radius > 0.0f ? 1 : 0);
             if (d < nearest_dist)
             {
                 nearest_dist = d;
@@ -433,10 +540,11 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
 
         float dx = rx - nodes[nearest].x;
         float dy = ry - nodes[nearest].y;
-        float dist = sqrtf(nearest_dist);
-        float step = PLAN_MIN(config->rrt_config.step_size, dist);
-        float nx = nodes[nearest].x + dx / dist * step;
-        float ny = nodes[nearest].y + dy / dist * step;
+        /* 使用欧氏距离进行步进方向计算（运动学距离用于最近邻搜索） */
+        float dist_xy = sqrtf(dx * dx + dy * dy);
+        float step = PLAN_MIN(config->rrt_config.step_size, dist_xy);
+        float nx = nodes[nearest].x + dx / dist_xy * step;
+        float ny = nodes[nearest].y + dy / dist_xy * step;
 
         if (map && grid_is_occupied(map, nx, ny, config->robot_radius))
             continue;
@@ -446,7 +554,11 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
         nodes[node_count].parent_idx = nearest;
         node_count++;
 
-        float goal_dist = PLAN_DIST(nx, ny, config->goal.x, config->goal.y);
+        /* S-010修复: 使用运动学距离检查是否到达目标 */
+        float new_heading = plan_infer_heading(nodes[nearest].x, nodes[nearest].y, nx, ny);
+        float goal_dist = plan_kinematic_distance(nx, ny, new_heading,
+            config->goal.x, config->goal.y, config->goal.yaw,
+            config->min_turning_radius, config->min_turning_radius > 0.0f ? 1 : 0);
         if (goal_dist < config->rrt_config.goal_tolerance)
         {
             found = 1;
@@ -460,7 +572,17 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
         int best_idx = -1;
         for (int i = 0; i < node_count; i++)
         {
-            float d = PLAN_DIST(nodes[i].x, nodes[i].y, config->goal.x, config->goal.y);
+            /* S-010修复: 使用运动学距离评估最佳目标候选 */
+            float heading_i;
+            if (nodes[i].parent_idx >= 0) {
+                heading_i = plan_infer_heading(nodes[nodes[i].parent_idx].x,
+                    nodes[nodes[i].parent_idx].y, nodes[i].x, nodes[i].y);
+            } else {
+                heading_i = config->start.yaw;
+            }
+            float d = plan_kinematic_distance(nodes[i].x, nodes[i].y, heading_i,
+                config->goal.x, config->goal.y, config->goal.yaw,
+                config->min_turning_radius, config->min_turning_radius > 0.0f ? 1 : 0);
             if (d < best_dist)
             {
                 best_dist = d;
@@ -774,14 +896,24 @@ typedef struct {
     float cost;
 } RRTStarNode;
 
-static int rrt_star_nearest(const RRTStarNode* nodes, int count, float x, float y, float* nearest_dist)
+static int rrt_star_nearest(const RRTStarNode* nodes, int count, float x, float y,
+                             const float* headings, float* nearest_dist)
 {
     int nearest = 0;
     float min_d = 1e20f;
     int i;
-    for (i = 0; i < count; i++) {
-        float d = PLAN_DIST(nodes[i].x, nodes[i].y, x, y);
-        if (d < min_d) { min_d = d; nearest = i; }
+    if (headings) {
+        float target_heading = (count > 0) ? plan_infer_heading(nodes[0].x, nodes[0].y, x, y) : 0.0f;
+        for (i = 0; i < count; i++) {
+            float d = plan_kinematic_distance(nodes[i].x, nodes[i].y, headings[i],
+                x, y, target_heading, 1.0f, 1);
+            if (d < min_d) { min_d = d; nearest = i; }
+        }
+    } else {
+        for (i = 0; i < count; i++) {
+            float d = PLAN_DIST(nodes[i].x, nodes[i].y, x, y);
+            if (d < min_d) { min_d = d; nearest = i; }
+        }
     }
     if (nearest_dist) *nearest_dist = min_d;
     return nearest;
@@ -823,6 +955,7 @@ static float rrt_star_rewire_radius(int n, int dim)
 int plan_rrt_star(const PlanConfig* config, PlanResult* result)
 {
     RRTStarNode nodes[PLAN_RRT_STAR_MAX_NODES];
+    float headings[PLAN_RRT_STAR_MAX_NODES];  /* S-010: 存储每个节点的朝向 */
     int node_count = 0;
     int i, near_count;
     float step = (config->rrt_star_config.rewire_radius > 0) ?
@@ -839,7 +972,11 @@ int plan_rrt_star(const PlanConfig* config, PlanResult* result)
     nodes[0].y = config->start.y;
     nodes[0].parent = -1;
     nodes[0].cost = 0.0f;
+    headings[0] = config->start.yaw;  /* S-010: 初始朝向从配置读取 */
     node_count = 1;
+    /* 是否启用运动学距离（有最小转弯半径时启用） */
+    int use_kinematic = (config->min_turning_radius > 0.0f) ? 1 : 0;
+    float* heading_ptr = use_kinematic ? headings : NULL;
     for (i = 0; i < max_iter && node_count < max_nodes; i++) {
         float rand_x, rand_y;
         float near_x, near_y;
@@ -860,25 +997,36 @@ int plan_rrt_star(const PlanConfig* config, PlanResult* result)
                 rand_y = config->start.y - range + secure_random_float() * 2.0f * range;
             }
         }
-        nearest_idx = rrt_star_nearest(nodes, node_count, rand_x, rand_y, &nearest_d);
+        nearest_idx = rrt_star_nearest(nodes, node_count, rand_x, rand_y,
+                                       heading_ptr, &nearest_d);
         rrt_star_steer(nodes[nearest_idx].x, nodes[nearest_idx].y, rand_x, rand_y, step, &near_x, &near_y);
         if (nearest_d < step) { new_x = rand_x; new_y = rand_y; }
         else { new_x = near_x; new_y = near_y; }
         if (!rrt_star_collision_free(config, nodes[nearest_idx].x, nodes[nearest_idx].y, new_x, new_y)) continue;
         {
+            /* S-010: 新节点朝向（从父节点方向推断） */
+            float new_heading = plan_infer_heading(nodes[nearest_idx].x, nodes[nearest_idx].y, new_x, new_y);
+            
             float radius = rrt_star_rewire_radius(node_count, 2);
             int near_indices[256];
             float near_dists[256];
             int best_parent = nearest_idx;
-            float best_cost = nodes[nearest_idx].cost + nearest_d;
+            /* S-010: 使用运动学距离计算代价（初始代价） */
+            float kinematic_nearest_d = use_kinematic ?
+                plan_kinematic_distance(nodes[nearest_idx].x, nodes[nearest_idx].y, headings[nearest_idx],
+                    new_x, new_y, new_heading, config->min_turning_radius, 1) : nearest_d;
+            float best_cost = nodes[nearest_idx].cost + kinematic_nearest_d;
             near_count = 0;
             {
                 int j;
                 for (j = 0; j < node_count && near_count < 256; j++) {
+                    /* 空间邻近搜索仍使用欧氏距离（保证搜索半径的物理意义） */
                     float d = PLAN_DIST(nodes[j].x, nodes[j].y, new_x, new_y);
                     if (d < radius) {
                         near_indices[near_count] = j;
-                        near_dists[near_count] = d;
+                        near_dists[near_count] = use_kinematic ?
+                            plan_kinematic_distance(nodes[j].x, nodes[j].y, headings[j],
+                                new_x, new_y, new_heading, config->min_turning_radius, 1) : d;
                         near_count++;
                     }
                 }
@@ -893,6 +1041,8 @@ int plan_rrt_star(const PlanConfig* config, PlanResult* result)
                         rrt_star_collision_free(config, nodes[nidx].x, nodes[nidx].y, new_x, new_y)) {
                         best_parent = nidx;
                         best_cost = candidate_cost;
+                        /* 更新朝向以匹配新的父节点 */
+                        new_heading = plan_infer_heading(nodes[nidx].x, nodes[nidx].y, new_x, new_y);
                     }
                 }
             }
@@ -900,6 +1050,7 @@ int plan_rrt_star(const PlanConfig* config, PlanResult* result)
             nodes[node_count].y = new_y;
             nodes[node_count].parent = best_parent;
             nodes[node_count].cost = best_cost;
+            headings[node_count] = new_heading;
             node_count++;
             {
                 int j;
@@ -915,14 +1066,27 @@ int plan_rrt_star(const PlanConfig* config, PlanResult* result)
                 }
             }
         }
-        if (PLAN_DIST(new_x, new_y, config->goal.x, config->goal.y) < goal_tol) break;
+        /* S-010修复: 使用运动学距离检查是否到达目标 */
+        {
+            float goal_dist = use_kinematic ?
+                plan_kinematic_distance(new_x, new_y, headings[node_count - 1],
+                    config->goal.x, config->goal.y, config->goal.yaw,
+                    config->min_turning_radius, 1) :
+                PLAN_DIST(new_x, new_y, config->goal.x, config->goal.y);
+            if (goal_dist < goal_tol) break;
+        }
     }
     {
         int best_goal = -1;
         float best_goal_cost = 1e20f;
         int j;
         for (j = 0; j < node_count; j++) {
-            float d = PLAN_DIST(nodes[j].x, nodes[j].y, config->goal.x, config->goal.y);
+            /* S-010修复: 使用运动学距离评估最佳目标候选 */
+            float d = use_kinematic ?
+                plan_kinematic_distance(nodes[j].x, nodes[j].y, headings[j],
+                    config->goal.x, config->goal.y, config->goal.yaw,
+                    config->min_turning_radius, 1) :
+                PLAN_DIST(nodes[j].x, nodes[j].y, config->goal.x, config->goal.y);
             if (d < goal_tol) {
                 float total = nodes[j].cost + d;
                 if (total < best_goal_cost) {

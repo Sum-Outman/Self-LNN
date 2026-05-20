@@ -464,9 +464,13 @@ int kv_switch_branch(KnowledgeVersionManager* kvm, const char* branch_name) {
 }
 
 int kv_merge_branch(KnowledgeVersionManager* kvm, const char* source, const char* target) {
-    /* I-018修复: 确认F-016已实现真实分支合并（差异分析+跨分支复制）
-     * 历史注释保留用于代码演进追溯 */
+    /* D-009修复: 实现真正的分支合并逻辑
+     * 1. 加载源和目标快照的全部条目
+     * 2. 三路合并: 源独有→添加, 目标独有→保留, 冲突→目标优先级策略
+     * 3. 将合并结果写入新快照文件
+     * 4. 更新当前条目缓存反映合并状态 */
     if (!kvm || !source || !target) return -1;
+    if (strcmp(source, target) == 0) return -1;
 
     int src_exists = 0, tgt_exists = 0;
     int src_snap = -1, tgt_snap = -1;
@@ -491,54 +495,158 @@ int kv_merge_branch(KnowledgeVersionManager* kvm, const char* source, const char
         }
     }
     if (!src_exists || !tgt_exists) return -1;
-    
-    /* F-016: 使用差异分析获取实际的合并信息 */
-    int merged_count = 0;
-    int conflict_count = 0;
-    
-    if (src_snap >= 0 && tgt_snap >= 0) {
-        KnowledgeDiff diff;
-        memset(&diff, 0, sizeof(diff));
-        
-        /* 计算从source到target的差异 */
-        if (kv_diff_snapshots(kvm, src_snap, tgt_snap, &diff) == 0) {
-            /* 统计实际差异 */
-            merged_count = (int)(diff.added_count + diff.modified_count);
-            conflict_count = (int)diff.removed_count;
-            
-            /* 如果target中有条目在source中被删除，标记为冲突 */
-            for (int d = 0; d < diff.detail_count && d < KV_MAX_DIFF_DETAILS; d++) {
-                if (diff.details[d].change_type == KV_DIFF_REMOVE) {
-                    /* 被删除的条目在目标分支中仍存在 → 冲突 */
-                    conflict_count++;
-                }
+    if (src_snap < 0 || tgt_snap < 0) return -1;
+
+    /* 加载源快照条目 */
+    char src_filepath[512];
+    snprintf(src_filepath, sizeof(src_filepath), "%s/snapshot_%d.dat",
+             kvm->storage_dir, src_snap);
+    SnapshotEntryRecord* src_entries = (SnapshotEntryRecord*)
+        safe_calloc(KV_MAX_ENTRIES_PER_SNAPSHOT, sizeof(SnapshotEntryRecord));
+    int src_count = 0;
+    if (src_entries) {
+        FILE* fp = fopen(src_filepath, "rb");
+        if (fp) {
+            SnapshotFileHeader hdr;
+            if (fread(&hdr, sizeof(SnapshotFileHeader), 1, fp) == 1 &&
+                hdr.magic == KV_FILE_MAGIC) {
+                src_count = (int)(hdr.entry_count < KV_MAX_ENTRIES_PER_SNAPSHOT ?
+                                  hdr.entry_count : KV_MAX_ENTRIES_PER_SNAPSHOT);
+                fread(src_entries, sizeof(SnapshotEntryRecord), (size_t)src_count, fp);
+            }
+            fclose(fp);
+        }
+    }
+
+    /* 加载目标快照条目 */
+    char tgt_filepath[512];
+    snprintf(tgt_filepath, sizeof(tgt_filepath), "%s/snapshot_%d.dat",
+             kvm->storage_dir, tgt_snap);
+    SnapshotEntryRecord* tgt_entries = (SnapshotEntryRecord*)
+        safe_calloc(KV_MAX_ENTRIES_PER_SNAPSHOT, sizeof(SnapshotEntryRecord));
+    int tgt_count = 0;
+    if (tgt_entries) {
+        FILE* fp = fopen(tgt_filepath, "rb");
+        if (fp) {
+            SnapshotFileHeader hdr;
+            if (fread(&hdr, sizeof(SnapshotFileHeader), 1, fp) == 1 &&
+                hdr.magic == KV_FILE_MAGIC) {
+                tgt_count = (int)(hdr.entry_count < KV_MAX_ENTRIES_PER_SNAPSHOT ?
+                                  hdr.entry_count : KV_MAX_ENTRIES_PER_SNAPSHOT);
+                fread(tgt_entries, sizeof(SnapshotEntryRecord), (size_t)tgt_count, fp);
+            }
+            fclose(fp);
+        }
+    }
+
+    /* 构建合并条目数组：以target为基础，逐一添加源条目 */
+    SnapshotEntryRecord* merged_entries = (SnapshotEntryRecord*)
+        safe_calloc(KV_MAX_ENTRIES_PER_SNAPSHOT, sizeof(SnapshotEntryRecord));
+    if (!merged_entries) {
+        safe_free((void**)&src_entries);
+        safe_free((void**)&tgt_entries);
+        return -1;
+    }
+
+    /* 先将目标条目全部复制到合并结果 */
+    int merged_count = tgt_count;
+    if (tgt_entries && tgt_count > 0) {
+        memcpy(merged_entries, tgt_entries,
+               (size_t)tgt_count * sizeof(SnapshotEntryRecord));
+    }
+
+    int added_from_src = 0;
+    int conflicts_resolved = 0;
+
+    /* 遍历源条目，检查是否存在于目标分支 */
+    for (int si = 0; si < src_count && merged_count < KV_MAX_ENTRIES_PER_SNAPSHOT; si++) {
+        int found_in_tgt = -1;
+        for (int ti = 0; ti < tgt_count; ti++) {
+            if (strcmp(src_entries[si].subject, tgt_entries[ti].subject) == 0 &&
+                strcmp(src_entries[si].predicate, tgt_entries[ti].predicate) == 0 &&
+                strcmp(src_entries[si].object, tgt_entries[ti].object) == 0) {
+                found_in_tgt = ti;
+                break;
             }
         }
-        
-        /* 也反向计算差异（找到source中有但target没有的）
-         * 如果source有新条目target没有，这些是需要合并的 */
-        KnowledgeDiff rev_diff;
-        memset(&rev_diff, 0, sizeof(rev_diff));
-        if (kv_diff_snapshots(kvm, tgt_snap, src_snap, &rev_diff) == 0) {
-            merged_count += (int)(rev_diff.added_count + rev_diff.modified_count);
+
+        if (found_in_tgt < 0) {
+            /* 源独有：查找是否有相同S+P但不同O的冲突条目 */
+            int sp_conflict = -1;
+            for (int ti = 0; ti < tgt_count; ti++) {
+                if (strcmp(src_entries[si].subject, tgt_entries[ti].subject) == 0 &&
+                    strcmp(src_entries[si].predicate, tgt_entries[ti].predicate) == 0 &&
+                    strcmp(src_entries[si].object, tgt_entries[ti].object) != 0) {
+                    sp_conflict = ti;
+                    break;
+                }
+            }
+            if (sp_conflict >= 0) {
+                /* S+P相同但O不同 → 真正的合并冲突
+                 * 策略: 置信度择优，置信度接近时保留目标分支版本 */
+                float src_confidence = src_entries[si].confidence;
+                float tgt_confidence = tgt_entries[sp_conflict].confidence;
+                if (src_confidence > tgt_confidence * 1.5f) {
+                    /* 源置信度显著更高，用源替换目标 */
+                    merged_entries[sp_conflict] = src_entries[si];
+                    merged_entries[sp_conflict].entry_id = merged_count;
+                }
+                /* 否则保持目标版本不变 */
+                conflicts_resolved++;
+            } else {
+                /* 目标中没有同S+P冲突 → 安全添加 */
+                merged_entries[merged_count] = src_entries[si];
+                merged_entries[merged_count].entry_id = merged_count + 1;
+                merged_count++;
+                added_from_src++;
+            }
+        }
+        /* 完全相同（S+P+O都一致）的条目已在目标中，跳过 */
+    }
+
+    /* 将合并结果写入新快照 */
+    char merge_msg[KV_MAX_MESSAGE];
+    snprintf(merge_msg, sizeof(merge_msg),
+            "合并分支 '%s'->'%s': +%d条目, %d冲突解决",
+            source, target, added_from_src, conflicts_resolved);
+
+    /* 使用内部机制创建合并快照 */
+    if (kvm->snapshot_count >= KV_MAX_SNAPSHOTS) {
+        safe_free((void**)&src_entries);
+        safe_free((void**)&tgt_entries);
+        safe_free((void**)&merged_entries);
+        return -1;
+    }
+
+    /* 更新当前条目缓存为合并结果 */
+    if (merged_count <= KV_MAX_ENTRIES_PER_SNAPSHOT) {
+        memcpy(kvm->current_entries, merged_entries,
+               (size_t)merged_count * sizeof(SnapshotEntryRecord));
+        kvm->current_entry_count = merged_count;
+    }
+
+    int new_id = kv_create_snapshot(kvm, merge_msg);
+    if (new_id < 0) {
+        safe_free((void**)&src_entries);
+        safe_free((void**)&tgt_entries);
+        safe_free((void**)&merged_entries);
+        return -1;
+    }
+
+    /* 标记新快照归属目标分支 */
+    for (int i = 0; i < kvm->snapshot_count; i++) {
+        if (kvm->snapshots[i].snapshot_id == new_id) {
+            strncpy(kvm->snapshots[i].branch, target,
+                    sizeof(kvm->snapshots[i].branch) - 1);
+            kvm->snapshots[i].parent_id = tgt_snap;
+            kvm->snapshots[i].entry_count = (size_t)merged_count;
+            break;
         }
     }
-    
-    char merge_msg[KV_MAX_MESSAGE];
-    snprintf(merge_msg, sizeof(merge_msg), 
-            "合并分支 '%s' → '%s': %d条目差异, %d冲突",
-            source, target, merged_count, conflict_count);
-    
-    int new_id = kv_create_snapshot(kvm, merge_msg);
-    if (new_id < 0) return -1;
-    
-    /* 标记新快照归属目标分支 */
-    if (new_id > 0 && new_id < kvm->snapshot_count) {
-        strncpy(kvm->snapshots[new_id].branch, target, 
-                sizeof(kvm->snapshots[new_id].branch) - 1);
-        kvm->snapshots[new_id].parent_id = tgt_snap;
-    }
-    
+
+    safe_free((void**)&src_entries);
+    safe_free((void**)&tgt_entries);
+    safe_free((void**)&merged_entries);
     return 0;
 }
 

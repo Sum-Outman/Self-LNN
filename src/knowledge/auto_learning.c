@@ -11,6 +11,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/logging.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -420,22 +421,42 @@ int auto_learning_set_directory(AutoLearningSystem* system, const char* director
 }
 
 int auto_learning_learn_file(AutoLearningSystem* system, const char* filepath) {
-    if (!system || !filepath) return -1;
+    if (!system) {
+        log_error("[自主学习][P0-018] auto_learning_learn_file: 系统句柄为空");
+        return -1;
+    }
+    if (!filepath) {
+        log_error("[自主学习][P0-018] auto_learning_learn_file: 文件路径为空");
+        return -1;
+    }
 
     FILE* fp = fopen(filepath, "rb");
-    if (!fp) return -1;
+    if (!fp) {
+        log_error("[自主学习][P0-018] auto_learning_learn_file: 无法打开文件 '%s'", filepath);
+        return -1;
+    }
 
     fseek(fp, 0, SEEK_END);
     long file_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    if (file_size <= 0 || file_size > 10 * 1024 * 1024) {
+    if (file_size <= 0) {
+        log_error("[自主学习][P0-018] auto_learning_learn_file: 文件 '%s' 大小为 %ld（空文件），"
+                  "无数据可供学习", filepath, file_size);
+        fclose(fp);
+        return -1;
+    }
+    if (file_size > 10 * 1024 * 1024) {
+        log_error("[自主学习][P0-018] auto_learning_learn_file: 文件 '%s' 过大（%ld字节），"
+                  "超出10MB限制", filepath, file_size);
         fclose(fp);
         return -1;
     }
 
     char* content = (char*)safe_malloc((size_t)file_size + 1);
     if (!content) {
+        log_error("[自主学习][P0-018] auto_learning_learn_file: 内存分配失败，文件 '%s'（%ld字节）",
+                  filepath, file_size);
         fclose(fp);
         return -1;
     }
@@ -443,6 +464,48 @@ int auto_learning_learn_file(AutoLearningSystem* system, const char* filepath) {
     size_t read_size = fread(content, 1, (size_t)file_size, fp);
     fclose(fp);
     content[read_size] = '\0';
+
+    if (read_size == 0) {
+        log_error("[自主学习][P0-018] auto_learning_learn_file: 文件 '%s' 读取到0字节，无数据可供学习",
+                  filepath);
+        safe_free((void**)&content);
+        return -1;
+    }
+
+#ifdef SELFLNN_STRICT_REAL_DATA
+    /* P0-018修复: 严格真实数据模式 —— 验证文件内容是否为有效真实数据 */
+    {
+        /* 检查文件内容是否全为空白字符 */
+        int has_content = 0;
+        size_t check_limit = read_size < 1024 ? read_size : 1024;
+        for (size_t i = 0; i < check_limit; i++) {
+            if ((unsigned char)content[i] > 32) {
+                has_content = 1;
+                break;
+            }
+        }
+        if (!has_content) {
+            log_error("[自主学习][P0-018] auto_learning_learn_file: 严格真实数据模式 —— "
+                      "文件 '%s' 内容仅为空白字符，非有效真实数据。拒绝学习。", filepath);
+            safe_free((void**)&content);
+            return -1;
+        }
+
+        /* 检查是否为二进制/随机数据（非文本可读数据） */
+        int binary_count = 0;
+        for (size_t i = 0; i < check_limit; i++) {
+            unsigned char c = (unsigned char)content[i];
+            if (c < 9 || (c > 13 && c < 32)) binary_count++;
+        }
+        if (binary_count > (int)(check_limit / 2)) {
+            log_error("[自主学习][P0-018] auto_learning_learn_file: 严格真实数据模式 —— "
+                      "文件 '%s' 内容存在大量二进制控制字符（%d/%zu），疑似非文本数据。拒绝学习。",
+                      filepath, binary_count, check_limit);
+            safe_free((void**)&content);
+            return -1;
+        }
+    }
+#endif
 
     KnowledgeSourceType type = detect_source_type(filepath);
 
@@ -475,9 +538,97 @@ int auto_learning_learn_file(AutoLearningSystem* system, const char* filepath) {
 
 int auto_learning_learn_text(AutoLearningSystem* system, const char* text,
                              const char* source, KnowledgeSourceType type) {
-    if (!system || !text || !source) return -1;
+    if (!system) {
+        log_error("[自主学习][P0-018] auto_learning_learn_text: 系统句柄为空");
+        return -1;
+    }
+    if (!text) {
+        log_error("[自主学习][P0-018] auto_learning_learn_text: 输入文本为空指针");
+        return -1;
+    }
+    if (!source) {
+        log_error("[自主学习][P0-018] auto_learning_learn_text: 来源为空指针");
+        return -1;
+    }
 
-    if (system->entry_count >= system->entry_capacity) return -1;
+    size_t text_len = strlen(text);
+    if (text_len == 0) {
+        log_error("[自主学习][P0-018] auto_learning_learn_text: 输入文本长度为0，无数据可供学习");
+        return -1;
+    }
+
+#ifdef SELFLNN_STRICT_REAL_DATA
+    /* P0-018修复: 严格真实数据模式 —— 验证输入文本是否为真实数据，拒绝合成/随机/无效数据 */
+    {
+        /* 检查文本是否仅有空白字符（无效数据） */
+        int has_printable = 0;
+        int alpha_count = 0;
+        int digit_count = 0;
+        for (size_t i = 0; i < text_len && i < 4096; i++) {
+            unsigned char c = (unsigned char)text[i];
+            if (c > 32 && c < 127) has_printable = 1;
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) alpha_count++;
+            if (c >= '0' && c <= '9') digit_count++;
+        }
+        if (!has_printable) {
+            log_error("[自主学习][P0-018] auto_learning_learn_text: 严格真实数据模式 —— "
+                      "文本内容仅含空白字符，无有效数据。来源: '%s'。返回 -1 拒绝学习。", source);
+            return -1;
+        }
+
+        /* 检查是否为纯随机/合成数据：字母数字比过高且无自然语言结构特征 */
+        /* 正常文本中，字母比例通常在40%-70%之间，纯随机数据字母比例接近100%或接近0% */
+        size_t check_len = text_len < 256 ? text_len : 256;
+        if (check_len > 10) {
+            int printable_count = 0;
+            for (size_t i = 0; i < check_len; i++) {
+                unsigned char c = (unsigned char)text[i];
+                if (c >= 32 && c <= 126) printable_count++;
+            }
+            float printable_ratio = (float)printable_count / (float)check_len;
+
+            /* 若可打印字符比例 > 98% 且包含大量重复模式，可能是合成数据 */
+            int alpha_ratio = (alpha_count + digit_count) * 100 / (int)check_len;
+            if (alpha_ratio > 95 && check_len > 32) {
+                /* 检测重复模式：检查是否有自然语言的分隔符（空格、标点） */
+                int separators = 0;
+                for (size_t i = 0; i < check_len; i++) {
+                    if (text[i] == ' ' || text[i] == '.' || text[i] == ',' ||
+                        text[i] == '\n' || text[i] == '\t') separators++;
+                }
+                float sep_ratio = (float)separators / (float)check_len;
+                if (sep_ratio < 0.02f) {
+                    log_error("[自主学习][P0-018] auto_learning_learn_text: 严格真实数据模式 —— "
+                              "文本疑似随机/合成数据（无自然语言分隔结构，字母数字比=%d%%，分隔符比=%.2f%%）。"
+                              "来源: '%s'。拒绝学习。", alpha_ratio, sep_ratio * 100.0f, source);
+                    return -1;
+                }
+            }
+
+            /* 纯数字串可能为随机生成的数据 */
+            if (digit_count == (int)check_len && check_len > 8) {
+                log_error("[自主学习][P0-018] auto_learning_learn_text: 严格真实数据模式 —— "
+                          "文本内容为纯数字串（疑似随机/合成数据）。来源: '%s'。拒绝学习。", source);
+                return -1;
+            }
+        }
+
+        /* 单行极短文本（<5个有效字符）可能是随机噪声 */
+        if (text_len < 5) {
+            log_error("[自主学习][P0-018] auto_learning_learn_text: 严格真实数据模式 —— "
+                      "文本过短（%zu字节），无法构成有效知识。来源: '%s'。拒绝学习。",
+                      text_len, source);
+            return -1;
+        }
+    }
+#endif
+
+    if (system->entry_count >= system->entry_capacity) {
+        log_error("[自主学习][P0-018] auto_learning_learn_text: 学习条目已满（%zu/%zu），"
+                  "无法再添加新知识。来源: '%s'。",
+                  system->entry_count, system->entry_capacity, source);
+        return -1;
+    }
 
     AutoLearnEntry* entry = &system->entries[system->entry_count];
 
@@ -493,12 +644,11 @@ int auto_learning_learn_text(AutoLearningSystem* system, const char* text,
     memcpy(entry->topic, topic_text, topic_len);
     entry->topic[topic_len] = '\0';
 
-    /* 复制内容 */
-    size_t text_len = strlen(text);
-    if (text_len > 4096) text_len = 4096;
-    entry->content = (char*)safe_malloc(text_len + 1);
-    memcpy(entry->content, text, text_len);
-    entry->content[text_len] = '\0';
+    /* 复制内容（text_len已在函数入口处计算） */
+    size_t copy_len = text_len > 4096 ? 4096 : text_len;
+    entry->content = (char*)safe_malloc(copy_len + 1);
+    memcpy(entry->content, text, copy_len);
+    entry->content[copy_len] = '\0';
 
     entry->source_type = type;
     strncpy(entry->source_path, source, sizeof(entry->source_path) - 1);
@@ -541,17 +691,29 @@ int auto_learning_learn_text(AutoLearningSystem* system, const char* text,
 }
 
 int auto_learning_scan_directory(AutoLearningSystem* system) {
-    if (!system || system->watch_directory[0] == '\0') return -1;
+    if (!system) {
+        log_error("[自主学习][P0-018] auto_learning_scan_directory: 系统句柄为空");
+        return -1;
+    }
+    if (system->watch_directory[0] == '\0') {
+        log_error("[自主学习][P0-018] auto_learning_scan_directory: 监控目录未设置，无法扫描");
+        return -1;
+    }
 
     time_t scan_start = time(NULL);
+    int files_found = 0;
     int files_learned = 0;
 
     PlatformDirHandle dir = platform_dir_open(system->watch_directory);
-    if (!dir) return -1;
+    if (!dir) {
+        log_error("[自主学习][P0-018] auto_learning_scan_directory: 无法打开目录 '%s'", system->watch_directory);
+        return -1;
+    }
 
     PlatformDirEntry entry;
     while (platform_dir_read(dir, &entry) > 0) {
         if (entry.is_regular_file) {
+            files_found++;
             if (auto_learning_learn_file(system, entry.path) == 0) {
                 files_learned++;
             }
@@ -563,12 +725,31 @@ int auto_learning_scan_directory(AutoLearningSystem* system) {
     system->stats.total_scan_time_ms = (size_t)(difftime(time(NULL), scan_start) * 1000);
     system->last_scan = time(NULL);
 
+#ifdef SELFLNN_STRICT_REAL_DATA
+    /* P0-018修复: 严格真实数据模式 —— 未找到任何真实数据文件时返回错误 */
+    if (files_found == 0) {
+        log_error("[自主学习][P0-018] auto_learning_scan_directory: 严格真实数据模式 —— "
+                  "目录 '%s' 中未找到任何文件，无真实数据可供学习。返回 0 表示无数据学习。",
+                  system->watch_directory);
+        return 0;
+    }
+    if (files_learned == 0) {
+        log_warning("[自主学习][P0-018] auto_learning_scan_directory: 严格真实数据模式 —— "
+                    "目录 '%s' 中扫描到 %d 个文件，但未能从任何文件中成功学习。"
+                    "拒绝生成合成/随机数据作为学习输入。",
+                    system->watch_directory, files_found);
+        return 0;
+    }
+#endif
+
     /* 扫描完成后自动导出到知识库 */
     if (files_learned > 0 && system->knowledge_base) {
         auto_learning_export_to_knowledge_base(system, system->knowledge_base);
     }
 
-    return 0;
+    log_info("[自主学习] auto_learning_scan_directory: 从目录 '%s' 中成功学习了 %d 个文件",
+             system->watch_directory, files_learned);
+    return files_learned;
 }
 
 int auto_learning_verify_knowledge(AutoLearningSystem* system, size_t entry_index) {
@@ -780,7 +961,19 @@ static float source_type_weight(KnowledgeSourceType type) {
 int auto_learning_incremental_update(AutoLearningSystem* system, const char* topic,
                                      const char* content, KnowledgeSourceType type,
                                      const char* source_path) {
-    if (!system || !topic || !content) return -1;
+    if (!system) {
+        log_error("[自主学习][P0-018] auto_learning_incremental_update: 系统句柄为空");
+        return -1;
+    }
+    if (!topic || strlen(topic) == 0) {
+        log_error("[自主学习][P0-018] auto_learning_incremental_update: 主题为空，无法执行增量更新");
+        return -1;
+    }
+    if (!content || strlen(content) == 0) {
+        log_error("[自主学习][P0-018] auto_learning_incremental_update: 内容为空，"
+                  "无法对主题 '%s' 执行增量更新", topic ? topic : "(null)");
+        return -1;
+    }
 
     /* 查找话题相似度 > 0.7 的已有条目 */
     int best_match = -1;
@@ -879,13 +1072,79 @@ int auto_learning_fuse_knowledge(AutoLearningSystem* system, const char* topic,
                                   int source_indices[], int count,
                                   AutoLearnFusionMode mode,
                                   AutoLearnFusionResult* result) {
-    if (!system || !topic || !source_indices || count <= 0 || count > 32) return -1;
+    if (!system) {
+        log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 系统句柄为空");
+        return -1;
+    }
+    if (!topic) {
+        log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 融合主题为空");
+        return -1;
+    }
+    if (!source_indices) {
+        log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 源索引数组为空");
+        return -1;
+    }
+    if (count <= 0 || count > 32) {
+        log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 源条目数量无效（%d），"
+                  "必须在[1,32]范围内", count);
+        return -1;
+    }
 
     /* 验证所有源索引有效 */
     for (int i = 0; i < count; i++) {
-        if (source_indices[i] < 0 || (size_t)source_indices[i] >= system->entry_count) return -1;
-        if (!system->entries[source_indices[i]].topic) return -1;
+        if (source_indices[i] < 0 || (size_t)source_indices[i] >= system->entry_count) {
+            log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 源索引[%d]=%d 无效，"
+                      "有效范围[0, %zu)", i, source_indices[i], system->entry_count);
+            return -1;
+        }
+        if (!system->entries[source_indices[i]].topic) {
+            log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 源条目[%d]主题为空，"
+                      "条目数据无效", source_indices[i]);
+            return -1;
+        }
+        if (!system->entries[source_indices[i]].content) {
+            log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 源条目[%d]内容为空，"
+                      "无数据可供融合", source_indices[i]);
+            return -1;
+        }
+        if (strlen(system->entries[source_indices[i]].content) == 0) {
+            log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 源条目[%d]内容长度为0，"
+                      "无有效数据", source_indices[i]);
+            return -1;
+        }
     }
+
+#ifdef SELFLNN_STRICT_REAL_DATA
+    /* P0-018修复: 严格真实数据模式 —— 验证融合源的实体和关系是否来自真实数据提取 */
+    for (int i = 0; i < count; i++) {
+        int idx = source_indices[i];
+        AutoLearnEntry* entry = &system->entries[idx];
+
+        /* 验证条目来源路径存在且非空（确保来自真实文件） */
+        if (entry->source_path[0] == '\0') {
+            log_warning("[自主学习][P0-018] auto_learning_fuse_knowledge: 严格真实数据模式 —— "
+                        "源条目[%d] 无来源路径记录，无法验证数据真实性。继续融合但标记为低置信度。",
+                        idx);
+        }
+
+        /* 验证实体和关系是从真实内容中提取的，而非合成占位符 */
+        if (entry->entity_count == 0 && entry->relation_count == 0) {
+            log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 严格真实数据模式 —— "
+                      "源条目[%d] 主题 '%s' 的实体数和关系数均为0，该条目可能为无效/合成数据。"
+                      "拒绝融合。", idx, entry->topic);
+            return -1;
+        }
+
+        /* 验证内容长度与实体/关系数的比例合理性（合成数据通常此比例异常） */
+        size_t clen = strlen(entry->content);
+        if (clen > 200 && entry->entity_count == 0) {
+            log_error("[自主学习][P0-018] auto_learning_fuse_knowledge: 严格真实数据模式 —— "
+                      "源条目[%d] 主题 '%s' 内容长度 %zu 但无可抽取实体，"
+                      "数据可能为无效文本。拒绝融合。", idx, entry->topic, clen);
+            return -1;
+        }
+    }
+#endif
 
     /* 收集所有实体和关系的并集 */
     char* all_entities[64];
@@ -1682,6 +1941,15 @@ int active_learner_query_synthesis(ALActiveLearner* learner,
     float* out_features, int feature_dim, int count) {
     if (!learner || !out_features || feature_dim <= 0 || count <= 0) return 0;
 
+#ifdef SELFLNN_STRICT_REAL_DATA
+    /* P0-018修复: 严格真实数据模式 —— 完全禁止合成/随机数据生成
+     * 主动学习器的查询合成本质上是在特征空间中生成虚假样本，
+     * 违反"严格真实数据"原则，在此模式下直接拒绝。 */
+    log_error("[自主学习][P0-018] active_learner_query_synthesis: 严格真实数据模式 —— "
+              "完全禁止合成/随机数据生成。查询合成功能已禁用。"
+              "请使用真实标注样本进行主动学习。");
+    return 0;
+#else
     int synthesized = 0;
 
     /* 收集已标注样本的统计信息 */
@@ -1744,6 +2012,7 @@ int active_learner_query_synthesis(ALActiveLearner* learner,
     safe_free((void**)&mean);
     safe_free((void**)&std);
     return synthesized;
+#endif
 }
 
 int active_learner_query(ALActiveLearner* learner, int* sample_indices, int n,

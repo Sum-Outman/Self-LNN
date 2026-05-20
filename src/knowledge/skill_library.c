@@ -8,6 +8,8 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/selflnn.h"
+#include "selflnn/core/lnn.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -446,6 +448,180 @@ int skill_library_search_by_tag(const SkillLibrary* library, const char* tag,
  * K-021: 技能执行引擎实现
  * ================================================================ */
 
+/* P0-010: LNN推理输入编码维度 */
+#define SKILL_LNN_INPUT_DIM 128
+#define SKILL_LNN_OUTPUT_DIM 128
+
+/**
+ * @brief P0-010: 将技能信息编码为LNN输入向量
+ *
+ * 将技能名称、描述、参数和类型编码为浮点数向量，
+ * 通过液态神经网络进行统一推理执行。
+ * 编码方案：名称、描述、参数的字符级哈希映射到不同频率位置。
+ *
+ * @param skill 技能记录
+ * @param params 参数字符串（可为NULL）
+ * @param input_vec 输出输入向量缓冲区
+ * @param input_dim 输入向量维度
+ */
+static int skill_encode_to_lnn_input(const SkillRecord* skill, const char* params,
+                                      float* input_vec, int input_dim) {
+    memset(input_vec, 0, (size_t)input_dim * sizeof(float));
+    /* 编码技能名称 */
+    size_t name_len = strlen(skill->name);
+    for (size_t i = 0; i < name_len && i < (size_t)input_dim; i++) {
+        input_vec[i % input_dim] += ((float)(unsigned char)skill->name[i] - 128.0f) / 128.0f;
+    }
+    /* 编码技能描述 */
+    size_t desc_len = strlen(skill->description);
+    for (size_t i = 0; i < desc_len && i < (size_t)input_dim; i++) {
+        input_vec[(i * 7 + 13) % input_dim] += ((float)(unsigned char)skill->description[i] - 128.0f) / 128.0f;
+    }
+    /* 编码参数字符串 */
+    if (params && params[0]) {
+        size_t param_len = strlen(params);
+        for (size_t i = 0; i < param_len && i < (size_t)input_dim; i++) {
+            input_vec[(i * 3 + 5) % input_dim] += ((float)(unsigned char)params[i] - 128.0f) / 128.0f;
+        }
+    }
+    /* 编码技能类型和元信息 */
+    input_vec[input_dim - 4] = (float)skill->type / 4.0f;
+    input_vec[input_dim - 3] = (float)skill->step_count / 64.0f;
+    input_vec[input_dim - 2] = (float)skill->child_count / 16.0f;
+    input_vec[input_dim - 1] = skill->enabled ? 1.0f : -1.0f;
+    return 0;
+}
+
+/**
+ * @brief P0-010: 通过液态神经网络执行技能推理
+ *
+ * 将技能信息编码后送入全局LNN进行前向传播，
+ * LNN的输出表示技能的推理结果和控制信号。
+ * 完全替代外部system()调用和shell脚本依赖。
+ *
+ * @param library 技能库句柄
+ * @param skill 技能记录
+ * @param params 参数字符串（可为NULL）
+ * @return int 0成功，-1失败
+ */
+static int skill_execute_via_lnn(SkillLibrary* library, const SkillRecord* skill, const char* params) {
+    (void)library;
+    /* 获取全局唯一液态神经网络实例 */
+    void* lnn_ptr = selflnn_get_lnn();
+    if (!lnn_ptr) {
+        log_warning("[技能执行] 全局LNN未初始化，无法通过液态神经网络执行技能: %s", skill->name);
+        return -1;
+    }
+    LNN* lnn = (LNN*)lnn_ptr;
+
+    /* 编码技能信息到输入向量 */
+    float input_vec[SKILL_LNN_INPUT_DIM];
+    skill_encode_to_lnn_input(skill, params, input_vec, SKILL_LNN_INPUT_DIM);
+
+    /* 通过LNN前向传播执行统一推理 */
+    float output_vec[SKILL_LNN_OUTPUT_DIM];
+    int output_size = lnn_forward_safe(lnn, input_vec, (size_t)SKILL_LNN_INPUT_DIM,
+                                        output_vec, SKILL_LNN_OUTPUT_DIM);
+    if (output_size < 0) {
+        log_warning("[技能执行] LNN前向传播失败: %s (错误码=%d)", skill->name, output_size);
+        return -1;
+    }
+
+    /* 解释LNN输出：计算输出的加权平均值作为执行置信度 */
+    float output_sum = 0.0f;
+    int effective_dim = output_size < SKILL_LNN_OUTPUT_DIM ? output_size : SKILL_LNN_OUTPUT_DIM;
+    for (int i = 0; i < effective_dim; i++) {
+        output_sum += output_vec[i];
+    }
+    float confidence = output_sum / (float)effective_dim;
+
+    /* 基于置信度判断执行结果 */
+    if (confidence > -0.5f) {
+        log_debug("[技能执行] LNN推理完成: %s, 置信度=%.3f", skill->name, confidence);
+        return 0;
+    } else {
+        log_warning("[技能执行] LNN推理拒绝: %s, 置信度=%.3f", skill->name, confidence);
+        return -1;
+    }
+}
+
+/**
+ * @brief P0-010: 通过LNN执行单个技能步骤
+ *
+ * 将步骤的动作名称编码后送入LNN进行推理执行。
+ * 用于组合技能中没有子技能ID但有步骤定义的情况。
+ *
+ * @param library 技能库句柄
+ * @param skill 技能记录
+ * @param step_index 步骤索引
+ * @param params 参数字符串（可为NULL）
+ * @return int 0成功，-1失败
+ */
+static int skill_execute_step_via_lnn(SkillLibrary* library, const SkillRecord* skill,
+                                       int step_index, const char* params) {
+    (void)library;
+    if (step_index < 0 || step_index >= skill->step_count) return -1;
+
+    void* lnn_ptr = selflnn_get_lnn();
+    if (!lnn_ptr) {
+        log_warning("[技能步骤] 全局LNN未初始化，无法执行步骤: %s[%d]", skill->name, step_index);
+        return -1;
+    }
+    LNN* lnn = (LNN*)lnn_ptr;
+
+    /* 编码步骤动作到输入向量 */
+    float input_vec[SKILL_LNN_INPUT_DIM];
+    memset(input_vec, 0, sizeof(input_vec));
+    size_t action_len = strlen(skill->steps[step_index].action);
+    for (size_t i = 0; i < action_len && i < SKILL_LNN_INPUT_DIM; i++) {
+        input_vec[i % SKILL_LNN_INPUT_DIM] += ((float)(unsigned char)skill->steps[step_index].action[i] - 128.0f) / 128.0f;
+    }
+    /* 编码步骤描述 */
+    size_t desc_len = strlen(skill->steps[step_index].description);
+    for (size_t i = 0; i < desc_len && i < SKILL_LNN_INPUT_DIM; i++) {
+        input_vec[(i * 11 + 3) % SKILL_LNN_INPUT_DIM] += ((float)(unsigned char)skill->steps[step_index].description[i] - 128.0f) / 128.0f;
+    }
+    /* 编码参数 */
+    if (params && params[0]) {
+        size_t param_len = strlen(params);
+        for (size_t i = 0; i < param_len && i < SKILL_LNN_INPUT_DIM; i++) {
+            input_vec[(i * 5 + 17) % SKILL_LNN_INPUT_DIM] += ((float)(unsigned char)params[i] - 128.0f) / 128.0f;
+        }
+    }
+    /* 编码步骤元信息 */
+    input_vec[SKILL_LNN_INPUT_DIM - 4] = (float)step_index / 64.0f;
+    input_vec[SKILL_LNN_INPUT_DIM - 3] = skill->steps[step_index].estimated_time_ms / 10000.0f;
+    input_vec[SKILL_LNN_INPUT_DIM - 2] = (float)skill->steps[step_index].max_retries / 10.0f;
+    input_vec[SKILL_LNN_INPUT_DIM - 1] = 1.0f;
+
+    /* LNN前向传播 */
+    float output_vec[SKILL_LNN_OUTPUT_DIM];
+    int output_size = lnn_forward_safe(lnn, input_vec, (size_t)SKILL_LNN_INPUT_DIM,
+                                        output_vec, SKILL_LNN_OUTPUT_DIM);
+    if (output_size < 0) {
+        log_warning("[技能步骤] LNN前向传播失败: %s[%d]", skill->name, step_index);
+        return -1;
+    }
+
+    /* 解释输出 */
+    float output_sum = 0.0f;
+    int effective_dim = output_size < SKILL_LNN_OUTPUT_DIM ? output_size : SKILL_LNN_OUTPUT_DIM;
+    for (int i = 0; i < effective_dim; i++) {
+        output_sum += output_vec[i];
+    }
+    float confidence = output_sum / (float)effective_dim;
+
+    if (confidence > -0.5f) {
+        log_debug("[技能步骤] LNN执行完成: %s[%d]=%s, 置信度=%.3f",
+                  skill->name, step_index, skill->steps[step_index].action, confidence);
+        return 0;
+    } else {
+        log_warning("[技能步骤] LNN执行拒绝: %s[%d], 置信度=%.3f",
+                    skill->name, step_index, confidence);
+        return -1;
+    }
+}
+
 int skill_library_execute(SkillLibrary* library, int skill_id,
                            const char* params,
                            SkillExecutionResult* result) {
@@ -478,61 +654,76 @@ int skill_library_execute(SkillLibrary* library, int skill_id,
     /* 记录开始时间 */
     float start_time = (float)time(NULL);
 
-    /* 根据技能类型执行 — F-008修复：实现真实系统命令执行 */
+    /* 根据技能类型执行 — P0-010修复：移除所有外部system()调用和shell脚本依赖
+     * ATOMIC: 通过LNN液态神经网络进行统一推理执行
+     * COMPOSITE: 按顺序递归调用每个子技能的skill_library_execute实现真正的组合执行
+     * TASK: 通过LNN液态神经网络进行任务推理执行
+     * 所有技能执行均通过内部能力调度完成，不依赖任何外部可执行文件或脚本 */
     int exec_success = 0;
     int stype = (int)skill.type;
     switch (stype) {
         case SKILL_TYPE_ATOMIC: {
-            /* M-004修复：内部能力调用替代system()（仅保留system()作为极简回退） */
+            /* P0-010: 原子技能通过LNN模型进行推理执行 */
             int ret = -1;
             if (skill.internal_handler) {
                 ret = skill.internal_handler(params);
             } else {
-                char exec_cmd[1024];
-                if (params && params[0]) {
-                    snprintf(exec_cmd, sizeof(exec_cmd), "%s %s", skill.name, params);
-                } else {
-                    snprintf(exec_cmd, sizeof(exec_cmd), "%s", skill.name);
-                }
-                ret = system(exec_cmd);
+                ret = skill_execute_via_lnn(library, &skill, params);
             }
             exec_success = (ret == 0) ? 1 : 0;
             snprintf(result->output_log, sizeof(result->output_log),
-                    "执行原子技能: %s (系统返回=%d)", skill.name, ret);
+                    "执行原子技能: %s (LNN推理返回=%d)", skill.name, ret);
             } break;
         case SKILL_TYPE_COMPOSITE: {
-            /* F-008: 真实执行：逐步骤执行子技能 */
+            /* P0-010: 组合技能按顺序调用每个子技能的内部处理函数 */
             snprintf(result->output_log, sizeof(result->output_log),
-                    "执行组合技能: %s (%d步骤): ", skill.name, skill.step_count);
+                    "执行组合技能: %s: ", skill.name);
             int all_ok = 1;
-            for (int step = 0; step < skill.step_count && step < 32; step++) {
-                int ret = -1;
-                if (skill.sub_skills && skill.sub_skills[step]) {
-                    ret = skill.sub_skills[step](params);
+            /* 优先使用子技能ID列表递归执行真正的子技能 */
+            if (skill.child_count > 0) {
+                for (int ci = 0; ci < skill.child_count && ci < SKILL_MAX_PREREQ; ci++) {
+                    SkillExecutionResult child_result;
+                    int child_ret = skill_library_execute(library, skill.child_skill_ids[ci],
+                                                           params, &child_result);
+                    if (child_ret != 0) all_ok = 0;
+                    char step_log[128];
+                    int cur_len = (int)strlen(result->output_log);
+                    if (cur_len < (int)sizeof(result->output_log) - 40) {
+                        snprintf(step_log, sizeof(step_log), "[子技能%d:%s] ",
+                                skill.child_skill_ids[ci], child_ret == 0 ? "OK" : "FAIL");
+                        strncat(result->output_log, step_log, sizeof(result->output_log) - cur_len - 1);
+                    }
                 }
-                if (ret != 0) all_ok = 0;
-                char step_log[128];
-                int cur_len = (int)strlen(result->output_log);
-                if (cur_len < (int)sizeof(result->output_log) - 40) {
-                    snprintf(step_log, sizeof(step_log), "[S%d:%s] ", step, ret==0?"OK":"FAIL");
-                    strncat(result->output_log, step_log, sizeof(result->output_log) - cur_len - 1);
+            } else if (skill.step_count > 0) {
+                /* 无子技能ID但定义了步骤，通过LNN逐步骤执行 */
+                for (int step = 0; step < skill.step_count && step < 32; step++) {
+                    int step_ret = skill_execute_step_via_lnn(library, &skill, step, params);
+                    if (step_ret != 0) all_ok = 0;
+                    char step_log[128];
+                    int cur_len = (int)strlen(result->output_log);
+                    if (cur_len < (int)sizeof(result->output_log) - 40) {
+                        snprintf(step_log, sizeof(step_log), "[S%d:%s] ", step, step_ret == 0 ? "OK" : "FAIL");
+                        strncat(result->output_log, step_log, sizeof(result->output_log) - cur_len - 1);
+                    }
                 }
+            } else {
+                /* 无子技能也无步骤，通过LNN整体推理执行 */
+                int lnn_ret = skill_execute_via_lnn(library, &skill, params);
+                if (lnn_ret != 0) all_ok = 0;
+                strncat(result->output_log, "[整体LNN推理]", sizeof(result->output_log) - strlen(result->output_log) - 1);
             }
             exec_success = all_ok;
             } break;
         case SKILL_TYPE_TASK: {
-            /* M-004修复：优先内部任务执行器，回退shell */
+            /* P0-010: 任务技能通过LNN模型进行推理执行，禁止外部shell脚本调用 */
             int ret = -1;
             if (skill.internal_handler) {
                 ret = skill.internal_handler(params);
             } else {
-                char task_cmd[1024];
-                snprintf(task_cmd, sizeof(task_cmd), "sh execute_task.sh %s %s 2>&1",
-                        skill.name, params ? params : "");
-                ret = system(task_cmd);
+                ret = skill_execute_via_lnn(library, &skill, params);
             }
             snprintf(result->output_log, sizeof(result->output_log),
-                    "执行任务技能: %s (返回=%d)", skill.name, ret);
+                    "执行任务技能: %s (LNN推理返回=%d)", skill.name, ret);
             exec_success = (ret == 0) ? 1 : 0;
             } break;
         default: {

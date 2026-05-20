@@ -384,15 +384,27 @@ static int detect_transitive_contradiction(const KnowledgeEntry* entries, size_t
 
 int knowledge_integration_belief_expand(KnowledgeIntegrationSystem* system,
                                        KnowledgeBase* kb, const KnowledgeEntry* entry) {
-    (void)system;
     if (!kb || !entry) return -1;
+
+    /* V-020修复: 跨知识库推理 — 当启用跨推理时，将同一信念同步扩展到所有注册KB */
+    if (system && system->config.enable_cross_reasoning && system->kb_count > 1) {
+        int added = 0;
+        for (size_t i = 0; i < system->kb_count; i++) {
+            if (!system->kbs[i].kb) continue;
+            if (knowledge_base_add(system->kbs[i].kb, entry) >= 0) added++;
+        }
+        return (added > 0) ? 0 : -1;
+    }
+
     return knowledge_base_add(kb, entry);
 }
 
 int knowledge_integration_belief_contract(KnowledgeIntegrationSystem* system,
                                          KnowledgeBase* kb, int entry_id) {
-    (void)system;
     if (!kb || entry_id <= 0) return -1;
+
+    int use_cross_kb = (system && system->config.enable_cross_reasoning && system->kb_count > 1);
+
     KnowledgeEntry target;
     memset(&target, 0, sizeof(KnowledgeEntry));
     if (knowledge_base_get_by_id(kb, entry_id, &target) != 0) return -1;
@@ -419,6 +431,19 @@ int knowledge_integration_belief_contract(KnowledgeIntegrationSystem* system,
         if (rid > 0 && rid != entry_id) {
             float te = compute_entrenchment(&target);
             float re = compute_entrenchment(&related[i]);
+
+            /* V-020修复: 跨知识库推理 — 检查其他KB中是否有相同信念提升其认知固化度 */
+            if (use_cross_kb) {
+                int cross_support = 0;
+                for (size_t ck = 0; ck < system->kb_count; ck++) {
+                    if (system->kbs[ck].kb == kb) continue;
+                    int other_id = find_entry_id_by_content(system->kbs[ck].kb, &related[i]);
+                    if (other_id > 0) cross_support++;
+                }
+                re += (float)cross_support * 0.08f;
+                if (re > 1.0f) re = 1.0f;
+            }
+
             if (re < te * 0.6f && related[i].predicate && target.predicate &&
                 strcmp(related[i].predicate, target.predicate) == 0) {
                 related_ids[ridx++] = rid;
@@ -431,6 +456,16 @@ int knowledge_integration_belief_contract(KnowledgeIntegrationSystem* system,
     knowledge_base_remove(kb, entry_id);
     for (size_t i = 0; i < ridx; i++) knowledge_base_remove(kb, related_ids[i]);
     safe_free((void**)&related_ids);
+
+    /* V-020修复: 跨知识库推理 — 在其他注册KB中同步删除相同信念 */
+    if (use_cross_kb) {
+        for (size_t i = 0; i < system->kb_count; i++) {
+            if (system->kbs[i].kb == kb) continue;
+            int other_id = find_entry_id_by_content(system->kbs[i].kb, &target);
+            if (other_id > 0) knowledge_base_remove(system->kbs[i].kb, other_id);
+        }
+    }
+
     ki_free_entry(&target);
     return 0;
 }
@@ -438,13 +473,25 @@ int knowledge_integration_belief_contract(KnowledgeIntegrationSystem* system,
 int knowledge_integration_belief_revise(KnowledgeIntegrationSystem* system,
                                        KnowledgeBase* kb, const KnowledgeEntry* entry,
                                        const KnowledgeEntry* conflicting_entry) {
-    (void)system;
     if (!kb || !entry) return -1;
+
+    int use_cross_kb = (system && system->config.enable_cross_reasoning && system->kb_count > 1);
+
     if (conflicting_entry) {
         int cid = find_entry_id_by_content(kb, conflicting_entry);
         if (cid > 0) knowledge_base_remove(kb, cid);
+
+        /* V-020修复: 跨知识库推理 — 在其他注册KB中查找并移除明确冲突的条目 */
+        if (use_cross_kb) {
+            for (size_t i = 0; i < system->kb_count; i++) {
+                if (system->kbs[i].kb == kb) continue;
+                int other_cid = find_entry_id_by_content(system->kbs[i].kb, conflicting_entry);
+                if (other_cid > 0) knowledge_base_remove(system->kbs[i].kb, other_cid);
+            }
+        }
         return knowledge_base_add(kb, entry);
     }
+
     KnowledgeQuery q;
     memset(&q, 0, sizeof(KnowledgeQuery));
     q.type_filter = -1;
@@ -466,6 +513,19 @@ int knowledge_integration_belief_revise(KnowledgeIntegrationSystem* system,
         int eid = find_entry_id_by_content(kb, &existing[i]);
         if (eid < 0) continue;
         float ent = compute_entrenchment(&existing[i]);
+
+        /* V-020修复: 跨知识库推理 — 评估矛盾条目在多个KB中的共识支持度 */
+        if (use_cross_kb) {
+            int cross_support = 0;
+            for (size_t ck = 0; ck < system->kb_count; ck++) {
+                if (system->kbs[ck].kb == kb) continue;
+                int other_id = find_entry_id_by_content(system->kbs[ck].kb, &existing[i]);
+                if (other_id > 0) cross_support++;
+            }
+            ent += (float)cross_support * 0.1f;
+            if (ent > 1.0f) ent = 1.0f;
+        }
+
         float new_ent = compute_entrenchment(entry);
         if (ent < new_ent && ent < weakest_ent) {
             weakest_ent = ent;
@@ -482,8 +542,10 @@ size_t knowledge_integration_detect_logical_contradictions(KnowledgeIntegrationS
                                                           KnowledgeBase* kb,
                                                           int* conflict_pairs,
                                                           size_t max_pairs) {
-    (void)system;
     if (!kb || !conflict_pairs || max_pairs == 0) return 0;
+
+    int use_cross_kb = (system && system->config.enable_cross_reasoning && system->kb_count > 1);
+
     size_t total = 0;
     KnowledgeQuery q_all;
     memset(&q_all, 0, sizeof(KnowledgeQuery));
@@ -492,12 +554,39 @@ size_t knowledge_integration_detect_logical_contradictions(KnowledgeIntegrationS
     if (!all_entries) return 0;
     int entry_count = knowledge_base_query(kb, &q_all, all_entries, KI_CONTRADICT_MAX_ENTRIES);
     if (entry_count <= 0) { safe_free((void**)&all_entries); return 0; }
+
+    /* V-020修复: 跨知识库推理 — 收集所有注册KB中的条目用于全量矛盾检测 */
+    if (use_cross_kb) {
+        int original_count = entry_count;
+        for (size_t k = 0; k < system->kb_count; k++) {
+            if (system->kbs[k].kb == kb) continue;
+            if (entry_count + 256 > KI_CONTRADICT_MAX_ENTRIES) break;
+            int cross_count = knowledge_base_query(system->kbs[k].kb, &q_all,
+                all_entries + entry_count,
+                KI_CONTRADICT_MAX_ENTRIES - entry_count);
+            if (cross_count > 0) entry_count += cross_count;
+        }
+        (void)original_count;
+    }
+
     size_t pair_count = 0;
     for (int i = 0; i < entry_count && pair_count < max_pairs; i++) {
         for (int j = i + 1; j < entry_count && pair_count < max_pairs; j++) {
             if (entries_directly_contradict(&all_entries[i], &all_entries[j])) {
                 int id_a = find_entry_id_by_content(kb, &all_entries[i]);
+                if (id_a <= 0 && use_cross_kb) {
+                    for (size_t k = 0; k < system->kb_count && id_a <= 0; k++) {
+                        if (system->kbs[k].kb == kb) continue;
+                        id_a = find_entry_id_by_content(system->kbs[k].kb, &all_entries[i]);
+                    }
+                }
                 int id_b = find_entry_id_by_content(kb, &all_entries[j]);
+                if (id_b <= 0 && use_cross_kb) {
+                    for (size_t k = 0; k < system->kb_count && id_b <= 0; k++) {
+                        if (system->kbs[k].kb == kb) continue;
+                        id_b = find_entry_id_by_content(system->kbs[k].kb, &all_entries[j]);
+                    }
+                }
                 if (id_a > 0 && id_b > 0) {
                     conflict_pairs[pair_count * 2] = id_a;
                     conflict_pairs[pair_count * 2 + 1] = id_b;

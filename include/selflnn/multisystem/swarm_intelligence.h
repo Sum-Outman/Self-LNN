@@ -20,6 +20,9 @@
 #ifndef SELFLNN_SWARM_INTELLIGENCE_H
 #define SELFLNN_SWARM_INTELLIGENCE_H
 
+/* DUP-001: swarm_enhanced 功能已完全合并至本文件 */
+#define SELFLNN_SWARM_ENHANCED_MERGED 1
+
 #include "selflnn/core/errors.h"
 #include "selflnn/core/tensor.h"
 #include <stddef.h>
@@ -430,6 +433,169 @@ Swarm* swarm_create_woa(const SwarmConfig* config);
  * @return Swarm* 群体指针，失败返回NULL
  */
 Swarm* swarm_create_marl(const SwarmConfig* config);
+
+/* ============================================================================
+ * DUP-001: 增强群体智能系统声明（合并自 swarm_enhanced.h）
+ * ============================================================================ */
+
+/* 增强群体配置常量 */
+#define SWARM_ENH_MAX_NODES         4096
+#define SWARM_ENH_MAX_EDGES         262144
+#define SWARM_ENH_MAX_PHEROMONE_TYPES 16
+#define SWARM_ENH_MAX_CONSENSUS_ROUNDS 1000
+#define SWARM_ENH_MAX_COMMAND_SIZE  65536
+
+/* 增强群体算法类型 */
+typedef enum {
+    SWARM_ENH_ACO_ADAPTIVE = 0,
+    SWARM_ENH_ABC_ADAPTIVE,
+    SWARM_ENH_DISTRIBUTED_CONSENSUS,
+    SWARM_ENH_LIQUID_COMMUNICATION,
+    SWARM_ENH_SELF_HEALING,
+    SWARM_ENH_CFC_SWARM,
+    SWARM_ENH_HYBRID
+} SwarmEnhancedAlgorithm;
+
+/* 分布式共识协议类型 */
+typedef enum {
+    CONSENSUS_RAFT = 0,
+    CONSENSUS_PAXOS,
+    CONSENSUS_PBFT,
+    CONSENSUS_GOSSIP,
+    CONSENSUS_CFC_LIQUID,
+    CONSENSUS_HYBRID
+} ConsensusProtocol;
+
+/* 节点状态 */
+typedef enum {
+    NODE_STATE_FOLLOWER = 0,
+    NODE_STATE_CANDIDATE,
+    NODE_STATE_LEADER,
+    NODE_STATE_OBSERVER,
+    NODE_STATE_BYZANTINE,
+    NODE_STATE_OFFLINE
+} NodeState;
+
+/* ACO信息素更新策略 */
+typedef enum {
+    ACO_PHEROMONE_ANT_CYCLE = 0,
+    ACO_PHEROMONE_ANT_QUANTITY,
+    ACO_PHEROMONE_ANT_DENSITY,
+    ACO_PHEROMONE_ADAPTIVE,
+    ACO_PHEROMONE_CFC_LIQUID
+} ACOPheromoneUpdate;
+
+/* ACO增强配置 */
+typedef struct {
+    int num_ants;
+    float alpha;
+    float beta;
+    float evaporation_rate;
+    float initial_pheromone;
+    ACOPheromoneUpdate update_strategy;
+    float elite_weight;
+    float cfc_tau;
+    float cfc_dt;
+    int cfc_steps;
+    int max_iterations;
+    int enable_adaptive_params;
+    int enable_local_search;
+} ACOEnhancedConfig;
+
+/* ABC增强配置 */
+typedef struct {
+    int colony_size;
+    int food_sources;
+    int max_cycles;
+    float limit;
+    float scout_probability;
+    float cfc_tau;
+    float cfc_dt;
+    int cfc_steps;
+    int enable_adaptive_search;
+    int enable_multi_objective;
+} ABCEnhancedConfig;
+
+/* 分布式共识节点配置 */
+typedef struct {
+    int node_id;
+    NodeState initial_state;
+    float heartbeat_interval_ms;
+    float election_timeout_min_ms;
+    float election_timeout_max_ms;
+    int vote_for;
+    long current_term;
+    int is_byzantine;
+} ConsensusNodeConfig;
+
+/* 分布式共识日志条目 */
+typedef struct {
+    long index;
+    long term;
+    int command_type;
+    char command_data[SWARM_ENH_MAX_COMMAND_SIZE];
+    size_t command_size;
+    int is_committed;
+} ConsensusLogEntry;
+
+/* 群体液体通信消息 */
+typedef struct {
+    int sender_id;
+    int receiver_id;
+    long sequence_number;
+    int message_type;
+    float* state_vector;
+    size_t state_dim;
+    float* cfc_hidden;
+    size_t hidden_dim;
+    float timestamp;
+    int priority;
+    int is_ack_required;
+} LiquidMessage;
+
+/* 群体自愈配置 */
+typedef struct {
+    int heartbeat_timeout_ms;
+    int max_failures_before_rebuild;
+    int enable_automatic_replacement;
+    int enable_task_redistribution;
+    float cfc_recovery_tau;
+} SelfHealingConfig;
+
+/* 增强群体引擎句柄 */
+typedef struct SwarmEnhancedEngine SwarmEnhancedEngine;
+
+/* ========== ACO增强版API ========== */
+SwarmEnhancedEngine* swarm_aco_enhanced_create(const ACOEnhancedConfig* config);
+void swarm_aco_enhanced_destroy(SwarmEnhancedEngine* engine);
+int swarm_aco_init_graph(SwarmEnhancedEngine* engine, int num_nodes, const float* distance_matrix);
+int swarm_aco_enhanced_iterate(SwarmEnhancedEngine* engine, int iteration);
+int swarm_aco_get_best_path(SwarmEnhancedEngine* engine, int* path, int max_path_len, float* total_distance);
+int swarm_aco_get_pheromone(SwarmEnhancedEngine* engine, float* pheromone_matrix, size_t max_size);
+
+/* ========== ABC增强版API ========== */
+SwarmEnhancedEngine* swarm_abc_enhanced_create(const ABCEnhancedConfig* config);
+int swarm_abc_init_sources(SwarmEnhancedEngine* engine, int dimensions, const float* lower_bound, const float* upper_bound);
+int swarm_abc_enhanced_iterate(SwarmEnhancedEngine* engine, int cycle);
+int swarm_abc_get_best_solution(SwarmEnhancedEngine* engine, float* solution, int max_dim, float* fitness);
+
+/* ========== 群体液态通信API ========== */
+int swarm_liquid_comm_create(SwarmEnhancedEngine* engine, int num_nodes, int state_dim, int hidden_dim);
+int swarm_liquid_comm_send(SwarmEnhancedEngine* engine, int channel_id, const LiquidMessage* message);
+int swarm_liquid_comm_receive(SwarmEnhancedEngine* engine, int channel_id, LiquidMessage* message, int block);
+int swarm_liquid_comm_sync(SwarmEnhancedEngine* engine, int channel_id, int sync_steps);
+
+/* ========== 群体自愈与重组API ========== */
+int swarm_self_healing_configure(SwarmEnhancedEngine* engine, const SelfHealingConfig* config);
+int swarm_self_healing_detect_failures(SwarmEnhancedEngine* engine, int* failed_nodes, int max_failures);
+int swarm_self_healing_replace_node(SwarmEnhancedEngine* engine, int failed_node_id, int replacement_id);
+int swarm_self_healing_redistribute_tasks(SwarmEnhancedEngine* engine, int failed_node_id);
+
+/* ========== 模型管理 ========== */
+int swarm_enhanced_save(const SwarmEnhancedEngine* engine, SwarmEnhancedAlgorithm algorithm, const char* filepath);
+SwarmEnhancedEngine* swarm_enhanced_load(SwarmEnhancedAlgorithm algorithm, const char* filepath);
+ACOEnhancedConfig swarm_aco_default_config(void);
+ABCEnhancedConfig swarm_abc_default_config(void);
 
 #ifdef __cplusplus
 }

@@ -203,6 +203,264 @@ int sr3d_compute_dense_disparity(SR3DReconstructor* sr, const float* left, const
     return 0;
 }
 
+/* =============================================================== *
+ * V-017修复: 多视图一致性立体匹配 —— 光一致性验证和深度一致性检查    *
+ * =============================================================== */
+
+/**
+ * @brief 计算局部窗口内的归一化互相关（NCC）
+ *
+ * NCC衡量左右图像对应像素窗口的相似度，用于光一致性验证。
+ * NCC范围[-1, 1]，1表示完全匹配，-1表示完全负相关。
+ *
+ * @param left 左图像
+ * @param right 右图像
+ * @param w 图像宽度
+ * @param h 图像高度
+ * @param xl 左图像x坐标
+ * @param y 左图像y坐标
+ * @param xr 右图像x坐标
+ * @param yr 右图像y坐标
+ * @param win_size 窗口半边长
+ * @return NCC值[-1,1]，匹配失败返回-999
+ */
+static float sr3d_ncc_window(const float* left, const float* right,
+                              int w, int h,
+                              int xl, int y, int xr, int yr,
+                              int win_size) {
+    float sum_l = 0, sum_r = 0, sum_l2 = 0, sum_r2 = 0, sum_lr = 0;
+    int count = 0;
+
+    for (int wy = -win_size; wy <= win_size; wy++) {
+        for (int wx = -win_size; wx <= win_size; wx++) {
+            int plx = xl + wx, ply = y + wy;
+            int prx = xr + wx, pry = yr + wy;
+            if (plx >= 0 && plx < w && ply >= 0 && ply < h &&
+                prx >= 0 && prx < w && pry >= 0 && pry < h) {
+                float lv = left[ply * w + plx];
+                float rv = right[pry * w + prx];
+                sum_l += lv;
+                sum_r += rv;
+                sum_l2 += lv * lv;
+                sum_r2 += rv * rv;
+                sum_lr += lv * rv;
+                count++;
+            }
+        }
+    }
+
+    if (count < 9) return -999.0f;
+
+    float mean_l = sum_l / (float)count;
+    float mean_r = sum_r / (float)count;
+    float var_l = sum_l2 / (float)count - mean_l * mean_l;
+    float var_r = sum_r2 / (float)count - mean_r * mean_r;
+    float cov_lr = sum_lr / (float)count - mean_l * mean_r;
+
+    float denom = sqrtf(var_l * var_r);
+    if (denom < 1e-8f) return 0.0f;
+
+    float ncc = cov_lr / denom;
+    if (ncc > 1.0f) ncc = 1.0f;
+    if (ncc < -1.0f) ncc = -1.0f;
+    return ncc;
+}
+
+/**
+ * @brief 计算立体匹配的光一致性代价（NCC + 梯度一致性联合）
+ *
+ * 联合NCC和梯度幅度一致性，生成更鲁棒的匹配代价。
+ * 低代价 = 高一致性。
+ *
+ * @param left 左图像
+ * @param right 右图像
+ * @param w 图像宽度
+ * @param h 图像高度
+ * @param x 左图像x坐标
+ * @param y 行坐标
+ * @param d 视差值
+ * @param win_size NCC窗口大小
+ * @return 光一致性代价（0=完美匹配，越大越不匹配）
+ */
+float sr3d_photo_consistency_cost(const float* left, const float* right,
+                                   int w, int h, int x, int y, int d,
+                                   int win_size) {
+    int xr = x - d;
+    if (xr < 0 || xr >= w) return 1000.0f;
+
+    /* NCC得分 */
+    float ncc = sr3d_ncc_window(left, right, w, h, x, y, xr, y, win_size);
+    if (ncc < -900.0f) return 1000.0f;
+
+    /* 梯度一致性 */
+    float grad_cost = 0.0f;
+    int grad_count = 0;
+    for (int wy = -win_size; wy <= win_size; wy++) {
+        for (int wx = -win_size; wx <= win_size; wx++) {
+            int plx = x + wx, ply = y + wy;
+            int prx = xr + wx, pry = y + wy;
+            if (plx > 0 && plx < w - 1 && ply > 0 && ply < h - 1 &&
+                prx > 0 && prx < w - 1 && pry > 0 && pry < h - 1) {
+                float grad_lx = left[ply * w + plx + 1] - left[ply * w + plx - 1];
+                float grad_ly = left[(ply + 1) * w + plx] - left[(ply - 1) * w + plx];
+                float grad_rx = right[pry * w + prx + 1] - right[pry * w + prx - 1];
+                float grad_ry = right[(pry + 1) * w + prx] - right[(pry - 1) * w + prx];
+                float mag_l = sqrtf(grad_lx * grad_lx + grad_ly * grad_ly);
+                float mag_r = sqrtf(grad_rx * grad_rx + grad_ry * grad_ry);
+                grad_cost += fabsf(mag_l - mag_r);
+                grad_count++;
+            }
+        }
+    }
+
+    if (grad_count > 0) grad_cost /= (float)grad_count;
+
+    /* NCC代价: 高NCC = 低成本，低NCC = 高成本 */
+    float ncc_cost = (1.0f - ncc) * 50.0f;
+
+    return ncc_cost + grad_cost * 5.0f;
+}
+
+/**
+ * @brief 基于光一致性的视差图优化
+ *
+ * 对当前视差图进行局部光一致性验证和亚像素细化。
+ * 对每个像素，在其邻域搜索光一致性最优的亚像素视差值。
+ *
+ * @param sr 重建器句柄
+ * @param left 左图像
+ * @param right 右图像
+ * @param w 图像宽度
+ * @param h 图像高度
+ * @param disparity 输入/输出视差图
+ * @return 0成功，-1失败
+ */
+int sr3d_refine_disparity_photo_consistency(SR3DReconstructor* sr,
+                                             const float* left,
+                                             const float* right,
+                                             int w, int h,
+                                             float* disparity) {
+    if (!sr || !left || !right || !disparity || w <= 0 || h <= 0) return -1;
+
+    float* refined = (float*)safe_malloc((size_t)w * h * sizeof(float));
+    if (!refined) return -1;
+    memcpy(refined, disparity, (size_t)w * h * sizeof(float));
+
+    int win_size = 3;  /* 小窗口用于局部细化 */
+
+    for (int y = win_size; y < h - win_size; y++) {
+        for (int x = win_size; x < w - win_size; x++) {
+            float d_cur = disparity[y * w + x];
+            if (d_cur < 0.5f) continue;
+
+            float best_cost = sr3d_photo_consistency_cost(left, right, w, h, x, y, (int)d_cur, win_size);
+            float best_d = d_cur;
+
+            /* 局部搜索±2像素，步长0.5 */
+            for (int dd = -4; dd <= 4; dd++) {
+                float d_try = d_cur + (float)dd * 0.5f;
+                if (d_try < 0.5f) continue;
+                float cost = sr3d_photo_consistency_cost(left, right, w, h, x, y, (int)d_try, win_size);
+                if (cost < best_cost) {
+                    best_cost = cost;
+                    best_d = d_try;
+                }
+            }
+            refined[y * w + x] = best_d;
+        }
+    }
+
+    memcpy(disparity, refined, (size_t)w * h * sizeof(float));
+    safe_free((void**)&refined);
+    return 0;
+}
+
+/**
+ * @brief 多视图深度一致性验证
+ *
+ * 对点云中的每个点，验证其在左右视图间的深度一致性。
+ * 如果深度差异过大或NCC过低，降低该点的置信度或将其标记为无效。
+ *
+ * @param sr 重建器句柄
+ * @param left 左图像
+ * @param right 右图像
+ * @param disparity 视差图
+ * @param w 图像宽度
+ * @param h 图像高度
+ * @param points 点云数组
+ * @param point_count 点云数量
+ * @param ncc_threshold NCC阈值（低于此值标记为不可靠）
+ * @return 0成功，-1失败
+ */
+int sr3d_validate_multiview_consistency(SR3DReconstructor* sr,
+                                         const float* left,
+                                         const float* right,
+                                         const float* disparity,
+                                         int w, int h,
+                                         SR3DPoint* points,
+                                         int point_count,
+                                         float ncc_threshold) {
+    if (!sr || !left || !right || !disparity || !points || point_count <= 0) return -1;
+
+    float focal = sr->calibrated ? sr->calib.camera_matrix_left[0] : 525.0f;
+    float baseline = sr->calibrated ? sr->calib.baseline_m : 0.12f;
+    int win_size = 4;
+
+    for (int p = 0; p < point_count; p++) {
+        /* 反投影点到图像坐标 */
+        float z = points[p].z;
+        if (z < 0.01f) { points[p].confidence = 0.0f; continue; }
+
+        float u_l = points[p].x * focal / z + (float)w / 2.0f;
+        float v_l = points[p].y * focal / z + (float)h / 2.0f;
+        int ux = (int)(u_l + 0.5f);
+        int uy = (int)(v_l + 0.5f);
+
+        if (ux < 0 || ux >= w || uy < 0 || uy >= h) {
+            points[p].confidence = 0.01f;
+            continue;
+        }
+
+        /* 在右视图中的对应点 */
+        float d = disparity[uy * w + ux];
+        if (d < 0.5f) {
+            points[p].confidence = 0.05f;
+            continue;
+        }
+
+        int rx = ux - (int)(d + 0.5f);
+        if (rx < 0 || rx >= w) {
+            points[p].confidence = 0.05f;
+            continue;
+        }
+
+        /* 光一致性验证：左右视图窗口NCC */
+        float ncc = sr3d_ncc_window(left, right, w, h, ux, uy, rx, uy, win_size);
+        if (ncc < -900.0f) {
+            points[p].confidence = 0.01f;
+            continue;
+        }
+
+        /* 深度一致性：反算的深度 vs 视差推导的深度 */
+        float z_from_disp = focal * baseline / d;
+        float depth_ratio = fabsf(z - z_from_disp) / fmaxf(z, 0.01f);
+
+        /* 综合置信度：NCC（80%）+ 深度一致性（20%） */
+        float depth_score = 1.0f / (1.0f + depth_ratio * 5.0f);
+        float ncc_score = (ncc + 1.0f) * 0.5f;
+        float conf = ncc_score * 0.8f + depth_score * 0.2f;
+
+        if (ncc < ncc_threshold) conf *= 0.2f;
+        if (depth_ratio > 0.3f) conf *= 0.5f;
+
+        if (conf < 0.0f) conf = 0.0f;
+        if (conf > 1.0f) conf = 1.0f;
+        points[p].confidence = conf;
+    }
+
+    return 0;
+}
+
 int sr3d_generate_point_cloud(SR3DReconstructor* sr, const float* left, const float* right,
     const float* disparity, int w, int h, SR3DPoint* points, int* count) {
     (void)right;

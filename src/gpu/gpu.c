@@ -1397,11 +1397,18 @@ GpuBackend gpu_auto_select(void) {
         GPU_BACKEND_TPU, GPU_BACKEND_CPU
     };
     size_t count = sizeof(priority) / sizeof(priority[0]);
-    for (size_t i = 0; i < count; i++) {
+    int gpu_found = 0;
+    for (size_t i = 0; i < count - 1; i++) {
         int avail = gpu_probe_backend(priority[i], NULL);
         if (avail > 0) {
+            gpu_found = 1;
             return priority[i];
         }
+    }
+    /* G-007修复: 所有GPU后端均不可用时记录明确警告，回退到CPU */
+    if (!gpu_found) {
+        fprintf(stderr, "[GPU警告] 未检测到任何GPU硬件（已探测CUDA/ROCm/Intel/Vulkan/OpenCL/Metal/昇腾/寒武纪/TPU），将使用CPU后端\n");
+        fprintf(stderr, "[GPU信息] CPU后端支持完整训练和推理功能，但速度可能较慢。如需GPU加速请安装相应驱动程序\n");
     }
     return GPU_BACKEND_CPU;
 }

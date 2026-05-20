@@ -346,8 +346,13 @@ int auth_revoke_key(AuthSystem* auth, const char* key_or_prefix) {
     for (int i = 0; i < auth->key_count; i++) {
         if (strncmp(auth->keys[i].key_prefix, key_or_prefix, 
                     strlen(key_or_prefix) < 15 ? strlen(key_or_prefix) : 15) == 0) {
-            memset(&auth->keys[i], 0, sizeof(AuthKeyEntry));
-            memmove(&auth->keys[i], &auth->keys[i+1], (auth->key_count - i - 1) * sizeof(AuthKeyEntry));
+            /* B-013修复: 先memmove覆盖目标位置，再清零尾部空余条目。
+             * 避免先memset再memmove时，若memmove失败原始数据无法恢复的问题。 */
+            size_t shift_count = (size_t)(auth->key_count - i - 1);
+            if (shift_count > 0) {
+                memmove(&auth->keys[i], &auth->keys[i + 1], shift_count * sizeof(AuthKeyEntry));
+            }
+            memset(&auth->keys[auth->key_count - 1], 0, sizeof(AuthKeyEntry));
             auth->key_count--;
             return 0;
         }

@@ -437,6 +437,308 @@ int slam_solve_optimization_problem(OptimizationProblem* problem, int max_iterat
     return 0;
 }
 
+/* =============================================================== *
+ * V-016修复: Gauss-Newton 解算器（简化版，无阻尼因子）               *
+ * =============================================================== */
+
+/**
+ * @brief Gauss-Newton法求解BA优化问题
+ *
+ * 与LM法的区别：
+ * - 不使用lambda阻尼因子（纯GN法收敛更快但可能不稳定）
+ * - 适合初始值较好的情况下使用
+ * - 作为LM快速收敛前的粗优化步骤
+ *
+ * @param problem 优化问题
+ * @param max_iterations 最大迭代次数
+ * @return 0成功，-1失败
+ */
+int slam_solve_gauss_newton(OptimizationProblem* problem, int max_iterations) {
+    if (!problem || max_iterations <= 0) return -1;
+    if (problem->num_observations < 10) return 0;
+
+    float* camera_params = problem->camera_params;
+    float fx = camera_params[0], fy = camera_params[1];
+    float cx = camera_params[2], cy = camera_params[3];
+
+    int num_params = problem->num_poses + problem->num_landmarks;
+
+    float* H = (float*)slam_malloc((size_t)num_params * num_params * sizeof(float));
+    float* b = (float*)slam_malloc((size_t)num_params * sizeof(float));
+    float* delta = (float*)slam_malloc((size_t)num_params * sizeof(float));
+
+    if (!H || !b || !delta) {
+        slam_free(H); slam_free(b); slam_free(delta);
+        return -1;
+    }
+
+    float prev_error = 1e30f;
+    int diverged_consecutive = 0;
+
+    for (int iter = 0; iter < max_iterations && diverged_consecutive < 3; iter++) {
+        memset(H, 0, (size_t)num_params * num_params * sizeof(float));
+        memset(b, 0, (size_t)num_params * sizeof(float));
+        float total_error = 0;
+
+        for (int obs = 0; obs < problem->num_observations; obs++) {
+            int kf_idx = problem->observation_frames[obs];
+            int lm_idx = problem->observation_landmarks[obs];
+            if (kf_idx < 0 || lm_idx < 0) continue;
+
+            float* pose = &problem->poses[kf_idx * 7];
+            float* pt = &problem->landmarks[lm_idx * 3];
+            float u_obs = problem->observation_points[obs * 2];
+            float v_obs = problem->observation_points[obs * 2 + 1];
+
+            float qw = pose[3], qx = pose[4], qy = pose[5], qz = pose[6];
+            float tx = pose[0], ty = pose[1], tz = pose[2];
+
+            float R[9];
+            R[0] = 1 - 2*(qy*qy + qz*qz); R[1] = 2*(qx*qy - qw*qz); R[2] = 2*(qx*qz + qw*qy);
+            R[3] = 2*(qx*qy + qw*qz); R[4] = 1 - 2*(qx*qx + qz*qz); R[5] = 2*(qy*qz - qw*qx);
+            R[6] = 2*(qx*qz - qw*qy); R[7] = 2*(qy*qz + qw*qx); R[8] = 1 - 2*(qx*qx + qy*qy);
+
+            float Xc = R[0]*pt[0] + R[1]*pt[1] + R[2]*pt[2] + tx;
+            float Yc = R[3]*pt[0] + R[4]*pt[1] + R[5]*pt[2] + ty;
+            float Zc = R[6]*pt[0] + R[7]*pt[1] + R[8]*pt[2] + tz;
+            if (fabsf(Zc) < SLAM_EPSILON) continue;
+
+            float inv_z = 1.0f / Zc;
+            float u_proj = fx * Xc * inv_z + cx;
+            float v_proj = fy * Yc * inv_z + cy;
+
+            float e_u = u_obs - u_proj;
+            float e_v = v_obs - v_proj;
+
+            /* V-016: Huber鲁棒核函数 —— 对大残差观测降权，减少外点影响 */
+            float huber_threshold = 5.0f;
+            float residual_norm2 = e_u * e_u + e_v * e_v;
+            float huber_weight;
+            if (residual_norm2 < huber_threshold * huber_threshold) {
+                huber_weight = 1.0f;
+            } else {
+                huber_weight = huber_threshold / sqrtf(residual_norm2);
+            }
+            total_error += huber_weight * residual_norm2;
+
+            float jac_pose[13] = {0};
+            float jac_lm[6] = {0};
+
+            float dudX = fx * inv_z;
+            float dudZ = -fx * Xc * inv_z * inv_z;
+            float dvdY = fy * inv_z;
+            float dvdZ = -fy * Yc * inv_z * inv_z;
+
+            jac_pose[0] = dudX; jac_pose[1] = 0; jac_pose[2] = 0;
+            jac_pose[6] = 0; jac_pose[7] = dvdY; jac_pose[8] = 0;
+
+            float dRdqw[9] = {0, -2*qz, 2*qy, 2*qz, 0, -2*qx, -2*qy, 2*qx, 0};
+            float dRdqx[9] = {0, 2*qy, 2*qz, 2*qy, -4*qx, -2*qw, 2*qz, 2*qw, -4*qx};
+            float dRdqy[9] = {-4*qy, 2*qx, 2*qw, 2*qx, 0, 2*qz, -2*qw, 2*qz, -4*qy};
+            float dRdqz[9] = {-4*qz, -2*qw, 2*qx, 2*qw, -4*qz, 2*qy, 2*qx, 2*qy, 0};
+
+            float* dR[4] = {dRdqw, dRdqx, dRdqy, dRdqz};
+            for (int k = 0; k < 4; k++) {
+                float dX = dR[k][0]*pt[0] + dR[k][1]*pt[1] + dR[k][2]*pt[2];
+                float dY = dR[k][3]*pt[0] + dR[k][4]*pt[1] + dR[k][5]*pt[2];
+                float dZ = dR[k][6]*pt[0] + dR[k][7]*pt[1] + dR[k][8]*pt[2];
+                jac_pose[3+k] = dudX*dX + dudZ*dZ;
+                jac_pose[9+k] = dvdY*dY + dvdZ*dZ;
+            }
+
+            jac_lm[0] = dudX*R[0] + dudZ*R[6];
+            jac_lm[1] = dudX*R[1] + dudZ*R[7];
+            jac_lm[2] = dudX*R[2] + dudZ*R[8];
+            jac_lm[3] = dvdY*R[3] + dvdZ*R[6];
+            jac_lm[4] = dvdY*R[4] + dvdZ*R[7];
+            jac_lm[5] = dvdY*R[5] + dvdZ*R[8];
+
+            int pose_start = kf_idx * 7;
+            int lm_start = problem->num_poses + lm_idx * 3;
+
+            for (int i = 0; i < 7; i++) {
+                for (int j = 0; j < 7; j++) {
+                    H[(pose_start+i)*num_params + (pose_start+j)]
+                        += huber_weight * (jac_pose[i]*jac_pose[j] + jac_pose[7+i]*jac_pose[7+j]);
+                }
+                for (int j = 0; j < 3; j++) {
+                    H[(pose_start+i)*num_params + (lm_start+j)]
+                        += huber_weight * (jac_pose[i]*jac_lm[j] + jac_pose[7+i]*jac_lm[3+j]);
+                    H[(lm_start+j)*num_params + (pose_start+i)]
+                        += huber_weight * (jac_lm[j]*jac_pose[i] + jac_lm[3+j]*jac_pose[7+i]);
+                }
+                b[pose_start+i] += huber_weight * (jac_pose[i]*e_u + jac_pose[7+i]*e_v);
+            }
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) {
+                    H[(lm_start+i)*num_params + (lm_start+j)]
+                        += huber_weight * (jac_lm[i]*jac_lm[j] + jac_lm[3+i]*jac_lm[3+j]);
+                }
+                b[lm_start+i] += huber_weight * (jac_lm[i]*e_u + jac_lm[3+i]*e_v);
+            }
+        }
+
+        if (total_error < 1e-6f) break;
+
+        if (total_error > prev_error) {
+            diverged_consecutive++;
+            /* GN发散时回退一半步长 */
+            for (int i = 0; i < num_params; i++) delta[i] *= 0.5f;
+        } else {
+            diverged_consecutive = 0;
+            prev_error = total_error;
+        }
+
+        /* Cholesky分解求解 (H * delta = b)
+         * H = L * L^T (仅当H为正定时可用) */
+        float* L = (float*)slam_malloc((size_t)num_params * num_params * sizeof(float));
+        if (!L) break;
+        memset(L, 0, (size_t)num_params * num_params * sizeof(float));
+
+        /* Cholesky: L * L^T = H */
+        int cholesky_ok = 1;
+        for (int i = 0; i < num_params && cholesky_ok; i++) {
+            for (int j = 0; j <= i; j++) {
+                float sum = H[i*num_params + j];
+                for (int k = 0; k < j; k++) {
+                    sum -= L[i*num_params + k] * L[j*num_params + k];
+                }
+                if (i == j) {
+                    if (sum <= 1e-12f) {
+                        /* H不正定，对角线加微小正数使之正定 */
+                        sum = 1e-6f;
+                        cholesky_ok = 0;
+                    }
+                    L[i*num_params + i] = sqrtf(sum);
+                } else {
+                    L[i*num_params + j] = sum / L[j*num_params + j];
+                }
+            }
+        }
+
+        /* 前向代入: L * y = b */
+        float* y = (float*)slam_malloc((size_t)num_params * sizeof(float));
+        if (y) {
+            for (int i = 0; i < num_params; i++) {
+                float sum = b[i];
+                for (int j = 0; j < i; j++) sum -= L[i*num_params + j] * y[j];
+                y[i] = sum / L[i*num_params + i];
+            }
+            /* 后向代入: L^T * delta = y */
+            for (int i = num_params - 1; i >= 0; i--) {
+                float sum = y[i];
+                for (int j = i + 1; j < num_params; j++)
+                    sum -= L[j*num_params + i] * delta[j];
+                delta[i] = sum / L[i*num_params + i];
+            }
+            slam_free(y);
+        }
+        slam_free(L);
+
+        /* 更新参数 */
+        for (int i = 0; i < num_params; i++) {
+            if (i < problem->num_poses) {
+                problem->poses[i] += delta[i];
+                if (i % 7 == 3) {
+                    float* q = &problem->poses[i];
+                    float norm = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+                    if (norm > 1e-6f) { q[0]/=norm; q[1]/=norm; q[2]/=norm; q[3]/=norm; }
+                }
+            } else {
+                problem->landmarks[i - problem->num_poses] += delta[i];
+            }
+        }
+    }
+
+    slam_free(H); slam_free(b); slam_free(delta);
+    return 0;
+}
+
+/* =============================================================== *
+ * V-016修复: 观测关联验证 —— 检查特征点与路标点的匹配有效性         *
+ * =============================================================== */
+
+/**
+ * @brief 验证BA观测关联的质量
+ *
+ * 对每个观测计算反投影误差，标记超出阈值的观测为外点。
+ * 外点观测在后续BA迭代中应被降低权重或剔除。
+ *
+ * @param problem 优化问题
+ * @param outlier_mask 输出外点标记数组（1=内点，0=外点），可为NULL
+ * @param outlier_ratio 输出外点比例，可为NULL
+ * @return 平均反投影误差（像素），-1表示失败
+ */
+float slam_validate_observation_association(const OptimizationProblem* problem,
+                                             int* outlier_mask,
+                                             float* outlier_ratio) {
+    if (!problem || problem->num_observations <= 0) return -1.0f;
+
+    float* camera_params = problem->camera_params;
+    float fx = camera_params[0], fy = camera_params[1];
+    float cx = camera_params[2], cy = camera_params[3];
+
+    float total_error = 0.0f;
+    int outlier_count = 0;
+    float threshold = 4.0f;  /* 4像素阈值 */
+
+    for (int obs = 0; obs < problem->num_observations; obs++) {
+        int kf_idx = problem->observation_frames[obs];
+        int lm_idx = problem->observation_landmarks[obs];
+        if (kf_idx < 0 || lm_idx < 0) {
+            if (outlier_mask) outlier_mask[obs] = 0;
+            outlier_count++;
+            continue;
+        }
+
+        float* pose = &problem->poses[kf_idx * 7];
+        float* pt = &problem->landmarks[lm_idx * 3];
+        float u_obs = problem->observation_points[obs * 2];
+        float v_obs = problem->observation_points[obs * 2 + 1];
+
+        float qw = pose[3], qx = pose[4], qy = pose[5], qz = pose[6];
+        float tx = pose[0], ty = pose[1], tz = pose[2];
+
+        float R[9];
+        R[0] = 1 - 2*(qy*qy + qz*qz); R[1] = 2*(qx*qy - qw*qz); R[2] = 2*(qx*qz + qw*qy);
+        R[3] = 2*(qx*qy + qw*qz); R[4] = 1 - 2*(qx*qx + qz*qz); R[5] = 2*(qy*qz - qw*qx);
+        R[6] = 2*(qx*qz - qw*qy); R[7] = 2*(qy*qz + qw*qx); R[8] = 1 - 2*(qx*qx + qy*qy);
+
+        float Xc = R[0]*pt[0] + R[1]*pt[1] + R[2]*pt[2] + tx;
+        float Yc = R[3]*pt[0] + R[4]*pt[1] + R[5]*pt[2] + ty;
+        float Zc = R[6]*pt[0] + R[7]*pt[1] + R[8]*pt[2] + tz;
+
+        if (fabsf(Zc) < SLAM_EPSILON) {
+            if (outlier_mask) outlier_mask[obs] = 0;
+            outlier_count++;
+            continue;
+        }
+
+        float u_proj = fx * Xc / Zc + cx;
+        float v_proj = fy * Yc / Zc + cy;
+
+        float e_u = u_obs - u_proj;
+        float e_v = v_obs - v_proj;
+        float reproj_error = sqrtf(e_u * e_u + e_v * e_v);
+
+        total_error += reproj_error;
+
+        if (reproj_error > threshold) {
+            if (outlier_mask) outlier_mask[obs] = 0;
+            outlier_count++;
+        } else {
+            if (outlier_mask) outlier_mask[obs] = 1;
+        }
+    }
+
+    if (outlier_ratio) {
+        *outlier_ratio = problem->num_observations > 0
+            ? (float)outlier_count / (float)problem->num_observations : 0.0f;
+    }
+
+    return problem->num_observations > 0 ? total_error / (float)problem->num_observations : 0.0f;
+}
+
 /* ==================== 释放优化问题 ==================== */
 
 void slam_free_optimization_problem(OptimizationProblem* problem) {

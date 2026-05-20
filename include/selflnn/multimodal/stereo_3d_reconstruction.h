@@ -92,6 +92,30 @@ int sr3d_label_scene(SR3DReconstructor* sr, const SR3DPoint* points, int count, 
 int sr3d_generate_mesh(SR3DReconstructor* sr, const SR3DPoint* points, int point_count,
                         int* p_tri_count, int* p_tri_indices, int max_tri_indices);
 
+/* V-017: 多视图一致性立体匹配 —— 光一致性优化和深度验证 */
+
+/* 计算立体匹配的光一致性代价（NCC + 梯度一致性联合） */
+float sr3d_photo_consistency_cost(const float* left, const float* right,
+                                   int w, int h, int x, int y, int d,
+                                   int win_size);
+
+/* 基于光一致性的视差图优化（局部亚像素细化） */
+int sr3d_refine_disparity_photo_consistency(SR3DReconstructor* sr,
+                                             const float* left,
+                                             const float* right,
+                                             int w, int h,
+                                             float* disparity);
+
+/* 多视图深度一致性验证（点云置信度重评估） */
+int sr3d_validate_multiview_consistency(SR3DReconstructor* sr,
+                                         const float* left,
+                                         const float* right,
+                                         const float* disparity,
+                                         int w, int h,
+                                         SR3DPoint* points,
+                                         int point_count,
+                                         float ncc_threshold);
+
 #ifdef __cplusplus
 }
 #endif

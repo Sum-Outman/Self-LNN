@@ -656,7 +656,7 @@ int laplace_memory_decay_model(LaplaceEnhancedSystem* system, float* memory_stre
 static void pipeline_run_stage_fft(LaplaceEnhancedSystem* system,
                                     const float* signal, size_t signal_size,
                                     PipelineStageResult* stage) {
-    stage->stage = PIPELINE_STAGE_FFT;
+    stage->stage = LAPLACE_PIPELINE_STAGE_FFT;
     memset(stage->stage_metrics, 0, sizeof(stage->stage_metrics));
     stage->metric_count = 0;
 
@@ -672,7 +672,7 @@ static void pipeline_run_stage_fft(LaplaceEnhancedSystem* system,
 
 static void pipeline_run_stage_spectral(LaplaceEnhancedSystem* system,
                                           PipelineStageResult* stage) {
-    stage->stage = PIPELINE_STAGE_SPECTRAL;
+    stage->stage = LAPLACE_PIPELINE_STAGE_SPECTRAL;
     memset(stage->stage_metrics, 0, sizeof(stage->stage_metrics));
     stage->metric_count = 0;
 
@@ -693,7 +693,7 @@ static void pipeline_run_stage_spectral(LaplaceEnhancedSystem* system,
 
 static void pipeline_run_stage_stability(LaplaceEnhancedSystem* system,
                                            PipelineStageResult* stage) {
-    stage->stage = PIPELINE_STAGE_STABILITY;
+    stage->stage = LAPLACE_PIPELINE_STAGE_STABILITY;
     memset(stage->stage_metrics, 0, sizeof(stage->stage_metrics));
     stage->metric_count = 0;
 
@@ -716,7 +716,7 @@ static void pipeline_run_stage_stability(LaplaceEnhancedSystem* system,
 
 static void pipeline_run_stage_filtering(LaplaceEnhancedSystem* system,
                                            PipelineStageResult* stage) {
-    stage->stage = PIPELINE_STAGE_FILTERING;
+    stage->stage = LAPLACE_PIPELINE_STAGE_FILTERING;
     memset(stage->stage_metrics, 0, sizeof(stage->stage_metrics));
     stage->metric_count = 0;
 
@@ -735,7 +735,7 @@ static void pipeline_run_stage_control(LaplaceEnhancedSystem* system,
                                          PipelineStageResult* stage,
                                          float* control_recommendation,
                                          int* alarm_level) {
-    stage->stage = PIPELINE_STAGE_CONTROL;
+    stage->stage = LAPLACE_PIPELINE_STAGE_CONTROL;
     memset(stage->stage_metrics, 0, sizeof(stage->stage_metrics));
     stage->metric_count = 0;
 

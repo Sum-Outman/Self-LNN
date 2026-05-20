@@ -44,18 +44,9 @@ typedef enum {
 #endif
 
 /**
- * @brief 优化器类型（仅在未包含 optimizer.h 时定义）
+ * @brief 优化器类型（引用 optimizer.h 主定义）
  */
-#ifndef SELFLNN_CORE_OPTIMIZER_H
-typedef enum {
-    OPTIMIZER_SGD = 0,         /**< 随机梯度下降 */
-    OPTIMIZER_MOMENTUM = 1,    /**< 带动量的SGD */
-    OPTIMIZER_ADAGRAD = 2,     /**< AdaGrad优化器 */
-    OPTIMIZER_RMSPROP = 3,     /**< RMSProp优化器 */
-    OPTIMIZER_ADAM = 4,        /**< Adam优化器 */
-    OPTIMIZER_ADAMW = 5        /**< AdamW优化器 */
-} OptimizerType;
-#endif
+#include "selflnn/core/optimizer.h"
 
 /**
  * @brief 矩阵结构体

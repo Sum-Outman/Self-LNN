@@ -1775,20 +1775,13 @@ function updateRealTimeMetrics(systemStatus) {
         window.g_apiUsageChart.addData(label, [reqs.total||0]);
     }
 
-    // === 备份状态（从持久化存储读取，或显示默认就绪状态） ===
-    try {
-        var savedBackup = localStorage.getItem('selflnn_backup_status');
+    // === 备份状态（F-005修复: 不使用localStorage缓存作为fallback，后端未连接时显示"数据未加载"） ===
+    (function() {
         var backupStatusEl = document.getElementById('backup-status-text');
         var backupTimeEl = document.getElementById('backup-time-text');
-        if (savedBackup) {
-            var backupData = JSON.parse(savedBackup);
-            if (backupStatusEl) backupStatusEl.textContent = backupData.status || '已完成';
-            if (backupTimeEl) backupTimeEl.textContent = backupData.time || '未知';
-        } else {
-            if (backupStatusEl && backupStatusEl.textContent === '未连接') backupStatusEl.textContent = '就绪';
-            if (backupTimeEl && backupTimeEl.textContent === '未连接') backupTimeEl.textContent = '未执行';
-        }
-    } catch(e) {}
+        if (backupStatusEl && backupStatusEl.textContent === '未连接') backupStatusEl.textContent = '数据未加载';
+        if (backupTimeEl && backupTimeEl.textContent === '未连接') backupTimeEl.textContent = '数据未加载';
+    })();
 }
 
 function setEl(sel, val, prop) {
@@ -2144,12 +2137,6 @@ async function backupSystem() {
             var backupTimeEl = document.getElementById('backup-time-text');
             if (backupStatusEl) backupStatusEl.textContent = '已完成';
             if (backupTimeEl) backupTimeEl.textContent = new Date().toLocaleString();
-            try {
-                localStorage.setItem('selflnn_backup_status', JSON.stringify({
-                    status: '已完成',
-                    time: new Date().toLocaleString()
-                }));
-            } catch(e) {}
         } else {
             showNotification('❌ 备份失败: ' + (result ? result.error || '未知错误' : '后端未连接'), 'danger');
         }
@@ -2321,14 +2308,24 @@ async function refreshRobotStatus() {
                     document.getElementById('robot-position').textContent = 'X: -- m, Y: -- m, Z: -- m';
                 }
                 
-                // 更新姿态（后端当前未提供姿态数据，保持默认或从其他API获取）
-                // 这里可以扩展：如果API提供姿态数据，则使用真实数据
-                // 暂时保持默认值
-                document.getElementById('robot-orientation').textContent = 'Roll: 0.0°, Pitch: 0.0°, Yaw: 0.0°';
+                // 更新姿态（F-005修复: 后端未提供姿态数据时显示"数据未加载"）
+                if (robot.orientation) {
+                    const roll = (robot.orientation[0] || 0).toFixed(1);
+                    const pitch = (robot.orientation[1] || 0).toFixed(1);
+                    const yaw = (robot.orientation[2] || 0).toFixed(1);
+                    document.getElementById('robot-orientation').textContent = 
+                        'Roll: ' + roll + '°, Pitch: ' + pitch + '°, Yaw: ' + yaw + '°';
+                } else {
+                    document.getElementById('robot-orientation').textContent = '数据未加载';
+                }
                 
-                // 更新温度
-                const temperature = Math.round(robot.temperature || 25.0);
-                document.getElementById('robot-temperature').textContent = `${temperature}°C`;
+                // 更新温度（F-005修复: 不再使用25.0作为默认fallback值）
+                if (robot.temperature !== undefined && robot.temperature !== null) {
+                    const temperature = Math.round(robot.temperature);
+                    document.getElementById('robot-temperature').textContent = `${temperature}°C`;
+                } else {
+                    document.getElementById('robot-temperature').textContent = '数据未加载';
+                }
                 
                 // 更新状态指示器
                 const stateElement = document.getElementById('robot-state');

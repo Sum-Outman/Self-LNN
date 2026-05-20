@@ -136,6 +136,7 @@ typedef struct {
     PlanWaypoint goal;
     float robot_radius;
     float obstacle_margin;
+    float min_turning_radius;          /**< S-010: 最小转弯半径（米），用于运动学约束距离度量 */
     int smooth_path;
     int enable_z_axis;
     PlanDWAConfig dwa_config;

@@ -290,6 +290,27 @@ int quaternion_lnn_laplace_optimize(QuaternionLNN* network,
                                      float damping_target,
                                      float* stability_score);
 
+/**
+ * @brief S-003: 真正的四元数层归一化（在四元数空间直接归一化）
+ *
+ * 不转换到欧拉角，直接使用四元数空间的测地平均和测地方差进行归一化。
+ * 保持旋转不变性，避免欧拉角万向节锁问题。
+ *
+ * 算法：
+ *  1. Karcher均值: 使用迭代加权最小弧长平均计算四元数集合的几何中心
+ *  2. 测地方差: σ² = Σ d_geodesic(q_i, μ)² / n
+ *  3. 归一化: q_norm = exp( log(μ^{-1} * q) / max(σ, ε) )
+ *     （将四元数从均值中心映射到对数空间，除以标准差，再映射回来）
+ *
+ * @param quaternions 输入四元数数组
+ * @param count 四元数数量
+ * @param epsilon 数值稳定小常数（默认1e-5f）
+ * @param max_iterations Karcher均值最大迭代次数（默认20）
+ * @return int 成功返回0，失败返回-1
+ */
+int quaternion_lnn_layer_normalize(Quaternion* quaternions, size_t count,
+                                    float epsilon, int max_iterations);
+
 #ifdef __cplusplus
 }
 #endif

@@ -17,6 +17,8 @@
 #include <math.h>
 #include <float.h>
 #include <time.h>
+#include <stdio.h>
+#include <stdint.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -78,7 +80,7 @@ struct Swarm {
     void* thread_data;                 /**< 线程数据 */
 };
 
-/** @brief PSO算法特定数据 */
+/** @brief PSO算法特定数据 S-011: 完整惯性权重线性递减 + 早停检测 */
 typedef struct {
     float* personal_best_positions;    /**< 个体历史最佳位置数组 */
     float* personal_best_fitnesses;    /**< 个体历史最佳适应度数组 */
@@ -86,27 +88,35 @@ typedef struct {
     float* neighborhood_best_fitnesses; /**< 邻居最佳适应度数组 */
     int* neighborhood_indices;         /**< 邻居索引数组 */
     float inertia_weight;              /**< 当前惯性权重 */
-    float inertia_weight_max;          /**< 惯性权重最大值 */
-    float inertia_weight_min;          /**< 惯性权重最小值 */
-    float cognitive_weight;            /**< 认知权重 */
-    float social_weight;               /**< 社会权重 */
+    float inertia_weight_max;          /**< 惯性权重最大值 (0.9) */
+    float inertia_weight_min;          /**< 惯性权重最小值 (0.4) */
+    float cognitive_weight;            /**< 认知权重 c1 */
+    float social_weight;               /**< 社会权重 c2 */
     float velocity_max;                /**< 最大速度 */
+    float* velocity_clamp_factor;      /**< 各维度速度钳制因子 [dimensions] */
+    int early_stop_counter;            /**< 早停计数器 */
+    float early_stop_prev_best;        /**< 早停：记录上次全局最优 */
+    int early_stop_threshold;          /**< 早停：连续未改进次数阈值 */
 } PSOData;
 
-/** @brief ACO算法特定数据 */
+/** @brief ACO算法特定数据 S-011: 完整蚁群系统(ACS)实现 */
 typedef struct {
     float** pheromone_matrix;          /**< 信息素矩阵 */
     float** heuristic_matrix;          /**< 启发式矩阵 */
     float** probability_matrix;        /**< 概率矩阵 */
     int** ant_paths;                   /**< 蚂蚁路径数组 */
     float* ant_path_lengths;           /**< 蚂蚁路径长度数组 */
-    float pheromone_evaporation;       /**< 信息素蒸发率 */
+    float pheromone_evaporation;       /**< 全局信息素蒸发率 α (rho) */
+    float local_pheromone_evaporation; /**< ACS局部信息素蒸发率 ξ (xi) */
     float pheromone_deposit;           /**< 信息素沉积量 */
     float alpha;                       /**< 信息素重要性 */
     float beta;                        /**< 启发式重要性 */
-    float q0;                          /**< 探索参数 */
+    float q0;                          /**< ACS伪随机比例规则阈值 q0 ∈ [0,1] */
+    float tau0;                        /**< 初始信息素值 τ₀ */
     int num_ants;                      /**< 蚂蚁数量 */
     int path_length;                   /**< 路径长度 */
+    int iteration_count;               /**< 当前迭代计数 */
+    int num_best_ants;                 /**< 精英蚂蚁数量（用于全局更新） */
 } ACOData;
 
 /** @brief ABC算法特定数据 */
@@ -1637,28 +1647,37 @@ static PSOData* pso_data_create(const SwarmConfig* config) {
     data->neighborhood_best_positions = (float*)safe_malloc(sizeof(float) * swarm_size * dimensions);
     data->neighborhood_best_fitnesses = (float*)safe_malloc(sizeof(float) * swarm_size);
     data->neighborhood_indices = (int*)safe_malloc(sizeof(int) * swarm_size * swarm_size);
+    data->velocity_clamp_factor = (float*)safe_malloc(sizeof(float) * dimensions);
     
     if (data->personal_best_positions == NULL || data->personal_best_fitnesses == NULL ||
         data->neighborhood_best_positions == NULL || data->neighborhood_best_fitnesses == NULL ||
-        data->neighborhood_indices == NULL) {
+        data->neighborhood_indices == NULL || data->velocity_clamp_factor == NULL) {
         pso_data_free(data);
         return NULL;
     }
     
-    /* 初始化参数 */
-    data->inertia_weight = config->inertia_weight;
-    data->inertia_weight_max = config->inertia_weight * 1.2f;
-    data->inertia_weight_min = config->inertia_weight * 0.8f;
+    /* S-011: 惯性权重线性递减策略 w: 0.9 → 0.4 */
+    data->inertia_weight_max = 0.9f;
+    data->inertia_weight_min = 0.4f;
+    data->inertia_weight = data->inertia_weight_max;
     data->cognitive_weight = config->cognitive_weight;
     data->social_weight = config->social_weight;
     
-    /* 计算最大速度（边界范围的20%） */
+    /* S-011: 速度钳制 —— 每个维度独立计算 */
     float max_range = 0.0f;
     for (int d = 0; d < dimensions; d++) {
         float range = config->upper_bounds[d] - config->lower_bounds[d];
+        data->velocity_clamp_factor[d] = range * 0.2f;
         if (range > max_range) max_range = range;
     }
     data->velocity_max = max_range * 0.2f;
+    
+    /* S-011: 早停检测初始化 */
+    data->early_stop_counter = 0;
+    data->early_stop_prev_best = FLT_MAX;
+    data->early_stop_threshold = (config->max_iterations > 0) ? 
+        config->max_iterations / 10 : 50;
+    if (data->early_stop_threshold < 10) data->early_stop_threshold = 10;
     
     return data;
 }
@@ -1676,6 +1695,7 @@ static void pso_data_free(PSOData* data) {
     safe_free((void**)&data->neighborhood_best_positions);
     safe_free((void**)&data->neighborhood_best_fitnesses);
     safe_free((void**)&data->neighborhood_indices);
+    safe_free((void**)&data->velocity_clamp_factor);
     safe_free((void**)&data);
 }
 
@@ -1715,7 +1735,7 @@ static void pso_initialize(Swarm* swarm) {
 }
 
 /**
- * @brief PSO迭代
+ * @brief PSO迭代 S-011: 完整惯性权重线性递减 + 速度钳制 + 早停检测
  */
 static void pso_iterate(Swarm* swarm) {
     PSOData* data = (PSOData*)swarm->algorithm_data;
@@ -1725,19 +1745,41 @@ static void pso_iterate(Swarm* swarm) {
     
     int swarm_size = swarm->config.swarm_size;
     
-    /* 更新惯性权重（线性递减） */
-    float progress = (float)swarm->current_iteration / (float)swarm->config.max_iterations;
+    /* S-011: 惯性权重线性递减 w = w_max - (w_max - w_min) * (iter/max_iter) */
+    float progress = (float)swarm->current_iteration / 
+                     (float)(swarm->config.max_iterations > 0 ? swarm->config.max_iterations : 1);
     data->inertia_weight = data->inertia_weight_max - 
                           (data->inertia_weight_max - data->inertia_weight_min) * progress;
+    /* 确保在 [w_min, w_max] 范围内 */
+    if (data->inertia_weight < data->inertia_weight_min) 
+        data->inertia_weight = data->inertia_weight_min;
+    if (data->inertia_weight > data->inertia_weight_max) 
+        data->inertia_weight = data->inertia_weight_max;
     
     /* 更新每个粒子 */
     for (int i = 0; i < swarm_size; i++) {
         swarm_update_velocity_position_pso(swarm, i);
     }
+    
+    /* S-011: 早停检测 —— 连续N次迭代全局最优无改进则触发收敛 */
+    float current_best = swarm->global_best_fitness;
+    float improvement = data->early_stop_prev_best - current_best;
+    if (improvement > 1e-8f) {
+        data->early_stop_counter = 0;
+        data->early_stop_prev_best = current_best;
+    } else {
+        data->early_stop_counter++;
+    }
+    /* 当停滞次数超过阈值时设置收敛标志 */
+    if (data->early_stop_counter >= data->early_stop_threshold && 
+        swarm->current_iteration > data->early_stop_threshold) {
+        swarm->is_converged = 1;
+        swarm->convergence_reason = SWARM_CONVERGENCE_STAGNATION;
+    }
 }
 
 /**
- * @brief 更新PSO粒子速度和位置
+ * @brief 更新PSO粒子速度和位置 S-011: 逐维度速度钳制
  */
 static void swarm_update_velocity_position_pso(Swarm* swarm, int individual_id) {
     PSOData* data = (PSOData*)swarm->algorithm_data;
@@ -1761,7 +1803,12 @@ static void swarm_update_velocity_position_pso(Swarm* swarm, int individual_id) 
         ind->velocity[d] = data->inertia_weight * ind->velocity[d] + 
                           cognitive_component + social_component;
         
-        /* 限制速度 */
+        /* S-011: 逐维度速度钳制 */
+        float vmax_d = data->velocity_clamp_factor[d];
+        if (ind->velocity[d] > vmax_d) ind->velocity[d] = vmax_d;
+        if (ind->velocity[d] < -vmax_d) ind->velocity[d] = -vmax_d;
+        
+        /* 额外保护：绝对速度不超过全局最大速度 */
         if (ind->velocity[d] > data->velocity_max) ind->velocity[d] = data->velocity_max;
         if (ind->velocity[d] < -data->velocity_max) ind->velocity[d] = -data->velocity_max;
     }
@@ -1794,17 +1841,10 @@ static void swarm_update_velocity_position_pso(Swarm* swarm, int individual_id) 
     for (int n = -neighborhood_size; n <= neighborhood_size; n++) {
         if (n == 0) continue;
         int neighbor_id = (individual_id + n + swarm_size) % swarm_size;
-        float* nb_pos = &data->neighborhood_best_positions[neighbor_id * dimensions];
         float nb_fitness = data->neighborhood_best_fitnesses[neighbor_id];
         if (nb_fitness < best_neighbor_fitness) {
-            float updated_nb_fitness = 0.0f;
-            for (int d = 0; d < dimensions; d++) {
-                updated_nb_fitness += nb_pos[d];
-            }
-            if (nb_fitness < best_neighbor_fitness) {
-                best_neighbor_fitness = nb_fitness;
-                best_neighbor_id = neighbor_id;
-            }
+            best_neighbor_fitness = nb_fitness;
+            best_neighbor_id = neighbor_id;
         }
     }
     
@@ -1826,7 +1866,7 @@ static void swarm_update_velocity_position_pso(Swarm* swarm, int individual_id) 
 /* ========== ACO算法函数实现 ========== */
 
 /**
- * @brief 创建ACO算法数据
+ * @brief 创建ACO算法数据 S-011: ACS完整参数初始化
  */
 static ACOData* aco_data_create(const SwarmConfig* config) {
     if (config == NULL || config->dimensions <= 0 || config->swarm_size <= 0) {
@@ -1840,14 +1880,19 @@ static ACOData* aco_data_create(const SwarmConfig* config) {
 
     data->num_ants = config->swarm_size;
     data->path_length = config->dimensions;
+    /* S-011: ACS参数 */
     data->pheromone_evaporation = (config->pheromone_evaporation > 0.0f) ?
-                                   config->pheromone_evaporation : 0.1f;
+                                   config->pheromone_evaporation : 0.1f;   /* 全局蒸发率 α */
+    data->local_pheromone_evaporation = 0.1f;                               /* ACS局部蒸发率 ξ */
     data->pheromone_deposit = 1.0f;
     data->alpha = (config->exploration_factor > 0.0f) ?
                    config->exploration_factor : 1.0f;
     data->beta = (config->exploitation_factor > 0.0f) ?
                   config->exploitation_factor : 2.0f;
-    data->q0 = 0.9f;
+    data->q0 = 0.9f;          /* ACS伪随机比例规则阈值 */
+    data->tau0 = 0.1f;        /* 初始信息素值 */
+    data->iteration_count = 0;
+    data->num_best_ants = 3;  /* 精英蚂蚁数 */
 
     int dim = config->dimensions;
     int num_ants = data->num_ants;
@@ -1882,10 +1927,10 @@ static ACOData* aco_data_create(const SwarmConfig* config) {
             safe_free((void**)&data);
             return NULL;
         }
-        /* 初始化信息素和启发式信息 */
+        /* S-011: 初始信息素设为 τ₀ */
         for (int j = 0; j < dim; j++) {
             if (i != j) {
-                data->pheromone_matrix[i][j] = 0.1f;
+                data->pheromone_matrix[i][j] = data->tau0;
                 data->heuristic_matrix[i][j] = 1.0f / (float)(abs(i - j) + 1);
             }
         }
@@ -1991,7 +2036,7 @@ static void aco_data_free(ACOData* data) {
 }
 
 /**
- * @brief 初始化ACO算法
+ * @brief 初始化ACO算法 S-011: 使用 τ₀ 初始化信息素矩阵
  */
 static void aco_initialize(Swarm* swarm) {
     ACOData* data = (ACOData*)swarm->algorithm_data;
@@ -2000,12 +2045,13 @@ static void aco_initialize(Swarm* swarm) {
     }
 
     int dim = swarm->config.dimensions;
+    data->iteration_count = 0;
 
-    /* 重置信息素矩阵 */
+    /* S-011: 重置信息素矩阵为 τ₀ */
     for (int i = 0; i < dim; i++) {
         for (int j = 0; j < dim; j++) {
             if (i != j) {
-                data->pheromone_matrix[i][j] = 0.1f;
+                data->pheromone_matrix[i][j] = data->tau0;
                 data->heuristic_matrix[i][j] = 1.0f / (float)(abs(i - j) + 1);
             } else {
                 data->pheromone_matrix[i][j] = 0.0f;
@@ -2033,7 +2079,14 @@ static void aco_initialize(Swarm* swarm) {
 }
 
 /**
- * @brief 为单只蚂蚁构建路径（轮盘赌选择）
+ * @brief 为单只蚂蚁构建路径 S-011: ACS伪随机比例规则 + 局部信息素更新
+ * 
+ * ACS伪随机比例规则:
+ *   if q ≤ q0: 选择 τ(i,j)^α * η(i,j)^β 最大的弧（开发）
+ *   else:      轮盘赌选择（探索）
+ * 
+ * ACS局部信息素更新（每步执行）:
+ *   τ(i,j) ← (1-ξ) * τ(i,j) + ξ * τ₀
  */
 static void aco_construct_solution_internal(Swarm* swarm, ACOData* data, int ant_id) {
     int dim = swarm->config.dimensions;
@@ -2053,55 +2106,73 @@ static void aco_construct_solution_internal(Swarm* swarm, ACOData* data, int ant
     int step = 1;
 
     while (step < dim) {
-        /* 计算选择概率 */
-        float sum = 0.0f;
-        for (int j = 0; j < dim; j++) {
-            if (!visited[j]) {
-                float tau = data->pheromone_matrix[current][j];
-                float eta = data->heuristic_matrix[current][j];
-                data->probability_matrix[current][j] = powf(tau, data->alpha) * powf(eta, data->beta);
-                sum += data->probability_matrix[current][j];
-            } else {
-                data->probability_matrix[current][j] = 0.0f;
+        /* S-011: ACS伪随机比例规则 —— 选择下一节点 */
+        float q = rng_uniform(0.0f, 1.0f);
+        int next = -1;
+
+        if (q <= data->q0) {
+            /* 开发：选择 τ^α * η^β 最大的未访问节点 */
+            float best_val = -1.0f;
+            for (int j = 0; j < dim; j++) {
+                if (!visited[j]) {
+                    float tau = data->pheromone_matrix[current][j];
+                    float eta = data->heuristic_matrix[current][j];
+                    float val = powf(tau, data->alpha) * powf(eta, data->beta);
+                    if (val > best_val) {
+                        best_val = val;
+                        next = j;
+                    }
+                }
+            }
+        } else {
+            /* 探索：轮盘赌概率选择 */
+            float sum = 0.0f;
+            for (int j = 0; j < dim; j++) {
+                if (!visited[j]) {
+                    float tau = data->pheromone_matrix[current][j];
+                    float eta = data->heuristic_matrix[current][j];
+                    data->probability_matrix[current][j] = powf(tau, data->alpha) * powf(eta, data->beta);
+                    sum += data->probability_matrix[current][j];
+                } else {
+                    data->probability_matrix[current][j] = 0.0f;
+                }
+            }
+
+            if (sum > 0.0f) {
+                float r = rng_uniform(0.0f, 1.0f) * sum;
+                float cum = 0.0f;
+                for (int j = 0; j < dim; j++) {
+                    if (!visited[j]) {
+                        cum += data->probability_matrix[current][j];
+                        if (cum >= r) {
+                            next = j;
+                            break;
+                        }
+                    }
+                }
             }
         }
 
-        /* 轮盘赌选择下一节点 */
-        if (sum > 0.0f) {
-            float r = rng_uniform(0.0f, 1.0f) * sum;
-            float cum = 0.0f;
-            int next = -1;
+        /* 回退：如果未找到，选择第一个未访问节点 */
+        if (next < 0) {
             for (int j = 0; j < dim; j++) {
                 if (!visited[j]) {
-                    cum += data->probability_matrix[current][j];
-                    if (cum >= r) {
-                        next = j;
-                        break;
-                    }
-                }
-            }
-            if (next == -1) {
-                /* 回退：选择第一个未访问节点 */
-                for (int j = 0; j < dim; j++) {
-                    if (!visited[j]) {
-                        next = j;
-                        break;
-                    }
-                }
-            }
-            current = next;
-        } else {
-            /* 回退：选择第一个未访问节点 */
-            for (int j = 0; j < dim; j++) {
-                if (!visited[j]) {
-                    current = j;
+                    next = j;
                     break;
                 }
             }
         }
 
-        path[step] = current;
-        visited[current] = 1;
+        /* S-011: ACS局部信息素更新 τ(i,j) ← (1-ξ)*τ(i,j) + ξ*τ₀ */
+        float xi = data->local_pheromone_evaporation;
+        data->pheromone_matrix[current][next] = 
+            (1.0f - xi) * data->pheromone_matrix[current][next] + xi * data->tau0;
+        /* 对称更新 */
+        data->pheromone_matrix[next][current] = data->pheromone_matrix[current][next];
+
+        path[step] = next;
+        visited[next] = 1;
+        current = next;
         step++;
     }
 
@@ -2117,7 +2188,13 @@ static void aco_construct_solution_internal(Swarm* swarm, ACOData* data, int ant
 }
 
 /**
- * @brief ACO迭代
+ * @brief ACO迭代 S-011: ACS全局信息素更新（仅全局最优+精英蚂蚁沉积）
+ * 
+ * 全局信息素更新（在所有蚂蚁完成路径构建后执行）:
+ *   τ(i,j) ← (1-α) * τ(i,j) + α * Δτ_best
+ *   Δτ_best = 1 / L_best  (仅最优蚂蚁可沉积)
+ * 
+ * 精英策略: 前 num_best_ants 个最优蚂蚁也沉积信息素
  */
 static void aco_iterate(Swarm* swarm) {
     ACOData* data = (ACOData*)swarm->algorithm_data;
@@ -2127,41 +2204,83 @@ static void aco_iterate(Swarm* swarm) {
 
     int dim = swarm->config.dimensions;
     int num_ants = data->num_ants;
+    data->iteration_count++;
 
-    /* 每只蚂蚁构建路径 */
+    /* 每只蚂蚁构建路径（含ACS局部信息素更新） */
     for (int i = 0; i < num_ants && i < swarm->config.swarm_size; i++) {
         aco_construct_solution_internal(swarm, data, i);
-        /* 更新个体适应度（路径长度越短，适应度越好） */
         swarm->individuals[i].current_fitness = data->ant_path_lengths[i];
     }
 
-    /* 信息素蒸发 */
-    for (int i = 0; i < dim; i++) {
-        for (int j = 0; j < dim; j++) {
-            if (i != j) {
-                data->pheromone_matrix[i][j] *= (1.0f - data->pheromone_evaporation);
-                if (data->pheromone_matrix[i][j] < 0.0001f) {
-                    data->pheromone_matrix[i][j] = 0.0001f;
+    /* 找出当前最优蚂蚁和最优路径 */
+    float best_path_len = 1e20f;
+    int* best_ant_ids = (int*)safe_calloc(data->num_best_ants, sizeof(int));
+    float* best_lens = (float*)safe_calloc(data->num_best_ants, sizeof(float));
+    if (best_ant_ids && best_lens) {
+        for (int b = 0; b < data->num_best_ants; b++) best_lens[b] = 1e20f;
+        for (int ant = 0; ant < num_ants && ant < swarm->config.swarm_size; ant++) {
+            float len = data->ant_path_lengths[ant];
+            /* 插入排序找前 num_best_ants 个最优 */
+            for (int b = 0; b < data->num_best_ants; b++) {
+                if (len < best_lens[b]) {
+                    for (int t = data->num_best_ants - 1; t > b; t--) {
+                        best_lens[t] = best_lens[t - 1];
+                        best_ant_ids[t] = best_ant_ids[t - 1];
+                    }
+                    best_lens[b] = len;
+                    best_ant_ids[b] = ant;
+                    break;
                 }
             }
         }
     }
 
-    /* 信息素沉积 */
-    for (int ant = 0; ant < num_ants && ant < swarm->config.swarm_size; ant++) {
-        float deposit = data->pheromone_deposit / (data->ant_path_lengths[ant] + 0.001f);
-        for (int i = 0; i < dim - 1; i++) {
-            int from = data->ant_paths[ant][i];
-            int to = data->ant_paths[ant][i + 1];
-            data->pheromone_matrix[from][to] += deposit;
-            data->pheromone_matrix[to][from] += deposit;
+    /* S-011: ACS全局信息素蒸发 τ(i,j) ← (1-α) * τ(i,j) */
+    float alpha_evap = data->pheromone_evaporation;
+    for (int i = 0; i < dim; i++) {
+        for (int j = 0; j < dim; j++) {
+            if (i != j) {
+                data->pheromone_matrix[i][j] *= (1.0f - alpha_evap);
+                /* S-011: 信息素下界保护 τ_min = τ₀ * 0.01 */
+                float tau_min = data->tau0 * 0.01f;
+                if (data->pheromone_matrix[i][j] < tau_min) {
+                    data->pheromone_matrix[i][j] = tau_min;
+                }
+            }
         }
-        /* 环路连接 */
-        int last = data->ant_paths[ant][dim - 1];
-        int first = data->ant_paths[ant][0];
-        data->pheromone_matrix[last][first] += deposit;
-        data->pheromone_matrix[first][last] += deposit;
     }
+
+    /* S-011: ACS全局信息素沉积 —— 仅历史最优蚂蚁沉积 */
+    /* 更新全局最佳 */
+    if (best_ant_ids && best_lens) {
+        for (int b = 0; b < data->num_best_ants && b < num_ants; b++) {
+            if (best_lens[b] >= 1e20f) continue;
+            int ant = best_ant_ids[b];
+            /* 精英权重：排名越靠前沉积越多 */
+            float elitist_weight = 1.0f / (float)(b + 1);
+            float deposit = data->pheromone_deposit * elitist_weight / 
+                           (best_lens[b] + 0.001f);
+            
+            for (int i = 0; i < dim - 1; i++) {
+                int from = data->ant_paths[ant][i];
+                int to = data->ant_paths[ant][i + 1];
+                if (from >= 0 && from < dim && to >= 0 && to < dim) {
+                    data->pheromone_matrix[from][to] += deposit;
+                    data->pheromone_matrix[to][from] += deposit;
+                }
+            }
+            /* 环路连接 */
+            int last = data->ant_paths[ant][dim - 1];
+            int first = data->ant_paths[ant][0];
+            if (last >= 0 && last < dim && first >= 0 && first < dim) {
+                data->pheromone_matrix[last][first] += deposit;
+                data->pheromone_matrix[first][last] += deposit;
+            }
+        }
+    }
+
+    safe_free((void**)&best_lens);
+    safe_free((void**)&best_ant_ids);
 
     /* 更新全局最佳（最小化路径长度） */
     for (int i = 0; i < num_ants && i < swarm->config.swarm_size; i++) {
@@ -3377,4 +3496,976 @@ Swarm* swarm_create_marl(const SwarmConfig* config) {
     modified_config.social_weight = 0.0f;
     modified_config.pheromone_evaporation = 0.0f;
     return swarm_create(&modified_config);
+}
+
+/* ============================================================================
+ * DUP-001: 合并自 swarm_enhanced.c — 群体智能深度增强系统
+ * 
+ * 包括:
+ * 1. ACO增强版 — 自适应信息素更新 + CfC液态路径选择
+ * 2. ABC增强版 — 自适应雇佣蜂 + CfC液态蜜源评估
+ * 3. 分布式一致性 — Raft共识协议（已合并到swarm_coordination.c）
+ * 4. 群体液态通信 — CfC ODE群体状态同步
+ * 5. 群体自愈与重组 — 故障检测与自动替换
+ * 
+ * 注意: 所有类型定义已移至 swarm_intelligence.h 
+ * ============================================================================ */
+
+#define SWARM_EPSILON 1e-8f
+#define SWARM_INF 1e20f
+
+/* ========== 增强群体局部随机数（避免与现有函数冲突） ========== */
+
+static unsigned int swarm_enh_rand_seed = 0;
+static int swarm_enh_seed_initialized = 0;
+
+static void swarm_enh_seed_init(void) {
+    if (!swarm_enh_seed_initialized) {
+        swarm_enh_rand_seed = (unsigned int)((uintptr_t)time(NULL) ^
+                              ((uintptr_t)&swarm_enh_rand_seed * 2654435761U));
+        if (swarm_enh_rand_seed == 0) swarm_enh_rand_seed = 1;
+        swarm_enh_seed_initialized = 1;
+    }
+}
+
+static float swarm_enh_rand_float(void) {
+    swarm_enh_seed_init();
+    swarm_enh_rand_seed = swarm_enh_rand_seed * 1103515245 + 12345;
+    return (float)((swarm_enh_rand_seed >> 16) & 0x7FFF) / 32768.0f;
+}
+
+static int swarm_enh_rand_int(int min, int max) {
+    return min + (int)(swarm_enh_rand_float() * (max - min + 1));
+}
+
+/* CfC ODE步进 */
+static void swarm_enh_cfc_step(float* h, int dim, float tau, float dt) {
+    for (int i = 0; i < dim; i++) {
+        float gate = 1.0f / (1.0f + expf(-h[i]));
+        float act = tanhf(h[i]);
+        float dh = -h[i] / (tau + SWARM_EPSILON) + gate * act;
+        h[i] += dh * dt;
+    }
+}
+
+/* ========== 增强群体内部结构 ========== */
+
+typedef struct {
+    float* position;
+    float* velocity;
+    float* personal_best;
+    float personal_best_fitness;
+    float* path;
+    int path_length;
+    float path_cost;
+    int visited_flag;
+    int food_source_index;
+    float food_quality;
+    float food_fitness;
+    int trial_counter;
+} SwarmEnhancedAgent;
+
+typedef struct {
+    float weight;
+    int source_node;
+    int dest_node;
+    float pheromone;
+    float heuristic;
+    float cfc_activation;
+} SwarmEnhancedEdge;
+
+struct SwarmEnhancedEngine {
+    int algorithm_type;
+    int is_initialized;
+
+    /* ACO状态 */
+    ACOEnhancedConfig aco_config;
+    int aco_num_nodes;
+    float* aco_distance;
+    float* aco_pheromone;
+    float* aco_heuristic;
+    SwarmEnhancedAgent* aco_ants;
+    float* aco_best_path;
+    int aco_best_path_len;
+    float aco_best_cost;
+    float* aco_cfc_state;
+
+    /* ABC状态 */
+    ABCEnhancedConfig abc_config;
+    int abc_dimensions;
+    float* abc_lower;
+    float* abc_upper;
+    SwarmEnhancedAgent* abc_food_sources;
+    float* abc_best_solution;
+    float abc_best_fitness;
+    float* abc_cfc_state;
+    float* abc_probabilities;
+
+    /* 共识状态 */
+    ConsensusNodeConfig consensus_config;
+    ConsensusProtocol consensus_protocol;
+    int* consensus_peers;
+    int consensus_peer_count;
+    ConsensusLogEntry* consensus_log;
+    int consensus_log_count;
+    int consensus_log_capacity;
+    int consensus_votes_received;
+    int consensus_voted_for;
+    float consensus_current_term;
+    int consensus_leader_id;
+    int consensus_node_state;
+    float consensus_election_timeout;
+
+    /* 液态通信状态 */
+    int comm_channel_count;
+    int comm_num_nodes;
+    int comm_state_dim;
+    int comm_hidden_dim;
+    float** comm_states;
+    float** comm_hidden;
+    LiquidMessage* comm_message_buffer;
+    int comm_buffer_size;
+    int comm_buffer_capacity;
+    LiquidMessage** comm_channel_buffers;
+    int* comm_channel_buffer_sizes;
+    int* comm_channel_buffer_caps;
+
+    /* 自愈状态 */
+    SelfHealingConfig healing_config;
+    int* healing_node_status;
+    int* healing_node_last_seen;
+    int healing_node_count;
+    int healing_failure_count;
+};
+
+/* ============================================================================
+ * DUP-001: ACO增强版 — 自适应信息素更新 + CfC液态路径选择
+ * ============================================================================ */
+
+SwarmEnhancedEngine* swarm_aco_enhanced_create(const ACOEnhancedConfig* config) {
+    if (!config) return NULL;
+    SwarmEnhancedEngine* engine = (SwarmEnhancedEngine*)
+        safe_calloc(1, sizeof(SwarmEnhancedEngine));
+    if (!engine) return NULL;
+
+    engine->algorithm_type = SWARM_ENH_ACO_ADAPTIVE;
+    engine->aco_config = *config;
+    engine->aco_best_cost = SWARM_INF;
+    engine->aco_best_path_len = 0;
+
+    engine->aco_cfc_state = (float*)safe_calloc(64, sizeof(float));
+    if (engine->aco_cfc_state) {
+        for (int s = 0; s < 64; s++)
+            engine->aco_cfc_state[s] = ((float)((s * 1103515245 + 12345) % 10000) / 10000.0f - 0.5f) * 0.1f;
+    }
+
+    engine->is_initialized = 1;
+    
+    return engine;
+}
+
+void swarm_aco_enhanced_destroy(SwarmEnhancedEngine* engine) {
+    if (!engine) return;
+
+    safe_free((void**)&engine->aco_distance);
+    safe_free((void**)&engine->aco_pheromone);
+    safe_free((void**)&engine->aco_heuristic);
+
+    if (engine->aco_ants) {
+        for (int i = 0; i < engine->aco_config.num_ants; i++) {
+            safe_free((void**)&engine->aco_ants[i].path);
+        }
+        safe_free((void**)&engine->aco_ants);
+    }
+    safe_free((void**)&engine->aco_best_path);
+    safe_free((void**)&engine->aco_cfc_state);
+
+    if (engine->abc_food_sources) {
+        for (int i = 0; i < engine->abc_config.food_sources; i++) {
+            safe_free((void**)&engine->abc_food_sources[i].position);
+        }
+        safe_free((void**)&engine->abc_food_sources);
+    }
+    safe_free((void**)&engine->abc_best_solution);
+    safe_free((void**)&engine->abc_cfc_state);
+    safe_free((void**)&engine->abc_lower);
+    safe_free((void**)&engine->abc_upper);
+    safe_free((void**)&engine->abc_probabilities);
+
+    safe_free((void**)&engine->consensus_peers);
+    if (engine->consensus_log) {
+        safe_free((void**)&engine->consensus_log);
+    }
+
+    if (engine->comm_states) {
+        for (int i = 0; i < engine->comm_num_nodes; i++)
+            safe_free((void**)&engine->comm_states[i]);
+        safe_free((void**)&engine->comm_states);
+    }
+    if (engine->comm_hidden) {
+        for (int i = 0; i < engine->comm_num_nodes; i++)
+            safe_free((void**)&engine->comm_hidden[i]);
+        safe_free((void**)&engine->comm_hidden);
+    }
+    safe_free((void**)&engine->comm_message_buffer);
+    if (engine->comm_channel_buffers) {
+        for (int c = 0; c < engine->comm_channel_count; c++)
+            safe_free((void**)&engine->comm_channel_buffers[c]);
+        safe_free((void**)&engine->comm_channel_buffers);
+    }
+    safe_free((void**)&engine->comm_channel_buffer_sizes);
+    safe_free((void**)&engine->comm_channel_buffer_caps);
+    safe_free((void**)&engine->healing_node_status);
+    safe_free((void**)&engine->healing_node_last_seen);
+
+    safe_free((void**)&engine);
+}
+
+int swarm_aco_init_graph(SwarmEnhancedEngine* engine,
+                          int num_nodes,
+                          const float* distance_matrix) {
+    if (!engine || !distance_matrix || num_nodes < 2) return -1;
+    if (engine->algorithm_type != SWARM_ENH_ACO_ADAPTIVE) return -1;
+
+    engine->aco_num_nodes = num_nodes;
+    int n = num_nodes;
+
+    engine->aco_distance = (float*)safe_calloc(n * n, sizeof(float));
+    engine->aco_pheromone = (float*)safe_calloc(n * n, sizeof(float));
+    engine->aco_heuristic = (float*)safe_calloc(n * n, sizeof(float));
+    if (!engine->aco_distance || !engine->aco_pheromone || !engine->aco_heuristic)
+        return -1;
+
+    memcpy(engine->aco_distance, distance_matrix, n * n * sizeof(float));
+
+    float init_phero = engine->aco_config.initial_pheromone;
+    if (init_phero < SWARM_EPSILON) init_phero = 0.1f;
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (i != j) {
+                engine->aco_pheromone[i * n + j] = init_phero;
+                float d = engine->aco_distance[i * n + j];
+                engine->aco_heuristic[i * n + j] = d > SWARM_EPSILON ? 1.0f / d : SWARM_INF;
+            } else {
+                engine->aco_pheromone[i * n + j] = 0.0f;
+                engine->aco_heuristic[i * n + j] = 0.0f;
+            }
+        }
+    }
+
+    int num_ants = engine->aco_config.num_ants;
+    engine->aco_ants = (SwarmEnhancedAgent*)safe_calloc(num_ants, sizeof(SwarmEnhancedAgent));
+    if (!engine->aco_ants) return -1;
+    for (int i = 0; i < num_ants; i++) {
+        engine->aco_ants[i].path = (float*)safe_calloc(n * 2, sizeof(float));
+        engine->aco_ants[i].path_length = 0;
+        engine->aco_ants[i].path_cost = 0.0f;
+    }
+
+    engine->aco_best_path = (float*)safe_calloc(n * 2, sizeof(float));
+    if (!engine->aco_best_path) return -1;
+
+    return 0;
+}
+
+static int aco_enhanced_select_next_node(SwarmEnhancedEngine* engine,
+                                          int ant_idx,
+                                          int current_node,
+                                          const int* visited, int num_visited) {
+    (void)ant_idx;
+    int n = engine->aco_num_nodes;
+    float alpha = engine->aco_config.alpha;
+    float beta = engine->aco_config.beta;
+
+    float total_prob = 0.0f;
+    float* probs = (float*)safe_calloc(n, sizeof(float));
+    if (!probs) return -1;
+
+    for (int j = 0; j < n; j++) {
+        int already_visited = 0;
+        for (int v = 0; v < num_visited; v++) {
+            if (visited[v] == j) { already_visited = 1; break; }
+        }
+        if (!already_visited && current_node != j) {
+            float tau = powf(engine->aco_pheromone[current_node * n + j], alpha);
+            float eta = powf(engine->aco_heuristic[current_node * n + j], beta);
+            probs[j] = tau * eta;
+            total_prob += probs[j];
+        } else {
+            probs[j] = 0.0f;
+        }
+    }
+
+    if (total_prob < SWARM_EPSILON) {
+        safe_free((void**)&probs);
+        for (int j = 0; j < n; j++) {
+            int already_visited = 0;
+            for (int v = 0; v < num_visited; v++) {
+                if (visited[v] == j) { already_visited = 1; break; }
+            }
+            if (!already_visited && current_node != j) return j;
+        }
+        return -1;
+    }
+
+    float r = swarm_enh_rand_float() * total_prob;
+    float cum = 0.0f;
+    for (int j = 0; j < n; j++) {
+        cum += probs[j];
+        if (r <= cum && probs[j] > 0) {
+            safe_free((void**)&probs);
+            return j;
+        }
+    }
+
+    safe_free((void**)&probs);
+    for (int j = n - 1; j >= 0; j--) {
+        if (probs[j] > 0) return j;
+    }
+    return -1;
+}
+
+int swarm_aco_enhanced_iterate(SwarmEnhancedEngine* engine, int iteration) {
+    (void)iteration;
+    if (!engine || engine->algorithm_type != SWARM_ENH_ACO_ADAPTIVE) return -1;
+    if (!engine->aco_ants) return -1;
+
+    int n = engine->aco_num_nodes;
+    int num_ants = engine->aco_config.num_ants;
+    ACOEnhancedConfig* cfg = &engine->aco_config;
+
+    for (int ant = 0; ant < num_ants; ant++) {
+        int* visited = (int*)safe_calloc(n, sizeof(int));
+        int num_visited = 0;
+        int start = swarm_enh_rand_int(0, n - 1);
+
+        visited[num_visited++] = start;
+        int current = start;
+
+        float cost = 0.0f;
+        for (int step = 1; step < n; step++) {
+            int next = aco_enhanced_select_next_node(engine, ant, current, visited, num_visited);
+            if (next < 0) break;
+            cost += engine->aco_distance[current * n + next];
+            visited[num_visited++] = next;
+            current = next;
+        }
+        if (num_visited == n) {
+            cost += engine->aco_distance[current * n + start];
+            visited[num_visited++] = start;
+        }
+
+        SwarmEnhancedAgent* agent = &engine->aco_ants[ant];
+        for (int i = 0; i < num_visited && i < n * 2; i++)
+            agent->path[i] = (float)visited[i];
+        agent->path_length = num_visited;
+        agent->path_cost = cost;
+
+        if (cost < engine->aco_best_cost) {
+            engine->aco_best_cost = cost;
+            engine->aco_best_path_len = num_visited;
+            for (int i = 0; i < num_visited && i < n * 2; i++)
+                engine->aco_best_path[i] = (float)visited[i];
+        }
+
+        safe_free((void**)&visited);
+    }
+
+    float rho = cfg->evaporation_rate;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            engine->aco_pheromone[i * n + j] *= (1.0f - rho);
+            if (engine->aco_pheromone[i * n + j] < 1e-6f)
+                engine->aco_pheromone[i * n + j] = 1e-6f;
+        }
+    }
+
+    for (int ant = 0; ant < num_ants; ant++) {
+        SwarmEnhancedAgent* agent = &engine->aco_ants[ant];
+        float deposit = 1.0f / (agent->path_cost + SWARM_EPSILON);
+
+        for (int i = 0; i < agent->path_length - 1; i++) {
+            int from = (int)agent->path[i];
+            int to = (int)agent->path[i + 1];
+            if (from >= 0 && from < n && to >= 0 && to < n) {
+                engine->aco_pheromone[from * n + to] += deposit;
+                engine->aco_pheromone[to * n + from] += deposit;
+            }
+        }
+    }
+
+    float elite_weight = cfg->elite_weight;
+    if (elite_weight > 0 && engine->aco_best_cost < SWARM_INF) {
+        float deposit = elite_weight / (engine->aco_best_cost + SWARM_EPSILON);
+        for (int i = 0; i < engine->aco_best_path_len - 1; i++) {
+            int from = (int)engine->aco_best_path[i];
+            int to = (int)engine->aco_best_path[i + 1];
+            if (from >= 0 && from < n && to >= 0 && to < n) {
+                engine->aco_pheromone[from * n + to] += deposit;
+                engine->aco_pheromone[to * n + from] += deposit;
+            }
+        }
+    }
+
+    if (engine->aco_cfc_state) {
+        for (int s = 0; s < cfg->cfc_steps; s++)
+            swarm_enh_cfc_step(engine->aco_cfc_state, 64, cfg->cfc_tau, cfg->cfc_dt);
+    }
+
+    return 0;
+}
+
+int swarm_aco_get_best_path(SwarmEnhancedEngine* engine,
+                             int* path, int max_path_len,
+                             float* total_distance) {
+    if (!engine || !path || !total_distance) return -1;
+    if (engine->aco_best_path_len < 1) return -1;
+
+    int len = engine->aco_best_path_len < max_path_len ?
+        engine->aco_best_path_len : max_path_len;
+
+    for (int i = 0; i < len; i++)
+        path[i] = (int)engine->aco_best_path[i];
+
+    *total_distance = engine->aco_best_cost;
+    return len;
+}
+
+int swarm_aco_get_pheromone(SwarmEnhancedEngine* engine,
+                             float* pheromone_matrix, size_t max_size) {
+    if (!engine || !pheromone_matrix) return -1;
+    int n = engine->aco_num_nodes;
+    size_t sz = (size_t)(n * n);
+    if (sz > max_size) sz = max_size;
+    memcpy(pheromone_matrix, engine->aco_pheromone, sz * sizeof(float));
+    return 0;
+}
+
+/* ============================================================================
+ * DUP-001: ABC增强版 — 自适应雇佣蜂 + CfC液态蜜源评估
+ * ============================================================================ */
+
+SwarmEnhancedEngine* swarm_abc_enhanced_create(const ABCEnhancedConfig* config) {
+    if (!config) return NULL;
+    SwarmEnhancedEngine* engine = (SwarmEnhancedEngine*)
+        safe_calloc(1, sizeof(SwarmEnhancedEngine));
+    if (!engine) return NULL;
+
+    engine->algorithm_type = SWARM_ENH_ABC_ADAPTIVE;
+    engine->abc_config = *config;
+    engine->abc_best_fitness = -SWARM_INF;
+
+    engine->abc_cfc_state = (float*)safe_calloc(64, sizeof(float));
+    if (engine->abc_cfc_state) {
+        for (int s = 0; s < 64; s++)
+            engine->abc_cfc_state[s] = ((float)((s * 126543 + 998877) % 10000) / 10000.0f - 0.5f) * 0.15f;
+    }
+    engine->abc_probabilities = (float*)safe_calloc(config->food_sources, sizeof(float));
+
+    engine->is_initialized = 1;
+    
+    return engine;
+}
+
+int swarm_abc_init_sources(SwarmEnhancedEngine* engine,
+                            int dimensions,
+                            const float* lower_bound,
+                            const float* upper_bound) {
+    if (!engine || !lower_bound || !upper_bound || dimensions < 1) return -1;
+
+    engine->abc_dimensions = dimensions;
+    engine->abc_lower = (float*)safe_calloc(dimensions, sizeof(float));
+    engine->abc_upper = (float*)safe_calloc(dimensions, sizeof(float));
+    if (!engine->abc_lower || !engine->abc_upper) return -1;
+    memcpy(engine->abc_lower, lower_bound, dimensions * sizeof(float));
+    memcpy(engine->abc_upper, upper_bound, dimensions * sizeof(float));
+
+    int num_sources = engine->abc_config.food_sources;
+    engine->abc_food_sources = (SwarmEnhancedAgent*)
+        safe_calloc(num_sources, sizeof(SwarmEnhancedAgent));
+    if (!engine->abc_food_sources) return -1;
+
+    for (int i = 0; i < num_sources; i++) {
+        engine->abc_food_sources[i].position = (float*)
+            safe_calloc(dimensions, sizeof(float));
+        if (!engine->abc_food_sources[i].position) return -1;
+        engine->abc_food_sources[i].trial_counter = 0;
+        engine->abc_food_sources[i].food_fitness = 0.0f;
+        for (int d = 0; d < dimensions; d++) {
+            engine->abc_food_sources[i].position[d] =
+                lower_bound[d] + swarm_enh_rand_float() * (upper_bound[d] - lower_bound[d]);
+        }
+    }
+
+    engine->abc_best_solution = (float*)safe_calloc(dimensions, sizeof(float));
+    if (!engine->abc_best_solution) return -1;
+
+    return 0;
+}
+
+int swarm_abc_enhanced_iterate(SwarmEnhancedEngine* engine, int cycle) {
+    (void)cycle;
+    if (!engine || engine->algorithm_type != SWARM_ENH_ABC_ADAPTIVE) return -1;
+    if (!engine->abc_food_sources) return -1;
+
+    ABCEnhancedConfig* cfg = &engine->abc_config;
+    int dim = engine->abc_dimensions;
+    int num_food = cfg->food_sources;
+
+    for (int i = 0; i < num_food; i++) {
+        SwarmEnhancedAgent* source = &engine->abc_food_sources[i];
+        float* new_pos = (float*)safe_calloc(dim, sizeof(float));
+        if (!new_pos) continue;
+        memcpy(new_pos, source->position, dim * sizeof(float));
+
+        int k = i;
+        while (k == i) k = swarm_enh_rand_int(0, num_food - 1);
+        int d = swarm_enh_rand_int(0, dim - 1);
+
+        float phi = (swarm_enh_rand_float() * 2.0f - 1.0f);
+        new_pos[d] = source->position[d] +
+            phi * (source->position[d] - engine->abc_food_sources[k].position[d]);
+
+        if (new_pos[d] < engine->abc_lower[d]) new_pos[d] = engine->abc_lower[d];
+        if (new_pos[d] > engine->abc_upper[d]) new_pos[d] = engine->abc_upper[d];
+
+        float new_fitness = 0.0f;
+        for (int dd = 0; dd < dim; dd++)
+            new_fitness -= new_pos[dd] * new_pos[dd];
+        new_fitness = 1.0f / (1.0f + fabsf(new_fitness));
+
+        if (new_fitness > source->food_fitness) {
+            memcpy(source->position, new_pos, dim * sizeof(float));
+            source->food_fitness = new_fitness;
+            source->trial_counter = 0;
+            if (new_fitness > engine->abc_best_fitness) {
+                engine->abc_best_fitness = new_fitness;
+                memcpy(engine->abc_best_solution, new_pos, dim * sizeof(float));
+            }
+        } else {
+            source->trial_counter++;
+        }
+        safe_free((void**)&new_pos);
+    }
+
+    float total_fitness = 0.0f;
+    for (int i = 0; i < num_food; i++) {
+        engine->abc_probabilities[i] =
+            engine->abc_food_sources[i].food_fitness;
+        total_fitness += engine->abc_probabilities[i];
+    }
+    if (total_fitness > SWARM_EPSILON) {
+        for (int i = 0; i < num_food; i++)
+            engine->abc_probabilities[i] /= total_fitness;
+    }
+
+    for (int i = 0; i < num_food; i++) {
+        float r = swarm_enh_rand_float();
+        float cum = 0.0f;
+        int selected = 0;
+        for (int s = 0; s < num_food; s++) {
+            cum += engine->abc_probabilities[s];
+            if (r <= cum) { selected = s; break; }
+        }
+
+        SwarmEnhancedAgent* source = &engine->abc_food_sources[selected];
+        float* new_pos = (float*)safe_calloc(dim, sizeof(float));
+        if (!new_pos) continue;
+        memcpy(new_pos, source->position, dim * sizeof(float));
+
+        int k = selected;
+        while (k == selected) k = swarm_enh_rand_int(0, num_food - 1);
+        int d = swarm_enh_rand_int(0, dim - 1);
+
+        float phi = (swarm_enh_rand_float() * 2.0f - 1.0f);
+        new_pos[d] = source->position[d] +
+            phi * (source->position[d] - engine->abc_food_sources[k].position[d]);
+
+        if (new_pos[d] < engine->abc_lower[d]) new_pos[d] = engine->abc_lower[d];
+        if (new_pos[d] > engine->abc_upper[d]) new_pos[d] = engine->abc_upper[d];
+
+        float new_fitness = 0.0f;
+        for (int dd = 0; dd < dim; dd++)
+            new_fitness -= new_pos[dd] * new_pos[dd];
+        new_fitness = 1.0f / (1.0f + fabsf(new_fitness));
+
+        if (new_fitness > source->food_fitness) {
+            memcpy(source->position, new_pos, dim * sizeof(float));
+            source->food_fitness = new_fitness;
+            source->trial_counter = 0;
+        } else {
+            source->trial_counter++;
+        }
+        safe_free((void**)&new_pos);
+    }
+
+    for (int i = 0; i < num_food; i++) {
+        if (engine->abc_food_sources[i].trial_counter > (int)cfg->limit) {
+            if (swarm_enh_rand_float() < cfg->scout_probability) {
+                for (int d = 0; d < dim; d++) {
+                    engine->abc_food_sources[i].position[d] =
+                        engine->abc_lower[d] + swarm_enh_rand_float() *
+                        (engine->abc_upper[d] - engine->abc_lower[d]);
+                }
+                engine->abc_food_sources[i].food_fitness = 0.0f;
+                engine->abc_food_sources[i].trial_counter = 0;
+            }
+        }
+    }
+
+    if (engine->abc_cfc_state) {
+        for (int s = 0; s < cfg->cfc_steps; s++)
+            swarm_enh_cfc_step(engine->abc_cfc_state, 64, cfg->cfc_tau, cfg->cfc_dt);
+    }
+
+    return 0;
+}
+
+int swarm_abc_get_best_solution(SwarmEnhancedEngine* engine,
+                                 float* solution, int max_dim,
+                                 float* fitness) {
+    if (!engine || !solution || !fitness) return -1;
+    if (!engine->abc_best_solution) return -1;
+
+    int dim = engine->abc_dimensions < max_dim ?
+        engine->abc_dimensions : max_dim;
+    memcpy(solution, engine->abc_best_solution, dim * sizeof(float));
+    *fitness = engine->abc_best_fitness;
+    return dim;
+}
+
+/* ============================================================================
+ * DUP-001: 群体液态通信 — CfC ODE群体状态同步
+ * ============================================================================ */
+
+int swarm_liquid_comm_create(SwarmEnhancedEngine* engine,
+                              int num_nodes, int state_dim, int hidden_dim) {
+    if (!engine || num_nodes < 1 || state_dim < 1 || hidden_dim < 1) return -1;
+
+    engine->comm_num_nodes = num_nodes;
+    engine->comm_state_dim = state_dim;
+    engine->comm_hidden_dim = hidden_dim;
+    engine->comm_channel_count++;
+    int channel = engine->comm_channel_count;
+
+    engine->comm_states = (float**)safe_calloc(num_nodes, sizeof(float*));
+    engine->comm_hidden = (float**)safe_calloc(num_nodes, sizeof(float*));
+    if (!engine->comm_states || !engine->comm_hidden) return -1;
+
+    for (int i = 0; i < num_nodes; i++) {
+        engine->comm_states[i] = (float*)safe_calloc(state_dim, sizeof(float));
+        engine->comm_hidden[i] = (float*)safe_calloc(hidden_dim, sizeof(float));
+        if (!engine->comm_states[i] || !engine->comm_hidden[i]) return -1;
+    }
+
+    engine->comm_buffer_capacity = 1024;
+    engine->comm_message_buffer = (LiquidMessage*)
+        safe_calloc(engine->comm_buffer_capacity, sizeof(LiquidMessage));
+
+    int ch = engine->comm_channel_count;
+    size_t new_cap = ch * sizeof(LiquidMessage*);
+    engine->comm_channel_buffers = (LiquidMessage**)safe_realloc(
+        engine->comm_channel_buffers, new_cap);
+    engine->comm_channel_buffer_sizes = (int*)safe_realloc(
+        engine->comm_channel_buffer_sizes, ch * sizeof(int));
+    engine->comm_channel_buffer_caps = (int*)safe_realloc(
+        engine->comm_channel_buffer_caps, ch * sizeof(int));
+    if (engine->comm_channel_buffers) {
+        engine->comm_channel_buffers[ch - 1] = (LiquidMessage*)
+            safe_calloc(256, sizeof(LiquidMessage));
+    }
+    if (engine->comm_channel_buffer_sizes) engine->comm_channel_buffer_sizes[ch - 1] = 0;
+    if (engine->comm_channel_buffer_caps) engine->comm_channel_buffer_caps[ch - 1] = 256;
+
+    return channel;
+}
+
+int swarm_liquid_comm_send(SwarmEnhancedEngine* engine,
+                            int channel_id, const LiquidMessage* message) {
+    if (!engine || !message) return -1;
+
+    int ch_idx = channel_id - 1;
+    if (ch_idx < 0 || ch_idx >= engine->comm_channel_count ||
+        !engine->comm_channel_buffers || !engine->comm_channel_buffers[ch_idx]) {
+        if (engine->comm_buffer_size >= engine->comm_buffer_capacity) return -1;
+        int idx = engine->comm_buffer_size;
+        engine->comm_message_buffer[idx] = *message;
+        engine->comm_buffer_size++;
+        return 0;
+    }
+
+    int* sz = &engine->comm_channel_buffer_sizes[ch_idx];
+    int cap = engine->comm_channel_buffer_caps[ch_idx];
+    if (*sz >= cap) return -1;
+
+    engine->comm_channel_buffers[ch_idx][*sz] = *message;
+    if (message->state_vector && message->state_dim > 0) {
+        engine->comm_channel_buffers[ch_idx][*sz].state_vector = (float*)
+            safe_calloc(message->state_dim, sizeof(float));
+        if (engine->comm_channel_buffers[ch_idx][*sz].state_vector)
+            memcpy(engine->comm_channel_buffers[ch_idx][*sz].state_vector,
+                   message->state_vector, message->state_dim * sizeof(float));
+    }
+    (*sz)++;
+    return 0;
+}
+
+int swarm_liquid_comm_receive(SwarmEnhancedEngine* engine,
+                               int channel_id, LiquidMessage* message, int block) {
+    if (!engine || !message) return -1;
+    (void)block;
+
+    int ch_idx = channel_id - 1;
+    if (ch_idx >= 0 && ch_idx < engine->comm_channel_count &&
+        engine->comm_channel_buffers && engine->comm_channel_buffers[ch_idx]) {
+        int* sz = &engine->comm_channel_buffer_sizes[ch_idx];
+        if (*sz < 1) return 0;
+        *message = engine->comm_channel_buffers[ch_idx][0];
+        for (int i = 1; i < *sz; i++)
+            engine->comm_channel_buffers[ch_idx][i - 1] = engine->comm_channel_buffers[ch_idx][i];
+        (*sz)--;
+        return 1;
+    }
+
+    if (engine->comm_buffer_size < 1) return 0;
+
+    *message = engine->comm_message_buffer[0];
+    for (int i = 1; i < engine->comm_buffer_size; i++)
+        engine->comm_message_buffer[i - 1] = engine->comm_message_buffer[i];
+    engine->comm_buffer_size--;
+
+    return 1;
+}
+
+int swarm_liquid_comm_sync(SwarmEnhancedEngine* engine,
+                            int channel_id, int sync_steps) {
+    if (!engine || !engine->comm_states || !engine->comm_hidden) return -1;
+
+    float coupling = 0.005f + 0.005f * ((float)(channel_id % 8));
+
+    int n = engine->comm_num_nodes;
+
+    for (int step = 0; step < sync_steps; step++) {
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                if (i == j) continue;
+                int dim = engine->comm_state_dim;
+                for (int d = 0; d < dim; d++) {
+                    float diff = engine->comm_states[j][d] - engine->comm_states[i][d];
+                    engine->comm_states[i][d] += coupling * diff;
+                }
+            }
+        }
+
+        for (int i = 0; i < n; i++) {
+            swarm_enh_cfc_step(engine->comm_hidden[i],
+                           engine->comm_hidden_dim, 1.0f, 0.1f);
+        }
+    }
+
+    return 0;
+}
+
+/* ============================================================================
+ * DUP-001: 群体自愈与重组 — 故障检测与自动替换
+ * ============================================================================ */
+
+int swarm_self_healing_configure(SwarmEnhancedEngine* engine,
+                                  const SelfHealingConfig* config) {
+    if (!engine || !config) return -1;
+    engine->healing_config = *config;
+
+    if (engine->healing_node_status) {
+        safe_free((void**)&engine->healing_node_status);
+    }
+    if (engine->healing_node_last_seen) {
+        safe_free((void**)&engine->healing_node_last_seen);
+    }
+    engine->healing_node_count = engine->comm_num_nodes > 0 ?
+        engine->comm_num_nodes : 64;
+    engine->healing_node_status = (int*)
+        safe_calloc(engine->healing_node_count, sizeof(int));
+    engine->healing_node_last_seen = (int*)
+        safe_calloc(engine->healing_node_count, sizeof(int));
+
+    return 0;
+}
+
+int swarm_self_healing_detect_failures(SwarmEnhancedEngine* engine,
+                                        int* failed_nodes, int max_failures) {
+    if (!engine || !failed_nodes || max_failures < 1) return -1;
+
+    int failures = 0;
+
+    if (!engine->healing_node_status) {
+        engine->healing_node_count = engine->comm_num_nodes > 0 ?
+            engine->comm_num_nodes : 64;
+        engine->healing_node_status = (int*)
+            safe_calloc(engine->healing_node_count, sizeof(int));
+        if (!engine->healing_node_status) return -1;
+    }
+
+    long heartbeat_timeout_us = 10 * 1000 * 1000;
+    long current_time_us = (long)((double)clock() / (double)CLOCKS_PER_SEC * 1e6);
+
+    if (!engine->healing_node_last_seen) {
+        engine->healing_node_last_seen = (int*)
+            safe_calloc(engine->healing_node_count, sizeof(int));
+    }
+
+    for (int i = 0; i < engine->healing_node_count && failures < max_failures; i++) {
+        if (engine->healing_node_status[i] == 0) {
+            long node_last_seen = engine->healing_node_last_seen[i];
+            if (node_last_seen == 0) {
+                engine->healing_node_last_seen[i] = current_time_us;
+                continue;
+            }
+            long elapsed = current_time_us - node_last_seen;
+
+            if (elapsed > heartbeat_timeout_us) {
+                engine->healing_node_status[i] = 1;
+                failed_nodes[failures++] = i;
+                log_warning("[群体自愈] 节点%d故障检测 [超时=%.1fs]",
+                         i, (float)elapsed / 1e6f);
+            }
+        }
+    }
+
+    return failures;
+}
+
+int swarm_self_healing_replace_node(SwarmEnhancedEngine* engine,
+                                     int failed_node_id, int replacement_id) {
+    if (!engine) return -1;
+    if (failed_node_id < 0 || replacement_id < 0) return -1;
+
+    if (engine->comm_hidden && failed_node_id < engine->comm_num_nodes) {
+        memcpy(engine->comm_hidden[failed_node_id],
+               engine->comm_hidden[replacement_id],
+               engine->comm_hidden_dim * sizeof(float));
+    }
+
+    if (engine->comm_states && failed_node_id < engine->comm_num_nodes) {
+        memcpy(engine->comm_states[failed_node_id],
+               engine->comm_states[replacement_id],
+               engine->comm_state_dim * sizeof(float));
+    }
+
+    if (engine->healing_node_status && failed_node_id < engine->healing_node_count) {
+        engine->healing_node_status[failed_node_id] = 0;
+    }
+
+    engine->healing_failure_count++;
+    return 0;
+}
+
+int swarm_self_healing_redistribute_tasks(SwarmEnhancedEngine* engine,
+                                           int failed_node_id) {
+    if (!engine) return -1;
+
+    int total_nodes = engine->comm_num_nodes > 0 ?
+        engine->comm_num_nodes : engine->healing_node_count;
+
+    for (int i = 0; i < total_nodes; i++) {
+        if (i == failed_node_id) continue;
+        if (engine->healing_node_status && engine->healing_node_status[i] != 0) continue;
+
+        if (engine->comm_states && i < engine->comm_num_nodes) {
+            float load_share = 1.0f / (total_nodes - 1);
+            for (int d = 0; d < engine->comm_state_dim; d++) {
+                engine->comm_states[i][d] += load_share * 0.1f;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* ============================================================================
+ * DUP-001: 增强群体模型管理
+ * ============================================================================ */
+
+int swarm_enhanced_save(const SwarmEnhancedEngine* engine,
+                         SwarmEnhancedAlgorithm algorithm,
+                         const char* filepath) {
+    if (!engine || !filepath) return -1;
+    FILE* f = fopen(filepath, "wb");
+    if (!f) return -1;
+
+    int alg = (int)algorithm;
+    fwrite(&alg, sizeof(int), 1, f);
+
+    if (algorithm == SWARM_ENH_ACO_ADAPTIVE) {
+        fwrite(&engine->aco_config, sizeof(ACOEnhancedConfig), 1, f);
+        fwrite(&engine->aco_num_nodes, sizeof(int), 1, f);
+        fwrite(&engine->aco_best_cost, sizeof(float), 1, f);
+    } else if (algorithm == SWARM_ENH_ABC_ADAPTIVE) {
+        fwrite(&engine->abc_config, sizeof(ABCEnhancedConfig), 1, f);
+        fwrite(&engine->abc_best_fitness, sizeof(float), 1, f);
+    }
+
+    fclose(f);
+    return 0;
+}
+
+SwarmEnhancedEngine* swarm_enhanced_load(SwarmEnhancedAlgorithm algorithm,
+                                          const char* filepath) {
+    (void)algorithm;
+    if (!filepath) return NULL;
+    FILE* f = fopen(filepath, "rb");
+    if (!f) return NULL;
+
+    int alg;
+    if (fread(&alg, sizeof(int), 1, f) != 1) { fclose(f); return NULL; }
+
+    SwarmEnhancedEngine* engine = NULL;
+
+    if (alg == SWARM_ENH_ACO_ADAPTIVE) {
+        ACOEnhancedConfig cfg;
+        if (fread(&cfg, sizeof(ACOEnhancedConfig), 1, f) == 1)
+            engine = swarm_aco_enhanced_create(&cfg);
+    } else if (alg == SWARM_ENH_ABC_ADAPTIVE) {
+        ABCEnhancedConfig cfg;
+        if (fread(&cfg, sizeof(ABCEnhancedConfig), 1, f) == 1)
+            engine = swarm_abc_enhanced_create(&cfg);
+    }
+
+    fclose(f);
+    return engine;
+}
+
+ACOEnhancedConfig swarm_aco_default_config(void) {
+    ACOEnhancedConfig cfg;
+    memset(&cfg, 0, sizeof(ACOEnhancedConfig));
+    cfg.num_ants = 20;
+    cfg.alpha = 1.0f;
+    cfg.beta = 2.0f;
+    cfg.evaporation_rate = 0.1f;
+    cfg.initial_pheromone = 0.1f;
+    cfg.update_strategy = ACO_PHEROMONE_ANT_CYCLE;
+    cfg.elite_weight = 2.0f;
+    cfg.cfc_tau = 2.0f;
+    cfg.cfc_dt = 0.1f;
+    cfg.cfc_steps = 5;
+    cfg.max_iterations = 200;
+    cfg.enable_adaptive_params = 1;
+    cfg.enable_local_search = 1;
+    return cfg;
+}
+
+ABCEnhancedConfig swarm_abc_default_config(void) {
+    ABCEnhancedConfig cfg;
+    memset(&cfg, 0, sizeof(ABCEnhancedConfig));
+    cfg.colony_size = 50;
+    cfg.food_sources = 30;
+    cfg.max_cycles = 500;
+    cfg.limit = 50.0f;
+    cfg.scout_probability = 0.3f;
+    cfg.cfc_tau = 2.0f;
+    cfg.cfc_dt = 0.1f;
+    cfg.cfc_steps = 5;
+    cfg.enable_adaptive_search = 1;
+    cfg.enable_multi_objective = 0;
+    return cfg;
 }
