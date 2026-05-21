@@ -1383,9 +1383,10 @@ static void build_element_stiffness_matrix(double* ke) {
                     k[i][j] += B[kk][i] * DBT[kk][j] * detJ;
     }
     
-    for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++)
-            ke[i * 4 + j] = k[i * 2][j * 2];
+    /* R6-003修复: 保留完整8x8单元刚度矩阵（含x+y方向DOF），而非仅提取x方向 */
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 8; j++)
+            ke[i * 8 + j] = k[i][j];
 }
 
 /**
@@ -1416,7 +1417,7 @@ TopologyOptimizationState* topology_optimization_create(int nelx, int nely,
     state->compliance = (double*)safe_calloc(n, sizeof(double));
     state->sensitivity = (double*)safe_calloc(n, sizeof(double));
     state->sensitivity_filter = (double*)safe_calloc(n, sizeof(double));
-    state->ke = (double*)safe_calloc(16, sizeof(double));
+    state->ke = (double*)safe_calloc(64, sizeof(double)); /* R6-003修复: 8x8完整单元刚度矩阵 */
     
     if (!state->densities || !state->densities_new || !state->compliance ||
         !state->sensitivity || !state->sensitivity_filter || !state->ke) {
@@ -1588,14 +1589,10 @@ double topology_optimization_simp_iteration(TopologyOptimizationState* state) {
                 2 * n1 + 2, 2 * n1 + 3
             };
             
+            /* R6-003修复: 组装完整的8x8单元刚度矩阵到全局矩阵，而非仅对角 */
             for (int i = 0; i < 8; i++) {
                 for (int j = 0; j < 8; j++) {
-                    int ri = edof[i];
-                    int ci = edof[j];
-                    int rp = (ci >= ri) ? (ci - ri) : (ri - ci);
-                    if (rp == 0) {
-                        K[ri * 4 + 0] += x_penal * state->ke[(i / 2) * 4 + (j / 2)];
-                    }
+                    K[edof[i] * ndof + edof[j]] += x_penal * state->ke[i * 8 + j];
                 }
             }
         }

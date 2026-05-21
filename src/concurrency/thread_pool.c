@@ -145,32 +145,34 @@ static TaskNode* task_node_alloc(ThreadPool* pool) {
         return node;
     }
     
-    // 如果池为空，分配新节点
-    // 检查是否超过最大节点限制
-    if (pool->max_nodes > 0 && pool->allocated_nodes >= pool->max_nodes) {
+    /* R7-005修复: TOCTOU竞态——在锁内同时检查+递增，消除窗口 */
 #ifdef _WIN32
+    EnterCriticalSection(&pool->node_lock);
+    if (pool->max_nodes > 0 && pool->allocated_nodes >= pool->max_nodes) {
         LeaveCriticalSection(&pool->node_lock);
-#else
-        pthread_mutex_unlock(&pool->node_lock);
-#endif
         return NULL;
     }
-    
-#ifdef _WIN32
+    pool->allocated_nodes++;
     LeaveCriticalSection(&pool->node_lock);
 #else
+    pthread_mutex_lock(&pool->node_lock);
+    if (pool->max_nodes > 0 && pool->allocated_nodes >= pool->max_nodes) {
+        pthread_mutex_unlock(&pool->node_lock);
+        return NULL;
+    }
+    pool->allocated_nodes++;
     pthread_mutex_unlock(&pool->node_lock);
 #endif
     
     node = (TaskNode*)safe_malloc(sizeof(TaskNode));
-    if (node) {
+    if (!node) {
 #ifdef _WIN32
         EnterCriticalSection(&pool->node_lock);
-        pool->allocated_nodes++;
+        pool->allocated_nodes--;
         LeaveCriticalSection(&pool->node_lock);
 #else
         pthread_mutex_lock(&pool->node_lock);
-        pool->allocated_nodes++;
+        pool->allocated_nodes--;
         pthread_mutex_unlock(&pool->node_lock);
 #endif
     }
@@ -1020,11 +1022,14 @@ int thread_pool_submit(ThreadPool* pool, TaskFunction function,
     int result = -1;
     
     if (pool->config.enable_work_stealing) {
-        // 工作窃取模式：提交到某个线程的本地队列
-        
-        // 轮询选择目标线程
-        size_t target_thread = pool->next_thread_index;
-        pool->next_thread_index = (pool->next_thread_index + 1) % pool->config.num_threads;
+        /* R7-005修复: next_thread_index使用原子操作为避免竞态 */
+        size_t target_thread;
+#ifdef _WIN32
+        target_thread = (size_t)InterlockedIncrement64((LONG64*)&pool->next_thread_index);
+#else
+        target_thread = (size_t)__sync_fetch_and_add(&pool->next_thread_index, 1);
+#endif
+        target_thread = target_thread % pool->config.num_threads;
         
         // 检查线程队列是否已满
         if (pool->config.max_tasks_per_thread > 0 && 

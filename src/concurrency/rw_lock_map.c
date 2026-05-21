@@ -203,7 +203,12 @@ int rw_lock_map_insert(RwLockMap* map, const char* key, void* value) {
         return -1;
     }
 
+    /* ZSF-036修复: 跨平台字符串复制，Windows用_strdup，POSIX用strdup */
+#ifdef _WIN32
     new_entry->key = _strdup(key);
+#else
+    new_entry->key = strdup(key);
+#endif
     if (!new_entry->key) {
         safe_free((void**)&new_entry);
         rw_map_spin_unlock(lock);

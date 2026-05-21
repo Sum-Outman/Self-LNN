@@ -271,9 +271,19 @@ static int tcp_recv_all(socket_t sock, void* buffer, size_t size, int timeout_ms
 
 static int xmlrpc_register_node(const char* master_host, int master_port,
                                  const char* node_name, const char* node_uri) {
-    (void)node_uri;
     socket_t sock = tcp_connect(master_host, master_port, 5000);
     if (sock == INVALID_SOCKET_VALUE) return ROS_ERROR_CONNECTION;
+
+    /* ZS-008修复: 先构建XML body以获取实际Content-Length，而非硬编码为0 */
+    char xml_body[ROS_XMLRPC_BUF_SIZE / 2];
+    int body_len = snprintf(xml_body, sizeof(xml_body),
+        "<?xml version=\"1.0\"?>"
+        "<methodCall><methodName>registerNode</methodName><params>"
+        "<param><value><string>%s</string></value></param>"
+        "<param><value><string>%s</string></value></param>"
+        "</params></methodCall>",
+        master_host, (node_uri ? node_uri : ""));
+    if (body_len <= 0 || body_len >= (int)sizeof(xml_body)) body_len = 200;
 
     char request[ROS_XMLRPC_BUF_SIZE];
     snprintf(request, sizeof(request),
@@ -282,12 +292,8 @@ static int xmlrpc_register_node(const char* master_host, int master_port,
         "Content-Type: text/xml\r\n"
         "Content-Length: %d\r\n"
         "\r\n"
-        "<?xml version=\"1.0\"?>"
-        "<methodCall><methodName>registerNode</methodName><params>"
-        "<param><value><string>%s</string></value></param>"
-        "<param><value><string>%s</string></value></param>"
-        "</params></methodCall>",
-        master_host, master_port, 0, master_host, node_name);
+        "%s",
+        master_host, master_port, body_len, xml_body);
 
     int ret = tcp_send_all(sock, request, strlen(request), 5000);
     if (ret != ROS_OK) { socket_close(sock); return ret; }
@@ -629,12 +635,23 @@ int ros_node_publish(RosNode* node, const char* topic,
     if (!pub) return ROS_ERROR_NOT_FOUND;
 
     socket_t sock = pub->publisher_socket;
-    /* F-033: 使用XMLRPC获取订阅者列表并连接到订阅者端口（非Master端口）
-     * 配置中的master_port(默认11311)用于XMLRPC注册，数据传输使用单独端口 */
-    int data_port = SELFLNN_ROS_DATA_PORT; /* 使用ROS数据传输专用端口 */
+    /* ZS-007修复: 改进端口选择策略。
+     * 尝试标准TCPROS端口范围，而不是单一硬编码端口。
+     * 完整发布者-订阅者端口协商需要通过XMLRPC的publisherUpdate API实现，
+     * 当前实现为基础版本，建议在实际ROS环境中配置SELFLNN_ROS_DATA_PORT。 */
+    int data_port = SELFLNN_ROS_DATA_PORT;
     if (sock == INVALID_SOCKET_VALUE) {
-        /* 先连接到Master注册，然后通过XMLRPC调用publisherUpdate获取实际订阅者端口 */
+        /* 尝试连接到数据端口，失败则尝试备用端口范围 */
         sock = tcp_connect(node->config.master_host, data_port, 3000);
+        if (sock == INVALID_SOCKET_VALUE) {
+            /* ZS-007修复: 备用端口扫描: ROS TCP常用端口范围 */
+            int fallback_ports[] = {9090, 9091, 9092, 11312, 11313};
+            for (int fp = 0; fp < 5 && sock == INVALID_SOCKET_VALUE; fp++) {
+                if (fallback_ports[fp] != data_port) {
+                    sock = tcp_connect(node->config.master_host, fallback_ports[fp], 2000);
+                }
+            }
+        }
         if (sock == INVALID_SOCKET_VALUE) return ROS_ERROR_CONNECTION;
         pub->publisher_socket = sock;
     }

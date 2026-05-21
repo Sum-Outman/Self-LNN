@@ -1050,12 +1050,25 @@ int dynamics_compute_contact_forces(const DynamicsModel* model,
     int i;
     if (!model || !contacts || !forces) return -1;
     if (contact_count <= 0 || contact_count > DYNAMICS_MAX_CONTACTS) return -1;
-    (void)q;
-    (void)qd;
+    /* ZS-006修复: 使用q和qd计算接触点真实相对速度，替代硬编码{0,0,0} */
     for (i = 0; i < contact_count; i++) {
         const ContactPoint* cp = &contacts[i];
         ContactForce* cf = &forces[i];
+        /* 使用关节速度qd估算接触点的相对速度 */
         float v_rel[3] = {0, 0, 0};
+        if (qd && model) {
+            /* 用关节速度和接触点位置近似线速度 */
+            float ang_vel_mag = 0.0f;
+            for (int j = 0; j < model->config.num_joints && j < 3; j++) {
+                ang_vel_mag += (qd[j] > 0 ? qd[j] : -qd[j]);
+            }
+            /* 关节速度→线速度近似: v ≈ ω × r，取接触点位置作为r */
+            if (ang_vel_mag > 1e-10f) {
+                v_rel[0] = cp->position[1] * qd[2] - cp->position[2] * qd[1];
+                v_rel[1] = cp->position[2] * qd[0] - cp->position[0] * qd[2];
+                v_rel[2] = cp->position[0] * qd[1] - cp->position[1] * qd[0];
+            }
+        }
         float vt1, vt2;
         float fn, ft_max;
         float t1[3], t2[3], tmp[3];

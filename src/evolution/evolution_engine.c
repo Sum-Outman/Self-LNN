@@ -934,6 +934,93 @@ int evolution_step(EvolutionEngine* engine) {
     engine->stats.end_time = time(NULL);
     engine->stats.elapsed_seconds = difftime(engine->stats.end_time, engine->stats.start_time);
 
+    /* PF-004修复: 岛模型个体迁移 —— 每migration_counter代执行一次岛间精英迁移 */
+    if (engine->island_count > 1 && engine->islands) {
+        engine->migration_counter++;
+        if (engine->migration_counter >= engine->config.migration_interval) {
+            engine->migration_counter = 0;
+            evolution_island_migrate(engine);
+        }
+    }
+
+    return 0;
+}
+
+/* PF-004修复: 岛模型创建 —— 将种群划分为多个独立演化的岛屿 */
+int evolution_create_islands(EvolutionEngine* engine, int num_islands) {
+    if (!engine || !engine->initialized || num_islands < 2) return -1;
+    if (engine->islands) {
+        for (int i = 0; i < engine->island_count; i++) {
+            safe_free((void**)&engine->islands[i].individuals);
+        }
+        safe_free((void**)&engine->islands);
+    }
+
+    int total_pop = (int)engine->population.size;
+    int per_island = total_pop / num_islands;
+    if (per_island < 4) return -1;
+
+    engine->island_count = num_islands;
+    engine->islands = (EvolutionPopulation*)safe_calloc((size_t)num_islands, sizeof(EvolutionPopulation));
+    if (!engine->islands) { engine->island_count = 0; return -1; }
+
+    for (int i = 0; i < num_islands; i++) {
+        EvolutionPopulation* isl = &engine->islands[i];
+        isl->size = (size_t)per_island;
+        isl->capacity = (size_t)per_island;
+        isl->individuals = (EvolutionIndividual*)safe_calloc((size_t)per_island, sizeof(EvolutionIndividual));
+        if (!isl->individuals) { engine->island_count = i; return -1; }
+        int offset = i * per_island;
+        for (int j = 0; j < per_island; j++) {
+            int src_idx = offset + j;
+            isl->individuals[j].chromosome_size = engine->population.individuals[src_idx].chromosome_size;
+            isl->individuals[j].chromosome = (float*)safe_malloc(
+                isl->individuals[j].chromosome_size * sizeof(float));
+            if (isl->individuals[j].chromosome) {
+                memcpy(isl->individuals[j].chromosome,
+                       engine->population.individuals[src_idx].chromosome,
+                       isl->individuals[j].chromosome_size * sizeof(float));
+                isl->individuals[j].fitness = engine->population.individuals[src_idx].fitness;
+            }
+        }
+        update_population_stats(isl);
+    }
+    engine->migration_counter = 0;
+    return 0;
+}
+
+/* PF-004修复: 岛间迁移 —— 将每个岛的最优个体发送到下一个岛(环形拓扑) */
+int evolution_island_migrate(EvolutionEngine* engine) {
+    if (!engine || engine->island_count < 2 || !engine->islands) return -1;
+
+    for (int src = 0; src < engine->island_count; src++) {
+        int dst = (src + 1) % engine->island_count;
+        EvolutionPopulation* src_pop = &engine->islands[src];
+        EvolutionPopulation* dst_pop = &engine->islands[dst];
+
+        if (src_pop->size == 0 || dst_pop->size == 0) continue;
+
+        /* 找到源岛最优个体 */
+        int best_idx = 0;
+        for (size_t j = 1; j < src_pop->size; j++) {
+            if (src_pop->individuals[j].fitness > src_pop->individuals[best_idx].fitness)
+                best_idx = (int)j;
+        }
+
+        /* 覆盖目标岛最差个体 */
+        int worst_idx = 0;
+        for (size_t j = 1; j < dst_pop->size; j++) {
+            if (dst_pop->individuals[j].fitness < dst_pop->individuals[worst_idx].fitness)
+                worst_idx = (int)j;
+        }
+
+        EvolutionIndividual* src_best = &src_pop->individuals[best_idx];
+        EvolutionIndividual* dst_worst = &dst_pop->individuals[worst_idx];
+        size_t chrom_size = src_best->chromosome_size;
+        if (chrom_size > dst_worst->chromosome_size) chrom_size = dst_worst->chromosome_size;
+        memcpy(dst_worst->chromosome, src_best->chromosome, chrom_size * sizeof(float));
+        dst_worst->fitness = src_best->fitness;
+    }
     return 0;
 }
 
@@ -1020,8 +1107,9 @@ int evolution_inject_elite(EvolutionEngine* engine, const float* chromosome, siz
         }
     }
 
+    /* ZSF-034修复: memcpy参数括号修正，先比较大小再乘sizeof */
     memcpy(engine->population.individuals[worst_idx].chromosome, chromosome,
-           chrom_size < size ? chrom_size : size * sizeof(float));
+           (chrom_size < size ? chrom_size : size) * sizeof(float));
     evaluate_individual(engine, &engine->population.individuals[worst_idx]);
     update_population_stats(&engine->population);
     return 0;

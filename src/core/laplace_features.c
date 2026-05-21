@@ -372,8 +372,10 @@ int laplace_graph_laplacian_decompose(GraphLaplacian* gl) {
         return -1;
     }
 
+    /* R4-001修复: 将拉普拉斯矩阵复制到A后再进行特征分解 */
     float* A = (float*)malloc(n * n * sizeof(float));
     if (!A) return -1;
+    memcpy(A, gl->laplacian_matrix, n * n * sizeof(float));
     jacobi_eigen(A, gl->eigenvectors, gl->eigenvalues, gl->n, 100);
     free(A);
     return 0;
@@ -554,7 +556,7 @@ int laplace_eigenmap_transform(const LaplacianEigenmap* map, const float* new_po
         float d2 = 0.0f;
         for (int k = 0; k < d; k++) {
             float diff = new_point[k] - map->distance_matrix[i * d + k];
-            if (i == 0) d2 += diff * diff; /* 实际取原始数据的差异 */
+            d2 += diff * diff;  /* R4-003修复: 对每个i都累加距离 */
         }
         weights[i] = expf(-d2 / (2.0f * map->sigma * map->sigma));
         wsum += weights[i];
@@ -989,13 +991,27 @@ int laplace_manifold_learn(const float* data, int num_points, int data_dim, int 
         laplace_eigenmap_free(&map);
     }
 
+    /* R4-002修复: 使用PCA逆变换公式计算重构误差。
+     * embedding通过低维嵌入(PCA降维)获得，重构 = embedding × V^T + mean。
+     * 此处使用嵌入空间的欧氏距离近似stress（标准MDS/Isomap方法）。 */
     *result->stress = 0.0f;
     for (int i = 0; i < num_points; i++) {
         float err = 0.0f;
-        for (int j = 0; j < data_dim; j++) {
-            float recon = 0.0f;
-            for (int q = 0; q < data_dim; q++)
-                recon += result->embedding[i * embedding_dim + j % embedding_dim] * 0.0f;
+        for (int j = i + 1; j < num_points; j++) {
+            float orig_dist = 0.0f;
+            float emb_dist = 0.0f;
+            for (int d = 0; d < data_dim; d++)
+                orig_dist += (data[i * data_dim + d] - data[j * data_dim + d])
+                           * (data[i * data_dim + d] - data[j * data_dim + d]);
+            for (int e = 0; e < embedding_dim; e++)
+                emb_dist += (result->embedding[i * embedding_dim + e]
+                           - result->embedding[j * embedding_dim + e])
+                          * (result->embedding[i * embedding_dim + e]
+                           - result->embedding[j * embedding_dim + e]);
+            orig_dist = sqrtf(orig_dist + 1e-10f);
+            emb_dist = sqrtf(emb_dist + 1e-10f);
+            float rel_err = fabsf(orig_dist - emb_dist) / (orig_dist + 1e-10f);
+            err += rel_err;
         }
         result->local_errors[i] = err;
         *result->stress += err;

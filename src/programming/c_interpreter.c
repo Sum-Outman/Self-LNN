@@ -393,7 +393,7 @@ static int _ci_match(CiInterpreter* ci, char c) {
     return 0;
 }
 static float _ci_statement(CiInterpreter* ci);
-static float _ci_parse_block(CiInterpreter* ci);
+static int _ci_parse_block(CiInterpreter* ci);
 static float _ci_if_statement(CiInterpreter* ci);
 static float _ci_for_loop(CiInterpreter* ci);
 static float _ci_while_loop(CiInterpreter* ci);
@@ -442,25 +442,30 @@ static float _ci_if_statement(CiInterpreter* ci) {
 
 static float _ci_for_loop(CiInterpreter* ci) {
     if (!_ci_expect(ci, '(')) return 0.0f;
-    /* N-009修复: 完整for循环解析 init;cond;inc */
     _ci_statement(ci);
     _ci_expect(ci, ';');
     float result = 0.0f;
+    /* PF-007修复: for循环位置恢复逻辑重整
+     * saved_pos = 条件位置（';'之后、条件表达式之前）
+     * inc_pos = 增量表达式后的位置（循环体之前）
+     */
+    int cond_pos = ci->pos;
     float cond = _ci_expr(ci);
     _ci_expect(ci, ';');
     if (cond > 0.01f || cond < -0.01f) {
-        /* 保存增量表达式位置 */
-        int saved_pos = ci->pos;
-        _ci_expr(ci);
         int inc_pos = ci->pos;
-        ci->pos = saved_pos;
+        _ci_expr(ci);  /* 解析增量表达式，ci->pos前进到')'或循环体 */
+        int body_start = ci->pos;
+        ci->pos = inc_pos;  /* 回到增量表达式位置 */
         while (cond > 0.01f || cond < -0.01f) {
+            /* 执行循环体 */
+            ci->pos = body_start;
             result = _ci_parse_block(ci);
+            /* 执行增量表达式 */
             ci->pos = inc_pos;
             _ci_expr(ci);
-            ci->pos = inc_pos;
             /* 重新求值条件 */
-            ci->pos = saved_pos;
+            ci->pos = cond_pos;
             cond = _ci_expr(ci);
         }
     }

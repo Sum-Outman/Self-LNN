@@ -659,7 +659,14 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
             }
         }
 
-        (void)cmaes_optimize(state, func, user_data);
+        /* R6-007修复: 使用cmaes_optimize返回值，而非(void)丢弃 */
+        int cma_result = cmaes_optimize(state, func, user_data);
+        if (cma_result != 0) {
+            /* CMA-ES优化步失败，记录但继续（可能因停滞/收敛） */
+            if (state->termination_reason == CMAES_TERM_TOLFUN) {
+                break; /* 收敛终止 */
+            }
+        }
 
         if (state->best_fitness < global_best_fitness) {
             global_best_fitness = state->best_fitness;

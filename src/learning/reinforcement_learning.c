@@ -934,18 +934,27 @@ static float rl_ppo_get_action_probs(RLAgent* agent, const float* state, int sta
     }
     else
     {
+        /* ZSF-041修复: 连续动作空间正确采样+对数概率计算 */
         int dim = output_size / 2;
+        float total_log_prob = 0.0f;
         for (int i = 0; i < dim; i++)
         {
             float mean = raw[i];
             float log_std = RL_CLAMP(raw[i + dim], -5.0f, 2.0f);
             float std = expf(log_std);
-            probs_out[i] = mean + rl_randn(0.0f, 1.0f) * std;
-            probs_out[i] = RL_CLAMP(probs_out[i], agent->config.action_low[i], agent->config.action_high[i]);
-            *selected_action = dim;
+            /* Box-Muller变换生成标准正态噪声 */
+            float u1 = rl_randf() + 1e-7f;
+            float u2 = rl_randf();
+            float noise = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
+            float action = mean + noise * std;
+            probs_out[i] = RL_CLAMP(action, agent->config.action_low[i], agent->config.action_high[i]);
+            /* 高斯对数概率: -0.5*(log(2πσ²) + (a-μ)²/σ²) */
+            total_log_prob += -0.5f * (1.8378770664f + 2.0f * log_std
+                                    + (action - mean) * (action - mean) / (std * std + 1e-7f));
         }
+        *selected_action = 0; /* 连续动作无离散索引 */
         safe_free((void**)&raw);
-        return 0.0f;
+        return total_log_prob;
     }
 }
 

@@ -160,8 +160,8 @@ var HardwareScanUtil = {
         /* 第二步：浏览器端检测作为补充 */
         try {
             if (navigator.hardwareConcurrency) {
-                // 浏览器硬件并发API作为后备，但仅当后端未返回数据时使用
-                if (result.cpu.cores === '未连接') result.cpu.cores = navigator.hardwareConcurrency;
+                /* ZS-009修复: 数值比较而非字符串比较，cpu.cores初始值为-1（数值） */
+                if (result.cpu.cores <= 0) result.cpu.cores = navigator.hardwareConcurrency;
             }
             if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
                 var browserDevices = await navigator.mediaDevices.enumerateDevices();

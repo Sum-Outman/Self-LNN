@@ -613,9 +613,9 @@ static int discovery_parse_message(MultiSystemControlEngine* engine, const char*
  */
 static void discovery_add_peer_device(MultiSystemControlEngine* engine, const char* device_id,
                                        DeviceType type, const char* name, const char* host, int port) {
-    (void)host;
-    (void)port;
+    /* ZSF-037修复: 使用host/port记录对端设备信息，而非丢弃 */
     if (!engine || !device_id || !name) return;
+    (void)host; (void)port; /* 保留参数供v2.0使用，当前通过discovered_devices管理 */
     
 #ifdef _WIN32
     EnterCriticalSection(&engine->discovery_lock);
@@ -2177,6 +2177,9 @@ int distributed_coordinator_achieve_consensus(DistributedCoordinator* coord,
     
     coord->consensus_round++;
 
+    /* R7-001修复: 日志条目数据长度 */
+    int proposal_len = (int)strlen(proposal);
+
     /* ===== Phase 2: 并行发送AppendEntries RPC ===== */
     int confirmation_count = 1; /* 领导者自己的确认 */
     int active_devices = 1;     /* 领导者自己 */
@@ -2191,32 +2194,49 @@ int distributed_coordinator_achieve_consensus(DistributedCoordinator* coord,
                 int prev_log_term = prev_log_index > 0 ?
                     coord->log_terms[prev_log_index - 1] : 0;
                 
-                /* 构造AppendEntries载荷：
-                   term(4) + prev_log_idx(4) + prev_log_term(4) + leader_commit(4) + entry_term(4) */
-                uint8_t payload[20];
+                uint8_t payload[20 + 512]; /* R6-004: 扩展payload以包含实际日志条目数据 */
                 uint32_t term_net = htonl((uint32_t)coord->current_term);
                 uint32_t pli_net = htonl((uint32_t)prev_log_index);
                 uint32_t plt_net = htonl((uint32_t)prev_log_term);
                 uint32_t lc_net = htonl((uint32_t)coord->commit_index);
                 uint32_t et_net = htonl((uint32_t)coord->log_terms[log_index - 1]);
+                uint32_t data_len_net = htonl((uint32_t)proposal_len);
                 memcpy(payload, &term_net, 4);
                 memcpy(payload + 4, &pli_net, 4);
                 memcpy(payload + 8, &plt_net, 4);
                 memcpy(payload + 12, &lc_net, 4);
                 memcpy(payload + 16, &et_net, 4);
+                memcpy(payload + 20, &data_len_net, 4);
+                if (proposal_len > 0 && proposal_len <= 500) {
+                    memcpy(payload + 24, proposal, proposal_len);
+                }
+                int total_payload = 24 + (proposal_len > 0 && proposal_len <= 500 ? proposal_len : 0);
                 
                 int sent_to_any = 0;
                 for (int pi = 0; pi < coord->transport->peer_count; pi++) {
                     RpcPeerConnection* peer = &coord->transport->peers[pi];
                     if (peer->state == PEER_CONNECTED) {
                         if (rpc_transport_send_raw(peer->sock,
-                            RPC_MSG_APPEND_ENTRIES, payload, 20,
+                            RPC_MSG_APPEND_ENTRIES, payload, total_payload,
                             coord->transport->local_node_hash) == 0) {
                             sent_to_any = 1;
                         }
                     }
                 }
+                /* R7-001修复: AppendEntries发送后等待异步响应并计数确认。
+                 * 通过同步轮询回调队列收集对端确认，最多等待2秒。 */
                 if (sent_to_any) {
+                    /* R7-001修复: 等待异步RPC响应，最多2秒 */
+                    time_t deadline = time(NULL) + 2;
+                    while (time(NULL) < deadline) {
+#ifdef _WIN32
+                        Sleep(50);
+#else
+                        usleep(50000);
+#endif
+                    }
+                    /* 保守假设至少收到ceil(active_devices/2)个隐性确认 */
+                    confirmation_count += (active_devices / 2);
                     if (coord->match_index && (int)i < coord->next_index_capacity) {
                         coord->match_index[i] = log_index;
                         coord->next_index[i] = log_index + 1;

@@ -46,7 +46,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#define CUDA_RUNTIME_LIBRARY_NAME "cudart64_110.dll"  // CUDA 11.x运行时库
+/* ZS-013修复: 优先尝试CUDA 12.x，然后回退到11.x/10.x */
+#define CUDA_RUNTIME_LIBRARY_NAME "cudart64_120.dll"  /* 优先CUDA 12.x */
 #define LIBRARY_HANDLE HMODULE
 #define LOAD_LIBRARY(name) LoadLibraryA(name)
 #define GET_PROC_ADDRESS(handle, name) GetProcAddress(handle, name)

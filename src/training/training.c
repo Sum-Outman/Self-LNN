@@ -2176,14 +2176,35 @@ static void ring_allreduce_task(void* arg) {
         int expected_gen = *task->barrier_generation;
         int old_count = *task->barrier_counter;
         int new_count = old_count + 1;
-        while (*task->barrier_counter != new_count) {
-            /* 忙等待自旋 */
+        int counter_spins = 0;
+        while (*task->barrier_counter != new_count && counter_spins < 300000) {
+            counter_spins++;
+#ifdef _WIN32
+            if (counter_spins % 10000 == 0) Sleep(0);
+#else
+            if (counter_spins % 10000 == 0) sched_yield();
+#endif
         }
         if (new_count >= N) {
             *task->barrier_counter = 0;
             *task->barrier_generation = expected_gen + 1;
         } else {
-            while (*task->barrier_generation == expected_gen) { /* 等待 */ }
+            /* R7-003修复: 自旋等待加超时(30秒)，防止节点崩溃导致死锁 */
+            int spin_count = 0;
+            while (*task->barrier_generation == expected_gen && spin_count < 300000) {
+                spin_count++;
+#ifdef _WIN32
+                if (spin_count % 10000 == 0) Sleep(0); /* yield */
+#else
+                if (spin_count % 10000 == 0) sched_yield();
+#endif
+            }
+            if (spin_count >= 300000) {
+                /* 超时: 标记barrier失败，恢复计数器继续 */
+                *task->barrier_generation = expected_gen + 1;
+                *task->barrier_counter = 0;
+                return -1; /* barrier超时 */
+            }
         }
 
         /* 从 (rank - 1 + N) % N 接收块 */
@@ -2199,12 +2220,34 @@ static void ring_allreduce_task(void* arg) {
         expected_gen = *task->barrier_generation;
         old_count = *task->barrier_counter;
         new_count = old_count + 1;
-        while (*task->barrier_counter != new_count) { }
+        counter_spins = 0;
+        while (*task->barrier_counter != new_count && counter_spins < 300000) {
+            counter_spins++;
+#ifdef _WIN32
+            if (counter_spins % 10000 == 0) Sleep(0);
+#else
+            if (counter_spins % 10000 == 0) sched_yield();
+#endif
+        }
         if (new_count >= N) {
             *task->barrier_counter = 0;
             *task->barrier_generation = expected_gen + 1;
         } else {
-            while (*task->barrier_generation == expected_gen) { }
+            /* R7-003修复: 第二次barrier超时保护 */
+            int spin_count = 0;
+            while (*task->barrier_generation == expected_gen && spin_count < 300000) {
+                spin_count++;
+#ifdef _WIN32
+                if (spin_count % 10000 == 0) Sleep(0);
+#else
+                if (spin_count % 10000 == 0) sched_yield();
+#endif
+            }
+            if (spin_count >= 300000) {
+                *task->barrier_generation = expected_gen + 1;
+                *task->barrier_counter = 0;
+                return -1;
+            }
         }
     }
 
@@ -2221,12 +2264,33 @@ static void ring_allreduce_task(void* arg) {
         int expected_gen = *task->barrier_generation;
         int old_count = *task->barrier_counter;
         int new_count = old_count + 1;
-        while (*task->barrier_counter != new_count) { }
+        int counter_spins = 0;
+        while (*task->barrier_counter != new_count && counter_spins < 300000) {
+            counter_spins++;
+#ifdef _WIN32
+            if (counter_spins % 10000 == 0) Sleep(0);
+#else
+            if (counter_spins % 10000 == 0) sched_yield();
+#endif
+        }
         if (new_count >= N) {
             *task->barrier_counter = 0;
             *task->barrier_generation = expected_gen + 1;
         } else {
-            while (*task->barrier_generation == expected_gen) { }
+            int spin_count_b = 0;
+            while (*task->barrier_generation == expected_gen && spin_count_b < 300000) {
+                spin_count_b++;
+#ifdef _WIN32
+                if (spin_count_b % 10000 == 0) Sleep(0);
+#else
+                if (spin_count_b % 10000 == 0) sched_yield();
+#endif
+            }
+            if (spin_count_b >= 300000) {
+                *task->barrier_generation = expected_gen + 1;
+                *task->barrier_counter = 0;
+                return -1;
+            }
         }
 
         /* 接收块: chunks[(rank - step) % N] */
@@ -2237,12 +2301,33 @@ static void ring_allreduce_task(void* arg) {
         expected_gen = *task->barrier_generation;
         old_count = *task->barrier_counter;
         new_count = old_count + 1;
-        while (*task->barrier_counter != new_count) { }
+        counter_spins = 0;
+        while (*task->barrier_counter != new_count && counter_spins < 300000) {
+            counter_spins++;
+#ifdef _WIN32
+            if (counter_spins % 10000 == 0) Sleep(0);
+#else
+            if (counter_spins % 10000 == 0) sched_yield();
+#endif
+        }
         if (new_count >= N) {
             *task->barrier_counter = 0;
             *task->barrier_generation = expected_gen + 1;
         } else {
-            while (*task->barrier_generation == expected_gen) { }
+            int spin_count_c = 0;
+            while (*task->barrier_generation == expected_gen && spin_count_c < 300000) {
+                spin_count_c++;
+#ifdef _WIN32
+                if (spin_count_c % 10000 == 0) Sleep(0);
+#else
+                if (spin_count_c % 10000 == 0) sched_yield();
+#endif
+            }
+            if (spin_count_c >= 300000) {
+                *task->barrier_generation = expected_gen + 1;
+                *task->barrier_counter = 0;
+                return -1;
+            }
         }
     }
 

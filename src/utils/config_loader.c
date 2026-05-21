@@ -7,6 +7,8 @@
 #include "selflnn/utils/json_parser.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/core/port_config.h"
+#include "selflnn/backend/backend.h" /* SELFLNN_DEFAULT_PORT 别名 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -107,9 +109,15 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
     fprintf(fp, "  \"max_concurrent_tasks\": %d,\n", config->max_concurrent_tasks);
     fprintf(fp, "  \"power_mode\": \"%s\",\n", pm);
     fprintf(fp, "  \"gpu_backend\": \"%s\",\n", gb);
-    fprintf(fp, "  \"http_port\": 8080,\n");
-    fprintf(fp, "  \"websocket_port\": 9090,\n");
-    fprintf(fp, "  \"distributed_port\": 8765\n");
+    /* ZSF-038修复: 端口号从port_config.h读取，而非硬编码。添加模型路径字段。 */
+    fprintf(fp, "  \"http_port\": %d,\n", SELFLNN_DEFAULT_PORT);
+    fprintf(fp, "  \"websocket_port\": %d,\n", SELFLNN_WEBSOCKET_PORT);
+    fprintf(fp, "  \"distributed_port\": 8765,\n");
+    if (config->model_path && config->model_path[0]) {
+        fprintf(fp, "  \"model_path\": \"%s\"\n", config->model_path);
+    } else {
+        fprintf(fp, "  \"model_path\": \"\"\n");
+    }
     fprintf(fp, "}\n");
 
     fclose(fp);

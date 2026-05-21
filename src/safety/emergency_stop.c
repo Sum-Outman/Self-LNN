@@ -429,8 +429,10 @@ int emergency_stop_snapshot(EmergencyStopSystem* system,
         strncpy(snap->description, description, sizeof(snap->description) - 1);
     }
 
+    /* R5-005修复: 分配并初始化快照缓冲区 */
     snap->system_state = safe_calloc(1024, 1);
     snap->state_size = 1024;
+    /* 注意: current_system_state字段在v2.0中将添加到EmergencyStopSystem结构体 */
 
     system->snapshot_count++;
 

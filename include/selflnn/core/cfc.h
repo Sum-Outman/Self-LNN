@@ -17,7 +17,7 @@ extern "C" {
  * 架构层级：
  *   CfCCell（单元级）→ cfc_cell.h / cfc_cell.c   — 单个CfC细胞的前向/反向/ODE求解
  *   CfCNetwork（网络级）→ cfc_network.h / cfc_network.c — 多层CfC单元组成的网络
- *   cfc.h / cfc.c（统一入口）                           — 对外暴露网络级API
+ *   cfc.h（统一入口）                                    — 对外暴露网络级API
  *
  * 本文件作为统一入口，同时引入细胞级和网络级API。
  * 所有外部模块应该包含 cfc.h 获取完整CfC能力。

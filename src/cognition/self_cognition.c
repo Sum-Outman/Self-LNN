@@ -3125,49 +3125,59 @@ ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, c
     size_t solutions = 0;
     char causes_buffer[1024] = {0};
     char solutions_buffer[1024] = {0};
+    size_t causes_remaining = sizeof(causes_buffer) - 1;
+    size_t solutions_remaining = sizeof(solutions_buffer) - 1;
+    
+    /* R7-004修复: 使用安全追加替代65+次strcat，防止缓冲区溢出 */
+#define SAFE_APPEND(buf, remaining, fmt, ...) do { \
+    if (remaining > 0) { \
+        int _w = snprintf(buf + strlen(buf), remaining, fmt, ##__VA_ARGS__); \
+        if (_w > 0 && (size_t)_w < remaining) remaining -= (size_t)_w; \
+        else remaining = 0; \
+    } \
+} while(0)
     
     // 通用分析：所有错误类型都可能涉及的基本原因
     if (severity >= ERROR_SEVERITY_HIGH) {
-        // 高严重度错误通常涉及系统级问题
-        strcat(causes_buffer, "1. 系统资源不足或配置错误\n");
+        SAFE_APPEND(causes_buffer, causes_remaining, "1. 系统资源不足或配置错误\n");
         root_causes++;
         
-        strcat(solutions_buffer, "1. 检查系统资源使用情况并优化配置\n");
+        SAFE_APPEND(solutions_buffer, solutions_remaining, "1. 检查系统资源使用情况并优化配置\n");
         solutions++;
     }
     
     // LNN相关错误的深度诊断
     if (lnn_related_error) {
-        strcat(causes_buffer, "2. 液态神经网络状态异常或参数不稳定\n");
+        SAFE_APPEND(causes_buffer, causes_remaining, "2. 液态神经网络状态异常或参数不稳定\n");
         root_causes++;
         
-        strcat(solutions_buffer, "2. 检查LNN参数、梯度状态和收敛情况\n");
-        strcat(solutions_buffer, "3. 调整学习率、时间常数或正则化参数\n");
+        SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 检查LNN参数、梯度状态和收敛情况\n");
+        SAFE_APPEND(solutions_buffer, solutions_remaining, "3. 调整学习率、时间常数或正则化参数\n");
         solutions += 2;
         
         // 基于LNN具体状态的诊断
         if (lnn_gradient_norm > 10.0f) {
-            strcat(causes_buffer, "3. 梯度爆炸问题\n");
-            strcat(solutions_buffer, "4. 应用梯度裁剪或降低学习率\n");
+            SAFE_APPEND(causes_buffer, causes_remaining, "3. 梯度爆炸问题\n");
+            SAFE_APPEND(solutions_buffer, solutions_remaining, "4. 应用梯度裁剪或降低学习率\n");
             root_causes++;
             solutions++;
         } else if (lnn_gradient_norm < 0.001f) {
-            strcat(causes_buffer, "3. 梯度消失问题\n");
-            strcat(solutions_buffer, "4. 使用梯度激活函数或调整网络深度\n");
+            SAFE_APPEND(causes_buffer, causes_remaining, "3. 梯度消失问题\n");
+            SAFE_APPEND(solutions_buffer, solutions_remaining, "4. 使用梯度激活函数或调整网络深度\n");
             root_causes++;
             solutions++;
         }
         
         if (lnn_memory_usage > 0.8f) {
-            strcat(causes_buffer, "4. LNN内存使用过高，可能导致内存溢出\n");
-            strcat(solutions_buffer, "5. 减少批量大小或优化内存分配策略\n");
+            SAFE_APPEND(causes_buffer, causes_remaining, "4. LNN内存使用过高，可能导致内存溢出\n");
+            SAFE_APPEND(solutions_buffer, solutions_remaining, "5. 减少批量大小或优化内存分配策略\n");
             root_causes++;
             solutions++;
         }
         
         if (lnn_performance < 0.3f) {
-            strcat(causes_buffer, "5. LNN性能低下，可能影响系统稳定性\n");
-            strcat(solutions_buffer, "6. 检查训练数据质量或调整网络架构\n");
+            SAFE_APPEND(causes_buffer, causes_remaining, "5. LNN性能低下，可能影响系统稳定性\n");
+            SAFE_APPEND(solutions_buffer, solutions_remaining, "6. 检查训练数据质量或调整网络架构\n");
             root_causes++;
             solutions++;
         }
@@ -3175,70 +3185,70 @@ ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, c
         // 类别特定的分析和解决方案（非LNN相关）
         switch (category) {
             case CATEGORY_MEMORY:
-                strcat(causes_buffer, "2. 内存分配失败或内存泄漏\n");
-                strcat(causes_buffer, "3. 内存访问越界或空指针解引用\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "2. 内存分配失败或内存泄漏\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "3. 内存访问越界或空指针解引用\n");
                 root_causes += 2;
                 
-                strcat(solutions_buffer, "2. 检查内存分配大小和释放逻辑\n");
-                strcat(solutions_buffer, "3. 添加内存边界检查和空指针验证\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 检查内存分配大小和释放逻辑\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "3. 添加内存边界检查和空指针验证\n");
                 solutions += 2;
                 break;
                 
             case CATEGORY_COMPUTATION:
-                strcat(causes_buffer, "2. 数值计算溢出或除零错误\n");
-                strcat(causes_buffer, "3. 浮点数精度损失或不稳定算法\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "2. 数值计算溢出或除零错误\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "3. 浮点数精度损失或不稳定算法\n");
                 root_causes += 2;
                 
-                strcat(solutions_buffer, "2. 添加数值范围检查和异常处理\n");
-                strcat(solutions_buffer, "3. 使用数值稳定的算法或增加精度\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 添加数值范围检查和异常处理\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "3. 使用数值稳定的算法或增加精度\n");
                 solutions += 2;
                 break;
                 
             case CATEGORY_NETWORK:
-                strcat(causes_buffer, "2. 网络连接超时或中断\n");
-                strcat(causes_buffer, "3. 数据传输错误或协议不一致\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "2. 网络连接超时或中断\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "3. 数据传输错误或协议不一致\n");
                 root_causes += 2;
                 
-                strcat(solutions_buffer, "2. 增加网络重试机制和超时设置\n");
-                strcat(solutions_buffer, "3. 验证数据完整性和协议兼容性\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 增加网络重试机制和超时设置\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "3. 验证数据完整性和协议兼容性\n");
                 solutions += 2;
                 break;
                 
             case CATEGORY_SYSTEM:
-                strcat(causes_buffer, "2. 系统调用失败或权限不足\n");
-                strcat(causes_buffer, "3. 硬件故障或驱动程序问题\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "2. 系统调用失败或权限不足\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "3. 硬件故障或驱动程序问题\n");
                 root_causes += 2;
                 
-                strcat(solutions_buffer, "2. 检查系统权限和依赖库版本\n");
-                strcat(solutions_buffer, "3. 验证硬件状态和驱动程序更新\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 检查系统权限和依赖库版本\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "3. 验证硬件状态和驱动程序更新\n");
                 solutions += 2;
                 break;
                 
             case CATEGORY_LOGIC:
-                strcat(causes_buffer, "2. 程序逻辑错误或条件判断不充分\n");
-                strcat(causes_buffer, "3. 状态机不一致或并发竞争条件\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "2. 程序逻辑错误或条件判断不充分\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "3. 状态机不一致或并发竞争条件\n");
                 root_causes += 2;
                 
-                strcat(solutions_buffer, "2. 增加单元测试和逻辑验证\n");
-                strcat(solutions_buffer, "3. 使用锁或原子操作避免竞争条件\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 增加单元测试和逻辑验证\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "3. 使用锁或原子操作避免竞争条件\n");
                 solutions += 2;
                 break;
                 
             case CATEGORY_PERFORMANCE:
-                strcat(causes_buffer, "2. 算法时间复杂度过高\n");
-                strcat(causes_buffer, "3. 资源使用效率低下或缓存未命中\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "2. 算法时间复杂度过高\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "3. 资源使用效率低下或缓存未命中\n");
                 root_causes += 2;
                 
-                strcat(solutions_buffer, "2. 优化算法或使用更高效的数据结构\n");
-                strcat(solutions_buffer, "3. 添加缓存机制和资源池\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 优化算法或使用更高效的数据结构\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "3. 添加缓存机制和资源池\n");
                 solutions += 2;
                 break;
                 
             case CATEGORY_UNKNOWN:
-                strcat(causes_buffer, "2. 错误类型未知，需要进一步诊断\n");
+                SAFE_APPEND(causes_buffer, causes_remaining, "2. 错误类型未知，需要进一步诊断\n");
                 root_causes += 1;
                 
-                strcat(solutions_buffer, "2. 增加详细日志记录和错误追踪\n");
+                SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 增加详细日志记录和错误追踪\n");
                 solutions += 1;
                 break;
         }

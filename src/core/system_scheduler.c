@@ -28,7 +28,9 @@ struct SystemScheduler {
 
 static uint64_t get_current_time_ms(void) {
 #ifdef _WIN32
-    return (uint64_t)clock() * 1000 / CLOCKS_PER_SEC;
+    /* ZSF-035修复: clock()返回CPU时间而非挂钟时间，在空闲等待时不递增。
+     * 使用GetTickCount64()获取精确挂钟时间，Windows XP+可用。 */
+    return (uint64_t)GetTickCount64();
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

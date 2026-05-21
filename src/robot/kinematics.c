@@ -93,14 +93,6 @@ void vec3_transform_quat(Vec3* out, const Vec3* v, const float* q) {
     out->z = v->x * (xz - wy) + v->y * (yz + wx) + v->z * (1.0f - (xx + yy));
 }
 
-/* quat operations moved to math_utils.h */
-
-/* quat operations moved to math_utils.h */
-
-/* quat operations moved to math_utils.h */
-
-/* quat operations moved to math_utils.h */
-
 static void mat3_mul_vec3(Vec3* out, const float* mat, const Vec3* v) {
     out->x = mat[0]*v->x + mat[1]*v->y + mat[2]*v->z;
     out->y = mat[3]*v->x + mat[4]*v->y + mat[5]*v->z;
@@ -475,13 +467,35 @@ int collision_detect(const CollisionShape* shapes, int shape_count,
 
 int collision_detect_robot_self(const KinematicModel* model, const float* joint_angles,
                                  CollisionResult* result) {
-    (void)joint_angles;
+    /* ZS-005修复: 使用joint_angles和正运动学计算各链节当前世界位姿 */
     if (!model || !result) return -1;
     CollisionShape shapes[KINEMATICS_MAX_LINKS];
     int shape_count = 0;
+
+    /* 首先计算所有链节的正运动学位姿 */
+    Vec3 link_positions[KINEMATICS_MAX_LINKS];
+    float link_orientations[KINEMATICS_MAX_LINKS * 4];
+    int use_transformed = 0;
+    if (joint_angles) {
+        if (forward_kinematics_full(model, joint_angles,
+                                     link_positions, link_orientations) == 0) {
+            use_transformed = 1;
+        }
+    }
+
     for (int i = 0; i < model->joint_count && shape_count < KINEMATICS_MAX_LINKS; i++) {
         if (model->joints[i].has_collision) {
-            shapes[shape_count++] = model->joints[i].collision_shape;
+            shapes[shape_count] = model->joints[i].collision_shape;
+            if (use_transformed) {
+                shapes[shape_count].local_transform[0] = link_positions[i].x;
+                shapes[shape_count].local_transform[1] = link_positions[i].y;
+                shapes[shape_count].local_transform[2] = link_positions[i].z;
+                shapes[shape_count].local_transform[3] = link_orientations[i * 4 + 0];
+                shapes[shape_count].local_transform[4] = link_orientations[i * 4 + 1];
+                shapes[shape_count].local_transform[5] = link_orientations[i * 4 + 2];
+                shapes[shape_count].local_transform[6] = link_orientations[i * 4 + 3];
+            }
+            shape_count++;
         }
     }
     return collision_detect(shapes, shape_count, result, NULL, NULL);

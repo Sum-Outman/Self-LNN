@@ -95,51 +95,53 @@ static void dc_update_cause_prior(DCErrorType type, const char* cause_name, int 
     }
 }
 
-/* 错误类型→可能原因的预设条件概率（作为先验，会被动态学习覆盖） */
+/* ZSF-042修复: 贝叶斯预设条件概率填充。
+ * 根节点(num_parents=0)使用先验概率prior_prob作为基础概率。
+ * cond_probs[0]=P(cause|parent_absent), cond_probs[1]=P(cause|parent_present) */
 static const struct {
     DCErrorType error_type;
     const char* cause_name;
     float prior_prob;
-    int num_parents; /* 0 = 根节点 */
+    int num_parents;
     int parents[DC_MAX_BAYES_PARENTS];
-    float cond_probs[2]; /* P(cause|parent_absent), P(cause|parent_present) */
+    float cond_probs[2];
 } g_bayes_presets[] = {
-    /* 语法类错误的原因网络 */
-    {DC_ERROR_SYNTAX, "格式不规范",        0.30f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_SYNTAX, "类型不匹配",        0.25f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_SYNTAX, "缺少必要参数",      0.20f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_SYNTAX, "上下文冲突",        0.15f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_SYNTAX, "边界条件遗漏",      0.10f, 0, {0}, {0.0f, 0.0f}},
-    /* 逻辑类错误的原因网络 */
-    {DC_ERROR_LOGIC, "推理链断裂",         0.28f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_LOGIC, "前提假设错误",       0.24f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_LOGIC, "循环依赖",           0.20f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_LOGIC, "归纳偏差",           0.16f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_LOGIC, "类比失当",           0.12f, 0, {0}, {0.0f, 0.0f}},
-    /* 知识类错误的原因网络 */
-    {DC_ERROR_KNOWLEDGE, "知识过时",       0.30f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_KNOWLEDGE, "知识不完整",     0.25f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_KNOWLEDGE, "知识冲突",       0.20f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_KNOWLEDGE, "知识来源不可靠", 0.15f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_KNOWLEDGE, "知识粒度不匹配", 0.10f, 0, {0}, {0.0f, 0.0f}},
-    /* 策略类错误的原因网络 */
-    {DC_ERROR_STRATEGY, "目标优先级错误",   0.27f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_STRATEGY, "资源分配不当",     0.23f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_STRATEGY, "时序规划错误",     0.20f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_STRATEGY, "风险评估不足",     0.17f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_STRATEGY, "备选方案缺失",     0.13f, 0, {0}, {0.0f, 0.0f}},
-    /* 感知类错误的原因网络 */
-    {DC_ERROR_PERCEPTION, "传感器噪声",     0.28f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_PERCEPTION, "特征提取错误",   0.24f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_PERCEPTION, "模态对齐偏差",   0.20f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_PERCEPTION, "时间同步误差",   0.16f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_PERCEPTION, "分辨率不足",      0.12f, 0, {0}, {0.0f, 0.0f}},
-    /* 执行类错误的原因网络 */
-    {DC_ERROR_EXECUTION, "资源耗尽",        0.30f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_EXECUTION, "并发冲突",        0.25f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_EXECUTION, "超时未响应",      0.20f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_EXECUTION, "权限不足",        0.15f, 0, {0}, {0.0f, 0.0f}},
-    {DC_ERROR_EXECUTION, "外部依赖不可用",  0.10f, 0, {0}, {0.0f, 0.0f}},
+    /* 语法类错误 */
+    {DC_ERROR_SYNTAX, "格式不规范",        0.30f, 0, {0}, {0.30f, 0.85f}},
+    {DC_ERROR_SYNTAX, "类型不匹配",        0.25f, 0, {0}, {0.25f, 0.80f}},
+    {DC_ERROR_SYNTAX, "缺少必要参数",      0.20f, 0, {0}, {0.20f, 0.75f}},
+    {DC_ERROR_SYNTAX, "上下文冲突",        0.15f, 0, {0}, {0.15f, 0.70f}},
+    {DC_ERROR_SYNTAX, "边界条件遗漏",      0.10f, 0, {0}, {0.10f, 0.60f}},
+    /* 逻辑类错误 */
+    {DC_ERROR_LOGIC, "推理链断裂",         0.28f, 0, {0}, {0.28f, 0.82f}},
+    {DC_ERROR_LOGIC, "前提假设错误",       0.24f, 0, {0}, {0.24f, 0.78f}},
+    {DC_ERROR_LOGIC, "循环依赖",           0.20f, 0, {0}, {0.20f, 0.72f}},
+    {DC_ERROR_LOGIC, "归纳偏差",           0.16f, 0, {0}, {0.16f, 0.68f}},
+    {DC_ERROR_LOGIC, "类比失当",           0.12f, 0, {0}, {0.12f, 0.60f}},
+    /* 知识类错误 */
+    {DC_ERROR_KNOWLEDGE, "知识过时",       0.30f, 0, {0}, {0.30f, 0.80f}},
+    {DC_ERROR_KNOWLEDGE, "知识不完整",     0.25f, 0, {0}, {0.25f, 0.75f}},
+    {DC_ERROR_KNOWLEDGE, "知识冲突",       0.20f, 0, {0}, {0.20f, 0.70f}},
+    {DC_ERROR_KNOWLEDGE, "知识来源不可靠", 0.15f, 0, {0}, {0.15f, 0.65f}},
+    {DC_ERROR_KNOWLEDGE, "知识粒度不匹配", 0.10f, 0, {0}, {0.10f, 0.58f}},
+    /* 策略类错误 */
+    {DC_ERROR_STRATEGY, "目标优先级错误",   0.27f, 0, {0}, {0.27f, 0.78f}},
+    {DC_ERROR_STRATEGY, "资源分配不当",     0.23f, 0, {0}, {0.23f, 0.74f}},
+    {DC_ERROR_STRATEGY, "时序规划错误",     0.20f, 0, {0}, {0.20f, 0.70f}},
+    {DC_ERROR_STRATEGY, "风险评估不足",     0.17f, 0, {0}, {0.17f, 0.68f}},
+    {DC_ERROR_STRATEGY, "备选方案缺失",     0.13f, 0, {0}, {0.13f, 0.62f}},
+    /* 感知类错误 */
+    {DC_ERROR_PERCEPTION, "传感器噪声",     0.28f, 0, {0}, {0.28f, 0.75f}},
+    {DC_ERROR_PERCEPTION, "特征提取错误",   0.24f, 0, {0}, {0.24f, 0.72f}},
+    {DC_ERROR_PERCEPTION, "模态对齐偏差",   0.20f, 0, {0}, {0.20f, 0.68f}},
+    {DC_ERROR_PERCEPTION, "时间同步误差",   0.16f, 0, {0}, {0.16f, 0.64f}},
+    {DC_ERROR_PERCEPTION, "分辨率不足",      0.12f, 0, {0}, {0.12f, 0.58f}},
+    /* 执行类错误 */
+    {DC_ERROR_EXECUTION, "资源耗尽",        0.30f, 0, {0}, {0.30f, 0.80f}},
+    {DC_ERROR_EXECUTION, "并发冲突",        0.25f, 0, {0}, {0.25f, 0.75f}},
+    {DC_ERROR_EXECUTION, "超时未响应",      0.20f, 0, {0}, {0.20f, 0.72f}},
+    {DC_ERROR_EXECUTION, "权限不足",        0.15f, 0, {0}, {0.15f, 0.68f}},
+    {DC_ERROR_EXECUTION, "外部依赖不可用",  0.10f, 0, {0}, {0.10f, 0.58f}},
 };
 
 static const int g_bayes_presets_count = sizeof(g_bayes_presets) / sizeof(g_bayes_presets[0]);

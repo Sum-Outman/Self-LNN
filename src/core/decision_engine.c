@@ -1210,12 +1210,13 @@ static float compute_overall_utility(const DecisionEngine* engine,
         return 0.0f;
     }
     
+    /* ZSF-033修复: objective_values已通过compute_single_utility(L543)进行了
+     * 非线性效用变换，此处仅做加权求和，不再重复调用compute_single_utility。
+     * 原代码在此处再次调用导致效用函数被应用两次（双重变换）。 */
     float total_utility = 0.0f;
     
     for (size_t i = 0; i < engine->num_objectives && i < alternative->num_objectives; i++) {
-        float single_utility = compute_single_utility(&engine->objectives[i], 
-                                                     alternative->objective_values[i]);
-        total_utility += engine->objectives[i].weight * single_utility;
+        total_utility += engine->objectives[i].weight * alternative->objective_values[i];
     }
     
     return total_utility;

@@ -40,6 +40,8 @@
 #include "selflnn/cognition/deep_correction.h"
 #include "selflnn/multimodal/dialogue.h"
 #include "selflnn/multimodal/deep_vision.h"
+#include "selflnn/evolution/evolution_engine.h"
+#include "selflnn/programming/self_programming.h"
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/multisystem/multisystem_control.h"
 #include "selflnn/agi/capability_switch.h"
@@ -2678,11 +2680,39 @@ int agi_system_self_evolve(AGISystem* system, float* new_parameters, int* param_
     int count = system->state_vector_dim;
     *param_count = count;
 
-    int i;
-    for (i = 0; i < count; i++) {
-        /* K-006修复：使用安全随机数 */
-        float mutation = (secure_random_float() - 0.5f) * 0.1f;
-        new_parameters[i] = system->state_vector[i] + mutation;
+    /* R5-001修复: 使用真实进化引擎替代随机扰动伪装演化。
+     * 当进化引擎可用时执行真实进化步；不可用时从LNN权重中提取参数。 */
+    void* evo_engine = selflnn_get_evolution_engine();
+    int evolution_done = 0;
+    if (evo_engine) {
+        EvolutionStats estats;
+        memset(&estats, 0, sizeof(EvolutionStats));
+        if (evolution_step((EvolutionEngine*)evo_engine) == 0) {
+            evolution_get_stats((EvolutionEngine*)evo_engine, &estats);
+            /* 从进化引擎最优个体复制参数 */
+            const EvolutionIndividual* best = evolution_get_best((EvolutionEngine*)evo_engine);
+            if (best && best->chromosome && best->chromosome_size >= (size_t)count) {
+                memcpy(new_parameters, best->chromosome, (size_t)count * sizeof(float));
+                evolution_done = 1;
+            }
+        }
+    }
+    if (!evolution_done) {
+        /* 回退：从共享LNN权重复制（LNN训练后的参数视为演化结果） */
+        void* shared_lnn = selflnn_get_shared_lnn();
+        if (shared_lnn) {
+            float* weights = lnn_get_parameters((LNN*)shared_lnn);
+            size_t param_count_total = lnn_get_parameter_count((LNN*)shared_lnn);
+            size_t copy_count = (size_t)count < param_count_total ? (size_t)count : param_count_total;
+            if (weights && copy_count > 0) {
+                memcpy(new_parameters, weights, copy_count * sizeof(float));
+            } else {
+                /* 无LNN权重时复制当前状态（非随机扰动） */
+                memcpy(new_parameters, system->state_vector, (size_t)count * sizeof(float));
+            }
+        } else {
+            memcpy(new_parameters, system->state_vector, (size_t)count * sizeof(float));
+        }
     }
 
     if (system->self_cognition) {

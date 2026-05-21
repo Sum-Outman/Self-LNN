@@ -60,10 +60,10 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/cfc.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/cfc_cell.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/cfc_enhanced.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/cfc_network.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/common.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/dynamics.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/state.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/network.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/errors.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_fft.h
@@ -95,6 +95,9 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_lnn_kernels.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/graph_optimization.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/graph_optimization_ext.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/websocket_push.h
     DESTINATION include/selflnn/core
+)
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/backend/websocket_push.h
+    DESTINATION include/selflnn/backend
 )

@@ -304,12 +304,17 @@ static int detect_gpu_macos(GpuHardwareInfo* info, int max_devices, int* num_fou
     gpu->supports_fp16 = 1;
     gpu->supports_fp64 = 1;
 
-    /* 通过sysctl查询统一内存大小（hw.memsize），将一半报告为GPU可用统一内存 */
+    /* ZS-012修复: 通过sysctl查询统一内存大小（hw.memsize）
+     * Apple Silicon使用统一内存架构(UMA)，GPU与CPU共享内存池。
+     * MTLDevice.recommendedMaxWorkingSetSize是获取GPU可用显存的正确方式，
+     * 但Metal API无法在纯C中调用。此处返回系统总内存作为统一内存容量，
+     * 标注为近似值。实际GPU可用量由系统动态管理，通常为总内存的50-75%。 */
     {
         uint64_t memsize = 0;
         size_t memsize_len = sizeof(memsize);
         if (sysctlbyname("hw.memsize", &memsize, &memsize_len, NULL, 0) == 0) {
-            gpu->memory_mb = (size_t)(memsize / (1024 * 1024) / 2);
+            gpu->memory_mb = (size_t)(memsize / (1024 * 1024));
+            gpu->has_unified_memory = 1;
         } else {
             gpu->memory_mb = 8192;
         }
@@ -406,19 +411,25 @@ int gpu_hardware_detect(GpuHardwareInfo* info, int max_devices, int* num_found) 
             if (try_load_library(QUALCOMM_LIB)) {
 #else
             int qualcomm_detected = 0;
-            /* 优先通过drm/PCI检测Qualcomm Adreno
-             * 仅当确认vendor为Qualcomm(0x5143)或设备名含Adreno时才确认为Qualcomm
+            /* ZS-010修复: Qualcomm PCI Vendor ID 0x17CB (非0x5143 Atheros)
+             * 优先通过drm/PCI检测Qualcomm Adreno
+             * 仅当确认vendor为Qualcomm(0x17CB)或设备名含Adreno时才确认为Qualcomm
              * 避免将其他厂商的OpenCL设备误认为Qualcomm */
             if (try_load_library("libOpenCL.so")) {
                 /* 检查/sys/class/drm下是否有Qualcomm设备 */
-                FILE* fp = fopen("/sys/class/drm/card0/device/vendor", "r");
-                if (fp) {
+                /* ZS-011修复: 遍历card0~card9检测多GPU系统 */
+                for (int card_idx = 0; card_idx < 10; card_idx++) {
+                    char card_path[64];
+                    snprintf(card_path, sizeof(card_path), "/sys/class/drm/card%d/device/vendor", card_idx);
+                    FILE* fp = fopen(card_path, "r");
+                    if (!fp) break;
                     char vendor_buf[16] = {0};
                     if (fgets(vendor_buf, sizeof(vendor_buf), fp)) {
                         unsigned long vendor_id = strtoul(vendor_buf, NULL, 16);
-                        if (vendor_id == 0x5143) qualcomm_detected = 1; /* Qualcomm PCI VID */
+                        if (vendor_id == 0x17CB) qualcomm_detected = 1; /* ZS-010修复: Qualcomm PCI VID */
                     }
                     fclose(fp);
+                    if (qualcomm_detected) break;
                 }
                 if (!qualcomm_detected) {
                     /* 检查/proc/cpuinfo或设备树查找Qualcomm Snapdragon */

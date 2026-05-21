@@ -1225,6 +1225,26 @@ OptimizationResult* graph_optimize(ComputationGraph* graph,
         graph_memory_optimization(graph);
     }
     
+    /* PF-005修复: 将CSE、LICM和并行执行集成到主优化管线 */
+    if (strategy->enable_dead_code_elim) {
+        /* CSE: 公共子表达式消除 —— 合并语义相同的计算节点 */
+        int cse_eliminated = graph_common_subexpression_elimination(graph);
+        eliminated_nodes += cse_eliminated;
+    }
+    
+    if (strategy->enable_fusion) {
+        /* LICM: 循环不变代码外提 */
+        int licm_moved = graph_loop_invariant_code_motion(graph);
+        if (licm_moved > 0) {
+            eliminated_nodes += licm_moved; /* LICM计入eliminated_nodes */
+        }
+    }
+    
+    /* 并行执行集成 */
+    if (strategy->enable_memory_opt) {
+        graph_execute_parallel(graph); /* 结果计入graph内部 */
+    }
+    
     // 更新结果
     result->fused_nodes = fused_nodes;
     result->eliminated_nodes = folded_nodes + eliminated_nodes;

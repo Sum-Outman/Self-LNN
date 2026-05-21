@@ -1783,7 +1783,14 @@ static int gr_enum_paths_for_rule(GraphReasoner* reasoner,
     if (frame[0].neighbors && nb_init_cnt > 0) {
         for (int i = 0; i < nb_init_cnt; i++) {
             frame[0].neighbors[i] = nb_init[i];
-            frame[0].rels[i] = 0;
+            /* ZS-003修复: 从源节点出边ID中获取实际关系类型，而非硬编码为0 */
+            const ALNode* src_node = adjacency_list_get_node(
+                reasoner->adjacency_list, source_entity);
+            if (src_node && src_node->out_edge_ids && i < (int)src_node->out_degree) {
+                frame[0].rels[i] = src_node->out_edge_ids[i];
+            } else {
+                frame[0].rels[i] = i + 1;
+            }
         }
     }
 
@@ -1804,7 +1811,9 @@ static int gr_enum_paths_for_rule(GraphReasoner* reasoner,
         if (visited[next]) continue;
 
         path_entities[depth + 1] = next;
-        path_relations[depth] = 0;
+        /* ZS-003修复: 使用当前栈帧中存储的实际关系ID，而非硬编码0 */
+        path_relations[depth] = (cur->rels && cur->neighbor_idx > 0 ?
+                                 cur->rels[cur->neighbor_idx - 1] : depth + 1);
 
         if (depth + 1 >= 2) {
             RelationPath* rp = &cache->paths[cache->count];
@@ -1832,7 +1841,14 @@ static int gr_enum_paths_for_rule(GraphReasoner* reasoner,
             if (next_f->neighbors && nb_cnt > 0) {
                 for (int i = 0; i < nb_cnt; i++) {
                     next_f->neighbors[i] = nb_buf[i];
-                    next_f->rels[i] = 0;
+                    /* ZS-003修复: 从当前节点出边ID中获取实际关系类型 */
+                    const ALNode* cn = adjacency_list_get_node(
+                        reasoner->adjacency_list, next);
+                    if (cn && cn->out_edge_ids && i < (int)cn->out_degree) {
+                        next_f->rels[i] = cn->out_edge_ids[i];
+                    } else {
+                        next_f->rels[i] = i + 1;
+                    }
                 }
             }
         }

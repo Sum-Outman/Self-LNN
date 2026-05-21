@@ -189,6 +189,49 @@ static void ltm_consolidation_scan(LongTermMemory* memory) {
     memory->last_consolidation_scan_time = now;
 }
 
+/* PF-008修复: 睡眠记忆重放 —— 系统空闲时重放记忆增强巩固
+ * 模拟生物学睡眠过程中海马体→皮层的记忆重放机制：
+ * 1. 随机选取近期访问的记忆记录
+ * 2. 重放其激活模式以增强长时程增强(LTP)
+ * 3. 降低高频率记忆的重放概率(防过拟合)
+ * 4. 促进短期记忆向长期记忆的转化 */
+int long_term_memory_sleep_replay(LongTermMemory* memory, int replay_rounds) {
+    if (!memory || !memory->memory_system || memory->record_count == 0) return -1;
+    if (replay_rounds <= 0) replay_rounds = 5;
+    if (replay_rounds > 50) replay_rounds = 50;
+
+    unsigned int rng = (unsigned int)(time(NULL) ^ (uintptr_t)memory);
+    int rereinforced = 0;
+
+    for (int round = 0; round < replay_rounds; round++) {
+        for (size_t i = 0; i < memory->record_count && i < 256; i++) {
+            LTMAccessRecord* rec = &memory->access_records[i];
+            if (!rec->key || rec->base_strength < 0.01f) continue;
+
+            /* 模拟睡眠纺锤波: 高频访问的记忆以较低概率重放 */
+            float replay_prob = 0.3f;
+            if (rec->access_count > 10) replay_prob = 0.15f;
+            if (rec->access_count < 3) replay_prob = 0.5f;
+
+            rng = rng * 1103515245u + 12345u;
+            if ((float)(rng & 0x7FFF) / 32767.0f > replay_prob) continue;
+
+            /* 重放记忆: 增强基本强度 + Hebbian巩固 */
+            float boost = memory->config.consolidation_rate * 0.1f
+                        * (1.0f - rec->base_strength);
+            rec->base_strength += boost;
+            if (rec->base_strength > 1.0f) rec->base_strength = 1.0f;
+
+            /* 触发底层记忆系统巩固 */
+            if (memory->memory_system) {
+                memory_consolidate(memory->memory_system, rec->key);
+            }
+            rereinforced++;
+        }
+    }
+    return rereinforced;
+}
+
 LongTermMemory* long_term_memory_create(const LongTermMemoryConfig* config) {
     if (!config) return NULL;
     

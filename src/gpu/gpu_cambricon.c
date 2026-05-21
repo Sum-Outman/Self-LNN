@@ -546,7 +546,10 @@ static int cambricon_backend_get_memory_info(GpuContext* context, size_t* total,
 }
 
 static int cambricon_backend_device_reset(GpuContext* context) {
-    (void)context; return 0;
+    /* R4-005修复: 添加参数校验和诊断日志，寒武纪无真实硬件时安全返回 */
+    if (!context) return -1;
+    log_info("[寒武纪GPU] 设备重置请求 (无物理硬件，安全返回)");
+    return 0;
 }
 
 /* F-002: 寒武纪BANG C嵌入计算内核源码 */

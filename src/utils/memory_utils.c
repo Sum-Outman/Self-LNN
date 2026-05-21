@@ -457,10 +457,11 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
         // 初始化内存为零
         memset(ptr, 0, size);
         
-        // 递增分配序号并记录
+    /* R7-006修复: _safe_aligned_malloc加锁保护全局统计 */
+    MEM_LOCK();
+    {
         size_t current_id = ++g_allocation_counter;
         
-        // 更新统计
         g_memory_stats.total_allocated += size;
         g_memory_stats.current_usage += size;
         g_memory_stats.allocation_count++;
@@ -470,6 +471,8 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
         }
         
         alloc_track_add(ptr, size, current_id, file, line);
+    }
+    MEM_UNLOCK();
     }
     
     return ptr;

@@ -904,8 +904,10 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
                 }
                 pipeline->data_buffer = init_data;
                 pipeline->data_size = total_floats * sizeof(float);
-                pipeline->has_real_data = 1;
-                fprintf(stderr, "[训练管线] 紧急生成初始随机权重数据以启动训练\n");
+                /* ZS-001修复: 紧急PRNG数据不得标记为真实数据，保持has_real_data=0 */
+                pipeline->has_real_data = 0;
+                fprintf(stderr, "[训练管线] 警告: 无真实训练数据，紧急PRNG数据仅用于框架验证\n");
+                fprintf(stderr, "[训练管线] 请将真实训练数据放入 data/training/ 目录后重新启动\n");
             }
         }
         if (!pipeline->has_real_data) {
@@ -1131,16 +1133,10 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 lnn_backward_accumulate(pipeline->network, input, &loss);
                 pipeline->network->config.learning_rate = pipeline->config.base_lr * 1.5f;
             } else if (stage == TRAIN_STAGE_DEEP_TRAIN) {
-                /* 深度训练：增强梯度传播+更高正则化
-                 * P1-002: Dropout上限0.5，防止网络完全退化 */
+                /* R6-002修复: dropout/weight_decay在epoch级别调整而非每样本递增 */
                 lnn_forward(pipeline->network, input, output);
                 lnn_backward_accumulate(pipeline->network, target, &loss);
-                if (pipeline->network->config.dropout_rate < 0.5f)
-                    pipeline->network->config.dropout_rate += 0.001f;
-                if (pipeline->network->config.dropout_rate > 0.5f)
-                    pipeline->network->config.dropout_rate = 0.5f;
                 pipeline->network->config.learning_rate = pipeline->config.base_lr;
-                pipeline->network->config.weight_decay *= 1.0001f;
             } else if (stage == TRAIN_STAGE_MULTIMODAL) {
                 /* 多模态联合训练：跨模态对比损失 */
                 float shifted_target[256];
@@ -1150,7 +1146,13 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 lnn_forward(pipeline->network, input, output);
                 float mse_loss = compute_loss_value(output, target, output_dim, LOSS_MSE);
                 float contrast_loss = compute_loss_value(output, shifted_target, output_dim, LOSS_MSE);
-                loss = 0.7f * mse_loss + 0.3f * (1.0f / (1.0f + contrast_loss));
+                /* R6-001修复: 对比损失公式修正。
+                 * 原公式 0.3*(1/(1+contrast)) 会鼓励与负样本相似——完全反了。
+                 * 正确语义: 正样本MSE应小；负样本MSE应大（惩罚与负样本的相似性）。
+                 * 使用 max(0, margin + mse_loss - contrast_loss) 三元组损失形式。 */
+                float margin = 0.2f;
+                loss = mse_loss + 0.3f * (mse_loss - contrast_loss + margin > 0.0f ?
+                                          mse_loss - contrast_loss + margin : 0.0f);
                 lnn_backward_accumulate(pipeline->network, target, &loss);
                 pipeline->network->config.learning_rate = pipeline->config.base_lr * 0.8f;
             } else if (stage == TRAIN_STAGE_FINE_TUNE) {
@@ -2731,7 +2733,11 @@ int training_pipeline_modal_alignment(TrainingPipeline* pipeline,
         }
     }
 
-    pipeline->has_real_data = 1;
+    /* ZS-002修复: 仅在训练循环实际执行了批量训练后才标记真实数据，
+     * 而非无条件设置。epochs=0或空批时不设置。 */
+    if (epochs > 0 && image_count > 0 && text_count > 0) {
+        pipeline->has_real_data = 1;
+    }
     return 0;
 }
 

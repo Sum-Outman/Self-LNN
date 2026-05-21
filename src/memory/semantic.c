@@ -548,7 +548,16 @@ int semantic_memory_get_stats(const SemanticMemory* memory, size_t* total_concep
     }
     
     if (total_concepts) {
-        *total_concepts = total_items;
+        /* ZSF-039修复: 仅统计概念条目(不含关系条目)，而非直接使用total_items */
+        size_t concept_count = 0;
+        for (size_t i = 0; i < total_items; i++) {
+            char key_buf[256];
+            if (memory_get_key(memory->memory_system, i, key_buf, sizeof(key_buf)) == 0) {
+                /* 关系条目包含下划线分隔符，纯概念条目不含 */
+                if (!strchr(key_buf, '_')) concept_count++;
+            }
+        }
+        *total_concepts = concept_count > 0 ? concept_count : total_items;
     }
     
     if (avg_relations) {

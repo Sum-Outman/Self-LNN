@@ -144,11 +144,15 @@ int pe_world_step_ngs(PEWorld* world, float dt) {
         for (int i = 0; i < world->body_count; i++) {
             PEBody* b = &world->bodies[i];
             if (!b->props.active || b->props.type != PE_BODY_DYNAMIC) continue;
-            pe_vec3_scale(world->gravity, b->props.inv_mass * sub_dt, world->gravity);
-            if (pe_vec3_len_sq(world->gravity) > PE_EPS) {
-                b->vel[0] += world->gravity[0] * sub_dt;
-                b->vel[1] += world->gravity[1] * sub_dt;
-                b->vel[2] += world->gravity[2] * sub_dt;
+            /* R4-007修复: 使用局部变量gravity_impulse而非修改全局gravity */
+            float gravity_impulse[3];
+            gravity_impulse[0] = world->gravity[0] * b->props.inv_mass * sub_dt;
+            gravity_impulse[1] = world->gravity[1] * b->props.inv_mass * sub_dt;
+            gravity_impulse[2] = world->gravity[2] * b->props.inv_mass * sub_dt;
+            if (pe_vec3_len_sq(gravity_impulse) > PE_EPS) {
+                b->vel[0] += gravity_impulse[0] * sub_dt;
+                b->vel[1] += gravity_impulse[1] * sub_dt;
+                b->vel[2] += gravity_impulse[2] * sub_dt;
             }
             pe_integrate_velocity(b, sub_dt);
         }

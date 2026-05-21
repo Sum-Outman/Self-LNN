@@ -127,47 +127,70 @@ static void cpu_pause_hint(void);
  * 危险指针确保线程在访问共享节点期间，该节点不会被其他线程释放。
  * 每线程在解引用前注册危险指针，释放前检查所有危险指针表。
  * 延迟释放列表累积待释放节点，周期性扫描安全后才能释放。
- */
-#define MAX_HAZARD_SLOTS 64
+/* R6-006修复: 每线程危险指针表(Q-043), 避免全局共享表导致线程间覆盖。
+ * 使用 __thread/__declspec(thread) TLS确保每个线程拥有独立槽位。
+ * 共享的 is_hazard_protected 扫描所有线程的TLS表(通过注册机制)。 */
+#define LF_MAX_THREADS 64
+#define MAX_HAZARD_SLOTS 8
 #define DEFERRED_FREE_THRESHOLD 64
 
 typedef struct {
     void* slots[MAX_HAZARD_SLOTS];
+    int thread_id;
+    int in_use;
 } HazardPointerTable;
-static HazardPointerTable hazard_table;
-static volatile int hazard_table_init_flag = 0;
 
-/* K-182: CAS确保hazard_table仅初始化一次 */
-static void hazard_table_ensure_init(void) {
-    if (!hazard_table_init_flag) {
-        if (compare_and_swap_uintptr((volatile LONG*)&hazard_table_init_flag, 0, 2)) {
-            memset((void*)&hazard_table, 0, sizeof(hazard_table));
-            atomic_thread_fence(0);
-            hazard_table_init_flag = 1;
-        } else {
-            while (hazard_table_init_flag != 1) { cpu_pause_hint(); }
+static HazardPointerTable g_hazard_tables[LF_MAX_THREADS];
+static volatile int g_hazard_table_count = 0;
+static volatile int g_hazard_init_flag = 0;
+
+/* 为当前线程分配独立的危险指针表槽位 */
+static int hazard_register_thread(void) {
+    for (int i = 0; i < LF_MAX_THREADS; i++) {
+        if (!g_hazard_tables[i].in_use) {
+            if (compare_and_swap_uintptr((volatile LONG*)&g_hazard_tables[i].in_use, 0, 1)) {
+                g_hazard_tables[i].thread_id = i;
+                memset(g_hazard_tables[i].slots, 0, sizeof(g_hazard_tables[i].slots));
+                return i;
+            }
         }
     }
+    return -1;
+}
+/* R6-006修复: MSVC使用__declspec(thread)，GCC/Clang使用__thread */
+#ifdef _MSC_VER
+static __declspec(thread) int g_tls_hazard_id = -1;
+#else
+static __thread int g_tls_hazard_id = -1;
+#endif
+
+static inline int hazard_get_my_id(void) {
+    if (g_tls_hazard_id < 0) g_tls_hazard_id = hazard_register_thread();
+    return g_tls_hazard_id;
 }
 
 static inline void hazard_ptr_set(void* ptr, int slot) {
-    if (!hazard_table_init_flag) hazard_table_ensure_init();
-    if (slot >= 0 && slot < MAX_HAZARD_SLOTS) {
-        hazard_table.slots[slot] = ptr;
+    int tid = hazard_get_my_id();
+    if (tid >= 0 && tid < LF_MAX_THREADS && slot >= 0 && slot < MAX_HAZARD_SLOTS) {
+        g_hazard_tables[tid].slots[slot] = ptr;
         atomic_thread_fence(0);
     }
 }
 
 static inline void hazard_ptr_clear(int slot) {
-    if (slot >= 0 && slot < MAX_HAZARD_SLOTS) {
-        hazard_table.slots[slot] = NULL;
+    int tid = hazard_get_my_id();
+    if (tid >= 0 && tid < LF_MAX_THREADS && slot >= 0 && slot < MAX_HAZARD_SLOTS) {
+        g_hazard_tables[tid].slots[slot] = NULL;
     }
 }
 
 static int is_hazard_protected(void* ptr) {
-    if (!ptr || !hazard_table_init_flag) return 0;
-    for (int i = 0; i < MAX_HAZARD_SLOTS; i++) {
-        if (hazard_table.slots[i] == ptr) return 1;
+    if (!ptr) return 0;
+    for (int t = 0; t < LF_MAX_THREADS; t++) {
+        if (!g_hazard_tables[t].in_use) continue;
+        for (int i = 0; i < MAX_HAZARD_SLOTS; i++) {
+            if (g_hazard_tables[t].slots[i] == ptr) return 1;
+        }
     }
     return 0;
 }

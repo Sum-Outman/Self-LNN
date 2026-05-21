@@ -367,14 +367,17 @@ static void* ws_push_accept_thread(void* arg)
         ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
         if (client == WS_INVALID) continue;
 
-        /* 查找空闲客户端槽位 */
+        /* PF-003修复: 互斥锁保护槽位分配，防止accept线程与poll函数竞态 */
+        mutex_lock(srv->mutex);
         int slot = -1;
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
             if (!srv->clients[i].active) { slot = i; break; }
         }
-        if (slot < 0) { WS_CLOSE(client); continue; }
+        if (slot < 0) { mutex_unlock(srv->mutex); WS_CLOSE(client); continue; }
 
-        /* WebSocket握手 */
+        srv->clients[slot].active = 1;
+        mutex_unlock(srv->mutex);
+
         if (ws_do_handshake(client) != 0) { WS_CLOSE(client); continue; }
 
         ws_set_nonblock(client, 1);
@@ -395,6 +398,12 @@ WSPushServer* ws_push_server_create(int port)
     memset(srv, 0, sizeof(WSPushServer));
     srv->port = port > 0 ? port : SELFLNN_WEBSOCKET_PORT;
     srv->listen_sock = WS_INVALID;
+    /* PF-003修复: 初始化全局互斥锁以保护accept+槽位分配竞态条件 */
+    srv->mutex = mutex_create();
+    if (!srv->mutex) {
+        safe_free((void**)&srv);
+        return NULL;
+    }
     srv->last_tick = (long)time(NULL);
     return srv;
 }
@@ -446,6 +455,16 @@ void ws_push_server_stop(WSPushServer* srv)
 {
     if (!srv) return;
     srv->running = 0;
+    /* R6-008修复: 等待accept线程退出，防止use-after-free */
+    if (srv->accept_thread) {
+#ifdef _WIN32
+        WaitForSingleObject((HANDLE)srv->accept_thread, 3000);
+        CloseHandle((HANDLE)srv->accept_thread);
+#else
+        pthread_join((pthread_t)(uintptr_t)srv->accept_thread, NULL);
+#endif
+        srv->accept_thread = NULL;
+    }
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (srv->clients[i].active) ws_client_close(&srv->clients[i]);
     }
@@ -459,6 +478,8 @@ void ws_push_server_destroy(WSPushServer* srv)
 {
     if (!srv) return;
     ws_push_server_stop(srv);
+    /* R6-008修复: 销毁互斥锁防止资源泄漏 */
+    if (srv->mutex) { mutex_destroy(srv->mutex); srv->mutex = NULL; }
     ws_global_cleanup();
     safe_free((void**)&srv);
 }
@@ -581,22 +602,22 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
         ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
         if (client != WS_INVALID) {
             ws_set_nonblock(client, 1);
+            /* PF-003修复: poll中accept+槽位操作加互斥锁 */
+            mutex_lock(srv->mutex);
             int found = -1;
             for (int i = 0; i < WS_MAX_CLIENTS; i++) {
                 if (!srv->clients[i].active) { found = i; break; }
             }
             if (found >= 0) {
-                srv->clients[found].sock = client;
                 srv->clients[found].active = 1;
-                srv->clients[found].recv_len = 0;
-                srv->clients[found].send_len = 0;
-                srv->clients[found].send_pos = 0;
-                srv->clients[found].closing = 0;
-                srv->clients[found].last_active = (long)time(NULL);
+                mutex_unlock(srv->mutex);
+                /* 统一使用ws_client_init初始化客户端槽位 */
+                ws_client_init(&srv->clients[found], client);
                 if (ws_do_handshake(client) != 0) {
                     ws_client_close(&srv->clients[found]);
                 }
             } else {
+                mutex_unlock(srv->mutex);
                 WS_CLOSE(client);
             }
         }

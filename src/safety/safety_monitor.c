@@ -321,7 +321,20 @@ SafetyLevel safety_check_status(SafetyMonitor* monitor) {
 
 int safety_approve_action(SafetyMonitor* monitor, const char* action_type, const void* params) {
     if (!monitor || !action_type) return -1;
-    (void)params;
+    /* R5-002修复: 使用params验证动作参数合理性，而非丢弃 */
+    if (params) {
+        /* 解析动作参数（约定格式: 前8字节为float动作幅值） */
+        const float* param_floats = (const float*)params;
+        float total_magnitude = 0.0f;
+        for (int i = 0; i < 4; i++) total_magnitude += fabsf(param_floats[i]);
+        /* 动作幅值超过上界且安全评分低时拒绝 */
+        if (total_magnitude > monitor->physical_boundaries.max_acceleration) {
+            if (monitor->stats.current_safety_score < 0.6f) {
+                log_warning("[安全] 动作审批拒绝: %s幅值过大=%.3f", action_type, total_magnitude);
+                return -1;
+            }
+        }
+    }
 
     /* K-修复: 双缓冲预检查 — 先在锁内获取快照，再验证，消除TOCTOU窗口 */
     SAFETY_LOCK(monitor);

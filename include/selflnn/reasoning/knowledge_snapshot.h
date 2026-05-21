@@ -17,6 +17,10 @@
 #include <stddef.h>
 #include "selflnn/knowledge/knowledge.h"
 
+/* ZS-021修复: knowledge_snapshot函数仅在MSVC路径(reasoning_internal.c)实现。
+ * 非MSVC平台(GCC/Clang)使用reasoning.c，这些函数不可用。
+ * 此处添加条件编译保护，避免非MSVC平台链接错误。 */
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -82,11 +82,24 @@ int sec_add_constraint(SecBehaviorMonitor* monitor, const SecBehaviorConstraint*
 SecViolationLevel sec_check_constraints(SecBehaviorMonitor* monitor,
                                          const float* output_values, int output_count,
                                          const char* action_type, float action_magnitude) {
-    (void)action_type;
     if (!monitor || !monitor->is_monitoring_active) return SEC_VIOLATION_NONE;
 
     monitor->constraint_set.last_check_time = time(NULL);
     int worst_violation = SEC_VIOLATION_NONE;
+
+    /* R5-003修复: 根据action_type区分不同操作的安全约束严格度 */
+    float type_multiplier = 1.0f;
+    if (action_type) {
+        if (strstr(action_type, "delete") || strstr(action_type, "remove") ||
+            strstr(action_type, "关闭") || strstr(action_type, "删除"))
+            type_multiplier = 2.0f;  /* 破坏性操作更严格 */
+        else if (strstr(action_type, "move") || strstr(action_type, "移动") ||
+                 strstr(action_type, "execute") || strstr(action_type, "执行"))
+            type_multiplier = 1.5f;  /* 执行类操作中等严格 */
+        else if (strstr(action_type, "query") || strstr(action_type, "查询") ||
+                 strstr(action_type, "read") || strstr(action_type, "读取"))
+            type_multiplier = 0.5f;  /* 只读操作宽松 */
+    }
 
     for (int i = 0; i < monitor->constraint_set.constraint_count; i++) {
         SecBehaviorConstraint* c = &monitor->constraint_set.constraints[i];
@@ -1278,16 +1291,24 @@ int sec_update_feature_distribution(SecInputMonitor* monitor,
     dist->samples_count++;
     dist->last_update_time = time(NULL);
 
+    /* R5-003修复: 使用真实特征值样本计算协方差，替代 cov+=0.0f 伪实现 */
     if (dist->covariance_dim < fc && dist->samples_count > fc + 10 &&
         dist->covariance_dim < SEC_EMBEDDING_DIM) {
         dist->covariance_dim = fc > SEC_EMBEDDING_DIM ? SEC_EMBEDDING_DIM : fc;
         for (int i = 0; i < dist->covariance_dim; i++) {
             for (int j = 0; j < dist->covariance_dim; j++) {
                 float cov = 0.0f;
-                for (int k = 0; k < 10 && k < dist->samples_count; k++) {
-                    cov += 0.0f;
+                /* 使用增量协方差：Cov(X_i,X_j)的近实时估计 */
+                if (i == j) {
+                    cov = dist->feature_variance[i];  /* 对角=方差 */
+                } else if (dist->samples_count > 2) {
+                    /* 跨特征协方差: 基于均值偏差的Welford增量 */
+                    float mean_i = dist->feature_mean[i];
+                    float mean_j = dist->feature_mean[j];
+                    cov = (features[i] - mean_i) * (features[j] - mean_j) * 0.1f
+                        + dist->covariance_matrix[i * dist->covariance_dim + j] * 0.9f;
                 }
-                dist->covariance_matrix[i * dist->covariance_dim + j] = (i == j) ? dist->feature_variance[i] : 0.0f;
+                dist->covariance_matrix[i * dist->covariance_dim + j] = cov;
             }
         }
     }

@@ -477,7 +477,7 @@ class VisualizationManager {
     }
 
     /**
-     * 初始化默认网络拓扑（后端未连接时的过渡状态，非虚假数据）
+     * ZS-018修复: 初始化默认网络拓扑 —— 后端未连接时仅显示连接状态提示
      * 800ms后通过 _checkBackendAndUpdate 自动重试获取真实拓扑
      */
     initDefaultNetwork() {
@@ -485,21 +485,17 @@ class VisualizationManager {
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
         const w = canvas.width, h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
         ctx.fillStyle = '#0a0a1a';
         ctx.fillRect(0, 0, w, h);
-        ctx.fillStyle = 'rgba(68,136,170,0.6)';
-        ctx.font = '14px monospace';
+        ctx.fillStyle = 'rgba(68,136,170,0.5)';
+        ctx.font = '13px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('[后端未连接] SELF-LNN 液态神经网络', w / 2, h / 2 - 20);
-        ctx.fillStyle = 'rgba(102,170,255,0.4)';
-        ctx.font = '12px monospace';
-        ctx.fillText('正在自动重试连接...连接成功后将加载真实网络拓扑', w / 2, h / 2 + 8);
-        ctx.fillStyle = 'rgba(255,255,255,0.15)';
-        ctx.font = '10px monospace';
-        /* M-042修复: 基于真实数据渲染，移除占位文本 */
-        if (typeof nodeCount === 'undefined' || nodeCount === 0) {
-            ctx.fillText('等待LNN网络数据...', w / 2, h / 2);
-        }
+        ctx.fillText('[后端未连接] 液态神经网络拓扑', w / 2, h / 2 - 12);
+        ctx.fillStyle = 'rgba(130,160,200,0.3)';
+        ctx.font = '11px monospace';
+        ctx.fillText('连接后端后将自动加载真实网络数据', w / 2, h / 2 + 10);
+        /* ZS-018修复: 不渲染任何虚假节点/边/占位数据 */
     }
 
     /**

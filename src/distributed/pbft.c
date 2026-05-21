@@ -9,7 +9,7 @@
 #include <math.h>
 
 #ifdef _MSC_VER
-#pragma warning(disable:4456 4013)  /* pre-existing: hdr shadowing, pbft_send_view_change */
+#pragma warning(disable:4456)  /* ZSF-032修复: pbft_send_view_change已实现，移除4013 */
 #endif
 
 #ifdef _WIN32
@@ -990,6 +990,42 @@ static int pbft_validate_view_change(const PbftViewChange* msg, uint32_t current
         if (i > 0 && msg->prepared_evidence[i].seq_number <= msg->prepared_evidence[i - 1].seq_number) return 0;
     }
     return 1;
+}
+
+/* ZSF-032修复: pbft_send_view_change() 函数实现
+ * 原代码调用此函数但未定义，编译警告(#pragma 4013)压制了链接错误。
+ * 构建并广播ViewChange消息到所有活跃节点。 */
+static int pbft_send_view_change(PbftSystem* system, uint32_t new_view_number) {
+    if (!system || new_view_number <= system->current_view) return -1;
+    PbftViewChange vc;
+    memset(&vc, 0, sizeof(vc));
+    vc.header.type = PBFT_MSG_VIEW_CHANGE;
+    vc.header.sender_id = system->config.node_id;
+    vc.header.view_number = system->current_view;
+    vc.new_view_number = new_view_number;
+    vc.prepared_count = 0;
+    /* 收集当前视图下已prepared但未committed的证据 */
+    for (int i = 0; i < system->log_count && vc.prepared_count < PBFT_MAX_PENDING_BATCH; i++) {
+        if (system->log_entries[i].prepare_count >= (uint32_t)(2 * system->config.max_fault)) {
+            vc.prepared_evidence[vc.prepared_count].seq_number = system->log_entries[i].sequence_number;
+            memcpy(vc.prepared_evidence[vc.prepared_count].digest,
+                   system->log_entries[i].request_digest, sizeof(vc.prepared_evidence[0].digest));
+            vc.prepared_count++;
+        }
+    }
+    /* 计算整包摘要并广播 */
+    pbft_compute_digest(&vc, sizeof(PbftViewChange), vc.header.digest);
+    for (int i = 0; i < system->node_count; i++) {
+        if (i != (int)system->config.node_id && system->nodes[i].is_active) {
+            pbft_send_message(system, (uint32_t)i, &vc, sizeof(PbftViewChange));
+        }
+    }
+    system->last_view_change_time_ms = get_current_time_ms();
+    if (system->config.verbose) {
+        printf("[PBFT] 节点 %u 发送 ViewChange: new_view=%u\n",
+               system->config.node_id, new_view_number);
+    }
+    return 0;
 }
 
 static int pbft_handle_view_change(PbftSystem* system, const PbftViewChange* msg) {

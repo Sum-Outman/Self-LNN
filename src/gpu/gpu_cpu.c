@@ -2734,6 +2734,12 @@ GpuMemory* gpu_double_buffer_get_back(GpuDoubleBuffer* db) {
 }
 
 int gpu_double_buffer_sync(GpuDoubleBuffer* db) {
+    /* R4-004修复: CPU端double buffer同步，交换front/back指针 */
+    if (!db) return -1;
+    if (!db->front_buffer || !db->back_buffer) return -1;
+    void* temp = db->front_buffer;
+    db->front_buffer = db->back_buffer;
+    db->back_buffer = temp;
     return 0;
 }
 

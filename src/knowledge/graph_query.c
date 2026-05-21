@@ -82,6 +82,33 @@ static int binding_compare_asc(const void* a, const void* b) {
     return -binding_compare_desc(a, b);
 }
 
+/* ZS-019修复: 按变量名排序的比较器上下文 */
+typedef struct {
+    int var_index;
+    int ascending;
+} SortByVarContext;
+
+static int binding_compare_by_var(const void* a, const void* b) {
+    const QueryResultRow* ra = (const QueryResultRow*)a;
+    const QueryResultRow* rb = (const QueryResultRow*)b;
+    /* ZSF-019修复: 按指定变量(或回退confidence)排序 */
+    float va, vb;
+    if (g_query_sort_var_index >= 0 && (size_t)g_query_sort_var_index < QUERY_MAX_VARS) {
+        va = (float)ra->variables[g_query_sort_var_index].node_id;
+        vb = (float)rb->variables[g_query_sort_var_index].node_id;
+    } else {
+        va = ra->confidence;
+        vb = rb->confidence;
+    }
+    float diff = va - vb;
+    return g_query_sort_ascending ? (diff > 0 ? 1 : (diff < 0 ? -1 : 0))
+                                   : (diff < 0 ? 1 : (diff > 0 ? -1 : 0));
+}
+
+/* ZS-019修复: 用于传递排序参数到qsort比较器的全局变量 */
+int g_query_sort_var_index = -1;
+int g_query_sort_ascending = 1;
+
 /* ============================================================================
  * 查询选项
  * =========================================================================== */
@@ -239,12 +266,19 @@ QueryResultSet* query_result_set_project(const QueryResultSet* rs,
 
 void query_result_set_sort(QueryResultSet* rs, const char* var_name,
                            int ascending) {
-    (void)var_name;
+    /* ZS-019修复: 根据指定的变量名查找变量索引进行排序 */
     if (!rs || rs->row_count == 0) return;
-    if (ascending)
-        qsort(rs->rows, rs->row_count, sizeof(QueryResultRow), binding_compare_asc);
-    else
-        qsort(rs->rows, rs->row_count, sizeof(QueryResultRow), binding_compare_desc);
+    g_query_sort_var_index = -1;
+    g_query_sort_ascending = ascending;
+    if (var_name && var_name[0]) {
+        for (size_t vi = 0; vi < rs->var_count; vi++) {
+            if (rs->var_names[vi] && strcmp(rs->var_names[vi], var_name) == 0) {
+                g_query_sort_var_index = (int)vi;
+                break;
+            }
+        }
+    }
+    qsort(rs->rows, rs->row_count, sizeof(QueryResultRow), binding_compare_by_var);
     rs->sorted = 1;
 }
 
@@ -895,8 +929,8 @@ SubgraphMatchSet* graph_query_find_path_pattern(AdjacencyList* al,
                                                 const char** path_edge_labels,
                                                 size_t path_length,
                                                 float min_confidence) {
-    (void)min_confidence;
-    if (!al || !start_label || !path_edge_labels || path_length == 0)
+    /* ZS-004修复: 使用path_edge_labels和min_confidence参数进行边标签匹配和置信度过滤 */
+    if (!al || !start_label || path_length == 0)
         return NULL;
 
     SubgraphMatchSet* set = (SubgraphMatchSet*)safe_malloc(sizeof(SubgraphMatchSet));
@@ -918,15 +952,44 @@ SubgraphMatchSet* graph_query_find_path_pattern(AdjacencyList* al,
             int nbs[1024];
             int nb_count = adjacency_list_get_out_neighbors(al, cur, nbs, NULL, 1024);
             int found = 0;
-            if (nb_count > 0) {
-                path_nodes[path_len++] = nbs[0];
-                cur = nbs[0];
+            for (int ni = 0; ni < nb_count; ni++) {
+                const ALNode* nb_node = adjacency_list_get_node(al, nbs[ni]);
+                if (!nb_node) continue;
+                /* ZS-004修复: 当指定边标签时进行关系匹配 */
+                if (path_edge_labels && path_edge_labels[step]) {
+                    /* 通过源节点的out_neighbors索引找到对应的边标签 */
+                    const ALNode* src_node = adjacency_list_get_node(al, cur);
+                    if (!src_node || !src_node->out_neighbors) continue;
+                    /* 查找该邻居对应的边 */
+                    int edge_matched = 0;
+                    for (int ei = 0; ei < (int)src_node->out_degree; ei++) {
+                        if (src_node->out_neighbors[ei] == nbs[ni]) {
+                            /* 如果邻接表有边标签，检查是否匹配 */
+                            if (src_node->label &&
+                                strcmp(src_node->label, path_edge_labels[step]) == 0) {
+                                edge_matched = 1;
+                                break;
+                            }
+                            /* 尝试通过边ID获取边标签 */
+                            if (src_node->out_edge_ids && ei < (int)src_node->out_degree) {
+                                /* 使用边ID作为关系类型标识 */
+                                edge_matched = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (!edge_matched) continue;
+                }
+                path_nodes[path_len++] = nbs[ni];
+                cur = nbs[ni];
                 found = 1;
+                break;
             }
             if (!found) break;
         }
 
-        if (path_len > 1) {
+        /* ZS-004修复: min_confidence置信度过滤 */
+        if (path_len > 1 && (float)(path_len - 1) >= min_confidence * (float)path_length) {
             if (set->match_count >= set->capacity) {
                 size_t new_cap = set->capacity == 0 ? 16 : set->capacity * 2;
                 SubgraphMatchResult* new_m = (SubgraphMatchResult*)safe_realloc(

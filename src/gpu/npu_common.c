@@ -225,7 +225,8 @@ void npu_common_stream_free(GpuStream* stream) {
 }
 
 int npu_common_stream_synchronize(GpuStream* stream) {
-    (void)stream;
+    /* R4-006修复: 添加NULL检查，无真实NPU硬件时安全返回 */
+    if (!stream) return -1;
     return 0;
 }
 
