@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "selflnn/core/common.h"
+#include "selflnn/core/cfc_network.h"
+#include "selflnn/core/state.h"
 #include "selflnn/core/parameter_shard.h"
 #include "selflnn/utils/platform.h"
 
@@ -58,14 +60,8 @@ typedef struct {
  */
 typedef struct LNN LNN;
 
-/* 前向声明依赖类型 */
-typedef struct CfCNetwork CfCNetwork;
-typedef struct NetworkState NetworkState;
-
-/* 前向声明记忆系统类型 */
+/* 前向声明依赖类型（由 cfc_network.h 提供 CfCNetwork/NetworkState） */
 typedef struct MemorySystem MemorySystem;
-
-/* 前向声明拉普拉斯分析器类型 */
 typedef struct LaplaceAnalyzer LaplaceAnalyzer;
 
 /* 内部实现：仅在SELFLNN_IMPLEMENTATION定义时暴露结构体定义 */

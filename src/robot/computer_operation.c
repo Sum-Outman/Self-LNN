@@ -284,10 +284,12 @@ static const char* re_match_atom(const char* p, const char* s) {
 
 /* 递归匹配：模式p从位置pos开始匹配字符串s，返回匹配结束位置或NULL */
 static const char* re_match_from(const char* p, const char* s, int is_start) {
+    const char* s_original = s; /* P1-025修复: 保存原始字符串位置，用于交替操作回退 */
     while (*p) {
         if (*p == '|') {
-            /* 交替：尝试左边，失败则尝试右边 */
-            const char* alt_start = p + 1;
+            /* 交替：左侧已匹配成功（能走到|说明前面字符都已匹配），尝试右侧备选 */
+            const char* left_result = s; /* 保存左侧匹配结束位置 */
+            const char* alt_start = p + 1; /* 右侧分支起始（|之后） */
             const char* alt_end = alt_start;
             int depth = 0;
             while (*alt_end) {
@@ -296,12 +298,14 @@ static const char* re_match_from(const char* p, const char* s, int is_start) {
                 else if (*alt_end == '|' && depth == 0) break;
                 alt_end++;
             }
-            /* 匹配左边 */
-            const char* left = re_match_from(alt_start, s, is_start);
-            if (left) return left;
-            /* 匹配右边 */
-            if (*alt_end == '|') alt_end++;
-            return re_match_from(alt_end, s, is_start);
+            /* 尝试右侧匹配（从原始字符串位置开始，因左侧匹配已消耗了字符串字符） */
+            const char* right = re_match_from(alt_start, s_original, is_start);
+            if (right) return right;
+            /* 右侧失败，返回左侧匹配结果，继续匹配交替后内容 */
+            s = left_result;
+            p = alt_end;
+            if (*p == '|') p++;
+            continue;
         }
         if (*p == ')') return s;  /* 分组结束，返回当前位置 */
         if (*p == '^') { is_start = 1; p++; continue; }
@@ -703,9 +707,40 @@ static int co_os_type_text(const char* text, size_t len) {
         co_os_sleep_ms(5);
     }
     return 0;
-#else
-    (void)len;
+#elif defined(__linux__)
+    /* Linux: 使用XTestFakeKeyEvent逐字符发送按键 */
+    Display* display = XOpenDisplay(NULL);
+    if (!display) return -1;
+    for (size_t i = 0; i < len && i < 1024; i++) {
+        KeySym ks = XStringToKeysym((char[2]){text[i], '\0'});
+        if (ks == NoSymbol) { ks = (KeySym)(unsigned char)text[i]; }
+        KeyCode kc = XKeysymToKeycode(display, ks);
+        if (kc == 0) continue;
+        XTestFakeKeyEvent(display, kc, True, CurrentTime);
+        XTestFakeKeyEvent(display, kc, False, CurrentTime);
+        XFlush(display);
+        co_os_sleep_ms(5);
+    }
+    XCloseDisplay(display);
     return 0;
+#elif defined(__APPLE__)
+    /* macOS: 使用CGEventPost逐字符发送Unicode */
+    for (size_t i = 0; i < len && i < 1024; i++) {
+        UniChar uc = (UniChar)text[i];
+        CGEventRef ev = CGEventCreateKeyboardEvent(NULL, 0, true);
+        if (ev) {
+            CGEventKeyboardSetUnicodeString(ev, 1, &uc);
+            CGEventPost(kCGHIDEventTap, ev);
+            CFRelease(ev);
+        }
+        ev = CGEventCreateKeyboardEvent(NULL, 0, false);
+        if (ev) { CGEventPost(kCGHIDEventTap, ev); CFRelease(ev); }
+        co_os_sleep_ms(5);
+    }
+    return 0;
+#else
+    (void)text; (void)len;
+    return -1;
 #endif
 }
 

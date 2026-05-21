@@ -2566,11 +2566,11 @@ static int vulkan_backend_memory_copy_from_device_async(void* dst, GpuMemory* sr
 #define SPV_OP_FMUL                133
 #define SPV_OP_FADD                129
 #define SPV_OP_FSUB                131
-#define SPV_OP_FCONVERT_GE         0 /* 占位 */
+#define SPV_OP_FCONVERT_GE         136 /* OpFConvert: 浮点宽度转换 */
 #define SPV_OP_IMUL                125
 #define SPV_OP_IADD                128
 #define SPV_OP_FNEG                127
-#define SPV_OP_FCONVERT_SINT_FLOAT 0 /* 占位 */
+#define SPV_OP_FCONVERT_SINT_FLOAT 113 /* OpConvertSToF: 有符号整数→浮点 */
 #define SPV_OP_COMPOSITE_CONSTRUCT 80
 #define SPV_OP_COMPOSITE_EXTRACT   81
 

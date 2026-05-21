@@ -61,11 +61,8 @@ static void policy_forward(const PolicyNetwork* net,
     if (hd < 8) hd = 8;
     if (hd > 256) hd = 256;
 
-    /* 动态分配3层中间激活 */
-    float* h0 = (float*)malloc((size_t)hd * sizeof(float));
-    float* h1 = (float*)malloc((size_t)hd * sizeof(float));
-    float* h2 = (float*)malloc((size_t)hd * sizeof(float));
-    if (!h0 || !h1 || !h2) { free(h0); free(h1); free(h2); return; }
+    /* MSVC不支持VLA: hd已钳位到[8,256], 使用最大固定尺寸栈数组 */
+    float h0[256], h1[256], h2[256];
 
     /* 第1层：输入→隐藏层0（ReLU） */
     if (net->weights_ih) {
@@ -95,7 +92,6 @@ static void policy_forward(const PolicyNetwork* net,
     } else {
         for (int i = 0; i < ad; i++) output[i] = h2[i % hd];
     }
-    free(h0); free(h1); free(h2);
 }
 
 /* DQN全梯度反向传播（不考虑target网络，仅在线训练用） */
@@ -107,21 +103,13 @@ static void policy_update(PolicyNetwork* net,
     if (hd < 8) hd = 8;
     if (hd > 256) hd = 256;
 
-    float* h0 = (float*)malloc((size_t)hd * sizeof(float));
-    float* h1 = (float*)malloc((size_t)hd * sizeof(float));
-    float* h2 = (float*)malloc((size_t)hd * sizeof(float));
-    float* output = (float*)malloc((size_t)ad * sizeof(float));
-    if (!h0 || !h1 || !h2 || !output) { free(h0); free(h1); free(h2); free(output); return; }
+    /* MSVC不支持VLA: 使用最大固定尺寸栈数组 (hd≤256, ad≤16) */
+    float h0[256], h1[256], h2[256];
+    float output[16];
+    float delta_o[16], delta_h2[256], delta_h1[256], delta_h0[256];
 
     /* 前向传播（复用函数） */
     policy_forward(net, input, output);
-
-    /* 输出层误差 */
-    float* delta_o = (float*)malloc((size_t)ad * sizeof(float));
-    float* delta_h2 = (float*)malloc((size_t)hd * sizeof(float));
-    float* delta_h1 = (float*)malloc((size_t)hd * sizeof(float));
-    float* delta_h0 = (float*)malloc((size_t)hd * sizeof(float));
-    if (!delta_o || !delta_h2 || !delta_h1 || !delta_h0) goto cleanup;
 
     for (int i = 0; i < ad; i++) delta_o[i] = target[i] - output[i];
 
@@ -179,9 +167,6 @@ static void policy_update(PolicyNetwork* net,
             net->bias_h1[k] += learning_rate * delta_h0[k];
     }
 
-cleanup:
-    free(h0); free(h1); free(h2); free(output);
-    free(delta_o); free(delta_h2); free(delta_h1); free(delta_h0);
 }
 
 static void replay_buffer_push(ReplayBuffer* buf,
@@ -463,8 +448,9 @@ int robot_agent_learn(RobotAgent* agent, const float* state,
                 if (fabsf(q_target[i]) > max_q) max_q = fabsf(q_target[i]);
             }
             float td_target[AGENT_ACTION_DIM];
+            float reward = batch[b].reward;
             for (int i = 0; i < agent->policy.output_dim; i++) {
-                td_target[i] = batch[b].action[i] +
+                td_target[i] = reward +
                     agent->policy.discount_factor * max_q * (batch[b].done ? 0.0f : 1.0f);
             }
             policy_update(&agent->policy, batch[b].state, td_target,

@@ -232,7 +232,17 @@ typedef struct {
 
 /* ============================================================================
  * 训练状态数据结构
- * =========================================================================== */
+ * P1-036修复: 大型数组改为指针+堆分配，防止栈溢出
+ * 分配容量定义 */
+#define PPO_OBS_BUFFER_ROWS      2048
+#define PPO_OBS_DIM              77
+#define PPO_ACTION_DIM           32
+#define PPO_ADAM_W_DIM           4928
+#define PPO_ADAM_LAYERS          18
+#define PPO_POLICY_W1_DIM        (77*64)
+#define PPO_POLICY_W2_DIM        (64*32)
+#define PPO_VALUE_W1_DIM         (77*64)
+/* =========================================================================== */
 
 typedef struct {
     int active;
@@ -250,17 +260,18 @@ typedef struct {
     float learning_rate;
     int total_samples;
     char status_message[256];
-    float policy_w1[77*64];
+    float policy_w1[PPO_POLICY_W1_DIM];
     float policy_b1[64];
-    float policy_w2[64*32];
+    float policy_w2[PPO_POLICY_W2_DIM];
     float policy_b2[32];
-    float value_w1[77*64];
+    float value_w1[PPO_VALUE_W1_DIM];
     float value_b1[64];
     float value_w2[64];
     float value_b2;
     int ppo_initialized;
-    float obs_buffer[2048*77];
-    float action_buffer[2048*32];
+    /* P1-036修复: 大型缓冲区改为指针，通过堆分配避免栈溢出 */
+    float* obs_buffer;      /* [2048*77] 堆分配 */
+    float* action_buffer;   /* [2048*32] 堆分配 */
     float reward_buffer[2048];
     int terminal_buffer[2048];
     float value_buffer[2048];
@@ -274,10 +285,15 @@ typedef struct {
     float gamma;
     float gae_lambda;
     int ppo_update_counter;
-    float adam_m[18*4928];
-    float adam_v[18*4928];
+    /* P1-036修复: Adam优化器动量缓冲区改为指针 */
+    float* adam_m;          /* [18*4928] 堆分配 */
+    float* adam_v;          /* [18*4928] 堆分配 */
     int adam_step;
 } InternalTrainingState;
+
+/* P1-036修复: 静态断言，确保结构体自身（不含指针指向的堆内存）不过大 */
+_Static_assert(sizeof(InternalTrainingState) < 128 * 1024,
+    "P1-036: InternalTrainingState大型数组已改为指针+堆分配");
 
 /* ============================================================================
  * 路径规划状态数据结构
@@ -1324,6 +1340,16 @@ void gazebo_simulator_destroy(Simulator* simulator) {
         safe_free((void**)&gazebo->model_names[i]);
     }
     safe_free((void**)&gazebo->model_names);
+
+    /* P1-036修复: 释放训练状态堆分配的大型缓冲区 */
+    {
+        InternalTrainingState* t = &gazebo->internal.training;
+        safe_free((void**)&t->obs_buffer);
+        safe_free((void**)&t->action_buffer);
+        safe_free((void**)&t->adam_m);
+        safe_free((void**)&t->adam_v);
+    }
+
     safe_free((void**)&gazebo);
 }
 
@@ -2866,6 +2892,20 @@ int gazebo_simulator_start_training(Simulator* simulator, SimulatorTrainingMode 
     InternalTrainingState* t = &gazebo->internal.training;
     if (t->active) return -1;
     memset(t, 0, sizeof(InternalTrainingState));
+    /* P1-036修复: 分配大型缓冲区到堆上 */
+    t->obs_buffer    = (float*)safe_malloc(PPO_OBS_BUFFER_ROWS * PPO_OBS_DIM * sizeof(float));
+    t->action_buffer = (float*)safe_malloc(PPO_OBS_BUFFER_ROWS * PPO_ACTION_DIM * sizeof(float));
+    t->adam_m        = (float*)safe_malloc(PPO_ADAM_LAYERS * PPO_ADAM_W_DIM * sizeof(float));
+    t->adam_v        = (float*)safe_malloc(PPO_ADAM_LAYERS * PPO_ADAM_W_DIM * sizeof(float));
+    if (!t->obs_buffer || !t->action_buffer || !t->adam_m || !t->adam_v) {
+        /* 分配失败，清理已分配的内存并返回错误 */
+        safe_free((void**)&t->obs_buffer);
+        safe_free((void**)&t->action_buffer);
+        safe_free((void**)&t->adam_m);
+        safe_free((void**)&t->adam_v);
+        memset(t, 0, sizeof(InternalTrainingState));
+        return -1;
+    }
     t->active = 1;
     t->mode = (int)mode;
     t->max_episodes = max_episodes > 0 ? max_episodes : 1000;

@@ -850,8 +850,9 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
             }
             tp->data_buffer = init_data;
             tp->data_size = total_floats * sizeof(float);
-            tp->has_real_data = 1;
-            fprintf(stderr, "[训练管线] 已生成 %zu 个初始随机权重样本 (输入维度=%zu, 输出维度=%zu)\n",
+            /* P2-057修复: LCG伪随机生成的数据不是真实数据，has_real_data保持为0 */
+            tp->has_real_data = 0;
+            fprintf(stderr, "[训练管线] 已生成 %zu 个初始随机权重样本 (输入维度=%zu, 输出维度=%zu, 伪随机数据标志=0)\n",
                     sample_count, input_dim, output_dim);
         }
     }

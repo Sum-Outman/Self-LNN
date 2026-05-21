@@ -123,7 +123,26 @@ static void fp16_to_fp32_batch_f16c(const fp16_t* src, float* dst, size_t count)
         dst[i] = _mm_cvtss_f32(vf32);
     }
 #else
-    (void)src; (void)dst; (void)count;
+    /* P2-058修复: 无F16C时使用纯C逐元素FP16→FP32转换回退 */
+    for (size_t i = 0; i < count; i++) {
+        unsigned short bits = (unsigned short)src[i];
+        unsigned int sign = (bits >> 15) & 1;
+        int exponent = ((bits >> 10) & 0x1F) - 15;
+        unsigned int mantissa = bits & 0x3FF;
+        if (exponent == -15) {
+            /* 次正规数 */
+            dst[i] = (sign ? -1.0f : 1.0f) * (float)mantissa / 1024.0f * 6.103515625e-5f;
+        } else if (exponent == 16) {
+            /* 无穷大或NaN */
+            if (mantissa == 0) {
+                dst[i] = sign ? -INFINITY : INFINITY;
+            } else {
+                dst[i] = NAN;
+            }
+        } else {
+            dst[i] = (sign ? -1.0f : 1.0f) * (1.0f + (float)mantissa / 1024.0f) * powf(2.0f, (float)exponent);
+        }
+    }
 #endif
 }
 

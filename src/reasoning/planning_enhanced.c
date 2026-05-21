@@ -438,84 +438,210 @@ int plan_enhanced_generate_temporal(PlanEnhancedEngine* engine,
         return -1;
     }
     memcpy(current_state, initial_state, state_size * sizeof(float));
-    /* 贪婪前向搜索 */
+    /* P2-052修复: Beam Search替代贪婪搜索，保留top-k候选路径 */
     int plan_len = 0;
     float current_time = 0.0f;
     float total_cost = 0.0f;
     result->total_duration = 0.0f;
+
+    #define PLAN_MAX_BEAM 5
+    /* 每一条beam候选路径的状态 */
+    typedef struct {
+        float* state;
+        float time;
+        float cost;
+        int actions[256];
+        int action_count;
+        float cfc_score;
+    } BeamCandidate;
+
+    BeamCandidate beams[PLAN_MAX_BEAM];
+    int beam_count = 1;
+    /* 初始化第0条beam */
+    beams[0].state = (float*)safe_malloc(state_size * sizeof(float));
+    if (!beams[0].state) { safe_free((void**)&current_state); return -1; }
+    memcpy(beams[0].state, initial_state, state_size * sizeof(float));
+    beams[0].time = 0.0f;
+    beams[0].cost = 0.0f;
+    beams[0].action_count = 0;
+    beams[0].cfc_score = 0.0f;
+
     for (int step = 0; step < max_steps; step++) {
-        /* 检查是否已达到目标 */
-        int goal_met = 1;
-        size_t min_gs = goal_size < state_size ? goal_size : state_size;
-        for (size_t i = 0; i < min_gs; i++) {
-            if (goal_state[i] > 0.5f && current_state[i] < 0.5f) {
-                goal_met = 0;
-                break;
-            }
-        }
-        if (goal_met) break;
-        /* 查找可行动作中最好的 */
-        int best_action = -1;
-        float best_score = -PLAN_ENH_INF;
-        float* best_next = (float*)safe_malloc(state_size * sizeof(float));
-        if (!best_next) break;
-        for (int a = 0; a < engine->action_count; a++) {
-            /* 检查前提条件 */
-            int applicable = 1;
-            size_t min_ps = engine->actions[a].precond_size < state_size ?
-                            engine->actions[a].precond_size : state_size;
-            for (size_t i = 0; i < min_ps; i++) {
-                if (engine->actions[a].preconditions[i] > 0.5f && current_state[i] < 0.5f) {
-                    applicable = 0;
+        if (beam_count == 0) break;
+
+        /* 收集所有扩展候选 */
+        typedef struct {
+            float* state;
+            float time;
+            float cost;
+            int action_id;
+            float cfc_score;
+            int parent_beam;
+        } Expansion;
+
+        int max_expansions = beam_count * engine->action_count;
+        Expansion* expansions = (Expansion*)safe_malloc((size_t)max_expansions * sizeof(Expansion));
+        if (!expansions) break;
+        int expansion_count = 0;
+
+        for (int b = 0; b < beam_count; b++) {
+            /* 检查该beam是否已到达目标 */
+            int goal_met = 1;
+            size_t min_gs = goal_size < state_size ? goal_size : state_size;
+            for (size_t i = 0; i < min_gs; i++) {
+                if (goal_state[i] > 0.5f && beams[b].state[i] < 0.5f) {
+                    goal_met = 0;
                     break;
                 }
             }
-            if (!applicable) continue;
-            /* 计算后继状态 */
-            float* next = (float*)safe_malloc(state_size * sizeof(float));
-            if (!next) continue;
-            memcpy(next, current_state, state_size * sizeof(float));
-            size_t min_es = engine->actions[a].effect_size < state_size ?
-                            engine->actions[a].effect_size : state_size;
-            for (size_t i = 0; i < min_es; i++) {
-                if (engine->actions[a].effects[i] > 0.5f) next[i] = 1.0f;
-                else if (engine->actions[a].effects[i] < -0.5f) next[i] = 0.0f;
+            if (goal_met) continue; /* 已到达目标，不再扩展 */
+
+            for (int a = 0; a < engine->action_count; a++) {
+                /* 检查前提条件 */
+                int applicable = 1;
+                size_t min_ps = engine->actions[a].precond_size < state_size ?
+                                engine->actions[a].precond_size : state_size;
+                for (size_t i = 0; i < min_ps; i++) {
+                    if (engine->actions[a].preconditions[i] > 0.5f && beams[b].state[i] < 0.5f) {
+                        applicable = 0;
+                        break;
+                    }
+                }
+                if (!applicable) continue;
+
+                /* 计算后继状态 */
+                float* next = (float*)safe_malloc(state_size * sizeof(float));
+                if (!next) continue;
+                memcpy(next, beams[b].state, state_size * sizeof(float));
+                size_t min_es = engine->actions[a].effect_size < state_size ?
+                                engine->actions[a].effect_size : state_size;
+                for (size_t i = 0; i < min_es; i++) {
+                    if (engine->actions[a].effects[i] > 0.5f) next[i] = 1.0f;
+                    else if (engine->actions[a].effects[i] < -0.5f) next[i] = 0.0f;
+                }
+
+                /* 用CfC评估该动作 */
+                float cfc_input[4] = {
+                    (float)a / (float)(engine->action_count + 1),
+                    beams[b].state[0],
+                    next[0],
+                    engine->actions[a].cost
+                };
+                float h_save[64];
+                memcpy(h_save, engine->cfc_state, (size_t)engine->cfc_dim * sizeof(float));
+                cfc_integrate(engine, cfc_input, 5);
+                float action_score = engine->cfc_state[0] * 0.7f - engine->actions[a].cost * 0.3f;
+                memcpy(engine->cfc_state, h_save, (size_t)engine->cfc_dim * sizeof(float));
+
+                /* 记录扩展候选 */
+                if (expansion_count < max_expansions) {
+                    expansions[expansion_count].state = next;
+                    expansions[expansion_count].time = beams[b].time + engine->actions[a].duration_min;
+                    expansions[expansion_count].cost = beams[b].cost + engine->actions[a].cost;
+                    expansions[expansion_count].action_id = a;
+                    expansions[expansion_count].cfc_score = beams[b].cfc_score + action_score;
+                    expansions[expansion_count].parent_beam = b;
+                    expansion_count++;
+                } else {
+                    safe_free((void**)&next);
+                }
             }
-            /* 用CfC评估该动作 */
-            float cfc_input[4] = {(float)a / (float)(engine->action_count + 1),
-                                  current_state[0], next[0],
-                                  engine->actions[a].cost};
-            float h_save[64];
-            memcpy(h_save, engine->cfc_state, (size_t)engine->cfc_dim * sizeof(float));
-            cfc_integrate(engine, cfc_input, 5);
-            float score = engine->cfc_state[0] * 0.7f - engine->actions[a].cost * 0.3f;
-            memcpy(engine->cfc_state, h_save, (size_t)engine->cfc_dim * sizeof(float));
-            if (score > best_score) {
-                best_score = score;
-                best_action = a;
-                memcpy(best_next, next, state_size * sizeof(float));
+        }
+
+        /* 按CfC评分降序排序扩展候选 */
+        for (int i = 0; i < expansion_count - 1; i++) {
+            int best_idx = i;
+            for (int j = i + 1; j < expansion_count; j++) {
+                if (expansions[j].cfc_score > expansions[best_idx].cfc_score) {
+                    best_idx = j;
+                }
             }
-            safe_free((void**)&next);
+            if (best_idx != i) {
+                Expansion tmp = expansions[i];
+                expansions[i] = expansions[best_idx];
+                expansions[best_idx] = tmp;
+            }
         }
-        if (best_action < 0) {
-            safe_free((void**)&best_next);
-            break;
+
+        /* 选择top-k beam */
+        int new_beam_count = 0;
+        for (int i = 0; i < expansion_count && new_beam_count < PLAN_MAX_BEAM; i++) {
+            int parent = expansions[i].parent_beam;
+            BeamCandidate* nb = &beams[new_beam_count];
+
+            /* 复用或分配新状态 */
+            if (new_beam_count != parent) {
+                if (nb->state) safe_free((void**)&nb->state);
+                nb->state = expansions[i].state;
+            } else {
+                /* 同一parent，需要新分配 */
+                float* old_state = nb->state;
+                nb->state = expansions[i].state;
+                if (old_state && old_state != expansions[i].state) {
+                    safe_free((void**)&old_state);
+                }
+            }
+
+            /* 复制动作历史 */
+            memcpy(nb->actions, beams[parent].actions, (size_t)beams[parent].action_count * sizeof(int));
+            nb->actions[beams[parent].action_count] = expansions[i].action_id;
+            nb->action_count = beams[parent].action_count + 1;
+            nb->time = expansions[i].time;
+            nb->cost = expansions[i].cost;
+            nb->cfc_score = expansions[i].cfc_score;
+
+            new_beam_count++;
         }
-        /* 记录动作 */
-        result->action_ids[plan_len] = best_action;
-        result->start_times[plan_len] = current_time;
-        float dur = engine->actions[best_action].duration_min;
-        if (dur < 0.1f) dur = 1.0f;
-        result->end_times[plan_len] = current_time + dur;
-        result->assigned_agents[plan_len] = 0;
-        total_cost += engine->actions[best_action].cost;
-        current_time += dur;
-        memcpy(current_state, best_next, state_size * sizeof(float));
-        safe_free((void**)&best_next);
-        plan_len++;
+
+        /* 释放未选中的扩展状态 */
+        for (int i = new_beam_count; i < expansion_count; i++) {
+            safe_free((void**)&expansions[i].state);
+        }
+        /* 释放旧beam中未复用的状态 */
+        for (int b = new_beam_count; b < beam_count; b++) {
+            if (beams[b].state) safe_free((void**)&beams[b].state);
+            beams[b].state = NULL;
+        }
+
+        safe_free((void**)&expansions);
+        beam_count = new_beam_count;
+
+        /* 更新当前时间（取最佳beam的时间） */
+        if (beam_count > 0) {
+            current_time = beams[0].time;
+            total_cost = beams[0].cost;
+            plan_len = beams[0].action_count;
+            memcpy(current_state, beams[0].state, state_size * sizeof(float));
+        }
+    }
+
+    /* 将最佳beam的动作复制到结果 */
+    if (beam_count > 0 && beams[0].action_count > 0) {
+        for (int i = 0; i < beams[0].action_count && i < 256; i++) {
+            result->action_ids[i] = beams[0].actions[i];
+            result->start_times[i] = 0; /* 时间将在下面重新计算 */
+            float dur = engine->actions[beams[0].actions[i]].duration_min;
+            if (dur < 0.1f) dur = 1.0f;
+            result->end_times[i] = result->start_times[i] + dur;
+            result->assigned_agents[i] = 0;
+            if (i > 0) {
+                result->start_times[i] = result->end_times[i-1];
+                result->end_times[i] = result->start_times[i] + dur;
+            }
+        }
+        result->action_count = beams[0].action_count;
+        current_time = (result->action_count > 0) ? result->end_times[result->action_count - 1] : 0.0f;
+        total_cost = beams[0].cost;
+    } else {
+        result->action_count = 0;
+    }
+
+    /* 释放所有beam状态 */
+    for (int b = 0; b < PLAN_MAX_BEAM; b++) {
+        if (beams[b].state) safe_free((void**)&beams[b].state);
     }
     safe_free((void**)&current_state);
-    result->action_count = plan_len;
+
     result->agent_count = 1;
     result->total_cost = total_cost;
     result->total_duration = current_time;
@@ -524,7 +650,7 @@ int plan_enhanced_generate_temporal(PlanEnhancedEngine* engine,
     result->is_feasible = plan_len > 0 ? 1 : 0;
     if (plan_len > 0) {
         snprintf(result->plan_summary, sizeof(result->plan_summary),
-                 "时间规划完成: %d个动作, 总时间%.2f, 总成本%.2f",
+                 "BeamSearch规划完成: %d个动作, 总时间%.2f, 总成本%.2f",
                  plan_len, current_time, total_cost);
     } else {
         snprintf(result->plan_summary, sizeof(result->plan_summary),

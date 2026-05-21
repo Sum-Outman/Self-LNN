@@ -165,6 +165,140 @@ void tensor_fill(Tensor* tensor, float value);
  */
 void tensor_zero(Tensor* tensor);
 
+/* ================================================================
+ * 核心张量运算 — 矩阵乘法、卷积、池化、激活函数、逐元素操作
+ * 100%纯C实现，支持OpenMP多线程并行
+ * ================================================================ */
+
+/**
+ * @brief 矩阵乘法 C = A × B
+ * 
+ * 支持2D矩阵乘法和批量矩阵乘法（第一维为批次）。
+ * A形状: [m, k] 或 [batch, m, k]
+ * B形状: [k, n] 或 [batch, k, n]
+ * C必须预先分配正确形状: [m, n] 或 [batch, m, n]
+ * 使用OpenMP并行化最外层循环。
+ * 
+ * @param a 左操作数张量
+ * @param b 右操作数张量
+ * @param c 输出张量（必须预先分配）
+ * @return int 成功返回0，失败返回错误码
+ */
+int tensor_matmul(const Tensor* a, const Tensor* b, Tensor* c);
+
+/**
+ * @brief 逐元素加法（支持广播）
+ * 
+ * NumPy风格广播规则：从最后一维开始向前对齐，
+ * 维度为1的可广播到任意大小，缺失维度视为1。
+ * result必须预先分配正确形状（广播结果形状）。
+ * 
+ * 广播示例:
+ *   [3, 4] + [4]    → [3, 4]
+ *   [3, 1] + [1, 4] → [3, 4]
+ *   [3, 4] + [3, 4] → [3, 4]
+ *   [2, 3] + [1, 3] → [2, 3]
+ * 
+ * @param a 左操作数张量
+ * @param b 右操作数张量
+ * @param result 输出张量（必须预先分配）
+ * @return int 成功返回0，失败返回错误码
+ */
+int tensor_add(const Tensor* a, const Tensor* b, Tensor* result);
+
+/**
+ * @brief 2D卷积运算
+ * 
+ * 输入形状: [N, C_in, H, W]
+ * 卷积核形状: [C_out, C_in, kH, kW]
+ * 输出形状: [N, C_out, H_out, W_out]
+ * 
+ * 输出尺寸计算:
+ *   H_out = floor((H + 2*pad_h - dil_h*(kH-1) - 1) / stride_h + 1)
+ *   W_out = floor((W + 2*pad_w - dil_w*(kW-1) - 1) / stride_w + 1)
+ * 
+ * @param input 输入张量 [N, C_in, H, W]
+ * @param kernel 卷积核张量 [C_out, C_in, kH, kW]
+ * @param output 输出张量（必须预先分配正确形状）
+ * @param stride_h 垂直步长
+ * @param stride_w 水平步长
+ * @param padding_h 垂直填充
+ * @param padding_w 水平填充
+ * @param dilation_h 垂直膨胀
+ * @param dilation_w 水平膨胀
+ * @return int 成功返回0，失败返回错误码
+ */
+int tensor_conv2d(const Tensor* input, const Tensor* kernel, Tensor* output,
+                  int stride_h, int stride_w, int padding_h, int padding_w,
+                  int dilation_h, int dilation_w);
+
+/**
+ * @brief 2D最大池化
+ * 
+ * 输入形状: [N, C, H, W]
+ * 输出形状: [N, C, H_out, W_out]
+ * 
+ * 输出尺寸计算:
+ *   H_out = floor((H + 2*pad_h - kH) / stride_h + 1)
+ *   W_out = floor((W + 2*pad_w - kW) / stride_w + 1)
+ * 
+ * @param input 输入张量 [N, C, H, W]
+ * @param output 输出张量（必须预先分配正确形状）
+ * @param kernel_h 池化核高度
+ * @param kernel_w 池化核宽度
+ * @param stride_h 垂直步长
+ * @param stride_w 水平步长
+ * @param padding_h 垂直填充
+ * @param padding_w 水平填充
+ * @return int 成功返回0，失败返回错误码
+ */
+int tensor_maxpool2d(const Tensor* input, Tensor* output,
+                     int kernel_h, int kernel_w, int stride_h, int stride_w,
+                     int padding_h, int padding_w);
+
+/**
+ * @brief ReLU激活函数（原地操作）
+ * 
+ * relu(x) = max(0, x)
+ * 
+ * @param tensor 输入/输出张量
+ * @return int 成功返回0，失败返回错误码
+ */
+int tensor_relu(Tensor* tensor);
+
+/**
+ * @brief Sigmoid激活函数（原地操作）
+ * 
+ * sigmoid(x) = 1 / (1 + exp(-x))
+ * 
+ * @param tensor 输入/输出张量
+ * @return int 成功返回0，失败返回错误码
+ */
+int tensor_sigmoid(Tensor* tensor);
+
+/**
+ * @brief Tanh激活函数（原地操作）
+ * 
+ * tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+ * 
+ * @param tensor 输入/输出张量
+ * @return int 成功返回0，失败返回错误码
+ */
+int tensor_tanh(Tensor* tensor);
+
+/**
+ * @brief Softmax归一化
+ * 
+ * softmax(x_i) = exp(x_i) / sum_j(exp(x_j))
+ * 沿指定轴进行归一化。
+ * 
+ * @param input 输入张量
+ * @param output 输出张量（必须预先分配与输入相同形状）
+ * @param axis 归一化轴（-1表示最后一维）
+ * @return int 成功返回0，失败返回错误码
+ */
+int tensor_softmax(const Tensor* input, Tensor* output, int axis);
+
 #ifdef __cplusplus
 }
 #endif

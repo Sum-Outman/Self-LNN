@@ -137,11 +137,41 @@ static int ml_is_list_item(const char* line, size_t len) {
     return 0;
 }
 
+static void ml_text_hash_embed(const char* text, size_t text_len, float* embedding, int dim) {
+    if (!text || !embedding || dim <= 0) {
+        for (int i = 0; i < dim; i++) embedding[i] = 0.0f;
+        return;
+    }
+    if (text_len < 2) {
+        for (int i = 0; i < dim; i++) {
+            unsigned long h = 5381;
+            h = ((h << 5) + h) + (unsigned char)text[0];
+            h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+            embedding[i] = (float)(h % 1000007) / 500003.5f - 1.0f;
+        }
+    } else {
+        for (int i = 0; i < dim; i++) {
+            int pos = (i * 127 + 31) % (int)(text_len - 1);
+            unsigned long h = 5381;
+            h = ((h << 5) + h) + (unsigned char)text[pos];
+            h = ((h << 5) + h) + (unsigned char)text[pos + 1];
+            h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+            embedding[i] = (float)(h % 1000007) / 500003.5f - 1.0f;
+        }
+    }
+    float norm = 0.0f;
+    for (int i = 0; i < dim; i++) norm += embedding[i] * embedding[i];
+    norm = sqrtf(norm);
+    if (norm > 1e-10f) {
+        for (int i = 0; i < dim; i++) embedding[i] /= norm;
+    }
+}
+
 static void ml_embed_text_simple(LNN* encoder, const char* text, size_t text_len, float* embed_out) {
     float input[256] = {0};
-    for (size_t i = 0; i < text_len && i < 256; i++) {
-        input[i] = (float)(unsigned char)text[i] / 255.0f;
-    }
+    int dim = (int)(text_len < 256 ? text_len : 256);
+    if (dim < 1) dim = 1;
+    ml_text_hash_embed(text, text_len, input, dim);
     lnn_forward(encoder, input, embed_out);
 }
 

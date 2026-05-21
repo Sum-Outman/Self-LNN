@@ -1073,7 +1073,12 @@ static int rl_ppo_train(RLAgent* agent, int batch_size)
                     }
                 }
                 float total_loss = p_loss + pc->value_coef * v_loss - pc->entropy_coef * entropy;
-                lnn_backward(actor, &total_loss, &total_loss);
+                /* P1-034修复：使用独立的target和loss缓冲区，避免同一float既作梯度又作损失 */
+                {
+                    float actor_target[1] = {total_loss};
+                    float actor_loss = 0.0f;
+                    lnn_backward(actor, actor_target, &actor_loss);
+                }
             }
         }
     }
@@ -1201,7 +1206,12 @@ static int rl_a2c_train(RLAgent* agent, int batch_size)
                 }
             }
             float total_loss = p_loss + pc->value_coef * v_loss - pc->entropy_coef * entropy;
-            lnn_backward(actor, &total_loss, &total_loss);
+            /* P1-034修复：使用独立的target和loss缓冲区，避免同一float既作梯度又作损失 */
+            {
+                float actor_target[1] = {total_loss};
+                float actor_loss = 0.0f;
+                lnn_backward(actor, actor_target, &actor_loss);
+            }
         }
     }
 
@@ -1372,7 +1382,9 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
 
             float q_for_actor = RL_MIN(q1, q2);
             float actor_loss = agent->alpha * new_log_prob - q_for_actor;
-            lnn_backward(actor, &actor_loss, &actor_loss);
+            /* P1-034修复：SAC actor使用独立target/loss缓冲区 */
+            float actor_target[1] = {actor_loss};
+            lnn_backward(actor, actor_target, &actor_loss);
 
             safe_free((void**)&next_sa);
         }
@@ -1663,7 +1675,9 @@ static int rl_cfc_td3_train(RLAgent* agent, int batch_size)
             float actor_loss = -q1_val;
             total_actor_loss += actor_loss;
 
-            lnn_backward(actor, &actor_loss, &actor_loss);
+            /* P1-034修复：TD3 actor使用独立target/loss缓冲区 */
+            float actor_target[1] = {actor_loss};
+            lnn_backward(actor, actor_target, &actor_loss);
 
             safe_free((void**)&sa_pair);
             safe_free((void**)&actor_action);
@@ -2343,7 +2357,9 @@ static int rl_cfc_impala_train(RLAgent* agent, int batch_size)
         float actor_loss = policy_loss + entropy_loss;
         total_loss += actor_loss;
 
-        lnn_backward(actor, &actor_loss, &actor_loss);
+        /* P1-034修复：IMPALA actor使用独立target/loss缓冲区 */
+        float actor_target[1] = {actor_loss};
+        lnn_backward(actor, actor_target, &actor_loss);
 
         /* 价值函数损失 */
         float value = 0.0f;

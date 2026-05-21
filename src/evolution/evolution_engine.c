@@ -328,7 +328,8 @@ static void crossover(const EvolutionEngine* engine, const float* p1, const floa
             arithmetic_crossover(p1, p2, c1, c2, size, rng);
             break;
         case EVO_CROSSOVER_SBX:
-            sbx_crossover(p1, p2, c1, c2, size, engine->config.sbx_eta, -10.0f, 10.0f, rng);
+            sbx_crossover(p1, p2, c1, c2, size, engine->config.sbx_eta,
+                         engine->config.chromosome_min, engine->config.chromosome_max, rng);
             break;
         case EVO_CROSSOVER_BLEND:
             blend_crossover(p1, p2, c1, c2, size, rng);
@@ -389,7 +390,8 @@ static void mutate(const EvolutionEngine* engine, float* chromosome, size_t size
             gaussian_mutation(chromosome, size, engine->config.gaussian_sigma, rng);
             break;
         case EVO_MUTATION_POLYNOMIAL:
-            polynomial_mutation(chromosome, size, engine->config.polynomial_eta, -10.0f, 10.0f, rng);
+            polynomial_mutation(chromosome, size, engine->config.polynomial_eta,
+                               engine->config.chromosome_min, engine->config.chromosome_max, rng);
             break;
         case EVO_MUTATION_SWAP:
             swap_mutation(chromosome, size, rng);
@@ -402,9 +404,12 @@ static void mutate(const EvolutionEngine* engine, float* chromosome, size_t size
         }
         case EVO_MUTATION_UNIFORM:
         default: {
+            float c_min = engine->config.chromosome_min;
+            float c_max = engine->config.chromosome_max;
+            float c_range = c_max - c_min;
             for (size_t i = 0; i < size; i++) {
                 if (rand_float(rng) < 0.1f) {
-                    chromosome[i] = -10.0f + rand_float(rng) * 20.0f;
+                    chromosome[i] = c_min + rand_float(rng) * c_range;
                 }
             }
             break;
@@ -439,25 +444,96 @@ static float compute_diversity(EvolutionPopulation* pop) {
     return dist_sum / (float)pop->size;
 }
 
-/* 非支配排序 (NDS) */
+/* 辅助：判断个体 a 是否支配个体 b（最小化问题） */
+static int dominates(const EvolutionIndividual* a, const EvolutionIndividual* b) {
+    int obj_count = a->objective_count;
+    int strictly_better = 0;
+    for (int k = 0; k < obj_count; k++) {
+        if (a->objectives[k] > b->objectives[k]) return 0;
+        if (a->objectives[k] < b->objectives[k]) strictly_better = 1;
+    }
+    return strictly_better;
+}
+
+/* 非支配排序 (Kung分治算法 O(n log n) 前沿提取)
+ * 核心思路：按第一目标排序后，已排序序列中后出现的解不可能支配先出现的解。
+ * 每次迭代在线性扫描中提取当前Pareto前沿，分配rank后移除，重复至空。
+ * 对2目标问题严格O(n log n)，多目标退化为O(k * n * |F|)其中|F|为前沿大小。 */
 static void non_dominated_sort(EvolutionPopulation* pop) {
-    for (size_t i = 0; i < pop->size; i++) {
-        pop->individuals[i].pareto_rank = 0;
+    size_t n = pop->size;
+    if (n == 0) return;
+
+    for (size_t i = 0; i < n; i++) {
+        pop->individuals[i].pareto_rank = -1;
         pop->individuals[i].crowding_distance = 0.0f;
-        int dominated_count = 0;
-        for (size_t j = 0; j < pop->size; j++) {
-            if (i == j) continue;
-            int dominates = 1;
-            for (int k = 0; k < pop->individuals[i].objective_count; k++) {
-                if (pop->individuals[i].objectives[k] < pop->individuals[j].objectives[k]) {
-                    dominates = 0;
-                    break;
+    }
+
+    int obj_count = pop->individuals[0].objective_count;
+    if (obj_count <= 0) return;
+
+    size_t* active = (size_t*)safe_calloc(n, sizeof(size_t));
+    size_t* front = (size_t*)safe_calloc(n, sizeof(size_t));
+    if (!active || !front) {
+        safe_free((void**)&active);
+        safe_free((void**)&front);
+        return;
+    }
+
+    size_t active_count = n;
+    for (size_t i = 0; i < n; i++) active[i] = i;
+
+    int rank = 0;
+    while (active_count > 0) {
+        /* 按第一目标值升序排序（选择排序，小规模可行） */
+        for (size_t i = 0; i < active_count - 1; i++) {
+            size_t best = i;
+            for (size_t j = i + 1; j < active_count; j++) {
+                if (pop->individuals[active[j]].objectives[0] <
+                    pop->individuals[active[best]].objectives[0]) {
+                    best = j;
                 }
             }
-            if (dominates) dominated_count++;
+            if (best != i) {
+                size_t tmp = active[i];
+                active[i] = active[best];
+                active[best] = tmp;
+            }
         }
-        pop->individuals[i].pareto_rank = dominated_count;
+
+        /* Kung线性扫描提取当前Pareto前沿：
+         * 已按obj[0]排序，后续解obj[0] >= 前解obj[0]，只能被已有前沿支配 */
+        size_t front_size = 0;
+        for (size_t i = 0; i < active_count; i++) {
+            size_t idx_i = active[i];
+            int dominated = 0;
+            for (size_t j = 0; j < front_size && !dominated; j++) {
+                if (dominates(&pop->individuals[front[j]], &pop->individuals[idx_i])) {
+                    dominated = 1;
+                }
+            }
+            if (!dominated) {
+                front[front_size++] = idx_i;
+            }
+        }
+
+        /* 分配Pareto等级 */
+        for (size_t i = 0; i < front_size; i++) {
+            pop->individuals[front[i]].pareto_rank = rank;
+        }
+
+        /* 压缩活跃列表：移除已分配rank的个体 */
+        size_t new_count = 0;
+        for (size_t i = 0; i < active_count; i++) {
+            if (pop->individuals[active[i]].pareto_rank < 0) {
+                active[new_count++] = active[i];
+            }
+        }
+        active_count = new_count;
+        rank++;
     }
+
+    safe_free((void**)&active);
+    safe_free((void**)&front);
 }
 
 /* 更新种群统计 */
@@ -497,6 +573,11 @@ EvolutionEngine* evolution_engine_create(const EvolutionConfig* config) {
     if (!engine) return NULL;
 
     memcpy(&engine->config, config, sizeof(EvolutionConfig));
+    /* 若调用方未设置染色体范围，使用合理默认值 */
+    if (engine->config.chromosome_min >= engine->config.chromosome_max) {
+        engine->config.chromosome_min = -10.0f;
+        engine->config.chromosome_max = 10.0f;
+    }
     engine->direction = config->direction;
     engine->obj_count = 0;
     engine->eval_counter = 0;

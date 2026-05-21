@@ -1016,7 +1016,12 @@ int dr_generate_hypotheses(DeepReflectionEngine* engine,
         for (size_t variant = 0; variant < 2 && count < max_h; variant++) {
             float hyp_in[DR_EMBED_DIM];
             for (size_t j = 0; j < edim; j++) {
-                float noise = ((float)((seed + i * 37 + variant * 73) % 1000) / 1000.0f - 0.5f) * 0.3f;
+                /* Box-Muller变换生成标准正态噪声：从两个均匀分布伪随机数生成高斯分布 */
+                unsigned int s_a = seed + (unsigned int)(i * 37 + variant * 73 + j * 101);
+                unsigned int s_b = seed + (unsigned int)(i * 53 + variant * 97 + j * 151);
+                float u1 = (float)(s_a % 1000000) / 1000000.0f + 1e-7f;
+                float u2 = (float)(s_b % 1000000) / 1000000.0f;
+                float noise = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265f * u2) * 0.15f;
                 hyp_in[j] = base[j] + noise;
             }
 

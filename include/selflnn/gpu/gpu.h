@@ -154,11 +154,7 @@ typedef struct GpuKernel GpuKernel;
  */
 typedef struct GpuStream GpuStream;
 
-/**
- * @brief GPU上下文句柄
- */
-typedef struct GpuContext GpuContext;
-
+/** GPU上下文句柄前向声明位于文件头部（第42行），此处无需重复 */
 /**
  * @brief 后端可用性标志位
  * @anchor GPU_BACKEND_FLAG

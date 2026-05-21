@@ -184,41 +184,48 @@ static void hash_table_free(HashEntry* table, size_t capacity) {
 }
 
 /**
- * @brief 哈希表插入
+ * @brief 哈希表插入（P2-046: 支持负载因子检查与动态扩容信号）
  * 
  * @param table 哈希表指针
  * @param capacity 哈希表容量
  * @param key 键
  * @param value 值
- * @return int 成功返回0，失败返回-1
+ * @param occupied_count 指向已占用条目计数的指针（可选，用于负载因子检查）
+ * @return int 0=成功, -1=表满, -2=负载因子>0.7需扩容, 正数=更新已有键
  */
-static int hash_table_insert(HashEntry* table, size_t capacity, const char* key, GraphNode* value) {
+static int hash_table_insert(HashEntry* table, size_t capacity, const char* key,
+                              GraphNode* value, size_t* occupied_count) {
     if (!table || !key || capacity == 0) return -1;
-    
+
+    /* P2-046: 负载因子检查 — 超过0.7需要扩容 */
+    if (occupied_count && *occupied_count * 10 >= capacity * 7) return -2;
+
     unsigned long hash = hash_string(key) % capacity;
     size_t original_index = hash;
-    
-    // 线性探测
+
+    /* 线性探测 */
     while (table[hash].occupied) {
         if (table[hash].key && strcmp(table[hash].key, key) == 0) {
-            // 键已存在，更新值
+            /* 键已存在，更新值 */
             table[hash].value = value;
-            return 0;
+            return 1;  /* 更新已有键，不增加计数 */
         }
-        
+
         hash = (hash + 1) % capacity;
         if (hash == original_index) {
-            // 哈希表已满
+            /* 哈希表已满 */
+            if (occupied_count) return -2;  /* 信号触发扩容 */
             return -1;
         }
     }
-    
-    // 插入新条目
+
+    /* 插入新条目 */
     table[hash].key = string_duplicate(key);
     if (!table[hash].key) return -1;
-    
+
     table[hash].value = value;
     table[hash].occupied = 1;
+    if (occupied_count) (*occupied_count)++;
     return 0;
 }
 
@@ -270,7 +277,7 @@ static int hash_table_rehash(HashEntry** table_ptr, size_t* capacity_ptr, size_t
     if (!new_table) return -1;
     for (size_t i = 0; i < old_capacity; i++) {
         if (old_table[i].occupied && old_table[i].key) {
-            if (hash_table_insert(new_table, new_capacity, old_table[i].key, old_table[i].value) != 0) {
+            if (hash_table_insert(new_table, new_capacity, old_table[i].key, old_table[i].value, NULL) < 0) {
                 hash_table_free(new_table, new_capacity);
                 return -1;
             }
@@ -283,9 +290,9 @@ static int hash_table_rehash(HashEntry** table_ptr, size_t* capacity_ptr, size_t
 }
 
 /**
- * @brief 安全哈希表插入（自动rehash）
+ * @brief 安全哈希表插入（P2-046: 负载因子>0.7自动rehash）
  *
- * 如果插入失败（表满），自动扩容至2倍后重试。
+ * 跟踪已占用条目计数，当负载因子超过0.7时自动触发2倍扩容并重新哈希。
  * 最多重试3次rehash。
  *
  * @param table_ptr 指向哈希表指针的指针
@@ -297,12 +304,30 @@ static int hash_table_rehash(HashEntry** table_ptr, size_t* capacity_ptr, size_t
 static int hash_table_insert_or_rehash(HashEntry** table_ptr, size_t* capacity_ptr,
                                         const char* key, GraphNode* value) {
     if (!table_ptr || !*table_ptr || !capacity_ptr || !key) return -1;
-    int result = hash_table_insert(*table_ptr, *capacity_ptr, key, value);
-    if (result == 0) return 0;
+
+    /* P2-046: 维护已占用计数，用于负载因子检查 */
+    size_t occupied_count = 0;
+    /* 初始扫描表计算当前已占用数 */
+    for (size_t i = 0; i < *capacity_ptr; i++) {
+        if ((*table_ptr)[i].occupied) occupied_count++;
+    }
+
+    int result = hash_table_insert(*table_ptr, *capacity_ptr, key, value, &occupied_count);
+    if (result >= 0) return 0;  /* 0=插入成功, 1=更新已有键 */
+
+    /* result == -2: 负载因子过高或表满，需要扩容 */
     for (int retry = 0; retry < 3; retry++) {
+        size_t old_capacity = *capacity_ptr;
         if (hash_table_rehash(table_ptr, capacity_ptr, 0) != 0) return -1;
-        result = hash_table_insert(*table_ptr, *capacity_ptr, key, value);
-        if (result == 0) return 0;
+
+        /* P2-046: rehash后重新统计已占用条目数 */
+        occupied_count = 0;
+        for (size_t i = 0; i < *capacity_ptr; i++) {
+            if ((*table_ptr)[i].occupied) occupied_count++;
+        }
+
+        result = hash_table_insert(*table_ptr, *capacity_ptr, key, value, &occupied_count);
+        if (result >= 0) return 0;
     }
     return -1;
 }

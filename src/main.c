@@ -866,7 +866,7 @@ int main(int argc, char* argv[])
             printf("  SELF-LNN核心系统初始化成功\n");
             /* ZSFABC: 初始化能力开关为默认启用状态 */
             capability_reset_to_defaults();
-            /* 创建在线学习器 */
+            /* P0-013修复: 创建在线学习器时提供初始权重，而非NULL导致创建失败 */
             OnlineLearningConfig ol_config;
             memset(&ol_config, 0, sizeof(OnlineLearningConfig));
             ol_config.learning_rate = 0.001f;
@@ -874,7 +874,16 @@ int main(int argc, char* argv[])
             ol_config.window_size = 100;
             ol_config.enable_adaptive_rate = 1;
             ol_config.buffer_size = 1000;
-            void* learner = (void*)online_learner_create(&ol_config, NULL, 0);
+            /* 分配初始权重: 输入维度默认128，在线学习器为线性回归W·input → 标量预测 */
+            size_t nw = 128;
+            float* init_weights = (float*)safe_malloc(nw * sizeof(float));
+            if (init_weights) {
+                for (size_t i = 0; i < nw; i++) {
+                    init_weights[i] = ((float)(rand() % 10000) / 10000.0f - 0.5f) * 0.02f;
+                }
+            }
+            void* learner = (void*)online_learner_create(&ol_config, init_weights, nw);
+            safe_free((void**)&init_weights);
             if (learner) {
                  printf("  在线学习器初始化成功\n");
                  g_online_learner_handle = learner;

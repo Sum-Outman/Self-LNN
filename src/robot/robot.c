@@ -93,6 +93,8 @@ struct Robot {
     float sim_joint_positions[32]; /**< 仿真关节位置 (rad) */
     float sim_joint_velocities[32]; /**< 仿真关节速度 (rad/s) */
     float prev_joint_velocities[32]; /**< 前一时刻关节速度 (rad/s)，用于加速度计算 */
+    float filtered_accel[32];       /**< EMA滤波后关节加速度 (rad/s²)，非static避免线程数据竞争 */
+    float prev_timestamp;           /**< 关节力矩控制上次时间戳，非static避免线程数据竞争 */
     float sim_motor_torques[32];   /**< 仿真电机力矩 (Nm) */
     float sim_environment[10];    /**< 仿真环境参数 */
     float sim_last_update_time;   /**< 仿真最后更新时间 (秒) */
@@ -227,6 +229,7 @@ Robot* robot_create(const RobotConfig* config) {
         robot->sim_joint_positions[i] = 0.0f;
         robot->sim_joint_velocities[i] = 0.0f;
         robot->prev_joint_velocities[i] = 0.0f;
+        robot->filtered_accel[i] = 0.0f;
         robot->sim_motor_torques[i] = 0.0f;
     }
     
@@ -235,6 +238,8 @@ Robot* robot_create(const RobotConfig* config) {
     }
     
     robot->sim_last_update_time = 0.0f;
+    robot->prev_timestamp = 0.0f;
+    robot->last_update_time = 0.0f;
     robot->sim_data_warning = 0; /* 仿真数据警告标记：1=含有仿真数据，禁止用于自主学习训练 */
     for (int i = 0; i < 3; i++) {
         robot->imu_accel[i] = 0.0f;
@@ -461,14 +466,13 @@ int robot_get_status(Robot* robot, RobotStatus* status) {
     PerfTimer timer;
     perf_timer_start(&timer);
     
-    // 更新时间戳（仿真时间）
-    static float last_update_time = 0.0f;
+    /* P1-023修复：使用结构体成员替代static局部变量，避免多线程数据竞争 */
     float current_time = (float)clock() / CLOCKS_PER_SEC;
-    if (last_update_time <= 0.0f) {
-        last_update_time = current_time;
+    if (robot->last_update_time <= 0.0f) {
+        robot->last_update_time = current_time;
     }
     
-    float dt = current_time - last_update_time;
+    float dt = current_time - robot->last_update_time;
     if (dt > 0.0f) {
         robot->status.timestamp = current_time;
         
@@ -520,7 +524,7 @@ int robot_get_status(Robot* robot, RobotStatus* status) {
             }
         }
         
-        last_update_time = current_time;
+        robot->last_update_time = current_time;
     }
     
     // 将仿真状态同步到输出状态
@@ -534,7 +538,17 @@ int robot_get_status(Robot* robot, RobotStatus* status) {
     memcpy(status->joint_positions, robot->sim_joint_positions, 32 * sizeof(float));
     memcpy(status->joint_velocities, robot->sim_joint_velocities, 32 * sizeof(float));
     memcpy(status->joint_torques, robot->sim_motor_torques, 32 * sizeof(float));
-    
+
+    /* P3-075修复: 检查并报告仿真数据异常标志 */
+    if (robot->sim_data_warning) {
+        if (status->state != ROBOT_STATE_ERROR) {
+            status->state = ROBOT_STATE_ERROR;
+        }
+        strncpy(status->error_message, "仿真数据异常(NaN/Inf)，禁止用于自主学习训练",
+                sizeof(status->error_message) - 1);
+        status->error_message[sizeof(status->error_message) - 1] = '\0';
+    }
+
     // 性能统计
     uint64_t elapsed_ns = perf_timer_stop(&timer);
     (void)elapsed_ns;  // 消除未使用变量警告
@@ -698,38 +712,35 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
                 float joint_position = robot->status.joint_positions[i];
                 float joint_velocity = robot->status.joint_velocities[i];
 
-                /* 使用EMA滤波计算平滑加速度，避免有限差分噪声放大 */
-                static float prev_joint_velocities[32] = {0};
-                static float filtered_accel[32] = {0};
-                static float prev_timestamp = 0.0f;
+                /* P1-023修复：使用结构体成员替代static局部变量，避免多线程数据竞争 */
                 float joint_acceleration = 0.0f;
 
                 float current_timestamp = robot->status.timestamp;
-                float dt = (current_timestamp > prev_timestamp) ? (current_timestamp - prev_timestamp) : 0.01f;
+                float dt = (current_timestamp > robot->prev_timestamp) ? (current_timestamp - robot->prev_timestamp) : 0.01f;
 
                 if (dt > 1e-6f) {
                     /* 原始加速度（有限差分） */
-                    float raw_accel = (joint_velocity - prev_joint_velocities[i]) / dt;
-                    prev_joint_velocities[i] = joint_velocity;
+                    float raw_accel = (joint_velocity - robot->prev_joint_velocities[i]) / dt;
+                    robot->prev_joint_velocities[i] = joint_velocity;
 
                     /* EMA低通滤波：a_filtered = α × a_raw + (1-α) × a_prev */
                     float alpha = 0.3f; /* 平滑系数（0=最强滤波，1=无滤波） */
                     if (dt < 0.005f) alpha = 0.15f; /* 高频采样时增强滤波 */
-                    float prev_filtered = filtered_accel[i];
-                    filtered_accel[i] = alpha * raw_accel + (1.0f - alpha) * prev_filtered;
+                    float prev_filtered = robot->filtered_accel[i];
+                    robot->filtered_accel[i] = alpha * raw_accel + (1.0f - alpha) * prev_filtered;
 
                     /* 限幅防止异常值 */
                     float max_reasonable_accel = 500.0f;
-                    if (filtered_accel[i] > max_reasonable_accel)
-                        filtered_accel[i] = max_reasonable_accel;
-                    if (filtered_accel[i] < -max_reasonable_accel)
-                        filtered_accel[i] = -max_reasonable_accel;
+                    if (robot->filtered_accel[i] > max_reasonable_accel)
+                        robot->filtered_accel[i] = max_reasonable_accel;
+                    if (robot->filtered_accel[i] < -max_reasonable_accel)
+                        robot->filtered_accel[i] = -max_reasonable_accel;
 
-                    joint_acceleration = filtered_accel[i];
+                    joint_acceleration = robot->filtered_accel[i];
                 }
 
                 if (i == 0) {
-                    prev_timestamp = current_timestamp;
+                    robot->prev_timestamp = current_timestamp;
                 }
                 
                 // 1. 重力补偿：τ_gravity = m * g * l * sin(q)
@@ -2250,6 +2261,34 @@ static void robot_sim_apply_command(Robot* robot, const RobotCommand* command) {
             float error = command->target_joint_positions[i] - robot->sim_joint_positions[i];
             float gain = 5.0f; // 关节P增益
             robot->sim_joint_velocities[i] = error * gain;
+        }
+    }
+
+    /* P3-075修复: 检测仿真数据中是否存在NaN/Inf，若发现则标记sim_data_warning */
+    {
+        int has_nan_inf = 0;
+        /* 检查仿真位置 */
+        for (int i = 0; i < 3 && !has_nan_inf; i++) {
+            if (isnan(robot->sim_position[i]) || isinf(robot->sim_position[i])) has_nan_inf = 1;
+        }
+        /* 检查仿真速度 */
+        for (int i = 0; i < 3 && !has_nan_inf; i++) {
+            if (isnan(robot->sim_velocity[i]) || isinf(robot->sim_velocity[i])) has_nan_inf = 1;
+        }
+        /* 检查关节位置 */
+        for (int i = 0; i < robot->config.num_joints && i < 32 && !has_nan_inf; i++) {
+            if (isnan(robot->sim_joint_positions[i]) || isinf(robot->sim_joint_positions[i])) has_nan_inf = 1;
+        }
+        /* 检查关节速度 */
+        for (int i = 0; i < robot->config.num_joints && i < 32 && !has_nan_inf; i++) {
+            if (isnan(robot->sim_joint_velocities[i]) || isinf(robot->sim_joint_velocities[i])) has_nan_inf = 1;
+        }
+        /* 检查力矩 */
+        for (int i = 0; i < robot->config.num_joints && i < 32 && !has_nan_inf; i++) {
+            if (isnan(robot->sim_motor_torques[i]) || isinf(robot->sim_motor_torques[i])) has_nan_inf = 1;
+        }
+        if (has_nan_inf) {
+            robot->sim_data_warning = 1;
         }
     }
 }
@@ -3951,9 +3990,9 @@ int robot_read_sensor_valid(Robot* robot, int sensor_type, float* value, int* va
 int robot_get_all_sensor_validity(Robot* robot, int* validity_bitmask) {
     if (!robot || !validity_bitmask) return -1;
     int mask = 0;
-    float dummy; int v;
+    float unused_result; int v;
     for (int s = 0; s < 8; s++) {
-        if (robot_read_sensor_valid(robot, s, &dummy, &v) == 0 && v)
+        if (robot_read_sensor_valid(robot, s, &unused_result, &v) == 0 && v)
             mask |= (1 << s);
     }
     *validity_bitmask = mask;

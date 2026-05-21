@@ -361,15 +361,34 @@ int vision_cfc_detect(const float* image, int width, int height, int channels,
     if (!image || !detections || !num_found || !vision_lnn) return -1;
     *num_found = 0;
 
+    /* P3-074修复: 从LNN运行时配置获取hidden_size，动态计算检测布局 */
+    LNNConfig lnn_cfg;
+    memset(&lnn_cfg, 0, sizeof(LNNConfig));
+    int hidden_size = CFC_VISION_HIDDEN_DIM;
+    if (vision_lnn && lnn_get_config(vision_lnn, &lnn_cfg) == 0 && lnn_cfg.hidden_size > 0) {
+        hidden_size = (int)lnn_cfg.hidden_size;
+    }
+
+    /* P0-004修复: 使用动态类别数 */
+    int num_classes = vision_class_get_count(vision_class_registry_get_global());
+    if (num_classes <= 0) num_classes = VISION_CLASS_DEFAULT_COUNT;
+    int per_det_dim = 5 + num_classes;
+
+    /* 动态计算分组：groups条带数，每带了per_group个检测 */
+    int groups = CFC_VISION_MAX_OBJECTS / 10;
+    if (groups < 1) groups = 1;
+    int per_group = (hidden_size / groups) / per_det_dim;
+    if (per_group < 1) per_group = 1;
+
     int total_values = width * height * channels;
     float* cfc_input = (float*)safe_calloc(CFC_VISION_INPUT_DIM, sizeof(float));
-    float* cfc_hidden = (float*)safe_calloc(CFC_VISION_HIDDEN_DIM, sizeof(float));
+    float* cfc_hidden = (float*)safe_calloc((size_t)hidden_size, sizeof(float));
     if (!cfc_input || !cfc_hidden) {
         safe_free((void**)&cfc_input); safe_free((void**)&cfc_hidden);
         return -1;
     }
 
-    /* 自适应降采样到1024维：使用双线性空间插值而非简单stride跳变 */
+    /* 自适应降采样到CFC_VISION_INPUT_DIM维：使用双线性空间插值而非简单stride跳变 */
     if (total_values <= CFC_VISION_INPUT_DIM) {
         memcpy(cfc_input, image, (size_t)total_values * sizeof(float));
     } else {
@@ -391,16 +410,11 @@ int vision_cfc_detect(const float* image, int width, int height, int channels,
 
     lnn_forward(vision_lnn, cfc_input, cfc_hidden);
 
-    /* 50检测×85=4250维 使用分组解码头 */
-    int groups = CFC_VISION_MAX_OBJECTS / 10; /* 5组，每组10个检测 */
-    int per_group = 10;
-    int out_idx = 0;
-
     for (int g = 0; g < groups; g++) {
-        int group_hidden_offset = g * (CFC_VISION_HIDDEN_DIM / groups);
+        int group_hidden_offset = g * (hidden_size / groups);
         for (int d = 0; d < per_group && *num_found < max_detections; d++) {
-            int base = group_hidden_offset + d * 85;
-            if (base + 4 >= CFC_VISION_HIDDEN_DIM) break;
+            int base = group_hidden_offset + d * per_det_dim;
+            if (base + 4 >= hidden_size) break;
 
             float cx = cfc_hidden[base] * (float)width;
             float cy = cfc_hidden[base + 1] * (float)height;
@@ -409,17 +423,12 @@ int vision_cfc_detect(const float* image, int width, int height, int channels,
             float conf = 1.0f / (1.0f + expf(-cfc_hidden[base + 4]));
             if (conf < 0.3f) continue;
 
-            /* P0-004修复: 使用动态类别数替代固定CFC_VISION_CLASS_MAX */
-            int num_classes = vision_class_get_count(vision_class_registry_get_global());
-            if (num_classes <= 0) num_classes = VISION_CLASS_DEFAULT_COUNT;
-            int per_det_dim = 5 + num_classes; /* cx,cy,w,h,conf + N类logits */
             int logits_end = base + per_det_dim;
-
             float* class_logits = (float*)safe_calloc((size_t)num_classes, sizeof(float));
             int class_id = 0;
             float max_prob = 0.0f;
 
-            if (class_logits && logits_end <= CFC_VISION_HIDDEN_DIM) {
+            if (class_logits && logits_end <= hidden_size) {
                 for (int c = 0; c < num_classes; c++)
                     class_logits[c] = cfc_hidden[base + 5 + c];
                 _softmax(class_logits, num_classes);
@@ -1182,35 +1191,46 @@ int vision_enhanced_cfc_detect(const float* features, int feature_dim,
     if (!features || !detections || !num_found || !vision_lnn) return -1;
     *num_found = 0;
 
+    /* P3-074修复: 从LNN运行时配置获取hidden_size，取代硬编码CFC_VISION_HIDDEN_DIM */
+    LNNConfig lnn_cfg;
+    memset(&lnn_cfg, 0, sizeof(LNNConfig));
+    int hidden_size = CFC_VISION_HIDDEN_DIM;
+    if (vision_lnn && lnn_get_config(vision_lnn, &lnn_cfg) == 0 && lnn_cfg.hidden_size > 0) {
+        hidden_size = (int)lnn_cfg.hidden_size;
+    }
+
     /* P0-004修复: 获取动态类别数 */
     int num_classes = vision_class_get_count(vision_class_registry_get_global());
     if (num_classes <= 0) num_classes = VISION_CLASS_DEFAULT_COUNT;
     /* 每个检测编码: cx,cy,w,h,conf + N类logits = 5+num_classes */
     int per_det_dim = 5 + num_classes;
 
+    /* 动态分组：根据hidden_size和per_det_dim计算合理的组数和每组检测数 */
+    int groups = 5;
+    if (groups < 1) groups = 1;
+    int per_g = (hidden_size / groups) / per_det_dim;
+    if (per_g < 1) per_g = 1;
+
     int in_dim = feature_dim < CFC_VISION_INPUT_DIM ? feature_dim : CFC_VISION_INPUT_DIM;
     float* in_buf = (float*)safe_calloc(CFC_VISION_INPUT_DIM, sizeof(float));
-    float* hid_buf = (float*)safe_calloc(CFC_VISION_HIDDEN_DIM, sizeof(float));
+    float* hid_buf = (float*)safe_calloc((size_t)hidden_size, sizeof(float));
     if (!in_buf || !hid_buf) { safe_free((void**)&in_buf); safe_free((void**)&hid_buf); return -1; }
     memcpy(in_buf, features, (size_t)in_dim * sizeof(float));
 
     lnn_forward(vision_lnn, in_buf, hid_buf);
 
-    /* 分组解码：5组×10检测 = 50个检测对象（每检测per_det_dim维） */
-    int groups = 5;
-    int per_g = 10;
     for (int g = 0; g < groups; g++) {
-        int off = g * (CFC_VISION_HIDDEN_DIM / groups);
+        int off = g * (hidden_size / groups);
         for (int d = 0; d < per_g && *num_found < max_detections; d++) {
             int b = off + d * per_det_dim;
-            if (b + 4 >= CFC_VISION_HIDDEN_DIM) break;
+            if (b + 4 >= hidden_size) break;
             float cx = hid_buf[b], cy = hid_buf[b+1];
             float w = fabsf(hid_buf[b+2]) * 0.5f + 0.02f;
             float h_img = fabsf(hid_buf[b+3]) * 0.5f + 0.02f;
             float conf = 1.0f/(1.0f+expf(-hid_buf[b+4]));
             if (conf < 0.25f) continue;
 
-            int ok = (b + per_det_dim <= CFC_VISION_HIDDEN_DIM);
+            int ok = (b + per_det_dim <= hidden_size);
             int best = 0;
             float* logits = (float*)safe_calloc((size_t)num_classes, sizeof(float));
             if (ok && logits) {

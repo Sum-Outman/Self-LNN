@@ -190,12 +190,25 @@ int unified_lnn_state_step(UnifiedLNNState* state,
         const float* bias = state->modality_biases[m];
         const float* raw = raw_inputs[m];
 
+        /* P1-031修复: 跨模态维度差异归一化
+         * 不同模态维度差异巨大（视觉1024 vs 触觉64），直接投影求和
+         * 导致高维模态主导输出。先对原始输入做L2归一化，再按sqrt(dim)缩放
+         * 使各模态对combined_input的贡献处于相同量级。 */
+        float raw_l2_norm = 0.0f;
+        for (size_t j = 0; j < actual_raw; j++) {
+            raw_l2_norm += raw[j] * raw[j];
+        }
+        raw_l2_norm = sqrtf(raw_l2_norm + 1e-12f);
+        float inv_norm = 1.0f / raw_l2_norm;
+        /* 缩放因子: sqrt(state_dim/raw_dim)使不同维度模态贡献均衡 */
+        float dim_scale = sqrtf((float)state_dim / (float)(actual_raw + 1));
+
         for (size_t i = 0; i < state_dim; i++) {
             float dot = bias ? bias[i] : 0.0f;
             for (size_t j = 0; j < actual_raw; j++) {
-                dot += proj[i * raw_dim + j] * raw[j];
+                dot += proj[i * raw_dim + j] * raw[j] * inv_norm;
             }
-            state->combined_input_buffer[i] += dot;
+            state->combined_input_buffer[i] += dot * dim_scale;
         }
     }
 
@@ -335,6 +348,77 @@ int unified_lnn_state_train_step(UnifiedLNNState* state,
         loss = sqrtf(loss / (float)tgt_size);
     }
     if (loss_out) *loss_out = loss;
+
+    /* P0-010修复: 在线学习梯度反向传播到共享LNN内部
+     * 原代码仅计算损失值但从不反向传播，学习信号在输出投影处截断。
+     * 修复流程：
+     *   1. 计算输出投影层的损失梯度 dL/d(output)
+     *   2. 更新输出投影权重 W_out 和偏置 b_out (SGD)
+     *   3. 通过链式法则将误差反向传播到LNN隐藏状态 dL/dh
+     *   4. 构造虚拟目标并调用 lnn_backward 传播误差到CfC内部
+     * 确保梯度流经: 损失→输出投影→LNN→CfC门控/ODE/时间常数
+     * P0-010修复: 完整梯度链（使用LNN API避免不完整类型访问） */
+    LNNConfig lnn_cfg;
+    if (state->shared_lnn && lnn_get_config(state->shared_lnn, &lnn_cfg) == 0
+        && lnn_cfg.enable_training
+        && target_output && loss > 1e-8f && tgt_size > 0) {
+
+        size_t state_dim = state->config.state_dimension;
+        float lr = state->config.learning_rate;
+        float* h = state->hidden_state_buffer;
+        float inv_n = 1.0f / (float)tgt_size;
+
+        /* 步骤1: 输出投影损失梯度
+         * MSE: L = sqrt(mean((out-target)^2))
+         * dL/d(out[i]) = (out[i] - target[i]) / (loss * N)
+         * 当loss很小时使用 safe_inv_loss */
+        float safe_inv_loss = 1.0f / (loss * (float)tgt_size + 1e-10f);
+        float dL_dout[UNIFIED_LNN_DEFAULT_OUTPUT_DIM];
+        for (size_t i = 0; i < tgt_size; i++) {
+            dL_dout[i] = (temp_output[i] - target_output[i]) * safe_inv_loss;
+        }
+
+        /* 步骤2: 更新输出投影权重（线性层 SGD）
+         * W_out[i,j] -= lr * dL/dout[i] * h[j]
+         * b_out[i] -= lr * dL/dout[i] */
+        for (size_t i = 0; i < tgt_size; i++) {
+            float lr_dout = lr * dL_dout[i];
+            for (size_t j = 0; j < state_dim; j++) {
+                state->output_weight[i * state_dim + j] -= lr_dout * h[j];
+            }
+            if (state->output_bias) {
+                state->output_bias[i] -= lr_dout;
+            }
+        }
+
+        /* 步骤3: 链式法则传播误差到LNN隐藏状态
+         * dL/dh[j] = Σ_i W_out[i,j] * dL/dout[i] */
+        float* dL_dh = (float*)calloc(state_dim, sizeof(float));
+        if (dL_dh) {
+            for (size_t j = 0; j < state_dim; j++) {
+                for (size_t i = 0; i < tgt_size; i++) {
+                    dL_dh[j] += state->output_weight[i * state_dim + j] * dL_dout[i];
+                }
+            }
+
+            /* 步骤4: 构造虚拟目标并调用lnn_backward进行完整反向传播
+             * virtual_target[j] = h[j] - dL_dh[j]
+             * lnn_backward内部: error = 2*(output - target)/N
+             * = 2*(h - (h - dL_dh))/N = 2*dL_dh/N → 梯度方向正确 */
+            float* virtual_target = (float*)calloc(state_dim, sizeof(float));
+            if (virtual_target) {
+                for (size_t j = 0; j < state_dim; j++) {
+                    virtual_target[j] = h[j] - dL_dh[j];
+                }
+
+                float backward_loss = 0.0f;
+                lnn_backward(state->shared_lnn, virtual_target, &backward_loss);
+                free(virtual_target);
+            }
+            free(dL_dh);
+        }
+    }
+
     return 0;
 }
 

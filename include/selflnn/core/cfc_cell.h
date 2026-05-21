@@ -39,7 +39,8 @@ typedef enum {
     ODE_SOLVER_CTBP = 3,        /**< 连续时间反向传播法（精确梯度计算） */
     ODE_SOLVER_DP54 = 4,        /**< Dormand-Prince 5(4)自适应步长求解器（7阶Butcher table，更优误差控制） */
     ODE_SOLVER_ROSENBROCK = 5,  /**< Rosenbrock刚性方程求解器（隐式RK-L稳定，支持刚性动态） */
-    ODE_SOLVER_SYMPLECTIC = 6   /**< Forest-Ruth辛积分器（4阶辛几何，保守系统能量守恒） */
+    ODE_SOLVER_SYMPLECTIC = 6,  /**< Forest-Ruth辛积分器（4阶辛几何，保守系统能量守恒） */
+    ODE_SOLVER_RHS = 7          /**< P2-041修复: 直接RHS评估器（前向欧拉步，使用cfc_cell_compute_rhs作为备选求解器） */
 } OdeSolverType;
 
 /**
@@ -74,7 +75,8 @@ typedef struct {
     float noise_std;               /**< 噪声标准差 */
     int enable_adaptation;         /**< 是否启用参数自适应 */
     float delta_t;                 /**< 时间步长（秒），默认1.0，支持连续时间动态 */
-    int ode_solver_type;           /**< ODE求解器类型：0=闭式解，1=RK4，2=RK45，3=CTBP，4=DP54，5=Rosenbrock，6=Forest-Ruth辛 */
+    int delta_t_explicitly_set;    /**< P2-042修复: 调用者是否显式设置了delta_t（0=使用默认，1=显式设置），解决1.0既是合法配置又是默认值的歧义 */
+    int ode_solver_type;           /**< ODE求解器类型：0=闭式解，1=RK4，2=RK45，3=CTBP，4=DP54，5=Rosenbrock，6=Forest-Ruth辛，7=RHS直接评估 */
     RK45Config rk45_config;        /**< RK45自适应求解器配置 */
     CTBPConfig ctbp_config;        /**< CTBP连续时间反向传播配置 */
     DP54Config dp54_config;        /**< DP54自适应步长求解器配置 */
@@ -191,6 +193,7 @@ struct CfCCell {
     int use_adaptive_tau;
     float min_time_constant;
     float max_time_constant;
+    float* forward_tau_used;    /**< P1-019修复: 前向传播实际使用的tau值 [hidden_size]，反向传播直接读取避免不一致 */
     float* input_gate_weight_grad;
     float* output_gate_weight_grad;
     float* forget_gate_weight_grad;

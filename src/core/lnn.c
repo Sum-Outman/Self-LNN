@@ -11,6 +11,7 @@
  */
 
 #define SELFLNN_IMPLEMENTATION
+#define SELFLNN_CORE_INTERNAL
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/cfc.h"
 #include "selflnn/core/cfc_cell.h"
@@ -2507,54 +2508,216 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
         return ret;
     }
 
-    /* 步骤2: 应用优化器更新参数 */
-    if (optimizer) {
+    /* P0-011修复: 步骤2 — 扩展优化器参数收集范围
+     * 原代码仅收集cfc_network->weight_matrix并使用gradient_buffer(隐藏状态梯度)
+     * 误作为参数梯度。门控权重/时间常数/cell级参数被完全跳过。
+     * 修复：
+     *   1. 收集规范参数(weight_matrix, bias_vector)及其正确梯度
+     *   2. 遍历所有CfC层收集cell级独立参数(input_gate_weights, gate_biases,
+     *      time_constants, hidden_to_gate_weights, hidden_to_activation_weights)
+     *   3. 统一通过优化器更新后分别写回
+     *   4. 调用cfc_sync_shared_to_cells同步规范参数到各层 */
+    if (optimizer && network->cfc_network) {
+        CfCNetwork* cfc = network->cfc_network;
         size_t hidden_size = network->config.hidden_size;
-        size_t output_size = network->config.output_size;
         size_t input_size = network->config.input_size;
+        int num_layers = cfc->config.num_layers;
+        const size_t MAX_PARAMS = 1048576;
 
-        /* 收集所有可训练参数和梯度 */
-        size_t total_params = 0;
-        /* 估计总参数数: hidden^2 + hidden*input + hidden*output + biases */
-        total_params = hidden_size * hidden_size + hidden_size * input_size 
-                     + hidden_size * output_size + hidden_size * 4;
-        if (total_params > 1048576) total_params = 1048576; /* 上限1M参数 */
+        /* 计算规范参数大小 */
+        size_t shared_w_count;
+        if (num_layers <= 1) {
+            shared_w_count = input_size * hidden_size;
+        } else {
+            shared_w_count = hidden_size * hidden_size;
+        }
+        size_t shared_b_count = hidden_size;
+
+        /* 计算cell级独立参数总大小 */
+        size_t cell_unique_params = 0;
+        for (int l = 0; l < num_layers; l++) {
+            CfCCell* cell = cfc->layers[l];
+            if (!cell) continue;
+            size_t layer_input = (l == 0) ? input_size : hidden_size;
+            cell_unique_params += layer_input * hidden_size;  /* input_gate_weights */
+            if (cell->gate_biases) cell_unique_params += hidden_size * 3;
+            if (cell->use_adaptive_tau && cell->time_constants) cell_unique_params += hidden_size;
+            if (cell->hidden_to_gate_weights) cell_unique_params += hidden_size * hidden_size;
+            if (cell->hidden_to_activation_weights) cell_unique_params += hidden_size * hidden_size;
+        }
+
+        size_t total_params = shared_w_count + shared_b_count + cell_unique_params;
+        if (total_params > MAX_PARAMS) total_params = MAX_PARAMS;
 
         float* all_params = (float*)safe_calloc(total_params, sizeof(float));
         float* all_grads = (float*)safe_calloc(total_params, sizeof(float));
 
         if (all_params && all_grads) {
-            /* 从CfC网络提取参数和梯度 */
-            size_t param_idx = 0;
-            if (network->cfc_network && network->cfc_network->weight_matrix) {
-                size_t n_params = hidden_size * hidden_size;
-                if (n_params + param_idx <= total_params) {
-                    memcpy(all_params + param_idx, network->cfc_network->weight_matrix,
-                           n_params * sizeof(float));
-                    if (network->gradient_buffer && hidden_size <= total_params) {
-                        /* 梯度缓冲区包含累积的梯度 */
-                        memcpy(all_grads + param_idx, network->gradient_buffer,
-                               hidden_size * sizeof(float));
+            size_t idx = 0;
+
+            /* --- 收集规范参数: weight_matrix --- */
+            if (cfc->weight_matrix && idx + shared_w_count <= total_params) {
+                memcpy(all_params + idx, cfc->weight_matrix, shared_w_count * sizeof(float));
+                if (cfc->weight_gradients) {
+                    memcpy(all_grads + idx, cfc->weight_gradients, shared_w_count * sizeof(float));
+                }
+                idx += shared_w_count;
+            }
+
+            /* --- 收集规范参数: bias_vector --- */
+            if (cfc->bias_vector && idx + shared_b_count <= total_params) {
+                memcpy(all_params + idx, cfc->bias_vector, shared_b_count * sizeof(float));
+                if (cfc->bias_gradients) {
+                    memcpy(all_grads + idx, cfc->bias_gradients, shared_b_count * sizeof(float));
+                }
+                idx += shared_b_count;
+            }
+
+            /* --- 收集各层cell独立参数 --- */
+            for (int l = 0; l < num_layers; l++) {
+                CfCCell* cell = cfc->layers[l];
+                if (!cell) continue;
+                size_t layer_input = (l == 0) ? input_size : hidden_size;
+
+                /* input_gate_weights */
+                if (cell->input_gate_weights && idx + layer_input * hidden_size <= total_params) {
+                    size_t n = layer_input * hidden_size;
+                    memcpy(all_params + idx, cell->input_gate_weights, n * sizeof(float));
+                    if (cell->input_gate_weight_grad) {
+                        memcpy(all_grads + idx, cell->input_gate_weight_grad, n * sizeof(float));
                     }
-                    param_idx += n_params;
+                    idx += n;
+                }
+
+                /* gate_biases */
+                if (cell->gate_biases && idx + hidden_size * 3 <= total_params) {
+                    size_t n = hidden_size * 3;
+                    memcpy(all_params + idx, cell->gate_biases, n * sizeof(float));
+                    if (cell->gate_bias_grad) {
+                        memcpy(all_grads + idx, cell->gate_bias_grad, n * sizeof(float));
+                    }
+                    idx += n;
+                }
+
+                /* time_constants (自适应τ) */
+                if (cell->use_adaptive_tau && cell->time_constants 
+                    && idx + hidden_size <= total_params) {
+                    memcpy(all_params + idx, cell->time_constants, hidden_size * sizeof(float));
+                    if (cell->time_constant_grad) {
+                        memcpy(all_grads + idx, cell->time_constant_grad, hidden_size * sizeof(float));
+                    }
+                    idx += hidden_size;
+                }
+
+                /* hidden_to_gate_weights */
+                if (cell->hidden_to_gate_weights && idx + hidden_size * hidden_size <= total_params) {
+                    size_t n = hidden_size * hidden_size;
+                    memcpy(all_params + idx, cell->hidden_to_gate_weights, n * sizeof(float));
+                    if (cell->hidden_to_gate_weight_grad) {
+                        memcpy(all_grads + idx, cell->hidden_to_gate_weight_grad, n * sizeof(float));
+                    }
+                    idx += n;
+                }
+
+                /* hidden_to_activation_weights */
+                if (cell->hidden_to_activation_weights && idx + hidden_size * hidden_size <= total_params) {
+                    size_t n = hidden_size * hidden_size;
+                    memcpy(all_params + idx, cell->hidden_to_activation_weights, n * sizeof(float));
+                    if (cell->hidden_to_activation_weight_grad) {
+                        memcpy(all_grads + idx, cell->hidden_to_activation_weight_grad, n * sizeof(float));
+                    }
+                    idx += n;
                 }
             }
 
             /* 执行优化器步进 */
-            if (param_idx > 0) {
-                optimizer_step(optimizer, all_params, all_grads, param_idx, network->backward_count);
-                
-                /* 将更新后的参数写回CfC网络 */
-                if (network->cfc_network && network->cfc_network->weight_matrix) {
-                    size_t write_back = param_idx < hidden_size * hidden_size ? 
-                                      param_idx : hidden_size * hidden_size;
-                    memcpy(network->cfc_network->weight_matrix, all_params,
-                           write_back * sizeof(float));
+            if (idx > 0) {
+                optimizer_step(optimizer, all_params, all_grads, idx, network->backward_count);
+
+                /* 回写参数: 重置索引 */
+                size_t widx = 0;
+
+                /* 回写规范参数: weight_matrix */
+                if (cfc->weight_matrix && widx + shared_w_count <= idx) {
+                    memcpy(cfc->weight_matrix, all_params + widx, shared_w_count * sizeof(float));
+                    widx += shared_w_count;
                 }
 
-                /* 清零梯度缓冲区 */
-                if (network->gradient_buffer) {
-                    memset(network->gradient_buffer, 0, hidden_size * sizeof(float));
+                /* 回写规范参数: bias_vector */
+                if (cfc->bias_vector && widx + shared_b_count <= idx) {
+                    memcpy(cfc->bias_vector, all_params + widx, shared_b_count * sizeof(float));
+                    widx += shared_b_count;
+                }
+
+                /* 回写各层cell独立参数 */
+                for (int l = 0; l < num_layers; l++) {
+                    CfCCell* cell = cfc->layers[l];
+                    if (!cell) continue;
+                    size_t layer_input = (l == 0) ? input_size : hidden_size;
+
+                    if (cell->input_gate_weights && widx + layer_input * hidden_size <= idx) {
+                        size_t n = layer_input * hidden_size;
+                        memcpy(cell->input_gate_weights, all_params + widx, n * sizeof(float));
+                        widx += n;
+                    }
+
+                    if (cell->gate_biases && widx + hidden_size * 3 <= idx) {
+                        size_t n = hidden_size * 3;
+                        memcpy(cell->gate_biases, all_params + widx, n * sizeof(float));
+                        widx += n;
+                    }
+
+                    if (cell->use_adaptive_tau && cell->time_constants 
+                        && widx + hidden_size <= idx) {
+                        memcpy(cell->time_constants, all_params + widx, hidden_size * sizeof(float));
+                        /* 时间常数范围裁剪 */
+                        for (size_t k = 0; k < hidden_size; k++) {
+                            if (cell->time_constants[k] < cell->min_time_constant)
+                                cell->time_constants[k] = cell->min_time_constant;
+                            if (cell->time_constants[k] > cell->max_time_constant)
+                                cell->time_constants[k] = cell->max_time_constant;
+                        }
+                        widx += hidden_size;
+                    }
+
+                    if (cell->hidden_to_gate_weights && widx + hidden_size * hidden_size <= idx) {
+                        size_t n = hidden_size * hidden_size;
+                        memcpy(cell->hidden_to_gate_weights, all_params + widx, n * sizeof(float));
+                        widx += n;
+                    }
+
+                    if (cell->hidden_to_activation_weights && widx + hidden_size * hidden_size <= idx) {
+                        size_t n = hidden_size * hidden_size;
+                        memcpy(cell->hidden_to_activation_weights, all_params + widx, n * sizeof(float));
+                        widx += n;
+                    }
+                }
+
+                /* 同步规范参数到各层cell的weight_matrix/bias_vector */
+                cfc_sync_shared_to_cells(cfc);
+
+                /* 清零规范梯度缓冲区 */
+                if (cfc->weight_gradients) {
+                    memset(cfc->weight_gradients, 0, shared_w_count * sizeof(float));
+                }
+                if (cfc->bias_gradients) {
+                    memset(cfc->bias_gradients, 0, shared_b_count * sizeof(float));
+                }
+                /* 清零cell级梯度缓冲区（已通过优化器消费） */
+                for (int l = 0; l < num_layers; l++) {
+                    CfCCell* cell = cfc->layers[l];
+                    if (!cell) continue;
+                    size_t layer_input = (l == 0) ? input_size : hidden_size;
+                    if (cell->input_gate_weight_grad)
+                        memset(cell->input_gate_weight_grad, 0, layer_input * hidden_size * sizeof(float));
+                    if (cell->gate_bias_grad)
+                        memset(cell->gate_bias_grad, 0, hidden_size * 3 * sizeof(float));
+                    if (cell->time_constant_grad)
+                        memset(cell->time_constant_grad, 0, hidden_size * sizeof(float));
+                    if (cell->hidden_to_gate_weight_grad)
+                        memset(cell->hidden_to_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
+                    if (cell->hidden_to_activation_weight_grad)
+                        memset(cell->hidden_to_activation_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
                 }
             }
         }
@@ -2563,7 +2726,7 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
         safe_free((void**)&all_grads);
     }
 
-    /* 步骤3: 统一应用cell级梯度（如果优化器未处理cell参数） */
+    /* 步骤3: 无优化器时使用SGD应用cell级梯度 */
     if (!optimizer && network->cfc_network) {
         cfc_apply_cell_gradients(network->cfc_network, network->config.learning_rate);
     }

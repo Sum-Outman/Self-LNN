@@ -1432,7 +1432,11 @@ int swarm_allocate_hungarian(SwarmController* controller)
     int i, j;
     for (i = 0; i < n_tasks; i++)
         if (controller->tasks[i].is_completed || controller->tasks[i].is_assigned) { swarm_unlock(controller); return 0; }
-    if (n_tasks > HUNGARIAN_MAX || n_robots > HUNGARIAN_MAX) { swarm_unlock(controller); return -1; }
+    /* P3-071修复: 超出HUNGARIAN_MAX(256)时回退到贪婪/拍卖分配，而非直接失败 */
+    if (n_tasks > HUNGARIAN_MAX || n_robots > HUNGARIAN_MAX) {
+        swarm_unlock(controller);
+        return swarm_allocate_tasks(controller);
+    }
     int n = SWARM_MAX(n_tasks, n_robots);
     float cost[256][256];
     int m = n;
@@ -1527,7 +1531,7 @@ int swarm_allocate_hungarian(SwarmController* controller)
 #define SWARM_UDP_SYNC_VERSION    1
 #define SWARM_UDP_MAX_PAYLOAD     4096
 #define SWARM_UDP_MULTICAST_IP    "239.192.88.1"  /* 私有组播地址 */
-#define SWARM_UDP_TTL             8
+#define SWARM_UDP_TTL             1   /* 限制在局域网内，不穿透路由器 */
 
 #pragma pack(push, 1)
 typedef struct {

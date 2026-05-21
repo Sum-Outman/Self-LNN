@@ -35,6 +35,7 @@ RosenbrockConfig ode_rosenbrock_default_config(void)
     cfg.max_iterations = 10000;
     cfg.use_finite_diff_jacobian = 1;
     cfg.finite_diff_eps = 1e-6f;
+    cfg.jacobian_bandwidth = 8;     /* P2-044: 液态NN默认带状宽度，0=全矩阵 */
     return cfg;
 }
 
@@ -768,14 +769,63 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             }
         }
     } else if (use_omp) {
-        /* ZSFAB P1-002修复: 消除双重RHS调用 - 并行路径与串行回退互斥 */
+        /* P0-007修复: 无域分解并行RHS数据竞争
+         * 原代码多线程并发写入同一dydt数组产生数据竞争。
+         * 修复：每线程分配独立临时dydt缓冲区，
+         * 并行计算后通过OMP critical将结果reduce到主dydt。 */
 #ifdef _OPENMP
-        #pragma omp parallel
         {
-            float* local_dydt = dydt;
-            const float* local_y = y;
-            int ret = rhs(t, local_y, local_dydt, ctx);
-            if (ret != 0) { (void)ret; }
+            int max_threads = (num_threads > 0) ? num_threads : omp_get_max_threads();
+            if (max_threads < 1) max_threads = 1;
+            if (max_threads > 64) max_threads = 64;
+
+            float** thread_dydt_buffers = (float**)calloc((size_t)max_threads, sizeof(float*));
+            int alloc_ok = (thread_dydt_buffers != NULL);
+
+            if (alloc_ok) {
+                for (int ti = 0; ti < max_threads; ti++) {
+                    thread_dydt_buffers[ti] = (float*)calloc(n, sizeof(float));
+                    if (!thread_dydt_buffers[ti]) { alloc_ok = 0; break; }
+                }
+            }
+
+            if (alloc_ok) {
+                /* 清零主dydt，各线程写入独立缓冲区后通过critical累加 */
+                memset(dydt, 0, n * sizeof(float));
+#pragma omp parallel
+                {
+                    int tid = omp_get_thread_num();
+                    if (tid >= 0 && tid < max_threads && thread_dydt_buffers[tid]) {
+                        int ret = rhs(t, y, thread_dydt_buffers[tid], ctx);
+                        if (ret != 0) { (void)ret; }
+#pragma omp critical
+                        {
+                            for (size_t i = 0; i < n; i++) {
+                                dydt[i] += thread_dydt_buffers[tid][i];
+                            }
+                        }
+                    }
+                }
+                /* 多线程结果取平均值（消除重复计算偏差） */
+                if (max_threads > 1) {
+                    float inv_threads = 1.0f / (float)max_threads;
+                    for (size_t i = 0; i < n; i++) {
+                        dydt[i] *= inv_threads;
+                    }
+                }
+            } else {
+                /* 内存分配失败，回退到串行执行 */
+                int ret = rhs(t, y, dydt, ctx);
+                if (ret != 0) { (void)ret; }
+            }
+
+            /* 释放per-thread临时缓冲区 */
+            if (thread_dydt_buffers) {
+                for (int ti = 0; ti < max_threads; ti++) {
+                    free(thread_dydt_buffers[ti]);
+                }
+                free(thread_dydt_buffers);
+            }
         }
 #else
         int ret = rhs(t, y, dydt, ctx);
@@ -988,24 +1038,66 @@ static int ros_gauss_eliminate(float* A, size_t n, float* b, float* x)
     return 0;
 }
 
+/* P2-044: 带状雅可比矩阵计算
+ * 液态神经网络具有天然的带状连接结构，因此仅计算对角线附近的非零带。
+ * 同时优化内存复制：只复制一次y→yp，扰动后恢复，消除O(n²) memcpy开销。
+ * 
+ * @param bandwidth 带状半宽度：0=全矩阵，>0=仅计算[i-bandwidth, i+bandwidth]范围内的列
+ */
 static int ros_compute_jacobian(ODERHSFunc rhs, void* ctx, float t, const float* y,
                                  float* J, size_t n, float eps,
-                                 float* f0, float* fp, float* yp)
+                                 float* f0, float* fp, float* yp,
+                                 int bandwidth)
 {
     if (rhs(t, y, f0, ctx) != 0) return -2;
 
-    for (size_t j = 0; j < n; j++)
+    /* 预复制 y→yp 一次，后续仅修改扰动维并恢复 */
+    memcpy(yp, y, n * sizeof(float));
+
+    if (bandwidth > 0 && (size_t)bandwidth < n)
     {
-        float y_save = y[j];
-        float h = eps * dp54_max(1.0f, dp54_abs(y_save));
-        if (dp54_abs(h) < 1e-12f) h = eps;
-        memcpy(yp, y, n * sizeof(float));
-        yp[j] = y_save + h;
+        /* 带状模式：零初始化J，仅计算对角线附近非零带 */
+        memset(J, 0, n * n * sizeof(float));
 
-        if (rhs(t, yp, fp, ctx) != 0) return -2;
+        for (size_t j = 0; j < n; j++)
+        {
+            float y_save = y[j];
+            float h = eps * dp54_max(1.0f, dp54_abs(y_save));
+            if (dp54_abs(h) < 1e-12f) h = eps;
 
-        for (size_t i = 0; i < n; i++)
-            J[i * n + j] = (fp[i] - f0[i]) / h;
+            yp[j] = y_save + h;          /* 仅修改扰动维 */
+
+            if (rhs(t, yp, fp, ctx) != 0) return -2;
+
+            /* 仅计算带状范围内行i ∈ [max(0,j-bw), min(n,j+bw+1)) */
+            size_t i_start = (j > (size_t)bandwidth) ? (j - (size_t)bandwidth) : 0;
+            size_t i_end = j + (size_t)bandwidth + 1;
+            if (i_end > n) i_end = n;
+
+            for (size_t i = i_start; i < i_end; i++)
+                J[i * n + j] = (fp[i] - f0[i]) / h;
+
+            yp[j] = y_save;              /* 恢复原始值 */
+        }
+    }
+    else
+    {
+        /* 全矩阵模式：计算所有列，但使用预复制+恢复策略 */
+        for (size_t j = 0; j < n; j++)
+        {
+            float y_save = y[j];
+            float h = eps * dp54_max(1.0f, dp54_abs(y_save));
+            if (dp54_abs(h) < 1e-12f) h = eps;
+
+            yp[j] = y_save + h;
+
+            if (rhs(t, yp, fp, ctx) != 0) return -2;
+
+            for (size_t i = 0; i < n; i++)
+                J[i * n + j] = (fp[i] - f0[i]) / h;
+
+            yp[j] = y_save;              /* 恢复原始值 */
+        }
     }
 
     return 0;
@@ -1021,6 +1113,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
     float gamma_val = (cfg->gamma_coeff > 0.0f) ? cfg->gamma_coeff : 0.435866521508f;
     int max_iter = (cfg->max_iterations > 0) ? cfg->max_iterations : 10000;
     float eps_fd = (cfg->finite_diff_eps > 0.0f) ? cfg->finite_diff_eps : 1e-6f;
+    int bandw = cfg->jacobian_bandwidth;  /* P2-044: 雅可比带状宽度 */
 
     float* J = workspace;
     float* k = J + n * n;
@@ -1049,7 +1142,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
         if (rhs(t_current, y, f_n, ctx) != 0) return -2;
 
         if (ros_compute_jacobian(rhs, ctx, t_current, y, J, n, eps_fd,
-                                  jac_f0, jac_fp, jac_yp) != 0)
+                                  jac_f0, jac_fp, jac_yp, bandw) != 0)
             return -3;
 
         /* A = I - h_step * gamma_val * J (where J = dF/dy) */

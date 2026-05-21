@@ -55,16 +55,32 @@ static int text_match_score(const char* text, const char* query) {
         return 2;
     }
     
-    // 单词匹配：将查询拆分为单词，检查是否有任何单词出现在文本中
+    /* P2-045: 线程安全分词 - 不使用strtok，手动跳过分隔符提取单词 */
     char query_copy[1024];
     snprintf(query_copy, sizeof(query_copy), "%s", query);
-    
-    char* token = strtok(query_copy, " \t\n\r.,;:!?");
-    while (token != NULL) {
-        if (strstr(text, token) != NULL) {
-            return 1;
+    const char* delimiters = " \t\n\r.,;:!?";
+    const char* p = query_copy;
+    while (*p) {
+        /* 跳过前导分隔符 */
+        while (*p && strchr(delimiters, *p)) p++;
+        if (!*p) break;
+
+        /* 找到单词结束位置 */
+        const char* token_start = p;
+        while (*p && !strchr(delimiters, *p)) p++;
+
+        /* 在文本中搜索该单词 */
+        size_t token_len = (size_t)(p - token_start);
+        if (token_len > 0) {
+            /* 使用memmem等效搜索：用临时null结尾 + strstr */
+            char token_buf[256];
+            size_t copy_len = token_len < sizeof(token_buf) - 1 ? token_len : sizeof(token_buf) - 1;
+            memcpy(token_buf, token_start, copy_len);
+            token_buf[copy_len] = '\0';
+            if (strstr(text, token_buf) != NULL) {
+                return 1;
+            }
         }
-        token = strtok(NULL, " \t\n\r.,;:!?");
     }
     
     return 0;

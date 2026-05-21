@@ -3,8 +3,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
-#include "cfc_cell.h"
-#include "cfc_network.h"
+#include "selflnn/core/cfc_network.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -1834,22 +1834,40 @@ int planning_generate(PlanningSystem* system,
             safe_free((void**)&nodes);
             break;
         }
-        case PLANNING_HIERARCHICAL: {
+        case PLANNING_SEQUENTIAL: {
+            /* P0-009修复: 实现真实的分段路径规划 — 生成中间路标点序列
+             * 将目标分解为多个路标点(waypoints)，每一步向最近的路标点推进，
+             * 到达当前路标点后切换到下一个，形成平滑的路径规划。 */
             float state[MAX_STATE_DIMENSION];
             memcpy(state, current_state, state_size * sizeof(float));
-            int abstraction_levels = 3;
-            float step_sizes[] = {0.3f, 0.15f, 0.05f};
 
-            for (int level = 0; level < abstraction_levels && steps < max_steps; level++) {
-                float step = step_sizes[level % 3];
-                int level_steps = (int)(max_steps / abstraction_levels) + 1;
-                if (level == abstraction_levels - 1) level_steps = (int)(max_steps - steps);
+            /* 计算路径分段数：根据距离自适应 */
+            float total_dist = 0.0f;
+            for (size_t d = 0; d < state_size; d++) {
+                float diff = goal[d] - state[d];
+                total_dist += diff * diff;
+            }
+            total_dist = sqrtf(total_dist);
+            int num_waypoints = (int)(total_dist / (system->config.goal_tolerance * 2.0f + 0.01f)) + 1;
+            if (num_waypoints > (int)max_steps) num_waypoints = (int)max_steps;
+            if (num_waypoints < 2) num_waypoints = 2;
 
-                for (int s = 0; s < level_steps && steps < max_steps; s++) {
-                    if (steps >= max_plan_size / (state_size > 0 ? state_size : 1)) break;
+            for (int wp = 0; wp < num_waypoints && steps < max_steps; wp++) {
+                float alpha = (float)(wp + 1) / (float)num_waypoints;
+                float waypoint[MAX_STATE_DIMENSION];
+                for (size_t d = 0; d < state_size; d++) {
+                    waypoint[d] = current_state[d] + (goal[d] - current_state[d]) * alpha;
+                }
+
+                /* 从当前位置向路标点推进 */
+                int wp_steps = 0;
+                int max_wp_steps = (int)(max_steps / num_waypoints) + 1;
+                while (wp_steps < max_wp_steps && steps < max_steps) {
+                    float wp_dist = 0.0f;
                     for (size_t d = 0; d < state_size; d++) {
-                        float diff = goal[d] - state[d];
-                        float action = (diff > 0.001f) ? step : (diff < -0.001f) ? -step : 0.0f;
+                        float diff = waypoint[d] - state[d];
+                        wp_dist += diff * diff;
+                        float action = CLAMP(diff * 0.3f, -0.2f, 0.2f);
                         state[d] += action;
                         state[d] = CLAMP(state[d], -2.0f, 2.0f);
                         if (steps * state_size + d < max_plan_size) {
@@ -1857,87 +1875,324 @@ int planning_generate(PlanningSystem* system,
                         }
                     }
                     steps++;
-
-                    float dist = 0.0f;
-                    for (size_t d = 0; d < state_size; d++) dist += (state[d] - goal[d]) * (state[d] - goal[d]);
-                    if (sqrtf(dist) < system->config.goal_tolerance) break;
+                    wp_steps++;
+                    if (sqrtf(wp_dist) < system->config.goal_tolerance * 2.0f) break;
                 }
+            }
+
+            /* 确保最终抵达目标 */
+            float final_dist = 0.0f;
+            for (size_t d = 0; d < state_size; d++) final_dist += (state[d] - goal[d]) * (state[d] - goal[d]);
+            while (sqrtf(final_dist) >= system->config.goal_tolerance && steps < max_steps) {
+                for (size_t d = 0; d < state_size; d++) {
+                    float diff = goal[d] - state[d];
+                    state[d] += CLAMP(diff * 0.5f, -0.1f, 0.1f);
+                    state[d] = CLAMP(state[d], -2.0f, 2.0f);
+                    if (steps * state_size + d < max_plan_size) {
+                        plan[steps * state_size + d] = state[d];
+                    }
+                }
+                steps++;
+                final_dist = 0.0f;
+                for (size_t d = 0; d < state_size; d++) final_dist += (state[d] - goal[d]) * (state[d] - goal[d]);
             }
             break;
         }
-        case PLANNING_SEQUENTIAL: {
+        case PLANNING_HIERARCHICAL: {
+            /* P0-009修复: 实现真实的分层规划 — 将目标分解为子目标树
+             * 层次结构：战略层(粗粒度子目标) → 战术层(细粒度子目标) → 执行层(微步)
+             * 每个层次独立规划，上层结果作为下层约束。 */
             float state[MAX_STATE_DIMENSION];
             memcpy(state, current_state, state_size * sizeof(float));
-            float step_size = 0.1f * (1.0f - system->config.risk_tolerance * 0.5f);
 
-            for (size_t s = 0; s < max_steps; s++) {
-                for (size_t d = 0; d < state_size; d++) {
-                    float diff = goal[d] - state[d];
-                    float action = CLAMP(diff * step_size, -step_size, step_size);
-                    state[d] += action;
-                    state[d] = CLAMP(state[d], -2.0f, 2.0f);
-                    if (s * state_size + d < max_plan_size) {
-                        plan[s * state_size + d] = state[d];
+            #define HP_MAX_LEVELS 3
+            #define HP_MAX_SUBGOALS 8
+
+            /* 定义层次结构 */
+            int levels[] = {2, 4, 8}; /* 每层的子目标数 */
+            float step_sizes[] = {0.3f, 0.15f, 0.05f};
+
+            for (int level = 0; level < HP_MAX_LEVELS && steps < max_steps; level++) {
+                int num_subgoals = levels[level];
+                if (num_subgoals > HP_MAX_SUBGOALS) num_subgoals = HP_MAX_SUBGOALS;
+                float step = step_sizes[level];
+
+                /* 为当前层生成子目标（在当前位置与最终目标之间均匀分布） */
+                float subgoals[HP_MAX_SUBGOALS * MAX_STATE_DIMENSION];
+                float level_start[MAX_STATE_DIMENSION];
+                memcpy(level_start, state, state_size * sizeof(float));
+
+                for (int sg = 0; sg < num_subgoals; sg++) {
+                    float alpha = (float)(sg + 1) / (float)num_subgoals;
+                    for (size_t d = 0; d < state_size && d < MAX_STATE_DIMENSION; d++) {
+                        subgoals[sg * (int)state_size + (int)d] = level_start[d]
+                            + (goal[d] - level_start[d]) * alpha;
                     }
                 }
-                steps = s + 1;
-                float dist = 0.0f;
-                for (size_t d = 0; d < state_size; d++) dist += (state[d] - goal[d]) * (state[d] - goal[d]);
-                if (sqrtf(dist) < system->config.goal_tolerance) break;
+
+                /* 依次追逐每个子目标 */
+                for (int sg = 0; sg < num_subgoals && steps < max_steps; sg++) {
+                    int sg_step = 0;
+                    int max_sg_steps = (int)(max_steps / (HP_MAX_LEVELS * num_subgoals)) + 1;
+                    if (max_sg_steps < 2) max_sg_steps = 2;
+
+                    while (sg_step < max_sg_steps && steps < max_steps) {
+                        float sg_dist = 0.0f;
+                        for (size_t d = 0; d < state_size && d < MAX_STATE_DIMENSION; d++) {
+                            float diff = subgoals[sg * (int)state_size + (int)d] - state[d];
+                            sg_dist += diff * diff;
+                            float action = (diff > 0.001f) ? step : (diff < -0.001f) ? -step : 0.0f;
+                            state[d] += action;
+                            state[d] = CLAMP(state[d], -2.0f, 2.0f);
+                            if (steps * state_size + d < max_plan_size) {
+                                plan[steps * state_size + d] = state[d];
+                            }
+                        }
+                        steps++;
+                        sg_step++;
+                        if (sqrtf(sg_dist) < system->config.goal_tolerance * 1.5f) break;
+                    }
+                }
+            }
+
+            /* 最终微调抵达精确目标 */
+            float final_dist = 0.0f;
+            for (size_t d = 0; d < state_size; d++) final_dist += (state[d] - goal[d]) * (state[d] - goal[d]);
+            while (sqrtf(final_dist) >= system->config.goal_tolerance && steps < max_steps) {
+                for (size_t d = 0; d < state_size; d++) {
+                    float diff = goal[d] - state[d];
+                    state[d] += CLAMP(diff * 0.5f, -0.03f, 0.03f);
+                    state[d] = CLAMP(state[d], -2.0f, 2.0f);
+                    if (steps * state_size + d < max_plan_size) {
+                        plan[steps * state_size + d] = state[d];
+                    }
+                }
+                steps++;
+                final_dist = 0.0f;
+                for (size_t d = 0; d < state_size; d++) final_dist += (state[d] - goal[d]) * (state[d] - goal[d]);
             }
             break;
         }
         case PLANNING_PARALLEL: {
+            /* P0-009修复: 实现真实的并行规划 — 将状态空间分解为独立子空间并行求解
+             * 将状态维度分组为3个独立子空间，每组独立规划，最终合并输出。 */
             float state[MAX_STATE_DIMENSION];
             memcpy(state, current_state, state_size * sizeof(float));
-            int num_parallel = 3;
-            float parallel_actions[MAX_STATE_DIMENSION * 3];
+            int num_groups = (int)state_size > 2 ? 3 : 1;
 
-            for (int p = 0; p < num_parallel; p++) {
-                float weight = 1.0f / (float)num_parallel;
-                for (size_t d = 0; d < state_size; d++) {
-                    parallel_actions[p * state_size + d] = (goal[d] - state[d]) * weight * 0.2f;
-                }
+            /* 按维度分组：组0=位置维, 组1=速度维, 组2=姿态维 */
+            typedef struct {
+                int* dims;
+                int dim_count;
+            } DimGroup;
+
+            DimGroup groups[3];
+            int all_dims[MAX_STATE_DIMENSION];
+            for (int i = 0; i < MAX_STATE_DIMENSION; i++) all_dims[i] = i;
+
+            int group_sizes[3] = {0, 0, 0};
+            for (size_t d = 0; d < state_size; d++) {
+                int g = (int)d % num_groups;
+                group_sizes[g]++;
             }
 
-            for (size_t s = 0; s < max_steps; s++) {
-                for (size_t d = 0; d < state_size; d++) {
-                    float combined = 0.0f;
-                    for (int p = 0; p < num_parallel; p++) {
-                        combined += parallel_actions[p * state_size + d];
+            int offsets[3];
+            offsets[0] = 0;
+            for (int g = 1; g < num_groups; g++) {
+                offsets[g] = offsets[g - 1] + group_sizes[g - 1];
+            }
+
+            for (int g = 0; g < num_groups; g++) {
+                groups[g].dim_count = group_sizes[g];
+                /* 使用静态分配避免malloc，每组最多分配state_size维度 */
+            }
+
+            /* 为每个组独立规划 */
+            float group_plans[3][MAX_STATE_DIMENSION * 10];
+            int group_steps[3] = {0, 0, 0};
+
+            for (int g = 0; g < num_groups; g++) {
+                float gp_state[MAX_STATE_DIMENSION];
+                for (size_t d = 0; d < state_size; d++) gp_state[d] = state[d];
+
+                int g_steps = 0;
+                int g_max_steps = (int)(max_steps / num_groups) + 1;
+                float g_step = 0.15f * (1.0f + (float)g * 0.2f); /* 每组不同步长 */
+
+                for (int s = 0; s < g_max_steps && g_steps < (int)(max_steps / num_groups); s++) {
+                    int dim_idx = (int)(s % (int)state_size);
+                    /* 只更新当前组的维度 */
+                    int group_idx = dim_idx % num_groups;
+                    if (group_idx == g) {
+                        float diff = goal[dim_idx] - gp_state[dim_idx];
+                        float action = CLAMP(diff * g_step, -0.2f, 0.2f);
+                        gp_state[dim_idx] += action;
+                        gp_state[dim_idx] = CLAMP(gp_state[dim_idx], -2.0f, 2.0f);
                     }
-                    state[d] += combined;
-                    state[d] = CLAMP(state[d], -2.0f, 2.0f);
-                    if (s * state_size + d < max_plan_size) {
-                        plan[s * state_size + d] = state[d];
+
+                    /* 存储组状态 */
+                    size_t offset = (size_t)g_steps * state_size;
+                    if (offset + state_size <= MAX_STATE_DIMENSION * 10) {
+                        for (size_t d2 = 0; d2 < state_size; d2++) {
+                            group_plans[g][offset + d2] = gp_state[d2];
+                        }
+                    }
+                    g_steps++;
+
+                    float dist = 0.0f;
+                    for (size_t d = 0; d < state_size; d++) dist += (gp_state[d] - goal[d]) * (gp_state[d] - goal[d]);
+                    if (sqrtf(dist) < system->config.goal_tolerance) break;
+                }
+                group_steps[g] = g_steps;
+            }
+
+            /* 合并各组的规划：轮流从每组取一步 */
+            int max_group_steps = group_steps[0];
+            for (int g = 1; g < num_groups; g++) {
+                if (group_steps[g] > max_group_steps) max_group_steps = group_steps[g];
+            }
+
+            steps = 0;
+            for (int s = 0; s < max_group_steps && steps < max_steps; s++) {
+                /* 合并: 对所有组取加权平均 */
+                float merged[MAX_STATE_DIMENSION];
+                for (size_t d = 0; d < state_size; d++) merged[d] = 0.0f;
+
+                int active_groups = 0;
+                for (int g = 0; g < num_groups; g++) {
+                    if (s < group_steps[g]) {
+                        size_t goffset = (size_t)s * state_size;
+                        if (goffset + state_size <= MAX_STATE_DIMENSION * 10) {
+                            for (size_t d = 0; d < state_size; d++) {
+                                merged[d] += group_plans[g][goffset + d];
+                            }
+                            active_groups++;
+                        }
                     }
                 }
-                steps = s + 1;
+                if (active_groups > 0) {
+                    for (size_t d = 0; d < state_size; d++) {
+                        merged[d] /= (float)active_groups;
+                        merged[d] = CLAMP(merged[d], -2.0f, 2.0f);
+                        if (steps * state_size + d < max_plan_size) {
+                            plan[steps * state_size + d] = merged[d];
+                        }
+                    }
+                    steps++;
+                }
                 float dist = 0.0f;
-                for (size_t d = 0; d < state_size; d++) dist += (state[d] - goal[d]) * (state[d] - goal[d]);
+                for (size_t d = 0; d < state_size; d++) dist += (merged[d] - goal[d]) * (merged[d] - goal[d]);
                 if (sqrtf(dist) < system->config.goal_tolerance) break;
             }
             break;
         }
         case PLANNING_REACTIVE: {
+            /* P0-009修复: 实现真实的反应式规划 — 基于有限状态机的感知-行动映射
+             * FSM状态: 快速接近 → 减速对齐 → 精细调整 → 稳定保持
+             * 每个状态下有不同的增益和阈值，模拟反应式控制的自然切换。 */
             float state[MAX_STATE_DIMENSION];
             memcpy(state, current_state, state_size * sizeof(float));
 
+            enum { FSM_APPROACH, FSM_ALIGN, FSM_FINE_TUNE, FSM_STABILIZE };
+            int fsm_state = FSM_APPROACH;
+            int fsm_stall_count = 0;
+
             for (size_t s = 0; s < max_steps; s++) {
+                /* 计算距目标距离，用于状态转移决策 */
+                float dist = 0.0f;
+                float max_diff = 0.0f;
                 for (size_t d = 0; d < state_size; d++) {
                     float diff = goal[d] - state[d];
-                    float gain = 0.5f + system->config.risk_tolerance * 0.5f;
-                    float action = CLAMP(diff * gain, -0.3f, 0.3f);
+                    dist += diff * diff;
+                    if (fabsf(diff) > max_diff) max_diff = fabsf(diff);
+                }
+                dist = sqrtf(dist);
+
+                /* 反应式状态机转移逻辑 */
+                switch (fsm_state) {
+                    case FSM_APPROACH:
+                        if (dist < system->config.goal_tolerance * 10.0f) {
+                            fsm_state = FSM_ALIGN;
+                        }
+                        break;
+                    case FSM_ALIGN:
+                        if (dist < system->config.goal_tolerance * 3.0f) {
+                            fsm_state = FSM_FINE_TUNE;
+                        }
+                        break;
+                    case FSM_FINE_TUNE:
+                        if (dist < system->config.goal_tolerance * 1.2f) {
+                            fsm_state = FSM_STABILIZE;
+                        }
+                        break;
+                    case FSM_STABILIZE:
+                        if (dist > system->config.goal_tolerance * 2.0f) {
+                            fsm_state = FSM_FINE_TUNE; /* 回退到微调 */
+                        }
+                        break;
+                }
+
+                /* 根据当前FSM状态选择动作参数 */
+                float gain, step_max, noise_factor;
+                switch (fsm_state) {
+                    case FSM_APPROACH:
+                        gain = 0.8f;
+                        step_max = 0.25f;
+                        noise_factor = 0.02f;
+                        break;
+                    case FSM_ALIGN:
+                        gain = 0.5f;
+                        step_max = 0.1f;
+                        noise_factor = 0.01f;
+                        break;
+                    case FSM_FINE_TUNE:
+                        gain = 0.2f;
+                        step_max = 0.04f;
+                        noise_factor = 0.005f;
+                        break;
+                    case FSM_STABILIZE:
+                    default:
+                        gain = 0.08f;
+                        step_max = 0.01f;
+                        noise_factor = 0.001f;
+                        break;
+                }
+
+                /* 根据系统风险容忍度微调增益 */
+                gain += system->config.risk_tolerance * 0.1f * gain;
+
+                /* 执行动作 */
+                float prev_total_diff = 0.0f;
+                for (size_t d = 0; d < state_size; d++) prev_total_diff += fabsf(goal[d] - state[d]);
+
+                for (size_t d = 0; d < state_size; d++) {
+                    float diff = goal[d] - state[d];
+                    float action = CLAMP(diff * gain, -step_max, step_max);
+                    /* 添加与距离成正比的探索噪声 */
+                    float noise = (plan_rng_uniform(-1.0f, 1.0f)) * noise_factor * (1.0f + fabsf(diff));
+                    action += noise;
                     state[d] += action;
                     state[d] = CLAMP(state[d], -2.0f, 2.0f);
                     if (s * state_size + d < max_plan_size) {
                         plan[s * state_size + d] = state[d];
                     }
                 }
+
+                /* 停滞检测：若连续多步变化太小则改变策略 */
+                float cur_total_diff = 0.0f;
+                for (size_t d = 0; d < state_size; d++) cur_total_diff += fabsf(goal[d] - state[d]);
+                if (fabsf(prev_total_diff - cur_total_diff) < 0.001f) {
+                    fsm_stall_count++;
+                    if (fsm_stall_count > 5 && fsm_state == FSM_APPROACH) {
+                        fsm_state = FSM_ALIGN; /* 强制推进到下一状态 */
+                        fsm_stall_count = 0;
+                    }
+                } else {
+                    fsm_stall_count = 0;
+                }
+
                 steps = s + 1;
-                float dist = 0.0f;
-                for (size_t d = 0; d < state_size; d++) dist += (state[d] - goal[d]) * (state[d] - goal[d]);
-                if (sqrtf(dist) < system->config.goal_tolerance) break;
+                if (dist < system->config.goal_tolerance) break;
             }
             break;
         }

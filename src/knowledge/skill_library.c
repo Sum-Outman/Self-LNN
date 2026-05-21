@@ -45,26 +45,97 @@ static float cosine_similarity(const float* a, const float* b, int dim) {
 
 static void generate_embedding_impl(const SkillRecord* record, float* embedding, int dim) {
     memset(embedding, 0, dim * sizeof(float));
+    if (!record || dim <= 0) return;
+    
+    /* P2-039修复: 使用n-gram哈希嵌入替代ASCII/255加权和
+     * 对技能名称、描述、标签分别哈希嵌入后加权混合，再进行L2归一化
+     * 确保不同技能文本产生有语义区分度的嵌入向量 */
+    float* name_emb = (float*)safe_calloc((size_t)dim, sizeof(float));
+    float* desc_emb = (float*)safe_calloc((size_t)dim, sizeof(float));
+    float* tag_emb = (float*)safe_calloc((size_t)dim, sizeof(float));
+    if (!name_emb || !desc_emb || !tag_emb) {
+        safe_free((void**)&name_emb);
+        safe_free((void**)&desc_emb);
+        safe_free((void**)&tag_emb);
+        return;
+    }
+    
     size_t name_len = strlen(record->name);
-    for (size_t i = 0; i < name_len && i < (size_t)dim; i++) {
-        embedding[i % dim] += ((float)(unsigned char)record->name[i]) / 255.0f * 0.5f;
-    }
-    size_t desc_len = strlen(record->description);
-    for (size_t i = 0; i < desc_len && i < (size_t)dim; i++) {
-        embedding[(i * 3 + 7) % dim] += ((float)(unsigned char)record->description[i]) / 255.0f * 0.3f;
-    }
-    for (int t = 0; t < record->tag_count; t++) {
-        size_t tag_len = strlen(record->tags[t]);
-        for (size_t i = 0; i < tag_len && i < (size_t)dim; i++) {
-            embedding[(i * 5 + t * 11) % dim] += ((float)(unsigned char)record->tags[t][i]) / 255.0f * 0.2f;
+    if (name_len >= 2) {
+        for (int i = 0; i < dim; i++) {
+            int pos = (i * 97 + 13) % (int)(name_len - 1);
+            unsigned long h = 5381;
+            h = ((h << 5) + h) + (unsigned char)record->name[pos];
+            h = ((h << 5) + h) + (unsigned char)record->name[pos + 1];
+            h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+            name_emb[i] = (float)(h % 1000007) / 500003.5f - 1.0f;
+        }
+    } else if (name_len > 0) {
+        for (int i = 0; i < dim; i++) {
+            unsigned long h = 5381;
+            h = ((h << 5) + h) + (unsigned char)record->name[0];
+            h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+            name_emb[i] = (float)(h % 1000007) / 500003.5f - 1.0f;
         }
     }
+    
+    size_t desc_len = strlen(record->description);
+    if (desc_len >= 2) {
+        for (int i = 0; i < dim; i++) {
+            int pos = (i * 73 + 47) % (int)(desc_len - 1);
+            unsigned long h = 5381;
+            h = ((h << 5) + h) + (unsigned char)record->description[pos];
+            h = ((h << 5) + h) + (unsigned char)record->description[pos + 1];
+            h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+            desc_emb[i] = (float)(h % 1000007) / 500003.5f - 1.0f;
+        }
+    } else if (desc_len > 0) {
+        for (int i = 0; i < dim; i++) {
+            unsigned long h = 5381;
+            h = ((h << 5) + h) + (unsigned char)record->description[0];
+            h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+            desc_emb[i] = (float)(h % 1000007) / 500003.5f - 1.0f;
+        }
+    }
+    
+    for (int t = 0; t < record->tag_count; t++) {
+        size_t tag_len = strlen(record->tags[t]);
+        if (tag_len >= 2) {
+            for (int i = 0; i < dim; i++) {
+                int pos = (i * 59 + t * 37) % (int)(tag_len - 1);
+                unsigned long h = 5381;
+                h = ((h << 5) + h) + (unsigned char)record->tags[t][pos];
+                h = ((h << 5) + h) + (unsigned char)record->tags[t][pos + 1];
+                h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+                float v = (float)(h % 1000007) / 500003.5f - 1.0f;
+                tag_emb[i] += v * 0.5f / (float)(record->tag_count);
+            }
+        } else if (tag_len > 0) {
+            for (int i = 0; i < dim; i++) {
+                unsigned long h = 5381;
+                h = ((h << 5) + h) + (unsigned char)record->tags[t][0];
+                h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+                tag_emb[i] += ((float)(h % 1000007) / 500003.5f - 1.0f) * 0.5f / (float)(record->tag_count);
+            }
+        }
+    }
+    
+    /* 加权混合: 名称50% + 描述30% + 标签20% */
+    for (int i = 0; i < dim; i++) {
+        embedding[i] = name_emb[i] * 0.5f + desc_emb[i] * 0.3f + tag_emb[i] * 0.2f;
+    }
+    
+    /* L2归一化 */
     float norm = 0.0f;
     for (int i = 0; i < dim; i++) norm += embedding[i] * embedding[i];
     norm = sqrtf(norm);
     if (norm > 1e-10f) {
         for (int i = 0; i < dim; i++) embedding[i] /= norm;
     }
+    
+    safe_free((void**)&name_emb);
+    safe_free((void**)&desc_emb);
+    safe_free((void**)&tag_emb);
 }
 
 static void default_skills_init(SkillLibrary* library) {

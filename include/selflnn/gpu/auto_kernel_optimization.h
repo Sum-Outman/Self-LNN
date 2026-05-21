@@ -11,7 +11,7 @@
 
 #include <stddef.h>
 
-/* 前向声明 — 避免与 gpu.h 循环依赖 */
+/* 前向声明 */
 typedef struct GpuContext GpuContext;
 
 #ifdef __cplusplus

@@ -2941,6 +2941,7 @@ fd_cleanup:
     if (bias_buf) mtlBufferRelease(bias_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_forward_dense]");
     (void)context; (void)input; (void)weights; (void)bias; (void)output;
     (void)batch_size; (void)input_size; (void)output_size; (void)act_type; (void)alpha;
     return -1;
@@ -3022,6 +3023,7 @@ int metal_matmul_train(GpuContext* context,
     mtlBufferRelease(a_buf); mtlBufferRelease(b_buf); mtlBufferRelease(c_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_matmul_train]");
     (void)context; (void)A; (void)B; (void)C;
     (void)M; (void)N; (void)K; (void)alpha; (void)beta;
     return -1;
@@ -3089,6 +3091,7 @@ int metal_activation_forward(GpuContext* context,
     mtlBufferRelease(in_buf); mtlBufferRelease(out_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_activation_forward]");
     (void)context; (void)input; (void)output;
     (void)num_elements; (void)act_type; (void)alpha;
     return -1;
@@ -3161,6 +3164,7 @@ int metal_activation_backward(GpuContext* context,
     mtlBufferRelease(in_buf); mtlBufferRelease(go_buf); mtlBufferRelease(gi_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_activation_backward]");
     (void)context; (void)input; (void)grad_output; (void)grad_input;
     (void)num_elements; (void)act_type; (void)alpha;
     return -1;
@@ -3285,6 +3289,7 @@ int metal_batch_norm_forward(GpuContext* context,
     mtlBufferRelease(mean_buf); mtlBufferRelease(var_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_batch_norm_forward]");
     (void)context; (void)input; (void)output; (void)gamma; (void)beta;
     (void)running_mean; (void)running_var; (void)batch_mean; (void)batch_var;
     (void)num_elements; (void)num_features; (void)config; (void)is_training;
@@ -3471,6 +3476,7 @@ bnb_cleanup:
     for (int i = 0; i < 9; i++) mtlBufferRelease(mbrel[i]);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_batch_norm_backward]");
     (void)context; (void)input; (void)grad_output; (void)grad_input;
     (void)grad_gamma; (void)grad_beta; (void)mean; (void)var; (void)gamma;
     (void)num_elements; (void)num_features; (void)config;
@@ -3554,6 +3560,7 @@ int metal_dropout_forward(GpuContext* context,
     if (mask_buf) mtlBufferRelease(mask_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_dropout_forward]");
     (void)context; (void)input; (void)output; (void)mask;
     (void)num_elements; (void)dropout_rate; (void)is_training;
     return -1;
@@ -3626,6 +3633,7 @@ int metal_dropout_backward(GpuContext* context,
     mtlBufferRelease(go_buf); mtlBufferRelease(gi_buf); mtlBufferRelease(mask_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_dropout_backward]");
     (void)context; (void)grad_output; (void)grad_input; (void)mask;
     (void)num_elements; (void)dropout_rate;
     return -1;
@@ -3703,6 +3711,7 @@ int metal_rmsprop_update(GpuContext* context, float* weights, const float* gradi
     mtlBufferRelease(w_buf); mtlBufferRelease(g_buf); mtlBufferRelease(sa_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_rmsprop_update]");
     (void)context; (void)weights; (void)gradients; (void)square_avg;
     (void)num_params; (void)learning_rate; (void)decay; (void)epsilon; (void)weight_decay;
     return -1;
@@ -3810,6 +3819,7 @@ int metal_cross_entropy_loss_gradient(GpuContext* context,
     mtlBufferRelease(grad_buf);
     return 0;
 #else
+    set_metal_error_string("Metal后端在非Apple平台不可用 [metal_cross_entropy_loss_gradient]");
     (void)context; (void)logits; (void)targets; (void)loss; (void)gradients;
     (void)num_elements; (void)num_classes; (void)is_integer_label;
     return -1;

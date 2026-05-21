@@ -408,6 +408,27 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     
     state_dim = g_system_state.config.state_dimension;
     channels = g_system_state.config.multimodal_channels;
+    
+    /* 统计已初始化的子系统数量，用于计算初始置信度 */
+    int init_count = 0;
+    if (g_system_state.memory_manager)          init_count++;
+    if (g_system_state.knowledge_graph)          init_count++;
+    if (g_system_state.knowledge_base)           init_count++;
+    if (g_system_state.reasoning_engine)         init_count++;
+    if (g_system_state.unified_signal_processor) init_count++;
+    if (g_system_state.lnn_instance)             init_count++;
+    if (g_system_state.unified_lnn_state)        init_count++;
+    if (g_system_state.self_cognition_system)    init_count++;
+    if (g_system_state.metacognition_system)     init_count++;
+    if (g_system_state.programming_engine)       init_count++;
+    if (g_system_state.gpu_context)              init_count++;
+    if (g_system_state.dialogue_processor)       init_count++;
+    if (g_system_state.evolution_engine)         init_count++;
+    if (g_system_state.safety_monitor)           init_count++;
+    if (g_system_state.thread_pool)              init_count++;
+    if (g_system_state.planning_system)          init_count++;
+    if (g_system_state.auto_learning)            init_count++;
+    if (g_system_state.data_pipeline)            init_count++;
     SYSTEM_UNLOCK();
     
     if (channels <= 0) channels = 64;
@@ -417,7 +438,8 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     
     state->state_dimension = state_dim;
     state->timestamp = input->timestamp;
-    state->confidence = 0.5;
+    state->confidence = (init_count / 20.0f) * 0.85f + 0.05f;
+    if (state->confidence > 0.9f) state->confidence = 0.9f;
     
     /* 分配状态向量内存（不在锁内执行） */
     state->state_vector = (double*)safe_calloc(state_dim, sizeof(double));
@@ -1018,19 +1040,27 @@ int selflnn_get_active_goal(void* kb, float* goal, int dim) {
     int i;
     KnowledgeBase* kbase = (KnowledgeBase*)kb;
     if (!kbase || !goal || dim <= 0) return -1;
-    /* 从知识库获取统计信息作为目标向量近似 */
+    /* P2-043修复: 使用带噪声的随机初始化 + 知识库统计信息推断目标向量
+     * 替代原来纯确定性 i%16/16.0f 线性递增填充，使得目标向量具有合理的多样性 */
     size_t total_entries = 0, memory_usage = 0;
+    float kb_factor = 1.0f;
     if (knowledge_base_get_stats(kbase, &total_entries, &memory_usage) == 0) {
-        float entry_factor = (total_entries > 0) ? 1.0f / (float)(total_entries + 1) : 1.0f;
-        for (i = 0; i < dim && i < 64; i++) {
-            goal[i] = entry_factor * ((float)(i % 16) / 16.0f);
-        }
-    } else {
-        for (i = 0; i < dim && i < 64; i++) {
-            goal[i] = 0.0f;
-        }
+        kb_factor = (total_entries > 0) ? 1.0f / (float)(total_entries + 1) : 1.0f;
     }
-    for (; i < dim && i < 64; i++) goal[i] = 0.0f;
+    /* 使用当前时间和知识库条目数作为随机种子，确保每次调用产生不同的目标向量 */
+    unsigned int seed = (unsigned int)time(NULL) ^ ((unsigned int)total_entries * 1103515245u);
+    for (i = 0; i < dim; i++) {
+        seed = seed * 1103515245 + 12345;
+        float noise = ((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f;
+        goal[i] = noise * kb_factor;
+    }
+    /* L2归一化使得目标向量具有单位长度 */
+    float norm = 0.0f;
+    for (i = 0; i < dim; i++) norm += goal[i] * goal[i];
+    norm = sqrtf(norm);
+    if (norm > 1e-10f) {
+        for (i = 0; i < dim; i++) goal[i] /= norm;
+    }
     return 0;
 }
 

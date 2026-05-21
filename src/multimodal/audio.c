@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 /**
  * @brief 音频处理器内部结构体
@@ -1656,6 +1657,9 @@ static void* audio_capture_thread_func(void* arg) {
         snd_pcm_sframes_t frames = snd_pcm_readi(ctx->handle, raw_buf, period_frames);
         if (frames < 0) {
             snd_pcm_recover(ctx->handle, (int)frames, 0);
+            /* 恢复后短暂休眠，避免错误路径上CPU忙等，降低占用 */
+            struct timespec ts = {0, 100000};
+            nanosleep(&ts, NULL);
             continue;
         }
 

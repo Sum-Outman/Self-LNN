@@ -227,10 +227,18 @@ int voice_motion_process_audio(VoiceMotionControl* vmc, const float* audio, size
     float cfcout_speed = 0.0f, cfcout_lift = 0.0f;
 
     if (lnn) {
-        /* 通过共享LNN进行语音→运动分类 */
-        float lnn_hid[256] = {0}, lnn_cell[256] = {0}, lnn_out[256] = {0};
-        if (lnn_forward(lnn, audio_feat, lnn_out) == 0) {
-            (void)lnn_hid; (void)lnn_cell;
+        /* 维度对齐：20维音频特征 → LNN输入维度（padding或截断） */
+        size_t lnn_input_dim = lnn_get_input_size(lnn);
+        if (lnn_input_dim == 0) { cmd->type = MOTION_CMD_UNKNOWN; return -1; }
+        float lnn_input[256] = {0};
+        float lnn_out[256] = {0};
+        if (lnn_input_dim > 20) {
+            memcpy(lnn_input, audio_feat, 20 * sizeof(float));
+            memset(lnn_input + 20, 0, (lnn_input_dim - 20) * sizeof(float));
+        } else {
+            memcpy(lnn_input, audio_feat, lnn_input_dim * sizeof(float));
+        }
+        if (lnn_forward(lnn, lnn_input, lnn_out) == 0) {
             cfcout_move   = fabsf(lnn_out[0]);
             cfcout_turn   = fabsf(lnn_out[1]);
             cfcout_stop   = fabsf(lnn_out[2]);

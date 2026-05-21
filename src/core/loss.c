@@ -79,15 +79,13 @@ float loss_compute_ex(const float* predictions, const float* targets, int n,
         }
         case LOSS_CATEGORICAL_CROSSENTROPY:
         {
+            /* P2-055修复: 多分类CrossEntropy仅限制预测值，target保持原始one-hot值 */
             for (i = 0; i < n; i++)
             {
                 float p = predictions[i];
                 if (p < FLT_EPSILON) p = FLT_EPSILON;
                 if (p > 1.0f - FLT_EPSILON) p = 1.0f - FLT_EPSILON;
-                float t = targets[i];
-                if (t < FLT_EPSILON) t = FLT_EPSILON;
-                if (t > 1.0f - FLT_EPSILON) t = 1.0f - FLT_EPSILON;
-                loss -= t * logf(p);
+                loss -= targets[i] * logf(p);
             }
             loss /= (float)n;
             break;

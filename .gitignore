@@ -80,8 +80,7 @@ Desktop.ini
 *.d
 
 # ====== 编辑器 ======
-.vscode/settings.json
-.vscode/launch.json
+.vscode/
 .idea/
 *.iml
 

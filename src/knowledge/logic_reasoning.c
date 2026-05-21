@@ -104,14 +104,14 @@ static int nonmonotonic_detect_contradiction(NonmonotonicState* state, const cha
 /**
  * @brief 推理引擎内部结构
  */
-struct ReasoningEngine {
-    ReasoningEngineConfig config;     /**< 引擎配置 */
+struct LogicReasoningEngine {
+    LogicReasoningEngineConfig config;     /**< 引擎配置 */
     
     InferenceRule** rules;            /**< 规则数组 */
     size_t rule_count;                /**< 规则数量 */
     size_t rule_capacity;             /**< 规则数组容量 */
     
-    ConflictResolutionStrategy conflict_strategy; /**< 冲突解决策略 */
+    LogicConflictResolutionStrategy conflict_strategy; /**< 冲突解决策略 */
     
     /* 规则使用统计 */
     size_t* rule_use_counts;          /**< 规则使用次数数组 */
@@ -286,10 +286,10 @@ static char** apply_rule(InferenceRule* rule, char** facts, size_t fact_count,
 /**
  * @brief 选择冲突规则（完整实现）
  */
-static InferenceRule* select_conflict_rule(ReasoningEngine* engine,
+static InferenceRule* select_conflict_rule(LogicReasoningEngine* engine,
                                           InferenceRule** applicable_rules,
                                           size_t rule_count,
-                                          ConflictResolutionStrategy strategy) {
+                                          LogicConflictResolutionStrategy strategy) {
     if (!engine || !applicable_rules || rule_count == 0) return NULL;
     
     // 如果没有启用冲突解决或只有一个规则，返回第一个规则
@@ -374,16 +374,16 @@ static InferenceRule* select_conflict_rule(ReasoningEngine* engine,
  * 公共API实现
  * =========================================================================== */
 
-ReasoningEngine* logic_reasoning_engine_create(const ReasoningEngineConfig* config) {
-    ReasoningEngine* engine = (ReasoningEngine*)safe_malloc(sizeof(ReasoningEngine));
+LogicReasoningEngine* logic_reasoning_engine_create(const LogicReasoningEngineConfig* config) {
+    LogicReasoningEngine* engine = (LogicReasoningEngine*)safe_malloc(sizeof(LogicReasoningEngine));
     if (!engine) return NULL;
     
     // 设置配置
     if (config) {
-        memcpy(&engine->config, config, sizeof(ReasoningEngineConfig));
+        memcpy(&engine->config, config, sizeof(LogicReasoningEngineConfig));
     } else {
         // 默认配置
-        engine->config.mode = REASONING_FORWARD_CHAINING;
+        engine->config.mode = LOGIC_REASONING_FORWARD_CHAINING;
         engine->config.max_inference_steps = 100;
         engine->config.min_confidence = 0.1f;
         engine->config.enable_conflict_resolution = 1;
@@ -426,7 +426,7 @@ ReasoningEngine* logic_reasoning_engine_create(const ReasoningEngineConfig* conf
     return engine;
 }
 
-void logic_reasoning_engine_free(ReasoningEngine* engine) {
+void logic_reasoning_engine_free(LogicReasoningEngine* engine) {
     if (!engine) return;
     
     // 释放所有规则
@@ -522,7 +522,7 @@ void logic_reasoning_engine_free_inference_result(LogicInferenceResult* result) 
     safe_free((void**)&result);
 }
 
-int logic_reasoning_engine_add_rule(ReasoningEngine* engine, const InferenceRule* rule) {
+int logic_reasoning_engine_add_rule(LogicReasoningEngine* engine, const InferenceRule* rule) {
     if (!engine || !rule) return -1;
     
     // 扩展规则数组
@@ -576,7 +576,7 @@ int logic_reasoning_engine_add_rule(ReasoningEngine* engine, const InferenceRule
     return new_rule->id;
 }
 
-int logic_reasoning_engine_load_rules_from_kb(ReasoningEngine* engine, KnowledgeBase* kb) {
+int logic_reasoning_engine_load_rules_from_kb(LogicReasoningEngine* engine, KnowledgeBase* kb) {
     if (!engine || !kb) {
         return -1;
     }
@@ -797,7 +797,7 @@ int logic_reasoning_engine_load_rules_from_kb(ReasoningEngine* engine, Knowledge
     return loaded_rules;
 }
 
-int logic_reasoning_engine_load_rules_from_graph(ReasoningEngine* engine, KnowledgeGraph* graph) {
+int logic_reasoning_engine_load_rules_from_graph(LogicReasoningEngine* engine, KnowledgeGraph* graph) {
     if (!engine || !graph) {
         return -1;
     }
@@ -1020,7 +1020,7 @@ int logic_reasoning_engine_load_rules_from_graph(ReasoningEngine* engine, Knowle
     return loaded_rules;
 }
 
-int logic_reasoning_engine_load_rules_from_semantic_network(ReasoningEngine* engine,
+int logic_reasoning_engine_load_rules_from_semantic_network(LogicReasoningEngine* engine,
                                                      SemanticNetwork* network) {
     if (!engine || !network) {
         return -1;
@@ -1285,15 +1285,15 @@ int logic_reasoning_engine_load_rules_from_semantic_network(ReasoningEngine* eng
     return loaded_rules;
 }
 
-int logic_reasoning_engine_set_conflict_resolution(ReasoningEngine* engine,
-                                            ConflictResolutionStrategy strategy) {
+int logic_reasoning_engine_set_conflict_resolution(LogicReasoningEngine* engine,
+                                            LogicConflictResolutionStrategy strategy) {
     if (!engine) return -1;
     
     engine->conflict_strategy = strategy;
     return 0;
 }
 
-LogicInferenceResult* logic_reasoning_engine_forward_chain(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_forward_chain(LogicReasoningEngine* engine,
                                                const char** initial_facts,
                                                size_t fact_count,
                                                const char** goal_facts,
@@ -1493,7 +1493,7 @@ LogicInferenceResult* logic_reasoning_engine_forward_chain(ReasoningEngine* engi
     return result;
 }
 
-LogicInferenceResult* logic_reasoning_engine_backward_chain(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_backward_chain(LogicReasoningEngine* engine,
                                                 const char** goal_facts,
                                                 size_t goal_count,
                                                 const char** known_facts,
@@ -1658,7 +1658,7 @@ LogicInferenceResult* logic_reasoning_engine_backward_chain(ReasoningEngine* eng
     return result;
 }
 
-LogicInferenceResult* logic_reasoning_engine_mixed_chain(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_mixed_chain(LogicReasoningEngine* engine,
                                              const char** facts,
                                              size_t fact_count,
                                              const char** goals,
@@ -1768,7 +1768,7 @@ LogicInferenceResult* logic_reasoning_engine_mixed_chain(ReasoningEngine* engine
     return result;
 }
 
-LogicInferenceResult* logic_reasoning_engine_reason_with_kb(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_reason_with_kb(LogicReasoningEngine* engine,
                                                 KnowledgeBase* kb,
                                                 const char* query,
                                                 size_t max_results) {
@@ -1872,7 +1872,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_kb(ReasoningEngine* eng
     return result;
 }
 
-LogicInferenceResult* logic_reasoning_engine_reason_with_graph(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_reason_with_graph(LogicReasoningEngine* engine,
                                                    KnowledgeGraph* graph,
                                                    GraphNode* start_node,
                                                    GraphNode* end_node,
@@ -1983,7 +1983,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_graph(ReasoningEngine* 
     return result;
 }
 
-LogicInferenceResult* logic_reasoning_engine_reason_with_semantic_network(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_reason_with_semantic_network(LogicReasoningEngine* engine,
                                                               SemanticNetwork* network,
                                                               Concept* concept,
                                                               int relation_type,
@@ -2086,7 +2086,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_semantic_network(Reason
     return result;
 }
 
-int logic_reasoning_engine_get_stats(ReasoningEngine* engine,
+int logic_reasoning_engine_get_stats(LogicReasoningEngine* engine,
                               size_t* total_rules,
                               size_t* inference_count,
                               float* avg_inference_time) {
@@ -2107,7 +2107,7 @@ int logic_reasoning_engine_get_stats(ReasoningEngine* engine,
     return 0;
 }
 
-void logic_reasoning_engine_reset(ReasoningEngine* engine) {
+void logic_reasoning_engine_reset(LogicReasoningEngine* engine) {
     if (!engine) return;
     
     // 重置统计信息
@@ -2139,7 +2139,7 @@ void logic_reasoning_engine_reset(ReasoningEngine* engine) {
     engine->nonmonotonic_state.fact_count = 0;
 }
 
-int logic_reasoning_engine_save_rules(ReasoningEngine* engine, const char* filename) {
+int logic_reasoning_engine_save_rules(LogicReasoningEngine* engine, const char* filename) {
     if (!engine || !filename) return -1;
     
     FILE* fp = fopen(filename, "w");
@@ -2172,7 +2172,7 @@ int logic_reasoning_engine_save_rules(ReasoningEngine* engine, const char* filen
     return 0;
 }
 
-int logic_reasoning_engine_load_rules(ReasoningEngine* engine, const char* filename) {
+int logic_reasoning_engine_load_rules(LogicReasoningEngine* engine, const char* filename) {
     if (!engine || !filename) return -1;
     
     FILE* fp = fopen(filename, "r");
@@ -2761,7 +2761,7 @@ static int nonmonotonic_detect_contradiction(NonmonotonicState* state, const cha
  * F-09: 公共API - 概率软逻辑(PSL)
  * =========================================================================== */
 
-int logic_reasoning_engine_add_psl_formula(ReasoningEngine* engine, const PslFormulaSpec* formula) {
+int logic_reasoning_engine_add_psl_formula(LogicReasoningEngine* engine, const PslFormulaSpec* formula) {
     if (!engine || !formula) return -1;
     
     if (expand_array((void**)&engine->psl_state.formulas, &engine->psl_state.formula_capacity,
@@ -2796,7 +2796,7 @@ int logic_reasoning_engine_add_psl_formula(ReasoningEngine* engine, const PslFor
     return (int)(engine->psl_state.formula_count - 1);
 }
 
-LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(LogicReasoningEngine* engine,
                                                                      const char** facts, size_t fact_count) {
     /*
      * PSL不确定性推理：
@@ -2907,7 +2907,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(ReasoningEn
  * F-09: 公共API - 默认推理
  * =========================================================================== */
 
-int logic_reasoning_engine_add_default_rule(ReasoningEngine* engine, const DefaultRuleSpec* rule) {
+int logic_reasoning_engine_add_default_rule(LogicReasoningEngine* engine, const DefaultRuleSpec* rule) {
     if (!engine || !rule) return -1;
     
     if (expand_array((void**)&engine->default_state.rules, &engine->default_state.rule_capacity,
@@ -2957,7 +2957,7 @@ int logic_reasoning_engine_add_default_rule(ReasoningEngine* engine, const Defau
     return (int)(engine->default_state.rule_count - 1);
 }
 
-LogicInferenceResult* logic_reasoning_engine_default_reason(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_default_reason(LogicReasoningEngine* engine,
                                                             const char** facts, size_t fact_count) {
     /*
      * 默认推理算法：
@@ -3111,7 +3111,7 @@ LogicInferenceResult* logic_reasoning_engine_default_reason(ReasoningEngine* eng
  * F-09: 公共API - 非单调推理
  * =========================================================================== */
 
-int logic_reasoning_engine_nonmonotonic_add_fact(ReasoningEngine* engine, const char* fact,
+int logic_reasoning_engine_nonmonotonic_add_fact(LogicReasoningEngine* engine, const char* fact,
                                                   float confidence, int is_monotonic) {
     if (!engine || !fact) return -1;
     
@@ -3120,12 +3120,12 @@ int logic_reasoning_engine_nonmonotonic_add_fact(ReasoningEngine* engine, const 
     return result;
 }
 
-int logic_reasoning_engine_nonmonotonic_remove_fact(ReasoningEngine* engine, const char* fact) {
+int logic_reasoning_engine_nonmonotonic_remove_fact(LogicReasoningEngine* engine, const char* fact) {
     if (!engine || !fact) return -1;
     return nonmonotonic_remove_fact(&engine->nonmonotonic_state, fact);
 }
 
-LogicInferenceResult* logic_reasoning_engine_nonmonotonic_reason(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_nonmonotonic_reason(LogicReasoningEngine* engine,
                                                                   const char** facts, size_t fact_count) {
     /*
      * 非单调推理算法：
@@ -3487,7 +3487,7 @@ int logic_fol_resolution(const char** premises, int premise_count,
  * 输入：一组具体的事实三元组，输出：泛化后的规则
  * ============================================================================ */
 
-ReasoningEngine* logic_reasoning_induction(ReasoningEngine* engine,
+LogicReasoningEngine* logic_reasoning_induction(LogicReasoningEngine* engine,
     const char** instances, size_t instance_count, int max_rules) {
     if (!engine || !instances || instance_count == 0) return NULL;
 
@@ -3551,7 +3551,7 @@ ReasoningEngine* logic_reasoning_induction(ReasoningEngine* engine,
  * 从结果推导最可能原因。算法：贝叶斯逆概率 + 最佳解释推理(IBE)
  * ============================================================================ */
 
-char* logic_reasoning_abduction(ReasoningEngine* engine,
+char* logic_reasoning_abduction(LogicReasoningEngine* engine,
     const char* observation, float* confidence_out) {
     if (!engine || !observation) return NULL;
 
@@ -3606,7 +3606,7 @@ char* logic_reasoning_abduction(ReasoningEngine* engine,
  * 结构映射理论(SMT)简化版：A:B :: C:? → 在知识库中搜索类比映射
  * ============================================================================ */
 
-char* logic_reasoning_analogy(ReasoningEngine* engine,
+char* logic_reasoning_analogy(LogicReasoningEngine* engine,
     const char* source_a, const char* source_b,
     const char* target_c, float* confidence_out) {
     if (!engine || !source_a || !source_b || !target_c) return NULL;

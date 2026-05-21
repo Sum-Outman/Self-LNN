@@ -70,9 +70,9 @@ GazeboBridge* gazebo_connect(const GazeboConfig* config) {
         config->use_gui ? "" : "-s");
     
 #ifdef _WIN32
-    FILE* pipe = _popen(cmd, "r+");
+    FILE* pipe = _popen(cmd, "r");
 #else
-    FILE* pipe = popen(cmd, "r+");
+    FILE* pipe = popen(cmd, "r");
 #endif
     
     if (!pipe) {
@@ -148,6 +148,24 @@ static int gz_exec(const char* cmd, char* output, size_t out_size) {
     return ret;
 }
 
+/* P1-026修复: model_name安全校验——防止命令注入
+ * model_name会被拼接到shell命令中，必须拒绝包含特殊字符的名称 */
+static int gz_validate_model_name(const char* name) {
+    if (!name || !*name) return -1;
+    size_t len = strlen(name);
+    if (len == 0 || len > 255) return -1;
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        /* 仅允许字母、数字、下划线、连字符、点号、斜杠 */
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '/') {
+            continue;
+        }
+        return -1;  /* 拒绝: ; | & $ ` # \n \r < > ! ( ) { } [ ] ' " % * ? ~ 空格等 */
+    }
+    return 0;
+}
+
 int gazebo_spawn_model(GazeboBridge* bridge, const char* model_name,
                        const char* sdf_path,
                        const float position[3],
@@ -155,6 +173,8 @@ int gazebo_spawn_model(GazeboBridge* bridge, const char* model_name,
     /* F-003: 使用gz service创建模型 — 真实Gazebo API */
     if (!bridge || !model_name || !sdf_path) return -1;
     if (bridge->state != GAZEBO_CONNECTED) return -1;
+    /* P1-026修复: 防止命令注入——校验model_name不含shell特殊字符 */
+    if (gz_validate_model_name(model_name) != 0) return -1;
     
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
@@ -176,6 +196,8 @@ int gazebo_delete_model(GazeboBridge* bridge, const char* model_name) {
     /* F-003: 使用gz service删除模型 */
     if (!bridge || !model_name) return -1;
     if (bridge->state != GAZEBO_CONNECTED) return -1;
+    /* P1-026修复: 防止命令注入——校验model_name不含shell特殊字符 */
+    if (gz_validate_model_name(model_name) != 0) return -1;
     
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
@@ -190,6 +212,8 @@ int gazebo_get_model_state(GazeboBridge* bridge, const char* model_name,
                            GazeboModelState* state) {
     /* F-003: 使用gz topic获取模型位姿 */
     if (!bridge || !model_name || !state) return -1;
+    /* P1-026修复: 防止命令注入——校验model_name不含shell特殊字符 */
+    if (gz_validate_model_name(model_name) != 0) return -1;
     memset(state, 0, sizeof(GazeboModelState));
     strncpy(state->model_name, model_name, 255);
     

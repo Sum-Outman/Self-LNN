@@ -460,7 +460,6 @@ int ros_robot_controller_send_joint_torques(RosRobotController* controller, int 
 int ros_robot_controller_execute_trajectory(RosRobotController* controller, int robot_id,
                                              const float* trajectory, int num_points,
                                              float duration) {
-    (void)trajectory;
     int idx = find_robot_entry(controller, robot_id);
     if (idx < 0) return -1;
 

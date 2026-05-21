@@ -202,6 +202,7 @@ struct CfCCell {
     int use_adaptive_tau;       /**< 是否使用自适应时间常数 */
     float min_time_constant;    /**< 最小时间常数 */
     float max_time_constant;    /**< 最大时间常数 */
+    float* forward_tau_used;    /**< P1-019修复: 前向传播实际使用的tau值 [hidden_size]，反向传播直接读取避免不一致 */
     /* 梯度缓冲区（修复缺失部分） */
     float* input_gate_weight_grad;  /**< 输入门权重梯度 */
     float* output_gate_weight_grad; /**< 输出门权重梯度 */
@@ -430,9 +431,11 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     if (cell->config.residual_scale < 0.01f) cell->config.residual_scale = 0.0f;
     if (cell->config.residual_scale > 1.0f) cell->config.residual_scale = 1.0f;
     
-    // 设置delta_t默认值（如果未设置或无效）
+    // 设置delta_t默认值（如果未设置或无效），并跟踪显式设置标志
     if (cell->config.delta_t <= 0.0f) {
-        cell->config.delta_t = 1.0f;  // 默认时间步长
+        cell->config.delta_t = 1.0f;  // 默认时间步长，标志位保持0（未显式设置）
+    } else {
+        cell->config.delta_t_explicitly_set = 1;  // P2-042修复: 调用者显式设置了非零delta_t
     }
     
     // 分配状态
@@ -464,6 +467,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     
     // 分配液态神经网络增强特性内存
     cell->time_constants = (float*)safe_calloc(hidden_size, sizeof(float));
+    cell->forward_tau_used = (float*)safe_calloc(hidden_size, sizeof(float));  /* P1-019修复: 前向tau快照 */
     cell->input_gate_weights = (float*)safe_calloc(weight_size, sizeof(float));
     cell->forget_gate_weights = (float*)safe_calloc(weight_size, sizeof(float));
     cell->output_gate_weights = (float*)safe_calloc(weight_size, sizeof(float));
@@ -788,11 +792,11 @@ quaternion_init_end: ;
     }
     
     /* P0-015修复: 初始化自动求解器选择
-     * 当use_auto_solver未显式启用且delta_t为默认值时，
+     * 当use_auto_solver未显式启用且delta_t未被显式设置时，
      * 自动根据隐藏层大小和输入尺寸选择最适合的ODE求解器 */
     cell->enhanced_state = NULL;
     if (cell->config.use_auto_solver == 0 && 
-        cell->config.delta_t >= 0.99f && cell->config.delta_t <= 1.01f) {
+        cell->config.delta_t_explicitly_set == 0) {
         /* 调用者未显式配置求解器参数，启用自动选择 */
         cell->config.use_auto_solver = 1;
         cell->config.use_adaptive_step = 1;
@@ -888,6 +892,7 @@ void cfc_cell_free(CfCCell* cell) {
     
     // 释放液态神经网络增强特性内存
     safe_free((void**)&cell->time_constants);
+    safe_free((void**)&cell->forward_tau_used);  /* P1-019修复: 前向tau快照 */
     safe_free((void**)&cell->input_gate_weights);
     safe_free((void**)&cell->forget_gate_weights);
     safe_free((void**)&cell->output_gate_weights);
@@ -1067,6 +1072,9 @@ static void cfc_cell_compute_rhs(CfCCell* cell, const float* input,
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
         
+        /* P1-019修复: 记录前向RHS使用的tau（数值求解器通过compute_rhs获取tau） */
+        cell->forward_tau_used[i] = tau;
+        
         rhs_output[i] = (-hidden_state[i] + driver) / tau;
     }
 }
@@ -1187,6 +1195,9 @@ static void cfc_multi_timescale_solution(CfCCell* cell, const float* input,
         float mix_alpha = fast_mag / total_mag;
 
         output[i] = mix_alpha * new_fast + (1.0f - mix_alpha) * new_slow;
+
+        /* P1-019修复: 记录多时间尺度前向实际使用的有效tau（磁矩加权混合） */
+        cell->forward_tau_used[i] = mix_alpha * tau_fast + (1.0f - mix_alpha) * tau_slow;
     }
 }
 
@@ -1278,6 +1289,9 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         // 限制时间常数范围以确保数值稳定性
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
+        
+        /* P1-019修复: 记录前向实际使用的tau，供反向传播直接读取 */
+        cell->forward_tau_used[i] = tau;
         
         // 确保Δt/τ不会太小导致数值下溢
         float dt_over_tau = delta_t / tau;
@@ -2106,6 +2120,18 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
                                 cell->state->state,
                                 cell->config.delta_t,
                                 cell->state->activation);
+    } else if (cell->config.ode_solver_type == ODE_SOLVER_RHS) {
+        /* P2-041修复: 使用cfc_cell_compute_rhs进行直接RHS评估（前向欧拉步）
+         * 作为备选数值求解器，对动态系统进行单步欧拉积分 */
+        float* rhs = cell->state->noise_buffer;
+        cfc_cell_compute_rhs(cell, cell->state->input_buffer,
+                            cell->state->state, rhs);
+        size_t hs = cell->config.hidden_size;
+        for (size_t i = 0; i < hs; i++) {
+            float new_h = cell->state->state[i] + cell->config.delta_t * rhs[i];
+            if (isnan(new_h) || isinf(new_h)) new_h = 0.0f;
+            cell->state->activation[i] = new_h;
+        }
     } else {
         cfc_closed_form_solution(cell,
                                 cell->state->input_buffer,
@@ -2305,6 +2331,18 @@ int cfc_cell_forward_with_dt(CfCCell* cell, const float* input, float delta_t, f
                                 cell->state->state,
                                 delta_t,
                                 cell->state->activation);
+    } else if (cell->config.ode_solver_type == ODE_SOLVER_RHS) {
+        /* P2-041修复: 使用cfc_cell_compute_rhs进行直接RHS评估（前向欧拉步）
+         * 作为备选数值求解器，对动态系统进行单步欧拉积分 */
+        float* rhs = cell->state->noise_buffer;
+        cfc_cell_compute_rhs(cell, cell->state->input_buffer,
+                            cell->state->state, rhs);
+        size_t hs = cell->config.hidden_size;
+        for (size_t i = 0; i < hs; i++) {
+            float new_h = cell->state->state[i] + delta_t * rhs[i];
+            if (isnan(new_h) || isinf(new_h)) new_h = 0.0f;
+            cell->state->activation[i] = new_h;
+        }
     } else {
         cfc_closed_form_solution(cell,
                                 cell->state->input_buffer,
@@ -2584,10 +2622,16 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         float activation = tanhf(activation_input_sum);
         float activation_derivative = 1.0f - activation * activation;  // tanh'(x) = 1 - tanh²(x)
         
-        // 获取时间常数
-        float tau = cell->config.time_constant;
-        if (cell->use_adaptive_tau && cell->time_constants) {
+        // P1-019修复: 获取前向传播实际使用的时间常数
+        // 多时间尺度、液时域缩放等求解器使用与config不同的tau值
+        // 优先从forward_tau_used读取，确保反向传播与前向传播的exp项系数一致
+        float tau;
+        if (cell->forward_tau_used && cell->forward_tau_used[i] > 0.0f) {
+            tau = cell->forward_tau_used[i];
+        } else if (cell->use_adaptive_tau && cell->time_constants) {
             tau = cell->time_constants[i];
+        } else {
+            tau = cell->config.time_constant;
         }
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
@@ -2765,6 +2809,24 @@ int cfc_cell_set_config(CfCCell* cell, const CfCCellConfig* config) {
     cell->config.noise_std = config->noise_std;
     cell->config.enable_adaptation = config->enable_adaptation;
     cell->config.ode_solver_type = config->ode_solver_type;
+    
+    /* P1-020修复: 多时间尺度并行演化配置传递
+     * cfc_configure_multi_rate通过cfc_cell_set_config更新多时间尺度字段，
+     * 若此处不更新，change_multi_timescale设置将丢失 */
+    cell->config.use_multi_timescale = config->use_multi_timescale;
+    cell->config.fast_tau_ratio = config->fast_tau_ratio;
+    cell->config.slow_tau_ratio = config->slow_tau_ratio;
+    cell->use_multi_timescale = config->use_multi_timescale;
+    cell->fast_tau_ratio = config->fast_tau_ratio;
+    cell->slow_tau_ratio = config->slow_tau_ratio;
+    
+    /* P1-020修复: 时间步长和自适应步长配置传递 */
+    cell->config.delta_t = config->delta_t;
+    cell->config.delta_t_explicitly_set = config->delta_t_explicitly_set;  /* P2-042修复: 传递显式设置标志 */
+    cell->config.use_adaptive_step = config->use_adaptive_step;
+    cell->use_adaptive_step = config->use_adaptive_step;
+    cell->config.use_parallel_solve = config->use_parallel_solve;
+    cell->use_parallel_solve = config->use_parallel_solve;
     
     return 0;
 }

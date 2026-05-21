@@ -19,15 +19,15 @@ extern "C" {
 #endif
 
 /**
- * @brief 推理模式
+ * @brief 逻辑推理模式（区别于 core/reasoning.h 的 ReasoningMode）
  */
 typedef enum {
-    REASONING_FORWARD_CHAINING = 0,   /**< 前向链推理 */
-    REASONING_BACKWARD_CHAINING = 1,  /**< 后向链推理 */
-    REASONING_MIXED_CHAINING = 2,     /**< 混合链推理 */
-    REASONING_MONOTONIC = 3,          /**< 单调推理 */
-    REASONING_NONMONOTONIC = 4        /**< 非单调推理 */
-} ReasoningMode;
+    LOGIC_REASONING_FORWARD_CHAINING = 0,   /**< 前向链推理 */
+    LOGIC_REASONING_BACKWARD_CHAINING = 1,  /**< 后向链推理 */
+    LOGIC_REASONING_MIXED_CHAINING = 2,     /**< 混合链推理 */
+    LOGIC_REASONING_MONOTONIC = 3,          /**< 单调推理 */
+    LOGIC_REASONING_NONMONOTONIC = 4        /**< 非单调推理 */
+} LogicReasoningMode;
 
 /**
  * @brief 规则结构
@@ -55,18 +55,18 @@ typedef struct PslFormulaSpec PslFormulaSpec;
  * @brief 推理引擎配置
  */
 typedef struct {
-    ReasoningMode mode;               /**< 推理模式 */
+    LogicReasoningMode mode;               /**< 推理模式 */
     int max_inference_steps;          /**< 最大推理步数 */
     float min_confidence;             /**< 最小置信度阈值 */
     int enable_conflict_resolution;   /**< 是否启用冲突解决 */
     int enable_uncertainty_reasoning; /**< 是否启用不确定性推理 */
     size_t working_memory_size;       /**< 工作内存大小 */
-} ReasoningEngineConfig;
+} LogicReasoningEngineConfig;
 
 /**
- * @brief 推理引擎句柄
+ * @brief 逻辑推理引擎句柄
  */
-typedef struct ReasoningEngine ReasoningEngine;
+typedef struct LogicReasoningEngine LogicReasoningEngine;
 
 /**
  * @brief 逻辑推理结果
@@ -92,7 +92,7 @@ typedef enum {
     CONFLICT_RESOLUTION_RECENCY = 1,  /**< 最近使用策略 */
     CONFLICT_RESOLUTION_SPECIFICITY = 2, /**< 特异性策略 */
     CONFLICT_RESOLUTION_RANDOM = 3    /**< 随机策略 */
-} ConflictResolutionStrategy;
+} LogicConflictResolutionStrategy;
 
 /**
  * @brief 创建逻辑推理引擎
@@ -100,14 +100,14 @@ typedef enum {
  * @param config 引擎配置
  * @return ReasoningEngine* 逻辑推理引擎句柄，失败返回NULL
  */
-ReasoningEngine* logic_reasoning_engine_create(const ReasoningEngineConfig* config);
+LogicReasoningEngine* logic_reasoning_engine_create(const LogicReasoningEngineConfig* config);
 
 /**
  * @brief 释放逻辑推理引擎
  * 
  * @param engine 逻辑推理引擎句柄
  */
-void logic_reasoning_engine_free(ReasoningEngine* engine);
+void logic_reasoning_engine_free(LogicReasoningEngine* engine);
 
 /**
  * @brief 释放逻辑推理结果
@@ -123,7 +123,7 @@ void logic_reasoning_engine_free_inference_result(LogicInferenceResult* result);
  * @param rule 规则
  * @return int 成功返回规则ID，失败返回-1
  */
-int logic_reasoning_engine_add_rule(ReasoningEngine* engine, const InferenceRule* rule);
+int logic_reasoning_engine_add_rule(LogicReasoningEngine* engine, const InferenceRule* rule);
 
 /**
  * @brief 从知识库加载规则到逻辑推理引擎
@@ -132,7 +132,7 @@ int logic_reasoning_engine_add_rule(ReasoningEngine* engine, const InferenceRule
  * @param kb 知识库句柄
  * @return int 成功返回加载的规则数，失败返回-1
  */
-int logic_reasoning_engine_load_rules_from_kb(ReasoningEngine* engine, KnowledgeBase* kb);
+int logic_reasoning_engine_load_rules_from_kb(LogicReasoningEngine* engine, KnowledgeBase* kb);
 
 /**
  * @brief 从知识图谱加载规则到逻辑推理引擎
@@ -141,7 +141,7 @@ int logic_reasoning_engine_load_rules_from_kb(ReasoningEngine* engine, Knowledge
  * @param graph 知识图谱句柄
  * @return int 成功返回加载的规则数，失败返回-1
  */
-int logic_reasoning_engine_load_rules_from_graph(ReasoningEngine* engine, KnowledgeGraph* graph);
+int logic_reasoning_engine_load_rules_from_graph(LogicReasoningEngine* engine, KnowledgeGraph* graph);
 
 /**
  * @brief 从语义网络加载规则到逻辑推理引擎
@@ -150,7 +150,7 @@ int logic_reasoning_engine_load_rules_from_graph(ReasoningEngine* engine, Knowle
  * @param network 语义网络句柄
  * @return int 成功返回加载的规则数，失败返回-1
  */
-int logic_reasoning_engine_load_rules_from_semantic_network(ReasoningEngine* engine,
+int logic_reasoning_engine_load_rules_from_semantic_network(LogicReasoningEngine* engine,
                                                      SemanticNetwork* network);
 
 /**
@@ -160,8 +160,8 @@ int logic_reasoning_engine_load_rules_from_semantic_network(ReasoningEngine* eng
  * @param strategy 冲突解决策略
  * @return int 成功返回0，失败返回-1
  */
-int logic_reasoning_engine_set_conflict_resolution(ReasoningEngine* engine,
-                                            ConflictResolutionStrategy strategy);
+int logic_reasoning_engine_set_conflict_resolution(LogicReasoningEngine* engine,
+                                            LogicConflictResolutionStrategy strategy);
 
 /**
  * @brief 执行逻辑推理引擎前向链推理
@@ -173,7 +173,7 @@ int logic_reasoning_engine_set_conflict_resolution(ReasoningEngine* engine,
  * @param goal_count 目标事实数量
  * @return InferenceResult* 推理结果，调用者负责释放，失败返回NULL
  */
-LogicInferenceResult* logic_reasoning_engine_forward_chain(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_forward_chain(LogicReasoningEngine* engine,
                                                const char** initial_facts,
                                                size_t fact_count,
                                                const char** goal_facts,
@@ -189,7 +189,7 @@ LogicInferenceResult* logic_reasoning_engine_forward_chain(ReasoningEngine* engi
  * @param known_count 已知事实数量
  * @return InferenceResult* 推理结果，调用者负责释放，失败返回NULL
  */
-LogicInferenceResult* logic_reasoning_engine_backward_chain(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_backward_chain(LogicReasoningEngine* engine,
                                                 const char** goal_facts,
                                                 size_t goal_count,
                                                 const char** known_facts,
@@ -205,7 +205,7 @@ LogicInferenceResult* logic_reasoning_engine_backward_chain(ReasoningEngine* eng
  * @param goal_count 目标数量
  * @return InferenceResult* 推理结果，调用者负责释放，失败返回NULL
  */
-LogicInferenceResult* logic_reasoning_engine_mixed_chain(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_mixed_chain(LogicReasoningEngine* engine,
                                              const char** facts,
                                              size_t fact_count,
                                              const char** goals,
@@ -220,7 +220,7 @@ LogicInferenceResult* logic_reasoning_engine_mixed_chain(ReasoningEngine* engine
  * @param max_results 最大结果数
  * @return InferenceResult* 推理结果，调用者负责释放，失败返回NULL
  */
-LogicInferenceResult* logic_reasoning_engine_reason_with_kb(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_reason_with_kb(LogicReasoningEngine* engine,
                                                 KnowledgeBase* kb,
                                                 const char* query,
                                                 size_t max_results);
@@ -235,7 +235,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_kb(ReasoningEngine* eng
  * @param max_paths 最大路径数
  * @return InferenceResult* 推理结果，调用者负责释放，失败返回NULL
  */
-LogicInferenceResult* logic_reasoning_engine_reason_with_graph(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_reason_with_graph(LogicReasoningEngine* engine,
                                                    KnowledgeGraph* graph,
                                                    GraphNode* start_node,
                                                    GraphNode* end_node,
@@ -251,7 +251,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_graph(ReasoningEngine* 
  * @param max_depth 最大深度
  * @return InferenceResult* 推理结果，调用者负责释放，失败返回NULL
  */
-LogicInferenceResult* logic_reasoning_engine_reason_with_semantic_network(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_reason_with_semantic_network(LogicReasoningEngine* engine,
                                                               SemanticNetwork* network,
                                                               Concept* concept,
                                                               int relation_type,
@@ -266,7 +266,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_semantic_network(Reason
  * @param avg_inference_time 平均推理时间输出（毫秒）
  * @return int 成功返回0，失败返回-1
  */
-int logic_reasoning_engine_get_stats(ReasoningEngine* engine,
+int logic_reasoning_engine_get_stats(LogicReasoningEngine* engine,
                               size_t* total_rules,
                               size_t* inference_count,
                               float* avg_inference_time);
@@ -276,7 +276,7 @@ int logic_reasoning_engine_get_stats(ReasoningEngine* engine,
  * 
  * @param engine 逻辑推理引擎句柄
  */
-void logic_reasoning_engine_reset(ReasoningEngine* engine);
+void logic_reasoning_engine_reset(LogicReasoningEngine* engine);
 
 /**
  * @brief 保存逻辑推理引擎规则到文件
@@ -285,7 +285,7 @@ void logic_reasoning_engine_reset(ReasoningEngine* engine);
  * @param filename 文件名
  * @return int 成功返回0，失败返回-1
  */
-int logic_reasoning_engine_save_rules(ReasoningEngine* engine, const char* filename);
+int logic_reasoning_engine_save_rules(LogicReasoningEngine* engine, const char* filename);
 
 /**
  * @brief 从文件加载逻辑推理引擎规则
@@ -294,7 +294,7 @@ int logic_reasoning_engine_save_rules(ReasoningEngine* engine, const char* filen
  * @param filename 文件名
  * @return int 成功返回加载的规则数，失败返回-1
  */
-int logic_reasoning_engine_load_rules(ReasoningEngine* engine, const char* filename);
+int logic_reasoning_engine_load_rules(LogicReasoningEngine* engine, const char* filename);
 
 /**
  * @brief 释放逻辑推理结果内存
@@ -342,7 +342,7 @@ void inference_rule_free(InferenceRule* rule);
  * @param formula PSL公式结构体指针
  * @return int 成功返回公式ID，失败返回-1
  */
-int logic_reasoning_engine_add_psl_formula(ReasoningEngine* engine, const PslFormulaSpec* formula);
+int logic_reasoning_engine_add_psl_formula(LogicReasoningEngine* engine, const PslFormulaSpec* formula);
 
 /**
  * @brief 执行PSL不确定性推理
@@ -355,7 +355,7 @@ int logic_reasoning_engine_add_psl_formula(ReasoningEngine* engine, const PslFor
  * @param fact_count 事实数量
  * @return LogicInferenceResult* 推理结果，调用者负责释放
  */
-LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(LogicReasoningEngine* engine,
                                                                      const char** facts, size_t fact_count);
 
 /* ============================================================================
@@ -373,7 +373,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(ReasoningEn
  * @param rule 默认规则结构体指针
  * @return int 成功返回规则ID，失败返回-1
  */
-int logic_reasoning_engine_add_default_rule(ReasoningEngine* engine, const DefaultRuleSpec* rule);
+int logic_reasoning_engine_add_default_rule(LogicReasoningEngine* engine, const DefaultRuleSpec* rule);
 
 /**
  * @brief 执行默认推理
@@ -386,7 +386,7 @@ int logic_reasoning_engine_add_default_rule(ReasoningEngine* engine, const Defau
  * @param fact_count 事实数量
  * @return LogicInferenceResult* 推理结果，调用者负责释放
  */
-LogicInferenceResult* logic_reasoning_engine_default_reason(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_default_reason(LogicReasoningEngine* engine,
                                                             const char** facts, size_t fact_count);
 
 /* ============================================================================
@@ -404,7 +404,7 @@ LogicInferenceResult* logic_reasoning_engine_default_reason(ReasoningEngine* eng
  * @param is_monotonic 是否为单调事实（1=不可撤销，0=可撤销）
  * @return int 成功返回事实ID，失败返回-1
  */
-int logic_reasoning_engine_nonmonotonic_add_fact(ReasoningEngine* engine, const char* fact,
+int logic_reasoning_engine_nonmonotonic_add_fact(LogicReasoningEngine* engine, const char* fact,
                                                   float confidence, int is_monotonic);
 
 /**
@@ -414,7 +414,7 @@ int logic_reasoning_engine_nonmonotonic_add_fact(ReasoningEngine* engine, const 
  * @param fact 事实字符串
  * @return int 成功返回0，失败返回-1
  */
-int logic_reasoning_engine_nonmonotonic_remove_fact(ReasoningEngine* engine, const char* fact);
+int logic_reasoning_engine_nonmonotonic_remove_fact(LogicReasoningEngine* engine, const char* fact);
 
 /**
  * @brief 执行非单调推理
@@ -430,19 +430,19 @@ int logic_reasoning_engine_nonmonotonic_remove_fact(ReasoningEngine* engine, con
  * @param fact_count 事实数量
  * @return LogicInferenceResult* 推理结果，调用者负责释放
  */
-LogicInferenceResult* logic_reasoning_engine_nonmonotonic_reason(ReasoningEngine* engine,
+LogicInferenceResult* logic_reasoning_engine_nonmonotonic_reason(LogicReasoningEngine* engine,
                                                                   const char** facts, size_t fact_count);
 
 /* K-修复: 归纳推理——从具体实例泛化出一般规则 */
-ReasoningEngine* logic_reasoning_induction(ReasoningEngine* engine,
+LogicReasoningEngine* logic_reasoning_induction(LogicReasoningEngine* engine,
     const char** instances, size_t instance_count, int max_rules);
 
 /* K-修复: 溯因推理——从结果推导最可能原因 */
-char* logic_reasoning_abduction(ReasoningEngine* engine,
+char* logic_reasoning_abduction(LogicReasoningEngine* engine,
     const char* observation, float* confidence_out);
 
 /* K-修复: 类比推理——A:B :: C:D 结构映射 */
-char* logic_reasoning_analogy(ReasoningEngine* engine,
+char* logic_reasoning_analogy(LogicReasoningEngine* engine,
     const char* source_a, const char* source_b,
     const char* target_c, float* confidence_out);
 

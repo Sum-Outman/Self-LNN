@@ -11,6 +11,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include "selflnn/core/cfc_cell.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -328,7 +329,7 @@ int cfc_set_solver_type(CfCNetwork* network, int solver_type);
 int cfc_set_adaptive_step(CfCNetwork* network, int enable);
 
 #ifdef SELFLNN_IMPLEMENTATION
-typedef struct CfCCell CfCCell;
+/* CfCCell 前向声明由 cfc_cell.h 提供，此处无需重复 */
 struct CfCNetwork {
     CfCNetworkConfig config;
     CfCCell** layers;
@@ -347,6 +348,11 @@ struct CfCNetwork {
     /* P0-001: 每层级联层归一化，消除深层网络的内部协变量偏移 */
     void** layer_norms;           /**< LayerNorm* 数组 [num_layers]，每层一个LN */
     float* ln_temp_buffer;        /**< LN前向临時缓冲区 (max_layer_size) */
+    /* P0-014修复: W_out/b_out参数与梯度分离存储，防止梯度更新破坏参数值 */
+    float* W_out_params;          /**< 输出投影矩阵参数 [output_size * hidden_size] */
+    float* b_out_params;          /**< 输出投影偏置参数 [output_size] */
+    float* W_out_gradients;       /**< 输出投影矩阵梯度 [output_size * hidden_size] */
+    float* b_out_gradients;       /**< 输出投影偏置梯度 [output_size] */
 };
 #endif
 

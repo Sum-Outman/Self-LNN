@@ -1262,12 +1262,14 @@ static int ring_allreduce_internal(DistributedContext* ctx, float* data, size_t 
         }
     }
 
-    /* Phase 2: AllGather (n-1 步) - 每个节点拥有已归约的数据块 */
+    /* Phase 2: AllGather (n-1 步) - 每个节点拥有已归约的数据块
+     * 标准Ring AllReduce公式：Reduce-Scatter后节点i拥有位置(i+1)%n的归约结果
+     * 步骤s: 发送块 (i+1-s+n)%n, 接收块 (i-s+n)%n */
     for (int step = 0; step < n - 1; step++) {
-        size_t send_chunk = ((ctx->my_node_id - step + n) % n) * chunk_size;
+        size_t send_chunk = ((ctx->my_node_id + 1 - step + n) % n) * chunk_size;
         size_t send_count = (send_chunk + chunk_size <= count) ? chunk_size : (count > send_chunk ? count - send_chunk : 0);
 
-        size_t recv_chunk = ((ctx->my_node_id - step - 1 + n) % n) * chunk_size;
+        size_t recv_chunk = ((ctx->my_node_id - step + n) % n) * chunk_size;
         size_t recv_count = (recv_chunk + chunk_size <= count) ? chunk_size : (count > recv_chunk ? count - recv_chunk : 0);
 
         /* 发送本地已归约数据块 */

@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -28,6 +29,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #endif
 
 /* ==================== 厂商SDK库路径定义 ==================== */
@@ -301,6 +303,17 @@ static int detect_gpu_macos(GpuHardwareInfo* info, int max_devices, int* num_fou
     snprintf(gpu->device_name, sizeof(gpu->device_name), "Apple Silicon GPU (Metal 3)");
     gpu->supports_fp16 = 1;
     gpu->supports_fp64 = 1;
+
+    /* 通过sysctl查询统一内存大小（hw.memsize），将一半报告为GPU可用统一内存 */
+    {
+        uint64_t memsize = 0;
+        size_t memsize_len = sizeof(memsize);
+        if (sysctlbyname("hw.memsize", &memsize, &memsize_len, NULL, 0) == 0) {
+            gpu->memory_mb = (size_t)(memsize / (1024 * 1024) / 2);
+        } else {
+            gpu->memory_mb = 8192;
+        }
+    }
     #else
     snprintf(gpu->device_name, sizeof(gpu->device_name), "Apple GPU (Metal)");
     #endif

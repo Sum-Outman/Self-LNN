@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <math.h>
 
 #ifdef _MSC_VER
@@ -117,6 +118,32 @@ typedef struct {
     float target_velocity;
 } PBPIDController;
 
+/**
+ * @brief 内部仿真物体（非URDF机器人）：盒子/球体/圆柱体
+ * P0-004修复: 真实跟踪内部仿真物体的形状、位置、速度等物理状态
+ */
+#define PB_MAX_INTERNAL_BODIES 256
+#define PB_INTERNAL_BODY_BOX 0
+#define PB_INTERNAL_BODY_SPHERE 1
+#define PB_INTERNAL_BODY_CYLINDER 2
+
+typedef struct {
+    int body_id;                      /**< 物体ID */
+    int shape_type;                   /**< 形状类型: 0=盒子, 1=球体, 2=圆柱体 */
+    float position[3];                /**< 位置 (x, y, z) */
+    float orientation[4];             /**< 姿态 (四元数) */
+    float linear_velocity[3];         /**< 线速度 */
+    float angular_velocity[3];        /**< 角速度 */
+    float dimensions[3];              /**< 尺寸: 盒子(half-extents), 球体(radius,_,_), 圆柱体(radius,height,_) */
+    float mass;                       /**< 质量 */
+    float friction;                   /**< 摩擦系数 */
+    float restitution;                /**< 恢复系数 */
+    int is_active;                    /**< 是否活跃 */
+    int num_links;                    /**< 链接数（简单物体为1） */
+    int num_joints;                   /**< 关节数（简单物体为0） */
+    char name[64];                    /**< 物体名称 */
+} PBInternalBody;
+
 typedef struct {
     PBConfig config;
     PBConnectionState state;
@@ -124,6 +151,7 @@ typedef struct {
     float simulation_time;
     int step_count;
     int total_constraints;
+
     int last_constraint_id;
 
     PBRobotInfo robots[PB_MAX_ROBOTS];
@@ -149,6 +177,7 @@ typedef struct {
     Simulator* internal_sim;
     SimulatorConfig sim_config;
     int internal_body_count;
+    PBInternalBody internal_bodies[PB_MAX_INTERNAL_BODIES];  /**< P0-004: 内部物体跟踪数组 */
     float internal_gravity_z;
     int internal_realtime_enabled;
 
@@ -506,9 +535,53 @@ static int pb_internal_dispatch(const char* cmd) {
     }
     
     /* ============ GET_LINK_STATE ============ */
+    /* P0-004修复: 从内部仿真器读取真实链路状态，不再返回全零占位符 */
     if (strcmp(cmd_name, "GET_LINK_STATE") == 0) {
+        int bid = nargs > 0 ? atoi(args[0]) : 0;
+        int lid = nargs > 1 ? atoi(args[1]) : -1;
+        float pos[3] = {0, 0, 0};
+        float orn[4] = {0, 0, 0, 1};
+        float lin_vel[3] = {0, 0, 0};
+        float ang_vel[3] = {0, 0, 0};
+
+        if (g_pb.internal_sim && bid > 0 && bid <= g_pb.internal_body_count) {
+            SimulatorRobotState state;
+            if (simulator_get_robot_state(g_pb.internal_sim, bid - 1, &state) == 0) {
+                pos[0] = state.position[0];
+                pos[1] = state.position[1];
+                pos[2] = state.position[2];
+                orn[0] = state.orientation[0];
+                orn[1] = state.orientation[1];
+                orn[2] = state.orientation[2];
+                orn[3] = state.orientation[3];
+                lin_vel[0] = state.velocity[0];
+                lin_vel[1] = state.velocity[1];
+                lin_vel[2] = state.velocity[2];
+                ang_vel[0] = state.angular_velocity[0];
+                ang_vel[1] = state.angular_velocity[1];
+                ang_vel[2] = state.angular_velocity[2];
+            }
+        } else {
+            /* 从内部物体数组查找简单物体（盒子/球体/圆柱体） */
+            for (int i = 0; i < g_pb.internal_body_count && i < PB_MAX_INTERNAL_BODIES; i++) {
+                if (g_pb.internal_bodies[i].body_id == bid) {
+                    memcpy(pos, g_pb.internal_bodies[i].position, sizeof(pos));
+                    memcpy(orn, g_pb.internal_bodies[i].orientation, sizeof(orn));
+                    memcpy(lin_vel, g_pb.internal_bodies[i].linear_velocity, sizeof(lin_vel));
+                    memcpy(ang_vel, g_pb.internal_bodies[i].angular_velocity, sizeof(ang_vel));
+                    break;
+                }
+            }
+        }
+        (void)lid; /* link_index: 简单物体使用基座状态，机器人可根据lid做运动学链计算 */
+
         char buf[512];
-        snprintf(buf, sizeof(buf), "OK|0.0|0.0|0.0|0.0|0.0|0.0|1.0|0.0|0.0|0.0|0.0|0.0|0.0");
+        snprintf(buf, sizeof(buf),
+            "OK|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f",
+            pos[0], pos[1], pos[2],
+            orn[0], orn[1], orn[2], orn[3],
+            lin_vel[0], lin_vel[1], lin_vel[2],
+            ang_vel[0], ang_vel[1], ang_vel[2]);
         pb_set_response(buf);
         return 0;
     }
@@ -770,8 +843,40 @@ static int pb_internal_dispatch(const char* cmd) {
     }
     
     /* ============ SCENE ============ */
+    /* P0-004修复: 实现真实的场景序列化，不再为无操作占位符 */
     if (strcmp(cmd_name, "LOAD_SCENE") == 0) {
-        pb_set_response("OK");
+        if (nargs < 1) { pb_set_response("ERROR|缺少文件路径"); return -1; }
+        const char* filepath = args[0];
+        FILE* fp = fopen(filepath, "rb");
+        if (!fp) {
+            char buf[64]; snprintf(buf, sizeof(buf), "ERROR|无法打开文件"); pb_set_response(buf);
+            return -1;
+        }
+        /* 读取魔术数 */
+        uint32_t magic = 0, version = 0;
+        if (fread(&magic, sizeof(uint32_t), 1, fp) != 1 || magic != 0x53425A43) {
+            fclose(fp); pb_set_response("ERROR|格式错误"); return -1;
+        }
+        if (fread(&version, sizeof(uint32_t), 1, fp) != 1) {
+            fclose(fp); pb_set_response("ERROR|读取版本失败"); return -1;
+        }
+        (void)version;
+        /* 读取物体数据 */
+        uint32_t body_count = 0;
+        fread(&body_count, sizeof(uint32_t), 1, fp);
+        if (body_count > PB_MAX_INTERNAL_BODIES) body_count = PB_MAX_INTERNAL_BODIES;
+        fread(g_pb.internal_bodies, sizeof(PBInternalBody), body_count, fp);
+        g_pb.internal_body_count = (int)body_count;
+        g_pb.body_count = (int)body_count;
+        /* 读取机器人数据 */
+        uint32_t robot_count = 0;
+        fread(&robot_count, sizeof(uint32_t), 1, fp);
+        if (robot_count > PB_MAX_ROBOTS) robot_count = PB_MAX_ROBOTS;
+        fread(g_pb.robots, sizeof(PBRobotInfo), robot_count, fp);
+        g_pb.robot_count = (int)robot_count;
+        fclose(fp);
+        char buf[64]; snprintf(buf, sizeof(buf), "OK|%u|%u", body_count, robot_count);
+        pb_set_response(buf);
         return 0;
     }
     if (strcmp(cmd_name, "CLEAR_SCENE") == 0) {
@@ -780,6 +885,7 @@ static int pb_internal_dispatch(const char* cmd) {
         g_pb.simulation_time = 0.0f; g_pb.total_constraints = 0;
         g_pb.pid_count = 0; g_pb.debug_item_count = 0;
         memset(g_pb.robots, 0, sizeof(g_pb.robots));
+        memset(g_pb.internal_bodies, 0, sizeof(g_pb.internal_bodies));
         memset(g_pb.constraints, 0, sizeof(g_pb.constraints));
         memset(g_pb.pid_controllers, 0, sizeof(g_pb.pid_controllers));
         if (g_pb.internal_sim) simulator_reset(g_pb.internal_sim);
@@ -787,16 +893,97 @@ static int pb_internal_dispatch(const char* cmd) {
         return 0;
     }
     if (strcmp(cmd_name, "SAVE_SCENE") == 0) {
-        pb_set_response("OK");
+        if (nargs < 1) { pb_set_response("ERROR|缺少文件路径"); return -1; }
+        const char* filepath = args[0];
+        FILE* fp = fopen(filepath, "wb");
+        if (!fp) {
+            char buf[64]; snprintf(buf, sizeof(buf), "ERROR|无法创建文件"); pb_set_response(buf);
+            return -1;
+        }
+        /* 写入魔术数: 'SBZC' */
+        uint32_t magic = 0x53425A43;
+        uint32_t version = 1;
+        fwrite(&magic, sizeof(uint32_t), 1, fp);
+        fwrite(&version, sizeof(uint32_t), 1, fp);
+        /* 写入内部物体数据 */
+        uint32_t body_count = (uint32_t)g_pb.internal_body_count;
+        fwrite(&body_count, sizeof(uint32_t), 1, fp);
+        fwrite(g_pb.internal_bodies, sizeof(PBInternalBody), body_count, fp);
+        /* 写入机器人数据 */
+        uint32_t robot_count = (uint32_t)g_pb.robot_count;
+        fwrite(&robot_count, sizeof(uint32_t), 1, fp);
+        fwrite(g_pb.robots, sizeof(PBRobotInfo), robot_count, fp);
+        fclose(fp);
+        char buf[64]; snprintf(buf, sizeof(buf), "OK|%u|%u", body_count, robot_count);
+        pb_set_response(buf);
         return 0;
     }
     
     /* ============ ADD_BOX/SPHERE/CYLINDER ============ */
+    /* P0-004修复: 真实创建内部物体记录，不再仅递增计数器 */
     if (strcmp(cmd_name, "ADD_BOX") == 0 || strcmp(cmd_name, "ADD_SPHERE") == 0 ||
         strcmp(cmd_name, "ADD_CYLINDER") == 0) {
+        int shape_type = PB_INTERNAL_BODY_BOX;
+        if (strcmp(cmd_name, "ADD_SPHERE") == 0) shape_type = PB_INTERNAL_BODY_SPHERE;
+        if (strcmp(cmd_name, "ADD_CYLINDER") == 0) shape_type = PB_INTERNAL_BODY_CYLINDER;
+
+        /* 解析参数: 位置(x,y,z), 尺寸, 质量 */
+        float px = nargs > 0 ? (float)atof(args[0]) : 0.0f;
+        float py = nargs > 1 ? (float)atof(args[1]) : 0.0f;
+        float pz = nargs > 2 ? (float)atof(args[2]) : 0.0f;
+        float dim1 = nargs > 3 ? (float)atof(args[3]) : 0.5f;
+        float dim2 = nargs > 4 ? (float)atof(args[4]) : 0.5f;
+        float dim3 = nargs > 5 ? (float)atof(args[5]) : 0.5f;
+        float mass = nargs > 6 ? (float)atof(args[6]) : 1.0f;
+
         int new_id = g_pb.internal_body_count + 1;
+        int idx = g_pb.internal_body_count;
+        if (idx < PB_MAX_INTERNAL_BODIES) {
+            PBInternalBody* body = &g_pb.internal_bodies[idx];
+            memset(body, 0, sizeof(PBInternalBody));
+            body->body_id = new_id;
+            body->shape_type = shape_type;
+            body->position[0] = px; body->position[1] = py; body->position[2] = pz;
+            body->orientation[0] = 0; body->orientation[1] = 0;
+            body->orientation[2] = 0; body->orientation[3] = 1;
+            body->dimensions[0] = dim1;
+            body->dimensions[1] = dim2;
+            body->dimensions[2] = dim3;
+            body->mass = mass > 0 ? mass : 0.001f;
+            body->friction = 0.5f;
+            body->restitution = 0.3f;
+            body->is_active = 1;
+            body->num_links = 1;
+            body->num_joints = 0;
+            snprintf(body->name, sizeof(body->name), "%s_%d",
+                     cmd_name, new_id);
+        }
         g_pb.internal_body_count++;
         g_pb.body_count++;
+
+        /* 如果有内部仿真器，尝试在仿真器中创建相应对象 */
+        if (g_pb.internal_sim) {
+            SimulatorSceneObject obj;
+            memset(&obj, 0, sizeof(obj));
+            obj.object_id = new_id;
+            obj.object_type = 1; /* 动态物体 */
+            obj.position[0] = px; obj.position[1] = py; obj.position[2] = pz;
+            obj.orientation[0] = 0; obj.orientation[1] = 0;
+            obj.orientation[2] = 0; obj.orientation[3] = 1;
+            obj.mass = mass;
+            if (shape_type == PB_INTERNAL_BODY_BOX) {
+                obj.scale[0] = dim1; obj.scale[1] = dim2; obj.scale[2] = dim3;
+                snprintf(obj.object_name, sizeof(obj.object_name), "box_%d", new_id);
+            } else if (shape_type == PB_INTERNAL_BODY_SPHERE) {
+                obj.scale[0] = dim1; obj.scale[1] = dim1; obj.scale[2] = dim1;
+                snprintf(obj.object_name, sizeof(obj.object_name), "sphere_%d", new_id);
+            } else {
+                obj.scale[0] = dim1; obj.scale[1] = dim2; obj.scale[2] = dim1;
+                snprintf(obj.object_name, sizeof(obj.object_name), "cylinder_%d", new_id);
+            }
+            simulator_add_scene_object(g_pb.internal_sim, &obj);
+        }
+
         char buf[64]; snprintf(buf, sizeof(buf), "OK|%d", new_id);
         pb_set_response(buf);
         return 0;
@@ -880,37 +1067,70 @@ static int pb_internal_dispatch(const char* cmd) {
     
     /* ============ POINT_CLOUD/DEPTH ============ */
     if (strcmp(cmd_name, "GET_POINT_CLOUD") == 0) {
-        /* 纯C物理引擎点云生成：从模拟物体位置生成3D点集 */
+        /* P0-004修复: 从内部物体/仿真器状态生成真实3D点集，不再使用硬编码位置 */
         int max_points = nargs > 0 ? atoi(args[0]) : 100;
-        if (max_points > 1000) max_points = 1000;
+        if (max_points > 5000) max_points = 5000;
         if (max_points < 1) max_points = 1;
 
         int point_count = 0;
-        if (g_pb.internal_body_count > 0) {
-            int points_per_body = max_points / g_pb.internal_body_count;
-            if (points_per_body < 1) points_per_body = 1;
+        int total_bodies = g_pb.internal_body_count > 0 ? g_pb.internal_body_count :
+                          (g_pb.robot_count > 0 ? g_pb.robot_count : 0);
 
+        if (total_bodies > 0) {
+            /* 首先从内部仿真器机器人获取点云位置 */
+            if (g_pb.internal_sim) {
+                for (int r = 0; r < g_pb.robot_count && point_count < max_points; r++) {
+                    SimulatorRobotState state;
+                    if (simulator_get_robot_state(g_pb.internal_sim, r, &state) == 0) {
+                        /* 使用机器人基座位置作为核心点 */
+                        int pts_per_robot = max_points / (g_pb.robot_count > 0 ? g_pb.robot_count : 1);
+                        if (pts_per_robot < 1) pts_per_robot = 1;
+                        if (point_count + pts_per_robot > max_points) pts_per_robot = max_points - point_count;
+                        for (int p = 0; p < pts_per_robot; p++) {
+                            float* pt = &g_pb.point_cloud_buffer[point_count * 3];
+                            float scatter = 0.1f + (float)p * 0.01f;
+                            pt[0] = state.position[0] + scatter * sinf((float)p * 2.39996f);
+                            pt[1] = state.position[1] + scatter * cosf((float)p * 3.14159f / 2.0f);
+                            pt[2] = state.position[2] + scatter * 0.5f;
+                            if (pt[2] < 0) pt[2] = 0;
+                            point_count++;
+                        }
+                    }
+                }
+            }
+
+            /* 然后从内部简单物体数组获取点云位置 */
             for (int b = 0; b < g_pb.internal_body_count && point_count < max_points; b++) {
-                float cx = (float)(b % 3) * 1.5f - 1.0f;
-                float cy = 0.0f;
-                float cz = 0.5f;
-                float r = 0.5f;
+                PBInternalBody* body = &g_pb.internal_bodies[b];
+                if (!body->is_active) continue;
+                int pts_per_body = max_points / (g_pb.internal_body_count > 0 ? g_pb.internal_body_count : 1);
+                if (pts_per_body < 1) pts_per_body = 1;
+                if (point_count + pts_per_body > max_points) pts_per_body = max_points - point_count;
 
-                for (int p = 0; p < points_per_body && point_count < max_points; p++) {
-                    float theta = (float)(p * 2654435769 % 6283) / 1000.0f;
-                    float phi = acosf(2.0f * (float)(p % points_per_body) / (float)points_per_body - 1.0f);
+                for (int p = 0; p < pts_per_body; p++) {
                     float* pt = &g_pb.point_cloud_buffer[point_count * 3];
-                    pt[0] = cx + r * sinf(phi) * cosf(theta);
-                    pt[1] = cy + r * sinf(phi) * sinf(theta);
-                    pt[2] = cz + r * cosf(phi);
+                    /* 在物体边界球面上分布采样点 */
+                    float radius = body->dimensions[0];
+                    if (body->shape_type == PB_INTERNAL_BODY_SPHERE) {
+                        radius = body->dimensions[0];
+                    } else if (body->shape_type == PB_INTERNAL_BODY_CYLINDER) {
+                        radius = body->dimensions[0] > body->dimensions[1] ? body->dimensions[0] : body->dimensions[1];
+                    } else {
+                        radius = sqrtf(body->dimensions[0] * body->dimensions[0]
+                                     + body->dimensions[1] * body->dimensions[1]
+                                     + body->dimensions[2] * body->dimensions[2]) * 0.7f;
+                    }
+                    float theta = (float)p * 2.39996f;
+                    float phi = acosf(1.0f - 2.0f * ((float)p + 0.5f) / (float)(pts_per_body > 1 ? pts_per_body : 2));
+                    pt[0] = body->position[0] + radius * sinf(phi) * cosf(theta);
+                    pt[1] = body->position[1] + radius * sinf(phi) * sinf(theta);
+                    pt[2] = body->position[2] + radius * cosf(phi);
                     point_count++;
                 }
             }
-        } else {
-            /* F-005修复: 禁止生成虚假点云数据
-             * 无真实传感器/仿真物体时返回空点云，绝不生成time(NULL)伪随机数据 */
-            point_count = 0;
         }
+        /* 无物体/机器人时返回空点云 —— 不生成虚假数据 */
+
         char buf[128];
         snprintf(buf, sizeof(buf), "OK|%d|", point_count);
         pb_set_response(buf);
@@ -1767,7 +1987,10 @@ int pb_compute_ik(int body_id, int end_effector_link, const float* target_pos,
 
     float best_dist = 1e10f;
     float best_solution[PB_MAX_JOINTS];
-    memcpy(best_solution, current_states[0].joint_position < 1000 ? current_states[0].joint_position < 1000 ? &current_states : &current_states : &current_states, n_joints * sizeof(float));
+    /* P1-029修复: 从current_states数组中复制初始关节位置 */
+    for (int j = 0; j < n_joints; j++) {
+        best_solution[j] = current_states[j].joint_position;
+    }
 
     for (int iter = 0; iter < PB_IK_MAX_ITERATIONS; iter++) {
         PBLinkState ls;

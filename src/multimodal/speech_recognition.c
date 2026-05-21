@@ -1638,42 +1638,80 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                     compute_output_logits(recognizer, recognizer->hidden_state,
                                           frame_logits, vs);
 
-                    /* 数值梯度 */
+                    /* P2-050修复: 参数量>1000时使用分析梯度，避免数值梯度O(N)前向传播 */
+                    int total_params = hs * vs + vs; /* 权重参数 + 偏置参数 */
                     float* grad_w = (float*)safe_calloc((size_t)hs * vs, sizeof(float));
                     float* grad_b = (float*)safe_calloc((size_t)vs, sizeof(float));
                     if (grad_w && grad_b) {
-                        float eps = 1e-4f;
                         float base_loss = 0.0f;
-                        for (int c = 0; c < vs; c++) {
-                            base_loss -= target_dist[c] * logf(frame_logits[c] + 1e-10f);
-                        }
 
-                        for (int h = 0; h < hs; h++) {
+                        if (total_params <= 1000) {
+                            /* 小参数量: 数值梯度（精确验证） */
+                            float eps = 1e-4f;
                             for (int c = 0; c < vs; c++) {
-                                float old = recognizer->output_projection_weight[(size_t)h * vs + c];
-                                recognizer->output_projection_weight[(size_t)h * vs + c] = old + eps;
+                                base_loss -= target_dist[c] * logf(frame_logits[c] + 1e-10f);
+                            }
+
+                            for (int h = 0; h < hs; h++) {
+                                for (int c = 0; c < vs; c++) {
+                                    float old = recognizer->output_projection_weight[(size_t)h * vs + c];
+                                    recognizer->output_projection_weight[(size_t)h * vs + c] = old + eps;
+                                    compute_output_logits(recognizer, recognizer->hidden_state,
+                                                          frame_logits, vs);
+                                    float pos_loss = 0.0f;
+                                    for (int cc = 0; cc < vs; cc++) {
+                                        pos_loss -= target_dist[cc] * logf(frame_logits[cc] + 1e-10f);
+                                    }
+                                    recognizer->output_projection_weight[(size_t)h * vs + c] = old;
+                                    grad_w[(size_t)h * vs + c] = (pos_loss - base_loss) / eps;
+                                }
+                            }
+
+                            for (int c = 0; c < vs; c++) {
+                                float old = recognizer->output_projection_bias[c];
+                                recognizer->output_projection_bias[c] = old + eps;
                                 compute_output_logits(recognizer, recognizer->hidden_state,
                                                       frame_logits, vs);
                                 float pos_loss = 0.0f;
                                 for (int cc = 0; cc < vs; cc++) {
                                     pos_loss -= target_dist[cc] * logf(frame_logits[cc] + 1e-10f);
                                 }
-                                recognizer->output_projection_weight[(size_t)h * vs + c] = old;
-                                grad_w[(size_t)h * vs + c] = (pos_loss - base_loss) / eps;
+                                recognizer->output_projection_bias[c] = old;
+                                grad_b[c] = (pos_loss - base_loss) / eps;
                             }
-                        }
+                        } else {
+                            /* 大参数量: 分析梯度（Softmax交叉熵闭式解，O(N)单次前向传播） */
+                            /* 计算Softmax概率 */
+                            float* probs = (float*)safe_malloc((size_t)vs * sizeof(float));
+                            if (probs) {
+                                float max_logit = frame_logits[0];
+                                for (int c = 1; c < vs; c++) {
+                                    if (frame_logits[c] > max_logit) max_logit = frame_logits[c];
+                                }
+                                float sum_exp = 0.0f;
+                                for (int c = 0; c < vs; c++) {
+                                    probs[c] = expf(frame_logits[c] - max_logit);
+                                    sum_exp += probs[c];
+                                }
+                                for (int c = 0; c < vs; c++) {
+                                    probs[c] /= (sum_exp + 1e-10f);
+                                    base_loss -= target_dist[c] * logf(probs[c] + 1e-10f);
+                                }
 
-                        for (int c = 0; c < vs; c++) {
-                            float old = recognizer->output_projection_bias[c];
-                            recognizer->output_projection_bias[c] = old + eps;
-                            compute_output_logits(recognizer, recognizer->hidden_state,
-                                                  frame_logits, vs);
-                            float pos_loss = 0.0f;
-                            for (int cc = 0; cc < vs; cc++) {
-                                pos_loss -= target_dist[cc] * logf(frame_logits[cc] + 1e-10f);
+                                /* dL/dW[h][c] = (probs[c] - target[c]) * hidden[h] */
+                                for (int h = 0; h < hs; h++) {
+                                    for (int c = 0; c < vs; c++) {
+                                        grad_w[(size_t)h * vs + c] = (probs[c] - target_dist[c]) * recognizer->hidden_state[h];
+                                    }
+                                }
+
+                                /* dL/db[c] = probs[c] - target[c] */
+                                for (int c = 0; c < vs; c++) {
+                                    grad_b[c] = probs[c] - target_dist[c];
+                                }
+
+                                safe_free((void**)&probs);
                             }
-                            recognizer->output_projection_bias[c] = old;
-                            grad_b[c] = (pos_loss - base_loss) / eps;
                         }
 
                         /* Adam更新 */

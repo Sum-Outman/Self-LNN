@@ -56,6 +56,40 @@ static float cosine_similarity_teach(const float* a, const float* b, size_t dim)
     return dot / denom;
 }
 
+/* P2-038修复: n-gram哈希嵌入——将文本转为有语义区分度的嵌入向量
+ * 使用2-gram滑动窗口 + djb2哈希 + L2归一化
+ * 相比简单的ASCII/255映射，不同文本可产生有实质区分度的嵌入 */
+static void teach_text_hash_embed(const char* text, float* embedding, int dim) {
+    if (!text || !embedding || dim <= 0) return;
+    size_t len = strlen(text);
+    if (len < 2) {
+        /* 文本太短，使用单字符哈希填充 */
+        for (int i = 0; i < dim; i++) {
+            unsigned long h = 5381;
+            h = ((h << 5) + h) + (unsigned char)text[0];
+            h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+            embedding[i] = (float)(h % 1000007) / 500003.5f - 1.0f;
+        }
+    } else {
+        for (int i = 0; i < dim; i++) {
+            /* 在文本上滑动选择2-gram窗口 */
+            int pos = (i * 127 + 31) % (int)(len - 1);
+            unsigned long h = 5381;
+            h = ((h << 5) + h) + (unsigned char)text[pos];
+            h = ((h << 5) + h) + (unsigned char)text[pos + 1];
+            h = ((h << 5) + h) + ((unsigned int)i * 2654435761u);
+            embedding[i] = (float)(h % 1000007) / 500003.5f - 1.0f;
+        }
+    }
+    /* L2归一化 */
+    float norm = 0.0f;
+    for (int i = 0; i < dim; i++) norm += embedding[i] * embedding[i];
+    norm = sqrtf(norm);
+    if (norm > 1e-10f) {
+        for (int i = 0; i < dim; i++) embedding[i] /= norm;
+    }
+}
+
 TeachSystem* teach_system_create(size_t obs_dim, size_t act_dim,
                                   TeachTrainConfig config) {
     TeachSystem* system = (TeachSystem*)safe_calloc(1, sizeof(TeachSystem));
@@ -810,11 +844,8 @@ int teach_bind_concept(TeachSystem* system,
     }
 
     size_t text_offset = TEACH_VISUAL_DIM + TEACH_AUDIO_DIM + TEACH_TACTILE_DIM;
-    size_t qlen = strlen(concept_name);
     memset(scratch, 0, TEACH_TEXT_DIM * sizeof(float));
-    for (size_t i = 0; i < qlen && i < TEACH_TEXT_DIM; i++) {
-        scratch[i] = (float)(unsigned char)concept_name[i] / 255.0f;
-    }
+    teach_text_hash_embed(concept_name, scratch, TEACH_TEXT_DIM);
     lnn_forward(system->text_encoder, scratch, fused_input + text_offset);
 
     float unified[TEACH_UNIFIED_DIM];
@@ -914,10 +945,7 @@ int teach_look_and_learn(TeachSystem* system,
     memcpy(fused_input, visual_feat, TEACH_VISUAL_DIM * sizeof(float));
 
     memset(scratch, 0, TEACH_TEXT_DIM * sizeof(float));
-    size_t qlen = strlen(concept_name);
-    for (size_t i = 0; i < qlen && i < TEACH_TEXT_DIM; i++) {
-        scratch[i] = (float)(unsigned char)concept_name[i] / 255.0f;
-    }
+    teach_text_hash_embed(concept_name, scratch, TEACH_TEXT_DIM);
     lnn_forward(system->text_encoder, scratch, fused_input + text_offset);
 
     float unified[TEACH_UNIFIED_DIM];
@@ -980,10 +1008,7 @@ int teach_say_and_associate(TeachSystem* system,
 
     const char* source_text = text ? text : concept_name;
     memset(scratch, 0, TEACH_TEXT_DIM * sizeof(float));
-    size_t qlen = strlen(source_text);
-    for (size_t i = 0; i < qlen && i < TEACH_TEXT_DIM; i++) {
-        scratch[i] = (float)(unsigned char)source_text[i] / 255.0f;
-    }
+    teach_text_hash_embed(source_text, scratch, TEACH_TEXT_DIM);
     lnn_forward(system->text_encoder, scratch, fused_input + text_offset);
 
     float unified[TEACH_UNIFIED_DIM];
@@ -1074,10 +1099,7 @@ int teach_touch_and_understand(TeachSystem* system,
     memcpy(fused_input + TEACH_VISUAL_DIM + TEACH_AUDIO_DIM, tactile_feat, TEACH_TACTILE_DIM * sizeof(float));
 
     memset(scratch, 0, TEACH_TEXT_DIM * sizeof(float));
-    size_t qlen = strlen(concept_name);
-    for (size_t i = 0; i < qlen && i < TEACH_TEXT_DIM; i++) {
-        scratch[i] = (float)(unsigned char)concept_name[i] / 255.0f;
-    }
+    teach_text_hash_embed(concept_name, scratch, TEACH_TEXT_DIM);
     lnn_forward(system->text_encoder, scratch, fused_input + text_offset);
 
     float unified[TEACH_UNIFIED_DIM];
@@ -1183,10 +1205,7 @@ int teach_count_and_generalize(TeachSystem* system,
     if (estimated_count < 1) estimated_count = 1;
 
     memset(scratch, 0, TEACH_TEXT_DIM * sizeof(float));
-    size_t qlen = strlen(count_concept);
-    for (size_t i = 0; i < qlen && i < TEACH_TEXT_DIM; i++) {
-        scratch[i] = (float)(unsigned char)count_concept[i] / 255.0f;
-    }
+    teach_text_hash_embed(count_concept, scratch, TEACH_TEXT_DIM);
     float text_feat[TEACH_TEXT_DIM];
     memset(text_feat, 0, sizeof(text_feat));
     lnn_forward(system->text_encoder, scratch, text_feat);

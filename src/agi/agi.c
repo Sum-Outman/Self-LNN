@@ -333,20 +333,14 @@ static int cap_set_curiosity(int enable) {
     return 0;
 }
 
+/* P0-015修复: agi.c不再重复注册能力模块。
+ * capability_switch.c中的ensure_callbacks_registered()是唯一的注册点，
+ * 使用selflnn_get_*()访问器获取子系统引用。
+ * 此处仅设置g_agi_cap_system供agi.c内部回调使用。 */
 static void agi_register_all_capabilities(AGISystem* system) {
     g_agi_cap_system = system;
-    capability_register_module(CAP_SELF_COGNITION, cap_check_self_cognition, cap_set_self_cognition);
-    capability_register_module(CAP_SELF_DECISION, cap_check_decision, cap_set_decision);
-    capability_register_module(CAP_SELF_LEARNING, cap_check_learning, cap_set_learning);
-    capability_register_module(CAP_SELF_EVOLUTION, cap_check_evolution, cap_set_evolution);
-    capability_register_module(CAP_IMITATION_LEARNING, cap_check_imitation, cap_set_imitation);
-    capability_register_module(CAP_SELF_CORRECTION, cap_check_correction, cap_set_correction);
-    capability_register_module(CAP_AUTONOMOUS_EXECUTION, cap_check_autonomous_execution, cap_set_autonomous_execution);
-    capability_register_module(CAP_REFLECTION, cap_check_reflection, cap_set_reflection);
-    capability_register_module(CAP_CURIOSITY, cap_check_curiosity, cap_set_curiosity);
-    capability_register_module(CAP_PLANNING, cap_check_planning, cap_set_planning);
-    capability_register_module(CAP_DIALOGUE, cap_check_dialogue, cap_set_dialogue);
-    capability_register_module(CAP_CONCURRENCY, cap_check_concurrency, cap_set_concurrency);
+    /* 能力注册已迁移至capability_switch.c的ensure_callbacks_registered()，
+     * 避免双注册覆盖问题。 */
 }
 
 /* 认知循环并行任务结构 */

@@ -954,9 +954,16 @@ int advanced_control_step(AdvancedControlState* state,
                 /* Bm = [[0],[ωn²]] -> Bm^T = [0, ωn²]
                  * s = Bm^T * P * e = [0, ωn²] * [[p11, p12],[p12, p22]] * [e_pos, e_vel]^T
                  *   = ωn² * (p12*e_pos + p22*e_vel) */
-                float s[6]; /* 6个关节的标量自适应信号 */
-                for (int i = 0; i < 6; i++) {
-                    s[i] = omega_n_sq * (p12 * e[i] + p22 * ((i < 5) ? e[i + 1] : 0.0f));
+                float s[6]; /* 6个状态维度的标量自适应信号，每对(pos,vel)使用同一标量 */
+                /* P1-037修复: 明确使用位置/速度误差分开索引，不依赖交错假设 */
+                for (int j = 0; j < 3; j++) {
+                    int i_pos = j * 2;       /* 位置误差索引 */
+                    int i_vel = j * 2 + 1;   /* 速度误差索引 */
+                    float e_pos_j = e[i_pos];
+                    float e_vel_j = e[i_vel];
+                    float s_joint = omega_n_sq * (p12 * e_pos_j + p22 * e_vel_j);
+                    s[i_pos] = s_joint;
+                    s[i_vel] = s_joint;
                 }
 
                 /* ---- 步骤5: 自适应增益更新 ---- */

@@ -52,6 +52,7 @@ struct DynamicsSystem {
     float* noise_buffer;        /**< 噪声缓冲区 */
     float* prev_state;          /**< 前一状态向量（BDF-2所需） */
     float* workspace;           /**< 预分配ODE求解器工作区（最大11*state_size） */
+    float* ode_input_buf;       /**< P1-021修复：预分配ODE RHS输入缓冲区，避免每步堆分配 */
     int bdf2_initialized;       /**< BDF-2初始化标记（需要两步历史） */
     int is_initialized;         /**< 是否已初始化 */
     float time;                 /**< 当前时间 */
@@ -121,6 +122,13 @@ DynamicsSystem* dynamics_create(const DynamicsConfig* config) {
         return NULL;
     }
 
+    /* P1-021修复：预分配ODE RHS输入缓冲区，避免每次RHS调用malloc/free */
+    system->ode_input_buf = (float*)safe_calloc(state_size, sizeof(float));
+    if (!system->ode_input_buf) {
+        dynamics_free(system);
+        return NULL;
+    }
+
     // BDF-2初始化
     system->bdf2_initialized = 0;
     
@@ -156,8 +164,7 @@ void dynamics_free(DynamicsSystem* system) {
     safe_free((void**)&system->noise_buffer);
     safe_free((void**)&system->prev_state);
     safe_free((void**)&system->workspace);
-    
-    // 释放系统结构
+    safe_free((void**)&system->ode_input_buf);
     safe_free((void**)&system);
 }
 
@@ -522,13 +529,11 @@ static void compute_derivatives(const DynamicsSystem* system,
 static int dynamics_ode_rhs(float t, const float* y, float* dydt, void* ctx) {
     DynamicsSystem* s = (DynamicsSystem*)ctx;
     size_t n = s->config.state_size;
-    /* MID-015修复: 动态分配input_buf替代硬编码固定大小[256]防止数组越界 */
-    float* input_buf = (float*)malloc(n * sizeof(float));
-    if (!input_buf) return -1;
+    /* P1-021修复：使用预分配缓冲区替代每步malloc/free，消除堆分配开销 */
+    float* input_buf = s->ode_input_buf;
     for (size_t i = 0; i < n; i++) input_buf[i] = y[n+i] * s->config.damping;
     compute_derivatives(s, y, y+n, input_buf, dydt, dydt+n);
     (void)t;
-    free(input_buf);
     return 0;
 }
 
@@ -1560,13 +1565,23 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
         const float* current_state = trajectory + (size_t)step * state_dim;
         const float* prev_state = trajectory + (size_t)(step - 1) * state_dim;
 
-        /* 计算雅可比向量积: J^T @ adjoint
-         * J @ a ≈ [f(x + εa) - f(x - εa)] / (2ε)
-         * 其中 f 是ODE函数输出dstate/dt和dvel/dt的组合 */
+        /* P1-022修复: 生成随机单位扰动向量，在所有维度上同时应用同一方向扰动
+         * 原实现每个维度独立扰动（perturb = epsilon * adjoint[d]），不同维度
+         * 扰动幅度差异巨大，导致JVP估计失真。改为先生成单位方向向量v，
+         * 再对所有维度统一施加 ±epsilon * v[d] 的扰动 */
+        float perturb_norm = 0.0f;
         for (size_t d = 0; d < state_dim; d++) {
-            float perturb = epsilon * adjoint[d];
-            perturb_plus[d]  = current_state[d] + perturb;
-            perturb_minus[d] = current_state[d] - perturb;
+            /* 使用确定性的伪随机方向（基于步数和维度哈希），确保可复现 */
+            float hash_val = sinf((float)(step * 137 + d * 509) * 3.14159f);
+            perturb_plus[d] = hash_val;
+            perturb_norm += hash_val * hash_val;
+        }
+        perturb_norm = sqrtf(perturb_norm + 1e-12f);
+        float inv_norm = epsilon / perturb_norm;
+        for (size_t d = 0; d < state_dim; d++) {
+            float unit_perturb = perturb_plus[d] / perturb_norm;
+            perturb_plus[d]  = current_state[d] + epsilon * unit_perturb;
+            perturb_minus[d] = current_state[d] - epsilon * unit_perturb;
         }
 
         /* 通过真实ODE函数计算扰动状态下的导数 */

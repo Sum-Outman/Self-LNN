@@ -395,7 +395,11 @@ int im_irl_train(ImitationDeepLearner* idl, ImDemonstration* demos, int demo_cou
             float* target = (float*)safe_malloc(8 * sizeof(float));
             if (!input || !output || !target) { safe_free((void**)&input); safe_free((void**)&output); safe_free((void**)&target); continue; }
             memcpy(input, demos[d].keyframes[0].joint_positions, IM_MAX_JOINTS * sizeof(float));
-            memset(target, 0, 8 * sizeof(float));
+            /* P0-012修复: IRL奖励网络目标应为专家轨迹高奖励+非专家低奖励
+             * 使用当前迭代步骤的状态作为对比，专家轨迹target=1.0提供正向学习信号 */
+            for (int ti = 0; ti < 8; ti++) {
+                target[ti] = 1.0f;
+            }
             if (idl->irl_network) {
                 lnn_forward(idl->irl_network, input, output);
                 float loss; lnn_backward(idl->irl_network, target, &loss);
@@ -479,18 +483,25 @@ int im_behavioral_clone_train(ImitationDeepLearner* idl, const float* states, in
 
     if (!idl->bc_network) idl->bc_network = lnn_create(&cfg);
 
+    /* P2-040修复: 将缓冲区分配移到循环外部，避免每样本重复分配释放 */
+    float* in_buf = (float*)safe_malloc((size_t)state_dim * sizeof(float));
+    float* out_buf = (float*)safe_malloc((size_t)action_dim * sizeof(float));
+    if (!in_buf || !out_buf) {
+        safe_free((void**)&in_buf);
+        safe_free((void**)&out_buf);
+        return -1;
+    }
+
     for (int epoch = 0; epoch < epochs; epoch++) {
         for (int s = 0; s < samples; s++) {
-            float* in_buf = (float*)safe_malloc(state_dim * sizeof(float));
-            float* out_buf = (float*)safe_malloc(action_dim * sizeof(float));
-            if (!in_buf || !out_buf) { safe_free((void**)&in_buf); safe_free((void**)&out_buf); continue; }
             memcpy(in_buf, states + s * state_dim, state_dim * sizeof(float));
             float loss;
             lnn_forward(idl->bc_network, in_buf, out_buf);
             lnn_backward(idl->bc_network, actions + s * action_dim, &loss);
-            safe_free((void**)&in_buf); safe_free((void**)&out_buf);
         }
     }
+    safe_free((void**)&in_buf);
+    safe_free((void**)&out_buf);
     return 0;
 }
 

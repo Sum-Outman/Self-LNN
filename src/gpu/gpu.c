@@ -8,6 +8,8 @@
  * SDK诊断、硬件检测等功能。
  */
 
+#include <stddef.h>
+#include <stdint.h>
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_memory_pool.h"
 #include "selflnn/gpu/auto_kernel_optimization.h"
@@ -21,11 +23,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>
-#include <stddef.h>
 
 /* SIMD加速（用于多GPU通信的CPU累加回退路径） */
 #if defined(__SSE__) || defined(__SSE2__) || defined(_M_X64)
@@ -2814,6 +2814,197 @@ int gpu_forward_dense(GpuContext* context, const float* input, float* output,
     return 0;
 }
 
+/* ============================================================================
+ * SIMD加速CPU回退辅助函数（SSE/AVX）
+ * 用于GPU后端不可用时提供向量化CPU计算
+ * =========================================================================== */
+
+/* SIMD批归一化前向：单通道输出 = alpha*input + beta */
+static inline void gpu_simd_bn_apply(const float* restrict input, float* restrict output,
+                                     size_t count, float alpha, float beta) {
+    size_t i = 0;
+#if GPU_COMM_HAVE_AVX
+    __m256 av = _mm256_set1_ps(alpha);
+    __m256 bv = _mm256_set1_ps(beta);
+    for (; i + 8 <= count; i += 8) {
+        __m256 iv = _mm256_loadu_ps(&input[i]);
+        _mm256_storeu_ps(&output[i], _mm256_add_ps(_mm256_mul_ps(iv, av), bv));
+    }
+#elif GPU_COMM_HAVE_SSE
+    __m128 av = _mm_set1_ps(alpha);
+    __m128 bv = _mm_set1_ps(beta);
+    for (; i + 4 <= count; i += 4) {
+        __m128 iv = _mm_loadu_ps(&input[i]);
+        _mm_storeu_ps(&output[i], _mm_add_ps(_mm_mul_ps(iv, av), bv));
+    }
+#endif
+    for (; i < count; i++) {
+        output[i] = alpha * input[i] + beta;
+    }
+}
+
+/* SIMD激活函数前向 */
+static inline void gpu_simd_act_forward(const float* restrict input, float* restrict output,
+                                        size_t n, GpuActivationType act_type, float alpha) {
+    size_t i = 0;
+    switch (act_type) {
+        case GPU_ACTIVATION_RELU:
+#if GPU_COMM_HAVE_AVX
+            { __m256 z = _mm256_setzero_ps();
+            for (; i + 8 <= n; i += 8) {
+                _mm256_storeu_ps(&output[i], _mm256_max_ps(_mm256_loadu_ps(&input[i]), z));
+            }}
+#elif GPU_COMM_HAVE_SSE
+            { __m128 z = _mm_setzero_ps();
+            for (; i + 4 <= n; i += 4) {
+                _mm_storeu_ps(&output[i], _mm_max_ps(_mm_loadu_ps(&input[i]), z));
+            }}
+#endif
+            for (; i < n; i++) output[i] = (input[i] > 0.0f) ? input[i] : 0.0f;
+            break;
+        case GPU_ACTIVATION_LEAKY_RELU:
+#if GPU_COMM_HAVE_AVX
+            { __m256 z = _mm256_setzero_ps(); __m256 av = _mm256_set1_ps(alpha);
+            for (; i + 8 <= n; i += 8) {
+                __m256 iv = _mm256_loadu_ps(&input[i]);
+                __m256 lk = _mm256_mul_ps(iv, av);
+                _mm256_storeu_ps(&output[i], _mm256_blendv_ps(lk, iv, _mm256_cmp_ps(iv, z, _CMP_GT_OQ)));
+            }}
+#elif GPU_COMM_HAVE_SSE
+            { __m128 z = _mm_setzero_ps(); __m128 av = _mm_set1_ps(alpha);
+            for (; i + 4 <= n; i += 4) {
+                __m128 iv = _mm_loadu_ps(&input[i]);
+                __m128 lk = _mm_mul_ps(iv, av);
+                __m128 mask = _mm_cmpgt_ps(iv, z);
+                _mm_storeu_ps(&output[i], _mm_or_ps(_mm_and_ps(mask, iv), _mm_andnot_ps(mask, lk)));
+            }}
+#endif
+            for (; i < n; i++) output[i] = (input[i] > 0.0f) ? input[i] : alpha * input[i];
+            break;
+        default:
+            for (; i < n; i++) {
+                float x = input[i];
+                switch (act_type) {
+                    case GPU_ACTIVATION_SIGMOID: output[i] = 1.0f / (1.0f + expf(-x)); break;
+                    case GPU_ACTIVATION_TANH: output[i] = tanhf(x); break;
+                    case GPU_ACTIVATION_GELU: output[i] = 0.5f * x * (1.0f + erff(x / sqrtf(2.0f))); break;
+                    case GPU_ACTIVATION_SOFTPLUS: output[i] = logf(1.0f + expf(x)); break;
+                    default: output[i] = x; break;
+                }
+            }
+            break;
+    }
+}
+
+/* SIMD激活函数反向 */
+static inline void gpu_simd_act_backward(const float* restrict input, const float* restrict grad_output,
+                                         float* restrict grad_input, size_t n,
+                                         GpuActivationType act_type, float alpha) {
+    size_t i = 0;
+    switch (act_type) {
+        case GPU_ACTIVATION_RELU:
+#if GPU_COMM_HAVE_AVX
+            { __m256 z = _mm256_setzero_ps();
+            for (; i + 8 <= n; i += 8) {
+                __m256 iv = _mm256_loadu_ps(&input[i]);
+                __m256 gv = _mm256_loadu_ps(&grad_output[i]);
+                _mm256_storeu_ps(&grad_input[i], _mm256_and_ps(gv, _mm256_cmp_ps(iv, z, _CMP_GT_OQ)));
+            }}
+#elif GPU_COMM_HAVE_SSE
+            { __m128 z = _mm_setzero_ps();
+            for (; i + 4 <= n; i += 4) {
+                __m128 iv = _mm_loadu_ps(&input[i]);
+                __m128 gv = _mm_loadu_ps(&grad_output[i]);
+                _mm_storeu_ps(&grad_input[i], _mm_and_ps(gv, _mm_cmpgt_ps(iv, z)));
+            }}
+#endif
+            for (; i < n; i++) grad_input[i] = (input[i] > 0.0f) ? grad_output[i] : 0.0f;
+            break;
+        case GPU_ACTIVATION_LEAKY_RELU:
+#if GPU_COMM_HAVE_AVX
+            { __m256 z = _mm256_setzero_ps(); __m256 av = _mm256_set1_ps(alpha);
+            for (; i + 8 <= n; i += 8) {
+                __m256 iv = _mm256_loadu_ps(&input[i]);
+                __m256 gv = _mm256_loadu_ps(&grad_output[i]);
+                __m256 lk = _mm256_mul_ps(gv, av);
+                _mm256_storeu_ps(&grad_input[i], _mm256_blendv_ps(lk, gv, _mm256_cmp_ps(iv, z, _CMP_GT_OQ)));
+            }}
+#elif GPU_COMM_HAVE_SSE
+            { __m128 z = _mm_setzero_ps(); __m128 av = _mm_set1_ps(alpha);
+            for (; i + 4 <= n; i += 4) {
+                __m128 iv = _mm_loadu_ps(&input[i]);
+                __m128 gv = _mm_loadu_ps(&grad_output[i]);
+                __m128 lk = _mm_mul_ps(gv, av);
+                __m128 mask = _mm_cmpgt_ps(iv, z);
+                _mm_storeu_ps(&grad_input[i], _mm_or_ps(_mm_and_ps(mask, gv), _mm_andnot_ps(mask, lk)));
+            }}
+#endif
+            for (; i < n; i++) grad_input[i] = (input[i] > 0.0f) ? grad_output[i] : alpha * grad_output[i];
+            break;
+        default:
+            for (; i < n; i++) {
+                float x = input[i]; float g = grad_output[i];
+                switch (act_type) {
+                    case GPU_ACTIVATION_SIGMOID: { float s = 1.0f / (1.0f + expf(-x)); grad_input[i] = g * s * (1.0f - s); break; }
+                    case GPU_ACTIVATION_TANH: { float t = tanhf(x); grad_input[i] = g * (1.0f - t * t); break; }
+                    case GPU_ACTIVATION_GELU: { float cdf = 0.5f * (1.0f + erff(x / sqrtf(2.0f))); float pdf = expf(-0.5f * x * x) / sqrtf(2.0f * (float)M_PI); grad_input[i] = g * (cdf + x * pdf); break; }
+                    case GPU_ACTIVATION_SOFTPLUS: { float s = 1.0f / (1.0f + expf(-x)); grad_input[i] = g * s; break; }
+                    default: grad_input[i] = g; break;
+                }
+            }
+            break;
+    }
+}
+
+/* SIMD Dropout前向 */
+static inline void gpu_simd_dropout_forward(const float* restrict input, float* restrict output,
+                                            size_t n, float dropout_rate, unsigned int* seed) {
+    unsigned int s = seed ? *seed : 42U;
+    float scale = 1.0f / (1.0f - dropout_rate);
+    size_t i = 0;
+#if GPU_COMM_HAVE_AVX
+    __m256 rate_vec = _mm256_set1_ps(dropout_rate);
+    __m256 scale_vec = _mm256_set1_ps(scale);
+    __m256i svec = _mm256_set1_epi32((int)s);
+    __m256i mul = _mm256_set1_epi32(1103515245);
+    __m256i add = _mm256_set1_epi32(12345);
+    __m256 norm = _mm256_set1_ps(1.0f / 2147483648.0f);
+    for (; i + 8 <= n; i += 8) {
+        svec = _mm256_add_epi32(_mm256_mullo_epi32(svec, mul), add);
+        __m256 rv = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_srai_epi32(svec, 1)), norm);
+        __m256 iv = _mm256_loadu_ps(&input[i]);
+        __m256 mask = _mm256_cmp_ps(rv, rate_vec, _CMP_GT_OQ);
+        _mm256_storeu_ps(&output[i], _mm256_and_ps(mask, _mm256_mul_ps(iv, scale_vec)));
+    }
+    s = (unsigned int)_mm256_extract_epi32(svec, 7);
+#elif GPU_COMM_HAVE_SSE
+    __m128 rate_vec = _mm_set1_ps(dropout_rate);
+    __m128 scale_vec = _mm_set1_ps(scale);
+    __m128i svec = _mm_set1_epi32((int)s);
+    __m128i mul = _mm_set1_epi32(1103515245);
+    __m128i add = _mm_set1_epi32(12345);
+    __m128 norm = _mm_set1_ps(1.0f / 2147483648.0f);
+    for (; i + 4 <= n; i += 4) {
+        svec = _mm_add_epi32(_mm_mullo_epi32(svec, mul), add);
+        __m128i shifted = _mm_srai_epi32(svec, 1);
+        __m128 rv = _mm_mul_ps(_mm_cvtepi32_ps(shifted), norm);
+        __m128 iv = _mm_loadu_ps(&input[i]);
+        __m128 mask = _mm_cmpgt_ps(rv, rate_vec);
+        _mm_storeu_ps(&output[i], _mm_and_ps(mask, _mm_mul_ps(iv, scale_vec)));
+    }
+    s = (unsigned int)_mm_extract_epi32(svec, 3);
+#endif
+    for (; i < n; i++) {
+        s = s * 1103515245U + 12345U;
+        float r = (float)(s & 0x7FFFFFFF) / 2147483648.0f;
+        output[i] = (r > dropout_rate) ? input[i] * scale : 0.0f;
+    }
+    if (seed) *seed = s;
+}
+
+/**
+ * @brief 批归一化前向传播（GPU调度 + SIMD CPU回退）
+ */
 int gpu_batch_norm_forward(GpuContext* context, const float* input, float* output,
                            size_t batch_size, size_t channels, size_t spatial_size,
                            const float* gamma, const float* beta,
@@ -2863,11 +3054,13 @@ int gpu_batch_norm_forward(GpuContext* context, const float* input, float* outpu
         float inv_std = 1.0f / sqrtf(var + epsilon);
         float g = gamma ? gamma[c] : 1.0f;
         float b = beta ? beta[c] : 0.0f;
+        float alpha = g * inv_std;
+        float bias = b - g * mean * inv_std;
         for (size_t b_idx = 0; b_idx < batch_size; b_idx++) {
-            for (size_t s = 0; s < spatial_size; s++) {
-                size_t idx = b_idx * channels * spatial_size + c * spatial_size + s;
-                output[idx] = g * (input[idx] - mean) * inv_std + b;
-            }
+            gpu_simd_bn_apply(
+                input + b_idx * channels * spatial_size + c * spatial_size,
+                output + b_idx * channels * spatial_size + c * spatial_size,
+                spatial_size, alpha, bias);
         }
     }
     return 0;
@@ -2887,6 +3080,38 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
                                                   grad_input, grad_gamma, grad_beta,
                                                   batch_size, channels, spatial_size,
                                                   gamma, epsilon);
+            break;
+        case GPU_BACKEND_VULKAN:
+            if (vulkan_batch_norm_backward != NULL) {
+                /* Vulkan接口差异：需要预先计算mean/var */
+                float* c_mean = (float*)malloc(channels * sizeof(float));
+                float* c_var = (float*)malloc(channels * sizeof(float));
+                if (c_mean && c_var) {
+                    for (size_t c = 0; c < channels; c++) {
+                        size_t count = batch_size * spatial_size;
+                        double m = 0.0, v = 0.0;
+                        for (size_t b = 0; b < batch_size; b++)
+                            for (size_t s = 0; s < spatial_size; s++) {
+                                size_t idx = b * channels * spatial_size + c * spatial_size + s;
+                                m += (double)input[idx];
+                            }
+                        m /= (double)count;
+                        for (size_t b = 0; b < batch_size; b++)
+                            for (size_t s = 0; s < spatial_size; s++) {
+                                size_t idx = b * channels * spatial_size + c * spatial_size + s;
+                                double d = (double)input[idx] - m;
+                                v += d * d;
+                            }
+                        c_mean[c] = (float)m; c_var[c] = (float)(v / (double)count);
+                    }
+                    int ret = vulkan_batch_norm_backward(context, input, grad_output,
+                        c_mean, c_var, gamma, grad_input, grad_gamma, grad_beta,
+                        channels, spatial_size, epsilon);
+                    free(c_mean); free(c_var);
+                    return ret;
+                }
+                free(c_mean); free(c_var);
+            }
             break;
         default:
             break;
@@ -2922,12 +3147,49 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
         }
         if (grad_gamma) grad_gamma[c] = (float)dgamma;
         if (grad_beta) grad_beta[c] = (float)dbeta;
+        /* SIMD加速标量化的渐变回传 */
+        float scale = (float)((double)g * (double)inv_std / (double)count);
+        float mean_f = (float)mean, var_f = (float)var;
+        float dgamma_f = (float)dgamma;
         for (size_t b = 0; b < batch_size; b++) {
-            for (size_t s = 0; s < spatial_size; s++) {
-                size_t idx = b * channels * spatial_size + c * spatial_size + s;
+            size_t base = b * channels * spatial_size + c * spatial_size;
+            size_t i = 0;
+#if GPU_COMM_HAVE_AVX
+            __m256 sc = _mm256_set1_ps(scale);
+            __m256 db = _mm256_set1_ps((float)dbeta);
+            __m256 mn = _mm256_set1_ps(mean_f);
+            __m256 dg = _mm256_set1_ps(dgamma_f);
+            __m256 ve = _mm256_set1_ps(var_f + epsilon);
+            __m256 ct = _mm256_set1_ps((float)count);
+            for (; i + 8 <= spatial_size; i += 8) {
+                __m256 go = _mm256_loadu_ps(&grad_output[base + i]);
+                __m256 in = _mm256_loadu_ps(&input[base + i]);
+                __m256 dx = _mm256_mul_ps(sc,
+                    _mm256_sub_ps(_mm256_mul_ps(ct, go),
+                    _mm256_add_ps(db, _mm256_mul_ps(_mm256_div_ps(_mm256_sub_ps(in, mn), ve), dg))));
+                _mm256_storeu_ps(&grad_input[base + i], dx);
+            }
+#elif GPU_COMM_HAVE_SSE
+            __m128 sc = _mm_set1_ps(scale);
+            __m128 db = _mm_set1_ps((float)dbeta);
+            __m128 mn = _mm_set1_ps(mean_f);
+            __m128 dg = _mm_set1_ps(dgamma_f);
+            __m128 ve = _mm_set1_ps(var_f + epsilon);
+            __m128 ct = _mm_set1_ps((float)count);
+            for (; i + 4 <= spatial_size; i += 4) {
+                __m128 go = _mm_loadu_ps(&grad_output[base + i]);
+                __m128 in = _mm_loadu_ps(&input[base + i]);
+                __m128 dx = _mm_mul_ps(sc,
+                    _mm_sub_ps(_mm_mul_ps(ct, go),
+                    _mm_add_ps(db, _mm_mul_ps(_mm_div_ps(_mm_sub_ps(in, mn), ve), dg))));
+                _mm_storeu_ps(&grad_input[base + i], dx);
+            }
+#endif
+            for (; i < spatial_size; i++) {
+                size_t idx = base + i;
                 double x = (double)input[idx];
-                double dx = (double)g * (double)inv_std / (double)count;
-                dx *= (double)count * (double)grad_output[idx] - dbeta - (x - mean) / (double)(var + epsilon) * dgamma;
+                double dx = scale * ((double)count * (double)grad_output[idx]
+                    - dbeta - (x - mean) / (double)(var + epsilon) * dgamma);
                 grad_input[idx] = (float)dx;
             }
         }
@@ -2952,32 +3214,7 @@ int gpu_activation_forward(GpuContext* context, const float* input, float* outpu
             break;
     }
 
-    for (size_t i = 0; i < size; i++) {
-        float x = input[i];
-        switch (act_type) {
-            case GPU_ACTIVATION_RELU:
-                output[i] = (x > 0.0f) ? x : 0.0f;
-                break;
-            case GPU_ACTIVATION_LEAKY_RELU:
-                output[i] = (x > 0.0f) ? x : alpha * x;
-                break;
-            case GPU_ACTIVATION_SIGMOID:
-                output[i] = 1.0f / (1.0f + expf(-x));
-                break;
-            case GPU_ACTIVATION_TANH:
-                output[i] = tanhf(x);
-                break;
-            case GPU_ACTIVATION_GELU:
-                output[i] = 0.5f * x * (1.0f + erff(x / sqrtf(2.0f)));
-                break;
-            case GPU_ACTIVATION_SOFTPLUS:
-                output[i] = logf(1.0f + expf(x));
-                break;
-            default:
-                output[i] = x;
-                break;
-        }
-    }
+    gpu_simd_act_forward(input, output, size, act_type, alpha);
     return 0;
 }
 
@@ -3001,42 +3238,7 @@ int gpu_activation_backward(GpuContext* context, const float* input,
             break;
     }
 
-    for (size_t i = 0; i < size; i++) {
-        float x = input[i];
-        float grad = grad_output[i];
-        switch (act_type) {
-            case GPU_ACTIVATION_RELU:
-                grad_input[i] = (x > 0.0f) ? grad : 0.0f;
-                break;
-            case GPU_ACTIVATION_LEAKY_RELU:
-                grad_input[i] = (x > 0.0f) ? grad : alpha * grad;
-                break;
-            case GPU_ACTIVATION_SIGMOID: {
-                float s = 1.0f / (1.0f + expf(-x));
-                grad_input[i] = grad * s * (1.0f - s);
-                break;
-            }
-            case GPU_ACTIVATION_TANH: {
-                float t = tanhf(x);
-                grad_input[i] = grad * (1.0f - t * t);
-                break;
-            }
-            case GPU_ACTIVATION_GELU: {
-                float cdf = 0.5f * (1.0f + erff(x / sqrtf(2.0f)));
-                float pdf = expf(-0.5f * x * x) / sqrtf(2.0f * (float)M_PI);
-                grad_input[i] = grad * (cdf + x * pdf);
-                break;
-            }
-            case GPU_ACTIVATION_SOFTPLUS: {
-                float s = 1.0f / (1.0f + expf(-x));
-                grad_input[i] = grad * s;
-                break;
-            }
-            default:
-                grad_input[i] = grad;
-                break;
-        }
-    }
+    gpu_simd_act_backward(input, grad_output, grad_input, size, act_type, alpha);
     return 0;
 }
 
@@ -3068,12 +3270,7 @@ int gpu_dropout_forward(GpuContext* context, const float* input, float* output,
         return 0;
     }
     unsigned int seed = random_seed ? *random_seed : 42;
-    float scale = 1.0f / (1.0f - dropout_rate);
-    for (size_t i = 0; i < size; i++) {
-        seed = seed * 1103515245U + 12345U;
-        float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
-        output[i] = (r > dropout_rate) ? input[i] * scale : 0.0f;
-    }
+    gpu_simd_dropout_forward(input, output, size, dropout_rate, &seed);
     if (random_seed) *random_seed = seed;
     return 0;
 }

@@ -1304,7 +1304,7 @@ struct GpuMixedPrecisionContext {
  * CPU后端：后端名称和可用性检测
  * ============================================================================ */
 
-const char* gpu_backend_name(GpuBackend backend) {
+static const char* gpu_backend_name(GpuBackend backend) {
     if (backend == GPU_BACKEND_CPU) return "CPU(纯C计算)";
     switch (backend) {
         case GPU_BACKEND_CUDA:     return "CUDA(NVIDIA)";
@@ -1320,7 +1320,7 @@ const char* gpu_backend_name(GpuBackend backend) {
     }
 }
 
-int gpu_probe_backend(GpuBackend backend, GpuBackendAvailability* info) {
+static int gpu_probe_backend(GpuBackend backend, GpuBackendAvailability* info) {
     if (backend != GPU_BACKEND_CPU) {
         if (info) {
             memset(info, 0, sizeof(*info));

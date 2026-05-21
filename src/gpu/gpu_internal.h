@@ -21,10 +21,11 @@
 #ifndef SELFLNN_GPU_INTERNAL_H
 #define SELFLNN_GPU_INTERNAL_H
 
+#include <stddef.h>
+#include <stdint.h>
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/auto_kernel_optimization.h"
 #include "selflnn/concurrency/thread_pool.h"
-#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {

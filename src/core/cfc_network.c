@@ -118,36 +118,45 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         weight_size = config->input_size * config->hidden_size;
     }
     
-    // 分配连续参数块（权重矩阵 + 偏置向量连续存储，确保lnn_get_parameters返回完整参数）
-    size_t total_param_size = weight_size + config->hidden_size;
+    /* P0-014修复: 输出投影参数(W_out/b_out)从grad_block分离到param_block扩展区 */
+    size_t out_proj_param_size = (config->output_size != config->hidden_size) ? 
+        (config->output_size * config->hidden_size + config->output_size) : 0;
+    size_t total_param_size = weight_size + config->hidden_size + out_proj_param_size;
     float* param_block = (float*)safe_calloc(total_param_size, sizeof(float));
     network->weight_matrix = param_block;
     network->bias_vector = param_block ? param_block + weight_size : NULL;
+    if (out_proj_param_size > 0 && param_block) {
+        network->W_out_params = param_block + weight_size + config->hidden_size;
+        network->b_out_params = network->W_out_params + config->output_size * config->hidden_size;
+    } else {
+        network->W_out_params = NULL;
+        network->b_out_params = NULL;
+    }
     
-    // 分配连续梯度块（权重梯度 + 偏置梯度 + 输出投影矩阵W_out + b_out连续存储）
-    // W_out: [output_size × hidden_size], b_out: [output_size]
-    size_t out_proj_size = (config->output_size != config->hidden_size) ? 
-        (config->output_size * config->hidden_size + config->output_size) : 0;
-    size_t total_grad_size = weight_size + config->hidden_size + out_proj_size;
+    /* P0-014修复: 输出投影梯度(W_out_gradients/b_out_gradients)与参数完全分离 */
+    size_t out_proj_grad_size = out_proj_param_size;
+    size_t total_grad_size = weight_size + config->hidden_size + out_proj_grad_size;
     float* grad_block = (float*)safe_calloc(total_grad_size, sizeof(float));
     network->weight_gradients = grad_block;
     network->bias_gradients = grad_block ? grad_block + weight_size : NULL;
+    if (out_proj_grad_size > 0 && grad_block) {
+        network->W_out_gradients = grad_block + weight_size + config->hidden_size;
+        network->b_out_gradients = network->W_out_gradients + config->output_size * config->hidden_size;
+    } else {
+        network->W_out_gradients = NULL;
+        network->b_out_gradients = NULL;
+    }
 
-    // 初始化输出投影矩阵（如果输出维度不同于隐藏维度）
-    if (out_proj_size > 0 && grad_block) {
-        float* W_out = grad_block + weight_size + config->hidden_size;
-        float* b_out = W_out + config->output_size * config->hidden_size;
-        /* FIX-005: 使用 He/Kaiming 自适应初始化，替代固定 U(-0.1, 0.1)。
-         * He 均匀分布: limit = sqrt(6 / fan_in)
-         * fan_in = hidden_size (投影层的输入是隐藏状态) */
+    /* P0-014修复: He/Kaiming自适应初始化W_out参数（在param_block中，与梯度区分离） */
+    if (out_proj_param_size > 0 && network->W_out_params) {
         float he_limit = sqrtf(6.0f / (float)config->hidden_size);
         if (he_limit > 0.2f) he_limit = 0.2f;
         if (he_limit < 0.001f) he_limit = 0.001f;
         for (size_t i = 0; i < config->output_size * config->hidden_size; i++) {
-            W_out[i] = rng_uniform(-he_limit, he_limit);
+            network->W_out_params[i] = rng_uniform(-he_limit, he_limit);
         }
         for (size_t i = 0; i < config->output_size; i++) {
-            b_out[i] = 0.0f;
+            network->b_out_params[i] = 0.0f;
         }
     }
     
@@ -252,8 +261,12 @@ void cfc_free(CfCNetwork* network) {
 
     safe_free((void**)&network->weight_matrix);
     network->bias_vector = NULL;
+    network->W_out_params = NULL;
+    network->b_out_params = NULL;
     safe_free((void**)&network->weight_gradients);
     network->bias_gradients = NULL;
+    network->W_out_gradients = NULL;
+    network->b_out_gradients = NULL;
     
     safe_free((void**)&network);
 }
@@ -361,21 +374,14 @@ int cfc_forward(CfCNetwork* network, const float* input,
         }
     }
     
-    // 应用输出投影矩阵：output = W_out · hidden_state + b_out
-    // K-052: 修复输出投影矩阵偏移量Bug —— 原代码多加了hidden_size导致读取零值
-    // 梯度块布局: [weight_grads: w_size] [bias_grads: hidden_size] [W_out: out*hid] [b_out: out]
-    // W_out起始偏移 = w_size + hidden_size (不是 w_size + hidden_size + hidden_size)
-    size_t w_size = input_size * hidden_size;
-    float* W_out = network->weight_gradients + w_size + hidden_size;
-    float* b_out = W_out + output_size * hidden_size;
-
-    if (output_size != hidden_size && network->weight_gradients) {
+    /* P0-014修复: 使用独立W_out_params/b_out_params（不再与梯度共享存储） */
+    if (output_size != hidden_size && network->W_out_params) {
         for (size_t i = 0; i < output_size; i++) {
             float sum = 0.0f;
             for (size_t j = 0; j < hidden_size; j++) {
-                sum += W_out[i * hidden_size + j] * current_hidden[j];
+                sum += network->W_out_params[i * hidden_size + j] * current_hidden[j];
             }
-            output[i] = sum + b_out[i];
+            output[i] = sum + network->b_out_params[i];
         }
     } else {
         memcpy(output, current_hidden, output_size * sizeof(float));
@@ -407,6 +413,14 @@ int cfc_forward(CfCNetwork* network, const float* input,
  */
 void cfc_zero_cell_gradients(CfCNetwork* network) {
     if (!network || !network->layers) return;
+    /* P0-014修复: 清零输出投影梯度（与cell梯度同步清零） */
+    if (network->W_out_gradients) {
+        memset(network->W_out_gradients, 0, 
+               network->config.output_size * network->config.hidden_size * sizeof(float));
+    }
+    if (network->b_out_gradients) {
+        memset(network->b_out_gradients, 0, network->config.output_size * sizeof(float));
+    }
     for (int cl = 0; cl < network->config.num_layers; cl++) {
         CfCCell* cell = network->layers[cl];
         if (!cell) continue;
@@ -475,28 +489,24 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
     // 步骤1: 计算输出层梯度（包括输出投影矩阵的梯度）
     float* output_gradient = network->layer_gradients + ((num_layers - 1) * max_layer_size);
     
-    if (output_size != hidden_size && network->weight_gradients) {
-        /* 输出投影矩阵反向传播：dL/dh = W_out^T · dL/do */
-        /* K-052: 修复与forward一致的W_out偏移量 */
-        size_t w_size = input_size * hidden_size;
-        float* W_out = network->weight_gradients + w_size + hidden_size;
-        float* b_out = W_out + output_size * hidden_size;
+    if (output_size != hidden_size && network->W_out_params) {
+        /* P0-014修复: 使用独立W_out_params进行反向传播计算 */
         
-        // dL/dh_j = Σ_i W_out[i][j] * error[i]
+        /* dL/dh_j = Σ_i W_out[i][j] * error[i] */
         memset(output_gradient, 0, hidden_size * sizeof(float));
         for (size_t i = 0; i < output_size; i++) {
             for (size_t j = 0; j < hidden_size; j++) {
-                output_gradient[j] += W_out[i * hidden_size + j] * error[i];
+                output_gradient[j] += network->W_out_params[i * hidden_size + j] * error[i];
             }
         }
         
-        // 更新W_out: dL/dW_out[i][j] = error[i] * h[j]
+        /* 更新W_out_params: dL/dW_out[i][j] = error[i] * h[j] */
         float* last_hidden = network->layer_outputs + ((num_layers - 1) * max_layer_size);
         for (size_t i = 0; i < output_size; i++) {
             for (size_t j = 0; j < hidden_size; j++) {
-                W_out[i * hidden_size + j] -= learning_rate * error[i] * last_hidden[j];
+                network->W_out_params[i * hidden_size + j] -= learning_rate * error[i] * last_hidden[j];
             }
-            b_out[i] -= learning_rate * error[i];
+            network->b_out_params[i] -= learning_rate * error[i];
         }
     } else {
         memcpy(output_gradient, error, hidden_size * sizeof(float));
@@ -676,29 +686,24 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
     float* output_gradient = network->layer_gradients + ((num_layers - 1) * max_layer_size);
     float* last_hidden = network->layer_outputs + ((num_layers - 1) * max_layer_size);
     
-    /* FIX-015: 输出投影矩阵梯度累积。cfc_backward Step1 在此处计算W_out梯度
-     * 并直接更新，但 cfc_accumulate_gradients 完全跳过了W_out。
-     * 当 output_size != hidden_size 时，须将 error 通过 W_out^T 反向传播
-     * 得到 dL/dh，同时累积 W_out 和 b_out 梯度。 */
-    size_t w_size_for_out = input_size * hidden_size;
-    float* W_out_grad_region = network->weight_gradients + w_size_for_out + hidden_size;
-    float* b_out_grad_region = W_out_grad_region + output_size * hidden_size;
-    
-    if (output_size != hidden_size && network->weight_gradients) {
-        float* W_out = network->weight_gradients + w_size_for_out + hidden_size;
-        /* dL/dh = W_out^T · error */
+    /* P0-014修复: 输出投影矩阵梯度累积。
+     * 读取W_out参数值用于反向传播dL/dh = W_out^T · error，
+     * 梯度累积到独立的W_out_gradients区域（与参数完全分离）。 */
+    if (output_size != hidden_size && network->W_out_params && network->W_out_gradients) {
+        /* dL/dh = W_out^T · error，使用参数值进行反向传播 */
         memset(output_gradient, 0, hidden_size * sizeof(float));
         for (size_t i = 0; i < output_size; i++) {
             for (size_t j = 0; j < hidden_size; j++) {
-                output_gradient[j] += W_out[i * hidden_size + j] * error[i];
+                output_gradient[j] += network->W_out_params[i * hidden_size + j] * error[i];
             }
         }
         /* 累积W_out梯度: dL/dW_out[i][j] += error[i] * last_hidden[j] */
+        /* 梯度写入独立梯度缓冲区，不污染参数值 */
         for (size_t i = 0; i < output_size; i++) {
             for (size_t j = 0; j < hidden_size; j++) {
-                W_out_grad_region[i * hidden_size + j] += error[i] * last_hidden[j];
+                network->W_out_gradients[i * hidden_size + j] += error[i] * last_hidden[j];
             }
-            b_out_grad_region[i] += error[i];
+            network->b_out_gradients[i] += error[i];
         }
     } else {
         size_t copy_size = (output_size < hidden_size) ? output_size : hidden_size;
@@ -943,8 +948,9 @@ int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate) {
 /**
  * @brief 应用输出投影矩阵(W_out+b_out)梯度
  * 
- * FIX-015: W_out/b_out 存储在 grad_block 尾部而非 param_block，
- * 外部优化器路径无法触及。此函数在批量训练结束时应用累积梯度。
+ * P0-014修复: W_out_params/b_out_params 存储在 param_block 扩展区，
+ * W_out_gradients/b_out_gradients 存储在 grad_block 扩展区，
+ * 两者完全分离。此函数将累积的梯度应用到参数上。
  */
 int cfc_apply_out_proj_gradients(CfCNetwork* network, float learning_rate) {
     SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
@@ -952,27 +958,22 @@ int cfc_apply_out_proj_gradients(CfCNetwork* network, float learning_rate) {
     
     size_t hidden_size = network->config.hidden_size;
     size_t output_size = network->config.output_size;
-    size_t input_size = network->config.input_size;
     
-    if (output_size == hidden_size || !network->weight_gradients) return 0;
+    if (output_size == hidden_size || !network->W_out_params || !network->W_out_gradients) return 0;
     
-    size_t w_size = input_size * hidden_size;
-    float* W_out_params = network->weight_gradients + w_size + hidden_size;
-    float* b_out_params = W_out_params + output_size * hidden_size;
-    /* W_out梯度区域与W_out参数区域相同（都在grad_block中） */
-    float* W_out_grads = W_out_params;
-    float* b_out_grads = b_out_params;
-    
-    /* 更新W_out */
+    /* P0-014修复: 参数与梯度完全分离，使用独立缓冲区 */
     for (size_t i = 0; i < output_size * hidden_size; i++) {
-        float g = W_out_grads[i];
-        if (isfinite(g)) W_out_params[i] -= learning_rate * g;
+        float g = network->W_out_gradients[i];
+        if (isfinite(g)) network->W_out_params[i] -= learning_rate * g;
     }
     /* 更新b_out */
     for (size_t i = 0; i < output_size; i++) {
-        float g = b_out_grads[i];
-        if (isfinite(g)) b_out_params[i] -= learning_rate * g;
+        float g = network->b_out_gradients[i];
+        if (isfinite(g)) network->b_out_params[i] -= learning_rate * g;
     }
+    /* 应用后清零梯度缓冲区 */
+    memset(network->W_out_gradients, 0, output_size * hidden_size * sizeof(float));
+    memset(network->b_out_gradients, 0, output_size * sizeof(float));
     return 0;
 }
 
@@ -1072,6 +1073,20 @@ int cfc_save(const CfCNetwork* network, FILE* file) {
                  SELFLNN_ERROR_IO_ERROR,
                  "保存偏置向量失败（大小：%zu）", network->config.hidden_size);
     
+    /* P0-014修复: 保存输出投影矩阵参数（如果存在） */
+    if (network->config.output_size != network->config.hidden_size && 
+        network->W_out_params && network->b_out_params) {
+        size_t out_proj_count = network->config.output_size * network->config.hidden_size;
+        SELFLNN_CHECK(fwrite(network->W_out_params, sizeof(float), out_proj_count, file) 
+                     == out_proj_count,
+                     SELFLNN_ERROR_IO_ERROR,
+                     "保存输出投影矩阵失败（大小：%zu）", out_proj_count);
+        SELFLNN_CHECK(fwrite(network->b_out_params, sizeof(float), network->config.output_size, file) 
+                     == network->config.output_size,
+                     SELFLNN_ERROR_IO_ERROR,
+                     "保存输出投影偏置失败（大小：%zu）", network->config.output_size);
+    }
+    
     return 0;
 }
 
@@ -1132,6 +1147,19 @@ int cfc_load(CfCNetwork* network, FILE* file) {
                  == config.hidden_size,
                  SELFLNN_ERROR_IO_ERROR,
                  "读取偏置向量失败（大小：%zu）", config.hidden_size);
+
+    /* P0-014修复: 加载输出投影矩阵参数（如果存在） */
+    if (config.output_size != config.hidden_size && network->W_out_params && network->b_out_params) {
+        size_t out_proj_count = config.output_size * config.hidden_size;
+        SELFLNN_CHECK(fread(network->W_out_params, sizeof(float), out_proj_count, file) 
+                     == out_proj_count,
+                     SELFLNN_ERROR_IO_ERROR,
+                     "读取输出投影矩阵失败（大小：%zu）", out_proj_count);
+        SELFLNN_CHECK(fread(network->b_out_params, sizeof(float), config.output_size, file) 
+                     == config.output_size,
+                     SELFLNN_ERROR_IO_ERROR,
+                     "读取输出投影偏置失败（大小：%zu）", config.output_size);
+    }
     
     return 0;
 }

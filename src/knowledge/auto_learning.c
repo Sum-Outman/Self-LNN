@@ -127,27 +127,41 @@ static int extract_entities(const char* text, char*** entities, int* entity_coun
                 if (strcmp(lower, *sw) == 0) { is_stopword = 1; break; }
             }
 
-            /* F-042: 实体后缀识别 — 向后合并更多字符形成完整中文实体 */
+            /* P2-047: 正向最大匹配分词(FMM) — 实体后缀识别
+             * 从最长可能的中文候选长度开始递减尝试，第一个匹配到后缀的即胜出。
+             * 替换原来的单次后缀检查，实现完整FMM策略。 */
             if (!is_stopword && (*start & 0x80)) {
-                const char* ext = ptr;
-                while (*ext && (*ext & 0x80)) ext++;
-                size_t ext_len = (size_t)(ext - start);
-                if (ext_len > word_len && ext_len < 64) {
-                    /* 扩展词也检查是否匹配实体后缀 */
-                    int has_suffix = 0;
-                    for (const char** sf = entity_suffixes; *sf; sf++) {
-                        size_t sl = strlen(*sf);
-                        if (ext_len >= sl && memcmp(ext - sl, *sf, sl) == 0) {
-                            has_suffix = 1;
-                            break;
+                /* 找到最大可能的中文扩展边界 */
+                const char* max_ext = ptr;
+                while (*max_ext && (*max_ext & 0x80)) max_ext++;
+                size_t max_len = (size_t)(max_ext - start);
+                if (max_len > word_len && max_len < 64) {
+                    /* 从最长候选递减到最短候选，FMM: 第一个匹配胜出 */
+                    for (const char* probe = max_ext; probe > ptr; ) {
+                        /* 向前回退，寻找UTF-8字符起始字节 */
+                        const char* prev = probe;
+                        do {
+                            if (--prev <= start) break;
+                        } while ((*prev & 0xC0) == 0x80);
+                        if (prev <= start) break;
+                        probe = prev;
+
+                        size_t cand_len = (size_t)(probe - start);
+                        if (cand_len < word_len) break;  /* 已缩至原始词长，停止 */
+
+                        /* 检查当前候选长度是否以实体后缀结尾 */
+                        for (const char** sf = entity_suffixes; *sf; sf++) {
+                            size_t sl = strlen(*sf);
+                            if (cand_len >= sl && memcmp(probe - sl, *sf, sl) == 0) {
+                                word_len = cand_len;
+                                memcpy(temp, start, cand_len);
+                                temp[cand_len] = '\0';
+                                ptr = probe;
+                                goto fmm_done;
+                            }
                         }
                     }
-                    if (has_suffix) {
-                        word_len = ext_len;
-                        memcpy(temp, start, ext_len);
-                        temp[ext_len] = '\0';
-                        ptr = ext;
-                    }
+                    fmm_done:;
                 }
             }
 
@@ -194,11 +208,11 @@ static int extract_relations(const char* text, char*** relations, int* relation_
     char** rels = (char**)safe_malloc(capacity * sizeof(char*));
     if (!rels) return -1;
 
-    /* M-022修复: 增强关系抽取 - 提取主谓宾三元组模式 */
+    /* P2-048: 去重关系模式数组 - 移除重复的"位于"和"表示" */
     const char* patterns[] = {"是", "属于", "包含", "具有", "能够", "可以", "需要", "使用",
                               "控制", "连接", "产生", "影响", "定义", "实现", "提供",
                               "is", "has", "can", "uses", "controls", "contains",
-                              "位于","位于","拥有","组成","形成","表示","表示","包括","支持"};
+                              "位于", "拥有", "组成", "形成", "表示", "包括", "支持"};
     int pattern_count = sizeof(patterns) / sizeof(patterns[0]);
 
     for (int i = 0; i < pattern_count && count < capacity; i++) {

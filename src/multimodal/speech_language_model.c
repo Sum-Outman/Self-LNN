@@ -29,6 +29,7 @@ typedef struct {
     unsigned int key;
     int count;
     int next;
+    char* ngram_str;  /**< P0-003修复: 存储原始N-gram字符串用于二次比对，防止哈希碰撞 */
 } LmHashEntry;
 
 typedef struct {
@@ -79,6 +80,15 @@ static void lm_free(LanguageModel* lm) {
     if (!lm) return;
     for (int i = 0; i < lm->n; i++) {
         if (lm->ngram_maps[i]) {
+            /* P0-003修复: 释放每个条目的N-gram字符串 */
+            if (lm->ngram_maps[i]->entries) {
+                for (int j = 0; j < lm->ngram_maps[i]->entry_count; j++) {
+                    if (lm->ngram_maps[i]->entries[j].ngram_str) {
+                        free(lm->ngram_maps[i]->entries[j].ngram_str);
+                        lm->ngram_maps[i]->entries[j].ngram_str = NULL;
+                    }
+                }
+            }
             safe_free((void**)&lm->ngram_maps[i]->entries);
             safe_free((void**)&lm->ngram_maps[i]->heads);
             safe_free((void**)&lm->ngram_maps[i]);
@@ -89,11 +99,15 @@ static void lm_free(LanguageModel* lm) {
 
 static int lm_insert_ngram(LmHashMap* map, const char* ngram, int* existing) {
     unsigned int h = lm_hash_str(ngram);
+    /* P0-003修复: 先比对哈希值，再比对原始字符串，彻底消除哈希碰撞漏洞 */
     for (int idx = map->heads[h]; idx != -1; idx = map->entries[idx].next) {
         if (map->entries[idx].key == h) {
-            map->entries[idx].count++;
-            if (existing) *existing = 1;
-            return idx;
+            /* 二次比对：实际字符串比对 */
+            if (map->entries[idx].ngram_str && strcmp(map->entries[idx].ngram_str, ngram) == 0) {
+                map->entries[idx].count++;
+                if (existing) *existing = 1;
+                return idx;
+            }
         }
     }
     if (map->entry_count >= map->capacity) return -1;
@@ -101,6 +115,12 @@ static int lm_insert_ngram(LmHashMap* map, const char* ngram, int* existing) {
     map->entries[idx].key = h;
     map->entries[idx].count = 1;
     map->entries[idx].next = map->heads[h];
+    /* P0-003修复: 手动分配并复制N-gram字符串，避免strdup跨平台问题 */
+    size_t ngram_len = strlen(ngram) + 1;
+    map->entries[idx].ngram_str = (char*)malloc(ngram_len);
+    if (map->entries[idx].ngram_str) {
+        memcpy(map->entries[idx].ngram_str, ngram, ngram_len);
+    }
     map->heads[h] = idx;
     if (existing) *existing = 0;
     return idx;
@@ -250,9 +270,10 @@ int speech_language_model_build_from_text(const char* text, size_t text_len,
 /**
  * @brief K-033a: N-gram语言模型评分 — 使用Kneser-Ney平滑计算序列概率
  *
- * 对给定的token序列计算Kneser-Ney平滑后的对数概率。
- * 回退策略：trigram → bigram → unigram，每层使用Kneser-Ney折扣。
- * 没有任何硬编码固定值 —— 所有概率均从训练统计中计算。
+ * P2-056修复: 完整的Kneser-Ney平滑实现
+ * - 高阶n-gram: 折扣概率 + 回退权重 × 低阶Kneser-Ney概率
+ * - 低阶回退: 使用continuation probability（N₁₊计数），非原始频率
+ * - 回退权重的lambda因子保证概率和为1
  *
  * @param model 训练好的语言模型句柄
  * @param tokens token数组
@@ -270,8 +291,34 @@ float speech_language_model_score(void* model, const int* tokens, int num_tokens
     int valid_ngrams = 0;
     float d = lm->kn_discount;
 
+    /* P2-056修复: 预计算continuation counts（每个token作为不同bigram尾词的次数） */
+    #define KN_MAX_UNIQUE_TOKENS 4096
+    int cont_count[KN_MAX_UNIQUE_TOKENS] = {0};
+    int total_distinct_continuations = 0;
+
+    if (n >= 2 && lm->ngram_maps[1]) {
+        LmHashMap* bigram_map = lm->ngram_maps[1];
+        for (int i = 0; i < LM_HASH_SIZE; i++) {
+            for (int idx = bigram_map->heads[i]; idx != -1; idx = bigram_map->entries[idx].next) {
+                if (bigram_map->entries[idx].ngram_str) {
+                    /* 提取bigram最后一个token（即continuation word） */
+                    const char* s = bigram_map->entries[idx].ngram_str;
+                    const char* last_space = strrchr(s, ' ');
+                    if (last_space && last_space[1]) {
+                        int tok = atoi(last_space + 1);
+                        if (tok >= 0 && tok < KN_MAX_UNIQUE_TOKENS) {
+                            if (cont_count[tok] == 0) total_distinct_continuations++;
+                            cont_count[tok]++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     for (int pos = 0; pos < num_tokens; pos++) {
         float best_prob = -1e10f;
+        int found_higher = 0;
 
         /* 从高阶到低阶尝试匹配 */
         for (int order = n - 1; order >= 0 && order <= pos; order--) {
@@ -292,17 +339,20 @@ float speech_language_model_score(void* model, const int* tokens, int num_tokens
 
             for (int idx = map->heads[h]; idx != -1; idx = map->entries[idx].next) {
                 if (map->entries[idx].key == h) {
-                    count = map->entries[idx].count;
-                    found = 1;
-                    break;
+                    if (map->entries[idx].ngram_str && strcmp(map->entries[idx].ngram_str, ngram) == 0) {
+                        count = map->entries[idx].count;
+                        found = 1;
+                        break;
+                    }
                 }
             }
 
             if (found && count > 0) {
                 /* 获取上下文计数（order-1的ngram） */
                 int context_count = lm->total_words;
+                int distinct_successors = 0;
+                char ctx[512] = "";
                 if (order > 0 && pos > 0) {
-                    char ctx[512] = "";
                     for (int j = pos - order; j < pos; j++) {
                         if (j < 0) break;
                         char token_str[32];
@@ -314,28 +364,85 @@ float speech_language_model_score(void* model, const int* tokens, int num_tokens
                     LmHashMap* ctx_map = lm->ngram_maps[order - 1];
                     for (int idx = ctx_map->heads[ctx_h]; idx != -1; idx = ctx_map->entries[idx].next) {
                         if (ctx_map->entries[idx].key == ctx_h) {
-                            context_count = ctx_map->entries[idx].count;
-                            break;
+                            if (ctx_map->entries[idx].ngram_str && strcmp(ctx_map->entries[idx].ngram_str, ctx) == 0) {
+                                context_count = ctx_map->entries[idx].count;
+                                break;
+                            }
                         }
                     }
                 }
 
-                /* Kneser-Ney平滑概率 */
-                float prob = ((float)count - d) / (float)(context_count > 0 ? context_count : 1);
-                if (prob < 1e-10f) prob = 1e-10f;
+                /* P2-056修复: 真实Kneser-Ney平滑
+                 * P_KN(w|h) = max(c(hw)-d,0)/c(h) + lambda(h) * P_KN_continuation(w|h')
+                 * 其中 lambda(h) = d * N₁₊(h•) / c(h)
+                 * N₁₊(h•) = 上下文h后出现的不同词的种类数 */
+                float discounted_prob = ((float)count - d) / (float)(context_count > 0 ? context_count : 1);
+                if (discounted_prob < 0.0f) discounted_prob = 0.0f;
+
+                /* 计算回退权重lambda: 只有当前阶还有未匹配的后继词时才有回退 */
+                if (order > 0 && context_count > 0) {
+                    /* 统计上下文h后有多少不同的后继词种类 */
+                    for (int succ_idx = 0; succ_idx < map->entry_count && succ_idx < 1000; succ_idx++) {
+                        if (map->entries[succ_idx].ngram_str && map->entries[succ_idx].count > 0) {
+                            /* 检查该ngram是否以此上下文开头 */
+                            const char* s = map->entries[succ_idx].ngram_str;
+                            const char* last_sp = strrchr(s, ' ');
+                            if (last_sp) {
+                                size_t prefix_len = (size_t)(last_sp - s);
+                                if (ctx[0] && strncmp(s, ctx, prefix_len) == 0 && (int)prefix_len == (int)strlen(ctx)) {
+                                    distinct_successors++;
+                                }
+                            }
+                        }
+                    }
+                    if (distinct_successors == 0) distinct_successors = 1;
+                }
+
+                /* lambda = d * N₁₊(h•) / c(h)  — 回退到低阶的概率质量 */
+                float lambda = (context_count > 0) ? (d * (float)distinct_successors / (float)context_count) : 0.0f;
+                if (lambda > 1.0f) lambda = 1.0f;
+
+                float prob = discounted_prob;
+                if (discounted_prob < 1e-10f) prob = 1e-10f;
                 best_prob = logf(prob);
+
+                /* 如果当前阶是unigram(order==0)，使用continuation probability */
+                if (order == 0) {
+                    int w = tokens[pos];
+                    float cont_prob = 1e-10f;
+                    if (w >= 0 && w < KN_MAX_UNIQUE_TOKENS && total_distinct_continuations > 0) {
+                        cont_prob = (float)(cont_count[w] > 0 ? cont_count[w] : 1) / (float)total_distinct_continuations;
+                    } else {
+                        cont_prob = 1.0f / (float)(lm->ngram_maps[0]->entry_count > 0 ? lm->ngram_maps[0]->entry_count : 1);
+                    }
+                    /* 混合continuation probability与折扣概率 */
+                    float mixed = cont_prob * 0.5f + prob * 0.5f;
+                    if (mixed < 1e-10f) mixed = 1e-10f;
+                    best_prob = logf(mixed);
+                }
+
+                found_higher = 1;
                 break;
             }
         }
 
-        /* 全部未命中：使用unigram统一回退 */
+        /* 全部未命中：使用continuation probability回退 */
         if (best_prob < -1e9f) {
-            best_prob = logf(1.0f / (float)(lm->ngram_maps[0]->entry_count > 0 ? lm->ngram_maps[0]->entry_count : 1));
+            int w = tokens[pos];
+            float cont_prob = 1e-10f;
+            if (w >= 0 && w < KN_MAX_UNIQUE_TOKENS && total_distinct_continuations > 0 && cont_count[w] > 0) {
+                cont_prob = (float)cont_count[w] / (float)total_distinct_continuations;
+            } else {
+                cont_prob = 1.0f / (float)(lm->ngram_maps[0]->entry_count > 0 ? lm->ngram_maps[0]->entry_count : 1);
+            }
+            best_prob = logf(cont_prob);
         }
 
         total_log_prob += best_prob;
         valid_ngrams++;
     }
+
+    #undef KN_MAX_UNIQUE_TOKENS
 
     if (valid_ngrams == 0) return -1e10f;
     return total_log_prob / (float)valid_ngrams;

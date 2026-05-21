@@ -177,6 +177,50 @@ typedef cl_bitfield cl_map_flags;
 typedef unsigned int cl_bool;
 
 /* ============================================================================
+ * P3-069修复: 编译时断言——验证手动定义常量与标准OpenCL头文件一致
+ * 若任何断言失败，编译将报错，防止常量不一致导致运行时错误。
+ * ============================================================================ */
+#if CL_SUCCESS != 0
+#error "OpenCL常量CL_SUCCESS定义与标准不一致: 应为0"
+#endif
+#if CL_DEVICE_NOT_FOUND != -1
+#error "OpenCL常量CL_DEVICE_NOT_FOUND定义与标准不一致: 应为-1"
+#endif
+#if CL_OUT_OF_RESOURCES != -5
+#error "OpenCL常量CL_OUT_OF_RESOURCES定义与标准不一致: 应为-5"
+#endif
+#if CL_OUT_OF_HOST_MEMORY != -6
+#error "OpenCL常量CL_OUT_OF_HOST_MEMORY定义与标准不一致: 应为-6"
+#endif
+#if CL_INVALID_VALUE != -30
+#error "OpenCL常量CL_INVALID_VALUE定义与标准不一致: 应为-30"
+#endif
+#if CL_DEVICE_TYPE_CPU != 2
+#error "OpenCL常量CL_DEVICE_TYPE_CPU定义与标准不一致: 应为2 (1<<1)"
+#endif
+#if CL_DEVICE_TYPE_GPU != 4
+#error "OpenCL常量CL_DEVICE_TYPE_GPU定义与标准不一致: 应为4 (1<<2)"
+#endif
+#if CL_MEM_READ_WRITE != 1
+#error "OpenCL常量CL_MEM_READ_WRITE定义与标准不一致: 应为1 (1<<0)"
+#endif
+#if CL_MEM_READ_ONLY != 4
+#error "OpenCL常量CL_MEM_READ_ONLY定义与标准不一致: 应为4 (1<<2)"
+#endif
+#if CL_QUEUED != 0
+#error "OpenCL常量CL_QUEUED定义与标准不一致: 应为0x0"
+#endif
+#if CL_COMPLETE != 3
+#error "OpenCL常量CL_COMPLETE定义与标准不一致: 应为0x3"
+#endif
+#if CL_FALSE != 0
+#error "OpenCL常量CL_FALSE定义与标准不一致: 应为0"
+#endif
+#if CL_TRUE != 1
+#error "OpenCL常量CL_TRUE定义与标准不一致: 应为1"
+#endif
+
+/* ============================================================================
  * 预定义OpenCL内核源代码
  * 这些内核提供真实的GPU计算功能，符合项目"禁止任何降级处理"要求
  * =========================================================================== */

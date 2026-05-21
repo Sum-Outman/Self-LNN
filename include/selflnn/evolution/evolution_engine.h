@@ -87,6 +87,9 @@ typedef struct {
     int max_generations;             /* 最大代数 */
     int elite_count;                 /* 精英保留数 */
 
+    float chromosome_min;            /* 染色体取值范围下限 */
+    float chromosome_max;            /* 染色体取值范围上限 */
+
     float crossover_rate;            /* 交叉率 (0-1) */
     float mutation_rate;             /* 初始变异率 (0-1) */
     float mutation_rate_min;         /* 最小变异率 */

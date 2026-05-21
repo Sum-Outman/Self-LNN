@@ -33,6 +33,7 @@ typedef struct {
     int max_iterations;
     int use_finite_diff_jacobian;
     float finite_diff_eps;
+    int jacobian_bandwidth;         /**< P2-044: 雅可比带状宽度，0=全矩阵，>0=仅计算对角线附近±bandwidth带 */
 } RosenbrockConfig;
 
 typedef struct {
