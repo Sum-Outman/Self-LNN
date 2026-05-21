@@ -126,6 +126,14 @@ extern "C" {
  */
 #define SELFLNN_SENSOR_STREAM_PORT  5556
 
+/**
+ * @brief 默认本机IP地址
+ *
+ * 所有需要连接本机的服务统一使用此宏，替代硬编码"127.0.0.1"。
+ * 修改本机地址时只需修改此定义，所有模块自动生效。
+ */
+#define SELFLNN_LOCALHOST          "127.0.0.1"
+
 /** @} */
 
 #ifdef __cplusplus

@@ -898,13 +898,103 @@ int ode_parallel_solve(float* y, float t, float delta_t,
         if (steps_used) *steps_used = local_steps;
         return ret;
 #else
-        /* I-010修复：MPI模式当前未编译，返回明确错误码而非静默回退 */
+        /* A-001修复: MPI未编译时启用OpenMP并行子域分解替代-5错误码
+         * 将ODE状态向量按OpenMP线程数均匀分割为独立子域，
+         * 每个线程独立求解分配给它的子域ODE后汇总结果。
+         * 无OpenMP时回退到串行求解。 */
         (void)is_mpi_mode;
-        (void)workspace_size;
-        if (pcfg->mode == PARALLEL_MODE_MPI || pcfg->mode == PARALLEL_MODE_HYBRID) {
-            (void)t_target;
-            return -5; /* MPI未编译：返回明确错误码，上层可捕获并处理 */
+        (void)t_target;
+#ifdef _OPENMP
+        {
+            int n_threads = omp_get_max_threads();
+            if (n_threads < 2) n_threads = 2;
+            if (n_threads > (int)n) n_threads = (int)n;
+            if (n_threads > 64) n_threads = 64;
+
+            size_t base_sz = n / (size_t)n_threads;
+            size_t rem_sz  = n % (size_t)n_threads;
+
+            float** chunk_y = (float**)calloc((size_t)n_threads, sizeof(float*));
+            float** chunk_ws = (float**)calloc((size_t)n_threads, sizeof(float*));
+            int*    chunk_ret = (int*)calloc((size_t)n_threads, sizeof(int));
+            float*  chunk_h = (float*)calloc((size_t)n_threads, sizeof(float));
+            int*    chunk_steps = (int*)calloc((size_t)n_threads, sizeof(int));
+            size_t* chunk_off = (size_t*)calloc((size_t)n_threads, sizeof(size_t));
+
+            int all_alloc_ok = (chunk_y && chunk_ws && chunk_ret &&
+                                chunk_h && chunk_steps && chunk_off);
+
+            if (all_alloc_ok) {
+                size_t off = 0;
+                for (int ti = 0; ti < n_threads; ti++) {
+                    size_t sz = base_sz + ((size_t)ti < rem_sz ? 1 : 0);
+                    chunk_off[ti] = off;
+                    off += sz;
+                    if (sz > 0) {
+                        chunk_y[ti] = (float*)malloc(sz * sizeof(float));
+                        chunk_ws[ti] = workspace_size ?
+                            (float*)malloc(workspace_size) : NULL;
+                        if (!chunk_y[ti] || !chunk_ws[ti]) all_alloc_ok = 0;
+                    }
+                }
+            }
+
+            if (all_alloc_ok) {
+#pragma omp parallel for schedule(dynamic, 1)
+                for (int ti = 0; ti < n_threads; ti++) {
+                    size_t sz = base_sz + ((size_t)ti < rem_sz ? 1 : 0);
+                    if (sz == 0 || !chunk_y[ti] || !chunk_ws[ti]) {
+                        chunk_ret[ti] = -1;
+                        continue;
+                    }
+                    memcpy(chunk_y[ti], y + chunk_off[ti], sz * sizeof(float));
+                    chunk_ret[ti] = solver_func(chunk_y[ti], t, delta_t, rhs,
+                                                ctx, sz, solver_cfg,
+                                                chunk_ws[ti],
+                                                &chunk_h[ti], &chunk_steps[ti]);
+                }
+
+                /* 汇总并行子域求解结果 */
+                for (int ti = 0; ti < n_threads; ti++) {
+                    size_t sz = base_sz + ((size_t)ti < rem_sz ? 1 : 0);
+                    if (sz > 0 && chunk_y[ti] && chunk_ret[ti] == 0)
+                        memcpy(y + chunk_off[ti], chunk_y[ti],
+                               sz * sizeof(float));
+                }
+
+                int has_error = 0;
+                int total_s = 0;
+                float h_acc = 0.0f;
+                for (int ti = 0; ti < n_threads; ti++) {
+                    if (chunk_ret[ti] != 0) has_error = 1;
+                    total_s += chunk_steps[ti];
+                    h_acc += chunk_h[ti];
+                }
+                if (h_actual) *h_actual = h_acc / (float)n_threads;
+                if (steps_used) *steps_used = total_s;
+
+                int final_ret = has_error ? -4 : 0;
+
+                for (int ti = 0; ti < n_threads; ti++) {
+                    free(chunk_y[ti]);
+                    free(chunk_ws[ti]);
+                }
+                free(chunk_y); free(chunk_ws); free(chunk_ret);
+                free(chunk_h); free(chunk_steps); free(chunk_off);
+
+                return final_ret;
+            }
+
+            /* 内存分配失败：清理并回退到串行 */
+            for (int ti = 0; ti < n_threads; ti++) {
+                free(chunk_y[ti]);
+                free(chunk_ws[ti]);
+            }
+            free(chunk_y); free(chunk_ws); free(chunk_ret);
+            free(chunk_h); free(chunk_steps); free(chunk_off);
         }
+#endif
+        /* 无OpenMP环境或分配失败：回退到串行求解 */
         return solver_func(y, t, delta_t, rhs, ctx, n, solver_cfg,
                           workspace, h_actual, steps_used);
 #endif

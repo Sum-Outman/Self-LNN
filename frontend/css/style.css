@@ -3153,18 +3153,7 @@ body {
     flex: 1;
 }
 
-.stat-label {
-    display: block;
-    color: #aaaaaa;
-    font-size: 0.9rem;
-    margin-bottom: 0.25rem;
-}
-
-.stat-value {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: #fff;
-}
+/* BUG-2修复: 删除此处重复的.stat-label/.stat-value定义，统一使用L495-L506的版本 */
 
 .stat-bar {
     height: 6px;
@@ -3887,15 +3876,7 @@ body {
     border-radius: 6px;
 }
 
-.stat-label {
-    color: #aaaaaa;
-    font-weight: 500;
-}
-
-.stat-value {
-    color: #fff;
-    font-weight: 600;
-}
+/* BUG-2修复: 删除此处第三次重复的.stat-label/.stat-value定义，统一使用L495-L506 */
 
 .modal-config {
     display: flex;
@@ -9102,3 +9083,27 @@ input:focus+.slider { box-shadow:0 0 1px #2196F3; }
     .cog-goal-metrics { grid-template-columns:repeat(2,1fr); }
     .tom-agent-container { grid-template-columns:1fr; }
 }
+/* ZSFAB-S3: 技能板块样式 */
+.skills-container{display:flex;gap:1rem;height:calc(100vh - 300px);min-height:500px}
+.skill-list{width:280px;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;padding:.5rem;border:1px solid rgba(255,255,255,.06)}
+.skill-detail{flex:1;overflow-y:auto;background:rgba(0,0,0,.2);border-radius:8px;padding:1rem;border:1px solid rgba(255,255,255,.06)}
+.skill-item{padding:.7rem .8rem;margin-bottom:4px;cursor:pointer;border-radius:6px;border:1px solid transparent;transition:.2s;font-size:.8rem}
+.skill-item:hover{background:rgba(0,200,255,.08);border-color:rgba(0,200,255,.2)}
+.skill-item.active{background:rgba(0,200,255,.12);border-color:rgba(0,200,255,.3)}
+.skill-type{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.6rem;margin-right:4px}
+.type-atomic{background:rgba(0,255,136,.15);color:#00ff88}
+.type-composite{background:rgba(68,136,255,.15);color:#4488ff}
+.type-task{background:rgba(255,170,0,.15);color:#ffaa00}
+.type-meta{background:rgba(255,68,136,.15);color:#ff4488}
+.filter-bar{display:flex;gap:6px;margin-bottom:.6rem;flex-wrap:wrap}
+.filter-btn{padding:4px 12px;border-radius:12px;font-size:.7rem;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#aaa;cursor:pointer;transition:.2s}
+.filter-btn:hover{background:rgba(0,200,255,.1);border-color:rgba(0,200,255,.3);color:#fff}
+.filter-btn.active{background:rgba(0,200,255,.15);border-color:rgba(0,200,255,.4);color:#00c8ff}
+.tag{display:inline-block;padding:2px 8px;border-radius:10px;background:rgba(255,255,255,.06);color:#888;font-size:.65rem;margin:2px}
+.param-row{display:flex;align-items:center;gap:.6rem;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:.75rem}
+.param-row:first-child{border-top:1px solid rgba(255,255,255,.05);padding-top:.5rem}
+.param-name{color:#888;min-width:80px}
+.param-value{color:#00c8ff;font-family:monospace}
+.step-item{padding:.4rem .6rem;margin-bottom:3px;border-radius:4px;background:rgba(0,0,0,.2);font-size:.75rem;border-left:2px solid rgba(0,200,255,.3)}
+.step-item .step-desc{color:#ccc}
+.skill-detail-actions{display:flex;gap:.6rem;margin-top:1rem;padding-top:.8rem;border-top:1px solid rgba(255,255,255,.06)}

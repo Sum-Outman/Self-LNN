@@ -606,7 +606,7 @@ DistributedConfig distributed_config_default(void) {
     cfg.checkpoint_frequency = 100;
     cfg.quorum_percentage = 51;
     cfg.rebalance_check_interval = 10;
-    strncpy(cfg.master_host, "127.0.0.1", sizeof(cfg.master_host) - 1);
+    strncpy(cfg.master_host, SELFLNN_LOCALHOST, sizeof(cfg.master_host) - 1);
     snprintf(cfg.checkpoint_dir, sizeof(cfg.checkpoint_dir), "./checkpoints");
     return cfg;
 }

@@ -401,7 +401,7 @@ static int slam_add_landmark(SlamSystem* system, const float* point3d,
                             const FeaturePoint* feature, int frame_id);
 static int slam_update_landmark_observation(SlamSystem* system, int landmark_id,
                                            int frame_id, const float* point2d);
-static int slam_optimize_local_bundle(SlamSystem* system, int window_size);
+static int slam_optimize_local_bundle(SlamSystem* system, int window_size, int iterations);
 static int slam_detect_loop_closure(SlamSystem* system, int frame_id,
                                    int* matched_frame_id);
 static int slam_correct_loop_closure(SlamSystem* system, int frame_id,
@@ -1419,7 +1419,7 @@ int slam_process_visual_frame(SlamSystem* system,
     
     /* 局部优化（如果有关键帧） */
     if (system->local_map.num_keyframes >= 2) {
-        slam_optimize_local_bundle(system, 5); /* 优化最近5个关键帧 */
+        slam_optimize_local_bundle(system, 5, 10); /* 优化最近5个关键帧，最多10次迭代 */
     }
     
     /* MUL-06: 更新共视图（如果是关键帧） */
@@ -1815,12 +1815,40 @@ int slam_process_point_cloud(SlamSystem* system,
     
     /* 条件2：运动幅度判断（如果有上一帧位姿） */
     if (system->frames_processed > 0) {
-        /* 完整实现：检查当前帧与上一关键帧的运动幅度（ ） */
-        /* 计算实际相对运动，不使用固定阈值 */
-        float motion_threshold = 0.2f; /* 运动幅度阈值 */
-        UNUSED(motion_threshold);
-        /* 注意：实际应用中应计算实际运动幅度 */
-        create_keyframe = 1; /* 假设运动幅度足够 */
+        /* 完整实现：检查当前帧与上一关键帧的运动幅度（基于平移和旋转的复合运动度量） */
+        float motion_threshold = 0.2f; /* 运动幅度阈值（复合度量：平移距离+旋转等效平移） */
+        
+        /* 计算当前帧相对上一关键帧的实际运动幅度 */
+        float motion_magnitude = 0.0f;
+        if (system->local_map.num_keyframes > 0) {
+            KeyFrame* last_kf = &system->local_map.keyframes[system->local_map.num_keyframes - 1];
+            /* 平移幅度：欧几里得距离 */
+            float dx = current_pose.position[0] - last_kf->pose.position[0];
+            float dy = current_pose.position[1] - last_kf->pose.position[1];
+            float dz = current_pose.position[2] - last_kf->pose.position[2];
+            float translation_mag = sqrtf(dx*dx + dy*dy + dz*dz);
+            
+            /* 旋转幅度：通过四元数共轭计算相对旋转角度 */
+            float qw = last_kf->pose.orientation[0];
+            float qx = last_kf->pose.orientation[1];
+            float qy = last_kf->pose.orientation[2];
+            float qz = last_kf->pose.orientation[3];
+            float qr_w = current_pose.orientation[0]*qw + current_pose.orientation[1]*qx
+                       + current_pose.orientation[2]*qy + current_pose.orientation[3]*qz;
+            if (qr_w > 1.0f) qr_w = 1.0f;
+            if (qr_w < -1.0f) qr_w = -1.0f;
+            float rotation_angle = 2.0f * acosf(qr_w);
+            float rotation_equiv = rotation_angle * 0.5f; /* 旋转弧度转为近似等效平移距离 */
+            
+            motion_magnitude = translation_mag + rotation_equiv;
+        } else {
+            motion_magnitude = motion_threshold + 1.0f; /* 无关键帧时强制创建首帧 */
+        }
+        
+        /* 仅当实际运动幅度超过阈值时才创建关键帧 */
+        if (motion_magnitude > motion_threshold) {
+            create_keyframe = 1;
+        }
     }
     
     /* 条件3：点云密度和质量判断 */
@@ -2773,13 +2801,12 @@ int slam_perform_global_optimization(SlamSystem* system, int iterations) {
 }
 
 int slam_perform_local_optimization(SlamSystem* system, int window_size, int iterations) {
-    UNUSED(iterations);
     if (!system) {
         return -1;
     }
     
-    /* 局部优化（捆集调整） */
-    return slam_optimize_local_bundle(system, window_size);
+    /* 局部优化（捆集调整），使用传入的迭代次数控制优化精度 */
+    return slam_optimize_local_bundle(system, window_size, iterations);
 }
 
 int slam_trigger_loop_closure(SlamSystem* system, int candidate_frame_id) {
@@ -3858,12 +3885,12 @@ static int slam_estimate_motion_2d2d(const FeaturePoint* features1,
             for (int q = p + 1; q < 3; q++) {
                 /* 计算2x2子矩阵 */
                 float Fpp = 0.0f, Fpq = 0.0f, Fqp = 0.0f, Fqq = 0.0f;
-                UNUSED(Fqp);
                 for (int i = 0; i < 3; i++) {
                     Fpp += F[p*3 + i] * F[p*3 + i];
                     Fqq += F[q*3 + i] * F[q*3 + i];
                     Fpq += F[p*3 + i] * F[q*3 + i];
                 }
+                Fqp = Fpq; /* 2x2子矩阵的对称性：F(q,p) = F(p,q) */
                 
                 /* 计算雅可比旋转角度 */
                 float theta = 0.5f * atan2f(2.0f * Fpq, Fpp - Fqq);
@@ -5096,7 +5123,7 @@ static int slam_update_landmark_observation(SlamSystem* system, int landmark_id,
     return 0;
 }
 
-static int slam_optimize_local_bundle(SlamSystem* system, int window_size) {
+static int slam_optimize_local_bundle(SlamSystem* system, int window_size, int iterations) {
     if (!system) {
         return -1;
     }
@@ -5275,7 +5302,8 @@ static int slam_optimize_local_bundle(SlamSystem* system, int window_size) {
     num_observations = obs_idx; /* 实际观测数量 */
     
     /* 步骤4：高斯-牛顿优化 */
-    const int max_iterations = 10;
+    /* 使用传入的迭代次数控制优化精度 */
+    const int max_iterations = (iterations > 0) ? iterations : 10;
     const float lambda_init = 1e-3f; /* LM算法的初始lambda */
     float lambda = lambda_init;
     
@@ -6211,10 +6239,10 @@ static int slam_correct_loop_closure(SlamSystem* system, int frame_id,
     
     constraint_idx++;
     
-    /* 6. 高斯-牛顿优化 */
+    /* 6. Levenberg-Marquardt优化（高斯-牛顿 + 自适应阻尼） */
     const int max_iterations = 20;
-    float lambda = 1e-3f; /* LM阻尼因子 */
-    UNUSED(lambda);
+    float lambda = 1e-3f; /* LM阻尼因子：初始值1e-3 */
+    float prev_total_error = 1e30f; /* 上一轮迭代的总误差，用于自适应调整lambda */
     
     for (int iter = 0; iter < max_iterations; iter++) {
         /* 计算残差和雅可比矩阵 */
@@ -6647,10 +6675,9 @@ static int slam_correct_loop_closure(SlamSystem* system, int frame_id,
                 JTr[i] = -sum; /* 负号因为方程是J^T * J * delta = -J^T * r */
             }
             
-            /* 添加阻尼项（Levenberg-Marquardt风格）以提高数值稳定性 */
-            float lm_lambda = 1e-3f;
+            /* 添加阻尼项（Levenberg-Marquardt正则化）以提高数值稳定性 */
             for (int i = 0; i < num_params; i++) {
-                JTJ[i * num_params + i] += lm_lambda;
+                JTJ[i * num_params + i] += lambda; /* 使用自适应lambda（非固定值） */
             }
             
             /* 求解线性系统：JTJ * delta = JTr */
@@ -6758,6 +6785,20 @@ static int slam_correct_loop_closure(SlamSystem* system, int frame_id,
         /* 清理迭代内存 */
         slam_free(residuals);
         slam_free(jacobian);
+        
+        /* LM阻尼因子自适应调整：根据误差变化趋势动态调节 */
+        if (iter > 0) {
+            if (total_error < prev_total_error) {
+                /* 误差减小：降低阻尼，使优化趋向高斯-牛顿法 */
+                lambda *= 0.5f;
+                if (lambda < 1e-6f) lambda = 1e-6f;
+            } else {
+                /* 误差增大：提高阻尼，使优化趋向梯度下降法 */
+                lambda *= 2.0f;
+                if (lambda > 1.0f) lambda = 1.0f;
+            }
+        }
+        prev_total_error = total_error;
         
         /* 检查收敛条件 */
         if (total_error < 1e-4f || iter == max_iterations - 1) {
@@ -8309,10 +8350,11 @@ static int slam_compute_fundamental_matrix_8point(const float* points1, const fl
                + F_normalized[2] * (F_normalized[3] * F_normalized[7] - F_normalized[4] * F_normalized[6]);
     if (fabsf(detF) > 1e-6f) {
         float inv_det = 1.0f / detF;
-        UNUSED(inv_det);
+        /* 使用inv_det计算归一化因子：norm = |detF|^(-1/3) = cbrt(|inv_det|) */
+        float norm_factor = cbrtf(fabsf(inv_det));
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j < 3; j++) {
-                F_normalized[i * 3 + j] *= powf(fabsf(detF), -1.0f / 3.0f);
+                F_normalized[i * 3 + j] *= norm_factor;
             }
         }
     }

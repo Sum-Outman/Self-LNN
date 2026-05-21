@@ -199,7 +199,7 @@ static void update_simulator_status(Simulator* sim);
 static const SimulatorConfig DEFAULT_SIMULATOR_CONFIG = {
     .type = SIMULATOR_SIMPLE,
     .name = "默认仿真器",
-    .hostname = "127.0.0.1",
+    .hostname = SELFLNN_LOCALHOST,
     .port = SELFLNN_SIMULATOR_PORT,
     .timeout_ms = 5000,
     .retry_count = 3,

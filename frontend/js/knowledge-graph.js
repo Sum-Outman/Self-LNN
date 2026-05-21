@@ -945,13 +945,19 @@
         /* 3秒后连接WebSocket */
         setTimeout(function() { connectKnowledgeWebSocket(); }, 3000);
 
-        /* 每60秒轮询知识库数据 */
-        setInterval(function() { fetchKnowledgeFromBackend(); }, 60000);
+        /* ZSFAB-H07修复: 知识库轮询统一到DataEngine调度，回退到独立setInterval */
+        if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
+            g_dataEngine.registerModule('knowledge_graph_poll', 60000, fetchKnowledgeFromBackend);
+        } else {
+            setInterval(function() { fetchKnowledgeFromBackend(); }, 60000);
+        }
 
         /* 16秒后初始化Canvas（确保DOM已渲染完整） */
-        if (document.getElementById('graph-canvas')) {
-            setTimeout(function() { initCanvas(); }, 16000);
-        }
+        setTimeout(function() {
+            if (document.getElementById('graph-canvas')) {
+                initCanvas();
+            }
+        }, 16000);
     });
 
 })();

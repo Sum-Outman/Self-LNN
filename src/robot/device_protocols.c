@@ -6,6 +6,7 @@
  * 连接失败时返回-1，不生成任何模拟/虚拟数据。
  */
 #include "selflnn/robot/device_protocols.h"
+#include "selflnn/core/port_config.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+/* Windows SDK将interface定义为struct宏(winsock2→objbase链)，与CAN接口参数名冲突 */
+#undef interface
 #define socklen_t int
 #define close_socket(s) closesocket(s)
 #define WOULD_BLOCK WSAEWOULDBLOCK
@@ -280,7 +283,7 @@ static int modbus_build_write_request(uint8_t* frame, uint8_t slave_id, uint16_t
 }
 
 static const char* modbus_device_host(DeviceInstance* dev) {
-    return dev->config.modbus.port[0] ? dev->config.modbus.port : "127.0.0.1";
+    return dev->config.modbus.port[0] ? dev->config.modbus.port : SELFLNN_LOCALHOST;
 }
 
 static int modbus_device_port(DeviceInstance* dev) {
@@ -493,7 +496,7 @@ int can_read_frame(DeviceProtocolManager* dpm, const char* device, CanFrame* fra
  * 消息类型：HEL(Hello) ACK(Acknowledge) OPN(OpenSecureChannel) CLO(CloseSecureChannel)
  *           MSG(Message) → 包含序列化的NodeId+ReadRequest/WriteRequest */
 static const char* opcua_device_host(DeviceInstance* dev) {
-    return dev->config.opc_ua.endpoint_url[0] ? dev->config.opc_ua.endpoint_url : "127.0.0.1";
+    return dev->config.opc_ua.endpoint_url[0] ? dev->config.opc_ua.endpoint_url : SELFLNN_LOCALHOST;
 }
 
 static int opcua_device_port(DeviceInstance* dev) {
@@ -683,7 +686,7 @@ int opcua_write_node(DeviceProtocolManager* dpm, const char* device, const char*
 
 /* ===== MQTT真实TCP实现 ===== */
 static const char* mqtt_device_host(DeviceInstance* dev) {
-    return dev->config.mqtt.broker_url[0] ? dev->config.mqtt.broker_url : "127.0.0.1";
+    return dev->config.mqtt.broker_url[0] ? dev->config.mqtt.broker_url : SELFLNN_LOCALHOST;
 }
 
 static int mqtt_device_port(DeviceInstance* dev) {

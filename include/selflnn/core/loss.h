@@ -91,4 +91,34 @@ void loss_gradient(const float* predictions, const float* targets, int n, float*
 }
 #endif
 
+/**
+ * @brief 设置Focal Loss默认gamma参数（聚焦参数）
+ * @param gamma 新的默认gamma值
+ */
+void loss_set_default_focal_gamma(float gamma);
+
+/**
+ * @brief 设置Focal Loss默认alpha参数（类别平衡参数）
+ * @param alpha 新的默认alpha值
+ */
+void loss_set_default_focal_alpha(float alpha);
+
+/**
+ * @brief 设置Dice Loss默认平滑因子
+ * @param smooth 新的默认平滑值
+ */
+void loss_set_default_dice_smooth(float smooth);
+
+/**
+ * @brief 设置Triplet Loss默认边界值
+ * @param margin 新的默认边界值
+ */
+void loss_set_default_triplet_margin(float margin);
+
+/**
+ * @brief 设置Quantile Loss默认分位数
+ * @param tau 新的默认分位数值
+ */
+void loss_set_default_quantile_tau(float tau);
+
 #endif // SELFLNN_LOSS_H

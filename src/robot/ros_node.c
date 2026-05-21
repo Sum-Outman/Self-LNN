@@ -409,10 +409,10 @@ static void publish_tcp_data(socket_t sock, const char* topic, const uint8_t* da
 RosNodeConfig ros_node_config_default(const char* node_name) {
     RosNodeConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
-    strncpy(cfg.master_host, "127.0.0.1", sizeof(cfg.master_host) - 1);
+    strncpy(cfg.master_host, SELFLNN_LOCALHOST, sizeof(cfg.master_host) - 1);
     cfg.master_port = 11311;
     strncpy(cfg.node_name, node_name ? node_name : "/self_lnn_node", sizeof(cfg.node_name) - 1);
-    strncpy(cfg.node_host, "127.0.0.1", sizeof(cfg.node_host) - 1);
+    strncpy(cfg.node_host, SELFLNN_LOCALHOST, sizeof(cfg.node_host) - 1);
     cfg.xmlrpc_port = 11312;
     cfg.tcp_port = 0;
     cfg.tcp_timeout_ms = 5000;

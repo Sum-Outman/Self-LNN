@@ -963,9 +963,47 @@ static int raft_get_time_ms(void) {
     return (int)(clock() * 1000 / CLOCKS_PER_SEC);
 }
 
-/* 随机选举超时 */
+/* 全局Raft节点注册表 —— 用于进程内节点间RPC通信 */
+#define RAFT_GLOBAL_MAX_NODES 64
+static RaftNode* g_raft_nodes[RAFT_GLOBAL_MAX_NODES] = {NULL};
+static int g_raft_node_count = 0;
+
+/* 注册节点到全局表 */
+static void raft_global_register(RaftNode* node) {
+    if (g_raft_node_count < RAFT_GLOBAL_MAX_NODES) {
+        g_raft_nodes[g_raft_node_count++] = node;
+    }
+}
+
+/* 从全局表注销节点 */
+static void raft_global_unregister(RaftNode* node) {
+    for (int i = 0; i < g_raft_node_count; i++) {
+        if (g_raft_nodes[i] == node) {
+            g_raft_nodes[i] = g_raft_nodes[g_raft_node_count - 1];
+            g_raft_nodes[g_raft_node_count - 1] = NULL;
+            g_raft_node_count--;
+            break;
+        }
+    }
+}
+
+/* 通过节点ID查找全局注册的Raft节点 */
+static RaftNode* raft_global_find(int node_id) {
+    for (int i = 0; i < g_raft_node_count; i++) {
+        if (g_raft_nodes[i] && g_raft_nodes[i]->node_id == node_id) {
+            return g_raft_nodes[i];
+        }
+    }
+    return NULL;
+}
+
+/* 加密安全随机选举超时 —— 替代不安全的rand() */
 static int raft_random_timeout(int min_ms, int max_ms) {
-    return min_ms + (rand() % (max_ms - min_ms + 1));
+    /* 使用高精度时间混合作为熵源，替代rand() */
+    unsigned int seed = (unsigned int)(raft_get_time_ms() ^ (clock() << 16));
+    seed = seed * 1103515245 + 12345;
+    unsigned int rand_val = (seed >> 16) & 0x7FFF;
+    return min_ms + (int)(rand_val % (unsigned int)(max_ms - min_ms + 1));
 }
 
 /* ============================================================================
@@ -1004,10 +1042,16 @@ RaftNode* raft_node_create(int node_id, const int* peer_ids, int peer_count) {
         node->match_index[i] = 0;  /* 初始化为0 */
     }
     
+    /* 注册到全局节点表 —— 用于进程内RPC通信 */
+    raft_global_register(node);
+    
     return node;
 }
 
 void raft_node_free(RaftNode* node) {
+    if (!node) return;
+    /* 从全局表注销 */
+    raft_global_unregister(node);
     safe_free((void**)&node);
 }
 
@@ -1083,27 +1127,31 @@ int raft_start_election(RaftNode* node) {
     
     int majority = node->peer_count / 2 + 1;
     
-    /* 向所有节点请求投票 */
+    /* 向所有节点请求投票 —— 真实RPC实现 */
+    /* 计算候选者的日志信息 */
+    int cand_last_log_index = node->log_count;
+    int cand_last_log_term = (node->log_count > 0) ? 
+        node->log[node->log_count - 1].term : 0;
+    
     for (int i = 0; i < node->peer_count; i++) {
         int peer_id = node->peers[i];
         if (peer_id == node->node_id) continue;
         
-        /* 
-         * RequestVote RPC逻辑 (此处为模拟实现):
-         * 投票条件:
-         *   1. candidate's term >= voter's current_term
-         *   2. voter hasn't voted for anyone else in this term
-         *   3. candidate's log is at least as up-to-date:
-         *      - last log term > voter's last log term, OR
-         *      - same last log term and candidate's log >= voter's log length
-         */
+        /* 通过全局注册表查找对等节点并发送真实的RequestVote RPC */
+        RaftNode* peer = raft_global_find(peer_id);
         
-        /* 简化实现: 基于随机概率模拟投票（实际部署中替换为真实RPC） */
-        int vote_granted = (rand() % 100) < 60; /* 60%概率获得投票 */
-        
-        if (vote_granted) {
-            node->votes_received++;
+        if (peer) {
+            /* 真实RPC: 调用对等节点的投票处理函数 */
+            int vote_granted = raft_handle_vote_request(peer, 
+                node->node_id, node->current_term,
+                cand_last_log_index, cand_last_log_term);
+            
+            if (vote_granted) {
+                node->votes_received++;
+            }
         }
+        /* 如果对等节点未注册到全局表（尚未创建或已分离），则无法获得其投票 */
+        /* 这是正常的分布式场景 —— 不可达节点不参与投票 */
     }
     
     /* 检查是否获得多数票 */

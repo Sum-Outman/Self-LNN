@@ -24,6 +24,7 @@ class DialogueEnhanced {
         this.onVoiceOutputStart = null;
         this.onVoiceOutputStop = null;
         this.onVoiceOutputError = null;
+        this.onVoiceInputError = null;   /* BUG-3修复: 初始化语音输入错误回调 */
     }
 
     get isRecording() { return this._capturer ? this._capturer.isRecording : false; }
@@ -399,13 +400,6 @@ class DialogueEnhanced {
         /* 使用全局SelfLnnWebSocket的connect方法 */
         gws.connect();
         return true;
-    }
-
-    _wsConnect() {
-        /* 委托给全局SelfLnnWebSocket，不再自行创建WebSocket连接 */
-        var gws = window.SelfLnnWebSocket;
-        if (!gws) return;
-        gws.connect();
     }
 
     /**

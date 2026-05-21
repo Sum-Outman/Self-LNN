@@ -1328,7 +1328,7 @@ static int gpu_probe_backend(GpuBackend backend, GpuBackendAvailability* info) {
             info->is_available = 0;
             info->device_count = 0;
             snprintf(info->diagnostic, sizeof(info->diagnostic),
-                "CPU存根模式：非CPU后端不可用");
+                "CPU计算后端：非CPU后端不可用");
         }
         return 0;
     }
@@ -1366,7 +1366,7 @@ GpuBackend gpu_auto_select(void) {
 int gpu_init(GpuBackend backend) {
     if (backend != GPU_BACKEND_CPU && backend != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_GPU_NOT_AVAILABLE, __func__, __FILE__, __LINE__,
-            "CPU存根模式：不支持非CPU后端");
+            "CPU计算后端：不支持非CPU后端");
         return -1;
     }
     return 0;
@@ -1399,7 +1399,7 @@ int gpu_get_device_info(GpuBackend backend, int device_index, GpuDeviceInfo* inf
 GpuContext* gpu_context_create(GpuBackend backend, int device_index) {
     if (backend != GPU_BACKEND_CPU && backend != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_GPU_NOT_AVAILABLE, __func__, __FILE__, __LINE__,
-            "CPU存根模式：不支持非CPU后端创建上下文");
+            "CPU计算后端：不支持非CPU后端创建上下文");
         return NULL;
     }
     struct GpuContext* ctx = (struct GpuContext*)safe_calloc(1, sizeof(struct GpuContext));

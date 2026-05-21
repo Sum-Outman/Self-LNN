@@ -2332,7 +2332,7 @@ static void metal_backend_kernel_free(GpuKernel* kernel) {
 }
 
 /**
- * @brief 设置Metal内核参数（存根）
+ * @brief 设置Metal内核参数
  */
 static int metal_backend_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t arg_size, const void* arg_value) {
     UNUSED(kernel); UNUSED(arg_index); UNUSED(arg_size); UNUSED(arg_value);

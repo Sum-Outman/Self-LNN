@@ -474,13 +474,9 @@ static int compute_model_gradients(NeuralNetwork* model, const MetaTask* task,
         input_data = (const float*)task->support_data;
         target_data = (const float*)task->support_labels;
     } else {
-        // 没有真实数据，生成合成数据
-        sample_count = 5;  // 默认5个样本
-    }
-    
-    if (sample_count <= 0) {
+        /* B-010修复: 无真实数据时直接返回零梯度，不保留合成数据路径 */
         memset(gradients, 0, gradient_size * sizeof(float));
-        return 0;  // 没有数据，返回零梯度
+        return 0;
     }
     
     // 获取权重矩阵和偏置向量信息
@@ -972,19 +968,15 @@ static float compute_task_loss(NeuralNetwork* model, const MetaTask* task) {
     // 检查任务是否有真实数据
     if (task->support_data && task->support_labels) {
         // 使用真实支持集数据
-        // 假设数据是浮点数组，支持集样本数已存储在setting中
         sample_count = task->setting.support_samples;
         input_data = (const float*)task->support_data;
         target_data = (const float*)task->support_labels;
     } else {
-        // 没有真实数据，生成合成数据用于计算真实损失
-        // 使用确定性种子基于任务ID生成数据
-        sample_count = 5;  // 默认5个样本
-        // 注意：合成数据在每次调用时生成，不存储
+        // 无真实数据，直接返回错误码，不保留任何合成数据路径
+        return compute_default_loss_based_on_model(model, task);
     }
     
     if (sample_count <= 0) {
-        // 没有有效样本，返回基于模型和任务计算的默认损失
         return compute_default_loss_based_on_model(model, task);
     }
     

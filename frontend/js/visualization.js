@@ -1354,13 +1354,20 @@ class VisualizationManager {
 
             if (robotStatus && robotStatus.success && robotStatus.data) {
                 const robot = robotStatus.data.robot || {};
+                /* B-011修复: 不再使用硬编码50作为默认值
+                 * 无真实数据时返回-1，前端显示"无数据" */
                 const metrics = {
-                    motion: robot.motion_capability || robot.battery || 50,
-                    sensor: robot.sensor_capability || 50,
-                    response: robot.response_time ? Math.max(0, 100 - robot.response_time * 10) : 50,
-                    stability: robot.state === 0 ? 80 : robot.state === 1 ? 95 : 50,
-                    efficiency: robot.temperature ? Math.max(0, 100 - (robot.temperature - 20) * 2) : 50,
-                    load: robot.load || robot.battery || 50
+                    motion: (robot.motion_capability !== undefined) ? robot.motion_capability : 
+                            (robot.battery !== undefined) ? robot.battery : -1,
+                    sensor: (robot.sensor_capability !== undefined) ? robot.sensor_capability : -1,
+                    response: (robot.response_time !== undefined) ? 
+                             Math.max(0, 100 - robot.response_time * 10) : -1,
+                    stability: (robot.state !== undefined) ? 
+                              (robot.state === 0 ? 80 : robot.state === 1 ? 95 : -1) : -1,
+                    efficiency: (robot.temperature !== undefined) ? 
+                               Math.max(0, 100 - (robot.temperature - 20) * 2) : -1,
+                    load: (robot.load !== undefined) ? robot.load : 
+                         (robot.battery !== undefined) ? robot.battery : -1
                 };
                 if (robot.robot_id || robot.status) {
                     this.updateRobotStatus(robot.robot_id || 1, metrics);
@@ -1556,7 +1563,7 @@ class VisualizationManager {
 
         ctx.clearRect(0, 0, w, h);
 
-        const data = this.stateActivationData || this._defaultActivationData || [];
+        const data = this.stateActivationData || [];
         const maxVal = Math.max(1, ...data.flat());
 
         for (let i = 0; i < data.length && i < size; i++) {
@@ -1592,13 +1599,10 @@ class VisualizationManager {
     initHeatmapData() {
         const size = this.heatmapSize || 20;
         this.stateActivationData = [];
-        this._defaultActivationData = [];
         for (let i = 0; i < size; i++) {
             this.stateActivationData[i] = [];
-            this._defaultActivationData[i] = [];
             for (let j = 0; j < size; j++) {
                 this.stateActivationData[i][j] = 0;
-                this._defaultActivationData[i][j] = 0;
             }
         }
         this.renderStateActivationHeatmap();
@@ -1622,10 +1626,10 @@ class VisualizationManager {
         const capEl = document.getElementById('gpu-compute-cap');
         const verEl = document.getElementById('gpu-cuda-version');
 
-        if (nameEl) nameEl.textContent = gpuStatus.device_name || '等待连接';
-        if (memEl) memEl.textContent = gpuStatus.memory ? `${gpuStatus.memory.used}/${gpuStatus.memory.total}` : '等待连接';
-        if (capEl) capEl.textContent = gpuStatus.compute_capability || '等待连接';
-        if (verEl) verEl.textContent = gpuStatus.cuda_version || '等待连接';
+        if (nameEl) nameEl.textContent = (gpuStatus.device_name !== undefined) ? gpuStatus.device_name : '等待连接';
+        if (memEl) memEl.textContent = (gpuStatus.memory !== undefined) ? `${gpuStatus.memory.used}/${gpuStatus.memory.total}` : '等待连接';
+        if (capEl) capEl.textContent = (gpuStatus.compute_capability !== undefined) ? gpuStatus.compute_capability : '等待连接';
+        if (verEl) verEl.textContent = (gpuStatus.cuda_version !== undefined) ? gpuStatus.cuda_version : '等待连接';
     }
 
     // ============================================================================

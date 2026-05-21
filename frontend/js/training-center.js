@@ -1,209 +1,83 @@
-(function() {
-    var trainingPolling = null;
-    var trainingWs = null;
-    var trainingChart = null;
-    var chartData = { losses: [], accs: [], maxPoints: 100 };
-    var wsReconnectAttempt = 0;
-    var wsReconnectMax = 10;
-    var wsReconnectBaseMs = 1000;
-    var wsReconnectMaxMs = 30000;
-    var wsHeartbeatTimer = null;
-    var wsHeartbeatIntervalMs = 15000;
+﻿(function() {
+    'use strict';
+    var trainingPollInterval = null;
 
-    function calcBackoff(attempt) {
-        var delay = Math.min(wsReconnectBaseMs * Math.pow(2, attempt), wsReconnectMaxMs);
-        var jitter = Math.random() * 1000;
-        return Math.floor(delay + jitter);
-    }
-
-    function startHeartbeat() {
-        stopHeartbeat();
-        wsHeartbeatTimer = setInterval(function() {
-            if (trainingWs && trainingWs.readyState === WebSocket.OPEN) {
-                trainingWs.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
-            }
-        }, wsHeartbeatIntervalMs);
-    }
-
-    function stopHeartbeat() {
-        if (wsHeartbeatTimer) { clearInterval(wsHeartbeatTimer); wsHeartbeatTimer = null; }
-    }
-
-    function startPolling() {
-        stopPolling();
-        if (window.g_dataEngine) {
-            window.g_dataEngine.registerModule('training_center', 2000, pollTraining);
-        } else {
-            trainingPolling = setInterval(pollTraining, 2000);
-        }
-    }
-
-    function stopPolling() {
-        if (trainingPolling) {
-            clearInterval(trainingPolling);
-            trainingPolling = null;
-        }
-        if (window.g_dataEngine) {
-            window.g_dataEngine.unregisterModule('training_center');
-        }
-    }
-
-    function initChart() {
-        var canvas = document.getElementById('training-chart');
-        if (!canvas || !window.SelfLnnChart) return;
-        trainingChart = new SelfLnnChart(canvas, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [
-                    { label: '损失', borderColor: '#e74c3c', backgroundColor: 'rgba(231,76,60,0.1)', data: chartData.losses, fill: true },
-                    { label: '准确率', borderColor: '#2ecc71', backgroundColor: 'rgba(46,204,113,0.1)', data: chartData.accs, fill: true }
-                ]
-            }
-        });
-    }
-
-    function updateTrainingUI(tr) {
-        var el;
-        el = document.getElementById('current-epoch');
-        if (el) el.textContent = tr.current_epoch != null ? tr.current_epoch : '-';
-        el = document.getElementById('train-loss');
-        if (el) el.textContent = tr.train_loss != null ? tr.train_loss.toFixed(6) : '-';
-        el = document.getElementById('val-loss');
-        if (el) el.textContent = tr.val_loss != null ? tr.val_loss.toFixed(6) : '-';
-        el = document.getElementById('train-accuracy');
-        if (el) el.textContent = tr.accuracy != null ? (tr.accuracy * 100).toFixed(2) + '%' : '-';
-        el = document.getElementById('train-time');
-        if (el) el.textContent = tr.elapsed_time ? tr.elapsed_time + 's' : '-';
-
-        if (tr.train_loss != null && tr.accuracy != null) {
-            chartData.losses.push(tr.train_loss);
-            chartData.accs.push(tr.accuracy);
-            if (chartData.losses.length > chartData.maxPoints) { chartData.losses.shift(); chartData.accs.shift(); }
-            if (trainingChart) trainingChart.draw();
-        }
-    }
+    function stopPolling() { if (trainingPollInterval) { clearInterval(trainingPollInterval); trainingPollInterval = null; } }
 
     async function startTraining() {
-        var mode = document.getElementById('train-mode').value;
-        var lr = parseFloat(document.getElementById('train-lr').value);
-        var batch = parseInt(document.getElementById('train-batch').value);
-        var epochs = parseInt(document.getElementById('train-epochs').value);
-        var dataPath = document.getElementById('train-data').value;
-        var config = { mode: mode, learning_rate: lr, batch_size: batch, num_epochs: epochs, dataset_path: dataPath };
-        var modeMap = { 'pretrain': 'trainingPretrain', 'finetune': 'trainingFineTune', 'rl': 'trainingContinual', 'contrastive': 'trainingTransfer', 'curriculum': 'trainingFromScratch' };
-        var methodName = modeMap[mode] || 'trainingPretrain';
         try {
-            var data = await SelfLnnApi[methodName](config);
-            if (data.training && data.training.status !== 'error') {
-                window.showNotification('训练任务已启动', 'success');
-                startPolling();
+            var mode = document.getElementById('training-mode') ? document.getElementById('training-mode').value : 'pretrain';
+            var lr = 0.001;
+            var batch = 64;
+            var epochs = 100;
+            var datasetPath = document.getElementById('training-dataset-path') ? document.getElementById('training-dataset-path').value : './data/training';
+            var lrEl = document.getElementById('training-learning-rate');
+            if (lrEl) lr = parseFloat(lrEl.value) || 0.001;
+            var batchEl = document.getElementById('training-batch-size');
+            if (batchEl) batch = parseInt(batchEl.value) || 64;
+            var epochEl = document.getElementById('training-epochs');
+            if (epochEl) epochs = parseInt(epochEl.value) || 100;
+
+            var data = await SelfLnnApi.trainingStart({ mode: mode, learning_rate: lr, batch_size: batch, epochs: epochs, dataset_path: datasetPath });
+            if (data.success) {
+                showNotification('训练已启动(' + mode + ')', 'success');
+                if (trainingPollInterval) clearInterval(trainingPollInterval);
+                trainingPollInterval = setInterval(pollTraining, 2000);
                 pollTraining();
-            } else { window.showNotification('启动失败: ' + (data.error || '未知错误'), 'danger'); }
-        } catch (e) { window.showNotification('连接失败: ' + e.message, 'danger'); }
+            } else {
+                showNotification('启动失败: ' + (data.error || ''), 'danger');
+            }
+        } catch(e) { showNotification('启动失败: ' + e.message, 'danger'); }
     }
+    window.startTraining = startTraining;
 
     async function pollTraining() {
         try {
-            var data = await SelfLnnApi.trainingStatus();
-            var tr = data.training || data;
-            if (tr.status === 'error' || tr.status === 'stopped') {
-                stopPolling();
+            var data = await SelfLnnApi.getTrainingStatus();
+            if (data) {
+                var stageEl = document.getElementById('training-current-stage');
+                if (stageEl) stageEl.textContent = data.current_stage || data.stage || '--';
+                var epochEl = document.getElementById('training-current-epoch');
+                if (epochEl) epochEl.textContent = data.current_epoch || data.epoch || '--';
+                var lossEl = document.getElementById('training-current-loss');
+                if (lossEl) lossEl.textContent = data.current_loss ? data.current_loss.toFixed(4) : '--';
+                var accEl = document.getElementById('training-current-accuracy');
+                if (accEl) accEl.textContent = data.accuracy ? (data.accuracy * 100).toFixed(1) + '%' : '--';
+                var timeEl = document.getElementById('training-estimated-time');
+                if (timeEl) timeEl.textContent = data.estimated_time || '--';
+                var progressEl = document.getElementById('training-progress-fill');
+                if (progressEl) progressEl.style.width = data.progress ? data.progress + '%' : '0%';
+                var progressText = document.getElementById('training-progress-text');
+                if (progressText) progressText.textContent = data.progress ? data.progress.toFixed(1) + '%' : '--';
+
+                if (data.running === false) stopPolling();
             }
-            updateTrainingUI(tr);
-            /* 后端连接成功，清除离线提示 */
-            var offlineEl = document.getElementById('tc-offline-notice');
-            if (offlineEl) offlineEl.style.display = 'none';
-        } catch (e) {
-            console.warn('训练轮询失败:', e.message);
-            /* W-006: 后端未连接时显示明确离线提示（禁止虚假数据） */
-            showTrainingOffline(e.message);
-        }
-    }
-
-    /* W-006: 后端未连接离线状态提示 */
-    function showTrainingOffline(reason) {
-        var el = document.getElementById('tc-offline-notice');
-        if (!el) {
-            el = document.createElement('div');
-            el.id = 'tc-offline-notice';
-            el.style.cssText = 'background:#fff3cd;color:#856404;padding:12px 16px;' +
-                'margin:12px 0;border-radius:6px;border:1px solid #ffc107;text-align:center;';
-            var container = document.querySelector('.training-container') ||
-                           document.getElementById('training-center') ||
-                           document.body;
-            if (container && container.firstChild) {
-                container.insertBefore(el, container.firstChild);
-            }
-        }
-        el.style.display = 'block';
-        el.innerHTML = '⚠️ <strong>后端服务未连接</strong> — ' +
-            (reason || '无法获取训练数据') +
-            '（符合\"禁止任何虚假数据\"原则，不显示模拟数据）';
-    }
-
-    /* ZSFABC-016修复: 使用全局SelfLnnWebSocket替代独立WebSocket连接 */
-    function connectTrainingWs() {
-        var gws = window.SelfLnnWebSocket;
-        if (!gws || typeof gws.on !== 'function') {
-            startPolling();
-            return;
-        }
-        var el = document.getElementById('ws-status');
-        if (el) { el.textContent = 'WS统一连接'; el.style.color = '#00ff88'; }
-
-        gws.on('training_update', function(msg) { updateTrainingUI(msg); });
-        gws.on('system_status', function(msg) {
-            if (msg.data && msg.data.training) {
-                var t = msg.data.training;
-                updateTrainingUI({ current_epoch: t.epoch, train_loss: t.train_loss != null ? t.train_loss : null, val_loss: t.val_loss, accuracy: t.accuracy, elapsed_time: t.elapsed_time });
-            }
-        });
-        gws.on('training_progress', function(msg) { updateTrainingUI(msg); });
-        gws.on('training_log', function(msg) { if (msg && msg.message) console.log('[训练日志]', msg.message); });
-        gws.on('training_metrics', function(msg) { updateTrainingUI(msg); });
-        gws.on('gpu_status', function(msg) {
-            var gpuEl = document.getElementById('gpu-training-status');
-            if (gpuEl && msg.data) gpuEl.textContent = msg.data.device || msg.data.name || 'GPU在线';
-        });
-
-        if (!gws.isConnected) gws.connect();
-        stopPolling();
+        } catch(e) { console.warn('训练轮询失败:', e.message); }
     }
 
     window.pauseTraining = async function() {
-        try { var data = await SelfLnnApi.trainingPause(); alert(data.success ? '训练已暂停' : '暂停失败'); }
-        catch (e) { alert('操作失败'); }
+        try {
+            var data = await SelfLnnApi.trainingPause();
+            showNotification(data.success ? '训练已暂停' : '暂停失败', data.success ? 'success' : 'danger');
+            stopPolling();
+        } catch(e) { showNotification('操作失败', 'danger'); }
     };
     window.resumeTraining = async function() {
-        try { var data = await SelfLnnApi.trainingResume(); alert(data.success ? '训练已恢复' : '恢复失败'); }
-        catch (e) { alert('操作失败'); }
+        try {
+            var data = await SelfLnnApi.trainingResume();
+            showNotification(data.success ? '训练已恢复' : '恢复失败', data.success ? 'success' : 'danger');
+            if (trainingPollInterval) clearInterval(trainingPollInterval);
+            trainingPollInterval = setInterval(pollTraining, 2000);
+            pollTraining();
+        } catch(e) { showNotification('操作失败', 'danger'); }
     };
     window.stopTraining = async function() {
         try {
             var data = await SelfLnnApi.trainingStop();
             stopPolling();
-            alert(data.success ? '训练已停止' : '停止失败');
-        } catch (e) { alert('操作失败'); }
+            showNotification(data.success ? '训练已停止' : '停止失败', data.success ? 'success' : 'danger');
+        } catch(e) { showNotification('操作失败', 'danger'); }
     };
 
-    async function loadHistory() {
-        try {
-            var data = await SelfLnnApi.trainingHistory();
-            var tbody = document.getElementById('history-list');
-            var tasks = data.tasks || data.history || [];
-            if (tasks.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="pending-text">暂无记录</td></tr>'; return; }
-            tbody.innerHTML = tasks.map(function (t) {
-                return '<tr><td>' + (t.id || '-') + '</td><td>' + (t.mode || '-') + '</td><td><span class="status-badge ' + (t.status === 'running' ? 'active' : t.status === 'done' ? 'completed' : 'inactive') + '">' + (t.status || '-') + '</span></td><td>' + (t.loss != null ? t.loss.toFixed(6) : '-') + '</td><td>' + (t.accuracy != null ? (t.accuracy * 100).toFixed(2) + '%' : '-') + '</td><td>' + (t.epochs || '-') + '</td><td>' + (t.date || '-') + '</td></tr>';
-            }).join('');
-        } catch (e) { console.warn('训练历史加载失败:', e.message); }
-    }
-
-    window.startTraining = startTraining;
-
-    document.addEventListener('DOMContentLoaded', function () {
-        initChart();
-        connectTrainingWs();
-        loadHistory();
-    });
+    window.pollTraining = pollTraining;
 })();

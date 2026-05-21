@@ -530,12 +530,33 @@ int ws_push_broadcast_json(WSPushServer* srv, const char* json_message)
     int jlen = (int)strlen(json_message);
     if (jlen <= 0 || jlen >= WS_MAX_MESSAGE_SIZE) return -1;
     int sent = 0;
+
+    /* ZSFAB-S6修复: 加互斥锁保护客户端列表，防止与poll线程竞态 */
+    ws_socket_t active_socks[WS_MAX_CLIENTS];
+    int active_indices[WS_MAX_CLIENTS];
+    int active_count = 0;
+
+    /* 第一阶段：锁定后快照活跃客户端socket列表 */
+    mutex_lock(srv->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (!srv->clients[i].active) continue;
         ws_socket_t sock = srv->clients[i].sock;
         if (sock == WS_INVALID) continue;
-        if (ws_send_frame(sock, 0x01, (unsigned char*)json_message, jlen) == 0) sent++;
-        else ws_client_close(&srv->clients[i]);
+        active_socks[active_count] = sock;
+        active_indices[active_count] = i;
+        active_count++;
+    }
+    mutex_unlock(srv->mutex);
+
+    /* 第二阶段：无锁发送帧，发送失败时加锁关闭客户端 */
+    for (int i = 0; i < active_count; i++) {
+        if (ws_send_frame(active_socks[i], 0x01, (unsigned char*)json_message, jlen) == 0) {
+            sent++;
+        } else {
+            mutex_lock(srv->mutex);
+            ws_client_close(&srv->clients[active_indices[i]]);
+            mutex_unlock(srv->mutex);
+        }
     }
     return sent;
 }

@@ -20,6 +20,7 @@
 #include "selflnn/core/lnn_layer_norm.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/secure_random.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -56,14 +57,12 @@
  * @brief 生成确定性均匀分布数
  * @param min 最小值
  * @param max 最大值
- * @param seed 种子值，确保不同调用产生不同结果
+ * @param seed 种子值（保留接口兼容性，实际使用密码学安全随机数）
  */
 static float random_uniform_seeded(float min, float max, unsigned int seed) {
-    // 确定性伪随机数生成：基于种子、min和max的哈希值
-    seed = seed ^ (unsigned int)(*(unsigned int*)&min) ^ (unsigned int)(*(unsigned int*)&max);
-    seed = seed * 1103515245 + 12345;
-    unsigned int rand_val = (seed >> 16) & 0x7FFF;
-    return min + (max - min) * ((float)rand_val / 32767.0f);
+    /* 使用密码学安全随机数替代LCG，消除弱随机性安全隐患 */
+    (void)seed;
+    return min + (max - min) * secure_random_float();
 }
 
 /* ========================================================================

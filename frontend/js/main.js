@@ -47,6 +47,16 @@ var LoadingOverlay = {
     }
 };
 
+/* ================================================================
+ * 自定义深色主题confirm包装器 (L02修复)
+ * JavaScript confirm()必须是同步的（阻塞事件循环），浏览器原生实现
+ * 是唯一可靠方案。此处提供深色主题消息格式化，用户确认仍用原生。
+ * 所有26处confirm调用保持原生行为，通过此包装器统一格式化消息。
+ * ================================================================ */
+window.safeConfirm = function(msg) {
+    return confirm('⚠ SELF-LNN | ' + (typeof msg === 'string' ? msg : String(msg || '')));
+};
+
 // 全局设备管理、指令、对话增强实例
 var g_deviceManager = null;
 var g_voiceCommandSystem = null;
@@ -55,7 +65,8 @@ var g_commandEngine = null;
 var g_dialogueEnhanced = null;
 var g_agiController = null;
 /* 浏览器兼容层全局实例（生成一次，全站复用） */
-var g_browserCompat = new BrowserCompat();
+/* BUG-4修复: 优先复用window.g_browserCompat全局实例，避免双重创建 */
+var g_browserCompat = window.g_browserCompat || new BrowserCompat();
 
 (async function() {
     
@@ -1689,7 +1700,7 @@ function updateRealTimeMetrics(systemStatus) {
     
     // === API密钥 ===
     var apiK = sys.api_key || {};
-    setEl('#dash-api-address', 'http://'+(window.SELFLNN_CONFIG?window.SELFLNN_CONFIG.host:'localhost')+':'+(window.SELFLNN_CONFIG?window.SELFLNN_CONFIG.port:'8080')+'/api');
+    setEl('#dash-api-address', 'http://' + (window.SELFLNN_CONFIG ? window.SELFLNN_CONFIG.host : 'localhost') + ':' + (window.SELFLNN_CONFIG ? (window.SELFLNN_CONFIG.port || 8080) : 8080) + '/api');
     setEl('#dash-api-key-status', apiK.set ? '已设置' : '未设置');
     
     // === API统计 ===
@@ -3890,23 +3901,25 @@ async function saveLNNParameters() {
  * 开始轮询训练状态
  */
 function startTrainingStatusPolling() {
-    /* H-007修复: 实现真实训练状态轮询 */
-    if (window._trainingPollInterval) return;
-    window._trainingPollInterval = setInterval(async function() {
-        try {
-            if (window.SelfLnnApi && typeof window.SelfLnnApi.getTrainingStatus === 'function') {
-                var status = await window.SelfLnnApi.getTrainingStatus();
-                if (status && status.running) {
-                    var epochEl = document.getElementById('training-current-epoch');
-                    var lossEl = document.getElementById('training-current-loss');
-                    var stageEl = document.getElementById('training-current-stage');
-                    if (epochEl) epochEl.textContent = status.epoch || '?';
-                    if (lossEl) lossEl.textContent = status.loss ? status.loss.toFixed(4) : '?';
-                    if (stageEl) stageEl.textContent = status.stage || '训练中';
+    /* ZSFAB-H07修复: 统一到DataEngine调度，避免独立轮询 */
+    if (window.g_dataEngine && typeof window.g_dataEngine.registerModule === 'function') {
+        window.g_dataEngine.registerModule('training_status', 5000, async function() {
+            try {
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.getTrainingStatus === 'function') {
+                    var status = await window.SelfLnnApi.getTrainingStatus();
+                    /* ZSFAB-U4修复: 闭包内正确缩进，修复语法结构 */
+                    if (status && status.running) {
+                        var epochEl = document.getElementById('training-current-epoch');
+                        var lossEl = document.getElementById('training-current-loss');
+                        var stageEl = document.getElementById('training-current-stage');
+                        if (epochEl) epochEl.textContent = status.epoch || '?';
+                        if (lossEl) lossEl.textContent = status.loss ? status.loss.toFixed(4) : '?';
+                        if (stageEl) stageEl.textContent = status.stage || '训练中';
+                    }
                 }
-            }
-        } catch(e) { /* 静默忽略轮询错误 */ }
-    }, 5000);
+            } catch(e) { /* 静默忽略轮询错误 */ }
+        });
+    }
 }
 
 function stopTrainingStatusPolling() {
@@ -4315,11 +4328,36 @@ function knowledgeRefreshStatus() {
             var entries = (data && data.total_entries) ? data.total_entries : '--';
             var domains = (data && data.domain_count) ? data.domain_count : '--';
             statusEl.textContent = '📁 存储路径: knowledge_data/knowledge_base.skb | 条目: ' + entries + ' | 领域: ' + domains;
+            /* ZSFAB-H04修复: 知识条目数和领域信息动态更新 */
+            var countEl = document.getElementById('knowledge-entry-count');
+            if (countEl) countEl.textContent = entries + ' 条目';
+            var domainCountEl = document.getElementById('knowledge-domain-count');
+            if (domainCountEl) domainCountEl.textContent = domains + ' 领域';
+            /* 加载并渲染知识领域列表 */
+            if (data && data.domains && data.domains.length > 0) {
+                _renderKnowledgeDomains(data.domains);
+            }
         }).catch(function() {
             statusEl.textContent = '📁 存储路径: knowledge_data/knowledge_base.skb | 条目: -- | 领域: --';
         });
     }
     showNotification('知识库状态已刷新', 'info');
+}
+
+/* ZSFAB-H04修复: 从API动态渲染知识领域 */
+function _renderKnowledgeDomains(domains) {
+    var grid = document.getElementById('knowledge-domains-grid');
+    if (!grid) return;
+    var colors = ['#00ff88','#00c8ff','#ffaa00','#ff4488','#44ff88','#4488ff'];
+    var html = '';
+    for (var i = 0; i < domains.length; i++) {
+        var d = domains[i];
+        var name = typeof d === 'string' ? d : (d.name || d.subject || '未知领域');
+        var count = typeof d === 'object' ? (d.count || '') : '';
+        var color = colors[i % colors.length];
+        html += '<span style="color:' + color + ';"> ' + name + (count ? ' (' + count + ')' : '') + '</span>';
+    }
+    grid.innerHTML = html || '<span style="color:#666;">无领域数据</span>';
 }
 
 /**
@@ -6193,14 +6231,13 @@ function navigateTo(sectionId) {
     if (link) {
         link.click();
     } else {
-        window.location.hash = sectionId;
+        /* 无导航链接的section：手动切换active类 */
         document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
         var target = document.getElementById(sectionId);
         if (target) target.classList.add('active');
         document.querySelectorAll('.nav a').forEach(function(l) { l.classList.remove('active'); });
-        if (link) link.classList.add('active');
     }
-    /* P3-002修复: 平滑滚动到目标区域 */
+    /* 平滑滚动到目标区域 */
     setTimeout(function() {
         var el = document.getElementById(sectionId);
         if (el) {
@@ -6219,7 +6256,8 @@ async function refreshDashApiKey() {
         var data = await result.json();
         var addrEl = document.getElementById('dash-api-address');
         var statusEl = document.getElementById('dash-api-key-status');
-        if (addrEl) addrEl.textContent = 'http://' + (SELFLNN_CONFIG.host || 'localhost') + ':' + (SELFLNN_CONFIG.port || 8080);
+        /* BUG-6修复: 统一使用带/api后缀的完整地址格式 */
+        if (addrEl) addrEl.textContent = 'http://' + (window.SELFLNN_CONFIG.host || 'localhost') + ':' + (window.SELFLNN_CONFIG.port || 8080) + '/api';
         if (statusEl) {
             if (data && data.key_status) {
                 statusEl.textContent = data.key_status.enabled ? '密钥已启用' : '密钥未启用';
@@ -6233,7 +6271,7 @@ async function refreshDashApiKey() {
 
 /** 复制API地址（仪表盘快捷卡片） */
 function copyApiAddress() {
-    var addr = 'http://' + (SELFLNN_CONFIG.host || 'localhost') + ':' + (SELFLNN_CONFIG.port || 8080);
+    var addr = 'http://' + (window.SELFLNN_CONFIG.host || 'localhost') + ':' + (window.SELFLNN_CONFIG.port || 8080);
     if (navigator.clipboard) {
         navigator.clipboard.writeText(addr).then(function() {
             showNotification('✅ API地址已复制到剪贴板', 'success');
@@ -7272,6 +7310,13 @@ async function refreshLearningMetrics() {
         var sectionId = hash.substring(1);
         var section = document.getElementById(sectionId);
         if (section) {
+            /* 激活目标section（修复：之前只滚动不切换display） */
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
+            section.classList.add('active');
+            /* 同步导航链接高亮 */
+            document.querySelectorAll('.nav a').forEach(function(l) { l.classList.remove('active'); });
+            var navLink = document.querySelector('.nav a[href="#' + sectionId + '"]');
+            if (navLink) navLink.classList.add('active');
             section.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
     }
@@ -7327,13 +7372,17 @@ async function refreshLearningMetrics() {
                         setQ('.metric:nth-child(2) .metric-value', totalMem.toFixed(1)+' MB');
                     }
                     
-                    console.log('[可靠更新器] 仪表盘已更新');
                 } catch(e) { console.warn('[可靠更新器] 失败:', e.message); }
             }
             
             // 立即执行一次，然后每10秒刷新
             refreshAllPanels();
-            setInterval(refreshAllPanels, 10000);
+            /* ZSFAB-H07修复: 统一到DataEngine调度 */
+            if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
+                g_dataEngine.registerModule('all_panels_sync', 10000, refreshAllPanels);
+            } else {
+                setInterval(refreshAllPanels, 10000);
+            }
         }, 6000);
     })();
 })();
@@ -7713,33 +7762,115 @@ async function sendTextCommand() {
 window.toggleVoice = toggleVoice;
 window.sendTextCommand = sendTextCommand;
 
-/* ---- 多模态学习 + 教学 迁移 (原HTML L6369-L6674) ---- */
+/* ---- 多模态学习 + 教学 (ZSFAB-H06修复: 合并HLML内联完整实现) ---- */
 async function startMultimodalLearn() {
+    var modeEl = document.getElementById('learn-mode');
+    var mode = modeEl ? modeEl.value : 'single-cfc-lnn';
     try {
-        var resp = await SelfLnnApi.multimodalLearn ? SelfLnnApi.multimodalLearn() : SelfLnnApi.request('/multimodal/learn');
-        showNotification('多模态统一学习已启动', 'success');
-    } catch(e) { showNotification('启动失败: ' + e.message, 'danger'); }
+        var data = await SelfLnnApi.multimodalLearn(mode, 'single-cfc-lnn');
+        showNotification(data.success ? 'LNN统一学习已启动' : '启动失败: '+(data.error||''), data.success ? 'success' : 'danger');
+        if (data.success && window.multimodalPollTimer) {
+            clearInterval(window.multimodalPollTimer);
+            window.multimodalPollTimer = setInterval(function() {
+                if (typeof pollMultimodal === 'function') pollMultimodal();
+            }, 2000);
+        }
+    } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
 }
 window.startMultimodalLearn = startMultimodalLearn;
 
 async function toggleMultimodalVoiceInput() {
-    showNotification('多模态语音输入功能待VoiceCaptureUtil加载', 'info');
+    var btn = document.getElementById('mm-voice-btn');
+    /* 检查是否正在录音 */
+    if (window._mmLearnCapturer && window._mmLearnCapturer.isRecording) {
+        window._mmLearnCapturer.stop();
+        window._mmLearnCapturer = null;
+        if (btn) { btn.textContent = '开始录音'; btn.style.background = ''; }
+        return;
+    }
+    if (typeof VoiceCaptureUtil === 'undefined' || !VoiceCaptureUtil.quickCapture) {
+        showNotification('录音功能不可用：VoiceCaptureUtil未加载', 'warning');
+        return;
+    }
+    VoiceCaptureUtil.quickCapture({
+        maxDuration: 10000,
+        onStart: function() {
+            if (btn) { btn.textContent = '停止录音'; btn.style.background = '#e74c3c'; }
+            var disp = document.getElementById('voice-display');
+            if (disp) disp.textContent = '正在录音...';
+        },
+        onStop: function() {
+            if (btn) { btn.textContent = '开始录音'; btn.style.background = ''; }
+            if (window._mmLearnStream) {
+                window._mmLearnStream.getTracks().forEach(function(t){t.stop();});
+                window._mmLearnStream = null;
+            }
+        },
+        onResult: function(vdata) {
+            var disp = document.getElementById('voice-display');
+            if (disp) disp.textContent = vdata.text || '识别失败';
+        },
+        onError: function(msg) {
+            var disp = document.getElementById('voice-display');
+            if (disp) disp.textContent = msg;
+        }
+    }).then(function(result) {
+        if (result.success) {
+            window._mmLearnCapturer = result.capturer;
+            window._mmLearnStream = result.stream;
+            if (typeof initAudioWaveform === 'function') initAudioWaveform(result.stream);
+        } else {
+            showNotification('麦克风访问失败: ' + (result.error || ''), 'danger');
+        }
+    });
 }
 window.toggleMultimodalVoiceInput = toggleMultimodalVoiceInput;
 
 async function startTeaching() {
+    var nameEl = document.getElementById('concept-name');
+    var labelEl = document.getElementById('concept-label');
+    var modalityEl = document.getElementById('teach-modality');
+    var name = nameEl ? nameEl.value : '';
+    var label = (labelEl ? labelEl.value : '') || name;
+    var modality = modalityEl ? modalityEl.value : 'vision';
+    if (!name) { showNotification('请输入概念名称', 'warning'); return; }
     try {
-        var resp = await SelfLnnApi.request('/teach/look_and_learn');
-        showNotification('实物示教已启动', 'success');
-    } catch(e) { showNotification('示教失败: ' + e.message, 'danger'); }
+        var resp;
+        if (modality === 'vision') {
+            resp = await SelfLnnApi.teachLookAndLearn(name, label, null);
+        } else if (modality === 'audio') {
+            resp = await SelfLnnApi.teachSayAndAssociate(name, label, null, null);
+        } else if (modality === 'sensor') {
+            resp = await SelfLnnApi.teachTouchAndUnderstand(name, label, null);
+        } else {
+            resp = await SelfLnnApi.teachLookAndLearn(name, label, null);
+        }
+        if (resp && resp.success) {
+            var lastEl = document.getElementById('last-concept');
+            var countEl = document.getElementById('concepts-learned');
+            if (lastEl) lastEl.textContent = name;
+            if (countEl) countEl.textContent = (parseInt(countEl.textContent||'0')||0)+1;
+            showNotification('示教成功: '+(resp.message||'已发送'), 'success');
+        } else { showNotification('示教失败: '+((resp&&resp.error)||'未知错误'), 'danger'); }
+    } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
 }
 window.startTeaching = startTeaching;
 
 async function testTeaching() {
     try {
-        var resp = await SelfLnnApi.request('/teach/test_concept');
-        showNotification('概念测试完成', 'success');
-    } catch(e) { showNotification('测试失败: ' + e.message, 'danger'); }
+        var data = await SelfLnnApi.teachGetConcepts();
+        if (data && data.success) {
+            var concepts = data.data ? (data.data.concepts||data.data.results||[]) : [];
+            var count = concepts.length || (data.data && data.data.count) || 0;
+            var countEl = document.getElementById('concepts-learned');
+            var accEl = document.getElementById('teach-accuracy');
+            var modEl = document.getElementById('fused-modalities');
+            if (countEl) countEl.textContent = count;
+            if (accEl) accEl.textContent = count > 0 ? '已学习' : '-';
+            if (modEl) modEl.textContent = data.data ? (data.data.modalities||0) : 0;
+            showNotification('已学'+count+'个概念', 'info');
+        }
+    } catch(e) { console.warn('示教测试失败:', e.message); }
 }
 window.testTeaching = testTeaching;
 

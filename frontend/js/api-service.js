@@ -4977,7 +4977,9 @@ class ApiService {
  */
 class WebSocketManager {
     constructor(url) {
-        this.url = url || `ws://${SELFLNN_CONFIG.host}:${SELFLNN_CONFIG.port}/ws`;
+        /* BUG-5修复: 运行时动态读取window.SELFLNN_CONFIG而非静态捕获 */
+        var cfg = window.SELFLNN_CONFIG || { host: 'localhost', port: 8080 };
+        this.url = url || ('ws://' + cfg.host + ':' + cfg.port + '/ws');
         this.ws = null;
         this.isConnected = false;
         this.isManualDisconnect = false;
@@ -5373,10 +5375,8 @@ class WebSocketManager {
 
 // 创建全局API服务实例（IIFE内暴露）
 window.SelfLnnApi = new ApiService();
-/* WebSocket通过HTTP Upgrade共用HTTP端口 */
-window.SelfLnnWebSocket = new WebSocketManager(
-    'ws://' + SELFLNN_CONFIG.host + ':' + (SELFLNN_CONFIG.port || 8080) + '/ws'
-);
+/* WebSocket通过HTTP Upgrade共用HTTP端口 — 构造函数动态读取window.SELFLNN_CONFIG */
+window.SelfLnnWebSocket = new WebSocketManager();
 
 })(); /* IIFE结束 */
 

@@ -36,6 +36,11 @@
 #include <time.h>
 #include <stdint.h>
 
+/* 平台特定头文件 */
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 /**
  * @brief 简单32位哈希 - 用于确定性伪随机权重初始化
  */
@@ -1971,6 +1976,88 @@ SELFLNN_API int lnn_analyze_laplace_stability(LNN* network, float* stability_sco
 /**
  * @brief 启用参数分片
  */
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * 硬件拓扑检测辅助函数
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * @brief 检测指定CPU核心所属的NUMA节点
+ * 
+ * Windows：使用 GetNumaProcessorNodeEx 查询处理器NUMA拓扑
+ * Linux：可通过 /sys/devices/system/cpu/cpuN/topology 或 libnuma 检测，
+ *         当前简化实现，无法检测时返回0
+ * 其他平台：默认返回0
+ * 
+ * @param cpu_index CPU核心索引
+ * @return NUMA节点编号，无法检测时返回0
+ */
+static uint32_t detect_numa_node(int cpu_index) {
+#ifdef _WIN32
+    USHORT node = 0;
+    PROCESSOR_NUMBER proc_num = {0};
+    proc_num.Number = (BYTE)cpu_index;
+    /* 优先使用 GetNumaProcessorNodeEx（支持多处理器组） */
+    if (GetNumaProcessorNodeEx(&proc_num, &node)) {
+        return (uint32_t)node;
+    }
+    /* 备用：旧版API（仅支持64个处理器以内） */
+    if (GetNumaProcessorNode((UCHAR)cpu_index, &node)) {
+        return (uint32_t)node;
+    }
+    /* 无法检测NUMA拓扑，默认返回节点0 */
+    return 0;
+#elif defined(__linux__)
+    /* ZSFAB-M06修复: 通过sysfs读取NUMA节点信息，无需libnuma依赖 */
+    char numa_path[128];
+    snprintf(numa_path, sizeof(numa_path),
+        "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu_index);
+    FILE* fp = fopen(numa_path, "r");
+    if (fp) {
+        int node = 0;
+        if (fscanf(fp, "%d", &node) == 1) {
+            fclose(fp);
+            return (uint32_t)(node >= 0 ? node : 0);
+        }
+        fclose(fp);
+    }
+    return 0;
+#else
+    (void)cpu_index;
+    return 0;
+#endif
+}
+
+/**
+ * @brief 检测内存带宽（GB/s）
+ * 
+ * 内存带宽受CPU型号、内存类型（DDR4/DDR5）、频率、通道数、时序等多因素影响。
+ * 精确值需要通过基准测试（如STREAM）获取。以下为常见配置参考值：
+ *   - DDR4-2133 双通道 ≈ 34 GB/s
+ *   - DDR4-3200 双通道 ≈ 51 GB/s
+ *   - DDR5-4800 双通道 ≈ 76 GB/s
+ *   - DDR5-5600 四通道 ≈ 179 GB/s
+ * 
+ * 当前简化实现：无法精确检测时返回0.0，由上层根据实际硬件配置赋值。
+ * 
+ * @return 内存带宽（GB/s），无法检测时返回0.0
+ */
+static float detect_memory_bandwidth_gbps(void) {
+#ifdef _WIN32
+    /* Windows：可通过WMI（Win32_PhysicalMemory）查询内存配置（频率/通道数），
+     * 或通过 GetLogicalProcessorInformation 获取缓存信息推断。
+     * 精确带宽值需要运行微基准测试，此处返回0.0以避免伪造数据。 */
+    return 0.0f;
+#elif defined(__linux__)
+    /* Linux：可解析 /proc/cpuinfo 获取CPU型号，结合 /sys/devices/system/edac/mc/
+     * 或 dmidecode 获取内存配置，但无法直接获得精确带宽值。
+     * 精确值需通过STREAM等微基准测试获取。 */
+    return 0.0f;
+#else
+    return 0.0f;
+#endif
+}
+
 SELFLNN_API int lnn_enable_sharding(LNN* network, size_t num_shards, size_t shard_id)
 {
     SELFLNN_CHECK_NULL(network, "LNN网络句柄为空");
@@ -2032,10 +2119,10 @@ SELFLNN_API int lnn_enable_sharding(LNN* network, size_t num_shards, size_t shar
         desc.gradient_size_bytes = desc.num_params * sizeof(float);
         desc.device_id = 0;
         desc.node_id = 0;
-        desc.numa_node = (uint32_t)(i % 4);
+        desc.numa_node = detect_numa_node((int)i);
         desc.memory_usage_gb = (float)(desc.num_params * sizeof(float)) / (1024.0f * 1024.0f * 1024.0f);
         desc.compute_power_tflops = 0.0f;
-        desc.bandwidth_gbps = 12.0;
+        desc.bandwidth_gbps = detect_memory_bandwidth_gbps();
 
         int add_ret = shard_system_add_shard(network->shard_system, &desc);
         (void)add_ret;

@@ -407,6 +407,37 @@ SELFLNN_API size_t selflnn_discover_devices(DeviceInfo* devices, size_t max_devi
 SELFLNN_API int selflnn_set_power_mode(PowerMode power_mode);
 
 /**
+ * @brief 产品设计标签表结构体
+ * 
+ * 可配置的中文标签字符串表，用于产品设计功能的文本生成。
+ * 支持运行时通过 selflnn_set_product_design_labels() 修改，
+ * 实现国际化或业务定制。
+ */
+typedef struct {
+    const char* type_labels[4];      /**< 产品类型标签（硬件/软件/系统/自定义） */
+    const char* style_suffixes[5];   /**< 产品名称风格后缀 */
+    size_t style_suffix_count;       /**< 风格后缀实际条目数 */
+    const char* feat_prefixes[16];   /**< 功能特性前缀池 */
+    size_t feat_prefix_count;        /**< 前缀实际条目数 */
+    const char* feat_suffixes[12];   /**< 功能特性后缀池 */
+    size_t feat_suffix_count;        /**< 后缀实际条目数 */
+    const char* default_features[3]; /**< 默认特性（LNN不可用时回退） */
+    size_t default_feature_count;    /**< 默认特性实际条目数 */
+} ProductDesignLabels;
+
+/**
+ * @brief 设置产品设计标签表
+ * @param labels 标签表配置
+ */
+SELFLNN_API void selflnn_set_product_design_labels(const ProductDesignLabels* labels);
+
+/**
+ * @brief 获取当前产品设计标签表
+ * @return 标签表指针（只读）
+ */
+SELFLNN_API const ProductDesignLabels* selflnn_get_product_design_labels(void);
+
+/**
  * @brief 监控能耗
  * @param duration 监控时长（秒）
  * @param data_points 数据点数组（输出）

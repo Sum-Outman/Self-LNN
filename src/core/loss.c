@@ -7,26 +7,34 @@ float loss_compute(const float* predictions, const float* targets, int n, LossTy
     return loss_compute_ex(predictions, targets, n, loss_type, NULL);
 }
 
-static float default_focal_gamma(void) { return 2.0f; }
-static float default_focal_alpha(void) { return 0.25f; }
-static float default_dice_smooth(void) { return 1e-6f; }
-static float default_triplet_margin(void) { return 1.0f; }
-static float default_quantile_tau(void) { return 0.5f; }
+/* 损失函数默认超参数——可通过setter函数在运行时修改 */
+static float g_default_focal_gamma = 2.0f;
+static float g_default_focal_alpha = 0.25f;
+static float g_default_dice_smooth = 1e-6f;
+static float g_default_triplet_margin = 1.0f;
+static float g_default_quantile_tau = 0.5f;
+
+/* 可配置超参数setter函数 */
+void loss_set_default_focal_gamma(float gamma) { g_default_focal_gamma = gamma; }
+void loss_set_default_focal_alpha(float alpha) { g_default_focal_alpha = alpha; }
+void loss_set_default_dice_smooth(float smooth) { g_default_dice_smooth = smooth; }
+void loss_set_default_triplet_margin(float margin) { g_default_triplet_margin = margin; }
+void loss_set_default_quantile_tau(float tau) { g_default_quantile_tau = tau; }
 
 static float get_gamma(const LossConfig* c) {
-    return (c && c->focal_gamma > 0.0f) ? c->focal_gamma : default_focal_gamma();
+    return (c && c->focal_gamma > 0.0f) ? c->focal_gamma : g_default_focal_gamma;
 }
 static float get_alpha(const LossConfig* c) {
-    return (c && c->focal_alpha > 0.0f) ? c->focal_alpha : default_focal_alpha();
+    return (c && c->focal_alpha > 0.0f) ? c->focal_alpha : g_default_focal_alpha;
 }
 static float get_smooth(const LossConfig* c) {
-    return (c && c->dice_smooth > 0.0f) ? c->dice_smooth : default_dice_smooth();
+    return (c && c->dice_smooth > 0.0f) ? c->dice_smooth : g_default_dice_smooth;
 }
 static float get_margin(const LossConfig* c) {
-    return (c && c->triplet_margin > 0.0f) ? c->triplet_margin : default_triplet_margin();
+    return (c && c->triplet_margin > 0.0f) ? c->triplet_margin : g_default_triplet_margin;
 }
 static float get_tau(const LossConfig* c) {
-    return (c && c->quantile_tau > 0.0f) ? c->quantile_tau : default_quantile_tau();
+    return (c && c->quantile_tau > 0.0f) ? c->quantile_tau : g_default_quantile_tau;
 }
 
 float loss_compute_ex(const float* predictions, const float* targets, int n,

@@ -3163,8 +3163,8 @@
                                     </div>
                                     <div>
                                         <label style="font-size:0.75rem;color:rgba(255,255,255,0.5);">预设知识条目</label>
-                                        <div style="background:rgba(0,0,0,0.3);padding:8px;border-radius:4px;font-size:0.75rem;margin-top:4px;color:#00ff88;">
-                                            500+ 条目（20个知识领域）
+                                        <div id="knowledge-entry-count" style="background:rgba(0,0,0,0.3);padding:8px;border-radius:4px;font-size:0.75rem;margin-top:4px;color:#00ff88;" data-source="backend">
+                                            加载中...
                                         </div>
                                     </div>
                                 </div>
@@ -3192,30 +3192,11 @@
                         <div class="card knowledge-domains-card">
                             <div class="card-header">
                                 <h3> 知识领域覆盖</h3>
-                                <span id="knowledge-domain-count" style="font-size:0.8rem;color:#00c8ff;">20 领域</span>
+                                <span id="knowledge-domain-count" style="font-size:0.8rem;color:#00c8ff;" data-source="backend">加载中...</span>
                             </div>
                             <div class="card-content">
-                                <div id="knowledge-domains-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;font-size:0.7rem;">
-                                    <span style="color:#00ff88;"> 数学基础</span>
-                                    <span style="color:#00ff88;"> 物理基础</span>
-                                    <span style="color:#00ff88;"> 化学基础</span>
-                                    <span style="color:#00ff88;"> 生物学基础</span>
-                                    <span style="color:#00c8ff;"> 医学基础</span>
-                                    <span style="color:#00c8ff;"> 计算机科学</span>
-                                    <span style="color:#00c8ff;"> 机器学习/AI</span>
-                                    <span style="color:#00c8ff;"> 计算机视觉</span>
-                                    <span style="color:#ffaa00;"> 语音/音频</span>
-                                    <span style="color:#ffaa00;"> 自然语言处理</span>
-                                    <span style="color:#ffaa00;"> 机器人/工程</span>
-                                    <span style="color:#ffaa00;"> 电气/电子</span>
-                                    <span style="color:#ff4488;"> 网络/通信</span>
-                                    <span style="color:#ff4488;"> 安全/密码学</span>
-                                    <span style="color:#ff4488;"> 数学进阶</span>
-                                    <span style="color:#ff4488;"> 物理进阶</span>
-                                    <span style="color:#44ff88;"> 经济/哲学</span>
-                                    <span style="color:#44ff88;"> 天文/环境</span>
-                                    <span style="color:#44ff88;"> 历史/文化</span>
-                                    <span style="color:#44ff88;"> SELF-LNN专属</span>
+                                <div id="knowledge-domains-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;font-size:0.7rem;" data-source="backend">
+                                    <span style="color:#666;">从知识库加载领域数据...</span>
                                 </div>
                             </div>
                         </div>
@@ -4289,31 +4270,7 @@ response = requests.get(
 
         /* ZSFABC-012修复: emergencyStop 已由 main.js 统一管理 */
 
-        async function softStop() {
-            if (!confirm('确认执行软停止？当前任务将完成后停止。')) return;
-            try {
-                var result = await SelfLnnApi.softStop('safety');
-                if (result.success) {
-                    showNotification('软停止已激活', 'warning');
-                    pollSafety();
-                } else {
-                    showNotification('操作失败: ' + (result.error || '未知错误'), 'danger');
-                }
-            } catch(e) { showNotification('操作失败: ' + e.message, 'danger'); }
-        }
-
-        async function resetSafety() {
-            try {
-                var result = await SelfLnnApi.resetSafetyState();
-                if (result.success) {
-                    showNotification('安全状态已重置', 'info');
-                } else {
-                    showNotification('重置失败: ' + (result.error || '未知错误'), 'danger');
-                }
-                pollSafety();
-            } catch(e) { showNotification('操作失败: ' + e.message, 'danger'); }
-        }
-
+        /* ZSFAB-H06修复: 移除重复定义 softStop/resetSafety，统一由 main.js 管理 */
         /* 物理安全边界——必须从后端获取真实数据，不使用默认值 */
         async function fetchSafetyBounds() {
             try {
@@ -4325,8 +4282,8 @@ response = requests.get(
                 }
             } catch(e) { console.warn('安全边界获取失败:', e.message); }
             /* 后端不可用时显示离线状态，不使用虚假默认值 */
-            document.getElementById('bounds-status').textContent = '⚠ 后端未连接——安全边界数据不可用';
-            document.getElementById('bounds-status').style.color = '#ff6b6b';
+            var bs = document.getElementById('bounds-status');
+            if (bs) { bs.textContent = '⚠ 后端未连接——安全边界数据不可用'; bs.style.color = '#ff6b6b'; }
         }
 
         function updateSafetyBoundsUI(bounds) {
@@ -4468,9 +4425,9 @@ response = requests.get(
             } else {
                 /* 回退到直接API调用 */
                 try {
-                    var resp = await fetch('/api/robot/command', { 
+                    /* ZSFAB-S9修复: 使用SelfLnnApi替代直接fetch，获得认证/重试/熔断保护 */
+                    var resp = await window.SelfLnnApi.request('/robot/command', { 
                         method:'POST', 
-                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({command: cmd}) 
                     });
                     var data = await resp.json();
@@ -4518,31 +4475,31 @@ response = requests.get(
                 <div class="label">API 端点总数</div>
             </div>
             <div class="summary-card">
-                <div class="num">8</div>
+                <div class="num" id="api-count-system">—</div>
                 <div class="label">系统管理</div>
             </div>
             <div class="summary-card">
-                <div class="num">14</div>
+                <div class="num" id="api-count-robot">—</div>
                 <div class="label">机器人/ROS/串口</div>
             </div>
             <div class="summary-card">
-                <div class="num">11</div>
+                <div class="num" id="api-count-multimodal">—</div>
                 <div class="label">多模态/对话</div>
             </div>
             <div class="summary-card">
-                <div class="num">11</div>
+                <div class="num" id="api-count-device">—</div>
                 <div class="label">设备/音频/视频</div>
             </div>
             <div class="summary-card">
-                <div class="num">6</div>
+                <div class="num" id="api-count-file">—</div>
                 <div class="label">文件/计算机控制</div>
             </div>
             <div class="summary-card">
-                <div class="num">8</div>
+                <div class="num" id="api-count-agi">—</div>
                 <div class="label">AGI/知识/学习</div>
             </div>
             <div class="summary-card">
-                <div class="num">16</div>
+                <div class="num" id="api-count-ext">—</div>
                 <div class="label">扩展控制</div>
             </div>
         </div>
@@ -4568,7 +4525,7 @@ response = requests.get(
 
         /* API端点数据从后端动态加载，避免硬编码虚假数据 */
         var apiData = [];
-        var apiDataLoaded = false;
+        /* ZSFAB-M02修复: 移除重复var声明 */
 
         function render() {
             var container = document.getElementById('api-list');
@@ -4625,8 +4582,9 @@ response = requests.get(
             navBar.innerHTML = navHtml;
         }
 
-        /* 从后端动态加载API文档 */
+        /* ZSFAB-M02修复: 删除重复var声明，在此处统一显式声明 */
         var apiDataLoaded = false;
+        /* ZSFAB-M02修复: apiDataLoaded由统一初始化管理 */
         (function loadFromBackend() {
             SelfLnnApi.getApiDocs().then(function(result) {
                 if (!result.success) throw new Error('后端不可用');
@@ -4697,11 +4655,32 @@ response = requests.get(
             });
         })();
 
+        /* ZSFAB-H05修复: summary计数改为动态计算，不从硬编码读取 */
         function updateSummaryCard(dataArr) {
             var total = 0;
-            dataArr.forEach(function(c) { total += c.endpoints.length; });
+            var cats = {}; /* 按类别统计 */
+            dataArr.forEach(function(c) {
+                total += c.endpoints.length;
+                var cat = (c.category || '').toLowerCase();
+                if (cat.indexOf('system') >= 0 || cat.indexOf('系统') >= 0) cats.system = (cats.system||0) + c.endpoints.length;
+                else if (cat.indexOf('robot') >= 0 || cat.indexOf('ros') >= 0 || cat.indexOf('机器人') >= 0 || cat.indexOf('serial') >= 0) cats.robot = (cats.robot||0) + c.endpoints.length;
+                else if (cat.indexOf('multimodal') >= 0 || cat.indexOf('dialogue') >= 0 || cat.indexOf('多模态') >= 0) cats.multimodal = (cats.multimodal||0) + c.endpoints.length;
+                else if (cat.indexOf('device') >= 0 || cat.indexOf('audio') >= 0 || cat.indexOf('设备') >= 0) cats.device = (cats.device||0) + c.endpoints.length;
+                else if (cat.indexOf('files') >= 0 || cat.indexOf('computer') >= 0 || cat.indexOf('文件') >= 0) cats.file = (cats.file||0) + c.endpoints.length;
+                else if (cat.indexOf('agi') >= 0 || cat.indexOf('knowledge') >= 0 || cat.indexOf('learning') >= 0 || cat.indexOf('skills') >= 0 || cat.indexOf('imitation') >= 0 || cat.indexOf('key') >= 0 || cat.indexOf('auto-learn') >= 0) cats.agi = (cats.agi||0) + c.endpoints.length;
+                else cats.ext = (cats.ext||0) + c.endpoints.length;
+            });
             var el = document.getElementById('total-endpoints');
             if (el) el.textContent = total;
+            /* ZSFAB-H05修复: 分类卡片动态计数 */
+            var setCount = function(id, v) { var el2 = document.getElementById(id); if (el2) el2.textContent = v; };
+            setCount('api-count-system', cats.system || '—');
+            setCount('api-count-robot', cats.robot || '—');
+            setCount('api-count-multimodal', cats.multimodal || '—');
+            setCount('api-count-device', cats.device || '—');
+            setCount('api-count-file', cats.file || '—');
+            setCount('api-count-agi', cats.agi || '—');
+            setCount('api-count-ext', cats.ext || '—');
         }
 
         function toggleCategory(ci) {
@@ -5388,21 +5367,8 @@ response = requests.get(
             </div>
         </div>
     <script>
+        /* ZSFAB-H06修复: 移除重复定义 startMultimodalLearn，统一由 main.js 管理 */
         var multimodalPollTimer = null;
-        var isRecording = false;
-
-        async function startMultimodalLearn() {
-            var mode = document.getElementById('learn-mode').value;
-            try {
-                var data = await SelfLnnApi.multimodalLearn(mode, 'single-cfc-lnn');
-                showNotification(data.success ? 'LNN统一学习已启动' : '启动失败: '+(data.error||''), data.success ? 'success' : 'danger');
-                if (data.success) {
-                    if (multimodalPollTimer) clearInterval(multimodalPollTimer);
-                    multimodalPollTimer = setInterval(pollMultimodal, 2000);
-                    pollMultimodal();
-                }
-            } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
-        }
 
         async function pollMultimodal() {
             try {
@@ -5506,49 +5472,9 @@ response = requests.get(
             frame();
         }
 
-        function toggleMultimodalVoiceInput() {
-            var btn = document.getElementById('mm-voice-btn');
-            if (window._mmLearnCapturer && window._mmLearnCapturer.isRecording) {
-                window._mmLearnCapturer.stop();
-                window._mmLearnCapturer = null;
-                isRecording = false;
-                btn.textContent = '开始录音';
-                btn.style.background = '';
-                return;
-            }
-            VoiceCaptureUtil.quickCapture({
-                maxDuration: 10000,
-                onStart: function() {
-                    isRecording = true;
-                    btn.textContent = '停止录音';
-                    btn.style.background = '#e74c3c';
-                    document.getElementById('voice-display').textContent = '正在录音...';
-                },
-                onStop: function() {
-                    isRecording = false;
-                    btn.textContent = '开始录音';
-                    btn.style.background = '';
-                    if (window._mmLearnStream) {
-                        window._mmLearnStream.getTracks().forEach(function(t){t.stop();});
-                        window._mmLearnStream = null;
-                    }
-                },
-                onResult: function(vdata) {
-                    document.getElementById('voice-display').textContent = vdata.text || '识别失败';
-                },
-                onError: function(msg) {
-                    document.getElementById('voice-display').textContent = msg;
-                }
-            }).then(function(result) {
-                if (result.success) {
-                    window._mmLearnCapturer = result.capturer;
-                    window._mmLearnStream = result.stream;
-                    initAudioWaveform(result.stream);
-                } else {
-                    showNotification('麦克风访问失败: ' + result.error, 'danger');
-                }
-            });
-        }
+        /* ZSFAB-H06修复: 移除重复定义 toggleMultimodalVoiceInput，统一由 main.js 管理 */
+        /* 原录音UI逻辑合并至 main.js，此处仅保留 isRecording 变量 */
+        var isRecording = false;
 
         function stopVoiceInput() {
             if (window._mmLearnCapturer) {
@@ -5645,45 +5571,8 @@ response = requests.get(
                 </div>
             </div>
     <script>
-        /* ZSFABC-022: teach section内联脚本 — 实物示教功能 */
-        async function startTeaching() {
-            var name = document.getElementById('concept-name').value;
-            var label = document.getElementById('concept-label').value || name;
-            var modality = document.getElementById('teach-modality').value;
-            var learnMode = document.getElementById('teach-learn-mode').value;
-            if (!name) { showNotification('请输入概念名称', 'warning'); return; }
-            try {
-                /* 根据模态选择对应的示教API */
-                var resp;
-                if (modality === 'vision') {
-                    resp = await SelfLnnApi.teachLookAndLearn(name, label, null);
-                } else if (modality === 'audio') {
-                    resp = await SelfLnnApi.teachSayAndAssociate(name, label, null, null);
-                } else if (modality === 'sensor') {
-                    resp = await SelfLnnApi.teachTouchAndUnderstand(name, label, null);
-                } else {
-                    resp = await SelfLnnApi.teachLookAndLearn(name, label, null);
-                }
-                if (resp && resp.success) {
-                    document.getElementById('last-concept').textContent = name;
-                    document.getElementById('concepts-learned').textContent = parseInt(document.getElementById('concepts-learned').textContent||0)+1;
-                    showNotification('示教成功: '+(resp.message||'已发送'), 'success');
-                } else { showNotification('示教失败: '+((resp&&resp.error)||'未知错误'), 'danger'); }
-            } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
-        }
-        async function testTeaching() {
-            try {
-                var data = await SelfLnnApi.teachGetConcepts();
-                if (data && data.success) {
-                    var concepts = data.data ? (data.data.concepts||data.data.results||[]) : [];
-                    var count = concepts.length || (data.data && data.data.count) || 0;
-                    document.getElementById('concepts-learned').textContent = count;
-                    document.getElementById('teach-accuracy').textContent = count > 0 ? '已学习' : '-';
-                    document.getElementById('fused-modalities').textContent = data.data ? (data.data.modalities||0) : 0;
-                    showNotification('已学'+count+'个概念', 'info');
-                }
-            } catch(e) { console.warn('示教测试失败:', e.message); }
-        }
+        /* ZSFAB-H06修复: 移除重复定义 startTeaching/testTeaching，统一由 main.js 管理 */
+        /* 保留 recordDemo 等非重复内联函数 */
         function recordDemo() {
             var label = document.getElementById('demo-label').value;
             var actions = document.getElementById('demo-actions').value;
@@ -6317,7 +6206,8 @@ response = requests.get(
     </script>
 
         <!-- ZSFABC-024: 系统运行日志面板 -->
-        <section class="card full-width" style="margin-bottom:20px">
+        <!-- ZSFAB-M05修复: 日志面板保持始终可见，添加id用于DOM定位 -->
+        <section id="sys-log-panel-section" class="card full-width" style="margin-bottom:20px">
             <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
                 <h3>📋 系统运行日志</h3>
                 <button onclick="var p=document.getElementById('sys-log-panel');p.innerHTML='';" class="btn btn-sm" style="background:#333;color:#aaa;border:1px solid #555">清空</button>
@@ -6405,42 +6295,7 @@ response = requests.get(
         // API服务实例（复用全局SelfLnnApi）
         var apiService = window.SelfLnnApi;
         
-        // 真实API操作函数
-        async function loadModel() {
-            try {
-                showLoading('加载模型中...');
-                const data = await apiService.request('/model/load', {
-                    method: 'POST',
-                    body: JSON.stringify({ model_type: 'lnn-core' })
-                });
-                showInlineSuccess(`模型加载成功: ${data.model_name || '未知模型'}`);
-                inlineUpdateModelStatus(data);
-            } catch (error) {
-                showInlineError(`模型加载失败: ${error.message}`);
-                console.error('模型加载异常:', error);
-            } finally {
-                hideLoading();
-            }
-        }
-        
-        async function backupSystem() {
-            try {
-                if (confirm('确定要开始系统备份吗？这可能需要几分钟时间。')) {
-                    showLoading('系统备份中...');
-                    const data = await apiService.request('/backup', {
-                        method: 'POST',
-                        body: JSON.stringify({ backup_type: 'full' })
-                    });
-                    showInlineSuccess(`系统备份成功: ${data.backup_path || '备份已完成'}`);
-                    updateBackupStatus(data);
-                }
-            } catch (error) {
-                showInlineError(`系统备份失败: ${error.message}`);
-                console.error('系统备份异常:', error);
-            } finally {
-                hideLoading();
-            }
-        }
+        /* ZSFAB-M03修复: loadModel/backupSystem 已由 main.js 统一管理，移除内联重复定义 */
         
         /* ZSFABC-012修复: emergencyStop 已由 main.js 统一管理 */
         
@@ -6475,28 +6330,8 @@ response = requests.get(
             return d;
         }
         
-        async function refreshDashboard() {
-            showLoading('刷新数据中...');
-            var _t = setTimeout(function() { hideLoading(); }, 10000);
-            try {
-                // 单线程服务器：顺序请求避免并发竞争
-                var r0 = await apiService.getSystemStatus().catch(function(e){ return {success:false,error:e.message}; });
-                var r1 = await apiService.getMemoryStatus().catch(function(e){ return {success:false,error:e.message}; });
-                var r2 = await apiService.getReasoningStatus().catch(function(e){ return {success:false,error:e.message}; });
-                var r3 = await apiService.getLearningStatus().catch(function(e){ return {success:false,error:e.message}; });
-                
-                if (r0.success) updateSystemStatus(r0.data);
-                if (r1.success) updateMemoryStatus(_normMemory(r1.data));
-                if (r2.success) updateReasoningStatus(_normReasoning(r2.data));
-                if (r3.success) inlineUpdateLearningStatus(r3.data);
-                
-                showInlineSuccess('数据刷新完成');
-            } catch (error) {
-                showInlineError('数据刷新失败: ' + error.message);
-            } finally {
-                hideLoading();
-            }
-        }
+        /* ZSFAB-S1修复: 删除内联refreshDashboard重复定义，统一使用main.js版本 */
+        /* main.js:refreshDashboard()从DataEngine读取数据，内联版本绕过DataEngine导致不一致 */
         
 
         

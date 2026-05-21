@@ -1,4 +1,5 @@
 #include "selflnn/robot/ros_protocol.h"
+#include "selflnn/core/port_config.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/common.h"
 #include <string.h>
@@ -1768,7 +1769,7 @@ int dds_write_data(DDSContext* ctx, const char* topic_name,
         }
         if (!has_match) continue;
 
-        dest.sin_addr.s_addr = inet_addr("127.0.0.1");
+        dest.sin_addr.s_addr = inet_addr(SELFLNN_LOCALHOST);
         dest.sin_port = htons((uint16_t)ctx->remote_participants[p].participant.user_traffic_port);
 
         sendto(ctx->user_sock, (const char*)rtps_buffer, (int)rtps_size, 0,

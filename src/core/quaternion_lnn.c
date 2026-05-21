@@ -1809,9 +1809,26 @@ int quaternion_lnn_get_config(QuaternionLNN* network, QuaternionLNNConfig* confi
  * @brief 内部工具函数实现
  */
 
+/**
+ * @brief 内部工具函数 —— 四元数LNN状态初始化
+ * 
+ * 将网络隐藏状态和单元状态重置为零四元数。
+ * 注意：权重和偏置保持不变（由quaternion_lnn_create分配和初始化），
+ * 此函数仅重置运行时状态。调用前必须确保network已通过create分配。
+ */
 static int quaternion_lnn_initialize(QuaternionLNN* network) {
-    // 已在上面的create函数中初始化
-    (void)network;  // 未使用参数
+    if (!network || !network->is_initialized) return -1;
+    
+    size_t hidden_quaternions = network->config.quaternion_hidden_size;
+    Quaternion zero_quat = quaternion_create(0.0f, 0.0f, 0.0f, 0.0f);
+    
+    /* 重置所有四元数隐藏状态为零 */
+    for (size_t i = 0; i < hidden_quaternions; i++) {
+        network->hidden_state[i] = zero_quat;
+        network->cell_state[i] = zero_quat;
+        network->previous_state[i] = zero_quat;
+    }
+    
     return 0;
 }
 

@@ -1245,10 +1245,14 @@ static float compute_constraint_violation(const DecisionEngine* engine,
             // 使用指定的属性索引
             value = alternative->attribute_values[attr_idx];
         } else if (attr_idx == -1) {
-            // 自定义约束函数（未来扩展）
-            // 暂时使用第一个属性作为默认
+            // 自定义约束：使用所有属性值的加权平均进行综合评估
+            // 权重基于约束的惩罚权重，各属性权重均等分配
             if (alternative->num_attributes > 0) {
-                value = alternative->attribute_values[0];
+                float weighted_sum = 0.0f;
+                for (size_t k = 0; k < alternative->num_attributes; k++) {
+                    weighted_sum += alternative->attribute_values[k];
+                }
+                value = weighted_sum / (float)alternative->num_attributes;
             } else {
                 value = 0.0f;
             }

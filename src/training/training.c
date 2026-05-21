@@ -4534,7 +4534,7 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
     // ---- F-13 真实分布式训练初始化（基于TCP网络的Ring AllReduce） ----
     if (trainer->distributed_initialized && config->use_distributed_training && config->distributed_num_nodes > 1) {
         DistributedConfig dist_cfg = distributed_config_default();
-        strncpy(dist_cfg.master_host, "127.0.0.1", sizeof(dist_cfg.master_host) - 1);
+        strncpy(dist_cfg.master_host, SELFLNN_LOCALHOST, sizeof(dist_cfg.master_host) - 1);
         dist_cfg.master_port = (unsigned short)SELFLNN_DISTRIBUTED_PORT;
         dist_cfg.num_nodes = config->distributed_num_nodes;
         dist_cfg.node_id = config->distributed_node_id;

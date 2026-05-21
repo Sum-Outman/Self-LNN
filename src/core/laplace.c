@@ -730,7 +730,7 @@ int laplace_compute_frequency_response(LaplaceAnalyzer* analyzer,
 int laplace_analyze_matrix_stability(LaplaceAnalyzer* analyzer,
                                   const float* state_matrix,
                                   const float* input_matrix,
-                                  const float* output_matrix,
+                                  float* output_matrix,
                                   size_t state_size,
                                   size_t input_size,
                                   size_t output_size,
@@ -756,16 +756,40 @@ int laplace_analyze_matrix_stability(LaplaceAnalyzer* analyzer,
         return SELFLNN_ERROR_INVALID_ARGUMENT;
     }
     
-    // 标记未使用的参数（保留给未来增强）
-    (void)input_matrix;
-    (void)output_matrix;
-    (void)input_size;
-    (void)output_size;
+    // 构建分析矩阵：如果提供了输入矩阵，构建增广系统矩阵进行更全面的稳定性分析
+    // 增广矩阵形式：[A, B; 0, 0]，其中A=状态矩阵、B=输入矩阵
+    // 通过分析增广系统的特征值，可以同时评估状态动态和输入耦合对稳定性的影响
+    size_t eff_size = state_size;
+    const float* eff_matrix = state_matrix;
+    float* aug_matrix = NULL;
     
-    // 增强实现：使用QR算法计算状态矩阵的特征值（极点）
+    if (input_matrix != NULL && input_size > 0) {
+        // 构建增广系统矩阵 [A, B; 0, 0]
+        // A = state_matrix (state_size × state_size)
+        // B = input_matrix (state_size × input_size)
+        eff_size = state_size + input_size;
+        aug_matrix = (float*)safe_calloc(eff_size * eff_size, sizeof(float));
+        if (aug_matrix) {
+            // 复制状态矩阵 A 到增广矩阵左上角块
+            for (size_t i = 0; i < state_size; i++) {
+                for (size_t j = 0; j < state_size; j++) {
+                    aug_matrix[i * eff_size + j] = state_matrix[i * state_size + j];
+                }
+            }
+            // 复制输入矩阵 B 到增广矩阵右上角块，反映输入对状态动态的耦合效应
+            for (size_t i = 0; i < state_size; i++) {
+                for (size_t j = 0; j < input_size; j++) {
+                    aug_matrix[i * eff_size + state_size + j] = input_matrix[i * input_size + j];
+                }
+            }
+            eff_matrix = aug_matrix;
+        }
+    }
+    
+    // 增强实现：使用QR算法计算系统矩阵的特征值（极点）
     // 注意：对于大规模系统，应考虑使用更高效的算法（如分治法）
     
-    size_t num_poles = state_size;
+    size_t num_poles = eff_size;
     if (num_poles > analyzer->pole_capacity) {
         // 需要扩大缓冲区
         Complex* new_poles = (Complex*)safe_realloc(analyzer->pole_buffer,
@@ -774,6 +798,7 @@ int laplace_analyze_matrix_stability(LaplaceAnalyzer* analyzer,
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
                                   __func__, __FILE__, __LINE__,
                                   "扩展极点缓冲区失败");
+            safe_free((void**)&aug_matrix);
             return SELFLNN_ERROR_OUT_OF_MEMORY;
         }
         analyzer->pole_buffer = new_poles;
@@ -782,17 +807,20 @@ int laplace_analyze_matrix_stability(LaplaceAnalyzer* analyzer,
     
     Complex* poles = analyzer->pole_buffer;
     
-    // 使用QR算法计算特征值
+    // 使用QR算法计算特征值（使用有效的系统矩阵和维度）
     int max_iterations = 200; // QR算法需要更多迭代
     float tolerance = 1e-8f;
     
-    int result_code = compute_eigenvalues_qr(state_matrix, state_size,
+    int result_code = compute_eigenvalues_qr(eff_matrix, eff_size,
                                             poles, max_iterations, tolerance);
     /* I-006修复：检查QR算法结果 */
     if (result_code != 0) {
         /* QR算法未收敛：标记分析器状态，使用近似极点继续 */
         analyzer->has_last_analysis = 0;
     }
+    
+    // 释放增广矩阵临时内存
+    safe_free((void**)&aug_matrix);
     
     int is_stable = 1;
     float min_real = FLT_MAX;
@@ -879,6 +907,22 @@ int laplace_analyze_matrix_stability(LaplaceAnalyzer* analyzer,
     analyzer->last_analysis.is_stable = result->is_stable;
     
     analyzer->has_last_analysis = 1;
+    
+    // 将分析结果写入输出矩阵：如果提供了输出矩阵，将极点稳定性信息编码到矩阵中
+    // 输出矩阵格式：output_size 行 × state_size 列
+    // 对角线上放置对应极点的实部（稳定性指标），非对角线元素清零
+    if (output_matrix != NULL && output_size > 0) {
+        // 先清零输出矩阵
+        for (size_t i = 0; i < output_size * state_size; i++) {
+            output_matrix[i] = 0.0f;
+        }
+        // 将对角线元素设置为对应极点的实部值
+        // 实部为负表示稳定极点，绝对值越大表示衰减越快
+        size_t min_dim = (output_size < state_size) ? output_size : state_size;
+        for (size_t i = 0; i < min_dim && i < num_poles; i++) {
+            output_matrix[i * state_size + i] = poles[i].real;
+        }
+    }
     
     return SELFLNN_SUCCESS;
 }

@@ -104,7 +104,7 @@ RosRobotControllerConfig ros_robot_controller_config_default(void) {
     cfg.heartbeat_interval_ms = 1000;
     cfg.enable_multi_robot_coordination = 1;
     cfg.enable_training = 1;
-    strncpy(cfg.default_ros_master_host, "127.0.0.1", sizeof(cfg.default_ros_master_host) - 1);
+    strncpy(cfg.default_ros_master_host, SELFLNN_LOCALHOST, sizeof(cfg.default_ros_master_host) - 1);
     cfg.default_ros_master_port = SELFLNN_ROS_MASTER_PORT;
     cfg.control_loop_hz = 50.0f;
     return cfg;

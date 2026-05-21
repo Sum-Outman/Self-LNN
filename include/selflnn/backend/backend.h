@@ -346,43 +346,47 @@ typedef enum {
     API_POST_KNOWLEDGE_IMPORT = 226,       /**< 导入知识库 */
     API_GET_KNOWLEDGE_VERSION = 227,       /**< 获取知识库版本 */
 
-    /* ===== 记忆管理端点 (228-237) ===== */
+    /* ===== 记忆管理端点 ===== */
     API_GET_SAFETY_BOUNDS = 228,           /**< 获取安全边界配置 */
     API_POST_MEMORY_ADD = 229,             /**< 添加记忆条目 */
     API_GET_MEMORY_ENTRY = 230,            /**< 获取记忆条目 */
-    API_POST_MEMORY_EXPORT = 231,          /**< 导出记忆 */
-    API_POST_MEMORY_CLEAR = 232,           /**< 清空记忆 */
-    API_GET_LNN_PARAMS = 233,              /**< 获取LNN参数 */
-    API_POST_MEMORY_SEARCH = 234,          /**< 搜索记忆 */
-    API_POST_MEMORY_SLEEP_CONSOLIDATION = 235, /**< 睡眠记忆巩固 */
-    API_POST_LNN_PARAMETERS_RESET = 236,   /**< 重置LNN参数 */
-    API_POST_LNN_CALIBRATE = 237,          /**< 校准LNN */
+    /* ZSFAB-S8: 记忆端点别名保留（避免编译错误，使用handler_table未占用的slot 280-283） */
+    API_POST_MEMORY_EXPORT = 280,          /**< 导出记忆（向后兼容别名） */
+    API_POST_MEMORY_CLEAR = 281,           /**< 清空记忆（向后兼容别名） */
+    API_POST_MEMORY_SEARCH = 282,          /**< 搜索记忆（向后兼容别名） */
+    API_POST_MEMORY_SLEEP_CONSOLIDATION = 283, /**< 睡眠记忆巩固（向后兼容别名） */
+    API_POST_TASK_CREATE = 284,            /**< 创建AGI任务（向后兼容别名） */
 
-    /* ===== 系统管理端点 (238-245) ===== */
-    API_POST_SYSTEM_RESTART = 238,         /**< 重启系统 */
-    API_GET_SYSTEM_LOGS = 239,             /**< 获取系统日志 */
-    API_GET_FLEET_STATUS = 240,            /**< 获取机器人舰队状态 */
-    API_POST_MULTIMODAL_TEST = 241,        /**< 多模态系统测试 */
-    API_POST_MULTIMODAL_CONFIG_RESET = 242,/**< 重置多模态配置 */
-    API_GET_AGI_TASKS = 243,               /**< 获取AGI任务列表 */
-    API_GET_AGI_DIAGNOSTIC = 244,          /**< AGI诊断信息 */
-    API_GET_DECISION_LOG = 245,            /**< 获取决策日志 */
+    /* ===== 系统管理端点（ZSFAB-S8: 对齐路由表231-245） ===== */
+    API_POST_SYSTEM_RESTART = 231,         /**< 重启系统 /api/system/restart */
+    API_GET_SYSTEM_LOGS = 232,             /**< 获取系统日志 /api/system/logs */
+    API_GET_LNN_PARAMS = 233,              /**< 获取LNN参数 /api/lnn/params */
+    API_POST_LNN_PARAMETERS_RESET = 234,   /**< 重置LNN参数 /api/lnn/parameters/reset */
+    API_POST_LNN_CALIBRATE = 235,          /**< 校准LNN /api/lnn/calibrate */
+    API_GET_LNN_CONFIG_EXPORT = 236,       /**< 导出LNN配置 /api/lnn/config/export */
+    API_POST_DIALOGUE_SEND = 237,          /**< 对话发送 /api/dialogue/send */
+    API_POST_ROBOT_PARAMS = 238,           /**< 机器人参数 /api/robot/params */
+    API_GET_FLEET_STATUS = 239,            /**< 获取机器人舰队状态 /api/fleet/status */
+    API_GET_COGNITION_STATE = 240,         /**< 认知状态 /api/cognition/state */
+    API_POST_MULTIMODAL_TEST = 241,        /**< 多模态系统测试 /api/multimodal/test */
+    API_POST_MULTIMODAL_CONFIG_RESET = 242,/**< 重置多模态配置 /api/multimodal/config/reset */
+    API_GET_AGI_TASKS = 243,               /**< 获取AGI任务列表 /api/agi/tasks */
+    API_GET_AGI_DIAGNOSTIC = 244,          /**< AGI诊断信息 /api/agi/diagnostic */
+    API_GET_AGI_DIAGNOSTIC_EXPORT = 245,   /**< 导出AGI诊断 /api/agi/diagnostic/export */
 
-    /* ===== 推理/训练端点 (246-259) ===== */
-    API_GET_DIALOGUE_SEND = 246,           /**< 获取对话响应 */
-    API_POST_MODEL_START = 247,            /**< 启动模型训练 */
-    API_POST_MODEL_STOP = 248,             /**< 停止模型训练 */
-    API_POST_MODEL_UNLOAD = 249,           /**< 卸载模型 */
-    API_POST_MODEL_CONFIG_SAVE = 250,      /**< 保存模型配置 */
-    API_GET_LNN_CONFIG_EXPORT = 251,       /**< 导出LNN配置 */
-    API_POST_TASK_CREATE = 252,            /**< 创建AGI任务 */
-    API_GET_AGI_DIAGNOSTIC_EXPORT = 253,   /**< 导出AGI诊断 */
-    API_POST_REASONING_START = 254,        /**< 启动推理 */
-    API_POST_REASONING_STOP_ALL = 255,     /**< 停止所有推理 */
-    API_POST_REASONING_PAUSE = 256,        /**< 暂停推理 */
-    API_POST_REASONING_CONFIG_SAVE = 257,  /**< 保存推理配置 */
-    API_POST_HYPERPARAMETER_START = 258,   /**< 启动超参数搜索 */
-    API_GET_HYPERPARAMETER_STATUS = 259,   /**< 获取超参数搜索状态 */
+    /* ===== 系统/模型/推理端点（ZSFAB-S8: 对齐路由表248-259） ===== */
+    API_POST_SYSTEM_SHUTDOWN = 248,        /**< 关闭系统 /api/system/shutdown */
+    API_POST_MODEL_START = 249,            /**< 启动模型 /api/model/start */
+    API_POST_MODEL_STOP = 250,             /**< 停止模型 /api/model/stop */
+    API_POST_MODEL_UNLOAD = 251,           /**< 卸载模型 /api/model/unload */
+    API_POST_MODEL_CONFIG_SAVE = 252,      /**< 保存模型配置 /api/model/config/save */
+    API_GET_DECISION_LOG = 253,            /**< 获取决策日志 /api/decision/log */
+    API_POST_REASONING_START = 254,        /**< 启动推理 /api/reasoning/start */
+    API_POST_REASONING_STOP_ALL = 255,     /**< 停止所有推理 /api/reasoning/stop_all */
+    API_POST_REASONING_PAUSE = 256,        /**< 暂停推理 /api/reasoning/pause */
+    API_POST_REASONING_CONFIG_SAVE = 257,  /**< 保存推理配置 /api/reasoning/config/save */
+    API_POST_HYPERPARAMETER_START = 258,   /**< 启动超参数搜索 /api/hyperparameter/start */
+    API_GET_HYPERPARAMETER_STATUS = 259,   /**< 获取超参数搜索状态 /api/hyperparameter/status */
 
     /* ===== K-023: 能力开关诊断 (实际dispatch使用260-266) ===== */
     API_POST_CAPABILITY_DIAGNOSE = 260,    /**< 12项能力开关完整状态诊断 */

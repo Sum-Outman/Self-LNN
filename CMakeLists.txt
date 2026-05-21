@@ -89,6 +89,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # 子目录
 add_subdirectory(src/core)
+add_subdirectory(src/math)
 add_subdirectory(src/multimodal)
 add_subdirectory(src/memory)
 add_subdirectory(src/reasoning)
@@ -187,6 +188,7 @@ target_link_libraries(selflnn PRIVATE
     selflnn_backend
     selflnn_multisystem
     selflnn_core
+    selflnn_math
     selflnn_multimodal
     selflnn_memory
     selflnn_reasoning

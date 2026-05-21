@@ -489,7 +489,7 @@ static int discovery_send_announcement(MultiSystemControlEngine* engine) {
     int len;
     
     len = snprintf(buf, sizeof(buf),
-                   "SELFLNN_DISCOVERY|self-node|%d|self-node|127.0.0.1|%d",
+                   "SELFLNN_DISCOVERY|self-node|%d|self-node|" SELFLNN_LOCALHOST "|%d",
                    DEVICE_TYPE_COMPUTE, engine->discovery_port);
     
     memset(&dest, 0, sizeof(dest));
@@ -516,7 +516,7 @@ static int discovery_send_probe(MultiSystemControlEngine* engine) {
                    "SELFLNN_DISCOVERY|PROBE|%d|%s|%s|%d",
                    DEVICE_TYPE_COMPUTE,
                    "self-discovery-probe",
-                   "127.0.0.1",
+                   SELFLNN_LOCALHOST,
                    engine->discovery_port);
     
     memset(&dest, 0, sizeof(dest));

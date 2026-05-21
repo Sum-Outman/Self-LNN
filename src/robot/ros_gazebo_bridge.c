@@ -314,10 +314,10 @@ static void bridge_spin_loop(void* arg) {
 RosGazeboBridgeConfig ros_gazebo_bridge_config_default(const char* node_name) {
     RosGazeboBridgeConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
-    strncpy(cfg.ros_master_host, "127.0.0.1", sizeof(cfg.ros_master_host) - 1);
+    strncpy(cfg.ros_master_host, SELFLNN_LOCALHOST, sizeof(cfg.ros_master_host) - 1);
     cfg.ros_master_port = SELFLNN_ROS_MASTER_PORT;
     strncpy(cfg.node_name, node_name ? node_name : "selflnn_gazebo_bridge", sizeof(cfg.node_name) - 1);
-    strncpy(cfg.node_host, "127.0.0.1", sizeof(cfg.node_host) - 1);
+    strncpy(cfg.node_host, SELFLNN_LOCALHOST, sizeof(cfg.node_host) - 1);
     cfg.node_xmlrpc_port = SELFLNN_ROS_XMLRPC_PORT;
     cfg.node_tcp_port = SELFLNN_ROS_MASTER_PORT + 1;
     strncpy(cfg.world_name, "world", sizeof(cfg.world_name) - 1);
@@ -360,7 +360,7 @@ RosGazeboBridge* ros_gazebo_bridge_create(const RosGazeboBridgeConfig* config) {
     memset(&sim_cfg, 0, sizeof(sim_cfg));
     sim_cfg.type = SIMULATOR_GAZEBO;
     strncpy(sim_cfg.name, config->world_name, sizeof(sim_cfg.name) - 1);
-    strncpy(sim_cfg.hostname, "127.0.0.1", sizeof(sim_cfg.hostname) - 1);
+    strncpy(sim_cfg.hostname, SELFLNN_LOCALHOST, sizeof(sim_cfg.hostname) - 1);
     sim_cfg.port = SELFLNN_GAZEBO_PORT;
     sim_cfg.timeout_ms = 5000;
     sim_cfg.retry_count = 3;
@@ -517,9 +517,9 @@ int gazebo_is_environment_available(void) {
     addr.sin_port = htons(11311);  /* ROS Master默认端口 */
 
 #ifdef _WIN32
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    addr.sin_addr.s_addr = inet_addr(SELFLNN_LOCALHOST);
 #else
-    inet_aton("127.0.0.1", &addr.sin_addr);
+    inet_aton(SELFLNN_LOCALHOST, &addr.sin_addr);
 #endif
 
     int result = 0;

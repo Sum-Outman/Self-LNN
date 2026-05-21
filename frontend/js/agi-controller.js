@@ -120,24 +120,34 @@ class AGIController {
             case 'disconnect':
                 return await this._apiPost('/api/robot/disconnect', task.params);
             case 'move':
+                if (task.params.distance === undefined || task.params.speed === undefined) {
+                    return { error: true, message: '移动指令缺少必要参数：distance/speed' };
+                }
                 return await this._apiPost('/api/robot/command', {
                     action: 'move',
                     direction: task.params.direction,
-                    distance: task.params.distance || 0.5,
-                    speed: task.params.speed || 0.3
+                    distance: task.params.distance,
+                    speed: task.params.speed
                 });
             case 'rotate':
+                if (task.params.angle === undefined || task.params.speed === undefined) {
+                    return { error: true, message: '旋转指令缺少必要参数：angle/speed' };
+                }
                 return await this._apiPost('/api/robot/command', {
                     action: 'rotate',
-                    angle: task.params.angle || 90,
-                    speed: task.params.speed || 0.5
+                    angle: task.params.angle,
+                    speed: task.params.speed
                 });
             case 'stop':
                 return await this._apiPost('/api/robot/command', { action: 'stop' });
             case 'emergency_stop':
                 return await this._apiPost('/api/robot/emergency_stop', {});
             case 'set_speed':
-                return await this._apiPost('/api/robot/parameters', { linear_speed: task.params.speed || 0.5 });
+                /* B-015修复: 无参数时返回错误，不使用默认值 */
+                if (task.params.speed === undefined) {
+                    return { error: true, message: '设置速度指令缺少必要参数：speed' };
+                }
+                return await this._apiPost('/api/robot/parameters', { linear_speed: task.params.speed });
             case 'get_status':
                 return await this._apiGet('/api/robot/status');
             case 'coordinate':

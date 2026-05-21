@@ -210,10 +210,13 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
     char** conclusions, int max_conclusions,
     float* confidences) {
     if (!engine || !premises || !conclusions || max_conclusions <= 0) return 0;
-    if (!confidences) {
-        static float dummy_conf[16];
-        confidences = dummy_conf;
-    }
+    
+    /* 局部置信度缓冲区：当调用者未提供confidences参数时，
+     * 使用内部缓冲区接收LNN计算的真实置信度值。
+     * 调用者可通过返回值获取结论数量，但无法获取具体置信度。
+     * 这是有意的设计——调用者若需要置信度数据则应提供有效指针。 */
+    float internal_confidences[16] = {0};
+    float* effective_confidences = confidences ? confidences : internal_confidences;
     
     /* P0-009修复: LNN未就绪时返回明确错误码(0=无结论)，不产生假结果 */
     if (!engine->lnn_instance) {
@@ -324,14 +327,14 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
                 snprintf(conclusion_str, 512, "[LNN语义推理] 匹配实体: %s (相似度:%.2f)",
                          subj[0] ? subj : "未知实体", result_scores[0]);
             }
-            confidences[conclusion_count] = result_scores[0] * 0.85f;
+            effective_confidences[conclusion_count] = result_scores[0] * 0.85f;
         } else if (match_count > 0) {
             /* 弱语义匹配：有一定相关性但置信度较低 */
             snprintf(conclusion_str, 512, "[LNN推理] 关于\"%s\"的低置信度关联: %s (得分:%.3f)",
                      premises[p],
                      kb_results[0].subject ? kb_results[0].subject : "未知",
                      result_scores[0]);
-            confidences[conclusion_count] = result_scores[0] * 0.6f;
+            effective_confidences[conclusion_count] = result_scores[0] * 0.6f;
         } else {
             /* 无知识库匹配：LNN已完成连续状态演化，但结果在新语义空间中
              * 无匹配的已知实体。返回LNN隐状态特征描述供上层分析。 */
@@ -347,7 +350,7 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
             snprintf(conclusion_str, 512,
                      "[LNN推理] 关于\"%s\"的连续状态演化完成 (峰值维度:%d 强度:%.3f)",
                      premises[p], max_idx, max_activation);
-            confidences[conclusion_count] = 0.28f;
+            effective_confidences[conclusion_count] = 0.28f;
         }
         
         conclusions[conclusion_count] = conclusion_str;
