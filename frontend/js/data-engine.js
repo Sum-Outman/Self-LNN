@@ -359,7 +359,7 @@ class DataEngine {
         snapshot._backendConnected = this._backendConnected;
         snapshot._lastError = this._lastError;
         this.listeners.forEach(cb => {
-            try { cb(snapshot); } catch (e) { }
+            try { cb(snapshot); } catch (e) { console.error('[DataEngine] 监听器回调异常:', e && e.message ? e.message : e); }
         });
     }
 }

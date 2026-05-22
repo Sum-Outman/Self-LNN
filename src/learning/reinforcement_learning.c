@@ -76,7 +76,9 @@ typedef enum {
     /* CfC-R2D2 循环网络 */
     RL_NETWORK_RECURRENT_Q = 16,
     RL_NETWORK_RECURRENT_Q_TARGET = 17,
-    RL_NETWORK_COUNT = 18
+    /* ZSFABC: SAC目标Critic2网络 */
+    RL_NETWORK_CRITIC2_TARGET = 18,
+    RL_NETWORK_COUNT = 19
 } RLNetworkType;
 
 struct RLAgent {
@@ -1269,6 +1271,20 @@ static int rl_sac_init(RLAgent* agent)
     ret = rl_lnn_create_if(agent, RL_NETWORK_CRITIC2, &sc->critic_lnn_config);
     if (ret != 0) return -1;
 
+    /* ZSFABC修复: 创建SAC目标Critic网络用于TAU软更新 */
+    LNNConfig target_cfg;
+    memset(&target_cfg, 0, sizeof(LNNConfig));
+    target_cfg.input_size = sc->critic_lnn_config.input_size;
+    target_cfg.hidden_size = sc->critic_lnn_config.hidden_size;
+    target_cfg.output_size = sc->critic_lnn_config.output_size;
+    target_cfg.learning_rate = 0.0f;
+    target_cfg.num_layers = sc->critic_lnn_config.num_layers;
+    target_cfg.enable_training = 0;
+    ret = rl_lnn_create_if(agent, RL_NETWORK_CRITIC1_TARGET, &target_cfg);
+    if (ret != 0) return -1;
+    ret = rl_lnn_create_if(agent, RL_NETWORK_CRITIC2_TARGET, &target_cfg);
+    if (ret != 0) return -1;
+
     agent->alpha = sc->init_alpha;
     agent->log_alpha = (float*)safe_malloc(sizeof(float));
     if (agent->log_alpha) *agent->log_alpha = logf(sc->init_alpha);
@@ -1404,6 +1420,29 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
             *agent->log_alpha += sc->alpha_lr * alpha_loss;
             agent->alpha = expf(*agent->log_alpha);
             agent->alpha = RL_CLAMP(agent->alpha, 0.001f, 10.0f);
+        }
+
+        /* ZSFABC修复: SAC目标Critic网络TAU软更新 */
+        {
+            float tau = sc->tau;
+            LNN* c1 = agent->networks[RL_NETWORK_CRITIC];
+            LNN* c1t = agent->networks[RL_NETWORK_CRITIC1_TARGET];
+            LNN* c2 = agent->networks[RL_NETWORK_CRITIC2];
+            LNN* c2t = agent->networks[RL_NETWORK_CRITIC2_TARGET];
+            float* c1p = c1 ? lnn_get_parameters(c1) : NULL;
+            float* c1tp = c1t ? lnn_get_parameters(c1t) : NULL;
+            size_t c1n = c1 ? lnn_get_parameter_count(c1) : 0;
+            if (c1p && c1tp && c1n > 0) {
+                for (size_t p = 0; p < c1n; p++)
+                    c1tp[p] = (1.0f - tau) * c1tp[p] + tau * c1p[p];
+            }
+            float* c2p = c2 ? lnn_get_parameters(c2) : NULL;
+            float* c2tp = c2t ? lnn_get_parameters(c2t) : NULL;
+            size_t c2n = c2 ? lnn_get_parameter_count(c2) : 0;
+            if (c2p && c2tp && c2n > 0) {
+                for (size_t p = 0; p < c2n; p++)
+                    c2tp[p] = (1.0f - tau) * c2tp[p] + tau * c2p[p];
+            }
         }
 
         safe_free((void**)&sa_pair);

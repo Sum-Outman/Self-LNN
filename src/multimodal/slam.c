@@ -10539,7 +10539,7 @@ CameraInputConfig camera_input_get_default_config(void)
 {
     CameraInputConfig config;
     memset(&config, 0, sizeof(CameraInputConfig));
-    config.source_type = CAMERA_SOURCE_SYNTHETIC;
+    config.source_type = CAMERA_SOURCE_HARDWARE;
     config.image_width = 640;
     config.image_height = 480;
     config.channels = 1;

@@ -1045,11 +1045,42 @@ int info_filter_get_state(const InfoFilter* inf, float* state, float* informatio
     int n = inf->config.state_dim; memcpy(state, inf->state, (size_t)n * sizeof(float));
     if (information_matrix) memcpy(information_matrix, inf->information_matrix, (size_t)(n * n) * sizeof(float));
     if (covariance) {
-        /* Σ = Ω^(-1) 简化为对角线倒数 */
+        /* ZSFABC修复: 使用Gauss-Jordan消元进行完整矩阵求逆，而非简化为对角线倒数 */
         memset(covariance, 0, (size_t)(n * n) * sizeof(float));
-        for (int i = 0; i < n; i++) {
-            float info_val = inf->information_matrix[i * n + i];
-            covariance[i * n + i] = (info_val > 1e-10f) ? 1.0f / info_val : 1e6f;
+        /* 复制信息矩阵到工作区 */
+        float* work = (float*)safe_malloc((size_t)(n * n) * sizeof(float));
+        if (work) {
+            for (int i = 0; i < n * n; i++) work[i] = inf->information_matrix[i];
+            /* 初始化为单位矩阵 */
+            for (int i = 0; i < n; i++) covariance[i * n + i] = 1.0f;
+            /* Gauss-Jordan消元求逆 */
+            for (int i = 0; i < n; i++) {
+                float pivot = work[i * n + i];
+                if (fabsf(pivot) < 1e-12f) {
+                    /* 对角线元素过小，添加正则化 */
+                    work[i * n + i] += 1e-6f;
+                    pivot = work[i * n + i];
+                }
+                for (int j = 0; j < n; j++) {
+                    work[i * n + j] /= pivot;
+                    covariance[i * n + j] /= pivot;
+                }
+                for (int k = 0; k < n; k++) {
+                    if (k == i) continue;
+                    float factor = work[k * n + i];
+                    for (int j = 0; j < n; j++) {
+                        work[k * n + j] -= factor * work[i * n + j];
+                        covariance[k * n + j] -= factor * covariance[i * n + j];
+                    }
+                }
+            }
+            safe_free((void**)&work);
+        } else {
+            /* 内存分配失败时回退到对角线近似 */
+            for (int i = 0; i < n; i++) {
+                float info_val = inf->information_matrix[i * n + i];
+                covariance[i * n + i] = (info_val > 1e-10f) ? 1.0f / info_val : 1e6f;
+            }
         }
     }
     return 0;

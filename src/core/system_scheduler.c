@@ -626,6 +626,33 @@ int system_scheduler_load_state(SystemScheduler* scheduler, const char* filepath
         fclose(fp);
         return SELFLNN_ERROR_FORMAT_ERROR;
     }
+    /* 读取模块计数 */
+    size_t file_module_count = 0;
+    if (fgets(line, sizeof(line), fp) && sscanf(line, "module_count=%zu", &file_module_count) == 1) {
+        for (size_t i = 0; i < file_module_count && i < scheduler->module_count; i++) {
+            char name[SCHEDULER_NAME_LEN] = {0};
+            int state = 0, enabled = 0;
+            size_t run_count = 0, error_count = 0;
+            /* 读取模块名称 */
+            if (!fgets(line, sizeof(line), fp)) break;
+            if (sscanf(line, "module[%*d].name=%63[^\n]", name) != 1) break;
+            /* 查找对应模块 */
+            for (size_t m = 0; m < scheduler->module_count; m++) {
+                if (strcmp(scheduler->modules[m].name, name) == 0) {
+                    /* 读取并恢复模块状态 */
+                    if (fgets(line, sizeof(line), fp) && sscanf(line, "module[%*d].state=%d", &state) == 1)
+                        scheduler->modules[m].state = (ModuleState)state;
+                    if (fgets(line, sizeof(line), fp) && sscanf(line, "module[%*d].enabled=%d", &enabled) == 1)
+                        scheduler->modules[m].enabled = enabled;
+                    if (fgets(line, sizeof(line), fp) && sscanf(line, "module[%*d].run_count=%zu", &run_count) == 1)
+                        scheduler->modules[m].run_count = run_count;
+                    if (fgets(line, sizeof(line), fp) && sscanf(line, "module[%*d].error_count=%zu", &error_count) == 1)
+                        scheduler->modules[m].error_count = error_count;
+                    break;
+                }
+            }
+        }
+    }
     fclose(fp);
     log_event(scheduler, "scheduler", 0, 0, "调度状态已加载");
     return SELFLNN_SUCCESS;

@@ -1,4 +1,4 @@
-﻿(function() {
+(function() {
     'use strict';
     var trainingPollInterval = null;
 
@@ -59,8 +59,8 @@
         try {
             var data = await SelfLnnApi.trainingPause();
             showNotification(data.success ? '训练已暂停' : '暂停失败', data.success ? 'success' : 'danger');
-            stopPolling();
-        } catch(e) { showNotification('操作失败', 'danger'); }
+        } catch(e) { showNotification('操作失败', 'danger'); console.error('[训练中心] pauseTraining失败:', e&&e.message?e.message:e); }
+        stopPolling();
     };
     window.resumeTraining = async function() {
         try {

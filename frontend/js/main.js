@@ -1017,7 +1017,9 @@ function initializeDashboard() {
                     window._renderDashboard(result.data);
                 }
             }
-        }).catch(function() {});
+        }).catch(function(e) {
+            console.error('[Dashboard] 系统状态获取失败:', e && e.message ? e.message : e);
+        });
     }
 }
 
@@ -2169,7 +2171,9 @@ async function emergencyStop() {
         } else {
             showNotification('⚠️ 紧急停止: ' + (result ? result.error || '后端未连接' : '后端未连接'), 'warning');
         }
-        try { await window.SelfLnnApi.resetSystem(); } catch (e) {}
+        try { await window.SelfLnnApi.resetSystem(); } catch (e) {
+                console.error('[紧急停止] 重置系统失败:', e && e.message ? e.message : e);
+            }
     } catch (e) {
         showNotification('❌ 紧急停止失败: ' + e.message, 'danger');
     }
@@ -2177,7 +2181,9 @@ async function emergencyStop() {
 
 /**
  * 网络连接测试（P0-004修复：实现缺失的testNetwork函数）
+ * ZSFABC: 如果HTML内联版本已定义，跳过main.js版本
  */
+if (typeof testNetwork === 'undefined') {
 async function testNetwork() {
     var resultEl = document.getElementById('network-test-result');
     var btnEl = document.querySelector('button[onclick="testNetwork()"]');
@@ -2215,6 +2221,7 @@ async function testNetwork() {
     }
     if (btnEl) { btnEl.disabled = false; btnEl.textContent = '测试连接'; }
 }
+} /* ZSFABC: testNetwork条件定义结束 */
 
 /**
  * 刷新仪表盘
@@ -7102,7 +7109,7 @@ window.prompt = function(msg, defVal) {
             !navigator.userAgent.includes('Trae')) {
             return window._origPrompt(msg, defVal);
         }
-    } catch(e) {}
+    } catch(e) { console.error('[prompt兼容层] _origPrompt调用失败:', e&&e.message?e.message:e); }
     console.warn('[prompt兼容层] 异步提示弹窗已触发，因原生prompt不可用。请使用SelfLnnNotify.prompt进行异步交互。');
     SelfLnnNotify.prompt(msg || '', defVal || '', function(val) {});
     return defVal || '';
@@ -7652,15 +7659,9 @@ function updateStats(data) {
     var total = document.getElementById('skills-total'); if (total) total.textContent = (data ? data.skills.length : skillsData.length);
 }
 
-function setFilter(type) {
-    renderSkillList(type);
-}
-
-function filterSkills() {
-    var sel = document.getElementById('skill-filter-select');
-    renderSkillList(sel ? sel.value : 'all');
-}
-
+/* ZSFABC修复: setFilter/selectSkill/testSkill在HTML内联脚本中定义（具有DOM特定UI逻辑）
+ * 如果HTML内联版本未加载，回退到main.js版本 */
+if (typeof setFilter === 'undefined') {
 function renderSkillList(filterType) {
     var container = document.getElementById('skill-list');
     if (!container) return;
@@ -7678,7 +7679,13 @@ function renderSkillList(filterType) {
         '<span style="float:right;font-size:0.7rem;color:rgba(255,255,255,0.3);">' + (s.type||'') + '</span></div>';
     }).join('');
 }
-
+function setFilter(type) { renderSkillList(type); }
+function filterSkills() {
+    var sel = document.getElementById('skill-filter-select');
+    renderSkillList(sel ? sel.value : 'all');
+}
+}
+if (typeof selectSkill === 'undefined') {
 function selectSkill(index) {
     if (index < 0 || index >= skillsData.length) return;
     var s = skillsData[index];
@@ -7690,7 +7697,9 @@ function selectSkill(index) {
         '<button class="btn btn-sm btn-primary" onclick="testSkill(' + index + ')" style="margin-top:8px;">测试执行</button>';
     }
 }
+}
 
+if (typeof testSkill === 'undefined') {
 async function testSkill(index) {
     if (index < 0 || index >= skillsData.length) return;
     var s = skillsData[index];
@@ -7698,6 +7707,7 @@ async function testSkill(index) {
         var data = await SelfLnnApi.request('/skills/execute', { method: 'POST', body: JSON.stringify({ skill_id: s.id||index }) });
         showNotification(data.success ? '技能执行成功' : '执行失败', data.success ? 'success' : 'warning');
     } catch(e) { showNotification('执行出错: ' + e.message, 'danger'); }
+}
 }
 
 /* ---- 全局暴露 (供onclick调用) ---- */
@@ -7713,9 +7723,10 @@ window.pollSafety = pollSafety;
 window.softStop = softStop;
 window.resetSafety = resetSafety;
 window.loadSkills = loadSkills;
-window.setFilter = setFilter;
-window.filterSkills = filterSkills;
-window.renderSkillList = renderSkillList;
+/* ZSFABC修复: setFilter/filterSkills/renderSkillList由HTML内联版本处理，移除window暴露 */
+/* window.setFilter = setFilter; */
+/* window.filterSkills = filterSkills; */
+/* window.renderSkillList = renderSkillList; */
 window.selectSkill = selectSkill;
 window.testSkill = testSkill;
 
@@ -7723,6 +7734,8 @@ window.testSkill = testSkill;
 var _voiceCapturing = false;
 var _voiceRecorder = null;
 
+/* ZSFABC修复: 语音控制函数在HTML内联脚本中可能有DOM特定版本，这里作为回退 */
+if (typeof toggleVoice === 'undefined') {
 async function toggleVoice() {
     if (typeof VoiceCaptureUtil === 'undefined') {
         showNotification('语音采集模块未加载', 'warning');
@@ -7730,7 +7743,7 @@ async function toggleVoice() {
     }
     if (_voiceCapturing) {
         _voiceCapturing = false;
-        if (_voiceRecorder) { try { _voiceRecorder.stop(); } catch(e) {} _voiceRecorder = null; }
+        if (_voiceRecorder) { try { _voiceRecorder.stop(); } catch(e) { console.error('[语音] 录制器停止失败:', e&&e.message?e.message:e); } _voiceRecorder = null; }
         var btn = document.getElementById('voice-toggle-btn');
         if (btn) { btn.textContent = '开始录音'; btn.className = btn.className.replace('active',''); }
         showNotification('录音已停止', 'info');
@@ -7748,7 +7761,9 @@ async function toggleVoice() {
         } catch(e) { showNotification('麦克风访问失败: ' + e.message, 'danger'); _voiceCapturing = false; }
     }
 }
+} /* ZSFABC: toggleVoice 条件定义结束 */
 
+if (typeof sendTextCommand === 'undefined') {
 async function sendTextCommand() {
     var inp = document.getElementById('text-command-input');
     var text = inp ? inp.value.trim() : '';
@@ -7756,8 +7771,10 @@ async function sendTextCommand() {
     try {
         var result = await SelfLnnApi.request('/device/command', { method: 'POST', body: JSON.stringify({ command: text }) });
         showNotification(result && result.success ? '指令已执行' : '指令执行失败', result && result.success ? 'success' : 'warning');
-    } catch(e) { showNotification('连接失败', 'danger'); }
+    } catch(e) { showNotification('连接失败', 'danger');
+    }
 }
+} /* ZSFABC: sendTextCommand 条件定义结束 */
 
 window.toggleVoice = toggleVoice;
 window.sendTextCommand = sendTextCommand;

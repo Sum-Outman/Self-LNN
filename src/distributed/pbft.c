@@ -578,6 +578,12 @@ static int pbft_execute_request(PbftSystem* system, uint32_t seq) {
     if (!entry || entry->executed) return -1;
     entry->executed = 1;
     if (seq > system->last_executed_seq) system->last_executed_seq = seq;
+    /* ZSFABC修复: 记录执行信息到日志（payload执行逻辑由上层回调处理） */
+    if (system->config.verbose) {
+        printf("[PBFT] 请求已执行: seq=%u client=%u req=%u\n",
+               seq, entry->client_id, entry->request_id);
+    }
+    system->stats.total_commits++;
     if (seq % system->config.checkpoint_interval == 0) {
         pbft_trigger_checkpoint(system);
     }

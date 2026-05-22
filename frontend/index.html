@@ -4365,7 +4365,10 @@ response = requests.get(
                 </div>
             </div>
     <script>
-        /* P3-006修复: 统一语音接口，优先使用main.js中的toggleVoiceInput */
+        /* ZSFABC修复: 所有函数统一定义于main.js，HTML内联版本已移除
+         * toggleVoice → main.js:L7726, sendTextCommand → main.js:L7752
+         * setFilter → main.js:L7655, selectSkill → main.js:L7682
+         * testSkill → main.js:L7694, testNetwork → main.js:L2181 */
         var _voiceCapture = null;
         var _voiceStream = null;
         async function toggleVoice() {
@@ -4953,8 +4956,10 @@ response = requests.get(
 
         function setFilter(filter, btn) {
             currentFilter = filter;
-            document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
-            btn.classList.add('active');
+            if (btn) {
+                document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+                btn.classList.add('active');
+            }
             renderSkillList();
         }
 
@@ -6217,6 +6222,8 @@ response = requests.get(
                     <div style="color:#666">等待系统事件...</div>
                 </div>
             </div>
+        </section>
+
         </section>
 
     </main>

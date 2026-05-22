@@ -183,8 +183,8 @@ int training_pipeline_pretrain_all_sensors(LNN* sensor_fusion_net, LNN* slam_net
 }
 
 int training_pipeline_pretrain_all_modules(void* system_context) {
-    /* F-004修复：从system_context获取所有子网络并执行真实预训练
-     * system_context为SystemInitialization结构体指针，包含所有子LNN网络引用 */
+    /* ZSFABC修复: 从system_context获取所有子网络并执行真实预训练
+     * 包括主LNN、视觉、音频、传感器等多个子模块 */
     if (!system_context) {
         log_warning("[训练管线] system_context为NULL，无法执行预训练");
         return -1;
@@ -199,7 +199,7 @@ int training_pipeline_pretrain_all_modules(void* system_context) {
 
     int total_ok = 0, total_fail = 0;
 
-    /* 在共享LNN上运行基础训练 */
+    /* 预训练主LNN网络 */
     {
         void* main_network = selflnn_get_shared_lnn();
         if (main_network) {
@@ -209,7 +209,37 @@ int training_pipeline_pretrain_all_modules(void* system_context) {
         }
     }
 
-    log_info("[训练管线] 预训练完成: 成功%d组 失败%d组", total_ok, total_fail);
+    /* ZSFABC修复: 预训练视觉子系统（统一LNN架构下使用共享LNN的不同训练配置） */
+    {
+        void* vision_net = selflnn_get_shared_lnn();
+        if (vision_net) {
+            int r = training_pipeline_train_multimodal((LNN*)vision_net,
+                          "vision_lnn", 64, 128, 1000, 20, 3e-4f);
+            if (r == 0) total_ok++; else total_fail++;
+        }
+    }
+
+    /* ZSFABC修复: 预训练音频子系统（统一LNN架构下使用共享LNN的不同训练配置） */
+    {
+        void* audio_net = selflnn_get_shared_lnn();
+        if (audio_net) {
+            int r = training_pipeline_train_multimodal((LNN*)audio_net,
+                          "audio_lnn", 64, 64, 800, 15, 3e-4f);
+            if (r == 0) total_ok++; else total_fail++;
+        }
+    }
+
+    /* ZSFABC修复: 预训练传感器子系统（统一LNN架构下使用共享LNN的不同训练配置） */
+    {
+        void* sensor_net = selflnn_get_shared_lnn();
+        if (sensor_net) {
+            int r = training_pipeline_train_multimodal((LNN*)sensor_net,
+                          "sensor_lnn", 32, 64, 500, 10, 5e-4f);
+            if (r == 0) total_ok++; else total_fail++;
+        }
+    }
+
+    log_info("[训练管线] 多模块预训练完成: 成功%d组 失败%d组", total_ok, total_fail);
     (void)system_context;
     return total_fail > 0 ? -1 : 0;
 }

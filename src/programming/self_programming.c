@@ -1573,6 +1573,13 @@ static char* ast_to_source(const ASTNode* node, int indent_level) {
     return buffer;
 }
 
+/* ZSFABC: 添加独立的C代码生成API */
+char* self_programming_generate_c(SelfProgrammingEngine* engine,
+                                  const CodeSpecification* spec) {
+    if (!engine || !spec) return NULL;
+    return synthesize_code(engine, spec);
+}
+
 /* ============================================================================
  * 公共API实现
  * =========================================================================== */

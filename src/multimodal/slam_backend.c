@@ -438,7 +438,7 @@ int slam_solve_optimization_problem(OptimizationProblem* problem, int max_iterat
 }
 
 /* =============================================================== *
- * V-016修复: Gauss-Newton 解算器（简化版，无阻尼因子）               *
+ * V-016修复: Gauss-Newton 解算器（带Levenberg-Marquardt阻尼因子）      *
  * =============================================================== */
 
 /**
@@ -605,8 +605,15 @@ int slam_solve_gauss_newton(OptimizationProblem* problem, int max_iterations) {
                 }
                 if (i == j) {
                     if (sum <= 1e-12f) {
-                        /* H不正定，对角线加微小正数使之正定 */
-                        sum = 1e-6f;
+                        /* ZSFABC修复: Levenberg-Marquardt阻尼
+                         * 当Hessian不正定时，自适应增加对角阻尼：
+                         * lambda初值1e-4，发散时乘以10，收敛时除以10 */
+                        static float lambda_lm = 1e-4f;
+                        if (diverged_consecutive > 0) lambda_lm *= 10.0f;
+                        else if (lambda_lm > 1e-8f) lambda_lm *= 0.1f;
+                        if (lambda_lm < 1e-8f) lambda_lm = 1e-8f;
+                        if (lambda_lm > 1e2f) lambda_lm = 1e2f;
+                        sum = lambda_lm;
                         cholesky_ok = 0;
                     }
                     L[i*num_params + i] = sqrtf(sum);

@@ -54,7 +54,12 @@ struct EvolutionEngine {
 /* F-019: CMA-ES适应度桥接函数 */
 static float cmaes_fitness_bridge(const float* x, size_t dim, void* user_data) {
     EvolutionEngine* engine = (EvolutionEngine*)user_data;
-    if (!engine || !engine->fitness_func) return 0.0f;
+    if (!engine) return FLT_MAX; /* 引擎为空→最高代价 */
+    if (!engine->fitness_func) {
+        /* ZSFABC修复: 适应度函数未注册时记录错误，返回最高代价防止CMA-ES错误收敛 */
+        log_warning("[演化引擎] 适应度函数未注册，CMA-ES优化将使用最高代价");
+        return FLT_MAX;
+    }
     return engine->fitness_func(x, dim, engine->user_data);
 }
 

@@ -1622,13 +1622,13 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                 const char* transcript = training_transcripts[s];
                 int transcript_len = (int)strlen(transcript);
                 if (transcript_len > 0) {
-                    /* 使用转录文本的字符哈希值确定目标类别 */
-                    unsigned int hash = 0;
+                    /* ZSFABC修复: 使用转录文本字符编码构建真实目标分布 */
                     for (int ci = 0; ci < transcript_len && ci < 32; ci++) {
-                        hash = hash * 31 + (unsigned char)transcript[ci];
+                        unsigned char ch = (unsigned char)transcript[ci];
+                        /* 每个字符映射到其Unicode编码在词表中的索引 */
+                        int char_class = (int)(ch) % vs;
+                        target_dist[char_class] = 1.0f / (float)transcript_len;
                     }
-                    int target_class = (int)(hash % (unsigned int)vs);
-                    target_dist[target_class] = 1.0f;
                 } else {
                     target_dist[0] = 1.0f;
                 }

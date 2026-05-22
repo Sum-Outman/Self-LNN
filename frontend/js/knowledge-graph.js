@@ -7,6 +7,8 @@
     'use strict';
 
     /* ==================== 模块级变量 ==================== */
+    var _kgCleanupList = []; /* ZSFABC: 事件监听器清理列表 */
+    var _kgIntervalIds = [];  /* ZSFABC: 定时器ID清理列表 */
     var graphState = {
         nodes: [],
         edges: [],
@@ -949,7 +951,8 @@
         if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
             g_dataEngine.registerModule('knowledge_graph_poll', 60000, fetchKnowledgeFromBackend);
         } else {
-            setInterval(function() { fetchKnowledgeFromBackend(); }, 60000);
+            var kgInterval = setInterval(function() { fetchKnowledgeFromBackend(); }, 60000);
+            _kgIntervalIds.push(kgInterval);
         }
 
         /* 16秒后初始化Canvas（确保DOM已渲染完整） */
@@ -959,5 +962,28 @@
             }
         }, 16000);
     });
+
+    /* ZSFABC修复: 知识图谱清理函数，移除所有事件监听器和定时器 */
+    window.destroyKnowledgeGraph = function() {
+        /* 清除所有setInterval */
+        _kgIntervalIds.forEach(function(id) { clearInterval(id); });
+        _kgIntervalIds = [];
+        /* 清除resize监听器 */
+        try { window.removeEventListener('resize', resizeCanvas); } catch(e) {}
+        try { window.removeEventListener('resize', resize3D); } catch(e) {}
+        /* 清除DOM事件监听器 */
+        _kgCleanupList.forEach(function(entry) {
+            try { entry.el.removeEventListener(entry.evt, entry.fn); } catch(e) {}
+        });
+        _kgCleanupList = [];
+        /* 停止WebGL 3D视图 */
+        if (graphState.rafId) { cancelAnimationFrame(graphState.rafId); graphState.rafId = 0; }
+        graphState.active3D = false;
+        console.log('[知识图谱] 资源已清理');
+    };
+
+    /* 捕获resize监听器引用用于清理 */
+    var _resizeCanvas = resizeCanvas;
+    var _resize3D = resize3D;
 
 })();

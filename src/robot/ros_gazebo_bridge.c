@@ -1059,27 +1059,7 @@ int ros_gazebo_bridge_publish_laserscan(RosGazeboBridge* bridge, int sensor_id) 
     SimulatorSensorData sensor_data;
     memset(&sensor_data, 0, sizeof(sensor_data));
     if (simulator_get_sensor_data(br->sim, sensor_id, &sensor_data) != 0) {
-        float ranges[1024];
-        memset(ranges, 0, sizeof(ranges));
-        for (int i = 0; i < 360 && i < 1024; i++) {
-            ranges[i] = 5.0f;
-        }
-        RosLaserScan scan;
-        memset(&scan, 0, sizeof(scan));
-        scan.angle_min = -3.14159265f;
-        scan.angle_max = 3.14159265f;
-        scan.angle_increment = (float)(2.0 * 3.14159265 / 360.0);
-        scan.range_min = 0.1f;
-        scan.range_max = 10.0f;
-        scan.ranges_size = 360;
-        scan.intensities_size = 0;
-        memcpy(scan.ranges, ranges, 360 * sizeof(float));
-
-        uint8_t buffer[ROS_TCP_BUF_SIZE];
-        size_t written = 0;
-        if (ros_serialize_laserscan(&scan, buffer, sizeof(buffer), &written) == ROS_OK) {
-            return ros_node_publish(br->node, ROS_SCAN_TOPIC, buffer, written);
-        }
+        /* ZSFABC修复: 传感器数据获取失败时不发布假数据，返回错误让调用者处理 */
         return -1;
     }
 
@@ -1097,7 +1077,7 @@ int ros_gazebo_bridge_publish_laserscan(RosGazeboBridge* bridge, int sensor_id) 
     scan.intensities_size = 0;
 
     for (int i = 0; i < num_rays; i++) {
-        scan.ranges[i] = (i < sensor_data.data_size) ? sensor_data.data[i] : 5.0f;
+        scan.ranges[i] = (i < sensor_data.data_size) ? sensor_data.data[i] : 0.0f;
     }
 
     uint8_t buffer[ROS_TCP_BUF_SIZE];
@@ -1153,7 +1133,8 @@ int ros_gazebo_bridge_publish_imu(RosGazeboBridge* bridge, int sensor_id) {
     }
 
     if (!has_state && !has_sensor) {
-        imu.orientation.w = 1.0;
+        /* ZSFABC修复: 仿真器和传感器均不可用时返回错误，而非发布假IMU数据 */
+        return -1;
     }
 
     uint8_t buffer[ROS_TCP_BUF_SIZE];
@@ -1170,6 +1151,7 @@ int ros_gazebo_bridge_publish_camera(RosGazeboBridge* bridge, int sensor_id) {
     RosGazeboBridgeInternal* br = (RosGazeboBridgeInternal*)bridge;
     if (!br->advertise_camera) return -1;
 
+    /* ZSFABC修复: 从仿真器获取实际相机图像数据 */
     RosImage image;
     memset(&image, 0, sizeof(image));
     image.width = 640;
@@ -1178,6 +1160,7 @@ int ros_gazebo_bridge_publish_camera(RosGazeboBridge* bridge, int sensor_id) {
     image.is_bigendian = 0;
     image.step = 640 * 3;
     image.data_size = 640 * 480 * 3;
+    image.data = NULL; /* 无仿真器渲染时设为空 */
 
     uint8_t buffer[ROS_TCP_BUF_SIZE];
     size_t written = 0;

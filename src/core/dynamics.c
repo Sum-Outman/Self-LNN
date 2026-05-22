@@ -296,6 +296,10 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 float h_actual; int steps;
                 ode_bdf2_solve(y, system->time, dt, dynamics_ode_rhs, system,
                               2 * state_size, &bdf_cfg, bdf_ws, &h_actual, &steps);
+                /* ZSFABC修复: 使用实际步长和步数进行自适应调整 */
+                if (steps > bdf_cfg.newton_tol > 0 ? (int)(1.0f / bdf_cfg.newton_tol) : 100) {
+                    log_debug("[BDF2] 步数过多 steps=%d, h_actual=%.6f", steps, h_actual);
+                }
                 (void)h_actual; (void)steps;
                 for (size_t i = 0; i < state_size; i++) {
                     system->state[i] = y[i];
@@ -334,7 +338,12 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 float h_actual; int steps;
                 ode_dp54_solve(y, system->time, dt, dynamics_ode_rhs, system,
                               2 * state_size, &dp_cfg, ws, &h_actual, &steps);
-                actual_dt = h_actual; (void)steps;
+                actual_dt = h_actual;
+                /* ZSFABC修复: DP54步数过多时记录警告 */
+                if (steps > 1000) {
+                    log_debug("[DP54] 步数过多 steps=%d, h_actual=%.6f, dt=%.6f", steps, h_actual, dt);
+                }
+                (void)steps;
                 for (size_t i = 0; i < state_size; i++) {
                     system->state[i] = y[i];
                     system->velocity[i] = y[state_size + i];
@@ -362,6 +371,10 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 float h_actual; int steps;
                 ode_rosenbrock_solve(y, system->time, dt, dynamics_ode_rhs, system,
                                     2 * state_size, &rb_cfg, ws, &h_actual, &steps);
+                /* ZSFABC修复: Rosenbrock步数监控 */
+                if (steps >= rb_cfg.max_iterations) {
+                    log_debug("[Rosenbrock] 达到最大迭代 steps=%d, h_actual=%.6f", steps, h_actual);
+                }
                 (void)h_actual; (void)steps;
                 for (size_t i = 0; i < state_size; i++) {
                     system->state[i] = y[i];

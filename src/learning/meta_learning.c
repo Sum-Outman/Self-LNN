@@ -2051,7 +2051,7 @@ void meta_learning_default_config(MetaLearningConfig* config) {
     config->inner_learning_rate = 0.01f;
     config->fast_learning_rate = 0.01f;
     
-    config->use_second_order = 0;   // 默认使用一阶近似
+    config->use_second_order = 1;   /* ZSFABC修复: 默认使用真二阶MAML，一阶作为可选优化 */
     config->use_learned_lr = 0;
     config->use_batch_norm = 1;
     
@@ -2491,16 +2491,11 @@ float meta_learner_maml_step(MetaLearner* learner, const MetaTask* task) {
     // 从基础模型提取初始参数
     int extracted_count = extract_model_parameters(learner->meta_model, ctx.initial_parameters, learner->parameter_count);
     if (extracted_count <= 0) {
-        // 提取失败，使用随机参数作为回退
-        uintptr_t model_hash = (uintptr_t)learner->meta_model;
-        uintptr_t task_hash = (uintptr_t)task;
-        uint32_t seed = (uint32_t)(model_hash ^ task_hash);
-        
-        for (size_t i = 0; i < learner->parameter_count; i++) {
-            seed = seed * 1103515245 + 12345;
-            uint32_t rand_val = (seed >> 16) & 0x7FFF;
-            ctx.initial_parameters[i] = (rand_val / 32767.5f) - 0.5f;
-        }
+        /* ZSFABC修复: 参数提取失败时返回错误，禁止使用随机回退 */
+        safe_free((void**)&ctx.initial_parameters);
+        safe_free((void**)&ctx.adapted_parameters);
+        log_error("[MAML] 参数提取失败，无法执行元学习适应");
+        return 0.0f;
     }
     
     // 执行真实的内循环适应：创建适应后模型并执行梯度下降
@@ -2652,16 +2647,11 @@ float meta_learner_reptile_step(MetaLearner* learner, const MetaTask* task) {
     // 从基础模型提取初始参数
     int extracted_count = extract_model_parameters(learner->meta_model, ctx.initial_parameters, learner->parameter_count);
     if (extracted_count <= 0) {
-        // 提取失败，使用随机参数作为回退
-        uintptr_t model_hash = (uintptr_t)learner->meta_model;
-        uintptr_t task_hash = (uintptr_t)task;
-        uint32_t seed = (uint32_t)(model_hash ^ task_hash) + 123456789;  // 不同偏移量
-        
-        for (size_t i = 0; i < learner->parameter_count; i++) {
-            seed = seed * 1103515245 + 12345;
-            uint32_t rand_val = (seed >> 16) & 0x7FFF;
-            ctx.initial_parameters[i] = (rand_val / 32767.5f) - 0.5f;
-        }
+        /* ZSFABC修复: 参数提取失败时返回错误，禁止使用随机回退 */
+        safe_free((void**)&ctx.initial_parameters);
+        safe_free((void**)&ctx.adapted_parameters);
+        log_error("[Reptile] 参数提取失败，无法执行元学习适应");
+        return 0.0f;
     }
     
     // 执行Reptile风格的内循环适应：真实梯度下降，而非伪随机变化

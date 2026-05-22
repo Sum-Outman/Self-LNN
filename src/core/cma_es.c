@@ -394,8 +394,10 @@ int cmaes_update(CMAESState* state, const float* fitness_values) {
 
     if (hs > 0) {
         alpha_cov = 1.0f - c1 - cmu;
+        /* ZSFABC修复: 当演化路径长度hs>0时，delta_h不应被丢弃，
+         * 需要在下一次合并到协方差更新中以补偿路径衰减 */
         float delta_h = (1.0f - hs) * c1 * (2.0f - c1);
-        (void)delta_h;
+        alpha_cov += delta_h; /* 将路径衰减补偿纳入协方差收缩因子 */
     } else {
         alpha_cov = 1.0f - c1 - cmu + c1 * hs * (2.0f - c1);
     }
@@ -771,7 +773,11 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
             }
         }
 
-        (void)cmaes_optimize(state, func, user_data);
+        int result = cmaes_optimize(state, func, user_data);
+        if (result != 0) {
+            /* ZSFABC修复: BIPOP中的CMA-ES优化失败处理 */
+            log_warning("[CMA-ES BIPOP] 子优化失败 (result=%d), 继续下次重启", result);
+        }
 
         if (state->best_fitness < global_best_fitness) {
             global_best_fitness = state->best_fitness;

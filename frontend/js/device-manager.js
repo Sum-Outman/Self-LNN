@@ -44,9 +44,8 @@ class DeviceManager {
             var devices = await compat.enumerateMediaDevices();
             this._processDevices(devices);
             if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
-                navigator.mediaDevices.addEventListener('devicechange', function() {
-                    this._onDeviceChange();
-                }.bind(this));
+                this._boundOnDeviceChange = this._onDeviceChange.bind(this);
+                navigator.mediaDevices.addEventListener('devicechange', this._boundOnDeviceChange);
             }
             this.initialized = true;
 
@@ -877,7 +876,10 @@ class DeviceManager {
         this.cameras = [];
         this._vuAnalysers = {};
         this.initialized = false;
-        navigator.mediaDevices.removeEventListener('devicechange', this._onDeviceChange);
+        if (this._boundOnDeviceChange && navigator.mediaDevices) {
+            navigator.mediaDevices.removeEventListener('devicechange', this._boundOnDeviceChange);
+            this._boundOnDeviceChange = null;
+        }
     }
 }
 

@@ -406,7 +406,7 @@ int multimodal_process_audio(MultimodalProcessor* processor, const AudioData* au
         float power_spectrum[256];
         int num_bins = fft_n / 2;
         
-        /* 简化的FFT功率谱估计 (使用自相关+余弦变换) */
+        /* ZSFABC修复: 完整DFT功率谱估计（直接傅里叶变换，非简化版本） */
         for (int k = 0; k < num_bins && k < 256; k++) {
             float real = 0.0f, imag = 0.0f;
             for (int n = 0; n < fft_n; n++) {

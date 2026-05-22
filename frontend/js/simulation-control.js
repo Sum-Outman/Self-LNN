@@ -1,4 +1,4 @@
-﻿(function() {
+(function() {
     'use strict';
     var simPolling = null;
 
@@ -34,7 +34,8 @@
             if (window.g_dataEngine && typeof window.g_dataEngine.unregisterModule === 'function') {
                 window.g_dataEngine.unregisterModule('simulation_status');
             }
-            document.getElementById('sim-status').textContent = '已停止';
+            var el = document.getElementById('sim-status');
+            if (el) el.textContent = '已停止';
             showNotification('仿真已停止', 'info');
         } catch(e) { showNotification('操作失败', 'danger'); }
     }

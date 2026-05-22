@@ -136,6 +136,10 @@ class VoiceCommandSystem {
     }
 
     startContinuousMode(micStream) {
+        if (this.continuousInterval) {
+            clearInterval(this.continuousInterval);
+            this.continuousInterval = null;
+        }
         this.continuousMode = true;
         this.continuousInterval = setInterval(() => {
             if (!this.isRecording && !this.isProcessing && this.continuousMode) {
