@@ -777,47 +777,6 @@ class VisualizationManager {
     }
 
     /**
-     * 初始化热力图数据
-     */
-    initHeatmapData() {
-        for (let i = 0; i < this.heatmapSize; i++) {
-            this.stateActivationData[i] = [];
-            for (let j = 0; j < this.heatmapSize; j++) {
-                this.stateActivationData[i][j] = 0.0;
-            }
-        }
-    }
-
-    /**
-     * 渲染神经元状态激活热图
-     */
-    renderStateActivationHeatmap() {
-        const ctx = this.stateActivationCtx;
-        const canvas = this.stateActivationCanvas;
-        if (!ctx || !canvas) return;
-
-        const width = canvas.width || canvas.parentElement.clientWidth;
-        const height = canvas.height || 300;
-        canvas.width = width;
-        canvas.height = height;
-
-        const cellW = width / this.heatmapSize;
-        const cellH = height / this.heatmapSize;
-
-        for (let i = 0; i < this.heatmapSize; i++) {
-            for (let j = 0; j < this.heatmapSize; j++) {
-                const value = Math.max(0, Math.min(1, this.stateActivationData[i][j] || 0));
-                const r = Math.round(255 * value);
-                const g = Math.round(255 * (1 - value) * 0.6);
-                const b = Math.round(255 * (1 - value) * 0.8);
-
-                ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-                ctx.fillRect(j * cellW, i * cellH, cellW + 0.5, cellH + 0.5);
-            }
-        }
-    }
-
-    /**
      * 初始化预测结果图表
      */
     initPredictionChart() {
@@ -1112,6 +1071,8 @@ class VisualizationManager {
      */
     updateWeightDistribution(weights, numBins) {
         if (!this.dataBuffers.weightDist) return;
+        if (!weights || !Array.isArray(weights)) return;
+        if (weights.length === 0) return;
         numBins = numBins || 20;
 
         const min = Math.min(...weights);
@@ -1230,10 +1191,45 @@ class VisualizationManager {
     }
 
     /**
+     * 更新权重分布数据（ZSFABC-C002修复: main.js和training-push.js调用的统一入口）
+     * @param {Float32Array|number[]} weights - 权重数组
+     * @param {number} [numBins] - 直方图分段数，默认20
+     */
+    updateWeightDistributionData(weights, numBins) {
+        if (!weights || !Array.isArray(weights) && !(weights instanceof Float32Array)) return;
+        this.updateWeightDistribution(Array.from ? Array.from(weights) : weights, numBins || 20);
+    }
+
+    /**
+     * 更新激活统计数据（ZSFABC-C002修复: main.js和training-push.js调用的统一入口）
+     * @param {number[]} layers - 各层激活值数组
+     * @param {number} mean - 平均值
+     * @param {number} max - 最大值
+     * @param {number} min - 最小值
+     * @param {number} std - 标准差
+     */
+    updateActivationData(layers, mean, max, min, std) {
+        if (!layers || !Array.isArray(layers)) return;
+        var sz = Math.max(layers.length, 16);
+        var data = new Array(sz);
+        for (var i = 0; i < sz; i++) {
+            var row = new Array(sz);
+            for (var j = 0; j < sz; j++) {
+                var layerIdx = Math.floor(i * layers.length / sz);
+                var val = layers[layerIdx] || 0;
+                row[j] = val;  /* ZSFABC-Fix: 移除人工正弦噪声，仅使用真实后端数据 */
+            }
+            data[i] = row;
+        }
+        this.updateStateActivationData(data);
+    }
+
+    /**
      * 更新预测数据
      */
     updatePredictionData(actual, predicted) {
         if (!this.dataBuffers.prediction) return;
+        if (!actual || !Array.isArray(actual) || !predicted || !Array.isArray(predicted)) return;
         const buffer = this.dataBuffers.prediction;
 
         buffer.actual = actual.map((v, i) => ({ x: i, y: v }));

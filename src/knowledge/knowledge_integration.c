@@ -9,6 +9,7 @@
 
 #include "selflnn/knowledge/knowledge_integration.h"
 #include "selflnn/knowledge/cfc_knowledge_embedding.h"
+#include "selflnn/reasoning/reasoning.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/core/errors.h"

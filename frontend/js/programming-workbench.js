@@ -29,10 +29,16 @@
         editorCode = el ? el.value : '';
     }
 
+    var _pwMaxOutputLines = 2000; /* ZSFABC-Fix: 输出行数上限，防止内存泄漏 */
     function appendOutput(text) {
         var el = document.getElementById('pw-output');
         if (el) {
             el.value += text + '\n';
+            /* 超过上限时截断前一半 */
+            var lines = el.value.split('\n');
+            if (lines.length > _pwMaxOutputLines) {
+                el.value = lines.slice(lines.length - _pwMaxOutputLines / 2).join('\n');
+            }
             el.scrollTop = el.scrollHeight;
         }
     }
@@ -76,7 +82,7 @@
                 '<div class="pw-metric-card"><div class="pw-metric-value">' + a.function_count + '</div><div class="pw-metric-label">函数数量</div></div>' +
                 '<div class="pw-metric-card"><div class="pw-metric-value">' + a.variable_count + '</div><div class="pw-metric-label">变量数量</div></div>' +
                 '<div class="pw-metric-card"><div class="pw-metric-value">' + a.max_nesting_depth + '</div><div class="pw-metric-label">最大嵌套</div></div>' +
-                '<div class="pw-metric-card"><div class="pw-metric-value">' + a.maintainability_index.toFixed(2) + '</div><div class="pw-metric-label">可维护性</div></div>' +
+                '<div class="pw-metric-card"><div class="pw-metric-value">' + (a.maintainability_index != null ? a.maintainability_index.toFixed(2) : 'N/A') + '</div><div class="pw-metric-label">可维护性</div></div>' +
                 '<div class="pw-metric-card pw-metric-error"><div class="pw-metric-value">' + a.error_count + '</div><div class="pw-metric-label">错误数</div></div>' +
                 '<div class="pw-metric-card pw-metric-warning"><div class="pw-metric-value">' + a.warning_count + '</div><div class="pw-metric-label">警告数</div></div>' +
             '</div>' +
@@ -109,6 +115,7 @@
         var funcName = document.getElementById('pw-gen-funcname') ? document.getElementById('pw-gen-funcname').value : 'my_function';
         var desc = document.getElementById('pw-gen-desc') ? document.getElementById('pw-gen-desc').value : '';
         var paramCount = parseInt(document.getElementById('pw-gen-paramcount') ? document.getElementById('pw-gen-paramcount').value : '0', 10);
+        if (isNaN(paramCount)) paramCount = 0;
         if (!funcName.trim()) { showStatus('请输入函数名称', true); return; }
         clearOutput();
         appendOutput('正在生成代码...');
@@ -138,6 +145,7 @@
         var code = getEditorCode();
         if (!code.trim()) { showStatus('请先输入代码', true); return; }
         var iterations = parseInt(document.getElementById('pw-opt-iterations') ? document.getElementById('pw-opt-iterations').value : '1', 10);
+        if (isNaN(iterations)) iterations = 1;
         clearOutput();
         appendOutput('正在优化代码 (迭代' + iterations + '次)...');
         try {
@@ -263,10 +271,16 @@
         showStatus('已清空');
     };
 
-    document.addEventListener('DOMContentLoaded', function() {
+    /* ZSFABC-Fix: 处理DOMContentLoaded竞态条件 */
+    function _pwInit() {
         switchTab('editor');
         checkProgrammingStatus();
-    });
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _pwInit);
+    } else {
+        _pwInit();
+    }
 
     /* ZSFABC-020修复: 重命名全局暴露避免与skills/knowledge的switchTab冲突 */
     window.switchProgrammingTab = switchTab;

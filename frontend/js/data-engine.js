@@ -36,7 +36,8 @@ class DataEngine {
 
         this._history = {};
         this._pollModules = new Map();
-        this._baseInterval = 2000;  /* ZSFABC-018: 降低轮询间隔至2秒提升实时性 */
+        this._baseInterval = 2000;
+        this._consecutiveErrors = 0;  /* ZSFABC-Fix: 初始化连续错误计数器 */
     }
 
     registerModule(name, intervalMs, callback) {
@@ -131,7 +132,7 @@ class DataEngine {
             }
         } catch (error) {
             console.error('数据获取失败:', error);
-            this._backendConnected = false;
+            /* ZSFABC-Fix: 不在此直接断开，由_tick统一管理连接状态（连续3次失败才断开） */
             this._lastError = error.message;
         }
     }
@@ -172,7 +173,9 @@ class DataEngine {
     async _tick() {
         this._fetchCount++;
 
-        var internalTick = Math.round(2000 / this._baseInterval);
+        /* ZSFABC-Fix: 连接检查每6秒执行一次，基于_baseInterval计算tick数量 */
+        var connectionCheckIntervalMs = 6000;
+        var internalTick = Math.max(1, Math.round(connectionCheckIntervalMs / this._baseInterval));
 
         if (this._fetchCount % (internalTick * 3) === 0) {
             await this.checkConnection();

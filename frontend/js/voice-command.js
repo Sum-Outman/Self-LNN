@@ -331,9 +331,9 @@ class CommandEngine {
     }
 
     _safetyCheck(parsed) {
-        const dangerousHandlers = ['computerShutdown', 'computerRestart', 'robotEmergencyStop'];
-        if (dangerousHandlers.includes(parsed.command)) {
-            return { allowed: true, reason: '高危操作，需用户确认' };
+        var dangerousHandlers = ['computerShutdown', 'computerRestart', 'robotEmergencyStop'];
+        if (dangerousHandlers.indexOf(parsed.command) >= 0) {
+            return { allowed: false, reason: '高危操作，需用户确认' };
         }
         return { allowed: true, reason: '' };
     }
@@ -415,7 +415,16 @@ class CommandEngine {
                 return null;
             },
             'save_model': async () => window.SelfLnnApi.backupSystem ? await window.SelfLnnApi.backupSystem() : null,
-            'load_model': async () => window.SelfLnnApi.loadModel ? await window.SelfLnnApi.loadModel() : null,
+            'load_model': async () => {
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.loadModel === 'function') {
+                    var loadParams = params || {};
+                    if (!loadParams.modelId && !loadParams.model_id) {
+                        return { success: false, error: '缺少模型ID参数 (modelId)' };
+                    }
+                    return await window.SelfLnnApi.loadModel(loadParams.modelId || loadParams.model_id);
+                }
+                return null;
+            },
             'get_status': async () => window.SelfLnnApi.getSystemStatus ? await window.SelfLnnApi.getSystemStatus() : null,
             'enable_feature': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
@@ -553,10 +562,10 @@ class CommandEngine {
                                 }
                             } else {
                                 var existingSpk = dm.speakers.find(function(s) { return s.active === false; });
-                                if (existingSpk) result = dm.startSpeaker(existingSpk.id);
+                                if (existingSpk) result = await dm.startSpeaker(existingSpk.id);
                                 else result = { success: false, error: '无法添加扬声器' };
                             }
-                            return result || { success: true, message: '扬声器已启动' };
+                            return result && typeof result.success !== 'undefined' ? result : { success: true, message: '扬声器已启动' };
                         case 'off':
                             var activeSpks = dm.speakers.filter(function(s) { return s.active; });
                             for (var i = 0; i < activeSpks.length; i++) {

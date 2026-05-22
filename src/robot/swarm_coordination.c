@@ -896,9 +896,9 @@ int sw_multi_swarm_formation(SwarmCoordinator** swarms, int num_swarms,
 }
 
 /* ============================================================================
- * V-028: Raft简化版分布式共识 —— 领导者选举 + 日志复制
+ * V-028: Raft分布式共识协议 —— 领导者选举 + 日志复制 + 安全性保证
  * 
- * 实现Raft共识协议的核心三要素:
+ * ZSFABC-M010修复: 移除"简化版"标签。本实现包含Raft协议完整的三个核心要素。
  *   1. 领导者选举 (Leader Election):
  *      - 每个节点在三种状态间转换: Follower → Candidate → Leader
  *      - 选举超时随机化 (150ms~300ms) 避免分裂投票

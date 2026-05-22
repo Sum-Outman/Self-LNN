@@ -2387,18 +2387,53 @@ int ik_solve_dls(const KinematicModel* model, const Vec3* target_pos,
         memset(J, 0, sizeof(J));
         compute_jacobian(model, joint_angles, J, model->joint_count);
 
-        /* 计算可操作性 ω = sqrt(det(J·J^T)) 近似, 简化为最小奇异值 */
+        /* ZSFABC-M008深度修复: 计算完整Yoshikawa可操作性指标 ω = sqrt(det(J·J^T))
+         * 不再使用简化的迹近似（trace(JJ^T)/N）。
+         * 对于6×n雅可比矩阵，JJ^T是6×6矩阵，直接计算其行列式。 */
         float jj[6 * 6] = {0};
         for (int i = 0; i < 6; i++) {
             for (int j = 0; j < 6; j++) {
+                float sum = 0.0f;
                 for (int k = 0; k < n; k++) {
-                    jj[i*6+j] += J[i*n+k] * J[j*n+k];
+                    sum += J[i * n + k] * J[j * n + k];
+                }
+                jj[i * 6 + j] = sum;
+            }
+        }
+        /* 直接计算6x6矩阵的行列式（使用LU分解） */
+        float lu[6 * 6];
+        memcpy(lu, jj, sizeof(lu));
+        float det = 1.0f;
+        int sign = 1;
+        for (int col = 0; col < 6; col++) {
+            /* 选主元 */
+            int pivot = col;
+            float max_v = fabsf(lu[col * 6 + col]);
+            for (int row = col + 1; row < 6; row++) {
+                float abs_v = fabsf(lu[row * 6 + col]);
+                if (abs_v > max_v) { max_v = abs_v; pivot = row; }
+            }
+            if (max_v < 1e-12f) { det = 0.0f; break; }
+            if (pivot != col) {
+                for (int j = 0; j < 6; j++) {
+                    float tmp = lu[col * 6 + j];
+                    lu[col * 6 + j] = lu[pivot * 6 + j];
+                    lu[pivot * 6 + j] = tmp;
+                }
+                sign = -sign;
+            }
+            det *= lu[col * 6 + col];
+            float inv_pivot = 1.0f / lu[col * 6 + col];
+            for (int row = col + 1; row < 6; row++) {
+                float factor = lu[row * 6 + col] * inv_pivot;
+                for (int j = col + 1; j < 6; j++) {
+                    lu[row * 6 + j] -= factor * lu[col * 6 + j];
                 }
             }
         }
-        float trace_jj = 0.0f;
-        for (int i = 0; i < 6; i++) trace_jj += jj[i*6+i];
-        float omega = sqrtf(trace_jj / 6.0f + 1e-10f);
+        det *= (float)sign;
+        if (det < 0.0f) det = -det;
+        float omega = sqrtf(det);
 
         /* DLS阻尼因子 */
         if (omega < damp_thresh) {

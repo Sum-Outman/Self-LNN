@@ -19,6 +19,7 @@ class ApiService {
         this.baseURL = `http://${SELFLNN_CONFIG.host}:${SELFLNN_CONFIG.port}/api`;
         this.connected = false;  /* F-003修复: 初始状态必须为未连接，由checkConnection()异步确认后更新 */
         this._connectionVerified = false;  /* 首次连接确认标记 */
+        this._coldStartUntil = Date.now() + 30000;  /* ZSFABC-FE-Fix: 冷启动期30秒，避免启动时误报熔断 */
         this.connectionCheckInterval = null;
         
         /* F-014修复: API密钥认证支持 */
@@ -72,9 +73,10 @@ class ApiService {
         this.isDevMode = false;
 
         this.downgradeStrategies = {
-            OFFLINE:  { level: 0, allowSimulated: false, allowCached: false, toastMsg: '未连接到后端服务器' },
-            DEGRADED: { level: 1, allowSimulated: false, allowCached: true,  toastMsg: '后端部分服务不可用' },
-            DISABLED:  { level: -1, allowSimulated: false, allowCached: false, toastMsg: '功能已禁用' }
+            CONNECTED: { level: 2, allowSimulated: false, allowCached: true,  toastMsg: null },
+            OFFLINE:   { level: 0, allowSimulated: false, allowCached: false, toastMsg: '未连接到后端服务器' },
+            DEGRADED:  { level: 1, allowSimulated: false, allowCached: true,  toastMsg: '后端部分服务不可用' },
+            DISABLED:   { level: -1, allowSimulated: false, allowCached: false, toastMsg: '功能已禁用' }
         };
     }
 
@@ -269,13 +271,18 @@ class ApiService {
                     const delayMs = useBackoff
                         ? this.getBackoffDelay(attempt, baseDelay, maxDelay)
                         : baseDelay;
-                    console.warn(`API请求失败(${response.status})，子系统[${subsystem}]，第${attempt + 1}次重试，等待${Math.round(delayMs)}ms...`);
+                    console.warn('API请求失败(' + response.status + ')，子系统[' + subsystem + ']，第' + (attempt + 1) + '次重试，等待' + Math.round(delayMs) + 'ms...');
                     await this.delay(delayMs);
                     continue;
                 }
 
-                /* 4xx客户端错误不重试 */
-                if (subsystem) this.recordCircuitBreakerSuccess(subsystem);
+                /* >=500且已达最大重试 → 记录为失败（非4xx穿透） */
+                if (response.status >= 500) {
+                    if (subsystem) this.recordCircuitBreakerFailure(subsystem);
+                    return response;
+                }
+
+                /* 4xx客户端错误不重试，不记录熔断 */
                 return response;
 
             } catch (error) {

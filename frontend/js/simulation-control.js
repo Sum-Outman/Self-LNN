@@ -1,8 +1,11 @@
 (function() {
     'use strict';
     var simPolling = null;
+    var _simStarting = false; /* ZSFABC-Fix: 启动状态守卫，防止重复点击 */
 
     async function startSimulation() {
+        if (_simStarting) { showNotification('仿真正在启动中，请稍候', 'warning'); return; }
+        _simStarting = true;
         var engine = document.getElementById('sim-engine') ? document.getElementById('sim-engine').value : 'internal';
         var scene = document.getElementById('sim-scene') ? document.getElementById('sim-scene').value : '';
         var dt = 0.01;
@@ -25,6 +28,7 @@
                 showNotification('启动失败: ' + (data.error || ''), 'danger');
             }
         } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
+        _simStarting = false;
     }
 
     async function stopSimulation() {
@@ -51,6 +55,13 @@
         try {
             var data = await SelfLnnApi.simulationStatus();
             if (data) {
+                /* ZSFABC-Fix: 仿真停止时自动清除轮询，防止资源泄漏 */
+                if (data.running === false) {
+                    if (simPolling) { clearInterval(simPolling); simPolling = null; }
+                    if (window.g_dataEngine && typeof window.g_dataEngine.unregisterModule === 'function') {
+                        window.g_dataEngine.unregisterModule('simulation_status');
+                    }
+                }
                 var statusEl = document.getElementById('sim-status');
                 if (statusEl) statusEl.textContent = data.running ? '运行中' : '已停止';
                 var stepEl = document.getElementById('sim-step');
@@ -91,8 +102,8 @@
     window.sim3dToggleGrid = sim3dToggleGrid;
 
     async function sim3dAddRobot() {
-        try { var d = await SelfLnnApi.request('/simulation/robot/add', { method: 'POST', body: JSON.stringify({}) }); showNotification('机器人已添加', 'success'); }
-        catch(e) { showNotification('添加失败', 'danger'); }
+        try { var d = await SelfLnnApi.request('/simulation/robot/add', { method: 'POST', body: JSON.stringify({}) }); showNotification(d && d.success ? '机器人已添加' : '添加失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
+        catch(e) { showNotification('添加失败: ' + (e && e.message || '网络错误'), 'danger'); }
     }
     window.sim3dAddRobot = sim3dAddRobot;
 
@@ -103,8 +114,8 @@
     window.sim3dClearAll = sim3dClearAll;
 
     async function start3DReconstruction() {
-        try { var d = await SelfLnnApi.request('/simulation/reconstruct3d', { method: 'POST', body: JSON.stringify({}) }); showNotification('三维重建已启动', 'success'); }
-        catch(e) { showNotification('启动失败', 'danger'); }
+        try { var d = await SelfLnnApi.request('/simulation/reconstruct3d', { method: 'POST', body: JSON.stringify({}) }); showNotification(d && d.success ? '三维重建已启动' : '启动失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
+        catch(e) { showNotification('启动失败: ' + (e && e.message || '网络错误'), 'danger'); }
     }
     window.start3DReconstruction = start3DReconstruction;
 

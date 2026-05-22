@@ -179,6 +179,7 @@
 
     function showStatus(id, msg, type) {
         var el = document.getElementById(id);
+        if (!el) return;
         el.textContent = msg;
         el.className = 'status-msg ' + type;
         if (type === 'success') {
@@ -199,6 +200,8 @@
 
         /* ZSFABC: pending条目仅做本地UI预览，实际数据由后端API响应填充。
          * confidence/weight置为-1表示"待后端确认"，UI层渲染为"--" */
+        graphState.localSeq = graphState.localSeq || 0;
+        graphState.localSeq++;
         var entry = {
             subject: subject,
             predicate: predicate,
@@ -207,7 +210,7 @@
             confidence: -1,
             weight: -1,
             timestamp: Date.now(),
-            id: 'pending_' + Date.now() + '_' + (++graphState.localSeq || (graphState.localSeq = 1))
+            id: 'pending_' + Date.now() + '_' + graphState.localSeq
         };
 
         /* 通过后端API添加 */
@@ -685,7 +688,7 @@
     function animate() {
         if (graphState.dragNode || graphState.nodes.length < 3) {
             drawGraph();
-            requestAnimationFrame(animate);
+            graphState._rafId = requestAnimationFrame(animate);
             return;
         }
 
@@ -701,10 +704,12 @@
             }
         }
         drawGraph();
-        requestAnimationFrame(animate);
+        graphState._rafId = requestAnimationFrame(animate);
     }
 
     function refreshGraph() {
+        /* ZSFABC-FE-Fix: 取消旧的动画循环防止泄漏 */
+        if (graphState._rafId) { cancelAnimationFrame(graphState._rafId); graphState._rafId = null; }
         buildGraph();
         if (graphState.layout === 'force' || graphState.layout === 'radial') {
             runForceLayout();

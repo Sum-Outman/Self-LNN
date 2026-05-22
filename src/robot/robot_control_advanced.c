@@ -967,41 +967,49 @@ int advanced_control_step(AdvancedControlState* state,
                 }
 
                 /* ---- 步骤5: 自适应增益更新 ---- */
-                /* 自适应增益矩阵 Γ（对角简化） */
-                float gamma_x = 0.5f;  /* Kx自适应率 */
-                float gamma_r = 0.1f;  /* Kr自适应率 */
+                /* ZSFABC-M009修复: 完整6×6矩阵MRAC自适应律
+                 * 不再使用对角线简化。
+                 * 完整MRAC法则: dK/dt = -Γ * s * φ^T
+                 * K = [Kx(6×6) | Kr(6×6)] 共72个标量
+                 * s = 滑动面 (6维) = e_dot + Λ*e
+                 * φ = 回归向量 (12维) = [当前状态(6) | 参考指令(6)]
+                 * Γ = 对称正定学习率矩阵，使用对角形式便于实现 */
+                float gamma_kx = 0.5f;  /* Kx自适应率 */
+                float gamma_kr = 0.1f;  /* Kr自适应率 */
 
-                /* Kx_diag: 反馈增益（6个对角线元素 = 6个关节位置误差增益） */
-                /* Kr_diag: 前馈增益（6个对角线元素 = 6个关节前馈增益） */
+                /* 对每个输出维度 (i) 和每个回归维度 (j) 更新Kx矩阵 */
                 for (int i = 0; i < 6; i++) {
-                    /* Kx更新: dKx/dt = -Γ_x * s * x^T
-                     * 对角线简化: Kx_i = Kx_i - γ_x * s_i * x_i */
-                    float delta_kx = -gamma_x * s[i] * current_state[i] * dt;
-                    state->adaptive_gains[i] += delta_kx;
-                    /* 投影算子：限制Kx在[-2, 10]范围内 */
-                    if (state->adaptive_gains[i] < -2.0f) state->adaptive_gains[i] = -2.0f;
-                    if (state->adaptive_gains[i] > 10.0f) state->adaptive_gains[i] = 10.0f;
-
-                    /* Kr更新: dKr/dt = -Γ_r * s * r^T
-                     * 对角线简化: Kr_i = Kr_i - γ_r * s_i * r_i */
-                    float delta_kr = -gamma_r * s[i] * state->mrac_ref_command[i] * dt;
-                    state->adaptive_gains[i + 6] += delta_kr;
-                    /* 投影算子：限制Kr在[-5, 5]范围内 */
-                    if (state->adaptive_gains[i + 6] < -5.0f) state->adaptive_gains[i + 6] = -5.0f;
-                    if (state->adaptive_gains[i + 6] > 5.0f) state->adaptive_gains[i + 6] = 5.0f;
+                    for (int j = 0; j < 6; j++) {
+                        /* ΔKx[i][j] = -γ_kx * s[i] * x[j] * dt */
+                        float delta = -gamma_kx * s[i] * current_state[j] * dt;
+                        state->adaptive_gains[i * 6 + j] += delta;
+                        if (state->adaptive_gains[i * 6 + j] < -2.0f)
+                            state->adaptive_gains[i * 6 + j] = -2.0f;
+                        if (state->adaptive_gains[i * 6 + j] > 10.0f)
+                            state->adaptive_gains[i * 6 + j] = 10.0f;
+                    }
+                    for (int j = 0; j < 6; j++) {
+                        /* ΔKr[i][j] = -γ_kr * s[i] * r[j] * dt */
+                        float delta = -gamma_kr * s[i] * state->mrac_ref_command[j] * dt;
+                        state->adaptive_gains[36 + i * 6 + j] += delta;
+                        if (state->adaptive_gains[36 + i * 6 + j] < -5.0f)
+                            state->adaptive_gains[36 + i * 6 + j] = -5.0f;
+                        if (state->adaptive_gains[36 + i * 6 + j] > 5.0f)
+                            state->adaptive_gains[36 + i * 6 + j] = 5.0f;
+                    }
                 }
 
                 /* ---- 步骤6: 计算控制输出 ---- */
-                /* u = Kx*x + Kr*r + u_robust
-                 * 其中u_robust = -η*sign(e^T*P*Bm)是鲁棒项，处理未建模动态 */
+                /* u = Kx*x + Kr*r + u_robust (完整矩阵乘法) */
                 for (int i = 0; i < 6; i++) {
-                    /* Kx_i * x_i */
-                    float u_kx = state->adaptive_gains[i] * current_state[i];
-                    /* Kr_i * r_i */
-                    float u_kr = state->adaptive_gains[i + 6] * state->mrac_ref_command[i];
+                    float u_kx = 0.0f;
+                    float u_kr = 0.0f;
+                    for (int j = 0; j < 6; j++) {
+                        u_kx += state->adaptive_gains[i * 6 + j] * current_state[j];
+                        u_kr += state->adaptive_gains[36 + i * 6 + j] * state->mrac_ref_command[j];
+                    }
                     /* 鲁棒项（基于σ修正的泄漏项，防止参数漂移） */
                     float u_robust = -0.01f * e[i];
-                    /* 合成控制信号 */
                     control_output[i] = u_kx + u_kr + u_robust;
                 }
 

@@ -573,6 +573,7 @@ class SelfLnnChart {
         };
         for (let ri = 0; ri < rows; ri++) {
             for (let ci = 0; ci < cols; ci++) {
+                if (!datasets[ri] || !datasets[ri].data) continue;
                 const v = datasets[ri].data[ci];
                 if (typeof v !== 'number' || isNaN(v)) continue;
                 const t = (v - minVal) / (maxVal - minVal);

@@ -97,8 +97,8 @@ class DialogueEnhanced {
             this.audioPlayer = audio;
 
             if (speakerId) {
-                var compat = window.g_browserCompat || new BrowserCompat();
-                await compat.setAudioSinkId(audio, speakerId);
+                var compat = (window.g_browserCompat) ? window.g_browserCompat : (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+                if (compat) await compat.setAudioSinkId(audio, speakerId);
             }
 
             await new Promise((resolve, reject) => {
@@ -148,8 +148,8 @@ class DialogueEnhanced {
         var self = this;
         return new Promise(function(resolve, reject) {
             var utterance = new SpeechSynthesisUtterance(text);
-            var compat = window.g_browserCompat || new BrowserCompat();
-            var voice = compat.getSpeechSynthesisVoice('zh-CN');
+            var compat = (window.g_browserCompat) ? window.g_browserCompat : (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            var voice = compat ? compat.getSpeechSynthesisVoice('zh-CN') : null;
             if (voice) utterance.voice = voice;
             utterance.lang = 'zh-CN';
             utterance.rate = self.ttsSpeed;

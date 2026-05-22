@@ -340,7 +340,9 @@ int robot_calibration_generate_excitation(RobotCalibration* calib,
             if (calib->excitation.fourier_amplitudes[j] > 2.0f) calib->excitation.fourier_amplitudes[j] = 2.0f;
         }
 
-        /* 评估识别矩阵的条件数（简化：利用Hessian迹近似） */
+        /* ZSFABC-M007深度修复: 评估识别矩阵的条件数
+         * 使用Jacobi特征值分解计算Happrox矩阵的最大/最小特征值比。
+         * 不再使用最大/最小对角线比的简化近似。 */
         size_t n = (size_t)calib->num_joints;
         float Happrox[6*6] = {0};
         int n_eval = n_pts < 50 ? n_pts : 50;
@@ -353,20 +355,62 @@ int robot_calibration_generate_excitation(RobotCalibration* calib,
                               * sinf((float)(k + 1) * w0 * t + calib->excitation.fourier_phases[k] + 0.5f * j);
                 }
             }
-            /* M-035修复: J6需要6×max_cols空间（16列）而非6×6 */
             float J6[6*16] = {0};
             build_identification_matrix(calib->nominal_dh, (int)n, q_eval, J6);
-            for (int ri = 0; ri < 6; ri++)
-                for (int ci = 0; ci < 6; ci++)
-                    Happrox[ri*6+ci] += J6[ri*16+ci] * J6[ri*16+ci];
+            for (int ri = 0; ri < 6; ri++) {
+                for (int ci = 0; ci < 6; ci++) {
+                    float sum = 0.0f;
+                    for (int k = 0; k < (int)n && k < 16; k++) {
+                        sum += J6[ri * 16 + k] * J6[ci * 16 + k];
+                    }
+                    Happrox[ri * 6 + ci] += sum;
+                }
+            }
         }
-        /* 用最大/最小对角线比近似条件数 */
-        float min_diag = 1e10f, max_diag = 0.0f;
+        /* Jacobi特征值分解计算条件数（对称矩阵） */
+        float eigv[6];
+        float work[6*6];
+        memcpy(work, Happrox, sizeof(work));
+        /* 对称矩阵Jacobi迭代求特征值 */
+        for (int iter = 0; iter < 30; iter++) {
+            float off_norm = 0.0f;
+            for (int i = 0; i < 6; i++)
+                for (int j = i + 1; j < 6; j++)
+                    off_norm += work[i*6+j] * work[i*6+j];
+            if (sqrtf(off_norm) < 1e-10f) break;
+            for (int p = 0; p < 5; p++) {
+                for (int q = p + 1; q < 6; q++) {
+                    if (fabsf(work[p*6+q]) < 1e-12f) continue;
+                    float theta = (work[q*6+q] - work[p*6+p]) / (2.0f * work[p*6+q]);
+                    float t = 1.0f / (fabsf(theta) + sqrtf(theta*theta + 1.0f));
+                    if (theta < 0) t = -t;
+                    float c = 1.0f / sqrtf(1.0f + t*t);
+                    float s = t * c;
+                    for (int r = 0; r < 6; r++) {
+                        if (r == p || r == q) continue;
+                        float rp = work[r*6+p], rq = work[r*6+q];
+                        work[r*6+p] = c * rp - s * rq;
+                        work[p*6+r] = work[r*6+p];
+                        work[r*6+q] = s * rp + c * rq;
+                        work[q*6+r] = work[r*6+q];
+                    }
+                    float pp = work[p*6+p], qq = work[q*6+q], pq = work[p*6+q];
+                    work[p*6+p] = c*c*pp + s*s*qq - 2.0f*c*s*pq;
+                    work[q*6+q] = s*s*pp + c*c*qq + 2.0f*c*s*pq;
+                    work[p*6+q] = 0.0f;
+                    work[q*6+p] = 0.0f;
+                }
+            }
+        }
+        /* 提取对角线作为特征值 */
+        for (int i = 0; i < 6; i++) eigv[i] = work[i*6+i];
+        float min_ev = 1e10f, max_ev = 0.0f;
         for (int di = 0; di < 6; di++) {
-            if (Happrox[di*6+di] < min_diag) min_diag = Happrox[di*6+di];
-            if (Happrox[di*6+di] > max_diag) max_diag = Happrox[di*6+di];
+            float ev = fabsf(eigv[di]);
+            if (ev < min_ev) min_ev = ev;
+            if (ev > max_ev) max_ev = ev;
         }
-        float cond_approx = (min_diag > 1e-10f) ? max_diag / min_diag : 1e10f;
+        float cond_approx = (min_ev > 1e-10f) ? max_ev / min_ev : 1e10f;
 
         if (cond_approx < best_cond) {
             best_cond = cond_approx;

@@ -165,8 +165,8 @@ TextProcessor* text_processor_create(const TextConfig* config) {
     processor->input_dim = input_dim;
     processor->hidden_dim = hidden_dim;
 
-    /* 创建文本编码专用LNN */
-    if (config->enable_cfc) {
+    /* 创建文本编码专用LNN（ZSFABC-M001修复：LNN创建失败返回NULL，不降级） */
+    {
         LNNConfig lnn_cfg;
         memset(&lnn_cfg, 0, sizeof(LNNConfig));
         lnn_cfg.input_size = input_dim;
@@ -183,24 +183,22 @@ TextProcessor* text_processor_create(const TextConfig* config) {
         lnn_cfg.ode_solver_type = 0;
 
         processor->text_lnn = lnn_create(&lnn_cfg);
-        if (processor->text_lnn) {
-            processor->owns_lnn = 1;
-
-            /* 分配隐藏状态和输入缓冲区 */
-            processor->hidden_state = (float*)safe_calloc(hidden_dim, sizeof(float));
-            processor->cell_state = (float*)safe_calloc(hidden_dim, sizeof(float));
-            processor->temp_input = (float*)safe_calloc(input_dim, sizeof(float));
-
-            if (!processor->hidden_state || !processor->cell_state
-                || !processor->temp_input) {
-                text_processor_free(processor);
-                return NULL;
-            }
+        if (!processor->text_lnn) {
+            log_error("[文本] LNN创建失败，文本处理器初始化中止。");
+            text_processor_free(processor);
+            return NULL;
         }
-    } else {
-        /* 不使用LNN时，降级为基本字符特征编码（不推荐） */
-        processor->text_lnn = NULL;
-        processor->owns_lnn = 0;
+        processor->owns_lnn = 1;
+
+        processor->hidden_state = (float*)safe_calloc(hidden_dim, sizeof(float));
+        processor->cell_state = (float*)safe_calloc(hidden_dim, sizeof(float));
+        processor->temp_input = (float*)safe_calloc(input_dim, sizeof(float));
+
+        if (!processor->hidden_state || !processor->cell_state
+            || !processor->temp_input) {
+            text_processor_free(processor);
+            return NULL;
+        }
     }
 
     processor->is_initialized = 1;
@@ -304,53 +302,10 @@ int text_process_string(TextProcessor* processor,
         return (int)copy_dim;
     }
 
-    /* 降级路径：LNN不可用时使用基本Unicode码点编码 */
-    /* 不是简单的字符频率，而是对每个码点进行哈希投影 */
-    {
-        size_t feature_dim = max_features < LNN_TEXT_DEFAULT_INPUT_DIM
-                             ? max_features : LNN_TEXT_DEFAULT_INPUT_DIM;
-        memset(features, 0, feature_dim * sizeof(float));
-
-        const char* pos = text;
-        const char* end = text + length;
-        size_t char_count = 0;
-
-        while (pos < end && char_count < LNN_TEXT_MAX_SEQ_LEN) {
-            unsigned int cp = 0;
-            int char_len = utf8_decode_codepoint(pos, &cp);
-            if (char_len <= 0) {
-                pos++;
-                continue;
-            }
-
-            /* 哈希投影：将码点映射到特征空间 */
-            unsigned int h1 = cp * 2654435761u;
-            unsigned int h2 = (cp ^ 0x5bd1e995) * 2654435761u;
-
-            size_t idx1 = h1 % feature_dim;
-            size_t idx2 = h2 % feature_dim;
-
-            features[idx1] += 1.0f;
-            features[idx2] += 0.5f;
-
-            pos += char_len;
-            char_count++;
-        }
-
-        /* 归一化 */
-        float norm = 0.0f;
-        for (size_t i = 0; i < feature_dim; i++) {
-            norm += features[i] * features[i];
-        }
-        if (norm > 1e-8f) {
-            float inv_norm = 1.0f / sqrtf(norm);
-            for (size_t i = 0; i < feature_dim; i++) {
-                features[i] *= inv_norm;
-            }
-        }
-
-        return (int)feature_dim;
-    }
+    /* ZSFABC-M001修复: LNN不可用时返回0特征维度，不再使用Unicode码点哈希降级
+     * 系统要求液态神经网络模型全部功能，不允许降级到非LNN编码 */
+    log_warning("[文本] LNN不可用，文本特征提取返回0维度。请确保系统LNN已初始化。");
+    return 0;
 }
 
 int text_extract_char_features(TextProcessor* processor,

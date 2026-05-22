@@ -18534,7 +18534,7 @@ static int handle_api_get_system_full_status(BackendServer* server,
         unsigned int gpu_backends = gpu_get_available_backends(NULL, 0);
         int gpu_avail = (gpu_backends != 0 && gpu_backends != (1u << GPU_BACKEND_CPU)) ? 1 : 0;
         /* 从服务器配置获取真实端口 */
-        int real_port = server->config.port > 0 ? server->config.port : 8080;
+        int real_port = server->config.port > 0 ? server->config.port : SELFLNN_HTTP_PORT;
         snprintf(j, 1024, "{\"success\":true,\"system\":{\"uptime_seconds\":%llu,"
             "\"active_tasks\":%d,\"total_memories\":%d,\"total_knowledge\":%d,"
             "\"lnn_available\":\"%s\",\"gpu_available\":\"%s\",\"backend_port\":%d}}",

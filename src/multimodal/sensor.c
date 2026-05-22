@@ -591,14 +591,68 @@ int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
         }
     }
     
-    /* 过程噪声协方差传播: P = F*P*F' + Q*dt */
-    /* 简化处理: 对角膨胀 + 按状态对交叉相关 */
-    for (int i = 0; i < n; i++) {
-        ekf->covariance[i * n + i] += ekf->process_noise[i * n + i] * dt;
+    /* ZSFABC-S009深度修复: 过程噪声协方差传播 P = F*P*F' + Q*dt
+     * 使用恒定速度模型的状态转移雅可比，而非对角简化。
+     * 状态结构: [pos0, vel0, pos1, vel1, ..., pos_k, vel_k]
+     * F矩阵为块对角: 每个2x2块为 [[1, dt], [0, 1-damping]]
+     * 完整的Q矩阵基于加速度方差构建每个2x2块 [[dt^4/4, dt^3/2], [dt^3/2, dt^2]] */
+    for (int i = 0; i < n; i += 2) {
+        float q0 = ekf->process_noise[i * n + i];
+        /* 对于每个位置-速度对(i, i+1)
+         * F块 = [[1, dt], [0, 0.995]] (带阻尼)
+         * Q块 = q0 * [[dt^4/4, dt^3/2], [dt^3/2, dt^2]]
+         * P_new = F*P*F' + Q */
+        float dt2 = dt * dt;
+        float dt3 = dt2 * dt;
+        float dt4 = dt3 * dt;
+        
+        /* 显式计算F*P*F' + Q（仅对角线2x2块 + 一对交叉项） */
+        /* 保存原始行 */
+        float p_ii = ekf->covariance[i * n + i];
+        float p_ij = (i + 1 < n) ? ekf->covariance[i * n + i + 1] : 0.0f;
+        float p_ji = (i + 1 < n) ? ekf->covariance[(i + 1) * n + i] : 0.0f;
+        float p_jj = (i + 1 < n) ? ekf->covariance[(i + 1) * n + (i + 1)] : 0.0f;
+        
+        /* F * P: 对第i和i+1行变换
+         * 行i: [p_ii + dt*p_ji, p_ij + dt*p_jj]
+         * 行i+1: [0.995*p_ji, 0.995*p_jj] */
+        float fp_ii = p_ii + dt * p_ji;
+        float fp_ij = p_ij + dt * p_jj;
+        float fp_ji = 0.995f * p_ji;
+        float fp_jj = 0.995f * p_jj;
+        
+        /* (F*P)*F': 乘上F的转置
+         * F' = [[1, 0], [dt, 0.995]]
+         * 结果对角: 
+         *   P'[i,i] = fp_ii*1 + fp_ij*dt
+         *   P'[i,i+1] = fp_ii*0 + fp_ij*0.995 = fp_ij*0.995
+         *   P'[i+1,i] = fp_ji*1 + fp_jj*dt
+         *   P'[i+1,i+1] = fp_ji*0 + fp_jj*0.995 = fp_jj*0.995 */
+        ekf->covariance[i * n + i] = fp_ii + fp_ij * dt + q0 * dt4 * 0.25f;
         if (i + 1 < n) {
-            /* 位置-速度交叉协方差膨胀 */
-            ekf->covariance[i * n + i + 1] += ekf->process_noise[i * n + i + 1] * dt * 0.5f;
-            ekf->covariance[(i + 1) * n + i] += ekf->process_noise[(i + 1) * n + i] * dt * 0.5f;
+            ekf->covariance[i * n + i + 1] = fp_ij * 0.995f + q0 * dt3 * 0.5f;
+            ekf->covariance[(i + 1) * n + i] = fp_ji + fp_jj * dt + q0 * dt3 * 0.5f;
+            ekf->covariance[(i + 1) * n + (i + 1)] = fp_jj * 0.995f + q0 * dt2;
+        }
+        
+        /* 更新与其他状态之间的交叉协方差 */
+        for (int c = 0; c < n; c++) {
+            if (c == i || c == i + 1) continue;
+            /* 行i: 新值 = 旧值 + dt*旧(行i+1,c) */
+            float old_ic = ekf->covariance[i * n + c];
+            float old_jc = (i + 1 < n) ? ekf->covariance[(i + 1) * n + c] : 0.0f;
+            ekf->covariance[i * n + c] = old_ic + dt * old_jc;
+            /* 行i+1: 新值 = 0.995 * 旧值 */
+            if (i + 1 < n) {
+                ekf->covariance[(i + 1) * n + c] = old_jc * 0.995f;
+            }
+            /* 列更新对称化 */
+            float old_ci = ekf->covariance[c * n + i];
+            float old_cj = (i + 1 < n) ? ekf->covariance[c * n + (i + 1)] : 0.0f;
+            ekf->covariance[c * n + i] = old_ci + dt * old_cj;
+            if (i + 1 < n) {
+                ekf->covariance[c * n + (i + 1)] = old_cj * 0.995f;
+            }
         }
     }
     return 0;

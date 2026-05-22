@@ -58,9 +58,13 @@
     window.pauseTraining = async function() {
         try {
             var data = await SelfLnnApi.trainingPause();
-            showNotification(data.success ? '训练已暂停' : '暂停失败', data.success ? 'success' : 'danger');
+            if (data && data.success) {
+                showNotification('训练已暂停', 'success');
+                stopPolling();
+            } else {
+                showNotification(data && data.error ? '暂停失败: ' + data.error : '暂停失败', 'danger');
+            }
         } catch(e) { showNotification('操作失败', 'danger'); console.error('[训练中心] pauseTraining失败:', e&&e.message?e.message:e); }
-        stopPolling();
     };
     window.resumeTraining = async function() {
         try {

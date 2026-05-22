@@ -25,7 +25,7 @@ class VoiceCaptureUtil {
     get isRecording() { return this._recording; }
 
     async start(stream) {
-        if (this._recording) return;
+        if (this._recording) return { success: false, error: '录音已在进行中' };
         try {
             if (!stream) throw new Error('未提供麦克风流');
             var compat = window.g_browserCompat || new BrowserCompat();
@@ -34,7 +34,7 @@ class VoiceCaptureUtil {
             this._stream = stream;
             this._recorder = new MediaRecorder(stream, {
                 mimeType: mimeType || 'audio/webm',
-                audioBitsPerSecond: this.sampleRate
+                audioBitsPerSecond: 128000  /* ZSFABC-Fix: 修复采样率与比特率混淆，16kbps→128kbps */
             });
             this._recorder.ondataavailable = function(e) {
                 if (e.data.size > 0) this._chunks.push(e.data);
@@ -92,8 +92,9 @@ class VoiceCaptureUtil {
             if (this.onError) this.onError('未采集到音频数据');
             return;
         }
-        var compat = window.g_browserCompat || new BrowserCompat();
-        var mimeType = compat.getSupportedMediaRecorderMimeType();
+        /* ZSFABC-Fix: BrowserCompat异常保护，防止未定义类导致崩溃 */
+        var compat = (typeof BrowserCompat !== 'undefined') ? new BrowserCompat() : null;
+        var mimeType = compat ? compat.getSupportedMediaRecorderMimeType() : 'audio/webm';
         var blob = new Blob(this._chunks, { type: mimeType || 'audio/webm' });
         this._chunks = [];
         if (this.onBlobReady) this.onBlobReady(blob);

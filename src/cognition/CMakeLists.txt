@@ -29,5 +29,15 @@ set_target_properties(selflnn_cognition PROPERTIES
     SOVERSION 1
 )
 
-# 链接依赖库
-target_link_libraries(selflnn_cognition PRIVATE selflnn_core)
+# 链接依赖库（ZSFABC-S008修复: 显式添加所有实际使用的模块依赖）
+target_link_libraries(selflnn_cognition PRIVATE 
+    selflnn_core
+    selflnn_evolution
+    selflnn_knowledge
+    selflnn_gpu
+    selflnn_memory
+    selflnn_reasoning
+    selflnn_learning
+    selflnn_agi
+    selflnn_safety
+)

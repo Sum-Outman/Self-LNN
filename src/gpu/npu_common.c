@@ -433,6 +433,112 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
 }
 
 /* ================================================================
+ * 5b. NPU内核创建/释放/参数设置（ZSFABC-C003修复：消除NULL函数指针）
+ *
+ * 为昇腾/寒武纪/TPU/Intel四个NPU后端提供统一的CPU内核管理。
+ * 内核通过"命名匹配"机制执行：kernel_name决定操作类型，
+ * 实际计算在npu_common_cpu_kernel_execute中完成。
+ * 零虚拟数据 —— 所有操作均为精确数学实现。
+ * ================================================================ */
+
+static GpuKernel* npu_common_kernel_create(GpuContext* context,
+                                            const char* kernel_source,
+                                            const char* kernel_name) {
+    (void)context;
+    if (!kernel_name) return NULL;
+
+    GpuKernel* k = (GpuKernel*)safe_calloc(1, sizeof(GpuKernel));
+    if (!k) return NULL;
+
+    k->context = context;
+    size_t name_len = strlen(kernel_name) + 1;
+    k->kernel_name = (char*)safe_malloc(name_len);
+    if (k->kernel_name) memcpy(k->kernel_name, kernel_name, name_len);
+    if (kernel_source) {
+        size_t src_len = strlen(kernel_source) + 1;
+        k->kernel_source = (char*)safe_malloc(src_len);
+        if (k->kernel_source) memcpy(k->kernel_source, kernel_source, src_len);
+    }
+    k->arg_capacity = 8;
+    k->arg_values = (void**)safe_calloc((size_t)k->arg_capacity, sizeof(void*));
+    k->arg_sizes  = (size_t*)safe_calloc((size_t)k->arg_capacity, sizeof(size_t));
+    k->arg_count  = 0;
+    k->work_dim   = 1;
+    k->is_compiled = 0;
+    k->global_work_size[0] = 0;
+    k->global_work_size[1] = 0;
+    k->global_work_size[2] = 0;
+    k->local_work_size[0]  = 0;
+    k->local_work_size[1]  = 0;
+    k->local_work_size[2]  = 0;
+
+    return k;
+}
+
+static void npu_common_kernel_free(GpuKernel* kernel) {
+    if (!kernel) return;
+    if (kernel->kernel_name)   safe_free((void**)&kernel->kernel_name);
+    if (kernel->kernel_source) safe_free((void**)&kernel->kernel_source);
+    if (kernel->arg_values)    safe_free((void**)&kernel->arg_values);
+    if (kernel->arg_sizes)     safe_free((void**)&kernel->arg_sizes);
+    if (kernel->user_data)     safe_free((void**)&kernel->user_data);
+    memset(kernel, 0, sizeof(GpuKernel));
+    safe_free((void**)&kernel);
+}
+
+static int npu_common_kernel_set_arg(GpuKernel* kernel, int arg_index,
+                                      size_t arg_size, const void* arg_value) {
+    if (!kernel || arg_index < 0) return -1;
+
+    if (arg_index >= kernel->arg_capacity) {
+        int new_cap = kernel->arg_capacity * 2;
+        if (new_cap <= arg_index) new_cap = arg_index + 8;
+        void** new_vals = (void**)safe_realloc(kernel->arg_values,
+                                                (size_t)new_cap * sizeof(void*));
+        size_t* new_sizes = (size_t*)safe_realloc(kernel->arg_sizes,
+                                                    (size_t)new_cap * sizeof(size_t));
+        if (!new_vals || !new_sizes) return -1;
+        kernel->arg_values = new_vals;
+        kernel->arg_sizes  = new_sizes;
+        for (int i = kernel->arg_capacity; i < new_cap; i++) {
+            kernel->arg_values[i] = NULL;
+            kernel->arg_sizes[i]  = 0;
+        }
+        kernel->arg_capacity = new_cap;
+    }
+
+    kernel->arg_values[arg_index] = (void*)arg_value;
+    kernel->arg_sizes[arg_index]  = arg_size;
+    if (arg_index >= kernel->arg_count) {
+        kernel->arg_count = arg_index + 1;
+    }
+    return 0;
+}
+
+static int npu_common_kernel_execute_entry(GpuKernel* kernel,
+                                            size_t global_work_size,
+                                            size_t local_work_size) {
+    if (!kernel) return -1;
+    kernel->global_work_size[0] = global_work_size;
+    kernel->local_work_size[0]  = local_work_size;
+    return npu_common_cpu_kernel_execute(kernel, global_work_size);
+}
+
+static int npu_common_kernel_execute_nd_entry(GpuKernel* kernel, int work_dim,
+                                               const size_t* global_sizes,
+                                               const size_t* local_sizes) {
+    if (!kernel || !global_sizes || work_dim < 1 || work_dim > 3) return -1;
+    size_t total = 1;
+    for (int d = 0; d < work_dim; d++) {
+        kernel->global_work_size[d] = global_sizes[d];
+        kernel->local_work_size[d]  = local_sizes ? local_sizes[d] : 0;
+        total *= global_sizes[d];
+    }
+    kernel->work_dim = work_dim;
+    return npu_common_cpu_kernel_execute(kernel, total);
+}
+
+/* ================================================================
  * 6a. NPU接口CPU回退函数（防止NULL指针崩溃）
  * ================================================================ */
 
@@ -513,11 +619,12 @@ void npu_common_populate_backend_iface(GpuBackendInterface* iface,
     iface->memory_copy_device_to_device = npu_common_memcpy_d2d_fallback;
     iface->memory_copy_to_device_async = npu_common_memcpy_h2d_fallback;
     iface->memory_copy_from_device_async = npu_common_memcpy_d2h_fallback;
-    iface->kernel_create = NULL;
-    iface->kernel_free = NULL;
-    iface->kernel_set_arg = NULL;
-    iface->kernel_execute = NULL;
-    iface->kernel_execute_nd = NULL;
+    /* ZSFABC-C003修复: 消除NULL内核指针，使用真实CPU计算路径 */
+    iface->kernel_create   = npu_common_kernel_create;
+    iface->kernel_free     = npu_common_kernel_free;
+    iface->kernel_set_arg  = npu_common_kernel_set_arg;
+    iface->kernel_execute  = npu_common_kernel_execute_entry;
+    iface->kernel_execute_nd = npu_common_kernel_execute_nd_entry;
     iface->stream_create = npu_common_stream_create;
     iface->stream_free = npu_common_stream_free;
     iface->stream_synchronize = npu_common_stream_synchronize;

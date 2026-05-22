@@ -1115,7 +1115,7 @@ int hardware_probe_serial(void) {
 /**
  * @brief CAN总线接口探测
  * 检查socketcan接口（Linux: can0/vcan0, Windows: pcan设备）
- * 如果检测失败，自动创建虚拟CAN接口用于开发测试
+ * 仅探测真实硬件CAN接口，不创建任何虚拟/模拟接口。未检测到时返回0。
  */
 int hardware_probe_can(void) {
 #ifdef __linux__

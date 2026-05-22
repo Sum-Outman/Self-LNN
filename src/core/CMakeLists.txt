@@ -15,7 +15,6 @@ add_library(selflnn_core
     quaternion_conv.c
     quaternion_batchnorm.c
     lnn_layer_norm.c
-    ../math/matrix_ops.c
 
     quaternion_optimizer.c
     graph_optimization.c
@@ -45,7 +44,8 @@ target_include_directories(selflnn_core PUBLIC
 )
 
 # quaternion_lnn.c、selflnn.c需要GPU函数，所以始终链接GPU桩库并传播给所有使用者
-target_link_libraries(selflnn_core PUBLIC selflnn_gpu utils)
+# ZSFABC-C001修复: 移除matrix_ops.c双重编译，改为链接selflnn_math库
+target_link_libraries(selflnn_core PUBLIC selflnn_gpu selflnn_math utils)
 target_link_libraries(selflnn_core PRIVATE selflnn_knowledge selflnn_multimodal)
 
 # 安装规则

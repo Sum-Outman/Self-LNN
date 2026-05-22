@@ -1029,7 +1029,7 @@ function initializeDashboard() {
 function showApiUnavailableError() {
     /* 如果内联仪表盘更新器已设值，不覆盖 */
     if (window.__dashboardLive === true) return;
-    console.warn('后端后端未连接，显示断开状态（绝不生成虚假数据）');
+    console.warn('后端未连接，显示断开状态（绝不生成虚假数据）');
     showNotification('⚠️ 后端后端未连接，等待连接...', 'warning');
     
     if (g_usingDataEngine && g_dataEngine) {
@@ -1102,13 +1102,13 @@ function updateSystemHealth(systemStatus) {
         // API返回详细系统状态，我们可以从中提取信息
         const systemData = systemStatus.data.system;
         
-        // CPU使用率（优先使用后端返回的真实估算值）
+        // CPU使用率（必须使用后端返回的真实值，禁止虚假推算）
         if (systemData.cpu_usage !== undefined && systemData.cpu_usage >= 0) {
             cpuUsage = systemData.cpu_usage;
         } else {
-            cpuUsage = Math.min(100, Math.max(0, systemData.requests.total * 0.1));
+            cpuUsage = -1;
         }
-        if (cpuElement) cpuElement.textContent = `${Math.round(cpuUsage)}%`;
+        if (cpuElement) cpuElement.textContent = cpuUsage >= 0 ? `${Math.round(cpuUsage)}%` : '--';
         
         // 内存使用（从内存统计中获取，绝不使用假数据）
         const memoryData = systemData.modules.memory;
@@ -1552,8 +1552,10 @@ function updateRealTimeMetrics(systemStatus) {
     
     // === 系统健康状态 ===
     setEl('.health-status .status-text', sys.status === 'running' ? '运行正常' : '状态异常');
-    setEl('.metric:nth-child(1) .metric-value', Math.round(Math.min(100, Math.max(0, reqs.total * 0.1))) + '%');
-    setEl('.metric:nth-child(1) .metric-fill', Math.min(100, Math.max(0, reqs.total * 0.1)) + '%', 'width');
+    /* ZSFABC-FE-Fix: 禁止虚假CPU数据，使用后端真实CPU值 */
+    var realCpu = (sys.cpu_usage !== undefined && sys.cpu_usage >= 0) ? sys.cpu_usage : ((reqs.cpu !== undefined && reqs.cpu >= 0) ? reqs.cpu : -1);
+    setEl('.metric:nth-child(1) .metric-value', realCpu >= 0 ? Math.round(realCpu) + '%' : '--');
+    setEl('.metric:nth-child(1) .metric-fill', realCpu >= 0 ? Math.round(realCpu) + '%' : '0%', 'width');
     if (sys.uptime) { var d=Math.floor(sys.uptime/86400); var h=Math.floor((sys.uptime%86400)/3600); setEl('.metric:nth-child(3) .metric-value', d+'天 '+h+'小时'); }
     
     // === LNN状态（单一液态神经网络） ===
@@ -1649,7 +1651,10 @@ function updateRealTimeMetrics(systemStatus) {
     var lnnSt2 = mods.lnn_state || {};
     setEl('#state-dimension', lnnMod.h_dim ? lnnMod.h_dim + '维' : '--');
     setEl('#lnn-accuracy', sys.training && sys.training.accuracy ? (sys.training.accuracy * 100).toFixed(1) + '%' : '--');
-    setEl('#inference-latency', reqs.rate_per_minute > 0 ? (60000 / reqs.rate_per_minute).toFixed(0) + 'ms' : '--');
+    /* ZSFABC-FE-Fix: 禁止虚假推理延迟（请求速率反推），必须使用后端真实值 */
+    var realLatency = (lnnSt2.inference_latency_ms !== undefined && lnnSt2.inference_latency_ms >= 0) ? lnnSt2.inference_latency_ms
+                    : (sys.inference_latency_ms !== undefined && sys.inference_latency_ms >= 0) ? sys.inference_latency_ms : -1;
+    setEl('#inference-latency', realLatency >= 0 ? realLatency.toFixed(1) + 'ms' : '--');
     setEl('#time-constant', lnnMod.tau !== undefined && lnnMod.tau !== null ? lnnMod.tau.toFixed(4) + 's' : '--');
     
     // === 模型详情（CfC核心信息+性能指标圆环） ===
@@ -1743,9 +1748,12 @@ function updateRealTimeMetrics(systemStatus) {
         var ps = memInfo.querySelectorAll('p');
         if (ps.length >= 3) {
             var entryCount = mem.entry_count !== undefined && mem.entry_count !== null ? mem.entry_count : 0;
-            ps[0].querySelector('strong').textContent = entryCount + ' 条';
-            ps[1].querySelector('strong').textContent = mem.consolidation_ratio !== undefined && mem.consolidation_ratio !== null ? (mem.consolidation_ratio * 100).toFixed(1) + '%' : '0.0%';
-            ps[2].querySelector('strong').textContent = mem.consolidation_ratio !== undefined && mem.consolidation_ratio !== null ? (mem.consolidation_ratio * 100).toFixed(1) + '%' : '0.0%';
+            var s0 = ps[0] && ps[0].querySelector('strong');
+            var s1 = ps[1] && ps[1].querySelector('strong');
+            var s2 = ps[2] && ps[2].querySelector('strong');
+            if (s0) s0.textContent = entryCount + ' 条';
+            if (s1) s1.textContent = mem.consolidation_ratio !== undefined && mem.consolidation_ratio !== null ? (mem.consolidation_ratio * 100).toFixed(1) + '%' : '0.0%';
+            if (s2) s2.textContent = mem.retrieval_success_rate !== undefined && mem.retrieval_success_rate !== null ? (mem.retrieval_success_rate * 100).toFixed(1) + '%' : '0.0%';
         }
     }
     setEl('#dash-knowledge-count', sys.knowledge ? sys.knowledge.count : '--');
@@ -1755,7 +1763,9 @@ function updateRealTimeMetrics(systemStatus) {
     var total_req = reqs.total || 0;
     var errors_req = reqs.errors || 0;
     var success_rate = total_req > 0 ? ((total_req - errors_req) / total_req * 100).toFixed(1) : '--';
-    var avg_resp_time = reqs.rate_per_minute > 0 ? (60000 / reqs.rate_per_minute).toFixed(0) : '--';
+    /* ZSFABC-FE-Fix: 禁止虚假响应时间（请求速率反推），必须使用后端真实值 */
+    var avg_resp_time = (reqs.avg_response_time_ms !== undefined && reqs.avg_response_time_ms >= 0) ? reqs.avg_response_time_ms.toFixed(1) + 'ms'
+                      : (sys.avg_response_time_ms !== undefined && sys.avg_response_time_ms >= 0) ? sys.avg_response_time_ms.toFixed(1) + 'ms' : '--';
     setEl('.reasoning-stats .stat:nth-child(1) .stat-value', reqs.rate_per_minute ? (reqs.rate_per_minute / 60).toFixed(1) : '0.0');
     setEl('.reasoning-stats .stat:nth-child(2) .stat-value', avg_resp_time);
     setEl('.reasoning-stats .stat:nth-child(3) .stat-value', success_rate);
@@ -1870,7 +1880,7 @@ function setupEventListeners() {
         // Ctrl + T 开始训练
         if (e.ctrlKey && e.key === 't') {
             e.preventDefault();
-            startTraining();
+            startTrainingQuick();
         }
         
         // Ctrl + S 紧急停止
@@ -2881,6 +2891,28 @@ function cancelTask(taskId) {
 }
 
 /**
+ * 继续/恢复任务（ZSFABC-FE-Fix: 原函数缺失导致 onclick 崩溃）
+ */
+function resumeTask(taskId) {
+    showNotification('继续任务中...', 'info');
+    if (window.SelfLnnApi && typeof window.SelfLnnApi.resumeTask === 'function') {
+        SelfLnnApi.resumeTask(taskId).then(result => {
+            if (result && result.success) {
+                showNotification('✅ 任务已恢复', 'success');
+                updateTaskUI(taskId, '运行中', 'rgba(40, 167, 69, 0.1)', '#28a745');
+                loadTaskQueue();
+            } else {
+                showNotification('⚠️ 任务恢复失败: ' + (result ? result.error || '未知错误' : '未知错误'), 'warning');
+            }
+        }).catch(err => {
+            showNotification('❌ 恢复失败: ' + err.message, 'danger');
+        });
+    } else {
+        showNotification('⚠️ 任务API不可用', 'warning');
+    }
+}
+
+/**
  * 更新单个任务UI
  */
 function updateTaskUI(taskId, statusText, bgColor, textColor) {
@@ -3789,61 +3821,63 @@ async function refreshLNNStatus() {
                 // 例如：更新稳定性、收敛率、动态响应等指标
                 if (status.stability !== undefined) {
                     const stabilityPercent = Math.min(100, Math.max(0, status.stability * 100));
-                    document.querySelectorAll('.circle-progress')[0].setAttribute('data-percent', stabilityPercent);
-                    document.querySelectorAll('.circle-text')[0].textContent = `${stabilityPercent.toFixed(1)}%`;
-                    
-                    // 更新进度条
-                    const circleFill = document.querySelectorAll('.circle-fill')[0];
-                    const circumference = 2 * Math.PI * 36;
-                    const offset = circumference - (stabilityPercent / 100) * circumference;
-                    circleFill.style.strokeDashoffset = offset;
-                }
+                    var cps = document.querySelectorAll('.circle-progress');
+                    var cts = document.querySelectorAll('.circle-text');
+                    var cfs = document.querySelectorAll('.circle-fill');
+                    if (cps[0]) cps[0].setAttribute('data-percent', stabilityPercent);
+                    if (cts[0]) cts[0].textContent = stabilityPercent.toFixed(1) + '%';
+                    if (cfs[0]) {
+                        var circ = 2 * Math.PI * 36;
+                        var off = circ - (stabilityPercent / 100) * circ;
+                        cfs[0].style.strokeDashoffset = off;
+                    }
                 
                 if (status.convergence_rate !== undefined) {
                     const convergencePercent = Math.min(100, Math.max(0, status.convergence_rate * 100));
-                    document.querySelectorAll('.circle-progress')[1].setAttribute('data-percent', convergencePercent);
-                    document.querySelectorAll('.circle-text')[1].textContent = `${convergencePercent.toFixed(1)}%`;
-                    
-                    const circleFill = document.querySelectorAll('.circle-fill')[1];
+                    if (cps[1]) cps[1].setAttribute('data-percent', convergencePercent);
+                    if (cts[1]) cts[1].textContent = convergencePercent.toFixed(1) + '%';
+                    if (cfs[1]) {
                     const circumference = 2 * Math.PI * 36;
                     const offset = circumference - (convergencePercent / 100) * circumference;
-                    circleFill.style.strokeDashoffset = offset;
+                    cfs[1].style.strokeDashoffset = offset;
+                    }
                 }
                 
                 if (status.dynamic_response !== undefined) {
                     const responseValue = status.dynamic_response;
-                    document.querySelectorAll('.circle-progress')[2].setAttribute('data-percent', Math.min(100, responseValue));
-                    document.querySelectorAll('.circle-text')[2].textContent = `${responseValue.toFixed(1)} Hz`;
-                    
-                    const circleFill = document.querySelectorAll('.circle-fill')[2];
+                    if (cps[2]) cps[2].setAttribute('data-percent', Math.min(100, responseValue));
+                    if (cts[2]) cts[2].textContent = responseValue.toFixed(1) + ' Hz';
+                    if (cfs[2]) {
                     const circumference = 2 * Math.PI * 36;
                     const offset = circumference - (Math.min(100, responseValue) / 100) * circumference;
-                    circleFill.style.strokeDashoffset = offset;
+                    cfs[2].style.strokeDashoffset = offset;
+                    }
                 }
                 
-                // 更新状态指标
+                var ivs = document.querySelectorAll('.indicator-value');
+                var ifs = document.querySelectorAll('.indicator-fill');
                 if (status.viscosity !== undefined) {
                     const viscosityPercent = Math.min(100, Math.max(0, status.viscosity * 100));
-                    document.querySelectorAll('.indicator-value')[0].textContent = status.viscosity.toFixed(3);
-                    document.querySelectorAll('.indicator-fill')[0].style.width = `${viscosityPercent}%`;
+                    if (ivs[0]) ivs[0].textContent = status.viscosity.toFixed(3);
+                    if (ifs[0]) ifs[0].style.width = viscosityPercent + '%';
                 }
                 
                 if (status.temperature_entropy !== undefined) {
                     const entropyPercent = Math.min(100, Math.max(0, status.temperature_entropy * 100));
-                    document.querySelectorAll('.indicator-value')[1].textContent = status.temperature_entropy.toFixed(3);
-                    document.querySelectorAll('.indicator-fill')[1].style.width = `${entropyPercent}%`;
+                    if (ivs[1]) ivs[1].textContent = status.temperature_entropy.toFixed(3);
+                    if (ifs[1]) ifs[1].style.width = entropyPercent + '%';
                 }
                 
                 if (status.flow_rate !== undefined) {
                     const flowPercent = Math.min(100, Math.max(0, status.flow_rate * 100));
-                    document.querySelectorAll('.indicator-value')[2].textContent = status.flow_rate.toFixed(3);
-                    document.querySelectorAll('.indicator-fill')[2].style.width = `${flowPercent}%`;
+                    if (ivs[2]) ivs[2].textContent = status.flow_rate.toFixed(3);
+                    if (ifs[2]) ifs[2].style.width = flowPercent + '%';
                 }
                 
                 if (status.diffusion_coefficient !== undefined) {
                     const diffusionPercent = Math.min(100, Math.max(0, status.diffusion_coefficient * 100));
-                    document.querySelectorAll('.indicator-value')[3].textContent = status.diffusion_coefficient.toFixed(3);
-                    document.querySelectorAll('.indicator-fill')[3].style.width = `${diffusionPercent}%`;
+                    if (ivs[3]) ivs[3].textContent = status.diffusion_coefficient.toFixed(3);
+                    if (ifs[3]) ifs[3].style.width = diffusionPercent + '%';
                 }
             } else {
                 showNotification(`❌ 获取LNN状态失败: ${result.error || '未知错误'}`, 'error');
@@ -4331,7 +4365,7 @@ function knowledgeRefreshStatus() {
         statusEl.style.display = 'block';
         statusEl.style.background = 'rgba(0,200,255,0.1)';
         statusEl.style.color = '#00c8ff';
-        selfLnnApi.getKnowledgeStats().then(function(data) {
+        SelfLnnApi.getKnowledgeStats().then(function(data) {
             var entries = (data && data.total_entries) ? data.total_entries : '--';
             var domains = (data && data.domain_count) ? data.domain_count : '--';
             statusEl.textContent = '📁 存储路径: knowledge_data/knowledge_base.skb | 条目: ' + entries + ' | 领域: ' + domains;
@@ -5867,7 +5901,8 @@ function toggleVoiceOutput() {
  */
 
 /** 显示/隐藏API密钥 */
-function toggleApiKeyVisibility() {
+function toggleApiKeyVisibility(event) {
+    if (!event) return;
     var input = document.getElementById('api-key-current');
     if (input) {
         if (input.type === 'password') {
@@ -5979,8 +6014,15 @@ async function setNewApiKey() {
 function generateNewApiKey() {
     var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
     var key = '';
+    /* ZSFABC-Fix: 使用crypto.getRandomValues替代Math.random确保API密钥安全 */
+    var randomBuf = new Uint32Array(32);
+    if (window.crypto && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(randomBuf);
+    } else {
+        for (var i = 0; i < 32; i++) randomBuf[i] = Math.floor(Math.random() * 4294967296);
+    }
     for (var i = 0; i < 32; i++) {
-        key += chars.charAt(Math.floor(Math.random() * chars.length));
+        key += chars.charAt(randomBuf[i] % chars.length);
     }
     var input = document.getElementById('api-key-new-input');
     if (input) input.value = key;
@@ -6363,8 +6405,16 @@ async function refreshSleepConsolidationStats() {
             document.getElementById('sleep-stat-abstract').textContent = sc.abstracted || 0;
             document.getElementById('sleep-consolidation-result').style.display = 'block';
             if (sc.last_run) {
-                document.getElementById('sleep-consolidation-result').querySelector('div').insertAdjacentHTML('beforeend',
-                    '<span>上次执行: ' + sc.last_run + '</span>');
+                /* ZSFABC-Fix: 使用textContent替代insertAdjacentHTML，防止XSS */
+                var resultDiv = document.getElementById('sleep-consolidation-result');
+                if (resultDiv) {
+                    var innerDiv = resultDiv.querySelector('div');
+                    if (innerDiv) {
+                        var span = document.createElement('span');
+                        span.textContent = '上次执行: ' + sc.last_run;
+                        innerDiv.appendChild(span);
+                    }
+                }
             }
         } else {
             document.getElementById('sleep-consolidation-result').style.display = 'none';
@@ -7384,11 +7434,11 @@ async function refreshLearningMetrics() {
             
             // 立即执行一次，然后每10秒刷新
             refreshAllPanels();
-            /* ZSFAB-H07修复: 统一到DataEngine调度 */
+            /* ZSFABC-FE-Fix: 保存定时器句柄防止内存泄漏 */
             if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
                 g_dataEngine.registerModule('all_panels_sync', 10000, refreshAllPanels);
             } else {
-                setInterval(refreshAllPanels, 10000);
+                window._allPanelsRefreshTimer = setInterval(refreshAllPanels, 10000);
             }
         }, 6000);
     })();

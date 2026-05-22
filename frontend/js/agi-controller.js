@@ -121,7 +121,7 @@ class AGIController {
                 return await this._apiPost('/api/robot/disconnect', task.params);
             case 'move':
                 if (task.params.distance === undefined || task.params.speed === undefined) {
-                    return { error: true, message: '移动指令缺少必要参数：distance/speed' };
+                    throw new Error('移动指令缺少必要参数：distance/speed');
                 }
                 return await this._apiPost('/api/robot/command', {
                     action: 'move',
@@ -131,7 +131,7 @@ class AGIController {
                 });
             case 'rotate':
                 if (task.params.angle === undefined || task.params.speed === undefined) {
-                    return { error: true, message: '旋转指令缺少必要参数：angle/speed' };
+                    throw new Error('旋转指令缺少必要参数：angle/speed');
                 }
                 return await this._apiPost('/api/robot/command', {
                     action: 'rotate',
@@ -143,9 +143,8 @@ class AGIController {
             case 'emergency_stop':
                 return await this._apiPost('/api/robot/emergency_stop', {});
             case 'set_speed':
-                /* B-015修复: 无参数时返回错误，不使用默认值 */
                 if (task.params.speed === undefined) {
-                    return { error: true, message: '设置速度指令缺少必要参数：speed' };
+                    throw new Error('设置速度指令缺少必要参数：speed');
                 }
                 return await this._apiPost('/api/robot/parameters', { linear_speed: task.params.speed });
             case 'get_status':

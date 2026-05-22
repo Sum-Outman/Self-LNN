@@ -925,106 +925,13 @@ static float zipf_frequency_encode(int rank, int total_ranks, unsigned int seed)
 }
 
 int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
-#ifdef SELFLNN_BOOTSTRAP_DISABLED
+    /* ZSFABC-S004深度修复: 永久禁用合成数据生成。
+     * 需求明确要求"禁止使用任何预训练模型"、"不可以使用任何假数据和虚拟数据"。
+     * 合成数学函数数据(分形/谐振子/Zipf/sin-cos方程)违反此原则。
+     * 系统必须从真实多模态传感器/摄像头/麦克风数据中学习。 */
     (void)out_ds;
     (void)num_samples;
-    log_error("[数据集] 引导数据生成已禁用。Release模式下禁止合成数据，"
-              "请使用真实多模态数据训练。如需测试框架，请使用--allow-bootstrap编译选项。");
+    log_error("[数据集] 引导数据生成已永久禁用（ZSFABC-S004修复）。"
+              "系统必须使用真实多模态数据训练。禁止使用合成数学函数数据。");
     return -1;
-#else
-    if (!out_ds || num_samples == 0 || num_samples > BS_MAX_SAMPLES) return -1;
-    
-    log_warning("[数据集] 生成数学引导数据集（仅用于框架验证，绝对不可用于自主学习）。"
-                "样本数=%zu，Release模式下此函数将被禁用。", num_samples);
-    
-    TrainingDataset* ds = dataset_create("SELF-LNN_Bootstrap_Multimodal_DEBUG_ONLY",
-                                          num_samples, BS_FUSED_DIM, BS_VISION_DIM);
-    if (!ds) return -1;
-
-    ds->header.flags |= 0x80000000; /* 标记为引导数据（禁止自主学习使用） */
-    
-    for (size_t s = 0; s < num_samples; s++) {
-        float* sample = ds->inputs + s * BS_FUSED_DIM;
-        float* target = ds->outputs + s * BS_VISION_DIM;
-        
-        /* 视觉：分形纹理（Mandelbrot集映射）+ 梯度 + Sobel边缘 */
-        for (int i = 0; i < BS_VISION_DIM; i++) {
-            int vx = i % 16;
-            int vy = i / 16;
-            float fractal = fractal_texture(vx, vy, (int)s, 16, 16);
-            float gradient = (float)(vx + vy) / 31.0f;
-            float edge = (vx > 0 && vy > 0 && vx < 15 && vy < 15) ?
-                fabsf(fractal_texture(vx+1, vy, (int)s, 16, 16) -
-                      fractal_texture(vx-1, vy, (int)s, 16, 16)) * 0.5f : 0.0f;
-            sample[i] = fractal * 0.5f + gradient * 0.3f + edge * 0.2f;
-            target[i] = fractal * 0.7f + edge * 0.3f; /* 目标：分形+边缘 */
-        }
-        sample += BS_VISION_DIM;
-        
-        /* 音频：真实阻尼谐振子叠加模型 */
-        for (int i = 0; i < BS_AUDIO_DIM; i++) {
-            float t = (float)(i) * 0.001f;
-            float base_freq = 100.0f + (float)(s % 20) * 50.0f;
-            float damping = 2.0f + (float)(s % 5) * 0.5f;
-            sample[i] = physics_vibration(t, base_freq, damping, (int)s);
-            target[i] = physics_vibration(t, base_freq, damping * 0.3f, (int)s);
-        }
-        sample += BS_AUDIO_DIM;
-        
-        /* 文本：Zipf分布频率编码 + 词共现矩阵 */
-        static const char* text_vocab[] = {
-            "液态神经网络", "连续时间", "微分方程", "CfC细胞",
-            "多模态融合", "贝叶斯推理", "拓扑排序", "动态规划",
-            "梯度下降", "反向传播", "时间常数", "状态演化",
-            "传感器融合", "机器人运动学", "摄像头标定", "麦克风阵列",
-            "知识图谱", "语义网络", "因果推理", "自注意机制",
-            "能量优化", "路径积分", "量子退火", "熵最大化"
-        };
-        int vocab_size = sizeof(text_vocab) / sizeof(text_vocab[0]);
-        for (int i = 0; i < BS_TEXT_DIM; i++) {
-            int rank = (s + i * 3) % vocab_size;
-            float freq = zipf_frequency_encode(rank, vocab_size, (unsigned int)(s * 65537 + i));
-            float cooccur = 0.0f;
-            if (i > 0) cooccur = sample[-1] * 0.3f;
-            sample[i] = freq + cooccur;
-            target[i] = freq;
-        }
-        sample += BS_TEXT_DIM;
-        
-        /* 传感器：牛顿力学刚体运动方程 */
-        for (int i = 0; i < BS_SENSOR_DIM; i++) {
-            float t = (float)(s * BS_SENSOR_DIM + i) * 0.005f;
-            /* 刚体加速度（m/s²）— 基于牛顿第二定律 */
-            float acc_x = sinf(t * 2.5f) * 1.5f + cosf(t * 0.7f) * 0.5f;
-            float acc_y = cosf(t * 1.9f) * 1.2f + sinf(t * 0.5f) * 0.4f;
-            float acc_z = 9.81f + sinf(t * 0.3f) * 0.3f; /* 重力 + 微小振动 */
-            /* 陀螺仪角速度（rad/s）— 基于刚体旋转动力学 */
-            float gyro_x = cosf(t * 2.0f) * 0.8f;
-            float gyro_y = sinf(t * 2.5f) * 0.7f;
-            float gyro_z = cosf(t * 0.6f) * sinf(t * 1.3f) * 0.5f;
-            /* 磁力计（μT）— 地球磁场+扰动 */
-            float mag_x = 25.0f + cosf(t * 0.1f) * 5.0f;
-            float mag_y = sinf(t * 0.1f) * 3.0f;
-            (void)mag_y;
-            /* 温度（°C）— 热力学模型 */
-            float temp = 25.0f + sinf(t * 0.05f) * 3.0f + cosf(t * 0.03f) * 1.5f;
-            
-            switch (i % 8) {
-                case 0: sample[i] = acc_x * 0.1f; break;
-                case 1: sample[i] = acc_y * 0.1f; break;
-                case 2: sample[i] = (acc_z - 9.81f) * 0.1f; break;
-                case 3: sample[i] = gyro_x; break;
-                case 4: sample[i] = gyro_y; break;
-                case 5: sample[i] = gyro_z; break;
-                case 6: sample[i] = (mag_x - 25.0f) / 25.0f; break;
-                case 7: sample[i] = (temp - 20.0f) / 15.0f; break;
-            }
-            target[i] = sample[i];
-        }
-    }
-    
-    *out_ds = ds;
-    log_info("[数据集] 数学引导数据集生成完成：%zu样本 × %d维", num_samples, BS_FUSED_DIM);
-    return 0;
-#endif
 }

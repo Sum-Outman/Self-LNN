@@ -6,10 +6,11 @@
  * 稳定性优化和系统特性分析功能。
  */
 
+#define SELFLNN_CORE_INTERNAL
+
 #include "selflnn/core/laplace.h"
 #include "selflnn/core/laplace_integration.h"
 #include "selflnn/core/laplace_fft.h"
-#define SELFLNN_CORE_INTERNAL
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/cfc.h"
 #include "selflnn/core/lnn.h"

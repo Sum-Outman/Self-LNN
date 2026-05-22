@@ -123,9 +123,9 @@ class BrowserCompat {
 
     async enumerateMediaDevices() {
         if (!this.features.enumerateDevices) {
-            console.warn('enumerateDevices不可用，尝试降级处理');
+            console.warn('enumerateDevices不可用，尝试降级处理（仅音频）');
             try {
-                var stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+                var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 var devices = [];
                 if (stream.getAudioTracks().length > 0) {
                     devices.push({ kind: 'audioinput', label: '默认麦克风', deviceId: 'default' });

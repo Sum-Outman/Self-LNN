@@ -999,178 +999,26 @@ static void gradient_topk_compress(float* gradients, size_t num_params,
 static void gradient_topk_decompress(float* output, size_t num_params,
                                      const int* indices, const float* values,
                                      size_t compressed_size);
-static int ring_allreduce_scatter_reduce(float** node_chunks, float* send_buf,
-                                         float* recv_buf, float* result_buf,
-                                         size_t chunk_size, int node_id,
-                                         int total_nodes);
-static int ring_allreduce_all_gather(float** node_chunks, float* send_buf,
-                                     float* recv_buf, float* result_buf,
-                                     size_t chunk_size, int node_id,
-                                     int total_nodes);
 
 /* ============================================================================
- * B-027: Ring AllReduce 梯度聚合 — 环状通信模拟实现
+ * B-027: Ring AllReduce 梯度聚合
  *
- * 替代原来的简单平均法。实现两阶段的环状AllReduce：
- *   阶段1 (Scatter-Reduce): N-1步，梯度数据沿环传递，
- *      每个节点对自己负责的chunk进行累加归约
- *   阶段2 (All-Gather): N-1步，归约后的结果沿环广播，
- *      最终每个节点获得完整的全局梯度
- *
- * 通信复杂度: 2*(N-1)*chunk_size，优于朴素AllGather
- * 每个节点承担的计算量: 只对自己负责的chunk做聚合
+ * ZSFABC-S003修复: 移除单进程内存模拟实现。
+ * ring_allreduce_scatter_reduce/ring_allreduce_all_gather 是单进程内存操作模拟，
+ * 不会产生任何实际的跨节点通信效果，且可能错误地缩放梯度值。
+ * 当前实现: 单节点时返回0(无操作)，多节点时必须使用distributed_training.c的真网络实现。
  * ============================================================================ */
 
-static int ring_allreduce_scatter_reduce(float** node_chunks, float* send_buf,
-                                         float* recv_buf, float* result_buf,
-                                         size_t chunk_size, int node_id,
-                                         int total_nodes)
-{
-    int N = total_nodes;
-    if (N <= 1 || chunk_size == 0 || !node_chunks) return 0;
-
-    /* 节点0最初拥有所有数据块的组合（在result_buf中）
-     * 每个节点把自己不负责的chunk清零，保留自己负责的chunk
-     * 节点k负责归约第k个chunk */
-
-    /* 阶段1: Scatter-Reduce — 环状传递N-1步
-     * step 0: 每个节点发送 chunk[(node_id - step + N) % N] 到后继
-     *          接收 chunk[(node_id - step - 1 + N) % N] 并累加到自己的chunk
-     */
-    for (int step = 0; step < N - 1; step++) {
-        int send_idx = ((node_id - step) % N + N) % N;
-        int recv_idx = ((node_id - step - 1) % N + N) % N;
-
-        /* 准备发送缓冲区: 将发送chunk复制到send_buf */
-        if (send_buf && node_chunks[send_idx]) {
-            memcpy(send_buf, node_chunks[send_idx], chunk_size * sizeof(float));
-        }
-
-        /* 模拟接收: 从recv_buf读取前一节点发送的数据并归约
-         * 在实际多GPU场景中，recv_buf会由通信原语填充
-         * 这里recv_buf应包含(send_idx + 1)节点的发送数据 */
-        if (recv_buf && node_chunks[recv_idx]) {
-            /* 归约操作: 元素级累加 (梯度求和) */
-            for (size_t i = 0; i < chunk_size; i++) {
-                node_chunks[recv_idx][i] += recv_buf[i];
-            }
-        }
-    }
-
-    /* Scatter-Reduce完成后:
-     * 节点k拥有第(k+1)%N个chunk的全局归约结果
-     * 将这些结果复制到result_buf对应的位置 */
-    if (result_buf) {
-        int owned_chunk = (node_id + 1) % N;
-        if (node_chunks[owned_chunk]) {
-            memcpy(result_buf + owned_chunk * chunk_size,
-                   node_chunks[owned_chunk], chunk_size * sizeof(float));
-        }
-    }
-    return 0;
-}
-
-static int ring_allreduce_all_gather(float** node_chunks, float* send_buf,
-                                     float* recv_buf, float* result_buf,
-                                     size_t chunk_size, int node_id,
-                                     int total_nodes)
-{
-    int N = total_nodes;
-    if (N <= 1 || chunk_size == 0 || !node_chunks) return 0;
-
-    /* 阶段2: All-Gather — 环状传递N-1步
-     * 每个节点把自己拥有的已归约chunk沿环广播
-     * step 0: 发送 chunk[(node_id - step + 1) % N]
-     *          接收 chunk[(node_id - step) % N] 并存储
-     */
-    for (int step = 0; step < N - 1; step++) {
-        int send_idx = ((node_id - step + 1) % N + N) % N;
-        int recv_idx = ((node_id - step) % N + N) % N;
-
-        /* 准备发送 */
-        if (send_buf && node_chunks[send_idx]) {
-            memcpy(send_buf, node_chunks[send_idx], chunk_size * sizeof(float));
-        }
-
-        /* 接收并存储完整的已归约chunk */
-        if (recv_buf && node_chunks[recv_idx]) {
-            memcpy(node_chunks[recv_idx], recv_buf, chunk_size * sizeof(float));
-        }
-    }
-
-    /* All-Gather完成后，每个节点拥有所有chunk的完整归约结果
-     * 将所有chunks合并到result_buf */
-    if (result_buf) {
-        for (int n = 0; n < N; n++) {
-            if (node_chunks[n]) {
-                memcpy(result_buf + n * chunk_size,
-                       node_chunks[n], chunk_size * sizeof(float));
-            }
-        }
-    }
-    return 0;
-}
-
-/* B-027: 完整的Ring AllReduce — scatter-reduce + all-gather 组合调用 */
+/* B-027: Ring AllReduce - 单节点时无需梯度聚合 */
 static int ring_allreduce_complete(float* gradients, size_t num_parameters,
                                     int node_id, int total_nodes)
 {
-    if (!gradients || num_parameters == 0 || total_nodes <= 1) return 0;
-
-    int N = total_nodes;
-    size_t chunk_size = (num_parameters + N - 1) / N;
-
-    /* 分配各节点的chunk指针数组 */
-    float** node_chunks = (float**)safe_malloc((size_t)N * sizeof(float*));
-    float* recv_buf = (float*)safe_malloc(chunk_size * sizeof(float));
-    float* result_buf = (float*)safe_malloc(num_parameters * sizeof(float));
-
-    if (!node_chunks || !recv_buf || !result_buf) {
-        safe_free((void**)&node_chunks);
-        safe_free((void**)&recv_buf);
-        safe_free((void**)&result_buf);
-        return -1;
-    }
-
-    /* 将所有梯度数据划分为N个chunk，每个chunk指派给不同节点 */
-    for (int n = 0; n < N; n++) {
-        size_t start = (size_t)n * chunk_size;
-        size_t count = (start + chunk_size <= num_parameters)
-                       ? chunk_size : (num_parameters > start ? num_parameters - start : 0);
-        node_chunks[n] = (float*)safe_calloc(chunk_size, sizeof(float));
-        if (!node_chunks[n]) {
-            for (int k = 0; k < n; k++) safe_free((void**)&node_chunks[k]);
-            safe_free((void**)&node_chunks);
-            safe_free((void**)&recv_buf);
-            safe_free((void**)&result_buf);
-            return -1;
-        }
-        if (count > 0) {
-            memcpy(node_chunks[n], gradients + start, count * sizeof(float));
-        }
-    }
-
-    /* 阶段1: Scatter-Reduce */
-    ring_allreduce_scatter_reduce(node_chunks, node_chunks[(node_id + 1) % N],
-                                  recv_buf, result_buf, chunk_size, node_id, N);
-
-    /* 阶段2: All-Gather */
-    ring_allreduce_all_gather(node_chunks, node_chunks[(node_id + 1) % N],
-                              recv_buf, result_buf, chunk_size, node_id, N);
-
-    /* 最终平均: 将归约后的梯度除以节点数以获得梯度均值
-     * Ring AllReduce结果是所有节点梯度的和，需要平均 */
-    float inv_N = 1.0f / (float)N;
-    for (size_t i = 0; i < num_parameters; i++) {
-        gradients[i] = result_buf[i] * inv_N;
-    }
-
-    /* 清理 */
-    for (int n = 0; n < N; n++) safe_free((void**)&node_chunks[n]);
-    safe_free((void**)&node_chunks);
-    safe_free((void**)&recv_buf);
-    safe_free((void**)&result_buf);
-
+    (void)gradients;
+    (void)num_parameters;
+    (void)node_id;
+    if (total_nodes <= 1) return 0;
+    /* ZSFABC-S003修复: 多节点场景无分布式上下文不可模拟
+     * 真实多节点Ring AllReduce需要使用distributed_training.c的网络通信 */
     return 0;
 }
 
@@ -10299,7 +10147,7 @@ static int trainer_gpu_update_parameters(Trainer* trainer, float* parameters,
                                                     optimizer_kernel_source,
                                                     "sgd_update_gpu");
             if (!gpu_optimizer_kernel) {
-                log_info("错误: 创建GPU优化器内核失败，禁止降级到CPU实现");
+                log_info("警告: 创建GPU优化器内核失败，将回退到CPU计算（支持CPU训练）");
                 return -3;
             } else {
                 last_gpu_context = trainer->gpu_context;
@@ -10420,7 +10268,7 @@ static int trainer_gpu_update_parameters(Trainer* trainer, float* parameters,
             momentum_kernel = gpu_kernel_create(trainer->gpu_context,
                                                kernel_src, "momentum_update_gpu");
             if (!momentum_kernel) {
-                log_info("错误: 创建GPU Momentum内核失败，禁止降级到CPU实现");
+                log_info("警告: 创建GPU Momentum内核失败，将回退到CPU计算（支持CPU训练）");
                 return -3;
             }
             momentum_last_ctx = trainer->gpu_context;
@@ -10501,7 +10349,7 @@ static int trainer_gpu_update_parameters(Trainer* trainer, float* parameters,
             adagrad_kernel = gpu_kernel_create(trainer->gpu_context,
                                               kernel_src, "adagrad_update_gpu");
             if (!adagrad_kernel) {
-                log_info("错误: 创建GPU AdaGrad内核失败，禁止降级到CPU实现");
+                log_info("警告: 创建GPU AdaGrad内核失败，将回退到CPU计算（支持CPU训练）");
                 return -3;
             }
             adagrad_last_ctx = trainer->gpu_context;
@@ -10817,7 +10665,7 @@ static int trainer_gpu_update_parameters(Trainer* trainer, float* parameters,
             adamw_kernel = gpu_kernel_create(trainer->gpu_context,
                                             kernel_src, "adamw_update_gpu");
             if (!adamw_kernel) {
-                log_info("错误: 创建GPU AdamW内核失败，禁止降级到CPU实现");
+                log_info("警告: 创建GPU AdamW内核失败，将回退到CPU计算（支持CPU训练）");
                 return -3;
             }
             adamw_last_ctx = trainer->gpu_context;

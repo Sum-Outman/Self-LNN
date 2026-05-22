@@ -10,6 +10,7 @@
 #define SELFLNN_UNCERTAINTY_REASONING_H
 
 #include "selflnn/knowledge/logic_reasoning.h"
+#include "selflnn/reasoning/reasoning.h"
 #include <stddef.h>
 
 #ifdef __cplusplus

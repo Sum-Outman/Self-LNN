@@ -665,8 +665,8 @@ class DeviceManager {
         const confidenceMap = new Float32Array(w * h);
         /* P1-026修复：Census变换 - 对每个像素计算其邻域的相对亮度模式
            替代原始灰度值匹配，对光照变化和相机增益差异具有鲁棒性 */
-        const censusLeft  = new Array(w * h);
-        const censusRight = new Array(w * h);
+        let censusLeft  = new Array(w * h);
+        let censusRight = new Array(w * h);
         const computeCensus = (gray, imgW, imgH) => {
             const census = new Array(imgW * imgH);
             const cRad = 3;

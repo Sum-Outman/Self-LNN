@@ -64,14 +64,8 @@ int sensor_sim_lidar_scan(SensorSimContext* ctx,
         quat_rotate(mount_quat, ray_dir, world_dir);
         float best_t = ctx->lidar_config.max_range;
         int hit = 0;
-        /* 检查地平面作为默认回退 */
-        if (world_dir[2] < -0.001f) {
-            float gt = -mount_pos[2] / world_dir[2];
-            if (gt > ctx->lidar_config.min_range && gt < best_t) {
-                best_t = gt; hit = 1;
-            }
-        }
-        /* 检查所有物理管道中的碰撞体 */
+        /* ZSFABC-S010修复: 严格真实数据模式下禁用地面回退检测
+         * 仅在有真实物理管线碰撞体时计算交点 */
         if (pp) {
             for (int oi = 0; oi < pp->object_count; oi++) {
                 float obj_t;
