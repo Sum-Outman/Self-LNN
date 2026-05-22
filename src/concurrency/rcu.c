@@ -100,6 +100,10 @@ static void rcu_release_thread_id(RcuDomain* domain, int thread_id) {
     atomic_decrement(&domain->registered_thread_count);
 }
 
+/* ZSFWS-L012: 当前RCU宽限期检测使用轮询方式(sleep_ms(1)循环)
+ * 高负载下最多轮询1000次(1秒超时)，对实时性要求不高的场景可接受。
+ * Linux内核RCU使用基于中断的状态机(ZOOM kernel)，具有O(1)延迟。
+ * 当前纯用户态实现受限于无内核抢占支持，后续可优化为条件变量通知机制。 */
 static int rcu_wait_for_quiescent_state(RcuDomain* domain) {
     if (!domain) return -1;
     int max_retries = 1000;

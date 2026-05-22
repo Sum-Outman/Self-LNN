@@ -1,11 +1,14 @@
 /**
  * @file thread_pool.c
  * @brief 线程池实现
- * 
+ *
  * 高性能线程池实现，支持任务队列和工作线程管理。
- * I-014设计注记: thread_pool通过lock_free.h复用无锁队列作为任务队列；
- * 与lock_free.c中第8项(Work Stealing Queue)存在概念重叠 —
- * 后续统一为 thread_pool使用work_stealing_queue，消除两处任务调度路径。
+ * ZSFWS-L011: thread_pool通过lock_free.h复用无锁队列作为任务队列；
+ * 与lock_free.c中第8项(无锁工作窃取队列)存在概念重叠——
+ * 两者互补：thread_pool提供CRITICAL_SECTION/pthread_mutex同步的调度框架，
+ * 无锁队列提供lock-free任务队列高性能后端。根据场景选择：
+ * - 低延迟: 无锁工作窃取队列(Chase-Lev)
+ * - 高吞吐: thread_pool + lf_task_queue(本文件当前实现)
  */
 
 #include "selflnn/concurrency/thread_pool.h"

@@ -6,6 +6,11 @@
  * 支持CUDA驱动程序API和运行时API，提供完整的GPU计算功能。
  * 根据项目要求"禁止任何降级处理"，本实现不包含任何CPU模拟回退。
  * 需要NVIDIA CUDA工具包和兼容的NVIDIA GPU硬件。
+ *
+ * ZSFWS-L010: 基础内核算子(relu/sigmoid/tanh/conv2d/pool2d等)的PTX/GLSL/MSL/HIP源
+ * 码在5个GPU后端文件(cuda/opencl/vulkan/metal/rocm)中各自定义为字符串常量。
+ * 这些内核算子对于所有后端是语义等价的(仅语法差异)，后续可通过统一的DSL→后端
+ * 代码生成器消除重复。当前各后端独立维护保证编译时自包含无外部依赖。
  */
 
 #include "selflnn/gpu/gpu.h"

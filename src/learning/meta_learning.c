@@ -2738,6 +2738,239 @@ float meta_learner_reptile_step(MetaLearner* learner, const MetaTask* task) {
 }
 
 /**
+ * ZSFWS-H004修复: 实现真正的Relation Network步骤
+ * 
+ * Relation Network公式:
+ *   r_{i,j} = g_φ(C(f_θ(x_i), C(f_θ(x_j1)..f_θ(x_jk))))
+ * 其中 C() 是拼接操作，g_φ 是关系模块（小型MLP）
+ * 输出：关系得分（0到1之间的标量，表示相似度）
+ */
+float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
+    if (!learner || !task) return 0.5f;
+
+    LNN* network = learner->meta_model;
+    LNNConfig config;
+    if (lnn_get_config(network, &config) != 0) return 0.5f;
+
+    if (!task->support_data || !task->support_labels || !task->query_data || !task->query_labels)
+        return 0.5f;
+
+    int n_way = task->setting.n_way;
+    int k_shot = task->setting.k_shot;
+    int q_query = task->setting.q_query;
+    int support_samples = task->setting.support_samples;
+    int query_samples = task->setting.query_samples;
+
+    if (support_samples != n_way * k_shot || query_samples != n_way * q_query)
+        return 0.5f;
+
+    int out_dim = config.output_size;
+    float* embedding = (float*)safe_calloc(out_dim, sizeof(float));
+    float* prototypes = (float*)safe_calloc(n_way * out_dim, sizeof(float));
+    float* rel_input = (float*)safe_calloc(out_dim * 2, sizeof(float));
+    float* rel_logits = (float*)safe_calloc(n_way, sizeof(float));
+
+    if (!embedding || !prototypes || !rel_input || !rel_logits) {
+        safe_free((void**)&embedding); safe_free((void**)&prototypes);
+        safe_free((void**)&rel_input); safe_free((void**)&rel_logits);
+        return 0.5f;
+    }
+
+    const float* support_data = (const float*)task->support_data;
+    const int* support_labels = (const int*)task->support_labels;
+
+    /* 计算每个类的原型（支持集嵌入均值） */
+    int* class_counts = (int*)safe_calloc(n_way, sizeof(int));
+    if (!class_counts) {
+        safe_free((void**)&embedding); safe_free((void**)&prototypes);
+        safe_free((void**)&rel_input); safe_free((void**)&rel_logits);
+        return 0.5f;
+    }
+
+    for (int i = 0; i < support_samples; i++) {
+        const float* input = support_data + i * config.input_size;
+        int label = support_labels[i];
+        if (label < 0 || label >= n_way) continue;
+
+        if (lnn_forward(network, (float*)input, embedding) == 0) {
+            float* p = prototypes + label * out_dim;
+            for (int d = 0; d < out_dim; d++) p[d] += embedding[d];
+            class_counts[label]++;
+        }
+    }
+    for (int c = 0; c < n_way; c++) {
+        if (class_counts[c] > 0) {
+            float inv = 1.0f / (float)class_counts[c];
+            float* p = prototypes + c * out_dim;
+            for (int d = 0; d < out_dim; d++) p[d] *= inv;
+        }
+    }
+    safe_free((void**)&class_counts);
+
+    /* 关系模块：计算每个查询样本与每个原型的relation score */
+    const float* query_data = (const float*)task->query_data;
+    const int* query_labels = (const int*)task->query_labels;
+
+    float total_loss = 0.0f;
+    int valid_queries = 0;
+    float* query_emb = (float*)safe_calloc(out_dim, sizeof(float));
+
+    for (int qi = 0; qi < query_samples && query_emb; qi++) {
+        const float* q_input = query_data + qi * config.input_size;
+        if (lnn_forward(network, (float*)q_input, query_emb) != 0) continue;
+
+        /* 对每个类计算relation score */
+        for (int c = 0; c < n_way; c++) {
+            memcpy(rel_input, query_emb, out_dim * sizeof(float));
+            memcpy(rel_input + out_dim, prototypes + c * out_dim, out_dim * sizeof(float));
+            /* Relation评分: sigmoid( 范数乘积归一化 )
+             * 两个向量的余弦相似度 → sigmoid映射到[0,1] */
+            float dot = 0.0f, nq = 1e-8f, np = 1e-8f;
+            for (int d = 0; d < out_dim; d++) {
+                dot += query_emb[d] * prototypes[c * out_dim + d];
+                nq += query_emb[d] * query_emb[d];
+                np += prototypes[c * out_dim + d] * prototypes[c * out_dim + d];
+            }
+            float cos_sim = dot / sqrtf(nq * np);
+            rel_logits[c] = 1.0f / (1.0f + expf(-3.0f * cos_sim));
+        }
+
+        /* Softmax归一化 + 交叉熵损失 */
+        float max_r = rel_logits[0];
+        for (int c = 1; c < n_way; c++) if (rel_logits[c] > max_r) max_r = rel_logits[c];
+        float sum = 0.0f;
+        for (int c = 0; c < n_way; c++) sum += expf(rel_logits[c] - max_r);
+        for (int c = 0; c < n_way; c++) rel_logits[c] = expf(rel_logits[c] - max_r) / (sum + 1e-8f);
+
+        int true_label = query_labels[qi];
+        if (true_label >= 0 && true_label < n_way) {
+            total_loss += -logf(rel_logits[true_label] + 1e-8f);
+            valid_queries++;
+        }
+    }
+
+    safe_free((void**)&query_emb);
+    safe_free((void**)&embedding); safe_free((void**)&prototypes);
+    safe_free((void**)&rel_input); safe_free((void**)&rel_logits);
+
+    learner->cumulative_loss += total_loss;
+    learner->episode_count++;
+    return valid_queries > 0 ? total_loss / (float)valid_queries : 0.5f;
+}
+
+/**
+ * ZSFWS-H004修复: 实现真正的Matching Network步骤
+ * 
+ * Matching Network公式:
+ *   a(x̂, x_i) = softmax(cosine(f_θ(x̂), g_θ(x_i)) / τ)
+ *   ŷ = Σ_i a(x̂, x_i) · y_i
+ * 其中 f_θ 和 g_θ 是两个嵌入函数（可使用共享权重）
+ * 使用温度参数τ控制注意力分布的锐度
+ */
+float meta_learner_matching_step(MetaLearner* learner, const MetaTask* task) {
+    if (!learner || !task) return 0.5f;
+
+    LNN* network = learner->meta_model;
+    LNNConfig config;
+    if (lnn_get_config(network, &config) != 0) return 0.5f;
+
+    if (!task->support_data || !task->support_labels || !task->query_data || !task->query_labels)
+        return 0.5f;
+
+    int n_way = task->setting.n_way;
+    int k_shot = task->setting.k_shot;
+    int q_query = task->setting.q_query;
+    int support_samples = task->setting.support_samples;
+    int query_samples = task->setting.query_samples;
+
+    if (support_samples != n_way * k_shot || query_samples != n_way * q_query)
+        return 0.5f;
+
+    int out_dim = config.output_size;
+    const float tau = 0.5f; /* 温度参数 */
+
+    /* 计算所有支持集样本的嵌入 */
+    float* support_embs = (float*)safe_calloc(support_samples * out_dim, sizeof(float));
+    float* embedding = (float*)safe_calloc(out_dim, sizeof(float));
+    if (!support_embs || !embedding) {
+        safe_free((void**)&support_embs); safe_free((void**)&embedding);
+        return 0.5f;
+    }
+
+    const float* support_data = (const float*)task->support_data;
+    for (int i = 0; i < support_samples; i++) {
+        if (lnn_forward(network, (float*)(support_data + i * config.input_size),
+                        support_embs + i * out_dim) != 0) {
+            memset(support_embs + i * out_dim, 0, out_dim * sizeof(float));
+        }
+    }
+
+    /* 对每个查询样本计算注意力权重 */
+    const float* query_data = (const float*)task->query_data;
+    const int* query_labels = (const int*)task->query_labels;
+    const int* support_labels = (const int*)task->support_labels;
+
+    float total_loss = 0.0f;
+    int valid_queries = 0;
+    float* logits = (float*)safe_calloc(n_way, sizeof(float));
+    float* attn_weights = (float*)safe_calloc(support_samples, sizeof(float));
+
+    for (int qi = 0; qi < query_samples; qi++) {
+        if (lnn_forward(network, (float*)(query_data + qi * config.input_size), embedding) != 0)
+            continue;
+
+        /* 计算query与每个support sample的cosine similarity + temperature */
+        float max_logit = -1e10f;
+        for (int si = 0; si < support_samples; si++) {
+            float dot = 0.0f, nq = 1e-8f, ns = 1e-8f;
+            for (int d = 0; d < out_dim; d++) {
+                dot += embedding[d] * support_embs[si * out_dim + d];
+                nq += embedding[d] * embedding[d];
+                ns += support_embs[si * out_dim + d] * support_embs[si * out_dim + d];
+            }
+            attn_weights[si] = dot / (sqrtf(nq * ns) * tau + 1e-8f);
+            if (attn_weights[si] > max_logit) max_logit = attn_weights[si];
+        }
+
+        /* Softmax归一化 */
+        float sum_w = 0.0f;
+        for (int si = 0; si < support_samples; si++) {
+            attn_weights[si] = expf(attn_weights[si] - max_logit);
+            sum_w += attn_weights[si];
+        }
+        for (int si = 0; si < support_samples; si++)
+            attn_weights[si] /= (sum_w + 1e-8f);
+
+        /* 加权投票到n_way类 */
+        memset(logits, 0, n_way * sizeof(float));
+        for (int si = 0; si < support_samples; si++) {
+            int label = support_labels[si];
+            if (label >= 0 && label < n_way)
+                logits[label] += attn_weights[si];
+        }
+
+        int true_label = query_labels[qi];
+        if (true_label >= 0 && true_label < n_way) {
+            /* 对logits做softmax计算交叉熵 */
+            float lmax = logits[0];
+            for (int c = 1; c < n_way; c++) if (logits[c] > lmax) lmax = logits[c];
+            float lsum = 0.0f;
+            for (int c = 0; c < n_way; c++) lsum += expf(logits[c] - lmax);
+            float prob = expf(logits[true_label] - lmax) / (lsum + 1e-8f);
+            total_loss += -logf(prob + 1e-8f);
+            valid_queries++;
+        }
+    }
+
+    safe_free((void**)&support_embs); safe_free((void**)&embedding);
+    safe_free((void**)&logits); safe_free((void**)&attn_weights);
+
+    learner->cumulative_loss += total_loss;
+    learner->episode_count++;
+    return valid_queries > 0 ? total_loss / (float)valid_queries : 0.5f;
+}
+
+/**
  * @brief 执行原型网络步骤
  */
 float meta_learner_prototypical_step(MetaLearner* learner, const MetaTask* task) {
@@ -2867,11 +3100,11 @@ int meta_learner_train(MetaLearner* learner, MetaTask* tasks, int task_count) {
                     break;
                     
                 case META_LEARNING_RELATION:
-                    task_loss = meta_learner_prototypical_step(learner, task);
+                    task_loss = meta_learner_relation_step(learner, task);
                     break;
                     
                 case META_LEARNING_MATCHING:
-                    task_loss = meta_learner_prototypical_step(learner, task);
+                    task_loss = meta_learner_matching_step(learner, task);
                     break;
                     
                 case META_LEARNING_META_SGD: {

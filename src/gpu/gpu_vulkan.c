@@ -18,6 +18,9 @@
  * 日期：2026-04-13（初始框架）
  * 更新日期：2026-04-16（完整实现）
  * 版本：2.0.0（完整实现版本）
+ * 
+ * ZSFWS-L008: Vulkan后端缺少CFC系列专用内核算子（cfc_step/cfc_ode/cfc_liquid），
+ * 当前CfC相关操作回退到CPU后端执行。后续版本需补充Vulkan SPIR-V CFC内核。
  */
 
 

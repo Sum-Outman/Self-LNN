@@ -358,6 +358,10 @@ static int gr_load_from_property_graph(GraphReasoner* reasoner) {
         }
     }
 
+    /* ZSFWS-M013: 属性图的边数据通过RDF存储路径加载（gr_load_from_rdf_store）
+     * property_graph当前无公开边迭代API，边的关系注册由上层调用
+     * graph_reasoner_train_from_triples提供，确保链路预测和规则挖掘正常工作 */
+
     return 0;
 }
 
@@ -378,6 +382,24 @@ static int gr_load_from_adjacency_list(GraphReasoner* reasoner) {
             reasoner->entity_to_cfc_id[i] = cfc_id;
             reasoner->cfc_to_entity_id[cfc_id] = i;
             reasoner->entity_count++;
+        }
+
+        /* ZSFWS-M013修复: 从邻接表出边加载关系
+         * 使用adjacency_list_get_out_neighbors获取出邻居节点ID
+         * 边的语义为"adjacent"关系类型 */
+        int* out_neighbors = NULL;
+        int out_cnt = adjacency_list_get_out_neighbors(reasoner->adjacency_list, i,
+                                                        &out_neighbors, NULL, NULL);
+        for (int oe = 0; oe < out_cnt && out_neighbors; oe++) {
+            int tgt_id = out_neighbors[oe];
+            int cfc_rel_id = cfc_embed_add_relation(reasoner->embed_state, "adjacent");
+            if (cfc_rel_id >= 0) {
+                int tgt_cfc = reasoner->entity_to_cfc_id[tgt_id];
+                if (tgt_cfc >= 0) {
+                    cfc_embed_add_triple(reasoner->embed_state, cfc_id, cfc_rel_id, tgt_cfc);
+                    reasoner->relation_count++;
+                }
+            }
         }
     }
 

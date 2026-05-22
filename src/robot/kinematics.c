@@ -1905,10 +1905,20 @@ static int urdf_build_model(KinematicModel* model, XmlUrdfLink* links, int link_
 
         DHParameter dh;
         memset(&dh, 0, sizeof(dh));
-        dh.a = 0;
-        dh.alpha = 0;
+        /* ZSFWS-L013修复: DH参数完整三轴映射
+         * 原实现仅取origin_xyz[2]作为dh.d，对非纯Z轴偏移关节不正确。
+         * 完整URDF joint的xyz origin决定了父关节坐标系到当前关节坐标系的平移。
+         * dh.d = 沿Z轴的偏移（如果关节轴是Z），
+         * dh.a = 沿X轴偏移，从origin_xyz[0:2]的欧氏距离分解 */
+        dh.a = sqrtf(j->origin_xyz[0] * j->origin_xyz[0] + j->origin_xyz[1] * j->origin_xyz[1]);
+        dh.alpha = 0.0f;
         dh.d = j->origin_xyz[2];
-        dh.theta = 0;
+        dh.theta = 0.0f;
+
+        /* 若origin_xyz有显著的XY偏移，通过alpha表示方向 */
+        if (dh.a > 0.001f && fabsf(j->origin_xyz[2]) < 0.001f) {
+            dh.alpha = atan2f(j->origin_xyz[1], j->origin_xyz[0]);
+        }
 
         float limit_lower = j->limit_lower;
         float limit_upper = j->limit_upper;

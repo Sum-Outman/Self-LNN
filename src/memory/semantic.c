@@ -12,6 +12,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <stdio.h>
 
 /**
@@ -323,10 +324,17 @@ int semantic_memory_generalize(SemanticMemory* memory, const char* concept_id,
             }
         }
         
-        /* 幂迭代提取主特征向量 */
+        /* ZSFWS-L018修复: 幂迭代初始向量添加随机扰动
+         * 原实现使用均匀向量1/sqrt(dim)作为初始猜测，可能导致收敛到非主特征向量。
+         * 添加±1%随机扰动打破对称性，同时保持与协方差矩阵主方向的对齐。 */
+        uint32_t perturb_seed = (uint32_t)((uintptr_t)cov_matrix * 2654435761U);
         for (int comp = 0; comp < matrix_dim && comp < sq; comp++) {
             float* vec = eigen_vecs + comp * matrix_dim;
-            for (size_t i = 0; i < matrix_dim; i++) vec[i] = 1.0f / sqrtf((float)matrix_dim);
+            for (size_t i = 0; i < matrix_dim; i++) {
+                perturb_seed = perturb_seed * 1103515245U + 12345U;
+                float r = ((float)(perturb_seed & 0xFFFF) / 65536.0f - 0.5f) * 0.02f;
+                vec[i] = 1.0f / sqrtf((float)matrix_dim) + r;
+            }
             
             float lambda = 0.0f;
             for (int iter = 0; iter < 30; iter++) {

@@ -183,7 +183,13 @@ int lb_update_node_metrics(LbBalancer* balancer, uint32_t node_id,
         net_bw_ratio = metrics->network_bandwidth_mbps / (node->capability.network_bandwidth_gbps * 1000.0);
         if (net_bw_ratio > 1.0) net_bw_ratio = 1.0;
     }
-    double io_util = metrics->temperature_celsius / 100.0;
+    /* ZSFWS-L020修复: IO利用率使用队列深度+网络带宽加权估算
+     * 原实现用temperature_celsius/100作为IO指标（无物理意义）
+     * 改用: queue_depth/32归一化 + network_bandwidth_mbps利用率加权
+     * LbNodeMetrics有: queue_depth(uint32) + network_bandwidth_mbps(double) */
+    double queue_pressure = (double)(metrics->queue_depth) / 32.0;
+    if (queue_pressure > 1.0) queue_pressure = 1.0;
+    double io_util = queue_pressure * 0.5 + net_bw_ratio * 0.5;
     if (io_util > 1.0) io_util = 1.0;
     node->current_load = gpu_weight * metrics->gpu_utilization
                        + cpu_weight  * metrics->cpu_utilization

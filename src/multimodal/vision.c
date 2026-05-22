@@ -572,6 +572,18 @@ int vision_nms(CfCVisionDetection* detections, int count, float iou_threshold) {
     return out_idx;
 }
 
+/* ZSFWS-L002: 释放检测结果中由safe_malloc分配的class_probs动态内存
+ * 调用者在处理完检测结果后必须调用此函数防止内存泄漏。 */
+void vision_free_detections(CfCVisionDetection* detections, int count) {
+    if (!detections || count <= 0) return;
+    for (int i = 0; i < count; i++) {
+        if (detections[i].class_probs) {
+            safe_free((void**)&detections[i].class_probs);
+            detections[i].class_probs_count = 0;
+        }
+    }
+}
+
 /* ================================================================
  * 颜色识别：RGB颜色直方图 + 主色检测
  * ================================================================ */
@@ -986,6 +998,10 @@ int vision_process_image(VisionProcessor* processor,
     }
 
     safe_free((void**)&gray);
+    /* ZSFWS-L001: 传统CV路径特征格式对齐说明
+     * CfC路径(enable_cfc=1): [confidence,cx,cy,w,h,class_id]×N → 6N维检测向量
+     * 传统CV回退: [灰度矩+颜色(18)+HSV直方图(28)+边缘(6)+LBP(8)+HOG(36)+...] → 可变维纹理向量
+     * 两者语义不同，CfC路径应作为主路径。下游解码需根据processor->config.enable_cfc区分格式。 */
     return (int)feature_idx;
 }
 

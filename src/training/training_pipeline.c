@@ -1021,6 +1021,20 @@ static int compute_evaluation_metrics(TrainingPipeline* pipeline);
 static int pipeline_self_supervised_init(TrainingPipeline* pipeline) {
     if (!pipeline || !pipeline->network) return -1;
 
+    /* ZSFWS-M008修复: 严格真实数据模式下禁止使用确定性正弦波生成训练数据。
+     * 自监督初始化应仅在引导模式（ALLOW_BOOTSTRAP_DATA=ON）下使用。
+     * 在严格模式下，返回-1通知调用方使用真实数据源。 */
+#ifdef SELFLNN_STRICT_REAL_DATA
+    {
+        static int strict_warned = 0;
+        if (!strict_warned) {
+            log_warning("[训练管线] 严格真实数据模式下禁用自监督初始化，"
+                        "请提供真实训练数据到 data/training/ 目录");
+            strict_warned = 1;
+        }
+        return -1;
+    }
+#else
     /* 确定输入/输出维度 */
     size_t input_dim = 512, output_dim = 256;
     if (pipeline->source_count > 0 && pipeline->sources[0].loaded) {
@@ -1085,6 +1099,7 @@ static int pipeline_self_supervised_init(TrainingPipeline* pipeline) {
             " (输入维度=%zu, 输出维度=%zu)\n",
             sample_count, input_dim, output_dim);
     return 0;
+#endif /* !SELFLNN_STRICT_REAL_DATA */
 }
 
 int training_pipeline_step(TrainingPipeline* pipeline) {
@@ -2233,6 +2248,7 @@ int pipeline_run_speech_phase(TrainingPipeline* pipeline, int epochs, float* fin
                 (SpeechRecognizer*)sr_inst,
                 (const float**)&pipeline->data_buffer,
                 &transcript,
+                NULL,
                 1, 1, 0.001f, 1,
                 &sr_loss);
 

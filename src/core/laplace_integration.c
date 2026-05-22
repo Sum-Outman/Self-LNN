@@ -522,7 +522,9 @@ int lnn_laplace_modulate_hidden(void* analyzer, float* hidden_state,
         mean_abs += val;
         if (val > max_abs) max_abs = val;
     }
-    mean_abs /= hidden_size;
+    /* ZSFWS-NEW03: 除零防护——hidden_size为0时跳过分析 */
+    if (hidden_size == 0) { return 0; }
+    mean_abs /= (float)hidden_size;
     if (mean_abs < 1e-6f) mean_abs = 1e-6f;
     if (max_abs < 1e-6f) max_abs = 1e-6f;
 

@@ -72,7 +72,7 @@ static unsigned short recognize_character_by_features(const float* features, int
                                            CharTemplate* templates, int num_templates);
 static float compute_feature_distance(const float* features, int num_features,
                                      CharTemplate* templates, int num_templates,
-                                     char target_char);
+                                     unsigned short target_char);
 static int preprocess_image_basic(const float* image_data, int width, int height, int channels,
                                  float** processed_data, int* processed_width, int* processed_height);
 static int detect_text_regions(const float* image_data, int width, int height,
@@ -685,7 +685,7 @@ int ocr_recognize(OcrProcessor* processor,
  */
 static float compute_feature_distance(const float* features, int num_features,
                                      CharTemplate* templates, int num_templates,
-                                     char target_char) {
+                                     unsigned short target_char) {
     if (!features || !templates || num_features <= 0 || num_templates <= 0) {
         return FLT_MAX;
     }
@@ -2414,7 +2414,7 @@ int ocr_recognize_chars(OcrProcessor* processor,
         
         if (features_extracted > 0) {
             // 使用模板匹配识别字符
-            result->characters[i] = (char)recognize_character_by_features(
+            result->characters[i] = recognize_character_by_features(
                 char_features, features_extracted,
                 processor->char_templates, processor->num_char_templates);
             

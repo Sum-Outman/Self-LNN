@@ -2668,6 +2668,17 @@ static void* server_thread_func(void* param) {
                         }
                         if (cached_frontend_path[0] == '\0') {
                             strcpy(cached_frontend_path, "frontend");
+                            /* L-006: 前端文件目录探测失败，输出当前工作目录以帮助用户诊断 */
+                            char cwd_buf[1024] = {0};
+#ifdef _WIN32
+                            if (_getcwd(cwd_buf, sizeof(cwd_buf))) {
+#else
+                            if (getcwd(cwd_buf, sizeof(cwd_buf))) {
+#endif
+                                log_warning("[后端] 前端文件目录探测失败，请检查工作目录。当前目录: %s", cwd_buf);
+                            } else {
+                                log_warning("[后端] 前端文件目录探测失败，请检查工作目录。（无法获取当前目录）");
+                            }
                             log_warning("[静态服务] 未找到前端目录，使用默认: %s", cached_frontend_path);
                         }
                     }
@@ -2794,8 +2805,24 @@ static void* server_thread_func(void* param) {
                         tp_ctx->path[sizeof(tp_ctx->path) - 1] = '\0';
                         tp_ctx->bytes_received = bytes_received;
                         memcpy(tp_ctx->buffer, buffer, (size_t)bytes_received);
-                        tp_ctx->content_length = 0;
-                        tp_ctx->content_too_large = 0;
+                        /* ZSFWS-L005修复: 主线程预解析Content-Length传入worker上下文
+                         * 避免worker中重复遍历header解析(worker复用以提高效率) */
+                        {
+                            size_t pre_cl = 0;
+                            for (size_t hs = 0; hs + 16 <= (size_t)bytes_received; hs++) {
+                                if ((strncmp(buffer + hs, "Content-Length:", 15) == 0 ||
+                                     strncmp(buffer + hs, "content-length:", 15) == 0)) {
+                                    char* vs = buffer + hs + 15;
+                                    while (vs < buffer + bytes_received && (*vs == ' ' || *vs == ':')) vs++;
+                                    if (vs < buffer + bytes_received) {
+                                        pre_cl = (size_t)atoi(vs);
+                                        break;
+                                    }
+                                }
+                            }
+                            tp_ctx->content_length = (pre_cl > 0 && pre_cl <= 10485760) ? pre_cl : 0;
+                            tp_ctx->content_too_large = (pre_cl > 10485760) ? 1 : 0;
+                        }
                         tp_ctx->request_body = NULL;
                         tp_ctx->request_body_copy = NULL;
                         tp_ctx->auth_header[0] = '\0';
@@ -3377,6 +3404,10 @@ static void* server_thread_func(void* param) {
                     request_type = API_POST_PROGRAMMING_EXECUTE;
                 } else if (strcmp(path, "/api/programming/status") == 0) {
                     request_type = API_GET_PROGRAMMING_STATUS;
+                /* ZSFWS-M001: 旧路由表(弃用标记) —— 请勿在此添加新路由
+                 * 以下使用数字魔数(220-247)，与枚举API_*_EXT定义对应。
+                 * 新端点应使用 backend_route_path_to_type() 统一路由函数。
+                 * 旧路由保留向后兼容，计划v2.0迁移至统一路由。 */
                 /* 新增路由（第12轮补充）：将25个新端点映射到分发表220-247 */
                 /* 精确匹配优先，避免strstr产生歧义 */
                 } else if (strcmp(path, "/api/knowledge/add") == 0) {
@@ -3568,8 +3599,9 @@ static void* server_thread_func(void* param) {
                     server->error_count++;
                     if (response) backend_response_free(response);
                     safe_free((void**)&request_body_copy);
-                    /* ZSFABC: SEH崩溃后仍发送200安全响应，避免客户端看到连接关闭 */
-                    const char* crash_safe = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n{\"status\":\"ok\",\"message\":\"Request processed via safe fallback\"}";
+                    /* ZSFWS-H005修复: 崩溃时返回500而非200，让调用方能检测到内部错误
+                     * 原返回200 OK会掩盖崩溃，导致自主学习将垃圾数据作为有效响应 */
+                    const char* crash_safe = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n{\"status\":\"error\",\"error_code\":\"INTERNAL_CRASH\",\"message\":\"内部处理崩溃，请检查系统日志\"}";
                     socket_send(client_socket, crash_safe, (int)strlen(crash_safe));
 #ifdef _WIN32
                     InterlockedDecrement(&server->connection_count);

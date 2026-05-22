@@ -741,10 +741,14 @@ int property_graph_save(PropertyGraph* pg, const char* filename) {
     fwrite(&magic, sizeof(magic), 1, fp);
     fwrite(&version, sizeof(version), 1, fp);
 
-    /* B-019修复: 遍历node_count而非node_capacity，避免写出稀疏数组空节点 */
-    uint32_t nc = (uint32_t)pg->node_count;
-    fwrite(&nc, sizeof(nc), 1, fp);
-    for (size_t i = 0; i < pg->node_count; i++) {
+    /* ZSFWS-M025修复: 保存实际存在的节点数（遍历capacity跳过空洞）
+     * 防止节点ID不连续时丢失高ID节点 */
+    uint32_t actual_count = 0;
+    for (size_t i = 0; i < pg->node_capacity; i++) {
+        if (pg->nodes[i]) actual_count++;
+    }
+    fwrite(&actual_count, sizeof(actual_count), 1, fp);
+    for (size_t i = 0; i < pg->node_capacity; i++) {
         PGNode* n = pg->nodes[i];
         if (!n) continue;
         int32_t nid = (int32_t)n->id;

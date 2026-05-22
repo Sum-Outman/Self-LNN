@@ -8,6 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+/* ZSFWS-L007: 当前WebSocket实现不支持per-message-deflate(RFC7692)压缩扩展。
+ * 影响: 高负载场景下JSON推送占用额外带宽（未压缩时约3-5x膨胀）。
+ * 后续方案: 实现纯C deflate核心或使用应用层msgpack替代JSON。
+ * 当前缓解: 高频推送(如系统状态)仅包含最小字段集。 */
 #include <time.h>
 #include <stdint.h>
 

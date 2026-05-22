@@ -245,6 +245,7 @@ int speech_recognizer_set_config(SpeechRecognizer* recognizer,
 int speech_recognizer_train(SpeechRecognizer* recognizer,
                             const float** training_audio,
                             const char** training_transcripts,
+                            const int* training_audio_lengths,
                             int num_samples, int num_epochs,
                             float learning_rate, int batch_size,
                             float* out_loss);

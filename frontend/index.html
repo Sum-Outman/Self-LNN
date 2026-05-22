@@ -472,74 +472,11 @@
                                 <!-- 心智理论（Theory of Mind）状态可视化 -->
                                 <div class="cognition-tom">
                                     <div class="cognition-subtitle">心智理论状态（多智能体信念/欲望/意图）</div>
-                                    <div class="tom-agent-container" id="tom-agents">
-                                        <div class="tom-agent-card">
-                                            <div class="tom-agent-header">
-                                                <span class="tom-agent-name">智能体 #1</span>
-                                                <span class="tom-agent-status online"></span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">信念</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill" id="tom-agent0-belief" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent0-belief-val">0%</span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">欲望</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill tom-desire" id="tom-agent0-desire" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent0-desire-val">0%</span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">意图</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill tom-intention" id="tom-agent0-intention" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent0-intention-val">0%</span>
-                                            </div>
-                                            <div class="tom-belief-content" id="tom-agent0-belief-text">未知</div>
-                                        </div>
-                                        <div class="tom-agent-card">
-                                            <div class="tom-agent-header">
-                                                <span class="tom-agent-name">智能体 #2</span>
-                                                <span class="tom-agent-status online"></span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">信念</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill" id="tom-agent1-belief" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent1-belief-val">0%</span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">欲望</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill tom-desire" id="tom-agent1-desire" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent1-desire-val">0%</span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">意图</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill tom-intention" id="tom-agent1-intention" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent1-intention-val">0%</span>
-                                            </div>
-                                            <div class="tom-belief-content" id="tom-agent1-belief-text">未知</div>
-                                        </div>
-                                        <div class="tom-agent-card">
-                                            <div class="tom-agent-header">
-                                                <span class="tom-agent-name">智能体 #3</span>
-                                                <span class="tom-agent-status offline"></span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">信念</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill" id="tom-agent2-belief" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent2-belief-val">0%</span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">欲望</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill tom-desire" id="tom-agent2-desire" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent2-desire-val">0%</span>
-                                            </div>
-                                            <div class="tom-dimension">
-                                                <span class="tom-dim-label">意图</span>
-                                                <div class="tom-dim-bar"><div class="tom-dim-fill tom-intention" id="tom-agent2-intention" style="width:0%"></div></div>
-                                                <span class="tom-dim-value" id="tom-agent2-intention-val">0%</span>
-                                            </div>
-                                            <div class="tom-belief-content" id="tom-agent2-belief-text">未知</div>
-                                        </div>
-                                    </div>
+                                    <!-- ZSFWS-M002: ToM智能体卡片模板（JS动态填充）
+                                     所有agent名称/状态/信念/欲望/意图值均由 data-engine.js
+                                     通过API /api/cognition/tom 实时获取并填充。
+                                     HTML仅提供DOM骨架，初始值均为0%/"未知"表示未连接状态。 -->
+                                <div class="tom-agent-container" id="tom-agents"></div>
                                     <div class="tom-summary">
                                         <span class="tom-summary-label">群体心智理论状态：</span>
                                         <span class="tom-summary-value" id="tom-summary-text">等待数据...</span>
@@ -1128,7 +1065,8 @@
                                             <label>语言:</label>
                                             <select class="form-select" id="text-language">
                                                 <option value="zh">中文</option>
-                                                <option value="en" selected>英文</option>
+                                                <option value="zh" selected>中文</option>
+                                                <option value="en">英文</option>
                                                 <option value="ja">日文</option>
                                                 <option value="auto">自动检测</option>
                                             </select>

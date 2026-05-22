@@ -1,5 +1,4 @@
 #include "selflnn/agi/capability_switch.h"
-#include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/learning/online_learning.h"
 #include "selflnn/evolution/evolution_engine.h"
@@ -382,9 +381,15 @@ static int cap_set_concurrency(int enable) {
 }
 
 /* 初始化时自动注册所有回调 */
-static int g_callbacks_registered = 0;
+/* L-021: 使用原子操作保护一次性注册，避免多线程竞态条件 */
 static void ensure_callbacks_registered(void) {
-    if (g_callbacks_registered) return;
+#ifdef _WIN32
+    static volatile LONG registered_lock = 0;
+    if (InterlockedCompareExchange(&registered_lock, 1, 0) != 0) return;
+#else
+    static volatile int registered_lock = 0;
+    if (__sync_lock_test_and_set(&registered_lock, 1)) return;
+#endif
     capability_register_module(CAP_SELF_COGNITION,       cap_check_self_cognition,    cap_set_self_cognition);
     capability_register_module(CAP_SELF_DECISION,         cap_check_self_decision,     cap_set_self_decision);
     capability_register_module(CAP_AUTONOMOUS_EXECUTION,  cap_check_autonomous_execution, cap_set_autonomous_execution);
@@ -397,8 +402,12 @@ static void ensure_callbacks_registered(void) {
     capability_register_module(CAP_PLANNING,              cap_check_planning,          cap_set_planning);
     capability_register_module(CAP_DIALOGUE,              cap_check_dialogue,          cap_set_dialogue);
     capability_register_module(CAP_CONCURRENCY,           cap_check_concurrency,       cap_set_concurrency);
-    g_callbacks_registered = 1;
     log_info("[能力开关] 全部12个能力开关回调注册完成");
+#ifdef _WIN32
+    registered_lock = 0;
+#else
+    __sync_lock_release(&registered_lock);
+#endif
 }
 
 const char* capability_get_name(CapabilityType type)

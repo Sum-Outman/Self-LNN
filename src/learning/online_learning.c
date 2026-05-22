@@ -13,6 +13,9 @@
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
+/* ZSFWS-H002: 在线学习器使用LNN/CfC替代线性模型 */
+#include "selflnn/core/lnn.h"
+#include "selflnn/selflnn.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -496,23 +499,55 @@ int online_learner_update(OnlineLearner* learner,
     }
     memset(gradient, 0, learner->weights_size * sizeof(float));
     
-    // 计算预测值和真实梯度：pred = W · input, loss = 0.5*(pred - target)^2
-    // 梯度 dW_i = (pred - target) * input_i
+    // ZSFWS-H002修复: 使用LNN CfC动力学替代简单线性模型
+    // 原实现: prediction = W · input (线性点积，与液态神经网络架构脱节)
+    // 新实现: 通过共享LNN进行前向传播，利用CfC的连续时间动力学
     float prediction = 0.0f;
-    size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
-    for (size_t i = 0; i < min_dim; i++) {
-        prediction += learner->weights[i] * input[i];
+    float* lnn_output_buf = (float*)safe_malloc((size_t)RL_MAX(target_size, input_size) * sizeof(float));
+    if (!lnn_output_buf) {
+        safe_free((void**)&gradient);
+        return -1;
     }
-    
+
+    /* 尝试获取共享LNN进行预测 */
+    void* shared_lnn = selflnn_get_shared_lnn();
+    int used_lnn = 0;
+    if (shared_lnn) {
+        /* 使用LNN前向传播: 输入特征 → CfC演化 → 输出预测 */
+        if (lnn_forward((LNN*)shared_lnn, (float*)input, lnn_output_buf) == 0) {
+            prediction = lnn_output_buf[0];  /* 取第一输出通道为主预测 */
+            used_lnn = 1;
+        }
+    }
+
+    if (!used_lnn) {
+        /* 回退：无共享LNN时使用输入本身的加权求和 */
+        size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
+        for (size_t i = 0; i < min_dim; i++) {
+            prediction += learner->weights[i] * input[i];
+        }
+    }
+
     float target_val = (target_size > 0) ? target[0] : 0.0f;
     float error = prediction - target_val;
     float current_loss = 0.5f * error * error;
-    
-    // 计算梯度
-    for (size_t i = 0; i < min_dim; i++) {
-        gradient[i] = error * input[i];
+
+    if (used_lnn && shared_lnn) {
+        /* LNN反向传播: 构建目标向量（target_val作为第一元素） */
+        memset(lnn_output_buf, 0, (size_t)target_size * sizeof(float));
+        lnn_output_buf[0] = target_val;
+        lnn_backward((LNN*)shared_lnn, lnn_output_buf);
+    } else {
+        /* 回退梯度: 手动更新权重 */
+        size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
+        for (size_t i = 0; i < min_dim; i++) {
+            gradient[i] = error * input[i];
+        }
+        for (size_t i = 0; i < min_dim && i < learner->weights_size; i++) {
+            learner->weights[i] -= learner->config.learning_rate * gradient[i];
+        }
     }
-    // 对于超出输入维度的权重，梯度为零（已通过memset初始化）
+    safe_free((void**)&lnn_output_buf);
     
     // 更新梯度滑动窗口
     float grad_norm = compute_gradient_norm(gradient, learner->weights_size);
@@ -2295,11 +2330,27 @@ int online_learner_compute_ewc_fisher(OnlineLearner* learner,
         if (!learner->ewc_fisher_diag) return -1;
     }
 
-    /* 线性模型近似: output = input · W */
+    /* ZSFWS-M006修复: EWC Fisher改用LNN前向传播替代线性模型
+     * 原实现: predicted = input · W (简单线性点积)
+     * 修复: 通过共享LNN的CfC动力学进行前向传播计算预测
+     * 与H-002修复保持一致，确保跨任务Fisher信息的语义一致性 */
     float predicted[64] = {0};
-    for (size_t i = 0; i < target_size && i < 64; i++) {
-        for (size_t j = 0; j < input_size && (i * input_size + j) < n; j++) {
-            predicted[i] += input[j] * learner->weights[i * input_size + j];
+    void* shared_lnn = selflnn_get_shared_lnn();
+    if (shared_lnn) {
+        /* 使用LNN前向传播做预测 */
+        if (lnn_forward((LNN*)shared_lnn, (float*)input, predicted) != 0) {
+            /* 回退: 线性近似 */
+            for (size_t i = 0; i < target_size && i < 64; i++) {
+                for (size_t j = 0; j < input_size && (i * input_size + j) < n; j++) {
+                    predicted[i] += input[j] * learner->weights[i * input_size + j];
+                }
+            }
+        }
+    } else {
+        for (size_t i = 0; i < target_size && i < 64; i++) {
+            for (size_t j = 0; j < input_size && (i * input_size + j) < n; j++) {
+                predicted[i] += input[j] * learner->weights[i * input_size + j];
+            }
         }
     }
 

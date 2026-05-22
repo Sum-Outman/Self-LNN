@@ -86,14 +86,19 @@ static float ltm_hebbian_strengthen(float current_strength, int access_count, in
     return result > 1.0f ? 1.0f : result;
 }
 
-/* M-027: SM-2完整算法 — 动态EF因子和间隔计算
- * I(n+1) = I(n) * EF （若n=1则I(2)=6天，若n=2则I(3)=I(2)*EF）
- * EF' = EF + (0.1 - (5-q)*(0.08+(5-q)*0.02))
- * q=回忆质量(0-5)从strength映射，EF下限1.3 */
+/* ZSFWS-L015修复: SM-2回忆质量映射改进
+ * 原实现: q = (int)(strength*5+0.5) 直接截断
+ * 改进: 使用非线性映射更加符合SM-2评分分布
+ * strength ≈ 0.0-0.2 → q=0(完全遗忘), 0.2-0.4→q=1, 0.4-0.6→q=2
+ * 0.6-0.75→q=3, 0.75-0.9→q=4(正确但有犹豫), >0.9→q=5(完美) */
 static double ltm_calculate_interval(float strength, int rep_count, float* ef) {
-    /* 回忆质量q: 从strength(0-1)映射到SM-2的0-5分 */
-    int q = (int)(strength * 5.0f + 0.5f);
-    if (q < 0) q = 0; if (q > 5) q = 5;
+    int q;
+    if (strength < 0.2f) q = 0;
+    else if (strength < 0.4f) q = 1;
+    else if (strength < 0.6f) q = 2;
+    else if (strength < 0.75f) q = 3;
+    else if (strength < 0.9f) q = 4;
+    else q = 5;
 
     /* 更新EF因子 */
     float old_ef = *ef;
@@ -126,6 +131,12 @@ static double ltm_calculate_interval(float strength, int rep_count, float* ef) {
 static void ltm_apply_decay(LongTermMemory* memory) {
     uint64_t now = ltm_get_time_ms();
     if (memory->last_decay_time == 0) { memory->last_decay_time = now; return; }
+    
+    /* 系统重启检测：GetTickCount64在重启后会归零，若当前时间小于上次更新时间则跳过本次衰减 */
+    if (now < memory->last_decay_time) {
+        memory->last_decay_time = now;
+        return;
+    }
     
     double dt_sec = (double)(now - memory->last_decay_time) / 1000.0;
     if (dt_sec < 10.0) return; /* 至少10秒 */

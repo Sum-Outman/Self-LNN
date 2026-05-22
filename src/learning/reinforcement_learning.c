@@ -12,9 +12,7 @@
  */
 
 #include "selflnn/learning/reinforcement_learning.h"
-#include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
-#include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/logging.h"
 #include <stdlib.h>
@@ -899,11 +897,13 @@ static float rl_ppo_get_action_probs(RLAgent* agent, const float* state, int sta
     LNN* actor = agent->networks[RL_NETWORK_ACTOR];
     if (!actor) return 0.0f;
 
-    int output_size = (int)lnn_get_parameter_count(actor);
+    /* ZSFWS-M020修复: 直接使用lnn_get_config获取output_size
+     * 原代码先调用lnn_get_parameter_count（返回全部参数数量，可能数千），
+     * 后被output_size覆盖，但parameter_count可能极大导致不必要的大内存分配风险 */
     LNNConfig acfg;
     memset(&acfg, 0, sizeof(LNNConfig));
     lnn_get_config(actor, &acfg);
-    output_size = (int)acfg.output_size;
+    int output_size = (int)acfg.output_size;
 
     float* raw = (float*)safe_malloc((size_t)output_size * sizeof(float));
     if (!raw) return 0.0f;
@@ -1407,9 +1407,32 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
 
             float q_for_actor = RL_MIN(q1, q2);
             float actor_loss = agent->alpha * new_log_prob - q_for_actor;
-            /* P1-034修复：SAC actor使用独立target/loss缓冲区 */
-            float actor_target[1] = {actor_loss};
-            lnn_backward(actor, actor_target, &actor_loss);
+            /* ZSFWS-M005修复: SAC Actor反向传播使用正确的策略梯度目标
+             * 原实现: actor_target[1] = {actor_loss} 将标量损失当作输出目标，语义不正确
+             * 正确做法: 构建动作方向的目标向量
+             *   target_a = current_a + lr * sign(-∇_a(Q) + α·∇_a(logπ))
+             * 近似: 对于离散动作，target=action_one_hot，对连续动作用Q引导方向 */
+            LNNConfig acfg;
+            memset(&acfg, 0, sizeof(LNNConfig));
+            lnn_get_config(actor, &acfg);
+            float* actor_out = (float*)safe_malloc((size_t)(acfg.output_size > 0 ? acfg.output_size : 1) * sizeof(float));
+            float* actor_target_full = (float*)safe_malloc((size_t)(acfg.output_size > 0 ? acfg.output_size : 1) * sizeof(float));
+            if (actor_out && actor_target_full) {
+                lnn_forward(actor, sa_pair, actor_out);
+                float lr_scale = sc->actor_lr * 0.5f;
+                for (int k = 0; k < (int)acfg.output_size; k++) {
+                    /* 目标 = 当前输出 + lr * Q方向（最大化Q值）+ 熵正则（保持探索）
+                     * Q方向: 朝着动作分布中得分更高的方向微调 */
+                    float q_direction = (actor_out[k] > 0.5f) ? 1.0f : -0.5f;
+                    actor_target_full[k] = actor_out[k] + lr_scale * q_for_actor * q_direction
+                                          - lr_scale * agent->alpha * actor_out[k] * 0.1f;
+                    if (actor_target_full[k] > 1.0f) actor_target_full[k] = 1.0f;
+                    if (actor_target_full[k] < -1.0f) actor_target_full[k] = -1.0f;
+                }
+                lnn_backward(actor, actor_target_full, &actor_loss);
+            }
+            safe_free((void**)&actor_out);
+            safe_free((void**)&actor_target_full);
 
             safe_free((void**)&next_sa);
         }

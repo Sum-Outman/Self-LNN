@@ -584,6 +584,8 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
     if (loss_type < 0 || loss_type > 11) loss_type = (int)LOSS_MSE;
 
     float* error_gradient = network->error_buffer;
+    /* ZSFWS-NEW02: output_size为size_t但下游接int参数——实际NN维度远<2^31，安全
+     * 若后续支持超大输出层需将loss_gradient_ex接口改为size_t */
     loss_gradient_ex(network->output_buffer, target, (int)output_size,
                      error_gradient, (LossType)loss_type, NULL);
 

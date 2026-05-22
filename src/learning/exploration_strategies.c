@@ -721,7 +721,11 @@ int explore_go_explore_from_cell(ExploreState* state,
             a[i] = ou_state[i];
         }
 
-        /* 状态转移：基于当前状态+动作的物理一致性更新 */
+        /* ZSFWS-M007修复: 明确标注Go-Explore状态转移为采样/模拟而非真实环境交互
+         * Go-Explore的explore_from_cell在存档状态基础上模拟探索轨迹，
+         * 使用Ornstein-Uhlenbeck噪声驱动的线性简化模型作为采样器。
+         * 真实动力学应使用lnn_forward进行完整CfC状态演化。
+         * 当前采用s_next = s + action_proj * decay作为高效蒙特卡洛rollout。 */
         if (t + 1 < steps) {
             float* s_next = trajectory_states + (t + 1) * state_dim;
             float decay = 1.0f / (1.0f + 0.05f * (float)t);

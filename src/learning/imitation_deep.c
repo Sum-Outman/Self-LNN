@@ -2,11 +2,11 @@
  * @file imitation_deep.c
  * @brief 模仿学习深度增强完整实现
  *
- * K-007: 角色定义 —— imitation_deep.c 是 imitation_learning.c 的【深度增强内部模块】
- * 提供：深度示范编码、轨迹优化、行为克隆增强等高级模仿学习特性。
- * 
- * API统一入口：所有外部调用通过 imitation_learning.c（163KB）的公开API，
- * imitation_deep.c 作为内部增强模块被其调用，不直接暴露给外部调用方。
+ * ZSFWS-M004: 角色说明 —— 本文件提供独立公开BC训练器(im_behavioral_clone_train)
+ * 及深度增强的IRL/DAgger/BC+算法实现，可通过imitation_learning.h间接调用。
+ * 与imitation_learning.c(163KB GAIL/IRL/DAgger主实现)形成互补关系：
+ * imitation_deep.c负责增强算法实现，imitation_learning.c负责标准框架+公开API暴露。
+ * 两文件间不存在功能重复，而是分层增强架构。
  */
 #include "selflnn/learning/imitation_deep.h"
 #include "selflnn/core/lnn.h"

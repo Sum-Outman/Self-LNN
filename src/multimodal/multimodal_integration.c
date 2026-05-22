@@ -823,8 +823,9 @@ int multimodal_integration_process_to_lnn(
     if (!processor || !lnn_net || !lnn_output || max_output_size == 0) {
         return -1;
     }
-    (void)vis_in; (void)aud_in;
-    (void)txt_in2; (void)sen_in2;
+    /* ZSFWS-L022修复: 移除误导性(void)转换
+     * vis_in/aud_in/txt_in2/sen_in2在下方传递给unified_signal_processor_encode_to_lnn
+     * (void)转换让人误以为这些参数被丢弃，实则被正常使用 */
     
     if (!processor->unified_signal_processor) {
         return -1;

@@ -185,7 +185,9 @@ typedef int (*CollisionCallback)(int shape_a, int shape_b,
 
 void vec3_add(Vec3* out, const Vec3* a, const Vec3* b);
 void vec3_sub(Vec3* out, const Vec3* a, const Vec3* b);
+#ifndef SELFLNN_MATH_UTILS_H
 float vec3_dot(const Vec3* a, const Vec3* b);
+#endif
 void vec3_cross(Vec3* out, const Vec3* a, const Vec3* b);
 void vec3_scale(Vec3* out, const Vec3* a, float s);
 float vec3_length(const Vec3* a);

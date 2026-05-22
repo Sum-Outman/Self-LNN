@@ -3266,11 +3266,11 @@ ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, c
         }
         
         if (similar_errors > 3) {
-            // 频繁发生的错误需要特别关注
-            strcat(causes_buffer, "6. 此错误频繁发生，可能存在系统性缺陷\n");
+            /* ZSFWS-NEW04: 用SAFE_APPEND替代裸strcat防止缓冲区溢出 */
+            SAFE_APPEND(causes_buffer, causes_remaining, "6. 此错误频繁发生，可能存在系统性缺陷\n");
             root_causes++;
             
-            strcat(solutions_buffer, "7. 实施根本原因分析和系统性修复\n");
+            SAFE_APPEND(solutions_buffer, solutions_remaining, "7. 实施根本原因分析和系统性修复\n");
             solutions++;
         }
     }

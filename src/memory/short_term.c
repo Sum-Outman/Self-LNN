@@ -194,9 +194,13 @@ int short_term_memory_store(ShortTermMemory* memory, const char* key,
         }
     }
     
-    /* F-006: 干扰效应 — 存储新记忆时轻微衰减所有现有记忆 */
+    /* ZSFWS-L017修复: 干扰效应动态调整（原硬编码0.98）
+     * 干扰强度与存储容量成反比：容量越小干扰越大（资源竞争） */
+    float capacity_ratio = memory->record_capacity > 0
+        ? (float)memory->record_count / (float)memory->record_capacity : 0.0f;
+    float interference_factor = 0.98f + 0.02f * (1.0f - capacity_ratio);
     for (size_t i = 0; i < memory->record_count; i++) {
-        memory->access_records[i].current_strength *= 0.98f;
+        memory->access_records[i].current_strength *= interference_factor;
     }
     
     int result = memory_store(memory->memory_system, key, data, data_size,

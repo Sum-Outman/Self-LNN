@@ -938,7 +938,7 @@ int memory_manager_store(MemoryManager* manager, const char* key,
     }
 
     /* 快速稳定性检查：对存储的记忆数据进行频域稳定性加权 */
-    if (result == 0 && data && data_size > 0) {
+    if (manager->config.enable_laplace_stability_check && data && data_size > 0) {
         size_t spec_size = data_size < 512 ? data_size : 512;
         float den_coeffs[2] = {1.0f, -0.5f};
         int is_stable = 0;
@@ -1035,7 +1035,7 @@ int memory_manager_consolidate(MemoryManager* manager, const char* key)
     }
 
     /* 快速稳定性检查：巩固后评估记忆稳定性 */
-    if (result == 0) {
+    if (manager->config.enable_laplace_stability_check) {
         float den_coeffs[2] = {1.0f, -0.5f};
         int is_stable = 0;
         if (laplace_check_stability_fast(den_coeffs, 2, &is_stable, NULL) == 0) {
@@ -1100,6 +1100,7 @@ int memory_manager_set_config(MemoryManager* manager, const MemoryManagerConfig*
     manager->config.enable_integration = config->enable_integration;
     manager->config.buddy_pool_size = config->buddy_pool_size;
     manager->config.enable_buddy_allocator = config->enable_buddy_allocator;
+    manager->config.enable_laplace_stability_check = config->enable_laplace_stability_check;
 
     if (config->enable_buddy_allocator && !manager->buddy_enabled) {
         size_t pool_sz = config->buddy_pool_size > 0 ?

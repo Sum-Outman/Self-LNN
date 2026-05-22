@@ -994,13 +994,16 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
                 }
             }
         } else {
-            /* CfC闭式解ODE: h(t+dt) = h(t)*exp(-dt/τ) + (1-exp(-dt/τ))*σ(W·[x,h])⊙tanh(W·[x,h]) */
+            /* ZSFWS-M022修复: 自包含CfC回退路径
+             * 复用嵌入表作为权重矩阵时，嵌入表为Xavier×0.1缩放，
+             * 添加0.2尺度因子使门控和激活计算与标准CfC权重范围匹配 */
+            const float embed_weight_scale = 0.2f;
             for (int i = 0; i < hs; i++) {
                 float gate_sum = 0.0f;
                 float act_sum = 0.0f;
                 for (size_t j = 0; j < input_dim; j++) {
-                    gate_sum += input_buf[j] * (engine->embedding_table[(size_t)((i+j)%ed)]);
-                    act_sum  += input_buf[j] * (engine->embedding_table[(size_t)((i+j+hs/2)%ed)]);
+                    gate_sum += input_buf[j] * (engine->embedding_table[(size_t)((i+j)%ed)]) * embed_weight_scale;
+                    act_sum  += input_buf[j] * (engine->embedding_table[(size_t)((i+j+hs/2)%ed)]) * embed_weight_scale;
                 }
                 gate_sum += engine->hidden_state[i] * 0.15f;
                 act_sum  += engine->hidden_state[i] * 0.15f;

@@ -246,21 +246,36 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                     obj->confidence = edge_response * 8.0f;
                     if (obj->confidence > 1.0f) obj->confidence = 1.0f;
                     
-                    /* 使用真实NCC模板匹配确定最佳类别 */
-                    int best_category = 0;
-                    float best_ncc = -1.0f;
-                    for (int c = 0; c < or_obj->category_count; c++) {
-                        float ncc = normalized_cross_correlation(
-                            hog_features, or_obj->category_templates[c], 128);
-                        if (ncc > best_ncc) {
-                            best_ncc = ncc;
-                            best_category = c;
+                    /* ZSFWS-M009修复: 检查模板是否已训练
+                     * 未训练时模板全为零，NCC匹配无意义，直接返回"未训练"状态 */
+                    int is_trained = 0;
+                    for (int c = 0; c < or_obj->category_count && !is_trained; c++) {
+                        for (int i = 0; i < 128; i++) {
+                            if (or_obj->category_templates[c][i] != 0.0f) {
+                                is_trained = 1; break;
+                            }
                         }
                     }
-                    obj->category_id = best_category;
-                    if (best_category < or_obj->category_count) {
+                    
+                    int best_category = 0;
+                    float best_ncc = -1.0f;
+                    if (is_trained) {
+                        for (int c = 0; c < or_obj->category_count; c++) {
+                            float ncc = normalized_cross_correlation(
+                                hog_features, or_obj->category_templates[c], 128);
+                            if (ncc > best_ncc) {
+                                best_ncc = ncc;
+                                best_category = c;
+                            }
+                        }
+                    }
+                    obj->category_id = is_trained ? best_category : -1;
+                    if (is_trained && best_category < or_obj->category_count) {
                         snprintf(obj->category_name, sizeof(obj->category_name),
                                 "%s", or_obj->category_names[best_category]);
+                    } else {
+                        snprintf(obj->category_name, sizeof(obj->category_name),
+                                "未训练");
                     }
                     /* 存储HOG特征 */
                     memcpy(obj->features, hog_features, 128 * sizeof(float));

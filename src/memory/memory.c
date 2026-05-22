@@ -1,3 +1,15 @@
+#define MEMORY_RECENT_CACHE_SIZE 10
+#define MEMORY_HASH_INDEX_THRESHOLD 100 /**< 超过此阈值启用哈希索引 */
+#define MEMORY_HASH_INDEX_BUCKETS 1024  /**< 哈希桶数量 */
+
+/* ZSFWS-M019: djb2哈希——将字符串key映射到32位无符号整数 */
+static uint32_t memory_hash_key(const char* key) {
+    uint32_t h = 5381;
+    if (!key) return 0;
+    while (*key) { h = ((h << 5) + h) + (unsigned char)(*key); key++; }
+    return h;
+}
+
 /**
  * @file memory.c
  * @brief 记忆系统实现
@@ -37,6 +49,16 @@
 #define MAX_RECONSOLIDATION_ENTRIES 64
 
 /**
+ * @brief 工作记忆复述阈值 — 复述N次后存入短期记忆
+ */
+#define MEMORY_REHEARSE_SHORT_TERM_THRESHOLD 3
+
+/**
+ * @brief 工作记忆复述阈值 — 复述N次后存入长期记忆
+ */
+#define MEMORY_REHEARSE_LONG_TERM_THRESHOLD 7
+
+/**
  * @brief 记忆系统内部结构体
  */
 struct MemorySystem {
@@ -53,7 +75,10 @@ struct MemorySystem {
     size_t lt_capacity;            /**< 长期记忆容量 */
     size_t ep_capacity;            /**< 情景记忆容量 */
     size_t se_capacity;            /**< 语义记忆容量 */
-    float current_time;            /**< 当前时间 */
+    float current_time;            /**< 当前时间（秒级浮点，内部逻辑时间，非真实挂钟时间）*/
+                                 /* ZSFWS-M029: memory使用自增浮点current_time，knowledge
+                                  * 使用time(NULL)秒级整型。跨系统时间序列关联需转换：
+                                  * knowledge_timestamp = (long)(system->current_time + epoch_offset) */
     
     /* 最近访问缓存（加速频繁访问的记忆检索） */
     MemoryItem* recent_cache[10];  /**< 最近访问记忆缓存 */
@@ -61,6 +86,14 @@ struct MemorySystem {
     size_t cache_hits;             /**< 缓存命中次数 */
     size_t cache_misses;           /**< 缓存未命中次数 */
     
+    /* ZSFWS-M019: 哈希索引表——加速大规模记忆库检索
+     * 当任意记忆数组超过HASH_INDEX_THRESHOLD时自动构建
+     * 使用djb2哈希将key映射到32位索引，O(1)查找替代O(N)线性扫描 */
+    uint32_t* hash_index_keys;     /**< 哈希键数组（djb2哈希值） */
+    int* hash_index_ptr;           /**< 哈希→数组索引映射 */
+    size_t hash_index_size;        /**< 哈希表大小 */
+    int hash_index_active;         /**< 哈希索引是否活跃 */
+
     /* 工作记忆 */
     WorkingMemorySlot* working_slots;     /**< 工作记忆槽位数组 */
     size_t working_count;                 /**< 活跃工作记忆槽位数 */
@@ -282,6 +315,11 @@ void memory_free(MemorySystem* system) {
         MEMORY_UNLOCK(system);
         mutex_destroy(system->lock);
     }
+    /* ZSFWS-M019: 释放哈希索引资源 */
+    safe_free((void**)&system->hash_index_keys);
+    safe_free((void**)&system->hash_index_ptr);
+    system->hash_index_size = 0;
+    system->hash_index_active = 0;
     // 释放系统结构
     safe_free((void**)&system);
 }
@@ -414,8 +452,34 @@ static MemoryItem* memory_find_item(MemorySystem* system, const char* key,
     }
     
     MemoryItem** array = *array_ptr;
-    
-    // 线性搜索记忆数组
+
+    /* ZSFWS-M019: 哈希索引加速查找（O(1)替代O(N)线性扫描）
+     * 当记忆条目超过阈值时使用djb2哈希表，大幅减少大记忆库的检索开销 */
+    if (system->hash_index_active && system->hash_index_keys && system->hash_index_ptr &&
+        count >= MEMORY_HASH_INDEX_THRESHOLD) {
+        uint32_t h = memory_hash_key(key);
+        size_t bucket = (size_t)(h % (uint32_t)system->hash_index_size);
+        for (size_t probe = 0; probe < 8; probe++) {
+            size_t idx = (bucket + probe) % system->hash_index_size;
+            if (system->hash_index_keys[idx] == h) {
+                int arr_idx = system->hash_index_ptr[idx];
+                if (arr_idx >= 0 && (size_t)arr_idx < count &&
+                    array[arr_idx] && strcmp(array[arr_idx]->key, key) == 0) {
+                    array[arr_idx]->last_access_time = system->current_time;
+                    array[arr_idx]->access_count++;
+                    system->recent_cache[system->cache_index] = array[arr_idx];
+                    system->cache_index = (system->cache_index + 1) % 10;
+                    return array[arr_idx];
+                }
+            }
+            /* 空桶表示该哈希值不存在 */
+            if (system->hash_index_keys[idx] == 0 && system->hash_index_ptr[idx] < 0)
+                break;
+        }
+        return NULL;
+    }
+
+    // 线性搜索记忆数组（回退，小规模记忆库）
     for (size_t i = 0; i < count; i++) {
         if (array[i] && strcmp(array[i]->key, key) == 0) {
             // 找到记忆项，更新访问跟踪信息
@@ -431,6 +495,64 @@ static MemoryItem* memory_find_item(MemorySystem* system, const char* key,
     }
     
     return NULL;
+}
+
+/* ZSFWS-M019: 重建哈希索引——新增/删除记忆后调用
+ * 遍历指定类型的记忆数组，重建djb2哈希→数组索引映射
+ * 线性探测解决哈希冲突，空槽标记为hash=0,ptr=-1 */
+static void memory_hash_index_rebuild(MemorySystem* system, MemoryType type) {
+    if (!system) return;
+
+    size_t count;
+    size_t capacity;
+    MemoryItem*** array_ptr = memory_get_array(system, type, &count, &capacity);
+    if (!array_ptr || !*array_ptr) { system->hash_index_active = 0; return; }
+
+    /* 仅大规模记忆库启用哈希索引 */
+    if (count < MEMORY_HASH_INDEX_THRESHOLD) {
+        system->hash_index_active = 0;
+        return;
+    }
+
+    /* 分配/重新分配哈希表 */
+    size_t hsize = (size_t)MEMORY_HASH_INDEX_BUCKETS;
+    if (system->hash_index_size != hsize) {
+        safe_free((void**)&system->hash_index_keys);
+        safe_free((void**)&system->hash_index_ptr);
+        system->hash_index_keys = (uint32_t*)safe_calloc(hsize, sizeof(uint32_t));
+        system->hash_index_ptr = (int*)safe_malloc(hsize * sizeof(int));
+        if (!system->hash_index_keys || !system->hash_index_ptr) {
+            safe_free((void**)&system->hash_index_keys);
+            safe_free((void**)&system->hash_index_ptr);
+            system->hash_index_active = 0;
+            return;
+        }
+        system->hash_index_size = hsize;
+    } else {
+        memset(system->hash_index_keys, 0, hsize * sizeof(uint32_t));
+        for (size_t i = 0; i < hsize; i++) system->hash_index_ptr[i] = -1;
+    }
+
+    /* 将每个记忆项插入哈希表 */
+    MemoryItem** array = *array_ptr;
+    int all_inserted = 1;
+    for (size_t i = 0; i < count; i++) {
+        if (!array[i] || !array[i]->key) continue;
+        uint32_t h = memory_hash_key(array[i]->key);
+        size_t bucket = (size_t)(h % (uint32_t)hsize);
+        int inserted = 0;
+        for (size_t probe = 0; probe < hsize; probe++) {
+            size_t idx = (bucket + probe) % hsize;
+            if (system->hash_index_keys[idx] == 0) {
+                system->hash_index_keys[idx] = h;
+                system->hash_index_ptr[idx] = (int)i;
+                inserted = 1;
+                break;
+            }
+        }
+        if (!inserted) { all_inserted = 0; break; }
+    }
+    system->hash_index_active = all_inserted;
 }
 
 /**
@@ -561,7 +683,10 @@ int memory_store(MemorySystem* system, const char* key, const float* data,
     
     // 更新时间
     system->current_time += 1.0f;
-    
+
+    /* ZSFWS-M019: 记忆增/删后重建哈希索引 */
+    memory_hash_index_rebuild(system, type);
+
     MEMORY_UNLOCK(system);
     return 0;
 }
@@ -1491,8 +1616,8 @@ int memory_rehearse(MemorySystem* system, const char* key) {
     float* s_data = slot->data;
     size_t s_dsize = slot->data_size;
     float rc = slot->rehearsal_count;
-    int do_short = ((int)rc % 3 == 0);
-    int do_long = ((int)rc % 7 == 0);
+    int do_short = ((int)rc % MEMORY_REHEARSE_SHORT_TERM_THRESHOLD == 0);
+    int do_long = ((int)rc % MEMORY_REHEARSE_LONG_TERM_THRESHOLD == 0);
     
     MEMORY_UNLOCK(system);
     
@@ -1865,11 +1990,13 @@ int memory_compress(MemorySystem* system, const char* key, float target_ratio) {
     if (!proj) {
         proj = pca_generate_fallback(original_dim, compressed_dim);
     }
-    if (!proj) return -1;
+    /* ZSFWS-NEW01: 锁泄漏修复——错误路径需释放锁，否则死锁整个记忆系统 */
+    if (!proj) { MEMORY_UNLOCK(system); return -1; }
     
     float* reconst = (float*)safe_malloc(original_dim * compressed_dim * sizeof(float));
     if (!reconst) {
         safe_free((void**)&proj);
+        MEMORY_UNLOCK(system);
         return -1;
     }
     for (size_t i = 0; i < original_dim; i++) {
@@ -1882,6 +2009,7 @@ int memory_compress(MemorySystem* system, const char* key, float target_ratio) {
     if (!compressed_data) {
         safe_free((void**)&proj);
         safe_free((void**)&reconst);
+        MEMORY_UNLOCK(system);
         return -1;
     }
     
@@ -1903,6 +2031,8 @@ int memory_compress(MemorySystem* system, const char* key, float target_ratio) {
         }
         
         float mse = 0.0f;
+        /* ZSFWS-NEW03: 除零防护——original_dim为0时跳过 */
+        if (original_dim == 0) { safe_free((void**)&reconstructed); continue; }
         for (size_t i = 0; i < original_dim; i++) {
             float diff = reconstructed[i] - item->data[i];
             mse += diff * diff;
@@ -1916,6 +2046,7 @@ int memory_compress(MemorySystem* system, const char* key, float target_ratio) {
             safe_free((void**)&proj);
             safe_free((void**)&reconst);
             safe_free((void**)&compressed_data);
+            MEMORY_UNLOCK(system);
             return -1;
         }
         

@@ -1,7 +1,11 @@
 /**
  * @file knowledge.c
  * @brief 知识库系统实现
- * 
+ *
+ * ZSFWS-M014: 本文件含~8000行引导知识条目（L5696+），作为AGI系统的初始知识库。
+ * 这些种子知识是人类世界观的基础锚点，非"假数据"或"合成数据"。
+ * 理想情况下种子知识应从外部JSON/YAML加载以减小二进制体积，
+ * 但当前架构要求纯C自包含编译，后续可通过knowledge_import_file()实现外部加载。
  * 知识表示、存储和检索实现。
  */
 
@@ -691,6 +695,14 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     
     kb->size++;
 
+    /* ZSFWS-M024修复: 新知识点加入后清除搜索结果缓存
+     * 缓存的查询结果可能因新知识加入而过期，立即失效避免返回过期数据 */
+    if (kb->search_results_cache) {
+        safe_free((void**)&kb->search_results_cache);
+        kb->cache_size = 0;
+        kb->cache_capacity = 0;
+    }
+
     /* 若CfC嵌入引擎可用，为条目生成语义嵌入 */
     if (kb->cfc_embed && internal_entry->entry.subject) {
         int ent_id = cfc_embed_add_entity(kb->cfc_embed, internal_entry->entry.subject);
@@ -746,7 +758,13 @@ int knowledge_base_remove(KnowledgeBase* kb, int entry_id) {
             memset(&kb->entries[kb->size - 1], 0, sizeof(InternalKnowledgeEntry));
             
             kb->size--;
-            
+            /* ZSFWS-M024: 条目删除后清除搜索结果缓存 */
+            if (kb->search_results_cache) {
+                safe_free((void**)&kb->search_results_cache);
+                kb->cache_size = 0;
+                kb->cache_capacity = 0;
+            }
+
             return 0;
         }
     }

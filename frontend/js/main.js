@@ -1527,6 +1527,62 @@ async function pollRealTimeUpdates() {
     }
 }
 
+/* ZSFWS-M002: ToM智能体卡片动态渲染器
+ * 从后端API(/api/cognition/tom)获取心智理论数据并动态生成agent卡片。
+ * 不再使用HTML硬编码的"智能体#1/#2/#3"模板，所有agent信息由后端提供。 */
+function renderTomAgents(tomData) {
+    var container = document.getElementById('tom-agents');
+    if (!container) return;
+    if (!tomData || !tomData.agents || !tomData.agents.length) {
+        container.innerHTML = '<div class="tom-empty">等待心智理论数据...</div>';
+        return;
+    }
+    var html = '';
+    var agents = tomData.agents;
+    for (var i = 0; i < agents.length; i++) {
+        var a = agents[i];
+        var beliefW = ((a.beliefScore || 0) * 100).toFixed(0);
+        var desireW = ((a.desireScore || 0) * 100).toFixed(0);
+        var intentW = ((a.intentionScore || 0) * 100).toFixed(0);
+        var statusClass = a.online ? 'online' : 'offline';
+        html += '<div class="tom-agent-card">' +
+            '<div class="tom-agent-header">' +
+            '<span class="tom-agent-name">' + (a.name || ('智能体 #' + (i+1))) + '</span>' +
+            '<span class="tom-agent-status ' + statusClass + '"></span>' +
+            '</div>' +
+            '<div class="tom-dimension">' +
+            '<span class="tom-dim-label">信念</span>' +
+            '<div class="tom-dim-bar"><div class="tom-dim-fill" style="width:' + beliefW + '%"></div></div>' +
+            '<span class="tom-dim-value">' + beliefW + '%</span>' +
+            '</div>' +
+            '<div class="tom-dimension">' +
+            '<span class="tom-dim-label">欲望</span>' +
+            '<div class="tom-dim-bar"><div class="tom-dim-fill tom-desire" style="width:' + desireW + '%"></div></div>' +
+            '<span class="tom-dim-value">' + desireW + '%</span>' +
+            '</div>' +
+            '<div class="tom-dimension">' +
+            '<span class="tom-dim-label">意图</span>' +
+            '<div class="tom-dim-bar"><div class="tom-dim-fill tom-intention" style="width:' + intentW + '%"></div></div>' +
+            '<span class="tom-dim-value">' + intentW + '%</span>' +
+            '</div>' +
+            '<div class="tom-belief-content">' + (a.beliefText || '未知') + '</div>' +
+            '</div>';
+    }
+    container.innerHTML = html;
+    var summaryEl = document.getElementById('tom-summary-text');
+    if (summaryEl) summaryEl.textContent = tomData.summary || '等待数据...';
+}
+
+/* ZSFWS-M003: 定期轮询心智理论状态并渲染 */
+function updateTomDisplay() {
+    if (typeof SelfLnnApi === 'undefined' || !SelfLnnApi.cognitionStatus) return;
+    SelfLnnApi.cognitionStatus().then(function(res) {
+        if (res && res.success && res.data && res.data.tom) {
+            renderTomAgents(res.data.tom);
+        }
+    }).catch(function() { /* 静默 */ });
+}
+
 /**
  * 从数据引擎更新所有UI组件
  */

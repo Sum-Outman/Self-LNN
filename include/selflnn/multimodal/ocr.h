@@ -127,7 +127,7 @@ typedef struct {
     int y;                             /**< 字符左上角Y坐标 */
     int width;                         /**< 字符宽度 */
     int height;                        /**< 字符高度 */
-    char character;                    /**< 识别的字符 */
+    unsigned short character;          /**< 识别的字符（支持Unicode，含中文） */
     float confidence;                  /**< 置信度 */
     float* alternatives;               /**< 备选字符置信度 */
     char* alt_chars;                   /**< 备选字符 */

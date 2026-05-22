@@ -175,6 +175,9 @@ typedef struct {
     float cx, cy, w, h;
     float confidence;
     int class_id;
+    char class_name[VISION_CLASS_NAME_MAX_LEN];
+    float* class_probs;          /**< 动态分配的类别概率数组 */
+    int class_probs_count;       /**< class_probs的实际长度 */
 } CfCVisionDetection;
 
 int vision_cfc_detect(const float* image, int width, int height, int channels,
@@ -192,6 +195,10 @@ const char* vision_get_class_name_en(int class_id);
 
 /* 非极大值抑制 */
 int vision_nms(CfCVisionDetection* detections, int count, float iou_threshold);
+
+/* ZSFWS-L002: 释放检测结果中动态分配的class_probs内存
+ * 每个检测结果的class_probs由safe_malloc分配，调用者必须使用此函数释放 */
+void vision_free_detections(CfCVisionDetection* detections, int count);
 
 #ifdef __cplusplus
 }

@@ -51,6 +51,7 @@ typedef struct {
     int enable_integration;       /**< 是否启用记忆整合 */
     size_t buddy_pool_size;       /**< 伙伴分配器内存池大小（0=使用默认） */
     int enable_buddy_allocator;   /**< 是否启用伙伴分配器 */
+    int enable_laplace_stability_check; /**< 是否启用Laplace稳定性检查 */
 } MemoryManagerConfig;
 
 /**

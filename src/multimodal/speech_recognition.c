@@ -1922,6 +1922,7 @@ int speech_recognizer_set_config(SpeechRecognizer* recognizer,
 int speech_recognizer_train(SpeechRecognizer* recognizer,
                              const float** training_audio,
                              const char** training_transcripts,
+                             const int* training_audio_lengths,
                              int num_samples, int num_epochs,
                              float learning_rate, int batch_size,
                              float* out_loss) {
@@ -1971,8 +1972,16 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                 cfc_cell_reset(recognizer->self_contained_cfc);
             }
 
+            /* ZSFWS-M023修复: 使用音频数据实际长度计算帧数
+             * 原实现用 transcript_len * 100 估算，存在不精确问题。
+             * 改用 training_audio_lengths[] 提供真实音频采样数，同时保留转录长度作为回退。 */
+            int audio_sample_count = training_audio_lengths ? training_audio_lengths[s] : 0;
+            if (audio_sample_count <= 0) {
+                /* 回退：假设16kHz采样率，100ms/字符的估计 */
+                audio_sample_count = (int)strlen(training_transcripts[s]) * SR_DEFAULT_FRAME_LENGTH + SR_DEFAULT_FRAME_LENGTH;
+            }
             int num_frames = extract_mel_features(recognizer,
-                training_audio[s], (int)strlen(training_transcripts[s]) * 100 + SR_DEFAULT_FRAME_LENGTH,
+                training_audio[s], audio_sample_count,
                 recognizer->feature_buffer,
                 recognizer->feature_buffer_capacity * recognizer->config.feature_dimension);
 

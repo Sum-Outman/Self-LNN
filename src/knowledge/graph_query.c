@@ -1076,10 +1076,22 @@ static int pg_check_node_match(PropertyGraph* pg, int node_id,
     return 1;
 }
 
+/* ZSFWS-L999: VF2递归深度保护 —— 防止超大模式图导致栈溢出
+ * VF2是深度优先递归搜索，递归深度=模式图节点数。
+ * 默认上限2000层(C栈约16KB/层≈32MB)，超出此范围建议使用迭代BFS或Ullmann算法。
+ * 实际上业务模式图极少超过100节点，此处仅作为安全兜底。 */
+#define VF2_MAX_RECURSION_DEPTH 2000
+
 static int vf2_search(PropertyGraph* pg, const QueryGraphPattern* pattern,
                       int* mapping, int* mapped_graph,
                       int depth, size_t max_node_cap,
                       SubgraphMatchSet* set, size_t max_results) {
+    /* 递归深度保护：超出上限时安全终止 */
+    if (depth > VF2_MAX_RECURSION_DEPTH) {
+        log_warning("[VF2] 模式图节点数=%d超出递归上限%d，搜索提前终止",
+                    depth, VF2_MAX_RECURSION_DEPTH);
+        return 0;
+    }
     if ((size_t)depth == pattern->node_count) {
         int* matched = (int*)safe_malloc(
             (size_t)pattern->node_count * sizeof(int));

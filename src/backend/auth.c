@@ -10,6 +10,10 @@
 #include <math.h>
 #include <time.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #define ROTLEFT(a,b) (((a) << (b)) | ((a) >> (32-(b))))
 #define ROTRIGHT(a,b) (((a) >> (b)) | ((a) << (32-(b))))
 #define CH(x,y,z) (((x) & (y)) ^ (~(x) & (z)))
@@ -212,8 +216,17 @@ static int string_to_key(const char* str, uint8_t* hash) {
     return 0;
 }
 
+/* ZSFWS-L004修复: 使用高精度时间函数替代 clock()
+ * clock() 在某些平台分辨率仅为10ms，影响令牌桶精度。
+ * Windows使用GetTickCount64（毫秒精度），POSIX使用clock_gettime */
 static uint64_t get_current_time_ms(void) {
-    return (uint64_t)clock() * 1000 / CLOCKS_PER_SEC;
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+#endif
 }
 
 static void token_bucket_init(TokenBucket* bucket, uint64_t capacity, double refill_rate_per_sec) {

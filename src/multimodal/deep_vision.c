@@ -707,6 +707,16 @@ int cfc_ode_layer_backward(CfcOdeLayer* layer,
             /* dL/dW_gate[i,h] = dL_dout_h * th * g * (1-g) * input[i] */
             dL_dw_gate[(size_t)h * input_dim + i] = dL_dout_h * th * g * (1.0f - g) * input[i];
         }
+
+        /* ZSFWS-C002修复: 隐藏状态循环权重梯度
+         * dL/dW_hidden[j,h] = dL_dout_h * gate * tanh_deriv * state[j]
+         * 来自: linear = W_hidden * state + W_input * input + b_hidden */
+        for (int j = 0; j < hidden_dim; j++) {
+            dL_dw_hidden[(size_t)h * hidden_dim + j] = dL_dout_h * g * tanh_deriv * state[j];
+            /* dL/dU_gate[j,h] = dL_dout_h * tanh * gate * (1-gate) * state[j]
+             * 来自: gate_pre = U_gate * state + W_gate * input + b_gate */
+            dL_du_gate[(size_t)h * hidden_dim + j] = dL_dout_h * th * g * (1.0f - g) * state[j];
+        }
     }
 
     /* 计算dL/dinput（如果请求） */
@@ -1772,6 +1782,11 @@ int cfc_vision_train_network(CfcVisionProcessor* processor,
     indices = (int*)safe_malloc((size_t)num_samples * sizeof(int));
     if (!indices) { safe_free((void**)&current_out); safe_free((void**)&loss_grad); return -1; }
     for (i = 0; i < num_samples; i++) indices[i] = i;
+
+    /* ZSFWS-C001修复: 训练期间临时启用特征提取（绕过training_completed门控）
+     * 保存原始状态用于错误回退，训练完成后再永久设置 */
+    int saved_training_completed = processor->training_completed;
+    processor->training_completed = 1;
 
     for (epoch = 0; epoch < num_epochs; epoch++) {
         for (i = num_samples - 1; i > 0; i--) {

@@ -13,6 +13,18 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/platform.h"
 #include "gpu_internal.h"
+
+/* ZSFWS-L009: 内核缓存自旋锁——保护多线程并发编译时的竞态条件 */
+#ifdef _WIN32
+#include <windows.h>
+static volatile LONG rocm_cache_lock_val = 0;
+#define ROCM_CACHE_LOCK()   while (InterlockedCompareExchange(&rocm_cache_lock_val, 1, 0) != 0) { /* yield */ Sleep(0); }
+#define ROCM_CACHE_UNLOCK() InterlockedExchange(&rocm_cache_lock_val, 0)
+#else
+static volatile int rocm_cache_lock_val = 0;
+#define ROCM_CACHE_LOCK()   while (__sync_lock_test_and_set(&rocm_cache_lock_val, 1)) { /* yield */ usleep(0); }
+#define ROCM_CACHE_UNLOCK() __sync_lock_release(&rocm_cache_lock_val)
+#endif
 #include "selflnn/utils/logging.h"
 
 #include <stdlib.h>
@@ -406,15 +418,18 @@ static void rocm_hash_kernel(const char* source, const char* name, char* hash_ou
 
 static RocmCacheEntry* rocm_cache_lookup(RocmContextInternal* ctx, const char* hash_key) {
     if (!ctx || !hash_key) return NULL;
+    ROCM_CACHE_LOCK();
     for (int i = 0; i < ctx->cache_count; i++) {
         if (ctx->kernel_cache[i].valid &&
             strncmp(ctx->kernel_cache[i].hash_key, hash_key, ROCM_CACHE_HASH_SIZE) == 0) {
             ctx->kernel_cache[i].access_count++;
             ctx->cache_hits++;
+            ROCM_CACHE_UNLOCK();
             return &ctx->kernel_cache[i];
         }
     }
     ctx->cache_misses++;
+    ROCM_CACHE_UNLOCK();
     return NULL;
 }
 
@@ -450,13 +465,14 @@ static int rocm_cache_insert(RocmContextInternal* ctx, const char* hash_key, con
                               char* hsaco, size_t hsaco_size, void* module, void* function,
                               uint64_t compile_time_ms) {
     if (!ctx || !hash_key || !hsaco || hsaco_size == 0 || !module || !function) return -1;
+    ROCM_CACHE_LOCK();
     if (ctx->cache_count >= ROCM_CACHE_MAX_ENTRIES) rocm_cache_evict_one(ctx);
     int idx = -1;
     for (int i = 0; i < ROCM_CACHE_MAX_ENTRIES; i++) {
         if (!ctx->kernel_cache[i].valid) { idx = i; break; }
     }
     if (idx < 0) { rocm_cache_evict_one(ctx); for (int i = 0; i < ROCM_CACHE_MAX_ENTRIES; i++) { if (!ctx->kernel_cache[i].valid) { idx = i; break; } } }
-    if (idx < 0) return -1;
+    if (idx < 0) { ROCM_CACHE_UNLOCK(); return -1; }
     RocmCacheEntry* entry = &ctx->kernel_cache[idx];
     memset(entry, 0, sizeof(RocmCacheEntry));
     strncpy(entry->hash_key, hash_key, ROCM_CACHE_HASH_SIZE);
@@ -470,6 +486,7 @@ static int rocm_cache_insert(RocmContextInternal* ctx, const char* hash_key, con
     entry->access_count = 0;
     entry->compile_time_ms = compile_time_ms;
     ctx->cache_count++;
+    ROCM_CACHE_UNLOCK();
     return 0;
 }
 

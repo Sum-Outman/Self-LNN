@@ -250,13 +250,22 @@ int speech_language_model_build_from_text(const char* text, size_t text_len,
     for (int order = 1; order < n; order++) {
         for (int i = 0; i + order < wc; i++) {
             char ngram_buf[512] = "";
+            size_t buf_used = 0;
             for (int j = 0; j <= order; j++) {
-                if (j > 0) strcat(ngram_buf, " ");
+                /* ZSFWS-NEW04: 缓冲区溢出防护——order受n限制但n可>50 */
+                if (buf_used >= sizeof(ngram_buf) - 16) break;
+                if (j > 0 && buf_used + 1 < sizeof(ngram_buf)) {
+                    ngram_buf[buf_used++] = ' ';
+                    ngram_buf[buf_used] = '\0';
+                }
                 char num_str[32];
-                snprintf(num_str, sizeof(num_str), "%d", word_buffer[i + j]);
-                strcat(ngram_buf, num_str);
+                int nl = snprintf(num_str, sizeof(num_str), "%d", word_buffer[i + j]);
+                if ((int)buf_used + nl < (int)sizeof(ngram_buf) - 1) {
+                    memcpy(ngram_buf + buf_used, num_str, (size_t)nl + 1);
+                    buf_used += (size_t)nl;
+                } else break;
             }
-            lm_insert_ngram(lm->ngram_maps[order], ngram_buf, NULL);
+            if (buf_used > 0) lm_insert_ngram(lm->ngram_maps[order], ngram_buf, NULL);
         }
     }
     lm->total_words = total_tokens;

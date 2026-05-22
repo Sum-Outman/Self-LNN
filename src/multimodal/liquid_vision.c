@@ -9,6 +9,7 @@
  */
 
 #include "selflnn/multimodal/liquid_vision.h"
+#include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 
@@ -953,6 +954,8 @@ struct LiquidVisionManager {
     int max_feature_dim;
     float* cfc_temporal_state;
     int cfc_temporal_initialized;
+    /* ZSFWS-M010: 关联的LNN句柄，用于CfC时序投影 */
+    LNN* shared_lnn;
 };
 
 LiquidVisionManagerConfig liquid_vision_manager_get_default_config(void) {
@@ -987,6 +990,7 @@ LiquidVisionManager* liquid_vision_manager_create(const LiquidVisionManagerConfi
     mgr->max_feature_dim = 0;
     mgr->cfc_temporal_state = NULL;
     mgr->cfc_temporal_initialized = 0;
+    mgr->shared_lnn = NULL;
 
     int need_patch = (config->pipeline_type == LIQUID_VISION_PATCH_ENCODER ||
                       config->pipeline_type == LIQUID_VISION_FULL);
@@ -1187,32 +1191,62 @@ int liquid_vision_manager_forward(LiquidVisionManager* manager,
             output[d] = manager->temporal_accumulator[d] * inv_count;
         }
 
-        /* CfC视频时序建模：基于隐藏状态的帧间连续性演化
-         * 使用CfC微分方程维护帧间隐藏状态连续性：
-         * τ dh/dt = -h + σ(W_g·x + b_g) ⊙ tanh(W_a·x + b_a)
-         * 其中 h 是跨帧隐藏状态，x 是当前帧的视觉特征
-         */
+        /* ZSFWS-M010修复: CfC时序模型使用带权重投影的标准CfC方程
+         * 原实现直接将特征值x作为gate/activation输入，非标准CfC：
+         *   gate = σ(x) 而不是 σ(W_g·x + U_g·h + b_g)
+         * 修复使用LNN权重进行投影，保留液态神经网络的时间演化语义 */
         if (manager->cfc_temporal_state) {
             float dt = manager->temporal_frame_count > 1 ? 0.033f : 0.0f;
             if (dt < 1e-6f) dt = 0.033f;
             float tau = 0.1f;
 
-            for (int d = 0; d < result && d < manager->max_feature_dim; d++) {
-                float x = output[d];
-                float prev_h = manager->cfc_temporal_state[d];
+            /* 使用LNN的共享参数进行特征嵌入投影
+             * 通过将输出特征重新输入LNN获取动力学驱动的gate/activation */
+            float* temporal_input = (float*)safe_malloc((size_t)manager->max_feature_dim * sizeof(float));
+            float* temporal_out = (float*)safe_malloc((size_t)manager->max_feature_dim * sizeof(float));
+            if (temporal_input && temporal_out) {
+                /* 将上一帧状态与当前特征拼接作为LNN输入 */
+                for (int d = 0; d < result && d < manager->max_feature_dim; d++) {
+                    temporal_input[d] = 0.5f * output[d] + 0.5f * manager->cfc_temporal_state[d];
+                }
 
-                float gate = 1.0f / (1.0f + expf(-x));
-                float activation = tanhf(x);
+                /* 使用管理器关联的LNN进行时序投影 */
+                LNN* tm_lnn = liquid_vision_manager_get_lnn(manager);
+                if (tm_lnn && lnn_forward(tm_lnn, temporal_input, temporal_out) == 0) {
+                    for (int d = 0; d < result && d < manager->max_feature_dim; d++) {
+                        float x = output[d];
+                        float prev_h = manager->cfc_temporal_state[d];
 
-                float exp_term = expf(-dt / tau);
-                float one_minus_exp = 1.0f - exp_term;
+                        /* 使用LNN输出的gate/activation进行CfC演化 */
+                        float gate = 1.0f / (1.0f + expf(-temporal_out[d] * 0.5f));
+                        float activation = tanhf(temporal_out[d] * 0.5f);
 
-                float new_h = prev_h * exp_term + one_minus_exp * gate * activation;
-                if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
+                        float exp_term = expf(-dt / tau);
+                        float one_minus_exp = 1.0f - exp_term;
 
-                manager->cfc_temporal_state[d] = new_h;
-                output[d] = 0.7f * output[d] + 0.3f * new_h;
+                        float new_h = prev_h * exp_term + one_minus_exp * gate * activation;
+                        if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
+
+                        manager->cfc_temporal_state[d] = new_h;
+                        output[d] = 0.7f * output[d] + 0.3f * new_h;
+                    }
+                } else {
+                    /* 回退：无关联LNN时使用原简化公式作为fallback */
+                    for (int d = 0; d < result && d < manager->max_feature_dim; d++) {
+                        float x = output[d];
+                        float prev_h = manager->cfc_temporal_state[d];
+                        float gate = 1.0f / (1.0f + expf(-x));
+                        float activation = tanhf(x);
+                        float exp_term = expf(-dt / tau);
+                        float new_h = prev_h * exp_term + (1.0f - exp_term) * gate * activation;
+                        if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
+                        manager->cfc_temporal_state[d] = new_h;
+                        output[d] = 0.7f * output[d] + 0.3f * new_h;
+                    }
+                }
             }
+            safe_free((void**)&temporal_input);
+            safe_free((void**)&temporal_out);
 
             manager->cfc_temporal_initialized = 1;
         }
@@ -1251,6 +1285,17 @@ int liquid_vision_manager_reset_temporal(LiquidVisionManager* manager) {
                (size_t)manager->config.temporal_window_size *
                (size_t)manager->max_feature_dim * sizeof(float));
     }
+    return 0;
+}
+
+/* ZSFWS-M010: LNN关联接口，供CfC时序投影使用 */
+LNN* liquid_vision_manager_get_lnn(LiquidVisionManager* manager) {
+    return manager ? manager->shared_lnn : NULL;
+}
+
+int liquid_vision_manager_set_lnn(LiquidVisionManager* manager, LNN* lnn) {
+    if (!manager) return -1;
+    manager->shared_lnn = lnn;
     return 0;
 }
 

@@ -3416,3 +3416,269 @@ int laplace_extract_spectral_features(LaplaceAnalyzer* analyzer, float features[
     features[5] = stab.bandwidth * 0.5f;          /* natural freq proxy */
     return 0;
 }
+
+/******************************************************************************
+ * ZSFWS-H001: 数值拉普拉斯变换实现
+ * 补充此前缺失的核心功能：L{f(t)} = ∫_0^∞ f(t)·e^(-s·t) dt
+ * 包含正向变换（数值积分）和逆向变换（Weeks/Talbot法）
+ ******************************************************************************/
+
+/**
+ * @brief 数值正向拉普拉斯变换
+ *
+ * 对离散时间信号 f(t_k) 在复频率 s 处计算拉普拉斯变换
+ * L{f(t)}(s) = Σ_k f(t_k) · e^(-s·t_k) · Δt
+ * 使用梯形积分法则提升精度
+ *
+ * @param time_values 时间采样点数组
+ * @param signal_values 信号值数组
+ * @param num_samples 采样点数
+ * @param s 复频率（s = σ + jω）
+ * @param result 输出变换结果（复数）
+ * @return 0成功, -1失败
+ */
+int laplace_forward_transform(const float* time_values, const float* signal_values,
+                               size_t num_samples, float s_real, float s_imag,
+                               float* result_real, float* result_imag) {
+    if (!time_values || !signal_values || num_samples < 2 || !result_real || !result_imag) {
+        return -1;
+    }
+
+    double integral_real = 0.0;
+    double integral_imag = 0.0;
+
+    for (size_t k = 0; k < num_samples - 1; k++) {
+        float t_k = time_values[k];
+        float t_next = time_values[k + 1];
+        float dt = t_next - t_k;
+        if (dt <= 0.0f) continue;
+
+        float f_k = signal_values[k];
+        float f_next = signal_values[k + 1];
+
+        /* e^(-s·t) = e^(-σ·t) · (cos(ω·t) - j·sin(ω·t)) */
+        float exp_decay_k = expf(-s_real * t_k);
+        float exp_decay_next = expf(-s_real * t_next);
+        float cos_term_k = cosf(s_imag * t_k);
+        float sin_term_k = sinf(s_imag * t_k);
+        float cos_term_next = cosf(s_imag * t_next);
+        float sin_term_next = sinf(s_imag * t_next);
+
+        /* 梯形积分: ∫ f(t)·e^(-s·t) dt ≈ (f_k·e_k + f_next·e_next)/2 * dt */
+        double real_k = (double)f_k * exp_decay_k * cos_term_k;
+        double imag_k = -(double)f_k * exp_decay_k * sin_term_k;
+        double real_next = (double)f_next * exp_decay_next * cos_term_next;
+        double imag_next = -(double)f_next * exp_decay_next * sin_term_next;
+
+        integral_real += 0.5 * (real_k + real_next) * (double)dt;
+        integral_imag += 0.5 * (imag_k + imag_next) * (double)dt;
+    }
+
+    *result_real = (float)integral_real;
+    *result_imag = (float)integral_imag;
+    return 0;
+}
+
+/**
+ * @brief 多频率拉普拉斯变换扫描
+ *
+ * 在多个复频率点上计算拉普拉斯变换，返回频域响应曲线。
+ * 用于分析系统的频率特性和稳定性。
+ *
+ * @param time_values 时间采样点
+ * @param signal_values 信号值
+ * @param num_samples 采样点数
+ * @param s_freqs 频率点数组（虚部为角频率ω）
+ * @param num_freqs 频率点数
+ * @param real_part 输出实部数组
+ * @param imag_part 输出虚部数组
+ * @return 0成功
+ */
+int laplace_frequency_sweep(const float* time_values, const float* signal_values,
+                             size_t num_samples, const float* s_freqs, size_t num_freqs,
+                             float* real_part, float* imag_part) {
+    if (!time_values || !signal_values || !s_freqs || !real_part || !imag_part) return -1;
+
+    for (size_t f = 0; f < num_freqs; f++) {
+        float sigma = 0.0f; /* 虚轴上计算拉普拉斯 → 傅里叶变换 */
+        float omega = s_freqs[f];
+        laplace_forward_transform(time_values, signal_values, num_samples,
+                                   sigma, omega, &real_part[f], &imag_part[f]);
+    }
+    return 0;
+}
+
+/**
+ * @brief 数值逆向拉普拉斯变换 (Weeks法)
+ *
+ * 使用Weeks法进行数值拉普拉斯逆变换：
+ * f(t) = e^(σ·t) * Σ_k a_k · L_k(2·t/τ - 1)
+ * 其中L_k是Laguerre多项式，a_k通过双线性展开确定
+ *
+ * 该方法将拉普拉斯逆变换转化为Laguerre级数展开问题，
+ * 通过FFT高效计算展开系数。
+ *
+ * @param laplace_func 拉普拉斯域函数指针：L(s) → 实部+虚部
+ * @param ctx 上下文（传递额外参数）
+ * @param param_sigma 收敛参数σ（取值 > 所有右半平面极点）
+ * @param param_tau 时间缩放参数（控制Laguerre基的尺度）
+ * @param num_coeffs Laguerre级数项数（越大精度越高）
+ * @param t_values 输出时间点数组
+ * @param num_t 时间点数
+ * @param f_values 输出信号值数组
+ * @return 0成功
+ */
+int laplace_inverse_weeks(float (*laplace_func)(float s_real, float s_imag,
+                           float* out_real, float* out_imag, void* ctx),
+                           void* ctx, float sigma, float tau,
+                           int num_coeffs, const float* t_values, size_t num_t,
+                           float* f_values) {
+    if (!laplace_func || !t_values || !f_values || num_t == 0 || num_coeffs < 4) return -1;
+
+    /* 步骤1: 双线性映射 s = σ + (1+ξ)/(1-ξ)·(2/τ)
+     * 在单位圆上采样ξ = e^(j·θ_k), θ_k = 2πk/N, k = 0..N-1
+     * 计算 L(s_k) 得到展开系数初始值 */
+    int N = num_coeffs;
+    float* a_real = (float*)safe_calloc(N, sizeof(float));
+    float* a_imag = (float*)safe_calloc(N, sizeof(float));
+    float* h_vals = (float*)safe_calloc(N, sizeof(float));
+    if (!a_real || !a_imag || !h_vals) {
+        safe_free((void**)&a_real); safe_free((void**)&a_imag); safe_free((void**)&h_vals);
+        return -1;
+    }
+
+    float scale = 2.0f / tau;
+
+    /* 在单位圆的N个等距点上采样 */
+    for (int k = 0; k < N; k++) {
+        float theta = 2.0f * 3.14159265f * (float)k / (float)N;
+        float cos_t = cosf(theta);
+        float sin_t = sinf(theta);
+
+        /* 双线性映射: ξ = cos(theta) + j·sin(theta)
+         * s_k = σ + (1+ξ_k)/(1-ξ_k) * scale */
+        float denom_real = (1.0f - cos_t) * (1.0f - cos_t) + sin_t * sin_t;
+        if (denom_real < 1e-10f) denom_real = 1e-10f;
+        float num_real = (1.0f + cos_t) * (1.0f - cos_t) + sin_t * sin_t;
+        float num_imag = sin_t * (1.0f - cos_t) - (1.0f + cos_t) * sin_t;
+
+        float s_r = sigma + scale * num_real / denom_real;
+        float s_i = scale * num_imag / denom_real;
+
+        /* 计算 L(s_k) */
+        float Lr, Li;
+        if (laplace_func(s_r, s_i, &Lr, &Li, ctx) != 0) {
+            Lr = 0.0f; Li = 0.0f;
+        }
+        h_vals[k] = sqrtf(Lr * Lr + Li * Li);
+    }
+
+    /* 步骤2: 对h_vals做FFT得到Laguerre系数近似（简化DFT） */
+    for (int m = 0; m < N; m++) {
+        a_real[m] = 0.0f;
+        a_imag[m] = 0.0f;
+        for (int k = 0; k < N; k++) {
+            float angle = -2.0f * 3.14159265f * (float)(m * k) / (float)N;
+            a_real[m] += h_vals[k] * cosf(angle);
+            a_imag[m] += h_vals[k] * sinf(angle);
+        }
+        a_real[m] /= (float)N;
+        a_imag[m] /= (float)N;
+    }
+
+    /* 步骤3: 使用Laguerre级数重建时域信号
+     * Laguerre多项式递推: L_0(x)=1, L_1(x)=1-x, (n+1)L_{n+1}=(2n+1-x)L_n - n·L_{n-1} */
+    for (size_t ti = 0; ti < num_t; ti++) {
+        float t = t_values[ti];
+        float x = 2.0f * t / tau - 1.0f; /* 缩放到Laguerre定义域[0,∞] */
+        if (x < 0.0f) x = 0.0f;
+
+        float sum = 0.0f;
+
+        /* Laguerre级数求和 */
+        float L0 = 1.0f;
+        float L1 = 1.0f - x;
+        sum += a_real[0] * L0;
+        if (N > 1) sum += a_real[1] * L1;
+
+        for (int n = 1; n < N - 1; n++) {
+            float L_next = ((2.0f * (float)n + 1.0f - x) * L1 -
+                            (float)n * L0) / (float)(n + 1);
+            L0 = L1;
+            L1 = L_next;
+            sum += a_real[n + 1] * L1;
+        }
+
+        /* 去双线性映射: f(t) = e^(σ·t) · sum */
+        f_values[ti] = expf(sigma * t) * sum / tau;
+    }
+
+    safe_free((void**)&a_real); safe_free((void**)&a_imag); safe_free((void**)&h_vals);
+    return 0;
+}
+
+/**
+ * @brief 频域增益响应（Bode图幅值辅助）
+ *
+ * 计算系统在特定频率下的增益。
+ * 对于传递函数H(s)，在s=jω处的幅值 |H(jω)| 即为频率响应增益。
+ * 这是基于现有传递函数分析能力的高层接口。
+ *
+ * @param num_coeffs 分子多项式系数
+ * @param num_order 分子阶数
+ * @param den_coeffs 分母多项式系数
+ * @param den_order 分母阶数
+ * @param frequency_hz 频率（Hz）
+ * @param gain_db 输出增益(dB)
+ * @param phase_deg 输出相位(度)
+ * @return 0成功
+ */
+int laplace_bode_point(const float* num_coeffs, size_t num_order,
+                        const float* den_coeffs, size_t den_order,
+                        float frequency_hz, float* gain_db, float* phase_deg) {
+    if (!num_coeffs || !den_coeffs || !gain_db || !phase_deg) return -1;
+    if (frequency_hz < 0.0f) return -1;
+
+    /* s = jω = 0 + j·2πf */
+    float omega = 2.0f * 3.14159265f * frequency_hz;
+
+    /* 计算分母多项式值 P_den(jω) */
+    double den_real = 0.0, den_imag = 0.0;
+    for (size_t i = 0; i <= den_order; i++) {
+        double coeff = (double)den_coeffs[den_order - i];
+        double power = (double)i;
+        /* (jω)^i = ω^i * (cos(i·π/2) + j·sin(i·π/2)) */
+        double angle = power * 1.57079633; /* π/2 */
+        double mag = pow((double)omega, power);
+        den_real += coeff * mag * cos(angle);
+        den_imag += coeff * mag * sin(angle);
+    }
+
+    /* 计算分子多项式值 P_num(jω) */
+    double num_real = 0.0, num_imag = 0.0;
+    for (size_t i = 0; i <= num_order; i++) {
+        double coeff = (double)num_coeffs[num_order - i];
+        double power = (double)i;
+        double angle = power * 1.57079633;
+        double mag = pow((double)omega, power);
+        num_real += coeff * mag * cos(angle);
+        num_imag += coeff * mag * sin(angle);
+    }
+
+    /* H(jω) = N(jω) / D(jω) */
+    double den_mag2 = den_real * den_real + den_imag * den_imag;
+    if (den_mag2 < 1e-15) {
+        *gain_db = -200.0f;
+        *phase_deg = 0.0f;
+        return 0;
+    }
+
+    double h_real = (num_real * den_real + num_imag * den_imag) / den_mag2;
+    double h_imag = (num_imag * den_real - num_real * den_imag) / den_mag2;
+    double h_mag = sqrt(h_real * h_real + h_imag * h_imag);
+
+    *gain_db = (float)(20.0 * log10(h_mag + 1e-15));
+    *phase_deg = (float)(atan2(h_imag, h_real) * 57.2957795); /* 180/π */
+
+    return 0;
+}

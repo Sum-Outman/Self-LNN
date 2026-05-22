@@ -400,9 +400,13 @@ int quaternion_cfc_cell_reset(QuaternionCfcCell* cell) {
 /**
  * @brief 四元数CfC ODE右端项（RHS）回调函数
  *
- * P0-003修复：真正的输入驱动四元数动力学
- * dq/dt = -q⊙τ⁻¹ + input_drive
- * 其中 τ⁻¹ 是每分量独立的时间常数倒数，input_drive 是输入增益后的外部信号
+ * ZSFWS-H006修复：使用真正的四元数Hamilton乘积耦合动力学
+ * dq/dt = 0.5 * q ⊗ (0, Ω) - q/τ
+ * 其中 Ω = tanh(input_drive) 是经非线性激活的角速度向量（3D旋转空间）
+ * Hamilton乘积 q ⊗ Ω 提供四元数分量间的自然交叉耦合，保留旋转不变性
+ *
+ * 原实现使用逐分量独立 dq/dt[i] = -q[i]/τ[i] + drive[i]
+ * 丧失了四元数旋转不变性的理论优势
  */
 int quaternion_cfc_rhs(float t, const float* q, float* dqdt, void* ctx) {
     (void)t;
@@ -415,11 +419,30 @@ int quaternion_cfc_rhs(float t, const float* q, float* dqdt, void* ctx) {
     float inv_tau_y = 1.0f / fmaxf(cell->time_constant.y, 1e-6f);
     float inv_tau_z = 1.0f / fmaxf(cell->time_constant.z, 1e-6f);
 
-    /* P0-003修复：真正的输入驱动CfC动力学 dq/dt = -q/τ + drive */
-    dqdt[0] = -q[0] * inv_tau_w + cell->current_input_drive[0];
-    dqdt[1] = -q[1] * inv_tau_x + cell->current_input_drive[1];
-    dqdt[2] = -q[2] * inv_tau_y + cell->current_input_drive[2];
-    dqdt[3] = -q[3] * inv_tau_z + cell->current_input_drive[3];
+    /* ZSFWS-H006: 将输入驱动投影为角速度（非线性激活保持有界性） */
+    float omega_x = tanhf(cell->current_input_drive[1]);
+    float omega_y = tanhf(cell->current_input_drive[2]);
+    float omega_z = tanhf(cell->current_input_drive[3]);
+
+    /* Hamilton乘积: q ⊗ (0, Ω)
+     * (qw + qx·i + qy·j + qz·k) ⊗ (0 + ωx·i + ωy·j + ωz·k)
+     * 实部: -(qx·ωx + qy·ωy + qz·ωz)
+     * i分量: qw·ωx + qy·ωz - qz·ωy
+     * j分量: qw·ωy + qz·ωx - qx·ωz
+     * k分量: qw·ωz + qx·ωy - qy·ωx */
+    float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
+    float h_dot_w = -(qx * omega_x + qy * omega_y + qz * omega_z);
+    float h_dot_x = qw * omega_x + qy * omega_z - qz * omega_y;
+    float h_dot_y = qw * omega_y + qz * omega_x - qx * omega_z;
+    float h_dot_z = qw * omega_z + qx * omega_y - qy * omega_x;
+
+    /* CfC动力学: dq/dt = 0.5 * Hamilton(q, Ω) - q/τ + drive_bias
+     * 0.5因子来自四元数旋转微分方程，-q/τ提供指数衰减（CfC特性）
+     * input_drive[0]提供了标量驱动项（幅度调制） */
+    dqdt[0] = 0.5f * h_dot_w - qw * inv_tau_w + cell->current_input_drive[0] * 0.1f;
+    dqdt[1] = 0.5f * h_dot_x - qx * inv_tau_x;
+    dqdt[2] = 0.5f * h_dot_y - qy * inv_tau_y;
+    dqdt[3] = 0.5f * h_dot_z - qz * inv_tau_z;
 
     return 0;
 }
@@ -529,25 +552,20 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
             break;
         }
         case 4: {
-            /* Forest-Ruth 辛积分（无分离版本：用前一半作为位置） */
-            const float theta = SELFLNN_FOREST_RUTH_THETA;
-            const float d1 = theta * 0.5f;
-            const float d2 = (1.0f - theta) * 0.5f;
-            const float d3 = d1;
-
+            /* ZSFWS-C003修复: 原3阶段伪Forest-Ruth错误。
+             * 真正Forest-Ruth 4阶7阶段辛积分需要q/p分离，不适合四元数R⁴空间。
+             * 改用BDF2自适应步长，已在ode_solvers.c中正确实现（ode_bdf2_solve）。
+             * BDF2对刚性ODE（含CfC动力学）数值稳定且精度良好。 */
             size_t n = (size_t)n_quat * 4;
-            float* derivs = (float*)safe_calloc(n, sizeof(float));
-            if (!derivs) { ret = -1; break; }
+            size_t ws = ode_bdf2_workspace_size(n);
+            float* workspace = (float*)safe_calloc(ws, sizeof(float));
+            if (!workspace) { ret = -1; break; }
 
-            for (int stage = 0; stage < 3; stage++) {
-                float coeff = (stage == 0) ? d1 : ((stage == 1) ? d2 : d3);
-                quaternion_cfc_rhs(0.0f, state, derivs, qcfc_cell);
-                for (size_t i = 0; i < n; i++)
-                    state[i] += coeff * h * derivs[i];
-            }
-
-            steps = 3;
-            safe_free((void**)&derivs);
+            float h_actual = 0.0f;
+            BDF2Config bdf_cfg = ode_bdf2_default_config();
+            ret = ode_bdf2_solve(state, 0.0f, h, quaternion_cfc_rhs, qcfc_cell,
+                                 n, &bdf_cfg, workspace, &h_actual, &steps);
+            safe_free((void**)&workspace);
             break;
         }
         case 5: {
@@ -568,27 +586,19 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
             break;
         }
         case 6: {
-            /* P2-011修复: Verlet需要分离变量(position+momentum)，不适合四元数。
-             * 四元数H=R⁴空间，无哈密顿对偶结构，Verlet语义不适用。
-             * 回退到Forest-Ruth四阶辛积分，正确保留四元数范数。 */
-            const float theta = SELFLNN_FOREST_RUTH_THETA;
-            const float d1 = theta * 0.5f;
-            const float d2 = (1.0f - theta) * 0.5f;
-            const float d3 = d1;
-
+            /* ZSFWS-C003修复: P2-011已正确指出Verlet不适合四元数。
+             * 原回退仍使用了错误的3阶段伪Forest-Ruth。
+             * 改用BDF2自适应步长（与case 4一致），数值稳定且精度良好。 */
             size_t n = (size_t)n_quat * 4;
-            float* derivs = (float*)safe_calloc(n, sizeof(float));
-            if (!derivs) { ret = -1; break; }
+            size_t ws = ode_bdf2_workspace_size(n);
+            float* workspace = (float*)safe_calloc(ws, sizeof(float));
+            if (!workspace) { ret = -1; break; }
 
-            for (int stage = 0; stage < 3; stage++) {
-                float coeff = (stage == 0) ? d1 : ((stage == 1) ? d2 : d3);
-                quaternion_cfc_rhs(0.0f, state, derivs, qcfc_cell);
-                for (size_t i = 0; i < n; i++)
-                    state[i] += coeff * h * derivs[i];
-            }
-
-            steps = 3;
-            safe_free((void**)&derivs);
+            float h_actual = 0.0f;
+            BDF2Config bdf_cfg = ode_bdf2_default_config();
+            ret = ode_bdf2_solve(state, 0.0f, h, quaternion_cfc_rhs, qcfc_cell,
+                                 n, &bdf_cfg, workspace, &h_actual, &steps);
+            safe_free((void**)&workspace);
             break;
         }
         case 7: {
