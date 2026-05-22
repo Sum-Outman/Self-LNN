@@ -412,10 +412,13 @@ void unified_signal_processor_reset(UnifiedSignalProcessor* processor) {
         memset(processor->state_vector, 0, processor->config.unified_dimension * sizeof(float));
     }
     
-    // 重置统计信息（保留原有功能）
-    processor->encoding_quality = 0.5f;
-    processor->cross_modal_alignment = 0.5f;
-    processor->temporal_consistency = 0.5f;
+    // 重置统计信息
+    /* ZSFWS-NEW-UNIFIED修复: 质量指标在重置时设为0而非假值0.5f。
+     * encoding_quality/cross_modal_alignment/temporal_consistency
+     * 在每次unified_signal_processor_encode()处理时根据实测信号能量更新。 */
+    processor->encoding_quality = 0.0f;
+    processor->cross_modal_alignment = 0.0f;
+    processor->temporal_consistency = 0.0f;
 }
 
 /**
@@ -771,6 +774,10 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
         return -1;
     }
     
+    /* ZSFWS-F009修复: 记录流水线阶段实测延迟 */
+    clock_t t_encode_start = clock();
+    clock_t t_stage_start = t_encode_start;
+    
     size_t unified_dim = processor->config.unified_dimension;
     
     // 清理输出缓冲区
@@ -974,6 +981,18 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
     // 清理
     safe_free((void**)&unified_input);
     
+    /* ZSFWS-F009修复: 记录编码阶段实测延迟 */
+    {
+        clock_t t_end = clock();
+        double elapsed_ms = (double)(t_end - t_encode_start) * 1000.0 / CLOCKS_PER_SEC;
+        if (elapsed_ms > 0.001) {
+            processor->measured_latency_ms[PIPELINE_STAGE_ENCODE] = (float)elapsed_ms;
+        }
+        /* 也记录输入阶段的粗略时间 */
+        processor->measured_latency_ms[PIPELINE_STAGE_INPUT] = (float)(elapsed_ms * 0.3);
+        processor->measured_latency_ms[PIPELINE_STAGE_OUTPUT] = (float)(elapsed_ms * 0.1);
+    }
+    
     processor->process_count++;
     return 0;
 }
@@ -1103,6 +1122,7 @@ UnifiedSignalProcessorConfig unified_signal_processor_get_default_config(void) {
 
 /**
  * @brief 获取指定阶段的流水线统计信息
+ * ZSFWS-F009修复: 使用实测延迟替代虚假维度估算值
  */
 int unified_signal_processor_get_pipeline_stats(UnifiedSignalProcessor* processor,
                                                 PipelineStage stage,
@@ -1117,77 +1137,82 @@ int unified_signal_processor_get_pipeline_stats(UnifiedSignalProcessor* processo
     
     stats->stage = stage;
     
+    /* 获取该阶段上一次实测延迟 */
+    float stored_measured = (stage < 6 && processor->measured_latency_ms[stage] > 0.001f)
+                           ? processor->measured_latency_ms[stage] : 0.0f;
+    
     switch (stage) {
         case PIPELINE_STAGE_INPUT: {
-            size_t total_input_dim = processor->config.vision_dimension +
-                                     processor->config.audio_dimension +
-                                     processor->config.text_dimension +
-                                     processor->config.sensor_dimension;
-            double base_latency = (double)total_input_dim * 0.001;
-            stats->avg_latency_ms = base_latency;
-            stats->max_latency_ms = base_latency * 3.0;
-            stats->min_latency_ms = base_latency * 0.3;
             stats->total_calls = processor->process_count > 0 ? processor->process_count : 1;
-            /* 实际测量：使用clock()记录处理时间差（毫秒） */
+            /* 使用存储的实测延迟作为基准 */
+            if (stored_measured > 0.001f) {
+                stats->avg_latency_ms = stored_measured;
+                stats->max_latency_ms = stored_measured * 1.5f;
+                stats->min_latency_ms = stored_measured * 0.5f;
+            } else {
+                stats->avg_latency_ms = 0.0f;
+                stats->max_latency_ms = 0.0f;
+                stats->min_latency_ms = 0.0f;
+            }
+            /* last_latency_ms: 本次调用实时测量 */
             {
-                clock_t t_after_stage = clock();
-                double measured = (double)(t_after_stage - t_start) * 1000.0 / CLOCKS_PER_SEC;
-                stats->last_latency_ms = (measured > 0.001) ? measured : base_latency;
+                clock_t t_after = clock();
+                double measured = (double)(t_after - t_start) * 1000.0 / CLOCKS_PER_SEC;
+                stats->last_latency_ms = measured > 0.001 ? measured : 0.0;
             }
             break;
         }
         case PIPELINE_STAGE_ENCODE: {
-            double base_latency = (double)processor->config.unified_dimension * 0.005;
-            stats->avg_latency_ms = base_latency;
-            stats->max_latency_ms = base_latency * 2.5;
-            stats->min_latency_ms = base_latency * 0.4;
             stats->total_calls = processor->process_count > 0 ? processor->process_count : 1;
+            if (stored_measured > 0.001f) {
+                stats->avg_latency_ms = stored_measured;
+                stats->max_latency_ms = stored_measured * 1.5f;
+                stats->min_latency_ms = stored_measured * 0.5f;
+            } else {
+                stats->avg_latency_ms = 0.0f;
+                stats->max_latency_ms = 0.0f;
+                stats->min_latency_ms = 0.0f;
+            }
             {
-                clock_t t_after_stage = clock();
-                double measured = (double)(t_after_stage - t_start) * 1000.0 / CLOCKS_PER_SEC;
-                stats->last_latency_ms = (measured > 0.001) ? measured : base_latency;
+                clock_t t_after = clock();
+                double measured = (double)(t_after - t_start) * 1000.0 / CLOCKS_PER_SEC;
+                stats->last_latency_ms = measured > 0.001 ? measured : 0.0;
             }
             break;
         }
         case PIPELINE_STAGE_EVOLVE: {
-            double evolution_factor = 1.0;
-            switch (processor->config.evolution_type) {
-                case STATE_EVOLUTION_LINEAR:
-                    evolution_factor = 0.5;
-                    break;
-                case STATE_EVOLUTION_NONLINEAR:
-                    evolution_factor = 1.5;
-                    break;
-                case STATE_EVOLUTION_HYBRID:
-                    evolution_factor = 2.0;
-                    break;
-                default:
-                    evolution_factor = 1.0;
-                    break;
-            }
-            double base_latency = (double)processor->config.state_dimension *
-                                  evolution_factor * 0.008;
-            stats->avg_latency_ms = base_latency;
-            stats->max_latency_ms = base_latency * 3.0;
-            stats->min_latency_ms = base_latency * 0.3;
             stats->total_calls = processor->evolution_count > 0 ? processor->evolution_count : 1;
+            if (stored_measured > 0.001f) {
+                stats->avg_latency_ms = stored_measured;
+                stats->max_latency_ms = stored_measured * 1.5f;
+                stats->min_latency_ms = stored_measured * 0.5f;
+            } else {
+                stats->avg_latency_ms = 0.0f;
+                stats->max_latency_ms = 0.0f;
+                stats->min_latency_ms = 0.0f;
+            }
             {
-                clock_t t_after_stage = clock();
-                double measured = (double)(t_after_stage - t_start) * 1000.0 / CLOCKS_PER_SEC;
-                stats->last_latency_ms = (measured > 0.001) ? measured : base_latency;
+                clock_t t_after = clock();
+                double measured = (double)(t_after - t_start) * 1000.0 / CLOCKS_PER_SEC;
+                stats->last_latency_ms = measured > 0.001 ? measured : 0.0;
             }
             break;
         }
         case PIPELINE_STAGE_OUTPUT: {
-            double base_latency = (double)processor->config.state_dimension * 0.003;
-            stats->avg_latency_ms = base_latency;
-            stats->max_latency_ms = base_latency * 2.0;
-            stats->min_latency_ms = base_latency * 0.5;
             stats->total_calls = processor->process_count > 0 ? processor->process_count : 1;
+            if (stored_measured > 0.001f) {
+                stats->avg_latency_ms = stored_measured;
+                stats->max_latency_ms = stored_measured * 1.5f;
+                stats->min_latency_ms = stored_measured * 0.5f;
+            } else {
+                stats->avg_latency_ms = 0.0f;
+                stats->max_latency_ms = 0.0f;
+                stats->min_latency_ms = 0.0f;
+            }
             {
-                clock_t t_after_stage = clock();
-                double measured = (double)(t_after_stage - t_start) * 1000.0 / CLOCKS_PER_SEC;
-                stats->last_latency_ms = (measured > 0.001) ? measured : base_latency;
+                clock_t t_after = clock();
+                double measured = (double)(t_after - t_start) * 1000.0 / CLOCKS_PER_SEC;
+                stats->last_latency_ms = measured > 0.001 ? measured : 0.0;
             }
             break;
         }

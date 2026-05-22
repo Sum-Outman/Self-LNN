@@ -92,6 +92,7 @@ typedef float (*CiBuiltinFunc)(float);
 typedef struct {
     char name[CI_MAX_FUNC_NAME];
     CiBuiltinFunc func;
+    int is_sentinel;  /* L-029: 显式哨兵标记，替代零初始化结构体的不安全隐式终止 */
 } CiBuiltin;
 
 static float _ci_builtin_abs(float x) { return fabsf(x); }
@@ -101,12 +102,12 @@ static float _ci_builtin_sqrt(float x) { return sqrtf(x); }
 static float _ci_builtin_rand(float x) { (void)x; return (float)rand() / (float)RAND_MAX; }
 
 static const CiBuiltin g_ci_builtins[] = {
-    {"abs",  _ci_builtin_abs},
-    {"sin",  _ci_builtin_sin},
-    {"cos",  _ci_builtin_cos},
-    {"sqrt", _ci_builtin_sqrt},
-    {"rand", _ci_builtin_rand},
-    { {0}, NULL }
+    {"abs",  _ci_builtin_abs, 0},
+    {"sin",  _ci_builtin_sin, 0},
+    {"cos",  _ci_builtin_cos, 0},
+    {"sqrt", _ci_builtin_sqrt, 0},
+    {"rand", _ci_builtin_rand, 0},
+    {"",     NULL,            1}  /* L-029: 显式哨兵标记 */
 };
 
 /* ---- 词法分析器 ---- */
@@ -265,7 +266,7 @@ static float _ci_primary(CiInterpreter* ci) {
             if (_ci_current(ci)->type == CI_TOK_RPAREN)
                 _ci_next(ci); /* 跳过) */
             /* 查找内置函数 */
-            for (int i = 0; g_ci_builtins[i].name; i++) {
+            for (int i = 0; !g_ci_builtins[i].is_sentinel; i++) {
                 if (strcmp(name, g_ci_builtins[i].name) == 0)
                     return g_ci_builtins[i].func(arg);
             }
@@ -495,7 +496,7 @@ static float _ci_while_loop(CiInterpreter* ci) {
 }
 
 static float _ci_call_builtin(const char* name, float arg) {
-    for (int i = 0; g_ci_builtins[i].name[0]; i++) {
+    for (int i = 0; !g_ci_builtins[i].is_sentinel; i++) {
         if (strcmp(g_ci_builtins[i].name, name) == 0)
             return g_ci_builtins[i].func(arg);
     }

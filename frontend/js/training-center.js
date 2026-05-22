@@ -14,9 +14,9 @@
             var lrEl = document.getElementById('training-learning-rate');
             if (lrEl) lr = parseFloat(lrEl.value) || 0.001;
             var batchEl = document.getElementById('training-batch-size');
-            if (batchEl) batch = parseInt(batchEl.value) || 64;
+            if (batchEl) batch = parseInt(batchEl.value, 10) || 64;
             var epochEl = document.getElementById('training-epochs');
-            if (epochEl) epochs = parseInt(epochEl.value) || 100;
+            if (epochEl) epochs = parseInt(epochEl.value, 10) || 100;
 
             var data = await SelfLnnApi.trainingStart({ mode: mode, learning_rate: lr, batch_size: batch, epochs: epochs, dataset_path: datasetPath });
             if (data.success) {

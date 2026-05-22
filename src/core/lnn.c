@@ -562,16 +562,22 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
     int num_layers = network->config.num_layers;
     /* ZSFABC修复: 使用配置参数正常化误差梯度和学习率 */
     if (input_size > 0 && output_size > 0) {
+        /* ZSFWS-NEW-LNN修复: 应用归一化因子到误差梯度防止梯度爆炸/消失 */
         float scale_factor = sqrtf((float)input_size / (float)output_size);
-        (void)scale_factor; /* 归一化因子已就绪，可用于梯度缩放 */
+        float applied_scale = (scale_factor > 100.0f) ? 100.0f : 
+                              (scale_factor < 0.01f) ? 0.01f : scale_factor;
+        for (size_t i = 0; i < network->config.output_size && i < output_size; i++) {
+            network->error_buffer[i] *= applied_scale;
+        }
     }
     if (num_layers > 1) {
         /* 多层网络：使用1/sqrt(num_layers)防止梯度爆炸 */
         float depth_scale = 1.0f / sqrtf((float)num_layers);
-        (void)depth_scale;
+        float dscale = (depth_scale > 10.0f) ? 10.0f : (depth_scale < 0.001f) ? 0.001f : depth_scale;
+        for (size_t i = 0; i < network->config.output_size && i < output_size; i++) {
+            network->error_buffer[i] *= dscale;
+        }
     }
-    (void)input_size;
-    (void)num_layers;
 
     /* FIX-003: 使用配置的损失函数类型计算正确的误差梯度 */
     int loss_type = network->config.loss_function;

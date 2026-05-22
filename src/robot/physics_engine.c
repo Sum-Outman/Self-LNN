@@ -125,7 +125,8 @@ static void pe_solve_joint_fixed(PEJoint* j, PEBody* ba, PEBody* bb, float dt);
 static void pe_solve_joint_spring(PEJoint* j, PEBody* ba, PEBody* bb, float dt);
 
 static void pe_body_aabb(const PEBody* body, float* min_out, float* max_out) {
-    float radius = 0.5f;
+    /* ZSFWS-F002修复: 使用刚体自身的bounding_radius而非硬编码0.5m */
+    float radius = body->bounding_radius > 0.0f ? body->bounding_radius : 0.5f;
     for (int i = 0; i < 3; i++) {
         min_out[i] = body->pos[i] - radius;
         max_out[i] = body->pos[i] + radius;
@@ -293,7 +294,8 @@ int pe_body_add(PEWorld* world, const float* pos, const float* quat, float mass,
         b->props.inv_inertia[2] = 0.0f;
     } else {
         b->props.inv_mass = 1.0f / (mass + PE_EPS);
-        float radius = 0.5f;
+        /* ZSFWS-F002修复: 使用刚体bounding_radius计算惯性张量，替代硬编码0.5m球体 */
+        float radius = b->bounding_radius > 0.0f ? b->bounding_radius : 0.5f;
         float ixx = 0.4f * mass * radius * radius;
         b->props.inertia[0] = ixx;
         b->props.inertia[1] = ixx;
@@ -819,7 +821,10 @@ static int pe_gjk_penetration(const PEBody* body_a, const PEBody* body_b, float*
         if (sep_len > PE_EPS) { pe_vec3_scale(sep, 1.0f/sep_len, normal); }
         else { normal[1] = 1.0f; }
     }
-    if (penetration) *penetration = radius * 2.0f - pe_vec3_dist_sq(body_a->pos, body_b->pos);
+    /* ZSFWS-F001修复: 穿透深度使用pe_vec3_dist（欧氏距离）而非pe_vec3_dist_sq（距离平方）。
+     * 原代码将线性距离(2*radius)与距离平方混用，导致穿透深度量纲错误。
+     * pe_vec3_dist返回线性距离，减法结果量纲一致。 */
+    if (penetration) *penetration = radius * 2.0f - pe_vec3_dist(body_a->pos, body_b->pos);
     if (penetration && *penetration < 0) *penetration = 0.0f;
     if (point) {
         pe_vec3_add(body_a->pos, body_b->pos, point);

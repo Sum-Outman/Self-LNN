@@ -55,6 +55,9 @@ typedef struct {
     void* user_data;
     int has_subscribers;
     socket_t publisher_socket;
+    socket_t subscriber_listen_socket; /**< 订阅者监听套接字 ZSFWS-F006 */
+    int subscriber_port;               /**< 订阅者监听端口 ZSFWS-F006 */
+    socket_t subscriber_data_socket;    /**< 与发布者的数据连接 ZSFWS-F006 */
 } RosTopicEntry;
 
 typedef struct {
@@ -369,9 +372,13 @@ static int xmlrpc_register_publisher(const char* master_host, int master_port,
 
 static int xmlrpc_register_subscriber(const char* master_host, int master_port,
                                        const char* node_name, const char* topic,
-                                       const char* type_name) {
+                                       const char* type_name, int subscriber_port) {
     socket_t sock = tcp_connect(master_host, master_port, 5000);
     if (sock == INVALID_SOCKET_VALUE) return ROS_ERROR_CONNECTION;
+
+    /* ZSFWS-F006修复: 携带订阅者监听端口，构建完整的caller_id URI */
+    char caller_id[512];
+    snprintf(caller_id, sizeof(caller_id), "http://127.0.0.1:%d/", subscriber_port);
 
     char request[ROS_XMLRPC_BUF_SIZE];
     snprintf(request, sizeof(request),
@@ -387,7 +394,7 @@ static int xmlrpc_register_subscriber(const char* master_host, int master_port,
         "<param><value><string>%s</string></value></param>"
         "<param><value><string>%s</string></value></param>"
         "</params></methodCall>",
-        master_host, master_port, 0, master_host, topic, type_name, node_name);
+        master_host, master_port, 0, caller_id, topic, type_name, node_name);
 
     int ret = tcp_send_all(sock, request, strlen(request), 5000);
     if (ret != ROS_OK) { socket_close(sock); return ret; }
@@ -500,7 +507,8 @@ int ros_node_disconnect_from_master(RosNode* node) {
             xmlrpc_register_subscriber(node->config.master_host,
                                         node->config.master_port,
                                         node->config.node_name,
-                                        node->subscribers[i].topic, "");
+                                        node->subscribers[i].topic, "",
+                                        node->subscribers[i].subscriber_port);
         }
     }
 
@@ -588,12 +596,7 @@ int ros_node_subscribe(RosNode* node, const char* topic, const char* type,
         }
     }
 
-    int ret = xmlrpc_register_subscriber(node->config.master_host,
-                                          node->config.master_port,
-                                          node->config.node_name,
-                                          topic, type);
-    if (ret != ROS_OK) return ret;
-
+    /* ZSFWS-F006修复: 创建订阅者监听套接字，等待发布者TCPROS连接 */
     RosTopicEntry* entry = &node->subscribers[node->subscriber_count];
     memset(entry, 0, sizeof(*entry));
     strncpy(entry->topic, topic, sizeof(entry->topic) - 1);
@@ -601,6 +604,55 @@ int ros_node_subscribe(RosNode* node, const char* topic, const char* type,
     entry->is_subscribed = 1;
     entry->callback = callback;
     entry->user_data = user_data;
+    entry->publisher_socket = INVALID_SOCKET_VALUE;
+    entry->subscriber_listen_socket = INVALID_SOCKET_VALUE;
+    entry->subscriber_data_socket = INVALID_SOCKET_VALUE;
+
+    /* 创建TCP监听套接字，绑定到0.0.0.0:0让系统分配端口 */
+    socket_t listen_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_sock == INVALID_SOCKET_VALUE) return ROS_ERROR_GENERAL;
+
+    /* 设置SO_REUSEADDR */
+    int reuse = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = 0; /* 系统自动分配端口 */
+
+    if (bind(listen_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        socket_close(listen_sock);
+        return ROS_ERROR_GENERAL;
+    }
+
+    /* 获取分配的端口号 */
+    socklen_t addr_len = sizeof(addr);
+    if (getsockname(listen_sock, (struct sockaddr*)&addr, &addr_len) < 0) {
+        socket_close(listen_sock);
+        return ROS_ERROR_GENERAL;
+    }
+    entry->subscriber_port = ntohs(addr.sin_port);
+
+    if (listen(listen_sock, 5) < 0) {
+        socket_close(listen_sock);
+        return ROS_ERROR_GENERAL;
+    }
+    entry->subscriber_listen_socket = listen_sock;
+
+    /* 向Master注册订阅，携带监听端口 */
+    int ret = xmlrpc_register_subscriber(node->config.master_host,
+                                          node->config.master_port,
+                                          node->config.node_name,
+                                          topic, type,
+                                          entry->subscriber_port);
+    if (ret != ROS_OK) {
+        socket_close(listen_sock);
+        entry->subscriber_listen_socket = INVALID_SOCKET_VALUE;
+        return ret;
+    }
+
     node->subscriber_count++;
     return ROS_OK;
 }
@@ -719,35 +771,73 @@ int ros_node_spin(RosNode* node, int timeout_ms) {
 }
 
 int ros_node_spin_once(RosNode* node) {
-    /* F-002修复: 实现TCPROS订阅数据接收，触发消息回调 */
+    /* ZSFWS-F006修复: 实现TCPROS数据接收，包括接受发布者连接和读取消息 */
     if (!node) return ROS_ERROR_INVALID_PARAM;
     
     int received = 0;
     for (int i = 0; i < node->subscriber_count; i++) {
         RosTopicEntry* sub = &node->subscribers[i];
-        if (!sub->is_subscribed || !sub->callback || sub->publisher_socket == INVALID_SOCKET_VALUE)
-            continue;
+        if (!sub->is_subscribed || !sub->callback) continue;
+        
+        /* 检查是否有新的发布者连接待接受 */
+        if (sub->subscriber_listen_socket != INVALID_SOCKET_VALUE) {
+            fd_set acceptfds;
+            struct timeval tv_zero;
+            FD_ZERO(&acceptfds);
+            FD_SET((unsigned int)sub->subscriber_listen_socket, &acceptfds);
+            tv_zero.tv_sec = 0;
+            tv_zero.tv_usec = 0;
+            
+            if (select((int)(sub->subscriber_listen_socket + 1), &acceptfds, NULL, NULL, &tv_zero) > 0) {
+                struct sockaddr_in peer_addr;
+                socklen_t peer_len = sizeof(peer_addr);
+                socket_t data_sock = accept(sub->subscriber_listen_socket, 
+                                            (struct sockaddr*)&peer_addr, &peer_len);
+                if (data_sock != INVALID_SOCKET_VALUE) {
+                    /* 关闭旧的数据连接（如果有），保存新连接 */
+                    if (sub->subscriber_data_socket != INVALID_SOCKET_VALUE) {
+                        socket_close(sub->subscriber_data_socket);
+                    }
+                    sub->subscriber_data_socket = data_sock;
+                }
+            }
+        }
+        
+        /* 读取数据: 优先从subscriber_data_socket读，回退到publisher_socket */
+        socket_t read_socket = INVALID_SOCKET_VALUE;
+        if (sub->subscriber_data_socket != INVALID_SOCKET_VALUE) {
+            read_socket = sub->subscriber_data_socket;
+        } else if (sub->publisher_socket != INVALID_SOCKET_VALUE) {
+            read_socket = sub->publisher_socket;
+        }
+        if (read_socket == INVALID_SOCKET_VALUE) continue;
         
         /* 检查是否有数据可读 */
         fd_set readfds;
         struct timeval tv;
         FD_ZERO(&readfds);
-        FD_SET((unsigned int)sub->publisher_socket, &readfds);
+        FD_SET((unsigned int)read_socket, &readfds);
         tv.tv_sec = 0;
         tv.tv_usec = 10000; /* 10ms非阻塞轮询 */
         
-        int sel = select((int)(sub->publisher_socket + 1), &readfds, NULL, NULL, &tv);
+        int sel = select((int)(read_socket + 1), &readfds, NULL, NULL, &tv);
         if (sel <= 0) continue;
         
         /* 读取TCPROS消息：4字节长度头 + 数据 */
         unsigned char header[4];
 #ifdef _WIN32
-        int hdr_n = recv(sub->publisher_socket, (char*)header, 4, 0);
+        int hdr_n = recv(read_socket, (char*)header, 4, 0);
 #else
-        ssize_t hdr_n = read(sub->publisher_socket, header, 4);
+        ssize_t hdr_n = read(read_socket, header, 4);
 #endif
         if (hdr_n != 4) {
-            if (hdr_n <= 0) { sub->is_subscribed = 0; sub->publisher_socket = INVALID_SOCKET_VALUE; }
+            if (hdr_n <= 0) { 
+                socket_close(read_socket);
+                if (read_socket == sub->subscriber_data_socket) 
+                    sub->subscriber_data_socket = INVALID_SOCKET_VALUE;
+                else 
+                    sub->publisher_socket = INVALID_SOCKET_VALUE;
+            }
             continue;
         }
         uint32_t data_len = ((uint32_t)header[0] | ((uint32_t)header[1] << 8) |
@@ -759,9 +849,9 @@ int ros_node_spin_once(RosNode* node) {
         size_t total_read = 0;
         while (total_read < data_len) {
 #ifdef _WIN32
-            int chunk = recv(sub->publisher_socket, (char*)data + total_read, (int)(data_len - total_read), 0);
+            int chunk = recv(read_socket, (char*)data + total_read, (int)(data_len - total_read), 0);
 #else
-            ssize_t chunk = read(sub->publisher_socket, data + total_read, data_len - total_read);
+            ssize_t chunk = read(read_socket, data + total_read, data_len - total_read);
 #endif
             if (chunk <= 0) { free(data); data = NULL; break; }
             total_read += (size_t)chunk;
@@ -772,7 +862,7 @@ int ros_node_spin_once(RosNode* node) {
             received++;
         }
     }
-    return received > 0 ? ROS_OK : ROS_OK; /* 即使无消息也不算错误 */
+    return received > 0 ? ROS_OK : ROS_OK;
 }
 
 void ros_node_stop_spin(RosNode* node) {

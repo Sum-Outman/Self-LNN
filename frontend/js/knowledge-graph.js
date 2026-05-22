@@ -73,25 +73,27 @@
             fetchKnowledgeFromBackend();
             return;
         }
-        /* 注册知识图谱事件监听 */
-        ws.on('knowledge_update', function() { fetchKnowledgeFromBackend(); });
-        ws.on('knowledge_added', function() { fetchKnowledgeFromBackend(); });
-        ws.on('knowledge_deleted', function() { fetchKnowledgeFromBackend(); });
-        /* 监听全局WebSocket连接状态 */
-        document.addEventListener('websocket-connection-status', function(e) {
-            if (e.detail && e.detail.connected) {
-                graphState.backendOnline = true;
-                showConnectionBanner('已连接知识图谱服务', 'connected');
-                fetchKnowledgeFromBackend();
-            } else {
-                graphState.backendOnline = false;
-                showConnectionBanner('知识图谱服务已断开——知识库不可用', 'disconnected');
-                knowledgeEntries = [];
-                refreshStats();
-                refreshGraph();
-                renderEntryList();
-            }
-        });
+        /* ZSFWS-KG4修复: 使用一次性标记防止事件监听器重复注册 */
+        if (!graphState._kgWsRegistered) {
+            graphState._kgWsRegistered = true;
+            ws.on('knowledge_update', function() { fetchKnowledgeFromBackend(); });
+            ws.on('knowledge_added', function() { fetchKnowledgeFromBackend(); });
+            ws.on('knowledge_deleted', function() { fetchKnowledgeFromBackend(); });
+            document.addEventListener('websocket-connection-status', function(e) {
+                if (e.detail && e.detail.connected) {
+                    graphState.backendOnline = true;
+                    showConnectionBanner('已连接知识图谱服务', 'connected');
+                    fetchKnowledgeFromBackend();
+                } else {
+                    graphState.backendOnline = false;
+                    showConnectionBanner('知识图谱服务已断开——知识库不可用', 'disconnected');
+                    knowledgeEntries = [];
+                    refreshStats();
+                    refreshGraph();
+                    renderEntryList();
+                }
+            });
+        }
         /* 尝试连接 */
         if (!ws.isConnected) {
             ws.connect();
@@ -542,6 +544,7 @@
             canvas.style.cursor = node ? 'pointer' : 'default';
             if (node) {
                 var tooltip = document.getElementById('node-tooltip');
+                if (!tooltip) return;
                 tooltip.style.display = 'block';
                 tooltip.style.left = (e.clientX - rect.left + 10) + 'px';
                 tooltip.style.top = (e.clientY - rect.top + 10) + 'px';
@@ -553,7 +556,8 @@
                 });
                 tooltip.innerHTML = '<b>' + escapeHtml(node.id) + '</b><br>连接: ' + node.connections + '<br>' + edgeInfo;
             } else {
-                document.getElementById('node-tooltip').style.display = 'none';
+                var tt = document.getElementById('node-tooltip');
+                if (tt) tt.style.display = 'none';
             }
         }
     }
@@ -604,7 +608,8 @@
     }
 
     function drawGraph() {
-        if (!ctx) return;
+        /* ZSFWS-KG2修复: 检查canvas是否已初始化 */
+        if (!ctx || !canvas) return;
         var w = canvas.width, h = canvas.height;
         ctx.clearRect(0, 0, w, h);
 
@@ -873,18 +878,22 @@
         });
 
         var pArr = new Float32Array(posBuf), cArr = new Float32Array(colorBuf), sArr = new Float32Array(sizeBuf);
-        var pb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, pb); gl.bufferData(gl.ARRAY_BUFFER, pArr, gl.DYNAMIC_DRAW);
+        /* ZSFWS-KG6修复: 缓冲复用，首次创建后仅更新数据，避免每帧createBuffer/deleteBuffer */
+        if (!gl3d._cachedPb) {
+            gl3d._cachedPb = gl.createBuffer();
+            gl3d._cachedCb = gl.createBuffer();
+            gl3d._cachedSb = gl.createBuffer();
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, gl3d._cachedPb); gl.bufferData(gl.ARRAY_BUFFER, pArr, gl.DYNAMIC_DRAW);
         gl.vertexAttribPointer(gl3d.aPos, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(gl3d.aPos);
 
-        var cb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, cb); gl.bufferData(gl.ARRAY_BUFFER, cArr, gl.DYNAMIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gl3d._cachedCb); gl.bufferData(gl.ARRAY_BUFFER, cArr, gl.DYNAMIC_DRAW);
         gl.vertexAttribPointer(gl3d.aColor, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(gl3d.aColor);
 
-        var sb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, sb); gl.bufferData(gl.ARRAY_BUFFER, sArr, gl.DYNAMIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gl3d._cachedSb); gl.bufferData(gl.ARRAY_BUFFER, sArr, gl.DYNAMIC_DRAW);
         gl.vertexAttribPointer(gl3d.aSize, 1, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(gl3d.aSize);
 
         gl.drawArrays(gl.POINTS, 0, nodes3d.length);
-
-        gl.deleteBuffer(pb); gl.deleteBuffer(cb); gl.deleteBuffer(sb);
     }
 
     function start3DView() {
@@ -982,8 +991,11 @@
         });
         _kgCleanupList = [];
         /* 停止WebGL 3D视图 */
-        if (graphState.rafId) { cancelAnimationFrame(graphState.rafId); graphState.rafId = 0; }
-        graphState.active3D = false;
+        /* ZSFWS-KG1修复: rafId→_rafId变量名一致，取消动画帧 */
+        if (graphState._rafId) { cancelAnimationFrame(graphState._rafId); graphState._rafId = 0; }
+        /* ZSFWS-KG5修复: 清理WebGL 3D动画帧 */
+        if (gl3d.animId) { cancelAnimationFrame(gl3d.animId); gl3d.animId = null; }
+        gl3d.running = false;
         console.log('[知识图谱] 资源已清理');
     };
 

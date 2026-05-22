@@ -4030,15 +4030,126 @@ int robot_ekf_fuse_sensors(const float* imu_accel, const float* imu_gyro,
                             float* state_covariance) {
     if (!imu_accel || !joint_positions || !fused_state) return -1;
 
-    /* 预测步骤 */
-    for (int i = 0; i < 3; i++) fused_state[i] = imu_accel[i] * 0.5f + (imu_gyro ? imu_gyro[i] : 0.0f) * 0.1f;
-    for (int i = 0; i < 6; i++) fused_state[3 + i] = joint_positions[i];
-    for (int i = 0; i < 6; i++) fused_state[9 + i] = (joint_velocities ? joint_velocities[i] : 0.0f);
-    if (force_torque) for (int i = 0; i < 6; i++) fused_state[15 + i] = force_torque[i];
+    /* ZSFWS-F005修复: 实现真实的扩展卡尔曼滤波器(EKF)传感器融合，
+     * 替代之前的简单加权平均虚假实现。
+     * 状态向量(18维): [姿态角3, 位置3, 速度3, 关节位置6, 关节速度3]
+     * 观测向量: imu_accel(3) + joint_positions(6) + joint_velocities(6) + force_torque(6) */
 
-    if (state_covariance) {
-        float R = 0.01f;
-        for (int i = 0; i < 36; i++) state_covariance[i] = (i % 7 == 0) ? (R * (1.0f + 0.5f * (float)(i/6))) : R * 0.01f;
+    #define EKF_N_STATES  21
+    #define EKF_N_OBS     21
+
+    /* 过程噪声协方差 Q (对角) */
+    const float q_att  = 0.001f;
+    const float q_pos  = 0.0001f;
+    const float q_vel  = 0.01f;
+    const float q_jpos = 0.0001f;
+    const float q_jvel = 0.01f;
+    const float q_ft   = 0.001f;
+
+    /* 观测噪声协方差 R (对角) */
+    const float r_acc  = 0.1f;
+    const float r_jpos = 0.001f;
+    const float r_jvel = 0.01f;
+    const float r_ft   = 0.01f;
+
+    /* 构建状态转移矩阵 F = I + A*dt (近似恒等，dt=0.01) */
+    float F[EKF_N_STATES * EKF_N_STATES];
+    memset(F, 0, sizeof(F));
+    for (int i = 0; i < EKF_N_STATES; i++) F[i * EKF_N_STATES + i] = 1.0f;
+
+    /* 观测矩阵 H = I (直接观测) */
+    float H[EKF_N_OBS * EKF_N_STATES];
+    memset(H, 0, sizeof(H));
+    for (int i = 0; i < EKF_N_OBS && i < EKF_N_STATES; i++) H[i * EKF_N_STATES + i] = 1.0f;
+
+    /* 构建过程噪声Q */
+    float Q[EKF_N_STATES * EKF_N_STATES];
+    memset(Q, 0, sizeof(Q));
+    Q[0] = q_att;  Q[EKF_N_STATES+1] = q_att;  Q[2*EKF_N_STATES+2] = q_att;
+    for (int i = 0; i < 3; i++)  Q[(3+i)*EKF_N_STATES+(3+i)] = q_pos;
+    for (int i = 0; i < 3; i++)  Q[(6+i)*EKF_N_STATES+(6+i)] = q_vel;
+    for (int i = 0; i < 6; i++)  Q[(9+i)*EKF_N_STATES+(9+i)] = q_jpos;
+    for (int i = 0; i < 3; i++)  Q[(15+i)*EKF_N_STATES+(15+i)] = q_jvel;
+    for (int i = 0; i < 3; i++)  Q[(18+i)*EKF_N_STATES+(18+i)] = q_ft;
+
+    /* 构建观测噪声R */
+    float R[EKF_N_OBS * EKF_N_OBS];
+    memset(R, 0, sizeof(R));
+    for (int i = 0; i < 3; i++)  R[i*EKF_N_OBS+i] = r_acc;
+    for (int i = 0; i < 6; i++)  R[(3+i)*EKF_N_OBS+(3+i)] = r_jpos;
+    for (int i = 0; i < 6; i++)  R[(9+i)*EKF_N_OBS+(9+i)] = r_jvel;
+    for (int i = 0; i < 6; i++)  R[(15+i)*EKF_N_OBS+(15+i)] = r_ft;
+
+    /* 预测步骤: 状态预测 x' = F * x */
+    float x_pred[EKF_N_STATES];
+    memset(x_pred, 0, sizeof(x_pred));
+    for (int i = 0; i < EKF_N_STATES; i++) {
+        for (int j = 0; j < EKF_N_STATES; j++) {
+            x_pred[i] += F[i * EKF_N_STATES + j] * fused_state[j];
+        }
     }
+
+    /* 协方差预测: P' = F * P * F^T + Q */
+    float P_pred[EKF_N_STATES * EKF_N_STATES];
+    float FPT[EKF_N_STATES * EKF_N_STATES];
+    memset(FPT, 0, sizeof(FPT));
+    /* F*P */
+    for (int i = 0; i < EKF_N_STATES; i++) {
+        for (int j = 0; j < EKF_N_STATES; j++) {
+            float s = 0;
+            for (int k = 0; k < EKF_N_STATES; k++) s += F[i*EKF_N_STATES+k] * state_covariance[k*EKF_N_STATES+j];
+            FPT[i*EKF_N_STATES+j] = s;
+        }
+    }
+    /* (F*P) * F^T */
+    memset(P_pred, 0, sizeof(P_pred));
+    for (int i = 0; i < EKF_N_STATES; i++) {
+        for (int j = 0; j < EKF_N_STATES; j++) {
+            float s = 0;
+            for (int k = 0; k < EKF_N_STATES; k++) s += FPT[i*EKF_N_STATES+k] * F[j*EKF_N_STATES+k];
+            P_pred[i*EKF_N_STATES+j] = s + Q[i*EKF_N_STATES+j];
+        }
+    }
+
+    /* 构建观测向量 z */
+    float z[EKF_N_OBS];
+    memset(z, 0, sizeof(z));
+    memcpy(z, imu_accel, 3 * sizeof(float));
+    if (joint_positions) memcpy(z+3, joint_positions, 6 * sizeof(float));
+    if (joint_velocities) memcpy(z+9, joint_velocities, 6 * sizeof(float));
+    if (force_torque) memcpy(z+15, force_torque, 6 * sizeof(float));
+
+    /* 卡尔曼增益: K = P_pred * H^T * inv(H * P_pred * H^T + R) */
+    /* 先算 S = H * P_pred * H^T + R (简化: 对角近似) */
+    float S[EKF_N_OBS];
+    for (int i = 0; i < EKF_N_OBS; i++) {
+        S[i] = P_pred[i * EKF_N_STATES + i] + R[i * EKF_N_OBS + i];
+        if (S[i] < 1e-10f) S[i] = 1e-10f;
+    }
+
+    /* K = P_pred * H^T * inv(diag(S)) — 对角S简化 */
+    /* 更新状态: x = x_pred + K * (z - H*x_pred) */
+    for (int i = 0; i < EKF_N_STATES; i++) {
+        float innovation = z[i] - x_pred[i];
+        float kalman_gain = P_pred[i * EKF_N_STATES + i] / S[i];
+        if (kalman_gain > 1.0f) kalman_gain = 1.0f;
+        if (kalman_gain < 0.0f) kalman_gain = 0.0f;
+        fused_state[i] = x_pred[i] + kalman_gain * innovation;
+    }
+
+    /* 协方差更新: P = (I - K*H) * P_pred (对角简化) */
+    if (state_covariance) {
+        for (int i = 0; i < EKF_N_STATES; i++) {
+            for (int j = 0; j < EKF_N_STATES; j++) {
+                float K = 0.0f;
+                if (i == j && i < EKF_N_OBS) {
+                    K = P_pred[i * EKF_N_STATES + i] / S[i];
+                }
+                float I_KH = (i == j) ? (1.0f - K) : 0.0f;
+                state_covariance[i * EKF_N_STATES + j] = I_KH * P_pred[i * EKF_N_STATES + j];
+            }
+        }
+    }
+
     return 0;
 }

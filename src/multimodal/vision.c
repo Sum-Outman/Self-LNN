@@ -867,7 +867,12 @@ int vision_process_image(VisionProcessor* processor,
                     features[feature_idx++] = (float)sw;
                     features[feature_idx++] = (float)sh;
                     features[feature_idx++] = (float)s_count / (float)(width * height);
-                    features[feature_idx++] = sc > 0 ? s_mean - features[feature_idx - 6] : 0.0f;
+                    /* ZSFWS-S006修复: 添加边界检查防止数组越界 */
+                    if (feature_idx >= 6 && sc > 0) {
+                        features[feature_idx++] = s_mean - features[feature_idx - 7];
+                    } else {
+                        features[feature_idx++] = 0.0f;
+                    }
                 }
             }
         }

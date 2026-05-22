@@ -75,9 +75,15 @@ struct RcuThread {
 
 static int rcu_allocate_thread_id(RcuDomain* domain) {
     if (!domain) return -1;
+    /* ZSFWS-S015修复: 使用CAS原子操作保护槽位分配，防止多线程并发获取同一thread_id。
+     * thread_active为volatile int，不使用atomic_cas(该宏用InterlockedCompareExchangePointer处理指针)。
+     * 改用InterlockedCompareExchange(Windows)/__sync_bool_compare_and_swap(Linux)处理整型CAS。 */
     for (int i = 0; i < MAX_RCU_THREADS; i++) {
-        if (!domain->thread_active[i]) {
-            domain->thread_active[i] = 1;
+#ifdef _WIN32
+        if (InterlockedCompareExchange((LONG volatile*)&domain->thread_active[i], 1, 0) == 0) {
+#else
+        if (__sync_bool_compare_and_swap(&domain->thread_active[i], 0, 1)) {
+#endif
             domain->thread_in_read_section[i] = 0;
             domain->thread_reader_count[i] = 0;
             atomic_increment(&domain->registered_thread_count);

@@ -1273,11 +1273,16 @@ class VisualizationManager {
             const api = window.SelfLnnApi;
             if (!api) return;
 
+            /* ZSFWS-VZ2修复: 每个API调用独立catch，单点失败不丢失其他响应 */
+            const safeCall = (fn) => {
+                if (typeof fn !== 'function') return Promise.resolve(null);
+                return fn().catch(function(e) { console.warn('[可视化] API调用失败:', e); return null; });
+            };
             const [learningStatus, systemStatus, memoryStatus, robotStatus] = await Promise.all([
-                api.getLearningStatus ? api.getLearningStatus() : Promise.resolve(null),
-                api.getSystemStatus ? api.getSystemStatus() : Promise.resolve(null),
-                api.getMemoryStatus ? api.getMemoryStatus() : Promise.resolve(null),
-                api.getRobotStatus ? api.getRobotStatus() : Promise.resolve(null)
+                safeCall(api.getLearningStatus),
+                safeCall(api.getSystemStatus),
+                safeCall(api.getMemoryStatus),
+                safeCall(api.getRobotStatus)
             ]);
 
             if (learningStatus && learningStatus.success && learningStatus.data) {
@@ -1503,7 +1508,7 @@ class VisualizationManager {
             const chart = this.charts[key];
             if (chart && chart.data && chart.data.datasets) {
                 summary[key] = {
-                    type: chart.config.type,
+                    type: chart.options ? chart.options.type : 'unknown',
                     datasets: chart.data.datasets.length,
                     dataPoints: chart.data.datasets[0] ? chart.data.datasets[0].data.length : 0
                 };
@@ -1962,6 +1967,8 @@ class VisualizationManager {
      * @param {string} mode 'fire' | 'rainbow' | 'neon'
      */
     setSpectrumColorMode(mode) {
+        /* ZSFWS-VZ3修复: spectrumData未初始化时安全退出 */
+        if (!this.spectrumData) return;
         if (['fire', 'rainbow', 'neon'].includes(mode)) {
             this.spectrumData.colorMode = mode;
             this.renderSpectrum();

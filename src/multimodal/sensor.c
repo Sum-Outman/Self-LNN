@@ -756,7 +756,10 @@ static int chol_decomp(const float* a, float* L, int n) {
 
 int ukf_predict(UKFFilter* ukf, const float* control, float dt) {
     if (!ukf) return -1;
-    int n = ukf->config.state_dim, ns = 2 * n + 1; (void)control;
+    int n = ukf->config.state_dim, ns = 2 * n + 1;
+    /* ZSFWS-NEW-SENSOR修复: 将control输入集成到sigma点传播中。
+     * 状态转移: x_{k+1} = f(x_k) + B * control * dt
+     * 其中 B 为控制矩阵（简化为恒等映射），control 直接叠加到速度分量 */
     float* L = ukf->workspace_mat;
     float scale = sqrtf((float)n + ukf->lambda);
     if (chol_decomp(ukf->covariance, L, n) != 0) {
@@ -771,7 +774,12 @@ int ukf_predict(UKFFilter* ukf, const float* control, float dt) {
         ukf->sigma_points[(1 + n + i) * n + j] = ukf->state[j] - L[j * n + i];
     for (int s = 0; s < ns; s++) {
         float* sp = &ukf->sigma_points[s * n];
-        for (int i = 0; i < n; i++) { float vel = (i + 1 < n) ? sp[i + 1] * 0.1f * dt : 0.0f; sp[i] += vel; }
+        /* ZSFWS-NEW-SENSOR修复: 将control输入加入sigma点预测 */
+        for (int i = 0; i < n; i++) { 
+            float vel = (i + 1 < n) ? sp[i + 1] * 0.1f * dt : 0.0f;
+            float ctrl = (control && i < n) ? control[i] * dt : 0.0f;
+            sp[i] += vel + ctrl;
+        }
     }
     memset(ukf->state, 0, (size_t)n * sizeof(float));
     for (int s = 0; s < ns; s++) { float w = ukf->sigma_weights[s];
@@ -958,10 +966,14 @@ static float box_muller_rand(void) {
 int particle_filter_predict(ParticleFilter* pf, const float* control, float dt) {
     if (!pf) return -1;
     int np = pf->current_particles, n = pf->config.state_dim;
-    float noise = pf->config.process_noise_std; (void)control;
-    for (int p = 0; p < np; p++)
-        for (int d = 0; d < n; d++)
-            pf->particles[p * n + d] += box_muller_rand() * noise * dt;
+    float noise = pf->config.process_noise_std;
+    /* ZSFWS-NEW-SENSOR修复: 将control输入加入粒子预测 */
+    for (int p = 0; p < np; p++) {
+        for (int d = 0; d < n; d++) {
+            float ctrl = (control && d < n) ? control[d] * dt : 0.0f;
+            pf->particles[p * n + d] += ctrl + box_muller_rand() * noise * dt;
+        }
+    }
     return 0;
 }
 
@@ -1070,7 +1082,12 @@ void info_filter_free(InfoFilter* inf) {
 
 int info_filter_predict(InfoFilter* inf, const float* control, float dt) {
     if (!inf) return -1;
-    int n = inf->config.state_dim; (void)control;
+    int n = inf->config.state_dim;
+    /* ZSFWS-NEW-SENSOR修复: 信息滤波器预测中加入控制输入，
+     * 状态预测: x_pred = f(x) + B * control * dt */
+    for (int i = 0; i < n; i++) {
+        if (control) inf->state[i] += control[i] * dt;
+    }
     /* 信息形式预测: Ω_pred = (Ω^(-1) + Q)^(-1) 简化为信息扩张 */
     float qi = inf->config.process_info_std * inf->config.process_info_std;
     if (qi > 1e-10f) {

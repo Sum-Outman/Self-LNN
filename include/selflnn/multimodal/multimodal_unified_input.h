@@ -38,6 +38,8 @@ typedef struct {
     float signal_strength;              /**< 信号强度 */
     int initialized;                    /**< 是否已初始化 */
     size_t dimension;                   /**< 控制信号维度 */
+    size_t offset;                      /**< 在统一输入缓冲区中的偏移量 */
+    size_t active_size;                 /**< 当前活跃信号的实际大小 */
 } ModalityControlMetrics;
 
 /**
@@ -64,6 +66,7 @@ typedef struct {
     LNN* lnn_instance;                              /**< 关联的LNN实例（不拥有，不释放） */
     float* unified_input_buffer;                    /**< 统一输入缓冲区 */
     size_t unified_input_buffer_size;               /**< 统一输入缓冲区大小 */
+    size_t total_active_size;                       /**< 当前活跃信号的总维度 */
     /* M-003修复: 保存上一次输出用于时序对比 */
     float prev_output[SELFLNN_MAX_CONTROL_DIM];     /**< 上一次统一输出 */
     size_t prev_output_dim;                         /**< 上一次输出维度 */

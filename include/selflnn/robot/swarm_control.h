@@ -58,6 +58,7 @@ typedef struct {
     int is_active;
     float battery_level;
     float task_progress;
+    uint32_t udp_seq_counter; /**< ZSFWS-M011: UDP报文递增序号，区分新旧数据包 */
 } SwarmRobotState;
 
 typedef struct {

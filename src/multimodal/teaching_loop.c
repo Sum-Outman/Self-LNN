@@ -85,8 +85,14 @@ int tl_cross_modal_associate(TeachingLoopSystem* tls, TeachingSession* session, 
 int tl_test_concept(TeachingLoopSystem* tls, TeachingSession* session, int concept_id, int* correct) {
     if (!tls || !session || !correct) return -1;
     session->questions_asked++;
-    *correct = (concept_id > 0 && concept_id <= session->concept_count &&
-               session->concepts[concept_id - 1].mastery_level > 0.3f) ? 1 : 0;
+    /* S-017修复: mastery_level阈值从0.3降低到0.15，并增加review_count>=1作为严格条件
+     * 仅当概念至少被复习过一次且掌握度达到基础阈值时才判断为正确 */
+    int mastery_ok = (concept_id > 0 && concept_id <= session->concept_count &&
+                      session->concepts[concept_id - 1].mastery_level > 0.15f);
+    /* 额外严格条件：必须至少复习过一次才判对（防止未经复习的概念被判正确） */
+    int has_been_reviewed = (concept_id > 0 && concept_id <= session->concept_count &&
+                             session->concepts[concept_id - 1].review_count >= 1);
+    *correct = (mastery_ok && has_been_reviewed) ? 1 : 0;
     if (*correct) session->correct_answers++;
 
     if (concept_id >= 1 && concept_id <= session->concept_count) {
@@ -176,10 +182,96 @@ int tl_get_next_question(TeachingLoopSystem* tls, TeachingSession* session, char
     return 0;
 }
 
+/* S-017修复: 字符嵌入+余弦相似度匹配
+ * 提取回答和期望概念的字符N-gram频率特征向量，计算余弦相似度
+ * 同时计算与概念名称的编辑距离归一化分数，综合判断正确性 */
+static float tl_calculate_semantic_similarity(const char* answer, const TeachingConcept* concept) {
+    if (!answer || !concept || strlen(answer) == 0) return 0.0f;
+
+    /* 提取回答的字符bigram频率特征（64维） */
+    float ans_feat[64];
+    memset(ans_feat, 0, sizeof(ans_feat));
+    size_t alen = strlen(answer);
+    if (alen > 256) alen = 256;
+    float weight = 1.0f;
+    for (size_t i = 0; i + 1 < alen; i++) {
+        unsigned int hash = ((unsigned char)answer[i] * 31 + (unsigned char)answer[i+1]) * 2654435761u;
+        int idx = (int)(hash % 64);
+        ans_feat[idx] += weight;
+        weight *= 0.92f;
+    }
+    /* L2归一化回答特征 */
+    float norm = 0.0f;
+    for (int d = 0; d < 64; d++) norm += ans_feat[d] * ans_feat[d];
+    if (norm > 1e-6f) { norm = sqrtf(norm); for (int d = 0; d < 64; d++) ans_feat[d] /= norm; }
+
+    /* 提取概念名称的bigram特征 */
+    float name_feat[64];
+    memset(name_feat, 0, sizeof(name_feat));
+    size_t nlen = strlen(concept->name);
+    if (nlen > 128) nlen = 128;
+    for (size_t i = 0; i + 1 < nlen; i++) {
+        unsigned int hash = ((unsigned char)concept->name[i] * 31 + (unsigned char)concept->name[i+1]) * 2654435761u;
+        int idx = (int)(hash % 64);
+        name_feat[idx] += 1.0f;
+    }
+    norm = 0.0f;
+    for (int d = 0; d < 64; d++) norm += name_feat[d] * name_feat[d];
+    if (norm > 1e-6f) { norm = sqrtf(norm); for (int d = 0; d < 64; d++) name_feat[d] /= norm; }
+
+    /* 余弦相似度 */
+    float cos_sim = 0.0f;
+    for (int d = 0; d < 64; d++) cos_sim += ans_feat[d] * name_feat[d];
+    if (cos_sim < 0.0f) cos_sim = 0.0f;
+
+    /* 编辑距离归一化分数 */
+    float edit_score = 0.0f;
+    {
+        size_t la = strlen(answer);
+        size_t lb = strlen(concept->name);
+        if (la > 0 && lb > 0) {
+            /* 动态规划计算编辑距离 */
+            int dp[128][128];
+            int max_a = (int)(la < 127 ? la : 127);
+            int max_b = (int)(lb < 127 ? lb : 127);
+            for (int i = 0; i <= max_a; i++) dp[i][0] = i;
+            for (int j = 0; j <= max_b; j++) dp[0][j] = j;
+            for (int i = 1; i <= max_a; i++) {
+                for (int j = 1; j <= max_b; j++) {
+                    int cost = (answer[i-1] == concept->name[j-1]) ? 0 : 1;
+                    int del = dp[i-1][j] + 1;
+                    int ins = dp[i][j-1] + 1;
+                    int sub = dp[i-1][j-1] + cost;
+                    dp[i][j] = del < ins ? (del < sub ? del : sub) : (ins < sub ? ins : sub);
+                }
+            }
+            int max_len = max_a > max_b ? max_a : max_b;
+            if (max_len > 0) {
+                edit_score = 1.0f - (float)dp[max_a][max_b] / (float)max_len;
+                if (edit_score < 0.0f) edit_score = 0.0f;
+            }
+        }
+    }
+
+    /* 综合评分：余弦相似度 (0.6) + 编辑距离 (0.4) */
+    float combined = cos_sim * 0.6f + edit_score * 0.4f;
+    return combined;
+}
+
 int tl_submit_answer(TeachingLoopSystem* tls, TeachingSession* session, const char* answer, int* correct) {
     if (!tls || !session || !correct) return -1;
-    int is_long_enough = answer && strlen(answer) > 2;
-    *correct = is_long_enough ? 1 : 0;
+    /* S-017修复: 使用语义相似度匹配替代简单的字符长度判断
+     * 提取回答的特征向量与当前概念的语义特征比较，
+     * 仅当余弦相似度+编辑距离综合得分超过阈值时判对 */
+    int is_correct = 0;
+    if (answer && strlen(answer) > 0 && session->current_concept > 0 &&
+        session->current_concept <= session->concept_count) {
+        TeachingConcept* c = &session->concepts[session->current_concept - 1];
+        float similarity = tl_calculate_semantic_similarity(answer, c);
+        /* 综合相似度阈值：0.25（平衡精确匹配和宽松语义匹配） */
+        is_correct = (similarity > 0.25f) ? 1 : 0;
+    }
+    *correct = is_correct;
 
     if (session->current_concept > 0) {
         TeachingConcept* c = &session->concepts[session->current_concept - 1];

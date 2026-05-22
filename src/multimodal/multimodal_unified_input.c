@@ -166,34 +166,34 @@ static int unified_input_dynamic_process(
 
     memset(state->unified_input_buffer, 0, state->unified_buffer_size * sizeof(float));
 
+    size_t cumulative_offset = 0;
     for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
-        /* B-015: 验证模态索引偏移不超出缓冲区 */
-        size_t base = (size_t)m * SELFLNN_MAX_CONTROL_DIM;
-        if (base >= state->unified_buffer_size) {
-            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
-                                  "统一输入动态处理: 模态偏移超出缓冲区");
-            return -1;
-        }
-
         if (modality_present[m] && signals[m]) {
             size_t copy = signal_sizes[m];
-            /* B-015: 信号大小边界检查 —— 确保不超过单个模态槽位 */
             if (copy > SELFLNN_MAX_CONTROL_DIM) {
                 copy = SELFLNN_MAX_CONTROL_DIM;
             }
-            /* B-015: 防止信号大小为0但仍标记为存在的边缘情况 */
             if (copy == 0) {
                 continue;
             }
-            /* B-015: 二次验证拷贝不越界 */
-            if (base + copy > state->unified_buffer_size) {
-                copy = state->unified_buffer_size - base;
+            if (cumulative_offset + copy > state->unified_buffer_size) {
+                copy = state->unified_buffer_size - cumulative_offset;
+            }
+            if (copy == 0) {
+                break;
             }
             for (size_t d = 0; d < copy; d++) {
-                state->unified_input_buffer[base + d] = signals[m][d];
+                state->unified_input_buffer[cumulative_offset + d] = signals[m][d];
             }
+            state->modality_metrics[m].offset = cumulative_offset;
+            state->modality_metrics[m].active_size = copy;
+            cumulative_offset += copy;
+        } else {
+            state->modality_metrics[m].offset = 0;
+            state->modality_metrics[m].active_size = 0;
         }
     }
+    state->total_active_size = cumulative_offset;
 
     size_t output_dim = max_output_size;
     /* B-015: 输出维度上限检查 */
@@ -293,8 +293,11 @@ int multimodal_unified_input_init(UnifiedInputState* state, const UnifiedInputCo
         state->modality_metrics[i].confidence = 0.5f;
         state->modality_metrics[i].uncertainty = 0.5f;
         state->modality_metrics[i].signal_strength = 0.0f;
+        state->modality_metrics[i].offset = 0;
+        state->modality_metrics[i].active_size = 0;
     }
 
+    state->total_active_size = 0;
     state->unified_buffer_size = SELFLNN_UNIFIED_INPUT_DIM;
     state->unified_input_buffer = (float*)safe_calloc(state->unified_buffer_size, sizeof(float));
     if (!state->unified_input_buffer) {
@@ -378,6 +381,23 @@ int multimodal_unified_input_process(UnifiedInputState* state,
         return 0;
     }
 
+    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        if (modality_present[m] && signals[m] && signal_sizes[m] > 0) {
+            float energy = 0.0f;
+            size_t count = signal_sizes[m];
+            for (size_t d = 0; d < count; d++) {
+                energy += signals[m][d] * signals[m][d];
+            }
+            state->modality_metrics[m].signal_strength = sqrtf(energy / (float)count);
+            state->modality_metrics[m].dimension = count;
+            if (!state->modality_metrics[m].initialized) {
+                state->modality_metrics[m].initialized = 1;
+            }
+        } else {
+            state->modality_metrics[m].signal_strength = 0.0f;
+        }
+    }
+
     int result_dim = unified_input_dynamic_process(
         state, signals, signal_sizes, modality_present,
         SELFLNN_MAX_MODALITIES, unified_output, max_output_size);
@@ -390,10 +410,41 @@ int multimodal_unified_input_process(UnifiedInputState* state,
         state->historical_process_quality = 0.95f * state->historical_process_quality +
                                            0.05f * quality;
         state->total_process_count++;
-        /* 保存当前输出作为下一次的prev_output */
         if (result_dim <= SELFLNN_MAX_CONTROL_DIM) {
             memcpy(state->prev_output, unified_output, (size_t)result_dim * sizeof(float));
             state->prev_output_dim = (size_t)result_dim;
+        }
+
+        for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+            if (modality_present[m] && state->modality_metrics[m].initialized) {
+                float prior_conf = state->modality_metrics[m].confidence;
+                float signal_factor = state->modality_metrics[m].signal_strength;
+                float signal_proxy = signal_factor / (1.0f + signal_factor);
+                float quality_factor = quality * signal_proxy;
+                float updated_conf = 0.8f * prior_conf + 0.2f * quality_factor;
+                if (updated_conf > 1.0f) updated_conf = 1.0f;
+                if (updated_conf < 0.01f) updated_conf = 0.01f;
+                state->modality_metrics[m].confidence = updated_conf;
+                state->modality_metrics[m].uncertainty = 1.0f - updated_conf;
+            }
+        }
+
+        float total_conf = 0.0f;
+        int present_count = 0;
+        for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+            if (modality_present[m] && state->modality_metrics[m].initialized) {
+                total_conf += state->modality_metrics[m].confidence;
+                present_count++;
+            }
+        }
+        if (present_count > 0 && total_conf > 1e-8f) {
+            for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+                if (modality_present[m] && state->modality_metrics[m].initialized) {
+                    state->input_weights[m] = state->modality_metrics[m].confidence / total_conf;
+                } else {
+                    state->input_weights[m] = 0.0f;
+                }
+            }
         }
     }
 
@@ -442,8 +493,13 @@ int multimodal_unified_input_reset(UnifiedInputState* state)
     for (int i = 0; i < SELFLNN_MAX_MODALITIES; i++) {
         state->input_weights[i] = 1.0f / (float)SELFLNN_MAX_MODALITIES;
         state->modality_metrics[i].confidence = 0.5f;
+        state->modality_metrics[i].uncertainty = 0.5f;
+        state->modality_metrics[i].signal_strength = 0.0f;
+        state->modality_metrics[i].offset = 0;
+        state->modality_metrics[i].active_size = 0;
     }
 
+    state->total_active_size = 0;
     state->unified_buffer_size = SELFLNN_UNIFIED_INPUT_DIM;
     state->unified_input_buffer = (float*)safe_calloc(state->unified_buffer_size, sizeof(float));
     if (state->unified_input_buffer) {

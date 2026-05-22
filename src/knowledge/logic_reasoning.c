@@ -1476,8 +1476,9 @@ LogicInferenceResult* logic_reasoning_engine_forward_chain(LogicReasoningEngine*
             result->overall_confidence = 1.0f;
         }
     } else {
-        // 没有应用规则，使用基础置信度
-        result->overall_confidence = 0.5f;  // 中性置信度
+        /* ZSFWS-NEW-LOGIC修复: 无匹配规则时置信度为0而非中性0.5f。
+         * 0.5f中性置信度会误导下游决策系统。0表示"无可用的推理依据"。 */
+        result->overall_confidence = 0.0f;
     }
     
     // 计算推理时间
@@ -2485,20 +2486,22 @@ static int psl_optimize_gradient_descent(PslState* state, float* variable_values
             if (!premise_truths) continue;
             
             for (size_t p = 0; p < formula->premise_count; p++) {
-                premise_truths[p] = 0.5f; /* 默认中间值 */
-                /* 在variable_values中查找前提变量 */
+                /* ZSFWS-B001修复: 变量索引无效时跳过该公式，不使用伪0.5f默认值 */
                 size_t var_idx = (size_t)(unsigned long long)(void*)formula->premise_vars[p];
-                if (var_idx < var_count) {
+                if (var_idx >= var_count) {
+                    premise_truths[p] = -1.0f; /* 标记无效，将被跳过 */
+                } else {
                     premise_truths[p] = variable_values[var_idx];
                 }
             }
             
             /* 计算结论真值 */
-            float conclusion_truth = 0.5f;
             size_t conc_var_idx = (size_t)(unsigned long long)(void*)formula->conclusion_var;
-            if (conc_var_idx < var_count) {
-                conclusion_truth = variable_values[conc_var_idx];
+            if (conc_var_idx >= var_count) {
+                safe_free((void**)&premise_truths);
+                continue; /* 结论变量无效，跳过该公式 */
             }
+            float conclusion_truth = variable_values[conc_var_idx];
             
             /* 计算蕴含距离 */
             float sum = 0.0f;
@@ -2841,7 +2844,9 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(LogicReason
         if (!premise_truths) continue;
         
         for (size_t p = 0; p < formula->premise_count; p++) {
-            premise_truths[p] = 0.5f;
+            /* ZSFWS-B002修复: 使用0.0f而非伪值0.5f作为未匹配前提的默认值。
+             * 未匹配的前提应被视为"未知"（0真值贡献于Lukasiewicz合取）。 */
+            premise_truths[p] = 0.0f;
             for (size_t i = 0; i < fact_count; i++) {
                 if (formula->premise_vars[p] && facts[i] &&
                     strstr(facts[i], formula->premise_vars[p]) != NULL) {
@@ -2851,7 +2856,8 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(LogicReason
             }
         }
         
-        float conclusion_truth = 0.5f;
+        /* ZSFWS-B002修复: 结论变量在已知事实中查找，未匹配时真值0.0f */
+        float conclusion_truth = 0.0f;
         for (size_t i = 0; i < fact_count; i++) {
             if (formula->conclusion_var && facts[i] &&
                 strstr(facts[i], formula->conclusion_var) != NULL) {

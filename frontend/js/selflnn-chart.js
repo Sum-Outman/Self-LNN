@@ -47,6 +47,17 @@ class SelfLnnChart {
         }
     }
 
+    /* ZSFWS-SC1修复: 安全计算数组的最小/最大值，避免超大数据集Math.min(...展开)栈溢出 */
+    _computeMinMax(arr) {
+        if (!arr || arr.length === 0) return { min: 0, max: 1 };
+        let mn = Infinity, mx = -Infinity;
+        for (let i = 0; i < arr.length; i++) {
+            if (arr[i] < mn) mn = arr[i];
+            if (arr[i] > mx) mx = arr[i];
+        }
+        return { min: mn, max: mx };
+    }
+
     setData(data) {
         this.data = data;
         this.draw();
@@ -123,8 +134,9 @@ class SelfLnnChart {
             }
         }
         if (allValues.length === 0) return;
-        let yMin = Math.min(...allValues);
-        let yMax = Math.max(...allValues);
+        var mm = this._computeMinMax(allValues);
+        let yMin = mm.min;
+        let yMax = mm.max;
         const range = yMax - yMin;
         if (range < 0.001) { yMin -= 0.5; yMax += 0.5; }
         const yPad = (yMax - yMin) * 0.1 || 0.1;
@@ -192,8 +204,9 @@ class SelfLnnChart {
             }
         }
         if (allValues.length === 0) return;
-        let yMin = Math.min(...allValues);
-        let yMax = Math.max(...allValues);
+        var mm2 = this._computeMinMax(allValues);
+        let yMin = mm2.min;
+        let yMax = mm2.max;
         const range = yMax - yMin;
         if (range < 0.001) { yMin -= 0.5; yMax += 0.5; }
         const yPad = (yMax - yMin) * 0.1 || 0.1;
@@ -258,8 +271,9 @@ class SelfLnnChart {
             }
         }
         if (allValues.length === 0) return;
-        let yMin = Math.min(...allValues);
-        let yMax = Math.max(...allValues);
+        var mm4 = this._computeMinMax(allValues);
+        let yMin = mm4.min;
+        let yMax = mm4.max;
         const range = yMax - yMin;
         if (range < 0.001) { yMin -= 0.5; yMax += 0.5; }
         const yPad = (yMax - yMin) * 0.1 || 0.1;
@@ -362,8 +376,10 @@ class SelfLnnChart {
             }
         }
         if (allValues.length === 0) return;
-        const yMax = Math.max(...allValues) * 1.15 || 1;
-        const yMin = 0;
+        /* ZSFWS-SC2修复: 柱状图支持负值，yMin使用实际数据最小值而非硬编码0 */
+        var mm3 = this._computeMinMax(allValues);
+        let yMin = mm3.min < 0 ? mm3.min * 1.15 : 0;
+        let yMax = mm3.max * 1.15 || 1;
 
         this._drawGrid(area, yMin, yMax);
 
@@ -378,7 +394,9 @@ class SelfLnnChart {
 
             for (let i = 0; i < pts.length; i++) {
                 const x = area.x + i * (barWidth + gap) + gap / 2;
-                const barH = (pts[i] / yMax) * area.h;
+                /* ZSFWS-SC2修复: 柱状图正确处理负值 - 从yMin而非0开始计算高度 */
+                const valueRange = yMax - yMin || 1;
+                const barH = ((pts[i] - yMin) / valueRange) * area.h;
                 const y = area.y + area.h - barH;
 
                 ctx.fillStyle = color;
@@ -485,7 +503,10 @@ class SelfLnnChart {
         if (!datasets || datasets.length === 0) return;
         const values = datasets[0].data || [];
         if (values.length === 0) return;
-        const total = values.reduce((a, b) => a + b, 0);
+        /* ZSFWS-SC3修复: 过滤非数字值防止reduce产生NaN */
+        const validValues = values.filter(function(v) { return typeof v === 'number' && !isNaN(v) && isFinite(v); });
+        if (validValues.length === 0) return;
+        const total = validValues.reduce(function(a, b) { return a + b; }, 0);
         if (total <= 0) return;
         const colors = [
             '#00c8ff', '#00ff88', '#ff6600', '#ffcc00', '#cc44ff',
@@ -493,8 +514,8 @@ class SelfLnnChart {
         ];
         let startAngle = -Math.PI / 2;
         const slices = [];
-        for (let i = 0; i < values.length; i++) {
-            const sweep = (values[i] / total) * Math.PI * 2;
+        for (let i = 0; i < validValues.length; i++) {
+            const sweep = (validValues[i] / total) * Math.PI * 2;
             const midAngle = startAngle + sweep / 2;
             slices.push({ startAngle, sweep, midAngle, value: values[i], pct: (values[i] / total * 100), label: labels[i] || '', color: datasets[0].backgroundColor ? (Array.isArray(datasets[0].backgroundColor) ? datasets[0].backgroundColor[i] : datasets[0].backgroundColor) : colors[i % colors.length] });
             startAngle += sweep;

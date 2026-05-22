@@ -3831,6 +3831,7 @@ async function refreshLNNStatus() {
                         var off = circ - (stabilityPercent / 100) * circ;
                         cfs[0].style.strokeDashoffset = off;
                     }
+                }
                 
                 if (status.convergence_rate !== undefined) {
                     const convergencePercent = Math.min(100, Math.max(0, status.convergence_rate * 100));
@@ -7784,9 +7785,16 @@ window.testSkill = testSkill;
 var _voiceCapturing = false;
 var _voiceRecorder = null;
 
-/* ZSFABC修复: 语音控制函数在HTML内联脚本中可能有DOM特定版本，这里作为回退 */
+/* ZSFWS-M024修复: toggleVoice统一使用toggleVoiceInput逻辑，
+ * 避免两套独立语音控制路径重复操作麦克风 */
 if (typeof toggleVoice === 'undefined') {
 async function toggleVoice() {
+    /* 如果对话增强模块可用，直接使用其语音输入功能 */
+    if (typeof toggleVoiceInput === 'function' && g_dialogueEnhanced && g_deviceManager) {
+        toggleVoiceInput();
+        return;
+    }
+    /* 回退路径：独立的VoiceCaptureUtil快速采集 */
     if (typeof VoiceCaptureUtil === 'undefined') {
         showNotification('语音采集模块未加载', 'warning');
         return;
@@ -7811,7 +7819,7 @@ async function toggleVoice() {
         } catch(e) { showNotification('麦克风访问失败: ' + e.message, 'danger'); _voiceCapturing = false; }
     }
 }
-} /* ZSFABC: toggleVoice 条件定义结束 */
+}
 
 if (typeof sendTextCommand === 'undefined') {
 async function sendTextCommand() {

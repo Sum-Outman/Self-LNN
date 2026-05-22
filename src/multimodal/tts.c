@@ -127,6 +127,7 @@ struct TTSEngine {
     /* 拼音查找表 */
     TTS_PinyinEntry* pinyin_table;
     int pinyin_table_size;
+    int use_real_pinyin_lookup; /**< 使用真实拼音二分查找（替代哨兵指针）ZSFWS-S003 */
 
     /* 输出投影权重（隐藏状态 → 波形样本） */
     float* waveform_projection_w;    /* [hidden_size x 1] */
@@ -240,7 +241,9 @@ const char* tts_get_pinyin_string(const TTS_Pinyin* pinyin) {
 extern int tts_pinyin_lookup(uint16_t codepoint, int* out_init, int* out_final, int* out_tone);
 
 static int init_pinyin_table(TTSEngine* engine) {
-    engine->pinyin_table = (TTS_PinyinEntry*)(uintptr_t)1; /* 哨兵：使用真实拼音查找 */
+    /* ZSFWS-S003修复: 使用布尔标志替代不安全哨兵指针(uintptr_t)1 */
+    engine->pinyin_table = NULL; /* 不使用预置拼音表 */
+    engine->use_real_pinyin_lookup = 1; /* 标记使用真实拼音二分查找 */
     engine->pinyin_table_size = TTS_PINYIN_TABLE_SIZE;
     return 0;
 }
@@ -293,7 +296,7 @@ int tts_text_to_pinyin(TTSEngine* engine, const char* text,
         output[count].final_part = TTS_FINAL_NONE;
         output[count].tone = 0;
 
-        if (engine->pinyin_table) {
+        if (engine->use_real_pinyin_lookup) {
             int init, final, tone;
             if (tts_pinyin_lookup((uint16_t)codepoint, &init, &final, &tone)) {
                 output[count].initial = (TTS_Initial)init;
@@ -1214,7 +1217,7 @@ TTSEngine* tts_engine_create(const TTSConfig* config) {
 
     /* 初始化嵌入表（惰性） */
     if (init_embeddings(engine) != 0) {
-        if (engine->pinyin_table != (TTS_PinyinEntry*)(uintptr_t)1)
+        if (!engine->use_real_pinyin_lookup && engine->pinyin_table)
             safe_free((void**)&engine->pinyin_table);
         safe_free((void**)&engine);
         return NULL;
@@ -1226,7 +1229,7 @@ TTSEngine* tts_engine_create(const TTSConfig* config) {
         (size_t)engine->token_capacity * sizeof(int));
     if (!engine->token_buffer) {
         safe_free((void**)&engine->embedding_table);
-        if (engine->pinyin_table != (TTS_PinyinEntry*)(uintptr_t)1)
+        if (!engine->use_real_pinyin_lookup && engine->pinyin_table)
             safe_free((void**)&engine->pinyin_table);
         safe_free((void**)&engine);
         return NULL;
@@ -1255,7 +1258,7 @@ void tts_engine_free(TTSEngine* engine) {
     safe_free((void**)&engine->hidden_state);
 
     safe_free((void**)&engine->embedding_table);
-    if (engine->pinyin_table != (TTS_PinyinEntry*)(uintptr_t)1)
+    if (!engine->use_real_pinyin_lookup && engine->pinyin_table)
         safe_free((void**)&engine->pinyin_table);
     safe_free((void**)&engine->waveform_projection_w);
     safe_free((void**)&engine->waveform_projection_b);

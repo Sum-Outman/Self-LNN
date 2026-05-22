@@ -28,7 +28,9 @@ class VoiceCaptureUtil {
         if (this._recording) return { success: false, error: '录音已在进行中' };
         try {
             if (!stream) throw new Error('未提供麦克风流');
-            var compat = window.g_browserCompat || new BrowserCompat();
+            /* ZSFWS-VC-BC修复: BrowserCompat类存在性检查，优先使用全局实例 */
+        var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+        if (!compat) return false;
             var mimeType = compat.getSupportedMediaRecorderMimeType();
             this._chunks = [];
             this._stream = stream;
@@ -93,7 +95,7 @@ class VoiceCaptureUtil {
             return;
         }
         /* ZSFABC-Fix: BrowserCompat异常保护，防止未定义类导致崩溃 */
-        var compat = (typeof BrowserCompat !== 'undefined') ? new BrowserCompat() : null;
+        var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
         var mimeType = compat ? compat.getSupportedMediaRecorderMimeType() : 'audio/webm';
         var blob = new Blob(this._chunks, { type: mimeType || 'audio/webm' });
         this._chunks = [];
@@ -151,11 +153,9 @@ class VoiceCaptureUtil {
                 if (options.onStart) options.onStart();
             };
             capturer.onStop = function() {
-                if (options.onStop) {
-                    options.onStop();
-                } else {
-                    stream.getTracks().forEach(function(t) { t.stop(); });
-                }
+                /* ZSFWS-VC1修复: 无论是否有自定义onStop，都必须停止MediaStream释放资源 */
+                stream.getTracks().forEach(function(t) { t.stop(); });
+                if (options.onStop) options.onStop();
             };
             capturer.onBlobReady = async function(blob) {
                 try {

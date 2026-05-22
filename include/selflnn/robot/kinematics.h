@@ -3,6 +3,7 @@
 
 #include "selflnn/robot/robot.h"
 #include <stddef.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -155,6 +156,23 @@ typedef struct {
     char source_urdf[2048];
 } KinematicModel;
 
+/* S-001修复: 机器人运动学实例状态结构体
+ * 每个RobotKinematics实例独立持有速度计算所需的前一帧状态，
+ * 消除TLS线程局部存储跨不同模型/机器人实例共享的问题。
+ * 每个机器人/模型创建独立的RobotKinematics实例，互不干扰。 */
+typedef struct {
+    clock_t prev_tick;                 /* 上一帧的时间戳(clock ticks) */
+    float prev_pos_x;                  /* 上一帧末端位置X */
+    float prev_pos_y;                  /* 上一帧末端位置Y */
+    float prev_pos_z;                  /* 上一帧末端位置Z */
+    float prev_quat_x;                 /* 上一帧末端姿态四元数X */
+    float prev_quat_y;                 /* 上一帧末端姿态四元数Y */
+    float prev_quat_z;                 /* 上一帧末端姿态四元数Z */
+    float prev_quat_w;                 /* 上一帧末端姿态四元数W */
+    int is_initialized;               /* 是否已初始化（首次调用标记） */
+    int robot_instance_id;            /* 绑定的机器人实例ID，-1表示未绑定 */
+} RobotKinematics;
+
 typedef struct {
     Vec3 position;
     float orientation[4];
@@ -210,6 +228,14 @@ int forward_kinematics(const KinematicModel* model, const float* joint_angles,
                         EndEffectorState* result);
 int forward_kinematics_full(const KinematicModel* model, const float* joint_angles,
                              Vec3* link_positions, float* link_orientations);
+
+/* S-001修复: 带实例状态的正运动学速度计算
+ * RobotKinematics实例由调用方创建和管理，每个机器人独立持有一个。
+ * 通过robot_kinematics_init()初始化，robot_kinematics_reset()重置。 */
+void robot_kinematics_init(RobotKinematics* state);
+void robot_kinematics_reset(RobotKinematics* state);
+int forward_kinematics_stateful(const KinematicModel* model, const float* joint_angles,
+                                 RobotKinematics* state, EndEffectorState* result);
 int compute_jacobian(const KinematicModel* model, const float* joint_angles,
                       float* jacobian, int jacobian_rows);
 int inverse_kinematics_ccd(const KinematicModel* model, const Vec3* target_pos,

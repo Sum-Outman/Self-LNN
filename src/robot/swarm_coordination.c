@@ -317,7 +317,12 @@ int sw_move_formation(SwarmCoordinator* sc, int formation_id, const float* delta
 int sw_rotate_formation(SwarmCoordinator* sc, int formation_id, float angle) {
     if (!sc || angle == 0.0f) return -1;
     float rad = angle * (float)M_PI / 180.0f;
-    return sw_move_formation(sc, formation_id, (float[]){cosf(rad) - 1.0f, sinf(rad), 0.0f});
+    /* ZSFWS-S023修复: 使用显式数组变量替代C99复合字面量，兼容MSVC */
+    float move_offset[3];
+    move_offset[0] = cosf(rad) - 1.0f;
+    move_offset[1] = sinf(rad);
+    move_offset[2] = 0.0f;
+    return sw_move_formation(sc, formation_id, move_offset);
 }
 
 int sw_assign_task(SwarmCoordinator* sc, const SwarmTask* task) {

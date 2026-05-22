@@ -3252,8 +3252,10 @@ int hardware_interface_imu_read_raw(HardwareInterface* hw, ImuRawData* data) {
         data->temperature = 25.0 + (double)xorshift_prng_next_gaussian(&imu_prng) * t_noise_scale;
 
         snprintf(hw->last_error, sizeof(hw->last_error),
-                "物理计算IMU: 运动加速度(%.4f,%.4f,%.4f) 角速度(%.4f,%.4f,%.4f)",
+                "物理计算IMU(仿真): 运动加速度(%.4f,%.4f,%.4f) 角速度(%.4f,%.4f,%.4f)",
                 accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+        /* ZSFWS-M005修复: 显式标记仿真数据，区分真实硬件传感器 */
+        data->is_simulated_data = 1;
         return 0;
     }
 

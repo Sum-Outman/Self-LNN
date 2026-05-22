@@ -149,28 +149,10 @@ ObjectRecognizer* object_recognizer_create(void) {
     int cat_count = sizeof(cats) / sizeof(cats[0]);
     for (int i = 0; i < cat_count && i < OR_MAX_CATEGORIES; i++) {
         snprintf(or_obj->category_names[i], 64, "%s", cats[i]);
-        /* ZSFABC-S002修复: 使用安全随机数生成器产生正交初始模板
-         * 每个类别的初始模板使用不同的随机种子确保低相关性。
-         * 模板将在首次真实图像识别时被实际特征替换。 */
+        /* ZSFWS-S004修复: 模板初始化为全零，标记为"未训练"状态。
+         * 不再使用PRNG生成伪随机特征，因为随机特征不等于真实图像学习特征。
+         * 未训练时模板全为零，or_train_classifier训练后替换为真实HOG+NCC学习模板。 */
         memset(or_obj->category_templates[i], 0, 128 * sizeof(float));
-        /* 使用Xorshift PRNG基于类别索引产生可复现的伪随机正交特征 */
-        uint32_t seed = (uint32_t)((i * 2654435761u) ^ 0x9E3779B9u);
-        float sum_sq = 0.0f;
-        for (int j = 0; j < 128; j++) {
-            /* Xorshift32 伪随机数生成器（可复现、高质量统计特性） */
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            float val = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
-            val = val * 2.0f - 1.0f;  /* 映射到 [-1, 1] */
-            or_obj->category_templates[i][j] = val;
-            sum_sq += val * val;
-        }
-        /* L2归一化模板向量 */
-        float inv_norm = 1.0f / sqrtf(sum_sq + 1e-8f);
-        for (int j = 0; j < 128; j++) {
-            or_obj->category_templates[i][j] *= inv_norm;
-        }
         or_obj->category_count++;
     }
     or_obj->last_scene = SCENE_UNKNOWN;

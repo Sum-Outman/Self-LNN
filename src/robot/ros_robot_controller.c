@@ -511,6 +511,12 @@ int ros_robot_controller_emergency_stop(RosRobotController* controller, int robo
     entry->info.angular_velocity[1] = 0;
     entry->info.angular_velocity[2] = 0;
 
+    /* ZSFWS-M012修复: 紧急停止时检查桥接可用性，不可用时仅记录警告 */
+    if (!entry->bridge) {
+        log_warn("[ROS机器人] 紧急停止：桥接不可用，速度归零仅反映内部状态。"
+                 "如需硬件停止，请确保ROS/仿真桥接已连接。");
+    }
+
     return 0;
 }
 

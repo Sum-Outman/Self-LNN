@@ -87,13 +87,13 @@ static double pde_rand_normal(double mean, double stddev)
 static DesignParameter* pde_copy_params(const DesignParameter* src, size_t count)
 {
     if (!src || count == 0) return NULL;
-    DesignParameter* dst = (DesignParameter*)malloc(sizeof(DesignParameter) * count);
+    DesignParameter* dst = (DesignParameter*)safe_malloc(sizeof(DesignParameter) * count);
     if (!dst) return NULL;
     for (size_t i = 0; i < count; ++i) {
         dst[i] = src[i];
         dst[i].name = NULL;
         if (src[i].name) {
-            dst[i].name = (char*)malloc(strlen(src[i].name) + 1);
+            dst[i].name = (char*)safe_malloc(strlen(src[i].name) + 1);
             if (dst[i].name) pde_strcpy(dst[i].name, strlen(src[i].name) + 1, src[i].name);
         }
     }
@@ -105,8 +105,8 @@ static void pde_free_params(DesignParameter* params, size_t count)
 {
     if (!params) return;
     for (size_t i = 0; i < count; ++i)
-        free(params[i].name);
-    free(params);
+        safe_free((void**)&params[i].name);
+    safe_free((void**)&params);
 }
 
 /* 评估一个设计方案的各目标值 */
@@ -204,7 +204,7 @@ struct PdeRequirementTracker {
 PdeRequirementTracker* pde_tracker_create(void)
 {
     PdeRequirementTracker* tracker = (PdeRequirementTracker*)
-        malloc(sizeof(PdeRequirementTracker));
+        safe_malloc(sizeof(PdeRequirementTracker));
     if (!tracker) return NULL;
     memset(tracker, 0, sizeof(PdeRequirementTracker));
     tracker->next_req_id = 1;
@@ -215,7 +215,7 @@ PdeRequirementTracker* pde_tracker_create(void)
 
 void pde_tracker_destroy(PdeRequirementTracker* tracker)
 {
-    free(tracker);
+    safe_free((void**)&tracker);
 }
 
 int pde_tracker_register_requirements(PdeRequirementTracker* tracker,
@@ -931,7 +931,7 @@ static void pde_polynomial_mutation(DesignParameter* child, size_t param_count, 
 PdeMultiObjectiveOptimizer* pde_moo_create(void)
 {
     PdeMultiObjectiveOptimizer* opt = (PdeMultiObjectiveOptimizer*)
-        malloc(sizeof(PdeMultiObjectiveOptimizer));
+        safe_malloc(sizeof(PdeMultiObjectiveOptimizer));
     if (!opt) return NULL;
     memset(opt, 0, sizeof(PdeMultiObjectiveOptimizer));
     opt->initialized = 1;
@@ -941,7 +941,7 @@ PdeMultiObjectiveOptimizer* pde_moo_create(void)
 
 void pde_moo_destroy(PdeMultiObjectiveOptimizer* optimizer)
 {
-    free(optimizer);
+    safe_free((void**)&optimizer);
 }
 
 int pde_moo_add_objective(PdeMultiObjectiveOptimizer* optimizer,

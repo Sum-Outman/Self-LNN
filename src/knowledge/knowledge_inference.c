@@ -632,8 +632,9 @@ int ki_graph_bfs(KnowledgeInferenceEngine* kie, const char* start_concept, int m
     KIFact* related, int* related_count) {
     if (!kie || !start_concept || !related || !related_count) return -1;
     *related_count = 0;
-    GraphNode queue[KI_MAX_GRAPH_NODES];
-    memset(queue, 0, sizeof(queue));
+    GraphNode* queue = (GraphNode*)safe_malloc(KI_MAX_GRAPH_NODES * sizeof(GraphNode));
+    if (!queue) return -1;
+    memset(queue, 0, KI_MAX_GRAPH_NODES * sizeof(GraphNode));
     int head = 0, tail = 0;
     GraphNode start_node;
     concept_from_kb(kie, start_concept, &start_node);
@@ -664,6 +665,7 @@ int ki_graph_bfs(KnowledgeInferenceEngine* kie, const char* start_concept, int m
             }
         }
     }
+    safe_free((void**)&queue);
     return 0;
 }
 

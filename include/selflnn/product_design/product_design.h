@@ -146,7 +146,7 @@ typedef struct {
     int iteration;               /**< 当前迭代次数 */
     int max_iterations;          /**< 最大迭代次数 */
     double change_threshold;     /**< 收敛阈值 */
-    double* ke;                  /**< 单元刚度矩阵 (4x4) */
+    double* ke;                  /**< 单元刚度矩阵 (8x8) */
     double* f;                   /**< 力向量 */
     int* fixed_dofs;             /**< 固定自由度索引 */
     int fixed_count;             /**< 固定自由度数量 */

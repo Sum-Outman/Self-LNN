@@ -397,6 +397,21 @@ class DialogueEnhanced {
         this.wsUrl = wsUrl;
         this.wsReconnectAttempts = 0;
         this.wsMaxReconnect = 5;
+        /* ZSFWS-M025修复: 监听WebSocket事件，实现真实重连计数和上限 */
+        var self = this;
+        if (gws.ws) {
+            var existingClose = gws.ws.onclose;
+            gws.ws.onclose = function(evt) {
+                self.wsReconnectAttempts++;
+                if (self.wsReconnectAttempts > self.wsMaxReconnect) {
+                    console.error('[SELF-LNN] WebSocket重连已达上限(' + self.wsMaxReconnect + '次)，停止重连。请检查后端服务。');
+                    if (self.onWsStatusChange) self.onWsStatusChange('disconnected');
+                    return;
+                }
+                console.warn('[SELF-LNN] WebSocket断开，第' + self.wsReconnectAttempts + '/' + self.wsMaxReconnect + '次重连...');
+                if (typeof existingClose === 'function') existingClose.call(gws.ws, evt);
+            };
+        }
         /* 使用全局SelfLnnWebSocket的connect方法 */
         gws.connect();
         return true;

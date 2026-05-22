@@ -12309,6 +12309,8 @@ static int handle_api_post_learning_dialogue(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 400;
         }
+        /* ZSFWS-D001修复: 设置错误响应后立即返回，防止后续空指针解引用 */
+        return 0;
     }
     char dialogue_text[4096] = {0};
     char expected_response[4096] = {0};
@@ -20916,6 +20918,16 @@ static void init_handler_table(RequestHandler* table) {
     /* ====== P5: 产品设计端点 ====== */
     table[270] = handle_api_post_product_design;
     table[271] = handle_api_get_product_spec;
+
+    /* ZSFAB-S8修复: 槽位272-279补充注册（未知端点统一返回"未实现"） */
+    table[272] = handle_api_not_implemented;
+    table[273] = handle_api_not_implemented;
+    table[274] = handle_api_not_implemented;
+    table[275] = handle_api_not_implemented;
+    table[276] = handle_api_not_implemented;
+    table[277] = handle_api_not_implemented;
+    table[278] = handle_api_not_implemented;
+    table[279] = handle_api_not_implemented;
 
     /* ZSFAB-S8修复: 统一路由的向后兼容别名槽位(280-284) */
     table[280] = handle_api_get_memory_export;

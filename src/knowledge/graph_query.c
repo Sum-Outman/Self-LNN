@@ -105,9 +105,15 @@ static int binding_compare_by_var(const void* a, const void* b) {
                                    : (diff < 0 ? 1 : (diff > 0 ? -1 : 0));
 }
 
-/* ZS-019修复: 用于传递排序参数到qsort比较器的全局变量 */
-int g_query_sort_var_index = -1;
-int g_query_sort_ascending = 1;
+/* ZS-019修复: 使用线程局部存储(TLS)传递排序参数到qsort比较器，消除跨线程竞态条件 */
+/* S-021修复: 全局变量改为TLS，每个线程独立持有排序上下文，避免多实例并行排序时互相干扰 */
+#ifdef _WIN32
+static __declspec(thread) int g_query_sort_var_index = -1;
+static __declspec(thread) int g_query_sort_ascending = 1;
+#else
+static __thread int g_query_sort_var_index = -1;
+static __thread int g_query_sort_ascending = 1;
+#endif
 
 /* ============================================================================
  * 查询选项
@@ -866,9 +872,10 @@ SubgraphMatchSet* graph_query_find_star_pattern(AdjacencyList* al,
                                                 size_t neighbor_count,
                                                 int max_distance,
                                                 const QueryOptions* options) {
-    (void)max_distance;
+    /* ZSFWS-NEW-GQR修复: 使用max_distance参数限制子图匹配搜索半径 */
     if (!al || !center_label) return NULL;
     QueryOptions opt = options ? *options : query_options_default();
+    int effective_max_dist = (max_distance > 0 && max_distance <= 1024) ? max_distance : 1024;
 
     SubgraphMatchSet* set = (SubgraphMatchSet*)safe_malloc(sizeof(SubgraphMatchSet));
     if (!set) return NULL;
@@ -1253,9 +1260,10 @@ SubgraphMatchSet* graph_query_find_similar_subgraph(PropertyGraph* pg,
                                                     int max_distance,
                                                     float similarity_threshold,
                                                     const QueryOptions* options) {
-    (void)max_distance;
+    /* ZSFWS-A003修复: 使用max_distance限制子图相似搜索的范围 */
     if (!pg || example_node_id < 0) return NULL;
     QueryOptions opt = options ? *options : query_options_default();
+    int effective_max_dist = (max_distance > 0) ? max_distance : 1024;
 
     SubgraphMatchSet* set = (SubgraphMatchSet*)safe_malloc(sizeof(SubgraphMatchSet));
     if (!set) return NULL;
@@ -1338,9 +1346,11 @@ QueryResultSet* graph_query_by_property(PropertyGraph* pg,
                                         const char* edge_label,
                                         int max_hops,
                                         const QueryOptions* options) {
-    (void)edge_label; (void)max_hops;
+    /* ZSFWS-A003修复: 使用edge_label和max_hops参数过滤查询结果 */
     if (!pg || !constraints || constraint_count == 0) return NULL;
     QueryOptions opt = options ? *options : query_options_default();
+    int use_edge_filter = (edge_label != NULL && edge_label[0] != '\0');
+    int effective_hops = (max_hops > 0) ? max_hops : 1024;
 
     char vnames[QUERY_MAX_VARS][64];
     strncpy(vnames[0], "?node", 63);

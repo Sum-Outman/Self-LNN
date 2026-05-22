@@ -1048,25 +1048,93 @@ int dynamics_compute_contact_forces(const DynamicsModel* model,
                                      ContactForce* forces)
 {
     int i;
+    float world_R[DYNAMICS_MAX_JOINTS * 9];
+    float world_p[DYNAMICS_MAX_JOINTS * 3];
+    float world_axes[DYNAMICS_MAX_JOINTS * 3];
+    int has_world_kinematics;
     if (!model || !contacts || !forces) return -1;
     if (contact_count <= 0 || contact_count > DYNAMICS_MAX_CONTACTS) return -1;
-    /* ZS-006修复: 使用q和qd计算接触点真实相对速度，替代硬编码{0,0,0} */
+
+    /* M-003: 预先计算所有关节的世界变换和世界坐标系下的关节轴
+     *        避免在接触点循环内重复计算运动学 */
+    has_world_kinematics = 0;
+    if (qd && model && model->config.num_joints > 0) {
+        int j;
+        compute_world_transforms(model, q, world_R, world_p);
+        /* 计算世界坐标系下的关节轴 */
+        for (j = 0; j < model->config.num_joints; j++) {
+            float axis_local[3];
+            float axis_norm;
+            axis_local[0] = model->config.joint_axes[j * 3 + 0];
+            axis_local[1] = model->config.joint_axes[j * 3 + 1];
+            axis_local[2] = model->config.joint_axes[j * 3 + 2];
+            axis_norm = (float)sqrt(axis_local[0] * axis_local[0] +
+                                    axis_local[1] * axis_local[1] +
+                                    axis_local[2] * axis_local[2]);
+            if (axis_norm > 1e-10f) {
+                axis_local[0] /= axis_norm;
+                axis_local[1] /= axis_norm;
+                axis_local[2] /= axis_norm;
+            }
+            mat3_vec3_mul(&world_R[j * 9], axis_local, &world_axes[j * 3]);
+        }
+        has_world_kinematics = 1;
+    }
+
     for (i = 0; i < contact_count; i++) {
         const ContactPoint* cp = &contacts[i];
         ContactForce* cf = &forces[i];
-        /* 使用关节速度qd估算接触点的相对速度 */
         float v_rel[3] = {0, 0, 0};
-        if (qd && model) {
-            /* 用关节速度和接触点位置近似线速度 */
-            float ang_vel_mag = 0.0f;
-            for (int j = 0; j < model->config.num_joints && j < 3; j++) {
-                ang_vel_mag += (qd[j] > 0 ? qd[j] : -qd[j]);
-            }
-            /* 关节速度→线速度近似: v ≈ ω × r，取接触点位置作为r */
-            if (ang_vel_mag > 1e-10f) {
-                v_rel[0] = cp->position[1] * qd[2] - cp->position[2] * qd[1];
-                v_rel[1] = cp->position[2] * qd[0] - cp->position[0] * qd[2];
-                v_rel[2] = cp->position[0] * qd[1] - cp->position[1] * qd[0];
+
+        /* M-003: 使用完整几何雅可比计算接触点速度
+         *        遍历从基座到接触点所属刚体(body_a)的运动链，
+         *        对每个关节累积速度贡献：
+         *          - 旋转关节: ω_j × r_{cp→j}  其中 ω_j = axis_j * qd_j
+         *          - 平动关节: axis_j * qd_j
+         *        这替代了原仅适用于Z轴对齐旋转关节的叉积近似 */
+        if (has_world_kinematics && qd) {
+            int body_a = cp->body_a;
+            int n_joints = model->config.num_joints;
+            if (body_a < 0 || body_a >= n_joints) body_a = n_joints - 1;
+            if (body_a >= 0) {
+                /* 构建从基座到body_a的运动链 */
+                int chain[64];
+                int chain_len = 0;
+                int curr = body_a;
+                while (curr >= 0 && chain_len < 64) {
+                    chain[chain_len++] = curr;
+                    if (curr == 0 || model->config.parent_indices[curr] < 0) break;
+                    curr = model->config.parent_indices[curr];
+                }
+                /* 反转链顺序：从基座(root)到body_a(leaf) */
+                {
+                    int k;
+                    for (k = chain_len - 1; k >= 0; k--) {
+                        int j = chain[k];
+                        int jtype = model->config.joint_types[j];
+                        if (jtype == JOINT_TYPE_REVOLUTE || jtype == JOINT_TYPE_CONTINUOUS) {
+                            /* 旋转关节速度贡献: v = (axis · qd) × r */
+                            float omega[3];
+                            float r[3];
+                            omega[0] = world_axes[j * 3 + 0] * qd[j];
+                            omega[1] = world_axes[j * 3 + 1] * qd[j];
+                            omega[2] = world_axes[j * 3 + 2] * qd[j];
+                            r[0] = cp->position[0] - world_p[j * 3 + 0];
+                            r[1] = cp->position[1] - world_p[j * 3 + 1];
+                            r[2] = cp->position[2] - world_p[j * 3 + 2];
+                            /* v_contrib = omega × r */
+                            v_rel[0] += omega[1] * r[2] - omega[2] * r[1];
+                            v_rel[1] += omega[2] * r[0] - omega[0] * r[2];
+                            v_rel[2] += omega[0] * r[1] - omega[1] * r[0];
+                        } else if (jtype == JOINT_TYPE_PRISMATIC) {
+                            /* 平动关节速度贡献: v = axis · qd */
+                            v_rel[0] += world_axes[j * 3 + 0] * qd[j];
+                            v_rel[1] += world_axes[j * 3 + 1] * qd[j];
+                            v_rel[2] += world_axes[j * 3 + 2] * qd[j];
+                        }
+                        /* JOINT_TYPE_FIXED: 无速度贡献 */
+                    }
+                }
             }
         }
         float vt1, vt2;

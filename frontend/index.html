@@ -18,7 +18,13 @@
                 var self = this;
                 var gws = window.SelfLnnWebSocket;
                 if (!gws || typeof gws.on !== 'function') {
-                    setTimeout(function() { self.init(); }, 500);
+                    self._retryCount = (self._retryCount || 0) + 1;
+                    if (self._retryCount <= 10) {
+                        setTimeout(function() { self.init(); }, 500);
+                    } else {
+                        console.error('[SELF-LNN] WebSocket管理器初始化失败：' +
+                            '已重试' + self._retryCount + '次，SelfLnnWebSocket模块未就绪，停止重试。');
+                    }
                     return;
                 }
                 gws.on('*', function(data) { self._notify({type:'ws_message', data:data}); });
@@ -30,7 +36,7 @@
         setTimeout(function() { window._wsManager.init(); }, 3000);
         /* 前端配置 - 可在此处修改服务器地址和端口 */
         window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
-            host: 'localhost',
+            host: window.location.hostname || 'localhost',
             port: 8080         /* HTTP端口，WebSocket通过HTTP Upgrade共用此端口 */
         };
         /* 全局保护：合并页面中hidden section的DOM引用安全 */

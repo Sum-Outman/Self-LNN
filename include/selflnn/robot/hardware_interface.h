@@ -375,6 +375,7 @@ typedef struct {
     double magnetometer[3];   /**< 磁力计（µT）[x,y,z] */
     double temperature;       /**< 温度（°C） */
     double timestamp;         /**< 时间戳（秒） */
+    int is_simulated_data;    /**< ZSFWS-M005: 1=仿真计算数据, 0=真实硬件传感器数据 */
 } ImuRawData;
 
 /**

@@ -21,6 +21,18 @@
 #include <windows.h>
 #endif
 
+/* ========== 技能自动发现数据结构（定义在SkillLibrary之前，作为实例成员） ========== */
+#define MAX_DISCOVERED_PATTERNS 32
+
+typedef struct {
+    float* pattern_sequence;
+    size_t pattern_length;
+    size_t feature_dim;
+    float confidence;
+    size_t occurrence_count;
+    char suggested_name[64];
+} DiscoveredPattern;
+
 /* 技能库内部结构 */
 struct SkillLibrary {
     SkillRecord* records;
@@ -29,6 +41,9 @@ struct SkillLibrary {
     size_t max_skills;
     int next_skill_id;
     SkillLibraryStats stats;
+    /* S-022修复: 发现模式数组从全局变量改为实例成员，每个SkillLibrary实例独立维护 */
+    DiscoveredPattern discovered_patterns[MAX_DISCOVERED_PATTERNS];
+    int pattern_count;
 };
 
 static float cosine_similarity(const float* a, const float* b, int dim) {
@@ -410,6 +425,10 @@ SkillLibrary* skill_library_create(size_t max_skills) {
 
 void skill_library_free(SkillLibrary* library) {
     if (!library) return;
+    /* S-022修复: 释放发现模式中的动态分配内存 */
+    for (int i = 0; i < library->pattern_count; i++) {
+        safe_free((void**)&library->discovered_patterns[i].pattern_sequence);
+    }
     safe_free((void**)&library->records);
     safe_free((void**)&library);
 }
@@ -890,18 +909,8 @@ typedef struct {
     float success_confidence;
 } ExperienceEpisode;
 
-#define MAX_DISCOVERED_PATTERNS 32
 #define MIN_PATTERN_LENGTH 3
 #define PATTERN_SIMILARITY_THRESH 0.7f
-
-typedef struct {
-    float* pattern_sequence;
-    size_t pattern_length;
-    size_t feature_dim;
-    float confidence;
-    size_t occurrence_count;
-    char suggested_name[64];
-} DiscoveredPattern;
 
 /* ========== 线程安全：模式发现计数器锁 ========== */
 #ifdef _WIN32
@@ -921,9 +930,6 @@ static pthread_mutex_t g_sk_plock = PTHREAD_MUTEX_INITIALIZER;
 #define SK_PLOCK() pthread_mutex_lock(&g_sk_plock)
 #define SK_PUNLOCK() pthread_mutex_unlock(&g_sk_plock)
 #endif
-
-static DiscoveredPattern g_discovered_patterns[MAX_DISCOVERED_PATTERNS];
-static int g_pattern_count = 0;
 
 int skill_library_discover_from_experience(SkillLibrary* library,
                                             const float* states, size_t num_steps,
@@ -982,22 +988,22 @@ int skill_library_discover_from_experience(SkillLibrary* library,
                 /* 检查是否与已有模式重复 */
                 int is_new = 1;
                 SK_PLOCK();
-                int pcount = g_pattern_count;
+                int pcount = library->pattern_count;
                 for (int p = 0; p < pcount; p++) {
-                    if (g_discovered_patterns[p].pattern_length == seg_len &&
-                        g_discovered_patterns[p].feature_dim == total_dim) {
+                    if (library->discovered_patterns[p].pattern_length == seg_len &&
+                        library->discovered_patterns[p].feature_dim == total_dim) {
                         float sim = 0.0f;
                         for (size_t j = 0; j < seg_len * total_dim; j++) {
-                            float diff = pattern[j] - g_discovered_patterns[p].pattern_sequence[j];
+                            float diff = pattern[j] - library->discovered_patterns[p].pattern_sequence[j];
                             sim += diff * diff;
                         }
                         sim = 1.0f / (1.0f + sqrtf(sim));
                         if (sim > PATTERN_SIMILARITY_THRESH) {
                             is_new = 0;
-                            g_discovered_patterns[p].occurrence_count++;
-                            g_discovered_patterns[p].confidence += 0.1f;
-                            if (g_discovered_patterns[p].confidence > 1.0f)
-                                g_discovered_patterns[p].confidence = 1.0f;
+                            library->discovered_patterns[p].occurrence_count++;
+                            library->discovered_patterns[p].confidence += 0.1f;
+                            if (library->discovered_patterns[p].confidence > 1.0f)
+                                library->discovered_patterns[p].confidence = 1.0f;
                             break;
                         }
                     }
@@ -1005,7 +1011,7 @@ int skill_library_discover_from_experience(SkillLibrary* library,
 
                 /* 存储新模式 */
                 if (is_new && pcount < MAX_DISCOVERED_PATTERNS) {
-                    DiscoveredPattern* dp = &g_discovered_patterns[pcount];
+                    DiscoveredPattern* dp = &library->discovered_patterns[pcount];
                     dp->pattern_sequence = pattern;
                     dp->pattern_length = seg_len;
                     dp->feature_dim = total_dim;
@@ -1028,7 +1034,7 @@ int skill_library_discover_from_experience(SkillLibrary* library,
                     skill.enabled = 1;
 
                     skill_library_add(library, &skill);
-                    g_pattern_count++;
+                    library->pattern_count++;
                     SK_PUNLOCK();
                     discovered++;
                 } else {
@@ -1047,28 +1053,31 @@ int skill_library_discover_from_experience(SkillLibrary* library,
     return discovered;
 }
 
-int skill_library_get_discovered_count(void) {
+int skill_library_get_discovered_count(SkillLibrary* library) {
+    if (!library) return 0;
     SK_PLOCK();
-    int count = g_pattern_count;
+    int count = library->pattern_count;
     SK_PUNLOCK();
     return count;
 }
 
-const char* skill_library_get_discovered_name(int index) {
+const char* skill_library_get_discovered_name(SkillLibrary* library, int index) {
+    if (!library) return NULL;
     SK_PLOCK();
-    if (index < 0 || index >= g_pattern_count) { SK_PUNLOCK(); return NULL; }
-    const char* name = g_discovered_patterns[index].suggested_name;
+    if (index < 0 || index >= library->pattern_count) { SK_PUNLOCK(); return NULL; }
+    const char* name = library->discovered_patterns[index].suggested_name;
     SK_PUNLOCK();
     return name;
 }
 
-void skill_library_clear_discovered(void) {
+void skill_library_clear_discovered(SkillLibrary* library) {
+    if (!library) return;
     SK_PLOCK();
-    for (int i = 0; i < g_pattern_count; i++) {
-        safe_free((void**)&g_discovered_patterns[i].pattern_sequence);
+    for (int i = 0; i < library->pattern_count; i++) {
+        safe_free((void**)&library->discovered_patterns[i].pattern_sequence);
     }
-    memset(g_discovered_patterns, 0, sizeof(g_discovered_patterns));
-    g_pattern_count = 0;
+    memset(library->discovered_patterns, 0, sizeof(library->discovered_patterns));
+    library->pattern_count = 0;
     SK_PUNLOCK();
 }
 

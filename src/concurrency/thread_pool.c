@@ -125,15 +125,19 @@ struct ThreadPool {
  * @brief 从池中分配任务节点
  */
 static TaskNode* task_node_alloc(ThreadPool* pool) {
+    TaskNode* node = NULL;
+    
 #ifdef _WIN32
     EnterCriticalSection(&pool->node_lock);
 #else
     pthread_mutex_lock(&pool->node_lock);
 #endif
     
-    TaskNode* node = NULL;
+    /* ZSFWS-F003修复: 消除Windows双重EnterCriticalSection死锁。
+     * 将free_nodes获取 + allocated_nodes检查+递增合并到同一个锁区间，
+     * 对外统一释放一次锁，避免非递归临界区的重入死锁。 */
     
-    // 首先尝试从自由节点池中获取
+    /* 首先尝试从自由节点池中获取 */
     if (pool->free_nodes) {
         node = pool->free_nodes;
         pool->free_nodes = node->next;
@@ -145,27 +149,26 @@ static TaskNode* task_node_alloc(ThreadPool* pool) {
         return node;
     }
     
-    /* R7-005修复: TOCTOU竞态——在锁内同时检查+递增，消除窗口 */
-#ifdef _WIN32
-    EnterCriticalSection(&pool->node_lock);
+    /* 节点池已空——在持有锁的情况下检查上限并递增计数 */
     if (pool->max_nodes > 0 && pool->allocated_nodes >= pool->max_nodes) {
+#ifdef _WIN32
         LeaveCriticalSection(&pool->node_lock);
+#else
+        pthread_mutex_unlock(&pool->node_lock);
+#endif
         return NULL;
     }
     pool->allocated_nodes++;
+    
+#ifdef _WIN32
     LeaveCriticalSection(&pool->node_lock);
 #else
-    pthread_mutex_lock(&pool->node_lock);
-    if (pool->max_nodes > 0 && pool->allocated_nodes >= pool->max_nodes) {
-        pthread_mutex_unlock(&pool->node_lock);
-        return NULL;
-    }
-    pool->allocated_nodes++;
     pthread_mutex_unlock(&pool->node_lock);
 #endif
     
     node = (TaskNode*)safe_malloc(sizeof(TaskNode));
     if (!node) {
+        /* 分配失败——需要单独加锁减少计数 */
 #ifdef _WIN32
         EnterCriticalSection(&pool->node_lock);
         pool->allocated_nodes--;

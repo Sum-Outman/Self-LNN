@@ -1670,7 +1670,10 @@ int swarm_udp_send_state(SwarmController* controller, int robot_index) {
     pkt.version = SWARM_UDP_SYNC_VERSION;
     pkt.msg_type = 0; /* state_sync */
     pkt.robot_id = (uint16_t)rs->robot_id;
-    pkt.seq_num = (uint32_t)(size_t)controller;
+    /* ZSFWS-M011修复: 使用递增序号替代指针值。
+     * 指针值在每次程序运行时相同，无法区分新旧数据包。
+     * 每个robot_state维护独立的seq_counter，跨报文递增。 */
+    pkt.seq_num = rs->udp_seq_counter++;
     pkt.timestamp_us = 0;
 
     /* 序列化机器人状态到payload */

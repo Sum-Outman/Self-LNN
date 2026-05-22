@@ -451,16 +451,11 @@ class CommandEngine {
         document.dispatchEvent(new CustomEvent('device-command', {
             detail: { deviceType: deviceType, action: action, params: params }
         }));
-        var dm = window.SelfLnnDeviceManager;
+        /* ZSFWS-S009修复: 使用全局单例g_deviceManager（main.js创建），
+         * 而非创建重复的DeviceManager实例，避免设备列表不同步 */
+        var dm = window.g_deviceManager || window.SelfLnnDeviceManager;
         if (!dm) {
-            try {
-                dm = new DeviceManager();
-                await dm.init();
-                window.SelfLnnDeviceManager = dm;
-            } catch (e) {
-                /* MID-007修复: 设备管理器初始化失败时应返回失败，而非虚假成功 */
-                return { success: false, message: '设备管理器不可用，无法执行设备指令: ' + deviceType + '/' + action, error: e.message };
-            }
+            return { success: false, message: '设备管理器不可用，无法执行设备指令: ' + deviceType + '/' + action };
         }
         try {
             var result;

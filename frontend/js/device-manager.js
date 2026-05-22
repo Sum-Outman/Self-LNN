@@ -33,14 +33,18 @@ class DeviceManager {
             onDepthUpdate: null,
             onDisparityUpdate: null,
             onPointCloudUpdate: null,
-            processingInterval: null
+            processingInterval: null,
+            worker: null,
+            workerBusy: false
         };
     }
 
     async init() {
         if (this.initialized) return;
         try {
-            var compat = window.g_browserCompat || new BrowserCompat();
+            /* ZSFWS-DM1修复: BrowserCompat类存在性检查，回退到window.g_browserCompat */
+            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            if (!compat) { console.error('[DeviceManager] BrowserCompat未加载'); return; }
             var devices = await compat.enumerateMediaDevices();
             this._processDevices(devices);
             if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
@@ -158,8 +162,9 @@ class DeviceManager {
         if (!mic) return { success: false, error: '未找到麦克风' };
         if (mic.active) return { success: true };
         try {
-            var compat = window.g_browserCompat || new BrowserCompat();
-            var baseConstraints = compat.getDefaultAudioConstraints();
+            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            if (!compat) return { success: false, error: 'BrowserCompat未加载' };
+            var baseConstraints = JSON.parse(JSON.stringify(compat.getDefaultAudioConstraints()));
             baseConstraints.audio.deviceId = { exact: mic.deviceId };
             var stream = await compat.getUserMediaWithFallback(baseConstraints);
             mic.stream = stream;
@@ -589,6 +594,23 @@ class DeviceManager {
 
     _startStereoProcessing() {
         this._stopStereoProcessing();
+        /* M-026: 创建Web Worker用于Census变换立体匹配，避免阻塞主线程 */
+        try {
+            if (!this.stereoVision.worker) {
+                this.stereoVision.worker = new Worker('js/workers/stereo-worker.js');
+                var self = this;
+                this.stereoVision.worker.onmessage = function(e) {
+                    self._onStereoWorkerResult(e.data);
+                };
+                this.stereoVision.worker.onerror = function(err) {
+                    console.error('[立体匹配Worker] 错误:', err.message);
+                    self.stereoVision.workerBusy = false;
+                };
+            }
+        } catch (e) {
+            console.warn('[立体匹配Worker] 创建失败，回退到主线程:', e.message);
+            this.stereoVision.worker = null;
+        }
         this.stereoVision.processingInterval = setInterval(() => {
             if (!this.stereoVision.enabled) return;
             this._processStereoFrame();
@@ -599,6 +621,12 @@ class DeviceManager {
         if (this.stereoVision.processingInterval) {
             clearInterval(this.stereoVision.processingInterval);
             this.stereoVision.processingInterval = null;
+        }
+        /* M-026: 终止Web Worker */
+        if (this.stereoVision.worker) {
+            this.stereoVision.worker.terminate();
+            this.stereoVision.worker = null;
+            this.stereoVision.workerBusy = false;
         }
     }
 
@@ -612,31 +640,79 @@ class DeviceManager {
             const rightData = this._captureCanvasData(rightCanvas);
             if (!leftData || !rightData) return;
 
-            const disparityMap = this._computeDisparity(leftData, rightData);
-            this.stereoVision.disparityMap = disparityMap;
-
-            const depthMap = this._disparityToDepth(disparityMap);
-            this.stereoVision.depthMap = depthMap;
-
-            const pointCloud = this._depthToPointCloud(depthMap, leftData.width, leftData.height);
-            this.stereoVision.pointCloud = pointCloud;
-
-            this.stereoVision.lastCaptureTime = Date.now();
-
-            document.dispatchEvent(new CustomEvent('stereo-vision-update', {
-                detail: {
-                    disparityMap: disparityMap,
-                    depthMap: depthMap,
-                    pointCloud: pointCloud,
-                    timestamp: this.stereoVision.lastCaptureTime
-                }
-            }));
-            if (this.stereoVision.onDisparityUpdate) this.stereoVision.onDisparityUpdate(disparityMap);
-            if (this.stereoVision.onDepthUpdate) this.stereoVision.onDepthUpdate(depthMap);
-            if (this.stereoVision.onPointCloudUpdate) this.stereoVision.onPointCloudUpdate(pointCloud);
+            /* M-026: 使用Web Worker异步计算视差图，避免阻塞主线程 */
+            if (this.stereoVision.worker && !this.stereoVision.workerBusy) {
+                this.stereoVision.workerBusy = true;
+                /* 拷贝像素缓冲区发送到Worker（不能直接传输ImageData.buffer） */
+                var leftBuf = leftData.data.buffer.slice(0);
+                var rightBuf = rightData.data.buffer.slice(0);
+                var w = leftData.width;
+                var h = leftData.height;
+                var maxDisp = Math.min(64, Math.floor(w / 4));
+                /* 暂存当前帧的width/height供Worker回调使用 */
+                this.stereoVision._pendingWidth = w;
+                this.stereoVision._pendingHeight = h;
+                this.stereoVision.worker.postMessage({
+                    type: 'compute',
+                    leftBuffer: leftBuf,
+                    rightBuffer: rightBuf,
+                    width: w,
+                    height: h,
+                    maxDisparity: maxDisp
+                }, [leftBuf, rightBuf]);
+            } else if (!this.stereoVision.worker) {
+                /* Worker不可用时回退到主线程同步计算 */
+                const disparityMap = this._computeDisparity(leftData, rightData);
+                this._processStereoResult(disparityMap, leftData.width, leftData.height);
+            }
         } catch (err) {
             console.warn('立体视觉处理错误:', err.message);
         }
+    }
+
+    /**
+     * M-026: Worker完成回调 — 接收视差图并计算深度图/点云
+     */
+    _onStereoWorkerResult(msg) {
+        if (msg.type !== 'result') {
+            this.stereoVision.workerBusy = false;
+            return;
+        }
+        var w = msg.width;
+        var h = msg.height;
+        var disparityMap = new Float32Array(msg.disparityBuffer);
+        var confidenceMap = new Float32Array(msg.confidenceBuffer);
+
+        this.stereoVision.confidenceMap = confidenceMap;
+        this._processStereoResult(disparityMap, w, h);
+        this.stereoVision.workerBusy = false;
+    }
+
+    /**
+     * M-026: 统一的立体视觉结果处理 — 深度图 + 点云 + 事件分发
+     */
+    _processStereoResult(disparityMap, width, height) {
+        this.stereoVision.disparityMap = disparityMap;
+
+        const depthMap = this._disparityToDepth(disparityMap);
+        this.stereoVision.depthMap = depthMap;
+
+        const pointCloud = this._depthToPointCloud(depthMap, width, height);
+        this.stereoVision.pointCloud = pointCloud;
+
+        this.stereoVision.lastCaptureTime = Date.now();
+
+        document.dispatchEvent(new CustomEvent('stereo-vision-update', {
+            detail: {
+                disparityMap: disparityMap,
+                depthMap: depthMap,
+                pointCloud: pointCloud,
+                timestamp: this.stereoVision.lastCaptureTime
+            }
+        }));
+        if (this.stereoVision.onDisparityUpdate) this.stereoVision.onDisparityUpdate(disparityMap);
+        if (this.stereoVision.onDepthUpdate) this.stereoVision.onDepthUpdate(depthMap);
+        if (this.stereoVision.onPointCloudUpdate) this.stereoVision.onPointCloudUpdate(pointCloud);
     }
 
     _captureCanvasData(videoEl) {
@@ -675,13 +751,13 @@ class DeviceManager {
                 for (let x = cRad; x < imgW - cRad; x++) {
                     const idx = y * imgW + x;
                     const center = gray[idx];
-                    let val = 0n;
+                    let val = BigInt(0);
                     let bit = 0;
                     for (let dy = -cRad; dy <= cRad; dy++) {
                         for (let dx = -cRad; dx <= cRad; dx++) {
                             if (dx === 0 && dy === 0) continue;
                             const nIdx = (y + dy) * imgW + (x + dx);
-                            if (gray[nIdx] >= center) val |= (1n << BigInt(bit));
+                            if (gray[nIdx] >= center) val |= (BigInt(1) << BigInt(bit));
                             bit++;
                             if (bit >= 48) break;
                         }
@@ -698,7 +774,7 @@ class DeviceManager {
         const hammingDist = (a, b) => {
             let diff = a ^ b;
             let count = 0;
-            while (diff > 0n) { count++; diff &= (diff - 1n); }
+            while (diff > BigInt(0)) { count++; diff &= (diff - BigInt(1)); }
             return count;
         };
         /* P1-026修复：改进的块匹配 - Census变换汉明距离 + 自适应窗口 + 亚像素插值 */

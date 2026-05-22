@@ -1,9 +1,12 @@
 #include "selflnn/backend/backend.h"
 #include "selflnn/backend/websocket_push.h"
 #include "selflnn/self_cognition.h"
-#include "selflnn/metacognition.h"
-#include "selflnn/multi_agent.h"
-#include "selflnn/neural_architecture_search.h"
+/* ZSFWS-NEW-MAININC: 移除5个未使用的include
+ * - metacognition.h: agi_bg_metacognition仅用内部API，不依赖此头文件
+ * - multi_agent.h: main.c中从未调用multi_agent_*函数
+ * - neural_architecture_search.h: main.c中从未调用NAS相关函数
+ * - learning/meta_learning.h: main.c中从未调用meta_learning_*函数
+ * - robot/ros_robot_controller.h: main.c中从未调用ros_robot_controller_*函数 */
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/quaternion_lnn.h"
 #include "selflnn/knowledge/knowledge.h"
@@ -19,7 +22,6 @@
 #include "selflnn/agi/capability_switch.h"
 #include "selflnn/learning/learning.h"
 #include "selflnn/learning/imitation_learning.h"
-#include "selflnn/learning/meta_learning.h"
 #include "selflnn/learning/online_learning.h"
 #include "selflnn/multimodal/multimodal.h"
 #include "selflnn/multimodal/multimodal_manager.h"
@@ -28,7 +30,6 @@
 #include "selflnn/training/training_pipeline.h"
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/robot/robot.h"
-#include "selflnn/robot/ros_robot_controller.h"
 #include "selflnn/programming/self_programming.h"
 #include "selflnn/product_design/product_design.h"
 #include "selflnn/concurrency/thread_pool.h"
@@ -746,11 +747,11 @@ static void signal_handler(int sig)
     g_agi_running = 0;
 }
 
-static void print_system_info(void)
+static void print_system_info(int port, int ws_port)
 {
     printf("系统信息:\n");
-    printf("  HTTP端口:     %d\n", SELFLNN_DEFAULT_PORT);
-    printf("  WebSocket端口: %d\n", SELFLNN_WEBSOCKET_PORT);
+    printf("  HTTP端口:     %d\n", port);
+    printf("  WebSocket端口: %d\n", ws_port);
     printf("  Gazebo端口:   %d\n", SELFLNN_GAZEBO_PORT);
     printf("  编译标准:      C11\n");
     printf("  目标平台:      跨平台 (Windows/Linux/macOS)\n");
@@ -854,7 +855,7 @@ int main(int argc, char* argv[])
     signal(SIGHUP, signal_handler);
 #endif
 
-    print_system_info();
+    print_system_info(config.port, SELFLNN_WEBSOCKET_PORT);
 
     printf("正在初始化SELF-LNN AGI系统...\n");
     printf("  多模态:       %s\n", config.enable_multimodal ? "启用" : "禁用");
@@ -977,12 +978,19 @@ int main(int argc, char* argv[])
     g_last_cognition = g_start_time;
     g_last_safety = g_start_time;
 
-    /* AGI主事件循环：处理后台认知任务 + 服务HTTP请求 */
+    /* AGI主事件循环：处理后台认知任务 + 服务HTTP请求 + WebSocket推送维护 */
     while (g_agi_running) {
         /* 执行一轮AGI后台任务 */
         int bg_result = 0;
         agi_background_loop_iteration();
         (void)bg_result;
+
+        /* ZSFWS-F004修复: 主事件循环中调用WebSocket推送服务器poll，
+         * 处理客户端帧数据、ping/pong心跳（每30秒）、客户端超时检测（120秒）。
+         * 此前ws_push_server_poll从未被调用，导致WebSocket 9090端口半瘫痪。 */
+        if (g_ws_push_server) {
+            ws_push_server_poll(g_ws_push_server, 100);
+        }
 
         /* 主睡眠间隔 */
 #ifdef _WIN32
