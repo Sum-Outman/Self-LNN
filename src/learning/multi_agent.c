@@ -649,99 +649,146 @@ void agent_destroy(Agent* agent) {
 }
 
 /**
- * @brief 智能体决策
+ * @brief 智能体决策 - 使用LNN液态神经网络驱动
  */
 AgentAction* agent_decide(Agent* agent, const float* observation, size_t obs_size) {
     if (!agent || !observation || obs_size == 0) {
         return NULL;
     }
     
-    // 创建动作
     AgentAction* action = (AgentAction*)safe_calloc(1, sizeof(AgentAction));
     if (!action) {
         return NULL;
     }
     
-    // 根据智能体类型决定动作类型
-    if (agent->config.type == AGENT_TYPE_EXPLORER) {
-        action->action_type = ACTION_TYPE_EXPLORE;
-        action->confidence = 0.7f;
-    } else if (agent->config.type == AGENT_TYPE_EXPLOITER) {
-        action->action_type = ACTION_TYPE_EXPLOIT;
-        action->confidence = 0.9f;
-    } else if (agent->config.type == AGENT_TYPE_COLLABORATOR) {
-        action->action_type = ACTION_TYPE_COLLABORATE;
-        action->confidence = 0.8f;
-    } else {
-        action->action_type = ACTION_TYPE_NONE;
-        action->confidence = 0.5f;
-    }
-    
-    // 分配动作值数组
-    action->values_size = obs_size;  // 动作空间与观察空间相同
+    action->values_size = obs_size;
     action->action_values = (float*)safe_calloc(action->values_size, sizeof(float));
     if (!action->action_values) {
         safe_free((void**)&action);
         return NULL;
     }
     
-    // 完整决策逻辑：基于多因素加权评估的智能体决策（ 启发式策略）
-    // 考虑因素：观察值、能量水平、历史成功率、协作权重、任务优先级
-    for (size_t i = 0; i < obs_size; i++) {
-        float obs_val = observation[i];
-        float action_val = 0.0f;
-        
-        // 1. 观察值分级响应（多阈值决策）
-        if (obs_val > 0.8f) {
-            // 高观察值：强烈积极行动
-            action_val = agent->config.exploration_rate * (0.8f + 0.2f * obs_val);
-        } else if (obs_val > 0.5f) {
-            // 中高观察值：适度积极行动
-            action_val = agent->config.exploration_rate * (0.3f + 0.5f * obs_val);
-        } else if (obs_val > 0.2f) {
-            // 中等观察值：谨慎行动
-            action_val = agent->config.exploration_rate * (0.1f * obs_val - 0.05f);
-        } else {
-            // 低观察值：消极行动
-            action_val = -0.15f * (1.0f - obs_val);
+    /* 尝试使用LNN决策模型（若已初始化） */
+    int lnn_decided = 0;
+    if (agent->decision_model) {
+        LNN* lnn = (LNN*)selflnn_get_lnn();
+        if (lnn) {
+            /* 使用LNN全局模型进行决策 */
+            int lnn_input_size = (int)obs_size < 128 ? 128 : (int)obs_size;
+            float* lnn_input = (float*)safe_calloc(lnn_input_size, sizeof(float));
+            float* lnn_output = (float*)safe_calloc(lnn_input_size, sizeof(float));
+            
+            if (lnn_input && lnn_output) {
+                /* 构造LNN输入：观察值 + 智能体状态特征 */
+                for (size_t i = 0; i < obs_size && i < 120; i++) {
+                    lnn_input[i] = observation[i];
+                }
+                /* 附加智能体内部状态作为上下文 */
+                if (obs_size < 120) {
+                    lnn_input[obs_size + 0] = agent->state.energy_level;
+                    lnn_input[obs_size + 1] = agent->state.success_rate;
+                    lnn_input[obs_size + 2] = agent->state.efficiency;
+                    lnn_input[obs_size + 3] = agent->config.exploration_rate;
+                    lnn_input[obs_size + 4] = (float)agent->collaborator_count / 10.0f;
+                    lnn_input[obs_size + 5] = (float)agent->state.capability_level / 100.0f;
+                    lnn_input[obs_size + 6] = (float)agent->config.learning_rate;
+                    lnn_input[obs_size + 7] = 1.0f; /* 偏置 */
+                }
+                
+                int fwd_ret = lnn_forward(lnn, lnn_input, lnn_output);
+                if (fwd_ret == 0) {
+                    /* LNN输出作为动作值 */
+                    for (size_t i = 0; i < obs_size; i++) {
+                        /* 使用tanh激活将LNN输出映射到合适范围 */
+                        float raw = (i < (size_t)lnn_input_size) ? lnn_output[i] : 0.0f;
+                        action->action_values[i] = tanhf(raw * 0.5f);
+                    }
+                    
+                    /* 根据LNN输出判定动作类型 */
+                    float sum_values = 0.0f;
+                    for (size_t i = 0; i < obs_size; i++) {
+                        sum_values += action->action_values[i] * action->action_values[i];
+                    }
+                    float rms = sqrtf(sum_values / (float)obs_size + 1e-10f);
+                    
+                    if (rms > 0.3f && agent->config.type == AGENT_TYPE_EXPLORER) {
+                        action->action_type = ACTION_TYPE_EXPLORE;
+                        action->confidence = 0.7f + rms * 0.3f;
+                    } else if (rms > 0.5f && agent->config.type == AGENT_TYPE_COLLABORATOR) {
+                        action->action_type = ACTION_TYPE_COLLABORATE;
+                        action->confidence = 0.8f + rms * 0.2f;
+                    } else {
+                        action->action_type = ACTION_TYPE_EXPLOIT;
+                        action->confidence = 0.6f + rms * 0.4f;
+                    }
+                    
+                    action->expected_reward = rms * agent->state.success_rate;
+                    lnn_decided = 1;
+                }
+            }
+            safe_free((void**)&lnn_input);
+            safe_free((void**)&lnn_output);
         }
-        
-        // 2. 能量自适应调节
-        float energy_factor = agent->state.energy_level;
-        if (energy_factor < 0.3f) {
-            // 低能量状态：大幅降低行动幅度以节省能量
-            action_val *= 0.3f + 0.7f * energy_factor;
-        } else if (energy_factor > 0.8f) {
-            // 高能量状态：略微增强行动
-            action_val *= 1.0f + 0.2f * (energy_factor - 0.8f);
-        }
-        
-        // 3. 历史成功率调节
-        float success_factor = agent->state.success_rate;
-        if (success_factor < 0.2f) {
-            // 低成功率：降低冒险倾向
-            action_val *= 0.5f;
-        } else if (success_factor > 0.7f) {
-            // 高成功率：增强信心
-            action_val *= 1.0f + 0.15f * success_factor;
-        }
-        
-        // 4. 探索-利用平衡
-        float explore_bonus = agent->config.exploration_rate * (1.0f - success_factor) * 0.2f;
-        if (obs_val > 0.3f && obs_val < 0.7f) {
-            // 模糊区域：增加探索性
-            action_val += explore_bonus;
-        }
-        
-        action->action_values[i] = action_val;
     }
     
-    // 计算预期奖励（基于历史成功率）
-    action->expected_reward = agent->state.success_rate * agent->state.energy_level;
+    if (!lnn_decided) {
+        /* LNN未就绪时使用确定性推理规则，基于多因素加权评估 */
+        /* 根据智能体类型决定动作类型 */
+        if (agent->config.type == AGENT_TYPE_EXPLORER) {
+            action->action_type = ACTION_TYPE_EXPLORE;
+            action->confidence = 0.7f;
+        } else if (agent->config.type == AGENT_TYPE_EXPLOITER) {
+            action->action_type = ACTION_TYPE_EXPLOIT;
+            action->confidence = 0.9f;
+        } else if (agent->config.type == AGENT_TYPE_COLLABORATOR) {
+            action->action_type = ACTION_TYPE_COLLABORATE;
+            action->confidence = 0.8f;
+        } else {
+            action->action_type = ACTION_TYPE_NONE;
+            action->confidence = 0.5f;
+        }
+        
+        /* 完整决策逻辑：基于多因素加权评估 */
+        for (size_t i = 0; i < obs_size; i++) {
+            float obs_val = observation[i];
+            float action_val = 0.0f;
+            
+            if (obs_val > 0.8f) {
+                action_val = agent->config.exploration_rate * (0.8f + 0.2f * obs_val);
+            } else if (obs_val > 0.5f) {
+                action_val = agent->config.exploration_rate * (0.3f + 0.5f * obs_val);
+            } else if (obs_val > 0.2f) {
+                action_val = agent->config.exploration_rate * (0.1f * obs_val - 0.05f);
+            } else {
+                action_val = -0.15f * (1.0f - obs_val);
+            }
+            
+            float energy_factor = agent->state.energy_level;
+            if (energy_factor < 0.3f) {
+                action_val *= 0.3f + 0.7f * energy_factor;
+            } else if (energy_factor > 0.8f) {
+                action_val *= 1.0f + 0.2f * (energy_factor - 0.8f);
+            }
+            
+            float success_factor = agent->state.success_rate;
+            if (success_factor < 0.2f) {
+                action_val *= 0.5f;
+            } else if (success_factor > 0.7f) {
+                action_val *= 1.0f + 0.15f * success_factor;
+            }
+            
+            float explore_bonus = agent->config.exploration_rate * (1.0f - success_factor) * 0.2f;
+            if (obs_val > 0.3f && obs_val < 0.7f) {
+                action_val += explore_bonus;
+            }
+            
+            action->action_values[i] = action_val;
+        }
+        
+        action->expected_reward = agent->state.success_rate * agent->state.energy_level;
+    }
     
-    // 设置目标（如果需要协作）
     if (agent->collaborator_count > 0 && action->action_type == ACTION_TYPE_COLLABORATE) {
-        // 选择合作者中权重最高的
         float max_weight = 0.0f;
         int best_collaborator = -1;
         for (int i = 0; i < agent->collaborator_count; i++) {
@@ -755,9 +802,7 @@ AgentAction* agent_decide(Agent* agent, const float* observation, size_t obs_siz
         action->target_agent_id = -1;
     }
     
-    action->task_id = -1;  // 暂时不关联具体任务
-    
-    // 更新决策统计
+    action->task_id = -1;
     agent->decisions_made++;
     
     return action;

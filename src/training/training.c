@@ -600,6 +600,7 @@ typedef struct Trainer {
     LearningRateScheduler* scheduler; /**< 学习率调度器 */
     TrainingState state;           /**< 训练状态 */
     TrainingHistory history;       /**< 训练历史 */
+    char current_training_phase[32]; /**< 当前训练阶段名称（如"预训练"、"微调"、"持续训练"等） */
     
     // 训练缓冲区
     float* gradients;              /**< 梯度缓冲区 */
@@ -1126,6 +1127,19 @@ TrainingState* trainer_get_state(Trainer* trainer) {
     TrainingState* result = &trainer->state;
     TRAINER_UNLOCK(trainer);
     return result;
+}
+
+/**
+ * @brief 设置训练器当前训练阶段名称
+ */
+void trainer_set_current_training_phase(Trainer* trainer, const char* phase_name) {
+    if (!trainer || !phase_name) {
+        return;
+    }
+    TRAINER_LOCK(trainer);
+    memset(trainer->current_training_phase, 0, sizeof(trainer->current_training_phase));
+    strncpy(trainer->current_training_phase, phase_name, sizeof(trainer->current_training_phase) - 1);
+    TRAINER_UNLOCK(trainer);
 }
 
 /**
@@ -4016,6 +4030,10 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
     trainer->state.learning_rate = config->learning_rate;
     trainer->state.best_loss = FLT_MAX;
     
+    // 初始化当前训练阶段为默认值
+    memset(trainer->current_training_phase, 0, sizeof(trainer->current_training_phase));
+    strncpy(trainer->current_training_phase, "标准训练", sizeof(trainer->current_training_phase) - 1);
+    
     // 初始化训练历史
     trainer->history.size = 0;
     trainer->history.capacity = config->epochs;
@@ -4026,10 +4044,11 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
     trainer->history.val_losses = (float*)safe_malloc(capacity * sizeof(float));
     trainer->history.val_accuracies = (float*)safe_malloc(capacity * sizeof(float));
     trainer->history.learning_rates = (float*)safe_malloc(capacity * sizeof(float));
+    trainer->history.train_modes = (char**)safe_calloc(capacity, sizeof(char*));
     
     if (!trainer->history.train_losses || !trainer->history.train_accuracies ||
         !trainer->history.val_losses || !trainer->history.val_accuracies ||
-        !trainer->history.learning_rates) {
+        !trainer->history.learning_rates || !trainer->history.train_modes) {
         trainer_free(trainer);
         return NULL;
     }
@@ -4613,6 +4632,12 @@ void trainer_free(Trainer* trainer) {
     safe_free((void**)&trainer->history.val_losses);
     safe_free((void**)&trainer->history.val_accuracies);
     safe_free((void**)&trainer->history.learning_rates);
+    if (trainer->history.train_modes) {
+        for (size_t i = 0; i < trainer->history.size; i++) {
+            safe_free((void**)&trainer->history.train_modes[i]);
+        }
+        safe_free((void**)&trainer->history.train_modes);
+    }
     
     // 释放梯度缓冲区
     safe_free((void**)&trainer->gradients);
@@ -5878,6 +5903,27 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                 if (trainer->network && trainer->network->cfc_network) {
                     cfc_sync_shared_to_cells(trainer->network->cfc_network);
                 }
+
+                /* P0-BPTT修复: 统一cell级参数更新 —— 使用与主优化器相同的
+                 * Adam超参数更新所有cell级参数(W_gh/W_ah/W_gx/gate_bias/τ)。
+                 * 解决双层参数更新分裂问题：cell级参数不再使用原始SGD，
+                 * 而是使用与主网络权重一致的Adam自适应学习率。
+                 * 
+                 * 全局步数使用optimizer->t（已在optimizer_update中自增）。 */
+                if (trainer->network && trainer->network->cfc_network) {
+                    cfc_apply_cell_gradients_adam(
+                        trainer->network->cfc_network,
+                        trainer->state.learning_rate,
+                        trainer->optimizer.beta1 > 0.0f ? trainer->optimizer.beta1 : 0.9f,
+                        trainer->optimizer.beta2 > 0.0f ? trainer->optimizer.beta2 : 0.999f,
+                        trainer->optimizer.epsilon > 0.0f ? trainer->optimizer.epsilon : 1e-8f,
+                        trainer->optimizer.t);
+                    /* P0-BPTT审计修复: Adam消费梯度后立即清零cell梯度。
+                     * cfc_cell_backward使用+=累积模式，梯度不被清零会导致
+                     * 跨批次泄漏：批次N的cell梯度=G₀+G₁+...+G_N → 指数增长。
+                     * 此处清零确保每批次从零开始累积。 */
+                    cfc_zero_cell_gradients(trainer->network->cfc_network);
+                }
                 
                 // 更新学习率
                 size_t global_step = epoch * trainer->state.total_batches + batch_num;
@@ -6092,6 +6138,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             trainer->history.val_losses[idx] = val_loss;
             trainer->history.val_accuracies[idx] = val_accuracy;
             trainer->history.learning_rates[idx] = trainer->state.learning_rate;
+            trainer->history.train_modes[idx] = strdup(trainer->current_training_phase);
             trainer->history.size++;
         }
         
@@ -8384,6 +8431,14 @@ int training_history_save(const TrainingHistory* history, const char* filename) 
         fwrite(history->val_losses, sizeof(float), history->size, file);
         fwrite(history->val_accuracies, sizeof(float), history->size, file);
         fwrite(history->learning_rates, sizeof(float), history->size, file);
+        /* 保存训练模式名称：每个字符串长度（uint16_t）+ 字符串内容 */
+        for (size_t i = 0; i < history->size; i++) {
+            uint16_t mode_len = history->train_modes[i] ? (uint16_t)strlen(history->train_modes[i]) : 0;
+            fwrite(&mode_len, sizeof(uint16_t), 1, file);
+            if (mode_len > 0) {
+                fwrite(history->train_modes[i], 1, mode_len, file);
+            }
+        }
     }
     
     fclose(file);
@@ -8426,9 +8481,11 @@ TrainingHistory* training_history_load(const char* filename) {
     history->val_losses = (float*)safe_malloc(size * sizeof(float));
     history->val_accuracies = (float*)safe_malloc(size * sizeof(float));
     history->learning_rates = (float*)safe_malloc(size * sizeof(float));
+    history->train_modes = (char**)safe_calloc(size, sizeof(char*));
     
     if (!history->train_losses || !history->train_accuracies ||
-        !history->val_losses || !history->val_accuracies || !history->learning_rates) {
+        !history->val_losses || !history->val_accuracies || !history->learning_rates ||
+        !history->train_modes) {
         training_history_free(history);
         fclose(file);
         return NULL;
@@ -8444,6 +8501,35 @@ TrainingHistory* training_history_load(const char* filename) {
             training_history_free(history);
             fclose(file);
             return NULL;
+        }
+        /* 读取训练模式名称 */
+        for (size_t i = 0; i < size; i++) {
+            uint16_t mode_len = 0;
+            if (fread(&mode_len, sizeof(uint16_t), 1, file) != 1) {
+                training_history_free(history);
+                fclose(file);
+                return NULL;
+            }
+            if (mode_len > 0 && mode_len < 256) {
+                history->train_modes[i] = (char*)safe_malloc(mode_len + 1);
+                if (!history->train_modes[i]) {
+                    training_history_free(history);
+                    fclose(file);
+                    return NULL;
+                }
+                if (fread(history->train_modes[i], 1, mode_len, file) != mode_len) {
+                    training_history_free(history);
+                    fclose(file);
+                    return NULL;
+                }
+                history->train_modes[i][mode_len] = '\0';
+            } else if (mode_len == 0) {
+                history->train_modes[i] = strdup("未知");
+            } else {
+                training_history_free(history);
+                fclose(file);
+                return NULL;
+            }
         }
     }
     
@@ -8464,6 +8550,12 @@ void training_history_free(TrainingHistory* history) {
     safe_free((void**)&history->val_losses);
     safe_free((void**)&history->val_accuracies);
     safe_free((void**)&history->learning_rates);
+    if (history->train_modes) {
+        for (size_t i = 0; i < history->size; i++) {
+            safe_free((void**)&history->train_modes[i]);
+        }
+        safe_free((void**)&history->train_modes);
+    }
     
     safe_free((void**)&history);
 }
@@ -12627,6 +12719,7 @@ int trainer_train_from_memory(Trainer* trainer, MemorySystem* mem_system,
             trainer->history.train_losses[idx] = avg_loss;
             trainer->history.train_accuracies[idx] = avg_accuracy;
             trainer->history.learning_rates[idx] = trainer->state.learning_rate;
+            trainer->history.train_modes[idx] = strdup(trainer->current_training_phase);
             trainer->history.size++;
         }
 

@@ -134,6 +134,7 @@ class DeviceManager {
             vadSilenceFrames: 0,
             vadSpeechFrames: 10,
             vadReleaseFrames: 20,
+            lastAudioBlob: null,
             onVuUpdate: null,
             onVadChange: null
         };

@@ -37,11 +37,11 @@ self-Z/
 │   ├── com.selflnn.slnn.plist.example
 │   └── version.h.in
 ├── scripts/                    # 构建/部署/测试脚本
-│   ├── build.bat / build.sh
-│   ├── quick_start.bat / quick_start.sh
-│   ├── run_tests.bat / run_tests.sh
-│   ├── deploy.bat / deploy.sh
-│   └── check_code_quality.bat / check_code_quality.sh
+│   ├── build.bat / build.sh          # 构建脚本
+│   ├── run_tests.bat / run_tests.sh  # 测试运行脚本
+│   ├── check_code_quality.bat        # 代码质量检查
+│   ├── performance_analysis.bat      # 性能分析
+│   └── ...
 ├── include/selflnn/           # 公共头文件
 │   ├── core/                  # 核心模块（CfC单元、ODE求解器等）
 │   ├── multimodal/            # 多模态处理
@@ -69,15 +69,11 @@ self-Z/
 │   ├── gpu/gpu.c              # GPU调度层
 │   └── ...
 ├── frontend/                  # Web前端
-│   ├── index.html             # 主控制台
-│   ├── training-center.html
-│   ├── simulation-control.html
-│   ├── teach.html
-│   ├── voice-control.html
-│   ├── usage-logs.html
+│   ├── index.html             # 主控制台（SPA单页面应用）
 │   ├── css/
 │   └── js/
-│       ├── api-service.js     # API服务（240个方法）
+│       ├── api-service.js     # API服务
+│       └── ... (共19个JS文件，含Worker)
 │       └── main.js
 ├── tests/                     # 测试代码
 │   ├── core/test_core.c       # 核心测试（22项）

@@ -192,17 +192,20 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
         return NULL;
     }
     
-    /* 发送 WebSocket 升级请求 */
+    /* 发送 WebSocket 升级请求 - 每次连接生成新随机Key */
+    char ws_key_b64[32];
+    snprintf(ws_key_b64, sizeof(ws_key_b64), "LLNN-AGI-KEY-%08x", 
+             (uint32_t)(time(NULL) ^ (uintptr_t)bridge));
     char upgrade_request[2048];
     snprintf(upgrade_request, sizeof(upgrade_request),
         "GET / HTTP/1.1\r\n"
         "Host: %s:%d\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Key: %s\r\n"
         "Sec-WebSocket-Version: 13\r\n"
         "\r\n",
-        bridge->config.bridge_host, bridge->config.bridge_port);
+        bridge->config.bridge_host, bridge->config.bridge_port, ws_key_b64);
     
 #ifdef _WIN32
     send(bridge->socket_fd, upgrade_request, (int)strlen(upgrade_request), 0);

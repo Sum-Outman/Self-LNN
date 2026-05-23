@@ -204,6 +204,7 @@ typedef struct {
     float* val_losses;                /**< 验证损失历史 */
     float* val_accuracies;            /**< 验证准确率历史 */
     float* learning_rates;            /**< 学习率历史 */
+    char** train_modes;               /**< 训练模式名称历史（如"预训练"、"微调"、"持续训练"等） */
     
     size_t size;                      /**< 历史记录大小 */
     size_t capacity;                  /**< 历史记录容量 */
@@ -399,6 +400,17 @@ int trainer_predict(Trainer* trainer, const float* inputs, float* outputs,
  * @return TrainingHistory* 训练历史指针
  */
 TrainingHistory* trainer_get_history(Trainer* trainer);
+
+/**
+ * @brief 设置训练器当前训练阶段名称
+ * 
+ * 在每次训练前调用，指定当前训练阶段（如"预训练"、"微调"、"持续训练"等），
+ * 该阶段名称会被记录到TrainingHistory的train_modes字段中。
+ * 
+ * @param trainer 训练器
+ * @param phase_name 阶段名称（长度不超过31字符）
+ */
+void trainer_set_current_training_phase(Trainer* trainer, const char* phase_name);
 
 /**
  * @brief 保存训练历史到文件

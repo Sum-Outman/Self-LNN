@@ -23,6 +23,11 @@ add_library(selflnn_robot
     ros_bridge.c
     pybullet_bridge.c
     gazebo_bridge.c
+    ros_node.c
+    ros_robot_controller.c
+    ros_gazebo_bridge.c
+    hardware_resource_manager.c
+    swarm_coordination.c
 )
 
 target_compile_definitions(selflnn_robot PRIVATE WIN32_LEAN_AND_MEAN)

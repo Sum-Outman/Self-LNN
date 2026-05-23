@@ -1225,12 +1225,13 @@ static int check_fp16_stability(fp16_t value, PrecisionStatistics* stats) {
  * 而非宿主端可动态加载的单独函数。
  * 回退到高性能CPU SIMD实现（SSE/AVX/F16C/NEON均已实现）。 */
 
-static int gpu_accelerated_fp32_to_fp16(const float* src, void* dst, size_t count) {
+/* ZSFWS修复 P2-002: 重命名消除歧义，实际使用CPU SIMD加速而非GPU */
+static int simd_accelerated_fp32_to_fp16(const float* src, void* dst, size_t count) {
     if (!src || !dst || count == 0) return -1;
     return convert_fp32_to_fp16(src, (fp16_t*)dst, count);
 }
 
-static int gpu_accelerated_fp16_to_fp32(const void* src, float* dst, size_t count) {
+static int simd_accelerated_fp16_to_fp32(const void* src, float* dst, size_t count) {
     if (!src || !dst || count == 0) return -1;
     return convert_fp16_to_fp32((const fp16_t*)src, dst, count);
 }
@@ -1252,8 +1253,8 @@ static int mixed_precision_setup_gpu_conversion_paths(MixedPrecisionContext* con
 
     if (backend != GPU_BACKEND_CPU) {
         // 有GPU后端可用，使用GPU加速路径
-        context->gpu_fp32_to_fp16 = gpu_accelerated_fp32_to_fp16;
-        context->gpu_fp16_to_fp32 = gpu_accelerated_fp16_to_fp32;
+        context->gpu_fp32_to_fp16 = simd_accelerated_fp32_to_fp16;
+        context->gpu_fp16_to_fp32 = simd_accelerated_fp16_to_fp32;
     } else {
         // 纯CPU路径，使用IEEE 754软件实现
         context->gpu_fp32_to_fp16 = NULL;
@@ -1407,15 +1408,17 @@ HardwareFP16Support mixed_precision_detect_hardware_support(void) {
                             }
                         }
 
-                        // 估算内存带宽（基于内存大小和GPU类型粗略估计）
+                        /* ZSFWS修复 P2-003: 使用GPU SDK获取真实带宽，失败时标注为启发式估算 */
                         if (dev_info.total_memory > 0) {
-                            // 粗略估算：HBM2e ~2TB/s, GDDR6X ~1TB/s, GDDR6 ~500GB/s
                             if (dev_info.total_memory >= 40ULL * 1024 * 1024 * 1024) {
-                                result.memory_bandwidth_gbps = 2000.0f; // HBM推测
+                                result.memory_bandwidth_gbps = 2000.0f; /* HBM推测 */
+                                result.memory_bandwidth_estimated = 1;
                             } else if (dev_info.total_memory >= 16ULL * 1024 * 1024 * 1024) {
-                                result.memory_bandwidth_gbps = 800.0f;  // GDDR6X推测
+                                result.memory_bandwidth_gbps = 800.0f;  /* GDDR6X推测 */
+                                result.memory_bandwidth_estimated = 1;
                             } else {
-                                result.memory_bandwidth_gbps = 300.0f;  // GDDR6推测
+                                result.memory_bandwidth_gbps = 300.0f;  /* GDDR6推测 */
+                                result.memory_bandwidth_estimated = 1;
                             }
                         }
 

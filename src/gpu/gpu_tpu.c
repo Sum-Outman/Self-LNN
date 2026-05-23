@@ -561,36 +561,11 @@ static float tpu_xavier_random(uint32_t* seed) {
  */
 static int npu_tpu_cpu_infer_fallback(NpuModel* model, const float** inputs,
                                        float** outputs, int batch_size) {
-    if (!model || !inputs || !outputs || batch_size <= 0) return -1;
-
-    /* 从模型获取实际维度，不再硬编码1024 */
-    int in_dim = model->input_sizes[0] > 0 ? (int)(model->input_sizes[0] / sizeof(float)) : 1024;
-    int out_dim = model->output_sizes[0] > 0 ? (int)(model->output_sizes[0] / sizeof(float)) : 1024;
-
-    /* Xavier均匀分布初始化权重: w ~ U(-limit, limit), limit = sqrt(6/(n_in+n_out)) */
-    float xavier_limit = sqrtf(6.0f / (float)(in_dim + out_dim));
-
-    /* 基于模型指针和维度构造确定性种子基 */
-    uint32_t seed_base = (uint32_t)((uintptr_t)model) ^
-                         (uint32_t)(in_dim * 0x9E3779B9) ^
-                         (uint32_t)(out_dim * 0x85EBCA77);
-
-    for (int b = 0; b < batch_size; b++) {
-        if (!inputs[b] || !outputs[b]) continue;
-        for (int o = 0; o < out_dim; o++) {
-            float sum = 0.0f;
-            for (int i = 0; i < in_dim; i++) {
-                /* 每个突触(i,o)使用确定性种子生成Xavier初始化权重 */
-                uint32_t seed = seed_base ^ (uint32_t)(i * 0x6C078965 + o * 0x5D588B65);
-                float r = tpu_xavier_random(&seed);
-                float w = r * xavier_limit;  /* 范围: [-limit, +limit] */
-                sum += inputs[b][i] * w;
-            }
-            /* ReLU激活: 与原始实现保持一致 */
-            outputs[b][o] = sum > 0.0f ? sum : 0.0f;
-        }
-    }
-    return 0;
+    (void)model; (void)inputs; (void)outputs; (void)batch_size;
+    /* ZSFWS修复 P0-004: 移除Xavier随机权重推理假数据路径。
+     * 随机权重推理产生无意义结果，违反"禁止虚假数据"原则。
+     * TPU推理需要真实训练好的模型权重，未加载模型时返回错误。 */
+    return -1;
 }
 
 static int tpu_npu_infer(NpuModel* model, const float** inputs, float** outputs, int batch_size) {
@@ -731,13 +706,14 @@ const NpuBackendInterface* tpu_get_npu_interface(void) { return &g_tpu_npu_iface
  * 不依赖任何外部CPU SIMD后端函数，所有回退路径均为本地纯C实现
  * =================================================================== */
 
-/* F-009/F-010修复：使用npu_common共享实现，消除重复代码 */
+/* ZSFWS修复 P0-003: 添加context验证+SIMD加速 */
 int tpu_forward_dense(GpuContext* context, const float* input,
                       const float* weights, const float* bias, float* output,
                       size_t batch_size, size_t input_size, size_t output_size,
                       GpuActivationType act_type, float alpha) {
+    if (!context || !context->is_initialized) return -1;
     /* Google TPU硬件可用时优先使用TPU计算 */
-    if (g_tpu_state.tpu_available && context && context->backend_data) {
+    if (g_tpu_state.tpu_available && context->backend_data) {
         if (g_tpu.tpuExecute) {
             void* in_ptr = (void*)input;
             void* w_ptr = (void*)weights;
@@ -748,16 +724,16 @@ int tpu_forward_dense(GpuContext* context, const float* input,
             if (ret == 0) return 0;
         }
     }
-    (void)context;
-    return npu_common_cpu_forward_dense(input, weights, bias, output,
-                                         batch_size, input_size, output_size,
-                                         act_type, alpha);
+    return npu_common_simd_forward_dense(input, weights, bias, output,
+                                          batch_size, input_size, output_size,
+                                          act_type, alpha);
 }
 
 int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
                       float* c, size_t m, size_t n, size_t k,
                       int transpose_a, int transpose_b) {
-    if (g_tpu_state.tpu_available && context && context->backend_data) {
+    if (!context || !context->is_initialized) return -1;
+    if (g_tpu_state.tpu_available && context->backend_data) {
         if (g_tpu.tpuExecute) {
             void* aptr = (void*)a; void* bptr = (void*)b; void* cptr = (void*)c;
             void* ptrs[3] = {aptr, bptr, cptr};
@@ -765,15 +741,14 @@ int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
             if (ret == 0) return 0;
         }
     }
-    (void)context;
-    return npu_common_cpu_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
+    return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 
 int tpu_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
                       const float* b, const float* tau, float* h_out,
                       float dt, int dim) {
-    (void)context;
-    return npu_common_cpu_cfc_step(h_in, W, b, tau, h_out, dt, dim);
+    if (!context || !context->is_initialized) return -1;
+    return npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
 }
 
 const GpuBackendInterface* tpu_get_backend_interface(void) {

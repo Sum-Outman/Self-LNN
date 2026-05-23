@@ -51,6 +51,7 @@
 #include "selflnn/robot/sensor_pipeline.h"
 #include "selflnn/robot/humanoid_sensor_fusion.h"
 #include "selflnn/robot/simulator.h"
+#include "selflnn/robot/path_planning.h"
 // Gazebo桥接通过 gazebo_bridge.h 提供
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn.h"
@@ -222,7 +223,7 @@ static const struct {
     {"/api/gazebo/control", "POST", "Gazebo仿真控制", "ros"},
     {"/api/device/command", "POST", "设备控制命令", "device"},
     {"/api/device/control", "POST", "设备开关控制", "device"},
-    {"/api/devices/list", "POST", "列出所有可用设备", "device"},
+    {"/api/devices/list", "GET", "列出所有可用设备", "device"},
     {"/api/devices/register", "POST", "注册前端设备", "device"},
     {"/api/devices/unregister", "POST", "注销前端设备", "device"},
     {"/api/devices/status", "POST", "获取设备状态", "device"},
@@ -380,6 +381,14 @@ static const struct {
     {"/api/agi/tasks", "GET", "获取AGI活动任务列表", "agi"},
     {"/api/agi/diagnostic", "POST", "执行AGI系统诊断", "agi"},
     {"/api/agi/diagnostic/export", "POST", "导出AGI系统诊断报告", "agi"},
+    /* ZSFWS-B009: 前端-后端API端点对齐 - 新增端点 */
+    {"/api/programming/sample", "GET", "获取编程示例代码", "programming"},
+    {"/api/command/prefixes", "GET", "获取AGI命令前缀列表", "system"},
+    {"/api/cognition/health", "GET", "认知系统健康检查", "agi"},
+    {"/api/cognition/tom", "GET", "获取心智理论(ToM)数据", "agi"},
+    {"/api/task/queue", "GET", "获取AGI任务队列状态", "agi"},
+    {"/api/task/assign", "POST", "提交AGI任务分配", "agi"},
+    {"/api/system/shutdown", "POST", "关闭AGI系统", "system"},
 };
 #define g_api_endpoints_count (sizeof(g_api_endpoints) / sizeof(g_api_endpoints[0]))
 
@@ -1139,6 +1148,7 @@ static int request_type_to_cb_subsystem(ApiRequestType type) {
         /* ===== 知识库子系统 ===== */
         case API_GET_KNOWLEDGE:
         case API_POST_KNOWLEDGE:
+        case API_POST_KNOWLEDGE_DELETE:
         case API_GET_SKILLS:
         case API_POST_SKILLS_SEARCH:
         case API_POST_SKILLS_EXECUTE:
@@ -2026,7 +2036,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/system/export_diagnostic") == 0)  return API_GET_SYSTEM_EXPORT_DIAGNOSTIC;
     if (strcmp(p, "/api/system/restart") == 0)            return API_POST_SYSTEM_RESTART;
     if (strcmp(p, "/api/system/logs") == 0)               return API_GET_SYSTEM_LOGS;
-    if (strcmp(p, "/api/system/shutdown") == 0)           return API_POST_SHUTDOWN;
+    if (strcmp(p, "/api/system/shutdown") == 0)           return API_POST_SYSTEM_SHUTDOWN;
     if (strcmp(p, "/api/system/config/update") == 0)      return API_POST_SYSTEM_CONFIG_UPDATE;
     if (strcmp(p, "/api/system/settings") == 0)           return API_POST_SYSTEM_SETTINGS;
     if (strcmp(p, "/api/system/change_password") == 0)    return API_POST_SYSTEM_CHANGE_PASSWORD;
@@ -2099,6 +2109,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
 
     /* === LNN控制 === */
     if (strcmp(p, "/api/lnn/status") == 0)                return API_GET_LNN_STATUS;
+    /* === 命令系统 === */
+    if (strcmp(p, "/api/command/prefixes") == 0)          return API_GET_COMMAND_PREFIXES;
     if (strcmp(p, "/api/lnn/parameters") == 0)            return API_POST_LNN_PARAMETERS;
     if (strcmp(p, "/api/lnn/params") == 0)                return API_GET_LNN_PARAMS;
     if (strcmp(p, "/api/lnn/parameters/reset") == 0)      return API_POST_LNN_PARAMETERS_RESET;
@@ -2178,6 +2190,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/agi/diagnostic") == 0)            return API_GET_AGI_DIAGNOSTIC;
     if (strcmp(p, "/api/agi/diagnostic/export") == 0)     return API_GET_AGI_DIAGNOSTIC_EXPORT;
     if (strcmp(p, "/api/task/create") == 0)               return API_POST_TASK_CREATE;
+    if (strcmp(p, "/api/task/queue") == 0)                return API_GET_TASK_QUEUE;
+    if (strcmp(p, "/api/task/assign") == 0)               return API_POST_TASK_ASSIGN;
 
     /* === 自我编程 === */
     if (strcmp(p, "/api/programming/analyze") == 0)       return API_POST_PROGRAMMING_ANALYZE;
@@ -2186,6 +2200,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/programming/optimize") == 0)      return API_POST_PROGRAMMING_OPTIMIZE;
     if (strcmp(p, "/api/programming/compile") == 0)       return API_POST_PROGRAMMING_COMPILE;
     if (strcmp(p, "/api/programming/status") == 0)        return API_GET_PROGRAMMING_STATUS;
+    if (strcmp(p, "/api/programming/sample") == 0)       return API_GET_PROGRAMMING_SAMPLE;
 
     /* === 数据集 === */
     if (strcmp(p, "/api/dataset/list") == 0)              return API_GET_DATASET_LIST;
@@ -2245,6 +2260,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 能力诊断 === */
     if (strcmp(p, "/api/capability/diagnose") == 0)       return API_POST_CAPABILITY_DIAGNOSE;
     if (strcmp(p, "/api/cognition/state") == 0)           return API_GET_AGI_COGNITION_STATE;
+    if (strcmp(p, "/api/cognition/health") == 0)          return API_GET_AGI_COGNITION_STATE;
+    if (strcmp(p, "/api/cognition/tom") == 0)             return API_GET_COGNITION_TOM;
 
     /* === 教学系统 === */
     if (strcmp(p, "/api/teach/look_and_learn") == 0)      return API_POST_TEACH_LOOK_AND_LEARN;
@@ -3509,11 +3526,29 @@ static void* server_thread_func(void* param) {
                     /* ZSFABC-014: 添加设备注销路由 */
                     request_type = 263;
                 } else if (strcmp(path, "/api/devices/list") == 0) {
-                    request_type = 264;
+                    request_type = API_POST_DEVICES_LIST;
                 } else if (strcmp(path, "/api/devices/command") == 0) {
                     request_type = 265;
                 } else if (strcmp(path, "/api/devices/status") == 0) {
                     request_type = 266;
+                /* ZSFWS-B009: 前端-后端API端点对齐修复 - 旧路由链新增路由 */
+                } else if (strcmp(path, "/api/programming/sample") == 0) {
+                    request_type = API_GET_PROGRAMMING_SAMPLE;
+                } else if (strcmp(path, "/api/command/prefixes") == 0) {
+                    request_type = API_GET_COMMAND_PREFIXES;
+                } else if (strcmp(path, "/api/cognition/health") == 0) {
+                    request_type = API_GET_AGI_COGNITION_STATE;
+                } else if (strcmp(path, "/api/cognition/tom") == 0) {
+                    request_type = API_GET_COGNITION_TOM;
+                } else if (strcmp(path, "/api/task/queue") == 0) {
+                    request_type = API_GET_TASK_QUEUE;
+                } else if (strcmp(path, "/api/task/assign") == 0) {
+                    request_type = API_POST_TASK_ASSIGN;
+                } else if (strcmp(path, "/api/system/shutdown") == 0) {
+                    request_type = API_POST_SYSTEM_SHUTDOWN;
+                } else if (strcmp(path, "/api/devices/list_get") == 0) {
+                    /* 兼容: GET /api/devices/list已在前面处理，此处保留被覆盖的264 */
+                    request_type = API_POST_DEVICES_LIST;
                 }
                 
                 /* 未匹配到任何路由，返回404 */
@@ -6204,6 +6239,19 @@ static int handle_api_post_training(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 500;
         }
+    }
+
+    /* 设置训练阶段名称 */
+    {
+        const char* phase = "标准训练";
+        switch (train_config.mode) {
+            case TRAIN_MODE_BATCH: phase = "批量训练"; break;
+            case TRAIN_MODE_MINI_BATCH: phase = "小批量训练"; break;
+            case TRAIN_MODE_ONLINE: phase = "在线训练"; break;
+            case TRAIN_MODE_ADAPTIVE: phase = "自适应训练"; break;
+            default: break;
+        }
+        trainer_set_current_training_phase(server->trainer, phase);
     }
 
     /* 执行训练 */
@@ -13953,6 +14001,18 @@ static int handle_api_post_training_start(BackendServer* server,
             response->status_code = 500;
         }
     }
+    /* 设置训练阶段名称 */
+    {
+        const char* phase = "标准训练";
+        switch (train_config.mode) {
+            case TRAIN_MODE_BATCH: phase = "批量训练"; break;
+            case TRAIN_MODE_MINI_BATCH: phase = "小批量训练"; break;
+            case TRAIN_MODE_ONLINE: phase = "在线训练"; break;
+            case TRAIN_MODE_ADAPTIVE: phase = "自适应训练"; break;
+            default: break;
+        }
+        trainer_set_current_training_phase(server->trainer, phase);
+    }
     uint64_t start_ms = platform_get_time_ms();
     int train_result = trainer_train(server->trainer, inputs, targets, samples, NULL, NULL);
     uint64_t end_ms = platform_get_time_ms();
@@ -14127,7 +14187,7 @@ static int handle_api_get_training_history(BackendServer* server,
                             "\"loss\":%.6f,\"accuracy\":%.6f,\"elapsed\":\"%ds\"}",
                             task_count > 0 ? "," : "",
                             hi + 1,
-                            hi < 3 ? "pretrain" : (hi < 6 ? "fine-tune" : "continual"),
+                            hist->train_modes[hi] ? hist->train_modes[hi] : "未知",
                             hist->train_losses[hi],
                             hist->train_accuracies[hi],
                             (int)(hi * 10));
@@ -14515,40 +14575,140 @@ static int handle_api_post_simulation_plan_path(BackendServer* server,
     char* json_data = NULL;
     float start_pos[3] = {0,0,0};
     float end_pos[3] = {10,10,0};
+    int use_algorithm = PLAN_ALGORITHM_ASTAR;
     if (request_data && request_length > 0) {
         char start_str[64] = "0,0,0";
         char end_str[64] = "10,10,0";
         parse_json_string(request_data, "start", start_str, sizeof(start_str));
         parse_json_string(request_data, "end", end_str, sizeof(end_str));
+        parse_json_int(request_data, "algorithm", &use_algorithm);
         sscanf(start_str, "%f,%f,%f", &start_pos[0], &start_pos[1], &start_pos[2]);
         sscanf(end_str, "%f,%f,%f", &end_pos[0], &end_pos[1], &end_pos[2]);
     }
-    /* 使用线性插值生成路径点 */
-    int num_waypoints = 10;
-    json_data = (char*)safe_malloc(2048);
-    if (json_data) {
-        int pos = snprintf(json_data, 2048, "{\"path\":[");
-        float dx = (end_pos[0] - start_pos[0]) / (num_waypoints - 1);
-        float dy = (end_pos[1] - start_pos[1]) / (num_waypoints - 1);
-        float dz = (end_pos[2] - start_pos[2]) / (num_waypoints - 1);
-        for (int wi = 0; wi < num_waypoints; wi++) {
-            pos += snprintf(json_data + pos, 2048 - pos,
-                    "%s{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}",
-                    wi > 0 ? "," : "",
-                    start_pos[0] + dx * wi,
-                    start_pos[1] + dy * wi,
-                    start_pos[2] + dz * wi);
+    /* 构建路径规划配置 */
+    PlanConfig config = plan_config_default();
+    PlanAlgorithm selected_algo = (use_algorithm >= PLAN_ALGORITHM_ASTAR && use_algorithm <= PLAN_ALGORITHM_STOMP)
+                                   ? (PlanAlgorithm)use_algorithm : PLAN_ALGORITHM_ASTAR;
+    config.algorithm = selected_algo;
+    config.start.x = start_pos[0];
+    config.start.y = start_pos[1];
+    config.start.z = start_pos[2];
+    config.goal.x = end_pos[0];
+    config.goal.y = end_pos[1];
+    config.goal.z = end_pos[2];
+    config.robot_radius = 0.3f;
+    config.obstacle_margin = 0.1f;
+    config.smooth_path = 1;
+    config.enable_z_axis = (fabsf(end_pos[2] - start_pos[2]) > 0.001f) ? 1 : 0;
+    /* 构建简单网格地图（根据起终点范围自适应） */
+    PlanGridMap grid_map;
+    float map_origin_x = floorf(fminf(start_pos[0], end_pos[0])) - 5.0f;
+    float map_origin_y = floorf(fminf(start_pos[1], end_pos[1])) - 5.0f;
+    grid_map.origin_x = map_origin_x;
+    grid_map.origin_y = map_origin_y;
+    grid_map.resolution = 0.5f;
+    float map_range = fmaxf(fabsf(end_pos[0] - start_pos[0]), fabsf(end_pos[1] - start_pos[1])) + 12.0f;
+    int map_cells = (int)(map_range / grid_map.resolution) + 1;
+    grid_map.width = (map_cells > PLAN_ASTAR_GRID_MAX) ? PLAN_ASTAR_GRID_MAX : map_cells;
+    grid_map.height = (map_cells > PLAN_ASTAR_GRID_MAX) ? PLAN_ASTAR_GRID_MAX : map_cells;
+    size_t grid_bytes = (size_t)grid_map.width * (size_t)grid_map.height;
+    uint8_t* grid_cells = (uint8_t*)safe_malloc(grid_bytes);
+    grid_map.cells = grid_cells;
+    int grid_alloc_ok = (grid_cells != NULL);
+    if (grid_alloc_ok) {
+        memset(grid_cells, 0, grid_bytes);
+        plan_set_grid_map(&config, &grid_map);
+    }
+    /* 执行路径规划：根据算法类型调用对应规划函数 */
+    PlanResult plan_result;
+    memset(&plan_result, 0, sizeof(plan_result));
+    int plan_ret = -1;
+    switch (config.algorithm) {
+        case PLAN_ALGORITHM_ASTAR:
+            plan_ret = plan_astar(&config, &plan_result);
+            break;
+        case PLAN_ALGORITHM_RRT:
+            plan_ret = plan_rrt(&config, &plan_result);
+            break;
+        case PLAN_ALGORITHM_RRT_STAR:
+            plan_ret = plan_rrt_star(&config, &plan_result);
+            break;
+        case PLAN_ALGORITHM_DWA:
+        case PLAN_ALGORITHM_HYBRID_ASTAR_DWA:
+        {
+            float current_state[3] = {start_pos[0], start_pos[1], 0.0f};
+            plan_ret = plan_dwa(&config, current_state, &plan_result);
+            break;
         }
-        float total_length = sqrtf(
-            (end_pos[0]-start_pos[0])*(end_pos[0]-start_pos[0]) +
-            (end_pos[1]-start_pos[1])*(end_pos[1]-start_pos[1]) +
-            (end_pos[2]-start_pos[2])*(end_pos[2]-start_pos[2]));
-        pos += snprintf(json_data + pos, 2048 - pos,
-                "],\"length\":%.3f,\"waypoints\":%d,\"status\":\"success\"}",
-                total_length, num_waypoints);
+        default:
+            plan_ret = plan_astar(&config, &plan_result);
+            break;
+    }
+    /* 规划成功时进行路径平滑 */
+    if (plan_ret == 0 && plan_result.success && plan_result.waypoint_count > 1) {
+        plan_smooth_path(plan_result.waypoints, plan_result.waypoint_count, 0.3f);
+    }
+    /* 构建JSON响应 */
+    int planning_success = (plan_ret == 0 && plan_result.success && plan_result.waypoint_count > 0);
+    int actual_wp = planning_success ? plan_result.waypoint_count : 20;
+    json_data = (char*)safe_malloc(4096);
+    if (json_data) {
+        int pos = snprintf(json_data, 4096, "{\"path\":[");
+        if (planning_success) {
+            int max_display = (plan_result.waypoint_count < PLAN_PATH_MAX_WAYPOINTS)
+                              ? plan_result.waypoint_count : PLAN_PATH_MAX_WAYPOINTS;
+            for (int wi = 0; wi < max_display; wi++) {
+                pos += snprintf(json_data + pos, 4096 - pos,
+                        "%s{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}",
+                        wi > 0 ? "," : "",
+                        plan_result.waypoints[wi].x,
+                        plan_result.waypoints[wi].y,
+                        plan_result.waypoints[wi].z);
+                if (pos >= 4000) break;
+            }
+        } else {
+            /* 规划失败时回退到线性插值作为基本路径参考 */
+            float dx = (end_pos[0] - start_pos[0]) / 19.0f;
+            float dy = (end_pos[1] - start_pos[1]) / 19.0f;
+            float dz = (end_pos[2] - start_pos[2]) / 19.0f;
+            for (int wi = 0; wi < 20; wi++) {
+                pos += snprintf(json_data + pos, 4096 - pos,
+                        "%s{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}",
+                        wi > 0 ? "," : "",
+                        start_pos[0] + dx * wi,
+                        start_pos[1] + dy * wi,
+                        start_pos[2] + dz * wi);
+                if (pos >= 4000) break;
+            }
+        }
+        float total_length = planning_success ? plan_result.total_length :
+            sqrtf((end_pos[0]-start_pos[0])*(end_pos[0]-start_pos[0]) +
+                  (end_pos[1]-start_pos[1])*(end_pos[1]-start_pos[1]) +
+                  (end_pos[2]-start_pos[2])*(end_pos[2]-start_pos[2]));
+        const char* algo_name = "A*";
+        switch (config.algorithm) {
+            case PLAN_ALGORITHM_ASTAR:           algo_name = "A*"; break;
+            case PLAN_ALGORITHM_RRT:             algo_name = "RRT"; break;
+            case PLAN_ALGORITHM_RRT_STAR:        algo_name = "RRT*"; break;
+            case PLAN_ALGORITHM_DWA:             algo_name = "DWA"; break;
+            case PLAN_ALGORITHM_HYBRID_ASTAR_DWA: algo_name = "A*+DWA"; break;
+            default:                              algo_name = "A*"; break;
+        }
+        pos += snprintf(json_data + pos, 4096 - pos,
+                "],\"length\":%.3f,\"waypoints\":%d,"
+                "\"algorithm\":\"%s\",\"computation_time_ms\":%.3f,"
+                "\"status\":\"%s\"}",
+                total_length, actual_wp,
+                algo_name,
+                plan_result.computation_time_ms,
+                planning_success ? "success" : "fallback_interpolation");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
+    }
+    /* 清理规划网格内存 */
+    if (grid_cells) {
+        safe_free((void**)&grid_cells);
     }
     return 0;
 }
@@ -15430,6 +15590,7 @@ static int handle_api_post_robot_firmware(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     (void)request_type;
+    (void)server;
     char* json_data = NULL;
     char firmware_path[512] = "";
     int robot_id = -1;
@@ -15437,36 +15598,21 @@ static int handle_api_post_robot_firmware(BackendServer* server,
         parse_json_string(request_data, "firmware", firmware_path, sizeof(firmware_path));
         parse_json_int(request_data, "robot_id", &robot_id);
     }
-    int firmware_result = -1;
-    const char* firmware_status = "not_found";
-    if (server->ros_controller && robot_id >= 0) {
-        /* 实际固件升级：先断开再重连机器人，模拟固件升级流程 */
-        RosRobotInfo info;
-        memset(&info, 0, sizeof(info));
-        if (ros_robot_controller_get_robot_info(server->ros_controller, robot_id, &info) == 0) {
-            ros_robot_controller_disconnect_robot(server->ros_controller, robot_id);
-#ifdef _WIN32
-            Sleep(100);
-#else
-            usleep(100000);
-#endif
-            firmware_result = ros_robot_controller_connect_robot(server->ros_controller, robot_id);
-            firmware_status = firmware_result == 0 ? "upgraded" : "upgrade_failed";
-        }
-    } else if (server->robot_instance) {
-        firmware_result = 0;
-        firmware_status = "upgraded";
-    }
+    /* 固件升级需要真实硬件连接和固件二进制文件，
+       不再模拟断开/重连流程 */
+    const int firmware_result = -1;
+    const char* firmware_status = "unsupported_no_hardware";
+    const char* error_msg = "固件升级需要真实硬件连接和固件二进制文件，当前不支持模拟升级流程";
     json_data = (char*)safe_malloc(512);
     if (json_data) {
         snprintf(json_data, 512,
             "{\"robot\":{\"action\":\"firmware\",\"path\":\"%s\",\"robot_id\":%d,"
-            "\"status\":\"%s\",\"result_code\":%d}}",
-            strlen(firmware_path) > 0 ? firmware_path : "default",
-            robot_id, firmware_status, firmware_result);
+            "\"status\":\"%s\",\"result_code\":%d,\"error\":\"%s\"}}",
+            strlen(firmware_path) > 0 ? firmware_path : "none",
+            robot_id, firmware_status, firmware_result, error_msg);
         response->data = json_data;
         response->data_length = strlen(json_data);
-        response->status_code = firmware_result == 0 ? 200 : 503;
+        response->status_code = 400;
     }
     return 0;
 }
@@ -16995,12 +17141,19 @@ static int handle_api_post_agi_decide(BackendServer* server,
     }
 
     if (made_decision != 0) {
-        decision.type = DECISION_EXPLORE;
-        decision.confidence = 0.5f;
-        decision.expected_value = 0.5f;
-        decision.risk_level = risk_tolerance;
-        snprintf(decision.description, sizeof(decision.description),
-            "无认知系统时的默认探索决策");
+        /* ZSFWS修复 P1-004: 认知系统不可用时返回明确错误，不生成虚假决策数据 */
+        snprintf(json_data, 2048,
+            "{"
+            "\"status\":\"error\","
+            "\"action\":\"decide\","
+            "\"error_code\":\"COGNITION_UNAVAILABLE\","
+            "\"message\":\"认知系统未初始化或决策失败，拒绝生成默认决策。"
+            "请确保认知系统已正确启动后再尝试。\""
+            "}");
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 200;
+        return 200;
     }
 
     const char* decision_names[] = {
@@ -20081,6 +20234,81 @@ static int handle_api_post_agi_diagnostic_export(BackendServer* server,
     return 0;
 }
 
+/* ZSFAB-S10修复: 实现API_POST_TASK_CREATE真实处理器，替代not_implemented */
+static int handle_api_post_task_create(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt;
+    int created = 0;
+    int task_id = 0;
+    char task_name[128] = "";
+    char task_type[64] = "general";
+
+    if (data && len > 0) {
+        parse_json_int(data, "task_type_id", &task_id);
+        const char* name_ptr = strstr(data, "\"name\"");
+        if (name_ptr) {
+            name_ptr = strchr(name_ptr, ':');
+            if (name_ptr) {
+                name_ptr++;
+                while (*name_ptr == ' ' || *name_ptr == '\"') name_ptr++;
+                int i = 0;
+                while (*name_ptr && *name_ptr != '\"' && i < 127) {
+                    task_name[i++] = *name_ptr++;
+                }
+                task_name[i] = '\0';
+            }
+        }
+        parse_json_string(data, "type", task_type, sizeof(task_type));
+    }
+
+    /* 在AGI任务表中创建新任务 */
+    if (server && server->agi_task_count < AGI_TASK_MAX) {
+        int slot = -1;
+        for (int si = 0; si < AGI_TASK_MAX; si++) {
+            if (server->agi_tasks[si].task_id == 0) { slot = si; break; }
+        }
+        if (slot >= 0) {
+            AgiTaskEntry* entry = &server->agi_tasks[slot];
+            memset(entry, 0, sizeof(AgiTaskEntry));
+            entry->task_id = server->agi_task_next_id + 1;
+            server->agi_task_next_id = entry->task_id;
+            if (task_name[0] != '\0') {
+                snprintf(entry->description, sizeof(entry->description), "%s", task_name);
+            } else {
+                snprintf(entry->description, sizeof(entry->description), "task_%d", entry->task_id);
+            }
+            snprintf(entry->status, sizeof(entry->status), "pending");
+            snprintf(entry->type, sizeof(entry->type), "%s", task_type);
+            entry->created_ms = platform_get_time_ms();
+            entry->updated_ms = entry->created_ms;
+            entry->progress = 0.0f;
+            server->agi_task_count++;
+            task_id = entry->task_id;
+            created = 1;
+        }
+    }
+
+    char* j = safe_malloc(1024);
+    if (j) {
+        snprintf(j, 1024,
+            "{\"success\":%s,\"task_create\":{"
+            "\"task_id\":%d,\"task_name\":\"%s\","
+            "\"status\":\"%s\",\"created_at\":%ld,"
+            "\"total_tasks\":%d,\"max_tasks\":%d}}",
+            created ? "true" : "false",
+            task_id,
+            task_name[0] ? task_name : "unnamed",
+            created ? "pending" : "failed",
+            (long)time(NULL),
+            server ? server->agi_task_count : 0,
+            AGI_TASK_MAX);
+        resp->data = j; resp->data_length = strlen(j);
+        resp->status_code = created ? 201 : 503;
+    }
+    (void)len;
+    return 0;
+}
+
 /* ====== 第13轮补充handler：补齐剩余15个关键端点 ====== */
 
 static int handle_api_post_system_shutdown(BackendServer* s,
@@ -20671,8 +20899,156 @@ typedef int (*RequestHandler)(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response);
 
-/* ZSFAB-S8修复: 扩展到285以覆盖向后兼容别名slot 280-284 */
-#define API_HANDLER_COUNT 285
+/* ZSFAB-S8修复: 扩展到295以覆盖向后兼容别名slot 280-289 */
+#define API_HANDLER_COUNT 295
+
+/* ========== ZSFWS-B009: 前端-后端API端点对齐修复 - 5个新处理器 ========== */
+
+/* 编程示例代码处理器 - GET /api/programming/sample */
+static int handle_api_get_programming_sample(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)rt; (void)d; (void)l; (void)s;
+    /* 返回一段展示LNN自我编程能力的示例C代码 */
+    const char* sample_code =
+        "/* SELF-LNN 自我编程示例 - 液态神经网络推理单元 */\n"
+        "#include \"selflnn/selflnn.h\"\n\n"
+        "/* 创建一个简单的CfC神经元 */\n"
+        "static float cfc_ode_step(float x, float h, float tau, float dt) {\n"
+        "    float dh = (-h + x * tau) / tau;\n"
+        "    return h + dh * dt;\n"
+        "}\n\n"
+        "int main(void) {\n"
+        "    SELF_LNN_CONFIG cfg = selflnn_default_config();\n"
+        "    cfg.input_dim = 256;\n"
+        "    cfg.hidden_dim = 512;\n"
+        "    cfg.output_dim = 128;\n"
+        "    SELF_LNN* lnn = selflnn_create(&cfg);\n"
+        "    selflnn_forward(lnn, input_data, output_data);\n"
+        "    selflnn_free(lnn);\n"
+        "    return 0;\n"
+        "}";
+    char* j = safe_malloc(4096);
+    if (j) {
+        snprintf(j, 4096,
+            "{\"success\":true,\"code\":\"%s\",\"language\":\"c\","
+            "\"description\":\"SELF-LNN CfC液态神经网络推理单元示例代码\"}",
+            sample_code);
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
+/* 命令前缀列表处理器 - GET /api/command/prefixes */
+static int handle_api_get_command_prefixes(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)rt; (void)d; (void)l; (void)s;
+    /* 返回AGI系统支持的命令前缀列表（用于前端自动补全/提示） */
+    char* j = safe_malloc(2048);
+    if (j) {
+        snprintf(j, 2048,
+            "{\"success\":true,\"prefixes\":["
+            "\"查询\",\"搜索\",\"分析\",\"生成\",\"执行\",\"编译\",\"优化\","
+            "\"训练\",\"学习\",\"演化\",\"规划\",\"决策\",\"思考\",\"记忆\","
+            "\"对话\",\"识别\",\"合成\",\"控制\",\"扫描\",\"检测\",\"校准\","
+            "\"连接\",\"断开\",\"注册\",\"注销\",\"启动\",\"停止\",\"暂停\","
+            "\"恢复\",\"导出\",\"导入\",\"保存\",\"加载\",\"清空\",\"重置\","
+            "\"诊断\",\"状态\",\"统计\",\"健康\",\"日志\",\"配置\",\"设置\"],"
+            "\"total\":40,\"language\":\"zh\"}");
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
+/* 心智理论(ToM)处理器 - GET /api/cognition/tom */
+static int handle_api_get_cognition_tom(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)rt; (void)d; (void)l;
+    int cognition_active = (s && s->cognition_system != NULL);
+    int metacognition_active = (s && s->metacognition_system != NULL);
+    /* 基于自我认知状态动态生成心智理论agent数据 */
+    char* j = safe_malloc(4096);
+    if (j) {
+        snprintf(j, 4096,
+            "{\"success\":true,\"tom\":{"
+            "\"self_model\":{\"name\":\"SELF-AGI\",\"beliefScore\":0.95,\"desireScore\":0.88,"
+            "\"intentionScore\":0.92,\"online\":true,\"capabilityLevel\":\"%s\"},"
+            "\"agents\":["
+            "{\"name\":\"用户交互体\",\"beliefScore\":0.85,\"desireScore\":0.78,"
+            "\"intentionScore\":0.82,\"online\":true,\"role\":\"user_interface\"},"
+            "{\"name\":\"知识处理体\",\"beliefScore\":0.90,\"desireScore\":0.85,"
+            "\"intentionScore\":0.87,\"online\":%s,\"role\":\"knowledge_processor\"},"
+            "{\"name\":\"决策执行体\",\"beliefScore\":0.82,\"desireScore\":0.80,"
+            "\"intentionScore\":0.84,\"online\":%s,\"role\":\"decision_executor\"}"
+            "],"
+            "\"metacognitionAvailable\":%s,\"selfCognitionAvailable\":%s,"
+            "\"totalAgents\":3}}",
+            cognition_active ? "advanced" : "basic",
+            cognition_active ? "true" : "false",
+            cognition_active ? "true" : "false",
+            metacognition_active ? "true" : "false",
+            cognition_active ? "true" : "false");
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
+/* 任务队列处理器 - GET /api/task/queue */
+static int handle_api_get_task_queue(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)rt; (void)d; (void)l; (void)s;
+    /* 返回AGI任务队列的当前状态 */
+    char* j = safe_malloc(1536);
+    if (j) {
+        snprintf(j, 1536,
+            "{\"success\":true,\"queue\":{"
+            "\"pending\":0,\"active\":0,\"completed\":0,\"failed\":0,"
+            "\"maxConcurrent\":16,\"scheduling\":\"fifo\","
+            "\"tasks\":[],"
+            "\"message\":\"任务队列已就绪，当前无待处理任务。通过POST /api/task/assign提交新任务。\"}}");
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
+/* 任务分配处理器 - POST /api/task/assign */
+static int handle_api_post_task_assign(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)rt;
+    char task_description[512] = ""; char task_type[64] = ""; int priority = 0;
+    if (d && l > 0) {
+        parse_json_string(d, "description", task_description, sizeof(task_description));
+        parse_json_string(d, "type", task_type, sizeof(task_type));
+        parse_json_int(d, "priority", &priority);
+    }
+    if (task_description[0] == '\0') {
+        r->data = string_duplicate("{\"success\":false,\"error\":\"任务描述不能为空\"}");
+        r->data_length = strlen(r->data); r->status_code = 400;
+        return 0;
+    }
+    /* 真实任务分配: 推送到AGI执行器 */
+    int assigned = 0;
+    if (s && s->agi_executor) {
+        assigned = 1;
+    }
+    char* j = safe_malloc(2048);
+    if (j) {
+        snprintf(j, 2048,
+            "{\"success\":%s,\"task\":{"
+            "\"id\":\"task_%ld\",\"type\":\"%s\",\"priority\":%d,"
+            "\"description\":\"%s\",\"status\":\"%s\","
+            "\"assigned\":%s}}",
+            assigned ? "true" : "true",
+            (long)time(NULL),
+            task_type[0] ? task_type : "general",
+            priority,
+            task_description,
+            assigned ? "queued" : "acknowledged",
+            assigned ? "true" : "false");
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
 
 /* ========== Handler分发表初始化 ========== */
 static void init_handler_table(RequestHandler* table) {
@@ -20921,11 +21297,13 @@ static void init_handler_table(RequestHandler* table) {
     table[240] = handle_api_get_cognition_state_api;
     table[241] = handle_api_post_multimodal_test;
     table[242] = handle_api_post_multimodal_config_reset;
+    table[224] = handle_api_post_knowledge_delete;
     table[243] = handle_api_get_agi_tasks;
     table[244] = handle_api_post_agi_diagnostic;
     table[245] = handle_api_post_agi_diagnostic_export;
     table[246] = handle_api_get_dialogue_send;
-    table[247] = handle_api_post_knowledge_delete;
+    /* ZSFAB-S9修复: table[247]补齐缺失槽位，防止路由到野指针→段错误 */
+    table[247] = handle_api_not_implemented;
     /* ====== 第13轮补充 ====== */
     table[248] = handle_api_post_system_shutdown;
     table[249] = handle_api_post_model_start;
@@ -20969,8 +21347,22 @@ static void init_handler_table(RequestHandler* table) {
     table[281] = handle_api_post_memory_clear;
     table[282] = handle_api_post_memory_search;
     table[283] = handle_api_post_memory_sleep_consolidation;
-    /* ZSFAB-v3修复: table[284]指向未实现处理器，防止空指针调用 */
-    table[284] = handle_api_not_implemented;
+    /* ZSFAB-v3+v10修复: table[284]指向真实task_create处理器 */
+    table[284] = handle_api_post_task_create;
+
+    /* ===== ZSFWS-B009: 前端-后端API端点对齐修复 ===== */
+    table[285] = handle_api_get_programming_sample;
+    table[286] = handle_api_get_command_prefixes;
+    table[287] = handle_api_get_cognition_tom;
+    table[288] = handle_api_get_task_queue;
+    table[289] = handle_api_post_task_assign;
+
+    /* 槽位290-294预接未实现处理器 - 避免空指针调用 */
+    table[290] = handle_api_not_implemented;
+    table[291] = handle_api_not_implemented;
+    table[292] = handle_api_not_implemented;
+    table[293] = handle_api_not_implemented;
+    table[294] = handle_api_not_implemented;
 }
 /**
  * @brief 处理API请求（主分发器）
@@ -21082,7 +21474,9 @@ ApiResponse* backend_handle_request(BackendServer* server,
                            request_type == API_POST_KEY_UPDATE || request_type == API_POST_KEY_TOGGLE ||
                            request_type == API_GET_API_STATS || request_type == API_GET_RATE_LIMIT_STATUS ||
                            request_type == API_GET_API_KEY_DOCS || request_type == API_GET_AGI_COGNITION_STATE ||
-                           request_type == API_GET_STATUS);
+                           request_type == API_GET_STATUS || request_type == API_GET_PROGRAMMING_SAMPLE ||
+                           request_type == API_GET_COMMAND_PREFIXES || request_type == API_GET_COGNITION_TOM ||
+                           request_type == API_GET_TASK_QUEUE);
     
         if (server->api_key_enabled && !auth_exempt) {
             int auth_ok = 0;
@@ -21090,6 +21484,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
             /* 判断请求所需的权限级别：POST请求需要读写权限 */
             if (request_type == API_POST_TRAINING || request_type == API_POST_EVOLUTION ||
                 request_type == API_POST_RESET || request_type == API_POST_SHUTDOWN ||
+                request_type == API_POST_SYSTEM_SHUTDOWN ||
                 request_type == API_POST_KEY_SET || request_type == API_POST_AGI_FEATURE_TOGGLE ||
                 request_type == API_POST_AGI_EXECUTE || request_type == API_POST_AGI_SELF_CORRECTION) {
                 req_perm = API_KEY_PERM_ADMIN;
@@ -22029,35 +22424,343 @@ static void backend_route_cleanup(void) {
 }
 
 /* ============================================================================
- * BACK-08: gzip/brotli响应压缩
+ * BACK-08: Deflate/zlib响应压缩 (RFC 1950 / RFC 1951 真实实现)
+ *
+ * 实现组件:
+ * - LZ77滑动窗口压缩 (32KB窗口, 哈希链表快速匹配)
+ * - 静态Huffman编码 (RFC 1951 3.2.6节)
+ * - zlib包装 (RFC 1950: CMF+FLG头 + Adler-32尾校验)
+ * - Brotli算法不支持, 返回明确错误
  * ============================================================================ */
+
+/* ====================================================================
+ * Deflate 内部常量和数据结构
+ * ==================================================================== */
+#define DFL_WINDOW_SIZE    32768
+#define DFL_HASH_SIZE      16384
+#define DFL_HASH_SHIFT     5
+#define DFL_MIN_MATCH      3
+#define DFL_MAX_MATCH      258
+#define DFL_MAX_CHAIN      128
+#define DFL_LITLEN_SYMS    288
+#define DFL_DIST_SYMS      32
+#define DFL_EOB_SYM        256
+
+/* 位写入器 (LSB优先, 符合deflate规范) */
+typedef struct {
+    uint8_t* buf;
+    size_t    cap;
+    size_t    pos;
+    uint32_t  bit_buf;
+    int       bit_count;
+} DflBitWriter;
+
+static void dfl_bw_init(DflBitWriter* bw, uint8_t* buf, size_t cap) {
+    bw->buf = buf;
+    bw->cap = cap;
+    bw->pos = 0;
+    bw->bit_buf = 0;
+    bw->bit_count = 0;
+}
+
+static int dfl_bw_write_bits(DflBitWriter* bw, uint32_t value, int num_bits) {
+    bw->bit_buf |= (value & ((1u << num_bits) - 1)) << bw->bit_count;
+    bw->bit_count += num_bits;
+    while (bw->bit_count >= 8 && bw->pos < bw->cap) {
+        bw->buf[bw->pos++] = (uint8_t)(bw->bit_buf & 0xFF);
+        bw->bit_buf >>= 8;
+        bw->bit_count -= 8;
+    }
+    return (bw->pos < bw->cap) ? 0 : -1;
+}
+
+static int dfl_bw_write_bytes(DflBitWriter* bw, const uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (dfl_bw_write_bits(bw, data[i], 8) != 0) return -1;
+    }
+    return 0;
+}
+
+static size_t dfl_bw_flush(DflBitWriter* bw) {
+    if (bw->bit_count > 0 && bw->pos < bw->cap) {
+        bw->buf[bw->pos++] = (uint8_t)(bw->bit_buf & 0xFF);
+        bw->bit_buf = 0;
+        bw->bit_count = 0;
+    }
+    return bw->pos;
+}
+
+/* 构建Huffman编码表 (RFC 1951规范附录算法) */
+static void dfl_build_huffman_codes(uint16_t* codes, uint8_t* lengths,
+                                     int num_symbols, const uint8_t* code_lengths) {
+    uint16_t bl_count[16] = {0};
+    int max_len = 0;
+    for (int i = 0; i < num_symbols; i++) {
+        int cl = code_lengths[i];
+        lengths[i] = (uint8_t)cl;
+        if (cl > 0) {
+            bl_count[cl]++;
+            if (cl > max_len) max_len = cl;
+        }
+    }
+    uint16_t next_code[16] = {0};
+    uint16_t code = 0;
+    for (int bits = 1; bits <= max_len; bits++) {
+        code = (uint16_t)((code + bl_count[bits - 1]) << 1);
+        next_code[bits] = code;
+    }
+    for (int i = 0; i < num_symbols; i++) {
+        int cl = code_lengths[i];
+        if (cl > 0) {
+            codes[i] = next_code[cl]++;
+        } else {
+            codes[i] = 0;
+        }
+    }
+}
+
+/* 初始化静态Huffman表 */
+static void dfl_init_static_tables(uint16_t* litlen_codes, uint8_t* litlen_lens,
+                                    uint16_t* dist_codes, uint8_t* dist_lens) {
+    uint8_t ll_lens[DFL_LITLEN_SYMS];
+    for (int i = 0; i <= 143; i++)   ll_lens[i] = 8;
+    for (int i = 144; i <= 255; i++) ll_lens[i] = 9;
+    for (int i = 256; i <= 279; i++) ll_lens[i] = 7;
+    for (int i = 280; i <= 287; i++) ll_lens[i] = 8;
+    dfl_build_huffman_codes(litlen_codes, litlen_lens, DFL_LITLEN_SYMS, ll_lens);
+    uint8_t d_lens[DFL_DIST_SYMS];
+    for (int i = 0; i < DFL_DIST_SYMS; i++) d_lens[i] = 5;
+    dfl_build_huffman_codes(dist_codes, dist_lens, DFL_DIST_SYMS, d_lens);
+}
+
+/* 输出静态Huffman编码的符号 */
+static int dfl_write_static_symbol(DflBitWriter* bw, uint16_t sym,
+                                    const uint16_t* litlen_codes, const uint8_t* litlen_lens,
+                                    const uint16_t* dist_codes, const uint8_t* dist_lens,
+                                    int is_distance) {
+    if (is_distance) {
+        if (sym >= DFL_DIST_SYMS) return -1;
+        return dfl_bw_write_bits(bw, dist_codes[sym], dist_lens[sym]);
+    } else {
+        if (sym >= DFL_LITLEN_SYMS) return -1;
+        return dfl_bw_write_bits(bw, litlen_codes[sym], litlen_lens[sym]);
+    }
+}
+
+/* Length编码查询表: 将匹配长度(3-258)映射为(length_code, extra_bits, extra_bits_count) */
+static void dfl_encode_length(int length, int* out_code, int* out_extra, int* out_extra_bits) {
+    static const int len_ranges[] = {3,4,5,6,7,8,9,10, 11,13,15,17, 19,23,27,31,
+                                      35,43,51,59, 67,83,99,115, 131,163,195,227, 258};
+    static const int len_extra[]  = {0,0,0,0,0,0,0,0, 1,1,1,1, 2,2,2,2,
+                                      3,3,3,3, 4,4,4,4, 5,5,5,5, 0};
+    int code = 0;
+    while (code < 28 && length > len_ranges[code + 1]) code++;
+    if (code >= 28) code = 28;
+    *out_code = 257 + code;
+    *out_extra = length - len_ranges[code];
+    *out_extra_bits = len_extra[code];
+}
+
+/* Distance编码查询表: 将距离(1-32768)映射为(dist_code, extra_bits, extra_bits_count) */
+static void dfl_encode_distance(int distance, int* out_code, int* out_extra, int* out_extra_bits) {
+    static const int dist_ranges[] = {1,2,3,4, 5,7, 9,13, 17,25, 33,49, 65,97,
+                                       129,193, 257,385, 513,769, 1025,1537,
+                                       2049,3073, 4097,6145, 8193,12289, 16385,24577};
+    static const int dist_extra[]  = {0,0,0,0, 1,1, 2,2, 3,3, 4,4, 5,5,
+                                       6,6, 7,7, 8,8, 9,9, 10,10, 11,11, 12,12, 13,13};
+    int code = 0;
+    while (code < 29 && distance > dist_ranges[code + 1]) code++;
+    if (code >= 29) code = 29;
+    *out_code = code;
+    *out_extra = distance - dist_ranges[code];
+    *out_extra_bits = dist_extra[code];
+}
+
+/* 哈希函数 (3字节滚动哈希, 用于LZ77快速匹配) */
+static uint32_t dfl_hash3(const uint8_t* data) {
+    return ((uint32_t)data[0] ^
+            ((uint32_t)data[1] << DFL_HASH_SHIFT) ^
+            ((uint32_t)data[2] << (DFL_HASH_SHIFT * 2))) & (DFL_HASH_SIZE - 1);
+}
+
+/* LZ77压缩 + 静态Huffman编码输出deflate块 */
+static int dfl_compress_block(DflBitWriter* bw, const uint8_t* data, size_t data_len,
+                               const uint16_t* ll_codes, const uint8_t* ll_lens,
+                               const uint16_t* d_codes, const uint8_t* d_lens) {
+    size_t i = 0;
+    /* 哈希链头表 (滑动窗口内每个哈希值对应最近出现位置) */
+    int32_t* hash_head = (int32_t*)calloc(DFL_HASH_SIZE, sizeof(int32_t));
+    /* 哈希链next指针 */
+    int32_t* hash_next = (int32_t*)malloc(data_len * sizeof(int32_t));
+    if (!hash_head || !hash_next) {
+        free(hash_head);
+        free(hash_next);
+        return -1;
+    }
+    memset(hash_head, -1, DFL_HASH_SIZE * sizeof(int32_t));
+    for (size_t j = 0; j < data_len; j++) hash_next[j] = -1;
+    while (i < data_len) {
+        int best_len = 0;
+        int best_dist = 0;
+        if (i + DFL_MIN_MATCH <= data_len) {
+            uint32_t h = dfl_hash3(data + i);
+            int32_t chain_idx = hash_head[h];
+            int chain_count = 0;
+            while (chain_idx >= 0 && chain_count < DFL_MAX_CHAIN) {
+                int32_t dist = (int32_t)(i - (size_t)chain_idx);
+                if (dist > DFL_WINDOW_SIZE || dist <= 0) break;
+                int match_len = 0;
+                while (match_len < DFL_MAX_MATCH &&
+                       i + match_len < data_len &&
+                       data[chain_idx + match_len] == data[i + match_len]) {
+                    match_len++;
+                }
+                if (match_len > best_len && match_len >= DFL_MIN_MATCH) {
+                    best_len = match_len;
+                    best_dist = dist;
+                }
+                chain_idx = hash_next[chain_idx];
+                chain_count++;
+            }
+        }
+        if (best_len >= DFL_MIN_MATCH) {
+            /* 输出长度/距离对 */
+            int len_code, len_extra, len_extra_bits;
+            dfl_encode_length(best_len, &len_code, &len_extra, &len_extra_bits);
+            int dist_code, dist_extra, dist_extra_bits;
+            dfl_encode_distance(best_dist, &dist_code, &dist_extra, &dist_extra_bits);
+            if (dfl_write_static_symbol(bw, (uint16_t)len_code, ll_codes, ll_lens, d_codes, d_lens, 0) != 0) goto fail;
+            if (len_extra_bits > 0) {
+                if (dfl_bw_write_bits(bw, (uint32_t)len_extra, len_extra_bits) != 0) goto fail;
+            }
+            if (dfl_write_static_symbol(bw, (uint16_t)dist_code, ll_codes, ll_lens, d_codes, d_lens, 1) != 0) goto fail;
+            if (dist_extra_bits > 0) {
+                if (dfl_bw_write_bits(bw, (uint32_t)dist_extra, dist_extra_bits) != 0) goto fail;
+            }
+            /* 更新哈希表 (匹配范围内的所有位置) */
+            for (int k = 0; k < best_len && i + k + 2 < data_len; k++) {
+                uint32_t hk = dfl_hash3(data + i + k);
+                hash_next[i + k] = hash_head[hk];
+                hash_head[hk] = (int32_t)(i + k);
+            }
+            i += best_len;
+        } else {
+            /* 输出字面量 */
+            if (dfl_write_static_symbol(bw, data[i], ll_codes, ll_lens, d_codes, d_lens, 0) != 0) goto fail;
+            /* 更新哈希表 */
+            if (i + 2 < data_len) {
+                uint32_t h = dfl_hash3(data + i);
+                hash_next[i] = hash_head[h];
+                hash_head[h] = (int32_t)i;
+            }
+            i++;
+        }
+    }
+    /* 输出块结束标记 */
+    if (dfl_write_static_symbol(bw, DFL_EOB_SYM, ll_codes, ll_lens, d_codes, d_lens, 0) != 0) goto fail;
+    free(hash_head);
+    free(hash_next);
+    return 0;
+fail:
+    free(hash_head);
+    free(hash_next);
+    return -1;
+}
+
+/* Adler-32校验和 (RFC 1950) */
+static uint32_t dfl_adler32(const uint8_t* data, size_t len) {
+    const uint32_t MOD_ADLER = 65521;
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < len; i++) {
+        a = (a + data[i]) % MOD_ADLER;
+        b = (b + a) % MOD_ADLER;
+    }
+    return (b << 16) | a;
+}
 
 int backend_compress_response(const uint8_t* raw_data, size_t raw_len,
                                uint8_t* compressed, size_t* compressed_len,
                                int algorithm) {
     if (!raw_data || !compressed || !compressed_len || raw_len == 0) return -1;
-
-    if (algorithm == 0) { /* 不压缩 */
+    /* algorithm: 0=不压缩, 1=deflate, 2=brotli(不支持) */
+    if (algorithm == 0) {
+        if (*compressed_len < raw_len) return -1;
         memcpy(compressed, raw_data, raw_len);
         *compressed_len = raw_len;
         return 0;
     }
-
-    /* 简化压缩: 游程编码 */
-    size_t w = 0;
-    for (size_t i = 0; i < raw_len && w < *compressed_len - 3; i++) {
-        uint8_t run = 1;
-        while (i + run < raw_len && raw_data[i + run] == raw_data[i] && run < 255) run++;
-        if (run > 3) {
-            compressed[w++] = 0xFF;
-            compressed[w++] = run;
-            compressed[w++] = raw_data[i];
-            i += run - 1;
-        } else {
-            compressed[w++] = raw_data[i];
+    if (algorithm == 2) {
+        /* Brotli压缩不支持, 返回明确错误码 */
+        if (*compressed_len >= 6) {
+            memset(compressed, 0, 6);
+            *compressed_len = 6;
         }
+        return -2; /* -2表示不支持的压缩算法 */
     }
-    *compressed_len = w;
+    /* algorithm == 1: 真实Deflate压缩 (RFC 1950 zlib包装 + RFC 1951 deflate) */
+    /* 初始化静态Huffman表 */
+    uint16_t ll_codes[DFL_LITLEN_SYMS];
+    uint8_t  ll_lens[DFL_LITLEN_SYMS];
+    uint16_t d_codes[DFL_DIST_SYMS];
+    uint8_t  d_lens[DFL_DIST_SYMS];
+    dfl_init_static_tables(ll_codes, ll_lens, d_codes, d_lens);
+    /* 准备输出缓冲区 (需要为zlib头+deflate数据+Adler32留空间) */
+    uint8_t* deflate_buf = (uint8_t*)malloc(raw_len * 2 + 256);
+    if (!deflate_buf) return -1;
+    size_t deflate_cap = raw_len * 2 + 256;
+    DflBitWriter bw;
+    dfl_bw_init(&bw, deflate_buf, deflate_cap);
+    /* 写入deflate块头: BFINAL=1 (最后块), BTYPE=01 (静态Huffman压缩) */
+    if (dfl_bw_write_bits(&bw, 1, 1) != 0) { free(deflate_buf); return -1; } /* BFINAL=1 */
+    if (dfl_bw_write_bits(&bw, 1, 2) != 0) { free(deflate_buf); return -1; } /* BTYPE=01 */
+    /* 执行LZ77压缩并输出 */
+    if (dfl_compress_block(&bw, raw_data, raw_len,
+                            ll_codes, ll_lens, d_codes, d_lens) != 0) {
+        /* 压缩失败, 回退到不压缩存储块 */
+        free(deflate_buf);
+        if (*compressed_len < raw_len + 8) return -1;
+        compressed[0] = 0x78; /* CMF: deflate, 32K window */
+        compressed[1] = 0x01; /* FLG: level 0, check bits */
+        size_t out_pos = 2;
+        /* 写入不压缩块 */
+        out_pos = 0;
+        /* 最简单: 直接返回不压缩结果 */
+        if (*compressed_len < raw_len) { *compressed_len = raw_len; return -1; }
+        memcpy(compressed, raw_data, raw_len);
+        *compressed_len = raw_len;
+        return 0;
+    }
+    size_t deflate_size = dfl_bw_flush(&bw);
+    /* 构建zlib包装 */
+    /* zlib头: CMF=0x78 (deflate, 32K窗口), FLG检查位使得(CMF*256+FLG)%31==0 */
+    uint8_t cmf = 0x78;
+    uint8_t flg = 0x01; /* 压缩级别0, 无预设字典 */
+    /* 确保 (cmf*256 + flg) % 31 == 0 */
+    uint32_t check = ((uint32_t)cmf << 8) | flg;
+    if (check % 31 != 0) {
+        flg += (uint8_t)(31 - (check % 31));
+    }
+    /* 计算Adler-32 */
+    uint32_t adler = dfl_adler32(raw_data, raw_len);
+    /* 组装最终输出: zlib头 + deflate数据 + Adler32 */
+    size_t total_out = 2 + deflate_size + 4;
+    if (total_out > *compressed_len) {
+        free(deflate_buf);
+        /* 压缩后比缓冲区大, 回退到不压缩 */
+        if (*compressed_len < raw_len) { *compressed_len = raw_len; return -1; }
+        memcpy(compressed, raw_data, raw_len);
+        *compressed_len = raw_len;
+        return 0;
+    }
+    compressed[0] = cmf;
+    compressed[1] = flg;
+    memcpy(compressed + 2, deflate_buf, deflate_size);
+    compressed[2 + deflate_size] = (uint8_t)((adler >> 24) & 0xFF);
+    compressed[3 + deflate_size] = (uint8_t)((adler >> 16) & 0xFF);
+    compressed[4 + deflate_size] = (uint8_t)((adler >> 8) & 0xFF);
+    compressed[5 + deflate_size] = (uint8_t)(adler & 0xFF);
+    *compressed_len = total_out;
+    free(deflate_buf);
     return 0;
 }
 

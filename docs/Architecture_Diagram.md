@@ -3,8 +3,8 @@
 
 > **版本 / Version:** 1.4.0 | **语言 / Language:** 100% Pure C (C11) | **构建 / Build:** CMake 3.10+
 > **核心模型 / Core Model:** CfC (Closed-form Continuous-time) LNN — Token-Free 连续信号架构 / Continuous Signal Architecture
-> **ODE求解器 / Solvers:** 7种/7 types (闭式解/Closed-Form, RK4, RK45, DP54, Rosenbrock, Symplectic, CTBP)
-> **GPU后端 / Backends:** 10种/10 types | **API Handler槽位 / Slots:** 285 (277已实现/Implemented) | **前端/Frontend:** SPA + 18 JS
+> **ODE求解器 / Solvers:** 8种/8 types (闭式解/Closed-Form, RK4, RK45, CTBP, DP54, Rosenbrock, Forest-Ruth辛, RHS) 
+> **GPU后端 / Backends:** 10种/10 types | **API Handler槽位 / Slots:** 290 (282 API枚举 + 8别名) | **前端/Frontend:** SPA + 19 JS (18主模块 + 1 Worker)
 > **项目信息 / Info:** [GitHub](https://github.com/Sum-Outman/Self-LNN) | [Email](mailto:silencecrowtom@qq.com)
 
 ---
@@ -17,12 +17,12 @@
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  层1 / Layer 1: 前端交互层 / Frontend Layer — SPA + 18 JS           │  │
+│  │  层1 / Layer 1: 前端交互层 / Frontend Layer — 1 HTML (SPA) + 19 JS│  │
 │  │  仪表盘/Dashboard | LNN控制台/Console | 训练中心/Training             │  │
 │  │  机器人控制/Robot Ctrl | 仿真控制/Simulation | 多模态学习/Multimodal  │  │
 │  │  语音控制/Voice Ctrl | 对话界面/Dialogue | 安全面板/Safety Panel      │  │
 │  │  知识图谱/Knowledge Graph | API文档/API Docs | 编程工作台/Workbench  │  │
-│  │  通信/Comm: WebSocket (实时推送/Real-time) + HTTP REST, 端口/Port 8080│  │
+│  │  通信/Comm: WebSocket 9090 (实时推送/Real-time) + HTTP REST 8080│  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                    │  ↕ HTTP/WebSocket                     │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
@@ -30,7 +30,7 @@
 │  │  HTTP路由分发/Routing | WebSocket实时通信 | API密钥认证/Auth          │  │
 │  │  熔断器/CircuitBreaker | 日志系统/Logging | 线程池调度/ThreadPool     │  │
 │  │  配置管理/Config | 信号处理/Signal | 安全头注入/SecurityHeaders      │  │
-│  │  285 handler槽位/API slots (277已实现/implemented)                    │  │
+│  │  290 handler槽位/API slots (282 API枚举 + 8别名)             │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                    │                                        │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
@@ -78,15 +78,15 @@
 
 ### 中文
 系统分为四层架构：
-1. **前端交互层**：单页面应用（SPA）+ 18个JS模块，提供完整的Web控制台界面
-2. **后端服务层**：提供HTTP REST API和WebSocket通信，处理路由、认证、安全等功能，285个handler槽位（277已实现）
+1. **前端交互层**：单页面应用（SPA，1个index.html）+ 19个JS模块（18个主模块 + 1个Worker），提供完整的Web控制台界面
+2. **后端服务层**：提供HTTP REST API和WebSocket通信，处理路由、认证、安全等功能，290个handler槽位（282个API枚举 + 8个别名）
 3. **统一多模态输入层**：将9种模态数据通过线性投影求和后注入单一CfC动态系统
 4. **核心引擎层**：包含唯一的共享LNN实例，128→256→128网络结构，所有子系统共享该模型
 
 ### English
 The system is divided into four architectural layers:
-1. **Frontend Interaction Layer**: Single Page Application (SPA) with 18 JS modules, providing a complete Web console interface
-2. **Backend Service Layer**: Provides HTTP REST API and WebSocket communication, handling routing, authentication, and security; 285 handler slots (277 implemented)
+1. **Frontend Interaction Layer**: Single Page Application (SPA, 1 index.html) with 19 JS modules (18 main modules + 1 Worker), providing a complete Web console interface
+2. **Backend Service Layer**: Provides HTTP REST API and WebSocket communication, handling routing, authentication, and security; 290 handler slots (282 API enums + 8 aliases)
 3. **Unified Multimodal Input Layer**: Injects 9 modalities of data into a single CfC dynamic system after linear projection and summation
 4. **Core Engine Layer**: Contains the only shared LNN instance, 128→256→128 network structure, with all subsystems sharing this model for processing
 
@@ -145,7 +145,7 @@ Each module mounts its corresponding functional subsystems (knowledge base, memo
 
 ### 中文
 1. **输入阶段**：多模态原始数据（视觉、音频、文本、传感器等）通过各自的线性投影矩阵 `W·x+b` 映射到统一特征空间
-2. **演化阶段**：拼接后的统一输入进入单一 CfCCell ODE 连续动态系统，由7种可选求解器进行状态演化
+2. **演化阶段**：拼接后的统一输入进入单一 CfCCell ODE 连续动态系统，由8种可选求解器进行状态演化
 3. **输出阶段**：演化后的状态注入共享主LNN，21个子系统通过注册表读取对应输出进行决策/预测/控制
 
 ### English

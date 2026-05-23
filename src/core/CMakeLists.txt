@@ -35,6 +35,7 @@ add_library(selflnn_core
     ode_solvers.c
     cfc_enhanced.c
     unified_lnn_state.c
+    laplace_unified.c
 )
 
 target_compile_definitions(selflnn_core PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
@@ -46,7 +47,7 @@ target_include_directories(selflnn_core PUBLIC
 # quaternion_lnn.c、selflnn.c需要GPU函数，所以始终链接GPU桩库并传播给所有使用者
 # ZSFABC-C001修复: 移除matrix_ops.c双重编译，改为链接selflnn_math库
 target_link_libraries(selflnn_core PUBLIC selflnn_gpu selflnn_math utils)
-target_link_libraries(selflnn_core PRIVATE selflnn_knowledge selflnn_multimodal)
+target_link_libraries(selflnn_core PRIVATE selflnn_multimodal)
 
 # 安装规则
 install(TARGETS selflnn_core

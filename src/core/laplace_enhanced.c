@@ -552,14 +552,9 @@ int laplace_stabilize_control(LaplaceEnhancedSystem* system, const float* contro
      * 先进行前向滤波 */
     float* forward_buf = (float*)safe_malloc(signal_size * sizeof(float));
     if (!forward_buf) {
-        /* 内存不足时降级为EMA低通滤波 */
-        float alpha = 0.3f;
-        stabilized_signal[0] = control_signal[0];
-        for (size_t i = 1; i < signal_size; i++) {
-            stabilized_signal[i] = alpha * control_signal[i] +
-                                   (1.0f - alpha) * stabilized_signal[i - 1];
-        }
-        return 0;
+        /* 内存分配失败，返回错误而非降级为EMA滤波 */
+        log_error("[拉普拉斯增强] safe_malloc失败，信号大小=%zu字节，拒绝EMA降级处理", signal_size * sizeof(float));
+        return -1;
     }
 
     /* 前向IIR滤波: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2] */

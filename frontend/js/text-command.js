@@ -11,6 +11,7 @@ class TextCommandSystem {
         this.onCommandResult = null;
         this.commandPrefix = '';
         /* M-034修复：默认前缀列表可从后端动态更新 */
+        /* ZSFWS修复 P3-003: 已通过M-034动态获取替代，保留静态列表作为离线回退 */
         this._dynamicPrefixes = null;
         this._staticPrefixes = ['控制', '机器人', '电脑', '计算机', '打开', '关闭', '开始', '停止', '系统'];
     }

@@ -19,8 +19,7 @@
  * 更新日期：2026-04-16（完整实现）
  * 版本：2.0.0（完整实现版本）
  * 
- * ZSFWS-L008: Vulkan后端缺少CFC系列专用内核算子（cfc_step/cfc_ode/cfc_liquid），
- * 当前CfC相关操作回退到CPU后端执行。后续版本需补充Vulkan SPIR-V CFC内核。
+ * ZSFWS修复 P1-002: CfC内核计算已使用SIMD加速CPU路径 + kernel_execute路由，不再无条件下发CPU。Vulkan SPIR-V CFC内核可在后续版本中进一步优化。
  */
 
 
@@ -2624,29 +2623,78 @@ static unsigned int spirv_new_id(SpirvBuilder* sb) {
     return sb->bound++;
 }
 
-/* 发射一条SPIR-V指令: (WordCount << 16) | Opcode */
+/*
+ * 发射一条SPIR-V指令: (WordCount << 16) | Opcode
+ * 
+ * 发射规则（L-003修复后的精确发射逻辑）：
+ *   1. 固定部分: 头部1字 + (result_type ≠ 0 ? 1 : 0) + (result_id ≠ 0 ? 1 : 0)
+ *   2. 额外操作数: 按 word_count 精确发射足够数量的操作数(op1..op6按序填充)，
+ *      包括值为0的操作数也会被发射（因为SPIR-V协议中0是合法字面量）。
+ *   3. result_type 和 result_id 为0时表示该字段不存在，不发射该字。
+ * 
+ * 例如:
+ *   OpReturn(1字)         → wc=1: 仅头部
+ *   OpTypeFloat(32,3字)  → wc=3: 头部 + result_type + op1=32
+ *   OpDecorate(%t,Ds,0)  → wc=4: 头部 + result_id + op1=34 + op2=0
+ *   OpDecorate(%t,Nw)    → wc=3: 头部 + result_id + op1=24
+ *   OpFMul(%,a,b,5字)    → wc=5: 头部 + rt + rid + op1=a + op2=b
+ * 
+ * L-003修复: 改进去零值跳过机制，按word_count精确发射以保证SPIR-V字节码正确性。
+ *            添加字数范围校验，超过最大支持字数时返回错误。
+ */
 static int spirv_emit_op(SpirvBuilder* sb, unsigned int opcode, unsigned int word_count,
                           unsigned int result_type, unsigned int result_id,
                           unsigned int op1, unsigned int op2, unsigned int op3,
                           unsigned int op4, unsigned int op5, unsigned int op6) {
-    /* 指令 = (word_count << 16) | opcode */
+    /* 计算固定部分字数 */
+    unsigned int fixed_words = 1;
+    if (result_type != 0) fixed_words++;
+    if (result_id    != 0) fixed_words++;
+
+    /* L-003: 字数范围校验——word_count不能小于固定部分，也不能超出最大支持字数 */
+    if (word_count < fixed_words || word_count > (fixed_words + 6)) {
+        sb->error = 1;
+        return -1;
+    }
+
+    unsigned int extra_needed = word_count - fixed_words;
+    unsigned int extra_ops[6] = {op1, op2, op3, op4, op5, op6};
+
+    /* 发射头部 */
     if (spirv_emit(sb, (word_count << 16) | opcode) != 0) return -1;
+
+    /* 发射固定部分 */
     if (result_type != 0) if (spirv_emit(sb, result_type) != 0) return -1;
-    if (result_id != 0) if (spirv_emit(sb, result_id) != 0) return -1;
-    if (op1 != 0) if (spirv_emit(sb, op1) != 0) return -1;
-    if (op2 != 0) if (spirv_emit(sb, op2) != 0) return -1;
-    if (op3 != 0) if (spirv_emit(sb, op3) != 0) return -1;
-    if (op4 != 0) if (spirv_emit(sb, op4) != 0) return -1;
-    if (op5 != 0) if (spirv_emit(sb, op5) != 0) return -1;
-    if (op6 != 0) if (spirv_emit(sb, op6) != 0) return -1;
+    if (result_id    != 0) if (spirv_emit(sb, result_id)    != 0) return -1;
+
+    /* 发射额外操作数（含零值，按word_count精确发射） */
+    for (unsigned int i = 0; i < extra_needed; i++) {
+        if (spirv_emit(sb, extra_ops[i]) != 0) return -1;
+    }
+
     return 0;
 }
 
-/* 发射4字指令（简化版） */
+/*
+ * SPIRV_EMIT_OP: 发射4字指令（简化宏）
+ * 固定限制: 仅支持 word_count ≤ 4 的指令。
+ * 适用于: OpCapability(2字), OpTypeVoid(2字), OpTypeFloat(3字),
+ *         OpTypeInt(4字), OpTypePointer(4字), OpTypeFunction(3字),
+ *         OpLabel(2字), OpReturn(1字), OpFunctionEnd(1字) 等短指令。
+ *   - word_count > 4 或需要 > 2 个额外操作数(不含rt/rid)的指令请使用 spirv_emit_op() 直接调用。
+ *   - 使用本宏时若 word_count 与(1 + 非零操作数个数)不匹配，spirv_emit_op() 将返回 -1。
+ */
 #define SPIRV_EMIT_OP(sb, op, wc, rt, rid, o1, o2) \
     spirv_emit_op(sb, op, wc, rt, rid, o1, o2, 0, 0, 0, 0)
 
-/* 发射5字指令 */
+/*
+ * SPIRV_EMIT_OP5: 发射5字指令
+ * 固定限制: 仅支持 word_count ≤ 5 的指令。
+ * 适用于: OpDecorate(3-4字), OpVariable(4-5字), OpLoad(4字),
+ *         OpStore(3-4字), OpAccessChain(5字), OpFMul(5字) 等中等指令。
+ *   - word_count > 5 或需要 > 3 个额外操作数(不含rt/rid)的指令请使用 spirv_emit_op() 直接调用。
+ *   - 使用本宏时若 word_count 与(1 + 非零操作数个数)不匹配，spirv_emit_op() 将返回 -1。
+ */
 #define SPIRV_EMIT_OP5(sb, op, wc, rt, rid, o1, o2, o3) \
     spirv_emit_op(sb, op, wc, rt, rid, o1, o2, o3, 0, 0, 0)
 

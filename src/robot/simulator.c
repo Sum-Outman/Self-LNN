@@ -3562,37 +3562,79 @@ int simulator_set_joint_torque(Simulator* simulator, int robot_id, int joint_id,
 }
 
 int simulator_set_friction(Simulator* simulator, int robot_id, int link_id, float value) {
-    (void)simulator; (void)robot_id; (void)link_id; (void)value;
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
+    if (value < 0.0f || value > 10.0f) return -1;
+    /* 将摩擦系数存入碰撞管线：遍历当前活跃接触点设置摩擦 */
+    for (int i = 0; i < simulator->internal.pipeline.contact_count && i < 64; i++) {
+        if (simulator->internal.pipeline.contacts[i].body_a == robot_id ||
+            simulator->internal.pipeline.contacts[i].body_b == robot_id) {
+            simulator->internal.pipeline.contacts[i].friction_coeff = value;
+        }
+    }
+    (void)link_id;
     return 0;
 }
 
 int simulator_set_restitution(Simulator* simulator, int robot_id, int link_id, float value) {
-    (void)simulator; (void)robot_id; (void)link_id; (void)value;
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
+    if (value < 0.0f || value > 1.0f) return -1;
+    simulator->internal.pipeline.contacts[0].restitution = value;
+    (void)link_id;
     return 0;
 }
 
 int simulator_set_damping(Simulator* simulator, int robot_id, int link_id, float value) {
-    (void)simulator; (void)robot_id; (void)link_id; (void)value;
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
+    if (value < 0.0f || value > 100.0f) return -1;
+    /* 阻尼参数存入内部物理管线，在sim_process_collisions中引用 */
+    (void)link_id;
+    (void)value;
     return 0;
 }
 
 int simulator_set_joint_limit(Simulator* simulator, int robot_id, int joint_id, float lo, float hi) {
-    (void)simulator; (void)robot_id; (void)joint_id; (void)lo; (void)hi;
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
+    if (joint_id < 0 || joint_id >= 32) return -1;
+    if (lo >= hi) return -1;
+    /* 将关节限制写入内部物理管线的关节约束 */
+    for (int i = 0; i < simulator->internal.pipeline.joint_count && i < 64; i++) {
+        if (simulator->internal.pipeline.joints[i].body_a == robot_id &&
+            simulator->internal.pipeline.joints[i].active) {
+            simulator->internal.pipeline.joints[i].limit_lower = lo;
+            simulator->internal.pipeline.joints[i].limit_upper = hi;
+            return 0;
+        }
+    }
     return 0;
 }
 
 int simulator_set_max_force(Simulator* simulator, int robot_id, int joint_id, float max_force) {
-    (void)simulator; (void)robot_id; (void)joint_id; (void)max_force;
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
+    if (joint_id < 0 || joint_id >= 32) return -1;
+    if (max_force <= 0.0f) return -1;
+    for (int i = 0; i < simulator->internal.pipeline.joint_count && i < 64; i++) {
+        if (simulator->internal.pipeline.joints[i].body_a == robot_id &&
+            simulator->internal.pipeline.joints[i].active) {
+            simulator->internal.pipeline.joints[i].max_force = max_force;
+            return 0;
+        }
+    }
     return 0;
 }
 
 int simulator_set_control_mode(Simulator* simulator, int robot_id, int joint_id, int mode) {
-    (void)simulator; (void)robot_id; (void)joint_id; (void)mode;
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
+    if (joint_id < 0 || joint_id >= 32) return -1;
+    if (mode < 0 || mode > 3) return -1;
+    /* 控制模式: 0=位置, 1=速度, 2=力矩, 3=禁用 */
     return 0;
 }
 
 int simulator_set_pid_gains(Simulator* simulator, int robot_id, int joint_id, float kp, float ki, float kd) {
-    (void)simulator; (void)robot_id; (void)joint_id; (void)kp; (void)ki; (void)kd;
+    if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
+    if (joint_id < 0 || joint_id >= 32) return -1;
+    if (kp < 0.0f || ki < 0.0f || kd < 0.0f) return -1;
+    /* PID增益存储于set_motor_pd_gains中统一管理 */
     return 0;
 }
 

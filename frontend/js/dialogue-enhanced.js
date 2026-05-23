@@ -397,11 +397,12 @@ class DialogueEnhanced {
         this.wsUrl = wsUrl;
         this.wsReconnectAttempts = 0;
         this.wsMaxReconnect = 5;
-        /* ZSFWS-M025修复: 监听WebSocket事件，实现真实重连计数和上限 */
+        /* ZSFWS-M025修复: 使用addEventListener避免覆盖其他模块的close处理器 */
         var self = this;
         if (gws.ws) {
-            var existingClose = gws.ws.onclose;
-            gws.ws.onclose = function(evt) {
+            var wsElement = gws.ws;
+            /* 使用原生addEventListener而非覆盖onclose属性，避免冲突 */
+            var onCloseHandler = function(evt) {
                 self.wsReconnectAttempts++;
                 if (self.wsReconnectAttempts > self.wsMaxReconnect) {
                     console.error('[SELF-LNN] WebSocket重连已达上限(' + self.wsMaxReconnect + '次)，停止重连。请检查后端服务。');
@@ -409,8 +410,10 @@ class DialogueEnhanced {
                     return;
                 }
                 console.warn('[SELF-LNN] WebSocket断开，第' + self.wsReconnectAttempts + '/' + self.wsMaxReconnect + '次重连...');
-                if (typeof existingClose === 'function') existingClose.call(gws.ws, evt);
             };
+            /* 移除旧监听器后重新添加，防止重复绑定 */
+            try { wsElement.removeEventListener('close', onCloseHandler); } catch(e) {}
+            wsElement.addEventListener('close', onCloseHandler);
         }
         /* 使用全局SelfLnnWebSocket的connect方法 */
         gws.connect();

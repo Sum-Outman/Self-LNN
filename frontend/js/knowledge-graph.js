@@ -374,7 +374,9 @@
         var damping = 0.9;
         var centerForce = 0.01;
 
-        for (var iter = 0; iter < 50; iter++) {
+        /* 根据节点数量动态调整迭代次数 */
+        var maxIterations = Math.min(Math.max(Math.floor(nodes.length * 1.5), 20), 200);
+        for (var iter = 0; iter < maxIterations; iter++) {
             for (var i = 0; i < nodes.length; i++) {
                 var fx = 0, fy = 0;
                 for (var j = 0; j < nodes.length; j++) {

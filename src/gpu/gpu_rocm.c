@@ -854,10 +854,8 @@ static int rocm_backend_kernel_execute(GpuKernel* kernel, size_t global_work_siz
     unsigned int block_dim = (unsigned int)local_work_size;
     if (block_dim > (unsigned int)rocm_ctx->max_threads_per_block) block_dim = (unsigned int)rocm_ctx->max_threads_per_block;
     void* hip_func = kern->backend_data;
+    /* ZSFWS修复 P3-006: 移除无意义的NULL参数kernel启动尝试 */
     hipError_t err = hipModuleLaunchKernel(hip_func, grid_dim, 1, 1, block_dim, 1, 1, 0, stream, kern->arg_values, NULL);
-    if (err == hipErrorInvalidValue) {
-        err = hipModuleLaunchKernel(hip_func, grid_dim, 1, 1, block_dim, 1, 1, 0, stream, NULL, NULL);
-    }
     if (err != hipSuccess) return -1;
     return 0;
 }

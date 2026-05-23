@@ -83,6 +83,19 @@ void npu_common_populate_backend_iface(GpuBackendInterface* iface,
                                         GpuBackendMemCpyToDevFn cpy_h2d,
                                         GpuBackendMemCpyFromDevFn cpy_d2h);
 
+/* ZSFWS修复: SIMD加速版本 */
+int npu_common_simd_forward_dense(const float* input, const float* weights,
+                                   const float* bias, float* output,
+                                   size_t batch_size, size_t input_size,
+                                   size_t output_size,
+                                   GpuActivationType act_type, float alpha);
+int npu_common_simd_matmul(const float* a, const float* b, float* c,
+                            size_t m, size_t n, size_t k,
+                            int transpose_a, int transpose_b);
+int npu_common_simd_cfc_step(const float* h_in, const float* W,
+                              const float* b, const float* tau, float* h_out,
+                              float dt, int dim);
+
 #ifdef __cplusplus
 }
 #endif

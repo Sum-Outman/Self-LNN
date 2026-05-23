@@ -14,6 +14,7 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/secure_random.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -248,26 +249,26 @@ static void cfc_depth_ode_layer_init(CfcDepthOdeLayer* layer,
     float scale_gate = sqrtf(2.0f / (float)(input_dim + hidden_dim));
     float scale_ugate = sqrtf(2.0f / (float)(hidden_dim + hidden_dim));
 
-    unsigned int seed = (unsigned int)(uintptr_t)layer;
+    /* ZSFWS修复 P3-008: 统一使用secure_random_float()替代LCG PRNG */
     for (int i = 0; i < input_dim * hidden_dim; i++) {
-        seed = seed * 1103515245 + 12345;
-        layer->w_input[i] = (((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f) * scale_input;
-        seed = seed * 1103515245 + 12346;
-        layer->w_gate[i] = (((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f) * scale_gate;
+        float r = secure_random_float();
+        layer->w_input[i] = (r * 2.0f - 1.0f) * scale_input;
+        r = secure_random_float();
+        layer->w_gate[i] = (r * 2.0f - 1.0f) * scale_gate;
     }
     for (int i = 0; i < hidden_dim * hidden_dim; i++) {
-        seed = seed * 1103515245 + 12347;
-        layer->w_hidden[i] = (((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f) * scale_hidden;
-        seed = seed * 1103515245 + 12348;
-        layer->u_gate[i] = (((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f) * scale_ugate;
+        float r = secure_random_float();
+        layer->w_hidden[i] = (r * 2.0f - 1.0f) * scale_hidden;
+        r = secure_random_float();
+        layer->u_gate[i] = (r * 2.0f - 1.0f) * scale_ugate;
     }
     for (int i = 0; i < hidden_dim; i++) {
         layer->b_hidden[i] = 0.0f;
         layer->b_gate[i] = 0.0f;
     }
     for (int i = 0; i < input_dim + hidden_dim; i++) {
-        seed = seed * 1103515245 + 12349;
-        layer->tau_weights[i] = (((float)((seed >> 16) & 0x7FFF) / 32767.0f) * 2.0f - 1.0f) * 0.1f;
+        float r = secure_random_float();
+        layer->tau_weights[i] = (r * 2.0f - 1.0f) * 0.1f;
     }
     layer->tau_bias = 0.0f;
     layer->is_initialized = 1;

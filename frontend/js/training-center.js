@@ -10,7 +10,9 @@
             var lr = 0.001;
             var batch = 64;
             var epochs = 100;
-            var datasetPath = document.getElementById('training-dataset-path') ? document.getElementById('training-dataset-path').value : './data/training';
+            var datasetPath = document.getElementById('training-dataset-path') ?
+                document.getElementById('training-dataset-path').value : null;
+            if (!datasetPath) datasetPath = '/data/training';
             var lrEl = document.getElementById('training-learning-rate');
             if (lrEl) lr = parseFloat(lrEl.value) || 0.001;
             var batchEl = document.getElementById('training-batch-size');

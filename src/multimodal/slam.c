@@ -4228,7 +4228,8 @@ static int slam_estimate_motion_2d2d(const FeaturePoint* features1,
                            + tri_MtM[1] * (tri_Mtb[0] * tri_MtM[7] - tri_MtM[3] * tri_Mtb[2])
                            + tri_Mtb[0] * (tri_MtM[3] * tri_MtM[5] - tri_MtM[4] * tri_MtM[6])) * tri_inv;
                 } else {
-                    tri_X = x1; tri_Y = y1; tri_Z = 1.0f;
+                    /* 退化情况：三角测量克拉默法则求解失败，跳过此匹配 */
+                    continue;
                 }
                 if (tri_Z <= 0.0f) tri_Z = fmaxf(0.001f, fabsf(tri_Z));
             }
@@ -4950,10 +4951,8 @@ static int slam_triangulate_points(const FeaturePoint* features1,
                + MtM[1] * (Mtb[0] * MtM[7] - MtM[3] * Mtb[2])
                + Mtb[0] * (MtM[3] * MtM[5] - MtM[4] * MtM[6])) * inv_det;
         } else {
-            /* 退化情况：使用第一视图深度为1的回退 */
-            X = x1;
-            Y = y1;
-            Z = 1.0f;
+            /* 退化情况：三角测量克拉默法则求解失败，跳过此匹配 */
+            continue;
         }
         
         /* 深度有效性检查 */
@@ -9430,249 +9429,10 @@ int slam_generate_synthetic_frame(float* image_data,
                                  int width, int height,
                                  int frame_id, int total_frames,
                                  const float* camera_params) {
-#ifdef SELFLNN_STRICT_REAL_DATA
-    /* 严格真实数据模式：禁止合成帧生成 */
     (void)image_data; (void)width; (void)height;
     (void)frame_id; (void)total_frames; (void)camera_params;
-    log_error("[SLAM] 严格真实数据模式：slam_generate_synthetic_frame() 已禁用。"
-              "请使用真实摄像头图像数据。");
+    log_error("[SLAM] 合成帧生成已永久禁用，请连接真实相机。");
     return -1;
-#else
-    if (!image_data || width <= 0 || height <= 0 || total_frames <= 0 || !camera_params) {
-        return -1;
-    }
-
-    float fx = (camera_params[0] > 0.0f) ? camera_params[0] : SLAM_DEFAULT_FOCAL_LENGTH;
-    float fy = (camera_params[1] > 0.0f) ? camera_params[1] : SLAM_DEFAULT_FOCAL_LENGTH;
-    float cx = (camera_params[2] > 0.0f) ? camera_params[2] : (float)width * 0.5f;
-    float cy = (camera_params[3] > 0.0f) ? camera_params[3] : (float)height * 0.5f;
-
-    float t = (total_frames > 1) ? (float)frame_id / (float)(total_frames - 1) : 0.0f;
-
-    /* ---- 1. 填充背景: 棋盘格 + 径向渐变 ---- */
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            float dx = (float)(x - (int)cx) / (float)width;
-            float dy = (float)(y - (int)cy) / (float)height;
-            float dist = sqrtf(dx * dx + dy * dy);
-
-            /* 棋盘格纹理 */
-            float checker_x = (float)x * 0.05f;
-            float checker_y = (float)y * 0.05f;
-            int cx_i = (int)(checker_x + 1000.0f);
-            int cy_i = (int)(checker_y + 1000.0f);
-            float checker = ((cx_i + cy_i) & 1) ? 0.05f : -0.05f;
-
-            /* 径向渐变 */
-            float gradient = 0.42f + 0.08f * sinf(dist * 10.0f + t * 2.0f);
-
-            /* 空间光照变化（多光源合成计算） */
-            float light_angle = t * 6.2832f;
-            float lighting = 1.0f + 0.15f * sinf(dx * 3.0f + light_angle) * cosf(dy * 2.0f);
-
-            image_data[y * width + x] = (gradient + checker) * lighting;
-            if (image_data[y * width + x] < 0.1f) image_data[y * width + x] = 0.1f;
-            if (image_data[y * width + x] > 0.7f) image_data[y * width + x] = 0.7f;
-        }
-    }
-
-    /* ---- 2. 计算相机位姿 ---- */
-    float cam_pos[3], R[9];
-    compute_synthetic_camera_pose(frame_id, total_frames, cam_pos, R);
-
-    /* 计算前帧相机位姿（用于运动模糊估计） */
-    float prev_cam_pos[3], prev_R[9];
-    int prev_id = (frame_id > 0) ? frame_id - 1 : 0;
-    compute_synthetic_camera_pose(prev_id, total_frames, prev_cam_pos, prev_R);
-
-    /* 估计运动速度（用于运动模糊强度） */
-    float motion_speed = 0.0f;
-    for (int i = 0; i < 3; i++) {
-        float diff = cam_pos[i] - prev_cam_pos[i];
-        motion_speed += diff * diff;
-    }
-    float rot_diff = 0.0f;
-    for (int i = 0; i < 9; i++) {
-        float diff = R[i] - prev_R[i];
-        rot_diff += diff * diff;
-    }
-    motion_speed = sqrtf(motion_speed + rot_diff * 10.0f);
-    float blur_intensity = (motion_speed > 0.02f) ? (motion_speed * 30.0f) : 0.0f;
-    if (blur_intensity > 3.0f) blur_intensity = 3.0f;
-
-    /* ---- 3. 生成静态3D场景点 ---- */
-    float scene_points[SLAM_SYNTHETIC_NUM_POINTS][3];
-    float point_sizes[SLAM_SYNTHETIC_NUM_POINTS];
-    float point_brightnesses[SLAM_SYNTHETIC_NUM_POINTS];
-    unsigned int base_seed = (unsigned int)(frame_id + 1) * 2654435761u;
-    int num_points = generate_scene_points(scene_points, point_sizes,
-                                           point_brightnesses,
-                                           SLAM_SYNTHETIC_NUM_POINTS, &base_seed);
-
-    /* ---- 4. 投影并绘制3D特征点 ---- */
-    float motion_blur_x = 0.0f, motion_blur_y = 0.0f;
-    if (blur_intensity > 0.1f) {
-        /* 计算运动模糊方向：将运动向量投影到图像平面 */
-        float motion_dir[3] = {
-            cam_pos[0] - prev_cam_pos[0],
-            cam_pos[1] - prev_cam_pos[1],
-            cam_pos[2] - prev_cam_pos[2]
-        };
-        float m_norm = sqrtf(motion_dir[0]*motion_dir[0] +
-                            motion_dir[1]*motion_dir[1] +
-                            motion_dir[2]*motion_dir[2]);
-        if (m_norm > 1e-6f) {
-            motion_dir[0] /= m_norm;
-            motion_dir[1] /= m_norm;
-            motion_dir[2] /= m_norm;
-        }
-        float img_motion[2] = {
-            fx * motion_dir[0] / fmaxf(cam_pos[2], 0.5f),
-            fy * motion_dir[1] / fmaxf(cam_pos[2], 0.5f)
-        };
-        motion_blur_x = img_motion[0] * blur_intensity * 2.0f;
-        motion_blur_y = img_motion[1] * blur_intensity * 2.0f;
-    }
-
-    for (int p = 0; p < num_points; p++) {
-        float Pc[3];
-        Pc[0] = R[0]*scene_points[p][0] + R[1]*scene_points[p][1] + R[2]*scene_points[p][2]
-                - (R[0]*cam_pos[0] + R[1]*cam_pos[1] + R[2]*cam_pos[2]);
-        Pc[1] = R[3]*scene_points[p][0] + R[4]*scene_points[p][1] + R[5]*scene_points[p][2]
-                - (R[3]*cam_pos[0] + R[4]*cam_pos[1] + R[5]*cam_pos[2]);
-        Pc[2] = R[6]*scene_points[p][0] + R[7]*scene_points[p][1] + R[8]*scene_points[p][2]
-                - (R[6]*cam_pos[0] + R[7]*cam_pos[1] + R[8]*cam_pos[2]);
-
-        if (Pc[2] <= 0.01f) continue;
-
-        float u = fx * Pc[0] / Pc[2] + cx;
-        float v = fy * Pc[1] / Pc[2] + cy;
-
-        if (u < -10.0f || u >= (float)(width + 10) || v < -10.0f || v >= (float)(height + 10)) continue;
-
-        float radius = point_sizes[p] * (1.0f + 0.15f * sinf(t * 6.2832f + (float)p * 0.5f));
-        float brightness = point_brightnesses[p];
-
-        /* 添加运动模糊效果：沿运动方向拉伸圆形 */
-        if (blur_intensity > 0.3f) {
-            int num_blur_samples = (int)(blur_intensity * 3.0f) + 1;
-            if (num_blur_samples > 8) num_blur_samples = 8;
-            for (int s = -num_blur_samples / 2; s <= num_blur_samples / 2; s++) {
-                float sample_u = u + motion_blur_x * (float)s / (float)num_blur_samples;
-                float sample_v = v + motion_blur_y * (float)s / (float)num_blur_samples;
-                float blur_weight = 1.0f / (float)(num_blur_samples + 1);
-                draw_circle(image_data, width, height,
-                          sample_u, sample_v,
-                          radius * 0.8f,
-                          brightness * 0.7f, blur_weight * 0.6f);
-            }
-        } else {
-            draw_circle(image_data, width, height, u, v, radius, brightness, 0.8f);
-
-            /* 每个第5个点绘制暗色外环增强角点响应 */
-            if (p % 5 == 0) {
-                draw_circle(image_data, width, height, u, v, radius + 1.0f,
-                          brightness * 0.3f, 0.5f);
-            }
-        }
-    }
-
-    /* ---- 5. 绘制L形角点特征 ---- */
-    base_seed = (unsigned int)(frame_id + 1) * 2654435761u + 12345u;
-    for (int c = 0; c < SLAM_SYNTHETIC_NUM_CORNERS; c++) {
-        base_seed = base_seed * 1103515245u + 12345u;
-        float corner_x = ((float)(base_seed & 0x7FFF) / 32767.0f - 0.5f) * 4.0f;
-        base_seed = base_seed * 1103515245u + 12345u;
-        float corner_y = ((float)(base_seed & 0x7FFF) / 32767.0f - 0.5f) * 3.0f;
-        base_seed = base_seed * 1103515245u + 12345u;
-        float corner_z = 3.0f + ((float)(base_seed & 0xFFFF) / 65535.0f) * 10.0f;
-
-        float Pc[3];
-        Pc[0] = R[0]*corner_x + R[1]*corner_y + R[2]*corner_z
-                - (R[0]*cam_pos[0] + R[1]*cam_pos[1] + R[2]*cam_pos[2]);
-        Pc[1] = R[3]*corner_x + R[4]*corner_y + R[5]*corner_z
-                - (R[3]*cam_pos[0] + R[4]*cam_pos[1] + R[5]*cam_pos[2]);
-        Pc[2] = R[6]*corner_x + R[7]*corner_y + R[8]*corner_z
-                - (R[6]*cam_pos[0] + R[7]*cam_pos[1] + R[8]*cam_pos[2]);
-
-        if (Pc[2] <= 0.01f) continue;
-
-        float uc = fx * Pc[0] / Pc[2] + cx;
-        float vc = fy * Pc[1] / Pc[2] + cy;
-
-        if (uc < 0.0f || uc >= (float)width || vc < 0.0f || vc >= (float)height) continue;
-
-        /* 根据距离调整角点大小 */
-        float corner_size = 4.0f + 15.0f / fmaxf(Pc[2], 0.5f);
-        if (corner_size > 12.0f) corner_size = 12.0f;
-        base_seed = base_seed * 1103515245u + 12345u;
-        float corner_brightness = 0.6f + ((float)(base_seed & 0x7F) / 127.0f) * 0.4f;
-        draw_corner(image_data, width, height, uc, vc, corner_size, corner_brightness);
-    }
-
-    /* ---- 6. 绘制线段特征（边缘检测数据） ---- */
-    base_seed = (unsigned int)(frame_id + 1) * 2654435761u + 67890u;
-    for (int l = 0; l < SLAM_SYNTHETIC_NUM_LINES; l++) {
-        base_seed = base_seed * 1103515245u + 12345u;
-        float lx0 = ((float)(base_seed & 0x7FFF) / 32767.0f - 0.5f) * 6.0f;
-        base_seed = base_seed * 1103515245u + 12345u;
-        float ly0 = ((float)(base_seed & 0x7FFF) / 32767.0f - 0.5f) * 4.0f;
-        base_seed = base_seed * 1103515245u + 12345u;
-        float lz = 2.0f + ((float)(base_seed & 0xFFFF) / 65535.0f) * 12.0f;
-        base_seed = base_seed * 1103515245u + 12345u;
-        float lx1 = lx0 + ((float)(base_seed & 0x7FFF) / 32767.0f - 0.5f) * 1.5f;
-        base_seed = base_seed * 1103515245u + 12345u;
-        float ly1 = ly0 + ((float)(base_seed & 0x7FFF) / 32767.0f - 0.5f) * 1.5f;
-
-        /* 投影线段端点 */
-        float Pc0[3], Pc1[3];
-        for (int pt = 0; pt < 2; pt++) {
-            float px = (pt == 0) ? lx0 : lx1;
-            float py = (pt == 0) ? ly0 : ly1;
-            float* Pc = (pt == 0) ? Pc0 : Pc1;
-            Pc[0] = R[0]*px + R[1]*py + R[2]*lz
-                    - (R[0]*cam_pos[0] + R[1]*cam_pos[1] + R[2]*cam_pos[2]);
-            Pc[1] = R[3]*px + R[4]*py + R[5]*lz
-                    - (R[3]*cam_pos[0] + R[4]*cam_pos[1] + R[5]*cam_pos[2]);
-            Pc[2] = R[6]*px + R[7]*py + R[8]*lz
-                    - (R[6]*cam_pos[0] + R[7]*cam_pos[1] + R[8]*cam_pos[2]);
-        }
-        if (Pc0[2] <= 0.01f || Pc1[2] <= 0.01f) continue;
-
-        float u0 = fx * Pc0[0] / Pc0[2] + cx;
-        float v0 = fy * Pc0[1] / Pc0[2] + cy;
-        float u1 = fx * Pc1[0] / Pc1[2] + cx;
-        float v1 = fy * Pc1[1] / Pc1[2] + cy;
-
-        if ((u0 < 0 && u1 < 0) || (u0 >= width && u1 >= width) ||
-            (v0 < 0 && v1 < 0) || (v0 >= height && v1 >= height)) continue;
-
-        base_seed = base_seed * 1103515245u + 12345u;
-        float line_brightness = 0.5f + ((float)(base_seed & 0x7F) / 127.0f) * 0.3f;
-        draw_line(image_data, width, height, u0, v0, u1, v1, line_brightness);
-    }
-
-    /* ---- 7. 添加复合噪声模型 ---- */
-    unsigned int noise_seed = (unsigned int)(frame_id + 1) * 2654435761u;
-    for (int i = 0; i < width * height; i++) {
-        noise_seed = noise_seed * 1103515245u + 12345u;
-        float gauss_noise = ((float)(noise_seed & 0xFFFF) / 65535.0f +
-                            (float)((noise_seed >> 16) & 0xFFFF) / 65535.0f - 1.0f) * 0.03f;
-
-        /* 散粒噪声（与信号强度相关） */
-        noise_seed = noise_seed * 1103515245u + 12345u;
-        float shot_noise = ((float)(noise_seed & 0xFFFF) / 65535.0f - 0.5f) *
-                           sqrtf(image_data[i] * 0.08f + 0.01f);
-
-        image_data[i] += gauss_noise + shot_noise;
-
-        /* 截止处理 */
-        if (image_data[i] < 0.0f) image_data[i] = 0.0f;
-        if (image_data[i] > 1.0f) image_data[i] = 1.0f;
-    }
-
-    return 0;
-#endif /* SELFLNN_STRICT_REAL_DATA */
 }
 
 /**

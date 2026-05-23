@@ -430,19 +430,37 @@ void logging_log_json(LogLevel level, const char* file, int line,
 
 double logging_get_timestamp(void)
 {
-    // 使用clock函数获取高精度时间
-    // 这里返回秒为单位的时间
-    static double start_time = 0.0;
-    static clock_t start_clock = 0;
-    
-    if (start_clock == 0)
-    {
-        start_clock = clock();
-        start_time = 0.0;
+    static double epoch_offset = 0.0;
+    static int initialized = 0;
+    if (!initialized) {
+        struct timespec ts;
+#if defined(_WIN32)
+        FILETIME ft;
+        GetSystemTimePreciseAsFileTime(&ft);
+        ULARGE_INTEGER uli;
+        uli.LowPart = ft.dwLowDateTime;
+        uli.HighPart = ft.dwHighDateTime;
+        double win_epoch = (double)(uli.QuadPart - 116444736000000000ULL) / 10000000.0;
+        epoch_offset = win_epoch;
+#else
+        clock_gettime(CLOCK_REALTIME, &ts);
+        epoch_offset = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
+        initialized = 1;
     }
-    
-    clock_t current_clock = clock();
-    return (double)(current_clock - start_clock) / CLOCKS_PER_SEC;
+    struct timespec ts;
+#if defined(_WIN32)
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    double now = (double)(uli.QuadPart - 116444736000000000ULL) / 10000000.0;
+    return now;
+#else
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
 }
 
 const char* logging_get_level_name(LogLevel level)

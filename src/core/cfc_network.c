@@ -406,6 +406,163 @@ int cfc_forward(CfCNetwork* network, const float* input,
 }
 
 /**
+ * @brief P0-BPTT: 分配/初始化cell级动量缓冲区
+ */
+static int cfc_ensure_cell_momentum(CfCCell* cell) {
+    if (!cell) return -1;
+    if (cell->cell_momentum_initialized) return 0;
+
+    size_t hidden = cell->config.hidden_size;
+    size_t input = cell->config.input_size;
+    size_t total = 0;
+
+    /* 统计所有cell级参数总量 */
+    total += input * hidden;  /* W_gx */
+    total += input * hidden;  /* W_fx */
+    total += input * hidden;  /* W_ox */
+    total += hidden * hidden; /* W_gh */
+    total += hidden * hidden; /* W_ah */
+    total += hidden * 3;      /* b_g */
+    total += hidden;          /* τ */
+
+    cell->cell_momentum_buffer = (float*)safe_calloc(total * 2, sizeof(float));
+    if (!cell->cell_momentum_buffer) return -1;
+    cell->cell_velocity_buffer = cell->cell_momentum_buffer + total;
+    cell->cell_momentum_size = total;
+    cell->cell_momentum_initialized = 1;
+    return 0;
+}
+
+/**
+ * @brief P0-BPTT: 使用Adam更新一组cell参数（内部辅助函数）
+ * 
+ * @param params 参数数组
+ * @param grads 梯度数组
+ * @param m 一阶矩缓冲区
+ * @param v 二阶矩缓冲区
+ * @param count 参数数量
+ * @param lr 学习率
+ * @param b1 beta1
+ * @param b2 beta2
+ * @param eps epsilon
+ * @param b1c 1/(1-beta1^t) 偏差校正
+ * @param b2c 1/(1-beta2^t) 偏差校正
+ */
+static void cfc_adam_update_group(float* params, const float* grads,
+                                   float* m, float* v, size_t count,
+                                   float lr, float b1, float b2, float eps,
+                                   float b1c, float b2c) {
+    for (size_t i = 0; i < count; i++) {
+        float g = grads[i];
+        if (!isfinite(g)) continue;
+        m[i] = b1 * m[i] + (1.0f - b1) * g;
+        v[i] = b2 * v[i] + (1.0f - b2) * g * g;
+        float m_hat = m[i] * b1c;
+        float v_hat = v[i] * b2c;
+        params[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+    }
+}
+
+/**
+ * @brief P0-BPTT: 用Adam风格更新所有cell级参数
+ * 
+ * 解决双层参数更新分裂问题——原先cell级参数用简单SGD，
+ * 与主优化器(Adam/AdamW)的更新路径完全不匹配，导致收敛分裂。
+ * 此函数将Adam自适应学习率统一应用于所有cell级参数。
+ */
+int cfc_apply_cell_gradients_adam(CfCNetwork* network, float learning_rate,
+                                   float beta1, float beta2, float epsilon, size_t t) {
+    SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
+    SELFLNN_CHECK_INITIALIZED(network, "CfC网络未初始化");
+
+    size_t hidden_size = network->config.hidden_size;
+    size_t input_size = network->config.input_size;
+    int num_layers = network->config.num_layers;
+
+    if (beta1 <= 0.0f) beta1 = 0.9f;
+    if (beta2 <= 0.0f) beta2 = 0.999f;
+    if (epsilon <= 0.0f) epsilon = 1e-8f;
+    if (t == 0) t = 1;
+
+    float b1_corr = 1.0f / (1.0f - powf(beta1, (float)t));
+    float b2_corr = 1.0f / (1.0f - powf(beta2, (float)t));
+
+    for (int layer = 0; layer < num_layers; layer++) {
+        CfCCell* cell = network->layers[layer];
+        if (!cell) continue;
+
+        if (cfc_ensure_cell_momentum(cell) != 0) return -1;
+
+        size_t layer_input = (layer == 0) ? input_size : hidden_size;
+        size_t w_count = layer_input * hidden_size;
+        size_t hh_count = hidden_size * hidden_size;
+
+        float* m = cell->cell_momentum_buffer;
+        float* v = cell->cell_velocity_buffer;
+        size_t offset = 0;
+
+        /* W_gx: 输入→门控 */
+        if (cell->input_gate_weight_grad && cell->input_gate_weights) {
+            cfc_adam_update_group(cell->input_gate_weights, cell->input_gate_weight_grad,
+                                  m + offset, v + offset, w_count,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            offset += w_count;
+        }
+        /* W_fx: 输入→遗忘门 */
+        if (cell->forget_gate_weight_grad && cell->forget_gate_weights) {
+            cfc_adam_update_group(cell->forget_gate_weights, cell->forget_gate_weight_grad,
+                                  m + offset, v + offset, w_count,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            offset += w_count;
+        }
+        /* W_ox: 输入→输出门 */
+        if (cell->output_gate_weight_grad && cell->output_gate_weights) {
+            cfc_adam_update_group(cell->output_gate_weights, cell->output_gate_weight_grad,
+                                  m + offset, v + offset, w_count,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            offset += w_count;
+        }
+        /* W_gh: 隐藏→门控 */
+        if (cell->hidden_to_gate_weight_grad && cell->hidden_to_gate_weights) {
+            cfc_adam_update_group(cell->hidden_to_gate_weights, cell->hidden_to_gate_weight_grad,
+                                  m + offset, v + offset, hh_count,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            offset += hh_count;
+        }
+        /* W_ah: 隐藏→激活 */
+        if (cell->hidden_to_activation_weight_grad && cell->hidden_to_activation_weights) {
+            cfc_adam_update_group(cell->hidden_to_activation_weights,
+                                  cell->hidden_to_activation_weight_grad,
+                                  m + offset, v + offset, hh_count,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            offset += hh_count;
+        }
+        /* b_g: 门控偏置 */
+        if (cell->gate_bias_grad && cell->gate_biases) {
+            cfc_adam_update_group(cell->gate_biases, cell->gate_bias_grad,
+                                  m + offset, v + offset, hidden_size * 3,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            offset += hidden_size * 3;
+        }
+        /* τ: 时间常数 */
+        if (cell->use_adaptive_tau && cell->time_constant_grad && cell->time_constants) {
+            cfc_adam_update_group(cell->time_constants, cell->time_constant_grad,
+                                  m + offset, v + offset, hidden_size,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            /* 钳位时间常数范围 */
+            for (size_t k = 0; k < hidden_size; k++) {
+                if (cell->time_constants[k] < cell->min_time_constant)
+                    cell->time_constants[k] = cell->min_time_constant;
+                if (cell->time_constants[k] > cell->max_time_constant)
+                    cell->time_constants[k] = cell->max_time_constant;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/**
  * @brief P0-002深度修复: 清零所有cell级梯度缓冲区
  * 
  * 在batch训练开始时/单样本反向传播前调用一次，
@@ -491,7 +648,7 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
     
     if (output_size != hidden_size && network->W_out_params) {
         /* P0-014修复: 使用独立W_out_params进行反向传播计算 */
-        
+
         /* dL/dh_j = Σ_i W_out[i][j] * error[i] */
         memset(output_gradient, 0, hidden_size * sizeof(float));
         for (size_t i = 0; i < output_size; i++) {
@@ -499,14 +656,31 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
                 output_gradient[j] += network->W_out_params[i * hidden_size + j] * error[i];
             }
         }
-        
-        /* 更新W_out_params: dL/dW_out[i][j] = error[i] * h[j] */
+
         float* last_hidden = network->layer_outputs + ((num_layers - 1) * max_layer_size);
-        for (size_t i = 0; i < output_size; i++) {
-            for (size_t j = 0; j < hidden_size; j++) {
-                network->W_out_params[i * hidden_size + j] -= learning_rate * error[i] * last_hidden[j];
+        if (skip_cell_update) {
+            /* P0-BPTT修复: 批量训练模式，W_out梯度累积到独立梯度缓冲区，
+             * 由cfc_apply_out_proj_gradients在批量结束时统一应用。
+             * 旧代码直接更新W_out_params导致批量训练时每样本独立更新，
+             * W_out的梯度未经过批量平均即被应用。 */
+            if (network->W_out_gradients) {
+                for (size_t i = 0; i < output_size; i++) {
+                    for (size_t j = 0; j < hidden_size; j++) {
+                        network->W_out_gradients[i * hidden_size + j] +=
+                            error[i] * last_hidden[j];
+                    }
+                    network->b_out_gradients[i] += error[i];
+                }
             }
-            network->b_out_params[i] -= learning_rate * error[i];
+        } else {
+            /* 单样本模式：直接更新W_out_params */
+            for (size_t i = 0; i < output_size; i++) {
+                for (size_t j = 0; j < hidden_size; j++) {
+                    network->W_out_params[i * hidden_size + j] -=
+                        learning_rate * error[i] * last_hidden[j];
+                }
+                network->b_out_params[i] -= learning_rate * error[i];
+            }
         }
     } else {
         memcpy(output_gradient, error, hidden_size * sizeof(float));

@@ -1738,7 +1738,7 @@ int gpu_get_device_info(GpuBackend backend, int device_index, GpuDeviceInfo* inf
  * CPU后端：上下文管理
  * =========================================================================== */
 
-GpuContext* gpu_context_create(GpuBackend backend, int device_index) {
+GpuContext* gpu_cpu_context_create(GpuBackend backend, int device_index) {
     if (backend != GPU_BACKEND_CPU && backend != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_GPU_NOT_AVAILABLE, __func__, __FILE__, __LINE__,
             "CPU计算后端：不支持非CPU后端创建上下文");

@@ -89,6 +89,24 @@ int cfc_get_bias_vector(CfCNetwork* network, float** bias_vector, size_t* bias_c
 int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate);
 
 /**
+ * @brief P0-BPTT: 使用Adam风格更新应用cell级参数梯度
+ * 
+ * 为所有cell级参数（W_gh, W_ah, W_gx, W_fx, W_ox, b_g, τ）使用
+ * Adam自适应学习率更新，解决双层参数更新分裂问题。
+ * 内部维护每参数的动量(m)和速度(v)缓冲区。
+ * 
+ * @param network CfC网络
+ * @param learning_rate 基础学习率
+ * @param beta1 一阶矩衰减率（默认0.9）
+ * @param beta2 二阶矩衰减率（默认0.999）
+ * @param epsilon 数值稳定常数（默认1e-8）
+ * @param t 当前全局步数（用于偏差校正）
+ * @return 0成功，负值失败
+ */
+int cfc_apply_cell_gradients_adam(CfCNetwork* network, float learning_rate,
+                                   float beta1, float beta2, float epsilon, size_t t);
+
+/**
  * @brief 应用输出投影矩阵(W_out+b_out)梯度
  * 
  * FIX-015: W_out 参数不在共享权重块(param_block)中，而是在grad_block尾部。

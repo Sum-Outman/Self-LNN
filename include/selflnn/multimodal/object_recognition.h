@@ -8,6 +8,9 @@
 
 #include <stddef.h>
 
+/* 前向声明，避免循环依赖 */
+typedef struct DepthEstimator DepthEstimator;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -82,6 +85,11 @@ int or_detect_changes(ObjectRecognizer* or_obj, const float* prev, const float* 
 int or_train_classifier(ObjectRecognizer* or_obj, const float* features, const int* labels, int samples, int dim, int categories);
 int or_save_model(const ObjectRecognizer* or_obj, const char* filepath);
 int or_load_model(ObjectRecognizer* or_obj, const char* filepath);
+
+/* 深度信息集成 —— 解决 H-010 硬编码物距问题 */
+int or_set_depth_estimator(ObjectRecognizer* or_obj, DepthEstimator* estimator);
+int or_set_depth_map(ObjectRecognizer* or_obj, const float* depth_map, int w, int h);
+int or_clear_depth_map(ObjectRecognizer* or_obj);
 
 #ifdef __cplusplus
 }

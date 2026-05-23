@@ -7,8 +7,8 @@
 
 body {
     font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
-    background: linear-gradient(135deg, #000000 0%, #111111 50%, #222222 100%);
-    color: #ffffff;
+    background: linear-gradient(135deg, var(--theme-bg-primary) 0%, var(--theme-bg-secondary) 50%, #222222 100%);
+    color: var(--theme-text-primary);
     min-height: 100vh;
     line-height: 1.6;
 }
@@ -91,7 +91,7 @@ body {
     margin-top: 0;
     background: rgba(0, 0, 0, 0.85);
     backdrop-filter: blur(12px);
-    border-bottom: 1px solid rgba(0, 255, 136, 0.10);
+    border-bottom: 1px solid var(--theme-border);
     position: sticky;
     top: 0;
     z-index: 1000;
@@ -267,7 +267,7 @@ body {
 }
 
 .section-header h2 i {
-    color: #888888;
+    color: var(--theme-accent);
 }
 
 .section-header p {
@@ -374,6 +374,14 @@ body {
 .model-status.disconnected {
     background: rgba(255, 50, 50, 0.1);
     color: #ff5555;
+}
+
+.status-badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
 }
 
 .status-badge.pending {
@@ -749,7 +757,7 @@ body {
 
 .btn:hover {
     transform: translateY(-2px);
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 5px 15px var(--theme-shadow);
 }
 
 .btn-primary {
@@ -790,8 +798,8 @@ body {
 
 .btn-outline {
     background: transparent;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    color: #cccccc;
+    border: 1px solid var(--theme-border);
+    color: var(--theme-text-secondary);
 }
 
 .btn-outline:hover {
@@ -2203,10 +2211,10 @@ body {
 .form-input {
     width: 100%;
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--theme-bg-card);
+    border: 1px solid var(--theme-border);
     border-radius: 6px;
-    color: #cccccc;
+    color: var(--theme-text-secondary);
     font-family: inherit;
     font-size: 0.9rem;
     box-sizing: border-box;
@@ -2219,10 +2227,10 @@ body {
 
 .form-select {
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--theme-bg-card);
+    border: 1px solid var(--theme-border);
     border-radius: 6px;
-    color: #cccccc;
+    color: var(--theme-text-secondary);
     font-family: inherit;
     font-size: 0.9rem;
     box-sizing: border-box;
@@ -2640,24 +2648,24 @@ body {
     margin-left: auto;
 }
 
-.status-badge {
+.model-item-status .status-badge {
     padding: 0.25rem 0.75rem;
     border-radius: 12px;
     font-size: 0.85rem;
     font-weight: 500;
 }
 
-.status-badge.active {
+.model-item-status .status-badge.active {
     background: rgba(255, 255, 255, 0.1);
     color: #aaaaaa;
 }
 
-.status-badge.training {
+.model-item-status .status-badge.training {
     background: rgba(255, 255, 255, 0.1);
     color: #999999;
 }
 
-.status-badge.stopped {
+.model-item-status .status-badge.stopped {
     background: rgba(255, 255, 255, 0.1);
     color: #777777;
 }
@@ -2804,10 +2812,10 @@ body {
 .form-input,
 .slider {
     padding: 0.5rem 1rem;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--theme-bg-card);
+    border: 1px solid var(--theme-border);
     border-radius: 4px;
-    color: #ffffff;
+    color: var(--theme-text-primary);
     font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
     font-size: 1rem;
 }
@@ -2820,8 +2828,8 @@ body {
 }
 
 .form-select option {
-    background: #222222;
-    color: #ffffff;
+    background: var(--theme-bg-secondary);
+    color: var(--theme-text-primary);
 }
 
 .slider {
@@ -4752,7 +4760,7 @@ input:checked + .slider:before {
     display: flex;
     justify-content: center;
     align-items: center;
-    z-index: 9999;
+    z-index: 10001;
     color: white;
     font-size: 18px;
 }
@@ -6020,7 +6028,7 @@ input:checked + .slider:before {
     font-family: 'Consolas', 'Courier New', monospace;
 }
 
-.status-badge {
+.api-key-section .status-badge {
     display: inline-block;
     padding: 0.25rem 0.75rem;
     border-radius: 12px;
@@ -6028,19 +6036,19 @@ input:checked + .slider:before {
     font-weight: 500;
 }
 
-.status-badge.active {
+.api-key-section .status-badge.active {
     background: rgba(0, 255, 136, 0.2);
     color: #00ff88;
     border: 1px solid rgba(0, 255, 136, 0.3);
 }
 
-.status-badge.inactive {
+.api-key-section .status-badge.inactive {
     background: rgba(255, 107, 107, 0.2);
     color: #ff6b6b;
     border: 1px solid rgba(255, 107, 107, 0.3);
 }
 
-.status-badge.pending {
+.api-key-section .status-badge.pending {
     background: rgba(255, 186, 0, 0.2);
     color: #ffba00;
     border: 1px solid rgba(255, 186, 0, 0.3);
@@ -6660,7 +6668,7 @@ input:checked + .slider:before {
     left: 0;
     right: 0;
     bottom: 0;
-    z-index: 9999;
+    z-index: 10002;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -8713,23 +8721,6 @@ input:checked + .slider:before {
 /* ================================================================
  * 通用组件样式 - 跨页面标准化
  * ================================================================ */
-
-/* 小尺寸按钮 - 在多个页面中广泛使用 */
-.btn-sm {
-    padding: 0.35rem 0.8rem;
-    border: none;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.08);
-    color: #cccccc;
-    cursor: pointer;
-    font-size: 0.75rem;
-    font-family: inherit;
-    transition: all 0.2s ease;
-}
-.btn-sm:hover {
-    background: rgba(255, 255, 255, 0.15);
-    color: #ffffff;
-}
 
 /* 等待连接文本 - 未连接后端时的占位提示 */
 .pending-text {

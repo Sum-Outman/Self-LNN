@@ -453,8 +453,11 @@ int can_send_frame(DeviceProtocolManager* dpm, const char* device, const CanFram
     }
     return 0;
 #else
-    dev->bytes_sent += 8 + (size_t)frame->dlc;
-    return 0;
+    /* 非Linux平台不支持SocketCAN，返回错误而非静默成功 */
+    (void)frame;
+    (void)dev;
+    log_warn("[CAN] 非Linux平台不支持SocketCAN，can_send_frame发送失败");
+    return -1;
 #endif
 }
 

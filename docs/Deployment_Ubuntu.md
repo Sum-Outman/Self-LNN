@@ -2,7 +2,7 @@
 # Ubuntu Deployment Guide
 
 > **适用版本 (Applicable Version):** Ubuntu 22.04 LTS / 24.04 LTS
-> **SELF-LNN版本 (Version):** 1.0.0 | **架构 (Arch):** x86-64 / ARM64
+> **SELF-LNN版本 (Version):** 1.4.0 | **架构 (Arch):** x86-64 / ARM64
 
 ---
 
@@ -85,21 +85,21 @@ cd build && ctest --output-on-failure && cd ..
 # 方法2: 使用测试脚本
 ./scripts/run_tests.sh
 
-# 方法3: 直接运行测试二进制
-./build/tests/test_core
+# 方法3: 直接运行测试二进制（tests/目录尚未建立）
+# ./build/tests/test_core
 ```
 
 ### 2.4 启动服务 / Start the Service
 
 ```bash
 # 直接运行 (Run directly)
-./build/src/selflnn
+./build/bin/Release/selflnn
 
 # 指定端口 (Specify port)
-./build/src/selflnn -p 8080
+./build/bin/Release/selflnn -p 8080
 
 # 后台运行 (Run in background)
-nohup ./build/src/selflnn > slnn.log 2>&1 &
+nohup ./build/bin/Release/selflnn > slnn.log 2>&1 &
 ```
 
 启动后访问 (After startup, access): `http://localhost:8080`
@@ -156,14 +156,18 @@ cmake --build build --clean-first
 ### 4.1 使用部署脚本 / Using Deploy Script
 
 ```bash
-# 部署到 /opt/slnn (Deploy to /opt/slnn)
-sudo ./scripts/deploy.sh -t /opt/slnn
+# 手动部署到 /opt/slnn (Manual deploy to /opt/slnn)
+sudo mkdir -p /opt/slnn/{bin,frontend,config,logs,data}
+sudo cp build/bin/Release/selflnn /opt/slnn/bin/
+sudo cp -r frontend/* /opt/slnn/frontend/
+sudo cp config/*.json.example /opt/slnn/config/
 
-# 部署并指定端口 (Deploy with custom port)
-sudo ./scripts/deploy.sh -t /opt/slnn -p 8080
-
-# 部署并安装为系统服务 (Deploy and install as system service)
-sudo ./scripts/deploy.sh -t /opt/slnn -s
+# 使用 systemd 服务（参考 config/slnn.service.example）
+# Use systemd service (refer to config/slnn.service.example)
+sudo cp config/slnn.service.example /etc/systemd/system/slnn.service
+sudo systemctl daemon-reload
+sudo systemctl enable slnn
+sudo systemctl start slnn
 ```
 
 ### 4.2 手动部署 / Manual Deploy
@@ -173,7 +177,7 @@ sudo ./scripts/deploy.sh -t /opt/slnn -s
 sudo mkdir -p /opt/slnn/{bin,config,frontend,logs,data}
 
 # 复制二进制 (Copy binary)
-sudo cp build/src/selflnn /opt/slnn/bin/
+sudo cp build/bin/Release/selflnn /opt/slnn/bin/
 
 # 复制配置 (Copy config)
 sudo cp config/backend_config.json.example /opt/slnn/config/backend_config.json
@@ -329,7 +333,7 @@ curl http://localhost:8080/api/v1/gpu/status
 或查看启动日志中的GPU信息 (Or check startup logs for GPU info):
 
 ```bash
-./build/src/selflnn -l debug 2>&1 | grep -i gpu
+./build/bin/Release/selflnn -l debug 2>&1 | grep -i gpu
 ```
 
 ## 7. 验证部署 / Verify Deployment

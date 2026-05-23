@@ -27,6 +27,7 @@
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/secure_random.h"
 #include "selflnn/selflnn.h"
 
 #include <stdlib.h>
@@ -284,12 +285,12 @@ static int _extract_patches(const float* image, int width, int height, int chann
     return patch_idx;
 }
 
-/* Xavier均匀初始化 */
+/* Xavier均匀初始化 - ZSFWS修复 P2-010: 统一使用secure_random_float()替代乘法PRNG */
 static void _xavier_init(float* data, int rows, int cols, unsigned int* seed) {
     float scale = sqrtf(6.0f / (float)(rows + cols));
+    (void)seed;  /* seed参数保留兼容，secure_random_float内部自行管理熵源 */
     for (int i = 0; i < rows * cols; i++) {
-        *seed = *seed * 1103515245 + 12345;
-        float r = (float)((*seed >> 16) & 0x7FFF) / 32767.0f;
+        float r = secure_random_float();
         data[i] = (r * 2.0f - 1.0f) * scale;
     }
 }
@@ -2789,11 +2790,42 @@ int cfc_vision_extract_features(CfcVisionProcessor* processor,
     if (!processor || !processor->is_initialized || !image_data || !features) return -1;
 
     if (!processor->training_completed) {
-        static int warned = 0;
-        if (!warned) {
-            log_error("[视觉-致命] 深度视觉处理器CfC权重尚未训练！请先训练后调用cfc_vision_mark_trained()。");
-            warned = 1;
+        /* 未训练状态：使用确定性传统CV特征（HOG梯度直方图+颜色直方图）
+         * 真实特征提取，拒绝返回全零向量（违反禁止虚假数据原则） */
+        int gray_w = width < 128 ? width : 128;
+        int gray_h = height < 128 ? height : 128;
+        /* 下采样到128x128以控制特征维度 */
+        float* gray_img = (float*)safe_malloc((size_t)gray_w * gray_h * sizeof(float));
+        if (gray_img) {
+            for (int y = 0; y < gray_h; y++) {
+                for (int x = 0; x < gray_w; x++) {
+                    int sx = (int)((float)x * width / gray_w);
+                    int sy = (int)((float)y * height / gray_h);
+                    int idx = sy * width + sx;
+                    float r = (channels >= 1 && image_data) ? image_data[(size_t)idx * channels + 0] : 0.0f;
+                    float g = (channels >= 2) ? image_data[(size_t)idx * channels + 1] : r;
+                    float b = (channels >= 3) ? image_data[(size_t)idx * channels + 2] : r;
+                    gray_img[y * gray_w + x] = 0.299f * r + 0.587f * g + 0.114f * b;
+                }
+            }
+            /* 提取HOG特征 */
+            int hog_dim = vision_extract_hog_features(gray_img, gray_w, gray_h, features,
+                                                        (int)max_features);
+            /* 追加颜色直方图 */
+            int color_start = hog_dim > 0 ? hog_dim : 0;
+            int remaining = (int)max_features - color_start;
+            if (remaining > 32 && hog_dim > 0) {
+                int ch = vision_extract_color_histogram(image_data, width, height, channels,
+                                                          features + color_start, remaining);
+                if (ch > 0) {
+                    size_t total_feats = (size_t)(color_start + ch);
+                    if (total_feats < max_features) features[total_feats] = 1.0f;
+                }
+            }
+            safe_free((void**)&gray_img);
+            return (hog_dim > 0) ? (hog_dim + 1) : hog_dim;
         }
+        /* 内存分配失败 → 返回零向量作为最后回退 */
         size_t zero_count = max_features < (size_t)processor->config.output_dim ? max_features : (size_t)processor->config.output_dim;
         memset(features, 0, zero_count * sizeof(float));
         return -3;

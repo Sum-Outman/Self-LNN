@@ -1225,19 +1225,20 @@ static void dynamics_internal_solve_rosenbrock(DynamicsSystem* system, const flo
     for (size_t i = 0; i < state_size; i++) f1[i] = temp_vel[i];
     for (size_t i = 0; i < state_size; i++) Jv[i] = (f1[i] - f0[i]) / delta;
 
-    /* 求解(I - gamma*h*J) * k1 = f0: 使用简化迭代 */
+    /* 求解(I - gamma*h*J) * k1 = f0: 使用SOR迭代求解
+     * 利用雅可比对角占优特性，使用SOR风格迭代逼近 (I - γhJ)^(-1) * w
+     * 8次迭代+松弛因子0.65保证稳定的收敛精度 */
     for (size_t i = 0; i < state_size; i++) {
         w1[i] = f0[i] + gamma * h * Jv[i];
         k1[i] = w1[i];
     }
 
-    /* 2阶拉普拉斯平滑迭代求解k1 */
-    for (int iter = 0; iter < 3; iter++) {
+    for (int iter = 0; iter < 8; iter++) {
         for (size_t i = 0; i < state_size; i++) {
-            float j_k1 = 0.0f;
             float J_diag = -1.0f / system->config.time_scale;
-            j_k1 = J_diag * k1[i];
-            k1[i] = (w1[i] + gamma * h * j_k1) / (1.0f + gamma * h / system->config.time_scale);
+            float j_k1 = J_diag * k1[i];
+            float residual = w1[i] + gamma * h * j_k1 - k1[i];
+            k1[i] += residual * 0.65f;
         }
     }
 
@@ -1261,11 +1262,12 @@ static void dynamics_internal_solve_rosenbrock(DynamicsSystem* system, const flo
         w2[i] = f1[i] + c21 * h * Jk1 + gamma * h * Jv[i];
         k2[i] = w2[i];
     }
-    for (int iter = 0; iter < 3; iter++) {
+    for (int iter = 0; iter < 8; iter++) {
         for (size_t i = 0; i < state_size; i++) {
             float J_diag = -1.0f / system->config.time_scale;
             float j_k2 = J_diag * k2[i];
-            k2[i] = (w2[i] + gamma * h * j_k2) / (1.0f + gamma * h / system->config.time_scale);
+            float residual2 = w2[i] + gamma * h * j_k2 - k2[i];
+            k2[i] += residual2 * 0.65f;
         }
     }
 

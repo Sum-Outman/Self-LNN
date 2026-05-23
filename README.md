@@ -46,7 +46,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 ### 中文
 | 特性类别 | 具体功能 |
 |---------|---------|
-| **核心模型** | 单一 CfC 液态神经网络，7 种 ODE 求解器（闭式解、RK4、RK45、DP54、Rosenbrock、Symplectic、CTBP） |
+| **核心模型** | 单一 CfC 液态神经网络，8 种 ODE 求解器（闭式解、RK4、RK45、CTBP、DP54、Rosenbrock、Forest-Ruth辛、RHS直接评估） |
 | **多模态处理** | 支持 9 种模态统一输入：视觉、音频、文本、传感器、触觉、本体感、热感、雷达、电机 |
 | **架构设计** | Token-Free 连续信号架构，无离散 token，无需注意力机制，零外部 C 库依赖 |
 | **认知能力** | 自我认知、元认知、迭代式深度反思、多维自我修正 |
@@ -58,15 +58,15 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **知识库** | 知识图谱、三元组存储、多跳推理、本体工程、语义网络 |
 | **机器人控制** | DH 运动学、A*/RRT* 路径规划、ROS/ROS2 集成、PyBullet/Gazebo 仿真、多机器人协调 |
 | **GPU 加速** | 10 种 GPU 后端接口（CUDA、OpenCL、Vulkan、Metal、ROCm、CPU-SIMD — 完整内核调度+线程池并行；Intel、Ascend、Cambricon、TPU — 通过dlsym动态加载SDK + CPU自动回退；CPU 后端支持 27+ 种真实内核算子） |
-| **后端服务** | HTTP REST API（285 handler槽位，277 已实现 + 8 向后兼容别名）、WebSocket 实时通信、API 密钥认证、安全监控 |
+| **后端服务** | HTTP REST API（290 handler槽位，282个API枚举 + 8个向后兼容别名）、WebSocket 实时通信、API 密钥认证、安全监控 |
 | **并发系统** | 线程池、无锁队列、读写锁、RCU 机制 |
 | **安全系统** | 紧急停止、熔断器、审计日志、内容过滤 |
-| **前端界面** | 单页面应用（SPA）、18 个 JS 模块，完整的可视化控制台 |
+| **前端界面** | 单页面应用（SPA）、19 个 JS 模块（18个主模块 + 1个Stereo Worker），完整的可视化控制台 |
 
 ### English
 | Feature Category | Specific Functions |
 |-----------------|-------------------|
-| **Core Model** | Single CfC Liquid Neural Network, 7 ODE solvers (Closed-Form, RK4, RK45, DP54, Rosenbrock, Symplectic, CTBP) |
+| **Core Model** | Single CfC Liquid Neural Network, 8 ODE solvers (Closed-Form, RK4, RK45, CTBP, DP54, Rosenbrock, Forest-Ruth Symplectic, RHS Direct) |
 | **Multimodal Processing** | Unified input for 9 modalities: Vision, Audio, Text, Sensor, Haptic, Proprioception, Thermal, Radar, Motor |
 | **Architecture Design** | Token-Free continuous signal architecture, no discrete tokens, no attention mechanisms, zero external C library dependencies |
 | **Cognitive Abilities** | Self-cognition, metacognition, iterative deep reflection, multi-dimensional self-correction |
@@ -78,10 +78,10 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **Knowledge Base** | Knowledge graph, triple store, multi-hop reasoning, ontology engineering, semantic network |
 | **Robot Control** | DH kinematics, A*/RRT* path planning, ROS/ROS2 integration, PyBullet/Gazebo simulation, multi-robot coordination |
 | **GPU Acceleration** | 10 GPU backend interfaces (CUDA, OpenCL, Vulkan, Metal, ROCm, CPU-SIMD — full kernel dispatch + thread pool parallelism; Intel, Ascend, Cambricon, TPU — dlsym-loaded SDK + CPU auto-fallback; CPU backend supports 27+ real kernel operators) |
-| **Backend Service** | HTTP REST API (285 handler slots, 277 implemented + 8 backward-compatible aliases), WebSocket real-time communication, API key authentication, security monitoring |
+| **Backend Service** | HTTP REST API (290 handler slots, 282 API enums + 8 backward-compatible aliases), WebSocket real-time communication, API key authentication, security monitoring |
 | **Concurrency System** | Thread pool, lock-free queue, read-write lock, RCU mechanism |
 | **Safety System** | Emergency stop, circuit breaker, audit log, content filtering |
-| **Frontend Interface** | Single Page Application (SPA), 18 JS modules, complete visual console |
+| **Frontend Interface** | Single Page Application (SPA), 19 JS modules (18 main modules + 1 Stereo Worker), complete visual console |
 
 ---
 
@@ -93,7 +93,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  层1 / Layer 1: 前端交互层 / Frontend Layer — 15 HTML + 17 JS        │  │
+│  │  层1 / Layer 1: 前端交互层 / Frontend Layer — 1 HTML (SPA) + 19 JS │  │
 │  │  仪表盘/Dashboard | LNN控制台/Console | 训练中心/Training             │  │
 │  │  机器人控制/Robot Ctrl | 仿真控制/Simulation | 多模态学习/Multimodal  │  │
 │  │  语音控制/Voice Ctrl | 对话界面/Dialogue | 安全面板/Safety Panel      │  │
@@ -153,14 +153,14 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 
 ### 中文
 系统分为四层架构：
-1. **前端交互层**：单页面应用（SPA）+ 18个JS模块组成，提供完整的Web控制台界面
+1. **前端交互层**：单页面应用（SPA，1个index.html）+ 19个JS模块（18个主模块 + 1个Worker）组成，提供完整的Web控制台界面
 2. **后端服务层**：提供HTTP REST API和WebSocket通信，处理路由、认证、安全等功能
 3. **统一多模态输入层**：将9种模态数据通过线性投影求和后注入单一CfC动态系统
 4. **核心引擎层**：包含唯一的共享LNN实例，所有子系统共享该模型进行处理
 
 ### English
 The system is divided into four architectural layers:
-1. **Frontend Interaction Layer**: Single Page Application (SPA) with 18 JS modules, providing a complete Web console interface
+1. **Frontend Interaction Layer**: Single Page Application (SPA, 1 index.html) with 19 JS modules (18 main modules + 1 Worker), providing a complete Web console interface
 2. **Backend Service Layer**: Provides HTTP REST API and WebSocket communication, handling routing, authentication, security, and other functions
 3. **Unified Multimodal Input Layer**: Injects 9 modalities of data into a single CfC dynamic system after linear projection and summation
 4. **Core Engine Layer**: Contains the only shared LNN instance, with all subsystems sharing this model for processing
@@ -251,15 +251,15 @@ make -j$(nproc)
 # Or specify port
 ./build/bin/Release/selflnn.exe --port 8080
 
-# 运行示例
-# Run examples
-./build/examples/Release/hello_selflnn.exe
-./build/examples/Release/robot_example.exe
-./build/examples/Release/knowledge_example.exe
+# 运行示例（待实现：examples/ 目录尚未建立）
+# Run examples (to be implemented: examples/ directory not yet established)
+# ./build/examples/Release/hello_selflnn.exe
+# ./build/examples/Release/robot_example.exe
+# ./build/examples/Release/knowledge_example.exe
 
-# 运行测试
-# Run tests
-ctest --test-dir build -C Release
+# 运行测试（待实现：tests/ 目录尚未建立）
+# Run tests (to be implemented: tests/ directory not yet established)
+# ctest --test-dir build -C Release
 ```
 
 #### English
@@ -270,13 +270,13 @@ ctest --test-dir build -C Release
 # Or specify port
 ./build/bin/Release/selflnn.exe --port 8080
 
-# Run examples
-./build/examples/Release/hello_selflnn.exe
-./build/examples/Release/robot_example.exe
-./build/examples/Release/knowledge_example.exe
+# Run examples (to be implemented: examples/ directory not yet established)
+# ./build/examples/Release/hello_selflnn.exe
+# ./build/examples/Release/robot_example.exe
+# ./build/examples/Release/knowledge_example.exe
 
-# Run tests
-ctest --test-dir build -C Release
+# Run tests (to be implemented: tests/ directory not yet established)
+# ctest --test-dir build -C Release
 ```
 
 ### 配置 / Configuration
@@ -876,15 +876,15 @@ The system provides a complete 6-stage training pipeline for robot skill trainin
 self-Z/
 ├── src/                    # 源代码 / Source Code
 │   ├── core/              # CfC 核心 / Core (34 files)
-│   ├── multimodal/        # 多模态处理 / Multimodal (52 files)
+│   ├── multimodal/        # 多模态处理 / Multimodal (50 files)
 │   ├── cognition/         # 自我认知 / Cognition (6 files)
-│   ├── reasoning/         # 推理引擎 / Reasoning (11 files)
+│   ├── reasoning/         # 推理引擎 / Reasoning (12 files)
 │   ├── knowledge/         # 知识库 / Knowledge (18 files)
 │   ├── memory/            # 记忆系统 / Memory (7 files)
 │   ├── learning/          # 学习系统 / Learning (10 files)
-│   ├── training/          # 训练系统 / Training (15 files)
-│   ├── robot/             # 机器人控制 / Robot (34 files)
-│   ├── gpu/               # GPU 加速 / GPU Backends (10 backends, 17 files)
+│   ├── training/          # 训练系统 / Training (14 files)
+│   ├── robot/             # 机器人控制 / Robot (27 files)
+│   ├── gpu/               # GPU 加速 / GPU Backends (10 backends, 18 files)
 │   ├── backend/           # HTTP/WS 后端 / Backend (3 files)
 │   ├── agi/               # AGI 核心 / AGI Core (3 files)
 │   ├── evolution/         # 演化引擎 / Evolution (3 files)
@@ -895,16 +895,16 @@ self-Z/
 │   ├── product_design/    # 产品设计 / Product Design (2 files)
 │   ├── multisystem/       # 多系统控制 / Multisystem (3 files)
 │   ├── math/              # 数学库 / Math (1 file)
-│   └── utils/             # 工具库 / Utils (12 files)
-├── include/selflnn/       # 头文件 / Headers (~180 files)
-├── frontend/              # 前端 / Frontend (15 HTML + 17 JS)
+│   └── utils/             # 工具库 / Utils (13 files)
+├── include/selflnn/       # 头文件 / Headers (223 files)
+├── frontend/              # 前端 / Frontend (1 HTML + 19 JS + 3 CSS)
 ├── docs/                  # 文档 / Documentation
-├── tests/                 # 测试 / Tests (50 files)
-├── examples/              # 示例 / Examples (6 files)
-├── scripts/               # 脚本 / Scripts (21 files)
+├── tests/                 # 测试 / Tests (待建立)
+├── examples/              # 示例 / Examples (待建立)
+├── scripts/               # 脚本 / Scripts (9 files)
 ├── config/                # 配置模板 / Config Templates
 ├── CMakeLists.txt         # 构建配置 / Build Config
-└── selflnn_config.json    # 运行时配置 / Runtime Config
+└── selflnn_config.json    # 运行时配置（从config/模板生成） / Runtime Config (generate from config/ template)
 ```
 
 #### English
@@ -912,15 +912,15 @@ self-Z/
 self-Z/
 ├── src/                    # Source Code
 │   ├── core/              # CfC Core (34 files)
-│   ├── multimodal/        # Multimodal Processing (52 files)
+│   ├── multimodal/        # Multimodal Processing (50 files)
 │   ├── cognition/         # Cognition (6 files)
-│   ├── reasoning/         # Reasoning Engine (11 files)
+│   ├── reasoning/         # Reasoning Engine (12 files)
 │   ├── knowledge/         # Knowledge Base (18 files)
 │   ├── memory/            # Memory System (7 files)
 │   ├── learning/          # Learning System (10 files)
-│   ├── training/          # Training System (15 files)
-│   ├── robot/             # Robot Control (34 files)
-│   ├── gpu/               # GPU Acceleration (10 backends, 17 files)
+│   ├── training/          # Training System (14 files)
+│   ├── robot/             # Robot Control (27 files)
+│   ├── gpu/               # GPU Acceleration (10 backends, 18 files)
 │   ├── backend/           # HTTP/WS Backend (3 files)
 │   ├── agi/               # AGI Core (3 files)
 │   ├── evolution/         # Evolution Engine (3 files)
@@ -931,16 +931,16 @@ self-Z/
 │   ├── product_design/    # Product Design (2 files)
 │   ├── multisystem/       # Multisystem Control (3 files)
 │   ├── math/              # Math Library (1 file)
-│   └── utils/             # Utilities (12 files)
-├── include/selflnn/       # Headers (~180 files)
-├── frontend/              # Frontend (15 HTML + 17 JS)
+│   └── utils/             # Utilities (13 files)
+├── include/selflnn/       # Headers (223 files)
+├── frontend/              # Frontend (1 HTML + 19 JS + 3 CSS)
 ├── docs/                  # Documentation
-├── tests/                 # Tests (50 files)
-├── examples/              # Examples (6 files)
-├── scripts/               # Scripts (21 files)
+├── tests/                 # Tests (to be established)
+├── examples/              # Examples (to be established)
+├── scripts/               # Scripts (9 files)
 ├── config/                # Config Templates
 ├── CMakeLists.txt         # Build Config
-└── selflnn_config.json    # Runtime Config
+└── selflnn_config.json    # Runtime Config (generate from config/ template)
 ```
 
 ### 添加新功能 / Adding New Features
@@ -1041,6 +1041,6 @@ A: Release builds default to `SELFLNN_STRICT_REAL_DATA` mode, where all syntheti
 
 ---
 
-> **文档更新 / Updated**: 2026-05-14
+> **文档更新 / Updated**: 2026-05-24
 > **开源仓库 / Repository**: https://github.com/Sum-Outman/Self-LNN
 > **开发者邮箱 / Developer Email**: silencecrowtom@qq.com

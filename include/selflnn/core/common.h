@@ -424,4 +424,16 @@ SELFLNN_STATIC_ASSERT(CHAR_BIT == 8, "CHAR_BIT 必须为 8");
     #define SELFLNN_IS_FINITE(x) (isfinite(x))
 #endif
 
+// ============================================================
+// 核心常量宏定义（L-001修复：统一管理关键数值常量，消除硬编码魔数）
+// ============================================================
+#define SELFLNN_EPSILON_FLOAT        1e-7f   /* 浮点数比较容差 */
+#define SELFLNN_EPSILON_DOUBLE       1e-12   /* 双精度浮点数比较容差 */
+#define SELFLNN_DEFAULT_DT           0.01f   /* 默认时间步长（dt） */
+#define SELFLNN_DEFAULT_LEARNING_RATE 0.001f /* 默认学习率 */
+#define SELFLNN_DEFAULT_TAU_MIN      0.001f  /* 默认最小时间常数 */
+#define SELFLNN_DEFAULT_TAU_MAX      10.0f   /* 默认最大时间常数 */
+#define SELFLNN_DEFAULT_GRAD_CLIP    5.0f    /* 默认梯度裁剪阈值 */
+#define SELFLNN_DEFAULT_LAYER_NORM_EPS 1e-5f /* 默认层归一化epsilon */
+
 #endif // SELFLNN_CORE_COMMON_H

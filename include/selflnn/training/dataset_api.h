@@ -98,7 +98,7 @@ int dataset_shuffle(TrainingDataset* ds);
  * @return 实际读取的样本数
  */
 int dataset_get_batch(TrainingDataset* ds, size_t batch_size,
-                       float* batch_inputs, float* batch_outputs);
+                     float* input_batch, float* output_batch);
 
 /**
  * @brief 计算数据集统计信息

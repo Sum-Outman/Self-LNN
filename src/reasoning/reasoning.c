@@ -3542,7 +3542,7 @@ static int analogical_reasoning_for_infer(ReasoningEngine* engine,
                     float deviation = last_premise - premise_mean;
                     float next_value = last_premise - mean_reversion * deviation;
                     
-                    // 添加基于确定性混沌的伪随机噪声
+                    // 添加基于确定性混沌噪声
                     // 使用简单但有效的混沌映射生成噪声
                     float chaos_noise = 0.0f;
                     if (premise_std > 1e-10f) {

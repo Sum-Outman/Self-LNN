@@ -167,14 +167,25 @@ int voice_motion_process_text(VoiceMotionControl* vmc, const char* text, MotionC
     cmd->type = MOTION_CMD_UNKNOWN;
     cmd->confidence = 0.0f;
 
+    /* 扫描所有匹配而非仅取第一个，优先最长匹配（避免"向前走慢点"丢失"慢点"） */
+    int best_match_idx = -1;
+    size_t best_match_len = 0;
     for (int i = 0; i < vmc->dict_count; i++) {
-        if (strstr(text, vmc->dict[i].keyword)) {
-            cmd->type = vmc->dict[i].cmd_type;
-            cmd->param1 = vmc->dict[i].default_param1;
-            cmd->param2 = vmc->dict[i].default_param2;
-            cmd->confidence = 0.85f;
-            break;
+        const char* found = strstr(text, vmc->dict[i].keyword);
+        if (found) {
+            size_t kw_len = strlen(vmc->dict[i].keyword);
+            if (kw_len > best_match_len) {
+                best_match_len = kw_len;
+                best_match_idx = i;
+            }
         }
+    }
+
+    if (best_match_idx >= 0) {
+        cmd->type = vmc->dict[best_match_idx].cmd_type;
+        cmd->param1 = vmc->dict[best_match_idx].default_param1;
+        cmd->param2 = vmc->dict[best_match_idx].default_param2;
+        cmd->confidence = 0.85f;
     }
 
     /* 增强数值提取 */

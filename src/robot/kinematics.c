@@ -775,6 +775,7 @@ int forward_kinematics_stateful(const KinematicModel* model, const float* joint_
  * 【已弃用】推荐使用 forward_kinematics_stateful() 以避免TLS跨实例共享问题。
  * 此函数保留用于向后兼容，内部使用TLS RobotKinematics实例。
  * 警告：同一线程内多个机器人模型共享同一个TLS RobotKinematics状态。
+ * 多机器人场景应使用 forward_kinematics_stateful() 传入独立的 RobotKinematics 实例。
  */
 int forward_kinematics(const KinematicModel* model, const float* joint_angles,
                         EndEffectorState* result) {

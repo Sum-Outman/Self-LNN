@@ -59,6 +59,8 @@ int ws_push_get_next_available_client(WSPushServer* server);
 
 int ws_push_get_client_count(const WSPushServer* server);
 
+int ws_push_server_poll(WSPushServer* server, int timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

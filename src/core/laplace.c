@@ -1108,7 +1108,6 @@ int laplace_optimize_training(LaplaceAnalyzer* analyzer,
             // 计算复指数：e^{jωτ}，其中τ = index_offset * dt
             float angle = omega * index_offset * dt;
             float cos_val = cosf(angle);
-            // float sin_val = sinf(angle);  // 未使用
             
             // 累加权重的实部（假设频域权重是实数且对称）
             coeff += freq_weights[k] * cos_val;

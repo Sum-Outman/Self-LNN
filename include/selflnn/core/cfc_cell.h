@@ -245,6 +245,11 @@ struct CfCCell {
     GatedCfCData* gated_data;
     HierarchicalCfCData* hierarchical_data;
     LiquidMemoryCfCData* liquid_memory_data;
+    /* P0-BPTT: 统一参数更新 — cell级动量缓冲区 */
+    float* cell_momentum_buffer;     /**< 所有cell级参数的动量缓冲区（一维平坦） */
+    float* cell_velocity_buffer;     /**< 所有cell级参数的速度缓冲区（Adam二阶矩） */
+    size_t cell_momentum_size;       /**< 动量缓冲区总大小（元素数） */
+    int cell_momentum_initialized;   /**< 动量缓冲区是否已初始化 */
 };
 #endif
 
@@ -293,6 +298,47 @@ int cfc_cell_forward_with_dt(CfCCell* cell, const float* input, float delta_t, f
  * @return int 成功返回0，失败返回-1
  */
 int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradient);
+
+/**
+ * @brief 时间梯度反向传播 — 计算梯度通过CfC状态转移矩阵的回传
+ * 
+ * 对给定组合梯度combined_gradient (已包含当前时间步的损失梯度和
+ * 来自未来的时间梯度)，计算通过状态转移 h_new→h_old 传播回上一步的梯度。
+ * 
+ * 同时累积时间链对 W_gh、W_ah、gate_bias 的额外梯度贡献。
+ * 
+ * @param cell CfC单元句柄（需已执行前向传播保存saved_state）
+ * @param combined_gradient 组合梯度向量 [hidden_size]
+ * @param temporal_gradient_out 输出时间梯度 [hidden_size]（传回上一步的梯度）
+ * @return 0成功，负值失败
+ */
+int cfc_cell_temporal_backward(CfCCell* cell, const float* combined_gradient,
+                                float* temporal_gradient_out);
+
+/**
+ * @brief 截断时间反向传播 (Truncated BPTT)
+ * 
+ * 在给定时间窗口上执行完整的BPTT。
+ * 
+ * 调用方需在调用前执行完整的前向传播序列，保存每步的快照:
+ *   seq_inputs[t]      = x(t)
+ *   seq_prev_states[t] = cfc_cell_forward 调用后 cell->state->saved_state 的快照
+ *   seq_forward_tau[t] = cell->forward_tau_used 的快照（可为NULL自动推算）
+ * 
+ * @param cell CfC单元句柄
+ * @param loss_gradients 每时间步的损失梯度 [seq_len * hidden_size]
+ * @param input_gradients 输出每步输入梯度 [seq_len * input_size]
+ * @param seq_len 序列长度
+ * @param seq_inputs 每步输入 [seq_len * input_size]
+ * @param seq_prev_states 每步前向状态快照 [seq_len * hidden_size]
+ * @param seq_forward_tau 每步 τ 快照 [seq_len * hidden_size]，NULL从time_constants推算
+ * @return 0成功，负值失败
+ */
+int cfc_cell_backward_bptt(CfCCell* cell, const float* loss_gradients,
+                            float* input_gradients, int seq_len,
+                            const float* seq_inputs,
+                            const float* seq_prev_states,
+                            const float* seq_forward_tau);
 
 /**
  * @brief 重置CfC单元状态

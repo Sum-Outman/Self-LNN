@@ -318,19 +318,45 @@ static int streaming_notify_clients(SensorPipeline* pipeline, const SensorPipeli
 {
     if (!pipeline->streaming_running || !entry) return -1;
 
-    uint8_t header[32];
-    size_t pos = 0;
-    uint32_t net_sensor_id = (uint32_t)entry->sensor_id;
-    uint32_t net_type = (uint32_t)entry->sensor_type;
-    uint32_t net_size = (uint32_t)entry->data_size;
-    uint64_t net_ts = (uint64_t)(entry->timestamp * 1e6);
-    float net_confidence = entry->confidence;
+    /* 构建WebSocket文本帧负载（JSON格式以确保客户端兼容） */
+    char payload[8192];
+    int payload_len = snprintf(payload, sizeof(payload),
+        "{\"sensor_id\":%u,\"type\":%u,\"timestamp\":%.6f,\"confidence\":%.4f,\"data_size\":%u}",
+        (uint32_t)entry->sensor_id,
+        (uint32_t)entry->sensor_type,
+        entry->timestamp,
+        entry->confidence,
+        (uint32_t)entry->data_size);
+    if (payload_len < 0) return -1;
 
-    memcpy(header + pos, &net_sensor_id, 4); pos += 4;
-    memcpy(header + pos, &net_type, 4); pos += 4;
-    memcpy(header + pos, &net_size, 4); pos += 4;
-    memcpy(header + pos, &net_ts, 8); pos += 8;
-    memcpy(header + pos, &net_confidence, 4); pos += 4;
+    /* 构建WebSocket文本帧 (opcode=0x1 文本帧, FIN=1)
+     * 帧格式: [FIN|RSV|opcode] [MASK|len] [ext len] [mask key] [payload]
+     * 客户端→服务器帧需要MASK位=1，此处为服务器→客户端，MASK=0 */
+    uint8_t ws_frame[8704]; /* 8K payload + header overhead */
+    size_t frame_pos = 0;
+
+    /* 字节0: FIN=1, RSV=0, opcode=0x1(文本帧) */
+    ws_frame[frame_pos++] = 0x81;
+
+    /* 字节1+: 长度编码 (MASK=0, 服务器→客户端) */
+    if ((size_t)payload_len < 126) {
+        ws_frame[frame_pos++] = (uint8_t)(payload_len & 0x7F);
+    } else if (payload_len < 65536) {
+        ws_frame[frame_pos++] = 126;
+        ws_frame[frame_pos++] = (uint8_t)((payload_len >> 8) & 0xFF);
+        ws_frame[frame_pos++] = (uint8_t)(payload_len & 0xFF);
+    } else {
+        ws_frame[frame_pos++] = 127;
+        for (int i = 7; i >= 0; i--) {
+            ws_frame[frame_pos++] = (uint8_t)(((uint64_t)payload_len >> (i * 8)) & 0xFF);
+        }
+    }
+
+    /* 复制负载数据 */
+    memcpy(ws_frame + frame_pos, payload, (size_t)payload_len);
+    frame_pos += (size_t)payload_len;
+
+    size_t total_frame_size = frame_pos;
 
     for (int i = 0; i < pipeline->client_count; i++)
     {
@@ -350,19 +376,15 @@ static int streaming_notify_clients(SensorPipeline* pipeline, const SensorPipeli
         if (!subscribed) continue;
 
 #if defined(_WIN32)
-        int sent = send(client->socket, (const char*)header, (int)sizeof(header), 0);
-        if (sent > 0 && net_size > 0 && entry->data)
-            sent = send(client->socket, (const char*)entry->data, (int)net_size, 0);
+        int sent = send(client->socket, (const char*)ws_frame, (int)total_frame_size, 0);
         if (sent <= 0)
         {
             closesocket(client->socket);
             client->is_active = 0;
-            client->socket = -1;
+            client->socket = (SOCKET)-1;
         }
 #else
-        int sent = (int)write(client->socket, header, sizeof(header));
-        if (sent > 0 && net_size > 0 && entry->data)
-            sent = (int)write(client->socket, entry->data, net_size);
+        int sent = (int)write(client->socket, ws_frame, total_frame_size);
         if (sent <= 0)
         {
             close(client->socket);

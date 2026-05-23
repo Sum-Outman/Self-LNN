@@ -622,60 +622,17 @@ static int compute_model_gradients(NeuralNetwork* model, const MetaTask* task,
 }
 
 /**
- * @brief 计算默认损失值——使用真实前向传播+MSE计算
+ * @brief 计算默认损失值
  * 
- * 当无法获取支持集数据时，使用基于任务ID的确定性输入数据，
- * 执行真实的前向传播和MSE损失计算。
- * 严格遵循"不接受任何简化处理"要求。
+ * H-002修复: 当没有真实数据时，直接返回 -1.0f 表示"无法计算"。
+ * 不再使用LCG生成伪随机输入和目标数据来伪造损失值。
+ * 调用者必须正确处理 -1.0f 返回值，表示没有可用数据来评估模型。
  */
 static float compute_default_loss_based_on_model(NeuralNetwork* model, const MetaTask* task) {
-    if (!model || !task) return 0.0f;
-    
-    LNN* network = (LNN*)model;
-    LNNConfig config;
-    if (lnn_get_config(network, &config) != 0) return 0.5f;
-    
-    uintptr_t task_ptr = (uintptr_t)task;
-    uint32_t seed = (uint32_t)(task_ptr ^ (task_ptr >> 16));
-    const char* id = task->task_id;
-    if (id) { while (*id) { seed = seed * 31 + (uint8_t)(*id); id++; } }
-    
-    float total_loss = 0.0f;
-    int valid_samples = 0;
-    int batch_size = (task->setting.support_samples > 0) ? 
-                     (task->setting.support_samples < 16 ? task->setting.support_samples : 16) : 8;
-    
-    for (int s = 0; s < batch_size; s++) {
-        float input_buf[64] = {0};
-        float target_buf[64] = {0};
-        int input_dim = (config.input_size > 0 && config.input_size <= 64) ? (int)config.input_size : 64;
-        int output_dim = (config.output_size > 0 && config.output_size <= 64) ? (int)config.output_size : 64;
-        
-        for (int i = 0; i < input_dim; i++) {
-            seed = seed * 1103515245 + 12345;
-            input_buf[i] = ((float)((seed >> 16) & 0x7FFF) / 32768.0f - 0.5f) * 2.0f;
-        }
-        
-        float output[256] = {0};
-        int fwd_result = lnn_forward(network, input_buf, output);
-        if (fwd_result != 0) continue;
-        
-        for (int i = 0; i < output_dim; i++) {
-            seed = seed * 1103515245 + 12345;
-            target_buf[i] = ((float)((seed >> 16) & 0x7FFF) / 32768.0f - 0.5f) * 2.0f;
-        }
-        
-        float sample_loss = 0.0f;
-        for (int i = 0; i < output_dim; i++) {
-            float diff = output[i] - target_buf[i];
-            sample_loss += diff * diff;
-        }
-        sample_loss /= (float)output_dim;
-        total_loss += sample_loss;
-        valid_samples++;
-    }
-    
-    return (valid_samples > 0) ? (total_loss / (float)valid_samples) : 0.5f;
+    (void)model;
+    (void)task;
+    /* 无真实数据，无法计算损失，返回 -1.0f 表示无效 */
+    return -1.0f;
 }
 
 /* ============================================================================
@@ -1041,14 +998,12 @@ static float compute_task_loss(NeuralNetwork* model, const MetaTask* task) {
     float avg_loss;
     if (valid_samples_processed > 0) {
         avg_loss = total_loss / valid_samples_processed;
+        if (avg_loss < 0.0f) avg_loss = 0.0f;
+        if (avg_loss > 10.0f) avg_loss = 10.0f;
     } else {
         // 没有成功处理任何样本，返回基于模型和任务计算的默认损失
         avg_loss = compute_default_loss_based_on_model(model, task);
     }
-    
-    // 确保损失值在合理范围内
-    if (avg_loss < 0.0f) avg_loss = 0.0f;
-    if (avg_loss > 10.0f) avg_loss = 10.0f;
     
     // 清理
     safe_free((void**)&hidden_state);
@@ -1483,14 +1438,14 @@ static float prototypical_network(MetaLearner* learner, const MetaTask* task) {
     // 获取网络配置
     LNNConfig config;
     if (lnn_get_config(network, &config) != 0) {
-        // 获取配置失败，返回默认损失
-        return 0.5f;
+        // 获取配置失败，返回 -1.0f 表示无法计算
+        return -1.0f;
     }
     
     // 检查任务数据是否可用
     if (!task->support_data || !task->support_labels || !task->query_data || !task->query_labels) {
         // 缺少必要数据，无法计算真实损失
-        return 0.5f;
+        return -1.0f;
     }
     
     int n_way = task->setting.n_way;
@@ -1501,7 +1456,7 @@ static float prototypical_network(MetaLearner* learner, const MetaTask* task) {
     
     // 验证数据一致性
     if (support_samples != n_way * k_shot || query_samples != n_way * q_query) {
-        return 0.5f;
+        return -1.0f;
     }
     
     // 分配临时缓冲区
@@ -1513,7 +1468,7 @@ static float prototypical_network(MetaLearner* learner, const MetaTask* task) {
         safe_free((void**)&hidden_state);
         safe_free((void**)&cell_state);
         safe_free((void**)&embedding);
-        return 0.5f;
+        return -1.0f;
     }
     
     // 计算每个类的原型（支持集样本嵌入的均值）
@@ -1523,7 +1478,7 @@ static float prototypical_network(MetaLearner* learner, const MetaTask* task) {
     if (!prototypes || !class_counts) {
         safe_free((void**)&hidden_state); safe_free((void**)&cell_state); safe_free((void**)&embedding);
         safe_free((void**)&prototypes); safe_free((void**)&class_counts);
-        return 0.5f;
+        return -1.0f;
     }
     
     // 初始化原型为零
@@ -1572,6 +1527,7 @@ static float prototypical_network(MetaLearner* learner, const MetaTask* task) {
     // 计算查询集损失
     const float* query_data = (const float*)task->query_data;
     const int* query_labels = (const int*)task->query_labels;
+    float avg_loss;
     float total_loss = 0.0f;
     int valid_query_count = 0;
     
@@ -1629,7 +1585,15 @@ static float prototypical_network(MetaLearner* learner, const MetaTask* task) {
     }
     
     // 计算平均损失
-    float avg_loss = (valid_query_count > 0) ? total_loss / valid_query_count : 0.5f;
+    if (valid_query_count <= 0) {
+        safe_free((void**)&hidden_state);
+        safe_free((void**)&cell_state);
+        safe_free((void**)&embedding);
+        safe_free((void**)&prototypes);
+        safe_free((void**)&class_counts);
+        return -1.0f;
+    }
+    avg_loss = total_loss / valid_query_count;
     
     // 确保损失值在合理范围内
     if (avg_loss < 0.1f) avg_loss = 0.1f;
@@ -1667,11 +1631,11 @@ static float relation_network(MetaLearner* learner, const MetaTask* task) {
     
     LNNConfig config;
     if (lnn_get_config(network, &config) != 0) {
-        return 0.5f;
+        return -1.0f;
     }
     
     if (!task->support_data || !task->support_labels || !task->query_data || !task->query_labels) {
-        return 0.5f;
+        return -1.0f;
     }
     
     int n_way = task->setting.n_way;
@@ -1681,7 +1645,7 @@ static float relation_network(MetaLearner* learner, const MetaTask* task) {
     int query_samples = task->setting.query_samples;
     
     if (support_samples != n_way * k_shot || query_samples <= 0) {
-        return 0.5f;
+        return -1.0f;
     }
     
     int max_n_way = n_way > 64 ? 64 : n_way;
@@ -1695,7 +1659,7 @@ static float relation_network(MetaLearner* learner, const MetaTask* task) {
         safe_free((void**)&hidden_state);
         safe_free((void**)&cell_state);
         safe_free((void**)&embedding);
-        return 0.5f;
+        return -1.0f;
     }
     
     // 计算每个类别的综合嵌入表示（支持集均值）
@@ -1708,7 +1672,7 @@ static float relation_network(MetaLearner* learner, const MetaTask* task) {
         safe_free((void**)&embedding);
         safe_free((void**)&class_embeddings);
         safe_free((void**)&class_counts);
-        return 0.5f;
+        return -1.0f;
     }
     
     const float* support_data = (const float*)task->support_data;
@@ -1756,7 +1720,7 @@ static float relation_network(MetaLearner* learner, const MetaTask* task) {
         safe_free((void**)&embedding);
         safe_free((void**)&class_embeddings);
         safe_free((void**)&class_counts);
-        return 0.5f;
+        return -1.0f;
     }
     
     for (int i = 0; i < max_query; i++) {
@@ -1833,7 +1797,8 @@ static float relation_network(MetaLearner* learner, const MetaTask* task) {
     safe_free((void**)&class_embeddings);
     safe_free((void**)&class_counts);
     
-    float avg_loss = (valid_count > 0) ? total_loss / valid_count : 0.5f;
+    if (valid_count <= 0) return -1.0f;
+    float avg_loss = total_loss / valid_count;
     if (avg_loss < 0.1f) avg_loss = 0.1f;
     if (avg_loss > 10.0f) avg_loss = 10.0f;
     return avg_loss;
@@ -1861,11 +1826,11 @@ static float matching_network(MetaLearner* learner, const MetaTask* task) {
     
     LNNConfig config;
     if (lnn_get_config(network, &config) != 0) {
-        return 0.5f;
+        return -1.0f;
     }
     
     if (!task->support_data || !task->support_labels || !task->query_data || !task->query_labels) {
-        return 0.5f;
+        return -1.0f;
     }
     
     int n_way = task->setting.n_way;
@@ -1875,7 +1840,7 @@ static float matching_network(MetaLearner* learner, const MetaTask* task) {
     int query_samples = task->setting.query_samples;
     
     if (support_samples <= 0 || query_samples <= 0) {
-        return 0.5f;
+        return -1.0f;
     }
     
     int max_support = support_samples > 512 ? 512 : support_samples;
@@ -1889,7 +1854,7 @@ static float matching_network(MetaLearner* learner, const MetaTask* task) {
         safe_free((void**)&hidden_state);
         safe_free((void**)&cell_state);
         safe_free((void**)&embedding);
-        return 0.5f;
+        return -1.0f;
     }
     
     // 计算支持集样本的嵌入
@@ -1902,7 +1867,7 @@ static float matching_network(MetaLearner* learner, const MetaTask* task) {
         safe_free((void**)&embedding);
         safe_free((void**)&support_embeddings);
         safe_free((void**)&support_labels_arr);
-        return 0.5f;
+        return -1.0f;
     }
     
     const float* support_data = (const float*)task->support_data;
@@ -1930,7 +1895,7 @@ static float matching_network(MetaLearner* learner, const MetaTask* task) {
         safe_free((void**)&embedding);
         safe_free((void**)&support_embeddings);
         safe_free((void**)&support_labels_arr);
-        return 0.5f;
+        return -1.0f;
     }
     
     // 匹配网络：使用注意力机制计算查询样本的预测
@@ -2010,7 +1975,8 @@ static float matching_network(MetaLearner* learner, const MetaTask* task) {
     safe_free((void**)&support_embeddings);
     safe_free((void**)&support_labels_arr);
     
-    float avg_loss = (valid_count > 0) ? total_loss / valid_count : 0.5f;
+    if (valid_count <= 0) return -1.0f;
+    float avg_loss = total_loss / valid_count;
     if (avg_loss < 0.1f) avg_loss = 0.1f;
     if (avg_loss > 10.0f) avg_loss = 10.0f;
     return avg_loss;
@@ -2696,31 +2662,24 @@ float meta_learner_reptile_step(MetaLearner* learner, const MetaTask* task) {
         int adapted_count = extract_model_parameters(
             reptile_adapted, ctx.adapted_parameters, learner->parameter_count);
         if (adapted_count <= 0) {
-            // 提取失败时，使用伪随机变化的回退方案（确保程序继续运行）
-            uintptr_t model_hash = (uintptr_t)learner->meta_model;
-            uintptr_t task_hash = (uintptr_t)task;
-            uint32_t seed = (uint32_t)(model_hash ^ task_hash) + 987654321;
-            for (size_t i = 0; i < learner->parameter_count; i++) {
-                seed = seed * 1103515245 + 12345;
-                uint32_t rand_val = (seed >> 16) & 0x7FFF;
-                ctx.adapted_parameters[i] = ctx.initial_parameters[i] + 
-                    (rand_val / 32767.5f - 0.5f) * 0.1f;
-            }
+            /* 参数提取失败，直接返回错误而非使用伪随机回退 */
+            log_error("[Reptile] 参数提取失败，拒绝伪随机回退。需要检查deep_copy_network和extract_model_parameters实现。");
+            lnn_free((LNN*)reptile_adapted);
+            safe_free((void**)&ctx.initial_parameters);
+            safe_free((void**)&ctx.adapted_parameters);
+            safe_free((void**)&ctx.task_gradients);
+            return -1;
         }
         
         // 释放深度副本
         lnn_free((LNN*)reptile_adapted);
     } else {
-        // 深度复制失败的回退方案
-        uintptr_t model_hash = (uintptr_t)learner->meta_model;
-        uintptr_t task_hash = (uintptr_t)task;
-        uint32_t seed = (uint32_t)(model_hash ^ task_hash) + 987654321;
-        for (size_t i = 0; i < learner->parameter_count; i++) {
-            seed = seed * 1103515245 + 12345;
-            uint32_t rand_val = (seed >> 16) & 0x7FFF;
-            ctx.adapted_parameters[i] = ctx.initial_parameters[i] + 
-                (rand_val / 32767.5f - 0.5f) * 0.1f;
-        }
+        /* 深度复制失败，直接返回错误而非使用LCG伪随机回退 */
+        log_error("[Reptile] deep_copy_network失败，拒绝LCG伪随机回退。模型指针可能无效。");
+        safe_free((void**)&ctx.initial_parameters);
+        safe_free((void**)&ctx.adapted_parameters);
+        safe_free((void**)&ctx.task_gradients);
+        return -1;
     }
     
     // 执行Reptile更新
@@ -2746,14 +2705,14 @@ float meta_learner_reptile_step(MetaLearner* learner, const MetaTask* task) {
  * 输出：关系得分（0到1之间的标量，表示相似度）
  */
 float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
-    if (!learner || !task) return 0.5f;
+    if (!learner || !task) return -1.0f;
 
     LNN* network = learner->meta_model;
     LNNConfig config;
-    if (lnn_get_config(network, &config) != 0) return 0.5f;
+    if (lnn_get_config(network, &config) != 0) return -1.0f;
 
     if (!task->support_data || !task->support_labels || !task->query_data || !task->query_labels)
-        return 0.5f;
+        return -1.0f;
 
     int n_way = task->setting.n_way;
     int k_shot = task->setting.k_shot;
@@ -2762,7 +2721,7 @@ float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
     int query_samples = task->setting.query_samples;
 
     if (support_samples != n_way * k_shot || query_samples != n_way * q_query)
-        return 0.5f;
+        return -1.0f;
 
     int out_dim = config.output_size;
     float* embedding = (float*)safe_calloc(out_dim, sizeof(float));
@@ -2773,7 +2732,7 @@ float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
     if (!embedding || !prototypes || !rel_input || !rel_logits) {
         safe_free((void**)&embedding); safe_free((void**)&prototypes);
         safe_free((void**)&rel_input); safe_free((void**)&rel_logits);
-        return 0.5f;
+        return -1.0f;
     }
 
     const float* support_data = (const float*)task->support_data;
@@ -2784,7 +2743,7 @@ float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
     if (!class_counts) {
         safe_free((void**)&embedding); safe_free((void**)&prototypes);
         safe_free((void**)&rel_input); safe_free((void**)&rel_logits);
-        return 0.5f;
+        return -1.0f;
     }
 
     for (int i = 0; i < support_samples; i++) {
@@ -2855,7 +2814,7 @@ float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
 
     learner->cumulative_loss += total_loss;
     learner->episode_count++;
-    return valid_queries > 0 ? total_loss / (float)valid_queries : 0.5f;
+    return valid_queries > 0 ? total_loss / (float)valid_queries : -1.0f;
 }
 
 /**
@@ -2868,14 +2827,14 @@ float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
  * 使用温度参数τ控制注意力分布的锐度
  */
 float meta_learner_matching_step(MetaLearner* learner, const MetaTask* task) {
-    if (!learner || !task) return 0.5f;
+    if (!learner || !task) return -1.0f;
 
     LNN* network = learner->meta_model;
     LNNConfig config;
-    if (lnn_get_config(network, &config) != 0) return 0.5f;
+    if (lnn_get_config(network, &config) != 0) return -1.0f;
 
     if (!task->support_data || !task->support_labels || !task->query_data || !task->query_labels)
-        return 0.5f;
+        return -1.0f;
 
     int n_way = task->setting.n_way;
     int k_shot = task->setting.k_shot;
@@ -2884,7 +2843,7 @@ float meta_learner_matching_step(MetaLearner* learner, const MetaTask* task) {
     int query_samples = task->setting.query_samples;
 
     if (support_samples != n_way * k_shot || query_samples != n_way * q_query)
-        return 0.5f;
+        return -1.0f;
 
     int out_dim = config.output_size;
     const float tau = 0.5f; /* 温度参数 */
@@ -2894,7 +2853,7 @@ float meta_learner_matching_step(MetaLearner* learner, const MetaTask* task) {
     float* embedding = (float*)safe_calloc(out_dim, sizeof(float));
     if (!support_embs || !embedding) {
         safe_free((void**)&support_embs); safe_free((void**)&embedding);
-        return 0.5f;
+        return -1.0f;
     }
 
     const float* support_data = (const float*)task->support_data;
@@ -2967,9 +2926,8 @@ float meta_learner_matching_step(MetaLearner* learner, const MetaTask* task) {
 
     learner->cumulative_loss += total_loss;
     learner->episode_count++;
-    return valid_queries > 0 ? total_loss / (float)valid_queries : 0.5f;
+    return valid_queries > 0 ? total_loss / (float)valid_queries : -1.0f;
 }
-
 /**
  * @brief 执行原型网络步骤
  */
@@ -3161,7 +3119,7 @@ int meta_learner_train(MetaLearner* learner, MetaTask* tasks, int task_count) {
                         task_loss = query_loss;
                         lnn_free(adapted);
                     } else {
-                        task_loss = 0.5f;
+                        task_loss = -1.0f;
                     }
                     break;
                 }
@@ -3221,7 +3179,7 @@ int meta_learner_train(MetaLearner* learner, MetaTask* tasks, int task_count) {
                         task_loss = query_loss;
                         lnn_free(adapted);
                     } else {
-                        task_loss = 0.5f;
+                        task_loss = -1.0f;
                     }
                     break;
                 }

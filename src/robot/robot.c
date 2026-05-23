@@ -4125,36 +4125,134 @@ int robot_ekf_fuse_sensors(const float* imu_accel, const float* imu_gyro,
     if (joint_velocities) memcpy(z+9, joint_velocities, 6 * sizeof(float));
     if (force_torque) memcpy(z+15, force_torque, 6 * sizeof(float));
 
-    /* 卡尔曼增益: K = P_pred * H^T * inv(H * P_pred * H^T + R) */
-    /* 先算 S = H * P_pred * H^T + R (简化: 对角近似) */
-    float S[EKF_N_OBS];
+    /* H-006修复: 完整的扩展卡尔曼滤波更新 — 全矩阵求逆替代对角简化 */
+    /* 计算新息协方差矩阵 S_full = H * P_pred * H^T + R (H=I, 故 S_full = P_pred + R) */
+    float S_full[EKF_N_OBS * EKF_N_OBS];
+    const float ekf_reg_eps = 1e-6f;
     for (int i = 0; i < EKF_N_OBS; i++) {
-        S[i] = P_pred[i * EKF_N_STATES + i] + R[i * EKF_N_OBS + i];
-        if (S[i] < 1e-10f) S[i] = 1e-10f;
+        for (int j = 0; j < EKF_N_OBS; j++) {
+            S_full[i * EKF_N_OBS + j] = P_pred[i * EKF_N_STATES + j] + R[i * EKF_N_OBS + j];
+        }
+        S_full[i * EKF_N_OBS + i] += ekf_reg_eps;
     }
 
-    /* K = P_pred * H^T * inv(diag(S)) — 对角S简化 */
-    /* 更新状态: x = x_pred + K * (z - H*x_pred) */
-    for (int i = 0; i < EKF_N_STATES; i++) {
-        float innovation = z[i] - x_pred[i];
-        float kalman_gain = P_pred[i * EKF_N_STATES + i] / S[i];
-        if (kalman_gain > 1.0f) kalman_gain = 1.0f;
-        if (kalman_gain < 0.0f) kalman_gain = 0.0f;
-        fused_state[i] = x_pred[i] + kalman_gain * innovation;
-    }
+    /* 高斯-约旦消元法: 对 S_full (21x21) 求逆 → S_inv */
+    float S_inv[EKF_N_OBS * EKF_N_OBS];
+    {
+        /* 增广矩阵: [S_full | I], 维度 21x42 */
+        float aug[EKF_N_OBS][EKF_N_OBS * 2];
+        memset(aug, 0, sizeof(aug));
+        for (int i = 0; i < EKF_N_OBS; i++) {
+            for (int j = 0; j < EKF_N_OBS; j++) {
+                aug[i][j] = S_full[i * EKF_N_OBS + j];
+            }
+            aug[i][EKF_N_OBS + i] = 1.0f;
+        }
 
-    /* 协方差更新: P = (I - K*H) * P_pred (对角简化) */
-    if (state_covariance) {
-        for (int i = 0; i < EKF_N_STATES; i++) {
-            for (int j = 0; j < EKF_N_STATES; j++) {
-                float K = 0.0f;
-                if (i == j && i < EKF_N_OBS) {
-                    K = P_pred[i * EKF_N_STATES + i] / S[i];
+        int singular = 0;
+        for (int col = 0; col < EKF_N_OBS && !singular; col++) {
+            /* 部分主元选取 */
+            int pivot = col;
+            float max_val = fabsf(aug[col][col]);
+            for (int row = col + 1; row < EKF_N_OBS; row++) {
+                float val = fabsf(aug[row][col]);
+                if (val > max_val) { max_val = val; pivot = row; }
+            }
+            if (max_val < 1e-12f) { singular = 1; break; }
+
+            /* 行交换 */
+            if (pivot != col) {
+                for (int j = 0; j < EKF_N_OBS * 2; j++) {
+                    float tmp = aug[col][j];
+                    aug[col][j] = aug[pivot][j];
+                    aug[pivot][j] = tmp;
                 }
-                float I_KH = (i == j) ? (1.0f - K) : 0.0f;
-                state_covariance[i * EKF_N_STATES + j] = I_KH * P_pred[i * EKF_N_STATES + j];
+            }
+
+            /* 主元归一化 */
+            float pivot_val = aug[col][col];
+            for (int j = 0; j < EKF_N_OBS * 2; j++) {
+                aug[col][j] /= pivot_val;
+            }
+
+            /* 消去其他行 */
+            for (int row = 0; row < EKF_N_OBS; row++) {
+                if (row == col) continue;
+                float factor = aug[row][col];
+                for (int j = 0; j < EKF_N_OBS * 2; j++) {
+                    aug[row][j] -= factor * aug[col][j];
+                }
             }
         }
+
+        if (singular) {
+            /* 矩阵奇异时退化为对角近似逆（安全后备） */
+            memset(S_inv, 0, sizeof(S_inv));
+            for (int i = 0; i < EKF_N_OBS; i++) {
+                float d = S_full[i * EKF_N_OBS + i];
+                S_inv[i * EKF_N_OBS + i] = 1.0f / (d > 1e-12f ? d : 1e-8f);
+            }
+        } else {
+            for (int i = 0; i < EKF_N_OBS; i++) {
+                for (int j = 0; j < EKF_N_OBS; j++) {
+                    S_inv[i * EKF_N_OBS + j] = aug[i][EKF_N_OBS + j];
+                }
+            }
+        }
+    }
+
+    /* 卡尔曼增益: K_gain = P_pred * H^T * inv(S) = P_pred * S_inv (H^T=I) */
+    float K_gain[EKF_N_STATES * EKF_N_OBS];
+    memset(K_gain, 0, sizeof(K_gain));
+    for (int i = 0; i < EKF_N_STATES; i++) {
+        for (int j = 0; j < EKF_N_OBS; j++) {
+            float s = 0.0f;
+            for (int k = 0; k < EKF_N_OBS; k++) {
+                s += P_pred[i * EKF_N_STATES + k] * S_inv[k * EKF_N_OBS + j];
+            }
+            K_gain[i * EKF_N_OBS + j] = s;
+        }
+    }
+
+    /* 状态更新: x = x_pred + K_gain * (z - H * x_pred) (H=I, 全矩阵乘向量) */
+    {
+        float innovation[EKF_N_OBS];
+        for (int i = 0; i < EKF_N_OBS; i++) {
+            innovation[i] = z[i] - x_pred[i];
+        }
+        for (int i = 0; i < EKF_N_STATES; i++) {
+            float correction = 0.0f;
+            for (int j = 0; j < EKF_N_OBS; j++) {
+                correction += K_gain[i * EKF_N_OBS + j] * innovation[j];
+            }
+            fused_state[i] = x_pred[i] + correction;
+        }
+    }
+
+    /* 协方差更新: P = (I - K_gain * H) * P_pred = (I - K_gain) * P_pred (H=I) */
+    if (state_covariance) {
+        float I_minus_KH[EKF_N_STATES * EKF_N_STATES];
+        memset(I_minus_KH, 0, sizeof(I_minus_KH));
+        for (int i = 0; i < EKF_N_STATES; i++) {
+            for (int j = 0; j < EKF_N_STATES; j++) {
+                I_minus_KH[i * EKF_N_STATES + j] = (i == j) ? 1.0f : 0.0f;
+                if (j < EKF_N_OBS) {
+                    I_minus_KH[i * EKF_N_STATES + j] -= K_gain[i * EKF_N_OBS + j];
+                }
+            }
+        }
+        /* P_new = (I - K) * P_pred, 完整矩阵乘法 */
+        float P_new[EKF_N_STATES * EKF_N_STATES];
+        for (int i = 0; i < EKF_N_STATES; i++) {
+            for (int j = 0; j < EKF_N_STATES; j++) {
+                float s = 0.0f;
+                for (int k = 0; k < EKF_N_STATES; k++) {
+                    s += I_minus_KH[i * EKF_N_STATES + k] * P_pred[k * EKF_N_STATES + j];
+                }
+                P_new[i * EKF_N_STATES + j] = s;
+            }
+        }
+        memcpy(state_covariance, P_new, sizeof(float) * EKF_N_STATES * EKF_N_STATES);
     }
 
     return 0;

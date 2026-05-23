@@ -132,16 +132,29 @@ OcrConfig ocr_get_default_config(void) {
 #define CJK_EXT_A_BEGIN    0x3400
 #define CJK_EXT_A_END      0x4DBF
 
-/* 基于Unicode码点的确定性结构属性计算函数
- * 使用Knuth乘法哈希+混合哈希生成每个汉字的唯一属性编码
- * 返回格式: [15:14=结构类型][13:8=笔画数估算][5:0=偏旁ID] */
+/* ZSFWS修复 P0-005: 使用CfC液态网络计算汉字视觉特征，替代数学哈希合成 */
+/* 前向声明 */
+static int cfc_based_char_feature_extract(OcrProcessor* processor, uint16_t codepoint,
+                                           float* feature_out, int feature_dim);
+
+/**
+ * @brief 计算CJK汉字笔画属性（已弃用）
+ * @deprecated 自v1.0起弃用，汉字特征现在由CfC网络从真实图像中学习。
+ *             此函数保留仅用于API兼容性，返回默认属性值0。
+ *             新代码应使用 cfc_based_char_feature_extract() 替代。
+ * @param codepoint Unicode码点（未使用）
+ * @return 始终返回0（默认笔画属性）
+ */
+#if defined(__GNUC__)
+__attribute__((deprecated("已弃用: 汉字特征由CfC网络学习，请使用cfc_based_char_feature_extract")))
+#elif defined(_MSC_VER)
+__declspec(deprecated("已弃用: 汉字特征由CfC网络学习，请使用cfc_based_char_feature_extract"))
+#endif
 static uint16_t compute_cjk_stroke_attr(uint16_t codepoint) {
-    uint32_t h1 = ((uint32_t)codepoint * 2654435761u);
-    uint32_t h2 = ((uint32_t)codepoint ^ 0x5A5A5A5Au) * 1597334677u;
-    int stroke_count = 2 + ((h1 >> 16) % 24);
-    int struct_type = ((h1 >> 20) ^ (h2 >> 24)) & 0x3;
-    int radical_id = ((h1 >> 4) ^ (h2 >> 10)) & 0x3F;
-    return (uint16_t)((struct_type << 14) | (stroke_count << 8) | radical_id);
+    /* 此函数已弃用：汉字特征现在由CfC网络从真实图像中学习
+     * 保留作为兼容性接口，返回默认属性 */
+    (void)codepoint;
+    return 0;
 }
 
 /* M-013: 1000个常用中文字符 UTF-16 码点数组 */
@@ -301,149 +314,79 @@ OcrProcessor* ocr_processor_create(const OcrConfig* config) {
                 processor->char_templates[idx].avg_distance = 0.5f;
                 
                 if (processor->char_templates[idx].features) {
-                    /* M-013修复: 基于Unicode码点计算汉字结构属性
-                     * 使用compute_cjk_stroke_attr()从码点确定性计算:
-                     *   stroke_count: 笔画数估算(2-25)
-                     *   struct_type:  结构类型(0=独体,1=左右,2=上下,3=包围)
-                     *   radical_id:   偏旁ID(0-63)
-                     * 基于笔画数和结构类型计算64维特征向量 */
-                    unsigned short attr = compute_cjk_stroke_attr(common_chinese[i]);
-                    int stroke_count = (attr >> 8) & 0x3F;        /* 真实笔画数 */
-                    int struct_type  = (attr >> 14) & 0x3;        /* 真实结构类型 */
-                    int radical_id   = attr & 0x3F;               /* 偏旁标识 */
-                    if (stroke_count < 1) stroke_count = 1;
-                    if (stroke_count > 40) stroke_count = 40;
-                    
-                    float* feat = processor->char_templates[idx].features;
-                    
-                    /* 维度0-31: 8x8网格笔画密度投影
-                     * 基于真实结构类型分配密度区域, 笔画数决定总密度 */
-                    for (int f = 0; f < 32; f++) {
-                        int gx = f % 8;
-                        int gy = f / 8;
-                        float density = 0.0f;
+                    /* ZSFWS修复 P0-005: 使用CfC液态视觉网络生成真实汉字视觉特征 */
+                    int feat_dim = 64;
+                    /* 在if/else外部声明渲染缓冲区，使两个分支都能访问 */
+                    float rendered_char[32 * 32];
+                    memset(rendered_char, 0, sizeof(rendered_char));
+                    uint16_t cp = common_chinese[i];
+                    ocr_render_char_glyph(cp, rendered_char, 32, 32);
+                    if (processor->deep_vision_processor) {
+                        /* 使用CfC网络从字符图像中提取真实视觉特征 */
                         
-                        /* 中心相对坐标 (-1.0 到 1.0) */
-                        float cx = (float)(gx - 3.5f) / 4.0f;
-                        float cy = (float)(gy - 3.5f) / 4.0f;
-                        
-                        if (struct_type == 0) {
-                            /* 独体结构: 笔画集中在中心 */
-                            float dist2 = cx*cx + cy*cy;
-                            density = expf(-dist2 * 2.5f) * 0.8f + 0.04f;
-                        } else if (struct_type == 1) {
-                            /* 左右结构: 笔画在左右两半分布
-                             * 左半权重略高(多数左右结构汉字左窄右宽) */
-                            float left_dist2 = (cx + 0.5f)*(cx + 0.5f) + cy*cy;
-                            float right_dist2 = (cx - 0.5f)*(cx - 0.5f) + cy*cy;
-                            density = expf(-left_dist2 * 3.0f) * 0.5f
-                                    + expf(-right_dist2 * 3.0f) * 0.4f + 0.03f;
-                        } else if (struct_type == 2) {
-                            /* 上下结构: 笔画在上下两半分布 */
-                            float top_dist2 = cx*cx + (cy + 0.5f)*(cy + 0.5f);
-                            float bot_dist2 = cx*cx + (cy - 0.5f)*(cy - 0.5f);
-                            density = expf(-top_dist2 * 3.0f) * 0.5f
-                                    + expf(-bot_dist2 * 3.0f) * 0.4f + 0.03f;
+                        /* 使用CfC ODE视觉处理器提取特征 */
+                        float vision_output[64];
+                        if (cfc_vision_extract_features(processor->deep_vision_processor, 
+                                                          rendered_char, 32, 32, 1,
+                                                          vision_output, (size_t)feat_dim) == 0) {
+                            memcpy(processor->char_templates[idx].features, vision_output, feat_dim * sizeof(float));
                         } else {
-                            /* 包围/品字结构: 外围+中心分布 */
-                            float edge = 0.6f - fminf(fabsf(cx), fabsf(cy)) * 0.5f;
-                            if (edge < 0.0f) edge = 0.0f;
-                            float center_dist2 = cx*cx + cy*cy;
-                            density = edge * 0.3f + expf(-center_dist2 * 2.0f) * 0.4f + 0.04f;
-                        }
-                        
-                        /* 笔画密度调制: 笔画越多密度越高 */
-                        float stroke_factor = (float)stroke_count / 14.0f;
-                        density *= stroke_factor * 1.1f;
-                        
-                        /* 偏旁个性化调制: 相同结构+相同笔画但不同偏旁产生不同分布 */
-                        float radical_tweak = sinf((float)(radical_id * 73 + f * 17) * 0.0174533f) * 0.04f;
-                        density += radical_tweak;
-                        
-                        /* 笔画数随机化: 确保相同偏旁不同笔画数的字符特征不同 */
-                        float stroke_fine = cosf((float)(stroke_count * 47 + f * 13) * 0.0314159f) * 0.02f;
-                        density += stroke_fine;
-                        
-                        if (density < 0.0f) density = 0.0f;
-                        if (density > 1.0f) density = 1.0f;
-                        
-                        feat[f] = density;
-                    }
-                    
-                    /* 维度32-39: 8方向梯度方向直方图（从密度网格计算） */
-                    float orient_hist[8] = {0};
-                    for (int gy = 0; gy < 7; gy++) {
-                        for (int gx = 0; gx < 7; gx++) {
-                            float gx_val = feat[gy*8 + gx + 1] - feat[gy*8 + gx];
-                            float gy_val = feat[(gy+1)*8 + gx] - feat[gy*8 + gx];
-                            float mag = sqrtf(gx_val*gx_val + gy_val*gy_val);
-                            if (mag > 0.001f) {
-                                float angle = atan2f(gy_val, gx_val);
-                                float bin_f = (angle / 3.14159265f + 1.0f) * 4.0f;
-                                int bin = (int)bin_f;
-                                if (bin >= 8) bin = 7;
-                                if (bin < 0) bin = 0;
-                                float frac = bin_f - (float)bin;
-                                orient_hist[bin % 8] += mag * (1.0f - frac);
-                                orient_hist[(bin + 1) % 8] += mag * frac;
+                            /* CfC网络不可用时使用字符位图网格密度特征（64维真实结构特征） */
+                            float grid_density_2[64];
+                            memset(grid_density_2, 0, sizeof(grid_density_2));
+                            for (int gy = 0; gy < 8; gy++) {
+                                for (int gx = 0; gx < 8; gx++) {
+                                    float sum = 0.0f;
+                                    int cnt = 0;
+                                    for (int py = gy * 4; py < (gy + 1) * 4 && py < 32; py++) {
+                                        for (int px = gx * 4; px < (gx + 1) * 4 && px < 32; px++) {
+                                            int pidx = py * 32 + px;
+                                            sum += (rendered_char[pidx] > 0.5f) ? 1.0f : 0.0f;
+                                            cnt++;
+                                        }
+                                    }
+                                    grid_density_2[gy * 8 + gx] = (cnt > 0) ? (sum / (float)cnt) : 0.0f;
+                                }
+                            }
+                            float max_d = 0.0f;
+                            for (int d = 0; d < 64; d++) {
+                                if (grid_density_2[d] > max_d) max_d = grid_density_2[d];
+                            }
+                            float sc = (max_d > 0.001f) ? (1.0f / max_d) : 1.0f;
+                            for (int d = 0; d < 64; d++) {
+                                processor->char_templates[idx].features[d] = grid_density_2[d] * sc;
                             }
                         }
-                    }
-                    float orient_sum = 0.0f;
-                    for (int b = 0; b < 8; b++) orient_sum += orient_hist[b];
-                    if (orient_sum > 0.001f) {
-                        for (int b = 0; b < 8; b++) orient_hist[b] /= orient_sum;
-                    }
-                    for (int b = 0; b < 8; b++) feat[32 + b] = orient_hist[b];
-                    
-                    /* 维度40-49: 结构统计特征 */
-                    feat[40] = (float)stroke_count / 40.0f;                 /* 归一化笔画数 */
-                    feat[41] = (float)struct_type / 3.0f;                   /* 归一化结构类型 */
-                    feat[42] = (float)radical_id / 63.0f;                   /* 归一化偏旁ID */
-                    
-                    /* 水平对称度 */
-                    float h_sym = 0.0f;
-                    for (int gy = 0; gy < 8; gy++)
-                        for (int gx = 0; gx < 4; gx++)
-                            h_sym += fabsf(feat[gy*8 + gx] - feat[gy*8 + 7 - gx]);
-                    feat[43] = 1.0f - fminf(h_sym / 16.0f, 1.0f);
-                    
-                    /* 垂直对称度 */
-                    float v_sym = 0.0f;
-                    for (int gy = 0; gy < 4; gy++)
-                        for (int gx = 0; gx < 8; gx++)
-                            v_sym += fabsf(feat[gy*8 + gx] - feat[(7-gy)*8 + gx]);
-                    feat[44] = 1.0f - fminf(v_sym / 16.0f, 1.0f);
-                    
-                    /* 笔画密度均值 */
-                    float mean_density = 0.0f;
-                    for (int f = 0; f < 32; f++) mean_density += feat[f];
-                    feat[45] = mean_density / 32.0f;
-                    
-                    /* 笔画密度标准差 */
-                    float var_density = 0.0f;
-                    for (int f = 0; f < 32; f++) {
-                        float diff = feat[f] - feat[45];
-                        var_density += diff * diff;
-                    }
-                    feat[46] = sqrtf(var_density / 32.0f);
-                    
-                    /* 左上/右上/左下/右下四象限密度 */
-                    float q_dens[4] = {0};
-                    for (int gy = 0; gy < 8; gy++)
-                        for (int gx = 0; gx < 8; gx++) {
-                            int q = (gy < 4 ? 0 : 2) + (gx < 4 ? 0 : 1);
-                            q_dens[q] += feat[gy*8 + gx];
+                    } else {
+                        /* 无CfC网络时使用基于字符位图的结构化空间特征（64维网格密度）
+                         * 拒绝cos/sin正交投影，改为提取真实字符形态特征
+                         * 方法：将32×32字符位图分为8×8网格，每格计算像素密度
+                         * 这64个特征值直接编码字符的空间结构信息 */
+                        float grid_density[64];
+                        memset(grid_density, 0, sizeof(grid_density));
+                        for (int gy = 0; gy < 8; gy++) {
+                            for (int gx = 0; gx < 8; gx++) {
+                                float sum = 0.0f;
+                                int count = 0;
+                                for (int py = gy * 4; py < (gy + 1) * 4 && py < 32; py++) {
+                                    for (int px = gx * 4; px < (gx + 1) * 4 && px < 32; px++) {
+                                        int pixel_idx = py * 32 + px;
+                                        sum += (rendered_char[pixel_idx] > 0.5f) ? 1.0f : 0.0f;
+                                        count++;
+                                    }
+                                }
+                                grid_density[gy * 8 + gx] = (count > 0) ? (sum / (float)count) : 0.0f;
+                            }
                         }
-                    for (int q = 0; q < 4; q++) feat[47 + q] = q_dens[q] / 16.0f;
-                    
-                    /* 维度51-63: 基于偏旁和笔画数的哈希派生特征 */
-                    for (int f = 51; f < 64; f++) {
-                        float hash_val = sinf((float)(
-                            radical_id * 131 + stroke_count * 37 + (f * 7) + 
-                            ((attr >> 8) * 53) + 41
-                        ) * 0.0174533f) * 0.5f + 0.5f;
-                        feat[f] = hash_val;
+                        /* 归一化：使特征具有相似尺度 */
+                        float max_density = 0.0f;
+                        for (int d = 0; d < 64; d++) {
+                            if (grid_density[d] > max_density) max_density = grid_density[d];
+                        }
+                        float scale = (max_density > 0.001f) ? (1.0f / max_density) : 1.0f;
+                        for (int d = 0; d < 64; d++) {
+                            processor->char_templates[idx].features[d] = grid_density[d] * scale;
+                        }
                     }
                     
                     /* 计算平均距离 */
@@ -453,7 +396,7 @@ OcrProcessor* ocr_processor_create(const OcrConfig* config) {
                         if (!processor->char_templates[k].features) continue;
                         float dist_sq = 0.0f;
                         for (int f = 0; f < 64; f++) {
-                            float d = feat[f] - processor->char_templates[k].features[f];
+                            float d = processor->char_templates[idx].features[f] - processor->char_templates[k].features[f];
                             dist_sq += d * d;
                         }
                         total_dist += sqrtf(dist_sq);
@@ -2245,153 +2188,15 @@ int ocr_recognize_chars(OcrProcessor* processor,
         }
     }
     
-    // 如果仍然没有模板，使用基于图像特征的启发式字符识别（完整实现）
+    /* ZSFWS修复 P0-006: 移除启发式字符猜测回退路径
+     * 启发式猜测（像素密度猜I/W/A、对称性猜O/A/H）产生不可靠结果，
+     * 违反"禁止虚假数据"原则。无模板时返回"未训练"错误。 */
     if (processor->num_char_templates == 0) {
-        for (int i = 0; i < num_chars; i++) {
-            // 获取当前字符图像
-            const float* char_image = &char_images[i * char_width * char_height];
-            
-            // 计算图像特征
-            float pixel_density = 0.0f;
-            float vertical_symmetry = 0.0f;
-            float horizontal_symmetry = 0.0f;
-            float vertical_peak = 0.0f;
-            float horizontal_peak = 0.0f;
-            
-            // 1. 计算像素密度（平均亮度）
-            for (int y = 0; y < char_height; y++) {
-                for (int x = 0; x < char_width; x++) {
-                    pixel_density += char_image[y * char_width + x];
-                }
-            }
-            pixel_density /= (char_width * char_height);
-            
-            // 2. 计算垂直对称性（左右对称）
-            if (char_width > 1) {
-                float left_sum = 0.0f, right_sum = 0.0f;
-                int half_width = char_width / 2;
-                for (int y = 0; y < char_height; y++) {
-                    for (int x = 0; x < half_width; x++) {
-                        left_sum += char_image[y * char_width + x];
-                        int mirror_x = char_width - 1 - x;
-                        right_sum += char_image[y * char_width + mirror_x];
-                    }
-                }
-                vertical_symmetry = 1.0f - fabsf(left_sum - right_sum) / (left_sum + right_sum + 1e-8f);
-            }
-            
-            // 3. 计算水平对称性（上下对称）
-            if (char_height > 1) {
-                float top_sum = 0.0f, bottom_sum = 0.0f;
-                int half_height = char_height / 2;
-                for (int y = 0; y < half_height; y++) {
-                    for (int x = 0; x < char_width; x++) {
-                        top_sum += char_image[y * char_width + x];
-                        int mirror_y = char_height - 1 - y;
-                        bottom_sum += char_image[mirror_y * char_width + x];
-                    }
-                }
-                horizontal_symmetry = 1.0f - fabsf(top_sum - bottom_sum) / (top_sum + bottom_sum + 1e-8f);
-            }
-            
-            // 4. 计算垂直投影直方图峰值位置
-            float* vert_proj = (float*)safe_calloc(char_width, sizeof(float));
-            if (vert_proj) {
-                memset(vert_proj, 0, char_width * sizeof(float));
-                for (int y = 0; y < char_height; y++) {
-                    for (int x = 0; x < char_width; x++) {
-                        vert_proj[x] += char_image[y * char_width + x];
-                    }
-                }
-                // 找到最大值位置
-                int max_x = 0;
-                float max_val = vert_proj[0];
-                for (int x = 1; x < char_width; x++) {
-                    if (vert_proj[x] > max_val) {
-                        max_val = vert_proj[x];
-                        max_x = x;
-                    }
-                }
-                vertical_peak = (float)max_x / (float)char_width;
-                safe_free((void**)&vert_proj);
-            }
-            
-            // 5. 计算水平投影直方图峰值位置
-            float* horiz_proj = (float*)safe_calloc(char_height, sizeof(float));
-            if (horiz_proj) {
-                memset(horiz_proj, 0, char_height * sizeof(float));
-                for (int y = 0; y < char_height; y++) {
-                    for (int x = 0; x < char_width; x++) {
-                        horiz_proj[y] += char_image[y * char_width + x];
-                    }
-                }
-                // 找到最大值位置
-                int max_y = 0;
-                float max_val = horiz_proj[0];
-                for (int y = 1; y < char_height; y++) {
-                    if (horiz_proj[y] > max_val) {
-                        max_val = horiz_proj[y];
-                        max_y = y;
-                    }
-                }
-                horizontal_peak = (float)max_y / (float)char_height;
-                safe_free((void**)&horiz_proj);
-            }
-            
-            // 基于特征猜测字符（启发式规则）
-            char guessed_char = '?';
-            float confidence = 0.5f; // 基础置信度
-            
-            // 规则1: 根据像素密度
-            if (pixel_density < 0.3f) {
-                // 低密度字符：I, 1, l, i
-                guessed_char = 'I';
-                confidence = 0.6f;
-            } else if (pixel_density > 0.7f) {
-                // 高密度字符：W, M, B, E
-                guessed_char = 'W';
-                confidence = 0.6f;
-            } else {
-                // 中等密度字符
-                guessed_char = 'A';
-                confidence = 0.5f;
-            }
-            
-            // 规则2: 根据对称性调整
-            if (vertical_symmetry > 0.8f && horizontal_symmetry > 0.8f) {
-                // 高度对称字符：O, X, H, I
-                guessed_char = 'O';
-                confidence = 0.7f;
-            } else if (vertical_symmetry > 0.7f) {
-                // 垂直对称字符：A, H, M, T
-                if (pixel_density > 0.5f) {
-                    guessed_char = 'A';
-                } else {
-                    guessed_char = 'H';
-                }
-                confidence = 0.65f;
-            }
-            
-            // 规则3: 根据峰值位置调整
-            if (vertical_peak < 0.3f) {
-                // 左侧峰值：L, J, C
-                guessed_char = 'L';
-            } else if (vertical_peak > 0.7f) {
-                // 右侧峰值：R, K, P
-                guessed_char = 'R';
-            }
-            
-            // 确保字符在'A'-'Z'范围内
-            if (guessed_char < 'A' || guessed_char > 'Z') {
-                guessed_char = 'A' + (i % 26);
-                confidence = 0.3f; // 降低置信度
-            }
-            
-            result->characters[i] = guessed_char;
-            result->confidences[i] = confidence;
-        }
-        result->characters[num_chars] = '\0';
-        return 0;
+        /* 无字符模板，标记结果为空并返回"需要训练" */
+        result->num_chars = 0;
+        result->characters = NULL;
+        result->confidences = NULL;
+        return 1;  /* 返回1表示需要训练 */
     }
     
     // 使用模板匹配进行字符识别

@@ -443,15 +443,15 @@ int robot_agent_learn(RobotAgent* agent, const float* state,
         for (int b = 0; b < batch_size; b++) {
             float q_target[AGENT_ACTION_DIM];
             policy_forward(&agent->target_policy, batch[b].next_state, q_target);
-            float max_q = 0.0f;
+            float max_q = -1e30f;
             for (int i = 0; i < agent->policy.output_dim; i++) {
-                if (fabsf(q_target[i]) > max_q) max_q = fabsf(q_target[i]);
+                if (q_target[i] > max_q) max_q = q_target[i];
             }
             float td_target[AGENT_ACTION_DIM];
             float reward = batch[b].reward;
+            float done_factor = batch[b].done ? 0.0f : 1.0f;
             for (int i = 0; i < agent->policy.output_dim; i++) {
-                td_target[i] = reward +
-                    agent->policy.discount_factor * max_q * (batch[b].done ? 0.0f : 1.0f);
+                td_target[i] = (i == 0 ? (reward + agent->policy.discount_factor * max_q * done_factor) : 0.0f);
             }
             policy_update(&agent->policy, batch[b].state, td_target,
                           agent->policy.learning_rate);
@@ -504,12 +504,16 @@ int robot_agent_imitate(RobotAgent* agent,
         memcpy(exp.state, s, s_dim * sizeof(float));
         memcpy(exp.action, a, a_dim * sizeof(float));
         exp.reward = 1.0f;
-        memcpy(exp.next_state, s, s_dim * sizeof(float));
+        /* 模仿学习：使用专家演示的action作为监督信号直接更新策略，
+         * 不依赖TD学习（因为演示没有真实的转移环境） */
+        memset(exp.next_state, 0, s_dim * sizeof(float));
         exp.done = 1;
         exp.timestamp = (float)time_utils_get_time_s();
-        exp.priority = 1.0f;
+        /* 降低经验回放优先级（演示数据仅用于行为克隆监督） */
+        exp.priority = 0.3f;
         replay_buffer_push(&agent->replay_buffer, &exp);
 
+        /* 监督学习：直接用专家动作作为目标，2倍学习率加速 */
         policy_update(&agent->policy, s, a, agent->policy.learning_rate * 2.0f);
     }
 

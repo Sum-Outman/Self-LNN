@@ -1238,47 +1238,19 @@ COSystem* co_system_create(COConfig config) {
         system->ui_classifier_owns = 0;
         system->ocr_net_owns = 0;
     } else {
-        /* 回退：自建独立LNN（全局系统未初始化时使用） */
-        system->screen_encoder_owns = 1;
-        system->action_policy_owns = 1;
-        system->element_detector_owns = 1;
-        system->ui_classifier_owns = 1;
-        system->ocr_net_owns = 1;
-
-        LNNConfig screen_cfg = {0};
-        screen_cfg.input_size = 64 * 64;
-        screen_cfg.hidden_size = 512;
-        screen_cfg.output_size = 1024;
-        screen_cfg.num_layers = 1;
-        system->screen_encoder = lnn_create(&screen_cfg);
-
-        LNNConfig policy_cfg = {0};
-        policy_cfg.input_size = 1024 + 512;
-        policy_cfg.hidden_size = 512;
-        policy_cfg.output_size = (int)CO_ACTION_MAX * 10;
-        policy_cfg.num_layers = 1;
-        system->action_policy = lnn_create(&policy_cfg);
-
-        LNNConfig detector_cfg = {0};
-        detector_cfg.input_size = 32 * 32;
-        detector_cfg.hidden_size = 256;
-        detector_cfg.output_size = CO_MAX_ELEMENTS;
-        detector_cfg.num_layers = 1;
-        system->element_detector = lnn_create(&detector_cfg);
-
-        LNNConfig ui_cfg = {0};
-        ui_cfg.input_size = 32 * 32;
-        ui_cfg.hidden_size = 128;
-        ui_cfg.output_size = 16;
-        ui_cfg.num_layers = 1;
-        system->ui_classifier = lnn_create(&ui_cfg);
-
-        LNNConfig ocr_cfg = {0};
-        ocr_cfg.input_size = 16 * 16;
-        ocr_cfg.hidden_size = 64;
-        ocr_cfg.output_size = 36;
-        ocr_cfg.num_layers = 1;
-        system->ocr_net = lnn_create(&ocr_cfg);
+        /* 全局LNN未初始化时，所有AI子网络设为NULL，调用时返回明确错误
+         * 禁止创建随机权重LNN（Xavier初始化产生无意义输出，违反禁止虚假数据原则） */
+        system->screen_encoder = NULL;
+        system->action_policy = NULL;
+        system->element_detector = NULL;
+        system->ui_classifier = NULL;
+        system->ocr_net = NULL;
+        system->screen_encoder_owns = 0;
+        system->action_policy_owns = 0;
+        system->element_detector_owns = 0;
+        system->ui_classifier_owns = 0;
+        system->ocr_net_owns = 0;
+        log_warn("[电脑操作] 全局LNN未初始化，AI功能将不可用。请先调用selflnn_init()初始化系统。");
     }
 
     system->last_screen_cache = (float*)calloc(CO_SCREEN_WIDTH * CO_SCREEN_HEIGHT * CO_SCREEN_CHANNELS, sizeof(float));

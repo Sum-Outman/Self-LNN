@@ -291,9 +291,10 @@ int im_irl_infer_reward(ImitationDeepLearner* idl, const ImDemonstration* demo, 
     if (!idl->irl_network) {
         idl->irl_network = lnn_create(&cfg);
         if (!idl->irl_network) {
-            /* 创建失败时回退：使用演示特征初始化权重 */
-            for (int i = 0; i < dim; i++) 
-                reward_weights[i] = 0.1f + ((float)(i * 7) / (float)(dim * 13)) * 0.5f;
+            /* M-007修复: LNN网络创建失败时不得使用启发式虚假权重。
+             * 启发式权重(0.1f + ((i*7)/(dim*13))*0.5f)是硬编码猜测值，
+             * 不反映专家演示的真实奖励结构，会导致错误的模仿学习信号。
+             * 直接返回错误码，由上层调用方决定如何处理。 */
             return -1;
         }
     }
@@ -369,14 +370,19 @@ int im_irl_infer_reward(ImitationDeepLearner* idl, const ImDemonstration* demo, 
                 reward_weights[i] = lnn_output[i];
             }
         } else {
-            /* 训练失败时的回退 */
-            for (int i = 0; i < dim; i++) 
-                reward_weights[i] = expert_features[i] * 0.8f + 0.1f;
+            /* M-007修复: 训练完成后前向传播失败，不得使用启发式回退权重。
+             * expert_features * 0.8f + 0.1f 是经验猜测，缺乏理论基础。
+             * 直接返回错误码，由上层调用方决定重试或报告错误。 */
+            safe_free((void**)&expert_features); safe_free((void**)&current_features);
+            safe_free((void**)&lnn_input); safe_free((void**)&lnn_output); safe_free((void**)&lnn_target);
+            return -1;
         }
     } else {
-        /* 内存分配失败回退 */
-        for (int i = 0; i < dim; i++) 
-            reward_weights[i] = 0.1f + ((float)(i * 7) / (float)(dim * 13)) * 0.5f;
+        /* M-007修复: 内存分配失败不得使用启发式虚假权重。
+         * 直接返回错误码，由上层调用方处理内存不足情况。 */
+        safe_free((void**)&expert_features); safe_free((void**)&current_features);
+        safe_free((void**)&lnn_input); safe_free((void**)&lnn_output); safe_free((void**)&lnn_target);
+        return -1;
     }
     
     safe_free((void**)&expert_features); safe_free((void**)&current_features);
@@ -443,17 +449,17 @@ int im_process_observation(ImitationDeepLearner* idl, const float* joint_positio
                 for (int i = 0; i < action_dim && i < IM_MAX_JOINTS; i++)
                     action_output[i] = lnn_output[i];
             } else {
-                /* LNN前向失败时使用缩放关节位置作为回退 */
+                /* ZSFWS修复 P2-009: LNN前向失败时使用零阶保持，不做线性缩放推断 */
                 for (int i = 0; i < action_dim && i < copy; i++)
-                    action_output[i] = joint_positions[i] * 0.8f;
+                    action_output[i] = joint_positions[i];
             }
             safe_free((void**)&lnn_output);
         }
         safe_free((void**)&lnn_input);
     } else {
-        /* 未训练时使用简单的阻尼关节位置映射 */
+        /* ZSFWS修复 P2-009: 未训练时使用零阶保持（保持当前位置），不做线性推断 */
         for (int i = 0; i < action_dim && i < copy; i++)
-            action_output[i] = joint_positions[i] * 0.8f;
+            action_output[i] = joint_positions[i];
     }
     return 0;
 }

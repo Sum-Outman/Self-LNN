@@ -115,27 +115,32 @@ cmake --build . --parallel $(nproc)
 ## 部署到生产目录 / Deploy to Production Directory
 
 ### 中文
-项目提供部署脚本，将编译产物和前端文件复制到指定目录。
+项目使用 CMake install 功能将编译产物和前端文件部署到指定目录。
 
 #### Windows
 ```powershell
-# 部署到默认目录
-scripts\deploy.bat
+# 先编译项目
+scripts\build.bat
 
-# 部署到指定目录
-scripts\deploy.bat -t "C:\Program Files\selflnn"
-
-# 跳过构建（已构建时使用）
-scripts\deploy.bat -n
+# 手动部署到指定目录
+mkdir "C:\Program Files\selflnn\bin"
+mkdir "C:\Program Files\selflnn\frontend"
+mkdir "C:\Program Files\selflnn\config"
+copy build\bin\Release\selflnn.exe "C:\Program Files\selflnn\bin\"
+xcopy frontend "C:\Program Files\selflnn\frontend\" /E /I
+copy config\*.json.example "C:\Program Files\selflnn\config\"
 ```
 
 #### Linux
 ```bash
-# 部署到 /opt/slnn
-sudo ./scripts/deploy.sh -t /opt/slnn
+# 先编译项目
+./scripts/build.sh
 
-# 跳过构建
-sudo ./scripts/deploy.sh -t /opt/slnn -n
+# 手动部署到 /opt/slnn
+sudo mkdir -p /opt/slnn/{bin,frontend,config,data}
+sudo cp build/bin/Release/selflnn /opt/slnn/bin/
+sudo cp -r frontend/* /opt/slnn/frontend/
+sudo cp config/*.json.example /opt/slnn/config/
 ```
 
 #### 部署目录结构
@@ -143,13 +148,8 @@ sudo ./scripts/deploy.sh -t /opt/slnn -n
 /opt/slnn/
 ├── bin/                    # 可执行文件
 │   └── selflnn            # AGI后端服务
-├── frontend/              # 前端页面
+├── frontend/              # 前端页面（SPA单页面应用）
 │   ├── index.html         # 主控制台
-│   ├── training-center.html
-│   ├── simulation-control.html
-│   ├── teach.html
-│   ├── voice-control.html
-│   ├── usage-logs.html
 │   ├── css/
 │   └── js/
 ├── config/                # 配置文件
@@ -160,14 +160,14 @@ sudo ./scripts/deploy.sh -t /opt/slnn -n
 ```
 
 ### English
-Deployment scripts copy the compiled binary and frontend files to the target directory.
+Deployment uses CMake build followed by manual file copy to the target directory.
 
 ```bash
 # Deploy to /opt/slnn
-sudo ./scripts/deploy.sh -t /opt/slnn
-
-# Skip build step if already built
-sudo ./scripts/deploy.sh -t /opt/slnn -n
+sudo mkdir -p /opt/slnn/{bin,frontend,config,data}
+sudo cp build/bin/Release/selflnn /opt/slnn/bin/
+sudo cp -r frontend/* /opt/slnn/frontend/
+sudo cp config/*.json.example /opt/slnn/config/
 ```
 
 **Deployment directory layout:**
@@ -321,13 +321,13 @@ cmake .. -DENABLE_GPU=ON
 
 ```bash
 # 1. 检查可执行文件
-./build/bin/selflnn --help
+./build/bin/Release/selflnn --help
 
-# 2. 运行测试
+# 2. 运行测试（tests/目录尚未建立，待完善）
 ./scripts/run_tests.sh
 
 # 3. 启动服务
-./build/bin/selflnn --port 8080 &
+./build/bin/Release/selflnn --port 8080 &
 
 # 4. 验证API
 curl http://localhost:8080/api/status
@@ -341,13 +341,13 @@ After deployment, verify with:
 
 ```bash
 # 1. Check executable
-./build/bin/selflnn --help
+./build/bin/Release/selflnn --help
 
-# 2. Run tests
+# 2. Run tests (tests/ directory not yet established)
 ./scripts/run_tests.sh
 
 # 3. Start service
-./build/bin/selflnn --port 8080 &
+./build/bin/Release/selflnn --port 8080 &
 
 # 4. Verify API
 curl http://localhost:8080/api/status

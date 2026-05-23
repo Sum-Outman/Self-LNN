@@ -28,7 +28,7 @@ SELF-LNN is a full-modal AGI system based on a single CfC (Closed-form Continuou
 **核心特性 (Core Features):**
 - **单一模型 (Single Model):** 全模态统一输入→统一状态演化→统一输出
 - **纯C实现 (Pure C):** 无任何第三方库依赖，C11标准
-- **连续时间动态 (Continuous Time):** 7种ODE求解器 + 内置Verlet/BDF2
+- **连续时间动态 (Continuous Time):** 8种ODE求解器（闭式解、RK4、RK45、CTBP、DP54、Rosenbrock、Forest-Ruth辛、RHS）
 - **GPU加速 (GPU Acceleration):** 10种后端运行时动态加载
 - **全双工通信 (Full-Duplex):** HTTP REST + WebSocket 实时通信
 - **自我演化 (Self-Evolution):** 在线学习、强化学习、模仿学习、元学习
@@ -69,27 +69,24 @@ chmod +x scripts/build.sh
 
 ### 3.2 运行测试 / Run Tests
 
-**Windows:**
-```powershell
-.\scripts\run_tests.bat
-```
+> **注意：** tests/ 目录尚未建立，测试功能待实现。当前可通过编译后运行可执行文件进行手动功能验证。
+> **Note:** The tests/ directory is not yet established. Manual functional verification can be done by running the compiled executable.
 
-**Linux/macOS:**
-```bash
-./scripts/run_tests.sh
+```powershell
+# 测试命令待建立
+# Test commands to be established
 ```
 
 ### 3.3 启动AGI系统 / Start AGI System
 
 ```bash
 # 直接运行二进制 (Run binary directly)
-./build/src/Debug/selflnn
-# 或 (Or)
-./build/src/selflnn
+./build/bin/Release/selflnn         # Linux/macOS
+.\build\bin\Release\selflnn.exe     # Windows
 
-# 使用快速启动脚本 (Use quick-start script)
-.\scripts\quick_start.bat    # Windows
-./scripts/quick_start.sh     # Linux/macOS
+# 使用构建脚本（首次需编译）
+./scripts/build.sh                  # Linux/macOS
+.\scripts\build.bat                 # Windows
 ```
 
 ### 3.4 访问Web控制台 / Access Web Console
@@ -376,7 +373,7 @@ cfc_cell_reset(network);
 selflnn -l debug
 
 # 使用Valgrind检查内存 (Linux/macOS)
-valgrind --leak-check=full ./build/src/selflnn
+valgrind --leak-check=full ./build/bin/Release/selflnn
 
 # 使用Dr. Memory检查内存 (Windows)
 drmemory.exe -- build\src\Debug\selflnn.exe
@@ -400,7 +397,8 @@ sudo journalctl -u slnn -f
 
 **Windows (服务 Service):**
 ```powershell
-.\scripts\deploy.bat --install-service
+# 使用 Windows Service Manager 注册服务（参考 config/slnn_windows_service.xml.example）
+sc create slnn binPath= "C:\Program Files\selflnn\bin\selflnn.exe" start= auto
 ```
 
 **macOS (launchd):**
@@ -412,14 +410,16 @@ launchctl load ~/Library/LaunchAgents/com.selflnn.slnn.plist
 ### 8.2 部署脚本 / Deploy Scripts
 
 ```bash
-# Windows
-.\scripts\deploy.bat
+# Windows - 编译后手动部署
+mkdir "C:\Program Files\selflnn\bin"
+copy build\bin\Release\selflnn.exe "C:\Program Files\selflnn\bin\"
+xcopy frontend "C:\Program Files\selflnn\frontend\" /E /I
 
-# Linux/macOS
-sudo ./scripts/deploy.sh -t /opt/slnn
-# -t <target_dir>: 目标安装目录 Target directory
-# -p <port>: 服务端口 Service port
-# -s: 安装为系统服务 Install as system service
+# Linux/macOS - 编译后手动部署
+sudo mkdir -p /opt/slnn/{bin,frontend,config}
+sudo cp build/bin/Release/selflnn /opt/slnn/bin/
+sudo cp -r frontend/* /opt/slnn/frontend/
+sudo cp config/*.json.example /opt/slnn/config/
 ```
 
 ### 8.3 验证部署 / Verify Deployment

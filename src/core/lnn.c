@@ -1512,18 +1512,11 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
         network->current_loss = total_loss / batch_size;
         network->backward_count += batch_size;
 
-        /* FIX-011: 应用cell级参数梯度（门控权重、门控偏置、时间常数）。
-         * cfc_backward Step3 在单样本路径中直接更新这些参数，
-         * 但 cfc_accumulate_gradients（批量路径）不处理cell级参数。
-         * cfc_apply_cell_gradients 遍历各层CfCCell应用内部梯度。
-         * 
-         * 注意：当前cell级梯度来自最后一样本（cfc_cell_backward用=覆盖），
-         * 非跨样本平均。未来改进需在 cfc_accumulate_gradients 中为cell级
-         * 梯度增加+=累积通道。 */
-        cfc_apply_cell_gradients(cfc_network, network->config.learning_rate);
-        /* FIX-015: 应用W_out输出投影矩阵梯度。
-         * W_out 不在 param_block 中（在 grad_block 尾部），
-         * 外部 optimizer_update 无法触及，需在此处单独更新。 */
+        /* P0-BPTT修复: cell级参数梯度已在反向传播中累积完毕。
+         * 统一的Adam更新由训练循环(training.c)在optimizer_update后
+         * 调用cfc_apply_cell_gradients_adam完成，确保所有参数(共享块+cell级)
+         * 使用一致的优化算法和超参数。
+         * 此处仅处理W_out输出投影梯度(FIX-015保持不变)。 */
         cfc_apply_out_proj_gradients(cfc_network, network->config.learning_rate);
     }
     
@@ -1999,8 +1992,8 @@ SELFLNN_API int lnn_analyze_laplace_stability(LNN* network, float* stability_sco
  * @brief 检测指定CPU核心所属的NUMA节点
  * 
  * Windows：使用 GetNumaProcessorNodeEx 查询处理器NUMA拓扑
- * Linux：可通过 /sys/devices/system/cpu/cpuN/topology 或 libnuma 检测，
- *         当前简化实现，无法检测时返回0
+ * Linux：通过 /sys/devices/system/cpu/cpuN/topology 读取physical_package_id，
+ *         或使用 libnuma 检测。当前已完整实现sysfs路径读取。
  * 其他平台：默认返回0
  * 
  * @param cpu_index CPU核心索引

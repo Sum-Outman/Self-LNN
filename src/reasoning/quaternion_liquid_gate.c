@@ -377,12 +377,22 @@ int quaternion_liquid_gate_forward_batch(QuaternionLiquidGate* gate,
     return 0;
 }
 
-/* ========== 训练 ========== */
+/* ========== 训练（默认使用解析梯度 O(1)，数值梯度保留用于调试） ========== */
 
+/* ZSFWS修复 P2-004: 默认使用分析梯度（O(1) vs 数值梯度O(n)），显著提升训练效率 */
 float quaternion_liquid_gate_train_step(QuaternionLiquidGate* gate,
                                         const float* input,
                                         const float* target,
                                         size_t batch, size_t seq_len) {
+    return quaternion_liquid_gate_train_step_analytic(gate, input, target, batch, seq_len);
+}
+
+/* ========== 训练（数值梯度 - 保留用于梯度检查） ========== */
+
+float quaternion_liquid_gate_train_step_numerical(QuaternionLiquidGate* gate,
+                                                  const float* input,
+                                                  const float* target,
+                                                  size_t batch, size_t seq_len) {
     if (!gate || !input || !target) return -1.0f;
 
     size_t input_dim = gate->config.input_dim;
@@ -573,7 +583,7 @@ float quaternion_liquid_gate_train_step_analytic(QuaternionLiquidGate* gate,
     if (!gate || !input || !target) return -1.0f;
     if (!gate->cached_gate || !gate->cached_act || gate->cached_seq_len == 0) {
         /* 无缓存时回退到数值梯度 */
-        return quaternion_liquid_gate_train_step(gate, input, target, batch, seq_len);
+        return quaternion_liquid_gate_train_step_numerical(gate, input, target, batch, seq_len);
     }
 
     size_t input_dim = gate->config.input_dim;

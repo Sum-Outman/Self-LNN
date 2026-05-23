@@ -4,6 +4,7 @@ message(STATUS "构建多系统控制库: 包含源文件 multisystem_control.c,
 set(MULTISYSTEM_CONTROL_SOURCES
     multisystem_control.c
     swarm_intelligence.c
+    swarm_enhanced.c
 )
 
 message(STATUS "多系统控制库源文件: ${MULTISYSTEM_CONTROL_SOURCES}")

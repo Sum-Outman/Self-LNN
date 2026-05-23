@@ -340,11 +340,21 @@ class ApiService {
      */
     async request(endpoint, options = {}, retryCount = null) {
         /* 页面加载期间排队请求，就绪后逐次释放（间隔200ms防止洪流） */
+        /* ZSFABC-F003修复: 添加3秒超时机制，防止__PAGE_READY未置true导致无限等待 */
         if (window.__PAGE_READY !== true) {
             var self = this;
+            var _checkStartTime = Date.now();
+            var _CHECK_TIMEOUT_MS = 3000;
             return new Promise(function(resolve) {
                 var check = function() {
                     if (window.__PAGE_READY === true) {
+                        setTimeout(function() {
+                            resolve(self.request(endpoint, options, retryCount));
+                        }, self._drainInterval);
+                        self._drainInterval += 200;
+                    } else if (Date.now() - _checkStartTime >= _CHECK_TIMEOUT_MS) {
+                        console.warn('[ApiService] __PAGE_READY等待超时(%dms)，自动释放所有挂起请求，强制继续', _CHECK_TIMEOUT_MS);
+                        window.__PAGE_READY = true;
                         setTimeout(function() {
                             resolve(self.request(endpoint, options, retryCount));
                         }, self._drainInterval);
@@ -2353,7 +2363,7 @@ class ApiService {
      */
     async getSensorPipelineStatus() {
         try {
-            const response = await this.request('/sensor-pipeline/status');
+            const response = await this.request('/sensor/pipeline/status');
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
             return { success: true, data: data };
@@ -4980,6 +4990,65 @@ class ApiService {
             return { success: true, data: data };
         } catch (error) {
             console.error('设置视频质量失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 获取训练状态（ZSFAB-BUG-2/5修复: 添加缺失的API方法）
+     * 调用 GET /api/training/status
+     */
+    async getTrainingStatus() {
+        try {
+            const response = await this.request('/training/status');
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('获取训练状态失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 恢复/继续任务（ZSFAB-BUG-3修复: 添加缺失的API方法）
+     * 调用 POST /api/task/resume
+     * @param {string|number} taskId - 任务ID
+     */
+    async resumeTask(taskId) {
+        try {
+            const response = await this.request('/task/resume', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ task_id: taskId })
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('恢复任务失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 导入知识库数据（ZSFAB-BUG-4修复: 添加缺失的API方法）
+     * 调用 POST /api/knowledge/import
+     * @param {string} fileContent - 文件内容
+     * @param {string} fileName - 文件名
+     */
+    async importKnowledge(fileContent, fileName) {
+        try {
+            const response = await this.request('/knowledge/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: fileContent, file_name: fileName || 'import.json' })
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data, importedCount: data.imported_count || data.count || 0 };
+        } catch (error) {
+            console.error('知识导入失败:', error);
             return { success: false, error: error.message, data: null };
         }
     }

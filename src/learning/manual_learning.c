@@ -871,8 +871,40 @@ int ml_generate_qa(MLSystem* system, size_t doc_id, MLQAPair* qa_pairs, size_t* 
 
             MLQAPair* qa = &qa_pairs[qa_count];
 
-            /* 基于关键词类型智能选择问题模式 */
-            int pattern_type = (int)(kw_scores[k] * 7.0f) % 6;
+            /* 使用LNN编码器分析关键词上下文，选择最合适的提问模式
+             * 替代原来的伪随机 pattern_type = (int)(kw_scores[k] * 7.0f) % 6 */
+            int pattern_type = 0;
+            if (system->qa_encoder) {
+                /* 提取关键词周围256字符上下文，通过LNN编码获得语义向量 */
+                const char* kw_pos = ml_str_find(page->content, keywords[k], page->content_len);
+                if (kw_pos) {
+                    size_t ctx_start = (kw_pos - page->content > 128) ? (size_t)(kw_pos - page->content - 128) : 0;
+                    size_t ctx_end = (size_t)(kw_pos - page->content) + strlen(keywords[k]) + 128;
+                    if (ctx_end > page->content_len) ctx_end = page->content_len;
+                    size_t ctx_len = ctx_end - ctx_start;
+                    float* ctx_embed = (float*)safe_calloc(ML_EMBED_DIM, sizeof(float));
+                    if (ctx_embed) {
+                        ml_embed_text_simple(system->qa_encoder, page->content + ctx_start,
+                                             ctx_len, ctx_embed);
+                        /* 基于上下文嵌入的范数和方向选择提问类型 */
+                        float embed_norm = 0.0f;
+                        float embed_sum = 0.0f;
+                        for (int d = 0; d < ML_EMBED_DIM; d++) {
+                            embed_norm += ctx_embed[d] * ctx_embed[d];
+                            embed_sum += ctx_embed[d];
+                        }
+                        embed_norm = sqrtf(embed_norm + 1e-10f);
+                        /* 根据嵌入特性选择：高能量→原理类，低能量→定义类，偏正→优势类 */
+                        if (embed_norm > 1.5f && embed_sum > 0.0f) pattern_type = 3;      /* 工作原理 */
+                        else if (embed_norm > 1.5f && embed_sum <= 0.0f) pattern_type = 2; /* 如何使用 */
+                        else if (embed_norm > 0.8f && embed_sum > 0.1f) pattern_type = 4;  /* 优势比较 */
+                        else if (embed_norm > 0.8f) pattern_type = 1;                      /* 特点 */
+                        else pattern_type = 0;                                              /* 定义 */
+                        safe_free((void**)&ctx_embed);
+                    }
+                }
+            }
+
             switch (pattern_type) {
                 case 0: snprintf(qa->question, ML_MAX_TEXT_LEN, "%s的定义是什么？", keywords[k]); break;
                 case 1: snprintf(qa->question, ML_MAX_TEXT_LEN, "%s的主要特点有哪些？", keywords[k]); break;

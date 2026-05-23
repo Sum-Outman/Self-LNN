@@ -987,7 +987,7 @@ function updateAllModelStatusBadges(systemStatus) {
     
     // 单一CfC LNN核心状态显示：data-model属性 -> 状态文本/CSS类
     const lnnCoreStatus = {
-        available: true,
+        available: false, /* ZSFWS修复 P3-002: 初始未知状态，等待API确认后更新 */
         label: modules.lnn && modules.lnn.status === 'running' ? '运行中' : '未连接',
         cssClass: modules.lnn && modules.lnn.status === 'running' ? 'active' : 'pending',
         h_dim: modules.lnn && modules.lnn.h_dim ? modules.lnn.h_dim : '--',
@@ -1587,8 +1587,8 @@ function renderTomAgents(tomData) {
 
 /* ZSFWS-M003: 定期轮询心智理论状态并渲染 */
 function updateTomDisplay() {
-    if (typeof SelfLnnApi === 'undefined' || !SelfLnnApi.cognitionStatus) return;
-    SelfLnnApi.cognitionStatus().then(function(res) {
+    if (typeof SelfLnnApi === 'undefined' || !SelfLnnApi.getCognitionStatus) return;
+    SelfLnnApi.getCognitionStatus().then(function(res) {
         if (res && res.success && res.data && res.data.tom) {
             renderTomAgents(res.data.tom);
         }
@@ -3712,22 +3712,25 @@ async function testMultimodalProcessing() {
         let audioData = null;
         let textData = { content: '' };
         
-        /* 尝试从CameraManager获取实时帧 */
-        if (typeof window.DeviceManager !== 'undefined' && window.DeviceManager.currentCamera) {
+        /* 尝试从摄像头获取真实图像帧（使用正确的DeviceManager API） */
+        if (g_deviceManager && typeof g_deviceManager.captureSnapshot === 'function') {
             try {
-                const frame = await window.DeviceManager.captureFrame();
-                if (frame && frame.data) {
-                    visionData = { image: frame.data, source: 'live_camera' };
+                var activeCam = g_deviceManager.cameras ? g_deviceManager.cameras.find(function(c) { return c.active; }) : null;
+                if (activeCam) {
+                    const frame = g_deviceManager.captureSnapshot(activeCam.id);
+                    if (frame) {
+                        visionData = { image: frame, source: 'live_camera' };
+                    }
                 }
             } catch(e) { /* 摄像头不可用是正常的（无硬件时） */ }
         }
         
-        /* 尝试从AudioCapture获取真实音频波形 */
-        if (typeof window.VoiceCaptureUtil !== 'undefined' && window.VoiceCaptureUtil.getWaveform) {
+        /* 尝试从VoiceCaptureUtil获取音频波形 */
+        if (typeof window.VoiceCaptureUtil !== 'undefined' && typeof window.VoiceCaptureUtil.quickCapture === 'function') {
             try {
-                const waveform = window.VoiceCaptureUtil.getWaveform();
-                if (waveform && waveform.length > 0) {
-                    audioData = { waveform: waveform, source: 'live_mic' };
+                const audioBlob = await window.VoiceCaptureUtil.quickCapture();
+                if (audioBlob && audioBlob.size > 0) {
+                    audioData = { blob: audioBlob, source: 'live_mic' };
                 }
             } catch(e) { /* 麦克风不可用是正常的 */ }
         }
@@ -5449,8 +5452,17 @@ async function sendDialogueMessage() {
     var sendMicCheckbox = document.getElementById('dialogue-send-mic');
     if (sendMicCheckbox && sendMicCheckbox.checked && g_deviceManager) {
         var mic = g_deviceManager.microphones.find(function(m) { return m.active; });
-        if (mic && mic.lastAudioBlob) {
-            multimodalAudio = 'mic_audio';
+        if (mic && mic.active && g_voiceCaptureUtil) {
+            /* 使用VoiceCaptureUtil实时采集音频并设置lastAudioBlob */
+            try {
+                var audioBlob = await g_voiceCaptureUtil.quickCapture();
+                if (audioBlob) {
+                    mic.lastAudioBlob = audioBlob;
+                    multimodalAudio = 'mic_audio';
+                }
+            } catch(e) {
+                console.warn('音频采集失败:', e);
+            }
         }
     }
 
@@ -5470,6 +5482,35 @@ async function sendDialogueMessage() {
 
     if (useStreaming) {
         if (typingEl) typingEl.remove();
+        /* 注册流式响应处理器，接收后端WebSocket推送的对话回复 */
+        var streamBuffer = '';
+        var streamTimer = null;
+        var gws = window.SelfLnnWebSocket;
+        var streamHandler = function(data) {
+            if (data && (data.type === 'dialogue_response' || data.type === 'dialogue_stream')) {
+                if (data.token) {
+                    streamBuffer += data.token;
+                    if (streamTimer) clearTimeout(streamTimer);
+                    streamTimer = setTimeout(function() {
+                        /* 批量刷新UI：移除旧的流式消息，追加累积内容 */
+                        var existingEl = document.getElementById('dialogue-stream-msg');
+                        if (existingEl) existingEl.remove();
+                        addDialogueMessage('ai', streamBuffer, { msgId: 'dialogue-stream-msg' });
+                        streamTimer = null;
+                    }, 50);
+                }
+                if (data.done) {
+                    if (streamTimer) { clearTimeout(streamTimer); streamTimer = null; }
+                    var existingEl = document.getElementById('dialogue-stream-msg');
+                    if (existingEl) existingEl.remove();
+                    addDialogueMessage('ai', streamBuffer);
+                    streamBuffer = '';
+                    /* 移除流式监听器 */
+                    if (gws && gws.off) gws.off('dialogue_response', streamHandler);
+                }
+            }
+        };
+        if (gws && gws.on) gws.on('dialogue_response', streamHandler);
         g_dialogueEnhanced.sendMultimodalMessage(message, multimodalImage, multimodalAudio, {
             temperature: temperature,
             max_length: maxLength,
@@ -5478,7 +5519,7 @@ async function sendDialogueMessage() {
             streaming: true
         });
         var modelStatusEl = document.getElementById('dialogue-model-status');
-        if (modelStatusEl) modelStatusEl.textContent = '在线';
+        if (modelStatusEl) modelStatusEl.textContent = '流式对话';
         var totalRoundsEl = document.getElementById('dialogue-total-rounds');
         if (totalRoundsEl) totalRoundsEl.textContent = '-';
         input.disabled = false;

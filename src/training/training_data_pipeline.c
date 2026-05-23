@@ -3,8 +3,9 @@
  * @brief 多模态训练数据管线 - 桥接多模态CfC/LNN权重到训练器
  *
  * K-035: 已验证实现完整性。解决P3关键缺陷：所有多模态NN权重初始化后从未训练。
- * ZSFWS-001修复: 添加SELFLNN_STRICT_REAL_DATA保护，严格模式下禁止合成数据生成。
- * 严格模式：仅使用data_collection_pipeline提供的真实硬件数据，无真实数据时返回错误。
+ * ZSFWS-001 / H-005修复: 完全移除合成数据生成器路径（data_generator_create等），
+ * 所有训练数据必须来自data_collection_pipeline提供的真实硬件/传感器数据，
+ * 无真实数据时返回错误并跳过训练步骤。
  * 通过 trainer_create + trainer_train 真实执行训练循环。
  * 与 unified_signal_processor_training.c 配合完成统一信号处理器的端到端训练。
  */
@@ -37,12 +38,13 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
         return -1;
     }
 
-/* ZSFWS-001修复: 严格真实数据模式下，禁止使用合成数据生成器。
- * 必须从真实数据采集管道获取训练数据。
- * 无真实数据时直接返回错误，确保自主学习不使用虚假数据。 */
-#ifdef SELFLNN_STRICT_REAL_DATA
+    /*
+     * ZSFWS-001修复 / H-005修复: 完全禁用合成训练数据生成。
+     * 所有训练数据必须来自真实数据采集管线或真实文件。
+     * 移除 data_generator_create / DATA_GENERATOR_CONFIG_DEFAULT 合成数据路径。
+     * 无真实数据时直接返回错误，禁止使用任何合成/虚假数据。
+     */
     {
-        /* 尝试从数据采集管道获取真实训练数据 */
         void* dp = selflnn_get_data_pipeline();
         int real_samples = 0;
         if (dp) {
@@ -51,7 +53,7 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
                 inputs, targets, actual_samples, input_dim, output_dim);
         }
         if (real_samples <= 0) {
-            log_warning("[训练管线] 严格真实数据模式：%s 无可用真实训练数据，训练已跳过", module_name);
+            log_warning("[训练管线] 无真实训练数据，跳过训练步骤：%s", module_name);
             safe_free((void**)&inputs);
             safe_free((void**)&targets);
             return -1;
@@ -61,32 +63,6 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
             log_info("[训练管线] %s 收集到%d个真实训练样本", module_name, actual_samples);
         }
     }
-#else
-    /* 非严格模式：允许使用数据生成器合成训练数据（仅调试/测试用途） */
-    {
-        DataGeneratorConfig gen_config = DATA_GENERATOR_CONFIG_DEFAULT;
-        gen_config.input_dim = input_dim;
-        gen_config.output_dim = output_dim;
-        gen_config.num_classes = output_dim;
-        gen_config.noise_level = 0.05f;
-        gen_config.signal_type = 4;
-
-        void* generator = data_generator_create(&gen_config);
-        if (!generator) {
-            safe_free((void**)&inputs);
-            safe_free((void**)&targets);
-            return -1;
-        }
-        int gen_ret = data_generator_generate(generator, inputs, targets, actual_samples);
-        data_generator_free(generator);
-        if (gen_ret != 0) {
-            safe_free((void**)&inputs);
-            safe_free((void**)&targets);
-            return -1;
-        }
-        log_warning("[训练管线] 警告：%s 使用合成数据训练（非严格模式，仅供调试）", module_name);
-    }
-#endif
 
     TrainingConfig train_cfg = training_config_default();
     train_cfg.learning_rate = learning_rate > 0.0f ? learning_rate : 1e-3f;

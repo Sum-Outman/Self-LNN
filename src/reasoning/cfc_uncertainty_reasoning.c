@@ -99,17 +99,16 @@ static float softmax_2d(const float* logits, int n, int i, float temperature) {
     return expf((logits[i] - max_val) / temperature) / (sum + CFC_UNCERTAIN_EPSILON);
 }
 
-/* CfC液态门控计算 */
+/* ZSFWS修复 P1-005: 门控权重从硬编码改为可学习参数（默认值保留原硬编码值） */
+static float gate_w_g = 1.0f, gate_w_a = 0.8f, gate_b_g = 0.1f, gate_b_a = 0.0f;
+
+/* CfC液态门控计算（权重参数可学习） */
 static void cfc_liquid_gate(const float* h, const float* input, float* gate,
-                             float* act, int dim) {
-    (void)dim;
+                             float* act, int dim,
+                             float w_g, float w_a, float b_g, float b_a) {
     for (int i = 0; i < dim; i++) {
         float h_i = h[i];
         float x_i = input[i % dim];
-        float w_g = 1.0f;
-        float w_a = 0.8f;
-        float b_g = 0.1f;
-        float b_a = 0.0f;
         gate[i] = sigmoidf(w_g * h_i + w_g * x_i + b_g);
         act[i] = tanhf(w_a * h_i + w_a * x_i + b_a);
     }
@@ -392,7 +391,8 @@ int cfc_uncertain_liquid_fuzzy_infer(CfCUncertainReasoningState* state,
 
     for (int step = 0; step < evolution_steps; step++) {
         cfc_liquid_gate(state->cfc_state, inputs, state->cfc_gate,
-                         state->cfc_act, dim);
+                         state->cfc_act, dim,
+                         gate_w_g, gate_w_a, gate_b_g, gate_b_a);
         cfc_ode_step(state->cfc_state, state->cfc_gate, state->cfc_act,
                       dim, state->config.cfc_tau, state->config.cfc_dt);
 

@@ -886,23 +886,68 @@ int hd_detect_lidar_devices(HDDeviceInfo* infos, size_t max_count, size_t* count
     if (!infos || !count || max_count == 0) return -1;
     *count = 0;
 
+    /* LiDAR设备通常通过USB或串口连接，需要协议握手才能确认。
+     * 当前仅尝试通过特征词识别已知LiDAR设备，而非将所有串口标记为LiDAR */
     size_t lidar_count = 0;
-    HDDeviceInfo port_infos[HD_MAX_SERIAL_PORTS];
-    size_t port_count = 0;
-    if (hd_detect_serial_ports(port_infos, HD_MAX_SERIAL_PORTS, &port_count) != 0) return 0;
-
-    for (size_t p = 0; p < port_count && lidar_count < max_count; p++) {
-        const char* name = port_infos[p].name;
-        if (strstr(name, "COM") == NULL && strstr(name, "tty") == NULL) continue;
-
-        HDDeviceInfo* info = &infos[lidar_count];
-        memcpy(info, &port_infos[p], sizeof(HDDeviceInfo));
-        info->type = HD_DEVICE_LIDAR;
-        snprintf(info->name, HD_MAX_NAME_LEN, "LiDAR (%s)", port_infos[p].name);
-        info->status = HD_STATUS_AVAILABLE;
-        info->performance_score = 0.6f;
-        lidar_count++;
+#ifdef __linux__
+    /* Linux下扫描/dev目录查找已知LiDAR设备 */
+    const char* known_lidar_patterns[] = {
+        "lidar", "rplidar", "ydlidar", "hokuyo", "sick", "velodyne",
+        "ouster", "robosense", "hesai", "livox", NULL
+    };
+    DIR* dev_dir = opendir("/dev");
+    if (dev_dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dev_dir)) != NULL && lidar_count < max_count) {
+            const char* name = entry->d_name;
+            if (strstr(name, "ttyUSB") || strstr(name, "ttyACM") || 
+                strstr(name, "ttyS") || strstr(name, "serial")) {
+                continue;
+            }
+            for (int k = 0; known_lidar_patterns[k] != NULL; k++) {
+                if (hd_stristr(name, known_lidar_patterns[k])) {
+                    HDDeviceInfo* info = &infos[lidar_count];
+                    memset(info, 0, sizeof(HDDeviceInfo));
+                    info->type = HD_DEVICE_LIDAR;
+                    snprintf(info->name, HD_MAX_NAME_LEN, "LiDAR-%s", name);
+                    info->status = HD_STATUS_AVAILABLE;
+                    info->performance_score = 0.7f;
+                    lidar_count++;
+                    break;
+                }
+            }
+        }
+        closedir(dev_dir);
     }
+#elif defined(_WIN32)
+    /* Windows下通过COM端口名称或设备管理器检测LiDAR
+     * 使用SetupDi API枚举设备并检查描述符中的LiDAR关键词 */
+    HDEVINFO devInfo = SetupDiGetClassDevs(NULL, NULL, NULL, 
+        DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (devInfo != INVALID_HANDLE_VALUE) {
+        SP_DEVINFO_DATA devInfoData;
+        devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+        for (DWORD i = 0; SetupDiEnumDeviceInfo(devInfo, i, &devInfoData) && lidar_count < max_count; i++) {
+            char desc[256] = {0};
+            SetupDiGetDeviceRegistryPropertyA(devInfo, &devInfoData, SPDRP_DEVICEDESC,
+                NULL, (PBYTE)desc, sizeof(desc), NULL);
+            const char* keywords[] = {"LiDAR", "LIDAR", "lidar", "激光雷达", "laser scanner", NULL};
+            for (int k = 0; keywords[k] != NULL; k++) {
+                if (strstr(desc, keywords[k])) {
+                    HDDeviceInfo* info = &infos[lidar_count];
+                    memset(info, 0, sizeof(HDDeviceInfo));
+                    info->type = HD_DEVICE_LIDAR;
+                    snprintf(info->name, HD_MAX_NAME_LEN, "%.200s", desc);
+                    info->status = HD_STATUS_AVAILABLE;
+                    info->performance_score = 0.7f;
+                    lidar_count++;
+                    break;
+                }
+            }
+        }
+        SetupDiDestroyDeviceInfoList(devInfo);
+    }
+#endif
 
     *count = lidar_count;
     return 0;
@@ -1285,17 +1330,26 @@ int hd_classify_device_capability(const HDDeviceInfo* device, HDDeviceCapability
     }
 
     float lnn_output[HD_LNN_OUTPUT_DIM] = {0};
-    LNNConfig cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.input_size = HD_LNN_INPUT_DIM;
-    cfg.hidden_size = HD_LNN_HIDDEN_DIM;
-    cfg.output_size = HD_LNN_OUTPUT_DIM;
-
-    LNN* classifier = lnn_create(&cfg);
-    if (!classifier) return -1;
-
-    lnn_forward(classifier, input, lnn_output);
-    lnn_free(classifier);
+    /* 使用全局LNN分类器，拒绝创建随机权重LNN */
+     LNN* classifier = (LNN*)selflnn_get_lnn();
+     if (classifier) {
+        lnn_forward(classifier, input, lnn_output);
+    } else {
+        /* 全局LNN未就绪时，使用基于规则的确定性分类 */
+        switch (device->type) {
+            case HD_DEVICE_CAMERA: case HD_DEVICE_DEPTH_CAMERA:
+                caps[*count] = HD_CAP_VISION_PROCESSING; (*count)++; break;
+            case HD_DEVICE_MICROPHONE: case HD_DEVICE_SPEAKER:
+                caps[*count] = HD_CAP_AUDIO_PROCESSING; (*count)++; break;
+            case HD_DEVICE_GPU:
+                caps[*count] = HD_CAP_HIGH_PERFORMANCE; (*count)++; break;
+            case HD_DEVICE_IMU: case HD_DEVICE_LIDAR:
+                caps[*count] = HD_CAP_LOW_LATENCY; (*count)++; break;
+            default:
+                caps[*count] = HD_CAP_UNKNOWN; (*count)++; break;
+        }
+        return 0;
+    }
 
     struct { HDDeviceCapability cap; int idx; } cap_map[] = {
         {HD_CAP_VISION_PROCESSING, 0},
@@ -1326,12 +1380,56 @@ int hd_hotplug_start_monitor(HDHotplugMonitor* monitor) {
     if (!monitor) return -1;
     memset(monitor, 0, sizeof(HDHotplugMonitor));
     monitor->monitor_active = 1;
+
+    /* 计算初始设备哈希用于变更检测
+     * 跨平台实现：通过hd_detect_all()重新枚举设备并计算哈希
+     * 变更检测在hd_hotplug_poll_events()中通过哈希比对实现 */
+    monitor->last_device_hash = 0;
+    HDDetectionResult init_result;
+    memset(&init_result, 0, sizeof(init_result));
+    if (hd_detect_all(&init_result) == 0) {
+        uint32_t hash = hd_compute_device_hash(&init_result);
+        monitor->last_device_hash = hash;
+        hd_free_detection_result(&init_result);
+    }
     return 0;
 }
 
 int hd_hotplug_poll_events(HDHotplugMonitor* monitor) {
     if (!monitor || !monitor->monitor_active) return -1;
-    return (int)monitor->num_events;
+
+    int event_count = 0;
+    HDDetectionResult current;
+    memset(&current, 0, sizeof(current));
+
+    if (hd_detect_all(&current) != 0) return -1;
+
+    uint32_t current_hash = hd_compute_device_hash(&current);
+
+    if (current_hash != monitor->last_device_hash) {
+        /* 检测到设备变更，统计变化的设备数 */
+        monitor->last_device_hash = current_hash;
+        event_count = 1;
+        monitor->num_events++;
+    }
+
+    hd_free_detection_result(&current);
+    return event_count;
+}
+
+/* 辅助函数：计算设备列表的哈希值用于变更检测 */
+static uint32_t hd_compute_device_hash(const HDDetectionResult* result) {
+    if (!result || result->num_devices == 0) return 0;
+    uint32_t hash = 5381;
+    for (size_t i = 0; i < result->num_devices; i++) {
+        const HDDeviceInfo* d = &result->devices[i];
+        hash = ((hash << 5) + hash) + (uint32_t)d->type;
+        hash = ((hash << 5) + hash) + (uint32_t)d->status;
+        for (const char* p = d->name; *p; p++) {
+            hash = ((hash << 5) + hash) + (uint32_t)(unsigned char)*p;
+        }
+    }
+    return hash;
 }
 
 int hd_hotplug_stop_monitor(HDHotplugMonitor* monitor) {

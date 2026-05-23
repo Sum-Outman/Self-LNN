@@ -117,7 +117,7 @@ extern "C" {
  *
  * Gazebo的ROS接口通信端口，用于Gazebo与ROS系统之间的数据交换。
  */
-#define SELFLNN_GAZEBO_ROS_PORT     11345
+#define SELFLNN_GAZEBO_ROS_PORT     SELFLNN_GAZEBO_PORT  /* 与Gazebo共用同一端口 */
 
 /**
  * @brief 传感器数据流端口

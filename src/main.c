@@ -55,6 +55,8 @@
 #else
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #endif
 
 /* 静态函数前向声明 */
@@ -694,7 +696,7 @@ static void print_usage(const char* prog)
 {
     printf("用法: %s [选项]\n", prog);
     printf("选项:\n");
-    printf("  --port <端口号>            设置服务器端口（默认: %d）\n", SELFLNN_DEFAULT_PORT);
+    printf("  --port <端口号>            设置服务器端口（默认: %d）\n", SELFLNN_HTTP_PORT);
     printf("  --max-connections <数量>   设置最大连接数（默认: 100）\n");
     printf("  --api-key <密钥>           设置API认证密钥\n");
     printf("  --log-file <文件路径>      设置日志文件路径\n");
@@ -888,6 +890,9 @@ int main(int argc, char* argv[])
     printf("  端口:         %d\n", config.port);
     printf("  最大连接数:   %d\n", config.max_connections);
     printf("  日志文件:     %s\n", config.log_file ? config.log_file : "无");
+#ifdef SELFLNN_USE_PURE_C_PHYSICS
+    printf("  物理引擎:     纯C内部引擎（优先）\n");
+#endif
     printf("\n");
 
     /* 初始化SELF-LNN核心系统（为AGI后台任务提供子系统支持） */
@@ -1022,9 +1027,7 @@ int main(int argc, char* argv[])
     /* AGI主事件循环：处理后台认知任务 + 服务HTTP请求 + WebSocket推送维护 */
     while (g_agi_running) {
         /* 执行一轮AGI后台任务 */
-        int bg_result = 0;
         agi_background_loop_iteration();
-        (void)bg_result;
 
         /* ZSFWS-F004修复: 主事件循环中调用WebSocket推送服务器poll，
          * 处理客户端帧数据、ping/pong心跳（每30秒）、客户端超时检测（120秒）。
@@ -1060,6 +1063,15 @@ int main(int argc, char* argv[])
         training_pipeline_free(g_training_pipeline);
         g_training_pipeline = NULL;
     }
+    if (g_online_learner_handle) {
+        online_learner_free((OnlineLearner*)g_online_learner_handle);
+        g_online_learner_handle = NULL;
+    }
+    if (g_evolution_engine_handle) {
+        evolution_engine_free((EvolutionEngine*)g_evolution_engine_handle);
+        g_evolution_engine_handle = NULL;
+    }
+    selflnn_shutdown();
 
     printf("SELF-LNN AGI 系统已停止。\n");
     return 0;

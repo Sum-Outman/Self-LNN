@@ -279,6 +279,24 @@ int hardware_interface_set_simulation_motion(HardwareInterface* hw,
                                              const double linear_acceleration[3]);
 
 /**
+ * @brief 设置仿真模式下的机器人地理位置
+ * 
+ * L-004修复: 用于WMM2025地磁场动态计算。
+ * 在HW_MODE_SIMULATION模式下，IMU磁力计读数基于此位置通过WMM2025球谐模型动态计算，
+ * 而不是使用硬编码的北半球典型值。温度也会根据纬度和海拔动态调节。
+ * 
+ * @param hw              硬件接口句柄
+ * @param latitude_deg    纬度（度，-90~90，北半球为正）
+ * @param longitude_deg   经度（度，-180~180，东半球为正）
+ * @param altitude_m      海拔高度（米）
+ * @return int            成功返回0，失败返回-1
+ */
+int hardware_interface_set_simulation_position(HardwareInterface* hw,
+                                                double latitude_deg,
+                                                double longitude_deg,
+                                                double altitude_m);
+
+/**
  * @brief 发送数据
  * 
  * @param hw 硬件接口句柄

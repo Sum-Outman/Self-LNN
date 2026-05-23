@@ -737,29 +737,29 @@ const NpuBackendInterface* cambricon_get_npu_interface(void) {
  * 寒武纪模型推理(cnrtCreateModel/cnrtModelCompute)独立于此路径
  * =================================================================== */
 
-/* F-009/F-010修复：使用npu_common共享实现，消除重复代码 */
+/* ZSFWS修复 P0-001: 添加context验证+SIMD加速，不再无条件CPU回退 */
 int cambricon_forward_dense(GpuContext* context, const float* input,
                             const float* weights, const float* bias, float* output,
                             size_t batch_size, size_t input_size, size_t output_size,
                             GpuActivationType act_type, float alpha) {
-    (void)context;
-    return npu_common_cpu_forward_dense(input, weights, bias, output,
-                                         batch_size, input_size, output_size,
-                                         act_type, alpha);
+    if (!context || !context->is_initialized) return -1;
+    return npu_common_simd_forward_dense(input, weights, bias, output,
+                                          batch_size, input_size, output_size,
+                                          act_type, alpha);
 }
 
 int cambricon_matmul_train(GpuContext* context, const float* a, const float* b,
                             float* c, size_t m, size_t n, size_t k,
                             int transpose_a, int transpose_b) {
-    (void)context;
-    return npu_common_cpu_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
+    if (!context || !context->is_initialized) return -1;
+    return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 
 int cambricon_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
                             const float* b, const float* tau, float* h_out,
                             float dt, int dim) {
-    (void)context;
-    return npu_common_cpu_cfc_step(h_in, W, b, tau, h_out, dt, dim);
+    if (!context || !context->is_initialized) return -1;
+    return npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
 }
 
 const GpuBackendInterface* cambricon_get_backend_interface(void) {

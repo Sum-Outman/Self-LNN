@@ -224,22 +224,89 @@ int gazebo_get_model_state(GazeboBridge* bridge, const char* model_name,
     
     if (gz_exec(cmd, output, sizeof(output)) == 0 && output[0]) {
         float px=0, py=0, pz=0, ox=0, oy=0, oz=0, ow=1;
-        /* 宽松解析JSON或YAML格式的位姿数据 */
-        if (sscanf(output, "x:%f y:%f z:%f", &px, &py, &pz) >= 3 ||
-            sscanf(output, "\"x\":%f,\"y\":%f,\"z\":%f", &px, &py, &pz) >= 3 ||
-            sscanf(output, "x: %f y: %f z: %f", &px, &py, &pz) >= 3) {
-            state->position[0] = px;
-            state->position[1] = py;
-            state->position[2] = pz;
+        int found = 0;
+
+        /* 解析Gazebo protobuf文本格式位姿数据
+         * gz topic -e 输出protobuf文本表示，格式如:
+         *   position { x: 1.234 y: 5.678 z: 0.123 }
+         *   orientation { x: 0.0 y: 0.0 z: 0.0 w: 1.0 }
+         * 同时兼容JSON/简化格式作为回退 */
+        const char* p = output;
+
+        /* 策略1: 解析protobuf文本格式 position { x:... y:... z:... } */
+        {
+            const char* pos_tag = strstr(p, "position");
+            if (pos_tag) {
+                const char* xp = strstr(pos_tag, "x:");
+                const char* yp = strstr(pos_tag, "y:");
+                const char* zp = strstr(pos_tag, "z:");
+                /* 确保x/y/z都在同一个position块内 */
+                if (xp && yp && zp) {
+                    const char* next_block = strstr(pos_tag + 9, "}");
+                    if (next_block) {
+                        int x_ok = (xp < next_block), y_ok = (yp < next_block), z_ok = (zp < next_block);
+                        if (x_ok && y_ok && z_ok) {
+                            px = (float)atof(xp + 2);
+                            py = (float)atof(yp + 2);
+                            pz = (float)atof(zp + 2);
+                            found |= 1;
+                        }
+                    }
+                }
+            }
         }
-        if (sscanf(output, "w:%f x:%f y:%f z:%f", &ow, &ox, &oy, &oz) >= 4 ||
-            sscanf(output, "w: %f x: %f y: %f z: %f", &ow, &ox, &oy, &oz) >= 4) {
-            state->orientation[0] = ox;
-            state->orientation[1] = oy;
-            state->orientation[2] = oz;
-            state->orientation[3] = ow;
+
+        /* 策略2: 解析protobuf文本格式 orientation { x:... y:... z:... w:... } */
+        {
+            const char* ori_tag = strstr(p, "orientation");
+            if (ori_tag) {
+                const char* xp = strstr(ori_tag, "x:");
+                const char* yp = strstr(ori_tag, "y:");
+                const char* zp = strstr(ori_tag, "z:");
+                const char* wp = strstr(ori_tag, "w:");
+                if (xp && yp && zp && wp) {
+                    const char* next_block = strstr(ori_tag + 11, "}");
+                    if (next_block) {
+                        int x_ok = (xp < next_block), y_ok = (yp < next_block);
+                        int z_ok = (zp < next_block), w_ok = (wp < next_block);
+                        if (x_ok && y_ok && z_ok && w_ok) {
+                            ox = (float)atof(xp + 2);
+                            oy = (float)atof(yp + 2);
+                            oz = (float)atof(zp + 2);
+                            ow = (float)atof(wp + 2);
+                            found |= 2;
+                        }
+                    }
+                }
+            }
         }
-        return 0;
+
+        /* 策略3: 回退 - sscanf尝试多种格式 */
+        if (!(found & 1)) {
+            if (sscanf(output, "x:%f y:%f z:%f", &px, &py, &pz) >= 3 ||
+                sscanf(output, "\"x\":%f,\"y\":%f,\"z\":%f", &px, &py, &pz) >= 3 ||
+                sscanf(output, "x: %f y: %f z: %f", &px, &py, &pz) >= 3 ||
+                sscanf(output, "x=%f y=%f z=%f", &px, &py, &pz) >= 3) {
+                found |= 1;
+            }
+        }
+
+        if (!(found & 2)) {
+            if (sscanf(output, "w:%f x:%f y:%f z:%f", &ow, &ox, &oy, &oz) >= 4 ||
+                sscanf(output, "w: %f x: %f y: %f z: %f", &ow, &ox, &oy, &oz) >= 4 ||
+                sscanf(output, "w=%f x=%f y=%f z=%f", &ow, &ox, &oy, &oz) >= 4) {
+                found |= 2;
+            }
+        }
+
+        state->position[0] = px;
+        state->position[1] = py;
+        state->position[2] = pz;
+        state->orientation[0] = ox;
+        state->orientation[1] = oy;
+        state->orientation[2] = oz;
+        state->orientation[3] = ow;
+        return (found & 1) ? 0 : -1;
     }
     return -1;
 }

@@ -27,53 +27,20 @@ SELF-LNN is a pure-C full-modal AGI system based on Closed-form Continuous-time 
 ## 演示1：运行核心测试套件 / Demo 1: Run Core Test Suite
 
 ### 中文
-项目内置完整的单元测试套件，验证CfC单元、ODE求解器、反向传播等核心功能。
+> **注意：** tests/ 目录尚未建立，核心测试套件待实现。当前可通过编译项目并运行主程序进行手动功能验证。
 
-#### Windows
 ```powershell
-# 构建项目
-scripts\build.bat
+# 编译项目
+scripts\build.bat      # Windows
+./scripts/build.sh     # Linux/macOS
 
-# 运行测试
-scripts\run_tests.bat
-```
-
-#### Linux
-```bash
-# 构建项目
-./scripts/build.sh
-
-# 运行测试
-./scripts/run_tests.sh
-```
-
-**预期输出（test_core 测试套件，22项测试全部通过）：**
-```
-测试CfC细胞创建和销毁... [通过]
-测试CfC细胞前向传播... [通过]
-测试动态系统求解器... [通过]
-测试液态神经网络前向传播... [通过]
-测试液态神经网络训练... [通过]
-测试模型保存和加载... [通过]
-测试拉普拉斯稳定性分析... [通过]
-测试ODE求解器精度... [通过]
-...
-成功: 22/22 测试通过
+# 运行主程序
+./build/bin/Release/selflnn        # Linux/macOS
+.\build\bin\Release\selflnn.exe    # Windows
 ```
 
 ### English
-The project includes a complete unit test suite verifying core functionality: CfC cell, ODE solvers, backpropagation, etc.
-
-**Expected output (test_core suite: 22/22 passed):**
-```
-Test CfC cell create/destroy... [PASS]
-Test CfC cell forward... [PASS]
-Test dynamics solver... [PASS]
-Test LNN forward... [PASS]
-Test LNN training... [PASS]
-...
-Success: 22/22 tests passed
-```
+> **Note:** The tests/ directory is not yet established. Manual functional verification can be done by compiling and running the main executable.
 
 ---
 
@@ -200,11 +167,13 @@ AGI后端服务是系统的核心HTTP服务器，提供REST API接口。
 
 **启动服务：**
 ```bash
-# 默认端口8080启动
-./build/bin/selflnn
+# 先编译项目
+./scripts/build.sh      # Linux/macOS
+.\scripts\build.bat     # Windows
 
-# 或使用快速启动脚本
-./scripts/quick_start.sh
+# 默认端口8080启动
+./build/bin/Release/selflnn         # Linux/macOS
+.\build\bin\Release\selflnn.exe     # Windows
 ```
 
 **验证服务运行：**
@@ -234,9 +203,11 @@ Usage: selflnn [Options]
 
 **Start the service:**
 ```bash
-./build/bin/selflnn
-# or
-./scripts/quick_start.sh
+# Build first
+./scripts/build.sh      # Linux/macOS
+
+# Start with default port 8080
+./build/bin/Release/selflnn         # Linux/macOS
 ```
 
 **Verify service:**

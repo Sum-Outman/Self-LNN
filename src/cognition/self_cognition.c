@@ -4981,7 +4981,17 @@ static int perform_metacognitive_reasoning_internal(SelfCognitionSystem* system,
                       "3. 设定更具挑战性目标");
             }
             
-            result->reasoning_confidence = 0.8f;
+            /* ZSFWS修复 P2-006: 基于修正效果动态计算推理置信度 */
+            if (system->correction_count > 0 && system->correction_effectiveness_size > 0) {
+                float avg_effectiveness = 0.0f;
+                for (size_t i = 0; i < system->correction_effectiveness_size; i++) {
+                    avg_effectiveness += system->correction_effectiveness[i];
+                }
+                avg_effectiveness /= (float)system->correction_effectiveness_size;
+                result->reasoning_confidence = 0.4f + 0.5f * avg_effectiveness;
+            } else {
+                result->reasoning_confidence = 0.5f;  /* 无修正效果数据时的中性基准 */
+            }
             break;
         }
             

@@ -1302,6 +1302,7 @@ typedef struct {
     HANDLE thread_handle;                    /**< 线程句柄 */
     DWORD thread_id;                         /**< 线程ID */
     volatile int running;                    /**< 运行标志 */
+    volatile int is_executing;               /**< L-006: 是否正在执行任务（1=执行中，0=空闲等待） */
     size_t tasks_executed;                   /**< 已执行任务数 */
     size_t tasks_stolen;                     /**< 窃取的任务数 */
 } WorkerThread;
@@ -1393,24 +1394,30 @@ static DWORD WINAPI worker_thread_main(LPVOID arg) {
         }
         
         if (task) {
-            // 执行任务
+            /* L-006: 标记线程正在执行任务 */
+            worker->is_executing = 1;
+
+            /* 执行任务 */
             InterlockedDecrement((volatile LONG*)&pool->pending_tasks);
             
             if (task->func) {
                 task->func(task->arg);
             }
             
-            // 标记完成
+            /* 标记完成 */
             task->completed = 1;
             InterlockedIncrement((volatile LONG*)&pool->completed_tasks);
             worker->tasks_executed++;
             
-            // 触发完成事件
+            /* 触发完成事件 */
             if (task->completion_event) {
                 SetEvent(task->completion_event);
             }
+
+            /* L-006: 任务执行完毕，线程恢复空闲状态 */
+            worker->is_executing = 0;
         } else {
-            // 没有任务，等待
+            /* 没有任务，等待 */
             DWORD wait_ms = pool->config.idle_timeout_ms > 0 ?
                            (DWORD)pool->config.idle_timeout_ms : INFINITE;
             WaitForSingleObject(pool->work_event, wait_ms);
@@ -1673,10 +1680,16 @@ int lock_free_thread_pool_get_stats(LockFreeThreadPool* pool,
     }
     
     if (idle_threads) {
-        // 简化估算：活跃线程 - 正在执行任务的线程
-        size_t executing = (size_t)pool->pending_tasks;
-        size_t total_active = pool->num_workers;
-        *idle_threads = executing < total_active ? total_active - executing : 0;
+        /* L-006修复: 遍历线程状态数组精确统计空闲线程数
+         * 不再使用简化公式 total_active - pending_tasks，
+         * 而是检查每个线程的 is_executing 标志。 */
+        size_t idle = 0;
+        for (size_t i = 0; i < pool->num_workers; i++) {
+            if (pool->workers[i].running && !pool->workers[i].is_executing) {
+                idle++;
+            }
+        }
+        *idle_threads = idle;
     }
     
     if (pending_tasks) *pending_tasks = (size_t)pool->pending_tasks;
@@ -1792,6 +1805,7 @@ typedef struct {
     size_t thread_index;
     pthread_t thread;
     volatile int running;
+    volatile int is_executing;               /**< L-006: 是否正在执行任务（1=执行中，0=空闲等待） */
     size_t tasks_executed;
     size_t tasks_stolen;
 } WorkerThread;
@@ -1866,6 +1880,9 @@ static void* worker_thread_main(void* arg) {
         }
         
         if (task) {
+            /* L-006: 标记线程正在执行任务 */
+            worker->is_executing = 1;
+
             __sync_fetch_and_sub(&pool->pending_tasks, 1);
             
             if (task->func) {
@@ -1882,6 +1899,9 @@ static void* worker_thread_main(void* arg) {
                 pthread_cond_signal(&task->completion_cond);
                 pthread_mutex_unlock(&task->completion_mutex);
             }
+
+            /* L-006: 任务执行完毕，线程恢复空闲状态 */
+            worker->is_executing = 0;
         } else {
             struct timespec ts;
             if (pool->config.idle_timeout_ms > 0) {
@@ -2133,9 +2153,16 @@ int lock_free_thread_pool_get_stats(LockFreeThreadPool* pool,
         *active_threads = active;
     }
     if (idle_threads) {
-        size_t executing = (size_t)pool->pending_tasks;
-        size_t total_active = pool->num_workers;
-        *idle_threads = executing < total_active ? total_active - executing : 0;
+        /* L-006修复: 遍历线程状态数组精确统计空闲线程数
+         * 不再使用简化公式 total_active - pending_tasks，
+         * 而是检查每个线程的 is_executing 标志。 */
+        size_t idle = 0;
+        for (size_t i = 0; i < pool->num_workers; i++) {
+            if (pool->workers[i].running && !pool->workers[i].is_executing) {
+                idle++;
+            }
+        }
+        *idle_threads = idle;
     }
     if (pending_tasks) *pending_tasks = (size_t)pool->pending_tasks;
     if (completed_tasks) *completed_tasks = (size_t)pool->completed_tasks;

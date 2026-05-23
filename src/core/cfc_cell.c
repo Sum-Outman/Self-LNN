@@ -18,6 +18,7 @@
 #include "selflnn/core/quaternion_lnn.h"
 #include "selflnn/core/quaternion_cfc.h"
 #include "selflnn/core/lnn_layer_norm.h"
+#include "selflnn/core/common.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -652,9 +653,9 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     // 初始化液态神经网络增强特性
     cell->use_gating = 1;  // 默认启用门控
     cell->use_adaptive_tau = 1;  // 默认启用自适应时间常数
-    cell->min_time_constant = 0.1f;
-    cell->max_time_constant = 10.0f;
-    cell->tau_learning_rate = 0.001f;  // 时间常数学习率默认值
+    cell->min_time_constant = SELFLNN_DEFAULT_TAU_MIN;
+    cell->max_time_constant = SELFLNN_DEFAULT_TAU_MAX;
+    cell->tau_learning_rate = SELFLNN_DEFAULT_LEARNING_RATE;  // 时间常数学习率默认值
     
     // 初始化状态向量为小随机值
     for (size_t i = 0; i < hidden_size; i++) {
@@ -667,7 +668,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
          * 修正为以配置值为中心 [τ*0.5, τ*2.0] 的窄区间，确保异构但可控。 */
         {
             float tc = cell->config.time_constant;
-            if (tc < 0.01f) tc = 0.1f;
+            if (tc < SELFLNN_DEFAULT_DT) tc = 0.1f;
             float tc_min = tc * 0.5f;
             float tc_max = tc * 2.0f;
             if (tc_min < cell->min_time_constant) tc_min = cell->min_time_constant;
@@ -1025,6 +1026,12 @@ void cfc_cell_free(CfCCell* cell) {
         layer_norm_free(cell->cell_layer_norm);
         cell->cell_layer_norm = NULL;
     }
+
+    /* P0-BPTT: 释放cell级动量/速度缓冲区 */
+    safe_free((void**)&cell->cell_momentum_buffer);
+    cell->cell_velocity_buffer = NULL;
+    cell->cell_momentum_size = 0;
+    cell->cell_momentum_initialized = 0;
 
     // 释放单元结构
     safe_free((void**)&cell);
@@ -1505,13 +1512,14 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
     (void)input;
     size_t n = cell->config.hidden_size;
     size_t ws_size = ode_rosenbrock_workspace_size(n);
-    float y[sizeof(float) * 256];
-    float ws[sizeof(float) * 4096];
+    /* 栈分配优化：支持最多1024个神经元，超限时自动退化为堆分配 */
+    float y[sizeof(float) * 1024];
+    float ws[sizeof(float) * 8192];
     float* y_state = y;
     float* workspace = ws;
     int need_free = 0;
 
-    if (n > 256 || ws_size > 4096)
+    if (n > 1024 || ws_size > 8192)
     {
         y_state = (float*)malloc(n * sizeof(float));
         workspace = (float*)malloc(ws_size * sizeof(float));
@@ -2567,7 +2575,6 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
     // 获取前向传播时保存的输入和状态
     const float* input = cell->state->input_buffer;
     const float* prev_state = cell->state->saved_state;  // 从保存缓冲区读取前向传播前的状态 h(t)
-    // const float* current_activation = cell->state->activation;  // 前向传播后的激活值（未使用）
     
     // 复制梯度到内部缓冲区
     memcpy(cell->state->gradient, gradient, hidden_size * sizeof(float));
@@ -2662,19 +2669,26 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         // 计算从h_new到各个中间变量的梯度
         float dL_dh_new = cell->state->gradient[i];  // 来自上层的梯度
         
-        /* P2-002: 残差连接反向传播——梯度通过残差高速公路直接回传
-         * ∂h_new/∂h_prev_residual = residual_scale
-         * dL/dh_prev_residual = dL/dh_new * residual_scale
-         * 此梯度加到 hidden-to-hidden 权重梯度计算中对 prev_state 的依赖中 */
         float effective_dL_dh_new = dL_dh_new;
-        if (cell->config.use_residual && cell->config.residual_scale > 0.0f) {
-            effective_dL_dh_new += dL_dh_new * cell->config.residual_scale * 0.5f;
-            /* 0.5x因子用于防止残差梯度在深层网络中过度主导 */
-        }
+        /* P2-002-审计修复: 移除 0.5x 启发式缩放因子。
+         * 残差连接的梯度应通过 cfc_cell_temporal_backward 的时间雅可比
+         * 正确传递到上一步的状态，而非注入 ODE 驱动项梯度。
+         *
+         * ∂h_res/∂h_old = ∂h_raw/∂h_old + α·I (α = residual_scale)
+         * 时间反向传播全量传递:
+         *   g_prev = g * (exp_term + α) + W_gh^T·v_gh + W_ah^T·v_ah
+         * ODE 驱动项梯度路径仅使用原始 dL/dh_new:
+         *   ∂L/∂driver = dL/dh_new · (1-exp(-Δt/τ))
+         * 残散梯度由 temporal_backward 单独处理。
+         *
+         * FIX-013 兼容: effective_dL_dh_new 仍保留变量名，
+         * 其值现等于 dL_dh_new（原 FIX-013 路径曾完全丢弃残差梯度，
+         * 现已通过 temporal_backward 正确恢复）。 */
+        (void)cell->config.residual_scale; /* 残差标记，by temporal_backward */
         
-        /* FIX-013: 使用 effective_dL_dh_new（含残差梯度贡献），
-         * 而非原始的 dL_dh_new。之前 effective_dL_dh_new 被计算但从未使用，
-         * 导致残差连接的梯度完全丢失。τ梯度仍用 dL_dh_new（残差通道与τ无关）。 */
+        /* 审计修复（原 FIX-013）: τ梯度使用原始 dL_dh_new
+         * （残差连接不依赖 τ，故 τ 梯度无需残差修正）。
+         * effective_dL_dh_new 现等价于 dL_dh_new，v4.0 审计回归为纯数学梯度。 */
         float dL_ddriver = effective_dL_dh_new * driver_coeff;
         
         // driver对gate和activation的导数
@@ -2739,6 +2753,235 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         }
     }
     
+    return 0;
+}
+
+/* ========================================================================
+ * P0-BPTT: 时间反向传播 — 计算梯度通过CfC状态转移的回传
+ *
+ * CfC状态转移（逐神经元独立时间常数τ_i）:
+ *   h_new_i = h_old_i · exp(-Δt/τ_i) + (1-exp(-Δt/τ_i)) · σ(g_i) · tanh(a_i)
+ *
+ * 定义:
+ *   α_i = exp(-Δt/τ_i),  β_i = 1 - α_i
+ *   G_i = σ(W_gh_i·h_old + W_gx_i·x + b_g_i)          门控值
+ *   A_i = tanh(W_ah_i·h_old + W_ax_i·x + b_a_i)       激活值
+ *   G'_i = G_i·(1 - G_i)                               门控导数
+ *   A'_i = 1 - A_i·A_i                                 激活导数
+ *
+ * 时间雅可比向量积（纯状态到状态传递，不累加参数梯度）:
+ *   g_out[j] = α_j·g_j + (W_gh^T · v_gh)[j] + (W_ah^T · v_ah)[j]
+ *              [+ residual_scale·g_j  如果残差连接启用]
+ *
+ * 其中加权向量:
+ *   v_gh_i = β_i · g_i · G'_i · A_i
+ *   v_ah_i = β_i · g_i · G_i · A'_i
+ *
+ * 重要: 此函数仅计算时间梯度传递。不累积任何参数梯度！
+ * W_gh/W_ah/W_gx/W_ax/b_g/b_a/τ的参数梯度由 cfc_cell_backward 在
+ * BPTT循环的每步中通过combo_grad正确计算（combo_grad已包含时间链贡献）。
+ * 在此处重复累积参数梯度将导致双计，使W_gh/W_ah学习率翻倍。
+ * ======================================================================== */
+int cfc_cell_temporal_backward(CfCCell* cell, const float* combined_gradient,
+                                float* temporal_gradient_out) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_NULL(combined_gradient, "组合梯度向量为空");
+    SELFLNN_CHECK_NULL(temporal_gradient_out, "时间梯度输出为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+    CHECK_CFC_STATE_INT(cell);
+
+    if (!cell->state->saved_state) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "CfC单元saved_state为空，BPTT需要前向传播保存的状态");
+        return -1;
+    }
+
+    size_t hidden_size = cell->config.hidden_size;
+    size_t input_size = cell->config.input_size;
+    const float* input = cell->state->input_buffer;
+    const float* prev_state = cell->state->saved_state;
+    float delta_t = cell->config.delta_t;
+
+    /* v_gh存入gradient, v_ah存入adapted_params */
+    float* v_gh = cell->state->gradient;
+    float* v_ah = cell->state->adapted_params;
+
+    /* ====== 第一步: 计算前向变量 + α·I项 + 加权向量v_gh/v_ah + W_gh/W_ah/b_g时间梯度 ====== */
+    for (size_t i = 0; i < hidden_size; i++) {
+        float gate_input_sum = cell->gate_biases[i * 3];
+        float activ_input_sum = cell->bias_vector[i];
+        for (size_t j = 0; j < input_size; j++) {
+            size_t idx = i * input_size + j;
+            gate_input_sum += cell->input_gate_weights[idx] * input[j];
+            activ_input_sum += cell->weight_matrix[idx] * input[j];
+        }
+        for (size_t j = 0; j < hidden_size; j++) {
+            size_t h_idx = i * hidden_size + j;
+            gate_input_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            activ_input_sum += cell->hidden_to_activation_weights[h_idx] * prev_state[j];
+        }
+
+        float gate = 1.0f / (1.0f + expf(-gate_input_sum));
+        float activation = tanhf(activ_input_sum);
+        float gate_deriv = gate * (1.0f - gate);
+        float activ_deriv = 1.0f - activation * activation;
+
+        float tau;
+        if (cell->forward_tau_used && cell->forward_tau_used[i] > 0.0f) {
+            tau = cell->forward_tau_used[i];
+        } else if (cell->use_adaptive_tau && cell->time_constants) {
+            tau = cell->time_constants[i];
+        } else {
+            tau = cell->config.time_constant;
+        }
+        if (tau < cell->min_time_constant) tau = cell->min_time_constant;
+        if (tau > cell->max_time_constant) tau = cell->max_time_constant;
+
+        float dt_over_tau = delta_t / tau;
+        if (dt_over_tau < 1e-8f) dt_over_tau = 1e-8f;
+        if (dt_over_tau > 100.0f) dt_over_tau = 100.0f;
+
+        float exp_term;
+        if (dt_over_tau > 20.0f) exp_term = 0.0f;
+        else if (dt_over_tau < 1e-4f) exp_term = 1.0f - dt_over_tau;
+        else exp_term = expf(-dt_over_tau);
+
+        float beta = 1.0f - exp_term;
+
+        /* α·I项: temporal_out[i] = α_i · g_i [+ residual_scale · g_i]
+         * 残差连接: h_new = h_raw + α·h_old
+         *   ∂h_new/∂h_old = ∂h_raw/∂h_old + α·I
+         *   残差贡献直接加到 α·I 项中 */
+        float alpha_total = exp_term;
+        if (cell->config.use_residual && cell->config.residual_scale > 0.0f) {
+            alpha_total += cell->config.residual_scale;
+        }
+        temporal_gradient_out[i] = alpha_total * combined_gradient[i];
+
+        /* 构建加权向量(完整包含β_i和所有导数):
+         * v_gh_i = β_i · g_i · G'_i · A_i
+         * v_ah_i = β_i · g_i · G_i · A'_i */
+        float common = beta * combined_gradient[i];
+        v_gh[i] = common * gate_deriv * activation;
+        v_ah[i] = common * gate * activ_deriv;
+    }
+
+    /* ====== 第二步: 矩阵-向量积 W_gh^T·v_gh + W_ah^T·v_ah ====== */
+    for (size_t i = 0; i < hidden_size; i++) {
+        float sum_gh = 0.0f;
+        float sum_ah = 0.0f;
+        for (size_t j = 0; j < hidden_size; j++) {
+            size_t h_idx = j * hidden_size + i;
+            sum_gh += cell->hidden_to_gate_weights[h_idx] * v_gh[j];
+            sum_ah += cell->hidden_to_activation_weights[h_idx] * v_ah[j];
+        }
+
+        /* =  (W_gh^T·v_gh)[i] + (W_ah^T·v_ah)[i]
+         * 注意: 无额外乘数！β_i/G'_i/A'_i已在v_gh/v_ah内部 */
+        temporal_gradient_out[i] += sum_gh + sum_ah;
+
+        if (isnan(temporal_gradient_out[i]) || isinf(temporal_gradient_out[i])) {
+            temporal_gradient_out[i] = 0.0f;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief CfC单元截断时间反向传播 (Truncated BPTT)
+ * 
+ * 在给定时间窗口 [0, seq_len) 上执行BPTT。
+ * 
+ * 调用方需在调用前执行完整的前向传播序列。对每步 t:
+ *   - 将 h(t) 保存
+ *   - cell->state->saved_state 自然记录了 h(t-1)【前向后快照】
+ *   - 故 seq_prev_states[t] 可直接使用 saved_state 的快照
+ *   - seq_inputs[t] = x(t)
+ *   - seq_forward_tau[t] = 对 cell->forward_tau_used 的快照（逐时间步 τ）
+ * 
+ * 反向循环从 t=seq_len-1 到 0:
+ *   1. 恢复 seq_prev_states[t] → cell->state->saved_state
+ *   2. 恢复 seq_inputs[t] → cell->state->input_buffer
+ *   3. 恢复 seq_forward_tau + t*hidden → cell->forward_tau_used
+ *   4. cfc_cell_backward(combo_grad) — 读 forward_tau_used/saved_state/input_buffer
+ *   5. cfc_cell_temporal_backward(combo_grad) — 同样读这些缓冲区
+ * 
+ * @param cell CfC单元句柄
+ * @param loss_gradients 每时间步的损失梯度 [seq_len * hidden_size]
+ * @param input_gradients 输出每步输入梯度 [seq_len * input_size]
+ * @param seq_len 序列长度
+ * @param seq_inputs 每步输入 x(t) [seq_len * input_size]
+ * @param seq_prev_states 每步前向状态 h(t-1) [seq_len * hidden_size]
+ * @param seq_forward_tau 每步前向使用的 τ [seq_len * hidden_size]，可为NULL（从 time_constants 推算）
+ * @return 0成功，负值失败
+ */
+int cfc_cell_backward_bptt(CfCCell* cell, const float* loss_gradients,
+                            float* input_gradients, int seq_len,
+                            const float* seq_inputs,
+                            const float* seq_prev_states,
+                            const float* seq_forward_tau) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_NULL(loss_gradients, "损失梯度为空");
+    SELFLNN_CHECK_NULL(input_gradients, "输入梯度缓冲区为空");
+    SELFLNN_CHECK_NULL(seq_inputs, "序列输入为空");
+    SELFLNN_CHECK_NULL(seq_prev_states, "序列前向状态为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+    SELFLNN_CHECK(seq_len > 0, SELFLNN_ERROR_INVALID_ARGUMENT,
+                 "序列长度必须>0，当前值=%d", seq_len);
+
+    size_t hidden_size = cell->config.hidden_size;
+    size_t input_size = cell->config.input_size;
+
+    float* temporal_grad = (float*)safe_calloc(hidden_size, sizeof(float));
+    if (!temporal_grad) return SELFLNN_ERROR_OUT_OF_MEMORY;
+
+    for (int t = seq_len - 1; t >= 0; t--) {
+        /* P0-BPTT-审计修复: 三步全量恢复每时间步的上下文缓冲区 */
+        memcpy(cell->state->saved_state,
+               seq_prev_states + t * hidden_size,
+               hidden_size * sizeof(float));
+        memcpy(cell->state->input_buffer,
+               seq_inputs + t * input_size,
+               input_size * sizeof(float));
+        /* forward_tau_used 记录前向传播时每神经元独立使用的 τ 值。
+         * cfc_cell_backward(L2647) 和 cfc_cell_temporal_backward(L2822)
+         * 均从 forward_tau_used 读取 τ 以确保前向/反向 exp(-Δt/τ) 一致。
+         * BPTT 循环必须为每步恢复该时间步的 τ 快照。 */
+        if (seq_forward_tau && cell->forward_tau_used) {
+            memcpy(cell->forward_tau_used,
+                   seq_forward_tau + t * hidden_size,
+                   hidden_size * sizeof(float));
+        }
+
+        const float* step_loss_grad = loss_gradients + t * hidden_size;
+        float* step_input_grad = input_gradients + t * input_size;
+
+        /* 组合梯度 = 直接损失梯度 + 来自未来的时间梯度 */
+        float* combo_grad = cell->state->gradient;
+        for (size_t i = 0; i < hidden_size; i++) {
+            combo_grad[i] = step_loss_grad[i] + temporal_grad[i];
+        }
+
+        /* 执行标准反向传播（累积cell参数梯度，使用+=模式） */
+        memset(step_input_grad, 0, input_size * sizeof(float));
+        int ret = cfc_cell_backward(cell, combo_grad, step_input_grad);
+        if (ret != 0) {
+            safe_free((void**)&temporal_grad);
+            return ret;
+        }
+
+        /* 传播时间梯度到上一步（如果还有更早的时间步） */
+        if (t > 0) {
+            ret = cfc_cell_temporal_backward(cell, combo_grad, temporal_grad);
+            if (ret != 0) {
+                safe_free((void**)&temporal_grad);
+                return ret;
+            }
+        }
+    }
+
+    safe_free((void**)&temporal_grad);
     return 0;
 }
 

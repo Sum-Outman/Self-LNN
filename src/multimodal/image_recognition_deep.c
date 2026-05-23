@@ -128,6 +128,7 @@ static void _patch_cfc_encode(const float* img, int w, int h, int ch,
 
 struct IRDFineClassifier {
     IRDFineConfig cfg;
+    int training_completed;
     float W_gx_p[256 * 32], W_ax_p[256 * 32], W_gh_p[256 * 256], W_ah_p[256 * 256];
     float b_g_p[256], b_a_p[256];
     float W_gx_part[256 * 256], W_ax_part[256 * 256];
@@ -174,7 +175,18 @@ IRDFineClassifier* ird_fine_create(const IRDFineConfig* config) {
     _xavier_init(c->pW_ah, PCFC_HD, PCFC_HD);
     memset(c->pb_g, 0, PCFC_HD * sizeof(float));
     memset(c->pb_a, 0, PCFC_HD * sizeof(float));
+    c->training_completed = 0;
     return c;
+}
+
+int ird_fine_mark_trained(IRDFineClassifier* c) {
+    if (!c) return -1;
+    c->training_completed = 1;
+    return 0;
+}
+
+int ird_fine_is_trained(const IRDFineClassifier* c) {
+    return c ? c->training_completed : 0;
 }
 
 void ird_fine_free(IRDFineClassifier* c) { safe_free((void**)&c); }
@@ -267,6 +279,53 @@ int ird_fine_classify(IRDFineClassifier* clf, const float* img,
                        int w, int h, int ch, IRDFineGrainedResult* res) {
     if (!clf || !img || !res) return -1;
     memset(res, 0, sizeof(IRDFineGrainedResult));
+
+    /* 未训练状态：使用确定性颜色直方图+边缘密度特征分类
+     * 基于真实图像信号处理，拒绝随机权重推理 */
+    if (!clf->training_completed) {
+        float color_hist[32] = {0};
+        float edge_density = 0.0f;
+        int total_px = w * h;
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                float r = (ch >= 1) ? img[(size_t)idx * ch + 0] : 0.0f;
+                float g = (ch >= 2) ? img[(size_t)idx * ch + 1] : r;
+                float b = (ch >= 3) ? img[(size_t)idx * ch + 2] : r;
+                int bin = (int)((r + g + b) / 3.0f * 32.0f);
+                if (bin < 0) bin = 0; if (bin > 31) bin = 31;
+                color_hist[bin] += 1.0f;
+                /* Sobel边缘检测 */
+                int idx_l = y * w + (x - 1), idx_r = y * w + (x + 1);
+                int idx_u = (y - 1) * w + x, idx_d = (y + 1) * w + x;
+                float gx = img[(size_t)idx_r * ch + 0] - img[(size_t)idx_l * ch + 0];
+                float gy = img[(size_t)idx_d * ch + 0] - img[(size_t)idx_u * ch + 0];
+                edge_density += sqrtf(gx * gx + gy * gy + 1e-10f);
+            }
+        }
+        /* 归一化 */
+        for (int i = 0; i < 32; i++) color_hist[i] /= (float)(total_px + 1);
+        edge_density /= (float)(total_px + 1);
+
+        /* 简单规则：根据亮度+边缘密度做粗分类 */
+        float brightness = 0.0f;
+        for (int i = 0; i < 32; i++) brightness += color_hist[i] * (float)i / 32.0f;
+        if (brightness < 0.2f && edge_density > 0.1f) {
+            snprintf(res->coarse_category_name, 64, "文字/文本");
+            res->coarse_confidence = 0.4f;
+        } else if (brightness > 0.7f && edge_density < 0.05f) {
+            snprintf(res->coarse_category_name, 64, "明亮场景");
+            res->coarse_confidence = 0.4f;
+        } else if (edge_density > 0.15f) {
+            snprintf(res->coarse_category_name, 64, "复杂纹理");
+            res->coarse_confidence = 0.4f;
+        } else {
+            snprintf(res->coarse_category_name, 64, "自然场景");
+            res->coarse_confidence = 0.35f;
+        }
+        snprintf(res->fine_category_name, 64, "未训练-粗分类");
+        return 0;
+    }
     int hd = clf->cfg.feature_dim, ps = clf->cfg.patch_size, st = ps / 2;
     int cols = (w - ps) / st + 1;
     if (cols < 1) cols = 1;

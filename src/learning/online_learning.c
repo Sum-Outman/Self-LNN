@@ -605,72 +605,78 @@ int online_learner_update(OnlineLearner* learner,
     }
     memset(gradient, 0, learner->weights_size * sizeof(float));
     
-    /* ZSFWS-013修复: 使用LNN CfC动力学替代简单线性模型
+    /* ZSFWS-013/M-006修复: 使用LNN CfC动力学替代简单线性模型
      * 当LNN已附着时：使用 lnn_forward 预测 + lnn_backward_accumulate 累积梯度（不立即更新）
      * 后续由学习器的SGD/Kalman/Adaptive算法直接对LNN参数应用更新
-     * 当LNN未附着时：回退到线性回归（保守兼容） */
-    float prediction = 0.0f;
+     * 当LNN未附着时：直接返回错误码(-1)，不回退到线性模型，
+     * 因为错误的线性回退会产生虚假训练数据，污染学习器状态 */
     float* lnn_output_buf = (float*)safe_malloc((size_t)RL_MAX(target_size, input_size) * sizeof(float));
     if (!lnn_output_buf) {
         safe_free((void**)&gradient);
         return -1;
     }
 
-    int used_lnn_forward = 0;
-    if (learner->lnn_attached && learner->attached_lnn) {
-        /* LNN附着模式：使用LNN前向传播 */
-        if (lnn_forward(learner->attached_lnn, (float*)input, lnn_output_buf) == 0) {
-            prediction = lnn_output_buf[0];
-            used_lnn_forward = 1;
-        }
+    /* M-006: LNN未附着时直接返回错误，不做线性回退 */
+    if (!learner->lnn_attached || !learner->attached_lnn) {
+        selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
+                              "在线学习更新：LNN未附着，无法进行前向/反向传播");
+        safe_free((void**)&lnn_output_buf);
+        safe_free((void**)&gradient);
+        return -1;
     }
 
+    float prediction = 0.0f;
+    int used_lnn_forward = 0;
+
+    /* LNN附着模式：使用LNN前向传播 */
+    if (lnn_forward(learner->attached_lnn, (float*)input, lnn_output_buf) == 0) {
+        prediction = lnn_output_buf[0];
+        used_lnn_forward = 1;
+    }
+
+    /* M-006: LNN前向传播失败时直接返回错误，不做线性回退 */
     if (!used_lnn_forward) {
-        /* 回退：线性加权预测（LNN未附着或无共享LNN时） */
-        size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
-        for (size_t i = 0; i < min_dim; i++) {
-            prediction += learner->weights[i] * input[i];
-        }
+        selflnn_set_last_error(SELFLNN_ERROR_COMPUTATION_FAILED, __func__, __FILE__, __LINE__,
+                              "在线学习更新：LNN前向传播失败");
+        safe_free((void**)&lnn_output_buf);
+        safe_free((void**)&gradient);
+        return -1;
     }
 
     float target_val = (target_size > 0) ? target[0] : 0.0f;
     float error = prediction - target_val;
     float current_loss = 0.5f * error * error;
 
-    /* ZSFWS-013: LNN附着模式下的梯度累积策略
+    /* ZSFWS-013/M-006修复: LNN附着模式下的梯度累积策略
      * 使用 lnn_backward_accumulate 将梯度累积到LNN的内部梯度缓冲区，
      * 然后从LNN梯度缓冲区读取梯度到本地gradient数组，
      * 最后由学习器的 SGD/Kalman/Adaptive 算法通过 learner->weights
-     * (指向LNN参数) 应用更新——实现学习器完全控制LNN权重更新 */
-    if (used_lnn_forward && learner->lnn_attached && learner->attached_lnn) {
-        /* 构建LNN目标向量：target_val作为第一输出元素 */
-        memset(lnn_output_buf, 0, (size_t)target_size * sizeof(float));
-        lnn_output_buf[0] = target_val;
+     * (指向LNN参数) 应用更新——实现学习器完全控制LNN权重更新
+     * M-006: 反向传播失败时直接返回错误，不做简单误差梯度回退 */
 
-        /* 累积模式反向传播：仅累积梯度不更新权重 */
-        float backward_loss = 0.0f;
-        if (lnn_backward_accumulate(learner->attached_lnn, lnn_output_buf, &backward_loss) == 0) {
-            /* 从LNN梯度缓冲区复制梯度到本地gradient数组 */
-            float* lnn_grads = lnn_get_gradients(learner->attached_lnn);
-            if (lnn_grads) {
-                size_t param_count = lnn_get_parameter_count(learner->attached_lnn);
-                size_t copy_n = (param_count < learner->weights_size) ? param_count : learner->weights_size;
-                memcpy(gradient, lnn_grads, copy_n * sizeof(float));
-            }
-        } else {
-            /* 反向传播失败时回退：使用简单误差梯度 */
-            size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
-            for (size_t i = 0; i < min_dim; i++) {
-                gradient[i] = error * input[i];
-            }
-        }
-    } else {
-        /* 回退梯度：手动计算简单线性梯度 */
-        size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
-        for (size_t i = 0; i < min_dim; i++) {
-            gradient[i] = error * input[i];
-        }
+    /* 构建LNN目标向量：target_val作为第一输出元素 */
+    memset(lnn_output_buf, 0, (size_t)target_size * sizeof(float));
+    lnn_output_buf[0] = target_val;
+
+    /* 累积模式反向传播：仅累积梯度不更新权重 */
+    float backward_loss = 0.0f;
+    if (lnn_backward_accumulate(learner->attached_lnn, lnn_output_buf, &backward_loss) != 0) {
+        /* M-006: 反向传播失败时直接返回错误，不回退到简单误差梯度 */
+        selflnn_set_last_error(SELFLNN_ERROR_COMPUTATION_FAILED, __func__, __FILE__, __LINE__,
+                              "在线学习更新：LNN反向传播累积失败");
+        safe_free((void**)&lnn_output_buf);
+        safe_free((void**)&gradient);
+        return -1;
     }
+
+    /* 从LNN梯度缓冲区复制梯度到本地gradient数组 */
+    float* lnn_grads = lnn_get_gradients(learner->attached_lnn);
+    if (lnn_grads) {
+        size_t param_count = lnn_get_parameter_count(learner->attached_lnn);
+        size_t copy_n = (param_count < learner->weights_size) ? param_count : learner->weights_size;
+        memcpy(gradient, lnn_grads, copy_n * sizeof(float));
+    }
+
     safe_free((void**)&lnn_output_buf);
     
     // 更新梯度滑动窗口

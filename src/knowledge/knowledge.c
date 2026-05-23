@@ -5529,7 +5529,7 @@ int knowledge_has_lnn_integration(const KnowledgeBase* kb) {
  * 所有知识以三元组（主体-谓词-客体）形式存储
  * ============================================================================ */
 
-#define PRESET_KNOWLEDGE_COUNT 300
+#define PRESET_KNOWLEDGE_COUNT 281
 
 typedef struct {
     const char* subject;
@@ -5694,23 +5694,15 @@ static const PresetKnowledgeEntry g_preset_knowledge[] = {
     {"类比推理", "定义", "基于相似性的推理", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
     {"溯因推理", "定义", "从结果推断原因的推理", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
 
-    /* === 化学基础 === */
-    {"元素周期表", "创建者", "门捷列夫", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
+    /* === 化学进阶 === */
     {"原子序数", "定义", "原子核中质子的数量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
     {"化学键", "类型", "离子键、共价键、金属键", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"pH值", "范围", "0到14", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"酸", "pH值", "小于7", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"碱", "pH值", "大于7", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"中性溶液", "pH值", "等于7", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"水", "化学式", "H2O", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"二氧化碳", "化学式", "CO2", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"氯化钠", "化学式", "NaCl", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"氧", "化学符号", "O", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"氢", "化学符号", "H", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"碳", "化学符号", "C", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"氮", "化学符号", "N", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"铁", "化学符号", "Fe", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"金", "化学符号", "Au", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"银", "化学符号", "Ag", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"铜", "化学符号", "Cu", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"铝", "化学符号", "Al", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
@@ -5718,25 +5710,14 @@ static const PresetKnowledgeEntry g_preset_knowledge[] = {
     {"氧化", "定义", "物质与氧发生反应或失去电子", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
     {"还原", "定义", "物质获得电子的过程", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
 
-    /* === 生物学基础 === */
-    {"细胞", "是", "生物体的基本结构和功能单位", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
+    /* === 生物学进阶 === */
     {"细胞核", "功能", "存储遗传信息", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"DNA", "全称", "脱氧核糖核酸", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"RNA", "全称", "核糖核酸", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"基因", "定义", "DNA上编码蛋白质的片段", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
     {"染色体", "组成", "DNA和蛋白质", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"人类染色体", "数量", "46条（23对）", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"线粒体", "功能", "细胞的能量工厂", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"光合作用", "定义", "植物利用光能合成有机物的过程", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
     {"呼吸作用", "定义", "细胞分解有机物释放能量的过程", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"免疫系统", "功能", "保护身体免受病原体侵害", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
     {"疫苗", "功能", "激活免疫系统产生抗体", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"进化论", "提出者", "达尔文", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"自然选择", "定义", "适应环境的个体更可能生存和繁殖", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
     {"生态系统", "组成", "生物群落和非生物环境", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
     {"食物链", "描述", "生物间的捕食关系", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
     {"生物多样性", "定义", "地球上所有生物的种类和变异", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"蛋白质", "组成", "氨基酸", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
     {"碳水化合物", "功能", "提供能量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
     {"脂肪", "功能", "储存能量和保温", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
 

@@ -1869,18 +1869,125 @@ void semantic_parsing_swrl_cleanup(void) {
 int semantic_parsing_swrl_add_rule(const char* name, const char* body_rules,
     int body_count, const char* head_rules, int head_count, float confidence) {
     if (!g_swrl_engine) return -1;
-    /* 简化接口：通过字符串添加 */
     SwrlAtom body[SWRL_MAX_ATOMS] = {0};
     SwrlAtom head[SWRL_MAX_ATOMS] = {0};
-    body[0].type = ATOM_PROPERTY;
-    strncpy(body[0].predicate, body_rules, 127);
-    body[0].arg1[0] = '?'; body[0].arg1[1] = 'x'; body[0].arg1[2] = 0;
-    body[0].arg2[0] = '?'; body[0].arg2[1] = 'y'; body[0].arg2[2] = 0;
-    head[0].type = ATOM_PROPERTY;
-    strncpy(head[0].predicate, head_rules, 127);
-    head[0].arg1[0] = '?'; head[0].arg1[1] = 'x'; head[0].arg1[2] = 0;
-    head[0].arg2[0] = '?'; head[0].arg2[1] = 'y'; head[0].arg2[2] = 0;
-    return swrl_add_rule(g_swrl_engine, name, body, 1, head, 1, confidence);
+    int actual_body_count = 0;
+    int actual_head_count = 0;
+    /* 解析单个原子字符串: 格式 "类型:谓词:arg1:arg2" 或简单 "谓词名" */
+    /* 类型: C=类归属 P=属性关系 E=相等 D=不等 B=内置函数 */
+    #define PARSE_ONE_ATOM(atom_str, out_atom) do { \
+        char _parts[4][128] = {{0}, {0}, {0}, {0}}; \
+        int _pc = 0; \
+        const char* _s = (atom_str); \
+        const char* _colon; \
+        while ((_colon = strchr(_s, ':')) != NULL && _pc < 4) { \
+            size_t _len = (size_t)(_colon - _s); \
+            if (_len > 127) _len = 127; \
+            memcpy(_parts[_pc], _s, _len); \
+            _parts[_pc][_len] = '\0'; \
+            _s = _colon + 1; \
+            _pc++; \
+        } \
+        if (_pc < 4 && _s[0] != '\0') { \
+            strncpy(_parts[_pc], _s, 127); \
+            _parts[_pc][127] = '\0'; \
+            _pc++; \
+        } \
+        if (_pc == 1) { \
+            (out_atom)->type = ATOM_PROPERTY; \
+            strncpy((out_atom)->predicate, _parts[0], 127); \
+            (out_atom)->predicate[127] = '\0'; \
+            (out_atom)->arg1[0] = '?'; (out_atom)->arg1[1] = 'x'; (out_atom)->arg1[2] = '\0'; \
+            (out_atom)->arg2[0] = '?'; (out_atom)->arg2[1] = 'y'; (out_atom)->arg2[2] = '\0'; \
+        } else if (_pc >= 2) { \
+            switch (_parts[0][0]) { \
+                case 'C': case 'c': (out_atom)->type = ATOM_CLASS; break; \
+                case 'P': case 'p': (out_atom)->type = ATOM_PROPERTY; break; \
+                case 'E': case 'e': (out_atom)->type = ATOM_EQUAL; break; \
+                case 'D': case 'd': (out_atom)->type = ATOM_DIFFERENT; break; \
+                case 'B': case 'b': (out_atom)->type = ATOM_BUILTIN; break; \
+                default: (out_atom)->type = ATOM_PROPERTY; break; \
+            } \
+            strncpy((out_atom)->predicate, _parts[1], 127); \
+            (out_atom)->predicate[127] = '\0'; \
+            if (_pc >= 3) { strncpy((out_atom)->arg1, _parts[2], 127); (out_atom)->arg1[127] = '\0'; } \
+            else { (out_atom)->arg1[0] = '?'; (out_atom)->arg1[1] = 'x'; (out_atom)->arg1[2] = '\0'; } \
+            if (_pc >= 4) { strncpy((out_atom)->arg2, _parts[3], 127); (out_atom)->arg2[127] = '\0'; } \
+            else { (out_atom)->arg2[0] = '?'; (out_atom)->arg2[1] = 'y'; (out_atom)->arg2[2] = '\0'; } \
+        } \
+    } while(0)
+    /* 解析body规则: 以";"分隔多个原子 */
+    if (body_rules && body_count > 0) {
+        const char* cursor = body_rules;
+        while (actual_body_count < body_count && actual_body_count < SWRL_MAX_ATOMS) {
+            while (*cursor == ' ' || *cursor == '\t') cursor++;
+            if (*cursor == '\0') break;
+            const char* semi = strchr(cursor, ';');
+            char single[512] = {0};
+            if (semi) {
+                size_t len = (size_t)(semi - cursor);
+                if (len > 511) len = 511;
+                memcpy(single, cursor, len);
+                single[len] = '\0';
+                cursor = semi + 1;
+            } else {
+                strncpy(single, cursor, 511);
+                single[511] = '\0';
+                cursor += strlen(cursor);
+            }
+            /* 去除尾部空格 */
+            size_t slen = strlen(single);
+            while (slen > 0 && (single[slen-1] == ' ' || single[slen-1] == '\t')) {
+                single[--slen] = '\0';
+            }
+            if (slen > 0) {
+                PARSE_ONE_ATOM(single, &body[actual_body_count]);
+                actual_body_count++;
+            }
+        }
+    }
+    /* 解析head规则 */
+    if (head_rules && head_count > 0) {
+        const char* cursor = head_rules;
+        while (actual_head_count < head_count && actual_head_count < SWRL_MAX_ATOMS) {
+            while (*cursor == ' ' || *cursor == '\t') cursor++;
+            if (*cursor == '\0') break;
+            const char* semi = strchr(cursor, ';');
+            char single[512] = {0};
+            if (semi) {
+                size_t len = (size_t)(semi - cursor);
+                if (len > 511) len = 511;
+                memcpy(single, cursor, len);
+                single[len] = '\0';
+                cursor = semi + 1;
+            } else {
+                strncpy(single, cursor, 511);
+                single[511] = '\0';
+                cursor += strlen(cursor);
+            }
+            size_t slen = strlen(single);
+            while (slen > 0 && (single[slen-1] == ' ' || single[slen-1] == '\t')) {
+                single[--slen] = '\0';
+            }
+            if (slen > 0) {
+                PARSE_ONE_ATOM(single, &head[actual_head_count]);
+                actual_head_count++;
+            }
+        }
+    }
+    /* 回退: 如果字符串中存在内容但未能解析出任何原子,
+       将整个字符串当作单个谓词名处理 (向后兼容) */
+    if (actual_body_count == 0 && body_rules && body_count > 0) {
+        PARSE_ONE_ATOM(body_rules, &body[0]);
+        actual_body_count = 1;
+    }
+    if (actual_head_count == 0 && head_rules && head_count > 0) {
+        PARSE_ONE_ATOM(head_rules, &head[0]);
+        actual_head_count = 1;
+    }
+    #undef PARSE_ONE_ATOM
+    return swrl_add_rule(g_swrl_engine, name, body, actual_body_count,
+                          head, actual_head_count, confidence);
 }
 
 int semantic_parsing_swrl_add_fact(const char* subject, const char* predicate,

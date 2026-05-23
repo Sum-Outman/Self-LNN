@@ -608,6 +608,12 @@ static int discovery_parse_message(MultiSystemControlEngine* engine, const char*
     return 0;
 }
 
+/* L-008修复: 对端设备连接信息，存储在DeviceInfo.device_specific_data中 */
+typedef struct {
+    char host[64];  /**< 对端主机地址 */
+    int port;       /**< 对端端口号 */
+} PeerConnectionInfo;
+
 /**
  * @brief 添加对端设备到发现列表
  */
@@ -615,7 +621,18 @@ static void discovery_add_peer_device(MultiSystemControlEngine* engine, const ch
                                        DeviceType type, const char* name, const char* host, int port) {
     /* ZSF-037修复: 使用host/port记录对端设备信息，而非丢弃 */
     if (!engine || !device_id || !name) return;
-    (void)host; (void)port; /* 保留参数供v2.0使用，当前通过discovered_devices管理 */
+    
+    /* L-008修复: 如果host和port非空则存储到device_specific_data中
+     * 在锁定前提取参数，减少临界区内的分配时间 */
+    PeerConnectionInfo* peer_info = NULL;
+    if (host && host[0] != '\0' && port > 0) {
+        peer_info = (PeerConnectionInfo*)safe_malloc(sizeof(PeerConnectionInfo));
+        if (peer_info) {
+            strncpy(peer_info->host, host, sizeof(peer_info->host) - 1);
+            peer_info->host[sizeof(peer_info->host) - 1] = '\0';
+            peer_info->port = port;
+        }
+    }
     
 #ifdef _WIN32
     EnterCriticalSection(&engine->discovery_lock);
@@ -640,6 +657,11 @@ static void discovery_add_peer_device(MultiSystemControlEngine* engine, const ch
             dev->state = DEVICE_STATE_IDLE;
             dev->last_seen = engine->system_time;
             dev->is_online = 1;
+            /* L-008修复: 将对端连接信息挂载到device_specific_data
+             * destroy_device_info时会自动通过safe_free释放 */
+            if (peer_info) {
+                dev->device_specific_data = peer_info;
+            }
             
             if (engine->discovered_count >= engine->discovered_capacity) {
                 size_t new_cap = (engine->discovered_capacity == 0) ? 32 : engine->discovered_capacity * 2;

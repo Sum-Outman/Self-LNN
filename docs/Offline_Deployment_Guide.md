@@ -212,17 +212,11 @@ cmake --build . --parallel
 ### 2.5 部署到生产目录 / Deploy to Production Directory
 
 ```bash
-# 使用部署脚本 (Use deploy script)
-# Linux/macOS:
-chmod +x scripts/deploy.sh
-./scripts/deploy.sh
-
-# 或手动部署 (Or manual deployment):
+# 手动部署 (Manual deployment):
 mkdir -p /opt/slnn
-cp -r build/bin /opt/slnn/
+cp build/bin/Release/selflnn /opt/slnn/bin/
 cp -r config /opt/slnn/
 cp -r frontend /opt/slnn/
-cp -r scripts /opt/slnn/
 
 # Windows: 拷贝到目标目录即可
 # Windows: Copy to target directory
@@ -435,8 +429,7 @@ slnn-offline-bundle/
 │   ├── slnn_windows_service.xml.example
 │   └── com.selflnn.slnn.plist.example
 ├── scripts/                    # 脚本工具
-│   ├── build.bat / build.sh   # 构建脚本
-│   ├── deploy.sh               # 部署脚本
+│   ├── build.sh               # 构建脚本
 │   ├── run_tests.sh            # 测试脚本
 │   ├── verify_project.py       # (可选/Optional)
 │   ├── fix_line_endings.py     # (可选/Optional)

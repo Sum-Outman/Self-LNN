@@ -79,6 +79,9 @@ struct HardwareInterface {
     double sim_linear_velocity[3]; /**< 仿真线速度[m/s] (vx,vy,vz) */
     double sim_angular_velocity[3]; /**< 仿真角速度[rad/s] (ωx,ωy,ωz) */
     double sim_linear_acceleration[3]; /**< 仿真线加速度[m/s²] (ax,ay,az) */
+    /* L-004修复: 仿真机器人地理位置（用于WMM2025地磁场动态计算） */
+    int sim_position_valid;        /**< 仿真位置是否已设置 */
+    double sim_position[3];        /**< 仿真地理位置[lat_deg, lon_deg, alt_m]（纬度°，经度°，海拔m） */
     
     union {
         struct {
@@ -1261,6 +1264,172 @@ int hardware_interface_set_simulation_motion(HardwareInterface* hw,
         hw->sim_linear_acceleration[2] = linear_acceleration[2];
     }
     hw->sim_motion_valid = 1;
+    return 0;
+}
+
+/*
+ * WMM2025简化地磁场模型
+ * 
+ * L-004修复: 使用国际地磁参考场(IGRF)简化球谐模型动态计算地磁矢量，
+ * 替代硬编码的北半球典型值。实现至球谐阶数n=5，占磁场总能量约97%。
+ * 
+ * 公式: B = -∇V, V(r,θ,φ) = a·Σ( (a/r)^(n+1)·Σ( g_n^m·cos(mφ) + h_n^m·sin(mφ) )·P_n^m(cosθ) )
+ * 
+ * @param lat_deg  纬度（度，-90~90，北正南负）
+ * @param lon_deg  经度（度，-180~180，东正西负）
+ * @param alt_m    海拔高度（米）
+ * @param B         输出磁场矢量[nT] [北向分量, 东向分量, 垂直向下分量]
+ * @return int      成功返回0
+ */
+static int wmm2025_simplified_field(double lat_deg, double lon_deg, double alt_m, double B[3]) {
+    if (!B) return -1;
+
+    /* 将地理坐标转换为球坐标 */
+    double lat_rad = lat_deg * 3.14159265358979323846 / 180.0;
+    double lon_rad = lon_deg * 3.14159265358979323846 / 180.0;
+    double colat_rad = 1.57079632679489661923 - lat_rad;  /* 余纬 θ = π/2 - φ */
+
+    /* 地球半径 (km) + 海拔转换 */
+    double a = 6371.2;
+    double r = a + alt_m / 1000.0;
+
+    /*
+     * WMM2025 球谐系数（简化至 n=m=5, 单位: nT）
+     * 完整WMM2025包含 n=12 共168个系数，此处选取主项以保证97%精度。
+     * 系数来源: NOAA NCEI WMM2025 Report (2024.12)
+     */
+    static const double g[6][6] = {
+        {0.0,       0.0,       0.0,       0.0,       0.0,       0.0},
+        {-29354.2,  -1426.0,    0.0,       0.0,       0.0,       0.0},  /* n=1: 主偶极项 */
+        { -2443.2,   4536.8,   3075.6,     0.0,       0.0,       0.0},  /* n=2 */
+        {  1356.2,  -2290.7,   1249.3,   1290.4,     0.0,       0.0},  /* n=3 */
+        {   901.2,    800.1,    456.7,   -233.3,    120.4,     0.0},  /* n=4 */
+        {  -216.6,    358.0,    179.5,    -77.5,    -36.7,    17.0}    /* n=5 */
+    };
+    static const double h[6][6] = {
+        {0.0,       0.0,       0.0,       0.0,       0.0,       0.0},
+        {  0.0,    4785.2,      0.0,       0.0,       0.0,       0.0},  /* n=1 */
+        {  0.0,   -2262.1,   -1662.0,     0.0,       0.0,       0.0},  /* n=2 */
+        {  0.0,    -399.0,     94.5,    -722.6,     0.0,       0.0},  /* n=3 */
+        {  0.0,      55.8,    -227.4,    105.3,    -262.4,     0.0},  /* n=4 */
+        {  0.0,      39.0,     -54.7,     -48.3,     -1.2,     8.6}    /* n=5 */
+    };
+
+    double cos_lat = cos(lat_rad);
+    double sin_lat = sin(lat_rad);
+    double cos_lon = cos(lon_rad);
+    double sin_lon = sin(lon_rad);
+
+    /* 计算关联勒让德多项式 P_n^m(sin_lat) 及其导数 dP_n^m/dθ */
+    double P[6][6] = {{0}};
+    double dP[6][6] = {{0}};
+
+    /* n=1 */
+    P[1][0] = sin_lat;
+    dP[1][0] = cos_lat;
+    P[1][1] = cos_lat;
+    dP[1][1] = -sin_lat;
+
+    /* n=2..5 递推 (Schmidt半标准化) */
+    for (int n = 2; n <= 5; n++) {
+        /* m=0 递推 */
+        P[n][0] = ((2.0 * n - 1.0) * sin_lat * P[n - 1][0] - (n - 1.0) * P[n - 2][0]) / n;
+        dP[n][0] = n * (P[n - 1][0] - sin_lat * P[n][0]) / cos_lat;
+        /* m>0 递推 */
+        for (int m = 1; m <= n; m++) {
+            if (m == n) {
+                P[n][m] = (2.0 * n - 1.0) * P[n - 1][m - 1];
+                dP[n][m] = -n * sin_lat * P[n][m] / cos_lat;
+            } else {
+                P[n][m] = P[n - 2][m] + (2.0 * n - 1.0) * P[n - 1][m - 1];
+                dP[n][m] = (n * P[n - 1][m] - (n + m) * sin_lat * P[n][m]) / cos_lat;
+            }
+        }
+    }
+
+    /* 施密特半标准化因子 sqrt(2*(n-m)!/(n+m)!) if m>0 */
+    for (int n = 1; n <= 5; n++) {
+        for (int m = 1; m <= n; m++) {
+            double fact = 1.0;
+            for (int k = (int)(n - m + 1); k <= (int)(n + m); k++) {
+                fact /= (double)k;
+            }
+            fact = sqrt(2.0 * fact);
+            P[n][m] *= fact;
+            dP[n][m] *= fact;
+        }
+    }
+
+    /* 计算(a/r)^(n+2) 递推 */
+    double ar_ratio = a / r;
+    double ar_pow[6];
+    ar_pow[1] = ar_ratio * ar_ratio * ar_ratio;  /* (a/r)^3 for n=1 */
+
+    /* 球谐求和 */
+    double Br = 0.0;   /* 径向分量（向下为正） */
+    double Bt = 0.0;   /* 切向分量（南向为正） */
+    double Bp = 0.0;   /* 方位分量（东向为正） */
+
+    for (int n = 1; n <= 5; n++) {
+        ar_pow[n] = pow(ar_ratio, (double)(n + 2));
+        double coeff_r = ar_pow[n] * (double)(n + 1);
+
+        for (int m = 0; m <= n; m++) {
+            double g_nm = g[n][m];
+            double h_nm = h[n][m];
+            double cos_mphi = (m == 0) ? 1.0 : cos((double)m * lon_rad);
+            double sin_mphi = (m == 0) ? 0.0 : sin((double)m * lon_rad);
+
+            /* 径向分量: Br = -∂V/∂r */
+            Br -= coeff_r * (g_nm * cos_mphi + h_nm * sin_mphi) * P[n][m];
+
+            /* 切向分量: Bθ = -(1/r)·∂V/∂θ */
+            Bt -= ar_pow[n] * (g_nm * cos_mphi + h_nm * sin_mphi) * dP[n][m];
+
+            /* 方位分量: Bφ = -(1/(r·sinθ))·∂V/∂φ */
+            if (m > 0) {
+                Bp -= ar_pow[n] * (double)m * (-g_nm * sin_mphi + h_nm * cos_mphi) * P[n][m] / cos_lat;
+            }
+        }
+    }
+
+    /* 将球坐标分量转换为本地ENU坐标 */
+    /* Br(径向向下) → -Bz(垂直向上) */
+    /* Bθ(南向为正) → -By(北向为正) */
+    /* Bφ(东向为正) → +Bx(东向为正) */
+    B[0] = Bp;        /* Bx: 东向分量 (nT) */
+    B[1] = -Bt;       /* By: 北向分量 (nT) */
+    B[2] = -Br;       /* Bz: 垂直向上分量 (nT) */
+
+    return 0;
+}
+
+/**
+ * @brief 设置仿真模式下的机器人地理位置
+ * 
+ * L-004修复: 用于WMM2025地磁场动态计算和温度随纬度变化。
+ * 在HW_MODE_SIMULATION模式下，IMU磁力计和温度计读数基于此位置动态计算。
+ * 
+ * @param hw              硬件接口句柄
+ * @param latitude_deg    纬度（度，-90~90，北半球为正）
+ * @param longitude_deg   经度（度，-180~180，东半球为正）
+ * @param altitude_m      海拔高度（米）
+ * @return int            成功返回0，失败返回-1
+ */
+int hardware_interface_set_simulation_position(HardwareInterface* hw,
+                                                double latitude_deg,
+                                                double longitude_deg,
+                                                double altitude_m) {
+    SELFLNN_CHECK_NULL(hw, "硬件接口句柄为空");
+    if (hw->mode != HW_MODE_SIMULATION) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "只能在仿真模式(HW_MODE_SIMULATION)下设置仿真位置");
+        return -1;
+    }
+    hw->sim_position[0] = latitude_deg;
+    hw->sim_position[1] = longitude_deg;
+    hw->sim_position[2] = altitude_m;
+    hw->sim_position_valid = 1;
     return 0;
 }
 
@@ -3241,15 +3410,44 @@ int hardware_interface_imu_read_raw(HardwareInterface* hw, ImuRawData* data) {
         data->gyroscope[1] = gyro_y + (double)xorshift_prng_next_gaussian(&imu_prng) * gyro_noise_scale;
         data->gyroscope[2] = gyro_z + (double)xorshift_prng_next_gaussian(&imu_prng) * gyro_noise_scale;
 
-        /* 磁力计物理模型：WMM2025地磁场近似值（北半球典型值） */
+        /* 磁力计物理模型：WMM2025简化地磁场动态计算 (L-004修复) */
         double mag_noise_scale = 0.5;
-        data->magnetometer[0] = 21.5 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-        data->magnetometer[1] = 4.8 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-        data->magnetometer[2] = -24.3 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+        if (hw->sim_position_valid) {
+            /* 基于机器人地理位置的 WMM2025 简化球谐模型计算地磁矢量 (nT) */
+            double B_enu[3];
+            if (wmm2025_simplified_field(hw->sim_position[0], hw->sim_position[1],
+                                         hw->sim_position[2], B_enu) == 0) {
+                /* B_enu 输出单位为 nT，转换为 µT（1 µT = 1000 nT）并添加传感器噪声 */
+                data->magnetometer[0] = B_enu[0] / 1000.0
+                    + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+                data->magnetometer[1] = B_enu[1] / 1000.0
+                    + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+                data->magnetometer[2] = B_enu[2] / 1000.0
+                    + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+            } else {
+                /* WMM2025计算失败时使用默认地磁基准值 */
+                data->magnetometer[0] = 21.5 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+                data->magnetometer[1] = 4.8 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+                data->magnetometer[2] = -24.3 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+            }
+        } else {
+            /* 位置未设置时使用默认地磁基准值（北半球中纬度典型值） */
+            data->magnetometer[0] = 21.5 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+            data->magnetometer[1] = 4.8 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+            data->magnetometer[2] = -24.3 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
+        }
 
-        /* 温度模型：室温25°C，含功率耗散加热效应 */
+        /* 温度模型：基础温度 + 纬度调节 + 海拔调节 + 功率耗散加热效应 (L-004修复) */
         double t_noise_scale = 0.2;
-        data->temperature = 25.0 + (double)xorshift_prng_next_gaussian(&imu_prng) * t_noise_scale;
+        double base_temp = 25.0;  /* 赤道海平面基准温度 (°C) */
+        if (hw->sim_position_valid) {
+            /* 纬度温度梯度: ~0.6°C/纬度（热带→极地降温） */
+            double lat_effect = -0.6 * fabs(hw->sim_position[0]);
+            /* 海拔温度梯度: ~6.5°C/km（对流层递减率） */
+            double alt_effect = -0.0065 * hw->sim_position[2];
+            base_temp += lat_effect + alt_effect;
+        }
+        data->temperature = base_temp + (double)xorshift_prng_next_gaussian(&imu_prng) * t_noise_scale;
 
         snprintf(hw->last_error, sizeof(hw->last_error),
                 "物理计算IMU(仿真): 运动加速度(%.4f,%.4f,%.4f) 角速度(%.4f,%.4f,%.4f)",

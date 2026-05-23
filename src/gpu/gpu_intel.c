@@ -771,17 +771,23 @@ static int intel_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMemory*
     return -1;
 }
 
-/* 注意：Intel Level Zero异步内存拷贝需要额外实现Level Zero命令列表和栅栏机制。
- * 当前Intel后端通过CPU内存模拟GPU显存，拷贝操作本身即为同步完成，
- * 因此_async版本直接调用同步实现。在完整Level Zero后端中需替换为zeCommandListAppendMemoryCopy。 */
+/* M-005修复: Intel Level Zero SDK不可用时异步拷贝不得静默退化为同步。
+ * 调用者期望异步语义（非阻塞），退化为同步会导致调用方逻辑错误。
+ * 当无法实现真正的异步拷贝时，必须返回错误码告知调用方。
+ * 异步拷贝需要Level Zero命令列表(CommandList)和栅栏(Fence)机制，
+ * 在Level Zero后端完全实现后替换为zeCommandListAppendMemoryCopy。 */
 static int intel_backend_memory_copy_to_device_async(GpuMemory* dst, const void* src, size_t size, GpuStream* stream) {
-    (void)stream;
-    return intel_backend_memory_copy_to_device(dst, src, size);
+    (void)dst; (void)src; (void)size; (void)stream;
+    /* 异步拷贝需要Level Zero命令列表支持，当前CPU模拟模式不具备异步能力。
+     * 返回错误码强制调用方处理而非静默退化 */
+    return -1;
 }
 
 static int intel_backend_memory_copy_from_device_async(void* dst, GpuMemory* src, size_t size, GpuStream* stream) {
-    (void)stream;
-    return intel_backend_memory_copy_from_device(dst, src, size);
+    (void)dst; (void)src; (void)size; (void)stream;
+    /* 异步拷贝需要Level Zero命令列表支持，当前CPU模拟模式不具备异步能力。
+     * 返回错误码强制调用方处理而非静默退化 */
+    return -1;
 }
 
 static GpuKernel* intel_backend_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {

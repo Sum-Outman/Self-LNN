@@ -430,6 +430,13 @@ typedef enum {
     /* ===== 产品设计 ===== */
     API_POST_PRODUCT_DESIGN = 270,         /**< 产品设计生成 */
     API_GET_PRODUCT_SPEC = 271,            /**< 获取产品规格 */
+
+    /* ===== ZSFWS-B009: 前端-后端API端点对齐修复 ===== */
+    API_GET_PROGRAMMING_SAMPLE = 285,      /**< 获取编程示例代码 /api/programming/sample */
+    API_GET_COMMAND_PREFIXES = 286,        /**< 获取命令前缀列表 /api/command/prefixes */
+    API_GET_COGNITION_TOM = 287,           /**< 获取心智理论状态 /api/cognition/tom */
+    API_GET_TASK_QUEUE = 288,              /**< 获取任务队列状态 /api/task/queue */
+    API_POST_TASK_ASSIGN = 289,            /**< 分配AGI任务 /api/task/assign */
 } ApiRequestType;
 
 /**

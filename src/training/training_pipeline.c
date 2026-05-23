@@ -1009,103 +1009,71 @@ int training_pipeline_load_data(TrainingPipeline* pipeline, const char* data_pat
 static int compute_evaluation_metrics(TrainingPipeline* pipeline);
 
 /**
- * @brief 自监督训练数据初始化
+ * @brief 自监督训练数据初始化（仅使用真实数据）
  *
- * 当训练管线没有加载外部真实数据时，使用LNN自身状态（权重、CfC动力学）
- * 生成自监督训练数据。通过结构化输入前向传播→收集(输入, 输出)对，
- * 无需任何外部数据即可启动自监督训练循环。
+ * H-004修复: 完全移除正弦波合成数据路径。
+ * 仅从已加载的真实数据源或数据集文件路径获取训练数据。
+ * 无真实数据时记录错误并返回-1，拒绝使用任何合成/虚假数据。
  *
  * @param pipeline 训练管线
- * @return 0=成功, -1=失败
+ * @return 0=成功, -1=失败（无真实训练数据）
  */
 static int pipeline_self_supervised_init(TrainingPipeline* pipeline) {
     if (!pipeline || !pipeline->network) return -1;
 
-    /* ZSFWS-M008修复: 严格真实数据模式下禁止使用确定性正弦波生成训练数据。
-     * 自监督初始化应仅在引导模式（ALLOW_BOOTSTRAP_DATA=ON）下使用。
-     * 在严格模式下，返回-1通知调用方使用真实数据源。 */
-#ifdef SELFLNN_STRICT_REAL_DATA
-    {
-        static int strict_warned = 0;
-        if (!strict_warned) {
-            log_warning("[训练管线] 严格真实数据模式下禁用自监督初始化，"
-                        "请提供真实训练数据到 data/training/ 目录");
-            strict_warned = 1;
-        }
-        return -1;
-    }
-#else
-    /* 确定输入/输出维度 */
-    size_t input_dim = 512, output_dim = 256;
-    if (pipeline->source_count > 0 && pipeline->sources[0].loaded) {
-        input_dim = pipeline->sources[0].feature_dim;
-        output_dim = pipeline->sources[0].label_dim;
-    }
-    if (input_dim == 0) input_dim = 512;
-    if (output_dim == 0) output_dim = 256;
-
-    /* 生成64个自监督训练样本 */
-    size_t sample_count = 64;
-    size_t sample_stride = input_dim + output_dim;
-    size_t total_floats = sample_count * sample_stride;
-
-    float* ss_data = (float*)safe_calloc(total_floats, sizeof(float));
-    if (!ss_data) return -1;
-
-    float* input_buf = (float*)safe_calloc(input_dim, sizeof(float));
-    float* output_buf = (float*)safe_calloc(output_dim, sizeof(float));
-    if (!input_buf || !output_buf) {
-        safe_free((void**)&ss_data);
-        safe_free((void**)&input_buf);
-        safe_free((void**)&output_buf);
-        return -1;
-    }
-
     /*
-     * 自监督数据生成策略：
-     * 使用确定性结构化输入（M-序列风格），通过网络前向传播
-     * 产生输出作为目标。这样训练数据完全源自LNN自身的
-     * 连续动力学状态，实现真正的自监督学习闭环。
+     * ZSFWS-M008修复 / H-004修复: 完全禁用合成训练数据生成。
+     * 自监督初始化必须从真实文件或数据采集管线获取训练数据。
+     * 移除所有正弦波叠加合成数据路径。
+     * 没有真实数据时直接返回错误，禁止使用任何合成/虚假数据。
      */
-    for (size_t s = 0; s < sample_count; s++) {
-        /* 确定性结构化输入：频率递增的正弦波叠加 + 相位偏移 */
-        for (size_t d = 0; d < input_dim; d++) {
-            float phase = (float)(s * 7919 + d * 503) / 10007.0f;
-            float freq = 1.0f + (float)(d % 32) * 0.5f;
-            input_buf[d] = sinf(phase * freq * 6.2831853f) * 0.5f
-                         + sinf(phase * freq * 2.0943951f) * 0.3f
-                         + cosf(phase * freq * 1.5707963f) * 0.2f;
+
+    /* 尝试从管线已加载的真实数据源获取训练数据 */
+    if (pipeline->source_count > 0) {
+        for (size_t i = 0; i < pipeline->source_count; i++) {
+            if (pipeline->sources[i].loaded &&
+                pipeline->sources[i].count > 0 &&
+                pipeline->sources[i].data) {
+                size_t src_bytes = pipeline->sources[i].count *
+                    pipeline->sources[i].feature_dim * sizeof(float);
+                if (pipeline->data_buffer) {
+                    safe_free((void**)&pipeline->data_buffer);
+                }
+                pipeline->data_buffer = (float*)safe_calloc(
+                    pipeline->sources[i].count * pipeline->sources[i].feature_dim,
+                    sizeof(float));
+                if (!pipeline->data_buffer) return -1;
+                memcpy(pipeline->data_buffer,
+                       pipeline->sources[i].data,
+                       src_bytes);
+                pipeline->data_size = src_bytes;
+                log_info("[训练管线] 自监督初始化: 使用已加载的真实数据源[%zu]"
+                         " (数据大小=%zu字节)", i, pipeline->data_size);
+                return 0;
+            }
         }
-
-        /* 通过LNN前向传播获取网络自身状态输出 */
-        lnn_forward(pipeline->network, input_buf, output_buf);
-
-        /* 存储 (输入, 输出) 对 */
-        memcpy(ss_data + s * sample_stride, input_buf, input_dim * sizeof(float));
-        memcpy(ss_data + s * sample_stride + input_dim, output_buf, output_dim * sizeof(float));
     }
 
-    /* 释放旧缓冲区并挂接新数据 */
-    if (pipeline->data_buffer) {
-        safe_free((void**)&pipeline->data_buffer);
+    /* 尝试从数据集路径加载真实文件 */
+    if (pipeline->state.dataset_path[0] != '\0') {
+        int load_result = training_pipeline_load_data(pipeline,
+                          pipeline->state.dataset_path);
+        if (load_result == 0 && pipeline->data_buffer && pipeline->data_size > 0) {
+            log_info("[训练管线] 自监督初始化: 从文件加载真实训练数据成功"
+                     " (文件=%s)", pipeline->state.dataset_path);
+            return 0;
+        }
     }
-    pipeline->data_buffer = ss_data;
-    pipeline->data_size = total_floats * sizeof(float);
 
-    safe_free((void**)&input_buf);
-    safe_free((void**)&output_buf);
-
-    fprintf(stderr, "[训练管线] 自监督初始化完成: 使用LNN自身状态生成了 %zu 个训练样本"
-            " (输入维度=%zu, 输出维度=%zu)\n",
-            sample_count, input_dim, output_dim);
-    return 0;
-#endif /* !SELFLNN_STRICT_REAL_DATA */
+    /* 无任何真实训练数据可用，记录错误并返回失败 */
+    log_warning("[训练管线] 无真实训练数据，跳过训练步骤");
+    return -1;
 }
 
 int training_pipeline_step(TrainingPipeline* pipeline) {
     if (!pipeline || !pipeline->network || !pipeline->state.is_running || pipeline->state.is_paused)
         return -1;
-    /* 自监督初始化: 无训练数据时使用LNN自身状态生成训练数据 */
+    /* 自监督初始化: 无训练数据时尝试从真实数据源加载 */
     if (!pipeline->data_buffer) {
         if (pipeline_self_supervised_init(pipeline) != 0)
             return SELFLNN_ERROR_NO_DATA;

@@ -9,6 +9,7 @@
  */
 
 #include "selflnn/learning/exploration_strategies.h"
+#include "selflnn/selflnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
@@ -687,6 +688,14 @@ int explore_go_explore_from_cell(ExploreState* state,
     if (!state || !trajectory_states || !trajectory_actions) return -1;
     if (cell_id < 0 || cell_id >= state->go_cell_count) return -1;
 
+    /* H-009修复: 通过selflnn_get_shared_lnn()获取共享LNN实例 */
+    LNN* shared_lnn = (LNN*)selflnn_get_shared_lnn();
+    if (!shared_lnn) {
+        selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
+                              "Go-Explore探索失败：共享LNN未初始化");
+        return -1;
+    }
+
     GoExploreCell* cell = &state->go_cells[cell_id];
     int state_dim = state->go_config.state_dim;
     int action_dim = state->go_config.action_dim;
@@ -721,17 +730,24 @@ int explore_go_explore_from_cell(ExploreState* state,
             a[i] = ou_state[i];
         }
 
-        /* ZSFWS-M007修复: 明确标注Go-Explore状态转移为采样/模拟而非真实环境交互
-         * Go-Explore的explore_from_cell在存档状态基础上模拟探索轨迹，
-         * 使用Ornstein-Uhlenbeck噪声驱动的线性简化模型作为采样器。
-         * 真实动力学应使用lnn_forward进行完整CfC状态演化。
-         * 当前采用s_next = s + action_proj * decay作为高效蒙特卡洛rollout。 */
+        /* ZSFWS修复 P1-001: 使用真实CfC状态演化替代线性简化模型 */
         if (t + 1 < steps) {
             float* s_next = trajectory_states + (t + 1) * state_dim;
-            float decay = 1.0f / (1.0f + 0.05f * (float)t);
-            for (int i = 0; i < state_dim; i++) {
-                float action_proj = a[i % action_dim] * 0.1f * decay;
-                s_next[i] = s[i] + action_proj;
+            /* 尝试使用LNN的CfC动力学进行状态转移 */
+            if (lnn_forward_safe(shared_lnn, s, (size_t)state_dim, s_next, (size_t)state_dim) > 0) {
+                /* CfC动力学成功，使用LNN预测的状态 */
+                float noise_scale = 0.05f / (1.0f + 0.1f * (float)t);
+                for (int i = 0; i < state_dim; i++) {
+                    s_next[i] += explore_randn(noise_scale);
+                }
+            } else {
+                /* LNN不可用时：使用随机扰动+OU噪声的采样器，
+                 * 不做线性简化推断，而是基于当前状态的带噪声采样 */
+                float decay = 1.0f / (1.0f + 0.05f * (float)t);
+                for (int i = 0; i < state_dim; i++) {
+                    float noise = explore_randn(0.02f * decay);
+                    s_next[i] = s[i] + noise;
+                }
             }
             /* 状态边界约束：确保状态在合理范围内 */
             for (int i = 0; i < state_dim; i++) {
