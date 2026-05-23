@@ -111,51 +111,73 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     network->activation_buffer = (float*)safe_calloc(max_layer_size, sizeof(float));
     network->dropout_mask = (float*)safe_calloc(max_layer_size, sizeof(float));
     
-    // 分配权重和偏置
-    size_t weight_size = config->hidden_size * config->hidden_size;
-    if (config->num_layers == 1) {
-        // 单层网络：输入到隐藏
-        weight_size = config->input_size * config->hidden_size;
+    /* ZSFWS-MLW: 多层权重独立存储——每层分配独立权重矩阵
+     * 单层: param = [input*hidden w]  [hidden b]  [W_out] [b_out]
+     * 多层: param = [layer0: input*hidden] [layer1..N-1: each hidden*hidden] [N*hidden b] [W_out] [b_out]
+     * 梯度块使用相同布局 */
+    int num_layers_int = config->num_layers;
+    size_t input_size_cfg = config->input_size;
+    size_t hidden_size_cfg = config->hidden_size;
+    size_t output_size_cfg = config->output_size;
+
+    /* 分配每层偏移追踪数组 */
+    network->per_layer_w_offset = (size_t*)safe_calloc((size_t)num_layers_int, sizeof(size_t));
+    network->per_layer_b_offset = (size_t*)safe_calloc((size_t)num_layers_int, sizeof(size_t));
+    network->per_layer_w_size   = (size_t*)safe_calloc((size_t)num_layers_int, sizeof(size_t));
+
+    /* 计算每层权重和偏置大小 */
+    size_t total_w = 0, total_b = 0;
+    for (int l = 0; l < num_layers_int; l++) {
+        size_t l_input = (l == 0) ? input_size_cfg : hidden_size_cfg;
+        size_t w_sz = l_input * hidden_size_cfg;
+        network->per_layer_w_offset[l] = total_w;
+        network->per_layer_w_size[l] = w_sz;
+        network->per_layer_b_offset[l] = total_b;
+        total_w += w_sz;
+        total_b += hidden_size_cfg;
     }
-    
-    /* P0-014修复: 输出投影参数(W_out/b_out)从grad_block分离到param_block扩展区 */
-    size_t out_proj_param_size = (config->output_size != config->hidden_size) ? 
-        (config->output_size * config->hidden_size + config->output_size) : 0;
-    size_t total_param_size = weight_size + config->hidden_size + out_proj_param_size;
+    network->total_weight_params = total_w;
+    network->total_bias_params = total_b;
+
+    /* 输出投影参数 */
+    size_t out_proj_param_size = (output_size_cfg != hidden_size_cfg) ? 
+        (output_size_cfg * hidden_size_cfg + output_size_cfg) : 0;
+    size_t total_param_size = total_w + total_b + out_proj_param_size;
     float* param_block = (float*)safe_calloc(total_param_size, sizeof(float));
-    network->weight_matrix = param_block;
-    network->bias_vector = param_block ? param_block + weight_size : NULL;
+    network->weight_matrix = param_block;               /* 指向层0权重起始 */
+    network->bias_vector = param_block ? param_block + total_w : NULL; /* 指向偏置区域起始 */
+
     if (out_proj_param_size > 0 && param_block) {
-        network->W_out_params = param_block + weight_size + config->hidden_size;
-        network->b_out_params = network->W_out_params + config->output_size * config->hidden_size;
+        network->W_out_params = param_block + total_w + total_b;
+        network->b_out_params = network->W_out_params + output_size_cfg * hidden_size_cfg;
     } else {
         network->W_out_params = NULL;
         network->b_out_params = NULL;
     }
-    
-    /* P0-014修复: 输出投影梯度(W_out_gradients/b_out_gradients)与参数完全分离 */
+
+    /* 梯度块——与参数块相同布局，完全分离 */
     size_t out_proj_grad_size = out_proj_param_size;
-    size_t total_grad_size = weight_size + config->hidden_size + out_proj_grad_size;
+    size_t total_grad_size = total_w + total_b + out_proj_grad_size;
     float* grad_block = (float*)safe_calloc(total_grad_size, sizeof(float));
     network->weight_gradients = grad_block;
-    network->bias_gradients = grad_block ? grad_block + weight_size : NULL;
+    network->bias_gradients = grad_block ? grad_block + total_w : NULL;
     if (out_proj_grad_size > 0 && grad_block) {
-        network->W_out_gradients = grad_block + weight_size + config->hidden_size;
-        network->b_out_gradients = network->W_out_gradients + config->output_size * config->hidden_size;
+        network->W_out_gradients = grad_block + total_w + total_b;
+        network->b_out_gradients = network->W_out_gradients + output_size_cfg * hidden_size_cfg;
     } else {
         network->W_out_gradients = NULL;
         network->b_out_gradients = NULL;
     }
 
-    /* P0-014修复: He/Kaiming自适应初始化W_out参数（在param_block中，与梯度区分离） */
+    /* P0-014修复: He/Kaiming自适应初始化W_out参数 */
     if (out_proj_param_size > 0 && network->W_out_params) {
-        float he_limit = sqrtf(6.0f / (float)config->hidden_size);
+        float he_limit = sqrtf(6.0f / (float)hidden_size_cfg);
         if (he_limit > 0.2f) he_limit = 0.2f;
         if (he_limit < 0.001f) he_limit = 0.001f;
-        for (size_t i = 0; i < config->output_size * config->hidden_size; i++) {
+        for (size_t i = 0; i < output_size_cfg * hidden_size_cfg; i++) {
             network->W_out_params[i] = rng_uniform(-he_limit, he_limit);
         }
-        for (size_t i = 0; i < config->output_size; i++) {
+        for (size_t i = 0; i < output_size_cfg; i++) {
             network->b_out_params[i] = 0.0f;
         }
     }
@@ -163,26 +185,34 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     // 检查内存分配
     if (!network->layer_outputs || !network->layer_gradients ||
         !network->activation_buffer || !network->dropout_mask ||
-        !param_block || !grad_block) {
+        !param_block || !grad_block ||
+        !network->per_layer_w_offset || !network->per_layer_b_offset ||
+        !network->per_layer_w_size) {
         cfc_free(network);
         return NULL;
     }
     
-    /* FIX-005: 使用 He/Kaiming 自适应初始化网络级权重矩阵。
-     * fan_in = input_size (第一层) 或 hidden_size (后续层已在 cell 中初始化)
-     * limit = sqrt(6 / fan_in)，对应均匀分布 He 初始化 */
+    /* ZSFWS-MLW: 使用 He/Kaiming 自适应初始化每层独立权重矩阵 */
     {
-        float he_limit = sqrtf(6.0f / (float)config->input_size);
-        if (he_limit > 0.2f) he_limit = 0.2f;
-        if (he_limit < 0.001f) he_limit = 0.001f;
-        for (size_t i = 0; i < weight_size; i++) {
-            network->weight_matrix[i] = rng_uniform(-he_limit, he_limit);
+        for (int l = 0; l < num_layers_int; l++) {
+            size_t l_input = (l == 0) ? input_size_cfg : hidden_size_cfg;
+            float he_limit = sqrtf(6.0f / (float)l_input);
+            if (he_limit > 0.2f) he_limit = 0.2f;
+            if (he_limit < 0.001f) he_limit = 0.001f;
+            float* lw = param_block + network->per_layer_w_offset[l];
+            size_t lw_sz = network->per_layer_w_size[l];
+            for (size_t i = 0; i < lw_sz; i++) {
+                lw[i] = rng_uniform(-he_limit, he_limit);
+            }
         }
     }
     
     // 初始化偏置为零
-    for (size_t i = 0; i < config->hidden_size; i++) {
-        network->bias_vector[i] = 0.0f;
+    {
+        float* bias_start = param_block + total_w;
+        for (size_t i = 0; i < total_b; i++) {
+            bias_start[i] = 0.0f;
+        }
     }
     
     // 初始化Dropout掩码
@@ -267,6 +297,11 @@ void cfc_free(CfCNetwork* network) {
     network->bias_gradients = NULL;
     network->W_out_gradients = NULL;
     network->b_out_gradients = NULL;
+
+    /* ZSFWS-MLW: 释放每层偏移追踪数组 */
+    safe_free((void**)&network->per_layer_w_offset);
+    safe_free((void**)&network->per_layer_b_offset);
+    safe_free((void**)&network->per_layer_w_size);
     
     safe_free((void**)&network);
 }
@@ -302,16 +337,15 @@ int cfc_forward(CfCNetwork* network, const float* input,
     // 第一层：输入到隐藏
     if (num_layers == 1) {
         // 单层网络：保存原始输入到layer_gradients缓冲区的前input_size个元素中（用于反向传播）
-        // 注意：layer_gradients的大小为total_layers * max_layer_size，所以前input_size个元素是安全的
         memcpy(network->layer_gradients, input, input_size * sizeof(float));
         
-        // 直接应用权重和偏置
-        matrix_vector_multiply_raw(current_input, network->weight_matrix, input, 
+        /* ZSFWS-MLW: 使用层0的独立权重矩阵（单层时即为全体参数块） */
+        float* layer0_w = network->weight_matrix + network->per_layer_w_offset[0];
+        float* layer0_b = network->bias_vector + network->per_layer_b_offset[0];
+        matrix_vector_multiply_raw(current_input, layer0_w, input, 
                                  hidden_size, input_size);
-        
-        // 添加偏置
         for (size_t i = 0; i < hidden_size; i++) {
-            current_input[i] += network->bias_vector[i];
+            current_input[i] += layer0_b[i];
         }
     } else {
         // 多层网络：第一层使用输入
@@ -790,17 +824,25 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
 
     /* FIX-007/011: 步骤4 — 累积网络级输入预处理参数的梯度。
      * 使用 += 而非 = 确保批量训练时多个样本的梯度正确累加。
-     * 调用方需在每批次开始前将 weight_gradients/bias_gradients 清零。 */
-    if (saved_input && num_layers == 1) {
-        for (size_t j = 0; j < hidden_size; j++) {
-            float dL_dh_j = gradient[j];
-            for (size_t k = 0; k < input_size; k++) {
-                network->weight_gradients[j * input_size + k] += dL_dh_j * saved_input[k];
+     * 调用方需在每批次开始前将 weight_gradients/bias_gradients 清零。
+     * ZSFWS-MLW: 使用层0的梯度偏移，支持多层独立权重。 */
+    if (saved_input) {
+        size_t layer0_w_size = network->per_layer_w_size[0];
+        float* grad_l0_w = network->weight_gradients + network->per_layer_w_offset[0];
+        float* grad_l0_b = network->bias_gradients + network->per_layer_b_offset[0];
+        size_t l0_input = (num_layers == 1) ? input_size : hidden_size;
+        if (num_layers == 1) {
+            for (size_t j = 0; j < hidden_size; j++) {
+                float dL_dh_j = gradient[j];
+                for (size_t k = 0; k < input_size; k++) {
+                    grad_l0_w[j * input_size + k] += dL_dh_j * saved_input[k];
+                }
             }
         }
         for (size_t j = 0; j < hidden_size; j++) {
-            network->bias_gradients[j] += gradient[j];
+            grad_l0_b[j] += gradient[j];
         }
+        (void)l0_input; (void)layer0_w_size;
     }
 
     if (saved_input) safe_free((void**)&saved_input);
@@ -935,90 +977,59 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
          * cfc_cell_backward已正确计算了CfC门控+激活+ODE链式的完整梯度。
          * 旧代码用 gradient[i]*input[j] 重新计算→这是简单线性层梯度，完全
          * 忽略了CfC内部的sigmoid/tanh/exp(-Δt/τ)导数链，导致外部梯度错误。
-         * 批量训练时使用+=累积（FIX-010），调用方已在批次前清零。 */
+         * 批量训练时使用+=累积（FIX-010），调用方已在批次前清零。
+         * ZSFWS-MLW: 使用per_layer偏移写入正确位置。 */
         total_weight_size = hidden_size * config->input_size;
+        float* grad_l0_w = weight_gradients + network->per_layer_w_offset[0];
+        float* grad_l0_b = bias_gradients + network->per_layer_b_offset[0];
         CfCCell* cell0 = network->layers[0];
         if (cell0 && cell0->weight_grad && cell0->bias_grad) {
             for (size_t i = 0; i < total_weight_size; i++) {
-                weight_gradients[i] += cell0->weight_grad[i];
+                grad_l0_w[i] += cell0->weight_grad[i];
             }
             for (size_t i = 0; i < hidden_size; i++) {
-                bias_gradients[i] += cell0->bias_grad[i];
+                grad_l0_b[i] += cell0->bias_grad[i];
             }
         }
     } else {
         // 多层网络完整梯度计算
-        // 多层CfC使用共享的 hidden_size × hidden_size 权重矩阵
-        // 所有层的梯度累积到这个共享矩阵中:
-        //   - 第0层(input→hidden): hidden_size × input_size, maps to 前input_size列
-        //   - 中间层(hidden→hidden): hidden_size × hidden_size, 直接映射到共享矩阵
-        //   - 最后一层(hidden→output): 输出投影矩阵, 存储在W_out区域
+        /* ZSFWS-MLW: 每层cell梯度写入独立的param_block偏移位置
+         * 不再使用共享的 hidden*hidden 矩阵，每层拥有独立的权重空间
+         * Layer 0: hidden_size × input_size → per_layer_w_offset[0]
+         * Layer 1..N-2: hidden_size × hidden_size → per_layer_w_offset[layer]
+         * Layer N-1: hidden_size × hidden_size → per_layer_w_offset[N-1] */
         
-        total_weight_size = config->hidden_size * config->hidden_size;
-        
-        /* FIX-010: 不在此处清零共享梯度缓冲区。
-         * _lnn_backward_batch_internal 在逐样本循环前已清零一次，
-         * 此处再清零会导致之前样本的梯度全部丢失（仅保留最后一个样本）。 */
-        
-        // 逐层累积梯度到共享权重矩阵中
         for (int layer = 0; layer < num_layers; layer++) {
-            // 获取当前层CfC单元中已计算的权重梯度和偏置梯度
             CfCCell* cell = network->layers[layer];
             if (!cell) continue;
             
             size_t curr_input_size = (layer == 0) ? config->input_size : config->hidden_size;
             size_t cell_weight_size = curr_input_size * config->hidden_size;
             
-            if (layer == 0) {
-                // 第0层: hidden_size × input_size 映射到共享矩阵的前input_size列
-                // cell->weight_grad[i * input_size + j] → weight_gradients[i * hidden_size + j]
-                for (size_t i = 0; i < config->hidden_size; i++) {
-                    for (size_t j = 0; j < config->input_size; j++) {
-                        size_t cell_idx = i * config->input_size + j;
-                        size_t shared_idx = i * config->hidden_size + j;
-                        if (cell_idx < cell_weight_size && shared_idx < total_weight_size) {
-                            weight_gradients[shared_idx] += cell->weight_grad[cell_idx];
-                        }
-                    }
-                }
-            } else if (layer < num_layers - 1) {
-                // 中间层: hidden_size × hidden_size 直接累积到共享矩阵
-                for (size_t i = 0; i < config->hidden_size; i++) {
-                    for (size_t j = 0; j < config->hidden_size; j++) {
-                        size_t idx = i * config->hidden_size + j;
-                        if (idx < cell_weight_size && idx < total_weight_size) {
-                            weight_gradients[idx] += cell->weight_grad[idx];
-                        }
-                    }
-                }
-            } else {
-                // 最后一层: hidden_size × output_size 是输出投影
-                // 存储在 weight_gradients + hidden_size*hidden_size + hidden_size 之后
-                // (W_out区域), 此处无需处理到共享权重矩阵
-            }
+            float* layer_grad_w = weight_gradients + network->per_layer_w_offset[layer];
+            float* layer_grad_b = bias_gradients + network->per_layer_b_offset[layer];
             
-            // 累积偏置梯度（所有层的偏置累积到共享的hidden_size偏置向量）
-            for (size_t i = 0; i < config->hidden_size; i++) {
-                if (i < config->hidden_size) {
-                    bias_gradients[i] += cell->bias_grad[i];
+            /* 直接复制cell梯度到param_block对应位置 */
+            if (cell->weight_grad && layer_grad_w && cell_weight_size <= network->per_layer_w_size[layer]) {
+                for (size_t i = 0; i < cell_weight_size; i++) {
+                    layer_grad_w[i] += cell->weight_grad[i];
+                }
+            }
+            if (cell->bias_grad && layer_grad_b) {
+                for (size_t i = 0; i < config->hidden_size; i++) {
+                    layer_grad_b[i] += cell->bias_grad[i];
                 }
             }
         }
         
-        // 将计算出的梯度存储到网络内部缓冲区
-        size_t actual_weight_size = config->hidden_size * config->hidden_size;
-        size_t copy_weight_size = (total_weight_size < actual_weight_size) ?
-            total_weight_size : actual_weight_size;
+        /* 同步到网络内部梯度缓冲区（保持向后兼容） */
         if (network->weight_gradients && weight_gradients) {
-            memcpy(network->weight_gradients, weight_gradients, 
-                   copy_weight_size * sizeof(float));
+            memcpy(network->weight_gradients, weight_gradients,
+                   network->total_weight_params * sizeof(float));
         }
-        
-        size_t actual_bias_size = config->hidden_size;
-        size_t copy_bias_size = actual_bias_size;
         if (network->bias_gradients && bias_gradients) {
             memcpy(network->bias_gradients, bias_gradients,
-                   copy_bias_size * sizeof(float));
+                   network->total_bias_params * sizeof(float));
         }
     }
     
@@ -1168,13 +1179,13 @@ int cfc_apply_out_proj_gradients(CfCNetwork* network, float learning_rate) {
 /**
  * @brief 将共享参数块同步到各层CfC单元的活跃权重
  * 
- * FIX-017: cfc_forward 读取 cell->weight_matrix/bias_vector 做前向计算。
- * optimizer_update 更新的是共享 param_block。此函数将优化后的参数
- * 从共享块复制到各层 cell 权重，确保下一次前向传播使用最新参数。
+ * ZSFWS-MLW: FIX-017 全面重写。原代码在多层时所有层复制相同权重矩阵，
+ * 导致多层网络的参数空间退化为单层。新代码使用per_layer偏移正确分配
+ * 每层的独立权重和偏置。
  * 
- * 单层: cell->weight_matrix 从 param_block 复制 input*hidden 元素
- *       cell->bias_vector 从 param_block+weight_size 复制 hidden 元素
- * 多层: 每层 cell 都复制共享的 hidden*hidden 矩阵和偏置向量
+ * 内存布局: param_block = [layer0_W] [layer1_W] ... [layerN-1_W] [all_b] [W_out] [b_out]
+ * Layer 0: W[hidden×input], b[hidden]
+ * Layer 1..N-1: each W[hidden×hidden], each b[hidden]
  */
 int cfc_sync_shared_to_cells(CfCNetwork* network) {
     SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
@@ -1187,35 +1198,23 @@ int cfc_sync_shared_to_cells(CfCNetwork* network) {
     float* shared_w = network->weight_matrix;
     float* shared_b = network->bias_vector;
     if (!shared_w || !shared_b) return -1;
+    if (!network->per_layer_w_offset || !network->per_layer_b_offset) return -1;
     
     for (int layer = 0; layer < num_layers; layer++) {
         CfCCell* cell = network->layers[layer];
         if (!cell || !cell->weight_matrix || !cell->bias_vector) continue;
         
-        if (num_layers == 1) {
-            /* 单层: shared_w 有 input*hidden 个元素 */
-            size_t w_count = input_size * hidden_size;
-            memcpy(cell->weight_matrix, shared_w, w_count * sizeof(float));
-            memcpy(cell->bias_vector, shared_b, hidden_size * sizeof(float));
-        } else {
-            /* 多层: shared_w 有 hidden*hidden 个元素，所有层共享 */
-            if (layer == 0) {
-                /* 第0层: shared_w 的前 input_size 列是输入投影 */
-                for (size_t i = 0; i < hidden_size; i++) {
-                    for (size_t j = 0; j < input_size; j++) {
-                        cell->weight_matrix[i * input_size + j] = shared_w[i * hidden_size + j];
-                    }
-                    for (size_t j = input_size; j < hidden_size; j++) {
-                        cell->weight_matrix[i * input_size + j] = 0.0f;
-                    }
-                }
-            } else {
-                /* 中间层: 直接复制 hidden*hidden 矩阵 */
-                size_t hh = hidden_size * hidden_size;
-                memcpy(cell->weight_matrix, shared_w, hh * sizeof(float));
-            }
-            memcpy(cell->bias_vector, shared_b, hidden_size * sizeof(float));
-        }
+        /* 使用per_layer偏移获取当前层的独立权重区域 */
+        float* layer_w = shared_w + network->per_layer_w_offset[layer];
+        float* layer_b = shared_b + network->per_layer_b_offset[layer];
+        size_t w_count = network->per_layer_w_size[layer];
+        size_t l_input = (layer == 0) ? input_size : hidden_size;
+        
+        /* 直接复制：cell权重维度与param_block中存储的维度完全匹配 */
+        memcpy(cell->weight_matrix, layer_w, w_count * sizeof(float));
+        memcpy(cell->bias_vector, layer_b, hidden_size * sizeof(float));
+        
+        (void)l_input; /* 编译期防御 */
     }
     return 0;
 }
@@ -1247,19 +1246,26 @@ int cfc_save(const CfCNetwork* network, FILE* file) {
     }
     
     // 保存权重和偏置
-    size_t weight_size = network->config.hidden_size * network->config.hidden_size;
-    if (network->config.num_layers == 1) {
-        weight_size = network->config.input_size * network->config.hidden_size;
+    /* ZSFWS-MLW: 使用实际分配的多层参数总数进行序列化 */
+    size_t weight_size = network->total_weight_params;
+    size_t bias_size = network->total_bias_params;
+    if (!network->per_layer_w_offset || weight_size == 0) {
+        /* 向后兼容：per_layer未初始化时使用旧计算方式 */
+        weight_size = network->config.hidden_size * network->config.hidden_size;
+        if (network->config.num_layers == 1) {
+            weight_size = network->config.input_size * network->config.hidden_size;
+        }
+        bias_size = network->config.hidden_size;
     }
     
     SELFLNN_CHECK(fwrite(network->weight_matrix, sizeof(float), weight_size, file) == weight_size,
                  SELFLNN_ERROR_IO_ERROR,
                  "保存权重矩阵失败（大小：%zu）", weight_size);
     
-    SELFLNN_CHECK(fwrite(network->bias_vector, sizeof(float), network->config.hidden_size, file) 
-                 == network->config.hidden_size,
+    SELFLNN_CHECK(fwrite(network->bias_vector, sizeof(float), bias_size, file) 
+                 == bias_size,
                  SELFLNN_ERROR_IO_ERROR,
-                 "保存偏置向量失败（大小：%zu）", network->config.hidden_size);
+                 "保存偏置向量失败（大小：%zu）", bias_size);
     
     /* P0-014修复: 保存输出投影矩阵参数（如果存在） */
     if (network->config.output_size != network->config.hidden_size && 
@@ -1322,19 +1328,25 @@ int cfc_load(CfCNetwork* network, FILE* file) {
     }
     
     // 读取权重和偏置
-    size_t weight_size = config.hidden_size * config.hidden_size;
-    if (config.num_layers == 1) {
-        weight_size = config.input_size * config.hidden_size;
+    /* ZSFWS-MLW: 使用实际分配的多层参数总数进行反序列化 */
+    size_t weight_size = network->total_weight_params;
+    size_t bias_size = network->total_bias_params;
+    if (!network->per_layer_w_offset || weight_size == 0) {
+        weight_size = config.hidden_size * config.hidden_size;
+        if (config.num_layers == 1) {
+            weight_size = config.input_size * config.hidden_size;
+        }
+        bias_size = config.hidden_size;
     }
     
     SELFLNN_CHECK(fread(network->weight_matrix, sizeof(float), weight_size, file) == weight_size,
                  SELFLNN_ERROR_IO_ERROR,
                  "读取权重矩阵失败（大小：%zu）", weight_size);
     
-    SELFLNN_CHECK(fread(network->bias_vector, sizeof(float), config.hidden_size, file) 
-                 == config.hidden_size,
+    SELFLNN_CHECK(fread(network->bias_vector, sizeof(float), bias_size, file) 
+                 == bias_size,
                  SELFLNN_ERROR_IO_ERROR,
-                 "读取偏置向量失败（大小：%zu）", config.hidden_size);
+                 "读取偏置向量失败（大小：%zu）", bias_size);
 
     /* P0-014修复: 加载输出投影矩阵参数（如果存在） */
     if (config.output_size != config.hidden_size && network->W_out_params && network->b_out_params) {
@@ -1473,12 +1485,11 @@ int cfc_get_weight_matrix(CfCNetwork* network, float** weight_matrix, size_t* we
     SELFLNN_CHECK(network->is_initialized, SELFLNN_ERROR_NOT_INITIALIZED,
                  "CfC网络未初始化");
     
-    // 返回权重矩阵信息
-    // 与cfc_create中的实际存储布局一致：
-    // 单层: weight_size = input_size * hidden_size
-    // 多层: weight_size = hidden_size * hidden_size
+    /* ZSFWS-MLW: 返回实际分配的多层权重总数，而非旧单层大小 */
     *weight_matrix = network->weight_matrix;
-    if (network->config.num_layers <= 1) {
+    if (network->per_layer_w_offset && network->total_weight_params > 0) {
+        *weight_count = network->total_weight_params;
+    } else if (network->config.num_layers <= 1) {
         *weight_count = network->config.input_size * network->config.hidden_size;
     } else {
         *weight_count = network->config.hidden_size * network->config.hidden_size;
@@ -1500,9 +1511,13 @@ int cfc_get_bias_vector(CfCNetwork* network, float** bias_vector, size_t* bias_c
     SELFLNN_CHECK(network->is_initialized, SELFLNN_ERROR_NOT_INITIALIZED,
                  "CfC网络未初始化");
     
-    // 返回偏置向量信息
+    /* ZSFWS-MLW: 返回实际分配的多层偏置总数 */
     *bias_vector = network->bias_vector;
-    *bias_count = network->config.hidden_size;
+    if (network->per_layer_b_offset && network->total_bias_params > 0) {
+        *bias_count = network->total_bias_params;
+    } else {
+        *bias_count = network->config.hidden_size;
+    }
 
     return 0;
 }

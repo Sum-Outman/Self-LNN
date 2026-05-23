@@ -443,9 +443,157 @@ int sw_detect_conflicts(SwarmCoordinator* sc, SwarmConflict* out, int max_count)
 
 int sw_resolve_conflict(SwarmCoordinator* sc, int conflict_id, int strategy) {
     if (!sc) return -1;
-    /* 策略0：优先级高的机器人让路，低优先级的暂停 */
-    (void)conflict_id;
-    (void)strategy;
+    if (conflict_id < 0) return -1;
+
+    /* 查找冲突对应的机器人对 */
+    int robot_a_idx = -1, robot_b_idx = -1;
+    float min_dist = 0.5f;
+    int found_conflict = 0;
+
+    for (int i = 0; i < sc->robot_count; i++) {
+        if (!sc->robots[i].online) continue;
+        for (int j = i + 1; j < sc->robot_count; j++) {
+            if (!sc->robots[j].online) continue;
+            float dx = sc->robots[i].position[0] - sc->robots[j].position[0];
+            float dy = sc->robots[i].position[1] - sc->robots[j].position[1];
+            float dz = sc->robots[i].position[2] - sc->robots[j].position[2];
+            float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (dist < min_dist) {
+                if (conflict_id == 0) {
+                    robot_a_idx = i;
+                    robot_b_idx = j;
+                    found_conflict = 1;
+                    break;
+                }
+                conflict_id--;
+            }
+        }
+        if (found_conflict) break;
+    }
+
+    if (!found_conflict || robot_a_idx < 0 || robot_b_idx < 0) return -1;
+
+    SwarmRobot* ra = &sc->robots[robot_a_idx];
+    SwarmRobot* rb = &sc->robots[robot_b_idx];
+
+    /* 计算排斥向量（从B指向A的归一化方向） */
+    float dx = ra->position[0] - rb->position[0];
+    float dy = ra->position[1] - rb->position[1];
+    float dz = ra->position[2] - rb->position[2];
+    float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (dist < 1e-6f) { dx = 1.0f; dy = 0.0f; dz = 0.0f; dist = 1.0f; }
+    float nx = dx / dist;
+    float ny = dy / dist;
+    float nz = dz / dist;
+    float repulsion_dist = 1.0f;  /* 排斥目标距离1米 */
+
+    switch (strategy) {
+        case 0: {
+            /* 策略0：任务优先级比较——低优先级机器人让路 */
+            float pri_a = 0.0f, pri_b = 0.0f;
+            if (ra->task_id >= 0) {
+                for (int t = 0; t < sc->task_count; t++) {
+                    if (sc->tasks[t].task_id == ra->task_id) { pri_a = sc->tasks[t].priority; break; }
+                }
+            }
+            if (rb->task_id >= 0) {
+                for (int t = 0; t < sc->task_count; t++) {
+                    if (sc->tasks[t].task_id == rb->task_id) { pri_b = sc->tasks[t].priority; break; }
+                }
+            }
+            if (pri_a >= pri_b) {
+                /* B让路：B沿排斥方向移开 */
+                rb->goal_position[0] = rb->position[0] - nx * repulsion_dist;
+                rb->goal_position[1] = rb->position[1] - ny * repulsion_dist;
+                rb->goal_position[2] = rb->position[2] - nz * repulsion_dist;
+                rb->goal_active = 1;
+                rb->velocity_cmd[0] = -nx * 0.5f;
+                rb->velocity_cmd[1] = -ny * 0.5f;
+                rb->velocity_cmd[2] = -nz * 0.5f;
+                log_debug("[群体协同] 冲突解决(策略0)：机器人%d(优先级%.1f)让路于%d(优先级%.1f)",
+                         robot_b_idx, pri_b, robot_a_idx, pri_a);
+            } else {
+                /* A让路 */
+                ra->goal_position[0] = ra->position[0] + nx * repulsion_dist;
+                ra->goal_position[1] = ra->position[1] + ny * repulsion_dist;
+                ra->goal_position[2] = ra->position[2] + nz * repulsion_dist;
+                ra->goal_active = 1;
+                ra->velocity_cmd[0] = nx * 0.5f;
+                ra->velocity_cmd[1] = ny * 0.5f;
+                ra->velocity_cmd[2] = nz * 0.5f;
+                log_debug("[群体协同] 冲突解决(策略0)：机器人%d(优先级%.1f)让路于%d(优先级%.1f)",
+                         robot_a_idx, pri_a, robot_b_idx, pri_b);
+            }
+            break;
+        }
+        case 1: {
+            /* 策略1：ID小的机器人优先，ID大的让路 */
+            if (robot_a_idx < robot_b_idx) {
+                rb->goal_position[0] = rb->position[0] - nx * repulsion_dist;
+                rb->goal_position[1] = rb->position[1] - ny * repulsion_dist;
+                rb->goal_position[2] = rb->position[2] - nz * repulsion_dist;
+                rb->goal_active = 1;
+                rb->velocity_cmd[0] = -nx * 0.3f;
+                rb->velocity_cmd[1] = -ny * 0.3f;
+                rb->velocity_cmd[2] = -nz * 0.3f;
+            } else {
+                ra->goal_position[0] = ra->position[0] + nx * repulsion_dist;
+                ra->goal_position[1] = ra->position[1] + ny * repulsion_dist;
+                ra->goal_position[2] = ra->position[2] + nz * repulsion_dist;
+                ra->goal_active = 1;
+                ra->velocity_cmd[0] = nx * 0.3f;
+                ra->velocity_cmd[1] = ny * 0.3f;
+                ra->velocity_cmd[2] = nz * 0.3f;
+            }
+            log_debug("[群体协同] 冲突解决(策略1)：ID小者优先");
+            break;
+        }
+        case 2: {
+            /* 策略2：双方各退一半（对称排斥） */
+            float half = repulsion_dist * 0.5f;
+            ra->goal_position[0] = ra->position[0] + nx * half;
+            ra->goal_position[1] = ra->position[1] + ny * half;
+            ra->goal_position[2] = ra->position[2] + nz * half;
+            ra->goal_active = 1;
+            ra->velocity_cmd[0] = nx * 0.25f;
+            ra->velocity_cmd[1] = ny * 0.25f;
+            ra->velocity_cmd[2] = nz * 0.25f;
+            rb->goal_position[0] = rb->position[0] - nx * half;
+            rb->goal_position[1] = rb->position[1] - ny * half;
+            rb->goal_position[2] = rb->position[2] - nz * half;
+            rb->goal_active = 1;
+            rb->velocity_cmd[0] = -nx * 0.25f;
+            rb->velocity_cmd[1] = -ny * 0.25f;
+            rb->velocity_cmd[2] = -nz * 0.25f;
+            log_debug("[群体协同] 冲突解决(策略2)：双方对称排斥");
+            break;
+        }
+        default: {
+            /* 默认策略：基于负载——负载低的机器人让路 */
+            float load_a = ra->load + (ra->task_id >= 0 ? 1.0f : 0.0f);
+            float load_b = rb->load + (rb->task_id >= 0 ? 1.0f : 0.0f);
+            if (load_a <= load_b) {
+                ra->goal_position[0] = ra->position[0] + nx * repulsion_dist;
+                ra->goal_position[1] = ra->position[1] + ny * repulsion_dist;
+                ra->goal_position[2] = ra->position[2] + nz * repulsion_dist;
+                ra->goal_active = 1;
+                ra->velocity_cmd[0] = nx * 0.4f;
+                ra->velocity_cmd[1] = ny * 0.4f;
+                ra->velocity_cmd[2] = nz * 0.4f;
+            } else {
+                rb->goal_position[0] = rb->position[0] - nx * repulsion_dist;
+                rb->goal_position[1] = rb->position[1] - ny * repulsion_dist;
+                rb->goal_position[2] = rb->position[2] - nz * repulsion_dist;
+                rb->goal_active = 1;
+                rb->velocity_cmd[0] = -nx * 0.4f;
+                rb->velocity_cmd[1] = -ny * 0.4f;
+                rb->velocity_cmd[2] = -nz * 0.4f;
+            }
+            log_debug("[群体协同] 冲突解决(默认)：低负载者让路");
+            break;
+        }
+    }
+
     return 0;
 }
 

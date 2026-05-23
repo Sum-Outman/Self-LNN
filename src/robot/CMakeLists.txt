@@ -28,6 +28,9 @@ add_library(selflnn_robot
     ros_gazebo_bridge.c
     hardware_resource_manager.c
     swarm_coordination.c
+    ros2_node.c
+    ros_protocol.c
+    gait_generator.c
 )
 
 target_compile_definitions(selflnn_robot PRIVATE WIN32_LEAN_AND_MEAN)

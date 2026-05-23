@@ -5135,11 +5135,54 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                 }
             }
             
-            // 应用Dropout（如果启用）
+            /* ZSFWS-DROP: 应用Dropout——同步训练器配置到CfC网络层
+             * CfC网络内部在cfc_forward中已实现完整的Dropout机制
+             * （随机掩码+反缩放），此处同步配置确保训练模式正确启用 */
             if (trainer->config.regularization == REGULARIZATION_DROPOUT &&
                 trainer->config.dropout_rate > 0.0f) {
-                // 获取网络激活并应用Dropout
-                // 注意：这里需要实际的网络接口
+                CfCNetwork* cfc_net = lnn_get_cfc_network(trainer->network);
+                if (cfc_net) {
+                    CfCNetworkConfig cfc_cfg;
+                    if (cfc_get_config(cfc_net, &cfc_cfg) == 0) {
+                        cfc_cfg.dropout_rate = trainer->config.dropout_rate;
+                        cfc_cfg.enable_training = 1;
+                        cfc_set_config(cfc_net, &cfc_cfg);
+                    }
+                }
+            }
+            
+            /* ZSFWS-REG: 应用高级正则化（CutMix/MixUp/跨模态混合/DropPath）
+             * 增强数据在aug_inputs/aug_targets中，前向和损失计算使用增强后的数据 */
+            float* aug_inputs = NULL;
+            float* aug_targets = NULL;
+            float* actual_inputs = NULL;
+            float* actual_targets = NULL;
+            int use_augmented = 0;
+            if (trainer->regularizer) {
+                aug_inputs = (float*)safe_malloc(batch_size * input_dim * sizeof(float));
+                aug_targets = (float*)safe_malloc(batch_size * output_dim * sizeof(float));
+                if (aug_inputs && aug_targets) {
+                    int reg_ret = trainer_apply_regularization(trainer,
+                        batch_inputs, batch_targets, batch_size, input_dim, output_dim,
+                        aug_inputs, aug_targets, epoch, trainer->config.epochs);
+                    if (reg_ret == 0) {
+                        use_augmented = 1;
+                    }
+                }
+                if (!use_augmented) {
+                    safe_free((void**)&aug_inputs);
+                    safe_free((void**)&aug_targets);
+                }
+            }
+            /* ZSFWS-REG: 增强数据接管并释放原始缓冲区防止内存泄漏 */
+            actual_inputs = use_augmented ? aug_inputs : batch_inputs;
+            actual_targets = use_augmented ? aug_targets : batch_targets;
+            
+            if (use_augmented) {
+                if (batch_inputs) safe_free((void**)&batch_inputs);
+                if (batch_targets) safe_free((void**)&batch_targets);
+                batch_inputs = aug_inputs;
+                batch_targets = aug_targets;
             }
             
             // 前向传播路径选择：GPU → 混合精度 → 标准CPU
@@ -5147,7 +5190,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
 
             // GPU加速前向传播（如果启用GPU）
             if (trainer->gpu_initialized) {
-                if (trainer_gpu_forward_batch(trainer, batch_inputs, trainer->batch_outputs, batch_size) == 0) {
+                if (trainer_gpu_forward_batch(trainer, actual_inputs, trainer->batch_outputs, batch_size) == 0) {
                     forward_done = 1;
                 } else {
                     if (trainer->config.verbose) {
@@ -5160,7 +5203,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             // 混合精度训练路径（如果未使用GPU且混合精度启用）
             if (!forward_done && trainer->mixed_precision_context && trainer->mixed_precision_context->enabled) {
                 if (mixed_precision_forward(trainer->mixed_precision_context,
-                                           batch_inputs, trainer->batch_outputs) == 0) {
+                                           actual_inputs, trainer->batch_outputs) == 0) {
                     forward_done = 1;
                 } else {
                     if (trainer->config.verbose) {

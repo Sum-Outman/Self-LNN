@@ -141,8 +141,7 @@ static int gz_exec(const char* cmd, char* output, size_t out_size) {
         if (exit_code == 0) return 0;
         /* 命令超时或失败时进行重试 */
         if (max_retries > 0) {
-            log_info("Gazebo桥接: 命令重试中(%d次剩余) [%s]\n", max_retries,
-                     cmd + (cmd[0] ? 0 : 0));
+            log_info("Gazebo桥接: 命令重试中(%d次剩余) [%s]\n", max_retries, cmd);
         }
     }
     return ret;

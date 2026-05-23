@@ -371,6 +371,13 @@ struct CfCNetwork {
     float* b_out_params;          /**< 输出投影偏置参数 [output_size] */
     float* W_out_gradients;       /**< 输出投影矩阵梯度 [output_size * hidden_size] */
     float* b_out_gradients;       /**< 输出投影偏置梯度 [output_size] */
+    /* ZSFWS-MLW: 多层权重独立存储——每层独立权重矩阵，消除权重共享瓶颈
+     * 内存布局: [layer0_w(input*hidden)] [layer1_w(hidden*hidden)] ... [bias_all] [W_out] */
+    size_t* per_layer_w_offset;   /**< 每层权重在param_block中的偏移量[num_layers] */
+    size_t* per_layer_b_offset;   /**< 每层偏置在param_block中的偏移量[num_layers] */
+    size_t* per_layer_w_size;     /**< 每层权重元素数[num_layers] */
+    size_t  total_weight_params;  /**< 所有层权重参数总数（不含偏置） */
+    size_t  total_bias_params;    /**< 所有层偏置参数总数 */
 };
 #endif
 

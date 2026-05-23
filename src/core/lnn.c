@@ -1080,6 +1080,10 @@ int lnn_set_ode_solver(LNN* network, int solver_type) {
 
 /**
  * @brief 获取网络参数数量
+ * 
+ * ZSFWS-MLW: 完全重写。原代码只返回单层参数数，与实际的param_block大小不一致。
+ * 新代码返回所有层权重+所有层偏置+输出投影参数的总数，
+ * 与 cfc_network.c 中 param_block 的实际分配大小完全吻合。
  */
 size_t lnn_get_parameter_count(const LNN* network) {
     if (!network) {
@@ -1092,15 +1096,21 @@ size_t lnn_get_parameter_count(const LNN* network) {
     size_t param_count = 0;
     if (network->cfc_network) {
         CfCNetwork* cfc = network->cfc_network;
-        size_t weight_params = 0;
-        size_t bias_params = 0;
-        if (cfc->config.num_layers <= 1) {
-            weight_params = cfc->config.input_size * cfc->config.hidden_size;
+        /* 使用cfc内部追踪的实际参数总数 */
+        if (cfc->per_layer_w_offset && cfc->total_weight_params > 0) {
+            param_count = cfc->total_weight_params + cfc->total_bias_params;
         } else {
-            weight_params = cfc->config.hidden_size * cfc->config.hidden_size;
+            /* 向后兼容：per_layer未初始化时使用旧的计算方式 */
+            size_t weight_params = 0;
+            size_t bias_params = 0;
+            if (cfc->config.num_layers <= 1) {
+                weight_params = cfc->config.input_size * cfc->config.hidden_size;
+            } else {
+                weight_params = cfc->config.hidden_size * cfc->config.hidden_size;
+            }
+            bias_params = cfc->config.hidden_size;
+            param_count = weight_params + bias_params;
         }
-        bias_params = cfc->config.hidden_size;
-        param_count = weight_params + bias_params;
     } else {
         size_t input_size = network->config.input_size;
         size_t hidden_size = network->config.hidden_size;
@@ -1229,11 +1239,18 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
     CfCNetwork* cfc_network = network->cfc_network;
     SELFLNN_CHECK_NULL(cfc_network, "CfC网络句柄为空");
 
+    /* ZSFWS-MLW: 使用cfc内部追踪的实际参数总数（包含所有层） */
     size_t param_count;
-    if (cfc_network->config.num_layers <= 1) {
-        param_count = cfc_network->config.input_size * cfc_network->config.hidden_size + cfc_network->config.hidden_size;
+    float* shared_w;
+    float* shared_b;
+    if (cfc_network->per_layer_w_offset && cfc_network->total_weight_params > 0) {
+        param_count = cfc_network->total_weight_params + cfc_network->total_bias_params;
     } else {
-        param_count = cfc_network->config.hidden_size * cfc_network->config.hidden_size + cfc_network->config.hidden_size;
+        if (cfc_network->config.num_layers <= 1) {
+            param_count = cfc_network->config.input_size * cfc_network->config.hidden_size + cfc_network->config.hidden_size;
+        } else {
+            param_count = cfc_network->config.hidden_size * cfc_network->config.hidden_size + cfc_network->config.hidden_size;
+        }
     }
     
     // 调试信息：网络维度
@@ -1266,15 +1283,17 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
     // input_size already defined above
     
     // 计算总权重和偏置数量
-    // 必须与cfc_create中实际的参数存储布局一致：
-    // 单层: weight_size = input_size * hidden_size, bias_size = hidden_size
-    // 多层: weight_size = hidden_size * hidden_size, bias_size = hidden_size
-    if (num_layers <= 1) {
+    /* ZSFWS-MLW: 使用cfc内部追踪的实际多层参数总数 */
+    if (cfc_network->per_layer_w_offset && cfc_network->total_weight_params > 0) {
+        weight_count = cfc_network->total_weight_params;
+        bias_count   = cfc_network->total_bias_params;
+    } else if (num_layers <= 1) {
         weight_count = input_size * hidden_size;
+        bias_count = hidden_size;
     } else {
         weight_count = hidden_size * hidden_size;
+        bias_count = hidden_size;
     }
-    bias_count = hidden_size;
     
     // 调试信息（使用stderr确保崩溃时能输出）
     LNN_DEBUG("lnn_backward_batch: 网络层数=%d, 权重数=%zu, 偏置数=%zu\n",
@@ -2479,10 +2498,14 @@ int lnn_safe_forward(LNN* net, const float* input, float* output, float* hidden_
     size_t n_params;
     if (net->cfc_network) {
         CfCNetwork* cfc = net->cfc_network;
-        if (cfc->config.num_layers <= 1)
+        /* ZSFWS-MLW: 使用实际分配的多层参数总数进行NaN扫描 */
+        if (cfc->per_layer_w_offset && cfc->total_weight_params > 0) {
+            n_params = cfc->total_weight_params + cfc->total_bias_params;
+        } else if (cfc->config.num_layers <= 1) {
             n_params = cfc->config.input_size * cfc->config.hidden_size + cfc->config.hidden_size;
-        else
+        } else {
             n_params = cfc->config.hidden_size * cfc->config.hidden_size + cfc->config.hidden_size;
+        }
     } else {
         n_params = net->config.input_size * net->config.hidden_size + net->config.hidden_size;
     }

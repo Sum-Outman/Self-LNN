@@ -489,23 +489,24 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
         float* forward_original = (float*)safe_malloc(hidden_size * sizeof(float));
         float* forward_perturbed = (float*)safe_malloc(hidden_size * sizeof(float));
         if (perturbed_state && forward_original && forward_perturbed) {
-            /* 先执行原始前向 */
-            memcpy(perturbed_state, state, hidden_size * sizeof(float));
-            cfc_cell_forward(cell, input, perturbed_state);
+            /* 先执行原始前向，输出写入 forward_original */
+            memcpy(forward_original, state, hidden_size * sizeof(float));
+            cfc_cell_forward(cell, input, forward_original);
 
-            /* 随机方向扰动状态 */
+            /* 随机方向扰动状态，输出写入 forward_perturbed */
+            memcpy(forward_perturbed, state, hidden_size * sizeof(float));
             float norm_perturb = 0.0f;
             for (size_t i = 0; i < hidden_size; i++) {
                 /* 使用确定性的伪随机方向（基于状态值哈希） */
                 float direction = sinf(state[i] * 137.508f + 3.14159f) * eps;
-                perturbed_state[i] = state[i] + direction;
-                float diff = perturbed_state[i] - state[i];
+                forward_perturbed[i] = state[i] + direction;
+                float diff = forward_perturbed[i] - state[i];
                 norm_perturb += diff * diff;
             }
             norm_perturb = sqrtf(norm_perturb);
 
             if (norm_perturb > 1e-12f) {
-                cfc_cell_forward(cell, input, perturbed_state);
+                cfc_cell_forward(cell, input, forward_perturbed);
 
                 /* 计算 ||F(x+δ) - F(x)|| / ||δ|| 作为局部Lipschitz常数估计 */
                 float norm_diff = 0.0f;

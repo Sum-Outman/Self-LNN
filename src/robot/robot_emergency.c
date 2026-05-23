@@ -201,14 +201,12 @@ int robot_emergency_release(EmergencySystem* system) {
             system->is_emergency_active = 0;
             system->is_recovering = 0;
             system->history.recovery_count++;
-            emergency_log("紧急停止已恢复");
+            emergency_log("紧急停止已自动恢复");
         }
     } else {
-        system->current_level = EMERGENCY_LEVEL_NONE;
-        system->is_emergency_active = 0;
-        system->is_recovering = 0;
-        system->history.recovery_count++;
-        emergency_log("紧急停止已恢复");
+        /* 自动恢复已禁用，保持紧急停止状态等待手动恢复 */
+        emergency_log("自动恢复已禁用，紧急停止状态保持中，需手动恢复");
+        system->is_recovering = 1;
     }
     return 0;
 }

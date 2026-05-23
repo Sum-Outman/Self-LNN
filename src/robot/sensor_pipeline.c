@@ -22,6 +22,147 @@
 #include <pthread.h>
 #endif
 
+#define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+/* 纯C SHA1实现（用于WebSocket握手） */
+static void sha1_transform(unsigned int state[5], const unsigned char block[64]) {
+    unsigned int w[80], a, b, c, d, e, t;
+    for (int i = 0; i < 16; i++)
+        w[i] = ((unsigned int)block[i*4] << 24) | ((unsigned int)block[i*4+1] << 16) |
+               ((unsigned int)block[i*4+2] << 8) | (unsigned int)block[i*4+3];
+    for (int i = 16; i < 80; i++)
+        w[i] = (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]) << 1 | (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]) >> 31;
+    a = state[0]; b = state[1]; c = state[2]; d = state[3]; e = state[4];
+    for (int i = 0; i < 80; i++) {
+        unsigned int f, k;
+        if (i < 20)      { f = (b & c) | (~b & d);                  k = 0x5A827999; }
+        else if (i < 40) { f = b ^ c ^ d;                           k = 0x6ED9EBA1; }
+        else if (i < 60) { f = (b & c) | (b & d) | (c & d);        k = 0x8F1BBCDC; }
+        else             { f = b ^ c ^ d;                           k = 0xCA62C1D6; }
+        t = (a << 5 | a >> 27) + f + e + k + w[i];
+        e = d; d = c; c = (b << 30 | b >> 2); b = a; a = t;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d; state[4] += e;
+}
+
+static void sha1_hash(const unsigned char* data, size_t len, unsigned char hash[20]) {
+    unsigned int state[5] = { 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0 };
+    unsigned char block[64];
+    size_t i;
+    for (i = 0; i + 64 <= len; i += 64) {
+        memcpy(block, data + i, 64);
+        sha1_transform(state, block);
+    }
+    size_t remaining = len - i;
+    memcpy(block, data + i, remaining);
+    block[remaining] = 0x80;
+    memset(block + remaining + 1, 0, 64 - remaining - 1);
+    if (remaining >= 56) { sha1_transform(state, block); memset(block, 0, 64); }
+    unsigned long long bits = (unsigned long long)len * 8;
+    block[56] = (unsigned char)(bits >> 56); block[57] = (unsigned char)(bits >> 48);
+    block[58] = (unsigned char)(bits >> 40); block[59] = (unsigned char)(bits >> 32);
+    block[60] = (unsigned char)(bits >> 24); block[61] = (unsigned char)(bits >> 16);
+    block[62] = (unsigned char)(bits >> 8);  block[63] = (unsigned char)(bits);
+    sha1_transform(state, block);
+    for (int j = 0; j < 5; j++) {
+        hash[j*4] = (unsigned char)(state[j] >> 24); hash[j*4+1] = (unsigned char)(state[j] >> 16);
+        hash[j*4+2] = (unsigned char)(state[j] >> 8); hash[j*4+3] = (unsigned char)(state[j]);
+    }
+}
+
+static int base64_encode(const unsigned char* data, size_t len, char* out, size_t out_size) {
+    static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        unsigned int v = ((unsigned int)data[i] << 16) | ((i+1 < len ? (unsigned int)data[i+1] : 0) << 8) | (i+2 < len ? (unsigned int)data[i+2] : 0);
+        if (o+4 > out_size) return -1;
+        out[o++] = table[(v >> 18) & 63];
+        out[o++] = table[(v >> 12) & 63];
+        out[o++] = (i + 1 < len) ? table[(v >> 6) & 63] : '=';
+        out[o++] = (i + 2 < len) ? table[v & 63] : '=';
+    }
+    if (o < out_size) out[o] = '\0';
+    return (int)o;
+}
+
+/* WebSocket服务端升级握手 */
+static int ws_server_handshake(int client_fd) {
+    char buf[4096];
+    memset(buf, 0, sizeof(buf));
+#ifdef _WIN32
+    int n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+#else
+    ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
+#endif
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+
+    /* 提取 Sec-WebSocket-Key */
+    const char* key_start = strstr(buf, "Sec-WebSocket-Key:");
+    if (!key_start) return -1;
+    key_start += 18;
+    while (*key_start == ' ') key_start++;
+    const char* key_end = strstr(key_start, "\r\n");
+    if (!key_end) key_end = key_start + strlen(key_start);
+    size_t key_len = (size_t)(key_end - key_start);
+    while (key_len > 0 && key_start[key_len-1] == ' ') key_len--;
+
+    /* 计算 Accept = base64(sha1(key + GUID)) */
+    char concat[256];
+    size_t clen = key_len + sizeof(WS_GUID);
+    if (clen > sizeof(concat)) return -1;
+    memcpy(concat, key_start, key_len);
+    memcpy(concat + key_len, WS_GUID, sizeof(WS_GUID) - 1);
+    unsigned char sha1_out[20];
+    sha1_hash((const unsigned char*)concat, clen, sha1_out);
+    char accept_b64[64];
+    int b64len = base64_encode(sha1_out, 20, accept_b64, sizeof(accept_b64));
+    if (b64len < 0) return -1;
+
+    /* 发送 101 Switching Protocols */
+    char response[512];
+    snprintf(response, sizeof(response),
+             "HTTP/1.1 101 Switching Protocols\r\n"
+             "Upgrade: websocket\r\n"
+             "Connection: Upgrade\r\n"
+             "Sec-WebSocket-Accept: %s\r\n"
+             "\r\n", accept_b64);
+#ifdef _WIN32
+    send(client_fd, response, (int)strlen(response), 0);
+#else
+    write(client_fd, response, strlen(response));
+#endif
+    return 0;
+}
+
+/* WebSocket帧发送（服务器端） */
+static int ws_server_send_frame(int fd, const char* data, size_t len) {
+    unsigned char header[10];
+    size_t header_len = 2;
+    header[0] = 0x81; /* FIN + text opcode */
+    if (len < 126) {
+        header[1] = (unsigned char)len;
+    } else if (len < 65536) {
+        header[1] = 126;
+        header[2] = (unsigned char)((len >> 8) & 0xFF);
+        header[3] = (unsigned char)(len & 0xFF);
+        header_len = 4;
+    } else {
+        header[1] = 127;
+        for (int i = 0; i < 8; i++)
+            header[2 + i] = (unsigned char)((len >> (56 - 8 * i)) & 0xFF);
+        header_len = 10;
+    }
+#ifdef _WIN32
+    if (send(fd, (const char*)header, (int)header_len, 0) < 0) return -1;
+    if (send(fd, data, (int)len, 0) < 0) return -1;
+#else
+    if (write(fd, header, header_len) < 0) return -1;
+    if (write(fd, data, len) < 0) return -1;
+#endif
+    return 0;
+}
+
 typedef struct {
     int sensor_id;
     SensorType sensor_type;
@@ -524,6 +665,17 @@ static int streaming_server_thread(void* arg)
         sc->last_active = sc->connect_time;
         sc->num_subscriptions = 1;
         sc->subscribed_sensor_ids[0] = -1;
+
+        /* 执行WebSocket升级握手 */
+        if (ws_server_handshake((int)client) != 0) {
+#if defined(_WIN32)
+            closesocket(client);
+#else
+            close(client);
+#endif
+            continue;
+        }
+
         sc->is_active = 1;
         sc->recv_buffer_pos = 0;
         pipeline->client_count++;

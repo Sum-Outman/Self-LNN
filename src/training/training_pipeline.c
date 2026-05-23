@@ -1117,10 +1117,18 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
 
         /* FIX-011: 每批次开始前清零网络级梯度缓冲区（支持批量梯度累加） */
         /* P0-002: 同时清零cell各级梯度缓冲区（gate/tau等），改为用+=在batch内累积 */
+        /* ZSFWS-MLW: 使用实际分配的多层参数总数代替旧单层维度 */
         {
-            size_t wg_size = (size_t)pipeline->network->config.input_size *
+            size_t wg_size, bg_size;
+            if (pipeline->network->cfc_network->per_layer_w_offset &&
+                pipeline->network->cfc_network->total_weight_params > 0) {
+                wg_size = pipeline->network->cfc_network->total_weight_params;
+                bg_size = pipeline->network->cfc_network->total_bias_params;
+            } else {
+                wg_size = (size_t)pipeline->network->config.input_size *
                              (size_t)pipeline->network->config.hidden_size;
-            size_t bg_size = (size_t)pipeline->network->config.hidden_size;
+                bg_size = (size_t)pipeline->network->config.hidden_size;
+            }
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_size * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
@@ -1365,11 +1373,19 @@ int pipeline_multimodal_train_step(TrainingPipeline* pipeline,
     (void)target_size;
 
     /* FIX-015: 调用开始前清零网络级梯度，防止跨调用累积污染。
-     * cfc_backward 使用 += 累加梯度，若调用方不管理清零则梯度会无限累积。 */
+     * cfc_backward 使用 += 累加梯度，若调用方不管理清零则梯度会无限累积。
+     * ZSFWS-MLW: 使用实际分配的多层参数总数 */
     {
-        size_t wg_sz = (size_t)pipeline->network->config.input_size *
+        size_t wg_sz, bg_sz;
+        if (pipeline->network->cfc_network->per_layer_w_offset &&
+            pipeline->network->cfc_network->total_weight_params > 0) {
+            wg_sz = pipeline->network->cfc_network->total_weight_params;
+            bg_sz = pipeline->network->cfc_network->total_bias_params;
+        } else {
+            wg_sz = (size_t)pipeline->network->config.input_size *
                        (size_t)pipeline->network->config.hidden_size;
-        size_t bg_sz = (size_t)pipeline->network->config.hidden_size;
+            bg_sz = (size_t)pipeline->network->config.hidden_size;
+        }
         if (pipeline->network->cfc_network->weight_gradients)
             memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
         if (pipeline->network->cfc_network->bias_gradients)

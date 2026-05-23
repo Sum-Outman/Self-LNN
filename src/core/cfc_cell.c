@@ -1511,8 +1511,38 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
 {
     (void)input;
     size_t n = cell->config.hidden_size;
+    RosenbrockConfig cfg = cell->config.rosenbrock_config;
+
+    /* 当配置了有效的自适应容差参数时，优先使用自适应步长求解器 */
+    if (cfg.rel_tolerance > 1e-12f && cfg.abs_tolerance > 1e-12f &&
+        cfg.min_step_size > 0.0f && cfg.max_step_size > cfg.min_step_size) {
+        float* y_state = (float*)malloc(n * sizeof(float));
+        if (!y_state) return -1;
+        memcpy(y_state, prev_state, n * sizeof(float));
+
+        float h_final = 0.0f;
+        int steps_taken = 0;
+        float tolerance = cfg.abs_tolerance;
+        float h0 = delta_t / 10.0f;
+        if (h0 > cfg.max_step_size) h0 = cfg.max_step_size;
+        if (h0 < cfg.min_step_size) h0 = cfg.min_step_size;
+
+        int ret = ode_rosenbrock_adaptive_solve(cfc_cell_rhs_wrapper, cell,
+                                                 y_state, n, 0.0f, delta_t,
+                                                 h0, tolerance,
+                                                 cfg.min_step_size, cfg.max_step_size,
+                                                 cfg.max_iterations > 0 ? cfg.max_iterations : 1000,
+                                                 &h_final, &steps_taken);
+        if (ret == 0) {
+            memcpy(output, y_state, n * sizeof(float));
+            cell->state->rosenbrock_current_steps = steps_taken;
+        }
+        free(y_state);
+        return ret;
+    }
+
+    /* 回退到固定步长Rosenbrock（传统模式） */
     size_t ws_size = ode_rosenbrock_workspace_size(n);
-    /* 栈分配优化：支持最多1024个神经元，超限时自动退化为堆分配 */
     float y[sizeof(float) * 1024];
     float ws[sizeof(float) * 8192];
     float* y_state = y;
@@ -1533,7 +1563,6 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
 
     memcpy(y_state, prev_state, n * sizeof(float));
 
-    RosenbrockConfig cfg = cell->config.rosenbrock_config;
     int steps = 0;
     float h_actual = 0.0f;
 
