@@ -1075,8 +1075,11 @@ class VisualizationManager {
         if (weights.length === 0) return;
         numBins = numBins || 20;
 
-        const min = Math.min(...weights);
-        const max = Math.max(...weights);
+        var min = Infinity, max = -Infinity;
+        for (var i = 0; i < weights.length; i++) {
+            if (weights[i] < min) min = weights[i];
+            if (weights[i] > max) max = weights[i];
+        }
         const binWidth = (max - min) / numBins || 1;
         const bins = [];
         const counts = [];
@@ -1425,6 +1428,10 @@ class VisualizationManager {
      * 每次重新初始化前必须调用此方法释放旧实例
      */
     destroyAllCharts() {
+        if (this._spectrumResizeHandler) {
+            window.removeEventListener('resize', this._spectrumResizeHandler);
+            this._spectrumResizeHandler = null;
+        }
         Object.keys(this.charts).forEach(key => {
             const chart = this.charts[key];
             if (chart && typeof chart.destroy === 'function') {
@@ -1681,12 +1688,13 @@ class VisualizationManager {
         this.renderSpectrum();
 
         // 监听窗口大小变化
-        window.addEventListener('resize', () => {
+        this._spectrumResizeHandler = () => {
             if (this.spectrumCanvas && this.spectrumCanvas.offsetParent !== null) {
                 this.resizeSpectrumCanvas();
                 this.renderSpectrum();
             }
-        });
+        };
+        window.addEventListener('resize', this._spectrumResizeHandler);
     }
 
     /**

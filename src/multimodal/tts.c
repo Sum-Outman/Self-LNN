@@ -233,11 +233,11 @@ const char* tts_get_pinyin_string(const TTS_Pinyin* pinyin) {
     return buf;
 }
 
-/* =============================================================== *
- * 拼音查找函数（声明，实现在 tts_pinyin_real.c）                     *
- * 使用真实汉字→拼音二分查找，覆盖~220个最高频汉字                   *
- * 未找到返回0（TTS_INITIAL_NONE/TTS_FINAL_NONE）                   *
- * =============================================================== */
+/**
+ * @brief 汉字→拼音查找（实现在 tts_pinyin_real.c）
+ * 使用二分查找精确表(7174汉字) + Unicode启发式回退
+ * 覆盖 GB2312一级汉字 + 常用3500字 + HSK词汇汉字
+ */
 extern int tts_pinyin_lookup(uint16_t codepoint, int* out_init, int* out_final, int* out_tone);
 
 static int init_pinyin_table(TTSEngine* engine) {

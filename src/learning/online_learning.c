@@ -154,6 +154,11 @@ struct OnlineLearner {
     float* ewc_anchor_weights;      /**< EWC锚定权重 θ*_i (前一任务最优) */
     int ewc_initialized;            /**< EWC是否已初始化 */
     float ewc_total_fisher;         /**< Fisher信息总和 */
+
+    /* ZSFWS-013: LNN附着支持 —— 在线学习器直接操作LNN权重矩阵 */
+    LNN* attached_lnn;              /**< 附着的共享LNN实例 */
+    int lnn_attached;               /**< 是否已附着LNN（1=附着, 0=独立权重） */
+    int weights_owned;              /**< 权重内存是否由学习器自己管理 */
 };
 
 /* 前向声明辅助函数 */
@@ -203,6 +208,9 @@ OnlineLearner* online_learner_create(const OnlineLearningConfig* config,
     learner->current_learning_rate = config->learning_rate;
     learner->last_update_time = time(NULL);
     learner->is_initialized = 1;
+    learner->weights_owned = 1;
+    learner->lnn_attached = 0;
+    learner->attached_lnn = NULL;
     
     // 分配权重数组
     learner->weights = (float*)safe_malloc(weights_size * sizeof(float));
@@ -391,7 +399,12 @@ OnlineLearner* online_learner_create(const OnlineLearningConfig* config,
 void online_learner_free(OnlineLearner* learner) {
     if (!learner) return;
     
-    safe_free((void**)&learner->weights);
+    /* ZSFWS-013: 仅释放学习器自己拥有的权重内存，不释放LNN共享的权重 */
+    if (learner->weights_owned && learner->weights) {
+        safe_free((void**)&learner->weights);
+    } else {
+        learner->weights = NULL;
+    }
     safe_free((void**)&learner->weight_momentum);
     safe_free((void**)&learner->weight_velocity);
     safe_free((void**)&learner->input_buffer);
@@ -415,7 +428,100 @@ void online_learner_free(OnlineLearner* learner) {
         free_kalman_filter(&learner->kalman_state);
     }
     
+    /* ZSFWS-013: 清除LNN引用（不释放LNN本身，它由selflnn系统管理） */
+    learner->attached_lnn = NULL;
+    learner->lnn_attached = 0;
+    
     safe_free((void**)&learner);
+}
+
+/**
+ * @brief ZSFWS-013: 将在线学习器附着到共享LNN实例
+ *
+ * 调用后学习器将直接读写LNN的权重矩阵（而非维护独立副本）。
+ * 梯度下降更新直接作用于LNN参数，实现真正的液态神经网络在线学习。
+ * 学习器的统计信息（loss、samples、概念漂移检测等）继续正常维护。
+ *
+ * @param learner 在线学习器句柄
+ * @param lnn 共享LNN实例
+ * @return int 成功返回0，失败返回-1
+ */
+int online_learner_attach_lnn(OnlineLearner* learner, LNN* lnn) {
+    if (!learner || !lnn) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "附着LNN：无效参数");
+        return -1;
+    }
+
+    if (!learner->is_initialized) {
+        selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
+                              "附着LNN：学习器未初始化");
+        return -1;
+    }
+
+    /* 获取LNN参数维度 */
+    size_t param_count = lnn_get_parameter_count(lnn);
+    if (param_count == 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
+                              "附着LNN：LNN参数数为0");
+        return -1;
+    }
+
+    float* lnn_params = lnn_get_parameters(lnn);
+    if (!lnn_params) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "附着LNN：无法获取LNN参数指针");
+        return -1;
+    }
+
+    /* 释放学习器原有的独立权重（因为即将指向LNN共享权重） */
+    if (learner->weights_owned && learner->weights) {
+        safe_free((void**)&learner->weights);
+    }
+
+    /* 将weights指针重定向到LNN的参数缓冲区（不拥有所有权） */
+    learner->weights = lnn_params;
+    learner->weights_owned = 0;
+    learner->weights_size = param_count;
+    learner->attached_lnn = lnn;
+    learner->lnn_attached = 1;
+
+    /* 重新分配辅助缓冲区以匹配LNN参数维度 */
+    /* 动量缓冲区 */
+    if (learner->config.enable_momentum) {
+        safe_free((void**)&learner->weight_momentum);
+        learner->weight_momentum = (float*)safe_calloc(param_count, sizeof(float));
+    }
+
+    /* 自适应速度缓冲区 */
+    if (learner->config.enable_adaptive_rate) {
+        safe_free((void**)&learner->weight_velocity);
+        learner->weight_velocity = (float*)safe_calloc(param_count, sizeof(float));
+    }
+
+    /* 权重年龄数组 */
+    if (learner->config.forgetting_type != FORGETTING_NONE) {
+        safe_free((void**)&learner->weight_age);
+        learner->weight_age = (float*)safe_calloc(param_count, sizeof(float));
+    }
+
+    /* EWC缓冲区重建 */
+    safe_free((void**)&learner->ewc_fisher_diag);
+    safe_free((void**)&learner->ewc_anchor_weights);
+    learner->ewc_fisher_diag = NULL;
+    learner->ewc_anchor_weights = NULL;
+    learner->ewc_initialized = 0;
+    learner->ewc_total_fisher = 0.0f;
+
+    /* 卡尔曼滤波状态重建 */
+    if (learner->config.algorithm_type == ONLINE_LEARNING_KALMAN) {
+        free_kalman_filter(&learner->kalman_state);
+        initialize_kalman_filter(&learner->kalman_state, param_count, 0.01f, 0.001f);
+    }
+
+    log_info("[在线学习] 已附着到共享LNN，参数维度=%zu，所有权重更新将直接作用于LNN权重矩阵",
+             param_count);
+    return 0;
 }
 
 /**
@@ -499,9 +605,10 @@ int online_learner_update(OnlineLearner* learner,
     }
     memset(gradient, 0, learner->weights_size * sizeof(float));
     
-    // ZSFWS-H002修复: 使用LNN CfC动力学替代简单线性模型
-    // 原实现: prediction = W · input (线性点积，与液态神经网络架构脱节)
-    // 新实现: 通过共享LNN进行前向传播，利用CfC的连续时间动力学
+    /* ZSFWS-013修复: 使用LNN CfC动力学替代简单线性模型
+     * 当LNN已附着时：使用 lnn_forward 预测 + lnn_backward_accumulate 累积梯度（不立即更新）
+     * 后续由学习器的SGD/Kalman/Adaptive算法直接对LNN参数应用更新
+     * 当LNN未附着时：回退到线性回归（保守兼容） */
     float prediction = 0.0f;
     float* lnn_output_buf = (float*)safe_malloc((size_t)RL_MAX(target_size, input_size) * sizeof(float));
     if (!lnn_output_buf) {
@@ -509,19 +616,17 @@ int online_learner_update(OnlineLearner* learner,
         return -1;
     }
 
-    /* 尝试获取共享LNN进行预测 */
-    void* shared_lnn = selflnn_get_shared_lnn();
-    int used_lnn = 0;
-    if (shared_lnn) {
-        /* 使用LNN前向传播: 输入特征 → CfC演化 → 输出预测 */
-        if (lnn_forward((LNN*)shared_lnn, (float*)input, lnn_output_buf) == 0) {
-            prediction = lnn_output_buf[0];  /* 取第一输出通道为主预测 */
-            used_lnn = 1;
+    int used_lnn_forward = 0;
+    if (learner->lnn_attached && learner->attached_lnn) {
+        /* LNN附着模式：使用LNN前向传播 */
+        if (lnn_forward(learner->attached_lnn, (float*)input, lnn_output_buf) == 0) {
+            prediction = lnn_output_buf[0];
+            used_lnn_forward = 1;
         }
     }
 
-    if (!used_lnn) {
-        /* 回退：无共享LNN时使用输入本身的加权求和 */
+    if (!used_lnn_forward) {
+        /* 回退：线性加权预测（LNN未附着或无共享LNN时） */
         size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
         for (size_t i = 0; i < min_dim; i++) {
             prediction += learner->weights[i] * input[i];
@@ -532,19 +637,38 @@ int online_learner_update(OnlineLearner* learner,
     float error = prediction - target_val;
     float current_loss = 0.5f * error * error;
 
-    if (used_lnn && shared_lnn) {
-        /* LNN反向传播: 构建目标向量（target_val作为第一元素） */
+    /* ZSFWS-013: LNN附着模式下的梯度累积策略
+     * 使用 lnn_backward_accumulate 将梯度累积到LNN的内部梯度缓冲区，
+     * 然后从LNN梯度缓冲区读取梯度到本地gradient数组，
+     * 最后由学习器的 SGD/Kalman/Adaptive 算法通过 learner->weights
+     * (指向LNN参数) 应用更新——实现学习器完全控制LNN权重更新 */
+    if (used_lnn_forward && learner->lnn_attached && learner->attached_lnn) {
+        /* 构建LNN目标向量：target_val作为第一输出元素 */
         memset(lnn_output_buf, 0, (size_t)target_size * sizeof(float));
         lnn_output_buf[0] = target_val;
-        lnn_backward((LNN*)shared_lnn, lnn_output_buf);
+
+        /* 累积模式反向传播：仅累积梯度不更新权重 */
+        float backward_loss = 0.0f;
+        if (lnn_backward_accumulate(learner->attached_lnn, lnn_output_buf, &backward_loss) == 0) {
+            /* 从LNN梯度缓冲区复制梯度到本地gradient数组 */
+            float* lnn_grads = lnn_get_gradients(learner->attached_lnn);
+            if (lnn_grads) {
+                size_t param_count = lnn_get_parameter_count(learner->attached_lnn);
+                size_t copy_n = (param_count < learner->weights_size) ? param_count : learner->weights_size;
+                memcpy(gradient, lnn_grads, copy_n * sizeof(float));
+            }
+        } else {
+            /* 反向传播失败时回退：使用简单误差梯度 */
+            size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
+            for (size_t i = 0; i < min_dim; i++) {
+                gradient[i] = error * input[i];
+            }
+        }
     } else {
-        /* 回退梯度: 手动更新权重 */
+        /* 回退梯度：手动计算简单线性梯度 */
         size_t min_dim = (input_size < learner->weights_size) ? input_size : learner->weights_size;
         for (size_t i = 0; i < min_dim; i++) {
             gradient[i] = error * input[i];
-        }
-        for (size_t i = 0; i < min_dim && i < learner->weights_size; i++) {
-            learner->weights[i] -= learner->config.learning_rate * gradient[i];
         }
     }
     safe_free((void**)&lnn_output_buf);
@@ -851,10 +975,14 @@ int online_learner_reset(OnlineLearner* learner, int keep_weights) {
     
     // 重置权重（如果不保留）
     if (!keep_weights && learner->weights) {
-        /* P0-013: 仅用于重置时的权重重新初始化（小随机值打破对称性），
-         * 非数据流填充。在线学习更新严格使用真实数据，绝不降级到随机数据 */
-        for (size_t i = 0; i < learner->weights_size; i++) {
-            learner->weights[i] = (rng_uniform(0.0f, 1.0f)) * 0.1f - 0.05f;
+        /* ZSFWS-013: LNN附着模式下不重置LNN权重（防止破坏预训练模型）
+         * 仅重置学习器自己的统计信息，LNN权重保持不变 */
+        if (learner->lnn_attached) {
+            log_info("[在线学习] LNN附着模式：重置学习器统计信息，保留LNN权重不变");
+        } else {
+            for (size_t i = 0; i < learner->weights_size; i++) {
+                learner->weights[i] = (rng_uniform(0.0f, 1.0f)) * 0.1f - 0.05f;
+            }
         }
     }
     
@@ -2330,15 +2458,17 @@ int online_learner_compute_ewc_fisher(OnlineLearner* learner,
         if (!learner->ewc_fisher_diag) return -1;
     }
 
-    /* ZSFWS-M006修复: EWC Fisher改用LNN前向传播替代线性模型
-     * 原实现: predicted = input · W (简单线性点积)
-     * 修复: 通过共享LNN的CfC动力学进行前向传播计算预测
-     * 与H-002修复保持一致，确保跨任务Fisher信息的语义一致性 */
+    /* ZSFWS-013修复: EWC Fisher优先使用附着的LNN，而非全局查找
+     * 通过共享LNN的CfC动力学进行前向传播计算预测
+     * 与 update() 保持一致 */
     float predicted[64] = {0};
-    void* shared_lnn = selflnn_get_shared_lnn();
-    if (shared_lnn) {
+    LNN* use_lnn = learner->attached_lnn;
+    if (!use_lnn) {
+        use_lnn = (LNN*)selflnn_get_shared_lnn();
+    }
+    if (use_lnn) {
         /* 使用LNN前向传播做预测 */
-        if (lnn_forward((LNN*)shared_lnn, (float*)input, predicted) != 0) {
+        if (lnn_forward(use_lnn, (float*)input, predicted) != 0) {
             /* 回退: 线性近似 */
             for (size_t i = 0; i < target_size && i < 64; i++) {
                 for (size_t j = 0; j < input_size && (i * input_size + j) < n; j++) {

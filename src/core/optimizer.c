@@ -18,6 +18,7 @@ struct Optimizer
     float* beta2_power;
     size_t num_params;
     int is_initialized;
+    int last_error;              /**< 最后一次错误的错误码，0=无错误 */
 };
 
 Optimizer* optimizer_create(const OptimizerConfig* config)
@@ -298,7 +299,13 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
             *optimizer->beta1_power *= b1;
             *optimizer->beta2_power *= b2;
 
-            /* FIX-004: 单次循环完成动量更新并累积范数，将update值暂存入velocity_buffer复用 */
+            /* ZSFWS-OPT-FIX: LAMB优化器状态破坏修复。
+             * velocity_buffer存储的是梯度平方的指数移动平均(v_t = β2*v_{t-1} + (1-β2)*g²)，
+             * 第一遍循环中计算完v_hat后不能覆写velocity_buffer，否则下一次step时
+             * EMA输入错误。改为分配临时update_buffer存储中间结果。 */
+            float* update_tmp = (float*)safe_malloc((size_t)num_params * sizeof(float));
+            if (!update_tmp) { optimizer->last_error = -1; return -1; }
+
             float param_norm = 0.0f, update_norm = 0.0f;
             float inv_b1 = 1.0f / (1.0f - *optimizer->beta1_power);
             float inv_b2 = 1.0f / (1.0f - *optimizer->beta2_power);
@@ -313,8 +320,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
                 float v_hat = optimizer->velocity_buffer[i] * inv_b2;
 
                 float update = m_hat / (sqrtf(v_hat) + eps) + wd * parameters[i];
-                /* 复用velocity_buffer暂存update值，避免第二遍循环重复计算 */
-                optimizer->velocity_buffer[i] = update;
+                update_tmp[i] = update;
                 param_norm += parameters[i] * parameters[i];
                 update_norm += update * update;
             }
@@ -325,9 +331,9 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
 
             for (i = 0; i < num_params; i++)
             {
-                /* 直接使用velocity_buffer中预存的update值，无需重新计算 */
-                parameters[i] -= lr * trust_ratio * optimizer->velocity_buffer[i];
+                parameters[i] -= lr * trust_ratio * update_tmp[i];
             }
+            safe_free((void**)&update_tmp);
             break;
         }
 
@@ -451,6 +457,393 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
                                                 (1.0f - b1) * g_normed;
                 float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
                 parameters[i] -= lr * m_hat;
+            }
+            break;
+        }
+
+        default:
+            return -1;
+    }
+
+    return 0;
+}
+
+/* ZSFWS-023: 多参数组更新——一次更新多组独立参数（权重/偏置/门控/时间常数等） */
+int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* groups,
+                                  int num_groups, size_t step)
+{
+    if (!optimizer || !groups || num_groups <= 0) return -1;
+
+    /* 计算总参数数并验证各组指针有效性 */
+    size_t total_params = 0;
+    for (int g = 0; g < num_groups; g++) {
+        if (!groups[g].parameters || !groups[g].gradients || groups[g].num_params == 0) {
+            return -1;
+        }
+        total_params += groups[g].num_params;
+    }
+    if (total_params == 0) return -1;
+
+    /* 确保优化器内部缓冲区足够大 */
+    if (ensure_buffers(optimizer, total_params) != 0) return -1;
+
+    if (optimizer->config.type != OPTIMIZER_RANGER) {
+        (void)step;
+    }
+
+    float lr = optimizer->config.learning_rate;
+    float eps = optimizer->config.epsilon > 0.0f ? optimizer->config.epsilon : 1e-8f;
+
+    /* 使用全局偏移idx在跨组平坦缓冲区上操作 */
+    size_t idx = 0;
+
+    switch (optimizer->config.type)
+    {
+        case OPTIMIZER_SGD:
+        {
+            float wd = optimizer->config.weight_decay;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++) {
+                    params[i] *= (1.0f - lr * wd);
+                    params[i] -= lr * grads[i];
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_MOMENTUM:
+        {
+            float mu = optimizer->config.momentum > 0.0f ? optimizer->config.momentum : 0.9f;
+            float wd = optimizer->config.weight_decay;
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    params[i] *= (1.0f - lr * wd);
+                    float v_old = optimizer->momentum_buffer[idx];
+                    optimizer->momentum_buffer[idx] = mu * v_old - lr * grads[i];
+                    if (optimizer->config.use_nesterov) {
+                        params[i] += optimizer->momentum_buffer[idx] +
+                                     mu * (optimizer->momentum_buffer[idx] - v_old);
+                    } else {
+                        params[i] += optimizer->momentum_buffer[idx];
+                    }
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_ADAGRAD:
+        {
+            float wd = optimizer->config.weight_decay;
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    params[i] *= (1.0f - lr * wd);
+                    optimizer->cache_buffer[idx] += grads[i] * grads[i];
+                    float adjusted_lr = lr / (sqrtf(optimizer->cache_buffer[idx]) + eps);
+                    params[i] -= adjusted_lr * grads[i];
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_RMSPROP:
+        {
+            float decay_rate = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.9f;
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    optimizer->cache_buffer[idx] = decay_rate * optimizer->cache_buffer[idx] +
+                                                   (1.0f - decay_rate) * grads[i] * grads[i];
+                    float adjusted_lr = lr / (sqrtf(optimizer->cache_buffer[idx]) + eps);
+                    params[i] -= adjusted_lr * grads[i];
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_ADAM:
+        {
+            float b1 = optimizer->config.beta1 > 0.0f ? optimizer->config.beta1 : 0.9f;
+            float b2 = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.999f;
+            *optimizer->beta1_power *= b1;
+            *optimizer->beta2_power *= b2;
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    optimizer->momentum_buffer[idx] = b1 * optimizer->momentum_buffer[idx] +
+                                                      (1.0f - b1) * grads[i];
+                    optimizer->velocity_buffer[idx] = b2 * optimizer->velocity_buffer[idx] +
+                                                      (1.0f - b2) * grads[i] * grads[i];
+                    float m_hat = optimizer->momentum_buffer[idx] / (1.0f - *optimizer->beta1_power);
+                    float v_hat = optimizer->velocity_buffer[idx] / (1.0f - *optimizer->beta2_power);
+                    params[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_ADAMW:
+        {
+            float b1 = optimizer->config.beta1 > 0.0f ? optimizer->config.beta1 : 0.9f;
+            float b2 = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.999f;
+            float wd = optimizer->config.weight_decay;
+            *optimizer->beta1_power *= b1;
+            *optimizer->beta2_power *= b2;
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    optimizer->momentum_buffer[idx] = b1 * optimizer->momentum_buffer[idx] +
+                                                      (1.0f - b1) * grads[i];
+                    optimizer->velocity_buffer[idx] = b2 * optimizer->velocity_buffer[idx] +
+                                                      (1.0f - b2) * grads[i] * grads[i];
+                    float m_hat = optimizer->momentum_buffer[idx] / (1.0f - *optimizer->beta1_power);
+                    float v_hat = optimizer->velocity_buffer[idx] / (1.0f - *optimizer->beta2_power);
+                    params[i] -= lr * (m_hat / (sqrtf(v_hat) + eps) + wd * params[i]);
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_ADADELTA:
+        {
+            float rho = optimizer->config.momentum > 0.0f ? optimizer->config.momentum : 0.95f;
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    optimizer->velocity_buffer[idx] = rho * optimizer->velocity_buffer[idx] +
+                                                      (1.0f - rho) * grads[i] * grads[i];
+                    float rms_g = sqrtf(optimizer->velocity_buffer[idx] + eps);
+                    float rms_p = sqrtf(optimizer->momentum_buffer[idx] + eps);
+                    float delta = (rms_p / rms_g) * grads[i];
+                    optimizer->momentum_buffer[idx] = rho * optimizer->momentum_buffer[idx] +
+                                                      (1.0f - rho) * delta * delta;
+                    params[i] -= delta;
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_LAMB:
+        {
+            float b1 = optimizer->config.beta1 > 0.0f ? optimizer->config.beta1 : 0.9f;
+            float b2 = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.999f;
+            float trust = optimizer->config.lars_trust_coef > 0.0f ? optimizer->config.lars_trust_coef : 0.001f;
+            float wd = optimizer->config.weight_decay;
+            *optimizer->beta1_power *= b1;
+            *optimizer->beta2_power *= b2;
+            float inv_b1 = 1.0f / (1.0f - *optimizer->beta1_power);
+            float inv_b2 = 1.0f / (1.0f - *optimizer->beta2_power);
+
+            /* ZSFWS-OPT-FIX: 多组LAMB状态保护。分配临时update缓冲区 */
+            size_t total_params = 0;
+            for (int g = 0; g < num_groups; g++) total_params += groups[g].num_params;
+            float* update_tmp = (float*)safe_malloc(total_params * sizeof(float));
+            if (!update_tmp) { optimizer->last_error = -1; return -1; }
+
+            /* 第一遍：计算动量/速度和范数 */
+            float param_norm = 0.0f, update_norm = 0.0f;
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    optimizer->momentum_buffer[idx] = b1 * optimizer->momentum_buffer[idx] +
+                                                      (1.0f - b1) * grads[i];
+                    optimizer->velocity_buffer[idx] = b2 * optimizer->velocity_buffer[idx] +
+                                                      (1.0f - b2) * grads[i] * grads[i];
+                    float m_hat = optimizer->momentum_buffer[idx] * inv_b1;
+                    float v_hat = optimizer->velocity_buffer[idx] * inv_b2;
+                    float update = m_hat / (sqrtf(v_hat) + eps) + wd * params[i];
+                    update_tmp[idx] = update;
+                    param_norm += params[i] * params[i];
+                    update_norm += update * update;
+                }
+            }
+            param_norm = sqrtf(param_norm + 1e-12f);
+            update_norm = sqrtf(update_norm + 1e-12f);
+            float trust_ratio = (param_norm > 0.0f && update_norm > 0.0f)
+                                ? trust * param_norm / update_norm : 1.0f;
+
+            /* 第二遍：应用信任比缩放后的更新 */
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    params[i] -= lr * trust_ratio * update_tmp[idx];
+                }
+            }
+            safe_free((void**)&update_tmp);
+            break;
+        }
+
+        case OPTIMIZER_LARS:
+        {
+            float trust = optimizer->config.lars_trust_coef > 0.0f ? optimizer->config.lars_trust_coef : 0.001f;
+            float wd = optimizer->config.weight_decay;
+            float mu = optimizer->config.momentum > 0.0f ? optimizer->config.momentum : 0.9f;
+
+            /* 计算全局范数 */
+            float param_norm = 0.0f, grad_norm = 0.0f;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++) {
+                    param_norm += params[i] * params[i];
+                    float gv = grads[i] + wd * params[i];
+                    grad_norm += gv * gv;
+                }
+            }
+            param_norm = sqrtf(param_norm + 1e-12f);
+            grad_norm = sqrtf(grad_norm + 1e-12f);
+            float local_lr = (param_norm > 0.0f && grad_norm > 0.0f)
+                             ? trust * param_norm / grad_norm : 1.0f;
+            local_lr *= lr;
+
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    float gv = grads[i] + wd * params[i];
+                    optimizer->momentum_buffer[idx] = mu * optimizer->momentum_buffer[idx] -
+                                                      local_lr * gv;
+                    params[i] += optimizer->momentum_buffer[idx];
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_RANGER:
+        {
+            float b1 = optimizer->config.beta1 > 0.0f ? optimizer->config.beta1 : 0.9f;
+            float b2 = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.999f;
+            float wd = optimizer->config.weight_decay;
+            *optimizer->beta1_power *= b1;
+            *optimizer->beta2_power *= b2;
+
+            float rho_inf = 2.0f / (1.0f - b2) - 1.0f;
+            float beta2_t = *optimizer->beta2_power;
+            float rho_t = rho_inf - 2.0f * (float)step * beta2_t / (1.0f - beta2_t + 1e-12f);
+
+            int k = optimizer->config.lookahead_k > 0 ? optimizer->config.lookahead_k : 5;
+            float alpha = optimizer->config.lookahead_alpha > 0.0f
+                          ? optimizer->config.lookahead_alpha : 0.5f;
+
+            /* LookAhead慢权重初始化（首次调用时快照当前参数） */
+            if (step == 0) {
+                idx = 0;
+                for (int g = 0; g < num_groups; g++) {
+                    float* params = groups[g].parameters;
+                    size_t n = groups[g].num_params;
+                    for (size_t i = 0; i < n; i++, idx++) {
+                        optimizer->cache_buffer[idx] = params[i];
+                    }
+                }
+            }
+
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    params[i] *= (1.0f - lr * wd);
+                    optimizer->momentum_buffer[idx] = b1 * optimizer->momentum_buffer[idx] +
+                                                      (1.0f - b1) * grads[i];
+                    optimizer->velocity_buffer[idx] = b2 * optimizer->velocity_buffer[idx] +
+                                                      (1.0f - b2) * grads[i] * grads[i];
+                    float m_hat = optimizer->momentum_buffer[idx] / (1.0f - *optimizer->beta1_power);
+                    float v_hat = optimizer->velocity_buffer[idx] / (1.0f - *optimizer->beta2_power);
+                    if (rho_t > 4.0f) {
+                        float l_t = sqrtf(1.0f - *optimizer->beta2_power) / (sqrtf(v_hat) + eps);
+                        float r_num = (rho_t - 4.0f) * (rho_t - 2.0f) * rho_inf;
+                        float r_den = (rho_inf - 4.0f) * (rho_inf - 2.0f) * rho_t;
+                        float r_ratio = r_num / (r_den + 1e-12f);
+                        float r_t = sqrtf(r_ratio > 0.0f ? r_ratio : 0.0f);
+                        params[i] -= lr * r_t * m_hat * l_t;
+                    } else {
+                        params[i] -= lr * m_hat;
+                    }
+                }
+            }
+
+            /* LookAhead同步 */
+            if ((step + 1) % k == 0) {
+                idx = 0;
+                for (int g = 0; g < num_groups; g++) {
+                    float* params = groups[g].parameters;
+                    size_t n = groups[g].num_params;
+                    for (size_t i = 0; i < n; i++, idx++) {
+                        float slow = optimizer->cache_buffer[idx];
+                        float fast = params[i];
+                        float new_slow = slow + alpha * (fast - slow);
+                        optimizer->cache_buffer[idx] = new_slow;
+                        params[i] = new_slow;
+                    }
+                }
+            }
+            break;
+        }
+
+        case OPTIMIZER_NOVOGRAD:
+        {
+            float b1 = optimizer->config.beta1 > 0.0f ? optimizer->config.beta1 : 0.9f;
+            float b2 = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.999f;
+            *optimizer->beta1_power *= b1;
+
+            /* 全局梯度L2范数平方 */
+            float grad_l2_sq = 0.0f;
+            for (int g = 0; g < num_groups; g++) {
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++) {
+                    grad_l2_sq += grads[i] * grads[i];
+                }
+            }
+            float grad_norm_v = grad_l2_sq / (float)total_params;
+            float v = optimizer->velocity_buffer[0];
+            v = b2 * v + (1.0f - b2) * grad_norm_v;
+            optimizer->velocity_buffer[0] = v;
+
+            float v_sqrt = sqrtf(v + eps);
+            idx = 0;
+            for (int g = 0; g < num_groups; g++) {
+                float* params = groups[g].parameters;
+                const float* grads = groups[g].gradients;
+                size_t n = groups[g].num_params;
+                for (size_t i = 0; i < n; i++, idx++) {
+                    float g_normed = grads[i] / v_sqrt;
+                    optimizer->momentum_buffer[idx] = b1 * optimizer->momentum_buffer[idx] +
+                                                      (1.0f - b1) * g_normed;
+                    float m_hat = optimizer->momentum_buffer[idx] / (1.0f - *optimizer->beta1_power);
+                    params[i] -= lr * m_hat;
+                }
             }
             break;
         }

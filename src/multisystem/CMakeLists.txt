@@ -1,5 +1,5 @@
 # 多系统控制能力库
-message(STATUS "构建多系统控制库: 包含源文件 multisystem_control.c")
+message(STATUS "构建多系统控制库: 包含源文件 multisystem_control.c, swarm_intelligence.c")
 
 set(MULTISYSTEM_CONTROL_SOURCES
     multisystem_control.c

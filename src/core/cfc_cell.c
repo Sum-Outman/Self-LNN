@@ -552,66 +552,67 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->config.symplectic_config.substep_ratio = 0.5f;
     cell->config.symplectic_config.num_substeps = 1;
 
-    /* 四元数CfC初始化（P2.4） */
+    /* 四元数CfC初始化（P2.4）
+     * ZSFWS-021修复: 消除goto跳转，改用if-else结构。
+     * 策略：先将所有四元数指针预置为NULL，仅当维度满足4的倍数条件时才分配实际内存。
+     * 这样维度不符合条件时指针已为NULL，无需goto跳过置NULL的else分支。 */
     cell->use_quaternion = config->use_quaternion;
+    cell->quaternion_weights = NULL;
+    cell->quaternion_biases = NULL;
+    cell->quaternion_weight_grad = NULL;
+    cell->quaternion_bias_grad = NULL;
+    cell->quaternion_hidden_weights = NULL;
+    cell->quaternion_hidden_weight_grad = NULL;
+    cell->quaternion_time_constants = NULL;
+    cell->quaternion_workspace = NULL;
+
     if (cell->use_quaternion) {
         size_t num_hidden_quats = hidden_size / 4;
         size_t num_input_quats = input_size / 4;
         /* P2-013修复: 维度非4倍数时回退为禁用四元数模式，而非直接释放 */
-        if (num_hidden_quats < 1 || num_input_quats < 1 ||
-            hidden_size % 4 != 0 || input_size % 4 != 0) {
+        if (num_hidden_quats >= 1 && num_input_quats >= 1 &&
+            hidden_size % 4 == 0 && input_size % 4 == 0) {
+            /* 分配四元数权重: [num_hidden_quats × num_input_quats × 4] */
+            cell->quaternion_weights = (float*)safe_calloc(num_hidden_quats * num_input_quats * 4, sizeof(float));
+            cell->quaternion_biases = (float*)safe_calloc(num_hidden_quats * 4, sizeof(float));
+            cell->quaternion_weight_grad = (float*)safe_calloc(num_hidden_quats * num_input_quats * 4, sizeof(float));
+            cell->quaternion_bias_grad = (float*)safe_calloc(num_hidden_quats * 4, sizeof(float));
+            cell->quaternion_hidden_weights = (float*)safe_calloc(num_hidden_quats * num_hidden_quats * 4, sizeof(float));
+            cell->quaternion_hidden_weight_grad = (float*)safe_calloc(num_hidden_quats * num_hidden_quats * 4, sizeof(float));
+            cell->quaternion_time_constants = (float*)safe_calloc(num_hidden_quats, sizeof(float));
+            cell->quaternion_workspace = (float*)safe_calloc(hidden_size, sizeof(float));
+
+            /* P5-001修复: 初始化前检查所有四元数缓冲区分配成功，防止NULL指针写入 */
+            if (!cell->quaternion_weights || !cell->quaternion_biases ||
+                !cell->quaternion_weight_grad || !cell->quaternion_bias_grad ||
+                !cell->quaternion_hidden_weights || !cell->quaternion_hidden_weight_grad ||
+                !cell->quaternion_time_constants || !cell->quaternion_workspace) {
+                cfc_cell_free(cell);
+                return NULL;
+            }
+
+            /* P0-001: 四元数权重使用Xavier均匀分布初始化 */
+            unsigned int seed = 42;
+            float quat_limit = xavier_uniform_limit(num_input_quats * 4, num_hidden_quats * 4);
+            float quat_bias_limit = quat_limit * 0.5f;
+            for (size_t i = 0; i < num_hidden_quats * num_input_quats * 4; i++) {
+                cell->quaternion_weights[i] = random_uniform_seeded(-quat_limit, quat_limit, seed++);
+            }
+            for (size_t i = 0; i < num_hidden_quats * 4; i++) {
+                cell->quaternion_biases[i] = random_uniform_seeded(-quat_bias_limit, quat_bias_limit, seed++);
+            }
+            for (size_t i = 0; i < num_hidden_quats * num_hidden_quats * 4; i++) {
+                cell->quaternion_hidden_weights[i] = random_uniform_seeded(-quat_limit, quat_limit, seed++);
+            }
+            for (size_t i = 0; i < num_hidden_quats; i++) {
+                cell->quaternion_time_constants[i] = config->time_constant > 0.0f ?
+                    config->time_constant : 0.5f;
+            }
+        } else {
+            /* 维度不满足四元数要求，回退为禁用模式（指针已预置为NULL，无需额外清理） */
             cell->use_quaternion = 0;
-             /* 继续正常创建，跳过四元数分配和初始化 */
-             goto quaternion_init_end;
         }
-        /* 分配四元数权重: [num_hidden_quats × num_input_quats × 4] */
-        cell->quaternion_weights = (float*)safe_calloc(num_hidden_quats * num_input_quats * 4, sizeof(float));
-        cell->quaternion_biases = (float*)safe_calloc(num_hidden_quats * 4, sizeof(float));
-        cell->quaternion_weight_grad = (float*)safe_calloc(num_hidden_quats * num_input_quats * 4, sizeof(float));
-        cell->quaternion_bias_grad = (float*)safe_calloc(num_hidden_quats * 4, sizeof(float));
-        cell->quaternion_hidden_weights = (float*)safe_calloc(num_hidden_quats * num_hidden_quats * 4, sizeof(float));
-        cell->quaternion_hidden_weight_grad = (float*)safe_calloc(num_hidden_quats * num_hidden_quats * 4, sizeof(float));
-        cell->quaternion_time_constants = (float*)safe_calloc(num_hidden_quats, sizeof(float));
-        cell->quaternion_workspace = (float*)safe_calloc(hidden_size, sizeof(float));
-
-        /* P5-001修复: 初始化前检查所有四元数缓冲区分配成功，防止NULL指针写入 */
-        if (!cell->quaternion_weights || !cell->quaternion_biases ||
-            !cell->quaternion_weight_grad || !cell->quaternion_bias_grad ||
-            !cell->quaternion_hidden_weights || !cell->quaternion_hidden_weight_grad ||
-            !cell->quaternion_time_constants || !cell->quaternion_workspace) {
-            cfc_cell_free(cell);
-            return NULL;
-        }
-
-        /* P0-001: 四元数权重使用Xavier均匀分布初始化 */
-        unsigned int seed = 42;
-        float quat_limit = xavier_uniform_limit(num_input_quats * 4, num_hidden_quats * 4);
-        float quat_bias_limit = quat_limit * 0.5f;
-        for (size_t i = 0; i < num_hidden_quats * num_input_quats * 4; i++) {
-            cell->quaternion_weights[i] = random_uniform_seeded(-quat_limit, quat_limit, seed++);
-        }
-        for (size_t i = 0; i < num_hidden_quats * 4; i++) {
-            cell->quaternion_biases[i] = random_uniform_seeded(-quat_bias_limit, quat_bias_limit, seed++);
-        }
-        for (size_t i = 0; i < num_hidden_quats * num_hidden_quats * 4; i++) {
-            cell->quaternion_hidden_weights[i] = random_uniform_seeded(-quat_limit, quat_limit, seed++);
-        }
-        for (size_t i = 0; i < num_hidden_quats; i++) {
-            cell->quaternion_time_constants[i] = config->time_constant > 0.0f ?
-                config->time_constant : 0.5f;
-        }
-    } else {
-        cell->quaternion_weights = NULL;
-        cell->quaternion_biases = NULL;
-        cell->quaternion_weight_grad = NULL;
-        cell->quaternion_bias_grad = NULL;
-        cell->quaternion_hidden_weights = NULL;
-        cell->quaternion_hidden_weight_grad = NULL;
-        cell->quaternion_time_constants = NULL;
-        cell->quaternion_workspace = NULL;
     }
-
-quaternion_init_end: ;
 
     // 检查内存分配（包括新增的梯度缓冲区）
     if (!cell->state->state || !cell->state->adapted_params ||
@@ -749,8 +750,25 @@ quaternion_init_end: ;
             cell->slow_time_constants[i] = base_tau * cell->slow_tau_ratio;
             if (cell->fast_time_constants[i] < 0.001f) cell->fast_time_constants[i] = 0.001f;
             if (cell->slow_time_constants[i] > 100.0f) cell->slow_time_constants[i] = 100.0f;
-            cell->fast_state[i] = random_uniform_seeded(-0.01f, 0.01f, (unsigned int)(uintptr_t)cell ^ (unsigned int)i ^ 0x7000);
-            cell->slow_state[i] = random_uniform_seeded(-0.01f, 0.01f, (unsigned int)(uintptr_t)cell ^ (unsigned int)i ^ 0x8000);
+            /* ZSFWS-022修复: 多时间尺度状态初始化策略
+             * fast_state: 零初始化 —— 快速通道无历史记忆，直接响应瞬时输入。
+             *             演化中由快速时间常数 fast_tau ≈ 0.001~0.01 驱动，更新迅速。
+             *
+             * slow_state: 指数移动平均(EMA)近似初始化
+             * EMA递推公式: slow_new = α * state + (1-α) * slow_old
+             *   其中 α = 1.0f / slow_tau_ratio ≈ 0.1（慢速时间常数控制EMA平滑度）
+             *   慢速通道在演化中由 slow_tau ≈ 1.0~10.0 驱动，更新缓慢，具有惯性效应。
+             *
+             * 初始化时刻分析:
+             *   - cell->state->state 已由 safe_calloc 置零（无先验状态信息）
+             *   - 无历史累积时，EMA退化为一阶近似: slow_state = α * state
+             *   - 代入 state[i]=0 得 slow_state[i] = 0
+             *   - 随着时间序列输入推进，慢速通道将通过EMA公式逐步积累长时依赖
+             *
+             * 两通道初始值相同(=0)但演化动态不同:
+             *   fast_tau << slow_tau ⇒ 快通道跟踪瞬态变化，慢通道积压低频趋势 */ 
+            cell->fast_state[i] = 0.0f;
+            cell->slow_state[i] = 0.0f;
         }
     }
     

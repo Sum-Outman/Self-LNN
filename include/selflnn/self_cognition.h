@@ -1390,6 +1390,23 @@ void self_cognition_system_disable(SelfCognitionSystem* system);
 int self_cognition_system_is_enabled(const SelfCognitionSystem* system);
 
 /* ============================================================================
+ * ZSFWS-027: LNN训练就绪检查
+ *
+ * 检查全局共享LNN是否已完成训练（如加载了检查点或经过至少一轮训练）。
+ * 未训练的LNN（随机权重）会导致自我认知的评估/反思/修正产生无意义的
+ * 随机噪声输出，可能误导错误的自我修正决策。
+ *
+ * 检查逻辑：
+ *   1. self_model_lnn 是否已训练（is_model_trained标志）
+ *   2. 共享LNN是否经过前向传播（forward_count > 0）
+ *   3. 共享LNN的平均激活度是否非零（avg_activation ≠ 0.0）
+ *
+ * @param system 自我认知系统句柄
+ * @return 1=LNN已就绪可安全使用, 0=LNN未就绪需保守模式
+ * ============================================================================ */
+int self_cognition_is_lnn_ready(SelfCognitionSystem* system);
+
+/* ============================================================================
  * 闭环自我认知反馈系统（P1-05 修复）
  *
  * 实现完整的"预测→实测→偏差分析→模型校准"闭环。

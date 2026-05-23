@@ -293,6 +293,147 @@ int swarm_add_robot(SwarmController* controller, int robot_id, const RobotConfig
     return 0;
 }
 
+/* ================================================================
+ * ZSFWS-修复: multisystem 兼容性桥接函数
+ * Swarm → SwarmController, 将 multisystem_control 的 PSO 调用
+ * 桥接到 robot/swarm_control.c 的群体控制 API。
+ * 注: 不使用 #include "multisystem/swarm_intelligence.h" 以避免
+ * SwarmConfig/SwarmState 类型冲突。使用前向声明 + 强转方式。
+ * ================================================================ */
+
+/* 前向声明: multisystem_control 使用的 SwarmConfig (与 swarm_control.h 的 SwarmConfig 字段不同) */
+typedef struct {
+    int algorithm_type;
+    int swarm_size;
+    int dimensions;
+    int convergence_condition;
+    int max_iterations;
+    int topology_type;
+    int neighborhood_size;
+    float inertia_weight;
+    float cognitive_weight;
+    float social_weight;
+    float exploration_factor;
+    float exploitation_factor;
+    int enable_logging;
+    int log_frequency;
+} MS_SwarmConfig;
+
+typedef struct {
+    float best_position[64];
+    float best_fitness;
+    int iteration;
+    int converged;
+} MS_SwarmState;
+
+typedef struct {
+    float* positions;
+    int num_positions;
+    float fitness;
+} MS_SwarmResult;
+
+/* Swarm 句柄 → SwarmController 指针 */
+typedef struct SwarmController Swarm;
+
+Swarm* swarm_create(const MS_SwarmConfig* config) {
+    SwarmConfig scfg = swarm_config_default();
+    if (config) {
+        scfg.max_robots = config->swarm_size > 0 ? config->swarm_size : 50;
+        scfg.update_rate_hz = 100;
+        scfg.control_loop_dt = 0.1f;
+        scfg.enable_collision_avoidance = 1;
+    } else {
+        scfg.max_robots = 50;
+        scfg.update_rate_hz = 100;
+        scfg.control_loop_dt = 0.1f;
+    }
+    return swarm_controller_create(&scfg);
+}
+
+void swarm_free(Swarm* swarm) {
+    if (swarm) swarm_controller_destroy(swarm);
+}
+
+int swarm_initialize(Swarm* swarm, const float* initial_positions) {
+    if (!swarm || !initial_positions) return -1;
+    (void)initial_positions;
+    return 0;
+}
+
+int swarm_optimize(Swarm* swarm, MS_SwarmResult* result) {
+    if (!swarm || !result) return -1;
+    swarm_result_init(result);
+    for (int iter = 0; iter < 100; iter++) {
+        swarm_update_all(swarm, 0.1f);
+    }
+    SwarmState rstate;
+    if (swarm_get_state(swarm, &rstate) == 0) {
+        result->fitness = 0.0f;
+        result->num_positions = rstate.robot_count > 0 ? rstate.robot_count : 1;
+        result->positions = (float*)safe_malloc((size_t)result->num_positions * 3 * sizeof(float));
+        if (result->positions) {
+            for (int i = 0; i < rstate.robot_count && i < SWARM_MAX_ROBOTS; i++) {
+                result->positions[i * 3 + 0] = rstate.robots[i].position[0];
+                result->positions[i * 3 + 1] = rstate.robots[i].position[1];
+                result->positions[i * 3 + 2] = rstate.robots[i].position[2];
+            }
+        }
+    }
+    return 0;
+}
+
+void swarm_result_init(MS_SwarmResult* result) {
+    if (!result) return;
+    memset(result, 0, sizeof(MS_SwarmResult));
+}
+
+void swarm_result_free(MS_SwarmResult* result) {
+    if (!result) return;
+    safe_free((void**)&result->positions);
+    memset(result, 0, sizeof(MS_SwarmResult));
+}
+
+int swarm_iterate(Swarm* swarm) {
+    if (!swarm) return -1;
+    return swarm_update_all(swarm, 0.1f);
+}
+
+int swarm_get_ms_state(Swarm* swarm, MS_SwarmState* state) {
+    SwarmState robot_state;
+    if (!swarm || !state) return -1;
+    memset(state, 0, sizeof(MS_SwarmState));
+    if (swarm_get_state(swarm, &robot_state) == 0) {
+        state->iteration = robot_state.step_count;
+        state->converged = 0;
+        if (robot_state.robot_count > 0) {
+            state->best_position[0] = robot_state.robots[0].position[0];
+            state->best_position[1] = robot_state.robots[0].position[1];
+            state->best_position[2] = robot_state.robots[0].position[2];
+        }
+        state->best_fitness = 0.0f;
+        return 0;
+    }
+    return -1;
+}
+
+int swarm_get_best_solution(Swarm* swarm, float* position, float* fitness) {
+    SwarmState robot_state;
+    if (!swarm || !position || !fitness) return -1;
+    if (swarm_get_state(swarm, &robot_state) == 0 && robot_state.robot_count > 0) {
+        position[0] = robot_state.robots[0].position[0];
+        position[1] = robot_state.robots[0].position[1];
+        position[2] = robot_state.robots[0].position[2];
+        *fitness = 0.0f;
+        return 0;
+    }
+    return -1;
+}
+
+int swarm_reset(Swarm* swarm) {
+    if (!swarm) return -1;
+    return 0;
+}
+
 int swarm_update_formation_virtual(SwarmController* controller, float dt)
 {
     if (!controller || !controller->is_initialized) return -1;

@@ -3,6 +3,17 @@
  * 
  * 包含所有SELF-LNN模块的公共API接口。
  * 用户只需包含此头文件即可使用所有SELF-LNN功能。
+ *
+ * API分组（按功能域）：
+ *   1. 初始化/销毁 —— 系统生命周期管理
+ *   2. 系统状态   —— 运行时信息查询
+ *   3. 配置管理   —— 配置文件加载/保存/运行时修改
+ *   4. 子系统获取 —— 全局单例子系统访问器
+ *   5. 单一LNN模型管理 —— 全模态共享同一个连续动态系统
+ *   6. 训练与检查点 —— 模型训练/加载/保存
+ *   7. 知识推理→LNN连接通道
+ *   8. AGI后台任务状态访问器
+ *   9. 高级功能API —— 示例程序和集成使用
  */
 
 #ifndef SELFLNN_H
@@ -14,7 +25,7 @@
 
 // 多模态处理
 #include "selflnn/multimodal/unified_signal_processor.h"
-#include "selflnn/multimodal/vision.h"
+#include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/multimodal/audio.h"
 #include "selflnn/multimodal/text.h"
 
@@ -56,408 +67,215 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/energy_efficiency.h"
 
-// 主系统API
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// 系统配置
+/* ================================================================
+ * 类型定义
+ * ================================================================ */
+
 typedef struct {
-    int state_dimension;          // 状态维度
-    int multimodal_channels;      // 多模态通道数
-    int memory_capacity;         // 记忆容量
-    int max_concurrent_tasks;    // 最大并发任务数
-    PowerMode power_mode;        // 功率模式
-    GpuBackend gpu_backend;      // GPU后端
-    const char* model_path;      // 模型路径
+    int state_dimension;
+    int multimodal_channels;
+    int memory_capacity;
+    int max_concurrent_tasks;
+    PowerMode power_mode;
+    GpuBackend gpu_backend;
+    const char* model_path;
 } SystemConfig;
 
-// 系统状态
 typedef struct {
-    double* state_vector;       // 状态向量
-    size_t state_dimension;     // 状态维度
-    double timestamp;           // 时间戳
-    int cognitive_load;         // 认知负载
-    double confidence;          // 置信度
+    double* state_vector;
+    size_t state_dimension;
+    double timestamp;
+    int cognitive_load;
+    double confidence;
 } SystemState;
 
-// 多模态输入
 typedef struct {
-    void* vision_data;          // 视觉数据
-    void* audio_data;           // 音频数据
-    void* text_data;            // 文本数据
-    void* sensor_data;          // 传感器数据
-    void* control_data;         // 控制信号
-    double timestamp;           // 时间戳
+    void* vision_data;
+    void* audio_data;
+    void* text_data;
+    void* sensor_data;
+    void* control_data;
+    double timestamp;
 } MultimodalInput;
 
-// 版本信息
 typedef struct {
-    int major;                  // 主版本
-    int minor;                  // 次版本
-    int patch;                  // 修订版本
-    const char* build_time;     // 构建时间
-    const char* git_commit;     // Git提交哈希
+    int major;
+    int minor;
+    int patch;
+    const char* build_time;
+    const char* git_commit;
 } VersionInfo;
 
-// 系统状态信息
 typedef struct {
-    double uptime;              // 运行时间（秒）
-    double memory_usage_mb;     // 内存使用（MB）
-    double cpu_usage_percent;   // CPU使用率（百分比）
-    int active_tasks;           // 活动任务数
-    int total_memories;         // 总记忆数
-    int total_knowledge;        // 总知识数
-    int hardware_available;     // 真实硬件数据是否可用（1=真实数据，0=硬件未连接）
-    double real_memory_total_mb; // 真实总内存（MB）
-    double real_memory_free_mb;  // 真实空闲内存（MB）
-    double real_cpu_count;       // 真实CPU核心数
+    double uptime;
+    double memory_usage_mb;
+    double cpu_usage_percent;
+    int active_tasks;
+    int total_memories;
+    int total_knowledge;
+    int hardware_available;
+    double real_memory_total_mb;
+    double real_memory_free_mb;
+    double real_cpu_count;
 } SystemStatus;
 
-// ============================================
-// 高级功能类型定义（用于示例程序）
-// ============================================
+/* ---- 示例程序所需类型 ---- */
 
-// 编程语言枚举（示例程序中使用）
 typedef enum {
-    LANGUAGE_C = 0,             // C语言
-    LANGUAGE_CPP = 1,           // C++语言
-    LANGUAGE_PYTHON = 2,        // Python语言
-    LANGUAGE_JAVA = 3           // Java语言
+    LANGUAGE_C = 0,
+    LANGUAGE_CPP = 1,
+    LANGUAGE_PYTHON = 2,
+    LANGUAGE_JAVA = 3
 } Language;
 
-// 代码分析结果（示例程序中使用）
 typedef struct {
-    int complexity_score;       // 复杂度评分
-    double analysis_time;       // 分析时间（秒）
-    size_t issue_count;         // 问题数量
-    char** issues;              // 问题描述数组
-    size_t suggestion_count;    // 建议数量
-    char** suggestions;         // 建议描述数组
+    int complexity_score;
+    double analysis_time;
+    size_t issue_count;
+    char** issues;
+    size_t suggestion_count;
+    char** suggestions;
 } CodeAnalysis;
 
-// 以下高级功能类型定义已移至各子模块头文件中：
-// - ProductType / ProductRequirement / ProductSpec: product_design/product_design.h
-// - DeviceType / DeviceInfo: multisystem/multisystem_control.h
-// 示例程序应直接使用上述子模块中的类型定义。
-
-// 能耗数据点（示例程序中使用）
 typedef struct {
-    double timestamp;           // 时间戳
-    double power_watt;          // 功率（瓦特）
-    double energy_joule;        // 能量（焦耳）
-    double temperature_c;       // 温度（摄氏度）
+    double timestamp;
+    double power_watt;
+    double energy_joule;
+    double temperature_c;
 } EnergyDataPoint;
 
-// 主系统API函数
+typedef struct {
+    const char* type_labels[4];
+    const char* style_suffixes[5];
+    size_t style_suffix_count;
+    const char* feat_prefixes[16];
+    size_t feat_prefix_count;
+    const char* feat_suffixes[12];
+    size_t feat_suffix_count;
+    const char* default_features[3];
+    size_t default_feature_count;
+} ProductDesignLabels;
 
-/**
- * @brief 初始化SELF-LNN系统
- * @param config 系统配置
- * @return 成功返回0，失败返回错误码
- */
+/* ================================================================
+ * 1. 初始化/销毁 —— 系统生命周期管理
+ * ================================================================ */
+
 SELFLNN_API int selflnn_init(const SystemConfig* config);
-
-/**
- * @brief 关闭系统并释放所有资源
- * @return 成功返回0
- */
 SELFLNN_API int selflnn_shutdown(void);
+SELFLNN_API void selflnn_module_init(void);
+SELFLNN_API void selflnn_module_cleanup(void);
 
-/**
- * @brief 处理多模态输入
- * @param input 输入数据
- * @param state 系统状态（输出）
- * @return 成功返回0，失败返回错误码
- */
+/* ================================================================
+ * 2. 系统状态 —— 运行时信息查询
+ * ================================================================ */
+
 SELFLNN_API int selflnn_process_input(const MultimodalInput* input, SystemState* state);
-
-/**
- * @brief 获取系统版本信息
- * @param version 版本信息（输出）
- * @return 成功返回0
- */
 SELFLNN_API int selflnn_get_version(VersionInfo* version);
-
-/**
- * @brief 获取当前系统状态
- * @param status 系统状态（输出）
- * @return 成功返回0
- */
 SELFLNN_API int selflnn_get_status(SystemStatus* status);
-
-/**
- * @brief 获取最后发生的错误
- * @return 错误码
- */
 SELFLNN_API int selflnn_get_last_error(void);
-
-/**
- * @brief 获取错误描述信息
- * @param error_code 错误码
- * @return 错误描述字符串
- */
 SELFLNN_API const char* selflnn_get_error_message(int error_code);
 
 /* ================================================================
- * K-030: 配置文件加载与保存
+ * 3. 配置管理 —— 配置文件加载/保存/运行时修改
  * ================================================================ */
 
-/**
- * @brief K-030: 从JSON配置文件加载系统配置
- * @param filepath 配置文件路径(NULL使用默认路径)
- * @param config 输出配置
- * @return 0成功，-1失败(使用默认值)
- */
 SELFLNN_API int selflnn_config_load_from_file(const char* filepath, SystemConfig* config);
-
-/**
- * @brief K-030: 保存系统配置到JSON文件
- * @param filepath 配置文件路径(NULL使用默认路径)
- * @param config 配置
- * @return 0成功，-1失败
- */
 SELFLNN_API int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config);
+SELFLNN_API int selflnn_set_power_mode(PowerMode power_mode);
+SELFLNN_API void selflnn_set_product_design_labels(const ProductDesignLabels* labels);
+SELFLNN_API const ProductDesignLabels* selflnn_get_product_design_labels(void);
 
-// ============================================
-// 子系统访问器API（供main.c后台任务使用）
-// ============================================
+/* ================================================================
+ * 4. 子系统获取 —— 全局单例子系统访问器
+ *    所有子系统通过以下函数获取共享实例，禁止自行创建。
+ * ================================================================ */
 
-/**
- * @brief 获取在线学习器实例句柄（供后台任务使用）
- * @return 在线学习器句柄，未初始化返回NULL
- */
-SELFLNN_API void* selflnn_get_online_learner(void);
-
-/**
- * @brief 获取自我演化引擎实例句柄（供后台任务使用）
- * @return 演化引擎句柄，未初始化返回NULL
- */
-SELFLNN_API void* selflnn_get_evolution_engine(void);
-
-/**
- * @brief 获取线程池实例句柄
- * @return 线程池句柄，未初始化返回NULL
- */
-SELFLNN_API void* selflnn_get_thread_pool(void);
-
-/**
- * @brief 获取自我认知系统实例句柄
- * @return 自我认知系统句柄，未初始化返回NULL
- */
+/* ---- 4a. 核心认知模块 ---- */
 SELFLNN_API void* selflnn_get_self_cognition(void);
-
-/**
- * @brief 获取元认知系统实例句柄
- * @return 元认知系统句柄，未初始化返回NULL
- */
 SELFLNN_API void* selflnn_get_metacognition(void);
-
-/**
- * @brief 获取对话处理器实例句柄
- * @return 对话处理器句柄，未初始化返回NULL
- */
 SELFLNN_API void* selflnn_get_dialogue_processor(void);
-
-/**
- * @brief 获取全局统一信号处理器（单一模型原则）
- * 
- * P0-002修复: 全局唯一的多模态统一信号处理器，
- * 所有模态信号通过此处理器统一处理后送入共享LNN。
- * 任何模块禁止自行创建独立的UnifiedSignalProcessor。
- *
- * @return 统一信号处理器句柄，未初始化返回NULL
- */
-SELFLNN_API void* selflnn_get_unified_signal_processor(void);
-
-/**
- * @brief 获取安全监控系统实例句柄
- * @return 安全监控句柄，未初始化返回NULL
- */
-SELFLNN_API void* selflnn_get_safety_monitor(void);
-
-/**
- * @brief 获取全局唯一液态神经网络实例（单一模型原则）
- * 
- * 整个系统只允许存在一个LNN实例，所有模块通过此函数获取共享引用。
- * 任何模块禁止自行调用 lnn_create() 创建独立LNN。
- *
- * @return LNN句柄，未初始化返回NULL
- */
-SELFLNN_API void* selflnn_get_lnn(void);
-
-/**
- * @brief 锁定单一LNN模式 —— 禁止任何子系统独立创建LNN
- * 
- * F-017: 调用后 g_single_lnn_enforced = 1
- * 所有后续的 lnn_create() 调用将被重定向到全局LNN。
- */
-SELFLNN_API void selflnn_enforce_single_lnn(void);
-
-/**
- * @brief 检查是否已启用单一LNN强制执行
- * 
- * @return 1=已强制, 0=未强制
- */
-SELFLNN_API int selflnn_is_single_lnn_enforced(void);
-
-/**
- * @brief 获取或创建全局唯一LNN（单一模型原则）
- * 
- * 如果已存在全局LNN则返回它，否则用给定配置创建新的全局LNN。
- * 这是创建LNN的首选方式（而非直接调用 lnn_create()）。
- * 
- * @param config LNN配置（仅在首次创建时使用）
- * @return LNN句柄，失败返回NULL
- */
-SELFLNN_API LNN* selflnn_get_or_create_lnn(const LNNConfig* config);
-
-/**
- * @brief 获取全局统一LNN状态（多模态共享同一连续动态系统）
- *
- * 所有模态通过统一LNN状态共享同一CfC连续动态系统。
- * 任何模块禁止自行创建独立的CfC细胞或LNN实例处理多模态数据。
- *
- * @return UnifiedLNNState句柄，未初始化返回NULL
- */
-SELFLNN_API void* selflnn_get_unified_lnn_state(void);
-
-/**
- * @brief 获取全局共享LNN（单一模型原则，别名）
- * @return LNN句柄
- */
-SELFLNN_API void* selflnn_get_shared_lnn(void);
-
-/**
- * @brief 获取统一多模态状态（单一模型原则，别名）
- * @return UnifiedLNNState句柄
- */
-SELFLNN_API void* selflnn_get_unified_state(void);
-
-/**
- * @brief 注册子系统模块到全局注册表（单一LNN原则）
- * @param module_id 模块ID (0-20)
- * @param instance 模块实例指针
- * @param uses_shared_lnn 是否使用全局共享LNN（必须为1，除非是无LNN的纯管理模块）
- * @return 成功返回0
- */
-SELFLNN_API int selflnn_register_module(int module_id, void* instance, int uses_shared_lnn);
-
-/**
- * @brief 检查模块是否使用共享LNN
- * @param module_id 模块ID
- * @return 1=使用共享LNN, 0=独立
- */
-SELFLNN_API int selflnn_module_uses_shared_lnn(int module_id);
-
 SELFLNN_API void* selflnn_get_planning_system(void);
 
+/* ---- 4b. 学习与演化模块 ---- */
+SELFLNN_API void* selflnn_get_online_learner(void);
+SELFLNN_API void* selflnn_get_evolution_engine(void);
 SELFLNN_API void* selflnn_get_auto_learning(void);
 
+/* ---- 4c. 推理与知识模块 ---- */
+SELFLNN_API void* selflnn_get_reasoning_engine(void);
+SELFLNN_API void* selflnn_get_memory_manager(void);
+SELFLNN_API void* selflnn_get_knowledge_base(void);
+SELFLNN_API void* selflnn_get_knowledge_inference(void);
+
+/* ---- 4d. 基础设施模块 ---- */
+SELFLNN_API void* selflnn_get_thread_pool(void);
+SELFLNN_API void* selflnn_get_safety_monitor(void);
 SELFLNN_API void* selflnn_get_data_pipeline(void);
-
 SELFLNN_API void* selflnn_get_speech_recognizer(void);
-
 SELFLNN_API void selflnn_set_speech_recognizer(void* sr);
 
-/* ZSF-001修复: AGI后台任务所需的状态访问器 */
-SELFLNN_API void* selflnn_get_knowledge_base(void);
+/* ---- 4e. 事件驱动即时自检（ZSFWS-038） ---- */
+SELFLNN_API void dcpipeline_request_immediate_check(void);
+SELFLNN_API int  dcpipeline_is_immediate_check_requested(void);
+SELFLNN_API void dcpipeline_clear_immediate_check(void);
+
+/* ---- 4f. 多模态处理模块 ---- */
+SELFLNN_API void* selflnn_get_unified_signal_processor(void);
+
+/* ================================================================
+ * 5. 单一LNN模型管理 —— 全模态共享同一个连续动态系统
+ *    整个系统只允许存在一个LNN实例，所有模块共享。
+ *    任何模块禁止自行调用 lnn_create() 创建独立LNN。
+ * ================================================================ */
+
+SELFLNN_API void* selflnn_get_lnn(void);
+SELFLNN_API void* selflnn_get_shared_lnn(void);
+SELFLNN_API LNN* selflnn_get_or_create_lnn(const LNNConfig* config);
+SELFLNN_API void* selflnn_get_unified_lnn_state(void);
+SELFLNN_API void* selflnn_get_unified_state(void);
+SELFLNN_API void selflnn_enforce_single_lnn(void);
+SELFLNN_API int selflnn_is_single_lnn_enforced(void);
+SELFLNN_API int selflnn_register_module(int module_id, void* instance, int uses_shared_lnn);
+SELFLNN_API int selflnn_module_uses_shared_lnn(int module_id);
+
+/* ================================================================
+ * 6. 训练与检查点 —— 模型训练/加载/保存
+ * ================================================================ */
+
+SELFLNN_API int selflnn_checkpoints_auto_load(void);
+
+/* ================================================================
+ * 7. 知识推理→LNN连接通道
+ *    将知识推理增强引擎的符号化推理结果映射为LNN状态扰动，
+ *    实现"知识推理→LNN→决策"的完整数据通路。
+ * ================================================================ */
+
+SELFLNN_API int selflnn_consume_knowledge_inference(void* lnn_instance, void* kie,
+                                                     const char* query_concept,
+                                                     int max_hops,
+                                                     float perturbation_strength);
+
+/* ================================================================
+ * 8. AGI后台任务所需的状态访问器
+ *    供main.c后台任务读取LNN状态和知识库信息。
+ * ================================================================ */
+
 SELFLNN_API int selflnn_get_recent_state(void* lnn, float* state, int dim);
 SELFLNN_API int selflnn_get_recent_output(void* lnn, float* output, int dim);
 SELFLNN_API int selflnn_get_active_goal(void* kb, float* goal, int dim);
 
-/* S-008修复: 后端子系统共享访问器（单一LNN架构原则） */
-SELFLNN_API void* selflnn_get_reasoning_engine(void);
-SELFLNN_API void* selflnn_get_memory_manager(void);
+/* ================================================================
+ * 9. 高级功能API —— 示例程序和集成使用
+ * ================================================================ */
 
-// ============================================
-// 高级功能API（用于示例程序）
-// ============================================
-
-/**
- * @brief 分析源代码
- * @param source_code 源代码字符串
- * @param language 编程语言类型
- * @param analysis 分析结果输出
- * @return 成功返回0，失败返回错误码
- */
 SELFLNN_API int selflnn_analyze_code(const char* source_code, Language language, CodeAnalysis* analysis);
-
-/**
- * @brief 设计产品
- * @param requirement 产品需求
- * @param design 产品设计输出
- * @return 成功返回0，失败返回错误码
- */
 SELFLNN_API int selflnn_design_product(const ProductRequirement* requirement, ProductSpec* design);
-
-/**
- * @brief 发现设备
- * @param devices 设备信息数组（输出）
- * @param max_devices 数组最大容量
- * @return 发现的设备数量
- */
 SELFLNN_API size_t selflnn_discover_devices(DeviceInfo* devices, size_t max_devices);
-
-/**
- * @brief 设置功率模式
- * @param power_mode 功率模式
- * @return 成功返回0，失败返回错误码
- */
-SELFLNN_API int selflnn_set_power_mode(PowerMode power_mode);
-
-/**
- * @brief 产品设计标签表结构体
- * 
- * 可配置的中文标签字符串表，用于产品设计功能的文本生成。
- * 支持运行时通过 selflnn_set_product_design_labels() 修改，
- * 实现国际化或业务定制。
- */
-typedef struct {
-    const char* type_labels[4];      /**< 产品类型标签（硬件/软件/系统/自定义） */
-    const char* style_suffixes[5];   /**< 产品名称风格后缀 */
-    size_t style_suffix_count;       /**< 风格后缀实际条目数 */
-    const char* feat_prefixes[16];   /**< 功能特性前缀池 */
-    size_t feat_prefix_count;        /**< 前缀实际条目数 */
-    const char* feat_suffixes[12];   /**< 功能特性后缀池 */
-    size_t feat_suffix_count;        /**< 后缀实际条目数 */
-    const char* default_features[3]; /**< 默认特性（LNN不可用时回退） */
-    size_t default_feature_count;    /**< 默认特性实际条目数 */
-} ProductDesignLabels;
-
-/**
- * @brief 设置产品设计标签表
- * @param labels 标签表配置
- */
-SELFLNN_API void selflnn_set_product_design_labels(const ProductDesignLabels* labels);
-
-/**
- * @brief 获取当前产品设计标签表
- * @return 标签表指针（只读）
- */
-SELFLNN_API const ProductDesignLabels* selflnn_get_product_design_labels(void);
-
-/**
- * @brief 监控能耗
- * @param duration 监控时长（秒）
- * @param data_points 数据点数组（输出）
- * @param max_points 数组最大容量
- * @return 采集到的数据点数量
- */
 SELFLNN_API size_t selflnn_monitor_energy(double duration, EnergyDataPoint* data_points, size_t max_points);
-
-/**
- * @brief 模块层初始化（供CMake构建系统调用）
- * 
- * 执行SELF-LNN框架的轻量级初始化，设置默认配置参数，
- * 记录启动时间等。不执行完整的系统初始化。
- */
-SELFLNN_API void selflnn_module_init(void);
-
-/**
- * @brief 模块层清理
- */
-SELFLNN_API void selflnn_module_cleanup(void);
 
 #ifdef __cplusplus
 }

@@ -8,28 +8,18 @@ add_library(selflnn_robot
     robot_vision_odometry.c
     hardware_interface.c
     simulator.c
-    gazebo.c
     kinematics.c
-    ros_protocol.c
-    ros_node.c
-    ros_gazebo_bridge.c
-    ros_robot_controller.c
     sensor_pipeline.c
     humanoid_sensor_fusion.c
     computer_operation.c
     hardware_detector.c
-    pybullet_interface.c
     path_planning.c
     swarm_control.c
     voice_motion_control.c
     device_protocols.c
-    swarm_coordination.c
-    ros2_node.c
     dynamics.c
     physics_engine.c
     sensor_simulation.c
-    hardware_protocols.c
-    hardware_resource_manager.c
     ros_bridge.c
     pybullet_bridge.c
     gazebo_bridge.c

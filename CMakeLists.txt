@@ -74,12 +74,24 @@ option(BUILD_FRONTEND "Build frontend" ON)
 # 调试时如需框架验证数据，设置 ALLOW_BOOTSTRAP_DATA=ON
 option(ALLOW_BOOTSTRAP_DATA "允许引导数据集生成（仅调试用途）" OFF)
 
+# 种子知识控制（与引导合成数据独立）
+# 默认加载种子知识（数学/物理/地理等基础常识），确保知识库不为空
+# 如需完全从零开始学习，设置 SKIP_SEED_KNOWLEDGE=ON
+option(SKIP_SEED_KNOWLEDGE "跳过预置种子知识加载，知识库完全从零开始" OFF)
+
 if(ALLOW_BOOTSTRAP_DATA)
     message(WARNING "⚠️ 允许合成数据生成 — 仅用于调试/测试框架！自主学习严禁使用！")
     add_definitions(-DSELFLNN_ALLOW_BOOTSTRAP_DATA)
 else()
     add_definitions(-DSELFLNN_STRICT_REAL_DATA)
     message(STATUS "🔒 严格真实数据模式已启用 — 合成数据生成已禁用")
+endif()
+
+if(SKIP_SEED_KNOWLEDGE)
+    message(STATUS "⚠️ 跳过种子知识加载 — 知识库将从零开始构建")
+    add_definitions(-DSELFLNN_SKIP_SEED_KNOWLEDGE)
+else()
+    message(STATUS "📚 种子知识加载已启用 — 基础常识将被预置到知识库")
 endif()
 
 message(STATUS "构建配置: BUILD_TESTS=${BUILD_TESTS}")

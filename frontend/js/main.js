@@ -250,13 +250,17 @@ async function configureROS() {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.configureRos === 'function') {
             var result = await window.SelfLnnApi.configureRos({ host: host, port: port });
             if (result && result.success) {
-                document.querySelector('#ros-master-status .status-dot').className = 'status-dot online';
-                document.querySelector('#ros-master-status .status-text').textContent = '已连接';
+                var dot = document.querySelector('#ros-master-status .status-dot');
+                var txt = document.querySelector('#ros-master-status .status-text');
+                if (dot) dot.className = 'status-dot online';
+                if (txt) txt.textContent = '已连接';
                 showNotification('✅ ROS Master连接成功', 'success');
             } else {
                 var errMsg = (result && result.error) || '连接失败';
-                document.querySelector('#ros-master-status .status-dot').className = 'status-dot offline';
-                document.querySelector('#ros-master-status .status-text').textContent = '连接失败';
+                var dot = document.querySelector('#ros-master-status .status-dot');
+                var txt = document.querySelector('#ros-master-status .status-text');
+                if (dot) dot.className = 'status-dot offline';
+                if (txt) txt.textContent = '连接失败';
                 showNotification('❌ ' + errMsg, 'error');
             }
         } else {
@@ -296,14 +300,16 @@ async function controlGazebo(action) {
  * 在Gazebo中生成模型
  */
 async function spawnGazeboModel() {
-    var name = document.getElementById('gazebo-model-name').value;
+    var modelNameEl = document.getElementById('gazebo-model-name');
+    if (!modelNameEl) return;
+    var name = modelNameEl.value;
     if (!name) { showNotification('⚠️ 请输入模型名称', 'warning'); return; }
-    var x = parseFloat(document.getElementById('gazebo-model-x').value) || 0;
-    var y = parseFloat(document.getElementById('gazebo-model-y').value) || 0;
-    var z = parseFloat(document.getElementById('gazebo-model-z').value) || 0;
-    var yaw = parseFloat(document.getElementById('gazebo-model-yaw').value) || 0;
-    var pitch = parseFloat(document.getElementById('gazebo-model-pitch').value) || 0;
-    var roll = parseFloat(document.getElementById('gazebo-model-roll').value) || 0;
+    var x = parseFloat(((document.getElementById('gazebo-model-x') || {}).value)) || 0;
+    var y = parseFloat(((document.getElementById('gazebo-model-y') || {}).value)) || 0;
+    var z = parseFloat(((document.getElementById('gazebo-model-z') || {}).value)) || 0;
+    var yaw = parseFloat(((document.getElementById('gazebo-model-yaw') || {}).value)) || 0;
+    var pitch = parseFloat(((document.getElementById('gazebo-model-pitch') || {}).value)) || 0;
+    var roll = parseFloat(((document.getElementById('gazebo-model-roll') || {}).value)) || 0;
     showNotification('正在生成模型 ' + name + '...', 'info');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.controlGazebo === 'function') {
@@ -363,6 +369,7 @@ async function refreshRosNodes() {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.getRosNodes === 'function') {
             var result = await window.SelfLnnApi.getRosNodes();
             var listEl = document.getElementById('ros-node-list');
+            if (!listEl) return;
             if (result && result.success && result.data && result.data.nodes) {
                 var nodes = result.data.nodes;
                 if (nodes.length === 0) {
@@ -389,6 +396,7 @@ async function refreshRosTopics() {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.getRosTopics === 'function') {
             var result = await window.SelfLnnApi.getRosTopics();
             var listEl = document.getElementById('ros-topic-list');
+            if (!listEl) return;
             if (result && result.success && result.data && result.data.topics) {
                 var topics = result.data.topics;
                 if (topics.length === 0) {
@@ -420,22 +428,26 @@ async function refreshRosGazeboStatus() {
                 if (d.ros_master_connected !== undefined) {
                     var dot = document.querySelector('#ros-master-status .status-dot');
                     var txt = document.querySelector('#ros-master-status .status-text');
-                    dot.className = 'status-dot ' + (d.ros_master_connected ? 'online' : 'offline');
-                    txt.textContent = d.ros_master_connected ? '已连接' : (d.ros_master_error || '未连接');
+                    if (dot) dot.className = 'status-dot ' + (d.ros_master_connected ? 'online' : 'offline');
+                    if (txt) txt.textContent = d.ros_master_connected ? '已连接' : (d.ros_master_error || '未连接');
                 }
                 // Gazebo状态
                 if (d.gazebo_state !== undefined) {
                     var stateMap = {0:'未连接',1:'连接中',2:'已连接',3:'运行中',4:'错误'};
-                    document.getElementById('gazebo-bridge-status').textContent = stateMap[d.gazebo_state] || ('状态码:'+d.gazebo_state);
+                    var el = document.getElementById('gazebo-bridge-status');
+                    if (el) el.textContent = stateMap[d.gazebo_state] || ('状态码:'+d.gazebo_state);
                 }
                 if (d.gazebo_sim_time !== undefined) {
-                    document.getElementById('gazebo-sim-time').textContent = d.gazebo_sim_time.toFixed(1) + 's';
+                    var el = document.getElementById('gazebo-sim-time');
+                    if (el) el.textContent = d.gazebo_sim_time.toFixed(1) + 's';
                 }
                 if (d.gazebo_robot_count !== undefined) {
-                    document.getElementById('gazebo-robot-count').textContent = d.gazebo_robot_count;
+                    var el = document.getElementById('gazebo-robot-count');
+                    if (el) el.textContent = d.gazebo_robot_count;
                 }
                 if (d.gazebo_last_error) {
-                    document.getElementById('gazebo-last-error').textContent = d.gazebo_last_error;
+                    var el = document.getElementById('gazebo-last-error');
+                    if (el) el.textContent = d.gazebo_last_error;
                 }
             }
         }
@@ -5820,22 +5832,23 @@ setTimeout(initDialogueSystem, 100);
  * 切换自主知识库学习开关
  */
 async function toggleAutoLearn(enabled) {
+    /* ZSFWS-017修复: 后端不可用时明确告知用户，不再显示误导性的"已启用"通知 */
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.autoLearnToggle === 'function') {
             var result = await window.SelfLnnApi.autoLearnToggle(enabled);
             if (result.success) {
-                showNotification(enabled ? '自主知识库学习已启用' : '自主知识库学习已禁用', 'success');
+                showNotification(enabled ? '✅ 自主知识库学习已启用' : '⏸ 自主知识库学习已禁用', 'success');
                 if (enabled) {
                     setTimeout(refreshAutoLearnStats, 500);
                 }
             } else {
-                showNotification('切换失败: ' + (result.error || '未知错误'), 'error');
+                showNotification('❌ 切换失败: ' + (result.error || '未知错误'), 'error');
             }
         } else {
-            showNotification(enabled ? '自主知识库学习已启用' : '自主知识库学习已禁用', 'info');
+            showNotification('❌ 自主知识库学习后端未连接，无法切换（请确认SELF-LNN服务器已启动）', 'error');
         }
     } catch (e) {
-        showNotification('自主知识库学习请求失败: ' + e.message, 'error');
+        showNotification('❌ 自主知识库学习请求失败: ' + e.message, 'error');
     }
 }
 
@@ -6393,6 +6406,7 @@ function copyApiAddress() {
  * 切换多模态统一学习开关
  */
 async function toggleMultimodalLearning(enabled) {
+    /* ZSFWS-016修复: 后端不可用时不再显示误导性"离线模式"提示，明确告知用户后端未连接 */
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.multimodalLearn === 'function') {
             var result = await window.SelfLnnApi.multimodalLearn(
@@ -6401,17 +6415,17 @@ async function toggleMultimodalLearning(enabled) {
             );
             if (result.success) {
                 showNotification(enabled ? '✅ 已启用多模态统一学习' : '⏸ 已暂停多模态统一学习', 'success');
+                if (window.g_agiController) {
+                    window.g_agiController.multimodalLearningEnabled = enabled;
+                }
             } else {
-                showNotification('多模态学习切换失败: ' + (result.data?.multimodal?.status || '未知错误'), 'warning');
+                showNotification('❌ 多模态学习切换失败: ' + (result.data?.multimodal?.status || '未知错误'), 'error');
             }
         } else {
-            showNotification(enabled ? 'ℹ️ 已启用多模态统一学习（离线模式）' : 'ℹ️ 已暂停多模态统一学习（离线模式）', 'info');
-        }
-        if (window.g_agiController) {
-            window.g_agiController.multimodalLearningEnabled = enabled;
+            showNotification('❌ 多模态学习后端未连接，无法切换（请确认SELF-LNN服务器已启动）', 'error');
         }
     } catch (e) {
-        showNotification('多模态学习请求失败: ' + e.message, 'error');
+        showNotification('❌ 多模态学习请求失败: ' + e.message, 'error');
     }
 }
 
@@ -6733,11 +6747,12 @@ async function calibrateLNN() {
             var result = await window.SelfLnnApi.calibrateLNN();
             if (result && result.success && result.data) {
                 var data = result.data;
-                if (data.time_constant !== undefined) document.getElementById('lnn-time-constant').value = data.time_constant;
-                if (data.viscosity !== undefined) document.getElementById('lnn-viscosity').value = data.viscosity;
-                if (data.diffusion_rate !== undefined) document.getElementById('lnn-diffusion-rate').value = data.diffusion_rate;
-                if (data.temperature !== undefined) document.getElementById('lnn-temperature').value = data.temperature;
-                if (data.learning_rate !== undefined) document.getElementById('lnn-learning-rate').value = data.learning_rate;
+                var setInputVal = function(id,val){var el=document.getElementById(id);if(el)el.value=val;};
+                if (data.time_constant !== undefined) setInputVal('lnn-time-constant', data.time_constant);
+                if (data.viscosity !== undefined) setInputVal('lnn-viscosity', data.viscosity);
+                if (data.diffusion_rate !== undefined) setInputVal('lnn-diffusion-rate', data.diffusion_rate);
+                if (data.temperature !== undefined) setInputVal('lnn-temperature', data.temperature);
+                if (data.learning_rate !== undefined) setInputVal('lnn-learning-rate', data.learning_rate);
                 showNotification('LNN自动校准完成', 'success');
                 refreshLNNStatus();
             } else {

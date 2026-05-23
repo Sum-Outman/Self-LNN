@@ -51,6 +51,20 @@ typedef struct {
 } OptimizerConfig;
 
 /**
+ * @brief 多参数组结构体（ZSFWS-023修复：支持多组参数独立更新）
+ * 
+ * 优化器通过此结构一次性更新多个参数组（如输入权重、门控权重、
+ * 隐藏权重、时间常数、偏置等），每组可独立提供自己的参数和梯度指针。
+ * 优化器内部维护跨组的连续动量/速度缓冲区，确保所有参数组共享
+ * 相同的优化器状态演化。
+ */
+typedef struct {
+    float* parameters;         /**< 指向该参数组的参数数组（原地更新） */
+    const float* gradients;    /**< 指向该参数组的梯度数组（只读） */
+    size_t num_params;         /**< 该组参数的数量 */
+} OptimizerParamGroup;
+
+/**
  * @brief 优化器句柄（不透明类型）
  */
 typedef struct Optimizer Optimizer;
@@ -82,6 +96,25 @@ void optimizer_free(Optimizer* optimizer);
  */
 int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradients,
                    size_t num_params, size_t step);
+
+/**
+ * @brief 多参数组更新（ZSFWS-023修复：一次更新多组独立参数）
+ * 
+ * 该函数在一次调用中更新多个参数组，每组独立指定参数指针、梯度指针和大小。
+ * 适用于CfC/LNN等具有多组参数（输入权重、门控权重、隐藏权重、时间常数、偏置等）
+ * 的复杂网络结构，避免手动memcpy展平/回写。
+ * 
+ * 优化器内部将所有参数组映射到连续的动量/速度缓冲区上，
+ * 确保Adam/RMSprop等自适应优化器的状态正确更新。
+ * 
+ * @param optimizer 优化器句柄
+ * @param groups 参数组数组，每组独立指定params/grads/num_params
+ * @param num_groups 参数组数量
+ * @param step 当前步数（用于学习率调度和偏差修正）
+ * @return int 成功返回0，失败返回-1
+ */
+int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* groups,
+                                  int num_groups, size_t step);
 
 /**
  * @brief 重置优化器状态（用于新训练周期）

@@ -11,6 +11,22 @@ extern "C" {
  */
 
 /**
+ * @brief 模态类型枚举（ZSFWS-024：多模态输出适配）
+ * 
+ * 不同模态的输出具有不同的数值范围和分布特性，
+ * 需要不同的损失函数类型来度量预测误差。
+ */
+typedef enum {
+    MODALITY_VISUAL = 0,       /**< 视觉特征：连续浮点[-1,1]或[0,1]，适用MSE/Huber/Cosine */
+    MODALITY_TEXT_LOGITS = 1,  /**< 文本logits：未归一化logit，适用CrossEntropy */
+    MODALITY_TEXT_EMBED = 2,   /**< 文本嵌入：连续浮点向量，适用MSE/Cosine */
+    MODALITY_SENSOR = 3,       /**< 传感器数据：范围各异，适用Huber/MAE/Quantile */
+    MODALITY_CONTROL = 4,      /**< 控制信号：连续值，适用MSE/Huber */
+    MODALITY_AUDIO = 5,        /**< 音频特征：频域/时域连续值，适用MSE/MAE */
+    MODALITY_CUSTOM = 6        /**< 自定义模态：由外部指定LossType */
+} ModalityType;
+
+/**
  * @brief 损失函数类型枚举
  */
 typedef enum {
@@ -27,6 +43,21 @@ typedef enum {
     LOSS_TRIPLET = 10,      /**< Triplet损失：度量学习 */
     LOSS_QUANTILE = 11      /**< 分位数损失：分位数回归 */
 } LossType;
+
+/**
+ * @brief 多模态损失段描述符（ZSFWS-024）
+ * 
+ * 将统一输出张量划分为多个模态段，每段使用独立的损失函数。
+ * 最终损失为各段损失的加权和。
+ */
+typedef struct {
+    ModalityType modality;     /**< 模态类型（若为MODALITY_CUSTOM则使用custom_loss_type） */
+    int start_index;           /**< 在预测/目标数组中的起始索引 */
+    int length;                /**< 该模态段的元素数量 */
+    float weight;              /**< 该模态在总损失中的权重（默认1.0） */
+    LossType custom_loss_type; /**< 自定义损失类型（仅当modality==MODALITY_CUSTOM时生效） */
+    LossConfig loss_config;    /**< 该段的损失配置（focal_gamma等，可为全零使用默认值） */
+} MultimodalLossSegment;
 
 /**
  * @brief 损失函数配置结构体
@@ -86,6 +117,64 @@ float loss_compute(const float* predictions, const float* targets, int n, LossTy
  * @param loss_type 损失函数类型
  */
 void loss_gradient(const float* predictions, const float* targets, int n, float* gradients, LossType loss_type);
+
+/* ============ ZSFWS-024: 多模态损失函数 API ============ */
+
+/**
+ * @brief 计算多模态损失函数值（ZSFWS-024）
+ * 
+ * 将统一输出数组按模态段划分，每段使用最适合该模态的损失函数，
+ * 最终返回加权总损失。有效解决了视觉[-1,1]、文本discrete、传感器varied ranges
+ * 等多尺度差异问题。
+ * 
+ * 模态→损失映射规则：
+ *   MODALITY_VISUAL        → LOSS_HUBER (鲁棒于异常像素)
+ *   MODALITY_TEXT_LOGITS   → LOSS_CATEGORICAL_CROSSENTROPY
+ *   MODALITY_TEXT_EMBED    → LOSS_COSINE (方向敏感)
+ *   MODALITY_SENSOR        → LOSS_HUBER (鲁棒于传感器噪声)
+ *   MODALITY_CONTROL       → LOSS_MSE (精确控制)
+ *   MODALITY_AUDIO         → LOSS_MAE (鲁棒于频域尖峰)
+ *   MODALITY_CUSTOM        → 使用segment.custom_loss_type
+ * 
+ * @param predictions 统一预测数组（所有模态拼接）
+ * @param targets 统一目标数组（所有模态拼接）
+ * @param total_length 数组总长度（用于边界校验）
+ * @param segments 模态段描述符数组
+ * @param num_segments 模态段数量
+ * @return float 加权总损失值
+ */
+float loss_compute_multimodal(const float* predictions, const float* targets,
+                               int total_length,
+                               const MultimodalLossSegment* segments,
+                               int num_segments);
+
+/**
+ * @brief 计算多模态损失函数梯度（ZSFWS-024）
+ * 
+ * 对每个模态段独立计算梯度，然后拼接回统一的梯度数组。
+ * 各段梯度在写入前被清零，确保跨模态段无梯度泄漏。
+ * 
+ * @param predictions 统一预测数组
+ * @param targets 统一目标数组
+ * @param total_length 数组总长度
+ * @param gradients 统一梯度输出数组（调用者分配，函数填充）
+ * @param segments 模态段描述符数组
+ * @param num_segments 模态段数量
+ */
+void loss_gradient_multimodal(const float* predictions, const float* targets,
+                               int total_length, float* gradients,
+                               const MultimodalLossSegment* segments,
+                               int num_segments);
+
+/**
+ * @brief 解析模态类型对应的默认损失函数（ZSFWS-024）
+ * 
+ * 将ModalityType映射到最合适的LossType。
+ * 
+ * @param modality 模态类型
+ * @return LossType 推荐的损失函数类型
+ */
+LossType loss_get_default_for_modality(ModalityType modality);
 
 #ifdef __cplusplus
 }

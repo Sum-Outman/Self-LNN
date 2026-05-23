@@ -7,7 +7,7 @@
 
 #include "selflnn/robot/robot.h"
 #include "selflnn/robot/hardware_interface.h"
-#include "selflnn/robot/pybullet_interface.h"
+#include "selflnn/robot/pybullet_bridge.h"
 #include "selflnn/robot/hardware_detector.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -3382,32 +3382,40 @@ int robot_health_monitor_get_maintenance_summary(RobotHealthMonitor* monitor,
 
 /* ============================
  * PyBullet仿真引擎集成实现（M16）
+ * ZSFWS-修复: PBConfig→PyBulletConfig, pb_init/pb_connect→pybullet_connect
+ * pybullet_bridge.h 已将初始化+连接合为单一调用。
  * ============================ */
 
-int robot_connect_pybullet(Robot* robot, const PBConfig* config) {
+int robot_connect_pybullet(Robot* robot, const PyBulletConfig* config) {
     if (!robot) return -1;
     if (robot->pb_connected) return robot->pb_body_id;
 
-    PBConfig cfg = PB_CONFIG_DEFAULT;
+    PyBulletConfig cfg = {0};
     if (config) {
-        memcpy(&cfg, config, sizeof(PBConfig));
+        cfg = *config;
+    } else {
+        /* 默认配置 */
+        cfg.use_gui = 0;
+        cfg.time_step = 1.0f / 240.0f;
+        cfg.max_steps_per_call = 1;
+        cfg.urdf_path = NULL;
+        cfg.gravity[0] = 0.0f; cfg.gravity[1] = 0.0f; cfg.gravity[2] = -9.81f;
+        cfg.num_solver_iterations = 150;
+        cfg.enable_self_collision = 1;
     }
 
-    if (pb_init(&cfg) != 0) return -1;
-    if (pb_connect() != 0) {
-        pb_shutdown();
-        return -1;
-    }
+    int conn_id = pybullet_connect(&cfg);
+    if (conn_id < 0) return -1;
 
     robot->pb_connected = 1;
-    robot->pb_body_id = -1; // 未加载URDF时为-1
+    robot->pb_body_id = -1;
 
-    // 如果机器人有环境文件，尝试加载
-    PBRobotInfo info;
-    memset(&info, 0, sizeof(info));
-    if (pb_load_urdf("", 0.0f, 0.0f, 0.0f, 0, &info) == 0) {
-        // URDF路径为空时加载默认机器人
-        robot->pb_body_id = info.body_unique_id;
+    /* 加载默认URDF */
+    if (cfg.urdf_path && cfg.urdf_path[0] != '\0') {
+        float base_pos[3] = {0.0f, 0.0f, 0.0f};
+        float base_orn[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        robot->pb_body_id = pybullet_load_urdf(conn_id, cfg.urdf_path,
+            base_pos, base_orn, 0);
     }
 
     return robot->pb_body_id;
@@ -3417,11 +3425,8 @@ int robot_disconnect_pybullet(Robot* robot) {
     if (!robot) return -1;
     if (!robot->pb_connected) return 0;
 
-    if (robot->pb_body_id >= 0) {
-        pb_remove_body(robot->pb_body_id);
-    }
-    pb_disconnect();
-    pb_shutdown();
+    /* pybullet_disconnect 关闭连接并释放资源 */
+    pybullet_disconnect(0);
 
     robot->pb_connected = 0;
     robot->pb_body_id = -1;
@@ -3433,36 +3438,43 @@ int robot_is_pybullet_connected(const Robot* robot) {
     return robot->pb_connected ? 1 : 0;
 }
 
-int robot_controller_connect_pybullet(RobotController* controller, const PBConfig* config) {
+int robot_controller_connect_pybullet(RobotController* controller, const PyBulletConfig* config) {
     if (!controller) return -1;
     if (controller->pb_connected) return 0;
 
-    PBConfig cfg = PB_CONFIG_DEFAULT;
+    PyBulletConfig cfg = {0};
     if (config) {
-        memcpy(&cfg, config, sizeof(PBConfig));
+        cfg = *config;
+    } else {
+        cfg.use_gui = 0;
+        cfg.time_step = 1.0f / 240.0f;
+        cfg.max_steps_per_call = 1;
+        cfg.urdf_path = NULL;
+        cfg.gravity[0] = 0.0f; cfg.gravity[1] = 0.0f; cfg.gravity[2] = -9.81f;
+        cfg.num_solver_iterations = 150;
+        cfg.enable_self_collision = 1;
     }
 
-    if (pb_init(&cfg) != 0) return -1;
-    if (pb_connect() != 0) {
-        pb_shutdown();
-        return -1;
-    }
+    int conn_id = pybullet_connect(&cfg);
+    if (conn_id < 0) return -1;
 
     controller->pb_connected = 1;
     controller->pb_num_bodies = 0;
 
-    // 为已注册的机器人加载URDF
+    /* 为已注册的机器人加载URDF */
     for (size_t i = 0; i < controller->robot_count; i++) {
         Robot* r = controller->robots[i];
         if (!r) continue;
 
-        PBRobotInfo info;
-        memset(&info, 0, sizeof(info));
-        if (pb_load_urdf("", 0.0f, 0.0f, 0.0f, 0, &info) == 0) {
+        float base_pos[3] = {0.0f, (float)i, 0.0f};
+        float base_orn[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        int body_id = pybullet_load_urdf(conn_id,
+            cfg.urdf_path ? cfg.urdf_path : "",
+            base_pos, base_orn, 0);
+        if (body_id >= 0) {
             r->pb_connected = 1;
-            r->pb_body_id = info.body_unique_id;
+            r->pb_body_id = body_id;
 
-            // 记录body ID
             if (controller->pb_num_bodies >= (int)controller->pb_body_capacity) {
                 size_t new_cap = controller->pb_body_capacity * 2;
                 int* new_ids = (int*)safe_realloc(controller->pb_body_ids,
@@ -3472,7 +3484,7 @@ int robot_controller_connect_pybullet(RobotController* controller, const PBConfi
                     controller->pb_body_capacity = new_cap;
                 }
             }
-            controller->pb_body_ids[controller->pb_num_bodies++] = info.body_unique_id;
+            controller->pb_body_ids[controller->pb_num_bodies++] = body_id;
         }
     }
 
@@ -3483,12 +3495,7 @@ int robot_controller_disconnect_pybullet(RobotController* controller) {
     if (!controller) return -1;
     if (!controller->pb_connected) return 0;
 
-    // 清理所有机器人body
-    for (int i = 0; i < controller->pb_num_bodies; i++) {
-        pb_remove_body(controller->pb_body_ids[i]);
-    }
-
-    // 清理每个机器人的pybullet状态
+    /* 清理每个机器人的pybullet状态 */
     for (size_t i = 0; i < controller->robot_count; i++) {
         if (controller->robots[i]) {
             controller->robots[i]->pb_connected = 0;
@@ -3496,8 +3503,7 @@ int robot_controller_disconnect_pybullet(RobotController* controller) {
         }
     }
 
-    pb_disconnect();
-    pb_shutdown();
+    pybullet_disconnect(0);
 
     controller->pb_connected = 0;
     controller->pb_num_bodies = 0;

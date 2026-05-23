@@ -898,6 +898,20 @@ int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate) {
                 if (isfinite(g)) cell->input_gate_weights[k] -= learning_rate * g;
             }
         }
+        /* W_fx: 遗忘门权重 (ZSFWS-023修复: 补充遗漏) */
+        if (cell->forget_gate_weight_grad && cell->forget_gate_weights) {
+            for (k = 0; k < cell_w_count; k++) {
+                float g = cell->forget_gate_weight_grad[k];
+                if (isfinite(g)) cell->forget_gate_weights[k] -= learning_rate * g;
+            }
+        }
+        /* W_ox: 输出门权重 (ZSFWS-023修复: 补充遗漏) */
+        if (cell->output_gate_weight_grad && cell->output_gate_weights) {
+            for (k = 0; k < cell_w_count; k++) {
+                float g = cell->output_gate_weight_grad[k];
+                if (isfinite(g)) cell->output_gate_weights[k] -= learning_rate * g;
+            }
+        }
         /* W_gh / W_ah: 隐藏到隐藏权重 */
         for (k = 0; k < hh_count; k++) {
             if (cell->hidden_to_gate_weight_grad && cell->hidden_to_gate_weights) {
@@ -1503,22 +1517,22 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
         for (size_t i = 0; i < layer_size; i++) {
             /* 门控: σ(W_gi·x + U_gi·h + b_gi)，使用input_gate_weights */
             float gate_sum = cell->gate_biases[i * 3];  /* 输入门偏置 */
-            for (size_t j = 0; j < input_size && j < 256; j++) {
+            for (size_t j = 0; j < input_size; j++) {
                 gate_sum += cell->input_gate_weights[i * input_size + j] * input[j];
             }
             /* 隐藏到门控: U_gi·h */
-            for (size_t k = 0; k < layer_size && k < 128; k++) {
+            for (size_t k = 0; k < layer_size; k++) {
                 gate_sum += cell->hidden_to_gate_weights[i * layer_size + k] * layer_y[k];
             }
             float gate = 1.0f / (1.0f + expf(-gate_sum));
 
             /* 激活: tanh(W_a·x + U_a·h + b_a) */
             float act_sum = cell->bias_vector[i];
-            for (size_t j = 0; j < input_size && j < 256; j++) {
+            for (size_t j = 0; j < input_size; j++) {
                 act_sum += cell->weight_matrix[i * input_size + j] * input[j];
             }
             /* 隐藏到激活: U_a·h */
-            for (size_t k = 0; k < layer_size && k < 128; k++) {
+            for (size_t k = 0; k < layer_size; k++) {
                 act_sum += cell->hidden_to_activation_weights[i * layer_size + k] * layer_y[k];
             }
             float act = tanhf(act_sum);

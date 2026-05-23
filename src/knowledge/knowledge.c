@@ -5483,12 +5483,16 @@ void temporal_conflicts_free(TemporalConflict* conflicts, size_t count) {
 }
 
 /* ============================================================================
- * 知识库预填充：预置基础常识知识
+ * 知识库预填充：预置基础常识知识（种子知识）
  * 
- * N-015: 预置知识仅在编译宏SELFLNN_ALLOW_BOOTSTRAP_DATA定义时加载
+ * N-015: 预置种子知识默认加载，通过编译宏SELFLNN_SKIP_SEED_KNOWLEDGE禁用
  * SOURCE_PRESET标记+低权重(0.5)确保可被用户学习/自动学习覆盖
  * 严格真实数据模式下(knowledge_base_create)不调用此函数
  * 所有知识以三元组（主体-谓词-客体）形式存储
+ * 
+ * 注意：种子知识与引导合成数据(ALLOW_BOOTSTRAP_DATA)是独立的概念——
+ *   种子知识(SKIP_SEED_KNOWLEDGE)：基础知识库预置，如数学/物理/地理常识
+ *   引导数据(ALLOW_BOOTSTRAP_DATA)：用于调试的合成训练数据集生成
  * ============================================================================ */
 
 /* ============================================================================
@@ -5536,7 +5540,7 @@ typedef struct {
     float weight;
 } PresetKnowledgeEntry;
 
-#ifdef SELFLNN_ALLOW_BOOTSTRAP_DATA
+#ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
 static const PresetKnowledgeEntry g_preset_knowledge[] = {
     /* === 数学基础 === */
     {"1", "是", "自然数", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
@@ -6040,7 +6044,7 @@ static const PresetKnowledgeEntry g_preset_knowledge[] = {
     {"SELF-LNN", "训练方式", "预训练、训练、深度训练、多模态全功能训练、微调、局部功能训练、外部API训练", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
     {"SELF-LNN", "自学习安全机制", "合成数据生成在Release模式禁用，自主学习需hardware_available标志", KNOWLEDGE_RULE, CONFIDENCE_HIGH, 1.0f},
 };
-#endif /* SELFLNN_ALLOW_BOOTSTRAP_DATA */
+#endif /* SELFLNN_SKIP_SEED_KNOWLEDGE */
 
 /**
  * @brief K-006: 从外部知识库文件加载知识条目
@@ -6135,7 +6139,7 @@ int knowledge_base_load_from_file(KnowledgeBase* kb, const char* filepath) {
     return loaded;
 }
 
-#ifdef SELFLNN_ALLOW_BOOTSTRAP_DATA
+#ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
 #define PRESET_COUNT (sizeof(g_preset_knowledge) / sizeof(g_preset_knowledge[0]))
 
 int knowledge_base_populate_preset(KnowledgeBase* kb) {
@@ -6175,7 +6179,7 @@ int knowledge_base_populate_preset(KnowledgeBase* kb) {
     log_info("知识库预设常识加载完成：成功添加 %zu / %zu 条（标记为SOURCE_PRESET可替换）", added, PRESET_COUNT);
     return (int)added;
 }
-#endif /* SELFLNN_ALLOW_BOOTSTRAP_DATA */
+#endif /* SELFLNN_SKIP_SEED_KNOWLEDGE */
 
 /* ============================================================================
  * 知识库初始化函数（增强版）
@@ -6188,13 +6192,13 @@ KnowledgeBase* knowledge_base_create_with_preset(size_t max_entries) {
     KnowledgeBase* kb = knowledge_base_create(max_entries);
     if (!kb) return NULL;
     
-#ifdef SELFLNN_ALLOW_BOOTSTRAP_DATA
-    /* 调试/演示模式：允许加载预置引导知识用于框架验证 */
+#ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
+    /* 默认模式：加载种子知识作为知识库的基础常识 */
     int preset_count = knowledge_base_populate_preset(kb);
-    log_info("[知识库] 演示模式 - 已加载 %d 条预置引导知识（SOURCE_PRESET可替换）", preset_count);
+    log_info("[知识库] 已加载 %d 条种子知识（SOURCE_PRESET可替换，定义SELFLNN_SKIP_SEED_KNOWLEDGE可跳过）", preset_count);
 #else
-    /* 严格真实数据模式（默认）：不加载预置知识，所有知识从真实数据源学习获得 */
-    log_info("[知识库] 严格真实数据模式 - 知识库从零开始，所有知识从真实数据源学习");
+    /* 跳过种子知识：知识库从零开始，所有知识从真实数据源学习获得 */
+    log_info("[知识库] 跳过种子知识 - 知识库从零开始，所有知识从真实数据源学习");
 #endif
     
     return kb;

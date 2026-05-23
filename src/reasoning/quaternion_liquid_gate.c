@@ -1,6 +1,31 @@
 /**
  * @file quaternion_liquid_gate.c
- * @brief 四元数液态门控实现
+ * @brief 四元数液态门控 —— 推理层（Reasoning Layer）
+ *
+ * ========== ZSFWS-032 模块职责边界 ==========
+ * 本模块职责：LNN推理层级的四元数液态门控（批量序列粒度）
+ *   - 四元数门控(σ) + 激活(tanh)双路前向传播 (quaternion_liquid_gate_forward)
+ *   - 批量序列四元数门控 (quaternion_liquid_gate_forward_batch)
+ *   - 标量↔四元数投影变换 (project_to_quaternion_lg / project_from_quaternion_lg)
+ *   - Adam优化器训练 + 解析梯度 (quaternion_liquid_gate_train_step / analytic)
+ *   - 四元数相位位置编码 (quaternion_phase_encoding_*)
+ *   - 四元数液态状态聚合（含注意力） (quaternion_liquid_aggregation_*)
+ *   - 批量CfC稀疏激活、线性时间演化、分块演化 *
+ *
+ * * 注：末尾三个函数(quaternion_cfc_sparse_activate / linear_time_evolve /
+ *   block_evolve)在命名上接近 core/quaternion_cfc.c 层操作。
+ *   它们实际是推理层对CfC细胞的批量包装——处理 seq_len × quaternion_dim
+ *   维度的整体稀疏化/演化，而非core/quaternion_cfc.c的单细胞粒度。
+ *
+ * 与 core/quaternion_cfc.c 的关系：
+ *   本模块是 core/quaternion_cfc.c 的上层消费者——
+ *   core/quaternion_cfc.c 提供四元数基本运算（Hamilton乘积、闭式解更新、
+ *   ODE求解器），本模块在其基础上构建推理层所需的批量序列门控、
+ *   投影变换、聚合等高级功能。
+ *
+ * 本模块不涉及：单细胞状态管理、ODE右端项、旋转不变性度量。
+ * 完全基于CfC闭式解门控方程，无QKV投影、无softmax、无注意力权重。
+ * =============================================
  *
  * 完整实现基于四元数代数的CfC液态门控机制，包含：
  * - 四元数门控(σ) + 激活(tanh)双路径

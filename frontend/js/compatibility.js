@@ -184,8 +184,9 @@ class BrowserCompat {
     getSpeechSynthesisVoice(lang) {
         if (!this.features.speechSynthesis) return null;
         var voices = window.speechSynthesis.getVoices();
+        /* BUG-17修复：重复调用getVoices()时必须赋值给voices变量，否则后续for循环遍历的仍是空数组 */
         if (voices.length === 0) {
-            window.speechSynthesis.getVoices();
+            voices = window.speechSynthesis.getVoices();
         }
         lang = lang || 'zh-CN';
         for (var i = 0; i < voices.length; i++) {

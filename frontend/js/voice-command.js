@@ -542,13 +542,15 @@ class CommandEngine {
                 case 'speaker':
                     switch (action) {
                         case 'on':
-                            var spks = dm.getAvailableSpeakers();
-                            if (spks.length === 0) {
-                                if (window.SelfLnnApi) {
-                                    return window.SelfLnnApi.testSpeaker(500, 440);
-                                }
-                                return { success: false, error: '未找到可用扬声器' };
+                        var spks = dm.getAvailableSpeakers();
+                        if (spks.length === 0) {
+                            /* BUG-8修复：先await异步调用testSpeaker，再返回确定格式的对象，避免直接return可能得到的非对象值 */
+                            if (window.SelfLnnApi) {
+                                await window.SelfLnnApi.testSpeaker(500, 440);
+                                return { success: true, message: '已发送测试音' };
                             }
+                            return { success: false, error: '未找到可用扬声器' };
+                        }
                             var addResult = await dm.addSpeaker(spks[0].deviceId);
                             if (addResult.success) {
                                 result = await dm.startSpeaker(addResult.data.id);

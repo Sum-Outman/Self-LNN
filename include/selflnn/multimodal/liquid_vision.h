@@ -1,370 +1,385 @@
 /**
  * @file liquid_vision.h
- * @brief 液态视觉处理组件
+ * @brief 统一液态视觉处理系统
  *
- * 基于CfC（Closed-form Continuous-time）液态神经网络的视觉处理组件。
- * 所有组件使用唯一的微分方程驱动：τ dh/dt = -h + σ(gate) ⊙ tanh(activation)
+ * 基于CfC（Closed-form Continuous-time）液态神经网络的统一视觉处理组件。
+ * 所有视觉处理在单一液态神经网络框架内完成：
+ * τ dh/dt = -h + σ(W_gx·x + W_gh·h + b_g) ⊙ tanh(W_ax·x + W_ah·h + b_a)
+ *
  * 不引入任何Transformer、注意力机制或独立处理器。
- * 所有视觉处理在单一液态神经网络框架内完成。
+ * 纯C实现，不依赖任何第三方库。
+ *
+ * 模块结构：
+ *   【主路径】LiquidVisionManager（PatchEncoder → SpatialProcessor → CfCEvolver）
+ *   【辅助路径】传统CV预处理（Sobel/LBP/HOG/HSV直方图等）
+ *   【检测路径】YOLO风格目标检测头 + NMS
+ *   【类别系统】动态可扩展视觉类别注册表（80类COCO默认 + 动态扩展）
+ *   【兼容层】CfcVisionProcessor/CfcOdeLayer（保持现有模块兼容）
+ *
+ * 本文件整合了原 vision.h 和 deep_vision.h 的所有接口。
  */
 
 #ifndef SELFLNN_LIQUID_VISION_H
 #define SELFLNN_LIQUID_VISION_H
 
 #include <stddef.h>
+#include "selflnn/core/lnn.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ============ 液态补丁编码器 ============ */
+/* ===================================================================
+ * 第一部分：液态补丁编码器（原liquid_vision.h）
+ * =================================================================== */
 
-/**
- * @brief 液态补丁编码器配置
- *
- * 将图像划分为补丁，每个补丁通过CfC ODE连续时间动态编码
- * 为统一状态空间中的表示。补丁之间的顺序关系由连续时间
- * 自然建模，无需位置编码。
- */
 typedef struct {
-    int patch_size;              /**< 补丁大小（像素），默认16 */
-    int stride;                  /**< 补丁滑动步长，默认16（无重叠） */
-    int max_patches;             /**< 最大补丁数，默认256 */
-    int input_channels;          /**< 输入图像通道数，默认3 */
-    int patch_hidden_dim;        /**< 每个补丁的隐藏编码维度，默认64 */
-    float time_constant;         /**< CfC时间常数，默认0.1 */
-    float delta_t;               /**< ODE时间步长，默认0.05 */
-    int use_adaptive_tau;        /**< 是否启用自适应时间常数，默认1 */
-    float min_tau;               /**< 最小时间常数，默认0.01 */
-    float max_tau;               /**< 最大时间常数，默认1.0 */
-    int enable_noise;            /**< 是否启用噪声注入，默认0 */
-    float noise_std;             /**< 噪声标准差，默认0.01 */
+    int patch_size;
+    int stride;
+    int max_patches;
+    int input_channels;
+    int patch_hidden_dim;
+    float time_constant;
+    float delta_t;
+    int use_adaptive_tau;
+    float min_tau;
+    float max_tau;
+    int enable_noise;
+    float noise_std;
 } LiquidPatchEncoderConfig;
 
-/** @brief 液态补丁编码器句柄 */
 typedef struct LiquidPatchEncoder LiquidPatchEncoder;
 
-/**
- * @brief 获取默认液态补丁编码器配置
- */
 LiquidPatchEncoderConfig liquid_patch_encoder_get_default_config(void);
-
-/**
- * @brief 创建液态补丁编码器
- */
 LiquidPatchEncoder* liquid_patch_encoder_create(const LiquidPatchEncoderConfig* config);
-
-/**
- * @brief 释放液态补丁编码器
- */
 void liquid_patch_encoder_free(LiquidPatchEncoder* encoder);
 
-/**
- * @brief 液态补丁编码器前向传播
- *
- * 将图像划分为补丁，每个补丁通过CfC ODE动态编码。
- * 输出直接与液态神经网络统一状态空间兼容。
- *
- * @param encoder 编码器句柄
- * @param width 图像宽度
- * @param height 图像高度
- * @param channels 通道数
- * @param image_data 图像数据 [channels x height x width]
- * @param patch_embeddings 输出补丁嵌入 [num_patches x patch_hidden_dim]
- * @param max_patches 输出缓冲区最大补丁数
- * @return int 成功返回实际补丁数，失败返回-1
- */
 int liquid_patch_encoder_forward(LiquidPatchEncoder* encoder,
                                  int width, int height, int channels,
                                  const float* image_data,
                                  float* patch_embeddings, int max_patches);
-
-/**
- * @brief 液态补丁编码器反向传播（训练）
- *
- * 使用分析梯度的CfC反向传播。
- * 计算损失对编码器参数的梯度并应用更新。
- *
- * @param encoder 编码器句柄
- * @param dL_dembeddings 损失对补丁嵌入的梯度 [num_patches x patch_hidden_dim]
- * @param num_patches 补丁数
- * @param dL_dimage 输出损失对图像的梯度 [image_size]
- * @param image_size 图像尺寸（总元素数）
- * @param learning_rate 学习率
- * @return int 成功返回0，失败返回-1
- */
 int liquid_patch_encoder_backward(LiquidPatchEncoder* encoder,
                                    const float* dL_dembeddings, int num_patches,
                                    float* dL_dimage, int image_size,
                                    float learning_rate);
-
-/**
- * @brief 重置补丁编码器状态
- */
 void liquid_patch_encoder_reset(LiquidPatchEncoder* encoder);
-
-/**
- * @brief 获取补丁数
- */
 int liquid_patch_encoder_get_num_patches(const LiquidPatchEncoder* encoder,
                                           int width, int height);
-
-/**
- * @brief 获取补丁编码维度
- */
 int liquid_patch_encoder_get_hidden_dim(const LiquidPatchEncoder* encoder);
 
-/* ============ 液态视觉CfC演化器 ============ */
+/* ===================================================================
+ * 第二部分：液态视觉CfC演化器（原liquid_vision.h）
+ * =================================================================== */
 
-/**
- * @brief 液态视觉CfC演化器配置
- *
- * 在液态神经网络框架内，为视觉处理提供专用通道。
- * 每个通道使用独立的CfC ODE演化，具有视觉特异性的
- * 时间常数和门控机制。
- */
 typedef struct {
-    int visual_state_dim;        /**< 视觉状态维度，默认128 */
-    int num_visual_channels;     /**< 视觉处理通道数，默认4 */
-    float base_time_constant;    /**< 基础时间常数，默认0.1 */
-    float delta_t;               /**< ODE时间步长，默认0.05 */
-    int use_adaptive_tau;        /**< 是否启用自适应时间常数，默认1 */
-    float min_tau;               /**< 最小时间常数，默认0.01 */
-    float max_tau;               /**< 最大时间常数，默认2.0 */
-    int enable_cross_channel;    /**< 是否启用通道间交互（通过隐藏到隐藏连接），默认1 */
-    int enable_noise;            /**< 是否启用噪声，默认0 */
-    float noise_std;             /**< 噪声标准差，默认0.01 */
+    int visual_state_dim;
+    int num_visual_channels;
+    float base_time_constant;
+    float delta_t;
+    int use_adaptive_tau;
+    float min_tau;
+    float max_tau;
+    int enable_cross_channel;
+    int enable_noise;
+    float noise_std;
 } LiquidVisualCfCEvolverConfig;
 
-/** @brief 液态视觉CfC演化器句柄 */
 typedef struct LiquidVisualCfCEvolver LiquidVisualCfCEvolver;
 
-/**
- * @brief 获取默认配置
- */
 LiquidVisualCfCEvolverConfig liquid_visual_cfc_evolver_get_default_config(void);
-
-/**
- * @brief 创建演化器
- */
 LiquidVisualCfCEvolver* liquid_visual_cfc_evolver_create(const LiquidVisualCfCEvolverConfig* config);
-
-/**
- * @brief 释放演化器
- */
 void liquid_visual_cfc_evolver_free(LiquidVisualCfCEvolver* evolver);
 
-/**
- * @brief 演化器前向传播
- *
- * 将视觉特征通过CfC连续时间动态演化：
- * τ dh/dt = -h + σ(W_gx·x + W_gh·h + b_g) ⊙ tanh(W_ax·x + W_ah·h + b_a)
- *
- * @param evolver 演化器句柄
- * @param visual_input 视觉输入特征
- * @param input_dim 输入维度
- * @param visual_state 输出演化后的视觉状态
- * @return int 成功返回0，失败返回-1
- */
 int liquid_visual_cfc_evolver_forward(LiquidVisualCfCEvolver* evolver,
                                        const float* visual_input, int input_dim,
                                        float* visual_state);
-
-/**
- * @brief 多步演化（处理时间序列视觉输入）
- *
- * @param evolver 演化器句柄
- * @param visual_inputs 时间步输入数组 [num_steps x input_dim]
- * @param input_dim 输入维度
- * @param num_steps 时间步数
- * @param final_state 输出最终视觉状态
- * @return int 成功返回0，失败返回-1
- */
 int liquid_visual_cfc_evolver_step(LiquidVisualCfCEvolver* evolver,
                                     const float* visual_inputs, int input_dim,
                                     int num_steps, float* final_state);
-
-/**
- * @brief 重置演化器状态
- */
 void liquid_visual_cfc_evolver_reset(LiquidVisualCfCEvolver* evolver);
-
-/**
- * @brief 获取视觉状态维度
- */
 int liquid_visual_cfc_evolver_get_state_dim(const LiquidVisualCfCEvolver* evolver);
 
-/* ============ 液态空间特征处理器 ============ */
+/* ===================================================================
+ * 第三部分：液态空间特征处理器（原liquid_vision.h）
+ * =================================================================== */
 
-/**
- * @brief 液态空间特征处理器配置
- *
- * 通过CfC隐藏到隐藏连接（W_gh）建模视觉特征之间的空间关系。
- * 每个特征作为一个液态单元，单元间的交互由液态神经微分方程驱动。
- * 不使用任何注意力机制。
- */
 typedef struct {
-    int num_features;            /**< 特征数量（补丁数），默认64 */
-    int feature_dim;             /**< 每个特征的维度，默认64 */
-    int spatial_hidden_dim;      /**< 空间处理隐藏维度，默认128 */
-    float time_constant;         /**< 时间常数，默认0.1 */
-    float delta_t;               /**< ODE时间步长，默认0.05 */
-    int use_adaptive_tau;        /**< 是否启用自适应时间常数，默认1 */
-    int num_evolution_steps;     /**< 空间演化步数，默认3 */
-    float min_tau;               /**< 最小时间常数，默认0.01 */
-    float max_tau;               /**< 最大时间常数，默认1.0 */
+    int num_features;
+    int feature_dim;
+    int spatial_hidden_dim;
+    float time_constant;
+    float delta_t;
+    int use_adaptive_tau;
+    int num_evolution_steps;
+    float min_tau;
+    float max_tau;
 } LiquidSpatialProcessorConfig;
 
-/** @brief 液态空间特征处理器句柄 */
 typedef struct LiquidSpatialProcessor LiquidSpatialProcessor;
 
-/**
- * @brief 获取默认配置
- */
 LiquidSpatialProcessorConfig liquid_spatial_processor_get_default_config(void);
-
-/**
- * @brief 创建空间处理器
- */
 LiquidSpatialProcessor* liquid_spatial_processor_create(const LiquidSpatialProcessorConfig* config);
-
-/**
- * @brief 释放空间处理器
- */
 void liquid_spatial_processor_free(LiquidSpatialProcessor* processor);
 
-/**
- * @brief 空间处理器前向传播
- *
- * 通过CfC隐藏到隐藏动态演化特征间的空间关系：
- * 每个特征 i：τ dh_i/dt = -h_i + σ(Σ_j W_g_ij · h_j + b_gi) ⊙ tanh(Σ_j W_a_ij · h_j + b_ai)
- * 其中 j 遍历所有特征，W_g_ij 和 W_a_ij 为隐藏到隐藏权重
- *
- * @param processor 处理器句柄
- * @param features 输入特征 [num_features x feature_dim]
- * @param num_features 特征数
- * @param feature_dim 特征维度
- * @param output 输出空间感知特征 [num_features x spatial_hidden_dim]
- * @return int 成功返回0，失败返回-1
- */
 int liquid_spatial_processor_forward(LiquidSpatialProcessor* processor,
                                       const float* features, int num_features, int feature_dim,
                                       float* output);
-
-/**
- * @brief 重置空间处理器状态
- */
 void liquid_spatial_processor_reset(LiquidSpatialProcessor* processor);
-
-/**
- * @brief 获取输出维度
- */
 int liquid_spatial_processor_get_output_dim(const LiquidSpatialProcessor* processor);
 
-/* ============ 液态视觉管理器 ============ */
+/* ===================================================================
+ * 第四部分：液态视觉管理器（原liquid_vision.h）
+ * =================================================================== */
 
-/**
- * @brief 液态视觉处理类型
- */
 typedef enum {
-    LIQUID_VISION_PATCH_ENCODER = 0,    /**< 仅使用液态补丁编码器 */
-    LIQUID_VISION_CFC_EVOLVER = 1,      /**< 仅使用液态视觉CfC演化器 */
-    LIQUID_VISION_SPATIAL = 2,          /**< 仅使用液态空间处理器 */
-    LIQUID_VISION_FULL = 3              /**< 全流水线：补丁编码 → 空间处理 → CfC演化 */
+    LIQUID_VISION_PATCH_ENCODER = 0,
+    LIQUID_VISION_CFC_EVOLVER = 1,
+    LIQUID_VISION_SPATIAL = 2,
+    LIQUID_VISION_FULL = 3
 } LiquidVisionPipelineType;
 
-/**
- * @brief 液态视觉管理器配置
- */
 typedef struct {
-    LiquidVisionPipelineType pipeline_type;    /**< 流水线类型 */
-    LiquidPatchEncoderConfig patch_config;     /**< 补丁编码器配置 */
-    LiquidVisualCfCEvolverConfig evolver_config; /**< CfC演化器配置 */
-    LiquidSpatialProcessorConfig spatial_config; /**< 空间处理器配置 */
-    int enable_temporal_integration;           /**< 是否启用时序集成（多帧），默认0 */
-    int temporal_window_size;                  /**< 时序窗口大小，默认5 */
+    LiquidVisionPipelineType pipeline_type;
+    LiquidPatchEncoderConfig patch_config;
+    LiquidVisualCfCEvolverConfig evolver_config;
+    LiquidSpatialProcessorConfig spatial_config;
+    int enable_temporal_integration;
+    int temporal_window_size;
 } LiquidVisionManagerConfig;
 
-/** @brief 液态视觉管理器句柄 */
 typedef struct LiquidVisionManager LiquidVisionManager;
 
-/**
- * @brief 获取默认管理器配置
- */
 LiquidVisionManagerConfig liquid_vision_manager_get_default_config(void);
-
-/**
- * @brief 创建液态视觉管理器
- *
- * 整合所有液态视觉处理组件为一个统一流水线。
- * 所有处理均在液态神经网络框架内完成。
- *
- * @param config 管理器配置
- * @return LiquidVisionManager* 管理器句柄，失败返回NULL
- */
 LiquidVisionManager* liquid_vision_manager_create(const LiquidVisionManagerConfig* config);
-
-/**
- * @brief 释放液态视觉管理器
- */
 void liquid_vision_manager_free(LiquidVisionManager* manager);
 
-/**
- * @brief 管理器前向传播
- *
- * 根据pipeline_type执行相应流水线：
- * - PATCH_ENCODER: 图像 → 液态补丁编码 → 输出补丁嵌入
- * - CFC_EVOLVER: 视觉特征 → CfC演化 → 输出演化状态
- * - SPATIAL: 特征集 → 空间处理 → 输出空间感知特征
- * - FULL: 图像 → 补丁编码 → 空间处理 → CfC演化 → 输出
- *
- * @param manager 管理器句柄
- * @param width 图像宽度
- * @param height 图像高度
- * @param channels 通道数
- * @param image_data 图像数据
- * @param output 输出缓冲区
- * @param output_dim 输出缓冲区维度
- * @return int 成功返回输出维度，失败返回-1
- */
 int liquid_vision_manager_forward(LiquidVisionManager* manager,
                                    int width, int height, int channels,
                                    const float* image_data,
                                    float* output, int output_dim);
-
-/**
- * @brief 设置视觉特征输入（绕过图像处理直接输入特征）
- *
- * 用于从外部（如vision.c提取的SIFT/ORB/HOG特征）接收视觉特征，
- * 然后通过液态流水线进一步处理。
- *
- * @param manager 管理器句柄
- * @param features 视觉特征向量
- * @param feature_dim 特征维度
- * @return int 成功返回0，失败返回-1
- */
 int liquid_vision_manager_set_features(LiquidVisionManager* manager,
                                         const float* features, int feature_dim);
-
-/**
- * @brief 重置所有组件状态
- */
 void liquid_vision_manager_reset(LiquidVisionManager* manager);
-
-/**
- * @brief 获取管理器输出维度
- */
 int liquid_vision_manager_get_output_dim(const LiquidVisionManager* manager);
-
-/**
- * @brief 保存管理器参数到文件
- */
 int liquid_vision_manager_save(const LiquidVisionManager* manager, const char* filepath);
-
-/**
- * @brief 从文件加载管理器参数
- */
 int liquid_vision_manager_load(LiquidVisionManager* manager, const char* filepath);
+
+int liquid_vision_manager_enable_cfc_temporal(LiquidVisionManager* manager, int enable);
+int liquid_vision_manager_reset_temporal(LiquidVisionManager* manager);
+LNN* liquid_vision_manager_get_lnn(LiquidVisionManager* manager);
+int liquid_vision_manager_set_lnn(LiquidVisionManager* manager, LNN* lnn);
+
+/* ===================================================================
+ * 第五部分：动态可扩展视觉类别注册表（原vision.h）
+ * =================================================================== */
+
+#define VISION_CLASS_DEFAULT_COUNT 80
+#define VISION_CLASS_MAX_CAPACITY  100000
+#define VISION_CLASS_NAME_MAX_LEN   64
+
+typedef struct VisionClassRegistry VisionClassRegistry;
+
+typedef struct {
+    int class_id;
+    char name_zh[VISION_CLASS_NAME_MAX_LEN];
+    char name_en[VISION_CLASS_NAME_MAX_LEN];
+    int is_learned;
+    int sample_count;
+    float confidence_threshold;
+} VisionClassEntry;
+
+VisionClassRegistry* vision_class_registry_create(void);
+void vision_class_registry_free(VisionClassRegistry* registry);
+VisionClassRegistry* vision_class_registry_get_global(void);
+int vision_class_register(VisionClassRegistry* registry,
+                          const char* name_zh, const char* name_en);
+int vision_class_get_count(const VisionClassRegistry* registry);
+int vision_class_get_entry(const VisionClassRegistry* registry, int class_id,
+                           VisionClassEntry* entry);
+int vision_class_add_samples(VisionClassRegistry* registry, int class_id, int count);
+const char* vision_get_class_name_zh(int class_id);
+const char* vision_get_class_name_en(int class_id);
+
+/* ===================================================================
+ * 第六部分：检测结构体 + NMS（原vision.h）
+ * =================================================================== */
+
+typedef struct {
+    float cx, cy, w, h;
+    float confidence;
+    int class_id;
+    char class_name[VISION_CLASS_NAME_MAX_LEN];
+    float* class_probs;
+    int class_probs_count;
+} CfCVisionDetection;
+
+int vision_nms(CfCVisionDetection* detections, int count, float iou_threshold);
+void vision_free_detections(CfCVisionDetection* detections, int count);
+
+/* ===================================================================
+ * 第七部分：图像处理工具函数（原vision.h）
+ * =================================================================== */
+
+int vision_resize_bilinear(int src_width, int src_height, int channels,
+                            const float* src_data,
+                            int dst_width, int dst_height, float* dst_data);
+int vision_resize_bilinear_float(int src_width, int src_height, int channels,
+                            const float* src_data,
+                            int dst_width, int dst_height, float* dst_data);
+int vision_yuv420_to_rgb(int width, int height,
+                          const unsigned char* y_plane, int y_stride,
+                          const unsigned char* u_plane, int uv_stride,
+                          const unsigned char* v_plane,
+                          float* rgb_output);
+
+/* ===================================================================
+ * 第八部分：传统CV特征提取器（原vision.h）- 辅助预处理路径
+ * =================================================================== */
+
+int vision_extract_hog_features(const float* gray, int width, int height,
+                                float* features, int max_features);
+int vision_extract_multiscale_lbp(const float* gray, int width, int height,
+                                  float* features, int max_features);
+int vision_extract_color_histogram(const float* rgb, int width, int height, int channels,
+                                   float* features, int max_features);
+
+/* ===================================================================
+ * 第九部分：CfC ODE层（原deep_vision.h）- 兼容层
+ * =================================================================== */
+
+typedef struct {
+    int input_dim;
+    int hidden_dim;
+    int num_layers;
+    float time_constant;
+    float delta_t;
+    int use_adaptive_tau;
+    float min_tau;
+    float max_tau;
+    int use_bias;
+    int use_liquid_gate;
+    float noise_std;
+} CfcOdeLayerConfig;
+
+typedef struct CfcOdeLayer CfcOdeLayer;
+
+CfcOdeLayerConfig cfc_ode_layer_get_default_config(void);
+CfcOdeLayer* cfc_ode_layer_create(const CfcOdeLayerConfig* config);
+void cfc_ode_layer_free(CfcOdeLayer* layer);
+int cfc_ode_layer_forward(CfcOdeLayer* layer, const float* input, float* output);
+int cfc_ode_layers_forward(CfcOdeLayer** layers, int num_layers,
+                           const float* input, float* output);
+int cfc_ode_layer_backward(CfcOdeLayer* layer,
+                           const float* dL_doutput,
+                           const float* input,
+                           const float* output,
+                           float* dL_dinput,
+                           float learning_rate);
+
+/* ===================================================================
+ * 第十部分：CfcVisionProcessor兼容层（原deep_vision.h）
+ * =================================================================== */
+
+typedef struct {
+    int image_width;
+    int image_height;
+    int image_channels;
+    int patch_size;
+    int output_dim;
+    int num_ode_layers;
+    float time_constant;
+    float delta_t;
+} CfcVisionConfig;
+
+typedef struct CfcVisionProcessor CfcVisionProcessor;
+
+CfcVisionConfig cfc_vision_get_default_config(void);
+CfcVisionProcessor* cfc_vision_processor_create(const CfcVisionConfig* config);
+void cfc_vision_processor_destroy(CfcVisionProcessor* processor);
+
+int cfc_vision_extract_features(CfcVisionProcessor* processor,
+                                const float* image_data,
+                                int width, int height, int channels,
+                                float* features, size_t max_features);
+void cfc_vision_get_statistics(CfcVisionProcessor* processor,
+                                size_t* total_operations,
+                                float* memory_usage_mb,
+                                float* average_time_ms);
+int cfc_vision_save_processor(CfcVisionProcessor* processor, const char* filename);
+CfcVisionProcessor* cfc_vision_load_processor(const char* filename);
+
+/* ===================================================================
+ * 第十一部分：目标检测API（原deep_vision.h）
+ * =================================================================== */
+
+#define CFC_VISION_MAX_CLASSES 1000
+#define CFC_VISION_MAX_DETECTIONS 100
+
+typedef struct {
+    int class_id;
+    float confidence;
+    float x, y;
+    float width, height;
+} CfcDetectionResult;
+
+typedef struct {
+    int num_classes;
+    float conf_threshold;
+    float iou_threshold;
+    int max_detections;
+} CfcDetectionConfig;
+
+CfcDetectionConfig cfc_vision_get_default_detection_config(void);
+
+int cfc_vision_detect(CfcVisionProcessor* processor,
+                       const float* image_data,
+                       int width, int height, int channels,
+                       CfcDetectionResult* results, int max_results,
+                       int* num_detected);
+int cfc_vision_set_detection_threshold(CfcVisionProcessor* processor,
+                                        float conf_threshold,
+                                        float iou_threshold);
+int cfc_vision_get_detection_stats(CfcVisionProcessor* processor,
+                                    int* total_detections,
+                                    float* avg_confidence);
+void cfc_vision_mark_trained(CfcVisionProcessor* processor);
+int cfc_vision_is_trained(const CfcVisionProcessor* processor);
+int cfc_vision_train_network(CfcVisionProcessor* processor,
+    const float* training_images, const float* target_features,
+    int num_samples, int num_epochs, float learning_rate);
+
+/* ===================================================================
+ * 第十二部分：统一视觉入口（整合后的主接口）
+ * =================================================================== */
+
+typedef struct {
+    int target_width;
+    int target_height;
+    int grayscale;
+    int feature_dimension;
+    int enable_cfc;
+    size_t cfc_hidden_size;
+    float cfc_time_constant;
+    int enable_multiscale_pyramid;
+    int enable_hog;
+    int enable_color_histogram;
+} LiquidVisionConfig;
+
+typedef struct LiquidVisionProcessor LiquidVisionProcessor;
+
+LiquidVisionProcessor* liquid_vision_processor_create(const LiquidVisionConfig* config);
+void liquid_vision_processor_free(LiquidVisionProcessor* processor);
+
+int liquid_vision_process_image(LiquidVisionProcessor* processor,
+                        int width, int height, int channels,
+                        const float* data,
+                        float* features, size_t max_features);
+int liquid_vision_processor_get_config(const LiquidVisionProcessor* processor,
+                                        LiquidVisionConfig* config);
+int liquid_vision_processor_set_config(LiquidVisionProcessor* processor,
+                                        const LiquidVisionConfig* config);
+void liquid_vision_processor_reset(LiquidVisionProcessor* processor);
+void liquid_vision_processor_set_lnn(LiquidVisionProcessor* processor, LNN* lnn);
 
 #ifdef __cplusplus
 }

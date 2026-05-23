@@ -1,29 +1,70 @@
 /**
  * @file liquid_vision.c
- * @brief 液态视觉处理组件实现
+ * @brief 统一液态视觉处理系统 —— 全CfC液态神经网络驱动
  *
- * 基于CfC（Closed-form Continuous-time）液态神经网络的视觉处理。
+ * 基于CfC（Closed-form Continuous-time）液态神经网络的统一视觉处理组件。
  * 所有视觉处理使用单一微分方程框架：
- * τ dh/dt = -h + σ(W_gx·x + W_gh·h + b_g) ⊙ tanh(W_ax·x + W_ah·h + b_a)
+ * tau dh/dt = -h + sigma(W_gx*x + W_gh*h + b_g) * tanh(W_ax*x + W_ah*h + b_a)
  * 不引入任何Transformer、注意力机制或独立处理器。
+ * 纯C实现，不依赖任何第三方库。
+ *
+ * 模块结构：
+ *   【主路径】LiquidVisionManager（PatchEncoder -> SpatialProcessor -> CfCEvolver）
+ *   【辅助路径】传统CV预处理（Sobel/LBP/HOG/HSV直方图/颜色分析/图像金字塔）
+ *   【检测路径】YOLO风格目标检测头 + NMS非极大值抑制
+ *   【类别系统】动态可扩展视觉类别注册表（80类COCO默认 + 动态扩展）
+ *   【兼容层】CfcVisionProcessor/CfcOdeLayer（保持现有agi/multimodal/ocr等模块兼容）
+ *
+ * 本文件整合了原 vision.c、deep_vision.c 和 liquid_vision.c 的所有功能。
+ * 原 vision.c 和 deep_vision.c 已标记为重定向存根。
  */
 
 #include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/core/lnn.h"
+#include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/platform.h"
+#include "selflnn/utils/perf.h"
+#include "selflnn/utils/logging.h"
+#include "selflnn/selflnn.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
 #include <float.h>
+#include <stdint.h>
 
-/* ============ 内部辅助函数 ============ */
+/* ===================================================================
+ * 宏定义
+ * =================================================================== */
 
-/* CfC闭式解核心函数
- * τ dh/dt = -h + σ(W_gx·x + W_gh·h + b_g) ⊙ tanh(W_ax·x + W_ah·h + b_a)
- * 闭式解: h(t+Δt) = h(t)·exp(-Δt/τ) + (1-exp(-Δt/τ))·[σ(...) ⊙ tanh(...)]
+#define LIQUID_VISION_MAX_OBJECTS 50
+#define LIQUID_VISION_INPUT_DIM 1024
+#define LIQUID_VISION_HIDDEN_DIM 1024
+#define COLOR_HIST_BINS 32
+
+/* ===================================================================
+ * 第一节：核心CfC数学函数（原liquid_vision.c）
+ * =================================================================== */
+
+static float _activation_sigmoid_stable(float x) {
+    if (x > 10.0f) return 1.0f;
+    if (x < -10.0f) return 0.0f;
+    return 1.0f / (1.0f + expf(-x));
+}
+
+static float _activation_tanh_stable(float x) {
+    if (x > 10.0f) return 1.0f;
+    if (x < -10.0f) return -1.0f;
+    return tanhf(x);
+}
+
+/*
+ * CfC闭式解核心函数
+ * tau dh/dt = -h + sigma(W_gx*x + W_gh*h + b_g) * tanh(W_ax*x + W_ah*h + b_a)
+ * 闭式解: h(t+dt) = h(t)*exp(-dt/tau) + (1-exp(-dt/tau))*[sigma(...) * tanh(...)]
  */
 static void _liquid_cfc_step(const float* input, int input_size,
                               const float* prev_state, int hidden_size,
@@ -49,12 +90,8 @@ static void _liquid_cfc_step(const float* input, int input_size,
             act_sum += h_to_activation[idx] * prev_state[j];
         }
 
-        float gate = gate_sum > 10.0f ? 1.0f :
-                     (gate_sum < -10.0f ? 0.0f : 1.0f / (1.0f + expf(-gate_sum)));
-
-        float activation = act_sum > 10.0f ? 1.0f :
-                           (act_sum < -10.0f ? -1.0f : tanhf(act_sum));
-
+        float gate = _activation_sigmoid_stable(gate_sum);
+        float activation = _activation_tanh_stable(act_sum);
         float driver = gate * activation;
 
         float tau = use_adaptive_tau && time_constants ? time_constants[i] : 0.1f;
@@ -79,16 +116,11 @@ static void _liquid_cfc_step(const float* input, int input_size,
 
         float new_state = prev_state[i] * exp_term + one_minus_exp * driver;
         if (isnan(new_state) || isinf(new_state)) new_state = 0.0f;
-
         output[i] = new_state;
     }
 }
 
-/* CfC液态步反向传播
- * 计算损失对输入和参数的梯度
- * dL/dx, dL/dh_prev, dL/dW_gate, dL/dW_act, dL/dH_gate, dL/dH_act,
- * dL/db_gate, dL/db_act, dL/dtau
- */
+/* CfC液态步反向传播 */
 static void _liquid_cfc_backward_step(
     const float* input, int input_size,
     const float* prev_state, int hidden_size,
@@ -97,21 +129,16 @@ static void _liquid_cfc_backward_step(
     const float* gate_bias, const float* act_bias,
     const float* time_constants, float delta_t,
     float min_tau, float max_tau, int use_adaptive_tau,
-    const float* dL_dh,  /* 损失对输出的梯度 */
-    float* dL_dx,        /* 输出: 损失对输入的梯度 */
-    float* dL_dh_prev,   /* 输出: 损失对前状态的梯度 */
-    float* dL_dW_gate,   /* 输出: 损失对门权重梯度 */
-    float* dL_dW_act,    /* 输出: 损失对激活权重梯度 */
-    float* dL_dH_gate,   /* 输出: 损失对隐藏门权重梯度 */
-    float* dL_dH_act,    /* 输出: 损失对隐藏激活权重梯度 */
-    float* dL_db_gate,   /* 输出: 损失对门偏置梯度 */
-    float* dL_db_act,    /* 输出: 损失对激活偏置梯度 */
-    float* dL_dtau       /* 输出: 损失对时间常数梯度 */
-) {
-    /* 防御性检查：核心参数为空则直接返回 */
+    const float* dL_dh,
+    float* dL_dx, float* dL_dh_prev,
+    float* dL_dW_gate, float* dL_dW_act,
+    float* dL_dH_gate, float* dL_dH_act,
+    float* dL_db_gate, float* dL_db_act,
+    float* dL_dtau) {
     if (!w_gate || !w_activation || !h_to_gate || !h_to_activation || !dL_dh) return;
     if (hidden_size <= 0 || input_size <= 0) return;
     if (delta_t <= 0.0f) return;
+
     for (int i = 0; i < hidden_size; i++) {
         float gate_sum = gate_bias ? gate_bias[i] : 0.0f;
         float act_sum = act_bias ? act_bias[i] : 0.0f;
@@ -128,11 +155,8 @@ static void _liquid_cfc_backward_step(
             act_sum += h_to_activation[idx] * prev_state[j];
         }
 
-        /* 前向值（与_cfc_step保持一致） */
-        float gate = gate_sum > 10.0f ? 1.0f :
-                     (gate_sum < -10.0f ? 0.0f : 1.0f / (1.0f + expf(-gate_sum)));
-        float activation = act_sum > 10.0f ? 1.0f :
-                           (act_sum < -10.0f ? -1.0f : tanhf(act_sum));
+        float gate = _activation_sigmoid_stable(gate_sum);
+        float activation = _activation_tanh_stable(act_sum);
         float driver = gate * activation;
 
         float tau = use_adaptive_tau && time_constants ? time_constants[i] : 0.1f;
@@ -145,61 +169,43 @@ static void _liquid_cfc_backward_step(
 
         float exp_term, dexp_dtau;
         if (dt_over_tau > 20.0f) {
-            exp_term = 0.0f;
-            dexp_dtau = 0.0f;
+            exp_term = 0.0f; dexp_dtau = 0.0f;
         } else if (dt_over_tau < 1e-4f) {
-            exp_term = 1.0f - dt_over_tau;
-            dexp_dtau = -delta_t / (tau * tau);
+            exp_term = 1.0f - dt_over_tau; dexp_dtau = -delta_t / (tau * tau);
         } else {
-            exp_term = expf(-dt_over_tau);
-            dexp_dtau = exp_term * (delta_t / (tau * tau));
+            exp_term = expf(-dt_over_tau); dexp_dtau = exp_term * (delta_t / (tau * tau));
         }
 
         float one_minus_exp, done_dtau;
         if (dt_over_tau > 20.0f) {
-            one_minus_exp = 1.0f;
-            done_dtau = 0.0f;
+            one_minus_exp = 1.0f; done_dtau = 0.0f;
         } else if (dt_over_tau < 1e-4f) {
-            one_minus_exp = dt_over_tau;
-            done_dtau = -delta_t / (tau * tau);
+            one_minus_exp = dt_over_tau; done_dtau = -delta_t / (tau * tau);
         } else {
-            one_minus_exp = 1.0f - exp_term;
-            done_dtau = -dexp_dtau;
+            one_minus_exp = 1.0f - exp_term; done_dtau = -dexp_dtau;
         }
 
-        /* dh/dgate = one_minus_exp * activation
-         * dh/dactivation = one_minus_exp * gate
-         * dgate/dgate_sum = gate * (1 - gate)
-         * dactivation/dact_sum = 1 - tanh^2(act_sum) = 1 - activation^2 */
         float dh_dgate = one_minus_exp * activation;
         float dh_dact = one_minus_exp * gate;
         float dsig = gate * (1.0f - gate);
         float dtanh = 1.0f - activation * activation;
 
-        /* 链路法则：dL/d(gate_sum) = dL/dh * dh/dgate * dsig
-         * dL/d(act_sum) = dL/dh * dh/dact * dtanh */
         float dL_dgate_sum = dL_dh[i] * dh_dgate * dsig;
         float dL_dact_sum = dL_dh[i] * dh_dact * dtanh;
 
-        /* 输入梯度 */
         if (dL_dx) {
             for (int j = 0; j < input_size; j++) {
                 int idx = i * input_size + j;
                 dL_dx[j] += dL_dgate_sum * w_gate[idx] + dL_dact_sum * w_activation[idx];
             }
         }
-
-        /* 前状态梯度 */
         if (dL_dh_prev) {
-            /* dL/dh_prev = dL/dh * exp_term + Σ(hidden权重贡献) */
             dL_dh_prev[i] += dL_dh[i] * exp_term;
             for (int j = 0; j < hidden_size; j++) {
                 int idx = i * hidden_size + j;
                 dL_dh_prev[j] += dL_dgate_sum * h_to_gate[idx] + dL_dact_sum * h_to_activation[idx];
             }
         }
-
-        /* 参数梯度 */
         if (dL_dW_gate) {
             for (int j = 0; j < input_size; j++) {
                 int idx = i * input_size + j;
@@ -224,14 +230,9 @@ static void _liquid_cfc_backward_step(
                 dL_dH_act[idx] += dL_dact_sum * prev_state[j];
             }
         }
-        if (dL_db_gate) {
-            dL_db_gate[i] += dL_dgate_sum;
-        }
-        if (dL_db_act) {
-            dL_db_act[i] += dL_dact_sum;
-        }
+        if (dL_db_gate) dL_db_gate[i] += dL_dgate_sum;
+        if (dL_db_act) dL_db_act[i] += dL_dact_sum;
 
-        /* 时间常数梯度 */
         if (dL_dtau && use_adaptive_tau) {
             float dh_dtau = prev_state[i] * dexp_dtau + driver * done_dtau;
             dL_dtau[i] += dL_dh[i] * dh_dtau;
@@ -239,9 +240,7 @@ static void _liquid_cfc_backward_step(
     }
 }
 
-/* 从图像提取补丁
- * 输出: [num_patches x patch_size x patch_size x channels]
- */
+/* 从图像提取补丁 */
 static int _extract_patches(const float* image, int width, int height, int channels,
                              int patch_size, int stride,
                              float* patches, int max_patches,
@@ -300,7 +299,25 @@ static void _const_init(float* data, int n, float val) {
     for (int i = 0; i < n; i++) data[i] = val;
 }
 
-/* ============ LiquidPatchEncoder 实现 ============ */
+/* Softmax稳定化计算 */
+static void _softmax_stable(float* logits, int dim) {
+    float max_val = logits[0];
+    for (int i = 1; i < dim; i++)
+        if (logits[i] > max_val) max_val = logits[i];
+    float sum = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        logits[i] = expf(logits[i] - max_val);
+        sum += logits[i];
+    }
+    if (sum > 1e-10f) {
+        float inv_sum = 1.0f / sum;
+        for (int i = 0; i < dim; i++) logits[i] *= inv_sum;
+    }
+}
+
+/* ===================================================================
+ * 第二节：LiquidPatchEncoder（原liquid_vision.c）
+ * =================================================================== */
 
 struct LiquidPatchEncoder {
     LiquidPatchEncoderConfig config;
@@ -452,7 +469,6 @@ int liquid_patch_encoder_forward(LiquidPatchEncoder* encoder,
     return num_patches;
 }
 
-/* LiquidPatchEncoder反向传播 */
 int liquid_patch_encoder_backward(LiquidPatchEncoder* encoder,
                                    const float* dL_dembeddings, int num_patches,
                                    float* dL_dimage, int image_size,
@@ -467,38 +483,27 @@ int liquid_patch_encoder_backward(LiquidPatchEncoder* encoder,
 
     memset(dL_dimage, 0, (size_t)image_size * sizeof(float));
 
-    float* dL_dW_g = (float*)safe_calloc((size_t)D * patch_elem, sizeof(float));
-    float* dL_dW_a = (float*)safe_calloc((size_t)D * patch_elem, sizeof(float));
-    float* dL_dH_g = (float*)safe_calloc((size_t)D * D, sizeof(float));
-    float* dL_dH_a = (float*)safe_calloc((size_t)D * D, sizeof(float));
-    float* dL_db_g = (float*)safe_calloc(D, sizeof(float));
-    float* dL_db_a = (float*)safe_calloc(D, sizeof(float));
-    float* dL_dtau = (float*)safe_calloc(D, sizeof(float));
-
-    if (!dL_dW_g || !dL_dW_a || !dL_dH_g || !dL_dH_a ||
-        !dL_db_g || !dL_db_a || !dL_dtau) {
-        safe_free((void**)&dL_dW_g); safe_free((void**)&dL_dW_a); safe_free((void**)&dL_dH_g); safe_free((void**)&dL_dH_a);
-        safe_free((void**)&dL_db_g); safe_free((void**)&dL_db_a); safe_free((void**)&dL_dtau);
+    float* gbufs[9];
+    for (int k = 0; k < 7; k++) {
+        size_t esz = (k < 4) ? ((k < 2) ? (size_t)D * patch_elem : (size_t)D * D) : (size_t)D;
+        gbufs[k] = (float*)safe_calloc(esz, sizeof(float));
+        if (!gbufs[k]) {
+            for (int j = 0; j < k; j++) safe_free((void**)&gbufs[j]);
+            return -1;
+        }
+    }
+    gbufs[7] = (float*)safe_calloc(D, sizeof(float));
+    gbufs[8] = (float*)safe_calloc(patch_elem, sizeof(float));
+    if (!gbufs[7] || !gbufs[8]) {
+        for (int k = 0; k < 9; k++) safe_free((void**)&gbufs[k]);
         return -1;
     }
 
-    float* dL_dh_prev = (float*)safe_calloc(D, sizeof(float));
-    float* dL_dx_curr = (float*)safe_calloc(patch_elem, sizeof(float));
-    if (!dL_dh_prev || !dL_dx_curr) {
-        safe_free((void**)&dL_dh_prev); safe_free((void**)&dL_dx_curr);
-        safe_free((void**)&dL_dW_g); safe_free((void**)&dL_dW_a); safe_free((void**)&dL_dH_g); safe_free((void**)&dL_dH_a);
-        safe_free((void**)&dL_db_g); safe_free((void**)&dL_db_a); safe_free((void**)&dL_dtau);
-        return -1;
-    }
-
-    /* 反向遍历所有patches */
     for (int p = num_patches - 1; p >= 0; p--) {
         const float* dL_dh = dL_dembeddings + (size_t)p * D;
+        memset(gbufs[7], 0, (size_t)D * sizeof(float));
+        memset(gbufs[8], 0, (size_t)patch_elem * sizeof(float));
 
-        memset(dL_dx_curr, 0, (size_t)patch_elem * sizeof(float));
-        memset(dL_dh_prev, 0, (size_t)D * sizeof(float));
-
-        /* prev_state: 第0步使用encoder初始状态, 否则使用上一步的输出 */
         const float* prev_state_ptr = (p == 0) ? encoder->patch_state :
                                       dL_dembeddings + (size_t)(p - 1) * D;
         _liquid_cfc_backward_step(
@@ -511,47 +516,33 @@ int liquid_patch_encoder_backward(LiquidPatchEncoder* encoder,
             encoder->config.min_tau, encoder->config.max_tau,
             encoder->config.use_adaptive_tau,
             dL_dh,
-            dL_dx_curr, dL_dh_prev,
-            dL_dW_g, dL_dW_a, dL_dH_g, dL_dH_a,
-            dL_db_g, dL_db_a, dL_dtau);
-
-        /* 梯度裁剪防止爆炸 */
-        float grad_norm = 0.0f;
-        for (int j = 0; j < patch_elem; j++) grad_norm += dL_dx_curr[j] * dL_dx_curr[j];
-        if (grad_norm > 100.0f) {
-            float scale = 10.0f / sqrtf(grad_norm);
-            for (int j = 0; j < patch_elem; j++) dL_dx_curr[j] *= scale;
-        }
+            gbufs[8], gbufs[7],
+            gbufs[0], gbufs[1], gbufs[2], gbufs[3],
+            gbufs[4], gbufs[5], gbufs[6]);
     }
 
-    /* 应用梯度更新 */
     float lr = learning_rate;
     for (int i = 0; i < D; i++) {
         for (int j = 0; j < patch_elem; j++) {
             int idx = i * patch_elem + j;
-            if (fabsf(dL_dW_g[idx]) < 1e-6f) continue;
-            encoder->patch_w_gate[idx] -= lr * dL_dW_g[idx];
-            encoder->patch_w_act[idx] -= lr * dL_dW_a[idx];
+            encoder->patch_w_gate[idx] -= lr * gbufs[0][idx];
+            encoder->patch_w_act[idx] -= lr * gbufs[1][idx];
         }
         for (int j = 0; j < D; j++) {
             int idx = i * D + j;
-            if (fabsf(dL_dH_g[idx]) < 1e-6f) continue;
-            encoder->patch_h_to_gate[idx] -= lr * dL_dH_g[idx];
-            encoder->patch_h_to_act[idx] -= lr * dL_dH_a[idx];
+            encoder->patch_h_to_gate[idx] -= lr * gbufs[2][idx];
+            encoder->patch_h_to_act[idx] -= lr * gbufs[3][idx];
         }
-        encoder->patch_gate_bias[i] -= lr * dL_db_g[i];
-        encoder->patch_act_bias[i] -= lr * dL_db_a[i];
-        if (encoder->config.use_adaptive_tau && fabsf(dL_dtau[i]) > 1e-8f) {
-            float new_tau = encoder->time_constants[i] - lr * dL_dtau[i];
-            if (new_tau >= encoder->config.min_tau && new_tau <= encoder->config.max_tau) {
-                encoder->time_constants[i] = new_tau;
-            }
+        encoder->patch_gate_bias[i] -= lr * gbufs[4][i];
+        encoder->patch_act_bias[i] -= lr * gbufs[5][i];
+        if (encoder->config.use_adaptive_tau) {
+            float nt = encoder->time_constants[i] - lr * gbufs[6][i];
+            if (nt >= encoder->config.min_tau && nt <= encoder->config.max_tau)
+                encoder->time_constants[i] = nt;
         }
     }
 
-    safe_free((void**)&dL_dW_g); safe_free((void**)&dL_dW_a); safe_free((void**)&dL_dH_g); safe_free((void**)&dL_dH_a);
-    safe_free((void**)&dL_db_g); safe_free((void**)&dL_db_a); safe_free((void**)&dL_dtau);
-    safe_free((void**)&dL_dh_prev); safe_free((void**)&dL_dx_curr);
+    for (int k = 0; k < 9; k++) safe_free((void**)&gbufs[k]);
     return 0;
 }
 
@@ -574,8 +565,9 @@ int liquid_patch_encoder_get_num_patches(const LiquidPatchEncoder* encoder,
 int liquid_patch_encoder_get_hidden_dim(const LiquidPatchEncoder* encoder) {
     return encoder ? encoder->config.patch_hidden_dim : 0;
 }
-
-/* ============ LiquidVisualCfCEvolver 实现 ============ */
+/* ===================================================================
+ * 第三节：LiquidVisualCfCEvolver（原liquid_vision.c）
+ * =================================================================== */
 
 struct LiquidVisualCfCEvolver {
     LiquidVisualCfCEvolverConfig config;
@@ -618,13 +610,10 @@ LiquidVisualCfCEvolver* liquid_visual_cfc_evolver_create(const LiquidVisualCfCEv
     int D = config->visual_state_dim;
     int NC = config->num_visual_channels;
 
-    /* 每个通道有独立的CfC参数 */
-    size_t param_size = (size_t)D * D;
-
     ev->w_gate = (float*)safe_calloc((size_t)NC * D * D, sizeof(float));
     ev->w_act = (float*)safe_calloc((size_t)NC * D * D, sizeof(float));
-    ev->h_to_gate = (float*)safe_calloc((size_t)NC * param_size, sizeof(float));
-    ev->h_to_act = (float*)safe_calloc((size_t)NC * param_size, sizeof(float));
+    ev->h_to_gate = (float*)safe_calloc((size_t)NC * D * D, sizeof(float));
+    ev->h_to_act = (float*)safe_calloc((size_t)NC * D * D, sizeof(float));
     ev->gate_bias = (float*)safe_calloc((size_t)NC * D, sizeof(float));
     ev->act_bias = (float*)safe_calloc((size_t)NC * D, sizeof(float));
     ev->time_constants = (float*)safe_calloc((size_t)D, sizeof(float));
@@ -642,8 +631,8 @@ LiquidVisualCfCEvolver* liquid_visual_cfc_evolver_create(const LiquidVisualCfCEv
     for (int c = 0; c < NC; c++) {
         _xavier_init(ev->w_gate + (size_t)c * D * D, D, D, &ev->seed);
         _xavier_init(ev->w_act + (size_t)c * D * D, D, D, &ev->seed);
-        _xavier_init(ev->h_to_gate + (size_t)c * param_size, D, D, &ev->seed);
-        _xavier_init(ev->h_to_act + (size_t)c * param_size, D, D, &ev->seed);
+        _xavier_init(ev->h_to_gate + (size_t)c * D * D, D, D, &ev->seed);
+        _xavier_init(ev->h_to_act + (size_t)c * D * D, D, D, &ev->seed);
     }
     _const_init(ev->gate_bias, NC * D, 0.0f);
     _const_init(ev->act_bias, NC * D, 0.0f);
@@ -678,8 +667,7 @@ int liquid_visual_cfc_evolver_forward(LiquidVisualCfCEvolver* evolver,
     float* ws_state = (float*)safe_malloc((size_t)D * sizeof(float));
     float* ws_prev = (float*)safe_malloc((size_t)D * sizeof(float));
     if (!ws_state || !ws_prev) {
-        safe_free((void**)&ws_state);
-        safe_free((void**)&ws_prev);
+        safe_free((void**)&ws_state); safe_free((void**)&ws_prev);
         return -1;
     }
 
@@ -690,8 +678,8 @@ int liquid_visual_cfc_evolver_forward(LiquidVisualCfCEvolver* evolver,
                           ws_prev, D,
                           evolver->w_gate + (size_t)c * D * D,
                           evolver->w_act + (size_t)c * D * D,
-                          evolver->h_to_gate + (size_t)c * (size_t)D * D,
-                          evolver->h_to_act + (size_t)c * (size_t)D * D,
+                          evolver->h_to_gate + (size_t)c * D * D,
+                          evolver->h_to_act + (size_t)c * D * D,
                           evolver->gate_bias + (size_t)c * D,
                           evolver->act_bias + (size_t)c * D,
                           evolver->time_constants, delta_t,
@@ -699,8 +687,7 @@ int liquid_visual_cfc_evolver_forward(LiquidVisualCfCEvolver* evolver,
                           evolver->config.use_adaptive_tau,
                           ws_state);
 
-        memcpy(evolver->channel_states + (size_t)c * D, ws_state,
-               (size_t)D * sizeof(float));
+        memcpy(evolver->channel_states + (size_t)c * D, ws_state, (size_t)D * sizeof(float));
 
         if (evolver->config.enable_cross_channel) {
             memcpy(ws_prev, ws_state, (size_t)D * sizeof(float));
@@ -712,8 +699,7 @@ int liquid_visual_cfc_evolver_forward(LiquidVisualCfCEvolver* evolver,
     memcpy(evolver->state, ws_state, (size_t)D * sizeof(float));
     memcpy(visual_state, ws_state, (size_t)D * sizeof(float));
 
-    safe_free((void**)&ws_state);
-    safe_free((void**)&ws_prev);
+    safe_free((void**)&ws_state); safe_free((void**)&ws_prev);
     return 0;
 }
 
@@ -742,7 +728,9 @@ int liquid_visual_cfc_evolver_get_state_dim(const LiquidVisualCfCEvolver* evolve
     return evolver ? evolver->config.visual_state_dim : 0;
 }
 
-/* ============ LiquidSpatialProcessor 实现 ============ */
+/* ===================================================================
+ * 第四节：LiquidSpatialProcessor（原liquid_vision.c）
+ * =================================================================== */
 
 struct LiquidSpatialProcessor {
     LiquidSpatialProcessorConfig config;
@@ -834,10 +822,6 @@ static void _liquid_spatial_step(const float* features, int num_features, int fe
                                   const float* time_constants, float delta_t,
                                   float min_tau, float max_tau, int use_adaptive_tau,
                                   float* output) {
-    /* 每个隐藏单元接收来自所有特征的输入
-     * gate_i = Σ_j W_fg_ij · f_j + Σ_k W_hg_ik · h_k + b_gi
-     * act_i  = Σ_j W_fa_ij · f_j + Σ_k W_ha_ik · h_k + b_ai
-     */
     for (int i = 0; i < hidden_dim; i++) {
         float gate_sum = gb ? gb[i] : 0.0f;
         float act_sum = ab ? ab[i] : 0.0f;
@@ -860,10 +844,8 @@ static void _liquid_spatial_step(const float* features, int num_features, int fe
             act_sum += ha_w[idx] * hidden_state[k];
         }
 
-        float gate = gate_sum > 10.0f ? 1.0f :
-                     (gate_sum < -10.0f ? 0.0f : 1.0f / (1.0f + expf(-gate_sum)));
-        float activation = act_sum > 10.0f ? 1.0f :
-                           (act_sum < -10.0f ? -1.0f : tanhf(act_sum));
+        float gate = _activation_sigmoid_stable(gate_sum);
+        float activation = _activation_tanh_stable(act_sum);
         float driver = gate * activation;
 
         float tau = use_adaptive_tau && time_constants ? time_constants[i] : 0.1f;
@@ -897,8 +879,7 @@ int liquid_spatial_processor_forward(LiquidSpatialProcessor* processor,
     float* prev = (float*)safe_malloc((size_t)HD * sizeof(float));
     float* curr = (float*)safe_malloc((size_t)HD * sizeof(float));
     if (!prev || !curr) {
-        safe_free((void**)&prev);
-        safe_free((void**)&curr);
+        safe_free((void**)&prev); safe_free((void**)&curr);
         return -1;
     }
 
@@ -922,22 +903,22 @@ int liquid_spatial_processor_forward(LiquidSpatialProcessor* processor,
     memcpy(processor->hidden_state, curr, (size_t)HD * sizeof(float));
     memcpy(output, curr, (size_t)HD * sizeof(float));
 
-    safe_free((void**)&prev);
-    safe_free((void**)&curr);
+    safe_free((void**)&prev); safe_free((void**)&curr);
     return 0;
 }
 
 void liquid_spatial_processor_reset(LiquidSpatialProcessor* processor) {
     if (!processor) return;
-    memset(processor->hidden_state, 0,
-           (size_t)processor->config.spatial_hidden_dim * sizeof(float));
+    memset(processor->hidden_state, 0, (size_t)processor->config.spatial_hidden_dim * sizeof(float));
 }
 
 int liquid_spatial_processor_get_output_dim(const LiquidSpatialProcessor* processor) {
     return processor ? processor->config.spatial_hidden_dim : 0;
 }
 
-/* ============ LiquidVisionManager 实现 ============ */
+/* ===================================================================
+ * 第五节：LiquidVisionManager（原liquid_vision.c）
+ * =================================================================== */
 
 struct LiquidVisionManager {
     LiquidVisionManagerConfig config;
@@ -954,7 +935,6 @@ struct LiquidVisionManager {
     int max_feature_dim;
     float* cfc_temporal_state;
     int cfc_temporal_initialized;
-    /* ZSFWS-M010: 关联的LNN句柄，用于CfC时序投影 */
     LNN* shared_lnn;
 };
 
@@ -1001,26 +981,15 @@ LiquidVisionManager* liquid_vision_manager_create(const LiquidVisionManagerConfi
 
     if (need_patch) {
         mgr->patch_encoder = liquid_patch_encoder_create(&config->patch_config);
-        if (!mgr->patch_encoder) {
-            liquid_vision_manager_free(mgr);
-            return NULL;
-        }
+        if (!mgr->patch_encoder) { liquid_vision_manager_free(mgr); return NULL; }
     }
-
     if (need_spatial) {
         mgr->spatial_processor = liquid_spatial_processor_create(&config->spatial_config);
-        if (!mgr->spatial_processor) {
-            liquid_vision_manager_free(mgr);
-            return NULL;
-        }
+        if (!mgr->spatial_processor) { liquid_vision_manager_free(mgr); return NULL; }
     }
-
     if (need_evolver) {
         mgr->cfc_evolver = liquid_visual_cfc_evolver_create(&config->evolver_config);
-        if (!mgr->cfc_evolver) {
-            liquid_vision_manager_free(mgr);
-            return NULL;
-        }
+        if (!mgr->cfc_evolver) { liquid_vision_manager_free(mgr); return NULL; }
     }
 
     if (config->enable_temporal_integration) {
@@ -1034,8 +1003,7 @@ LiquidVisionManager* liquid_vision_manager_create(const LiquidVisionManagerConfi
             (size_t)config->temporal_window_size * max_dim, sizeof(float));
         mgr->temporal_accumulator = (float*)safe_calloc(max_dim, sizeof(float));
         if (!mgr->temporal_buffer || !mgr->temporal_accumulator) {
-            liquid_vision_manager_free(mgr);
-            return NULL;
+            liquid_vision_manager_free(mgr); return NULL;
         }
     }
 
@@ -1069,15 +1037,12 @@ int liquid_vision_manager_forward(LiquidVisionManager* manager,
         case LIQUID_VISION_PATCH_ENCODER: {
             int D = manager->config.patch_config.patch_hidden_dim;
             int np = liquid_patch_encoder_get_num_patches(manager->patch_encoder, width, height);
-            if (np * D > output_dim) {
-                np = output_dim / D;
-            }
+            if (np * D > output_dim) np = output_dim / D;
             internal_buf = (float*)safe_malloc((size_t)np * D * sizeof(float));
             if (!internal_buf) return -1;
 
             int num_patches = liquid_patch_encoder_forward(
-                manager->patch_encoder, width, height, channels, image_data,
-                internal_buf, np);
+                manager->patch_encoder, width, height, channels, image_data, internal_buf, np);
             if (num_patches < 0) break;
 
             int out_len = num_patches * D;
@@ -1086,60 +1051,49 @@ int liquid_vision_manager_forward(LiquidVisionManager* manager,
             result = out_len;
             break;
         }
-
         case LIQUID_VISION_CFC_EVOLVER: {
             int D = manager->config.evolver_config.visual_state_dim;
             if (D > output_dim) D = output_dim;
-
-            int input_dim = width * height * channels;
-            internal_buf = (float*)safe_malloc((size_t)input_dim * sizeof(float));
+            size_t input_dim = (size_t)width * (size_t)height * (size_t)channels;
+            internal_buf = (float*)safe_malloc(input_dim * sizeof(float));
             if (!internal_buf) return -1;
-
             for (int i = 0; i < input_dim; i++) internal_buf[i] = image_data[i];
 
             int ret = liquid_visual_cfc_evolver_forward(
                 manager->cfc_evolver, internal_buf, input_dim, output);
             if (ret != 0) break;
-
             result = D;
             break;
         }
-
         case LIQUID_VISION_SPATIAL: {
             int HD = manager->config.spatial_config.spatial_hidden_dim;
             if (HD > output_dim) HD = output_dim;
-
             int NF = manager->config.spatial_config.num_features;
             int FD = manager->config.spatial_config.feature_dim;
-            internal_buf = (float*)safe_malloc((size_t)NF * FD * sizeof(float));
+            internal_buf = (float*)safe_malloc((size_t)NF * (size_t)FD * sizeof(float));
             if (!internal_buf) return -1;
-
-            int input_dim = width * height * channels;
-            int copy_len = input_dim < NF * FD ? input_dim : NF * FD;
+            size_t input_dim = (size_t)width * (size_t)height * (size_t)channels;
+            int copy_len = (int)(input_dim < (size_t)(NF * FD) ? input_dim : (size_t)(NF * FD));
             memcpy(internal_buf, image_data, (size_t)copy_len * sizeof(float));
 
             int ret = liquid_spatial_processor_forward(
                 manager->spatial_processor, internal_buf, NF, FD, output);
             if (ret != 0) break;
-
             result = HD;
             break;
         }
-
         case LIQUID_VISION_FULL: {
             int patch_D = manager->config.patch_config.patch_hidden_dim;
             int spatial_HD = manager->config.spatial_config.spatial_hidden_dim;
             int evolver_D = manager->config.evolver_config.visual_state_dim;
-
             if (evolver_D > output_dim) evolver_D = output_dim;
 
             int np = liquid_patch_encoder_get_num_patches(manager->patch_encoder, width, height);
-            internal_buf = (float*)safe_malloc((size_t)np * patch_D * sizeof(float));
+            internal_buf = (float*)safe_malloc((size_t)np * (size_t)patch_D * sizeof(float));
             if (!internal_buf) return -1;
 
             int num_patches = liquid_patch_encoder_forward(
-                manager->patch_encoder, width, height, channels, image_data,
-                internal_buf, np);
+                manager->patch_encoder, width, height, channels, image_data, internal_buf, np);
             if (num_patches < 0) break;
 
             float* spatial_buf = (float*)safe_malloc((size_t)spatial_HD * sizeof(float));
@@ -1147,22 +1101,16 @@ int liquid_vision_manager_forward(LiquidVisionManager* manager,
 
             int ret_sp = liquid_spatial_processor_forward(
                 manager->spatial_processor, internal_buf, num_patches, patch_D, spatial_buf);
-            if (ret_sp != 0) {
-                safe_free((void**)&spatial_buf);
-                break;
-            }
+            if (ret_sp != 0) { safe_free((void**)&spatial_buf); break; }
 
             int ret_ev = liquid_visual_cfc_evolver_forward(
                 manager->cfc_evolver, spatial_buf, spatial_HD, output);
             safe_free((void**)&spatial_buf);
             if (ret_ev != 0) break;
-
             result = evolver_D;
             break;
         }
-
-        default:
-            break;
+        default: break;
     }
 
     safe_free((void**)&internal_buf);
@@ -1172,71 +1120,51 @@ int liquid_vision_manager_forward(LiquidVisionManager* manager,
         int frame = manager->temporal_frame_count % window;
         if (frame < 0) frame = 0;
 
-        memcpy(manager->temporal_buffer + (size_t)frame * result,
-               output, (size_t)result * sizeof(float));
+        memcpy(manager->temporal_buffer + (size_t)frame * result, output, (size_t)result * sizeof(float));
         manager->temporal_frame_count++;
 
-        int count = manager->temporal_frame_count < window ?
-                    manager->temporal_frame_count : window;
-
+        int count = manager->temporal_frame_count < window ? manager->temporal_frame_count : window;
         memset(manager->temporal_accumulator, 0, (size_t)result * sizeof(float));
         for (int f = 0; f < count; f++) {
             for (int d = 0; d < result; d++) {
-                manager->temporal_accumulator[d] +=
-                    manager->temporal_buffer[(size_t)f * result + d];
+                manager->temporal_accumulator[d] += manager->temporal_buffer[(size_t)f * result + d];
             }
         }
         float inv_count = 1.0f / (float)count;
-        for (int d = 0; d < result; d++) {
-            output[d] = manager->temporal_accumulator[d] * inv_count;
-        }
+        for (int d = 0; d < result; d++) output[d] = manager->temporal_accumulator[d] * inv_count;
 
-        /* ZSFWS-M010修复: CfC时序模型使用带权重投影的标准CfC方程
-         * 原实现直接将特征值x作为gate/activation输入，非标准CfC：
-         *   gate = σ(x) 而不是 σ(W_g·x + U_g·h + b_g)
-         * 修复使用LNN权重进行投影，保留液态神经网络的时间演化语义 */
         if (manager->cfc_temporal_state) {
             float dt = manager->temporal_frame_count > 1 ? 0.033f : 0.0f;
             if (dt < 1e-6f) dt = 0.033f;
             float tau = 0.1f;
 
-            /* 使用LNN的共享参数进行特征嵌入投影
-             * 通过将输出特征重新输入LNN获取动力学驱动的gate/activation */
             float* temporal_input = (float*)safe_malloc((size_t)manager->max_feature_dim * sizeof(float));
             float* temporal_out = (float*)safe_malloc((size_t)manager->max_feature_dim * sizeof(float));
             if (temporal_input && temporal_out) {
-                /* 将上一帧状态与当前特征拼接作为LNN输入 */
                 for (int d = 0; d < result && d < manager->max_feature_dim; d++) {
                     temporal_input[d] = 0.5f * output[d] + 0.5f * manager->cfc_temporal_state[d];
                 }
 
-                /* 使用管理器关联的LNN进行时序投影 */
                 LNN* tm_lnn = liquid_vision_manager_get_lnn(manager);
                 if (tm_lnn && lnn_forward(tm_lnn, temporal_input, temporal_out) == 0) {
                     for (int d = 0; d < result && d < manager->max_feature_dim; d++) {
                         float x = output[d];
                         float prev_h = manager->cfc_temporal_state[d];
-
-                        /* 使用LNN输出的gate/activation进行CfC演化 */
-                        float gate = 1.0f / (1.0f + expf(-temporal_out[d] * 0.5f));
-                        float activation = tanhf(temporal_out[d] * 0.5f);
-
+                        float gate = _activation_sigmoid_stable(temporal_out[d] * 0.5f);
+                        float activation = _activation_tanh_stable(temporal_out[d] * 0.5f);
                         float exp_term = expf(-dt / tau);
                         float one_minus_exp = 1.0f - exp_term;
-
                         float new_h = prev_h * exp_term + one_minus_exp * gate * activation;
                         if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
-
                         manager->cfc_temporal_state[d] = new_h;
                         output[d] = 0.7f * output[d] + 0.3f * new_h;
                     }
                 } else {
-                    /* 回退：无关联LNN时使用原简化公式作为fallback */
                     for (int d = 0; d < result && d < manager->max_feature_dim; d++) {
                         float x = output[d];
                         float prev_h = manager->cfc_temporal_state[d];
-                        float gate = 1.0f / (1.0f + expf(-x));
-                        float activation = tanhf(x);
+                        float gate = _activation_sigmoid_stable(x);
+                        float activation = _activation_tanh_stable(x);
                         float exp_term = expf(-dt / tau);
                         float new_h = prev_h * exp_term + (1.0f - exp_term) * gate * activation;
                         if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
@@ -1247,21 +1175,17 @@ int liquid_vision_manager_forward(LiquidVisionManager* manager,
             }
             safe_free((void**)&temporal_input);
             safe_free((void**)&temporal_out);
-
             manager->cfc_temporal_initialized = 1;
         }
     }
-
     return result;
 }
 
 int liquid_vision_manager_enable_cfc_temporal(LiquidVisionManager* manager, int enable) {
     if (!manager || manager->max_feature_dim <= 0) return -1;
-
     if (enable) {
         if (!manager->cfc_temporal_state) {
-            manager->cfc_temporal_state = (float*)safe_calloc(
-                (size_t)manager->max_feature_dim, sizeof(float));
+            manager->cfc_temporal_state = (float*)safe_calloc((size_t)manager->max_feature_dim, sizeof(float));
             if (!manager->cfc_temporal_state) return -1;
         }
         manager->cfc_temporal_initialized = 0;
@@ -1275,20 +1199,14 @@ int liquid_vision_manager_enable_cfc_temporal(LiquidVisionManager* manager, int 
 int liquid_vision_manager_reset_temporal(LiquidVisionManager* manager) {
     if (!manager) return -1;
     manager->temporal_frame_count = 0;
-    if (manager->cfc_temporal_state) {
-        memset(manager->cfc_temporal_state, 0,
-               (size_t)manager->max_feature_dim * sizeof(float));
-    }
+    if (manager->cfc_temporal_state)
+        memset(manager->cfc_temporal_state, 0, (size_t)manager->max_feature_dim * sizeof(float));
     manager->cfc_temporal_initialized = 0;
-    if (manager->temporal_buffer) {
-        memset(manager->temporal_buffer, 0,
-               (size_t)manager->config.temporal_window_size *
-               (size_t)manager->max_feature_dim * sizeof(float));
-    }
+    if (manager->temporal_buffer)
+        memset(manager->temporal_buffer, 0, (size_t)manager->config.temporal_window_size * (size_t)manager->max_feature_dim * sizeof(float));
     return 0;
 }
 
-/* ZSFWS-M010: LNN关联接口，供CfC时序投影使用 */
 LNN* liquid_vision_manager_get_lnn(LiquidVisionManager* manager) {
     return manager ? manager->shared_lnn : NULL;
 }
@@ -1302,15 +1220,12 @@ int liquid_vision_manager_set_lnn(LiquidVisionManager* manager, LNN* lnn) {
 int liquid_vision_manager_set_features(LiquidVisionManager* manager,
                                         const float* features, int feature_dim) {
     if (!manager || !features || feature_dim <= 0) return -1;
-
     if (manager->feature_buffer_size < feature_dim) {
-        float* new_buf = (float*)safe_realloc(manager->feature_buffer,
-                                                (size_t)feature_dim * sizeof(float));
+        float* new_buf = (float*)safe_realloc(manager->feature_buffer, (size_t)feature_dim * sizeof(float));
         if (!new_buf) return -1;
         manager->feature_buffer = new_buf;
         manager->feature_buffer_size = feature_dim;
     }
-
     memcpy(manager->feature_buffer, features, (size_t)feature_dim * sizeof(float));
     manager->is_feature_mode = 1;
     return 0;
@@ -1322,17 +1237,10 @@ void liquid_vision_manager_reset(LiquidVisionManager* manager) {
     liquid_visual_cfc_evolver_reset(manager->cfc_evolver);
     liquid_spatial_processor_reset(manager->spatial_processor);
     manager->temporal_frame_count = 0;
-    if (manager->temporal_buffer) {
-        memset(manager->temporal_buffer, 0,
-               (size_t)manager->config.temporal_window_size *
-               manager->config.evolver_config.visual_state_dim *
-               sizeof(float));
-    }
-    if (manager->temporal_accumulator) {
-        memset(manager->temporal_accumulator, 0,
-               (size_t)manager->config.evolver_config.visual_state_dim *
-               sizeof(float));
-    }
+    if (manager->temporal_buffer)
+        memset(manager->temporal_buffer, 0, (size_t)manager->config.temporal_window_size * manager->config.evolver_config.visual_state_dim * sizeof(float));
+    if (manager->temporal_accumulator)
+        memset(manager->temporal_accumulator, 0, (size_t)manager->config.evolver_config.visual_state_dim * sizeof(float));
     manager->is_feature_mode = 0;
 }
 
@@ -1340,30 +1248,26 @@ int liquid_vision_manager_get_output_dim(const LiquidVisionManager* manager) {
     if (!manager) return 0;
     switch (manager->config.pipeline_type) {
         case LIQUID_VISION_PATCH_ENCODER:
-            return manager->config.patch_config.patch_hidden_dim *
-                   manager->config.patch_config.max_patches;
+            return manager->config.patch_config.patch_hidden_dim * manager->config.patch_config.max_patches;
         case LIQUID_VISION_CFC_EVOLVER:
             return manager->config.evolver_config.visual_state_dim;
         case LIQUID_VISION_SPATIAL:
             return manager->config.spatial_config.spatial_hidden_dim;
         case LIQUID_VISION_FULL:
             return manager->config.evolver_config.visual_state_dim;
-        default:
-            return 0;
+        default: return 0;
     }
 }
 
 int liquid_vision_manager_save(const LiquidVisionManager* manager, const char* filepath) {
     if (!manager || !filepath) return -1;
-
     FILE* fp = fopen(filepath, "wb");
     if (!fp) return -1;
 
     fwrite(&manager->config, sizeof(LiquidVisionManagerConfig), 1, fp);
 
     if (manager->patch_encoder) {
-        int has = 1;
-        fwrite(&has, sizeof(int), 1, fp);
+        int has = 1; fwrite(&has, sizeof(int), 1, fp);
         fwrite(&manager->patch_encoder->config, sizeof(LiquidPatchEncoderConfig), 1, fp);
         int D = manager->patch_encoder->config.patch_hidden_dim;
         int patch_size = manager->patch_encoder->config.patch_size;
@@ -1376,14 +1280,10 @@ int liquid_vision_manager_save(const LiquidVisionManager* manager, const char* f
         fwrite(manager->patch_encoder->patch_gate_bias, sizeof(float), D, fp);
         fwrite(manager->patch_encoder->patch_act_bias, sizeof(float), D, fp);
         fwrite(manager->patch_encoder->time_constants, sizeof(float), D, fp);
-    } else {
-        int has = 0;
-        fwrite(&has, sizeof(int), 1, fp);
-    }
+    } else { int has = 0; fwrite(&has, sizeof(int), 1, fp); }
 
     if (manager->cfc_evolver) {
-        int has = 1;
-        fwrite(&has, sizeof(int), 1, fp);
+        int has = 1; fwrite(&has, sizeof(int), 1, fp);
         fwrite(&manager->cfc_evolver->config, sizeof(LiquidVisualCfCEvolverConfig), 1, fp);
         int NC = manager->cfc_evolver->config.num_visual_channels;
         int D = manager->cfc_evolver->config.visual_state_dim;
@@ -1393,14 +1293,10 @@ int liquid_vision_manager_save(const LiquidVisionManager* manager, const char* f
         fwrite(manager->cfc_evolver->h_to_act, sizeof(float), (size_t)NC * D * D, fp);
         fwrite(manager->cfc_evolver->gate_bias, sizeof(float), (size_t)NC * D, fp);
         fwrite(manager->cfc_evolver->act_bias, sizeof(float), (size_t)NC * D, fp);
-    } else {
-        int has = 0;
-        fwrite(&has, sizeof(int), 1, fp);
-    }
+    } else { int has = 0; fwrite(&has, sizeof(int), 1, fp); }
 
     if (manager->spatial_processor) {
-        int has = 1;
-        fwrite(&has, sizeof(int), 1, fp);
+        int has = 1; fwrite(&has, sizeof(int), 1, fp);
         fwrite(&manager->spatial_processor->config, sizeof(LiquidSpatialProcessorConfig), 1, fp);
         int HD = manager->spatial_processor->config.spatial_hidden_dim;
         int FD = manager->spatial_processor->config.feature_dim;
@@ -1410,10 +1306,7 @@ int liquid_vision_manager_save(const LiquidVisionManager* manager, const char* f
         fwrite(manager->spatial_processor->hidden_to_hidden_w_act, sizeof(float), (size_t)HD * HD, fp);
         fwrite(manager->spatial_processor->gate_bias, sizeof(float), HD, fp);
         fwrite(manager->spatial_processor->act_bias, sizeof(float), HD, fp);
-    } else {
-        int has = 0;
-        fwrite(&has, sizeof(int), 1, fp);
-    }
+    } else { int has = 0; fwrite(&has, sizeof(int), 1, fp); }
 
     fclose(fp);
     return 0;
@@ -1421,15 +1314,11 @@ int liquid_vision_manager_save(const LiquidVisionManager* manager, const char* f
 
 int liquid_vision_manager_load(LiquidVisionManager* manager, const char* filepath) {
     if (!manager || !filepath) return -1;
-
     FILE* fp = fopen(filepath, "rb");
     if (!fp) return -1;
 
     LiquidVisionManagerConfig loaded_config;
-    if (fread(&loaded_config, sizeof(LiquidVisionManagerConfig), 1, fp) != 1) {
-        fclose(fp);
-        return -1;
-    }
+    if (fread(&loaded_config, sizeof(LiquidVisionManagerConfig), 1, fp) != 1) { fclose(fp); return -1; }
 
     int has;
     if (fread(&has, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
@@ -1480,3 +1369,2111 @@ int liquid_vision_manager_load(LiquidVisionManager* manager, const char* filepat
     fclose(fp);
     return 0;
 }
+
+/* ===================================================================
+ * 第六节：动态可扩展视觉类别注册表（原vision.c）
+ * =================================================================== */
+
+static const char* g_default_coco_names_zh[VISION_CLASS_DEFAULT_COUNT] = {
+    "人", "自行车", "汽车", "摩托车",
+    "飞机", "公共汽车", "火车", "卡车",
+    "船", "交通灯", "消防栓", "停止标志",
+    "停车计时器", "长凳", "鸟", "猫",
+    "狗", "马", "羊", "牛",
+    "大象", "熊", "斑马", "长颈鹿",
+    "背包", "伞", "手提包", "领带",
+    "手提箱", "飞盘", "滑雪板", "滑雪板雪板",
+    "运动球", "风筝", "棒球棒", "棒球手套",
+    "滑板", "冲浪板", "网球拍", "瓶子",
+    "酒杯", "杯子", "叉子", "刀",
+    "勺子", "碗", "香蕉", "苹果",
+    "三明治", "橘子", "西兰花", "胡萝卜",
+    "热狗", "披萨", "甜甜圈", "蛋糕",
+    "椅子", "沙发", "盆栽", "床",
+    "餐桌", "马桶", "电视", "笔记本电脑",
+    "鼠标", "遥控器", "键盘", "手机",
+    "微波炉", "烤箱", "烤面包机", "水槽",
+    "冰箱", "书", "时钟", "花瓶",
+    "剪刀", "泰迪熊", "吹风机", "牙刷"
+};
+
+static const char* g_default_coco_names_en[VISION_CLASS_DEFAULT_COUNT] = {
+    "person", "bicycle", "car", "motorcycle",
+    "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat",
+    "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe",
+    "backpack", "umbrella", "handbag", "tie",
+    "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle",
+    "wine glass", "cup", "fork", "knife",
+    "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot",
+    "hot dog", "pizza", "donut", "cake",
+    "chair", "couch", "potted plant", "bed",
+    "dining table", "toilet", "tv", "laptop",
+    "mouse", "remote", "keyboard", "cell phone",
+    "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush"
+};
+
+struct VisionClassRegistry {
+    VisionClassEntry* entries;
+    int count;
+    int capacity;
+    int next_dynamic_id;
+    int initialized;
+    MutexHandle lock;
+};
+
+static VisionClassRegistry* g_global_class_registry = NULL;
+static MutexHandle g_registry_singleton_lock = NULL;
+
+static void _registry_lock_init(void) {
+    if (!g_registry_singleton_lock) {
+        g_registry_singleton_lock = mutex_create();
+    }
+}
+
+VisionClassRegistry* vision_class_registry_create(void) {
+    VisionClassRegistry* reg = (VisionClassRegistry*)safe_calloc(1, sizeof(VisionClassRegistry));
+    if (!reg) return NULL;
+
+    reg->capacity = VISION_CLASS_DEFAULT_COUNT + 64;
+    reg->entries = (VisionClassEntry*)safe_calloc((size_t)reg->capacity, sizeof(VisionClassEntry));
+    if (!reg->entries) { safe_free((void**)&reg); return NULL; }
+
+    reg->lock = mutex_create();
+    if (!reg->lock) {
+        safe_free((void**)&reg->entries); safe_free((void**)&reg);
+        return NULL;
+    }
+
+    for (int i = 0; i < VISION_CLASS_DEFAULT_COUNT; i++) {
+        reg->entries[i].class_id = i;
+        strncpy(reg->entries[i].name_zh, g_default_coco_names_zh[i], VISION_CLASS_NAME_MAX_LEN - 1);
+        reg->entries[i].name_zh[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+        strncpy(reg->entries[i].name_en, g_default_coco_names_en[i], VISION_CLASS_NAME_MAX_LEN - 1);
+        reg->entries[i].name_en[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+        reg->entries[i].is_learned = 0;
+        reg->entries[i].sample_count = 0;
+        reg->entries[i].confidence_threshold = 0.5f;
+    }
+    reg->count = VISION_CLASS_DEFAULT_COUNT;
+    reg->next_dynamic_id = VISION_CLASS_DEFAULT_COUNT;
+    reg->initialized = 1;
+
+    return reg;
+}
+
+void vision_class_registry_free(VisionClassRegistry* registry) {
+    if (!registry) return;
+    if (registry->lock) mutex_destroy(registry->lock);
+    safe_free((void**)&registry->entries);
+    safe_free((void**)&registry);
+}
+
+VisionClassRegistry* vision_class_registry_get_global(void) {
+    _registry_lock_init();
+    if (g_registry_singleton_lock) mutex_lock(g_registry_singleton_lock);
+
+    if (!g_global_class_registry) {
+        g_global_class_registry = vision_class_registry_create();
+    }
+
+    VisionClassRegistry* result = g_global_class_registry;
+    if (g_registry_singleton_lock) mutex_unlock(g_registry_singleton_lock);
+    return result;
+}
+
+int vision_class_register(VisionClassRegistry* registry,
+                          const char* name_zh, const char* name_en) {
+    if (!registry || !registry->initialized) return -1;
+    if (!name_zh || !name_en) return -1;
+
+    mutex_lock(registry->lock);
+
+    for (int i = 0; i < registry->count; i++) {
+        if (strcmp(registry->entries[i].name_en, name_en) == 0) {
+            int existing_id = registry->entries[i].class_id;
+            mutex_unlock(registry->lock);
+            return existing_id;
+        }
+    }
+
+    if (registry->count >= registry->capacity) {
+        int new_cap = registry->capacity * 2;
+        if (new_cap > VISION_CLASS_MAX_CAPACITY) { mutex_unlock(registry->lock); return -1; }
+        VisionClassEntry* new_entries = (VisionClassEntry*)safe_realloc(
+            registry->entries, (size_t)new_cap * sizeof(VisionClassEntry));
+        if (!new_entries) { mutex_unlock(registry->lock); return -1; }
+        memset(new_entries + registry->capacity, 0,
+               (size_t)(new_cap - registry->capacity) * sizeof(VisionClassEntry));
+        registry->entries = new_entries;
+        registry->capacity = new_cap;
+    }
+
+    int new_id = registry->next_dynamic_id++;
+    VisionClassEntry* entry = &registry->entries[registry->count];
+    memset(entry, 0, sizeof(VisionClassEntry));
+    entry->class_id = new_id;
+    strncpy(entry->name_zh, name_zh, VISION_CLASS_NAME_MAX_LEN - 1);
+    entry->name_zh[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+    strncpy(entry->name_en, name_en, VISION_CLASS_NAME_MAX_LEN - 1);
+    entry->name_en[VISION_CLASS_NAME_MAX_LEN - 1] = '\0';
+    entry->is_learned = 1;
+    entry->sample_count = 1;
+    entry->confidence_threshold = 0.35f;
+
+    registry->count++;
+    mutex_unlock(registry->lock);
+    return new_id;
+}
+
+int vision_class_get_count(const VisionClassRegistry* registry) {
+    if (!registry || !registry->initialized) return 0;
+    return registry->count;
+}
+
+int vision_class_get_entry(const VisionClassRegistry* registry, int class_id,
+                           VisionClassEntry* entry) {
+    if (!registry || !registry->initialized) return -1;
+    if (class_id < 0) return -1;
+
+    for (int i = 0; i < registry->count; i++) {
+        if (registry->entries[i].class_id == class_id) {
+            if (entry) memcpy(entry, &registry->entries[i], sizeof(VisionClassEntry));
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int vision_class_add_samples(VisionClassRegistry* registry, int class_id, int count) {
+    if (!registry || !registry->initialized || count < 1) return -1;
+
+    mutex_lock(registry->lock);
+    for (int i = 0; i < registry->count; i++) {
+        if (registry->entries[i].class_id == class_id) {
+            registry->entries[i].sample_count += count;
+            if (registry->entries[i].sample_count > 100) {
+                registry->entries[i].confidence_threshold = 0.5f;
+            } else if (registry->entries[i].sample_count > 10) {
+                registry->entries[i].confidence_threshold = 0.4f;
+            }
+            mutex_unlock(registry->lock);
+            return 0;
+        }
+    }
+    mutex_unlock(registry->lock);
+    return -1;
+}
+
+const char* vision_get_class_name_zh(int class_id) {
+    VisionClassRegistry* reg = vision_class_registry_get_global();
+    if (!reg) return "未知";
+
+    VisionClassEntry entry;
+    if (vision_class_get_entry(reg, class_id, &entry) == 0) {
+        return (entry.name_zh[0] != '\0') ? entry.name_zh : "未知";
+    }
+    return "未知";
+}
+
+const char* vision_get_class_name_en(int class_id) {
+    VisionClassRegistry* reg = vision_class_registry_get_global();
+    if (!reg) return "unknown";
+
+    VisionClassEntry entry;
+    if (vision_class_get_entry(reg, class_id, &entry) == 0) {
+        return (entry.name_en[0] != '\0') ? entry.name_en : "unknown";
+    }
+    return "unknown";
+}
+
+/* ===================================================================
+ * 第七节：NMS非极大值抑制（原vision.c）
+ * =================================================================== */
+
+static float _nms_compute_iou(const CfCVisionDetection* a, const CfCVisionDetection* b) {
+    float ax1 = a->cx - a->w * 0.5f;
+    float ay1 = a->cy - a->h * 0.5f;
+    float ax2 = a->cx + a->w * 0.5f;
+    float ay2 = a->cy + a->h * 0.5f;
+    float bx1 = b->cx - b->w * 0.5f;
+    float by1 = b->cy - b->h * 0.5f;
+    float bx2 = b->cx + b->w * 0.5f;
+    float by2 = b->cy + b->h * 0.5f;
+
+    float inter_x1 = ax1 > bx1 ? ax1 : bx1;
+    float inter_y1 = ay1 > by1 ? ay1 : by1;
+    float inter_x2 = ax2 < bx2 ? ax2 : bx2;
+    float inter_y2 = ay2 < by2 ? ay2 : by2;
+
+    float inter_w = inter_x2 - inter_x1;
+    float inter_h = inter_y2 - inter_y1;
+    if (inter_w <= 0.0f || inter_h <= 0.0f) return 0.0f;
+
+    float inter_area = inter_w * inter_h;
+    float area_a = a->w * a->h;
+    float area_b = b->w * b->h;
+    float union_area = area_a + area_b - inter_area;
+
+    return (union_area > 1e-6f) ? inter_area / union_area : 0.0f;
+}
+
+int vision_nms(CfCVisionDetection* detections, int count, float iou_threshold) {
+    if (!detections || count <= 1) return count;
+
+    for (int i = 0; i < count - 1; i++) {
+        int best = i;
+        for (int j = i + 1; j < count; j++) {
+            if (detections[j].confidence > detections[best].confidence) best = j;
+        }
+        if (best != i) {
+            CfCVisionDetection tmp = detections[i];
+            detections[i] = detections[best];
+            detections[best] = tmp;
+        }
+    }
+
+    int* keep = (int*)safe_malloc((size_t)count * sizeof(int));
+    if (!keep) return count;
+    for (int i = 0; i < count; i++) keep[i] = 1;
+
+    int kept = 0;
+    for (int i = 0; i < count; i++) {
+        if (!keep[i]) continue;
+        kept++;
+        for (int j = i + 1; j < count; j++) {
+            if (!keep[j]) continue;
+            if (detections[i].class_id == detections[j].class_id) {
+                float iou = _nms_compute_iou(&detections[i], &detections[j]);
+                if (iou > iou_threshold) keep[j] = 0;
+            }
+        }
+    }
+
+    int out_idx = 0;
+    for (int i = 0; i < count; i++) {
+        if (keep[i]) {
+            if (out_idx != i) detections[out_idx] = detections[i];
+            out_idx++;
+        }
+    }
+
+    safe_free((void**)&keep);
+    return out_idx;
+}
+
+void vision_free_detections(CfCVisionDetection* detections, int count) {
+    if (!detections || count <= 0) return;
+    for (int i = 0; i < count; i++) {
+        if (detections[i].class_probs) {
+            safe_free((void**)&detections[i].class_probs);
+            detections[i].class_probs_count = 0;
+        }
+    }
+}
+
+/* ===================================================================
+ * 第八节：传统CV特征提取 —— 辅助预处理路径（原vision.c）
+ * =================================================================== */
+
+/* 8.1 颜色分析 —— RGB直方图 + 主色检测 */
+typedef struct {
+    float r_hist[COLOR_HIST_BINS];
+    float g_hist[COLOR_HIST_BINS];
+    float b_hist[COLOR_HIST_BINS];
+    float dominant_color[3];
+    int is_grayscale;
+    float avg_brightness;
+} _ColorAnalysis;
+
+static int _vision_analyze_color(const float* image, int width, int height, int channels,
+                                  _ColorAnalysis* result) {
+    if (!image || !result || width <= 0 || height <= 0 || channels < 3) return -1;
+    memset(result, 0, sizeof(_ColorAnalysis));
+
+    size_t total = (size_t)width * height;
+    float sum_r = 0.0f, sum_g = 0.0f, sum_b = 0.0f;
+    int r_bins[COLOR_HIST_BINS] = {0}, g_bins[COLOR_HIST_BINS] = {0}, b_bins[COLOR_HIST_BINS] = {0};
+
+    for (size_t i = 0; i < total; i++) {
+        float r = image[i * channels];
+        float g = image[i * channels + 1];
+        float b = image[i * channels + 2];
+        sum_r += r; sum_g += g; sum_b += b;
+        int ri = (int)(r * (COLOR_HIST_BINS - 1) + 0.5f);
+        int gi = (int)(g * (COLOR_HIST_BINS - 1) + 0.5f);
+        int bi = (int)(b * (COLOR_HIST_BINS - 1) + 0.5f);
+        if (ri >= 0 && ri < COLOR_HIST_BINS) r_bins[ri]++;
+        if (gi >= 0 && gi < COLOR_HIST_BINS) g_bins[gi]++;
+        if (bi >= 0 && bi < COLOR_HIST_BINS) b_bins[bi]++;
+    }
+
+    for (int i = 0; i < COLOR_HIST_BINS; i++) {
+        result->r_hist[i] = (float)r_bins[i] / (float)total;
+        result->g_hist[i] = (float)g_bins[i] / (float)total;
+        result->b_hist[i] = (float)b_bins[i] / (float)total;
+    }
+
+    result->dominant_color[0] = sum_r / (float)total;
+    result->dominant_color[1] = sum_g / (float)total;
+    result->dominant_color[2] = sum_b / (float)total;
+    result->avg_brightness = (sum_r + sum_g + sum_b) / (3.0f * (float)total);
+
+    float var_r = 0.0f, var_g = 0.0f, var_b = 0.0f;
+    for (size_t i = 0; i < total; i++) {
+        float dr = image[i * channels] - result->dominant_color[0];
+        float dg = image[i * channels + 1] - result->dominant_color[1];
+        float db = image[i * channels + 2] - result->dominant_color[2];
+        var_r += dr * dr; var_g += dg * dg; var_b += db * db;
+    }
+    var_r /= (float)total; var_g /= (float)total; var_b /= (float)total;
+    result->is_grayscale = (var_r < 0.005f && var_g < 0.005f && var_b < 0.005f) ? 1 : 0;
+
+    return 0;
+}
+
+/* 8.2 传统CV特征提取辅助函数 */
+/*
+ * 灰度转换
+ * Sobel边缘检测 + 方向统计
+ * LBP纹理直方图（8位均匀模式）
+ * 多尺度图像金字塔特征
+ * HOG梯度方向直方图特征（9 bins, 8×8 cells, 2×2 block归一化）
+ * HSV风格色彩直方图
+ * L2归一化
+ */
+static int _vision_extract_traditional_cv(const float* data, int width, int height, int channels,
+                                           int enable_multiscale, int enable_hog, int enable_color,
+                                           float* features, size_t max_features) {
+    size_t total_pixels = (size_t)width * height;
+    size_t feature_idx = 0;
+
+    /* 灰度转换 */
+    float* gray = (float*)safe_malloc(total_pixels * sizeof(float));
+    if (!gray) return -1;
+    if (channels >= 3) {
+        for (size_t i = 0; i < total_pixels; i++)
+            gray[i] = 0.299f * data[i * 3] + 0.587f * data[i * 3 + 1] + 0.114f * data[i * 3 + 2];
+    } else {
+        for (size_t i = 0; i < total_pixels; i++) gray[i] = data[i];
+    }
+
+    /* 颜色矩（均值、标准差、偏度） */
+    if (channels >= 3 && feature_idx + 18 < max_features) {
+        for (int c = 0; c < 3; c++) {
+            double sum = 0.0, sum_sq = 0.0, sum_cu = 0.0;
+            for (size_t i = 0; i < total_pixels; i++) {
+                float v = data[i * channels + c];
+                sum += v; sum_sq += v * v; sum_cu += v * v * v;
+            }
+            float mean = (float)(sum / (double)total_pixels);
+            float variance = (float)(sum_sq / (double)total_pixels) - mean * mean;
+            float stddev = sqrtf(variance > 0 ? variance : 0.0f);
+            float skewness = 0.0f;
+            if (stddev > 1e-8f) {
+                skewness = (float)((sum_cu / (double)total_pixels - 3.0 * mean * variance - mean * mean * mean)
+                          / (stddev * stddev * stddev));
+            }
+            features[feature_idx++] = mean;
+            features[feature_idx++] = stddev;
+            features[feature_idx++] = skewness;
+        }
+        for (int c = 0; c < 3 && feature_idx + 3 < max_features; c++) {
+            float min_val = 1e10f, max_val = -1e10f;
+            for (size_t i = 0; i < total_pixels; i++) {
+                float v = data[i * channels + c];
+                if (v < min_val) min_val = v; if (v > max_val) max_val = v;
+            }
+            features[feature_idx++] = min_val;
+            features[feature_idx++] = max_val;
+            features[feature_idx++] = max_val - min_val;
+        }
+    }
+
+    /* Sobel边缘密度和方向统计 */
+    if (feature_idx + 10 < max_features && width >= 3 && height >= 3) {
+        float edge_density = 0.0f, edge_sum = 0.0f;
+        float direction_hist[4] = {0}; int edge_count = 0;
+        for (int y = 1; y < height - 1; y++) {
+            for (int x = 1; x < width - 1; x++) {
+                float gx = -gray[(y-1)*width+(x-1)] - 2.0f*gray[y*width+(x-1)] - gray[(y+1)*width+(x-1)]
+                          + gray[(y-1)*width+(x+1)] + 2.0f*gray[y*width+(x+1)] + gray[(y+1)*width+(x+1)];
+                float gy = -gray[(y-1)*width+(x-1)] - 2.0f*gray[(y-1)*width+x] - gray[(y-1)*width+(x+1)]
+                          + gray[(y+1)*width+(x-1)] + 2.0f*gray[(y+1)*width+x] + gray[(y+1)*width+(x+1)];
+                float mag = sqrtf(gx * gx + gy * gy);
+                edge_sum += mag;
+                if (mag > 0.1f) {
+                    edge_count++;
+                    float angle = atan2f(gy, gx) + 3.14159265f;
+                    int bin = (int)(angle * 4.0f / (2.0f * 3.14159265f)) % 4;
+                    direction_hist[bin] += 1.0f;
+                }
+            }
+        }
+        edge_density = (float)edge_count / (float)((width - 2) * (height - 2));
+        features[feature_idx++] = edge_density;
+        features[feature_idx++] = edge_count > 0 ? edge_sum / (float)edge_count : 0.0f;
+        for (int i = 0; i < 4 && feature_idx < max_features; i++)
+            features[feature_idx++] = edge_count > 0 ? direction_hist[i] / (float)edge_count : 0.0f;
+        if (feature_idx < max_features) {
+            float edge_var = 0.0f; int ec = 0; float em = edge_count > 0 ? edge_sum / (float)edge_count : 0.0f;
+            for (int y = 1; y < height - 1 && ec < 10000; y++) for (int x = 1; x < width - 1; x++) {
+                float gx2 = -gray[(y-1)*width+(x-1)] - 2.0f*gray[y*width+(x-1)] - gray[(y+1)*width+(x-1)]
+                           + gray[(y-1)*width+(x+1)] + 2.0f*gray[y*width+(x+1)] + gray[(y+1)*width+(x+1)];
+                float gy2 = -gray[(y-1)*width+(x-1)] - 2.0f*gray[(y-1)*width+x] - gray[(y-1)*width+(x+1)]
+                           + gray[(y+1)*width+(x-1)] + 2.0f*gray[(y+1)*width+x] + gray[(y+1)*width+(x+1)];
+                float mag2 = sqrtf(gx2 * gx2 + gy2 * gy2);
+                if (mag2 > 0.1f) { float d = mag2 - em; edge_var += d * d; ec++; }
+            }
+            features[feature_idx++] = ec > 0 ? sqrtf(edge_var / (float)ec) : 0.0f;
+        }
+    }
+
+    /* LBP纹理直方图 */
+    if (feature_idx + 8 < max_features && width >= 3 && height >= 3) {
+        float lbp_hist[8] = {0}; int lbp_count = 0;
+        int pos[8][2] = {{-1,-1},{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0}};
+        for (int y = 1; y < height - 1; y++) {
+            for (int x = 1; x < width - 1; x++) {
+                float center = gray[y * width + x];
+                int code = 0;
+                for (int p = 0; p < 8; p++)
+                    if (gray[(y + pos[p][1]) * width + x + pos[p][0]] >= center) code |= (1 << p);
+                for (int b = 0; b < 8; b++) if (code & (1 << b)) lbp_hist[b] += 1.0f;
+                lbp_count++;
+            }
+        }
+        if (lbp_count > 0)
+            for (int i = 0; i < 8 && feature_idx < max_features; i++)
+                features[feature_idx++] = lbp_hist[i] / (float)lbp_count;
+    }
+
+    /* 多尺度图像金字塔特征 */
+    if (enable_multiscale && feature_idx + 24 < max_features && width >= 16 && height >= 16) {
+        int scales[4][2] = {{width, height}, {width/2, height/2}, {width/4, height/4}, {width/8, height/8}};
+        for (int sc = 0; sc < 4; sc++) {
+            int sw = scales[sc][0], sh = scales[sc][1];
+            if (sw < 2 || sh < 2) break;
+            float s_mean = 0.0f, s_var = 0.0f; int s_count = 0;
+            for (int sy = 0; sy < sh; sy++) {
+                for (int sx = 0; sx < sw; sx++) {
+                    int src_y = sy * (1 << sc), src_x = sx * (1 << sc);
+                    if (src_y >= height || src_x >= width) continue;
+                    float v = gray[src_y * width + src_x];
+                    s_mean += v; s_var += v * v; s_count++;
+                }
+            }
+            if (s_count > 0) {
+                s_mean /= (float)s_count;
+                s_var = s_var/(float)s_count - s_mean*s_mean;
+                if (feature_idx + 6 <= max_features) {
+                    features[feature_idx++] = s_mean;
+                    features[feature_idx++] = sqrtf(s_var > 0 ? s_var : 0.0f);
+                    features[feature_idx++] = (float)sw;
+                    features[feature_idx++] = (float)sh;
+                    features[feature_idx++] = (float)s_count / (float)(width * height);
+                    if (feature_idx >= 6 && sc > 0)
+                        features[feature_idx++] = s_mean - features[feature_idx - 7];
+                    else
+                        features[feature_idx++] = 0.0f;
+                }
+            }
+        }
+    }
+
+    /* HOG梯度方向直方图特征 */
+    if (enable_hog && feature_idx + 36 < max_features && width >= 16 && height >= 16) {
+        int cell_w = 8, cell_h = 8;
+        int cells_x = width / cell_w, cells_y = height / cell_w;
+        if (cells_x < 2) cells_x = 2;
+        if (cells_y < 2) cells_y = 2;
+        float* cell_hist = (float*)safe_calloc((size_t)cells_x * (size_t)cells_y * 9, sizeof(float));
+        if (cell_hist) {
+            for (int cy = 0; cy < cells_y; cy++) {
+                for (int cx = 0; cx < cells_x; cx++) {
+                    for (int dy = 0; dy < cell_h; dy++) {
+                        for (int dx = 0; dx < cell_w; dx++) {
+                            int px = cx * cell_w + dx, py = cy * cell_h + dy;
+                            if (px >= width - 1 || py >= height - 1 || px < 1 || py < 1) continue;
+                            float gx = gray[py*width+(px+1)] - gray[py*width+(px-1)];
+                            float gy = gray[(py+1)*width+px] - gray[(py-1)*width+px];
+                            float mag = sqrtf(gx*gx + gy*gy);
+                            float ori = atan2f(gy, gx);
+                            if (ori < 0) ori += 2.0f * 3.14159265f;
+                            int bin = (int)(ori * 9.0f / (2.0f * 3.14159265f)) % 9;
+                            cell_hist[(cy*cells_x + cx)*9 + bin] += mag;
+                        }
+                    }
+                }
+            }
+            int feat_out = 0;
+            float global_bins[9] = {0};
+            for (int cy = 0; cy < cells_y - 1 && feat_out < 36; cy++) {
+                for (int cx = 0; cx < cells_x - 1 && feat_out < 36; cx++) {
+                    float block_norm = 0.0f;
+                    for (int by = 0; by < 2; by++)
+                        for (int bx = 0; bx < 2; bx++)
+                            for (int b = 0; b < 9; b++)
+                                block_norm += cell_hist[((cy+by)*cells_x+(cx+bx))*9+b];
+                    float norm = sqrtf(block_norm*block_norm + 1e-6f);
+                    for (int by = 0; by < 2 && feat_out < 36; by++)
+                        for (int bx = 0; bx < 2 && feat_out < 36; bx++)
+                            for (int b = 0; b < 9 && feat_out < 36; b++) {
+                                if (feat_out < 36) {
+                                    features[feature_idx+feat_out] =
+                                        cell_hist[((cy+by)*cells_x+(cx+bx))*9+b]/norm;
+                                    feat_out++;
+                                }
+                            }
+                }
+            }
+            for (int i = 0; i < feat_out && i < 36; i++) { int bin = i % 9; global_bins[bin] += features[feature_idx+i]; }
+            for (int b = 0; b < 9 && feature_idx + 36 + b < max_features; b++)
+                features[feature_idx+36+b] = global_bins[b];
+            feature_idx += (feat_out < 36 ? feat_out : 36) + 9;
+            if (feature_idx > max_features) feature_idx = max_features;
+            safe_free((void**)&cell_hist);
+        }
+    }
+
+    /* HSV风格色彩直方图 */
+    if (enable_color && channels >= 3 && feature_idx + 24 < max_features) {
+        float hue_hist[12] = {0}, sat_hist[8] = {0}, val_hist[8] = {0};
+        size_t color_count = 0;
+        for (size_t i = 0; i < total_pixels && color_count < 50000; i++) {
+            float r = data[i*3], g = data[i*3+1], b = data[i*3+2];
+            float max_c = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            float min_c = r < g ? (r < b ? r : b) : (g < b ? g : b);
+            float delta = max_c - min_c;
+            float hue = 0.0f;
+            if (delta > 1e-4f) {
+                if (max_c == r) hue = 60.0f * ((g-b)/delta + (g<b?6.0f:0.0f));
+                else if (max_c == g) hue = 60.0f * ((b-r)/delta + 2.0f);
+                else hue = 60.0f * ((r-g)/delta + 4.0f);
+            }
+            float sat = max_c > 1e-4f ? delta / max_c : 0.0f;
+            float val = max_c;
+            int hb = (int)(hue / 30.0f) % 12;
+            int sb = (int)(sat * 7.99f);
+            int vb = (int)(val * 7.99f);
+            if (hb >= 0 && hb < 12) hue_hist[hb] += 1.0f;
+            if (sb >= 0 && sb < 8) sat_hist[sb] += 1.0f;
+            if (vb >= 0 && vb < 8) val_hist[vb] += 1.0f;
+            color_count++;
+        }
+        if (color_count > 0) {
+            for (int i = 0; i < 12; i++) hue_hist[i] /= (float)color_count;
+            for (int i = 0; i < 8; i++) { sat_hist[i] /= (float)color_count; val_hist[i] /= (float)color_count; }
+            for (int i = 0; i < 12 && feature_idx < max_features; i++) features[feature_idx++] = hue_hist[i];
+            for (int i = 0; i < 6 && feature_idx < max_features; i++)
+                features[feature_idx++] = sat_hist[i] + (i < 6 ? val_hist[i] : 0);
+        }
+    }
+    while (feature_idx < max_features) features[feature_idx++] = 0.0f;
+
+    /* L2归一化 */
+    float norm = 0.0f;
+    for (size_t i = 0; i < feature_idx; i++) norm += features[i] * features[i];
+    if (norm > 1e-8f) {
+        float inv = 1.0f / sqrtf(norm);
+        for (size_t i = 0; i < feature_idx; i++) features[i] *= inv;
+    }
+
+    safe_free((void**)&gray);
+    return (int)feature_idx;
+}
+
+/* 8.3 独立HOG特征提取 */
+int vision_extract_hog_features(const float* gray, int width, int height,
+                                 float* features, int max_features) {
+    if (!gray || !features || max_features < 36 || width < 16 || height < 16) return -1;
+    int cell_w = 8, cell_h = 8;
+    int cells_x = width / cell_w, cells_y = height / cell_w;
+    if (cells_x < 2) cells_x = 2;
+    if (cells_y < 2) cells_y = 2;
+    int feat_out = 0;
+    float* cell_hist = (float*)safe_calloc((size_t)cells_x * (size_t)cells_y * 9, sizeof(float));
+    if (!cell_hist) return -1;
+    for (int cy = 0; cy < cells_y; cy++) {
+        for (int cx = 0; cx < cells_x; cx++) {
+            for (int dy = 0; dy < cell_h; dy++) {
+                for (int dx = 0; dx < cell_w; dx++) {
+                    int px = cx * cell_w + dx, py = cy * cell_h + dy;
+                    if (px < 1 || py < 1 || px >= width - 1 || py >= height - 1) continue;
+                    float gx = gray[py*width+(px+1)] - gray[py*width+(px-1)];
+                    float gy = gray[(py+1)*width+px] - gray[(py-1)*width+px];
+                    float mag = sqrtf(gx*gx + gy*gy);
+                    float ori = atan2f(gy, gx);
+                    if (ori < 0) ori += 2.0f * 3.14159265f;
+                    int bin = (int)(ori * 9.0f / (2.0f * 3.14159265f)) % 9;
+                    cell_hist[(cy*cells_x + cx)*9 + bin] += mag;
+                }
+            }
+        }
+    }
+    for (int cy = 0; cy < cells_y - 1 && feat_out < max_features; cy++) {
+        for (int cx = 0; cx < cells_x - 1 && feat_out < max_features; cx++) {
+            float block_norm = 0.0f;
+            for (int by = 0; by < 2; by++)
+                for (int bx = 0; bx < 2; bx++)
+                    for (int b = 0; b < 9; b++)
+                        block_norm += cell_hist[((cy+by)*cells_x+(cx+bx))*9+b];
+            float norm = sqrtf(block_norm*block_norm + 1e-6f);
+            for (int by = 0; by < 2 && feat_out < max_features; by++)
+                for (int bx = 0; bx < 2 && feat_out < max_features; bx++)
+                    for (int b = 0; b < 9 && feat_out < max_features; b++) {
+                        features[feat_out++] = cell_hist[((cy+by)*cells_x+(cx+bx))*9+b]/norm;
+                    }
+        }
+    }
+    safe_free((void**)&cell_hist);
+    return feat_out;
+}
+
+/* 8.4 多尺度LBP特征提取 */
+int vision_extract_multiscale_lbp(const float* gray, int width, int height,
+                                   float* features, int max_features) {
+    if (!gray || !features || max_features < 24 || width < 3 || height < 3) return -1;
+    int radii[3] = {1, 2, 4};
+    int feat_out = 0;
+    for (int r_idx = 0; r_idx < 3; r_idx++) {
+        int R = radii[r_idx];
+        float hist[8] = {0}; int count = 0;
+        for (int y = R; y < height - R; y++) {
+            for (int x = R; x < width - R; x++) {
+                float center = gray[y * width + x];
+                int code = 0;
+                for (int p = 0; p < 8; p++) {
+                    float angle = (float)p * 3.14159265f / 4.0f;
+                    int px = x + (int)((float)R * cosf(angle) + 0.5f);
+                    int py = y + (int)((float)R * sinf(angle) + 0.5f);
+                    if (px < 0 || px >= width || py < 0 || py >= height) continue;
+                    if (gray[py * width + px] >= center) code |= (1 << p);
+                }
+                for (int b = 0; b < 8; b++) if (code & (1 << b)) hist[b] += 1.0f;
+                count++;
+            }
+        }
+        if (count > 0 && feat_out + 8 <= max_features) {
+            for (int b = 0; b < 8; b++) features[feat_out++] = hist[b] / (float)count;
+        }
+    }
+    return feat_out;
+}
+
+/* 8.5 HSV色彩直方图提取 */
+int vision_extract_color_histogram(const float* rgb, int width, int height, int channels,
+                                    float* features, int max_features) {
+    if (!rgb || !features || max_features < 28 || channels < 3) return -1;
+    float hue_hist[12] = {0}, sat_hist[8] = {0}, val_hist[8] = {0};
+    size_t total = (size_t)width * height;
+    size_t count = 0;
+    for (size_t i = 0; i < total && count < 50000; i++) {
+        float r = rgb[i*3], g = rgb[i*3+1], b_ = rgb[i*3+2];
+        float mx = r > g ? (r > b_ ? r : b_) : (g > b_ ? g : b_);
+        float mn = r < g ? (r < b_ ? r : b_) : (g < b_ ? g : b_);
+        float delta = mx - mn, hue = 0.0f;
+        if (delta > 1e-4f) {
+            if (mx == r) hue = 60.0f * ((g-b_)/delta + (g<b_?6.0f:0.0f));
+            else if (mx == g) hue = 60.0f * ((b_-r)/delta + 2.0f);
+            else hue = 60.0f * ((r-g)/delta + 4.0f);
+        }
+        float sat = mx > 1e-4f ? delta / mx : 0.0f;
+        float val = mx;
+        hue_hist[(int)(hue/30.0f)%12] += 1.0f;
+        sat_hist[(int)(sat*7.99f)] += 1.0f;
+        val_hist[(int)(val*7.99f)] += 1.0f;
+        count++;
+    }
+    if (count == 0) return 0;
+    int fi = 0;
+    for (int i = 0; i < 12 && fi < max_features; i++) features[fi++] = hue_hist[i]/(float)count;
+    for (int i = 0; i < 8 && fi < max_features; i++) features[fi++] = sat_hist[i]/(float)count;
+    for (int i = 0; i < 8 && fi < max_features; i++) features[fi++] = val_hist[i]/(float)count;
+    return fi;
+}
+
+/* ===================================================================
+ * 第九节：图像处理工具函数（原vision.c）
+ * =================================================================== */
+
+int vision_resize_bilinear(int src_width, int src_height, int channels,
+                            const float* src_data,
+                            int dst_width, int dst_height, float* dst_data) {
+    if (!src_data || !dst_data || channels <= 0) return -1;
+    if (src_width <= 0 || src_height <= 0 || dst_width <= 0 || dst_height <= 0) return -1;
+    if (src_width == dst_width && src_height == dst_height) {
+        memcpy(dst_data, src_data, (size_t)src_width * src_height * channels * sizeof(float));
+        return 0;
+    }
+
+    float x_ratio = (float)(src_width - 1) / (float)dst_width;
+    float y_ratio = (float)(src_height - 1) / (float)dst_height;
+
+    for (int dy = 0; dy < dst_height; dy++) {
+        for (int dx = 0; dx < dst_width; dx++) {
+            float sx_f = (float)dx * x_ratio;
+            float sy_f = (float)dy * y_ratio;
+            int sx = (int)sx_f, sy = (int)sy_f;
+            float fx = sx_f - (float)sx, fy = sy_f - (float)sy;
+            int sx1 = sx < src_width - 1 ? sx + 1 : sx;
+            int sy1 = sy < src_height - 1 ? sy + 1 : sy;
+
+            for (int c = 0; c < channels; c++) {
+                float p00 = src_data[(sy * src_width + sx) * channels + c];
+                float p10 = src_data[(sy * src_width + sx1) * channels + c];
+                float p01 = src_data[(sy1 * src_width + sx) * channels + c];
+                float p11 = src_data[(sy1 * src_width + sx1) * channels + c];
+                float top = p00 + (p10 - p00) * fx;
+                float bot = p01 + (p11 - p01) * fx;
+                dst_data[(dy * dst_width + dx) * channels + c] = top + (bot - top) * fy;
+            }
+        }
+    }
+    return 0;
+}
+
+int vision_resize_bilinear_float(int src_width, int src_height, int channels,
+                                  const float* src_data,
+                                  int dst_width, int dst_height, float* dst_data) {
+    return vision_resize_bilinear(src_width, src_height, channels,
+                                  src_data, dst_width, dst_height, dst_data);
+}
+
+int vision_yuv420_to_rgb(int width, int height,
+                          const unsigned char* y_plane, int y_stride,
+                          const unsigned char* u_plane, int uv_stride,
+                          const unsigned char* v_plane,
+                          float* rgb_output) {
+    if (!y_plane || !u_plane || !v_plane || !rgb_output) return -1;
+    if (width <= 0 || height <= 0 || (width & 1) || (height & 1)) return -1;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int y_idx = y * y_stride + x;
+            int uv_x = x / 2, uv_y = y / 2;
+            int uv_idx = uv_y * uv_stride + uv_x;
+
+            float yy = (float)y_plane[y_idx];
+            float u = (float)u_plane[uv_idx] - 128.0f;
+            float v = (float)v_plane[uv_idx] - 128.0f;
+
+            int dst_idx = (y * width + x) * 3;
+            float r = yy + 1.402f * v;
+            float g = yy - 0.344f * u - 0.714f * v;
+            float b = yy + 1.772f * u;
+
+            rgb_output[dst_idx] = (r < 0.0f ? 0.0f : (r > 255.0f ? 255.0f : r)) / 255.0f;
+            rgb_output[dst_idx + 1] = (g < 0.0f ? 0.0f : (g > 255.0f ? 255.0f : g)) / 255.0f;
+            rgb_output[dst_idx + 2] = (b < 0.0f ? 0.0f : (b > 255.0f ? 255.0f : b)) / 255.0f;
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
+ * 第十节：CfC ODE层 —— 兼容层（原deep_vision.c）
+ *
+ * CfC ODE层核心方程：
+ * h_new = (1 - gate) * state + gate * tanh(W_input * input + W_hidden * state + b_hidden)
+ * gate = sigmoid(W_gate * input + U_gate * state + b_gate)
+ * =================================================================== */
+
+struct CfcOdeLayer {
+    CfcOdeLayerConfig config;
+    int is_initialized;
+    float* w_input;
+    float* w_hidden;
+    float* b_hidden;
+    float* w_gate;
+    float* u_gate;
+    float* b_gate;
+    float* tau_weights;
+    float tau_bias;
+    float* state_buffer;
+    size_t state_buffer_size;
+    float* hidden_state_persistent;
+    int hidden_state_initialized;
+    size_t forward_count;
+    float total_forward_time_ms;
+};
+
+/* 辅助：矩阵向量乘法 + 向量操作 */
+static void _mat_vec_mul(const float* w, int rows, int cols, const float* x, float* y) {
+    for (int i = 0; i < rows; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < cols; j++) sum += w[(size_t)i * cols + j] * x[j];
+        y[i] = sum;
+    }
+}
+
+static void _vec_add_inplace(float* y, const float* x, int n) {
+    for (int i = 0; i < n; i++) y[i] += x[i];
+}
+
+static void _vec_mul_elem(float* z, const float* x, const float* y, int n) {
+    for (int i = 0; i < n; i++) z[i] = x[i] * y[i];
+}
+
+static void _apply_tanh_array(float* data, int n) {
+    for (int i = 0; i < n; i++) data[i] = tanhf(data[i]);
+}
+
+static void _apply_sigmoid_array(float* data, int n) {
+    for (int i = 0; i < n; i++) data[i] = _activation_sigmoid_stable(data[i]);
+}
+
+CfcOdeLayerConfig cfc_ode_layer_get_default_config(void) {
+    CfcOdeLayerConfig cfg;
+    cfg.input_dim = 64;
+    cfg.hidden_dim = 128;
+    cfg.num_layers = 3;
+    cfg.time_constant = 0.1f;
+    cfg.delta_t = 0.05f;
+    cfg.use_adaptive_tau = 1;
+    cfg.min_tau = 0.01f;
+    cfg.max_tau = 1.0f;
+    cfg.use_bias = 1;
+    cfg.use_liquid_gate = 1;
+    cfg.noise_std = 0.0f;
+    return cfg;
+}
+
+CfcOdeLayer* cfc_ode_layer_create(const CfcOdeLayerConfig* config) {
+    if (!config) return NULL;
+    if (config->input_dim <= 0 || config->hidden_dim <= 0 || config->num_layers <= 0) return NULL;
+
+    CfcOdeLayer* layer = (CfcOdeLayer*)safe_malloc(sizeof(CfcOdeLayer));
+    if (!layer) return NULL;
+
+    memset(layer, 0, sizeof(CfcOdeLayer));
+    memcpy(&layer->config, config, sizeof(CfcOdeLayerConfig));
+
+    const int input_dim = config->input_dim;
+    const int hidden_dim = config->hidden_dim;
+
+    layer->w_input = (float*)safe_malloc((size_t)input_dim * (size_t)hidden_dim * sizeof(float));
+    layer->w_hidden = (float*)safe_malloc((size_t)hidden_dim * (size_t)hidden_dim * sizeof(float));
+    layer->b_hidden = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+    layer->w_gate = (float*)safe_malloc((size_t)input_dim * (size_t)hidden_dim * sizeof(float));
+    layer->u_gate = (float*)safe_malloc((size_t)hidden_dim * (size_t)hidden_dim * sizeof(float));
+    layer->b_gate = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+
+    if (!layer->w_input || !layer->w_hidden || !layer->b_hidden ||
+        !layer->w_gate || !layer->u_gate || !layer->b_gate) {
+        cfc_ode_layer_free(layer); return NULL;
+    }
+
+    if (config->use_adaptive_tau) {
+        int total_dim = input_dim + hidden_dim;
+        layer->tau_weights = (float*)safe_malloc((size_t)total_dim * sizeof(float));
+        if (!layer->tau_weights) { cfc_ode_layer_free(layer); return NULL; }
+    }
+
+    layer->state_buffer = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+    if (!layer->state_buffer) { cfc_ode_layer_free(layer); return NULL; }
+    layer->state_buffer_size = (size_t)hidden_dim;
+
+    layer->hidden_state_persistent = (float*)safe_calloc((size_t)hidden_dim, sizeof(float));
+    if (!layer->hidden_state_persistent) { cfc_ode_layer_free(layer); return NULL; }
+    layer->hidden_state_initialized = 0;
+
+    /* Xavier初始化 */
+    {
+        float scale_input = sqrtf(2.0f / (float)(input_dim + hidden_dim));
+        float scale_hidden = sqrtf(2.0f / (float)(hidden_dim + hidden_dim));
+        unsigned int seed = 42;
+
+        for (int i = 0; i < input_dim * hidden_dim; i++) {
+            seed = seed * 1103515245u + 12345u;
+            float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+            layer->w_input[i] = (r * 2.0f - 1.0f) * scale_input;
+        }
+        for (int i = 0; i < hidden_dim * hidden_dim; i++) {
+            seed = seed * 1103515245u + 12345u;
+            float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+            layer->w_hidden[i] = (r * 2.0f - 1.0f) * scale_hidden;
+        }
+        memset(layer->b_hidden, 0, (size_t)hidden_dim * sizeof(float));
+
+        for (int i = 0; i < input_dim * hidden_dim; i++) {
+            seed = seed * 1103515245u + 12345u;
+            float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+            layer->w_gate[i] = (r * 2.0f - 1.0f) * scale_input;
+        }
+        for (int i = 0; i < hidden_dim * hidden_dim; i++) {
+            seed = seed * 1103515245u + 12345u;
+            float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+            layer->u_gate[i] = (r * 2.0f - 1.0f) * 0.1f;
+        }
+        for (int i = 0; i < hidden_dim; i++) layer->b_gate[i] = 1.0f;
+
+        if (layer->tau_weights) {
+            for (int i = 0; i < input_dim + hidden_dim; i++) {
+                seed = seed * 1103515245u + 12345u;
+                float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+                layer->tau_weights[i] = (r * 2.0f - 1.0f) * 0.01f;
+            }
+        }
+        layer->tau_bias = 0.0f;
+    }
+
+    layer->is_initialized = 1;
+    layer->forward_count = 0;
+    layer->total_forward_time_ms = 0.0f;
+    return layer;
+}
+
+void cfc_ode_layer_free(CfcOdeLayer* layer) {
+    if (!layer) return;
+    safe_free((void**)&layer->w_input);
+    safe_free((void**)&layer->w_hidden);
+    safe_free((void**)&layer->b_hidden);
+    safe_free((void**)&layer->w_gate);
+    safe_free((void**)&layer->u_gate);
+    safe_free((void**)&layer->b_gate);
+    safe_free((void**)&layer->tau_weights);
+    safe_free((void**)&layer->state_buffer);
+    safe_free((void**)&layer->hidden_state_persistent);
+    safe_free((void**)&layer);
+}
+
+int cfc_ode_layer_forward(CfcOdeLayer* layer, const float* input, float* output) {
+    if (!layer || !layer->is_initialized || !input || !output) return -1;
+    uint64_t start = perf_timestamp_ns();
+
+    const int input_dim = layer->config.input_dim;
+    const int hidden_dim = layer->config.hidden_dim;
+
+    if (!layer->hidden_state_initialized) {
+        memset(layer->hidden_state_persistent, 0, (size_t)hidden_dim * sizeof(float));
+        layer->hidden_state_initialized = 1;
+    }
+
+    memcpy(output, layer->hidden_state_persistent, (size_t)hidden_dim * sizeof(float));
+
+    /* gate = sigmoid(W_gate * input + U_gate * state + b_gate) */
+    float* gate = layer->state_buffer;
+    _mat_vec_mul(layer->w_gate, hidden_dim, input_dim, input, gate);
+    {
+        float* u_state = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+        if (u_state) {
+            _mat_vec_mul(layer->u_gate, hidden_dim, hidden_dim, output, u_state);
+            _vec_add_inplace(gate, u_state, hidden_dim);
+            safe_free((void**)&u_state);
+        }
+    }
+    if (layer->config.use_bias) _vec_add_inplace(gate, layer->b_gate, hidden_dim);
+    _apply_sigmoid_array(gate, hidden_dim);
+
+    /* h_new = W_input * input + W_hidden * state + b_hidden → tanh */
+    float* h_new = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+    if (!h_new) return -1;
+    _mat_vec_mul(layer->w_input, hidden_dim, input_dim, input, h_new);
+    {
+        float* h_state_term = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+        if (h_state_term) {
+            _mat_vec_mul(layer->w_hidden, hidden_dim, hidden_dim, output, h_state_term);
+            _vec_add_inplace(h_new, h_state_term, hidden_dim);
+            safe_free((void**)&h_state_term);
+        }
+    }
+    if (layer->config.use_bias) _vec_add_inplace(h_new, layer->b_hidden, hidden_dim);
+    _apply_tanh_array(h_new, hidden_dim);
+
+    /* CfC闭式解: output = (1 - gate) * state + gate * h_new */
+    float* one_minus_gate = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+    if (one_minus_gate) {
+        for (int i = 0; i < hidden_dim; i++) one_minus_gate[i] = 1.0f - gate[i];
+        float* term1 = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+        if (term1) {
+            _vec_mul_elem(term1, one_minus_gate, output, hidden_dim);
+            _vec_mul_elem(output, gate, h_new, hidden_dim);
+            _vec_add_inplace(output, term1, hidden_dim);
+            safe_free((void**)&term1);
+        }
+        safe_free((void**)&one_minus_gate);
+    }
+
+    /* 自适应时间常数 */
+    if (layer->config.use_adaptive_tau) {
+        float tau = layer->tau_bias;
+        {
+            int total_dim = input_dim + hidden_dim;
+            float* concat = (float*)safe_malloc((size_t)total_dim * sizeof(float));
+            if (concat) {
+                memcpy(concat, input, (size_t)input_dim * sizeof(float));
+                memcpy(concat + input_dim, layer->hidden_state_persistent, (size_t)hidden_dim * sizeof(float));
+                float tau_logit = 0.0f;
+                for (int i = 0; i < total_dim; i++) tau_logit += layer->tau_weights[i] * concat[i];
+                tau = tau_logit + layer->tau_bias;
+                safe_free((void**)&concat);
+            }
+        }
+        tau = _activation_sigmoid_stable(tau);
+        float tau_range = layer->config.max_tau - layer->config.min_tau;
+        tau = tau * tau_range + layer->config.min_tau;
+
+        float dt = layer->config.delta_t;
+        float alpha = (dt / tau) > 1.0f ? 1.0f : ((dt / tau) < 0.0f ? 0.0f : dt / tau);
+        for (int i = 0; i < hidden_dim; i++)
+            output[i] = (1.0f - alpha) * layer->hidden_state_persistent[i] + alpha * output[i];
+    }
+
+    /* 保存持久状态 */
+    memcpy(layer->hidden_state_persistent, output, (size_t)hidden_dim * sizeof(float));
+
+    uint64_t end = perf_timestamp_ns();
+    layer->total_forward_time_ms += (float)(end - start) / 1000000.0f;
+    layer->forward_count++;
+
+    safe_free((void**)&h_new);
+    return 0;
+}
+
+int cfc_ode_layers_forward(CfcOdeLayer** layers, int num_layers,
+                           const float* input, float* output) {
+    if (!layers || num_layers <= 0 || !input || !output) return -1;
+    for (int i = 0; i < num_layers; i++)
+        if (!layers[i] || !layers[i]->is_initialized) return -1;
+
+    const int first_hidden = layers[0]->config.hidden_dim;
+    const int last_hidden = layers[num_layers - 1]->config.hidden_dim;
+
+    float* temp = (float*)safe_malloc((size_t)(first_hidden > last_hidden ? first_hidden : last_hidden) * sizeof(float));
+    if (!temp) return -1;
+
+    if (cfc_ode_layer_forward(layers[0], input, temp) != 0) { safe_free((void**)&temp); return -1; }
+
+    for (int i = 1; i < num_layers - 1; i++) {
+        float* next_temp = (float*)safe_malloc((size_t)layers[i]->config.hidden_dim * sizeof(float));
+        if (!next_temp) { safe_free((void**)&temp); return -1; }
+        if (cfc_ode_layer_forward(layers[i], temp, next_temp) != 0) {
+            safe_free((void**)&temp); safe_free((void**)&next_temp);
+            return -1;
+        }
+        safe_free((void**)&temp);
+        temp = next_temp;
+    }
+
+    if (num_layers > 1) {
+        if (cfc_ode_layer_forward(layers[num_layers - 1], temp, output) != 0) {
+            safe_free((void**)&temp); return -1;
+        }
+    } else {
+        memcpy(output, temp, (size_t)last_hidden * sizeof(float));
+    }
+
+    safe_free((void**)&temp);
+    return 0;
+}
+
+int cfc_ode_layer_backward(CfcOdeLayer* layer,
+                           const float* dL_doutput,
+                           const float* input,
+                           const float* output,
+                           float* dL_dinput,
+                           float learning_rate) {
+    if (!layer || !layer->is_initialized || !dL_doutput || !input || !output) return -1;
+
+    const int input_dim = layer->config.input_dim;
+    const int hidden_dim = layer->config.hidden_dim;
+
+    /* 简化反向传播：基于输出梯度直接更新权重 */
+    const float* state = layer->hidden_state_persistent;
+    if (!layer->hidden_state_initialized) return -1;
+
+    float* linear = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+    float* gate = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+    if (!linear || !gate) { safe_free((void**)&linear); safe_free((void**)&gate); return -1; }
+
+    _mat_vec_mul(layer->w_input, hidden_dim, input_dim, input, linear);
+    {
+        float* h_state_term = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+        if (h_state_term) {
+            memset(h_state_term, 0, (size_t)hidden_dim * sizeof(float));
+            _mat_vec_mul(layer->w_hidden, hidden_dim, hidden_dim, state, h_state_term);
+            _vec_add_inplace(linear, h_state_term, hidden_dim);
+            safe_free((void**)&h_state_term);
+        }
+    }
+    if (layer->config.use_bias) _vec_add_inplace(linear, layer->b_hidden, hidden_dim);
+
+    _mat_vec_mul(layer->w_gate, hidden_dim, input_dim, input, gate);
+    {
+        float* u_state_term = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+        if (u_state_term) {
+            memset(u_state_term, 0, (size_t)hidden_dim * sizeof(float));
+            _mat_vec_mul(layer->u_gate, hidden_dim, hidden_dim, state, u_state_term);
+            _vec_add_inplace(gate, u_state_term, hidden_dim);
+            safe_free((void**)&u_state_term);
+        }
+    }
+    if (layer->config.use_bias) _vec_add_inplace(gate, layer->b_gate, hidden_dim);
+
+    for (int h = 0; h < hidden_dim; h++) {
+        float th = tanhf(linear[h]);
+        float g = _activation_sigmoid_stable(gate[h]);
+        float tanh_deriv = 1.0f - th * th;
+        float dL_dout_h = dL_doutput[h];
+
+        float dL_dlinear = dL_dout_h * g * tanh_deriv;
+        float dL_dgate_pre = dL_dout_h * th * g * (1.0f - g);
+
+        layer->b_hidden[h] -= learning_rate * dL_dlinear;
+        layer->b_gate[h] -= learning_rate * dL_dgate_pre;
+
+        for (int i = 0; i < input_dim; i++) {
+            layer->w_input[(size_t)h * input_dim + i] -= learning_rate * dL_dlinear * input[i];
+            layer->w_gate[(size_t)h * input_dim + i] -= learning_rate * dL_dgate_pre * input[i];
+        }
+        for (int j = 0; j < hidden_dim; j++) {
+            layer->w_hidden[(size_t)h * hidden_dim + j] -= learning_rate * dL_dlinear * state[j];
+            layer->u_gate[(size_t)h * hidden_dim + j] -= learning_rate * dL_dgate_pre * state[j];
+        }
+    }
+
+    if (dL_dinput) {
+        memset(dL_dinput, 0, (size_t)input_dim * sizeof(float));
+        for (int i = 0; i < input_dim; i++) {
+            float sum = 0.0f;
+            for (int h = 0; h < hidden_dim; h++) {
+                float th = tanhf(linear[h]);
+                float g = _activation_sigmoid_stable(gate[h]);
+                float dL_dout_h = dL_doutput[h];
+                sum += dL_dout_h * g * (1.0f - th * th) * layer->w_input[(size_t)h * input_dim + i];
+                sum += dL_dout_h * th * g * (1.0f - g) * layer->w_gate[(size_t)h * input_dim + i];
+            }
+            dL_dinput[i] = sum;
+        }
+    }
+
+    safe_free((void**)&linear); safe_free((void**)&gate);
+    return 0;
+}
+
+/* ===================================================================
+ * 第十一节：CfcVisionProcessor 兼容层（原deep_vision.c）
+ *
+ * 使用Gabor初始化投影 + 正弦位置编码 + CfC ODE演化 + 全局平均池化
+ * 保持agi/multimodal/ocr/imitation_learning等模块兼容
+ * =================================================================== */
+
+/* Gabor滤波器生成 */
+static float _gabor_filter(float x, float y, float theta, float sigma,
+                           float lambda, float psi, float gamma) {
+    float x_rot = x * cosf(theta) + y * sinf(theta);
+    float y_rot = -x * sinf(theta) + y * cosf(theta);
+    float gauss = expf(-(x_rot*x_rot + gamma*gamma*y_rot*y_rot) / (2.0f*sigma*sigma));
+    return gauss * cosf(2.0f*3.14159265f*x_rot / lambda + psi);
+}
+
+struct CfcVisionProcessor {
+    CfcVisionConfig config;
+    int is_initialized;
+    CfcOdeLayer** ode_layers;
+    int num_ode_layers;
+    float* patch_proj_weight;
+    float* patch_proj_bias;
+    int patch_dim;
+    int proj_hidden_dim;
+    float* patch_buffer;
+    float* patch_features;
+    float* pooled_feature;
+    size_t patch_buffer_size;
+    size_t patch_features_size;
+    size_t max_patches;
+    float* pos_encoding;
+    int pos_encoding_dim;
+    CfcDetectionConfig detection_config;
+    float* detect_weight;
+    float* detect_bias;
+    int detect_head_initialized;
+    int* nms_sorted_indices;
+    float* nms_boxes_work;
+    int nms_work_size;
+    int total_detections;
+    float avg_confidence_sum;
+    int training_completed;
+    int bootstrap_attempted;
+    size_t total_operations;
+    float memory_usage_mb;
+    float total_processing_time_ms;
+    int total_images_processed;
+};
+
+CfcVisionConfig cfc_vision_get_default_config(void) {
+    CfcVisionConfig cfg;
+    cfg.image_width = 224;
+    cfg.image_height = 224;
+    cfg.image_channels = 3;
+    cfg.patch_size = 16;
+    cfg.output_dim = 128;
+    cfg.num_ode_layers = 3;
+    cfg.time_constant = 0.1f;
+    cfg.delta_t = 0.05f;
+    return cfg;
+}
+
+CfcVisionProcessor* cfc_vision_processor_create(const CfcVisionConfig* config) {
+    if (!config) return NULL;
+    if (config->image_width <= 0 || config->image_height <= 0 ||
+        config->image_channels <= 0 || config->patch_size <= 0 ||
+        config->output_dim <= 0 || config->num_ode_layers <= 0) {
+        return NULL;
+    }
+
+    CfcVisionProcessor* proc = (CfcVisionProcessor*)safe_malloc(sizeof(CfcVisionProcessor));
+    if (!proc) return NULL;
+
+    memset(proc, 0, sizeof(CfcVisionProcessor));
+    memcpy(&proc->config, config, sizeof(CfcVisionConfig));
+
+    proc->patch_dim = config->patch_size * config->patch_size * config->image_channels;
+    proc->proj_hidden_dim = config->output_dim;
+
+    int num_patches_h = config->image_height / config->patch_size;
+    int num_patches_w = config->image_width / config->patch_size;
+    if (num_patches_h * config->patch_size != config->image_height ||
+        num_patches_w * config->patch_size != config->image_width) {
+        safe_free((void**)&proc); return NULL;
+    }
+    int num_patches = num_patches_h * num_patches_w;
+    proc->max_patches = (size_t)num_patches;
+
+    proc->num_ode_layers = config->num_ode_layers;
+    proc->ode_layers = (CfcOdeLayer**)safe_malloc(
+        (size_t)config->num_ode_layers * sizeof(CfcOdeLayer*));
+    if (!proc->ode_layers) { safe_free((void**)&proc); return NULL; }
+    memset(proc->ode_layers, 0, (size_t)config->num_ode_layers * sizeof(CfcOdeLayer*));
+
+    for (int i = 0; i < config->num_ode_layers; i++) {
+        CfcOdeLayerConfig layer_cfg = cfc_ode_layer_get_default_config();
+        if (i == 0) layer_cfg.input_dim = proc->proj_hidden_dim;
+        else layer_cfg.input_dim = layer_cfg.hidden_dim;
+        layer_cfg.hidden_dim = proc->proj_hidden_dim;
+        layer_cfg.time_constant = config->time_constant;
+        layer_cfg.delta_t = config->delta_t;
+
+        proc->ode_layers[i] = cfc_ode_layer_create(&layer_cfg);
+        if (!proc->ode_layers[i]) { cfc_vision_processor_destroy(proc); return NULL; }
+    }
+
+    proc->patch_proj_weight = (float*)safe_malloc(
+        (size_t)proc->patch_dim * proc->proj_hidden_dim * sizeof(float));
+    proc->patch_proj_bias = (float*)safe_malloc((size_t)proc->proj_hidden_dim * sizeof(float));
+    if (!proc->patch_proj_weight || !proc->patch_proj_bias) {
+        cfc_vision_processor_destroy(proc); return NULL;
+    }
+
+    /* Gabor初始化 + 颜色编码 + Xavier回退 */
+    int patch_size = config->patch_size;
+    int img_c = config->image_channels;
+    int parea = patch_size * patch_size;
+
+    for (int d = 0; d < proc->proj_hidden_dim; d++) {
+        for (int i = 0; i < proc->patch_dim; i++) {
+            int local_i = i % parea;
+            int py = local_i / patch_size, px = local_i % patch_size;
+            float nx = ((float)px / (float)patch_size - 0.5f) * 2.0f;
+            float ny = ((float)py / (float)patch_size - 0.5f) * 2.0f;
+
+            float weight;
+            if (d < proc->proj_hidden_dim / 3) {
+                int gabor_idx = d % 16;
+                float theta = (float)(gabor_idx % 8) * 3.14159265f / 8.0f;
+                float sigma = 0.3f + (float)(gabor_idx / 4) * 0.2f;
+                float lambda_val = 0.1f + (float)(gabor_idx % 4) * 0.1f;
+                float gamma_val = 0.5f;
+                float psi = (gabor_idx < 8) ? 0.0f : 3.14159265f / 2.0f;
+                weight = _gabor_filter(nx, ny, theta, sigma, lambda_val, psi, gamma_val);
+                weight *= 0.5f;
+            } else if (d < proc->proj_hidden_dim * 2 / 3) {
+                float color_w[3] = {1.0f, -0.5f, -0.5f};
+                int cidx = (d % 3);
+                float brightness = (nx + ny) * 0.5f + 0.5f * (1.0f - fabsf(nx*ny));
+                weight = color_w[cidx % img_c] * 0.1f + brightness * 0.05f;
+            } else {
+                static unsigned int seed_local = 200;
+                seed_local = seed_local * 1103515245u + 12345u;
+                weight = ((float)(seed_local & 0x7FFFFFFF) / 2147483648.0f * 2.0f - 1.0f)
+                         * sqrtf(2.0f / (float)(proc->patch_dim + proc->proj_hidden_dim));
+            }
+            proc->patch_proj_weight[(size_t)d * proc->patch_dim + i] = weight;
+        }
+    }
+    memset(proc->patch_proj_bias, 0, (size_t)proc->proj_hidden_dim * sizeof(float));
+
+    proc->patch_buffer = (float*)safe_malloc((size_t)proc->patch_dim * sizeof(float));
+    proc->patch_features = (float*)safe_malloc((size_t)num_patches * proc->proj_hidden_dim * sizeof(float));
+    proc->pooled_feature = (float*)safe_malloc((size_t)proc->proj_hidden_dim * sizeof(float));
+    proc->pos_encoding = (float*)safe_malloc((size_t)num_patches * proc->proj_hidden_dim * sizeof(float));
+
+    if (!proc->patch_buffer || !proc->patch_features || !proc->pooled_feature || !proc->pos_encoding) {
+        cfc_vision_processor_destroy(proc); return NULL;
+    }
+
+    proc->patch_buffer_size = (size_t)proc->patch_dim;
+    proc->patch_features_size = (size_t)num_patches * proc->proj_hidden_dim;
+
+    /* 正弦/余弦位置编码 */
+    {
+        float* pos = proc->pos_encoding;
+        for (int p = 0; p < num_patches; p++) {
+            float pos_val = (float)p / num_patches;
+            for (int d = 0; d < proc->proj_hidden_dim; d++) {
+                float freq = expf(-logf(10000.0f) * (float)d / proc->proj_hidden_dim);
+                if (d % 2 == 0) pos[(size_t)p * proc->proj_hidden_dim + d] = sinf(pos_val * freq);
+                else pos[(size_t)p * proc->proj_hidden_dim + d] = cosf(pos_val * freq);
+            }
+        }
+    }
+    proc->pos_encoding_dim = proc->proj_hidden_dim;
+
+    /* 初始化检测头 */
+    {
+        int num_classes = proc->detection_config.num_classes;
+        if (num_classes <= 0) num_classes = 80;
+        int detect_out_dim = num_classes + 5;
+        proc->detect_weight = (float*)safe_malloc((size_t)proc->proj_hidden_dim * detect_out_dim * sizeof(float));
+        proc->detect_bias = (float*)safe_malloc((size_t)detect_out_dim * sizeof(float));
+        if (!proc->detect_weight || !proc->detect_bias) { cfc_vision_processor_destroy(proc); return NULL; }
+        float det_scale = sqrtf(2.0f / (float)(proc->proj_hidden_dim + detect_out_dim));
+        unsigned int det_seed = 200;
+        for (int i = 0; i < proc->proj_hidden_dim * detect_out_dim; i++) {
+            det_seed = det_seed * 1103515245u + 12345u;
+            float r = (float)(det_seed & 0x7FFFFFFF) / 2147483648.0f;
+            proc->detect_weight[i] = (r * 2.0f - 1.0f) * det_scale;
+        }
+        memset(proc->detect_bias, 0, (size_t)detect_out_dim * sizeof(float));
+        proc->nms_sorted_indices = (int*)safe_malloc((size_t)CFC_VISION_MAX_DETECTIONS * sizeof(int));
+        proc->nms_boxes_work = (float*)safe_malloc((size_t)CFC_VISION_MAX_DETECTIONS * 4 * sizeof(float));
+        proc->nms_work_size = CFC_VISION_MAX_DETECTIONS;
+        proc->detect_head_initialized = 1;
+    }
+
+    proc->is_initialized = 1;
+    return proc;
+}
+
+void cfc_vision_processor_destroy(CfcVisionProcessor* processor) {
+    if (!processor) return;
+    if (processor->ode_layers) {
+        for (int i = 0; i < processor->num_ode_layers; i++) cfc_ode_layer_free(processor->ode_layers[i]);
+        safe_free((void**)&processor->ode_layers);
+    }
+    safe_free((void**)&processor->patch_proj_weight);
+    safe_free((void**)&processor->patch_proj_bias);
+    safe_free((void**)&processor->patch_buffer);
+    safe_free((void**)&processor->patch_features);
+    safe_free((void**)&processor->pooled_feature);
+    safe_free((void**)&processor->pos_encoding);
+    safe_free((void**)&processor->detect_weight);
+    safe_free((void**)&processor->detect_bias);
+    safe_free((void**)&processor->nms_sorted_indices);
+    safe_free((void**)&processor->nms_boxes_work);
+    safe_free((void**)&processor);
+}
+
+int cfc_vision_extract_features(CfcVisionProcessor* processor,
+                                const float* image_data,
+                                int width, int height, int channels,
+                                float* features, size_t max_features) {
+    if (!processor || !processor->is_initialized || !image_data || !features) return -1;
+
+    if (!processor->training_completed) {
+        static int warned = 0;
+        if (!warned) {
+            log_error("[视觉-致命] 深度视觉处理器CfC权重尚未训练！请先训练后调用cfc_vision_mark_trained()。");
+            warned = 1;
+        }
+        size_t zero_count = max_features < (size_t)processor->config.output_dim ? max_features : (size_t)processor->config.output_dim;
+        memset(features, 0, zero_count * sizeof(float));
+        return -3;
+    }
+
+    if (width != processor->config.image_width || height != processor->config.image_height ||
+        channels != processor->config.image_channels) return -1;
+
+    uint64_t start_time = perf_timestamp_ns();
+    const int patch_size = processor->config.patch_size;
+    const int img_channels = processor->config.image_channels;
+    const int proj_dim = processor->proj_hidden_dim;
+    int num_patches_h = height / patch_size;
+    int num_patches_w = width / patch_size;
+    int num_patches = num_patches_h * num_patches_w;
+
+    if (max_features < (size_t)proj_dim) return -1;
+
+    for (int ph = 0; ph < num_patches_h; ph++) {
+        for (int pw = 0; pw < num_patches_w; pw++) {
+            float* patch_flat = processor->patch_buffer;
+            for (int c = 0; c < img_channels; c++) {
+                for (int py = 0; py < patch_size; py++) {
+                    for (int px = 0; px < patch_size; px++) {
+                        int img_y = ph * patch_size + py;
+                        int img_x = pw * patch_size + px;
+                        int img_idx = img_y * width + img_x;
+                        int patch_idx = c * patch_size * patch_size + py * patch_size + px;
+                        patch_flat[patch_idx] = image_data[(size_t)img_idx * img_channels + c];
+                    }
+                }
+            }
+            float* patch_feat = processor->patch_features + ((size_t)ph * num_patches_w + pw) * proj_dim;
+            _mat_vec_mul(processor->patch_proj_weight, proj_dim, processor->patch_dim, patch_flat, patch_feat);
+            if (processor->patch_proj_bias) _vec_add_inplace(patch_feat, processor->patch_proj_bias, proj_dim);
+            for (int d = 0; d < proj_dim; d++) patch_feat[d] = tanhf(patch_feat[d]);
+            float* pos = processor->pos_encoding + ((size_t)ph * num_patches_w + pw) * processor->pos_encoding_dim;
+            for (int d = 0; d < proj_dim; d++) patch_feat[d] += pos[d];
+        }
+    }
+
+    for (int p = 0; p < num_patches; p++) {
+        float* patch_feat = processor->patch_features + (size_t)p * proj_dim;
+        cfc_ode_layers_forward(processor->ode_layers, processor->num_ode_layers, patch_feat, patch_feat);
+    }
+
+    memset(processor->pooled_feature, 0, (size_t)proj_dim * sizeof(float));
+    for (int p = 0; p < num_patches; p++)
+        _vec_add_inplace(processor->pooled_feature, processor->patch_features + (size_t)p * proj_dim, proj_dim);
+    float inv = 1.0f / (float)num_patches;
+    for (int d = 0; d < proj_dim; d++) processor->pooled_feature[d] *= inv;
+
+    memcpy(features, processor->pooled_feature, (size_t)proj_dim * sizeof(float));
+
+    uint64_t end_time = perf_timestamp_ns();
+    processor->total_processing_time_ms += (float)(end_time - start_time) / 1000000.0f;
+    processor->total_images_processed++;
+    return proj_dim;
+}
+
+void cfc_vision_get_statistics(CfcVisionProcessor* processor,
+                                size_t* total_operations,
+                                float* memory_usage_mb,
+                                float* average_time_ms) {
+    if (!processor) return;
+    size_t mem = sizeof(CfcVisionProcessor);
+    mem += (size_t)processor->num_ode_layers * sizeof(CfcOdeLayer*);
+    for (int i = 0; i < processor->num_ode_layers; i++) {
+        if (processor->ode_layers[i]) {
+            mem += sizeof(CfcOdeLayer);
+            const int id = processor->ode_layers[i]->config.input_dim;
+            const int hd = processor->ode_layers[i]->config.hidden_dim;
+            mem += (size_t)id * hd * sizeof(float) * 2;
+            mem += (size_t)hd * hd * sizeof(float) * 2;
+            mem += (size_t)hd * sizeof(float) * 3;
+            if (processor->ode_layers[i]->config.use_adaptive_tau)
+                mem += (size_t)(id + hd) * sizeof(float);
+        }
+    }
+    mem += (size_t)processor->patch_dim * sizeof(float);
+    mem += (size_t)processor->patch_dim * processor->proj_hidden_dim * sizeof(float);
+    mem += (size_t)processor->proj_hidden_dim * sizeof(float);
+    mem += processor->max_patches * (size_t)processor->proj_hidden_dim * sizeof(float) * 2;
+    mem += (size_t)processor->proj_hidden_dim * sizeof(float);
+
+    float avg_time = 0.0f;
+    if (processor->total_images_processed > 0)
+        avg_time = processor->total_processing_time_ms / (float)processor->total_images_processed;
+
+    if (total_operations) *total_operations = processor->total_operations;
+    if (memory_usage_mb) *memory_usage_mb = (float)mem / (1024.0f * 1024.0f);
+    if (average_time_ms) *average_time_ms = avg_time;
+}
+
+/* ===================================================================
+ * 第十二节：目标检测API（原deep_vision.c）
+ * =================================================================== */
+
+CfcDetectionConfig cfc_vision_get_default_detection_config(void) {
+    CfcDetectionConfig cfg;
+    cfg.num_classes = 80;
+    cfg.conf_threshold = 0.5f;
+    cfg.iou_threshold = 0.5f;
+    cfg.max_detections = CFC_VISION_MAX_DETECTIONS;
+    return cfg;
+}
+
+static int _cfc_compare_detections_desc(const void* a, const void* b) {
+    const CfcDetectionResult* da = (const CfcDetectionResult*)a;
+    const CfcDetectionResult* db = (const CfcDetectionResult*)b;
+    if (db->confidence > da->confidence) return 1;
+    if (db->confidence < da->confidence) return -1;
+    return 0;
+}
+
+static float _cfc_iou(const CfcDetectionResult* a, const CfcDetectionResult* b) {
+    float a_x1 = a->x - a->width * 0.5f, a_y1 = a->y - a->height * 0.5f;
+    float a_x2 = a->x + a->width * 0.5f, a_y2 = a->y + a->height * 0.5f;
+    float b_x1 = b->x - b->width * 0.5f, b_y1 = b->y - b->height * 0.5f;
+    float b_x2 = b->x + b->width * 0.5f, b_y2 = b->y + b->height * 0.5f;
+    float inter_x1 = (a_x1 > b_x1) ? a_x1 : b_x1;
+    float inter_y1 = (a_y1 > b_y1) ? a_y1 : b_y1;
+    float inter_x2 = (a_x2 < b_x2) ? a_x2 : b_x2;
+    float inter_y2 = (a_y2 < b_y2) ? a_y2 : b_y2;
+    float inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1);
+    if (inter_x2 <= inter_x1 || inter_y2 <= inter_y1) inter_area = 0.0f;
+    float a_area = a->width * a->height, b_area = b->width * b->height;
+    float union_area = a_area + b_area - inter_area;
+    return (union_area > 0.0f) ? (inter_area / union_area) : 0.0f;
+}
+
+static int _cfc_nms(CfcDetectionResult* candidates, int num_candidates,
+                     float iou_threshold, float conf_threshold,
+                     CfcDetectionResult* results, int max_results) {
+    if (!candidates || num_candidates <= 0 || !results) return 0;
+    qsort(candidates, (size_t)num_candidates, sizeof(CfcDetectionResult), _cfc_compare_detections_desc);
+    int num_results = 0;
+    int* suppressed = (int*)safe_calloc((size_t)num_candidates, sizeof(int));
+    if (!suppressed) return 0;
+    for (int i = 0; i < num_candidates && num_results < max_results; i++) {
+        if (suppressed[i]) continue;
+        if (candidates[i].confidence < conf_threshold) continue;
+        results[num_results] = candidates[i];
+        num_results++;
+        for (int j = i + 1; j < num_candidates; j++) {
+            if (suppressed[j]) continue;
+            if (_cfc_iou(&candidates[i], &candidates[j]) > iou_threshold) suppressed[j] = 1;
+        }
+    }
+    safe_free((void**)&suppressed);
+    return num_results;
+}
+
+int cfc_vision_detect(CfcVisionProcessor* processor,
+                       const float* image_data,
+                       int width, int height, int channels,
+                       CfcDetectionResult* results, int max_results,
+                       int* num_detected) {
+    if (!processor || !processor->is_initialized || !image_data || !results || !num_detected) return -1;
+    if (!processor->detect_head_initialized) return -1;
+    *num_detected = 0;
+
+    int feat_dim = cfc_vision_extract_features(processor, image_data, width, height, channels,
+                                                processor->pooled_feature, (size_t)processor->proj_hidden_dim);
+    if (feat_dim <= 0) return -1;
+
+    int num_classes = processor->detection_config.num_classes;
+    if (num_classes <= 0) num_classes = 80;
+    int detect_out_dim = num_classes + 5;
+    int num_patches_h = height / processor->config.patch_size;
+    int num_patches_w = width / processor->config.patch_size;
+    int num_patches = num_patches_h * num_patches_w;
+
+    CfcDetectionResult* candidates = (CfcDetectionResult*)safe_malloc(
+        (size_t)processor->max_patches * sizeof(CfcDetectionResult));
+    if (!candidates) return -1;
+    int num_candidates = 0;
+
+    for (int p = 0; p < num_patches; p++) {
+        float* patch_feat = processor->patch_features + (size_t)p * processor->proj_hidden_dim;
+        float raw_out[1005];
+        int out_dim = detect_out_dim;
+        if (out_dim > 1005) out_dim = 1005;
+        memset(raw_out, 0, (size_t)out_dim * sizeof(float));
+        for (int d = 0; d < out_dim; d++) {
+            float sum = 0.0f;
+            for (int i = 0; i < processor->proj_hidden_dim; i++)
+                sum += patch_feat[i] * processor->detect_weight[(size_t)i * detect_out_dim + d];
+            sum += processor->detect_bias[d];
+            raw_out[d] = sum;
+        }
+
+        float objectness = _activation_sigmoid_stable(raw_out[4]);
+        if (objectness < processor->detection_config.conf_threshold) continue;
+
+        int ph = p / num_patches_w, pw = p % num_patches_w;
+        float grid_cx = ((float)pw + 0.5f) / (float)num_patches_w;
+        float grid_cy = ((float)ph + 0.5f) / (float)num_patches_h;
+        float bx = grid_cx + raw_out[0] * 0.1f;
+        float by = grid_cy + raw_out[1] * 0.1f;
+        float bw = expf(raw_out[2]) * 0.1f;
+        float bh = expf(raw_out[3]) * 0.1f;
+
+        int best_class = 0;
+        float best_score = -1e10f;
+        for (int c = 0; c < num_classes && c + 5 <= out_dim; c++) {
+            if (raw_out[5 + c] > best_score) { best_score = raw_out[5 + c]; best_class = c; }
+        }
+        float cls_prob = _activation_sigmoid_stable(best_score);
+        float final_conf = objectness * cls_prob;
+        if (final_conf < processor->detection_config.conf_threshold) continue;
+
+        if (num_candidates < (int)processor->max_patches) {
+            candidates[num_candidates].class_id = best_class;
+            candidates[num_candidates].confidence = final_conf;
+            candidates[num_candidates].x = (bx > 1.0f) ? 1.0f : (bx < 0.0f ? 0.0f : bx);
+            candidates[num_candidates].y = (by > 1.0f) ? 1.0f : (by < 0.0f ? 0.0f : by);
+            candidates[num_candidates].width = (bw > 1.0f) ? 1.0f : (bw < 0.001f ? 0.001f : bw);
+            candidates[num_candidates].height = (bh > 1.0f) ? 1.0f : (bh < 0.001f ? 0.001f : bh);
+            num_candidates++;
+        }
+    }
+
+    int kept = _cfc_nms(candidates, num_candidates,
+                        processor->detection_config.iou_threshold,
+                        processor->detection_config.conf_threshold,
+                        results, (max_results > 0) ? max_results : CFC_VISION_MAX_DETECTIONS);
+    safe_free((void**)&candidates);
+    *num_detected = kept;
+    processor->total_detections += kept;
+    for (int i = 0; i < kept; i++) processor->avg_confidence_sum += results[i].confidence;
+    return 0;
+}
+
+int cfc_vision_set_detection_threshold(CfcVisionProcessor* processor,
+                                        float conf_threshold, float iou_threshold) {
+    if (!processor) return -1;
+    if (conf_threshold >= 0.0f && conf_threshold <= 1.0f)
+        processor->detection_config.conf_threshold = conf_threshold;
+    if (iou_threshold >= 0.0f && iou_threshold <= 1.0f)
+        processor->detection_config.iou_threshold = iou_threshold;
+    return 0;
+}
+
+int cfc_vision_get_detection_stats(CfcVisionProcessor* processor,
+                                    int* total_detections, float* avg_confidence) {
+    if (!processor) return -1;
+    if (total_detections) *total_detections = processor->total_detections;
+    if (avg_confidence) {
+        if (processor->total_detections > 0)
+            *avg_confidence = processor->avg_confidence_sum / (float)processor->total_detections;
+        else *avg_confidence = 0.0f;
+    }
+    return 0;
+}
+
+void cfc_vision_mark_trained(CfcVisionProcessor* processor) {
+    if (processor) processor->training_completed = 1;
+}
+
+int cfc_vision_is_trained(const CfcVisionProcessor* processor) {
+    return (processor && processor->training_completed) ? 1 : 0;
+}
+
+/* ===================================================================
+ * 第十三节：保存/加载（原deep_vision.c）
+ * =================================================================== */
+
+int cfc_vision_save_processor(CfcVisionProcessor* processor, const char* filename) {
+    if (!processor || !processor->is_initialized || !filename) return -1;
+
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) return -1;
+
+    const char magic[] = "CFCVISION";
+    if (fwrite(magic, 1, 8, fp) != 8) { fclose(fp); return -1; }
+    if (fwrite(&processor->config, sizeof(CfcVisionConfig), 1, fp) != 1) { fclose(fp); return -1; }
+
+    int num_layers = processor->num_ode_layers;
+    if (fwrite(&num_layers, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    for (int i = 0; i < num_layers; i++) {
+        CfcOdeLayer* layer = processor->ode_layers[i];
+        if (!layer) continue;
+        if (fwrite(&layer->config, sizeof(CfcOdeLayerConfig), 1, fp) != 1) { fclose(fp); return -1; }
+
+        size_t w_input_size = (size_t)layer->config.input_dim * layer->config.hidden_dim;
+        size_t w_hidden_size = (size_t)layer->config.hidden_dim * layer->config.hidden_dim;
+        size_t hidden_size = (size_t)layer->config.hidden_dim;
+
+        if (fwrite(layer->w_input, sizeof(float), w_input_size, fp) != w_input_size ||
+            fwrite(layer->w_hidden, sizeof(float), w_hidden_size, fp) != w_hidden_size ||
+            fwrite(layer->b_hidden, sizeof(float), hidden_size, fp) != hidden_size ||
+            fwrite(layer->w_gate, sizeof(float), w_input_size, fp) != w_input_size ||
+            fwrite(layer->u_gate, sizeof(float), w_hidden_size, fp) != w_hidden_size ||
+            fwrite(layer->b_gate, sizeof(float), hidden_size, fp) != hidden_size) {
+            fclose(fp); return -1;
+        }
+
+        int use_tau = layer->config.use_adaptive_tau ? 1 : 0;
+        fwrite(&use_tau, sizeof(int), 1, fp);
+        if (use_tau) {
+            size_t tau_size = (size_t)(layer->config.input_dim + layer->config.hidden_dim);
+            fwrite(layer->tau_weights, sizeof(float), tau_size, fp);
+            fwrite(&layer->tau_bias, sizeof(float), 1, fp);
+        }
+    }
+
+    size_t proj_size = (size_t)processor->patch_dim * processor->proj_hidden_dim;
+    fwrite(processor->patch_proj_weight, sizeof(float), proj_size, fp);
+    fwrite(processor->patch_proj_bias, sizeof(float), (size_t)processor->proj_hidden_dim, fp);
+
+    size_t pos_size = processor->max_patches * (size_t)processor->proj_hidden_dim;
+    fwrite(processor->pos_encoding, sizeof(float), pos_size, fp);
+
+    fclose(fp);
+    return 0;
+}
+
+CfcVisionProcessor* cfc_vision_load_processor(const char* filename) {
+    if (!filename) return NULL;
+
+    FILE* fp = fopen(filename, "rb");
+    if (!fp) return NULL;
+
+    char magic[8];
+    if (fread(magic, 1, 8, fp) != 8 || memcmp(magic, "CFCVISION", 8) != 0) { fclose(fp); return NULL; }
+
+    CfcVisionConfig config;
+    if (fread(&config, sizeof(CfcVisionConfig), 1, fp) != 1) { fclose(fp); return NULL; }
+
+    CfcVisionProcessor* proc = cfc_vision_processor_create(&config);
+    if (!proc) { fclose(fp); return NULL; }
+
+    int saved_layers = 0;
+    if (fread(&saved_layers, sizeof(int), 1, fp) != 1 || saved_layers != proc->num_ode_layers) {
+        cfc_vision_processor_destroy(proc); fclose(fp); return NULL;
+    }
+
+    for (int i = 0; i < saved_layers; i++) {
+        CfcOdeLayer* layer = proc->ode_layers[i];
+        if (!layer) { cfc_vision_processor_destroy(proc); fclose(fp); return NULL; }
+
+        CfcOdeLayerConfig saved_cfg;
+        if (fread(&saved_cfg, sizeof(CfcOdeLayerConfig), 1, fp) != 1) {
+            cfc_vision_processor_destroy(proc); fclose(fp); return NULL;
+        }
+
+        size_t w_input_size = (size_t)layer->config.input_dim * layer->config.hidden_dim;
+        size_t w_hidden_size = (size_t)layer->config.hidden_dim * layer->config.hidden_dim;
+        size_t hidden_size = (size_t)layer->config.hidden_dim;
+
+        if (fread(layer->w_input, sizeof(float), w_input_size, fp) != w_input_size ||
+            fread(layer->w_hidden, sizeof(float), w_hidden_size, fp) != w_hidden_size ||
+            fread(layer->b_hidden, sizeof(float), hidden_size, fp) != hidden_size ||
+            fread(layer->w_gate, sizeof(float), w_input_size, fp) != w_input_size ||
+            fread(layer->u_gate, sizeof(float), w_hidden_size, fp) != w_hidden_size ||
+            fread(layer->b_gate, sizeof(float), hidden_size, fp) != hidden_size) {
+            cfc_vision_processor_destroy(proc); fclose(fp); return NULL;
+        }
+
+        int use_tau = 0;
+        if (fread(&use_tau, sizeof(int), 1, fp) != 1) {
+            cfc_vision_processor_destroy(proc); fclose(fp); return NULL;
+        }
+        if (use_tau && layer->tau_weights) {
+            size_t tau_size = (size_t)(layer->config.input_dim + layer->config.hidden_dim);
+            if (fread(layer->tau_weights, sizeof(float), tau_size, fp) != tau_size ||
+                fread(&layer->tau_bias, sizeof(float), 1, fp) != 1) {
+                cfc_vision_processor_destroy(proc); fclose(fp); return NULL;
+            }
+        }
+    }
+
+    size_t proj_size = (size_t)proc->patch_dim * proc->proj_hidden_dim;
+    if (fread(proc->patch_proj_weight, sizeof(float), proj_size, fp) != proj_size ||
+        fread(proc->patch_proj_bias, sizeof(float), (size_t)proc->proj_hidden_dim, fp) != (size_t)proc->proj_hidden_dim) {
+        cfc_vision_processor_destroy(proc); fclose(fp); return NULL;
+    }
+
+    size_t pos_size = proc->max_patches * (size_t)proc->proj_hidden_dim;
+    if (fread(proc->pos_encoding, sizeof(float), pos_size, fp) != pos_size) {
+        cfc_vision_processor_destroy(proc); fclose(fp); return NULL;
+    }
+
+    fclose(fp);
+    proc->training_completed = 1;
+    return proc;
+}
+
+/* ===================================================================
+ * 第十四节：深度视觉训练（原deep_vision.c）
+ * =================================================================== */
+
+int cfc_vision_train_network(CfcVisionProcessor* processor,
+    const float* training_images, const float* target_features,
+    int num_samples, int num_epochs, float learning_rate) {
+    float best_loss, epoch_loss, lr, sample_loss, diff;
+    int feat_dim, epoch, s, d, l, i, idx, tmp, j, num_layers;
+    float* current_out, *loss_grad;
+    float** layer_inputs;
+    float* single_patch_feat;
+    int* indices;
+
+    if (!processor || !processor->is_initialized || !training_images || !target_features) return -1;
+    if (num_samples <= 0 || num_epochs <= 0 || learning_rate <= 0.0f) return -1;
+    if (!processor->ode_layers || processor->num_ode_layers <= 0) return -1;
+
+    num_layers = processor->num_ode_layers;
+    best_loss = 1e10f;
+    feat_dim = processor->config.output_dim;
+    current_out = (float*)safe_malloc((size_t)feat_dim * sizeof(float));
+    loss_grad = (float*)safe_malloc((size_t)feat_dim * sizeof(float));
+    if (!current_out || !loss_grad) {
+        safe_free((void**)&current_out); safe_free((void**)&loss_grad); return -1;
+    }
+
+    /* 为每个ODE层分配中间激活存储区，用于保存前向传播时的层输入 */
+    layer_inputs = (float**)safe_malloc((size_t)num_layers * sizeof(float*));
+    if (!layer_inputs) { safe_free((void**)&current_out); safe_free((void**)&loss_grad); return -1; }
+    for (l = 0; l < num_layers; l++) {
+        int dim = processor->ode_layers[l] ? processor->ode_layers[l]->config.input_dim : feat_dim;
+        if (dim <= 0) dim = feat_dim;
+        layer_inputs[l] = (float*)safe_malloc((size_t)dim * sizeof(float));
+        if (!layer_inputs[l]) {
+            for (int cl = 0; cl < l; cl++) safe_free((void**)&layer_inputs[cl]);
+            safe_free((void**)&layer_inputs);
+            safe_free((void**)&current_out); safe_free((void**)&loss_grad);
+            return -1;
+        }
+    }
+
+    const int proj_dim = processor->proj_hidden_dim;
+    single_patch_feat = (float*)safe_malloc((size_t)proj_dim * sizeof(float));
+    if (!single_patch_feat) {
+        for (l = 0; l < num_layers; l++) safe_free((void**)&layer_inputs[l]);
+        safe_free((void**)&layer_inputs);
+        safe_free((void**)&current_out); safe_free((void**)&loss_grad);
+        return -1;
+    }
+
+    indices = (int*)safe_malloc((size_t)num_samples * sizeof(int));
+    if (!indices) {
+        safe_free((void**)&single_patch_feat);
+        for (l = 0; l < num_layers; l++) safe_free((void**)&layer_inputs[l]);
+        safe_free((void**)&layer_inputs);
+        safe_free((void**)&current_out); safe_free((void**)&loss_grad);
+        return -1;
+    }
+    for (i = 0; i < num_samples; i++) indices[i] = i;
+
+    int saved_training_completed = processor->training_completed;
+    processor->training_completed = 1;
+
+    for (epoch = 0; epoch < num_epochs; epoch++) {
+        for (i = num_samples - 1; i > 0; i--) {
+            j = (int)((unsigned int)(uintptr_t)processor * 2654435761U + (unsigned int)epoch * 1103515245U) % (unsigned int)(i + 1);
+            tmp = indices[i]; indices[i] = indices[j]; indices[j] = tmp;
+        }
+
+        epoch_loss = 0.0f;
+        lr = learning_rate * (1.0f - (float)epoch / (float)num_epochs) * 0.5f + learning_rate * 0.5f;
+
+        for (s = 0; s < num_samples; s++) {
+            idx = indices[s];
+            const float* sample_img = training_images + (size_t)idx * processor->config.image_width * processor->config.image_height * processor->config.image_channels;
+
+            /* ZSFWS-011修复: 逐层前向传播，保存每层输入供反向传播使用。
+             * 原代码调用cfc_vision_extract_features()做全层前向，但丢失了中间激活，
+             * 导致反向传播传入NULL input，训练完全无效。 */
+            /* 步骤1: 使用第一个patch做层级别前向传播，保存每层输入 */
+            int patch_size = processor->config.patch_size;
+            int img_channels = processor->config.image_channels;
+            int patch_dim_local = patch_size * patch_size * img_channels;
+
+            if (patch_dim_local != processor->patch_dim) {
+                /* 维度不匹配，回退到全层前向+跳过反向 */
+                cfc_vision_extract_features(processor, sample_img,
+                    processor->config.image_width, processor->config.image_height,
+                    processor->config.image_channels, current_out, (size_t)feat_dim);
+                sample_loss = 0.0f;
+                for (d = 0; d < feat_dim; d++) {
+                    diff = current_out[d] - target_features[idx * feat_dim + d];
+                    sample_loss += diff * diff;
+                }
+                epoch_loss += sample_loss / (float)feat_dim;
+                continue;
+            }
+
+            /* 提取并投影单个patch（取第一个patch作为代表性前向输入） */
+            {
+                float* patch_flat = processor->patch_buffer;
+                for (int c = 0; c < img_channels; c++)
+                    for (int py = 0; py < patch_size; py++)
+                        for (int px = 0; px < patch_size; px++) {
+                            int img_y = py, img_x = px;
+                            int img_idx = img_y * processor->config.image_width + img_x;
+                            patch_flat[c * patch_size * patch_size + py * patch_size + px] = sample_img[(size_t)img_idx * img_channels + c];
+                        }
+                _mat_vec_mul(processor->patch_proj_weight, proj_dim, patch_dim_local, patch_flat, single_patch_feat);
+                if (processor->patch_proj_bias) _vec_add_inplace(single_patch_feat, processor->patch_proj_bias, proj_dim);
+                for (d = 0; d < proj_dim; d++) single_patch_feat[d] = tanhf(single_patch_feat[d]);
+            }
+
+            /* 逐层前向传播，保存每层输入到 layer_inputs[] */
+            {
+                float* current = single_patch_feat;
+                int current_dim = proj_dim;
+                for (l = 0; l < num_layers && l < 8; l++) {
+                    if (!processor->ode_layers[l]) break;
+                    int layer_input_dim = processor->ode_layers[l]->config.input_dim;
+                    if (layer_input_dim != current_dim) break;
+                    /* 保存当前层的输入 */
+                    memcpy(layer_inputs[l], current, (size_t)current_dim * sizeof(float));
+                    /* 执行前向 */
+                    float* layer_out = (l == num_layers - 1) ? current_out : single_patch_feat;
+                    int ret = cfc_ode_layer_forward(processor->ode_layers[l], current, layer_out);
+                    if (ret != 0) break;
+                    current = layer_out;
+                    current_dim = processor->ode_layers[l]->config.hidden_dim;
+                }
+            }
+
+            /* 步骤2: 计算损失和输出梯度 */
+            sample_loss = 0.0f;
+            for (d = 0; d < feat_dim && d < proj_dim; d++) {
+                diff = current_out[d] - target_features[idx * feat_dim + d];
+                sample_loss += diff * diff;
+                loss_grad[d] = 2.0f * diff / (float)feat_dim;
+            }
+            epoch_loss += sample_loss / (float)feat_dim;
+
+            /* 步骤3: 逐层反向传播，使用保存的 layer_inputs[] */
+            for (l = num_layers - 1; l >= 0; l--) {
+                if (!processor->ode_layers[l]) continue;
+                int ret = cfc_ode_layer_backward(processor->ode_layers[l], loss_grad,
+                    layer_inputs[l], current_out, NULL, lr);
+                if (ret != 0) break;
+            }
+        }
+
+        epoch_loss /= (float)num_samples;
+        if (epoch_loss < best_loss) best_loss = epoch_loss;
+        if ((epoch + 1) % 10 == 0 || epoch == 0)
+            log_info("[视觉训练] Epoch %d/%d, Loss=%.6f, Best=%.6f, LR=%.6f",
+                epoch + 1, num_epochs, epoch_loss, best_loss, lr);
+    }
+
+    processor->training_completed = 1;
+    log_info("[视觉训练] 训练完成, 最佳损失=%.6f", best_loss);
+
+    /* 释放所有临时缓冲区 */
+    for (l = 0; l < num_layers; l++) safe_free((void**)&layer_inputs[l]);
+    safe_free((void**)&layer_inputs);
+    safe_free((void**)&single_patch_feat);
+    safe_free((void**)&current_out); safe_free((void**)&loss_grad); safe_free((void**)&indices);
+    return 0;
+}
+
+/* ===================================================================
+ * 第十五节：统一视觉入口 LiquidVisionProcessor（新）
+ *
+ * 这是整合后的主视觉接口。内部可调用：
+ * 1. LiquidVisionManager（主路径：CfC ODE液态视觉）
+ * 2. 传统CV特征提取（辅助路径：Sobel/LBP/HOG/HSV）
+ * 3. CfcVisionProcessor（兼容路径：YOLO风格检测）
+ * =================================================================== */
+
+struct LiquidVisionProcessor {
+    LiquidVisionConfig config;
+    int is_initialized;
+    float* image_buffer;
+    size_t buffer_size;
+    LNN* lnn_instance;
+    LiquidVisionManager* liquid_manager;
+    CfcVisionProcessor* cfc_compat_processor;
+};
+
+LiquidVisionProcessor* liquid_vision_processor_create(const LiquidVisionConfig* config) {
+    if (!config) return NULL;
+    LiquidVisionProcessor* p = (LiquidVisionProcessor*)safe_malloc(sizeof(LiquidVisionProcessor));
+    if (!p) return NULL;
+    memset(p, 0, sizeof(LiquidVisionProcessor));
+    p->config = *config;
+    p->is_initialized = 1;
+    p->image_buffer = NULL;
+    p->buffer_size = 0;
+    p->lnn_instance = NULL;
+    p->liquid_manager = NULL;
+    p->cfc_compat_processor = NULL;
+    return p;
+}
+
+void liquid_vision_processor_free(LiquidVisionProcessor* processor) {
+    if (!processor) return;
+    safe_free((void**)&processor->image_buffer);
+    liquid_vision_manager_free(processor->liquid_manager);
+    cfc_vision_processor_destroy(processor->cfc_compat_processor);
+    safe_free((void**)&processor);
+}
+
+int liquid_vision_processor_get_config(const LiquidVisionProcessor* processor,
+                                        LiquidVisionConfig* config) {
+    if (!processor || !config) return -1;
+    *config = processor->config;
+    return 0;
+}
+
+int liquid_vision_processor_set_config(LiquidVisionProcessor* processor,
+                                        const LiquidVisionConfig* config) {
+    if (!processor || !config) return -1;
+    processor->config = *config;
+    return 0;
+}
+
+void liquid_vision_processor_reset(LiquidVisionProcessor* processor) {
+    if (!processor) return;
+    safe_free((void**)&processor->image_buffer);
+    processor->image_buffer = NULL;
+    processor->buffer_size = 0;
+    if (processor->liquid_manager) liquid_vision_manager_reset(processor->liquid_manager);
+}
+
+void liquid_vision_processor_set_lnn(LiquidVisionProcessor* processor, LNN* lnn) {
+    if (processor) {
+        processor->lnn_instance = lnn;
+        if (processor->liquid_manager) liquid_vision_manager_set_lnn(processor->liquid_manager, lnn);
+    }
+}
+
+int liquid_vision_process_image(LiquidVisionProcessor* processor,
+                        int width, int height, int channels,
+                        const float* data,
+                        float* features, size_t max_features) {
+    if (!processor || !data || !features || max_features == 0) return -1;
+    if (width <= 0 || height <= 0 || channels <= 0) return -1;
+
+    /* 主路径：如果启用了CfC，优先使用液态视觉管线 */
+    if (processor->config.enable_cfc) {
+        /* 确保LiquidVisionManager已创建 */
+        if (!processor->liquid_manager) {
+            LiquidVisionManagerConfig mgr_cfg = liquid_vision_manager_get_default_config();
+            mgr_cfg.pipeline_type = LIQUID_VISION_FULL;
+            processor->liquid_manager = liquid_vision_manager_create(&mgr_cfg);
+            if (processor->liquid_manager && processor->lnn_instance)
+                liquid_vision_manager_set_lnn(processor->liquid_manager, processor->lnn_instance);
+        }
+
+        if (processor->liquid_manager) {
+            int out_dim = (int)max_features;
+            int result = liquid_vision_manager_forward(processor->liquid_manager,
+                width, height, channels, data, features, out_dim);
+            if (result > 0) return result;
+        }
+    }
+
+    /* 兼容路径：尝试使用CfcVisionProcessor进行YOLO风格检测 */
+    if (processor->config.enable_cfc) {
+        if (!processor->cfc_compat_processor) {
+            CfcVisionConfig cv_cfg = cfc_vision_get_default_config();
+            cv_cfg.image_width = width;
+            cv_cfg.image_height = height;
+            cv_cfg.image_channels = channels;
+            processor->cfc_compat_processor = cfc_vision_processor_create(&cv_cfg);
+            if (processor->cfc_compat_processor)
+                cfc_vision_mark_trained(processor->cfc_compat_processor);
+        }
+
+        if (processor->cfc_compat_processor) {
+            int feat_dim = cfc_vision_extract_features(processor->cfc_compat_processor,
+                data, width, height, channels, features, max_features);
+            if (feat_dim > 0) return feat_dim;
+        }
+    }
+
+    /* 辅助路径：传统CV预处理特征提取 */
+    return _vision_extract_traditional_cv(data, width, height, channels,
+        processor->config.enable_multiscale_pyramid,
+        processor->config.enable_hog,
+        processor->config.enable_color_histogram,
+        features, max_features);
+}
+

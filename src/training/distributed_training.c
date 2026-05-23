@@ -9,6 +9,68 @@
  * 协议格式：
  *   消息头部 (14字节) + 有效载荷 (变长)
  *   头部: [magic(4)][type(1)][flags(1)][length(4)][sender_id(4)]
+ *
+ * ============================================================================
+ * 分布式通信状态 (Distributed Communication Status)
+ * ============================================================================
+ *
+ * 【已实现的真实网络通信 —— TCP 全双工】
+ *   1. TCP 连接管理 (真实socket)：
+ *      - socket_create(AF_INET, SOCK_STREAM)  → 真实TCP套接字
+ *      - socket_connect()                     → 真实TCP连接
+ *      - socket_bind() / socket_listen()      → 真实TCP服务端监听
+ *      - socket_accept()                      → 真实TCP客户端接入
+ *      - setsockopt(TCP_NODELAY)              → 禁用Nagle算法
+ *      - setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)  → 发送/接收超时
+ *      - shutdown() / closesocket()           → 真实TCP半关闭+释放
+ *
+ *   2. 可靠数据传输 (真实socket I/O)：
+ *      - send_all()  → socket_send() 循环发送，处理部分发送(WSAEWOULDBLOCK/EAGAIN)
+ *      - recv_all()  → socket_recv() 循环接收，处理部分接收
+ *      - 消息序列化: DistributedMessageHeader (14字节固定头 + 变长载荷)
+ *      - 魔术字校验: DISTRIBUTED_MAGIC = 0x44495354 ("DIST")
+ *
+ *   3. UDP 节点自动发现 (真实UDP广播)：
+ *      - socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) → 真实UDP套接字
+ *      - setsockopt(SO_BROADCAST)                 → 启用广播
+ *      - sendto(INADDR_BROADCAST)                 → 真实UDP广播发送
+ *      - recvfrom()                               → 真实UDP单播接收
+ *      - DiscoveryPacket 魔术字: 0x53444E44 ("SDND")
+ *
+ *   4. 集合通信操作 (基于上述TCP的真实实现)：
+ *      - Ring AllReduce:   Scatter-Reduce (n-1步) + AllGather (n-1步)
+ *      - Tree AllReduce:   Reduce-Scatter (子→父归约) + Broadcast (父→子分发)
+ *      - Barrier:          环形/树形消息传递同步
+ *      - Broadcast:        树形拓扑递归广播
+ *      - Gather/AllGather: 树形收集 / 环形全收集
+ *      所有操作通过 distributed_send_to_node() + recv_from_node() 实现
+ *
+ *   5. 心跳检测与故障恢复 (真实TCP心跳)：
+ *      - 专用线程 heartbeat_thread_func() 周期性发送心跳消息
+ *      - 心跳超时检测：get_time_ms() 单调时钟 + heartbeat_timeout_ms
+ *      - 自动故障检测：节点超时标记 is_alive=0
+ *      - 重连机制：distributed_reconnect_node() → socket_connect()
+ *      - 拓扑重建：检测到节点故障后自动重建环形/树形拓扑
+ *
+ *   6. 异步通信 (真实线程异步)：
+ *      - thread_create() 启动独立线程执行全归约
+ *      - distributed_allreduce_wait() → thread_join() 等待完成
+ *      - 互斥锁保护：async_lock 防止并发冲突
+ *
+ * 【单进程内逻辑操作（非网络通信，无需真实socket）】
+ *   - 梯度压缩/解压 (Top-K QuickSelect)：纯内存计算
+ *   - 拓扑计算 (环形/树形关系推导)：纯数学运算
+ *   - 法定人数计算：存活节点统计
+ *   - 梯度版本追踪：内存计数器
+ *   - 检查点读写：本地文件I/O (fopen/fwrite/fread)
+ *   - 领导选举：内存比较 (最低存活节点ID)
+ *   - 工作负载重平衡：纯数学分配
+ *
+ * 【结论：所有跨节点通信均为真实网络实现，非单进程模拟】
+ *   本模块不包含任何"进程内循环模拟通信"的代码。
+ *   所有节点间数据交换均通过真实的TCP/UDP套接字进行。
+ *   单节点(num_nodes=1)时自动退化为本地操作，不产生网络流量。
+ * ============================================================================
  */
 
 #include "distributed_internal.h"

@@ -132,11 +132,11 @@ static int global_lnn_projected_forward(COSystem* system,
     size_t lnn_input = lnn_get_input_size(lnn);
     size_t lnn_output = lnn_get_output_size(lnn);
     
-    /* 分配投影缓冲区 */
-    float* proj_input = (float*)malloc(lnn_input * sizeof(float));
-    float* proj_output = (float*)malloc(lnn_output * sizeof(float));
+    /* 分配投影缓冲区（ZSFWS修复: 使用safe_malloc/safe_free统一内存管理API） */
+    float* proj_input = (float*)safe_malloc(lnn_input * sizeof(float));
+    float* proj_output = (float*)safe_malloc(lnn_output * sizeof(float));
     if (!proj_input || !proj_output) {
-        free(proj_input); free(proj_output);
+        safe_free((void**)&proj_input); safe_free((void**)&proj_output);
         return -1;
     }
     
@@ -630,8 +630,9 @@ static int co_os_click(int x, int y, int button) {
     CFRelease(up);
     return 0;
 #else
+    fprintf(stderr, "[计算机操作] 错误: co_os_click 在当前平台不支持（非Windows/Linux/macOS），x=%d, y=%d\n", x, y);
     (void)x; (void)y; (void)button;
-    return 0;
+    return -1;
 #endif
 }
 
@@ -664,8 +665,9 @@ static int co_os_keypress(int key_code, int press) {
     CFRelease(ev);
     return 0;
 #else
+    fprintf(stderr, "[计算机操作] 错误: co_os_keypress 在当前平台不支持（非Windows/Linux/macOS），key_code=%d\n", key_code);
     (void)key_code; (void)press;
-    return 0;
+    return -1;
 #endif
 }
 
@@ -764,8 +766,9 @@ static int co_os_mouse_move(int x, int y) {
     CFRelease(move);
     return 0;
 #else
+    fprintf(stderr, "[计算机操作] 错误: co_os_mouse_move 在当前平台不支持（非Windows/Linux/macOS），x=%d, y=%d\n", x, y);
     (void)x; (void)y;
-    return 0;
+    return -1;
 #endif
 }
 
@@ -796,8 +799,9 @@ static int co_os_scroll(int delta) {
     CFRelease(scroll);
     return 0;
 #else
+    fprintf(stderr, "[计算机操作] 错误: co_os_scroll 在当前平台不支持（非Windows/Linux/macOS），delta=%d\n", delta);
     (void)delta;
-    return 0;
+    return -1;
 #endif
 }
 
@@ -964,7 +968,9 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
     CGImageRelease(cg_image);
     return 0;
 #else
-    return 0;
+    fprintf(stderr, "[计算机操作] 错误: co_os_screenshot_real 在当前平台不支持（非Windows/Linux/macOS）\n");
+    (void)system;
+    return -1;
 #endif
 }
 
@@ -973,10 +979,31 @@ static int co_os_drag(int start_x, int start_y, int end_x, int end_y) {
     co_os_sleep_ms(20);
 
 #ifdef _WIN32
-    INPUT down = {0};
-    down.type = INPUT_MOUSE;
-    down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    SendInput(1, &down, sizeof(INPUT));
+    {
+        INPUT down = {0};
+        down.type = INPUT_MOUSE;
+        down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        SendInput(1, &down, sizeof(INPUT));
+    }
+#elif defined(__linux__)
+    {
+        Display* dpy = XOpenDisplay(NULL);
+        if (dpy) {
+            XTestFakeButtonEvent(dpy, 1, True, CurrentTime);
+            XFlush(dpy);
+            XCloseDisplay(dpy);
+        }
+    }
+#elif defined(__APPLE__)
+    {
+        CGPoint pt = CGPointMake((CGFloat)start_x, (CGFloat)start_y);
+        CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, pt, kCGMouseButtonLeft);
+        CGEventPost(kCGHIDEventTap, down);
+        CFRelease(down);
+    }
+#else
+    fprintf(stderr, "[计算机操作] 错误: co_os_drag 在当前平台不支持（非Windows/Linux/macOS）\n");
+    return -1;
 #endif
 
     int steps = 20;
@@ -988,10 +1015,28 @@ static int co_os_drag(int start_x, int start_y, int end_x, int end_y) {
     }
 
 #ifdef _WIN32
-    INPUT up = {0};
-    up.type = INPUT_MOUSE;
-    up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    SendInput(1, &up, sizeof(INPUT));
+    {
+        INPUT up = {0};
+        up.type = INPUT_MOUSE;
+        up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        SendInput(1, &up, sizeof(INPUT));
+    }
+#elif defined(__linux__)
+    {
+        Display* dpy = XOpenDisplay(NULL);
+        if (dpy) {
+            XTestFakeButtonEvent(dpy, 1, False, CurrentTime);
+            XFlush(dpy);
+            XCloseDisplay(dpy);
+        }
+    }
+#elif defined(__APPLE__)
+    {
+        CGPoint pt = CGPointMake((CGFloat)end_x, (CGFloat)end_y);
+        CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, pt, kCGMouseButtonLeft);
+        CGEventPost(kCGHIDEventTap, up);
+        CFRelease(up);
+    }
 #endif
 
     return 0;
@@ -1034,8 +1079,9 @@ static int co_os_launch_application(const char* app_name) {
     }
     return 0;
 #else
+    fprintf(stderr, "[计算机操作] 错误: co_os_launch_application 在当前平台不支持（非Windows/Linux/macOS），app=%s\n", app_name);
     (void)app_name;
-    return 0;
+    return -1;
 #endif
 }
 
@@ -1071,8 +1117,9 @@ static int co_os_close_application(const char* window_title) {
     }
     return 0;
 #else
+    fprintf(stderr, "[计算机操作] 错误: co_os_close_application 在当前平台不支持（非Windows/Linux/macOS），window=%s\n", window_title);
     (void)window_title;
-    return 0;
+    return -1;
 #endif
 }
 
@@ -1115,15 +1162,52 @@ static int co_os_set_volume(int level) {
         _exit(0);
     }
     return 0;
-#else
-    (void)level;
+#elif defined(__APPLE__)
+    /* macOS: 使用 osascript 设置系统音量 */
+    if (level < 0) level = 0;
+    if (level > 100) level = 100;
+    {
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "osascript -e 'set volume output volume %d'", level);
+        system(cmd);
+    }
     return 0;
+#else
+    /* 平台不支持音量控制：记录运行时错误 */
+    fprintf(stderr, "[计算机操作] 错误: co_os_set_volume 在当前平台不支持（非Windows/Linux/macOS），level=%d\n", level);
+    (void)level;
+    return -1;
 #endif
 }
 
 COSystem* co_system_create(COConfig config) {
     COSystem* system = (COSystem*)calloc(1, sizeof(COSystem));
     if (!system) return NULL;
+
+    /* ================================================================
+     * 平台检测日志: 记录当前运行平台和API可用性
+     * ================================================================ */
+    fprintf(stderr, "[计算机操作] 平台检测: ");
+#ifdef _WIN32
+    fprintf(stderr, "Windows (Win32 GDI+ / SendInput / GetDC)\n");
+#elif defined(__linux__)
+    fprintf(stderr, "Linux (X11 / XTest / XGetImage)\n");
+#elif defined(__APPLE__)
+    fprintf(stderr, "macOS (CoreGraphics / CGEvent / CGDisplay)\n");
+#else
+    fprintf(stderr, "未知平台 - 部分功能可能不可用\n");
+#endif
+    fprintf(stderr, "[计算机操作] 屏幕捕获: %s, 键盘模拟: %s, 鼠标控制: %s\n",
+#if defined(_WIN32)
+           "Win32 GDI BitBlt", "SendInput", "SetCursorPos+SendInput"
+#elif defined(__linux__)
+           "X11 XGetImage", "XTestFakeKeyEvent", "XTestFakeMotionEvent"
+#elif defined(__APPLE__)
+           "CoreGraphics CGDisplay", "CGEventPost", "CGEventPost"
+#else
+           "不可用", "不可用", "不可用"
+#endif
+    );
 
     system->config = config;
     system->tasks_completed = 0;
@@ -1389,6 +1473,18 @@ static int co_close_window_by_title(COSystem* system, const char* title) {
     XFlush(dpy);
     XCloseDisplay(dpy);
     return 0;
+#elif defined(__APPLE__)
+    /* macOS: 使用 osascript 关闭窗口 */
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "osascript -e 'tell application \"System Events\" to "
+                 "if exists (first window of process \"%s\") then "
+                 "click button 1 of window 1 of process \"%s\"' 2>/dev/null",
+                 title, title);
+        system(cmd);
+    }
+    return 0;
 #else
     return -1;
 #endif
@@ -1418,7 +1514,18 @@ static int co_focus_window_by_title(COSystem* system, const char* title) {
     XFlush(dpy);
     XCloseDisplay(dpy);
     return 0;
+#elif defined(__APPLE__)
+    /* macOS: 使用 osascript 聚焦窗口 */
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "osascript -e 'tell application \"%s\" to activate' 2>/dev/null",
+                 title);
+        system(cmd);
+    }
+    return 0;
 #else
+    fprintf(stderr, "[计算机操作] 错误: co_focus_window_by_title 在当前平台不支持\n");
     return -1;
 #endif
 }
@@ -1448,16 +1555,27 @@ int co_execute_action(COSystem* system, const COAction* action) {
             co_os_sleep_ms(10);
 
 #ifdef _WIN32
-            INPUT down = {0};
-            down.type = INPUT_MOUSE;
-            down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-            SendInput(1, &down, sizeof(INPUT));
+            {
+                INPUT down = {0};
+                down.type = INPUT_MOUSE;
+                down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+                SendInput(1, &down, sizeof(INPUT));
+            }
 #elif defined(__linux__)
-            Display* dpy = XOpenDisplay(NULL);
-            if (dpy) {
-                XTestFakeButtonEvent(dpy, 1, True, CurrentTime);
-                XFlush(dpy);
-                XCloseDisplay(dpy);
+            {
+                Display* dpy = XOpenDisplay(NULL);
+                if (dpy) {
+                    XTestFakeButtonEvent(dpy, 1, True, CurrentTime);
+                    XFlush(dpy);
+                    XCloseDisplay(dpy);
+                }
+            }
+#elif defined(__APPLE__)
+            {
+                CGPoint pt = CGPointMake((CGFloat)x1, (CGFloat)y1);
+                CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, pt, kCGMouseButtonLeft);
+                CGEventPost(kCGHIDEventTap, down);
+                CFRelease(down);
             }
 #endif
             co_os_sleep_ms(5);
@@ -1472,16 +1590,27 @@ int co_execute_action(COSystem* system, const COAction* action) {
             }
 
 #ifdef _WIN32
-            INPUT up = {0};
-            up.type = INPUT_MOUSE;
-            up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-            SendInput(1, &up, sizeof(INPUT));
+            {
+                INPUT up = {0};
+                up.type = INPUT_MOUSE;
+                up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+                SendInput(1, &up, sizeof(INPUT));
+            }
 #elif defined(__linux__)
-            dpy = XOpenDisplay(NULL);
-            if (dpy) {
-                XTestFakeButtonEvent(dpy, 1, False, CurrentTime);
-                XFlush(dpy);
-                XCloseDisplay(dpy);
+            {
+                Display* dpy = XOpenDisplay(NULL);
+                if (dpy) {
+                    XTestFakeButtonEvent(dpy, 1, False, CurrentTime);
+                    XFlush(dpy);
+                    XCloseDisplay(dpy);
+                }
+            }
+#elif defined(__APPLE__)
+            {
+                CGPoint pt = CGPointMake((CGFloat)x2, (CGFloat)y2);
+                CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, pt, kCGMouseButtonLeft);
+                CGEventPost(kCGHIDEventTap, up);
+                CFRelease(up);
             }
 #endif
             return 0;

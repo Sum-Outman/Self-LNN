@@ -15,7 +15,7 @@
 #endif
 
 #include "selflnn/multimodal/ocr.h"
-#include "selflnn/multimodal/deep_vision.h"
+#include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/multimodal/character_segmentation.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"

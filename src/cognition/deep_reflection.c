@@ -1,3 +1,45 @@
+/**
+ * @file deep_reflection.c
+ * @brief 深度反思引擎完整实现
+ *
+ * 多维度认知审视：信念冲突检测、认识论评估、逻辑一致性检验、
+ * 多段落反思、知识综合、假设生成与冲突解决。
+ *
+ * ============================================================
+ * 【模块职责 - ZSFWS-028 认知三模块边界】
+ * ============================================================
+ * 本模块（深度反思）的核心职责：主动内省式认知一致性审查系统
+ *
+ * 独特功能：
+ *   - 多维度自我反思（dr_reflect / dr_reflect_multi_passage）
+ *   - 认识论确定性评估——审视"我有多确定"（dr_epistemic_assessment）
+ *   - 知识库内部冲突检测与解决（dr_detect_knowledge_conflicts / dr_resolve_conflicts）
+ *   - 从反思结果生成新认知假设（dr_generate_hypotheses）
+ *   - 认知根因分析——寻找思维过程本身的逻辑矛盾（dr_root_cause_analysis）
+ *   - 检测信念体系中自相矛盾的命题（dr_detect_contradictions）
+ *   - 多视角综合以消除分歧（dr_generate_synthesis）
+ *   - 反思结果转化为行动计划（dr_chain_to_plan）
+ *   - 与元认知层集成（dr_integrate_with_metacognition）
+ *
+ * 与 deep_correction.c 的区别：
+ *   - deep_reflection 是"主动反思"：无外部错误触发，定期/按需审视内部一致性
+ *   - deep_correction 是"被动修复"：必须有错误报告才能触发
+ *   - reflection关注"我有没有自相矛盾？"，correction关注"这个错误是什么导致的？"
+ *
+ * 与 deep_thought_chain.c 的区别：
+ *   - deep_reflection 审视已有的信念/知识，不创造新推理链
+ *   - deep_thought_chain 从零开始构建解决新问题的推理路径
+ *   - reflection输出的是"认知状态审查报告"，thought_chain输出的是"推理路径"
+ *
+ * ⚠️  功能重叠提示：
+ *   - dr_root_cause_analysis（认知根因）与 dc_analyze_root_cause（错误根因）：
+ *     建议：两者可共享贝叶斯推理底层的概率传播机制，但输入不同
+ *   - dr_chain_to_plan（反思→计划）与 dtc_chain_to_plan（思考链→计划）：
+ *     建议：reflection的chain_to_plan应附加"反思来源"标记，thought_chain的不需
+ *   - dr_generate_hypotheses 与 dc_generate_hypotheses：
+ *     建议：reflection假设需标记为"探索性假设"（无关联错误），correction假设标记为"修正性假设"（有关联error_id）
+ * ============================================================
+ */
 #include "selflnn/cognition/deep_reflection.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"

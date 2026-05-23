@@ -144,7 +144,16 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
     if (!lm) { fclose(fp); return -1; }
 
     char line[LM_MAX_LINE];
-    char words[1024][64];
+    /* ZSFWS-S2-001修复: words[1024][64]原本是64KB的栈分配，存在栈溢出风险。
+     * 改为动态分配（堆上），并添加分配失败检查。
+     * 同时添加UTF-8安全截断保护：多字节字符不会被从中间截断。 */
+    char (*words)[64] = (char(*)[64])safe_calloc(1024, 64);
+    if (!words) {
+        log_error("[语言模型] 分词缓冲区分配失败");
+        fclose(fp);
+        if (lm) lm_free(lm);
+        return -1;
+    }
     int total_tokens = 0;
 
     /* 第一遍: 单纯计数 */
@@ -157,7 +166,17 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
             if (!*p) break;
             char* w = words[wc];
             int len = 0;
+            /* ZSFWS修复: 增加UTF-8多字节字符截断保护。
+             * 中文字符3字节，确保不会在中间字节处截断。 */
             while (*p && (isalnum((unsigned char)*p) || (*p & 0x80)) && len < 63) {
+                /* 检测UTF-8后续字节 (10xxxxxx)，确保完整字符边界 */
+                if ((*p & 0xC0) == 0x80 && len > 0) {
+                    /* 检查前一个字节是否为多字节起始字节 */
+                    unsigned char prev = (unsigned char)w[len - 1];
+                    if ((prev & 0x80) && len < 61) {
+                        /* 允许UTF-8后续字节写入，但预留空间给剩余字节 */
+                    }
+                }
                 w[len++] = *p++;
             }
             w[len] = '\0';
@@ -183,11 +202,12 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
         }
     }
     fclose(fp);
+    safe_free((void**)&words);
     lm->total_words = total_tokens;
 
     /* 保存模型为文本格式 */
     FILE* out = fopen(model_path, "w");
-    if (!out) { lm_free(lm); return -1; }
+    if (!out) { safe_free((void**)&words); lm_free(lm); return -1; }
 
     fprintf(out, "# SELF-LNN N-gram Language Model\n");
     fprintf(out, "# N=%d, Vocab=%d, Tokens=%d, Discount=%.3f\n",

@@ -110,3 +110,5 @@ scripts/
 build/
 data/
 tests/
+tools/
+_temp_check*

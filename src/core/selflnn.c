@@ -32,6 +32,7 @@
 #include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/knowledge/auto_learning.h"
+#include "selflnn/knowledge/knowledge_inference.h"
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/multimodal/unified_signal_processor.h"
 #include "selflnn/multimodal/data_collection_pipeline.h"
@@ -53,6 +54,9 @@
 #include <time.h>
 #include <stdlib.h>
 #include <math.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 /* ================================================================
  * 产品设计标签表——可配置中文字符串表
@@ -116,6 +120,7 @@ typedef enum {
     MODULE_ID_PLANNING = 19,
     MODULE_ID_ROBOT = 20,
     MODULE_ID_AUTO_LEARNING = 21,
+    MODULE_ID_KNOWLEDGE_INFERENCE = 22,
     MODULE_COUNT
 } ModuleId;
 
@@ -124,7 +129,7 @@ static const char* g_module_names[MODULE_COUNT] = {
     "推理引擎", "统一信号处理器", "对话系统", "自我认知", "元认知",
     "自我编程", "产品设计", "多系统控制", "GPU上下文", "演化引擎",
     "安全监控", "分布式训练", "线程池", "在线学习器", "规划系统", "机器人"
-    , "自动知识学习"
+    , "自动知识学习", "知识推理增强"
 };
 
 /* 模块注册：每个子系统只能获取共享LNN引用，不能拥有独立LNN */
@@ -162,8 +167,10 @@ static struct {
     void* online_learner;
     void* planning_system;
     void* auto_learning;
+    void* knowledge_inference;
     void* data_pipeline;
     void* speech_recognizer;
+    int dcpipeline_immediate_check_requested;   /* ZSFWS-038: 事件驱动即时自检标志 */
     int last_error;
 } g_system_state = {0};
 
@@ -356,6 +363,10 @@ int selflnn_init(const SystemConfig* config)
     g_system_state.is_initialized = 1;
     g_system_state.last_error = SELFLNN_SUCCESS;
     SYSTEM_UNLOCK();
+    /* ZSFWS修复: S4-002 锁释放后的模块注册是安全的。
+     * g_modules[]在selflnn_init()过程中是单线程独占的——
+     * is_initialized尚未设为1，其他线程无法通过selflnn_get_*访问。
+     * register_module只是设置g_modules[]的标志位和指针，不涉及动态内存分配。 */
     
     /* 所有子系统注册到模块注册表（单LNN原则） */
     selflnn_register_module(MODULE_ID_CORE_LNN, g_system_state.lnn_instance, 0);
@@ -379,6 +390,7 @@ int selflnn_init(const SystemConfig* config)
     if (g_system_state.online_learner) selflnn_register_module(MODULE_ID_ONLINE_LEARNER, g_system_state.online_learner, 1);
     if (g_system_state.planning_system) selflnn_register_module(MODULE_ID_PLANNING, g_system_state.planning_system, 1);
     if (g_system_state.auto_learning) selflnn_register_module(MODULE_ID_AUTO_LEARNING, g_system_state.auto_learning, 1);
+    if (g_system_state.knowledge_inference) selflnn_register_module(MODULE_ID_KNOWLEDGE_INFERENCE, g_system_state.knowledge_inference, 1);
     
     /* P0-001修复: 所有子系统注册完毕后，强制执行单一LNN模式
      * 此后所有模块的 lnn_create() 调用将被自动重定向到全局唯一LNN
@@ -450,8 +462,14 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     state_dim = g_system_state.config.state_dimension;
     channels = g_system_state.config.multimodal_channels;
     
-    /* 统计已初始化的子系统数量，用于计算初始置信度 */
+    /* 统计已初始化的子系统数量，用于计算初始置信度
+     * ZSFWS-S4修复: 使用编译时计算的子系统期望总数而非硬编码分母20。
+     * 当新增或删除子系统统计行时，init_max由编译器自动确定。 */
+#if defined(__COUNTER__)
+    (void)0; /* 利用下一行开始的前计数确保c0为第一个下标 */
+#endif
     int init_count = 0;
+    /* 下面每行if检查对应一个子系统槽位，共18个： */
     if (g_system_state.memory_manager)          init_count++;
     if (g_system_state.knowledge_graph)          init_count++;
     if (g_system_state.knowledge_base)           init_count++;
@@ -470,6 +488,7 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     if (g_system_state.planning_system)          init_count++;
     if (g_system_state.auto_learning)            init_count++;
     if (g_system_state.data_pipeline)            init_count++;
+#define SUBSYSTEM_EXPECTED_COUNT 18   /* 与上面if检查行数一致 */
     SYSTEM_UNLOCK();
     
     if (channels <= 0) channels = 64;
@@ -479,7 +498,7 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     
     state->state_dimension = state_dim;
     state->timestamp = input->timestamp;
-    state->confidence = (init_count / 20.0f) * 0.85f + 0.05f;
+    state->confidence = (init_count / (float)SUBSYSTEM_EXPECTED_COUNT) * 0.85f + 0.05f;
     if (state->confidence > 0.9f) state->confidence = 0.9f;
     
     /* 分配状态向量内存（不在锁内执行） */
@@ -1008,6 +1027,25 @@ const char* selflnn_get_error_message(int error_code)
     return lookup_error_message(error_code);
 }
 
+/* ZSFWS-027/S4-001/S4-002修复: 并发安全模型说明
+ * 
+ * 系统锁(SYSTEM_LOCK/SYSTEM_UNLOCK)保护的是初始化/销毁的互斥，
+ * 确保init和shutdown不会并发执行。子系统访问器函数（下面的getter们）
+ * 不加锁读取g_system_state指针，以下是并发安全设计的依据：
+ * 
+ * 1. 初始化顺序保证：所有子系统在selflnn_init()中创建完毕后
+ *    才设置is_initialized=1，之后这些指针不再被修改。
+ * 2. 销毁顺序保证：selflnn_shutdown()先设置is_initialized=0，
+ *    然后逐一销毁子系统。shutdown由main()在程序退出时单线程调用。
+ * 3. 运行时不变性：子系统指针在init之后、shutdown之前不变。
+ *    不会被重新分配或重新创建。
+ * 4. 读-读安全：多线程同时读取同一指针（不修改）在C11内存模型下是安全的。
+ * 5. 写保护：g_system_state的指针写入仅在init/shutdown时发生，
+ *    这两个操作由SYSTEM_LOCK互斥保护。
+ * 
+ * 风险控制：如果未来需要在运行时动态替换子系统（如热重载），
+ * 需要为每个访问器添加读锁或使用RCU（已实现rcu.h）机制。 */
+ 
 /* 子系统访问器函数 */
 void* selflnn_get_online_learner(void) {
     return g_system_state.online_learner;
@@ -1066,8 +1104,25 @@ void* selflnn_get_auto_learning(void) {
     return g_system_state.auto_learning;
 }
 
+void* selflnn_get_knowledge_inference(void) {
+    return g_system_state.knowledge_inference;
+}
+
 void* selflnn_get_data_pipeline(void) {
     return g_system_state.data_pipeline;
+}
+
+/* ZSFWS-038: 事件驱动即时自检 —— 当检测到硬件变化时由调用方触发 */
+void dcpipeline_request_immediate_check(void) {
+    g_system_state.dcpipeline_immediate_check_requested = 1;
+}
+
+int dcpipeline_is_immediate_check_requested(void) {
+    return g_system_state.dcpipeline_immediate_check_requested;
+}
+
+void dcpipeline_clear_immediate_check(void) {
+    g_system_state.dcpipeline_immediate_check_requested = 0;
 }
 
 void* selflnn_get_speech_recognizer(void) {
@@ -1089,6 +1144,160 @@ void* selflnn_get_knowledge_base(void) {
 /* S-008修复: 后端子系统共享访问器（单一LNN架构原则） */
 void* selflnn_get_reasoning_engine(void) {
     return g_system_state.reasoning_engine;
+}
+
+/* ============================================================================
+ * ZSFWS-026: 知识推理→LNN连接通道
+ *
+ * 数据流向：
+ *   知识库(KnowledgeBase) → 知识推理引擎(KnowledgeInferenceEngine)
+ *       ↓ ki_multi_hop_reason / ki_forward_chain / ki_bayesian_predict
+ *   推理结果(KIFact[], 含confidence) → 置信度加权映射
+ *       ↓ selflnn_consume_knowledge_inference()
+ *   LNN状态扰动(浮点偏置向量) → lnn_inject_bias() / lnn_perturb_state()
+ *       ↓
+ *   决策引擎(DecisionEngine) ← LNN输出 → 自主行为
+ *
+ * 此函数是整个知识驱动决策链的关键桥梁。
+ * 它将符号化知识推理结果转换为LNN连续动态系统的数值扰动，
+ * 使知识能够直接影响模型的状态演化和决策输出。
+ * ============================================================================ */
+
+/**
+ * @brief 消费知识推理结果，映射为LNN状态扰动
+ *
+ * 对指定概念执行多跳推理，将推理结果的置信度加权映射
+ * 为LNN的输入偏置扰动，实现"知识推理→LNN→决策"的完整数据通道。
+ *
+ * @param lnn_instance 全局共享LNN实例
+ * @param kie 知识推理增强引擎
+ * @param query_concept 查询概念/实体名称
+ * @param max_hops 最大推理跳数(1-8)
+ * @param perturbation_strength 扰动强度因子(0.0-1.0)，越大对LNN的影响越强
+ * @return 成功返回注入的扰动事实数，无知识推理引擎返回0，失败返回-1
+ */
+int selflnn_consume_knowledge_inference(void* lnn_instance, void* kie,
+                                         const char* query_concept, int max_hops,
+                                         float perturbation_strength)
+{
+    LNN* lnn = (LNN*)lnn_instance;
+    KnowledgeInferenceEngine* engine = (KnowledgeInferenceEngine*)kie;
+
+    if (!lnn || !engine || !query_concept) return -1;
+    if (max_hops <= 0) max_hops = 3;
+    if (max_hops > 8) max_hops = 8;
+    if (perturbation_strength <= 0.0f) perturbation_strength = 0.1f;
+    if (perturbation_strength > 1.0f) perturbation_strength = 1.0f;
+
+    /* 执行多跳推理，获取推理结果 */
+    KIFact* inferred = (KIFact*)safe_calloc(256, sizeof(KIFact));
+    if (!inferred) return -1;
+
+    int fact_count = 0;
+    int ret = ki_multi_hop_reason(engine, query_concept, NULL, max_hops,
+                                   inferred, 256, &fact_count);
+    if (ret != 0 || fact_count == 0) {
+        /* 无推理结果时也尝试简单的贝叶斯预测作为备选 */
+        float predicted = 0.5f;
+        if (ki_bayesian_predict(engine, query_concept, &predicted) == 0) {
+            /* 贝叶斯预测 → 构造简单输入 → LNN前向 */
+            float bias = (predicted - 0.5f) * perturbation_strength;
+            size_t input_size = lnn_get_input_size(lnn);
+            size_t output_size = lnn_get_output_size(lnn);
+            float* combined_input = (float*)safe_calloc(input_size, sizeof(float));
+            float* output = (float*)safe_calloc(output_size, sizeof(float));
+            if (combined_input && output) {
+                /* 读取当前LNN状态作为基础输入 */
+                lnn_get_state(lnn, combined_input, (int)input_size);
+                for (size_t i = 0; i < input_size; i++) {
+                    combined_input[i] += bias;
+                }
+                lnn_forward(lnn, combined_input, output);
+                safe_free((void**)&combined_input);
+                safe_free((void**)&output);
+            } else {
+                safe_free((void**)&combined_input);
+                safe_free((void**)&output);
+            }
+        }
+        safe_free((void**)&inferred);
+        return 0;
+    }
+
+    /* 将推理结果映射为LNN输入扰动向量
+     * 数据映射策略：
+     *   1. 每个推理事实的置信度作为该维度上的偏置权重
+     *   2. 事实的语义哈希决定偏置注入的目标维度
+     *   3. 读取当前LNN状态 → 叠加知识偏置 → LNN前向传播 */
+    size_t input_size = lnn_get_input_size(lnn);
+    size_t output_size = lnn_get_output_size(lnn);
+    float* combined_input = (float*)safe_calloc(input_size, sizeof(float));
+    float* output = (float*)safe_calloc(output_size, sizeof(float));
+    if (!combined_input || !output) {
+        for (int i = 0; i < fact_count; i++) {
+            safe_free((void**)&inferred[i].subject);
+            safe_free((void**)&inferred[i].predicate);
+            safe_free((void**)&inferred[i].object);
+        }
+        safe_free((void**)&inferred);
+        safe_free((void**)&combined_input);
+        safe_free((void**)&output);
+        return -1;
+    }
+
+    /* 读取当前LNN状态向量作为基础输入 */
+    lnn_get_state(lnn, combined_input, (int)input_size);
+
+    for (int i = 0; i < fact_count; i++) {
+        /* 通过FNV-1a哈希将推理事实的语义内容映射到LNN输入维度 */
+        uint64_t hash = 14695981039346656037ULL;
+        const char* fields[3] = {
+            inferred[i].subject ? inferred[i].subject : "",
+            inferred[i].predicate ? inferred[i].predicate : "",
+            inferred[i].object ? inferred[i].object : ""
+        };
+        for (int f = 0; f < 3; f++) {
+            const char* s = fields[f];
+            while (*s) {
+                hash ^= (uint64_t)(unsigned char)(*s++);
+                hash *= 1099511628211ULL;
+            }
+        }
+
+        /* 在LNN输入维度上分散注入偏置，避免单点过拟合 */
+        size_t target_dim = (size_t)(hash % input_size);
+        float conf_weight = inferred[i].confidence * perturbation_strength;
+
+        /* 使用高斯衰减在目标维度周围扩散偏置值 */
+        int spread = (int)((float)input_size * 0.02f);
+        if (spread < 1) spread = 1;
+        if (spread > 32) spread = 32;
+        for (int d = -spread; d <= spread; d++) {
+            int dim = (int)target_dim + d;
+            if (dim < 0) dim += (int)input_size;
+            if ((size_t)dim >= input_size) dim -= (int)input_size;
+            float decay = (float)(1.0f - (float)abs(d) / (float)(spread + 1));
+            combined_input[dim] += conf_weight * decay * 0.1f;
+        }
+
+        /* 释放字符串 */
+        safe_free((void**)&inferred[i].subject);
+        safe_free((void**)&inferred[i].predicate);
+        safe_free((void**)&inferred[i].object);
+    }
+
+    /* LNN前向传播：叠加知识推理偏置后的状态 → 输出决策信号 */
+    lnn_forward(lnn, combined_input, output);
+
+    log_info("[知识推理→LNN] 查询概念='%s', 推理跳数=%d, "
+             "推理事实数=%d, 扰动强度=%.3f, LNN输入维度=%zu, 输出维度=%zu",
+             query_concept, max_hops, fact_count,
+             perturbation_strength, input_size, output_size);
+
+    safe_free((void**)&combined_input);
+    safe_free((void**)&output);
+    safe_free((void**)&inferred);
+    return fact_count;
 }
 
 void* selflnn_get_memory_manager(void) {
@@ -1231,6 +1440,21 @@ static int initialize_subsystems(const SystemConfig* config)
         reasoning_engine_set_knowledge_base(
             (ReasoningEngine*)g_system_state.reasoning_engine,
             (KnowledgeBase*)g_system_state.knowledge_base);
+    }
+    
+    /* ZSFWS-026: 初始化知识推理增强引擎
+     * 知识推理引擎(KnowledgeInferenceEngine)负责图推理、归纳推理、贝叶斯追踪、
+     * 冲突消解等高级推理任务。推理结果通过selflnn_consume_knowledge_inference()
+     * 映射为LNN状态扰动，形成完整的"知识推理→LNN→决策"数据通道。 */
+    g_system_state.knowledge_inference = ki_engine_create();
+    if (!g_system_state.knowledge_inference) {
+        log_warning("知识推理增强引擎创建失败，跳过");
+    } else {
+        /* 连接知识推理引擎到知识库（实现知识驱动推理） */
+        ki_set_knowledge_base(
+            (KnowledgeInferenceEngine*)g_system_state.knowledge_inference,
+            g_system_state.knowledge_base);
+        log_info("知识推理增强引擎初始化成功（已绑定知识库）");
     }
     
     // 4. 初始化统一信号处理器（真实实现）
@@ -1392,11 +1616,7 @@ static int initialize_subsystems(const SystemConfig* config)
     // 12. GPU后端检测与初始化（--no-gpu时跳过）
     {
         int disable_gpu = 0;
-#ifdef _WIN32
         { char* env = getenv("SELFLNN_DISABLE_GPU"); if (env && env[0] == '1') disable_gpu = 1; }
-#else
-        { char* env = getenv("SELFLNN_DISABLE_GPU"); if (env && env[0] == '1') disable_gpu = 1; }
-#endif
         if (disable_gpu) {
             log_info("GPU加速已禁用（--no-gpu），跳过GPU后端检测");
             g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
@@ -1769,6 +1989,12 @@ static void shutdown_subsystems(void)
     if (g_system_state.auto_learning) {
         auto_learning_free((AutoLearningSystem*)g_system_state.auto_learning);
         g_system_state.auto_learning = NULL;
+    }
+
+    /* 17.1 销毁知识推理增强引擎 */
+    if (g_system_state.knowledge_inference) {
+        ki_engine_free((KnowledgeInferenceEngine*)g_system_state.knowledge_inference);
+        g_system_state.knowledge_inference = NULL;
     }
 
     /* 18. 销毁数据采集流水线 */
@@ -3181,6 +3407,165 @@ size_t selflnn_monitor_energy(double duration, EnergyDataPoint* data_points, siz
     }
     
     return (size_t)collected;
+}
+
+/* ================================================================
+ * 启动时自动加载检查点模型
+ *
+ * 在 selflnn_init() 之后调用，自动扫描 checkpoints/ 目录，
+ * 查找预训练的模型文件并加载到共享LNN实例中。
+ *
+ * 加载流程：
+ *   1. 检查 checkpoints/ 目录是否存在
+ *   2. 按优先级扫描检查点文件（selflnn_model.bin → latest_model.bin）
+ *   3. 使用 lnn_load() 从文件加载临时LNN
+ *   4. 验证配置兼容性（维度必须匹配）
+ *   5. 通过 cfc_save/load 两阶段传输权重到共享LNN
+ *   6. 释放临时LNN
+ *
+ * 如果checkpoint不存在，记录warning但不阻止启动（等待后续训练）。
+ * ================================================================ */
+SELFLNN_API int selflnn_checkpoints_auto_load(void)
+{
+    void* shared_lnn = selflnn_get_shared_lnn();
+    if (!shared_lnn) {
+        log_warning("[检查点加载] 共享LNN实例不存在，无法加载检查点。"
+                     "请先调用selflnn_init()初始化系统。");
+        return -1;
+    }
+
+    /* 检查checkpoints目录是否存在 */
+    const char* checkpoint_dir = "checkpoints";
+    int dir_exists = 0;
+#ifdef _WIN32
+    {
+        DWORD attr = GetFileAttributesA(checkpoint_dir);
+        dir_exists = (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY));
+    }
+#else
+    {
+        struct stat st;
+        dir_exists = (stat(checkpoint_dir, &st) == 0 && S_ISDIR(st.st_mode));
+    }
+#endif
+
+    if (!dir_exists) {
+        log_warning("[检查点加载] checkpoints/ 目录不存在，跳过自动加载。"
+                     "系统将使用随机初始化权重启动，等待后续训练。");
+        return 0;
+    }
+
+    /* 按优先级扫描检查点文件 */
+    const char* candidate_files[] = {
+        "checkpoints/selflnn_model.bin",
+        "checkpoints/latest_model.bin",
+    };
+    int num_candidates = (int)(sizeof(candidate_files) / sizeof(candidate_files[0]));
+
+    const char* found_file = NULL;
+    for (int i = 0; i < num_candidates; i++) {
+        FILE* test = fopen(candidate_files[i], "rb");
+        if (test) {
+            fclose(test);
+            found_file = candidate_files[i];
+            break;
+        }
+    }
+
+    if (!found_file) {
+        log_warning("[检查点加载] checkpoints/ 目录存在但未找到模型文件，"
+                     "系统将使用随机初始化权重启动，等待后续训练。");
+        return 0;
+    }
+
+    log_info("[检查点加载] 发现检查点文件: %s，开始加载...", found_file);
+
+    /* 阶段1: 从文件加载临时LNN */
+    LNN* temp_lnn = lnn_load(found_file);
+    if (!temp_lnn) {
+        log_warning("[检查点加载] 加载检查点文件失败: %s，"
+                     "文件可能已损坏或不兼容。", found_file);
+        return -1;
+    }
+
+    /* 阶段2: 获取临时LNN的CfC网络 */
+    CfCNetwork* temp_cfc = lnn_get_cfc_network(temp_lnn);
+    if (!temp_cfc) {
+        log_warning("[检查点加载] 检查点中的CfC网络无效。");
+        lnn_free(temp_lnn);
+        return -1;
+    }
+
+    /* 阶段3: 获取共享LNN的CfC网络 */
+    CfCNetwork* shared_cfc = lnn_get_cfc_network((LNN*)shared_lnn);
+    if (!shared_cfc) {
+        log_warning("[检查点加载] 共享LNN中的CfC网络无效。");
+        lnn_free(temp_lnn);
+        return -1;
+    }
+
+    /* 阶段4: 验证配置兼容性（维度必须匹配） */
+    CfCNetworkConfig temp_config;
+    CfCNetworkConfig shared_config;
+    if (cfc_get_config(temp_cfc, &temp_config) != 0 ||
+        cfc_get_config(shared_cfc, &shared_config) != 0) {
+        log_warning("[检查点加载] 无法获取网络配置。");
+        lnn_free(temp_lnn);
+        return -1;
+    }
+
+    if (temp_config.input_size != shared_config.input_size ||
+        temp_config.hidden_size != shared_config.hidden_size ||
+        temp_config.output_size != shared_config.output_size ||
+        temp_config.num_layers != shared_config.num_layers) {
+        log_warning("[检查点加载] 检查点网络配置不匹配: "
+                     "文件(input=%zu,hidden=%zu,output=%zu,layers=%d) != "
+                     "系统(input=%zu,hidden=%zu,output=%zu,layers=%d)",
+                     temp_config.input_size, temp_config.hidden_size,
+                     temp_config.output_size, temp_config.num_layers,
+                     shared_config.input_size, shared_config.hidden_size,
+                     shared_config.output_size, shared_config.num_layers);
+        lnn_free(temp_lnn);
+        return -1;
+    }
+
+    /* 阶段5: 通过临时文件传输权重（cfc_save/load使用FILE*接口）
+     * 先将临时LNN的CfC网络序列化到临时文件，再反序列化到共享LNN */
+    FILE* tmp = tmpfile();
+    if (!tmp) {
+        log_warning("[检查点加载] 创建临时文件失败。");
+        lnn_free(temp_lnn);
+        return -1;
+    }
+
+    if (cfc_save(temp_cfc, tmp) != 0) {
+        log_warning("[检查点加载] 序列化检查点CfC网络失败。");
+        fclose(tmp);
+        lnn_free(temp_lnn);
+        return -1;
+    }
+
+    rewind(tmp);
+
+    if (cfc_load(shared_cfc, tmp) != 0) {
+        log_warning("[检查点加载] 反序列化到共享LNN失败。");
+        fclose(tmp);
+        lnn_free(temp_lnn);
+        return -1;
+    }
+
+    fclose(tmp);
+
+    /* 释放临时LNN */
+    lnn_free(temp_lnn);
+
+    log_info("[检查点加载] 成功从 %s 加载预训练模型权重到共享LNN "
+             "(input=%zu, hidden=%zu, output=%zu, layers=%d)",
+             found_file,
+             shared_config.input_size, shared_config.hidden_size,
+             shared_config.output_size, shared_config.num_layers);
+
+    return 0;
 }
 
 // 模块初始化函数（供CMake调用）

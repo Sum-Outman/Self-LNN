@@ -3,7 +3,8 @@
  * @brief 多模态训练数据管线 - 桥接多模态CfC/LNN权重到训练器
  *
  * K-035: 已验证实现完整性。解决P3关键缺陷：所有多模态NN权重初始化后从未训练。
- * 使用现有 data_generator API 生成合成训练数据。
+ * ZSFWS-001修复: 添加SELFLNN_STRICT_REAL_DATA保护，严格模式下禁止合成数据生成。
+ * 严格模式：仅使用data_collection_pipeline提供的真实硬件数据，无真实数据时返回错误。
  * 通过 trainer_create + trainer_train 真实执行训练循环。
  * 与 unified_signal_processor_training.c 配合完成统一信号处理器的端到端训练。
  */
@@ -15,6 +16,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/selflnn.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/multimodal/data_collection_pipeline.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -26,24 +28,49 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
                                         int num_samples, int epochs, float learning_rate) {
     if (!network || !module_name) return -1;
 
-    DataGeneratorConfig gen_config = DATA_GENERATOR_CONFIG_DEFAULT;
-    gen_config.input_dim = input_dim;
-    gen_config.output_dim = output_dim;
-    gen_config.num_classes = output_dim;
-    gen_config.noise_level = 0.05f;
-    gen_config.signal_type = 4;
-
     int actual_samples = num_samples > 0 ? num_samples : 500;
-    float* inputs = (float*)safe_calloc((size_t)actual_samples * gen_config.input_dim, sizeof(float));
-    float* targets = (float*)safe_calloc((size_t)actual_samples * gen_config.output_dim, sizeof(float));
+    float* inputs = (float*)safe_calloc((size_t)actual_samples * input_dim, sizeof(float));
+    float* targets = (float*)safe_calloc((size_t)actual_samples * output_dim, sizeof(float));
     if (!inputs || !targets) {
         safe_free((void**)&inputs);
         safe_free((void**)&targets);
         return -1;
     }
 
-    /* 从数据生成器合成训练数据（真实数据由data_collection_pipeline提供） */
+/* ZSFWS-001修复: 严格真实数据模式下，禁止使用合成数据生成器。
+ * 必须从真实数据采集管道获取训练数据。
+ * 无真实数据时直接返回错误，确保自主学习不使用虚假数据。 */
+#ifdef SELFLNN_STRICT_REAL_DATA
     {
+        /* 尝试从数据采集管道获取真实训练数据 */
+        void* dp = selflnn_get_data_pipeline();
+        int real_samples = 0;
+        if (dp) {
+            real_samples = dcpipeline_collect_training_batch(
+                (DataCollectionPipeline*)dp,
+                inputs, targets, actual_samples, input_dim, output_dim);
+        }
+        if (real_samples <= 0) {
+            log_warning("[训练管线] 严格真实数据模式：%s 无可用真实训练数据，训练已跳过", module_name);
+            safe_free((void**)&inputs);
+            safe_free((void**)&targets);
+            return -1;
+        }
+        if (real_samples < actual_samples) {
+            actual_samples = real_samples;
+            log_info("[训练管线] %s 收集到%d个真实训练样本", module_name, actual_samples);
+        }
+    }
+#else
+    /* 非严格模式：允许使用数据生成器合成训练数据（仅调试/测试用途） */
+    {
+        DataGeneratorConfig gen_config = DATA_GENERATOR_CONFIG_DEFAULT;
+        gen_config.input_dim = input_dim;
+        gen_config.output_dim = output_dim;
+        gen_config.num_classes = output_dim;
+        gen_config.noise_level = 0.05f;
+        gen_config.signal_type = 4;
+
         void* generator = data_generator_create(&gen_config);
         if (!generator) {
             safe_free((void**)&inputs);
@@ -57,7 +84,9 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
             safe_free((void**)&targets);
             return -1;
         }
+        log_warning("[训练管线] 警告：%s 使用合成数据训练（非严格模式，仅供调试）", module_name);
     }
+#endif
 
     TrainingConfig train_cfg = training_config_default();
     train_cfg.learning_rate = learning_rate > 0.0f ? learning_rate : 1e-3f;

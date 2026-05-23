@@ -3,6 +3,37 @@
  * @brief 深度反思驱动的自我修正系统完整实现
  *
  * 增强版：贝叶斯根因诊断 + 自适应修正强度 + 多阶段验证流水线 + 模式自动学习
+ *
+ * ============================================================
+ * 【模块职责 - ZSFWS-028 认知三模块边界】
+ * ============================================================
+ * 本模块（深度修正）的核心职责：错误触发的被动式修复系统
+ *
+ * 独特功能：
+ *   - 接收外部报告的运行时错误/异常（dc_report_error）
+ *   - 贝叶斯概率推断定位错误根因（dc_bayesian_diagnose）
+ *   - 生成修正假设并自适应调整修正强度（dc_generate_hypotheses / dc_adaptive_strength）
+ *   - 多阶段验证流水线验证修正有效性（dc_validate_multi_stage）
+ *   - 修正执行与回滚机制（dc_apply_correction / dc_rollback_correction）
+ *   - 从修正历史中自动学习错误模式（dc_learn_pattern / dc_extract_rule）
+ *
+ * 与 deep_reflection.c 的区别：
+ *   - deep_correction 是"被动修复"：有错误发生 → 诊断 → 修正
+ *   - deep_reflection 是"主动反思"：无错误时主动审视自身认知一致性
+ *   - 两者都有根因分析，但correction分析的是运行时错误根因，
+ *     reflection分析的是认知逻辑矛盾根因
+ *
+ * 与 deep_thought_chain.c 的区别：
+ *   - deep_correction 处理已发生的错误，关注"修复"而非"构建"
+ *   - deep_thought_chain 从零构建推理链解决新问题，关注"推理"而非"修复"
+ *   - correction有回滚机制（修正失败可撤销），thought_chain有回溯机制（推理路径失败可退回到分支点）
+ *
+ * ⚠️  功能重叠提示：
+ *   - dc_generate_hypotheses（修正假设）与 dr_generate_hypotheses（反思假设）：
+ *     建议：correction的假设应始终关联一个具体的error_id，reflection的假设不关联错误
+ *   - dc_analyze_root_cause（错误根因）与 dr_root_cause_analysis（认知根因）：
+ *     建议：correction的根因分析结果可传递给reflection作为高级认知的输入
+ * ============================================================
  */
 #include "selflnn/cognition/deep_correction.h"
 #include "selflnn/core/laplace.h"

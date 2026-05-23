@@ -2771,11 +2771,11 @@ int multisystem_swarm_iterate(MultiSystemControlEngine* engine) {
  * @param state 状态输出缓冲区
  * @return int 成功返回0，失败返回-1
  */
-int multisystem_swarm_get_state(MultiSystemControlEngine* engine, SwarmState* state) {
+int multisystem_swarm_get_state(MultiSystemControlEngine* engine, MSSwarmState* state) {
     if (!engine || !engine->swarm || !state) {
         return -1;
     }
-    return swarm_get_state(engine->swarm, state);
+    return swarm_get_ms_state(engine->swarm, state);
 }
 
 /**

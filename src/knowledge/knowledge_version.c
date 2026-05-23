@@ -7,6 +7,7 @@
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
+#include "selflnn/utils/logging.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -136,6 +137,84 @@ static int find_entry_by_id(const SnapshotEntryRecord* records, int count, int e
         if (records[i].entry_id == entry_id) return i;
     }
     return -1;
+}
+
+/* ============================================================================
+ * ZSFWS-031: 语义相似度计算
+ *
+ * 基于字符级三元组(token tri-gram) Jaccard相似度计算两个字符串的
+ * 语义相似度。在纯C环境下实现，不依赖外部NLP库。
+ * 返回值范围 [0.0, 1.0]，1.0表示完全匹配。
+ *
+ * 策略：提取两个字符串的字符三元组(token tri-gram)集合，
+ * 计算 Jaccard 相似度 = |intersection| / |union|。
+ * 对中文（UTF-8）和英文均适用。
+ * ============================================================================ */
+static float compute_semantic_similarity(const char* s1, const char* s2) {
+    if (!s1 || !s2) return 0.0f;
+    size_t len1 = strlen(s1), len2 = strlen(s2);
+    if (len1 == 0 || len2 == 0) return 0.0f;
+    if (strcmp(s1, s2) == 0) return 1.0f;
+
+    /* 收集字符三元组到固定大小数组（不动态分配） */
+    #define MAX_TRIGRAMS 256
+    char trigrams1[MAX_TRIGRAMS][4];
+    char trigrams2[MAX_TRIGRAMS][4];
+    int t1_count = 0, t2_count = 0;
+
+    /* 从s1提取三元组 */
+    for (size_t i = 0; i + 2 < len1 && t1_count < MAX_TRIGRAMS; i++) {
+        trigrams1[t1_count][0] = s1[i];
+        trigrams1[t1_count][1] = s1[i + 1];
+        trigrams1[t1_count][2] = s1[i + 2];
+        trigrams1[t1_count][3] = '\0';
+        t1_count++;
+    }
+    if (t1_count == 0 && len1 > 0) {
+        /* 字符串太短，退化为直接比较 */
+        return (float)(s1[0] == s2[0]);
+    }
+
+    /* 从s2提取三元组 */
+    for (size_t i = 0; i + 2 < len2 && t2_count < MAX_TRIGRAMS; i++) {
+        trigrams2[t2_count][0] = s2[i];
+        trigrams2[t2_count][1] = s2[i + 1];
+        trigrams2[t2_count][2] = s2[i + 2];
+        trigrams2[t2_count][3] = '\0';
+        t2_count++;
+    }
+
+    /* 计算交集（避免重复计费） */
+    int intersection = 0;
+    int used2[MAX_TRIGRAMS] = {0};
+    for (int i = 0; i < t1_count; i++) {
+        for (int j = 0; j < t2_count; j++) {
+            if (!used2[j] && strcmp(trigrams1[i], trigrams2[j]) == 0) {
+                intersection++;
+                used2[j] = 1;
+                break;
+            }
+        }
+    }
+
+    /* Jaccard相似度 */
+    int union_count = t1_count + t2_count - intersection;
+    return union_count > 0 ? (float)intersection / (float)union_count : 0.0f;
+}
+
+/* ============================================================================
+ * ZSFWS-031: 实体级语义相似度综合评分
+ *
+ * 对一个知识实体（SPO三元组）与另一实体计算综合相似度，
+ * 权重分布：Subject 30%, Predicate 30%, Object 40%
+ * ============================================================================ */
+static float compute_entity_similarity(const SnapshotEntryRecord* a,
+                                       const SnapshotEntryRecord* b) {
+    if (!a || !b) return 0.0f;
+    float s_sim = compute_semantic_similarity(a->subject, b->subject);
+    float p_sim = compute_semantic_similarity(a->predicate, b->predicate);
+    float o_sim = compute_semantic_similarity(a->object, b->object);
+    return 0.30f * s_sim + 0.30f * p_sim + 0.40f * o_sim;
 }
 
 /* 内部辅助函数：使用字符串比较查找条目 */
@@ -313,6 +392,37 @@ int kv_restore_snapshot(KnowledgeVersionManager* kvm, int snapshot_id, void* kno
     return 0;
 }
 
+/* ============================================================================
+ * ZSFWS-031: 快照差异比较（实体级增/删/改检测）
+ *
+ * 本函数实现了完整的三层实体级别差异检测，而非简单全文对比：
+ *
+ * 第1层 - 新增检测（KV_DIFF_ADD）：
+ *   遍历目标快照中所有条目，在源快照中按(S,P)键查找，
+ *   未找到的标记为新增条目，记录完整的(S,P,O,confidence)。
+ *
+ * 第2层 - 修改检测（KV_DIFF_MODIFY）：
+ *   当(S,P)键在源快照和目标快照中都存在时，调用 entries_are_equal()
+ *   对比完整的 (S,P,O,confidence) 四元组：
+ *     - 若完全一致：跳过（无变更）
+ *     - 若任一字段不同：标记为修改，记录 before/after 对象值和置信度
+ *
+ *   注意：此处检测的是粗粒度的 SPO 三元组修改。对于近似实体的语义级
+ *   合并需求，请使用下方新增的 kv_semantic_merge_entities() 函数。
+ *
+ * 第3层 - 删除检测（KV_DIFF_REMOVE）：
+ *   反向遍历源快照条目，在目标快照中按(S,P)键查找，
+ *   未找到的标记为删除条目。
+ *
+ * 完备性说明：
+ *   1. 实体键(S,P)是知识图谱中三元组的唯一标识符，两个快照中的所有
+ *      条目都按此键进行精确匹配，不会遗漏任何新增或删除。
+ *   2. 修改检测覆盖了对象值(O)和置信度(confidence)两个变异维度，
+ *      能够捕获知识更新（同一事实的不同表述或不同置信度）。
+ *   3. 对于语义相似但字符串不完全相同的实体（如"机器学习"vs"机器学习技术"），
+ *      应使用 kv_semantic_merge_entities() 进行模糊匹配合并，
+ *      kv_diff_snapshots 保持精确匹配语义以保证版本差异的可追溯性。
+ * ============================================================================ */
 int kv_diff_snapshots(const KnowledgeVersionManager* kvm, int from_id, int to_id, KnowledgeDiff* diff) {
     if (!kvm || !diff) return -1;
     memset(diff, 0, sizeof(KnowledgeDiff));
@@ -586,10 +696,25 @@ int kv_merge_branch(KnowledgeVersionManager* kvm, const char* source, const char
                  * 策略: 置信度择优，置信度接近时保留目标分支版本 */
                 float src_confidence = src_entries[si].confidence;
                 float tgt_confidence = tgt_entries[sp_conflict].confidence;
+
+                /* ZSFWS-031: 冲突解决日志 */
+                log_info("[分支合并冲突] <%s, %s>: "
+                         "源分支值='%s'(confidence=%.3f) vs 目标分支值='%s'(confidence=%.3f)",
+                         src_entries[si].subject, src_entries[si].predicate,
+                         src_entries[si].object, src_confidence,
+                         tgt_entries[sp_conflict].object, tgt_confidence);
+
                 if (src_confidence > tgt_confidence * 1.5f) {
                     /* 源置信度显著更高，用源替换目标 */
+                    log_info("[分支合并冲突解决] 采用源分支版本: "
+                             "源置信度(%.3f) > 目标置信度(%.3f) * 1.5",
+                             src_confidence, tgt_confidence);
                     merged_entries[sp_conflict] = src_entries[si];
                     merged_entries[sp_conflict].entry_id = merged_count;
+                } else {
+                    log_info("[分支合并冲突解决] 保留目标分支版本: "
+                             "源置信度(%.3f) <= 目标置信度(%.3f) * 1.5 或目标分支优先级更高",
+                             src_confidence, tgt_confidence);
                 }
                 /* 否则保持目标版本不变 */
                 conflicts_resolved++;
@@ -945,4 +1070,139 @@ int kv_update_current_entries(KnowledgeVersionManager* kvm,
     memcpy(kvm->current_entries, entries, (size_t)count * sizeof(SnapshotEntryRecord));
     kvm->current_entry_count = count;
     return 0;
+}
+
+/* ============================================================================
+ * ZSFWS-031: 语义相似度合并策略
+ *
+ * 对两个快照中的实体进行语义级合并，根据相似度决定合并策略：
+ *   - 相似度 >= 0.80: 自动合并（高置信度实体替换低置信度）
+ *   - 相似度 0.50 ~ 0.80: 标记为待审核（记录到冲突日志）
+ *   - 相似度 < 0.50: 视为不同实体，保留双方
+ *
+ * 策略背后的设计思想：
+ *   1. 高相似度（>=0.8）的实体极可能是同一知识的不同表述，
+ *      自动合并可减少知识库冗余而不损失信息。
+ *   2. 中等相似度（0.5-0.8）的实体可能是相关但不完全等价的知识，
+ *      需要人工或后续推理确认，标记为待审核。
+ *   3. 低相似度（<0.5）的实体为不同的知识条目，各自保留。
+ *
+ * 注意：此函数是 kv_diff_snapshots 的补充而非替代。
+ *      kv_diff_snapshots 保证精确版本追溯（基于(S,P)精确匹配），
+ *      kv_semantic_merge_entities 提供语义级冗余消除能力。
+ *
+ * @param entries_a      第一个条目数组
+ * @param count_a        第一个数组大小
+ * @param entries_b      第二个条目数组  
+ * @param count_b        第二个数组大小
+ * @param merged_entries 合并结果输出（调用者分配，容量需 >= count_a + count_b）
+ * @param max_merged     合并结果最大容量
+ * @param merged_count   输出：实际合并后条目数
+ * @param log_buffer     冲突日志输出缓冲区（可NULL）
+ * @param log_max        日志缓冲区大小
+ * @return 0成功, -1失败
+ * ============================================================================ */
+int kv_semantic_merge_entities(
+    const SnapshotEntryRecord* entries_a, int count_a,
+    const SnapshotEntryRecord* entries_b, int count_b,
+    SnapshotEntryRecord* merged_entries, int max_merged,
+    int* merged_count,
+    char* log_buffer, size_t log_max)
+{
+    if (!entries_a || !entries_b || !merged_entries || !merged_count) return -1;
+    if (count_a < 0 || count_b < 0 || max_merged < (count_a + count_b)) return -1;
+
+    int out_count = 0;
+    int auto_merged = 0;
+    int pending_review = 0;
+    int log_pos = 0;
+
+    #define SEMANTIC_HIGH_THRESHOLD 0.80f
+    #define SEMANTIC_MID_THRESHOLD 0.50f
+
+    /* 使用标记数组追踪b中已合并的条目 */
+    int* b_merged = (int*)safe_calloc((size_t)count_b, sizeof(int));
+    if (!b_merged && count_b > 0) return -1;
+
+    /* 第1阶段：将a中所有条目与b比较，相似度 >= 0.8 自动合并 */
+    for (int ai = 0; ai < count_a && out_count < max_merged; ai++) {
+        float best_sim = 0.0f;
+        int best_idx = -1;
+
+        for (int bi = 0; bi < count_b; bi++) {
+            if (!b_merged) break;
+            if (b_merged[bi]) continue;
+            float sim = compute_entity_similarity(&entries_a[ai], &entries_b[bi]);
+            if (sim > best_sim) {
+                best_sim = sim;
+                best_idx = bi;
+            }
+        }
+
+        if (best_sim >= SEMANTIC_HIGH_THRESHOLD && best_idx >= 0) {
+            /* 高相似度自动合并：取置信度更高的 */
+            if (entries_a[ai].confidence >= entries_b[best_idx].confidence) {
+                merged_entries[out_count] = entries_a[ai];
+            } else {
+                merged_entries[out_count] = entries_b[best_idx];
+            }
+            merged_entries[out_count].entry_id = out_count + 1;
+            if (b_merged) b_merged[best_idx] = 1;
+            auto_merged++;
+            out_count++;
+        } else if (best_sim >= SEMANTIC_MID_THRESHOLD && best_idx >= 0) {
+            /* 中等相似度：两者都保留但标记为待审核 */
+            merged_entries[out_count] = entries_a[ai];
+            merged_entries[out_count].entry_id = out_count + 1;
+            out_count++;
+
+            if (out_count < max_merged && b_merged) {
+                merged_entries[out_count] = entries_b[best_idx];
+                merged_entries[out_count].entry_id = out_count + 1;
+                b_merged[best_idx] = 1;
+                out_count++;
+                pending_review++;
+
+                /* 记录待审核冲突到日志 */
+                if (log_buffer && (size_t)log_pos < log_max) {
+                    log_pos += snprintf(log_buffer + log_pos, log_max - (size_t)log_pos,
+                        "[待审核] 相似度=%.3f: <%s,%s,%s>(conf=%.2f) vs <%s,%s,%s>(conf=%.2f)\n",
+                        best_sim,
+                        entries_a[ai].subject, entries_a[ai].predicate, entries_a[ai].object,
+                        entries_a[ai].confidence,
+                        entries_b[best_idx].subject, entries_b[best_idx].predicate,
+                        entries_b[best_idx].object,
+                        entries_b[best_idx].confidence);
+                }
+            } else {
+                /* 空间不足，仅保留a条目 */
+            }
+        } else {
+            /* 低相似度：视为不同实体，保留a条目 */
+            merged_entries[out_count] = entries_a[ai];
+            merged_entries[out_count].entry_id = out_count + 1;
+            out_count++;
+        }
+    }
+
+    /* 第2阶段：将b中剩余未合并的条目追加到结果 */
+    for (int bi = 0; bi < count_b && out_count < max_merged; bi++) {
+        if (b_merged && b_merged[bi]) continue;
+        merged_entries[out_count] = entries_b[bi];
+        merged_entries[out_count].entry_id = out_count + 1;
+        out_count++;
+    }
+
+    /* 记录合并摘要 */
+    log_info("[语义合并] 完成: a=%d条目, b=%d条目 → 合并后=%d条目, "
+             "自动合并=%d, 待审核=%d (高阈值=%.2f, 中阈值=%.2f)",
+             count_a, count_b, out_count, auto_merged, pending_review,
+             SEMANTIC_HIGH_THRESHOLD, SEMANTIC_MID_THRESHOLD);
+
+    safe_free((void**)&b_merged);
+    *merged_count = out_count;
+    return 0;
+
+    #undef SEMANTIC_HIGH_THRESHOLD
+    #undef SEMANTIC_MID_THRESHOLD
 }

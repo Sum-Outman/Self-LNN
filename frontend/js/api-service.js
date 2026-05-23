@@ -248,7 +248,8 @@ class ApiService {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-                const response = await fetch(`${this.baseURL}${endpoint}`, {
+                /* BUG-16修复：URL拼接增加斜杠保护，避免baseURL无尾斜杠且endpoint无前导斜杠导致404 */
+                const response = await fetch(this.baseURL + (endpoint.startsWith('/') ? endpoint : '/' + endpoint), {
                     ...options,
                     signal: controller.signal
                 });
@@ -451,21 +452,28 @@ class ApiService {
      * 启动连接监控
      */
     startConnectionMonitor(interval = 5000) {
-        /* 初始延迟5秒：等服务器完成静态文件加载后再发起API请求 */
-         setTimeout(async () => {
-             const status = await this.checkConnection();
-             this.notifyConnectionStatus(status);
-             this.connectionCheckInterval = setInterval(async () => {
-                 const status = await this.checkConnection();
-                 this.notifyConnectionStatus(status);
-             }, interval);
-         }, 5000);
+        /* BUG-9修复：先停止已有监控防止重复，保存setTimeout定时器ID支持取消 */
+        this.stopConnectionMonitor();
+        this._connectionMonitorTimeout = setTimeout(async () => {
+            if (!this._connectionMonitorTimeout) return;
+            const status = await this.checkConnection();
+            this.notifyConnectionStatus(status);
+            this.connectionCheckInterval = setInterval(async () => {
+                const status = await this.checkConnection();
+                this.notifyConnectionStatus(status);
+            }, interval);
+        }, 5000);
     }
     
     /**
      * 停止连接监控
      */
     stopConnectionMonitor() {
+        /* BUG-9修复：清除初始延迟定时器，防止use-after-free */
+        if (this._connectionMonitorTimeout) {
+            clearTimeout(this._connectionMonitorTimeout);
+            this._connectionMonitorTimeout = null;
+        }
         if (this.connectionCheckInterval) {
             clearInterval(this.connectionCheckInterval);
             this.connectionCheckInterval = null;

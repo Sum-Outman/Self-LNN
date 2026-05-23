@@ -1,6 +1,44 @@
 /**
  * @file laplace_enhanced.c
- * @brief 拉普拉斯变换全面增强系统实现
+ * @brief 拉普拉斯变换全面增强系统 —— 系统编排层（System Orchestration Layer）
+ *
+ * ========== ZSFWS-033 模块职责边界 ==========
+ * 本模块职责：系统级拉普拉斯分析编排与监控
+ *   - 拉普拉斯增强系统生命周期管理 (laplace_enhanced_create/free)
+ *   - FFT频谱分析与频谱特征提取 (laplace_spectral_analyze) *
+ *   - 频域滤波器（Butterworth低通/带通） (laplace_spectral_filter) *
+ *   - 梯度频域增强（自适应截止频率） (laplace_enhance_gradients)
+ *   - 谱减法去噪 (laplace_denoise)
+ *   - 增强型稳定性分析（幂迭代特征值） (laplace_stability_analyze) **
+ *   - 控制信号稳定化（双线性变换二阶补偿器） (laplace_stabilize_control)
+ *   - FFT频域卷积（卷积定理实现） (laplace_fft_convolution_enhanced)
+ *   - 图像拉普拉斯锐化增强 (laplace_image_enhance)
+ *   - 拉普拉斯记忆衰减模型 (laplace_memory_decay_model)
+ *   - 5阶段分析管道（FFT→频谱→稳定性→滤波→控制） (laplace_pipeline_execute)
+ *   - 实时稳定性监控器 (laplace_monitor_*)
+ *   - LNN稳定性保证器（特征值监控+自动校正） (laplace_guarantor_*)
+ *
+ * * 与 laplace_integration.c 的关系：
+ *   两者都涉及FFT频谱计算。本模块的 laplace_spectral_analyze 侧重
+ *   系统级频谱特征提取（质心、熵、带宽、高低频能量比），作为分析管道
+ *   的输入阶段。laplace_integration.c 的 laplace_compute_spectrum 侧重
+ *   CfC训练级的频谱计算（用于自适应学习率）。
+ *   两者通过统一的 laplace_fft.h (lfft_split_radix2) 实现FFT，无重复实现。
+ *
+ * ** 与 laplace_integration.c 的关系：
+ *   两者都涉及稳定性分析。本模块的 laplace_stability_analyze 使用
+ *   幂迭代特征值分解进行系统级广义稳定性判断（阻尼比、增益裕度、
+ *   相位裕度、超调量）。laplace_integration.c 的 cfc_cell_analyze_stability
+ *   专注CfC单细胞的一阶传递函数极点分析。
+ *
+ * 与 laplace_features.c 的关系：
+ *   本模块与 laplace_features.c 无直接功能重叠。
+ *   laplace_features.c 是特征层（金字塔/图拉普拉斯/流形学习），
+ *   本模块是系统编排层（管道/监控/保证器），各司其职。
+ *
+ * 本模块的独特价值：提供了统一的分析管道和实时监控体系，
+ * 是系统初始化时创建的顶层Laplace系统，供各子系统调用。
+ * =============================================
  */
 
 #include "selflnn/core/laplace_enhanced.h"

@@ -11,7 +11,7 @@
 #include <stddef.h>
 #include "selflnn/robot/hardware_interface.h"
 #include "selflnn/robot/hardware_detector.h"
-#include "selflnn/robot/pybullet_interface.h"
+#include "selflnn/robot/pybullet_bridge.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -850,7 +850,7 @@ int robot_health_monitor_get_maintenance_summary(RobotHealthMonitor* monitor,
  * @param config PyBullet配置（可选，NULL使用默认配置）
  * @return int 成功返回PyBullet body ID，失败返回-1
  */
-int robot_connect_pybullet(Robot* robot, const PBConfig* config);
+int robot_connect_pybullet(Robot* robot, const PyBulletConfig* config);
 
 /**
  * @brief 断开PyBullet连接
@@ -875,7 +875,7 @@ int robot_is_pybullet_connected(const Robot* robot);
  * @param config PyBullet配置（可选，NULL使用默认配置）
  * @return int 成功返回0，失败返回-1
  */
-int robot_controller_connect_pybullet(RobotController* controller, const PBConfig* config);
+int robot_controller_connect_pybullet(RobotController* controller, const PyBulletConfig* config);
 
 /**
  * @brief 控制器版本：断开PyBullet连接

@@ -1,3 +1,40 @@
+/**
+ * @file laplace_features.c
+ * @brief 拉普拉斯特征提取 —— 空间/结构特征层（Spatial/Structural Feature Layer）
+ *
+ * ========== ZSFWS-033 模块职责边界 ==========
+ * 本模块职责：基于拉普拉斯算子的空间/结构特征提取与降维
+ *   - 多尺度高斯金字塔构建 (laplace_build_gaussian_pyramid)
+ *   - 拉普拉斯金字塔构建与重构 (laplace_build_laplacian_pyramid / reconstruct)
+ *   - 图拉普拉斯矩阵构建（标准/归一化） (laplace_graph_laplacian_build)
+ *   - 图拉普拉斯特征分解（Jacobi特征值） (laplace_graph_laplacian_decompose)
+ *   - 切比雪夫图卷积 (laplace_graph_conv_chebyshev)
+ *   - 谱域图卷积 (laplace_graph_conv_spectral)
+ *   - 拉普拉斯特征映射（Laplacian Eigenmap降维） (laplace_eigenmap_*)
+ *   - 拉普拉斯稀疏编码（含拉普拉斯正则化） (laplace_sparse_*)
+ *   - 拉普拉斯字典学习（交替优化） (laplace_dict_*)
+ *   - 局部线性嵌入（LLE流形学习） (laplace_lle)
+ *   - 通用流形学习（LLEs/Eigenmap两种方法） (laplace_manifold_learn)
+ *
+ * 与 laplace_enhanced.c 的关系：
+ *   本模块处理空间/结构域的特征（图像金字塔、图信号、流形嵌入），
+ *   laplace_enhanced.c 处理时间/频域的系统分析（FFT、频谱、稳定性监控）。
+ *   两个模块功能完全正交，无重叠。各自使用不同的数学工具——
+ *   本模块用Jacobi特征值分解和卷积，enhanced.c用FFT和幂迭代。
+ *
+ * 与 laplace_integration.c 的关系：
+ *   本模块处理空间/结构特征（金字塔、图信号处理），
+ *   laplace_integration.c 处理时间/频域特征（CfC动力学、频域学习率）。
+ *   两个模块功能完全正交，无重叠。本模块的"拉普拉斯"指图拉普拉斯
+ *   和拉普拉斯金字塔算子，integration.c的"拉普拉斯"指拉普拉斯变换
+ *   （s域传递函数分析）。
+ *
+ * 本模块是三个Laplace模块中唯一不涉及FFT/s域分析的模块——
+ *   专攻离散空间域的拉普拉斯特征提取和谱图理论，
+ *   为视觉处理、图结构数据、高维数据降维提供基础设施。
+ * =============================================
+ */
+
 #include "selflnn/core/laplace_features.h"
 #include "selflnn/utils/secure_random.h"
 #include <stdlib.h>

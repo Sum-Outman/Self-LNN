@@ -1767,7 +1767,8 @@ static ImitationLearningResult* train_gail(ImitationLearner* learner) {
                             policy_grad[max_state_dim + ad] = curr_a + lr * adv_reward * (curr_a > 0.5f ? 1.0f : -0.5f);
                         }
                         memcpy(policy_grad, sa_pair_buf, max_state_dim * sizeof(float));
-                        lnn_backward(policy_network, policy_grad);
+                        float policy_loss = 0.0f;
+                        lnn_backward(policy_network, policy_grad, &policy_loss);
                     }
                 }
             }
@@ -3357,7 +3358,7 @@ void expert_demonstration_free(ExpertDemonstration* demonstration) {
 // 将图像通过深度视觉特征提取器转换为状态向量，再使用标准模仿学习算法训练
 // ============================================================================
 
-#include "selflnn/multimodal/deep_vision.h"
+#include "selflnn/multimodal/liquid_vision.h"
 
 struct VisualImitationLearner {
     ImitationVisualConfig config;

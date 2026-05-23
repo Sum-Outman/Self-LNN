@@ -1,9 +1,7 @@
 # 多模态处理库
 add_library(selflnn_multimodal
     multimodal.c
-    vision.c
     stereo_calibration.c
-    deep_vision.c
     audio.c
     text.c
     sensor.c

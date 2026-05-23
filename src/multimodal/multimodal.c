@@ -9,7 +9,7 @@
  */
 
 #include "selflnn/multimodal/multimodal.h"
-#include "selflnn/multimodal/deep_vision.h"
+#include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"

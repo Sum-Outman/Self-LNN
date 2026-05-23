@@ -2658,6 +2658,8 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
             if (!cell) continue;
             size_t layer_input = (l == 0) ? input_size : hidden_size;
             cell_unique_params += layer_input * hidden_size;  /* input_gate_weights */
+            cell_unique_params += layer_input * hidden_size;  /* forget_gate_weights (ZSFWS-023修复: 补充遗漏) */
+            cell_unique_params += layer_input * hidden_size;  /* output_gate_weights (ZSFWS-023修复: 补充遗漏) */
             if (cell->gate_biases) cell_unique_params += hidden_size * 3;
             if (cell->use_adaptive_tau && cell->time_constants) cell_unique_params += hidden_size;
             if (cell->hidden_to_gate_weights) cell_unique_params += hidden_size * hidden_size;
@@ -2703,6 +2705,26 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
                     memcpy(all_params + idx, cell->input_gate_weights, n * sizeof(float));
                     if (cell->input_gate_weight_grad) {
                         memcpy(all_grads + idx, cell->input_gate_weight_grad, n * sizeof(float));
+                    }
+                    idx += n;
+                }
+
+                /* forget_gate_weights (ZSFWS-023修复: 补充遗漏的门控权重) */
+                if (cell->forget_gate_weights && idx + layer_input * hidden_size <= total_params) {
+                    size_t n = layer_input * hidden_size;
+                    memcpy(all_params + idx, cell->forget_gate_weights, n * sizeof(float));
+                    if (cell->forget_gate_weight_grad) {
+                        memcpy(all_grads + idx, cell->forget_gate_weight_grad, n * sizeof(float));
+                    }
+                    idx += n;
+                }
+
+                /* output_gate_weights (ZSFWS-023修复: 补充遗漏的门控权重) */
+                if (cell->output_gate_weights && idx + layer_input * hidden_size <= total_params) {
+                    size_t n = layer_input * hidden_size;
+                    memcpy(all_params + idx, cell->output_gate_weights, n * sizeof(float));
+                    if (cell->output_gate_weight_grad) {
+                        memcpy(all_grads + idx, cell->output_gate_weight_grad, n * sizeof(float));
                     }
                     idx += n;
                 }
@@ -2779,6 +2801,18 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
                         widx += n;
                     }
 
+                    if (cell->forget_gate_weights && widx + layer_input * hidden_size <= idx) {
+                        size_t n = layer_input * hidden_size;
+                        memcpy(cell->forget_gate_weights, all_params + widx, n * sizeof(float));
+                        widx += n;
+                    }
+
+                    if (cell->output_gate_weights && widx + layer_input * hidden_size <= idx) {
+                        size_t n = layer_input * hidden_size;
+                        memcpy(cell->output_gate_weights, all_params + widx, n * sizeof(float));
+                        widx += n;
+                    }
+
                     if (cell->gate_biases && widx + hidden_size * 3 <= idx) {
                         size_t n = hidden_size * 3;
                         memcpy(cell->gate_biases, all_params + widx, n * sizeof(float));
@@ -2828,6 +2862,10 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
                     size_t layer_input = (l == 0) ? input_size : hidden_size;
                     if (cell->input_gate_weight_grad)
                         memset(cell->input_gate_weight_grad, 0, layer_input * hidden_size * sizeof(float));
+                    if (cell->forget_gate_weight_grad)
+                        memset(cell->forget_gate_weight_grad, 0, layer_input * hidden_size * sizeof(float));
+                    if (cell->output_gate_weight_grad)
+                        memset(cell->output_gate_weight_grad, 0, layer_input * hidden_size * sizeof(float));
                     if (cell->gate_bias_grad)
                         memset(cell->gate_bias_grad, 0, hidden_size * 3 * sizeof(float));
                     if (cell->time_constant_grad)

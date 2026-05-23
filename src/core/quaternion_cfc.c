@@ -1,6 +1,28 @@
 /**
  * @file quaternion_cfc.c
- * @brief 四元数CfC单元实现
+ * @brief 四元数CfC单元 —— 核心层（Core Layer）
+ * 
+ * ========== ZSFWS-032 模块职责边界 ==========
+ * 本模块职责：CfC Cell层级的四元数动力学（单细胞粒度）
+ *   - 四元数CfC单细胞状态演化 (quaternion_cfc_closed_form_update)
+ *   - Hamilton乘积驱动的ODE右端项 (quaternion_cfc_rhs)
+ *   - 多类型ODE求解器路由 (quaternion_cfc_solve_with_solver)
+ *   - 四元数旋转不变性度量 (quaternion_cfc_cell_rotation_invariance)
+ *   - 单细胞参数自适应与演化 (quaternion_cfc_cell_adapt/evolve)
+ * 
+ * 与 reasoning/quaternion_liquid_gate.c 的关系：
+ *   quaternion_liquid_gate.c 是本模块的上层消费者——
+ *   它使用本模块提供的四元数基本运算（Hamilton乘积等），
+ *   在其基础上构建批量序列门控(sigmoid/tanh双路)、
+ *   四元数投影、相位编码、注意力聚合等推理层功能。
+ *   本模块不处理批量序列、不处理投影变换、不处理注意力机制。
+ * 
+ * 与 core/cfc_cell.c 的关系：
+ *   本模块是 CfC Cell 的四元数化并行实现——
+ *   cfc_cell.c 处理实数标量CfC动力学，
+ *   本模块处理四元数超复杂CfC动力学。
+ *   两者在CfC网络中可混合使用（通过solver_type路由）。
+ * =============================================
  * 
  * 将四元数表示与CfC动力学深度集成，实现四维超复杂连续时间动态系统，
  * 支持旋转不变性和四维状态演化。

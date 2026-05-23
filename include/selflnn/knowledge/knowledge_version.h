@@ -126,6 +126,36 @@ int kv_diff_export_report(const KnowledgeVersionManager* kvm, int from_id, int t
 /* 清理过期快照 */
 int kv_cleanup_old_snapshots(KnowledgeVersionManager* kvm, int keep_count);
 
+/* ============================================================================
+ * ZSFWS-031: 语义相似度合并策略
+ *
+ * 对两个快照中的实体进行语义级合并，根据字符三元组Jaccard相似度决定策略：
+ *   - 相似度 >= 0.80: 自动合并（取置信度高者）
+ *   - 相似度 0.50 ~ 0.80: 标记为待审核（写入日志）
+ *   - 相似度 < 0.50: 视为不同实体，均保留
+ *
+ * 与 kv_diff_snapshots 的关系：
+ *   kv_diff_snapshots: 精确匹配版本追溯（(S,P)键完全相等）
+ *   kv_semantic_merge_entities: 语义模糊匹配合并（近似字符串合并）
+ *
+ * @param entries_a      第一个条目数组
+ * @param count_a        第一个数组大小
+ * @param entries_b      第二个条目数组
+ * @param count_b        第二个数组大小
+ * @param merged_entries 合并结果输出（调用者预分配，容量 >= count_a + count_b）
+ * @param max_merged     合并结果最大容量
+ * @param merged_count   输出：实际合并条目数
+ * @param log_buffer     冲突日志输出缓冲区（可NULL）
+ * @param log_max        日志缓冲区大小
+ * @return 0成功, -1失败
+ * ============================================================================ */
+int kv_semantic_merge_entities(
+    const SnapshotEntryRecord* entries_a, int count_a,
+    const SnapshotEntryRecord* entries_b, int count_b,
+    SnapshotEntryRecord* merged_entries, int max_merged,
+    int* merged_count,
+    char* log_buffer, size_t log_max);
+
 #ifdef __cplusplus
 }
 #endif

@@ -19,7 +19,7 @@
 #include "selflnn/multimodal/slam.h"
 #include "selflnn/multimodal/point_cloud.h"
 #include "selflnn/multimodal/depth_estimation.h"
-#include "selflnn/multimodal/vision.h"
+#include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/memory.h"
 #include "selflnn/core/safe_memory.h"

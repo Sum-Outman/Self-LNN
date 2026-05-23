@@ -1,7 +1,48 @@
 /**
  * @file laplace_integration.c
- * @brief 拉普拉斯变换深度集成实现
- * 
+ * @brief 拉普拉斯变换深度集成 —— CfC/LNN集成层（CfC/LNN Integration Layer）
+ *
+ * ========== ZSFWS-033 模块职责边界 ==========
+ * 本模块职责：将拉普拉斯变换深度集成到CfC细胞和LNN网络操作中
+ *   - CfC单细胞稳定性分析（一阶传递函数极点+Bode图） (cfc_cell_analyze_stability) *
+ *   - CfC单细胞稳定性优化（自适应参数搜索+CAS锁保护） (cfc_cell_optimize_stability)
+ *   - CfC单细胞频率响应计算 (cfc_cell_frequency_response)
+ *   - CfC单细胞低通滤波器设计（拉普拉斯域参数配置） (cfc_cell_design_lowpass_filter)
+ *   - CfC单细胞系统辨识（最小二乘法→连续时间参数） (cfc_cell_system_identification)
+ *   - LNN隐藏状态频域调制（基于激活分布的频域感知调制） (lnn_laplace_modulate_hidden)
+ *   - LNN网络动力学综合分析（频域能量+零交叉+稳定性边界） (lnn_laplace_analyze_network_dynamics)
+ *   - 频谱计算（FFT→谱特征，用于自适应学习率） (laplace_compute_spectrum) **
+ *   - 频域自适应学习率（基于谱质心/高低频能量比） (laplace_freq_adaptive_lr)
+ *   - 分数阶拉普拉斯记忆（Grünwald-Letnikov分数阶微积分） (laplace_fractional_*)
+ *   - 递归最小二乘(RLS)在线系统辨识 (laplace_rls_*)
+ *   - 拉普拉斯域PID自动调谐 (laplace_pid_auto_tune)
+ *   - 超前-滞后补偿器设计 (laplace_lead_lag_design)
+ *   - 自适应频谱门控（Wiener滤波/阈值门控） (laplace_spectral_gate)
+ *   - 多变量LNN全网络稳定性分析（全cell极点+耦合矩阵） (laplace_lnn_full_stability) *
+ *
+ * * 与 laplace_enhanced.c 的关系：
+ *   两者都涉及稳定性分析。本模块聚焦CfC单细胞/LNN网络级的稳定性
+ *   （一阶传递函数极点、Bode图、耦合矩阵），laplace_enhanced.c 聚焦
+ *   系统级的通用稳定性（幂迭代特征值、二阶系统参数）。
+ *   laplace_lnn_full_stability 是本模块独有的——遍历所有CfC细胞计算
+ *   极点分布+耦合效应，区别于 enhanced.c 的矩阵特征值方法。
+ *
+ * ** 与 laplace_enhanced.c 的关系：
+ *   两者都涉及频谱计算。本模块的 laplace_compute_spectrum 为训练级
+ *   服务（频谱特征→学习率自适应），laplace_enhanced.c 的
+ *   laplace_spectral_analyze 为系统级服务（分析管道第一阶段）。
+ *   两者通过统一的 laplace_fft.h (lfft_complex_inplace) 实现FFT，
+ *   无重复实现。频谱JSON序列化仅本模块提供 (laplace_spectrum_to_json)。
+ *
+ * 与 laplace_features.c 的关系：
+ *   本模块与 laplace_features.c 无直接功能重叠。
+ *   laplace_features.c 处理空间/结构特征（金字塔、图信号处理），
+ *   本模块处理时间/频域特征（CfC细胞动力学、LNN网络稳定性）。
+ *
+ * 本模块的独特价值：CfC/LNN核心操作与拉普拉斯频域理论的深度结合，
+ * 是训练优化（自适应LR、分数阶记忆）和稳定性保证的核心组件。
+ * =============================================
+ *
  * 将拉普拉斯变换深度集成到CfC核心中，提供频域分析、
  * 稳定性优化和系统特性分析功能。
  */

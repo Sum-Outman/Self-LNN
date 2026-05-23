@@ -1,6 +1,7 @@
 #include "selflnn/core/loss.h"
 #include <math.h>
 #include <float.h>
+#include <string.h>
 
 float loss_compute(const float* predictions, const float* targets, int n, LossType loss_type)
 {
@@ -444,4 +445,185 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
 void loss_gradient(const float* predictions, const float* targets, int n, float* gradients, LossType loss_type)
 {
     loss_gradient_ex(predictions, targets, n, gradients, loss_type, NULL);
+}
+
+/* ==========================================================================
+ * ZSFWS-024: 多模态损失函数实现
+ * 解决多模态输出多尺度差异（视觉[-1,1]、文本离散ID、传感器变范围）
+ * ========================================================================== */
+
+/**
+ * @brief 解析模态类型→默认损失函数映射
+ */
+LossType loss_get_default_for_modality(ModalityType modality)
+{
+    switch (modality) {
+        case MODALITY_VISUAL:
+            return LOSS_HUBER;                    /* [-1,1]浮点，Huber鲁棒于异常像素 */
+        case MODALITY_TEXT_LOGITS:
+            return LOSS_CATEGORICAL_CROSSENTROPY; /* 离散token logits，CE最优 */
+        case MODALITY_TEXT_EMBED:
+            return LOSS_COSINE;                   /* 嵌入向量，方向相似度优于L2 */
+        case MODALITY_SENSOR:
+            return LOSS_HUBER;                    /* 变范围传感器，Huber抗噪声 */
+        case MODALITY_CONTROL:
+            return LOSS_MSE;                      /* 连续控制信号，MSE精确 */
+        case MODALITY_AUDIO:
+            return LOSS_MAE;                      /* 频域特征，MAE抗尖峰干扰 */
+        case MODALITY_CUSTOM:
+        default:
+            return LOSS_MSE;                      /* 自定义回退到MSE */
+    }
+}
+
+/**
+ * @brief 验证多模态段描述的完整性
+ * @return 0=有效, -1=有越界段, -2=有重叠段
+ */
+static int validate_multimodal_segments(const MultimodalLossSegment* segments,
+                                         int num_segments, int total_length)
+{
+    if (!segments || num_segments <= 0) return -1;
+    if (total_length <= 0) return -1;
+
+    /* 检查每段的边界和重叠 */
+    for (int i = 0; i < num_segments; i++) {
+        const MultimodalLossSegment* seg = &segments[i];
+        if (seg->start_index < 0 || seg->length <= 0) return -1;
+        if (seg->start_index + seg->length > total_length) return -1;
+        if (seg->weight < 0.0f) return -1;        /* 负权重无效 */
+
+        /* 检查与前一段是否重叠（段需按start_index升序） */
+        if (i > 0) {
+            const MultimodalLossSegment* prev = &segments[i - 1];
+            if (seg->start_index < prev->start_index + prev->length) {
+                return -2;                          /* 段重叠 */
+            }
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief 计算多模态损失（带每段独立梯度输出）
+ * 
+ * 遍历所有模态段，对每段使用其模态类型对应的最佳损失函数计算损失值。
+ * 
+ * @return float 加权总损失，验证失败返回1e6f
+ */
+float loss_compute_multimodal(const float* predictions, const float* targets,
+                               int total_length,
+                               const MultimodalLossSegment* segments,
+                               int num_segments)
+{
+    if (!predictions || !targets || !segments || num_segments <= 0 || total_length <= 0) {
+        return 1e6f;
+    }
+
+    /* 验证段描述 */
+    if (validate_multimodal_segments(segments, num_segments, total_length) != 0) {
+        return 1e6f;
+    }
+
+    float total_loss = 0.0f;
+    float total_weight = 0.0f;
+
+    for (int s = 0; s < num_segments; s++) {
+        const MultimodalLossSegment* seg = &segments[s];
+        const float* seg_pred = predictions + seg->start_index;
+        const float* seg_target = targets + seg->start_index;
+
+        /* 确定该段使用的损失类型 */
+        LossType loss_type;
+        const LossConfig* loss_cfg;
+        if (seg->modality == MODALITY_CUSTOM) {
+            loss_type = seg->custom_loss_type;
+        } else {
+            loss_type = loss_get_default_for_modality(seg->modality);
+        }
+
+        /* 若config全零则传NULL使用默认值 */
+        if (seg->loss_config.focal_gamma > 0.0f || seg->loss_config.focal_alpha > 0.0f ||
+            seg->loss_config.dice_smooth > 0.0f || seg->loss_config.triplet_margin > 0.0f ||
+            seg->loss_config.quantile_tau > 0.0f) {
+            loss_cfg = &seg->loss_config;
+        } else {
+            loss_cfg = NULL;
+        }
+
+        float seg_loss = loss_compute_ex(seg_pred, seg_target, seg->length, loss_type, loss_cfg);
+        float seg_weight = seg->weight > 0.0f ? seg->weight : 1.0f;
+
+        total_loss += seg_weight * seg_loss;
+        total_weight += seg_weight;
+    }
+
+    /* 归一化：除以总权重以保持损失量纲一致性 */
+    if (total_weight > 0.0f) {
+        total_loss /= total_weight;
+    }
+
+    if (isnan(total_loss) || isinf(total_loss)) {
+        return 1e6f;
+    }
+    return total_loss;
+}
+
+/**
+ * @brief 计算多模态损失梯度
+ * 
+ * 对每个模态段独立计算梯度，写入统一梯度数组对应位置。
+ * 先全局清零再逐段填充，确保未被覆盖的区域梯度为0。
+ */
+void loss_gradient_multimodal(const float* predictions, const float* targets,
+                               int total_length, float* gradients,
+                               const MultimodalLossSegment* segments,
+                               int num_segments)
+{
+    if (!predictions || !targets || !gradients || !segments || num_segments <= 0 || total_length <= 0) {
+        return;
+    }
+
+    if (validate_multimodal_segments(segments, num_segments, total_length) != 0) {
+        return;
+    }
+
+    /* 全局清零：未覆盖区域梯度归零，防止跨模态泄漏 */
+    memset(gradients, 0, (size_t)total_length * sizeof(float));
+
+    for (int s = 0; s < num_segments; s++) {
+        const MultimodalLossSegment* seg = &segments[s];
+        const float* seg_pred = predictions + seg->start_index;
+        const float* seg_target = targets + seg->start_index;
+        float* seg_grad = gradients + seg->start_index;
+
+        /* 确定损失类型 */
+        LossType loss_type;
+        const LossConfig* loss_cfg;
+        if (seg->modality == MODALITY_CUSTOM) {
+            loss_type = seg->custom_loss_type;
+        } else {
+            loss_type = loss_get_default_for_modality(seg->modality);
+        }
+
+        if (seg->loss_config.focal_gamma > 0.0f || seg->loss_config.focal_alpha > 0.0f ||
+            seg->loss_config.dice_smooth > 0.0f || seg->loss_config.triplet_margin > 0.0f ||
+            seg->loss_config.quantile_tau > 0.0f) {
+            loss_cfg = &seg->loss_config;
+        } else {
+            loss_cfg = NULL;
+        }
+
+        float seg_weight = seg->weight > 0.0f ? seg->weight : 1.0f;
+
+        /* 计算该段的原始梯度 */
+        loss_gradient_ex(seg_pred, seg_target, seg->length, seg_grad, loss_type, loss_cfg);
+
+        /* 应用段权重缩放梯度 */
+        if (seg_weight != 1.0f) {
+            for (int i = 0; i < seg->length; i++) {
+                seg_grad[i] *= seg_weight;
+            }
+        }
+    }
 }

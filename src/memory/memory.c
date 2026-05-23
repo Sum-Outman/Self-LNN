@@ -2031,14 +2031,16 @@ int memory_compress(MemorySystem* system, const char* key, float target_ratio) {
         }
         
         float mse = 0.0f;
-        /* ZSFWS-NEW03: 除零防护——original_dim为0时跳过 */
-        if (original_dim == 0) { safe_free((void**)&reconstructed); continue; }
-        for (size_t i = 0; i < original_dim; i++) {
-            float diff = reconstructed[i] - item->data[i];
-            mse += diff * diff;
+        /* ZSFWS-NEW03: 除零防护——original_dim为0时跳过MSE计算 */
+        if (original_dim == 0) { safe_free((void**)&reconstructed); reconstructed = NULL; }
+        if (reconstructed) {
+            for (size_t i = 0; i < original_dim; i++) {
+                float diff = reconstructed[i] - item->data[i];
+                mse += diff * diff;
+            }
+            mse /= original_dim;
+            safe_free((void**)&reconstructed);
         }
-        mse /= original_dim;
-        safe_free((void**)&reconstructed);
         
         // 存储压缩信息
         int idx = existing_idx >= 0 ? existing_idx : (int)system->compression_count;

@@ -362,6 +362,51 @@ int pde_local_search(const ProductRequirement* requirement,
                       float step_size,
                       DesignEvaluation* final_evaluation);
 
+/* ============================================================================
+ * ZSFWS-036: 工业设计种子案例库接口
+ * ============================================================================ */
+
+/**
+ * @brief 加载种子案例到产品设计引擎
+ *
+ * 在引擎初始化时加载50+个跨领域工业设计先验案例，
+ * 为设计优化、类比推理和设计空间探索提供基线参考。
+ * 案例涵盖：消费电子(10)、机械设计(10)、软件界面(10)、
+ * 建筑结构(5)、机器人设计(5)、其他(10)。
+ *
+ * @param engine 产品设计引擎句柄
+ * @return 成功加载的案例数量，失败返回-1
+ */
+int product_design_load_seed_cases(struct ProductDesignEngine* engine);
+
+/**
+ * @brief 获取指定类别的种子案例数量
+ *
+ * @param category 案例类别 (0=消费电子,1=机械设计,2=软件界面,3=建筑结构,4=机器人设计,5=其他)
+ * @return 该类别案例数量，无效类别返回0
+ */
+int product_design_get_seed_case_count_by_category(int category);
+
+/**
+ * @brief 获取种子案例条目详情
+ *
+ * @param index 案例索引（0~54）
+ * @param name 输出：案例名称缓冲区
+ * @param name_size 名称缓冲区大小
+ * @param category_name 输出：类别名称缓冲区
+ * @param cat_size 类别名称缓冲区大小
+ * @param tags 输出：特征标签缓冲区（逗号分隔）
+ * @param tags_size 特征标签缓冲区大小
+ * @param constraints 输出：设计约束摘要缓冲区
+ * @param cons_size 约束摘要缓冲区大小
+ * @return 成功返回0，无效索引返回-1
+ */
+int product_design_get_seed_case(int index,
+                                  char* name, size_t name_size,
+                                  char* category_name, size_t cat_size,
+                                  char* tags, size_t tags_size,
+                                  char* constraints, size_t cons_size);
+
 #ifdef __cplusplus
 }
 #endif

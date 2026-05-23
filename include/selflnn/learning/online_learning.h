@@ -11,6 +11,9 @@
 
 #include <stddef.h>
 
+/* ZSFWS-013: 前向声明LNN类型，用于 online_learner_attach_lnn() */
+typedef struct LNN LNN;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -297,6 +300,19 @@ int online_learner_save_state(OnlineLearner* learner, const char* filename);
  * @return int 成功返回0，失败返回-1
  */
 int online_learner_load_state(OnlineLearner* learner, const char* filename);
+
+/**
+ * @brief ZSFWS-013: 将在线学习器附着到共享LNN实例
+ *
+ * 调用后学习器将直接读写LNN的权重矩阵，而非维护独立权重副本。
+ * 学习器的梯度下降更新将直接作用于LNN参数，实现真正的在线学习。
+ * 学习器的统计信息（loss、samples、概念漂移等）继续正常维护。
+ *
+ * @param learner 在线学习器句柄
+ * @param lnn 共享LNN实例
+ * @return int 成功返回0，失败返回-1
+ */
+int online_learner_attach_lnn(OnlineLearner* learner, LNN* lnn);
 
 #ifdef __cplusplus
 }

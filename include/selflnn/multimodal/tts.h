@@ -37,7 +37,7 @@ extern "C" {
 #define TTS_DEFAULT_TIME_CONSTANT 0.05f
 
 /** @brief 拼音表大小 */
-#define TTS_PINYIN_TABLE_SIZE 3755
+#define TTS_PINYIN_TABLE_SIZE 7200
 
 /** @brief 最大波形生成长度 */
 #define TTS_MAX_WAVEFORM_LENGTH (TTS_SAMPLE_RATE_DEFAULT * 60)
@@ -252,6 +252,34 @@ const char* tts_get_pinyin_string(const TTS_Pinyin* pinyin);
  * @return int 成功返回拼音数量，失败返回-1
  */
 int tts_text_to_pinyin(TTSEngine* engine, const char* text, TTS_Pinyin* output, int max_output);
+
+/**
+ * @brief Unicode码点→拼音查找（二分查找精确表 + 启发式回退）
+ * @param codepoint Unicode码点
+ * @param out_init 输出声母索引(TTS_Initial枚举值)
+ * @param out_final 输出韵母索引(TTS_Final枚举值)
+ * @param out_tone 输出声调(0-4)
+ * @return 1=精确匹配, 0=启发式近似
+ */
+int tts_pinyin_lookup(uint16_t codepoint, int* out_init, int* out_final, int* out_tone);
+
+/**
+ * @brief 从GB2312编码查找拼音（快速辅助函数）
+ * @param gb_hi GB2312高字节(0xA1-0xF7)
+ * @param gb_lo GB2312低字节(0xA1-0xFE)
+ * @param out_init 输出声母索引
+ * @param out_final 输出韵母索引
+ * @param out_tone 输出声调(0-4)
+ * @return 1=成功, 0=失败
+ */
+int tts_pinyin_lookup_gb2312(unsigned char gb_hi, unsigned char gb_lo,
+                              int* out_init, int* out_final, int* out_tone);
+
+/**
+ * @brief 获取拼音精确表大小
+ * @return 表条目数
+ */
+int tts_pinyin_table_size(void);
 
 #ifdef __cplusplus
 }

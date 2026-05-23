@@ -5,6 +5,8 @@
 
 #include "selflnn/evolution/evolution_engine.h"
 #include "selflnn/core/lnn.h"
+#include "selflnn/core/cfc.h"             /* ZSFWS-012: CfC Cell权重写入 */
+#include "selflnn/core/cfc_cell.h"        /* ZSFWS-012: CfCCell结构体 */
 #include "selflnn/core/laplace.h"
 #include "selflnn/core/cma_es.h"          /* F-010/F-019: CMA-ES集成 */
 #include "selflnn/utils/memory_utils.h"
@@ -1236,7 +1238,102 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
     orig_norm = sqrt(orig_norm);
     new_norm = sqrt(new_norm);
 
+    /* ZSFWS-012: 写入前记录日志 */
+    log_info("[演化验证] 开始写入LNN权重: 染色体大小=%zu, LNN参数数=%zu, 适应度=%.6f",
+             best->chromosome_size, total_params, best->fitness);
+
+    /* ZSFWS-012 Step1: 写入规范参数块（weight_matrix + bias_vector连续块） */
     memcpy(params, best->chromosome, copy_count * sizeof(float));
+
+    /* ZSFWS-012 Step2: 深度写入每层CfC Cell的独立参数 */
+    CfCNetwork* cfc_net = lnn_get_cfc_network(lnn);
+    if (cfc_net && cfc_net->layers) {
+        size_t chrom_offset = copy_count;
+        int num_layers = cfc_net->config.num_layers;
+        size_t hidden_size = (size_t)cfc_net->config.hidden_size;
+        size_t input_size = (size_t)cfc_net->config.input_size;
+        int cell_params_written = 0;
+
+        for (int l = 0; l < num_layers; l++) {
+            CfCCell* cell = cfc_net->layers[l];
+            if (!cell) continue;
+            size_t layer_input = (l == 0) ? input_size : hidden_size;
+
+            /* 写入input_gate_weights [hidden_size * layer_input] */
+            if (cell->input_gate_weights) {
+                size_t n = hidden_size * layer_input;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->input_gate_weights, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+
+            /* 写入forget_gate_weights [hidden_size * layer_input] */
+            if (cell->forget_gate_weights) {
+                size_t n = hidden_size * layer_input;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->forget_gate_weights, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+
+            /* 写入output_gate_weights [hidden_size * layer_input] */
+            if (cell->output_gate_weights) {
+                size_t n = hidden_size * layer_input;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->output_gate_weights, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+
+            /* 写入gate_biases [hidden_size * 3] */
+            if (cell->gate_biases) {
+                size_t n = hidden_size * 3;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->gate_biases, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+
+            /* 写入time_constants [hidden_size] */
+            if (cell->use_adaptive_tau && cell->time_constants) {
+                size_t n = hidden_size;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->time_constants, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+
+            /* 写入hidden_to_gate_weights [hidden_size * hidden_size] */
+            if (cell->hidden_to_gate_weights) {
+                size_t n = hidden_size * hidden_size;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->hidden_to_gate_weights, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+
+            /* 写入hidden_to_activation_weights [hidden_size * hidden_size] */
+            if (cell->hidden_to_activation_weights) {
+                size_t n = hidden_size * hidden_size;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->hidden_to_activation_weights, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+        }
+
+        log_info("[演化验证] CfC Cell独立参数已写入: 层数=%d, 写入字段数=%d, "
+                 "染色体总消耗=%zu/%zu",
+                 num_layers, cell_params_written, chrom_offset, best->chromosome_size);
+    }
 
     /* K-013: 记录权重变更日志 */
     float rel_change = (orig_norm > 1e-8f) ? (float)(l2_diff / orig_norm) * 100.0f : 0.0f;
@@ -1245,7 +1342,7 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
              copy_count, total_params, l2_diff, orig_norm, new_norm,
              rel_change, best->fitness, engine->population.generation);
 
-    /* K-013: 验证写入完整性 —— 随机抽查5个位置确认写入成功 */
+    /* ZSFWS-012: 写入后校验 —— 随机抽查5个规范参数位置确认写入成功 */
     int mismatches = 0;
     for (int chk = 0; chk < 5 && copy_count > 0; chk++) {
         size_t idx = (size_t)((unsigned int)(chk * 2654435761ULL) % copy_count);
@@ -1257,6 +1354,23 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
         log_warning("[演化验证] 随机抽查发现%d处写入不一致", mismatches);
     } else {
         log_info("[演化验证] 随机抽查5处全部写入一致，权重变更确认无误");
+    }
+
+    /* ZSFWS-012: 写入后校验 Cell级参数 */
+    if (cfc_net && cfc_net->layers && cfc_net->config.num_layers > 0) {
+        CfCCell* cell0 = cfc_net->layers[0];
+        if (cell0 && cell0->input_gate_weights && cell0->config.hidden_size > 0) {
+            float first_gate_weight = cell0->input_gate_weights[0];
+            float last_gate_weight = cell0->input_gate_weights[cell0->config.hidden_size - 1];
+            log_info("[演化验证] Cell级参数校验: 第0层input_gate_weights[0]=%.6f, [last]=%.6f",
+                     first_gate_weight, last_gate_weight);
+        }
+        if (cell0 && cell0->gate_biases) {
+            float gb0 = cell0->gate_biases[0];
+            float gb_last = cell0->gate_biases[cell0->config.hidden_size * 3 - 1];
+            log_info("[演化验证] Cell级参数校验: 第0层gate_biases[0]=%.6f, [last]=%.6f",
+                     gb0, gb_last);
+        }
     }
 
     return 0;

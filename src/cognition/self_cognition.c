@@ -565,10 +565,64 @@ int self_cognition_memory_retrieve(SelfCognitionSystem* system, const char* quer
     return found;
 }
 
+/* ZSFWS-027: LNN训练状态检查 —— 检测共享LNN是否已经过训练，
+ * 避免未训练的随机权重LNN输出无意义的自我评估导致错误修正决策 */
+static int _self_cognition_check_lnn_ready_internal(SelfCognitionSystem* system) {
+    if (!system) return 0;
+
+    /* 1. 检查自我的LNN模型是否已训练 */
+    if (system->self_model_lnn && system->is_model_trained) {
+        return 1;
+    }
+
+    /* 2. 获取全局共享LNN实例并检查其统计信息 */
+    void* shared_lnn = selflnn_get_shared_lnn();
+    if (!shared_lnn) {
+        log_warning("[LNN就绪检查] 全局共享LNN实例不存在，自我认知将使用保守评估模式");
+        return 0;
+    }
+
+    /* 3. 检查LNN的前向传播次数（>0表示已被使用过） */
+    uint64_t forward_count = 0;
+    if (lnn_get_stats((const LNN*)shared_lnn, NULL, &forward_count, NULL, NULL) == 0) {
+        if (forward_count > 0) {
+            /* 进一步检查平均激活度是否在合理范围 */
+            CfCNetwork* cfc = lnn_get_cfc_network((LNN*)shared_lnn);
+            if (cfc) {
+                float avg_activation = 0.0f;
+                if (cfc_get_stats(cfc, &avg_activation, NULL, NULL, NULL) == 0) {
+                    /* avg_activation == 0.0 表示从未有过激活（全零权重输出），为未训练状态 */
+                    if (avg_activation == 0.0f) {
+                        log_warning("[LNN就绪检查] 共享LNN激活度为零（可能为随机初始化权重），"
+                                   "建议先加载检查点或进行训练后再启用自我认知功能");
+                        return 0;
+                    }
+                    return 1;
+                }
+            }
+            return 1;
+        }
+    }
+
+    log_warning("[LNN就绪检查] 共享LNN未经过训练（forward_count=0），"
+               "自我认知将使用保守评估模式，避免随机噪声误导修正决策");
+    return 0;
+}
+
 /* ===================== 迭代式元认知循环（P1-04修复） ===================== */
 
 int self_cognition_iterative_reflection(SelfCognitionSystem* system, int max_iterations) {
     if (!system) return -1;
+
+    /* ZSFWS-027: LNN未训练保护 —— 未训练的LNN随机权重会导致无意义的反思输出 */
+    if (!_self_cognition_check_lnn_ready_internal(system)) {
+        log_warning("[迭代反思] LNN未训练，跳过迭代式元认知循环，"
+                   "返回0轮次以避免随机噪声状态下的错误自我评估");
+        system->confidence_level = 0.3f;
+        system->adaptive_correction_strength = 0.0f;
+        return 0;
+    }
+
     if (max_iterations <= 0) max_iterations = 3;
     int iteration = 0;
     float prev_confidence = system->confidence_level > 0.01f ? system->confidence_level : 0.5f;
@@ -927,6 +981,26 @@ int self_cognition_neutral_assessment(SelfCognitionSystem* system,
                               "客观理性自我评估：参数为空");
         return -1;
     }
+
+    /* ZSFWS-027: LNN未训练保护 ——
+     * 如果LNN未训练，返回带[未训练-保守评估]标记的保守评估结果，
+     * 而不是依赖随机权重的LNN进行可能产生噪声的评估 */
+    if (!_self_cognition_check_lnn_ready_internal(system)) {
+        if (result_size > 0 && assessment_result) {
+            snprintf(assessment_result, result_size,
+                    "[未训练-保守评估] LNN模型尚未完成训练，系统处于保守评估模式。"
+                    "当前自我评估基于基线指标（置信度=%.2f, 修正强度=%.2f），"
+                    "建议完成至少一轮训练后再启用深度自我认知功能。"
+                    "评估类型=%d, 系统已运行更新计数=%d",
+                    system->confidence_level > 0.01f ? system->confidence_level : 0.3f,
+                    system->adaptive_correction_strength,
+                    assessment_type, system->update_count);
+        }
+        log_warning("[中性评估] LNN未训练，返回带[未训练-保守评估]标记的评估结果，"
+                   "避免随机权重产生误导性自我评估");
+        return 0;
+    }
+
     if (!system->metacognition_system) {
         selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
                               "客观理性自我评估：元认知系统未初始化");
@@ -3876,7 +3950,29 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
     if (!system || !correction_result) {
         return -1;
     }
-    
+
+    /* ZSFWS-027: LNN未训练保护 ——
+     * 未训练的LNN（随机权重）会导致analyze_issue_type等内部函数产生无意义的
+     * 问题分析和修正策略，可能造成错误的参数调整。在LNN就绪前返回保守修正。 */
+    if (!_self_cognition_check_lnn_ready_internal(system)) {
+        strncpy(correction_result->description,
+                "[未训练-保守修正] LNN未完成训练，跳过深度自我修正。"
+                "当前仅执行基线参数校验修正，不会对模型产生实质性修改。"
+                "建议先加载检查点或完成初始训练后再启用自我修正功能。",
+                sizeof(correction_result->description) - 1);
+        correction_result->description[sizeof(correction_result->description) - 1] = '\0';
+        correction_result->type = SELF_CORRECTION_PERFORMANCE;
+        correction_result->correction_strength = 0.0f;
+        correction_result->expected_improvement = 0.0f;
+        correction_result->confidence = 0.1f;
+        correction_result->correction_time = time(NULL);
+        correction_result->correction_id = -((system->correction_count + 1) * 100);
+        log_warning("[自我修正] LNN未训练，返回保守修正结果（强度=0.0），"
+                   "避免随机权重产生破坏性参数调整。问题描述='%s', 严重程度=%.2f",
+                   issue_description ? issue_description : "(null)", issue_severity);
+        return -2;
+    }
+
     // 检查自我修正是否启用
     if (!system->self_correction_enabled) {
         strncpy(correction_result->description, "自我修正功能已禁用——未执行任何修正操作",
@@ -8631,6 +8727,18 @@ void self_cognition_system_disable(SelfCognitionSystem* system) {
 
 int self_cognition_system_is_enabled(const SelfCognitionSystem* system) {
     return (system && system->enabled) ? 1 : 0;
+}
+
+/* ============================================================================
+ * ZSFWS-027: LNN训练就绪检查API
+ *
+ * 供外部模块（如main.c）在调用自我认知的深度评估前检查LNN是否已就绪。
+ * 未训练的LNN（随机权重）会产生无意义的自我评估输出，可能导致错误的
+ * 自我修正决策。此函数提供统一的训练状态检测入口。
+ * ============================================================================ */
+
+int self_cognition_is_lnn_ready(SelfCognitionSystem* system) {
+    return _self_cognition_check_lnn_ready_internal(system);
 }
 
 /* ============================================================================

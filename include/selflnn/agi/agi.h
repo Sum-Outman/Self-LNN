@@ -17,7 +17,7 @@
 #include "selflnn/cognition/deep_thought_chain.h"
 #include "selflnn/cognition/deep_correction.h"
 #include "selflnn/multimodal/dialogue.h"
-#include "selflnn/multimodal/deep_vision.h"
+#include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/multisystem/multisystem_control.h"
 #include "selflnn/core/unified_lnn_state.h"

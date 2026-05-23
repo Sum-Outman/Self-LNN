@@ -162,8 +162,8 @@
 
     /* ==================== 页面交互 ==================== */
     function switchTab(name) {
-        document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
-        document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+        document.querySelectorAll('#knowledge .tab-btn').forEach(function(b) { b.classList.remove('active'); });
+        document.querySelectorAll('#knowledge .tab-content').forEach(function(c) { c.classList.remove('active'); });
         var btn = document.querySelector('.tab-btn[onclick*="' + name + '"]');
         if (btn) btn.classList.add('active');
         var tabEl = document.getElementById('tab-' + name);
@@ -258,7 +258,8 @@
 
     function renderEntryList() {
         var container = document.getElementById('entry-list');
-        var query = document.getElementById('search-query').value.trim().toLowerCase();
+        var searchInput = document.getElementById('search-query');
+        var query = searchInput ? searchInput.value.trim().toLowerCase() : '';
 
         var filtered = knowledgeEntries;
         if (query) {
@@ -749,7 +750,8 @@
             });
         }
         drawGraph();
-        document.getElementById('graph-info').textContent = graphState.nodes.length + ' 节点 · ' + graphState.edges.length + ' 条边';
+        var infoEl = document.getElementById('graph-info');
+        if (infoEl) infoEl.textContent = graphState.nodes.length + ' 节点 · ' + graphState.edges.length + ' 条边';
     }
 
     function clearGraph() {
@@ -775,7 +777,12 @@
         var cv = document.createElement('canvas');
         cv.id = 'graph-canvas-3d';
         cv.style.cssText = 'width:100%;height:100%;display:none;position:absolute;top:0;left:0;';
-        document.querySelector('.main-area').appendChild(cv);
+        var mainArea = document.querySelector('.main-area');
+        if (!mainArea) {
+            console.warn('[知识图谱3D] .main-area 容器不存在，WebGL初始化已跳过');
+            return false;
+        }
+        mainArea.appendChild(cv);
 
         var gl = cv.getContext('webgl') || cv.getContext('experimental-webgl');
         if (!gl) return false;

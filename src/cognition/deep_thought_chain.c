@@ -1,3 +1,45 @@
+/**
+ * @file deep_thought_chain.c
+ * @brief 深度思考链系统完整实现
+ *
+ * 多分支推理链构建与评估：束搜索、自一致性重排序、
+ * 分支扩展、剪枝回溯、思维合并与最优路径选择。
+ *
+ * ============================================================
+ * 【模块职责 - ZSFWS-028 认知三模块边界】
+ * ============================================================
+ * 本模块（深度思考链）的核心职责：构建式推理链生成与优化系统
+ *
+ * 独特功能：
+ *   - 多步骤推理链构建（dtc_reason_chain）：观察→分析→假设→推理→评估→综合→结论→行动
+ *   - 推理分支并行扩展（dtc_expand_branch）
+ *   - 束搜索探索最优推理路径（dtc_beam_search）
+ *   - 自一致性重排序验证推理可靠性（dtc_self_consistency_rerank）
+ *   - 多路径思维合并以消除分歧（dtc_merge_thoughts）
+ *   - 推理链质量评估（dtc_evaluate_chain）
+ *   - 低质量分支剪枝（dtc_prune_chain）
+ *   - 推理失败时回溯到分支点重试（dtc_backtrack）
+ *   - 选择全局最优推理路径（dtc_get_best_path）
+ *   - 推理链导出为文本描述或行动计划（dtc_chain_to_text / dtc_chain_to_plan）
+ *
+ * 与 deep_correction.c 的区别：
+ *   - deep_thought_chain 面向未来问题构建新推理路径，是"创造式"的
+ *   - deep_correction 面向已发生的错误构建修复路径，是"补救式"的
+ *   - thought_chain有回溯（backtrack到分支点），correction有回滚（rollback修正操作）
+ *
+ * 与 deep_reflection.c 的区别：
+ *   - deep_thought_chain 从零构建新推理，关注"如何解决新问题"
+ *   - deep_reflection 审视已有信念，关注"我现有的认知是否正确"
+ *   - thought_chain输出是"推理路径/计划"，reflection输出是"认知审查报告"
+ *
+ * ⚠️  功能重叠提示：
+ *   - dtc_chain_to_plan（思考链→计划）与 dr_chain_to_plan（反思→计划）：
+ *     建议：thought_chain的plan通常更具体、分步骤，reflection的plan更宏观
+ *     两个plan可通过一个统一的"计划融合层"合并为执行计划
+ *   - dtc_merge_thoughts（思维合并）与 dr_generate_synthesis（反思综合）：
+ *     建议：两者本质都是多视角融合，可共享融合算法基础层，但输入类型不同
+ * ============================================================
+ */
 #include "selflnn/cognition/deep_thought_chain.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"

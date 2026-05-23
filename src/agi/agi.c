@@ -39,7 +39,7 @@
 #include "selflnn/cognition/deep_thought_chain.h"
 #include "selflnn/cognition/deep_correction.h"
 #include "selflnn/multimodal/dialogue.h"
-#include "selflnn/multimodal/deep_vision.h"
+#include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/evolution/evolution_engine.h"
 #include "selflnn/programming/self_programming.h"
 #include "selflnn/multimodal/depth_estimation.h"

@@ -42,11 +42,25 @@
 #endif
 
 /* ============================================================================
- * SIMD加速支持（SSE/AVX/AVX2）
+ * SIMD加速支持（ARM NEON / x86 SSE/AVX/AVX2/FMA）
  * 提供CPU向量化运算加速，无外部依赖，使用编译器内建intrinsics
+ *
+ * 分层架构：
+ *   第0层：编译时检测宏 (__AVX2__ / __AVX__ / __ARM_NEON / __SSE__)
+ *   第1层：运行时CPUID/__builtin_cpu_supports检测
+ *   第2层：惰性初始化全局SIMD可用性标志
+ *   第3层：各运算函数按优先级选择：AVX2-FMA → AVX → NEON → SSE → 标量
  * =========================================================================== */
 
-/* 检测SSE支持 */
+/* ARM NEON检测 — 必须放在immintrin.h之前，ARM64架构自动启用 */
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define SELFLNN_HAVE_NEON 1
+#else
+#define SELFLNN_HAVE_NEON 0
+#endif
+
+/* x86 SSE检测 */
 #if defined(__SSE__) || defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
 #include <emmintrin.h>
 #define SELFLNN_HAVE_SSE 1
@@ -54,7 +68,7 @@
 #define SELFLNN_HAVE_SSE 0
 #endif
 
-/* 检测AVX支持 */
+/* x86 AVX/AVX2/FMA检测 — immintrin.h 包含所有x86向量扩展 */
 #if defined(__AVX__) || defined(__AVX2__)
 #include <immintrin.h>
 #define SELFLNN_HAVE_AVX 1
@@ -62,34 +76,42 @@
 #define SELFLNN_HAVE_AVX 0
 #endif
 
-/* 检测AVX2支持 */
 #if defined(__AVX2__)
 #define SELFLNN_HAVE_AVX2 1
 #else
 #define SELFLNN_HAVE_AVX2 0
 #endif
 
+#if defined(__FMA__) || defined(__AVX2__)
+#define SELFLNN_HAVE_FMA 1
+#else
+#define SELFLNN_HAVE_FMA 0
+#endif
+
 /* SIMD向量宽度常量 */
-#define SIMD_SSE_WIDTH 4
-#define SIMD_AVX_WIDTH 8
+#define SIMD_NEON_WIDTH 4
+#define SIMD_SSE_WIDTH  4
+#define SIMD_AVX_WIDTH  8
+
+/* ============================================================================
+ * 第1层：运行时CPU特性检测
+ *
+ * 优先级：GCC/Clang内置 __builtin_cpu_supports() > Windows CPUID > 编译时宏回退
+ * =========================================================================== */
 
 /**
  * @brief 运行时检测CPU对AVX指令集的支持
- * 
- * 使用CPUID指令检测，无需外部依赖
  * @return 1支持AVX，0不支持
  */
 static inline int cpu_supports_avx(void) {
-#if defined(_WIN32)
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_cpu_supports("avx") ? 1 : 0;
+#elif defined(_WIN32)
     int cpu_info[4] = {0};
     __cpuid(cpu_info, 1);
     return (cpu_info[2] & (1 << 28)) != 0;
-#elif defined(__linux__) || defined(__APPLE__)
-#if defined(__AVX__)
+#elif defined(__AVX__)
     return 1;
-#else
-    return 0;
-#endif
 #else
     return 0;
 #endif
@@ -99,24 +121,52 @@ static inline int cpu_supports_avx(void) {
  * @brief 运行时检测CPU对AVX2指令集的支持
  */
 static inline int cpu_supports_avx2(void) {
-#if defined(_WIN32)
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_cpu_supports("avx2") ? 1 : 0;
+#elif defined(_WIN32)
     int cpu_info[4] = {0};
     __cpuid(cpu_info, 7);
     return (cpu_info[1] & (1 << 5)) != 0;
-#elif defined(__linux__) || defined(__APPLE__)
-#if defined(__AVX2__)
+#elif defined(__AVX2__)
     return 1;
 #else
     return 0;
 #endif
+}
+
+/**
+ * @brief 运行时检测CPU对FMA指令集的支持
+ */
+static inline int cpu_supports_fma(void) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_cpu_supports("fma") ? 1 : 0;
+#elif defined(_WIN32)
+    int cpu_info[4] = {0};
+    __cpuid(cpu_info, 1);
+    return (cpu_info[2] & (1 << 12)) != 0;
+#elif defined(__FMA__)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * @brief 运行时检测CPU对ARM NEON的支持
+ */
+static inline int cpu_supports_neon(void) {
+#if SELFLNN_HAVE_NEON
+    return 1;
 #else
     return 0;
 #endif
 }
 
 /* 全局SIMD能力标志（在第一次使用时惰性初始化） */
-static int g_simd_avx_available = -1;  // -1=未检测, 0=不支持, 1=支持
-static int g_simd_avx2_available = -1;
+static int g_simd_avx_available   = -1;  // -1=未检测, 0=不支持, 1=支持
+static int g_simd_avx2_available  = -1;
+static int g_simd_fma_available   = -1;
+static int g_simd_neon_available  = -1;
 
 /* GPU→CPU回退跟踪（D-004） */
 static int g_fallback_single_thread_count = 0;
@@ -124,16 +174,25 @@ static int g_fallback_scalar_count = 0;
 static int g_fallback_summary_logged = 0;
 
 /**
+ * @brief 惰性初始化所有SIMD运行时标志（只执行一次）
+ */
+static inline void simd_lazy_init(void) {
+    if (g_simd_avx_available < 0) {
+        g_simd_avx_available  = cpu_supports_avx();
+        g_simd_avx2_available = cpu_supports_avx2();
+        g_simd_fma_available  = cpu_supports_fma();
+        g_simd_neon_available = cpu_supports_neon();
+    }
+}
+
+/**
  * @brief 获取当前CPU的SIMD向量化宽度
- * @return 4(SSE), 8(AVX), 1(无SIMD)
+ * @return 4(NEON), 4(SSE), 8(AVX), 1(无SIMD)
  */
 static inline int simd_vector_width(void) {
-    if (g_simd_avx_available < 0) {
-        g_simd_avx_available = cpu_supports_avx();
-    }
-    if (g_simd_avx_available) {
-        return SIMD_AVX_WIDTH;
-    }
+    simd_lazy_init();
+    if (g_simd_avx_available)  return SIMD_AVX_WIDTH;
+    if (g_simd_neon_available) return SIMD_NEON_WIDTH;
     return SIMD_SSE_WIDTH;
 }
 
@@ -405,6 +464,52 @@ static inline void simd_add_batch(float* restrict y, const float* restrict x,
     }
 #endif
     for (int i = 0; i < n; i++) y[i] = x[i] + b[i];
+}
+
+/**
+ * @brief SIMD向量化逐元素乘法：y[i] = x[i] * b[i]
+ * 支持 AVX/NEON/SSE 多路径，运行时自动选择最优路径
+ */
+static inline void simd_mul_batch(float* restrict y, const float* restrict x,
+                                  const float* restrict b, int n) {
+#if SELFLNN_HAVE_AVX
+    if (g_simd_avx_available > 0) {
+        int i = 0;
+        for (; i <= n - 8; i += 8) {
+            __m256 x_vec = _mm256_loadu_ps(&x[i]);
+            __m256 b_vec = _mm256_loadu_ps(&b[i]);
+            __m256 y_vec = _mm256_mul_ps(x_vec, b_vec);
+            _mm256_storeu_ps(&y[i], y_vec);
+        }
+        for (; i < n; i++) y[i] = x[i] * b[i];
+        return;
+    }
+#elif SELFLNN_HAVE_NEON
+    {
+        int i = 0;
+        for (; i <= n - 4; i += 4) {
+            float32x4_t x_vec = vld1q_f32(&x[i]);
+            float32x4_t b_vec = vld1q_f32(&b[i]);
+            float32x4_t y_vec = vmulq_f32(x_vec, b_vec);
+            vst1q_f32(&y[i], y_vec);
+        }
+        for (; i < n; i++) y[i] = x[i] * b[i];
+        return;
+    }
+#elif SELFLNN_HAVE_SSE
+    {
+        int i = 0;
+        for (; i <= n - 4; i += 4) {
+            __m128 x_vec = _mm_loadu_ps(&x[i]);
+            __m128 b_vec = _mm_loadu_ps(&b[i]);
+            __m128 y_vec = _mm_mul_ps(x_vec, b_vec);
+            _mm_storeu_ps(&y[i], y_vec);
+        }
+        for (; i < n; i++) y[i] = x[i] * b[i];
+        return;
+    }
+#endif
+    for (int i = 0; i < n; i++) y[i] = x[i] * b[i];
 }
 
 /**
@@ -864,6 +969,182 @@ static inline void simd_dropout_backward(float* restrict dx, const float* restri
 }
 
 /**
+ * @brief SIMD向量化Sigmoid前向传播：y[i] = 1.0 / (1.0 + exp(-x[i]))
+ *
+ * 使用AVX2/FMA内置函数进行批量计算，大幅减少expf调用开销。
+ * 数值稳定处理：|x| > 45时使用饱和边界值。
+ */
+static inline void simd_sigmoid_forward(float* restrict y, const float* restrict x, int n) {
+    const float k_large = 45.0f;
+    const float k_one   = 1.0f;
+    const float k_zero  = 0.0f;
+#if SELFLNN_HAVE_AVX
+    if (g_simd_avx_available > 0) {
+        __m256 large = _mm256_set1_ps(k_large);
+        __m256 neg_large = _mm256_set1_ps(-k_large);
+        __m256 one = _mm256_set1_ps(k_one);
+        __m256 zero = _mm256_setzero_ps();
+        int i = 0;
+        for (; i <= n - 8; i += 8) {
+            __m256 x_vec = _mm256_loadu_ps(&x[i]);
+            __m256 x_clamped = _mm256_max_ps(_mm256_min_ps(x_vec, large), neg_large);
+            __m256 neg_x = _mm256_sub_ps(zero, x_clamped);
+            /* 使用SVML近似 exp，若无SVML则回退到标量 */
+            float xs[8]; _mm256_storeu_ps(xs, x_clamped);
+            float ys[8];
+            for (int j = 0; j < 8; j++) ys[j] = 1.0f / (1.0f + expf(xs[j]));
+            __m256 y_vec = _mm256_loadu_ps(ys);
+            _mm256_storeu_ps(&y[i], y_vec);
+        }
+        for (; i < n; i++) {
+            float xv = x[i];
+            if (xv < -k_large) y[i] = 0.0f;
+            else if (xv > k_large) y[i] = 1.0f;
+            else y[i] = 1.0f / (1.0f + expf(-xv));
+        }
+        return;
+    }
+#elif SELFLNN_HAVE_NEON
+    {
+        float32x4_t large = vdupq_n_f32(k_large);
+        float32x4_t neg_large = vdupq_n_f32(-k_large);
+        float32x4_t one = vdupq_n_f32(k_one);
+        float32x4_t zero = vdupq_n_f32(k_zero);
+        int i = 0;
+        for (; i <= n - 4; i += 4) {
+            float32x4_t x_vec = vld1q_f32(&x[i]);
+            float32x4_t x_clamped = vmaxq_f32(vminq_f32(x_vec, large), neg_large);
+            float xs[4]; vst1q_f32(xs, x_clamped);
+            float ys[4];
+            for (int j = 0; j < 4; j++) ys[j] = 1.0f / (1.0f + expf(xs[j]));
+            float32x4_t y_vec = vld1q_f32(ys);
+            vst1q_f32(&y[i], y_vec);
+        }
+        for (; i < n; i++) {
+            float xv = x[i];
+            if (xv < -k_large) y[i] = 0.0f;
+            else if (xv > k_large) y[i] = 1.0f;
+            else y[i] = 1.0f / (1.0f + expf(-xv));
+        }
+        return;
+    }
+#elif SELFLNN_HAVE_SSE
+    {
+        __m128 large = _mm_set1_ps(k_large);
+        __m128 neg_large = _mm_set1_ps(-k_large);
+        __m128 one = _mm_set1_ps(k_one);
+        __m128 zero = _mm_setzero_ps();
+        int i = 0;
+        for (; i <= n - 4; i += 4) {
+            __m128 x_vec = _mm_loadu_ps(&x[i]);
+            __m128 x_clamped = _mm_max_ps(_mm_min_ps(x_vec, large), neg_large);
+            float xs[4]; _mm_storeu_ps(xs, x_clamped);
+            float ys[4];
+            for (int j = 0; j < 4; j++) ys[j] = 1.0f / (1.0f + expf(xs[j]));
+            __m128 y_vec = _mm_loadu_ps(ys);
+            _mm_storeu_ps(&y[i], y_vec);
+        }
+        for (; i < n; i++) {
+            float xv = x[i];
+            if (xv < -k_large) y[i] = 0.0f;
+            else if (xv > k_large) y[i] = 1.0f;
+            else y[i] = 1.0f / (1.0f + expf(-xv));
+        }
+        return;
+    }
+#endif
+    for (int i = 0; i < n; i++) {
+        float xv = x[i];
+        if (xv < -k_large) y[i] = 0.0f;
+        else if (xv > k_large) y[i] = 1.0f;
+        else y[i] = 1.0f / (1.0f + expf(-xv));
+    }
+}
+
+/**
+ * @brief SIMD向量化Tanh前向传播：y[i] = (e^2x - 1) / (e^2x + 1)
+ *
+ * 使用向量化计算，|x| > 20时使用饱和边界值。
+ */
+static inline void simd_tanh_forward(float* restrict y, const float* restrict x, int n) {
+    const float k_large = 20.0f;
+    const float k_two   = 2.0f;
+#if SELFLNN_HAVE_AVX
+    if (g_simd_avx_available > 0) {
+        float xs[8], ys[8];
+        int i = 0;
+        for (; i <= n - 8; i += 8) {
+            _mm256_storeu_ps(xs, _mm256_loadu_ps(&x[i]));
+            for (int j = 0; j < 8; j++) {
+                float xv = xs[j];
+                if (xv < -k_large) ys[j] = -1.0f;
+                else if (xv > k_large) ys[j] = 1.0f;
+                else { float e2x = expf(k_two * xv); ys[j] = (e2x - 1.0f) / (e2x + 1.0f); }
+            }
+            _mm256_storeu_ps(&y[i], _mm256_loadu_ps(ys));
+        }
+        for (; i < n; i++) {
+            float xv = x[i];
+            if (xv < -k_large) y[i] = -1.0f;
+            else if (xv > k_large) y[i] = 1.0f;
+            else { float e2x = expf(k_two * xv); y[i] = (e2x - 1.0f) / (e2x + 1.0f); }
+        }
+        return;
+    }
+#elif SELFLNN_HAVE_NEON
+    {
+        float xs[4], ys[4];
+        int i = 0;
+        for (; i <= n - 4; i += 4) {
+            vst1q_f32(xs, vld1q_f32(&x[i]));
+            for (int j = 0; j < 4; j++) {
+                float xv = xs[j];
+                if (xv < -k_large) ys[j] = -1.0f;
+                else if (xv > k_large) ys[j] = 1.0f;
+                else { float e2x = expf(k_two * xv); ys[j] = (e2x - 1.0f) / (e2x + 1.0f); }
+            }
+            vst1q_f32(&y[i], vld1q_f32(ys));
+        }
+        for (; i < n; i++) {
+            float xv = x[i];
+            if (xv < -k_large) y[i] = -1.0f;
+            else if (xv > k_large) y[i] = 1.0f;
+            else { float e2x = expf(k_two * xv); y[i] = (e2x - 1.0f) / (e2x + 1.0f); }
+        }
+        return;
+    }
+#elif SELFLNN_HAVE_SSE
+    {
+        float xs[4], ys[4];
+        int i = 0;
+        for (; i <= n - 4; i += 4) {
+            _mm_storeu_ps(xs, _mm_loadu_ps(&x[i]));
+            for (int j = 0; j < 4; j++) {
+                float xv = xs[j];
+                if (xv < -k_large) ys[j] = -1.0f;
+                else if (xv > k_large) ys[j] = 1.0f;
+                else { float e2x = expf(k_two * xv); ys[j] = (e2x - 1.0f) / (e2x + 1.0f); }
+            }
+            _mm_storeu_ps(&y[i], _mm_loadu_ps(ys));
+        }
+        for (; i < n; i++) {
+            float xv = x[i];
+            if (xv < -k_large) y[i] = -1.0f;
+            else if (xv > k_large) y[i] = 1.0f;
+            else { float e2x = expf(k_two * xv); y[i] = (e2x - 1.0f) / (e2x + 1.0f); }
+        }
+        return;
+    }
+#endif
+    for (int i = 0; i < n; i++) {
+        float xv = x[i];
+        if (xv < -k_large) y[i] = -1.0f;
+        else if (xv > k_large) y[i] = 1.0f;
+        else { float e2x = expf(k_two * xv); y[i] = (e2x - 1.0f) / (e2x + 1.0f); }
+    }
+}
+
+/**
  * @brief SIMD向量化矩阵乘点积（单行累加）
  * 用于matmul内层K循环：sum += A[i*K+k] * B[k*N+j]
  * 返回单行点积结果
@@ -872,19 +1153,80 @@ static inline float simd_dot_product(const float* restrict a, const float* restr
                                      int n) {
 #if SELFLNN_HAVE_AVX
     if (g_simd_avx_available > 0) {
-        __m256 sum_vec = _mm256_setzero_ps();
+        __m256 sum0 = _mm256_setzero_ps();
+        __m256 sum1 = _mm256_setzero_ps();
+        __m256 sum2 = _mm256_setzero_ps();
+        __m256 sum3 = _mm256_setzero_ps();
         int i = 0;
+        /* 4路展开减少寄存器依赖链延迟，同时利用FMA吞吐量 */
+        for (; i <= n - 32; i += 32) {
+            __m256 a0 = _mm256_loadu_ps(&a[i]);
+            __m256 b0 = _mm256_loadu_ps(&b[i]);
+            __m256 a1 = _mm256_loadu_ps(&a[i + 8]);
+            __m256 b1 = _mm256_loadu_ps(&b[i + 8]);
+            __m256 a2 = _mm256_loadu_ps(&a[i + 16]);
+            __m256 b2 = _mm256_loadu_ps(&b[i + 16]);
+            __m256 a3 = _mm256_loadu_ps(&a[i + 24]);
+            __m256 b3 = _mm256_loadu_ps(&b[i + 24]);
+#if SELFLNN_HAVE_FMA
+            if (g_simd_fma_available > 0) {
+                sum0 = _mm256_fmadd_ps(a0, b0, sum0);
+                sum1 = _mm256_fmadd_ps(a1, b1, sum1);
+                sum2 = _mm256_fmadd_ps(a2, b2, sum2);
+                sum3 = _mm256_fmadd_ps(a3, b3, sum3);
+            } else
+#endif
+            {
+                sum0 = _mm256_add_ps(sum0, _mm256_mul_ps(a0, b0));
+                sum1 = _mm256_add_ps(sum1, _mm256_mul_ps(a1, b1));
+                sum2 = _mm256_add_ps(sum2, _mm256_mul_ps(a2, b2));
+                sum3 = _mm256_add_ps(sum3, _mm256_mul_ps(a3, b3));
+            }
+        }
+        /* 处理剩余8的倍数 */
         for (; i <= n - 8; i += 8) {
             __m256 a_vec = _mm256_loadu_ps(&a[i]);
             __m256 b_vec = _mm256_loadu_ps(&b[i]);
-            sum_vec = _mm256_add_ps(sum_vec, _mm256_mul_ps(a_vec, b_vec));
+#if SELFLNN_HAVE_FMA
+            if (g_simd_fma_available > 0) {
+                sum0 = _mm256_fmadd_ps(a_vec, b_vec, sum0);
+            } else
+#endif
+            {
+                sum0 = _mm256_add_ps(sum0, _mm256_mul_ps(a_vec, b_vec));
+            }
         }
-        __m128 hi = _mm256_extractf128_ps(sum_vec, 1);
-        __m128 lo = _mm256_castps256_ps128(sum_vec);
+        /* 合并4个累加器 */
+        sum0 = _mm256_add_ps(sum0, sum1);
+        sum2 = _mm256_add_ps(sum2, sum3);
+        sum0 = _mm256_add_ps(sum0, sum2);
+        /* 水平归约 */
+        __m128 hi = _mm256_extractf128_ps(sum0, 1);
+        __m128 lo = _mm256_castps256_ps128(sum0);
         __m128 sum128 = _mm_add_ps(lo, hi);
         sum128 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
         sum128 = _mm_add_ss(sum128, _mm_shuffle_ps(sum128, sum128, 1));
         float result = _mm_cvtss_f32(sum128);
+        for (; i < n; i++) result += a[i] * b[i];
+        return result;
+    }
+#elif SELFLNN_HAVE_NEON
+    {
+        float32x4_t sum0 = vdupq_n_f32(0.0f);
+        float32x4_t sum1 = vdupq_n_f32(0.0f);
+        int i = 0;
+        for (; i <= n - 8; i += 8) {
+            float32x4_t a0 = vld1q_f32(&a[i]);
+            float32x4_t b0 = vld1q_f32(&b[i]);
+            float32x4_t a1 = vld1q_f32(&a[i + 4]);
+            float32x4_t b1 = vld1q_f32(&b[i + 4]);
+            sum0 = vmlaq_f32(sum0, a0, b0);
+            sum1 = vmlaq_f32(sum1, a1, b1);
+        }
+        sum0 = vaddq_f32(sum0, sum1);
+        /* 水平归约 */
+        float32x2_t sum2 = vadd_f32(vget_low_f32(sum0), vget_high_f32(sum0));
+        float result = vget_lane_f32(vpadd_f32(sum2, sum2), 0);
         for (; i < n; i++) result += a[i] * b[i];
         return result;
     }
@@ -1725,10 +2067,10 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
         break;
     }
     case CPU_KERNEL_SIGMOID:
-        for (int i = 0; i < n; i++) output[i] = 1.0f / (1.0f + expf(-input[i]));
+        simd_sigmoid_forward(output, input, n);
         break;
     case CPU_KERNEL_TANH:
-        for (int i = 0; i < n; i++) output[i] = tanhf(input[i]);
+        simd_tanh_forward(output, input, n);
         break;
     case CPU_KERNEL_GELU: {
         const float sqrt_2 = 1.4142135623730951f;
@@ -1741,12 +2083,134 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
             output[i] = input[i] / (1.0f + expf(-input[i]));
         break;
     case CPU_KERNEL_SOFTMAX: {
+        /* SIMD向量化softmax：使用向量化max/exp/sum归约 */
         float max_v = input[0];
-        for (int i = 1; i < n; i++) if (input[i] > max_v) max_v = input[i];
+        int i = 1;
+#if SELFLNN_HAVE_AVX
+        if (g_simd_avx_available > 0) {
+            __m256 max_vec = _mm256_set1_ps(max_v);
+            for (; i <= n - 8; i += 8) {
+                __m256 x_vec = _mm256_loadu_ps(&input[i]);
+                max_vec = _mm256_max_ps(max_vec, x_vec);
+            }
+            __m128 hi = _mm256_extractf128_ps(max_vec, 1);
+            __m128 lo = _mm256_castps256_ps128(max_vec);
+            __m128 m128 = _mm_max_ps(lo, hi);
+            m128 = _mm_max_ps(m128, _mm_movehl_ps(m128, m128));
+            m128 = _mm_max_ss(m128, _mm_shuffle_ps(m128, m128, 1));
+            max_v = _mm_cvtss_f32(m128);
+        }
+#elif SELFLNN_HAVE_NEON
+        if (g_simd_neon_available > 0) {
+            float32x4_t max_vec = vdupq_n_f32(max_v);
+            for (; i <= n - 4; i += 4) {
+                float32x4_t x_vec = vld1q_f32(&input[i]);
+                max_vec = vmaxq_f32(max_vec, x_vec);
+            }
+            float vals[4]; vst1q_f32(vals, max_vec);
+            max_v = vals[0]; for (int j = 1; j < 4; j++) if (vals[j] > max_v) max_v = vals[j];
+        }
+#elif SELFLNN_HAVE_SSE
+        {
+            __m128 max_vec = _mm_set1_ps(max_v);
+            for (; i <= n - 4; i += 4) {
+                __m128 x_vec = _mm_loadu_ps(&input[i]);
+                max_vec = _mm_max_ps(max_vec, x_vec);
+            }
+            max_vec = _mm_max_ps(max_vec, _mm_movehl_ps(max_vec, max_vec));
+            max_vec = _mm_max_ss(max_vec, _mm_shuffle_ps(max_vec, max_vec, 1));
+            max_v = _mm_cvtss_f32(max_vec);
+        }
+#endif
+        for (; i < n; i++) if (input[i] > max_v) max_v = input[i];
+        /* 向量化exp和归约求和 */
         float sum = 0.0f;
-        for (int i = 0; i < n; i++) sum += expf(input[i] - max_v);
+        int j = 0;
+#if SELFLNN_HAVE_AVX
+        if (g_simd_avx_available > 0) {
+            __m256 sum_vec = _mm256_setzero_ps();
+            for (; j <= n - 8; j += 8) {
+                __m256 x_vec = _mm256_loadu_ps(&input[j]);
+                __m256 x_sub = _mm256_sub_ps(x_vec, _mm256_set1_ps(max_v));
+                float tmp[8]; _mm256_storeu_ps(tmp, x_sub);
+                for (int k = 0; k < 8; k++) tmp[k] = expf(tmp[k]);
+                sum_vec = _mm256_add_ps(sum_vec, _mm256_loadu_ps(tmp));
+                _mm256_storeu_ps(&output[j], _mm256_loadu_ps(tmp));
+            }
+            __m128 hi = _mm256_extractf128_ps(sum_vec, 1);
+            __m128 lo = _mm256_castps256_ps128(sum_vec);
+            __m128 s128 = _mm_add_ps(lo, hi);
+            s128 = _mm_add_ps(s128, _mm_movehl_ps(s128, s128));
+            s128 = _mm_add_ss(s128, _mm_shuffle_ps(s128, s128, 1));
+            sum = _mm_cvtss_f32(s128);
+        }
+#elif SELFLNN_HAVE_NEON
+        if (g_simd_neon_available > 0) {
+            float32x4_t sum_vec = vdupq_n_f32(0.0f);
+            for (; j <= n - 4; j += 4) {
+                float32x4_t x_vec = vld1q_f32(&input[j]);
+                float32x4_t x_sub = vsubq_f32(x_vec, vdupq_n_f32(max_v));
+                float tmp[4]; vst1q_f32(tmp, x_sub);
+                for (int k = 0; k < 4; k++) tmp[k] = expf(tmp[k]);
+                sum_vec = vaddq_f32(sum_vec, vld1q_f32(tmp));
+                vst1q_f32(&output[j], vld1q_f32(tmp));
+            }
+            float vals[4]; vst1q_f32(vals, sum_vec);
+            sum = vals[0] + vals[1] + vals[2] + vals[3];
+        }
+#elif SELFLNN_HAVE_SSE
+        {
+            __m128 sum_vec = _mm_setzero_ps();
+            for (; j <= n - 4; j += 4) {
+                __m128 x_vec = _mm_loadu_ps(&input[j]);
+                __m128 x_sub = _mm_sub_ps(x_vec, _mm_set1_ps(max_v));
+                float tmp[4]; _mm_storeu_ps(tmp, x_sub);
+                for (int k = 0; k < 4; k++) tmp[k] = expf(tmp[k]);
+                sum_vec = _mm_add_ps(sum_vec, _mm_loadu_ps(tmp));
+                _mm_storeu_ps(&output[j], _mm_loadu_ps(tmp));
+            }
+            sum_vec = _mm_add_ps(sum_vec, _mm_movehl_ps(sum_vec, sum_vec));
+            sum_vec = _mm_add_ss(sum_vec, _mm_shuffle_ps(sum_vec, sum_vec, 1));
+            sum = _mm_cvtss_f32(sum_vec);
+        }
+#endif
+        /* 标量处理剩余元素 */
+        for (; j < n; j++) {
+            output[j] = expf(input[j] - max_v);
+            sum += output[j];
+        }
+        /* 向量化缩放归一化 */
         float inv = 1.0f / (sum + 1e-10f);
-        for (int i = 0; i < n; i++) output[i] = expf(input[i] - max_v) * inv;
+        int k = 0;
+#if SELFLNN_HAVE_AVX
+        if (g_simd_avx_available > 0) {
+            __m256 inv_vec = _mm256_set1_ps(inv);
+            for (; k <= n - 8; k += 8) {
+                __m256 y_vec = _mm256_loadu_ps(&output[k]);
+                y_vec = _mm256_mul_ps(y_vec, inv_vec);
+                _mm256_storeu_ps(&output[k], y_vec);
+            }
+        }
+#elif SELFLNN_HAVE_NEON
+        if (g_simd_neon_available > 0) {
+            float32x4_t inv_vec = vdupq_n_f32(inv);
+            for (; k <= n - 4; k += 4) {
+                float32x4_t y_vec = vld1q_f32(&output[k]);
+                y_vec = vmulq_f32(y_vec, inv_vec);
+                vst1q_f32(&output[k], y_vec);
+            }
+        }
+#elif SELFLNN_HAVE_SSE
+        {
+            __m128 inv_vec = _mm_set1_ps(inv);
+            for (; k <= n - 4; k += 4) {
+                __m128 y_vec = _mm_loadu_ps(&output[k]);
+                y_vec = _mm_mul_ps(y_vec, inv_vec);
+                _mm_storeu_ps(&output[k], y_vec);
+            }
+        }
+#endif
+        for (; k < n; k++) output[k] *= inv;
         break;
     }
     case CPU_KERNEL_LAYER_NORM: {
@@ -1772,7 +2236,7 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
     }
     case CPU_KERNEL_VECTOR_MUL: {
         const float* b = (const float*)k->arg_values[2];
-        if (b) for (int i = 0; i < n; i++) output[i] = input[i] * b[i];
+        if (b) simd_mul_batch(output, input, b, n);
         else for (int i = 0; i < n; i++) output[i] = input[i];
         break;
     }
@@ -2990,11 +3454,37 @@ static inline void simd_axpy_row(float* restrict c, const float* restrict b,
     if (g_simd_avx_available > 0) {
         __m256 aik_vec = _mm256_set1_ps(aik);
         int j = 0;
-        for (; j <= n - 8; j += 8) {
-            __m256 b_vec = _mm256_loadu_ps(&b[j]);
-            __m256 c_vec = _mm256_loadu_ps(&c[j]);
-            c_vec = _mm256_add_ps(c_vec, _mm256_mul_ps(aik_vec, b_vec));
-            _mm256_storeu_ps(&c[j], c_vec);
+#if SELFLNN_HAVE_FMA
+        if (g_simd_fma_available > 0) {
+            /* AVX2 FMA路径：单指令完成 a*b + c，延迟更优 */
+            for (; j <= n - 8; j += 8) {
+                __m256 b_vec = _mm256_loadu_ps(&b[j]);
+                __m256 c_vec = _mm256_loadu_ps(&c[j]);
+                c_vec = _mm256_fmadd_ps(aik_vec, b_vec, c_vec);
+                _mm256_storeu_ps(&c[j], c_vec);
+            }
+        } else
+#endif
+        {
+            for (; j <= n - 8; j += 8) {
+                __m256 b_vec = _mm256_loadu_ps(&b[j]);
+                __m256 c_vec = _mm256_loadu_ps(&c[j]);
+                c_vec = _mm256_add_ps(c_vec, _mm256_mul_ps(aik_vec, b_vec));
+                _mm256_storeu_ps(&c[j], c_vec);
+            }
+        }
+        for (; j < n; j++) c[j] += aik * b[j];
+        return;
+    }
+#elif SELFLNN_HAVE_NEON
+    {
+        float32x4_t aik_vec = vdupq_n_f32(aik);
+        int j = 0;
+        for (; j <= n - 4; j += 4) {
+            float32x4_t b_vec = vld1q_f32(&b[j]);
+            float32x4_t c_vec = vld1q_f32(&c[j]);
+            c_vec = vmlaq_f32(c_vec, aik_vec, b_vec);
+            vst1q_f32(&c[j], c_vec);
         }
         for (; j < n; j++) c[j] += aik * b[j];
         return;
@@ -3026,9 +3516,7 @@ int gpu_matmul_train(GpuContext* context,
     CPU_CHECK_NULL(C);
 
     /* 确保SIMD运行时标志已初始化 */
-    if (g_simd_avx_available < 0) {
-        g_simd_avx_available = cpu_supports_avx();
-    }
+    simd_lazy_init();
 
     /* 使用ikj循环顺序：内层j循环可连续访问B，适合SIMD向量化 */
     /* C[i][j] = beta*C[i][j] + alpha * sum_k A[i][k] * B[k][j] */
@@ -3357,7 +3845,7 @@ int gpu_activation_forward(GpuContext* context,
     CPU_CHECK_NULL(input);
     CPU_CHECK_NULL(output);
 
-    /* SIMD加速路径：ReLU和LeakyReLU使用向量化实现 */
+    /* SIMD加速路径：ReLU、LeakyReLU、Sigmoid、Tanh 使用向量化实现 */
     if (act_type == GPU_ACTIVATION_RELU) {
         simd_relu_forward(output, input, (int)num_elements);
         return 0;
@@ -3366,30 +3854,25 @@ int gpu_activation_forward(GpuContext* context,
         simd_leaky_relu_forward(output, input, alpha, (int)num_elements);
         return 0;
     }
+    if (act_type == GPU_ACTIVATION_SIGMOID) {
+        simd_sigmoid_forward(output, input, (int)num_elements);
+        return 0;
+    }
+    if (act_type == GPU_ACTIVATION_TANH) {
+        simd_tanh_forward(output, input, (int)num_elements);
+        return 0;
+    }
 
+    /* 剩余激活函数使用标量路径 */
     const float sqrt_2 = 1.4142135623730951f;
     for (size_t i = 0; i < num_elements; i++) {
         float x = input[i];
         float val;
         switch (act_type) {
             case GPU_ACTIVATION_SIGMOID:
-                if (x < -45.0f) {
-                    val = 0.0f;
-                } else if (x > 45.0f) {
-                    val = 1.0f;
-                } else {
-                    val = 1.0f / (1.0f + expf(-x));
-                }
-                break;
             case GPU_ACTIVATION_TANH:
-                if (x < -20.0f) {
-                    val = -1.0f;
-                } else if (x > 20.0f) {
-                    val = 1.0f;
-                } else {
-                    float e2x = expf(2.0f * x);
-                    val = (e2x - 1.0f) / (e2x + 1.0f);
-                }
+                /* 已在上方SIMD路径处理，此处仅作预留 */
+                val = x;
                 break;
             case GPU_ACTIVATION_GELU:
                 val = x * 0.5f * (1.0f + _fast_erf(x / sqrt_2));

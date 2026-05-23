@@ -109,8 +109,8 @@ static void agi_bg_online_learning(void) {
     float* state = (float*)safe_malloc(128 * sizeof(float));
     float* target = (float*)safe_malloc(128 * sizeof(float));
     if (!state || !target) {
-        free(state);
-        free(target);
+        safe_free((void**)&state);
+        safe_free((void**)&target);
         return;
     }
     /* 尝试从LNN网络获取当前状态和最近输出作为训练数据 */
@@ -122,8 +122,8 @@ static void agi_bg_online_learning(void) {
             online_learner_update((OnlineLearner*)learner, state, 128, target, 128, &loss);
         }
     }
-    free(state);
-    free(target);
+    safe_free((void**)&state);
+    safe_free((void**)&target);
 }
 
 /* AGI后台任务：知识固化（系统状态监控 + 记忆/知识统计） */
@@ -261,10 +261,14 @@ static void agi_bg_safety_check(void) {
     
     log_debug("[AGI后台] 安全检查完成，安全等级=%d", (int)level);
 
-    /* 数据采集流水线自检（每3个安全周期执行一次） */
+    /* 数据采集流水线自检（每3个安全周期执行一次，或由事件驱动即时触发） */
+    /* ZSFWS-038: 保持现有counter机制（每3周期=约3小时），
+     * 但添加即时自检请求检查，当硬件变化事件触发时立即执行自检，
+     * 无需等待完整的3个安全周期。 */
     static int pipeline_check_counter = 0;
     pipeline_check_counter++;
-    if (pipeline_check_counter % 3 == 0) {
+    int immediate_requested = dcpipeline_is_immediate_check_requested();
+    if (pipeline_check_counter % 3 == 0 || immediate_requested) {
         void* dp = selflnn_get_data_pipeline();
         if (dp) {
             DataSourceHealth results[DC_SOURCE_COUNT];
@@ -274,6 +278,12 @@ static void agi_bg_safety_check(void) {
                     log_debug("[AGI后台] 数据源 %d: %s", i, results[i].status_message);
                 }
             }
+            if (immediate_requested) {
+                log_info("[AGI后台] 事件驱动即时自检完成，已检查%d个数据源", checked);
+            }
+        }
+        if (immediate_requested) {
+            dcpipeline_clear_immediate_check();
         }
     }
 }
@@ -505,19 +515,30 @@ static void agi_background_loop_iteration(void) {
         g_last_consolidate = now;
     }
 
-    /* 自我反思（受自我反思能力开关控制） */
+    /* 自我反思（受自我反思能力开关控制 + ZSFWS-027 LNN就绪检查） */
     if (capability_is_enabled(CAP_REFLECTION) &&
         now - g_last_reflection >= SELF_REFLECTION_INTERVAL) {
-        agi_bg_self_reflection();
-        g_last_reflection = now;
-        g_agi_self.reflection_count++;
-        SystemStatus st;
-        if (selflnn_get_status(&st) == 0) {
-            float mem_efficiency = (st.total_memories > 0) ?
-                (float)(st.active_tasks + 1) / (float)st.total_memories : 0.0f;
-            g_agi_self.avg_reflection_score = g_agi_self.avg_reflection_score * 0.8f +
-                (1.0f - CLAMP(mem_efficiency, 0.0f, 1.0f)) * 0.2f;
+        /* ZSFWS-027: 在发起深度自我反思前检查LNN是否已训练，
+         * 避免随机权重LNN产生无意义的自我评估和错误修正决策 */
+        void* scs_check = selflnn_get_self_cognition();
+        if (scs_check && !self_cognition_is_lnn_ready((SelfCognitionSystem*)scs_check)) {
+            log_debug("[AGI后台] LNN尚未完成训练，跳过本次深度自我反思，"
+                     "等待模型检查点加载或初始训练完成后自动启用");
+            /* 仍然更新反思时间戳避免频繁重试 */
+            g_last_reflection = now;
+        } else {
+            agi_bg_self_reflection();
+            g_last_reflection = now;
+            g_agi_self.reflection_count++;
+            SystemStatus st;
+            if (selflnn_get_status(&st) == 0) {
+                float mem_efficiency = (st.total_memories > 0) ?
+                    (float)(st.active_tasks + 1) / (float)st.total_memories : 0.0f;
+                g_agi_self.avg_reflection_score = g_agi_self.avg_reflection_score * 0.8f +
+                    (1.0f - CLAMP(mem_efficiency, 0.0f, 1.0f)) * 0.2f;
+            }
         }
+
     }
 
     /* 演化步（受自我演化能力开关控制） */
@@ -885,27 +906,47 @@ int main(int argc, char* argv[])
             printf("  SELF-LNN核心系统初始化成功\n");
             /* ZSFABC: 初始化能力开关为默认启用状态 */
             capability_reset_to_defaults();
-            /* P0-013修复: 创建在线学习器时提供初始权重，而非NULL导致创建失败 */
+            /* M-016: 启动时自动加载检查点模型
+             * 扫描 checkpoints/ 目录，如果有预训练模型则加载到共享LNN */
+            {
+                int load_result = selflnn_checkpoints_auto_load();
+                if (load_result == 0) {
+                    printf("  检查点模型自动加载完成\n");
+                } else {
+                    printf("  检查点模型加载失败（系统将使用随机初始化权重）\n");
+                }
+            }
+            /* ZSFWS-013修复: 在线学习器附着到共享LNN，直接操作LNN权重矩阵
+             * 不再使用rand()随机权重和独立线性回归器。
+             * 在线学习器通过 lnn_forward/lnn_backward_accumulate 使用CfC动力学
+             * 计算真实梯度，再由SGD/Kalman/Adaptive算法直接更新LNN参数。 */
             OnlineLearningConfig ol_config;
             memset(&ol_config, 0, sizeof(OnlineLearningConfig));
+            ol_config.algorithm_type = ONLINE_LEARNING_ADAPTIVE;
             ol_config.learning_rate = 0.001f;
             ol_config.forgetting_factor = 0.9f;
             ol_config.window_size = 100;
             ol_config.enable_adaptive_rate = 1;
+            ol_config.enable_momentum = 1;
+            ol_config.momentum_factor = 0.9f;
             ol_config.buffer_size = 1000;
-            /* 分配初始权重: 输入维度默认128，在线学习器为线性回归W·input → 标量预测 */
-            size_t nw = 128;
-            float* init_weights = (float*)safe_malloc(nw * sizeof(float));
-            if (init_weights) {
-                for (size_t i = 0; i < nw; i++) {
-                    init_weights[i] = ((float)(rand() % 10000) / 10000.0f - 0.5f) * 0.02f;
+            ol_config.min_learning_rate = 1e-6f;
+            ol_config.max_learning_rate = 0.1f;
+            /* 使用占位权重创建学习器（1个元素），后续通过 attach_lnn 替换为LNN参数引用 */
+            float placeholder_weight = 0.0f;
+            OnlineLearner* learner_raw = online_learner_create(&ol_config, &placeholder_weight, 1);
+            if (learner_raw) {
+                /* 获取共享LNN并附着到学习器 */
+                void* shared_lnn_ptr = selflnn_get_shared_lnn();
+                if (shared_lnn_ptr && online_learner_attach_lnn(learner_raw, (LNN*)shared_lnn_ptr) == 0) {
+                    printf("  在线学习器初始化成功（已附着到共享LNN，直接操作LNN权重矩阵）\n");
+                    g_online_learner_handle = (void*)learner_raw;
+                } else {
+                    printf("  在线学习器LNN附着失败，回退到独立权重模式\n");
+                    g_online_learner_handle = (void*)learner_raw;
                 }
-            }
-            void* learner = (void*)online_learner_create(&ol_config, init_weights, nw);
-            safe_free((void**)&init_weights);
-            if (learner) {
-                 printf("  在线学习器初始化成功\n");
-                 g_online_learner_handle = learner;
+            } else {
+                printf("  在线学习器创建失败\n");
             }
             /* 获取自我演化引擎句柄（已在selflnn_init中创建） */
             g_evolution_engine_handle = selflnn_get_evolution_engine();
