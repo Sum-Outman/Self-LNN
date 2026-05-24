@@ -57,6 +57,8 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <dirent.h>
+#include <strings.h>
 #endif
 
 /* 静态函数前向声明 */
@@ -103,10 +105,13 @@ static void agi_bg_online_learning(void) {
     OnlineLearningStatus status;
     memset(&status, 0, sizeof(OnlineLearningStatus));
     int s = online_learner_get_status((OnlineLearner*)learner, &status);
+    if (s != 0) {
+        log_warning("[AGI后台] 在线学习器状态查询失败，跳过本轮学习");
+        return;
+    }
     if (status.total_samples < 10 || status.current_learning_rate < 1e-7f) {
         return;
     }
-    (void)s;
     /* 从系统状态缓冲区获取真实的在线学习数据 */
     float* state = (float*)safe_malloc(128 * sizeof(float));
     float* target = (float*)safe_malloc(128 * sizeof(float));
@@ -457,6 +462,7 @@ static void agi_bg_training_step(void) {
         if (!g_training_pipeline) return;
         /* ZSFYGY-F010修复: 确保训练数据目录存在，不存在则自动创建 */
         /* ZS-026修复: 使用目录属性检查替代fopen文件检查 */
+        /* ZSFX-016修复: 目录创建后验证是否存在数据文件，无文件时输出警告并执行空训练步 */
         {
             int dir_exists = 0;
 #ifdef _WIN32
@@ -479,6 +485,68 @@ static void agi_bg_training_step(void) {
                 log_info("[AGI后台] 训练数据目录已自动创建: data/training/");
             } else {
                 log_debug("[AGI后台] 训练数据目录已存在");
+            }
+            /* ZSFX-016: 扫描目录下所有文件，验证是否存在训练数据文件 */
+            {
+                int data_file_count = 0;
+                const char* exts[] = {".json", ".csv", ".txt", ".bin"};
+                int num_exts = sizeof(exts) / sizeof(exts[0]);
+#ifdef _WIN32
+                {
+                    WIN32_FIND_DATAA find_data;
+                    HANDLE h_find;
+                    char search_path[512];
+                    snprintf(search_path, sizeof(search_path), "data\\training\\*");
+                    h_find = FindFirstFileA(search_path, &find_data);
+                    if (h_find != INVALID_HANDLE_VALUE) {
+                        do {
+                            if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                                continue;
+                            const char* fname = find_data.cFileName;
+                            const char* dot = strrchr(fname, '.');
+                            if (dot) {
+                                for (int ei = 0; ei < num_exts; ei++) {
+                                    if (_stricmp(dot, exts[ei]) == 0) {
+                                        data_file_count++;
+                                        break;
+                                    }
+                                }
+                            }
+                        } while (FindNextFileA(h_find, &find_data));
+                        FindClose(h_find);
+                    }
+                }
+#else
+                {
+                    DIR* d = opendir("data/training");
+                    if (d) {
+                        struct dirent* entry;
+                        while ((entry = readdir(d)) != NULL) {
+                            if (entry->d_type == DT_DIR) continue;
+                            const char* fname = entry->d_name;
+                            const char* dot = strrchr(fname, '.');
+                            if (dot) {
+                                for (int ei = 0; ei < num_exts; ei++) {
+                                    if (strcasecmp(dot, exts[ei]) == 0) {
+                                        data_file_count++;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        closedir(d);
+                    }
+                }
+#endif
+                if (data_file_count == 0) {
+                    log_warn("[AGI后台] 训练数据目录 data/training/ 中未找到任何数据文件(.json/.csv/.txt/.bin)，" 
+                             "将仅执行空训练步（不加载空数据），请放入训练数据文件后重新训练。");
+                    /* 仅执行空训练步，不调用training_pipeline_load_data加载空数据 */
+                    if (!g_training_pipeline) { training_pipeline_destroy(g_training_pipeline); g_training_pipeline = NULL; return; }
+                    training_pipeline_step(g_training_pipeline);
+                    return;
+                }
+                log_info("[AGI后台] 训练数据目录扫描完成，发现 %d 个数据文件", data_file_count);
             }
         }
         training_pipeline_load_data(g_training_pipeline, "data/training");
@@ -567,8 +635,9 @@ static void agi_background_loop_iteration(void) {
         g_last_training_step = now;
     }
 
-    /* 认知更新 */
-    if (now - g_last_cognition >= COGNITION_UPDATE_INTERVAL) {
+    /* Z8-003: 认知更新（受自我认知能力开关控制 — 之前直接执行无人检查） */
+    if (capability_is_enabled(CAP_SELF_COGNITION) &&
+        now - g_last_cognition >= COGNITION_UPDATE_INTERVAL) {
         agi_bg_cognition_update();
         g_last_cognition = now;
     }
@@ -599,6 +668,34 @@ static void agi_background_loop_iteration(void) {
                 g_agi_self.evolution_success, had_error ? 1 : 0,
                 (long long)(now - g_start_time));
             ws_push_broadcast_json(g_ws_push_server, status_json);
+
+            /* Z7-002: 每20个循环推送安全状态 */
+            if (ws_broadcast_counter % 20 == 0) {
+                char safety_json[512];
+                void* sm = selflnn_get_safety_monitor();
+                SafetyStats ss = {0};
+                if (sm && safety_get_stats((SafetyMonitor*)sm, &ss) == 0) {
+                    snprintf(safety_json, sizeof(safety_json),
+                        "{\"type\":\"safety_alert\",\"score\":%.3f,\"events\":%zu,\"timestamp\":%lld}",
+                        ss.current_safety_score, ss.total_events, (long long)now);
+                    ws_push_broadcast_json(g_ws_push_server, safety_json);
+                }
+            }
+
+            /* Z7-002: 每30个循环推送训练状态 */
+            if (ws_broadcast_counter % 30 == 0 && g_training_pipeline) {
+                char train_json[512];
+                TrainingPipelineState tps;
+                memset(&tps, 0, sizeof(tps));
+                if (training_pipeline_get_state(g_training_pipeline, &tps) == 0) {
+                    snprintf(train_json, sizeof(train_json),
+                        "{\"type\":\"training_metrics\",\"stage\":%d,\"epoch\":%d,"
+                        "\"loss\":%.6f,\"accuracy\":%.4f,\"lr\":%.8f,\"timestamp\":%lld}",
+                        (int)tps.current_stage, tps.current_epoch, tps.current_loss,
+                        tps.train_accuracy, tps.learning_rate, (long long)now);
+                    ws_push_broadcast_json(g_ws_push_server, train_json);
+                }
+            }
         }
     }
 
@@ -909,8 +1006,6 @@ int main(int argc, char* argv[])
 
         if (selflnn_init(&sys_config) == 0) {
             printf("  SELF-LNN核心系统初始化成功\n");
-            /* ZSFABC: 初始化能力开关为默认启用状态 */
-            capability_reset_to_defaults();
             /* M-016: 启动时自动加载检查点模型
              * 扫描 checkpoints/ 目录，如果有预训练模型则加载到共享LNN */
             {
@@ -958,6 +1053,10 @@ int main(int argc, char* argv[])
             if (g_evolution_engine_handle) {
                 printf("  自我演化引擎句柄获取成功\n");
             }
+            /* Z8-002: 能力开关重置移到在线学习器创建之后
+             * 确保子系统(online_learner/evolution_engine等)全部就绪后再激活 */
+            capability_reset_to_defaults();
+            printf("  能力开关已重置为默认启用状态\n");
         } else {
             printf("  SELF-LNN核心系统初始化失败，后台任务将受限\n");
         }

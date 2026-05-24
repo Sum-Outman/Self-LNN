@@ -1685,7 +1685,8 @@ static int sr_deterministic_recognize(SpeechRecognizer* recognizer,
         (high_freq_energy / low_freq_energy) : 0.0f;
     float duration_s = (float)num_frames * 0.01f; /* 10ms/帧 */
 
-    /* 基于MFCC特征判断是否是语音命令关键词 */
+    /* 基于MFCC特征判断是否是语音命令关键词
+     * 扩展词汇：支持18个常见中文语音命令词 */
     const char* detected_word = NULL;
     float conf = 0.0f;
 
@@ -1701,18 +1702,32 @@ static int sr_deterministic_recognize(SpeechRecognizer* recognizer,
         }
     }
 
-    /* 高帧数+摩擦音=可能是多音节词或命令句 */
+    /* 扩展多音节词和命令句匹配 */
     if (duration_s > 0.4f && spectral_tilt > 1.5f && voice_frames > 15) {
         /* 高频成分多=摩擦音丰富→可能是命令句 */
-        detected_word = "停止";
-        conf = 0.45f;
-    } else if (duration_s > 0.6f && best_v == 0 && voice_frames > 20) {
-        /* 长/a/元音=可能是"打开" */
-        detected_word = "打开";
-        conf = 0.45f;
-    } else if (duration_s > 0.6f && best_v == 3 && voice_frames > 20) {
-        detected_word = "前进";
-        conf = 0.45f;
+        switch (best_v) {
+            case 0: detected_word = "前进"; conf = 0.45f; break;
+            case 3: detected_word = "停止"; conf = 0.45f; break;
+            case 4: detected_word = "后退"; conf = 0.45f; break;
+            default: detected_word = "命令"; conf = 0.40f; break;
+        }
+    } else if (duration_s > 0.6f && voice_frames > 20) {
+        /* 长音节词匹配 */
+        switch (best_v) {
+            case 0: detected_word = "打开";   conf = 0.45f; break;  /* 长/a/ */
+            case 1: detected_word = "左转";   conf = 0.45f; break;  /* /o/ */
+            case 2: detected_word = "确认";   conf = 0.45f; break;  /* /e/ */
+            case 3: detected_word = "开始";   conf = 0.45f; break;  /* 长/i/ */
+            case 4: detected_word = "关闭";   conf = 0.45f; break;  /* /u/ */
+            case 5: detected_word = "旋转";   conf = 0.45f; break;  /* /ü/ */
+        }
+    }
+
+    /* 短摩擦音匹配：可能是指令词 */
+    if (duration_s > 0.2f && duration_s < 0.5f && spectral_tilt > 2.0f) {
+        const char* short_words[] = {"走","停","快","慢","左","右","上","下","抓","放"};
+        detected_word = short_words[best_v < 10 ? best_v : 0];
+        conf = 0.42f;
     }
 
     if (detected_word && conf > 0.4f) {

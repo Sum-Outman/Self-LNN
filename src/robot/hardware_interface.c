@@ -1056,7 +1056,7 @@ int hardware_interface_connect(HardwareInterface* hw) {
  * 检测本机是否运行ROS Master，支持rosmaster --core或roscore
  * 检测方式：TCP连接到ROS_MASTER_URI端口(默认11311)，发送caller_id检查
  */
-int hardware_probe_ros(const char* ros_master_uri) {
+static int hardware_probe_ros(const char* ros_master_uri) {
     const char* uri = ros_master_uri ? ros_master_uri : "http://localhost:11311";
     /* 解析URI提取host:port */
     const char* p = strstr(uri, "://");
@@ -1095,7 +1095,7 @@ int hardware_probe_ros(const char* ros_master_uri) {
  * @brief 串行端口探测
  * Windows: 枚举COM1-COM32; Linux: 检查 /dev/ttyS0,ttyUSB0,ttyACM0
  */
-int hardware_probe_serial(void) {
+static int hardware_probe_serial(void) {
     int found = 0;
 #ifdef _WIN32
     char port[8];
@@ -1120,7 +1120,7 @@ int hardware_probe_serial(void) {
  * 检查socketcan接口（Linux: can0/vcan0, Windows: pcan设备）
  * 仅探测真实硬件CAN接口，不创建任何虚拟/模拟接口。未检测到时返回0。
  */
-int hardware_probe_can(void) {
+static int hardware_probe_can(void) {
 #ifdef __linux__
     /* 检查socketcan接口 */
     struct ifreq ifr;
@@ -1147,7 +1147,7 @@ int hardware_probe_can(void) {
  * @param hw 硬件接口句柄
  * @return 0=成功, -1=无可用硬件通道
  */
-int hardware_auto_connect(HardwareInterface* hw) {
+static int hardware_auto_connect(HardwareInterface* hw) {
     if (!hw) return -1;
     int ros_ok = hardware_probe_ros(NULL);
     int serial_ok = hardware_probe_serial();

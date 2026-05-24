@@ -931,6 +931,317 @@ class DeviceManager {
         this.stereoVision.focalLength = Math.max(100, Math.min(2000, focalLength));
     }
 
+    /* ZSFX-033修复: 设备添加面板HTML生成函数
+     * 返回串行、扬声器、摄像头的完整配置UI界面HTML字符串 */
+    deviceAddPanel() {
+        var self = this;
+        var microphones = this.getAvailableMicrophones();
+        var speakers = this.getAvailableSpeakers();
+        var cameras = this.getAvailableCameras();
+        /* 已添加设备ID集合 */
+        var addedMicIds = this.microphones.map(function(m) { return m.deviceId; });
+        var addedSpkIds = this.speakers.map(function(s) { return s.deviceId; });
+        var addedCamIds = this.cameras.map(function(c) { return c.deviceId; });
+
+        var html = '';
+        html += '<div class="device-add-panel" style="max-height:70vh;overflow-y:auto;padding:16px;">';
+
+        /* 麦克风区域 */
+        html += '<div class="device-section" style="margin-bottom:20px;">';
+        html += '<h4 style="margin:0 0 8px 0;color:#3498db;border-bottom:1px solid rgba(52,152,219,0.3);padding-bottom:6px;"> 麦克风设备</h4>';
+        html += '<div style="margin-bottom:8px;">';
+        html += '<button onclick="window.DEVICE_MGR.scanAudioDevices()" class="btn btn-sm" style="background:#3498db;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
+        html += '</div>';
+        if (microphones.length === 0) {
+            html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到麦克风设备，请检查浏览器权限设置</p>';
+        } else {
+            html += '<div class="device-list" style="max-height:180px;overflow-y:auto;">';
+            for (var i = 0; i < microphones.length; i++) {
+                var mic = microphones[i];
+                var isAdded = addedMicIds.indexOf(mic.deviceId) !== -1;
+                html += '<div class="device-item" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;margin:4px 0;background:rgba(255,255,255,0.03);border-radius:6px;border:1px solid rgba(255,255,255,0.08);">';
+                html += '<div style="flex:1;min-width:0;">';
+                html += '<div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + self._escapeHtml(mic.label || '麦克风 ' + (i + 1)) + '</div>';
+                html += '<div style="font-size:11px;color:#888;">' + self._escapeHtml(mic.deviceId || '无设备ID') + '</div>';
+                html += '</div>';
+                html += '<div style="margin-left:12px;flex-shrink:0;">';
+                if (isAdded) {
+                    html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
+                } else {
+                    html += '<button onclick="window.DEVICE_MGR.addMicrophone(\'' + self._escAttr(mic.deviceId) + '\').then(function(r){if(r.success){window.DEVICE_MGR.deviceAddPanel_show();window.DEVICE_MGR.startMicrophone(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                }
+                html += '</div>';
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+        html += '</div>';
+
+        /* 扬声器区域 */
+        html += '<div class="device-section" style="margin-bottom:20px;">';
+        html += '<h4 style="margin:0 0 8px 0;color:#e67e22;border-bottom:1px solid rgba(230,126,34,0.3);padding-bottom:6px;"> 扬声器设备</h4>';
+        html += '<div style="margin-bottom:8px;">';
+        html += '<button onclick="window.DEVICE_MGR.scanAudioDevices()" class="btn btn-sm" style="background:#e67e22;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
+        html += '</div>';
+        if (speakers.length === 0) {
+            html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到扬声器设备，请检查浏览器权限设置</p>';
+        } else {
+            html += '<div class="device-list" style="max-height:180px;overflow-y:auto;">';
+            for (var j = 0; j < speakers.length; j++) {
+                var spk = speakers[j];
+                var isAdded = addedSpkIds.indexOf(spk.deviceId) !== -1;
+                html += '<div class="device-item" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;margin:4px 0;background:rgba(255,255,255,0.03);border-radius:6px;border:1px solid rgba(255,255,255,0.08);">';
+                html += '<div style="flex:1;min-width:0;">';
+                html += '<div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + self._escapeHtml(spk.label || '扬声器 ' + (j + 1)) + '</div>';
+                html += '<div style="font-size:11px;color:#888;">' + self._escapeHtml(spk.deviceId || '无设备ID') + '</div>';
+                html += '</div>';
+                html += '<div style="margin-left:12px;flex-shrink:0;">';
+                if (isAdded) {
+                    html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
+                } else {
+                    html += '<button onclick="window.DEVICE_MGR.addSpeaker(\'' + self._escAttr(spk.deviceId) + '\').then(function(r){if(r.success){window.DEVICE_MGR.deviceAddPanel_show();window.DEVICE_MGR.startSpeaker(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                }
+                html += '</div>';
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+        html += '</div>';
+
+        /* 摄像头区域 */
+        html += '<div class="device-section" style="margin-bottom:20px;">';
+        html += '<h4 style="margin:0 0 8px 0;color:#9b59b6;border-bottom:1px solid rgba(155,89,182,0.3);padding-bottom:6px;"> 摄像头设备</h4>';
+        html += '<div style="margin-bottom:8px;">';
+        html += '<button onclick="window.DEVICE_MGR.scanVideoDevices()" class="btn btn-sm" style="background:#9b59b6;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新视频设备列表</button>';
+        html += '</div>';
+        if (cameras.length === 0) {
+            html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到摄像头设备，请检查浏览器权限设置</p>';
+        } else {
+            html += '<div class="device-list" style="max-height:180px;overflow-y:auto;">';
+            for (var k = 0; k < cameras.length; k++) {
+                var cam = cameras[k];
+                var isAdded = addedCamIds.indexOf(cam.deviceId) !== -1;
+                html += '<div class="device-item" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;margin:4px 0;background:rgba(255,255,255,0.03);border-radius:6px;border:1px solid rgba(255,255,255,0.08);">';
+                html += '<div style="flex:1;min-width:0;">';
+                html += '<div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + self._escapeHtml(cam.label || '摄像头 ' + (k + 1)) + '</div>';
+                html += '<div style="font-size:11px;color:#888;">' + self._escapeHtml(cam.deviceId || '无设备ID') + '</div>';
+                html += '</div>';
+                html += '<div style="margin-left:12px;flex-shrink:0;">';
+                if (isAdded) {
+                    html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
+                } else {
+                    html += '<button onclick="window.DEVICE_MGR.addCamera(\'' + self._escAttr(cam.deviceId) + '\').then(function(r){if(r.success){window.DEVICE_MGR.deviceAddPanel_show();window.DEVICE_MGR.startCamera(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                }
+                html += '</div>';
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+        html += '</div>';
+
+        /* 已添加设备摘要 */
+        html += '<div class="device-section">';
+        html += '<h4 style="margin:0 0 8px 0;color:#27ae60;border-bottom:1px solid rgba(39,174,96,0.3);padding-bottom:6px;"> 已添加设备摘要</h4>';
+        html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-size:12px;">';
+        html += '<div style="background:rgba(52,152,219,0.1);padding:10px;border-radius:6px;text-align:center;">';
+        html += '<div style="color:#3498db;font-weight:bold;">麦克风</div>';
+        html += '<div style="font-size:18px;color:#fff;margin-top:4px;">' + this.microphones.length + ' 个</div>';
+        html += '</div>';
+        html += '<div style="background:rgba(230,126,34,0.1);padding:10px;border-radius:6px;text-align:center;">';
+        html += '<div style="color:#e67e22;font-weight:bold;">扬声器</div>';
+        html += '<div style="font-size:18px;color:#fff;margin-top:4px;">' + this.speakers.length + ' 个</div>';
+        html += '</div>';
+        html += '<div style="background:rgba(155,89,182,0.1);padding:10px;border-radius:6px;text-align:center;">';
+        html += '<div style="color:#9b59b6;font-weight:bold;">摄像头</div>';
+        html += '<div style="font-size:18px;color:#fff;margin-top:4px;">' + this.cameras.length + ' 个</div>';
+        html += '</div>';
+        html += '</div>';
+        html += '</div>';
+
+        html += '</div>'; /* device-add-panel */
+        return html;
+    }
+
+    /* ZSFX-033: 在页面中显示设备添加面板的便捷方法 */
+    deviceAddPanel_show(containerId) {
+        var container;
+        if (containerId) {
+            container = document.getElementById(containerId);
+        } else {
+            /* 默认尝试找到设备管理工作台面板 */
+            container = document.getElementById('device-control');
+            if (!container) {
+                /* 回退：创建模态层 */
+                var overlay = document.createElement('div');
+                overlay.id = 'device-panel-overlay';
+                overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;';
+                overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+                var panel = document.createElement('div');
+                panel.style.cssText = 'background:#1a1a2e;border-radius:12px;border:1px solid rgba(255,255,255,0.15);max-width:640px;width:90%;max-height:80vh;box-shadow:0 20px 60px rgba(0,0,0,0.5);';
+                panel.innerHTML = this.deviceAddPanel();
+                /* 添加关闭按钮 */
+                var closeBtn = document.createElement('div');
+                closeBtn.style.cssText = 'text-align:right;padding:8px 16px 0 16px;';
+                closeBtn.innerHTML = '<button style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;opacity:0.6;" onclick="document.getElementById(\'device-panel-overlay\').remove();">✕</button>';
+                panel.insertBefore(closeBtn, panel.firstChild);
+                overlay.appendChild(panel);
+                document.body.appendChild(overlay);
+                return;
+            }
+        }
+        container.innerHTML = this.deviceAddPanel();
+    }
+
+    /* ZSFX-033修复: 真实Web API扫描音频设备（麦克风 + 扬声器）
+     * 使用 navigator.mediaDevices.enumerateDevices() 获取设备列表
+     * 同时请求音频权限以便获得设备标签名称 */
+    async scanAudioDevices() {
+        var self = this;
+        try {
+            /* 先请求音频权限以获取带标签的设备列表 */
+            var hasPermission = false;
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                try {
+                    var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    /* 立即停止轨道，仅用于获取权限 */
+                    if (stream) {
+                        stream.getTracks().forEach(function(t) { t.stop(); });
+                        hasPermission = true;
+                    }
+                } catch (permErr) {
+                    console.warn('[扫描音频设备] 无法获取音频权限:', permErr.message);
+                }
+            }
+            /* 枚举所有设备 */
+            if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+                console.warn('[扫描音频设备] mediaDevices API不可用');
+                return { success: false, error: '浏览器不支持设备枚举API' };
+            }
+            var devices = await navigator.mediaDevices.enumerateDevices();
+            var audioInputs = [];
+            var audioOutputs = [];
+            for (var i = 0; i < devices.length; i++) {
+                var d = devices[i];
+                if (d.deviceId === 'default' || d.deviceId === 'communications') continue;
+                if (d.kind === 'audioinput') {
+                    audioInputs.push({
+                        deviceId: d.deviceId,
+                        label: d.label || '麦克风 ' + (audioInputs.length + 1),
+                        kind: 'audioinput',
+                        groupId: d.groupId || ''
+                    });
+                } else if (d.kind === 'audiooutput') {
+                    audioOutputs.push({
+                        deviceId: d.deviceId,
+                        label: d.label || '扬声器 ' + (audioOutputs.length + 1),
+                        kind: 'audiooutput',
+                        groupId: d.groupId || ''
+                    });
+                }
+            }
+            /* 更新内部设备列表 */
+            this._availableMicrophones = audioInputs;
+            this._availableSpeakers = audioOutputs;
+
+            /* 分发设备更新事件 */
+            document.dispatchEvent(new CustomEvent('device-list-changed', {
+                detail: {
+                    microphones: audioInputs,
+                    speakers: audioOutputs,
+                    cameras: this._availableCameras || [],
+                    hasAudioPermission: hasPermission
+                }
+            }));
+
+            return {
+                success: true,
+                microphones: audioInputs,
+                speakers: audioOutputs,
+                totalAudioInputs: audioInputs.length,
+                totalAudioOutputs: audioOutputs.length,
+                hasPermission: hasPermission
+            };
+        } catch (err) {
+            console.error('[扫描音频设备] 扫描失败:', err.message);
+            return { success: false, error: '扫描音频设备失败: ' + err.message };
+        }
+    }
+
+    /* ZSFX-033修复: 真实Web API扫描视频设备（摄像头）
+     * 使用 navigator.mediaDevices.enumerateDevices() 获取视频设备列表
+     * 同时请求视频权限以便获得设备标签名称 */
+    async scanVideoDevices() {
+        var self = this;
+        try {
+            /* 先请求视频权限以获取带标签的设备列表 */
+            var hasPermission = false;
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                try {
+                    var stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    if (stream) {
+                        stream.getTracks().forEach(function(t) { t.stop(); });
+                        hasPermission = true;
+                    }
+                } catch (permErr) {
+                    console.warn('[扫描视频设备] 无法获取视频权限:', permErr.message);
+                }
+            }
+            /* 枚举所有设备 */
+            if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+                console.warn('[扫描视频设备] mediaDevices API不可用');
+                return { success: false, error: '浏览器不支持设备枚举API' };
+            }
+            var devices = await navigator.mediaDevices.enumerateDevices();
+            var videoInputs = [];
+            for (var i = 0; i < devices.length; i++) {
+                var d = devices[i];
+                if (d.deviceId === 'default' || d.deviceId === 'communications') continue;
+                if (d.kind === 'videoinput') {
+                    videoInputs.push({
+                        deviceId: d.deviceId,
+                        label: d.label || '摄像头 ' + (videoInputs.length + 1),
+                        kind: 'videoinput',
+                        groupId: d.groupId || ''
+                    });
+                }
+            }
+            /* 更新内部设备列表 */
+            this._availableCameras = videoInputs;
+
+            /* 分发设备更新事件 */
+            document.dispatchEvent(new CustomEvent('device-list-changed', {
+                detail: {
+                    microphones: this._availableMicrophones || [],
+                    speakers: this._availableSpeakers || [],
+                    cameras: videoInputs,
+                    hasVideoPermission: hasPermission
+                }
+            }));
+
+            return {
+                success: true,
+                cameras: videoInputs,
+                totalVideoInputs: videoInputs.length,
+                hasPermission: hasPermission
+            };
+        } catch (err) {
+            console.error('[扫描视频设备] 扫描失败:', err.message);
+            return { success: false, error: '扫描视频设备失败: ' + err.message };
+        }
+    }
+
+    /* HTML转义辅助函数 */
+    _escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    /* 属性值转义（用于onclick属性中的字符串） */
+    _escAttr(str) {
+        if (!str) return '';
+        return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+
     async destroy() {
         this.disableDualCameraSpatialPerception();
         if (this._monitorInterval) {

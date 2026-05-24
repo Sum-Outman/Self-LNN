@@ -297,6 +297,11 @@ class AGIController {
                 return await this._apiPost('/api/agi/feature/toggle', { feature: 'imitation_learning', enabled: task.params.enabled });
             case 'toggle_self_correction':
                 return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_correction', enabled: task.params.enabled });
+            /* Z7-004: 补充缺失的能力开关前端接口 */  
+            case 'toggle_self_reflection':
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'reflection', enabled: task.params.enabled });
+            case 'toggle_planning':
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'planning', enabled: task.params.enabled });
             case 'trigger_self_correction':
                 return await this._apiPost('/api/agi/self_correction', { trigger: task.params.trigger || 'manual', context: task.params.context || {} });
             default:

@@ -511,12 +511,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->liquid_tau_max = 2.0f;
     cell->liquid_init_scale = 0.01f;
     cell->liquid_use_layer_norm = 0;
-    
-    // 使用默认时间常数初始化（均分在[min, max]区间）
-    for (size_t i = 0; i < hidden_size; i++) {
-        cell->computed_liquid_tau[i] = cell->config.time_constant > 0.0f ?
-            cell->config.time_constant : (cell->liquid_tau_min + cell->liquid_tau_max) * 0.5f;
-    }
+    /* Z3-001修复: liquid_tau初始化延迟到NULL检查之后，避免分配失败时写入NULL崩溃 */
     
     /* ODE求解器工作空间按需分配（默认闭合解无需工作空间）
      * 各求解器工作空间大小：
@@ -615,7 +610,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         }
     }
 
-    // 检查内存分配（包括新增的梯度缓冲区）
+    // 检查内存分配（包括新增的梯度缓冲区+液时域+伴随法+前向tau）
     if (!cell->state->state || !cell->state->adapted_params ||
         !cell->state->noise_buffer || !cell->state->activation ||
         !cell->state->gradient || !cell->state->input_buffer ||
@@ -633,9 +628,22 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         !cell->fast_time_constants || !cell->slow_time_constants ||
         !cell->fast_state || !cell->slow_state ||
         !cell->fast_activation || !cell->slow_activation ||
-        !cell->multi_timescale_workspace) {
+        !cell->multi_timescale_workspace ||
+        /* Z3-001: 液时域缩放缓冲区NULL检查 */
+        !cell->liquid_tau_weights || !cell->liquid_tau_bias ||
+        !cell->liquid_tau_weight_grad || !cell->liquid_tau_bias_grad ||
+        !cell->computed_liquid_tau || !cell->liquid_tau_workspace ||
+        /* Z3-001: 伴随法缓冲区NULL检查 */
+        !cell->adjoint_state || !cell->adjoint_workspace ||
+        /* Z3-001: 前向传播tau缓冲区 */
+        !cell->forward_tau_used) {
         cfc_cell_free(cell);
         return NULL;
+    }
+    /* Z3-001: NULL检查通过后才初始化computed_liquid_tau */
+    for (size_t i = 0; i < hidden_size; i++) {
+        cell->computed_liquid_tau[i] = cell->config.time_constant > 0.0f ?
+            cell->config.time_constant : (cell->liquid_tau_min + cell->liquid_tau_max) * 0.5f;
     }
     /* 四元数缓冲区检查 */
     if (cell->use_quaternion && (!cell->quaternion_weights || !cell->quaternion_biases ||
@@ -1321,8 +1329,10 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         float dt_over_tau = delta_t / tau;
         if (dt_over_tau < 1e-8f) {
             dt_over_tau = 1e-8f;
-        } else if (dt_over_tau > 100.0f) {
-            dt_over_tau = 100.0f;
+        } else if (dt_over_tau > 20.0f) {
+            /* Z10-002: 钳位上限从100改为20，与后续exp_term>20.0f分支一致。
+             * expf(-50)在单精度下返回0.0f(下溢)，20~100区间无实际差异 */
+            dt_over_tau = 20.0f;
         }
         
         // 计算指数项：exp(-Δt/τ) - 使用高精度计算
@@ -1551,8 +1561,9 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
 
     if (n > 1024 || ws_size > 8192)
     {
-        y_state = (float*)malloc(n * sizeof(float));
-        workspace = (float*)malloc(ws_size * sizeof(float));
+        /* Z9-001: 统一使用safe_malloc替代malloc，避免与safe_free混用导致堆损坏 */
+        y_state = (float*)safe_malloc(n * sizeof(float));
+        workspace = (float*)safe_malloc(ws_size * sizeof(float));
         if (!y_state || !workspace)
         {
             safe_free((void**)&y_state); safe_free((void**)&workspace);

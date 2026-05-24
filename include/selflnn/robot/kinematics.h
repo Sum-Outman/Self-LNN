@@ -183,17 +183,16 @@ typedef struct {
 typedef int (*CollisionCallback)(int shape_a, int shape_b,
                                   const CollisionContact* contact, void* user_data);
 
-void vec3_add(Vec3* out, const Vec3* a, const Vec3* b);
-void vec3_sub(Vec3* out, const Vec3* a, const Vec3* b);
-#ifndef SELFLNN_MATH_UTILS_H
-float vec3_dot(const Vec3* a, const Vec3* b);
-#endif
-void vec3_cross(Vec3* out, const Vec3* a, const Vec3* b);
-void vec3_scale(Vec3* out, const Vec3* a, float s);
-float vec3_length(const Vec3* a);
-void vec3_normalize(Vec3* out, const Vec3* a);
-float vec3_distance(const Vec3* a, const Vec3* b);
-void vec3_transform_quat(Vec3* out, const Vec3* v, const float* q);
+void k_vec3_add(Vec3* out, const Vec3* a, const Vec3* b);
+void k_vec3_sub(Vec3* out, const Vec3* a, const Vec3* b);
+void k_vec3_lerp(Vec3* out, const Vec3* a, const Vec3* b, float t);
+float k_vec3_dot(const Vec3* a, const Vec3* b);
+void k_vec3_cross(Vec3* out, const Vec3* a, const Vec3* b);
+void k_vec3_scale(Vec3* out, const Vec3* a, float s);
+float k_vec3_length(const Vec3* a);
+void k_vec3_normalize(Vec3* out, const Vec3* a);
+float k_vec3_distance(const Vec3* a, const Vec3* b);
+void k_vec3_transform_quat(Vec3* out, const Vec3* v, const float* q);
 
 /* F-032修复: 移除与math_utils.h中static inline版本冲突的四元数函数声明
  * 四元数函数(quat_multiply/quat_conjugate/quat_to_matrix/quat_from_axis_angle)

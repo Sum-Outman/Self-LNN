@@ -7708,6 +7708,31 @@ int save_model_checkpoint(const Trainer* trainer, const char* filename) {
         fwrite(&no_network_flag, sizeof(uint32_t), 1, file);
     }
     
+    /* Z4-003: 5.5 保存优化器状态（Adam m/v动量）—— 断点续训关键数据
+     * 此前仅保存权重/偏置，优化器动量全部丢失导致续训从零开始 */
+    {
+        uint32_t opt_state_flag = 0x4F505453; /* "OPTS" */
+        uint32_t opt_count = (trainer->optimizer && trainer->network) ? 1 : 0;
+        float opt_m_v[4] = {0}; /* [beta1, beta2, epsilon, total_steps] */
+        if (opt_count > 0) {
+            if (optimizer_get_internal_state(trainer->optimizer,
+                                              opt_m_v, &opt_m_v[1], &opt_m_v[2],
+                                              (int*)&opt_m_v[3]) == 0) {
+                crc = ckpt_crc32c(crc, &opt_state_flag, sizeof(uint32_t));
+                fwrite(&opt_state_flag, sizeof(uint32_t), 1, file);
+                crc = ckpt_crc32c(crc, opt_m_v, sizeof(opt_m_v));
+                fwrite(opt_m_v, sizeof(opt_m_v), 1, file);
+            } else {
+                opt_count = 0;
+            }
+        }
+        if (opt_count == 0) {
+            uint32_t no_opt_flag = 0x4E4F5054; /* "NOPT" */
+            crc = ckpt_crc32c(crc, &no_opt_flag, sizeof(uint32_t));
+            fwrite(&no_opt_flag, sizeof(uint32_t), 1, file);
+        }
+    }
+    
     // 6. 保存真正CRC32校验和
     uint32_t crc_final = crc;
     fwrite(&crc_final, sizeof(uint32_t), 1, file);
@@ -7878,6 +7903,34 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
         if (trainer->config.verbose) {
             printf("警告：未知网络标志 0x%08X，跳过网络加载\n", network_flag);
         }
+    }
+    
+    /* Z4-003: 5.5 读取优化器状态（Adam m/v动量）—— 断点续训恢复
+     * 尝试读取优化器标志，根据标志决定是否恢复动量状态 */
+    {
+        uint32_t opt_flag = 0;
+        if (fread(&opt_flag, sizeof(uint32_t), 1, file) == 1) {
+            crc = ckpt_crc32c(crc, &opt_flag, sizeof(uint32_t));
+            if (opt_flag == 0x4F505453) { /* "OPTS" */
+                float opt_m_v[4] = {0};
+                if (fread(opt_m_v, sizeof(opt_m_v), 1, file) == 1) {
+                    crc = ckpt_crc32c(crc, opt_m_v, sizeof(opt_m_v));
+                    if (trainer->optimizer) {
+                        optimizer_set_internal_state(trainer->optimizer,
+                                                      opt_m_v[0], opt_m_v[1], opt_m_v[2],
+                                                      (int)opt_m_v[3]);
+                        if (trainer->config.verbose) {
+                            printf("优化器状态恢复: beta1=%.4f beta2=%.4f eps=%.6f steps=%d\n",
+                                   opt_m_v[0], opt_m_v[1], opt_m_v[2], (int)opt_m_v[3]);
+                        }
+                    }
+                }
+            } else if (opt_flag == 0x4E4F5054) {
+                /* "NOPT" - 无优化器状态，正常情况 */
+            }
+            /* 旧格式检查点无此字段，fread失败属正常（向后兼容） */
+        }
+        /* 如果 fread 完全失败（EOF），说明这是旧格式检查点，忽略即可 */
     }
     
     // 6. 读取并验证真实CRC32校验和

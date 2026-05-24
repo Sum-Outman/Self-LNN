@@ -1252,6 +1252,14 @@ static int mutate_architecture_internal(NASSystem* system,
     
     if (!child->layer_types || !child->layer_widths || !child->kernel_sizes || 
         !child->operations || !child->activations) {
+        /* Z9-004: 浅拷贝后分配失败——清理已分配内存并重置child指针防止双重释放 */
+        safe_free((void**)&child->layer_types);
+        safe_free((void**)&child->layer_widths);
+        safe_free((void**)&child->kernel_sizes);
+        safe_free((void**)&child->operations);
+        safe_free((void**)&child->activations);
+        /* 将child的指针重新置零，避免调用方误认为child可用 */
+        memset(child, 0, sizeof(ArchitectureDescription));
         return -1;
     }
     

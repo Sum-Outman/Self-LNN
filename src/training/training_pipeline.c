@@ -113,6 +113,16 @@ struct TrainingPipeline {
     /* M-004修复: RC低通滤波器历史梯度存储 */
     float* prev_gradients;                     /**< 上一步原始梯度快照（RC滤波用） */
     size_t prev_gradients_size;                /**< 梯度快照容量 */
+
+    /* 训练收敛检测机制 */
+    int patience_counter;                      /**< 早停耐心计数器（连续未改善epoch数） */
+    int convergence_log_interval;              /**< 损失监控日志输出间隔（每N步打印） */
+    float last_best_train_loss;                /**< 上次最佳训练损失（用于平台检测） */
+    float last_best_val_loss;                  /**< 上次最佳验证损失（用于平台检测） */
+    int plateau_counter;                       /**< 损失平台计数器（连续未下降epoch数） */
+    int plateau_threshold;                     /**< 平台阈值（超过此时长触发LR衰减） */
+    float plateau_lr_decay_factor;             /**< 平台时学习率衰减因子（0.5=减半） */
+    int convergence_max_patience;              /**< 早停最大耐心值 */
 };
 
 /* FIX-013: compute_loss_value 直接委托 loss_compute，确保与 LossType 枚举严格一致。
@@ -121,6 +131,91 @@ struct TrainingPipeline {
  * 在值 2-4 上存在致命映射错误。统一后所有损失值与梯度使用同一枚举源。 */
 static float compute_loss_value(const float* output, const float* target, size_t n, int loss_type) {
     return loss_compute(output, target, (int)n, (LossType)loss_type);
+}
+
+/**
+ * @brief 训练收敛检测与自适应学习率调整
+ *
+ * 在每个epoch结束后调用，执行以下功能：
+ * 1. 早停检测：当验证损失连续不改善时，patience_counter递增，
+ *    超过convergence_max_patience时返回1触发早停。
+ * 2. 损失监控日志：每convergence_log_interval个epoch打印当前损失。
+ * 3. 平台自适应学习率衰减：当损失连续plateau_threshold个epoch
+ *    未改善时，学习率乘以plateau_lr_decay_factor（默认减半）。
+ *
+ * @param pipeline 训练管线
+ * @param epoch 当前epoch编号（从1开始）
+ * @param total_epochs 总epoch数
+ * @param current_loss 当前epoch的损失值
+ * @param lr_ptr 学习率指针（将被原地修改）
+ * @param use_early_stopping 是否启用早停（0=不启用, 1=启用）
+ * @param phase_name 阶段名称（用于日志输出）
+ * @return 0=继续训练, 1=触发早停
+ */
+static int pipeline_convergence_check(TrainingPipeline* pipeline,
+                                       int epoch, int total_epochs,
+                                       float current_loss,
+                                       float* lr_ptr,
+                                       int use_early_stopping,
+                                       const char* phase_name) {
+    if (!pipeline || !lr_ptr || !phase_name) return 0;
+
+    /* 更新最佳损失 */
+    float prev_best = pipeline->last_best_train_loss;
+    if (current_loss < pipeline->last_best_train_loss - 1e-7f) {
+        pipeline->last_best_train_loss = current_loss;
+        pipeline->patience_counter = 0;
+        pipeline->plateau_counter = 0;
+    } else {
+        pipeline->patience_counter++;
+        pipeline->plateau_counter++;
+    }
+
+    /* 1. 损失监控日志输出（每N个epoch打印） */
+    if (epoch % pipeline->convergence_log_interval == 0 || epoch == total_epochs || epoch == 1) {
+        const char* trend = (current_loss < prev_best) ? "↓改善" : "→未改善";
+        float mse_sqrt = sqrtf(current_loss > 0 ? current_loss : 0.0f);
+        log_info("[训练收敛] %s | Epoch %d/%d | 损失=%.6f (RMSE=%.4f) %s | "
+                 "最佳=%.6f | LR=%.8f | 耐心=%d/%d",
+                 phase_name, epoch, total_epochs, current_loss, mse_sqrt,
+                 trend, pipeline->last_best_train_loss, *lr_ptr,
+                 pipeline->patience_counter, pipeline->convergence_max_patience);
+
+        /* 在monitor中记录详细损失日志 */
+        if (pipeline->monitor) {
+            training_monitor_log_metric(pipeline->monitor, TM_LOSS,
+                epoch, 0, current_loss);
+            training_monitor_log_metric(pipeline->monitor, TM_LOSS,
+                epoch, 1, pipeline->last_best_train_loss);
+        }
+    }
+
+    /* 2. 早停检测 */
+    if (use_early_stopping &&
+        pipeline->patience_counter >= pipeline->convergence_max_patience) {
+        log_warning("[训练收敛] %s | 触发早停! 连续%d个epoch损失未改善 "
+                    "(当前=%.6f, 最佳=%.6f), 在epoch %d/%d停止",
+                    phase_name, pipeline->patience_counter,
+                    current_loss, pipeline->last_best_train_loss,
+                    epoch, total_epochs);
+        return 1;
+    }
+
+    /* 3. 自适应学习率衰减：损失平台时学习率减半 */
+    if (pipeline->plateau_counter >= pipeline->plateau_threshold) {
+        float old_lr = *lr_ptr;
+        *lr_ptr *= pipeline->plateau_lr_decay_factor;
+        /* 防止学习率衰减到过小值 */
+        if (*lr_ptr < 1e-8f) *lr_ptr = 1e-8f;
+        pipeline->plateau_counter = 0; /* 重置平台计数器 */
+
+        log_warning("[训练收敛] %s | 损失平台检测: %d个epoch无改善, "
+                    "学习率衰减: %.8f → %.8f (衰减因子=%.2f)",
+                    phase_name, pipeline->plateau_threshold,
+                    old_lr, *lr_ptr, pipeline->plateau_lr_decay_factor);
+    }
+
+    return 0;
 }
 
 /** 应用配置的优化器：仅使用优化器自身更新规则，禁止原始SGD叠加 */
@@ -147,6 +242,26 @@ static void pipeline_apply_optimizer(TrainingPipeline* pipeline, LNN* network, f
     }
     pipeline->optimizer_step++;
     (void)lr;
+}
+
+/** P0-BPTT: 统一使用Adam自适应学习率更新cell级参数，消除与主优化器的分裂 */
+static void pipeline_apply_cell_gradients_adam(TrainingPipeline* pipeline) {
+    if (!pipeline || !pipeline->network || !pipeline->network->cfc_network) return;
+    if (!pipeline->optimizer) {
+        cfc_apply_cell_gradients(pipeline->network->cfc_network,
+            pipeline->network->config.learning_rate);
+        return;
+    }
+    OptimizerConfig opt_cfg;
+    if (optimizer_get_config(pipeline->optimizer, &opt_cfg) != 0) {
+        cfc_apply_cell_gradients(pipeline->network->cfc_network,
+            pipeline->network->config.learning_rate);
+        return;
+    }
+    size_t t = pipeline->optimizer_step > 0 ? pipeline->optimizer_step : 1;
+    cfc_apply_cell_gradients_adam(pipeline->network->cfc_network,
+        pipeline->network->config.learning_rate,
+        opt_cfg.beta1, opt_cfg.beta2, opt_cfg.epsilon, t);
 }
 
 /** 梯度稳定性分析与滤波 */
@@ -863,6 +978,19 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
         fprintf(stderr, "[训练管线] 信息: 未加载训练数据，将在首次训练步骤中使用LNN自身状态生成自监督训练数据\n");
     }
 
+    /* 初始化收敛检测机制 */
+    tp->patience_counter = 0;
+    tp->convergence_log_interval = 10;           /**< 每10个epoch打印一次损失日志 */
+    tp->last_best_train_loss = FLT_MAX;
+    tp->last_best_val_loss = FLT_MAX;
+    tp->plateau_counter = 0;
+    tp->plateau_threshold = (tp->config.early_stopping_patience > 0)
+        ? tp->config.early_stopping_patience / 2 : 4;  /**< 默认4个epoch无改善触发LR衰减 */
+    if (tp->plateau_threshold < 2) tp->plateau_threshold = 2;
+    tp->plateau_lr_decay_factor = 0.5f;               /**< 平台时学习率减半 */
+    tp->convergence_max_patience = (tp->config.early_stopping_patience > 0)
+        ? tp->config.early_stopping_patience : 10;     /**< 默认早停耐心为10 */
+
     tp->monitor = training_monitor_create("selflnn_training",
         (int)(tp->config.pretrain_epochs + tp->config.deep_train_epochs +
               tp->config.multimodal_epochs + tp->config.fine_tune_epochs +
@@ -1257,10 +1385,9 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
         if (!is_eval_stage) {
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
-            /* P0-002: 统一应用cell级参数梯度（gate/tau/LN参数），
-             * 使用与主优化器一致的学习率，消除cell级参数裸SGD更新问题。 */
-            cfc_apply_cell_gradients(pipeline->network->cfc_network,
-                pipeline->network->config.learning_rate);
+            /* P0-BPTT: 统一使用Adam更新cell级参数（gate/tau/LN等），
+             * 与主优化器保持一致的更新规则，消除双层参数更新分裂。 */
+            pipeline_apply_cell_gradients_adam(pipeline);
         }
         epoch_loss += batch_loss / (float)actual_batch;
     }
@@ -1440,9 +1567,8 @@ int pipeline_multimodal_train_step(TrainingPipeline* pipeline,
     lnn_backward_accumulate(pipeline->network, target, loss);
     pipeline_apply_optimizer(pipeline, pipeline->network,
         pipeline->network->config.learning_rate);
-    /* P0-002: cell参数批量统一下发 */
-    cfc_apply_cell_gradients(pipeline->network->cfc_network,
-        pipeline->network->config.learning_rate);
+    /* P0-BPTT: cell参数使用Adam统一更新 */
+    pipeline_apply_cell_gradients_adam(pipeline);
 
     safe_free((void**)&combined);
     safe_free((void**)&output);
@@ -1514,8 +1640,7 @@ int pipeline_local_train(TrainingPipeline* pipeline, const char* module_name,
         if (pipeline->network && num_samples > 0) {
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
-            cfc_apply_cell_gradients(pipeline->network->cfc_network,
-                pipeline->network->config.learning_rate);
+            pipeline_apply_cell_gradients_adam(pipeline);
         }
         *final_loss += (num_samples > 0) ? epoch_loss / (float)num_samples : 0.0f;
     }
@@ -1663,6 +1788,26 @@ int pipeline_auto_tune(TrainingPipeline* pipeline,
  * 所有训练阶段使用真实数据，拒绝任何伪随机生成
  * ================================================================ */
 
+/** P0-BPTT: 学习率预热函数
+ * 在训练开始的前total_warmup_steps步内，学习率从base_lr线性增加到target_lr。
+ * 防止初始阶段大梯度破坏Adam动量缓冲区，显著提升收敛稳定性。
+ * @param current_step 当前全局步数（从0开始）
+ * @param total_warmup_steps 预热总步数
+ * @param base_lr 预热起始学习率（通常为目标LR的1/100）
+ * @param target_lr 目标学习率
+ * @return 当前步骤的有效学习率
+ */
+float training_warmup_lr(int current_step, int total_warmup_steps, float base_lr, float target_lr) {
+    if (total_warmup_steps <= 0 || current_step >= total_warmup_steps) {
+        return target_lr;
+    }
+    if (current_step <= 0) {
+        return base_lr;
+    }
+    float ratio = (float)current_step / (float)total_warmup_steps;
+    return base_lr + (target_lr - base_lr) * ratio;
+}
+
 int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* final_loss) {
     if (!pipeline || !final_loss || !pipeline->network) return -1;
     if (!pipeline->data_buffer) return SELFLNN_ERROR_NO_DATA;
@@ -1689,6 +1834,16 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
 
     float best_loss = FLT_MAX;
     size_t batch_size = pipeline->config.batch_size > 0 ? pipeline->config.batch_size : 32;
+
+    /* P0-BPTT: 学习率预热——前10%的全局步数内LR从1/100线性增加到目标值，
+     * 防止Adam动量缓冲区在初期被大梯度破坏，显著提升收敛稳定性。 */
+    size_t total_batches_per_epoch = (total_samples + batch_size - 1) / batch_size;
+    size_t total_steps = total_batches_per_epoch * (size_t)epochs;
+    int total_warmup_steps = (int)(total_steps / 10);
+    if (total_warmup_steps < 10) total_warmup_steps = 10;
+    float warmup_base_lr = pretrain_lr * 0.01f;
+    float saved_pretrain_lr = pretrain_lr;
+    int global_step = 0;
 
     /* 初始化打乱索引 */
     size_t* shuffle_idx = (size_t*)safe_malloc(total_samples * sizeof(size_t));
@@ -1758,11 +1913,20 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                     safe_free((void**)&noisy_input);
                 }
             }
+            /* P0-BPTT: 学习率预热——前10%步数内线性增加LR */
+            if (global_step < total_warmup_steps) {
+                float warmup_lr = training_warmup_lr(global_step, total_warmup_steps,
+                    warmup_base_lr, saved_pretrain_lr);
+                pipeline->network->config.learning_rate = warmup_lr;
+                optimizer_set_learning_rate(pipeline->optimizer, warmup_lr);
+            } else {
+                pipeline->network->config.learning_rate = saved_pretrain_lr;
+            }
+            global_step++;
             /* FIX-010: 优化器在每个batch结束后统一调用一次 */
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
-            cfc_apply_cell_gradients(pipeline->network->cfc_network,
-                pipeline->network->config.learning_rate);
+            pipeline_apply_cell_gradients_adam(pipeline);
         }
         /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
         pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
@@ -1771,10 +1935,23 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
         pipeline->state.current_epoch = epoch + 1;
         pipeline->state.current_loss = epoch_loss;
         pipeline->state.samples_processed += samples_processed;
+
+        /* 训练收敛检测：早停 + 损失日志 + 自适应LR衰减 */
+        if (pipeline_convergence_check(pipeline, epoch + 1, epochs,
+                epoch_loss, &pipeline->network->config.learning_rate,
+                pipeline->config.use_early_stopping,
+                "预训练阶段") != 0) {
+            /* 早停触发，跳出epoch循环 */
+            break;
+        }
     }
     safe_free((void**)&shuffle_idx);
     if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
     *final_loss = best_loss;
+    /* 重置收敛状态以备下一阶段 */
+    pipeline->patience_counter = 0;
+    pipeline->plateau_counter = 0;
+    pipeline->last_best_train_loss = FLT_MAX;
     pipeline->state.stage = TRAIN_STAGE_DEEP_TRAIN;
     return 0;
 }
@@ -1852,8 +2029,7 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
             /* FIX-010: 优化器在每个batch结束后统一调用一次 */
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
-            cfc_apply_cell_gradients(pipeline->network->cfc_network,
-                pipeline->network->config.learning_rate);
+            pipeline_apply_cell_gradients_adam(pipeline);
         }
         /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
         pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
@@ -1863,6 +2039,14 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
         pipeline->state.current_loss = loss;
         pipeline->state.samples_processed += samples_processed;
 
+        /* 训练收敛检测：早停 + 损失日志 + 自适应LR衰减 */
+        if (pipeline_convergence_check(pipeline, epoch + 1, epochs,
+                loss, &pipeline->network->config.learning_rate,
+                pipeline->config.use_early_stopping,
+                "深度训练阶段") != 0) {
+            break;
+        }
+
         if (pipeline->monitor) {
             training_monitor_log_metric(pipeline->monitor, TM_LOSS,
                 pipeline->state.current_epoch, 0, loss);
@@ -1871,6 +2055,10 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
     safe_free((void**)&shuffle_idx);
     if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
     *final_loss = best_loss;
+    /* 重置收敛状态以备下一阶段 */
+    pipeline->patience_counter = 0;
+    pipeline->plateau_counter = 0;
+    pipeline->last_best_train_loss = FLT_MAX;
     return 0;
 }
 
@@ -1967,8 +2155,7 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
         /* FIX-010: 优化器在每个epoch结束后统一调用一次 */
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
-        cfc_apply_cell_gradients(pipeline->network->cfc_network,
-            pipeline->network->config.learning_rate);
+        pipeline_apply_cell_gradients_adam(pipeline);
 
         if (processed_count > 0) epoch_loss /= (float)processed_count;
 
@@ -1978,6 +2165,14 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
         pipeline->state.current_epoch = epoch + 1;
         pipeline->state.current_loss = epoch_loss;
         pipeline->state.samples_processed += processed_count;
+
+        /* 训练收敛检测：早停 + 损失日志 + 自适应LR衰减 */
+        if (pipeline_convergence_check(pipeline, epoch + 1, epochs,
+                epoch_loss, &pipeline->network->config.learning_rate,
+                pipeline->config.use_early_stopping,
+                "多模态训练阶段") != 0) {
+            break;
+        }
 
         if (pipeline->monitor) {
             training_monitor_log_metric(pipeline->monitor, TM_LOSS,
@@ -1992,6 +2187,10 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
     pipeline->network->config.learning_rate = saved_lr;
     if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
     *final_loss = best_loss;
+    /* 重置收敛状态以备下一阶段 */
+    pipeline->patience_counter = 0;
+    pipeline->plateau_counter = 0;
+    pipeline->last_best_train_loss = FLT_MAX;
     pipeline->state.stage = TRAIN_STAGE_FINE_TUNE;
     return 0;
 }
@@ -2073,9 +2272,8 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
         /* FIX-010: 优化器在每个epoch结束后统一调用一次 */
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
-        /* P0-002: cell参数批量统一下发 */
-        cfc_apply_cell_gradients(pipeline->network->cfc_network,
-            pipeline->network->config.learning_rate);
+        /* P0-BPTT: cell参数使用Adam统一更新 */
+        pipeline_apply_cell_gradients_adam(pipeline);
         /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
         pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         l /= (float)total_samples;
@@ -2085,6 +2283,14 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
         pipeline->state.current_epoch = epoch + 1;
         pipeline->state.current_loss = l;
 
+        /* 训练收敛检测：早停 + 损失日志 + 自适应LR衰减 */
+        if (pipeline_convergence_check(pipeline, epoch + 1, epochs,
+                l, &pipeline->network->config.learning_rate,
+                pipeline->config.use_early_stopping,
+                "微调训练阶段") != 0) {
+            break;
+        }
+
         if (pipeline->monitor) {
             training_monitor_log_metric(pipeline->monitor, TM_LOSS,
                 pipeline->state.current_epoch, 0, l);
@@ -2093,6 +2299,10 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
     safe_free((void**)&shuffle_idx);
     if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
     *final_loss = best_loss;
+    /* 重置收敛状态以备下一阶段 */
+    pipeline->patience_counter = 0;
+    pipeline->plateau_counter = 0;
+    pipeline->last_best_train_loss = FLT_MAX;
     pipeline->state.stage = TRAIN_STAGE_EVALUATION;
     return 0;
 }
@@ -2177,9 +2387,8 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
         /* FIX-010: 优化器在每个epoch结束后统一调用一次 */
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
-        /* P0-002: cell参数批量统一下发 */
-        cfc_apply_cell_gradients(pipeline->network->cfc_network,
-            pipeline->network->config.learning_rate);
+        /* P0-BPTT: cell参数使用Adam统一更新 */
+        pipeline_apply_cell_gradients_adam(pipeline);
         /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
         pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         l /= (float)total_samples;
@@ -2188,6 +2397,14 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
         else no_improve++;
         pipeline->state.current_epoch = epoch + 1;
         pipeline->state.current_loss = l;
+
+        /* 训练收敛检测：早停 + 损失日志 + 自适应LR衰减 */
+        if (pipeline_convergence_check(pipeline, epoch + 1, epochs,
+                l, &pipeline->network->config.learning_rate,
+                pipeline->config.use_early_stopping,
+                "本地适配阶段") != 0) {
+            break;
+        }
 
         if (pipeline->monitor) {
             training_monitor_log_metric(pipeline->monitor, TM_LOSS,
@@ -2198,6 +2415,10 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
     if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
     *final_loss = best_loss;
     pipeline->network->config.learning_rate = saved_lr;
+    /* 重置收敛状态 */
+    pipeline->patience_counter = 0;
+    pipeline->plateau_counter = 0;
+    pipeline->last_best_train_loss = FLT_MAX;
     pipeline->state.stage = TRAIN_STAGE_EVALUATION;
     return 0;
 }

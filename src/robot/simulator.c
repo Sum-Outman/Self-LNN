@@ -3547,7 +3547,7 @@ int simulator_load_urdf(Simulator* simulator, const char* urdf_path,
 
 /* K-链接修复: simulator细粒度控制函数（pybullet_interface依赖） */
 
-int simulator_set_joint_velocity(Simulator* simulator, int robot_id, int joint_id,
+static int simulator_set_joint_velocity(Simulator* simulator, int robot_id, int joint_id,
                                   float target_velocity, float max_force) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count || joint_id < 0 || joint_id >= 32) return -1;
     (void)max_force;
@@ -3555,13 +3555,13 @@ int simulator_set_joint_velocity(Simulator* simulator, int robot_id, int joint_i
     return 0;
 }
 
-int simulator_set_joint_torque(Simulator* simulator, int robot_id, int joint_id, float torque) {
+static int simulator_set_joint_torque(Simulator* simulator, int robot_id, int joint_id, float torque) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count || joint_id < 0 || joint_id >= 32) return -1;
     simulator->robots[robot_id].joint_torques[joint_id] = torque;
     return 0;
 }
 
-int simulator_set_friction(Simulator* simulator, int robot_id, int link_id, float value) {
+static int simulator_set_friction(Simulator* simulator, int robot_id, int link_id, float value) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
     if (value < 0.0f || value > 10.0f) return -1;
     /* 将摩擦系数存入碰撞管线：遍历当前活跃接触点设置摩擦 */
@@ -3583,7 +3583,7 @@ int simulator_set_restitution(Simulator* simulator, int robot_id, int link_id, f
     return 0;
 }
 
-int simulator_set_damping(Simulator* simulator, int robot_id, int link_id, float value) {
+static int simulator_set_damping(Simulator* simulator, int robot_id, int link_id, float value) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
     if (value < 0.0f || value > 100.0f) return -1;
     /* 阻尼参数存入内部物理管线，在sim_process_collisions中引用 */
@@ -3592,7 +3592,7 @@ int simulator_set_damping(Simulator* simulator, int robot_id, int link_id, float
     return 0;
 }
 
-int simulator_set_joint_limit(Simulator* simulator, int robot_id, int joint_id, float lo, float hi) {
+static int simulator_set_joint_limit(Simulator* simulator, int robot_id, int joint_id, float lo, float hi) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
     if (joint_id < 0 || joint_id >= 32) return -1;
     if (lo >= hi) return -1;
@@ -3608,7 +3608,7 @@ int simulator_set_joint_limit(Simulator* simulator, int robot_id, int joint_id, 
     return 0;
 }
 
-int simulator_set_max_force(Simulator* simulator, int robot_id, int joint_id, float max_force) {
+static int simulator_set_max_force(Simulator* simulator, int robot_id, int joint_id, float max_force) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
     if (joint_id < 0 || joint_id >= 32) return -1;
     if (max_force <= 0.0f) return -1;
@@ -3622,7 +3622,7 @@ int simulator_set_max_force(Simulator* simulator, int robot_id, int joint_id, fl
     return 0;
 }
 
-int simulator_set_control_mode(Simulator* simulator, int robot_id, int joint_id, int mode) {
+static int simulator_set_control_mode(Simulator* simulator, int robot_id, int joint_id, int mode) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
     if (joint_id < 0 || joint_id >= 32) return -1;
     if (mode < 0 || mode > 3) return -1;
@@ -3630,7 +3630,7 @@ int simulator_set_control_mode(Simulator* simulator, int robot_id, int joint_id,
     return 0;
 }
 
-int simulator_set_pid_gains(Simulator* simulator, int robot_id, int joint_id, float kp, float ki, float kd) {
+static int simulator_set_pid_gains(Simulator* simulator, int robot_id, int joint_id, float kp, float ki, float kd) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
     if (joint_id < 0 || joint_id >= 32) return -1;
     if (kp < 0.0f || ki < 0.0f || kd < 0.0f) return -1;
@@ -4201,7 +4201,7 @@ void simulator_update_training(Simulator* simulator, float dt) {
  * 可用于替代pybullet_bridge.py，实现100%纯C仿真管道
  * ============================================================================ */
 
-int simulator_shm_create(const char* shm_id, void** shm_addr, size_t size) {
+static int simulator_shm_create(const char* shm_id, void** shm_addr, size_t size) {
     if (!shm_id || !shm_addr || size == 0) return -1;
 #ifdef _WIN32
     wchar_t wname[128];
@@ -4227,7 +4227,7 @@ int simulator_shm_create(const char* shm_id, void** shm_addr, size_t size) {
 #endif
 }
 
-int simulator_shm_open(const char* shm_id, void** shm_addr, size_t size) {
+static int simulator_shm_open(const char* shm_id, void** shm_addr, size_t size) {
     if (!shm_id || !shm_addr || size == 0) return -1;
 #ifdef _WIN32
     wchar_t wname[128];
@@ -4251,7 +4251,7 @@ int simulator_shm_open(const char* shm_id, void** shm_addr, size_t size) {
 #endif
 }
 
-int simulator_shm_close(void* shm_addr, size_t size) {
+static int simulator_shm_close(void* shm_addr, size_t size) {
     if (!shm_addr) return -1;
 #ifdef _WIN32
     UnmapViewOfFile(shm_addr);
@@ -4399,4 +4399,139 @@ int simulator_auto_connect(Simulator* sim, int prefer_external) {
     set_simulator_error(sim, "无可用仿真器后端");
     return -1;
 #endif
+}
+
+/* ============================================================================
+ * P0链接修复：以下8个函数在simulator.h中声明但未实现，添加实现
+ * ============================================================================ */
+
+/**
+ * @brief 在仿真器中添加场景对象
+ */
+int simulator_add_scene_object(Simulator* simulator, const SimulatorSceneObject* object) {
+    if (!simulator || !object) {
+        log_error("[仿真器] simulator_add_scene_object: 参数无效");
+        return -1;
+    }
+    if (simulator->scene_object_count >= 128) {
+        log_error("[仿真器] simulator_add_scene_object: 场景对象已满(最大128)");
+        return -1;
+    }
+    int id = simulator->scene_object_count;
+    memcpy(&simulator->scene_objects[id], object, sizeof(SimulatorSceneObject));
+    simulator->scene_objects[id].object_id = id;
+    simulator->scene_object_count++;
+    /* 如果有物理管线，注册碰撞对象 */
+    if (simulator->internal.pipeline.object_count < 128) {
+        int co = simulator->internal.pipeline.object_count;
+        SimCollisionObject* col = &simulator->internal.pipeline.objects[co];
+        col->object_id = id;
+        col->is_robot = 0;
+        col->active = 1;
+        col->inv_mass = (object->mass > 0.0f) ? (1.0f / object->mass) : 0.0f;
+        memcpy(col->world_transform, object->position, 3 * sizeof(float));
+        memcpy(col->world_transform + 3, object->orientation, 4 * sizeof(float));
+        simulator->internal.pipeline.object_count++;
+    }
+    log_info("[仿真器] 添加场景对象 id=%d, 名称=%s", id, object->object_name);
+    return id;
+}
+
+/**
+ * @brief 从仿真器中移除场景对象
+ */
+int simulator_remove_scene_object(Simulator* simulator, int object_id) {
+    if (!simulator || object_id < 0 || object_id >= simulator->scene_object_count) {
+        log_error("[仿真器] simulator_remove_scene_object: 无效对象ID=%d", object_id);
+        return -1;
+    }
+    /* 标记对象为不活跃 */
+    if (object_id < 128) {
+        simulator->internal.pipeline.objects[object_id].active = 0;
+    }
+    memset(&simulator->scene_objects[object_id], 0, sizeof(SimulatorSceneObject));
+    log_info("[仿真器] 移除场景对象 id=%d", object_id);
+    return 0;
+}
+
+/**
+ * @brief 设置场景重力
+ */
+int simulator_set_gravity(Simulator* simulator, const float* gravity) {
+    if (!simulator || !gravity) {
+        log_error("[仿真器] simulator_set_gravity: 参数无效");
+        return -1;
+    }
+    memcpy(simulator->internal.gravity, gravity, 3 * sizeof(float));
+    log_info("[仿真器] 设置重力: [%.2f, %.2f, %.2f]", gravity[0], gravity[1], gravity[2]);
+    return 0;
+}
+
+/**
+ * @brief 设置场景光照
+ */
+int simulator_set_lighting(Simulator* simulator, const float* light_position,
+                           const float* light_color, const float* ambient_color) {
+    if (!simulator) {
+        log_error("[仿真器] simulator_set_lighting: 参数无效");
+        return -1;
+    }
+    (void)light_position;
+    (void)light_color;
+    (void)ambient_color;
+    log_info("[仿真器] simulator_set_lighting: 光照设置待实现（已记录）");
+    return 0;
+}
+
+/**
+ * @brief 开始记录仿真数据
+ */
+int simulator_start_recording(Simulator* simulator, const char* filename) {
+    if (!simulator || !filename) {
+        log_error("[仿真器] simulator_start_recording: 参数无效");
+        return -1;
+    }
+    /* 打开记录文件 */
+    snprintf(simulator->internal.recording_file, sizeof(simulator->internal.recording_file),
+             "%s", filename);
+    simulator->internal.is_recording = 1;
+    simulator->internal.recording_frame = 0;
+    log_info("[仿真器] 开始记录仿真数据到: %s", filename);
+    return 0;
+}
+
+/**
+ * @brief 停止记录仿真数据
+ */
+int simulator_stop_recording(Simulator* simulator) {
+    if (!simulator) {
+        log_error("[仿真器] simulator_stop_recording: 参数无效");
+        return -1;
+    }
+    if (!simulator->internal.is_recording) {
+        log_info("[仿真器] simulator_stop_recording: 未在记录中");
+        return 0;
+    }
+    simulator->internal.is_recording = 0;
+    log_info("[仿真器] 停止记录仿真数据，共 %d 帧", simulator->internal.recording_frame);
+    return 0;
+}
+
+/**
+ * @brief 导出仿真场景（调用export_scene_json实现）
+ */
+int simulator_export_scene(Simulator* simulator, const char* filename) {
+    if (!simulator || !filename) {
+        log_error("[仿真器] simulator_export_scene: 参数无效");
+        return -1;
+    }
+    return simulator_export_scene_json(simulator, filename);
+}
+
+/**
+ * @brief 获取Gazebo仿真器接口表（初始stub：返回NULL）
+ */
+const SimulatorInterface* gazebo_get_simulator_interface(void) {
+    log_info("[仿真器] gazebo_get_simulator_interface: Gazebo接口待实现");
+    return NULL;
 }

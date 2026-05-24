@@ -34,6 +34,7 @@
 #include "selflnn/knowledge/auto_learning.h"
 #include "selflnn/knowledge/knowledge_inference.h"
 #include "selflnn/reasoning/reasoning.h"
+#include "selflnn/reasoning/planning.h"
 #include "selflnn/multimodal/unified_signal_processor.h"
 #include "selflnn/multimodal/data_collection_pipeline.h"
 #include "selflnn/core/lnn.h"
@@ -179,8 +180,11 @@ static LNN* g_global_singleton_lnn = NULL;
 static int g_single_lnn_enforced = 0;
 
 void* selflnn_get_lnn(void) {
-    if (g_global_singleton_lnn) return g_global_singleton_lnn;
-    return g_system_state.lnn_instance;
+    /* Z9-002: 添加读取锁 —— 防止与selflnn_enforce_single_lnn写入竞态 */
+    SYSTEM_LOCK();
+    void* result = g_global_singleton_lnn ? (void*)g_global_singleton_lnn : g_system_state.lnn_instance;
+    SYSTEM_UNLOCK();
+    return result;
 }
 
 void selflnn_enforce_single_lnn(void) {
@@ -1435,6 +1439,24 @@ static int initialize_subsystems(const SystemConfig* config)
         goto cleanup;
     }
     
+    /* Z5-003: planning_system创建 —— 之前结构体字段+模块注册+init_count均引用但从未创建
+     * planning_system是AGI规划能力核心，负责分层规划/MCTS/CMA-ES等算法 */
+    {
+        PlanningConfig plan_config;
+        memset(&plan_config, 0, sizeof(PlanningConfig));
+        plan_config.algorithm = PLANNING_MCTS;
+        plan_config.max_plan_length = 50;
+        plan_config.risk_tolerance = 0.3f;
+        plan_config.goal_tolerance = 0.1f;
+        plan_config.enable_adaptation = 1;
+        g_system_state.planning_system = planning_system_create(&plan_config);
+        if (g_system_state.planning_system) {
+            log_info("规划系统初始化成功（MCTS）");
+        } else {
+            log_warning("规划系统创建失败，跳过");
+        }
+    }
+    
     /* S-008修复: 连接推理引擎到知识库（实现知识驱动推理） */
     if (g_system_state.knowledge_base && g_system_state.reasoning_engine) {
         reasoning_engine_set_knowledge_base(
@@ -1458,12 +1480,54 @@ static int initialize_subsystems(const SystemConfig* config)
     }
     
     // 4. 初始化统一信号处理器（真实实现）
+    /* Z5-001: multimodal_channels配置传播 —— 覆盖默认多模态通道数 */
     UnifiedSignalProcessorConfig processor_config = unified_signal_processor_get_default_config();
+    if (config->multimodal_channels > 0) {
+        processor_config.unified_dimension = (size_t)config->multimodal_channels;
+        log_info("统一信号处理器使用配置的多模态通道数: %d", config->multimodal_channels);
+    }
     g_system_state.unified_signal_processor = unified_signal_processor_create(&processor_config);
     if (!g_system_state.unified_signal_processor) {
         log_error("统一信号处理器创建失败");
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
+    }
+    
+    /* Z6-001: GPU后端检测移到LNN之前 —— 确保LNN创建时GPU上下文已可用 */
+    {
+        int disable_gpu = 0;
+        { char* env = getenv("SELFLNN_DISABLE_GPU"); if (env && env[0] == '1') disable_gpu = 1; }
+        if (disable_gpu) {
+            log_info("GPU加速已禁用（--no-gpu），跳过GPU后端检测");
+            g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+        } else {
+            GpuBackend target_backend = config->gpu_backend;
+            if (target_backend == GPU_BACKEND_CPU || target_backend == 0) {
+                unsigned int available = gpu_get_available_backends(NULL, 0);
+                if (available & GPU_BACKEND_FLAG_CUDA) { target_backend = GPU_BACKEND_CUDA; }
+                else if (available & GPU_BACKEND_FLAG_ROCM) { target_backend = GPU_BACKEND_ROCM; }
+                else if (available & GPU_BACKEND_FLAG_OPENCL) { target_backend = GPU_BACKEND_OPENCL; }
+                else if (available & GPU_BACKEND_FLAG_VULKAN) { target_backend = GPU_BACKEND_VULKAN; }
+                else if (available & GPU_BACKEND_FLAG_METAL) { target_backend = GPU_BACKEND_METAL; }
+                else if (available & GPU_BACKEND_FLAG_ASCEND) { target_backend = GPU_BACKEND_ASCEND; }
+                else if (available & GPU_BACKEND_FLAG_CAMBRICON) { target_backend = GPU_BACKEND_CAMBRICON; }
+                else if (available & GPU_BACKEND_FLAG_TPU) { target_backend = GPU_BACKEND_TPU; }
+                else { target_backend = GPU_BACKEND_CPU; }
+                if (target_backend != GPU_BACKEND_CPU) {
+                    g_system_state.gpu_context = gpu_context_create(target_backend, 0);
+                    if (g_system_state.gpu_context) {
+                        g_system_state.config.gpu_backend = target_backend;
+                        log_info("GPU上下文已提前初始化，后端: %s", gpu_backend_name(target_backend));
+                    } else { g_system_state.config.gpu_backend = GPU_BACKEND_CPU; }
+                }
+            } else {
+                g_system_state.gpu_context = gpu_context_create(target_backend, 0);
+                if (g_system_state.gpu_context) {
+                    g_system_state.config.gpu_backend = target_backend;
+                    log_info("GPU上下文已提前初始化，后端: %s", gpu_backend_name(target_backend));
+                }
+            }
+        }
     }
     
     // 5. 初始化液态神经网络（LNN核心模型）
@@ -1483,6 +1547,23 @@ static int initialize_subsystems(const SystemConfig* config)
         if (g_system_state.lnn_instance) {
             log_info("LNN液态神经网络初始化成功，输入维度=%zu，隐藏维度=%zu，输出维度=%zu",
                      lnn_config.input_size, lnn_config.hidden_size, lnn_config.output_size);
+            /* Z4-001: GPU上下文注册到系统状态 —— LNN通过g_system_state访问GPU */
+            if (g_system_state.gpu_context) {
+                log_info("GPU上下文已就绪并可通过系统状态访问，后端: %s",
+                         gpu_backend_name(g_system_state.config.gpu_backend));
+            } else {
+                log_info("无GPU上下文，LNN将使用CPU计算");
+            }
+            /* Z5-002: model_path配置生效 —— 使用模型路径自动加载检查点 */
+            if (config->model_path && config->model_path[0] != '\0') {
+                LNN* lnn = (LNN*)g_system_state.lnn_instance;
+                if (lnn_load_from_file(lnn, config->model_path) == 0) {
+                    log_info("从配置模型路径加载检查点成功: %s", config->model_path);
+                } else {
+                    log_warning("从配置模型路径加载检查点失败: %s（将使用随机初始化权重）",
+                                config->model_path);
+                }
+            }
         } else {
             log_warning("LNN液态神经网络创建失败，跳过");
         }
@@ -1613,65 +1694,13 @@ static int initialize_subsystems(const SystemConfig* config)
         log_info("自动硬件检测已禁用（使用手动扫描：POST /api/hardware/scan）");
     }
     
-    // 12. GPU后端检测与初始化（--no-gpu时跳过）
+    // 12. GPU后端已在LNN之前初始化（Z6-001修复），此处跳过重复初始化
     {
-        int disable_gpu = 0;
-        { char* env = getenv("SELFLNN_DISABLE_GPU"); if (env && env[0] == '1') disable_gpu = 1; }
-        if (disable_gpu) {
-            log_info("GPU加速已禁用（--no-gpu），跳过GPU后端检测");
-            g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+        if (!g_system_state.gpu_context) {
+            log_warning("GPU上下文在LNN之前未成功初始化");
         } else {
-            GpuBackend target_backend = config->gpu_backend;
-        if (target_backend == GPU_BACKEND_CPU || target_backend == 0) {
-            // 未指定GPU后端时自动检测最佳可用后端
-            unsigned int available = gpu_get_available_backends(NULL, 0);
-            if (available & GPU_BACKEND_FLAG_CUDA) {
-                target_backend = GPU_BACKEND_CUDA;
-                log_info("自动检测到CUDA GPU可用");
-            } else if (available & GPU_BACKEND_FLAG_ROCM) {
-                target_backend = GPU_BACKEND_ROCM;
-                log_info("自动检测到ROCm GPU可用");
-            } else if (available & GPU_BACKEND_FLAG_OPENCL) {
-                target_backend = GPU_BACKEND_OPENCL;
-                log_info("自动检测到OpenCL GPU可用");
-            } else if (available & GPU_BACKEND_FLAG_VULKAN) {
-                target_backend = GPU_BACKEND_VULKAN;
-                log_info("自动检测到Vulkan GPU可用");
-            } else if (available & GPU_BACKEND_FLAG_METAL) {
-                target_backend = GPU_BACKEND_METAL;
-                log_info("自动检测到Metal GPU可用");
-            } else if (available & GPU_BACKEND_FLAG_ASCEND) {
-                target_backend = GPU_BACKEND_ASCEND;
-                log_info("自动检测到昇腾NPU可用");
-            } else if (available & GPU_BACKEND_FLAG_CAMBRICON) {
-                target_backend = GPU_BACKEND_CAMBRICON;
-                log_info("自动检测到寒武纪MLU可用");
-            } else if (available & GPU_BACKEND_FLAG_TPU) {
-                target_backend = GPU_BACKEND_TPU;
-                log_info("自动检测到TPU可用");
-            } else {
-                target_backend = GPU_BACKEND_CPU;
-                log_info("未检测到GPU后端，使用CPU计算");
-            }
-            if (target_backend != GPU_BACKEND_CPU) {
-                g_system_state.gpu_context = gpu_context_create(target_backend, 0);
-                if (g_system_state.gpu_context) {
-                    log_info("GPU上下文初始化成功，后端: %s", gpu_backend_name(target_backend));
-                } else {
-                    log_error("检测到GPU后端(%s)但上下文创建失败，无法使用GPU加速",
-                              gpu_backend_name(target_backend));
-                    g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
-                }
-            }
-        } else {
-            g_system_state.gpu_context = gpu_context_create(target_backend, 0);
-            if (g_system_state.gpu_context) {
-                log_info("GPU上下文初始化成功，后端: %s", gpu_backend_name(target_backend));
-            } else {
-                log_warning("GPU上下文创建失败，跳过GPU加速");
-            }
+            log_debug("GPU上下文已就绪（在LNN创建前初始化）");
         }
-        }  /* end of if(!disable_gpu) */
     }
     
     // 13. 初始化对话系统
@@ -1901,6 +1930,12 @@ static void shutdown_subsystems(void)
         g_system_state.reasoning_engine = NULL;
     }
     
+    /* Z5-003: 销毁规划系统（与创建对应） */
+    if (g_system_state.planning_system) {
+        planning_system_free((PlanningSystem*)g_system_state.planning_system);
+        g_system_state.planning_system = NULL;
+    }
+    
     // 4. 销毁统一信号处理器
     if (g_system_state.unified_signal_processor) {
         unified_signal_processor_free((UnifiedSignalProcessor*)g_system_state.unified_signal_processor);
@@ -2001,6 +2036,12 @@ static void shutdown_subsystems(void)
     if (g_system_state.data_pipeline) {
         dcpipeline_free((DataCollectionPipeline*)g_system_state.data_pipeline);
         g_system_state.data_pipeline = NULL;
+    }
+
+    /* Z3-002: 销毁在线学习器（之前被遗漏，造成内存泄漏） */
+    if (g_system_state.online_learner) {
+        online_learner_free((OnlineLearner*)g_system_state.online_learner);
+        g_system_state.online_learner = NULL;
     }
 
     log_info("所有子系统已关闭");
@@ -3583,6 +3624,15 @@ SELFLNN_API void selflnn_module_init(void)
     g_system_state.config.power_mode = POWER_MODE_BALANCED;
     g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
     g_system_state.config.model_path = NULL;
+    /* Z5-004: power_mode传播 —— 实际影响运行时，之前仅记录日志 */
+    if (config->power_mode == POWER_MODE_LOW_POWER) {
+        g_system_state.config.power_mode = POWER_MODE_LOW_POWER;
+    } else if (config->power_mode == POWER_MODE_HIGH_PERFORMANCE) {
+        g_system_state.config.power_mode = POWER_MODE_HIGH_PERFORMANCE;
+    } else {
+        g_system_state.config.power_mode = POWER_MODE_BALANCED;
+    }
+    log_info("功率模式已配置: %d", g_system_state.config.power_mode);
     g_system_state.start_time = get_current_time();
     g_system_state.last_error = SELFLNN_SUCCESS;
     log_info("SELF-LNN模块层初始化完成");

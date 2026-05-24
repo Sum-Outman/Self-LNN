@@ -1931,7 +1931,9 @@ static float get_system_cpu_usage(void) {
     FILETIME idle_filetime, kernel_filetime, user_filetime;
     
     if (!GetSystemTimes(&idle_filetime, &kernel_filetime, &user_filetime)) {
-        return 0.3f; /* 失败时返回默认值 */
+        log_warning("[ZSFX-023] CPU使用率检测失败：GetSystemTimes()调用失败，返回默认值0.3f。"
+                    "可能原因：系统权限不足或Win32 API异常。");
+        return 0.3f;
     }
     
     idle_time.LowPart = idle_filetime.dwLowDateTime;
@@ -1952,7 +1954,9 @@ static float get_system_cpu_usage(void) {
         last_idle_time = idle_time;
         last_kernel_time = kernel_time;
         last_user_time = user_time;
-        return 0.3f; /* 返回合理默认值 */
+        log_warning("[ZSFX-023] CPU使用率首次采样：total_time=0（需两次采样的差值），"
+                    "返回默认值0.3f，下次调用将返回真实值。");
+        return 0.3f;
     }
     
     /* 计算空闲时间差 */
@@ -1972,7 +1976,9 @@ static float get_system_cpu_usage(void) {
     /* Linux实现：从/proc/stat读取 */
     FILE* stat_file = fopen("/proc/stat", "r");
     if (!stat_file) {
-        return 0.3f; /* 失败时返回默认值 */
+        log_warning("[ZSFX-023] CPU使用率检测失败：无法打开/proc/stat文件，"
+                    "返回默认值0.3f。可能原因：非Linux系统或文件系统权限不足。");
+        return 0.3f;
     }
     
     static unsigned long long last_total = 0, last_idle = 0;
@@ -1981,6 +1987,8 @@ static float get_system_cpu_usage(void) {
     if (fscanf(stat_file, "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
                &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal, &guest, &guest_nice) != 10) {
         fclose(stat_file);
+        log_warning("[ZSFX-023] CPU使用率解析失败：/proc/stat格式异常，无法解析10个CPU字段，"
+                    "返回默认值0.3f。");
         return 0.3f;
     }
     
@@ -1993,6 +2001,8 @@ static float get_system_cpu_usage(void) {
         /* 第一次调用 */
         last_total = total;
         last_idle = total_idle;
+        log_warning("[ZSFX-023] CPU使用率Linux首次采样：last_total=0（需两次采样的差值），"
+                    "返回默认值0.3f，下次调用将返回真实值。");
         return 0.3f;
     }
     
@@ -2000,6 +2010,8 @@ static float get_system_cpu_usage(void) {
     unsigned long long idle_delta = total_idle - last_idle;
     
     if (total_delta == 0) {
+        log_warning("[ZSFX-023] CPU使用率检测异常：total_delta=0（两次采样间系统时间无变化），"
+                    "返回默认值0.3f。可能原因：系统时钟异常或非正常CPU调度。");
         return 0.3f;
     }
     
@@ -2022,7 +2034,9 @@ static float get_system_memory_usage(void) {
     memory_status.dwLength = sizeof(memory_status);
     
     if (!GlobalMemoryStatusEx(&memory_status)) {
-        return 0.5f; /* 失败时返回默认值 */
+        log_warning("[ZSFX-023] 内存使用率检测失败：GlobalMemoryStatusEx()调用失败，"
+                    "返回默认值0.5f。可能原因：系统权限不足或Win32 API异常。");
+        return 0.5f;
     }
     
     /* 计算内存使用率：已使用内存 / 总内存 */
@@ -2033,6 +2047,8 @@ static float get_system_memory_usage(void) {
     /* Linux实现：从/proc/meminfo读取 */
     FILE* meminfo_file = fopen("/proc/meminfo", "r");
     if (!meminfo_file) {
+        log_warning("[ZSFX-023] 内存使用率检测失败：无法打开/proc/meminfo文件，"
+                    "返回默认值0.5f。可能原因：非Linux系统或文件权限不足。");
         return 0.5f;
     }
     
@@ -2054,6 +2070,8 @@ static float get_system_memory_usage(void) {
     fclose(meminfo_file);
     
     if (mem_total == 0) {
+        log_warning("[ZSFX-023] 内存使用率解析失败：/proc/meminfo中MemTotal=0，"
+                    "返回默认值0.5f。可能原因：/proc/meminfo文件格式异常或损坏。");
         return 0.5f;
     }
     
@@ -2189,11 +2207,15 @@ static float get_system_disk_usage(void) {
     if (!GetDiskFreeSpaceExA("C:\\", &free_bytes_available, &total_bytes, &total_free_bytes)) {
         /* 如果C盘失败，尝试当前工作目录 */
         if (!GetDiskFreeSpaceExA(".", &free_bytes_available, &total_bytes, &total_free_bytes)) {
-            return 0.5f; /* 失败时返回默认值 */
+            log_warning("[ZSFX-023] 磁盘使用率检测失败：GetDiskFreeSpaceExA(C:\\)和当前目录均失败，"
+                        "返回默认值0.5f。可能原因：磁盘不可访问或Win32 API异常。");
+            return 0.5f;
         }
     }
     
     if (total_bytes.QuadPart == 0) {
+        log_warning("[ZSFX-023] 磁盘使用率检测异常：Windows磁盘总容量为0，"
+                    "返回默认值0.5f。可能原因：磁盘设备异常或被卸载。");
         return 0.5f;
     }
     
@@ -2207,13 +2229,17 @@ static float get_system_disk_usage(void) {
     struct statvfs vfs;
     
     if (statvfs("/", &vfs) != 0) {
-        return 0.5f; /* 失败时返回默认值 */
+        log_warning("[ZSFX-023] 磁盘使用率检测失败：statvfs(/)调用失败，"
+                    "返回默认值0.5f。可能原因：非Linux系统或根目录不可访问。");
+        return 0.5f;
     }
     
     unsigned long long total_bytes = vfs.f_blocks * vfs.f_frsize;
     unsigned long long free_bytes = vfs.f_bfree * vfs.f_frsize;
     
     if (total_bytes == 0) {
+        log_warning("[ZSFX-023] 磁盘使用率检测异常：Linux根目录磁盘总容量为0，"
+                    "返回默认值0.5f。可能原因：文件系统异常或statvfs返回无效数据。");
         return 0.5f;
     }
     

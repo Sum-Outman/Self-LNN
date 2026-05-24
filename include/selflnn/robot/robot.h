@@ -960,7 +960,7 @@ int robot_read_sensor_valid(Robot* robot, int sensor_id, SensorData* data);
 int robot_get_all_sensor_validity(Robot* robot, int* validity, size_t max_sensors);
 
 /* 重连管理 */
-void robot_update_reconnect_state(Robot* robot);
+int robot_update_reconnect_state_impl(int connection_ok);
 int robot_get_reconnect_delay_ms(Robot* robot);
 
 /* EKF传感器融合 */

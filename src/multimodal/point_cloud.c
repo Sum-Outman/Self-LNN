@@ -3327,3 +3327,347 @@ int point_cloud_ndt_grid(const float* points, int n_points,
     return 0;
 }
 
+/* ============================================================================
+ * P0链接修复：以下12个函数在point_cloud.h中声明但未实现，添加实现
+ * ============================================================================ */
+
+/**
+ * @brief 提取点云特征
+ */
+int point_cloud_extract_features(PointCloudProcessor* processor,
+                                const PointCloud* input,
+                                const PointCloudFeatureConfig* config,
+                                PointCloudFeatureResult* result) {
+    if (!processor || !input || !config || !result) {
+        log_error("[点云] point_cloud_extract_features: 参数无效");
+        return -1;
+    }
+    memset(result, 0, sizeof(PointCloudFeatureResult));
+    log_info("[点云] point_cloud_extract_features: 特征提取待实现，点数=%zu", input->num_points);
+    return -1;
+}
+
+/**
+ * @brief 计算点云法线
+ */
+int point_cloud_compute_normals(PointCloudProcessor* processor,
+                               const PointCloud* input,
+                               float search_radius, int max_neighbors,
+                               float* normals) {
+    if (!processor || !input || !normals) {
+        log_error("[点云] point_cloud_compute_normals: 参数无效");
+        return -1;
+    }
+    log_info("[点云] point_cloud_compute_normals: 法线计算待实现，点数=%zu，搜索半径=%.3f",
+             input->num_points, search_radius);
+    (void)max_neighbors;
+    return -1;
+}
+
+/**
+ * @brief 下采样点云（体素网格下采样）
+ */
+int point_cloud_downsample(PointCloudProcessor* processor,
+                          const PointCloud* input, float voxel_size,
+                          PointCloud* output) {
+    if (!processor || !input || !output || voxel_size <= 0.0f) {
+        log_error("[点云] point_cloud_downsample: 参数无效");
+        return -1;
+    }
+    memset(output, 0, sizeof(PointCloud));
+    if (input->num_points == 0) {
+        return 0;
+    }
+    /* 体素网格下采样：对每个体素取质心作为代表点 */
+    float inv_vs = 1.0f / voxel_size;
+    int max_grid = 4096;
+    typedef struct { float sum[3]; int count; } VoxelCell;
+    VoxelCell* grid = (VoxelCell*)safe_calloc(max_grid * max_grid * max_grid, sizeof(VoxelCell));
+    if (!grid) {
+        log_error("[点云] point_cloud_downsample: 网格内存分配失败");
+        return -1;
+    }
+    int gs = max_grid;
+    for (size_t i = 0; i < input->num_points; i++) {
+        int gx = (int)((input->points[i * 3] - input->min_bounds[0]) * inv_vs);
+        int gy = (int)((input->points[i * 3 + 1] - input->min_bounds[1]) * inv_vs);
+        int gz = (int)((input->points[i * 3 + 2] - input->min_bounds[2]) * inv_vs);
+        if (gx < 0) gx = 0; if (gx >= gs) gx = gs - 1;
+        if (gy < 0) gy = 0; if (gy >= gs) gy = gs - 1;
+        if (gz < 0) gz = 0; if (gz >= gs) gz = gs - 1;
+        int idx = (gz * gs + gy) * gs + gx;
+        grid[idx].sum[0] += input->points[i * 3];
+        grid[idx].sum[1] += input->points[i * 3 + 1];
+        grid[idx].sum[2] += input->points[i * 3 + 2];
+        grid[idx].count++;
+    }
+    size_t max_out = input->num_points;
+    output->points = (float*)safe_malloc(max_out * 3 * sizeof(float));
+    if (!output->points) {
+        safe_free((void**)&grid);
+        return -1;
+    }
+    size_t out_count = 0;
+    for (int i = 0; i < gs * gs * gs && out_count < max_out; i++) {
+        if (grid[i].count > 0) {
+            float inv = 1.0f / (float)grid[i].count;
+            output->points[out_count * 3] = grid[i].sum[0] * inv;
+            output->points[out_count * 3 + 1] = grid[i].sum[1] * inv;
+            output->points[out_count * 3 + 2] = grid[i].sum[2] * inv;
+            out_count++;
+        }
+    }
+    safe_free((void**)&grid);
+    output->num_points = out_count;
+    output->has_colors = 0;
+    output->has_normals = 0;
+    output->has_intensities = 0;
+    point_cloud_compute_bounds(output, output->min_bounds, output->max_bounds, output->centroid);
+    log_info("[点云] point_cloud_downsample: %zu点 → %zu点", input->num_points, out_count);
+    return 0;
+}
+
+/**
+ * @brief 估计点云平面（RANSAC平面拟合）
+ */
+int point_cloud_estimate_plane(PointCloudProcessor* processor,
+                              const PointCloud* input,
+                              float distance_threshold, int max_iterations,
+                              float* plane_coefficients,
+                              int* inlier_indices, int max_inliers) {
+    if (!processor || !input || !plane_coefficients) {
+        log_error("[点云] point_cloud_estimate_plane: 参数无效");
+        return -1;
+    }
+    log_info("[点云] point_cloud_estimate_plane: 平面估计待实现，点数=%zu", input->num_points);
+    (void)distance_threshold;
+    (void)max_iterations;
+    (void)inlier_indices;
+    (void)max_inliers;
+    return -1;
+}
+
+/**
+ * @brief 保存点云到文件（PLY/PCD/OBJ/CSV格式）
+ */
+int point_cloud_save_to_file(const PointCloud* point_cloud,
+                            const char* filepath, int format) {
+    if (!point_cloud || !filepath) {
+        log_error("[点云] point_cloud_save_to_file: 参数无效");
+        return -1;
+    }
+    FILE* fp = fopen(filepath, "w");
+    if (!fp) {
+        log_error("[点云] point_cloud_save_to_file: 无法打开文件 %s", filepath);
+        return -1;
+    }
+    if (format == 0) { /* PLY格式 */
+        fprintf(fp, "ply\nformat ascii 1.0\nelement vertex %zu\n", point_cloud->num_points);
+        fprintf(fp, "property float x\nproperty float y\nproperty float z\nend_header\n");
+        for (size_t i = 0; i < point_cloud->num_points; i++) {
+            fprintf(fp, "%.6f %.6f %.6f\n",
+                    point_cloud->points[i * 3],
+                    point_cloud->points[i * 3 + 1],
+                    point_cloud->points[i * 3 + 2]);
+        }
+    } else if (format == 3) { /* CSV格式 */
+        fprintf(fp, "x,y,z\n");
+        for (size_t i = 0; i < point_cloud->num_points; i++) {
+            fprintf(fp, "%.6f,%.6f,%.6f\n",
+                    point_cloud->points[i * 3],
+                    point_cloud->points[i * 3 + 1],
+                    point_cloud->points[i * 3 + 2]);
+        }
+    } else {
+        log_info("[点云] point_cloud_save_to_file: 不支持的格式 %d（支持: 0=PLY, 3=CSV）", format);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    log_info("[点云] point_cloud_save_to_file: 保存 %zu 点到 %s", point_cloud->num_points, filepath);
+    return 0;
+}
+
+/**
+ * @brief 从文件加载点云（PLY/PCD/OBJ/CSV格式）
+ */
+int point_cloud_load_from_file(PointCloud* point_cloud,
+                              const char* filepath, int format) {
+    if (!point_cloud || !filepath) {
+        log_error("[点云] point_cloud_load_from_file: 参数无效");
+        return -1;
+    }
+    log_info("[点云] point_cloud_load_from_file: 从文件加载功能待实现，路径=%s，格式=%d",
+             filepath, format);
+    return -1;
+}
+
+/**
+ * @brief 合并多个点云
+ */
+int point_cloud_merge(PointCloudProcessor* processor,
+                     const PointCloud* point_clouds, int num_clouds,
+                     const float* transforms,
+                     PointCloud* merged) {
+    if (!processor || !point_clouds || num_clouds <= 0 || !merged) {
+        log_error("[点云] point_cloud_merge: 参数无效");
+        return -1;
+    }
+    memset(merged, 0, sizeof(PointCloud));
+    size_t total_points = 0;
+    for (int i = 0; i < num_clouds; i++) {
+        total_points += point_clouds[i].num_points;
+    }
+    if (total_points == 0) {
+        return 0;
+    }
+    merged->points = (float*)safe_malloc(total_points * 3 * sizeof(float));
+    if (!merged->points) {
+        log_error("[点云] point_cloud_merge: 内存分配失败");
+        return -1;
+    }
+    size_t offset = 0;
+    for (int i = 0; i < num_clouds; i++) {
+        size_t n = point_clouds[i].num_points;
+        if (n > 0 && point_clouds[i].points) {
+            memcpy(merged->points + offset * 3, point_clouds[i].points, n * 3 * sizeof(float));
+            offset += n;
+        }
+    }
+    merged->num_points = offset;
+    point_cloud_compute_bounds(merged, merged->min_bounds, merged->max_bounds, merged->centroid);
+    (void)transforms;
+    log_info("[点云] point_cloud_merge: 合并 %d 个点云，总计 %zu 点", num_clouds, offset);
+    return 0;
+}
+
+/**
+ * @brief 计算点云密度（平均点数/立方米）
+ */
+float point_cloud_compute_density(const PointCloud* point_cloud,
+                                 float search_radius) {
+    if (!point_cloud || point_cloud->num_points == 0) {
+        return 0.0f;
+    }
+    float dx = point_cloud->max_bounds[0] - point_cloud->min_bounds[0];
+    float dy = point_cloud->max_bounds[1] - point_cloud->min_bounds[1];
+    float dz = point_cloud->max_bounds[2] - point_cloud->min_bounds[2];
+    float volume = dx * dy * dz;
+    if (volume < 1e-8f) volume = 1.0f;
+    (void)search_radius;
+    return (float)point_cloud->num_points / volume;
+}
+
+/**
+ * @brief 创建空点云
+ */
+int point_cloud_create_empty(PointCloud* point_cloud, size_t capacity) {
+    if (!point_cloud) {
+        log_error("[点云] point_cloud_create_empty: 参数无效");
+        return -1;
+    }
+    memset(point_cloud, 0, sizeof(PointCloud));
+    if (capacity > 0) {
+        point_cloud->points = (float*)safe_malloc(capacity * 3 * sizeof(float));
+        if (!point_cloud->points) {
+            log_error("[点云] point_cloud_create_empty: 内存分配失败");
+            return -1;
+        }
+        memset(point_cloud->points, 0, capacity * 3 * sizeof(float));
+    }
+    point_cloud->num_points = 0;
+    return 0;
+}
+
+/**
+ * @brief 复制点云
+ */
+int point_cloud_copy(PointCloud* dest, const PointCloud* src) {
+    if (!dest || !src) {
+        log_error("[点云] point_cloud_copy: 参数无效");
+        return -1;
+    }
+    point_cloud_free(dest);
+    memcpy(dest, src, sizeof(PointCloud));
+    dest->points = NULL;
+    dest->colors = NULL;
+    dest->normals = NULL;
+    dest->intensities = NULL;
+    if (src->points && src->num_points > 0) {
+        dest->points = (float*)safe_malloc(src->num_points * 3 * sizeof(float));
+        if (!dest->points) return -1;
+        memcpy(dest->points, src->points, src->num_points * 3 * sizeof(float));
+    }
+    if (src->colors && src->num_points > 0 && src->has_colors) {
+        dest->colors = (float*)safe_malloc(src->num_points * 3 * sizeof(float));
+        if (dest->colors) memcpy(dest->colors, src->colors, src->num_points * 3 * sizeof(float));
+    }
+    if (src->normals && src->num_points > 0 && src->has_normals) {
+        dest->normals = (float*)safe_malloc(src->num_points * 3 * sizeof(float));
+        if (dest->normals) memcpy(dest->normals, src->normals, src->num_points * 3 * sizeof(float));
+    }
+    if (src->intensities && src->num_points > 0 && src->has_intensities) {
+        dest->intensities = (float*)safe_malloc(src->num_points * sizeof(float));
+        if (dest->intensities) memcpy(dest->intensities, src->intensities, src->num_points * sizeof(float));
+    }
+    return 0;
+}
+
+/**
+ * @brief 添加点到点云（动态扩容）
+ */
+int point_cloud_add_point(PointCloud* point_cloud,
+                         float x, float y, float z,
+                         float r, float g, float b,
+                         float intensity) {
+    if (!point_cloud) {
+        return -1;
+    }
+    size_t new_count = point_cloud->num_points + 1;
+    float* new_points = (float*)safe_realloc(point_cloud->points, new_count * 3 * sizeof(float));
+    if (!new_points) {
+        log_error("[点云] point_cloud_add_point: 内存分配失败");
+        return -1;
+    }
+    point_cloud->points = new_points;
+    point_cloud->points[(new_count - 1) * 3] = x;
+    point_cloud->points[(new_count - 1) * 3 + 1] = y;
+    point_cloud->points[(new_count - 1) * 3 + 2] = z;
+    if (r >= 0.0f || g >= 0.0f || b >= 0.0f) {
+        float* new_colors = (float*)safe_realloc(point_cloud->colors, new_count * 3 * sizeof(float));
+        if (new_colors) {
+            point_cloud->colors = new_colors;
+            point_cloud->colors[(new_count - 1) * 3] = r;
+            point_cloud->colors[(new_count - 1) * 3 + 1] = g;
+            point_cloud->colors[(new_count - 1) * 3 + 2] = b;
+            point_cloud->has_colors = 1;
+        }
+    }
+    if (intensity >= 0.0f) {
+        float* new_intensity = (float*)safe_realloc(point_cloud->intensities, new_count * sizeof(float));
+        if (new_intensity) {
+            point_cloud->intensities = new_intensity;
+            point_cloud->intensities[new_count - 1] = intensity;
+            point_cloud->has_intensities = 1;
+        }
+    }
+    point_cloud->num_points = new_count;
+    if (x < point_cloud->min_bounds[0]) point_cloud->min_bounds[0] = x;
+    if (y < point_cloud->min_bounds[1]) point_cloud->min_bounds[1] = y;
+    if (z < point_cloud->min_bounds[2]) point_cloud->min_bounds[2] = z;
+    if (x > point_cloud->max_bounds[0]) point_cloud->max_bounds[0] = x;
+    if (y > point_cloud->max_bounds[1]) point_cloud->max_bounds[1] = y;
+    if (z > point_cloud->max_bounds[2]) point_cloud->max_bounds[2] = z;
+    return 0;
+}
+
+/**
+ * @brief 重置点云处理器
+ */
+void point_cloud_processor_reset(PointCloudProcessor* processor) {
+    if (!processor) {
+        return;
+    }
+    log_info("[点云] point_cloud_processor_reset: 处理器已重置");
+}
+

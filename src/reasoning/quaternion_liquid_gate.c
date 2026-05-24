@@ -195,8 +195,10 @@ QuaternionLiquidGate* quaternion_liquid_gate_create(const QuaternionLiquidGateCo
         }
     }
 
-    /* 输出投影: [quaternion_dim * 4][input_dim] */
+    /* 输出投影: [quaternion_dim * 4][input_dim] 独立分配 */
     size_t out_size = quaternion_dim * 4 * input_dim;
+    size_t out_bias_size = config->use_bias ? input_dim : 0;
+    size_t out_total_size = out_size + out_bias_size;
     float* out_kernel = (float*)safe_calloc(out_size, sizeof(float));
     if (!out_kernel) {
         quaternion_liquid_gate_destroy(gate);
@@ -206,52 +208,40 @@ QuaternionLiquidGate* quaternion_liquid_gate_create(const QuaternionLiquidGateCo
     for (size_t i = 0; i < out_size; i++) {
         out_kernel[i] = (secure_random_float() * 2.0f - 1.0f) * o_scale;
     }
-    /* 将out_kernel临时存入act_bias指针，但需要在forward中建立独立输出投影 */
-    /* 这里直接使用额外的output_kernel字段 — 实际上需要通过extended方式存储 */
-    /* 简便方案：将输出投影附在adam_m后面通过内存偏移访问 */
-    /* 更干净的方案：在QuaternionLiquidGateWeights中加output_kernel/output_bias字段 */
-    /* 但由于结构体已定，使用动态扩展：将输出投影指针存到本地变量，需要用的时候再加载 */
-    /* --- 实现策略：直接分配单独的输出投影权重，通过扩展内存块存储 */
-    /* 这里将输出投影回标量作为单独的线性层，和gate/act分开 */
-    /* 使用动态加载方式: 保存到文件时一起保存 */
-    /* 把output_kernel放在adam_m后面的内存区域 */
-    /* 完整实现：输出投影通过扩展内存块存储，与gate/act分离 */
-    /* 最佳方法：将out_kernel存为全局变量，或用static变量，但这不利于多实例 */
-    /* 解决方案：扩展QuaternionLiquidGate结构体 - 但头文件已发，在实现文件中用扩展内存 */
 
-    /* 使用动态扩展：创建扩展块，将输出投影放在gate结构后 */
-    /* 在gate->adam_m后偏移存储输出投影 */
-    size_t total_params = kernel_size * 2; /* gate_kernel + act_kernel */
+    /* ZSFX-022: 独立分配输出权重存储（消除adam_m内存偏移hack） */
+    gate->out_weight_storage = (float*)safe_calloc(out_total_size, sizeof(float));
+    if (!gate->out_weight_storage) {
+        safe_free((void**)&out_kernel);
+        quaternion_liquid_gate_destroy(gate);
+        return NULL;
+    }
+    memcpy(gate->out_weight_storage, out_kernel, out_size * sizeof(float));
     if (config->use_bias) {
-        total_params += bias_size * 2; /* gate_bias + act_bias */
+        memset(gate->out_weight_storage + out_size, 0, out_bias_size * sizeof(float));
+    }
+    safe_free((void**)&out_kernel);
+
+    /* 输出投影Adam状态独立分配 */
+    gate->out_adam_m = (float*)safe_calloc(out_total_size, sizeof(float));
+    gate->out_adam_v = (float*)safe_calloc(out_total_size, sizeof(float));
+    if (!gate->out_adam_m || !gate->out_adam_v) {
+        quaternion_liquid_gate_destroy(gate);
+        return NULL;
     }
 
-    /* Adam状态：为所有可训练参数分配 */
-    size_t m_size = total_params + out_size + (config->use_bias ? input_dim : 0);
+    /* Adam状态：仅为主参数（gate_kernel + act_kernel + bias）分配，不再包含输出投影 */
+    size_t total_params = kernel_size * 2;
+    if (config->use_bias) {
+        total_params += bias_size * 2;
+    }
+    size_t m_size = total_params;
     gate->adam_m = (float*)safe_calloc(m_size, sizeof(float));
     gate->adam_v = (float*)safe_calloc(m_size, sizeof(float));
     if (!gate->adam_m || !gate->adam_v) {
         quaternion_liquid_gate_destroy(gate);
-        safe_free((void**)&out_kernel);
         return NULL;
     }
-
-    /* 将输出投影权重和偏置存储在adam_m之后的内存中 */
-    /* 使用adam_m的偏移区域存储额外权重 */
-    /* 注意：adam_update_f32不能更新这个区域，需要单独处理 */
-    /* 使用更清晰的方式：将out_kernel和out_bias直接单独存储 */
-    /* 但为了不修改头文件，使用gate->adam_m指针指向扩展内存区域 */
-    /* 在gate->adam_m后面存储out_kernel和out_bias */
-    float* out_weight_storage = gate->adam_m + total_params;
-    memcpy(out_weight_storage, out_kernel, out_size * sizeof(float));
-    if (config->use_bias) {
-        memset(out_weight_storage + out_size, 0, input_dim * sizeof(float));
-    }
-    safe_free((void**)&out_kernel);
-
-    /* 存储输出投影元数据到gate_kernel尾部（使用gate_biases作为标记） */
-    /* 在save/load时需要知道out_size, 通过kernel_size反推 */
-    /* 无需额外存储，通过gate->config可以反推 */
 
     return gate;
 }
@@ -264,24 +254,18 @@ void quaternion_liquid_gate_destroy(QuaternionLiquidGate* gate) {
     safe_free((void**)&gate->weights.act_bias);
     safe_free((void**)&gate->adam_m);
     safe_free((void**)&gate->adam_v);
+    safe_free((void**)&gate->out_weight_storage);
+    safe_free((void**)&gate->out_adam_m);
+    safe_free((void**)&gate->out_adam_v);
     safe_free((void**)&gate->cached_gate);
     safe_free((void**)&gate->cached_act);
     safe_free((void**)&gate);
 }
 
-/* ========== 获取参数数量和偏移 ========== */
-
-/**
- * @brief 获取输出投影偏移（在adam_m中的起始位置）
+/* ========== 输出投影权重访问 ==========
+ * ZSFX-022: out_weight_storage 独立分配，不再通过adam_m偏移访问
+ * out_weight_storage 布局: [out_size 输出核] [out_bias_size 输出偏置(可选)]
  */
-static size_t get_output_offset(const QuaternionLiquidGate* gate) {
-    size_t input_dim = gate->config.input_dim;
-    size_t quaternion_dim = gate->config.quaternion_dim;
-    size_t kernel_size = input_dim * quaternion_dim * 4;
-    size_t bias_size = gate->config.use_bias ? quaternion_dim * 4 : 0;
-    /* gate_kernel + act_kernel + gate_bias + act_bias */
-    return kernel_size * 2 + bias_size * 2;
-}
 
 /* ========== 前向传播 ========== */
 
@@ -337,11 +321,10 @@ int quaternion_liquid_gate_forward(QuaternionLiquidGate* gate,
         }
     }
 
-    /* 输出投影: 四元数 → 标量 */
-    size_t out_offset = get_output_offset(gate);
-    const float* out_weight = gate->adam_m + out_offset;
+    /* 输出投影: 四元数 → 标量 (ZSFX-022: 使用独立out_weight_storage) */
+    const float* out_weight = gate->out_weight_storage;
     const float* out_bias = gate->config.use_bias ?
-                            out_weight + quaternion_dim * 4 * input_dim : NULL;
+                            gate->out_weight_storage + quaternion_dim * 4 * input_dim : NULL;
 
     project_from_quaternion_lg(modulation, output,
                                out_weight, out_bias,
@@ -505,11 +488,10 @@ float quaternion_liquid_gate_train_step_numerical(QuaternionLiquidGate* gate,
         }
     }
 
-    /* 输出投影梯度 */
+    /* 输出投影梯度 (ZSFX-022: 使用独立out_weight_storage和out_adam) */
     size_t out_size = quaternion_dim * 4 * input_dim_c;
     grad_buf = (float*)safe_malloc(out_size * sizeof(float));
-    size_t out_offset = get_output_offset(gate);
-    float* out_weight = gate->adam_m + out_offset;
+    float* out_weight = gate->out_weight_storage;
 
     if (grad_buf) {
         for (size_t i = 0; i < out_size; i++) {
@@ -524,18 +506,15 @@ float quaternion_liquid_gate_train_step_numerical(QuaternionLiquidGate* gate,
             } else { grad_buf[i] = 0.0f; }
             out_weight[i] = orig;
         }
-        /* 输出投影的Adam状态存储在adam_m末尾 */
-        size_t total_params = kernel_size * 2 + (gate->config.use_bias ? quaternion_dim * 4 * 2 : 0);
-        size_t out_param_start = total_params;
         adam_update_f32(out_weight, grad_buf,
-                        &gate->adam_m[out_param_start], &gate->adam_v[out_param_start],
+                        gate->out_adam_m, gate->out_adam_v,
                         gate->adam_step, lr, out_size);
         safe_free((void**)&grad_buf);
     }
 
     /* 输出偏置梯度 */
     if (gate->config.use_bias) {
-        float* out_bias = out_weight + out_size;
+        float* out_bias = gate->out_weight_storage + out_size;
         grad_buf = (float*)safe_malloc(input_dim_c * sizeof(float));
         if (grad_buf) {
             for (size_t i = 0; i < input_dim_c; i++) {
@@ -550,10 +529,8 @@ float quaternion_liquid_gate_train_step_numerical(QuaternionLiquidGate* gate,
                 } else { grad_buf[i] = 0.0f; }
                 out_bias[i] = orig;
             }
-            size_t total_params = kernel_size * 2 + (gate->config.use_bias ? quaternion_dim * 4 * 2 : 0);
-            size_t out_param_start = total_params + out_size;
             adam_update_f32(out_bias, grad_buf,
-                            &gate->adam_m[out_param_start], &gate->adam_v[out_param_start],
+                            gate->out_adam_m + out_size, gate->out_adam_v + out_size,
                             gate->adam_step, lr, input_dim_c);
             safe_free((void**)&grad_buf);
         }
@@ -607,9 +584,8 @@ float quaternion_liquid_gate_train_step_analytic(QuaternionLiquidGate* gate,
         d_output[i] = 2.0f * (pred[i] - target[i]) / (float)n_elem;
     }
 
-    /* 输出投影反向：∂L/∂modulation[4*q+j] = Σ_i d_output[i*q+j] * output_weight[i] */
-    size_t out_offset = get_output_offset(gate);
-    const float* out_weight = gate->adam_m + out_offset;
+    /* 输出投影反向：∂L/∂modulation[4*q+j] = Σ_i d_output[i*q+j] * output_weight[i] (ZSFX-022) */
+    const float* out_weight = gate->out_weight_storage;
     size_t mod_elem = batch * seq_len * quat_dim * 4;
     float* d_mod = (float*)safe_calloc(mod_elem, sizeof(float));
     if (!d_mod) { safe_free((void**)&d_output); safe_free((void**)&pred); return loss; }
@@ -777,15 +753,14 @@ int quaternion_liquid_gate_save(const QuaternionLiquidGate* gate, const char* fi
         }
     }
 
-    /* 写入输出投影 */
-    size_t out_offset = get_output_offset(gate);
-    const float* out_weight = gate->adam_m + out_offset;
+    /* 写入输出投影 (ZSFX-022: 使用独立out_weight_storage) */
+    const float* out_weight = gate->out_weight_storage;
     if (fwrite(out_weight, sizeof(float), out_size, fp) != out_size) {
         fclose(fp);
         return -1;
     }
     if (gate->config.use_bias) {
-        const float* out_bias = out_weight + out_size;
+        const float* out_bias = gate->out_weight_storage + out_size;
         if (fwrite(out_bias, sizeof(float), input_dim, fp) != input_dim) {
             fclose(fp);
             return -1;
@@ -1259,15 +1234,14 @@ int quaternion_liquid_gate_load(QuaternionLiquidGate* gate, const char* filepath
         }
     }
 
-    /* 读取输出投影 */
-    size_t out_offset = get_output_offset(gate);
-    float* out_weight = gate->adam_m + out_offset;
+    /* 读取输出投影 (ZSFX-022: 使用独立out_weight_storage) */
+    float* out_weight = gate->out_weight_storage;
     if (fread(out_weight, sizeof(float), out_size, fp) != out_size) {
         fclose(fp);
         return -1;
     }
     if (gate->config.use_bias) {
-        float* out_bias = out_weight + out_size;
+        float* out_bias = gate->out_weight_storage + out_size;
         if (fread(out_bias, sizeof(float), input_dim, fp) != input_dim) {
             fclose(fp);
             return -1;

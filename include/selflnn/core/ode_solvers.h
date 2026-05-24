@@ -34,6 +34,7 @@ typedef struct {
     int use_finite_diff_jacobian;
     float finite_diff_eps;
     int jacobian_bandwidth;         /**< P2-044: 雅可比带状宽度，0=全矩阵，>0=仅计算对角线附近±bandwidth带 */
+    int method_order;               /**< P3-001: Rosenbrock方法阶数，1=一阶半隐式欧拉，3=ROS3p三阶方法 */
 } RosenbrockConfig;
 
 typedef struct {

@@ -2651,16 +2651,67 @@ static float calculate_confidence(const float* data, size_t data_size) {
 }
 
 /**
- * @brief 计算不确定性
- * 
+ * @brief ZSFX-024: 基于贝叶斯后验方差的不确定性计算
+ *
+ * 维护预测误差方差的指数移动平均(EMA)作为贝叶斯后验方差的估计，
+ * 使用 uncertainty = sqrt(ema_variance) / (1.0 + log(1 + N)) 公式。
+ *
+ * 其中：
+ *   - ema_variance: 历史预测误差的EMA平滑方差
+ *   - N: 历史样本数
+ *   - 分母中的 log(1+N) 反映随着经验增长，不确定性自然降低
+ *
  * @param data 输入数据数组
  * @param data_size 数据大小
  * @return float 不确定性值 (0-1)
  */
 static float calculate_uncertainty(const float* data, size_t data_size) {
-    /* 不确定性通常是置信度的补集 */
-    float confidence = calculate_confidence(data, data_size);
-    return 1.0f - confidence;
+    if (!data || data_size == 0) {
+        return 0.5f; /* 无数据时默认中等不确定性 */
+    }
+
+    /* 静态状态：维护EMA方差和历史样本数 */
+    static float s_ema_variance = 0.01f;   /* EMA平滑方差，初始0.01 */
+    static size_t s_total_samples = 0;      /* 累计历史样本数 */
+    static float s_ema_mean = 0.0f;         /* EMA平滑均值 */
+
+    /* 计算当前批次的均值和方差 */
+    float sum = 0.0f;
+    float sum_sq = 0.0f;
+    for (size_t i = 0; i < data_size; i++) {
+        sum += data[i];
+        sum_sq += data[i] * data[i];
+    }
+    float batch_mean = sum / (float)data_size;
+    float batch_variance = (sum_sq / (float)data_size) - (batch_mean * batch_mean);
+    if (batch_variance < 1e-8f) batch_variance = 1e-8f;
+
+    /* 更新EMA均值和方差（指数移动平均，平滑因子α=0.1） */
+    float alpha = 0.1f;
+    if (s_total_samples == 0) {
+        s_ema_mean = batch_mean;
+        s_ema_variance = batch_variance;
+    } else {
+        s_ema_mean = alpha * batch_mean + (1.0f - alpha) * s_ema_mean;
+        /* 批量方差与EMA均值的结合 */
+        float centered_var = batch_variance + (batch_mean - s_ema_mean) * (batch_mean - s_ema_mean);
+        s_ema_variance = alpha * centered_var + (1.0f - alpha) * s_ema_variance;
+    }
+
+    /* 更新累计样本数 */
+    s_total_samples += data_size;
+
+    /* 贝叶斯后验方差不确定性 */
+    /* sqrt(ema_variance) / (1 + log(1 + N)) */
+    float posterior_std = sqrtf(s_ema_variance);
+    float log_term = logf(1.0f + (float)s_total_samples);
+    float uncertainty = posterior_std / (1.0f + log_term);
+
+    /* 上限裁剪: 不确定性最大不超过1.0 */
+    if (uncertainty > 1.0f) uncertainty = 1.0f;
+    if (uncertainty < 0.001f) uncertainty = 0.001f;
+
+    return uncertainty;
 }
 
 /**

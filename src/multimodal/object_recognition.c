@@ -161,15 +161,10 @@ ObjectRecognizer* object_recognizer_create(void) {
     int cat_count = sizeof(cats) / sizeof(cats[0]);
     for (int i = 0; i < cat_count && i < OR_MAX_CATEGORIES; i++) {
         snprintf(or_obj->category_names[i], 64, "%s", cats[i]);
-        /* ZSFWS-S004: 模板基础初始化 */
+        /* 模板初始化为零特征向量 — 标记为未训练状态 */
         memset(or_obj->category_templates[i], 0, 128 * sizeof(float));
-        /* ZSFWS修复 P1-003: 添加基础视觉特征预训练，避免出厂全零模板 */
-        /* 使用通用颜色/形状描述符初始化模板特征向量 */
-        for (int f = 0; f < 128; f++) {
-            /* 使用类别ID作为种子生成确定性基础特征（正交基投影） */
-            float seed = (float)(i * 7919 + f * 6271) * 0.0001f;
-            or_obj->category_templates[i][f] = sinf(seed * 3.14159f) * 0.1f;
-        }
+        /* 第一个特征元素设为类别ID编码，用于区分未训练类别 */
+        or_obj->category_templates[i][0] = (float)(i + 1) * 0.01f;
         /* 标记为基础特征，非完整训练，基础置信度很低需要训练提升 */
         or_obj->category_count++;
     }
@@ -264,15 +259,12 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                     obj->confidence = edge_response * 8.0f;
                     if (obj->confidence > 1.0f) obj->confidence = 1.0f;
                     
-                    /* ZSFWS-M009修复: 检查模板是否已训练
-                     * 未训练时模板全为零，NCC匹配无意义，直接返回"未训练"状态 */
+                    /* 检查模板是否已训练：需要模板L2范数 > 0.5 */
                     int is_trained = 0;
                     for (int c = 0; c < or_obj->category_count && !is_trained; c++) {
-                        for (int i = 0; i < 128; i++) {
-                            if (or_obj->category_templates[c][i] != 0.0f) {
-                                is_trained = 1; break;
-                            }
-                        }
+                        float norm = 0.0f;
+                        for (int i = 0; i < 128; i++) norm += or_obj->category_templates[c][i] * or_obj->category_templates[c][i];
+                        if (norm > 0.25f) { is_trained = 1; break; }
                     }
                     
                     int best_category = 0;

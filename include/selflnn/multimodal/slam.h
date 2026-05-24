@@ -963,7 +963,11 @@ typedef struct CfCDirectVO CfCDirectVO;
  *
  * @return CfCDirectVOConfig 默认配置
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 CfCDirectVOConfig slam_cfc_direct_vo_get_default_config(void);
+#else
+static inline CfCDirectVOConfig slam_cfc_direct_vo_get_default_config(void) { CfCDirectVOConfig c; memset(&c, 0, sizeof(c)); return c; }
+#endif
 
 /**
  * @brief 创建CfC直接法VO
@@ -971,14 +975,22 @@ CfCDirectVOConfig slam_cfc_direct_vo_get_default_config(void);
  * @param config CfC直接法VO配置
  * @return CfCDirectVO* 句柄，失败返回NULL
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 CfCDirectVO* slam_cfc_direct_vo_create(const CfCDirectVOConfig* config);
+#else
+static inline CfCDirectVO* slam_cfc_direct_vo_create(const CfCDirectVOConfig* config) { (void)config; return NULL; }
+#endif
 
 /**
  * @brief 释放CfC直接法VO
  *
  * @param vo CfC直接法VO句柄
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 void slam_cfc_direct_vo_free(CfCDirectVO* vo);
+#else
+static inline void slam_cfc_direct_vo_free(CfCDirectVO* vo) { (void)vo; }
+#endif
 
 /**
  * @brief 处理一对连续帧，估计相对位姿
@@ -1001,12 +1013,21 @@ void slam_cfc_direct_vo_free(CfCDirectVO* vo);
  * @param pose_out 输出位姿 [tx,ty,tz,qw,qx,qy,qz]（参考帧到当前帧的变换）
  * @return int 成功返回0，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_cfc_direct_vo_estimate_pose(CfCDirectVO* vo,
                                      const float* ref_image,
                                      const float* curr_image,
                                      int width, int height, int channels,
                                      const float camera_params[4],
                                      float pose_out[7]);
+#else
+static inline int slam_cfc_direct_vo_estimate_pose(CfCDirectVO* vo,
+                                     const float* ref_image,
+                                     const float* curr_image,
+                                     int width, int height, int channels,
+                                     const float camera_params[4],
+                                     float pose_out[7]) { (void)vo; (void)ref_image; (void)curr_image; (void)width; (void)height; (void)channels; (void)camera_params; (void)pose_out; return -1; }
+#endif
 
 /**
  * @brief 重置CfC直接法VO的内部状态
@@ -1015,7 +1036,11 @@ int slam_cfc_direct_vo_estimate_pose(CfCDirectVO* vo,
  *
  * @param vo CfC直接法VO句柄
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 void slam_cfc_direct_vo_reset(CfCDirectVO* vo);
+#else
+static inline void slam_cfc_direct_vo_reset(CfCDirectVO* vo) { (void)vo; }
+#endif
 
 /**
  * @brief 获取CfC直接法VO的内部状态信息
@@ -1027,11 +1052,19 @@ void slam_cfc_direct_vo_reset(CfCDirectVO* vo);
  * @param hidden_size CfC隐藏状态缓冲区大小
  * @return int 成功返回0，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_cfc_direct_vo_get_state(const CfCDirectVO* vo,
                                  int* iterations_used,
                                  float* final_error,
                                  float* cfc_hidden_state,
                                  size_t hidden_size);
+#else
+static inline int slam_cfc_direct_vo_get_state(const CfCDirectVO* vo,
+                                 int* iterations_used,
+                                 float* final_error,
+                                 float* cfc_hidden_state,
+                                 size_t hidden_size) { (void)vo; (void)iterations_used; (void)final_error; (void)cfc_hidden_state; (void)hidden_size; return -1; }
+#endif
 
 // ==================== 稠密地图构建（TSDF） ====================
 
@@ -1067,7 +1100,11 @@ typedef struct TSDFVolume TSDFVolume;
  *
  * @return TSDFVolumeConfig 默认配置
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 TSDFVolumeConfig slam_tsdf_get_default_config(void);
+#else
+static inline TSDFVolumeConfig slam_tsdf_get_default_config(void) { TSDFVolumeConfig c; memset(&c, 0, sizeof(c)); return c; }
+#endif
 
 /**
  * @brief 创建TSDF体素网格
@@ -1075,14 +1112,22 @@ TSDFVolumeConfig slam_tsdf_get_default_config(void);
  * @param config TSDF体素配置
  * @return TSDFVolume* 句柄，失败返回NULL
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 TSDFVolume* slam_tsdf_create(const TSDFVolumeConfig* config);
+#else
+static inline TSDFVolume* slam_tsdf_create(const TSDFVolumeConfig* config) { (void)config; return NULL; }
+#endif
 
 /**
  * @brief 释放TSDF体素网格
  *
  * @param volume TSDF体素句柄
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 void slam_tsdf_free(TSDFVolume* volume);
+#else
+static inline void slam_tsdf_free(TSDFVolume* volume) { (void)volume; }
+#endif
 
 /**
  * @brief 融合一帧深度图到TSDF体素网格
@@ -1106,12 +1151,21 @@ void slam_tsdf_free(TSDFVolume* volume);
  * @param min_depth 最小有效深度（米，默认0.1）
  * @return int 成功返回0，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_tsdf_integrate_depth(TSDFVolume* volume,
                               const float* depth_image,
                               int image_width, int image_height,
                               const float camera_params[4],
                               const float camera_pose[7],
                               float max_depth, float min_depth);
+#else
+static inline int slam_tsdf_integrate_depth(TSDFVolume* volume,
+                              const float* depth_image,
+                              int image_width, int image_height,
+                              const float camera_params[4],
+                              const float camera_pose[7],
+                              float max_depth, float min_depth) { (void)volume; (void)depth_image; (void)image_width; (void)image_height; (void)camera_params; (void)camera_pose; (void)max_depth; (void)min_depth; return -1; }
+#endif
 
 /**
  * @brief 从TSDF体素网格光线投影渲染深度图和彩色图
@@ -1132,12 +1186,21 @@ int slam_tsdf_integrate_depth(TSDFVolume* volume,
  * @param color_out 输出彩色图（float数组，需预分配 output_width*output_height*3，可为NULL）
  * @return int 成功返回0，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_tsdf_raycast(const TSDFVolume* volume,
                       const float camera_pose[7],
                       const float camera_params[4],
                       int output_width, int output_height,
                       float* depth_out,
                       float* color_out);
+#else
+static inline int slam_tsdf_raycast(const TSDFVolume* volume,
+                      const float camera_pose[7],
+                      const float camera_params[4],
+                      int output_width, int output_height,
+                      float* depth_out,
+                      float* color_out) { (void)volume; (void)camera_pose; (void)camera_params; (void)output_width; (void)output_height; (void)depth_out; (void)color_out; return -1; }
+#endif
 
 /**
  * @brief 从TSDF体素网格提取三角网格
@@ -1159,11 +1222,19 @@ int slam_tsdf_raycast(const TSDFVolume* volume,
  * @param num_indices 输出实际索引数
  * @return int 成功返回0，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_tsdf_extract_mesh(const TSDFVolume* volume,
                            float* vertices, float* normals,
                            size_t max_vertices, size_t* num_vertices,
                            int* indices,
                            size_t max_indices, size_t* num_indices);
+#else
+static inline int slam_tsdf_extract_mesh(const TSDFVolume* volume,
+                           float* vertices, float* normals,
+                           size_t max_vertices, size_t* num_vertices,
+                           int* indices,
+                           size_t max_indices, size_t* num_indices) { (void)volume; (void)vertices; (void)normals; (void)max_vertices; (void)num_vertices; (void)indices; (void)max_indices; (void)num_indices; return -1; }
+#endif
 
 /**
  * @brief 获取TSDF体素处的SDF值和权重
@@ -1176,16 +1247,26 @@ int slam_tsdf_extract_mesh(const TSDFVolume* volume,
  * @param weight 输出权重（可为NULL）
  * @return int 成功返回0，体素不存在返回1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_tsdf_query_point(const TSDFVolume* volume,
                           float world_x, float world_y, float world_z,
                           float* sdf_value, float* weight);
+#else
+static inline int slam_tsdf_query_point(const TSDFVolume* volume,
+                          float world_x, float world_y, float world_z,
+                          float* sdf_value, float* weight) { (void)volume; (void)world_x; (void)world_y; (void)world_z; (void)sdf_value; (void)weight; return 1; }
+#endif
 
 /**
  * @brief 重置TSDF体素网格（清空所有数据）
  *
  * @param volume TSDF体素句柄
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 void slam_tsdf_reset(TSDFVolume* volume);
+#else
+static inline void slam_tsdf_reset(TSDFVolume* volume) { (void)volume; }
+#endif
 
 // ==================== 语义地图构建 ====================
 
@@ -1222,7 +1303,11 @@ typedef struct SemanticMap SemanticMap;
  *
  * @return SemanticMapConfig 默认配置
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 SemanticMapConfig slam_semantic_map_get_default_config(void);
+#else
+static inline SemanticMapConfig slam_semantic_map_get_default_config(void) { SemanticMapConfig c; memset(&c, 0, sizeof(c)); return c; }
+#endif
 
 /**
  * @brief 创建语义地图
@@ -1230,14 +1315,22 @@ SemanticMapConfig slam_semantic_map_get_default_config(void);
  * @param config 语义地图配置
  * @return SemanticMap* 句柄，失败返回NULL
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 SemanticMap* slam_semantic_map_create(const SemanticMapConfig* config);
+#else
+static inline SemanticMap* slam_semantic_map_create(const SemanticMapConfig* config) { (void)config; return NULL; }
+#endif
 
 /**
  * @brief 释放语义地图
  *
  * @param map 语义地图句柄
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 void slam_semantic_map_free(SemanticMap* map);
+#else
+static inline void slam_semantic_map_free(SemanticMap* map) { (void)map; }
+#endif
 
 /**
  * @brief 融合一帧语义分割结果到语义地图
@@ -1263,6 +1356,7 @@ void slam_semantic_map_free(SemanticMap* map);
  * @param camera_pose 相机位姿 [tx,ty,tz,qw,qx,qy,qz]
  * @return int 成功返回0，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_semantic_map_integrate(SemanticMap* map,
                                 const int* semantic_labels,
                                 const float* semantic_probs,
@@ -1271,6 +1365,16 @@ int slam_semantic_map_integrate(SemanticMap* map,
                                 int num_classes,
                                 const float camera_params[4],
                                 const float camera_pose[7]);
+#else
+static inline int slam_semantic_map_integrate(SemanticMap* map,
+                                const int* semantic_labels,
+                                const float* semantic_probs,
+                                const float* depth_image,
+                                int image_width, int image_height,
+                                int num_classes,
+                                const float camera_params[4],
+                                const float camera_pose[7]) { (void)map; (void)semantic_labels; (void)semantic_probs; (void)depth_image; (void)image_width; (void)image_height; (void)num_classes; (void)camera_params; (void)camera_pose; return -1; }
+#endif
 
 /**
  * @brief 查询某3D点的语义标签和置信度
@@ -1285,17 +1389,28 @@ int slam_semantic_map_integrate(SemanticMap* map,
  * @param max_classes probs_out缓冲区大小
  * @return int 成功返回0，点不存在返回1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_semantic_map_query(const SemanticMap* map,
                             float world_x, float world_y, float world_z,
                             int* label, float* confidence,
                             float* probs_out, int max_classes);
+#else
+static inline int slam_semantic_map_query(const SemanticMap* map,
+                            float world_x, float world_y, float world_z,
+                            int* label, float* confidence,
+                            float* probs_out, int max_classes) { (void)map; (void)world_x; (void)world_y; (void)world_z; (void)label; (void)confidence; (void)probs_out; (void)max_classes; return 1; }
+#endif
 
 /**
  * @brief 重置语义地图
  *
  * @param map 语义地图句柄
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 void slam_semantic_map_reset(SemanticMap* map);
+#else
+static inline void slam_semantic_map_reset(SemanticMap* map) { (void)map; }
+#endif
 
 /**
  * @brief 获取语义地图统计信息
@@ -1306,10 +1421,17 @@ void slam_semantic_map_reset(SemanticMap* map);
  * @param avg_confidence 输出平均置信度
  * @return int 成功返回0，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_semantic_map_get_stats(const SemanticMap* map,
                                 int* total_voxels,
                                 int* labeled_voxels,
                                 float* avg_confidence);
+#else
+static inline int slam_semantic_map_get_stats(const SemanticMap* map,
+                                int* total_voxels,
+                                int* labeled_voxels,
+                                float* avg_confidence) { (void)map; (void)total_voxels; (void)labeled_voxels; (void)avg_confidence; return -1; }
+#endif
 
 // ==================== 动态环境地图更新 ====================
 
@@ -1372,7 +1494,11 @@ typedef struct {
  *
  * @return DynamicMapConfig 默认配置
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 DynamicMapConfig slam_dynamic_map_get_default_config(void);
+#else
+static inline DynamicMapConfig slam_dynamic_map_get_default_config(void) { DynamicMapConfig c; memset(&c, 0, sizeof(c)); return c; }
+#endif
 
 /**
  * @brief 创建动态地图
@@ -1380,14 +1506,22 @@ DynamicMapConfig slam_dynamic_map_get_default_config(void);
  * @param config 动态地图配置
  * @return DynamicMap* 句柄，失败返回NULL
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 DynamicMap* slam_dynamic_map_create(const DynamicMapConfig* config);
+#else
+static inline DynamicMap* slam_dynamic_map_create(const DynamicMapConfig* config) { (void)config; return NULL; }
+#endif
 
 /**
  * @brief 释放动态地图
  *
  * @param map 动态地图句柄
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 void slam_dynamic_map_free(DynamicMap* map);
+#else
+static inline void slam_dynamic_map_free(DynamicMap* map) { (void)map; }
+#endif
 
 /**
  * @brief 更新动态地图（使用当前帧深度/点云）
@@ -1414,6 +1548,7 @@ void slam_dynamic_map_free(DynamicMap* map);
  * @param timestamp 当前时间戳（秒）
  * @return int 成功返回检测到的动态体素数，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_dynamic_map_update(DynamicMap* map,
                             const float* depth_image,
                             const float* point_cloud,
@@ -1422,6 +1557,16 @@ int slam_dynamic_map_update(DynamicMap* map,
                             const float camera_params[4],
                             const float camera_pose[7],
                             float timestamp);
+#else
+static inline int slam_dynamic_map_update(DynamicMap* map,
+                            const float* depth_image,
+                            const float* point_cloud,
+                            size_t point_count,
+                            int image_width, int image_height,
+                            const float camera_params[4],
+                            const float camera_pose[7],
+                            float timestamp) { (void)map; (void)depth_image; (void)point_cloud; (void)point_count; (void)image_width; (void)image_height; (void)camera_params; (void)camera_pose; (void)timestamp; return -1; }
+#endif
 
 /**
  * @brief 检测动态变化区域
@@ -1435,10 +1580,17 @@ int slam_dynamic_map_update(DynamicMap* map,
  * @param num_dynamic 输出实际动态体素数
  * @return int 成功返回0，失败返回-1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_dynamic_map_detect_changes(const DynamicMap* map,
                                     DynamicVoxelInfo* dynamic_voxels,
                                     size_t max_count,
                                     size_t* num_dynamic);
+#else
+static inline int slam_dynamic_map_detect_changes(const DynamicMap* map,
+                                    DynamicVoxelInfo* dynamic_voxels,
+                                    size_t max_count,
+                                    size_t* num_dynamic) { (void)map; (void)dynamic_voxels; (void)max_count; (void)num_dynamic; return -1; }
+#endif
 
 /**
  * @brief 查询某3D点的动态状态
@@ -1450,16 +1602,26 @@ int slam_dynamic_map_detect_changes(const DynamicMap* map,
  * @param info 输出动态体素信息（可为NULL）
  * @return int 成功返回0，体素不存在返回1
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 int slam_dynamic_map_query(const DynamicMap* map,
                            float world_x, float world_y, float world_z,
                            DynamicVoxelInfo* info);
+#else
+static inline int slam_dynamic_map_query(const DynamicMap* map,
+                           float world_x, float world_y, float world_z,
+                           DynamicVoxelInfo* info) { (void)map; (void)world_x; (void)world_y; (void)world_z; (void)info; return 1; }
+#endif
 
 /**
  * @brief 重置动态地图
  *
  * @param map 动态地图句柄
  */
+#ifdef SELFLNN_SLAM_ADVANCED
 void slam_dynamic_map_reset(DynamicMap* map);
+#else
+static inline void slam_dynamic_map_reset(DynamicMap* map) { (void)map; }
+#endif
 
 // ==================== CameraInput 相机输入接口 ====================
 

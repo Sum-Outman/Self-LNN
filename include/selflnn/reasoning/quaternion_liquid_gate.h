@@ -53,6 +53,11 @@ typedef struct {
     float* adam_v;                           /**< 二阶动量 */
     size_t adam_step;                        /**< 优化步数 */
 
+    /* ZSFX-022: 输出投影权重独立存储（消除内存hack） */
+    float* out_weight_storage;               /**< 输出投影核+偏置，独立分配，独立释放 */
+    float* out_adam_m;                       /**< 输出投影Adam一阶动量，独立分配 */
+    float* out_adam_v;                       /**< 输出投影Adam二阶动量，独立分配 */
+
     /* 缓存(前向传播时使用) */
     Quaternion* cached_gate;                 /**< 缓存的门控信号 [seq_len][quaternion_dim] */
     Quaternion* cached_act;                  /**< 缓存的激活信号 [seq_len][quaternion_dim] */

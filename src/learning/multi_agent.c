@@ -515,7 +515,7 @@ void agent_message_destroy(AgentMessage* message) {
 /**
  * @brief 创建智能体
  */
-Agent* agent_create(const AgentConfig* config) {
+static Agent* agent_create(const AgentConfig* config) {
     if (!config) {
         return NULL;
     }
@@ -614,7 +614,7 @@ Agent* agent_create(const AgentConfig* config) {
 /**
  * @brief 销毁智能体
  */
-void agent_destroy(Agent* agent) {
+static void agent_destroy(Agent* agent) {
     if (!agent) return;
     
     // 清理消息队列
@@ -651,7 +651,7 @@ void agent_destroy(Agent* agent) {
 /**
  * @brief 智能体决策 - 使用LNN液态神经网络驱动
  */
-AgentAction* agent_decide(Agent* agent, const float* observation, size_t obs_size) {
+static AgentAction* agent_decide(Agent* agent, const float* observation, size_t obs_size) {
     if (!agent || !observation || obs_size == 0) {
         return NULL;
     }
@@ -811,7 +811,7 @@ AgentAction* agent_decide(Agent* agent, const float* observation, size_t obs_siz
 /**
  * @brief 智能体学习
  */
-int agent_learn(Agent* agent, const AgentExperience* experience) {
+static int agent_learn(Agent* agent, const AgentExperience* experience) {
     if (!agent || !experience) {
         return -1;
     }
@@ -1002,7 +1002,7 @@ int agent_learn(Agent* agent, const AgentExperience* experience) {
 /**
  * @brief 智能体通信
  */
-int agent_communicate(Agent* sender, Agent* receiver, const char* message_type, 
+static int agent_communicate(Agent* sender, Agent* receiver, const char* message_type, 
                      const void* message_data, size_t data_size) {
     if (!sender || !receiver || !message_type) {
         return -1;
@@ -1466,7 +1466,7 @@ static void form_consensus(MultiAgentSystem* system);
 /**
  * @brief 运行多智能体系统
  */
-int multi_agent_system_run(MultiAgentSystem* system, int steps) {
+static int multi_agent_system_run(MultiAgentSystem* system, int steps) {
     if (!system || steps <= 0) {
         return -1;
     }
@@ -1693,7 +1693,7 @@ int multi_agent_system_add_task(MultiAgentSystem* system, CollaborativeTask* tas
 /**
  * @brief 评估多智能体系统性能
  */
-int evaluate_system_performance(MultiAgentSystem* system) {
+static int evaluate_system_performance(MultiAgentSystem* system) {
     if (!system) {
         return -1;
     }

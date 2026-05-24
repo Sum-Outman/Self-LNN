@@ -196,18 +196,25 @@ DCCorrectionSystem* dc_correction_create(void) {
     dcs->verification_pipeline[2] = DC_VERIFY_EXECUTION;
     dcs->verification_pipeline[3] = DC_VERIFY_EFFECT;
 
-    /* S-015+M-013修复: 预置修正规则（初始success_rate=0.5，随使用动态学习） */
+    /* S-015+M-013+ZSFX-021修复: 预置修正规则（含动态权重学习）
+     * - 初始success_rate基于规则类型预设的先验成功率
+     * - usage_count追踪使用次数，成功数越多权重越高
+     * - 当规则成功应用N次后自动提升weight
+     * - 当规则连续失败时降低weight并触发热重新评估 */
     const char* preset_patterns[] = {"空指针", "越界", "溢出", "死锁", "竞态", "内存泄漏", "精度损失", "初始化", "超时", "资源耗尽"};
     const char* preset_fixes[] = {"添加空指针检查", "添加边界检查", "使用更大的数据类型", "添加锁超时机制", "使用原子操作", "确保free配对", "使用double替代float", "初始化所有变量", "增加超时设置", "添加资源池限制"};
+    float preset_priors[] = {0.55f, 0.55f, 0.50f, 0.45f, 0.45f, 0.50f, 0.48f, 0.52f, 0.50f, 0.45f};
     for (int i = 0; i < 10; i++) {
         DCCorrectionRule* r = &dcs->rules[dcs->rule_count];
+        memset(r, 0, sizeof(DCCorrectionRule));
         r->rule_id = dcs->next_rule_id++;
         snprintf(r->pattern, sizeof(r->pattern), "%s", preset_patterns[i]);
         snprintf(r->correction, sizeof(r->correction), "%s", preset_fixes[i]);
         r->target_type = (DCErrorType)(i % 6);
-        r->success_rate = 0.5f;
+        r->success_rate = preset_priors[i];
         r->created_at = time(NULL);
         r->usage_count = 0;
+        r->success_count = 0;
         dcs->rule_count++;
     }
     
@@ -1178,6 +1185,196 @@ int dc_extract_rule(DCCorrectionSystem* dcs, int error_id) {
         }
     }
     return -1;
+}
+
+/*
+ * ZSFX-021: detect_new_error_pattern — 修正失败时动态生成新候选规则
+ *
+ * 当已有规则匹配失败（dc_apply_correction返回-1）或规则success_rate持续下降时调用。
+ * 使用以下策略生成新规则：
+ *   1. 从错误描述中提取关键词特征
+ *   2. 在预设原因网络(g_bayes_presets)中查找相似模式
+ *   3. 基于匹配到的成功规则克隆修正策略并调整
+ *   4. 如果无任何匹配，基于错误类型生成通用修正模板
+ *   5. 新规则初始success_rate=0.3，后续通过实际使用结果动态学习提升
+ *
+ * @param dcs 修正系统句柄
+ * @param error_id 失败修正对应的错误ID
+ * @param failed_rule_id 失败的规则ID（-1表示没有匹配到任何规则）
+ * @return 新规则ID，失败返回-1
+ */
+int dc_detect_new_error_pattern(DCCorrectionSystem* dcs, int error_id, int failed_rule_id) {
+    if (!dcs || dcs->rule_count >= DC_MAX_RULES) return -1;
+
+    /* 查找对应错误 */
+    DCErrorRecord* target_error = NULL;
+    for (int i = 0; i < dcs->error_count; i++) {
+        if (dcs->errors[i].error_id == error_id) {
+            target_error = &dcs->errors[i];
+            break;
+        }
+    }
+    if (!target_error) return -1;
+
+    /* 阶段1: 从错误描述中提取关键词特征 */
+    const char* error_keywords[] = {
+        "空指针", "越界", "溢出", "死锁", "竞态", "内存", "精度", "初始化",
+        "超时", "资源", "权限", "冲突", "同步", "格式", "类型", "缺失",
+        "不完整", "过时", "噪声", "延迟", "分辨率", "特征", "对齐", "循环",
+        "依赖", "归纳", "类比", "优先级", "分配", "时序", "风险", "备选",
+        "连接", "断开", "损坏", "丢失", "重复", "冗余", "不一致", "偏差"
+    };
+    float keyword_scores[48] = {0};
+    int keyword_count = 0;
+
+    for (int k = 0; k < 48; k++) {
+        if (strstr(target_error->description, error_keywords[k])) {
+            keyword_scores[k] = 1.0f;
+            keyword_count++;
+            /* 多次出现加权 */
+            const char* pos = target_error->description;
+            int occurrences = 0;
+            while ((pos = strstr(pos, error_keywords[k])) != NULL) {
+                occurrences++;
+                pos++;
+            }
+            keyword_scores[k] = occurrences > 1 ? 1.0f + (float)(occurrences - 1) * 0.3f : 1.0f;
+            if (keyword_scores[k] > 2.0f) keyword_scores[k] = 2.0f;
+        }
+    }
+
+    /* 阶段2: 在预设原因网络中查找相似错误类型模式 */
+    float best_match_score = 0.0f;
+    const char* best_cause_name = NULL;
+    for (int p = 0; p < g_bayes_presets_count; p++) {
+        if (g_bayes_presets[p].error_type != target_error->type) continue;
+        float match_score = 0.0f;
+        const char* cause = g_bayes_presets[p].cause_name;
+        for (int k = 0; k < 48; k++) {
+            if (keyword_scores[k] > 0 && strstr(cause, error_keywords[k])) {
+                match_score += keyword_scores[k] * g_bayes_presets[p].prior_prob;
+            }
+        }
+        /* 检查是否有学习过的原因增强 */
+        float learned_prior = dc_get_cause_prior(target_error->type, cause, g_bayes_presets[p].prior_prob);
+        if (learned_prior > g_bayes_presets[p].prior_prob) {
+            match_score *= 1.0f + (learned_prior - g_bayes_presets[p].prior_prob) * 2.0f;
+        }
+        if (match_score > best_match_score) {
+            best_match_score = match_score;
+            best_cause_name = cause;
+        }
+    }
+
+    /* 阶段3: 在已有成功规则中查找最相似的修正策略 */
+    const char* best_existing_correction = NULL;
+    float best_rule_score = 0.0f;
+    for (int r = 0; r < dcs->rule_count; r++) {
+        if (dcs->rules[r].usage_count >= 3 && dcs->rules[r].success_rate > 0.5f) {
+            float rule_match = 0.0f;
+            for (int k = 0; k < 48; k++) {
+                if (keyword_scores[k] > 0 && strstr(dcs->rules[r].pattern, error_keywords[k])) {
+                    rule_match += keyword_scores[k];
+                }
+            }
+            rule_match *= dcs->rules[r].success_rate;
+            if (rule_match > best_rule_score) {
+                best_rule_score = rule_match;
+                best_existing_correction = dcs->rules[r].correction;
+            }
+        }
+    }
+
+    /* 阶段4: 如果有失败的规则，降低其权重（惩罚） */
+    if (failed_rule_id > 0) {
+        for (int r = 0; r < dcs->rule_count; r++) {
+            if (dcs->rules[r].rule_id == failed_rule_id) {
+                dcs->rules[r].usage_count++;
+                /* 失败惩罚：权重衰减 */
+                float penalty = 1.0f / (1.0f + (float)(dcs->rules[r].usage_count - dcs->rules[r].success_count));
+                dcs->rules[r].success_rate = dcs->rules[r].success_rate * 0.8f + penalty * 0.2f;
+                if (dcs->rules[r].success_rate < 0.1f) dcs->rules[r].success_rate = 0.1f;
+                break;
+            }
+        }
+    }
+
+    /* 阶段5: 生成新候选规则 */
+    DCCorrectionRule* new_rule = &dcs->rules[dcs->rule_count];
+    memset(new_rule, 0, sizeof(DCCorrectionRule));
+    new_rule->rule_id = dcs->next_rule_id++;
+    new_rule->target_type = target_error->type;
+    new_rule->created_at = time(NULL);
+
+    /* 使用检测到的关键词构建模式名 */
+    char pattern_buf[256] = "";
+    int pattern_pos = 0;
+    for (int k = 0; k < 48 && pattern_pos < 240; k++) {
+        if (keyword_scores[k] > 0 && !strstr(pattern_buf, error_keywords[k])) {
+            pattern_pos += snprintf(pattern_buf + pattern_pos,
+                sizeof(pattern_buf) - (size_t)pattern_pos,
+                "%s%s", (pattern_pos > 0 ? "+" : ""), error_keywords[k]);
+        }
+    }
+    if (pattern_pos == 0) {
+        snprintf(pattern_buf, sizeof(pattern_buf), "自动检测模式_#%d", error_id);
+    }
+    snprintf(new_rule->pattern, sizeof(new_rule->pattern), "%.250s", pattern_buf);
+
+    /* 构建修正策略：优先生成基于最佳匹配原因的修正 */
+    if (best_cause_name && best_match_score > 0.1f) {
+        /* 从已知成功规则中借鉴修正模式 */
+        if (best_existing_correction && best_rule_score > 0.5f) {
+            snprintf(new_rule->correction, sizeof(new_rule->correction),
+                "检查%s相关逻辑：%s", best_cause_name, best_existing_correction);
+        } else {
+            snprintf(new_rule->correction, sizeof(new_rule->correction),
+                "检查并修正%s相关逻辑（自动检测）", best_cause_name);
+        }
+    } else if (best_existing_correction && best_rule_score > 0.3f) {
+        snprintf(new_rule->correction, sizeof(new_rule->correction),
+            "%.200s（适配模式:%s）", best_existing_correction, target_error->description);
+    } else {
+        /* 基于错误类型的通用修正模板 */
+        const char* generic_fixes[] = {
+            "检查语法并修正格式规范",     /* SYNTAX */
+            "审查推理步骤消除逻辑漏洞",   /* LOGIC */
+            "更新知识库条目确保信息准确", /* KNOWLEDGE */
+            "重新评估策略目标和优先级",   /* STRATEGY */
+            "校准传感器提升感知精度",     /* PERCEPTION */
+            "检查执行环境释放资源",       /* EXECUTION */
+            "分析未知错误特征并尝试修正"  /* UNKNOWN */
+        };
+        int type_idx = (int)target_error->type;
+        if (type_idx < 0 || type_idx > 6) type_idx = 6;
+        snprintf(new_rule->correction, sizeof(new_rule->correction),
+            "%s: %.200s", generic_fixes[type_idx], target_error->description);
+    }
+
+    /* 初始成功率为候选规则的预估权重 */
+    /* 公式：基于最佳匹配得分×最优规则得分×贝叶斯先验的综合 */
+    float initial_rate = 0.30f;
+    if (best_match_score > 0) {
+        initial_rate += best_match_score * 0.20f;
+    }
+    if (best_rule_score > 0) {
+        initial_rate += best_rule_score * 0.15f;
+    }
+    /* 严重度低的错误更容易修正 */
+    initial_rate += (1.0f - target_error->severity) * 0.10f;
+    if (initial_rate > 0.60f) initial_rate = 0.60f;
+    if (initial_rate < 0.20f) initial_rate = 0.20f;
+    new_rule->success_rate = initial_rate;
+    new_rule->usage_count = 1;
+    new_rule->success_count = 0;
+    new_rule->last_used = time(NULL);
+
+    dcs->rule_count++;
+
+    /* 同时更新动态学习跟踪：记录该错误类型的新模式 */
+    dc_update_cause_prior(target_error->type, pattern_buf, 0);
+
+    return new_rule->rule_id;
 }
 
 int dc_get_rules(const DCCorrectionSystem* dcs, DCCorrectionRule* out, int max_count) {

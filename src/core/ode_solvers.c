@@ -36,6 +36,7 @@ RosenbrockConfig ode_rosenbrock_default_config(void)
     cfg.use_finite_diff_jacobian = 1;
     cfg.finite_diff_eps = 1e-6f;
     cfg.jacobian_bandwidth = 8;     /* P2-044: 液态NN默认带状宽度，0=全矩阵 */
+    cfg.method_order = 1;           /* P3-001: 默认一阶方法，设为3启用ROS3p三阶 */
     return cfg;
 }
 
@@ -55,7 +56,8 @@ size_t ode_dp54_workspace_size(size_t n)
 
 size_t ode_rosenbrock_workspace_size(size_t n)
 {
-    return (n * n + 5 * n);
+    /* P3-001: 增加工作空间(5n→8n)支持ROS3p三阶方法的额外k向量和临时缓冲区 */
+    return (n * n + 8 * n);
 }
 
 size_t ode_forest_ruth_workspace_size(size_t n)
@@ -1077,6 +1079,16 @@ int ode_mpi_sync_domains(float* y, size_t n, const ParallelODERHSConfig* pcfg)
 #endif
 }
 
+/* ============================================================================
+ * P3-001: 线性系统求解器——高斯消元法 + 就地LU分解
+ *
+ * ros_gauss_eliminate: 复制矩阵到增广矩阵后执行带列主元的高斯消元。
+ * 适用于单次求解的场景（一阶Rosenbrock方法）。
+ *
+ * ros_lu_decompose / ros_lu_solve: 就地LU分解+前向/回代。
+ * 适用于多次求解同一矩阵的场景（ROS3p三阶方法）。
+ * ============================================================================ */
+
 static int ros_gauss_eliminate(float* A, size_t n, float* b, float* x)
 {
     float* system = (float*)malloc((n * (n + 1)) * sizeof(float));
@@ -1129,6 +1141,81 @@ static int ros_gauss_eliminate(float* A, size_t n, float* b, float* x)
 
     free(system);
     return 0;
+}
+
+/* P3-001: 就地LU分解（带列主元），A被就地修改为LU因子
+ * 下三角L的对角线元素均为1（隐式存储），L的非对角线元素存储在A的下三角部分
+ * 上三角U存储在A的上三角部分（含对角线）
+ * 返回0成功，-1矩阵奇异 */
+static int ros_lu_decompose(float* A, size_t n, int* pivot)
+{
+    for (size_t k = 0; k < n; k++)
+    {
+        /* 列主元选择 */
+        size_t pivot_row = k;
+        float max_val = dp54_abs(A[k * n + k]);
+        for (size_t i = k + 1; i < n; i++)
+        {
+            float val = dp54_abs(A[i * n + k]);
+            if (val > max_val) { max_val = val; pivot_row = i; }
+        }
+        if (max_val < SELFLNN_ROSENBROCK_LINSOLVE_TOL) return -1;
+
+        pivot[k] = (int)pivot_row;
+
+        /* 行交换 */
+        if (pivot_row != k)
+        {
+            for (size_t j = 0; j < n; j++)
+            {
+                float tmp = A[k * n + j];
+                A[k * n + j] = A[pivot_row * n + j];
+                A[pivot_row * n + j] = tmp;
+            }
+        }
+
+        /* 高斯消元：计算乘数并更新子矩阵 */
+        float diag = A[k * n + k];
+        for (size_t i = k + 1; i < n; i++)
+        {
+            A[i * n + k] /= diag;
+            float factor = A[i * n + k];
+            for (size_t j = k + 1; j < n; j++)
+                A[i * n + j] -= factor * A[k * n + j];
+        }
+    }
+    return 0;
+}
+
+/* P3-001: 利用LU分解求解线性系统 Ax = b
+ * 步骤：1) 前向代入 Ly = Pb   2) 回代 Ux = y
+ * x可以与b指向同一缓冲区（就地求解） */
+static void ros_lu_solve(const float* LU, size_t n, const int* pivot,
+                         const float* b, float* x)
+{
+    size_t i, j;
+
+    /* 应用行置换：y_perm = P * b（写入x作为临时存储） */
+    for (i = 0; i < n; i++)
+        x[i] = b[pivot[i]];
+
+    /* 前向代入：解 Ly = y_perm（L对角线为1隐式存储）
+     * y[i] = y_perm[i] - Σ_{j=0}^{i-1} L[i][j] * y[j] */
+    for (i = 0; i < n; i++)
+    {
+        for (j = 0; j < i; j++)
+            x[i] -= LU[i * n + j] * x[j];
+    }
+
+    /* 回代：解 Ux = y
+     * x[i] = (y[i] - Σ_{j=i+1}^{n-1} U[i][j] * x[j]) / U[i][i] */
+    for (i = n; i > 0; i--)
+    {
+        size_t idx = i - 1;
+        for (j = idx + 1; j < n; j++)
+            x[idx] -= LU[idx * n + j] * x[j];
+        x[idx] /= LU[idx * n + idx];
+    }
 }
 
 /* P2-044: 带状雅可比矩阵计算
@@ -1207,60 +1294,210 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
     int max_iter = (cfg->max_iterations > 0) ? cfg->max_iterations : 10000;
     float eps_fd = (cfg->finite_diff_eps > 0.0f) ? cfg->finite_diff_eps : 1e-6f;
     int bandw = cfg->jacobian_bandwidth;  /* P2-044: 雅可比带状宽度 */
+    int use_ros3p = (cfg->method_order >= 3);  /* P3-001: 方法阶数选择 */
 
     float* J = workspace;
-    float* k = J + n * n;
-    float* f_n = k + n;
-    float* jac_f0 = f_n + n;
-    float* jac_fp = jac_f0 + n;
-    float* jac_yp = jac_fp + n;
+    float* k1 = workspace + n * n;
+    float* k2 = k1 + n;
+    float* k3 = k2 + n;
+    float* f_n = k3 + n;              /* P3-001: 基态RHS(亦是jac_f0) */
+    float* y_tmp = f_n + n;           /* P3-001: 中间状态(亦是jac_fp) */
+    float* f_tmp = y_tmp + n;         /* P3-001: 中间RHS(亦是jac_yp) */
 
     float t_current = t;
     int total_steps = 0;
 
-    /* 使用固定步长子步进（半隐式欧拉/1级Rosenbrock法）
-       正确公式：(I - h*gamma*J) * k = h*F(y), y_new = y + k */
-    int n_steps = (int)(delta_t / h_max) + 1;
-    if (n_steps < 1) n_steps = 1;
-    /* 一阶方法需要足够步数保证精度：在max_iter预算内细化步长 */
-    if (max_iter > n_steps * 20) {
-        n_steps = n_steps * 20;
-        if (n_steps > max_iter) n_steps = max_iter;
-    }
-    if (n_steps > max_iter) n_steps = max_iter;
-    float h_step = delta_t / (float)n_steps;
-
-    for (int step = 0; step < n_steps; step++)
+    if (use_ros3p)
     {
-        if (rhs(t_current, y, f_n, ctx) != 0) return -2;
+        /* ================================================================
+         * P3-001: ROS3p三阶Rosenbrock方法（3阶段，L-稳定）
+         *
+         * 阶段公式：
+         *   (I - γhJ) k1 = h f(y_n)
+         *   (I - γhJ) k2 = h f(y_n + α21 k1) + h J (γ21 k1)
+         *   (I - γhJ) k3 = h f(y_n + α31 k1 + α32 k2) + h J (γ31 k1 + γ32 k2)
+         * 更新: y_{n+1} = y_n + b1 k1 + b2 k2 + b3 k3
+         *
+         * J@v项通过有限差分计算：J@z ≈ [f(y+εz/||z||) - f(y)] / ε
+         * 矩阵A = I - γhJ 使用就地LU分解，3次回代复用LU因子
+         * ================================================================ */
 
-        if (ros_compute_jacobian(rhs, ctx, t_current, y, J, n, eps_fd,
-                                  jac_f0, jac_fp, jac_yp, bandw) != 0)
-            return -3;
+        /* ROS3P系数（Rang & Angermann, 2005, L-稳定版本） */
+        const float a21 = gamma_val;
+        const float a31 = 0.7f;
+        const float a32 = 0.3f;
+        const float g21 = -0.843435809497848f;   /* γ21 = -(1+γ)/γ 的简化系数 */
+        const float g31 = -1.0f;
+        const float g32 = -0.533333333333333f;   /* -8/15 */
+        const float b1  = 0.0f;
+        const float b2  = 0.7f;
+        const float b3  = 0.3f;
 
-        /* A = I - h_step * gamma_val * J (where J = dF/dy) */
-        for (size_t i = 0; i < n; i++)
-        {
-            for (size_t j = 0; j < n; j++)
-                J[i * n + j] *= -h_step * gamma_val;
-            J[i * n + i] += 1.0f;
+        /* 步骤细化：三阶方法每步精度更高，减少子步数（×5而非×20） */
+        int n_steps = (int)(delta_t / h_max) + 1;
+        if (n_steps < 1) n_steps = 1;
+        if (max_iter > n_steps * 5) {
+            n_steps = n_steps * 5;
+            if (n_steps > max_iter) n_steps = max_iter;
+        }
+        if (n_steps > max_iter) n_steps = max_iter;
+        float h_step = delta_t / (float)n_steps;
+
+        /* 主元追踪数组（堆分配以支持任意n）
+         * 最小化分配：分配一次，多步复用 */
+        int* pivot = (int*)malloc(n * sizeof(int));
+        if (!pivot) {
+            /* 内存不足：回退到一阶方法 */
+            use_ros3p = 0;
         }
 
-        /* RHS = h_step * F(y) */
-        for (size_t i = 0; i < n; i++)
-            k[i] = h_step * f_n[i];
+        if (use_ros3p)
+        {
+            for (int step = 0; step < n_steps; step++)
+            {
+                /* --- 1. 计算雅可比矩阵 J = ∂f/∂y --- */
+                float* jac_f0_ptr = f_n;     /* f_n = jac_f0 */
+                float* jac_fp_ptr = y_tmp;   /* y_tmp = jac_fp */
+                float* jac_yp_ptr = f_tmp;   /* f_tmp = jac_yp */
+                /* 预保存基态RHS */
+                if (rhs(t_current, y, jac_f0_ptr, ctx) != 0) { free(pivot); return -2; }
 
-        if (ros_gauss_eliminate(J, n, k, k) != 0) return -4;
+                if (ros_compute_jacobian(rhs, ctx, t_current, y, J, n, eps_fd,
+                                          jac_f0_ptr, jac_fp_ptr, jac_yp_ptr, bandw) != 0) {
+                    free(pivot); return -3;
+                }
 
-        for (size_t i = 0; i < n; i++)
-            y[i] += k[i];
-        t_current += h_step;
-        total_steps++;
+                /* 基态RHS = jac_f0_ptr，f_n中已有f(y) */
+                for (size_t i = 0; i < n; i++) f_n[i] = jac_f0_ptr[i];
+
+                /* --- 2. 构建A = I - γhJ，然后LU分解（就地修改J→A→LU） --- */
+                for (size_t i = 0; i < n; i++)
+                {
+                    for (size_t j = 0; j < n; j++)
+                        J[i * n + j] *= -h_step * gamma_val;
+                    J[i * n + i] += 1.0f;
+                }
+
+                if (ros_lu_decompose(J, n, pivot) != 0) { free(pivot); return -4; }
+
+                /* --- 3. 阶段1: (I - γhJ) k1 = h f(y_n) --- */
+                for (size_t i = 0; i < n; i++)
+                    y_tmp[i] = h_step * f_n[i];     /* y_tmp用作RHS临时存储 */
+                ros_lu_solve(J, n, pivot, y_tmp, k1);
+
+                /* --- 4. 计算 J@k1（有限差分法，用于阶段2的γ项）--- */
+                float k1_norm = 0.0f;
+                for (size_t i = 0; i < n; i++) k1_norm += k1[i] * k1[i];
+                k1_norm = sqrtf(k1_norm + 1e-12f);
+                float delta1 = eps_fd / k1_norm;
+                for (size_t i = 0; i < n; i++)
+                    y_tmp[i] = y[i] + delta1 * k1[i];
+                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { free(pivot); return -2; }
+                /* J@k1 ≈ (f(y+δ·k1) - f(y)) / δ */
+                for (size_t i = 0; i < n; i++)
+                    k3[i] = (f_tmp[i] - f_n[i]) / delta1;  /* k3 = J@k1 临时存储 */
+
+                /* --- 5. 阶段2: (I - γhJ) k2 = h f(y + a21 k1) + h J (g21 k1) --- */
+                for (size_t i = 0; i < n; i++)
+                    y_tmp[i] = y[i] + a21 * k1[i];
+                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { free(pivot); return -2; }
+                for (size_t i = 0; i < n; i++)
+                    y_tmp[i] = h_step * (f_tmp[i] + g21 * k3[i]);  /* k3 = J@k1 */
+                ros_lu_solve(J, n, pivot, y_tmp, k2);
+
+                /* --- 6. 计算 J@k2（有限差分法，用于阶段3的γ项）--- */
+                float k2_norm = 0.0f;
+                for (size_t i = 0; i < n; i++) k2_norm += k2[i] * k2[i];
+                k2_norm = sqrtf(k2_norm + 1e-12f);
+                float delta2 = eps_fd / k2_norm;
+                for (size_t i = 0; i < n; i++)
+                    y_tmp[i] = y[i] + delta2 * k2[i];
+                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { free(pivot); return -2; }
+                /* f_tmp[0..n-1]存J@k2结果 */
+                for (size_t i = 0; i < n; i++)
+                    f_tmp[i] = (f_tmp[i] - f_n[i]) / delta2;
+
+                /* --- 7. 阶段3: (I - γhJ) k3 = h f(y + a31k1 + a32k2) + h J (g31k1 + g32k2) --- */
+                for (size_t i = 0; i < n; i++)
+                    y_tmp[i] = y[i] + a31 * k1[i] + a32 * k2[i];
+                if (rhs(t_current, y_tmp, f_n, ctx) != 0) { free(pivot); return -2; }
+                for (size_t i = 0; i < n; i++)
+                    y_tmp[i] = h_step * (f_n[i] + g31 * k3[i] + g32 * f_tmp[i]);
+                ros_lu_solve(J, n, pivot, y_tmp, k3);
+
+                /* --- 8. 组合解: y_{n+1} = y_n + b1*k1 + b2*k2 + b3*k3 --- */
+                for (size_t i = 0; i < n; i++)
+                    y[i] += b1 * k1[i] + b2 * k2[i] + b3 * k3[i];
+
+                t_current += h_step;
+                total_steps++;
+            }
+            free(pivot);
+            if (h_actual) *h_actual = t_current - t;
+            if (steps_used) *steps_used = total_steps;
+            return 0;
+        }
     }
 
-    if (h_actual) *h_actual = t_current - t;
-    if (steps_used) *steps_used = total_steps;
-    return 0;
+    /* ================================================================
+     * 一阶半隐式欧拉法（回退方法/默认方法）
+     * 公式: (I - h*γ*J) * k = h*F(y), y_new = y + k
+     * ================================================================ */
+    {
+        float* k = k1;  /* 一阶方法只用k1 */
+        /* 一阶方法工作空间布局(与原实现兼容)
+         * J = workspace[0..n²-1]
+         * k = workspace[n²..n²+n-1]
+         * f_n = workspace[n²+n..n²+2n-1]
+         * jac_f0 = workspace[n²+2n..n²+3n-1]
+         * jac_fp = workspace[n²+3n..n²+4n-1]
+         * jac_yp = workspace[n²+4n..n²+5n-1] */
+        float* jac_f0_1 = f_n;       /* 偏移0: n²+n */
+        float* jac_fp_1 = y_tmp;     /* 偏移1: n²+2n */
+        float* jac_yp_1 = f_tmp;     /* 偏移2: n²+3n */
+
+        int n_steps = (int)(delta_t / h_max) + 1;
+        if (n_steps < 1) n_steps = 1;
+        /* 一阶方法需要足够步数保证精度：在max_iter预算内细化步长 */
+        if (max_iter > n_steps * 20) {
+            n_steps = n_steps * 20;
+            if (n_steps > max_iter) n_steps = max_iter;
+        }
+        if (n_steps > max_iter) n_steps = max_iter;
+        float h_step = delta_t / (float)n_steps;
+
+        for (int step = 0; step < n_steps; step++)
+        {
+            if (rhs(t_current, y, f_n, ctx) != 0) return -2;
+
+            if (ros_compute_jacobian(rhs, ctx, t_current, y, J, n, eps_fd,
+                                      jac_f0_1, jac_fp_1, jac_yp_1, bandw) != 0)
+                return -3;
+
+            /* A = I - h_step * gamma_val * J */
+            for (size_t i = 0; i < n; i++)
+            {
+                for (size_t j = 0; j < n; j++)
+                    J[i * n + j] *= -h_step * gamma_val;
+                J[i * n + i] += 1.0f;
+            }
+
+            /* RHS = h_step * F(y) */
+            for (size_t i = 0; i < n; i++)
+                k[i] = h_step * f_n[i];
+
+            if (ros_gauss_eliminate(J, n, k, k) != 0) return -4;
+
+            for (size_t i = 0; i < n; i++)
+                y[i] += k[i];
+            t_current += h_step;
+            total_steps++;
+        }
+
+        if (h_actual) *h_actual = t_current - t;
+        if (steps_used) *steps_used = total_steps;
+        return 0;
+    }
 }
 
 /* ================================================================

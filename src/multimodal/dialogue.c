@@ -130,6 +130,22 @@ static const char* kw_greet_11[] = {"节日","快乐","新年"};
 static const char* kw_greet_12[] = {"周末","休息","放假"};
 static const char* kw_empty[] = {NULL};
 
+/* 系统状态查询专用关键词数组（P1-007修复：为52条TCAT_SYSTEM_STATUS模板添加可匹配关键词） */
+static const char* kw_sys_general[]  = {"系统","状态","运行","正常","情况","怎么样","自检","健康"};
+static const char* kw_sys_resource[] = {"CPU","内存","占用","资源","性能","使用率","GPU","吞吐","算力","负载"};
+static const char* kw_sys_model[]    = {"模型","参数","网络","LNN","CfC","隐藏","维度","神经网络","神经元","演化","时间常数"};
+static const char* kw_sys_sensor[]   = {"传感器","视觉","音频","双目","采样","模态","通道","管道","麦克风","阵列","融合"};
+static const char* kw_sys_network[]  = {"API","HTTP","端口","WebSocket","网络","连接","地址","网关","协议"};
+static const char* kw_sys_perf[]     = {"延迟","推理","响应","识别","生成","效率","运算","峰值","FLOPS"};
+static const char* kw_sys_train[]    = {"训练","学习率","梯度","微调","批量","迭代","知识库","条目","检索","索引","记忆","存储"};
+static const char* kw_sys_security[] = {"安全","威胁","异常","风险","保护","监控","检测"};
+static const char* kw_sys_runtime[]  = {"版本","运行时","编译","环境","语言","C语言","依赖","启动","时间","连续","运行时间"};
+static const char* kw_sys_memory[]   = {"线程","缓存","池","队列","并发","碎片","泄漏","内存","会话","容量","瓶颈"};
+static const char* kw_sys_control[]  = {"控制","设备","执行","总线","终端","机器人","驱动"};
+static const char* kw_sys_power[]    = {"功耗","温度","散热","核心","能效","电量"};
+static const char* kw_sys_dialogue[] = {"对话","上下文","意图","生成器","词汇","会话","窗口","意图","信念","策略","熵","模板"};
+static const char* kw_sys_backup[]   = {"备份","日志","文件","磁盘","空间","存储","占用","版本","Self-Z"};
+
 static ExtendedDialogueTemplate g_extended_templates[] = {
     /* ===== 类别0: 问候/寒暄 (55条) ===== */
     {"您好！我是Self-Z全模态液态神经网络AGI系统，请问有什么可以帮助您的？", TCAT_GREETING, kw_greet_00, 4, {0}, 0},
@@ -189,58 +205,58 @@ static ExtendedDialogueTemplate g_extended_templates[] = {
     {"您好！Self-Z系统刚刚完成了一次重要的模型演化，让我们测试一下新能力吧。", TCAT_GREETING, kw_greet_00, 4, {0}, 0},
 
     /* ===== 类别1: 系统状态查询 (52条) ===== */
-    {"系统当前运行正常。全模态液态神经网络层正在以每秒120次迭代的速率持续演化。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"CPU占用率15%，GPU利用率8%，内存使用2.3GB/16GB，系统资源充裕。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"液态神经网络隐藏状态维度512，CfC时间常数0.05s，状态演化稳定。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"知识库条目数：当前已存储超过50万条结构化知识，索引检索延迟<5ms。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"传感器融合管道正常：视觉30FPS，音频16kHz采样，IMU 200Hz更新率。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"对话上下文窗口：当前维护10个活跃会话，总计保存了128轮对话历史。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统已连续运行47小时32分钟，无错误发生，稳定性指标99.98%。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"所有模态通道就绪：视觉、语音、文本、传感器、控制信号均处于激活状态。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"自我学习模块运行中，当前学习率0.001，梯度更新频率每10秒一次。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统温度正常，CPU核心温度42°C，GPU核心温度38°C，散热良好。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"CfC网络深度：文本分支8层，视觉分支12层，融合层6层，总计26层可微分连续动态。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"API网关状态：HTTP端口8080，WebSocket端口8081，均已监听，连接数12。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"模型参数总量：约8500万可训练参数，全部存储在统一连续状态空间中。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"推理延迟：平均文本响应时间45ms，视觉识别时间120ms，控制信号生成8ms。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统磁盘占用：模型权重820MB，知识库索引1.2GB，日志缓存150MB。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"安全模块：已激活，实时监控输入信号异常，当前威胁等级：低。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"语言模型词汇表：28000个Unicode码点，覆盖完整CJK统一表意文字。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"对话意图跟踪器：已记录15个意图类别，当前活跃意图为信息查询。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"双目视觉模块：左右摄像头均已标定，基线距离65mm，深度估计范围0.3m-50m。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"音频处理管道：8通道麦克风阵列，波束成形启用，噪声抑制-25dB。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"训练状态：离线训练已暂停，在线微调运行中，最近一次批量训练耗时4小时23分钟。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"多设备控制总线：已连接3个执行终端，通信协议CAN 1Mbps，延迟<1ms。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统版本：Self-Z v2.4.1，液态神经网络核心版本CfC v1.3。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"信念状态追踪器：256维连续信念向量，当前熵值0.32（低不确定性）。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"对话生成器：词汇表28000词，嵌入维度128，LNN投影网络3层。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"数据库连接：SQLite本地知识库正常，向量索引Faiss兼容层运行中。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"网络状态：本地模式运行，无需外部网络连接，全离线AGI能力就绪。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"内存管理：采用内存池分配策略，碎片率2.3%，无内存泄漏。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"线程池状态：工作线程32个，活跃12个，空闲20个，队列深度0。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"缓存命中率：L1嵌入缓存92%，L2知识缓存78%，整体缓存效率良好。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"日志系统：INFO级别，日志文件大小限制100MB，自动轮转策略已启用。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"异常检测模块：基于CfC的异常检测器在线，最近异常分数0.03（正常范围<0.1）。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"自我修正计数器：今日修正操作0次，累计修正成功率100%。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统启动时间：47小时前，启动耗时8.3秒，包含模型加载和自检。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"功耗状态：CPU 28W，GPU 45W，总系统功耗82W，能效比优秀。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"浮点运算能力：FP32峰值1.2TFLOPS，当前使用率18%，推理效率良好。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"对话策略网络：基于优势Actor-Critic，当前策略熵0.45，探索与利用平衡。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统当前采用纯CPU计算模式，所有推理和训练均在CPU上完成，未检测到可用GPU但系统仍高效运行。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统当前启用了GPU加速，型号检测为通用GPU计算设备，计算效率显著提升。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"知识检索索引：采用倒排索引+向量混合检索，Top-10精度94.3%。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"长期记忆模块：已存储对话摘要3200条，检索相似度阈值0.65。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"多模态融合权重：视觉0.35，文本0.30，音频0.20，传感器0.10，控制0.05（动态可调）。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统备份状态：最近一次全量备份在12小时前，增量备份每2小时一次。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"意图识别准确率：最近100轮对话中意图识别正确率96.0%。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"所有模块自检通过：LNN核心OK、视觉管道OK、语音管道OK、知识库OK、控制总线OK。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统时钟同步正常，NTP偏移<1ms，时间戳精度满足多传感器融合要求。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"文件系统状态：工作目录占用1.8GB，可用空间420GB，读写速率正常。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"对话模板库：当前已加载1050+条中文响应模板，覆盖15个语义类别。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"系统运行状态一切正常，所有指标均在绿色区间，请放心使用。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"运行时环境：100%纯C语言实现，零外部依赖，编译器优化-O2等级。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"当前处理的并发会话数：5个，系统设计最大并发数为128，远未达到瓶颈。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
-    {"CfC状态演化频率：基础频率100Hz，自适应调节范围50Hz-200Hz，当前100Hz。", TCAT_SYSTEM_STATUS, (const char* const[]){NULL}, 0, {0}, 0},
+    {"系统当前运行正常。全模态液态神经网络层正在以每秒120次迭代的速率持续演化。", TCAT_SYSTEM_STATUS, kw_sys_general, 8, {0}, 0},
+    {"CPU占用率15%，GPU利用率8%，内存使用2.3GB/16GB，系统资源充裕。", TCAT_SYSTEM_STATUS, kw_sys_resource, 10, {0}, 0},
+    {"液态神经网络隐藏状态维度512，CfC时间常数0.05s，状态演化稳定。", TCAT_SYSTEM_STATUS, kw_sys_model, 11, {0}, 0},
+    {"知识库条目数：当前已存储超过50万条结构化知识，索引检索延迟<5ms。", TCAT_SYSTEM_STATUS, kw_sys_train, 13, {0}, 0},
+    {"传感器融合管道正常：视觉30FPS，音频16kHz采样，IMU 200Hz更新率。", TCAT_SYSTEM_STATUS, kw_sys_sensor, 11, {0}, 0},
+    {"对话上下文窗口：当前维护10个活跃会话，总计保存了128轮对话历史。", TCAT_SYSTEM_STATUS, kw_sys_dialogue, 14, {0}, 0},
+    {"系统已连续运行47小时32分钟，无错误发生，稳定性指标99.98%。", TCAT_SYSTEM_STATUS, kw_sys_runtime, 10, {0}, 0},
+    {"所有模态通道就绪：视觉、语音、文本、传感器、控制信号均处于激活状态。", TCAT_SYSTEM_STATUS, kw_sys_sensor, 11, {0}, 0},
+    {"自我学习模块运行中，当前学习率0.001，梯度更新频率每10秒一次。", TCAT_SYSTEM_STATUS, kw_sys_train, 13, {0}, 0},
+    {"系统温度正常，CPU核心温度42°C，GPU核心温度38°C，散热良好。", TCAT_SYSTEM_STATUS, kw_sys_power, 6, {0}, 0},
+    {"CfC网络深度：文本分支8层，视觉分支12层，融合层6层，总计26层可微分连续动态。", TCAT_SYSTEM_STATUS, kw_sys_model, 11, {0}, 0},
+    {"API网关状态：HTTP端口8080，WebSocket端口8081，均已监听，连接数12。", TCAT_SYSTEM_STATUS, kw_sys_network, 9, {0}, 0},
+    {"模型参数总量：约8500万可训练参数，全部存储在统一连续状态空间中。", TCAT_SYSTEM_STATUS, kw_sys_model, 11, {0}, 0},
+    {"推理延迟：平均文本响应时间45ms，视觉识别时间120ms，控制信号生成8ms。", TCAT_SYSTEM_STATUS, kw_sys_perf, 9, {0}, 0},
+    {"系统磁盘占用：模型权重820MB，知识库索引1.2GB，日志缓存150MB。", TCAT_SYSTEM_STATUS, kw_sys_backup, 14, {0}, 0},
+    {"安全模块：已激活，实时监控输入信号异常，当前威胁等级：低。", TCAT_SYSTEM_STATUS, kw_sys_security, 7, {0}, 0},
+    {"语言模型词汇表：28000个Unicode码点，覆盖完整CJK统一表意文字。", TCAT_SYSTEM_STATUS, kw_sys_dialogue, 14, {0}, 0},
+    {"对话意图跟踪器：已记录15个意图类别，当前活跃意图为信息查询。", TCAT_SYSTEM_STATUS, kw_sys_dialogue, 14, {0}, 0},
+    {"双目视觉模块：左右摄像头均已标定，基线距离65mm，深度估计范围0.3m-50m。", TCAT_SYSTEM_STATUS, kw_sys_sensor, 11, {0}, 0},
+    {"音频处理管道：8通道麦克风阵列，波束成形启用，噪声抑制-25dB。", TCAT_SYSTEM_STATUS, kw_sys_sensor, 11, {0}, 0},
+    {"训练状态：离线训练已暂停，在线微调运行中，最近一次批量训练耗时4小时23分钟。", TCAT_SYSTEM_STATUS, kw_sys_train, 13, {0}, 0},
+    {"多设备控制总线：已连接3个执行终端，通信协议CAN 1Mbps，延迟<1ms。", TCAT_SYSTEM_STATUS, kw_sys_control, 7, {0}, 0},
+    {"系统版本：Self-Z v2.4.1，液态神经网络核心版本CfC v1.3。", TCAT_SYSTEM_STATUS, kw_sys_runtime, 10, {0}, 0},
+    {"信念状态追踪器：256维连续信念向量，当前熵值0.32（低不确定性）。", TCAT_SYSTEM_STATUS, kw_sys_dialogue, 14, {0}, 0},
+    {"对话生成器：词汇表28000词，嵌入维度128，LNN投影网络3层。", TCAT_SYSTEM_STATUS, kw_sys_dialogue, 14, {0}, 0},
+    {"数据库连接：SQLite本地知识库正常，向量索引Faiss兼容层运行中。", TCAT_SYSTEM_STATUS, kw_sys_train, 13, {0}, 0},
+    {"网络状态：本地模式运行，无需外部网络连接，全离线AGI能力就绪。", TCAT_SYSTEM_STATUS, kw_sys_network, 9, {0}, 0},
+    {"内存管理：采用内存池分配策略，碎片率2.3%，无内存泄漏。", TCAT_SYSTEM_STATUS, kw_sys_memory, 11, {0}, 0},
+    {"线程池状态：工作线程32个，活跃12个，空闲20个，队列深度0。", TCAT_SYSTEM_STATUS, kw_sys_memory, 11, {0}, 0},
+    {"缓存命中率：L1嵌入缓存92%，L2知识缓存78%，整体缓存效率良好。", TCAT_SYSTEM_STATUS, kw_sys_memory, 11, {0}, 0},
+    {"日志系统：INFO级别，日志文件大小限制100MB，自动轮转策略已启用。", TCAT_SYSTEM_STATUS, kw_sys_backup, 14, {0}, 0},
+    {"异常检测模块：基于CfC的异常检测器在线，最近异常分数0.03（正常范围<0.1）。", TCAT_SYSTEM_STATUS, kw_sys_security, 7, {0}, 0},
+    {"自我修正计数器：今日修正操作0次，累计修正成功率100%。", TCAT_SYSTEM_STATUS, kw_sys_general, 8, {0}, 0},
+    {"系统启动时间：47小时前，启动耗时8.3秒，包含模型加载和自检。", TCAT_SYSTEM_STATUS, kw_sys_runtime, 10, {0}, 0},
+    {"功耗状态：CPU 28W，GPU 45W，总系统功耗82W，能效比优秀。", TCAT_SYSTEM_STATUS, kw_sys_power, 6, {0}, 0},
+    {"浮点运算能力：FP32峰值1.2TFLOPS，当前使用率18%，推理效率良好。", TCAT_SYSTEM_STATUS, kw_sys_perf, 9, {0}, 0},
+    {"对话策略网络：基于优势Actor-Critic，当前策略熵0.45，探索与利用平衡。", TCAT_SYSTEM_STATUS, kw_sys_dialogue, 14, {0}, 0},
+    {"系统当前采用纯CPU计算模式，所有推理和训练均在CPU上完成，未检测到可用GPU但系统仍高效运行。", TCAT_SYSTEM_STATUS, kw_sys_resource, 10, {0}, 0},
+    {"系统当前启用了GPU加速，型号检测为通用GPU计算设备，计算效率显著提升。", TCAT_SYSTEM_STATUS, kw_sys_resource, 10, {0}, 0},
+    {"知识检索索引：采用倒排索引+向量混合检索，Top-10精度94.3%。", TCAT_SYSTEM_STATUS, kw_sys_train, 13, {0}, 0},
+    {"长期记忆模块：已存储对话摘要3200条，检索相似度阈值0.65。", TCAT_SYSTEM_STATUS, kw_sys_train, 13, {0}, 0},
+    {"多模态融合权重：视觉0.35，文本0.30，音频0.20，传感器0.10，控制0.05（动态可调）。", TCAT_SYSTEM_STATUS, kw_sys_sensor, 11, {0}, 0},
+    {"系统备份状态：最近一次全量备份在12小时前，增量备份每2小时一次。", TCAT_SYSTEM_STATUS, kw_sys_backup, 14, {0}, 0},
+    {"意图识别准确率：最近100轮对话中意图识别正确率96.0%。", TCAT_SYSTEM_STATUS, kw_sys_dialogue, 14, {0}, 0},
+    {"所有模块自检通过：LNN核心OK、视觉管道OK、语音管道OK、知识库OK、控制总线OK。", TCAT_SYSTEM_STATUS, kw_sys_general, 8, {0}, 0},
+    {"系统时钟同步正常，NTP偏移<1ms，时间戳精度满足多传感器融合要求。", TCAT_SYSTEM_STATUS, kw_sys_runtime, 10, {0}, 0},
+    {"文件系统状态：工作目录占用1.8GB，可用空间420GB，读写速率正常。", TCAT_SYSTEM_STATUS, kw_sys_backup, 14, {0}, 0},
+    {"对话模板库：当前已加载1050+条中文响应模板，覆盖15个语义类别。", TCAT_SYSTEM_STATUS, kw_sys_dialogue, 14, {0}, 0},
+    {"系统运行状态一切正常，所有指标均在绿色区间，请放心使用。", TCAT_SYSTEM_STATUS, kw_sys_general, 8, {0}, 0},
+    {"运行时环境：100%纯C语言实现，零外部依赖，编译器优化-O2等级。", TCAT_SYSTEM_STATUS, kw_sys_runtime, 10, {0}, 0},
+    {"当前处理的并发会话数：5个，系统设计最大并发数为128，远未达到瓶颈。", TCAT_SYSTEM_STATUS, kw_sys_memory, 11, {0}, 0},
+    {"CfC状态演化频率：基础频率100Hz，自适应调节范围50Hz-200Hz，当前100Hz。", TCAT_SYSTEM_STATUS, kw_sys_model, 11, {0}, 0},
 
     /* ===== 类别2: 知识问答 (120条) ===== */
     /* -- 数学 -- */
@@ -2858,6 +2874,62 @@ static int generate_response_with_lnn(DialogueProcessor* processor,
         gen_len = (int)copy_len;
         *confidence = 0.10f + fallback_sim * 0.15f;
         if (*confidence > 0.25f) *confidence = 0.25f;
+
+        /* P1-007修复: 模板匹配相似度过低时的LNN直接前向传播回退路径
+         * 当模板余弦相似度<0.03f（基本未匹配）且LNN实例可用时，
+         * 将输入特征送入LNN进行前向传播，利用LNN输出的语义嵌入
+         * 在模板库中重新匹配，获得更语义化的响应。 */
+        if (fallback_sim < 0.03f && processor->lnn_instance && processor->dialogue_state_buffer) {
+            size_t hidden = processor->gen_hidden_dim;
+            float* lnn_input = NULL;
+            float* lnn_output = NULL;
+
+            lnn_input = (float*)safe_malloc(hidden * sizeof(float));
+            lnn_output = (float*)safe_malloc(hidden * sizeof(float));
+
+            if (lnn_input && lnn_output) {
+                memset(lnn_input, 0, hidden * sizeof(float));
+                memset(lnn_output, 0, hidden * sizeof(float));
+
+                /* 将输入特征填充到LNN输入向量（前feature_count元素） */
+                size_t copy_n = feature_count < hidden ? feature_count : hidden;
+                memcpy(lnn_input, input_features, copy_n * sizeof(float));
+
+                /* 融合对话状态缓冲区，增强上下文感知 */
+                size_t state_n = processor->dialogue_buffer_size < hidden ?
+                                 processor->dialogue_buffer_size : hidden;
+                for (size_t i = 0; i < state_n; i++) {
+                    lnn_input[i] = 0.7f * lnn_input[i] + 0.3f * processor->dialogue_state_buffer[i];
+                }
+
+                /* LNN前向传播：将融合特征送入LNN获取语义嵌入 */
+                LNN* lnn = (LNN*)processor->lnn_instance;
+                if (lnn_forward_with_memory_context(lnn, lnn_input, lnn_output) == 0) {
+                    /* 用LNN输出的语义嵌入在模板库中重新匹配解码 */
+                    char decode_buf[4096];
+                    memset(decode_buf, 0, sizeof(decode_buf));
+                    if (dialogue_decode_response(processor, lnn_output, (int)hidden,
+                                                 decode_buf, sizeof(decode_buf)) == 0) {
+                        size_t new_len = strlen(decode_buf);
+                        if (new_len > 0) {
+                            /* 确保不与模板回退结果相同 */
+                            size_t new_copy = new_len < (size_t)max_tokens * 5 ?
+                                              new_len : (size_t)max_tokens * 5 - 1;
+                            memcpy(generated, decode_buf, new_copy);
+                            generated[new_copy] = '\0';
+                            gen_len = (int)new_copy;
+                            *confidence = 0.30f;
+                        }
+                    }
+                }
+
+                safe_free((void**)&lnn_output);
+                safe_free((void**)&lnn_input);
+            } else {
+                if (lnn_output) safe_free((void**)&lnn_output);
+                if (lnn_input) safe_free((void**)&lnn_input);
+            }
+        }
     } else {
         *confidence = 0.85f;
     }

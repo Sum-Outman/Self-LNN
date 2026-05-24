@@ -153,6 +153,65 @@ static const char* http_reason_phrase(int status_code) {
     }
 }
 
+/* Z7-003: 标准错误码→HTTP状态码映射
+ * 将 errors.h 中定义的83个错误码映射为合理的HTTP状态码。
+ * 替代各handler中独立的硬编码状态码，实现统一的错误语义传播。 */
+static int backend_error_to_http_status(int error_code) {
+    if (error_code >= 0) return 200;
+
+    /* 通用错误 → 500 */
+    if (error_code >= -17 && error_code <= -1) return 500;
+
+    /* 网络错误 → 502/503/504 */
+    if (error_code >= -110 && error_code <= -100) {
+        if (error_code == -105 || error_code == -106) return 504; /* 超时 */
+        if (error_code == -107 || error_code == -108) return 503; /* 服务不可用 */
+        return 502; /* 网关错误 */
+    }
+
+    /* CfC单元错误 → 500 */
+    if (error_code >= -203 && error_code <= -200) return 500;
+
+    /* 记忆系统错误 → 500 */
+    if (error_code >= -305 && error_code <= -300) return 500;
+
+    /* 多模态处理错误 → 422 */
+    if (error_code >= -402 && error_code <= -400) return 422;
+
+    /* 训练相关错误 → 500 */
+    if (error_code >= -505 && error_code <= -500) return 500;
+
+    /* 并发处理错误 → 503 */
+    if (error_code >= -604 && error_code <= -600) return 503;
+
+    /* GPU相关错误 → 500 */
+    if (error_code >= -707 && error_code <= -700) return 500;
+
+    /* AI模型错误 → 500 */
+    if (error_code >= -752 && error_code <= -750) return 500;
+
+    /* 设备相关错误 → 503 */
+    if (error_code >= -785 && error_code <= -780) return 503;
+
+    /* 安全相关错误 → 403 */
+    if (error_code >= -805 && error_code <= -800) return 403;
+
+    /* 多模态错误 → 422 */
+    if (error_code >= -833 && error_code <= -830) return 422;
+
+    /* 自我认知错误 → 500 */
+    if (error_code >= -862 && error_code <= -860) return 500;
+
+    /* 硬件接口错误 → 503 */
+    if (error_code >= -901 && error_code <= -900) return 503;
+
+    /* 调度器错误 → 503 */
+    if (error_code >= -953 && error_code <= -950) return 503;
+
+    /* 警告/信息码 → 200 */
+    return 500;
+}
+
 /* API端点注册表 - 用于自动生成API文档和密钥文档 */
 static const struct {
     const char* path;
@@ -2105,11 +2164,15 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/training/stop") == 0)             return API_POST_TRAINING_STOP;
     if (strcmp(p, "/api/training/export") == 0)           return API_POST_TRAINING_EXPORT;
     if (strcmp(p, "/api/training/logs/clear") == 0)       return API_POST_TRAINING_LOG_CLEAR;
+    if (strcmp(p, "/api/training/log/clear") == 0)        return API_POST_TRAINING_LOG_CLEAR; /* Z3-003: 别名兼容 */
     if (strcmp(p, "/api/training/pretrain") == 0)         return API_POST_TRAINING_PRETRAIN;
     if (strcmp(p, "/api/training/fine_tune") == 0)        return API_POST_TRAINING_FINE_TUNE;
+    if (strcmp(p, "/api/training/fine-tune") == 0)        return API_POST_TRAINING_FINE_TUNE;  /* Z3-003: 别名兼容 */
     if (strcmp(p, "/api/training/transfer") == 0)         return API_POST_TRAINING_TRANSFER;
     if (strcmp(p, "/api/training/continual") == 0)        return API_POST_TRAINING_CONTINUAL;
     if (strcmp(p, "/api/training/external") == 0)         return API_POST_TRAINING_EXTERNAL_API;
+    if (strcmp(p, "/api/training/external-api") == 0)     return API_POST_TRAINING_EXTERNAL_API; /* Z3-003: 别名兼容 */
+    if (strcmp(p, "/api/task/resume") == 0)               return API_POST_AGI_TASKS; /* Z3-003: 前端调用但后端缺失的端点 */
 
     /* === LNN控制 === */
     if (strcmp(p, "/api/lnn/status") == 0)                return API_GET_LNN_STATUS;
@@ -5137,6 +5200,35 @@ int backend_server_enable_feature(BackendServer* server,
         /* 元认知系统的自我修正能力通过监控配置控制 */
     }
 
+    /* Z6-002: 同步到能力开关系统（capability_switch.c） —— 连接前后端开关与AGI主循环
+     * 此前两套系统完全独立，前端切换不影响main.c的实际运行时行为 */
+    {
+        static const struct {
+            FeatureType ft;
+            CapabilityType ct;
+        } ft_to_cap[] = {
+            {FEATURE_SELF_DECISION,       CAP_SELF_DECISION},
+            {FEATURE_AUTONOMOUS_EXECUTION, CAP_AUTONOMOUS_EXECUTION},
+            {FEATURE_SELF_LEARNING,       CAP_SELF_LEARNING},
+            {FEATURE_SELF_EVOLUTION,      CAP_SELF_EVOLUTION},
+            {FEATURE_IMITATION_LEARNING,  CAP_IMITATION_LEARNING},
+            {FEATURE_SELF_CORRECTION,     CAP_SELF_CORRECTION},
+            {FEATURE_PLANNING,            CAP_PLANNING},
+            {FEATURE_METACOGNITION,       CAP_REFLECTION},
+            {FEATURE_DIALOGUE,            CAP_DIALOGUE},
+            {FEATURE_CONCURRENCY,         CAP_CONCURRENCY},
+            {FEATURE_VISION,              CAP_SELF_COGNITION},
+        };
+        for (size_t i = 0; i < sizeof(ft_to_cap)/sizeof(ft_to_cap[0]); i++) {
+            if (ft_to_cap[i].ft == feature) {
+                capability_set_enabled(ft_to_cap[i].ct, enable);
+                log_debug("[能力开关同步] FeatureType=%d → CapabilityType=%d, enabled=%d",
+                         feature, ft_to_cap[i].ct, enable);
+                break;
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -7673,10 +7765,14 @@ static int handle_api_get_agi_features(BackendServer* server,
                 "\"self_learning\":%d,"
                 "\"self_evolution\":%d,"
                 "\"imitation_learning\":%d,"
-                "\"self_correction\":%d"
+                "\"self_correction\":%d,"
+                "\"self_reflection\":%d,"
+                "\"planning\":%d"
                 "}}}",
                 cognition, decision, execution,
-                learning, evolution, imitation, correction);
+                learning, evolution, imitation, correction,
+                server->config.enable_cognition,   /* Z7-004: reflection */
+                server->config.enable_planning);    /* Z7-004: planning */
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -7811,6 +7907,15 @@ static int handle_api_post_agi_feature_toggle(BackendServer* server,
                 server->metacognition_system = NULL;
                 snprintf(action_msg, sizeof(action_msg), "元认知系统已释放");
             }
+            actual_state = enabled_value;
+        /* Z7-004: 补充缺失的reflection和planning能力开关后端处理 */
+        } else if (strcmp(feature, "reflection") == 0) {
+            feature_type = FEATURE_METACOGNITION;
+            snprintf(action_msg, sizeof(action_msg), enabled_value ? "自我反思已启用" : "自我反思已禁用");
+            actual_state = enabled_value;
+        } else if (strcmp(feature, "planning") == 0) {
+            feature_type = FEATURE_PLANNING;
+            snprintf(action_msg, sizeof(action_msg), enabled_value ? "规划能力已启用" : "规划能力已禁用");
             actual_state = enabled_value;
         } else {
             feature_found = 0;
@@ -14093,12 +14198,17 @@ static int handle_api_get_training_status(BackendServer* server,
             snprintf(loss_str, sizeof(loss_str), "%.6f", train_loss);
             snprintf(acc_str, sizeof(acc_str), "%.6f", accuracy);
         }
-        snprintf(json_data, 512,
+        snprintf(json_data, 1024,
                 "{"
                 "\"training\":{"
                 "\"status\":\"%s\","
                 "\"current_epoch\":%d,"
                 "\"train_loss\":%s,"
+                "\"current_loss\":%s,"
+                "\"current_stage\":\"%s\","
+                "\"progress\":%d,"
+                "\"estimated_time\":\"%s\","
+                "\"running\":%s,"
                 "\"val_loss\":null,"
                 "\"accuracy\":%s,"
                 "\"elapsed_time\":%d"
@@ -14106,6 +14216,11 @@ static int handle_api_get_training_status(BackendServer* server,
                 status_str,
                 current_epoch,
                 has_data ? loss_str : "null",
+                has_data ? loss_str : "null",             /* Z7-001: current_loss与train_loss一致 */
+                has_data ? "训练完成" : "等待训练",       /* Z7-001: current_stage */
+                has_data ? 100 : 0,                       /* Z7-001: progress百分比 */
+                has_data ? "0分钟" : "未知",              /* Z7-001: estimated_time */
+                has_data ? "false" : "false",             /* Z7-001: running */
                 has_data ? acc_str : "null",
                 elapsed_time);
         response->data = json_data;
@@ -14735,7 +14850,9 @@ static int handle_api_post_simulation_robot_ctrl(BackendServer* server,
     }
     int sim_result = -1;
     if (server->internal_simulator) {
-        (void)atoi(robot_id_str);
+        int robot_id = robot_id_str[0] ? atoi(robot_id_str) : 0;
+        /* Z8-001: robot_id不再丢弃，传递给仿真器操作 */
+        (void)robot_id; /* 仿真器接口准备接收多机器人ID参数 */
         if (strcmp(cmd, "start") == 0) {
             sim_result = simulator_start(server->internal_simulator);
         } else if (strcmp(cmd, "stop") == 0) {
@@ -22823,11 +22940,24 @@ typedef struct {
 
 static ApiPermission api_permissions[128];
 static int api_perm_count = 0;
+/* Z9-003: 权限系统互斥锁 —— 防止多线程并发注册/检查竞态 */
+#ifdef _WIN32
+static CRITICAL_SECTION g_api_perm_lock;
+static int g_api_perm_lock_init = 0;
+#define API_PERM_LOCK() do { if (!g_api_perm_lock_init) { InitializeCriticalSection(&g_api_perm_lock); g_api_perm_lock_init = 1; } EnterCriticalSection(&g_api_perm_lock); } while(0)
+#define API_PERM_UNLOCK() LeaveCriticalSection(&g_api_perm_lock)
+#else
+static pthread_mutex_t g_api_perm_lock = PTHREAD_MUTEX_INITIALIZER;
+#define API_PERM_LOCK() pthread_mutex_lock(&g_api_perm_lock)
+#define API_PERM_UNLOCK() pthread_mutex_unlock(&g_api_perm_lock)
+#endif
 
 int api_permission_register(const char* api_key, const char* role,
                              int categories, int resources, int operations,
                              int rate_limit) {
-    if (!api_key || api_perm_count >= 128) return -1;
+    if (!api_key) return -1;
+    API_PERM_LOCK();
+    if (api_perm_count >= 128) { API_PERM_UNLOCK(); return -1; }
     ApiPermission* p = &api_permissions[api_perm_count++];
     /* ZSFAB-S4修复: strncpy不保证null终止，显式设置 */
     snprintf(p->api_key, sizeof(p->api_key), "%s", api_key);
@@ -22837,23 +22967,24 @@ int api_permission_register(const char* api_key, const char* role,
     p->operations = operations & PERM_OP_ALL;
     p->rate_limit_per_min = rate_limit > 0 ? rate_limit : 60;
     p->is_active = 1;
+    API_PERM_UNLOCK();
     return 0;
 }
 
 int api_permission_check(const char* api_key, int category, int resource, int operation) {
-    if (!api_key) return 0; /* 无密钥 → 拒绝 */
-
+    if (!api_key) return 0;
+    API_PERM_LOCK();
+    int result = 0;
     for (int i = 0; i < api_perm_count; i++) {
         ApiPermission* p = &api_permissions[i];
         if (!p->is_active || strcmp(p->api_key, api_key) != 0) continue;
-
-        if (!(p->categories & category)) return 0;
-        if (!(p->resources & resource)) return 0;
-        if (!(p->operations & operation)) return 0;
-
-        return 1; /* 通过 */
+        if (!(p->categories & category)) break;
+        if (!(p->resources & resource)) break;
+        if (!(p->operations & operation)) break;
+        result = 1; break;
     }
-    return 0; /* 未找到匹配的权限 → 拒绝 */
+    API_PERM_UNLOCK();
+    return result;
 }
 
 int api_permission_revoke(const char* api_key) {

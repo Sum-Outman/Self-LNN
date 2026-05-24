@@ -245,7 +245,235 @@ static int probe_serial_device(const char* port_pattern) {
 }
 
 /*
- * probe_hid_device: 检测人机接口设备（IMU/力传感器等通过HID连接）
+ * ZSFX-025: probe_hid_device — HID报告描述符解析，按传感器类型精准探测
+ *
+ * 使用 Windows Raw Input API 的 RID_DEVICE_INFO_HID 结构体获取：
+ *   - usUsagePage: HID用途页（0x01=通用桌面, 0x20=传感器, 0x05=游戏等）
+ *   - usUsage:    具体用途ID
+ *
+ * HID传感器用途对照表（UsagePage=0x20）：
+ *   加速度计: Usage=0x73 (Accelerometer 3D)
+ *   陀螺仪:   Usage=0x76 (Gyrometer 3D)
+ *   磁力计:   Usage=0x78 (Compass 3D) / 0x79 (Magnetometer 3D)
+ *   温度传感器: Usage=0x04 (Environmental Temperature)
+ *   湿度传感器: Usage=0x07 (Environmental Humidity)
+ *   压力传感器: Usage=0x06 (Environmental Atmospheric Pressure)
+ *
+ * 非传感器的HID设备通过UsagePage区分：
+ *   键盘: UsagePage=0x01, Usage=0x06 | 鼠标: UsagePage=0x01, Usage=0x02
+ *
+ * Linux: 读取 /sys/class/input/event*/device/name 进行名称匹配
+ * 也支持 IIO子系统：/sys/bus/iio/devices/iio:device*/name
+ */
+static int probe_hid_device_sensor_type(DataCollectionSourceType sensor_type) {
+    int found_matching_sensor = 0;
+
+#ifdef _WIN32
+    /* 阶段1: 使用 Raw Input API 枚举设备并解析HID用途 */
+    UINT num_devices = 0;
+    if (GetRawInputDeviceList(NULL, &num_devices, sizeof(RAWINPUTDEVICELIST)) != 0) {
+        return 0;
+    }
+    if (num_devices == 0) return 0;
+
+    RAWINPUTDEVICELIST* device_list = (RAWINPUTDEVICELIST*)malloc(num_devices * sizeof(RAWINPUTDEVICELIST));
+    if (!device_list) return 0;
+
+    if (GetRawInputDeviceList(device_list, &num_devices, sizeof(RAWINPUTDEVICELIST)) == (UINT)-1) {
+        free(device_list);
+        return 0;
+    }
+
+    for (UINT i = 0; i < num_devices; i++) {
+        RID_DEVICE_INFO info;
+        UINT info_size = sizeof(RID_DEVICE_INFO);
+        info.cbSize = sizeof(RID_DEVICE_INFO);
+
+        if (GetRawInputDeviceInfoA(device_list[i].hDevice, RIDI_DEVICEINFO, &info, &info_size) <= 0) {
+            continue;
+        }
+
+        /* 仅处理HID设备类型 */
+        if (info.dwType != RIM_TYPEHID) continue;
+
+        USHORT usage_page = info.hid.usUsagePage;
+        USHORT usage = info.hid.usUsage;
+
+        switch (sensor_type) {
+            case DC_SOURCE_IMU:
+                /* IMU: 加速度计(0x73) 或 陀螺仪(0x76) */
+                if (usage_page == 0x20 && (usage == 0x73 || usage == 0x76)) {
+                    found_matching_sensor = 1;
+                }
+                /* 备用: 游戏手柄/摇杆中的IMU (UsagePage=0x01, Usage=0x04/0x05) */
+                if (usage_page == 0x01 && (usage == 0x04 || usage == 0x05)) {
+                    found_matching_sensor = 1;
+                }
+                break;
+
+            case DC_SOURCE_TEMPERATURE:
+                /* 温度传感器: UsagePage=0x20, Usage=0x04 (环境温度) */
+                if (usage_page == 0x20 && usage == 0x04) {
+                    found_matching_sensor = 1;
+                }
+                break;
+
+            case DC_SOURCE_HUMIDITY:
+                /* 湿度传感器: UsagePage=0x20, Usage=0x07 (环境湿度) */
+                if (usage_page == 0x20 && usage == 0x07) {
+                    found_matching_sensor = 1;
+                }
+                break;
+
+            case DC_SOURCE_PRESSURE:
+                /* 压力/气压传感器: UsagePage=0x20, Usage=0x06 */
+                if (usage_page == 0x20 && usage == 0x06) {
+                    found_matching_sensor = 1;
+                }
+                break;
+
+            case DC_SOURCE_FORCE_TORQUE:
+                /* 力/力矩传感器: UsagePage=0x20 Usage=0x20-0x2F范围 */
+                if (usage_page == 0x20 && (usage >= 0x20 && usage <= 0x2F)) {
+                    found_matching_sensor = 1;
+                }
+                break;
+
+            case DC_SOURCE_PROXIMITY:
+                /* 接近传感器: UsagePage=0x20, Usage=0x11 (Proximity) */
+                if (usage_page == 0x20 && usage == 0x11) {
+                    found_matching_sensor = 1;
+                }
+                break;
+
+            default:
+                /* 通用HID探测：任何HID设备都算匹配 */
+                found_matching_sensor = 1;
+                break;
+        }
+
+        if (found_matching_sensor) break;
+    }
+
+    free(device_list);
+
+#else
+    /* Linux: 读取输入设备名称和IIO子系统 */
+    for (int i = 0; i < 32; i++) {
+        char path[128];
+        char name[128] = "";
+
+        /* 先尝试 /sys/class/input/eventN/device/name */
+        snprintf(path, sizeof(path), "/sys/class/input/event%d/device/name", i);
+        FILE* fp = fopen(path, "r");
+        if (fp) {
+            if (fgets(name, sizeof(name), fp)) {
+                size_t len = strlen(name);
+                if (len > 0 && name[len - 1] == '\n') name[len - 1] = '\0';
+            }
+            fclose(fp);
+
+            /* 基于名称匹配传感器类型 */
+            switch (sensor_type) {
+                case DC_SOURCE_IMU:
+                    if (strstr(name, "accelerometer") || strstr(name, "加速度") ||
+                        strstr(name, "gyro") || strstr(name, "陀螺") ||
+                        strstr(name, "imu") || strstr(name, "IMU") ||
+                        strstr(name, "motion")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                case DC_SOURCE_TEMPERATURE:
+                    if (strstr(name, "temperature") || strstr(name, "温度") ||
+                        strstr(name, "thermal") || strstr(name, "temp")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                case DC_SOURCE_HUMIDITY:
+                    if (strstr(name, "humidity") || strstr(name, "湿度") ||
+                        strstr(name, "hygro")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                case DC_SOURCE_PRESSURE:
+                    if (strstr(name, "pressure") || strstr(name, "压力") ||
+                        strstr(name, "barometer") || strstr(name, "气压")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                case DC_SOURCE_FORCE_TORQUE:
+                    if (strstr(name, "force") || strstr(name, "力") ||
+                        strstr(name, "torque") || strstr(name, "力矩")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                case DC_SOURCE_PROXIMITY:
+                    if (strstr(name, "proximity") || strstr(name, "接近") ||
+                        strstr(name, "distance") || strstr(name, "距离")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                default:
+                    found_matching_sensor = 1;
+                    break;
+            }
+        }
+
+        if (found_matching_sensor) break;
+
+        /* 再尝试 IIO子系统: /sys/bus/iio/devices/iio:deviceN/name */
+        snprintf(path, sizeof(path), "/sys/bus/iio/devices/iio:device%d/name", i);
+        fp = fopen(path, "r");
+        if (fp) {
+            memset(name, 0, sizeof(name));
+            if (fgets(name, sizeof(name), fp)) {
+                size_t len = strlen(name);
+                if (len > 0 && name[len - 1] == '\n') name[len - 1] = '\0';
+            }
+            fclose(fp);
+
+            /* IIO传感器名称匹配 */
+            switch (sensor_type) {
+                case DC_SOURCE_IMU:
+                    if (strstr(name, "accel") || strstr(name, "gyro") ||
+                        strstr(name, "imu") || strstr(name, "mpu") ||
+                        strstr(name, "bmi") || strstr(name, "lsm")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                case DC_SOURCE_TEMPERATURE:
+                    if (strstr(name, "temp") || strstr(name, "bmp") ||
+                        strstr(name, "hts") || strstr(name, "sht")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                case DC_SOURCE_HUMIDITY:
+                    if (strstr(name, "humidity") || strstr(name, "hts") ||
+                        strstr(name, "sht") || strstr(name, "hdc")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                case DC_SOURCE_PRESSURE:
+                    if (strstr(name, "pressure") || strstr(name, "baro") ||
+                        strstr(name, "bmp") || strstr(name, "lps")) {
+                        found_matching_sensor = 1;
+                    }
+                    break;
+                default:
+                    found_matching_sensor = 1;
+                    break;
+            }
+        }
+
+        if (found_matching_sensor) break;
+    }
+#endif
+
+    return found_matching_sensor;
+}
+
+/*
+ * probe_hid_device: 旧版兼容接口（无参数，检测任意HID设备）
  */
 static int probe_hid_device(void) {
 #ifdef _WIN32
@@ -297,27 +525,36 @@ static int probe_sensor(DataSourceSlot* slot) {
 
     switch (slot->type) {
     case DC_SOURCE_IMU:
-        /* IMU可通过HID/I2C/SPI连接 */
-        detected = probe_hid_device();
+        /* ZSFX-025: IMU通过HID精确探测（UsagePage=0x20, Usage=0x73/0x76） */
+        detected = probe_hid_device_sensor_type(DC_SOURCE_IMU);
         break;
     case DC_SOURCE_TEMPERATURE:
+        /* 温度传感器通过HID精确探测（UsagePage=0x20, Usage=0x04） */
+        detected = probe_hid_device_sensor_type(DC_SOURCE_TEMPERATURE) || probe_serial_device(NULL);
+        break;
     case DC_SOURCE_HUMIDITY:
+        /* 湿度传感器通过HID精确探测（UsagePage=0x20, Usage=0x07） */
+        detected = probe_hid_device_sensor_type(DC_SOURCE_HUMIDITY) || probe_serial_device(NULL);
+        break;
     case DC_SOURCE_PRESSURE:
-        /* 环境传感器通常通过I2C或串口连接 */
-        detected = probe_serial_device(NULL) || probe_hid_device();
+        /* 压力传感器通过HID精确探测（UsagePage=0x20, Usage=0x06） */
+        detected = probe_hid_device_sensor_type(DC_SOURCE_PRESSURE) || probe_serial_device(NULL);
         break;
     case DC_SOURCE_LIDAR:
         /* 激光雷达通常通过以太网或串口连接 */
         detected = probe_network_sensor() || probe_serial_device(NULL);
         break;
     case DC_SOURCE_MOTOR_ENCODER:
-    case DC_SOURCE_FORCE_TORQUE:
-        /* 电机编码器和力/力矩传感器通过CAN/串口/HID连接 */
+        /* 电机编码器通过CAN/串口/HID连接 */
         detected = probe_serial_device(NULL) || probe_hid_device();
         break;
+    case DC_SOURCE_FORCE_TORQUE:
+        /* 力/力矩传感器通过HID（UsagePage=0x20, Usage=0x20-0x2F）或串口连接 */
+        detected = probe_hid_device_sensor_type(DC_SOURCE_FORCE_TORQUE) || probe_serial_device(NULL);
+        break;
     case DC_SOURCE_PROXIMITY:
-        /* 接近传感器通过GPIO/串口连接 */
-        detected = probe_serial_device(NULL);
+        /* 接近传感器通过HID（UsagePage=0x20, Usage=0x11）或串口连接 */
+        detected = probe_hid_device_sensor_type(DC_SOURCE_PROXIMITY) || probe_serial_device(NULL);
         break;
     default:
         break;
@@ -790,4 +1027,62 @@ int dcpipeline_has_real_data(DataCollectionPipeline* pipeline) {
 
     mutex_unlock(pipeline->lock);
     return has_data;
+}
+
+/* Z5-005: 训练数据批量采集入口 —— 之前此函数声明但从未实现
+ * 将多模态采集管道的实时数据转换为训练批次格式
+ * 供训练管线(training_pipeline.c)调用以获取真实训练数据 */
+int dcpipeline_collect_training_batch(DataCollectionPipeline* pipeline,
+                                       float* batch_data, size_t batch_size,
+                                       float* batch_labels, size_t label_size,
+                                       int max_samples) {
+    if (!pipeline || !batch_data || !batch_labels || max_samples <= 0) return -1;
+    if (!pipeline->initialized) return -2;
+
+    mutex_lock(pipeline->lock);
+
+    int collected = 0;
+    CollectionSnapshot snapshot;
+    memset(&snapshot, 0, sizeof(CollectionSnapshot));
+
+    for (int sample = 0; sample < max_samples; sample++) {
+        int has_data = 0;
+        for (int i = 0; i < DC_SOURCE_COUNT && !has_data; i++) {
+            if (pipeline->slots[i].enabled &&
+                pipeline->slots[i].hardware_detected &&
+                pipeline->slots[i].latest_frame.data_size > 0) {
+                has_data = 1;
+            }
+        }
+        if (!has_data) break;
+
+        /* 采集一份快照 */
+        if (dcpipeline_collect_internal(pipeline, &snapshot) != 0) break;
+
+        /* 将多模态数据展平到训练批次中 */
+        /* 图像数据（取第一帧RGB） */
+        if (snapshot.num_images > 0 && snapshot.images[0].rgb_data) {
+            size_t img_size = (size_t)(snapshot.images[0].width * snapshot.images[0].height * snapshot.images[0].channels);
+            size_t copy_size = img_size < (batch_size / (size_t)(max_samples)) ? img_size : (batch_size / (size_t)(max_samples));
+            if (collected * (batch_size / (size_t)max_samples) + copy_size <= batch_size) {
+                memcpy(batch_data + collected * (batch_size / (size_t)max_samples),
+                       snapshot.images[0].rgb_data, copy_size * sizeof(float));
+            }
+        }
+        /* 音频数据 */
+        if (snapshot.num_audio_frames > 0 && snapshot.audio_frames[0].samples) {
+            float avg = 0;
+            for (int j = 0; j < snapshot.audio_frames[0].num_samples && j < 256; j++) {
+                avg += snapshot.audio_frames[0].samples[j];
+            }
+            batch_labels[collected] = avg / 256.0f;
+        }
+
+        dcpipeline_free_snapshot(&snapshot);
+        collected++;
+        if ((size_t)collected >= batch_size) break;
+    }
+
+    mutex_unlock(pipeline->lock);
+    return collected;
 }

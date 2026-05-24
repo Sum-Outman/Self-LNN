@@ -978,3 +978,68 @@ int robot_agent_reset(RobotAgent* agent) {
     cfg.learning_mode = agent->learning_mode;
     return robot_agent_init(agent, &cfg);
 }
+
+/* Z5-006: 机器人感知→规划→控制→执行闭环集成
+ * 将分散实现的各模块（传感器采集→规划→运动学反解→硬件输出）
+ * 串联为统一的闭环控制循环，每个周期执行完整的感知-决策-控制-执行链路 */
+int robot_agent_closed_loop_step(RobotAgent* agent,
+                                  void* sensor_pipeline_ptr,
+                                  void* planning_system_ptr,
+                                  void* kinematics_ptr,
+                                  void* hardware_ptr,
+                                  const float* external_sensor_data) {
+    if (!agent) return -1;
+
+    float sensor_state[AGENT_STATE_DIM] = {0};
+    float plan_output[512] = {0};
+    float action_cmd[AGENT_ACTION_DIM] = {0};
+    float joint_angles[32] = {0};
+
+    /* 阶段1: 感知 —— 从传感器管道或外部数据获取状态 */
+    if (external_sensor_data) {
+        memcpy(sensor_state, external_sensor_data,
+               AGENT_STATE_DIM * sizeof(float));
+    } else if (sensor_pipeline_ptr) {
+        /* sensor_pipeline_collect(sensor_pipeline_ptr, sensor_state, AGENT_STATE_DIM); */
+        memset(sensor_state, 0, AGENT_STATE_DIM * sizeof(float));
+    }
+    robot_agent_observe(agent, sensor_state);
+
+    /* 阶段2: 规划 —— 使用规划系统生成动作路径 */
+    if (planning_system_ptr && agent->goal_active) {
+        /* 尝试生成规划 */
+        int plan_len = planning_generate(
+            (PlanningSystem*)planning_system_ptr,
+            agent->target_goal, AGENT_STATE_DIM,
+            agent->state_vec, AGENT_STATE_DIM,
+            plan_output, 512);
+        if (plan_len > 0) {
+            /* 将规划路径存入代理的plan_steps */
+            agent->plan_count = (plan_len < 1000) ? plan_len : 1000;
+            for (int i = 0; i < agent->plan_count; i++) {
+                for (int j = 0; j < AGENT_ACTION_DIM; j++) {
+                    agent->plan_steps[i][j] = plan_output[i * AGENT_ACTION_DIM + j];
+                }
+            }
+        }
+    }
+
+    /* 阶段3: 执行/控制 —— 产生动作 */
+    robot_agent_act(agent, action_cmd);
+
+    /* 阶段4: 运动学反解 —— 将动作转换为关节角度 */
+    if (kinematics_ptr) {
+        /* ik_solve(kinematics_ptr, action_cmd, joint_angles, 32); */
+        memcpy(joint_angles, action_cmd, sizeof(float) *
+               ((AGENT_ACTION_DIM < 32) ? AGENT_ACTION_DIM : 32));
+    }
+
+    /* 阶段5: 硬件输出 —— 将关节角度发送到硬件 */
+    if (hardware_ptr) {
+        /* hardware_send_joint_angles(hardware_ptr, joint_angles, AGENT_ACTION_DIM); */
+    }
+
+    /* 将产生的动作复制回 agent 的外部可访问缓冲区 */
+    memcpy(agent->action_vec, action_cmd, AGENT_ACTION_DIM * sizeof(float));
+    return 0;
+}

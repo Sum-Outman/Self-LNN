@@ -22,6 +22,7 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/core/lnn.h"           /* F-017: LNN状态转移 */
 #include "selflnn/selflnn.h"           /* F-017: selflnn_get_lnn */
+#include "selflnn/reasoning/hierarchical_planning.h" /* ZSFX-019: 分层规划真实API */
 
 #include <stdlib.h>
 #include <string.h>
@@ -162,31 +163,179 @@ static int gp_subroutine_evolve(PlanningSystem* system, float* gp_weights, size_
 
 static float planning_evolution_evaluate_fitness(PlanningSystem* system, const float* genome) {
     if (!system || !genome) return -1e10f;
+
+    /* ZSFX-020修复: 多目标适应度评估
+     * 目标1: 任务性能 —— 基于可行性历史的真实任务表现权重
+     * 目标2: 种群多样性 —— 与种群均值的距离，鼓励多样性
+     * 目标3: 探索新颖性 —— 与当前启发式权重的距离，鼓励探索而非趋同
+     * 权重可配置，默认三目标均等(各占1/3) */
     float fitness = 0.0f;
     size_t w_size = system->heuristic_weights_size;
+    size_t genome_len = system->evolution_genome_size;
+
+    /* 多目标权重配置（归一化后使用） */
+    float w_task = system->multi_objective_config.task_weight > 0.0f ?
+                   system->multi_objective_config.task_weight : 0.34f;
+    float w_diversity = system->multi_objective_config.diversity_weight > 0.0f ?
+                        system->multi_objective_config.diversity_weight : 0.33f;
+    float w_novelty = system->multi_objective_config.novelty_weight > 0.0f ?
+                      system->multi_objective_config.novelty_weight : 0.33f;
+    float w_sum = w_task + w_diversity + w_novelty;
+    if (w_sum > 0.0f) { w_task /= w_sum; w_diversity /= w_sum; w_novelty /= w_sum; }
+
+    /* ===== 目标1: 任务性能评估 =====
+     * 基于可行性历史衡量基因组质量：使用近期规划成功率与可行性趋势
+     * 作为真实任务性能的代理指标，鼓励靠近已验证有效的参数区域 */
+    float task_score = 0.0f;
     if (w_size > 0 && system->heuristic_weights) {
-        for (size_t i = 0; i < w_size; i++) {
-            float diff = genome[i] - system->heuristic_weights[i];
-            fitness -= fabsf(diff) * 0.5f;
-        }
-    }
-    float risk_tol = genome[w_size];
-    float goal_tol = genome[w_size + 1];
-    fitness += system->config.risk_tolerance * (1.0f - fabsf(risk_tol - system->config.risk_tolerance));
-    fitness += system->config.goal_tolerance * (1.0f - fabsf(goal_tol - system->config.goal_tolerance));
-    fitness += system->config.max_plan_length * 0.01f;
-    if (system->evolution_population && system->evolution_population_size > 1) {
-        float div = 0.0f;
-        for (size_t i = 0; i < system->evolution_population_size; i++) {
-            const float* other = system->evolution_population + i * system->evolution_genome_size;
-            float d = 0.0f;
-            for (size_t j = 0; j < system->evolution_genome_size && j < w_size + 2; j++) {
-                d += fabsf(genome[j] - other[j]);
+        /* 使用近期可行性历史计算加权基线 */
+        float hist_avg = 0.0f;
+        if (system->feasibility_history_count > 0) {
+            for (int i = 0; i < system->feasibility_history_count && i < 20; i++) {
+                hist_avg += system->feasibility_history[i];
             }
-            div += d;
+            hist_avg /= (float)system->feasibility_history_count;
+        } else {
+            hist_avg = 0.5f; /* 无历史时使用中性值 */
         }
-        fitness += div / (float)system->evolution_population_size * 0.1f;
+        hist_avg = fmaxf(0.1f, fminf(0.9f, hist_avg));
+
+        /* 高性能(hist_avg高)时偏向收敛，低性能时偏向探索 */
+        float exploit_factor = hist_avg;
+        float explore_factor = 1.0f - hist_avg;
+
+        /* 任务性能分量: 与启发式权重的加权余弦相似度 */
+        float aligned_sum = 0.0f;
+        float norm_genome = 0.0f, norm_heuristic = 0.0f;
+        for (size_t i = 0; i < w_size && i < genome_len; i++) {
+            aligned_sum += genome[i] * system->heuristic_weights[i];
+            norm_genome += genome[i] * genome[i];
+            norm_heuristic += system->heuristic_weights[i] * system->heuristic_weights[i];
+        }
+        float cosine_sim = 0.0f;
+        if (norm_genome > 1e-10f && norm_heuristic > 1e-10f) {
+            cosine_sim = aligned_sum / (sqrtf(norm_genome) * sqrtf(norm_heuristic));
+        }
+        cosine_sim = fmaxf(-1.0f, fminf(1.0f, cosine_sim));
+
+        /* 根据可行性自适应: 高可行性时余弦相似度更有利；
+         * 低可行性时降低其权重，让探索发挥更大作用 */
+        task_score = cosine_sim * exploit_factor * 0.8f;
+
+        /* 惩罚项: 仅对极端偏离施加温和惩罚（而非原来对所有偏离都惩罚） */
+        for (size_t i = 0; i < w_size && i < genome_len; i++) {
+            float diff = fabsf(genome[i] - system->heuristic_weights[i]);
+            if (diff > 2.0f) {
+                task_score -= (diff - 2.0f) * 0.1f; /* 仅极异常时惩罚 */
+            }
+        }
     }
+
+    /* 风险/目标容忍度与配置的对齐度 */
+    if (w_size < genome_len) {
+        float risk_tol = genome[w_size];
+        float goal_tol = genome[w_size + 1];
+        float risk_align = 1.0f - fminf(1.0f, fabsf(risk_tol - system->config.risk_tolerance));
+        float goal_align = 1.0f - fminf(1.0f, fabsf(goal_tol - system->config.goal_tolerance));
+        task_score += (risk_align + goal_align) * 0.1f;
+    }
+
+    fitness += w_task * task_score;
+
+    /* ===== 目标2: 种群多样性奖励 =====
+     * 计算当前基因组与种群中所有其他个体的平均距离，
+     * 距离越大说明该基因组越独特，多样性越高 */
+    float diversity_score = 0.0f;
+    if (system->evolution_population && system->evolution_population_size > 1) {
+        /* 先计算种群均值 */
+        float* pop_mean = (float*)calloc(genome_len, sizeof(float));
+        if (pop_mean) {
+            for (size_t i = 0; i < system->evolution_population_size; i++) {
+                const float* other = system->evolution_population + i * genome_len;
+                for (size_t j = 0; j < genome_len; j++) {
+                    pop_mean[j] += other[j];
+                }
+            }
+            for (size_t j = 0; j < genome_len; j++) {
+                pop_mean[j] /= (float)system->evolution_population_size;
+            }
+
+            /* 与种群均值的欧氏距离 */
+            float dist_to_mean = 0.0f;
+            for (size_t j = 0; j < genome_len; j++) {
+                float d = genome[j] - pop_mean[j];
+                dist_to_mean += d * d;
+            }
+            dist_to_mean = sqrtf(dist_to_mean);
+
+            /* 归一化到合理范围，奖励适度的多样性 */
+            float max_expected_dist = sqrtf((float)genome_len) * 2.0f;
+            float normalized_div = fminf(1.0f, dist_to_mean / (max_expected_dist + 1e-8f));
+
+            /* 高多样性得到奖励；与均值太近得到惩罚 */
+            if (normalized_div < 0.05f) {
+                diversity_score = -0.3f; /* 过于聚集，强惩罚 */
+            } else if (normalized_div < 0.15f) {
+                diversity_score = normalized_div * 0.5f - 0.1f; /* 轻微负分 */
+            } else {
+                diversity_score = normalized_div * 0.8f; /* 正奖励 */
+            }
+
+            free(pop_mean);
+        }
+    }
+
+    fitness += w_diversity * diversity_score;
+
+    /* ===== 目标3: 探索新颖性奖励 =====
+     * 鼓励探索与当前系统状态不同的参数区域，
+     * 防止进化趋同于现有启发式权重。 */
+    float novelty_score = 0.0f;
+    if (w_size > 0 && system->heuristic_weights) {
+        /* 与启发式权重的标准化距离: 距离越大奖励越高(探索) */
+        float novelty_dist = 0.0f;
+        for (size_t i = 0; i < w_size && i < genome_len; i++) {
+            float diff = genome[i] - system->heuristic_weights[i];
+            novelty_dist += diff * diff;
+        }
+        novelty_dist = sqrtf(novelty_dist);
+
+        /* 归一化：预期最大距离约为sqrt(w_size)*2 */
+        float max_dist = sqrtf((float)w_size) * 2.0f + 1e-8f;
+        float norm_novelty = fminf(1.0f, novelty_dist / max_dist);
+
+        /* 新颖性奖励: 适度的新颖性获得最高奖励 */
+        /* 太近(趋同)无奖励，太远(随机)也行但略低，最佳在0.3-0.7范围 */
+        if (norm_novelty < 0.1f) {
+            novelty_score = -0.2f; /* 趋同惩罚 */
+        } else if (norm_novelty < 0.5f) {
+            novelty_score = norm_novelty * 2.0f; /* 线性增长到1.0 */
+        } else {
+            novelty_score = 1.0f - (norm_novelty - 0.5f) * 0.5f; /* 缓慢下降 */
+        }
+
+        /* 执行偏离历史: 如果连续失败较多，额外奖励探索 */
+        if (system->consecutive_failures > 3) {
+            float fail_bonus = fminf(1.0f, (float)(system->consecutive_failures - 3) / 10.0f);
+            novelty_score += fail_bonus * 0.5f;
+        }
+
+        /* 可行性趋势: 可行性下降时加强探索 */
+        if (system->feasibility_history_count >= 3) {
+            int idx = system->feasibility_history_count;
+            float recent = system->feasibility_history[(idx - 1) % 20];
+            float older = system->feasibility_history[(idx - 3) % 20];
+            if (recent < older && recent < 0.4f) {
+                novelty_score += 0.2f; /* 性能下降，奖励探索 */
+            }
+        }
+    }
+
+    fitness += w_novelty * novelty_score;
+
+    /* 微小的基准项，避免零或负适应度导致选择问题 */
+    fitness += system->config.max_plan_length * 0.005f;
+
     return fitness;
 }
 
@@ -1720,20 +1869,21 @@ int planning_generate(PlanningSystem* system,
                     int branch_factor = 8; /* 每个节点8个候选动作方向 */
                     for (int b = 0; b < branch_factor && node_count < MCTS_MAX_NODES; b++) {
                         float angle = (float)b * 2.0f * 3.14159f / (float)branch_factor;
-                        (void)angle; /* MCTS方向角度保留用于后续动作空间扩展 */
                         int new_idx = node_count++;
                         MCTSNode* child = &nodes[new_idx];
                         
-                        /* 生成动作方向 */
+                        /* 生成动作方向 — 使用角度控制方向性 */
                         memcpy(child->state, nodes[current].state, state_size * sizeof(float));
                         float action_scale = 0.05f / (1.0f + (float)nodes[current].depth * 0.1f);
                         child->depth = nodes[current].depth + 1;
                         
                         for (size_t d = 0; d < state_size && d < MAX_STATE_DIMENSION; d++) {
                             float goal_diff = goal[d] - nodes[current].state[d];
+                            /* 方向性探索：使用角度分量指导动作方向 */
+                            float directional_component = cosf(angle + (float)d * 0.5f) * action_scale * goal_diff;
                             float explore_comp = (plan_rng_uniform(-1.0f, 1.0f) + 
                                 (goal_diff > 0 ? 1.0f : -1.0f)) * action_scale;
-                            child->state[d] += explore_comp;
+                            child->state[d] += explore_comp + directional_component;
                             child->state[d] = CLAMP(child->state[d], -3.0f, 3.0f);
                             
                             float dist = goal[d] - child->state[d];
@@ -1899,77 +2049,137 @@ int planning_generate(PlanningSystem* system,
             break;
         }
         case PLANNING_HIERARCHICAL: {
-            /* P0-009修复: 实现真实的分层规划 — 将目标分解为子目标树
-             * 层次结构：战略层(粗粒度子目标) → 战术层(细粒度子目标) → 执行层(微步)
-             * 每个层次独立规划，上层结果作为下层约束。 */
-            float state[MAX_STATE_DIMENSION];
-            memcpy(state, current_state, state_size * sizeof(float));
-
+            /* ZSFX-019修复: 调用hierarchical_planning.c的真实HTN/POP/HRL算法
+             * 条件编译桥接：优先使用真实分层规划API，
+             * 当API不可用或调用失败时回退到本地分层近似实现。 */
             #define HP_MAX_LEVELS 3
             #define HP_MAX_SUBGOALS 8
 
-            /* 定义层次结构 */
-            int levels[] = {2, 4, 8}; /* 每层的子目标数 */
-            float step_sizes[] = {0.3f, 0.15f, 0.05f};
+            int hp_used_real_api = 0;
 
-            for (int level = 0; level < HP_MAX_LEVELS && steps < max_steps; level++) {
-                int num_subgoals = levels[level];
-                if (num_subgoals > HP_MAX_SUBGOALS) num_subgoals = HP_MAX_SUBGOALS;
-                float step = step_sizes[level];
+            /* 尝试使用真实分层规划API */
+            {
+                HierarchicalPlanningConfig hp_config;
+                memset(&hp_config, 0, sizeof(hp_config));
+                hp_config.algorithm = HIERARCHICAL_HTN;
+                hp_config.max_hierarchy_levels = HP_MAX_LEVELS;
+                hp_config.abstraction_threshold = 0.3f;
+                hp_config.decomposition_granularity = 0.5f;
+                hp_config.decomposition_method = DECOMPOSITION_AND_OR;
+                hp_config.enable_backtracking = 1;
+                hp_config.max_backtrack_steps = 16;
+                hp_config.risk_propagation_factor = 0.2f;
+                hp_config.enable_parallel_decomposition = 0;
+                hp_config.enable_dynamic_hierarchy = 1;
+                hp_config.learning_rate = 0.001f;
+                hp_config.discount_factor = 0.95f;
+                hp_config.enable_transfer_learning = 0;
 
-                /* 为当前层生成子目标（在当前位置与最终目标之间均匀分布） */
-                float subgoals[HP_MAX_SUBGOALS * MAX_STATE_DIMENSION];
-                float level_start[MAX_STATE_DIMENSION];
-                memcpy(level_start, state, state_size * sizeof(float));
+                HierarchicalPlanningSystem* hp_system = hierarchical_planning_system_create(&hp_config);
+                if (hp_system) {
+                    /* 任务分解 */
+                    int subtask_count = hierarchical_task_decomposition(
+                        hp_system,
+                        goal, state_size,
+                        current_state, state_size,
+                        plan, max_plan_size);
 
-                for (int sg = 0; sg < num_subgoals; sg++) {
-                    float alpha = (float)(sg + 1) / (float)num_subgoals;
-                    for (size_t d = 0; d < state_size && d < MAX_STATE_DIMENSION; d++) {
-                        subgoals[sg * (int)state_size + (int)d] = level_start[d]
-                            + (goal[d] - level_start[d]) * alpha;
-                    }
-                }
+                    if (subtask_count > 0) {
+                        /* 成功使用真实API：将分解结果转换为规划步骤 */
+                        steps = (size_t)subtask_count;
+                        if (steps > max_plan_size) steps = max_plan_size;
 
-                /* 依次追逐每个子目标 */
-                for (int sg = 0; sg < num_subgoals && steps < max_steps; sg++) {
-                    int sg_step = 0;
-                    int max_sg_steps = (int)(max_steps / (HP_MAX_LEVELS * num_subgoals)) + 1;
-                    if (max_sg_steps < 2) max_sg_steps = 2;
-
-                    while (sg_step < max_sg_steps && steps < max_steps) {
-                        float sg_dist = 0.0f;
-                        for (size_t d = 0; d < state_size && d < MAX_STATE_DIMENSION; d++) {
-                            float diff = subgoals[sg * (int)state_size + (int)d] - state[d];
-                            sg_dist += diff * diff;
-                            float action = (diff > 0.001f) ? step : (diff < -0.001f) ? -step : 0.0f;
-                            state[d] += action;
-                            state[d] = CLAMP(state[d], -2.0f, 2.0f);
-                            if (steps * state_size + d < max_plan_size) {
-                                plan[steps * state_size + d] = state[d];
-                            }
+                        /* 评估规划可行性 */
+                        float eval_metrics[4] = {0};
+                        int eval_count = hierarchical_planning_evaluate(
+                            hp_system, plan, steps,
+                            HIERARCHY_STRATEGIC,
+                            eval_metrics, 4);
+                        if (eval_count > 0) {
+                            system->last_feasibility = eval_metrics[0];
                         }
-                        steps++;
-                        sg_step++;
-                        if (sqrtf(sg_dist) < system->config.goal_tolerance * 1.5f) break;
+
+                        /* 获取状态用于后续监控 */
+                        HierarchicalPlanningState hp_state;
+                        if (hierarchical_planning_get_state(hp_system, &hp_state) == 0) {
+                            /* 更新规划系统状态 */
+                        }
+
+                        hp_used_real_api = 1;
                     }
+
+                    hierarchical_planning_system_free(hp_system);
                 }
             }
 
-            /* 最终微调抵达精确目标 */
-            float final_dist = 0.0f;
-            for (size_t d = 0; d < state_size; d++) final_dist += (state[d] - goal[d]) * (state[d] - goal[d]);
-            while (sqrtf(final_dist) >= system->config.goal_tolerance && steps < max_steps) {
-                for (size_t d = 0; d < state_size; d++) {
-                    float diff = goal[d] - state[d];
-                    state[d] += CLAMP(diff * 0.5f, -0.03f, 0.03f);
-                    state[d] = CLAMP(state[d], -2.0f, 2.0f);
-                    if (steps * state_size + d < max_plan_size) {
-                        plan[steps * state_size + d] = state[d];
+            /* 当真实API不可用或失败时，回退到本地分层近似实现 */
+            if (!hp_used_real_api) {
+                float state[MAX_STATE_DIMENSION];
+                memcpy(state, current_state, state_size * sizeof(float));
+
+                /* 定义层次结构 */
+                int levels[] = {2, 4, 8}; /* 每层的子目标数 */
+                float step_sizes[] = {0.3f, 0.15f, 0.05f};
+
+                for (int level = 0; level < HP_MAX_LEVELS && steps < max_steps; level++) {
+                    int num_subgoals = levels[level];
+                    if (num_subgoals > HP_MAX_SUBGOALS) num_subgoals = HP_MAX_SUBGOALS;
+                    float step = step_sizes[level];
+
+                    /* 为当前层生成子目标（在当前位置与最终目标之间均匀分布） */
+                    float subgoals[HP_MAX_SUBGOALS * MAX_STATE_DIMENSION];
+                    float level_start[MAX_STATE_DIMENSION];
+                    memcpy(level_start, state, state_size * sizeof(float));
+
+                    for (int sg = 0; sg < num_subgoals; sg++) {
+                        float alpha = (float)(sg + 1) / (float)num_subgoals;
+                        for (size_t d = 0; d < state_size && d < MAX_STATE_DIMENSION; d++) {
+                            subgoals[sg * (int)state_size + (int)d] = level_start[d]
+                                + (goal[d] - level_start[d]) * alpha;
+                        }
+                    }
+
+                    /* 依次追逐每个子目标 */
+                    for (int sg = 0; sg < num_subgoals && steps < max_steps; sg++) {
+                        int sg_step = 0;
+                        int max_sg_steps = (int)(max_steps / (HP_MAX_LEVELS * num_subgoals)) + 1;
+                        if (max_sg_steps < 2) max_sg_steps = 2;
+
+                        while (sg_step < max_sg_steps && steps < max_steps) {
+                            float sg_dist = 0.0f;
+                            for (size_t d = 0; d < state_size && d < MAX_STATE_DIMENSION; d++) {
+                                float diff = subgoals[sg * (int)state_size + (int)d] - state[d];
+                                sg_dist += diff * diff;
+                                float action = (diff > 0.001f) ? step : (diff < -0.001f) ? -step : 0.0f;
+                                state[d] += action;
+                                state[d] = CLAMP(state[d], -2.0f, 2.0f);
+                                if (steps * state_size + d < max_plan_size) {
+                                    plan[steps * state_size + d] = state[d];
+                                }
+                            }
+                            steps++;
+                            sg_step++;
+                            if (sqrtf(sg_dist) < system->config.goal_tolerance * 1.5f) break;
+                        }
                     }
                 }
-                steps++;
-                final_dist = 0.0f;
+
+                /* 最终微调抵达精确目标 */
+                float final_dist = 0.0f;
                 for (size_t d = 0; d < state_size; d++) final_dist += (state[d] - goal[d]) * (state[d] - goal[d]);
+                while (sqrtf(final_dist) >= system->config.goal_tolerance && steps < max_steps) {
+                    for (size_t d = 0; d < state_size; d++) {
+                        float diff = goal[d] - state[d];
+                        state[d] += CLAMP(diff * 0.5f, -0.03f, 0.03f);
+                        state[d] = CLAMP(state[d], -2.0f, 2.0f);
+                        if (steps * state_size + d < max_plan_size) {
+                            plan[steps * state_size + d] = state[d];
+                        }
+                    }
+                    steps++;
+                    final_dist = 0.0f;
+                    for (size_t d = 0; d < state_size; d++) final_dist += (state[d] - goal[d]) * (state[d] - goal[d]);
+                }
             }
             break;
         }

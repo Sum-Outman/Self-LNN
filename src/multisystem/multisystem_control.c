@@ -1898,7 +1898,7 @@ DistributedCoordinator* distributed_coordinator_init(const char* engine_id,
 /**
  * @brief 释放分布式协调器
  */
-void distributed_coordinator_destroy(DistributedCoordinator* coord) {
+static void distributed_coordinator_destroy(DistributedCoordinator* coord) {
     if (!coord) return;
     
     /* 停止并释放TCP RPC传输层 */
@@ -1965,7 +1965,7 @@ void distributed_coordinator_destroy(DistributedCoordinator* coord) {
  * 如果收到来自新领导者的AppendEntries则转换为跟随者；
  * 如果超时则开始新一轮选举。
  */
-int distributed_coordinator_start_election(DistributedCoordinator* coord,
+static int distributed_coordinator_start_election(DistributedCoordinator* coord,
                                            const char* local_device_id) {
     if (!coord || !local_device_id) return -1;
 
@@ -2044,7 +2044,7 @@ int distributed_coordinator_start_election(DistributedCoordinator* coord,
  * 1. 如果RPC中的term < current_term，拒绝投票
  * 2. 如果voted_for为空（或为candidate_id）且候选者日志至少和本机一样新，给予投票
  */
-int distributed_coordinator_handle_vote(DistributedCoordinator* coord,
+static int distributed_coordinator_handle_vote(DistributedCoordinator* coord,
                                         const char* candidate_id,
                                         int vote) {
     if (!coord || !candidate_id) return -1;
@@ -2149,7 +2149,7 @@ int distributed_coordinator_update_heartbeat(DistributedCoordinator* coord,
 /**
  * @brief 同步分布式状态到所有设备
  */
-int distributed_coordinator_sync_state(DistributedCoordinator* coord,
+static int distributed_coordinator_sync_state(DistributedCoordinator* coord,
                                        MultiSystemControlEngine* engine) {
     if (!coord || !engine) return -1;
 
@@ -2183,7 +2183,7 @@ int distributed_coordinator_sync_state(DistributedCoordinator* coord,
  * @param agreement_count 输出达成一致的设备数
  * @return 1=达成共识并提交，0=等待更多确认，-1=错误
  */
-int distributed_coordinator_achieve_consensus(DistributedCoordinator* coord,
+static int distributed_coordinator_achieve_consensus(DistributedCoordinator* coord,
                                               const char* proposal,
                                               int* agreement_count) {
     if (!coord || !proposal || !agreement_count) return -1;
@@ -2345,14 +2345,14 @@ FaultTolerantController* fault_tolerant_controller_init(double watchdog_timeout,
 /**
  * @brief 释放容错控制器
  */
-void fault_tolerant_controller_destroy(FaultTolerantController* ftc) {
+static void fault_tolerant_controller_destroy(FaultTolerantController* ftc) {
     if (ftc) safe_free((void**)&ftc);
 }
 
 /**
  * @brief 复位看门狗
  */
-int fault_tolerant_reset_watchdog(FaultTolerantController* ftc,
+static int fault_tolerant_reset_watchdog(FaultTolerantController* ftc,
                                   double current_time) {
     if (!ftc) return -1;
     ftc->last_watchdog_reset = current_time;
@@ -2378,7 +2378,7 @@ int fault_tolerant_check_watchdog(FaultTolerantController* ftc,
 /**
  * @brief 执行故障转移
  */
-int fault_tolerant_perform_failover(FaultTolerantController* ftc,
+static int fault_tolerant_perform_failover(FaultTolerantController* ftc,
                                     DeviceInfo** devices,
                                     size_t device_count,
                                     const char* failed_device_id,
@@ -2427,7 +2427,7 @@ int fault_tolerant_perform_failover(FaultTolerantController* ftc,
 /**
  * @brief 执行自动恢复
  */
-int fault_tolerant_auto_recover(FaultTolerantController* ftc,
+static int fault_tolerant_auto_recover(FaultTolerantController* ftc,
                                 DeviceInfo* failed_device) {
     if (!ftc || !failed_device) return -1;
 
@@ -2445,7 +2445,7 @@ int fault_tolerant_auto_recover(FaultTolerantController* ftc,
 /**
  * @brief 执行健康检查
  */
-int fault_tolerant_health_check(FaultTolerantController* ftc,
+static int fault_tolerant_health_check(FaultTolerantController* ftc,
                                 DeviceInfo** devices,
                                 size_t device_count,
                                 double current_time) {
@@ -2478,7 +2478,7 @@ int fault_tolerant_health_check(FaultTolerantController* ftc,
 /**
  * @brief 配置容错参数
  */
-int fault_tolerant_configure(FaultTolerantController* ftc,
+static int fault_tolerant_configure(FaultTolerantController* ftc,
                              int enable_auto_recovery,
                              int enable_health_monitoring,
                              int max_recovery_attempts) {
@@ -2547,7 +2547,7 @@ DynamicTaskAllocator* dynamic_task_allocator_init(int initial_capacity) {
 /**
  * @brief 释放动态任务分配器
  */
-void dynamic_task_allocator_destroy(DynamicTaskAllocator* alloc) {
+static void dynamic_task_allocator_destroy(DynamicTaskAllocator* alloc) {
     if (!alloc) return;
     if (alloc->pending_tasks) {
         for (size_t i = 0; i < alloc->pending_count; i++) {
@@ -2563,7 +2563,7 @@ void dynamic_task_allocator_destroy(DynamicTaskAllocator* alloc) {
 /**
  * @brief 向分配器添加待分配任务
  */
-int dynamic_task_allocator_add_task(DynamicTaskAllocator* alloc, Task* task) {
+static int dynamic_task_allocator_add_task(DynamicTaskAllocator* alloc, Task* task) {
     if (!alloc || !task) return -1;
 
     if (alloc->pending_count >= alloc->pending_capacity) {
@@ -2667,7 +2667,7 @@ TaskAssignment* dynamic_task_allocator_assign_load_aware(
 /**
  * @brief 执行动态重新平衡
  */
-int dynamic_task_allocator_rebalance(DynamicTaskAllocator* alloc,
+static int dynamic_task_allocator_rebalance(DynamicTaskAllocator* alloc,
                                      MultiSystemControlEngine* engine,
                                      DeviceInfo** devices,
                                      size_t device_count,
@@ -2716,14 +2716,14 @@ int dynamic_task_allocator_rebalance(DynamicTaskAllocator* alloc,
 /**
  * @brief 获取待分配任务数量
  */
-size_t dynamic_task_allocator_get_pending_count(DynamicTaskAllocator* alloc) {
+static size_t dynamic_task_allocator_get_pending_count(DynamicTaskAllocator* alloc) {
     return alloc ? alloc->pending_count : 0;
 }
 
 /**
  * @brief 配置动态分配参数
  */
-int dynamic_task_allocator_configure(DynamicTaskAllocator* alloc,
+static int dynamic_task_allocator_configure(DynamicTaskAllocator* alloc,
                                      int enable_load_balancing,
                                      int enable_priority_scheduling,
                                      double rebalance_interval) {
@@ -5378,7 +5378,7 @@ int multisystem_knowledge_get_sync_status(KnowledgeSyncStatus* status) {
  * 
  * 在 rpc_dispatch_message 的 default 分支中调用此函数
  */
-void rpc_dispatch_knowledge_message(TcpRpcTransport* transport, const RpcMessage* msg) {
+static void rpc_dispatch_knowledge_message(TcpRpcTransport* transport, const RpcMessage* msg) {
     (void)(transport);
     if (!msg || !msg->payload) return;
 

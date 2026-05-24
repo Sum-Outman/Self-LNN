@@ -343,7 +343,7 @@ static int rl_physics_env_step(RLPhysicsEnv* env,
  * @param total_reward 输出累积奖励
  * @return 实际步数, -1失败
  */
-int rl_physics_rollout(RLAgent* agent, int connection_id, int robot_id,
+static int rl_physics_rollout(RLAgent* agent, int connection_id, int robot_id,
                         int num_joints, float dt, int max_steps, float* total_reward) {
     if (!agent || !agent->is_initialized || !total_reward) return -1;
     if (num_joints <= 0) return -1;
@@ -3332,7 +3332,7 @@ typedef struct {
 
 static void gym_env_free(GymEnv* env);
 
-GymEnv* gym_env_create(size_t obs_dim, size_t act_dim, int is_continuous) {
+static GymEnv* gym_env_create(size_t obs_dim, size_t act_dim, int is_continuous) {
     GymEnv* env = (GymEnv*)safe_calloc(1, sizeof(GymEnv));
     if (!env) return NULL;
 
@@ -3359,7 +3359,7 @@ GymEnv* gym_env_create(size_t obs_dim, size_t act_dim, int is_continuous) {
     return env;
 }
 
-void gym_env_free(GymEnv* env) {
+static void gym_env_free(GymEnv* env) {
     if (!env) return;
     safe_free((void**)&env->observation_space);
     safe_free((void**)&env->action_low);
@@ -3367,7 +3367,7 @@ void gym_env_free(GymEnv* env) {
     safe_free((void**)&env);
 }
 
-int gym_env_register_functions(GymEnv* env,
+static int gym_env_register_functions(GymEnv* env,
                                 int (*reset_fn)(void*, float*, size_t*),
                                 int (*step_fn)(void*, const float*, size_t,
                                                float*, size_t*, float*, int*),
@@ -3381,7 +3381,7 @@ int gym_env_register_functions(GymEnv* env,
     return 0;
 }
 
-int gym_env_reset(GymEnv* env, float* initial_obs, size_t* obs_dim_out) {
+static int gym_env_reset(GymEnv* env, float* initial_obs, size_t* obs_dim_out) {
     if (!env || !initial_obs || !obs_dim_out) return -1;
 
     if (env->reset_func && env->env_handle) {
@@ -3402,7 +3402,7 @@ int gym_env_reset(GymEnv* env, float* initial_obs, size_t* obs_dim_out) {
     return -1;
 }
 
-int gym_env_step(GymEnv* env, const float* action, size_t act_dim,
+static int gym_env_step(GymEnv* env, const float* action, size_t act_dim,
                   float* next_obs, size_t* obs_dim_out,
                   float* reward, int* done) {
     if (!env || !action || !next_obs || !reward || !done) return -1;
@@ -3422,7 +3422,7 @@ int gym_env_step(GymEnv* env, const float* action, size_t act_dim,
     return -1;
 }
 
-void gym_env_close(GymEnv* env) {
+static void gym_env_close(GymEnv* env) {
     if (!env) return;
     if (env->close_func && env->env_handle) {
         env->close_func(env->env_handle);
@@ -3471,7 +3471,7 @@ static int rl_agent_get_action(void* agent, const float* state, int state_dim,
     return 0;
 }
 
-int rl_agent_train_episode(void* agent, GymEnv* env,
+static int rl_agent_train_episode(void* agent, GymEnv* env,
                             int max_steps, float* total_reward) {
     if (!env || !total_reward) return -1;
     /* BUG-019修复: 使用agent进行动作选择，而非纯随机动作

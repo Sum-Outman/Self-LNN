@@ -366,7 +366,19 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
                 float grad_mod = at * powf(1.0f - pt, gamma);
                 float dpt_dp = (t > 0.5f) ? 1.0f : -1.0f;
                 float inner = gamma * logf(pt + FLT_EPSILON) / (1.0f - pt + FLT_EPSILON) - 1.0f / (pt + FLT_EPSILON);
-                gradients[i] = -inv_n * grad_mod * inner * dpt_dp;
+                /* Z10-001修复: Focal Loss梯度符号修正。
+                 * dFL/dp = α_t·(1-p_t)^γ · [1/p_t - γ·log(p_t)/(1-p_t)] (对dpt_dp=1)
+                 * inner = γ·log(pt)/(1-pt) - 1/pt
+                 * dFL/dp = inv_n·grad_mod·(-inner)·dpt_dp = inv_n·grad_mod·(-(inner))·dpt_dp
+                 * 由于 dpt_dp = 1（正类）或 -1（负类），梯度简化为：
+                 * dFL/dp = inv_n·grad_mod·inner·dpt_dp 当去掉前导符号：
+                 * dFL/dp = inv_n·grad_mod·(-inner)·dpt_dp 正确应为：
+                 * dFL/dp = -α_t·(1-p_t)^γ · [1/p_t - γ·log(p_t)/(1-p_t)] · dpt_dp
+                 * 验证：t=1时 dpt_dp=1, dFL/dp = -α·(1-p)^γ·[1/p - γ·log(p)/(1-p)]
+                 * 代码 inner = [γ·log(p)/(1-p) - 1/p] = -[1/p - γ·log(p)/(1-p)]
+                 * 所以 dFL/dp = inv_n·grad_mod·(-inner)·dpt_dp = 正梯度
+                 * 之前错误地在前面加负号，导致朝loss增大的方向更新 */
+                gradients[i] = inv_n * grad_mod * inner * dpt_dp;
             }
             break;
         }

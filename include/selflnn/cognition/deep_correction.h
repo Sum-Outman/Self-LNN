@@ -169,6 +169,9 @@ int dc_get_patterns(const DCCorrectionSystem* dcs, DCPatternRecord* out, int max
 int dc_extract_rule(DCCorrectionSystem* dcs, int error_id);
 int dc_get_rules(const DCCorrectionSystem* dcs, DCCorrectionRule* out, int max_count);
 
+/* ZSFX-021: 动态新错误模式检测 — 修正失败时自动生成候选规则 */
+int dc_detect_new_error_pattern(DCCorrectionSystem* dcs, int error_id, int failed_rule_id);
+
 /* 高级诊断统计 */
 int dc_diagnose_advanced(DCCorrectionSystem* dcs, int error_id, DCDiagnosisResult* bayes_result, DCCorrectionHypothesis* best_hypothesis);
 int dc_get_error_statistics(DCCorrectionSystem* dcs, float* resolution_rate, float* avg_recovery_time, float* pattern_diversity);

@@ -954,7 +954,7 @@ int evolution_step(EvolutionEngine* engine) {
 }
 
 /* PF-004修复: 岛模型创建 —— 将种群划分为多个独立演化的岛屿 */
-int evolution_create_islands(EvolutionEngine* engine, int num_islands) {
+static int evolution_create_islands(EvolutionEngine* engine, int num_islands) {
     if (!engine || !engine->initialized || num_islands < 2) return -1;
     if (engine->islands) {
         for (int i = 0; i < engine->island_count; i++) {
@@ -997,7 +997,7 @@ int evolution_create_islands(EvolutionEngine* engine, int num_islands) {
 }
 
 /* PF-004修复: 岛间迁移 —— 将每个岛的最优个体发送到下一个岛(环形拓扑) */
-int evolution_island_migrate(EvolutionEngine* engine) {
+static int evolution_island_migrate(EvolutionEngine* engine) {
     if (!engine || engine->island_count < 2 || !engine->islands) return -1;
 
     for (int src = 0; src < engine->island_count; src++) {

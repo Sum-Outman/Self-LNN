@@ -144,6 +144,14 @@ struct KnowledgeBase {
     /* CfC知识图谱嵌入引擎（语义搜索与推理） */
     CfCEmbedState* cfc_embed;             /**< CfC嵌入引擎句柄 */
     int cfc_embed_dim;                    /**< 嵌入向量维度 */
+
+    /* Z4-002: 线程安全 —— 知识库全局读写锁 */
+#ifdef _WIN32
+    CRITICAL_SECTION kb_lock;
+#else
+    pthread_rwlock_t kb_lock;
+#endif
+    int kb_lock_initialized;
 };
 
 /**
@@ -548,7 +556,15 @@ KnowledgeBase* knowledge_base_create(size_t max_entries) {
     if (kb == NULL) {
         return NULL;
     }
-    
+
+    /* Z4-002: 初始化知识库读写锁 */
+#ifdef _WIN32
+    InitializeCriticalSection(&kb->kb_lock);
+#else
+    pthread_rwlock_init(&kb->kb_lock, NULL);
+#endif
+    kb->kb_lock_initialized = 1;
+
     /* 初始化容量 */
     size_t initial_capacity = 16;
     if (max_entries > 0 && max_entries < initial_capacity) {
@@ -643,17 +659,35 @@ void knowledge_base_free(KnowledgeBase* kb) {
     }
     safe_free((void**)&kb->object_index.items);
 
+    /* Z4-002: 销毁知识库锁 */
+#ifdef _WIN32
+    if (kb->kb_lock_initialized) DeleteCriticalSection(&kb->kb_lock);
+#else
+    if (kb->kb_lock_initialized) pthread_rwlock_destroy(&kb->kb_lock);
+#endif
+
     safe_free((void**)&kb->entries);
     safe_free((void**)&kb);
 }
+
+/* Z4-002: 知识库线程安全宏 */
+#ifdef _WIN32
+#define KB_WLOCK(kb) do { if ((kb)->kb_lock_initialized) EnterCriticalSection(&(kb)->kb_lock); } while(0)
+#define KB_WUNLOCK(kb) do { if ((kb)->kb_lock_initialized) LeaveCriticalSection(&(kb)->kb_lock); } while(0)
+#else
+#define KB_WLOCK(kb) do { if ((kb)->kb_lock_initialized) pthread_rwlock_wrlock(&(kb)->kb_lock); } while(0)
+#define KB_WUNLOCK(kb) do { if ((kb)->kb_lock_initialized) pthread_rwlock_unlock(&(kb)->kb_lock); } while(0)
+#endif
 
 int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     if (kb == NULL || entry == NULL) {
         return -1;
     }
+    KB_WLOCK(kb);
     
     /* 检查容量限制 */
     if (kb->max_entries > 0 && kb->size >= kb->max_entries) {
+        KB_WUNLOCK(kb);
         return -1;
     }
     
@@ -667,6 +701,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
         InternalKnowledgeEntry* new_entries = (InternalKnowledgeEntry*)safe_realloc(
             kb->entries, new_capacity * sizeof(InternalKnowledgeEntry));
         if (new_entries == NULL) {
+            KB_WUNLOCK(kb);
             return -1;
         }
         
@@ -683,6 +718,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     
     /* 复制条目数据 */
     if (copy_knowledge_entry(&internal_entry->entry, entry) != 0) {
+        KB_WUNLOCK(kb);
         return -1;
     }
     
@@ -734,6 +770,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
         inverted_index_add_key(&kb->object_index, internal_entry->entry.object, internal_entry->id);
     }
 
+    KB_WUNLOCK(kb);
     return internal_entry->id;
 }
 
@@ -741,6 +778,7 @@ int knowledge_base_remove(KnowledgeBase* kb, int entry_id) {
     if (kb == NULL || entry_id <= 0) {
         return -1;
     }
+    KB_WLOCK(kb);
     
     /* 查找条目 */
     for (size_t i = 0; i < kb->size; i++) {
@@ -765,11 +803,13 @@ int knowledge_base_remove(KnowledgeBase* kb, int entry_id) {
                 kb->cache_capacity = 0;
             }
 
+            KB_WUNLOCK(kb);
             return 0;
         }
     }
     
     /* 未找到 */
+    KB_WUNLOCK(kb);
     return -1;
 }
 
