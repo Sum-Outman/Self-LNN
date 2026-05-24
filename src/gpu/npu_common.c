@@ -65,14 +65,14 @@ size_t npu_common_get_system_memory_free(void) {
     MEMORYSTATUSEX ms;
     ms.dwLength = sizeof(ms);
     if (GlobalMemoryStatusEx(&ms)) return (size_t)ms.ullAvailPhys;
-    return 4ULL * 1024 * 1024 * 1024;
+    return 0;
 #elif defined(__linux__)
     long pages = sysconf(_SC_AVPHYS_PAGES);
     long page_size = sysconf(_SC_PAGE_SIZE);
     if (pages > 0 && page_size > 0) return (size_t)pages * (size_t)page_size;
-    return 4ULL * 1024 * 1024 * 1024;
+    return 0;
 #else
-    return 4ULL * 1024 * 1024 * 1024;
+    return 0;
 #endif
 }
 

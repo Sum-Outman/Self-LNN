@@ -1137,6 +1137,20 @@ void selflnn_set_speech_recognizer(void* sr) {
     g_system_state.speech_recognizer = sr;
 }
 
+/* APP10: 产品设计引擎访问器 */
+void* selflnn_get_product_design_engine(void) {
+    return g_system_state.product_design_engine;
+}
+
+void selflnn_set_product_design_engine(void* engine) {
+    g_system_state.product_design_engine = engine;
+}
+
+/* APP13: 多系统控制访问器 */
+void* selflnn_get_multisystem_control(void) {
+    return g_system_state.multisystem_controller;
+}
+
 /* ZSF-001修复: AGI后台任务所需的状态访问器函数
  * 这些函数为真实实现，提供LNN状态读取和知识库访问。
  * MSVC平台使用reasoning_internal.c作为推理引擎实现。 */

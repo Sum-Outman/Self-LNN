@@ -1,14 +1,12 @@
 #include "selflnn/backend/backend.h"
 #include "selflnn/backend/websocket_push.h"
 #include "selflnn/self_cognition.h"
-/* ZSFWS-NEW-MAININC: 移除5个未使用的include
- * - metacognition.h: agi_bg_metacognition仅用内部API，不依赖此头文件
- * - multi_agent.h: main.c中从未调用multi_agent_*函数
- * - neural_architecture_search.h: main.c中从未调用NAS相关函数
- * - learning/meta_learning.h: main.c中从未调用meta_learning_*函数
- * - robot/ros_robot_controller.h: main.c中从未调用ros_robot_controller_*函数 */
 #include "selflnn/core/lnn.h"
-#include "selflnn/core/quaternion_lnn.h"
+#include "selflnn/core/laplace_unified.h"                    /* 已恢复: 拉普拉斯统一 */
+#include "selflnn/multimodal/audio.h"                       /* 音频采集 */
+#include "selflnn/multimodal/speech_recognition.h"           /* 语音识别 */
+#include "selflnn/multimodal/tts.h"                         /* 语音合成 */
+#include "selflnn/robot/computer_operation.h"                /* 计算机操作 */
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/knowledge/auto_learning.h"
 #include "selflnn/multimodal/data_collection_pipeline.h"
@@ -17,11 +15,9 @@
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/planning.h"
 
-/* ZSF-018修复: 移除重复include，统一管理所有头文件引用 */
 /* 能力开关 */
 #include "selflnn/agi/capability_switch.h"
 #include "selflnn/learning/learning.h"
-#include "selflnn/learning/imitation_learning.h"
 #include "selflnn/learning/online_learning.h"
 #include "selflnn/multimodal/multimodal.h"
 #include "selflnn/multimodal/multimodal_manager.h"
@@ -30,7 +26,6 @@
 #include "selflnn/training/training_pipeline.h"
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/robot/robot.h"
-#include "selflnn/programming/self_programming.h"
 #include "selflnn/product_design/product_design.h"
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/multisystem/multisystem_control.h"
@@ -39,6 +34,7 @@
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/selflnn.h"
 #include "selflnn/evolution/evolution_engine.h"
+#include "selflnn/neural_architecture_search.h"             /* NAS周期触发 */
 #include "selflnn/safety/safety_monitor.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,11 +67,11 @@ static int is_subsystem_healthy_int(const char* name, void* handle, int (*is_ini
 #endif
 #define ONLINE_LEARN_INTERVAL    36000  /* 在线学习每10小时（降低负载测试用） */
 #define SELF_REFLECTION_INTERVAL 86400  /* 自我反思每24小时（降低负载测试用） */
-#define KNOWLEDGE_CONSOLIDATE    86400  /* 知识固化每24小时（降低负载测试用） */
-#define EVOLUTION_STEP_INTERVAL  86400  /* 演化步每24小时（降低负载测试用） */
-#define COGNITION_UPDATE_INTERVAL 3600  /* 认知更新每1小时（降低负载测试用） */
-#define SAFETY_CHECK_INTERVAL     3600  /* 安全检查每1小时（降低负载测试用） */
-#define TRAINING_STEP_INTERVAL   86400  /* ZSFABC: 训练步每24小时（降低负载测试用） */
+#define KNOWLEDGE_CONSOLIDATE    3600  /* P38修复: 知识固化每1小时 */
+#define EVOLUTION_STEP_INTERVAL  3600  /* P38修复: 演化步每1小时 */
+#define COGNITION_UPDATE_INTERVAL 300  /* P38修复: 认知更新每5分钟 */
+#define SAFETY_CHECK_INTERVAL      60  /* P38修复: 安全检查每1分钟(安全关键) */
+#define TRAINING_STEP_INTERVAL   3600  /* P38修复: 训练步每1小时 */
 
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 4
@@ -96,6 +92,66 @@ static time_t g_last_safety = 0;
 static int g_bg_task_error_count = 0;
 static TrainingPipeline* g_training_pipeline = NULL;   /* ZSFABC: 训练管线 */
 static time_t g_last_training_step = 0;                 /* ZSFABC: 上次训练步时间 */
+static ProductDesignEngine* g_product_design = NULL;    /* APP10: 产品设计引擎 */
+static void* g_nas_system = NULL;                         /* 神经架构搜索系统 */
+static void* g_laplace_unified = NULL;                    /* 拉普拉斯统一系统 */
+static void* g_audio_capture = NULL;                       /* 音频采集实例 */
+static void* g_speech_recognizer = NULL;                   /* 语音识别实例 */
+static void* g_tts_engine = NULL;                          /* TTS语音合成 */
+static void* g_computer_op = NULL;                         /* 计算机操作 */
+
+/* P28修复: 演化引擎默认适应度函数 — 基于LNN权重的一致性评估
+ * 将染色体(晶片)中的权重写入LNN，运行前向传播，
+ * 通过输出稳定性评估适应度(激活输出方差越小→越稳定→适应度越高) */
+static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_size, void* user_data) {
+    LNN* lnn = (LNN*)user_data;
+    if (!lnn || chrom_size == 0) return 0.0f;
+    /* 将染色体复制到LNN权重缓冲区（lnn_get_parameters返回可写指针） */
+    size_t lnn_param_count = lnn_get_parameter_count(lnn);
+    if (lnn_param_count == 0) return 0.0f;
+    float* lnn_params = lnn_get_parameters(lnn);
+    if (!lnn_params) return 0.0f;
+    size_t copy_count = (chrom_size < lnn_param_count) ? chrom_size : lnn_param_count;
+    memcpy(lnn_params, chromosome, copy_count * sizeof(float));
+    /* 使用均匀采样输入评估输出稳定性 */
+    float avg_activation = 0.0f, avg_variance = 0.0f;
+    int test_samples = 8;
+    size_t input_dim = 64;
+    float* test_input = (float*)safe_calloc(input_dim, sizeof(float));
+    float* output = (float*)safe_malloc(128 * sizeof(float));
+    if (!test_input || !output) {
+        safe_free((void**)&test_input);
+        safe_free((void**)&output);
+        return 0.0f;
+    }
+    for (int s = 0; s < test_samples; s++) {
+        for (size_t i = 0; i < input_dim; i++)
+            test_input[i] = sinf((float)(s * 17 + i) * 0.314159f);
+        memset(output, 0, 128 * sizeof(float));
+        lnn_forward(lnn, test_input, output);
+        float sum = 0.0f, sq_sum = 0.0f;
+        size_t count = 0;
+        for (size_t i = 0; i < 128 && count < 64; i++) {
+            if (fabsf(output[i]) > 1e-8f) {
+                sum += output[i]; sq_sum += output[i] * output[i]; count++;
+            }
+        }
+        if (count > 0) {
+            float mean = sum / (float)count;
+            float var = sq_sum / (float)count - mean * mean;
+            avg_activation += fabsf(mean);
+            avg_variance += var;
+        }
+    }
+    safe_free((void**)&test_input);
+    safe_free((void**)&output);
+    avg_activation /= (float)test_samples;
+    avg_variance /= (float)test_samples;
+    /* 适应度 = 激活强度 - 惩罚项(方差) + 小常数 */
+    float fitness = avg_activation * 0.5f - avg_variance * 0.3f + 0.001f;
+    if (fitness < 0.0f) fitness = 0.001f;
+    return fitness;
+}
 
 /* AGI后台任务：在线学习循环 */
 static void agi_bg_online_learning(void) {
@@ -223,6 +279,15 @@ static void agi_bg_evolution_step(void) {
     } else {
         log_warning("[AGI后台] 演化步执行失败，错误码=%d", result);
     }
+    /* APP11: 每5个演化周期触发一次神经架构搜索(NAS) */
+    static int nas_trigger_counter = 0;
+    nas_trigger_counter++;
+    if (nas_trigger_counter % 5 == 0 && g_nas_system) {
+        int nas_ret = nas_search_generation((NASSystem*)g_nas_system);
+        if (nas_ret == 0) {
+            log_info("[AGI后台] NAS搜索代完成");
+        }
+    }
 }
 
 /* AGI后台任务：认知更新 */
@@ -238,6 +303,11 @@ static void agi_bg_cognition_update(void) {
         log_debug("[AGI后台] 认知更新：活动任务=%d, 记忆=%d, 知识=%d",
                    status.active_tasks, status.total_memories, 
                    status.total_knowledge);
+    }
+    /* APP13: 群智优化 — 认知更新时触发蜂群迭代优化 */
+    void* ms_ctrl = selflnn_get_multisystem_control();
+    if (ms_ctrl) {
+        multisystem_swarm_iterate((MultiSystemControlEngine*)ms_ctrl);
     }
 }
 
@@ -585,6 +655,23 @@ static void agi_background_loop_iteration(void) {
         g_last_consolidate = now;
     }
 
+    /* P24修复: 记忆睡眠巩固(NREM/REM) — 每180秒触发 */
+    {
+        static time_t g_last_sleep = 0;
+        if (now - g_last_sleep >= 180) {
+            void* mm = selflnn_get_memory_manager();
+            if (mm) {
+                int stats[4] = {0};
+                memory_sleep_consolidation((MemorySystem*)mm, 1.0f, stats);
+                if (stats[0] > 0 || stats[1] > 0) {
+                    log_info("[AGI后台] 睡眠巩固 NREM=%d REM=%d STM→LTM=%d 清理=%d",
+                             stats[0], stats[1], stats[2], stats[3]);
+                }
+            }
+            g_last_sleep = now;
+        }
+    }
+
     /* 自我反思（受自我反思能力开关控制 + ZSFWS-027 LNN就绪检查） */
     if (capability_is_enabled(CAP_REFLECTION) &&
         now - g_last_reflection >= SELF_REFLECTION_INTERVAL) {
@@ -689,7 +776,7 @@ static void agi_background_loop_iteration(void) {
                 memset(&tps, 0, sizeof(tps));
                 if (training_pipeline_get_state(g_training_pipeline, &tps) == 0) {
                     snprintf(train_json, sizeof(train_json),
-                        "{\"type\":\"training_metrics\",\"stage\":%d,\"epoch\":%d,"
+                        "{\"type\":\"training_status\",\"stage\":%d,\"epoch\":%d,"
                         "\"loss\":%.6f,\"accuracy\":%.4f,\"lr\":%.8f,\"timestamp\":%lld}",
                         (int)tps.current_stage, tps.current_epoch, tps.current_loss,
                         tps.train_accuracy, tps.learning_rate, (long long)now);
@@ -1032,14 +1119,16 @@ int main(int argc, char* argv[])
             ol_config.buffer_size = 1000;
             ol_config.min_learning_rate = 1e-6f;
             ol_config.max_learning_rate = 0.1f;
-            /* 使用占位权重创建学习器（1个元素），后续通过 attach_lnn 替换为LNN参数引用 */
-            float placeholder_weight = 0.0f;
-            OnlineLearner* learner_raw = online_learner_create(&ol_config, &placeholder_weight, 1);
+            /* P20修复: 从selflnn获取已创建的学习器并附着LNN，避免双重创建 */
+            OnlineLearner* learner_raw = (OnlineLearner*)selflnn_get_online_learner();
+            if (!learner_raw) {
+                float placeholder_weight = 0.0f;
+                learner_raw = online_learner_create(&ol_config, &placeholder_weight, 1);
+            }
             if (learner_raw) {
-                /* 获取共享LNN并附着到学习器 */
                 void* shared_lnn_ptr = selflnn_get_shared_lnn();
                 if (shared_lnn_ptr && online_learner_attach_lnn(learner_raw, (LNN*)shared_lnn_ptr) == 0) {
-                    printf("  在线学习器初始化成功（已附着到共享LNN，直接操作LNN权重矩阵）\n");
+                    printf("  在线学习器初始化成功（已附着到共享LNN）\n");
                     g_online_learner_handle = (void*)learner_raw;
                 } else {
                     printf("  在线学习器LNN附着失败，回退到独立权重模式\n");
@@ -1052,6 +1141,91 @@ int main(int argc, char* argv[])
             g_evolution_engine_handle = selflnn_get_evolution_engine();
             if (g_evolution_engine_handle) {
                 printf("  自我演化引擎句柄获取成功\n");
+                /* P28修复: 注入适应度函数（基于LNN损失），否则演化引擎无法运行 */
+                void* shared_lnn = selflnn_get_shared_lnn();
+                if (shared_lnn) {
+                    evolution_set_fitness_function(
+                        (EvolutionEngine*)g_evolution_engine_handle,
+                        lnn_weights_fitness_function, (void*)shared_lnn);
+                    printf("  演化引擎适应度函数已注入（基于LNN权重评估）\n");
+                } else {
+                    printf("  演化引擎需LNN就绪后才能设置适应度函数\n");
+                }
+            }
+            /* APP10: 获取产品设计引擎（selflnn_init已创建，此处不再重复创建） */
+            g_product_design = (ProductDesignEngine*)selflnn_get_product_design_engine();
+            if (g_product_design) {
+                printf("  产品设计引擎获取成功（已在selflnn_init中初始化）\n");
+            } else {
+                printf("  产品设计引擎未就绪\n");
+            }
+            /* APP11: 初始化神经架构搜索系统 */
+            {
+                NASConfig nas_cfg;
+                memset(&nas_cfg, 0, sizeof(nas_cfg));
+                nas_cfg.population_size = 20;
+                nas_cfg.max_generations = 50;
+                nas_cfg.mutation_rate = 0.15f;
+                nas_cfg.crossover_rate = 0.7f;
+                g_nas_system = nas_system_create(&nas_cfg, NULL, 0);
+                if (g_nas_system) {
+                    nas_initialize_search_space((NASSystem*)g_nas_system);
+                    printf("  神经架构搜索(NAS)系统初始化成功\n");
+                } else {
+                    printf("  NAS系统初始化失败\n");
+                }
+            }
+            /* APP12: 初始化拉普拉斯增强系统 */
+            g_laplace_unified = laplace_unified_init(NULL);
+            if (g_laplace_unified) {
+                printf("  拉普拉斯增强系统初始化成功\n");
+            } else {
+                printf("  拉普拉斯增强系统初始化失败(底层已在训练管线中集成)\n");
+            }
+             /* APP15: 初始化音频管道（VAD+语音识别+TTS） */
+            {
+                g_audio_capture = audio_capture_create("default", 16000, 1);
+                if (g_audio_capture) {
+                    audio_capture_start(g_audio_capture, NULL, NULL);
+                    printf("  音频采集管道初始化成功 (16kHz单声道)\n");
+                } else {
+                    printf("  音频采集管道未就绪(无可用的麦克风设备)\n");
+                }
+                SpeechRecognitionConfig sr_cfg;
+                memset(&sr_cfg, 0, sizeof(sr_cfg));
+                sr_cfg.sample_rate = 16000;
+                sr_cfg.num_mel_bins = 80;
+                sr_cfg.hidden_size = 256;
+                sr_cfg.beam_width = 5;
+                g_speech_recognizer = speech_recognizer_create(&sr_cfg);
+                if (g_speech_recognizer) {
+                    selflnn_set_speech_recognizer(g_speech_recognizer);
+                    printf("  语音识别引擎初始化成功\n");
+                } else {
+                    printf("  语音识别引擎初始化失败(需要训练语言模型)\n");
+                }
+                TTSConfig tts_cfg;
+                memset(&tts_cfg, 0, sizeof(tts_cfg));
+                tts_cfg.sample_rate = 16000;
+                tts_cfg.speed = 1.0f;
+                tts_cfg.hidden_size = 512;
+                g_tts_engine = (void*)tts_engine_create(&tts_cfg);
+                if (g_tts_engine) {
+                    printf("  TTS语音合成初始化成功\n");
+                } else {
+                    printf("  TTS语音合成初始化失败\n");
+                }
+            }
+            /* APP16: 初始化计算机操作模块 */
+            {
+                COConfig co_cfg = CO_CONFIG_DEFAULT;
+                co_cfg.enable_safety_check = 1;
+                g_computer_op = (void*)co_system_create(co_cfg);
+                if (g_computer_op) {
+                    printf("  计算机操作模块初始化成功\n");
+                } else {
+                    printf("  计算机操作模块初始化失败\n");
+                }
             }
             /* Z8-002: 能力开关重置移到在线学习器创建之后
              * 确保子系统(online_learner/evolution_engine等)全部就绪后再激活 */
@@ -1169,6 +1343,40 @@ int main(int argc, char* argv[])
     if (g_evolution_engine_handle) {
         evolution_engine_free((EvolutionEngine*)g_evolution_engine_handle);
         g_evolution_engine_handle = NULL;
+    }
+    /* APP10: 销毁产品设计引擎 */
+    if (g_product_design) {
+        product_design_engine_destroy(g_product_design);
+        g_product_design = NULL;
+    }
+    /* APP11: 销毁NAS系统 */
+    if (g_nas_system) {
+        nas_system_free((NASSystem*)g_nas_system);
+        g_nas_system = NULL;
+    }
+    /* APP12: 销毁拉普拉斯增强 */
+    if (g_laplace_unified) {
+        laplace_unified_free(g_laplace_unified);
+        g_laplace_unified = NULL;
+    }
+    /* APP15: 销毁音频管道 */
+    if (g_audio_capture) {
+        audio_capture_stop(g_audio_capture);
+        audio_capture_free(g_audio_capture);
+        g_audio_capture = NULL;
+    }
+    if (g_speech_recognizer) {
+        speech_recognizer_free(g_speech_recognizer);
+        g_speech_recognizer = NULL;
+    }
+    if (g_tts_engine) {
+        tts_engine_free((TTSEngine*)g_tts_engine);
+        g_tts_engine = NULL;
+    }
+    /* APP16: 销毁计算机操作 */
+    if (g_computer_op) {
+        co_system_destroy((COSystem*)g_computer_op);
+        g_computer_op = NULL;
     }
     selflnn_shutdown();
 

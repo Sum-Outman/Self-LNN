@@ -6,11 +6,13 @@
  * 负责：目标分解、计划生成、执行监控、可行性评估。
  * 
  * 层级关系：
- *   planning.c（本文件）→ 核心规划算法（A* /BFS/DFS/启发式搜索）
+ *   planning.c（本文件）→ 核心规划算法（MCTS蒙特卡洛树搜索/反应式FSM/CMA-ES演化策略/时序约束网络TCN）
  *   planning_enhanced.c → 增强规划（STN时序网 + HTN层次任务网 + 多智能体协调）
- *   hierarchical_planning.c → 分层规划
+ *   hierarchical_planning.c → 分层规划（HTN/POP/HRL分解）
  *   long_term_planning.c → 长期规划
  * 
+ * 注：A*/BFS/Dijkstra/Beam Search等图搜索算法并未在本文件中实现。
+ * 状态空间规划通过MCTS+CMA-ES演化策略+线性插值组合实现。
  * planning.c 提供基础规划API，planning_enhanced.c 在此基础上增加高级特性。
  * 两者互不替代，职责明确分离。
  */

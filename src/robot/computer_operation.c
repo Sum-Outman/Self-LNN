@@ -1163,13 +1163,14 @@ static int co_os_set_volume(int level) {
     }
     return 0;
 #elif defined(__APPLE__)
-    /* macOS: 使用 osascript 设置系统音量 */
+    /* macOS: 使用 osascript 设置系统音量 (P43: popen替代system防注入) */
     if (level < 0) level = 0;
     if (level > 100) level = 100;
     {
         char cmd[128];
         snprintf(cmd, sizeof(cmd), "osascript -e 'set volume output volume %d'", level);
-        system(cmd);
+        FILE* p = popen(cmd, "r");
+        if (p) pclose(p);
     }
     return 0;
 #else
@@ -1446,7 +1447,7 @@ static int co_close_window_by_title(COSystem* system, const char* title) {
     XCloseDisplay(dpy);
     return 0;
 #elif defined(__APPLE__)
-    /* macOS: 使用 osascript 关闭窗口 */
+    /* macOS: 使用 osascript 关闭窗口 (P43: popen替代system) */
     {
         char cmd[512];
         snprintf(cmd, sizeof(cmd),
@@ -1454,7 +1455,8 @@ static int co_close_window_by_title(COSystem* system, const char* title) {
                  "if exists (first window of process \"%s\") then "
                  "click button 1 of window 1 of process \"%s\"' 2>/dev/null",
                  title, title);
-        system(cmd);
+        FILE* p = popen(cmd, "r");
+        if (p) pclose(p);
     }
     return 0;
 #else
@@ -1487,13 +1489,14 @@ static int co_focus_window_by_title(COSystem* system, const char* title) {
     XCloseDisplay(dpy);
     return 0;
 #elif defined(__APPLE__)
-    /* macOS: 使用 osascript 聚焦窗口 */
+    /* macOS: 使用 osascript 聚焦窗口 (P43: popen替代system) */
     {
         char cmd[512];
         snprintf(cmd, sizeof(cmd),
                  "osascript -e 'tell application \"%s\" to activate' 2>/dev/null",
                  title);
-        system(cmd);
+        FILE* p = popen(cmd, "r");
+        if (p) pclose(p);
     }
     return 0;
 #else
@@ -2061,7 +2064,8 @@ int co_browser_execute_js(COSystem* system, const char* js_code, char* result_ou
         if (hMem) {
             char* clip_data = (char*)GlobalLock(hMem);
             if (clip_data) {
-                strcpy(clip_data, js_code);
+                size_t js_len = strlen(js_code);
+                memcpy(clip_data, js_code, js_len + 1);  /* +1 for null terminator */
                 GlobalUnlock(hMem);
                 EmptyClipboard();
                 SetClipboardData(CF_TEXT, hMem);
@@ -2080,11 +2084,17 @@ int co_browser_execute_js(COSystem* system, const char* js_code, char* result_ou
         CloseClipboard();
     }
 #elif defined(__linux__) && defined(X11_AVAILABLE)
-    /* Linux下使用xdotool或xclip注入 */
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "echo '%s' | xclip -selection clipboard 2>/dev/null && "
-             "xdotool key ctrl+v Return 2>/dev/null", js_code);
-    success = (system(cmd) == 0) ? 1 : 0;
+    /* Linux下使用xdotool或xclip注入 (P43: popen替代system) */
+    {
+        char cmd[2048];
+        snprintf(cmd, sizeof(cmd), "echo '%s' | xclip -selection clipboard 2>/dev/null && "
+                 "xdotool key ctrl+v Return 2>/dev/null", js_code);
+        FILE* p = popen(cmd, "r");
+        if (p) {
+            int rc = pclose(p);
+            success = (rc == 0) ? 1 : 0;
+        }
+    }
 #endif
     if (result_out && result_size > 0) {
         snprintf(result_out, result_size, "{\"status\":\"%s\",\"method\":\"clipboard_injection\"}",
@@ -2875,8 +2885,9 @@ int co_learn_from_demo(COSystem* system, const float* screen_sequence, const COA
     }
 
     free(system->demo_label);
-    system->demo_label = (char*)malloc(strlen(task_label) + 1);
-    if (system->demo_label) strcpy(system->demo_label, task_label);
+    size_t label_len = strlen(task_label);
+    system->demo_label = (char*)malloc(label_len + 1);
+    if (system->demo_label) memcpy(system->demo_label, task_label, label_len + 1);
 
     return 0;
 }

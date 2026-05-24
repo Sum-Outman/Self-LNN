@@ -212,6 +212,12 @@ typedef enum {
     API_POST_SIMULATION_PLAN_PATH = 120,   /**< 路径规划 */
     API_POST_SIMULATION_ROBOT_CTRL = 121,  /**< 仿真机器人控制 */
     API_POST_SIMULATION_RECONSTRUCT = 135, /**< 3D重建请求 */
+    API_POST_SIMULATION_VIEW_RESET = 305,  /**< 重置仿真视图 */
+    API_POST_SIMULATION_TOGGLE_GRID = 306, /**< 切换仿真网格 */
+    API_POST_SIMULATION_ROBOT_ADD = 307,   /**< 添加仿真机器人 */
+    API_POST_SIMULATION_CLEAR = 308,       /**< 清空仿真场景 */
+    API_POST_SIMULATION_COMMAND = 309,     /**< 仿真命令 */
+    API_POST_ROBOT_PATH_PLAN = 310,        /**< 机器人路径规划 */
 
     /* ===== 多模态学习新端点 ===== */
     API_POST_MULTIMODAL_LEARN = 122,       /**< 启动多模态学习 */

@@ -3332,7 +3332,7 @@ int point_cloud_ndt_grid(const float* points, int n_points,
  * ============================================================================ */
 
 /**
- * @brief 提取点云特征
+ * @brief 提取点云特征（完整实现：基于PCA的几何特征 + 统计特征）
  */
 int point_cloud_extract_features(PointCloudProcessor* processor,
                                 const PointCloud* input,
@@ -3342,13 +3342,104 @@ int point_cloud_extract_features(PointCloudProcessor* processor,
         log_error("[点云] point_cloud_extract_features: 参数无效");
         return -1;
     }
+    if (input->num_points == 0) {
+        memset(result, 0, sizeof(PointCloudFeatureResult));
+        return 0;
+    }
+    /* P02修复: 基于PCA的几何特征提取
+     * 使用协方差矩阵特征值分析提取点云特征：
+     * - 线性度 (λ1-λ2)/λ1
+     * - 平面度 (λ2-λ3)/λ1
+     * - 散度 λ3/(λ1+λ2+λ3)
+     * - 各向异性 (λ1-λ3)/λ1 */
     memset(result, 0, sizeof(PointCloudFeatureResult));
-    log_info("[点云] point_cloud_extract_features: 特征提取待实现，点数=%zu", input->num_points);
-    return -1;
+    /* 计算质心 */
+    float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+    for (size_t i = 0; i < input->num_points; i++) {
+        cx += input->points[i * 3];
+        cy += input->points[i * 3 + 1];
+        cz += input->points[i * 3 + 2];
+    }
+    float inv_n = 1.0f / (float)input->num_points;
+    cx *= inv_n; cy *= inv_n; cz *= inv_n;
+    /* 计算协方差矩阵 */
+    float cov[9] = {0};
+    for (size_t i = 0; i < input->num_points; i++) {
+        float dx = input->points[i * 3] - cx;
+        float dy = input->points[i * 3 + 1] - cy;
+        float dz = input->points[i * 3 + 2] - cz;
+        cov[0] += dx * dx; cov[1] += dx * dy; cov[2] += dx * dz;
+        cov[4] += dy * dy; cov[5] += dy * dz;
+        cov[8] += dz * dz;
+    }
+    cov[3] = cov[1]; cov[6] = cov[2]; cov[7] = cov[5];
+    for (int i = 0; i < 9; i++) cov[i] *= inv_n;
+    /* 幂迭代法求最大特征值和特征向量 */
+    float v[3] = {1.0f, 0.0f, 0.0f};
+    for (int iter = 0; iter < 20; iter++) {
+        float w[3];
+        w[0] = cov[0] * v[0] + cov[1] * v[1] + cov[2] * v[2];
+        w[1] = cov[3] * v[0] + cov[4] * v[1] + cov[5] * v[2];
+        w[2] = cov[6] * v[0] + cov[7] * v[1] + cov[8] * v[2];
+        float norm = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+        if (norm < 1e-10f) break;
+        v[0] = w[0] / norm; v[1] = w[1] / norm; v[2] = w[2] / norm;
+    }
+    float lambda1 = v[0] * (cov[0] * v[0] + cov[1] * v[1] + cov[2] * v[2]) +
+                   v[1] * (cov[3] * v[0] + cov[4] * v[1] + cov[5] * v[2]) +
+                   v[2] * (cov[6] * v[0] + cov[7] * v[1] + cov[8] * v[2]);
+    /* 缩减法求次大特征值 */
+    float cov2[9];
+    memcpy(cov2, cov, sizeof(cov2));
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            cov2[i * 3 + j] -= lambda1 * ((i == 0 ? v[0] : (i == 1 ? v[1] : v[2])) *
+                                          (j == 0 ? v[0] : (j == 1 ? v[1] : v[2])));
+        }
+    }
+    float u[3] = {0.0f, 1.0f, 0.0f};
+    for (int iter = 0; iter < 20; iter++) {
+        float w[3];
+        w[0] = cov2[0] * u[0] + cov2[1] * u[1] + cov2[2] * u[2];
+        w[1] = cov2[3] * u[0] + cov2[4] * u[1] + cov2[5] * u[2];
+        w[2] = cov2[6] * u[0] + cov2[7] * u[1] + cov2[8] * u[2];
+        float norm = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+        if (norm < 1e-10f) break;
+        u[0] = w[0] / norm; u[1] = w[1] / norm; u[2] = w[2] / norm;
+    }
+    float lambda2 = u[0] * (cov2[0] * u[0] + cov2[1] * u[1] + cov2[2] * u[2]) +
+                   u[1] * (cov2[3] * u[0] + cov2[4] * u[1] + cov2[5] * u[2]) +
+                   u[2] * (cov2[6] * u[0] + cov2[7] * u[1] + cov2[8] * u[2]);
+    if (lambda2 < 0.0f) lambda2 = 0.0f;
+    /* 最小特征值 = trace - λ1 - λ2 */
+    float trace = cov[0] + cov[4] + cov[8];
+    float lambda3 = trace - lambda1 - lambda2;
+    if (lambda3 < 0.0f) lambda3 = 0.0f;
+    /* 分配特征结果 */
+    int num_feat = 7;
+    result->features = (float*)safe_malloc(num_feat * sizeof(float));
+    if (!result->features) {
+        log_error("[点云] point_cloud_extract_features: 特征内存分配失败");
+        return -1;
+    }
+    result->num_features = num_feat;
+    float sum_lambda = lambda1 + lambda2 + lambda3;
+    if (sum_lambda < 1e-10f) sum_lambda = 1e-10f;
+    result->features[0] = (lambda1 - lambda2) / lambda1; /* 线性度 */
+    result->features[1] = (lambda2 - lambda3) / lambda1; /* 平面度 */
+    result->features[2] = lambda3 / sum_lambda;           /* 散度 */
+    result->features[3] = (lambda1 - lambda3) / lambda1; /* 各向异性 */
+    result->features[4] = cx;  /* 质心X */
+    result->features[5] = cy;  /* 质心Y */
+    result->features[6] = cz;  /* 质心Z */
+    result->feature_type = config->feature_type;
+    log_info("[点云] point_cloud_extract_features: 提取%d维几何特征，点数=%zu",
+             num_feat, input->num_points);
+    return num_feat;
 }
 
 /**
- * @brief 计算点云法线
+ * @brief 计算点云法线（完整实现：基于PCA的最小特征向量法）
  */
 int point_cloud_compute_normals(PointCloudProcessor* processor,
                                const PointCloud* input,
@@ -3358,10 +3449,232 @@ int point_cloud_compute_normals(PointCloudProcessor* processor,
         log_error("[点云] point_cloud_compute_normals: 参数无效");
         return -1;
     }
-    log_info("[点云] point_cloud_compute_normals: 法线计算待实现，点数=%zu，搜索半径=%.3f",
-             input->num_points, search_radius);
-    (void)max_neighbors;
-    return -1;
+    if (input->num_points == 0) return 0;
+    /* P02修复: PCA法线估计
+     * 对每个点，在其邻域内计算协方差矩阵，
+     * 最小特征值对应的特征向量即为法线方向 */
+    int k = (max_neighbors > 0) ? max_neighbors : 10;
+    if (k > (int)input->num_points) k = (int)input->num_points;
+    float sr2 = search_radius * search_radius;
+    if (sr2 <= 0.0f) sr2 = 1.0f;
+    for (size_t i = 0; i < input->num_points; i++) {
+        float px = input->points[i * 3];
+        float py = input->points[i * 3 + 1];
+        float pz = input->points[i * 3 + 2];
+        /* 收集邻域点 */
+        float local_cx = 0.0f, local_cy = 0.0f, local_cz = 0.0f;
+        int neighbor_count = 0;
+        for (size_t j = 0; j < input->num_points && neighbor_count < k * 2; j++) {
+            float dx = input->points[j * 3] - px;
+            float dy = input->points[j * 3 + 1] - py;
+            float dz = input->points[j * 3 + 2] - pz;
+            float dist2 = dx * dx + dy * dy + dz * dz;
+            if (dist2 <= sr2) {
+                local_cx += input->points[j * 3];
+                local_cy += input->points[j * 3 + 1];
+                local_cz += input->points[j * 3 + 2];
+                neighbor_count++;
+            }
+        }
+        if (neighbor_count < 3) {
+            normals[i * 3] = 0.0f;
+            normals[i * 3 + 1] = 0.0f;
+            normals[i * 3 + 2] = 1.0f;
+            continue;
+        }
+        local_cx /= (float)neighbor_count;
+        local_cy /= (float)neighbor_count;
+        local_cz /= (float)neighbor_count;
+        /* 局部协方差矩阵 */
+        float lcov[9] = {0};
+        for (size_t j = 0; j < input->num_points; j++) {
+            float dx = input->points[j * 3] - px;
+            float dy = input->points[j * 3 + 1] - py;
+            float dz = input->points[j * 3 + 2] - pz;
+            float dist2 = dx * dx + dy * dy + dz * dz;
+            if (dist2 <= sr2) {
+                float ddx = input->points[j * 3] - local_cx;
+                float ddy = input->points[j * 3 + 1] - local_cy;
+                float ddz = input->points[j * 3 + 2] - local_cz;
+                lcov[0] += ddx * ddx; lcov[1] += ddx * ddy; lcov[2] += ddx * ddz;
+                lcov[4] += ddy * ddy; lcov[5] += ddy * ddz;
+                lcov[8] += ddz * ddz;
+            }
+        }
+        lcov[3] = lcov[1]; lcov[6] = lcov[2]; lcov[7] = lcov[5];
+        /* 幂迭代法求最小特征向量（对-I迭代求最大=对原矩阵求最小） */
+        float n[3] = {0.0f, 0.0f, 1.0f};
+        float identity[9] = {1,0,0, 0,1,0, 0,0,1};
+        float neg_cov[9];
+        for (int r = 0; r < 9; r++) neg_cov[r] = identity[r] - lcov[r];
+        for (int iter = 0; iter < 15; iter++) {
+            float w[3];
+            w[0] = neg_cov[0] * n[0] + neg_cov[1] * n[1] + neg_cov[2] * n[2];
+            w[1] = neg_cov[3] * n[0] + neg_cov[4] * n[1] + neg_cov[5] * n[2];
+            w[2] = neg_cov[6] * n[0] + neg_cov[7] * n[1] + neg_cov[8] * n[2];
+            float nrm = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+            if (nrm < 1e-10f) break;
+            n[0] = w[0] / nrm; n[1] = w[1] / nrm; n[2] = w[2] / nrm;
+        }
+        normals[i * 3] = n[0];
+        normals[i * 3 + 1] = n[1];
+        normals[i * 3 + 2] = n[2];
+    }
+    log_info("[点云] 计算%d个法线，搜索半径=%.3f", (int)input->num_points, search_radius);
+    return (int)input->num_points;
+}
+
+/**
+ * @brief 估计点云平面（完整实现：RANSAC平面拟合）
+ */
+int point_cloud_estimate_plane(PointCloudProcessor* processor,
+                              const PointCloud* input,
+                              float distance_threshold, int max_iterations,
+                              float* plane_coefficients,
+                              int* inlier_indices, int max_inliers) {
+    if (!processor || !input || !plane_coefficients) {
+        log_error("[点云] point_cloud_estimate_plane: 参数无效");
+        return -1;
+    }
+    if (input->num_points < 3) {
+        log_error("[点云] point_cloud_estimate_plane: 点数不足(最小3)，当前=%zu", input->num_points);
+        return -1;
+    }
+    /* P02修复: RANSAC平面拟合 ax+by+cz+d=0
+     * 随机采样3点确定平面，计算内点数，迭代优化 */
+    float dt = (distance_threshold > 0.0f) ? distance_threshold : 0.05f;
+    int max_iter = (max_iterations > 0) ? max_iterations : 100;
+    int best_inliers = 0;
+    float best_plane[4] = {0, 0, 1, 0};
+    size_t n = input->num_points;
+    /* 使用确定性索引选择替代真随机，保证可重现 */
+    for (int iter = 0; iter < max_iter; iter++) {
+        /* 选择3个间距较大的点 */
+        int i1 = (iter * 7) % (int)n;
+        int i2 = (iter * 13 + (int)n / 3) % (int)n;
+        int i3 = (iter * 19 + 2 * (int)n / 3) % (int)n;
+        if (i1 == i2 || i2 == i3 || i1 == i3) continue;
+        float p1[3] = {input->points[i1*3], input->points[i1*3+1], input->points[i1*3+2]};
+        float p2[3] = {input->points[i2*3], input->points[i2*3+1], input->points[i2*3+2]};
+        float p3[3] = {input->points[i3*3], input->points[i3*3+1], input->points[i3*3+2]};
+        /* 计算法线 n = (p2-p1)×(p3-p1) */
+        float v1[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
+        float v2[3] = {p3[0]-p1[0], p3[1]-p1[1], p3[2]-p1[2]};
+        float normal[3];
+        normal[0] = v1[1]*v2[2] - v1[2]*v2[1];
+        normal[1] = v1[2]*v2[0] - v1[0]*v2[2];
+        normal[2] = v1[0]*v2[1] - v1[1]*v2[0];
+        float nrm = sqrtf(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]);
+        if (nrm < 1e-10f) continue;
+        normal[0] /= nrm; normal[1] /= nrm; normal[2] /= nrm;
+        float d = -(normal[0]*p1[0] + normal[1]*p1[1] + normal[2]*p1[2]);
+        /* 统计内点 */
+        int inliers = 0;
+        for (size_t i = 0; i < n; i++) {
+            float dist = normal[0]*input->points[i*3] + normal[1]*input->points[i*3+1] +
+                        normal[2]*input->points[i*3+2] + d;
+            if (dist < 0) dist = -dist;
+            if (dist < dt) inliers++;
+        }
+        if (inliers > best_inliers) {
+            best_inliers = inliers;
+            best_plane[0] = normal[0]; best_plane[1] = normal[1];
+            best_plane[2] = normal[2]; best_plane[3] = d;
+        }
+    }
+    plane_coefficients[0] = best_plane[0];
+    plane_coefficients[1] = best_plane[1];
+    plane_coefficients[2] = best_plane[2];
+    plane_coefficients[3] = best_plane[3];
+    if (inlier_indices && max_inliers > 0) {
+        int count = 0;
+        for (size_t i = 0; i < n && count < max_inliers; i++) {
+            float dist = best_plane[0]*input->points[i*3] + best_plane[1]*input->points[i*3+1] +
+                        best_plane[2]*input->points[i*3+2] + best_plane[3];
+            if (dist < 0) dist = -dist;
+            if (dist < dt) inlier_indices[count++] = (int)i;
+        }
+    }
+    log_info("[点云] RANSAC平面估计: %d/%zu内点 (%.1f%%), 平面=[%.4f,%.4f,%.4f,%.4f]",
+             best_inliers, n, 100.0f*(float)best_inliers/(float)n,
+             best_plane[0], best_plane[1], best_plane[2], best_plane[3]);
+    return best_inliers;
+}
+
+/**
+ * @brief 从文件加载点云（完整实现：PLY/PCD/CSV格式解析）
+ */
+int point_cloud_load_from_file(PointCloud* point_cloud,
+                              const char* filepath, int format) {
+    if (!point_cloud || !filepath) {
+        log_error("[点云] point_cloud_load_from_file: 参数无效");
+        return -1;
+    }
+    /* P02修复: 解析PLY/PCD/CSV文件格式 */
+    FILE* fp = fopen(filepath, "r");
+    if (!fp) {
+        log_error("[点云] point_cloud_load_from_file: 无法打开文件 %s", filepath);
+        return -1;
+    }
+    memset(point_cloud, 0, sizeof(PointCloud));
+    char line[1024];
+    size_t estimated_points = 0;
+    int header_done = 0;
+    if (format == 0) {
+        /* PLY格式解析 */
+        while (fgets(line, sizeof(line), fp)) {
+            if (strncmp(line, "element vertex ", 15) == 0) {
+                estimated_points = (size_t)atoi(line + 15);
+            }
+            if (strcmp(line, "end_header\n") == 0 || strcmp(line, "end_header\r\n") == 0) {
+                header_done = 1;
+                break;
+            }
+        }
+    } else if (format == 3) {
+        /* CSV格式：跳过标题行 */
+        fgets(line, sizeof(line), fp);
+        header_done = 1;
+    }
+    if (!header_done && format == 0) {
+        fclose(fp);
+        return -1;
+    }
+    /* 预估点数 */
+    if (estimated_points == 0) estimated_points = 100000;
+    point_cloud->points = (float*)safe_malloc(estimated_points * 3 * sizeof(float));
+    if (!point_cloud->points) {
+        fclose(fp);
+        return -1;
+    }
+    size_t count = 0;
+    size_t capacity = estimated_points;
+    while (fgets(line, sizeof(line), fp) && count < capacity) {
+        float x, y, z;
+        if (format == 3) {
+            if (sscanf(line, "%f,%f,%f", &x, &y, &z) == 3) {
+                point_cloud->points[count * 3] = x;
+                point_cloud->points[count * 3 + 1] = y;
+                point_cloud->points[count * 3 + 2] = z;
+                count++;
+            }
+        } else {
+            if (sscanf(line, "%f %f %f", &x, &y, &z) == 3) {
+                point_cloud->points[count * 3] = x;
+                point_cloud->points[count * 3 + 1] = y;
+                point_cloud->points[count * 3 + 2] = z;
+                count++;
+            }
+        }
+    }
+    fclose(fp);
+    point_cloud->num_points = count;
+    if (count > 0) {
+        point_cloud_compute_bounds(point_cloud, point_cloud->min_bounds,
+                                   point_cloud->max_bounds, point_cloud->centroid);
+    }
+    log_info("[点云] 从文件加载 %zu 个点，路径=%s", count, filepath);
+    return (int)count;
 }
 
 /**
@@ -3428,26 +3741,6 @@ int point_cloud_downsample(PointCloudProcessor* processor,
 }
 
 /**
- * @brief 估计点云平面（RANSAC平面拟合）
- */
-int point_cloud_estimate_plane(PointCloudProcessor* processor,
-                              const PointCloud* input,
-                              float distance_threshold, int max_iterations,
-                              float* plane_coefficients,
-                              int* inlier_indices, int max_inliers) {
-    if (!processor || !input || !plane_coefficients) {
-        log_error("[点云] point_cloud_estimate_plane: 参数无效");
-        return -1;
-    }
-    log_info("[点云] point_cloud_estimate_plane: 平面估计待实现，点数=%zu", input->num_points);
-    (void)distance_threshold;
-    (void)max_iterations;
-    (void)inlier_indices;
-    (void)max_inliers;
-    return -1;
-}
-
-/**
  * @brief 保存点云到文件（PLY/PCD/OBJ/CSV格式）
  */
 int point_cloud_save_to_file(const PointCloud* point_cloud,
@@ -3486,20 +3779,6 @@ int point_cloud_save_to_file(const PointCloud* point_cloud,
     fclose(fp);
     log_info("[点云] point_cloud_save_to_file: 保存 %zu 点到 %s", point_cloud->num_points, filepath);
     return 0;
-}
-
-/**
- * @brief 从文件加载点云（PLY/PCD/OBJ/CSV格式）
- */
-int point_cloud_load_from_file(PointCloud* point_cloud,
-                              const char* filepath, int format) {
-    if (!point_cloud || !filepath) {
-        log_error("[点云] point_cloud_load_from_file: 参数无效");
-        return -1;
-    }
-    log_info("[点云] point_cloud_load_from_file: 从文件加载功能待实现，路径=%s，格式=%d",
-             filepath, format);
-    return -1;
 }
 
 /**

@@ -217,6 +217,9 @@ SELFLNN_API void* selflnn_get_safety_monitor(void);
 SELFLNN_API void* selflnn_get_data_pipeline(void);
 SELFLNN_API void* selflnn_get_speech_recognizer(void);
 SELFLNN_API void selflnn_set_speech_recognizer(void* sr);
+SELFLNN_API void* selflnn_get_product_design_engine(void);  /* APP10: 产品设计引擎 */
+SELFLNN_API void selflnn_set_product_design_engine(void* engine);
+SELFLNN_API void* selflnn_get_multisystem_control(void);     /* APP13: 多系统控制 */
 
 /* ---- 4e. 事件驱动即时自检（ZSFWS-038） ---- */
 SELFLNN_API void dcpipeline_request_immediate_check(void);

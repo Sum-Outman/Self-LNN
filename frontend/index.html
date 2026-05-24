@@ -68,6 +68,7 @@
     <script src="js/programming-workbench.js"></script>
     <script src="js/training-center.js"></script>
     <script src="js/simulation-control.js"></script>
+    <script src="js/product-design.js"></script>
     <script src="js/hardware-util.js"></script>
 </head>
 <body>
@@ -101,6 +102,7 @@
                             <li><a href="#programming-workbench">编程工作台</a></li>
                             <li><a href="#multimodal-learn">多模态学习</a></li>
                             <li><a href="#simulation-control">仿真控制</a></li>
+                            <li><a href="#product-design">产品设计</a></li>
                             <li><a href="#device-control">设备控制</a></li>
                         </ul>
                     </li>
@@ -4466,6 +4468,29 @@ response = requests.get(
     })();
     </script>
 
+            </section>
+            <!-- ====== APP10: 产品设计 ====== -->
+            <section id="product-design" class="section">
+                <div class="card">
+                    <h2>产品设计</h2>
+                    <p class="desc">AI驱动的产品设计引擎 —— 输入需求描述，自动生成产品规格与评估</p>
+                </div>
+                <div class="card">
+                    <h3>需求描述</h3>
+                    <textarea id="pd-requirement" rows="4" style="width:100%;padding:10px;border:1px solid #444;border-radius:6px;background:#1a1a2e;color:#e0e0e0;font-size:14px" placeholder="例如：设计一个低功耗长续航的户外监测无人机，预算控制在5万元以内"></textarea>
+                    <div style="margin-top:10px;display:flex;gap:10px">
+                        <button id="pd-generate-btn" class="btn-primary" style="padding:8px 24px">生成设计方案</button>
+                        <button id="pd-status-btn" class="btn-secondary" style="padding:8px 24px">检查引擎状态</button>
+                    </div>
+                </div>
+                <div id="pd-status-card" class="card" style="display:none">
+                    <h3>引擎状态</h3>
+                    <div id="pd-status-content"></div>
+                </div>
+                <div id="pd-result-card" class="card" style="display:none">
+                    <h3>设计结果</h3>
+                    <div id="pd-result-content"></div>
+                </div>
             </section>
             <!-- ====== api-docs (从 api-docs.html 合并) ====== -->
             <section id="api-docs" class="section">

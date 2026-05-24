@@ -9,7 +9,7 @@ endif()
 # 构建选项
 option(BUILD_TESTS "构建测试程序" ON)
 option(BUILD_EXAMPLES "构建示例程序" ON)
-option(ENABLE_GPU "启用GPU加速支持" OFF)
+option(ENABLE_GPU "启用GPU加速支持" ON)
 option(INSTALL_EXAMPLES "安装示例程序" OFF)
 
 # F-005/F-006: 外部运行时接口（纯IPC通信，不链接外部库）

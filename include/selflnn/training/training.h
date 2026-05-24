@@ -165,6 +165,12 @@ typedef struct {
     float evolution_crossover_rate;         /**< 演化交叉率（默认0.8） */
     float evolution_elitism_rate;           /**< 演化精英保留率（默认0.1） */
     int evolution_use_validation;           /**< 演化是否使用验证集评估（默认1） */
+    
+    /* P15修复: 课程学习配置 */
+    int use_curriculum;                     /**< 是否启用课程学习 */
+    int curriculum_stages;                  /**< 课程学习阶段数（默认8） */
+    int curriculum_warmup;                  /**< 课程学习预热轮数（默认3） */
+    size_t num_samples;                     /**< 训练样本总数（课程学习需要） */
 } TrainingConfig;
 
 /**

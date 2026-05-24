@@ -1,4 +1,8 @@
 #include "selflnn/robot/robot_agent.h"
+#include "selflnn/robot/sensor_pipeline.h"
+#include "selflnn/robot/kinematics.h"
+#include "selflnn/robot/hardware_interface.h"
+#include "selflnn/reasoning/planning.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/time_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -1000,21 +1004,38 @@ int robot_agent_closed_loop_step(RobotAgent* agent,
         memcpy(sensor_state, external_sensor_data,
                AGENT_STATE_DIM * sizeof(float));
     } else if (sensor_pipeline_ptr) {
-        /* sensor_pipeline_collect(sensor_pipeline_ptr, sensor_state, AGENT_STATE_DIM); */
-        memset(sensor_state, 0, AGENT_STATE_DIM * sizeof(float));
+        /* P04修复: 调用真实的传感器管道采集函数 */
+        SensorPipeline* sp = (SensorPipeline*)sensor_pipeline_ptr;
+        if (sensor_pipeline_is_running(sp)) {
+            /* 从传感器管道收集所有已注册传感器的最近读数合并为状态向量 */
+            SensorPipelineEntry entry;
+            int sensor_ids[16];
+            int count = 16;
+            sensor_pipeline_get_registered_sensors(sp, sensor_ids, &count);
+            size_t state_idx = 0;
+            for (int i = 0; i < count && state_idx + 3 < AGENT_STATE_DIM; i++) {
+                if (sensor_pipeline_get_latest(sp, sensor_ids[i], &entry) == 0) {
+                    if (entry.data_size > 0 && state_idx < AGENT_STATE_DIM) {
+                        size_t copy_n = entry.data_size;
+                        if (state_idx + copy_n > AGENT_STATE_DIM)
+                            copy_n = AGENT_STATE_DIM - state_idx;
+                        memcpy(sensor_state + state_idx, entry.data_buffer, copy_n * sizeof(float));
+                        state_idx += copy_n;
+                    }
+                }
+            }
+        }
     }
     robot_agent_observe(agent, sensor_state);
 
     /* 阶段2: 规划 —— 使用规划系统生成动作路径 */
     if (planning_system_ptr && agent->goal_active) {
-        /* 尝试生成规划 */
         int plan_len = planning_generate(
             (PlanningSystem*)planning_system_ptr,
             agent->target_goal, AGENT_STATE_DIM,
             agent->state_vec, AGENT_STATE_DIM,
             plan_output, 512);
         if (plan_len > 0) {
-            /* 将规划路径存入代理的plan_steps */
             agent->plan_count = (plan_len < 1000) ? plan_len : 1000;
             for (int i = 0; i < agent->plan_count; i++) {
                 for (int j = 0; j < AGENT_ACTION_DIM; j++) {
@@ -1029,14 +1050,31 @@ int robot_agent_closed_loop_step(RobotAgent* agent,
 
     /* 阶段4: 运动学反解 —— 将动作转换为关节角度 */
     if (kinematics_ptr) {
-        /* ik_solve(kinematics_ptr, action_cmd, joint_angles, 32); */
-        memcpy(joint_angles, action_cmd, sizeof(float) *
-               ((AGENT_ACTION_DIM < 32) ? AGENT_ACTION_DIM : 32));
+        /* P04修复: 调用真实的逆运动学求解函数 */
+        KinematicModel* km = (KinematicModel*)kinematics_ptr;
+        Vec3 target_pos;
+        target_pos.x = action_cmd[0];
+        target_pos.y = action_cmd[1];
+        target_pos.z = action_cmd[2];
+        int ik_result = inverse_kinematics_ccd(km, &target_pos, NULL,
+                                                joint_angles,
+                                                KINEMATICS_IK_MAX_ITER,
+                                                KINEMATICS_IK_TOLERANCE);
+        if (ik_result <= 0) {
+            /* IK求解失败时回退为直接映射 */
+            int copy_count = (AGENT_ACTION_DIM < 32) ? AGENT_ACTION_DIM : 32;
+            memcpy(joint_angles, action_cmd, sizeof(float) * copy_count);
+        }
     }
 
     /* 阶段5: 硬件输出 —— 将关节角度发送到硬件 */
     if (hardware_ptr) {
-        /* hardware_send_joint_angles(hardware_ptr, joint_angles, AGENT_ACTION_DIM); */
+        /* P04修复: 调用真实的硬件输出函数 */
+        HardwareInterface* hw = (HardwareInterface*)hardware_ptr;
+        if (hardware_interface_is_connected(hw)) {
+            hardware_interface_send(hw, joint_angles,
+                                   sizeof(float) * ((AGENT_ACTION_DIM < 32) ? AGENT_ACTION_DIM : 32));
+        }
     }
 
     /* 将产生的动作复制回 agent 的外部可访问缓冲区 */

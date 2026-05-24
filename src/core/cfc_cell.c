@@ -4183,10 +4183,26 @@ static int compute_liquid_time_constants(CfCCell* cell, const float* input,
         memcpy(normalized, net_buffer, hidden_size * sizeof(float));
     }
 
-    // 步骤3: sigmoid 激活 + 缩放到 [tau_min, tau_max]
+    // 步骤3: softplus + sigmoid 液态时间常数 (LTC论文 Hasani et al. 2021)
+    // τ_i = softplus(net_i) + σ(-net_i / τ_base)
+    // softplus(x) = log(1+exp(x))：对正输入近线性，对负输入平滑趋于0
+    // σ(-x/τ_base)：稳定项，防止时间常数过小
     for (size_t i = 0; i < hidden_size; i++) {
-        float sig = 1.0f / (1.0f + expf(-net_buffer[i]));
-        tau_out[i] = sig * tau_range + tau_min;
+        float net = net_buffer[i];
+        // 数值稳定softplus
+        float sp = (net > 20.0f) ? net :
+                   (net < -20.0f) ? 0.0f :
+                   logf(1.0f + expf(net));
+        // σ(-net/τ_base), τ_base默认1.0
+        float tau_base = 1.0f;
+        float gate_arg = -net / tau_base;
+        float gate = (gate_arg > 10.0f) ? 1.0f :
+                     (gate_arg < -10.0f) ? 0.0f :
+                     1.0f / (1.0f + expf(gate_arg));
+        float tau = sp + gate;
+        if (tau < tau_min) tau = tau_min;
+        if (tau > tau_max) tau = tau_max;
+        tau_out[i] = tau;
     }
 
     return 0;
@@ -4332,16 +4348,13 @@ int cfc_cell_set_liquid_tau(CfCCell* cell, const float* tau_values) {
 }
 
 /**
- * @brief 液时域缩放的梯度反向传播
+ * @brief 液时域缩放的梯度反向传播 (P23: softplus版)
  *
- * 计算损失对液时域缩放参数（W_tau, b_tau）的梯度，用于端到端训练。
- * 需要从上层获取 dL/dτ 的梯度（即 tau_gradient 参数）。
+ * 计算损失对液时域缩放参数（W_tau, b_tau）的梯度。
  *
- * 反向传播公式：
- *   dL/dW_tau[i,j] = dL/dτ_i · dτ_i/dsig_i · dsig_i/dnet_i · dnet_i/dW_tau[i,j]
- *                  = dL/dτ_i · (τ_max - τ_min) · sig_i · (1 - sig_i) · x_j
- *   dL/db_tau[i]  = dL/dτ_i · (τ_max - τ_min) · sig_i · (1 - sig_i)
- *   dL/dx_j        = Σ_i dL/dτ_i · (τ_max - τ_min) · sig_i · (1 - sig_i) · W_tau[i,j]
+ * 前向公式：τ_i = softplus(net_i) + σ(-net_i / τ_base)
+ * 反向公式：dτ/dnet = sigmoid(net) - gate*(1-gate)/τ_base
+ *   其中 gate = σ(-net/τ_base)
  */
 int cfc_cell_backward_liquid(CfCCell* cell, const float* gradient, float* input_gradient, float* tau_gradient) {
     SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
@@ -4353,28 +4366,30 @@ int cfc_cell_backward_liquid(CfCCell* cell, const float* gradient, float* input_
 
     size_t hidden_size = cell->config.hidden_size;
     size_t input_size = cell->config.input_size;
-    float tau_range = cell->liquid_tau_max - cell->liquid_tau_min;
+    float tau_base = 1.0f;
 
-    // 使用 gradient 作为 dL/dτ（损失对时间常数的梯度）
     const float* dL_dtau = gradient;
-
-    // 如果提供了 tau_gradient 输出缓冲区，将梯度复制到其中
     if (tau_gradient) {
         memcpy(tau_gradient, gradient, hidden_size * sizeof(float));
     }
 
-    // 步骤1: 计算 sigmoid 输出和导数
-    // 先重新计算 net 值（使用当前输入缓冲区）
+    /* 输入L2归一化，与前向一致 */
+    float input_norm = 0.0f;
+    for (size_t j = 0; j < input_size; j++) {
+        input_norm += cell->state->input_buffer[j] * cell->state->input_buffer[j];
+    }
+    input_norm = sqrtf(input_norm) + 1e-8f;
+    float inv_norm = 1.0f / input_norm;
+
     float* net = cell->liquid_tau_workspace;
     for (size_t i = 0; i < hidden_size; i++) {
         net[i] = cell->liquid_tau_bias[i];
         for (size_t j = 0; j < input_size; j++) {
             net[i] += cell->liquid_tau_weights[i * input_size + j] *
-                      cell->state->input_buffer[j];
+                      cell->state->input_buffer[j] * inv_norm;
         }
     }
 
-    // 如果启用了层归一化，需要重新计算归一化后的值
     if (cell->liquid_use_layer_norm) {
         float mean = 0.0f;
         for (size_t i = 0; i < hidden_size; i++) mean += net[i];
@@ -4391,14 +4406,22 @@ int cfc_cell_backward_liquid(CfCCell* cell, const float* gradient, float* input_
         }
     }
 
-    // 步骤2: 计算 sigmoid 导数 dsig/dnet = sig * (1 - sig)
-    // 同时计算 dτ/dnet = tau_range * dsig/dnet
+    /* P27修复: softplus + gate 联合梯度
+     * 前向: τ = softplus(net) + σ(-net/τ_base)
+     * 导数: dτ/dnet = σ(net) - gate*(1-gate)/τ_base */
     for (size_t i = 0; i < hidden_size; i++) {
-        float sig = 1.0f / (1.0f + expf(-net[i]));
-        float dsig_dnet = sig * (1.0f - sig);
-        // clip 防止极端值
-        if (dsig_dnet < 1e-8f) dsig_dnet = 1e-8f;
-        net[i] = dL_dtau[i] * tau_range * dsig_dnet;
+        float net_val = net[i];
+        float sigmoid_net = (net_val > 10.0f) ? 1.0f :
+                            (net_val < -10.0f) ? 0.0f :
+                            1.0f / (1.0f + expf(-net_val));
+        float gate_arg = -net_val / tau_base;
+        float gate = (gate_arg > 10.0f) ? 1.0f :
+                     (gate_arg < -10.0f) ? 0.0f :
+                     1.0f / (1.0f + expf(gate_arg));
+        float dtau_dnet = sigmoid_net - gate * (1.0f - gate) / tau_base;
+        if (dtau_dnet < 1e-8f) dtau_dnet = 1e-8f;
+        if (dtau_dnet > 1e8f) dtau_dnet = 1e8f;
+        net[i] = dL_dtau[i] * dtau_dnet;
     }
 
     // 步骤3: 计算梯度

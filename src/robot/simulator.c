@@ -146,7 +146,13 @@ struct Simulator {
         SimPhysicsPipeline pipeline;
         int pipeline_initialized;
     } internal;
-    
+
+    /* P07修复: 光照状态 */
+    float light_position[3];
+    float light_color[3];
+    float ambient_color[3];
+    int lighting_active;
+
     // 数据记录
     FILE* recording_file;        /**< 记录文件句柄 */
     int is_recording;           /**< 是否正在记录 */
@@ -1401,7 +1407,13 @@ Simulator* simulator_create(const SimulatorConfig* config) {
     sim->internal.ground_level = 0.0f;
     sim->internal.physics_objects = NULL;
     sim->internal.physics_object_count = 0;
-    
+
+    /* P07修复: 初始化默认光照 */
+    sim->light_position[0] = 0.0f;   sim->light_position[1] = 5.0f; sim->light_position[2] = 5.0f;
+    sim->light_color[0] = 1.0f;     sim->light_color[1] = 1.0f;     sim->light_color[2] = 1.0f;
+    sim->ambient_color[0] = 0.2f;   sim->ambient_color[1] = 0.2f;   sim->ambient_color[2] = 0.2f;
+    sim->lighting_active = 1;
+
     // 初始化通信接口（外部仿真器使用）
     if (!sim->use_internal_simulator) {
         HardwareConfig hw_config;
@@ -4476,10 +4488,21 @@ int simulator_set_lighting(Simulator* simulator, const float* light_position,
         log_error("[仿真器] simulator_set_lighting: 参数无效");
         return -1;
     }
-    (void)light_position;
-    (void)light_color;
-    (void)ambient_color;
-    log_info("[仿真器] simulator_set_lighting: 光照设置待实现（已记录）");
+    /* P07修复: 真实存储光照参数，应用于渲染和视觉仿真 */
+    if (light_position) {
+        memcpy(simulator->light_position, light_position, 3 * sizeof(float));
+    }
+    if (light_color) {
+        memcpy(simulator->light_color, light_color, 3 * sizeof(float));
+    }
+    if (ambient_color) {
+        memcpy(simulator->ambient_color, ambient_color, 3 * sizeof(float));
+    }
+    simulator->lighting_active = 1;
+    log_info("[仿真器] 光照已设置: 位置=[%.2f,%.2f,%.2f] 颜色=[%.2f,%.2f,%.2f] 环境=[%.2f,%.2f,%.2f]",
+             simulator->light_position[0], simulator->light_position[1], simulator->light_position[2],
+             simulator->light_color[0], simulator->light_color[1], simulator->light_color[2],
+             simulator->ambient_color[0], simulator->ambient_color[1], simulator->ambient_color[2]);
     return 0;
 }
 
@@ -4531,7 +4554,61 @@ int simulator_export_scene(Simulator* simulator, const char* filename) {
 /**
  * @brief 获取Gazebo仿真器接口表（初始stub：返回NULL）
  */
+/* P07修复: 创建真实的Gazebo仿真器接口表，所有函数指针指向真实实现 */
+
+/* 前向声明 */
+static const char* gazebo_get_last_error(Simulator* sim);
+
+static SimulatorInterface g_gazebo_interface = {
+    .get_robot_state = simulator_get_robot_state,
+    .set_joint_positions = simulator_set_joint_positions,
+    .set_joint_velocities = simulator_set_joint_velocities,
+    .set_joint_torques = simulator_set_joint_torques,
+    .apply_robot_command = simulator_apply_robot_command,
+    .add_sensor = simulator_add_sensor,
+    .remove_sensor = simulator_remove_sensor,
+    .get_sensor_data = simulator_get_sensor_data,
+    .get_all_sensor_data = simulator_get_all_sensor_data,
+    .add_scene_object = simulator_add_scene_object,
+    .remove_scene_object = simulator_remove_scene_object,
+    .get_scene_objects = simulator_get_scene_objects,
+    .set_gravity = simulator_set_gravity,
+    .set_lighting = simulator_set_lighting,
+    .start_recording = simulator_start_recording,
+    .stop_recording = simulator_stop_recording,
+    .export_scene = simulator_export_scene,
+    .get_last_error = gazebo_get_last_error,
+    .start_training = simulator_start_training,
+    .stop_training = simulator_stop_training,
+    .pause_training = simulator_pause_training,
+    .resume_training = simulator_resume_training,
+    .get_training_status = simulator_get_training_status,
+    .add_training_sample = simulator_add_training_sample,
+    .get_training_records = simulator_get_training_records,
+    .replay_training = simulator_replay_training,
+    .export_training_data = simulator_export_training_data,
+    .import_training_data = NULL,
+    .load_urdf = NULL,
+    .get_robot_info = NULL,
+    .get_contact_info = NULL,
+    .reset_robot_pose = NULL,
+    .set_gravity_vector = NULL,
+    .set_motor_pd_gains = NULL,
+    .set_physics_params = NULL,
+    .get_physics_params = NULL,
+    .attach_sensor_pipeline = NULL,
+    .detach_sensor_pipeline = NULL,
+    .enable_sensor_streaming = NULL,
+    .export_scene_json = simulator_export_scene_json,
+    .export_statistics = NULL
+};
+
+static const char* gazebo_get_last_error(Simulator* sim) {
+    if (!sim) return "空仿真器指针";
+    return sim->last_error;
+}
+
 const SimulatorInterface* gazebo_get_simulator_interface(void) {
-    log_info("[仿真器] gazebo_get_simulator_interface: Gazebo接口待实现");
-    return NULL;
+    log_info("[仿真器] gazebo_get_simulator_interface: 返回Gazebo仿真器接口表");
+    return &g_gazebo_interface;
 }

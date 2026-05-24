@@ -594,6 +594,9 @@ int trainer_load_dataset_graphql(Trainer* trainer, const char* endpoint,
 /**
  * @brief 训练器实现
  */
+/* P15: 前向声明课程学习调度器类型 */
+typedef struct CurriculumScheduler CurriculumScheduler;
+
 typedef struct Trainer {
     TrainingConfig config;         /**< 训练配置 */
     LNN* network;                  /**< 神经网络 */
@@ -827,6 +830,7 @@ typedef struct Trainer {
     // ---- 训练增强：训练阶段和课程学习 ----
     int training_phase;                       /**< 当前训练阶段(0=从零,1=预训练,2=微调,3=多模态对齐) */
     struct CurriculumState* curriculum_state; /**< 课程学习状态 */
+    CurriculumScheduler* curriculum_scheduler; /**< P15修复: 课程学习调度器 */
 
     // ---- P1: 线程安全锁 ----
     MutexHandle lock;                         /**< 训练器内部锁（保护所有可变字段） */
@@ -1322,6 +1326,20 @@ static void trainer_cleanup_gpu_resources(Trainer* trainer) {
     // 重置GPU状态
     trainer->gpu_initialized = 0;
     trainer->gpu_backend = GPU_BACKEND_CPU;
+    
+    /* P15修复: 初始化课程学习调度器（配置启用时创建，否则NULL） */
+    trainer->curriculum_scheduler = NULL;
+    if (config->use_curriculum) {
+        trainer->curriculum_scheduler = curriculum_scheduler_create(
+            config->num_samples > 0 ? config->num_samples : 1000,
+            config->curriculum_stages > 0 ? config->curriculum_stages : 8,
+            config->curriculum_warmup > 0 ? config->curriculum_warmup : 3,
+            (config->epochs / (config->curriculum_stages > 0 ? config->curriculum_stages : 8)));
+        if (trainer->curriculum_scheduler && config->verbose) {
+            printf("课程学习已启用：%d阶段，预热%d轮\n",
+                   config->curriculum_stages, config->curriculum_warmup);
+        }
+    }
 }
 
 /**
@@ -4826,6 +4844,12 @@ void trainer_free(Trainer* trainer) {
     mutex_destroy(trainer->lock);
     trainer->lock = NULL;
     
+    /* P15修复: 释放课程学习调度器 */
+    if (trainer->curriculum_scheduler) {
+        curriculum_scheduler_free(trainer->curriculum_scheduler);
+        trainer->curriculum_scheduler = NULL;
+    }
+    
     // 释放训练器
     safe_free((void**)&trainer);
 }
@@ -6083,6 +6107,17 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                 if (trainer->config.verbose) {
                     printf("早停触发于轮次 %zu\n", epoch);
                 }
+            }
+        }
+        
+        /* P15修复: 课程学习阶段更新 — 每个epoch结束时推进课程难度 */
+        if (trainer->curriculum_scheduler) {
+            curriculum_scheduler_update(trainer->curriculum_scheduler, (int)epoch, val_loss);
+            if (trainer->config.verbose && (epoch % 5 == 0 || epoch < 5)) {
+                printf("课程学习: 轮次%zu, 当前阶段%d/%d, 难度阈值=%.4f\n",
+                       epoch, trainer->curriculum_scheduler->current_stage + 1,
+                       trainer->curriculum_scheduler->num_stages,
+                       trainer->curriculum_scheduler->difficulty_threshold);
             }
         }
         
@@ -12861,20 +12896,30 @@ int trainer_enable_gpu(Trainer* trainer, int enable) {
     
     trainer->config.use_gpu = enable ? 1 : 0;
     
-    // 如果启用GPU，确保GPU上下文存在
+    /* P12修复: 启用GPU时必须设置gpu_initialized标志位
+     * 训练循环中所有GPU路径都通过 if(trainer->gpu_initialized) 守卫，
+     * 不设置此标志位将导致GPU加速路径完全不可达。 */
     if (enable) {
         if (!trainer->gpu_context) {
             GpuBackend backend = gpu_auto_select();
             trainer->gpu_context = gpu_context_create(backend, 0);
             if (!trainer->gpu_context) {
-                /* P0-012修复: GPU上下文创建失败时自动回退CPU，不阻止训练 */
                 log_info("警告: GPU上下文创建失败，自动回退到CPU训练");
                 trainer->config.use_gpu = 0;
                 trainer->gpu_backend = GPU_BACKEND_CPU;
+                trainer->gpu_initialized = 0;
                 TRAINER_UNLOCK(trainer);
                 return 0;
             }
+            trainer->gpu_backend = backend;
         }
+        /* P12修复: 关键 — 设置GPU初始化完成标志 */
+        trainer->gpu_initialized = 1;
+        log_info("GPU训练已启用，后端=%d", (int)trainer->gpu_backend);
+    } else {
+        trainer->gpu_initialized = 0;
+        trainer->gpu_backend = GPU_BACKEND_CPU;
+        log_info("GPU训练已禁用，回退到CPU模式");
     }
     
     TRAINER_UNLOCK(trainer);
@@ -12919,20 +12964,27 @@ int trainer_set_gpu_config(Trainer* trainer, const GpuTrainingConfig* config) {
     trainer->config.use_mixed_precision = config->use_mixed_precision;
     trainer->config.mixed_precision_mode = config->mixed_precision_mode;
     
-    // 如果启用GPU且需要创建/更新GPU上下文
+    /* P12修复: 设置GPU配置时必须同步gpu_initialized标志位 */
     if (config->enable_gpu) {
         if (!trainer->gpu_context) {
             GpuBackend backend = gpu_auto_select();
             trainer->gpu_context = gpu_context_create(backend, config->device_id);
             if (!trainer->gpu_context) {
-                /* P0-012修复: GPU上下文创建失败时自动回退CPU，不阻止训练 */
                 log_info("警告: GPU配置上下文创建失败，自动回退到CPU训练");
                 trainer->config.use_gpu = 0;
                 trainer->gpu_backend = GPU_BACKEND_CPU;
+                trainer->gpu_initialized = 0;
                 TRAINER_UNLOCK(trainer);
                 return 0;
             }
+            trainer->gpu_backend = backend;
         }
+        /* P12修复: 关键 — 设置GPU初始化完成标志 */
+        trainer->gpu_initialized = 1;
+        log_info("GPU配置已应用，启用GPU训练，后端=%d", (int)trainer->gpu_backend);
+    } else {
+        trainer->gpu_initialized = 0;
+        trainer->gpu_backend = GPU_BACKEND_CPU;
     }
     
     TRAINER_UNLOCK(trainer);

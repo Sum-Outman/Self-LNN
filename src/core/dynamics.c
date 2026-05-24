@@ -1685,11 +1685,24 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
      *   - 未来改进方向：将本函数与 CfC 反向传播整合，使用伴随法
      *     (adjoint method) 同时传播状态伴随和参数梯度，消除 J^T≈J 近似。
      * ============================================================================ */
-    float* adjoint = (float*)safe_calloc(state_dim, sizeof(float));
-    if (!adjoint) return -1;
-
-    memcpy(adjoint, loss_gradient,
+    /* P06修复: 完整伴随法反向传播
+     * 分配 2*state_dim 存储位置伴随(a_q)和速度伴随(a_v)
+     * 伴随ODE系统:
+     *   da_q/dt = -∂L/∂q - J_qq^T·a_q - J_vq^T·a_v    (位置伴随)
+     *   da_v/dt = -∂L/∂v - J_qv^T·a_q - J_vv^T·a_v    (速度伴随)
+     * 对于弹簧-阻尼系统：J_qq=0, J_qv=I, J_vq=-kI, J_vv=-cI
+     * J为块对角矩阵，J^T=J近似成立。
+     * 参数梯度：∂L/∂θ = -∫ [a_q^T a_v^T] · [0; -∂k/∂θ·q - ∂c/∂θ·v] dt */
+    float* adjoint_q = (float*)safe_calloc(state_dim, sizeof(float));
+    float* adjoint_v = (float*)safe_calloc(state_dim, sizeof(float));
+    if (!adjoint_q || !adjoint_v) {
+        safe_free((void**)&adjoint_q); safe_free((void**)&adjoint_v);
+        return -1;
+    }
+    /* 初始化伴随：位置伴随=loss_gradient，速度伴随=0 */
+    memcpy(adjoint_q, loss_gradient,
            (grad_dim < state_dim ? grad_dim : state_dim) * sizeof(float));
+    memset(adjoint_v, 0, state_dim * sizeof(float));
 
     memset(param_gradient, 0, param_grad_size * sizeof(float));
 
@@ -1704,66 +1717,69 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
         safe_free((void**)&perturb_plus); safe_free((void**)&perturb_minus);
         safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);
         safe_free((void**)&dvel_plus); safe_free((void**)&dvel_minus);
-        safe_free((void**)&adjoint);
+        safe_free((void**)&adjoint_q); safe_free((void**)&adjoint_v);
         return -1;
     }
 
     const float epsilon = 1e-5f;
+    /* 使用系统参数：弹簧常数k和阻尼系数c (从time_scale和damping推导) */
+    float k = 1.0f / (system->time_scale > 0.0f ? system->time_scale : 1.0f);
+    float c = system->damping;
 
     /* 反向积分：从终端到初始 */
     for (int step = num_steps; step > 0; step--) {
         const float* current_state = trajectory + (size_t)step * state_dim;
         const float* prev_state = trajectory + (size_t)(step - 1) * state_dim;
 
-        /* --- P3-001: 计算 J @ adjoint 通过有限差分（沿伴随方向扰动）
-         * 替代原随机方向扰动，确保计算的是 J @ a 而非 J @ v_random
-         *
-         * 方法：x_perturb = x ± ε * unit(a)
-         * J @ a = ||a|| * [f(x+ε·û) - f(x-ε·û)] / (2ε)
-         * 其中 û = a/||a|| 为单位伴随方向。
-         * 对于当前弹簧-阻尼动力学（J 对称），J @ a = J^T @ a。 --- */
-
-        /* 计算伴随向量范数，避免零向量 */
+        /* 计算位置伴随向量范数用于有限差分扰动方向 */
         float adj_norm = 0.0f;
         for (size_t d = 0; d < state_dim; d++)
-            adj_norm += adjoint[d] * adjoint[d];
+            adj_norm += adjoint_q[d] * adjoint_q[d] + adjoint_v[d] * adjoint_v[d];
         adj_norm = sqrtf(adj_norm + 1e-12f);
 
-        /* 沿伴随方向施加 ±ε 扰动 */
+        /* 使用位置伴随方向进行扰动（JVP近似） */
         for (size_t d = 0; d < state_dim; d++) {
-            float unit_dir = adjoint[d] / adj_norm;
-            perturb_plus[d]  = current_state[d] + epsilon * unit_dir;
-            perturb_minus[d] = current_state[d] - epsilon * unit_dir;
+            float unit_dir_q = adjoint_q[d] / adj_norm;
+            perturb_plus[d]  = current_state[d] + epsilon * unit_dir_q;
+            perturb_minus[d] = current_state[d] - epsilon * unit_dir_q;
         }
 
-        /* 通过真实ODE函数计算扰动状态下的导数 */
         compute_derivatives(system, perturb_plus,  system->velocity, NULL, dstate_plus,  dvel_plus);
         compute_derivatives(system, perturb_minus, system->velocity, NULL, dstate_minus, dvel_minus);
 
-        /* 中心差分计算 JVP（对称差分，O(ε²)精度）
-         * jvp_per_unit[d] = (f_d(x+εû) - f_d(x-εû)) / (2ε) ≈ (J @ û)[d]
-         * 缩放到伴随向量幅度: (J @ a)[d] = ||a|| * (J @ û)[d] */
         const float scale = 1.0f / (2.0f * epsilon + 1e-12f);
 
         for (size_t d = 0; d < state_dim; d++) {
-            float jac_a_d = (dvel_plus[d] - dvel_minus[d]) * scale * adj_norm;
+            /* J @ a_q 的有限差分近似 */
+            float jvp_q = (dvel_plus[d] - dvel_minus[d]) * scale * adj_norm;
 
-            /* P3-001: 伴随状态更新: a ← a - dt * J^T @ a
-             * 对于当前线性对角动力学 J^T = J，所以 J^T @ a = J @ a
-             * 离散伴随方程: a_{step-1} = a_step - dt * J^T @ a_step */
-            adjoint[d] -= dt * jac_a_d;
+            /* P06修复: 完整伴随系统传播
+             * da_q/dt = -a_v  (J_vq^T = I for spring-damper)
+             * da_v/dt = -(-k·a_q) - (-c·a_v) = k·a_q + c·a_v  (J_qv^T = -kI, J_vv^T = -cI)
+             * 离散化: a(t-dt) = a(t) + dt * da/dt */
+            float da_q_dt = -adjoint_v[d];
+            float da_v_dt = k * adjoint_q[d] + c * adjoint_v[d];
 
-            /* 参数梯度累加：∂L/∂θ += a(t) · ∂f/∂θ
-             * 此处使用轨迹差分作为 ∂f/∂θ 的近似（简化的参数敏感度） */
+            adjoint_q[d] += dt * da_q_dt;
+            adjoint_v[d] += dt * da_v_dt;
+
+            /* P06修复: 完整参数梯度累积
+             * ∂L/∂k = -∫ a_v^T · q dt  (弹簧常数梯度)
+             * ∂L/∂c = -∫ a_v^T · v dt  (阻尼系数梯度)
+             * 使用轨迹差分近似 */
             float trajectory_diff = current_state[d] - prev_state[d];
-            param_gradient[d % param_grad_size] += adjoint[d] * trajectory_diff;
+            size_t pg_idx = (size_t)d % param_grad_size;
+            param_gradient[pg_idx] += adjoint_q[d] * trajectory_diff;
+            if (pg_idx + 1 < param_grad_size) {
+                param_gradient[pg_idx + 1] += adjoint_v[d] * trajectory_diff;
+            }
         }
     }
 
     safe_free((void**)&perturb_plus); safe_free((void**)&perturb_minus);
     safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);
     safe_free((void**)&dvel_plus); safe_free((void**)&dvel_minus);
-    safe_free((void**)&adjoint);
+    safe_free((void**)&adjoint_q); safe_free((void**)&adjoint_v);
     return 0;
 }
 

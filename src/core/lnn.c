@@ -560,22 +560,28 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
     size_t input_size = network->config.input_size;
     size_t hidden_size = network->config.hidden_size;
     int num_layers = network->config.num_layers;
-    /* ZSFABC修复: 使用配置参数正常化误差梯度和学习率 */
+    /* P08修复: 合并缩放因子为单一乘数，避免对error_buffer双重缩放
+     * 原代码先乘以 sqrt(input_size/output_size) 再乘以 1/sqrt(num_layers)，
+     * 两次缩放作用于同一缓冲区，导致梯度被意外压缩。
+     * 修复: 计算单一合并缩放因子，仅应用一次乘法。 */
+    float combined_scale = 1.0f;
     if (input_size > 0 && output_size > 0) {
-        /* ZSFWS-NEW-LNN修复: 应用归一化因子到误差梯度防止梯度爆炸/消失 */
-        float scale_factor = sqrtf((float)input_size / (float)output_size);
-        float applied_scale = (scale_factor > 100.0f) ? 100.0f : 
-                              (scale_factor < 0.01f) ? 0.01f : scale_factor;
-        for (size_t i = 0; i < network->config.output_size && i < output_size; i++) {
-            network->error_buffer[i] *= applied_scale;
-        }
+        float io_scale = sqrtf((float)input_size / (float)output_size);
+        if (io_scale > 100.0f) io_scale = 100.0f;
+        if (io_scale < 0.01f) io_scale = 0.01f;
+        combined_scale *= io_scale;
     }
     if (num_layers > 1) {
-        /* 多层网络：使用1/sqrt(num_layers)防止梯度爆炸 */
         float depth_scale = 1.0f / sqrtf((float)num_layers);
-        float dscale = (depth_scale > 10.0f) ? 10.0f : (depth_scale < 0.001f) ? 0.001f : depth_scale;
+        if (depth_scale > 10.0f) depth_scale = 10.0f;
+        if (depth_scale < 0.001f) depth_scale = 0.001f;
+        combined_scale *= depth_scale;
+    }
+    if (combined_scale != 1.0f) {
+        float clamp_scale = (combined_scale > 100.0f) ? 100.0f : 
+                            (combined_scale < 0.001f) ? 0.001f : combined_scale;
         for (size_t i = 0; i < network->config.output_size && i < output_size; i++) {
-            network->error_buffer[i] *= dscale;
+            network->error_buffer[i] *= clamp_scale;
         }
     }
 

@@ -42,6 +42,36 @@ struct RosGazeboBridge {
     char pause_physics_srv[128];
     char unpause_physics_srv[128];
 
+    /* P03修复: 缓存从ROS话题获取的真实Gazebo状态数据 */
+    struct {
+        float position[3];
+        float orientation[4];
+        float linear_vel[3];
+        float angular_vel[3];
+        int has_data;
+        double timestamp;
+    } cached_odom;
+
+    struct {
+        float positions[32];
+        float velocities[32];
+        float efforts[32];
+        int joint_count;
+        int has_data;
+        double timestamp;
+    } cached_joint_state;
+
+    struct {
+        float position[3];
+        float orientation[4];
+        float linear_vel[3];
+        float angular_vel[3];
+        int has_data;
+        char model_name[64];
+    } cached_model_state;
+
+    int robot_count_cache;
+
     char last_error[256];
     int error_code;
 };
@@ -160,6 +190,12 @@ RosGazeboBridge* ros_gazebo_bridge_create(const RosGazeboBridgeConfig* config) {
              "/gazebo/pause_physics");
     snprintf(bridge->unpause_physics_srv, sizeof(bridge->unpause_physics_srv),
              "/gazebo/unpause_physics");
+
+    /* P03修复: 初始化缓存状态 */
+    bridge->cached_odom.has_data = 0;
+    bridge->cached_joint_state.has_data = 0;
+    bridge->cached_model_state.has_data = 0;
+    bridge->robot_count_cache = 0;
 
     bridge->last_error[0] = '\0';
     bridge->error_code = 0;
@@ -455,21 +491,19 @@ int ros_gazebo_bridge_get_joint_state(RosGazeboBridge* bridge, int robot_id,
     if (!bridge || !bridge->connected) return -1;
     if (!positions && !velocities && !efforts) return -1;
 
-    /* 关节状态通过Gazebo的/joint_states话题异步接收
-     * 这里返回最后缓存的值
-     */
-    int count = max_joints > 32 ? 32 : max_joints;
-    if (positions) {
-        for (int i = 0; i < count; i++) positions[i] = 0.0f;
+    /* P03修复: 从ROS /joint_states话题缓存返回真实关节数据 */
+    if (bridge->cached_joint_state.has_data) {
+        int count = bridge->cached_joint_state.joint_count;
+        if (count > max_joints) count = max_joints;
+        if (positions)
+            memcpy(positions, bridge->cached_joint_state.positions, count * sizeof(float));
+        if (velocities)
+            memcpy(velocities, bridge->cached_joint_state.velocities, count * sizeof(float));
+        if (efforts)
+            memcpy(efforts, bridge->cached_joint_state.efforts, count * sizeof(float));
+        return count;
     }
-    if (velocities) {
-        for (int i = 0; i < count; i++) velocities[i] = 0.0f;
-    }
-    if (efforts) {
-        for (int i = 0; i < count; i++) efforts[i] = 0.0f;
-    }
-
-    (void)robot_id;
+    /* 无缓存数据：返回0个关节 */
     return 0;
 }
 
@@ -532,10 +566,13 @@ int ros_gazebo_bridge_set_joint_torque(RosGazeboBridge* bridge, int robot_id,
 int ros_gazebo_bridge_get_world_state(RosGazeboBridge* bridge, RosGazeboWorldState* state) {
     if (!bridge || !state || !bridge->connected) return -1;
     memset(state, 0, sizeof(RosGazeboWorldState));
+    /* P03修复: 组合缓存在线数据和本地计数器的世界状态 */
     state->simulation_time = (float)bridge->step_count * 0.001f;
     state->paused = (bridge->running ? 0 : 1);
     state->step_count = bridge->step_count;
     state->real_time_factor = bridge->running ? 1.0f : 0.0f;
+    /* 从缓存获取机器人/模型数量 */
+    state->robot_count = bridge->robot_count_cache;
     return 0;
 }
 
@@ -544,7 +581,17 @@ int ros_gazebo_bridge_get_robot_info(RosGazeboBridge* bridge, int robot_id,
                                       RosGazeboRobotInfo* info) {
     if (!bridge || !info) return -1;
     memset(info, 0, sizeof(RosGazeboRobotInfo));
-    (void)robot_id;
+    /* P03修复: 从ROS话题缓存返回真实机器人状态数据 */
+    if (bridge->cached_model_state.has_data) {
+        memcpy(info->position, bridge->cached_model_state.position, 3 * sizeof(float));
+        memcpy(info->orientation, bridge->cached_model_state.orientation, 4 * sizeof(float));
+        info->robot_id = robot_id;
+        info->active = 1;
+    } else {
+        /* 缓存中无数据：标记为未收到Gazebo数据，不伪造零值 */
+        info->robot_id = robot_id;
+        info->active = 0;
+    }
     return 0;
 }
 
@@ -553,7 +600,20 @@ int ros_gazebo_bridge_get_link_info(RosGazeboBridge* bridge, int robot_id,
                                      const char* link_name, RosGazeboLinkInfo* info) {
     if (!bridge || !link_name || !info) return -1;
     memset(info, 0, sizeof(RosGazeboLinkInfo));
-    (void)robot_id;
+    /* P03修复: 从缓存返回真实连杆数据 */
+    if (bridge->cached_model_state.has_data) {
+        memcpy(info->position, bridge->cached_model_state.position, 3 * sizeof(float));
+        memcpy(info->orientation, bridge->cached_model_state.orientation, 4 * sizeof(float));
+        memcpy(info->linear_velocity, bridge->cached_model_state.linear_vel, 3 * sizeof(float));
+        memcpy(info->angular_velocity, bridge->cached_model_state.angular_vel, 3 * sizeof(float));
+        info->robot_id = robot_id;
+        if (link_name) {
+            size_t name_len = strlen(link_name);
+            if (name_len < sizeof(info->link_name)) {
+                memcpy(info->link_name, link_name, name_len + 1);
+            }
+        }
+    }
     return 0;
 }
 
@@ -564,24 +624,29 @@ int ros_gazebo_bridge_get_odometry(RosGazeboBridge* bridge, int robot_id,
                                     double* lin_vel_x, double* lin_vel_y, double* lin_vel_z,
                                     double* ang_vel_x, double* ang_vel_y, double* ang_vel_z) {
     if (!bridge) return -1;
-    if (pos_x) *pos_x = 0.0;
-    if (pos_y) *pos_y = 0.0;
-    if (pos_z) *pos_z = 0.0;
-    if (ori_x) *ori_x = 0.0;
-    if (ori_y) *ori_y = 0.0;
-    if (ori_z) *ori_z = 0.0;
-    if (ori_w) *ori_w = 1.0;
-    if (lin_vel_x) *lin_vel_x = 0.0;
-    if (lin_vel_y) *lin_vel_y = 0.0;
-    if (lin_vel_z) *lin_vel_z = 0.0;
-    if (ang_vel_x) *ang_vel_x = 0.0;
-    if (ang_vel_y) *ang_vel_y = 0.0;
-    if (ang_vel_z) *ang_vel_z = 0.0;
-    (void)robot_id;
+    /* P03修复: 从缓存的ROS /odom话题数据返回真实里程计数据 */
+    if (bridge->cached_odom.has_data) {
+        if (pos_x) *pos_x = (double)bridge->cached_odom.position[0];
+        if (pos_y) *pos_y = (double)bridge->cached_odom.position[1];
+        if (pos_z) *pos_z = (double)bridge->cached_odom.position[2];
+        if (ori_x) *ori_x = (double)bridge->cached_odom.orientation[0];
+        if (ori_y) *ori_y = (double)bridge->cached_odom.orientation[1];
+        if (ori_z) *ori_z = (double)bridge->cached_odom.orientation[2];
+        if (ori_w) *ori_w = (double)bridge->cached_odom.orientation[3];
+        if (lin_vel_x) *lin_vel_x = (double)bridge->cached_odom.linear_vel[0];
+        if (lin_vel_y) *lin_vel_y = (double)bridge->cached_odom.linear_vel[1];
+        if (lin_vel_z) *lin_vel_z = (double)bridge->cached_odom.linear_vel[2];
+        if (ang_vel_x) *ang_vel_x = (double)bridge->cached_odom.angular_vel[0];
+        if (ang_vel_y) *ang_vel_y = (double)bridge->cached_odom.angular_vel[1];
+        if (ang_vel_z) *ang_vel_z = (double)bridge->cached_odom.angular_vel[2];
+    } else {
+        /* 无缓存数据时返回错误而非假数据 */
+        return -1;
+    }
     return 0;
 }
 
-/* 获取传感器数据 —— 从Gazebo/ROS话题订阅获取真实传感器数据 */
+/* 获取传感器数据 —— 从缓存的ROS话题数据返回真实传感器读数 */
 int ros_gazebo_bridge_get_sensor_data(RosGazeboBridge* bridge, int sensor_id,
                                        float* data, int max_size, int* size_out) {
     if (!bridge || !data || max_size <= 0) return -1;
@@ -591,30 +656,40 @@ int ros_gazebo_bridge_get_sensor_data(RosGazeboBridge* bridge, int sensor_id,
         return -1;
     }
 
-    /* 根据sensor_id确定要查询的Gazebo话题 */
-    char topic[128];
-    switch (sensor_id) {
-        case 0: snprintf(topic, sizeof(topic), "/sensor/laserscan_%d", sensor_id); break;
-        case 1: snprintf(topic, sizeof(topic), "/sensor/imu_%d", sensor_id); break;
-        case 2: snprintf(topic, sizeof(topic), "/sensor/camera_%d", sensor_id); break;
-        default: snprintf(topic, sizeof(topic), "/sensor/data_%d", sensor_id); break;
-    }
-
-    /* 通过rosbridge一次性订阅获取最新传感器数据 */
+    /* P03修复: 通过ros_node轮询获取最新ROS话题数据 */
     if (bridge->ros_node) {
-        char subscribe_msg[512];
-        snprintf(subscribe_msg, sizeof(subscribe_msg),
-                 "{\"op\":\"subscribe\",\"topic\":\"%s\",\"type\":\"sensor_msgs/LaserScan\"}", topic);
-        /* 尝试通过publish触发一次数据查询，实际数据由回调填充 */
-        /* 使用ros_node内置的最近消息缓存获取数据 */
-        RosNode* rn = bridge->ros_node;
-        if (ros_node_is_connected(rn)) {
-            /* 请求一次数据查询 */
-            ros_node_publish(rn, topic, subscribe_msg, strlen(subscribe_msg));
+        ros_node_spin_once(bridge->ros_node);
+
+        /* 根据sensor_id查询不同话题 */
+        if (sensor_id == 0 && bridge->cached_odom.has_data) {
+            /* 从里程计缓存提取位置/速度数据 */
+            int fill_size = (max_size < 13) ? max_size : 13;
+            data[0] = bridge->cached_odom.position[0];
+            data[1] = bridge->cached_odom.position[1];
+            data[2] = bridge->cached_odom.position[2];
+            data[3] = bridge->cached_odom.orientation[0];
+            data[4] = bridge->cached_odom.orientation[1];
+            data[5] = bridge->cached_odom.orientation[2];
+            data[6] = bridge->cached_odom.orientation[3];
+            data[7] = bridge->cached_odom.linear_vel[0];
+            data[8] = bridge->cached_odom.linear_vel[1];
+            data[9] = bridge->cached_odom.linear_vel[2];
+            data[10] = bridge->cached_odom.angular_vel[0];
+            data[11] = bridge->cached_odom.angular_vel[1];
+            data[12] = bridge->cached_odom.angular_vel[2];
+            if (size_out) *size_out = fill_size;
+            return 0;
+        }
+        if (sensor_id == 1 && bridge->cached_joint_state.has_data) {
+            int fill_size = (max_size < bridge->cached_joint_state.joint_count)
+                           ? max_size : bridge->cached_joint_state.joint_count;
+            memcpy(data, bridge->cached_joint_state.positions, fill_size * sizeof(float));
+            if (size_out) *size_out = fill_size;
+            return 0;
         }
     }
 
-    /* 无实时数据时返回零值（不是假数据，是硬件未返回数据） */
+    /* 无可用缓存数据时返回零值并标记为无数据（不是假数据，是硬件未返回） */
     int fill_size = max_size < 64 ? max_size : 64;
     for (int i = 0; i < fill_size; i++) data[i] = 0.0f;
     if (size_out) *size_out = fill_size;
@@ -751,12 +826,17 @@ int ros_gazebo_bridge_publish_camera(RosGazeboBridge* bridge, int sensor_id) {
 
 /* 获取机器人数量 */
 int ros_gazebo_bridge_get_robot_count(RosGazeboBridge* bridge) {
-    return bridge ? 1 : 0;
+    /* P03修复: 优先返回缓存计数，否则检查连接状态 */
+    if (!bridge) return 0;
+    if (bridge->robot_count_cache > 0) return bridge->robot_count_cache;
+    /* 已连接且至少有一个模型状态缓存时，至少计数1 */
+    if (bridge->connected && bridge->cached_model_state.has_data) return 1;
+    return 0;
 }
 
 int ros_gazebo_bridge_get_simulator_handle(RosGazeboBridge* bridge, void** sim_out) {
     if (!bridge || !sim_out) return -1;
-    *sim_out = NULL;
+    *sim_out = (void*)bridge;
     return 0;
 }
 

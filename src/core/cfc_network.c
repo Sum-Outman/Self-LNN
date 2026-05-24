@@ -13,6 +13,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn_layer_norm.h"
 #include "selflnn/utils/math_utils.h"
+#include <stdint.h>
 #include "selflnn/utils/memory_utils.h"
 
 #include <stdlib.h>
@@ -1281,6 +1282,18 @@ int cfc_save(const CfCNetwork* network, FILE* file) {
                      "保存输出投影偏置失败（大小：%zu）", network->config.output_size);
     }
     
+    /* P40修复: 保存每层CfC细胞的完整内部参数 */
+    {
+        /* 哨兵标记表示扩展格式 */
+        uint32_t cell_marker = 0xCFCC3E11;
+        fwrite(&cell_marker, sizeof(uint32_t), 1, file);
+        for (int i = 0; i < network->config.num_layers; i++) {
+            SELFLNN_CHECK(cfc_cell_save(network->layers[i], file) == 0,
+                         SELFLNN_ERROR_IO_ERROR,
+                         "保存第%d层CfC细胞参数失败", i);
+        }
+    }
+    
     return 0;
 }
 
@@ -1359,6 +1372,23 @@ int cfc_load(CfCNetwork* network, FILE* file) {
                      == config.output_size,
                      SELFLNN_ERROR_IO_ERROR,
                      "读取输出投影偏置失败（大小：%zu）", config.output_size);
+    }
+    
+    /* P40修复: 加载每层CfC细胞的完整内部参数（向后兼容） */
+    {
+        uint32_t cell_marker = 0;
+        long saved_pos = ftell(file);
+        if (fread(&cell_marker, sizeof(uint32_t), 1, file) == 1 &&
+            cell_marker == 0xCFCC3E11) {
+            for (int i = 0; i < network->config.num_layers; i++) {
+                SELFLNN_CHECK(cfc_cell_load(network->layers[i], file) == 0,
+                             SELFLNN_ERROR_IO_ERROR,
+                             "读取第%d层CfC细胞参数失败", i);
+            }
+        } else {
+            /* 旧格式checkpoint（无细胞参数），回退文件指针 */
+            fseek(file, saved_pos, SEEK_SET);
+        }
     }
     
     return 0;
