@@ -151,7 +151,9 @@ static char** extract_keywords(const char* text, size_t* count) {
     size_t keyword_capacity = 0;
     size_t keyword_size = 0;
     
-    char* token = strtok(text_copy, " ,.!?;:\t\n\r");
+    /* ZSFZS-F037: strtok→strtok_s线程安全 */
+    char* saveptr = NULL;
+    char* token = strtok_s(text_copy, " ,.!?;:\t\n\r", &saveptr);
     while (token) {
         if (strlen(token) >= 2) {
             if (keyword_size >= keyword_capacity) {
@@ -175,7 +177,7 @@ static char** extract_keywords(const char* text, size_t* count) {
             }
             keyword_size++;
         }
-        token = strtok(NULL, " ,.!?;:\t\n\r");
+        token = strtok_s(NULL, " ,.!?;:\t\n\r", &saveptr);
     }
     
     safe_free((void**)&text_copy);

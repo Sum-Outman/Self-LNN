@@ -1961,9 +1961,11 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
     if (stats->min_dt_used < 1e-12f) stats->min_dt_used = h;
     stats->used_stiff_solver = using_stiff_solver;
 
-    /* I-012修复：步数达到上限未完成时标记（外部可通过rejected_steps推断） */
+    /* ZSFZS-F012修复: 使用专门的truncated标志位替代rejected_steps负数编码。
+     * 语义分离：rejected_steps只表示被自适应步长拒绝的步数，
+     * truncated专门标记是否因达到最大步数上限而未完成演化。 */
     if (stats->total_steps >= config->max_steps)
-        stats->rejected_steps = -(stats->rejected_steps + 1);
+        stats->truncated = 1;
 
     /* 最终轨迹点 */
     if (traj) cfc_trajectory_append(traj, t, hidden_state);

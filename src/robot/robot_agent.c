@@ -236,6 +236,15 @@ void robot_agent_free(RobotAgent* agent) {
     safe_free((void**)&agent->policy.bias_h2);
     safe_free((void**)&agent->policy.bias_h3);
     safe_free((void**)&agent->policy.bias_o);
+    /* ZSFZS-F022修复: 释放target_policy的8块内存，修复严重内存泄漏 */
+    safe_free((void**)&agent->target_policy.weights_ih);
+    safe_free((void**)&agent->target_policy.weights_hh);
+    safe_free((void**)&agent->target_policy.weights_hh2);
+    safe_free((void**)&agent->target_policy.weights_ho);
+    safe_free((void**)&agent->target_policy.bias_h1);
+    safe_free((void**)&agent->target_policy.bias_h2);
+    safe_free((void**)&agent->target_policy.bias_h3);
+    safe_free((void**)&agent->target_policy.bias_o);
     safe_free((void**)&agent);
 }
 
@@ -264,15 +273,16 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
     agent->policy.discount_factor = config->discount_factor;
 
     /* 分配3层DQN权重（Xavier初始化） */
+    /* ZSFZS-F022修复: 所有malloc添加NULL检查 */
     if (sd > 0 && hd > 0) {
         agent->policy.weights_ih = (float*)malloc((size_t)sd * hd * sizeof(float));
         agent->policy.bias_h1 = (float*)malloc((size_t)hd * sizeof(float));
-        if (agent->policy.weights_ih) {
+        if (agent->policy.weights_ih && agent->policy.bias_h1) {
             float scale = sqrtf(2.0f / (float)(sd + hd));
             for (int i = 0; i < sd * hd; i++)
                 agent->policy.weights_ih[i] = (AGENT_RAND_FLOAT * 2.0f - 1.0f) * scale;
+            memset(agent->policy.bias_h1, 0, (size_t)hd * sizeof(float));
         }
-        if (agent->policy.bias_h1) memset(agent->policy.bias_h1, 0, (size_t)hd * sizeof(float));
     }
     if (hd > 0) {
         agent->policy.weights_hh = (float*)malloc((size_t)hd * hd * sizeof(float));

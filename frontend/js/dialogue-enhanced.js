@@ -124,7 +124,10 @@ class DialogueEnhanced {
 
     async _ttsSynthesize(text) {
         try {
-            var response = await SelfLnnApi.request('/tts/synthesize', {
+            /* ZSFZS-F055修复: SelfLnnApi空检查 */
+            var api = window.SelfLnnApi;
+            if (!api) throw new Error('API服务未加载');
+            var response = await api.request('/tts/synthesize', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

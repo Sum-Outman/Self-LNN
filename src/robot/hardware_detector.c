@@ -549,7 +549,9 @@ int hd_detect_network_adapters(HDDeviceInfo* infos, size_t max_count, size_t* co
             FILE* fp = popen("ifconfig -l 2>/dev/null || echo ''", "r");
             if (fp) {
                 if (fgets(buf, sizeof(buf), fp)) {
-                    char* token = strtok(buf, " \n\r\t");
+                    /* ZSFZS-F039: strtok→strtok_s线程安全 */
+                    char* saveptr = NULL;
+                    char* token = strtok_s(buf, " \n\r\t", &saveptr);
                     while (token != NULL && net_count < max_count) {
                         if (strcmp(token, "lo0") != 0 && strcmp(token, "lo") != 0) {
                             HDDeviceInfo* info = &infos[net_count];
@@ -560,7 +562,7 @@ int hd_detect_network_adapters(HDDeviceInfo* infos, size_t max_count, size_t* co
                             info->performance_score = 0.6f;
                             net_count++;
                         }
-                        token = strtok(NULL, " \n\r\t");
+                        token = strtok_s(NULL, " \n\r\t", &saveptr);
                     }
                 }
                 pclose(fp);

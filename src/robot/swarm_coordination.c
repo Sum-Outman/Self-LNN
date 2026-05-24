@@ -18,6 +18,7 @@
 #include "selflnn/robot/swarm_coordination.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/secure_random.h"  /* ZSFZS-F032: 安全随机数 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -724,8 +725,9 @@ RaftNode* raft_node_create(int node_id, const int* peer_ids, int peer_count) {
     node->last_applied = -1;
     node->leader_id = -1;
     node->last_heartbeat = time(NULL);
+    /* ZSFZS-F032修复: rand()→secure_random_float进行安全随机选举超时 */
     node->election_timeout_ms = RAFT_ELECTION_TIMEOUT_MIN +
-        (rand() % (RAFT_ELECTION_TIMEOUT_MAX - RAFT_ELECTION_TIMEOUT_MIN));
+        (int)(secure_random_float() * (float)(RAFT_ELECTION_TIMEOUT_MAX - RAFT_ELECTION_TIMEOUT_MIN));
 
     log_info("[Raft] 节点 %d 已创建, 同伴数=%d", node_id, peer_count);
     return node;
@@ -765,8 +767,9 @@ int raft_start_election(RaftNode* node) {
     node->role = RAFT_CANDIDATE;
     node->current_term++;
     node->voted_for = node->node_id;
+    /* ZSFZS-F032修复: rand()→secure_random_float */
     node->election_timeout_ms = RAFT_ELECTION_TIMEOUT_MIN +
-        (rand() % (RAFT_ELECTION_TIMEOUT_MAX - RAFT_ELECTION_TIMEOUT_MIN));
+        (int)(secure_random_float() * (float)(RAFT_ELECTION_TIMEOUT_MAX - RAFT_ELECTION_TIMEOUT_MIN));
     node->last_heartbeat = time(NULL);
 
     log_info("[Raft] 节点 %d 开始选举，任期=%d", node->node_id, node->current_term);

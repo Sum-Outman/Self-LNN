@@ -23,7 +23,14 @@
 #include <string.h>
 #include <math.h>
 #include <sys/stat.h>
+/* ZSFZS-F013修复: 跨平台目录创建宏 */
+#ifdef _WIN32
 #include <direct.h>
+#define mkdir_p(path) _mkdir(path)
+#else
+#include <sys/stat.h>
+#define mkdir_p(path) mkdir(path, 0755)
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -108,7 +115,7 @@ static int ensure_directory_exists(const char* dir_path) {
     if (stat(dir_path, &st) == 0) {
         return 0;
     }
-    return _mkdir(dir_path);
+    return mkdir_p(dir_path);
 }
 
 /**

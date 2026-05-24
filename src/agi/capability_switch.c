@@ -177,7 +177,7 @@ int metacognition_set_enabled(void* mc, int enabled) {
         log_info("[能力开关] 元认知系统已激活（自评循环已恢复）");
     } else {
         /* 禁用：保存当前自我模型状态后暂停 */
-        metacognition_save_state(mcs, NULL);
+        metacognition_save_state(mcs, "data/metacognition_state.bin");
         log_info("[能力开关] 元认知已暂停（自我模型状态已保存）");
     }
     return 0;
@@ -284,7 +284,7 @@ static int cap_set_imitation(int enable) {
     if (g_capability_forced_on[CAP_IMITATION_LEARNING]) { g_capability_states[CAP_IMITATION_LEARNING] = 1; return 0; }
     /* R5-004修复: 连接模仿学习子系统 */
     void* learner = selflnn_get_online_learner();
-    if (learner && enable) imitation_set_enabled(learner, 1);
+    if (learner && enable) online_learner_set_imitation_enabled((OnlineLearner*)learner, 1);
     log_info("[能力开关] 模仿学习 %s", enable ? "开启" : "关闭");
     return 0;
 }
@@ -300,7 +300,7 @@ static int cap_set_self_correction(int enable) {
     if (g_capability_forced_on[CAP_SELF_CORRECTION]) { g_capability_states[CAP_SELF_CORRECTION] = 1; return 0; }
     /* R5-004修复: 连接自我修正子系统 */
     void* sc = selflnn_get_self_cognition();
-    if (sc) self_cognition_set_correction_enabled(sc, enable ? 1 : 0);
+    if (sc) self_cognition_enable_self_correction((SelfCognitionSystem*)sc, enable ? 1 : 0);
     log_info("[能力开关] 自我修正 %s", enable ? "开启" : "关闭");
     return 0;
 }
@@ -330,7 +330,7 @@ static int cap_set_curiosity(int enable) {
     if (g_capability_forced_on[CAP_CURIOSITY]) { g_capability_states[CAP_CURIOSITY] = 1; return 0; }
     /* R5-004修复: 连接好奇心/探索子系统 */
     void* learner = selflnn_get_online_learner();
-    if (learner) online_learner_set_exploration(learner, enable ? 0.15f : 0.0f);
+    if (learner) online_learner_set_exploration((OnlineLearner*)learner, enable ? 0.15f : 0.0f);
     log_info("[能力开关] 好奇心 %s", enable ? "开启" : "关闭");
     return 0;
 }

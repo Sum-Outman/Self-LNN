@@ -401,7 +401,11 @@ int unified_lnn_state_train_step(UnifiedLNNState* state,
                 }
             }
 
-            /* 步骤4: 构造虚拟目标并调用lnn_backward进行完整反向传播
+            /* 步骤4: 构造虚拟目标并调用lnn_backward进行完整反向传播。
+             * ZSFZS-F015: "虚拟目标"不是假数据，而是通过链式法则从MSE损失梯度
+             * 反推出的LNN隐藏状态应达值：virtual_target = h_current - dL/dh。
+             * 这确保了梯度从输出损失流过输出投影层到达LNN内部CfC门控/ODE/时间常数。
+             * virtual_target来源于真实损失梯度的数学反推，非随机生成。
              * virtual_target[j] = h[j] - dL_dh[j]
              * lnn_backward内部: error = 2*(output - target)/N
              * = 2*(h - (h - dL_dh))/N = 2*dL_dh/N → 梯度方向正确 */

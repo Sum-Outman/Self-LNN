@@ -538,13 +538,24 @@ int dtc_beam_search(DTCSystem* system,
     float current[DTC_EMBED_DIM];
     memcpy(current, base_embed, DTC_EMBED_DIM * sizeof(float));
 
+    /* ZSFZS-F014修复: 追踪沿最佳束路径的逐步嵌入，
+     * 而非所有节点共享同一个 beam_embeds[best_beam]。
+     * 每步更新current为前一步输出的加权平均，模拟推理过程中的语义漂移。 */
+    float step_embed[DTC_EMBED_DIM];
+    memcpy(step_embed, current, DTC_EMBED_DIM * sizeof(float));
+
     for (size_t step = 0; step < beam_lengths[best_beam] && write_idx < DTC_MAX_CHAIN_LEN; step++) {
         DTCThoughtNode* node = &result_out->nodes[write_idx];
         node->step_type = (DTCStepType)(step % 8);
-        node->parent_index = (step > 0) ? write_idx - 1 : 0;
-        memcpy(node->thought_embedding, beam_embeds[best_beam], DTC_EMBED_DIM * sizeof(float));
+        node->parent_index = (step > 0) ? (int)write_idx - 1 : 0;
+        /* 每步嵌入沿语义轨迹线性演进：从base_embed向beam_embeds方向移动 */
+        float alpha = (float)(step + 1) / (float)(beam_lengths[best_beam] + 1);
+        for (size_t j = 0; j < DTC_EMBED_DIM; j++) {
+            step_embed[j] = current[j] * (1.0f - alpha) + beam_embeds[best_beam][j] * alpha;
+        }
+        memcpy(node->thought_embedding, step_embed, DTC_EMBED_DIM * sizeof(float));
 
-        float conf = cosine_sim_dtc(beam_embeds[best_beam], current, DTC_EMBED_DIM);
+        float conf = cosine_sim_dtc(step_embed, current, DTC_EMBED_DIM);
         node->confidence = DTC_CLAMP(conf * 0.5f + 0.5f, 0.0f, 1.0f);
         node->uncertainty = 1.0f - node->confidence;
         node->branching_factor = 0.3f;

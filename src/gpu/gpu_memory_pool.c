@@ -1904,8 +1904,10 @@ void* gpu_memory_pool_alloc(GpuMemoryPool* pool, size_t size, size_t alignment) 
         
         // 如果需要，清零内存
         if (pool->config.zero_memory_on_alloc) {
-            // 通过GPU后端清零内存
-            // gpu_backend_memory_set(used_block->address, 0, aligned_size);
+            /* ZSFZS-F008修复: 使用memset执行真实内存清零，而非注释掉的虚拟操作 */
+            if (used_block->address) {
+                memset(used_block->address, 0, aligned_size);
+            }
         }
         
         return aligned_addr;
@@ -1987,8 +1989,10 @@ int gpu_memory_pool_free(GpuMemoryPool* pool, void* ptr) {
     
     // 如果需要，清零内存
     if (pool->config.zero_memory_on_free) {
-        // 通过GPU后端清零内存
-        // gpu_backend_memory_set(block->address, 0, block->size);
+        /* ZSFZS-F008修复: 使用memset执行真实内存清零 */
+        if (block->address) {
+            memset(block->address, 0, block->size);
+        }
     }
     
     /* 检查是否需要碎片整理 */
@@ -2067,8 +2071,10 @@ void* gpu_memory_pool_realloc(GpuMemoryPool* pool, void* ptr, size_t new_size) {
         return NULL;
     }
     
-    // 复制数据
-    // gpu_backend_memory_copy(new_ptr, ptr, block->size);
+    /* ZSFZS-F008修复: 使用memcpy执行真实内存复制 */
+    if (ptr && new_ptr) {
+        memcpy(new_ptr, ptr, block->size);
+    }
     
     // 释放原块
     gpu_memory_pool_free(pool, ptr);

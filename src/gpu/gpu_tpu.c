@@ -295,9 +295,10 @@ static int tpu_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMemory* s
 
 static GpuKernel* tpu_backend_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     if (!context) return NULL;
+    /* ZSFZS-F003修复: 无TPU硬件时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
+     * 不再直接返回NULL，确保调用方在无硬件环境也能正常创建kernels进行计算。 */
     if (!g_tpu_state.tpu_available) {
-        log_warning("[TPU] TPU硬件不可用，kernel创建失败");
-        return NULL;
+        log_info("[TPU] TPU硬件不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
     }
     GpuKernel* k = (GpuKernel*)safe_calloc(1, sizeof(GpuKernel));
     if (!k) return NULL;

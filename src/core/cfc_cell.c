@@ -1903,10 +1903,22 @@ static int cfc_cell_forward_quaternion(CfCCell* cell, const float* input, float*
     size_t num_input_quats = input_size / 4;
     float dt = cell->config.delta_t;
 
-    /* 输入和状态直接映射为四元数数组（不额外分配） */
-    Quaternion* input_quats = (Quaternion*)input;
-    Quaternion* state_quats = (Quaternion*)cell->state->state;
-    Quaternion* output_quats = (Quaternion*)cell->state->activation;
+    /* ZSFZS-F011修复: 使用memcpy安全转换替代裸指针强制类型转换，
+     * 避免违反C严格别名规则。Quaternion与float[4]内存布局一致，
+     * 通过memcpy避免未定义行为。 */
+    Quaternion input_quats_buf[128];
+    Quaternion state_quats_buf[128];
+    Quaternion output_quats_buf[128];
+    size_t nq = num_hidden_quats < 128 ? num_hidden_quats : 128;
+    for (size_t i = 0; i < num_input_quats && i < 128; i++) {
+        memcpy(&input_quats_buf[i], input + i * 4, sizeof(Quaternion));
+    }
+    for (size_t i = 0; i < nq; i++) {
+        memcpy(&state_quats_buf[i], cell->state->state + i * 4, sizeof(Quaternion));
+    }
+    Quaternion* input_quats = input_quats_buf;
+    Quaternion* state_quats = state_quats_buf;
+    Quaternion* output_quats = output_quats_buf;
 
     /* 每四元数循环：驱动 = 偏置 + 输入投影 + 状态反馈 */
     Quaternion* W = (Quaternion*)cell->quaternion_weights;    /* [num_hidden_quats × num_input_quats] */
@@ -1944,15 +1956,22 @@ static int cfc_cell_forward_quaternion(CfCCell* cell, const float* input, float*
     /* 输出：将四元数数组展平为float数组 */
     for (size_t i = 0; i < num_hidden_quats; i++) {
         size_t off = i * 4;
+        /* ZSFZS-F011: 同时写入hidden_state和内部activation */
         hidden_state[off]     = output_quats[i].w;
         hidden_state[off + 1] = output_quats[i].x;
         hidden_state[off + 2] = output_quats[i].y;
         hidden_state[off + 3] = output_quats[i].z;
+        memcpy(cell->state->activation + off, &output_quats[i], sizeof(Quaternion));
     }
 
     /* 更新内部状态 */
     memcpy(cell->state->state, cell->state->activation, hidden_size * sizeof(float));
     cell->state->time += 1.0f;
+
+    /* ZSFZS-F011修复: 四元数路径记录forward_tau_used保证反向传播一致性 */
+    if (cell->forward_tau_used && num_hidden_quats > 0) {
+        cell->forward_tau_used[0] = tau[0];  /* 记录首个四元数的时间常数 */
+    }
 
     return 0;
 }
@@ -2668,11 +2687,17 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * prev_state[j];
         }
         
-        // 计算门控和激活的导数
-        float gate = 1.0f / (1.0f + expf(-gate_input_sum));
+        // 计算门控和激活的导数（ZSFZS-F023: 添加截断保护，防止expf溢出）
+        float gate_input_clamped = gate_input_sum;
+        if (gate_input_clamped > 10.0f) gate_input_clamped = 10.0f;
+        else if (gate_input_clamped < -10.0f) gate_input_clamped = -10.0f;
+        float gate = 1.0f / (1.0f + expf(-gate_input_clamped));
         float gate_derivative = gate * (1.0f - gate);  // σ'(x) = σ(x) * (1 - σ(x))
         
-        float activation = tanhf(activation_input_sum);
+        float act_input_clamped = activation_input_sum;
+        if (act_input_clamped > 10.0f) act_input_clamped = 10.0f;
+        else if (act_input_clamped < -10.0f) act_input_clamped = -10.0f;
+        float activation = tanhf(act_input_clamped);
         float activation_derivative = 1.0f - activation * activation;  // tanh'(x) = 1 - tanh²(x)
         
         // P1-019修复: 获取前向传播实际使用的时间常数
@@ -3006,6 +3031,16 @@ int cfc_cell_backward_bptt(CfCCell* cell, const float* loss_gradients,
             if (ret != 0) {
                 safe_free((void**)&temporal_grad);
                 return ret;
+            }
+            /* ZSFZS-F030修复: BPTT梯度裁剪，防止长序列梯度爆炸 */
+            float norm_sq = 0.0f;
+            for (size_t i = 0; i < hidden_size; i++)
+                norm_sq += temporal_grad[i] * temporal_grad[i];
+            float norm = sqrtf(norm_sq);
+            if (norm > 10.0f) {
+                float scale = 10.0f / norm;
+                for (size_t i = 0; i < hidden_size; i++)
+                    temporal_grad[i] *= scale;
             }
         }
     }
@@ -3507,9 +3542,16 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
             }
             
             /* 激活值和导数 */
-            float gate = 1.0f / (1.0f + expf(-gate_input_sum));
+            /* ZSFZS-F034修复: 伴随法反向传播添加sigmoid/tanh截断保护 */
+            float gate_input_clamped = gate_input_sum;
+            if (gate_input_clamped > 10.0f) gate_input_clamped = 10.0f;
+            else if (gate_input_clamped < -10.0f) gate_input_clamped = -10.0f;
+            float gate = 1.0f / (1.0f + expf(-gate_input_clamped));
             float gate_deriv = gate * (1.0f - gate);
-            float act = tanhf(activation_input_sum);
+            float act_input_clamped = activation_input_sum;
+            if (act_input_clamped > 10.0f) act_input_clamped = 10.0f;
+            else if (act_input_clamped < -10.0f) act_input_clamped = -10.0f;
+            float act = tanhf(act_input_clamped);
             float act_deriv = 1.0f - act * act;
             
             float driver = gate * act;
@@ -4717,7 +4759,11 @@ static int gated_cfc_cross_gate_update(GatedCfCData* gd, const float* gate_input
             cross_sum += gd->cross_gate_weights[i * hidden_size + j] * gd->workspace[j];
         }
         float total = gate_input[i] + cross_sum + activation[i];
-        float new_gate = 1.0f / (1.0f + expf(-total));
+        /* ZSFZS-F033修复: 门控CfC交叉门控sigmoid添加截断保护 */
+        float total_clamped = total;
+        if (total_clamped > 10.0f) total_clamped = 10.0f;
+        else if (total_clamped < -10.0f) total_clamped = -10.0f;
+        float new_gate = 1.0f / (1.0f + expf(-total_clamped));
         gd->cross_gate_state[i] = new_gate;
         gate_output[i] = new_gate;
     }

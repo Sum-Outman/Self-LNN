@@ -268,17 +268,30 @@ static int check_data_directory(const char* dirpath) {
 static int validate_data_integrity(const float* data, size_t count) {
     if (!data || count == 0) return -1;
     
-    /* P1-003强化: 检测全零数据（最常见的虚假数据来源） */
+    /* ZSFZS-F006修复: 添加详细诊断信息，帮助定位问题数据源 */
     int all_zero = 1;
     int has_nan = 0;
     int has_inf = 0;
+    float min_val = FLT_MAX, max_val = -FLT_MAX;
     for (size_t i = 0; i < count && i < 10000; i++) {
         if (fabsf(data[i]) > 1e-9f) all_zero = 0;
         if (isnan(data[i])) has_nan = 1;
         if (isinf(data[i])) has_inf = 1;
+        if (data[i] < min_val) min_val = data[i];
+        if (data[i] > max_val) max_val = data[i];
     }
-    if (all_zero) return -1;
-    if (has_nan || has_inf) return -1;
+    if (all_zero) {
+        log_error("[训练管线] 数据完整性检查失败: 所有 %zu 个元素全为零，数据源可能为空或未加载", count);
+        return -1;
+    }
+    if (has_nan) {
+        log_error("[训练管线] 数据完整性检查失败: 检测到NaN值，数据源可能损坏");
+        return -1;
+    }
+    if (has_inf) {
+        log_error("[训练管线] 数据完整性检查失败: 检测到无穷大值，数据源可能溢出");
+        return -1;
+    }
     
     size_t suspicious_patterns = 0;
     size_t total_checks = 0;
@@ -287,7 +300,11 @@ static int validate_data_integrity(const float* data, size_t count) {
         if (diff > -1e-7f && diff < 1e-7f) suspicious_patterns++;
         total_checks++;
     }
-    if (total_checks > 0 && suspicious_patterns > total_checks / 2) return -1;
+    if (total_checks > 0 && suspicious_patterns > total_checks / 2) {
+        log_error("[训练管线] 数据完整性检查失败: %zu/%zu 的相邻元素完全相同（疑似重复/填充数据），"
+                 "范围[%.6f, %.6f]", suspicious_patterns, total_checks, min_val, max_val);
+        return -1;
+    }
     int has_variance = 0;
     float sum = 0.0f, sumsq = 0.0f;
     size_t n = count < 1000 ? count : 1000;
@@ -298,6 +315,10 @@ static int validate_data_integrity(const float* data, size_t count) {
     float mean = sum / (float)n;
     float var = sumsq / (float)n - mean * mean;
     if (var > 1e-10f) has_variance = 1;
+    if (!has_variance) {
+        log_error("[训练管线] 数据完整性检查失败: 方差为零（均值=%.6f, 范围[%.6f, %.6f]），"
+                 "数据无变化信息", mean, min_val, max_val);
+    }
     return has_variance ? 0 : -1;
 }
 

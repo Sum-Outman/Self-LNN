@@ -207,6 +207,7 @@ typedef struct {
     float max_dt_used;          /**< 最宽步长 */
     float stiffness_ratio;      /**< 刚度比（max|Re(λ)| / min|Re(λ)|） */
     int used_stiff_solver;      /**< 是否使用了刚性求解器 */
+    int truncated;              /**< ZSFZS-F012: 是否因步数上限而未完成演化（1=截断, 0=正常完成） */
 } CfCContinuousStats;
 
 /**

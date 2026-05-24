@@ -532,10 +532,12 @@ int auto_learning_learn_file(AutoLearningSystem* system, const char* filepath) {
             break;
         case KNOWLEDGE_SOURCE_CSV: {
             /* CSV处理：每行作为一个条目 */
-            char* line = strtok(content, "\n");
+            /* ZSFZS-F009修复: 使用线程安全的strtok替代strtok */
+            char* saveptr = NULL;
+            char* line = strtok_s(content, "\n", &saveptr);
             while (line) {
                 auto_learning_learn_text(system, line, filepath, KNOWLEDGE_SOURCE_CSV);
-                line = strtok(NULL, "\n");
+                line = strtok_s(NULL, "\n", &saveptr);
             }
             break;
         }

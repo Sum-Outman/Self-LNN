@@ -357,7 +357,11 @@ static int cambricon_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMem
 
 static GpuKernel* cambricon_backend_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     if (!context) return NULL;
-    if (!g_cb_state.cnrt_available) { log_warning("[Cambricon] CNRT不可用，kernel创建失败"); return NULL; }
+    /* ZSFZS-F003修复: 无CNRT时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
+     * 不再直接返回NULL，确保调用方在无硬件环境也能正常创建kernels进行计算。 */
+    if (!g_cb_state.cnrt_available) {
+        log_info("[Cambricon] CNRT不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
+    }
     GpuKernel* k = (GpuKernel*)safe_calloc(1, sizeof(GpuKernel));
     if (!k) return NULL;
     k->context = context;

@@ -3095,7 +3095,9 @@ InferenceResult* knowledge_query(KnowledgeBase* kb, const char* query_text,
             /* 将查询文本按空格拆分为单词，查找每个单词的嵌入 */
             char query_copy[1024];
             snprintf(query_copy, sizeof(query_copy), "%s", query_text);
-            char* token = strtok(query_copy, " \t\n\r.,;:!?，。；：！？、");
+            /* ZSFZS-F009修复: 使用线程安全的strtok替代strtok */
+            char* saveptr = NULL;
+            char* token = strtok_s(query_copy, " \t\n\r.,;:!?，。；：！？、", &saveptr);
             
             float* agg_embedding = (float*)safe_calloc(dim, sizeof(float));
             int token_count = 0;

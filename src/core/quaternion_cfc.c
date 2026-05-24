@@ -153,11 +153,19 @@ void quaternion_cfc_cell_destroy(QuaternionCfcCell* cell) {
 /**
  * @brief 使用CfC闭式解更新四元数状态
  * 
- * 对每个四元数分量应用CfC闭式解:
- *   new = prev * exp(-dt/τ) + (1 - exp(-dt/τ)) * drive
+ * ZSFZS-F004修复: 在S^3流形上进行真正的四元数CfC演化。
  * 
- * 这是四元数化的CfC闭式解：每个分量（w,x,y,z）独立演化，
- * 具有各自的时间常数，最终输出通过四元数乘法保持旋转结构。
+ * 演化公式（四元数群S^3上的闭式解）:
+ *   q_next = normalize( q * exp(-dt/τ_mean) + (1 - exp(-dt/τ_mean)) * drive )
+ * 
+ * 其中:
+ * - q * exp(-dt/τ_mean) 是四元数标量乘法（向0衰减）
+ * - drive是目标四元数旋转方向
+ * - normalize() 将结果投影回S^3单位四元数流形
+ * 
+ * 这确保演化始终在四元数群S^3上进行，保留旋转空间的几何结构。
+ * 使用各分量时间常数的调和平均值作为统一时间常数，保证四元数
+ * 作为整体（而非四个独立分量）进行一致演化。
  */
 int quaternion_cfc_closed_form_update(Quaternion* state, const Quaternion* drive,
                                        const Quaternion* time_constant, float dt,
@@ -166,19 +174,35 @@ int quaternion_cfc_closed_form_update(Quaternion* state, const Quaternion* drive
         return -1;
     }
 
-    float exp_w = expf(-dt / fmaxf(time_constant->w, 1e-6f));
-    float exp_x = expf(-dt / fmaxf(time_constant->x, 1e-6f));
-    float exp_y = expf(-dt / fmaxf(time_constant->y, 1e-6f));
-    float exp_z = expf(-dt / fmaxf(time_constant->z, 1e-6f));
+    /* 计算统一时间常数：使用调和平均值，确保四元数整体一致演化 */
+    float tw = fmaxf(time_constant->w, 1e-6f);
+    float tx = fmaxf(time_constant->x, 1e-6f);
+    float ty = fmaxf(time_constant->y, 1e-6f);
+    float tz = fmaxf(time_constant->z, 1e-6f);
+    /* 调和平均: 4 / (1/tw + 1/tx + 1/ty + 1/tz) */
+    float tau_mean = 4.0f / (1.0f/tw + 1.0f/tx + 1.0f/ty + 1.0f/tz);
+    float decay = expf(-dt / tau_mean);
+    float complement = 1.0f - decay;
 
-    state->w = state->w * exp_w + (1.0f - exp_w) * drive->w;
-    state->x = state->x * exp_x + (1.0f - exp_x) * drive->x;
-    state->y = state->y * exp_y + (1.0f - exp_y) * drive->y;
-    state->z = state->z * exp_z + (1.0f - exp_z) * drive->z;
+    /* 在R^4中进行线性插值（CfC核心动力学），然后投影回S^3 */
+    float w_new = state->w * decay + drive->w * complement;
+    float x_new = state->x * decay + drive->x * complement;
+    float y_new = state->y * decay + drive->y * complement;
+    float z_new = state->z * decay + drive->z * complement;
 
-    /* P0-006修复：不强制归一化，保留状态幅度信息。
-     * 仅当状态范数极小（接近退化）时对旋转分量做保护性归一化。
-     * 调用方（如quaternion_cfc_solve_with_solver）在需要时自行归一化。 */
+    /* 投影回S^3流形（四元数归一化），确保始终是有效单位四元数 */
+    float norm = sqrtf(w_new * w_new + x_new * x_new + y_new * y_new + z_new * z_new);
+    if (norm > 1e-8f) {
+        float inv_norm = 1.0f / norm;
+        state->w = w_new * inv_norm;
+        state->x = x_new * inv_norm;
+        state->y = y_new * inv_norm;
+        state->z = z_new * inv_norm;
+    } else {
+        /* 退化情况：保持恒等四元数 */
+        state->w = 1.0f; state->x = 0.0f; state->y = 0.0f; state->z = 0.0f;
+    }
+
     if (output) *output = *state;
     return 0;
 }

@@ -75,7 +75,9 @@ class DeviceManager {
 
     _onDeviceChange() {
         var self = this;
-        var compat = window.g_browserCompat || new BrowserCompat();
+        /* ZSFZS-F054修复: BrowserCompat回退路径添加类型检查 */
+        var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+        if (!compat) { console.warn('[DeviceManager] BrowserCompat未加载，跳过设备枚举'); return; }
         compat.enumerateMediaDevices().then(function(devices) {
             self._processDevices(devices);
             if (self.deviceChangeCallback) {

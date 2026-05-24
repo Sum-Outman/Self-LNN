@@ -15,6 +15,7 @@
 #include "selflnn/programming/self_programming.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/secure_random.h"  /* ZSFZS-F032: 安全随机数 */
 #include "selflnn/core/errors.h"
 
 #include <stdlib.h>
@@ -99,7 +100,8 @@ static float _ci_builtin_abs(float x) { return fabsf(x); }
 static float _ci_builtin_sin(float x) { return sinf(x); }
 static float _ci_builtin_cos(float x) { return cosf(x); }
 static float _ci_builtin_sqrt(float x) { return sqrtf(x); }
-static float _ci_builtin_rand(float x) { (void)x; return (float)rand() / (float)RAND_MAX; }
+/* ZSFZS-F032修复: rand()→secure_random_float，消除确定性伪随机 */
+static float _ci_builtin_rand(float x) { (void)x; return secure_random_float(); }
 
 static const CiBuiltin g_ci_builtins[] = {
     {"abs",  _ci_builtin_abs, 0},

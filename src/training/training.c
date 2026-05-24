@@ -473,7 +473,9 @@ int trainer_load_dataset_from_url(Trainer* trainer, const char* url, const char*
             if (is_header && line_num == 0) {
                 /* 首行检查是否为列名：如果所有token都无法解析为float则为列名行 */
                 int all_text = 1;
-                char* token = strtok(line, ",\t;");
+                /* ZSFZS-F038: strtok→strtok_s线程安全 */
+                char* saveptr = NULL;
+                char* token = strtok_s(line, ",\t;", &saveptr);
                 while (token) {
                     char* endptr;
                     strtod(token, &endptr);
@@ -481,7 +483,7 @@ int trainer_load_dataset_from_url(Trainer* trainer, const char* url, const char*
                         all_text = 0;
                         break;
                     }
-                    token = strtok(NULL, ",\t;");
+                    token = strtok_s(NULL, ",\t;", &saveptr);
                 }
                 if (all_text) {
                     /* 首行是列名，跳过 */

@@ -71,6 +71,8 @@ struct DeepReflectionEngine {
     int owns_conflict;
     int owns_epistemic;
     int owns_hypothesis;
+    int conflict_net_warmed;        /**< ZSFZS-F017: conflict_net是否已完成预热 */
+    int lnn_conflict_epochs;        /**< ZSFZS-F017: conflict_net预热迭代次数 */
     float* layer_embeddings;
     size_t layer_embed_count;
     float* knowledge_base;
@@ -296,6 +298,32 @@ static float dr_cross_contradiction_check(DeepReflectionEngine* engine,
         memcpy(con_input + edim, prev_embeddings + (size_t)p * edim, edim * sizeof(float));
         float con_out[1] = {0};
         if (engine->conflict_net) {
+            /* ZSFZS-F017修复: conflict_net未充分训练时，使用Xavier初始化后
+             * 先执行一次无监督预热（基于余弦距离的自蒸馏），
+             * 然后用预热后的网络检测矛盾。预热在首次调用时自动触发。 */
+            if (!engine->conflict_net_warmed && engine->lnn_conflict_epochs < 3) {
+                /* 自蒸馏预热：让网络输出接近余弦距离，提供合理的初始嵌入 */
+                float* temp_out = (float*)calloc(edim * 2, sizeof(float));
+                if (temp_out) {
+                    for (size_t j = 0; j < edim; j++) {
+                        temp_out[j] = layer_embedding[j];
+                        temp_out[edim + j] = prev_embeddings ? prev_embeddings[j] : 0.0f;
+                    }
+                    float cos_dist = 1.0f - cosine_sim_dr(layer_embedding,
+                        prev_embeddings ? prev_embeddings : layer_embedding, edim);
+                    float target[1] = { cos_dist };
+                    /* 单步SGD预热，学习率0.01 */
+                    for (int wu = 0; wu < 5; wu++) {
+                        lnn_forward(engine->conflict_net, temp_out, con_out);
+                        float err = con_out[0] - target[0];
+                        float grad[1] = { err * 0.01f };
+                        lnn_backward(engine->conflict_net, grad, NULL);
+                    }
+                    engine->lnn_conflict_epochs++;
+                    if (engine->lnn_conflict_epochs >= 3) engine->conflict_net_warmed = 1;
+                    free(temp_out);
+                }
+            }
             lnn_forward(engine->conflict_net, con_input, con_out);
         } else {
             /* 无conflict_net时使用余弦距离作为替代 */

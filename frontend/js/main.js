@@ -1588,7 +1588,8 @@ function renderTomAgents(tomData) {
 /* ZSFWS-M003: 定期轮询心智理论状态并渲染 */
 function updateTomDisplay() {
     if (typeof SelfLnnApi === 'undefined' || !SelfLnnApi.getCognitionStatus) return;
-    SelfLnnApi.getCognitionStatus().then(function(res) {
+    window.SelfLnnApi.getCognitionStatus().then(function(res) {
+        if (typeof SelfLnnApi === 'undefined') return;
         if (res && res.success && res.data && res.data.tom) {
             renderTomAgents(res.data.tom);
         }
@@ -3725,12 +3726,13 @@ async function testMultimodalProcessing() {
             } catch(e) { /* 摄像头不可用是正常的（无硬件时） */ }
         }
         
-        /* 尝试从VoiceCaptureUtil获取音频波形 */
+        /* ZSFZS-F026修复: quickCapture返回{success, capturer, stream}对象，非Blob。
+         * 音频数据通过capturer获取，而非直接检查返回值的size属性。 */
         if (typeof window.VoiceCaptureUtil !== 'undefined' && typeof window.VoiceCaptureUtil.quickCapture === 'function') {
             try {
-                const audioBlob = await window.VoiceCaptureUtil.quickCapture();
-                if (audioBlob && audioBlob.size > 0) {
-                    audioData = { blob: audioBlob, source: 'live_mic' };
+                const captureResult = await window.VoiceCaptureUtil.quickCapture();
+                if (captureResult && captureResult.success) {
+                    audioData = { source: 'live_mic', capturer: captureResult.capturer };
                 }
             } catch(e) { /* 麦克风不可用是正常的 */ }
         }
@@ -5422,6 +5424,8 @@ async function sendDialogueMessage() {
     if (!message) return;
 
     const messagesContainer = document.getElementById('dialogue-messages');
+    /* ZSFZS-F047修复: messagesContainer为null时安全退出 */
+    if (!messagesContainer) return;
     const welcomeEl = messagesContainer.querySelector('.dialogue-welcome');
     if (welcomeEl) welcomeEl.style.display = 'none';
 
@@ -5452,12 +5456,14 @@ async function sendDialogueMessage() {
     var sendMicCheckbox = document.getElementById('dialogue-send-mic');
     if (sendMicCheckbox && sendMicCheckbox.checked && g_deviceManager) {
         var mic = g_deviceManager.microphones.find(function(m) { return m.active; });
-        if (mic && mic.active && g_voiceCaptureUtil) {
+        if (mic && mic.active) {
+            /* ZSFZS-F046修复: g_voiceCaptureUtil→window.VoiceCaptureUtil，消除未定义变量 */
             /* 使用VoiceCaptureUtil实时采集音频并设置lastAudioBlob */
             try {
-                var audioBlob = await g_voiceCaptureUtil.quickCapture();
-                if (audioBlob) {
-                    mic.lastAudioBlob = audioBlob;
+                var captureResult = await window.VoiceCaptureUtil.quickCapture();
+                /* ZSFZS-F043修复: quickCapture返回{success,capturer,stream}对象，提取capturer */
+                if (captureResult && captureResult.success && captureResult.capturer) {
+                    mic.lastAudioBlob = captureResult.capturer;
                     multimodalAudio = 'mic_audio';
                 }
             } catch(e) {
@@ -5553,7 +5559,7 @@ async function sendDialogueMessage() {
 
         if (g_dialogueEnhanced && g_dialogueEnhanced.voiceOutputEnabled) {
             var speakerId = null;
-            var activeSpeaker = g_deviceManager ? g_deviceManager.speakers.find(function(s) { return s.active; }) : null;
+            var activeSpeaker = g_deviceManager && g_deviceManager.speakers ? g_deviceManager.speakers.find(function(s) { return s.active; }) : null;
             if (activeSpeaker) speakerId = activeSpeaker.deviceId;
             g_dialogueEnhanced.speakText(reply, speakerId);
         }
@@ -5649,6 +5655,8 @@ function renderMarkdown(text) {
 
 function addDialogueMessage(role, content, tokens) {
     const container = document.getElementById('dialogue-messages');
+    /* ZSFZS-F047修复: container为null时安全退出 */
+    if (!container) return;
     const div = document.createElement('div');
     div.className = 'dialogue-message ' + role;
 
@@ -7812,7 +7820,8 @@ async function loadSkills() {
         var data = await SelfLnnApi.request('/skills');
         if (data && data.skills) {
             skillsData = data.skills;
-            renderSkillList();
+            /* ZSFZS-F048修复: 始终确保renderSkillList已定义再调用 */
+            if (typeof renderSkillList === 'function') renderSkillList();
             updateStats(data);
         }
     } catch(e) { /* 静默 */ }
@@ -7922,10 +7931,16 @@ async function toggleVoice() {
         var btn = document.getElementById('voice-toggle-btn');
         if (btn) { btn.textContent = '停止录音'; if (!btn.className.match(/active/)) btn.className += ' active'; }
         try {
-            _voiceRecorder = await VoiceCaptureUtil.quickCapture(function(text) {
-                var inp = document.getElementById('voice-text-output');
-                if (inp) inp.value = text;
-                showNotification('语音识别: ' + text, 'success');
+            /* ZSFZS-F042修复: quickCapture参数正确传递——使用options对象而非回调函数 */
+            _voiceRecorder = await VoiceCaptureUtil.quickCapture({
+                maxDuration: 10000,
+                onResult: function(result) {
+                    if (result && result.text) {
+                        var inp = document.getElementById('voice-text-output');
+                        if (inp) inp.value = result.text;
+                        showNotification('语音识别: ' + result.text, 'success');
+                    }
+                }
             });
             showNotification('录音已开始...', 'info');
         } catch(e) { showNotification('麦克风访问失败: ' + e.message, 'danger'); _voiceCapturing = false; }

@@ -173,7 +173,13 @@ static void cfc_simd_sigmoid_batch(const float* x, float* y, size_t n) {
         __m128 result = _mm_div_ps(one, _mm_add_ps(one, exp_val));
         _mm_storeu_ps(y + i, result);
     }
-    for (; i < n; i++) y[i] = 1.0f / (1.0f + expf(-x[i]));
+    /* ZSFZS-F029修复: 标量回退路径添加±10截断保护 */
+    for (; i < n; i++) {
+        float clamped = x[i];
+        if (clamped > 10.0f) clamped = 10.0f;
+        else if (clamped < -10.0f) clamped = -10.0f;
+        y[i] = 1.0f / (1.0f + expf(-clamped));
+    }
 }
 
 /* SSE Tanh批量：y[i] = tanh(x[i]) = 2*sigmoid(2x) - 1 使用高精度exp */
@@ -529,6 +535,12 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
         if (perturbed_state) safe_free((void**)&perturbed_state);
         if (forward_original) safe_free((void**)&forward_original);
         if (forward_perturbed) safe_free((void**)&forward_perturbed);
+
+        /* ZSFZS-F010修复: 刚度估计中 cfc_cell_forward 内部可能分配ODE工作空间，
+         * 需要显式释放以避免内存泄漏。使用cell提供的释放接口。 */
+        if (cell && cell->ode_workspace) {
+            safe_free((void**)&cell->ode_workspace);
+        }
     }
 
     if (stiffness_ratio > 1e6f) stiffness_ratio = 1e6f;

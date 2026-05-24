@@ -775,6 +775,10 @@ static GpuKernel* rocm_backend_kernel_create(GpuContext* context, const char* ke
              hsaco_path, real_src_path);
     int compile_result = system(compile_cmd);
     if (compile_result != 0) {
+        /* ZSFZS-F021修复: hipcc编译失败时提供详细的错误日志，
+         * 帮助定位是hipcc未安装还是目标架构不支持。
+         * 清理临时文件后返回NULL，由调用方处理回退。 */
+        log_warning("[ROCm] JIT编译失败: hipcc返回码%d, 可能原因: hipcc未安装或目标架构不支持", compile_result);
         remove(real_src_path);
         remove(hsaco_path);
         return NULL;

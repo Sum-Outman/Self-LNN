@@ -389,6 +389,10 @@ static const struct {
     {"/api/task/queue", "GET", "获取AGI任务队列状态", "agi"},
     {"/api/task/assign", "POST", "提交AGI任务分配", "agi"},
     {"/api/system/shutdown", "POST", "关闭AGI系统", "system"},
+    /* ZSFZS-F035: 补充注册已有处理器但未在端点数组中声明的API */
+    {"/api/training/resume", "POST", "恢复训练任务", "training"},
+    {"/api/knowledge/import", "POST", "导入知识库条目", "knowledge"},
+    {"/api/knowledge/delete", "POST", "删除知识库条目", "knowledge"},
 };
 #define g_api_endpoints_count (sizeof(g_api_endpoints) / sizeof(g_api_endpoints[0]))
 
@@ -4104,7 +4108,12 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     if (server->config.max_connections_per_ip <= 0) {
         server->config.max_connections_per_ip = 16;       /* 每IP默认16连接 */
     }
-    /* W-005: 线程模型默认值 */
+    /* ZSFZS-F007修复: 线程模型默认启用线程池，实现真正高并发。
+     * thread_model=1时API请求通过线程池异步并发处理，
+     * 主线程仅做accept和分发，不阻塞等待请求处理完成。 */
+    if (server->config.thread_model == 0 && server->config.thread_pool_size == 0) {
+        server->config.thread_model = 1;              /* 默认启用线程池模型 */
+    }
     if (server->config.thread_pool_size <= 0) {
         server->config.thread_pool_size = 4;              /* 默认4个工作线程 */
     }
@@ -15253,7 +15262,9 @@ static int handle_api_post_skills_compose(BackendServer* server,
         char comp_buf[256];
         strncpy(comp_buf, components, sizeof(comp_buf) - 1);
         comp_buf[sizeof(comp_buf) - 1] = '\0';
-        char* token = strtok(comp_buf, ",");
+        char* saveptr = NULL;
+        /* ZSFZS-F036: strtok→strtok_s线程安全 */
+        char* token = strtok_s(comp_buf, ",", &saveptr);
         while (token && count < SKILL_MAX_PREREQ) {
             while (*token == ' ') token++;
             int sid = atoi(token);

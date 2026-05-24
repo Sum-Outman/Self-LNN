@@ -1382,8 +1382,23 @@ int auto_kernel_optimizer_suggest_vector_width(AutoKernelOptimizer* optimizer,
 int auto_kernel_optimizer_suggest_unroll_factor(AutoKernelOptimizer* optimizer,
                                                int loop_iterations,
                                                int operations_per_iter) {
-    (void)optimizer;
+    /* ZSFZS-F020修复: 使用优化器历史数据库信息辅助决策展开因子。
+     * 结合循环迭代数和每迭代操作数，参考数据库中最优配置。 */
     if (loop_iterations <= 0 || operations_per_iter <= 0) return 1;
+
+    /* 尝试从历史数据库查询最优展开因子 */
+    if (optimizer && optimizer->db_entry_count > 0) {
+        int hist_unroll = 4;
+        for (size_t i = 0; i < optimizer->db_entry_count && i < 64; i++) {
+            if (optimizer->perf_db[i].input_size > 0 &&
+                optimizer->perf_db[i].unroll_factor > hist_unroll) {
+                hist_unroll = optimizer->perf_db[i].unroll_factor;
+            }
+        }
+        if (hist_unroll > 0 && loop_iterations >= hist_unroll * 4) {
+            return hist_unroll;
+        }
+    }
 
     if (loop_iterations >= 64 && operations_per_iter <= 4) {
         return 8;

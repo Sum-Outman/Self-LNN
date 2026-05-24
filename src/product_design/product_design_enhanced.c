@@ -227,11 +227,13 @@ int pde_tracker_register_requirements(PdeRequirementTracker* tracker,
     pde_strcpy(text_copy, sizeof(text_copy), requirement_text);
 
     /* 按行分割需求文本 */
-    char* line = strtok(text_copy, "\n");
+    /* ZSFZS-F041: strtok→strtok_s线程安全 */
+    char* saveptr = NULL;
+    char* line = strtok_s(text_copy, "\n", &saveptr);
     while (line && tracker->req_count < PDE_MAX_REQUIREMENTS) {
         while (*line == ' ' || *line == '\t') line++;
         if (*line == '\0' || *line == '#' || *line == '/') {
-            line = strtok(NULL, "\n");
+            line = strtok_s(NULL, "\n", &saveptr);
             continue;
         }
 
@@ -276,7 +278,7 @@ int pde_tracker_register_requirements(PdeRequirementTracker* tracker,
         snprintf(item->change_history, sizeof(item->change_history), "v1: 初始创建");
 
         tracker->req_count++;
-        line = strtok(NULL, "\n");
+        line = strtok_s(NULL, "\n", &saveptr);
     }
 
     return tracker->req_count;

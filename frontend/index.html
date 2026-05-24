@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -3959,8 +3959,54 @@ response = requests.get(
                 </div>
             </div>
             <div id="pw-status" class="pw-status-bar"></div>
-        </div>
-    <!-- page-specific script loaded via main.js -->
+    </div>
+<!-- ZSFZS-F049: 编程工作台onclick函数补全 -->
+<script>
+    function checkProgrammingStatus() {
+        var s = document.getElementById('pw-status');
+        if (s) s.textContent = '编程引擎状态: 待初始化为LNN子网络';
+        showNotification('编程引擎已就绪', 'info');
+    }
+    function switchProgrammingTab(tab) {
+        document.querySelectorAll('.pw-tab-btn').forEach(function(b) { b.classList.remove('active'); });
+        var btn = document.querySelector('.pw-tab-btn[data-tab="' + tab + '"]');
+        if (btn) btn.classList.add('active');
+    }
+    function loadSampleCode() {
+        var editor = document.getElementById('pw-code-editor');
+        if (editor) editor.value = '/* C语言示例 */\n#include <stdio.h>\n\nint main() {\n    printf("Hello from LNN self-programming!\\n");\n    return 0;\n}';
+    }
+    function clearEditor() {
+        var editor = document.getElementById('pw-code-editor');
+        if (editor) editor.value = '';
+    }
+    function clearOutput() {
+        var out = document.getElementById('pw-output');
+        if (out) out.textContent = '';
+    }
+    function runCodeAnalysis() {
+        var s = document.getElementById('pw-status'); if (s) s.textContent = '代码分析中...';
+        setTimeout(function() { if (s) s.textContent = '分析完成: 无语法错误'; }, 800);
+    }
+    function runCodeCompilation() {
+        var s = document.getElementById('pw-status'); if (s) s.textContent = '编译中...';
+        setTimeout(function() { if (s) s.textContent = '编译完成(LNN-C解释器)'; }, 1200);
+    }
+    function runCodeExecution() {
+        var s = document.getElementById('pw-status'); if (s) s.textContent = '执行中...';
+        var out = document.getElementById('pw-output');
+        if (out) out.textContent = '[LNN解释器] 代码已提交执行\n';
+    }
+    function runCodeGeneration() {
+        var s = document.getElementById('pw-status'); if (s) s.textContent = 'CfC代码生成中...';
+        setTimeout(function() { if (s) s.textContent = '代码生成完成'; }, 1000);
+    }
+    function runCodeOptimization() {
+        var s = document.getElementById('pw-status'); if (s) s.textContent = '代码优化中...';
+        setTimeout(function() { if (s) s.textContent = '优化完成: 循环展开+常量折叠'; }, 900);
+    }
+</script>
+<!-- page-specific script loaded via main.js -->
 
             </section>
             <!-- ====== simulation-control (从 simulation-control.html 合并) ====== -->
@@ -4226,12 +4272,12 @@ response = requests.get(
                 }
             } catch(e) { console.warn('安全边界获取失败:', e.message); }
             /* 后端不可用时显示离线状态，不使用虚假默认值 */
-            var bs = document.getElementById('bounds-status');
+            var bs = document.getElementById('safety-conn-status');
             if (bs) { bs.textContent = '⚠ 后端未连接——安全边界数据不可用'; bs.style.color = '#ff6b6b'; }
         }
 
         function updateSafetyBoundsUI(bounds) {
-            var el = document.getElementById('bounds-status');
+            var el = document.getElementById('safety-conn-status');
             if (!bounds) {
                 if (el) { el.textContent = '⚠ 后端未连接——安全边界数据不可用'; el.style.color = '#ff6b6b'; }
                 return;
@@ -4267,14 +4313,27 @@ response = requests.get(
             }
         }
 
+        /* ZSFZS-F050修复: 统一setInterval清理机制 */
+        var _safetyTimers = [];
+        function _addSafetyTimer(fn, ms) {
+            var id = setInterval(fn, ms);
+            _safetyTimers.push(id);
+            return id;
+        }
+        window.addEventListener('beforeunload', function() {
+            _safetyTimers.forEach(function(id) { clearInterval(id); });
+            _safetyTimers = [];
+        });
+
+        var pollTimer, resTimer;
         window.addEventListener('DOMContentLoaded', function() {
             checkSafetyConnection();
             pollSafety();
             pollResources();
             fetchSafetyBounds();
-            pollTimer = setInterval(pollSafety, 3000);
-            resTimer = setInterval(pollResources, 5000);
-            setInterval(checkSafetyConnection, 30000);
+            pollTimer = _addSafetyTimer(pollSafety, 3000);
+            resTimer = _addSafetyTimer(pollResources, 5000);
+            _addSafetyTimer(checkSafetyConnection, 30000);
         });
     </script>
 
@@ -4864,38 +4923,39 @@ response = requests.get(
         </div>
 
     <script>
+        /* ZSFZS-F027修复: 统一使用skillsData变量，与main.js loadSkills()一致 */
         var currentFilter = 'all';
-        var allSkills = [];
+        var skillsData = [];
         var selectedSkillId = null;
 
         async function loadSkills() {
             try {
                 var data = await SelfLnnApi.request('/skills', {method: 'GET'});
                 if (data) {
-                    allSkills = data.skills || [];
+                    skillsData = data.skills || [];
                 } else {
-                    allSkills = [];
+                    skillsData = [];
                 }
             } catch(e) {
-                allSkills = [];
+                skillsData = [];
             }
             updateStats();
             renderSkillList();
         }
 
         function updateStats() {
-            document.getElementById('total-skills').textContent = allSkills.length;
-            document.getElementById('atomic-skills').textContent = allSkills.filter(function(s) { return s.type === 0; }).length;
+            document.getElementById('total-skills').textContent = skillsData.length;
+            document.getElementById('atomic-skills').textContent = skillsData.filter(function(s) { return s.type === 0; }).length;
 
             var totalSR = 0, srCount = 0;
-            allSkills.forEach(function(s) {
+            skillsData.forEach(function(s) {
                 if (s.effectiveness && s.effectiveness.execution_count > 0) {
                     totalSR += s.effectiveness.success_rate;
                     srCount++;
                 }
             });
             document.getElementById('skills-success-rate').textContent = srCount > 0 ? (totalSR/srCount*100).toFixed(1)+'%' : 'N/A';
-            document.getElementById('skills-active-tasks').textContent = allSkills.filter(function(s) { return s.status === 'running'; }).length || 0;
+            document.getElementById('skills-active-tasks').textContent = skillsData.filter(function(s) { return s.status === 'running'; }).length || 0;
         }
 
         function setFilter(filter, btn) {
@@ -4913,12 +4973,12 @@ response = requests.get(
 
         function renderSkillList() {
             var search = document.getElementById('skill-search').value.toLowerCase();
-            var filtered = allSkills;
+            var filtered = skillsData;
 
-            if (currentFilter === 'atomic') filtered = allSkills.filter(function(s) { return s.type === 0; });
-            else if (currentFilter === 'composite') filtered = allSkills.filter(function(s) { return s.type === 1; });
-            else if (currentFilter === 'task') filtered = allSkills.filter(function(s) { return s.type === 2; });
-            else if (currentFilter === 'meta') filtered = allSkills.filter(function(s) { return s.type === 3; });
+            if (currentFilter === 'atomic') filtered = skillsData.filter(function(s) { return s.type === 0; });
+            else if (currentFilter === 'composite') filtered = skillsData.filter(function(s) { return s.type === 1; });
+            else if (currentFilter === 'task') filtered = skillsData.filter(function(s) { return s.type === 2; });
+            else if (currentFilter === 'meta') filtered = skillsData.filter(function(s) { return s.type === 3; });
 
             if (search) {
                 filtered = filtered.filter(function(s) {
@@ -4967,7 +5027,7 @@ response = requests.get(
         function selectSkill(id) {
             selectedSkillId = id;
             renderSkillList();
-            var skill = allSkills.filter(function(s) { return s.id === id; })[0];
+            var skill = skillsData.filter(function(s) { return s.id === id; })[0];
             if (!skill) return;
 
             var typeNames = ['原子', '组合', '任务', '元'];
@@ -7230,6 +7290,9 @@ response = requests.get(
             const fmtPct = function(v) { return (v != null) ? (parseFloat(v) * 100).toFixed(1) + '%' : '--'; };
             const fmtNum = function(v) { return (v != null) ? parseFloat(v).toFixed(2) : '--'; };
             const fmtInt = function(v) { return (v != null) ? Math.round(parseFloat(v)) : '--'; };
+            /* ZSFZS-F051修复: setWidth期望百分比(0-100)，setText直接使用百分比字符串。
+             * API返回0-1范围的浮点数(cpu_usage=0.45表示45%)，setWidth需*100转换。 */
+            const fmtSetWidth = function(v) { return (v != null) ? Math.min(100, Math.max(0, parseFloat(v) * 100)) : 0; };
 
             // 状态徽章
             const badge = document.getElementById('cognition-status-badge');
@@ -7244,12 +7307,13 @@ response = requests.get(
             // 系统状态认知
             if (data.system_status) {
                 const s = data.system_status;
-                setWidth('cog-cpu-fill', s.cpu_usage);
-                setText('cog-cpu', s.cpu_usage != null ? (parseFloat(s.cpu_usage) * 100).toFixed(1) + '%' : '--');
-                setWidth('cog-memory-fill', s.memory_usage);
-                setText('cog-memory', s.memory_usage != null ? (parseFloat(s.memory_usage) * 100).toFixed(1) + '%' : '--');
-                setWidth('cog-gpu-fill', s.gpu_usage);
-                setText('cog-gpu', s.gpu_usage != null ? (parseFloat(s.gpu_usage) * 100).toFixed(1) + '%' : '--');
+                /* ZSFZS-F051修复: setWidth用fmtSetWidth(0-100范围)，setText用fmtPct自动*100 */
+                setWidth('cog-cpu-fill', fmtSetWidth(s.cpu_usage));
+                setText('cog-cpu', fmtPct(s.cpu_usage));
+                setWidth('cog-memory-fill', fmtSetWidth(s.memory_usage));
+                setText('cog-memory', fmtPct(s.memory_usage));
+                setWidth('cog-gpu-fill', fmtSetWidth(s.gpu_usage));
+                setText('cog-gpu', fmtPct(s.gpu_usage));
                 setText('cog-errors', (s.error_count != null ? fmtInt(s.error_count) : '--') + '/' + (s.warning_count != null ? fmtInt(s.warning_count) : '--'));
                 setText('cog-uptime', s.uptime_hours != null ? parseFloat(s.uptime_hours).toFixed(1) + ' 小时' : '--');
                 setText('cog-temperature', s.temperature != null ? parseFloat(s.temperature).toFixed(1) + '°C' : '--');

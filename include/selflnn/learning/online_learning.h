@@ -314,6 +314,46 @@ int online_learner_load_state(OnlineLearner* learner, const char* filename);
  */
 int online_learner_attach_lnn(OnlineLearner* learner, LNN* lnn);
 
+/**
+ * @brief ZSFZS-001: 设置在线学习器的模仿学习启用状态
+ *
+ * 由能力开关系统调用，控制模仿学习子系统的启停。
+ *
+ * @param learner 在线学习器句柄
+ * @param enabled 1=启用模仿学习, 0=禁用模仿学习
+ * @return int 成功返回0，失败返回-1
+ */
+int online_learner_set_imitation_enabled(OnlineLearner* learner, int enabled);
+
+/**
+ * @brief ZSFZS-001: 设置在线学习器的探索率
+ *
+ * 由能力开关系统调用，控制好奇心/探索驱动力。
+ * 探索率影响epsilon-greedy策略和噪声注入强度。
+ *
+ * @param learner 在线学习器句柄
+ * @param rate 探索率（0.0=纯利用, 1.0=纯探索）
+ * @return int 成功返回0，失败返回-1
+ */
+int online_learner_set_exploration(OnlineLearner* learner, float rate);
+
+/**
+ * @brief ZSFZS-001: 获取在线学习器的模仿学习启用状态
+ *
+ * @param learner 在线学习器句柄
+ * @return int 1=启用, 0=禁用, -1=错误
+ */
+int online_learner_get_imitation_enabled(OnlineLearner* learner);
+
+/**
+ * @brief ZSFZS-001: 获取在线学习器的当前探索率
+ *
+ * @param learner 在线学习器句柄
+ * @param rate [输出] 当前探索率
+ * @return int 成功返回0，失败返回-1
+ */
+int online_learner_get_exploration(OnlineLearner* learner, float* rate);
+
 #ifdef __cplusplus
 }
 #endif

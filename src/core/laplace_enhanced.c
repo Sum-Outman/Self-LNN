@@ -484,18 +484,19 @@ int laplace_stability_analyze(LaplaceEnhancedSystem* system, const float* system
         safe_free((void**)&real_parts);
         safe_free((void**)&imag_parts);
     }
-    /* 如果内存分配失败，返回现有默认零值，标记为不稳定 */
+    /* ZSFZS-F005修复: 内存分配失败时不使用任何降级处理或硬编码虚拟数据。
+     * 直接在分析结构中设置错误标记，让调用方知晓分析未能完成。
+     * 禁止使用硬编码的伪分析结果（阻尼比/频率/增益裕度等）。 */
     if (!real_parts || !imag_parts) {
         safe_free((void**)&real_parts);
         safe_free((void**)&imag_parts);
-        analysis->is_stable = 0;
-        analysis->damping_ratio = 0.1f;
-        analysis->natural_frequency = 1.0f;
-        analysis->gain_margin = 3.0f;
-        analysis->phase_margin = 20.0f;
-        analysis->settling_time = 10.0f;
-        analysis->overshoot = 0.8f;
-        analysis->stability_reserve = 0.1f;
+        /* 全部置零标记分析失败，has_valid_analysis=0让调用方得知分析不可用 */
+        memset(analysis, 0, sizeof(EnhancedStabilityAnalysis));
+        analysis->is_stable = 0; /* 保守假设：标记为不稳定，需调用方自行判断 */
+        memcpy(&system->last_stability, analysis, sizeof(EnhancedStabilityAnalysis));
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "拉普拉斯稳定性分析：特征值内存分配失败，无法完成分析");
+        return -1;
     }
 
     memcpy(&system->last_stability, analysis, sizeof(EnhancedStabilityAnalysis));

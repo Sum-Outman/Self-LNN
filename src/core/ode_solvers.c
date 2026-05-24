@@ -6,7 +6,7 @@
 #define SELFLNN_DP54_SAFETY 0.9f
 #define SELFLNN_DP54_PGROW -0.2f
 #define SELFLNN_DP54_PSHRINK -0.25f
-#define SELFLNN_DP54_ERR_CTRL 1.0e-12f
+#define SELFLNN_DP54_ERR_CTRL 0.5f  /* ZSFZS-F028: 从1e-12调整为0.5，消除无意义的步长微调 */
 
 static float dp54_max(float a, float b) { return (a > b) ? a : b; }
 static float dp54_min(float a, float b) { return (a < b) ? a : b; }
@@ -640,7 +640,10 @@ float ode_adaptive_step_control(float max_error, float h,
         if (cfg->step_rejection_policy == 1) {
             float ki = 0.1f;
             float error_ratio = (float)log((double)err_clamp);
+            /* ZSFZS-F044修复: 仅误差稳定时累加PI积分防止windup */
             sol->pi_integral += 0.5f * ki * h * (error_ratio + sol->pi_previous_error);
+            if (sol->pi_integral > 5.0f) sol->pi_integral = 5.0f;
+            if (sol->pi_integral < -5.0f) sol->pi_integral = -5.0f;
             sol->pi_previous_error = error_ratio;
             float pi_factor = (float)exp((double)(0.3f * error_ratio + sol->pi_integral));
             h_new = h * (float)fmax(0.2, fmin(5.0, safety * pi_factor));

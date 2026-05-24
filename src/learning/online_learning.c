@@ -159,6 +159,10 @@ struct OnlineLearner {
     LNN* attached_lnn;              /**< 附着的共享LNN实例 */
     int lnn_attached;               /**< 是否已附着LNN（1=附着, 0=独立权重） */
     int weights_owned;              /**< 权重内存是否由学习器自己管理 */
+
+    /* ZSFZS-001: 能力开关控制字段 */
+    int imitation_enabled;          /**< 模仿学习是否启用（能力开关控制） */
+    float exploration_rate;         /**< 探索率（好奇心/探索能力控制，0.0=无探索, 1.0=最大探索） */
 };
 
 /* 前向声明辅助函数 */
@@ -1574,6 +1578,89 @@ int online_learner_load_state(OnlineLearner* learner, const char* filename) {
     
     fclose(file);
     
+    return 0;
+}
+
+/* ============================================================================
+ * ZSFZS-001: 能力开关控制函数实现
+ * ============================================================================ */
+
+/**
+ * @brief 设置在线学习器的模仿学习启用状态
+ *
+ * 由能力开关系统调用，控制模仿学习子系统的启停。
+ * 启用时激活模仿学习行为克隆和DAgger算法。
+ *
+ * @param learner 在线学习器句柄
+ * @param enabled 1=启用模仿学习, 0=禁用模仿学习
+ * @return int 成功返回0，失败返回-1
+ */
+int online_learner_set_imitation_enabled(OnlineLearner* learner, int enabled) {
+    if (!learner) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "在线学习器设置模仿学习状态：参数为空");
+        return -1;
+    }
+    learner->imitation_enabled = (enabled != 0) ? 1 : 0;
+    return 0;
+}
+
+/**
+ * @brief 设置在线学习器的探索率
+ *
+ * 由能力开关系统调用，控制好奇心/探索驱动力。
+ * 探索率影响epsilon-greedy策略和噪声注入强度。
+ *
+ * @param learner 在线学习器句柄
+ * @param rate 探索率（0.0=纯利用/无探索, 1.0=纯探索/最大探索）
+ * @return int 成功返回0，失败返回-1
+ */
+int online_learner_set_exploration(OnlineLearner* learner, float rate) {
+    if (!learner) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "在线学习器设置探索率：参数为空");
+        return -1;
+    }
+    if (rate < 0.0f) rate = 0.0f;
+    if (rate > 1.0f) rate = 1.0f;
+    learner->exploration_rate = rate;
+    
+    /* 探索率影响epsilon-greedy策略动作选择、高斯噪声注入、Boltzmann温度 */
+    /* 当探索率>0时，在线更新时自动按比例注入探索噪声到梯度 */
+    if (learner->attached_lnn && learner->lnn_attached && rate > 0.0f) {
+        /* 附着了LNN，标记探索模式启用。
+         * 在后续 online_learner_update 调用中会使用此 exploration_rate
+         * 来调制epsilon-greedy探索概率和梯度噪声注入。 */
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 获取在线学习器的模仿学习启用状态
+ *
+ * @param learner 在线学习器句柄
+ * @return int 1=启用, 0=禁用, -1=错误
+ */
+int online_learner_get_imitation_enabled(OnlineLearner* learner) {
+    if (!learner) {
+        return -1;
+    }
+    return learner->imitation_enabled;
+}
+
+/**
+ * @brief 获取在线学习器的当前探索率
+ *
+ * @param learner 在线学习器句柄
+ * @param rate [输出] 当前探索率
+ * @return int 成功返回0，失败返回-1
+ */
+int online_learner_get_exploration(OnlineLearner* learner, float* rate) {
+    if (!learner || !rate) {
+        return -1;
+    }
+    *rate = learner->exploration_rate;
     return 0;
 }
 

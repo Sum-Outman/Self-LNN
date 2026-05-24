@@ -11,6 +11,7 @@
 #include "selflnn/knowledge/semantic_network.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
+#include "selflnn/utils/secure_random.h"  /* ZSFZS-F016: 安全随机数 */
 #include "selflnn/core/errors.h"
 
 #include <stdlib.h>
@@ -352,11 +353,11 @@ static InferenceRule* select_conflict_rule(LogicReasoningEngine* engine,
         }
         
         case CONFLICT_RESOLUTION_RANDOM: {
-            // 随机选择一个规则
-            // 线性同余生成器（LCG）伪随机数生成：X_{n+1} = (1103515245 * X_n + 12345) mod 2^31
-            static unsigned int seed = 12345;
-            seed = seed * 1103515245 + 12345;
-            size_t index = (size_t)((seed >> 16) % rule_count);
+            /* ZSFZS-F016修复: 使用secure_random替代确定性LCG伪随机数。
+             * LCG在多次调用下产生高度可预测序列，不适合需要真正随机性的冲突解决。
+             * secure_random_float 使用系统熵源（/dev/urandom/BCryptGenRandom）生成密码学安全随机数。 */
+            size_t index = (size_t)(secure_random_float() * (float)rule_count);
+            if (index >= rule_count) index = rule_count - 1;
             selected_rule = applicable_rules[index];
             break;
         }

@@ -346,6 +346,8 @@ class ApiService {
             var _checkStartTime = Date.now();
             var _CHECK_TIMEOUT_MS = 3000;
             return new Promise(function(resolve) {
+                /* ZSFZS-F056修复: 每次排空时重置间隔为初始值，防止累积延迟 */
+                self._drainInterval = 0;
                 var check = function() {
                     if (window.__PAGE_READY === true) {
                         setTimeout(function() {

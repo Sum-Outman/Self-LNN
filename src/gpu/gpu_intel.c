@@ -777,16 +777,26 @@ static int intel_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMemory*
  * 异步拷贝需要Level Zero命令列表(CommandList)和栅栏(Fence)机制，
  * 在Level Zero后端完全实现后替换为zeCommandListAppendMemoryCopy。 */
 static int intel_backend_memory_copy_to_device_async(GpuMemory* dst, const void* src, size_t size, GpuStream* stream) {
-    (void)dst; (void)src; (void)size; (void)stream;
-    /* 异步拷贝需要Level Zero命令列表支持，当前CPU模拟模式不具备异步能力。
-     * 返回错误码强制调用方处理而非静默退化 */
+    (void)stream;
+    if (!dst || !src || size == 0) return -1;
+    /* ZSFZS-F002修复: 异步拷贝在CPU模拟模式下回退为同步拷贝，
+     * 而非返回错误。确保调用方在无Level Zero环境也能正常工作。 */
+    if (dst->data) {
+        memcpy(dst->data, src, size);
+        return 0;
+    }
     return -1;
 }
 
 static int intel_backend_memory_copy_from_device_async(void* dst, GpuMemory* src, size_t size, GpuStream* stream) {
-    (void)dst; (void)src; (void)size; (void)stream;
-    /* 异步拷贝需要Level Zero命令列表支持，当前CPU模拟模式不具备异步能力。
-     * 返回错误码强制调用方处理而非静默退化 */
+    (void)stream;
+    if (!dst || !src || size == 0) return -1;
+    /* ZSFZS-F002修复: 异步拷贝在CPU模拟模式下回退为同步拷贝，
+     * 而非返回错误。确保调用方在无Level Zero环境也能正常工作。 */
+    if (src->data) {
+        memcpy(dst, src->data, size);
+        return 0;
+    }
     return -1;
 }
 

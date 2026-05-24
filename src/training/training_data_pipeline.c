@@ -120,20 +120,36 @@ int training_pipeline_pretrain_all_vision(LNN* vision_net, LNN* deep_vision_net,
                                            LNN* liquid_vision_net, LNN* image_recog_net) {
     int ok = 0, fail = 0;
 
+    /* ZSFZS-F019修复: 从LNN配置动态读取维度，替代硬编码值。
+     * 使用 lnn_get_input_size/lnn_get_output_size 获取实际配置的维度。
+     * 如果网络未配置则使用合理默认值。 */
+
     if (vision_net) {
-        int r = training_pipeline_train_multimodal(vision_net, "vision", 256, 128, 1000, 20, 1e-3f);
+        size_t in_dim = lnn_get_input_size(vision_net);
+        size_t out_dim = lnn_get_output_size(vision_net);
+        if (in_dim < 16) in_dim = 256; if (out_dim < 8) out_dim = 128;
+        int r = training_pipeline_train_multimodal(vision_net, "vision", (int)in_dim, (int)out_dim, 1000, 20, 1e-3f);
         if (r == 0) ok++; else fail++;
     }
     if (deep_vision_net) {
-        int r = training_pipeline_train_multimodal(deep_vision_net, "deep_vision", 512, 256, 800, 15, 5e-4f);
+        size_t in_dim = lnn_get_input_size(deep_vision_net);
+        size_t out_dim = lnn_get_output_size(deep_vision_net);
+        if (in_dim < 16) in_dim = 512; if (out_dim < 8) out_dim = 256;
+        int r = training_pipeline_train_multimodal(deep_vision_net, "deep_vision", (int)in_dim, (int)out_dim, 800, 15, 5e-4f);
         if (r == 0) ok++; else fail++;
     }
     if (liquid_vision_net) {
-        int r = training_pipeline_train_multimodal(liquid_vision_net, "liquid_vision", 256, 128, 1000, 20, 1e-3f);
+        size_t in_dim = lnn_get_input_size(liquid_vision_net);
+        size_t out_dim = lnn_get_output_size(liquid_vision_net);
+        if (in_dim < 16) in_dim = 256; if (out_dim < 8) out_dim = 128;
+        int r = training_pipeline_train_multimodal(liquid_vision_net, "liquid_vision", (int)in_dim, (int)out_dim, 1000, 20, 1e-3f);
         if (r == 0) ok++; else fail++;
     }
     if (image_recog_net) {
-        int r = training_pipeline_train_multimodal(image_recog_net, "image_recognition", 512, 256, 800, 15, 5e-4f);
+        size_t in_dim = lnn_get_input_size(image_recog_net);
+        size_t out_dim = lnn_get_output_size(image_recog_net);
+        if (in_dim < 16) in_dim = 512; if (out_dim < 8) out_dim = 256;
+        int r = training_pipeline_train_multimodal(image_recog_net, "image_recognition", (int)in_dim, (int)out_dim, 800, 15, 5e-4f);
         if (r == 0) ok++; else fail++;
     }
 
@@ -145,16 +161,26 @@ int training_pipeline_pretrain_all_audio(LNN* speech_net, LNN* audio_semantic_ne
                                           LNN* vad_net) {
     int ok = 0, fail = 0;
 
+    /* ZSFZS-F019: 动态读取LNN维度 */
     if (speech_net) {
-        int r = training_pipeline_train_multimodal(speech_net, "speech_recognition", 128, 64, 1200, 25, 2e-3f);
+        size_t in_dim = lnn_get_input_size(speech_net);
+        size_t out_dim = lnn_get_output_size(speech_net);
+        if (in_dim < 16) in_dim = 128; if (out_dim < 8) out_dim = 64;
+        int r = training_pipeline_train_multimodal(speech_net, "speech_recognition", (int)in_dim, (int)out_dim, 1200, 25, 2e-3f);
         if (r == 0) ok++; else fail++;
     }
     if (audio_semantic_net) {
-        int r = training_pipeline_train_multimodal(audio_semantic_net, "audio_semantic", 256, 128, 800, 15, 1e-3f);
+        size_t in_dim = lnn_get_input_size(audio_semantic_net);
+        size_t out_dim = lnn_get_output_size(audio_semantic_net);
+        if (in_dim < 16) in_dim = 256; if (out_dim < 8) out_dim = 128;
+        int r = training_pipeline_train_multimodal(audio_semantic_net, "audio_semantic", (int)in_dim, (int)out_dim, 800, 15, 1e-3f);
         if (r == 0) ok++; else fail++;
     }
     if (vad_net) {
-        int r = training_pipeline_train_multimodal(vad_net, "vad", 64, 2, 500, 10, 2e-3f);
+        size_t in_dim = lnn_get_input_size(vad_net);
+        size_t out_dim = lnn_get_output_size(vad_net);
+        if (in_dim < 16) in_dim = 64; if (out_dim < 2) out_dim = 2;
+        int r = training_pipeline_train_multimodal(vad_net, "vad", (int)in_dim, (int)out_dim, 500, 10, 2e-3f);
         if (r == 0) ok++; else fail++;
     }
 
@@ -166,20 +192,33 @@ int training_pipeline_pretrain_all_sensors(LNN* sensor_fusion_net, LNN* slam_net
                                             LNN* depth_net, LNN* ocr_net) {
     int ok = 0, fail = 0;
 
+    /* ZSFZS-F019: 动态读取LNN维度 */
     if (sensor_fusion_net) {
-        int r = training_pipeline_train_multimodal(sensor_fusion_net, "sensor_fusion", 128, 64, 1000, 20, 1e-3f);
+        size_t in_dim = lnn_get_input_size(sensor_fusion_net);
+        size_t out_dim = lnn_get_output_size(sensor_fusion_net);
+        if (in_dim < 16) in_dim = 128; if (out_dim < 8) out_dim = 64;
+        int r = training_pipeline_train_multimodal(sensor_fusion_net, "sensor_fusion", (int)in_dim, (int)out_dim, 1000, 20, 1e-3f);
         if (r == 0) ok++; else fail++;
     }
     if (slam_net) {
-        int r = training_pipeline_train_multimodal(slam_net, "slam", 256, 128, 800, 15, 5e-4f);
+        size_t in_dim = lnn_get_input_size(slam_net);
+        size_t out_dim = lnn_get_output_size(slam_net);
+        if (in_dim < 16) in_dim = 256; if (out_dim < 8) out_dim = 128;
+        int r = training_pipeline_train_multimodal(slam_net, "slam", (int)in_dim, (int)out_dim, 800, 15, 5e-4f);
         if (r == 0) ok++; else fail++;
     }
     if (depth_net) {
-        int r = training_pipeline_train_multimodal(depth_net, "depth_estimation", 128, 64, 1000, 20, 1e-3f);
+        size_t in_dim = lnn_get_input_size(depth_net);
+        size_t out_dim = lnn_get_output_size(depth_net);
+        if (in_dim < 16) in_dim = 128; if (out_dim < 8) out_dim = 64;
+        int r = training_pipeline_train_multimodal(depth_net, "depth_estimation", (int)in_dim, (int)out_dim, 1000, 20, 1e-3f);
         if (r == 0) ok++; else fail++;
     }
     if (ocr_net) {
-        int r = training_pipeline_train_multimodal(ocr_net, "ocr", 256, 36, 1500, 30, 2e-3f);
+        size_t in_dim = lnn_get_input_size(ocr_net);
+        size_t out_dim = lnn_get_output_size(ocr_net);
+        if (in_dim < 16) in_dim = 256; if (out_dim < 8) out_dim = 36;
+        int r = training_pipeline_train_multimodal(ocr_net, "ocr", (int)in_dim, (int)out_dim, 1500, 30, 2e-3f);
         if (r == 0) ok++; else fail++;
     }
 

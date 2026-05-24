@@ -1766,7 +1766,9 @@ int rdf_triple_store_import_ntriples(RDFTripleStore* store,
         int s_literal = 0, o_literal = 0;
         char* token;
 
-        token = strtok(p, " \t");
+        /* ZSFZS-F040: strtok→strtok_s线程安全 */
+        char* saveptr = NULL;
+        token = strtok_s(p, " \t", &saveptr);
         if (!token) continue;
 
         if (token[0] == '<') {
@@ -1783,8 +1785,8 @@ int rdf_triple_store_import_ntriples(RDFTripleStore* store,
             s_literal = 1;
         }
 
-        token = strtok(NULL, " \t");
-        if (!token) continue;
+        token = strtok_s(NULL, " \t", &saveptr);
+        if (!token) continue;  /* 跳过无谓词的行 */
         if (token[0] == '<') {
             size_t len = strlen(token);
             if (len > 2 && token[len - 1] == '>') {

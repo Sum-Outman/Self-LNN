@@ -280,7 +280,9 @@
         var html = '';
         filtered.forEach(function(e) {
             html += '<div class="entry-item">';
-            html += '<button class="del-btn" onclick="deleteEntry(\'' + e.id + '\')" title="删除">✕</button>';
+            /* ZSFZS-F053修复: onclick中的id值做JS转义，防止XSS攻击 */
+            var escapedId = String(e.id).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');
+            html += '<button class="del-btn" onclick="deleteEntry(\'' + escapedId + '\')" title="删除">✕</button>';
             html += '<div class="triple">';
             html += '<span class="s">' + escapeHtml(e.subject) + '</span>';
             html += '<span style="color:rgba(255,255,255,0.2);font-size:0.6rem;">──</span>';
@@ -310,12 +312,15 @@
                 var resp = data.data || data;
                 if (resp && resp.knowledge) {
                     graphState.backendOnline = true;
-                    document.getElementById('stat-entries').textContent = resp.knowledge.total_entries || knowledgeEntries.length;
-                    var mem = resp.knowledge.memory_usage_bytes || (knowledgeEntries.length * 128);
-                    document.getElementById('stat-memory').textContent = formatBytes(mem);
+                    /* ZSFZS-F053修复: DOM操作前null检查 */
+            var statEntries = document.getElementById('stat-entries');
+            var statMemory = document.getElementById('stat-memory');
+            if (statEntries) statEntries.textContent = resp.knowledge.total_entries || knowledgeEntries.length;
+            var mem = resp.knowledge.memory_usage_bytes || (knowledgeEntries.length * 128);
+            if (statMemory) statMemory.textContent = formatBytes(mem);
                 } else {
-                    document.getElementById('stat-entries').textContent = knowledgeEntries.length;
-                    document.getElementById('stat-memory').textContent = formatBytes(knowledgeEntries.length * 128);
+                    if (statEntries) statEntries.textContent = knowledgeEntries.length;
+                    if (statMemory) statMemory.textContent = formatBytes(knowledgeEntries.length * 128);
                 }
             })
             .catch(function() {

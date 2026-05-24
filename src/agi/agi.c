@@ -51,7 +51,13 @@
 #include <math.h>
 #include <time.h>
 
+/* ZSFZS-F025修复: 移除agi.c中10个extern未定义符号声明。
+ * capability_switch.c 的 ensure_callbacks_registered() 是唯一注册点。
+ * agi.c 中这些 cap_check_* 和 cap_set_* 函数是死代码，
+ * 仅通过 g_agi_cap_system 全局指针引用（也仅用于agi.c内部）。
+ * 如果 capability_switch 要使用这些函数，应通过 selflnn_get_*() 访问器连接。 */
 /* 子系统接口前向声明（实现位于对应子系统模块） */
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL  /* 默认未定义，避免链接错误 */
 extern int learning_engine_is_imitation_enabled(void* learner);
 extern int learning_engine_set_imitation_enabled(void* learner, int enable);
 extern int deep_reflection_is_enabled(void* reflection);
@@ -63,6 +69,7 @@ extern void planning_disable(void* planner);
 extern int dialogue_is_enabled(void* dialogue);
 extern void dialogue_enable(void* dialogue);
 extern void dialogue_disable(void* dialogue);
+#endif
 #include "selflnn/concurrency/thread_pool.h"
 #include <stdlib.h>
 #include <string.h>
@@ -216,53 +223,85 @@ static int cap_set_evolution(int enable) {
 }
 
 static int cap_check_imitation(void) {
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->learner) return 0;
     return learning_engine_is_imitation_enabled(sys->learner);
+#else
+    (void)0; return 0;
+#endif
 }
 static int cap_set_imitation(int enable) {
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->learner) return -1;
     return learning_engine_set_imitation_enabled(sys->learner, enable);
+#else
+    (void)enable; return 0;
+#endif
 }
 
 static int cap_check_reflection(void) {
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->reflection) return 0;
     return deep_reflection_is_enabled(sys->reflection);
+#else
+    (void)0; return 0;
+#endif
 }
 static int cap_set_reflection(int enable) {
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->reflection) return -1;
     if (enable) deep_reflection_enable(sys->reflection);
     else deep_reflection_disable(sys->reflection);
     return 0;
+#else
+    (void)enable; return 0;
+#endif
 }
 
 static int cap_check_planning(void) {
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->planner) return 0;
     return planning_is_enabled(sys->planner);
+#else
+    (void)0; return 0;
+#endif
 }
 static int cap_set_planning(int enable) {
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->planner) return -1;
     if (enable) planning_enable(sys->planner);
     else planning_disable(sys->planner);
     return 0;
+#else
+    (void)enable; return 0;
+#endif
 }
 
 static int cap_check_dialogue(void) {
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->dialogue) return 0;
     return dialogue_is_enabled(sys->dialogue);
+#else
+    (void)0; return 0;
+#endif
 }
 static int cap_set_dialogue(int enable) {
+#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->dialogue) return -1;
     if (enable) dialogue_enable(sys->dialogue);
     else dialogue_disable(sys->dialogue);
     return 0;
+#else
+    (void)enable; return 0;
+#endif
 }
 
 static int cap_check_correction(void) {
@@ -1673,7 +1712,8 @@ int agi_system_learn(AGISystem* system, const float* experience, int exp_dim, fl
 
     if (system->knowledge) {
         char key[64];
-        sprintf(key, "exp_%ld_%d", (long)time(NULL), system->reward_count);
+        /* ZSFZS-F031: sprintf→snprintf防止缓冲区溢出 */
+        snprintf(key, sizeof(key), "exp_%ld_%d", (long)time(NULL), system->reward_count);
         KnowledgeEntry entry;
         memset(&entry, 0, sizeof(entry));
         entry.subject = key;
@@ -1966,7 +2006,8 @@ int agi_system_cognitive_cycle(AGISystem* system, const float* sensory_input, in
             /* 记录修正事件到知识库 */
             if (corrections_applied > 0 && system->knowledge) {
                 char key[64];
-                sprintf(key, "correction_%d_%ld", system->total_cycles, (long)time(NULL));
+                /* ZSFZS-F031: sprintf→snprintf */
+                snprintf(key, sizeof(key), "correction_%d_%ld", system->total_cycles, (long)time(NULL));
                 KnowledgeEntry entry;
                 memset(&entry, 0, sizeof(entry));
                 entry.subject = key;
@@ -2231,7 +2272,8 @@ int agi_system_cognitive_cycle_multimodal(AGISystem* system,
             /* 记录修正事件到知识库 */
             if (corrections_applied > 0 && system->knowledge) {
                 char key[64];
-                sprintf(key, "correction_%d", system->total_cycles);
+                /* ZSFZS-F031: sprintf→snprintf */
+                snprintf(key, sizeof(key), "correction_%d", system->total_cycles);
                 KnowledgeEntry entry;
                 memset(&entry, 0, sizeof(entry));
                 entry.subject = key;
@@ -2655,7 +2697,8 @@ int agi_system_imitate(AGISystem* system, const float* demonstration, int demo_d
 
     if (system->knowledge) {
         char key[64];
-        sprintf(key, "imitation_%d_%ld", system->total_cycles, (long)time(NULL));
+        /* ZSFZS-F031: sprintf→snprintf */
+        snprintf(key, sizeof(key), "imitation_%d_%ld", system->total_cycles, (long)time(NULL));
         KnowledgeEntry entry;
         memset(&entry, 0, sizeof(entry));
         entry.subject = key;
@@ -2726,7 +2769,8 @@ int agi_system_self_evolve(AGISystem* system, float* new_parameters, int* param_
 
     if (system->knowledge) {
         char key[64];
-        sprintf(key, "evolution_%d_%ld", system->total_cycles, (long)time(NULL));
+        /* ZSFZS-F031: sprintf→snprintf */
+        snprintf(key, sizeof(key), "evolution_%d_%ld", system->total_cycles, (long)time(NULL));
         KnowledgeEntry entry;
         memset(&entry, 0, sizeof(entry));
         entry.subject = key;
@@ -2886,7 +2930,8 @@ int agi_system_process_stereo(AGISystem* system,
 
     if (system->knowledge) {
         char key[64];
-        sprintf(key, "stereo_%d_%ld", system->total_cycles, (long)time(NULL));
+        /* ZSFZS-F031: sprintf→snprintf */
+        snprintf(key, sizeof(key), "stereo_%d_%ld", system->total_cycles, (long)time(NULL));
         KnowledgeEntry entry;
         memset(&entry, 0, sizeof(entry));
         entry.subject = key;

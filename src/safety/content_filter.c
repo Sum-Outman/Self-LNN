@@ -192,6 +192,9 @@ ContentFilter* content_filter_create(void) {
         r->enabled = 1;
         r->action_type = 3;
     }
+    /* ZSFZS-F018修复: 全部规则添加完成后，默认启用LNN语义过滤层。
+     * 语义层与关键词匹配层协同工作：语义层做深度理解，关键词层做精细分类。 */
+    filter->enable_semantic = 1;
     
     return filter;
 }
