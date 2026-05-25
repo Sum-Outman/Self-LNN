@@ -1133,6 +1133,111 @@ int dialogue_gen_set_knowledge_base(DialogueGenerator* gen,
                                          const float* knowledge_embeddings,
                                          int num_entries, size_t embedding_dim);
 
+/* ============================================================================
+ * dg_generate_response: 基于CfC ODE的神经对话生成（核心函数）
+ *
+ * 使用CfC连续时间ODE进行对话状态编码，结合知识库检索增强上下文，
+ * 通过自回归解码器逐token生成回复文本。取代原有的模板匹配+规则填充方式。
+ *
+ * 上下文编码流程：
+ *   用户输入 → 文本向量化 → CfC ODE编码 → 对话状态h
+ *   知识检索 → 事实向量嵌入 → 与h融合 → 增强状态h'
+ *   增强状态h' → 自回归解码 → 逐词生成回复
+ *
+ * 回复生成优先级：
+ *   1. 知识库检索增强（检索结果→模板填充）
+ *   2. CfC ODE神经生成（模型权重已加载时）
+ *   3. 模板匹配回退（无模型时）
+ * ============================================================================ */
+
+/**
+ * @brief CfC ODE神经对话生成主入口
+ *
+ * 接收用户输入和对话上下文，通过CfC连续时间动态系统生成回复。
+ * 自动从知识库中检索与用户输入最相关的5个事实，注入到编码状态中。
+ *
+ * @param gen 对话生成器句柄（必须已初始化CfC单元）
+ * @param user_input 用户输入文本
+ * @param input_length 输入文本长度
+ * @param dialogue_history 对话历史文本（可为NULL表示新对话）
+ * @param history_length 对话历史长度
+ * @param output_text [out] 生成的回复文本缓冲区
+ * @param max_output 输出缓冲区最大字节数
+ * @param temperature 生成温度（0.1-2.0）
+ * @param top_k Top-K采样参数
+ * @param confidence [out] 生成置信度输出
+ * @return int 成功返回生成文本长度，失败返回-1
+ */
+int dg_generate_response(DialogueGenerator* gen,
+                         const char* user_input,
+                         size_t input_length,
+                         const char* dialogue_history,
+                         size_t history_length,
+                         char* output_text,
+                         size_t max_output,
+                         float temperature,
+                         int top_k,
+                         float* confidence);
+
+/**
+ * @brief 保存CfC对话模型权重到二进制文件
+ *
+ * 保存生成器的全部权重：词嵌入表、输出投影权重W和b、
+ * 知识库嵌入（如已初始化）。使用魔数+版本+校验和格式。
+ *
+ * @param gen 对话生成器句柄
+ * @param filepath 保存文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int dg_save_dialogue_model(DialogueGenerator* gen, const char* filepath);
+
+/**
+ * @brief 从二进制文件加载CfC对话模型权重
+ *
+ * 加载由dg_save_dialogue_model保存的模型权重。
+ * 验证魔数、版本匹配和校验和，确保文件完整性。
+ *
+ * @param gen 对话生成器句柄（必须已初始化词汇表）
+ * @param filepath 模型文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int dg_load_dialogue_model(DialogueGenerator* gen, const char* filepath);
+
+/**
+ * @brief 检查对话生成器是否已初始化
+ *
+ * @param gen 对话生成器句柄
+ * @return int 已初始化返回1，否则返回0
+ */
+int dialogue_gen_is_initialized(const DialogueGenerator* gen);
+
+/**
+ * @brief 使用CfC ODE对话生成器生成回复（集成入口）
+ *
+ * 结合DialogueProcessor的上下文，使用CfC ODE路径生成对话回复。
+ * 自动处理对话历史拼接和知识库检索增强。
+ *
+ * @param processor 对话处理器句柄
+ * @param user_input 用户输入文本
+ * @param input_length 输入文本长度
+ * @param context 对话上下文（可为NULL）
+ * @param output_text [out] 生成的回复文本缓冲区
+ * @param max_output 输出缓冲区最大字节数
+ * @param temperature 生成温度（0.1-2.0）
+ * @param top_k Top-K采样参数
+ * @param confidence [out] 生成置信度输出
+ * @return int 成功返回生成文本长度，失败返回-1
+ */
+int dialogue_generate_with_cfc_ode(DialogueProcessor* processor,
+                                   const char* user_input,
+                                   size_t input_length,
+                                   const DialogueContext* context,
+                                   char* output_text,
+                                   size_t max_output,
+                                   float temperature,
+                                   int top_k,
+                                   float* confidence);
+
 /**
  * @brief 将对话深度增强系统集成到主对话处理器
  *

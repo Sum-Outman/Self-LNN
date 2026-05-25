@@ -50,24 +50,140 @@
 #include <string.h>
 #include <math.h>
 
-/* ZSFBUILD: RealtimeMonitor类型未在任何头文件中声明，在此处补全 */
+/* ZSFBUILD: 缺失类型定义 —— laplace_enhanced.h为空转发，全部在此补全 */
+
+/* 增强目标 */
+typedef enum {
+    LAPLACE_TARGET_ALL = 0,        /**< 全部子系统 */
+    LAPLACE_TARGET_LNN = 1,        /**< LNN网络 */
+    LAPLACE_TARGET_TRAINING = 2,   /**< 训练系统 */
+    LAPLACE_TARGET_INFERENCE = 3   /**< 推理系统 */
+} LaplaceTarget;
+
+/* 滤波器操作类型 */
+typedef enum {
+    LAPLACE_OP_GAUSSIAN = 0,       /**< 高斯滤波 */
+    LAPLACE_OP_MEDIAN = 1,         /**< 中值滤波 */
+    LAPLACE_OP_BILATERAL = 2,      /**< 双边滤波 */
+    LAPLACE_OP_BUTTERWORTH = 3     /**< Butterworth滤波 */
+} LaplaceFilterOpType;
+
+/* 滤波器类型 */
+typedef enum {
+    LAPLACE_FILTER_LOWPASS = 0,    /**< 低通 */
+    LAPLACE_FILTER_HIGHPASS = 1,   /**< 高通 */
+    LAPLACE_FILTER_BANDPASS = 2,   /**< 带通 */
+    LAPLACE_FILTER_BANDSTOP = 3    /**< 带阻 */
+} LaplaceFilterPassType;
+
+/* 滤波器配置 */
 typedef struct {
-    float* history_buffer;
-    float* spectrum_accumulator;
-    float* feature_history;
-    size_t buffer_size;
-    size_t feature_history_size;
-    size_t write_pos;
-    size_t feature_write_pos;
-    float stability_threshold;
-    float anomaly_threshold;
-    int is_initialized;
-} RealtimeMonitor;
+    LaplaceFilterOpType op_type;        /**< 操作类型 */
+    LaplaceFilterPassType type;          /**< 通带类型 */
+    float cutoff_frequency;             /**< 截止频率 */
+    float filter_order;                  /**< 滤波器阶数 */
+    float smoothing_alpha;              /**< 平滑系数 */
+    float noise_suppression;            /**< 噪声抑制 */
+    int use_adaptive_cutoff;            /**< 自适应截止 */
+    int use_zero_phase;                 /**< 零相位滤波 */
+    int kernel_size;                    /**< 核大小 */
+    int order;                          /**< 滤波器阶数 */
+    float cutoff_freq;                  /**< 归一化截止频率 */
+} LaplaceFilterConfig;
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+/* 频谱特征 */
+typedef struct {
+    float* magnitude_spectrum;          /**< 幅度谱 */
+    float* phase_spectrum;              /**< 相位谱 */
+    size_t spectrum_size;               /**< 频谱大小 */
+    float dominant_frequency;           /**< 主导频率 */
+    float spectral_entropy;             /**< 谱熵 */
+    float spectral_centroid;            /**< 谱质心 */
+    float spectral_bandwidth;           /**< 谱带宽 */
+    float spectral_flatness;            /**< 谱平坦度 */
+    float spectral_rolloff;             /**< 谱滚降 */
+    float spectral_spread;              /**< 谱扩展 */
+    float high_freq_energy_ratio;       /**< 高频能量比 */
+    float low_freq_energy_ratio;        /**< 低频能量比 */
+    float stability_metric;             /**< 综合稳定性度量 */
+    int peak_count;                     /**< 峰值数量 */
+} LaplaceSpectralFeatures;
 
+/* 增强稳定性分析 */
+typedef struct {
+    float dominant_eigenvalue;          /**< 主导特征值 */
+    float eigenvalue_spread;            /**< 特征值散布 */
+    int eigenvalue_count;               /**< 特征值数量 */
+    float damping_ratio;                /**< 阻尼比 */
+    float natural_frequency;            /**< 自然频率 */
+    float gain_margin;                  /**< 增益裕度 */
+    float phase_margin;                 /**< 相位裕度 */
+    float overshoot;                    /**< 超调量 */
+    float settling_time;                /**< 稳定时间 Ts */
+    float stability_reserve;            /**< 稳定储备 (0-1) */
+    float condition_number;             /**< 条件数 */
+    int is_stable;                      /**< 是否稳定 */
+    float stability_margin;             /**< 稳定性裕度 */
+    float eigenvalue_real_parts[128];   /**< 特征值实部 */
+    float eigenvalue_imag_parts[128];   /**< 特征值虚部 */
+} EnhancedStabilityAnalysis;
+
+/* 分析管道阶段 */
+typedef enum {
+    LAPLACE_PIPELINE_STAGE_FFT = 0,        /**< FFT频域变换 */
+    LAPLACE_PIPELINE_STAGE_SPECTRAL = 1,   /**< 频谱特征提取 */
+    LAPLACE_PIPELINE_STAGE_STABILITY = 2,  /**< 稳定性分析 */
+    LAPLACE_PIPELINE_STAGE_FILTERING = 3,  /**< 频域滤波 */
+    LAPLACE_PIPELINE_STAGE_CONTROL = 4     /**< 控制信号生成 */
+} LaplacePipelineStage;
+
+/* 管道阶段结果 */
+typedef struct {
+    LaplacePipelineStage stage;            /**< 管道阶段 */
+    int success;                           /**< 是否成功 */
+    float execution_time_ms;               /**< 执行时间(ms) */
+    float stage_metrics[8];                /**< 阶段指标 */
+    int metric_count;                      /**< 指标数量 */
+} PipelineStageResult;
+
+/* 管道最终结果 */
+typedef struct {
+    PipelineStageResult stage_results[5];  /**< 各阶段结果 */
+    int stage_count;                       /**< 阶段计数 */
+    float overall_health_score;            /**< 综合健康指数 */
+    float control_recommendation;          /**< 控制建议 */
+    int alarm_level;                       /**< 告警级别 */
+} PipelineResult;
+
+/* Laplace增强系统 */
+typedef struct LaplaceEnhancedSystem LaplaceEnhancedSystem;
+
+/* ZSFBUILD: LNN稳定性保证器配置 */
+typedef struct {
+    float max_eigenvalue_real;           /**< 最大允许特征值实部 */
+    float damping_factor;                /**< 阻尼因子 */
+    float correction_strength;           /**< 校正强度 */
+    int enable_automatic_correction;     /**< 自动校正开关 */
+    int enable_adaptive_damping;         /**< 自适应阻尼 */
+} LNNStabilityConfig;
+
+/* ZSFBUILD: LNN稳定性保证器 */
+typedef struct {
+    LaplaceEnhancedSystem* parent_system;    /**< 父系统 */
+    LNNStabilityConfig config;               /**< 配置 */
+    float* eigenvalue_real_parts;            /**< 特征值实部 */
+    float* eigenvalue_imag_parts;            /**< 特征值虚部 */
+    size_t eigenvalue_count;                 /**< 特征值数量 */
+    float max_real_part;                     /**< 最大实部 */
+    float* correction_history;               /**< 校正历史 */
+    size_t correction_history_size;          /**< 校正历史容量 */
+    size_t correction_write_pos;             /**< 校正写入位置 */
+    int correction_count;                    /**< 校正次数 */
+} LNNStabilityGuarantor;
+
+/* Laplace增强系统 */
+
+/* 前向声明 */
 static void power_iteration_eigenvalues(const float* matrix, size_t size,
                                           float* real_parts, float* imag_parts,
                                           size_t* count, size_t max_count);
@@ -94,6 +210,25 @@ struct LaplaceEnhancedSystem {
     float* filter_kernel;
     int filter_kernel_size;
 };
+
+/* ZSFBUILD: RealtimeMonitor类型未在任何头文件中声明，在此处补全 */
+typedef struct {
+    float* history_buffer;
+    float* spectrum_accumulator;
+    float* feature_history;
+    size_t buffer_size;
+    size_t feature_history_size;
+    size_t write_pos;
+    size_t feature_write_pos;
+    float stability_threshold;
+    float anomaly_threshold;
+    int consecutive_anomalies;      /**< 连续异常计数 */
+    int is_initialized;
+} RealtimeMonitor;
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* 快速傅里叶变换：统一使用 laplace_fft.h 中的 lfft_split_radix2 实现，
  * 已消除与 laplace_integration.c / laplace_ai_framework.c 的重复代码 */
@@ -1259,6 +1394,54 @@ int laplace_guarantor_get_report(LNNStabilityGuarantor* guarantor,
             *current_stability_margin = -guarantor->max_real_part;
         }
     }
+}
+
+/* ============================================================================
+ * ZSFX-P0修复: laplace_enhanced_system_init — 拉普拉斯增强系统统一初始化入口
+ * 由 laplace_unified_system_init() 调用，创建全局增强系统和保证器。
+ * ============================================================================ */
+
+static LaplaceEnhancedSystem* g_enhanced_system = NULL;
+static RealtimeMonitor* g_enhanced_monitor = NULL;
+
+int laplace_enhanced_system_init(void) {
+    if (g_enhanced_system) return 0; /* 已初始化 */
+
+    /* 创建增强系统（目标：全部LNN子系统的频谱分析和滤波） */
+    g_enhanced_system = laplace_enhanced_create(LAPLACE_TARGET_ALL);
+    if (!g_enhanced_system) return -1;
+
+    /* 配置默认滤波器：Butterworth低通，截止频率自适应 */
+    LaplaceFilterConfig fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.type = LAPLACE_FILTER_LOWPASS;
+    fc.order = 4;
+    fc.cutoff_freq = 0.85f; /* 归一化频率 */
+    fc.use_adaptive_cutoff = 1;
+    laplace_set_filter_config(g_enhanced_system, &fc);
+
+    /* 创建实时监控器（窗口大小128，采样间隔100ms） */
+    g_enhanced_monitor = laplace_monitor_create(128, 100);
+    if (!g_enhanced_monitor) {
+        laplace_enhanced_free(g_enhanced_system);
+        g_enhanced_system = NULL;
+        return -1;
+    }
 
     return 0;
+}
+
+void laplace_enhanced_system_cleanup(void) {
+    if (g_enhanced_monitor) {
+        laplace_monitor_free(g_enhanced_monitor);
+        g_enhanced_monitor = NULL;
+    }
+    if (g_enhanced_system) {
+        laplace_enhanced_free(g_enhanced_system);
+        g_enhanced_system = NULL;
+    }
+}
+
+LaplaceEnhancedSystem* laplace_enhanced_get_instance(void) {
+    return g_enhanced_system;
 }

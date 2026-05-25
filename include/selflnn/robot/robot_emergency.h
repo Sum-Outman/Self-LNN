@@ -161,6 +161,7 @@ int robot_emergency_remove_brake(EmergencySystem* system, int brake_id);
 int robot_emergency_trigger(EmergencySystem* system, EmergencyLevel level,
                              int channel_id, const char* reason);
 int robot_emergency_release(EmergencySystem* system);
+int robot_emergency_update(EmergencySystem* system);
 
 int robot_emergency_update_channel(EmergencySystem* system, int channel_id,
                                     float value, uint64_t timestamp_ms);

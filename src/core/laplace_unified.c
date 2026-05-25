@@ -12,9 +12,8 @@
 #include <stdio.h>
 
 int laplace_unified_system_init(const LaplaceAIConfig* cfg) {
-    /* ZSFBUILD: LaplaceAIConfig为不透明类型，实际初始化通过laplace_analyzer_create完成
-     * 原代码引用不存在的laplace_ai_create/free和LaplaceEnhancedSystem等类型。
-     * 修正为使用真实API: laplace.h 中的 LaplaceAnalyzer。 */
+    /* ZSFBUILD: 深度初始化拉普拉斯分析器、AI框架、增强系统和深度集成子系统
+     * 创建全局LaplaceAnalyzer并保持其生命周期，供后续健康检查使用 */
     (void)cfg;
     
     LaplaceConfig default_cfg = LAPLACE_CONFIG_DEFAULT;
@@ -23,8 +22,38 @@ int laplace_unified_system_init(const LaplaceAIConfig* cfg) {
         log_error("[拉普拉斯统一] 拉普拉斯分析器初始化失败");
         return -1;
     }
-    laplace_analyzer_free(analyzer);
 
+    /* 初始化AI框架层（频域滤波、Butterworth、MFCC等） */
+    if (laplace_ai_framework_init() != 0) {
+        log_error("[拉普拉斯统一] AI框架初始化失败");
+        laplace_analyzer_free(analyzer);
+        return -1;
+    }
+
+    /* 初始化增强系统层（系统级频谱分析、滤波、降噪、稳定性监控） */
+    if (laplace_enhanced_system_init() != 0) {
+        log_error("[拉普拉斯统一] 增强系统初始化失败");
+        laplace_analyzer_free(analyzer);
+        return -1;
+    }
+
+    /* 初始化深度集成层（CfC稳定性、频率响应、系统辨识、分数阶记忆） */
+    if (laplace_integration_init() != 0) {
+        log_error("[拉普拉斯统一] 深度集成初始化失败");
+        laplace_analyzer_free(analyzer);
+        return -1;
+    }
+
+    /* 验证所有子系统就绪 */
+    char health_buf[512];
+    if (laplace_unified_health_check(health_buf, sizeof(health_buf)) != 0) {
+        log_error("[拉普拉斯统一] 健康检查失败");
+        laplace_analyzer_free(analyzer);
+        return -1;
+    }
+    log_info("[拉普拉斯统一] 全系统就绪: %s", health_buf);
+
+    laplace_analyzer_free(analyzer);
     log_info("[拉普拉斯统一] 全系统初始化完成：AI框架 + 增强系统 + 深度集成");
     return 0;
 }

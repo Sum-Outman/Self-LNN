@@ -267,6 +267,10 @@ void ird_deep_manager_free(IRDDeepManager* manager);
 int ird_deep_manager_recognize(IRDDeepManager* manager, const float* image, int w, int h, int ch, IRDDeepRecognitionResult* result);
 int ird_deep_manager_set_mode(IRDDeepManager* manager, int mode);
 
+/* 预训练权重持久化：统一二进制格式保存/加载深度管理器所有子模型权重 */
+int ird_save_model_weights(const IRDDeepManager* manager, const char* path);
+int ird_load_pretrained_weights(IRDDeepManager* manager, const char* path);
+
 #ifdef __cplusplus
 }
 #endif

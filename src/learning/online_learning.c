@@ -2287,7 +2287,35 @@ static int update_kalman_filter(KalmanFilterState* state, const float* measureme
     }
     
     // === 预测步骤 ===
-    // x_pred = x_prev (状态转移矩阵为单位矩阵，即假设状态不变)
+    // N-003修复: 使用速度估计的真实状态转移
+    // 状态模型: x(t+dt) = x(t) + velocity * dt
+    // 简单恒定速度模型，利用历史测量值差分估计速度
+    {
+        float dt = (state->last_measurement_time > 0)
+            ? (float)(time(NULL) - state->last_measurement_time) * 1e-6f
+            : 0.0f;
+        if (dt <= 0.0f) dt = 0.01f; /* 默认10ms步长 */
+
+        /* 速度估计：最近两次测量的差分 */
+        for (size_t i = 0; i < n; i++) {
+            float velocity = (state->last_measurement_available)
+                ? (measurement[i] - state->last_measurement[i]) / (dt + 1e-8f)
+                : 0.0f;
+            /* 状态推断: x_pred = x_prev + v * dt */
+            float x_pred = state->x[i] + velocity * dt;
+            /* 限制推断步长，防止异常跳变 */
+            float max_step = fabsf(state->x[i]) * 0.5f + 1.0f;
+            if (fabsf(x_pred - state->x[i]) > max_step) {
+                x_pred = state->x[i] + (x_pred > state->x[i] ? max_step : -max_step);
+            }
+            state->x[i] = x_pred;
+            /* 保存当前测量供下次速度估计 */
+            state->last_measurement[i] = measurement[i];
+        }
+        state->last_measurement_available = 1;
+        state->last_measurement_time = (long)time(NULL);
+    }
+
     // P_pred = P_prev + Q (加上过程噪声)
     for (size_t i = 0; i < n; i++) {
         state->P[i * n + i] += state->Q;

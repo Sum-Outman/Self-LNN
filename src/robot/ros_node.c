@@ -29,6 +29,7 @@ struct RosNode {
     struct {
         char topic[ROS_MAX_TOPIC_NAME];
         char type[ROS_MAX_TYPE_NAME];
+        char md5sum[64];      /* ZSFX-FIX: ROS消息MD5校验和 */
         int active;
     } publishers[ROS_NODE_MAX_PUBLISHERS];
     int num_publishers;
@@ -191,9 +192,14 @@ int ros_node_advertise(RosNode* node, const char* topic, const char* type,
     snprintf(node->publishers[idx].topic, sizeof(node->publishers[idx].topic), "%s", topic);
     snprintf(node->publishers[idx].type, sizeof(node->publishers[idx].type), "%s", type);
     node->publishers[idx].active = 1;
+    /* L-010修复: 存储md5sum用于ROS消息类型校验 */
+    if (md5sum) {
+        snprintf(node->publishers[idx].md5sum, sizeof(node->publishers[idx].md5sum), "%s", md5sum);
+    } else {
+        node->publishers[idx].md5sum[0] = '\0';
+    }
     node->num_publishers++;
 
-    (void)md5sum;
     log_debug("[ROS节点] 广告话题: %s [%s]", topic, type);
     return 0;
 }

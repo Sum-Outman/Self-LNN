@@ -1395,7 +1395,7 @@ SpeechRecognitionConfig speech_recognition_get_default_config(void) {
     config.num_epochs = 100;
     config.gradient_clip_norm = 5.0f;
     config.use_ctc_loss = 1;
-    config.use_gpu = 0;
+    config.use_gpu = gpu_is_available() ? 1 : 0;
     return config;
 }
 
@@ -1803,13 +1803,14 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
     float dt = 1.0f;
     float alpha_val = 1.0f - expf(-dt / tau);
 
-    /* ZSFABC-F007: 输入投影权重改为实例成员，每个识别器独立分配 */
+    /* ZSFABC-F007: 输入投影权重改为实例成员，每个识别器独立分配
+     * He初始化（Kaiming）：输入投影→非线性门控系统，使用sqrt(2/fan_in)缩放 */
     if (!recognizer->input_projection_initialized) {
         recognizer->input_projection_weight = (float*)safe_malloc(hs * (size_t)feature_dim * sizeof(float));
         if (recognizer->input_projection_weight) {
-            float scale = sqrtf(2.0f / (float)(feature_dim + (int)hs));
+            float he_scale = sqrtf(2.0f / (float)feature_dim);
             for (size_t i = 0; i < hs * (size_t)feature_dim; i++) {
-                recognizer->input_projection_weight[i] = (secure_random_float() * 2.0f - 1.0f) * scale;
+                recognizer->input_projection_weight[i] = rng_uniform(-he_scale, he_scale);
             }
             recognizer->input_projection_initialized = 1;
         }
@@ -1899,51 +1900,32 @@ fallback_self_contained:
                               logits, vocab_size);
     }
 
-    /* 步骤4：自适应解码（贪心 → 波束搜索 → 告警）
-     * 先尝试贪心解码，若置信度低则升级为波束搜索。
+    /* 步骤4：Beam Search CTC解码（beam_width=5）
+     * 使用波束搜索作为主解码器，维护Top-5候选序列，
+     * 合并空白符(blank)重复，排序保留最优候选。
      * 纯液态系统无外部语言模型，但波束搜索的序列级评分
-     * 优于帧级贪心，在模糊音频上能提供更好的解码质量。 */
+     * 优于帧级贪心，在模糊音频上能提供更好的解码质量。
+     * 若波束搜索未产生结果，回退到贪心解码。 */
     int out_len = 0;
     int use_beam = 0;
-    greedy_decode(all_logits, num_timesteps, vocab_size,
-                  recognizer->decoded_tokens, &out_len,
-                  recognizer->decoded_token_capacity);
+    int beam_width = 5;              /* Top-K候选数 */
+    float beam_threshold = 10.0f;    /* 波束剪枝阈值 */
+    float temperature = 1.0f;        /* 温度缩放系数 */
 
-    /* 评估贪心解码置信度 */
-    float greedy_conf = 0.0f;
-    if (out_len > 0) {
-        for (int i = 0; i < out_len; i++) {
-            int tid = recognizer->decoded_tokens[i];
-            if (tid >= 0 && tid < vocab_size) {
-                float max_v = all_logits[0];
-                for (int t = 0; t < num_timesteps; t++) {
-                    for (int c = 0; c < vocab_size; c++) {
-                        float v = all_logits[(size_t)t * vocab_size + c];
-                        if (v > max_v) max_v = v;
-                    }
-                }
-                float sum = 0.0f;
-                for (int t = 0; t < num_timesteps; t++)
-                    sum += expf(all_logits[(size_t)t * vocab_size + tid] - max_v);
-                greedy_conf += (sum > 0.0f) ? logf(sum / (float)num_timesteps + 1e-10f) : -10.0f;
-            }
-        }
-        greedy_conf = greedy_conf / (float)out_len;
-        greedy_conf = 1.0f / (1.0f + expf(-greedy_conf * 0.5f)); /* sigmoid归一化 */
-    }
-
-    /* 若贪心置信度低于阈值，启用波束搜索 */
-    float conf_threshold = 0.3f;
-    if (greedy_conf < conf_threshold) {
-        int beam_len = 0;
-        beam_search_decode(all_logits, num_timesteps, vocab_size,
-                          8, 10.0f, 1.0f,
-                          recognizer->decoded_tokens, &beam_len,
-                          recognizer->decoded_token_capacity);
-        if (beam_len > 0) {
-            out_len = beam_len;
-            use_beam = 1;
-        }
+    int beam_len = 0;
+    int beam_ret = beam_search_decode(all_logits, num_timesteps, vocab_size,
+                                       beam_width, beam_threshold, temperature,
+                                       recognizer->decoded_tokens, &beam_len,
+                                       recognizer->decoded_token_capacity);
+    if (beam_ret == 0 && beam_len > 0) {
+        /* 波束搜索成功，使用其解码结果 */
+        out_len = beam_len;
+        use_beam = 1;
+    } else {
+        /* 波束搜索失败，回退到贪心解码 */
+        greedy_decode(all_logits, num_timesteps, vocab_size,
+                      recognizer->decoded_tokens, &out_len,
+                      recognizer->decoded_token_capacity);
     }
 
     /* 步骤5：构建结果 */
@@ -2492,19 +2474,47 @@ int speech_recognizer_save_model(SpeechRecognizer* recognizer,
     char path[1024];
     int hs = (int)recognizer->config.hidden_size;
     int vs = recognizer->config.vocab_size;
+    int feature_dim = recognizer->config.feature_dimension;
 
+    /* 保存输出投影权重矩阵 [hidden_size x vocab_size] */
     snprintf(path, sizeof(path), "%s/projection_w.bin", directory);
     FILE* f = fopen(path, "wb");
     if (!f) return -1;
     fwrite(recognizer->output_projection_weight, sizeof(float), (size_t)hs * vs, f);
     fclose(f);
 
+    /* 保存输出投影偏置 [vocab_size] */
     snprintf(path, sizeof(path), "%s/projection_b.bin", directory);
     f = fopen(path, "wb");
     if (!f) return -1;
     fwrite(recognizer->output_projection_bias, sizeof(float), (size_t)vs, f);
     fclose(f);
 
+    /* 保存输入投影权重矩阵 [hidden_size x feature_dim] */
+    if (recognizer->input_projection_initialized && recognizer->input_projection_weight) {
+        snprintf(path, sizeof(path), "%s/input_projection_w.bin", directory);
+        f = fopen(path, "wb");
+        if (f) {
+            fwrite(recognizer->input_projection_weight, sizeof(float),
+                   (size_t)hs * feature_dim, f);
+            fclose(f);
+        }
+    }
+
+    /* 保存自包含CfC可学习缩放参数 */
+    snprintf(path, sizeof(path), "%s/sr_params.bin", directory);
+    f = fopen(path, "wb");
+    if (f) {
+        float params[4];
+        params[0] = recognizer->gate_scale;
+        params[1] = recognizer->act_scale;
+        params[2] = (float)recognizer->input_projection_initialized;
+        params[3] = (float)recognizer->is_model_trained;
+        fwrite(params, sizeof(float), 4, f);
+        fclose(f);
+    }
+
+    /* 保存配置文件 */
     snprintf(path, sizeof(path), "%s/sr_config.bin", directory);
     f = fopen(path, "wb");
     if (!f) return -1;
@@ -2520,7 +2530,9 @@ int speech_recognizer_load_model(SpeechRecognizer* recognizer,
 
     int hs = (int)recognizer->config.hidden_size;
     int vs = recognizer->config.vocab_size;
+    int feature_dim = recognizer->config.feature_dimension;
 
+    /* 确保状态缓冲区和投影层已初始化 */
     if (!recognizer->state_initialized) {
         if (init_state_buffer(recognizer) != 0) return -1;
     }
@@ -2529,19 +2541,97 @@ int speech_recognizer_load_model(SpeechRecognizer* recognizer,
     }
 
     char path[1024];
+
+    /* 加载输出投影权重矩阵 [hidden_size x vocab_size] */
     snprintf(path, sizeof(path), "%s/projection_w.bin", directory);
     FILE* f = fopen(path, "rb");
     if (!f) return -1;
-    size_t read_w = fread(recognizer->output_projection_weight, sizeof(float), (size_t)hs * vs, f);
+    size_t read_w = fread(recognizer->output_projection_weight, sizeof(float),
+                          (size_t)hs * vs, f);
     fclose(f);
-    if ((int)read_w != hs * vs) return -1;
+    if ((int)read_w != hs * vs) {
+        log_warn("[语音识别] projection_w.bin 大小不匹配: 期望%d, 实际%d", hs * vs, (int)read_w);
+        return -1;
+    }
 
+    /* 加载输出投影偏置 [vocab_size] */
     snprintf(path, sizeof(path), "%s/projection_b.bin", directory);
     f = fopen(path, "rb");
     if (!f) return -1;
-    size_t read_b = fread(recognizer->output_projection_bias, sizeof(float), (size_t)vs, f);
+    size_t read_b = fread(recognizer->output_projection_bias, sizeof(float),
+                          (size_t)vs, f);
     fclose(f);
-    if ((int)read_b != vs) return -1;
+    if ((int)read_b != vs) {
+        log_warn("[语音识别] projection_b.bin 大小不匹配: 期望%d, 实际%d", vs, (int)read_b);
+        return -1;
+    }
+
+    /* 加载输入投影权重矩阵 [hidden_size x feature_dim] */
+    snprintf(path, sizeof(path), "%s/input_projection_w.bin", directory);
+    f = fopen(path, "rb");
+    if (f) {
+        /* 输入投影权重文件存在，分配内存并加载 */
+        if (!recognizer->input_projection_weight) {
+            recognizer->input_projection_weight = (float*)safe_malloc(
+                (size_t)hs * feature_dim * sizeof(float));
+            if (!recognizer->input_projection_weight) {
+                fclose(f);
+                return -1;
+            }
+        }
+        size_t read_ip = fread(recognizer->input_projection_weight, sizeof(float),
+                               (size_t)hs * feature_dim, f);
+        fclose(f);
+        if ((int)read_ip == hs * feature_dim) {
+            recognizer->input_projection_initialized = 1;
+            log_info("[语音识别] 输入投影权重已加载 (%d x %d)", hs, feature_dim);
+        } else {
+            log_warn("[语音识别] input_projection_w.bin 大小不匹配: 期望%d, 实际%d",
+                     hs * feature_dim, (int)read_ip);
+        }
+    } else {
+        /* 输入投影权重文件不存在，使用Xavier初始化 */
+        log_info("[语音识别] 输入投影权重文件不存在，使用Xavier初始化");
+        if (!recognizer->input_projection_weight) {
+            recognizer->input_projection_weight = (float*)safe_malloc(
+                (size_t)hs * feature_dim * sizeof(float));
+            if (!recognizer->input_projection_weight) return -1;
+        }
+        float scale = sqrtf(2.0f / (float)(feature_dim + hs));
+        for (int i = 0; i < hs * feature_dim; i++) {
+            recognizer->input_projection_weight[i] = rng_uniform(-scale, scale);
+        }
+        recognizer->input_projection_initialized = 1;
+    }
+
+    /* 加载自包含CfC参数和训练标记 */
+    snprintf(path, sizeof(path), "%s/sr_params.bin", directory);
+    f = fopen(path, "rb");
+    if (f) {
+        float params[4];
+        size_t read_p = fread(params, sizeof(float), 4, f);
+        fclose(f);
+        if (read_p >= 2) {
+            recognizer->gate_scale = params[0];
+            recognizer->act_scale = params[1];
+            log_info("[语音识别] CfC参数已加载: gate_scale=%.6f, act_scale=%.6f",
+                     recognizer->gate_scale, recognizer->act_scale);
+        }
+        if (read_p >= 4) {
+            /* params[2] 存储了 input_projection_initialized 标记 */
+            if ((int)params[2] != 0 && !recognizer->input_projection_initialized) {
+                recognizer->input_projection_initialized = 1;
+            }
+            /* params[3] 存储了 is_model_trained 标记 */
+            if ((int)params[3] != 0) {
+                recognizer->is_model_trained = 1;
+            }
+        }
+    }
+
+    /* 标记模型已加载（设置model_loaded标记） */
+    recognizer->is_model_trained = 1;
+    log_info("[语音识别] 声学模型权重已从 %s 完整加载，model_loaded=1", directory);
 
     return 0;
 }

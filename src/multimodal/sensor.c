@@ -9,6 +9,17 @@
 #include <math.h>
 #include <float.h>
 
+/* 深度传感器预处理器接口前向声明（实现在 sensor_preprocessor_deep.c） */
+typedef struct SensorDeepPreprocessor SensorDeepPreprocessor;
+extern SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t obs_dim);
+extern void sensor_deep_preprocessor_free(SensorDeepPreprocessor* sdp);
+extern int sensor_deep_preprocess_frame(SensorDeepPreprocessor* sdp,
+    const float* raw_data, const float* gyro, const float* acc,
+    float dt, float* output);
+extern int sensor_deep_quality_assess(SensorDeepPreprocessor* sdp,
+    const float** modality_data, const size_t* modality_dims,
+    float* quality_scores);
+
 /* ============ 传感器处理器基础实现 ============ */
 
 /* B-016: 环形缓冲区四种状态检测宏 */
@@ -269,6 +280,83 @@ int sensor_extract_stat_features(SensorProcessor* processor,
     if (idx < max_features) stat_features[idx++] = rms;
     if (idx < max_features) stat_features[idx++] = crest_factor;
     return (int)idx;
+}
+
+/* ============================================================================
+ * 深度传感器预处理集成（调用 sensor_preprocessor_deep.c 的CfC ODE增强管线）
+ * ============================================================================ */
+
+/**
+ * @brief 传感器数据深度预处理
+ *
+ * 使用 sensor_preprocessor_deep.c 提供的 CfC ODE 增强型 ESKF + 粒子滤波 +
+ * 信息滤波组合管线，对传感器原始数据进行深度预处理。
+ * 当系统配置启用深度预处理时调用此函数替代基础处理管线。
+ *
+ * @param raw_data 原始传感器数据（观测维度）
+ * @param num_values 数据维度
+ * @param gyro 陀螺仪数据[3]（NULL=不使用IMU模式）
+ * @param acc 加速度计数据[3]（NULL=不使用IMU模式）
+ * @param dt 时间步长
+ * @param output 深度预处理输出（状态维度）
+ * @param output_dim 输出缓冲区大小
+ * @return 0成功，-1失败
+ */
+int sensor_deep_process(const float* raw_data, size_t num_values,
+                        const float* gyro, const float* acc,
+                        float dt, float* output, size_t output_dim) {
+    if (!raw_data || !output || num_values == 0 || output_dim == 0) return -1;
+
+    static SensorDeepPreprocessor* sdp = NULL;
+    static int initialized = 0;
+    static size_t cached_state_dim = 0;
+    static size_t cached_obs_dim = 0;
+
+    /* 惰性初始化深度预处理器 */
+    if (!initialized || cached_state_dim != output_dim || cached_obs_dim != num_values) {
+        if (sdp) {
+            sensor_deep_preprocessor_free(sdp);
+            sdp = NULL;
+        }
+        sdp = sensor_deep_preprocessor_create(output_dim, num_values);
+        if (!sdp) return -1;
+        cached_state_dim = output_dim;
+        cached_obs_dim = num_values;
+        initialized = 1;
+    }
+
+    return sensor_deep_preprocess_frame(sdp, raw_data, gyro, acc, dt, output);
+}
+
+/**
+ * @brief 传感器信号质量深度评估
+ *
+ * 调用深度预处理器的信号质量分析管线，对各模态传感器数据
+ * 进行多维度质量评估，辅助CfC自适应路由决策。
+ *
+ * @param modality_data 模态数据指针数组 [4]
+ * @param modality_dims 模态维度数组 [4]
+ * @param quality_scores 输出质量评分 [4]
+ * @return 0成功，-1失败
+ */
+int sensor_deep_quality(const float** modality_data,
+                        const size_t* modality_dims,
+                        float* quality_scores) {
+    static SensorDeepPreprocessor* q_sdp = NULL;
+    static int q_initialized = 0;
+
+    if (!q_initialized) {
+        size_t max_dim = 0;
+        for (int i = 0; i < 4 && modality_dims; i++) {
+            if (modality_dims[i] > max_dim) max_dim = modality_dims[i];
+        }
+        if (max_dim == 0) max_dim = 16;
+        q_sdp = sensor_deep_preprocessor_create(max_dim, max_dim);
+        if (!q_sdp) return -1;
+        q_initialized = 1;
+    }
+
+    return sensor_deep_quality_assess(q_sdp, modality_data, modality_dims, quality_scores);
 }
 
 /**

@@ -167,12 +167,16 @@ void tts_audio_free(TTSAudio* audio);
 int tts_synthesize_to_wav(TTSEngine* engine, const char* text, const char* wav_path);
 
 /**
- * @brief CfC驱动端到端语音合成（替代正弦波表合成）
+ * @brief CfC驱动端到端语音合成（深度声学模型管线）
  *
- * 文本 → 字符嵌入 → 共享LNN连续状态演化 → 直接输出波形样本。
- * 不使用正弦波表、拼音映射或独立声学模型。
+ * 完整流水线：
+ * 文本 → 字符嵌入 → 编码器(3层CfC ODE) → 编码隐藏状态
+ * → 解码器(自回归CfC ODE) → 梅尔频谱图
+ * → 神经声码器(WaveNet风格扩张卷积) → 音频波形
  *
- * @param engine TTS引擎（需已绑定共享LNN）
+ * 当声学模型未初始化时自动回退到确定性共振峰合成路径。
+ *
+ * @param engine TTS引擎
  * @param text 输入文本（UTF-8）
  * @param wav_path 输出WAV文件路径
  * @return int 0成功，-1失败
@@ -237,6 +241,33 @@ int tts_save_weights(TTSEngine* engine, const char* filepath);
 int tts_load_weights(TTSEngine* engine, const char* filepath);
 
 /**
+ * @brief 保存完整TTS模型权重（编码器+解码器+神经声码器）到二进制文件
+ *
+ * 包含：
+ * - 3层CfC ODE编码器权重（W, U, bias, tau）
+ * - 3层自回归CfC ODE解码器权重（W, U, bias, tau, output_w, output_b）
+ * - 8层WaveNet风格扩张卷积声码器权重
+ * - 字符嵌入表
+ *
+ * @param engine 引擎句柄
+ * @param filepath 文件路径
+ * @return 0成功, -1失败
+ */
+int tts_save_model(TTSEngine* engine, const char* filepath);
+
+/**
+ * @brief 从二进制文件加载完整TTS模型权重
+ *
+ * 自动初始化权重缓冲区（如果尚未初始化），然后从文件填充。
+ * 维度不匹配时返回错误。
+ *
+ * @param engine 引擎句柄
+ * @param filepath 文件路径
+ * @return 0成功, -1失败
+ */
+int tts_load_model(TTSEngine* engine, const char* filepath);
+
+/**
  * @brief 获取拼音字符串表示
  * @param pinyin 拼音结构体
  * @return const char* 拼音字符串
@@ -280,6 +311,92 @@ int tts_pinyin_lookup_gb2312(unsigned char gb_hi, unsigned char gb_lo,
  * @return 表条目数
  */
 int tts_pinyin_table_size(void);
+
+/* ================================================================
+ * 源-滤波器模型语音合成接口（LF声门脉冲 + LPC全极点声道滤波器）
+ * ================================================================ */
+
+/** @brief LPC最大阶数 */
+#define SF_LPC_MAX_ORDER 48
+
+/** @brief 最大共振峰数量 */
+#define SF_MAX_FORMANTS 6
+
+/**
+ * @brief 说话人特征参数结构体（声源+声道完整描述）
+ */
+typedef struct {
+    /* 声源参数（LF模型） */
+    float f0_mean;
+    float f0_min;
+    float f0_max;
+    float f0_std;
+    
+    /* LF声门模型参数 */
+    float lf_open_quotient;
+    float lf_speed_quotient;
+    float lf_return_quotient;
+    float lf_spectral_tilt;
+    
+    /* 声道滤波器参数 */
+    int lpc_order;
+    float lpc_coeffs[SF_LPC_MAX_ORDER];
+    float lpc_gain;
+    
+    /* 共振峰参数 */
+    float formant_freq[SF_MAX_FORMANTS];
+    float formant_bw[SF_MAX_FORMANTS];
+    float formant_amp[SF_MAX_FORMANTS];
+    
+    /* 声道特征 */
+    float vocal_tract_length;
+    float mouth_opening;
+    
+    /* 声调特征 */
+    float tone_range_semitones;
+    float tone_register_base;
+    
+    /* 韵律特征 */
+    float speaking_rate;
+    float mean_energy;
+    float energy_variation;
+    
+    /* 模型元数据 */
+    char speaker_name[64];
+    char speaker_gender;
+    int sample_rate;
+    uint32_t magic;
+    uint32_t version;
+} VoiceModelParams;
+
+/**
+ * @brief 获取默认声音模型参数（普通话女性）
+ * @param params 输出参数结构体（需由调用者分配内存）
+ */
+void tts_pinyin_get_default_voice_model(VoiceModelParams* params);
+
+/**
+ * @brief 评估声音模型参数的有效性
+ * @param params 声音模型参数
+ * @return 1=有效, 0=无效
+ */
+int tts_pinyin_validate_voice_model(const VoiceModelParams* params);
+
+/**
+ * @brief 保存说话人特征参数到二进制文件
+ * @param params 声音模型参数
+ * @param filepath 文件路径
+ * @return 0成功, -1失败
+ */
+int tts_pinyin_save_voice_model(const VoiceModelParams* params, const char* filepath);
+
+/**
+ * @brief 从二进制文件加载说话人特征参数
+ * @param params 输出声音模型参数（需由调用者分配内存）
+ * @param filepath 文件路径
+ * @return 0成功, -1失败
+ */
+int tts_pinyin_load_voice_model(VoiceModelParams* params, const char* filepath);
 
 #ifdef __cplusplus
 }

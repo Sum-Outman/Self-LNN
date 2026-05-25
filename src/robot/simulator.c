@@ -4595,82 +4595,145 @@ static SimulatorInterface g_gazebo_interface = {
     .export_statistics = sim_stub_export_statistics
 };
 
-/* ZSFX-001修复: 安全占位函数实现
- * 当外部仿真器(PyBullet/Gazebo)未连接时，以下函数安全返回错误码。
- * 绝不返回任何零值假数据，也绝不空指针崩溃。
+/* ZSFX-003修复: 安全占位函数实现 —— 委托到内部真实实现
+ * 当外部仿真器(PyBullet/Gazebo)未连接时，以下函数使用内部物理引擎和
+ * 机器人状态作为回退实现。不静默返回-1，而是在可用时执行真实操作。
+ * 仅在内部状态也不可用时返回错误码。
  * 调用方应检查返回值，不等于0表示操作未执行。 */
 static int sim_stub_import_training_data(Simulator* sim, const char* filename) {
-    (void)sim; (void)filename;
-    log_warning("[仿真器] import_training_data: 外部仿真器未连接，导入训练数据暂不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_import_training_data(sim, filename);
+    if (result != 0) {
+        log_error("[仿真器] import_training_data: 内部导入训练数据失败(文件:%s)", filename ? filename : "空");
+    } else {
+        log_info("[仿真器] import_training_data: 内部导入训练数据成功(文件:%s)", filename ? filename : "空");
+    }
+    return result;
 }
 static int sim_stub_load_urdf(Simulator* sim, const char* urdf_path, const float* pos, const char* name) {
-    (void)sim; (void)urdf_path; (void)pos; (void)name;
-    log_warning("[仿真器] load_urdf: 外部仿真器未连接，URDF加载暂不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_load_urdf(sim, urdf_path, pos, name);
+    if (result < 0) {
+        log_error("[仿真器] load_urdf: 内部URDF加载失败(路径:%s)", urdf_path ? urdf_path : "空");
+    } else {
+        log_info("[仿真器] load_urdf: 内部URDF加载成功,机器人ID=%d(路径:%s)", result, urdf_path ? urdf_path : "空");
+    }
+    return result;
 }
 static int sim_stub_get_robot_info(Simulator* sim, int robot_id, SimulatorRobotInfo* info) {
-    (void)sim; (void)robot_id;
-    if (info) memset(info, 0, sizeof(SimulatorRobotInfo));
-    log_warning("[仿真器] get_robot_info: 外部仿真器未连接，机器人信息不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_get_robot_info(sim, robot_id, info);
+    if (result != 0) {
+        log_error("[仿真器] get_robot_info: 内部获取机器人信息失败(ID:%d)", robot_id);
+    }
+    return result;
 }
 static int sim_stub_get_contact_info(Simulator* sim, int robot_id, SimulatorContactInfo* info) {
-    (void)sim; (void)robot_id;
-    if (info) memset(info, 0, sizeof(SimulatorContactInfo));
-    log_warning("[仿真器] get_contact_info: 外部仿真器未连接，接触信息不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_get_contact_info(sim, robot_id, info);
+    if (result != 0) {
+        log_error("[仿真器] get_contact_info: 内部获取接触信息失败(ID:%d)", robot_id);
+    }
+    return result;
 }
 static int sim_stub_reset_robot_pose(Simulator* sim, int robot_id, const float* pose) {
-    (void)sim; (void)robot_id; (void)pose;
-    log_warning("[仿真器] reset_robot_pose: 外部仿真器未连接，姿态重置不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_reset_robot_pose(sim, robot_id, pose);
+    if (result != 0) {
+        log_error("[仿真器] reset_robot_pose: 内部重置机器人姿态失败(ID:%d)", robot_id);
+    } else {
+        log_info("[仿真器] reset_robot_pose: 内部重置机器人姿态成功(ID:%d)", robot_id);
+    }
+    return result;
 }
 static int sim_stub_set_gravity_vector(Simulator* sim, const float* gravity) {
-    (void)sim; (void)gravity;
-    log_warning("[仿真器] set_gravity_vector: 外部仿真器未连接，重力设置不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_set_gravity_vector(sim, gravity);
+    if (result != 0) {
+        log_error("[仿真器] set_gravity_vector: 内部设置重力向量失败");
+    } else {
+        if (gravity) {
+            log_info("[仿真器] set_gravity_vector: 内部设置重力向量成功(%.2f,%.2f,%.2f)",
+                     gravity[0], gravity[1], gravity[2]);
+        }
+    }
+    return result;
 }
 static int sim_stub_set_motor_pd_gains(Simulator* sim, int robot_id, int joint_idx, const SimulatorMotorPDGains* gains) {
-    (void)sim; (void)robot_id; (void)joint_idx; (void)gains;
-    log_warning("[仿真器] set_motor_pd_gains: 外部仿真器未连接，电机PD增益设置不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_set_motor_pd_gains(sim, robot_id, joint_idx, gains);
+    if (result != 0) {
+        log_error("[仿真器] set_motor_pd_gains: 内部设置电机PD增益失败(机器人:%d,关节:%d)", robot_id, joint_idx);
+    }
+    return result;
 }
 static int sim_stub_set_physics_params(Simulator* sim, const SimulatorPhysicsParams* params) {
-    (void)sim; (void)params;
-    log_warning("[仿真器] set_physics_params: 外部仿真器未连接，物理参数设置不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_set_physics_params(sim, params);
+    if (result != 0) {
+        log_error("[仿真器] set_physics_params: 内部设置物理参数失败");
+    } else {
+        log_info("[仿真器] set_physics_params: 内部设置物理参数成功");
+    }
+    return result;
 }
 static int sim_stub_get_physics_params(Simulator* sim, SimulatorPhysicsParams* params) {
-    (void)sim;
-    if (params) memset(params, 0, sizeof(SimulatorPhysicsParams));
-    log_warning("[仿真器] get_physics_params: 外部仿真器未连接，物理参数不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_get_physics_params(sim, params);
+    if (result != 0) {
+        log_error("[仿真器] get_physics_params: 内部获取物理参数失败");
+    }
+    return result;
 }
 static int sim_stub_attach_sensor_pipeline(Simulator* sim, struct SensorPipeline* pipeline) {
-    (void)sim; (void)pipeline;
-    log_warning("[仿真器] attach_sensor_pipeline: 外部仿真器未连接，传感器管道附着不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_attach_sensor_pipeline(sim, pipeline);
+    if (result != 0) {
+        log_error("[仿真器] attach_sensor_pipeline: 内部附加传感器管道失败");
+    } else {
+        log_info("[仿真器] attach_sensor_pipeline: 内部附加传感器管道成功");
+    }
+    return result;
 }
 static int sim_stub_detach_sensor_pipeline(Simulator* sim) {
-    (void)sim;
-    log_warning("[仿真器] detach_sensor_pipeline: 外部仿真器未连接，传感器管道分离不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_detach_sensor_pipeline(sim);
+    if (result != 0) {
+        log_error("[仿真器] detach_sensor_pipeline: 内部分离传感器管道失败");
+    } else {
+        log_info("[仿真器] detach_sensor_pipeline: 内部分离传感器管道成功");
+    }
+    return result;
 }
 static int sim_stub_enable_sensor_streaming(Simulator* sim, int enable) {
-    (void)sim; (void)enable;
-    log_warning("[仿真器] enable_sensor_streaming: 外部仿真器未连接，传感器流不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_enable_sensor_streaming(sim, enable);
+    if (result != 0) {
+        log_error("[仿真器] enable_sensor_streaming: 内部切换传感器流失败(enable=%d)", enable);
+    } else {
+        log_info("[仿真器] enable_sensor_streaming: 内部切换传感器流成功(enable=%d)", enable);
+    }
+    return result;
 }
 static int sim_stub_export_scene_json(Simulator* sim, const char* filename) {
-    (void)sim; (void)filename;
-    log_warning("[仿真器] export_scene_json: 外部仿真器未连接，场景导出不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_export_scene_json(sim, filename);
+    if (result != 0) {
+        log_error("[仿真器] export_scene_json: 内部导出场景JSON失败(文件:%s)", filename ? filename : "空");
+    } else {
+        log_info("[仿真器] export_scene_json: 内部导出场景JSON成功(文件:%s)", filename ? filename : "空");
+    }
+    return result;
 }
 static int sim_stub_export_statistics(Simulator* sim, const char* filename) {
-    (void)sim; (void)filename;
-    log_warning("[仿真器] export_statistics: 外部仿真器未连接，统计数据导出不可用");
-    return -1;
+    if (!sim) return -1;
+    int result = simulator_export_statistics(sim, filename);
+    if (result != 0) {
+        log_error("[仿真器] export_statistics: 内部导出统计数据失败(文件:%s)", filename ? filename : "空");
+    } else {
+        log_info("[仿真器] export_statistics: 内部导出统计数据成功(文件:%s)", filename ? filename : "空");
+    }
+    return result;
 }
 
 static const char* gazebo_get_last_error(Simulator* sim) {

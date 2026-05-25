@@ -1118,7 +1118,7 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
         float epoch_loss = 0.0f;
         int count = 0;
 
-        for (size_t i = 0; i < num_samples - 1 && count < 100; i += 2, count++) {
+        for (size_t i = 0; i < num_samples - 1 && count < (int)num_samples; i += 2, count++) {
             const float* anchor = data + i * feature_dim;
             const float* positive = data + (i + 1) * feature_dim;
 

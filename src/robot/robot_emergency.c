@@ -192,23 +192,44 @@ int robot_emergency_release(EmergencySystem* system) {
     if (system->is_brake_engaged) {
         robot_emergency_release_brakes(system);
     }
+
+    /* P2-006修复: 自动恢复逻辑
+     * 如果延时为0且自动恢复已启用，立即触发恢复
+     * 否则设置恢复状态和时间戳，由update循环检测超时 */
+    if (system->auto_recovery_enabled && system->auto_recovery_delay_s <= 0.0f) {
+        system->current_level = EMERGENCY_LEVEL_NONE;
+        system->is_emergency_active = 0;
+        system->is_recovering = 0;
+        system->history.recovery_count++;
+        emergency_log("紧急停止已自动恢复（零延时）");
+        return 0;
+    }
+
     system->is_recovering = 1;
     system->recovery_start_time_ms = emergency_get_time_ms();
-    if (system->auto_recovery_enabled) {
-        uint64_t elapsed = emergency_get_time_ms() - system->recovery_start_time_ms;
-        if (elapsed >= (uint64_t)(system->auto_recovery_delay_s * 1000.0f)) {
-            system->current_level = EMERGENCY_LEVEL_NONE;
-            system->is_emergency_active = 0;
-            system->is_recovering = 0;
-            system->history.recovery_count++;
-            emergency_log("紧急停止已自动恢复");
-        }
-    } else {
-        /* 自动恢复已禁用，保持紧急停止状态等待手动恢复 */
-        emergency_log("自动恢复已禁用，紧急停止状态保持中，需手动恢复");
-        system->is_recovering = 1;
-    }
+    emergency_log("紧急停止恢复中...等待自动恢复延时");
     return 0;
+}
+
+/* P2-006修复: 添加update函数用于在循环中检测自动恢复超时 */
+int robot_emergency_update(EmergencySystem* system) {
+    if (!system) return -1;
+    if (!system->is_recovering || !system->auto_recovery_enabled) return 0;
+
+    /* 计算从恢复开始到现在经过的时间 */
+    uint64_t now_ms = emergency_get_time_ms();
+    uint64_t elapsed = now_ms - system->recovery_start_time_ms;
+    uint64_t delay_ms = (uint64_t)(system->auto_recovery_delay_s * 1000.0f);
+
+    if (elapsed >= delay_ms) {
+        system->current_level = EMERGENCY_LEVEL_NONE;
+        system->is_emergency_active = 0;
+        system->is_recovering = 0;
+        system->history.recovery_count++;
+        emergency_log("紧急停止已自动恢复（延时到达）");
+        return 1; /* 返回1表示已恢复 */
+    }
+    return 0; /* 仍在等待恢复 */
 }
 
 int robot_emergency_update_channel(EmergencySystem* system, int channel_id,

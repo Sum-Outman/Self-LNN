@@ -381,6 +381,29 @@ int liquid_vision_processor_set_config(LiquidVisionProcessor* processor,
 void liquid_vision_processor_reset(LiquidVisionProcessor* processor);
 void liquid_vision_processor_set_lnn(LiquidVisionProcessor* processor, LNN* lnn);
 
+/* ===================================================================
+ * 第十一部分之二：CNN可学习残差卷积网络API（新增）
+ *
+ * 替代原手工Sobel/Gabor算子的真实深度学习CNN特征提取器：
+ *   lv_apply_cnn_kernel    —— 单个可学习CNN卷积核前向传播
+ *   lv_extract_deep_features —— ResNet风格深层特征提取（残差连接+批归一化）
+ *   lv_load_weights        —— 从二进制文件加载CNN所有权重
+ *   lv_save_weights        —— 保存CNN所有权重到二进制文件
+ * =================================================================== */
+
+int lv_apply_cnn_kernel(LiquidVisionProcessor* processor,
+                         const float* kernel_w, const float* kernel_b,
+                         const float* image, int width, int height,
+                         int in_ch, int out_ch, float* output);
+
+int lv_extract_deep_features(LiquidVisionProcessor* processor,
+                              const float* image_data,
+                              int width, int height, int channels,
+                              float* features, size_t max_features);
+
+int lv_save_weights(const LiquidVisionProcessor* processor, const char* filepath);
+int lv_load_weights(LiquidVisionProcessor* processor, const char* filepath);
+
 #ifdef __cplusplus
 }
 #endif

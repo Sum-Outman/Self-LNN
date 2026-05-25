@@ -14,6 +14,7 @@
 
 #include "selflnn/multimodal/unified_signal_processor.h"
 #include "selflnn/multimodal/multimodal_unified_input.h"
+#include "selflnn/multimodal/unified_signal_processor_advanced.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/math_utils.h"
@@ -82,6 +83,9 @@ struct UnifiedSignalProcessor {
     
     /* CfC细胞单元：所有模态在CfC ODE状态空间中统一演化 */
     CfCCell* cfc_cell;                    /**< CfC细胞单元句柄 */
+    
+    /* 模态自适应路由：基于信号质量动态调整各模态贡献权重 */
+    AdaptiveRouter* adaptive_router;      /**< 自适应路由器句柄 */
     
     /* 不保留分离的模态处理器 —— 所有模态通过统一信号处理路径处理
      * 遵循"所有模态→统一输入到同一个连续动态系统"架构原则 */
@@ -707,6 +711,19 @@ UnifiedSignalProcessor* unified_signal_processor_create(const UnifiedSignalProce
         processor->cfc_cell = NULL;
     }
     
+    /* 创建自适应路由器，用于信号质量感知和模态权重动态调整 */
+    {
+        AdaptiveRouterConfig router_cfg = adaptive_router_get_default_config();
+        router_cfg.softmax_temperature = 1.0f;
+        router_cfg.weight_momentum = 0.9f;
+        router_cfg.enable_adaptive_temperature = 1;
+        processor->adaptive_router = adaptive_router_create(&router_cfg);
+        if (!processor->adaptive_router) {
+            unified_signal_processor_free(processor);
+            return NULL;
+        }
+    }
+    
     processor->is_initialized = 1;
     processor->encoding_quality = 0.5f;
     processor->cross_modal_alignment = 0.5f;
@@ -741,6 +758,12 @@ void unified_signal_processor_free(UnifiedSignalProcessor* processor) {
     if (processor->cfc_cell) {
         cfc_cell_free(processor->cfc_cell);
         processor->cfc_cell = NULL;
+    }
+    
+    // 释放自适应路由器
+    if (processor->adaptive_router) {
+        adaptive_router_free(processor->adaptive_router);
+        processor->adaptive_router = NULL;
     }
     
     // 释放缓冲区和投影矩阵
@@ -845,6 +868,40 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
         output->cross_modal_alignment = 0.0f;
         processor->process_count++;
         return 0;
+    }
+    
+    /* 自适应路由：计算各模态信号质量并动态调整权重 */
+    if (processor->adaptive_router) {
+        ModalityQualityMetrics quality_metrics[SELFLNN_MAX_MODALITIES] = {{{0}}};
+        int modality_active[SELFLNN_MAX_MODALITIES] = {1, 1, 1, 1};
+        float modality_weights[SELFLNN_MAX_MODALITIES] = {0.25f, 0.25f, 0.25f, 0.25f};
+        
+        if (vision && vision->features && expected_feature_counts[0] > 0) {
+            adaptive_router_compute_quality(processor->adaptive_router, 0,
+                vision->features, expected_feature_counts[0], NULL, &quality_metrics[0]);
+        }
+        if (audio && audio->mfcc_features && expected_feature_counts[1] > 0) {
+            adaptive_router_compute_quality(processor->adaptive_router, 1,
+                audio->mfcc_features, expected_feature_counts[1], NULL, &quality_metrics[1]);
+        }
+        if (text && text->embeddings && expected_feature_counts[2] > 0) {
+            adaptive_router_compute_quality(processor->adaptive_router, 2,
+                text->embeddings, expected_feature_counts[2], NULL, &quality_metrics[2]);
+        }
+        if (sensor && sensor->sensor_values && expected_feature_counts[3] > 0) {
+            adaptive_router_compute_quality(processor->adaptive_router, 3,
+                sensor->sensor_values, expected_feature_counts[3], NULL, &quality_metrics[3]);
+        }
+        
+        adaptive_router_compute_weights(processor->adaptive_router, quality_metrics,
+            modality_active, modality_weights);
+        
+        processor->encoding_quality = 0.0f;
+        for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+            if (quality_metrics[m].overall_quality > processor->encoding_quality) {
+                processor->encoding_quality = quality_metrics[m].overall_quality;
+            }
+        }
     }
     
     // 步骤1：将所有模态特征连接到统一输入向量

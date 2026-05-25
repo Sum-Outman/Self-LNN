@@ -100,6 +100,10 @@ typedef struct {
     float* reduce_buffer_in;
     float* reduce_buffer_out;
     size_t reduce_buffer_size;
+    int64_t send_socket;   /* 发送端socket句柄（跨平台存储，类型为SOCKET） */
+    int64_t recv_socket;   /* 接收端socket句柄（跨平台存储，类型为SOCKET） */
+    int comm_ready;        /* 网络连接就绪标志：1=真实TCP通信, 0=本地单进程回退 */
+    int listen_port;       /* 当前节点在环中的监听端口 */
 } MP3DContext;
 
 int mp_tensor_parallel_create(MPTensorPartition* tp, int rows, int cols,
@@ -188,6 +192,8 @@ int mp_3d_allgather(MP3DContext* ctx, float* data, int count,
                      MP3DDimension dim);
 int mp_3d_reduce_scatter(MP3DContext* ctx, float* data, int count,
                           MP3DDimension dim);
+int mp_3d_init_connections(MP3DContext* ctx, MP3DDimension dim, int base_port);
+void mp_3d_close_connections(MP3DContext* ctx);
 
 const char* mp_error_string(int error_code);
 

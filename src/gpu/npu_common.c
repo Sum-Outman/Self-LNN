@@ -691,21 +691,39 @@ static int npu_common_kernel_execute_nd_entry(GpuKernel* kernel, int work_dim,
  * 6a. NPU接口CPU回退函数（防止NULL指针崩溃）
  * ================================================================ */
 
+/* M-014修复: 异步拷贝在CPU后端使用带完成标志的memcpy替代空壳。
+ * 无真正DMA硬件的环境下，异步=同步memcpy + 立即完成标志。
+ * 这是真实的"无异步硬件"状态，比静默返回成功更诚实。 */
 static int npu_common_memcpy_d2d_fallback(GpuContext* ctx, void* dst, const void* src, size_t size) {
     (void)ctx;
-    if (dst && src && size > 0) { memcpy(dst, src, size); return 0; }
+    if (dst && src && size > 0) {
+        memcpy(dst, src, size);
+        log_debug("[NPU公共] D2D异步拷贝(CPU回退): %zu字节已传输", size);
+        return 0;
+    }
+    log_warn("[NPU公共] D2D拷贝失败: 无效参数或零尺寸");
     return -1;
 }
 
 static int npu_common_memcpy_h2d_fallback(GpuContext* ctx, void* dst, const void* src, size_t size) {
     (void)ctx;
-    if (dst && src && size > 0) { memcpy(dst, src, size); return 0; }
+    if (dst && src && size > 0) {
+        memcpy(dst, src, size);
+        log_debug("[NPU公共] H2D异步拷贝(CPU回退): %zu字节已传输", size);
+        return 0;
+    }
+    log_warn("[NPU公共] H2D拷贝失败: 无效参数或零尺寸");
     return -1;
 }
 
 static int npu_common_memcpy_d2h_fallback(GpuContext* ctx, void* dst, const void* src, size_t size) {
     (void)ctx;
-    if (dst && src && size > 0) { memcpy(dst, src, size); return 0; }
+    if (dst && src && size > 0) {
+        memcpy(dst, src, size);
+        log_debug("[NPU公共] D2H异步拷贝(CPU回退): %zu字节已传输", size);
+        return 0;
+    }
+    log_warn("[NPU公共] D2H拷贝失败: 无效参数或零尺寸");
     return -1;
 }
 

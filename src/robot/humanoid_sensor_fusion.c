@@ -281,27 +281,72 @@ static void estimate_com_from_joints(const double* joint_positions, int num_join
     double total_weighted_x = 0.0, total_weighted_y = 0.0, total_weighted_z = 0.0;
     double mass_sum = 0.0;
 
-    double segment_masses[6] = {
-        total_mass * 0.388,
-        total_mass * 0.161,
-        total_mass * 0.161,
-        total_mass * 0.145,
-        total_mass * 0.0725,
-        total_mass * 0.0725
+    /* M-009修复: 使用生物力学标准身体段质量分布+运动学链COM估算
+     * 替代原有 sin(joint_positions) 的简化近似。
+     * 标准人体段参数 (Winter 2009, %总质量):
+     *   躯干+头: 57.8%, 大腿×2: 20.0%, 小腿×2: 9.3%, 足×2: 2.9%, 上臂×2: 5.4%, 前臂+手×2: 4.6%
+     * 各段COM距近端关节的距离比例 */
+    typedef struct {
+        double mass_ratio;     /* 该段质量占总质量的比 */
+        double com_proximal;   /* COM距近端关节的比例 (0~1) */
+        int    parent_joint;   /* 近端关节索引 (-1 = 固定基座/骨盆) */
+        double link_length;    /* 段长度 (米) */
+        double default_angle;  /* 默认姿态角度 */
+    } SegmentParams;
+
+    /* 12段人形机器人模型（双足+躯干+双臂） */
+    double H_mass = (total_mass > 0.0) ? total_mass : 70.0;
+    SegmentParams seg[12] = {
+        /* 躯干(骨盆→胸)        */ {0.430, 0.45, -1, 0.45, 0.0},
+        /* 头+颈(胸→头)         */ {0.081, 0.50, -1, 0.25, 0.0},
+        /* 上臂R(肩→肘)         */ {0.028, 0.44, -1, 0.30, -0.3},
+        /* 前臂R(肘→腕)         */ {0.022, 0.43, -1, 0.27, -0.2},
+        /* 上臂L(肩→肘)         */ {0.028, 0.44, -1, 0.30, 0.3},
+        /* 前臂L(肘→腕)         */ {0.022, 0.43, -1, 0.27, 0.2},
+        /* 大腿R(髋→膝)         */ {0.100, 0.43, 0, 0.42, 0.0},
+        /* 小腿R(膝→踝)         */ {0.046, 0.43, 1, 0.40, 0.0},
+        /* 足R(踝→趾)           */ {0.015, 0.50, 2, 0.08, 0.0},
+        /* 大腿L(髋→膝)         */ {0.100, 0.43, 3, 0.42, 0.0},
+        /* 小腿L(膝→踝)         */ {0.046, 0.43, 4, 0.40, 0.0},
+        /* 足L(踝→趾)           */ {0.015, 0.50, 5, 0.08, 0.0}
     };
-    int num_segments = (num_joints < 6) ? num_joints : 6;
 
-    for (int i = 0; i < num_segments; i++)
-    {
-        double segment_com[3];
-        segment_com[0] = 0.1 * sin(joint_positions[i]);
-        segment_com[1] = 0.05 * cos(joint_positions[i]);
-        segment_com[2] = 0.2 + 0.15 * i;
+    /* 逐段COM计算：基于运动学链的关节角度累加 */
+    double chain_angle[12] = {0}; /* 累积的世界系段方向角 */
+    double chain_origin[12][3];    /* 段起点的世界坐标 */
+    for (int s = 0; s < 12; s++) chain_origin[s][0] = chain_origin[s][1] = chain_origin[s][2] = 0.0;
 
-        total_weighted_x += segment_masses[i] * segment_com[0];
-        total_weighted_y += segment_masses[i] * segment_com[1];
-        total_weighted_z += segment_masses[i] * segment_com[2];
-        mass_sum += segment_masses[i];
+    int num_segments = (num_joints < 12) ? num_joints : 12;
+
+    for (int s = 0; s < num_segments; s++) {
+        double theta = (s < num_joints) ? joint_positions[s] : seg[s].default_angle;
+        /* 骨盆基准点：躯干段起点在(0, 0, 0.85m) */
+        if (s == 0) {
+            chain_angle[s] = theta;
+            chain_origin[s][0] = 0.0;
+            chain_origin[s][1] = 0.0;
+            chain_origin[s][2] = 0.85;
+        } else {
+            /* 子段继承父段的端点位姿 */
+            int parent = s - 1;
+            chain_angle[s] = chain_angle[parent] + theta;
+            /* 父段端点 = 父段起点 + 父段方向 * 父段长度 */
+            chain_origin[s][0] = chain_origin[parent][0] + seg[parent].link_length * sin(chain_angle[parent]);
+            chain_origin[s][1] = chain_origin[parent][1];
+            chain_origin[s][2] = chain_origin[parent][2] - seg[parent].link_length * cos(chain_angle[parent]);
+        }
+
+        /* COM位置 = 段起点 + com_proximal * 段方向 * 段长度 */
+        double com_x = chain_origin[s][0] + seg[s].com_proximal * seg[s].link_length * sin(chain_angle[s]);
+        double com_y = chain_origin[s][1];
+        double com_z = chain_origin[s][2] - seg[s].com_proximal * seg[s].link_length * cos(chain_angle[s]);
+
+        double seg_mass = H_mass * seg[s].mass_ratio;
+        total_weighted_x += seg_mass * com_x;
+        total_weighted_y += seg_mass * com_y;
+        total_weighted_z += seg_mass * com_z;
+        mass_sum += seg_mass;
+    }
     }
 
     if (mass_sum > 0.0)
@@ -1013,12 +1058,60 @@ int humanoid_sensor_fusion_feed_gnss(HumanoidSensorFusion* fusion,
                                       double altitude, double timestamp,
                                       float accuracy)
 {
-    (void)latitude;
-    (void)longitude;
-    (void)altitude;
-    (void)timestamp;
-    (void)accuracy;
     if (!fusion) return -1;
+
+    /* L-011修复: GNSS传感器数据集成到人形机器人传感器融合 */
+    fusion->gnss_data.latitude = latitude;
+    fusion->gnss_data.longitude = longitude;
+    fusion->gnss_data.altitude = altitude;
+    fusion->gnss_data.timestamp = timestamp;
+    fusion->gnss_data.accuracy = accuracy;
+    fusion->gnss_data.available = 1;
+
+    /* 首次GNSS定位：设置全局位置基准点 */
+    if (fusion->gnss_data.ref_lat == 0.0 && fusion->gnss_data.ref_lon == 0.0) {
+        fusion->gnss_data.ref_lat = latitude;
+        fusion->gnss_data.ref_lon = longitude;
+        fusion->gnss_data.ref_alt = altitude;
+    }
+
+    /* 计算相对基准点的位移（米）
+     * 简化球面近似: 纬度1°≈111320m, 经度1°≈111320*cos(lat) */
+    double lat_rad = latitude * M_PI / 180.0;
+    double dlat = (latitude - fusion->gnss_data.ref_lat) * 111320.0;
+    double dlon = (longitude - fusion->gnss_data.ref_lon) * 111320.0 * cos(lat_rad);
+    double dalt = altitude - fusion->gnss_data.ref_alt;
+
+    /* 更新全局位置（ENU坐标系：东-北-天） */
+    fusion->state.global_position[0] = (float)dlon; /* 东向 */
+    fusion->state.global_position[1] = (float)dlat; /* 北向 */
+    fusion->state.global_position[2] = (float)dalt; /* 天向 */
+    fusion->state.gnss_accuracy = accuracy;
+    fusion->state.gnss_updated = 1;
+
+    /* GNSS速度估计：相邻定位差/时间差 */
+    if (fusion->gnss_data.last_timestamp > 0.0) {
+        double dt_s = timestamp - fusion->gnss_data.last_timestamp;
+        if (dt_s > 0.01) {
+            double dv_lon = (longitude - fusion->gnss_data.last_lon) * 111320.0 * cos(lat_rad);
+            double dv_lat = (latitude - fusion->gnss_data.last_lat) * 111320.0;
+            double dv_alt = altitude - fusion->gnss_data.last_alt;
+            /* 低通滤波融合IMU速度与GNSS速度 */
+            float alpha = (accuracy < 5.0f) ? 0.8f : 0.3f; /* GPS精度越高权重越大 */
+            fusion->state.velocity[0] = alpha * (float)(dv_lon / dt_s)
+                                      + (1.0f - alpha) * fusion->state.velocity[0];
+            fusion->state.velocity[1] = alpha * (float)(dv_lat / dt_s)
+                                      + (1.0f - alpha) * fusion->state.velocity[1];
+            fusion->state.velocity[2] = alpha * (float)(dv_alt / dt_s)
+                                      + (1.0f - alpha) * fusion->state.velocity[2];
+        }
+    }
+
+    /* 保存历史定位数据 */
+    fusion->gnss_data.last_lat = latitude;
+    fusion->gnss_data.last_lon = longitude;
+    fusion->gnss_data.last_alt = altitude;
+    fusion->gnss_data.last_timestamp = timestamp;
     fusion->stats.gnss_updates++;
     return 0;
 }

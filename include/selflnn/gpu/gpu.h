@@ -700,6 +700,25 @@ size_t gpu_suggest_work_group(GpuContext* context,
                               size_t max_work_group_size,
                               KernelType kernel_type);
 
+/* ZSFX-P1: 自动kernel优化器数据库管理API */
+
+/** @brief 清空自动kernel优化器的性能缓存 */
+int gpu_kernel_optimizer_clear_cache(GpuContext* context);
+
+/** @brief 保存kernel优化数据库到文件 */
+int gpu_kernel_optimizer_save_db(GpuContext* context, const char* filepath);
+
+/** @brief 从文件加载kernel优化数据库 */
+int gpu_kernel_optimizer_load_db(GpuContext* context, const char* filepath);
+
+/** @brief 获取历史最优kernel执行记录 */
+int gpu_kernel_optimizer_get_best(GpuContext* context, size_t* out_input,
+                                   size_t* out_output, double* out_time);
+
+/** @brief 预测指定输入输出尺寸的kernel执行时间 */
+int gpu_kernel_optimizer_predict(GpuContext* context, size_t input_size,
+                                  size_t output_size, double* predicted_time);
+
 // ==================== GPU内核缓存管理接口 ====================
 
 /**

@@ -158,6 +158,7 @@ typedef struct {
     HDHotplugEvent events[HD_DETECT_HOTPLUG_BUFFER];
     size_t num_events;
     int monitor_active;
+    uint32_t last_device_hash;   /**< ZSFX-FIX: 设备变更检测哈希 */
 } HDHotplugMonitor;
 
 int hd_detect_all(HDDetectionConfig config, HDDetectionResult* result);

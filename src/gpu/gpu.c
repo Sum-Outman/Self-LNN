@@ -1902,6 +1902,47 @@ size_t gpu_suggest_work_group(GpuContext* context, size_t global_size,
         global_size, max_work_group_size, kernel_type);
 }
 
+/* ZSFX-P1: 自动kernel优化器数据库管理包装器 */
+int gpu_kernel_optimizer_clear_cache(GpuContext* context) {
+    if (!context) return -1;
+    struct GpuContext* ctx = GPU_TO_INTERNAL(context);
+    if (!ctx->kernel_optimizer) return -1;
+    auto_kernel_optimizer_clear_cache(ctx->kernel_optimizer);
+    return 0;
+}
+
+int gpu_kernel_optimizer_save_db(GpuContext* context, const char* filepath) {
+    if (!context || !filepath) return -1;
+    struct GpuContext* ctx = GPU_TO_INTERNAL(context);
+    if (!ctx->kernel_optimizer) return -1;
+    return auto_kernel_optimizer_save_database(ctx->kernel_optimizer, filepath);
+}
+
+int gpu_kernel_optimizer_load_db(GpuContext* context, const char* filepath) {
+    if (!context || !filepath) return -1;
+    struct GpuContext* ctx = GPU_TO_INTERNAL(context);
+    if (!ctx->kernel_optimizer) return -1;
+    return auto_kernel_optimizer_load_database(ctx->kernel_optimizer, filepath);
+}
+
+int gpu_kernel_optimizer_get_best(GpuContext* context, size_t* out_input,
+                                   size_t* out_output, double* out_time) {
+    if (!context) return -1;
+    struct GpuContext* ctx = GPU_TO_INTERNAL(context);
+    if (!ctx->kernel_optimizer) return -1;
+    return auto_kernel_optimizer_get_best_record(ctx->kernel_optimizer,
+        out_input, out_output, out_time);
+}
+
+int gpu_kernel_optimizer_predict(GpuContext* context, size_t input_size,
+                                  size_t output_size, double* predicted_time) {
+    if (!context) return -1;
+    struct GpuContext* ctx = GPU_TO_INTERNAL(context);
+    if (!ctx->kernel_optimizer) return -1;
+    return auto_kernel_optimizer_predict_performance(ctx->kernel_optimizer,
+        input_size, output_size, predicted_time);
+}
+
 /* ============================================================================
  * 公共API实现 - 混合精度训练
  * =========================================================================== */

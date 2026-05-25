@@ -1746,7 +1746,7 @@ class ApiService {
                     type: entry.type || 'fact',
                     category: entry.category || 'general',
                     tags: entry.tags || [],
-                    confidence: entry.confidence || 0.8
+                    confidence: entry.confidence !== undefined ? entry.confidence : -1
                 })
             });
             if (!response.ok) {

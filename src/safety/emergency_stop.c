@@ -55,22 +55,26 @@ static long emergency_timestamp_us(void) {
 static int emergency_verify_password(const char* input_password) {
     if (!input_password || !input_password[0]) return 0;
     
-    /* 默认密码（仅当无配置文件时使用） */
-    if (strcmp(input_password, "selflnn_emergency_admin") == 0) return 1;
-    
-    /* 尝试从配置文件读取允许的密码 */
-    FILE* fp = fopen("config/emergency_password.txt", "r");
-    if (fp) {
-        char file_pass[128] = {0};
-        if (fgets(file_pass, sizeof(file_pass), fp)) {
-            size_t len = strlen(file_pass);
-            while (len > 0 && (file_pass[len-1] == '\n' || file_pass[len-1] == '\r'))
-                file_pass[--len] = '\0';
-            if (strcmp(input_password, file_pass) == 0) { fclose(fp); return 1; }
+    /* 尝试从配置文件读取密码：config/emergency_password.txt */
+    {
+        FILE* fp = fopen("config/emergency_password.txt", "r");
+        if (fp) {
+            char cfg_pwd[256];
+            memset(cfg_pwd, 0, sizeof(cfg_pwd));
+            if (fgets(cfg_pwd, (int)sizeof(cfg_pwd) - 1, fp)) {
+                /* 去除末尾换行符 */
+                size_t cfg_len = strlen(cfg_pwd);
+                while (cfg_len > 0 && (cfg_pwd[cfg_len - 1] == '\n' || cfg_pwd[cfg_len - 1] == '\r'))
+                    cfg_pwd[--cfg_len] = '\0';
+                fclose(fp);
+                if (cfg_len > 0 && strcmp(input_password, cfg_pwd) == 0) return 1;
+            } else {
+                fclose(fp);
+            }
         }
-        fclose(fp);
     }
     
+    /* 无配置文件或密码不匹配时拒绝（不再使用硬编码默认值） */
     return 0;
 }
 

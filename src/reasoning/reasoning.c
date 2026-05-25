@@ -4632,13 +4632,12 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
 
     /* P0-009修复: 知识同步成功后标记引擎已就绪 */
     int result = 0;
-    {
-        KnowledgeBase* kb = engine->external_kb;
-        size_t kb_size;
-        size_t kb_memory;
-        if (knowledge_base_get_stats(kb, &kb_size, &kb_memory) != 0) {
-            return -1;
-        }
+    KnowledgeBase* kb = engine->external_kb;
+    size_t kb_size;
+    size_t kb_memory;
+    if (knowledge_base_get_stats(kb, &kb_size, &kb_memory) != 0) {
+        return -1;
+    }
 
     if (kb_size == 0) {
         return 0;
@@ -5201,6 +5200,7 @@ int bayesian_network_variable_elimination(void* net_ptr,
                                           const int* evidence_vars, const int* evidence_vals,
                                           int num_evidence,
                                           BayesianQueryResult* result) {
+    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !query_vars || !result) return -1;
     if (num_queries <= 0 || num_queries > (int)network->num_nodes) return -1;
     if (num_evidence < 0) return -1;
@@ -5309,6 +5309,7 @@ int bayesian_network_gibbs_sampling(void* net_ptr,
                                     int num_evidence,
                                     int num_samples, int burn_in,
                                     BayesianQueryResult* result) {
+    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !query_vars || !result) return -1;
     if (num_queries <= 0) return -1;
     if (num_samples <= 0 || burn_in < 0) return -1;
@@ -5415,6 +5416,7 @@ int bayesian_network_belief_propagation(void* net_ptr,
                                         int num_evidence,
                                         int max_iterations, float convergence_threshold,
                                         BayesianQueryResult* result, size_t result_size) {
+    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !result) return -1;
     if (max_iterations <= 0) return -1;
     if (result_size < network->num_nodes) return -1;

@@ -8768,22 +8768,217 @@ int correction_select_best_strategy(float* best_rate, int* best_id) {
     return (best >= 0) ? 0 : -1;
 }
 
-/* COG-15: 跨平台温度/电压/功耗检测 */
-typedef struct { float temp_c; float voltage_v; float power_w; float cpu_usage; float mem_mb; int platform; } SystemHealth;
+/* COG-15: 跨平台温度/电压/功耗检测 — 真实硬件读取，无假数据 */
+typedef struct { float temp_c; float voltage_v; float power_w; float cpu_usage; float mem_mb; int platform; int temp_valid; } SystemHealth;
+
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+static ULARGE_INTEGER g_last_idle, g_last_kernel, g_last_user;
+static int g_cpu_init = 0;
+#endif
+
+#ifdef __linux__
+#include <unistd.h>
+#endif
 
 int cognition_get_system_health(SystemHealth* health) {
     if (!health) return -1;
     memset(health, 0, sizeof(SystemHealth));
+    health->temp_valid = 0; /* 默认温度不可用 */
+
 #if defined(_WIN32)
-    health->platform = 0; health->temp_c = 45.0f; health->voltage_v = 1.2f; health->power_w = 15.0f;
+    health->platform = 0;
+
+    /* 真实CPU使用率：基于系统空闲时间计算 */
+    {
+        FILETIME idle, kernel, user;
+        if (GetSystemTimes(&idle, &kernel, &user)) {
+            ULARGE_INTEGER ul_idle, ul_kernel, ul_user;
+            ul_idle.LowPart = idle.dwLowDateTime; ul_idle.HighPart = idle.dwHighDateTime;
+            ul_kernel.LowPart = kernel.dwLowDateTime; ul_kernel.HighPart = kernel.dwHighDateTime;
+            ul_user.LowPart = user.dwLowDateTime; ul_user.HighPart = user.dwHighDateTime;
+
+            if (g_cpu_init) {
+                ULONGLONG idle_diff = ul_idle.QuadPart - g_last_idle.QuadPart;
+                ULONGLONG kernel_diff = ul_kernel.QuadPart - g_last_kernel.QuadPart;
+                ULONGLONG user_diff = ul_user.QuadPart - g_last_user.QuadPart;
+                ULONGLONG total_diff = kernel_diff + user_diff;
+                if (total_diff > 0) {
+                    health->cpu_usage = (float)(total_diff - idle_diff) / (float)total_diff;
+                } else {
+                    health->cpu_usage = -1.0f;
+                }
+            } else {
+                health->cpu_usage = -1.0f;
+            }
+            g_last_idle = ul_idle; g_last_kernel = ul_kernel; g_last_user = ul_user;
+            g_cpu_init = 1;
+        } else {
+            health->cpu_usage = -1.0f;
+        }
+    }
+
+    /* 真实内存：使用GlobalMemoryStatusEx */
+    {
+        MEMORYSTATUSEX mem;
+        mem.dwLength = sizeof(mem);
+        if (GlobalMemoryStatusEx(&mem)) {
+            health->mem_mb = (float)(mem.ullTotalPhys - mem.ullAvailPhys) / (1024.0f * 1024.0f);
+        } else {
+            health->mem_mb = -1.0f;
+        }
+    }
+
+    /* 温度：尝试从MSR/WMI读取，当前标记为不可用（需硬件传感器驱动） */
+    health->temp_c = -1.0f;
+    health->voltage_v = -1.0f;
+    health->power_w = -1.0f;
+
 #elif defined(__linux__)
-    health->platform = 1; health->temp_c = 42.0f; health->voltage_v = 1.1f; health->power_w = 12.0f;
+    health->platform = 1;
+
+    /* 真实CPU使用率：从/proc/stat读取 */
+    {
+        FILE* fp = fopen("/proc/stat", "r");
+        if (fp) {
+            char line[256];
+            if (fgets(line, sizeof(line), fp)) {
+                unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
+                int n = sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                               &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
+                if (n >= 4) {
+                    if (n < 5) iowait = 0;
+                    if (n < 6) irq = 0;
+                    if (n < 7) softirq = 0;
+                    if (n < 8) steal = 0;
+                    unsigned long long total = user + nice + system + idle + iowait + irq + softirq + steal;
+                    unsigned long long active = total - idle - iowait;
+                    if (g_cpu_init) {
+                        unsigned long long prev_idle = g_last_idle.QuadPart;
+                        unsigned long long prev_total = g_last_kernel.QuadPart;
+                        unsigned long long total_diff = total - prev_total;
+                        if (total_diff > 0) {
+                            health->cpu_usage = (float)(total_diff - (idle + iowait - prev_idle)) / (float)total_diff;
+                        } else {
+                            health->cpu_usage = -1.0f;
+                        }
+                    } else {
+                        health->cpu_usage = -1.0f;
+                    }
+                    g_last_idle.QuadPart = idle + iowait;
+                    g_last_kernel.QuadPart = total;
+                    g_cpu_init = 1;
+                }
+            }
+            fclose(fp);
+        } else {
+            health->cpu_usage = -1.0f;
+        }
+    }
+
+    /* 真实内存：从/proc/meminfo读取 */
+    {
+        FILE* fp = fopen("/proc/meminfo", "r");
+        if (fp) {
+            unsigned long long total_kb = 0, avail_kb = 0;
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                if (sscanf(line, "MemTotal: %llu kB", &total_kb) == 1) continue;
+                if (sscanf(line, "MemAvailable: %llu kB", &avail_kb) == 1) {}
+            }
+            fclose(fp);
+            if (total_kb > 0 && avail_kb <= total_kb) {
+                health->mem_mb = (float)(total_kb - avail_kb) / 1024.0f;
+            } else {
+                health->mem_mb = -1.0f;
+            }
+        } else {
+            health->mem_mb = -1.0f;
+        }
+    }
+
+    /* 真实温度：从/sys/class/thermal读取第一个可用zone */
+    {
+        FILE* fp = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+        if (fp) {
+            int raw_temp = 0;
+            if (fscanf(fp, "%d", &raw_temp) == 1) {
+                health->temp_c = (float)raw_temp / 1000.0f;
+                health->temp_valid = 1;
+            }
+            fclose(fp);
+        }
+        if (!health->temp_valid) {
+            health->temp_c = -1.0f;
+        }
+    }
+
+    health->voltage_v = -1.0f;
+    health->power_w = -1.0f;
+
 #elif defined(__APPLE__)
-    health->platform = 2; health->temp_c = 40.0f; health->voltage_v = 1.0f; health->power_w = 10.0f;
+    health->platform = 2;
+
+    /* macOS真实内存：使用sysctl */
+    {
+        int mib[2] = {CTL_HW, HW_MEMSIZE};
+        int64_t total_bytes = 0;
+        size_t len = sizeof(total_bytes);
+        if (sysctl(mib, 2, &total_bytes, &len, NULL, 0) == 0 && total_bytes > 0) {
+            /* 获取已使用内存：通过host_statistics */
+            mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+            vm_statistics64_data_t vm_stat;
+            if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS) {
+                int64_t page_size = (int64_t)sysconf(_SC_PAGESIZE);
+                if (page_size <= 0) page_size = 4096;
+                int64_t used = ((int64_t)(vm_stat.active_count + vm_stat.inactive_count + vm_stat.wire_count)) * page_size;
+                health->mem_mb = (float)used / (1024.0f * 1024.0f);
+            } else {
+                health->mem_mb = -1.0f;
+            }
+        } else {
+            health->mem_mb = -1.0f;
+        }
+    }
+
+    /* macOS CPU使用率通过host_processor_info获取 */
+    {
+        processor_info_array_t cpu_info = NULL;
+        mach_msg_type_number_t info_count = 0;
+        natural_t num_cpus = 0;
+        if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO,
+                                &num_cpus, &cpu_info, &info_count) == KERN_SUCCESS) {
+            float total_user = 0, total_system = 0, total_idle = 0;
+            for (natural_t i = 0; i < num_cpus; i++) {
+                total_user   += (float)cpu_info[(CPU_STATE_MAX * i) + CPU_STATE_USER];
+                total_system += (float)cpu_info[(CPU_STATE_MAX * i) + CPU_STATE_SYSTEM];
+                total_idle   += (float)cpu_info[(CPU_STATE_MAX * i) + CPU_STATE_IDLE];
+            }
+            float total = total_user + total_system + total_idle;
+            if (total > 0) {
+                health->cpu_usage = (total_user + total_system) / total;
+            } else {
+                health->cpu_usage = -1.0f;
+            }
+            vm_deallocate(mach_task_self_, (vm_address_t)cpu_info, info_count * sizeof(integer_t));
+        } else {
+            health->cpu_usage = -1.0f;
+        }
+    }
+
+    health->temp_c = -1.0f;
+    health->voltage_v = -1.0f;
+    health->power_w = -1.0f;
+
 #else
-    health->platform = -1; health->temp_c = 38.0f; health->voltage_v = 1.05f; health->power_w = 8.0f;
+    health->platform = -1;
+    health->cpu_usage = -1.0f;
+    health->mem_mb = -1.0f;
+    health->temp_c = -1.0f;
+    health->voltage_v = -1.0f;
+    health->power_w = -1.0f;
 #endif
-    health->cpu_usage = 0.5f; health->mem_mb = 512.0f;
     return 0;
 }
 

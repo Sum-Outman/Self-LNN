@@ -850,7 +850,7 @@ struct ESKFFilter {
     float* buffer;
 };
 
-static ESKFFilter* eskf_create(const ESKFConfig* config) {
+ESKFFilter* eskf_create(const ESKFConfig* config) {
     if (!config) return NULL;
     ESKFFilter* eskf = (ESKFFilter*)safe_calloc(1, sizeof(ESKFFilter));
     if (!eskf) return NULL;
@@ -1139,7 +1139,7 @@ static int eskf_update(ESKFFilter* eskf, const float* observation, int obs_model
     return 0;
 }
 
-static int eskf_get_state(const ESKFFilter* eskf, float* nom_state, float* error_state, float* covariance) {
+int eskf_get_state(const ESKFFilter* eskf, float* nom_state, float* error_state, float* covariance) {
     if (!eskf || !nom_state) return -1;
     int ns = eskf->config.nom_state_dim;
     int es = eskf->config.error_state_dim;
@@ -1258,7 +1258,7 @@ static int particle_filter_predict(ParticleFilter* pf, const float* control, flo
     return 0;
 }
 
-static int particle_filter_update(ParticleFilter* pf, const float* observation) {
+int particle_filter_update(ParticleFilter* pf, const float* observation) {
     if (!pf || !observation) return -1;
     int s = pf->config.state_dim;
     int o = pf->config.obs_dim;
@@ -1360,7 +1360,7 @@ static int particle_filter_get_particles(const ParticleFilter* pf, float* partic
     return copy_n;
 }
 
-static int particle_filter_reset(ParticleFilter* pf, const float* init_mean, float init_std) {
+int particle_filter_reset(ParticleFilter* pf, const float* init_mean, float init_std) {
     if (!pf || !init_mean) return -1;
     int s = pf->config.state_dim;
     int n = pf->config.num_particles;
@@ -1467,7 +1467,7 @@ static void info_filter_free(InfoFilter* inf) {
     safe_free((void**)&inf);
 }
 
-static int info_filter_predict(InfoFilter* inf, const float* control, float dt) {
+int info_filter_predict(InfoFilter* inf, const float* control, float dt) {
     (void)control;
     if (!inf || dt <= 0.0f) return -1;
     int s = inf->config.state_dim;
@@ -1582,7 +1582,7 @@ static int info_filter_predict(InfoFilter* inf, const float* control, float dt) 
     return 0;
 }
 
-static int info_filter_update(InfoFilter* inf, const float* observation, const float* obs_jacobian) {
+int info_filter_update(InfoFilter* inf, const float* observation, const float* obs_jacobian) {
     if (!inf || !observation) return -1;
     int s = inf->config.state_dim;
     int o = inf->config.obs_dim;
@@ -1661,4 +1661,216 @@ static void info_filter_reset(InfoFilter* inf, const float* init_state, const fl
         for (int j = 0; j < s; j++)
             inf->information_vector[i] += inf->information_matrix[i * s + j] * inf->state[j];
     }
+}
+
+/* ============================================================================
+ * 公开API：深度传感器预处理集成接口
+ * ============================================================================ */
+
+/**
+ * @brief 深度传感器预处理上下文
+ *
+ * 封装内部静态滤波器实例，对外提供统一的传感器深度预处理接口。
+ * 内部使用 CfC ODE 增强的 ESKF + 粒子滤波 + 信息滤波组合管线。
+ */
+typedef struct SensorDeepPreprocessor {
+    ESKFFilter* eskf;
+    ParticleFilter* pf;
+    InfoFilter* inf;
+    int is_initialized;
+    size_t state_dim;
+    size_t obs_dim;
+    float* output_buffer;
+} SensorDeepPreprocessor;
+
+/**
+ * @brief 创建深度传感器预处理器
+ *
+ * @param state_dim 状态向量维度
+ * @param obs_dim 观测向量维度
+ * @return 预处理器句柄，失败返回NULL
+ */
+SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t obs_dim) {
+    if (state_dim == 0 || obs_dim == 0) return NULL;
+
+    SensorDeepPreprocessor* sdp = (SensorDeepPreprocessor*)safe_calloc(1, sizeof(SensorDeepPreprocessor));
+    if (!sdp) return NULL;
+
+    sdp->state_dim = state_dim;
+    sdp->obs_dim = obs_dim;
+
+    /* 创建ESKF（含CfC ODE状态转移） */
+    ESKFConfig eskf_cfg;
+    memset(&eskf_cfg, 0, sizeof(ESKFConfig));
+    eskf_cfg.nom_state_dim = (int)(state_dim > 16 ? state_dim : 16);
+    eskf_cfg.error_state_dim = 15;
+    eskf_cfg.obs_dim = (int)obs_dim;
+    eskf_cfg.use_cfc_transition = 1;
+    eskf_cfg.cfc_hidden_size = (int)state_dim;
+    sdp->eskf = eskf_create(&eskf_cfg);
+    if (!sdp->eskf) { sensor_deep_preprocessor_free(sdp); return NULL; }
+
+    /* 创建粒子滤波器（CfC运动模型） */
+    ParticleFilterConfig pf_cfg;
+    memset(&pf_cfg, 0, sizeof(ParticleFilterConfig));
+    pf_cfg.state_dim = (int)state_dim;
+    pf_cfg.obs_dim = (int)obs_dim;
+    pf_cfg.num_particles = 500;
+    pf_cfg.process_noise_std = 0.01f;
+    pf_cfg.observation_noise_std = 0.1f;
+    pf_cfg.resampling_threshold = 0.5f;
+    pf_cfg.use_cfc_motion_model = 1;
+    pf_cfg.cfc_hidden_size = (int)state_dim;
+    sdp->pf = particle_filter_create(&pf_cfg);
+    if (!sdp->pf) { sensor_deep_preprocessor_free(sdp); return NULL; }
+
+    /* 创建信息滤波器（CfC状态转移） */
+    InfoFilterConfig inf_cfg;
+    memset(&inf_cfg, 0, sizeof(InfoFilterConfig));
+    inf_cfg.state_dim = (int)state_dim;
+    inf_cfg.obs_dim = (int)obs_dim;
+    inf_cfg.process_info_std = 0.1f;
+    inf_cfg.observation_info_std = 0.01f;
+    inf_cfg.use_cfc_transition = 1;
+    inf_cfg.cfc_hidden_size = (int)state_dim;
+    sdp->inf = info_filter_create(&inf_cfg);
+    if (!sdp->inf) { sensor_deep_preprocessor_free(sdp); return NULL; }
+
+    sdp->output_buffer = (float*)safe_calloc(state_dim, sizeof(float));
+    if (!sdp->output_buffer) { sensor_deep_preprocessor_free(sdp); return NULL; }
+
+    sdp->is_initialized = 1;
+    return sdp;
+}
+
+/**
+ * @brief 释放深度传感器预处理器
+ */
+void sensor_deep_preprocessor_free(SensorDeepPreprocessor* sdp) {
+    if (!sdp) return;
+    if (sdp->eskf) { eskf_free(sdp->eskf); sdp->eskf = NULL; }
+    if (sdp->pf) { particle_filter_free(sdp->pf); sdp->pf = NULL; }
+    if (sdp->inf) { info_filter_free(sdp->inf); sdp->inf = NULL; }
+    safe_free((void**)&sdp->output_buffer);
+    safe_free((void**)&sdp);
+}
+
+/**
+ * @brief 深度预处理单帧传感器数据
+ *
+ * 通过ESKF+粒子滤波+信息滤波管线处理原始传感器数据，
+ * 输出优化后的状态估计。
+ *
+ * @param sdp 深度预处理器句柄
+ * @param raw_data 原始传感器数据 [obs_dim]
+ * @param gyro 陀螺仪数据 [3]（IMU模式时使用）
+ * @param acc 加速度计数据 [3]（IMU模式时使用）
+ * @param dt 时间步长
+ * @param output 输出状态估计 [state_dim]
+ * @return 0成功，-1失败
+ */
+int sensor_deep_preprocess_frame(SensorDeepPreprocessor* sdp,
+                                  const float* raw_data,
+                                  const float* gyro,
+                                  const float* acc,
+                                  float dt,
+                                  float* output) {
+    if (!sdp || !sdp->is_initialized || !raw_data || !output) return -1;
+    if (dt <= 0.0f) dt = 0.01f;
+
+    /* ESKF预测+更新（IMU运动学模式） */
+    if (sdp->eskf && gyro && acc) {
+        eskf_predict_nominal(sdp->eskf, gyro, acc, dt);
+        eskf_predict_error(sdp->eskf, dt);
+        eskf_update(sdp->eskf, raw_data, 0);
+        float nom_state[64];
+        float error_state[32];
+        eskf_get_state(sdp->eskf, nom_state, error_state, NULL);
+        /* 拷贝ESKF名义状态前sdp->state_dim维 */
+        size_t copy_dim = sdp->state_dim < 16 ? sdp->state_dim : 16;
+        memcpy(output, nom_state, copy_dim * sizeof(float));
+    }
+
+    /* 粒子滤波预测+更新 */
+    if (sdp->pf) {
+        particle_filter_predict(sdp->pf, NULL, dt);
+        particle_filter_update(sdp->pf, raw_data);
+        float pf_state[64];
+        int effective;
+        particle_filter_get_state(sdp->pf, pf_state, NULL, &effective);
+        /* 融合粒子滤波估计 */
+        for (size_t i = 0; i < sdp->state_dim && i < 64; i++) {
+            output[i] = output[i] * 0.5f + pf_state[i] * 0.5f;
+        }
+    }
+
+    /* 信息滤波预测+更新 */
+    if (sdp->inf) {
+        info_filter_predict(sdp->inf, NULL, dt);
+        info_filter_update(sdp->inf, raw_data, NULL);
+        float inf_state[64];
+        info_filter_get_state(sdp->inf, inf_state, NULL, NULL);
+        /* 三重滤波融合平均 */
+        for (size_t i = 0; i < sdp->state_dim && i < 64; i++) {
+            output[i] = output[i] * 0.667f + inf_state[i] * 0.333f;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 深度传感器预处理信号质量评估
+ *
+ * 对各传感器模态进行深度信号质量分析，辅助自适应路由决策。
+ *
+ * @param sdp 深度预处理器句柄
+ * @param modality_data 各模态原始数据 [4][dim]
+ * @param modality_dims 各模态数据维度 [4]
+ * @param quality_scores 输出质量评分 [4]
+ * @return 0成功，-1失败
+ */
+int sensor_deep_quality_assess(SensorDeepPreprocessor* sdp,
+                                const float** modality_data,
+                                const size_t* modality_dims,
+                                float* quality_scores) {
+    if (!sdp || !modality_data || !modality_dims || !quality_scores) return -1;
+
+    for (int m = 0; m < 4; m++) {
+        if (!modality_data[m] || modality_dims[m] == 0) {
+            quality_scores[m] = 0.0f;
+            continue;
+        }
+
+        /* 基于信号统计特性评估质量 */
+        const float* data = modality_data[m];
+        size_t n = modality_dims[m];
+
+        float sum = 0.0f, sum_sq = 0.0f;
+        int nonzero = 0;
+        for (size_t i = 0; i < n; i++) {
+            float v = data[i];
+            sum += v;
+            sum_sq += v * v;
+            if (fabsf(v) > 1e-6f) nonzero++;
+        }
+
+        float mean = sum / (float)n;
+        float variance = sum_sq / (float)n - mean * mean;
+        if (variance < 0.0f) variance = 0.0f;
+        float energy = sum_sq / (float)n;
+        float sparsity = (float)(n - nonzero) / (float)n;
+
+        /* 综合质量 = 能量*0.3 + 1/稀疏度*0.3 + 方差归一化*0.2 + 信号存在性*0.2 */
+        float q_energy = (energy > 0.0f) ? (1.0f - expf(-energy * 10.0f)) : 0.0f;
+        float q_sparsity = 1.0f - sparsity;
+        float q_var = (variance > 0.0f) ? (1.0f - expf(-variance * 5.0f)) : 0.0f;
+        float q_present = (nonzero > (int)(n / 4)) ? 1.0f : ((float)nonzero / (float)(n / 4));
+
+        quality_scores[m] = 0.3f * q_energy + 0.3f * q_sparsity + 0.2f * q_var + 0.2f * q_present;
+        if (quality_scores[m] > 1.0f) quality_scores[m] = 1.0f;
+        if (quality_scores[m] < 0.0f) quality_scores[m] = 0.0f;
+    }
+
+    return 0;
 }

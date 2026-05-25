@@ -93,6 +93,66 @@ typedef struct {
     float center_freq_hz;
 } SpectralGateConfig;
 
+/* ZSFBUILD: ZSFX-FIX — 5个缺失类型补全（原无任何头文件声明） */
+
+/* CfC单细胞稳定性分析结果 */
+typedef struct {
+    float phase_margin;          /* 相位裕度（度） */
+    float gain_margin;           /* 增益裕度（dB） */
+    float dominant_pole_real;    /* 主导极点实部 */
+    float dominant_pole_imag;    /* 主导极点虚部 */
+    float stability_score;       /* 稳定性评分 0-1 */
+    float natural_frequency;     /* 自然频率 (Hz) */
+    float damping_ratio;         /* 阻尼比 */
+    int is_stable;               /* 是否稳定 */
+    int stability_warning;       /* 0=正常, 1=临界阻尼低, 2=不稳定 */
+} CfcStabilityAnalysis;
+
+/* 频谱计算配置 */
+typedef struct {
+    size_t fft_size;             /* FFT窗口大小 */
+    float sampling_rate;         /* 采样率 (Hz) */
+    float min_frequency;         /* 最低分析频率 */
+    float max_frequency;         /* 最高分析频率 */
+    int enable_window;           /* 是否加窗 */
+    int enable_log_scale;        /* 是否对数刻度 */
+} SpectrumConfig;
+
+/* 频谱数据点 */
+typedef struct {
+    float frequency;             /* 频率 (Hz) */
+    float magnitude;             /* 幅度 */
+    float phase;                 /* 相位 (rad) */
+} SpectrumPoint;
+
+/* 频谱分析结果 */
+typedef struct {
+    SpectrumPoint* points;       /* 频谱点数组 */
+    size_t num_points;           /* 点数 */
+    float dc_component;          /* DC分量 */
+    float total_power;           /* 总功率 */
+    float dominant_frequency;    /* 主导频率 */
+    float dominant_magnitude;    /* 主导幅度 */
+    float spectral_centroid;     /* 频谱质心 */
+    float high_freq_ratio;       /* 高频能量比 */
+    float low_freq_ratio;        /* 低频能量比 */
+    float bandwidth_3db;         /* 3dB带宽 */
+} SpectrumResult;
+
+/* 频域自适应学习率配置 */
+typedef struct {
+    float base_learning_rate;    /* 基础学习率 */
+    float min_learning_rate;     /* 最小学习率 */
+    float max_learning_rate;     /* 最大学习率 */
+    float high_freq_threshold;   /* 高频阈值 */
+    float low_freq_threshold;    /* 低频阈值 */
+    float adaptation_speed;      /* 自适应速度 */
+    int use_spectral_centroid;   /* 使用频谱质心 */
+    float momentum;              /* 动量 */
+} FreqAdaptiveLRConfig;
+
+/* ZSFBUILD: ZSFX-FIX END */
+
 /* ZSFBUILD: PIDParams类型未在任何头文件中声明，在此处补全 */
 typedef struct {
     float kp;
@@ -1133,6 +1193,18 @@ void laplace_spectrum_result_free(SpectrumResult* result) {
  * 分数阶拉普拉斯记忆模块实现
  * ===================================================================== */
 
+/* ZSFBUILD: ZSFX-FIX — FractionalMemoryConfig 类型补全 */
+typedef struct {
+    float fractional_order;          /* 分数阶阶数 */
+    float memory_decay;              /* 记忆衰减率 */
+    int memory_length;               /* 记忆长度 */
+    int use_caputo_derivative;       /* 使用Caputo导数 */
+    int enable_adaptive_order;       /* 自适应阶数调整 */
+    float order_adaptation_rate;     /* 阶数自适应率 */
+    float min_fractional_order;      /* 最小阶数 */
+    float max_fractional_order;      /* 最大阶数 */
+} FractionalMemoryConfig;
+
 FractionalMemoryConfig laplace_fractional_memory_config_default(void) {
     FractionalMemoryConfig config;
     config.fractional_order = 0.5f;
@@ -1854,4 +1926,39 @@ void laplace_lnn_stability_result_free(LNNStabilityResult* result) {
         safe_free((void**)&result->cell_bandwidths);
         memset(result, 0, sizeof(LNNStabilityResult));
     }
+}
+
+/* ============================================================================
+ * ZSFX-P0修复: laplace_integration_init — 拉普拉斯深度集成统一初始化入口
+ * 由 laplace_unified_system_init() 调用，创建全局LNN Laplace分析器。
+ * ============================================================================ */
+
+static void* g_laplace_integration_ctx = NULL;
+
+int laplace_integration_init(void) {
+    if (g_laplace_integration_ctx) return 0; /* 已初始化 */
+
+    /* 创建默认拉普拉斯分析器作为全局上下文 */
+    LaplaceConfig cfg = LAPLACE_CONFIG_DEFAULT;
+    cfg.enable_frequency = 1;      /* 启用频域分析 */
+    cfg.enable_stability = 1;      /* 启用稳定性分析 */
+    cfg.stability_threshold = 0.85f;
+    cfg.enable_optimization = 1;   /* 启用自适应优化 */
+
+    LaplaceAnalyzer* analyzer = laplace_analyzer_create(&cfg);
+    if (!analyzer) return -1;
+
+    g_laplace_integration_ctx = (void*)analyzer;
+    return 0;
+}
+
+void laplace_integration_cleanup(void) {
+    if (g_laplace_integration_ctx) {
+        laplace_analyzer_free((LaplaceAnalyzer*)g_laplace_integration_ctx);
+        g_laplace_integration_ctx = NULL;
+    }
+}
+
+void* laplace_integration_get_context(void) {
+    return g_laplace_integration_ctx;
 }

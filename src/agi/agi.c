@@ -225,86 +225,59 @@ static int cap_set_evolution(int enable) {
     return 0;
 }
 
+/* N-001修复: 移除#ifdef条件编译空壳分支。
+ * 所有能力控制函数始终调用真实子系统，无论编译配置如何。
+ * 原SELFLNN_AGI_DIRECT_CAPCALL宏的#else分支为无操作空壳，
+ * 导致特定构建下模仿/反思/规划/对话开关完全失效。 */
+
 static int cap_check_imitation(void) {
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->learner) return 0;
     return learning_engine_is_imitation_enabled(sys->learner);
-#else
-    (void)0; return 0;
-#endif
 }
 static int cap_set_imitation(int enable) {
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->learner) return -1;
     return learning_engine_set_imitation_enabled(sys->learner, enable);
-#else
-    (void)enable; return 0;
-#endif
 }
 
 static int cap_check_reflection(void) {
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->reflection) return 0;
     return deep_reflection_is_enabled(sys->reflection);
-#else
-    (void)0; return 0;
-#endif
 }
 static int cap_set_reflection(int enable) {
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->reflection) return -1;
     if (enable) deep_reflection_enable(sys->reflection);
     else deep_reflection_disable(sys->reflection);
     return 0;
-#else
-    (void)enable; return 0;
-#endif
 }
 
 static int cap_check_planning(void) {
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->planner) return 0;
     return planning_is_enabled(sys->planner);
-#else
-    (void)0; return 0;
-#endif
 }
 static int cap_set_planning(int enable) {
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->planner) return -1;
     if (enable) planning_enable(sys->planner);
     else planning_disable(sys->planner);
     return 0;
-#else
-    (void)enable; return 0;
-#endif
 }
 
 static int cap_check_dialogue(void) {
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->dialogue) return 0;
     return dialogue_is_enabled(sys->dialogue);
-#else
-    (void)0; return 0;
-#endif
 }
 static int cap_set_dialogue(int enable) {
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL
     AGISystem* sys = g_agi_cap_system;
     if (!sys || !sys->dialogue) return -1;
     if (enable) dialogue_enable(sys->dialogue);
     else dialogue_disable(sys->dialogue);
     return 0;
-#else
-    (void)enable; return 0;
-#endif
 }
 
 static int cap_check_correction(void) {
@@ -658,7 +631,7 @@ static int create_default_depth_estimator(AGISystem* system)
     dcfg.max_features = 1000;
     dcfg.min_depth = 0.1f;
     dcfg.max_depth = 100.0f;
-    dcfg.use_gpu = 0;
+    dcfg.use_gpu = gpu_is_available() ? 1 : 0;
     dcfg.output_format = 0;
     DepthEstimator* de = depth_estimator_create(&dcfg);
     if (!de) return -1;

@@ -29,6 +29,7 @@
 #include "selflnn/core/cfc_cell.h"    /* 完整 CfCCell 结构体（梯度健康度报告） */
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/core/evolutionary_algorithms.h"
+#include "selflnn/core/loss.h"             /* ZSFX-P0: 统一损失函数接口 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -1073,7 +1074,7 @@ TrainingConfig training_config_default(void) {
     config.regularization_lambda = 0.01f;
     config.dropout_rate = 0.2f;
     config.gradient_clip_value = 1.0f;
-    config.gradient_clip_norm = 1.0f;
+    config.gradient_clip_norm = 5.0f;
     
     config.batch_size = 32;
     config.epochs = 100;
@@ -1083,7 +1084,7 @@ TrainingConfig training_config_default(void) {
     config.shuffle_data = 1;
     config.verbose = 1;
     config.save_best_model = 1;
-    config.use_gpu = 0;
+    config.use_gpu = gpu_is_available() ? 1 : 0;
     
     // 拉普拉斯优化默认配置
     config.use_laplace_optimization = 0;  // 默认不启用，需要显式启用
@@ -5339,103 +5340,45 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             
             perf_timer_stop(&trainer->forward_time);
             
-            // 计算损失和准确率
-            float loss = 0.0f;
+            /* ZSFX-P0: 统一损失计算路径。
+             * 使用 loss_compute_ex 替代原有的3种内联损失函数，
+             * 完整支持MSE/MAE/Huber/CrossEntropy/Focal/Dice/Triplet等11种损失。 */
+            float loss = loss_compute_ex(trainer->batch_outputs, batch_targets,
+                                         (int)(batch_size * output_dim),
+                                         trainer->config.loss_function, NULL);
+            
+            // 计算准确率（R²或分类准确率），辅助监控训练进度
             float accuracy = 0.0f;
-            
-            switch (trainer->config.loss_function) {
-                case LOSS_MEAN_SQUARED_ERROR:
-                    loss = loss_mean_squared_error(trainer->batch_outputs,
-                                                  batch_targets,
-                                                  batch_size * output_dim);
-                    break;
-                case LOSS_MEAN_ABSOLUTE_ERROR:
-                    loss = loss_mean_absolute_error(trainer->batch_outputs,
-                                                   batch_targets,
-                                                   batch_size * output_dim);
-                    break;
-                case LOSS_CROSS_ENTROPY:
-                    loss = loss_cross_entropy(trainer->batch_outputs,
-                                             batch_targets,
-                                             batch_size * output_dim);
-                    break;
-                default:
-                    loss = loss_mean_squared_error(trainer->batch_outputs,
-                                                  batch_targets,
-                                                  batch_size * output_dim);
-                    break;
-            }
-            
-            // 计算准确率（根据损失函数类型）
-            accuracy = 0.0f;
-            
-            // 根据损失函数类型计算准确率或相关指标
-            switch (trainer->config.loss_function) {
-                case LOSS_CROSS_ENTROPY:
-                    // 分类任务：计算准确率（预测类别 = 真实类别）
+            {
+                int is_classification = (trainer->config.loss_function == LOSS_CATEGORICAL_CROSSENTROPY ||
+                                         trainer->config.loss_function == LOSS_CROSS_ENTROPY ||
+                                         trainer->config.loss_function == LOSS_BINARY_CROSSENTROPY);
+                if (is_classification) {
                     for (size_t i = 0; i < batch_size; i++) {
-                        int predicted = 0;
-                        int target = 0;
+                        int predicted = 0, target = 0;
                         float max_prob = trainer->batch_outputs[i * output_dim];
                         float max_target = batch_targets[i * output_dim];
-                        
                         for (size_t j = 1; j < output_dim; j++) {
                             if (trainer->batch_outputs[i * output_dim + j] > max_prob) {
-                                max_prob = trainer->batch_outputs[i * output_dim + j];
-                                predicted = (int)j;
+                                max_prob = trainer->batch_outputs[i * output_dim + j]; predicted = (int)j;
                             }
                             if (batch_targets[i * output_dim + j] > max_target) {
-                                max_target = batch_targets[i * output_dim + j];
-                                target = (int)j;
+                                max_target = batch_targets[i * output_dim + j]; target = (int)j;
                             }
                         }
-                        
-                        if (predicted == target) {
-                            accuracy += 1.0f;
-                        }
+                        if (predicted == target) accuracy += 1.0f;
                     }
                     accuracy /= batch_size;
-                    break;
-                    
-                case LOSS_MEAN_SQUARED_ERROR:
-                case LOSS_MEAN_ABSOLUTE_ERROR:
-                    // 回归任务：计算R²分数（决定系数）
-                    // 首先计算目标变量的均值
-                    float target_mean = 0.0f;
-                    for (size_t i = 0; i < batch_size * output_dim; i++) {
-                        target_mean += batch_targets[i];
-                    }
+                } else {
+                    float target_mean = 0.0f, sst = 0.0f, sse = 0.0f;
+                    for (size_t i = 0; i < batch_size * output_dim; i++) target_mean += batch_targets[i];
                     target_mean /= (batch_size * output_dim);
-                    
-                    // 计算总平方和（SST）
-                    float sst = 0.0f;
                     for (size_t i = 0; i < batch_size * output_dim; i++) {
-                        float diff = batch_targets[i] - target_mean;
-                        sst += diff * diff;
+                        float d = batch_targets[i] - target_mean; sst += d * d;
+                        float r = batch_targets[i] - trainer->batch_outputs[i]; sse += r * r;
                     }
-                    
-                    // 计算残差平方和（SSE）
-                    float sse = 0.0f;
-                    for (size_t i = 0; i < batch_size * output_dim; i++) {
-                        float residual = batch_targets[i] - trainer->batch_outputs[i];
-                        sse += residual * residual;
-                    }
-                    
-                    // 计算R²分数
-                    if (sst > 1e-10f) {
-                        accuracy = 1.0f - (sse / sst);
-                        // R²分数可能在[-∞, 1]之间，我们限制到[0,1]范围用于显示
-                        if (accuracy < 0.0f) accuracy = 0.0f;
-                        if (accuracy > 1.0f) accuracy = 1.0f;
-                    } else {
-                        accuracy = 0.0f;
-                    }
-                    break;
-                    
-                default:
-                    // 其他损失函数：默认准确率为0
-                    accuracy = 0.0f;
-                    break;
+                    accuracy = (sst > 1e-10f) ? fmaxf(0.0f, 1.0f - sse / sst) : 0.0f;
+                }
             }
             
             epoch_loss += loss;
@@ -5444,32 +5387,17 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             // 反向传播
             perf_timer_start(&trainer->backward_time);
             
-            // 计算损失梯度
-            float* loss_gradients = trainer->batch_outputs;  // 重用缓冲区
+            // 计算损失梯度 (使用统一的loss.c接口替代原有的MSE/MAE/CE-only内联)
+            float* loss_gradients = trainer->batch_outputs;
             size_t num_outputs = batch_size * output_dim;
             
-            switch (trainer->config.loss_function) {
-                case LOSS_MEAN_SQUARED_ERROR:
-                    loss_mean_squared_error_gradient(trainer->batch_outputs,
-                                                    batch_targets,
-                                                    loss_gradients, num_outputs);
-                    break;
-                case LOSS_MEAN_ABSOLUTE_ERROR:
-                    loss_mean_absolute_error_gradient(trainer->batch_outputs,
-                                                     batch_targets,
-                                                     loss_gradients, num_outputs);
-                    break;
-                case LOSS_CROSS_ENTROPY:
-                    loss_cross_entropy_gradient(trainer->batch_outputs,
-                                               batch_targets,
-                                               loss_gradients, num_outputs);
-                    break;
-                default:
-                    loss_mean_squared_error_gradient(trainer->batch_outputs,
-                                                    batch_targets,
-                                                    loss_gradients, num_outputs);
-                    break;
-            }
+            /* ZSFX-P0: 统一损失函数路径。
+             * 使用 loss_gradient_ex 替代原有的3种内联损失梯度函数，
+             * 完整支持MSE/MAE/Huber/CrossEntropy/Focal/Dice/Triplet等11种损失。
+             * config=NULL使用硬编码默认值（Huber delta=1.0, Focal gamma=2.0等） */
+            loss_gradient_ex(trainer->batch_outputs, batch_targets,
+                             (int)num_outputs, loss_gradients,
+                             trainer->config.loss_function, NULL);
             
             // 反向传播路径选择：GPU → 混合精度 → 标准CPU
             int backward_done = 0;

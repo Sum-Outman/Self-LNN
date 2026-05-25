@@ -289,6 +289,54 @@ static float hp_gaussian_kernel(float dist_sq, float length_scale) {
     return expf(-0.5f * dist_sq / (length_scale * length_scale + 1e-10f));
 }
 
+/* ============================================================================
+ * Cholesky分解：正定对称矩阵 A(n×n) 分解为 A = L * L^T
+ * 结果L（下三角含对角线）就地覆盖A，上三角部分不修改
+ * 返回值：0成功，-1矩阵非正定
+ * ============================================================================ */
+static int hp_cholesky_decompose(float* A, int n) {
+    for (int j = 0; j < n; j++) {
+        float s = 0.0f;
+        for (int k = 0; k < j; k++) {
+            s += A[j * n + k] * A[j * n + k];
+        }
+        float diag_val = A[j * n + j] - s;
+        if (diag_val <= 1e-15f) return -1;
+        A[j * n + j] = sqrtf(diag_val);
+        float inv_diag = 1.0f / A[j * n + j];
+        for (int i = j + 1; i < n; i++) {
+            s = 0.0f;
+            for (int k = 0; k < j; k++) {
+                s += A[i * n + k] * A[j * n + k];
+            }
+            A[i * n + j] = (A[i * n + j] - s) * inv_diag;
+        }
+    }
+    return 0;
+}
+
+/* 前向代入：求解下三角系统 L * x = b，L[i*n+i]为对角线 */
+static void hp_forward_solve(const float* L, int n, const float* b, float* x) {
+    for (int i = 0; i < n; i++) {
+        float s = 0.0f;
+        for (int j = 0; j < i; j++) {
+            s += L[i * n + j] * x[j];
+        }
+        x[i] = (b[i] - s) / L[i * n + i];
+    }
+}
+
+/* 后向代入：求解上三角系统 L^T * x = b，L^T[i*n+j] = L[j*n+i] */
+static void hp_backward_solve(const float* L, int n, const float* b, float* x) {
+    for (int i = n - 1; i >= 0; i--) {
+        float s = 0.0f;
+        for (int j = i + 1; j < n; j++) {
+            s += L[j * n + i] * x[j];
+        }
+        x[i] = (b[i] - s) / L[i * n + i];
+    }
+}
+
 static int hp_bayesian_search_next(HyperparameterSearch* search, float* out_params) {
     if (search->trial_count >= search->max_trials) return -1;
     if (search->trial_count < search->param_count + 1) {
@@ -344,23 +392,37 @@ static int hp_bayesian_search_next(HyperparameterSearch* search, float* out_para
             k_star[i] = hp_gaussian_kernel(dist_sq, length_scale);
         }
         float k_star_star = 1.0f + sigma_noise;
-        memset(K_inv_y, 0, (size_t)n * sizeof(float));
+        /* 在核矩阵K对角线添加微扰项jitter，保证Cholesky分解数值稳定性 */
         for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                K_inv_y[i] += K[i * n + j] * y[j];
-            }
+            K[i * n + i] += 1e-6f;
         }
+        /* Cholesky分解：K = L * L^T，就地覆盖K的下三角 */
+        if (hp_cholesky_decompose(K, n) != 0) {
+            continue;
+        }
+        /* 分配临时缓冲区用于前向/后向代入中间结果 */
+        float* z_buf = (float*)safe_calloc((size_t)n, sizeof(float));
+        if (!z_buf) {
+            continue;
+        }
+        /* 求解 alpha = K^{-1} * y：分两步
+         * 步骤1：前向代入 L*z = y  →  z = L^{-1}*y
+         * 步骤2：后向代入 L^T*alpha = z  →  alpha = L^{-T}*z = K^{-1}*y */
+        hp_forward_solve(K, n, y, z_buf);
+        hp_backward_solve(K, n, z_buf, K_inv_y);
+        /* GP后验均值：mu* = k*^T * K^{-1} * y = k*^T * alpha */
         float mu_star = 0.0f;
         for (int i = 0; i < n; i++) {
             mu_star += k_star[i] * K_inv_y[i];
         }
+        /* GP后验方差：sigma*^2 = k** - v^T*v，其中 v = L^{-1}*k* */
+        hp_forward_solve(K, n, k_star, z_buf);
         float sigma_sq_star = k_star_star;
         for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                sigma_sq_star -= k_star[i] * K_inv_y[i] * k_star[j];
-            }
+            sigma_sq_star -= z_buf[i] * z_buf[i];
         }
-        if (sigma_sq_star < 0.0f) sigma_sq_star = 0.0f;
+        safe_free((void**)&z_buf);
+        if (sigma_sq_star < 1e-10f) sigma_sq_star = 1e-10f;
         float sigma_star = sqrtf(sigma_sq_star);
         float best_y = y[0];
         for (int i = 1; i < n; i++) {

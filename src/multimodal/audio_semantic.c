@@ -282,6 +282,64 @@ typedef struct {
     int initialized;           /**< 是否已初始化 */
 } SpeakerRecognitionModel;
 
+/* 声音事件分类类别数量 */
+#define SOUND_EVENT_NUM_CLASSES 10
+/* 声音事件分类类别名称 */
+static const char* g_sound_event_class_names[SOUND_EVENT_NUM_CLASSES] = {
+    "人声",     /* 0: 说话、歌唱等人声 */
+    "音乐",     /* 1: 乐器演奏、歌曲等音乐 */
+    "动物声",   /* 2: 狗叫、猫叫、鸟鸣等动物发声 */
+    "机械声",   /* 3: 引擎、机器运转等机械声音 */
+    "自然声",   /* 4: 风声、雨声、雷声等自然现象 */
+    "交通声",   /* 5: 车辆行驶、鸣笛等交通噪音 */
+    "警报声",   /* 6: 警笛、火警等警报信号 */
+    "静音",     /* 7: 无声音或背景噪音极低 */
+    "碰撞声",   /* 8: 撞击、破碎等突发冲击声 */
+    "其他"      /* 9: 无法明确归类的环境声音 */
+};
+
+/**
+ * @brief 声音事件分类结果结构体
+ */
+typedef struct {
+    int class_id;                                   /**< 分类类别ID */
+    char class_name[32];                            /**< 分类类别名称 */
+    float probabilities[SOUND_EVENT_NUM_CLASSES];   /**< 各类别概率 */
+    float confidence;                               /**< 最高类别置信度 */
+    int used_mlp;                                   /**< 是否使用了MLP+CfC路径（1=MLP路径，0=模板匹配回退） */
+} SoundEventResult;
+
+/**
+ * @brief 声音事件分类MLP+CfC ODE模型（深度神经网络）
+ * 
+ * 架构: MFCC特征 → MLP(128) → MLP(64) → CfC ODE演化 → softmax输出
+ * 支持训练权重持久化（二进制文件保存/加载）
+ */
+typedef struct {
+    /* MLP第1层: input_dim → 128 */
+    float* w1;        /**< 权重矩阵 [128 × input_dim] */
+    float* b1;        /**< 偏置向量 [128] */
+    /* MLP第2层: 128 → 64 */
+    float* w2;        /**< 权重矩阵 [64 × 128] */
+    float* b2;        /**< 偏置向量 [64] */
+    /* CfC ODE参数: dx/dt = (-x + σ(W_cfc*x + U_cfc*y + b_cfc) ⊙ tanh(W_cfc*x + U_cfc*y + b_cfc)) / τ */
+    float* w_cfc;     /**< W_cfc权重矩阵 [64 × 64] */
+    float* u_cfc;     /**< U_cfc循环权重矩阵 [64 × 64]（输入投影到状态空间） */
+    float* b_cfc;     /**< CfC偏置向量 [64] */
+    float  tau;       /**< CfC时间常数τ（控制演化速度） */
+    int    cfc_steps; /**< CfC ODE时间步数（Euler离散化步数） */
+    /* 输出层: 64 → num_classes */
+    float* w_out;     /**< 输出权重矩阵 [num_classes × 64] */
+    float* b_out;     /**< 输出偏置向量 [num_classes] */
+    /* 模型元数据 */
+    int input_dim;    /**< 输入特征维度（MFCC系数数量） */
+    int num_classes;  /**< 分类类别数量 */
+    int trained;      /**< 是否已加载训练权重 */
+    int initialized;  /**< 是否已初始化内存 */
+    /* 模板匹配回退：各类别的MFCC均值模板 */
+    float* template_means;  /**< 模板均值矩阵 [num_classes × input_dim] */
+} SoundEventModel;
+
 /**
  * @brief 音频语义理解器内部结构
  */
@@ -304,6 +362,7 @@ struct AudioSemanticProcessor {
     IntentModel intent_model;             /**< 意图识别模型 */
     KeywordModel keyword_model;           /**< 关键词提取模型 */
     SpeakerRecognitionModel speaker_model; /**< 说话人识别模型 */
+    SoundEventModel sound_event_model;     /**< 声音事件分类模型（MLP+CfC ODE） */
     
     /* 液态神经网络组件 */
     LNN* audio_lnn;                       /**< 音频特征处理LNN */
@@ -569,6 +628,186 @@ static void keyword_model_init(KeywordModel* model, int vocab_size, int embeddin
     }
 }
 
+/**
+ * @brief 声音事件分类MLP+CfC ODE模型初始化
+ * 
+ * 使用Xavier/He初始化所有层的权重矩阵，构建三层MLP+CfC ODE架构：
+ *   MFCC特征 → MLP ReLU(128) → MLP ReLU(64) → CfC ODE演化 → softmax输出
+ */
+static void sound_event_model_init(SoundEventModel* model, int input_dim) {
+    memset(model, 0, sizeof(SoundEventModel));
+    model->input_dim = input_dim;
+    model->num_classes = SOUND_EVENT_NUM_CLASSES;
+    model->trained = 0;
+    model->initialized = 0;
+    /* CfC ODE配置 */
+    model->tau = 0.1f;        /* 时间常数τ：小值=快响应，大值=慢积分 */
+    model->cfc_steps = 8;     /* Euler离散化步数 */
+
+    int hidden1 = 128;
+    int hidden2 = 64;
+    int num_classes = model->num_classes;
+
+    /* 分配MLP第1层内存 [128 × input_dim] 权重 + [128] 偏置 */
+    model->w1 = (float*)audio_semantic_calloc(hidden1 * input_dim, sizeof(float));
+    model->b1 = (float*)audio_semantic_calloc(hidden1, sizeof(float));
+    /* 分配MLP第2层内存 [64 × 128] 权重 + [64] 偏置 */
+    model->w2 = (float*)audio_semantic_calloc(hidden2 * hidden1, sizeof(float));
+    model->b2 = (float*)audio_semantic_calloc(hidden2, sizeof(float));
+    /* 分配CfC ODE参数 [64 × 64] + [64 × 64] + [64] */
+    model->w_cfc = (float*)audio_semantic_calloc(hidden2 * hidden2, sizeof(float));
+    model->u_cfc = (float*)audio_semantic_calloc(hidden2 * hidden2, sizeof(float));
+    model->b_cfc = (float*)audio_semantic_calloc(hidden2, sizeof(float));
+    /* 分配输出层内存 [num_classes × 64] + [num_classes] */
+    model->w_out = (float*)audio_semantic_calloc(num_classes * hidden2, sizeof(float));
+    model->b_out = (float*)audio_semantic_calloc(num_classes, sizeof(float));
+    /* 分配模板匹配回退内存 [num_classes × input_dim] */
+    model->template_means = (float*)audio_semantic_calloc(num_classes * input_dim, sizeof(float));
+
+    if (!model->w1 || !model->b1 || !model->w2 || !model->b2 ||
+        !model->w_cfc || !model->u_cfc || !model->b_cfc ||
+        !model->w_out || !model->b_out || !model->template_means) {
+        /* 内存分配失败，释放已分配的内存 */
+        sound_event_model_free(model);
+        return;
+    }
+
+    /* ---- Xavier/Glorot初始化（均匀分布） ---- */
+    /* 确定性种子生成函数（遵循项目风格） */
+    #define SOUND_INIT_SEED(i, extra) \
+        (unsigned int)(uintptr_t)model ^ (unsigned int)input_dim ^ \
+        (unsigned int)hidden1 ^ (unsigned int)hidden2 ^ (unsigned int)(i) ^ (unsigned int)(extra)
+
+    /* MLP第1层: W1 [128 × input_dim], Xavier init */
+    {
+        float xavier_range = sqrtf(6.0f / (float)(input_dim + hidden1));
+        for (int i = 0; i < hidden1 * input_dim; i++) {
+            unsigned int seed = SOUND_INIT_SEED(i, 0x1A2B);
+            seed = seed * 1103515245 + 12345;
+            unsigned int rand_val = (seed >> 16) & 0x7FFF;
+            model->w1[i] = ((float)rand_val / 32767.0f) * 2.0f * xavier_range - xavier_range;
+        }
+        for (int i = 0; i < hidden1; i++) {
+            unsigned int seed = SOUND_INIT_SEED(i, 0x3C4D);
+            seed = seed * 1103515245 + 12345;
+            unsigned int rand_val = (seed >> 16) & 0x7FFF;
+            model->b1[i] = ((float)rand_val / 32767.0f) * 0.02f - 0.01f;
+        }
+    }
+
+    /* MLP第2层: W2 [64 × 128], Xavier init */
+    {
+        float xavier_range = sqrtf(6.0f / (float)(hidden1 + hidden2));
+        for (int i = 0; i < hidden2 * hidden1; i++) {
+            unsigned int seed = SOUND_INIT_SEED(i, 0x5E6F);
+            seed = seed * 1103515245 + 12345;
+            unsigned int rand_val = (seed >> 16) & 0x7FFF;
+            model->w2[i] = ((float)rand_val / 32767.0f) * 2.0f * xavier_range - xavier_range;
+        }
+        for (int i = 0; i < hidden2; i++) {
+            unsigned int seed = SOUND_INIT_SEED(i, 0x7A8B);
+            seed = seed * 1103515245 + 12345;
+            unsigned int rand_val = (seed >> 16) & 0x7FFF;
+            model->b2[i] = ((float)rand_val / 32767.0f) * 0.02f - 0.01f;
+        }
+    }
+
+    /* CfC ODE参数: W_cfc [64 × 64], U_cfc [64 × 64], He init（针对ReLU/σ激活） */
+    {
+        float he_scale = sqrtf(2.0f / (float)hidden2);
+        for (int i = 0; i < hidden2 * hidden2; i++) {
+            unsigned int seed = SOUND_INIT_SEED(i, 0x9CDE);
+            seed = seed * 1103515245 + 12345;
+            unsigned int rand_val = (seed >> 16) & 0x7FFF;
+            /* 使用正态分布近似：Box-Muller变换的简化版本，范围限制在±3σ内 */
+            float u1 = (float)(rand_val) / 32767.0f;
+            float u2 = (float)((rand_val * 17 + 31) & 0x7FFF) / 32767.0f;
+            float normal_val = sqrtf(-2.0f * logf(u1 + 1e-8f)) * cosf(2.0f * 3.14159265f * u2);
+            model->w_cfc[i] = normal_val * he_scale * 0.5f; /* 适度缩放出稳定初始动态 */
+        }
+        for (int i = 0; i < hidden2 * hidden2; i++) {
+            unsigned int seed = SOUND_INIT_SEED(i, 0xEF01);
+            seed = seed * 1103515245 + 12345;
+            unsigned int rand_val = (seed >> 16) & 0x7FFF;
+            float u1 = (float)(rand_val) / 32767.0f;
+            float u2 = (float)((rand_val * 19 + 53) & 0x7FFF) / 32767.0f;
+            float normal_val = sqrtf(-2.0f * logf(u1 + 1e-8f)) * cosf(2.0f * 3.14159265f * u2);
+            model->u_cfc[i] = normal_val * he_scale * 0.3f; /* 循环权重更小，防止状态爆炸 */
+        }
+        for (int i = 0; i < hidden2; i++) {
+            model->b_cfc[i] = 0.0f; /* 偏置初始化为零 */
+        }
+    }
+
+    /* 输出层: W_out [num_classes × 64], Xavier init */
+    {
+        float xavier_range = sqrtf(6.0f / (float)(hidden2 + num_classes));
+        for (int i = 0; i < num_classes * hidden2; i++) {
+            unsigned int seed = SOUND_INIT_SEED(i, 0x2345);
+            seed = seed * 1103515245 + 12345;
+            unsigned int rand_val = (seed >> 16) & 0x7FFF;
+            model->w_out[i] = ((float)rand_val / 32767.0f) * 2.0f * xavier_range - xavier_range;
+        }
+        for (int i = 0; i < num_classes; i++) {
+            model->b_out[i] = 0.0f;
+        }
+    }
+
+    #undef SOUND_INIT_SEED
+
+    /* 初始化模板匹配回退：为各类别设置合理的手工MFCC均值模板
+     * 这些模板基于典型声音的MFCC特征分布统计特性设定，
+     * 在MLP权重未加载时作为回退分类器使用 */
+    if (model->template_means && input_dim > 0) {
+        int td = input_dim;
+        float* tm = model->template_means;
+        
+        /* 类别0: 人声 —— 基频谐波丰富，中高频能量分布分散 */
+        for (int c = 0; c < td; c++) {
+            tm[0 * td + c] = (c < 3) ? 0.5f : (c < 8) ? 0.3f : 0.05f;
+        }
+        /* 类别1: 音乐 —— 频谱谐波结构规律，能量分布周期性 */
+        for (int c = 0; c < td; c++) {
+            tm[1 * td + c] = (c % 3 == 0) ? 0.4f : (c < 6) ? 0.25f : 0.1f;
+        }
+        /* 类别2: 动物声 —— 高基频、突然起音，高频能量突出 */
+        for (int c = 0; c < td; c++) {
+            tm[2 * td + c] = (c < 5) ? 0.15f : (c < 10) ? 0.45f : 0.2f;
+        }
+        /* 类别3: 机械声 —— 宽带噪声、低频能量集中、缺乏谐波结构 */
+        for (int c = 0; c < td; c++) {
+            tm[3 * td + c] = (c < 4) ? 0.5f : (c < 8) ? 0.2f : 0.02f;
+        }
+        /* 类别4: 自然声 —— 平稳宽带频谱，中等相关系数 */
+        for (int c = 0; c < td; c++) {
+            tm[4 * td + c] = (c < 6) ? 0.3f : (c < 10) ? 0.2f : 0.05f;
+        }
+        /* 类别5: 交通声 —— 低频突出、连续噪声 */
+        for (int c = 0; c < td; c++) {
+            tm[5 * td + c] = (c < 2) ? 0.6f : (c < 6) ? 0.25f : 0.03f;
+        }
+        /* 类别6: 警报声 —— 周期性扫频、鲜明的频谱峰值 */
+        for (int c = 0; c < td; c++) {
+            tm[6 * td + c] = (c >= 4 && c < 8) ? 0.6f : 0.1f;
+        }
+        /* 类别7: 静音 —— 所有MFCC系数接近零 */
+        for (int c = 0; c < td; c++) {
+            tm[7 * td + c] = 0.01f;
+        }
+        /* 类别8: 碰撞声 —— 宽带瞬态、攻击性强，短时高频能量大 */
+        for (int c = 0; c < td; c++) {
+            tm[8 * td + c] = (c < 3) ? 0.3f : (c < 7) ? 0.35f : 0.15f;
+        }
+        /* 类别9: 其他 —— 各维度均衡中低值 */
+        for (int c = 0; c < td; c++) {
+            tm[9 * td + c] = 0.15f;
+        }
+    }
+
+    model->trained = 0;
+    model->initialized = 1;
+}
+
 static void emotion_model_free(EmotionModel* model) {
     if (model->weights_input_hidden) audio_semantic_free(model->weights_input_hidden);
     if (model->bias_hidden) audio_semantic_free(model->bias_hidden);
@@ -588,6 +827,25 @@ static void intent_model_free(IntentModel* model) {
 static void keyword_model_free(KeywordModel* model) {
     if (model->embeddings) audio_semantic_free(model->embeddings);
     memset(model, 0, sizeof(KeywordModel));
+}
+
+/**
+ * @brief 释放声音事件分类MLP+CfC ODE模型的所有内存
+ */
+static void sound_event_model_free(SoundEventModel* model) {
+    if (!model) return;
+    if (model->w1)          { audio_semantic_free(model->w1);          model->w1 = NULL; }
+    if (model->b1)          { audio_semantic_free(model->b1);          model->b1 = NULL; }
+    if (model->w2)          { audio_semantic_free(model->w2);          model->w2 = NULL; }
+    if (model->b2)          { audio_semantic_free(model->b2);          model->b2 = NULL; }
+    if (model->w_cfc)       { audio_semantic_free(model->w_cfc);       model->w_cfc = NULL; }
+    if (model->u_cfc)       { audio_semantic_free(model->u_cfc);       model->u_cfc = NULL; }
+    if (model->b_cfc)       { audio_semantic_free(model->b_cfc);       model->b_cfc = NULL; }
+    if (model->w_out)       { audio_semantic_free(model->w_out);       model->w_out = NULL; }
+    if (model->b_out)       { audio_semantic_free(model->b_out);       model->b_out = NULL; }
+    if (model->template_means) { audio_semantic_free(model->template_means); model->template_means = NULL; }
+    model->initialized = 0;
+    model->trained = 0;
 }
 
 /* ========== 公开API实现 ========== */
@@ -828,6 +1086,7 @@ void audio_semantic_processor_free(AudioSemanticProcessor* processor) {
     emotion_model_free(&processor->emotion_model);
     intent_model_free(&processor->intent_model);
     keyword_model_free(&processor->keyword_model);
+    sound_event_model_free(&processor->sound_event_model);  /* 释放声音事件分类MLP+CfC模型 */
     
     /* 释放说话人识别模型 */
     if (processor->speaker_model.initialized) {
@@ -3628,6 +3887,9 @@ static int audio_semantic_init_models(AudioSemanticProcessor* processor) {
         processor->speaker_model.initialized = 1;
     }
     
+    /* 初始化声音事件分类模型（MLP+CfC ODE） */
+    sound_event_model_init(&processor->sound_event_model, input_dim);
+    
     return 0;
 }
 
@@ -6325,5 +6587,397 @@ int audio_separate_sources(const float* mixed, int len, int sr, float* s1, float
     if(!mixed||!s1||!s2||len<64) return -1;
     int h=len/2; if(h<64)h=64; for(int i=0;i<h;i++){s1[i]=mixed[i]*0.8f;s2[i]=mixed[i+h]*0.2f;}
     *len_out=h; return 0;
+}
+
+/* ========== 声音事件分类（MLP+CfC ODE深度神经网络实现） ========== */
+
+/**
+ * @brief 使用CfC ODE神经网络对声音事件进行分类
+ * 
+ * 完整架构：
+ *   输入：MFCC特征向量 x(t) ∈ R^{input_dim}
+ *   MLP第1层：h1 = ReLU(W1 @ x + b1)   [input_dim → 128]
+ *   MLP第2层：h2 = ReLU(W2 @ h1 + b2)   [128 → 64]
+ *   CfC ODE：dh/dt = (-h + σ(W_cfc·h + U_cfc·h2 + b_cfc) ⊙ tanh(W_cfc·h + U_cfc·h2 + b_cfc)) / τ
+ *            Euler离散化，演化cfc_steps步
+ *   输出：logits = W_out @ h_final + b_out
+ *         prob = softmax(logits)
+ * 
+ * 回退机制：当MLP权重未加载时，使用MFCC均值模板的欧氏距离匹配
+ * 
+ * @param processor 音频语义理解器句柄
+ * @param mfcc_features MFCC特征向量（长度为input_dim）
+ * @param input_dim MFCC特征维度
+ * @param result 声音事件分类结果输出
+ * @return int 成功返回0，失败返回-1
+ */
+int as_classify_sound_event(AudioSemanticProcessor* processor,
+                            const float* mfcc_features,
+                            int input_dim,
+                            SoundEventResult* result) {
+    if (!processor || !mfcc_features || !result || input_dim <= 0) {
+        return -1;
+    }
+
+    memset(result, 0, sizeof(SoundEventResult));
+
+    SoundEventModel* model = &processor->sound_event_model;
+
+    /* 检查模型是否已初始化 */
+    if (!model->initialized) {
+        return -1;
+    }
+
+    int hidden1 = 128;
+    int hidden2 = 64;
+    int num_classes = SOUND_EVENT_NUM_CLASSES;
+
+    /* 如果MFCC维度不匹配，先进行维度适配 */
+    float adapted_features[32]; /* 最大支持32维MFCC */
+    int adapted_dim = input_dim;
+    if (input_dim > 32) adapted_dim = 32;
+    if (model->input_dim > 0) adapted_dim = model->input_dim;
+
+    if (adapted_dim > 32) adapted_dim = 32;
+    for (int i = 0; i < adapted_dim; i++) {
+        adapted_features[i] = (i < input_dim) ? mfcc_features[i] : 0.0f;
+    }
+
+    /* ===== 路径1：MLP+CfC ODE神经网络分类（权重已加载时） ===== */
+    if (model->trained && model->w1 && model->w2 && model->w_cfc && model->w_out) {
+        /* ---- MLP第1层：全连接 + ReLU ---- */
+        float h1[128];
+        for (int i = 0; i < hidden1; i++) {
+            float sum = model->b1[i];
+            for (int j = 0; j < adapted_dim; j++) {
+                sum += model->w1[i * adapted_dim + j] * adapted_features[j];
+            }
+            /* ReLU激活 */
+            h1[i] = (sum > 0.0f) ? sum : 0.0f;
+        }
+
+        /* ---- MLP第2层：全连接 + ReLU ---- */
+        float h2[64];
+        for (int i = 0; i < hidden2; i++) {
+            float sum = model->b2[i];
+            for (int j = 0; j < hidden1; j++) {
+                sum += model->w2[i * hidden1 + j] * h1[j];
+            }
+            h2[i] = (sum > 0.0f) ? sum : 0.0f;
+        }
+
+        /* ---- CfC ODE演化 ---- */
+        /* 公式：dh/dt = (-h + σ(W*h + U*h2 + b) ⊙ tanh(W*h + U*h2 + b)) / τ
+         * Euler离散化：h(t+Δt) = h(t) + Δt * [(-h(t) + σ(W*h(t)+U*h2+b) ⊙ tanh(W*h(t)+U*h2+b)) / τ]
+         * 其中 h2 是外部输入（来自MLP第2层的投影），在整个演化过程中保持不变 */
+        float h_cfc[64];
+        /* 初始化状态为h2投影 */
+        for (int i = 0; i < hidden2; i++) {
+            h_cfc[i] = h2[i] * 0.1f; /* 小值初始化利于稳定演化 */
+        }
+
+        float dt = model->tau / (float)model->cfc_steps;
+        float inv_tau = 1.0f / model->tau;
+
+        for (int step = 0; step < model->cfc_steps; step++) {
+            float dh[64];
+            for (int i = 0; i < hidden2; i++) {
+                /* 计算联合输入：W*h + U*h2 + b */
+                float combined = model->b_cfc[i];
+                for (int j = 0; j < hidden2; j++) {
+                    combined += model->w_cfc[i * hidden2 + j] * h_cfc[j];
+                    combined += model->u_cfc[i * hidden2 + j] * h2[j];
+                }
+                /* σ(combined) ⊙ tanh(combined) */
+                float sigmoid_val = 1.0f / (1.0f + expf(-combined));
+                float tanh_val = tanhf(combined);
+                float nonlinear = sigmoid_val * tanh_val;
+
+                /* dh = inv_tau * (-h + nonlinear) */
+                dh[i] = inv_tau * (-h_cfc[i] + nonlinear);
+            }
+            /* Euler步进 */
+            for (int i = 0; i < hidden2; i++) {
+                h_cfc[i] += dt * dh[i];
+            }
+        }
+
+        /* ---- 输出层：logits = W_out @ h_final + b_out ---- */
+        float logits[SOUND_EVENT_NUM_CLASSES];
+        float max_logit = -1e12f;
+        for (int i = 0; i < num_classes; i++) {
+            float sum = model->b_out[i];
+            for (int j = 0; j < hidden2; j++) {
+                sum += model->w_out[i * hidden2 + j] * h_cfc[j];
+            }
+            logits[i] = sum;
+            if (sum > max_logit) max_logit = sum;
+        }
+
+        /* ---- softmax概率计算（数值稳定版本） ---- */
+        float exp_sum = 0.0f;
+        float exp_vals[SOUND_EVENT_NUM_CLASSES];
+        for (int i = 0; i < num_classes; i++) {
+            exp_vals[i] = expf(logits[i] - max_logit);
+            exp_sum += exp_vals[i];
+        }
+        for (int i = 0; i < num_classes; i++) {
+            result->probabilities[i] = exp_vals[i] / (exp_sum + 1e-8f);
+        }
+
+        /* 找到最高概率的类别 */
+        int best_class = 0;
+        float best_prob = result->probabilities[0];
+        for (int i = 1; i < num_classes; i++) {
+            if (result->probabilities[i] > best_prob) {
+                best_prob = result->probabilities[i];
+                best_class = i;
+            }
+        }
+
+        result->class_id = best_class;
+        result->confidence = best_prob;
+        strncpy(result->class_name, g_sound_event_class_names[best_class], 31);
+        result->class_name[31] = '\0';
+        result->used_mlp = 1;
+    } else {
+        /* ===== 路径2：模板匹配回退（MFCC均值模板欧氏距离） ===== */
+        if (!model->template_means) {
+            return -1;
+        }
+
+        float min_distance = 1e12f;
+        int best_class = num_classes - 1; /* 默认为"其他" */
+
+        for (int cls = 0; cls < num_classes; cls++) {
+            float dist = 0.0f;
+            for (int d = 0; d < adapted_dim; d++) {
+                float diff = adapted_features[d] - model->template_means[cls * adapted_dim + d];
+                dist += diff * diff;
+            }
+            dist = sqrtf(dist);
+
+            if (dist < min_distance) {
+                min_distance = dist;
+                best_class = cls;
+            }
+        }
+
+        /* 将距离转换为概率（使用softmin：prob ∝ exp(-distance / temperature)） */
+        float temperature = 0.5f;
+        float distances[SOUND_EVENT_NUM_CLASSES];
+        float max_d = -1e12f;
+        for (int cls = 0; cls < num_classes; cls++) {
+            float d = 0.0f;
+            for (int i = 0; i < adapted_dim; i++) {
+                float diff = adapted_features[i] - model->template_means[cls * adapted_dim + i];
+                d += diff * diff;
+            }
+            distances[cls] = sqrtf(d);
+            if (-distances[cls] / temperature > max_d) {
+                max_d = -distances[cls] / temperature;
+            }
+        }
+
+        float exp_sum = 0.0f;
+        for (int cls = 0; cls < num_classes; cls++) {
+            float val = expf(-distances[cls] / temperature - max_d);
+            result->probabilities[cls] = val;
+            exp_sum += val;
+        }
+        for (int cls = 0; cls < num_classes; cls++) {
+            result->probabilities[cls] /= (exp_sum + 1e-8f);
+        }
+
+        /* 为模板匹配设置合理的置信度（基于距离比） */
+        float second_min = 1e12f;
+        for (int cls = 0; cls < num_classes; cls++) {
+            if (cls != best_class && distances[cls] < second_min) {
+                second_min = distances[cls];
+            }
+        }
+        float margin = (second_min - min_distance) / (min_distance + 1e-8f);
+        float conf = 1.0f / (1.0f + expf(-margin * 3.0f));
+        if (conf < 0.3f) conf = 0.3f;
+
+        result->class_id = best_class;
+        result->confidence = conf;
+        strncpy(result->class_name, g_sound_event_class_names[best_class], 31);
+        result->class_name[31] = '\0';
+        result->used_mlp = 0;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 保存声音事件分类MLP+CfC ODE模型权重到二进制文件
+ * 
+ * 文件格式：
+ *   [4字节] 魔术字 "ASMC" (Audio Sound Model CfC)
+ *   [4字节] input_dim
+ *   [4字节] num_classes
+ *   [4字节] trained标志
+ *   [MLP第1层] w1(input_dim*128) + b1(128)
+ *   [MLP第2层] w2(128*64) + b2(64)
+ *   [CfC ODE] w_cfc(64*64) + u_cfc(64*64) + b_cfc(64) + tau(4) + cfc_steps(4)
+ *   [输出层] w_out(num_classes*64) + b_out(num_classes)
+ *   [模板] template_means(num_classes*input_dim)
+ * 
+ * @param processor 音频语义理解器句柄
+ * @param filepath 保存文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int as_save_sound_model(AudioSemanticProcessor* processor, const char* filepath) {
+    if (!processor || !filepath) return -1;
+
+    SoundEventModel* model = &processor->sound_event_model;
+    if (!model->initialized) return -1;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) {
+        log_error("as_save_sound_model: 无法打开文件 %s\n", filepath);
+        return -1;
+    }
+
+    /* 写入魔术字 */
+    const char magic[4] = {'A', 'S', 'M', 'C'};
+    if (fwrite(magic, 4, 1, fp) != 1) { fclose(fp); return -1; }
+
+    int input_dim = model->input_dim;
+    int num_classes = model->num_classes;
+    int trained = model->trained;
+    int hidden1 = 128;
+    int hidden2 = 64;
+
+    /* 写入元数据 */
+    if (fwrite(&input_dim, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fwrite(&num_classes, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fwrite(&trained, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    /* 写入MLP第1层权重和偏置 [128 × input_dim] + [128] */
+    if (model->w1 && fwrite(model->w1, sizeof(float), hidden1 * input_dim, fp) != (size_t)(hidden1 * input_dim)) { fclose(fp); return -1; }
+    if (model->b1 && fwrite(model->b1, sizeof(float), hidden1, fp) != (size_t)hidden1) { fclose(fp); return -1; }
+
+    /* 写入MLP第2层权重和偏置 [64 × 128] + [64] */
+    if (model->w2 && fwrite(model->w2, sizeof(float), hidden2 * hidden1, fp) != (size_t)(hidden2 * hidden1)) { fclose(fp); return -1; }
+    if (model->b2 && fwrite(model->b2, sizeof(float), hidden2, fp) != (size_t)hidden2) { fclose(fp); return -1; }
+
+    /* 写入CfC ODE参数 [64 × 64] + [64 × 64] + [64] */
+    if (model->w_cfc && fwrite(model->w_cfc, sizeof(float), hidden2 * hidden2, fp) != (size_t)(hidden2 * hidden2)) { fclose(fp); return -1; }
+    if (model->u_cfc && fwrite(model->u_cfc, sizeof(float), hidden2 * hidden2, fp) != (size_t)(hidden2 * hidden2)) { fclose(fp); return -1; }
+    if (model->b_cfc && fwrite(model->b_cfc, sizeof(float), hidden2, fp) != (size_t)hidden2) { fclose(fp); return -1; }
+    if (fwrite(&model->tau, sizeof(float), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fwrite(&model->cfc_steps, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    /* 写入输出层权重和偏置 [num_classes × 64] + [num_classes] */
+    if (model->w_out && fwrite(model->w_out, sizeof(float), num_classes * hidden2, fp) != (size_t)(num_classes * hidden2)) { fclose(fp); return -1; }
+    if (model->b_out && fwrite(model->b_out, sizeof(float), num_classes, fp) != (size_t)num_classes) { fclose(fp); return -1; }
+
+    /* 写入模板匹配回退数据 [num_classes × input_dim] */
+    if (model->template_means && fwrite(model->template_means, sizeof(float), num_classes * input_dim, fp) != (size_t)(num_classes * input_dim)) { fclose(fp); return -1; }
+
+    fclose(fp);
+    log_info("声音事件分类模型已保存到: %s (input_dim=%d, num_classes=%d, trained=%d)\n",
+             filepath, input_dim, num_classes, trained);
+    return 0;
+}
+
+/**
+ * @brief 从二进制文件加载声音事件分类MLP+CfC ODE模型权重
+ * 
+ * 文件格式与as_save_sound_model完全一致。
+ * 加载成功后设置model->trained=1，启用神经网络分类路径。
+ * 
+ * @param processor 音频语义理解器句柄
+ * @param filepath 模型文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int as_load_sound_model(AudioSemanticProcessor* processor, const char* filepath) {
+    if (!processor || !filepath) return -1;
+
+    SoundEventModel* model = &processor->sound_event_model;
+    if (!model->initialized) return -1;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) {
+        log_error("as_load_sound_model: 无法打开文件 %s\n", filepath);
+        return -1;
+    }
+
+    /* 验证魔术字 */
+    char magic[4];
+    if (fread(magic, 4, 1, fp) != 1) { fclose(fp); return -1; }
+    if (magic[0] != 'A' || magic[1] != 'S' || magic[2] != 'M' || magic[3] != 'C') {
+        log_error("as_load_sound_model: 无效的模型文件格式，魔术字不匹配\n");
+        fclose(fp);
+        return -1;
+    }
+
+    int file_input_dim, file_num_classes, file_trained;
+    if (fread(&file_input_dim, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&file_num_classes, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&file_trained, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    /* 验证维度兼容性 */
+    if (file_input_dim < 0 || file_num_classes != SOUND_EVENT_NUM_CLASSES) {
+        log_error("as_load_sound_model: 模型维度不兼容 (file_num_classes=%d, expected=%d)\n",
+                  file_num_classes, SOUND_EVENT_NUM_CLASSES);
+        fclose(fp);
+        return -1;
+    }
+
+    /* 如果文件中的input_dim与当前不一致，需要重建模型 */
+    if (file_input_dim != model->input_dim) {
+        log_info("as_load_sound_model: input_dim不匹配 (file=%d, current=%d)，重建模型\n",
+                 file_input_dim, model->input_dim);
+        sound_event_model_free(model);
+        sound_event_model_init(model, file_input_dim);
+        if (!model->initialized) {
+            fclose(fp);
+            return -1;
+        }
+    }
+
+    int input_dim = model->input_dim;
+    int num_classes = model->num_classes;
+    int hidden1 = 128;
+    int hidden2 = 64;
+
+    /* 读取MLP第1层权重和偏置 */
+    if (fread(model->w1, sizeof(float), (size_t)hidden1 * file_input_dim, fp) != (size_t)(hidden1 * file_input_dim)) { fclose(fp); return -1; }
+    if (fread(model->b1, sizeof(float), hidden1, fp) != (size_t)hidden1) { fclose(fp); return -1; }
+
+    /* 读取MLP第2层权重和偏置 */
+    if (fread(model->w2, sizeof(float), (size_t)hidden2 * hidden1, fp) != (size_t)(hidden2 * hidden1)) { fclose(fp); return -1; }
+    if (fread(model->b2, sizeof(float), hidden2, fp) != (size_t)hidden2) { fclose(fp); return -1; }
+
+    /* 读取CfC ODE参数 */
+    if (fread(model->w_cfc, sizeof(float), (size_t)hidden2 * hidden2, fp) != (size_t)(hidden2 * hidden2)) { fclose(fp); return -1; }
+    if (fread(model->u_cfc, sizeof(float), (size_t)hidden2 * hidden2, fp) != (size_t)(hidden2 * hidden2)) { fclose(fp); return -1; }
+    if (fread(model->b_cfc, sizeof(float), hidden2, fp) != (size_t)hidden2) { fclose(fp); return -1; }
+    if (fread(&model->tau, sizeof(float), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&model->cfc_steps, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    /* 读取输出层权重和偏置 */
+    if (fread(model->w_out, sizeof(float), (size_t)num_classes * hidden2, fp) != (size_t)(num_classes * hidden2)) { fclose(fp); return -1; }
+    if (fread(model->b_out, sizeof(float), num_classes, fp) != (size_t)num_classes) { fclose(fp); return -1; }
+
+    /* 读取模板匹配回退数据 */
+    if (fread(model->template_means, sizeof(float), (size_t)num_classes * file_input_dim, fp) != (size_t)(num_classes * file_input_dim)) { fclose(fp); return -1; }
+
+    fclose(fp);
+
+    model->trained = file_trained > 0 ? 1 : 0;
+    /* 如果文件中有异构的input_dim但模板已经加载到对应位置，标记为已训练 */
+    if (model->trained) {
+        log_info("声音事件分类模型已从 %s 加载成功 (input_dim=%d, num_classes=%d, MLP+CfC ODE)\n",
+                 filepath, input_dim, num_classes);
+    } else {
+        log_info("声音事件分类模型模板数据已从 %s 加载 (input_dim=%d, 仅模板匹配回退模式)\n",
+                 filepath, input_dim);
+    }
+
+    return 0;
 }
 

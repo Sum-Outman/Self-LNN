@@ -125,7 +125,7 @@ typedef struct DeviceProtocolManager DeviceProtocolManager;
 DeviceProtocolManager* device_protocol_create(void);
 void device_protocol_free(DeviceProtocolManager* dpm);
 
-int device_protocol_connect(DeviceProtocolManager* dpm, const DeviceProtocolConfig* config);
+int device_protocol_connect(DeviceProtocolManager* dpm, const DeviceProtocolConfig* config, int connect_timeout_ms);
 int device_protocol_disconnect(DeviceProtocolManager* dpm, const char* device_name);
 int device_protocol_is_connected(DeviceProtocolManager* dpm, const char* device_name);
 

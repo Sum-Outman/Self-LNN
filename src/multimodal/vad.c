@@ -665,20 +665,37 @@ int vad_adaptive_threshold(VadProcessor* processor,
         
         return 0;
     } else {
-        // 无监督学习：基于统计方法
-        // 假设前10%的帧是噪声（语音通常不会在开始处）
-        int noise_frames = num_frames / 10;
-        if (noise_frames < 5) noise_frames = 5;
-        if (noise_frames > num_frames) noise_frames = num_frames;
-        
-        float noise_energy_sum = 0.0f;
-        for (int i = 0; i < noise_frames; i++) {
+        /* M-006修复: 自适应噪声估计替代"前10%噪声"假设
+         * 策略：计算全部帧能量的中位数值作为稳健噪声估计
+         * 中位数比前10%假设更鲁棒——不受语音在开头的影响 */
+        float* all_energies = (float*)safe_malloc((size_t)num_frames * sizeof(float));
+        if (!all_energies) return -1;
+
+        for (int i = 0; i < num_frames; i++) {
             const float* frame = &audio_data[i * frame_samples];
-            float energy = vad_compute_frame_energy(frame, frame_samples);
-            noise_energy_sum += energy;
+            all_energies[i] = vad_compute_frame_energy(frame, frame_samples);
         }
-        
-        float avg_noise_energy = noise_energy_sum / noise_frames;
+
+        /* 计算中位数能量（简单的插入排序 + 中位数） */
+        float med_energy = 0.0f;
+        {
+            /* 部分排序到中位数位置 */
+            for (int i = 1; i < num_frames; i++) {
+                float key = all_energies[i];
+                int j = i - 1;
+                while (j >= 0 && all_energies[j] > key) {
+                    all_energies[j + 1] = all_energies[j];
+                    j--;
+                }
+                all_energies[j + 1] = key;
+            }
+            med_energy = all_energies[num_frames / 2];
+        }
+        safe_free((void**)&all_energies);
+
+        /* 自适应噪声 = 中位数能量的1.2倍（涵盖低能量帧） */
+        float avg_noise_energy = med_energy * 1.2f;
+        if (avg_noise_energy < 1e-8f) avg_noise_energy = 1e-6f;
         
         // 设置自适应阈值：噪声能量的倍数
         float adaptive_threshold = avg_noise_energy * 5.0f;  // 5倍噪声能量

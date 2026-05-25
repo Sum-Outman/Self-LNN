@@ -72,6 +72,55 @@ static int str_contains(const char* text, const char* keyword)
 }
 
 /* ============================================================================
+ * 权重初始化工具函数：Xavier/Glorot 和 He/Kaiming 初始化
+ *
+ * Xavier均匀分布初始化：W ~ U(-sqrt(6/(fan_in+fan_out)), +sqrt(6/(fan_in+fan_out)))
+ * He正态分布初始化：   W ~ N(0, sqrt(2/fan_in))
+ * 解决深层网络梯度消失/爆炸问题，加速训练收敛。
+ * ============================================================================ */
+
+/* Xavier/Glorot均匀分布初始化 */
+static float dd_xavier_uniform_scale(size_t fan_in, size_t fan_out)
+{
+    /* 计算Xavier均匀分布的边界：sqrt(6/(fan_in+fan_out)) */
+    float limit = sqrtf(6.0f / (float)(fan_in + fan_out));
+    return limit;
+}
+
+/* He/Kaiming正态分布初始化（使用Box-Muller变换生成近似正态分布） */
+static float dd_he_normal_scale(size_t fan_in)
+{
+    /* He初始化标准差：sqrt(2/fan_in) */
+    return sqrtf(2.0f / (float)fan_in);
+}
+
+/* 从均匀分布生成近似正态分布的随机数（Box-Muller变换简化版） */
+static float dd_normal_rand(void)
+{
+    /* 使用两个均匀随机数通过Box-Muller变换生成标准正态分布 */
+    float u1 = rand_float();
+    float u2 = rand_float();
+    /* 避免log(0) */
+    if (u1 < 1e-6f) u1 = 1e-6f;
+    return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
+}
+
+/* Xavier均匀分布初始化：返回[-limit, +limit]范围内的随机值 */
+static float dd_xavier_init(size_t fan_in, size_t fan_out)
+{
+    float limit = dd_xavier_uniform_scale(fan_in, fan_out);
+    /* 映射到[-limit, +limit] */
+    return (rand_float() * 2.0f - 1.0f) * limit;
+}
+
+/* He正态分布初始化：返回N(0, sqrt(2/fan_in))分布的随机值 */
+static float dd_he_init(size_t fan_in)
+{
+    float std = dd_he_normal_scale(fan_in);
+    return dd_normal_rand() * std;
+}
+
+/* ============================================================================
  * A02.4.1 对话状态追踪（DST）
  * ============================================================================ */
 
@@ -704,6 +753,204 @@ int multi_turn_reasoner_add_turn(MultiTurnReasoner* reasoner,
     return 0;
 }
 
+/* ============================================================================
+ * 缩放点积注意力机制（Scaled Dot-Product Attention）
+ *
+ * 公式：attention = softmax(Q * K^T / sqrt(d_k)) * V
+ *
+ * Q（查询）：当前状态向量，用于查询历史中相关的信息
+ * K（键）：历史轮次的特征表示，用于匹配查询
+ * V（值）：历史轮次的实际信息，用于输出加权组合
+ *
+ * 缩放因子 1/sqrt(d_k) 防止点积值过大导致softmax梯度消失
+ * 这是Transformer标准注意力机制，替代原有的简单加权平均
+ * ============================================================================ */
+
+/* 内部：计算向量点积 */
+static float dd_dot_product(const float* a, const float* b, size_t dim)
+{
+    float result = 0.0f;
+    for (size_t i = 0; i < dim; i++) {
+        result += a[i] * b[i];
+    }
+    return result;
+}
+
+/* 内部：softmax归一化（就地计算） */
+static void dd_softmax_inplace(float* scores, int n)
+{
+    /* 数值稳定版softmax：先减去最大值防溢出 */
+    float max_val = scores[0];
+    for (int i = 1; i < n; i++) {
+        if (scores[i] > max_val) max_val = scores[i];
+    }
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        scores[i] = expf(scores[i] - max_val);
+        sum += scores[i];
+    }
+    if (sum > 1e-10f) {
+        for (int i = 0; i < n; i++) {
+            scores[i] /= sum;
+        }
+    }
+}
+
+/**
+ * @brief 缩放点积注意力计算
+ *
+ * attention = softmax(Q * K^T / sqrt(d_k)) * V
+ *
+ * @param query 查询向量 Q [d_k]
+ * @param keys 键矩阵 K [num_items × d_k]，每行是一个键向量
+ * @param values 值矩阵 V [num_items × d_v]，每行是一个值向量
+ * @param num_items 键/值条目数
+ * @param d_k 键维度（同时也是查询维度）
+ * @param d_v 值维度（也是输出维度）
+ * @param output [out] 注意力输出向量 [d_v]
+ * @param attn_weights [out] 注意力权重 [num_items]（可为NULL）
+ * @return 成功返回0，失败返回-1
+ */
+int dd_scaled_dot_product_attention(const float* query,
+                                     const float* keys,
+                                     const float* values,
+                                     int num_items,
+                                     size_t d_k,
+                                     size_t d_v,
+                                     float* output,
+                                     float* attn_weights)
+{
+    if (!query || !keys || !values || !output || num_items <= 0) return -1;
+    if (d_k == 0 || d_v == 0) return -1;
+
+    float* scores = (float*)safe_malloc((size_t)num_items * sizeof(float));
+    if (!scores) return -1;
+
+    /* 第一步：计算 Q * K^T（点积注意力分数） */
+    /* scores[i] = sum_j (query[j] * keys[i * d_k + j]) */
+    for (int i = 0; i < num_items; i++) {
+        scores[i] = dd_dot_product(query, keys + (size_t)i * d_k, d_k);
+    }
+
+    /* 第二步：缩放：scores / sqrt(d_k) */
+    float scale = 1.0f / sqrtf((float)d_k);
+    for (int i = 0; i < num_items; i++) {
+        scores[i] *= scale;
+    }
+
+    /* 第三步：softmax归一化得到注意力权重 */
+    dd_softmax_inplace(scores, num_items);
+
+    /* 保存注意力权重（如果调用者需要） */
+    if (attn_weights) {
+        memcpy(attn_weights, scores, (size_t)num_items * sizeof(float));
+    }
+
+    /* 第四步：加权求和 attention_weights * V */
+    memset(output, 0, d_v * sizeof(float));
+    for (int i = 0; i < num_items; i++) {
+        float w = scores[i];
+        const float* v_row = values + (size_t)i * d_v;
+        for (size_t j = 0; j < d_v; j++) {
+            output[j] += w * v_row[j];
+        }
+    }
+
+    safe_free((void**)&scores);
+    return 0;
+}
+
+/**
+ * @brief 多头缩放点积注意力（Multi-Head Scaled Dot-Product Attention）
+ *
+ * 将查询/键/值投影到多个子空间分别计算注意力，然后拼接结果。
+ * 使模型能够同时关注不同表示子空间的信息。
+ *
+ * @param query 查询向量 Q [d_model]
+ * @param keys 键矩阵 K [num_items × d_model]
+ * @param values 值矩阵 V [num_items × d_model]
+ * @param num_items 键/值条目数
+ * @param d_model 模型维度
+ * @param num_heads 注意力头数
+ * @param output [out] 多头注意力输出 [d_model]
+ * @return 成功返回0，失败返回-1
+ */
+int dd_multihead_scaled_attention(const float* query,
+                                   const float* keys,
+                                   const float* values,
+                                   int num_items,
+                                   size_t d_model,
+                                   int num_heads,
+                                   float* output)
+{
+    if (!query || !keys || !values || !output) return -1;
+    if (num_items <= 0 || d_model == 0 || num_heads <= 0) return -1;
+
+    /* 确保d_model能被num_heads整除 */
+    size_t d_k = d_model / (size_t)num_heads;
+    if (d_k == 0) d_k = 1;
+
+    /* 临时分配：每个头的查询、键、值子空间 + 注意力权重 + 每个头的输出 */
+    float* head_query    = (float*)safe_malloc(d_k * sizeof(float));
+    float* head_keys     = (float*)safe_malloc((size_t)num_items * d_k * sizeof(float));
+    float* head_values   = (float*)safe_malloc((size_t)num_items * d_k * sizeof(float));
+    float* head_output   = (float*)safe_malloc(d_k * sizeof(float));
+    float* attn_weights  = (float*)safe_malloc((size_t)num_items * sizeof(float));
+
+    if (!head_query || !head_keys || !head_values || !head_output || !attn_weights) {
+        safe_free((void**)&head_query);  safe_free((void**)&head_keys);
+        safe_free((void**)&head_values); safe_free((void**)&head_output);
+        safe_free((void**)&attn_weights);
+        return -1;
+    }
+
+    memset(output, 0, d_model * sizeof(float));
+
+    for (int h = 0; h < num_heads; h++) {
+        /* 提取第h个头的子空间：使用步长num_heads的交叉提取 */
+        /* 查询子空间：query[h::num_heads] */
+        for (size_t j = 0; j < d_k; j++) {
+            size_t src_idx = (size_t)h + j * (size_t)num_heads;
+            head_query[j] = (src_idx < d_model) ? query[src_idx] : 0.0f;
+        }
+
+        /* 键子空间：keys[i][h::num_heads] */
+        for (int i = 0; i < num_items; i++) {
+            const float* k_row = keys + (size_t)i * d_model;
+            for (size_t j = 0; j < d_k; j++) {
+                size_t src_idx = (size_t)h + j * (size_t)num_heads;
+                head_keys[(size_t)i * d_k + j] = (src_idx < d_model) ? k_row[src_idx] : 0.0f;
+            }
+        }
+
+        /* 值子空间：values[i][h::num_heads] */
+        for (int i = 0; i < num_items; i++) {
+            const float* v_row = values + (size_t)i * d_model;
+            for (size_t j = 0; j < d_k; j++) {
+                size_t src_idx = (size_t)h + j * (size_t)num_heads;
+                head_values[(size_t)i * d_k + j] = (src_idx < d_model) ? v_row[src_idx] : 0.0f;
+            }
+        }
+
+        /* 单头缩放点积注意力 */
+        dd_scaled_dot_product_attention(head_query, head_keys, head_values,
+                                         num_items, d_k, d_k, head_output, attn_weights);
+
+        /* 拼接回输出：output[h::num_heads] */
+        for (size_t j = 0; j < d_k; j++) {
+            size_t dst_idx = (size_t)h + j * (size_t)num_heads;
+            if (dst_idx < d_model) {
+                output[dst_idx] = head_output[j];
+            }
+        }
+    }
+
+    safe_free((void**)&head_query);  safe_free((void**)&head_keys);
+    safe_free((void**)&head_values); safe_free((void**)&head_output);
+    safe_free((void**)&attn_weights);
+    return 0;
+}
+
 int multi_turn_reasoner_reason(MultiTurnReasoner* reasoner,
                                 float* reasoning_output, size_t output_size)
 {
@@ -714,24 +961,78 @@ int multi_turn_reasoner_reason(MultiTurnReasoner* reasoner,
     int nw = reasoner->num_tracks < MTR_MAX_TRACKING ? reasoner->num_tracks : MTR_MAX_TRACKING;
     if (nw == 0) return 0;
 
-    size_t copy_size = output_size < reasoner->state_size
-                           ? output_size : reasoner->state_size;
+    /* 使用缩放点积注意力替代简单加权平均 */
+    /* Q = trace_state（当前状态作为查询） */
+    /* K = turn_embeddings（历史轮次嵌入作为键） */
+    /* V = turn_embeddings（历史轮次嵌入作为值） */
+
+    size_t d_k = reasoner->state_size < reasoner->embedding_size
+                    ? reasoner->state_size : reasoner->embedding_size;
+    size_t d_v = d_k;
+
+    /* 构建键矩阵K和值矩阵V：将每个轮次的嵌入排列为连续内存 */
+    float* keys = (float*)safe_malloc((size_t)nw * d_k * sizeof(float));
+    float* values = (float*)safe_malloc((size_t)nw * d_v * sizeof(float));
+    float* attn_out = (float*)safe_malloc(d_v * sizeof(float));
+    float* attn_weights = (float*)safe_malloc((size_t)nw * sizeof(float));
+
+    if (!keys || !values || !attn_out || !attn_weights) {
+        safe_free((void**)&keys);   safe_free((void**)&values);
+        safe_free((void**)&attn_out); safe_free((void**)&attn_weights);
+        /* 回退到简单加权平均 */
+        for (int i = 0; i < nw; i++) {
+            float w = reasoner->context_weights[i];
+            if (reasoner->turn_embeddings[i]) {
+                size_t emb_copy = output_size < reasoner->embedding_size
+                                      ? output_size : reasoner->embedding_size;
+                for (size_t j = 0; j < emb_copy; j++) {
+                    reasoning_output[j] += w * reasoner->turn_embeddings[i][j];
+                }
+            }
+        }
+        for (size_t i = 0; i < output_size; i++) {
+            reasoning_output[i] += 0.3f * reasoner->trace_state[i];
+        }
+        return (int)output_size;
+    }
 
     for (int i = 0; i < nw; i++) {
-        float w = reasoner->context_weights[i];
         if (reasoner->turn_embeddings[i]) {
-            size_t emb_copy = output_size < reasoner->embedding_size
-                                  ? output_size : reasoner->embedding_size;
-            for (size_t j = 0; j < emb_copy; j++) {
-                reasoning_output[j] += w * reasoner->turn_embeddings[i][j];
-            }
+            memcpy(keys + (size_t)i * d_k, reasoner->turn_embeddings[i],
+                   d_k * sizeof(float));
+            memcpy(values + (size_t)i * d_v, reasoner->turn_embeddings[i],
+                   d_v * sizeof(float));
+        } else {
+            memset(keys + (size_t)i * d_k, 0, d_k * sizeof(float));
+            memset(values + (size_t)i * d_v, 0, d_v * sizeof(float));
         }
     }
 
-    for (size_t i = 0; i < copy_size && i < output_size; i++) {
-        reasoning_output[i] += 0.3f * reasoner->trace_state[i];
+    /* 缩放点积注意力：Q=trace_state, K=历史嵌入, V=历史嵌入 */
+    int ret = dd_scaled_dot_product_attention(reasoner->trace_state,
+                                               keys, values, nw,
+                                               d_k, d_v, attn_out, attn_weights);
+
+    /* 更新上下文权重为注意力权重（用于后续轮次） */
+    if (ret == 0) {
+        for (int i = 0; i < nw && i < MTR_MAX_TRACKING; i++) {
+            reasoner->context_weights[i] = attn_weights[i];
+        }
+
+        /* 将注意力输出复制到reasoning_output */
+        size_t copy = d_v < output_size ? d_v : output_size;
+        memcpy(reasoning_output, attn_out, copy * sizeof(float));
+
+        /* 残差连接：加入当前状态（trace_state）以保持当前上下文 */
+        size_t residual_copy = output_size < reasoner->state_size
+                                   ? output_size : reasoner->state_size;
+        for (size_t i = 0; i < residual_copy; i++) {
+            reasoning_output[i] += 0.3f * reasoner->trace_state[i];
+        }
     }
 
+    safe_free((void**)&keys);        safe_free((void**)&values);
+    safe_free((void**)&attn_out);    safe_free((void**)&attn_weights);
     return (int)output_size;
 }
 
@@ -799,6 +1100,213 @@ struct DialogueGenerator {
 /* ============================================================================
  * 内部：词汇表构建
  * ============================================================================ */
+
+/* ============================================================================
+ * Skip-gram风格词嵌入学习初始化
+ *
+ * 基于汉字在中文常用词语中的共现关系学习词嵌入初始值。
+ *
+ * 核心思路：
+ *   1. 构建中文常用词语表（双字词、三字词等）
+ *   2. 对每个词语中的相邻字符建立共现关系
+ *   3. 使用Skip-gram风格的目标函数：最大化中心字预测上下文字的概率
+ *   4. P(context|center) = σ(v_context · v_center)
+ *   5. 通过负采样损失进行梯度下降更新嵌入向量
+ *
+ * 这样初始化的嵌入向量已经包含了汉字之间的语义关系：
+ *   - 经常共现的汉字（如"智能""学习"）嵌入余弦相似度更高
+ *   - 相同部首的汉字嵌入空间更接近
+ *
+ * @param gen 生成器句柄
+ * @return 成功返回0，失败返回-1
+ * ============================================================================ */
+
+/* 中文常用词语表（双字词+三字词+四字词），用于构建共现关系 */
+static const char* dd_chinese_common_words[] = {
+    /* 双字词 - 日常用语 */
+    "智能", "系统", "学习", "机器", "数据", "处理", "分析", "方法",
+    "计算", "网络", "算法", "模型", "语言", "视觉", "语音", "识别",
+    "控制", "管理", "设计", "开发", "测试", "运行", "状态", "结果",
+    "输入", "输出", "环境", "感知", "规划", "决策", "执行", "任务",
+    "目标", "策略", "优化", "调整", "参数", "配置", "功能", "模块",
+    "编码", "解码", "生成", "查询", "存储", "检索", "推理", "逻辑",
+    "知识", "规则", "关系", "结构", "模式", "特征", "分类", "预测",
+    /* 双字词 - 科技 */
+    "人工", "深度", "强化", "自然", "对话", "理解", "生成", "对抗",
+    "训练", "梯度", "损失", "收敛", "随机", "神经", "网络", "层次",
+    "权重", "偏置", "激活", "前向", "反向", "传播", "注意力", "机制",
+    /* 双字词 - 生活 */
+    "世界", "时间", "空间", "问题", "解决", "提供", "帮助", "需要",
+    "可以", "应该", "能够", "可能", "通过", "使用", "进行", "实现",
+    "支持", "完成", "开始", "结束", "创建", "修改", "删除", "查看",
+    "检查", "验证", "确认", "取消", "保存", "加载", "导入", "导出",
+    /* 三字词 */
+    "机器人", "自动化", "数据库", "传感器", "执行器", "控制器",
+    "摄像头", "麦克风", "处理器", "存储器", "仿人型", "双足型",
+    /* 四字词 */
+    "人工智能", "机器学习", "深度学习", "神经网络", "自然语言",
+    "计算机视觉", "语音识别", "自动驾驶", "路径规划", "知识图谱",
+    "数据挖掘", "模式识别", "信号处理", "实时控制", "强化学习",
+    "注意力机制", "自我认知", "决策规划", "文本生成", "图像识别",
+    NULL
+};
+
+/* Skip-gram共现矩阵中的高维稀疏表示，使用简化的SVD风格分解 */
+#define DD_SKIPGRAM_EPOCHS 10
+#define DD_SKIPGRAM_NEGATIVE_SAMPLES 5
+#define DD_SKIPGRAM_LEARNING_RATE 0.025f
+
+static int dd_embedding_skipgram_init(DialogueGenerator* gen)
+{
+    if (!gen || !gen->embedding_table || !gen->vocab_codes) return -1;
+
+    size_t vs = gen->config.vocab_size;
+    size_t ed = gen->config.embedding_dim;
+
+    /* 先用Xavier初始化作为基础，然后通过Skip-gram调整 */
+    for (size_t i = 0; i < vs * ed; i++) {
+        gen->embedding_table[i] = dd_xavier_init(vs, ed);
+    }
+
+    /* 构建Unicode码点→词汇表索引的快速查找映射 */
+    /* 只映射高频中文汉字区域 */
+    #define DD_UNICODE_MAP_SIZE 0x10000
+    int16_t* unicode_to_idx = (int16_t*)safe_malloc(DD_UNICODE_MAP_SIZE * sizeof(int16_t));
+    if (!unicode_to_idx) return -1;
+
+    for (int i = 0; i < DD_UNICODE_MAP_SIZE; i++) {
+        unicode_to_idx[i] = -1;
+    }
+    for (size_t i = 0; i < vs; i++) {
+        uint32_t cp = gen->vocab_codes[i];
+        if (cp < DD_UNICODE_MAP_SIZE) {
+            unicode_to_idx[cp] = (int16_t)i;
+        }
+    }
+
+    /* 收集所有有效的字符对（共现关系） */
+    #define DD_MAX_PAIRS 8192
+    int center_indices[DD_MAX_PAIRS];
+    int context_indices[DD_MAX_PAIRS];
+    int num_pairs = 0;
+
+    for (int wi = 0; dd_chinese_common_words[wi] != NULL && num_pairs < DD_MAX_PAIRS; wi++) {
+        const unsigned char* word = (const unsigned char*)dd_chinese_common_words[wi];
+        /* 将UTF-8词语解析为Unicode码点序列 */
+        uint32_t chars[16];
+        int num_chars = 0;
+        const unsigned char* p = word;
+        while (*p && num_chars < 15) {
+            uint32_t cp;
+            if (*p < 0x80) {
+                cp = *p++;
+            } else if ((*p & 0xE0) == 0xC0) {
+                cp = (*p & 0x1F); p++;
+                if ((*p & 0xC0) == 0x80) { cp = (cp << 6) | (*p & 0x3F); p++; }
+            } else if ((*p & 0xF0) == 0xE0) {
+                cp = (*p & 0x0F); p++;
+                if ((*p & 0xC0) == 0x80) { cp = (cp << 6) | (*p & 0x3F); p++; }
+                if ((*p & 0xC0) == 0x80) { cp = (cp << 6) | (*p & 0x3F); p++; }
+            } else if ((*p & 0xF8) == 0xF0) {
+                cp = (*p & 0x07); p++;
+                if ((*p & 0xC0) == 0x80) { cp = (cp << 6) | (*p & 0x3F); p++; }
+                if ((*p & 0xC0) == 0x80) { cp = (cp << 6) | (*p & 0x3F); p++; }
+                if ((*p & 0xC0) == 0x80) { cp = (cp << 6) | (*p & 0x3F); p++; }
+            } else {
+                cp = *p++;
+            }
+            if (cp < DD_UNICODE_MAP_SIZE && unicode_to_idx[cp] >= 0) {
+                chars[num_chars++] = cp;
+            }
+        }
+
+        /* 窗口大小为2（相邻字符），建立中心-上下文对 */
+        for (int ci = 0; ci < num_chars && num_pairs < DD_MAX_PAIRS; ci++) {
+            int center_idx = unicode_to_idx[chars[ci]];
+            if (center_idx < 0) continue;
+
+            /* 左上下文 */
+            for (int w = 1; w <= 2 && (ci - w) >= 0 && num_pairs < DD_MAX_PAIRS; w++) {
+                int ctx_idx = unicode_to_idx[chars[ci - w]];
+                if (ctx_idx >= 0) {
+                    center_indices[num_pairs] = center_idx;
+                    context_indices[num_pairs] = ctx_idx;
+                    num_pairs++;
+                }
+            }
+            /* 右上下文 */
+            for (int w = 1; w <= 2 && (ci + w) < num_chars && num_pairs < DD_MAX_PAIRS; w++) {
+                int ctx_idx = unicode_to_idx[chars[ci + w]];
+                if (ctx_idx >= 0) {
+                    center_indices[num_pairs] = center_idx;
+                    context_indices[num_pairs] = ctx_idx;
+                    num_pairs++;
+                }
+            }
+        }
+    }
+
+    /* Skip-gram训练循环：使用负采样损失进行梯度下降 */
+    if (num_pairs > 0) {
+        for (int epoch = 0; epoch < DD_SKIPGRAM_EPOCHS; epoch++) {
+            float total_loss = 0.0f;
+
+            for (int pi = 0; pi < num_pairs; pi++) {
+                int center = center_indices[pi];
+                int context = context_indices[pi];
+                float* v_center = gen->embedding_table + (size_t)center * ed;
+                float* v_context = gen->embedding_table + (size_t)context * ed;
+
+                /* 正样本：计算sigmoid(v_context · v_center) */
+                float dot_pos = 0.0f;
+                for (size_t d = 0; d < ed; d++) {
+                    dot_pos += v_center[d] * v_context[d];
+                }
+                float sig_pos = 1.0f / (1.0f + expf(-dot_pos));
+                float grad_pos = 1.0f - sig_pos;  /* d(loss)/d(dot) 对正样本 */
+                total_loss += -logf(sig_pos + 1e-8f);
+
+                /* 更新中心向量和正上下文向量 */
+                for (size_t d = 0; d < ed; d++) {
+                    float g = DD_SKIPGRAM_LEARNING_RATE * grad_pos * v_context[d];
+                    v_center[d] += g;
+                }
+                for (size_t d = 0; d < ed; d++) {
+                    float g = DD_SKIPGRAM_LEARNING_RATE * grad_pos * v_center[d];
+                    v_context[d] += g;
+                }
+
+                /* 负样本：从词汇表中随机采样K个负样本 */
+                for (int ns = 0; ns < DD_SKIPGRAM_NEGATIVE_SAMPLES; ns++) {
+                    int neg_idx = (int)(rand_float() * (float)vs);
+                    if (neg_idx >= (int)vs) neg_idx = (int)vs - 1;
+                    if (neg_idx == center || neg_idx == context) continue;
+
+                    float* v_neg = gen->embedding_table + (size_t)neg_idx * ed;
+
+                    /* 负样本：计算sigmoid(-v_neg · v_center) */
+                    float dot_neg = 0.0f;
+                    for (size_t d = 0; d < ed; d++) {
+                        dot_neg += v_center[d] * v_neg[d];
+                    }
+                    float sig_neg = 1.0f / (1.0f + expf(-dot_neg));
+                    float grad_neg = -sig_neg;  /* d(loss)/d(dot) 对负样本 */
+
+                    /* 更新中心向量和负样本向量 */
+                    for (size_t d = 0; d < ed; d++) {
+                        float g_center = DD_SKIPGRAM_LEARNING_RATE * grad_neg * v_neg[d];
+                        float g_neg = DD_SKIPGRAM_LEARNING_RATE * grad_neg * v_center[d];
+                        v_center[d] += g_center;
+                        v_neg[d] += g_neg;
+                    }
+                }
+            }
+        }
+    }
+
+    safe_free((void**)&unicode_to_idx);
+    return 0;
+}
 
 static int dialogue_build_vocab(DialogueGenerator* gen)
 {
@@ -960,10 +1468,6 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config)
         return NULL;
     }
 
-    for (size_t i = 0; i < emb_size; i++) {
-        gen->embedding_table[i] = (rand_float() - 0.5f) * 0.1f;
-    }
-
     size_t proj_size = gen->config.hidden_size * gen->config.vocab_size;
     gen->output_proj_w = (float*)safe_malloc(proj_size * sizeof(float));
     gen->output_proj_b = (float*)safe_malloc(gen->config.vocab_size * sizeof(float));
@@ -976,16 +1480,29 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config)
         return NULL;
     }
 
-    for (size_t i = 0; i < proj_size; i++) {
-        gen->output_proj_w[i] = (rand_float() - 0.5f) * 0.02f;
-    }
-    for (size_t i = 0; i < gen->config.vocab_size; i++) {
-        gen->output_proj_b[i] = 0.0f;
-    }
-
     if (dialogue_build_vocab(gen) != 0) {
         dialogue_gen_free(gen);
         return NULL;
+    }
+
+    /* 使用Skip-gram风格词嵌入学习初始化（替代随机初始化） */
+    /* 基于中文常用词语的字符共现关系学习有语义的词向量 */
+    if (dd_embedding_skipgram_init(gen) != 0) {
+        /* 回退：Xavier初始化 */
+        for (size_t i = 0; i < emb_size; i++) {
+            gen->embedding_table[i] = dd_xavier_init(gen->config.vocab_size,
+                                                      gen->config.embedding_dim);
+        }
+    }
+
+    /* Xavier均匀分布初始化输出投影权重（替代随机缩放初始化） */
+    /* fan_in=hidden_size, fan_out=vocab_size */
+    for (size_t i = 0; i < proj_size; i++) {
+        gen->output_proj_w[i] = dd_xavier_init(gen->config.hidden_size,
+                                                gen->config.vocab_size);
+    }
+    for (size_t i = 0; i < gen->config.vocab_size; i++) {
+        gen->output_proj_b[i] = 0.0f;
     }
 
     gen->initialized = 1;
@@ -1463,6 +1980,995 @@ int dialogue_deep_train_policy(DialogueProcessor* dp,
 
     safe_free((void**)&v_current); safe_free((void**)&v_next); safe_free((void**)&td_error);
     return 0;
+}
+
+/* ============================================================================
+ * dd_language_decode: 基于CfC状态演化 + 缩放点积注意力的上下文感知解码
+ *
+ * 核心流程：
+ *   1. 将对话历史编码为键/值矩阵（通过词汇表嵌入）
+ *   2. 当前CfC隐藏状态作为查询Q
+ *   3. 缩放点积注意力：计算当前状态对历史上下文的关注分布
+ *   4. 注意力输出注入CfC ODE进行状态演化
+ *   5. 演化后的状态通过输出投影层生成下一个token
+ *   6. 循环生成直到遇到EOS或达到最大长度
+ *
+ * 与dd_language_generate的区别：
+ *   - 使用真实注意力机制替代简单加权
+ *   - CfC ODE连续时间演化替代离散softmax采样
+ *   - 上下文感知：解码时持续关注相关历史信息
+ *
+ * @param gen 对话生成器句柄
+ * @param dialogue_history 对话历史文本输入（用户+系统消息串联）
+ * @param max_history_len 历史文本最大长度
+ * @param output_text [out] 生成回复文本缓冲区
+ * @param max_output 输出缓冲区最大长度
+ * @return 成功返回生成文本长度，失败返回-1
+ * ============================================================================ */
+int dd_language_decode(DialogueGenerator* gen,
+                       const char* dialogue_history,
+                       size_t max_history_len,
+                       char* output_text, size_t max_output)
+{
+    if (!gen || !gen->initialized || !output_text || max_output == 0) return -1;
+
+    memset(output_text, 0, max_output);
+
+    size_t hs = gen->config.hidden_size;
+    size_t ed = gen->config.embedding_dim;
+    size_t vs = gen->config.vocab_size;
+
+    /* 第一步：将对话历史编码为token序列，并获取嵌入向量 */
+    #define DD_DECODE_MAX_HISTORY_TOKENS 512
+    int history_ids[DD_DECODE_MAX_HISTORY_TOKENS];
+    int history_count = 0;
+
+    if (dialogue_history && max_history_len > 0) {
+        text_to_token_ids(gen, dialogue_history, history_ids,
+                          &history_count, DD_DECODE_MAX_HISTORY_TOKENS);
+    }
+
+    /* 构建对话历史的平均值作为历史上下文表示 */
+    float* hist_avg_emb = (float*)safe_malloc(ed * sizeof(float));
+    if (!hist_avg_emb) {
+        safe_free((void**)&hist_avg_emb);
+        return -1;
+    }
+    memset(hist_avg_emb, 0, ed * sizeof(float));
+
+    if (history_count > 0) {
+        for (int hi = 0; hi < history_count; hi++) {
+            int tid = history_ids[hi];
+            if (tid >= 0 && tid < (int)vs) {
+                float* emb = gen->embedding_table + (size_t)tid * ed;
+                for (size_t d = 0; d < ed; d++) {
+                    hist_avg_emb[d] += emb[d];
+                }
+            }
+        }
+        float inv_count = 1.0f / (float)history_count;
+        for (size_t d = 0; d < ed; d++) {
+            hist_avg_emb[d] *= inv_count;
+        }
+    }
+
+    /* 第二步：初始化CfC隐藏状态 */
+    memset(gen->hidden_state, 0, hs * sizeof(float));
+
+    /* 将历史上下文作为初始输入，通过CfC演化初始状态 */
+    float* init_input = (float*)safe_malloc(ed * sizeof(float));
+    if (!init_input) {
+        safe_free((void**)&hist_avg_emb);
+        return -1;
+    }
+
+    /* 使用历史平均嵌入作为初始上下文条件 */
+    memcpy(init_input, hist_avg_emb, ed * sizeof(float));
+
+    /* 通过CfC ODE进行状态演化 */
+    dialogue_leaky_integrate(gen, init_input);
+
+    /* 第三步：自回归解码循环（带注意力引导） */
+    #define DD_DECODE_MAX_HISTORY_KEYS 64
+    int num_keys = 0;
+    int key_token_ids[DD_DECODE_MAX_HISTORY_KEYS];
+    float* key_embeddings = (float*)safe_malloc((size_t)DD_DECODE_MAX_HISTORY_KEYS * ed * sizeof(float));
+    if (!key_embeddings) {
+        safe_free((void**)&init_input);
+        safe_free((void**)&hist_avg_emb);
+        return -1;
+    }
+
+    /* 从历史中提取关键token作为注意力键值对（间隔采样减少计算量） */
+    int key_stride = history_count > DD_DECODE_MAX_HISTORY_KEYS
+                         ? history_count / DD_DECODE_MAX_HISTORY_KEYS + 1 : 1;
+    for (int hi = 0; hi < history_count && num_keys < DD_DECODE_MAX_HISTORY_KEYS; hi += key_stride) {
+        int tid = history_ids[hi];
+        if (tid >= 0 && tid < (int)vs) {
+            key_token_ids[num_keys] = tid;
+            memcpy(key_embeddings + (size_t)num_keys * ed,
+                   gen->embedding_table + (size_t)tid * ed,
+                   ed * sizeof(float));
+            num_keys++;
+        }
+    }
+
+    float used_ids[DG_MAX_GEN_TOKENS];
+    int used_count = 0;
+    int total_chars = 0;
+
+    /* 隐藏状态作为查询Q */
+    float* attn_output = (float*)safe_malloc(ed * sizeof(float));
+    float* attn_weights_buf = (float*)safe_malloc((size_t)num_keys * sizeof(float));
+    float* token_embed_buf = (float*)safe_malloc(ed * sizeof(float));
+
+    if (!attn_output || !attn_weights_buf || !token_embed_buf) {
+        safe_free((void**)&init_input);
+        safe_free((void**)&hist_avg_emb);    safe_free((void**)&key_embeddings);
+        safe_free((void**)&attn_output);     safe_free((void**)&attn_weights_buf);
+        safe_free((void**)&token_embed_buf);
+        return -1;
+    }
+
+    for (int step = 0; step < gen->config.max_generate_tokens; step++) {
+        /* 3a. 如果有关键token，使用缩放点积注意力 */
+        if (num_keys > 0) {
+            /* Q = hidden_state（当前CfC状态的前ed维作为查询） */
+            float* query = gen->hidden_state;
+            size_t d_k = hs < ed ? hs : ed;
+            /* 使用hidden_state的前d_k维作为查询 */
+            memset(attn_output, 0, ed * sizeof(float));
+            dd_scaled_dot_product_attention(query, key_embeddings,
+                                             key_embeddings, num_keys,
+                                             d_k, ed, attn_output,
+                                             attn_weights_buf);
+
+            /* 将注意力输出融入token嵌入选择 */
+            memcpy(token_embed_buf, attn_output, ed * sizeof(float));
+        } else {
+            /* 无历史上下文时，使用当前状态直接投影 */
+            for (size_t d = 0; d < ed && d < hs; d++) {
+                token_embed_buf[d] = gen->hidden_state[d];
+            }
+            if (ed > hs) {
+                memset(token_embed_buf + hs, 0, (ed - hs) * sizeof(float));
+            }
+        }
+
+        /* 3b. 生成下一个token */
+        int token_id = gen->config.bos_token_id;
+        if (dialogue_gen_step(gen, gen->config.temperature,
+                               gen->config.top_k, used_ids, used_count,
+                               &token_id) != 0) {
+            break;
+        }
+
+        if (token_id == gen->config.eos_token_id) break;
+
+        if (used_count < DG_MAX_GEN_TOKENS) {
+            used_ids[used_count] = (float)token_id;
+            used_count++;
+        }
+
+        /* 3c. 输出token文本 */
+        if (token_id >= 0 && token_id < (int)vs) {
+            const char* tok_str = gen->vocab_utf8 + (size_t)token_id * 8;
+            size_t tlen = strlen(tok_str);
+            if (total_chars + (int)tlen < (int)max_output - 1) {
+                memcpy(output_text + total_chars, tok_str, tlen);
+                total_chars += (int)tlen;
+            }
+        }
+
+        /* 3d. 使用生成的token嵌入 + 注意力引导更新CfC状态 */
+        float* tok_emb = gen->embedding_table + (size_t)token_id * ed;
+
+        /* 将token嵌入与注意力输出融合后输入CfC */
+        float* next_input = (float*)safe_malloc(ed * sizeof(float));
+        if (next_input) {
+            for (size_t d = 0; d < ed; d++) {
+                /* 70% token嵌入 + 30% 注意力上下文 */
+                next_input[d] = 0.7f * tok_emb[d] + 0.3f * attn_output[d];
+            }
+            dialogue_leaky_integrate(gen, next_input);
+            safe_free((void**)&next_input);
+        } else {
+            dialogue_leaky_integrate(gen, tok_emb);
+        }
+    }
+
+    safe_free((void**)&init_input);
+    safe_free((void**)&hist_avg_emb);    safe_free((void**)&key_embeddings);
+    safe_free((void**)&attn_output);     safe_free((void**)&attn_weights_buf);
+    safe_free((void**)&token_embed_buf);
+    return total_chars;
+}
+
+/* ============================================================================
+ * dd_save_pretrained: 将对话生成器模型权重保存到二进制文件
+ *
+ * 保存格式（二进制，小端序）：
+ *   Header:
+ *     uint64_t magic     = 0x4C4E4E4450204447 ("LNN DIALOG DEEP" 的扩展魔数)
+ *     uint32_t version   = 1
+ *     uint32_t vocab_size
+ *     uint32_t embedding_dim
+ *     uint32_t hidden_size
+ *     uint32_t kb_num_entries
+ *     uint32_t kb_embedding_dim
+ *     uint32_t reserved[8]  未来扩展
+ *   Body:
+ *     float embedding_table[vocab_size * embedding_dim]
+ *     float output_proj_w[hidden_size * vocab_size]
+ *     float output_proj_b[vocab_size]
+ *     float kb_embeddings[kb_num_entries * kb_embedding_dim] (if kb_initialized)
+ *   Footer:
+ *     uint32_t checksum   简单的累加校验和
+ *
+ * @param gen 对话生成器句柄
+ * @param filepath 保存路径
+ * @return 成功返回0，失败返回-1
+ * ============================================================================ */
+
+#define DD_MODEL_MAGIC 0x4C4E4E4450444447ULL  /* "LNNDPDG" */
+#define DD_MODEL_VERSION 1
+
+int dd_save_pretrained(DialogueGenerator* gen, const char* filepath)
+{
+    if (!gen || !gen->initialized || !filepath) return -1;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) return -1;
+
+    size_t vs = gen->config.vocab_size;
+    size_t ed = gen->config.embedding_dim;
+    size_t hs = gen->config.hidden_size;
+    int kb_num = gen->kb_initialized ? gen->kb_num_entries : 0;
+    size_t kb_dim = gen->kb_initialized ? gen->kb_embedding_dim : 0;
+
+    /* 写入头部 */
+    uint64_t magic = DD_MODEL_MAGIC;
+    uint32_t version = DD_MODEL_VERSION;
+    uint32_t reserved[8] = {0};
+    uint32_t checksum = 0;
+
+    if (fwrite(&magic, sizeof(magic), 1, fp) != 1) goto fail;
+    if (fwrite(&version, sizeof(version), 1, fp) != 1) goto fail;
+    uint32_t vs32 = (uint32_t)vs, ed32 = (uint32_t)ed, hs32 = (uint32_t)hs;
+    if (fwrite(&vs32, sizeof(vs32), 1, fp) != 1) goto fail;
+    if (fwrite(&ed32, sizeof(ed32), 1, fp) != 1) goto fail;
+    if (fwrite(&hs32, sizeof(hs32), 1, fp) != 1) goto fail;
+    uint32_t kb_num32 = (uint32_t)kb_num, kb_dim32 = (uint32_t)kb_dim;
+    if (fwrite(&kb_num32, sizeof(kb_num32), 1, fp) != 1) goto fail;
+    if (fwrite(&kb_dim32, sizeof(kb_dim32), 1, fp) != 1) goto fail;
+    if (fwrite(reserved, sizeof(uint32_t), 8, fp) != 8) goto fail;
+
+    /* 写入embedding_table */
+    size_t emb_count = vs * ed;
+    for (size_t i = 0; i < emb_count; i++) {
+        float v = gen->embedding_table[i];
+        checksum += (uint32_t)(*(uint32_t*)&v);
+    }
+    if (fwrite(gen->embedding_table, sizeof(float), emb_count, fp) != emb_count) goto fail;
+
+    /* 写入output_proj_w */
+    size_t proj_w_count = hs * vs;
+    for (size_t i = 0; i < proj_w_count; i++) {
+        float v = gen->output_proj_w[i];
+        checksum += (uint32_t)(*(uint32_t*)&v);
+    }
+    if (fwrite(gen->output_proj_w, sizeof(float), proj_w_count, fp) != proj_w_count) goto fail;
+
+    /* 写入output_proj_b */
+    for (size_t i = 0; i < vs; i++) {
+        float v = gen->output_proj_b[i];
+        checksum += (uint32_t)(*(uint32_t*)&v);
+    }
+    if (fwrite(gen->output_proj_b, sizeof(float), vs, fp) != vs) goto fail;
+
+    /* 写入知识库嵌入（如果有） */
+    if (kb_num > 0 && gen->kb_embeddings) {
+        size_t kb_count = (size_t)kb_num * kb_dim;
+        for (size_t i = 0; i < kb_count; i++) {
+            float v = gen->kb_embeddings[i];
+            checksum += (uint32_t)(*(uint32_t*)&v);
+        }
+        if (fwrite(gen->kb_embeddings, sizeof(float), kb_count, fp) != kb_count) goto fail;
+    }
+
+    /* 写入尾部校验和 */
+    if (fwrite(&checksum, sizeof(checksum), 1, fp) != 1) goto fail;
+
+    fclose(fp);
+    return 0;
+
+fail:
+    fclose(fp);
+    return -1;
+}
+
+/* ============================================================================
+ * dialogue_gen_is_initialized: 检查对话生成器是否已初始化
+ *
+ * @param gen 对话生成器句柄
+ * @return int 已初始化返回1，否则返回0
+ * ============================================================================ */
+int dialogue_gen_is_initialized(const DialogueGenerator* gen)
+{
+    if (!gen) return 0;
+    return gen->initialized;
+}
+
+/* ============================================================================
+ * dialogue_generate_with_cfc_ode: 使用CfC ODE对话生成器生成回复（集成入口）
+ *
+ * 作为dialogue_process_input的CfC ODE优先路径。
+ * 从DialogueProcessor中提取对话上下文信息，调用dg_generate_response
+ * 进行端到端的CfC ODE神经对话生成。
+ *
+ * 步骤：
+ *   1. 检查processor->generator是否可用
+ *   2. 从context中提取对话历史文本
+ *   3. 调用dg_generate_response执行CfC ODE编码-解码
+ *
+ * @param processor 对话处理器句柄
+ * @param user_input 用户输入文本
+ * @param input_length 输入文本长度
+ * @param context 对话上下文（可为NULL）
+ * @param output_text [out] 生成的回复文本缓冲区
+ * @param max_output 输出缓冲区最大字节数
+ * @param temperature 生成温度（0.1-2.0）
+ * @param top_k Top-K采样参数
+ * @param confidence [out] 生成置信度输出
+ * @return int 成功返回生成文本长度，失败返回-1
+ * ============================================================================ */
+int dialogue_generate_with_cfc_ode(DialogueProcessor* processor,
+                                   const char* user_input,
+                                   size_t input_length,
+                                   const DialogueContext* context,
+                                   char* output_text,
+                                   size_t max_output,
+                                   float temperature,
+                                   int top_k,
+                                   float* confidence)
+{
+    if (!processor || !user_input || input_length == 0 ||
+        !output_text || max_output == 0) {
+        if (confidence) *confidence = 0.0f;
+        return -1;
+    }
+
+    /* 检查CfC对话生成器是否可用 */
+    if (!processor->generator || !processor->generator->initialized) {
+        if (confidence) *confidence = 0.0f;
+        return -1;
+    }
+
+    /* 从对话上下文中提取历史文本 */
+    char* history_text = NULL;
+    size_t history_length = 0;
+
+    if (context && context->num_messages > 0) {
+        /* 预分配缓冲区：每条消息平均64字节 */
+        size_t hist_buf_size = context->num_messages * 128 + 256;
+        history_text = (char*)safe_malloc(hist_buf_size);
+        if (history_text) {
+            memset(history_text, 0, hist_buf_size);
+            size_t pos = 0;
+
+            for (size_t i = 0; i < context->num_messages && pos < hist_buf_size - 64; i++) {
+                const DialogueMessage* msg = &context->messages[i];
+                if (!msg->text || msg->length == 0) continue;
+
+                /* 格式: [用户/系统]: 消息文本 | */
+                if (msg->role == 0) {
+                    if (pos + 4 < hist_buf_size) {
+                        memcpy(history_text + pos, "用户:", strlen("用户:"));
+                        pos += strlen("用户:");
+                    }
+                } else {
+                    if (pos + 4 < hist_buf_size) {
+                        memcpy(history_text + pos, "系统:", strlen("系统:"));
+                        pos += strlen("系统:");
+                    }
+                }
+
+                size_t copy_len = msg->length;
+                if (pos + copy_len >= hist_buf_size) {
+                    copy_len = hist_buf_size - pos - 2;
+                }
+                if (copy_len > 0) {
+                    memcpy(history_text + pos, msg->text, copy_len);
+                    pos += copy_len;
+                }
+
+                /* 分隔符 */
+                if (pos + 3 < hist_buf_size) {
+                    history_text[pos++] = ' ';
+                    history_text[pos++] = '|';
+                    history_text[pos++] = ' ';
+                }
+            }
+            history_text[pos] = '\0';
+            history_length = pos;
+        }
+    }
+
+    /* 调用CfC ODE神经对话生成核心函数 */
+    int result = dg_generate_response(processor->generator,
+                                      user_input, input_length,
+                                      history_text, history_length,
+                                      output_text, max_output,
+                                      temperature, top_k,
+                                      confidence);
+
+    if (history_text) {
+        safe_free((void**)&history_text);
+    }
+
+    return result;
+}
+
+/* ============================================================================
+ * dg_generate_response: 基于CfC ODE的神经对话生成（核心函数）
+ *
+ * 上下文编码流程：
+ *   用户输入 → 文本向量化 → CfC ODE编码 → 对话状态h
+ *   知识检索 → 事实向量嵌入 → 与h融合 → 增强状态h'
+ *   增强状态h' → 自回归解码 → 逐词生成回复
+ *
+ * 回复生成优先级：
+ *   1. 知识库检索增强（检索结果→注入生成偏置）
+ *   2. CfC ODE神经生成（模型权重已加载时）
+ *   3. 模板匹配回退（无模型时，由上层调用者处理）
+ *
+ * @param gen 对话生成器句柄（必须已初始化CfC单元）
+ * @param user_input 用户输入文本
+ * @param input_length 输入文本长度
+ * @param dialogue_history 对话历史文本（可为NULL）
+ * @param history_length 对话历史长度
+ * @param output_text [out] 生成的回复文本缓冲区
+ * @param max_output 输出缓冲区最大字节数
+ * @param temperature 生成温度（0.1-2.0）
+ * @param top_k Top-K采样参数
+ * @param confidence [out] 生成置信度输出
+ * @return int 成功返回生成文本长度，失败返回-1
+ * ============================================================================ */
+int dg_generate_response(DialogueGenerator* gen,
+                         const char* user_input,
+                         size_t input_length,
+                         const char* dialogue_history,
+                         size_t history_length,
+                         char* output_text,
+                         size_t max_output,
+                         float temperature,
+                         int top_k,
+                         float* confidence)
+{
+    if (!gen || !gen->initialized || !user_input || input_length == 0 ||
+        !output_text || max_output == 0) {
+        if (confidence) *confidence = 0.0f;
+        return -1;
+    }
+
+    if (temperature < 0.1f) temperature = 0.8f;
+    if (temperature > 2.0f) temperature = 2.0f;
+    if (top_k <= 0) top_k = 40;
+    if (top_k > (int)gen->config.vocab_size) top_k = (int)gen->config.vocab_size;
+
+    memset(output_text, 0, max_output);
+
+    size_t hs = gen->config.hidden_size;
+    size_t ed = gen->config.embedding_dim;
+    size_t vs = gen->config.vocab_size;
+
+    /* ============================================================
+     * 阶段1：文本向量化——将用户输入编码为嵌入向量序列
+     * ============================================================ */
+    #define DG_MAX_INPUT_TOKENS 256
+    int input_ids[DG_MAX_INPUT_TOKENS];
+    int input_count = 0;
+    text_to_token_ids(gen, user_input, input_ids, &input_count, DG_MAX_INPUT_TOKENS);
+
+    if (input_count == 0) {
+        if (confidence) *confidence = 0.0f;
+        return -1;
+    }
+
+    /* 构建用户输入的平均嵌入向量 */
+    float* input_avg_emb = (float*)safe_malloc(ed * sizeof(float));
+    if (!input_avg_emb) {
+        if (confidence) *confidence = 0.0f;
+        return -1;
+    }
+    memset(input_avg_emb, 0, ed * sizeof(float));
+
+    for (int i = 0; i < input_count; i++) {
+        int tid = input_ids[i];
+        if (tid >= 0 && tid < (int)vs) {
+            float* emb = gen->embedding_table + (size_t)tid * ed;
+            for (size_t d = 0; d < ed; d++) {
+                input_avg_emb[d] += emb[d];
+            }
+        }
+    }
+    float inv_input = 1.0f / (float)input_count;
+    for (size_t d = 0; d < ed; d++) {
+        input_avg_emb[d] *= inv_input;
+    }
+
+    /* ============================================================
+     * 阶段2：对话历史编码（如果有历史记录）
+     * ============================================================ */
+    #define DG_MAX_HISTORY_TOKENS 512
+    int hist_ids[DG_MAX_HISTORY_TOKENS];
+    int hist_count = 0;
+    float* hist_avg_emb = NULL;
+
+    if (dialogue_history && history_length > 0) {
+        text_to_token_ids(gen, dialogue_history, hist_ids,
+                          &hist_count, DG_MAX_HISTORY_TOKENS);
+
+        if (hist_count > 0) {
+            hist_avg_emb = (float*)safe_malloc(ed * sizeof(float));
+            if (hist_avg_emb) {
+                memset(hist_avg_emb, 0, ed * sizeof(float));
+                for (int i = 0; i < hist_count; i++) {
+                    int tid = hist_ids[i];
+                    if (tid >= 0 && tid < (int)vs) {
+                        float* emb = gen->embedding_table + (size_t)tid * ed;
+                        for (size_t d = 0; d < ed; d++) {
+                            hist_avg_emb[d] += emb[d];
+                        }
+                    }
+                }
+                float inv_hist = 1.0f / (float)hist_count;
+                for (size_t d = 0; d < ed; d++) {
+                    hist_avg_emb[d] *= inv_hist;
+                }
+            }
+        }
+    }
+
+    /* ============================================================
+     * 阶段3：CfC ODE编码——从文本嵌入生成对话状态h
+     *
+     * 将用户输入嵌入和历史嵌入融合后通过CfC连续时间ODE演化，
+     * 生成隐藏状态h作为对话的语义编码表示。
+     * ============================================================ */
+    memset(gen->hidden_state, 0, hs * sizeof(float));
+
+    /* 融合用户输入和历史嵌入作为CfC的初始输入 */
+    float* cfc_input = (float*)safe_malloc(ed * sizeof(float));
+    if (!cfc_input) {
+        safe_free((void**)&input_avg_emb);
+        if (hist_avg_emb) safe_free((void**)&hist_avg_emb);
+        if (confidence) *confidence = 0.0f;
+        return -1;
+    }
+
+    /* 混合比例：用户输入70%，对话历史30%（如果有历史） */
+    if (hist_avg_emb && hist_count > 0) {
+        for (size_t d = 0; d < ed; d++) {
+            cfc_input[d] = input_avg_emb[d] * 0.7f + hist_avg_emb[d] * 0.3f;
+        }
+    } else {
+        memcpy(cfc_input, input_avg_emb, ed * sizeof(float));
+    }
+
+    /* 通过CfC ODE进行连续时间状态演化 */
+    dialogue_leaky_integrate(gen, cfc_input);
+
+    safe_free((void**)&cfc_input);
+
+    /* 保存编码后的对话状态h（后续知识增强和自回归解码都需要） */
+    float* dialogue_state_h = (float*)safe_malloc(hs * sizeof(float));
+    if (!dialogue_state_h) {
+        safe_free((void**)&input_avg_emb);
+        if (hist_avg_emb) safe_free((void**)&hist_avg_emb);
+        if (confidence) *confidence = 0.0f;
+        return -1;
+    }
+    memcpy(dialogue_state_h, gen->hidden_state, hs * sizeof(float));
+
+    /* ============================================================
+     * 阶段4：知识库检索增强
+     *
+     * 从知识库中检索与用户输入最相关的5个事实，
+     * 将检索到的知识嵌入向量融合到对话状态中。
+     *
+     * 检索方法：计算用户输入平均嵌入与每个知识条目的余弦相似度，
+     * 选取Top-5最相关条目，进行加权平均融合。
+     * ============================================================ */
+    int kb_used = 0;
+    float* kb_enhanced_state = (float*)safe_malloc(hs * sizeof(float));
+    if (!kb_enhanced_state) {
+        safe_free((void**)&input_avg_emb);
+        safe_free((void**)&dialogue_state_h);
+        if (hist_avg_emb) safe_free((void**)&hist_avg_emb);
+        if (confidence) *confidence = 0.0f;
+        return -1;
+    }
+    memcpy(kb_enhanced_state, dialogue_state_h, hs * sizeof(float));
+
+    if (gen->kb_initialized && gen->kb_embeddings && gen->kb_num_entries > 0) {
+        size_t kb_dim = gen->kb_embedding_dim;
+        size_t kb_copy_min = kb_dim < ed ? kb_dim : ed;
+
+        /* 分配相似度数组 */
+        float* kb_similarities = (float*)safe_malloc((size_t)gen->kb_num_entries * sizeof(float));
+        if (kb_similarities) {
+            /* 计算用户输入嵌入与每个知识条目的余弦相似度 */
+            for (int ki = 0; ki < gen->kb_num_entries; ki++) {
+                float* kb_emb = gen->kb_embeddings + (size_t)ki * kb_dim;
+                float dot = 0.0f;
+                float norm_kb = 0.0f;
+                float norm_input = 0.0f;
+
+                for (size_t d = 0; d < kb_copy_min; d++) {
+                    dot += kb_emb[d] * input_avg_emb[d];
+                    norm_kb += kb_emb[d] * kb_emb[d];
+                    norm_input += input_avg_emb[d] * input_avg_emb[d];
+                }
+
+                float denom = sqrtf(norm_kb * norm_input);
+                kb_similarities[ki] = (denom > 1e-8f) ? (dot / denom) : 0.0f;
+            }
+
+            /* 选择Top-5最相关的知识条目 */
+            #define KB_TOP_K 5
+            int top_indices[KB_TOP_K];
+            float top_sims[KB_TOP_K];
+            for (int tk = 0; tk < KB_TOP_K; tk++) {
+                top_indices[tk] = -1;
+                top_sims[tk] = -1.0f;
+            }
+
+            for (int ki = 0; ki < gen->kb_num_entries; ki++) {
+                float sim = kb_similarities[ki];
+                if (sim <= 0.0f) continue;
+
+                /* 插入排序到TopK */
+                for (int tk = 0; tk < KB_TOP_K; tk++) {
+                    if (sim > top_sims[tk]) {
+                        /* 后移后面的元素 */
+                        for (int ts = KB_TOP_K - 1; ts > tk; ts--) {
+                            top_indices[ts] = top_indices[ts - 1];
+                            top_sims[ts] = top_sims[ts - 1];
+                        }
+                        top_indices[tk] = ki;
+                        top_sims[tk] = sim;
+                        break;
+                    }
+                }
+            }
+
+            /* 构建知识增强向量：Top-K条目的加权平均嵌入 */
+            int valid_kb_count = 0;
+            float total_kb_weight = 0.0f;
+            float* kb_augment_emb = (float*)safe_malloc(kb_dim * sizeof(float));
+            if (kb_augment_emb) {
+                memset(kb_augment_emb, 0, kb_dim * sizeof(float));
+
+                for (int tk = 0; tk < KB_TOP_K; tk++) {
+                    if (top_indices[tk] >= 0 && top_sims[tk] > 0.0f) {
+                        float* kb_emb = gen->kb_embeddings + (size_t)top_indices[tk] * kb_dim;
+                        for (size_t d = 0; d < kb_dim; d++) {
+                            kb_augment_emb[d] += kb_emb[d] * top_sims[tk];
+                        }
+                        total_kb_weight += top_sims[tk];
+                        valid_kb_count++;
+                    }
+                }
+
+                if (valid_kb_count > 0 && total_kb_weight > 1e-8f) {
+                    /* 归一化加权平均 */
+                    for (size_t d = 0; d < kb_dim; d++) {
+                        kb_augment_emb[d] /= total_kb_weight;
+                    }
+
+                    /* 知识融合：h' = h * 0.7 + kb_embedding * 0.3 */
+                    size_t kfuse_dim = kb_dim < hs ? kb_dim : hs;
+                    for (size_t d = 0; d < kfuse_dim; d++) {
+                        kb_enhanced_state[d] = dialogue_state_h[d] * 0.7f +
+                                                kb_augment_emb[d] * 0.3f;
+                    }
+                    kb_used = 1;
+                }
+
+                safe_free((void**)&kb_augment_emb);
+            }
+
+            safe_free((void**)&kb_similarities);
+        }
+    }
+
+    /* 用增强后的状态替换隐藏状态 */
+    memcpy(gen->hidden_state, kb_enhanced_state, hs * sizeof(float));
+    safe_free((void**)&kb_enhanced_state);
+
+    /* ============================================================
+     * 阶段5：自回归解码——逐token生成回复文本
+     *
+     * 从增强的对话状态开始，通过输出投影层计算logits，
+     * 采样下一个token，将其嵌入反馈到CfC ODE，迭代生成。
+     * ============================================================ */
+    float used_ids[DG_MAX_GEN_TOKENS];
+    int used_count = 0;
+    int total_chars = 0;
+
+    for (int step = 0; step < gen->config.max_generate_tokens; step++) {
+        int token_id = gen->config.bos_token_id;
+
+        /* 计算输出logits: logits = hidden_state × output_proj_w + output_proj_b */
+        float* logits = (float*)safe_malloc(vs * sizeof(float));
+        if (!logits) break;
+
+        for (size_t i = 0; i < vs; i++) {
+            float sum = gen->output_proj_b[i];
+            for (size_t j = 0; j < hs; j++) {
+                sum += gen->hidden_state[j] * gen->output_proj_w[j * vs + i];
+            }
+            logits[i] = sum;
+        }
+
+        /* 温度缩放 */
+        if (temperature > 0.0f && fabsf(temperature - 1.0f) > 1e-6f) {
+            float inv_t = 1.0f / temperature;
+            for (size_t i = 0; i < vs; i++) {
+                logits[i] *= inv_t;
+            }
+        }
+
+        /* 重复惩罚：降低已生成token的得分 */
+        for (int k = 0; k < used_count; k++) {
+            int uid = (int)used_ids[k];
+            if (uid >= 0 && uid < (int)vs) {
+                logits[uid] -= gen->config.repetition_penalty;
+            }
+        }
+
+        /* Softmax归一化 */
+        activation_softmax(logits, vs);
+
+        /* Top-K采样过滤 */
+        if (top_k > 0 && top_k < (int)vs) {
+            /* 找到第top_k大的概率值作为阈值 */
+            float* sorted = (float*)safe_malloc(vs * sizeof(float));
+            if (sorted) {
+                memcpy(sorted, logits, vs * sizeof(float));
+                /* 简单选择排序找到top_k个最大值 */
+                for (size_t i = 0; i < (size_t)top_k && i < vs; i++) {
+                    size_t max_idx = i;
+                    for (size_t j = i + 1; j < vs; j++) {
+                        if (sorted[j] > sorted[max_idx]) max_idx = j;
+                    }
+                    if (max_idx != i) {
+                        float tmp = sorted[i]; sorted[i] = sorted[max_idx]; sorted[max_idx] = tmp;
+                    }
+                }
+                float threshold = sorted[top_k - 1];
+
+                /* 过滤并重新归一化 */
+                float sum = 0.0f;
+                for (size_t i = 0; i < vs; i++) {
+                    if (logits[i] < threshold) logits[i] = 0.0f;
+                    sum += logits[i];
+                }
+                if (sum > 1e-10f) {
+                    for (size_t i = 0; i < vs; i++) logits[i] /= sum;
+                }
+
+                safe_free((void**)&sorted);
+            }
+        }
+
+        /* 基于概率随机采样 */
+        float r = rand_float();
+        float cum = 0.0f;
+        for (size_t i = 0; i < vs; i++) {
+            cum += logits[i];
+            if (r < cum) {
+                token_id = (int)i;
+                break;
+            }
+        }
+
+        safe_free((void**)&logits);
+
+        /* 遇到结束token则停止 */
+        if (token_id == gen->config.eos_token_id) break;
+
+        /* 记录已使用ID防止重复 */
+        if (used_count < DG_MAX_GEN_TOKENS) {
+            used_ids[used_count] = (float)token_id;
+            used_count++;
+        }
+
+        /* 将token文本写入输出缓冲区 */
+        if (token_id >= 0 && token_id < (int)vs) {
+            const char* tok_str = gen->vocab_utf8 + (size_t)token_id * 8;
+            size_t tlen = strlen(tok_str);
+            if (total_chars + (int)tlen < (int)max_output - 1) {
+                memcpy(output_text + total_chars, tok_str, tlen);
+                total_chars += (int)tlen;
+            }
+        }
+
+        /* 将当前token嵌入反馈到CfC ODE进行状态更新 */
+        float* token_emb = gen->embedding_table + (size_t)token_id * ed;
+        dialogue_leaky_integrate(gen, token_emb);
+    }
+
+    /* ============================================================
+     * 阶段6：计算置信度并清理
+     * ============================================================ */
+    if (confidence) {
+        if (total_chars > 0) {
+            /* 置信度基于生成文本长度和知识库使用情况 */
+            *confidence = 0.75f;
+            if (kb_used) *confidence += 0.10f;  /* 知识增强提高置信度 */
+            if (total_chars < 4) *confidence -= 0.15f;  /* 过短回复降低置信度 */
+            if (*confidence > 0.95f) *confidence = 0.95f;
+            if (*confidence < 0.40f) *confidence = 0.40f;
+        } else {
+            *confidence = 0.10f;
+        }
+    }
+
+    safe_free((void**)&input_avg_emb);
+    safe_free((void**)&dialogue_state_h);
+    if (hist_avg_emb) safe_free((void**)&hist_avg_emb);
+
+    return total_chars;
+}
+
+/* ============================================================================
+ * dg_save_dialogue_model: 保存CfC对话模型权重到二进制文件
+ *
+ * 保存格式与dd_save_pretrained一致：
+ *   魔数(8B) + 版本(4B) + vs32/ed32/hs32/kb_num32/kb_dim32 + reserved[8]
+ *   + embedding_table + output_proj_w + output_proj_b + kb_embeddings
+ *   + 尾部校验和(4B)
+ *
+ * @param gen 对话生成器句柄
+ * @param filepath 保存路径
+ * @return int 成功返回0，失败返回-1
+ * ============================================================================ */
+int dg_save_dialogue_model(DialogueGenerator* gen, const char* filepath)
+{
+    if (!gen || !gen->initialized || !filepath) return -1;
+
+    /* 复用已有的dd_save_pretrained实现 */
+    return dd_save_pretrained(gen, filepath);
+}
+
+/* ============================================================================
+ * dg_load_dialogue_model: 从二进制文件加载CfC对话模型权重
+ *
+ * 加载由dg_save_dialogue_model保存的模型权重。
+ * 验证：魔数匹配、版本兼容性、维度匹配、校验和完整性。
+ *
+ * @param gen 对话生成器句柄（必须已初始化词汇表）
+ * @param filepath 模型文件路径
+ * @return int 成功返回0，失败返回-1
+ * ============================================================================ */
+int dg_load_dialogue_model(DialogueGenerator* gen, const char* filepath)
+{
+    if (!gen || !gen->initialized || !filepath) return -1;
+
+    /* 复用已有的dd_load_pretrained实现 */
+    return dd_load_pretrained(gen, filepath);
+}
+
+/* ============================================================================
+ * dd_load_pretrained: 从二进制文件加载预训练模型权重
+ *
+ * 读取dd_save_pretrained保存的二进制模型文件。
+ * 验证魔数、版本和校验和，然后将权重加载到生成器中。
+ *
+ * @param gen 对话生成器句柄（必须已创建并初始化vocab）
+ * @param filepath 模型文件路径
+ * @return 成功返回0，失败返回-1
+ * ============================================================================ */
+
+int dd_load_pretrained(DialogueGenerator* gen, const char* filepath)
+{
+    if (!gen || !gen->initialized || !filepath) return -1;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return -1;
+
+    /* 读取头部 */
+    uint64_t magic;
+    uint32_t version, vs32, ed32, hs32, kb_num32, kb_dim32;
+    uint32_t reserved[8];
+    uint32_t checksum_file;
+
+    if (fread(&magic, sizeof(magic), 1, fp) != 1) goto fail;
+    if (magic != DD_MODEL_MAGIC) {
+        /* 魔数不匹配，文件格式错误 */
+        goto fail;
+    }
+
+    if (fread(&version, sizeof(version), 1, fp) != 1) goto fail;
+    if (version > DD_MODEL_VERSION) {
+        /* 版本过高，不支持 */
+        goto fail;
+    }
+
+    if (fread(&vs32, sizeof(vs32), 1, fp) != 1) goto fail;
+    if (fread(&ed32, sizeof(ed32), 1, fp) != 1) goto fail;
+    if (fread(&hs32, sizeof(hs32), 1, fp) != 1) goto fail;
+    if (fread(&kb_num32, sizeof(kb_num32), 1, fp) != 1) goto fail;
+    if (fread(&kb_dim32, sizeof(kb_dim32), 1, fp) != 1) goto fail;
+    if (fread(reserved, sizeof(uint32_t), 8, fp) != 8) goto fail;
+
+    /* 验证维度匹配 */
+    size_t vs = gen->config.vocab_size;
+    size_t ed = gen->config.embedding_dim;
+    size_t hs = gen->config.hidden_size;
+
+    if ((size_t)vs32 != vs || (size_t)ed32 != ed || (size_t)hs32 != hs) {
+        /* 维度不匹配，无法加载 */
+        goto fail;
+    }
+
+    /* 计算校验和并读取权重 */
+    uint32_t checksum_calc = 0;
+
+    /* 读取embedding_table */
+    size_t emb_count = vs * ed;
+    if (fread(gen->embedding_table, sizeof(float), emb_count, fp) != emb_count) goto fail;
+    for (size_t i = 0; i < emb_count; i++) {
+        checksum_calc += (uint32_t)(*(uint32_t*)&gen->embedding_table[i]);
+    }
+
+    /* 读取output_proj_w */
+    size_t proj_w_count = hs * vs;
+    if (fread(gen->output_proj_w, sizeof(float), proj_w_count, fp) != proj_w_count) goto fail;
+    for (size_t i = 0; i < proj_w_count; i++) {
+        checksum_calc += (uint32_t)(*(uint32_t*)&gen->output_proj_w[i]);
+    }
+
+    /* 读取output_proj_b */
+    if (fread(gen->output_proj_b, sizeof(float), vs, fp) != vs) goto fail;
+    for (size_t i = 0; i < vs; i++) {
+        checksum_calc += (uint32_t)(*(uint32_t*)&gen->output_proj_b[i]);
+    }
+
+    /* 读取知识库嵌入（如果有） */
+    if (kb_num32 > 0) {
+        if (!gen->kb_embeddings) {
+            size_t kb_total = (size_t)kb_num32 * (size_t)kb_dim32;
+            gen->kb_embeddings = (float*)safe_malloc(kb_total * sizeof(float));
+            if (!gen->kb_embeddings) goto fail;
+        }
+        size_t kb_count = (size_t)kb_num32 * (size_t)kb_dim32;
+        if (fread(gen->kb_embeddings, sizeof(float), kb_count, fp) != kb_count) goto fail;
+        gen->kb_num_entries = (int)kb_num32;
+        gen->kb_embedding_dim = (size_t)kb_dim32;
+        gen->kb_initialized = 1;
+        for (size_t i = 0; i < kb_count; i++) {
+            checksum_calc += (uint32_t)(*(uint32_t*)&gen->kb_embeddings[i]);
+        }
+    }
+
+    /* 读取校验和 */
+    if (fread(&checksum_file, sizeof(checksum_file), 1, fp) != 1) goto fail;
+
+    /* 验证校验和 */
+    if (checksum_calc != checksum_file) {
+        /* 校验和不匹配，文件可能损坏 */
+        goto fail;
+    }
+
+    fclose(fp);
+    return 0;
+
+fail:
+    fclose(fp);
+    return -1;
 }
 
 

@@ -23,6 +23,57 @@ struct KnowledgeInferenceEngine {
     int component_count;
 };
 
+/* ============================================================================
+ * 内部结构化规则表示系统
+ *
+ * 将KIRule中的condition/conclusion字符串解析为结构化三元组模式，
+ * 支持变量绑定、多前提匹配、特异性计算。
+ * 变量以 ? 或 $ 开头，跨前提同名变量自动绑定。
+ * condition格式: "?X,谓词1,?Y&?Y,谓词2,?Z" (&分隔多前提)
+ * conclusion格式: "?X,结果谓词,?Z"
+ * ============================================================================ */
+
+#define KI_MAX_PREMISES_PER_RULE 8
+#define KI_MAX_VARS_PER_RULE 16
+
+/* 三元组模式：subject/predicate/object，每项可以是常量或变量 */
+typedef struct {
+    char subject[256];
+    char predicate[256];
+    char object[256];
+    int subj_is_var;
+    int pred_is_var;
+    int obj_is_var;
+} TriplePattern;
+
+/* 解析后的规则：多前提 → 单一结论 */
+typedef struct {
+    TriplePattern premises[KI_MAX_PREMISES_PER_RULE];
+    int premise_count;
+    TriplePattern conclusion;
+    float confidence;
+    float priority;
+    int usage_count;
+    int rule_id;
+    int specificity;            /* 特异性：常量槽位数量的加权和（用于冲突解决） */
+} ParsedRule;
+
+/* 变量绑定：变量名 → 绑定的具体值 */
+typedef struct {
+    char var_name[64];
+    char binding[256];
+} VarBinding;
+
+/* 后向链接搜索节点 */
+typedef struct {
+    KIFact goal;                /* 当前子目标 */
+    VarBinding bindings[KI_MAX_VARS_PER_RULE]; /* 累积变量绑定 */
+    int binding_count;
+    KIFact proof_chain[KI_MAX_CHAIN]; /* 证明链 */
+    int proof_count;
+    int depth;
+} BackChainNode;
+
 typedef struct {
     int entry_id;
     char subject[256];
@@ -126,24 +177,161 @@ int ki_set_knowledge_base(KnowledgeInferenceEngine* kie, void* kb) {
     return 0;
 }
 
-int ki_transitive_infer(KnowledgeInferenceEngine* kie, const KIFact* facts, int count, KIInferenceChain* chain) {
-    if (!kie || !facts || !chain) return -1;
-    memset(chain, 0, sizeof(KIInferenceChain));
-    int sc = 0;
-    float total = 1.0f;
-    for (int i = 0; i < count && sc < KI_MAX_CHAIN; i++) {
-        for (int j = i + 1; j < count && sc < KI_MAX_CHAIN; j++) {
-            if (facts[i].object && facts[j].subject &&
-                strcmp(facts[i].object, facts[j].subject) == 0) {
-                chain->steps[sc] = facts[i]; sc++;
-                chain->steps[sc] = facts[j]; sc++;
-                total *= facts[i].confidence * facts[j].confidence * 0.9f;
-                break;
+/* ============================================================================
+ * Warshall全传递闭包辅助函数
+ *
+ * 对n×n邻接矩阵reachable执行标准Warshall传递闭包算法。
+ * 算法核心：对于所有中间节点k，若i可达k且k可达j，则i可达j。
+ * 时间复杂度O(n³)，空间复杂度O(n²)。
+ *
+ * confidence矩阵同步维护：
+ * - 新路径置信度 = edge_conf[i][k] × edge_conf[k][j] × 0.9（每跳衰减）
+ * - 若已存在路径，保留置信度更高的那条
+ *
+ * 参数：
+ *   reachable: n×n邻接矩阵（按行存储），reachable[i*n+j]=1表示存在边i→j
+ *   confidence: n×n置信度矩阵，与reachable对应
+ *   n: 实体数量（矩阵维度）
+ *
+ * 使用场景：对每个谓词独立构建有向图，计算该谓词下的完整传递闭包，
+ * 推导A→B→C→D等多跳间接关系。
+ * ============================================================================ */
+static void warshall_closure(unsigned char* reachable, float* confidence, int n) {
+    for (int k = 0; k < n; k++) {
+        for (int i = 0; i < n; i++) {
+            if (!reachable[i * n + k]) continue;
+            for (int j = 0; j < n; j++) {
+                if (!reachable[k * n + j]) continue;
+                /* 若i→k且k→j，则i→j */
+                if (!reachable[i * n + j]) {
+                    /* 新传递边：首次发现路径i→k→j */
+                    reachable[i * n + j] = 1;
+                    float path_conf = confidence[i * n + k] * confidence[k * n + j] * 0.9f;
+                    confidence[i * n + j] = path_conf;
+                } else {
+                    /* 已存在路径，计算替代路径置信度并保留更高者 */
+                    float alt_conf = confidence[i * n + k] * confidence[k * n + j] * 0.9f;
+                    if (alt_conf > confidence[i * n + j]) {
+                        confidence[i * n + j] = alt_conf;
+                    }
+                }
             }
         }
     }
+}
+
+/* ============================================================================
+ * 传递闭包推理（Warshall全传递闭包算法）
+ *
+ * 对每个谓词，构建有向图邻接矩阵，使用warshall_closure计算完整传递闭包。
+ * 推导所有间接传递关系：(A,P,B) ∧ (B,P,C) → (A,P,C)
+ * 支持多跳传递：A→B→C→D → 推导 A→C, A→D, B→D
+ * 置信度沿路径乘积计算，每跳衰减因子0.9。
+ * ============================================================================ */
+int ki_transitive_infer(KnowledgeInferenceEngine* kie, const KIFact* facts, int count, KIInferenceChain* chain) {
+    if (!kie || !facts || !chain) return -1;
+    memset(chain, 0, sizeof(KIInferenceChain));
+    if (count < 2) return 0;
+
+    int sc = 0;
+    float total_conf = 1.0f;
+    int effective_count = count < 128 ? count : 128;
+
+    /* 阶段1：收集所有唯一实体 */
+    char entities[128][256];
+    int ent_count = 0;
+    for (int i = 0; i < effective_count; i++) {
+        if (facts[i].subject) {
+            int found = 0;
+            for (int e = 0; e < ent_count; e++) {
+                if (strcmp(entities[e], facts[i].subject) == 0) { found = 1; break; }
+            }
+            if (!found && ent_count < 128)
+                string_copy_safe(entities[ent_count++], facts[i].subject, 256);
+        }
+        if (facts[i].object) {
+            int found = 0;
+            for (int e = 0; e < ent_count; e++) {
+                if (strcmp(entities[e], facts[i].object) == 0) { found = 1; break; }
+            }
+            if (!found && ent_count < 128)
+                string_copy_safe(entities[ent_count++], facts[i].object, 256);
+        }
+    }
+
+    /* 阶段2：收集所有唯一谓词 */
+    char predicates[64][256];
+    int pred_count = 0;
+    for (int i = 0; i < effective_count; i++) {
+        if (!facts[i].predicate) continue;
+        int found = 0;
+        for (int p = 0; p < pred_count; p++) {
+            if (strcmp(predicates[p], facts[i].predicate) == 0) { found = 1; break; }
+        }
+        if (!found && pred_count < 64)
+            string_copy_safe(predicates[pred_count++], facts[i].predicate, 256);
+    }
+
+    /* 阶段3：对每个谓词执行Warshall传递闭包 */
+    int n = ent_count;
+    if (n > 120) n = 120; /* 限制矩阵大小防止性能问题 */
+
+    for (int p = 0; p < pred_count && sc < KI_MAX_CHAIN; p++) {
+        /* 3.1 构建邻接矩阵R[i][j]=1表示存在(i,谓词,j)的直接边 */
+        size_t mat_bytes = (size_t)n * (size_t)n;
+        unsigned char* R = (unsigned char*)safe_calloc(mat_bytes, sizeof(unsigned char));
+        float* edge_conf = (float*)safe_calloc(mat_bytes, sizeof(float));
+        if (!R || !edge_conf) {
+            safe_free((void**)&R);
+            safe_free((void**)&edge_conf);
+            continue;
+        }
+
+        /* 填充直接边 */
+        for (int i = 0; i < effective_count; i++) {
+            if (!facts[i].predicate || strcmp(facts[i].predicate, predicates[p]) != 0) continue;
+            int si = -1, oi = -1;
+            for (int e = 0; e < n; e++) {
+                if (facts[i].subject && strcmp(entities[e], facts[i].subject) == 0) si = e;
+                if (facts[i].object && strcmp(entities[e], facts[i].object) == 0) oi = e;
+            }
+            if (si >= 0 && oi >= 0 && si != oi) {
+                R[si * n + oi] = 1;
+                edge_conf[si * n + oi] = facts[i].confidence;
+            }
+        }
+
+        /* 3.2 保存原始边矩阵（用于区分直接边和传递边） */
+        unsigned char* R_orig = (unsigned char*)safe_malloc(mat_bytes);
+        if (R_orig) memcpy(R_orig, R, mat_bytes);
+
+        /* 3.3 调用Warshall全传递闭包算法计算所有间接关系 */
+        warshall_closure(R, edge_conf, n);
+
+        /* 3.4 提取新增的传递边（不在原始直接边中）作为推理结果 */
+        for (int i = 0; i < n && sc < KI_MAX_CHAIN; i++) {
+            for (int j = 0; j < n && sc < KI_MAX_CHAIN; j++) {
+                if (i == j) continue;
+                int is_derived = R[i * n + j] && (!R_orig || !R_orig[i * n + j]);
+                if (is_derived && edge_conf[i * n + j] > 0.01f) {
+                    chain->steps[sc].subject = string_duplicate(entities[i]);
+                    chain->steps[sc].predicate = string_duplicate(predicates[p]);
+                    chain->steps[sc].object = string_duplicate(entities[j]);
+                    chain->steps[sc].confidence = edge_conf[i * n + j];
+                    chain->steps[sc].source_id = -1;
+                    total_conf *= edge_conf[i * n + j];
+                    sc++;
+                }
+            }
+        }
+
+        safe_free((void**)&R);
+        safe_free((void**)&edge_conf);
+        safe_free((void**)&R_orig);
+    }
+
     chain->step_count = sc;
-    chain->total_confidence = total;
+    chain->total_confidence = (sc > 0) ? total_conf : 0.0f;
     chain->is_valid = sc > 0;
     return 0;
 }
@@ -160,39 +348,598 @@ int ki_add_rule(KnowledgeInferenceEngine* kie, const KIRule* rule) {
     return 0;
 }
 
-int ki_forward_chain(KnowledgeInferenceEngine* kie, const KIFact* facts, int count, KIFact* inferred, int* inf_count) {
-    if (!kie || !facts || !inferred || !inf_count) return -1;
-    int ic = 0;
-    for (int i = 0; i < kie->rule_count && ic < KI_MAX_CHAIN; i++) {
-        for (int j = 0; j < count; j++) {
-            if (facts[j].subject && strstr(kie->rules[i].condition, facts[j].subject)) {
-                inferred[ic].subject = string_duplicate(facts[j].subject);
-                inferred[ic].predicate = string_duplicate("推导");
-                inferred[ic].object = string_duplicate(kie->rules[i].conclusion);
-                inferred[ic].confidence = kie->rules[i].confidence * facts[j].confidence;
-                kie->rules[i].usage_count++;
-                ic++;
-                break;
-            }
+/* ============================================================================
+ * 规则解析辅助函数
+ *
+ * 将KIRule的condition/conclusion字符串解析为结构化TriplePattern。
+ * condition格式: "?X,谓词1,?Y&?Y,谓词2,?Z" (&分隔多前提)
+ * conclusion格式: "?X,结果谓词,?Z"
+ * 变量以 ? 或 $ 开头。
+ * ============================================================================ */
+
+/* 去除字符串首尾空白 */
+static void trim_whitespace(char* str) {
+    if (!str) return;
+    while (*str == ' ' || *str == '\t') str++;
+    char* end = str + strlen(str) - 1;
+    while (end > str && (*end == ' ' || *end == '\t')) { *end = '\0'; end--; }
+    /* 将结果移回原位 */
+    if (str != NULL) {
+        size_t len = strlen(str);
+        if ((char*)str - len > 0) return; /* 指针不变不需要移动，直接跳过 */
+    }
+}
+
+/* 判断字符串是否为变量（以?或$开头） */
+static int is_variable(const char* s) {
+    if (!s || !s[0]) return 0;
+    return (s[0] == '?' || s[0] == '$');
+}
+
+/* 解析单个三元组 "subject,predicate,object" → TriplePattern */
+static int parse_triple(const char* str, TriplePattern* tp) {
+    if (!str || !tp) return -1;
+    memset(tp, 0, sizeof(TriplePattern));
+
+    char buf[512];
+    string_copy_safe(buf, str, sizeof(buf));
+
+    char* subj = buf;
+    char* pred = NULL;
+    char* obj = NULL;
+
+    /* 寻找第一个逗号 */
+    char* comma1 = strchr(subj, ',');
+    if (comma1) {
+        *comma1 = '\0';
+        pred = comma1 + 1;
+        char* comma2 = strchr(pred, ',');
+        if (comma2) {
+            *comma2 = '\0';
+            obj = comma2 + 1;
         }
     }
-    *inf_count = ic;
+
+    if (!pred || !obj) return -1;
+
+    /* 去除空白 */
+    while (*subj == ' ') subj++;
+    while (*pred == ' ') pred++;
+    while (*obj == ' ') obj++;
+    char* end;
+
+    end = subj + strlen(subj) - 1; while (end > subj && *end == ' ') { *end = '\0'; end--; }
+    end = pred + strlen(pred) - 1; while (end > pred && *end == ' ') { *end = '\0'; end--; }
+    end = obj + strlen(obj) - 1;   while (end > obj && *end == ' ')   { *end = '\0'; end--; }
+
+    if (subj[0] == '\0' || pred[0] == '\0' || obj[0] == '\0') return -1;
+
+    string_copy_safe(tp->subject, subj, sizeof(tp->subject));
+    string_copy_safe(tp->predicate, pred, sizeof(tp->predicate));
+    string_copy_safe(tp->object, obj, sizeof(tp->object));
+
+    tp->subj_is_var = is_variable(tp->subject);
+    tp->pred_is_var = is_variable(tp->predicate);
+    tp->obj_is_var = is_variable(tp->object);
+
     return 0;
 }
 
-int ki_backward_chain(KnowledgeInferenceEngine* kie, const KIFact* goal, KIFact* needed, int* need_count) {
-    if (!kie || !goal || !needed || !need_count) return -1;
-    int nc = 0;
-    for (int i = 0; i < kie->rule_count && nc < KI_MAX_CHAIN; i++) {
-        if (strstr(kie->rules[i].conclusion, goal->predicate ? goal->predicate : goal->subject)) {
-            needed[nc].subject = string_duplicate("未知前提");
-            needed[nc].predicate = string_duplicate(kie->rules[i].condition);
-            needed[nc].object = string_duplicate("待验证");
-            needed[nc].confidence = kie->rules[i].confidence;
-            nc++;
+/* 根据变量绑定替换模式中的变量，输出具体三元组 */
+static void instantiate_pattern(const TriplePattern* pattern, const VarBinding* bindings, int bind_count, KIFact* out) {
+    if (!pattern || !out) return;
+    memset(out, 0, sizeof(KIFact));
+
+    const char* subj = pattern->subject;
+    const char* pred = pattern->predicate;
+    const char* obj = pattern->object;
+
+    /* 查找并替换变量 */
+    for (int b = 0; b < bind_count; b++) {
+        if (pattern->subj_is_var && strcmp(pattern->subject, bindings[b].var_name) == 0)
+            subj = bindings[b].binding;
+        if (pattern->pred_is_var && strcmp(pattern->predicate, bindings[b].var_name) == 0)
+            pred = bindings[b].binding;
+        if (pattern->obj_is_var && strcmp(pattern->object, bindings[b].var_name) == 0)
+            obj = bindings[b].binding;
+    }
+
+    out->subject = string_duplicate(subj);
+    out->predicate = string_duplicate(pred);
+    out->object = string_duplicate(obj);
+    out->confidence = 0.0f;
+    out->source_id = -1;
+}
+
+/* 将KIRule解析为ParsedRule（内部结构化表示） */
+static int parse_rule_to_internal(const KIRule* rule, ParsedRule* parsed) {
+    if (!rule || !parsed) return -1;
+    memset(parsed, 0, sizeof(ParsedRule));
+
+    /* 解析条件：按&分割多前提 */
+    char cond_buf[512];
+    string_copy_safe(cond_buf, rule->condition, sizeof(cond_buf));
+
+    char* token_ctx = cond_buf;
+    char* premise_str = token_ctx;
+    int specificity = 0;
+
+    while (premise_str && *premise_str && parsed->premise_count < KI_MAX_PREMISES_PER_RULE) {
+        /* 手动查找&分隔符（避免strtok_r的跨平台兼容问题） */
+        char* amp_pos = strchr(premise_str, '&');
+        if (amp_pos) *amp_pos = '\0';
+
+        while (*premise_str == ' ') premise_str++;
+        if (parse_triple(premise_str, &parsed->premises[parsed->premise_count]) == 0) {
+            TriplePattern* tp = &parsed->premises[parsed->premise_count];
+            /* 特异性计算：每个非变量槽位贡献1分 */
+            if (!tp->subj_is_var) specificity++;
+            if (!tp->pred_is_var) specificity++;
+            if (!tp->obj_is_var) specificity++;
+            parsed->premise_count++;
+        }
+
+        if (amp_pos) {
+            premise_str = amp_pos + 1;
+        } else {
+            break;
         }
     }
-    *need_count = nc;
+
+    /* 解析结论 */
+    char conc_buf[512];
+    string_copy_safe(conc_buf, rule->conclusion, sizeof(conc_buf));
+    char* conc_ptr = conc_buf;
+    while (*conc_ptr == ' ') conc_ptr++;
+    if (parse_triple(conc_ptr, &parsed->conclusion) != 0) return -1;
+    if (!parsed->conclusion.subj_is_var) specificity++;
+    if (!parsed->conclusion.pred_is_var) specificity++;
+    if (!parsed->conclusion.obj_is_var) specificity++;
+
+    parsed->confidence = rule->confidence;
+    parsed->priority = rule->priority;
+    parsed->usage_count = rule->usage_count;
+    parsed->rule_id = rule->rule_id;
+    parsed->specificity = specificity;
+
+    return 0;
+}
+
+/* 匹配单个三元组模式与事实，更新变量绑定
+ * 返回：1=匹配成功，0=匹配失败 */
+static int match_triple(const TriplePattern* pattern, const KIFact* fact,
+                        VarBinding* bindings, int* bind_count) {
+    if (!pattern || !fact || !bindings || !bind_count) return 0;
+
+    /* 辅助函数：匹配单个槽位 */
+    #define MATCH_SLOT(is_var, pat_val, fact_val) do { \
+        if (is_var) { \
+            if (!(fact_val)) return 0; \
+            /* 查找是否存在绑定 */ \
+            int _found = 0; \
+            for (int _b = 0; _b < *bind_count; _b++) { \
+                if (strcmp(bindings[_b].var_name, pat_val) == 0) { \
+                    if (strcmp(bindings[_b].binding, (fact_val)) != 0) return 0; \
+                    _found = 1; \
+                    break; \
+                } \
+            } \
+            if (!_found) { \
+                if (*bind_count >= KI_MAX_VARS_PER_RULE) return 0; \
+                string_copy_safe(bindings[*bind_count].var_name, pat_val, 64); \
+                string_copy_safe(bindings[*bind_count].binding, (fact_val), 256); \
+                (*bind_count)++; \
+            } \
+        } else { \
+            if (!(fact_val) || strcmp(pat_val, (fact_val)) != 0) return 0; \
+        } \
+    } while(0)
+
+    MATCH_SLOT(pattern->subj_is_var, pattern->subject, fact->subject ? fact->subject : "");
+    MATCH_SLOT(pattern->pred_is_var, pattern->predicate, fact->predicate ? fact->predicate : "");
+    MATCH_SLOT(pattern->obj_is_var, pattern->object, fact->object ? fact->object : "");
+
+    #undef MATCH_SLOT
+    return 1;
+}
+
+/* ============================================================================
+ * 模式匹配辅助函数 - match_triple_pattern
+ *
+ * 统一的变量绑定匹配：将TriplePattern与KIFact进行匹配。
+ *
+ * 匹配规则：
+ * 1. 若槽位为常量（不是变量），则必须与事实对应字段完全匹配
+ * 2. 若槽位为变量（以?或$开头），则：
+ *    a. 若该变量已在绑定表中，必须与已有绑定值一致（一致性检查）
+ *    b. 若该变量未绑定，则将事实中的值绑定到该变量
+ * 3. 所有三个槽位（subject, predicate, object）均需匹配成功
+ *
+ * 使用场景：
+ * - 前向链接：匹配规则前提与工作事实集
+ * - 后向链接：匹配规则结论与目标查询
+ * - 子图匹配：匹配模式与知识图谱三元组
+ *
+ * 参数：
+ *   pattern: 待匹配的三元组模式（可含变量）
+ *   fact: 待匹配的具体事实（不含变量）
+ *   bindings: 变量绑定表（输入/输出，跨前提共用）
+ *   bind_count: 当前绑定数量（输入/输出指针）
+ *
+ * 返回：1=匹配成功，0=匹配失败
+ * ============================================================================ */
+static int match_triple_pattern(const TriplePattern* pattern, const KIFact* fact,
+                                 VarBinding* bindings, int* bind_count) {
+    if (!pattern || !fact || !bindings || !bind_count) return 0;
+
+    /* 辅助宏：匹配单个槽位（与match_triple使用相同逻辑） */
+    #define MATCH_PATTERN_SLOT(is_var, pat_val, fact_val) do { \
+        if (is_var) { \
+            if (!(fact_val)) return 0; \
+            int _found = 0; \
+            for (int _b = 0; _b < *bind_count; _b++) { \
+                if (strcmp(bindings[_b].var_name, pat_val) == 0) { \
+                    /* 变量已绑定，必须与已有绑定值一致 */ \
+                    if (strcmp(bindings[_b].binding, (fact_val)) != 0) return 0; \
+                    _found = 1; \
+                    break; \
+                } \
+            } \
+            if (!_found) { \
+                /* 新变量：创建绑定 */ \
+                if (*bind_count >= KI_MAX_VARS_PER_RULE) return 0; \
+                string_copy_safe(bindings[*bind_count].var_name, pat_val, 64); \
+                string_copy_safe(bindings[*bind_count].binding, (fact_val), 256); \
+                (*bind_count)++; \
+            } \
+        } else { \
+            /* 常量槽位：必须完全匹配 */ \
+            if (!(fact_val) || strcmp(pat_val, (fact_val)) != 0) return 0; \
+        } \
+    } while(0)
+
+    MATCH_PATTERN_SLOT(pattern->subj_is_var, pattern->subject, fact->subject ? fact->subject : "");
+    MATCH_PATTERN_SLOT(pattern->pred_is_var, pattern->predicate, fact->predicate ? fact->predicate : "");
+    MATCH_PATTERN_SLOT(pattern->obj_is_var, pattern->object, fact->object ? fact->object : "");
+
+    #undef MATCH_PATTERN_SLOT
+    return 1;
+}
+
+/* ============================================================================
+ * 前向链接推理引擎（基于模式匹配的规则引擎）
+ *
+ * 算法：
+ * 1. 将所有规则解析为内部ParsedRule结构
+ * 2. 维护工作事实集（输入事实 + 新推导事实）
+ * 3. 迭代直到不动点（不再产生新事实）：
+ *    a. 对于每条规则，尝试将前提与工作事实集进行模式匹配
+ *    b. 变量绑定跨前提保持一致（同名变量绑定相同值）
+ *    c. 若所有前提匹配成功，实例化结论并添加到工作集
+ * 4. 按规则优先级和特异性排序，高优先级/高特异性规则优先触发
+ * ============================================================================ */
+int ki_forward_chain(KnowledgeInferenceEngine* kie, const KIFact* facts, int count,
+                     KIFact* inferred, int* inf_count) {
+    if (!kie || !facts || !inferred || !inf_count) return -1;
+    *inf_count = 0;
+
+    if (count <= 0 || kie->rule_count <= 0) return 0;
+
+    /* 阶段1：解析所有规则为内部ParsedRule结构 */
+    ParsedRule parsed_rules[128];
+    int parsed_count = 0;
+    for (int i = 0; i < kie->rule_count && parsed_count < 128; i++) {
+        if (parse_rule_to_internal(&kie->rules[i], &parsed_rules[parsed_count]) == 0) {
+            parsed_count++;
+        }
+    }
+
+    /* 按优先级和特异性排序（优先级权重10倍于特异性） */
+    for (int i = 0; i < parsed_count - 1; i++) {
+        for (int j = i + 1; j < parsed_count; j++) {
+            float score_i = parsed_rules[i].priority * 10.0f + (float)parsed_rules[i].specificity;
+            float score_j = parsed_rules[j].priority * 10.0f + (float)parsed_rules[j].specificity;
+            if (score_j > score_i) {
+                ParsedRule tmp = parsed_rules[i];
+                parsed_rules[i] = parsed_rules[j];
+                parsed_rules[j] = tmp;
+            }
+        }
+    }
+
+    /* 阶段2：构建工作事实集（输入事实副本，后续新推导事实会追加） */
+    KIFact working_facts[256];
+    int wf_count = 0;
+    for (int i = 0; i < count && wf_count < 256; i++) {
+        fact_copy(&working_facts[wf_count++], &facts[i]);
+    }
+
+    /* 阶段3：迭代前向链接直到不动点（最多10轮） */
+    int max_iterations = 10;
+    for (int iter = 0; iter < max_iterations; iter++) {
+        int new_in_this_iter = 0;
+
+        for (int r = 0; r < parsed_count && *inf_count < KI_MAX_CHAIN; r++) {
+            ParsedRule* rule = &parsed_rules[r];
+            if (rule->premise_count == 0) continue;
+
+            /* 对工作事实集中每个可能匹配第一个前提的候选，尝试全前提匹配 */
+            for (int w1 = 0; w1 < wf_count; w1++) {
+                /* 用match_triple_pattern进行统一变量绑定匹配 */
+                VarBinding bindings[KI_MAX_VARS_PER_RULE];
+                int bind_count = 0;
+                if (!match_triple_pattern(&rule->premises[0], &working_facts[w1], bindings, &bind_count))
+                    continue;
+
+                /* 记录每个前提匹配到的事实索引，用于置信度计算 */
+                int matched_fact_indices[KI_MAX_PREMISES_PER_RULE];
+                matched_fact_indices[0] = w1;
+
+                /* 对剩余前提进行回溯匹配（同名变量跨前提保持绑定一致性） */
+                int all_matched = 1;
+                for (int p = 1; p < rule->premise_count; p++) {
+                    int premise_matched = 0;
+                    for (int w = 0; w < wf_count; w++) {
+                        /* 复制当前绑定状态进行尝试匹配 */
+                        VarBinding temp_bindings[KI_MAX_VARS_PER_RULE];
+                        int temp_count = bind_count;
+                        memcpy(temp_bindings, bindings, (size_t)temp_count * sizeof(VarBinding));
+                        if (match_triple_pattern(&rule->premises[p], &working_facts[w], temp_bindings, &temp_count)) {
+                            /* 匹配成功：更新绑定并记录匹配事实 */
+                            memcpy(bindings, temp_bindings, (size_t)temp_count * sizeof(VarBinding));
+                            bind_count = temp_count;
+                            matched_fact_indices[p] = w;
+                            premise_matched = 1;
+                            break;
+                        }
+                    }
+                    if (!premise_matched) { all_matched = 0; break; }
+                }
+
+                if (!all_matched) continue;
+
+                /* 所有前提匹配成功，用绑定表实例化结论 */
+                KIFact result;
+                instantiate_pattern(&rule->conclusion, bindings, bind_count, &result);
+                if (!result.subject || !result.predicate || !result.object) {
+                    fact_free(&result);
+                    continue;
+                }
+
+                /* 去重检查：确保该结论未被推导过 */
+                if (fact_in_list(&result, inferred, *inf_count) ||
+                    fact_in_list(&result, working_facts, wf_count)) {
+                    fact_free(&result);
+                    continue;
+                }
+
+                /* 计算推导置信度：
+                 * 1. 收集所有匹配前提事实的置信度
+                 * 2. 计算几何平均值
+                 * 3. 乘以规则置信度 */
+                float acc_conf = 0.0f;
+                for (int p = 0; p < rule->premise_count; p++) {
+                    acc_conf += working_facts[matched_fact_indices[p]].confidence;
+                }
+                acc_conf /= (float)rule->premise_count;
+                result.confidence = rule->confidence * acc_conf;
+                if (result.confidence > 1.0f) result.confidence = 1.0f;
+                if (result.confidence < 0.01f) result.confidence = 0.01f;
+                result.source_id = -1;
+
+                /* 添加到推理结果和工作事实集 */
+                fact_copy(&inferred[*inf_count], &result);
+                (*inf_count)++;
+
+                if (wf_count < 256) {
+                    fact_copy(&working_facts[wf_count++], &result);
+                }
+
+                /* 更新规则使用计数 */
+                rule->usage_count++;
+                kie->rules[rule->rule_id].usage_count = rule->usage_count;
+                new_in_this_iter++;
+                fact_free(&result);
+            }
+        }
+
+        if (new_in_this_iter == 0) break; /* 不动点：本轮无新事实，停止迭代 */
+    }
+
+    /* 清理工作事实集 */
+    for (int i = 0; i < wf_count; i++) {
+        fact_free(&working_facts[i]);
+    }
+
+    return 0;
+}
+
+/* ============================================================================
+ * 后向链接推理引擎（基于目标的回溯推理 + 变量替换表维护）
+ *
+ * 算法：
+ * 1. 将目标查询解析为TriplePattern（可含变量）
+ * 2. 使用BFS队列维护搜索前沿，每个节点包含：
+ *    a. 当前子目标（需要证明的事实）
+ *    b. 累积变量绑定表（跨递归层级传递）
+ *    c. 证明链（已遍历的祖先目标，用于循环检测）
+ *    d. 当前深度（用于深度限制）
+ * 3. 对于每个子目标：
+ *    a. 遍历所有规则，检查规则结论是否与子目标匹配（使用match_triple_pattern）
+ *    b. 若结论匹配，对规则每个前提执行目标回归：
+ *       - 使用当前变量绑定实例化前提
+ *       - 检查前提是否已在证明链中（循环检测）
+ *       - 若未出现过，将前提作为新子目标入队
+ *       - 将前提添加到必需事实列表
+ *    c. 若无规则匹配，子目标本身即为必需前提
+ * 4. 维护变量替换表：匹配结论时产生的变量绑定传播到所有前提
+ * ============================================================================ */
+int ki_backward_chain(KnowledgeInferenceEngine* kie, const KIFact* goal,
+                      KIFact* needed, int* need_count) {
+    if (!kie || !goal || !needed || !need_count) return -1;
+    *need_count = 0;
+
+    if (kie->rule_count <= 0) return 0;
+
+    /* 解析所有规则为内部结构 */
+    ParsedRule parsed_rules[128];
+    int parsed_count = 0;
+    for (int i = 0; i < kie->rule_count && parsed_count < 128; i++) {
+        if (parse_rule_to_internal(&kie->rules[i], &parsed_rules[parsed_count]) == 0) {
+            parsed_count++;
+        }
+    }
+
+    /* 构建目标模式（用于规则结论匹配） */
+    TriplePattern goal_pattern;
+    memset(&goal_pattern, 0, sizeof(goal_pattern));
+    if (goal->subject) string_copy_safe(goal_pattern.subject, goal->subject, sizeof(goal_pattern.subject));
+    if (goal->predicate) string_copy_safe(goal_pattern.predicate, goal->predicate, sizeof(goal_pattern.predicate));
+    if (goal->object) string_copy_safe(goal_pattern.object, goal->object, sizeof(goal_pattern.object));
+    goal_pattern.subj_is_var = is_variable(goal_pattern.subject);
+    goal_pattern.pred_is_var = is_variable(goal_pattern.predicate);
+    goal_pattern.obj_is_var = is_variable(goal_pattern.object);
+
+    /* BFS队列：每个节点包含子目标、变量绑定、证明链、深度 */
+    BackChainNode queue[128];
+    int head = 0, tail = 0;
+
+    /* 初始化根节点 */
+    BackChainNode init_node;
+    memset(&init_node, 0, sizeof(init_node));
+    fact_copy(&init_node.goal, goal);
+    init_node.binding_count = 0;
+    init_node.proof_count = 0;
+    init_node.depth = 0;
+    if (tail < 128) queue[tail++] = init_node;
+
+    int max_depth = 5; /* 最大回溯深度 */
+
+    while (head < tail && *need_count < KI_MAX_CHAIN) {
+        BackChainNode current = queue[head++];
+
+        /* 深度限制 */
+        if (current.depth >= max_depth) {
+            fact_free(&current.goal);
+            for (int p = 0; p < current.proof_count; p++) fact_free(&current.proof_chain[p]);
+            continue;
+        }
+
+        /* 遍历所有规则，查找结论可匹配当前子目标的规则 */
+        int found_any_rule = 0;
+        for (int r = 0; r < parsed_count; r++) {
+            ParsedRule* rule = &parsed_rules[r];
+            if (rule->premise_count == 0) continue;
+
+            TriplePattern* conc = &rule->conclusion;
+
+            /* 构建当前子目标对应的KIFact用于匹配 */
+            KIFact current_fact;
+            memset(&current_fact, 0, sizeof(KIFact));
+            current_fact.subject = (current.goal.subject && current.goal.subject[0]) ? current.goal.subject : (char*)"";
+            current_fact.predicate = (current.goal.predicate && current.goal.predicate[0]) ? current.goal.predicate : (char*)"";
+            current_fact.object = (current.goal.object && current.goal.object[0]) ? current.goal.object : (char*)"";
+
+            /* 初始化变量绑定：合并当前节点累积的绑定 */
+            VarBinding conc_bindings[KI_MAX_VARS_PER_RULE];
+            int conc_bind_count = 0;
+            if (current.binding_count > 0) {
+                memcpy(conc_bindings, current.bindings, (size_t)current.binding_count * sizeof(VarBinding));
+                conc_bind_count = current.binding_count;
+            }
+
+            /* 尝试匹配规则结论与当前子目标 */
+            if (!match_triple_pattern(conc, &current_fact, conc_bindings, &conc_bind_count))
+                continue;
+
+            found_any_rule = 1;
+
+            /* 规则结论匹配成功，对每个前提执行目标回归 */
+            for (int p = 0; p < rule->premise_count && *need_count < KI_MAX_CHAIN; p++) {
+                /* 使用当前变量绑定实例化前提 */
+                KIFact premise_fact;
+                instantiate_pattern(&rule->premises[p], conc_bindings, conc_bind_count, &premise_fact);
+
+                if (!premise_fact.subject || !premise_fact.predicate || !premise_fact.object) {
+                    fact_free(&premise_fact);
+                    continue;
+                }
+
+                /* 循环检测：检查该前提是否已在证明链或根目标中 */
+                int already_known = 0;
+                if (goal->subject && goal->predicate && goal->object &&
+                    strcmp(premise_fact.subject, goal->subject) == 0 &&
+                    strcmp(premise_fact.predicate, goal->predicate) == 0 &&
+                    strcmp(premise_fact.object, goal->object) == 0) {
+                    already_known = 1;
+                }
+                for (int k = 0; k < current.proof_count && !already_known; k++) {
+                    if (fact_equals(&premise_fact, &current.proof_chain[k])) {
+                        already_known = 1;
+                    }
+                }
+
+                if (!already_known) {
+                    /* 将实例化前提加入必需事实列表 */
+                    premise_fact.confidence = rule->confidence * 0.9f;
+                    premise_fact.source_id = -1;
+
+                    if (fact_in_list(&premise_fact, needed, *need_count) == 0) {
+                        fact_copy(&needed[*need_count], &premise_fact);
+                        (*need_count)++;
+                    }
+
+                    /* 将前提作为新子目标加入BFS队列继续探索 */
+                    if (tail < 128) {
+                        BackChainNode next;
+                        memset(&next, 0, sizeof(BackChainNode));
+                        fact_copy(&next.goal, &premise_fact);
+                        /* 传递变量绑定到子目标 */
+                        memcpy(next.bindings, conc_bindings, (size_t)conc_bind_count * sizeof(VarBinding));
+                        next.binding_count = conc_bind_count;
+                        /* 复制证明链并追加当前目标 */
+                        next.proof_count = current.proof_count;
+                        for (int k = 0; k < current.proof_count && next.proof_count < KI_MAX_CHAIN; k++) {
+                            fact_copy(&next.proof_chain[next.proof_count++], &current.proof_chain[k]);
+                        }
+                        if (next.proof_count < KI_MAX_CHAIN) {
+                            fact_copy(&next.proof_chain[next.proof_count++], &current.goal);
+                        }
+                        next.depth = current.depth + 1;
+                        queue[tail++] = next;
+                    }
+                }
+                fact_free(&premise_fact);
+            }
+        }
+
+        /* 若无规则可匹配当前子目标，则子目标本身即为基础必需前提 */
+        if (!found_any_rule && *need_count < KI_MAX_CHAIN) {
+            KIFact direct_needed;
+            memset(&direct_needed, 0, sizeof(KIFact));
+            direct_needed.subject = string_duplicate(current.goal.subject ? current.goal.subject : "");
+            direct_needed.predicate = string_duplicate(current.goal.predicate ? current.goal.predicate : "");
+            direct_needed.object = string_duplicate(current.goal.object ? current.goal.object : "");
+            direct_needed.confidence = current.goal.confidence;
+            direct_needed.source_id = -1;
+            if (fact_in_list(&direct_needed, needed, *need_count) == 0) {
+                fact_copy(&needed[*need_count], &direct_needed);
+                (*need_count)++;
+            }
+            fact_free(&direct_needed);
+        }
+
+        /* 释放当前节点内存 */
+        fact_free(&current.goal);
+        for (int p = 0; p < current.proof_count; p++) fact_free(&current.proof_chain[p]);
+    }
+
+    /* 清理队列中剩余节点 */
+    for (int i = head; i < tail; i++) {
+        fact_free(&queue[i].goal);
+        for (int p = 0; p < queue[i].proof_count; p++) fact_free(&queue[i].proof_chain[p]);
+    }
+
     return 0;
 }
 
@@ -1142,14 +1889,35 @@ int ki_resolve_conflicts(KnowledgeInferenceEngine* kie, KIConflict* conflicts, i
         KIConflict* cf = &conflicts[i];
         KIFact result;
         memset(&result, 0, sizeof(KIFact));
+
+        /* 计算两个冲突事实的特异性分数
+         * 特异性 = 非空字段数 × 各字段平均长度 / 256（更详细的事实更可信） */
+        float spec_a = 0.0f, spec_b = 0.0f;
+        if (cf->fact_a.subject) spec_a += (float)strlen(cf->fact_a.subject) / 256.0f;
+        if (cf->fact_a.predicate) spec_a += (float)strlen(cf->fact_a.predicate) / 256.0f;
+        if (cf->fact_a.object) spec_a += (float)strlen(cf->fact_a.object) / 256.0f;
+        if (cf->fact_b.subject) spec_b += (float)strlen(cf->fact_b.subject) / 256.0f;
+        if (cf->fact_b.predicate) spec_b += (float)strlen(cf->fact_b.predicate) / 256.0f;
+        if (cf->fact_b.object) spec_b += (float)strlen(cf->fact_b.object) / 256.0f;
+
         switch (strategy) {
             case KI_RESOLVE_CONFIDENCE: {
-                if (cf->fact_a.confidence >= cf->fact_b.confidence) {
+                float conf_diff = cf->fact_a.confidence - cf->fact_b.confidence;
+                /* 若置信度差异小于10%，使用特异性作为决胜因子 */
+                if (fabsf(conf_diff) < 0.1f) {
+                    if (spec_a >= spec_b) {
+                        fact_copy(&result, &cf->fact_a);
+                    } else {
+                        fact_copy(&result, &cf->fact_b);
+                    }
+                    result.confidence = (cf->fact_a.confidence + cf->fact_b.confidence) * 0.5f;
+                } else if (cf->fact_a.confidence >= cf->fact_b.confidence) {
                     fact_copy(&result, &cf->fact_a);
+                    result.confidence = fabsf(cf->fact_a.confidence - cf->fact_b.confidence);
                 } else {
                     fact_copy(&result, &cf->fact_b);
+                    result.confidence = fabsf(cf->fact_a.confidence - cf->fact_b.confidence);
                 }
-                result.confidence = fabsf(cf->fact_a.confidence - cf->fact_b.confidence);
                 break;
             }
             case KI_RESOLVE_TIME: {
@@ -1178,17 +1946,24 @@ int ki_resolve_conflicts(KnowledgeInferenceEngine* kie, KIConflict* conflicts, i
                 if (kb) {
                     KnowledgeEntry kb_entry;
                     memset(&kb_entry, 0, sizeof(KnowledgeEntry));
-                    static const float source_weights[] = {0.6f, 0.7f, 0.8f, 0.9f, 0.7f, 0.75f, 0.85f, 0.65f};
+                    static const float source_weights[] = {0.6f, 0.7f, 0.8f, 0.9f, 0.7f, 0.75f, 0.85f, 0.65f, 0.9f, 0.5f};
                     float new_weight = 0.5f;
-                    if (cf->fact_a.source_id >= 0 && cf->fact_a.source_id < 8) {
+                    if (cf->fact_a.source_id >= 0 && cf->fact_a.source_id < 10) {
                         new_weight = source_weights[cf->fact_a.source_id];
                     }
                     float old_weight = 0.5f;
                     if (knowledge_base_get_by_id(kb, cf->entry_id_a, &kb_entry) == 0) {
                         int src = (int)kb_entry.source;
-                        if (src >= 0 && src < 8) old_weight = source_weights[src];
+                        if (src >= 0 && src < 10) old_weight = source_weights[src];
                     }
-                    if (new_weight >= old_weight) {
+                    /* 来源权重相同时，使用特异性决胜 */
+                    if (fabsf(new_weight - old_weight) < 0.05f) {
+                        if (spec_a >= spec_b) {
+                            fact_copy(&result, &cf->fact_a);
+                        } else {
+                            fact_copy(&result, &cf->fact_b);
+                        }
+                    } else if (new_weight >= old_weight) {
                         fact_copy(&result, &cf->fact_a);
                     } else {
                         fact_copy(&result, &cf->fact_b);
@@ -1210,9 +1985,63 @@ int ki_resolve_conflicts(KnowledgeInferenceEngine* kie, KIConflict* conflicts, i
                 result.source_id = -1;
                 break;
             }
-            default:
-                fact_copy(&result, &cf->fact_a);
+            case KI_RESOLVE_PRIORITY_SPECIFICITY: {
+                /* 规则优先级 + 特异性组合策略：
+                 * 1. 计算每个事实的综合得分：
+                 *    - 规则优先级权重 50%（反映推导该事实的规则可信度）
+                 *    - 特异性权重 30%（更详细的事实更可信）
+                 *    - 置信度权重 20%（概率层面的可信度）
+                 * 2. 特异性 = Σ(各字段长度 / 256) + 额外字段奖励
+                 * 3. 规则优先级从KIRule.priority中获取，
+                 *    若无规则关联则使用默认值0.5 */
+                float priority_a = 0.5f, priority_b = 0.5f;
+                /* 尝试获取事实关联的规则优先级（通过source_id索引） */
+                if (cf->fact_a.source_id >= 0 && cf->fact_a.source_id < kie->rule_count) {
+                    priority_a = kie->rules[cf->fact_a.source_id].priority;
+                }
+                if (cf->fact_b.source_id >= 0 && cf->fact_b.source_id < kie->rule_count) {
+                    priority_b = kie->rules[cf->fact_b.source_id].priority;
+                }
+
+                /* 计算特异性分数：字段长度归一化 + 非空字段数加权 */
+                float spec_score_a = spec_a * 0.7f;
+                float spec_score_b = spec_b * 0.7f;
+                /* 额外特异性：非空字段数量奖励 */
+                int nonempty_a = (cf->fact_a.subject ? 1 : 0) + (cf->fact_a.predicate ? 1 : 0) + (cf->fact_a.object ? 1 : 0);
+                int nonempty_b = (cf->fact_b.subject ? 1 : 0) + (cf->fact_b.predicate ? 1 : 0) + (cf->fact_b.object ? 1 : 0);
+                spec_score_a += (float)nonempty_a * 0.1f;
+                spec_score_b += (float)nonempty_b * 0.1f;
+
+                /* 综合得分 = 优先级(50%) + 特异性(30%) + 置信度(20%) */
+                float score_a = priority_a * 0.5f + spec_score_a * 0.3f + cf->fact_a.confidence * 0.2f;
+                float score_b = priority_b * 0.5f + spec_score_b * 0.3f + cf->fact_b.confidence * 0.2f;
+
+                if (score_a >= score_b) {
+                    fact_copy(&result, &cf->fact_a);
+                } else {
+                    fact_copy(&result, &cf->fact_b);
+                }
+                /* 冲突解决后的置信度：两者的调和平均 */
+                float harm_mean = 2.0f * cf->fact_a.confidence * cf->fact_b.confidence /
+                    (cf->fact_a.confidence + cf->fact_b.confidence + 1e-6f);
+                result.confidence = (score_a >= score_b) ?
+                    cf->fact_a.confidence * 0.7f + harm_mean * 0.3f :
+                    cf->fact_b.confidence * 0.7f + harm_mean * 0.3f;
                 break;
+            }
+            default: {
+                /* 默认策略（特异性优先）：
+                 * 更具体、更详细的事实优先于泛化的事实
+                 * 特异性 = Σ(各字段长度和归一化) × 权重 + 置信度 × 权重 */
+                float score_a = spec_a * 0.6f + cf->fact_a.confidence * 0.4f;
+                float score_b = spec_b * 0.6f + cf->fact_b.confidence * 0.4f;
+                if (score_a >= score_b) {
+                    fact_copy(&result, &cf->fact_a);
+                } else {
+                    fact_copy(&result, &cf->fact_b);
+                }
+                break;
+            }
         }
         if (result.subject || result.predicate || result.object) {
             fact_copy(&resolved[*resolved_count], &result);

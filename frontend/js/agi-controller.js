@@ -240,7 +240,7 @@ class AGIController {
                 return await this._apiPost('/api/device/control', {
                     device: 'air_conditioner',
                     action: 'set_temperature',
-                    value: task.params.temperature || 26
+                    value: task.params.temperature !== undefined ? task.params.temperature : -1
                 });
             default:
                 throw new Error('未知设备操作: ' + task.action);

@@ -544,19 +544,14 @@ class CommandEngine {
                         case 'on':
                         var spks = dm.getAvailableSpeakers();
                         if (spks.length === 0) {
-                            /* BUG-8修复：先await异步调用testSpeaker，再返回确定格式的对象，避免直接return可能得到的非对象值 */
-                            if (window.SelfLnnApi) {
-                                await window.SelfLnnApi.testSpeaker(500, 440);
-                                return { success: true, message: '已发送测试音' };
-                            }
-                            return { success: false, error: '未找到可用扬声器' };
+                            /* L-009修复: 无硬件扬声器时返回真实状态，不使用客户端testSpeaker模拟确认
+                             * testSpeaker是纯浏览器端Web Audio API，无法验证后端音频通道 */
+                            return { success: false, error: '未找到可用扬声器硬件，无法播放音频。请连接物理扬声器设备后重试。' };
                         }
                             var addResult = await dm.addSpeaker(spks[0].deviceId);
                             if (addResult.success) {
                                 result = await dm.startSpeaker(addResult.data.id);
-                                if (window.SelfLnnApi) {
-                                    window.SelfLnnApi.testSpeaker(300, 880);
-                                }
+                                /* L-009修复: 移除testSpeaker客户端模拟确认 */
                             } else {
                                 var existingSpk = dm.speakers.find(function(s) { return s.active === false; });
                                 if (existingSpk) result = await dm.startSpeaker(existingSpk.id);

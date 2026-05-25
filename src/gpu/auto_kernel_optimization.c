@@ -1387,12 +1387,12 @@ int auto_kernel_optimizer_suggest_unroll_factor(AutoKernelOptimizer* optimizer,
     if (loop_iterations <= 0 || operations_per_iter <= 0) return 1;
 
     /* 尝试从历史数据库查询最优展开因子 */
-    if (optimizer && optimizer->db_entry_count > 0) {
+    if (optimizer && optimizer->database_count > 0) {
         int hist_unroll = 4;
-        for (size_t i = 0; i < optimizer->db_entry_count && i < 64; i++) {
-            if (optimizer->perf_db[i].input_size > 0 &&
-                optimizer->perf_db[i].unroll_factor > hist_unroll) {
-                hist_unroll = optimizer->perf_db[i].unroll_factor;
+        for (size_t i = 0; i < (size_t)optimizer->database_count && i < 64; i++) {
+            if (optimizer->database[i].record.input_size > 0 &&
+                optimizer->database[i].record.params.unroll_factor > hist_unroll) {
+                hist_unroll = optimizer->database[i].record.params.unroll_factor;
             }
         }
         if (hist_unroll > 0 && loop_iterations >= hist_unroll * 4) {

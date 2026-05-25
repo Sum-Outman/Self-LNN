@@ -17,6 +17,10 @@
 typedef struct LNN LNN;
 #endif
 
+#ifndef SELFLNN_KNOWLEDGE_H
+typedef struct KnowledgeBase KnowledgeBase;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -223,6 +227,25 @@ int multimodal_processor_process_unified(MultimodalProcessor* processor,
                                        const float* raw_text, size_t text_size,
                                        const float* raw_sensor, size_t sensor_size,
                                        float* output, size_t max_output_size);
+
+/**
+ * @brief 提取查询关键词并返回TF-IDF加权特征向量（P1-003修复）
+ *
+ * 使用真实TF-IDF计算替代硬编码高频词表。
+ * TF = 词频 / 查询总词数（当前文档内真实频率）
+ * IDF = log(总文档数 / (包含该词的文档数 + 1)) + 1（基于知识库文档统计）
+ * 分词使用增强版中英文混合分词（unigram + bigram + trigram）
+ * 当知识库不可用时，自动回退到内置高频词表。
+ *
+ * @param query       查询文本（UTF-8中英文混合）
+ * @param kb          知识库指针（用于IDF统计，可为NULL回退到高频词表）
+ * @param features    输出的TF-IDF加权特征向量（按分数降序）
+ * @param max_features 特征向量最大维度
+ * @return 成功返回实际特征维度，失败返回-1
+ */
+int mm_extract_keywords_from_query(const char* query,
+                                    struct KnowledgeBase* kb,
+                                    float* features, size_t max_features);
 
 #ifdef __cplusplus
 }

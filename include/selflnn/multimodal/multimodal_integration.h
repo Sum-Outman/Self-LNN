@@ -247,6 +247,168 @@ int multimodal_integration_generate_test_data(
     TextInput* text_output,
     SensorInput* sensor_output);
 
+/* ============================================================================
+ * MmCfcFusionState: CfC ODE 跨模态连续动态融合
+ *
+ * 各模态通过线性投影映射到统一隐空间，
+ * 拼接后通过 CfC ODE 进行连续时间状态演化。
+ * 融合权重可通过梯度反向传播学习更新。
+ *
+ * CfC ODE 融合公式：
+ *   τ * dh/dt = -h + σ(W_fusion * [modal_0; ...; modal_n]) ⊙ tanh(U_fusion * h + b)
+ *
+ * 支持9种模态:
+ *   视觉(0) 音频(1) 文本(2) 传感器(3) 触觉(4)
+ *   本体感(5) 热感(6) 雷达(7) 电机(8)
+ * ============================================================================ */
+
+#define MM_FUSION_MAX_MODALITIES  9
+
+/**
+ * @brief CfC跨模态ODE融合状态
+ */
+typedef struct {
+    int num_modalities;               /**< 模态数量（最多9种） */
+    int latent_dim;                   /**< 各模态投影后的统一隐空间维度 */
+    int hidden_dim;                   /**< CfC ODE 隐状态维度（即融合输出维度） */
+    int concat_dim;                   /**< 拼接后总维度 = num_modalities * latent_dim */
+
+    /* CfC ODE 隐状态 h ∈ R^{hidden_dim} */
+    float *h;
+
+    /* 各模态线性投影参数
+     * W_proj[m] ∈ R^{latent_dim × input_dims[m]}  (行优先存储)
+     * b_proj[m] ∈ R^{latent_dim} */
+    float **W_proj;
+    float **b_proj;
+    int *input_dims;
+
+    /* CfC 融合核心参数
+     * W_fusion ∈ R^{hidden_dim × concat_dim}  门控投影矩阵
+     * U_fusion ∈ R^{hidden_dim × hidden_dim}  循环矩阵
+     * b_fusion ∈ R^{hidden_dim}               偏置 */
+    float *W_fusion;
+    float *U_fusion;
+    float *b_fusion;
+    float tau;                        /**< ODE时间常数 */
+    float dt;                         /**< ODE积分步长 */
+    int ode_steps;                    /**< ODE数值积分步数 */
+
+    /* 学习相关 */
+    int is_training;
+    float learning_rate;
+
+    /* 梯度累积缓冲区（用于参数更新） */
+    float *dW_fusion;                 /**< W_fusion 参数梯度 */
+    float *dU_fusion;                 /**< U_fusion 参数梯度 */
+    float *db_fusion;                 /**< b_fusion 参数梯度 */
+    float **dW_proj;                  /**< 投影权重梯度数组 */
+    float **db_proj;                  /**< 投影偏置梯度数组 */
+
+    int is_initialized;
+} MmCfcFusionState;
+
+/**
+ * @brief 创建并初始化 CfC 跨模态ODE融合状态
+ *
+ * 使用 Xavier 初始化投影矩阵，He 初始化融合矩阵。
+ *
+ * @param num_modalities 模态数量
+ * @param modality_input_dims 各模态原始输入维度数组（长度=num_modalities）
+ * @param latent_dim 投影隐空间维度（默认64）
+ * @param hidden_dim CfC ODE 隐状态维度（默认256）
+ * @param ode_steps ODE数值积分步数（默认10）
+ * @param tau ODE时间常数（默认0.5）
+ * @param dt 积分步长（默认0.02）
+ * @return MmCfcFusionState* 成功返回状态指针，失败返回NULL
+ */
+MmCfcFusionState* mm_cfc_unified_fusion_init(
+    int num_modalities,
+    const int *modality_input_dims,
+    int latent_dim,
+    int hidden_dim,
+    int ode_steps,
+    float tau,
+    float dt);
+
+/**
+ * @brief 释放 CfC 跨模态ODE融合状态
+ *
+ * @param state 融合状态指针
+ */
+void mm_cfc_unified_fusion_free(MmCfcFusionState *state);
+
+/**
+ * @brief 执行 CfC ODE 跨模态连续动态融合
+ *
+ * 处理流程:
+ *   1. 各模态 → 线性投影 → 映射到统一隐空间维度(latent_dim)
+ *   2. 所有投影拼接为一维向量 X ∈ R^{concat_dim}
+ *   3. CfC ODE 数值求解: τ*dh/dt = -h + σ(W_fusion·X) ⊙ tanh(U_fusion·h + b)
+ *   4. 输出 ODE 演化收敛后的隐状态 h 作为跨模态融合特征
+ *
+ * @param state 融合状态
+ * @param modality_data 各模态原始数据（float*数组，对应index的模态缺失则传NULL）
+ * @param modality_dims 各模态实际数据维度（用于校验，必须匹配input_dims）
+ * @param num_modalities 有效模态数量（<= state->num_modalities）
+ * @param fused_output 融合输出缓冲区（调用者分配，大小>=hidden_dim）
+ * @param fused_output_dim 输出缓冲区维度
+ * @return int 成功返回0，失败返回负值
+ */
+int mm_cfc_unified_fusion(
+    MmCfcFusionState *state,
+    const float **modality_data,
+    const int *modality_dims,
+    int num_modalities,
+    float *fused_output,
+    int fused_output_dim);
+
+/**
+ * @brief 保存融合参数到二进制文件
+ *
+ * 依次保存: 元数据(num_modalities/latent_dim/hidden_dim等)
+ *          + 所有W_proj[] + b_proj[]
+ *          + W_fusion + U_fusion + b_fusion
+ *
+ * @param state 融合状态
+ * @param filepath 文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int mm_fusion_save_weights(MmCfcFusionState *state, const char *filepath);
+
+/**
+ * @brief 从二进制文件加载融合参数
+ *
+ * @param state 融合状态（必须已通过 mm_cfc_unified_fusion_init 初始化）
+ * @param filepath 文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int mm_fusion_load_weights(MmCfcFusionState *state, const char *filepath);
+
+/**
+ * @brief 单步融合训练（通过前向传播 + 数值梯度估计 + SGD更新参数）
+ *
+ * 使用中央差分法估计核心融合参数 W_fusion 的梯度，
+ * 以最小化融合输出与目标信号之间的 MSE 损失。
+ *
+ * @param state 融合状态
+ * @param modality_data 各模态原始数据
+ * @param modality_dims 各模态数据维度
+ * @param num_modalities 实际模态数量
+ * @param target 目标融合输出（监督信号）
+ * @param target_dim 目标维度（必须==hidden_dim）
+ * @param loss_out 输出：本轮训练损失值
+ * @return int 成功返回0，失败返回负值
+ */
+int mm_cfc_unified_fusion_train(
+    MmCfcFusionState *state,
+    const float **modality_data,
+    const int *modality_dims,
+    int num_modalities,
+    const float *target,
+    int target_dim,
+    float *loss_out);
+
 #ifdef __cplusplus
 }
 #endif

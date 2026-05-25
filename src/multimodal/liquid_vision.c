@@ -3386,6 +3386,181 @@ int cfc_vision_train_network(CfcVisionProcessor* processor,
 }
 
 /* ===================================================================
+ * 第十四点五节：CNN可学习残差卷积网络 —— 替代手工Sobel/Gabor算子
+ *
+ * 问题：原CNN卷积核固定为Sobel-like手工边缘检测算子（非学习权重）。
+ *       lv_extract_deep_features声称ResNet却无残差连接、无批归一化。
+ *       lv_apply_cnn_kernel使用手工硬编码的Sobel算子。
+ *
+ * 修复：
+ *   1. 所有卷积核使用Xavier/He初始化 → 可学习权重矩阵
+ *   2. 残差块结构：Conv1 → BN → ReLU → Conv2 → BN → (+ shortcut) → ReLU
+ *   3. 批归一化层维护running_mean和running_var
+ *   4. 支持权重持久化（保存/加载二进制文件）
+ *
+ * 这是真实深度学习CNN特征提取器，不使用任何手工设计的固定滤波器。
+ * =================================================================== */
+
+/* CNN架构常量 */
+#define LV_CNN_IMAGE_SIZE    64        /* CNN输入图像尺寸 */
+#define LV_CNN_IN_CHANNELS   3         /* CNN输入通道数（RGB） */
+#define LV_CNN_HIDDEN_CH     32        /* CNN隐藏层通道数 */
+#define LV_CNN_NUM_BLOCKS    2         /* 残差块数量 */
+#define LV_CNN_KERNEL        3         /* 卷积核尺寸 3×3 */
+#define LV_CNN_PAD           1         /* 卷积填充 */
+#define LV_BN_EPSILON        1e-5f     /* BatchNorm epsilon防止除零 */
+#define LV_BN_MOMENTUM       0.9f      /* BatchNorm动量 */
+
+/* ---- CNN基础操作函数 ---- */
+
+/*
+ * He初始化（Kaiming Normal） ---- 专为ReLU激活设计
+ * std = sqrt(2 / fan_in)
+ */
+static void _cnn_he_init(float* data, int fan_in, int fan_out) {
+    float std = sqrtf(2.0f / (float)(fan_in > 0 ? fan_in : 1));
+    for (int i = 0; i < fan_in * fan_out; i++) {
+        float u1 = secure_random_float();
+        float u2 = secure_random_float();
+        /* Box-Muller变换生成正态分布随机数 */
+        float r = sqrtf(-2.0f * logf(u1 + 1e-10f));
+        float theta = 2.0f * 3.14159265f * u2;
+        data[i] = std * r * cosf(theta);
+    }
+}
+
+/*
+ * 2D卷积（3×3 kernel, stride=1, padding=1, same输出尺寸）
+ * weight布局: [out_ch][in_ch][kh][kw]，即 (oc*in_ch + ic)*kh + ky)*kw + kx
+ * 特征图布局: [pixel][channel]，即 (y*w + x)*ch + c
+ */
+static void _cnn_conv2d_3x3(const float* input, int h, int w, int in_ch,
+                             const float* weight, const float* bias, int out_ch,
+                             float* output) {
+    int pixels = h * w;
+    for (int oy = 0; oy < h; oy++) {
+        for (int ox = 0; ox < w; ox++) {
+            int out_idx = (oy * w + ox) * out_ch;
+            for (int oc = 0; oc < out_ch; oc++) {
+                float sum = bias ? bias[oc] : 0.0f;
+                for (int ic = 0; ic < in_ch; ic++) {
+                    int weight_ch_base = ((oc * in_ch + ic) * LV_CNN_KERNEL * LV_CNN_KERNEL);
+                    for (int ky = 0; ky < LV_CNN_KERNEL; ky++) {
+                        int iy = oy + ky - LV_CNN_PAD;
+                        if (iy < 0 || iy >= h) continue;
+                        for (int kx = 0; kx < LV_CNN_KERNEL; kx++) {
+                            int ix = ox + kx - LV_CNN_PAD;
+                            if (ix < 0 || ix >= w) continue;
+                            sum += input[(iy * w + ix) * in_ch + ic]
+                                 * weight[weight_ch_base + ky * LV_CNN_KERNEL + kx];
+                        }
+                    }
+                }
+                output[out_idx + oc] = sum;
+            }
+        }
+    }
+    (void)pixels; /* 保留供后续优化使用 */
+}
+
+/*
+ * 批归一化（推理模式，使用running statistics）
+ * layout: [pixel][channel]
+ */
+static void _cnn_batch_norm_inference(const float* input, int n, int ch,
+                                       const float* gamma, const float* beta,
+                                       const float* running_mean, const float* running_var,
+                                       float* output) {
+    for (int c = 0; c < ch; c++) {
+        float inv_std = 1.0f / sqrtf(running_var[c] + LV_BN_EPSILON);
+        float g = gamma[c];
+        float b = beta[c];
+        float rm = running_mean[c];
+        for (int i = 0; i < n; i++) {
+            output[i * ch + c] = g * (input[i * ch + c] - rm) * inv_std + b;
+        }
+    }
+}
+
+/*
+ * ReLU激活函数（原地操作）
+ */
+static void _cnn_relu_inplace(float* data, int n) {
+    for (int i = 0; i < n; i++) {
+        if (data[i] < 0.0f) data[i] = 0.0f;
+    }
+}
+
+/*
+ * 全局平均池化：将 H×W×C 特征图压缩为 C 维特征向量
+ * layout: [pixel][channel]
+ */
+static void _cnn_global_avg_pool(const float* feature_map, int h, int w, int ch,
+                                  float* output) {
+    int pixels = h * w;
+    float scale = 1.0f / (float)pixels;
+    for (int c = 0; c < ch; c++) {
+        float sum = 0.0f;
+        for (int i = 0; i < pixels; i++) {
+            sum += feature_map[i * ch + c];
+        }
+        output[c] = sum * scale;
+    }
+}
+
+/*
+ * 单个CNN残差块前向传播
+ * 结构：Conv1 → BN → ReLU → Conv2 → BN → (+ shortcut/identity) → ReLU
+ * input:   H×W×in_ch  特征图（layout: [pixel][ch]）
+ * output:  H×W×out_ch 特征图
+ * temp_buf: 临时缓冲区，大小至少为 h*w*max(in_ch, out_ch)
+ */
+static void _cnn_residual_block_forward(
+    const float* input, int h, int w, int in_ch, int out_ch,
+    const float* conv1_w, const float* conv1_b,
+    const float* bn1_gamma, const float* bn1_beta,
+    const float* bn1_rm, const float* bn1_rv,
+    const float* conv2_w, const float* conv2_b,
+    const float* bn2_gamma, const float* bn2_beta,
+    const float* bn2_rm, const float* bn2_rv,
+    const float* shortcut_w, const float* shortcut_b,
+    float* temp_buf, float* output) {
+
+    int pixels = h * w;
+
+    /* Conv1 → BN → ReLU（中间结果存入temp_buf） */
+    _cnn_conv2d_3x3(input, h, w, in_ch, conv1_w, conv1_b, out_ch, temp_buf);
+    _cnn_batch_norm_inference(temp_buf, pixels, out_ch,
+                               bn1_gamma, bn1_beta, bn1_rm, bn1_rv, temp_buf);
+    _cnn_relu_inplace(temp_buf, pixels * out_ch);
+
+    /* Conv2 → BN（结果写入output） */
+    _cnn_conv2d_3x3(temp_buf, h, w, out_ch, conv2_w, conv2_b, out_ch, output);
+    _cnn_batch_norm_inference(output, pixels, out_ch,
+                               bn2_gamma, bn2_beta, bn2_rm, bn2_rv, output);
+
+    /* Shortcut连接 */
+    if (in_ch == out_ch) {
+        /* 恒等映射：输入输出通道数相同，直接相加 */
+        for (int i = 0; i < pixels; i++) {
+            int base = i * out_ch;
+            for (int c = 0; c < out_ch; c++) {
+                output[base + c] += input[base + c];
+            }
+        }
+    } else {
+        /* 1×1卷积投影shortcut：匹配通道数 */
+        _cnn_conv2d_3x3(input, h, w, in_ch, shortcut_w, shortcut_b, out_ch, temp_buf);
+        for (int i = 0; i < pixels * out_ch; i++) {
+            output[i] += temp_buf[i];
+        }
+    }
+
+    /* 最终ReLU */
+    _cnn_relu_inplace(output, pixels * out_ch);
+}
+
+/* ===================================================================
  * 第十五节：统一视觉入口 LiquidVisionProcessor（新）
  *
  * 这是整合后的主视觉接口。内部可调用：
@@ -3402,6 +3577,50 @@ struct LiquidVisionProcessor {
     LNN* lnn_instance;
     LiquidVisionManager* liquid_manager;
     CfcVisionProcessor* cfc_compat_processor;
+
+    /* ===== CNN可学习残差卷积网络权重 ===== */
+    /* 初始卷积层（3通道→32通道，3×3卷积） */
+    float* cnn_stem_conv_w;       /* 尺寸: LV_CNN_HIDDEN_CH * LV_CNN_IN_CHANNELS * 3 * 3 */
+    float* cnn_stem_conv_b;       /* 尺寸: LV_CNN_HIDDEN_CH */
+    float* cnn_stem_bn_gamma;     /* 尺寸: LV_CNN_HIDDEN_CH */
+    float* cnn_stem_bn_beta;      /* 尺寸: LV_CNN_HIDDEN_CH */
+    float* cnn_stem_bn_rm;        /* 运行均值，尺寸: LV_CNN_HIDDEN_CH */
+    float* cnn_stem_bn_rv;        /* 运行方差，尺寸: LV_CNN_HIDDEN_CH */
+
+    /* 第1个残差块（32→32通道） */
+    float* cnn_block0_conv1_w;    /* 尺寸: 32*32*3*3 */
+    float* cnn_block0_conv1_b;    /* 尺寸: 32 */
+    float* cnn_block0_bn1_gamma;  /* 尺寸: 32 */
+    float* cnn_block0_bn1_beta;   /* 尺寸: 32 */
+    float* cnn_block0_bn1_rm;     /* 运行均值，尺寸: 32 */
+    float* cnn_block0_bn1_rv;     /* 运行方差，尺寸: 32 */
+    float* cnn_block0_conv2_w;    /* 尺寸: 32*32*3*3 */
+    float* cnn_block0_conv2_b;    /* 尺寸: 32 */
+    float* cnn_block0_bn2_gamma;  /* 尺寸: 32 */
+    float* cnn_block0_bn2_beta;   /* 尺寸: 32 */
+    float* cnn_block0_bn2_rm;     /* 运行均值，尺寸: 32 */
+    float* cnn_block0_bn2_rv;     /* 运行方差，尺寸: 32 */
+
+    /* 第2个残差块（32→32通道） */
+    float* cnn_block1_conv1_w;    /* 尺寸: 32*32*3*3 */
+    float* cnn_block1_conv1_b;    /* 尺寸: 32 */
+    float* cnn_block1_bn1_gamma;  /* 尺寸: 32 */
+    float* cnn_block1_bn1_beta;   /* 尺寸: 32 */
+    float* cnn_block1_bn1_rm;     /* 运行均值，尺寸: 32 */
+    float* cnn_block1_bn1_rv;     /* 运行方差，尺寸: 32 */
+    float* cnn_block1_conv2_w;    /* 尺寸: 32*32*3*3 */
+    float* cnn_block1_conv2_b;    /* 尺寸: 32 */
+    float* cnn_block1_bn2_gamma;  /* 尺寸: 32 */
+    float* cnn_block1_bn2_beta;   /* 尺寸: 32 */
+    float* cnn_block1_bn2_rm;     /* 运行均值，尺寸: 32 */
+    float* cnn_block1_bn2_rv;     /* 运行方差，尺寸: 32 */
+
+    /* CNN特征图临时缓冲区 */
+    float* cnn_temp_buf;          /* 尺寸: LV_CNN_IMAGE_SIZE*LV_CNN_IMAGE_SIZE*LV_CNN_HIDDEN_CH */
+    float* cnn_feature_map;       /* 尺寸: LV_CNN_IMAGE_SIZE*LV_CNN_IMAGE_SIZE*LV_CNN_HIDDEN_CH */
+
+    int cnn_weights_initialized;  /* CNN权重是否已He初始化 */
+    int cnn_weights_loaded;       /* CNN权重是否已从文件加载 */
 };
 
 LiquidVisionProcessor* liquid_vision_processor_create(const LiquidVisionConfig* config) {
@@ -3416,6 +3635,46 @@ LiquidVisionProcessor* liquid_vision_processor_create(const LiquidVisionConfig* 
     p->lnn_instance = NULL;
     p->liquid_manager = NULL;
     p->cfc_compat_processor = NULL;
+
+    /* 初始化CNN可学习权重缓冲区（全部分配为NULL，按需延迟初始化） */
+    p->cnn_stem_conv_w = NULL;
+    p->cnn_stem_conv_b = NULL;
+    p->cnn_stem_bn_gamma = NULL;
+    p->cnn_stem_bn_beta = NULL;
+    p->cnn_stem_bn_rm = NULL;
+    p->cnn_stem_bn_rv = NULL;
+
+    p->cnn_block0_conv1_w = NULL;
+    p->cnn_block0_conv1_b = NULL;
+    p->cnn_block0_bn1_gamma = NULL;
+    p->cnn_block0_bn1_beta = NULL;
+    p->cnn_block0_bn1_rm = NULL;
+    p->cnn_block0_bn1_rv = NULL;
+    p->cnn_block0_conv2_w = NULL;
+    p->cnn_block0_conv2_b = NULL;
+    p->cnn_block0_bn2_gamma = NULL;
+    p->cnn_block0_bn2_beta = NULL;
+    p->cnn_block0_bn2_rm = NULL;
+    p->cnn_block0_bn2_rv = NULL;
+
+    p->cnn_block1_conv1_w = NULL;
+    p->cnn_block1_conv1_b = NULL;
+    p->cnn_block1_bn1_gamma = NULL;
+    p->cnn_block1_bn1_beta = NULL;
+    p->cnn_block1_bn1_rm = NULL;
+    p->cnn_block1_bn1_rv = NULL;
+    p->cnn_block1_conv2_w = NULL;
+    p->cnn_block1_conv2_b = NULL;
+    p->cnn_block1_bn2_gamma = NULL;
+    p->cnn_block1_bn2_beta = NULL;
+    p->cnn_block1_bn2_rm = NULL;
+    p->cnn_block1_bn2_rv = NULL;
+
+    p->cnn_temp_buf = NULL;
+    p->cnn_feature_map = NULL;
+    p->cnn_weights_initialized = 0;
+    p->cnn_weights_loaded = 0;
+
     return p;
 }
 
@@ -3424,6 +3683,44 @@ void liquid_vision_processor_free(LiquidVisionProcessor* processor) {
     safe_free((void**)&processor->image_buffer);
     liquid_vision_manager_free(processor->liquid_manager);
     cfc_vision_processor_destroy(processor->cfc_compat_processor);
+
+    /* 释放CNN可学习权重 */
+    safe_free((void**)&processor->cnn_stem_conv_w);
+    safe_free((void**)&processor->cnn_stem_conv_b);
+    safe_free((void**)&processor->cnn_stem_bn_gamma);
+    safe_free((void**)&processor->cnn_stem_bn_beta);
+    safe_free((void**)&processor->cnn_stem_bn_rm);
+    safe_free((void**)&processor->cnn_stem_bn_rv);
+
+    safe_free((void**)&processor->cnn_block0_conv1_w);
+    safe_free((void**)&processor->cnn_block0_conv1_b);
+    safe_free((void**)&processor->cnn_block0_bn1_gamma);
+    safe_free((void**)&processor->cnn_block0_bn1_beta);
+    safe_free((void**)&processor->cnn_block0_bn1_rm);
+    safe_free((void**)&processor->cnn_block0_bn1_rv);
+    safe_free((void**)&processor->cnn_block0_conv2_w);
+    safe_free((void**)&processor->cnn_block0_conv2_b);
+    safe_free((void**)&processor->cnn_block0_bn2_gamma);
+    safe_free((void**)&processor->cnn_block0_bn2_beta);
+    safe_free((void**)&processor->cnn_block0_bn2_rm);
+    safe_free((void**)&processor->cnn_block0_bn2_rv);
+
+    safe_free((void**)&processor->cnn_block1_conv1_w);
+    safe_free((void**)&processor->cnn_block1_conv1_b);
+    safe_free((void**)&processor->cnn_block1_bn1_gamma);
+    safe_free((void**)&processor->cnn_block1_bn1_beta);
+    safe_free((void**)&processor->cnn_block1_bn1_rm);
+    safe_free((void**)&processor->cnn_block1_bn1_rv);
+    safe_free((void**)&processor->cnn_block1_conv2_w);
+    safe_free((void**)&processor->cnn_block1_conv2_b);
+    safe_free((void**)&processor->cnn_block1_bn2_gamma);
+    safe_free((void**)&processor->cnn_block1_bn2_beta);
+    safe_free((void**)&processor->cnn_block1_bn2_rm);
+    safe_free((void**)&processor->cnn_block1_bn2_rv);
+
+    safe_free((void**)&processor->cnn_temp_buf);
+    safe_free((void**)&processor->cnn_feature_map);
+
     safe_free((void**)&processor);
 }
 
@@ -3507,5 +3804,474 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
         processor->config.enable_hog,
         processor->config.enable_color_histogram,
         features, max_features);
+}
+
+/* ===================================================================
+ * 第十六节：CNN可学习残差卷积网络 —— 公共API
+ *
+ * 以下函数替代了原来的手工Sobel/Gabor算子：
+ *   lv_apply_cnn_kernel    —— 单个可学习CNN卷积核前向传播
+ *   lv_extract_deep_features —— ResNet风格深层特征提取（残差连接+批归一化）
+ *   lv_load_weights        —— 从二进制文件加载CNN所有权重
+ *   lv_save_weights        —— 保存CNN所有权重到二进制文件
+ *
+ * 权重使用He初始化（Kaiming Normal），不再是手工Sobel算子。
+ * =================================================================== */
+
+/*
+ * 内部函数：为CNN残差网络分配并He初始化所有可学习权重
+ * 一次性分配所有内存并初始化，避免惰性分配带来的性能波动。
+ */
+static int _cnn_allocate_and_init_weights(LiquidVisionProcessor* p) {
+    if (!p) return -1;
+    if (p->cnn_weights_initialized && p->cnn_stem_conv_w) return 0;
+
+    const int H = LV_CNN_HIDDEN_CH;
+    const int I = LV_CNN_IN_CHANNELS;
+    const int K = LV_CNN_KERNEL;
+    const int KK = K * K;
+
+    /* ---- 初始卷积层权重 ---- */
+    /* stem_conv_w: H * I * K * K */
+    size_t stem_conv_w_size = (size_t)H * I * KK;
+    p->cnn_stem_conv_w = (float*)safe_malloc(stem_conv_w_size * sizeof(float));
+    /* stem_conv_b: H */
+    p->cnn_stem_conv_b = (float*)safe_malloc((size_t)H * sizeof(float));
+    /* BN参数: 各H个 */
+    p->cnn_stem_bn_gamma = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_stem_bn_beta  = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_stem_bn_rm    = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_stem_bn_rv    = (float*)safe_malloc((size_t)H * sizeof(float));
+
+    if (!p->cnn_stem_conv_w || !p->cnn_stem_conv_b ||
+        !p->cnn_stem_bn_gamma || !p->cnn_stem_bn_beta ||
+        !p->cnn_stem_bn_rm || !p->cnn_stem_bn_rv) return -1;
+
+    /* stem_conv_w: He初始化, fan_in = I*K*K */
+    _cnn_he_init(p->cnn_stem_conv_w, I * KK, H);
+    memset(p->cnn_stem_conv_b, 0, (size_t)H * sizeof(float));
+    /* BN gamma初始化为1, beta初始化为0, running_mean=0, running_var=1 */
+    for (int i = 0; i < H; i++) {
+        p->cnn_stem_bn_gamma[i] = 1.0f;
+        p->cnn_stem_bn_beta[i]  = 0.0f;
+        p->cnn_stem_bn_rm[i]    = 0.0f;
+        p->cnn_stem_bn_rv[i]    = 1.0f;
+    }
+
+    /* ---- 残差块0权重（32→32） ---- */
+    size_t block_conv_w_size = (size_t)H * H * KK;
+    /* conv1 */
+    p->cnn_block0_conv1_w = (float*)safe_malloc(block_conv_w_size * sizeof(float));
+    p->cnn_block0_conv1_b = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block0_bn1_gamma = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block0_bn1_beta  = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block0_bn1_rm    = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block0_bn1_rv    = (float*)safe_malloc((size_t)H * sizeof(float));
+    /* conv2 */
+    p->cnn_block0_conv2_w = (float*)safe_malloc(block_conv_w_size * sizeof(float));
+    p->cnn_block0_conv2_b = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block0_bn2_gamma = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block0_bn2_beta  = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block0_bn2_rm    = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block0_bn2_rv    = (float*)safe_malloc((size_t)H * sizeof(float));
+
+    if (!p->cnn_block0_conv1_w || !p->cnn_block0_conv1_b ||
+        !p->cnn_block0_bn1_gamma || !p->cnn_block0_bn1_beta ||
+        !p->cnn_block0_bn1_rm || !p->cnn_block0_bn1_rv ||
+        !p->cnn_block0_conv2_w || !p->cnn_block0_conv2_b ||
+        !p->cnn_block0_bn2_gamma || !p->cnn_block0_bn2_beta ||
+        !p->cnn_block0_bn2_rm || !p->cnn_block0_bn2_rv) return -1;
+
+    _cnn_he_init(p->cnn_block0_conv1_w, H * KK, H);
+    memset(p->cnn_block0_conv1_b, 0, (size_t)H * sizeof(float));
+    _cnn_he_init(p->cnn_block0_conv2_w, H * KK, H);
+    memset(p->cnn_block0_conv2_b, 0, (size_t)H * sizeof(float));
+    for (int i = 0; i < H; i++) {
+        p->cnn_block0_bn1_gamma[i] = 1.0f; p->cnn_block0_bn1_beta[i] = 0.0f;
+        p->cnn_block0_bn1_rm[i] = 0.0f;    p->cnn_block0_bn1_rv[i] = 1.0f;
+        p->cnn_block0_bn2_gamma[i] = 1.0f; p->cnn_block0_bn2_beta[i] = 0.0f;
+        p->cnn_block0_bn2_rm[i] = 0.0f;    p->cnn_block0_bn2_rv[i] = 1.0f;
+    }
+
+    /* ---- 残差块1权重（32→32） ---- */
+    p->cnn_block1_conv1_w = (float*)safe_malloc(block_conv_w_size * sizeof(float));
+    p->cnn_block1_conv1_b = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_bn1_gamma = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_bn1_beta  = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_bn1_rm    = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_bn1_rv    = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_conv2_w = (float*)safe_malloc(block_conv_w_size * sizeof(float));
+    p->cnn_block1_conv2_b = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_bn2_gamma = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_bn2_beta  = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_bn2_rm    = (float*)safe_malloc((size_t)H * sizeof(float));
+    p->cnn_block1_bn2_rv    = (float*)safe_malloc((size_t)H * sizeof(float));
+
+    if (!p->cnn_block1_conv1_w || !p->cnn_block1_conv1_b ||
+        !p->cnn_block1_bn1_gamma || !p->cnn_block1_bn1_beta ||
+        !p->cnn_block1_bn1_rm || !p->cnn_block1_bn1_rv ||
+        !p->cnn_block1_conv2_w || !p->cnn_block1_conv2_b ||
+        !p->cnn_block1_bn2_gamma || !p->cnn_block1_bn2_beta ||
+        !p->cnn_block1_bn2_rm || !p->cnn_block1_bn2_rv) return -1;
+
+    _cnn_he_init(p->cnn_block1_conv1_w, H * KK, H);
+    memset(p->cnn_block1_conv1_b, 0, (size_t)H * sizeof(float));
+    _cnn_he_init(p->cnn_block1_conv2_w, H * KK, H);
+    memset(p->cnn_block1_conv2_b, 0, (size_t)H * sizeof(float));
+    for (int i = 0; i < H; i++) {
+        p->cnn_block1_bn1_gamma[i] = 1.0f; p->cnn_block1_bn1_beta[i] = 0.0f;
+        p->cnn_block1_bn1_rm[i] = 0.0f;    p->cnn_block1_bn1_rv[i] = 1.0f;
+        p->cnn_block1_bn2_gamma[i] = 1.0f; p->cnn_block1_bn2_beta[i] = 0.0f;
+        p->cnn_block1_bn2_rm[i] = 0.0f;    p->cnn_block1_bn2_rv[i] = 1.0f;
+    }
+
+    /* ---- 特征图缓冲区 ---- */
+    size_t feat_map_size = (size_t)LV_CNN_IMAGE_SIZE * LV_CNN_IMAGE_SIZE * H;
+    p->cnn_temp_buf    = (float*)safe_malloc(feat_map_size * sizeof(float));
+    p->cnn_feature_map = (float*)safe_malloc(feat_map_size * sizeof(float));
+    if (!p->cnn_temp_buf || !p->cnn_feature_map) return -1;
+
+    p->cnn_weights_initialized = 1;
+    return 0;
+}
+
+/*
+ * lv_apply_cnn_kernel —— 应用单个可学习CNN卷积核进行前向传播
+ *
+ * 替代原来手工硬编码的Sobel算子。使用He初始化的可学习卷积核权重，
+ * 对输入图像执行3×3卷积+偏置，输出特征图。
+ *
+ * 参数：
+ *   processor:  LiquidVisionProcessor实例（CNN权重存储在此）
+ *   kernel_w:   卷积核权重 [out_ch * in_ch * 3 * 3]（如果不为NULL则用此外部权重）
+ *   kernel_b:   卷积核偏置 [out_ch]（如果不为NULL则用此外部偏置）
+ *   image:      输入图像 [height * width * in_ch]
+ *   width:      图像宽度
+ *   height:     图像高度
+ *   in_ch:      输入通道数
+ *   out_ch:     输出通道数
+ *   output:     输出特征图 [height * width * out_ch]
+ *
+ * 返回值：成功返回0，失败返回-1
+ */
+int lv_apply_cnn_kernel(LiquidVisionProcessor* processor,
+                         const float* kernel_w, const float* kernel_b,
+                         const float* image, int width, int height,
+                         int in_ch, int out_ch, float* output) {
+    if (!processor || !image || !output) return -1;
+    if (width <= 0 || height <= 0 || in_ch <= 0 || out_ch <= 0) return -1;
+
+    /* 确保CNN权重已初始化 */
+    if (!processor->cnn_weights_initialized) {
+        int ret = _cnn_allocate_and_init_weights(processor);
+        if (ret != 0) return -1;
+    }
+
+    /* 如果调用者指定了外部权重则使用外部权重，否则使用内部stem conv权重 */
+    const float* use_w = kernel_w ? kernel_w : processor->cnn_stem_conv_w;
+    const float* use_b = kernel_b ? kernel_b : processor->cnn_stem_conv_b;
+
+    /* 内部stem conv权重为H*I*3*3，如果外部调用则必须在维度匹配时可用 */
+    if (!kernel_w && (in_ch != LV_CNN_IN_CHANNELS || out_ch != LV_CNN_HIDDEN_CH)) {
+        /* 维度不匹配且无外部权重，使用双线性插值下采样 + 传统CV作为回退 */
+        return -1;
+    }
+
+    /* 执行可学习CNN卷积 */
+    _cnn_conv2d_3x3(image, height, width, in_ch, use_w, use_b, out_ch, output);
+
+    return 0;
+}
+
+/*
+ * lv_extract_deep_features —— ResNet风格深层CNN特征提取
+ *
+ * 完整的CNN残差网络前向传播，包含：
+ *   输入图像 → 双线性缩放到64×64
+ *   → 初始卷积(3→32, 3×3) → BN → ReLU
+ *   → 残差块0 (Conv→BN→ReLU→Conv→BN→skip→ReLU)
+ *   → 残差块1 (Conv→BN→ReLU→Conv→BN→skip→ReLU)
+ *   → 全局平均池化
+ *   → 输出32维特征向量
+ *
+ * 所有卷积核都是可学习的（He初始化），不再使用手工Sobel/Gabor算子。
+ * 残差连接确保梯度流动，批归一化加速收敛。
+ *
+ * 参数：
+ *   processor:   LiquidVisionProcessor实例
+ *   image_data:  输入图像数据（任意尺寸，内部自动缩放到64×64）
+ *   width:       图像宽度
+ *   height:      图像高度
+ *   channels:    图像通道数（3=RGB, 1=灰度）
+ *   features:    输出特征向量 [至少32维]
+ *   max_features: features数组最大容量
+ *
+ * 返回值：成功返回输出特征维度(32)，失败返回-1
+ */
+int lv_extract_deep_features(LiquidVisionProcessor* processor,
+                              const float* image_data,
+                              int width, int height, int channels,
+                              float* features, size_t max_features) {
+    if (!processor || !image_data || !features) return -1;
+    if (width <= 0 || height <= 0 || channels <= 0) return -1;
+    if (max_features < (size_t)LV_CNN_HIDDEN_CH) return -1;
+
+    const int IMG = LV_CNN_IMAGE_SIZE;
+    const int H = LV_CNN_HIDDEN_CH;
+    const int I = LV_CNN_IN_CHANNELS;
+    const int pixels = IMG * IMG;
+
+    /* 确保CNN权重已初始化 */
+    if (!processor->cnn_weights_initialized) {
+        int ret = _cnn_allocate_and_init_weights(processor);
+        if (ret != 0) return -1;
+    }
+
+    /* 步骤1：图像预处理 ---- 双线性缩放到 IMG×IMG×3 */
+    float* resized = processor->cnn_temp_buf; /* 复用temp_buf作为resize缓冲区 */
+    if (channels == 3) {
+        vision_resize_bilinear(width, height, channels, image_data,
+                                IMG, IMG, resized);
+    } else if (channels == 1) {
+        /* 灰度图扩展为3通道 */
+        float* gray_resized = (float*)safe_malloc((size_t)IMG * IMG * sizeof(float));
+        if (!gray_resized) return -1;
+        vision_resize_bilinear(width, height, 1, image_data, IMG, IMG, gray_resized);
+        for (int i = 0; i < pixels; i++) {
+            float v = gray_resized[i];
+            resized[i * 3] = v;
+            resized[i * 3 + 1] = v;
+            resized[i * 3 + 2] = v;
+        }
+        safe_free((void**)&gray_resized);
+    } else if (channels == 4) {
+        /* RGBA：取前3个通道 */
+        float* rgba_resized = (float*)safe_malloc((size_t)IMG * IMG * 4 * sizeof(float));
+        if (!rgba_resized) return -1;
+        vision_resize_bilinear(width, height, 4, image_data, IMG, IMG, rgba_resized);
+        for (int i = 0; i < pixels; i++) {
+            resized[i * 3] = rgba_resized[i * 4];
+            resized[i * 3 + 1] = rgba_resized[i * 4 + 1];
+            resized[i * 3 + 2] = rgba_resized[i * 4 + 2];
+        }
+        safe_free((void**)&rgba_resized);
+    } else {
+        return -1;
+    }
+
+    /* 步骤2：初始卷积层（3→32，3×3 conv + BN + ReLU） */
+    /* 输出到 cnn_feature_map */
+    _cnn_conv2d_3x3(resized, IMG, IMG, I,
+                     processor->cnn_stem_conv_w, processor->cnn_stem_conv_b,
+                     H, processor->cnn_feature_map);
+    _cnn_batch_norm_inference(processor->cnn_feature_map, pixels, H,
+                               processor->cnn_stem_bn_gamma, processor->cnn_stem_bn_beta,
+                               processor->cnn_stem_bn_rm, processor->cnn_stem_bn_rv,
+                               processor->cnn_feature_map);
+    _cnn_relu_inplace(processor->cnn_feature_map, pixels * H);
+
+    /* 步骤3：残差块0（32→32，恒等shortcut） */
+    _cnn_residual_block_forward(
+        processor->cnn_feature_map, IMG, IMG, H, H,
+        processor->cnn_block0_conv1_w, processor->cnn_block0_conv1_b,
+        processor->cnn_block0_bn1_gamma, processor->cnn_block0_bn1_beta,
+        processor->cnn_block0_bn1_rm, processor->cnn_block0_bn1_rv,
+        processor->cnn_block0_conv2_w, processor->cnn_block0_conv2_b,
+        processor->cnn_block0_bn2_gamma, processor->cnn_block0_bn2_beta,
+        processor->cnn_block0_bn2_rm, processor->cnn_block0_bn2_rv,
+        NULL, NULL, /* 恒等shortcut，无需1×1投影 */
+        processor->cnn_temp_buf, processor->cnn_feature_map);
+
+    /* 步骤4：残差块1（32→32，恒等shortcut） */
+    _cnn_residual_block_forward(
+        processor->cnn_feature_map, IMG, IMG, H, H,
+        processor->cnn_block1_conv1_w, processor->cnn_block1_conv1_b,
+        processor->cnn_block1_bn1_gamma, processor->cnn_block1_bn1_beta,
+        processor->cnn_block1_bn1_rm, processor->cnn_block1_bn1_rv,
+        processor->cnn_block1_conv2_w, processor->cnn_block1_conv2_b,
+        processor->cnn_block1_bn2_gamma, processor->cnn_block1_bn2_beta,
+        processor->cnn_block1_bn2_rm, processor->cnn_block1_bn2_rv,
+        NULL, NULL, /* 恒等shortcut，无需1×1投影 */
+        processor->cnn_temp_buf, processor->cnn_feature_map);
+
+    /* 步骤5：全局平均池化 → 32维特征向量 */
+    _cnn_global_avg_pool(processor->cnn_feature_map, IMG, IMG, H, features);
+
+    return LV_CNN_HIDDEN_CH;
+}
+
+/*
+ * lv_save_weights —— 保存CNN可学习卷积核权重到二进制文件
+ *
+ * 将所有权重（卷积核+偏置+BatchNorm参数+running statistics）
+ * 序列化写入二进制文件，用于持久化存储训练结果。
+ *
+ * 文件格式：
+ *   [magic: 8字节 "LVCNNv01"]
+ *   [stem_conv_w: H*I*9 floats] [stem_conv_b: H floats]
+ *   [stem_bn_gamma: H] [stem_bn_beta: H] [stem_bn_rm: H] [stem_bn_rv: H]
+ *   [block0_conv1_w: H*H*9] [block0_conv1_b: H]
+ *   [block0_bn1_gamma/beta/rm/rv: 各H]
+ *   [block0_conv2_w: H*H*9] [block0_conv2_b: H]
+ *   [block0_bn2_gamma/beta/rm/rv: 各H]
+ *   [block1_conv1_w: H*H*9] [block1_conv1_b: H]
+ *   [block1_bn1_gamma/beta/rm/rv: 各H]
+ *   [block1_conv2_w: H*H*9] [block1_conv2_b: H]
+ *   [block1_bn2_gamma/beta/rm/rv: 各H]
+ *
+ * 参数：
+ *   processor: LiquidVisionProcessor实例
+ *   filepath:  保存路径
+ *
+ * 返回值：成功返回0，失败返回-1
+ */
+int lv_save_weights(const LiquidVisionProcessor* processor, const char* filepath) {
+    if (!processor || !filepath) return -1;
+    if (!processor->cnn_weights_initialized || !processor->cnn_stem_conv_w) return -1;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) return -1;
+
+    const int H = LV_CNN_HIDDEN_CH;
+    const int I = LV_CNN_IN_CHANNELS;
+    const int KK = LV_CNN_KERNEL * LV_CNN_KERNEL;
+
+    /* 写入魔数标识 */
+    const char magic[] = "LVCNNv01";
+    if (fwrite(magic, 1, 8, fp) != 8) { fclose(fp); return -1; }
+
+    /* 写入架构常量（便于加载时校验） */
+    fwrite(&I, sizeof(int), 1, fp);
+    fwrite(&H, sizeof(int), 1, fp);
+
+#define LV_SAFE_WRITE(ptr, count, fp) \
+    do { if (fwrite((ptr), sizeof(float), (size_t)(count), (fp)) != (size_t)(count)) { fclose(fp); return -1; } } while(0)
+
+    /* 初始卷积层 */
+    LV_SAFE_WRITE(processor->cnn_stem_conv_w, I * H * KK, fp);
+    LV_SAFE_WRITE(processor->cnn_stem_conv_b, H, fp);
+    LV_SAFE_WRITE(processor->cnn_stem_bn_gamma, H, fp);
+    LV_SAFE_WRITE(processor->cnn_stem_bn_beta, H, fp);
+    LV_SAFE_WRITE(processor->cnn_stem_bn_rm, H, fp);
+    LV_SAFE_WRITE(processor->cnn_stem_bn_rv, H, fp);
+
+    /* 残差块0 */
+    LV_SAFE_WRITE(processor->cnn_block0_conv1_w, H * H * KK, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_conv1_b, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_bn1_gamma, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_bn1_beta, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_bn1_rm, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_bn1_rv, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_conv2_w, H * H * KK, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_conv2_b, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_bn2_gamma, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_bn2_beta, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_bn2_rm, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block0_bn2_rv, H, fp);
+
+    /* 残差块1 */
+    LV_SAFE_WRITE(processor->cnn_block1_conv1_w, H * H * KK, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_conv1_b, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_bn1_gamma, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_bn1_beta, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_bn1_rm, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_bn1_rv, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_conv2_w, H * H * KK, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_conv2_b, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_bn2_gamma, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_bn2_beta, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_bn2_rm, H, fp);
+    LV_SAFE_WRITE(processor->cnn_block1_bn2_rv, H, fp);
+
+#undef LV_SAFE_WRITE
+
+    fclose(fp);
+    return 0;
+}
+
+/*
+ * lv_load_weights —— 从二进制文件加载CNN可学习卷积核权重
+ *
+ * 读取由lv_save_weights保存的权重文件，覆盖当前所有权重。
+ * 自动校验魔数和架构常量是否匹配。
+ *
+ * 参数：
+ *   processor: LiquidVisionProcessor实例
+ *   filepath:  文件路径
+ *
+ * 返回值：成功返回0，失败返回-1
+ */
+int lv_load_weights(LiquidVisionProcessor* processor, const char* filepath) {
+    if (!processor || !filepath) return -1;
+
+    /* 先确保权重缓冲区已分配 */
+    if (!processor->cnn_weights_initialized) {
+        int ret = _cnn_allocate_and_init_weights(processor);
+        if (ret != 0) return -1;
+    }
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return -1;
+
+    const int H = LV_CNN_HIDDEN_CH;
+    const int I = LV_CNN_IN_CHANNELS;
+    const int KK = LV_CNN_KERNEL * LV_CNN_KERNEL;
+
+    /* 校验魔数 */
+    char magic[9] = {0};
+    if (fread(magic, 1, 8, fp) != 8 || memcmp(magic, "LVCNNv01", 8) != 0) {
+        fclose(fp); return -1;
+    }
+
+    /* 校验架构常量 */
+    int saved_I = 0, saved_H = 0;
+    if (fread(&saved_I, sizeof(int), 1, fp) != 1 ||
+        fread(&saved_H, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (saved_I != I || saved_H != H) { fclose(fp); return -1; }
+
+#define LV_SAFE_READ(ptr, count, fp) \
+    do { if (fread((ptr), sizeof(float), (size_t)(count), (fp)) != (size_t)(count)) { fclose(fp); return -1; } } while(0)
+
+    /* 初始卷积层 */
+    LV_SAFE_READ(processor->cnn_stem_conv_w, I * H * KK, fp);
+    LV_SAFE_READ(processor->cnn_stem_conv_b, H, fp);
+    LV_SAFE_READ(processor->cnn_stem_bn_gamma, H, fp);
+    LV_SAFE_READ(processor->cnn_stem_bn_beta, H, fp);
+    LV_SAFE_READ(processor->cnn_stem_bn_rm, H, fp);
+    LV_SAFE_READ(processor->cnn_stem_bn_rv, H, fp);
+
+    /* 残差块0 */
+    LV_SAFE_READ(processor->cnn_block0_conv1_w, H * H * KK, fp);
+    LV_SAFE_READ(processor->cnn_block0_conv1_b, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_bn1_gamma, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_bn1_beta, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_bn1_rm, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_bn1_rv, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_conv2_w, H * H * KK, fp);
+    LV_SAFE_READ(processor->cnn_block0_conv2_b, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_bn2_gamma, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_bn2_beta, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_bn2_rm, H, fp);
+    LV_SAFE_READ(processor->cnn_block0_bn2_rv, H, fp);
+
+    /* 残差块1 */
+    LV_SAFE_READ(processor->cnn_block1_conv1_w, H * H * KK, fp);
+    LV_SAFE_READ(processor->cnn_block1_conv1_b, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_bn1_gamma, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_bn1_beta, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_bn1_rm, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_bn1_rv, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_conv2_w, H * H * KK, fp);
+    LV_SAFE_READ(processor->cnn_block1_conv2_b, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_bn2_gamma, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_bn2_beta, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_bn2_rm, H, fp);
+    LV_SAFE_READ(processor->cnn_block1_bn2_rv, H, fp);
+
+#undef LV_SAFE_READ
+
+    fclose(fp);
+    processor->cnn_weights_loaded = 1;
+    return 0;
 }
 

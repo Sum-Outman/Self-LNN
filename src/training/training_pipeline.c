@@ -123,6 +123,10 @@ struct TrainingPipeline {
     int plateau_threshold;                     /**< 平台阈值（超过此时长触发LR衰减） */
     float plateau_lr_decay_factor;             /**< 平台时学习率衰减因子（0.5=减半） */
     int convergence_max_patience;              /**< 早停最大耐心值 */
+
+    /* ZSFX-P0: BPTT时间反向传播配置 */
+    int bptt_enabled;                          /**< 是否启用BPTT（序列数据训练时启用） */
+    int bptt_unroll_steps;                     /**< BPTT展开步数（默认4步，序列任务需更大值） */
 };
 
 /* FIX-013: compute_loss_value 直接委托 loss_compute，确保与 LossType 枚举严格一致。
@@ -936,7 +940,7 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     if (!tp) return NULL;
 
     tp->config = *config;
-    if (tp->config.pretrain_epochs == 0) tp->config.pretrain_epochs = 10;
+    if (tp->config.pretrain_epochs == 0) tp->config.pretrain_epochs = 30;
     if (tp->config.multimodal_epochs == 0) tp->config.multimodal_epochs = 5;
     if (tp->config.fine_tune_epochs == 0) tp->config.fine_tune_epochs = 8;
     if (tp->config.local_epochs == 0) tp->config.local_epochs = 3;
@@ -990,6 +994,10 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     tp->plateau_lr_decay_factor = 0.5f;               /**< 平台时学习率减半 */
     tp->convergence_max_patience = (tp->config.early_stopping_patience > 0)
         ? tp->config.early_stopping_patience : 10;     /**< 默认早停耐心为10 */
+
+    /* ZSFX-P0: BPTT配置默认值（序列训练时自动启用） */
+    tp->bptt_enabled = 0;
+    tp->bptt_unroll_steps = 4;
 
     tp->monitor = training_monitor_create("selflnn_training",
         (int)(tp->config.pretrain_epochs + tp->config.deep_train_epochs +
@@ -1048,9 +1056,9 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
     }
 
     LNNConfig lnn_cfg = {0};
-    lnn_cfg.input_size = 512;
-    lnn_cfg.hidden_size = 1024;
-    lnn_cfg.output_size = 256;
+    lnn_cfg.input_size = pipeline->config.input_size > 0 ? pipeline->config.input_size : 512;
+    lnn_cfg.hidden_size = pipeline->config.hidden_size > 0 ? pipeline->config.hidden_size : 1024;
+    lnn_cfg.output_size = pipeline->config.output_size > 0 ? pipeline->config.output_size : 256;
     lnn_cfg.learning_rate = pipeline->config.pretrain_lr > 0 ? pipeline->config.pretrain_lr : 0.001f;
     lnn_cfg.time_constant = 0.1f;
     lnn_cfg.enable_training = 1;

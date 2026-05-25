@@ -70,6 +70,28 @@ struct RosGazeboBridge {
         char model_name[64];
     } cached_model_state;
 
+    /* ZSFX-003修复: 激光扫描缓存 —— 从Gazebo /scan话题获取真实激光数据 */
+    struct {
+        float ranges[360];
+        float angle_min;
+        float angle_max;
+        float angle_increment;
+        float range_min;
+        float range_max;
+        int range_count;
+        int has_data;
+        double timestamp;
+    } cached_laserscan;
+
+    /* ZSFX-003修复: IMU缓存 —— 从Gazebo /imu话题获取真实姿态数据 */
+    struct {
+        float orientation[4];
+        float angular_velocity[3];
+        float linear_acceleration[3];
+        int has_data;
+        double timestamp;
+    } cached_imu;
+
     int robot_count_cache;
 
     char last_error[256];
@@ -698,44 +720,158 @@ int ros_gazebo_bridge_publish_odometry(RosGazeboBridge* bridge, int robot_id) {
     if (!bridge || !bridge->connected) return -1;
     if (!bridge->ros_node) return -1;
 
-    /* ZSFX-002修复: Gazebo未连接时拒绝发布全零里程计假数据
-     * 真实里程计数据只能从实际Gazebo仿真中获取。
-     * 这里仅作为占位：停止发布虚假数据，记录警告并返回错误。
-     * 未来当Gazebo实际连接后可填充真实模型状态 */
-    (void)robot_id;
-    log_warning("[ROS Gazebo桥接] publish_odometry: 外部Gazebo未连接，"
-                "禁止发布全零里程计假数据。里程计发布已拒绝。");
-    return -1;
+    /* ZSFX-003修复: 当Gazebo已连接且有真实里程计缓存数据时，发布真实里程计 */
+    ros_node_spin_once(bridge->ros_node);
+
+    if (!bridge->cached_odom.has_data) {
+        log_warning("[ROS Gazebo桥接] publish_odometry: 无真实里程计缓存数据(ID:%d)，发布已拒绝", robot_id);
+        return -1;
+    }
+
+    char odom_json[1024];
+    snprintf(odom_json, sizeof(odom_json),
+             "{\"header\":{\"frame_id\":\"odom\"},"
+             "\"child_frame_id\":\"base_link\","
+             "\"pose\":{\"pose\":{"
+             "\"position\":{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f},"
+             "\"orientation\":{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"w\":%.4f}},"
+             "\"covariance\":[0]*36},"
+             "\"twist\":{\"twist\":{"
+             "\"linear\":{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f},"
+             "\"angular\":{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f}},"
+             "\"covariance\":[0]*36}}",
+             bridge->cached_odom.position[0],
+             bridge->cached_odom.position[1],
+             bridge->cached_odom.position[2],
+             bridge->cached_odom.orientation[0],
+             bridge->cached_odom.orientation[1],
+             bridge->cached_odom.orientation[2],
+             bridge->cached_odom.orientation[3],
+             bridge->cached_odom.linear_vel[0],
+             bridge->cached_odom.linear_vel[1],
+             bridge->cached_odom.linear_vel[2],
+             bridge->cached_odom.angular_vel[0],
+             bridge->cached_odom.angular_vel[1],
+             bridge->cached_odom.angular_vel[2]);
+
+    return ros_node_publish(bridge->ros_node, "/odom", odom_json, strlen(odom_json));
 }
 
 int ros_gazebo_bridge_publish_joint_states(RosGazeboBridge* bridge, int robot_id) {
-    (void)bridge; (void)robot_id;
-    /* ZSFX-002修复: 禁止发布全零关节状态假数据。
-     * 真实关节状态只能从实际Gazebo/ROS仿真中获取。
-     * 发布全零值会污染下游控制逻辑和AGI认知。 */
-    log_warning("[ROS Gazebo桥接] publish_joint_states: 外部Gazebo未连接，"
-                "禁止发布全零关节状态假数据。操作已拒绝。");
-    return -1;
+    if (!bridge || !bridge->connected) return -1;
+    if (!bridge->ros_node) return -1;
+
+    /* ZSFX-003修复: 当Gazebo已连接且有真实关节状态缓存数据时，发布真实关节状态 */
+    ros_node_spin_once(bridge->ros_node);
+
+    if (!bridge->cached_joint_state.has_data) {
+        log_warning("[ROS Gazebo桥接] publish_joint_states: 无真实关节状态缓存数据(ID:%d)，发布已拒绝", robot_id);
+        return -1;
+    }
+
+    char joint_json[4096];
+    int offset = snprintf(joint_json, sizeof(joint_json),
+                          "{\"header\":{\"frame_id\":\"robot\"},"
+                          "\"name\":[");
+    for (int i = 0; i < bridge->cached_joint_state.joint_count && i < 32; i++) {
+        offset += snprintf(joint_json + offset, sizeof(joint_json) - offset,
+                          "%s\"joint_%d\"", (i > 0) ? "," : "", i);
+    }
+    offset += snprintf(joint_json + offset, sizeof(joint_json) - offset,
+                      "],\"position\":[");
+    for (int i = 0; i < bridge->cached_joint_state.joint_count && i < 32; i++) {
+        offset += snprintf(joint_json + offset, sizeof(joint_json) - offset,
+                          "%s%.4f", (i > 0) ? "," : "",
+                          bridge->cached_joint_state.positions[i]);
+    }
+    offset += snprintf(joint_json + offset, sizeof(joint_json) - offset,
+                      "],\"velocity\":[");
+    for (int i = 0; i < bridge->cached_joint_state.joint_count && i < 32; i++) {
+        offset += snprintf(joint_json + offset, sizeof(joint_json) - offset,
+                          "%s%.4f", (i > 0) ? "," : "",
+                          bridge->cached_joint_state.velocities[i]);
+    }
+    offset += snprintf(joint_json + offset, sizeof(joint_json) - offset,
+                      "],\"effort\":[");
+    for (int i = 0; i < bridge->cached_joint_state.joint_count && i < 32; i++) {
+        offset += snprintf(joint_json + offset, sizeof(joint_json) - offset,
+                          "%s%.4f", (i > 0) ? "," : "",
+                          bridge->cached_joint_state.efforts[i]);
+    }
+    snprintf(joint_json + offset, sizeof(joint_json) - offset, "]}");
+
+    return ros_node_publish(bridge->ros_node, "/joint_states", joint_json, strlen(joint_json));
 }
 
 int ros_gazebo_bridge_publish_laserscan(RosGazeboBridge* bridge, int sensor_id) {
-    (void)bridge; (void)sensor_id;
-    /* ZSFX-002修复: 禁止发布定值30m假数据激光扫描。
-     * 真实激光扫描数据只能从实际Gazebo仿真的激光传感器获取。
-     * 填充360个30m定值会严重欺骗AGI的空间感知和避障逻辑。 */
-    log_warning("[ROS Gazebo桥接] publish_laserscan: 外部Gazebo未连接，"
-                "禁止发布定值假数据(360×30.0m)激光扫描。操作已拒绝。");
-    return -1;
+    if (!bridge || !bridge->connected) return -1;
+    if (!bridge->ros_node) return -1;
+
+    /* ZSFX-003修复: 当Gazebo已连接且有真实激光扫描缓存数据时，发布真实激光扫描 */
+    ros_node_spin_once(bridge->ros_node);
+
+    if (!bridge->cached_laserscan.has_data) {
+        log_warning("[ROS Gazebo桥接] publish_laserscan: 无真实激光扫描缓存数据(传感器:%d)，发布已拒绝", sensor_id);
+        return -1;
+    }
+
+    char laser_json[16384];
+    int offset = snprintf(laser_json, sizeof(laser_json),
+                          "{\"header\":{\"frame_id\":\"laser\"},"
+                          "\"angle_min\":%.4f,"
+                          "\"angle_max\":%.4f,"
+                          "\"angle_increment\":%.4f,"
+                          "\"range_min\":%.4f,"
+                          "\"range_max\":%.4f,"
+                          "\"ranges\":[",
+                          bridge->cached_laserscan.angle_min,
+                          bridge->cached_laserscan.angle_max,
+                          bridge->cached_laserscan.angle_increment,
+                          bridge->cached_laserscan.range_min,
+                          bridge->cached_laserscan.range_max);
+    for (int i = 0; i < bridge->cached_laserscan.range_count && i < 360; i++) {
+        offset += snprintf(laser_json + offset, sizeof(laser_json) - offset,
+                          "%s%.4f", (i > 0) ? "," : "",
+                          bridge->cached_laserscan.ranges[i]);
+    }
+    snprintf(laser_json + offset, sizeof(laser_json) - offset, "]}");
+
+    return ros_node_publish(bridge->ros_node, "/scan", laser_json, strlen(laser_json));
 }
 
 int ros_gazebo_bridge_publish_imu(RosGazeboBridge* bridge, int sensor_id) {
-    (void)bridge; (void)sensor_id;
-    /* ZSFX-002修复: 禁止发布零值姿态+固定9.81重力加速度假IMU数据。
-     * 真实IMU数据只能从实际Gazebo仿真的IMU传感器获取。
-     * 全零姿态+固定重力会严重扭曲AGI对人体运动状态的认知。 */
-    log_warning("[ROS Gazebo桥接] publish_imu: 外部Gazebo未连接，"
-                "禁止发布零值姿态+固定重力假IMU数据。操作已拒绝。");
-    return -1;
+    if (!bridge || !bridge->connected) return -1;
+    if (!bridge->ros_node) return -1;
+
+    /* ZSFX-003修复: 当Gazebo已连接且有真实IMU缓存数据时，发布真实IMU数据 */
+    ros_node_spin_once(bridge->ros_node);
+
+    if (!bridge->cached_imu.has_data) {
+        log_warning("[ROS Gazebo桥接] publish_imu: 无真实IMU缓存数据(传感器:%d)，发布已拒绝", sensor_id);
+        return -1;
+    }
+
+    char imu_json[1024];
+    snprintf(imu_json, sizeof(imu_json),
+             "{\"header\":{\"frame_id\":\"imu_link\"},"
+             "\"orientation\":{"
+             "\"x\":%.6f,\"y\":%.6f,\"z\":%.6f,\"w\":%.6f},"
+             "\"angular_velocity\":{"
+             "\"x\":%.6f,\"y\":%.6f,\"z\":%.6f},"
+             "\"linear_acceleration\":{"
+             "\"x\":%.6f,\"y\":%.6f,\"z\":%.6f}}",
+             bridge->cached_imu.orientation[0],
+             bridge->cached_imu.orientation[1],
+             bridge->cached_imu.orientation[2],
+             bridge->cached_imu.orientation[3],
+             bridge->cached_imu.angular_velocity[0],
+             bridge->cached_imu.angular_velocity[1],
+             bridge->cached_imu.angular_velocity[2],
+             bridge->cached_imu.linear_acceleration[0],
+             bridge->cached_imu.linear_acceleration[1],
+             bridge->cached_imu.linear_acceleration[2]);
+
+    return ros_node_publish(bridge->ros_node, "/imu", imu_json, strlen(imu_json));
 }
 
 int ros_gazebo_bridge_publish_camera(RosGazeboBridge* bridge, int sensor_id) {

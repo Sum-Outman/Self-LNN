@@ -76,23 +76,11 @@ static void rotation_to_axis_angle(const float R[9], float* ax, float* ay,
     *az = (R[3] - R[1]) * s;
 }
 
-static void mat3_vec3_mul(const float R[9], const float v[3], float out[3]) {
-    out[0] = R[0]*v[0] + R[1]*v[1] + R[2]*v[2];
-    out[1] = R[3]*v[0] + R[4]*v[1] + R[5]*v[2];
-    out[2] = R[6]*v[0] + R[7]*v[1] + R[8]*v[2];
-}
-
-static void mat3_transpose(const float R[9], float Rt[9]) {
-    Rt[0]=R[0]; Rt[1]=R[3]; Rt[2]=R[6];
-    Rt[3]=R[1]; Rt[4]=R[4]; Rt[5]=R[7];
-    Rt[6]=R[2]; Rt[7]=R[5]; Rt[8]=R[8];
-}
-
-static void cross3(const float a[3], const float b[3], float out[3]) {
-    out[0] = a[1]*b[2] - a[2]*b[1];
-    out[1] = a[2]*b[0] - a[0]*b[2];
-    out[2] = a[0]*b[1] - a[1]*b[0];
-}
+/* M-008修复: 矩阵/向量运算统一到 vec3_ops.h */
+#include "selflnn/math/vec3_ops.h"
+#define mat3_vec3_mul(R,v,o)  mat3_mul_vec3(o,R,v)
+#define mat3_transpose(R,Rt)  mat3_transpose(Rt,R)
+#define cross3(a,b,o)         vec3_cross(o,a,b)
 
 static float compute_harris_score(const unsigned char* img, int x, int y,
                                    int w, int stride) {
@@ -160,35 +148,119 @@ static float compute_harris_score(const unsigned char* img, int x, int y,
 
 static void extract_patch_descriptor(const unsigned char* img, int x, int y,
                                       int w, int stride, float* desc) {
+    /* M-009修复: 方向归一化特征描述子
+     * 1. 计算patch中每个像素的梯度方向和幅度
+     * 2. 使用梯度直方图确定主方向 (8 bins)
+     * 3. 将采样模式旋转到主方向后提取描述子
+     * 4. L2归一化 + 截断阈值0.2 */
     for (int i = 0; i < VO_DESC_LENGTH; i++) desc[i] = 0.0f;
-    int patch_size = 8;
-    for (int dy = -patch_size; dy < patch_size; dy++) {
-        for (int dx = -patch_size; dx < patch_size; dx++) {
+
+    int patch_radius = 10; /* 20x20 patch → 覆盖更大区域 */
+    float orient_hist[8] = {0};
+
+    /* 第一步：计算patch内梯度，构建方向直方图 */
+    for (int dy = -patch_radius + 1; dy < patch_radius - 1; dy++) {
+        for (int dx = -patch_radius + 1; dx < patch_radius - 1; dx++) {
             int px = x + dx, py = y + dy;
-            if (px < 0 || py < 0 || px >= w || py >= 480) continue;
-            int bin = ((dx + patch_size) * 2 / (patch_size/4)) +
-                      ((dy + patch_size) * 2 / (patch_size/4)) * 4;
-            if (bin >= VO_DESC_LENGTH) bin = VO_DESC_LENGTH - 1;
-            float val = (float)img[py * stride + px] / 255.0f;
-            float Ix = 0, Iy = 0;
-            for (int k = -1; k <= 1; k++) {
-                for (int l = -1; l <= 1; l++) {
-                    int idx = (py+k)*stride + (px+l);
-                    if (idx >= 0) {
-                        Ix += img[idx] * (l == 1 ? 1.0f : (l == -1 ? -1.0f : 0.0f));
-                        Iy += img[idx] * (k == 1 ? 1.0f : (k == -1 ? -1.0f : 0.0f));
-                    }
-                }
-            }
-            float mag = sqrtf(Ix*Ix + Iy*Iy);
-            desc[bin] += mag * val;
+            if (px < 1 || py < 1 || px >= w - 1 || py >= 480 - 1) continue;
+            float p10 = (float)img[py * stride + px + 1];
+            float p_10 = (float)img[py * stride + px - 1];
+            float p01 = (float)img[(py + 1) * stride + px];
+            float p0_1 = (float)img[(py - 1) * stride + px];
+            float gx = p10 - p_10;
+            float gy = p01 - p0_1;
+            float mag = sqrtf(gx * gx + gy * gy);
+            float angle = atan2f(gy, gx); /* [-pi, pi] */
+            if (angle < 0) angle += 2.0f * (float)M_PI;
+            int bin = (int)(angle * 8.0f / (2.0f * (float)M_PI));
+            if (bin >= 8) bin = 0;
+            /* 高斯加权（离中心越近权重越大） */
+            float dist_sq = (float)(dx * dx + dy * dy) / (float)(patch_radius * patch_radius);
+            float gauss_w = expf(-dist_sq * 2.0f);
+            orient_hist[bin] += mag * gauss_w;
         }
     }
+
+    /* 主方向：直方图峰值 */
+    float max_orient = 0.0f;
+    int dom_bin = 0;
+    for (int b = 0; b < 8; b++) {
+        if (orient_hist[b] > max_orient) { max_orient = orient_hist[b]; dom_bin = b; }
+    }
+    float dom_angle = (float)dom_bin * 2.0f * (float)M_PI / 8.0f;
+    float cos_t = cosf(dom_angle);
+    float sin_t = sinf(dom_angle);
+
+    /* 第二步：方向归一化后提取描述子
+     * 将采样网格旋转 -dom_angle，在4x4子区域×8方向bin中构建描述子 */
+    int sub_regions = 4; /* 4x4 grid */
+    int orient_bins = 8;
+    int half_size = patch_radius / sub_regions * sub_regions;
+    int hist_stride = orient_bins;
+    int total_hist = sub_regions * sub_regions * hist_stride;
+
+    float* hist = (float*)calloc((size_t)total_hist, sizeof(float));
+    if (!hist) return;
+
+    for (int dy = -half_size; dy < half_size; dy++) {
+        for (int dx = -half_size; dx < half_size; dx++) {
+            int px = x + dx, py = y + dy;
+            if (px < 1 || py < 1 || px >= w - 1 || py >= 480 - 1) continue;
+
+            float p10 = (float)img[py * stride + px + 1];
+            float p_10 = (float)img[py * stride + px - 1];
+            float p01 = (float)img[(py + 1) * stride + px];
+            float p0_1 = (float)img[(py - 1) * stride + px];
+            float gx = p10 - p_10, gy = p01 - p0_1;
+            float mag = sqrtf(gx * gx + gy * gy);
+            float angle = atan2f(gy, gx) - dom_angle;
+            if (angle < 0) angle += 2.0f * (float)M_PI;
+            if (angle >= 2.0f * (float)M_PI) angle -= 2.0f * (float)M_PI;
+
+            /* 子区域索引：旋转后的位置 */
+            float rx = cos_t * (float)dx - sin_t * (float)dy;
+            float ry = sin_t * (float)dx + cos_t * (float)dy;
+            int sx = (int)((rx / (float)half_size + 1.0f) * 0.5f * (float)sub_regions);
+            int sy = (int)((ry / (float)half_size + 1.0f) * 0.5f * (float)sub_regions);
+            if (sx < 0) sx = 0; if (sx >= sub_regions) sx = sub_regions - 1;
+            if (sy < 0) sy = 0; if (sy >= sub_regions) sy = sub_regions - 1;
+
+            int obin = (int)(angle * (float)orient_bins / (2.0f * (float)M_PI));
+            if (obin >= orient_bins) obin = 0;
+
+            float dist_sq = (float)(dx * dx + dy * dy) / (float)(half_size * half_size);
+            float gauss_w = expf(-dist_sq * 2.5f);
+            int hist_idx = (sy * sub_regions + sx) * hist_stride + obin;
+            if (hist_idx >= 0 && hist_idx < total_hist) {
+                hist[hist_idx] += mag * gauss_w;
+            }
+        }
+    }
+
+    /* 将直方图压缩到 VO_DESC_LENGTH 描述子向量 */
+    int copy_len = total_hist < VO_DESC_LENGTH ? total_hist : VO_DESC_LENGTH;
+    for (int i = 0; i < copy_len; i++) desc[i] = hist[i];
+
+    free(hist);
+
+    /* L2归一化 + 截断阈值0.2 */
     float norm = 0.0f;
     for (int i = 0; i < VO_DESC_LENGTH; i++) norm += desc[i] * desc[i];
     norm = sqrtf(norm);
-    if (norm > 1e-6f) {
-        for (int i = 0; i < VO_DESC_LENGTH; i++) desc[i] /= norm;
+    if (norm > 1e-8f) {
+        float inv = 1.0f / norm;
+        for (int i = 0; i < VO_DESC_LENGTH; i++) {
+            desc[i] *= inv;
+            if (desc[i] > 0.2f) desc[i] = 0.2f;
+        }
+        /* 再次L2归一化 */
+        float norm2 = 0.0f;
+        for (int i = 0; i < VO_DESC_LENGTH; i++) norm2 += desc[i] * desc[i];
+        norm2 = sqrtf(norm2);
+        if (norm2 > 1e-8f) {
+            float inv2 = 1.0f / norm2;
+            for (int i = 0; i < VO_DESC_LENGTH; i++) desc[i] *= inv2;
+        }
     }
 }
 
@@ -855,14 +927,85 @@ int visual_odometry_compute_reprojection_error(const VisualOdometry* vo,
     float max_e = 0.0f;
     int count = 0;
     const CameraIntrinsics* K = &vo->intrinsics;
-    (void)K;
+
+    /* P2-004修复: 实现真实的3D→2D重投影误差
+     * 对每个内点匹配:
+     * 1. 三角测量得到3D点 X
+     * 2. 用相机内参K将3D点投影到2D (第一和第二相机)
+     * 3. 计算投影点与观测点的欧氏距离平方
+     * 公式: error = ||obs_2d - project(K, R*X + t)||² */
     for (int i = 0; i < vo->inlier_count; i++) {
         const FeatureMatch* m = &vo->inliers[i];
         const FeaturePoint* f1 = &vo->features[m->idx_src];
         const FeaturePoint* f2 = &vo->prev_features[m->idx_dst];
-        float dx = f1->x - f2->x;
-        float dy = f1->y - f2->y;
-        float err = sqrtf(dx*dx + dy*dy);
+
+        /* 归一化坐标 (从像素坐标转换) */
+        float u1 = (f1->x - K->cx) / K->fx;
+        float v1 = (f1->y - K->cy) / K->fy;
+        float u2 = (f2->x - K->cx) / K->fx;
+        float v2 = (f2->y - K->cy) / K->fy;
+
+        /* 三角测量恢复3D点深度
+         * 两点射线: p1 = (u1,v1,1), p2 = (u2,v2,1)
+         * p1经过旋转R和平移t到第二个相机坐标系
+         * 求解深度: A * [lambda1, lambda2]^T = t */
+        float R[9], t[3];
+        memcpy(R, vo->essential.R, 9 * sizeof(float));
+        memcpy(t, vo->essential.t, 3 * sizeof(float));
+
+        float p1[3] = {u1, v1, 1.0f};
+        float p2[3] = {u2, v2, 1.0f};
+        float p2_rot[3];
+        mat3_vec3_mul(R, p2, p2_rot);
+
+        /* 求解深度 A[4] = [p1[0], -p2_rot[0]; p1[1], -p2_rot[1]] */
+        float A[4] = {p1[0], -p2_rot[0], p1[1], -p2_rot[1]};
+        float b[2] = {t[0], t[1]};
+        float det = A[0]*A[3] - A[1]*A[2];
+
+        /* K矩阵有效性的简便检查: fx > 0 */
+        int has_valid_K = (K->fx > 0.0f && K->fy > 0.0f);
+
+        if (fabsf(det) < 1e-10f || !has_valid_K) {
+            /* K矩阵不可用或深度求解退化，回退到像素差 */
+            float dx = f1->x - f2->x;
+            float dy = f1->y - f2->y;
+            float err = dx*dx + dy*dy;
+            total += err;
+            if (err > max_e) max_e = err;
+            count++;
+            continue;
+        }
+
+        float lambda = (b[0]*A[3] - b[1]*A[1]) / det;
+
+        /* 3D点坐标 (第一相机坐标系) */
+        float X[3];
+        X[0] = p1[0] * lambda;
+        X[1] = p1[1] * lambda;
+        X[2] = lambda;
+
+        /* 第一相机投影: u' = project(K, X) */
+        float proj1_u = K->fx * X[0] / X[2] + K->cx;
+        float proj1_v = K->fy * X[1] / X[2] + K->cy;
+
+        /* 第二相机: X' = R*X + t, 然后投影 */
+        float X2[3];
+        mat3_vec3_mul(R, X, X2);
+        X2[0] += t[0];
+        X2[1] += t[1];
+        X2[2] += t[2];
+
+        float proj2_u = K->fx * X2[0] / X2[2] + K->cx;
+        float proj2_v = K->fy * X2[1] / X2[2] + K->cy;
+
+        /* 重投影误差 = 观测点与投影点的距离平方和 */
+        float edx1 = f1->x - proj1_u;
+        float edy1 = f1->y - proj1_v;
+        float edx2 = f2->x - proj2_u;
+        float edy2 = f2->y - proj2_v;
+        float err = edx1*edx1 + edy1*edy1 + edx2*edx2 + edy2*edy2;
+
         total += err;
         if (err > max_e) max_e = err;
         count++;

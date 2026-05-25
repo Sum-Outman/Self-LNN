@@ -350,8 +350,8 @@
             }
             nodes[e.subject].connections++;
             nodes[e.object].connections++;
-            /* F-001修复: 优先使用后端返回的真实权重，回退到置信度，仅最后兜底使用0.5 */
-            var edgeWeight = (e.weight >= 0) ? e.weight : ((e.confidence >= 0) ? e.confidence : 0.5);
+            /* F-001修复: 优先使用后端返回的真实权重，权重和置信度都缺失时标记为-1 */
+            var edgeWeight = (e.weight >= 0) ? e.weight : ((e.confidence >= 0) ? e.confidence : -1);
             edges.push({ source: e.subject, target: e.object, label: e.predicate, weight: edgeWeight });
         });
 

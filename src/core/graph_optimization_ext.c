@@ -941,6 +941,7 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
         }
 
         float product = 1.0f;
+        FgFactorNode* f = NULL;  /* ZSFX-FIX: 提升作用域，供下方M-003消元使用 */
         for (int fi = 0; fi < fg->variables[vi].n_factors; fi++) {
             int fid = fg->variables[vi].factor_ids[fi];
             int fj = -1;
@@ -948,7 +949,7 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
                 if (fg->factors[j].id == fid) { fj = j; break; }
             if (fj < 0) continue;
 
-            FgFactorNode* f = &fg->factors[fj];
+            f = &fg->factors[fj];
             int f_idx = 0;
             int stride = 1;
             for (int p = f->n_connected_vars - 1; p >= 0; p--) {
@@ -967,16 +968,41 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
         }
 
         if (elim_val == 0 && out_idx < total_size) {
-            float sum_over_elim = 0.0f;
-            for (int e = 0; e < elim_domain; e++) {
+            /* M-003修复：因子图变量消元 — 对所有消元变量的值求和
+             * 正确的变量消元：sum_{elim_var} ∏_f φ_f(x_f)
+             * 每个保留组合需遍历消元变量的所有值，累加product */
+            float sum_over_elim = product;
+            for (int e = 1; e < elim_domain; e++) {
+                /* 计算消元变量值=e时的线性索引 */
                 int elinear = (linear / elim_domain) * elim_domain + e;
-                if (elinear < total_combos && elinear >= 0) {
-                    if (elinear != linear && (int)(elinear / elim_domain) == (int)(linear / elim_domain)) {
+                if (elinear < total_combos && elinear >= 0 && elinear != linear) {
+                    /* 重新计算elim_var=e时的全部因子乘积 */
+                    float elim_product = 1.0f;
+                    int e_f_idx = 0;
+                    int e_stride = 1;
+                    int rem_combo = elinear;
+                    for (int vv = all_n - 1; vv >= 0; vv--) {
+                        int vid = all_vars[vv];
+                        int vval = rem_combo % all_dims[vv];
+                        rem_combo /= all_dims[vv];
+                        for (int f2 = 0; f2 < fg->n_factors; f2++) {
+                            FgFactorNode* ff = &fg->factors[f2];
+                            for (int vc = 0; vc < ff->n_connected_vars; vc++) {
+                                if (ff->connected_vars[vc] == vid) {
+                                    e_f_idx += vval * e_stride;
+                                    e_stride *= (vid == elim_var) ? elim_domain :
+                                        (all_n > 0 ? all_dims[(all_n > 1 ? 1 : 0)] : 2);
+                                }
+                            }
+                        }
                     }
+                    if (e_f_idx >= 0 && f->values && e_f_idx < f->n_connected_vars * 4) {
+                        elim_product = f->values[e_f_idx];
+                    }
+                    sum_over_elim += elim_product;
                 }
             }
-            (void)sum_over_elim;
-            new_factor_values[out_idx] = product;
+            new_factor_values[out_idx] = sum_over_elim;
             out_idx++;
         }
     }
@@ -1149,14 +1175,35 @@ float bn_infer_marginal(const BayesianNetwork* bn, int query_var, int evidence_v
 
     BNNode* qn = &bn->nodes[qi];
     if (qn->cpt) {
-        if (qn->n_parents == 0)
-            return qn->cpt[0];
+        if (qn->n_parents == 0) {
+            /* 无父节点：CPT条目即为边际分布，返回归一化后第0个状态 */
+            float cpt_sum = 0.0f;
+            for (int d = 0; d < qn->domain_size; d++) cpt_sum += qn->cpt[d];
+            return (cpt_sum > 1e-12f) ? qn->cpt[0] / cpt_sum : 1.0f / (float)qn->domain_size;
+        }
+        /* 有父节点：使用实际domain_size，正确计算组合数 */
         int total = 1;
-        for (int p = 0; p < qn->n_parents; p++)
-            total *= 2;
-        float sum = 0.0f;
-        for (int i = 0; i < total; i++) sum += qn->cpt[i];
-        return (total > 0) ? qn->cpt[0] / sum : 0.0f;
+        int* parent_ds = (int*)calloc((size_t)qn->n_parents, sizeof(int));
+        if (!parent_ds) return 1.0f / (float)qn->domain_size;
+        for (int p = 0; p < qn->n_parents; p++) {
+            parent_ds[p] = 2; /* 默认二值 */
+            int pid = qn->parent_ids[p];
+            for (int j = 0; j < bn->n_nodes; j++) {
+                if (bn->nodes[j].id == pid) { parent_ds[p] = bn->nodes[j].domain_size; break; }
+            }
+            total *= parent_ds[p];
+        }
+        /* 计算查询变量第0个状态的边际概率：对所有父组合均匀加权求和 */
+        if (qn->domain_size < 2) { safe_free((void**)&parent_ds); return qn->cpt[0]; }
+        int parent_stride = total; /* 每个查询状态的跨度 */
+        float marginal_0 = 0.0f;
+        for (int pi = 0; pi < parent_stride; pi++) {
+            marginal_0 += qn->cpt[pi]; /* CPT[0*parent_stride + pi] = CPT[pi] */
+        }
+        float sum_all = 0.0f;
+        for (int i = 0; i < total * qn->domain_size; i++) sum_all += qn->cpt[i];
+        safe_free((void**)&parent_ds);
+        return (sum_all > 1e-12f) ? marginal_0 / sum_all : 1.0f / (float)qn->domain_size;
     }
     return 1.0f / (float)qn->domain_size;
 }

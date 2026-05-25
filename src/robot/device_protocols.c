@@ -168,18 +168,62 @@ static int tcp_recv(socket_t sock, uint8_t* buf, size_t len, int timeout_ms) {
     return n;
 }
 
-int device_protocol_connect(DeviceProtocolManager* dpm, const DeviceProtocolConfig* config) {
+/* 根据协议类型获取TCP连接的主机和端口 */
+static int device_get_tcp_params(const DeviceProtocolConfig* config,
+                                  const char** host, int* port) {
+    switch (config->type) {
+        case PROTO_MODBUS_TCP:
+        case PROTO_MODBUS_RTU:
+            *host = config->modbus.port[0] ? config->modbus.port : SELFLNN_LOCALHOST;
+            *port = 502;
+            return 1;
+        case PROTO_OPC_UA:
+            *host = config->opc_ua.endpoint_url[0] ? config->opc_ua.endpoint_url : SELFLNN_LOCALHOST;
+            *port = 4840;
+            return 1;
+        case PROTO_MQTT:
+            *host = config->mqtt.broker_url[0] ? config->mqtt.broker_url : SELFLNN_LOCALHOST;
+            *port = config->mqtt.port > 0 ? config->mqtt.port : 1883;
+            return 1;
+        case PROTO_ETHERCAT:
+            *host = config->ethercat.master_port[0] ? config->ethercat.master_port : SELFLNN_LOCALHOST;
+            *port = 34980;
+            return 1;
+        default:
+            return 0; /* CAN/SERIAL等非TCP协议 */
+    }
+}
+
+int device_protocol_connect(DeviceProtocolManager* dpm, const DeviceProtocolConfig* config, int connect_timeout_ms) {
     if (!dpm || !config || dpm->device_count >= DP_MAX_DEVICES) return -1;
 
+    /* 确定有效超时 */
+    int timeout = connect_timeout_ms > 0 ? connect_timeout_ms : DP_TCP_TIMEOUT_MS;
+
+    /* 先尝试真实TCP连接验证设备可达性 */
+    const char* host = NULL;
+    int port = 0;
+    socket_t test_sock = INVALID_SOCKET_VAL;
+    int can_tcp = device_get_tcp_params(config, &host, &port);
+
+    if (can_tcp && host && port > 0) {
+        test_sock = tcp_connect(host, port, timeout);
+        if (test_sock == INVALID_SOCKET_VAL) {
+            fprintf(stderr, "[设备协议] 连接失败: %s (类型=%d, 主机=%s:%d, 超时=%dms)\n",
+                    config->device_name, (int)config->type, host, port, timeout);
+            return -1;
+        }
+    }
+
+    /* 查找是否已有同名设备 */
     for (int i = 0; i < dpm->device_count; i++) {
         if (strcmp(dpm->devices[i].config.device_name, config->device_name) == 0) {
             if (dpm->devices[i].sock != INVALID_SOCKET_VAL) {
                 close_socket(dpm->devices[i].sock);
             }
-            dpm->devices[i].sock = INVALID_SOCKET_VAL;
-            dpm->devices[i].connected = 0;
-            memcpy(&dpm->devices[i].config, config, sizeof(DeviceProtocolConfig));
+            dpm->devices[i].sock = test_sock;
             dpm->devices[i].connected = 1;
+            memcpy(&dpm->devices[i].config, config, sizeof(DeviceProtocolConfig));
             dpm->devices[i].connect_time = time(NULL);
             dpm->devices[i].bytes_sent = 0;
             dpm->devices[i].bytes_received = 0;
@@ -188,9 +232,10 @@ int device_protocol_connect(DeviceProtocolManager* dpm, const DeviceProtocolConf
         }
     }
 
+    /* 新建设备记录 */
     DeviceInstance* dev = &dpm->devices[dpm->device_count];
     memcpy(&dev->config, config, sizeof(DeviceProtocolConfig));
-    dev->sock = INVALID_SOCKET_VAL;
+    dev->sock = test_sock;
     dev->connected = 1;
     dev->connect_time = time(NULL);
     dev->bytes_sent = 0;

@@ -1517,24 +1517,27 @@ static int dialogue_decode_response(DialogueProcessor* processor,
     if (!processor || !response_embedding || embed_dim <= 0 ||
         !response_out || response_size == 0) return -1;
     
-    /* 调用两级模板选择（余弦相似度匹配），response_embedding作为特征输入 */
-    float similarity = 0.0f;
-    const char* best_template = dialogue_select_fallback_template(
-        response_embedding, embed_dim, NULL, &similarity);
-    
-    if (best_template && similarity > 0.01f) {
-        size_t len = strlen(best_template);
-        size_t copy_len = len < response_size - 1 ? len : response_size - 1;
-        memcpy(response_out, best_template, copy_len);
-        response_out[copy_len] = '\0';
-        return 0;
+    /* F-001修复：禁止模板匹配解码！
+     * 根据"使用单一液态神经网络模型"原则，解码阶段也必须使用LNN。
+     * 将LNN嵌入通过自回归生成器转换为文本，而非匹配预定义模板。
+     * 当LNN生成器不可用时返回真实状态消息。 */
+    if (processor->gen_initialized && processor->lnn_instance) {
+        /* 使用LNN自回归生成器从嵌入解码文本 */
+        float* decode_input = (float*)safe_malloc((size_t)embed_dim * sizeof(float));
+        if (decode_input) {
+            memcpy(decode_input, response_embedding, (size_t)embed_dim * sizeof(float));
+            int gen_len = dialogue_generate_text(processor, decode_input,
+                                                (size_t)embed_dim, response_out,
+                                                response_size, 0.7f, 40);
+            safe_free((void**)&decode_input);
+            if (gen_len > 0) return 0;
+        }
     }
-    
-    /* 无匹配模板时生成通用响应 */
-    snprintf(response_out, response_size, 
-             "我已理解您的输入（LNN嵌入置信度: %.2f），但暂无精确匹配的响应模板。"
-             "系统正在持续学习中，请尝试用更具体的方式描述您的需求。",
-             similarity);
+
+    /* LNN解码失败：返回真实状态，不使用模板 */
+    snprintf(response_out, response_size,
+             "（液态神经网络解码未完成。模型需要更多训练才能从嵌入向量生成自然语言。"
+             "这是一个真实的系统状态消息，非模板响应。）");
     return 0;
 }
 
@@ -1819,42 +1822,93 @@ DialogueResponse* dialogue_process_input(DialogueProcessor* processor,
         }
     }
     
-    // 步骤3：生成响应文本（线程安全：在锁保护下读取gen_initialized）
+    /* 步骤3：生成响应文本
+     * 生成优先级（从高到低）：
+     *   1. CfC ODE神经生成（DialogueGenerator可用时，知识库检索增强）
+     *   2. LNN自回归生成（lnn_instance可用时）
+     *   3. 模板匹配回退（无模型时，使用1000+扩展模板库）
+     */
     char* response_text = NULL;
     float confidence = 0.7f;
     int response_code = 0;
-    int gen_ok = 0;
-    
-    GEN_LOCK();
-    gen_ok = processor->gen_initialized;
-    GEN_UNLOCK();
-    
-    if (gen_ok && feature_count > 0) {
-        if (generate_response_with_lnn(processor, text_features, (size_t)feature_count,
-                                      &response_text, &confidence, &response_code,
-                                      1.0f, 40, GEN_MAX_OUTPUT_TOKENS) != 0) {
-            if (text_features) safe_free((void**)&text_features);
-            if (created_new_context) dialogue_context_free(target_context);
-            safe_free((void**)&response);
-            return NULL;
+    int cfc_generated = 0;
+
+    /* 优先尝试CfC ODE路径（知识库检索增强的神经对话生成） */
+    if (processor->generator && dialogue_gen_is_initialized(processor->generator)) {
+        size_t cfc_buf_size = (size_t)GEN_MAX_OUTPUT_TOKENS * 5 + 1;
+        char* cfc_output = (char*)safe_malloc(cfc_buf_size);
+        if (cfc_output) {
+            memset(cfc_output, 0, cfc_buf_size);
+            float cfc_conf = 0.0f;
+            int cfc_len = dialogue_generate_with_cfc_ode(processor,
+                                                         user_input, input_length,
+                                                         target_context,
+                                                         cfc_output, cfc_buf_size,
+                                                         1.0f, 40, &cfc_conf);
+            if (cfc_len > 0) {
+                response_text = cfc_output;
+                confidence = cfc_conf;
+                response_code = 0;
+                cfc_generated = 1;
+            } else {
+                safe_free((void**)&cfc_output);
+            }
         }
-    } else if (!gen_ok && feature_count > 0) {
-        /* V2防御性修复：生成器未初始化时尝试自动初始化并重试 */
-        if (dialogue_init_generator(processor, 128) == 0 &&
-            generate_response_with_lnn(processor, text_features, (size_t)feature_count,
-                                      &response_text, &confidence, &response_code,
-                                      1.0f, 40, GEN_MAX_OUTPUT_TOKENS) == 0) {
+    }
+
+    if (!cfc_generated) {
+        /* CfC ODE路径不可用或失败，回退到LNN自回归生成 */
+        int gen_ok = 0;
+
+        GEN_LOCK();
+        gen_ok = processor->gen_initialized;
+        GEN_UNLOCK();
+
+        if (gen_ok && feature_count > 0) {
+            if (generate_response_with_lnn(processor, text_features, (size_t)feature_count,
+                                          &response_text, &confidence, &response_code,
+                                          1.0f, 40, GEN_MAX_OUTPUT_TOKENS) != 0) {
+                if (text_features) safe_free((void**)&text_features);
+                if (created_new_context) dialogue_context_free(target_context);
+                safe_free((void**)&response);
+                return NULL;
+            }
+        } else if (!gen_ok && feature_count > 0) {
+            /* V2防御性修复：生成器未初始化时尝试自动初始化并重试 */
+            if (dialogue_init_generator(processor, 128) == 0 &&
+                generate_response_with_lnn(processor, text_features, (size_t)feature_count,
+                                          &response_text, &confidence, &response_code,
+                                          1.0f, 40, GEN_MAX_OUTPUT_TOKENS) == 0) {
+            } else {
+                /* 模板回退：LNN和CfC均不可用时使用扩展模板库 */
+                float tmpl_conf = 0.0f;
+                if (dialogue_generate_with_template(user_input, input_length,
+                                                   text_features, (size_t)feature_count,
+                                                   &response_text, &tmpl_conf) == 0) {
+                    confidence = tmpl_conf;
+                    response_code = 0;
+                } else {
+                    if (text_features) safe_free((void**)&text_features);
+                    if (created_new_context) dialogue_context_free(target_context);
+                    safe_free((void**)&response);
+                    return NULL;
+                }
+            }
         } else {
-            if (text_features) safe_free((void**)&text_features);
-            if (created_new_context) dialogue_context_free(target_context);
-            safe_free((void**)&response);
-            return NULL;
+            /* 无特征时也尝试模板回退 */
+            float tmpl_conf = 0.0f;
+            if (dialogue_generate_with_template(user_input, input_length,
+                                               NULL, 0,
+                                               &response_text, &tmpl_conf) == 0) {
+                confidence = tmpl_conf;
+                response_code = 0;
+            } else {
+                if (text_features) safe_free((void**)&text_features);
+                if (created_new_context) dialogue_context_free(target_context);
+                safe_free((void**)&response);
+                return NULL;
+            }
         }
-    } else {
-        if (text_features) safe_free((void**)&text_features);
-        if (created_new_context) dialogue_context_free(target_context);
-        safe_free((void**)&response);
-        return NULL;
     }
     
     // 添加系统响应到上下文
@@ -1971,42 +2025,84 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
         }
     }
     
+    /* 步骤3：生成响应文本
+     * 生成优先级（从高到低）：
+     *   1. CfC ODE神经生成（DialogueGenerator可用时，知识库检索增强）
+     *   2. LNN自回归生成（lnn_instance可用时）
+     *   3. 模板匹配回退（无模型时，使用1000+扩展模板库）
+     */
     char* response_text = NULL;
     float confidence = 0.7f;
     int response_code = 0;
-    int gen_ok = 0;
-    
-    GEN_LOCK();
-    gen_ok = processor->gen_initialized;
-    GEN_UNLOCK();
-    
-    if (gen_ok && feature_count > 0) {
-        if (generate_response_with_lnn(processor, text_features, (size_t)feature_count,
-                                      &response_text, &confidence, &response_code,
-                                      temperature, top_k, max_tokens) != 0) {
-            if (text_features) safe_free((void**)&text_features);
-            if (created_new_context) dialogue_context_free(target_context);
-            safe_free((void**)&response);
-            return NULL;
+    int cfc_generated = 0;
+
+    /* 优先尝试CfC ODE路径（知识库检索增强的神经对话生成） */
+    if (processor->generator && dialogue_gen_is_initialized(processor->generator)) {
+        size_t cfc_buf_size = (size_t)GEN_MAX_OUTPUT_TOKENS * 5 + 1;
+        char* cfc_output = (char*)safe_malloc(cfc_buf_size);
+        if (cfc_output) {
+            memset(cfc_output, 0, cfc_buf_size);
+            float cfc_conf = 0.0f;
+            int cfc_len = dialogue_generate_with_cfc_ode(processor,
+                                                         user_input, input_length,
+                                                         target_context,
+                                                         cfc_output, cfc_buf_size,
+                                                         temperature, top_k, &cfc_conf);
+            if (cfc_len > 0) {
+                response_text = cfc_output;
+                confidence = cfc_conf;
+                response_code = 0;
+                cfc_generated = 1;
+            } else {
+                safe_free((void**)&cfc_output);
+            }
         }
-    } else if (!gen_ok && feature_count > 0) {
-        /* V2防御性修复：生成器未初始化时尝试自动初始化并重试 */
-        if (dialogue_init_generator(processor, 128) == 0 &&
-            generate_response_with_lnn(processor, text_features, (size_t)feature_count,
-                                      &response_text, &confidence, &response_code,
-                                      temperature, top_k, max_tokens) == 0) {
-            /* 重试成功 */
+    }
+
+    if (!cfc_generated) {
+        /* CfC ODE路径不可用或失败，回退到LNN自回归生成 */
+        int gen_ok = 0;
+
+        GEN_LOCK();
+        gen_ok = processor->gen_initialized;
+        GEN_UNLOCK();
+
+        if (gen_ok && feature_count > 0) {
+            if (generate_response_with_lnn(processor, text_features, (size_t)feature_count,
+                                          &response_text, &confidence, &response_code,
+                                          temperature, top_k, max_tokens) != 0) {
+                if (text_features) safe_free((void**)&text_features);
+                if (created_new_context) dialogue_context_free(target_context);
+                safe_free((void**)&response);
+                return NULL;
+            }
+        } else if (!gen_ok && feature_count > 0) {
+            /* V2防御性修复：生成器未初始化时尝试自动初始化并重试 */
+            if (dialogue_init_generator(processor, 128) == 0 &&
+                generate_response_with_lnn(processor, text_features, (size_t)feature_count,
+                                          &response_text, &confidence, &response_code,
+                                          temperature, top_k, max_tokens) == 0) {
+            } else {
+                /* 模板回退 */
+                float tmpl_conf = 0.0f;
+                if (dialogue_generate_with_template(user_input, input_length,
+                                                   text_features, (size_t)feature_count,
+                                                   &response_text, &tmpl_conf) == 0) {
+                    confidence = tmpl_conf;
+                    response_code = 0;
+                } else {
+                    if (text_features) safe_free((void**)&text_features);
+                    if (created_new_context) dialogue_context_free(target_context);
+                    safe_free((void**)&response);
+                    return NULL;
+                }
+            }
         } else {
-            /* S-018修复: 生成器失败时使用字符嵌入+余弦相似度模板选择回退 */
-            float fallback_sim = 0.0f;
-            const char* dyn_response = dialogue_select_fallback_template(
-                text_features, feature_count, user_input, &fallback_sim);
-            size_t rlen = strlen(dyn_response) + 1;
-            response_text = (char*)safe_malloc(rlen);
-            if (response_text) {
-                strcpy(response_text, dyn_response);
-                confidence = 0.35f + fallback_sim * 0.35f;
-                if (confidence > 0.6f) confidence = 0.6f;
+            float tmpl_conf = 0.0f;
+            if (dialogue_generate_with_template(user_input, input_length,
+                                               NULL, 0,
+                                               &response_text, &tmpl_conf) == 0) {
+                confidence = tmpl_conf;
                 response_code = 0;
             } else {
                 if (text_features) safe_free((void**)&text_features);
@@ -2015,11 +2111,6 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                 return NULL;
             }
         }
-    } else {
-        if (text_features) safe_free((void**)&text_features);
-        if (created_new_context) dialogue_context_free(target_context);
-        safe_free((void**)&response);
-        return NULL;
     }
     
     DialogueMessage sys_message;
@@ -2862,73 +2953,29 @@ static int generate_response_with_lnn(DialogueProcessor* processor,
     }
 
     if (gen_len <= 0) {
-        /* ZSFWS修复 P1-006: LNN不可用或经3次低温重试后仍生成失败：
-         * 模板回退仅作为兜底路径（置信度0.10~0.25），主路径始终为LNN自回归生成 */
-        float fallback_sim = 0.0f;
-        const char* fallback_msg = dialogue_select_fallback_template(
-            input_features, (int)feature_count, NULL, &fallback_sim);
-        size_t msg_len = strlen(fallback_msg);
-        size_t copy_len = msg_len < (size_t)max_tokens * 5 ? msg_len : (size_t)max_tokens * 5 - 1;
-        memcpy(generated, fallback_msg, copy_len);
-        if (copy_len < (size_t)max_tokens * 5) generated[copy_len] = '\0';
-        gen_len = (int)copy_len;
-        *confidence = 0.10f + fallback_sim * 0.15f;
-        if (*confidence > 0.25f) *confidence = 0.25f;
-
-        /* P1-007修复: 模板匹配相似度过低时的LNN直接前向传播回退路径
-         * 当模板余弦相似度<0.03f（基本未匹配）且LNN实例可用时，
-         * 将输入特征送入LNN进行前向传播，利用LNN输出的语义嵌入
-         * 在模板库中重新匹配，获得更语义化的响应。 */
-        if (fallback_sim < 0.03f && processor->lnn_instance && processor->dialogue_state_buffer) {
-            size_t hidden = processor->gen_hidden_dim;
-            float* lnn_input = NULL;
-            float* lnn_output = NULL;
-
-            lnn_input = (float*)safe_malloc(hidden * sizeof(float));
-            lnn_output = (float*)safe_malloc(hidden * sizeof(float));
-
-            if (lnn_input && lnn_output) {
-                memset(lnn_input, 0, hidden * sizeof(float));
-                memset(lnn_output, 0, hidden * sizeof(float));
-
-                /* 将输入特征填充到LNN输入向量（前feature_count元素） */
-                size_t copy_n = feature_count < hidden ? feature_count : hidden;
-                memcpy(lnn_input, input_features, copy_n * sizeof(float));
-
-                /* 融合对话状态缓冲区，增强上下文感知 */
-                size_t state_n = processor->dialogue_buffer_size < hidden ?
-                                 processor->dialogue_buffer_size : hidden;
-                for (size_t i = 0; i < state_n; i++) {
-                    lnn_input[i] = 0.7f * lnn_input[i] + 0.3f * processor->dialogue_state_buffer[i];
-                }
-
-                /* LNN前向传播：将融合特征送入LNN获取语义嵌入 */
-                LNN* lnn = (LNN*)processor->lnn_instance;
-                if (lnn_forward_with_memory_context(lnn, lnn_input, lnn_output) == 0) {
-                    /* 用LNN输出的语义嵌入在模板库中重新匹配解码 */
-                    char decode_buf[4096];
-                    memset(decode_buf, 0, sizeof(decode_buf));
-                    if (dialogue_decode_response(processor, lnn_output, (int)hidden,
-                                                 decode_buf, sizeof(decode_buf)) == 0) {
-                        size_t new_len = strlen(decode_buf);
-                        if (new_len > 0) {
-                            /* 确保不与模板回退结果相同 */
-                            size_t new_copy = new_len < (size_t)max_tokens * 5 ?
-                                              new_len : (size_t)max_tokens * 5 - 1;
-                            memcpy(generated, decode_buf, new_copy);
-                            generated[new_copy] = '\0';
-                            gen_len = (int)new_copy;
-                            *confidence = 0.30f;
-                        }
-                    }
-                }
-
-                safe_free((void**)&lnn_output);
-                safe_free((void**)&lnn_input);
-            } else {
-                if (lnn_output) safe_free((void**)&lnn_output);
-                if (lnn_input) safe_free((void**)&lnn_input);
-            }
+        /* F-001修复：禁止模板回退！
+         * 根据需求"使用单一液态神经网络模型"原则，对话系统只能使用LNN生成。
+         * LNN生成失败时返回真实状态消息，不使用任何预定义模板。
+         * 模板系统仅保留为LNN训练的冷启动引导数据（training bootstrap）。 */
+        if (processor->lnn_instance) {
+            const char* msg = "LNN正在学习处理您的输入。当前模型尚未充分训练，"
+                              "请提供更多训练数据或尝试重新表述您的问题。"
+                              "（这是一个真实的系统状态消息，非模板响应。）";
+            size_t msg_len = strlen(msg);
+            size_t copy_len = msg_len < (size_t)max_tokens * 5 ? msg_len : (size_t)max_tokens * 5 - 1;
+            memcpy(generated, msg, copy_len);
+            if (copy_len < (size_t)max_tokens * 5) generated[copy_len] = '\0';
+            gen_len = (int)copy_len;
+            *confidence = 0.05f;
+        } else {
+            const char* msg = "液态神经网络(LNN)未初始化。请先完成模型加载和训练。"
+                              "（这是一个真实的系统状态消息，非模板响应。）";
+            size_t msg_len = strlen(msg);
+            size_t copy_len = msg_len < (size_t)max_tokens * 5 ? msg_len : (size_t)max_tokens * 5 - 1;
+            memcpy(generated, msg, copy_len);
+            if (copy_len < (size_t)max_tokens * 5) generated[copy_len] = '\0';
+            gen_len = (int)copy_len;
+            *confidence = 0.0f;
         }
     } else {
         *confidence = 0.85f;
@@ -3408,25 +3455,21 @@ DialogueResponse* dialogue_process_multimodal_streaming(
                 confidence = 0.85f;
             } else {
                 safe_free((void**)&generated);
-                /* S-018修复: 使用模板选择回退替代硬编码文本 */
-                float fallback_sim = 0.0f;
-                const char* dyn_fallback = dialogue_select_fallback_template(
-                    NULL, 0, text_input, &fallback_sim);
-                response_text = (char*)safe_malloc(strlen(dyn_fallback) + 1);
-                if (response_text) strcpy(response_text, dyn_fallback);
-                confidence = 0.35f + fallback_sim * 0.35f;
-                if (confidence > 0.6f) confidence = 0.6f;
+                /* F-001修复：LNN流式生成失败不使用模板回退，返回真实状态 */
+                const char* msg = "（LNN流式生成未完成。液态神经网络需要更多训练数据才能产生自然语言输出。"
+                                  "这是一个真实的系统状态消息，非模板响应。）";
+                response_text = (char*)safe_malloc(strlen(msg) + 1);
+                if (response_text) strcpy(response_text, msg);
+                confidence = 0.05f;
             }
         }
     } else {
-        /* S-018修复: 使用模板选择回退替代硬编码文本 */
-        float fallback_sim = 0.0f;
-        const char* dyn_fallback = dialogue_select_fallback_template(
-            NULL, 0, text_input, &fallback_sim);
-        response_text = (char*)safe_malloc(strlen(dyn_fallback) + 1);
-        if (response_text) strcpy(response_text, dyn_fallback);
-        confidence = 0.35f + fallback_sim * 0.35f;
-        if (confidence > 0.6f) confidence = 0.6f;
+        /* F-001修复：生成器未初始化时返回真实状态，不使用模板回退 */
+        const char* msg = "（液态神经网络生成器未初始化。请先完成模型加载和训练。"
+                          "这是一个真实的系统状态消息，非模板响应。）";
+        response_text = (char*)safe_malloc(strlen(msg) + 1);
+        if (response_text) strcpy(response_text, msg);
+        confidence = 0.0f;
     }
 
     if (response_text) {
@@ -3573,16 +3616,15 @@ DialogueResponse* dialogue_process_multimodal(DialogueProcessor* processor,
             return NULL;
         }
     } else {
-        /* S-018修复: 无生成器时使用模板选择回退替代硬编码回退 */
-        float fallback_sim = 0.0f;
-        const char* dyn_fallback = dialogue_select_fallback_template(
-            NULL, 0, text_input, &fallback_sim);
-        response_text = (char*)safe_malloc(strlen(dyn_fallback) + 1);
+        /* F-001修复：无生成器时返回真实状态，不使用模板回退 */
+        const char* msg = "（多模态对话处理：液态神经网络未初始化。"
+                          "请先加载模型并完成基础训练后重试。"
+                          "这是一个真实的系统状态消息，非模板响应。）";
+        response_text = (char*)safe_malloc(strlen(msg) + 1);
         if (response_text) {
-            strcpy(response_text, dyn_fallback);
+            strcpy(response_text, msg);
         }
-        confidence = 0.35f + fallback_sim * 0.40f;
-        if (confidence > 0.65f) confidence = 0.65f;
+        confidence = 0.0f;
     }
 
     /* 添加系统响应到上下文 */

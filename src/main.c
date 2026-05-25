@@ -92,6 +92,7 @@ static time_t g_last_safety = 0;
 static int g_bg_task_error_count = 0;
 static TrainingPipeline* g_training_pipeline = NULL;   /* ZSFABC: 训练管线 */
 static time_t g_last_training_step = 0;                 /* ZSFABC: 上次训练步时间 */
+void* g_global_lnn = NULL;                              /* H-003: 全局LNN指针供GPU后端TPU回退使用 */
 static ProductDesignEngine* g_product_design = NULL;    /* APP10: 产品设计引擎 */
 static void* g_nas_system = NULL;                         /* 神经架构搜索系统 */
 static void* g_laplace_unified = NULL;                    /* 拉普拉斯统一系统 */
@@ -1096,6 +1097,8 @@ int main(int argc, char* argv[])
 
         if (selflnn_init(&sys_config) == 0) {
             printf("  SELF-LNN核心系统初始化成功\n");
+            /* H-003: 设置全局LNN指针供GPU后端TPU回退使用 */
+            g_global_lnn = selflnn_get_shared_lnn();
             /* M-016: 启动时自动加载检查点模型
              * 扫描 checkpoints/ 目录，如果有预训练模型则加载到共享LNN */
             {

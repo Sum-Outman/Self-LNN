@@ -3298,7 +3298,7 @@ function switchCamera(camera) {
     
     showNotification('切换到: ' + cameraNames[camera], 'info');
     if (typeof window.SelfLnnApi === 'object' && typeof window.SelfLnnApi.switchCameraSource === 'function') {
-        window.SelfLnnApi.switchCameraSource({ camera: camera }).catch(function() {});
+        window.SelfLnnApi.switchCameraSource({ camera: camera }).catch(function(e) { console.warn('摄像头切换失败:', e); });
     }
 }
 
@@ -5592,7 +5592,7 @@ async function sendDialogueMessage() {
 /* ZSFABC-002修复: 通过统一API服务发送多模态对话请求，获得完整认证/重试/熔断保护 */
 async function sendMultimodalRequest(message, imageData, audioData, params) {
     try {
-        var tempVal = Math.round((params.temperature || 0.8) * 10);
+        var tempVal = params.temperature !== undefined ? Math.round(params.temperature * 10) : -1;
         if (tempVal < 1) tempVal = 10;
         if (tempVal > 20) tempVal = 20;
         const payload = {

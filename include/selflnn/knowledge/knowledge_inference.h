@@ -138,7 +138,8 @@ typedef enum {
     KI_RESOLVE_CONFIDENCE = 0,
     KI_RESOLVE_TIME = 1,
     KI_RESOLVE_SOURCE = 2,
-    KI_RESOLVE_MERGE = 3
+    KI_RESOLVE_MERGE = 3,
+    KI_RESOLVE_PRIORITY_SPECIFICITY = 4
 } KIResolutionStrategy;
 
 typedef struct KnowledgeInferenceEngine KnowledgeInferenceEngine;

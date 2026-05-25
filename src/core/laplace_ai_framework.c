@@ -18,29 +18,40 @@
 #define LAI_MAX_FILTER_BANDS 64
 
 typedef enum {
-    LAI_FILTER_LOWPASS = 0,
-    LAI_FILTER_HIGHPASS = 1,
-    LAI_FILTER_BANDPASS = 2,
-    LAI_FILTER_BANDSTOP = 3
+    LAI_FILTER_NONE = -1,       /**< 不过滤 */
+    LAI_FILTER_LOWPASS = 0,     /**< 低通 */
+    LAI_FILTER_HIGHPASS = 1,    /**< 高通 */
+    LAI_FILTER_BANDPASS = 2,    /**< 带通 */
+    LAI_FILTER_BANDSTOP = 3,    /**< 带阻 */
+    LAI_FILTER_NOTCH = 4,       /**< 陷波 */
+    LAI_FILTER_ADAPTIVE = 5     /**< 自适应 */
 } LAIFilterType;
 
 typedef enum {
-    LAI_WINDOW_HANN = 0,
-    LAI_WINDOW_HAMMING = 1,
-    LAI_WINDOW_HANNING = 1,  /* ZSFBUILD: 别名, Hann window = Hanning window */
-    LAI_WINDOW_BLACKMAN = 2,
-    LAI_WINDOW_KAISER = 3,
-    LAI_WINDOW_RECTANGULAR = 4
+    LAI_WINDOW_NONE = -1,       /**< 不加窗 */
+    LAI_WINDOW_HANN = 0,        /**< Hann窗 */
+    LAI_WINDOW_HAMMING = 1,     /**< Hamming窗 */
+    LAI_WINDOW_BLACKMAN = 2,    /**< Blackman窗 */
+    LAI_WINDOW_KAISER = 3,      /**< Kaiser窗 */
+    LAI_WINDOW_RECTANGULAR = 4  /**< 矩形窗（等同于NONE） */
 } LAIWindowType;
 
-typedef struct {
+/* 向后兼容别名 */
+#define LAI_WINDOW_HANNING LAI_WINDOW_HANN
+
+typedef struct LAIStabilityAnalysis {
     float gain_margin;
     float phase_margin;
     float dominant_pole_real;
     float dominant_pole_imag;
     float stability_margin;
-    int is_stable;
-} LAIStabilityAnalysis;
+    float stability_score;          /**< 综合稳定性评分 0-1 */
+     float noise_level;             /**< 噪声水平 (归一化) */
+     float oscillation_index;       /**< 振荡指数 */
+     int is_stable;
+     int warning_level;              /**< 警告级别 0=正常 1=临界 2=危险 */
+     char description[256];          /**< 诊断描述 */
+ } LAIStabilityAnalysis;
 
 /* ZSFBUILD: LAIStabilityReport 与 LAIStabilityAnalysis 等价 */
 typedef LAIStabilityAnalysis LAIStabilityReport;
@@ -54,6 +65,11 @@ typedef struct LaplaceAIConfig {
     int num_feature_bands;
     float feature_freq_bands[32];
     int enable_rl;
+    int filter_order;              /**< 滤波器阶数 (1-4) */
+    float high_cutoff_hz;          /**< 高频截止 (Hz) */
+    float lr_min_scale;            /**< 学习率最小缩放 */
+    float lr_max_scale;            /**< 学习率最大缩放 */
+    float lr_adaptation_speed;     /**< 学习率自适应速度 */
 } LaplaceAIConfig;
 
 typedef struct LaplaceAI {
@@ -72,10 +88,42 @@ typedef struct LAISpectrumResult {
     float* magnitude;
     float* phase;
     float* frequency;
+    float* band_energies;           /**< 各频带能量 */
     int fft_size;
     float sampling_rate;
     int num_frequencies;
+    int num_bins;                   /**< 频带数 */
+    int num_bands;                  /**< 子带数 */
+    float total_energy;             /**< 总能量 */
+    float spectral_centroid;        /**< 频谱质心 */
+    float spectral_rolloff;         /**< 频谱滚降 */
+    float dominant_freq;            /**< 主导频率 */
+    float processing_time_ms;       /**< 处理时间(ms) */
 } LAISpectrumResult;
+
+ /* 变换缓冲区（时域+频域双域存储） */
+ typedef struct {
+     size_t signal_length;           /**< 原始信号长度 */
+     size_t spectrum_size;           /**< 频谱大小 (fft_n/2+1) */
+     float* time_domain;             /**< 时域信号副本 */
+     float* frequency_domain_real;   /**< FFT实部 */
+     float* frequency_domain_imag;   /**< FFT虚部 */
+     float* magnitude_spectrum;      /**< 幅度谱 */
+     float* phase_spectrum;          /**< 相位谱 */
+     double transform_time_ms;       /**< 变换耗时(ms) */
+ } LAITransformBuffer;
+
+/* 默认配置初始化宏 */
+#define LAPLACE_AI_CONFIG_DEFAULT_INITIALIZER { \
+    512,      /* fft_size */ \
+    44000.0f, /* sampling_rate */ \
+    1,        /* enable_adaptive_filter */ \
+    LAI_WINDOW_HANN, /* window_type */ \
+    0.0f,     /* kaiser_beta */ \
+    8,        /* num_feature_bands */ \
+    {0},      /* feature_freq_bands */ \
+    0         /* enable_rl */ \
+}
 
 /* ========================================================================= */
 
@@ -1934,4 +1982,38 @@ int laplace_ai_rl_get_q_values(RLAgent* agent, const float* state, int state_dim
 {
     if (!agent) return -1;
     return rl_dqn_get_q_values(agent, state, state_dim, q_values);
+}
+
+/* ============================================================================
+ * ZSFX-P0修复: laplace_ai_framework_init — 拉普拉斯AI框架统一初始化入口
+ * 由 laplace_unified_system_init() 调用，创建全局LaplaceAI实例。
+ * ============================================================================ */
+
+static LaplaceAI* g_global_laplace_ai = NULL;
+
+int laplace_ai_framework_init(void) {
+    if (g_global_laplace_ai) return 0; /* 已初始化 */
+
+    LaplaceAIConfig cfg = LAPLACE_AI_CONFIG_DEFAULT_INITIALIZER;
+    cfg.sampling_rate = 44100; /* 默认音频采样率 */
+    cfg.fft_size = 2048;
+    cfg.window_type = LAI_WINDOW_HANN;
+    cfg.enable_adaptive_filter = 1;
+    cfg.num_feature_bands = 13;
+    cfg.enable_rl = 0;
+
+    g_global_laplace_ai = laplace_ai_create(&cfg);
+    if (!g_global_laplace_ai) return -1;
+    return 0;
+}
+
+void laplace_ai_framework_cleanup(void) {
+    if (g_global_laplace_ai) {
+        laplace_ai_free(g_global_laplace_ai);
+        g_global_laplace_ai = NULL;
+    }
+}
+
+LaplaceAI* laplace_ai_framework_get_instance(void) {
+    return g_global_laplace_ai;
 }

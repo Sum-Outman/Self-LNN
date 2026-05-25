@@ -2393,6 +2393,20 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
     char* compiler = find_system_compiler();
     if (!compiler) {
         remove(source_file);
+        /* K-007: 当外部编译器不可用时，回退使用内置C解释器执行表达式 */
+        if (self_programming_interpreter_available()) {
+            float expr_result = 0.0f;
+            char error_msg[256] = {0};
+            if (self_programming_interpret_expr(code, &expr_result, error_msg) == 0) {
+                if (output && output_size > 0) {
+                    snprintf(output, output_size, "%.6f", (double)expr_result);
+                }
+                return 0;
+            }
+            if (output && output_size > 0 && error_msg[0]) {
+                snprintf(output, output_size, "解释器错误: %s", error_msg);
+            }
+        }
         return -1;
     }
     

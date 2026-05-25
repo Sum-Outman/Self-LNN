@@ -1389,10 +1389,13 @@ int hd_hotplug_start_monitor(HDHotplugMonitor* monitor) {
     monitor->last_device_hash = 0;
     HDDetectionResult init_result;
     memset(&init_result, 0, sizeof(init_result));
-    if (hd_detect_all(&init_result) == 0) {
-        uint32_t hash = hd_compute_device_hash(&init_result);
-        monitor->last_device_hash = hash;
-        hd_free_detection_result(&init_result);
+    {
+        HDDetectionConfig default_cfg = HD_DETECTION_CONFIG_DEFAULT;
+        if (hd_detect_all(default_cfg, &init_result) == 0) {
+            uint32_t hash = hd_compute_device_hash(&init_result);
+            monitor->last_device_hash = hash;
+            hd_free_detection_result(&init_result);
+        }
     }
     return 0;
 }
@@ -1404,7 +1407,10 @@ int hd_hotplug_poll_events(HDHotplugMonitor* monitor) {
     HDDetectionResult current;
     memset(&current, 0, sizeof(current));
 
-    if (hd_detect_all(&current) != 0) return -1;
+    {
+        HDDetectionConfig default_cfg = HD_DETECTION_CONFIG_DEFAULT;
+        if (hd_detect_all(default_cfg, &current) != 0) return -1;
+    }
 
     uint32_t current_hash = hd_compute_device_hash(&current);
 

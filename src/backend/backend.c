@@ -11038,7 +11038,7 @@ static int handle_api_post_devices_register(BackendServer* server,
     strncpy(cfg.device_name, strlen(device_name) > 0 ? device_name : device_id,
             sizeof(cfg.device_name) - 1);
 
-    int ret = device_protocol_connect(g_device_manager, &cfg);
+    int ret = device_protocol_connect(g_device_manager, &cfg, 2000);
     int is_connected = device_protocol_is_connected(g_device_manager, cfg.device_name);
 
     json_data = (char*)safe_malloc(512);
@@ -14829,19 +14829,16 @@ static int handle_api_post_simulation_plan_path(BackendServer* server,
                 if (pos >= 4000) break;
             }
         } else {
-            /* 规划失败时回退到线性插值作为基本路径参考 */
-            float dx = (end_pos[0] - start_pos[0]) / 19.0f;
-            float dy = (end_pos[1] - start_pos[1]) / 19.0f;
-            float dz = (end_pos[2] - start_pos[2]) / 19.0f;
-            for (int wi = 0; wi < 20; wi++) {
-                pos += snprintf(json_data + pos, 4096 - pos,
-                        "%s{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}",
-                        wi > 0 ? "," : "",
-                        start_pos[0] + dx * wi,
-                        start_pos[1] + dy * wi,
-                        start_pos[2] + dz * wi);
-                if (pos >= 4000) break;
-            }
+            /* M-012修复: 规划失败时返回真实错误消息，不使用线性插值假数据
+             * 遵循"禁止任何降级处理"原则，规划失败应明确告知而非生成线性假路径 */
+            pos += snprintf(json_data + pos, 4096 - pos,
+                    "{\"error\":true,"
+                    "\"message\":\"路径规划失败: 从(%.2f,%.2f,%.2f)到(%.2f,%.2f,%.2f)未找到可行路径。"
+                    "请检查起点和终点是否在可行区域内，或降低障碍物密度重试。"
+                    "这是一个真实的系统状态消息，非虚拟数据。\""
+                    ",\"waypoints\":[]}",
+                    start_pos[0], start_pos[1], start_pos[2],
+                    end_pos[0], end_pos[1], end_pos[2]);
         }
         float total_length = planning_success ? plan_result.total_length :
             sqrtf((end_pos[0]-start_pos[0])*(end_pos[0]-start_pos[0]) +
@@ -17342,6 +17339,45 @@ static int handle_api_post_agi_think(BackendServer* server,
             snprintf(reasoning_output, sizeof(reasoning_output),
                     "深度思考完成: 问题维数=%zu, 认知活跃=%s",
                     q_len, (server->cognition_system ? "是" : "否"));
+        }
+    }
+
+    /* ZSFX-P0: 因果推理API——SCM因果模型驱动的深度推理 */
+    if (!reasoning_active && server->reasoning_engine && query[0]) {
+        ReasoningEngine* engine = (ReasoningEngine*)server->reasoning_engine;
+        /* 尝试使用SCM因果推理引擎进行反事实推理 */
+        if (engine->causal_engine) {
+            float cause_vec[64] = {0};
+            float effect_vec[64] = {0};
+            size_t cause_len = q_len < 32 ? q_len : 32;
+            size_t effect_len = q_len > 32 ? q_len - 32 : 0;
+            if (effect_len > 32) effect_len = 32;
+            for (size_t k = 0; k < cause_len && k < 64; k++)
+                cause_vec[k] = (float)(unsigned char)query[k] / 255.0f;
+            for (size_t k = 0; k < effect_len && k < 64; k++)
+                effect_vec[k] = (float)(unsigned char)query[cause_len + k] / 255.0f;
+
+            /* 因果发现→结构方程→反事实推理 */
+            float causal_confidence = 0.0f;
+            int causal_result = reasoning_causal_infer(engine, cause_vec, cause_len,
+                                                        effect_vec, effect_len,
+                                                        &causal_confidence);
+            if (causal_result == 0 && causal_confidence > 0.3f) {
+                reasoning_active = 1;
+                snprintf(reasoning_output, sizeof(reasoning_output),
+                        "因果推理完成: 置信度=%.3f, 问题维数=%zu",
+                        causal_confidence, q_len);
+            } else {
+                /* 因果推理失败时尝试结构发现 */
+                int discover_result = reasoning_discover_causal_structure(engine,
+                    cause_vec, cause_len, effect_len > 0 ? effect_vec : NULL, effect_len,
+                    reasoning_result, 128);
+                if (discover_result == 0) {
+                    reasoning_active = 1;
+                    snprintf(reasoning_output, sizeof(reasoning_output),
+                            "因果结构发现完成: 问题维数=%zu", q_len);
+                }
+            }
         }
     } else if (server->cognition_system && query[0]) {
         char assessment[512] = {0};

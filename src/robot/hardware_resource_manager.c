@@ -31,6 +31,7 @@ const IID IID_IMMDeviceEnumerator = {0xA95664D2,0x9614,0x4F35,{0xA7,0x46,0xDE,0x
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <pthread.h>
 #endif
 
 HardwareResourceManager* hrm_create(void) {
@@ -364,15 +365,169 @@ float hrm_get_quality_score(const HardwareResourceManager* hrm) {
     return hrm ? hrm->allocation_quality_score : 0.0f;
 }
 
+/* ============================================================================
+ * ZSFX-003修复: 热插拔监控线程实现
+ * 定期扫描硬件变化（基于hrm_scan_devices的硬件检测能力），
+ * 检测设备增删并自动重新分配资源角色。
+ * 
+ * Windows: CreateThread + WaitForSingleObject
+ * Linux:   pthread_create + pthread_join
+ * ============================================================================ */
+
+/* 热插拔监控间隔（毫秒） */
+#define HRM_HOTPLUG_POLL_INTERVAL_MS 2000
+
+#ifdef _WIN32
+static DWORD WINAPI hrm_hotplug_monitor_thread(LPVOID param) {
+    HardwareResourceManager* hrm = (HardwareResourceManager*)param;
+    if (!hrm) return 1;
+
+    /* COM初始化（COM可能需要用于DirectShow设备枚举） */
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    /* 记录初始设备数量用于变更检测 */
+    int prev_cameras = hrm->num_cameras;
+    int prev_mics = hrm->num_microphones;
+    int prev_speakers = hrm->num_speakers;
+
+    log_info("[硬件资源管理器] 热插拔监控线程已启动(cam:%d,mic:%d,spk:%d)",
+             prev_cameras, prev_mics, prev_speakers);
+
+    while (hrm->monitor_running) {
+        Sleep(HRM_HOTPLUG_POLL_INTERVAL_MS);
+
+        if (!hrm->monitor_running) break;
+
+        /* 重新扫描硬件设备 */
+        int scan_result = hrm_scan_devices(hrm);
+        if (scan_result != 0) {
+            log_error("[硬件资源管理器] 热插拔扫描失败，跳过本轮");
+            continue;
+        }
+
+        /* 检测变更 */
+        if (hrm->num_cameras != prev_cameras ||
+            hrm->num_microphones != prev_mics ||
+            hrm->num_speakers != prev_speakers) {
+            log_info("[硬件资源管理器] 硬件变更检测: 摄像头%d→%d, 麦克风%d→%d, 扬声器%d→%d",
+                     prev_cameras, hrm->num_cameras,
+                     prev_mics, hrm->num_microphones,
+                     prev_speakers, hrm->num_speakers);
+            hrm_auto_allocate(hrm);
+            prev_cameras = hrm->num_cameras;
+            prev_mics = hrm->num_microphones;
+            prev_speakers = hrm->num_speakers;
+        }
+    }
+
+    CoUninitialize();
+    log_info("[硬件资源管理器] 热插拔监控线程已退出");
+    return 0;
+}
+#else
+static void* hrm_hotplug_monitor_thread(void* param) {
+    HardwareResourceManager* hrm = (HardwareResourceManager*)param;
+    if (!hrm) return NULL;
+
+    int prev_cameras = hrm->num_cameras;
+    int prev_mics = hrm->num_microphones;
+    int prev_speakers = hrm->num_speakers;
+
+    log_info("[硬件资源管理器] 热插拔监控线程已启动(cam:%d,mic:%d,spk:%d)",
+             prev_cameras, prev_mics, prev_speakers);
+
+    while (hrm->monitor_running) {
+        /* 以秒为单位的睡眠，支持中断 */
+        for (int i = 0; i < HRM_HOTPLUG_POLL_INTERVAL_MS / 100; i++) {
+            if (!hrm->monitor_running) break;
+            usleep(100000); /* 100ms */
+        }
+        if (!hrm->monitor_running) break;
+
+        int scan_result = hrm_scan_devices(hrm);
+        if (scan_result != 0) {
+            log_error("[硬件资源管理器] 热插拔扫描失败，跳过本轮");
+            continue;
+        }
+
+        if (hrm->num_cameras != prev_cameras ||
+            hrm->num_microphones != prev_mics ||
+            hrm->num_speakers != prev_speakers) {
+            log_info("[硬件资源管理器] 硬件变更检测: 摄像头%d→%d, 麦克风%d→%d, 扬声器%d→%d",
+                     prev_cameras, hrm->num_cameras,
+                     prev_mics, hrm->num_microphones,
+                     prev_speakers, hrm->num_speakers);
+            hrm_auto_allocate(hrm);
+            prev_cameras = hrm->num_cameras;
+            prev_mics = hrm->num_microphones;
+            prev_speakers = hrm->num_speakers;
+        }
+    }
+
+    log_info("[硬件资源管理器] 热插拔监控线程已退出");
+    return NULL;
+}
+#endif
+
 int hrm_start_hotplug_monitor(HardwareResourceManager* hrm) {
     if (!hrm) return -1;
+
+    /* 如果已有线程在运行，先停止 */
+    if (hrm->monitor_running) {
+        log_warning("[硬件资源管理器] 热插拔监控已在运行，先停止旧线程");
+        hrm_stop_hotplug_monitor(hrm);
+    }
+
+    /* 确保已执行初始扫描 */
+    if (!hrm->initialized) {
+        hrm_scan_devices(hrm);
+        hrm_auto_allocate(hrm);
+    }
+
     hrm->monitor_running = 1;
+
+#ifdef _WIN32
+    hrm->monitor_thread = CreateThread(NULL, 0,
+                                        hrm_hotplug_monitor_thread,
+                                        hrm, 0, NULL);
+    if (!hrm->monitor_thread) {
+        log_error("[硬件资源管理器] CreateThread失败，无法启动热插拔监控");
+        hrm->monitor_running = 0;
+        return -1;
+    }
+#else
+    int rc = pthread_create((pthread_t*)&hrm->monitor_thread, NULL,
+                            hrm_hotplug_monitor_thread, hrm);
+    if (rc != 0) {
+        log_error("[硬件资源管理器] pthread_create失败(errno=%d)，无法启动热插拔监控", rc);
+        hrm->monitor_running = 0;
+        return -1;
+    }
+#endif
+
+    log_info("[硬件资源管理器] 热插拔监控已启动(间隔=%dms)", HRM_HOTPLUG_POLL_INTERVAL_MS);
     return 0;
 }
 
 int hrm_stop_hotplug_monitor(HardwareResourceManager* hrm) {
     if (!hrm) return -1;
+    if (!hrm->monitor_running) return 0;
+
+    /* 发出停止信号 */
     hrm->monitor_running = 0;
+
+    /* 等待线程退出 */
+    if (hrm->monitor_thread) {
+#ifdef _WIN32
+        WaitForSingleObject((HANDLE)hrm->monitor_thread, 5000); /* 最多等5秒 */
+        CloseHandle((HANDLE)hrm->monitor_thread);
+#else
+        pthread_join((pthread_t)hrm->monitor_thread, NULL);
+#endif
+        hrm->monitor_thread = NULL;
+    }
+
+    log_info("[硬件资源管理器] 热插拔监控已停止");
     return 0;
 }
 

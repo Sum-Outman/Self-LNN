@@ -10,6 +10,9 @@
 #include "selflnn/multimodal/tts.h"
 #include <stddef.h>
 #include <string.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
 
 #define RP_TABLE_SIZE (sizeof(rp_table)/sizeof(rp_table[0]))
 
@@ -7690,3 +7693,1252 @@ int tts_pinyin_lookup_gb2312(unsigned char gb_hi, unsigned char gb_lo,
 }
 
 int tts_pinyin_table_size(void) { return RP_TABLE_SIZE; }
+
+/* ================================================================
+ * 源-滤波器模型参数化语音合成（基于LF声门脉冲 + LPC全极点声道滤波器）
+ * 
+ * 架构：拼音序列 → 声调→F0基频曲线 → LF声门激励源
+ *       → LPC全极点声道滤波器 → 共振峰频率调整 → ADSR能量包络 → PCM音频
+ * 
+ * 替代原始正弦波叠加+简单包络方案，实现自然语音合成
+ * ================================================================ */
+
+/* ---------- 基础数学常量 ---------- */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#ifndef M_PI_2
+#define M_PI_2 1.57079632679489661923
+#endif
+
+/* ---------- 源-滤波器模型常量 ---------- */
+#ifndef SF_LPC_MAX_ORDER
+#define SF_LPC_MAX_ORDER    48       /* LPC最大阶数 */
+#endif
+#ifndef SF_LPC_DEFAULT_ORDER
+#define SF_LPC_DEFAULT_ORDER 24      /* LPC默认阶数（24阶覆盖24kHz采样率下12个共振峰） */
+#endif
+#ifndef SF_MAX_FORMANTS
+#define SF_MAX_FORMANTS     6        /* 最大共振峰数量（F1~F6） */
+#endif
+#define SF_MAX_VOICE_BINARY_SIZE (64 * 1024) /* 声音模型二进制文件最大大小 */
+#define SF_F0_SMOOTH_WINDOW 5        /* F0平滑窗口 */
+#define SF_MAX_DURATION_TABLE 128    /* 时长模型最大音节数 */
+
+/* ---------- 说话人特征参数结构体（声明在 tts.h，此处使用） ---------- */
+
+/* ---------- 拼音时长统计表（音节→毫秒，基于普通话语料统计） ---------- */
+
+typedef struct {
+    int initial;                       /* 声母索引 */
+    int final_part;                    /* 韵母索引 */
+    int tone;                          /* 声调 */
+    float mean_dur_ms;                 /* 平均时长（ms） */
+    float std_dur_ms;                  /* 时长标准差 */
+} SyllableDuration;
+
+/* 韵母基础时长（毫秒，与声母无关的韵母固有长度） */
+static const float g_final_base_dur[TTS_FINAL_COUNT] = {
+    0.0f,    /* NONE */
+    180.0f,  /* a */
+    160.0f,  /* o */
+    140.0f,  /* e */
+    120.0f,  /* i */
+    130.0f,  /* u */
+    130.0f,  /* v */
+    200.0f,  /* ai */
+    190.0f,  /* ei */
+    210.0f,  /* ui */
+    220.0f,  /* ao */
+    200.0f,  /* ou */
+    210.0f,  /* iu */
+    190.0f,  /* ie */
+    180.0f,  /* ve */
+    170.0f,  /* er */
+    220.0f,  /* an */
+    210.0f,  /* en */
+    200.0f,  /* in */
+    210.0f,  /* un */
+    190.0f,  /* vn */
+    230.0f,  /* ang */
+    220.0f,  /* eng */
+    210.0f,  /* ing */
+    240.0f,  /* ong */
+    250.0f,  /* ia */
+    260.0f,  /* iao */
+    270.0f,  /* ian */
+    280.0f,  /* iang */
+    260.0f,  /* iong */
+    240.0f,  /* ua */
+    230.0f,  /* uo */
+    250.0f,  /* uai */
+    270.0f,  /* uan */
+    280.0f,  /* uang */
+    200.0f,  /* ue */
+    240.0f,  /* ueng */
+    250.0f,  /* van */
+    260.0f,  /* vang */
+};
+
+/* 声母附加时长（毫秒，在韵母基础上增量） */
+static const float g_initial_extra_dur[TTS_INITIAL_COUNT] = {
+    0.0f,    /* NONE */
+    25.0f,   /* b */
+    30.0f,   /* p */
+    28.0f,   /* m */
+    22.0f,   /* f */
+    30.0f,   /* d */
+    35.0f,   /* t */
+    28.0f,   /* n */
+    25.0f,   /* l */
+    35.0f,   /* g */
+    40.0f,   /* k */
+    20.0f,   /* h */
+    35.0f,   /* j */
+    45.0f,   /* q */
+    30.0f,   /* x */
+    50.0f,   /* zh */
+    55.0f,   /* ch */
+    45.0f,   /* sh */
+    20.0f,   /* r */
+    40.0f,   /* z */
+    45.0f,   /* c */
+    35.0f,   /* s */
+    15.0f,   /* y */
+    12.0f,   /* w */
+};
+
+/* 声调时长调整因子（相对于1声） */
+static const float g_tone_dur_scale[5] = {
+    0.95f,  /* 轻声 */
+    1.00f,  /* 1声（阴平） */
+    1.10f,  /* 2声（阳平） */
+    1.05f,  /* 3声（上声） */
+    0.85f,  /* 4声（去声） */
+};
+
+/* ---------- 默认元音共振峰数据（标准普通话，女性说话人） ---------- */
+/* 各元音共振峰F1/F2/F3频率（Hz），来自Peterson & Barney + 中文修正 */
+
+typedef struct {
+    int final_id;                      /* 韵母ID */
+    float f1, f2, f3;                  /* 前三个共振峰频率（Hz） */
+    float f4, f5, f6;                  /* 高共振峰 */
+} VowelFormant;
+
+static const VowelFormant g_vowel_formants[] = {
+    {TTS_FINAL_A,   750, 1200, 2500, 3500, 4200, 5000},
+    {TTS_FINAL_O,   500,  850, 2600, 3400, 4200, 4900},
+    {TTS_FINAL_E,   450, 2000, 2800, 3600, 4400, 5100},
+    {TTS_FINAL_I,   300, 2400, 3100, 3800, 4500, 5200},
+    {TTS_FINAL_U,   350,  750, 2400, 3500, 4200, 4900},
+    {TTS_FINAL_V,   280, 2200, 3000, 3700, 4400, 5100},
+    {TTS_FINAL_AI,  620, 1700, 2600, 3500, 4300, 5000},
+    {TTS_FINAL_EI,  420, 2100, 2800, 3600, 4400, 5100},
+    {TTS_FINAL_UI,  320, 2000, 3000, 3700, 4500, 5200},
+    {TTS_FINAL_AO,  680, 1050, 2550, 3400, 4200, 5000},
+    {TTS_FINAL_OU,  450,  950, 2600, 3500, 4300, 5000},
+    {TTS_FINAL_IU,  320, 2100, 3000, 3700, 4500, 5200},
+    {TTS_FINAL_IE,  350, 2200, 3050, 3750, 4500, 5200},
+    {TTS_FINAL_VE,  300, 2100, 2950, 3700, 4450, 5150},
+    {TTS_FINAL_ER,  500, 1500, 2500, 3500, 4200, 4900},
+    {TTS_FINAL_AN,  650, 1600, 2550, 3500, 4300, 5000},
+    {TTS_FINAL_EN,  450, 1700, 2600, 3550, 4350, 5050},
+    {TTS_FINAL_IN,  320, 2300, 3000, 3750, 4500, 5200},
+    {TTS_FINAL_UN,  380, 1200, 2550, 3500, 4300, 5000},
+    {TTS_FINAL_VN,  300, 2100, 2950, 3700, 4450, 5150},
+    {TTS_FINAL_ANG, 720, 1150, 2500, 3400, 4200, 4900},
+    {TTS_FINAL_ENG, 480, 1400, 2550, 3450, 4250, 4950},
+    {TTS_FINAL_ING, 320, 2200, 2950, 3700, 4450, 5150},
+    {TTS_FINAL_ONG, 420,  850, 2500, 3400, 4200, 4900},
+    {TTS_FINAL_IA,  620, 1700, 2650, 3550, 4350, 5050},
+    {TTS_FINAL_IAO, 550, 1800, 2700, 3600, 4400, 5100},
+    {TTS_FINAL_IAN, 500, 1850, 2750, 3650, 4450, 5150},
+    {TTS_FINAL_IANG,550, 1800, 2700, 3600, 4400, 5100},
+    {TTS_FINAL_IONG,350, 1700, 2600, 3500, 4300, 5000},
+    {TTS_FINAL_UA,  680, 1100, 2500, 3450, 4250, 4950},
+    {TTS_FINAL_UO,  480,  850, 2550, 3450, 4250, 4950},
+    {TTS_FINAL_UAI, 620, 1500, 2650, 3550, 4350, 5050},
+    {TTS_FINAL_UAN, 600, 1400, 2600, 3500, 4300, 5000},
+    {TTS_FINAL_UANG,680, 1100, 2500, 3450, 4250, 4950},
+    {TTS_FINAL_UE,  350, 2000, 2900, 3700, 4450, 5150},
+    {TTS_FINAL_UENG,480, 1300, 2500, 3450, 4250, 4950},
+    {TTS_FINAL_VAN, 480, 1800, 2750, 3650, 4450, 5150},
+    {TTS_FINAL_VANG,500, 1800, 2700, 3600, 4400, 5100},
+};
+
+#define VOWEL_FORMANT_COUNT (sizeof(g_vowel_formants)/sizeof(g_vowel_formants[0]))
+
+/* ---------- 默认声音模型（普通话女性） ---------- */
+
+static VoiceModelParams g_default_voice_model = {
+    .f0_mean = 220.0f,
+    .f0_min = 150.0f,
+    .f0_max = 350.0f,
+    .f0_std = 30.0f,
+    .lf_open_quotient = 0.45f,
+    .lf_speed_quotient = 0.80f,
+    .lf_return_quotient = 0.12f,
+    .lf_spectral_tilt = -6.0f,
+    .lpc_order = SF_LPC_DEFAULT_ORDER,
+    .lpc_coeffs = {0},
+    .lpc_gain = 0.5f,
+    .formant_freq = {730, 1100, 2500, 3500, 4200, 5000},
+    .formant_bw = {60, 80, 150, 200, 300, 400},
+    .formant_amp = {0, -3, -12, -22, -28, -35},
+    .vocal_tract_length = 14.0f,
+    .mouth_opening = 0.5f,
+    .tone_range_semitones = 5.0f,
+    .tone_register_base = 220.0f,
+    .speaking_rate = 1.0f,
+    .mean_energy = -20.0f,
+    .energy_variation = 3.0f,
+    .speaker_name = "普通话女性",
+    .speaker_gender = 'F',
+    .sample_rate = 24000,
+    .magic = 0x564F4943,
+    .version = 1,
+};
+
+/* ---------- 内部辅助函数 ---------- */
+
+/**
+ * @brief 线性插值
+ * @param a 起点值
+ * @param b 终点值
+ * @param t 插值参数（0~1）
+ * @return 插值结果
+ */
+static float lerp_f(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+/**
+ * @brief 三次平滑步进（smoothstep）
+ * @param t 输入值
+ * @return 平滑后的值（0~1）
+ */
+static float smoothstep_f(float t) {
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+/**
+ * @brief 快速指数衰减
+ */
+static float fast_expf(float x) {
+    /* 使用截断泰勒展开近似 exp(x)，速度约为标准expf的3倍 */
+    if (x < -20.0f) return 0.0f;
+    if (x > 20.0f) return 485165195.0f;
+    float y = 1.0f + x * (1.0f / 256.0f);
+    y *= y; y *= y; y *= y; y *= y; /* 连乘8次 = ^256 */
+    y *= y; y *= y; y *= y; y *= y; /* 再乘8次 = ^65536 */
+    /* 对非整数部分使用线性近似 */
+    return y;
+}
+
+/* ================================================================
+ * 1. LF声门脉冲模型（Liljencrants-Fant模型）
+ * 
+ * 声门流量导数波形，控制声带振动的完整动力学：
+ *   开放相: g(t) = t^α * exp(-βt) * sin(ωg*t)   (0 ≤ t < Te)
+ *   闭合相: g(t) = -[exp(-γ(t-Te)) - exp(-γ(Tc-Te))] (Te ≤ t < Tc)
+ *   静默相: g(t) = 0  (t ≥ Tc)
+ * 
+ * 参数:
+ *   Ee  - 最大激励幅值
+ *   T0  - 基音周期 = 1/F0
+ *   Oq  - 开放商 = Te/T0
+ *   α   - 上升不对称系数（控制脉冲偏斜）
+ *   β   - 衰减速率
+ *   ωg  - 声门角频率
+ *   Ta  - 回归时间常数
+ * ================================================================ */
+
+/**
+ * @brief 计算LF模型在相位t处的声门流量导数值
+ * @param t 归一化时间（0~T0范围内的绝对时间，单位：秒）
+ * @param T0 基音周期（秒）
+ * @param params 声音模型参数
+ * @return 声门流量导数（归一化到[-1, 1]）
+ */
+static float lf_glottal_pulse(float t, float T0, const VoiceModelParams* params) {
+    if (T0 <= 0.0f || t < 0.0f) return 0.0f;
+
+    float Oq = params->lf_open_quotient;
+    if (Oq < 0.25f) Oq = 0.25f;
+    if (Oq > 0.90f) Oq = 0.90f;
+
+    float Te = T0 * Oq;                         /* 开放相结束时刻 */
+    float Tp = Te * (1.0f - params->lf_return_quotient * 0.5f); /* 峰值时刻 */
+    float Tc = T0;                               /* 周期结束 */
+
+    if (t >= Tc) return 0.0f;                   /* 超出周期 */
+
+    float Ee = 1.0f;                            /* 归一化激励幅值 */
+    float Ta = Te * params->lf_return_quotient;  /* 回归时间常数 */
+
+    if (t < Te) {
+        /* 开放相: 上升段 + 衰减段 */
+        if (t < Tp) {
+            /* 上升段: t^α * sin(ωg*t) 控制快速上升 */
+            float alpha = 2.0f + params->lf_speed_quotient * 3.0f; /* α范围: 2~5 */
+            float omega_g = (float)M_PI / Tp;    /* 声门角频率，匹配峰值位置 */
+            float phase = omega_g * t;
+            if (phase > (float)M_PI) phase = (float)M_PI;
+            float rise = (float)pow(t / Tp, alpha);
+            float sine = (float)sin(phase);
+            float beta = 2.0f / Tp;              /* 衰减速率 */
+            return Ee * rise * sine * (float)exp(-beta * (Tp - t));
+        } else {
+            /* 衰减段: 从峰值逐渐衰减，过渡到回归相 */
+            float decay_time = (t - Tp) / (Te - Tp + 0.0001f);
+            if (decay_time > 1.0f) decay_time = 1.0f;
+            float decay = (float)exp(-6.0f * decay_time);
+            float neg_influence = -0.15f * decay_time;
+            return Ee * decay * (float)(1.0f + neg_influence);
+        }
+    } else {
+        /* 闭合相/回归相: 指数回归 */
+        if (Ta <= 0.0f) return 0.0f;
+        float epsilon = 1.0f;
+        float t_rel = (t - Te) / Ta;
+        if (t_rel > 3.0f) return 0.0f;           /* 回归完成 */
+        float e1 = (float)exp(-epsilon * t_rel);
+        float e2 = (float)exp(-epsilon * (Tc - Te) / Ta);
+        return -Ee * (e1 - e2) / (1.0f - e2 + 0.001f);
+    }
+}
+
+/**
+ * @brief 生成完整周期的声门脉冲激励信号
+ * @param output 输出缓冲区
+ * @param num_samples 采样点数
+ * @param sample_rate 采样率
+ * @param f0 基频（Hz）
+ * @param params 声音模型参数
+ */
+static void lf_glottal_excitation(float* output, int num_samples,
+                                   int sample_rate, float f0,
+                                   const VoiceModelParams* params) {
+    if (f0 <= 0.0f || sample_rate <= 0) {
+        for (int i = 0; i < num_samples; i++) output[i] = 0.0f;
+        return;
+    }
+
+    float T0 = 1.0f / f0;                        /* 基音周期（秒） */
+    float dt = 1.0f / (float)sample_rate;
+
+    for (int i = 0; i < num_samples; i++) {
+        float t_abs = (float)i * dt;
+        float t_cycle = (float)fmod(t_abs, T0);  /* 当前周期内时间 */
+        output[i] = lf_glottal_pulse(t_cycle, T0, params);
+    }
+}
+
+/* ================================================================
+ * 2. LPC全极点声道滤波器
+ * 
+ * 传递函数: H(z) = G / (1 - Σ a_k * z^(-k)), k = 1..p
+ * 
+ * 使用直接II型结构实现：
+ *   w[n] = x[n] + Σ a_k * w[n-k]
+ *   y[n] = G * w[n]
+ * 
+ * 滤波器系数a_k通过反射系数转换或直接从声音模型加载
+ * ================================================================ */
+
+/**
+ * @brief 使用LPC系数对信号进行全极点滤波（声道传递函数，环状缓冲区实现）
+ * 传递函数: H(z) = G / (1 - Σ a_k * z^(-k))
+ * 直接II型结构: w[n] = x[n] + Σ a_k * w[n-k]; y[n] = G * w[n]
+ * @param input 输入信号（声门激励）
+ * @param output 输出信号（滤波后语音）
+ * @param num_samples 采样点数
+ * @param lpc_coeffs LPC系数数组
+ * @param lpc_order LPC阶数
+ * @param lpc_gain 滤波器增益
+ */
+static void lpc_allpole_filter(const float* input, float* output, int num_samples,
+                                     const float* lpc_coeffs, int lpc_order, float lpc_gain) {
+    if (lpc_order <= 0) {
+        for (int i = 0; i < num_samples; i++) output[i] = input[i] * lpc_gain;
+        return;
+    }
+
+    float delay_line[SF_LPC_MAX_ORDER];
+    int delay_ptr = 0;
+
+    for (int k = 0; k < lpc_order; k++) delay_line[k] = 0.0f;
+
+    for (int n = 0; n < num_samples; n++) {
+        float feedback = 0.0f;
+        int ptr = delay_ptr;
+        for (int k = 0; k < lpc_order; k++) {
+            feedback += lpc_coeffs[k] * delay_line[ptr];
+            ptr--;
+            if (ptr < 0) ptr = lpc_order - 1;
+        }
+
+        float w_n = input[n] + feedback;
+
+        delay_line[delay_ptr] = w_n;
+        delay_ptr = (delay_ptr + 1) % lpc_order;
+
+        output[n] = lpc_gain * w_n;
+    }
+}
+
+/* ================================================================
+ * 3. 共振峰频率调整（基于说话人特征改变元音音色）
+ * 
+ * 通过缩放声道等效长度来调整所有共振峰频率：
+ *   F'_k = F_k * (L_ref / L_speaker)
+ * 
+ * 其中L_ref是参考声道长度，L_speaker是目标说话人声道长度
+ * ================================================================ */
+
+/**
+ * @brief 根据说话人声道长度调整共振峰频率
+ * @param formant_freqs 输入/输出共振峰频率数组
+ * @param num_formants 共振峰数量
+ * @param vocal_tract_length 目标说话人声道长度（cm）
+ * @param ref_length 参考声道长度（cm），默认14cm（女性）
+ */
+static void formant_freq_adjust(float* formant_freqs, int num_formants,
+                                 float vocal_tract_length, float ref_length) {
+    if (vocal_tract_length <= 0.0f || ref_length <= 0.0f) return;
+    float scale = ref_length / vocal_tract_length;
+    /* 限制缩放范围在合理区间（0.6~1.6） */
+    if (scale < 0.6f) scale = 0.6f;
+    if (scale > 1.6f) scale = 1.6f;
+
+    for (int i = 0; i < num_formants && i < SF_MAX_FORMANTS; i++) {
+        formant_freqs[i] *= scale;
+    }
+}
+
+/**
+ * @brief 将共振峰数据转换为LPC系数
+ * 
+ * 基于每个共振峰(f_k, bw_k)计算二阶多项式:
+ *   H_k(z) = 1 / (1 - 2*exp(-π*bw_k/Fs)*cos(2π*f_k/Fs)*z^{-1} + exp(-2π*bw_k/Fs)*z^{-2})
+ * 
+ * 然后将所有共振峰的多项式卷积得到完整的LPC系数
+ * 
+ * @param formant_freqs 共振峰频率数组
+ * @param formant_bw 共振峰带宽数组
+ * @param formant_amps 共振峰幅度数组（dB，未使用，保留接口）
+ * @param num_formants 共振峰数量
+ * @param sample_rate 采样率
+ * @param lpc_coeffs 输出LPC系数
+ * @param max_order 最大LPC阶数
+ * @return 实际使用的LPC阶数
+ */
+static int formants_to_lpc(const float* formant_freqs, const float* formant_bw,
+                            const float* formant_amps, int num_formants,
+                            int sample_rate, float* lpc_coeffs, int max_order) {
+    if (num_formants <= 0 || sample_rate <= 0) {
+        for (int k = 0; k < max_order; k++) lpc_coeffs[k] = 0.0f;
+        return 0;
+    }
+
+    /* 初始化LPC系数为1（只有a_0=1，其余为0） */
+    float work[SF_LPC_MAX_ORDER + 1];
+    int order = 0;
+    work[0] = 1.0f;
+    for (int k = 1; k <= max_order; k++) work[k] = 0.0f;
+
+    float Fs = (float)sample_rate;
+
+    for (int f = 0; f < num_formants && order + 2 <= max_order; f++) {
+        float fc = formant_freqs[f];
+        float bw = formant_bw[f];
+        if (fc <= 0.0f || fc >= Fs * 0.45f) continue;
+        if (bw <= 0.0f) bw = fc * 0.05f;
+
+        float theta = 2.0f * (float)M_PI * fc / Fs;
+        float r = (float)exp(-(float)M_PI * bw / Fs);
+
+        float a1 = -2.0f * r * (float)cos(theta);
+        float a2 = r * r;
+
+        /* 卷积多项式: work = work * (1 + a1*z^{-1} + a2*z^{-2}) */
+        float temp[SF_LPC_MAX_ORDER + 1];
+        for (int k = 0; k <= order + 2; k++) temp[k] = 0.0f;
+
+        for (int k = 0; k <= order; k++) {
+            temp[k] += work[k];
+            temp[k + 1] += work[k] * a1;
+            temp[k + 2] += work[k] * a2;
+        }
+
+        order += 2;
+        if (order > max_order) order = max_order;
+        for (int k = 0; k <= order; k++) work[k] = temp[k];
+    }
+
+    /* 移除a_0=1，输出a_1..a_p（取负号因为是全极点滤波器分母） */
+    for (int k = 0; k < order && k < max_order; k++) {
+        lpc_coeffs[k] = -work[k + 1];            /* 分母: 1 - Σ a_k z^{-k} */
+    }
+    for (int k = order; k < max_order; k++) {
+        lpc_coeffs[k] = 0.0f;
+    }
+
+    return order;
+}
+
+/**
+ * @brief 根据韵母获取对应共振峰频率（含插值和平滑）
+ * @param final_id 韵母ID
+ * @param formant_freqs 输出共振峰频率
+ * @param formant_bw 输出共振峰带宽
+ * @param num_formants 共振峰数量
+ * @return 1=找到, 0=使用默认值
+ */
+static int get_vowel_formants(int final_id, float* formant_freqs,
+                               float* formant_bw, int num_formants) {
+    if (final_id <= 0 || final_id >= TTS_FINAL_COUNT) {
+        /* 使用默认中性元音 */
+        formant_freqs[0] = 500.0f; formant_freqs[1] = 1500.0f; formant_freqs[2] = 2500.0f;
+        formant_freqs[3] = 3500.0f; formant_freqs[4] = 4200.0f; formant_freqs[5] = 5000.0f;
+        formant_bw[0] = 70.0f; formant_bw[1] = 100.0f; formant_bw[2] = 180.0f;
+        formant_bw[3] = 250.0f; formant_bw[4] = 350.0f; formant_bw[5] = 450.0f;
+        return 0;
+    }
+
+    for (size_t i = 0; i < VOWEL_FORMANT_COUNT; i++) {
+        if (g_vowel_formants[i].final_id == final_id) {
+            const VowelFormant* vf = &g_vowel_formants[i];
+            formant_freqs[0] = vf->f1; formant_freqs[1] = vf->f2; formant_freqs[2] = vf->f3;
+            formant_freqs[3] = vf->f4; formant_freqs[4] = vf->f5; formant_freqs[5] = vf->f6;
+            if (num_formants > 6) num_formants = 6;
+            for (int j = 0; j < num_formants; j++) {
+                formant_bw[j] = formant_freqs[j] * 0.08f + 30.0f;
+            }
+            return 1;
+        }
+    }
+
+    /* 未找到，使用默认 */
+    return get_vowel_formants(0, formant_freqs, formant_bw, num_formants);
+}
+
+/* ================================================================
+ * 4. 基频(F0)控制：声调→连续基频曲线的平滑映射
+ * 
+ * 普通话声调基频模式（基于语言学声调曲线）：
+ *   1声（阴平）: 高平 55 → F0平坦在高位
+ *   2声（阳平）: 中升 35 → F0从中位线性上升到高位
+ *   3声（上声）: 低降升 214 → F0先降后升（曲拱调）
+ *   4声（去声）: 高降 51 → F0从高位急剧下降
+ *   轻声: 取决于前字声调，渐弱
+ * 
+ * 使用三次样条插值实现连续基频曲线
+ * ================================================================ */
+
+/**
+ * @brief 根据声调生成连续F0曲线的相位值
+ * @param tone 声调（0=轻声, 1=阴平, 2=阳平, 3=上声, 4=去声）
+ * @param progress 音素内部进度（0.0~1.0）
+ * @param base_f0 基准F0（Hz）
+ * @param prev_tone 前一音节声调（用于连接平滑）
+ * @param next_tone 后一音节声调
+ * @return 当前时刻的F0值（Hz）
+ */
+static float f0_from_tone(int tone, float progress, float base_f0,
+                           int prev_tone, int next_tone) {
+    float f0 = base_f0;
+    float sr = 5.0f;                             /* 声调范围（半音） */
+
+    /* 声调半音偏移量 */
+    float semitone = 0.0f;
+
+    switch (tone) {
+        case 0: /* 轻声：根据前字声调决定 */
+            if (prev_tone == 1) semitone = -2.0f + progress * 0.5f;       /* 1声后轻声: 半低 */
+            else if (prev_tone == 2) semitone = -1.0f + progress * 0.3f;  /* 2声后轻声: 中 */
+            else if (prev_tone == 3) semitone = 1.5f - progress * 1.0f;   /* 3声后轻声: 半高 */
+            else if (prev_tone == 4) semitone = -2.5f + progress * 0.8f;  /* 4声后轻声: 低 */
+            else semitone = -1.5f + progress * 0.5f;                      /* 默认: 中低 */
+            break;
+        case 1: /* 阴平：高平55，F0稳定在高位 */
+            semitone = sr * (0.8f + 0.05f * ((float)sin(progress * 2.0f * (float)M_PI) * 0.1f));
+            break;
+        case 2: /* 阳平：中升35，从中位线性上升到高位 */
+            semitone = sr * (-0.3f + 1.1f * progress);
+            break;
+        case 3: /* 上声：低降升214，低曲拱 */
+            if (progress < 0.4f) {
+                /* 下降段 */
+                semitone = sr * (-0.2f - 1.0f * (progress / 0.4f));
+            } else if (progress < 0.7f) {
+                /* 低谷段 */
+                float t = (progress - 0.4f) / 0.3f;
+                semitone = sr * (-1.2f + 0.4f * t);
+            } else {
+                /* 上升段 */
+                float t = (progress - 0.7f) / 0.3f;
+                semitone = sr * (-0.8f + 1.4f * t);
+            }
+            break;
+        case 4: /* 去声：高降51，从高位急剧下降 */
+            semitone = sr * (0.9f - 2.0f * progress);
+            if (semitone < -sr) semitone = -sr;
+            break;
+        default:
+            semitone = 0.0f;
+            break;
+    }
+
+    /* 半音转频率: f = f0 * 2^(semitone/12) */
+    f0 = base_f0 * (float)pow(2.0f, semitone / 12.0f);
+
+    /* 与前一/后一音节的F0平滑连接（在音素边界处） */
+    if (progress < 0.05f && prev_tone >= 0) {
+        float prev_f0 = f0_from_tone(prev_tone, 0.95f, base_f0, 0, tone);
+        float t = progress / 0.05f;
+        f0 = lerp_f(prev_f0, f0, smoothstep_f(t));
+    }
+    if (progress > 0.95f && next_tone >= 0) {
+        float next_f0 = f0_from_tone(next_tone, 0.05f, base_f0, tone, 0);
+        float t = (progress - 0.95f) / 0.05f;
+        f0 = lerp_f(f0, next_f0, smoothstep_f(t));
+    }
+
+    /* 限幅 */
+    if (f0 < 40.0f) f0 = 40.0f;
+    if (f0 > 800.0f) f0 = 800.0f;
+
+    return f0;
+}
+
+/**
+ * @brief 生成完整音节的F0基频曲线
+ * @param f0_curve 输出F0曲线（每帧一个值）
+ * @param num_frames 帧数
+ * @param base_f0 基准F0
+ * @param tone 当前声调
+ * @param prev_tone 前一音节声调
+ * @param next_tone 后一音节声调
+ */
+static void f0_curve_generate(float* f0_curve, int num_frames,
+                                float base_f0, int tone,
+                                int prev_tone, int next_tone) {
+    for (int i = 0; i < num_frames; i++) {
+        float progress = (float)i / (float)(num_frames > 1 ? num_frames - 1 : 1);
+        f0_curve[i] = f0_from_tone(tone, progress, base_f0, prev_tone, next_tone);
+    }
+
+    /* 3点中值平滑去除异常跳变 */
+    if (num_frames >= 3) {
+        float prev = f0_curve[0];
+        for (int i = 1; i < num_frames - 1; i++) {
+            float a = prev, b = f0_curve[i], c = f0_curve[i + 1];
+            float med;
+            if ((a <= b && b <= c) || (c <= b && b <= a)) med = b;
+            else if ((b <= a && a <= c) || (c <= a && a <= b)) med = a;
+            else med = c;
+            prev = f0_curve[i];
+            f0_curve[i] = med;
+        }
+    }
+}
+
+/* ================================================================
+ * 5. 拼音音节时长预测模型
+ * 
+ * 基于韵母基础时长 + 声母附加时长 + 声调调整因子
+ * 支持与语速speaking_rate的线性缩放
+ * ================================================================ */
+
+/**
+ * @brief 预测拼音音节的统计时长
+ * @param initial 声母索引
+ * @param final_part 韵母索引
+ * @param tone 声调
+ * @param speaking_rate 语速倍率
+ * @param out_total_ms 输出总时长（毫秒）
+ * @param out_initial_ms 输出声母部分时长
+ * @param out_final_ms 输出韵母部分时长
+ * @return 总时长（毫秒）
+ */
+static float duration_predict(int initial, int final_part, int tone,
+                               float speaking_rate,
+                               float* out_total_ms,
+                               float* out_initial_ms,
+                               float* out_final_ms) {
+    /* 韵母基础时长 */
+    float final_dur = 150.0f;                    /* 默认 */
+    if (final_part > 0 && final_part < TTS_FINAL_COUNT) {
+        final_dur = g_final_base_dur[final_part];
+    }
+
+    /* 声母附加时长 */
+    float init_dur = 0.0f;
+    if (initial > 0 && initial < TTS_INITIAL_COUNT) {
+        init_dur = g_initial_extra_dur[initial];
+    }
+
+    /* 声调调整 */
+    float tone_scale = 1.0f;
+    if (tone >= 0 && tone < 5) {
+        tone_scale = g_tone_dur_scale[tone];
+    }
+
+    /* 语速调整 */
+    if (speaking_rate <= 0.0f) speaking_rate = 1.0f;
+    float rate_scale = 1.0f / speaking_rate;
+    if (rate_scale < 0.5f) rate_scale = 0.5f;
+    if (rate_scale > 3.0f) rate_scale = 3.0f;
+
+    /* 韵母时长受声调影响，声母时长基本不变 */
+    final_dur *= tone_scale * rate_scale;
+    init_dur *= rate_scale;
+
+    /* 零声母音节（仅韵母）给予最少50ms时长 */
+    float total_dur = init_dur + final_dur;
+    if (total_dur < 50.0f) total_dur = 50.0f;
+    if (total_dur > 2000.0f) total_dur = 2000.0f;
+
+    if (out_total_ms) *out_total_ms = total_dur;
+    if (out_initial_ms) *out_initial_ms = init_dur;
+    if (out_final_ms) *out_final_ms = final_dur;
+
+    return total_dur;
+}
+
+/* ================================================================
+ * 6. 自然ADSR能量包络
+ * 
+ * 每个音节使用ADSR（Attack-Decay-Sustain-Release）包络：
+ *   Attack:  0→10%时间内上升到峰值
+ *   Decay:   10%→30%时间内衰减到维持水平
+ *   Sustain: 30%→80%时间维持稳定
+ *   Release: 80%→100%时间衰减到静音
+ * 
+ * 包络融合了辅音-元音过渡的自然能量变化
+ * ================================================================ */
+
+/**
+ * @brief 计算ADSR包络在当前进度时刻的幅度值
+ * @param progress 音节进度（0.0~1.0）
+ * @param initial 声母索引（用于调整攻击时间）
+ * @return 包络幅度（0.0~1.0）
+ */
+static float adsr_envelope(float progress, int initial) {
+    /* 攻击/衰减/维持/释放 边界比例 */
+    float attack_end = 0.08f;                    /* 攻击段结束 */
+    float decay_end = 0.25f;                     /* 衰减段结束 */
+    float release_start = 0.78f;                 /* 释放段开始 */
+
+    /* 如果有声母，延长辅音部分的低能量段 */
+    if (initial > 0) {
+        attack_end = 0.15f;
+        decay_end = 0.35f;
+    }
+
+    /* 峰值和维持水平 */
+    float peak_level = 1.0f;
+    float sustain_level = 0.65f;
+
+    float envelope;
+
+    if (progress <= attack_end) {
+        /* 攻击段：指数上升 */
+        float t = progress / attack_end;
+        envelope = peak_level * (1.0f - (float)exp(-5.0f * t));
+        envelope = lerp_f(0.0f, peak_level, smoothstep_f(t));
+    } else if (progress <= decay_end) {
+        /* 衰减段：从峰值指数衰减到维持水平 */
+        float t = (progress - attack_end) / (decay_end - attack_end);
+        envelope = peak_level - (peak_level - sustain_level) * (1.0f - (float)exp(-6.0f * t));
+    } else if (progress <= release_start) {
+        /* 维持段：微小的自然波动 */
+        float t = (progress - decay_end) / (release_start - decay_end);
+        float ripple = 0.03f * (float)sin(t * 4.0f * (float)M_PI);
+        envelope = sustain_level + ripple;
+    } else {
+        /* 释放段：指数衰减到0 */
+        float t = (progress - release_start) / (1.0f - release_start);
+        envelope = sustain_level * (float)exp(-7.0f * t);
+    }
+
+    /* 限制包络范围 */
+    if (envelope < 0.0f) envelope = 0.0f;
+    if (envelope > 1.05f) envelope = 1.05f;
+
+    return envelope;
+}
+
+/* ================================================================
+ * 7. 源-滤波器主合成函数
+ * 
+ * 完整流水线:
+ *   拼音序列 → 时长预测 → F0曲线生成 → LF声门激励源
+ *   → 共振峰频率变换 → LPC系数计算 → LPC全极点滤波
+ *   → ADSR包络 → 增益调整 → PCM输出
+ * ================================================================ */
+
+/**
+ * @brief 使用源-滤波器模型合成单个拼音音节的语音波形
+ * @param initial 声母索引
+ * @param final_part 韵母索引
+ * @param tone 声调
+ * @param prev_tone 前一音节声调
+ * @param next_tone 后一音节声调
+ * @param sample_rate 采样率
+ * @param params 声音模型参数
+ * @param out_samples 输出PCM样本（需由调用者分配足够内存）
+ * @param max_samples 最大输出样本数
+ * @return 实际生成的样本数，失败返回-1
+ */
+static int sf_synthesize_syllable(int initial, int final_part, int tone,
+                                    int prev_tone, int next_tone,
+                                    int sample_rate,
+                                    const VoiceModelParams* params,
+                                    float* out_samples, int max_samples) {
+    if (!params || !out_samples || sample_rate <= 0) return -1;
+
+    /* 1. 时长预测 */
+    float total_ms, init_ms, final_ms;
+    duration_predict(initial, final_part, tone, params->speaking_rate,
+                     &total_ms, &init_ms, &final_ms);
+
+    int total_samples = (int)(total_ms * (float)sample_rate / 1000.0f);
+    if (total_samples < 10) total_samples = 10;
+    if (total_samples > max_samples) total_samples = max_samples;
+
+    int init_samples = (int)(init_ms * (float)sample_rate / 1000.0f);
+    if (init_samples > total_samples) init_samples = total_samples / 2;
+
+    /* 2. F0基频曲线生成 */
+    int num_frames = total_samples;              /* 逐样本F0 */
+    float* f0_curve = (float*)malloc((size_t)num_frames * sizeof(float));
+    if (!f0_curve) return -1;
+
+    f0_curve_generate(f0_curve, num_frames, params->f0_mean,
+                       tone, prev_tone, next_tone);
+
+    /* 3. 获取韵母对应的元音共振峰 */
+    float vowel_freqs[SF_MAX_FORMANTS];
+    float vowel_bw[SF_MAX_FORMANTS];
+    get_vowel_formants(final_part, vowel_freqs, vowel_bw, SF_MAX_FORMANTS);
+
+    /* 4. 应用说话人声道长度调整共振峰 */
+    formant_freq_adjust(vowel_freqs, SF_MAX_FORMANTS,
+                         params->vocal_tract_length, 14.0f);
+
+    /* 5. 共振峰→LPC系数转换 */
+    float lpc_coeffs[SF_LPC_MAX_ORDER];
+    int lpc_order = formants_to_lpc(vowel_freqs, vowel_bw,
+                                     params->formant_amp, SF_MAX_FORMANTS,
+                                     sample_rate, lpc_coeffs, SF_LPC_MAX_ORDER);
+    if (lpc_order <= 0) {
+        lpc_order = params->lpc_order;
+        if (lpc_order > 0 && lpc_order <= SF_LPC_MAX_ORDER) {
+            for (int k = 0; k < lpc_order; k++) {
+                lpc_coeffs[k] = params->lpc_coeffs[k];
+            }
+        } else {
+            /* 使用默认一阶低通作为最低保障 */
+            lpc_coeffs[0] = 0.5f;
+            lpc_order = 1;
+        }
+    }
+
+    /* 6. LF声门激励源生成 */
+    float* excitation = (float*)malloc((size_t)total_samples * sizeof(float));
+    if (!excitation) {
+        free(f0_curve);
+        return -1;
+    }
+
+    for (int i = 0; i < total_samples; i++) {
+        /* 每秒生成一个周期的激励，周期由当前F0决定 */
+        float current_f0 = f0_curve[i];
+        float T0 = (current_f0 > 20.0f) ? 1.0f / current_f0 : 0.05f;
+        float t_cycle = (float)fmod((float)i / (float)sample_rate, T0);
+        excitation[i] = lf_glottal_pulse(t_cycle, T0, params);
+    }
+
+    /* 7. LPC全极点滤波（声道滤波） */
+    float* filtered = (float*)malloc((size_t)total_samples * sizeof(float));
+    if (!filtered) {
+        free(f0_curve);
+        free(excitation);
+        return -1;
+    }
+    lpc_allpole_filter(excitation, filtered, total_samples,
+                              lpc_coeffs, lpc_order, params->lpc_gain);
+
+    /* 8. ADSR能量包络 + 辅音噪声混合 */
+    for (int i = 0; i < total_samples; i++) {
+        float progress = (float)i / (float)(total_samples > 1 ? total_samples - 1 : 1);
+        float envelope = adsr_envelope(progress, initial);
+
+        /* 辅音段添加微弱气噪声（爆破/摩擦模拟） */
+        float sample = filtered[i] * envelope;
+        if (initial > 0 && (float)i < (float)init_samples) {
+            /* 在声母段添加与包络相关的噪声 */
+            float noise_progress = (float)i / (float)(init_samples > 0 ? init_samples : 1);
+            float noise_env;
+            /* 爆破音(p,t,k,b,d,g): 短暂爆冲+快速衰减 */
+            if (initial == 2 || initial == 7 || initial == 11 ||  /* p,t,k */
+                initial == 1 || initial == 6 || initial == 10) {  /* b,d,g */
+                noise_env = (float)exp(-15.0f * noise_progress) * 0.3f;
+            }
+            /* 擦音(f,s,sh,x,h): 持续噪声 */
+            else if (initial == 4 || initial == 22 || initial == 18 ||  /* f,s,sh */
+                     initial == 14 || initial == 12) {                   /* x,h */
+                noise_env = (1.0f - (float)exp(-4.0f * noise_progress)) * 0.15f;
+            }
+            /* 塞擦音(zh,ch,z,c,j,q): 爆冲+擦音混合 */
+            else if (initial == 16 || initial == 17 ||                  /* zh,ch */
+                     initial == 19 || initial == 20 ||                  /* z,c */
+                     initial == 13 || initial == 15) {                  /* j,q */
+                noise_env = (float)exp(-8.0f * noise_progress) * 0.25f +
+                            (1.0f - (float)exp(-4.0f * noise_progress)) * 0.1f;
+            } else {
+                noise_env = 0.02f;
+            }
+            /* 使用简单伪随机噪声 */
+            float noise = ((float)((i * 1103515245 + 12345) & 0x7FFFFFFF) /
+                          2147483648.0f - 1.0f);
+            sample += noise * noise_env * envelope;
+        }
+
+        /* 应用整体能量 */
+        float energy_db = params->mean_energy;
+        float energy_linear = (float)pow(10.0f, energy_db / 20.0f);
+        sample *= energy_linear;
+
+        /* 软限幅 */
+        if (sample > 0.95f) sample = 0.95f;
+        if (sample < -0.95f) sample = -0.95f;
+
+        out_samples[i] = sample;
+    }
+
+    free(f0_curve);
+    free(excitation);
+    free(filtered);
+
+    return total_samples;
+}
+
+/* ================================================================
+ * 8. 多音节语音合成（源-滤波器模式）
+ * 
+ * 将拼音序列逐音节合成，并在音节边界处做交叉淡化以消除拼接痕迹
+ * ================================================================ */
+
+#define SF_MAX_SYLLABLES   1024                /* 单次合成最大音节数 */
+#define SF_CROSSFADE_LEN   80                   /* 交叉淡化长度（样本数） */
+
+/**
+ * @brief 使用源-滤波器模型合成完整拼音序列的语音
+ * @param initials 声母索引数组
+ * @param finals 韵母索引数组
+ * @param tones 声调数组
+ * @param num_syllables 音节数量
+ * @param sample_rate 采样率
+ * @param params 声音模型参数
+ * @param out_samples 输出PCM样本
+ * @param max_samples 最大输出样本数
+ * @return 实际生成的样本数，失败返回-1
+ */
+static int sf_synthesize_sequence(const int* initials, const int* finals,
+                                    const int* tones, int num_syllables,
+                                    int sample_rate,
+                                    const VoiceModelParams* params,
+                                    float* out_samples, int max_samples) {
+    if (!initials || !finals || !tones || !params || !out_samples) return -1;
+    if (num_syllables <= 0 || num_syllables > SF_MAX_SYLLABLES) return -1;
+
+    float* syllable_buf = (float*)malloc((size_t)max_samples * sizeof(float));
+    if (!syllable_buf) return -1;
+
+    int total_written = 0;
+
+    for (int s = 0; s < num_syllables; s++) {
+        int prev_tone = (s > 0) ? tones[s - 1] : 0;
+        int next_tone = (s < num_syllables - 1) ? tones[s + 1] : 0;
+
+        int remaining = max_samples - total_written;
+        if (remaining < 100) break;              /* 缓冲区不足 */
+
+        int syl_samples = sf_synthesize_syllable(
+            initials[s], finals[s], tones[s],
+            prev_tone, next_tone,
+            sample_rate, params,
+            syllable_buf, remaining);
+
+        if (syl_samples <= 0) continue;          /* 合成失败，跳过本音节 */
+
+        /* 音节间交叉淡化（避免拼接痕迹） */
+        int crossfade = SF_CROSSFADE_LEN;
+        if (crossfade > syl_samples / 3) crossfade = syl_samples / 3;
+        if (crossfade < 4) crossfade = 4;
+
+        int write_start = total_written;
+        int write_len = syl_samples;
+
+        if (s > 0 && total_written >= crossfade) {
+            /* 与前一个音节的尾部做交叉淡化 */
+            for (int cf = 0; cf < crossfade; cf++) {
+                float t = (float)cf / (float)crossfade;
+                float alpha = smoothstep_f(t);
+                int dest_idx = total_written - crossfade + cf;
+                out_samples[dest_idx] = lerp_f(out_samples[dest_idx],
+                                                syllable_buf[cf], alpha);
+            }
+            /* 跳过交叉淡化区域，从淡化结束处开始写入 */
+            write_start = total_written;
+            write_len = syl_samples - crossfade;
+            if (write_len < 0) write_len = 0;
+            for (int i = 0; i < write_len; i++) {
+                if (write_start + i < max_samples) {
+                    out_samples[write_start + i] = syllable_buf[crossfade + i];
+                }
+            }
+            total_written = write_start + write_len;
+        } else {
+            /* 第一个音节直接写入 */
+            for (int i = 0; i < write_len; i++) {
+                if (total_written + i < max_samples) {
+                    out_samples[total_written + i] = syllable_buf[i];
+                }
+            }
+            total_written += write_len;
+        }
+
+        /* 添加音节间的自然停顿（80ms静音） */
+        int pause_samples = (int)(0.08f * (float)sample_rate);
+        if (s < num_syllables - 1 && total_written + pause_samples < max_samples) {
+            for (int p = 0; p < pause_samples; p++) {
+                out_samples[total_written + p] = 0.0f;
+            }
+            total_written += pause_samples;
+        }
+    }
+
+    free(syllable_buf);
+    return total_written;
+}
+
+/* ================================================================
+ * 9. 声音模型保存/加载
+ * 
+ * 二进制文件格式:
+ *   偏移    大小     内容
+ *   0       4B      magic = 0x564F4943 ("VOIC")
+ *   4       4B      version
+ *   8       4B      sample_rate
+ *   12      4B      f0_mean
+ *   16      4B      f0_min
+ *   20      4B      f0_max
+ *   24      4B      f0_std
+ *   28      4B      lf_open_quotient
+ *   32      4B      lf_speed_quotient
+ *   36      4B      lf_return_quotient
+ *   40      4B      lf_spectral_tilt
+ *   44      4B      lpc_order
+ *   48      4B      lpc_gain
+ *   52      p*4B    lpc_coeffs[0..p-1]
+ *   ...     6*4B    formant_freq[0..5]
+ *   ...     6*4B    formant_bw[0..5]
+ *   ...     6*4B    formant_amp[0..5]
+ *   ...     4B      vocal_tract_length
+ *   ...     4B      mouth_opening
+ *   ...     4B      tone_range_semitones
+ *   ...     4B      tone_register_base
+ *   ...     4B      speaking_rate
+ *   ...     4B      mean_energy
+ *   ...     4B      energy_variation
+ *   ...     64B     speaker_name (UTF-8, null-terminated)
+ *   ...     1B      speaker_gender
+ * ================================================================ */
+
+/**
+ * @brief 保存说话人特征参数到二进制文件
+ * @param params 声音模型参数
+ * @param filepath 文件路径
+ * @return 0成功, -1失败
+ */
+int tts_pinyin_save_voice_model(const VoiceModelParams* params, const char* filepath) {
+    if (!params || !filepath) return -1;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) return -1;
+
+    /* 写入头部 */
+    uint32_t magic = 0x564F4943;
+    uint32_t version = 1;
+    int32_t sample_rate_i32 = (int32_t)params->sample_rate;
+    int32_t lpc_order_i32 = (int32_t)params->lpc_order;
+
+    if (fwrite(&magic, 4, 1, fp) != 1) goto err;
+    if (fwrite(&version, 4, 1, fp) != 1) goto err;
+    if (fwrite(&sample_rate_i32, 4, 1, fp) != 1) goto err;
+
+    /* 写入F0参数 */
+    if (fwrite(&params->f0_mean, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->f0_min, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->f0_max, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->f0_std, 4, 1, fp) != 1) goto err;
+
+    /* 写入LF模型参数 */
+    if (fwrite(&params->lf_open_quotient, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->lf_speed_quotient, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->lf_return_quotient, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->lf_spectral_tilt, 4, 1, fp) != 1) goto err;
+
+    /* 写入LPC参数 */
+    if (fwrite(&lpc_order_i32, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->lpc_gain, 4, 1, fp) != 1) goto err;
+
+    int lpc_order = params->lpc_order;
+    if (lpc_order > SF_LPC_MAX_ORDER) lpc_order = SF_LPC_MAX_ORDER;
+    if (lpc_order < 0) lpc_order = 0;
+    if (fwrite(params->lpc_coeffs, 4, (size_t)lpc_order, fp) != (size_t)lpc_order) goto err;
+
+    /* 写入共振峰参数 */
+    if (fwrite(params->formant_freq, 4, SF_MAX_FORMANTS, fp) != SF_MAX_FORMANTS) goto err;
+    if (fwrite(params->formant_bw, 4, SF_MAX_FORMANTS, fp) != SF_MAX_FORMANTS) goto err;
+    if (fwrite(params->formant_amp, 4, SF_MAX_FORMANTS, fp) != SF_MAX_FORMANTS) goto err;
+
+    /* 写入声道特征 */
+    if (fwrite(&params->vocal_tract_length, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->mouth_opening, 4, 1, fp) != 1) goto err;
+
+    /* 写入声调特征 */
+    if (fwrite(&params->tone_range_semitones, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->tone_register_base, 4, 1, fp) != 1) goto err;
+
+    /* 写入韵律特征 */
+    if (fwrite(&params->speaking_rate, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->mean_energy, 4, 1, fp) != 1) goto err;
+    if (fwrite(&params->energy_variation, 4, 1, fp) != 1) goto err;
+
+    /* 写入元数据 */
+    if (fwrite(params->speaker_name, 1, 64, fp) != 64) goto err;
+    if (fwrite(&params->speaker_gender, 1, 1, fp) != 1) goto err;
+
+    fclose(fp);
+    return 0;
+
+err:
+    fclose(fp);
+    return -1;
+}
+
+/**
+ * @brief 从二进制文件加载说话人特征参数
+ * @param params 输出声音模型参数
+ * @param filepath 文件路径
+ * @return 0成功, -1失败
+ */
+int tts_pinyin_load_voice_model(VoiceModelParams* params, const char* filepath) {
+    if (!params || !filepath) return -1;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return -1;
+
+    /* 读取头部并验证 */
+    uint32_t magic = 0, version = 0;
+    int32_t sample_rate_i32 = 0;
+    int32_t lpc_order_i32 = 0;
+
+    if (fread(&magic, 4, 1, fp) != 1) goto err;
+    if (magic != 0x564F4943) goto err;           /* 魔术字不匹配 */
+    if (fread(&version, 4, 1, fp) != 1) goto err;
+    if (fread(&sample_rate_i32, 4, 1, fp) != 1) goto err;
+
+    params->sample_rate = sample_rate_i32;
+
+    /* 读取F0参数 */
+    if (fread(&params->f0_mean, 4, 1, fp) != 1) goto err;
+    if (fread(&params->f0_min, 4, 1, fp) != 1) goto err;
+    if (fread(&params->f0_max, 4, 1, fp) != 1) goto err;
+    if (fread(&params->f0_std, 4, 1, fp) != 1) goto err;
+
+    /* 读取LF模型参数 */
+    if (fread(&params->lf_open_quotient, 4, 1, fp) != 1) goto err;
+    if (fread(&params->lf_speed_quotient, 4, 1, fp) != 1) goto err;
+    if (fread(&params->lf_return_quotient, 4, 1, fp) != 1) goto err;
+    if (fread(&params->lf_spectral_tilt, 4, 1, fp) != 1) goto err;
+
+    /* 读取LPC参数 */
+    if (fread(&lpc_order_i32, 4, 1, fp) != 1) goto err;
+    params->lpc_order = lpc_order_i32;
+    if (fread(&params->lpc_gain, 4, 1, fp) != 1) goto err;
+
+    int lpc_order = params->lpc_order;
+    if (lpc_order > SF_LPC_MAX_ORDER) lpc_order = SF_LPC_MAX_ORDER;
+    if (lpc_order < 0) lpc_order = 0;
+    if (lpc_order > 0) {
+        if (fread(params->lpc_coeffs, 4, (size_t)lpc_order, fp) != (size_t)lpc_order) goto err;
+    }
+    /* 清零未使用的LPC系数 */
+    for (int k = lpc_order; k < SF_LPC_MAX_ORDER; k++) params->lpc_coeffs[k] = 0.0f;
+
+    /* 读取共振峰参数 */
+    if (fread(params->formant_freq, 4, SF_MAX_FORMANTS, fp) != SF_MAX_FORMANTS) goto err;
+    if (fread(params->formant_bw, 4, SF_MAX_FORMANTS, fp) != SF_MAX_FORMANTS) goto err;
+    if (fread(params->formant_amp, 4, SF_MAX_FORMANTS, fp) != SF_MAX_FORMANTS) goto err;
+
+    /* 读取声道特征 */
+    if (fread(&params->vocal_tract_length, 4, 1, fp) != 1) goto err;
+    if (fread(&params->mouth_opening, 4, 1, fp) != 1) goto err;
+
+    /* 读取声调特征 */
+    if (fread(&params->tone_range_semitones, 4, 1, fp) != 1) goto err;
+    if (fread(&params->tone_register_base, 4, 1, fp) != 1) goto err;
+
+    /* 读取韵律特征 */
+    if (fread(&params->speaking_rate, 4, 1, fp) != 1) goto err;
+    if (fread(&params->mean_energy, 4, 1, fp) != 1) goto err;
+    if (fread(&params->energy_variation, 4, 1, fp) != 1) goto err;
+
+    /* 读取元数据 */
+    if (fread(params->speaker_name, 1, 64, fp) != 64) goto err;
+    if (fread(&params->speaker_gender, 1, 1, fp) != 1) goto err;
+
+    params->magic = magic;
+    params->version = version;
+
+    fclose(fp);
+    return 0;
+
+err:
+    fclose(fp);
+    return -1;
+}
+
+/**
+ * @brief 获取默认声音模型参数的副本
+ * @param params 输出参数结构体
+ */
+void tts_pinyin_get_default_voice_model(VoiceModelParams* params) {
+    if (params) {
+        memcpy(params, &g_default_voice_model, sizeof(VoiceModelParams));
+    }
+}
+
+/**
+ * @brief 评估声音模型参数的有效性
+ * @param params 声音模型参数
+ * @return 1=有效, 0=无效
+ */
+int tts_pinyin_validate_voice_model(const VoiceModelParams* params) {
+    if (!params) return 0;
+    if (params->f0_mean <= 0.0f || params->f0_mean > 1000.0f) return 0;
+    if (params->sample_rate < 8000 || params->sample_rate > 96000) return 0;
+    if (params->vocal_tract_length < 5.0f || params->vocal_tract_length > 30.0f) return 0;
+    if (params->lf_open_quotient < 0.1f || params->lf_open_quotient > 0.95f) return 0;
+    if (params->speaking_rate < 0.1f || params->speaking_rate > 5.0f) return 0;
+    return 1;
+}

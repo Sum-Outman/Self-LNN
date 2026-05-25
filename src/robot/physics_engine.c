@@ -15,33 +15,19 @@ static float pe_abs(float v) { return v < 0.0f ? -v : v; }
 static float pe_sqrt(float v) { return sqrtf(v); }
 static float pe_sign(float v) { return v < 0.0f ? -1.0f : 1.0f; }
 
-static void pe_vec3_zero(float* v) { v[0] = 0.0f; v[1] = 0.0f; v[2] = 0.0f; }
-static void pe_vec3_copy(const float* src, float* dst) { dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; }
-static float pe_vec3_dot(const float* a, const float* b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
-static float pe_vec3_len_sq(const float* v) { return v[0]*v[0] + v[1]*v[1] + v[2]*v[2]; }
-static float pe_vec3_len(const float* v) { return pe_sqrt(pe_vec3_len_sq(v)); }
-
-static void pe_vec3_add(const float* a, const float* b, float* out) {
-    out[0] = a[0] + b[0]; out[1] = a[1] + b[1]; out[2] = a[2] + b[2];
-}
-static void pe_vec3_sub(const float* a, const float* b, float* out) {
-    out[0] = a[0] - b[0]; out[1] = a[1] - b[1]; out[2] = a[2] - b[2];
-}
-static void pe_vec3_scale(const float* v, float s, float* out) {
-    out[0] = v[0]*s; out[1] = v[1]*s; out[2] = v[2]*s;
-}
-static void pe_vec3_cross(const float* a, const float* b, float* out) {
-    out[0] = a[1]*b[2] - a[2]*b[1];
-    out[1] = a[2]*b[0] - a[0]*b[2];
-    out[2] = a[0]*b[1] - a[1]*b[0];
-}
-static void pe_vec3_mul(const float* a, const float* b, float* out) {
-    out[0] = a[0]*b[0]; out[1] = a[1]*b[1]; out[2] = a[2]*b[2];
-}
-static float pe_vec3_dist_sq(const float* a, const float* b) {
-    float dx = a[0]-b[0], dy = a[1]-b[1], dz = a[2]-b[2];
-    return dx*dx + dy*dy + dz*dz;
-}
+/* M-008修复: 向量运算统一到 selflnn/math/vec3_ops.h */
+#include "selflnn/math/vec3_ops.h"
+#define pe_vec3_zero(v)          vec3_zero(v)
+#define pe_vec3_copy(s,d)        vec3_copy(d,s)
+#define pe_vec3_dot(a,b)         vec3_dot(a,b)
+#define pe_vec3_len_sq(v)        vec3_length_sq(v)
+#define pe_vec3_len(v)           vec3_length(v)
+#define pe_vec3_add(a,b,o)       vec3_add(o,a,b)
+#define pe_vec3_sub(a,b,o)       vec3_sub(o,a,b)
+#define pe_vec3_scale(v,s,o)     vec3_scale(o,v,s)
+#define pe_vec3_cross(a,b,o)     vec3_cross(o,a,b)
+#define pe_vec3_mul(a,b,o)       vec3_mul(o,a,b)
+#define pe_vec3_dist_sq(a,b)     vec3_dist_sq(a,b)
 
 static void pe_quat_identity(float* q) { q[0] = 0.0f; q[1] = 0.0f; q[2] = 0.0f; q[3] = 1.0f; }
 /* quat_conjugate: use math_utils.h static inline */
@@ -402,7 +388,8 @@ int pe_joint_get_angle(const PEWorld* world, int joint_id, float* angle) {
 }
 
 void pe_collision_aabb(const PEBody* body, float* aabb_min, float* aabb_max) {
-    float extent = 0.5f;
+    /* ZSFWS-F002修复: 使用刚体自身的bounding_radius替代硬编码0.5f */
+    float extent = body->bounding_radius > 0.0f ? body->bounding_radius : 0.5f;
     aabb_min[0] = body->pos[0] - extent;
     aabb_min[1] = body->pos[1] - extent;
     aabb_min[2] = body->pos[2] - extent;
@@ -750,7 +737,9 @@ static int pe_gjk_penetration(const PEBody* body_a, const PEBody* body_b, float*
     dir[0] = 1.0f; dir[1] = 0.0f; dir[2] = 0.0f;
     int max_iter = 50;
 
-    float radius = 0.5f;
+    /* ZSFWS-F002修复: 从刚体读取实际碰撞几何半径，回退0.5f */
+    float radius_a = body_a->bounding_radius > 0.0f ? body_a->bounding_radius : 0.5f;
+    float radius_b = body_b->bounding_radius > 0.0f ? body_b->bounding_radius : 0.5f;
     for (int iter = 0; iter < max_iter; iter++) {
         float len = pe_vec3_len(dir);
         if (len < PE_EPS) break;
@@ -761,13 +750,13 @@ static int pe_gjk_penetration(const PEBody* body_a, const PEBody* body_b, float*
         pe_vec3_rotate_by_quat(ndir, body_a->quat, r_dir);
         float r_len = pe_vec3_len(r_dir);
         if (r_len < PE_EPS) { support_a[0] = body_a->pos[0]; support_a[1] = body_a->pos[1]; support_a[2] = body_a->pos[2]; }
-        else { pe_vec3_scale(r_dir, radius / r_len, support_a); pe_vec3_add(body_a->pos, support_a, support_a); }
+        else { pe_vec3_scale(r_dir, radius_a / r_len, support_a); pe_vec3_add(body_a->pos, support_a, support_a); }
 
         float neg_dir[3] = { -ndir[0], -ndir[1], -ndir[2] };
         pe_vec3_rotate_by_quat(neg_dir, body_b->quat, r_dir);
         r_len = pe_vec3_len(r_dir);
         if (r_len < PE_EPS) { support_b[0] = body_b->pos[0]; support_b[1] = body_b->pos[1]; support_b[2] = body_b->pos[2]; }
-        else { pe_vec3_scale(r_dir, radius / r_len, support_b); pe_vec3_add(body_b->pos, support_b, support_b); }
+        else { pe_vec3_scale(r_dir, radius_b / r_len, support_b); pe_vec3_add(body_b->pos, support_b, support_b); }
 
         pe_vec3_sub(support_a, support_b, mink_diff);
 
@@ -822,9 +811,9 @@ static int pe_gjk_penetration(const PEBody* body_a, const PEBody* body_b, float*
         else { normal[1] = 1.0f; }
     }
     /* ZSFWS-F001修复: 穿透深度使用pe_vec3_dist（欧氏距离）而非pe_vec3_dist_sq（距离平方）。
-     * 原代码将线性距离(2*radius)与距离平方混用，导致穿透深度量纲错误。
-     * pe_vec3_dist返回线性距离，减法结果量纲一致。 */
-    if (penetration) *penetration = radius * 2.0f - pe_vec3_dist(body_a->pos, body_b->pos);
+     * 原代码将线性距离与距离平方混用，导致穿透深度量纲错误。
+     * ZSFWS-F002修复: 使用两个刚体各自的实际碰撞几何半径之和 */
+    if (penetration) *penetration = (radius_a + radius_b) - pe_vec3_dist(body_a->pos, body_b->pos);
     if (penetration && *penetration < 0) *penetration = 0.0f;
     if (point) {
         pe_vec3_add(body_a->pos, body_b->pos, point);

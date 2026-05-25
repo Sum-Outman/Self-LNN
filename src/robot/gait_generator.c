@@ -2,6 +2,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/math/vec3_ops.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -53,52 +54,17 @@ struct GaitGenerator {
     float step_progress;                /* 单步进度 0~1 */
 };
 
-/* ============================================================================
- * 内部静态辅助函数：向量运算
- * ============================================================================ */
-
-static void gait_vec3_copy(float* dst, const float* src) {
-    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
-}
-
-static void gait_vec3_add(float* dst, const float* a, const float* b) {
-    dst[0] = a[0] + b[0]; dst[1] = a[1] + b[1]; dst[2] = a[2] + b[2];
-}
-
-static void gait_vec3_sub(float* dst, const float* a, const float* b) {
-    dst[0] = a[0] - b[0]; dst[1] = a[1] - b[1]; dst[2] = a[2] - b[2];
-}
-
-static void gait_vec3_scale(float* dst, const float* a, float s) {
-    dst[0] = a[0] * s; dst[1] = a[1] * s; dst[2] = a[2] * s;
-}
-
-static float gait_vec3_dot(const float* a, const float* b) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-static float gait_vec3_length(const float* a) {
-    return sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-}
-
-static void gait_vec3_normalize(float* dst, const float* a) {
-    float len = gait_vec3_length(a);
-    if (len < GAIT_EPSILON) { dst[0] = 0.0f; dst[1] = 0.0f; dst[2] = 0.0f; return; }
-    float inv = 1.0f / len;
-    dst[0] = a[0] * inv; dst[1] = a[1] * inv; dst[2] = a[2] * inv;
-}
-
-static void gait_vec3_cross(float* dst, const float* a, const float* b) {
-    dst[0] = a[1] * b[2] - a[2] * b[1];
-    dst[1] = a[2] * b[0] - a[0] * b[2];
-    dst[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-static void gait_vec3_lerp(float* dst, const float* a, const float* b, float t) {
-    dst[0] = a[0] + (b[0] - a[0]) * t;
-    dst[1] = a[1] + (b[1] - a[1]) * t;
-    dst[2] = a[2] + (b[2] - a[2]) * t;
-}
+/* M-008修复：向量运算已统一到 selflnn/math/vec3_ops.h
+ * 以下为向后兼容的别名宏，将 gait_vec3_* 映射到统一的 vec3_* 接口 */
+#define gait_vec3_copy(d,s)   vec3_copy(d,s)
+#define gait_vec3_add(d,a,b)  vec3_add(d,a,b)
+#define gait_vec3_sub(d,a,b)  vec3_sub(d,a,b)
+#define gait_vec3_scale(d,a,s) vec3_scale(d,a,s)
+#define gait_vec3_dot(a,b)    vec3_dot(a,b)
+#define gait_vec3_length(a)   vec3_length(a)
+#define gait_vec3_normalize(d,a) vec3_normalize(d,a)
+#define gait_vec3_cross(d,a,b) vec3_cross(d,a,b)
+#define gait_vec3_lerp(d,a,b,t) vec3_lerp(d,a,b,t)
 
 /* ============================================================================
  * 内部静态辅助函数：二维叉积（用于凸包ZMP判定）
@@ -325,11 +291,62 @@ static void gait_lipm_compute_preview_gains(float omega, float dt,
     float zc_over_g = 1.0f / omega; /* zc/g近似 */
     (void)zc_over_g;
 
-    /* 简化预览增益：指数衰减 */
+    /* M-009残修复: 使用Riccati方程解析解替代指数衰减近似
+     * LIPM离散模型: x(k+1)=A*x(k)+B*u(k), zmp=C*x(k)
+     * 二次代价: J = Σ (zmp_ref - zmp)^2 + ρ*u^2
+     * Riccati方程解析解产生最优预览增益
+     * 对于标量输入系统，最优增益 K = -R^(-1)*B'*P 其中P是代数Riccati解
+     * 解析解: gain(k) = -(1/(ρ+C*P*C')) * B' * (A' - K*C')^k * C' */
+    (void)zc_over_g;
+
+    /* Riccati方程解析解（标量输入LIPM） */
+    float rho = 1e-6f; /* 控制代价权重，数值稳定性 */
+    float a11 = 1.0f, a12 = dt;
+    float a21 = omega * omega * dt, a22 = 1.0f;
+    float b1 = dt * dt * 0.5f, b2 = dt;
+    float c1 = 1.0f, c2 = -zc_over_g / (omega > 0.0f ? omega : 1.0f);
+
+    /* 解析代数Riccati方程: P = A'*P*A - A'*P*B*(ρ+B'*P*B)^(-1)*B'*P*A + C'*C
+     * 对2x2系统迭代求解（Kleinman方法） */
+    float p11 = c1 * c1, p12 = c1 * c2, p22 = c2 * c2 + rho;
+    for (int iter = 0; iter < 20; iter++) {
+        float bp11 = b1 * p11 + b2 * p12;
+        float bp12 = b1 * p12 + b2 * p22;
+        float bp21 = bp12;
+        float bp22 = b1 * p12 + b2 * p22;
+        float denom = rho + b1 * bp11 + b2 * bp21;
+        if (denom < 1e-12f) denom = 1e-12f;
+        float k1 = -(bp11) / denom, k2 = -(bp21) / denom;
+
+        /* P_new = (A+B*K)' * P * (A+B*K) + K'*ρ*K + C'*C */
+        float ak11 = a11 + b1 * k1, ak12 = a12 + b1 * k2;
+        float ak21 = a21 + b2 * k1, ak22 = a22 + b2 * k2;
+        float np11 = ak11*(ak11*p11 + ak21*p12) + ak21*(ak11*p12 + ak21*p22) + k1*rho*k1 + c1*c1;
+        float np12 = ak11*(ak12*p11 + ak22*p12) + ak21*(ak12*p12 + ak22*p22) + k1*rho*k2 + c1*c2;
+        float np22 = ak12*(ak12*p11 + ak22*p12) + ak22*(ak12*p12 + ak22*p22) + k2*rho*k2 + c2*c2;
+
+        if (fabsf(np11 - p11) < 1e-8f && fabsf(np22 - p22) < 1e-8f) break;
+        p11 = np11; p12 = np12; p22 = np22;
+    }
+
+    /* 最优反馈增益: K = -(ρ+B'*P*B)^(-1) * B'*P*A */
+    float bpa1 = b1*p11*a11 + b1*p12*a21 + b2*p12*a11 + b2*p22*a21;
+    float bpa2 = b1*p11*a12 + b1*p12*a22 + b2*p12*a12 + b2*p22*a22;
+    float bpab = b1*(b1*p11 + b2*p12) + b2*(b1*p12 + b2*p22);
+    float inv_d = 1.0f / (rho + bpab + 1e-12f);
+    float kopt1 = -inv_d * bpa1;
+    float kopt2 = -inv_d * bpa2;
+
+    /* 最优预览增益: gain(k) = -(ρ+B'*P*B)^(-1) * B' * (A+B*K)'^k * C'
+     * 通过递推计算 (A+B*K)'^k * C' */
+    float akc1 = c1, akc2 = c2; /* (A+BK)'^0 * C' */
     for (int i = 0; i < horizon; i++) {
-        float k = (float)i;
-        float decay = expf(-omega * k * dt);
-        gains[i] = -decay * omega * dt;
+        /* gain = -inv_d * (b1*akc1 + b2*akc2) */
+        gains[i] = -inv_d * (b1 * akc1 + b2 * akc2);
+        /* 递推: akc = (A+BK)' * akc */
+        float nakc1 = (a11 + b1*kopt1) * akc1 + (a21 + b2*kopt1) * akc2;
+        float nakc2 = (a12 + b1*kopt2) * akc1 + (a22 + b2*kopt2) * akc2;
+        akc1 = nakc1; akc2 = nakc2;
     }
 }
 

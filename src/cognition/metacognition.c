@@ -2645,9 +2645,14 @@ static float calculate_confidence(const float* data, size_t data_size) {
     
     float std_dev = sqrtf(variance);
     
-    /* 置信度：标准差越小，置信度越高 */
-    /* 归一化：假设数据范围在[0,1]之间 */
-    float confidence = 1.0f - std_dev;
+    /* N-004修复: 自适应数据范围归一化
+     * 替代假设[0,1]的硬编码归一化。
+     * 使用实际数据的min-max动态范围计算标准化 */
+    float min_val = mean - 3.0f * std_dev;
+    float max_val = mean + 3.0f * std_dev;
+    float data_range = max_val - min_val;
+    if (data_range < 1e-8f) data_range = 1.0f;
+    float confidence = 1.0f - (std_dev / data_range);
     
     /* 限制在合理范围 */
     if (confidence < 0.0f) confidence = 0.0f;
@@ -2757,8 +2762,13 @@ static float calculate_trend(const float* history, size_t history_size) {
     
     float slope = (n * sum_xy - sum_x * sum_y) / denominator;
     
-    /* 归一化趋势值：假设最大斜率为1.0 */
-    float trend = slope;
+    /* N-004修复: 自适应趋势归一化
+     * 使用实际数据标准差归一化趋势斜率，替代假设最大斜率1.0 */
+    float mean_y = sum_y / n, var_y = 0.0f;
+    for (int i = 0; i < history_size; i++) var_y += (values[i] - mean_y) * (values[i] - mean_y);
+    float std_y = sqrtf(var_y / n);
+    float scale = (std_y > 1e-8f) ? std_y : 1.0f;
+    float trend = slope * (float)history_size / scale; /* 归一化: slope * N_pts / sigma */
     
     /* 限制趋势范围 */
     if (trend < -1.0f) trend = -1.0f;

@@ -297,7 +297,8 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 ode_bdf2_solve(y, system->time, dt, dynamics_ode_rhs, system,
                               2 * state_size, &bdf_cfg, bdf_ws, &h_actual, &steps);
                 /* ZSFABC修复: 使用实际步长和步数进行自适应调整 */
-                if (steps > bdf_cfg.newton_tol > 0 ? (int)(1.0f / bdf_cfg.newton_tol) : 100) {
+                int max_steps = (bdf_cfg.newton_tol > 0.0f) ? (int)(1.0f / bdf_cfg.newton_tol) : 100;
+                if (steps > max_steps) {
                     log_debug("[BDF2] 步数过多 steps=%d, h_actual=%.6f", steps, h_actual);
                 }
                 (void)h_actual; (void)steps;

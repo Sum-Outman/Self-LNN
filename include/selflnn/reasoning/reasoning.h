@@ -828,6 +828,15 @@ int reasoning_engine_set_bayesian_network(ReasoningEngine* engine,
  */
 BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* engine);
 
+/* ============================================================================
+ * ZSFX-P1修复: 推理历史管理（4个缺失声明）
+ * ============================================================================ */
+
+int reasoning_save_history(const ReasoningEngine* engine, const char* filepath);
+int reasoning_load_history(ReasoningEngine* engine, const char* filepath);
+int reasoning_set_autosave(ReasoningEngine* engine, const char* filepath);
+int reasoning_autosave_history(ReasoningEngine* engine);
+
 #ifdef __cplusplus
 }
 #endif

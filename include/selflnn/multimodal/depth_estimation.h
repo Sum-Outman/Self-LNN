@@ -322,6 +322,47 @@ int depth_estimate_compute_error(const float* estimated_depth, const float* grou
  */
 DepthEstimationConfig depth_estimation_get_default_config(void);
 
+/**
+ * @brief 使用CNN U-Net深度学习网络进行单目深度估计
+ *
+ * 基于编码器-解码器架构（U-Net风格）的端到端单目深度估计。
+ * 当CNN权重未加载时，自动回退到CfC ODE网络或多线索几何方法。
+ *
+ * @param estimator 深度估计处理器
+ * @param image 输入图像 [w*h*c] 行主序，像素值[0,1]
+ * @param w 图像宽度
+ * @param h 图像高度
+ * @param c 通道数(1=灰度, 3=RGB)
+ * @param depth_map 输出深度图 [w*h]，值域映射至[min_depth, max_depth]
+ * @return int 成功返回0，失败返回-1
+ */
+int de_monocular_depth(DepthEstimator* estimator,
+                       const float* image, int w, int h, int c,
+                       float* depth_map);
+
+/**
+ * @brief 加载CNN U-Net单目深度估计模型权重
+ *
+ * 从二进制文件读取CNN U-Net网络所有权重和偏置。
+ * 加载成功后，depth_estimate_monocular将优先使用CNN进行深度估计。
+ *
+ * @param estimator 深度估计处理器
+ * @param filepath 权重文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int de_load_monocular_model(DepthEstimator* estimator, const char* filepath);
+
+/**
+ * @brief 保存CNN U-Net单目深度估计模型权重
+ *
+ * 将CNN U-Net网络的所有权重和偏置保存到二进制文件。
+ *
+ * @param estimator 深度估计处理器
+ * @param filepath 保存路径
+ * @return int 成功返回0，失败返回-1
+ */
+int de_save_monocular_model(const DepthEstimator* estimator, const char* filepath);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,6 +1,7 @@
 #include "selflnn/robot/dynamics.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/math/vec3_ops.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -45,58 +46,15 @@ static void mat3_transpose(const float* m, float* out)
             out[i * 3 + j] = m[j * 3 + i];
 }
 
-static void mat3_vec3_mul(const float* m, const float* v, float* out)
-{
-    int i;
-    for (i = 0; i < 3; i++) {
-        out[i] = m[i * 3 + 0] * v[0] + m[i * 3 + 1] * v[1] + m[i * 3 + 2] * v[2];
-    }
-}
-
-static void dvec3_cross(const float* a, const float* b, float* out)
-{
-    out[0] = a[1] * b[2] - a[2] * b[1];
-    out[1] = a[2] * b[0] - a[0] * b[2];
-    out[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-static float dvec3_dot(const float* a, const float* b)
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-static void dvec3_add(const float* a, const float* b, float* out)
-{
-    out[0] = a[0] + b[0];
-    out[1] = a[1] + b[1];
-    out[2] = a[2] + b[2];
-}
-
-static void dvec3_sub(const float* a, const float* b, float* out)
-{
-    out[0] = a[0] - b[0];
-    out[1] = a[1] - b[1];
-    out[2] = a[2] - b[2];
-}
-
-static void dvec3_scale(const float* v, float s, float* out)
-{
-    out[0] = v[0] * s;
-    out[1] = v[1] * s;
-    out[2] = v[2] * s;
-}
-
-static void dvec3_copy(const float* src, float* dst)
-{
-    dst[0] = src[0];
-    dst[1] = src[1];
-    dst[2] = src[2];
-}
-
-static void dvec3_zero(float* v)
-{
-    v[0] = 0.0f; v[1] = 0.0f; v[2] = 0.0f;
-}
+/* M-008修复: 向量/矩阵运算已统一到 selflnn/math/vec3_ops.h */
+#define mat3_vec3_mul(m,v,o)  mat3_mul_vec3(o,m,v)
+#define dvec3_cross(a,b,o)    vec3_cross(o,a,b)
+#define dvec3_dot(a,b)        vec3_dot(a,b)
+#define dvec3_add(a,b,o)      vec3_add(o,a,b)
+#define dvec3_sub(a,b,o)      vec3_sub(o,a,b)
+#define dvec3_scale(v,s,o)    vec3_scale(o,v,s)
+#define dvec3_copy(s,d)       vec3_copy(d,s)
+#define dvec3_zero(v)         vec3_zero(v)
 
 static void inertia_transform(const float* I_body, const float* R, float* I_world)
 {
@@ -434,31 +392,24 @@ static void gjk_support(const GjkShape* a, const GjkShape* b,
     point[2] = a->vertices[best_a][2] - b->vertices[best_b][2];
 }
 
-static void vec3_sub(const float* a, const float* b, float* r) {
-    r[0] = a[0] - b[0]; r[1] = a[1] - b[1]; r[2] = a[2] - b[2];
-}
-static void vec3_add(const float* a, const float* b, float* r) {
-    r[0] = a[0] + b[0]; r[1] = a[1] + b[1]; r[2] = a[2] + b[2];
-}
-static void vec3_scale(const float* a, float s, float* r) {
-    r[0] = a[0] * s; r[1] = a[1] * s; r[2] = a[2] * s;
-}
-static float vec3_dot(const float* a, const float* b) {
-    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
-}
-static float vec3_len(const float* v) { return sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]); }
+/* M-008修复: vec3_sub/local函数已由 vec3_ops.h 统一提供 */
+#define vec3_len(v)  vec3_length(v)
 
 /**
- * @brief K-031: GJK碰撞检测 — 判断两个凸多面体是否相交
+ * @brief K-031: GJK碰撞检测（带单形体输出）— 判断两个凸多面体是否相交
  *
  * @param shape_a 凸多面体A的顶点数组
  * @param num_a A顶点数
  * @param shape_b 凸多面体B的顶点数组
  * @param num_b B顶点数
+ * @param simplex_out [输出] GJK单形体顶点数组(最多4个顶点)
+ * @param simplex_count_out [输出] 单形体顶点数
  * @return 1=碰撞, 0=无碰撞, -1=错误
  */
-int dynamics_gjk_collision(const float* shape_a, int num_a,
-                            const float* shape_b, int num_b) {
+static int dynamics_gjk_with_simplex(const float* shape_a, int num_a,
+                                      const float* shape_b, int num_b,
+                                      float simplex_out[4][3],
+                                      int* simplex_count_out) {
     if (!shape_a || !shape_b || num_a < 4 || num_b < 4) return -1;
 
     GjkShape a, b;
@@ -485,7 +436,17 @@ int dynamics_gjk_collision(const float* shape_a, int num_a,
         gjk_support(&a, &b, direction, support_pt);
 
         /* 如果support点不穿越原点方向，则无碰撞 */
-        if (vec3_dot(support_pt, direction) < 0.0f) return 0;
+        if (vec3_dot(support_pt, direction) < 0.0f) {
+            if (simplex_out && simplex_count_out) {
+                for (int s = 0; s < simplex_count; s++) {
+                    simplex_out[s][0] = simplex[s][0];
+                    simplex_out[s][1] = simplex[s][1];
+                    simplex_out[s][2] = simplex[s][2];
+                }
+                *simplex_count_out = simplex_count;
+            }
+            return 0;
+        }
 
         simplex[simplex_count][0] = support_pt[0];
         simplex[simplex_count][1] = support_pt[1];
@@ -501,12 +462,10 @@ int dynamics_gjk_collision(const float* shape_a, int num_a,
             direction[1] = ab[1] * vec3_dot(ab, ao) - ao[1] * vec3_dot(ab, ab);
             direction[2] = ab[2] * vec3_dot(ab, ao) - ao[2] * vec3_dot(ab, ab);
         } else if (simplex_count == 3) {
-            /* 三角形情况: 使用法向量检测 */
             float ab[3], ac[3], ao[3], n[3];
             vec3_sub(simplex[1], simplex[0], ab);
             vec3_sub(simplex[2], simplex[0], ac);
             ao[0] = -simplex[0][0]; ao[1] = -simplex[0][1]; ao[2] = -simplex[0][2];
-            /* 叉积求法向量 */
             n[0] = ab[1]*ac[2] - ab[2]*ac[1];
             n[1] = ab[2]*ac[0] - ab[0]*ac[2];
             n[2] = ab[0]*ac[1] - ab[1]*ac[0];
@@ -516,15 +475,50 @@ int dynamics_gjk_collision(const float* shape_a, int num_a,
                 direction[0] = -n[0]; direction[1] = -n[1]; direction[2] = -n[2];
             }
         } else if (simplex_count == 4) {
-            /* 四面体: 原点在内部则碰撞 */
+            /* 四面体: 原点在内部则碰撞，输出单形体 */
+            if (simplex_out && simplex_count_out) {
+                for (int s = 0; s < simplex_count; s++) {
+                    simplex_out[s][0] = simplex[s][0];
+                    simplex_out[s][1] = simplex[s][1];
+                    simplex_out[s][2] = simplex[s][2];
+                }
+                *simplex_count_out = simplex_count;
+            }
             return 1;
         }
+    }
+    if (simplex_out && simplex_count_out) {
+        for (int s = 0; s < simplex_count; s++) {
+            simplex_out[s][0] = simplex[s][0];
+            simplex_out[s][1] = simplex[s][1];
+            simplex_out[s][2] = simplex[s][2];
+        }
+        *simplex_count_out = simplex_count;
     }
     return 0;
 }
 
+/* 公开的GJK碰撞检测封装 */
+int dynamics_gjk_collision(const float* shape_a, int num_a,
+                            const float* shape_b, int num_b) {
+    float simplex_buf[4][3];
+    int simplex_cnt;
+    return dynamics_gjk_with_simplex(shape_a, num_a, shape_b, num_b,
+                                      simplex_buf, &simplex_cnt);
+}
+
+/* EPA多面体面数据结构 */
+#define EPA_MAX_FACES 64
+#define EPA_MAX_VERTICES 64
+
+typedef struct {
+    int v[3];          /* 面的3个顶点索引 */
+    float normal[3];   /* 面法向量（指向外部） */
+    float dist;        /* 面到原点的距离 */
+} EPAPolyFace;
+
 /**
- * @brief K-031: EPA穿透深度计算
+ * @brief K-031: EPA穿透深度计算 — 真正的扩展多面体算法
  *
  * 在GJK检测到碰撞后，使用EPA算法计算最小穿透深度和方向。
  *
@@ -545,26 +539,111 @@ int dynamics_epa_penetration(const float* shape_a, int num_a,
     if (!shape_a || !shape_b || !penetration_depth || !penetration_normal)
         return -1;
 
-    /* 先确认碰撞 */
-    if (!dynamics_gjk_collision(shape_a, num_a, shape_b, num_b)) {
+    /* 第一步: 用GJK检测碰撞并获取单形体 */
+    float simplex[4][3];
+    int simplex_count = 0;
+    int collision = dynamics_gjk_with_simplex(shape_a, num_a, shape_b, num_b,
+                                               simplex, &simplex_count);
+    if (!collision) {
         *penetration_depth = 0.0f;
         penetration_normal[0] = 0; penetration_normal[1] = 0; penetration_normal[2] = 1;
         return 0;
     }
 
-    /* EPA: 用GJK的support函数迭代扩展多面体找到最近面 */
-    float nearest_dist = 1e30f;
-    float nearest_norm[3] = {0, 0, 0};
+    /* 第二步: 从GJK单形体构建初始多面体
+     * GJK单形体是一个包含原点的四面体，顶点是Minkowski差点 */
+    if (simplex_count < 4) {
+        /* 单形体不足4个顶点，退化情况，使用14方向搜索作为回退 */
+        float nearest_dist = 1e30f;
+        float nearest_norm[3] = {0, 0, 1};
+        GjkShape a, b;
+        a.num_vertices = num_a < 32 ? num_a : 32;
+        b.num_vertices = num_b < 32 ? num_b : 32;
+        for (int i = 0; i < a.num_vertices; i++) {
+            a.vertices[i][0] = shape_a[i*3+0];
+            a.vertices[i][1] = shape_a[i*3+1];
+            a.vertices[i][2] = shape_a[i*3+2];
+        }
+        for (int i = 0; i < b.num_vertices; i++) {
+            b.vertices[i][0] = shape_b[i*3+0];
+            b.vertices[i][1] = shape_b[i*3+1];
+            b.vertices[i][2] = shape_b[i*3+2];
+        }
+        float search_dirs[14][3] = {
+            {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1},
+            {0.577f,0.577f,0.577f},{-0.577f,0.577f,0.577f},
+            {0.577f,-0.577f,0.577f},{0.577f,0.577f,-0.577f},
+            {-0.577f,-0.577f,0.577f},{-0.577f,0.577f,-0.577f},
+            {0.577f,-0.577f,-0.577f},{-0.577f,-0.577f,-0.577f}
+        };
+        for (int d = 0; d < 14; d++) {
+            float dir[3] = {search_dirs[d][0], search_dirs[d][1], search_dirs[d][2]};
+            float pt[3];
+            gjk_support(&a, &b, dir, pt);
+            float dist = vec3_len(pt);
+            if (dist < nearest_dist && dist > 1e-8f) {
+                nearest_dist = dist;
+                float inv = 1.0f / dist;
+                nearest_norm[0] = -pt[0] * inv;
+                nearest_norm[1] = -pt[1] * inv;
+                nearest_norm[2] = -pt[2] * inv;
+            }
+        }
+        *penetration_depth = nearest_dist;
+        penetration_normal[0] = nearest_norm[0];
+        penetration_normal[1] = nearest_norm[1];
+        penetration_normal[2] = nearest_norm[2];
+        if (contact_point) {
+            contact_point[0] = nearest_norm[0] * nearest_dist * 0.5f;
+            contact_point[1] = nearest_norm[1] * nearest_dist * 0.5f;
+            contact_point[2] = nearest_norm[2] * nearest_dist * 0.5f;
+        }
+        return 1;
+    }
 
-    /* 从AABB中心方向开始采样多个搜索方向 */
-    float search_dirs[14][3] = {
-        {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1},
-        {0.577f,0.577f,0.577f},{-0.577f,0.577f,0.577f},
-        {0.577f,-0.577f,0.577f},{0.577f,0.577f,-0.577f},
-        {-0.577f,-0.577f,0.577f},{-0.577f,0.577f,-0.577f},
-        {0.577f,-0.577f,-0.577f},{-0.577f,-0.577f,-0.577f}
-    };
+    /* 第三步: 构建EPA多面体顶点数组和面列表 */
+    float epa_vertices[EPA_MAX_VERTICES][3];
+    EPAPolyFace epa_faces[EPA_MAX_FACES];
+    int vertex_count = simplex_count;
+    int face_count = 0;
 
+    for (int i = 0; i < simplex_count; i++) {
+        epa_vertices[i][0] = simplex[i][0];
+        epa_vertices[i][1] = simplex[i][1];
+        epa_vertices[i][2] = simplex[i][2];
+    }
+
+    /* 从四面体的4个面构建初始面列表 */
+    int tet_faces[4][3] = {{0,1,2},{0,3,1},{0,2,3},{1,3,2}};
+    for (int f = 0; f < 4; f++) {
+        int i0 = tet_faces[f][0], i1 = tet_faces[f][1], i2 = tet_faces[f][2];
+        float ab[3], ac[3];
+        vec3_sub(epa_vertices[i1], epa_vertices[i0], ab);
+        vec3_sub(epa_vertices[i2], epa_vertices[i0], ac);
+        float n[3];
+        n[0] = ab[1]*ac[2] - ab[2]*ac[1];
+        n[1] = ab[2]*ac[0] - ab[0]*ac[2];
+        n[2] = ab[0]*ac[1] - ab[1]*ac[0];
+        float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+        if (nl < 1e-10f) continue;
+        n[0] /= nl; n[1] /= nl; n[2] /= nl;
+
+        /* 确保法向量指向外部（远离原点） */
+        if (vec3_dot(n, epa_vertices[i0]) < 0.0f) {
+            n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
+        }
+
+        epa_faces[face_count].v[0] = i0;
+        epa_faces[face_count].v[1] = i1;
+        epa_faces[face_count].v[2] = i2;
+        epa_faces[face_count].normal[0] = n[0];
+        epa_faces[face_count].normal[1] = n[1];
+        epa_faces[face_count].normal[2] = n[2];
+        epa_faces[face_count].dist = vec3_dot(n, epa_vertices[i0]);
+        face_count++;
+    }
+
+    /* 设置support函数所需的形状数据 */
     GjkShape a, b;
     a.num_vertices = num_a < 32 ? num_a : 32;
     b.num_vertices = num_b < 32 ? num_b : 32;
@@ -579,29 +658,154 @@ int dynamics_epa_penetration(const float* shape_a, int num_a,
         b.vertices[i][2] = shape_b[i*3+2];
     }
 
-    for (int d = 0; d < 14; d++) {
-        float dir[3] = {search_dirs[d][0], search_dirs[d][1], search_dirs[d][2]};
-        float pt[3];
-        gjk_support(&a, &b, dir, pt);
-        float dist = vec3_len(pt);
-        if (dist < nearest_dist && dist > 1e-8f) {
-            nearest_dist = dist;
-            /* 法向量指向分离方向 */
-            float inv = 1.0f / dist;
-            nearest_norm[0] = -pt[0] * inv;
-            nearest_norm[1] = -pt[1] * inv;
-            nearest_norm[2] = -pt[2] * inv;
+    /* 第四步: EPA迭代扩展多面体 */
+    int best_face_idx = 0;
+    float best_dist = 1e30f;
+    for (int iter = 0; iter < 32; iter++) {
+        /* 找到距离原点最近的面 */
+        best_face_idx = -1;
+        best_dist = 1e30f;
+        for (int f = 0; f < face_count; f++) {
+            if (epa_faces[f].dist < best_dist) {
+                best_dist = epa_faces[f].dist;
+                best_face_idx = f;
+            }
         }
+        if (best_face_idx < 0) break;
+
+        /* 沿最近面的法向量方向搜索新support点 */
+        float search_dir[3];
+        search_dir[0] = epa_faces[best_face_idx].normal[0];
+        search_dir[1] = epa_faces[best_face_idx].normal[1];
+        search_dir[2] = epa_faces[best_face_idx].normal[2];
+
+        float new_pt[3];
+        gjk_support(&a, &b, search_dir, new_pt);
+
+        /* 计算新点到原点的投影距离 */
+        float new_dist = vec3_dot(new_pt, search_dir);
+        float dist_diff = new_dist - best_dist;
+
+        /* 收敛判断: 新点没有显著提升距离 */
+        if (dist_diff < 1e-6f || vertex_count >= EPA_MAX_VERTICES - 1)
+            break;
+
+        /* 添加新顶点到多面体 */
+        epa_vertices[vertex_count][0] = new_pt[0];
+        epa_vertices[vertex_count][1] = new_pt[1];
+        epa_vertices[vertex_count][2] = new_pt[2];
+        int new_vi = vertex_count++;
+
+        /* 重建面列表: 移除能看到新顶点的面，为新边添加新面
+         * 简化实现: 移除旧面列表中所有被新顶点"看到"的面，
+         * 然后为每条暴露的边添加连接到新顶点的新面 */
+        int keep_face[EPA_MAX_FACES] = {0};
+        int new_face_count = 0;
+        int edge_list[EPA_MAX_FACES * 2][2];
+        int edge_count = 0;
+
+        for (int f = 0; f < face_count; f++) {
+            int i0 = epa_faces[f].v[0], i1 = epa_faces[f].v[1], i2 = epa_faces[f].v[2];
+            /* 面中心 */
+            float fc[3];
+            fc[0] = (epa_vertices[i0][0] + epa_vertices[i1][0] + epa_vertices[i2][0]) / 3.0f;
+            fc[1] = (epa_vertices[i0][1] + epa_vertices[i1][1] + epa_vertices[i2][1]) / 3.0f;
+            fc[2] = (epa_vertices[i0][2] + epa_vertices[i1][2] + epa_vertices[i2][2]) / 3.0f;
+
+            /* 判断新顶点是否在面外侧 */
+            float to_new[3];
+            vec3_sub(new_pt, fc, to_new);
+            float dot_view = vec3_dot(to_new, epa_faces[f].normal);
+
+            if (dot_view > 1e-6f) {
+                /* 面被新顶点"看到"，标记为移除，添加其三条边到边列表 */
+                int edges[3][2] = {{i0,i1},{i1,i2},{i2,i0}};
+                for (int e = 0; e < 3; e++) {
+                    int found = 0;
+                    for (int ee = 0; ee < edge_count; ee++) {
+                        if ((edge_list[ee][0] == edges[e][0] && edge_list[ee][1] == edges[e][1]) ||
+                            (edge_list[ee][0] == edges[e][1] && edge_list[ee][1] == edges[e][0])) {
+                            /* 边被共享，移除（两个相邻面都能看到新顶点） */
+                            edge_list[ee][0] = edge_list[edge_count-1][0];
+                            edge_list[ee][1] = edge_list[edge_count-1][1];
+                            edge_count--;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found && edge_count < EPA_MAX_FACES * 2) {
+                        edge_list[edge_count][0] = edges[e][0];
+                        edge_list[edge_count][1] = edges[e][1];
+                        edge_count++;
+                    }
+                }
+            } else {
+                /* 保留该面 */
+                keep_face[f] = 1;
+            }
+        }
+
+        /* 复制保留的面到新面列表 */
+        for (int f = 0; f < face_count; f++) {
+            if (keep_face[f]) {
+                if (new_face_count >= EPA_MAX_FACES) break;
+                epa_faces[new_face_count] = epa_faces[f];
+                new_face_count++;
+            }
+        }
+
+        /* 为每条暴露的边创建连接到新顶点的三角形面 */
+        for (int e = 0; e < edge_count && new_face_count < EPA_MAX_FACES; e++) {
+            int i0 = edge_list[e][0], i1 = edge_list[e][1];
+            float ab[3], ac[3];
+            vec3_sub(epa_vertices[i1], epa_vertices[i0], ab);
+            vec3_sub(new_pt, epa_vertices[i0], ac);
+            float n[3];
+            n[0] = ab[1]*ac[2] - ab[2]*ac[1];
+            n[1] = ab[2]*ac[0] - ab[0]*ac[2];
+            n[2] = ab[0]*ac[1] - ab[1]*ac[0];
+            float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+            if (nl < 1e-10f) continue;
+            n[0] /= nl; n[1] /= nl; n[2] /= nl;
+
+            /* 确保法向量指向外部 */
+            float fm[3];
+            fm[0] = (epa_vertices[i0][0] + epa_vertices[i1][0] + new_pt[0]) / 3.0f;
+            fm[1] = (epa_vertices[i0][1] + epa_vertices[i1][1] + new_pt[1]) / 3.0f;
+            fm[2] = (epa_vertices[i0][2] + epa_vertices[i1][2] + new_pt[2]) / 3.0f;
+            if (vec3_dot(n, fm) < 0.0f) {
+                n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
+            }
+
+            epa_faces[new_face_count].v[0] = i0;
+            epa_faces[new_face_count].v[1] = i1;
+            epa_faces[new_face_count].v[2] = new_vi;
+            epa_faces[new_face_count].normal[0] = n[0];
+            epa_faces[new_face_count].normal[1] = n[1];
+            epa_faces[new_face_count].normal[2] = n[2];
+            epa_faces[new_face_count].dist = vec3_dot(n, epa_vertices[i0]);
+            new_face_count++;
+        }
+
+        if (new_face_count <= 0) break;
+        face_count = new_face_count;
     }
 
-    *penetration_depth = nearest_dist;
-    penetration_normal[0] = nearest_norm[0];
-    penetration_normal[1] = nearest_norm[1];
-    penetration_normal[2] = nearest_norm[2];
+    /* 第五步: 输出结果——最近面到原点的距离即为穿透深度 */
+    *penetration_depth = best_dist;
+    if (best_face_idx >= 0) {
+        penetration_normal[0] = epa_faces[best_face_idx].normal[0];
+        penetration_normal[1] = epa_faces[best_face_idx].normal[1];
+        penetration_normal[2] = epa_faces[best_face_idx].normal[2];
+    } else {
+        penetration_normal[0] = 0; penetration_normal[1] = 0; penetration_normal[2] = 1;
+    }
     if (contact_point) {
-        contact_point[0] = nearest_norm[0] * nearest_dist * 0.5f;
-        contact_point[1] = nearest_norm[1] * nearest_dist * 0.5f;
-        contact_point[2] = nearest_norm[2] * nearest_dist * 0.5f;
+        /* 接触点: 最近面法向量方向上的穿透中点 */
+        float half_depth = best_dist * 0.5f;
+        contact_point[0] = penetration_normal[0] * half_depth;
+        contact_point[1] = penetration_normal[1] * half_depth;
+        contact_point[2] = penetration_normal[2] * half_depth;
     }
     return 1;
 }

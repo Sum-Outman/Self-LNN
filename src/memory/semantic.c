@@ -16,19 +16,6 @@
 #include <stdio.h>
 
 /**
- * @brief 安全字符串复制（内部辅助函数）
- */
-static char* safe_str_copy(const char* str) {
-    if (!str) return NULL;
-    size_t len = strlen(str) + 1;
-    char* copy = (char*)safe_malloc(len);
-    if (copy) {
-        memcpy(copy, str, len);
-    }
-    return copy;
-}
-
-/**
  * @brief 语义记忆内部结构体
  */
 typedef struct {

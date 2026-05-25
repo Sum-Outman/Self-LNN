@@ -38,10 +38,13 @@
         PD_INITIALIZED = true;
     }
 
-    /* 后端API基础URL */
+    /* 后端API基础URL — 使用统一api-service.exe进行请求 */
     function pdGetBaseUrl() {
+        if (typeof window.SelfLnnApi !== 'undefined' && window.SelfLnnApi && window.SelfLnnApi.getBaseUrl) {
+            return window.SelfLnnApi.getBaseUrl();
+        }
         var host = window.location.hostname || '127.0.0.1';
-        var port = (typeof SELFLNN_HTTP_PORT !== 'undefined') ? SELFLNN_HTTP_PORT : 8080;
+        var port = (typeof SELFLNN_HTTP_PORT !== 'undefined') ? SELFLNN_HTTP_PORT : -1;
         return 'http://' + host + ':' + port;
     }
 

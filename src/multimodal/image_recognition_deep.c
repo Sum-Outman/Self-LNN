@@ -22,8 +22,23 @@ static float _tanh_f(float x) {
 }
 
 /* K-011修复：使用加密安全随机数替代rand() */
+/* Xavier初始化：适用于tanh/sigmoid激活函数层
+ * 公式：std = sqrt(2.0 / (fan_in + fan_out)) */
 static void _xavier_init(float* w, int fan_in, int fan_out) {
     float scale = sqrtf(2.0f / (float)(fan_in + fan_out));
+    for (int i = 0; i < fan_in * fan_out; i++) {
+        float u1 = secure_random_float();
+        float u2 = secure_random_float();
+        if (u1 < 1e-7f) u1 = 1e-7f;
+        w[i] = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2) * scale;
+    }
+}
+
+/* He/Kaiming初始化：适用于ReLU及变体激活函数层
+ * 公式：std = sqrt(2.0 / fan_in)
+ * 对ReLU激活的层使用此初始化可以避免梯度消失，保持前向传播方差 */
+static void _he_init(float* w, int fan_in, int fan_out) {
+    float scale = sqrtf(2.0f / (float)fan_in);
     for (int i = 0; i < fan_in * fan_out; i++) {
         float u1 = secure_random_float();
         float u2 = secure_random_float();
@@ -1790,6 +1805,363 @@ int ird_deep_manager_set_mode(IRDDeepManager* manager, int mode) {
     if (!manager) return -1;
     if (mode < IRD_MODE_FINE_GRAINED || mode > IRD_MODE_FEW_SHOT) return -1;
     manager->current_mode = mode;
+    return 0;
+}
+
+/* ======================================================================== */
+/*  预训练权重加载与保存（统一二进制格式）                                     */
+/* ======================================================================== */
+
+/* 统一权重文件魔数：SELFIRD3 = SELF IRD v3 */
+#define IRD_WEIGHTS_MAGIC "SELFIRD3"
+
+/* 保存深度识别管理器所有子模型权重到单个二进制文件
+ * 文件格式：[魔数8字节][管理器配置][子模型存在标记4×int][逐个子模型权重数据]
+ * 返回0成功，-1失败 */
+int ird_save_model_weights(const IRDDeepManager* manager, const char* path) {
+    if (!manager || !path) return -1;
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+
+    /* 写入魔数标识 */
+    const char magic[9] = IRD_WEIGHTS_MAGIC;
+    fwrite(magic, 1, 8, f);
+
+    /* 写入管理器配置 */
+    fwrite(&manager->cfg, sizeof(IRDDeepManagerConfig), 1, f);
+
+    /* 写入各子模型存在标记 */
+    int flags[4];
+    flags[0] = (manager->fine_classifier != NULL) ? 1 : 0;
+    flags[1] = (manager->open_set_recognizer != NULL) ? 1 : 0;
+    flags[2] = (manager->zero_shot_recognizer != NULL) ? 1 : 0;
+    flags[3] = (manager->few_shot_recognizer != NULL) ? 1 : 0;
+    fwrite(flags, sizeof(int), 4, f);
+
+    /* 写入当前识别模式 */
+    fwrite(&manager->current_mode, sizeof(int), 1, f);
+
+    /* ---- 细粒度分类器权重 ---- */
+    if (flags[0]) {
+        const IRDFineClassifier* c = manager->fine_classifier;
+        fwrite(&c->cfg, sizeof(IRDFineConfig), 1, f);
+        fwrite(&c->training_completed, sizeof(int), 1, f);
+        fwrite(c->W_gx_p, sizeof(float), 256 * 32, f);
+        fwrite(c->W_ax_p, sizeof(float), 256 * 32, f);
+        fwrite(c->W_gh_p, sizeof(float), 256 * 256, f);
+        fwrite(c->W_ah_p, sizeof(float), 256 * 256, f);
+        fwrite(c->b_g_p, sizeof(float), 256, f);
+        fwrite(c->b_a_p, sizeof(float), 256, f);
+        fwrite(c->W_gx_part, sizeof(float), 256 * 256, f);
+        fwrite(c->W_ax_part, sizeof(float), 256 * 256, f);
+        fwrite(c->W_gh_part, sizeof(float), 256 * 256, f);
+        fwrite(c->W_ah_part, sizeof(float), 256 * 256, f);
+        fwrite(c->b_g_part, sizeof(float), 256, f);
+        fwrite(c->b_a_part, sizeof(float), 256, f);
+        fwrite(c->W_fine, sizeof(float), 256 * 256, f);
+        fwrite(c->b_fine, sizeof(float), 256, f);
+        fwrite(c->W_coarse, sizeof(float), 64 * 256, f);
+        fwrite(c->b_coarse, sizeof(float), 64, f);
+        fwrite(c->bilin_W, sizeof(float), 256 * 256, f);
+        fwrite(c->bilin_proj, sizeof(float), 256 * 2, f);
+        fwrite(c->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fwrite(c->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fwrite(c->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fwrite(c->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fwrite(c->pb_g, sizeof(float), PCFC_HD, f);
+        fwrite(c->pb_a, sizeof(float), PCFC_HD, f);
+    }
+
+    /* ---- 开放集识别器权重 ---- */
+    if (flags[1]) {
+        const IRDOpenSetRecognizer* r = manager->open_set_recognizer;
+        fwrite(&r->cfg, sizeof(IRDOpenSetConfig), 1, f);
+        fwrite(&r->inv_temp, sizeof(float), 1, f);
+        fwrite(&r->reject_threshold, sizeof(float), 1, f);
+        fwrite(&r->num_known_classes, sizeof(int), 1, f);
+        fwrite(&r->total_samples, sizeof(int), 1, f);
+        fwrite(&r->weibull_thresh, sizeof(float), 1, f);
+        fwrite(&r->nndr_threshold, sizeof(float), 1, f);
+        fwrite(r->prototypes, sizeof(float), 256 * 256, f);
+        fwrite(r->W_gx, sizeof(float), 256 * 32, f);
+        fwrite(r->W_ax, sizeof(float), 256 * 32, f);
+        fwrite(r->W_gh, sizeof(float), 256 * 256, f);
+        fwrite(r->W_ah, sizeof(float), 256 * 256, f);
+        fwrite(r->b_g, sizeof(float), 256, f);
+        fwrite(r->b_a, sizeof(float), 256, f);
+        fwrite(r->hidden, sizeof(float), 256, f);
+        fwrite(r->weibull_k, sizeof(float), 256, f);
+        fwrite(r->weibull_lambda, sizeof(float), 256, f);
+        fwrite(r->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fwrite(r->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fwrite(r->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fwrite(r->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fwrite(r->pb_g, sizeof(float), PCFC_HD, f);
+        fwrite(r->pb_a, sizeof(float), PCFC_HD, f);
+    }
+
+    /* ---- 零样本识别器权重 ---- */
+    if (flags[2]) {
+        const IRDZeroShotRecognizer* z = manager->zero_shot_recognizer;
+        fwrite(&z->cfg, sizeof(IRDZeroShotConfig), 1, f);
+        fwrite(&z->margin, sizeof(float), 1, f);
+        fwrite(&z->num_seen_classes, sizeof(int), 1, f);
+        fwrite(&z->num_unseen_classes, sizeof(int), 1, f);
+        fwrite(&z->num_total_classes, sizeof(int), 1, f);
+        fwrite(z->W_vis_sem, sizeof(float), 256 * 256, f);
+        fwrite(z->b_vis_sem, sizeof(float), 256, f);
+        fwrite(z->W_attr_pred, sizeof(float), 128 * 256, f);
+        fwrite(z->b_attr_pred, sizeof(float), 128, f);
+        fwrite(z->class_attributes, sizeof(float), 256 * 128, f);
+        fwrite(z->semantic_prototypes, sizeof(float), 256 * 256, f);
+        fwrite(z->W_gx, sizeof(float), 256 * 32, f);
+        fwrite(z->W_ax, sizeof(float), 256 * 32, f);
+        fwrite(z->W_gh, sizeof(float), 256 * 256, f);
+        fwrite(z->W_ah, sizeof(float), 256 * 256, f);
+        fwrite(z->b_g, sizeof(float), 256, f);
+        fwrite(z->b_a, sizeof(float), 256, f);
+        fwrite(z->hidden, sizeof(float), 256, f);
+        fwrite(z->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fwrite(z->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fwrite(z->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fwrite(z->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fwrite(z->pb_g, sizeof(float), PCFC_HD, f);
+        fwrite(z->pb_a, sizeof(float), PCFC_HD, f);
+    }
+
+    /* ---- 少样本识别器权重 ---- */
+    if (flags[3]) {
+        const IRDFewShotRecognizer* fs = manager->few_shot_recognizer;
+        fwrite(&fs->cfg, sizeof(IRDFewShotConfig), 1, f);
+        fwrite(&fs->tau, sizeof(float), 1, f);
+        fwrite(&fs->dt, sizeof(float), 1, f);
+        fwrite(&fs->num_support, sizeof(int), 1, f);
+        fwrite(&fs->num_classes, sizeof(int), 1, f);
+        fwrite(&fs->initialized, sizeof(int), 1, f);
+        fwrite(fs->W_embed, sizeof(float), 32 * 256, f);
+        fwrite(fs->b_embed, sizeof(float), 256, f);
+        fwrite(fs->W_gx, sizeof(float), 256 * 32, f);
+        fwrite(fs->W_ax, sizeof(float), 256 * 32, f);
+        fwrite(fs->W_gh, sizeof(float), 256 * 256, f);
+        fwrite(fs->W_ah, sizeof(float), 256 * 256, f);
+        fwrite(fs->b_g, sizeof(float), 256, f);
+        fwrite(fs->b_a, sizeof(float), 256, f);
+        fwrite(fs->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fwrite(fs->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fwrite(fs->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fwrite(fs->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fwrite(fs->pb_g, sizeof(float), PCFC_HD, f);
+        fwrite(fs->pb_a, sizeof(float), PCFC_HD, f);
+        fwrite(fs->support_features, sizeof(float), IRD_MAX_SUPPORT_SAMPLES * IRD_SEMANTIC_DIM, f);
+        fwrite(fs->support_labels, sizeof(int), IRD_MAX_SUPPORT_SAMPLES, f);
+        fwrite(fs->prototypes, sizeof(float), IRD_MAX_PROTOTYPES * IRD_SEMANTIC_DIM, f);
+        fwrite(fs->prototype_counts, sizeof(int), IRD_MAX_PROTOTYPES, f);
+        fwrite(fs->finetune_W, sizeof(float), 256 * 32, f);
+        fwrite(fs->finetune_b, sizeof(float), 256, f);
+        fwrite(fs->class_names, sizeof(char), 256 * 64, f);
+    }
+
+    fclose(f);
+    return 0;
+}
+
+/* 从二进制文件加载预训练权重到深度识别管理器所有子模型
+ * 文件格式与 ird_save_model_weights 严格对应
+ * 加载时会覆盖现有权重，用于恢复训练状态或部署预训练模型
+ * 返回0成功，-1失败 */
+int ird_load_pretrained_weights(IRDDeepManager* manager, const char* path) {
+    if (!manager || !path) return -1;
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+
+    /* 验证魔数标识 */
+    char magic[8];
+    if (fread(magic, 1, 8, f) != 8 || memcmp(magic, IRD_WEIGHTS_MAGIC, 8) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    /* 读取管理器配置 */
+    IRDDeepManagerConfig loaded_cfg;
+    fread(&loaded_cfg, sizeof(IRDDeepManagerConfig), 1, f);
+    memcpy(&manager->cfg, &loaded_cfg, sizeof(IRDDeepManagerConfig));
+
+    /* 读取子模型存在标记 */
+    int flags[4];
+    fread(flags, sizeof(int), 4, f);
+
+    /* 读取当前识别模式 */
+    fread(&manager->current_mode, sizeof(int), 1, f);
+
+    /* ---- 细粒度分类器权重 ---- */
+    if (flags[0] && manager->fine_classifier) {
+        IRDFineClassifier* c = manager->fine_classifier;
+        fread(&c->cfg, sizeof(IRDFineConfig), 1, f);
+        fread(&c->training_completed, sizeof(int), 1, f);
+        fread(c->W_gx_p, sizeof(float), 256 * 32, f);
+        fread(c->W_ax_p, sizeof(float), 256 * 32, f);
+        fread(c->W_gh_p, sizeof(float), 256 * 256, f);
+        fread(c->W_ah_p, sizeof(float), 256 * 256, f);
+        fread(c->b_g_p, sizeof(float), 256, f);
+        fread(c->b_a_p, sizeof(float), 256, f);
+        fread(c->W_gx_part, sizeof(float), 256 * 256, f);
+        fread(c->W_ax_part, sizeof(float), 256 * 256, f);
+        fread(c->W_gh_part, sizeof(float), 256 * 256, f);
+        fread(c->W_ah_part, sizeof(float), 256 * 256, f);
+        fread(c->b_g_part, sizeof(float), 256, f);
+        fread(c->b_a_part, sizeof(float), 256, f);
+        fread(c->W_fine, sizeof(float), 256 * 256, f);
+        fread(c->b_fine, sizeof(float), 256, f);
+        fread(c->W_coarse, sizeof(float), 64 * 256, f);
+        fread(c->b_coarse, sizeof(float), 64, f);
+        fread(c->bilin_W, sizeof(float), 256 * 256, f);
+        fread(c->bilin_proj, sizeof(float), 256 * 2, f);
+        fread(c->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fread(c->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fread(c->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fread(c->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fread(c->pb_g, sizeof(float), PCFC_HD, f);
+        fread(c->pb_a, sizeof(float), PCFC_HD, f);
+    } else if (flags[0]) {
+        /* 文件中存在权重但管理器未初始化该子模型，跳过对应数据 */
+        size_t skip_size = sizeof(IRDFineConfig) + sizeof(int)
+            + (256 * 32 + 256 * 32 + 256 * 256 + 256 * 256) * sizeof(float)
+            + (256 + 256) * sizeof(float)
+            + (256 * 256 + 256 * 256 + 256 * 256 + 256 * 256) * sizeof(float)
+            + (256 + 256) * sizeof(float)
+            + (256 * 256 + 256) * sizeof(float)
+            + (64 * 256 + 64) * sizeof(float)
+            + (256 * 256 + 256 * 2) * sizeof(float)
+            + (PCFC_HD * PCFC_MAX_CH + PCFC_HD * PCFC_MAX_CH) * sizeof(float)
+            + (PCFC_HD * PCFC_HD + PCFC_HD * PCFC_HD) * sizeof(float)
+            + (PCFC_HD + PCFC_HD) * sizeof(float);
+        fseek(f, (long)skip_size, SEEK_CUR);
+    }
+
+    /* ---- 开放集识别器权重 ---- */
+    if (flags[1] && manager->open_set_recognizer) {
+        IRDOpenSetRecognizer* r = manager->open_set_recognizer;
+        fread(&r->cfg, sizeof(IRDOpenSetConfig), 1, f);
+        fread(&r->inv_temp, sizeof(float), 1, f);
+        fread(&r->reject_threshold, sizeof(float), 1, f);
+        fread(&r->num_known_classes, sizeof(int), 1, f);
+        fread(&r->total_samples, sizeof(int), 1, f);
+        fread(&r->weibull_thresh, sizeof(float), 1, f);
+        fread(&r->nndr_threshold, sizeof(float), 1, f);
+        fread(r->prototypes, sizeof(float), 256 * 256, f);
+        fread(r->W_gx, sizeof(float), 256 * 32, f);
+        fread(r->W_ax, sizeof(float), 256 * 32, f);
+        fread(r->W_gh, sizeof(float), 256 * 256, f);
+        fread(r->W_ah, sizeof(float), 256 * 256, f);
+        fread(r->b_g, sizeof(float), 256, f);
+        fread(r->b_a, sizeof(float), 256, f);
+        fread(r->hidden, sizeof(float), 256, f);
+        fread(r->weibull_k, sizeof(float), 256, f);
+        fread(r->weibull_lambda, sizeof(float), 256, f);
+        fread(r->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fread(r->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fread(r->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fread(r->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fread(r->pb_g, sizeof(float), PCFC_HD, f);
+        fread(r->pb_a, sizeof(float), PCFC_HD, f);
+    } else if (flags[1]) {
+        size_t skip_size = sizeof(IRDOpenSetConfig) + sizeof(float) * 2
+            + sizeof(int) * 2 + sizeof(float) * 2
+            + (256 * 256 + 256 * 32 + 256 * 32 + 256 * 256 + 256 * 256) * sizeof(float)
+            + (256 + 256 + 256 + 256 + 256) * sizeof(float)
+            + (PCFC_HD * PCFC_MAX_CH + PCFC_HD * PCFC_MAX_CH) * sizeof(float)
+            + (PCFC_HD * PCFC_HD + PCFC_HD * PCFC_HD) * sizeof(float)
+            + (PCFC_HD + PCFC_HD) * sizeof(float);
+        fseek(f, (long)skip_size, SEEK_CUR);
+    }
+
+    /* ---- 零样本识别器权重 ---- */
+    if (flags[2] && manager->zero_shot_recognizer) {
+        IRDZeroShotRecognizer* z = manager->zero_shot_recognizer;
+        fread(&z->cfg, sizeof(IRDZeroShotConfig), 1, f);
+        fread(&z->margin, sizeof(float), 1, f);
+        fread(&z->num_seen_classes, sizeof(int), 1, f);
+        fread(&z->num_unseen_classes, sizeof(int), 1, f);
+        fread(&z->num_total_classes, sizeof(int), 1, f);
+        fread(z->W_vis_sem, sizeof(float), 256 * 256, f);
+        fread(z->b_vis_sem, sizeof(float), 256, f);
+        fread(z->W_attr_pred, sizeof(float), 128 * 256, f);
+        fread(z->b_attr_pred, sizeof(float), 128, f);
+        fread(z->class_attributes, sizeof(float), 256 * 128, f);
+        fread(z->semantic_prototypes, sizeof(float), 256 * 256, f);
+        fread(z->W_gx, sizeof(float), 256 * 32, f);
+        fread(z->W_ax, sizeof(float), 256 * 32, f);
+        fread(z->W_gh, sizeof(float), 256 * 256, f);
+        fread(z->W_ah, sizeof(float), 256 * 256, f);
+        fread(z->b_g, sizeof(float), 256, f);
+        fread(z->b_a, sizeof(float), 256, f);
+        fread(z->hidden, sizeof(float), 256, f);
+        fread(z->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fread(z->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fread(z->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fread(z->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fread(z->pb_g, sizeof(float), PCFC_HD, f);
+        fread(z->pb_a, sizeof(float), PCFC_HD, f);
+    } else if (flags[2]) {
+        size_t skip_size = sizeof(IRDZeroShotConfig) + sizeof(float)
+            + sizeof(int) * 3
+            + (256 * 256 + 256 + 128 * 256 + 128) * sizeof(float)
+            + (256 * 128 + 256 * 256 + 256 * 32 + 256 * 32) * sizeof(float)
+            + (256 * 256 + 256 * 256 + 256 + 256 + 256) * sizeof(float)
+            + (PCFC_HD * PCFC_MAX_CH + PCFC_HD * PCFC_MAX_CH) * sizeof(float)
+            + (PCFC_HD * PCFC_HD + PCFC_HD * PCFC_HD) * sizeof(float)
+            + (PCFC_HD + PCFC_HD) * sizeof(float);
+        fseek(f, (long)skip_size, SEEK_CUR);
+    }
+
+    /* ---- 少样本识别器权重 ---- */
+    if (flags[3] && manager->few_shot_recognizer) {
+        IRDFewShotRecognizer* fs = manager->few_shot_recognizer;
+        fread(&fs->cfg, sizeof(IRDFewShotConfig), 1, f);
+        fread(&fs->tau, sizeof(float), 1, f);
+        fread(&fs->dt, sizeof(float), 1, f);
+        fread(&fs->num_support, sizeof(int), 1, f);
+        fread(&fs->num_classes, sizeof(int), 1, f);
+        fread(&fs->initialized, sizeof(int), 1, f);
+        fread(fs->W_embed, sizeof(float), 32 * 256, f);
+        fread(fs->b_embed, sizeof(float), 256, f);
+        fread(fs->W_gx, sizeof(float), 256 * 32, f);
+        fread(fs->W_ax, sizeof(float), 256 * 32, f);
+        fread(fs->W_gh, sizeof(float), 256 * 256, f);
+        fread(fs->W_ah, sizeof(float), 256 * 256, f);
+        fread(fs->b_g, sizeof(float), 256, f);
+        fread(fs->b_a, sizeof(float), 256, f);
+        fread(fs->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fread(fs->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
+        fread(fs->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fread(fs->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
+        fread(fs->pb_g, sizeof(float), PCFC_HD, f);
+        fread(fs->pb_a, sizeof(float), PCFC_HD, f);
+        fread(fs->support_features, sizeof(float), IRD_MAX_SUPPORT_SAMPLES * IRD_SEMANTIC_DIM, f);
+        fread(fs->support_labels, sizeof(int), IRD_MAX_SUPPORT_SAMPLES, f);
+        fread(fs->prototypes, sizeof(float), IRD_MAX_PROTOTYPES * IRD_SEMANTIC_DIM, f);
+        fread(fs->prototype_counts, sizeof(int), IRD_MAX_PROTOTYPES, f);
+        fread(fs->finetune_W, sizeof(float), 256 * 32, f);
+        fread(fs->finetune_b, sizeof(float), 256, f);
+        fread(fs->class_names, sizeof(char), 256 * 64, f);
+    } else if (flags[3]) {
+        size_t skip_size = sizeof(IRDFewShotConfig) + sizeof(float) * 2
+            + sizeof(int) * 3
+            + (32 * 256 + 256) * sizeof(float)
+            + (256 * 32 + 256 * 32 + 256 * 256 + 256 * 256 + 256 + 256) * sizeof(float)
+            + (PCFC_HD * PCFC_MAX_CH + PCFC_HD * PCFC_MAX_CH) * sizeof(float)
+            + (PCFC_HD * PCFC_HD + PCFC_HD * PCFC_HD) * sizeof(float)
+            + (PCFC_HD + PCFC_HD) * sizeof(float)
+            + IRD_MAX_SUPPORT_SAMPLES * IRD_SEMANTIC_DIM * sizeof(float)
+            + IRD_MAX_SUPPORT_SAMPLES * sizeof(int)
+            + IRD_MAX_PROTOTYPES * IRD_SEMANTIC_DIM * sizeof(float)
+            + IRD_MAX_PROTOTYPES * sizeof(int)
+            + (256 * 32 + 256) * sizeof(float)
+            + 256 * 64 * sizeof(char);
+        fseek(f, (long)skip_size, SEEK_CUR);
+    }
+
+    fclose(f);
     return 0;
 }
 
