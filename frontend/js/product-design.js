@@ -34,7 +34,7 @@
 
         if (!PD_GENERATE_BTN) return;
         PD_GENERATE_BTN.addEventListener('click', pdGenerate);
-        PD_STATUS_BTN.addEventListener('click', pdCheckStatus);
+        if (PD_STATUS_BTN) PD_STATUS_BTN.addEventListener('click', pdCheckStatus);
         PD_INITIALIZED = true;
     }
 

@@ -1369,9 +1369,8 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
          * 仅由反向传播的time_constant_grad通过SGD/Adam更新，
          * 禁用启发式更新。非训练模式仅使用启发式。 */
         if (cell->use_adaptive_tau) {
-            if (cell->config.enable_training) {
-                /* 训练模式: 跳过启发式，由反向传播梯度驱动 */
-            } else {
+            /* 训练模式下跳过启发式更新（由反向传播梯度驱动），
+             * 非训练模式使用激活幅度自适应调整时间常数 */
             float activation_magnitude = fabsf(new_state);
             float beta = 2.0f;
             float target_tau = cell->min_time_constant + 
@@ -1384,7 +1383,6 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
             }
             if (cell->time_constants[i] > cell->max_time_constant) {
                 cell->time_constants[i] = cell->max_time_constant;
-            }
             }
         }
     }

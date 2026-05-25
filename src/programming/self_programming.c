@@ -12,6 +12,7 @@
 #endif
 
 #include "selflnn/programming/self_programming.h"
+#include "selflnn/programming/programming_enhanced.h"  /* H-017集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/core/errors.h"
@@ -64,6 +65,7 @@ struct SelfProgrammingEngine {
     void* parser_state;          /**< 解析器状态 */
     void* code_generator;        /**< 代码生成器状态 */
     void* analyzer_state;        /**< 分析器状态 */
+    void* penh_engine;           /**< H-017: 编程增强引擎（重构/性能/安全分析） */
 };
 
 /**
@@ -1595,6 +1597,9 @@ SelfProgrammingEngine* self_programming_engine_create(ProgrammingLanguage langua
     engine->language = language;
     engine->is_initialized = 1;
     
+    /* H-017集成: 初始化编程增强引擎（重构分析/性能分析/安全扫描） */
+    engine->penh_engine = penh_refactor_engine_create();
+    
     return engine;
 }
 
@@ -1615,6 +1620,11 @@ void self_programming_engine_destroy(SelfProgrammingEngine* engine) {
     
     if (engine->analyzer_state) {
         safe_free((void**)&engine->analyzer_state);
+    }
+    
+    /* H-017集成: 释放编程增强引擎 */
+    if (engine->penh_engine) {
+        penh_refactor_engine_free((PenhRefactorEngine*)engine->penh_engine);
     }
     
     safe_free((void**)&engine);
@@ -2898,6 +2908,39 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
     detail_pos += snprintf(result.details + detail_pos,
                            sizeof(result.details) - detail_pos,
                            "发现问题总数：%d\n", result.issue_count);
+    
+    /* H-017集成: 调用编程增强进行重构分析、性能分析、安全扫描 */
+    if (engine->penh_engine && ast) {
+        /* 分析AST生成重构计划 */
+        PenhRefactorPlan refactor_plan;
+        memset(&refactor_plan, 0, sizeof(PenhRefactorPlan));
+        penh_analyze_refactoring(engine->penh_engine, ast, &refactor_plan);
+        if (refactor_plan.action_count > 0) {
+            detail_pos += snprintf(result.details + detail_pos,
+                                   sizeof(result.details) - detail_pos,
+                                   "重构建议：%d个优化操作\n", refactor_plan.action_count);
+        }
+        
+        /* 性能分析 */
+        PenhPerfResult perf_result;
+        memset(&perf_result, 0, sizeof(PenhPerfResult));
+        penh_analyze_performance(source_code, ast, &perf_result);
+        if (perf_result.issue_count > 0) {
+            detail_pos += snprintf(result.details + detail_pos,
+                                   sizeof(result.details) - detail_pos,
+                                   "性能问题：%d个瓶颈(%.1f分)\n", perf_result.issue_count, perf_result.overall_score);
+        }
+        
+        /* 安全漏洞扫描 */
+        PenhSecurityResult sec_result;
+        memset(&sec_result, 0, sizeof(PenhSecurityResult));
+        penh_scan_security(source_code, ast, &sec_result);
+        if (sec_result.vuln_count > 0) {
+            detail_pos += snprintf(result.details + detail_pos,
+                                   sizeof(result.details) - detail_pos,
+                                   "安全漏洞：%d个风险(%.1f分)\n", sec_result.vuln_count, sec_result.overall_risk_score);
+        }
+    }
     
     return result;
 }

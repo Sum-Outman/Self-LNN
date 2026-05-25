@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <stdint.h>
 
@@ -759,6 +760,49 @@ int kv_merge_branch(KnowledgeVersionManager* kvm, const char* source, const char
         }
     }
 
+    /* H-002修复: 将合并结果序列化写入知识库数据文件
+     * 使用与快照文件相同的二进制格式(SnapshotFileHeader + 条目数组)，
+     * 写入storage_dir下的knowledge_merged_current.dat，
+     * 确保合并结果在程序重启后可恢复。 */
+    {
+        char merged_data_path[512];
+        snprintf(merged_data_path, sizeof(merged_data_path),
+                 "%s/knowledge_merged_current.dat", kvm->storage_dir);
+        FILE* merged_fp = fopen(merged_data_path, "wb");
+        if (merged_fp) {
+            SnapshotFileHeader merged_header;
+            memset(&merged_header, 0, sizeof(SnapshotFileHeader));
+            merged_header.magic = KV_FILE_MAGIC;
+            merged_header.version = KV_FILE_VERSION;
+            merged_header.snapshot_id = new_id;
+            snprintf(merged_header.message, KV_MAX_MESSAGE, "%s", merge_msg);
+            merged_header.created_at = time(NULL);
+            merged_header.entry_count = (size_t)merged_count;
+            merged_header.parent_id = tgt_snap;
+            snprintf(merged_header.branch, KV_MAX_BRANCH_NAME, "%s", target);
+            merged_header.is_checkpoint = 0;
+
+            size_t header_ok = fwrite(&merged_header, sizeof(SnapshotFileHeader), 1, merged_fp);
+            size_t entries_ok = 1;
+            if (merged_count > 0) {
+                entries_ok = fwrite(merged_entries, sizeof(SnapshotEntryRecord),
+                                    (size_t)merged_count, merged_fp);
+            }
+
+            if (header_ok != 1 || entries_ok != (size_t)merged_count) {
+                log_error("[分支合并] 写入合并数据文件失败: %s (header=%zu, entries=%zu/%d)",
+                          merged_data_path, header_ok, entries_ok, merged_count);
+            } else {
+                log_info("[分支合并] 合并结果已持久化写入: %s (共%d条目, 分支=%s)",
+                         merged_data_path, merged_count, target);
+            }
+            fclose(merged_fp);
+        } else {
+            log_error("[分支合并] 无法创建合并数据文件: %s (errno=%d)",
+                      merged_data_path, errno);
+        }
+    }
+
     safe_free((void**)&src_entries);
     safe_free((void**)&tgt_entries);
     safe_free((void**)&merged_entries);
@@ -986,33 +1030,58 @@ int kv_diff_export_report(const KnowledgeVersionManager* kvm, int from_id, int t
     return 0;
 }
 
+/* 快照按创建时间升序排序的比较函数 */
+static int compare_snapshots_by_time(const void* a, const void* b) {
+    const KnowledgeSnapshot* snap_a = (const KnowledgeSnapshot*)a;
+    const KnowledgeSnapshot* snap_b = (const KnowledgeSnapshot*)b;
+    if (snap_a->created_at < snap_b->created_at) return -1;
+    if (snap_a->created_at > snap_b->created_at) return 1;
+    return 0;
+}
+
 int kv_cleanup_old_snapshots(KnowledgeVersionManager* kvm, int keep_count) {
     if (!kvm || keep_count <= 0) return -1;
 
     if (kvm->snapshot_count <= keep_count) return 0;
 
+    /* 按创建时间升序排序，确保删除最旧的快照 */
+    qsort(kvm->snapshots, kvm->snapshot_count, sizeof(KnowledgeSnapshot), compare_snapshots_by_time);
+
     int to_remove = kvm->snapshot_count - keep_count;
+    int removed = 0;
     char filepath[512];
 
-    for (int i = 0; i < to_remove; i++) {
+    /* 遍历排序后的快照，移除最旧的，但保护检查点不被自动删除 */
+    for (int i = 0; i < kvm->snapshot_count && removed < to_remove; i++) {
+        /* 标记为检查点的快照不自动删除 */
+        if (kvm->snapshots[i].is_checkpoint) {
+            continue;
+        }
         int snap_id = kvm->snapshots[i].snapshot_id;
         snprintf(filepath, sizeof(filepath), "%s/snapshot_%d.dat",
                  kvm->storage_dir, snap_id);
         remove(filepath);
         memset(&kvm->snapshots[i], 0, sizeof(KnowledgeSnapshot));
+        removed++;
     }
 
-    int remaining = kvm->snapshot_count - to_remove;
-    for (int i = 0; i < remaining; i++) {
-        memcpy(&kvm->snapshots[i], &kvm->snapshots[i + to_remove], sizeof(KnowledgeSnapshot));
+    /* 紧凑数组：将已清空的快照移除，保留有效快照 */
+    int write_idx = 0;
+    for (int read_idx = 0; read_idx < kvm->snapshot_count; read_idx++) {
+        if (kvm->snapshots[read_idx].snapshot_id != 0) {
+            if (write_idx != read_idx) {
+                memcpy(&kvm->snapshots[write_idx], &kvm->snapshots[read_idx], sizeof(KnowledgeSnapshot));
+            }
+            write_idx++;
+        }
     }
-    kvm->snapshot_count = remaining;
+    kvm->snapshot_count = write_idx;
 
-    if (kvm->current_snapshot > 0) {
-        kvm->current_snapshot = kvm->snapshots[remaining - 1].snapshot_id;
+    if (kvm->current_snapshot > 0 && kvm->snapshot_count > 0) {
+        kvm->current_snapshot = kvm->snapshots[kvm->snapshot_count - 1].snapshot_id;
     }
 
-    return to_remove;
+    return removed;
 }
 
 /* 暴露当前条目快照供知识库更新时使用，并自动追踪条目历史 */
@@ -1195,4 +1264,172 @@ int kv_semantic_merge_entities(
 
     #undef SEMANTIC_HIGH_THRESHOLD
     #undef SEMANTIC_MID_THRESHOLD
+}
+
+/* ============================================================================
+ * H-003: 从knowledge_snapshot合并的标签和保存/加载功能
+ * ============================================================================ */
+
+/* 新增的save/load文件魔数（区别于SnapshotFileHeader的KV_FILE_MAGIC） */
+#define KV_SAVE_FILE_MAGIC  0x4B564D47  /* "KVMG" - KnowledgeVersion ManaGer */
+#define KV_SAVE_FILE_VERSION 1
+
+/* save/load用文件头 */
+typedef struct {
+    uint32_t magic;
+    uint32_t file_version;
+    int32_t snapshot_count;
+    int32_t current_snapshot;
+    int32_t branch_count;
+    int32_t auto_interval_min;
+    int32_t auto_max_snapshots;
+    int32_t next_snapshot_id;
+    int32_t history_count;
+    int32_t current_entry_count;
+    int32_t reserved[4];
+    /* 变长数据: storage_dir(512) + current_branch(64) + branch_names(16*64) + KnowledgeSnapshot数组 + entry_histories */
+} KVMFileHeader;
+
+/* 为指定快照添加标签 */
+int kv_add_tag(KnowledgeVersionManager* kvm, int snapshot_id, const char* tag) {
+    if (!kvm || !tag) return -1;
+    for (int i = 0; i < kvm->snapshot_count; i++) {
+        if (kvm->snapshots[i].snapshot_id == snapshot_id) {
+            snprintf(kvm->snapshots[i].tag, sizeof(kvm->snapshots[i].tag), "%s", tag);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* 将整个版本控制器序列化保存到文件 */
+int kv_save(const KnowledgeVersionManager* kvm, const char* filepath) {
+    if (!kvm || !filepath) return -1;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) {
+        log_error("[知识版本管理] 无法打开文件写入: %s", filepath);
+        return -1;
+    }
+
+    KVMFileHeader header;
+    memset(&header, 0, sizeof(KVMFileHeader));
+    header.magic = KV_SAVE_FILE_MAGIC;
+    header.file_version = KV_SAVE_FILE_VERSION;
+    header.snapshot_count = (int32_t)kvm->snapshot_count;
+    header.current_snapshot = (int32_t)kvm->current_snapshot;
+    header.branch_count = (int32_t)kvm->branch_count;
+    header.auto_interval_min = (int32_t)kvm->auto_interval_min;
+    header.auto_max_snapshots = (int32_t)kvm->auto_max_snapshots;
+    header.next_snapshot_id = (int32_t)kvm->next_snapshot_id;
+    header.history_count = (int32_t)kvm->history_count;
+    header.current_entry_count = (int32_t)kvm->current_entry_count;
+
+    if (fwrite(&header, sizeof(KVMFileHeader), 1, fp) != 1) {
+        fclose(fp);
+        return -1;
+    }
+
+    /* 写入storage_dir(512) */
+    fwrite(kvm->storage_dir, sizeof(kvm->storage_dir), 1, fp);
+    /* 写入current_branch(64) */
+    fwrite(kvm->current_branch, sizeof(kvm->current_branch), 1, fp);
+    /* 写入分支名称数组 */
+    fwrite(kvm->branches, sizeof(kvm->branches), 1, fp);
+    /* 写入快照数组 */
+    fwrite(kvm->snapshots, sizeof(kvm->snapshots), 1, fp);
+    /* 写入条目历史数组 */
+    fwrite(kvm->entry_histories, sizeof(kvm->entry_histories), 1, fp);
+    /* 写入当前条目数组 */
+    fwrite(kvm->current_entries, sizeof(SnapshotEntryRecord), (size_t)kvm->current_entry_count, fp);
+
+    fclose(fp);
+    log_info("[知识版本管理] 已保存版本控制状态到: %s (快照数=%d, 分支数=%d)",
+             filepath, kvm->snapshot_count, kvm->branch_count);
+    return 0;
+}
+
+/* 从文件反序列化加载版本控制器 */
+KnowledgeVersionManager* kv_load(const char* filepath) {
+    if (!filepath) return NULL;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) {
+        log_warning("[知识版本管理] 版本文件不存在: %s", filepath);
+        return NULL;
+    }
+
+    KVMFileHeader header;
+    if (fread(&header, sizeof(KVMFileHeader), 1, fp) != 1 ||
+        header.magic != KV_SAVE_FILE_MAGIC) {
+        log_error("[知识版本管理] 文件格式无效: %s (魔数不匹配)", filepath);
+        fclose(fp);
+        return NULL;
+    }
+
+    KnowledgeVersionManager* kvm = (KnowledgeVersionManager*)safe_calloc(1, sizeof(KnowledgeVersionManager));
+    if (!kvm) { fclose(fp); return NULL; }
+
+    kvm->snapshot_count = header.snapshot_count;
+    kvm->current_snapshot = header.current_snapshot;
+    kvm->branch_count = header.branch_count;
+    kvm->auto_interval_min = header.auto_interval_min;
+    kvm->auto_max_snapshots = header.auto_max_snapshots;
+    kvm->next_snapshot_id = header.next_snapshot_id;
+    kvm->history_count = header.history_count;
+    kvm->current_entry_count = header.current_entry_count;
+    kvm->last_auto_snapshot = 0;
+
+    /* 读取storage_dir */
+    fread(kvm->storage_dir, sizeof(kvm->storage_dir), 1, fp);
+    /* 读取current_branch */
+    fread(kvm->current_branch, sizeof(kvm->current_branch), 1, fp);
+    /* 读取分支名称数组 */
+    fread(kvm->branches, sizeof(kvm->branches), 1, fp);
+    /* 读取快照数组 */
+    fread(kvm->snapshots, sizeof(kvm->snapshots), 1, fp);
+    /* 读取条目历史数组 */
+    fread(kvm->entry_histories, sizeof(kvm->entry_histories), 1, fp);
+    /* 读取当前条目数组 */
+    if (kvm->current_entry_count > 0 && kvm->current_entry_count <= KV_MAX_ENTRIES_PER_SNAPSHOT) {
+        fread(kvm->current_entries, sizeof(SnapshotEntryRecord), (size_t)kvm->current_entry_count, fp);
+    }
+
+    fclose(fp);
+    log_info("[知识版本管理] 已从文件加载版本控制状态: %s (快照数=%d, 分支数=%d)",
+             filepath, kvm->snapshot_count, kvm->branch_count);
+    return kvm;
+}
+
+/* 获取指定分支的快照历史（按创建时间排序） */
+int kv_get_history(const KnowledgeVersionManager* kvm, const char* branch_name,
+                   KnowledgeSnapshot* out, int max_count) {
+    if (!kvm || !out || max_count <= 0) return -1;
+
+    /* 先收集匹配分支的快照到临时数组 */
+    KnowledgeSnapshot temp[KV_MAX_SNAPSHOTS];
+    int temp_count = 0;
+
+    for (int i = 0; i < kvm->snapshot_count && temp_count < KV_MAX_SNAPSHOTS; i++) {
+        if (!branch_name || strcmp(kvm->snapshots[i].branch, branch_name) == 0) {
+            memcpy(&temp[temp_count], &kvm->snapshots[i], sizeof(KnowledgeSnapshot));
+            temp_count++;
+        }
+    }
+
+    /* 按创建时间升序排序（冒泡排序，快照数量通常不大） */
+    for (int i = 0; i < temp_count - 1; i++) {
+        for (int j = 0; j < temp_count - i - 1; j++) {
+            if (temp[j].created_at > temp[j + 1].created_at) {
+                KnowledgeSnapshot tmp = temp[j];
+                temp[j] = temp[j + 1];
+                temp[j + 1] = tmp;
+            }
+        }
+    }
+
+    /* 复制结果，不超过max_count */
+    int result_count = temp_count < max_count ? temp_count : max_count;
+    memcpy(out, temp, (size_t)result_count * sizeof(KnowledgeSnapshot));
+    return result_count;
 }

@@ -3802,19 +3802,19 @@ static void calibrate_stereo_extrinsic(const float** left_images,
     memcpy(E, eigenvector, 9 * sizeof(float));
     
     // 步骤3：从本质矩阵分解旋转矩阵R和平移向量t
-    // M-006残修复: 使用已标定的外参或通过SVD从E矩阵恢复R和t
+    /* M-006残修复: 使用已标定的外参或通过SVD从E矩阵恢复R和t */
     // E = [t]_x * R，其中[t]_x是t的叉乘矩阵
     float R[9] = {0};
     float t[3] = {0};
     
     /* 优先使用已标定外参（如果有） */
-    if (estimator->stereo_calib.is_calibrated) {
-        memcpy(R, estimator->stereo_calib.extrinsics.rotation, 9 * sizeof(float));
-        memcpy(t, estimator->stereo_calib.extrinsics.translation, 3 * sizeof(float));
-    } else if (estimator->stereo_calib.baseline > 0.0f) {
+    if (stereo_calib->is_calibrated) {
+        memcpy(R, stereo_calib->extrinsics.rotation, 9 * sizeof(float));
+        memcpy(t, stereo_calib->extrinsics.translation, 3 * sizeof(float));
+    } else if (stereo_calib->baseline > 0.0f) {
         /* 有基线但无旋转矩阵：使用平行相机假设 */
         for (int i = 0; i < 3; i++) R[i * 3 + i] = 1.0f;
-        t[0] = estimator->stereo_calib.baseline;
+        t[0] = stereo_calib->baseline;
         t[1] = 0.0f; t[2] = 0.0f;
     } else {
         /* 无标定信息：从E矩阵SVD恢复R和t */
@@ -3842,8 +3842,7 @@ static void calibrate_stereo_extrinsic(const float** left_images,
         /* 从特征向量恢复t（归一化，考虑符号） */
         float t_norm = sqrtf(eigvec[0]*eigvec[0] + eigvec[1]*eigvec[1] + eigvec[2]*eigvec[2]);
         if (t_norm > 1e-8f) {
-            float default_baseline = (estimator->config.max_depth > 0) 
-                ? estimator->config.max_depth * 0.1f : 0.1f;
+            float default_baseline = 0.1f;
             for (int i = 0; i < 3; i++) t[i] = eigvec[i] * default_baseline / t_norm;
         } else {
             t[0] = 0.1f; t[1] = 0.0f; t[2] = 0.0f;
@@ -3856,6 +3855,7 @@ static void calibrate_stereo_extrinsic(const float** left_images,
     // 计算平均视差来估计基线
     float total_disparity = 0.0f;
     int valid_disparity_count = 0;
+    float baseline = 0.1f; /* 默认基线值 */
     
     for (int i = 0; i < total_points; i++) {
         float left_x = all_left_points[i * 2] * left_calib->fx + left_calib->cx;
@@ -3881,7 +3881,7 @@ static void calibrate_stereo_extrinsic(const float** left_images,
         if (est_depth < 0.1f) est_depth = 0.5f;
         if (est_depth > 20.0f) est_depth = 10.0f;
         /* 使用三角测量公式：baseline = disparity * depth / focal_length */
-        float baseline = fabsf(avg_disparity) * est_depth / left_calib->fx;
+        baseline = fabsf(avg_disparity) * est_depth / left_calib->fx;
         if (baseline < 0.005f) baseline = 0.005f;
         if (baseline > 2.0f) baseline = 2.0f;
     }

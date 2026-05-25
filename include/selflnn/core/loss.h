@@ -16,6 +16,8 @@ extern "C" {
  * 不同模态的输出具有不同的数值范围和分布特性，
  * 需要不同的损失函数类型来度量预测误差。
  */
+#ifndef SELFLNN_MODALITY_TYPE_DEFINED
+#define SELFLNN_MODALITY_TYPE_DEFINED
 typedef enum {
     MODALITY_VISUAL = 0,       /**< 视觉特征：连续浮点[-1,1]或[0,1]，适用MSE/Huber/Cosine */
     MODALITY_TEXT_LOGITS = 1,  /**< 文本logits：未归一化logit，适用CrossEntropy */
@@ -25,6 +27,7 @@ typedef enum {
     MODALITY_AUDIO = 5,        /**< 音频特征：频域/时域连续值，适用MSE/MAE */
     MODALITY_CUSTOM = 6        /**< 自定义模态：由外部指定LossType */
 } ModalityType;
+#endif
 
 /**
  * @brief 损失函数类型枚举

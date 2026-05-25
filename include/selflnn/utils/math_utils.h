@@ -30,18 +30,9 @@ typedef enum {
 } ActivationType;
 
 /**
- * @brief 损失函数类型（仅在未包含 loss.h 时定义）
+ * @brief 损失函数类型（引用 loss.h 主定义，此处仅为向后兼容）
  */
-#ifndef SELFLNN_LOSS_H
-typedef enum {
-    LOSS_MEAN_SQUARED_ERROR = 0,      /**< 均方误差 */
-    LOSS_MEAN_ABSOLUTE_ERROR = 1,     /**< 平均绝对误差 */
-    LOSS_CROSS_ENTROPY = 2,           /**< 交叉熵损失 */
-    LOSS_HUBER = 3,                   /**< Huber损失 */
-    LOSS_LOG_COSH = 4,                /**< Log-cosh损失 */
-    LOSS_CONTRASTIVE = 5              /**< 对比损失 */
-} LossType;
-#endif
+#include "selflnn/core/loss.h"
 
 /**
  * @brief 优化器类型（引用 optimizer.h 主定义）

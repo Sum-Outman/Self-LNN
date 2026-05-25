@@ -46,7 +46,10 @@ class VoiceCaptureUtil {
                 this._onRecordingComplete();
             }.bind(this);
             this._recorder.onerror = function(err) {
-                if (this.onError) this.onError('录音错误: ' + (err.message || '未知'));
+                var msg = '未知录音错误';
+                if (err && err.error && err.error.message) msg = err.error.message;
+                else if (err && err.message) msg = err.message;
+                if (this.onError) this.onError('录音错误: ' + msg);
             }.bind(this);
             this._recorder.start(100);
             this._recording = true;
@@ -118,7 +121,7 @@ class VoiceCaptureUtil {
     }
 
     static async uploadBlob(blob) {
-        if (!window.SelfLnnApi) return { success: false, error: 'API服务不可用', text: '', confidence: -1 };
+        if (!window.SelfLnnApi || typeof window.SelfLnnApi.voiceRecognize !== 'function') return { success: false, error: '语音识别API不可用', text: '', confidence: -1 };
         try {
             var result = await window.SelfLnnApi.voiceRecognize(blob);
             /* F-004修复: 检查API返回的success状态，失败时不伪装成功 */
@@ -170,7 +173,12 @@ class VoiceCaptureUtil {
                 if (options.onError) options.onError(msg);
             };
 
-            capturer.start(stream);
+            var startResult = await capturer.start(stream);
+            if (!startResult || !startResult.success) {
+                stream.getTracks().forEach(function(t) { t.stop(); });
+                return { success: false, capturer: null, stream: null, error: (startResult && startResult.error) || '录音启动失败' };
+            }
+            capturer.start = function() { return Promise.resolve(startResult); };
             return { success: true, capturer: capturer, stream: stream, error: null };
         } catch (err) {
             return { success: false, capturer: null, stream: null, error: err.message };

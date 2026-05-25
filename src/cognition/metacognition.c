@@ -2765,7 +2765,7 @@ static float calculate_trend(const float* history, size_t history_size) {
     /* N-004修复: 自适应趋势归一化
      * 使用实际数据标准差归一化趋势斜率，替代假设最大斜率1.0 */
     float mean_y = sum_y / n, var_y = 0.0f;
-    for (int i = 0; i < history_size; i++) var_y += (values[i] - mean_y) * (values[i] - mean_y);
+    for (int i = 0; i < history_size; i++) var_y += (history[i] - mean_y) * (history[i] - mean_y);
     float std_y = sqrtf(var_y / n);
     float scale = (std_y > 1e-8f) ? std_y : 1.0f;
     float trend = slope * (float)history_size / scale; /* 归一化: slope * N_pts / sigma */

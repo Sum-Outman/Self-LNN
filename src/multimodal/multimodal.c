@@ -1200,21 +1200,52 @@ static int mm_levenshtein_distance(const char* s1, const char* s2) {
 }
 
 /* ============================================================================
+ * 内部辅助: 安全获取知识库条目数（不透明KnowledgeBase句柄）
+ * ============================================================================ */
+static size_t mm_kb_entry_count(KnowledgeBase* kb) {
+    size_t total = 0;
+    if (!kb) return 0;
+    knowledge_base_get_stats(kb, &total, NULL);
+    return total;
+}
+
+/* ============================================================================
  * 内部辅助: 从知识库中统计某词出现的文档数（用于IDF计算）
  * ============================================================================ */
 static int mm_count_docs_with_term(KnowledgeBase* kb, const char* term) {
     if (!kb || !term) return 0;
     
+    size_t total_entries = 0;
+    if (knowledge_base_get_stats(kb, &total_entries, NULL) != 0) return 0;
+    if (total_entries == 0) return 0;
+    
+    /* 使用知识库查询API获取所有概念类条目 */
+    KnowledgeQuery query;
+    memset(&query, 0, sizeof(KnowledgeQuery));
+    query.type_filter = KNOWLEDGE_CONCEPT;
+    
+    size_t query_limit = total_entries < 4096 ? total_entries : 4096;
+    KnowledgeEntry* results = (KnowledgeEntry*)safe_calloc(query_limit, sizeof(KnowledgeEntry));
+    if (!results) return 0;
+    
+    int found = knowledge_base_query(kb, &query, results, (size_t)(query_limit > 0 ? query_limit : 1));
+    if (found < 0) {
+        safe_free((void**)&results);
+        /* 回退：查询所有类型 */
+        query.type_filter = -1;
+        found = knowledge_base_query(kb, &query, results, (size_t)(query_limit > 0 ? query_limit : 1));
+    }
+    
     int doc_count = 0;
-    for (size_t i = 0; i < kb->size && i < 4096; i++) {
-        KnowledgeEntry* entry = &kb->entries[i].entry;
-        const char* subj = entry->subject ? entry->subject : "";
-        const char* obj = entry->object ? entry->object : "";
-        
+    for (int i = 0; i < found && i < (int)query_limit; i++) {
+        const char* subj = results[i].subject ? results[i].subject : "";
+        const char* obj = results[i].object ? results[i].object : "";
         if (strstr(subj, term) || strstr(obj, term)) {
             doc_count++;
         }
     }
+    
+    safe_free((void**)&results);
     return doc_count;
 }
 
@@ -1295,12 +1326,12 @@ static int mm_compute_true_tfidf(const char* doc_text,
     float* idf_values = (float*)safe_calloc((size_t)tf_count, sizeof(float));
     if (!idf_values) return -1;
     
-    float total_docs = (kb && kb->size > 0) ? (float)kb->size : 100.0f;
+    float total_docs = (mm_kb_entry_count(kb) > 0) ? (float)mm_kb_entry_count(kb) : 100.0f;
     
     for (int i = 0; i < tf_count; i++) {
         float doc_freq_with_term;
         
-        if (kb && kb->size > 0) {
+        if (mm_kb_entry_count(kb) > 0) {
             /* 从知识库统计真实DF */
             int df = mm_count_docs_with_term(kb, term_freqs[i].term);
             doc_freq_with_term = (float)(df > 0 ? df : 1);
@@ -1413,10 +1444,18 @@ static int mm_build_cooccurrence(KnowledgeBase* kb,
     CoocEntry entries[MM_MAX_TERMS];
     int entry_count = 0;
     int total_target_occurrences = 0;
-    int max_docs = (int)(kb->size < 2048 ? kb->size : 2048);
+    int max_docs = (int)(mm_kb_entry_count(kb) < 2048 ? mm_kb_entry_count(kb) : 2048);
     
-    for (int di = 0; di < max_docs; di++) {
-        KnowledgeEntry* entry = &kb->entries[di].entry;
+    /* 通过知识库API查询所有条目 */
+    KnowledgeQuery cooc_query;
+    memset(&cooc_query, 0, sizeof(KnowledgeQuery));
+    KnowledgeEntry* cooc_results = (KnowledgeEntry*)safe_calloc((size_t)max_docs, sizeof(KnowledgeEntry));
+    if (!cooc_results) return 0;
+    int cooc_found = knowledge_base_query(kb, &cooc_query, cooc_results, (size_t)max_docs);
+    int cooc_limit = (cooc_found > 0 && cooc_found <= max_docs) ? cooc_found : max_docs;
+    
+    for (int di = 0; di < cooc_limit; di++) {
+        KnowledgeEntry* entry = &cooc_results[di];
         
         /* 合并subject和object作为文档文本 */
         char doc[8192] = {0};
@@ -1493,6 +1532,8 @@ static int mm_build_cooccurrence(KnowledgeBase* kb,
         }
     }
     
+    safe_free((void**)&cooc_results);
+    
     /* 归一化共现频率 */
     if (total_target_occurrences > 0 && entry_count > 0) {
         float inv_total = 1.0f / (float)total_target_occurrences;
@@ -1543,7 +1584,7 @@ static float mm_word2vec_similarity(const char* word1, const char* word2,
     if (strcmp(word1, word2) == 0) return 1.0f;
     
     /* 当知识库可用时，基于共现矩阵计算语义相似度 */
-    if (kb && kb->size > 0) {
+    if (mm_kb_entry_count(kb) > 0) {
         char cooc1[MM_MAX_TERMS][MM_MAX_TERM_LEN];
         float freq1[MM_MAX_TERMS];
         int n1 = mm_build_cooccurrence(kb, word1, cooc1, freq1, 64);
@@ -1736,7 +1777,7 @@ static int mm_semantic_query_expansion(const char* query,
     }
     
     /* 2. 按知识库中的高频共现词扩展 */
-    if (kb && kb->size > 0 && exp_count < max_expansions) {
+    if (mm_kb_entry_count(kb) > 0 && exp_count < max_expansions) {
         for (int ti = 0; ti < qt_count && ti < 64 && exp_count < max_expansions; ti++) {
             if (strlen(query_terms[ti]) < 2) continue;
             

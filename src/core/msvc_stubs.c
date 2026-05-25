@@ -8,6 +8,7 @@
 
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/cfc.h"
+#include "selflnn/core/laplace.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/robot/ros_gazebo_bridge.h"
@@ -165,17 +166,25 @@ void* lnn_laplace_create_default_analyzer(LNN* lnn) {
     log_warn("[MSVC桩] Laplace分析器创建失败: MSVC平台不可用");
     return NULL;
 }
-int lnn_laplace_modulate_hidden(LNN* lnn, int layer_idx, float* hidden, size_t hidden_size) {
-    (void)lnn; (void)layer_idx; (void)hidden; (void)hidden_size;
+int lnn_laplace_modulate_hidden(LaplaceAnalyzer* analyzer,
+                                float* hidden, size_t hidden_size, float strength) {
+    (void)analyzer; (void)hidden; (void)hidden_size; (void)strength;
     log_warn("[MSVC桩] Laplace隐藏层调制失败: MSVC平台不可用");
     return -1;
 }
-int lnn_laplace_analyze_network_dynamics(LNN* lnn, float* stability_margin, float* spectral_radius) {
-    (void)lnn;
-    if (stability_margin) *stability_margin = 1.0f;
-    if (spectral_radius) *spectral_radius = 0.0f;
-    log_warn("[MSVC桩] Laplace网络动态分析: MSVC平台仅返回默认值(stability=1.0, spectral=0.0)");
-    return 0;
+void lnn_laplace_analyze_network_dynamics(LaplaceAnalyzer* analyzer,
+                                          float time_constant,
+                                          const float* hidden_state,
+                                          size_t hidden_size,
+                                          float* stability_score,
+                                          float* recommended_cutoff,
+                                          float* frequency_bandwidth) {
+    (void)analyzer; (void)time_constant; (void)hidden_state; (void)hidden_size;
+    /* MSVC平台返回默认安全值 */
+    if (stability_score) *stability_score = 0.5f;
+    if (recommended_cutoff) *recommended_cutoff = 10.0f;
+    if (frequency_bandwidth) *frequency_bandwidth = 50.0f;
+    log_warn("[MSVC桩] Laplace网络动态分析: MSVC平台仅返回默认值(stability=0.5, cutoff=10Hz, bw=50Hz)");
 }
 
 /* ============================

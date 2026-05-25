@@ -867,42 +867,26 @@ int multimodal_integration_check_hardware(
 
     if (vision_output) {
         memset(vision_output, 0, sizeof(VisionInput));
-        if (processor->vision_hardware_detected) {
-            vision_output->width = processor->vision_config.width;
-            vision_output->height = processor->vision_config.height;
-            vision_output->channels = processor->vision_config.channels;
-            vision_output->has_data = 1;
+        if (processor->depth_estimator) {
             hw_available++;
-        } else {
-            vision_output->has_data = 0;
         }
     }
 
     if (audio_output) {
         memset(audio_output, 0, sizeof(AudioInput));
-        if (processor->audio_hardware_detected) {
-            audio_output->sample_rate = processor->audio_config.sample_rate;
-            audio_output->channels = processor->audio_config.channels;
-            audio_output->has_data = 1;
+        if (processor->speech_recognizer) {
             hw_available++;
-        } else {
-            audio_output->has_data = 0;
         }
     }
 
     if (text_output) {
         memset(text_output, 0, sizeof(TextInput));
-        text_output->has_data = 0;
     }
 
     if (sensor_output) {
         memset(sensor_output, 0, sizeof(SensorInput));
-        if (processor->sensor_hardware_detected) {
-            sensor_output->sensor_count = processor->sensor_config.sensor_count;
-            sensor_output->has_data = 1;
+        if (processor->point_cloud_processor) {
             hw_available++;
-        } else {
-            sensor_output->has_data = 0;
         }
     }
 

@@ -61,13 +61,93 @@ int laplace_unified_system_init(const LaplaceAIConfig* cfg) {
 int laplace_unified_health_check(char* report, size_t report_size) {
     if (!report || report_size == 0) return -1;
 
-    /* ZSFBUILD: 简化健康检查 — 原有代码引用了未在头文件声明的类型
-     * (LaplaceAIConfig.sampling_rate, LaplaceEnhancedSystem, laplace_enhanced_create, LAPLACE_TARGET_ALL)
-     * 这些API已分别通过laplace_ai_framework.h和laplace_enhanced.h正确暴露。
-     * 此统一入口的health_check替代为保守实现，子系统各自维护其健康检查。 */
-    
+    /* 真正的健康检查：创建临时分析器，验证配置和缓冲区分配 */
+    LaplaceConfig analyze_cfg;
+    int health_issues = 0;
+    char issues_buf[256] = {0};
+
+    /* 1. 验证默认配置有效性 */
+    const LaplaceConfig* default_cfg = laplace_get_default_config();
+    if (!default_cfg) {
+        snprintf(report, report_size, "拉普拉斯系统健康状态: [故障] 无法获取默认配置");
+        return -1;
+    }
+
+    /* 检查采样点数 */
+    if (default_cfg->num_samples == 0) {
+        strncat(issues_buf, "采样点数为零; ", sizeof(issues_buf) - strlen(issues_buf) - 1);
+        health_issues++;
+    }
+
+    /* 检查采样率 */
+    if (default_cfg->sample_rate <= 0.0f) {
+        strncat(issues_buf, "采样率无效; ", sizeof(issues_buf) - strlen(issues_buf) - 1);
+        health_issues++;
+    }
+
+    /* 检查频率范围有效性 */
+    if (default_cfg->min_frequency >= default_cfg->max_frequency) {
+        strncat(issues_buf, "频率范围无效(min>=max); ", sizeof(issues_buf) - strlen(issues_buf) - 1);
+        health_issues++;
+    }
+
+    if (default_cfg->frequency_range <= 0.0f) {
+        strncat(issues_buf, "频率范围为零; ", sizeof(issues_buf) - strlen(issues_buf) - 1);
+        health_issues++;
+    }
+
+    if (default_cfg->cutoff_frequency <= 0.0f) {
+        strncat(issues_buf, "截止频率为零; ", sizeof(issues_buf) - strlen(issues_buf) - 1);
+        health_issues++;
+    }
+
+    /* 2. 创建临时分析器，验证分配和初始化流程 */
+    LaplaceAnalyzer* test_analyzer = laplace_analyzer_create(default_cfg);
+    if (!test_analyzer) {
+        snprintf(report, report_size,
+                 "拉普拉斯系统健康状态: [故障] 分析器创建失败 - %s",
+                 issues_buf[0] ? issues_buf : "未知原因");
+        return -1;
+    }
+
+    /* 3. 验证配置一致性 */
+    if (laplace_analyzer_get_config(test_analyzer, &analyze_cfg) != 0) {
+        laplace_analyzer_free(test_analyzer);
+        snprintf(report, report_size, "拉普拉斯系统健康状态: [故障] 无法获取分析器配置");
+        return -1;
+    }
+
+    if (analyze_cfg.num_samples != default_cfg->num_samples ||
+        analyze_cfg.sample_rate != default_cfg->sample_rate) {
+        strncat(issues_buf, "配置不一致; ", sizeof(issues_buf) - strlen(issues_buf) - 1);
+        health_issues++;
+    }
+
+    /* 4. 释放测试分析器 */
+    laplace_analyzer_free(test_analyzer);
+
+    /* 5. 生成健康报告 */
+    if (health_issues > 0) {
+        snprintf(report, report_size,
+                 "拉普拉斯系统健康状态: [警告] %d个问题: %s"
+                 "配置 - 采样点:%zu 采样率:%.1fHz 频率范围:%.1f-%.1fHz 截止频率:%.1fHz",
+                 health_issues, issues_buf,
+                 default_cfg->num_samples, (double)default_cfg->sample_rate,
+                 (double)default_cfg->min_frequency, (double)default_cfg->max_frequency,
+                 (double)default_cfg->cutoff_frequency);
+        return 0;
+    }
+
     snprintf(report, report_size,
-             "拉普拉斯系统健康状态: 已初始化，各子系统通过独立API检查 (laplace_ai_*, laplace_enhanced_*, laplace_integration_*)");
+             "拉普拉斯系统健康状态: [正常] "
+             "采样点:%zu 采样率:%.1fHz 频率范围:%.1f-%.1fHz 截止频率:%.1fHz "
+             "稳定性分析:%s 频域分析:%s 自动调谐:%s",
+             default_cfg->num_samples, (double)default_cfg->sample_rate,
+             (double)default_cfg->min_frequency, (double)default_cfg->max_frequency,
+             (double)default_cfg->cutoff_frequency,
+             default_cfg->enable_stability ? "启用" : "关闭",
+             default_cfg->enable_frequency ? "启用" : "关闭",
+             default_cfg->enable_auto_tuning ? "启用" : "关闭");
 
     return 0;
 }

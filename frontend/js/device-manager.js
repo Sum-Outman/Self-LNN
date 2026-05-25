@@ -94,6 +94,8 @@ class DeviceManager {
                     cameras: self._availableCameras
                 }
             }));
+        }).catch(function(err) {
+            console.warn('[DeviceManager] 设备枚举失败:', err && err.message);
         });
     }
 
@@ -446,10 +448,11 @@ class DeviceManager {
         }
         try {
             var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            if (!compat) return { success: false, error: 'BrowserCompat未加载，无法启动摄像头' };
             var videoConstraints = {
                 deviceId: { exact: camera.deviceId }
             };
-            if (resolution) {
+            if (resolution && compat.getVideoConstraintsForResolution) {
                 var resConf = compat.getVideoConstraintsForResolution(resolution);
                 if (resConf.width) videoConstraints.width = resConf.width;
                 if (resConf.height) videoConstraints.height = resConf.height;
@@ -548,6 +551,10 @@ class DeviceManager {
     getAudioContext() {
         if (!this.audioContext) {
             var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            if (!compat || !compat.getAudioContext) {
+                console.error('[DeviceManager] BrowserCompat未加载，无法创建AudioContext');
+                return null;
+            }
             this.audioContext = compat.getAudioContext();
         }
         if (this.audioContext && this.audioContext.state === 'suspended') {

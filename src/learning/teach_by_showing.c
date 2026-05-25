@@ -26,6 +26,7 @@ struct TeachSystem {
     size_t* reproduction_counts;
     float* task_confidence;
     int initialized;
+    float cached_accuracy;
 
     TeachConcept concepts[TEACH_MAX_CONCEPTS];
     size_t num_concepts;
@@ -101,6 +102,7 @@ TeachSystem* teach_system_create(size_t obs_dim, size_t act_dim,
     system->hidden_dim = 512;
     system->is_trained = 0;
     system->initialized = 1;
+    system->cached_accuracy = 0.0f;
 
     system->demos.num_demos = 0;
     system->demos.max_steps = TEACH_MAX_STEPS_PER_DEMO;
@@ -279,6 +281,7 @@ int teach_record_demonstration(TeachSystem* system,
 
     system->demos.num_demos++;
     system->is_trained = 0;
+    system->cached_accuracy = 0.0f;
     return (int)idx;
 }
 
@@ -404,6 +407,32 @@ int teach_train_from_demos(TeachSystem* system,
 
     system->is_trained = 1;
 
+    /* M-003修复: 训练完成后计算真实准确率并缓存 */
+    {
+        float total_accuracy = 0.0f;
+        size_t eval_count = 0;
+        for (size_t i = 0; i < system->demos.num_demos; i++) {
+            size_t demo_len = system->demos.trajectory_lengths[i];
+            if (demo_len == 0) continue;
+            size_t act_off = i * TEACH_MAX_STEPS_PER_DEMO * system->act_dim;
+            float accuracy = 0.0f, similarity = 0.0f;
+            int ret = teach_evaluate_reproduction(system,
+                system->demos.labels[i],
+                system->demos.actions + act_off,
+                demo_len, system->act_dim,
+                &accuracy, &similarity);
+            if (ret == 0) {
+                total_accuracy += accuracy;
+                eval_count++;
+            }
+        }
+        if (eval_count > 0) {
+            system->cached_accuracy = total_accuracy / (float)eval_count;
+        } else {
+            system->cached_accuracy = 0.0f;
+        }
+    }
+
     safe_free((void**)&combined_input);
     safe_free((void**)&target_actions);
     safe_free((void**)&bc_losses);
@@ -517,7 +546,23 @@ void teach_get_stats(TeachSystem* system, TeachSystemStats* stats) {
         }
     }
 
-    stats->reproduction_accuracy = system->is_trained ? 0.85f : 0.0f;
+    /* M-003修复: 优先使用缓存的真实准确率，否则使用confidence_scores均值作为近似 */
+    if (system->cached_accuracy > 0.0f) {
+        stats->reproduction_accuracy = system->cached_accuracy;
+    } else if (system->is_trained) {
+        float total_conf = 0.0f;
+        for (size_t i = 0; i < system->demos.num_demos; i++) {
+            total_conf += system->demos.confidence_scores[i];
+        }
+        if (system->demos.num_demos > 0) {
+            stats->reproduction_accuracy = total_conf / (float)system->demos.num_demos;
+        } else {
+            stats->reproduction_accuracy = 0.0f;
+        }
+    } else {
+        stats->reproduction_accuracy = 0.0f;
+    }
+
     stats->task_recognition_confidence = 0.0f;
 
     float total_conf = 0.0f;
@@ -593,6 +638,7 @@ int teach_import_demos(TeachSystem* system, const char* file_path) {
 
     system->demos.num_demos += num_import;
     system->is_trained = 0;
+    system->cached_accuracy = 0.0f;
     fclose(fp);
     return 0;
 }
@@ -634,6 +680,7 @@ int teach_clear_demos(TeachSystem* system, size_t keep_latest) {
 
     system->demos.num_demos = keep_latest;
     system->is_trained = 0;
+    system->cached_accuracy = 0.0f;
     return (int)to_remove;
 }
 

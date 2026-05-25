@@ -10,6 +10,7 @@
 #include <math.h>
 #include <time.h>
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/learning/imitation_deep.h"  /* H-016集成: 深度模仿学习 */
 
 struct TeachingLoopSystem {
     int session_counter;
@@ -153,6 +154,41 @@ int tl_start_session(TeachingLoopSystem* tls, TeachingSession* session, const ch
 int tl_end_session(TeachingLoopSystem* tls, TeachingSession* session) {
     if (!tls || !session) return -1;
     session->is_active = 0;
+    
+    /* H-016集成: 教学结束后触发深度模仿学习 */
+    if (session->concept_count > 0) {
+        ImitationDeepLearner* idl = imitation_deep_create();
+        if (idl) {
+            /* 提取教学中的动作数据进行行为克隆训练 */
+            float* action_data = (float*)safe_malloc(TL_MAX_FEATURES * sizeof(float));
+            if (action_data) {
+                for (int i = 0; i < session->concept_count; i++) {
+                    TeachingConcept* c = &session->concepts[i];
+                    if (c->visual_dim > 0 && c->visual_features) {
+                        int dim = c->visual_dim < TL_MAX_FEATURES ? c->visual_dim : TL_MAX_FEATURES;
+                        memcpy(action_data, c->visual_features, dim * sizeof(float));
+                    }
+                }
+                /* 从教学概念中学习行为策略 */
+                ImDemonstration demo;
+                memset(&demo, 0, sizeof(ImDemonstration));
+                if (session->concept_count >= 1) {
+                    TeachingConcept* first = &session->concepts[0];
+                    int joints = first->visual_dim > 0 ? (first->visual_dim < IM_MAX_JOINTS ? first->visual_dim : IM_MAX_JOINTS) : 1;
+                    im_load_demonstration(idl, action_data, session->concept_count, joints, &demo);
+                    /* 提取关键帧和轨迹编码 */
+                    ImKeyframe kf[IM_MAX_KEYFRAMES];
+                    int kf_count = im_extract_keyframes(idl, &demo, kf, IM_MAX_KEYFRAMES);
+                    if (kf_count > 0) {
+                        im_encode_trajectory(idl, &demo);
+                    }
+                }
+                safe_free((void**)&action_data);
+            }
+            imitation_deep_free(idl);
+        }
+    }
+    
     return 0;
 }
 

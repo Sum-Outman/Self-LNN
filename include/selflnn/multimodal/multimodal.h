@@ -26,8 +26,10 @@ extern "C" {
 #endif
 
 /**
- * @brief 模态类型枚举
+ * @brief 模态类型枚举（与 loss.h 中的 ModalityType 互斥定义）
  */
+#ifndef SELFLNN_MODALITY_TYPE_DEFINED
+#define SELFLNN_MODALITY_TYPE_DEFINED
 typedef enum {
     MODALITY_VISION = 0,
     MODALITY_AUDIO = 1,
@@ -39,6 +41,7 @@ typedef enum {
     MODALITY_RADAR = 7,
     MODALITY_FUSED = 8
 } ModalityType;
+#endif
 
 /**
  * @brief 视觉数据格式

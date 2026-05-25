@@ -404,19 +404,21 @@ class DialogueEnhanced {
         var self = this;
         if (gws.ws) {
             var wsElement = gws.ws;
-            /* 使用原生addEventListener而非覆盖onclose属性，避免冲突 */
-            var onCloseHandler = function(evt) {
+            /* ZSFWS-M026修复: 将onCloseHandler存储在实例上，确保removeEventListener能匹配到同一个函数引用 */
+            if (this._wsCloseHandler) {
+                try { wsElement.removeEventListener('close', this._wsCloseHandler); } catch(e) {}
+            }
+            var self = this;
+            this._wsCloseHandler = function(evt) {
                 self.wsReconnectAttempts++;
                 if (self.wsReconnectAttempts > self.wsMaxReconnect) {
-                    console.error('[SELF-LNN] WebSocket重连已达上限(' + self.wsMaxReconnect + '次)，停止重连。请检查后端服务。');
+                    console.error('[SELF-LNN] WebSocket重连已达上限(' + self.wsMaxReconnect + '次)，停止重连。');
                     if (self.onWsStatusChange) self.onWsStatusChange('disconnected');
                     return;
                 }
                 console.warn('[SELF-LNN] WebSocket断开，第' + self.wsReconnectAttempts + '/' + self.wsMaxReconnect + '次重连...');
             };
-            /* 移除旧监听器后重新添加，防止重复绑定 */
-            try { wsElement.removeEventListener('close', onCloseHandler); } catch(e) {}
-            wsElement.addEventListener('close', onCloseHandler);
+            wsElement.addEventListener('close', this._wsCloseHandler);
         }
         /* 使用全局SelfLnnWebSocket的connect方法 */
         gws.connect();

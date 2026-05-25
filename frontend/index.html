@@ -79,7 +79,7 @@
             <div class="logo">
                 <h1>SELF-LNN</h1>
             </div>
-            <div id="hamburger-menu" onclick="var n=document.getElementById('main-nav');n.classList.toggle('collapsed');n.classList.toggle('visible');">
+            <div id="hamburger-menu" onclick="var n=document.getElementById('main-nav');if(n){n.classList.toggle('collapsed');n.classList.toggle('visible');}">
                  <span></span><span></span><span></span>
              </div>
             <nav class="nav" id="main-nav">
@@ -3889,7 +3889,7 @@ response = requests.get(
         document.addEventListener('DOMContentLoaded', function() {
             if (typeof refreshDevices === 'function') refreshDevices();
             if (typeof scanHardware === 'function') scanHardware();
-            devicePollTimer = setInterval(function(){ if(typeof refreshDevices==='function')refreshDevices(); }, 5000);
+            var devicePollTimer = setInterval(function(){ if(typeof refreshDevices==='function')refreshDevices(); }, 5000);
         });
         window.addEventListener('beforeunload', function() {
             if (typeof devicePollTimer !== 'undefined' && devicePollTimer) clearInterval(devicePollTimer);
@@ -6566,7 +6566,7 @@ response = requests.get(
             const icons = { success: '\u2705', error: '\u274C', info: '\u2139\uFE0F', warning: '\u26A0\uFE0F' };
             const toast = document.createElement('div');
             toast.className = 'toast ' + type;
-            toast.innerHTML = '<span class="toast-icon">' + (icons[type] || '') + '</span><span class="toast-message">' + message + '</span><button class="toast-close" onclick="this.parentElement.classList.add(\'toast-fade-out\');setTimeout(function(){this.parentElement.remove()}.bind(this),300)">&times;</button>';
+            toast.innerHTML = '<span class="toast-icon">' + (icons[type] || '') + '</span><span class="toast-message">' + message + '</span><button class="toast-close" onclick="var el=this.parentElement;el.classList.add(\'toast-fade-out\');setTimeout(function(){if(el&&el.parentNode)el.parentNode.removeChild(el);},300)">&times;</button>';
             container.appendChild(toast);
             setTimeout(function() {
                 toast.classList.add('toast-fade-out');

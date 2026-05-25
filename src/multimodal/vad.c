@@ -706,7 +706,7 @@ int vad_adaptive_threshold(VadProcessor* processor,
         // 更新噪声估计
         processor->noise_energy = avg_noise_energy;
         processor->noise_floor = avg_noise_energy * 0.5f;
-        processor->noise_frames = noise_frames;
+        processor->noise_frames = num_frames;
         
         return 0;
     }

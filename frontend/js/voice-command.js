@@ -47,7 +47,7 @@ class VoiceCommandSystem {
     get isRecording() { return this._capturer.isRecording; }
 
     async startRecording(micStream) {
-        if (this.isRecording) return;
+        if (this.isRecording) return { success: false, error: '录音已在进行中' };
         this.isProcessing = false;
         return this._capturer.start(micStream);
     }
@@ -143,7 +143,9 @@ class VoiceCommandSystem {
         this.continuousMode = true;
         this.continuousInterval = setInterval(() => {
             if (!this.isRecording && !this.isProcessing && this.continuousMode) {
-                this.startRecording(micStream);
+                this.startRecording(micStream).catch(function(e) {
+                    console.warn('连续模式录音启动失败:', e && e.message);
+                });
                 setTimeout(() => {
                     if (this.isRecording) this.stopRecording();
                 }, 3000);
@@ -395,8 +397,13 @@ class CommandEngine {
 
     async _callRobotApi(action, params) {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.sendRobotCommand === 'function') {
-            const cmd = { action: action, ...params };
-            return await window.SelfLnnApi.sendRobotCommand(cmd);
+            var cmd = { action: action };
+            if (params) Object.keys(params).forEach(function(k) { cmd[k] = params[k]; });
+            try {
+                return await window.SelfLnnApi.sendRobotCommand(cmd);
+            } catch (e) {
+                return { success: false, error: '机器人指令发送失败: ' + e.message };
+            }
         }
         return { success: false, error: '机器人API不可用' };
     }

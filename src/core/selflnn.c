@@ -51,6 +51,7 @@
 #include "selflnn/learning/online_learning.h"
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/agi/capability_switch.h"
+#include "selflnn/multi_agent.h"  /* H-015集成: 多智能体协作框架 */
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
@@ -161,6 +162,7 @@ typedef enum {
     MODULE_ID_ROBOT = 20,
     MODULE_ID_AUTO_LEARNING = 21,
     MODULE_ID_KNOWLEDGE_INFERENCE = 22,
+    MODULE_ID_MULTI_AGENT = 23,  /* H-015: 多智能体协作框架 */
     MODULE_COUNT
 } ModuleId;
 
@@ -169,7 +171,7 @@ static const char* g_module_names[MODULE_COUNT] = {
     "推理引擎", "统一信号处理器", "对话系统", "自我认知", "元认知",
     "自我编程", "产品设计", "多系统控制", "GPU上下文", "演化引擎",
     "安全监控", "分布式训练", "线程池", "在线学习器", "规划系统", "机器人"
-    , "自动知识学习", "知识推理增强"
+    , "自动知识学习", "知识推理增强", "多智能体系统"
 };
 
 /* 模块注册：每个子系统只能获取共享LNN引用，不能拥有独立LNN */
@@ -210,6 +212,7 @@ static struct {
     void* knowledge_inference;
     void* data_pipeline;
     void* speech_recognizer;
+    void* multi_agent_system;   /* H-015: 多智能体协作系统 */
     int dcpipeline_immediate_check_requested;   /* ZSFWS-038: 事件驱动即时自检标志 */
     int last_error;
 } g_system_state = {0};
@@ -393,6 +396,9 @@ int selflnn_init(const SystemConfig* config)
     if (g_system_state.planning_system) selflnn_register_module(MODULE_ID_PLANNING, g_system_state.planning_system, 1);
     if (g_system_state.auto_learning) selflnn_register_module(MODULE_ID_AUTO_LEARNING, g_system_state.auto_learning, 1);
     if (g_system_state.knowledge_inference) selflnn_register_module(MODULE_ID_KNOWLEDGE_INFERENCE, g_system_state.knowledge_inference, 1);
+    
+    /* H-015集成: 注册多智能体协作系统 */
+    if (g_system_state.multi_agent_system) selflnn_register_module(MODULE_ID_MULTI_AGENT, g_system_state.multi_agent_system, 1);
     
     /* P0-001修复: 所有子系统注册完毕后，强制执行单一LNN模式
      * 此后所有模块的 lnn_create() 调用将被自动重定向到全局唯一LNN
@@ -1051,6 +1057,11 @@ const char* selflnn_get_error_message(int error_code)
 /* 子系统访问器函数 */
 void* selflnn_get_online_learner(void) {
     return g_system_state.online_learner;
+}
+
+/* H-015集成: 获取多智能体系统 */
+void* selflnn_get_multi_agent_system(void) {
+    return g_system_state.multi_agent_system;
 }
 
 void* selflnn_get_evolution_engine(void) {
@@ -1879,6 +1890,22 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
 
+    /* H-015集成: 初始化多智能体协作系统 */
+    {
+        MultiAgentConfig ma_config;
+        multi_agent_default_config(&ma_config);
+        ma_config.agent_count = 8;
+        ma_config.centralized = 1;
+        ma_config.enable_collective_learning = 1;
+        ma_config.enable_knowledge_sharing = 1;
+        g_system_state.multi_agent_system = (void*)multi_agent_system_create(&ma_config);
+        if (g_system_state.multi_agent_system) {
+            log_info("多智能体协作系统初始化成功（8智能体，集中式架构）");
+        } else {
+            log_warning("多智能体协作系统创建失败，跳过");
+        }
+    }
+
     /* 20. 初始化多模态数据采集流水线（真实硬件数据采集，D-3/D-5） */
     {
         PipelineConfig pl_config = dcpipeline_get_default_config();
@@ -2042,6 +2069,12 @@ static void shutdown_subsystems(void)
     if (g_system_state.knowledge_inference) {
         ki_engine_free((KnowledgeInferenceEngine*)g_system_state.knowledge_inference);
         g_system_state.knowledge_inference = NULL;
+    }
+
+    /* 17.2 销毁多智能体系统 (H-015集成) */
+    if (g_system_state.multi_agent_system) {
+        multi_agent_system_destroy((MultiAgentSystem*)g_system_state.multi_agent_system);
+        g_system_state.multi_agent_system = NULL;
     }
 
     /* 18. 销毁数据采集流水线 */

@@ -10,7 +10,7 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
-#include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/platform.h"
 
 #include <stdlib.h>
@@ -24,6 +24,12 @@
 #ifdef _MSC_VER
 /* 4189/4100已通过UNUSED()处理 */
 #endif
+
+/* DropPath默认最大层数，可通过配置或动态扩展 */
+#define DROP_PATH_DEFAULT_MAX_LAYERS 64
+
+/* 域自适应分类器辅助常量 */
+#define DOMAIN_HIDDEN_SIZE 8
 
 /**
  * @brief DropPath状态
@@ -39,8 +45,7 @@ typedef struct {
  * @brief CutMix状态
  */
 typedef struct {
-    float* lambda_distribution;       /**< Lambda值分布 */
-    size_t distribution_size;         /**< 分布大小 */
+    float cutmix_alpha;               /**< Beta分布参数alpha */
     int* bounding_boxes;              /**< 边界框坐标 */
     size_t max_boxes;                 /**< 最大边界框数 */
 } CutMixState;
@@ -49,8 +54,6 @@ typedef struct {
  * @brief MixUp状态
  */
 typedef struct {
-    float* lambda_buffer;             /**< Lambda缓冲区 */
-    size_t buffer_size;               /**< 缓冲区大小 */
     float alpha;                      /**< Beta分布参数alpha */
 } MixUpState;
 
@@ -93,6 +96,43 @@ struct AdvancedRegularizer {
 };
 
 /**
+ * @brief 按需即时生成Beta分布样本
+ *
+ * 使用拒绝采样或正态近似法生成Beta(alpha, alpha)分布的单个样本，
+ * 替代预计算缓冲区，节省内存并支持动态alpha参数。
+ */
+static float generate_beta_sample(float alpha) {
+    float lambda_sample = 0.5f;
+    if (alpha > 10.0f) {
+        /* 大alpha：使用正态近似 */
+        float u1 = secure_random_float();
+        float u2 = secure_random_float();
+        if (u1 < 1e-10f) u1 = 1e-10f;
+        if (u2 < 1e-10f) u2 = 1e-10f;
+        float z = sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+        lambda_sample = 0.5f + z * 0.5f / sqrtf(4.0f * alpha + 2.0f);
+    } else if (alpha > 0.01f) {
+        /* Johnson's method: 拒绝采样生成Beta(alpha, alpha) */
+        for (int attempt = 0; attempt < 10; attempt++) {
+            float u = secure_random_float();
+            if (u < 1e-10f) u = 1e-10f;
+            float v = secure_random_float();
+            if (v < 1e-10f) v = 1e-10f;
+            float w = powf(u, 1.0f / alpha);
+            float x = powf(v, 1.0f / alpha);
+            if (w + x <= 1.0f) {
+                lambda_sample = w / (w + x);
+                break;
+            }
+        }
+    }
+    /* 数值裁剪防止极端值 */
+    if (lambda_sample < 0.01f) lambda_sample = 0.01f;
+    if (lambda_sample > 0.99f) lambda_sample = 0.99f;
+    return lambda_sample;
+}
+
+/**
  * @brief 创建高级正则化器
  */
 AdvancedRegularizer* advanced_regularizer_create(const AdvancedRegularizationConfig* config,
@@ -120,8 +160,8 @@ AdvancedRegularizer* advanced_regularizer_create(const AdvancedRegularizationCon
     
     // 根据配置初始化各状态
     if (config->type == ADV_REG_DROP_PATH || config->type == ADV_REG_STOCHASTIC_DEPTH) {
-        // 初始化DropPath状态
-        size_t max_layers = 100;  // 假设最大层数
+        /* 初始化DropPath状态，使用合理的动态默认值 */
+        size_t max_layers = DROP_PATH_DEFAULT_MAX_LAYERS;
         regularizer->drop_path_state.survival_probs = (float*)safe_malloc(max_layers * sizeof(float));
         regularizer->drop_path_state.dropped_layers = (int*)safe_malloc(max_layers * sizeof(int));
         if (!regularizer->drop_path_state.survival_probs || !regularizer->drop_path_state.dropped_layers) {
@@ -149,103 +189,21 @@ AdvancedRegularizer* advanced_regularizer_create(const AdvancedRegularizationCon
     }
     
     if (config->type == ADV_REG_CUTMIX) {
-        // 初始化CutMix状态
-        size_t dist_size = 1000;
-        regularizer->cutmix_state.lambda_distribution = (float*)safe_malloc(dist_size * sizeof(float));
-        regularizer->cutmix_state.bounding_boxes = (int*)safe_malloc(4 * 100 * sizeof(int)); // 最多100个边界框
-        if (!regularizer->cutmix_state.lambda_distribution || !regularizer->cutmix_state.bounding_boxes) {
-            safe_free((void**)&regularizer->cutmix_state.lambda_distribution);
-            safe_free((void**)&regularizer->cutmix_state.bounding_boxes);
+        /* 初始化CutMix状态：仅存储alpha参数，Lambda值按需即时生成 */
+        regularizer->cutmix_state.cutmix_alpha = config->cutmix_alpha;
+        regularizer->cutmix_state.bounding_boxes = (int*)safe_malloc(4 * 100 * sizeof(int)); /* 最多100个边界框 */
+        if (!regularizer->cutmix_state.bounding_boxes) {
             safe_free((void**)&regularizer);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "创建高级正则化器：CutMix状态内存分配失败");
             return NULL;
         }
-        regularizer->cutmix_state.distribution_size = dist_size;
         regularizer->cutmix_state.max_boxes = 100;
-        
-        // 初始化Lambda分布（Beta分布）
-        // 使用Marsaglia-Tsang方法的稳健Beta分布采样
-        float alpha = config->cutmix_alpha;
-        float beta_param = alpha; // 对称Beta(alpha, alpha)
-        for (size_t i = 0; i < dist_size; i++) {
-            float lambda_sample = 0.5f;
-            if (alpha > 10.0f) {
-                // 大alpha：使用正态近似
-                float u1 = rng_uniform(0.0f, 1.0f);
-                float u2 = rng_uniform(0.0f, 1.0f);
-                if (u1 < 1e-10f) u1 = 1e-10f;
-                if (u2 < 1e-10f) u2 = 1e-10f;
-                float z = sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
-                lambda_sample = 0.5f + z * 0.5f / sqrtf(4.0f * alpha + 2.0f);
-            } else if (alpha > 0.01f) {
-                // Johnson's method: 拒绝采样生成Beta(alpha, beta)
-                for (int attempt = 0; attempt < 10; attempt++) {
-                    float u = rng_uniform(0.0f, 1.0f);
-                    if (u < 1e-10f) u = 1e-10f;
-                    float v = rng_uniform(0.0f, 1.0f);
-                    if (v < 1e-10f) v = 1e-10f;
-                    float w = powf(u, 1.0f / alpha);
-                    float x = powf(v, 1.0f / beta_param);
-                    if (w + x <= 1.0f) {
-                        lambda_sample = w / (w + x);
-                        break;
-                    }
-                }
-            }
-            // 数值裁剪防止极端值
-            if (lambda_sample < 0.01f) lambda_sample = 0.01f;
-            if (lambda_sample > 0.99f) lambda_sample = 0.99f;
-            regularizer->cutmix_state.lambda_distribution[i] = lambda_sample;
-        }
     }
     
     if (config->type == ADV_REG_MIXUP) {
-        // 初始化MixUp状态
-        size_t buffer_size = 1000;
-        regularizer->mixup_state.lambda_buffer = (float*)safe_malloc(buffer_size * sizeof(float));
-        if (!regularizer->mixup_state.lambda_buffer) {
-            safe_free((void**)&regularizer);
-            selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
-                                  "创建高级正则化器：MixUp状态内存分配失败");
-            return NULL;
-        }
-        regularizer->mixup_state.buffer_size = buffer_size;
+        /* 初始化MixUp状态：仅存储alpha参数，Lambda值按需即时生成 */
         regularizer->mixup_state.alpha = config->mixup_alpha;
-        
-        // 初始化Lambda缓冲区（Beta分布）
-        // 使用Marsaglia-Tsang方法的稳健Beta分布采样
-        float alpha = config->mixup_alpha;
-        float beta_param = alpha;
-        for (size_t i = 0; i < buffer_size; i++) {
-            float lambda_sample = 0.5f;
-            if (alpha > 10.0f) {
-                // 大alpha：正态近似
-                float u1 = rng_uniform(0.0f, 1.0f);
-                float u2 = rng_uniform(0.0f, 1.0f);
-                if (u1 < 1e-10f) u1 = 1e-10f;
-                if (u2 < 1e-10f) u2 = 1e-10f;
-                float z = sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
-                lambda_sample = 0.5f + z * 0.5f / sqrtf(4.0f * alpha + 2.0f);
-            } else if (alpha > 0.01f) {
-                // Johnson's拒绝采样
-                for (int attempt = 0; attempt < 10; attempt++) {
-                    float u = rng_uniform(0.0f, 1.0f);
-                    if (u < 1e-10f) u = 1e-10f;
-                    float v = rng_uniform(0.0f, 1.0f);
-                    if (v < 1e-10f) v = 1e-10f;
-                    float w = powf(u, 1.0f / alpha);
-                    float x = powf(v, 1.0f / beta_param);
-                    if (w + x <= 1.0f) {
-                        lambda_sample = w / (w + x);
-                        break;
-                    }
-                }
-            }
-            if (lambda_sample < 0.01f) lambda_sample = 0.01f;
-            if (lambda_sample > 0.99f) lambda_sample = 0.99f;
-            regularizer->mixup_state.lambda_buffer[i] = lambda_sample;
-        }
     }
     
     if (config->type == ADV_REG_ADVERSARIAL) {
@@ -266,8 +224,10 @@ AdvancedRegularizer* advanced_regularizer_create(const AdvancedRegularizationCon
     }
     
     if (config->type == ADV_REG_DOMAIN_ADAPTATION) {
-        // 初始化域自适应状态
-        size_t classifier_size = 256; // 假设域分类器大小
+        /* 初始化域自适应状态：根据输入维度动态计算分类器大小
+         * 结构: input_dim -> hidden_size -> 1（二分类域判别器）
+         * size = input_dim * hidden_size + hidden_size + hidden_size + 1 */
+        size_t classifier_size = input_dim * DOMAIN_HIDDEN_SIZE + DOMAIN_HIDDEN_SIZE + DOMAIN_HIDDEN_SIZE + 1;
         regularizer->domain_state.domain_classifier = (float*)safe_calloc(classifier_size, sizeof(float));
         regularizer->domain_state.feature_align_loss = (float*)safe_malloc(100 * sizeof(float));
         if (!regularizer->domain_state.domain_classifier || !regularizer->domain_state.feature_align_loss) {
@@ -294,9 +254,7 @@ void advanced_regularizer_free(AdvancedRegularizer* regularizer) {
     
     safe_free((void**)&regularizer->drop_path_state.survival_probs);
     safe_free((void**)&regularizer->drop_path_state.dropped_layers);
-    safe_free((void**)&regularizer->cutmix_state.lambda_distribution);
     safe_free((void**)&regularizer->cutmix_state.bounding_boxes);
-    safe_free((void**)&regularizer->mixup_state.lambda_buffer);
     safe_free((void**)&regularizer->adv_state.perturbation);
     safe_free((void**)&regularizer->domain_state.domain_classifier);
     safe_free((void**)&regularizer->domain_state.feature_align_loss);
@@ -350,7 +308,7 @@ float drop_path_apply(float survival_prob, float* output, const float* residual,
     }
     
     // 训练模式：以概率 survival_prob 保留，否则丢弃
-    float r = rng_uniform(0.0f, 1.0f);
+    float r = secure_random_float();
     if (r < survival_prob) {
         // 保留分支：按生存概率缩放以保持期望值
         float scale = 1.0f / survival_prob;
@@ -430,7 +388,7 @@ int advanced_regularizer_apply_drop_path(AdvancedRegularizer* regularizer,
         
         // 根据生存概率随机决定是否丢弃该层
         float survival_prob = regularizer->drop_path_state.survival_probs[layer_idx];
-        float r = rng_uniform(0.0f, 1.0f);
+        float r = secure_random_float();
         
         if (r > survival_prob) {
             regularizer->drop_path_state.dropped_layers[layer_idx] = 1;
@@ -475,7 +433,7 @@ int advanced_regularizer_apply_cutmix(AdvancedRegularizer* regularizer,
     }
     
     float cutmix_prob = regularizer->config.cutmix_probability;
-    if (rng_uniform(0.0f, 1.0f) > cutmix_prob) {
+    if (secure_random_float() > cutmix_prob) {
         memcpy(augmented_inputs, inputs, batch_size * input_dim * sizeof(float));
         memcpy(augmented_targets, targets, batch_size * output_dim * sizeof(float));
         return 0;
@@ -488,16 +446,16 @@ int advanced_regularizer_apply_cutmix(AdvancedRegularizer* regularizer,
     if (version < 1) version = 1;
     
     for (size_t i = 0; i < batch_size; i++) {
-        size_t j = rng_next() % (uint64_t)(batch_size);
-        while (j == i) j = rng_next() % (uint64_t)(batch_size);
+        size_t j = secure_random_int((uint32_t)(batch_size));
+        while (j == i) j = secure_random_int((uint32_t)(batch_size));
         
-        size_t dist_idx = rng_next() % (uint64_t)(regularizer)->cutmix_state.distribution_size;
-        float lambda = regularizer->cutmix_state.lambda_distribution[dist_idx];
+        /* 按需即时生成Beta分布Lambda值 */
+        float lambda = generate_beta_sample(regularizer->cutmix_state.cutmix_alpha);
         
         if (version == 1) {
             size_t cut_size = (size_t)(lambda * input_dim);
             if (cut_size >= input_dim) cut_size = input_dim - 1;
-            size_t cut_start = rng_next() % (input_dim - cut_size);
+            size_t cut_start = secure_random_int((uint32_t)(input_dim - cut_size));
             
             memcpy(&augmented_inputs[i * input_dim + cut_start],
                    &inputs[j * input_dim + cut_start],
@@ -515,10 +473,10 @@ int advanced_regularizer_apply_cutmix(AdvancedRegularizer* regularizer,
             }
             
             if (width >= 4 && height >= 4 && width * height <= (int)input_dim) {
-                float r_x = rng_uniform(0.0f, 1.0f);
-                float r_y = rng_uniform(0.0f, 1.0f);
-                float r_w = rng_uniform(0.0f, 1.0f) * 0.6f + 0.1f;
-                float r_h = rng_uniform(0.0f, 1.0f) * 0.6f + 0.1f;
+                float r_x = secure_random_float();
+                float r_y = secure_random_float();
+                float r_w = secure_random_float() * 0.6f + 0.1f;
+                float r_h = secure_random_float() * 0.6f + 0.1f;
                 
                 float lambda_from_box = 1.0f - r_w * r_h;
                 if (lambda_from_box > lambda) {
@@ -572,7 +530,7 @@ int advanced_regularizer_apply_cutmix(AdvancedRegularizer* regularizer,
                 for (size_t b = 0; b < num_blocks; b++) {
                     size_t block_size = input_dim / (num_blocks * 4);
                     if (block_size < 1) block_size = 1;
-                    size_t block_start = rng_next() % (input_dim - block_size);
+                    size_t block_start = secure_random_int((uint32_t)(input_dim - block_size));
                     memcpy(&augmented_inputs[i * input_dim + block_start],
                            &inputs[j * input_dim + block_start],
                            block_size * sizeof(float));
@@ -619,7 +577,7 @@ int advanced_regularizer_apply_mixup(AdvancedRegularizer* regularizer,
     }
     
     float mixup_prob = regularizer->config.mixup_probability;
-    if (rng_uniform(0.0f, 1.0f) > mixup_prob) {
+    if (secure_random_float() > mixup_prob) {
         memcpy(augmented_inputs, inputs, batch_size * input_dim * sizeof(float));
         memcpy(augmented_targets, targets, batch_size * output_dim * sizeof(float));
         return 0;
@@ -627,12 +585,11 @@ int advanced_regularizer_apply_mixup(AdvancedRegularizer* regularizer,
     
     // 实现MixUp算法
     for (size_t i = 0; i < batch_size; i++) {
-        size_t j = rng_next() % (uint64_t)(batch_size);
-        while (j == i) j = rng_next() % (uint64_t)(batch_size);
+        size_t j = secure_random_int((uint32_t)(batch_size));
+        while (j == i) j = secure_random_int((uint32_t)(batch_size));
         
-        // 从缓冲区获取Lambda值
-        size_t buf_idx = rng_next() % (uint64_t)(regularizer)->mixup_state.buffer_size;
-        float lambda = regularizer->mixup_state.lambda_buffer[buf_idx];
+        /* 按需即时生成Beta分布Lambda值 */
+        float lambda = generate_beta_sample(regularizer->mixup_state.alpha);
         
         // 混合输入
         for (size_t k = 0; k < input_dim; k++) {
@@ -677,7 +634,7 @@ int advanced_regularizer_apply_multimodal_mix(AdvancedRegularizer* regularizer,
     }
     
     float mm_prob = regularizer->config.multimodal_mix_probability;
-    if (rng_uniform(0.0f, 1.0f) > mm_prob) {
+    if (secure_random_float() > mm_prob) {
         memcpy(augmented_inputs, inputs, batch_size * input_dim * sizeof(float));
         memcpy(augmented_targets, targets, batch_size * output_dim * sizeof(float));
         return 0;
@@ -698,18 +655,18 @@ int advanced_regularizer_apply_multimodal_mix(AdvancedRegularizer* regularizer,
     
     for (size_t i = 0; i < batch_size; i++) {
         /* 随机选择配对样本 */
-        size_t j = (size_t)(rng_next() % (uint64_t)batch_size);
-        while (j == i) j = (size_t)(rng_next() % (uint64_t)batch_size);
+        size_t j = (size_t)secure_random_int((uint32_t)(batch_size));
+        while (j == i) j = (size_t)secure_random_int((uint32_t)(batch_size));
         
         /* 随机选择要交换的模态数量（1或2个） */
-        int swap_count = (rng_uniform(0.0f, 1.0f) > 0.5f) ? 1 : 2;
+        int swap_count = (secure_random_float() > 0.5f) ? 1 : 2;
         
         /* 随机选择要交换的模态下标 */
         int swap_indices[2] = {-1, -1};
-        swap_indices[0] = (int)(rng_next() % (uint64_t)num_modals);
+        swap_indices[0] = (int)secure_random_int((uint32_t)num_modals);
         if (swap_count == 2) {
             do {
-                swap_indices[1] = (int)(rng_next() % (uint64_t)num_modals);
+                swap_indices[1] = (int)secure_random_int((uint32_t)num_modals);
             } while (swap_indices[1] == swap_indices[0]);
         }
         
@@ -849,7 +806,7 @@ int advanced_regularizer_generate_adversarial(AdvancedRegularizer* regularizer,
             
             // 添加小随机扰动
             for (size_t j = 0; j < input_dim; j++) {
-                float noise = (rng_uniform(0.0f, 1.0f)) * 2.0f - 1.0f;
+                float noise = secure_random_float() * 2.0f - 1.0f;
                 adv_input[j] += noise * epsilon * 0.1f;
                 if (adv_input[j] < 0.0f) adv_input[j] = 0.0f;
                 if (adv_input[j] > 1.0f) adv_input[j] = 1.0f;
@@ -1554,7 +1511,7 @@ int advanced_regularizer_apply_spatial_dropout(AdvancedRegularizer* regularizer,
     
     float channel_drop_rate = dropout_rate * 0.5f;
     for (size_t c = 0; c < channels; c++) {
-        float r = rng_uniform(0.0f, 1.0f);
+        float r = secure_random_float();
         if (r < channel_drop_rate) {
             size_t channel_start = c * elements_per_channel;
             memset(&activations[channel_start], 0, elements_per_channel * sizeof(float));
@@ -1566,16 +1523,16 @@ int advanced_regularizer_apply_spatial_dropout(AdvancedRegularizer* regularizer,
     if (num_blocks > (int)(channels * 2)) num_blocks = (int)(channels * 2);
     
     for (int b = 0; b < num_blocks; b++) {
-        int c = rng_next() % (int)channels;
-        int block_h = (int)((float)height * (rng_uniform(0.0f, 1.0f) * 0.3f + 0.1f));
-        int block_w = (int)((float)width * (rng_uniform(0.0f, 1.0f) * 0.3f + 0.1f));
+        int c = secure_random_int((uint32_t)channels);
+        int block_h = (int)((float)height * (secure_random_float() * 0.3f + 0.1f));
+        int block_w = (int)((float)width * (secure_random_float() * 0.3f + 0.1f));
         if (block_h < 2) block_h = 2;
         if (block_w < 2) block_w = 2;
         if (block_h > (int)height) block_h = (int)height;
         if (block_w > (int)width) block_w = (int)width;
         
-        int start_y = (height > (size_t)block_h) ? (int)(rng_next() % (height - (size_t)block_h)) : 0;
-        int start_x = (width > (size_t)block_w) ? (int)(rng_next() % (width - (size_t)block_w)) : 0;
+        int start_y = (height > (size_t)block_h) ? (int)(secure_random_int((uint32_t)(height - (size_t)block_h))) : 0;
+        int start_x = (width > (size_t)block_w) ? (int)(secure_random_int((uint32_t)(width - (size_t)block_w))) : 0;
         
         size_t channel_base = (size_t)c * elements_per_channel;
         for (int y = start_y; y < start_y + block_h && (size_t)y < height; y++) {
@@ -1589,7 +1546,7 @@ int advanced_regularizer_apply_spatial_dropout(AdvancedRegularizer* regularizer,
     if (pixel_drop_rate > 0.01f) {
         float scale = 1.0f / (1.0f - pixel_drop_rate);
         for (size_t i = 0; i < total_elements; i++) {
-            if (rng_uniform(0.0f, 1.0f) < pixel_drop_rate) {
+            if (secure_random_float() < pixel_drop_rate) {
                 activations[i] = 0.0f;
             } else {
                 activations[i] *= scale;
@@ -1627,7 +1584,7 @@ int advanced_regularizer_apply_dropconnect(AdvancedRegularizer* regularizer,
     float scale = 1.0f / (1.0f - dropout_rate);
     
     for (size_t i = 0; i < total_weights; i++) {
-        float r = rng_uniform(0.0f, 1.0f);
+        float r = secure_random_float();
         if (r < dropout_rate) {
             weights[i] = 0.0f;
         } else {
@@ -1641,15 +1598,15 @@ int advanced_regularizer_apply_dropconnect(AdvancedRegularizer* regularizer,
         if (num_blocks > 10) num_blocks = 10;
         
         for (int b = 0; b < num_blocks; b++) {
-            int block_rows = (int)((float)rows * (rng_uniform(0.0f, 1.0f) * 0.2f + 0.05f));
-            int block_cols = (int)((float)cols * (rng_uniform(0.0f, 1.0f) * 0.2f + 0.05f));
+            int block_rows = (int)((float)rows * (secure_random_float() * 0.2f + 0.05f));
+            int block_cols = (int)((float)cols * (secure_random_float() * 0.2f + 0.05f));
             if (block_rows < 1) block_rows = 1;
             if (block_cols < 1) block_cols = 1;
             if ((size_t)block_rows > rows) block_rows = (int)rows;
             if ((size_t)block_cols > cols) block_cols = (int)cols;
             
-            int start_row = (rows > (size_t)block_rows) ? (int)(rng_next() % (rows - (size_t)block_rows)) : 0;
-            int start_col = (cols > (size_t)block_cols) ? (int)(rng_next() % (cols - (size_t)block_cols)) : 0;
+            int start_row = (rows > (size_t)block_rows) ? (int)(secure_random_int((uint32_t)(rows - (size_t)block_rows))) : 0;
+            int start_col = (cols > (size_t)block_cols) ? (int)(secure_random_int((uint32_t)(cols - (size_t)block_cols))) : 0;
             
             for (int r = start_row; r < start_row + block_rows && (size_t)r < rows; r++) {
                 for (int c = start_col; c < start_col + block_cols && (size_t)c < cols; c++) {
@@ -1673,7 +1630,7 @@ int advanced_regularizer_apply_dropconnect(AdvancedRegularizer* regularizer,
                 float relative_mag = magnitude / mean_mag;
                 if (relative_mag < 0.5f) {
                     float extra_drop = mag_rate * (1.0f - relative_mag * 2.0f);
-                    if (extra_drop > 0 && rng_uniform(0.0f, 1.0f) < extra_drop) {
+                    if (extra_drop > 0 && secure_random_float() < extra_drop) {
                         weights[i] = 0.0f;
                     }
                 }
@@ -2045,23 +2002,24 @@ int advanced_regularizer_save_state(const AdvancedRegularizer* regularizer, cons
         fwrite(&regularizer->drop_path_state.current_drop_rate, sizeof(float), 1, file);
     }
     
-    fwrite(&regularizer->cutmix_state.distribution_size, sizeof(size_t), 1, file);
-    if (regularizer->cutmix_state.distribution_size > 0) {
-        fwrite(regularizer->cutmix_state.lambda_distribution,
-               sizeof(float), regularizer->cutmix_state.distribution_size, file);
+    /* CutMix状态：存储alpha参数（无预计算缓冲区） */
+    {
+        size_t zero_dist = 0;
+        fwrite(&zero_dist, sizeof(size_t), 1, file);
     }
+    fwrite(&regularizer->cutmix_state.cutmix_alpha, sizeof(float), 1, file);
     fwrite(&regularizer->cutmix_state.max_boxes, sizeof(size_t), 1, file);
     if (regularizer->cutmix_state.max_boxes > 0) {
         fwrite(regularizer->cutmix_state.bounding_boxes,
                sizeof(int), regularizer->cutmix_state.max_boxes * 4, file);
     }
     
-    fwrite(&regularizer->mixup_state.buffer_size, sizeof(size_t), 1, file);
-    fwrite(&regularizer->mixup_state.alpha, sizeof(float), 1, file);
-    if (regularizer->mixup_state.buffer_size > 0) {
-        fwrite(regularizer->mixup_state.lambda_buffer,
-               sizeof(float), regularizer->mixup_state.buffer_size, file);
+    /* MixUp状态：存储alpha参数（无预计算缓冲区） */
+    {
+        size_t zero_buf = 0;
+        fwrite(&zero_buf, sizeof(size_t), 1, file);
     }
+    fwrite(&regularizer->mixup_state.alpha, sizeof(float), 1, file);
     
     fwrite(&regularizer->adv_state.perturbation_size, sizeof(size_t), 1, file);
     fwrite(&regularizer->adv_state.epsilon, sizeof(float), 1, file);
@@ -2166,18 +2124,19 @@ int advanced_regularizer_load_state(AdvancedRegularizer* regularizer, const char
         }
     }
     
-    if (fread(&regularizer->cutmix_state.distribution_size, sizeof(size_t), 1, file) != 1) {
-        fclose(file); return -1;
-    }
-    if (regularizer->cutmix_state.distribution_size > 0) {
-        safe_free((void**)&regularizer->cutmix_state.lambda_distribution);
-        regularizer->cutmix_state.lambda_distribution = (float*)safe_malloc(
-            regularizer->cutmix_state.distribution_size * sizeof(float));
-        if (!regularizer->cutmix_state.lambda_distribution) { fclose(file); return -1; }
-        if (fread(regularizer->cutmix_state.lambda_distribution, sizeof(float),
-                  regularizer->cutmix_state.distribution_size, file) != regularizer->cutmix_state.distribution_size) {
+    /* CutMix状态：跳过旧版预计算缓冲区（若有），读取alpha参数 */
+    {
+        size_t legacy_dist_size = 0;
+        if (fread(&legacy_dist_size, sizeof(size_t), 1, file) != 1) {
             fclose(file); return -1;
         }
+        if (legacy_dist_size > 0) {
+            /* 旧格式有预计算缓冲区，跳过 */
+            fseek(file, (long)(legacy_dist_size * sizeof(float)), SEEK_CUR);
+        }
+    }
+    if (fread(&regularizer->cutmix_state.cutmix_alpha, sizeof(float), 1, file) != 1) {
+        fclose(file); return -1;
     }
     if (fread(&regularizer->cutmix_state.max_boxes, sizeof(size_t), 1, file) != 1) {
         fclose(file); return -1;
@@ -2193,21 +2152,19 @@ int advanced_regularizer_load_state(AdvancedRegularizer* regularizer, const char
         }
     }
     
-    if (fread(&regularizer->mixup_state.buffer_size, sizeof(size_t), 1, file) != 1) {
-        fclose(file); return -1;
+    /* MixUp状态：跳过旧版预计算缓冲区（若有），读取alpha参数 */
+    {
+        size_t legacy_buf_size = 0;
+        if (fread(&legacy_buf_size, sizeof(size_t), 1, file) != 1) {
+            fclose(file); return -1;
+        }
+        if (legacy_buf_size > 0) {
+            /* 旧格式有预计算缓冲区，跳过 */
+            fseek(file, (long)(legacy_buf_size * sizeof(float)), SEEK_CUR);
+        }
     }
     if (fread(&regularizer->mixup_state.alpha, sizeof(float), 1, file) != 1) {
         fclose(file); return -1;
-    }
-    if (regularizer->mixup_state.buffer_size > 0) {
-        safe_free((void**)&regularizer->mixup_state.lambda_buffer);
-        regularizer->mixup_state.lambda_buffer = (float*)safe_malloc(
-            regularizer->mixup_state.buffer_size * sizeof(float));
-        if (!regularizer->mixup_state.lambda_buffer) { fclose(file); return -1; }
-        if (fread(regularizer->mixup_state.lambda_buffer, sizeof(float),
-                  regularizer->mixup_state.buffer_size, file) != regularizer->mixup_state.buffer_size) {
-            fclose(file); return -1;
-        }
     }
     
     if (fread(&regularizer->adv_state.perturbation_size, sizeof(size_t), 1, file) != 1) {

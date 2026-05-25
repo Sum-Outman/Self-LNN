@@ -437,7 +437,7 @@ static ImitationLearningResult* train_behavioral_cloning(ImitationLearner* learn
     train_config.batch_size = learner->config.batch_size;
     train_config.learning_rate = learner->config.learning_rate;
     train_config.optimizer = OPTIMIZER_ADAM;
-    train_config.loss_function = LOSS_MEAN_SQUARED_ERROR;
+    train_config.loss_function = LOSS_MSE;
     train_config.regularization = REGULARIZATION_L2;
     train_config.regularization_lambda = learner->config.regularization_strength;
     train_config.dropout_rate = learner->config.dropout_rate;
@@ -686,7 +686,7 @@ static ImitationLearningResult* train_dagger(ImitationLearner* learner) {
     train_config.batch_size = learner->config.batch_size;
     train_config.learning_rate = learner->config.learning_rate;
     train_config.optimizer = OPTIMIZER_ADAM;
-    train_config.loss_function = LOSS_MEAN_SQUARED_ERROR;
+    train_config.loss_function = LOSS_MSE;
     train_config.regularization = REGULARIZATION_L2;
     train_config.regularization_lambda = learner->config.regularization_strength;
     train_config.dropout_rate = learner->config.dropout_rate;
@@ -1661,7 +1661,7 @@ static ImitationLearningResult* train_gail(ImitationLearner* learner) {
             memset(&dc, 0, sizeof(TrainingConfig));
             dc.mode = TRAIN_MODE_MINI_BATCH;
             dc.optimizer = OPTIMIZER_ADAM;
-            dc.loss_function = LOSS_CROSS_ENTROPY;
+            dc.loss_function = LOSS_CATEGORICAL_CROSSENTROPY;
             dc.learning_rate = learner->config.learning_rate * 0.5f;
             dc.batch_size = batch_size_d;
             dc.epochs = d_steps;
@@ -2303,7 +2303,7 @@ static ImitationLearningResult* train_iq_learn(ImitationLearner* learner) {
                     memset(&tc, 0, sizeof(TrainingConfig));
                     tc.mode = TRAIN_MODE_MINI_BATCH;
                     tc.optimizer = OPTIMIZER_ADAM;
-                    tc.loss_function = LOSS_MEAN_SQUARED_ERROR;
+                    tc.loss_function = LOSS_MSE;
                     tc.learning_rate = q_config.learning_rate;
                     tc.batch_size = (train_samples < 32) ? train_samples : 32;
                     tc.epochs = 1;
@@ -2865,7 +2865,7 @@ static ImitationLearningResult* train_bayesian_irl(ImitationLearner* learner) {
             memset(&bc_config, 0, sizeof(TrainingConfig));
             bc_config.mode = TRAIN_MODE_MINI_BATCH;
             bc_config.optimizer = OPTIMIZER_ADAM;
-            bc_config.loss_function = LOSS_MEAN_SQUARED_ERROR;
+            bc_config.loss_function = LOSS_MSE;
             bc_config.learning_rate = learning_rate_val;
             bc_config.batch_size = (actual_bs < 32) ? actual_bs : 32;
             bc_config.epochs = 1;

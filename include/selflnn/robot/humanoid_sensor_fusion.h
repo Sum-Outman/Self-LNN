@@ -132,6 +132,10 @@ typedef struct {
     double fusion_timestamp;
     double update_rate_hz;
     FusionState state;
+    /* GNSS全局定位数据 */
+    double global_position[3];
+    float gnss_accuracy;
+    int gnss_updated;
 } FusionHumanoidState;
 
 typedef struct {

@@ -1693,6 +1693,9 @@ typedef struct SensorDeepPreprocessor {
 SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t obs_dim) {
     if (state_dim == 0 || obs_dim == 0) return NULL;
 
+    /* 前向声明（实现见文件末尾） */
+    void sensor_deep_preprocessor_free(SensorDeepPreprocessor* sdp);
+
     SensorDeepPreprocessor* sdp = (SensorDeepPreprocessor*)safe_calloc(1, sizeof(SensorDeepPreprocessor));
     if (!sdp) return NULL;
 

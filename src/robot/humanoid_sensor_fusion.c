@@ -47,6 +47,23 @@ struct HumanoidSensorFusion {
 
     char last_error[256];
     int error_code;
+
+    /* GNSS传感器数据 */
+    struct {
+        double latitude;
+        double longitude;
+        double altitude;
+        double timestamp;
+        float accuracy;
+        int available;
+        double ref_lat;
+        double ref_lon;
+        double ref_alt;
+        double last_lat;
+        double last_lon;
+        double last_alt;
+        double last_timestamp;
+    } gnss_data;
 };
 
 static void quaternion_normalize(double q[4])
@@ -346,7 +363,6 @@ static void estimate_com_from_joints(const double* joint_positions, int num_join
         total_weighted_y += seg_mass * com_y;
         total_weighted_z += seg_mass * com_z;
         mass_sum += seg_mass;
-    }
     }
 
     if (mass_sum > 0.0)

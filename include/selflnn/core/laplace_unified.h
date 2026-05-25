@@ -16,8 +16,10 @@
 
 #include "selflnn/core/common.h"
 #include "selflnn/core/laplace.h"
-#include "selflnn/core/laplace_ai_framework.h"
-#include "selflnn/core/laplace_enhanced.h"
+/* laplace_ai_framework.h 暂未实现，跳过 */
+/* #include "selflnn/core/laplace_ai_framework.h" */
+/* laplace_enhanced.h 暂未实现，跳过 */
+/* #include "selflnn/core/laplace_enhanced.h" */
 #include "selflnn/core/laplace_integration.h"
 
 /* ZSFBUILD: 前向声明 —— LaplaceAIConfig原本通过laplace_ai_framework.h间接声明

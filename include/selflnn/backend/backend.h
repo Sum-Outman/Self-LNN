@@ -443,6 +443,14 @@ typedef enum {
     API_GET_COGNITION_TOM = 287,           /**< 获取心智理论状态 /api/cognition/tom */
     API_GET_TASK_QUEUE = 288,              /**< 获取任务队列状态 /api/task/queue */
     API_POST_TASK_ASSIGN = 289,            /**< 分配AGI任务 /api/task/assign */
+    
+    /* ===== 多智能体系统 (H-015集成) ===== */
+    API_GET_MULTI_AGENT_STATUS = 290,       /**< 获取多智能体状态 /api/multi-agent/status */
+    API_POST_MULTI_AGENT_NEGOTIATE = 291,   /**< 多智能体协商 /api/multi-agent/negotiate */
+    API_POST_MULTI_AGENT_COALITION = 292,   /**< 智能体联盟组建 /api/multi-agent/coalition */
+    API_POST_MULTI_AGENT_CONSENSUS = 293,   /**< 智能体共识达成 /api/multi-agent/consensus */
+    API_POST_MULTI_AGENT_MESSAGE = 294,     /**< 智能体消息发送 /api/multi-agent/message */
+    API_POST_MULTI_AGENT_TASK = 295,        /**< 分配协作任务 /api/multi-agent/task */
 } ApiRequestType;
 
 /**

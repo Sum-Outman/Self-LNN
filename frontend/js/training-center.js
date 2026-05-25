@@ -46,7 +46,7 @@
                 var lossEl = document.getElementById('training-current-loss');
                 if (lossEl) {
                     var lossVal = data.current_loss;
-                    var accInfo = data.accuracy ? (' | 准确率:' + (data.accuracy * 100).toFixed(1) + '%') : '';
+                    var accInfo = (data.accuracy !== undefined && data.accuracy !== null) ? (' | 准确率:' + (data.accuracy * 100).toFixed(1) + '%') : '';
                     var timeInfo = data.estimated_time ? (' | 预计:' + data.estimated_time) : '';
                     lossEl.textContent = (typeof lossVal === 'number' ? lossVal.toFixed(4) : String(lossVal || '--')) + accInfo + timeInfo;
                 }

@@ -8,7 +8,9 @@
 extern "C" {
 #endif
 
+#ifndef SELFLNN_MAX_MODALITIES
 #define SELFLNN_MAX_MODALITIES 4
+#endif
 
 /**
  * @file unified_signal_processor_advanced.h

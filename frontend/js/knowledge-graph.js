@@ -303,6 +303,8 @@
     }
 
     function refreshStats() {
+        var statEntries = document.getElementById('stat-entries');
+        var statMemory = document.getElementById('stat-memory');
         SelfLnnApi.request('/knowledge', {method: 'GET'})
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
@@ -312,20 +314,17 @@
                 var resp = data.data || data;
                 if (resp && resp.knowledge) {
                     graphState.backendOnline = true;
-                    /* ZSFZS-F053修复: DOM操作前null检查 */
-            var statEntries = document.getElementById('stat-entries');
-            var statMemory = document.getElementById('stat-memory');
-            if (statEntries) statEntries.textContent = resp.knowledge.total_entries || knowledgeEntries.length;
-            var mem = resp.knowledge.memory_usage_bytes || (knowledgeEntries.length * 128);
-            if (statMemory) statMemory.textContent = formatBytes(mem);
+                    if (statEntries) statEntries.textContent = resp.knowledge.total_entries || knowledgeEntries.length;
+                    var mem = resp.knowledge.memory_usage_bytes || (knowledgeEntries.length * 128);
+                    if (statMemory) statMemory.textContent = formatBytes(mem);
                 } else {
                     if (statEntries) statEntries.textContent = knowledgeEntries.length;
                     if (statMemory) statMemory.textContent = formatBytes(knowledgeEntries.length * 128);
                 }
             })
             .catch(function() {
-                document.getElementById('stat-entries').textContent = '离线';
-                document.getElementById('stat-memory').textContent = '离线';
+                if (statEntries) statEntries.textContent = '离线';
+                if (statMemory) statMemory.textContent = '离线';
             });
     }
 
@@ -439,6 +438,7 @@
 
     function initCanvas() {
         canvas = document.getElementById('graph-canvas');
+        if (!canvas) { console.warn('[知识图谱] graph-canvas不存在，Canvas未初始化'); return; }
         ctx = canvas.getContext('2d');
         resizeCanvas();
         window.addEventListener('resize', resizeCanvas);

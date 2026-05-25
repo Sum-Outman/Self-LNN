@@ -46,7 +46,8 @@ static const char* g_capability_names[CAP_COUNT] = {
     "好奇心",
     "规划能力",
     "对话能力",
-    "并发能力"
+    "并发能力",
+    "多智能体协作"  /* H-015集成 */
 };
 
 static const char* g_capability_descriptions[CAP_COUNT] = {
@@ -65,7 +66,7 @@ static const char* g_capability_descriptions[CAP_COUNT] = {
 };
 
 static int g_capability_states[CAP_COUNT] = {
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 };
 
 /* 运行时强制锁定：被锁定后无法通过开关关闭 */

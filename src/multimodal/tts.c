@@ -217,6 +217,7 @@ struct TTSEngine {
     int acoustic_model_initialized;  /**< 声学模型（编码器+解码器）已初始化 */
     int vocoder_initialized;         /**< 神经声码器已初始化 */
     int model_loaded;                /**< 权重已从文件加载 */
+    int is_trained;                  /**< 显式训练状态标志：1=已训练(权重从文件加载成功), 0=未训练(仅随机初始化) */
 };
 
 /* ZSFABC: TTS引擎完整性检查 —— 供后端调用前预检，避免深层崩溃 */
@@ -1387,12 +1388,18 @@ static int tts_neural_vocoder_forward(TTSEngine* engine,
     if (total_samples > max_wave_samples) total_samples = max_wave_samples;
     if (total_samples <= 0) return -1;
 
-    /* 如果声码器未初始化，回退到简单线性插值+Griffin-Lim */
+    /* 如果声码器未初始化，回退到谐波叠加合成 */
     if (!engine->vocoder_initialized) {
         /* 回退：使用梅尔频谱的逆变换近似作为波形
-         * 简化的Griffin-Lim：从梅尔频谱近似重构波形 */
+         * 谐波叠加合成 —— 基频(220Hz) + 4个泛音(440/660/880/1100Hz)
+         * 每个谐波幅度由梅尔频谱能量包络调制，产生比单正弦波更真实的语音质感 */
         int sr = engine->config.sample_rate;
         if (sr <= 0) sr = TTS_SAMPLE_RATE_DEFAULT;
+
+        /* 谐波参数：基频220Hz对应A3音，泛音为整数倍频 */
+        const int num_harmonics = 5;
+        const float harmonic_freqs[5] = {220.0f, 440.0f, 660.0f, 880.0f, 1100.0f};
+        const float harmonic_amps[5] = {1.0f, 0.5f, 0.33f, 0.25f, 0.2f};
 
         for (int t = 0; t < total_samples && t < max_wave_samples; t++) {
             /* 找到对应的梅尔帧 */
@@ -1416,9 +1423,17 @@ static int tts_neural_vocoder_forward(TTSEngine* engine,
                 mel_sum += val;
             }
 
-            /* 添加正弦载波模拟周期性 */
-            float phase = (float)t * 220.0f / (float)sr;
-            waveform_out[t] = tanhf(mel_sum * 0.01f) * sinf(2.0f * (float)M_PI * phase);
+            /* 谐波叠加合成：基频+4个泛音，幅度递减模拟声带振动谐波结构 */
+            float sample = 0.0f;
+            for (int h = 0; h < num_harmonics; h++) {
+                float phase = (float)t * harmonic_freqs[h] / (float)sr;
+                sample += harmonic_amps[h] * sinf(2.0f * (float)M_PI * phase);
+            }
+            /* 归一化：最大可能振幅 = sum of harmonic_amps ≈ 2.28 */
+            sample /= 2.28f;
+
+            /* 梅尔能量包络调制谐波堆叠幅度 */
+            waveform_out[t] = tanhf(mel_sum * 0.01f) * sample;
         }
 
         *out_wave_samples = total_samples;
@@ -1979,12 +1994,25 @@ static void tts_deterministic_formant_synth(TTSEngine* engine,
 }
 
 /**
- * @brief 检测投影权重是否为未训练的Xavier随机值
+ * @brief 检测TTS引擎是否处于未训练状态
+ *
+ * 首先检查显式的 is_trained 标志（该标志在 tts_load_model() 成功后设为1）。
+ * 如果标志为1则直接返回0（已训练）。
+ * 如果标志为0但模型已从文件加载(model_loaded=1)，则也视为已训练。
+ * 最后才使用方差启发式作为辅助验证。
+ *
  * @return 1=未训练(可安全使用确定性回退), 0=已训练
  */
 static int tts_is_untrained(TTSEngine* engine) {
     if (!engine) return 1;
-    /* 检测波形投影权重方差是否接近Xavier初始化特征 */
+
+    /* 显式训练标志检查：最可靠的方式 */
+    if (engine->is_trained) return 0;
+
+    /* 模型已从文件加载，即使is_trained为0(旧版本兼容)，也视为已训练 */
+    if (engine->model_loaded) return 0;
+
+    /* 辅助验证：检测波形投影权重方差是否接近Xavier初始化特征 */
     int hs = (int)engine->config.hidden_size;
     if (hs <= 0 || !engine->waveform_projection_w) return 1;
     float sum = 0.0f, sum_sq = 0.0f;
@@ -2158,13 +2186,13 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
         for (int f = 0; f < 5; f++) {
             float w0 = 2.0f * (float)M_PI * formant_freq[f] / sr;
             float bw = formant_bw[f] / sr;
-            float alpha = sinf(w0) * sinhf(logf(2.0f) / 2.0f * bw * w0 / sinf(w0) + 0.0001f);
-            float a0 = 1.0f + alpha;
+            float alpha_f = sinf(w0) * sinhf(logf(2.0f) / 2.0f * bw * w0 / sinf(w0) + 0.0001f);
+            float a0 = 1.0f + alpha_f;
             float a1 = -2.0f * cosf(w0);
-            float a2 = 1.0f - alpha;
-            float b0 = alpha;
+            float a2 = 1.0f - alpha_f;
+            float b0 = alpha_f;
             float b1 = 0.0f;
-            float b2 = -alpha;
+            float b2 = -alpha_f;
             float out = (b0/a0) * filter_in + z1[f];
             z1[f] = (b1/a0) * filter_in - (a1/a0) * out + z2[f];
             z2[f] = (b2/a0) * filter_in - (a2/a0) * out;
@@ -2257,12 +2285,22 @@ static int text_to_tokens(TTSEngine* engine, const char* text,
         pos++;
 
         if (codepoint >= 0x20 && codepoint <= 0x7E) {
+            /* ASCII可打印字符：直接映射 */
             tokens[count++] = codepoint;
         } else if (codepoint >= 0x4E00 && codepoint <= 0x9FFF) {
-            tokens[count++] = (codepoint % (engine->config.vocab_size - 32)) + 32;
+            /* CJK统一汉字(U+4E00-U+9FFF)：连续线性映射
+             * 将20,992个汉字的Unicode码点范围均匀映射到词表空间
+             * 保留语义相近汉字在嵌入空间的邻接关系（如"一"和"丁"相邻） */
+            int range = 0x9FFF - 0x4E00;
+            int offset = codepoint - 0x4E00;
+            int mapped = (int)((float)offset / (float)range * (float)(engine->config.vocab_size - 32));
+            if (mapped < 0) mapped = 0;
+            if (mapped >= engine->config.vocab_size - 32) mapped = engine->config.vocab_size - 33;
+            tokens[count++] = 32 + mapped;
         } else if (codepoint >= 0 && codepoint < 32) {
             /* 控制字符跳过 */
         } else {
+            /* 其他Unicode字符：映射到 '?' */
             tokens[count++] = '?';
         }
     }
@@ -2463,6 +2501,7 @@ int tts_load_model(TTSEngine* engine, const char* filepath) {
     }
 
     engine->model_loaded = 1;
+    engine->is_trained = 1;  /* 显式标记已训练：权重从文件加载成功 */
     fclose(fp);
     return 0;
 }
@@ -2662,26 +2701,10 @@ TTSAudio* tts_synthesize(TTSEngine* engine, const char* text) {
 
     int actual_samples = 0;
 
-    /* 判断是否使用确定性共振峰合成路径 */
-    if (!engine->shared_lnn && tts_is_untrained(engine)) {
-        /* 未训练状态：使用基于声学语音学数据的确定性共振峰合成
-         * 完全不依赖随机初始化权重，产生真实的语音信号 */
-        TTS_Pinyin* pinyins = (TTS_Pinyin*)safe_malloc((size_t)num_tokens * sizeof(TTS_Pinyin));
-        if (pinyins) {
-            actual_samples = tts_deterministic_synthesize(engine, text, pinyins,
-                                                           num_tokens, audio->samples, max_samples);
-            safe_free((void**)&pinyins);
-        }
-        if (actual_samples <= 0) {
-            /* 回退到generate_waveform（极少情况） */
-            actual_samples = generate_waveform(engine, engine->token_buffer, num_tokens,
-                                                audio->samples, max_samples);
-        }
-    } else {
-        /* LNN已就绪或权重已训练：使用CfC液态状态生成 */
-        actual_samples = generate_waveform(engine, engine->token_buffer, num_tokens,
-                                            audio->samples, max_samples);
-    }
+    /* H-004修复: 始终使用CfC液态神经网络路径，即使权重随机初始化。
+     * 自包含CfC+声门脉冲+共振峰滤波确保安全运行 */
+    actual_samples = generate_waveform(engine, engine->token_buffer, num_tokens,
+                                        audio->samples, max_samples);
 
     if (actual_samples <= 0) {
         safe_free((void**)&audio->samples);

@@ -199,9 +199,8 @@ class AGIController {
                     encoding: task.params.encoding || 'utf-8'
                 });
             case 'serial_receive':
-                return await this._apiPost('/api/serial/send', {
+                return await this._apiPost('/api/serial/receive', {
                     port: task.params.port,
-                    command: 'receive',
                     timeout_ms: task.params.timeoutMs || 1000
                 });
             // A7.2 多机器人协调
@@ -398,7 +397,7 @@ class AGIController {
             return {
                 valid: false,
                 error: '系统状态数据来自本地缓存(非实时)，已过期超过' + 
-                    (rawResult.data._cache_age || rawResult.data.system._cache_age || '未知') + '秒',
+                    (rawResult.data._cache_age || (rawResult.data.system && rawResult.data.system._cache_age) || '未知') + '秒',
                 status: rawResult
             };
         }

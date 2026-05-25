@@ -856,11 +856,33 @@ int dataset_augment_spectral(TrainingDataset* ds, float freq_mask_param, float t
  * ⚠️ 严格禁止用于生产环境的自主学习。
  * ============================================================================ */
 
-#ifndef SELFLNN_STRICT_REAL_DATA
+/* ============================================================================
+ * COMPILE-TIME 合成数据生成控制 — SELFLNN_STRICT_REAL_DATA
+ *
+ * 当 SELFLNN_STRICT_REAL_DATA 定义时：
+ *   - 所有合成数据生成辅助函数（分形纹理、物理振动、Zipf编码）不参与编译
+ *   - 所有合成数据相关常量（BS_MAX_SAMPLES 等）不参与编译
+ *   - dataset_bootstrap_multimodal 直接返回 -1 + 错误日志
+ *   - 零运行时开销，编译器彻底消除合成数据代码路径
+ *
+ * 当 SELFLNN_STRICT_REAL_DATA 未定义时：
+ *   - 编译所有辅助函数和常量
+ *   - 函数入口由 SELFLNN_ALLOW_BOOTSTRAP_DATA 控制
+ * ============================================================================ */
+#ifdef SELFLNN_STRICT_REAL_DATA
+/* ===== 严格真实数据模式：编译时彻底排除所有合成数据生成代码 ===== */
+int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
+    (void)out_ds;
+    (void)num_samples;
+    log_error("[数据集] SELFLNN_STRICT_REAL_DATA 编译时已彻底禁用合成数据引导。"
+              "整个合成数据生成代码路径已在编译阶段完全排除。"
+              "系统必须使用真实多模态数据训练。");
+    return -1;
+}
+#else  /* !SELFLNN_STRICT_REAL_DATA */
 /* DEBUG模式编译开关：仅当显式定义SELFLNN_ALLOW_BOOTSTRAP_DATA时允许引导数据生成 */
 #ifndef SELFLNN_ALLOW_BOOTSTRAP_DATA
 #define SELFLNN_BOOTSTRAP_DISABLED 1
-#endif
 #endif
 
 #define BS_MAX_SAMPLES 10000
@@ -873,6 +895,7 @@ int dataset_augment_spectral(TrainingDataset* ds, float freq_mask_param, float t
 /**
  * @brief 分形纹理生成器（Mandelbrot集映射到特征空间）
  * 产生真实的数学分形结构，用于测试视觉特征提取能力
+ * 注意：此函数仅在 SELFLNN_STRICT_REAL_DATA 未定义时参与编译
  */
 static float fractal_texture(int x, int y, int seed, int width, int height) {
     float cx = ((float)x / (float)width - 0.5f) * 3.0f;
@@ -893,6 +916,7 @@ static float fractal_texture(int x, int y, int seed, int width, int height) {
 /**
  * @brief 谐振子叠加模型（确定性物理振动）
  * 基于确定性的阻尼谐振子叠加原理生成频谱数据
+ * 注意：此函数仅在 SELFLNN_STRICT_REAL_DATA 未定义时参与编译
  */
 static float physics_vibration(float t, float base_freq, float damping, int mode) {
     float result = 0.0f;
@@ -910,6 +934,7 @@ static float physics_vibration(float t, float base_freq, float damping, int mode
 /**
  * @brief Zipf分布编码（确定性频率分布）
  * 基于确定性的Zipf定律生成词频分布编码
+ * 注意：此函数仅在 SELFLNN_STRICT_REAL_DATA 未定义时参与编译
  */
 static float zipf_frequency_encode(int rank, int total_ranks, unsigned int seed) {
     float zipf = 1.0f / (float)(rank + 1);
@@ -935,3 +960,4 @@ int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
               "系统必须使用真实多模态数据训练。禁止使用合成数学函数数据。");
     return -1;
 }
+#endif /* SELFLNN_STRICT_REAL_DATA */

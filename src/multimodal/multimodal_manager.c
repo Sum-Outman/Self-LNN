@@ -12,6 +12,7 @@
 #include "selflnn/multimodal/unified_signal_processor.h"
 #include "selflnn/selflnn.h"               /* P0-002: selflnn_get_unified_signal_processor */
 #include "selflnn/multimodal/multimodal_unified_input.h"
+#include "selflnn/multimodal/haptic_learning.h" /* H-018集成: 触觉CfC处理+纹理分析 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/core/errors.h"
@@ -37,6 +38,8 @@ struct MultimodalManager {
     int unified_signal_processor_owned;   /**< 是否拥有信号处理器（1=自建需释放，0=外部引用） */
     LNN* lnn_instance;                    /**< 关联的LNN实例（不拥有，不释放） */
     float modality_weights[4];            /**< 各模态权重（仅用于外部路由查询，不影响CfC内部状态演化） */
+    HapticCfcProcessor* haptic_cfc_proc;  /**< H-018: CfC触觉信号处理器 */
+    HapticTextureAnalyzer* haptic_texture_analyzer; /**< H-018: 触觉纹理分析器 */
 };
 
 /**
@@ -85,6 +88,18 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
         manager->unified_signal_processor = NULL;
     }
 
+    manager->modality_weights[2] = 0.0f;
+    manager->modality_weights[3] = 0.0f;
+    
+    /* H-018集成: 创建CfC触觉处理器和纹理分析器 */
+    {
+        HapticCfcConfig hc_cfg = haptic_cfc_get_default_config();
+        manager->haptic_cfc_proc = haptic_cfc_create(&hc_cfg);
+        
+        HapticTextureConfig ht_cfg = haptic_texture_get_default_config();
+        manager->haptic_texture_analyzer = haptic_texture_create(&ht_cfg);
+    }
+    
     return manager;
 }
 
@@ -102,6 +117,15 @@ void multimodal_manager_free(MultimodalManager* manager) {
     }
     if (manager->fused_features) {
         safe_free((void**)&manager->fused_features);
+    }
+    /* H-018集成: 释放触觉处理器和纹理分析器 */
+    if (manager->haptic_cfc_proc) {
+        haptic_cfc_free(manager->haptic_cfc_proc);
+        manager->haptic_cfc_proc = NULL;
+    }
+    if (manager->haptic_texture_analyzer) {
+        haptic_texture_free(manager->haptic_texture_analyzer);
+        manager->haptic_texture_analyzer = NULL;
     }
     safe_free((void**)&manager);
 }
@@ -185,6 +209,41 @@ int multimodal_manager_process(MultimodalManager* manager,
         safe_free((void**)&unified_output->unified_signal);
         safe_free((void**)&unified_output);
         return -1;
+    }
+
+    /* H-018集成: 在触觉数据到达时进行CfC触觉深度处理 */
+    if (manager->haptic_cfc_proc && sensor_input) {
+        SensorInput* si = (SensorInput*)sensor_input;
+        /* 将传感器输入转换为HapticReading结构进行CfC处理 */
+        HapticReading hr;
+        memset(&hr, 0, sizeof(HapticReading));
+        if (si->sensor_values && si->sensor_count > 0) {
+            size_t press_copy = si->sensor_count < 16 ? si->sensor_count : 16;
+            for (size_t i = 0; i < press_copy; i++)
+                hr.pressure[i] = si->sensor_values[i];
+            hr.sensor_count = (int)si->sensor_count;
+        }
+        float cfc_features[64];
+        int contact = 0, slip = 0;
+        if (haptic_cfc_process(manager->haptic_cfc_proc, &hr, 0.01f,
+                                cfc_features, 64, &contact, &slip) == 0) {
+            /* 将CfC触觉特征融合到统一输出中 */
+            size_t signal_dim = unified_output->signal_dimension;
+            size_t haptic_offset = signal_dim > 64 ? signal_dim - 64 : 0;
+            size_t copy = (signal_dim - haptic_offset) < 64 ?
+                         (signal_dim - haptic_offset) : 64;
+            for (size_t i = 0; i < copy; i++) {
+                unified_output->unified_signal[haptic_offset + i] +=
+                    cfc_features[i] * 0.3f;
+            }
+            /* 触觉纹理分析 */
+            if (manager->haptic_texture_analyzer) {
+                HapticTextureDescriptor tex_desc;
+                memset(&tex_desc, 0, sizeof(HapticTextureDescriptor));
+                haptic_texture_analyze(manager->haptic_texture_analyzer,
+                                       &hr, 0.01f, &tex_desc);
+            }
+        }
     }
 
     LNNConfig lnn_cfg;

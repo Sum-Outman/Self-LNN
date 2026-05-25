@@ -74,6 +74,7 @@
 #include "selflnn/knowledge/auto_learning.h"
 #include "selflnn/safety/safety_monitor.h"
 #include "selflnn/agi/capability_switch.h"
+#include "selflnn/multi_agent.h"             /* H-015集成 */
 #include "selflnn/safety/emergency_stop.h"
 #include "selflnn/safety/content_filter.h"
 #include "selflnn/backend/auth.h"
@@ -460,6 +461,13 @@ static const struct {
     {"/api/training/resume", "POST", "恢复训练任务", "training"},
     {"/api/knowledge/import", "POST", "导入知识库条目", "knowledge"},
     {"/api/knowledge/delete", "POST", "删除知识库条目", "knowledge"},
+    /* H-015集成: 多智能体系统API */
+    {"/api/multi-agent/status", "GET", "获取多智能体状态", "agi"},
+    {"/api/multi-agent/negotiate", "POST", "多智能体协商", "agi"},
+    {"/api/multi-agent/coalition", "POST", "智能体联盟组建", "agi"},
+    {"/api/multi-agent/consensus", "POST", "智能体共识达成", "agi"},
+    {"/api/multi-agent/message", "POST", "智能体消息发送", "agi"},
+    {"/api/multi-agent/task", "POST", "分配协作任务", "agi"},
 };
 #define g_api_endpoints_count (sizeof(g_api_endpoints) / sizeof(g_api_endpoints[0]))
 
@@ -2372,6 +2380,14 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/task/create") == 0)               return API_POST_TASK_CREATE;
     if (strcmp(p, "/api/task/queue") == 0)                return API_GET_TASK_QUEUE;
     if (strcmp(p, "/api/task/assign") == 0)               return API_POST_TASK_ASSIGN;
+    
+    /* === 多智能体系统 (H-015集成) === */
+    if (strcmp(p, "/api/multi-agent/status") == 0)        return API_GET_MULTI_AGENT_STATUS;
+    if (strcmp(p, "/api/multi-agent/negotiate") == 0)     return API_POST_MULTI_AGENT_NEGOTIATE;
+    if (strcmp(p, "/api/multi-agent/coalition") == 0)     return API_POST_MULTI_AGENT_COALITION;
+    if (strcmp(p, "/api/multi-agent/consensus") == 0)     return API_POST_MULTI_AGENT_CONSENSUS;
+    if (strcmp(p, "/api/multi-agent/message") == 0)       return API_POST_MULTI_AGENT_MESSAGE;
+    if (strcmp(p, "/api/multi-agent/task") == 0)          return API_POST_MULTI_AGENT_TASK;
 
     /* === 自我编程 === */
     if (strcmp(p, "/api/programming/analyze") == 0)       return API_POST_PROGRAMMING_ANALYZE;
@@ -17314,9 +17330,12 @@ static int handle_api_post_agi_think(BackendServer* server,
     if (!json_data) return -1;
 
     char query[256] = {0};
+    size_t q_len = 0;
+    float reasoning_result[128] = {0};
     if (request_data && request_length > 2) {
         parse_json_string(request_data, "query", query, sizeof(query));
     }
+    q_len = strlen(query);
 
     /* ZSFABC-006修复: 连接真实的推理/认知引擎进行实际分析 */
     char reasoning_output[512] = "思考引擎正在分析中...";
@@ -17324,11 +17343,9 @@ static int handle_api_post_agi_think(BackendServer* server,
     
     if (server->reasoning_engine && query[0]) {
         float query_vec[64] = {0};
-        size_t q_len = strlen(query);
         for (size_t k = 0; k < q_len && k < 64; k++) {
             query_vec[k] = (float)(unsigned char)query[k] / 255.0f;
         }
-        float reasoning_result[128] = {0};
         /* ZSFABC-006修复: reasoning_forward不存在，改用真实函数 reasoning_infer */
         int r_result = reasoning_infer((ReasoningEngine*)server->reasoning_engine,
                                        query_vec, (size_t)(q_len < 64 ? q_len : 64),
@@ -17345,38 +17362,33 @@ static int handle_api_post_agi_think(BackendServer* server,
     /* ZSFX-P0: 因果推理API——SCM因果模型驱动的深度推理 */
     if (!reasoning_active && server->reasoning_engine && query[0]) {
         ReasoningEngine* engine = (ReasoningEngine*)server->reasoning_engine;
-        /* 尝试使用SCM因果推理引擎进行反事实推理 */
-        if (engine->causal_engine) {
-            float cause_vec[64] = {0};
-            float effect_vec[64] = {0};
-            size_t cause_len = q_len < 32 ? q_len : 32;
-            size_t effect_len = q_len > 32 ? q_len - 32 : 0;
-            if (effect_len > 32) effect_len = 32;
-            for (size_t k = 0; k < cause_len && k < 64; k++)
-                cause_vec[k] = (float)(unsigned char)query[k] / 255.0f;
-            for (size_t k = 0; k < effect_len && k < 64; k++)
-                effect_vec[k] = (float)(unsigned char)query[cause_len + k] / 255.0f;
+        float cause_vec[64] = {0};
+        float effect_vec[64] = {0};
+        size_t cause_len = q_len < 32 ? q_len : 32;
+        size_t effect_len = q_len > 32 ? q_len - 32 : 0;
+        if (effect_len > 32) effect_len = 32;
+        for (size_t k = 0; k < cause_len && k < 64; k++)
+            cause_vec[k] = (float)(unsigned char)query[k] / 255.0f;
+        for (size_t k = 0; k < effect_len && k < 64; k++)
+            effect_vec[k] = (float)(unsigned char)query[cause_len + k] / 255.0f;
 
-            /* 因果发现→结构方程→反事实推理 */
-            float causal_confidence = 0.0f;
-            int causal_result = reasoning_causal_infer(engine, cause_vec, cause_len,
-                                                        effect_vec, effect_len,
-                                                        &causal_confidence);
-            if (causal_result == 0 && causal_confidence > 0.3f) {
+        float causal_confidence = 0.0f;
+        int causal_result = reasoning_causal_infer(engine, cause_vec, cause_len,
+                                                    effect_vec, effect_len,
+                                                    &causal_confidence);
+        if (causal_result == 0 && causal_confidence > 0.3f) {
+            reasoning_active = 1;
+            snprintf(reasoning_output, sizeof(reasoning_output),
+                    "因果推理完成: 置信度=%.3f, 问题维数=%zu",
+                    causal_confidence, q_len);
+        } else {
+            int discover_result = reasoning_discover_causal_structure(engine,
+                cause_vec, cause_len, effect_len > 0 ? effect_vec : NULL, effect_len,
+                reasoning_result, 128);
+            if (discover_result == 0) {
                 reasoning_active = 1;
                 snprintf(reasoning_output, sizeof(reasoning_output),
-                        "因果推理完成: 置信度=%.3f, 问题维数=%zu",
-                        causal_confidence, q_len);
-            } else {
-                /* 因果推理失败时尝试结构发现 */
-                int discover_result = reasoning_discover_causal_structure(engine,
-                    cause_vec, cause_len, effect_len > 0 ? effect_vec : NULL, effect_len,
-                    reasoning_result, 128);
-                if (discover_result == 0) {
-                    reasoning_active = 1;
-                    snprintf(reasoning_output, sizeof(reasoning_output),
-                            "因果结构发现完成: 问题维数=%zu", q_len);
-                }
+                        "因果结构发现完成: 问题维数=%zu", q_len);
             }
         }
     } else if (server->cognition_system && query[0]) {
@@ -21386,6 +21398,173 @@ static int handle_api_post_task_assign(BackendServer* s,
     return 0;
 }
 
+/* H-015集成: 多智能体系统处理器 */
+static int handle_api_get_multi_agent_status(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)s; (void)rt; (void)d; (void)l;
+    void* ma_sys = selflnn_get_multi_agent_system();
+    if (!ma_sys) {
+        r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
+        r->data_length = strlen(r->data); r->status_code = 503;
+        return 0;
+    }
+    MultiAgentSystem* sys = (MultiAgentSystem*)ma_sys;
+    float metrics[16];
+    int mc = multi_agent_evaluate_performance(sys, metrics, 16);
+    char* j = safe_malloc(4096);
+    if (j) {
+        snprintf(j, 4096,
+            "{\"success\":true,\"multi_agent_system\":{"
+            "\"initialized\":true,\"agent_count\":%d,\"metrics_count\":%d,"
+            "\"avg_reward\":%.4f,\"success_rate\":%.4f,\"collaboration_efficiency\":%.4f,"
+            "\"communication_efficiency\":%.4f,\"total_tasks\":%d,\"completed_tasks\":%d}}",
+            (int)mc > 0 ? (int)metrics[0] : 0, mc,
+            mc > 0 ? metrics[1] : 0.0f, mc > 1 ? metrics[2] : 0.0f,
+            mc > 2 ? metrics[3] : 0.0f, mc > 3 ? metrics[4] : 0.0f,
+            mc > 4 ? (int)metrics[5] : 0, mc > 5 ? (int)metrics[6] : 0);
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
+static int handle_api_post_multi_agent_negotiate(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)s; (void)rt;
+    void* ma_sys = selflnn_get_multi_agent_system();
+    if (!ma_sys) {
+        r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
+        r->data_length = strlen(r->data); r->status_code = 503;
+        return 0;
+    }
+    MultiAgentSystem* sys = (MultiAgentSystem*)ma_sys;
+    int agent_ids[16]; int agent_count = 0;
+    if (d && l > 0) {
+        char ids_str[256] = "";
+        parse_json_string(d, "agent_ids", ids_str, sizeof(ids_str));
+        if (ids_str[0]) {
+            char* tk = strtok(ids_str, ",");
+            while (tk && agent_count < 16) {
+                agent_ids[agent_count++] = atoi(tk);
+                tk = strtok(NULL, ",");
+            }
+        }
+    }
+    int agents[16] = {0, 1, 2, 3};
+    int result = multi_agent_reach_consensus(sys,
+        agent_count > 0 ? agent_ids : agents,
+        agent_count > 0 ? agent_count : 4,
+        d, NULL);
+    char* j = safe_malloc(1024);
+    if (j) {
+        snprintf(j, 1024,
+            "{\"success\":%s,\"consensus_reached\":%s,\"agent_count\":%d}",
+            result == 0 ? "true" : "false",
+            result == 0 ? "true" : "false",
+            agent_count > 0 ? agent_count : 4);
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
+static int handle_api_post_multi_agent_coalition(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)s; (void)rt; (void)d; (void)l;
+    void* ma_sys = selflnn_get_multi_agent_system();
+    if (!ma_sys) {
+        r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
+        r->data_length = strlen(r->data); r->status_code = 503;
+        return 0;
+    }
+    MultiAgentSystem* sys = (MultiAgentSystem*)ma_sys;
+    CollaborativeTask* task = collaborative_task_create("coalition_task", 3);
+    int coalition_ids[8];
+    int size = multi_agent_form_coalition(sys, task, coalition_ids, 8);
+    collaborative_task_destroy(task);
+    char* j = safe_malloc(2048);
+    if (j) {
+        char agents_list[256] = "";
+        int off = 0;
+        for (int i = 0; i < size && i < 8; i++) {
+            off += snprintf(agents_list + off, sizeof(agents_list) - off,
+                           "%s%d", i > 0 ? "," : "", coalition_ids[i]);
+        }
+        snprintf(j, 2048,
+            "{\"success\":true,\"coalition_size\":%d,\"agent_ids\":[%s]}",
+            size, size > 0 ? agents_list : "");
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
+static int handle_api_post_multi_agent_consensus(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    return handle_api_post_multi_agent_negotiate(s, rt, d, l, r);
+}
+
+static int handle_api_post_multi_agent_message(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)s; (void)rt;
+    void* ma_sys = selflnn_get_multi_agent_system();
+    if (!ma_sys) {
+        r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
+        r->data_length = strlen(r->data); r->status_code = 503;
+        return 0;
+    }
+    int sender_id = 0, receiver_id = 1;
+    char msg_type[64] = "info";
+    if (d && l > 0) {
+        parse_json_int(d, "sender_id", &sender_id);
+        parse_json_int(d, "receiver_id", &receiver_id);
+        parse_json_string(d, "message_type", msg_type, sizeof(msg_type));
+    }
+    AgentMessage* msg = agent_message_create(sender_id, receiver_id, msg_type);
+    int result = -1;
+    if (msg) {
+        result = multi_agent_send_message((MultiAgentSystem*)ma_sys, msg);
+        agent_message_destroy(msg);
+    }
+    char* j = safe_malloc(512);
+    if (j) {
+        snprintf(j, 512,
+            "{\"success\":%s,\"sender\":%d,\"receiver\":%d,\"type\":\"%s\"}",
+            result == 0 ? "true" : "false", sender_id, receiver_id, msg_type);
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
+
+static int handle_api_post_multi_agent_task(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)s; (void)rt;
+    void* ma_sys = selflnn_get_multi_agent_system();
+    if (!ma_sys) {
+        r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
+        r->data_length = strlen(r->data); r->status_code = 503;
+        return 0;
+    }
+    char task_id[128] = "";
+    if (d && l > 0) {
+        parse_json_string(d, "task_id", task_id, sizeof(task_id));
+    }
+    if (task_id[0] == '\0') {
+        snprintf(task_id, sizeof(task_id), "task_%ld", (long)time(NULL));
+    }
+    CollaborativeTask* task = collaborative_task_create(task_id, 3);
+    int result = -1;
+    if (task) {
+        task->task_type = TASK_TYPE_COLLABORATION;
+        result = multi_agent_execute_task((MultiAgentSystem*)ma_sys, task);
+        collaborative_task_destroy(task);
+    }
+    char* j = safe_malloc(512);
+    if (j) {
+        snprintf(j, 512,
+            "{\"success\":%s,\"task_id\":\"%s\"}",
+            result == 0 ? "true" : "false", task_id);
+        r->data = j; r->data_length = strlen(j); r->status_code = 200;
+    }
+    return 0;
+}
 
 /* ========== Handler分发表初始化 ========== */
 static void init_handler_table(RequestHandler* table) {
@@ -21700,12 +21879,13 @@ static void init_handler_table(RequestHandler* table) {
     table[288] = handle_api_get_task_queue;
     table[289] = handle_api_post_task_assign;
 
-    /* 槽位290-294预接未实现处理器 - 避免空指针调用 */
-    table[290] = handle_api_not_implemented;
-    table[291] = handle_api_not_implemented;
-    table[292] = handle_api_not_implemented;
-    table[293] = handle_api_not_implemented;
-    table[294] = handle_api_not_implemented;
+    /* 槽位290-295: 多智能体系统处理器 (H-015集成) */
+    table[290] = handle_api_get_multi_agent_status;
+    table[291] = handle_api_post_multi_agent_negotiate;
+    table[292] = handle_api_post_multi_agent_coalition;
+    table[293] = handle_api_post_multi_agent_consensus;
+    table[294] = handle_api_post_multi_agent_message;
+    table[295] = handle_api_post_multi_agent_task;
 }
 /**
  * @brief 处理API请求（主分发器）

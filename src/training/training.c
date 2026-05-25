@@ -710,6 +710,7 @@ typedef struct Trainer {
     int distributed_checkpoint_ready;      /**< 检查点是否已准备好 */
     int distributed_sync_pending;          /**< 同步是否待处理 */
     float distributed_learning_rate_scaled; /**< 缩放后的学习率 */
+    float current_learning_rate;           /**< 当前应用的学习率（拉普拉斯频域调制后） */
     
     // 高级正则化器
     AdvancedRegularizer* regularizer;      /**< 高级正则化器 */
@@ -1060,7 +1061,7 @@ TrainingConfig training_config_default(void) {
     
     config.mode = TRAIN_MODE_MINI_BATCH;
     config.optimizer = OPTIMIZER_ADAM;
-    config.loss_function = LOSS_MEAN_SQUARED_ERROR;
+    config.loss_function = LOSS_MSE;
     config.regularization = REGULARIZATION_L2;
     config.gradient_clip = GRADIENT_CLIP_NORM;
     
@@ -4923,10 +4924,10 @@ static float evolution_train_fitness(const float* genome, size_t genome_size, vo
         }
 
         switch (trainer->config.loss_function) {
-            case LOSS_CROSS_ENTROPY:
+            case LOSS_CATEGORICAL_CROSSENTROPY:
                 total_loss += loss_cross_entropy(data->output_buffer, batch_tg, cur_batch * data->output_dim);
                 break;
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MAE:
                 total_loss += loss_mean_absolute_error(data->output_buffer, batch_tg, cur_batch * data->output_dim);
                 break;
             default:
@@ -5322,8 +5323,8 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                         }
                         if (batch_inputs) safe_free((void**)&batch_inputs);
                         if (batch_targets) safe_free((void**)&batch_targets);
-                    break;
-                }
+                        break;
+                    }
                 forward_done = 1;
             }
             
@@ -5351,7 +5352,6 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             float accuracy = 0.0f;
             {
                 int is_classification = (trainer->config.loss_function == LOSS_CATEGORICAL_CROSSENTROPY ||
-                                         trainer->config.loss_function == LOSS_CROSS_ENTROPY ||
                                          trainer->config.loss_function == LOSS_BINARY_CROSSENTROPY);
                 if (is_classification) {
                     for (size_t i = 0; i < batch_size; i++) {
@@ -5673,10 +5673,9 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                                 if (freq_factor > 5.0f) freq_factor = 5.0f;
                             }
                             /* 平滑过渡: 指数移动平均避免LR剧烈震荡 */
-                            float old_lr = optimizer_get_learning_rate(trainer->optimizer);
+                            float old_lr = trainer->current_learning_rate;
                             float target_lr = trainer->current_learning_rate * freq_factor;
                             float smoothed_lr = old_lr * 0.7f + target_lr * 0.3f;
-                            optimizer_set_learning_rate(trainer->optimizer, smoothed_lr);
                             trainer->current_learning_rate = smoothed_lr;
                         }
                     }
@@ -6304,17 +6303,17 @@ int trainer_validate(Trainer* trainer, const float* inputs, const float* targets
         float batch_loss = 0.0f;
         
         switch (trainer->config.loss_function) {
-            case LOSS_MEAN_SQUARED_ERROR:
+            case LOSS_MSE:
                 batch_loss = loss_mean_squared_error(trainer->batch_outputs,
                                                     batch_targets,
                                                     current_batch_size * output_dim);
                 break;
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MAE:
                 batch_loss = loss_mean_absolute_error(trainer->batch_outputs,
                                                      batch_targets,
                                                      current_batch_size * output_dim);
                 break;
-            case LOSS_CROSS_ENTROPY:
+            case LOSS_CATEGORICAL_CROSSENTROPY:
                 batch_loss = loss_cross_entropy(trainer->batch_outputs,
                                                batch_targets,
                                                current_batch_size * output_dim);
@@ -6331,7 +6330,7 @@ int trainer_validate(Trainer* trainer, const float* inputs, const float* targets
         
         // 根据损失函数类型计算准确率或相关指标
         switch (trainer->config.loss_function) {
-            case LOSS_CROSS_ENTROPY:
+            case LOSS_CATEGORICAL_CROSSENTROPY:
                 // 分类任务：计算准确率（预测类别 = 真实类别）
                 // 假设输出是概率分布，取最大概率的索引作为预测类别
                 for (size_t i = 0; i < current_batch_size; i++) {
@@ -6358,8 +6357,8 @@ int trainer_validate(Trainer* trainer, const float* inputs, const float* targets
                 batch_accuracy /= current_batch_size;
                 break;
                 
-            case LOSS_MEAN_SQUARED_ERROR:
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MSE:
+            case LOSS_MAE:
                 // 回归任务：计算R²分数（决定系数）
                 // 首先计算目标变量的均值
                 float target_mean = 0.0f;
@@ -7174,13 +7173,13 @@ static float gradient_check_perturb_and_loss(Trainer* trainer,
         lnn_forward(trainer->network, sample_input, output);
 
         switch (trainer->config.loss_function) {
-            case LOSS_MEAN_SQUARED_ERROR:
+            case LOSS_MSE:
                 total_loss += loss_mean_squared_error(output, sample_target, output_dim);
                 break;
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MAE:
                 total_loss += loss_mean_absolute_error(output, sample_target, output_dim);
                 break;
-            case LOSS_CROSS_ENTROPY:
+            case LOSS_CATEGORICAL_CROSSENTROPY:
                 total_loss += loss_cross_entropy(output, sample_target, output_dim);
                 break;
             default:
@@ -7233,13 +7232,13 @@ int trainer_gradient_check(Trainer* trainer, const float* inputs, const float* t
         float loss_val = 0.0f;
         lnn_forward(trainer->network, sin, trainer->batch_outputs);
         switch (trainer->config.loss_function) {
-            case LOSS_MEAN_SQUARED_ERROR:
+            case LOSS_MSE:
                 loss_val = loss_mean_squared_error(trainer->batch_outputs, stt, output_dim);
                 break;
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MAE:
                 loss_val = loss_mean_absolute_error(trainer->batch_outputs, stt, output_dim);
                 break;
-            case LOSS_CROSS_ENTROPY:
+            case LOSS_CATEGORICAL_CROSSENTROPY:
                 loss_val = loss_cross_entropy(trainer->batch_outputs, stt, output_dim);
                 break;
             default:
@@ -7266,15 +7265,15 @@ int trainer_gradient_check(Trainer* trainer, const float* inputs, const float* t
                            all_outputs + s * output_dim);
             }
             switch (trainer->config.loss_function) {
-                case LOSS_MEAN_SQUARED_ERROR:
+                case LOSS_MSE:
                     loss_mean_squared_error_gradient(all_outputs, targets,
                                                      loss_grads, num_samples * output_dim);
                     break;
-                case LOSS_MEAN_ABSOLUTE_ERROR:
+                case LOSS_MAE:
                     loss_mean_absolute_error_gradient(all_outputs, targets,
                                                       loss_grads, num_samples * output_dim);
                     break;
-                case LOSS_CROSS_ENTROPY:
+                case LOSS_CATEGORICAL_CROSSENTROPY:
                     loss_cross_entropy_gradient(all_outputs, targets,
                                                 loss_grads, num_samples * output_dim);
                     break;
@@ -8467,9 +8466,9 @@ void training_config_print(const TrainingConfig* config) {
            config->optimizer == OPTIMIZER_RMSPROP ? "RMSProp" :
            config->optimizer == OPTIMIZER_ADAM ? "Adam" : "AdamW");
     printf("  损失函数：%s\n",
-           config->loss_function == LOSS_MEAN_SQUARED_ERROR ? "均方误差" :
-           config->loss_function == LOSS_MEAN_ABSOLUTE_ERROR ? "平均绝对误差" :
-           config->loss_function == LOSS_CROSS_ENTROPY ? "交叉熵" :
+           config->loss_function == LOSS_MSE ? "均方误差" :
+           config->loss_function == LOSS_MAE ? "平均绝对误差" :
+           config->loss_function == LOSS_CATEGORICAL_CROSSENTROPY ? "交叉熵" :
            config->loss_function == LOSS_HUBER ? "Huber损失" : "Log-cosh损失");
     printf("  正则化：%s\n",
            config->regularization == REGULARIZATION_NONE ? "无" :
@@ -8798,13 +8797,13 @@ int cross_validation(Trainer* trainer, const float* inputs, const float* targets
         
         // 计算损失
         switch (trainer->config.loss_function) {
-            case LOSS_MEAN_SQUARED_ERROR:
+            case LOSS_MSE:
                 fold_loss = loss_mean_squared_error(val_outputs, val_targets, val_samples * output_dim);
                 break;
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MAE:
                 fold_loss = loss_mean_absolute_error(val_outputs, val_targets, val_samples * output_dim);
                 break;
-            case LOSS_CROSS_ENTROPY:
+            case LOSS_CATEGORICAL_CROSSENTROPY:
                 fold_loss = loss_cross_entropy(val_outputs, val_targets, val_samples * output_dim);
                 break;
             default:
@@ -8815,7 +8814,7 @@ int cross_validation(Trainer* trainer, const float* inputs, const float* targets
         // 计算准确率（完整实现）
         float fold_accuracy = 0.0f;
         
-        if (trainer->config.loss_function == LOSS_CROSS_ENTROPY) {
+        if (trainer->config.loss_function == LOSS_CATEGORICAL_CROSSENTROPY) {
             // 分类任务：计算预测类别准确率
             // 假设输出是概率分布，目标是one-hot编码
             int correct = 0;
@@ -11500,11 +11499,11 @@ static float online_compute_loss(Trainer* trainer, const float* output, const fl
     if (!trainer || !output || !target || output_dim == 0) return 0.0f;
     
     switch (trainer->config.loss_function) {
-        case LOSS_MEAN_SQUARED_ERROR:
+        case LOSS_MSE:
             return loss_mean_squared_error(output, target, output_dim);
-        case LOSS_MEAN_ABSOLUTE_ERROR:
+        case LOSS_MAE:
             return loss_mean_absolute_error(output, target, output_dim);
-        case LOSS_CROSS_ENTROPY: {
+        case LOSS_CATEGORICAL_CROSSENTROPY: {
             float eps = 1e-7f;
             float loss = 0.0f;
             for (size_t i = 0; i < output_dim; i++) {
@@ -11542,7 +11541,7 @@ static float online_compute_accuracy(Trainer* trainer, const float* output, cons
     if (!trainer || !output || !target || output_dim == 0) return 0.0f;
     
     switch (trainer->config.loss_function) {
-        case LOSS_CROSS_ENTROPY: {
+        case LOSS_CATEGORICAL_CROSSENTROPY: {
             int predicted = 0;
             int actual = 0;
             float max_pred = output[0];
@@ -11553,8 +11552,8 @@ static float online_compute_accuracy(Trainer* trainer, const float* output, cons
             }
             return (predicted == actual) ? 1.0f : 0.0f;
         }
-        case LOSS_MEAN_SQUARED_ERROR:
-        case LOSS_MEAN_ABSOLUTE_ERROR: {
+        case LOSS_MSE:
+        case LOSS_MAE: {
             float target_mean = 0.0f;
             for (size_t i = 0; i < output_dim; i++) target_mean += target[i];
             target_mean /= output_dim;
@@ -11831,15 +11830,15 @@ int trainer_train_online(Trainer* trainer, const float* inputs, const float* tar
             
             memset(replay_loss_grad, 0, replay_batch_size * output_dim * sizeof(float));
             switch (trainer->config.loss_function) {
-                case LOSS_MEAN_SQUARED_ERROR:
+                case LOSS_MSE:
                     loss_mean_squared_error_gradient(replay_batch_outputs, replay_batch_targets,
                                                     replay_loss_grad, replay_batch_size * output_dim);
                     break;
-                case LOSS_MEAN_ABSOLUTE_ERROR:
+                case LOSS_MAE:
                     loss_mean_absolute_error_gradient(replay_batch_outputs, replay_batch_targets,
                                                      replay_loss_grad, replay_batch_size * output_dim);
                     break;
-                case LOSS_CROSS_ENTROPY:
+                case LOSS_CATEGORICAL_CROSSENTROPY:
                     loss_cross_entropy_gradient(replay_batch_outputs, replay_batch_targets,
                                                replay_loss_grad, replay_batch_size * output_dim);
                     break;
@@ -12087,11 +12086,11 @@ int trainer_online_step(Trainer* trainer, const float* input, const float* targe
 
                     memset(replay_loss_grad, 0, replay_batch_size * output_dim * sizeof(float));
                     switch (trainer->config.loss_function) {
-                        case LOSS_MEAN_SQUARED_ERROR:
+                        case LOSS_MSE:
                             loss_mean_squared_error_gradient(replay_batch_outputs, replay_batch_targets,
                                                             replay_loss_grad, replay_batch_size * output_dim);
                             break;
-                        case LOSS_CROSS_ENTROPY:
+                        case LOSS_CATEGORICAL_CROSSENTROPY:
                             loss_cross_entropy_gradient(replay_batch_outputs, replay_batch_targets,
                                                        replay_loss_grad, replay_batch_size * output_dim);
                             break;
@@ -12675,15 +12674,15 @@ int trainer_train_from_memory(Trainer* trainer, MemorySystem* mem_system,
 
         float batch_loss = 0.0f;
         switch (trainer->config.loss_function) {
-            case LOSS_MEAN_SQUARED_ERROR:
+            case LOSS_MSE:
                 batch_loss = loss_mean_squared_error(
                     batch_outputs, sampled_targets, actual_batch_size * effective_output_dim);
                 break;
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MAE:
                 batch_loss = loss_mean_absolute_error(
                     batch_outputs, sampled_targets, actual_batch_size * effective_output_dim);
                 break;
-            case LOSS_CROSS_ENTROPY:
+            case LOSS_CATEGORICAL_CROSSENTROPY:
                 batch_loss = loss_cross_entropy(
                     batch_outputs, sampled_targets, actual_batch_size * effective_output_dim);
                 break;
@@ -12695,7 +12694,7 @@ int trainer_train_from_memory(Trainer* trainer, MemorySystem* mem_system,
 
         float batch_accuracy = 0.0f;
         switch (trainer->config.loss_function) {
-            case LOSS_CROSS_ENTROPY: {
+            case LOSS_CATEGORICAL_CROSSENTROPY: {
                 for (size_t i = 0; i < actual_batch_size; i++) {
                     int predicted = 0, target = 0;
                     float max_pred = batch_outputs[i * output_dim];
@@ -12715,8 +12714,8 @@ int trainer_train_from_memory(Trainer* trainer, MemorySystem* mem_system,
                 batch_accuracy /= (float)actual_batch_size;
                 break;
             }
-            case LOSS_MEAN_SQUARED_ERROR:
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MSE:
+            case LOSS_MAE:
             default: {
                 float target_mean = 0.0f;
                 for (size_t i = 0; i < actual_batch_size * effective_output_dim; i++) {
@@ -12742,15 +12741,15 @@ int trainer_train_from_memory(Trainer* trainer, MemorySystem* mem_system,
         size_t num_outputs = actual_batch_size * output_dim;
         float* loss_gradients = batch_outputs;
         switch (trainer->config.loss_function) {
-            case LOSS_MEAN_SQUARED_ERROR:
+            case LOSS_MSE:
                 loss_mean_squared_error_gradient(batch_outputs, sampled_targets,
                                                  loss_gradients, num_outputs);
                 break;
-            case LOSS_MEAN_ABSOLUTE_ERROR:
+            case LOSS_MAE:
                 loss_mean_absolute_error_gradient(batch_outputs, sampled_targets,
                                                   loss_gradients, num_outputs);
                 break;
-            case LOSS_CROSS_ENTROPY:
+            case LOSS_CATEGORICAL_CROSSENTROPY:
                 loss_cross_entropy_gradient(batch_outputs, sampled_targets,
                                             loss_gradients, num_outputs);
                 break;

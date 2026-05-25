@@ -2862,18 +2862,24 @@ NeuralNetwork* mixed_precision_create_fp16_network(const NeuralNetwork* network)
         return NULL;
     }
     
-    // 完整实现：创建网络副本并转换权重到FP16
+    /* 创建FP16精度模拟网络（权重值为FP16精度级别但以FP32格式存储）
+     * 真正的FP16原生存储需要CfCNetwork结构体级别改造，当前版本通过
+     * FP32→FP16→FP32往返实现精度模拟：权重值具有FP16的精度特性（约3.3位有效十进制数字），
+     * 但存储格式仍为FP32以保持与现有API的完全兼容性。
+     * 
+     * 优势：匹配FP16推理时的精度行为，可用于验证FP16部署的数值稳定性
+     * 限制：无内存节省（存储仍为4字节/参数），无计算加速（数学运算仍为FP32） */
     
-    // 获取原始LNN配置
+    /* 获取原始LNN配置 */
     LNNConfig config;
     if (lnn_get_config(network, &config) != 0) {
-        return NULL;  // 无法获取配置
+        return NULL;  /* 无法获取配置 */
     }
     
-    // 创建新的LNN网络实例
+    /* 创建新的LNN网络实例 */
     LNN* fp16_network = lnn_create(&config);
     if (!fp16_network) {
-        return NULL;  // 网络创建失败
+        return NULL;  /* 网络创建失败 */
     }
     
     /* 获取原始网络的权重和偏置 */
@@ -2886,7 +2892,7 @@ NeuralNetwork* mixed_precision_create_fp16_network(const NeuralNetwork* network)
     if (cfc_fp16 && cfc_get_weight_matrix(cfc_fp16, &weight_matrix, &weight_count) == 0 &&
         cfc_get_bias_vector(cfc_fp16, &bias_vector, &bias_count) == 0) {
         
-        // 分配FP16权重和偏置缓冲区
+        /* 分配临时FP16缓冲区用于精度截断 */
         fp16_t* fp16_weights = (fp16_t*)safe_malloc(weight_count * sizeof(fp16_t));
         fp16_t* fp16_biases = NULL;
         
@@ -2895,13 +2901,12 @@ NeuralNetwork* mixed_precision_create_fp16_network(const NeuralNetwork* network)
         }
         
         if (fp16_weights) {
-            // 转换权重到FP16
+            /* FP32→FP16截断：模拟半精度数值表示 */
             for (size_t i = 0; i < weight_count; i++) {
                 fp16_weights[i] = fp32_to_fp16(weight_matrix[i]);
             }
             
-            // 获取FP16网络的权重矩阵并直接设置转换后的FP16值（转换为FP32）
-            // 注意：CfC网络内部使用FP32，但我们可以存储近似FP16精度的值
+            /* 获取目标网络权重矩阵，将FP16值转回FP32写入（精度保持FP16级别） */
             float* fp16_network_weights = NULL;
             size_t fp16_network_weight_count = 0;
             
@@ -2909,24 +2914,24 @@ NeuralNetwork* mixed_precision_create_fp16_network(const NeuralNetwork* network)
             if (cfc_fp16w && cfc_get_weight_matrix(cfc_fp16w, &fp16_network_weights, &fp16_network_weight_count) == 0 &&
                 fp16_network_weights && fp16_network_weight_count == weight_count) {
                 
-                // 将FP16值转换回FP32（保持精度近似）
+                /* FP16→FP32恢复：值保留FP16精度特性（约3.3位有效十进制数） */
                 for (size_t i = 0; i < weight_count; i++) {
                     fp16_network_weights[i] = fp16_to_fp32(fp16_weights[i]);
                 }
                 
-                printf("混合精度: 已设置FP16精度权重到网络（%zu个参数）\n", weight_count);
+                log_debug("[混合精度] FP16精度模拟网络：%zu个权重参数已设置（FP16精度级别，FP32存储格式）",
+                         weight_count);
             }
             
             safe_free((void**)&fp16_weights);
         }
         
         if (fp16_biases) {
-            // 转换偏置到FP16
+            /* 偏置同理：FP32→FP16→FP32往返 */
             for (size_t i = 0; i < bias_count; i++) {
                 fp16_biases[i] = fp32_to_fp16(bias_vector[i]);
             }
             
-            // 获取FP16网络的偏置向量并直接设置转换后的FP16值（转换为FP32）
             float* fp16_network_biases = NULL;
             size_t fp16_network_bias_count = 0;
             
@@ -2934,21 +2939,19 @@ NeuralNetwork* mixed_precision_create_fp16_network(const NeuralNetwork* network)
             if (cfc_fp16b && cfc_get_bias_vector(cfc_fp16b, &fp16_network_biases, &fp16_network_bias_count) == 0 &&
                 fp16_network_biases && fp16_network_bias_count == bias_count) {
                 
-                // 将FP16值转换回FP32（保持精度近似）
                 for (size_t i = 0; i < bias_count; i++) {
                     fp16_network_biases[i] = fp16_to_fp32(fp16_biases[i]);
                 }
                 
-                printf("混合精度: 已设置FP16精度偏置到网络（%zu个参数）\n", bias_count);
+                log_debug("[混合精度] FP16精度模拟网络：%zu个偏置参数已设置（FP16精度级别，FP32存储格式）",
+                         bias_count);
             }
             
             safe_free((void**)&fp16_biases);
         }
     }
     
-    // 函数返回的FP16网络具有近似FP16精度的权重值（存储为FP32）
-    // 这提供了内存节省的好处（无需额外存储FP16副本）
-    // 同时保持了与现有API的兼容性
+    log_info("[混合精度] FP16精度模拟网络创建完成（权重存储格式：FP32，数值精度级别：FP16）");
     
     return fp16_network;
 }

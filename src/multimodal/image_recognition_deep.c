@@ -1,6 +1,8 @@
 #include "selflnn/multimodal/image_recognition_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/knowledge/knowledge.h"
+#include "selflnn/selflnn.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -290,302 +292,17 @@ static void _locate_parts(IRDFineClassifier* clf, const float* pf, int np,
     *nump = sel;
 }
 
-/* ZSFX-004修复: 多特征组合未训练回退分类器
- * 使用 Sobel梯度方向直方图(6方向) + LBP纹理模式(8模式) + HSV颜色直方图(12色相桶)
- * 实现至少10种场景类型的细粒度分类，置信度基于特征匹配得分 */
-#define FALLBACK_GRAD_DIRS     6
-#define FALLBACK_LBP_PATTERNS  8
-#define FALLBACK_HUE_BINS      12
-#define FALLBACK_NUM_SCENES    10
-#define FALLBACK_FEAT_DIM      (FALLBACK_GRAD_DIRS + FALLBACK_LBP_PATTERNS + FALLBACK_HUE_BINS)
-
-/* 场景原型的特征向量（预定义10种场景的归一化特征模板） */
-static const float g_scene_prototypes[FALLBACK_NUM_SCENES][FALLBACK_FEAT_DIM] = {
-    /* 0: 文字/文档 - 高对比度、双边纹理、黑白为主 */
-    {0.08f,0.07f,0.06f,0.07f,0.08f,0.06f, 0.45f,0.08f,0.05f,0.12f,0.08f,0.35f,0.06f,0.04f, 0.65f,0.15f,0.03f,0.02f,0.03f,0.01f,0.01f,0.01f,0.02f,0.03f,0.02f,0.02f},
-    /* 1: 室内场景 - 均匀梯度分布、规则纹理、暖色调 */
-    {0.12f,0.11f,0.10f,0.13f,0.12f,0.10f, 0.04f,0.12f,0.06f,0.16f,0.14f,0.10f,0.08f,0.05f, 0.08f,0.12f,0.18f,0.22f,0.15f,0.08f,0.05f,0.04f,0.03f,0.02f,0.01f,0.02f},
-    /* 2: 室外自然 - 水平渐变多、树叶/草纹理、绿色为主 */
-    {0.18f,0.10f,0.06f,0.15f,0.09f,0.05f, 0.02f,0.04f,0.08f,0.28f,0.20f,0.10f,0.06f,0.03f, 0.03f,0.04f,0.07f,0.25f,0.30f,0.14f,0.07f,0.04f,0.02f,0.01f,0.01f,0.02f},
-    /* 3: 城市建筑 - 垂直+水平渐变主导、规则纹理、灰蓝调 */
-    {0.22f,0.06f,0.04f,0.23f,0.05f,0.03f, 0.02f,0.03f,0.05f,0.15f,0.25f,0.18f,0.10f,0.05f, 0.05f,0.08f,0.15f,0.18f,0.15f,0.10f,0.08f,0.06f,0.05f,0.04f,0.03f,0.03f},
-    /* 4: 人物肖像 - 中心渐变分布、光滑纹理、肤色暖调 */
-    {0.10f,0.09f,0.11f,0.12f,0.10f,0.09f, 0.02f,0.06f,0.10f,0.22f,0.18f,0.14f,0.08f,0.03f, 0.02f,0.05f,0.12f,0.28f,0.20f,0.12f,0.08f,0.05f,0.03f,0.02f,0.01f,0.02f},
-    /* 5: 夜景/暗光 - 低梯度响应、噪声纹理、暗蓝色调 */
-    {0.02f,0.02f,0.03f,0.02f,0.03f,0.02f, 0.30f,0.20f,0.12f,0.08f,0.06f,0.05f,0.04f,0.02f, 0.02f,0.04f,0.08f,0.05f,0.03f,0.02f,0.03f,0.06f,0.12f,0.18f,0.20f,0.17f},
-    /* 6: 天空/水景 - 水平渐变主导、光滑低纹理、蓝色为主 */
-    {0.25f,0.08f,0.04f,0.05f,0.03f,0.02f, 0.01f,0.03f,0.18f,0.30f,0.22f,0.08f,0.04f,0.01f, 0.01f,0.02f,0.03f,0.04f,0.05f,0.08f,0.18f,0.28f,0.18f,0.08f,0.03f,0.02f},
-    /* 7: 食物/餐桌 - 中高梯度圆形分布、细密纹理、暖色调 */
-    {0.06f,0.08f,0.10f,0.09f,0.07f,0.06f, 0.03f,0.08f,0.15f,0.20f,0.16f,0.14f,0.07f,0.03f, 0.02f,0.06f,0.15f,0.25f,0.18f,0.12f,0.08f,0.05f,0.03f,0.02f,0.02f,0.02f},
-    /* 8: 运动/高速 - 方向性渐变单一主导、低纹理、全色温 */
-    {0.25f,0.05f,0.03f,0.03f,0.02f,0.02f, 0.02f,0.08f,0.25f,0.20f,0.12f,0.08f,0.05f,0.03f, 0.05f,0.10f,0.15f,0.15f,0.12f,0.10f,0.08f,0.07f,0.06f,0.05f,0.04f,0.03f},
-    /* 9: 纹理/图案 - 全方向梯度均匀、LBP高响应、全色域 */
-    {0.12f,0.10f,0.09f,0.11f,0.10f,0.12f, 0.01f,0.01f,0.02f,0.05f,0.14f,0.25f,0.22f,0.14f, 0.05f,0.08f,0.10f,0.12f,0.14f,0.11f,0.09f,0.08f,0.07f,0.06f,0.05f,0.05f}
-};
-static const char* g_scene_names[FALLBACK_NUM_SCENES] = {
-    "文字/文档", "室内场景", "室外自然", "城市建筑", "人物肖像",
-    "夜景/暗光", "天空/水景", "食物/餐桌", "运动/高速", "纹理/图案"
-};
-
-/* 提取Sobel梯度方向直方图(6方向: 0°,30°,60°,90°,120°,150°) */
-static void _extract_gradient_hist(const float* gray, int w, int h,
-                                    float ghist[FALLBACK_GRAD_DIRS]) {
-    memset(ghist, 0, FALLBACK_GRAD_DIRS * sizeof(float));
-    int total = 0;
-    for (int y = 1; y < h - 1; y++) {
-        for (int x = 1; x < w - 1; x++) {
-            int idx = y * w + x;
-            float gx = gray[y * w + (x + 1)] - gray[y * w + (x - 1)];
-            float gy = gray[(y + 1) * w + x] - gray[(y - 1) * w + x];
-            float mag = sqrtf(gx * gx + gy * gy + 1e-8f);
-            if (mag < 0.02f) continue;
-            float angle = atan2f(gy, gx) * 180.0f / (float)M_PI;
-            if (angle < 0) angle += 180.0f;
-            /* 量化到6个方向: 0-29,30-59,60-89,90-119,120-149,150-179 */
-            int bin = (int)(angle / 30.0f);
-            if (bin < 0) bin = 0;
-            if (bin >= FALLBACK_GRAD_DIRS) bin = FALLBACK_GRAD_DIRS - 1;
-            ghist[bin] += mag;
-            total++;
-        }
-    }
-    if (total > 0) {
-        float inv = 1.0f / (float)total;
-        for (int i = 0; i < FALLBACK_GRAD_DIRS; i++) ghist[i] *= inv;
-    }
-    /* L1归一化 */
-    float sum = 0;
-    for (int i = 0; i < FALLBACK_GRAD_DIRS; i++) sum += ghist[i];
-    if (sum > 1e-8f) for (int i = 0; i < FALLBACK_GRAD_DIRS; i++) ghist[i] /= sum;
-}
-
-/* 提取LBP纹理模式(8邻域,模式统计) */
-static void _extract_lbp_patterns(const float* gray, int w, int h,
-                                   float lbp[FALLBACK_LBP_PATTERNS + 1]) {
-    /* lbp[0..7]: 均匀模式计数, lbp[8]: 0 or 1模式总占比 */
-    memset(lbp, 0, (FALLBACK_LBP_PATTERNS + 1) * sizeof(float));
-    int total = 0;
-    int radius = 1;
-    /* LBP采样点: 8邻域按逆时针排列 (左上开始) */
-    int dx[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
-    int dy[8] = {-1,-1,-1, 0, 1, 1, 1, 0};
-    for (int y = radius; y < h - radius; y++) {
-        for (int x = radius; x < w - radius; x++) {
-            int ci = y * w + x;
-            float center = gray[ci];
-            int code = 0;
-            int ones = 0;
-            for (int k = 0; k < 8; k++) {
-                int ni = (y + dy[k]) * w + (x + dx[k]);
-                if (gray[ni] >= center) { code |= (1 << k); ones++; }
-            }
-            /* 统计该码的跳变次数作为LBP模式类别
-             * 均匀模式(0次跳变) → lbp[0], 1次跳变 → lbp[1], ..., 7次跳变 → lbp[7] */
-            int transitions = 0;
-            int prev = (code >> 7) & 1;
-            for (int k = 0; k < 8; k++) {
-                int cur = (code >> k) & 1;
-                if (cur != prev) transitions++;
-                prev = cur;
-            }
-            if (transitions < 0) transitions = 0;
-            if (transitions >= FALLBACK_LBP_PATTERNS) transitions = FALLBACK_LBP_PATTERNS - 1;
-            lbp[transitions] += 1.0f;
-            lbp[FALLBACK_LBP_PATTERNS] += (float)ones / 8.0f;
-            total++;
-        }
-    }
-    if (total > 0) {
-        float inv = 1.0f / (float)total;
-        for (int i = 0; i < FALLBACK_LBP_PATTERNS; i++) lbp[i] *= inv;
-        lbp[FALLBACK_LBP_PATTERNS] *= inv;
-    }
-    /* L1归一化 */
-    float sum = 0;
-    for (int i = 0; i < FALLBACK_LBP_PATTERNS; i++) sum += lbp[i];
-    if (sum > 1e-8f) for (int i = 0; i < FALLBACK_LBP_PATTERNS; i++) lbp[i] /= sum;
-}
-
-/* 提取HSV颜色直方图(12色相桶) - 从RGB图像计算 */
-static void _extract_hsv_hist(const float* img, int w, int h, int ch,
-                               float hhist[FALLBACK_HUE_BINS]) {
-    memset(hhist, 0, FALLBACK_HUE_BINS * sizeof(float));
-    int total = 0;
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int idx = y * w + x;
-            float r = (ch >= 1) ? img[(size_t)idx * ch + 0] : 0.0f;
-            float g = (ch >= 2) ? img[(size_t)idx * ch + 1] : r;
-            float b = (ch >= 3) ? img[(size_t)idx * ch + 2] : r;
-            /* RGB → HSV 色相计算 */
-            float mx = (r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b);
-            float mn = (r < g) ? ((r < b) ? r : b) : ((g < b) ? g : b);
-            float chroma = mx - mn;
-            float hue = 0.0f;
-            if (chroma > 1e-7f) {
-                if (mx == r) {
-                    hue = 60.0f * (g - b) / chroma;
-                    if (hue < 0) hue += 360.0f;
-                } else if (mx == g) {
-                    hue = 60.0f * ((b - r) / chroma + 2.0f);
-                } else {
-                    hue = 60.0f * ((r - g) / chroma + 4.0f);
-                }
-            }
-            int bin = (int)(hue / 30.0f);
-            if (bin < 0) bin = 0;
-            if (bin >= FALLBACK_HUE_BINS) bin = FALLBACK_HUE_BINS - 1;
-            /* 使用饱和度加权 */
-            float sat = (mx > 1e-7f) ? chroma / mx : 0.0f;
-            float val = mx;
-            float weight = sat * val + 0.1f;
-            hhist[bin] += weight;
-            total++;
-        }
-    }
-    if (total > 0) {
-        /* 归一化 */
-        float sum = 0;
-        for (int i = 0; i < FALLBACK_HUE_BINS; i++) sum += hhist[i];
-        if (sum > 1e-8f)
-            for (int i = 0; i < FALLBACK_HUE_BINS; i++) hhist[i] /= sum;
-    }
-}
-
-/* 计算两个特征向量的余弦相似度 */
-static float _cosine_sim(const float* a, const float* b, int dim) {
-    float dot = 0, na = 0, nb = 0;
-    for (int i = 0; i < dim; i++) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    float denom = sqrtf(na * nb + 1e-10f);
-    return dot / denom;
-}
-
 int ird_fine_classify(IRDFineClassifier* clf, const float* img,
                        int w, int h, int ch, IRDFineGrainedResult* res) {
     if (!clf || !img || !res) return -1;
     memset(res, 0, sizeof(IRDFineGrainedResult));
 
-    /* ZSFX-004修复: 未训练状态使用多特征组合回退分类
-     * Sobel梯度方向直方图(6方向) + LBP纹理模式(8模式) + HSV颜色直方图(12色相桶)
-     * 与10种场景原型做余弦相似度匹配，置信度基于匹配得分 */
+    /* H-008修复: 未训练状态下不再使用硬编码场景原型做余弦相似度匹配，
+     * 直接使用CfC网络前向传播进行推理（即使权重随机初始化）。
+     * H-009修复: 置信度直接使用softmax/sigmoid自然输出值，不进行人为[0.1,0.85]区间映射。
+     * 最终置信度由CfC动态系统自然产生，未训练时接近均匀分布。 */
     if (!clf->training_completed) {
-        /* 根据图像尺寸分配灰度图缓冲区 */
-        int total_px = w * h;
-        /* 限制最大图像尺寸防止栈溢出，大图做降采样 */
-        int dw = w, dh = h;
-        int ds_w = w, ds_h = h;
-        float* gray = NULL;
-        float* gray_small = NULL;
-        const float* use_gray = NULL;
-        int use_w, use_h;
-        /* 如果图像太大，降采样到最大边长256 */
-        if (w > 256 || h > 256) {
-            ds_w = (w > h) ? 256 : (256 * w / h);
-            ds_h = (h > w) ? 256 : (256 * h / w);
-            if (ds_w < 4) ds_w = 4; if (ds_h < 4) ds_h = 4;
-            gray = (float*)malloc((size_t)total_px * sizeof(float));
-            gray_small = (float*)malloc((size_t)(ds_w * ds_h) * sizeof(float));
-            if (!gray || !gray_small) {
-                if (gray) free(gray);
-                if (gray_small) free(gray_small);
-                snprintf(res->coarse_category_name, 64, "内存不足");
-                res->coarse_confidence = 0.0f;
-                return -1;
-            }
-            /* 转为灰度图 */
-            for (int i = 0; i < total_px; i++) {
-                float r = (ch >= 1) ? img[(size_t)i * ch + 0] : 0.0f;
-                float gval = (ch >= 2) ? img[(size_t)i * ch + 1] : r;
-                float b = (ch >= 3) ? img[(size_t)i * ch + 2] : r;
-                gray[i] = 0.299f * r + 0.587f * gval + 0.114f * b;
-            }
-            /* 最近邻降采样到ds_w×ds_h */
-            for (int y = 0; y < ds_h; y++) {
-                for (int x = 0; x < ds_w; x++) {
-                    int sx = x * w / ds_w;
-                    int sy = y * h / ds_h;
-                    if (sx >= w) sx = w - 1;
-                    if (sy >= h) sy = h - 1;
-                    gray_small[y * ds_w + x] = gray[sy * w + sx];
-                }
-            }
-            use_gray = gray_small;
-            use_w = ds_w;
-            use_h = ds_h;
-        } else {
-            gray = (float*)malloc((size_t)total_px * sizeof(float));
-            if (!gray) {
-                snprintf(res->coarse_category_name, 64, "内存不足");
-                res->coarse_confidence = 0.0f;
-                return -1;
-            }
-            for (int i = 0; i < total_px; i++) {
-                float r = (ch >= 1) ? img[(size_t)i * ch + 0] : 0.0f;
-                float gval = (ch >= 2) ? img[(size_t)i * ch + 1] : r;
-                float b = (ch >= 3) ? img[(size_t)i * ch + 2] : r;
-                gray[i] = 0.299f * r + 0.587f * gval + 0.114f * b;
-            }
-            use_gray = gray;
-            use_w = w;
-            use_h = h;
-        }
-
-        /* 提取三组特征 */
-        float ghist[FALLBACK_GRAD_DIRS];
-        float lbp[FALLBACK_LBP_PATTERNS + 1];  /* +1用于均值 */
-        float hhist[FALLBACK_HUE_BINS];
-        _extract_gradient_hist(use_gray, use_w, use_h, ghist);
-        _extract_lbp_patterns(use_gray, use_w, use_h, lbp);
-        /* HSV使用原始分辨率图像(降采样版本也可) */
-        if (gray_small) {
-            /* 对降采样后的图重新构建伪RGB用于HSV提取 */
-            float* ds_img = (float*)malloc((size_t)(ds_w * ds_h) * 3 * sizeof(float));
-            if (ds_img) {
-                for (int i = 0; i < ds_w * ds_h; i++) {
-                    float v = gray_small[i];
-                    ds_img[i * 3 + 0] = v;
-                    ds_img[i * 3 + 1] = v;
-                    ds_img[i * 3 + 2] = v;
-                }
-                _extract_hsv_hist(ds_img, ds_w, ds_h, 3, hhist);
-                free(ds_img);
-            } else {
-                memset(hhist, 0, FALLBACK_HUE_BINS * sizeof(float));
-            }
-        } else {
-            _extract_hsv_hist(img, w, h, ch, hhist);
-        }
-
-        /* 释放灰度缓冲区 */
-        if (gray) free(gray);
-        if (gray_small) free(gray_small);
-
-        /* 组合特征向量: [梯度6 + LBP8 + 色调12] = 26维 */
-        float feat[FALLBACK_FEAT_DIM];
-        memcpy(feat, ghist, FALLBACK_GRAD_DIRS * sizeof(float));
-        memcpy(feat + FALLBACK_GRAD_DIRS, lbp, FALLBACK_LBP_PATTERNS * sizeof(float));
-        memcpy(feat + FALLBACK_GRAD_DIRS + FALLBACK_LBP_PATTERNS, hhist, FALLBACK_HUE_BINS * sizeof(float));
-
-        /* 与所有场景原型计算余弦相似度，选最佳匹配 */
-        int best_scene = 0;
-        float best_sim = -1.0f;
-        for (int s = 0; s < FALLBACK_NUM_SCENES; s++) {
-            float sim = _cosine_sim(feat, g_scene_prototypes[s], FALLBACK_FEAT_DIM);
-            if (sim > best_sim) { best_sim = sim; best_scene = s; }
-        }
-        /* 计算置信度: 对余弦相似度做sigmoid映射到[0.1, 0.85]区间 */
-        float raw_conf = 1.0f / (1.0f + expf(-(best_sim - 0.3f) * 8.0f));
-        res->coarse_confidence = 0.1f + raw_conf * 0.75f;
-        if (res->coarse_confidence > 0.85f) res->coarse_confidence = 0.85f;
-        if (res->coarse_confidence < 0.1f) res->coarse_confidence = 0.1f;
-
-        snprintf(res->coarse_category_name, 64, "%s", g_scene_names[best_scene]);
-        snprintf(res->fine_category_name, 64, "未训练-多特征分类(%s)", g_scene_names[best_scene]);
-        return 0;
+        fprintf(stderr, "[图像识别警告] 图像识别模块未训练，使用CfC网络随机初始化权重进行推理，结果不可靠，请先训练模型！\n");
     }
     int hd = clf->cfg.feature_dim, ps = clf->cfg.patch_size, st = ps / 2;
     int cols = (w - ps) / st + 1;
@@ -1586,16 +1303,48 @@ int ird_zero_shot_predict_from_features(IRDZeroShotRecognizer* rec, const float*
     int best = 0; float bs = sims[0];
     for (int ci = 1; ci < nc; ci++) { if (sims[ci] > bs) { bs = sims[ci]; best = ci; } }
     pred->class_id = best; pred->confidence = bs;
-    /* 零样本类别名称：使用预定义中文类别表 */
-    static const char* default_zs_categories[] = {
-        "物体","动物","人","车辆","建筑","植物","食物","工具","电子设备","家具",
-        "服装","书籍","乐器","运动器材","厨房用具","办公用品","玩具","艺术品","自然景观","城市景观",
-        "室内场景","室外场景","文字","图表","人脸","手写","标志","条形码","二维码","医疗影像",
-        "卫星图像","显微镜图像","红外图像","X光图像","超声波","雷达图像","热成像","夜视","水下","航空"
-    };
-    int ncats = (int)(sizeof(default_zs_categories)/sizeof(default_zs_categories[0]));
+    /* H-010修复: 零样本类别名称从知识库动态查询获取已学习的实体类别，
+     * 不再使用硬编码40种静态类别的default_zs_categories数组。
+     * 查询KnowledgeType=KNOWLEDGE_CONCEPT的概念条目，收集唯一客体名作为类别名 */
+    char zs_category_names[256][64];
+    int ncats = 0;
+    void* kb_raw = selflnn_get_knowledge_base();
+    if (kb_raw) {
+        KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
+        KnowledgeQuery query;
+        memset(&query, 0, sizeof(KnowledgeQuery));
+        query.type_filter = KNOWLEDGE_CONCEPT;
+        query.min_confidence = 0.0f;
+        query.max_confidence = 1.0f;
+
+        KnowledgeEntry results[128];
+        int found = knowledge_base_query(kb, &query, results, 128);
+
+        for (int i = 0; i < found && ncats < 256; i++) {
+            const char* name = NULL;
+            if (results[i].object && results[i].object[0] != '\0') {
+                name = results[i].object;
+            } else if (results[i].subject && results[i].subject[0] != '\0') {
+                name = results[i].subject;
+            }
+            if (name && strlen(name) > 0 && strlen(name) < 64) {
+                int dup = 0;
+                for (int j = 0; j < ncats; j++) {
+                    if (strcmp(zs_category_names[j], name) == 0) { dup = 1; break; }
+                }
+                if (!dup) {
+                    snprintf(zs_category_names[ncats], 64, "%s", name);
+                    ncats++;
+                }
+            }
+        }
+    }
+    if (ncats == 0) {
+        snprintf(zs_category_names[0], 64, "未知类别");
+        ncats = 1;
+    }
     if (best < ncats) {
-        snprintf(pred->class_name, 64, "%s", default_zs_categories[best]);
+        snprintf(pred->class_name, 64, "%s", zs_category_names[best]);
     } else {
         snprintf(pred->class_name, 64, "类别_%d", best);
     }
@@ -1611,7 +1360,7 @@ int ird_zero_shot_predict_from_features(IRDZeroShotRecognizer* rec, const float*
         pred->top_predictions[ki].class_id = si[ki];
         pred->top_predictions[ki].similarity = sims[si[ki]];
         if (si[ki] < ncats) {
-            snprintf(pred->top_predictions[ki].class_name, 64, "%s", default_zs_categories[si[ki]]);
+            snprintf(pred->top_predictions[ki].class_name, 64, "%s", zs_category_names[si[ki]]);
         } else {
             snprintf(pred->top_predictions[ki].class_name, 64, "类别_%d", si[ki]);
         }

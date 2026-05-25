@@ -7,6 +7,7 @@
 
 #include "selflnn/multisystem/multisystem_control.h"
 #include "selflnn/multisystem/swarm_intelligence.h"
+#include "selflnn/multisystem/swarm_enhanced.h"  /* H-014集成: 群智增强 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
@@ -175,6 +176,7 @@ struct MultiSystemControlEngine {
     size_t active_task_capacity; /**< 活动任务容量 */
     double system_time;          /**< 系统时间（秒） */
     Swarm* swarm;                /**< 群体智能优化器 */
+    void* swarm_enhanced;        /**< H-014: 群智增强引擎（ACO/ABC/共识/液态通信/自愈） */
     
     /* UDP多播服务发现 */
     int discovery_enabled;       /**< 是否启用服务发现 */
@@ -875,6 +877,15 @@ MultiSystemControlEngine* multisystem_control_engine_create(void) {
         }
     }
     
+    /* H-014集成: 初始化群智增强引擎（ACO/ABC/共识/液态通信/自愈） */
+    {
+        ACOEnhancedConfig aco_cfg = swarm_aco_default_config();
+        engine->swarm_enhanced = (void*)swarm_aco_enhanced_create(&aco_cfg);
+        if (!engine->swarm_enhanced) {
+            multi_system_log(MULTI_LOG_LEVEL_WARNING, "群智增强引擎初始化失败, 多系统控制引擎仍可正常运行");
+        }
+    }
+    
     /* 初始化UDP多播服务发现 */
     {
         strncpy(engine->discovery_addr, DISCOVERY_DEFAULT_ADDR, sizeof(engine->discovery_addr) - 1);
@@ -984,6 +995,12 @@ void multisystem_control_engine_destroy(MultiSystemControlEngine* engine) {
     if (engine->swarm) {
         swarm_free(engine->swarm);
         engine->swarm = NULL;
+    }
+    
+    /* H-014集成: 释放群智增强引擎 */
+    if (engine->swarm_enhanced) {
+        swarm_aco_enhanced_destroy((SwarmEnhancedEngine*)engine->swarm_enhanced);
+        engine->swarm_enhanced = NULL;
     }
     
     safe_free((void**)&engine);
@@ -2770,6 +2787,12 @@ int multisystem_swarm_optimize_assignment(MultiSystemControlEngine* engine,
     swarm_result_init(&result);
     int ret = swarm_optimize(engine->swarm, &result);
     swarm_result_free(&result);
+    
+    /* H-014集成: 群智优化完成后保存增强状态 */
+    if (ret == 0 && engine->swarm_enhanced) {
+        swarm_enhanced_save(engine->swarm_enhanced, SWARM_ENHANCED_ACO, "data/swarm_enhanced_state.bin");
+    }
+    
     return ret;
 }
 

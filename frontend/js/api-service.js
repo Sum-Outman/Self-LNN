@@ -531,7 +531,7 @@ class ApiService {
                 data: data
             };
         } catch (error) {
-            console.error('获取安全状态失败:', error);
+            console.error('获取系统状态失败:', error);
             return {
                 success: false,
                 error: error.message,

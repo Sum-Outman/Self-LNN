@@ -24,7 +24,9 @@ static void mat3_identity(float* m)
     m[0] = 1.0f; m[4] = 1.0f; m[8] = 1.0f;
 }
 
-static void mat3_mul(const float* a, const float* b, float* out)
+/*  mat3_mul 已在 vec3_ops.h 中 static inline 定义
+ *  本地版本参数顺序不同(a,b,out)，重命名为 mat3_mul_dyn 避免冲突 */
+static void mat3_mul_dyn(const float* a, const float* b, float* out)
 {
     int i, j, k;
     for (i = 0; i < 3; i++) {
@@ -38,7 +40,8 @@ static void mat3_mul(const float* a, const float* b, float* out)
     }
 }
 
-static void mat3_transpose(const float* m, float* out)
+/* mat3_transpose 已在 vec3_ops.h 中定义，重命名为 mat3_transpose_dyn 避免冲突 */
+static void mat3_transpose_dyn(const float* m, float* out)
 {
     int i, j;
     for (i = 0; i < 3; i++)
@@ -59,9 +62,9 @@ static void mat3_transpose(const float* m, float* out)
 static void inertia_transform(const float* I_body, const float* R, float* I_world)
 {
     float RT[9], tmp[9];
-    mat3_transpose(R, RT);
-    mat3_mul(I_body, RT, tmp);
-    mat3_mul(R, tmp, I_world);
+    mat3_transpose_dyn(R, RT);
+    mat3_mul_dyn(I_body, RT, tmp);
+    mat3_mul_dyn(R, tmp, I_world);
 }
 
 /* ================================================================
@@ -827,7 +830,7 @@ static void compute_world_transforms(const DynamicsModel* model,
             float* parent_R = &world_R[p_idx * 9];
             float* parent_p = &world_p[p_idx * 3];
             float tmp[3];
-            mat3_mul(parent_R, R_rel, &world_R[i * 9]);
+            mat3_mul_dyn(parent_R, R_rel, &world_R[i * 9]);
             mat3_vec3_mul(parent_R, p_rel, tmp);
             dvec3_add(parent_p, tmp, &world_p[i * 3]);
         }

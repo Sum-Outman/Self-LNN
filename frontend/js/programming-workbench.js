@@ -262,7 +262,7 @@
                 return;
             }
         } catch(e) { console.warn('从API获取示例代码失败:', e.message); }
-        showStatus('⚠ 后端未连接——无法加载示例代码（遵循禁止虚假数据原则）');
+        showStatus('⚠ 后端未连接——无法加载示例代码（遵循禁止虚假数据原则）', true);
     };
 
     window.clearEditor = function() {

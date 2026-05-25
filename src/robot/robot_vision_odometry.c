@@ -376,16 +376,7 @@ static void svd3_jacobi(const float M[9], float U[9], float S[3], float Vt[9]) {
     }
 }
 
-/* 矩阵乘法: C = A * B (均为3x3) */
-static void mat3_mul(const float A[9], const float B[9], float C[9]) {
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            C[i * 3 + j] = A[i * 3 + 0] * B[0 * 3 + j]
-                         + A[i * 3 + 1] * B[1 * 3 + j]
-                         + A[i * 3 + 2] * B[2 * 3 + j];
-        }
-    }
-}
+/*  mat3_mul 已在 include/selflnn/math/vec3_ops.h 中以 static inline 定义 */
 
 /* 8点法计算本质矩阵 + RANSAC内点筛选 */
 static int essential_from_points(const float* pts1, const float* pts2,

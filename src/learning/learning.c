@@ -22,6 +22,7 @@
 #include "selflnn/core/evolutionary_algorithms.h"
 #include "selflnn/learning/teach_by_showing.h"
 #include "selflnn/learning/manual_learning.h"
+#include "selflnn/learning/imitation_deep.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -136,6 +137,8 @@ struct LearningEngine {
     int enabled;                                        /**< 能力开关（P3.3） */
     int has_real_weights;                               /**< P0-010: 权重是否已从真实数据源加载（1=真实, 0=占位） */
     int has_real_knowledge;                             /**< P0-010: 知识库是否已从真实数据源加载 */
+    /* H-016集成: 深度模仿学习系统 */
+    ImitationDeepLearner* imitation_deep;              /**< 深度模仿学习器 */
 };
 
 /**
@@ -355,6 +358,9 @@ LearningEngine* learning_engine_create(const LearningConfig* config) {
         return NULL;
     }
 
+    /* 初始化深度模仿学习器 */
+    engine->imitation_deep = imitation_deep_create();
+
     return engine;
 }
 
@@ -394,6 +400,12 @@ void learning_engine_free(LearningEngine* engine) {
     safe_free((void**)&engine->internal_exp_state_dims);
     safe_free((void**)&engine->internal_exp_action_dims);
     safe_free((void**)&engine->internal_exp_next_state_dims);
+
+    /* H-016集成: 释放深度模仿学习器 */
+    if (engine->imitation_deep) {
+        imitation_deep_free(engine->imitation_deep);
+        engine->imitation_deep = NULL;
+    }
 
     safe_free((void**)&engine);
 }

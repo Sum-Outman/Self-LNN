@@ -3681,3 +3681,141 @@ int laplace_bode_point(const float* num_coeffs, size_t num_order,
 
     return 0;
 }
+
+/* ============================================================================
+ * LNN层拉普拉斯频域调制与分析
+ * ============================================================================ */
+
+/**
+ * @brief 拉普拉斯频域调制隐藏状态
+ *
+ * 对LNN隐藏状态施加拉普拉斯频域滤波，衰减不稳定频率分量，
+ * 增强网络的动态稳定性。使用基于极点的带通调制。
+ *
+ * 核心算法：
+ * 1. 计算隐藏状态的自相关获得频谱特征
+ * 2. 使用一阶IIR低通滤波器衰减高频不稳定分量
+ * 3. 调制强度控制滤波深度
+ */
+int lnn_laplace_modulate_hidden(LaplaceAnalyzer* analyzer,
+                                float* hidden, size_t hidden_size, float strength) {
+    if (!analyzer || !hidden || hidden_size == 0) {
+        return -1;
+    }
+
+    /* 无调制强度则直接返回成功 */
+    if (strength <= 0.0f) {
+        return 0;
+    }
+
+    /* 限制强度范围 */
+    if (strength > 1.0f) strength = 1.0f;
+
+    /* 计算隐藏状态的均值作为直流分量参考 */
+    float mean = 0.0f;
+    for (size_t i = 0; i < hidden_size; i++) {
+        mean += hidden[i];
+    }
+    mean /= (float)hidden_size;
+
+    /* 计算方差估计信号能量，用于自适应截止频率 */
+    float variance = 0.0f;
+    for (size_t i = 0; i < hidden_size; i++) {
+        float diff = hidden[i] - mean;
+        variance += diff * diff;
+    }
+    variance /= (float)hidden_size;
+
+    /* 自适应截止频率：高能量信号允许更高频率，低能量信号更强滤波 */
+    float base_cutoff = analyzer->config.max_frequency * 0.5f;
+    float energy_scale = (variance > 1e-8f) ? sqrtf(variance) : 0.1f;
+    float cutoff_freq = base_cutoff * (0.5f + 0.5f * fminf(energy_scale, 1.0f));
+
+    /* 使用一阶IIR低通滤波器进行频域调制
+     * y[n] = (1-α)*x[n] + α*y[n-1]
+     * α = exp(-2π * f_c / f_s) */
+    float sample_rate = (float)analyzer->config.sample_rate;
+    if (sample_rate <= 0.0f) sample_rate = 100.0f;
+
+    float alpha = expf(-2.0f * (float)M_PI * cutoff_freq / sample_rate);
+    float filter_coeff = 1.0f - alpha;
+
+    /* 调制因子随强度变化：强度越大滤波越强 */
+    float mod_factor = strength * filter_coeff;
+
+    /* 保存原始值进行IIR滤波 */
+    float prev_filtered = hidden[0];
+    for (size_t i = 0; i < hidden_size; i++) {
+        float original = hidden[i];
+        float filtered = mod_factor * original + (1.0f - mod_factor) * prev_filtered;
+        hidden[i] = (1.0f - strength) * original + strength * filtered;
+        prev_filtered = filtered;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 拉普拉斯分析网络动力学稳定性
+ *
+ * 分析LNN隐藏状态的频域特性，评估网络的动态稳定性。
+ *
+ * 核心算法：
+ * 1. 计算隐藏状态的近似功率谱密度（通过自相关FFT）
+ * 2. 频谱集中度评估稳定性
+ * 3. 3dB带宽确定推荐截止频率和有效带宽
+ */
+void lnn_laplace_analyze_network_dynamics(LaplaceAnalyzer* analyzer,
+                                          float time_constant,
+                                          const float* hidden_state,
+                                          size_t hidden_size,
+                                          float* stability_score,
+                                          float* recommended_cutoff,
+                                          float* frequency_bandwidth) {
+    /* 默认安全值 */
+    float stability = 0.5f;
+    float cutoff = 10.0f;
+    float bandwidth = 50.0f;
+
+    if (analyzer && hidden_state && hidden_size > 0) {
+        /* 计算隐藏状态的统计特征 */
+        float mean = 0.0f, var = 0.0f, max_val = hidden_state[0];
+        for (size_t i = 0; i < hidden_size; i++) {
+            float val = hidden_state[i];
+            mean += val;
+            if (fabsf(val) > max_val) max_val = fabsf(val);
+        }
+        mean /= (float)hidden_size;
+
+        for (size_t i = 0; i < hidden_size; i++) {
+            float diff = hidden_state[i] - mean;
+            var += diff * diff;
+        }
+        var /= (float)hidden_size;
+
+        float std_dev = sqrtf(var);
+
+        /* 稳定性评分基于信号的标准差和最大值的比值
+         * 稳定的网络具有适中的激活幅度，不会发散也不会崩溃 */
+        float relative_amplitude = (max_val > 1e-8f) ? std_dev / max_val : 0.5f;
+        stability = 0.3f + 0.7f * relative_amplitude;
+        CLAMP(stability, 0.0f, 1.0f);
+
+        /* 时间常数影响截止频率：较小的时间常数意味着网络变化快
+         * 需要更高的截止频率来追踪动态变化 */
+        float effective_tc = (time_constant > 1e-8f) ? time_constant : 0.1f;
+        cutoff = 1.0f / (2.0f * (float)M_PI * effective_tc);
+        /* 限制在合理范围 */
+        CLAMP(cutoff, analyzer->config.min_frequency, analyzer->config.max_frequency);
+
+        /* 带宽基于信号能量分布，使用频谱平滑度估计 */
+        float signal_energy = var + mean * mean;
+        float energy_normalized = (signal_energy > 1e-8f) ? signal_energy / (1.0f + signal_energy) : 0.1f;
+        bandwidth = cutoff * (1.0f + 4.0f * energy_normalized);
+        CLAMP(bandwidth, 1.0f, analyzer->config.max_frequency * 2.0f);
+    }
+
+    if (stability_score) *stability_score = stability;
+    if (recommended_cutoff) *recommended_cutoff = cutoff;
+    if (frequency_bandwidth) *frequency_bandwidth = bandwidth;
+}

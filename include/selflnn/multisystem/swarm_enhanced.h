@@ -35,12 +35,12 @@ typedef enum {
 } NodeState;
 
 typedef enum {
-    SWARM_ALGORITHM_ACO = 0,
-    SWARM_ALGORITHM_ABC = 1,
-    SWARM_ALGORITHM_PSO = 2,
-    SWARM_ALGORITHM_CONSENSUS = 3,
-    SWARM_ALGORITHM_LIQUID_COMM = 4,
-    SWARM_ALGORITHM_SELF_HEALING = 5
+    SWARM_ENHANCED_ACO = 0,
+    SWARM_ENHANCED_ABC = 1,
+    SWARM_ENHANCED_PSO = 2,
+    SWARM_ENHANCED_CONSENSUS = 3,
+    SWARM_ENHANCED_LIQUID_COMM = 4,
+    SWARM_ENHANCED_SELF_HEALING = 5
 } SwarmEnhancedAlgorithm;
 
 typedef struct {
@@ -148,6 +148,7 @@ typedef struct SwarmEnhancedEngine SwarmEnhancedEngine;
 
 SwarmEnhancedEngine* swarm_aco_enhanced_create(const ACOEnhancedConfig* config);
 void swarm_aco_enhanced_destroy(SwarmEnhancedEngine* engine);
+ACOEnhancedConfig swarm_aco_default_config(void);
 int swarm_aco_init_graph(SwarmEnhancedEngine* engine, int num_nodes, const float* distance_matrix);
 int swarm_aco_iterate(SwarmEnhancedEngine* engine, int iteration);
 int swarm_aco_get_best_path(SwarmEnhancedEngine* engine, int* path, int max_path_len, float* total_distance);

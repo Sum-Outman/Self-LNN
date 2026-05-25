@@ -20,6 +20,7 @@ typedef enum {
     CAP_PLANNING = 9,
     CAP_DIALOGUE = 10,
     CAP_CONCURRENCY = 11,
+    CAP_MULTI_AGENT = 12,  /* H-015集成 */
     CAP_COUNT
 } CapabilityType;
 

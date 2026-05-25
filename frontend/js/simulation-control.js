@@ -5,6 +5,9 @@
     var sim3dGl = null;
     var sim3dInitialized = false;
 
+    function escapeHtml(str) { if (!str) return ''; var d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+    function safeCoord(v) { return (typeof v === 'number' && !isNaN(v) && isFinite(v)) ? v.toFixed(1) : '?'; }
+
     /* ZSF-ZNB修复S-010: 初始化仿真3D WebGL画布 */
     function initSim3D() {
         var canvas = document.getElementById('sim3d-canvas');
@@ -106,16 +109,16 @@
                 var stepEl = document.getElementById('sim-steps');
                 if (stepEl) stepEl.textContent = data.step || data.steps || '--';
                 var timeEl = document.getElementById('sim-time');
-                if (timeEl) timeEl.textContent = (data.sim_time !== undefined ? data.sim_time.toFixed(2) + 's' : '--');
+                if (timeEl) timeEl.textContent = (typeof data.sim_time === 'number' && !isNaN(data.sim_time) && isFinite(data.sim_time) ? data.sim_time.toFixed(2) + 's' : '--');
                 var fpsEl = document.getElementById('sim-fps');
                 if (fpsEl) fpsEl.textContent = data.fps || '--';
                 if (data.robots && data.robots.length > 0) {
                     var robotList = document.getElementById('sim-robot-list');
                     if (robotList) {
                         robotList.innerHTML = data.robots.map(function(r, i) {
-                            return '<tr><td>' + (r.name || ('机器人' + (i + 1))) + '</td>' +
-                                '<td>' + (r.status || '活跃') + '</td>' +
-                                '<td>' + (r.position ? 'x=' + r.position.x.toFixed(1) + ',y=' + r.position.y.toFixed(1) + ',z=' + r.position.z.toFixed(1) : '--') + '</td></tr>';
+                            return '<tr><td>' + escapeHtml(r.name || ('机器人' + (i + 1))) + '</td>' +
+                                '<td>' + escapeHtml(r.status || '活跃') + '</td>' +
+                                '<td>' + (r.position ? 'x=' + safeCoord(r.position.x) + ',y=' + safeCoord(r.position.y) + ',z=' + safeCoord(r.position.z) : '--') + '</td></tr>';
                         }).join('');
                     }
                 }
@@ -171,9 +174,14 @@
     async function planPath() {
         try {
             var data = await SelfLnnApi.request('/robot/path/plan', { method: 'POST', body: JSON.stringify({}) });
-            showNotification('路径规划完成，步数: ' + (data.steps || 0), 'success');
+            showNotification('路径规划完成，步数: ' + (data && data.steps || 0), 'success');
         } catch(e) { showNotification('连接失败', 'danger'); }
     }
     window.planPath = planPath;
+
+    /* 页面卸载时清理定时器 */
+    window.addEventListener('beforeunload', function() {
+        if (simPolling) { clearInterval(simPolling); simPolling = null; }
+    });
 
 })();

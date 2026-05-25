@@ -1931,7 +1931,7 @@ int api_training_train_with_external(void* session,
     config.batch_size = 32;
     config.mode = TRAIN_MODE_MINI_BATCH;
     config.optimizer = OPTIMIZER_ADAM;
-    config.loss_function = LOSS_MEAN_SQUARED_ERROR;
+    config.loss_function = LOSS_MSE;
     config.regularization = REGULARIZATION_L2;
     config.enable_validation = 1;
     config.verbose = 0;

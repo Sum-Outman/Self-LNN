@@ -3107,3 +3107,78 @@ int memory_sample_priority_batch(MemorySystem* system, MemoryType memory_type,
     MEMORY_UNLOCK(system);
     return (int)actual_batch;
 }
+
+/**
+ * @brief 按全局索引获取记忆项键名
+ *
+ * 遍历所有记忆池（短期→长期→情景→语义）的顺序获取全局索引对应的记忆键名。
+ * 索引顺序：先短期记忆，再长期、情景、语义记忆。
+ */
+int memory_get_key(MemorySystem* system, size_t index, char* key_buf, size_t key_buf_size) {
+    if (!system || !system->is_initialized || !key_buf || key_buf_size == 0) {
+        return -1;
+    }
+
+    MEMORY_LOCK(system);
+
+    /* 按顺序遍历四个记忆池 */
+    size_t offset = 0;
+
+    /* 短期记忆 */
+    if (index - offset < system->st_count) {
+        MemoryItem* item = system->short_term_mem[index - offset];
+        if (item && item->key) {
+            strncpy(key_buf, item->key, key_buf_size - 1);
+            key_buf[key_buf_size - 1] = '\0';
+        } else {
+            key_buf[0] = '\0';
+        }
+        MEMORY_UNLOCK(system);
+        return 0;
+    }
+    offset += system->st_count;
+
+    /* 长期记忆 */
+    if (index - offset < system->lt_count) {
+        MemoryItem* item = system->long_term_mem[index - offset];
+        if (item && item->key) {
+            strncpy(key_buf, item->key, key_buf_size - 1);
+            key_buf[key_buf_size - 1] = '\0';
+        } else {
+            key_buf[0] = '\0';
+        }
+        MEMORY_UNLOCK(system);
+        return 0;
+    }
+    offset += system->lt_count;
+
+    /* 情景记忆 */
+    if (index - offset < system->ep_count) {
+        MemoryItem* item = system->episodic_mem[index - offset];
+        if (item && item->key) {
+            strncpy(key_buf, item->key, key_buf_size - 1);
+            key_buf[key_buf_size - 1] = '\0';
+        } else {
+            key_buf[0] = '\0';
+        }
+        MEMORY_UNLOCK(system);
+        return 0;
+    }
+    offset += system->ep_count;
+
+    /* 语义记忆 */
+    if (index - offset < system->se_count) {
+        MemoryItem* item = system->semantic_mem[index - offset];
+        if (item && item->key) {
+            strncpy(key_buf, item->key, key_buf_size - 1);
+            key_buf[key_buf_size - 1] = '\0';
+        } else {
+            key_buf[0] = '\0';
+        }
+        MEMORY_UNLOCK(system);
+        return 0;
+    }
+
+    MEMORY_UNLOCK(system);
+    return -1; /* 索引越界 */
+}

@@ -26,6 +26,10 @@
 #include <stdint.h>
 #include <math.h>
 
+/* 前向声明：JPEG/PNG解码器（完整实现见文件后部） */
+uint8_t* image_load_jpeg(const char* filepath, int* width_out, int* height_out);
+uint8_t* image_load_png(const char* filepath, int* width_out, int* height_out);
+
 /* BMP文件头 (14字节) */
 #pragma pack(push, 1)
 typedef struct {

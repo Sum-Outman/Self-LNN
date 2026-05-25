@@ -434,6 +434,10 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
 static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* result,
                                                     const AudioSemanticResult* prev_result);
 
+/* 声音事件模型前向声明 */
+static void sound_event_model_init(SoundEventModel* model, int input_dim);
+static void sound_event_model_free(SoundEventModel* model);
+
 /* 说话人识别辅助函数前向声明 */
 static float audio_semantic_cosine_similarity(const float* a, const float* b, int n);
 static int audio_semantic_extract_speaker_embedding(AudioSemanticProcessor* processor,

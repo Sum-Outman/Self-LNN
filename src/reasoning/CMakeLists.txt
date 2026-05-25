@@ -9,7 +9,6 @@ if(MSVC)
         laplace_operator.c planning_enhanced.c
         cfc_uncertainty_reasoning.c hierarchical_planning.c
         math_physics_reasoning.c quaternion_liquid_gate.c
-        knowledge_snapshot.c
     )
 else()
     set(REASONING_SOURCES
@@ -17,7 +16,6 @@ else()
         laplace_operator.c planning_enhanced.c
         cfc_uncertainty_reasoning.c hierarchical_planning.c
         math_physics_reasoning.c quaternion_liquid_gate.c
-        knowledge_snapshot.c
     )
 endif()
 

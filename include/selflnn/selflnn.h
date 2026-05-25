@@ -202,6 +202,7 @@ SELFLNN_API void* selflnn_get_planning_system(void);
 
 /* ---- 4b. 学习与演化模块 ---- */
 SELFLNN_API void* selflnn_get_online_learner(void);
+SELFLNN_API void* selflnn_get_multi_agent_system(void); /* H-015集成 */
 SELFLNN_API void* selflnn_get_evolution_engine(void);
 SELFLNN_API void* selflnn_get_auto_learning(void);
 

@@ -21,6 +21,9 @@
 #include <stdint.h>
 #include <time.h>
 
+/* 非MSVC平台使用原始实现，MSVC平台使用reasoning_internal.c替代实现 */
+#ifndef _MSC_VER
+
 /**
  * @brief 规则索引项
  */
@@ -5553,3 +5556,5 @@ BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* en
 }
 
 /* ZSFAB P1-001修复: 已删除重复stub，完整实现在上方 */
+
+#endif /* !_MSC_VER —— 非MSVC平台推理引擎实现结束 */

@@ -1126,7 +1126,7 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
     opt_cfg.epsilon = 1e-8f;
     size_t param_count = lnn_get_parameter_count(network);
     float* param_buffer = lnn_get_parameters(network);
-    Optimizer* opt = optimizer_create(&opt_cfg, param_buffer, param_count);
+    Optimizer* opt = optimizer_create(&opt_cfg);
     OptimizerConfig opt_cfg_cfc;
     memset(&opt_cfg_cfc, 0, sizeof(opt_cfg_cfc));
     opt_cfg_cfc.type = OPTIMIZER_ADAM;
@@ -1242,7 +1242,7 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
     opt_cfg.epsilon = 1e-8f;
     size_t param_count = lnn_get_parameter_count(student);
     float* param_buffer = lnn_get_parameters(student);
-    Optimizer* opt = optimizer_create(&opt_cfg, param_buffer, param_count);
+    Optimizer* opt = optimizer_create(&opt_cfg);
     if (!opt) {
         if (!same_network) ET_LNN_UNLOCK(student);
         ET_LNN_UNLOCK(teacher);

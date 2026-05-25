@@ -459,6 +459,20 @@ int memory_sample_training_batch(MemorySystem* system, MemoryType memory_type,
 size_t memory_get_count(MemorySystem* system, MemoryType memory_type);
 
 /**
+ * @brief 按全局索引获取记忆项键名
+ *
+ * 遍历所有记忆池（短期→长期→情景→语义），按全局顺序获取指定索引的记忆键名。
+ * 用于统计和枚举所有记忆条目。
+ *
+ * @param system 记忆系统句柄
+ * @param index 全局索引（0至全部记忆项总数-1）
+ * @param key_buf 键名输出缓冲区
+ * @param key_buf_size 缓冲区大小
+ * @return int 成功返回0，索引越界返回-1
+ */
+int memory_get_key(MemorySystem* system, size_t index, char* key_buf, size_t key_buf_size);
+
+/**
  * @brief 基于相似度检索记忆上下文
  * 
  * 使用输入查询向量与所有记忆项计算点积相似度，

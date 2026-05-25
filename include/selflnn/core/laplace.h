@@ -188,6 +188,43 @@ int laplace_analyzer_set_config(LaplaceAnalyzer* analyzer, const LaplaceConfig* 
 void laplace_analyzer_reset(LaplaceAnalyzer* analyzer);
 
 /**
+ * @brief 拉普拉斯频域调制隐藏状态
+ *
+ * 对LNN隐藏状态施加拉普拉斯频域滤波，衰减不稳定频率分量，
+ * 增强网络的动态稳定性。使用基于极点的带通调制。
+ *
+ * @param analyzer 拉普拉斯分析器句柄
+ * @param hidden 隐藏状态数组（原地调制）
+ * @param hidden_size 隐藏状态维度
+ * @param strength 调制强度（0.0~1.0）
+ * @return int 成功返回0，失败返回-1
+ */
+int lnn_laplace_modulate_hidden(LaplaceAnalyzer* analyzer,
+                                float* hidden, size_t hidden_size, float strength);
+
+/**
+ * @brief 拉普拉斯分析网络动力学稳定性
+ *
+ * 对LNN隐藏状态进行频域分析，评估网络的动态稳定性，
+ * 计算稳定性评分、推荐截止频率和有效带宽。
+ *
+ * @param analyzer 拉普拉斯分析器句柄
+ * @param time_constant CfC时间常数τ
+ * @param hidden_state 隐藏状态数组
+ * @param hidden_size 隐藏状态维度
+ * @param stability_score 输出：稳定性评分（0.0~1.0，越大越稳定）
+ * @param recommended_cutoff 输出：推荐截止频率（Hz）
+ * @param frequency_bandwidth 输出：有效频带宽度（Hz）
+ */
+void lnn_laplace_analyze_network_dynamics(LaplaceAnalyzer* analyzer,
+                                          float time_constant,
+                                          const float* hidden_state,
+                                          size_t hidden_size,
+                                          float* stability_score,
+                                          float* recommended_cutoff,
+                                          float* frequency_bandwidth);
+
+/**
  * @brief 计算复数运算
  */
 

@@ -63,6 +63,7 @@ typedef struct {
     char branch[KV_MAX_BRANCH_NAME];
     int parent_id;
     int is_checkpoint;
+    char tag[64];  /* H-003: 快照标签（从knowledge_snapshot合并） */
 } KnowledgeSnapshot;
 
 /* 版本差异 */
@@ -138,6 +139,21 @@ int kv_diff_export_report(const KnowledgeVersionManager* kvm, int from_id, int t
 
 /* 清理过期快照 */
 int kv_cleanup_old_snapshots(KnowledgeVersionManager* kvm, int keep_count);
+
+/* ===== H-003: 从knowledge_snapshot合并的标签和保存/加载功能 ===== */
+
+/* 为指定快照添加标签 */
+int kv_add_tag(KnowledgeVersionManager* kvm, int snapshot_id, const char* tag);
+
+/* 将整个版本控制器序列化保存到文件 */
+int kv_save(const KnowledgeVersionManager* kvm, const char* filepath);
+
+/* 从文件反序列化加载版本控制器（调用者需用knowledge_version_free释放） */
+KnowledgeVersionManager* kv_load(const char* filepath);
+
+/* 获取指定分支的快照历史（按创建时间排序） */
+int kv_get_history(const KnowledgeVersionManager* kvm, const char* branch_name,
+                   KnowledgeSnapshot* out, int max_count);
 
 /* ============================================================================
  * ZSFWS-031: 语义相似度合并策略

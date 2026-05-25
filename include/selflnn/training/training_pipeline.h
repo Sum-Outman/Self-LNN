@@ -73,6 +73,9 @@ typedef struct {
     int loss_function;               /**< 损失函数（LossType枚举值, loss.h）: 0=MSE 1=MAE 2=Huber 3=CategoricalCrossEntropy 4=BinaryCrossEntropy 5=KLD 6=Cosine 7=Contrastive 8=Focal 9=Dice 10=Triplet 11=Quantile */
     char data_directory[512];
     char output_directory[512];
+    size_t input_size;               /**< 输入维度（LNN网络input_size，默认512） */
+    size_t hidden_size;              /**< 隐藏层维度（LNN网络hidden_size，默认1024） */
+    size_t output_size;              /**< 输出维度（LNN网络output_size，默认256） */
 } TrainingPipelineConfig;
 
 typedef struct TrainingPipeline TrainingPipeline;

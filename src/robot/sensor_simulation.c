@@ -208,6 +208,12 @@ int sensor_sim_imu_update(SensorSimContext* ctx,
 #endif
 }
 
+/* ============================================================================
+ * 传感器仿真内部辅助函数 — 编译时受 SELFLNN_STRICT_REAL_DATA 保护
+ * 严格模式下这些函数不参与编译，彻底消除仿真数据生成代码路径
+ * ============================================================================ */
+#ifndef SELFLNN_STRICT_REAL_DATA
+
 /* 射线-球体相交：二次方程判别式 */
 static int ray_sphere_intersect(const float* ro, const float* rd,
                                 const float* center, float radius,
@@ -290,6 +296,8 @@ static int ray_capsule_intersect(const float* ro, const float* rd,
     if (hit) { *t_out=best_t; return 1; }
     return 0;
 }
+
+#endif /* !SELFLNN_STRICT_REAL_DATA */
 
 int sensor_sim_ray_intersect(const float* ray_origin, const float* ray_dir,
                              const SimCollisionObject* object,
