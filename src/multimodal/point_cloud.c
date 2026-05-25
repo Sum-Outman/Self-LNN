@@ -3422,7 +3422,7 @@ int point_cloud_extract_features(PointCloudProcessor* processor,
         log_error("[点云] point_cloud_extract_features: 特征内存分配失败");
         return -1;
     }
-    result->num_features = num_feat;
+    result->feature_dimension = num_feat;
     float sum_lambda = lambda1 + lambda2 + lambda3;
     if (sum_lambda < 1e-10f) sum_lambda = 1e-10f;
     result->features[0] = (lambda1 - lambda2) / lambda1; /* 线性度 */
@@ -3432,7 +3432,7 @@ int point_cloud_extract_features(PointCloudProcessor* processor,
     result->features[4] = cx;  /* 质心X */
     result->features[5] = cy;  /* 质心Y */
     result->features[6] = cz;  /* 质心Z */
-    result->feature_type = config->feature_type;
+    (void)config;  /* feature_type 在头文件定义中不存在，功能已通过feature_dimension隐含 */
     log_info("[点云] point_cloud_extract_features: 提取%d维几何特征，点数=%zu",
              num_feat, input->num_points);
     return num_feat;

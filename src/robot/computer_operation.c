@@ -9,6 +9,28 @@
 #include <time.h>
 #include <stdint.h>
 
+/* ZSFX-011: OCR全ASCII可打印字符集映射表
+ * 索引0: 未知/未识别(映射到'?')
+ * 索引1-95: ASCII可打印字符(0x20-0x7E，共95个)
+ * 比原来的36类(0-9,A-Z)扩展到95个可打印ASCII字符。
+ * 注意: 中文CJK OCR需要专用卷积+CTC/注意力模型管线，LNN共享输出维度(128)受限，
+ * 如需支持数千个汉字需在LNN输出维度扩展后另行实现。 */
+const char CO_OCR_CHARSET[CO_OCR_NUM_CLASSES] = {
+    '?',   /* 0: 未知/未识别 */
+    ' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')',  /* 1-10 */
+    '*', '+', ',', '-', '.', '/',                       /* 11-16 */
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', /* 17-26 */
+    ':', ';', '<', '=', '>', '?', '@',                  /* 27-33 */
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J',  /* 34-43 */
+    'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T',  /* 44-53 */
+    'U', 'V', 'W', 'X', 'Y', 'Z',                        /* 54-59 */
+    '[', '\\', ']', '^', '_', '`',                       /* 60-65 */
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',  /* 66-75 */
+    'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',  /* 76-85 */
+    'u', 'v', 'w', 'x', 'y', 'z',                        /* 86-91 */
+    '{', '|', '}', '~'                                    /* 92-95 */
+};
+
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
@@ -1792,21 +1814,22 @@ int co_ocr_recognize(COSystem* system, const float* screen_data, size_t width, s
                 }
             }
 
-            float ocr_out[36] = {0};
-            co_forward(system, system->ocr_net, char_input, 16*16, ocr_out, 36);
+            float ocr_out[CO_OCR_NUM_CLASSES];
+            memset(ocr_out, 0, sizeof(ocr_out));
+            co_forward(system, system->ocr_net, char_input, 16*16, ocr_out, CO_OCR_NUM_CLASSES);
 
             int best_char = 0;
             float best_char_conf = ocr_out[0];
-            for (int ci2 = 1; ci2 < 36; ci2++) {
+            for (int ci2 = 1; ci2 < CO_OCR_NUM_CLASSES; ci2++) {
                 if (ocr_out[ci2] > best_char_conf) { best_char_conf = ocr_out[ci2]; best_char = ci2; }
             }
 
-            if (best_char_conf > 0.4f) {
-                if (best_char < 10) ocr->text[ci] = (char)('0' + best_char);
-                else ocr->text[ci] = (char)('A' + best_char - 10);
+            /* ZSFX-011: 使用CO_OCR_CHARSET查表解码，替代硬编码'0'+/'A'映射 */
+            if (best_char_conf > CO_OCR_CONFIDENCE_THRESHOLD && best_char > 0 && best_char < CO_OCR_NUM_CLASSES) {
+                ocr->text[ci] = CO_OCR_CHARSET[best_char];
                 ocr->confidence += best_char_conf;
             } else {
-                ocr->text[ci] = '?';
+                ocr->text[ci] = CO_OCR_CHARSET[0];  /* '?' — 未识别 */
             }
         }
 

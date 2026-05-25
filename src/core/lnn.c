@@ -1249,6 +1249,8 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
     size_t param_count;
     float* shared_w;
     float* shared_b;
+    (void)shared_w;
+    (void)shared_b;
     if (cfc_network->per_layer_w_offset && cfc_network->total_weight_params > 0) {
         param_count = cfc_network->total_weight_params + cfc_network->total_bias_params;
     } else {
@@ -2034,8 +2036,9 @@ static uint32_t detect_numa_node(int cpu_index) {
         return (uint32_t)node;
     }
     /* 备用：旧版API（仅支持64个处理器以内） */
-    if (GetNumaProcessorNode((UCHAR)cpu_index, &node)) {
-        return (uint32_t)node;
+    UCHAR node_u8 = 0;
+    if (GetNumaProcessorNode((UCHAR)(cpu_index & 0xFF), &node_u8)) {
+        return (uint32_t)node_u8;
     }
     /* 无法检测NUMA拓扑，默认返回节点0 */
     return 0;

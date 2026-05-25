@@ -136,7 +136,7 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     engine->kb_auto_sync = 1;
     engine->knowledge_ready = 0;
     engine->lnn_instance = NULL;
-    engine->bayesian_network = NULL;
+    engine->bayesian_network = bayesian_network_create(64);
     
     return engine;
 }
@@ -152,6 +152,10 @@ void reasoning_engine_free(ReasoningEngine* engine) {
     if (engine->causal_engine) {
         causal_reasoning_engine_free(engine->causal_engine);
         engine->causal_engine = NULL;
+    }
+    if (engine->bayesian_network) {
+        bayesian_network_free(engine->bayesian_network);
+        engine->bayesian_network = NULL;
     }
     if (engine->history_inputs) safe_free((void**)&engine->history_inputs);
     if (engine->history_outputs) safe_free((void**)&engine->history_outputs);

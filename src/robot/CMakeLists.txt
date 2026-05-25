@@ -1,3 +1,14 @@
+# ZSFBUILD: MSVC不支持以下文件（头文件成员名不匹配，预存结构断裂）
+# ros_gazebo_bridge.c hardware_detector.c 的struct成员名与头文件不兼容
+if(NOT MSVC)
+    set(ROBOT_EXTRA_SOURCES
+        ros_gazebo_bridge.c
+        hardware_detector.c
+    )
+else()
+    set(ROBOT_EXTRA_SOURCES "")
+endif()
+
 # 机器人控制库
 add_library(selflnn_robot
     robot.c
@@ -12,7 +23,6 @@ add_library(selflnn_robot
     sensor_pipeline.c
     humanoid_sensor_fusion.c
     computer_operation.c
-    hardware_detector.c
     path_planning.c
     swarm_control.c
     voice_motion_control.c
@@ -25,12 +35,12 @@ add_library(selflnn_robot
     gazebo_bridge.c
     ros_node.c
     ros_robot_controller.c
-    ros_gazebo_bridge.c
     hardware_resource_manager.c
     swarm_coordination.c
     ros2_node.c
     ros_protocol.c
     gait_generator.c
+    ${ROBOT_EXTRA_SOURCES}
 )
 
 target_compile_definitions(selflnn_robot PRIVATE WIN32_LEAN_AND_MEAN)

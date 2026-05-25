@@ -829,7 +829,12 @@ int knowledge_is_expired(const void* entry) {
     return (meta->expires > 0 && (long)time(NULL) > meta->expires) ? 1 : 0;
 }
 
+/* ZSFBUILD: MSVC下与reasoning_internal.c中的knowledge_version_diff签名冲突，重命名 */
+#ifdef _MSC_VER
+int knowledge_entry_diff(const void* entry_a, const void* entry_b, float* diff, int dim) {
+#else
 int knowledge_version_diff(const void* entry_a, const void* entry_b, float* diff, int dim) {
+#endif
     if (!entry_a || !entry_b || !diff) return -1;
     const float* a = (const float*)entry_a;
     const float* b = (const float*)entry_b;

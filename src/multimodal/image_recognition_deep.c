@@ -1571,8 +1571,8 @@ int ird_zero_shot_predict_from_features(IRDZeroShotRecognizer* rec, const float*
     int best = 0; float bs = sims[0];
     for (int ci = 1; ci < nc; ci++) { if (sims[ci] > bs) { bs = sims[ci]; best = ci; } }
     pred->class_id = best; pred->confidence = bs;
-    /* 零样本类别名称：使用预定义中文类别表，提供有意义的类别名称 */
-    {static const char* default_zs_categories[] = {
+    /* 零样本类别名称：使用预定义中文类别表 */
+    static const char* default_zs_categories[] = {
         "物体","动物","人","车辆","建筑","植物","食物","工具","电子设备","家具",
         "服装","书籍","乐器","运动器材","厨房用具","办公用品","玩具","艺术品","自然景观","城市景观",
         "室内场景","室外场景","文字","图表","人脸","手写","标志","条形码","二维码","医疗影像",
@@ -1583,7 +1583,7 @@ int ird_zero_shot_predict_from_features(IRDZeroShotRecognizer* rec, const float*
         snprintf(pred->class_name, 64, "%s", default_zs_categories[best]);
     } else {
         snprintf(pred->class_name, 64, "类别_%d", best);
-    }}
+    }
 
     int topk = (nc < 10) ? nc : 10;
     int si[256];

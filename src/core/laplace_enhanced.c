@@ -50,6 +50,20 @@
 #include <string.h>
 #include <math.h>
 
+/* ZSFBUILD: RealtimeMonitor类型未在任何头文件中声明，在此处补全 */
+typedef struct {
+    float* history_buffer;
+    float* spectrum_accumulator;
+    float* feature_history;
+    size_t buffer_size;
+    size_t feature_history_size;
+    size_t write_pos;
+    size_t feature_write_pos;
+    float stability_threshold;
+    float anomaly_threshold;
+    int is_initialized;
+} RealtimeMonitor;
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif

@@ -13,6 +13,7 @@
 #include "selflnn/multimodal/text.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"
 
 #include <stdlib.h>
 #include <string.h>

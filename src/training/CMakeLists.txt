@@ -23,7 +23,8 @@ target_link_libraries(selflnn_training PRIVATE selflnn_core selflnn_learning sel
 
 # MSVC下使用/Z7避免PDB锁定问题
 if(MSVC)
-    target_compile_options(selflnn_training PRIVATE /Z7)
+    target_compile_options(selflnn_training PRIVATE /Z7 /wd4098 /wd4267)
+    # ZSFBUILD: /wd4098(void函数返回-1预存bug) /wd4267(size_t→int转换)
 endif()
 
 # 安装规则

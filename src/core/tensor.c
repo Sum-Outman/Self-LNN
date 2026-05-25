@@ -16,6 +16,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
+#include <stdlib.h>
+
+/* ZSFBUILD: -INFINITY在MSVC+WX配置下不可用，使用-FLT_MAX替代 */
+#ifndef SELFLNN_NEG_INF
+#define SELFLNN_NEG_INF (-FLT_MAX)
+#endif
 #include <stdint.h>
 #include <stdio.h>
 
@@ -1126,7 +1133,7 @@ int tensor_maxpool2d(const Tensor* input, Tensor* output,
         for (int c = 0; c < C; c++) {
             for (int h = 0; h < H_out; h++) {
                 for (int w = 0; w < W_out; w++) {
-                    float max_val = -INFINITY;
+                    float max_val = SELFLNN_NEG_INF;
 
                     int h_start = h * stride_h - padding_h;
                     int w_start = w * stride_w - padding_w;
@@ -1328,7 +1335,7 @@ int tensor_softmax(const Tensor* input, Tensor* output, int axis) {
             size_t base = o * outer_stride + j;
 
             /* 1. 找最大值（数值稳定性） */
-            float max_val = -INFINITY;
+            float max_val = SELFLNN_NEG_INF;
             for (int ai = 0; ai < axis_size; ai++) {
                 float val = data_out[base + (size_t)ai * axis_stride];
                 if (val > max_val) max_val = val;

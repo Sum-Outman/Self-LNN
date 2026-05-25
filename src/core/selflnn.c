@@ -60,6 +60,45 @@
 #endif
 
 /* ================================================================
+ * ZSFBUILD: SYSTEM_LOCK/SYSTEM_UNLOCK宏必须定义在首次使用(line 184)之前
+ * 原定义在line 249-283，MSVC预处理器自上而下扫描，导致line 184处宏未展开
+ * 变成未定义函数调用 → 链接器报错LNK2019
+ * ================================================================ */
+#ifdef _WIN32
+#include <windows.h>
+static CRITICAL_SECTION g_system_lock;
+static volatile LONG g_lock_initialized = 0;
+#define SYSTEM_LOCK_INIT() do { \
+    if (!g_lock_initialized) { \
+        if (InterlockedCompareExchange(&g_lock_initialized, 2, 0) == 0) { \
+            InitializeCriticalSection(&g_system_lock); \
+            g_lock_initialized = 1; \
+        } else { while (g_lock_initialized != 1) { Sleep(0); } } \
+    } \
+} while(0)
+#define SYSTEM_LOCK() EnterCriticalSection(&g_system_lock)
+#define SYSTEM_UNLOCK() LeaveCriticalSection(&g_system_lock)
+#elif defined(__APPLE__)
+#include <pthread.h>
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
+static pthread_mutex_t g_system_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_lock_initialized = 1;
+#define SYSTEM_LOCK_INIT() do { } while(0)
+#define SYSTEM_LOCK() pthread_mutex_lock(&g_system_lock)
+#define SYSTEM_UNLOCK() pthread_mutex_unlock(&g_system_lock)
+#else
+#include <pthread.h>
+#include <unistd.h>
+static pthread_mutex_t g_system_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_lock_initialized = 1;
+#define SYSTEM_LOCK_INIT() do { } while(0)
+#define SYSTEM_LOCK() pthread_mutex_lock(&g_system_lock)
+#define SYSTEM_UNLOCK() pthread_mutex_unlock(&g_system_lock)
+#endif
+
+/* ================================================================
  * 产品设计标签表——可配置中文字符串表
  * 替代硬编码标签数组，支持运行时通过API修改标签内容
  * 实现国际化/定制化产品设计描述的灵活配置
@@ -239,47 +278,6 @@ int selflnn_module_uses_shared_lnn(ModuleId mid) {
 #include <sys/random.h>
 #elif defined(__APPLE__)
 #include <Security/Security.h>
-#endif
-
-#ifdef _WIN32
-#include <windows.h>
-static CRITICAL_SECTION g_system_lock;
-/* K-182: volatile + InterlockedCompareExchange 消除DCL竞态 */
-static volatile LONG g_lock_initialized = 0;
-#define SYSTEM_LOCK_INIT() do { \
-    if (!g_lock_initialized) { \
-        if (InterlockedCompareExchange(&g_lock_initialized, 2, 0) == 0) { \
-            InitializeCriticalSection(&g_system_lock); \
-            g_lock_initialized = 1; \
-        } else { while (g_lock_initialized != 1) { Sleep(0); } } \
-    } \
-} while(0)
-#define SYSTEM_LOCK() EnterCriticalSection(&g_system_lock)
-#define SYSTEM_UNLOCK() LeaveCriticalSection(&g_system_lock)
-#elif defined(__APPLE__)
-#include <pthread.h>
-#include <mach/mach.h>
-#include <sys/sysctl.h>
-#include <unistd.h>
-/* ARC-001确认: pthread_mutex_t + PTHREAD_MUTEX_INITIALIZER 提供静态初始化，
- * 编译期即完成线程安全构造，无需运行时初始化调用。
- * SYSTEM_LOCK_INIT() 为空操作是标准POSIX惯例，非缺陷。 */
-static pthread_mutex_t g_system_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_lock_initialized = 1;
-#define SYSTEM_LOCK_INIT() do { } while(0)
-#define SYSTEM_LOCK() pthread_mutex_lock(&g_system_lock)
-#define SYSTEM_UNLOCK() pthread_mutex_unlock(&g_system_lock)
-#else
-#include <pthread.h>
-#include <unistd.h>
-/* ARC-001确认: pthread_mutex_t + PTHREAD_MUTEX_INITIALIZER 提供静态初始化，
- * 编译期即完成线程安全构造，无需运行时初始化调用。
- * SYSTEM_LOCK_INIT() 为空操作是标准POSIX惯例，非缺陷。 */
-static pthread_mutex_t g_system_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_lock_initialized = 1;
-#define SYSTEM_LOCK_INIT() do { } while(0)
-#define SYSTEM_LOCK() pthread_mutex_lock(&g_system_lock)
-#define SYSTEM_UNLOCK() pthread_mutex_unlock(&g_system_lock)
 #endif
 
 // g_system_state 已在前方声明并初始化
@@ -3638,14 +3636,8 @@ SELFLNN_API void selflnn_module_init(void)
     g_system_state.config.power_mode = POWER_MODE_BALANCED;
     g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
     g_system_state.config.model_path = NULL;
-    /* Z5-004: power_mode传播 —— 实际影响运行时，之前仅记录日志 */
-    if (config->power_mode == POWER_MODE_LOW_POWER) {
-        g_system_state.config.power_mode = POWER_MODE_LOW_POWER;
-    } else if (config->power_mode == POWER_MODE_HIGH_PERFORMANCE) {
-        g_system_state.config.power_mode = POWER_MODE_HIGH_PERFORMANCE;
-    } else {
-        g_system_state.config.power_mode = POWER_MODE_BALANCED;
-    }
+    /* ZSFBUILD: selflnn_module_init(void)无config参数，使用默认均衡模式 */
+    g_system_state.config.power_mode = POWER_MODE_BALANCED;
     log_info("功率模式已配置: %d", g_system_state.config.power_mode);
     g_system_state.start_time = get_current_time();
     g_system_state.last_error = SELFLNN_SUCCESS;

@@ -388,8 +388,9 @@ static int gr_load_from_adjacency_list(GraphReasoner* reasoner) {
          * 使用adjacency_list_get_out_neighbors获取出邻居节点ID
          * 边的语义为"adjacent"关系类型 */
         int* out_neighbors = NULL;
+        /* ZSFBUILD: adjacency_list_get_out_neighbors传NULL作为output参数 */
         int out_cnt = adjacency_list_get_out_neighbors(reasoner->adjacency_list, i,
-                                                        &out_neighbors, NULL, NULL);
+                                                        (int*)(&out_neighbors), NULL, 0);
         for (int oe = 0; oe < out_cnt && out_neighbors; oe++) {
             int tgt_id = out_neighbors[oe];
             int cfc_rel_id = cfc_embed_add_relation(reasoner->embed_state, "adjacent");

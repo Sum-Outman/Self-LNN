@@ -25,17 +25,7 @@
 #include <unistd.h>
 #endif
 
-/* 快照文件中保存的序列化条目结构 */
-typedef struct {
-    int entry_id;
-    char subject[256];
-    char predicate[256];
-    char object[256];
-    float confidence;
-    int type;
-    int source;
-    long timestamp;
-} SnapshotEntryRecord;
+/* ZSFBUILD: SnapshotEntryRecord定义已移至knowledge_version.h */
 
 /* 快照文件魔数 */
 #define KV_FILE_MAGIC 0x4B56534E

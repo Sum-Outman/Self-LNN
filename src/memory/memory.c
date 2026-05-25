@@ -1,3 +1,8 @@
+#include "selflnn/memory/memory.h"
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+
 #define MEMORY_RECENT_CACHE_SIZE 10
 #define MEMORY_HASH_INDEX_THRESHOLD 100 /**< 超过此阈值启用哈希索引 */
 #define MEMORY_HASH_INDEX_BUCKETS 1024  /**< 哈希桶数量 */

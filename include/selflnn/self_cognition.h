@@ -377,7 +377,7 @@ typedef struct {
     size_t step_count;             /**< 计划步骤数 */
     float estimated_completion_time; /**< 预计完成时间（秒） */
     char* plan_summary;            /**< 计划摘要 */
-} PlanResult;
+} CognitionPlanResult;
 
 /**
  * @brief 自我意识系统配置
@@ -461,9 +461,9 @@ void reflection_result_free(ReflectionResult* result);
  * 
  * @param system 系统句柄
  * @param goal 目标
- * @return PlanResult* 计划结果，失败返回NULL
+ * @return CognitionPlanResult* 计划结果，失败返回NULL
  */
-PlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const void* goal);
+CognitionPlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const void* goal);
 
 /**
  * @brief 销毁自我意识系统（self_awareness_system_free的别名）
@@ -493,7 +493,7 @@ void error_analysis_result_free(ErrorAnalysisResult* result);
  * 
  * @param result 计划结果
  */
-void plan_result_free(PlanResult* result);
+void plan_result_free(CognitionPlanResult* result);
 
 /* ============================
  * 自我修正系统API

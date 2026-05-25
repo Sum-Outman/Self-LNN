@@ -153,6 +153,9 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
     return fitness;
 }
 
+/* ZSFBUILD: C89前向声明 (is_online_learner_init在L490定义，先于L160调用) */
+static int is_online_learner_init(void* h);
+
 /* AGI后台任务：在线学习循环 */
 static void agi_bg_online_learning(void) {
     void* learner = selflnn_get_online_learner();
@@ -1184,7 +1187,7 @@ int main(int argc, char* argv[])
             }
              /* APP15: 初始化音频管道（VAD+语音识别+TTS） */
             {
-                g_audio_capture = audio_capture_create("default", 16000, 1);
+                g_audio_capture = audio_capture_create("default", 16000, 1, 16);
                 if (g_audio_capture) {
                     audio_capture_start(g_audio_capture, NULL, NULL);
                     printf("  音频采集管道初始化成功 (16kHz单声道)\n");

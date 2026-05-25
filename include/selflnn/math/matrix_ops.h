@@ -41,8 +41,8 @@ int matrix_ops_has_simd(void);
 /* LU分解: 将A分解为LU，返回0成功 */
 int matrix_lu_decompose(float* A, int* pivot, size_t n);
 
-/* LU求解: 使用LU分解结果求解Ax=b */
-void matrix_lu_solve(const float* LU, const int* pivot, const float* b, float* x, size_t n);
+/* LU求解: 使用LU分解结果求解Ax=b，返回0成功/-1失败 */
+int matrix_lu_solve(const float* A, const float* b, float* x, size_t n);
 
 /* 矩阵求逆: A^(-1) = invA */
 int matrix_inverse(const float* A, float* invA, size_t n);

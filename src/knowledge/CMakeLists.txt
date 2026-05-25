@@ -1,5 +1,5 @@
 # 知识库系统库
-add_library(selflnn_knowledge
+set(KNOWLEDGE_SOURCES
     knowledge.c
     api_training.c
     knowledge_graph.c
@@ -17,8 +17,13 @@ add_library(selflnn_knowledge
     ontology_engineering.c
     cfc_knowledge_embedding.c
     knowledge_integration.c
-    uncertainty_reasoning.c
 )
+# ZSFBUILD: MSVC下BayesianNetwork在reasoning.h和uncertainty_reasoning.h中冲突定义
+if(NOT MSVC)
+    list(APPEND KNOWLEDGE_SOURCES uncertainty_reasoning.c)
+endif()
+
+add_library(selflnn_knowledge ${KNOWLEDGE_SOURCES})
 
 target_include_directories(selflnn_knowledge PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include

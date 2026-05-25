@@ -367,22 +367,9 @@ typedef struct {
 char* self_programming_generate_python(SelfProgrammingEngine* engine,
                                        const PythonGenConfig* config);
 
-/**
- * @brief 生成C语言代码
- * 
- * 从代码规格说明生成完整的C语言函数实现。
- * 基于规格的参数类型、返回类型、I/O示例自动合成代码。
- * 
- * @param engine 自我编程引擎句柄
- * @param spec 代码规格说明
- * @return char* 生成的C代码字符串，失败返回NULL（调用者需safe_free）
- */
-char* self_programming_generate_c(SelfProgrammingEngine* engine,
-                                  const CodeSpecification* spec);
-
 /* ============================================================================
- * F-11: 代码合成数据结构
- * =========================================================================== */
+ * F-11: 代码合成数据结构（前置：CodeSpecification前向声明区域）
+ * ============================================================================ */
 
 /**
  * @brief I/O示例对（用于代码合成）
@@ -408,6 +395,18 @@ typedef struct {
     IOExample* examples;         /**< I/O示例数组 */
     size_t example_count;        /**< 示例数量 */
 } CodeSpecification;
+
+/**
+ * @brief 生成C语言代码（ZSFBUILD修复：移到CodeSpecification定义之后）
+ * 
+ * 从代码规格说明生成完整的C语言函数实现。
+ * 
+ * @param engine 自我编程引擎句柄
+ * @param spec 代码规格说明
+ * @return char* 生成的C代码字符串，失败返回NULL（调用者需safe_free）
+ */
+char* self_programming_generate_c(SelfProgrammingEngine* engine,
+                                  const CodeSpecification* spec);
 
 /* ============================================================================
  * F-11: 语义分析数据结构

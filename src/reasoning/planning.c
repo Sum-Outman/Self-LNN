@@ -11,10 +11,10 @@
  *   hierarchical_planning.c → 分层规划（HTN/POP/HRL分解）
  *   long_term_planning.c → 长期规划
  * 
- * 注：A*/BFS/Dijkstra/Beam Search等图搜索算法并未在本文件中实现。
- * 状态空间规划通过MCTS+CMA-ES演化策略+线性插值组合实现。
- * planning.c 提供基础规划API，planning_enhanced.c 在此基础上增加高级特性。
- * 两者互不替代，职责明确分离。
+ * 注：A-star/BFS/Dijkstra/Beam Search等图搜索算法并未在本文件中实现.
+ * 状态空间规划通过MCTS+CMA-ES演化策略+线性插值组合实现.
+ * planning.c 提供基础规划API，planning_enhanced.c 在此基础上增加高级特性.
+ * 两者互不替代，职责明确分离.
  */
 
 #include "selflnn/reasoning/planning.h"
@@ -176,12 +176,12 @@ static float planning_evolution_evaluate_fitness(PlanningSystem* system, const f
     size_t genome_len = system->evolution_genome_size;
 
     /* 多目标权重配置（归一化后使用） */
-    float w_task = system->multi_objective_config.task_weight > 0.0f ?
-                   system->multi_objective_config.task_weight : 0.34f;
-    float w_diversity = system->multi_objective_config.diversity_weight > 0.0f ?
-                        system->multi_objective_config.diversity_weight : 0.33f;
-    float w_novelty = system->multi_objective_config.novelty_weight > 0.0f ?
-                      system->multi_objective_config.novelty_weight : 0.33f;
+    float w_task = system->multi_objective_config.objective_weights[0] > 0.0f ?
+                   system->multi_objective_config.objective_weights[0] : 0.34f;
+    float w_diversity = system->multi_objective_config.objective_weights[1] > 0.0f ?
+                        system->multi_objective_config.objective_weights[1] : 0.33f;
+    float w_novelty = system->multi_objective_config.objective_weights[2] > 0.0f ?
+                      system->multi_objective_config.objective_weights[2] : 0.33f;
     float w_sum = w_task + w_diversity + w_novelty;
     if (w_sum > 0.0f) { w_task /= w_sum; w_diversity /= w_sum; w_novelty /= w_sum; }
 

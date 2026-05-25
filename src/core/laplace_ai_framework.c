@@ -9,6 +9,76 @@
 #include <stdio.h>
 #include <time.h>
 
+/* ============================================================================
+ * ZSFBUILD: 缺失类型定义 —— 原laplace_ai_framework.h为空转发，
+ * 以下类型定义从未在任何头文件中声明，在此处补全以确保编译通过。
+ * ============================================================================ */
+
+#define LAI_SPECTRUM_SIZE 4096
+#define LAI_MAX_FILTER_BANDS 64
+
+typedef enum {
+    LAI_FILTER_LOWPASS = 0,
+    LAI_FILTER_HIGHPASS = 1,
+    LAI_FILTER_BANDPASS = 2,
+    LAI_FILTER_BANDSTOP = 3
+} LAIFilterType;
+
+typedef enum {
+    LAI_WINDOW_HANN = 0,
+    LAI_WINDOW_HAMMING = 1,
+    LAI_WINDOW_HANNING = 1,  /* ZSFBUILD: 别名, Hann window = Hanning window */
+    LAI_WINDOW_BLACKMAN = 2,
+    LAI_WINDOW_KAISER = 3,
+    LAI_WINDOW_RECTANGULAR = 4
+} LAIWindowType;
+
+typedef struct {
+    float gain_margin;
+    float phase_margin;
+    float dominant_pole_real;
+    float dominant_pole_imag;
+    float stability_margin;
+    int is_stable;
+} LAIStabilityAnalysis;
+
+/* ZSFBUILD: LAIStabilityReport 与 LAIStabilityAnalysis 等价 */
+typedef LAIStabilityAnalysis LAIStabilityReport;
+
+typedef struct LaplaceAIConfig {
+    int fft_size;
+    float sampling_rate;
+    int enable_adaptive_filter;
+    int window_type;
+    float kaiser_beta;
+    int num_feature_bands;
+    float feature_freq_bands[32];
+    int enable_rl;
+} LaplaceAIConfig;
+
+typedef struct LaplaceAI {
+    LaplaceAIConfig config;
+    LaplaceAnalyzer* analyzer;
+    float* work_buffer;
+    float* filter_kernel_real;
+    float* filter_kernel_imag;
+    int kernel_size;
+    float prev_lr;
+    float lr_momentum;
+    int is_initialized;
+} LaplaceAI;
+
+typedef struct LAISpectrumResult {
+    float* magnitude;
+    float* phase;
+    float* frequency;
+    int fft_size;
+    float sampling_rate;
+    int num_frequencies;
+} LAISpectrumResult;
+
+/* ========================================================================= */
+
 /* 线程安全宏：各编译器TLS支持 */
 #if defined(_MSC_VER)
 #define LAI_THREAD_LOCAL __declspec(thread)

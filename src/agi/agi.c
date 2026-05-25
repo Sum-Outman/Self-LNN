@@ -21,6 +21,9 @@
 
 #define _CRT_NONSTDC_NO_DEPRECATE
 #include "selflnn/agi/agi.h"
+/* ZSFBUILD: selflnn_get_evolution_engine前向声明 (避免引入selflnn.h导致TASK_PRIORITY枚举冲突) */
+void* selflnn_get_evolution_engine(void);
+void* selflnn_get_shared_lnn(void);
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"

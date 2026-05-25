@@ -262,8 +262,8 @@ static int probe_serial_device(const char* port_pattern) {
  * 非传感器的HID设备通过UsagePage区分：
  *   键盘: UsagePage=0x01, Usage=0x06 | 鼠标: UsagePage=0x01, Usage=0x02
  *
- * Linux: 读取 /sys/class/input/event*/device/name 进行名称匹配
- * 也支持 IIO子系统：/sys/bus/iio/devices/iio:device*/name
+ * Linux: 读取 input/event 设备节点名称进行匹配
+ * 也支持 IIO子系统：iio:device 设备节点名称
  */
 static int probe_hid_device_sensor_type(DataCollectionSourceType sensor_type) {
     int found_matching_sensor = 0;
@@ -1029,6 +1029,57 @@ int dcpipeline_has_real_data(DataCollectionPipeline* pipeline) {
     return has_data;
 }
 
+/* Z5-005: 内部数据快照采集（ZSFBUILD修复：提供真实实现） */
+static int dcpipeline_collect_internal(DataCollectionPipeline* pipeline,
+                                        CollectionSnapshot* snapshot) {
+    if (!pipeline || !snapshot) return -1;
+    
+    memset(snapshot, 0, sizeof(CollectionSnapshot));
+    
+    /* 遍历所有启用的数据源槽位并采集每个槽位的最新帧 */
+    for (int i = 0; i < DC_SOURCE_COUNT; i++) {
+        DataSourceSlot* slot = &pipeline->slots[i];
+        if (!slot->enabled || !slot->hardware_detected || !slot->frame_ready)
+            continue;
+        
+        switch (slot->type) {
+        case DC_SOURCE_CAMERA_RGB:
+        case DC_SOURCE_CAMERA_STEREO_L:
+        case DC_SOURCE_CAMERA_STEREO_R:
+            if (snapshot->num_images < 16) {
+                memcpy(&snapshot->images[snapshot->num_images], 
+                       &slot->latest_image, sizeof(CollectedImageFrame));
+                snapshot->num_images++;
+            }
+            break;
+        case DC_SOURCE_MICROPHONE:
+            if (snapshot->num_audio_frames < 16) {
+                memcpy(&snapshot->audio_frames[snapshot->num_audio_frames],
+                       &slot->latest_audio, sizeof(CollectedAudioFrame));
+                snapshot->num_audio_frames++;
+            }
+            break;
+        case DC_SOURCE_LIDAR:
+            if (snapshot->num_point_clouds < 8) {
+                memcpy(&snapshot->point_clouds[snapshot->num_point_clouds],
+                       &slot->latest_pointcloud, sizeof(CollectedPointCloud));
+                snapshot->num_point_clouds++;
+            }
+            break;
+        default:
+            if (snapshot->num_sensor_frames < 16) {
+                memcpy(&snapshot->sensor_frames[snapshot->num_sensor_frames],
+                       &slot->latest_sensor, sizeof(CollectedSensorFrame));
+                snapshot->num_sensor_frames++;
+            }
+            break;
+        }
+        slot->frame_ready = 0; /* 标记此帧已被消费 */
+    }
+    
+    return 0;
+}
+
 /* Z5-005: 训练数据批量采集入口 —— 之前此函数声明但从未实现
  * 将多模态采集管道的实时数据转换为训练批次格式
  * 供训练管线(training_pipeline.c)调用以获取真实训练数据 */
@@ -1050,7 +1101,7 @@ int dcpipeline_collect_training_batch(DataCollectionPipeline* pipeline,
         for (int i = 0; i < DC_SOURCE_COUNT && !has_data; i++) {
             if (pipeline->slots[i].enabled &&
                 pipeline->slots[i].hardware_detected &&
-                pipeline->slots[i].latest_frame.data_size > 0) {
+                pipeline->slots[i].frame_ready) {
                 has_data = 1;
             }
         }

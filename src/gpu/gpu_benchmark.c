@@ -414,7 +414,7 @@ static int benchmark_matrix_multiply(GpuContext* context, int matrix_size,
         return -1;
     }
 
-    size_t i, j;
+    size_t i;
     for (i = 0; i < n * n; i++) {
         h_a[i] = secure_random_float() * 2.0f - 1.0f;
         h_b[i] = secure_random_float() * 2.0f - 1.0f;
@@ -1210,7 +1210,6 @@ int gpu_benchmark_format_report(const GpuBenchmarkResult* result,
 {
     if (!result || !buffer || buffer_size < 256) return -1;
 
-    char line[512];
     int pos = 0;
 
     pos += snprintf(buffer + pos, buffer_size - (size_t)pos,

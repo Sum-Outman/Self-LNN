@@ -24,6 +24,9 @@
 #include <time.h>
 #include <float.h>
 
+/* ZSFBUILD: RL_MAX宏来自reinforcement_learning.c，需在此文件也定义 */
+#define RL_MAX(X,Y) (((X)>(Y))?(X):(Y))
+
 /**
  * @brief 滑动窗口统计信息
  */
@@ -640,7 +643,7 @@ int online_learner_update(OnlineLearner* learner,
 
     /* M-006: LNN前向传播失败时直接返回错误，不做线性回退 */
     if (!used_lnn_forward) {
-        selflnn_set_last_error(SELFLNN_ERROR_COMPUTATION_FAILED, __func__, __FILE__, __LINE__,
+        selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
                               "在线学习更新：LNN前向传播失败");
         safe_free((void**)&lnn_output_buf);
         safe_free((void**)&gradient);
@@ -666,7 +669,7 @@ int online_learner_update(OnlineLearner* learner,
     float backward_loss = 0.0f;
     if (lnn_backward_accumulate(learner->attached_lnn, lnn_output_buf, &backward_loss) != 0) {
         /* M-006: 反向传播失败时直接返回错误，不回退到简单误差梯度 */
-        selflnn_set_last_error(SELFLNN_ERROR_COMPUTATION_FAILED, __func__, __FILE__, __LINE__,
+        selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
                               "在线学习更新：LNN反向传播累积失败");
         safe_free((void**)&lnn_output_buf);
         safe_free((void**)&gradient);

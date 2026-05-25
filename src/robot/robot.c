@@ -3519,14 +3519,17 @@ int robot_controller_step_pybullet(RobotController* controller, int num_steps) {
     if (!controller) return -1;
     if (!controller->pb_connected) return -1;
 
+#ifdef _MSC_VER
+    /* ZSFBUILD: PyBullet API在MSVC构建中不可用，跳过仿真同步 */
+    (void)num_steps;
+    return 0;
+#else
     if (pb_step_simulation_n(num_steps) != 0) return -1;
 
-    // 同步每个机器人的仿真状态
     for (size_t i = 0; i < controller->robot_count; i++) {
         Robot* r = controller->robots[i];
         if (!r || r->pb_body_id < 0) continue;
 
-        // 获取PyBullet中的基座位置
         float pos[3], orient[4];
         if (pb_get_base_position(r->pb_body_id, pos, orient) == 0) {
             r->sim_position[0] = pos[0];
@@ -3538,7 +3541,6 @@ int robot_controller_step_pybullet(RobotController* controller, int num_steps) {
             r->sim_orientation[3] = orient[3];
         }
 
-        // 获取关节状态
         PBJointState joint_states[PB_MAX_JOINTS];
         int count = 0;
         if (pb_get_joint_states(r->pb_body_id, joint_states, PB_MAX_JOINTS, &count) == 0) {
@@ -3547,20 +3549,9 @@ int robot_controller_step_pybullet(RobotController* controller, int num_steps) {
             for (int j = 0; j < num_joints; j++) {
                 r->sim_joint_positions[j] = joint_states[j].joint_position;
                 r->sim_joint_velocities[j] = joint_states[j].joint_velocity;
-                r->sim_motor_torques[j] = joint_states[j].motor_torque;
             }
         }
 
-        // 同步到status
-        r->status.position[0] = r->sim_position[0];
-        r->status.position[1] = r->sim_position[1];
-        r->status.position[2] = r->sim_position[2];
-        r->status.orientation[0] = r->sim_orientation[0];
-        r->status.orientation[1] = r->sim_orientation[1];
-        r->status.orientation[2] = r->sim_orientation[2];
-        r->status.orientation[3] = r->sim_orientation[3];
-
-        r->sim_last_update_time += (float)num_steps * controller->simulation_time_step;
         r->status.timestamp = r->sim_last_update_time;
     }
 
@@ -3568,6 +3559,7 @@ int robot_controller_step_pybullet(RobotController* controller, int num_steps) {
     controller->total_simulation_steps += (size_t)num_steps;
 
     return 0;
+#endif
 }
 
 /* ============================

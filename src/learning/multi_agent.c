@@ -671,7 +671,7 @@ static AgentAction* agent_decide(Agent* agent, const float* observation, size_t 
     /* 尝试使用LNN决策模型（若已初始化） */
     int lnn_decided = 0;
     if (agent->decision_model) {
-        LNN* lnn = (LNN*)selflnn_get_lnn();
+        LNN* lnn = (LNN*)(intptr_t)selflnn_get_lnn();
         if (lnn) {
             /* 使用LNN全局模型进行决策 */
             int lnn_input_size = (int)obs_size < 128 ? 128 : (int)obs_size;

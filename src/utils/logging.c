@@ -433,7 +433,6 @@ double logging_get_timestamp(void)
     static double epoch_offset = 0.0;
     static int initialized = 0;
     if (!initialized) {
-        struct timespec ts;
 #if defined(_WIN32)
         FILETIME ft;
         GetSystemTimePreciseAsFileTime(&ft);
@@ -443,12 +442,12 @@ double logging_get_timestamp(void)
         double win_epoch = (double)(uli.QuadPart - 116444736000000000ULL) / 10000000.0;
         epoch_offset = win_epoch;
 #else
+        struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         epoch_offset = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 #endif
         initialized = 1;
     }
-    struct timespec ts;
 #if defined(_WIN32)
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
@@ -458,6 +457,7 @@ double logging_get_timestamp(void)
     double now = (double)(uli.QuadPart - 116444736000000000ULL) / 10000000.0;
     return now;
 #else
+    struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 #endif

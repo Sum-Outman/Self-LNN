@@ -657,8 +657,7 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
             float inv_b2 = 1.0f / (1.0f - *optimizer->beta2_power);
 
             /* ZSFWS-OPT-FIX: 多组LAMB状态保护。分配临时update缓冲区 */
-            size_t total_params = 0;
-            for (int g = 0; g < num_groups; g++) total_params += groups[g].num_params;
+            /* ZSFBUILD: total_params已在函数开头计算，此处复用不重新声明 */
             float* update_tmp = (float*)safe_malloc(total_params * sizeof(float));
             if (!update_tmp) { optimizer->last_error = -1; return -1; }
 

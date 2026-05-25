@@ -188,8 +188,8 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     /* 初始化LNN集成 */
     engine->lnn_instance = NULL;
     
-    /* 初始化贝叶斯网络集成 */
-    engine->bayesian_network = NULL;
+    /* 初始化贝叶斯网络集成 — ZSFX-006修复: 实例化而非NULL */
+    engine->bayesian_network = bayesian_network_create(64);
     
     return engine;
 }
@@ -3914,8 +3914,7 @@ int reasoning_infer(ReasoningEngine* engine,
     perf_timer_start(&timer);
     
     /* 如果关联了外部知识库，使用知识增强推理 */
-    /* reasoning_infer_with_knowledge 仅在 GCC/Clang 平台编译，MSVC 使用 reasoning_internal.c */
-#ifndef _MSC_VER
+    /* ZSFX-007: 全平台统一启用知识增强推理 */
     if (engine->external_kb != NULL && engine->knowledge_base_size > 0) {
         int ret = reasoning_infer_with_knowledge(engine, premises, num_premises,
                                                 conclusion, max_conclusion_size,
@@ -3929,7 +3928,6 @@ int reasoning_infer(ReasoningEngine* engine,
         }
         /* 知识增强推理失败，回退到标准推理 */
     }
-#endif
     
     /* 如果关联了LNN实例，先通过液态神经网络进行状态演化 */
     float* evolved_premises = NULL;
@@ -4718,8 +4716,7 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
     return (int)synced;
 }
 
-/* reasoning_infer_with_knowledge 仅在 GCC/Clang 平台编译，MSVC 使用 reasoning_internal.c */
-#ifndef _MSC_VER
+/* ZSFX-007: reasoning_infer_with_knowledge 全平台统一编译 */
 /**
  * @brief 使用知识库增强推理
  *
@@ -4858,12 +4855,9 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
 
     return 0;
 }
-#endif /* _MSC_VER */
 
 /* ========== P2-3: 贝叶斯推理网络 + 推理引擎绑定 ========== */
-/* reasoning.c 中的贝叶斯网络函数仅在 GCC/Clang 平台编译，MSVC 使用 reasoning_internal.c */
-#ifndef _MSC_VER
-/* ZSFAB P0-001修复: 解禁完整贝叶斯网络实现，移除stub占位符，全平台启用 */
+/* ZSFX-007: 全平台统一编译，不再区分GCC/MSVC */
 BayesianNetwork* bayesian_network_create(size_t max_nodes) {
     if (max_nodes == 0 || max_nodes > 10000) return NULL;
 
@@ -5555,7 +5549,5 @@ BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* en
     if (!engine) return NULL;
     return engine->bayesian_network;
 }
-
-#endif /* _MSC_VER: Bayesian+Reasoning section */
 
 /* ZSFAB P1-001修复: 已删除重复stub，完整实现在上方 */

@@ -2333,9 +2333,9 @@ int dds_deserialize_rtps_data(const uint8_t* buffer, size_t buffer_size,
     }
 
     if (found_data) {
-        submsg->submessage_id = read_u8(&ptr);
-        submsg->flags = read_u8(&ptr);
-        submsg->length = read_u16_le(&ptr);
+        submsg->header.submessage_id = read_u8(&ptr);
+        submsg->header.flags = read_u8(&ptr);
+        submsg->header.length = read_u16_le(&ptr);
         submsg->extra_flags = read_u16_le(&ptr);
         submsg->octets_to_inline_qos = read_u16_le(&ptr);
         memcpy(submsg->reader_id.entity_id, ptr, DDS_ENTITY_ID_LEN);

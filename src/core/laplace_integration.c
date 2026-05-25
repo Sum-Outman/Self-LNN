@@ -61,7 +61,65 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 跨平台原子比较交换宏：MSVC用InterlockedCompareExchange，GCC/Clang用__sync_bool_compare_and_swap */
+/* ZSFBUILD: LNNStabilityResult类型未在任何头文件中声明，在此处补全 */
+typedef struct {
+    size_t num_cells;
+    int num_poles;
+    float* pole_real_parts;
+    float* pole_imag_parts;
+    float* pole_stability;
+    float* cell_bandwidths;
+    float overall_stability;
+    float characteristic_loci_margin;
+    float system_bandwidth;
+    float worst_case_margin;
+    int nyquist_stability;
+} LNNStabilityResult;
+
+/* ZSFBUILD: SpectralGateConfig类型未在任何头文件中声明，在此处补全 */
+typedef struct {
+    float noise_floor;
+    float gate_threshold;
+    float attack_time;
+    float release_time;
+    float frequency_smoothing;
+    int use_wiener_filter;
+    float wiener_alpha;
+    int enable_noise_estimation;
+    float noise_estimation_rate;
+    float min_gain;
+    float max_gain;
+    float bandwidth_hz;
+    float center_freq_hz;
+} SpectralGateConfig;
+
+/* ZSFBUILD: PIDParams类型未在任何头文件中声明，在此处补全 */
+typedef struct {
+    float kp;
+    float ki;
+    float kd;
+    float output_limit_min;
+    float output_limit_max;
+    float integral_limit_min;
+    float integral_limit_max;
+    float setpoint_weight;
+    float derivative_filter;
+} PIDParams;
+
+/* ZSFBUILD: RLSEstimator类型未在任何头文件中声明，在此处补全 */
+#define RLS_MAX_ORDER 4
+typedef struct {
+    float forgetting_factor;
+    int model_order;
+    float delta;
+    float lambda;
+    float P[RLS_MAX_ORDER * RLS_MAX_ORDER];
+    float theta[RLS_MAX_ORDER];
+    float phi_buffer[RLS_MAX_ORDER];
+    int is_initialized;
+} RLSEstimator;
+
+/* 跨平台原子比较交换宏 */
 #ifdef _MSC_VER
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

@@ -2165,7 +2165,7 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
                 __m128 x_vec = _mm_loadu_ps(&input[j]);
                 __m128 x_sub = _mm_sub_ps(x_vec, _mm_set1_ps(max_v));
                 float tmp[4]; _mm_storeu_ps(tmp, x_sub);
-                for (int k = 0; k < 4; k++) tmp[k] = expf(tmp[k]);
+                for (int ki = 0; ki < 4; ki++) tmp[ki] = expf(tmp[ki]);
                 sum_vec = _mm_add_ps(sum_vec, _mm_loadu_ps(tmp));
                 _mm_storeu_ps(&output[j], _mm_loadu_ps(tmp));
             }
@@ -2181,36 +2181,36 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
         }
         /* 向量化缩放归一化 */
         float inv = 1.0f / (sum + 1e-10f);
-        int k = 0;
+        int ki = 0;
 #if SELFLNN_HAVE_AVX
         if (g_simd_avx_available > 0) {
             __m256 inv_vec = _mm256_set1_ps(inv);
-            for (; k <= n - 8; k += 8) {
-                __m256 y_vec = _mm256_loadu_ps(&output[k]);
+            for (; ki <= n - 8; ki += 8) {
+                __m256 y_vec = _mm256_loadu_ps(&output[ki]);
                 y_vec = _mm256_mul_ps(y_vec, inv_vec);
-                _mm256_storeu_ps(&output[k], y_vec);
+                _mm256_storeu_ps(&output[ki], y_vec);
             }
         }
 #elif SELFLNN_HAVE_NEON
         if (g_simd_neon_available > 0) {
             float32x4_t inv_vec = vdupq_n_f32(inv);
-            for (; k <= n - 4; k += 4) {
-                float32x4_t y_vec = vld1q_f32(&output[k]);
+            for (; ki <= n - 4; ki += 4) {
+                float32x4_t y_vec = vld1q_f32(&output[ki]);
                 y_vec = vmulq_f32(y_vec, inv_vec);
-                vst1q_f32(&output[k], y_vec);
+                vst1q_f32(&output[ki], y_vec);
             }
         }
 #elif SELFLNN_HAVE_SSE
         {
             __m128 inv_vec = _mm_set1_ps(inv);
-            for (; k <= n - 4; k += 4) {
-                __m128 y_vec = _mm_loadu_ps(&output[k]);
+            for (; ki <= n - 4; ki += 4) {
+                __m128 y_vec = _mm_loadu_ps(&output[ki]);
                 y_vec = _mm_mul_ps(y_vec, inv_vec);
-                _mm_storeu_ps(&output[k], y_vec);
+                _mm_storeu_ps(&output[ki], y_vec);
             }
         }
 #endif
-        for (; k < n; k++) output[k] *= inv;
+        for (; ki < n; ki++) output[ki] *= inv;
         break;
     }
     case CPU_KERNEL_LAYER_NORM: {

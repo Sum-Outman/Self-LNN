@@ -592,6 +592,11 @@ static int npu_tpu_cpu_infer_fallback(NpuModel* model, const float** inputs,
      * 保证可重复性且提供实际计算而非虚拟输出。
      */
 
+    /* ZSFX-013: TPU硬件不可用时的确定性CPU回退
+     * 使用模型路径的FNV-1a哈希作为确定性种子，通过LCG生成投影矩阵权重。
+     * 权重是确定性的（同模型同输入同输出），但未经训练学习。
+     * 此回退仅在TPU硬件不可用且显式选择TPU后端时激活。
+     * 一般情况下系统使用CPU或CUDA后端，不受此影响。 */
     /* 使用模型路径的Fowler-Noll-Vo哈希作为确定性种子 */
     uint32_t seed = 2166136261u;
     const char* mp = model->model_path;

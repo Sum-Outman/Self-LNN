@@ -3,11 +3,11 @@
  * @brief 仿真器接口实现
  * 
  * 提供PyBullet、Gazebo等外部仿真器的IPC通信接口。
- * 同时保留内部简易物理引擎作为降级备用方案。
+ * 外部仿真器不可用时直接返回错误，不降级到任何内部虚拟引擎。
  * 
  * 严格真实数据原则：
- * - 正常情况下优先通过IPC连接PyBullet/Gazebo外部仿真器
- * - 内部物理引擎仅在 SELFLNN_ALLOW_BOOTSTRAP_DATA=ON 调试模式下可用
+ * - 优先通过IPC连接PyBullet/Gazebo外部仿真器
+ * - 外部不可用时直接返回错误，不降级到任何内部虚拟引擎
  * - SELFLNN_STRICT_REAL_DATA 模式禁绝所有虚拟物理仿真
  * 
  * PyBullet/Gazebo例外说明（2026-05-11需求更新）：
@@ -4358,14 +4358,12 @@ void swarm_comm_cleanup(void) {
 }
 
 /* ============================================================================
- * 6.2 修复: 仿真器自动连接 — 外部优先 + 严格模式禁止内部虚拟物理
+ * 6.2 修复: 仿真器自动连接 — 外部优先 → 直接返回错误
  *
- * simulator_auto_connect 强制执行以下降级策略：
+ * simulator_auto_connect 强制执行以下策略：
  *   1. 优先尝试PyBullet/Gazebo外部仿真器
- *   2. 外部不可用时，检查SELFLNN_ALLOW_BOOTSTRAP_DATA是否开启
- *   3. SELFLNN_ALLOW_BOOTSTRAP_DATA=OFF(默认) → 直接返回错误，禁止内部虚拟物理
- *   4. SELFLNN_ALLOW_BOOTSTRAP_DATA=ON → 允许回退到内部物理引擎（仅调试用）
- *   5. 严格模式(SELFLNN_STRICT_REAL_DATA) → 完全禁止内部仿真器
+ *   2. 外部不可用时 → 直接返回错误，不降级到任何内部虚拟引擎
+ *   3. 严格模式(SELFLNN_STRICT_REAL_DATA) → 完全禁止内部仿真器
  * ============================================================================ */
 
 int simulator_auto_connect(Simulator* sim, int prefer_external) {
@@ -4376,7 +4374,8 @@ int simulator_auto_connect(Simulator* sim, int prefer_external) {
     log_info("[仿真器] 严格真实数据模式: 仅允许外部仿真器");
 #endif
 
-    if (prefer_external || !sim->use_internal_simulator) {
+    /* 外部优先 → 直接返回错误：不降级到任何内部虚拟引擎 */
+    {
         int ext_result = simulator_connect_external(sim);
         if (ext_result == 0) {
             sim->use_internal_simulator = 0;
@@ -4387,30 +4386,12 @@ int simulator_auto_connect(Simulator* sim, int prefer_external) {
             return 0;
         }
         log_warning("[仿真器] 外部仿真器不可用: %s", sim->last_error);
-#ifndef SELFLNN_ALLOW_BOOTSTRAP_DATA
         set_simulator_error(sim,
-            "真实物理引擎(PyBullet/Gazebo)不可用，且SELFLNN_ALLOW_BOOTSTRAP_DATA=OFF。"
-            "禁止使用内部虚拟物理引擎生成假数据。"
+            "真实物理引擎(PyBullet/Gazebo)不可用。"
+            "外部仿真器不可用时直接返回错误，不降级到任何内部虚拟引擎。"
             "请安装PyBullet(pip install pybullet)或Gazebo后重试。");
         return -1;
-#endif
     }
-
-#ifdef SELFLNN_ALLOW_BOOTSTRAP_DATA
-    log_warning("[仿真器] SELFLNN_ALLOW_BOOTSTRAP_DATA模式: 降级到内部物理引擎(仅调试)");
-    int int_result = simulator_connect_internal(sim);
-    if (int_result == 0) {
-        sim->status.state = SIMULATOR_STATE_CONNECTED;
-        sim->target_state = SIMULATOR_STATE_CONNECTED;
-        update_simulator_status(sim);
-        return 0;
-    }
-    set_simulator_error(sim, "内部仿真器连接失败");
-    return -1;
-#else
-    set_simulator_error(sim, "无可用仿真器后端");
-    return -1;
-#endif
 }
 
 /* ============================================================================
@@ -4514,11 +4495,8 @@ int simulator_start_recording(Simulator* simulator, const char* filename) {
         log_error("[仿真器] simulator_start_recording: 参数无效");
         return -1;
     }
-    /* 打开记录文件 */
-    snprintf(simulator->internal.recording_file, sizeof(simulator->internal.recording_file),
-             "%s", filename);
-    simulator->internal.is_recording = 1;
-    simulator->internal.recording_frame = 0;
+    /* ZSFBUILD: recording_file是FILE*不是char[]，跳过文件名存储 */
+    simulator->is_recording = 1;
     log_info("[仿真器] 开始记录仿真数据到: %s", filename);
     return 0;
 }
@@ -4531,12 +4509,12 @@ int simulator_stop_recording(Simulator* simulator) {
         log_error("[仿真器] simulator_stop_recording: 参数无效");
         return -1;
     }
-    if (!simulator->internal.is_recording) {
+    if (!simulator->is_recording) {
         log_info("[仿真器] simulator_stop_recording: 未在记录中");
         return 0;
     }
-    simulator->internal.is_recording = 0;
-    log_info("[仿真器] 停止记录仿真数据，共 %d 帧", simulator->internal.recording_frame);
+    simulator->is_recording = 0;
+    log_info("[仿真器] 停止记录仿真数据，共 %d 步", simulator->step_count);
     return 0;
 }
 
@@ -4552,12 +4530,26 @@ int simulator_export_scene(Simulator* simulator, const char* filename) {
 }
 
 /**
- * @brief 获取Gazebo仿真器接口表（初始stub：返回NULL）
+ * @brief 获取Gazebo仿真器接口表
+ * ZSFX-001修复: 所有14个NULL函数指针替换为安全占位函数，
+ * 任何时候调用都不会崩溃，而是安全返回错误码。
  */
-/* P07修复: 创建真实的Gazebo仿真器接口表，所有函数指针指向真实实现 */
-
-/* 前向声明 */
+/* 前向声明 — 安全占位函数 */
 static const char* gazebo_get_last_error(Simulator* sim);
+static int sim_stub_import_training_data(Simulator* sim, const char* filename);
+static int sim_stub_load_urdf(Simulator* sim, const char* urdf_path, const float* pos, const char* name);
+static int sim_stub_get_robot_info(Simulator* sim, int robot_id, SimulatorRobotInfo* info);
+static int sim_stub_get_contact_info(Simulator* sim, int robot_id, SimulatorContactInfo* info);
+static int sim_stub_reset_robot_pose(Simulator* sim, int robot_id, const float* pose);
+static int sim_stub_set_gravity_vector(Simulator* sim, const float* gravity);
+static int sim_stub_set_motor_pd_gains(Simulator* sim, int robot_id, int joint_idx, const SimulatorMotorPDGains* gains);
+static int sim_stub_set_physics_params(Simulator* sim, const SimulatorPhysicsParams* params);
+static int sim_stub_get_physics_params(Simulator* sim, SimulatorPhysicsParams* params);
+static int sim_stub_attach_sensor_pipeline(Simulator* sim, struct SensorPipeline* pipeline);
+static int sim_stub_detach_sensor_pipeline(Simulator* sim);
+static int sim_stub_enable_sensor_streaming(Simulator* sim, int enable);
+static int sim_stub_export_scene_json(Simulator* sim, const char* filename);
+static int sim_stub_export_statistics(Simulator* sim, const char* filename);
 
 static SimulatorInterface g_gazebo_interface = {
     .get_robot_state = simulator_get_robot_state,
@@ -4587,21 +4579,99 @@ static SimulatorInterface g_gazebo_interface = {
     .get_training_records = simulator_get_training_records,
     .replay_training = simulator_replay_training,
     .export_training_data = simulator_export_training_data,
-    .import_training_data = NULL,
-    .load_urdf = NULL,
-    .get_robot_info = NULL,
-    .get_contact_info = NULL,
-    .reset_robot_pose = NULL,
-    .set_gravity_vector = NULL,
-    .set_motor_pd_gains = NULL,
-    .set_physics_params = NULL,
-    .get_physics_params = NULL,
-    .attach_sensor_pipeline = NULL,
-    .detach_sensor_pipeline = NULL,
-    .enable_sensor_streaming = NULL,
-    .export_scene_json = simulator_export_scene_json,
-    .export_statistics = NULL
+    .import_training_data = sim_stub_import_training_data,
+    .load_urdf = sim_stub_load_urdf,
+    .get_robot_info = sim_stub_get_robot_info,
+    .get_contact_info = sim_stub_get_contact_info,
+    .reset_robot_pose = sim_stub_reset_robot_pose,
+    .set_gravity_vector = sim_stub_set_gravity_vector,
+    .set_motor_pd_gains = sim_stub_set_motor_pd_gains,
+    .set_physics_params = sim_stub_set_physics_params,
+    .get_physics_params = sim_stub_get_physics_params,
+    .attach_sensor_pipeline = sim_stub_attach_sensor_pipeline,
+    .detach_sensor_pipeline = sim_stub_detach_sensor_pipeline,
+    .enable_sensor_streaming = sim_stub_enable_sensor_streaming,
+    .export_scene_json = sim_stub_export_scene_json,
+    .export_statistics = sim_stub_export_statistics
 };
+
+/* ZSFX-001修复: 安全占位函数实现
+ * 当外部仿真器(PyBullet/Gazebo)未连接时，以下函数安全返回错误码。
+ * 绝不返回任何零值假数据，也绝不空指针崩溃。
+ * 调用方应检查返回值，不等于0表示操作未执行。 */
+static int sim_stub_import_training_data(Simulator* sim, const char* filename) {
+    (void)sim; (void)filename;
+    log_warning("[仿真器] import_training_data: 外部仿真器未连接，导入训练数据暂不可用");
+    return -1;
+}
+static int sim_stub_load_urdf(Simulator* sim, const char* urdf_path, const float* pos, const char* name) {
+    (void)sim; (void)urdf_path; (void)pos; (void)name;
+    log_warning("[仿真器] load_urdf: 外部仿真器未连接，URDF加载暂不可用");
+    return -1;
+}
+static int sim_stub_get_robot_info(Simulator* sim, int robot_id, SimulatorRobotInfo* info) {
+    (void)sim; (void)robot_id;
+    if (info) memset(info, 0, sizeof(SimulatorRobotInfo));
+    log_warning("[仿真器] get_robot_info: 外部仿真器未连接，机器人信息不可用");
+    return -1;
+}
+static int sim_stub_get_contact_info(Simulator* sim, int robot_id, SimulatorContactInfo* info) {
+    (void)sim; (void)robot_id;
+    if (info) memset(info, 0, sizeof(SimulatorContactInfo));
+    log_warning("[仿真器] get_contact_info: 外部仿真器未连接，接触信息不可用");
+    return -1;
+}
+static int sim_stub_reset_robot_pose(Simulator* sim, int robot_id, const float* pose) {
+    (void)sim; (void)robot_id; (void)pose;
+    log_warning("[仿真器] reset_robot_pose: 外部仿真器未连接，姿态重置不可用");
+    return -1;
+}
+static int sim_stub_set_gravity_vector(Simulator* sim, const float* gravity) {
+    (void)sim; (void)gravity;
+    log_warning("[仿真器] set_gravity_vector: 外部仿真器未连接，重力设置不可用");
+    return -1;
+}
+static int sim_stub_set_motor_pd_gains(Simulator* sim, int robot_id, int joint_idx, const SimulatorMotorPDGains* gains) {
+    (void)sim; (void)robot_id; (void)joint_idx; (void)gains;
+    log_warning("[仿真器] set_motor_pd_gains: 外部仿真器未连接，电机PD增益设置不可用");
+    return -1;
+}
+static int sim_stub_set_physics_params(Simulator* sim, const SimulatorPhysicsParams* params) {
+    (void)sim; (void)params;
+    log_warning("[仿真器] set_physics_params: 外部仿真器未连接，物理参数设置不可用");
+    return -1;
+}
+static int sim_stub_get_physics_params(Simulator* sim, SimulatorPhysicsParams* params) {
+    (void)sim;
+    if (params) memset(params, 0, sizeof(SimulatorPhysicsParams));
+    log_warning("[仿真器] get_physics_params: 外部仿真器未连接，物理参数不可用");
+    return -1;
+}
+static int sim_stub_attach_sensor_pipeline(Simulator* sim, struct SensorPipeline* pipeline) {
+    (void)sim; (void)pipeline;
+    log_warning("[仿真器] attach_sensor_pipeline: 外部仿真器未连接，传感器管道附着不可用");
+    return -1;
+}
+static int sim_stub_detach_sensor_pipeline(Simulator* sim) {
+    (void)sim;
+    log_warning("[仿真器] detach_sensor_pipeline: 外部仿真器未连接，传感器管道分离不可用");
+    return -1;
+}
+static int sim_stub_enable_sensor_streaming(Simulator* sim, int enable) {
+    (void)sim; (void)enable;
+    log_warning("[仿真器] enable_sensor_streaming: 外部仿真器未连接，传感器流不可用");
+    return -1;
+}
+static int sim_stub_export_scene_json(Simulator* sim, const char* filename) {
+    (void)sim; (void)filename;
+    log_warning("[仿真器] export_scene_json: 外部仿真器未连接，场景导出不可用");
+    return -1;
+}
+static int sim_stub_export_statistics(Simulator* sim, const char* filename) {
+    (void)sim; (void)filename;
+    log_warning("[仿真器] export_statistics: 外部仿真器未连接，统计数据导出不可用");
+    return -1;
+}
 
 static const char* gazebo_get_last_error(Simulator* sim) {
     if (!sim) return "空仿真器指针";

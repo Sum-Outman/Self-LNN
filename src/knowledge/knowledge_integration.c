@@ -795,7 +795,7 @@ int knowledge_integration_sync_all(KnowledgeIntegrationSystem* system) {
     for (size_t i = 0; i < system->kb_count; i++) {
         for (size_t j = 0; j < system->engine_count; j++) {
             int result = logic_reasoning_engine_load_rules_from_kb(
-                system->engines[j].engine,
+                (LogicReasoningEngine*)system->engines[j].engine,
                 system->kbs[i].kb
             );
             if (result < 0) {

@@ -536,11 +536,7 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
         if (forward_original) safe_free((void**)&forward_original);
         if (forward_perturbed) safe_free((void**)&forward_perturbed);
 
-        /* ZSFZS-F010修复: 刚度估计中 cfc_cell_forward 内部可能分配ODE工作空间，
-         * 需要显式释放以避免内存泄漏。使用cell提供的释放接口。 */
-        if (cell && cell->ode_workspace) {
-            safe_free((void**)&cell->ode_workspace);
-        }
+        /* ZSFBUILD: ode_workspace成员在CfCCell中不存在，cell内部分配的资源由cell_free管理 */
     }
 
     if (stiffness_ratio > 1e6f) stiffness_ratio = 1e6f;

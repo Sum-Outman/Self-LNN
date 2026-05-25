@@ -1747,8 +1747,8 @@ static int rl_cfc_td3_train(RLAgent* agent, int batch_size)
             total_actor_loss += actor_loss;
 
             /* P1-034修复：TD3 actor使用独立target/loss缓冲区 */
-            float actor_target[1] = {actor_loss};
-            lnn_backward(actor, actor_target, &actor_loss);
+            float actor_target_loss_buf[1] = {actor_loss};
+            lnn_backward(actor, actor_target_loss_buf, &actor_loss);
 
             safe_free((void**)&sa_pair);
             safe_free((void**)&actor_action);

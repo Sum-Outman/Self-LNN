@@ -11,6 +11,7 @@
 #define SELFLNN_SLAM_H
 
 #include <stddef.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {

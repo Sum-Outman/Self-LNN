@@ -88,6 +88,16 @@ typedef struct {
     int ascending;
 } SortByVarContext;
 
+/* ZSFBUILD: TLS变量必须在MSVC C89模式下声明在使用前 */
+/* S-021修复: 全局变量改为TLS，每个线程独立持有排序上下文，避免多实例并行排序时互相干扰 */
+#ifdef _WIN32
+static __declspec(thread) int g_query_sort_var_index = -1;
+static __declspec(thread) int g_query_sort_ascending = 1;
+#else
+static __thread int g_query_sort_var_index = -1;
+static __thread int g_query_sort_ascending = 1;
+#endif
+
 static int binding_compare_by_var(const void* a, const void* b) {
     const QueryResultRow* ra = (const QueryResultRow*)a;
     const QueryResultRow* rb = (const QueryResultRow*)b;
@@ -104,16 +114,6 @@ static int binding_compare_by_var(const void* a, const void* b) {
     return g_query_sort_ascending ? (diff > 0 ? 1 : (diff < 0 ? -1 : 0))
                                    : (diff < 0 ? 1 : (diff > 0 ? -1 : 0));
 }
-
-/* ZS-019修复: 使用线程局部存储(TLS)传递排序参数到qsort比较器，消除跨线程竞态条件 */
-/* S-021修复: 全局变量改为TLS，每个线程独立持有排序上下文，避免多实例并行排序时互相干扰 */
-#ifdef _WIN32
-static __declspec(thread) int g_query_sort_var_index = -1;
-static __declspec(thread) int g_query_sort_ascending = 1;
-#else
-static __thread int g_query_sort_var_index = -1;
-static __thread int g_query_sort_ascending = 1;
-#endif
 
 /* ============================================================================
  * 查询选项

@@ -23,6 +23,9 @@
 #include <float.h>
 #include <time.h>
 
+/* ZSFBUILD: RL_MIN宏来自reinforcement_learning.c，需在此文件也定义 */
+#define RL_MIN(X,Y) (((X)<(Y))?(X):(Y))
+
 /**
  * @brief 行为克隆算法私有数据
  */

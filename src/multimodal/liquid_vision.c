@@ -1061,7 +1061,7 @@ int liquid_vision_manager_forward(LiquidVisionManager* manager,
             for (int i = 0; i < input_dim; i++) internal_buf[i] = image_data[i];
 
             int ret = liquid_visual_cfc_evolver_forward(
-                manager->cfc_evolver, internal_buf, input_dim, output);
+                manager->cfc_evolver, internal_buf, (int)input_dim, output);
             if (ret != 0) break;
             result = D;
             break;

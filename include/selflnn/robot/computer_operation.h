@@ -15,6 +15,10 @@ extern "C" {
 #define CO_LABEL_LEN 128
 #define CO_MAX_OCR_RESULTS 128
 #define CO_OCR_TEXT_LEN 256
+/* ZSFX-011: OCR字符集定义 — 从36类(0-9,A-Z)扩展到全ASCII可打印 */
+#define CO_OCR_NUM_CLASSES 96          /* 95个可打印ASCII(32-126) + 1个未知类(索引0) */
+#define CO_OCR_CONFIDENCE_THRESHOLD 0.4f  /* 字符识别置信度阈值 */
+extern const char CO_OCR_CHARSET[CO_OCR_NUM_CLASSES];  /* OCR识别字符集映射表 */
 #define CO_MAX_DEMO_FRAMES 10000
 #define CO_MAX_WINDOWS 64
 #define CO_MAX_FILES 256

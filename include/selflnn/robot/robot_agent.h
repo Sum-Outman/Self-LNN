@@ -137,6 +137,7 @@ typedef struct {
     int self_awareness_level;
     float confidence_score;
     float curiosity_factor;
+    int training_step_count;   /* ZSFX-012: DQN策略网络训练步数，推理前验证 */
 } RobotAgent;
 
 typedef struct {

@@ -1722,9 +1722,9 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
     }
 
     const float epsilon = 1e-5f;
-    /* 使用系统参数：弹簧常数k和阻尼系数c (从time_scale和damping推导) */
-    float k = 1.0f / (system->time_scale > 0.0f ? system->time_scale : 1.0f);
-    float c = system->damping;
+    /* ZSFBUILD: time_scale和damping不在DynamicsSystem中，使用默认值 */
+    float k = 1.0f;
+    float c = 0.1f;
 
     /* 反向积分：从终端到初始 */
     for (int step = num_steps; step > 0; step--) {

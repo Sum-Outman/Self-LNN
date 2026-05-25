@@ -45,6 +45,17 @@ typedef enum {
 } LossType;
 
 /**
+ * @brief 损失函数配置结构体
+ */
+typedef struct {
+    float focal_gamma;       /**< Focal Loss聚焦参数（默认2.0） */
+    float focal_alpha;       /**< Focal Loss类别平衡参数（默认0.25） */
+    float dice_smooth;       /**< Dice Loss平滑因子（默认1e-6） */
+    float triplet_margin;    /**< Triplet Loss边界值（默认1.0） */
+    float quantile_tau;      /**< Quantile Loss分位数（默认0.5） */
+} LossConfig;
+
+/**
  * @brief 多模态损失段描述符（ZSFWS-024）
  * 
  * 将统一输出张量划分为多个模态段，每段使用独立的损失函数。
@@ -58,17 +69,6 @@ typedef struct {
     LossType custom_loss_type; /**< 自定义损失类型（仅当modality==MODALITY_CUSTOM时生效） */
     LossConfig loss_config;    /**< 该段的损失配置（focal_gamma等，可为全零使用默认值） */
 } MultimodalLossSegment;
-
-/**
- * @brief 损失函数配置结构体
- */
-typedef struct {
-    float focal_gamma;       /**< Focal Loss聚焦参数（默认2.0） */
-    float focal_alpha;       /**< Focal Loss类别平衡参数（默认0.25） */
-    float dice_smooth;       /**< Dice Loss平滑因子（默认1e-6） */
-    float triplet_margin;    /**< Triplet Loss边界值（默认1.0） */
-    float quantile_tau;      /**< Quantile Loss分位数（默认0.5） */
-} LossConfig;
 
 /**
  * @brief 计算损失函数值（带配置参数）

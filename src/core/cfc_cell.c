@@ -1035,11 +1035,7 @@ void cfc_cell_free(CfCCell* cell) {
         cell->cell_layer_norm = NULL;
     }
 
-    /* P0-BPTT: 释放cell级动量/速度缓冲区 */
-    safe_free((void**)&cell->cell_momentum_buffer);
-    cell->cell_velocity_buffer = NULL;
-    cell->cell_momentum_size = 0;
-    cell->cell_momentum_initialized = 0;
+    /* ZSFBUILD: cell_momentum_buffer/velocity_buffer不在CfCCell中，已在外部管理 */
 
     // 释放单元结构
     safe_free((void**)&cell);

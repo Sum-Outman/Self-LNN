@@ -7,7 +7,20 @@
 #define SELFLNN_KNOWLEDGE_VERSION_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <time.h>
+
+/* ZSFBUILD: SnapshotEntryRecord完整定义 (从knowledge_version.c移入，header函数声明需要完整类型) */
+typedef struct {
+    int entry_id;
+    char subject[256];
+    char predicate[256];
+    char object[256];
+    float confidence;
+    int type;
+    int source;
+    long timestamp;
+} SnapshotEntryRecord;
 
 #ifdef __cplusplus
 extern "C" {

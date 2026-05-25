@@ -2723,7 +2723,7 @@ float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
     if (support_samples != n_way * k_shot || query_samples != n_way * q_query)
         return -1.0f;
 
-    int out_dim = config.output_size;
+    int out_dim = (int)config.output_size;
     float* embedding = (float*)safe_calloc(out_dim, sizeof(float));
     float* prototypes = (float*)safe_calloc(n_way * out_dim, sizeof(float));
     float* rel_input = (float*)safe_calloc(out_dim * 2, sizeof(float));
@@ -2845,7 +2845,7 @@ float meta_learner_matching_step(MetaLearner* learner, const MetaTask* task) {
     if (support_samples != n_way * k_shot || query_samples != n_way * q_query)
         return -1.0f;
 
-    int out_dim = config.output_size;
+    int out_dim = (int)config.output_size;
     const float tau = 0.5f; /* 温度参数 */
 
     /* 计算所有支持集样本的嵌入 */

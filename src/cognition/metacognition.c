@@ -20,6 +20,8 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/string_utils.h"
+#include "selflnn/utils/xorshift_prng.h"
+#include "selflnn/selflnn.h"
 #include "selflnn/cognition/deep_reflection.h"
 #include "selflnn/cognition/deep_thought_chain.h"
 
@@ -128,19 +130,23 @@ static int requires_action_based_on_monitoring(MetacognitionSystem* system,
                                               const MetacognitionMonitoringResult* result);
 
 /* 辅助函数 */
+static XorshiftPrng g_meta_xorshift_prng;
+static int g_meta_xorshift_seeded = 0;
+
 static void initialize_random_state(MetacognitionSystem* system) {
     system->random_seed = (unsigned int)time(NULL);
+    if (!g_meta_xorshift_seeded) {
+        xorshift_prng_seed_secure(&g_meta_xorshift_prng);
+        g_meta_xorshift_seeded = 1;
+    }
 }
 
 static float random_uniform(float min, float max) {
-    return min + (max - min) * (rng_uniform(0.0f, 1.0f));
+    return min + (max - min) * xorshift_prng_next_float(&g_meta_xorshift_prng);
 }
 
 static float random_normal(float mean, float stddev) {
-    float u1 = random_uniform(0.0f, 1.0f);
-    float u2 = random_uniform(0.0f, 1.0f);
-    float z0 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * MATH_PI * u2);
-    return mean + stddev * z0;
+    return mean + stddev * xorshift_prng_next_gaussian(&g_meta_xorshift_prng);
 }
 
 /**

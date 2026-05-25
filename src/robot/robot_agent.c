@@ -21,6 +21,9 @@
 #define AGENT_RAND_FLOAT secure_random_float()
 #define AGENT_CLAMP(v, lo, hi) (((v) < (lo)) ? (lo) : (((v) > (hi)) ? (hi) : (v)))
 
+/* ZSFX-012: 推理前最小训练步数 — Xavier随机初始化权重无任何语义信息 */
+#define AGENT_MIN_TRAINING_STEPS 100
+
 const AgentConfig AGENT_CONFIG_DEFAULT = {
     .learning_mode = LEARNING_MODE_REINFORCEMENT,
     .enable_self_learning = 1,
@@ -369,6 +372,7 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
     agent->self_awareness_level = 1;
     agent->confidence_score = 0.5f;
     agent->evolution_rate = 0.001f;
+    agent->training_step_count = 0;   /* ZSFX-012: Xavier初始化权重为随机值，训练步数从0开始 */
 
     for (int i = 0; i < AGENT_STATE_DIM; i++) {
         agent->state_mean[i] = 0.0f;
@@ -402,6 +406,14 @@ int robot_agent_observe(RobotAgent* agent, const float* state) {
 
 int robot_agent_act(RobotAgent* agent, float* action) {
     if (!agent || !action) return -1;
+
+    /* ZSFX-012: 训练步数检查 — Xavier初始化权重为随机值，禁止未训练推理 */
+    if (agent->training_step_count < AGENT_MIN_TRAINING_STEPS) {
+        log_error("[Agent] 推理拒绝：策略网络仅训练%d步，至少需要%d步训练",
+                  agent->training_step_count, AGENT_MIN_TRAINING_STEPS);
+        memset(action, 0, AGENT_ACTION_DIM * sizeof(float));
+        return -2;
+    }
 
     agent->state = AGENT_STATE_EXECUTING;
 
@@ -495,6 +507,7 @@ int robot_agent_learn(RobotAgent* agent, const float* state,
             memcpy(agent->target_policy.bias_o, agent->policy.bias_o, (size_t)ad * sizeof(float));
     }
 
+    agent->training_step_count++;  /* ZSFX-012: 每次学习迭代递增训练步数 */
     return 0;
 }
 
@@ -1019,7 +1032,8 @@ int robot_agent_closed_loop_step(RobotAgent* agent,
                         size_t copy_n = entry.data_size;
                         if (state_idx + copy_n > AGENT_STATE_DIM)
                             copy_n = AGENT_STATE_DIM - state_idx;
-                        memcpy(sensor_state + state_idx, entry.data_buffer, copy_n * sizeof(float));
+                        /* ZSFBUILD: entry.data_buffer不存在，使用entry.data (uint8_t*) */
+                        memcpy(sensor_state + state_idx, entry.data, copy_n * sizeof(float));
                         state_idx += copy_n;
                     }
                 }
@@ -1029,10 +1043,10 @@ int robot_agent_closed_loop_step(RobotAgent* agent,
     robot_agent_observe(agent, sensor_state);
 
     /* 阶段2: 规划 —— 使用规划系统生成动作路径 */
-    if (planning_system_ptr && agent->goal_active) {
+    if (planning_system_ptr && agent->current_goal.max_steps > 0) {
         int plan_len = planning_generate(
             (PlanningSystem*)planning_system_ptr,
-            agent->target_goal, AGENT_STATE_DIM,
+            agent->current_goal.target_state, AGENT_STATE_DIM,
             agent->state_vec, AGENT_STATE_DIM,
             plan_output, 512);
         if (plan_len > 0) {
@@ -1077,7 +1091,6 @@ int robot_agent_closed_loop_step(RobotAgent* agent,
         }
     }
 
-    /* 将产生的动作复制回 agent 的外部可访问缓冲区 */
-    memcpy(agent->action_vec, action_cmd, AGENT_ACTION_DIM * sizeof(float));
+    /* ZSFBUILD: action_vec不在RobotAgent中，动作已通过硬件接口输出 */
     return 0;
 }

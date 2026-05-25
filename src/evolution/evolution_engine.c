@@ -3,6 +3,9 @@
  * @brief 增强自我演化进化引擎完整实现
  */
 
+#define SELFLNN_CORE_INTERNAL  /* ZSFBUILD: 需要访问CfCCell内部结构体成员 */
+#define SELFLNN_IMPLEMENTATION /* ZSFBUILD: 需要访问CfCNetwork内部结构体成员 */
+
 #include "selflnn/evolution/evolution_engine.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/cfc.h"             /* ZSFWS-012: CfC Cell权重写入 */

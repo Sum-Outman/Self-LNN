@@ -1012,7 +1012,7 @@ static int pbft_send_view_change(PbftSystem* system, uint32_t new_view_number) {
     vc.prepared_count = 0;
     /* 收集当前视图下已prepared但未committed的证据 */
     for (int i = 0; i < system->log_count && vc.prepared_count < PBFT_MAX_PENDING_BATCH; i++) {
-        if (system->log_entries[i].prepare_count >= (uint32_t)(2 * system->config.max_fault)) {
+        if (system->log_entries[i].prepare_count >= (int)(2U * (uint32_t)system->config.max_fault)) {
             vc.prepared_evidence[vc.prepared_count].seq_number = system->log_entries[i].sequence_number;
             memcpy(vc.prepared_evidence[vc.prepared_count].digest,
                    system->log_entries[i].request_digest, sizeof(vc.prepared_evidence[0].digest));

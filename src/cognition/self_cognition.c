@@ -590,7 +590,7 @@ static int _self_cognition_check_lnn_ready_internal(SelfCognitionSystem* system)
             CfCNetwork* cfc = lnn_get_cfc_network((LNN*)shared_lnn);
             if (cfc) {
                 float avg_activation = 0.0f;
-                if (cfc_get_stats(cfc, &avg_activation, NULL, NULL, NULL) == 0) {
+                if (cfc_get_stats(cfc, &avg_activation, NULL, NULL) == 0) {
                     /* avg_activation == 0.0 表示从未有过激活（全零权重输出），为未训练状态 */
                     if (avg_activation == 0.0f) {
                         log_warning("[LNN就绪检查] 共享LNN激活度为零（可能为随机初始化权重），"
@@ -982,22 +982,42 @@ int self_cognition_neutral_assessment(SelfCognitionSystem* system,
         return -1;
     }
 
-    /* ZSFWS-027: LNN未训练保护 ——
-     * 如果LNN未训练，返回带[未训练-保守评估]标记的保守评估结果，
-     * 而不是依赖随机权重的LNN进行可能产生噪声的评估 */
+    /* ZSFX-009修复: LNN未训练时增强数据驱动保守评估
+     * 即使LNN权重未训练，系统仍可通过以下真实指标评估自身状态:
+     * 知识库条目数、记忆条数、活动任务、运行时间、硬件可用性、更新次数等 */
     if (!_self_cognition_check_lnn_ready_internal(system)) {
+        /* 收集真实系统指标用于数据驱动评估 */
+        SystemStatus st;
+        memset(&st, 0, sizeof(st));
+        int has_status = (selflnn_get_status(&st) == 0) ? 1 : 0;
+        
+        float data_driven_confidence = 0.3f;
+        int health_flags = 0;
+        if (has_status) {
+            if (st.total_knowledge > 50) { data_driven_confidence += 0.10f; health_flags |= 1; }
+            if (st.total_memories > 100) { data_driven_confidence += 0.08f; health_flags |= 2; }
+            if (st.active_tasks > 0 && st.active_tasks < 80) { data_driven_confidence += 0.07f; health_flags |= 4; }
+            if (st.hardware_available) { data_driven_confidence += 0.05f; health_flags |= 8; }
+            if (st.uptime > 60.0) { data_driven_confidence += 0.05f; health_flags |= 16; }
+        }
+        if (data_driven_confidence > 0.85f) data_driven_confidence = 0.85f;
+        
         if (result_size > 0 && assessment_result) {
             snprintf(assessment_result, result_size,
-                    "[未训练-保守评估] LNN模型尚未完成训练，系统处于保守评估模式。"
-                    "当前自我评估基于基线指标（置信度=%.2f, 修正强度=%.2f），"
-                    "建议完成至少一轮训练后再启用深度自我认知功能。"
-                    "评估类型=%d, 系统已运行更新计数=%d",
-                    system->confidence_level > 0.01f ? system->confidence_level : 0.3f,
-                    system->adaptive_correction_strength,
-                    assessment_type, system->update_count);
+                    "[LNN未训练-数据驱动评估] LNN模型尚未训练，基于真实系统指标的保守评估: "
+                    "置信度=%.2f(基于实际子系统状态), 健康标志=0x%02X, "
+                    "知识库=%d条, 记忆=%d条, 活动任务=%d, 硬件=%s, 运行=%.0f秒, "
+                    "更新次数=%d, 评估类型=%d",
+                    data_driven_confidence, health_flags,
+                    has_status ? st.total_knowledge : -1,
+                    has_status ? st.total_memories : -1,
+                    has_status ? st.active_tasks : -1,
+                    (has_status && st.hardware_available) ? "可用" : "未检测",
+                    has_status ? st.uptime : -1.0,
+                    system->update_count, assessment_type);
         }
-        log_warning("[中性评估] LNN未训练，返回带[未训练-保守评估]标记的评估结果，"
-                   "避免随机权重产生误导性自我评估");
+        log_info("[中性评估] LNN未训练，执行数据驱动保守评估: 置信度=%.2f, 标志=0x%02X",
+                data_driven_confidence, health_flags);
         return 0;
     }
 
@@ -2840,7 +2860,7 @@ void reflection_result_free(ReflectionResult* result) {
  * 完整实现：基于LNN系统状态深度分析进行复杂度评估、
  * 资源约束检查和依赖关系分析，生成详细的行动计划。
  */
-PlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const void* goal) {
+CognitionPlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const void* goal) {
     if (!system || !goal) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "规划目标：参数无效");
@@ -2850,7 +2870,7 @@ PlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const void* go
     // 将目标转换为SelfCognitionGoal结构体
     const SelfCognitionGoal* goal_ptr = (const SelfCognitionGoal*)goal;
     
-    PlanResult* result = (PlanResult*)safe_calloc(1, sizeof(PlanResult));
+    CognitionPlanResult* result = (CognitionPlanResult*)safe_calloc(1, sizeof(CognitionPlanResult));
     if (!result) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "规划目标：结果内存分配失败");
@@ -3072,7 +3092,7 @@ PlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const void* go
 /**
  * @brief 释放计划结果
  */
-void plan_result_free(PlanResult* result) {
+void plan_result_free(CognitionPlanResult* result) {
     if (!result) return;
     
     safe_free((void**)&result->plan_summary);
@@ -3977,16 +3997,38 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
         return -1;
     }
 
-    /* ZSFWS-027: LNN未训练保护 ——
-     * 未训练的LNN（随机权重）会导致analyze_issue_type等内部函数产生无意义的
-     * 问题分析和修正策略，可能造成错误的参数调整。在LNN就绪前返回保守修正。 */
+    /* ZSFX-009修复: LNN未训练时执行数据驱动保守修正
+     * 收集真实系统状态用于诊断，基于实际指标评估是否需要修正。
+     * 不依赖随机权重的LNN，仅基于可验证的系统指标。 */
     if (!_self_cognition_check_lnn_ready_internal(system)) {
-        strncpy(correction_result->description,
-                "[未训练-保守修正] LNN未完成训练，跳过深度自我修正。"
-                "当前仅执行基线参数校验修正，不会对模型产生实质性修改。"
-                "建议先加载检查点或完成初始训练后再启用自我修正功能。",
-                sizeof(correction_result->description) - 1);
-        correction_result->description[sizeof(correction_result->description) - 1] = '\0';
+        /* 查询知识库一致性作为真实数据驱动的修正依据 */
+        SystemStatus st;
+        memset(&st, 0, sizeof(st));
+        int has_status = (selflnn_get_status(&st) == 0);
+        
+        /* 基于真实指标评估修正必要性 */
+        float real_based_severity = issue_severity;
+        if (has_status) {
+            if (st.active_tasks > 80) real_based_severity += 0.1f;
+            if (st.total_memories > 5000) real_based_severity += 0.05f;
+            if (st.cpu_usage_percent > 90.0) real_based_severity += 0.15f;
+        }
+        if (real_based_severity > 1.0f) real_based_severity = 1.0f;
+        
+        int baselen = snprintf(correction_result->description,
+                sizeof(correction_result->description),
+                "[LNN未训练-数据驱动保守修正] LNN未完成训练，基于真实系统指标的修正分析: "
+                "知识=%d条, 记忆=%d条, 任务=%d, 原始严重度=%.2f, 修正后严重度=%.2f. ",
+                has_status ? st.total_knowledge : -1,
+                has_status ? st.total_memories : -1,
+                has_status ? st.active_tasks : -1,
+                issue_severity, real_based_severity);
+        if (baselen < (int)sizeof(correction_result->description) - 1) {
+            snprintf(correction_result->description + baselen,
+                    sizeof(correction_result->description) - (size_t)baselen,
+                    "当前仅执行基于实际子系统状态的危险度评估，不会对LNN模型产生实质性修改。"
+                    "建议加载检查点或完成初始训练后启用深度自我修正。");
+        }
         correction_result->type = SELF_CORRECTION_PERFORMANCE;
         correction_result->correction_strength = 0.0f;
         correction_result->expected_improvement = 0.0f;

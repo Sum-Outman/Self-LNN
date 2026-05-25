@@ -20,14 +20,18 @@
 #include "selflnn/core/laplace_enhanced.h"
 #include "selflnn/core/laplace_integration.h"
 
+/* ZSFBUILD: 前向声明 —— LaplaceAIConfig原本通过laplace_ai_framework.h间接声明
+ * 但该头文件为空转发，导致类型缺失。此处作为不透明指针类型修复。 */
+typedef struct LaplaceAIConfig LaplaceAIConfig;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* 统一入口宏 —— 将分散在各子模块中的函数映射到统一命名空间 */
-#define laplace_unified_init(cfg)       laplace_ai_create(cfg)
-#define laplace_unified_free(ptr)       laplace_ai_free(ptr)
-#define laplace_unified_transform(a,i,l,b)  laplace_ai_transform(a,i,l,b)
+/* ZSFBUILD: 原宏指向不存在的laplace_ai_*，修正为真实API */
+#define laplace_unified_init(cfg)       laplace_analyzer_create((const LaplaceConfig*)(cfg))
+#define laplace_unified_free(ptr)       laplace_analyzer_free((LaplaceAnalyzer*)(ptr))
 
 /* 拉普拉斯统一系统初始化（整合三个子系统） */
 int laplace_unified_system_init(const LaplaceAIConfig* cfg);
