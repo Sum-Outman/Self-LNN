@@ -103,7 +103,9 @@ static void* g_computer_op = NULL;                         /* 计算机操作 */
 
 /* P28修复: 演化引擎默认适应度函数 — 基于LNN权重的一致性评估
  * 将染色体(晶片)中的权重写入LNN，运行前向传播，
- * 通过输出稳定性评估适应度(激活输出方差越小→越稳定→适应度越高) */
+ * 通过输出稳定性评估适应度(激活输出方差越小→越稳定→适应度越高)。
+ * P3-002分析: 此处使用确定性正弦测试信号(sinf)属于演化算法的标准适应度评估方式
+ * ——测试信号仅作为固定评估探针，不参与训练数据流。与实际数据训练路径完全隔离。 */
 static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_size, void* user_data) {
     LNN* lnn = (LNN*)user_data;
     if (!lnn || chrom_size == 0) return 0.0f;
@@ -1107,33 +1109,76 @@ int main(int argc, char* argv[])
                     printf("  检查点模型自动加载完成\n");
                 } else {
                     printf("  检查点模型加载失败（系统将使用随机初始化权重）\n");
-                    /* ZSF-ZNB修复S-011: 无检查点时执行引导训练
-                     * 对共享LNN执行短期预训练，使权重脱离纯随机状态。
-                     * 使用合成正弦波+余弦波数据作为通用特征提取引导。
-                     * 训练5个epoch使LNN至少学到基本的函数映射能力。 */
+                    /* P3-001修复: 引导训练使用知识库种子知识替换合成正弦波
+                     * 通过TF-IDF检索获取知识条目，编码subject+predicate+object为特征向量。
+                     * 相比合成正弦波，真实文本特征能提供更有意义的初始梯度方向。 */
                     void* boot_lnn = g_global_lnn;
-                    if (boot_lnn) {
-                        size_t boot_samples = 128;
+                    void* boot_kb = selflnn_get_knowledge_base();
+                    KnowledgeBase* kb = (KnowledgeBase*)boot_kb;
+                    /* 通过knowledge_base_get_stats获取真实条目数 */
+                    size_t kb_total = 0;
+                    if (kb) knowledge_base_get_stats(kb, &kb_total, NULL);
+                    if (boot_lnn && kb && kb_total > 0) {
+                        size_t boot_samples = (kb_total > 128) ? 128 : kb_total;
                         size_t boot_feat_dim = 64;
                         size_t boot_batches = 5;
                         float* boot_data = (float*)safe_malloc(boot_samples * boot_feat_dim * sizeof(float));
                         if (boot_data) {
-                            for (size_t s = 0; s < boot_samples; s++) {
-                                for (size_t d = 0; d < boot_feat_dim; d++) {
-                                    float phase = (float)(s * d) * 0.1f;
-                                    boot_data[s * boot_feat_dim + d] = 
-                                        sinf(phase) * 0.5f + cosf(phase * 1.7f) * 0.3f;
+                            memset(boot_data, 0, boot_samples * boot_feat_dim * sizeof(float));
+                            /* 使用多个广覆盖查询提取知识条目特征 */
+                            const char* broad_queries[] = {
+                                "数学", "物理", "计算机", "逻辑", "常识",
+                                "生物", "化学", "人工智能", "SELF", "LNN",
+                                "CfC", "液态", "神经网络", "机器人", "AGI",
+                                NULL
+                            };
+                            size_t sample_idx = 0;
+                            for (int q = 0; broad_queries[q] && sample_idx < boot_samples; q++) {
+                                KnowledgeEntry entries[16];
+                                float scores_buf[16];
+                                int n = knowledge_base_search_tfidf(kb, broad_queries[q],
+                                                                     entries, 16, scores_buf, 0.01f);
+                                for (int e = 0; e < n && sample_idx < boot_samples; e++) {
+                                    const char* parts[3] = {
+                                        entries[e].subject,
+                                        entries[e].predicate,
+                                        entries[e].object
+                                    };
+                                    /* 三重bigram哈希编码→64维特征 */
+                                    int hash_count = 0;
+                                    for (int p = 0; p < 3; p++) {
+                                        if (!parts[p]) continue;
+                                        size_t plen = strlen(parts[p]);
+                                        for (size_t i = 0; i + 1 < plen; i++) {
+                                            uint32_t h = ((uint32_t)(unsigned char)parts[p][i] << 8)
+                                                       | (uint32_t)(unsigned char)parts[p][i+1];
+                                            h = h * 2654435761u;
+                                            size_t idx = (size_t)(h % boot_feat_dim);
+                                            boot_data[sample_idx * boot_feat_dim + idx] += 1.0f;
+                                            hash_count++;
+                                        }
+                                    }
+                                    if (hash_count > 0) {
+                                        float inv = 1.0f / sqrtf((float)hash_count + 1e-8f);
+                                        for (size_t d = 0; d < boot_feat_dim; d++)
+                                            boot_data[sample_idx * boot_feat_dim + d] *= inv;
+                                    }
+                                    sample_idx++;
                                 }
                             }
-                            int pretrained = lnn_self_supervised_pretrain(
-                                (LNN*)boot_lnn, boot_data, boot_samples, boot_feat_dim, (int)boot_batches);
-                            if (pretrained == 0) {
-                                printf("  引导训练完成：%zu样本×5轮，LNN已脱离纯随机状态\n", boot_samples);
-                            } else {
-                                printf("  引导训练执行，但结果需验证（错误码=%d）\n", pretrained);
+                            if (sample_idx > 0) {
+                                int pretrained = lnn_self_supervised_pretrain(
+                                    (LNN*)boot_lnn, boot_data, sample_idx, boot_feat_dim, (int)boot_batches);
+                                if (pretrained == 0) {
+                                    printf("  引导训练完成：%zu条知识库特征×5轮，LNN已获得先验知识\n", sample_idx);
+                                } else {
+                                    printf("  引导训练执行，结果需验证（错误码=%d）\n", pretrained);
+                                }
                             }
                             safe_free((void**)&boot_data);
                         }
+                    } else {
+                        printf("  知识库未就绪或为空，跳过引导训练（LNN使用随机初始化权重）\n");
                     }
                 }
             }

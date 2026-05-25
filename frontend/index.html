@@ -104,11 +104,13 @@
                         <a href="#" class="dropdown-toggle">功能中心 ▾</a>
                         <ul class="dropdown-menu">
                             <li><a href="#training-center">训练中心</a></li>
+                            <li><a href="#training">机器人训练</a></li>
                             <li><a href="#programming-workbench">编程工作台</a></li>
                             <li><a href="#multimodal-learn">多模态学习</a></li>
                             <li><a href="#simulation-control">仿真控制</a></li>
                             <li><a href="#product-design">产品设计</a></li>
                             <li><a href="#device-control">设备控制</a></li>
+                            <li><a href="#devices">设备管理</a></li>
                         </ul>
                     </li>
                     <li class="nav-dropdown">
@@ -4028,6 +4030,7 @@ response = requests.get(
                         <div class="form-group"><label>仿真时间步长(ms)</label><input type="number" id="sim-dt" value="10" min="1" class="form-input"></div>
                         <button onclick="startSimulation()" class="btn btn-primary" style="width:100%">启动仿真</button>
                         <button onclick="stopSimulation()" class="btn btn-danger" style="width:100%;margin-top:8px">停止仿真</button>
+                        <button onclick="resetSimulation()" class="btn btn-secondary" style="width:100%;margin-top:4px">重置仿真</button>
                     </div>
                 </div>
                 <div class="card">
@@ -4036,6 +4039,8 @@ response = requests.get(
                         <div class="metric"><span class="metric-label">状态</span><span class="metric-value" id="sim-status">未启动</span></div>
                         <div class="metric"><span class="metric-label">运行时间</span><span class="metric-value" id="sim-time">0s</span></div>
                         <div class="metric"><span class="metric-label">仿真步数</span><span class="metric-value" id="sim-steps">0</span></div>
+                        <div class="metric"><span class="metric-label">帧率(FPS)</span><span class="metric-value" id="sim-fps">--</span></div>
+                        <div class="metric"><span class="metric-label">场景</span><span class="metric-value" id="sim-scene">default</span></div>
                         <div class="metric"><span class="metric-label">实时因子</span><span class="metric-value" id="sim-realtime">1.0x</span></div>
                         <div class="metric"><span class="metric-label">机器人数量</span><span class="metric-value" id="sim-robots">0</span></div>
                         <div class="metric"><span class="metric-label">激光雷达</span><span class="metric-value" id="lidar-status">未连接</span></div>

@@ -66,7 +66,7 @@
             } else {
                 showNotification('启动失败: ' + (data.error || ''), 'danger');
             }
-        } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
+        } catch(e) { console.error('[仿真] 启动失败:', e.message); showNotification('连接失败: ' + e.message, 'danger'); }
         _simStarting = false;
     }
 
@@ -80,14 +80,14 @@
             var el = document.getElementById('sim-status');
             if (el) el.textContent = '已停止';
             showNotification('仿真已停止', 'info');
-        } catch(e) { showNotification('操作失败', 'danger'); }
+        } catch(e) { console.error('[仿真] 停止失败:', e.message); showNotification('操作失败', 'danger'); }
     }
 
     async function resetSimulation() {
         try {
             await SelfLnnApi.simulationReset();
             showNotification('仿真已重置', 'info');
-        } catch(e) { showNotification('操作失败', 'danger'); }
+        } catch(e) { console.error('[仿真] 重置失败:', e.message); showNotification('操作失败', 'danger'); }
     }
 
     async function pollSimulation() {
@@ -103,7 +103,7 @@
                 }
                 var statusEl = document.getElementById('sim-status');
                 if (statusEl) statusEl.textContent = data.running ? '运行中' : '已停止';
-                var stepEl = document.getElementById('sim-step');
+                var stepEl = document.getElementById('sim-steps');
                 if (stepEl) stepEl.textContent = data.step || data.steps || '--';
                 var timeEl = document.getElementById('sim-time');
                 if (timeEl) timeEl.textContent = (data.sim_time !== undefined ? data.sim_time.toFixed(2) + 's' : '--');
@@ -130,13 +130,13 @@
 
     async function sim3dResetView() {
         try { await SelfLnnApi.request('/simulation/view/reset', { method: 'POST' }); showNotification('视图已重置', 'info'); }
-        catch(e) { showNotification('操作失败', 'danger'); }
+        catch(e) { console.error('[仿真] 视图重置失败:', e.message); showNotification('操作失败', 'danger'); }
     }
     window.sim3dResetView = sim3dResetView;
 
     async function sim3dToggleGrid() {
         try { await SelfLnnApi.request('/simulation/view/toggle_grid', { method: 'POST' }); showNotification('网格已切换', 'info'); }
-        catch(e) { showNotification('操作失败', 'danger'); }
+        catch(e) { console.error('[仿真] 网格切换失败:', e.message); showNotification('操作失败', 'danger'); }
     }
     window.sim3dToggleGrid = sim3dToggleGrid;
 
@@ -148,7 +148,7 @@
 
     async function sim3dClearAll() {
         try { await SelfLnnApi.request('/simulation/clear', { method: 'POST' }); showNotification('场景已清空', 'info'); }
-        catch(e) { showNotification('操作失败', 'danger'); }
+        catch(e) { console.error('[仿真] 场景清空失败:', e.message); showNotification('操作失败', 'danger'); }
     }
     window.sim3dClearAll = sim3dClearAll;
 
@@ -159,7 +159,7 @@
     window.start3DReconstruction = start3DReconstruction;
 
     async function executeCommand() {
-        var cmd = document.getElementById('sim-cmd') ? document.getElementById('sim-cmd').value : '';
+        var cmd = document.getElementById('cmd-input') ? document.getElementById('cmd-input').value : '';
         if (!cmd) { showNotification('请输入命令', 'warning'); return; }
         try {
             var d = await SelfLnnApi.request('/simulation/command', { method: 'POST', body: JSON.stringify({ command: cmd }) });

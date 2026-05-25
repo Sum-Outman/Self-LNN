@@ -171,46 +171,6 @@ static int expand_array(void** array, size_t* capacity, size_t current_size, siz
 }
 
 /**
- * @brief 复制字符串数组
- */
-/* REMOVED: static char** string_duplicate_array(const char** src, size_t count) {
-    if (!src || count == 0) return NULL;
-    
-    char** dest = (char**)safe_malloc(count * sizeof(char*));
-    if (!dest) return NULL;
-    
-    for (size_t i = 0; i < count; i++) {
-        if (src[i]) {
-            dest[i] = string_duplicate_nullable(src[i]);
-            if (!dest[i]) {
-                // 清理已分配的内存
-                for (size_t j = 0; j < i; j++) {
-                    safe_free((void**)&dest[j]);
-                }
-                safe_free((void**)&dest);
-                return NULL;
-            }
-        } else {
-            dest[i] = NULL;
-        }
-    }
-    
-    return dest;
-}
-
-/**
- * @brief 释放字符串数组
- */
-/* REMOVED: static void string_array_free(char** array, size_t count) {
-    if (!array) return;
-    
-    for (size_t i = 0; i < count; i++) {
-        if (array[i]) safe_free((void**)&array[i]);
-    }
-    safe_free((void**)&array);
-}
-
-/**
  * @brief 分割字符串（兼容旧接口）
  */
 static size_t split_string(const char* str, char delimiter, char*** result) {

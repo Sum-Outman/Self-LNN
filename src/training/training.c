@@ -5654,9 +5654,31 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                             }
                         }
                         
-                        // 频域自适应学习率（基于FFT频谱分析）
-                        /* ZSFBUILD: FreqAdaptiveLRConfig/laplace_freq_adaptive_lr未实现，跳过 */
-                        (void)0;
+                        // 频域自适应学习率（基于拉普拉斯频域分析的梯度频谱自适应）
+                        /* ZSFWS-F3修复: 实现频域自适应学习率。
+                         * 基于梯度范数变化趋势和拉普拉斯稳定性评分动态调整学习率。
+                         * 高频梯度(爆炸) -> 缩小LR, 低频梯度(消失) -> 放大LR。
+                         * 稳定性评分越高，基础LR越稳定；评分越低，LR越保守。 */
+                        if (trainer->config.laplace_monitor_stability) {
+                            float stability = trainer->laplace_stability_score;
+                            if (stability < 1e-6f) stability = 0.5f;
+                            float freq_factor = 1.0f;
+                            if (trainer->laplace_stability_warning == 1) {
+                                /* 梯度爆炸: 高频分量过强，降低LR */
+                                freq_factor = 0.5f / fmaxf(stability, 0.1f);
+                                if (freq_factor < 0.1f) freq_factor = 0.1f;
+                            } else if (trainer->laplace_stability_warning == 2) {
+                                /* 梯度消失: 低频分量过弱，提高LR */
+                                freq_factor = 2.0f * stability;
+                                if (freq_factor > 5.0f) freq_factor = 5.0f;
+                            }
+                            /* 平滑过渡: 指数移动平均避免LR剧烈震荡 */
+                            float old_lr = optimizer_get_learning_rate(trainer->optimizer);
+                            float target_lr = trainer->current_learning_rate * freq_factor;
+                            float smoothed_lr = old_lr * 0.7f + target_lr * 0.3f;
+                            optimizer_set_learning_rate(trainer->optimizer, smoothed_lr);
+                            trainer->current_learning_rate = smoothed_lr;
+                        }
                     }
                 }
                 

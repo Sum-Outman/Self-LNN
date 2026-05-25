@@ -160,6 +160,7 @@ LNN* lnn_create(const LNNConfig* config) {
     network->input_buffer = (float*)safe_calloc(input_size, sizeof(float));
     network->output_buffer = (float*)safe_calloc(output_size, sizeof(float));
     network->error_buffer = (float*)safe_calloc(output_size, sizeof(float));
+    network->quaternion_pre_buf = (float*)safe_calloc(hidden_size, sizeof(float));
     
     // gradient_buffer 需要容纳 cfc_backward 中 max_layer_size 个浮点数的写入
     // 其中 max_layer_size = max(input_size, hidden_size, output_size)
@@ -421,6 +422,13 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
      * 将 hidden_state 按4个一组映射为四元数，应用 CfC 闭式解更新，
      * 增强状态在四维旋转空间中的表示稳定性和不变性 */
     if (network->config.enable_quaternion && hidden_size >= 4) {
+        /* ZSFWS-P6修复: 保存四元数处理前的状态供反向传播使用。
+         * hidden_state将在四元数循环中被原地修改为后处理值，
+         * 而反向传播需要前处理值来正确计算tanh导数链。 */
+        if (network->quaternion_pre_buf) {
+            memcpy(network->quaternion_pre_buf, network->hidden_state,
+                   hidden_size * sizeof(float));
+        }
         float quat_dt = network->config.time_constant * 0.5f;
         if (quat_dt < 0.001f) quat_dt = 0.001f;
         if (quat_dt > 0.5f) quat_dt = 0.5f;
@@ -560,29 +568,16 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
     size_t input_size = network->config.input_size;
     size_t hidden_size = network->config.hidden_size;
     int num_layers = network->config.num_layers;
-    /* M-009残修复: 削弱combined_scale对梯度的过度压缩。
-     * 原io_scale clamp下限0.01→改为0.05，depth_scale下限0.001→改为0.01，
-     * 避免在深层网络中梯度被压缩到接近零。
-     * 保留缩放机制但放宽约束，使梯度传播更通畅。 */
-    float combined_scale = 1.0f;
-    if (input_size > 0 && output_size > 0) {
-        float io_scale = sqrtf((float)input_size / (float)output_size);
-        if (io_scale > 100.0f) io_scale = 100.0f;
-        if (io_scale < 0.05f) io_scale = 0.05f;
-        combined_scale *= io_scale;
-    }
+    /* ZSFWS-P1修复: 移除combined_scale对error_buffer的直接缩放。
+     * 此前在cfc_backward之前缩放error_buffer会不可控地压缩所有后续梯度，
+     * 导致深层网络训练不收敛。改为将层深度因子应用于梯度裁剪阈值，
+     * 因为梯度裁剪是唯一合理的梯度缩放注入点——统一控制所有梯度的尺度。
+     * 输入输出维度差异由cfc_backward内部的W矩阵自然处理，无需干预。 */
+    float depth_grad_factor = 1.0f;
     if (num_layers > 1) {
-        float depth_scale = 1.0f / sqrtf((float)num_layers);
-        if (depth_scale > 10.0f) depth_scale = 10.0f;
-        if (depth_scale < 0.01f) depth_scale = 0.01f;
-        combined_scale *= depth_scale;
-    }
-    if (combined_scale != 1.0f) {
-        float clamp_scale = (combined_scale > 100.0f) ? 100.0f : 
-                            (combined_scale < 0.01f) ? 0.01f : combined_scale;
-        for (size_t i = 0; i < network->config.output_size && i < output_size; i++) {
-            network->error_buffer[i] *= clamp_scale;
-        }
+        depth_grad_factor = sqrtf((float)num_layers);
+        if (depth_grad_factor > 10.0f) depth_grad_factor = 10.0f;
+        if (depth_grad_factor < 1.0f) depth_grad_factor = 1.0f;
     }
 
     /* FIX-003: 使用配置的损失函数类型计算正确的误差梯度 */
@@ -626,6 +621,13 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
         grad_norm = 0.0f;
     }
     float max_grad_norm = network->config.max_grad_norm;
+    /* ZSFWS-P1修复: 将层深度因子应用于梯度裁剪阈值。
+     * 深层网络需要更宽松的裁剪阈值来避免梯度消失，
+     * 但对每层单独放缩会破坏梯度一致性。改为全局放缩裁剪阈值。 */
+    if (depth_grad_factor > 1.0f) {
+        max_grad_norm *= depth_grad_factor;
+        if (max_grad_norm > 50.0f) max_grad_norm = 50.0f;
+    }
     if (grad_norm > max_grad_norm) {
         float scale = max_grad_norm / (grad_norm + 1e-8f);
         for (size_t i = 0; i < hidden_size; i++) {
@@ -646,10 +648,15 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
         for (size_t q = 0; q < num_quats; q++) {
             float* gv = network->gradient_buffer + q * 4;
 
-            /* 获取前向传播时的原始状态（从hidden_state重建） */
+            /* ZSFWS-P6修复: 从quaternion_pre_buf获取前处理状态，
+             * 而非从已修改的hidden_state读取后处理值。
+             * 反向传播需要前处理状态来计算tanh导数链。 */
+            const float* pre_state = network->quaternion_pre_buf;
             float orig_qv[4];
             for (int c = 0; c < 4; c++) {
-                orig_qv[c] = network->hidden_state[c + q * 4];
+                orig_qv[c] = (pre_state && pre_state[q * 4 + c] != 0.0f)
+                           ? pre_state[q * 4 + c]
+                           : network->hidden_state[q * 4 + c];
             }
 
             /* 步骤1: 归一化层反向传播
@@ -987,6 +994,172 @@ LNN* lnn_load(const char* filepath) {
 
     fclose(file);
     return network;
+}
+
+/**
+ * @brief 从文件加载权重到已有LNN实例（P0-001修复）
+ * 
+ * 对称于lnn_save的二进制格式，将检查点文件中的CfC网络权重、
+ * 隐藏状态、细胞状态加载到已存在的LNN实例中。
+ * 
+ * 文件格式与lnn_save完全一致：
+ *   LNNFileHeader(64字节) → LNNConfig → CfC网络数据 → 
+ *   隐藏状态(float[hidden_size]) → 细胞状态(float[hidden_size]) →
+ *   扩展版本标记(uint32_t) → 扩展字段
+ * 
+ * @param network 已创建的LNN实例（必须已通过lnn_create初始化）
+ * @param filepath 模型文件路径
+ * @return 0成功，-1失败
+ */
+int lnn_load_from_file(LNN* network, const char* filepath) {
+    /* P0-001: 完整实现 —— 模型持久化加载 */
+    if (!network || !filepath) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "LNN实例或文件路径为空");
+        return -1;
+    }
+
+    if (!network->is_initialized) {
+        selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
+                              "LNN实例未初始化，无法从文件加载权重");
+        return -1;
+    }
+
+    FILE* file = fopen(filepath, "rb");
+    if (!file) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "打开模型文件失败: %s", filepath);
+        return -1;
+    }
+
+    /* 读取并验证文件头 */
+    LNNFileHeader header;
+    if (fread(&header, sizeof(header), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "读取模型文件头失败");
+        fclose(file);
+        return -1;
+    }
+
+    if (memcmp(header.magic, SELFLNN_FILE_MAGIC, SELFLNN_FILE_MAGIC_SIZE) != 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_FORMAT_ERROR, __func__, __FILE__, __LINE__,
+                              "模型文件魔数错误");
+        fclose(file);
+        return -1;
+    }
+
+    if (header.version > SELFLNN_FILE_VERSION) {
+        selflnn_set_last_error(SELFLNN_ERROR_FORMAT_ERROR, __func__, __FILE__, __LINE__,
+                              "模型文件版本(%u)高于当前版本(%u)",
+                              header.version, SELFLNN_FILE_VERSION);
+        fclose(file);
+        return -1;
+    }
+
+#if !SELFLNN_CAN_LOAD_PRETRAINED
+    if (header.marker & SELFLNN_MARKER_PRETRAINED) {
+        selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
+                              "禁止加载预训练标记的模型文件");
+        fclose(file);
+        return -1;
+    }
+#endif
+
+    /* 读取文件中的配置 */
+    LNNConfig file_config;
+    if (fread(&file_config, sizeof(LNNConfig), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "读取模型配置失败");
+        fclose(file);
+        return -1;
+    }
+
+    /* 验证配置校验和 */
+    uint32_t computed_checksum = lnn_calc_checksum(&file_config, sizeof(LNNConfig));
+    if (computed_checksum != header.checksum) {
+        selflnn_set_last_error(SELFLNN_ERROR_FORMAT_ERROR, __func__, __FILE__, __LINE__,
+                              "模型配置校验和不匹配，文件可能已损坏");
+        fclose(file);
+        return -1;
+    }
+
+    /* 验证维度兼容性 —— 文件中的维度必须与当前LNN实例一致 */
+    if (file_config.input_size != network->config.input_size ||
+        file_config.hidden_size != network->config.hidden_size ||
+        file_config.output_size != network->config.output_size ||
+        file_config.num_layers != network->config.num_layers) {
+        selflnn_set_last_error(SELFLNN_ERROR_NETWORK_CONFIG, __func__, __FILE__, __LINE__,
+                              "模型文件维度与当前LNN不匹配: "
+                              "文件(input=%zu,hidden=%zu,output=%zu,layers=%d) vs "
+                              "当前(input=%zu,hidden=%zu,output=%zu,layers=%d)",
+                              file_config.input_size, file_config.hidden_size,
+                              file_config.output_size, file_config.num_layers,
+                              network->config.input_size, network->config.hidden_size,
+                              network->config.output_size, network->config.num_layers);
+        fclose(file);
+        return -1;
+    }
+
+    LNN_LOCK(network);
+
+    /* 加载CfC网络权重到已有网络 */
+    if (cfc_load(network->cfc_network, file) != 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "加载CfC网络数据失败");
+        LNN_UNLOCK(network);
+        fclose(file);
+        return -1;
+    }
+
+    /* 加载隐藏状态 */
+    size_t hidden_size = network->config.hidden_size;
+    if (fread(network->hidden_state, sizeof(float), hidden_size, file) != hidden_size) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "加载隐藏状态失败");
+        LNN_UNLOCK(network);
+        fclose(file);
+        return -1;
+    }
+
+    /* 加载细胞状态 */
+    if (fread(network->cell_state, sizeof(float), hidden_size, file) != hidden_size) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "加载细胞状态失败");
+        LNN_UNLOCK(network);
+        fclose(file);
+        return -1;
+    }
+
+    /* 尝试加载扩展字段（v2格式），与lnn_save保持对称 */
+    uint32_t ext_version = 0;
+    if (fread(&ext_version, sizeof(uint32_t), 1, file) == 1 && ext_version == 2) {
+        fread(&network->enable_param_sharding, sizeof(int), 1, file);
+        fread(&network->num_local_shards, sizeof(size_t), 1, file);
+        fread(&network->enable_gradient_checkpointing, sizeof(int), 1, file);
+        fread(&network->enable_model_parallel, sizeof(int), 1, file);
+        fread(&network->enable_async_gradient_sync, sizeof(int), 1, file);
+        fread(&network->current_loss, sizeof(float), 1, file);
+        uint64_t fwd_bwd[2] = {0, 0};
+        if (fread(fwd_bwd, sizeof(uint64_t), 2, file) == 2) {
+            network->forward_count = (size_t)fwd_bwd[0];
+            network->backward_count = (size_t)fwd_bwd[1];
+        }
+        fread(&network->total_training_time, sizeof(double), 1, file);
+    }
+
+    /* 更新网络状态以反映加载的隐藏状态 */
+    network_state_update(network->state, network->hidden_state, hidden_size);
+
+    LNN_UNLOCK(network);
+    fclose(file);
+
+    log_info("从文件加载LNN模型成功: %s (输入=%zu, 隐藏=%zu, 输出=%zu, 层数=%d, "
+             "前向次数=%zu, 反向次数=%zu)",
+             filepath, network->config.input_size, network->config.hidden_size,
+             network->config.output_size, network->config.num_layers,
+             network->forward_count, network->backward_count);
+
+    return 0;
 }
 
 /**
@@ -2527,9 +2700,14 @@ int lnn_safe_forward(LNN* net, const float* input, float* output, float* hidden_
 
     if (has_nan) {
         selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
-                              "参数NaN检测: 回滚到默认值");
-        for (size_t i = 0; i < n_params && params; i++)
-            params[i] = ((float)(hash32((uint32_t)i) % 10000) / 10000.0f - 0.5f) * 0.1f;
+                              "参数NaN检测: 权重损坏，尝试从检查点恢复而非静默重置");
+        /* ZSFWS-P11修复: 不再静默重置权重为伪随机值。
+         * 之前hash32(i)生成伪随机值会导致模型权重无声丢失。
+         * 改为仅重置隐藏状态并记录错误，权重通过外部检查点恢复。 */
+        if (net->hidden_state)
+            memset(net->hidden_state, 0, net->config.hidden_size * sizeof(float));
+        LNN_UNLOCK(net);
+        return SELFLNN_ERROR_OPERATION_FAILED;
     }
 
     int ret = _lnn_forward_internal(net, input, output);

@@ -1700,17 +1700,25 @@ static void update_knowledge_metacognition(SelfCognitionSystem* system) {
     
     // 基于学习进展和系统状态的真实知识评估
     
-    /* 1. 知识增长模型：基于学习样本和训练进度 */
-    // 每个训练样本可能贡献多个概念，每个测试样本可能发现未知概念
-    float concepts_per_training_sample = 0.1f; // 每个训练样本贡献0.1个概念
-    float concepts_per_test_sample = 0.02f; // 每个测试样本贡献0.02个概念
-    
-    system->knowledge.known_concepts = (size_t)(system->learning.training_samples * concepts_per_training_sample);
-    system->knowledge.unknown_concepts = (size_t)(system->learning.test_samples * concepts_per_test_sample * 5.0f); // 测试发现更多未知
-    
-    // 确保最小数量
-    if (system->knowledge.known_concepts < 100) system->knowledge.known_concepts = 100;
-    if (system->knowledge.unknown_concepts < 500) system->knowledge.unknown_concepts = 500;
+    /* 1. 知识增长模型：查询真实知识库获取已知/未知概念数量 */
+    /* N-001修复: 不再使用硬编码系数 training_samples*0.1f，改为查询真实知识库 */
+    void* kb_raw = selflnn_get_knowledge_base();
+    KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
+    size_t kb_total = 0;
+    if (kb) knowledge_base_get_stats(kb, &kb_total, NULL);
+    if (kb && kb_total > 0) {
+        system->knowledge.known_concepts = kb_total;
+        /* 未知概念基于知识库合理估算 */
+        system->knowledge.unknown_concepts = (kb_total < 500) ? 500 : (kb_total / 2);
+        if (system->knowledge.unknown_concepts < 100) system->knowledge.unknown_concepts = 100;
+    } else {
+        /* 知识库未就绪时，基于训练进展的合理下限 */
+        system->knowledge.known_concepts = (system->learning.training_samples > 0)
+            ? (size_t)(system->learning.training_samples * 0.15f) + 50 : 50;
+        system->knowledge.unknown_concepts = 500;
+    }
+    if (system->knowledge.known_concepts < 50) system->knowledge.known_concepts = 50;
+    if (system->knowledge.unknown_concepts < 100) system->knowledge.unknown_concepts = 100;
     
     // 知识覆盖率 = 已知 / (已知 + 未知)
     float total_concepts = (float)(system->knowledge.known_concepts + system->knowledge.unknown_concepts);

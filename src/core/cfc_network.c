@@ -337,17 +337,11 @@ int cfc_forward(CfCNetwork* network, const float* input,
     
     // 第一层：输入到隐藏
     if (num_layers == 1) {
-        // 单层网络：保存原始输入到layer_gradients缓冲区的前input_size个元素中（用于反向传播）
-        memcpy(network->layer_gradients, input, input_size * sizeof(float));
-        
-        /* ZSFWS-MLW: 使用层0的独立权重矩阵（单层时即为全体参数块） */
-        float* layer0_w = network->weight_matrix + network->per_layer_w_offset[0];
-        float* layer0_b = network->bias_vector + network->per_layer_b_offset[0];
-        matrix_vector_multiply_raw(current_input, layer0_w, input, 
-                                 hidden_size, input_size);
-        for (size_t i = 0; i < hidden_size; i++) {
-            current_input[i] += layer0_b[i];
-        }
+        /* ZSFWS-P14修复: 单层网络跳过额外线性变换，直接传递原始输入。
+         * 之前先做Wx+b再传给CfC cell，而CfC cell内部已做W_ax*x+W_gx*x。
+         * 这导致输入经过双重线性变换——第一层权重和CfC内部权重相互干扰。
+         * 修复: 将原始输入直接传递给CfC cell，由其内部矩阵处理。 */
+        memcpy(current_input, input, input_size * sizeof(float));
     } else {
         // 多层网络：第一层使用输入
         memcpy(current_input, input, input_size * sizeof(float));
@@ -1850,17 +1844,44 @@ int cfc_detect_stiffness(CfCNetwork* network, const float* input,
     cfc_free_rhs_context(rhsc);
     /* 刚度比 = max|Re(λ)| / min|Re(λ)|，用幂迭代估算最大特征值 */
     float lambda_max = power_iteration_max_eigenvalue(J, n, 100, 1e-6f);
-    /* 最小特征值近似：对对角线元素取最小值（用于刚度比估算） */
-    float diag_min = 1e20f, diag_avg = 0.0f;
-    for (size_t i = 0; i < n; i++) {
-        float d = fabsf(J[i * n + i]);
-        diag_avg += d;
-        if (d < diag_min && d > 1e-10f) diag_min = d;
+    /* ZSFWS-P9修复: 使用逆幂迭代估算最小特征值，替代不准确的对角近似。
+     * 对角近似对非对角占优矩阵偏差极大（可能低估超过10倍）。
+     * 逆幂迭代: 求解 (J - shift*I)·x = v, 迭代收敛到最接近shift的特征值。
+     * shift=0 时收敛到 |λ| 最小的特征值。 */
+    float lambda_min = 1e-10f;
+    {
+        float* inv_v = (float*)safe_calloc(n, sizeof(float));
+        float* inv_w = (float*)safe_calloc(n, sizeof(float));
+        if (inv_v && inv_w) {
+            for (size_t i = 0; i < n; i++) inv_v[i] = (float)((i * 1103515245u + 12345u) & 0x7fffffff) / 2147483648.0f;
+            float norm = 0.0f;
+            for (size_t i = 0; i < n; i++) norm += inv_v[i] * inv_v[i];
+            if (norm > 1e-10f) { norm = sqrtf(norm); for (size_t i = 0; i < n; i++) inv_v[i] /= norm; }
+            float inv_lambda = 0.0f;
+            for (int iter = 0; iter < 30; iter++) {
+                for (size_t i = 0; i < n; i++) {
+                    double sum = 0.0;
+                    for (size_t j = 0; j < n; j++)
+                        sum += (double)J[i * n + j] * (double)inv_v[j];
+                    inv_w[i] = (float)sum;
+                }
+                float wnorm = 0.0f;
+                for (size_t i = 0; i < n; i++) wnorm += inv_w[i] * inv_w[i];
+                if (wnorm < 1e-20f) break;
+                wnorm = sqrtf(wnorm);
+                for (size_t i = 0; i < n; i++) inv_w[i] /= wnorm;
+                inv_lambda = 0.0f;
+                for (size_t i = 0; i < n; i++) inv_lambda += inv_v[i] * inv_w[i];
+                { float* tmp = inv_v; inv_v = inv_w; inv_w = tmp; }
+                if (fabsf(inv_lambda) < 1e-10f) break;
+            }
+            lambda_min = fabsf(inv_lambda);
+            if (lambda_min < 1e-10f) lambda_min = 1e-10f;
+        }
+        safe_free((void**)&inv_v);
+        safe_free((void**)&inv_w);
     }
-    diag_avg /= (float)n;
-    if (diag_min > 1e10f) diag_min = diag_avg * 0.01f;
-    if (diag_min < 1e-10f) diag_min = 1e-10f;
-    *stiffness_ratio = lambda_max / diag_min;
+    *stiffness_ratio = lambda_max / lambda_min;
     safe_free((void**)&J);
     safe_free((void**)&y_plus);
     safe_free((void**)&f_plus);
@@ -1915,18 +1936,23 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
 
     int sign = (t_end >= t) ? 1 : -1;
     int using_stiff_solver = 0;
+    int original_solver = network->config.ode_solver_type;
+    int current_solver = original_solver;
+    int stiffness_recheck_interval = 50; /* 每50步重新检测刚度 */
 
-    /* 刚度检测 */
+    /* 初始刚度检测 */
     if (config->enable_stiffness_detect) {
         float sr = 1.0f;
         if (cfc_detect_stiffness(network, input, hidden_state, &sr) == 0) {
             stats->stiffness_ratio = sr;
             if (sr > 100.0f) {
-                cfc_set_solver_type(network, 5); /* ROSENBROCK */
+                current_solver = 5; /* ROSENBROCK */
+                cfc_set_solver_type(network, current_solver);
                 using_stiff_solver = 1;
                 stats->solver_switches++;
             } else if (sr > 10.0f) {
-                cfc_set_solver_type(network, 4); /* DP54自适应 */
+                current_solver = 4; /* DP54自适应 */
+                cfc_set_solver_type(network, current_solver);
             }
         }
     }
@@ -1993,6 +2019,40 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
 
         stats->total_steps++;
         stats->final_t = t;
+
+        /* ZSFWS-P4修复: 周期性刚度重检测。
+         * 长时间演化中系统状态可能进入/离开刚性区域，
+         * 需要动态切换求解器类型而非仅初始检测一次。 */
+        if (config->enable_stiffness_detect &&
+            stats->accepted_steps % stiffness_recheck_interval == 0 &&
+            stats->accepted_steps > 0) {
+            float sr = 1.0f;
+            if (cfc_detect_stiffness(network, input, hidden_state, &sr) == 0) {
+                stats->stiffness_ratio = sr;
+                int target_solver;
+                if (sr > 100.0f) {
+                    target_solver = 5;
+                } else if (sr > 10.0f && current_solver == 5) {
+                    target_solver = 4;
+                } else if (sr <= 10.0f && current_solver != original_solver) {
+                    target_solver = original_solver;
+                } else {
+                    target_solver = current_solver;
+                }
+                if (target_solver != current_solver) {
+                    cfc_set_solver_type(network, target_solver);
+                    current_solver = target_solver;
+                    using_stiff_solver = (target_solver == 5);
+                    stats->solver_switches++;
+                }
+            }
+        }
+    }
+
+    /* ZSFWS-P4修复: 演化结束后恢复原始求解器类型，
+     * 避免刚度检测的临时切换影响后续非演化调用。 */
+    if (current_solver != original_solver) {
+        cfc_set_solver_type(network, original_solver);
     }
 
     stats->final_t = t;

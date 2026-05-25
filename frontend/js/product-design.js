@@ -74,11 +74,9 @@
             return;
         }
         pdShowLoading();
-        var url = '/api/product/spec';
+        var url = '/product/spec';
         var postData = JSON.stringify({ requirement: reqText });
 
-        /* ZSF-ZNB修复S-012: 使用SelfLnnApi.request()替代裸fetch
-         * 确保API密钥认证、重试机制和错误处理统一 */
         SelfLnnApi.request(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -146,9 +144,12 @@
     function pdCheckStatus() {
         pdInit();
         pdSetStatus('<div style="text-align:center;padding:20px"><span style="color:#4fc3f7">查询引擎状态...</span></div>', true);
-        var url = pdGetBaseUrl() + '/api/product/design';
 
-        fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        SelfLnnApi.request('/product/design', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}'
+        })
         .then(function(resp) { return resp.json(); })
         .then(function(data) {
             var pd = data.product_design;

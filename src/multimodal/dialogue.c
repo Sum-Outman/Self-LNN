@@ -16,6 +16,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/knowledge/knowledge.h"        /* P1-004: 知识库后备查询 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -1493,6 +1494,83 @@ static int dialogue_encode_input(const char* text, int text_len,
         }
     }
     
+    return 0;
+}
+
+/**
+ * @brief P1-004修复: LNN生成器未就绪时的知识库后备查询
+ * 当对话生成器未初始化时，从知识库中检索相关内容作为有意义的响应。
+ * 根据输入文本关键词在知识库中查找匹配条目，返回最佳匹配内容。
+ * 
+ * @param input_text 用户输入文本
+ * @param response_out 输出响应文本缓冲区
+ * @param response_size 输出缓冲区大小
+ * @param confidence_out 输出置信度
+ * @return 0成功，-1失败（连知识库也无法使用）
+ */
+static int dialogue_kb_fallback_response(const char* input_text,
+                                          char* response_out,
+                                          size_t response_size,
+                                          float* confidence_out) {
+    if (!input_text || !response_out || response_size == 0) return -1;
+
+    /* 获取系统知识库 */
+    void* kb_raw = selflnn_get_knowledge_base();
+    KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
+    if (!kb) {
+        snprintf(response_out, response_size,
+                 "（系统知识库尚未初始化。请等待知识库加载完成后重试。"
+                 "模型训练完成后对话功能将自动启用。）");
+        if (confidence_out) *confidence_out = 0.0f;
+        return 0;
+    }
+
+    /* 使用TF-IDF搜索查找相关知识条目 */
+    KnowledgeEntry results[5];
+    float scores[5];
+    int result_count = knowledge_base_search_tfidf(kb, input_text, 
+                                                    results, 5, scores, 0.05f);
+
+    if (result_count <= 0) {
+        /* TF-IDF无结果时尝试语义搜索 */
+        result_count = knowledge_base_cfc_semantic_search(kb, input_text,
+                                                           0.3f, results, 5);
+    }
+
+    if (result_count > 0) {
+        /* 拼接匹配的知识三元组作为响应 */
+        size_t written = 0;
+        written += (size_t)snprintf(response_out + written, 
+                                     response_size - written,
+                                     "（基于知识库检索的回应，模型尚未完成训练）\n\n");
+        for (int i = 0; i < result_count && written < response_size - 50; i++) {
+            const char* subj = results[i].subject;
+            const char* pred = results[i].predicate;
+            const char* obj = results[i].object;
+            if (subj && obj) {
+                written += (size_t)snprintf(response_out + written,
+                                             response_size - written,
+                                             "%s %s %s\n", 
+                                             subj, pred ? pred : "→", obj);
+            } else if (subj) {
+                written += (size_t)snprintf(response_out + written,
+                                             response_size - written,
+                                             "%s\n", subj);
+            }
+            response_out[written] = '\0';
+        }
+        if (confidence_out) *confidence_out = 0.4f;
+    } else {
+        /* 知识库中也没有匹配 */
+        size_t total = 0;
+        knowledge_base_get_stats(kb, &total, NULL);
+        snprintf(response_out, response_size,
+                 "（我理解您的问题，但模型还需要更多训练才能给出准确的回答。"
+                 "您可以在训练中心对模型进行训练，或向知识库添加相关知识。"
+                 "知识库当前包含%zu条知识条目。）", total);
+        if (confidence_out) *confidence_out = 0.1f;
+    }
+
     return 0;
 }
 
@@ -3433,21 +3511,25 @@ DialogueResponse* dialogue_process_multimodal_streaming(
                 confidence = 0.85f;
             } else {
                 safe_free((void**)&generated);
-                /* F-001修复：LNN流式生成失败不使用模板回退，返回真实状态 */
-                const char* msg = "（LNN流式生成未完成。液态神经网络需要更多训练数据才能产生自然语言输出。"
-                                  "这是一个真实的系统状态消息，非模板响应。）";
-                response_text = (char*)safe_malloc(strlen(msg) + 1);
-                if (response_text) strcpy(response_text, msg);
-                confidence = 0.05f;
+                /* P1-004修复：LNN流式生成失败时使用知识库后备 */
+                response_text = (char*)safe_malloc((size_t)GEN_MAX_OUTPUT_TOKENS * 5 + 1);
+                if (response_text) {
+                    memset(response_text, 0, (size_t)GEN_MAX_OUTPUT_TOKENS * 5 + 1);
+                    dialogue_kb_fallback_response(text_input, response_text,
+                                                   (size_t)GEN_MAX_OUTPUT_TOKENS * 5, &confidence);
+                }
             }
         }
     } else {
-        /* F-001修复：生成器未初始化时返回真实状态，不使用模板回退 */
-        const char* msg = "（液态神经网络生成器未初始化。请先完成模型加载和训练。"
-                          "这是一个真实的系统状态消息，非模板响应。）";
-        response_text = (char*)safe_malloc(strlen(msg) + 1);
-        if (response_text) strcpy(response_text, msg);
-        confidence = 0.0f;
+        /* P1-004修复：生成器未初始化时使用知识库后备 */
+        response_text = (char*)safe_malloc((size_t)GEN_MAX_OUTPUT_TOKENS * 5 + 1);
+        if (response_text) {
+            memset(response_text, 0, (size_t)GEN_MAX_OUTPUT_TOKENS * 5 + 1);
+            dialogue_kb_fallback_response(text_input, response_text,
+                                           (size_t)GEN_MAX_OUTPUT_TOKENS * 5, &confidence);
+        } else {
+            confidence = 0.0f;
+        }
     }
 
     if (response_text) {
@@ -3594,15 +3676,15 @@ DialogueResponse* dialogue_process_multimodal(DialogueProcessor* processor,
             return NULL;
         }
     } else {
-        /* F-001修复：无生成器时返回真实状态，不使用模板回退 */
-        const char* msg = "（多模态对话处理：液态神经网络未初始化。"
-                          "请先加载模型并完成基础训练后重试。"
-                          "这是一个真实的系统状态消息，非模板响应。）";
-        response_text = (char*)safe_malloc(strlen(msg) + 1);
+        /* P1-004修复：无生成器时使用知识库后备，而非返回状态消息 */
+        response_text = (char*)safe_malloc((size_t)GEN_MAX_OUTPUT_TOKENS * 5 + 1);
         if (response_text) {
-            strcpy(response_text, msg);
+            memset(response_text, 0, (size_t)GEN_MAX_OUTPUT_TOKENS * 5 + 1);
+            dialogue_kb_fallback_response(text_input, response_text,
+                                           (size_t)GEN_MAX_OUTPUT_TOKENS * 5, &confidence);
+        } else {
+            confidence = 0.0f;
         }
-        confidence = 0.0f;
     }
 
     /* 添加系统响应到上下文 */

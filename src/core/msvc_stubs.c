@@ -50,13 +50,9 @@ void training_pipeline_destroy(void* pipeline) {
 }
 
 /* ============================
- * LNN模型加载 (stub)
+ * P0-001修复: lnn_load_from_file 已移至 lnn.c 完整实现
+ * 不再需要MSVC桩
  * ============================ */
-int lnn_load_from_file(LNN* lnn, const char* filepath) {
-    (void)lnn;
-    log_warning("MSVC构建: lnn_load_from_file未实现, file=%s", filepath ? filepath : "null");
-    return -1;
-}
 
 /* ============================
  * PyBullet桥接桩 (PyBullet需Python环境，MSVC平台不可用)

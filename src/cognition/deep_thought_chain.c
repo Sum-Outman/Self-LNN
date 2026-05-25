@@ -45,6 +45,7 @@
 #include "selflnn/core/laplace.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/secure_random.h"   /* N-003: 安全随机数替代LCG */
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -199,12 +200,23 @@ int dtc_reason_chain(DTCSystem* system,
         size_t copy_dim = input_dim < DTC_EMBED_DIM ? input_dim : DTC_EMBED_DIM;
         memcpy(base_embed, input_data, copy_dim * sizeof(float));
     } else if (query) {
-        /* S-013修复: 使用LNN编码器生成真实语义嵌入，替代字符ASCII/255简化方式 */
+        /* N-004修复: 使用字符bigram哈希编码替代ASCII/255简化 */
         float query_input[DTC_EMBED_DIM];
         memset(query_input, 0, sizeof(query_input));
         size_t qlen = strlen(query);
-        for (size_t i = 0; i < qlen && i < DTC_EMBED_DIM; i++)
-            query_input[i] = (float)(unsigned char)query[i] / 255.0f;
+        int hash_count = 0;
+        for (size_t i = 0; i + 1 < qlen && i < DTC_EMBED_DIM * 4; i++) {
+            uint32_t h = ((uint32_t)(unsigned char)query[i] << 8) | (uint32_t)(unsigned char)query[i+1];
+            h = h * 2654435761u;
+            size_t idx = (size_t)(h % DTC_EMBED_DIM);
+            query_input[idx] += 1.0f;
+            hash_count++;
+        }
+        if (hash_count > 0) {
+            float inv = 1.0f / sqrtf((float)hash_count + 1e-8f);
+            for (size_t i = 0; i < DTC_EMBED_DIM; i++)
+                query_input[i] *= inv;
+        }
         if (system->thought_net) {
             lnn_forward(system->thought_net, query_input, base_embed);
         } else {
@@ -245,11 +257,10 @@ int dtc_reason_chain(DTCSystem* system,
 
         float thought_input[DTC_EMBED_DIM];
         for (size_t j = 0; j < DTC_EMBED_DIM; j++) {
-            /* box-muller-like: 使用LCG+hash生成近似高斯噪声 */
-            seed = seed * 1103515245 + 12345;
-            float u1 = (float)((seed >> 16) & 0x7FFF) / 32768.0f;
-            seed = seed * 1103515245 + 12345;
-            float u2 = (float)((seed >> 16) & 0x7FFF) / 32768.0f;
+            /* N-003修复: 使用密码学安全随机数替代LCG弱随机
+             * Box-Muller变换: sqrt(-2ln(U1))*cos(2π*U2) 生成标准正态分布噪声 */
+            float u1 = secure_random_float();
+            float u2 = secure_random_float();
             float noise = sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.2831853f * u2);
             thought_input[j] = current_embed[j] + noise * noise_scale * 0.1f;
         }
@@ -410,9 +421,20 @@ int dtc_beam_search(DTCSystem* system,
         size_t copy_dim = input_dim < DTC_EMBED_DIM ? input_dim : DTC_EMBED_DIM;
         memcpy(base_embed, input_data, copy_dim * sizeof(float));
     } else if (query) {
+        /* N-004修复: bigram哈希编码替代ASCII/255 */
         size_t qlen = strlen(query);
-        for (size_t i = 0; i < qlen && i < DTC_EMBED_DIM; i++)
-            base_embed[i] = (float)query[i] / 255.0f;
+        int hash_count = 0;
+        for (size_t i = 0; i + 1 < qlen && i < DTC_EMBED_DIM * 4; i++) {
+            uint32_t h = ((uint32_t)(unsigned char)query[i] << 8) | (uint32_t)(unsigned char)query[i+1];
+            h = h * 2654435761u;
+            size_t idx = (size_t)(h % DTC_EMBED_DIM);
+            base_embed[idx] += 1.0f;
+            hash_count++;
+        }
+        if (hash_count > 0) {
+            float inv = 1.0f / sqrtf((float)hash_count + 1e-8f);
+            for (size_t i = 0; i < DTC_EMBED_DIM; i++) base_embed[i] *= inv;
+        }
     }
 
     float norm = 0.0f;

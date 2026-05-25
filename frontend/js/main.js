@@ -3153,8 +3153,12 @@ function updateSensorChart(sensorData) {
     var values = sensorData.values;
     var n = values.length;
     
-    var yMin = Math.min.apply(null, values);
-    var yMax = Math.max.apply(null, values);
+    /* FIX-JS-002: 安全循环替代Math.min.apply/Math.max.apply(避免大数组栈溢出) */
+    var yMin = values[0], yMax = values[0];
+    for (var vi = 1; vi < n; vi++) {
+        if (values[vi] < yMin) yMin = values[vi];
+        if (values[vi] > yMax) yMax = values[vi];
+    }
     var yRange = yMax - yMin || 1;
     
     ctx.beginPath();
@@ -5536,20 +5540,26 @@ async function sendDialogueMessage() {
 
     var dialogueResult;
 
-    if (multimodalImage || multimodalAudio) {
-        dialogueResult = await sendMultimodalRequest(message, multimodalImage, multimodalAudio, {
-            temperature: temperature,
-            maxLength: maxLength,
-            topK: topK,
-            memoryRounds: memoryRounds
-        });
-    } else {
-        dialogueResult = await window.SelfLnnApi.sendDialogueMessage(message, {
-            temperature: temperature,
-            maxLength: maxLength,
-            topK: topK,
-            memoryRounds: memoryRounds
-        });
+    /* FIX-JS-004: try/catch保护避免网络异常导致输入框永久锁定 */
+    try {
+        if (multimodalImage || multimodalAudio) {
+            dialogueResult = await sendMultimodalRequest(message, multimodalImage, multimodalAudio, {
+                temperature: temperature,
+                maxLength: maxLength,
+                topK: topK,
+                memoryRounds: memoryRounds
+            });
+        } else {
+            dialogueResult = await window.SelfLnnApi.sendDialogueMessage(message, {
+                temperature: temperature,
+                maxLength: maxLength,
+                topK: topK,
+                memoryRounds: memoryRounds
+            });
+        }
+    } catch(e) {
+        console.error('[对话] 请求异常:', e.message, e.stack);
+        dialogueResult = { success: false, error: '网络请求异常: ' + e.message };
     }
 
     if (typingEl) typingEl.remove();
@@ -7895,13 +7905,11 @@ window.unregisterDevice = unregisterDevice;
 window.pollSafety = pollSafety;
 window.softStop = softStop;
 window.resetSafety = resetSafety;
-window.loadSkills = loadSkills;
-/* ZSFABC修复: setFilter/filterSkills/renderSkillList由HTML内联版本处理，移除window暴露 */
-/* window.setFilter = setFilter; */
-/* window.filterSkills = filterSkills; */
-/* window.renderSkillList = renderSkillList; */
-window.selectSkill = selectSkill;
-window.testSkill = testSkill;
+/* FIX-JS-003: loadSkills保留内联版本(含完整DOM更新)，main.js版仅作兜底 */
+window.loadSkills = window.loadSkills || loadSkills;
+/* FIX-JS-003: selectSkill和testSkill同样保留内联版本 */
+window.selectSkill = window.selectSkill || selectSkill;
+window.testSkill = window.testSkill || testSkill;
 
 /* ---- 语音控制迁移 (原HTML L4528-L4597) ---- */
 var _voiceCapturing = false;
@@ -7957,7 +7965,7 @@ async function sendTextCommand() {
     try {
         var result = await SelfLnnApi.request('/device/command', { method: 'POST', body: JSON.stringify({ command: text }) });
         showNotification(result && result.success ? '指令已执行' : '指令执行失败', result && result.success ? 'success' : 'warning');
-    } catch(e) { showNotification('连接失败', 'danger');
+    } catch(e) { console.error('[文字指令] 请求失败:', e.message, e.stack); showNotification('连接失败', 'danger');
     }
 }
 } /* ZSFABC: sendTextCommand 条件定义结束 */
@@ -7972,8 +7980,9 @@ async function startMultimodalLearn() {
     try {
         var data = await SelfLnnApi.multimodalLearn(mode, 'single-cfc-lnn');
         showNotification(data.success ? 'LNN统一学习已启动' : '启动失败: '+(data.error||''), data.success ? 'success' : 'danger');
-        if (data.success && window.multimodalPollTimer) {
-            clearInterval(window.multimodalPollTimer);
+        if (data.success) {
+            /* FIX-JS-006: 先清理旧定时器再设置新的 */
+            if (window.multimodalPollTimer) clearInterval(window.multimodalPollTimer);
             window.multimodalPollTimer = setInterval(function() {
                 if (typeof pollMultimodal === 'function') pollMultimodal();
             }, 2000);
@@ -8077,13 +8086,10 @@ async function testTeaching() {
 }
 window.testTeaching = testTeaching;
 
-/* ---- 硬件设置迁移 (原HTML L7113-L7296) ---- */
-async function scanHardwareFull() {
-    try {
-        if (typeof HardwareScanUtil !== 'undefined') {
-            await HardwareScanUtil.scanAll(true);
-            showNotification('全硬件扫描完成', 'success');
-        }
-    } catch(e) { showNotification('硬件扫描失败', 'danger'); }
-}
-window.scanHardwareFull = scanHardwareFull;
+/* ---- 硬件设置 (原HTML L7113-L7296) ---- */
+/* FIX-JS-001: scanHardwareFull已在index.html内联脚本中完整定义(含DOM更新逻辑) */
+/* 此处不再重复定义，避免覆盖内联版本的UI更新功能 */
+window.scanHardwareFull = window.scanHardwareFull || (async function() {
+    try { if (typeof HardwareScanUtil !== 'undefined') { await HardwareScanUtil.scanAll(true); showNotification('全硬件扫描完成', 'success'); } }
+    catch(e) { showNotification('硬件扫描失败', 'danger'); }
+});

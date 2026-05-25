@@ -15,21 +15,8 @@
 extern "C" {
 #endif
 
-#if 0
 /**
- * @brief 能耗模式枚举
- */
-typedef enum {
-    POWER_MODE_PERFORMANCE = 0,   /**< 高性能模式 */
-    POWER_MODE_BALANCED = 1,      /**< 均衡模式 */
-    POWER_MODE_POWER_SAVING = 2,  /**< 节能模式 */
-    POWER_MODE_ULTRA_SAVING = 3,  /**< 超节能模式 */
-    POWER_MODE_CUSTOM = 4         /**< 自定义模式 */
-} PowerMode;
-#endif
-
-/**
- * @brief 设备能耗状态
+ * @brief 设备能耗状态（P2-002修复：移除废弃的PowerMode枚举）
  */
 typedef enum {
     DEVICE_POWER_ACTIVE = 0,      /**< 活跃状态 */

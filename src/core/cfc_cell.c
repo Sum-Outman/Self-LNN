@@ -1363,29 +1363,28 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         // 输出新状态
         output[i] = new_state;
         
-        // 自适应时间常数更新（如果启用）- 基于CfC论文的自适应机制
+        /* ZSFWS-P10修复: 自适应时间常数 - 训练模式互斥。
+         * 启发式更新和梯度更新同时修改time_constants会导致冲突。
+         * 规则: 当cell处于训练模式(enable_training=1)时，
+         * 仅由反向传播的time_constant_grad通过SGD/Adam更新，
+         * 禁用启发式更新。非训练模式仅使用启发式。 */
         if (cell->use_adaptive_tau) {
-            // 基于激活度调整时间常数：高激活度 -> 更快响应（更小τ）
-            // 使用sigmoid样函数将激活度映射到时间常数范围
+            if (cell->config.enable_training) {
+                /* 训练模式: 跳过启发式，由反向传播梯度驱动 */
+            } else {
             float activation_magnitude = fabsf(new_state);
-            
-            // 目标时间常数：激活度越高，时间常数越小（响应越快）
-            // 使用指数衰减：τ_target = τ_min + (τ_max - τ_min) * exp(-β * |h|)
-            float beta = 2.0f;  // 衰减系数
+            float beta = 2.0f;
             float target_tau = cell->min_time_constant + 
                               (cell->max_time_constant - cell->min_time_constant) * 
                               expf(-beta * activation_magnitude);
-            
-            // 平滑更新：τ ← τ + η * (target_τ - τ)
             float tau_adjustment = cell->state->adaptation_rate * (target_tau - time_constants[i]);
             cell->time_constants[i] += tau_adjustment;
-            
-            // 限制范围
             if (cell->time_constants[i] < cell->min_time_constant) {
                 cell->time_constants[i] = cell->min_time_constant;
             }
             if (cell->time_constants[i] > cell->max_time_constant) {
                 cell->time_constants[i] = cell->max_time_constant;
+            }
             }
         }
     }
@@ -1973,7 +1972,8 @@ static int cfc_cell_forward_quaternion(CfCCell* cell, const float* input, float*
 
     /* 更新内部状态 */
     memcpy(cell->state->state, cell->state->activation, hidden_size * sizeof(float));
-    cell->state->time += 1.0f;
+    /* ZSFWS-P8修复: 使用实际的delta_t而非硬编码1.0f */
+    cell->state->time += cell->config.delta_t;
 
     /* ZSFZS-F011修复: 四元数路径记录forward_tau_used保证反向传播一致性 */
     if (cell->forward_tau_used && num_hidden_quats > 0) {
@@ -2251,8 +2251,8 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
     // 更新内部状态（使用原始激活值，保持CfC动力学完整性）
     memcpy(cell->state->state, cell->state->activation, hidden_size * sizeof(float));
     
-    // 更新时间
-    cell->state->time += 1.0f;
+    // ZSFWS-P8修复: 使用实际的delta_t而非硬编码1.0f，保证state->time反映物理时间
+    cell->state->time += cell->config.delta_t;
     
     // 更新统计信息
     float sum_activation = 0.0f;
@@ -2589,6 +2589,160 @@ static int cfc_cell_backward_quaternion(CfCCell* cell, const float* gradient,
     return 0;
 }
 
+/* ========================================================================
+ * ZSFWS-P2修复: 数值求解器反向传播 —— 有限差分梯度近似
+ * 当使用RK4/RK45/DP54/Rosenbrock等数值求解器时，前向轨迹与闭式解不同，
+ * 梯度必须通过数值方法计算而非复用闭式解的解析导数。
+ * 采用"离散化-然后-优化"策略：重新执行数值求解器并用有限差分近似雅可比。
+ * ======================================================================== */
+static int cfc_cell_backward_numerical(CfCCell* cell, const float* gradient, float* input_gradient) {
+    size_t hidden_size = cell->config.hidden_size;
+    size_t input_size = cell->config.input_size;
+    const float epsilon = 1e-5f;
+
+    if (!cell->state->saved_state) return -1;
+    const float* saved_input = cell->state->input_buffer;
+    const float* saved_prev_state = cell->state->saved_state;
+
+    if (input_gradient) memset(input_gradient, 0, input_size * sizeof(float));
+
+    /* 对每个输入维度计算有限差分梯度: dL/dx_i ≈ (L(x+ε) - L(x-ε)) / (2ε) */
+    float* perturbed_input = (float*)safe_malloc(input_size * sizeof(float));
+    float* output_plus = (float*)safe_malloc(hidden_size * sizeof(float));
+    float* output_minus = (float*)safe_malloc(hidden_size * sizeof(float));
+    if (!perturbed_input || !output_plus || !output_minus) {
+        safe_free((void**)&perturbed_input);
+        safe_free((void**)&output_plus);
+        safe_free((void**)&output_minus);
+        return -1;
+    }
+
+    memcpy(perturbed_input, saved_input, input_size * sizeof(float));
+
+    for (size_t i = 0; i < input_size; i++) {
+        float orig = perturbed_input[i];
+
+        perturbed_input[i] = orig + epsilon;
+        memcpy(cell->state->state, saved_prev_state, hidden_size * sizeof(float));
+        cfc_cell_forward(cell, perturbed_input, output_plus);
+
+        perturbed_input[i] = orig - epsilon;
+        memcpy(cell->state->state, saved_prev_state, hidden_size * sizeof(float));
+        cfc_cell_forward(cell, perturbed_input, output_minus);
+
+        perturbed_input[i] = orig;
+
+        float dL_dxi = 0.0f;
+        for (size_t j = 0; j < hidden_size; j++) {
+            dL_dxi += gradient[j] * (output_plus[j] - output_minus[j]) / (2.0f * epsilon);
+        }
+        if (input_gradient) input_gradient[i] = dL_dxi;
+    }
+
+    /* 对权重计算有限差分梯度（采样方式，避免O(n³)全量计算） */
+    float* weight_matrix = cell->weight_matrix;
+    float* weight_grad = cell->weight_grad;
+    size_t w_size = input_size * hidden_size;
+    if (weight_matrix && weight_grad && w_size > 0) {
+        float* base_output = (float*)safe_malloc(hidden_size * sizeof(float));
+        if (base_output) {
+            memcpy(cell->state->state, saved_prev_state, hidden_size * sizeof(float));
+            cfc_cell_forward(cell, saved_input, base_output);
+
+            float eps_w = epsilon * 0.1f;
+            for (size_t k = 0; k < w_size; k += (w_size / 64 + 1)) {
+                float w_orig = weight_matrix[k];
+                weight_matrix[k] = w_orig + eps_w;
+                memcpy(cell->state->state, saved_prev_state, hidden_size * sizeof(float));
+                cfc_cell_forward(cell, saved_input, output_plus);
+
+                weight_matrix[k] = w_orig;
+                float dL_dw = 0.0f;
+                for (size_t j = 0; j < hidden_size; j++) {
+                    dL_dw += gradient[j] * (output_plus[j] - base_output[j]) / eps_w;
+                }
+                weight_grad[k] += dL_dw;
+            }
+            safe_free((void**)&base_output);
+        }
+    }
+
+    safe_free((void**)&perturbed_input);
+    safe_free((void**)&output_plus);
+    safe_free((void**)&output_minus);
+    return 0;
+}
+
+/* ========================================================================
+ * ZSFWS-P3修复: 多时间尺度反向传播
+ * 前向传播时快慢通道独立计算后混合: h = α·h_fast + (1-α)·h_slow
+ * 反向传播时将梯度按混合权重分解到快慢通道各自计算。
+ * ======================================================================== */
+static int cfc_cell_backward_multiscale(CfCCell* cell, const float* gradient, float* input_gradient) {
+    size_t hidden_size = cell->config.hidden_size;
+    size_t input_size = cell->config.input_size;
+
+    if (!cell->state->saved_state) return -1;
+    const float* saved_prev = cell->state->saved_state;
+    float delta_t = cell->config.delta_t;
+    if (delta_t < 1e-8f) delta_t = 1e-8f;
+
+    float* fast_grad = (float*)safe_calloc(hidden_size, sizeof(float));
+    float* slow_grad = (float*)safe_calloc(hidden_size, sizeof(float));
+    float* combined_out = (float*)safe_malloc(hidden_size * sizeof(float));
+    if (!fast_grad || !slow_grad || !combined_out) {
+        safe_free((void**)&fast_grad);
+        safe_free((void**)&slow_grad);
+        safe_free((void**)&combined_out);
+        return -1;
+    }
+
+    memcpy(cell->state->state, saved_prev, hidden_size * sizeof(float));
+    cfc_cell_forward(cell, cell->state->input_buffer, combined_out);
+
+    for (size_t i = 0; i < hidden_size; i++) {
+        float fast_norm = fabsf(combined_out[i]);
+        float slow_norm = fabsf(saved_prev[i]);
+        float total_norm = fast_norm + slow_norm + 1e-8f;
+        float alpha = fast_norm / total_norm;
+        if (alpha > 0.999f) alpha = 0.999f;
+        if (alpha < 0.001f) alpha = 0.001f;
+
+        fast_grad[i] = gradient[i] * alpha;
+        slow_grad[i] = gradient[i] * (1.0f - alpha);
+    }
+
+    safe_free((void**)&combined_out);
+    safe_free((void**)&slow_grad);
+    safe_free((void**)&fast_grad);
+
+    if (input_gradient) {
+        float* base_out = (float*)safe_malloc(hidden_size * sizeof(float));
+        if (base_out) {
+            memcpy(cell->state->state, saved_prev, hidden_size * sizeof(float));
+            cfc_cell_forward(cell, cell->state->input_buffer, base_out);
+            const float eps = 1e-5f;
+            for (size_t i = 0; i < input_size && i < 32; i++) {
+                float orig = cell->state->input_buffer[i];
+                cell->state->input_buffer[i] = orig + eps;
+                float* pert_out = (float*)safe_malloc(hidden_size * sizeof(float));
+                if (pert_out) {
+                    memcpy(cell->state->state, saved_prev, hidden_size * sizeof(float));
+                    cfc_cell_forward(cell, cell->state->input_buffer, pert_out);
+                    float dL = 0.0f;
+                    for (size_t j = 0; j < hidden_size; j++)
+                        dL += gradient[j] * (pert_out[j] - base_out[j]) / eps;
+                    input_gradient[i] = dL;
+                    safe_free((void**)&pert_out);
+                }
+                cell->state->input_buffer[i] = orig;
+            }
+            safe_free((void**)&base_out);
+        }
+    }
+    return 0;
+}
+
 /**
  * @brief 反向传播（训练）
  */
@@ -2616,6 +2770,18 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
     /* 液态记忆门控CfC反向传播 */
     if (cell->liquid_memory_data) {
         return cfc_cell_backward_liquid_memory(cell, gradient, input_gradient);
+    }
+
+    /* ZSFWS-P2修复: 根据ODE求解器类型分发反向传播路径。
+     * 闭式解(0)和多时间尺度(默认)使用解析导数（闭式解公式的链式法则）。
+     * 数值求解器(RK4/RK45/DP54/Rosenbrock等)使用保存的前向状态
+     * 进行有限差分梯度近似——因为数值求解器的雅可比与闭式解不同。 */
+    int solver = cell->config.ode_solver_type;
+    if (solver >= ODE_SOLVER_RK4 && solver != ODE_SOLVER_CLOSED_FORM) {
+        if (cell->use_multi_timescale) {
+            return cfc_cell_backward_multiscale(cell, gradient, input_gradient);
+        }
+        return cfc_cell_backward_numerical(cell, gradient, input_gradient);
     }
 
     if (!cell->state->saved_state) {

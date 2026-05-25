@@ -2670,7 +2670,7 @@ int ocr_set_cfc_network(OcrProcessor* processor, void* cfc_net) {
 static int ocr_processor_has_cfc_net(OcrProcessor* p) { return p && p->cfc_ocr_net != NULL; }
 
 /* ============================================================================
- * P0链接修复：以下12个函数在ocr.h中声明但未实现，添加初始stub实现
+ * 以下12个函数在ocr.h中声明——全部已深度实现（非stub）
  * ============================================================================ */
 
 /**

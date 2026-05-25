@@ -335,6 +335,16 @@ static int simulator_start_internal(Simulator* sim) {
 
 static int simulator_stop_internal(Simulator* sim) {
     if (!sim) return -1;
+    /* N-002修复: 仿真器停止不再只是空操作，正确重置运行状态 */
+    sim->status.simulation_time = 0.0f;
+    sim->status.step_count = 0;
+    /* 将所有机器人速度归零 */
+    for (int i = 0; i < sim->robot_count; i++) {
+        memset(sim->robots[i].velocity, 0, sizeof(sim->robots[i].velocity));
+        memset(sim->robots[i].acceleration, 0, sizeof(sim->robots[i].acceleration));
+        memset(sim->robots[i].angular_velocity, 0, sizeof(sim->robots[i].angular_velocity));
+    }
+    log_info("[仿真器] 内部仿真已停止（重置时间/步数/速度）");
     return 0;
 }
 
@@ -4534,22 +4544,22 @@ int simulator_export_scene(Simulator* simulator, const char* filename) {
  * ZSFX-001修复: 所有14个NULL函数指针替换为安全占位函数，
  * 任何时候调用都不会崩溃，而是安全返回错误码。
  */
-/* 前向声明 — 安全占位函数 */
+/* P2-001修复: 仿真器包装函数（原命名"占位函数"误导，实际为真实桥接实现） */
 static const char* gazebo_get_last_error(Simulator* sim);
-static int sim_stub_import_training_data(Simulator* sim, const char* filename);
-static int sim_stub_load_urdf(Simulator* sim, const char* urdf_path, const float* pos, const char* name);
-static int sim_stub_get_robot_info(Simulator* sim, int robot_id, SimulatorRobotInfo* info);
-static int sim_stub_get_contact_info(Simulator* sim, int robot_id, SimulatorContactInfo* info);
-static int sim_stub_reset_robot_pose(Simulator* sim, int robot_id, const float* pose);
-static int sim_stub_set_gravity_vector(Simulator* sim, const float* gravity);
-static int sim_stub_set_motor_pd_gains(Simulator* sim, int robot_id, int joint_idx, const SimulatorMotorPDGains* gains);
-static int sim_stub_set_physics_params(Simulator* sim, const SimulatorPhysicsParams* params);
-static int sim_stub_get_physics_params(Simulator* sim, SimulatorPhysicsParams* params);
-static int sim_stub_attach_sensor_pipeline(Simulator* sim, struct SensorPipeline* pipeline);
-static int sim_stub_detach_sensor_pipeline(Simulator* sim);
-static int sim_stub_enable_sensor_streaming(Simulator* sim, int enable);
-static int sim_stub_export_scene_json(Simulator* sim, const char* filename);
-static int sim_stub_export_statistics(Simulator* sim, const char* filename);
+static int sim_wrap_import_training_data(Simulator* sim, const char* filename);
+static int sim_wrap_load_urdf(Simulator* sim, const char* urdf_path, const float* pos, const char* name);
+static int sim_wrap_get_robot_info(Simulator* sim, int robot_id, SimulatorRobotInfo* info);
+static int sim_wrap_get_contact_info(Simulator* sim, int robot_id, SimulatorContactInfo* info);
+static int sim_wrap_reset_robot_pose(Simulator* sim, int robot_id, const float* pose);
+static int sim_wrap_set_gravity_vector(Simulator* sim, const float* gravity);
+static int sim_wrap_set_motor_pd_gains(Simulator* sim, int robot_id, int joint_idx, const SimulatorMotorPDGains* gains);
+static int sim_wrap_set_physics_params(Simulator* sim, const SimulatorPhysicsParams* params);
+static int sim_wrap_get_physics_params(Simulator* sim, SimulatorPhysicsParams* params);
+static int sim_wrap_attach_sensor_pipeline(Simulator* sim, struct SensorPipeline* pipeline);
+static int sim_wrap_detach_sensor_pipeline(Simulator* sim);
+static int sim_wrap_enable_sensor_streaming(Simulator* sim, int enable);
+static int sim_wrap_export_scene_json(Simulator* sim, const char* filename);
+static int sim_wrap_export_statistics(Simulator* sim, const char* filename);
 
 static SimulatorInterface g_gazebo_interface = {
     .get_robot_state = simulator_get_robot_state,
@@ -4579,28 +4589,28 @@ static SimulatorInterface g_gazebo_interface = {
     .get_training_records = simulator_get_training_records,
     .replay_training = simulator_replay_training,
     .export_training_data = simulator_export_training_data,
-    .import_training_data = sim_stub_import_training_data,
-    .load_urdf = sim_stub_load_urdf,
-    .get_robot_info = sim_stub_get_robot_info,
-    .get_contact_info = sim_stub_get_contact_info,
-    .reset_robot_pose = sim_stub_reset_robot_pose,
-    .set_gravity_vector = sim_stub_set_gravity_vector,
-    .set_motor_pd_gains = sim_stub_set_motor_pd_gains,
-    .set_physics_params = sim_stub_set_physics_params,
-    .get_physics_params = sim_stub_get_physics_params,
-    .attach_sensor_pipeline = sim_stub_attach_sensor_pipeline,
-    .detach_sensor_pipeline = sim_stub_detach_sensor_pipeline,
-    .enable_sensor_streaming = sim_stub_enable_sensor_streaming,
-    .export_scene_json = sim_stub_export_scene_json,
-    .export_statistics = sim_stub_export_statistics
+    .import_training_data = sim_wrap_import_training_data,
+    .load_urdf = sim_wrap_load_urdf,
+    .get_robot_info = sim_wrap_get_robot_info,
+    .get_contact_info = sim_wrap_get_contact_info,
+    .reset_robot_pose = sim_wrap_reset_robot_pose,
+    .set_gravity_vector = sim_wrap_set_gravity_vector,
+    .set_motor_pd_gains = sim_wrap_set_motor_pd_gains,
+    .set_physics_params = sim_wrap_set_physics_params,
+    .get_physics_params = sim_wrap_get_physics_params,
+    .attach_sensor_pipeline = sim_wrap_attach_sensor_pipeline,
+    .detach_sensor_pipeline = sim_wrap_detach_sensor_pipeline,
+    .enable_sensor_streaming = sim_wrap_enable_sensor_streaming,
+    .export_scene_json = sim_wrap_export_scene_json,
+    .export_statistics = sim_wrap_export_statistics
 };
 
-/* ZSFX-003修复: 安全占位函数实现 —— 委托到内部真实实现
+/* P2-001修复: sim_wrap_* 包装函数——委托到内部真实实现
  * 当外部仿真器(PyBullet/Gazebo)未连接时，以下函数使用内部物理引擎和
  * 机器人状态作为回退实现。不静默返回-1，而是在可用时执行真实操作。
  * 仅在内部状态也不可用时返回错误码。
  * 调用方应检查返回值，不等于0表示操作未执行。 */
-static int sim_stub_import_training_data(Simulator* sim, const char* filename) {
+static int sim_wrap_import_training_data(Simulator* sim, const char* filename) {
     if (!sim) return -1;
     int result = simulator_import_training_data(sim, filename);
     if (result != 0) {
@@ -4610,7 +4620,7 @@ static int sim_stub_import_training_data(Simulator* sim, const char* filename) {
     }
     return result;
 }
-static int sim_stub_load_urdf(Simulator* sim, const char* urdf_path, const float* pos, const char* name) {
+static int sim_wrap_load_urdf(Simulator* sim, const char* urdf_path, const float* pos, const char* name) {
     if (!sim) return -1;
     int result = simulator_load_urdf(sim, urdf_path, pos, name);
     if (result < 0) {
@@ -4620,7 +4630,7 @@ static int sim_stub_load_urdf(Simulator* sim, const char* urdf_path, const float
     }
     return result;
 }
-static int sim_stub_get_robot_info(Simulator* sim, int robot_id, SimulatorRobotInfo* info) {
+static int sim_wrap_get_robot_info(Simulator* sim, int robot_id, SimulatorRobotInfo* info) {
     if (!sim) return -1;
     int result = simulator_get_robot_info(sim, robot_id, info);
     if (result != 0) {
@@ -4628,7 +4638,7 @@ static int sim_stub_get_robot_info(Simulator* sim, int robot_id, SimulatorRobotI
     }
     return result;
 }
-static int sim_stub_get_contact_info(Simulator* sim, int robot_id, SimulatorContactInfo* info) {
+static int sim_wrap_get_contact_info(Simulator* sim, int robot_id, SimulatorContactInfo* info) {
     if (!sim) return -1;
     int result = simulator_get_contact_info(sim, robot_id, info);
     if (result != 0) {
@@ -4636,7 +4646,7 @@ static int sim_stub_get_contact_info(Simulator* sim, int robot_id, SimulatorCont
     }
     return result;
 }
-static int sim_stub_reset_robot_pose(Simulator* sim, int robot_id, const float* pose) {
+static int sim_wrap_reset_robot_pose(Simulator* sim, int robot_id, const float* pose) {
     if (!sim) return -1;
     int result = simulator_reset_robot_pose(sim, robot_id, pose);
     if (result != 0) {
@@ -4646,7 +4656,7 @@ static int sim_stub_reset_robot_pose(Simulator* sim, int robot_id, const float* 
     }
     return result;
 }
-static int sim_stub_set_gravity_vector(Simulator* sim, const float* gravity) {
+static int sim_wrap_set_gravity_vector(Simulator* sim, const float* gravity) {
     if (!sim) return -1;
     int result = simulator_set_gravity_vector(sim, gravity);
     if (result != 0) {
@@ -4659,7 +4669,7 @@ static int sim_stub_set_gravity_vector(Simulator* sim, const float* gravity) {
     }
     return result;
 }
-static int sim_stub_set_motor_pd_gains(Simulator* sim, int robot_id, int joint_idx, const SimulatorMotorPDGains* gains) {
+static int sim_wrap_set_motor_pd_gains(Simulator* sim, int robot_id, int joint_idx, const SimulatorMotorPDGains* gains) {
     if (!sim) return -1;
     int result = simulator_set_motor_pd_gains(sim, robot_id, joint_idx, gains);
     if (result != 0) {
@@ -4667,7 +4677,7 @@ static int sim_stub_set_motor_pd_gains(Simulator* sim, int robot_id, int joint_i
     }
     return result;
 }
-static int sim_stub_set_physics_params(Simulator* sim, const SimulatorPhysicsParams* params) {
+static int sim_wrap_set_physics_params(Simulator* sim, const SimulatorPhysicsParams* params) {
     if (!sim) return -1;
     int result = simulator_set_physics_params(sim, params);
     if (result != 0) {
@@ -4677,7 +4687,7 @@ static int sim_stub_set_physics_params(Simulator* sim, const SimulatorPhysicsPar
     }
     return result;
 }
-static int sim_stub_get_physics_params(Simulator* sim, SimulatorPhysicsParams* params) {
+static int sim_wrap_get_physics_params(Simulator* sim, SimulatorPhysicsParams* params) {
     if (!sim) return -1;
     int result = simulator_get_physics_params(sim, params);
     if (result != 0) {
@@ -4685,7 +4695,7 @@ static int sim_stub_get_physics_params(Simulator* sim, SimulatorPhysicsParams* p
     }
     return result;
 }
-static int sim_stub_attach_sensor_pipeline(Simulator* sim, struct SensorPipeline* pipeline) {
+static int sim_wrap_attach_sensor_pipeline(Simulator* sim, struct SensorPipeline* pipeline) {
     if (!sim) return -1;
     int result = simulator_attach_sensor_pipeline(sim, pipeline);
     if (result != 0) {
@@ -4695,7 +4705,7 @@ static int sim_stub_attach_sensor_pipeline(Simulator* sim, struct SensorPipeline
     }
     return result;
 }
-static int sim_stub_detach_sensor_pipeline(Simulator* sim) {
+static int sim_wrap_detach_sensor_pipeline(Simulator* sim) {
     if (!sim) return -1;
     int result = simulator_detach_sensor_pipeline(sim);
     if (result != 0) {
@@ -4705,7 +4715,7 @@ static int sim_stub_detach_sensor_pipeline(Simulator* sim) {
     }
     return result;
 }
-static int sim_stub_enable_sensor_streaming(Simulator* sim, int enable) {
+static int sim_wrap_enable_sensor_streaming(Simulator* sim, int enable) {
     if (!sim) return -1;
     int result = simulator_enable_sensor_streaming(sim, enable);
     if (result != 0) {
@@ -4715,7 +4725,7 @@ static int sim_stub_enable_sensor_streaming(Simulator* sim, int enable) {
     }
     return result;
 }
-static int sim_stub_export_scene_json(Simulator* sim, const char* filename) {
+static int sim_wrap_export_scene_json(Simulator* sim, const char* filename) {
     if (!sim) return -1;
     int result = simulator_export_scene_json(sim, filename);
     if (result != 0) {
@@ -4725,7 +4735,7 @@ static int sim_stub_export_scene_json(Simulator* sim, const char* filename) {
     }
     return result;
 }
-static int sim_stub_export_statistics(Simulator* sim, const char* filename) {
+static int sim_wrap_export_statistics(Simulator* sim, const char* filename) {
     if (!sim) return -1;
     int result = simulator_export_statistics(sim, filename);
     if (result != 0) {

@@ -53,6 +53,7 @@ struct DynamicsSystem {
     float* prev_state;          /**< 前一状态向量（BDF-2所需） */
     float* workspace;           /**< 预分配ODE求解器工作区（最大11*state_size） */
     float* ode_input_buf;       /**< P1-021修复：预分配ODE RHS输入缓冲区，避免每步堆分配 */
+    float* external_input;      /**< ZSFWS-P5修复：真实外部输入（传感器/控制信号），NULL=无外部力 */
     int bdf2_initialized;       /**< BDF-2初始化标记（需要两步历史） */
     int is_initialized;         /**< 是否已初始化 */
     float time;                 /**< 当前时间 */
@@ -351,6 +352,9 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 }
             }
             safe_free((void**)&y); safe_free((void**)&ws);
+            /* ZSFWS-P12: 当ode_solvers内存分配失败时回退到内置DP54。
+             * 内置求解器直接操作state+velocity数组(零额外内存分配)，
+             * 作为OOM极致条件下的保底方案。正常情况走ode_solvers委托。 */
             if (!y || !ws) actual_dt = dynamics_internal_solve_dp54(system, input, dt);
             break;
         }
@@ -383,6 +387,8 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 }
             }
             safe_free((void**)&y); safe_free((void**)&ws);
+            /* ZSFWS-P12: OOM回退到内置Rosenbrock求解器。
+             * 正常路径委托ode_solvers.c的Rosenbrock实现。 */
             if (!y || !ws) dynamics_internal_solve_rosenbrock(system, input, dt);
             break;
         }
@@ -543,9 +549,17 @@ static void compute_derivatives(const DynamicsSystem* system,
 static int dynamics_ode_rhs(float t, const float* y, float* dydt, void* ctx) {
     DynamicsSystem* s = (DynamicsSystem*)ctx;
     size_t n = s->config.state_size;
-    /* P1-021修复：使用预分配缓冲区替代每步malloc/free，消除堆分配开销 */
+    /* ZSFWS-P5修复: 移除虚构的velocity*damping输入。
+     * 优先使用真实外部输入（传感器/控制信号），
+     * 无外部输入时使用零向量，代表系统仅受内部动力驱动。
+     * 之前velocity*damping=虚构力，不具备物理意义，
+     * 会导致ODE求解器产生错误的物理轨迹。 */
     float* input_buf = s->ode_input_buf;
-    for (size_t i = 0; i < n; i++) input_buf[i] = y[n+i] * s->config.damping;
+    if (s->external_input) {
+        memcpy(input_buf, s->external_input, n * sizeof(float));
+    } else {
+        memset(input_buf, 0, n * sizeof(float));
+    }
     compute_derivatives(s, y, y+n, input_buf, dydt, dydt+n);
     (void)t;
     return 0;
@@ -1763,23 +1777,51 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
         const float scale = 1.0f / (2.0f * epsilon + 1e-12f);
 
         for (size_t d = 0; d < state_dim; d++) {
-            /* J @ a_q 的有限差分近似 */
+            /* ZSFWS-P7修复: J@a_q的有限差分近似 - 实际使用而非丢弃。
+             * 之前此JVP被计算后完全未使用，伴随传播使用硬编码的线性弹簧模型。
+             * 现在混合使用：JVP提供非线性修正，线性模型提供稳定基线。
+             * J^T@a: 对于非线性系统，需要额外计算 J^T@a_v。
+             * 使用位置方向扰动计算J_vq@a_q: ∂(dv/dt)/∂q · a_q近似 */
             float jvp_q = (dvel_plus[d] - dvel_minus[d]) * scale * adj_norm;
 
-            /* P06修复: 完整伴随系统传播
-             * da_q/dt = -a_v  (J_vq^T = I for spring-damper)
-             * da_v/dt = -(-k·a_q) - (-c·a_v) = k·a_q + c·a_v  (J_qv^T = -kI, J_vv^T = -cI)
-             * 离散化: a(t-dt) = a(t) + dt * da/dt */
-            float da_q_dt = -adjoint_v[d];
-            float da_v_dt = k * adjoint_q[d] + c * adjoint_v[d];
+            /* 新增: 计算 J^T@a 用于非线性系统。
+             * 在a_v方向上扰动速度，计算反传所需的 J_qv^T@a_v 分量。 */
+            float unit_dir_v = (adj_norm > 1e-12f) ? adjoint_v[d] / adj_norm : 0.0f;
+            float jvp_transpose_v = 0.0f;
+            if (fabsf(unit_dir_v) > 1e-8f && system->config.nonlinearity > 0.01f) {
+                float pert_v_plus  = system->velocity[d] + epsilon * unit_dir_v;
+                float pert_v_minus = system->velocity[d] - epsilon * unit_dir_v;
+                float sv_orig = system->velocity[d];
+                system->velocity[d] = pert_v_plus;
+                compute_derivatives(system, current_state, system->velocity, zero_input, dstate_plus, dvel_plus);
+                system->velocity[d] = pert_v_minus;
+                compute_derivatives(system, current_state, system->velocity, zero_input, dstate_minus, dvel_minus);
+                system->velocity[d] = sv_orig;
+                jvp_transpose_v = (dstate_plus[d] - dstate_minus[d]) * scale * adj_norm;
+            }
+
+            /* ZSFWS-P7修复: 伴随系统传播 - 使用计算出的JVP而非硬编码k/c。
+             * 线性基线: da_q/dt = -a_v, da_v/dt = -JVP_q
+             * 混合: 非线性度越高，JVP权重越大 */
+            float nl_weight = CLAMP(system->config.nonlinearity, 0.0f, 1.0f);
+            float linear_k = (system->config.time_scale > 0.0f) ? system->config.time_scale : 1.0f;
+            float linear_c = (system->config.damping > 0.0f) ? system->config.damping : 0.1f;
+
+            /* 混合JVP: 线性弹簧项(k*a_q) 与 有限差分JVP 按非线性度加权 */
+            float effective_jvp_q = linear_k * adjoint_q[d] * (1.0f - nl_weight)
+                                  + jvp_q * nl_weight;
+            float effective_jvp_transpose = jvp_transpose_v * nl_weight;
+
+            /* 完整伴随系统: 
+             * da_q/dt = -a_v - d(dv/dt)/dq · a_v (J_vq^T@a_v)
+             * da_v/dt = -dV/dq · a_q - d(dv/dt)/dv · a_v = -J_vq@a_q - c*a_v */
+            float da_q_dt = -adjoint_v[d] - effective_jvp_transpose;
+            float da_v_dt = -effective_jvp_q - linear_c * adjoint_v[d];
 
             adjoint_q[d] += dt * da_q_dt;
             adjoint_v[d] += dt * da_v_dt;
 
-            /* P06修复: 完整参数梯度累积
-             * ∂L/∂k = -∫ a_v^T · q dt  (弹簧常数梯度)
-             * ∂L/∂c = -∫ a_v^T · v dt  (阻尼系数梯度)
-             * 使用轨迹差分近似 */
+            /* 参数梯度累积 */
             float trajectory_diff = current_state[d] - prev_state[d];
             size_t pg_idx = (size_t)d % param_grad_size;
             param_gradient[pg_idx] += adjoint_q[d] * trajectory_diff;

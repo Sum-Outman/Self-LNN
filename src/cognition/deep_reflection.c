@@ -481,12 +481,23 @@ int dr_reflect(DeepReflectionEngine* engine,
         size_t copy_dim = (context_size < DR_EMBED_DIM) ? context_size : DR_EMBED_DIM;
         memcpy(base_embed, context_data, copy_dim * sizeof(float));
     } else if (topic) {
-        /* S-012修复: 使用LNN编码器生成真实语义嵌入，替代字符ASCII/255简化方式 */
+        /* N-004修复: 使用字符bigram哈希编码替代ASCII/255简化 */
         float topic_input[DR_EMBED_DIM];
         memset(topic_input, 0, sizeof(topic_input));
         size_t tlen = strlen(topic);
-        for (size_t i = 0; i < tlen && i < DR_EMBED_DIM; i++) {
-            topic_input[i] = (float)(unsigned char)topic[i] / 255.0f;
+        /* 双字节哈希编码：相邻字符对→特征维度索引，均值叠加 */
+        int hash_count = 0;
+        for (size_t i = 0; i + 1 < tlen && i < DR_EMBED_DIM * 4; i++) {
+            uint32_t h = ((uint32_t)(unsigned char)topic[i] << 8) | (uint32_t)(unsigned char)topic[i+1];
+            h = h * 2654435761u;
+            size_t idx = (size_t)(h % DR_EMBED_DIM);
+            topic_input[idx] += 1.0f;
+            hash_count++;
+        }
+        if (hash_count > 0) {
+            float inv = 1.0f / sqrtf((float)hash_count + 1e-8f);
+            for (size_t i = 0; i < DR_EMBED_DIM; i++)
+                topic_input[i] *= inv;
         }
         if (engine->reflection_net) {
             lnn_forward(engine->reflection_net, topic_input, base_embed);
@@ -775,9 +786,19 @@ int dr_reflect_multi_passage(DeepReflectionEngine* engine,
         safe_free((void**)&emb_ptr);
         safe_free((void**)&weights);
     } else if (topic) {
+        /* N-004修复: bigram哈希编码替代ASCII/255 */
         size_t tlen = strlen(topic);
-        for (size_t i = 0; i < tlen && i < edim; i++) {
-            fused_embed[i] = (float)topic[i] / 255.0f;
+        int hash_count = 0;
+        for (size_t i = 0; i + 1 < tlen && i < edim * 4; i++) {
+            uint32_t h = ((uint32_t)(unsigned char)topic[i] << 8) | (uint32_t)(unsigned char)topic[i+1];
+            h = h * 2654435761u;
+            size_t idx = (size_t)(h % edim);
+            fused_embed[idx] += 1.0f;
+            hash_count++;
+        }
+        if (hash_count > 0) {
+            float inv = 1.0f / sqrtf((float)hash_count + 1e-8f);
+            for (size_t i = 0; i < edim; i++) fused_embed[i] *= inv;
         }
     }
 

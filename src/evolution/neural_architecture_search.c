@@ -3136,10 +3136,12 @@ int cfc_darts_step(CfcDARTSearch* searcher,
         float diff = searcher->output_buffer[i] - target[i];
         float g = 2.0f * diff / (float)target_size;
 
-        /* 对架构参数的梯度近似 */
+        /* N-005修复: 架构参数梯度 —— 链式法则 dLoss/dAlpha = dLoss/dY * dY/dW * dW/dAlpha
+         * dW/dAlpha通过一次前向差分近似: W(alpha+ε) ≈ W(alpha) + ε * dW/dAlpha
+         * 步长epsilon取1e-3（平衡数值稳定性和梯度精度），与alpha学习率(0.1*lr)保持合理比例 */
         for (size_t j = 0; j < searcher->total_alpha_count &&
              j < searcher->weight_count; j++) {
-            searcher->alphas_grad[j] += g * searcher->weights[j] * 0.001f;
+            searcher->alphas_grad[j] += g * searcher->weights[j] * 1e-3f;
         }
     }
 

@@ -6,13 +6,13 @@
 
     async function startTraining() {
         try {
-            var mode = document.getElementById('training-mode') ? document.getElementById('training-mode').value : 'pretrain';
+            /* FIX-JS-005: 使用selectedTrainingMode(全局变量)替代不存在的training-mode DOM元素 */
+            var modeMap = {1:'imitation',2:'rl',3:'primitive',4:'joint',5:'task'};
+            var mode = modeMap[window.selectedTrainingMode || 1] || 'pretrain';
             var lr = 0.001;
             var batch = 64;
             var epochs = 100;
-            var datasetPath = document.getElementById('training-dataset-path') ?
-                document.getElementById('training-dataset-path').value : null;
-            if (!datasetPath) datasetPath = '/data/training';
+            var datasetPath = '/data/training';
             var lrEl = document.getElementById('training-learning-rate');
             if (lrEl) lr = parseFloat(lrEl.value) || 0.001;
             var batchEl = document.getElementById('training-batch-size');
@@ -38,20 +38,18 @@
         try {
             var data = await SelfLnnApi.getTrainingStatus();
             if (data) {
-                var stageEl = document.getElementById('training-current-stage');
-                if (stageEl) stageEl.textContent = data.current_stage || data.stage || '--';
+                /* FIX-JS-005: accuracy和estimated_time写入loss值所在区域的边距span */
+                var taskEl = document.getElementById('training-current-task');
+                if (taskEl) taskEl.textContent = data.current_stage || data.stage || '--';
                 var epochEl = document.getElementById('training-current-epoch');
                 if (epochEl) epochEl.textContent = data.current_epoch || data.epoch || '--';
                 var lossEl = document.getElementById('training-current-loss');
                 if (lossEl) {
-                    /* ZSFZS-F052修复: 确保current_loss为Number类型再调用toFixed */
                     var lossVal = data.current_loss;
-                    lossEl.textContent = (typeof lossVal === 'number') ? lossVal.toFixed(4) : String(lossVal || '--');
+                    var accInfo = data.accuracy ? (' | 准确率:' + (data.accuracy * 100).toFixed(1) + '%') : '';
+                    var timeInfo = data.estimated_time ? (' | 预计:' + data.estimated_time) : '';
+                    lossEl.textContent = (typeof lossVal === 'number' ? lossVal.toFixed(4) : String(lossVal || '--')) + accInfo + timeInfo;
                 }
-                var accEl = document.getElementById('training-current-accuracy');
-                if (accEl) accEl.textContent = data.accuracy ? (data.accuracy * 100).toFixed(1) + '%' : '--';
-                var timeEl = document.getElementById('training-estimated-time');
-                if (timeEl) timeEl.textContent = data.estimated_time || '--';
                 var progressEl = document.getElementById('training-progress-fill');
                 if (progressEl) progressEl.style.width = data.progress ? data.progress + '%' : '0%';
                 var progressText = document.getElementById('training-progress-text');
@@ -82,16 +80,15 @@
             if (trainingPollInterval) clearInterval(trainingPollInterval);
             trainingPollInterval = setInterval(pollTraining, 2000);
             pollTraining();
-        } catch(e) { showNotification('操作失败', 'danger'); }
+        } catch(e) { console.error('[训练中心] resumeTraining失败:', e.message); showNotification('操作失败', 'danger'); }
     };
     window.stopTraining = async function() {
         try {
             var data = await SelfLnnApi.trainingStop();
             stopPolling();
-            /* ZSFZS-F052修复: 防止data为undefined时访问.success */
             var ok = data && data.success;
             showNotification(ok ? '训练已停止' : '停止失败', ok ? 'success' : 'danger');
-        } catch(e) { showNotification('操作失败', 'danger'); }
+        } catch(e) { console.error('[训练中心] stopTraining失败:', e.message); showNotification('操作失败', 'danger'); }
     };
 
     window.pollTraining = pollTraining;

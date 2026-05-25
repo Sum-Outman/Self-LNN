@@ -547,7 +547,7 @@ class DeviceManager {
 
     getAudioContext() {
         if (!this.audioContext) {
-            var compat = window.g_browserCompat || new BrowserCompat();
+            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
             this.audioContext = compat.getAudioContext();
         }
         if (this.audioContext && this.audioContext.state === 'suspended') {

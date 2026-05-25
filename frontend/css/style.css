@@ -4192,58 +4192,10 @@ body {
     font-size: 0.9rem;
 }
 
+/* FIX-CSS-001: .switch/.slider移至6208行统一规范 */
+
 /* 运动控制 */
-.control-mode {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.switch {
-    position: relative;
-    display: inline-block;
-    width: 50px;
-    height: 24px;
-}
-
-.switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-}
-
-.slider {
-    position: absolute;
-    cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: rgba(255, 255, 255, 0.1);
-    transition: .4s;
-    border-radius: 24px;
-}
-
-.slider:before {
-    position: absolute;
-    content: "";
-    height: 16px;
-    width: 16px;
-    left: 4px;
-    bottom: 4px;
-    background-color: #aaaaaa;
-    transition: .4s;
-    border-radius: 50%;
-}
-
-input:checked + .slider {
-    background-color: rgba(255, 255, 255, 0.3);
-}
-
-input:checked + .slider:before {
-    transform: translateX(26px);
-    background-color: #888888;
-}
+.control-mode { display:flex;align-items:center;gap:0.5rem; }
 
 .direction-control {
     margin-bottom: 1.5rem;
@@ -6190,57 +6142,7 @@ input:checked + .slider:before {
     color: #666666;
 }
 
-/* 开关样式 */
-.switch {
-    position: relative;
-    display: inline-block;
-    width: 44px;
-    height: 24px;
-    flex-shrink: 0;
-}
-
-.switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-}
-
-.slider {
-    position: absolute;
-    cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(255, 255, 255, 0.1);
-    transition: all 0.3s;
-    border-radius: 24px;
-}
-
-.slider:before {
-    position: absolute;
-    content: "";
-    height: 18px;
-    width: 18px;
-    left: 3px;
-    bottom: 3px;
-    background: #ffffff;
-    transition: all 0.3s;
-    border-radius: 50%;
-}
-
-.switch input:checked + .slider {
-    background: #00ff88;
-}
-
-.switch input:checked + .slider:before {
-    transform: translateX(20px);
-}
-
-.switch input:disabled + .slider {
-    opacity: 0.4;
-    cursor: not-allowed;
-}
+/* FIX-CSS-001: .switch/.slider已移至8867行统一规范 */
 
 /* ============================================
    对话界面响应式
@@ -8035,26 +7937,7 @@ input:checked + .slider:before {
     to { transform: translateX(0); opacity: 1; }
 }
 
-/* 开关滑块 */
-input:checked + .slider {
-    background: #00c8ff;
-}
-
-input:checked + .slider:before {
-    transform: translateX(20px);
-}
-
-.slider:before {
-    position: absolute;
-    content: "";
-    height: 18px;
-    width: 18px;
-    left: 3px;
-    bottom: 3px;
-    background: white;
-    transition: 0.3s;
-    border-radius: 50%;
-}
+/* FIX-CSS-001: 孤立.slider片段已合并到6208行统一规范 */
 
 /* 响应式 */
 @media (max-width: 900px) {
@@ -8863,14 +8746,15 @@ input:checked + .slider:before {
 }
 .btn-cancel:hover { background: rgba(255,255,255,0.14); }
 
-/* ===== 拨动开关(Toggle Switch) ===== */
-.switch { position:relative;display:inline-block;width:44px;height:24px;vertical-align:middle; }
+/* FIX-CSS-001: 统一.switch/.slider规范(合并原4处重复定义) */
+.switch { position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;vertical-align:middle; }
 .switch input { opacity:0;width:0;height:0; }
-.slider { position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#555;transition:0.3s;border-radius:24px; }
-.slider:before { position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background-color:white;transition:0.3s;border-radius:50%; }
-input:checked+.slider { background-color:#2196F3; }
-input:checked+.slider:before { transform:translateX(20px); }
-input:focus+.slider { box-shadow:0 0 1px #2196F3; }
+.slider { position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.1);transition:all 0.3s;border-radius:24px; }
+.slider:before { position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;transition:all 0.3s;border-radius:50%; }
+.switch input:checked+.slider { background:#00ff88; }
+.switch input:checked+.slider:before { transform:translateX(20px); }
+.switch input:disabled+.slider { opacity:0.4;cursor:not-allowed; }
+.switch input:focus+.slider { box-shadow:0 0 1px #00ff88; }
 .slider.round { border-radius:24px; }
 .slider.round:before { border-radius:50%; }
 
@@ -8958,18 +8842,13 @@ input:focus+.slider { box-shadow:0 0 1px #2196F3; }
 .code-block pre { margin:0;overflow-x:auto; }
 .code-block code { color:#00ff88;font-family:'Consolas','Courier New',monospace;font-size:0.8rem; }
 
-/* ===== 进度条增强 ===== */
-.progress-bar { height:8px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden; }
-.progress-fill { height:100%;background:linear-gradient(90deg,#2196F3,#42a5f5);border-radius:4px;transition:width 0.6s ease; }
+/* FIX-CSS-002: .progress-bar/.progress-fill重复定义已合并到3527行 */
+/* FIX-CSS-002: .info-grid/.info-item/.info-label/.info-value重复已合并到4003行 */
 
-/* ===== 机器人状态网格 ===== */
+/* 机器人状态网格(唯一选择器，保留) */
 .robot-status-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px; }
 .robot-info { margin-top:12px; }
 .robot-info h4 { font-size:0.9rem;color:#aaa;margin-bottom:8px; }
-.info-grid { display:grid;grid-template-columns:repeat(2,1fr);gap:6px; }
-.info-item { display:flex;justify-content:space-between;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:4px;font-size:0.8rem; }
-.info-label { color:#aaa; }
-.info-value { color:#ddd;font-weight:500; }
 
 /* ===== 传感器网格 ===== */
 .sensor-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px; }

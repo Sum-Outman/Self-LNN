@@ -125,6 +125,10 @@ struct LNN {
     uint64_t gradient_sync_count;                     /**< 梯度同步计数 */
 
     MutexHandle lock;                                 /**< 网络内部锁（线程安全） */
+
+    /* ZSFWS-P6修复: 四元数预处理状态缓冲区
+     * 保存四元数处理前的hidden_state，供反向传播计算正确的梯度链 */
+    float* quaternion_pre_buf;                        /**< 四元数处理前状态（反向传播用） */
 };
 
 /* 内部无锁函数声明（供扩展训练模块使用，调用者需持有 LNN_LOCK） */
@@ -257,6 +261,18 @@ int lnn_save(const LNN* network, const char* filepath);
  * @return LNN* 网络句柄，失败返回NULL
  */
 LNN* lnn_load(const char* filepath);
+
+/**
+ * @brief 从文件加载权重到已有LNN实例（P0-001修复）
+ * 
+ * 对称于lnn_save，将模型文件中的权重、隐藏状态、细胞状态加载到
+ * 已经创建的LNN实例中。不需要重新创建LNN，避免破坏已有的子系统绑定。
+ * 
+ * @param lnn 已创建的LNN实例指针
+ * @param filepath 模型文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int lnn_load_from_file(LNN* lnn, const char* filepath);
 
 /**
  * @brief 获取LNN网络配置

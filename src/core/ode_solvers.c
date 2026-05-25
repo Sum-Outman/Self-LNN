@@ -811,13 +811,11 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
                         }
                     }
                 }
-                /* 多线程结果取平均值（消除重复计算偏差） */
-                if (max_threads > 1) {
-                    float inv_threads = 1.0f / (float)max_threads;
-                    for (size_t i = 0; i < n; i++) {
-                        dydt[i] *= inv_threads;
-                    }
-                }
+                /* ZSFWS-P13修复: 移除多线程RHS结果取平均。
+                 * RHS函数是确定性的(f(t,y)对所有线程返回相同值)，
+                 * 取平均不仅无意义，还额外增加了计算开销。
+                 * 在无域分解的并行RHS模式下，保留第一个线程的结果即可。 */
+                /* 仅使用第一个线程的结果（确定性RHS） */
             } else {
                 /* 内存分配失败，回退到串行执行 */
                 int ret = rhs(t, y, dydt, ctx);
