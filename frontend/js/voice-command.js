@@ -409,6 +409,7 @@ class CommandEngine {
     }
 
     async _callSystemApi(action, params) {
+        if (!window.SelfLnnApi) return { success: false, error: '系统API服务未加载' };
         const apiMap = {
             'launch_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand({action:'launch_app',name:params.name}) : null,
             'close_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand({action:'close_app',name:params.name}) : null,

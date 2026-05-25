@@ -10,7 +10,12 @@ class SelfLnnChart {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
         this.options = options || {};
-        this.data = { labels: [], datasets: [] };
+        this.data = (options && options.data) ? {
+            labels: options.data.labels ? options.data.labels.slice() : [],
+            datasets: (options.data.datasets || []).map(function(ds) {
+                return { label: ds.label || '', data: ds.data ? ds.data.slice() : [], color: ds.color || '#3498db', borderColor: ds.borderColor || ds.color || '#3498db', fill: ds.fill || false };
+            })
+        } : { labels: [], datasets: [] };
 
         this._animFrame = null;
         this._animProgress = 0;

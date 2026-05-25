@@ -42,9 +42,19 @@ class TrainingPushManager {
         this._startGPUPolling();
     }
 
-    _registerWebSocketHandlers() {
+    _registerWebSocketHandlers(retryCount) {
+        retryCount = retryCount || 0;
         if (!window.SelfLnnWebSocket) {
-            setTimeout(() => this._registerWebSocketHandlers(), 500);
+            if (retryCount < 20) {
+                setTimeout(() => this._registerWebSocketHandlers(retryCount + 1), 500);
+            } else {
+                console.error('[TrainingPush] WebSocket模块加载超时(10s)，训练推送功能不可用');
+            }
+            return;
+        }
+
+        if (typeof window.SelfLnnWebSocket.on !== 'function') {
+            console.error('[TrainingPush] WebSocket模块不支持on()方法，训练推送功能不可用');
             return;
         }
 
@@ -295,12 +305,12 @@ class TrainingPushManager {
 
         if (gpuUtil) {
             const u = data.gpu_usage !== undefined ? data.gpu_usage : (data.utilization !== undefined ? data.utilization : 0);
-            gpuUtil.style.width = Math.min(u, 100) + '%';
+            gpuUtil.style.width = Math.max(0, Math.min(u, 100)) + '%';
             gpuUtil.textContent = Math.round(u) + '%';
         }
         if (gpuMem) {
             const m = data.gpu_memory_used !== undefined ? data.gpu_memory_used : (data.memory_used !== undefined ? data.memory_used : 0);
-            gpuMem.style.width = Math.min(m, 100) + '%';
+            gpuMem.style.width = Math.max(0, Math.min(m, 100)) + '%';
             gpuMem.textContent = Math.round(m) + '%';
         }
         if (gpuTemp) {

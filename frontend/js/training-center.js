@@ -8,7 +8,8 @@
         try {
             /* FIX-JS-005: 使用selectedTrainingMode(全局变量)替代不存在的training-mode DOM元素 */
             var modeMap = {1:'imitation',2:'rl',3:'primitive',4:'joint',5:'task'};
-            var mode = modeMap[window.selectedTrainingMode || 1] || 'pretrain';
+            var selMode = (window.selectedTrainingMode != null) ? window.selectedTrainingMode : 1;
+            var mode = modeMap[selMode] || 'pretrain';
             var lr = 0.001;
             var batch = 64;
             var epochs = 100;
@@ -21,7 +22,7 @@
             if (epochEl) epochs = parseInt(epochEl.value, 10) || 100;
 
             /* ZSFZS-F024修复: 参数传递修正——trainingStart期望5个独立参数而非对象 */
-            var data = await SelfLnnApi.trainingStart(mode, lr, batch, epochs, datasetPath);
+            var data = await window.SelfLnnApi.trainingStart(mode, lr, batch, epochs, datasetPath);
             if (data.success) {
                 showNotification('训练已启动(' + mode + ')', 'success');
                 if (trainingPollInterval) clearInterval(trainingPollInterval);
@@ -73,6 +74,7 @@
     };
     window.resumeTraining = async function() {
         try {
+            if (typeof SelfLnnApi === 'undefined') { showNotification('API服务未就绪', 'danger'); return; }
             var data = await SelfLnnApi.trainingResume();
             /* ZSFZS-F052修复: 防止data为undefined/null时访问.success崩溃 */
             var ok = data && data.success;

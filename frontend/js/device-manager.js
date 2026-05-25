@@ -482,10 +482,10 @@ class DeviceManager {
         }
     }
 
-    stopCamera(id) {
+    async stopCamera(id) {
         const camera = this.cameras.find(c => c.id === id);
         if (!camera) return { success: false, error: '未找到摄像头' };
-        this._stopCameraStream(camera);
+        await this._stopCameraStream(camera);
         document.dispatchEvent(new CustomEvent('device-stopped', {
             detail: { type: 'camera', id: id }
         }));

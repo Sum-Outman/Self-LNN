@@ -89,6 +89,12 @@ var g_browserCompat = window.g_browserCompat || new BrowserCompat();
         g_commandEngine.onCommandResult = function(parsed, result) {
             addDialogueMessage('system', '[指令执行] ' + parsed.rawText + (result.success ? ' - 执行成功' : ' - 失败: ' + result.error));
         };
+        g_voiceCommandSystem.onCommandResult = function(result) {
+            addDialogueMessage('system', '[语音指令] ' + (result.originalText || result.command || '') + (result.success ? ' - 执行成功' : ' - 失败: ' + (result.error || '')));
+        };
+        g_textCommandSystem.onCommandResult = function(parsed, result) {
+            addDialogueMessage('system', '[文字指令] ' + (parsed.rawText || '') + (result.success ? ' - 执行成功' : ' - 失败: ' + (result.error || '')));
+        };
         
         setupEventListeners();
         g_deviceManager.init().catch(function(err) {
@@ -337,7 +343,9 @@ async function spawnGazeboModel() {
  * 从Gazebo删除模型
  */
 async function deleteGazeboModel() {
-    var name = document.getElementById('gazebo-model-name').value;
+    var nameEl = document.getElementById('gazebo-model-name');
+    if (!nameEl) return;
+    var name = nameEl.value;
     if (!name) { showNotification('⚠️ 请输入要删除的模型名称', 'warning'); return; }
     if (!confirm('确定要删除模型 ' + name + ' 吗？')) return;
     showNotification('正在删除模型 ' + name + '...', 'warning');
@@ -496,8 +504,11 @@ async function startRobotTraining() {
                 iterations: iters
             });
             if (result && result.success) {
-                document.getElementById('training-global-status').textContent = '训练中';
-                document.getElementById('training-global-status').className = 'training-status-badge active';
+                var statusEl = document.getElementById('training-global-status');
+                if (statusEl) {
+                    statusEl.textContent = '训练中';
+                    statusEl.className = 'training-status-badge active';
+                }
                 showNotification('✅ 机器人训练已启动', 'success');
                 refreshTrainingStatus();
             } else {
@@ -1123,7 +1134,8 @@ function updateSystemHealth(systemStatus) {
         if (cpuElement) cpuElement.textContent = cpuUsage >= 0 ? `${Math.round(cpuUsage)}%` : '--';
         
         // 内存使用（从内存统计中获取，绝不使用假数据）
-        const memoryData = systemData.modules.memory;
+        const modules = systemData.modules || {};
+        const memoryData = modules.memory;
         if (memoryData && memoryData.total > 0) {
             const usedMB = memoryData.total / (1024 * 1024);
             // 从多个来源获取真实系统总内存，拒绝硬编码假值
@@ -1279,23 +1291,27 @@ function updateMemorySystem(memoryStatus) {
         const memoryData = memoryStatus.data.memory;
         
         if (memoryTypes.length >= 3) {
-            // 短期记忆（如果有实际数据）
+            var totalItems = (memoryData.statistics && memoryData.statistics.total_items) ? memoryData.statistics.total_items : 1;
+            var stPct = ((memoryData.short_term_size || 0) / totalItems * 100).toFixed(0);
+            var ltPct = ((memoryData.long_term_size || 0) / totalItems * 100).toFixed(0);
+            var epPct = ((memoryData.episodic_size || 0) / totalItems * 100).toFixed(0);
+            // 短期记忆
             const shortTerm = memoryTypes[0].querySelector('.type-usage');
             const shortTermFill = memoryTypes[0].querySelector('.type-fill');
-            if (shortTerm) shortTerm.textContent = '--%';
-            if (shortTermFill) shortTermFill.style.width = '0%';
+            if (shortTerm) shortTerm.textContent = stPct + '%';
+            if (shortTermFill) shortTermFill.style.width = stPct + '%';
             
             // 长期记忆
             const longTerm = memoryTypes[1].querySelector('.type-usage');
             const longTermFill = memoryTypes[1].querySelector('.type-fill');
-            if (longTerm) longTerm.textContent = '--%';
-            if (longTermFill) longTermFill.style.width = '0%';
+            if (longTerm) longTerm.textContent = ltPct + '%';
+            if (longTermFill) longTermFill.style.width = ltPct + '%';
             
             // 情景记忆
             const episodic = memoryTypes[2].querySelector('.type-usage');
             const episodicFill = memoryTypes[2].querySelector('.type-fill');
-            if (episodic) episodic.textContent = '--%';
-            if (episodicFill) episodicFill.style.width = '0%';
+            if (episodic) episodic.textContent = epPct + '%';
+            if (episodicFill) episodicFill.style.width = epPct + '%';
         }
         
         const memoryInfo = document.querySelector('.memory-info');

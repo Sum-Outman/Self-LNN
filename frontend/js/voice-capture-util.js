@@ -121,6 +121,7 @@ class VoiceCaptureUtil {
     }
 
     static async uploadBlob(blob) {
+        if (!blob || !(blob instanceof Blob)) return { success: false, error: '无效的音频数据', text: '', confidence: -1 };
         if (!window.SelfLnnApi || typeof window.SelfLnnApi.voiceRecognize !== 'function') return { success: false, error: '语音识别API不可用', text: '', confidence: -1 };
         try {
             var result = await window.SelfLnnApi.voiceRecognize(blob);
@@ -178,7 +179,6 @@ class VoiceCaptureUtil {
                 stream.getTracks().forEach(function(t) { t.stop(); });
                 return { success: false, capturer: null, stream: null, error: (startResult && startResult.error) || '录音启动失败' };
             }
-            capturer.start = function() { return Promise.resolve(startResult); };
             return { success: true, capturer: capturer, stream: stream, error: null };
         } catch (err) {
             return { success: false, capturer: null, stream: null, error: err.message };

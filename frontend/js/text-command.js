@@ -55,6 +55,11 @@ class TextCommandSystem {
                 if (this.onCommandResult) {
                     this.onCommandResult(parsed, result);
                 }
+            }).catch(err => {
+                console.error('命令执行异常:', err);
+                if (this.onCommandResult) {
+                    this.onCommandResult(parsed, { success: false, error: err.message || '命令执行异常' });
+                }
             });
             return parsed;
         }

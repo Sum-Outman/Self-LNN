@@ -489,7 +489,7 @@ class DialogueEnhanced {
         }
 
         try {
-            var response = await SelfLnnApi.request('/dialogue/multimodal', {
+            var response = await window.SelfLnnApi.request('/dialogue/multimodal', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)

@@ -637,7 +637,7 @@ body {
 
 .type-fill {
     height: 100%;
-    background: linear-gradient(90deg, #888888, #888888);
+    background: linear-gradient(90deg, #888888, #aaaaaa);
     border-radius: 4px;
 }
 

@@ -179,12 +179,12 @@ class ApiService {
         if (!endpoint) return 'general';
         const ep = endpoint.toLowerCase();
         if (ep.includes('/status') || ep.includes('/health') || ep.includes('/stats') || ep.includes('/system/')) return 'general';
+        if (ep.includes('/dialogue') || ep.includes('/tts')) return 'dialogue';
         if (ep.includes('/reasoning') || ep.includes('/agi/')) return 'reasoning';
         if (ep.includes('/learning') || ep.includes('/imitation') || ep.includes('/auto_learn')) return 'learning';
         if (ep.includes('/knowledge') || ep.includes('/skill')) return 'knowledge';
         if (ep.includes('/vision') || ep.includes('/audio') || ep.includes('/text') ||
             ep.includes('/sensor') || ep.includes('/multimodal') || ep.includes('/teach/')) return 'multimodal';
-        if (ep.includes('/dialogue') || ep.includes('/tts')) return 'dialogue';
         if (ep.includes('/training')) return 'training';
         if (ep.includes('/robot') || ep.includes('/ros') || ep.includes('/gazebo') ||
             ep.includes('/serial') || ep.includes('/device')) return 'robot';

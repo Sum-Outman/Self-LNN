@@ -1405,47 +1405,22 @@ class VisualizationManager {
                 }
             }
 
-            /* ===== M-014/M-015/M-016修复: 每次fetch时同时拉取频谱/热力图/预测数据 ===== */
-
             /* M-014修复: 频谱分析数据拉取
-             * TODO: 待后端提供 /api/audio/spectrum 接口后替换为真实音频频谱数据 */
+             * 后端光谱接口尚未就绪时记录warning而非使用虚假数据 */
             if (typeof this.updateSpectrumData === 'function') {
-                /* numBands为32，使用32个[0,1]范围随机幅值填充 */
-                const spectrumData32 = new Array(32);
-                for (let si = 0; si < 32; si++) {
-                    spectrumData32[si] = Math.random();
-                }
-                this.updateSpectrumData(spectrumData32, 44100);
+                console.debug('[Visualization] 频谱数据源待后端/api/audio/spectrum接口就绪');
             }
 
             /* M-015修复: 神经元激活热力图定期更新源
-             * TODO: 待后端提供神经网络激活值接口后替换为真实数据 */
-            if (this.stateActivationCanvas && capturedLossData) {
-                const baseActivation = Math.min(1, Math.max(0.05, capturedLossData.loss || 0.5));
-                const heatmapSize = this.heatmapSize || 20;
-                const activationData = new Array(heatmapSize);
-                for (let hi = 0; hi < heatmapSize; hi++) {
-                    activationData[hi] = new Array(heatmapSize);
-                    for (let hj = 0; hj < heatmapSize; hj++) {
-                        activationData[hi][hj] = baseActivation * (0.5 + Math.random() * 0.5);
-                    }
-                }
-                this.updateStateActivationData(activationData);
+             * 后端神经网络激活值接口尚未就绪时记录warning而非使用虚假数据 */
+            if (this.stateActivationCanvas) {
+                console.debug('[Visualization] 热力图数据源待后端神经网络激活值接口就绪');
             }
 
             /* M-016修复: 预测散点图在fetchAndUpdateAll中定期更新
-             * TODO: 待后端提供预测结果接口后替换为真实预测值 */
-            if (this.dataBuffers.prediction && capturedLossData) {
-                const windowSize = Math.min(10, this.maxDataPoints);
-                const actualValues = [];
-                const predictedValues = [];
-                const baseLoss = capturedLossData.loss || 0.5;
-                for (let pi = 0; pi < windowSize; pi++) {
-                    const actual = baseLoss * (0.5 + Math.random() * 1.0);
-                    actualValues.push(actual);
-                    predictedValues.push(actual * (0.9 + Math.random() * 0.2));
-                }
-                this.updatePredictionData(actualValues, predictedValues);
+             * 后端预测结果接口尚未就绪时记录warning而非使用虚假数据 */
+            if (this.dataBuffers && this.dataBuffers.prediction) {
+                console.debug('[Visualization] 预测散点图数据源待后端预测结果接口就绪');
             }
 
         } catch (error) {

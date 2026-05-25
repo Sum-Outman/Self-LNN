@@ -118,8 +118,13 @@
 
     /* ==================== 后端API操作 ==================== */
     function fetchKnowledgeFromBackend() {
+        if (!window.SelfLnnApi) {
+            graphState.loading = false;
+            showStatus('load-status', 'API服务未就绪', 'error');
+            return;
+        }
         graphState.loading = true;
-        SelfLnnApi.request('/knowledge', { method: 'GET' })
+        window.SelfLnnApi.request('/knowledge', { method: 'GET' })
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
@@ -161,14 +166,6 @@
     }
 
     /* ==================== 页面交互 ==================== */
-    function switchTab(name) {
-        document.querySelectorAll('#knowledge .tab-btn').forEach(function(b) { b.classList.remove('active'); });
-        document.querySelectorAll('#knowledge .tab-content').forEach(function(c) { c.classList.remove('active'); });
-        var btn = document.querySelector('.tab-btn[onclick*="' + name + '"]');
-        if (btn) btn.classList.add('active');
-        var tabEl = document.getElementById('tab-' + name);
-        if (tabEl) tabEl.classList.add('active');
-    }
 
     function fillExample(s, p, o) {
         document.getElementById('input-subject').value = s;
@@ -493,8 +490,10 @@
 
     function resizeCanvas() {
         if (!canvas) return;
-        canvas.width = canvas.parentElement.clientWidth;
-        canvas.height = canvas.parentElement.clientHeight;
+        var parent = canvas.parentElement;
+        if (!parent) return;
+        canvas.width = parent.clientWidth;
+        canvas.height = parent.clientHeight;
         drawGraph();
     }
 
