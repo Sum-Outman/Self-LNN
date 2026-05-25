@@ -41,18 +41,7 @@
 #include <string.h>
 #include <math.h>
 
-/* K-114: Box-Muller线程安全 —— static变量无锁保护,并发调用产生错误分布 */
-static float gaussian_random(float mean, float stddev) {
-    float u, v, s;
-    do {
-        u = rng_uniform(0.0f, 1.0f) * 2.0f - 1.0f;
-        v = rng_uniform(0.0f, 1.0f) * 2.0f - 1.0f;
-        s = u * u + v * v;
-    } while (s >= 1.0f || s == 0.0f);
-    
-    s = sqrtf(-2.0f * logf(s) / s);
-    return mean + stddev * u * s;
-}
+/* ZSF-ZNB修复L-003: 已使用math_utils中的rng_normal替代重复gaussian_random */
 
 /**
  * @brief 均匀随机数生成器（静态辅助函数）
@@ -233,10 +222,10 @@ int quaternion_cfc_cell_update(QuaternionCfcCell* cell, const Quaternion* input,
     if (ret != 0) return ret;
     
     if (cell->noise_std > 0.0f) {
-        cell->state.w += gaussian_random(0.0f, cell->noise_std) * dt;
-        cell->state.x += gaussian_random(0.0f, cell->noise_std) * dt;
-        cell->state.y += gaussian_random(0.0f, cell->noise_std) * dt;
-        cell->state.z += gaussian_random(0.0f, cell->noise_std) * dt;
+        cell->state.w += rng_normal(0.0f, cell->noise_std) * dt;
+        cell->state.x += rng_normal(0.0f, cell->noise_std) * dt;
+        cell->state.y += rng_normal(0.0f, cell->noise_std) * dt;
+        cell->state.z += rng_normal(0.0f, cell->noise_std) * dt;
     }
     
     if (output) {
@@ -354,22 +343,22 @@ int quaternion_cfc_cell_evolve(QuaternionCfcCell* cell, float mutation_rate) {
     // 对增益参数添加随机突变
     if (mutation_rate > 0.0f) {
         // 输入增益突变
-        cell->input_gain.w += gaussian_random(0.0f, mutation_rate);
-        cell->input_gain.x += gaussian_random(0.0f, mutation_rate);
-        cell->input_gain.y += gaussian_random(0.0f, mutation_rate);
-        cell->input_gain.z += gaussian_random(0.0f, mutation_rate);
+        cell->input_gain.w += rng_normal(0.0f, mutation_rate);
+        cell->input_gain.x += rng_normal(0.0f, mutation_rate);
+        cell->input_gain.y += rng_normal(0.0f, mutation_rate);
+        cell->input_gain.z += rng_normal(0.0f, mutation_rate);
         
         // 反馈增益突变
-        cell->feedback_gain.w += gaussian_random(0.0f, mutation_rate * 0.1f);
-        cell->feedback_gain.x += gaussian_random(0.0f, mutation_rate * 0.1f);
-        cell->feedback_gain.y += gaussian_random(0.0f, mutation_rate * 0.1f);
-        cell->feedback_gain.z += gaussian_random(0.0f, mutation_rate * 0.1f);
+        cell->feedback_gain.w += rng_normal(0.0f, mutation_rate * 0.1f);
+        cell->feedback_gain.x += rng_normal(0.0f, mutation_rate * 0.1f);
+        cell->feedback_gain.y += rng_normal(0.0f, mutation_rate * 0.1f);
+        cell->feedback_gain.z += rng_normal(0.0f, mutation_rate * 0.1f);
         
         // 输出增益突变
-        cell->output_gain.w += gaussian_random(0.0f, mutation_rate * 0.5f);
-        cell->output_gain.x += gaussian_random(0.0f, mutation_rate * 0.5f);
-        cell->output_gain.y += gaussian_random(0.0f, mutation_rate * 0.5f);
-        cell->output_gain.z += gaussian_random(0.0f, mutation_rate * 0.5f);
+        cell->output_gain.w += rng_normal(0.0f, mutation_rate * 0.5f);
+        cell->output_gain.x += rng_normal(0.0f, mutation_rate * 0.5f);
+        cell->output_gain.y += rng_normal(0.0f, mutation_rate * 0.5f);
+        cell->output_gain.z += rng_normal(0.0f, mutation_rate * 0.5f);
     }
     
     return 0;

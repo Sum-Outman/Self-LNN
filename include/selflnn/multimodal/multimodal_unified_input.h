@@ -21,6 +21,8 @@ extern "C" {
 #define SELFLNN_MAX_CONTROL_DIM 64
 #define SELFLNN_MAX_MODALITIES 9
 #define SELFLNN_UNIFIED_INPUT_DIM (SELFLNN_MAX_MODALITIES * SELFLNN_MAX_CONTROL_DIM)
+/* ZSF-ZNB修复S-002: 统一投影维度（所有模态投影到此维度后求和） */
+#define SELFLNN_UNIFIED_PROJECTION_DIM 256
 
 /**
  * @brief 统一输入方法枚举
@@ -70,6 +72,13 @@ typedef struct {
     /* M-003修复: 保存上一次输出用于时序对比 */
     float prev_output[SELFLNN_MAX_CONTROL_DIM];     /**< 上一次统一输出 */
     size_t prev_output_dim;                         /**< 上一次输出维度 */
+    /* ZSF-ZNB修复S-002: 每模态线性投影矩阵W_i + 偏置b_i
+     * W_i[modality] 将各模态原始维度映射到 SELFLNN_UNIFIED_PROJECTION_DIM
+     * 统一输入 = sum_i (W_i · x_i + b_i) -- element-wise求和 */
+    float* projection_matrices[SELFLNN_MAX_MODALITIES]; /**< 投影矩阵 [proj_dim × input_dim_i] */
+    float* projection_biases[SELFLNN_MAX_MODALITIES];   /**< 投影偏置 [proj_dim] */
+    size_t projection_input_sizes[SELFLNN_MAX_MODALITIES]; /**< 各投影输入维度 */
+    int projections_initialized;                         /**< 投影矩阵是否已初始化 */
 } UnifiedInputState;
 
 /**

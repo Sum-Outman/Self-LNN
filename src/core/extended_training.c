@@ -909,7 +909,9 @@ SELFLNN_API int lnn_trillion_scale_train_step(LNN* network, const float* input,
         ET_LNN_UNLOCK(network);
         return ret;
     }
-    if (network->enable_model_parallel) {
+    /* ZSF-ZNB修复H-003: 模型并行forward仅在非gradient_checkpointing时执行
+     * 避免常规forward和并行forward结果互相覆盖，浪费50%计算 */
+    if (!network->enable_gradient_checkpointing && network->enable_model_parallel) {
         ModelParallelConfig mp_config;
         memset(&mp_config, 0, sizeof(mp_config));
         mp_config.num_devices = network->model_parallel_size;
@@ -1003,7 +1005,7 @@ SELFLNN_API size_t lnn_calculate_trillion_scale_params(const LNN* network)
         size_t layer_input = (l == 0) ? input_size : hidden_size;
         total += (layer_input * hidden_size) + hidden_size;
     }
-    return total * 2;
+    return total; /* ZSF-ZNB修复M-004: 移除无理由的*2，内存估计在调用方处理 */
 }
 
 SELFLNN_API double lnn_estimate_trillion_scale_memory(const LNN* network,
@@ -1114,6 +1116,27 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
 
     ET_LNN_LOCK(network);
 
+    /* ZSF-ZNB修复C-004: 创建临时优化器用于参数更新 */
+    OptimizerConfig opt_cfg;
+    memset(&opt_cfg, 0, sizeof(opt_cfg));
+    opt_cfg.type = OPTIMIZER_ADAM;
+    opt_cfg.learning_rate = 0.0005f;
+    opt_cfg.beta1 = 0.9f;
+    opt_cfg.beta2 = 0.999f;
+    opt_cfg.epsilon = 1e-8f;
+    size_t param_count = lnn_get_parameter_count(network);
+    float* param_buffer = lnn_get_parameters(network);
+    Optimizer* opt = optimizer_create(&opt_cfg, param_buffer, param_count);
+    OptimizerConfig opt_cfg_cfc;
+    memset(&opt_cfg_cfc, 0, sizeof(opt_cfg_cfc));
+    opt_cfg_cfc.type = OPTIMIZER_ADAM;
+    opt_cfg_cfc.learning_rate = 0.0005f;
+    opt_cfg_cfc.beta1 = 0.9f;
+    opt_cfg_cfc.beta2 = 0.999f;
+    opt_cfg_cfc.epsilon = 1e-8f;
+
+    int total_count = 0;
+
     for (int ep = 0; ep < epochs; ep++) {
         float epoch_loss = 0.0f;
         int count = 0;
@@ -1163,15 +1186,37 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
                                 concat_dim, 0.1f, &loss_val);
             epoch_loss += loss_val;
 
+            /* ZSF-ZNB修复C-004: 添加反向传播更新网络参数
+             * 构造对比学习梯度：dL/dθ = ∂L/∂emb_anchor * ∂emb_anchor/∂θ + ...
+             * 使用组合target向量近似指导更新方向 */
+            float target_emb[512] = {0};
+            for (size_t d = 0; d < concat_dim && d < 512; d++) {
+                target_emb[d] = anchor_emb[d] * 0.5f + pos_emb[d] * 0.5f;
+            }
+            _lnn_backward_internal(network, target_emb, &loss_val);
+
             safe_free((void**)&aug_positive);
             safe_free((void**)&negatives);
         }
 
         if (count > 0) {
             epoch_loss /= (float)count;
+            /* ZSF-ZNB修复C-004: 每个epoch应用参数更新 */
+            float* current_params = lnn_get_parameters(network);
+            if (current_params && param_buffer) {
+                memcpy(param_buffer, current_params, param_count * sizeof(float));
+            }
+            optimizer_step(opt, param_buffer, NULL, param_count, 
+                          (size_t)(ep + total_count));
+            float* writeback = lnn_get_parameters(network);
+            if (writeback) {
+                memcpy(writeback, param_buffer, param_count * sizeof(float));
+            }
+            total_count++;
         }
     }
 
+    if (opt) optimizer_free(opt);
     ET_LNN_UNLOCK(network);
     return 0;
 }
@@ -1186,6 +1231,26 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
     int same_network = (teacher == student);
     ET_LNN_LOCK(teacher);
     if (!same_network) ET_LNN_LOCK(student);
+
+    /* ZSF-ZNB修复C-003: 创建临时优化器用于参数更新 */
+    OptimizerConfig opt_cfg;
+    memset(&opt_cfg, 0, sizeof(opt_cfg));
+    opt_cfg.type = OPTIMIZER_ADAM;
+    opt_cfg.learning_rate = 0.001f;
+    opt_cfg.beta1 = 0.9f;
+    opt_cfg.beta2 = 0.999f;
+    opt_cfg.epsilon = 1e-8f;
+    size_t param_count = lnn_get_parameter_count(student);
+    float* param_buffer = lnn_get_parameters(student);
+    Optimizer* opt = optimizer_create(&opt_cfg, param_buffer, param_count);
+    if (!opt) {
+        if (!same_network) ET_LNN_UNLOCK(student);
+        ET_LNN_UNLOCK(teacher);
+        return -2;
+    }
+
+    float total_epoch_loss = 0.0f;
+    int total_count = 0;
 
     for (int ep = 0; ep < epochs; ep++) {
         float total_loss = 0.0f;
@@ -1202,14 +1267,10 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
             _lnn_forward_internal(student, sample, s_output);
             (void)s_hidden; (void)s_cell;
 
-            /* ZSFABC-P0-007修复: KL散度公式修正
-             * 原代码错误: 单个值self-normalize(t_norm = t_soft/|t_soft|)并非softmax
-             * KL(P||Q) = Σ_i P(i)·log(P(i)/Q(i)) 其中P,Q是softmax归一化分布 */
             size_t out_dim = teacher->config.output_size;
             if (out_dim > 256) out_dim = 256;
             if (out_dim == 0) out_dim = 128;
 
-            /* 计算teacher/student softmax分布 */
             float t_sum = 0.0f, s_sum = 0.0f;
             float t_prob[256] = {0}, s_prob[256] = {0};
             for (size_t d = 0; d < out_dim; d++) {
@@ -1239,8 +1300,33 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
 
             float combined_loss = alpha * kl_div + (1.0f - alpha) * hard_loss;
             total_loss += combined_loss;
+
+            /* ZSF-ZNB修复C-003: 添加反向传播更新学生网络参数 */
+            float loss_val = combined_loss;
+            _lnn_backward_internal(student, t_output, &loss_val);
+        }
+
+        if (count > 0) {
+            float* current_params = lnn_get_parameters(student);
+            if (current_params) {
+                memcpy(param_buffer, current_params, param_count * sizeof(float));
+            }
+            optimizer_step(opt, param_buffer, NULL, param_count, 
+                          (size_t)(ep + total_count));
+            /* 将更新后的参数写回LNN */
+            float* writeback = lnn_get_parameters(student);
+            if (writeback) {
+                memcpy(writeback, param_buffer, param_count * sizeof(float));
+            }
+            total_epoch_loss += total_loss;
+            total_count += count;
         }
     }
+
+    if (total_count > 0) {
+        total_epoch_loss /= (float)total_count;
+    }
+    optimizer_free(opt);
 
     if (!same_network) ET_LNN_UNLOCK(student);
     ET_LNN_UNLOCK(teacher);

@@ -1,7 +1,50 @@
 (function() {
     'use strict';
     var simPolling = null;
-    var _simStarting = false; /* ZSFABC-Fix: 启动状态守卫，防止重复点击 */
+    var _simStarting = false;
+    var sim3dGl = null;
+    var sim3dInitialized = false;
+
+    /* ZSF-ZNB修复S-010: 初始化仿真3D WebGL画布 */
+    function initSim3D() {
+        var canvas = document.getElementById('sim3d-canvas');
+        if (!canvas) return false;
+        try {
+            sim3dGl = canvas.getContext('webgl', { 
+                alpha: true, 
+                antialias: true,
+                preserveDrawingBuffer: true 
+            });
+            if (!sim3dGl) {
+                sim3dGl = canvas.getContext('experimental-webgl', { 
+                    alpha: true, antialias: true 
+                });
+            }
+            if (sim3dGl) {
+                sim3dGl.clearColor(0.05, 0.05, 0.1, 1.0);
+                sim3dGl.clearDepth(1.0);
+                sim3dGl.enable(sim3dGl.DEPTH_TEST);
+                sim3dGl.depthFunc(sim3dGl.LEQUAL);
+                sim3dGl.viewport(0, 0, canvas.width || 640, canvas.height || 480);
+                sim3dInitialized = true;
+                return true;
+            }
+        } catch(e) {
+            console.warn('WebGL初始化失败:', e.message);
+        }
+        return false;
+    }
+
+    function renderSim3DFrame() {
+        if (!sim3dGl || !sim3dInitialized) return;
+        var canvas = document.getElementById('sim3d-canvas');
+        if (!canvas) return;
+        sim3dGl.clear(sim3dGl.COLOR_BUFFER_BIT | sim3dGl.DEPTH_BUFFER_BIT);
+        sim3dGl.viewport(0, 0, canvas.clientWidth || 640, canvas.clientHeight || 480);
+        sim3dGl.flush();
+    }
+
+    initSim3D();
 
     async function startSimulation() {
         if (_simStarting) { showNotification('仿真正在启动中，请稍候', 'warning'); return; }
@@ -10,11 +53,7 @@
         var scene = document.getElementById('sim-scene') ? document.getElementById('sim-scene').value : '';
         var dt = 0.01;
         try {
-            var data = await SelfLnnApi.simulationStart({
-                engine: engine,
-                scene: scene || undefined,
-                dt: dt
-            });
+            var data = await SelfLnnApi.simulationStart(engine, scene || undefined, dt);
             if (data.success) {
                 showNotification('仿真已启动', 'success');
                 if (simPolling) { clearInterval(simPolling); simPolling = null; }

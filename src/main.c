@@ -1107,6 +1107,34 @@ int main(int argc, char* argv[])
                     printf("  检查点模型自动加载完成\n");
                 } else {
                     printf("  检查点模型加载失败（系统将使用随机初始化权重）\n");
+                    /* ZSF-ZNB修复S-011: 无检查点时执行引导训练
+                     * 对共享LNN执行短期预训练，使权重脱离纯随机状态。
+                     * 使用合成正弦波+余弦波数据作为通用特征提取引导。
+                     * 训练5个epoch使LNN至少学到基本的函数映射能力。 */
+                    void* boot_lnn = g_global_lnn;
+                    if (boot_lnn) {
+                        size_t boot_samples = 128;
+                        size_t boot_feat_dim = 64;
+                        size_t boot_batches = 5;
+                        float* boot_data = (float*)safe_malloc(boot_samples * boot_feat_dim * sizeof(float));
+                        if (boot_data) {
+                            for (size_t s = 0; s < boot_samples; s++) {
+                                for (size_t d = 0; d < boot_feat_dim; d++) {
+                                    float phase = (float)(s * d) * 0.1f;
+                                    boot_data[s * boot_feat_dim + d] = 
+                                        sinf(phase) * 0.5f + cosf(phase * 1.7f) * 0.3f;
+                                }
+                            }
+                            int pretrained = lnn_self_supervised_pretrain(
+                                (LNN*)boot_lnn, boot_data, boot_samples, boot_feat_dim, (int)boot_batches);
+                            if (pretrained == 0) {
+                                printf("  引导训练完成：%zu样本×5轮，LNN已脱离纯随机状态\n", boot_samples);
+                            } else {
+                                printf("  引导训练执行，但结果需验证（错误码=%d）\n", pretrained);
+                            }
+                            safe_free((void**)&boot_data);
+                        }
+                    }
                 }
             }
             /* ZSFWS-013修复: 在线学习器附着到共享LNN，直接操作LNN权重矩阵

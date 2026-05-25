@@ -44,7 +44,7 @@
             return window.SelfLnnApi.getBaseUrl();
         }
         var host = window.location.hostname || '127.0.0.1';
-        var port = (typeof SELFLNN_HTTP_PORT !== 'undefined') ? SELFLNN_HTTP_PORT : -1;
+        var port = 8080;
         return 'http://' + host + ':' + port;
     }
 
@@ -74,10 +74,12 @@
             return;
         }
         pdShowLoading();
-        var url = pdGetBaseUrl() + '/api/product/spec';
+        var url = '/api/product/spec';
         var postData = JSON.stringify({ requirement: reqText });
 
-        fetch(url, {
+        /* ZSF-ZNB修复S-012: 使用SelfLnnApi.request()替代裸fetch
+         * 确保API密钥认证、重试机制和错误处理统一 */
+        SelfLnnApi.request(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: postData

@@ -784,54 +784,51 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         size_t curr_input_size = (layer == 0) ? input_size : hidden_size;
         size_t weight_count = curr_input_size * hidden_size;
         
-        /* 单样本模式：梯度累积（+=），由调用方通过cfc_apply_cell_gradients_adam下发更新 */
-        for (size_t k = 0; k < weight_count; k++) {
-            cell_layer->weight_grad[k] += learning_rate * cell_layer->weight_matrix[k] * 0.0f;
-            /* 注意：梯度已在 cfc_cell_backward 中被填充到 weight_grad 中。
-             * 此处不执行 -= lr*grad 的直接SGD更新，避免绕过外部优化器。 */
-        }
-        /* 保留原SGD路径作为fallback（通过 network->use_legacy_sgd 标志控制） */
-        if (network->flags & 0x01) {
+        /* ZSF-ZNB修复C-001: 去除*0.0f空操作，应用cell级梯度更新
+         * 梯度已在 cfc_cell_backward 中填充到 *_grad 数组。
+         * 使用简单SGD更新（参数 -= lr * grad），后续可升级为Adam等。
+         * 结构体已有cell_momentum_buffer用于未来统一动量管理。 */
+        {
+            float effective_lr = learning_rate;
             for (size_t k = 0; k < weight_count; k++) {
-                cell_layer->weight_matrix[k] -= learning_rate * cell_layer->weight_grad[k];
+                cell_layer->weight_matrix[k] -= effective_lr * cell_layer->weight_grad[k];
             }
             for (size_t k = 0; k < hidden_size; k++) {
-                cell_layer->bias_vector[k] -= learning_rate * cell_layer->bias_grad[k];
+                cell_layer->bias_vector[k] -= effective_lr * cell_layer->bias_grad[k];
             }
         }
-        
-        /* ZSFX-P0: HH权重/门控权重/时间常数 → 仅legacy模式直接SGD */
-        if (network->flags & 0x01) {
-            /* 更新隐藏到隐藏连接权重 */
+        /* ZSF-ZNB修复C-001: HH权重/门控权重/时间常数 → 全部应用SGD更新 */
+        {
+            float effective_lr = learning_rate;
             size_t hh_count = hidden_size * hidden_size;
+            /* 更新隐藏到隐藏连接权重 */
             for (size_t k = 0; k < hh_count; k++) {
                 cell_layer->hidden_to_gate_weights[k] -= 
-                    learning_rate * cell_layer->hidden_to_gate_weight_grad[k];
+                    effective_lr * cell_layer->hidden_to_gate_weight_grad[k];
                 cell_layer->hidden_to_activation_weights[k] -= 
-                    learning_rate * cell_layer->hidden_to_activation_weight_grad[k];
+                    effective_lr * cell_layer->hidden_to_activation_weight_grad[k];
             }
-            
-            /* 更新门控权重和偏置 */
+            /* 更新门控权重 */
             for (size_t k = 0; k < weight_count; k++) {
                 cell_layer->input_gate_weights[k] -= 
-                    learning_rate * cell_layer->input_gate_weight_grad[k];
+                    effective_lr * cell_layer->input_gate_weight_grad[k];
             }
+            /* 更新门控偏置 */
             for (size_t k = 0; k < hidden_size * 3; k++) {
-                cell_layer->gate_biases[k] -= learning_rate * cell_layer->gate_bias_grad[k];
+                cell_layer->gate_biases[k] -= effective_lr * cell_layer->gate_bias_grad[k];
             }
-            
-            /* 更新时间常数 */
-            if (cell_layer->use_adaptive_tau) {
-                for (size_t k = 0; k < hidden_size; k++) {
-                    cell_layer->time_constants[k] -= 
-                        cell_layer->tau_learning_rate * cell_layer->time_constant_grad[k];
-                    if (cell_layer->time_constants[k] < cell_layer->min_time_constant)
-                        cell_layer->time_constants[k] = cell_layer->min_time_constant;
-                    if (cell_layer->time_constants[k] > cell_layer->max_time_constant)
-                        cell_layer->time_constants[k] = cell_layer->max_time_constant;
-                }
+        }
+        /* 更新时间常数 */
+        if (cell_layer->use_adaptive_tau) {
+            for (size_t k = 0; k < hidden_size; k++) {
+                cell_layer->time_constants[k] -= 
+                    cell_layer->tau_learning_rate * cell_layer->time_constant_grad[k];
+                if (cell_layer->time_constants[k] < cell_layer->min_time_constant)
+                    cell_layer->time_constants[k] = cell_layer->min_time_constant;
+                if (cell_layer->time_constants[k] > cell_layer->max_time_constant)
+                    cell_layer->time_constants[k] = cell_layer->max_time_constant;
             }
-        } /* legacy SGD flag */
+        }
     }
     } /* if (!skip_cell_update) — 关闭P0-002批量模式cell参数延迟更新块 */
 

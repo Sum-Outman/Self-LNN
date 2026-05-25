@@ -403,6 +403,17 @@ class CommandEngine {
 
     async _callSystemApi(action, params) {
         const apiMap = {
+            'launch_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand({action:'launch_app',name:params.name}) : null,
+            'close_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand({action:'close_app',name:params.name}) : null,
+            'type_text': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand({action:'type_text',text:params.text}) : null,
+            'screenshot': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('screenshot',{}) : null,
+            'restart': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('restart',{}) : null,
+            'shutdown': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('shutdown',{}) : null,
+            'sleep': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('sleep',{}) : null,
+            'lock': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('lock',{}) : null,
+            'volume_up': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('volume_up',{value:params.value}) : null,
+            'volume_down': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('volume_down',{value:params.value}) : null,
+            'mute_toggle': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('mute_toggle',{}) : null,
             'start_training': async () => window.SelfLnnApi.startTraining ? await window.SelfLnnApi.startTraining(params) : null,
             'stop_training': async () => window.SelfLnnApi.stopTrainingJob ? await window.SelfLnnApi.stopTrainingJob() : null,
             'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : null,

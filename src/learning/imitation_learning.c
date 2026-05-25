@@ -1721,10 +1721,9 @@ static ImitationLearningResult* train_gail(ImitationLearner* learner) {
                                max_action_dim * sizeof(float));
                         float d_score = 0.0f;
                         if (lnn_forward(discriminator, da_input, &d_score) == 0) {
-                            /* 将判别器输出转为奖励: r = -log(1 - D(s,a)) */
+                            /* ZSF-ZNB修复S-006: 标准GAIL r = log D(s,a) */
                             float prob = 1.0f / (1.0f + expf(-d_score));
-                            float reward = -logf(1.0f - prob + 1e-8f);
-                            /* 简单的策略梯度: 最大化奖励 → 最小化负奖励 */
+                            float reward = logf(prob + 1e-8f);
                             total_g_loss -= reward;
                         }
                         safe_free((void**)&da_input);
@@ -1734,16 +1733,18 @@ static ImitationLearningResult* train_gail(ImitationLearner* learner) {
             if (total_expert_samples > 0) {
                 total_g_loss /= (float)total_expert_samples;
             }
-            /* ZSFWS-H003修复: GAIL G步使用对抗策略梯度替代BC
-             * 原实现使用 BC（MSE损失匹配专家动作），不利用判别器对抗信号。
-             * 标准GAIL应最大化判别器识别为"专家"的概率：
-             *   loss_G = -log(D(s,a))  或  loss_G = -log(1 - D'(s,a))
-             * 这里使用策略梯度方式：对每个生成样本计算对抗奖励，
-             * 通过LNN反向传播将策略推向高奖励方向。
-             *
-             * 具体方法：累积对抗奖励梯度
-             *   policy_loss = -Σ_i reward_i * log_prob
-             * 其中 reward_i = -log(1 - D(s_i, a_i)) 已在上面计算
+            /* ZSF-ZNB修复S-006: 标准GAIL(Ho&Ermon)生成器步
+             * 标准GAIL使用TRPO/PPO更新策略，奖励 = log D(s,a)
+             * D(s,a) = sigmoid(f(s,a)) 输出[0,1]
+             * 奖励: r(s,a) = log D(s,a) = -log(1 + e^{-f(s,a)}) = -softplus(-f)
+             * 策略梯度: ∇J = E[∇logπ(a|s) * log D(s,a)]
+             * 
+             * 实现方式：
+             *   1. 用判别器评估状态-动作对
+             *   2. r = log(sigmoid(d_score)) 作为即时奖励
+             *   3. 使用REINFORCE风格策略梯度：
+             *      target_a_i = a_i + lr * r * ∇_a logπ(a|s)
+             *      其中 ∇_a logπ(a|s) ≈ (1 - a²) (tanh策略假设)
              */
             float* sa_pair_buf = (float*)safe_calloc(max_state_dim + max_action_dim, sizeof(float));
             float* policy_grad = (float*)safe_calloc(max_state_dim + max_action_dim, sizeof(float));
@@ -1752,25 +1753,29 @@ static ImitationLearningResult* train_gail(ImitationLearner* learner) {
                 for (size_t gi = 0; gi < g_sample_count; gi++) {
                     memcpy(sa_pair_buf, &g_inputs[gi * max_state_dim], max_state_dim * sizeof(float));
 
-                    /* 将状态输入策略网络得到动作概率 */
+                    /* 将状态输入策略网络得到动作 */
                     lnn_forward(policy_network, sa_pair_buf, sa_pair_buf + max_state_dim);
 
                     /* 用判别器评估新动作 */
                     float d_score = 0.0f;
                     if (lnn_forward(discriminator, sa_pair_buf, &d_score) == 0) {
-                        float prob = 1.0f / (1.0f + expf(-d_score));
-                        float adv_reward = -logf(1.0f - prob + 1e-8f);
+                        /* 标准GAIL奖励: r = log D(s,a) = -softplus(-d_score)
+                         * 其中 D(s,a) = sigmoid(d_score) */
+                        float prob = 1.0f / (1.0f + expf(-d_score)); /* D(s,a) */
+                        float adv_reward = logf(prob + 1e-8f); /* log D(s,a) */
 
-                        /* 策略梯度: 使用对抗奖励
-                         * 目标: 最大化 d_score → 最小化 -d_score
-                         * 构建损失向量: target = current_action + lr * reward * sign */
-                        float lr = learner->config.learning_rate * 0.5f;
+                        /* REINFORCE策略梯度更新
+                         * target_a_i = a_i + lr * r * (1 - a_i²)
+                         * (1 - a_i²)是tanh策略的∇_a logπ近似 */
+                        float lr = learner->config.learning_rate * 0.3f;
                         for (int ad = 0; ad < max_action_dim; ad++) {
                             float curr_a = sa_pair_buf[max_state_dim + ad];
-                            policy_grad[max_state_dim + ad] = curr_a + lr * adv_reward * (curr_a > 0.5f ? 1.0f : -0.5f);
+                            float grad_log_pi = 1.0f - curr_a * curr_a + 1e-6f;
+                            policy_grad[max_state_dim + ad] = RL_CLAMP(
+                                curr_a + lr * adv_reward * grad_log_pi, -1.0f, 1.0f);
                         }
                         memcpy(policy_grad, sa_pair_buf, max_state_dim * sizeof(float));
-                        float policy_loss = 0.0f;
+                        float policy_loss = -adv_reward;
                         lnn_backward(policy_network, policy_grad, &policy_loss);
                     }
                 }

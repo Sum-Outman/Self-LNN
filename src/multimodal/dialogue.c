@@ -1823,11 +1823,13 @@ DialogueResponse* dialogue_process_input(DialogueProcessor* processor,
     }
     
     /* 步骤3：生成响应文本
+     * ZSF-ZNB修复H-004: 移除模板回退路径
      * 生成优先级（从高到低）：
-     *   1. CfC ODE神经生成（DialogueGenerator可用时，知识库检索增强）
+     *   1. CfC ODE神经生成（知识库检索增强）
      *   2. LNN自回归生成（lnn_instance可用时）
-     *   3. 模板匹配回退（无模型时，使用1000+扩展模板库）
-     */
+     *   3. LNN不可用时返回NULL → 后端LNN直连(state-aware分析)
+     * 
+     * 模板系统仅保留为LNN训练的冷启动语料库，不参与实际响应生成。 */
     char* response_text = NULL;
     float confidence = 0.7f;
     int response_code = 0;
@@ -1874,40 +1876,29 @@ DialogueResponse* dialogue_process_input(DialogueProcessor* processor,
                 return NULL;
             }
         } else if (!gen_ok && feature_count > 0) {
-            /* V2防御性修复：生成器未初始化时尝试自动初始化并重试 */
+            /* ZSF-ZNB修复H-004: 自动初始化生成器并重试LNN生成 */
             if (dialogue_init_generator(processor, 128) == 0 &&
                 generate_response_with_lnn(processor, text_features, (size_t)feature_count,
                                           &response_text, &confidence, &response_code,
                                           1.0f, 40, GEN_MAX_OUTPUT_TOKENS) == 0) {
+                /* LNN生成成功 */
             } else {
-                /* 模板回退：LNN和CfC均不可用时使用扩展模板库 */
-                float tmpl_conf = 0.0f;
-                if (dialogue_generate_with_template(user_input, input_length,
-                                                   text_features, (size_t)feature_count,
-                                                   &response_text, &tmpl_conf) == 0) {
-                    confidence = tmpl_conf;
-                    response_code = 0;
-                } else {
-                    if (text_features) safe_free((void**)&text_features);
-                    if (created_new_context) dialogue_context_free(target_context);
-                    safe_free((void**)&response);
-                    return NULL;
-                }
-            }
-        } else {
-            /* 无特征时也尝试模板回退 */
-            float tmpl_conf = 0.0f;
-            if (dialogue_generate_with_template(user_input, input_length,
-                                               NULL, 0,
-                                               &response_text, &tmpl_conf) == 0) {
-                confidence = tmpl_conf;
-                response_code = 0;
-            } else {
+                /* ZSF-ZNB修复H-004: 模板回退已禁用
+                 * 对话系统的模板仅保留为LNN训练的冷启动语料库。
+                 * 当LNN和CfC均不可用时，不返回模板响应,
+                 * 而是返回NULL让后端用LNN直连(state-aware分析)处理。
+                 * 这确保用户始终获得基于LNN的真实响应。 */
                 if (text_features) safe_free((void**)&text_features);
                 if (created_new_context) dialogue_context_free(target_context);
                 safe_free((void**)&response);
                 return NULL;
             }
+        } else {
+            /* ZSF-ZNB修复H-004: 无特征时也返回NULL让后端处理 */
+            if (text_features) safe_free((void**)&text_features);
+            if (created_new_context) dialogue_context_free(target_context);
+            safe_free((void**)&response);
+            return NULL;
         }
     }
     
@@ -2077,39 +2068,25 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                 return NULL;
             }
         } else if (!gen_ok && feature_count > 0) {
-            /* V2防御性修复：生成器未初始化时尝试自动初始化并重试 */
+            /* ZSF-ZNB修复H-004: 自动初始化生成器并重试LNN生成 */
             if (dialogue_init_generator(processor, 128) == 0 &&
                 generate_response_with_lnn(processor, text_features, (size_t)feature_count,
                                           &response_text, &confidence, &response_code,
                                           temperature, top_k, max_tokens) == 0) {
+                /* LNN生成成功 */
             } else {
-                /* 模板回退 */
-                float tmpl_conf = 0.0f;
-                if (dialogue_generate_with_template(user_input, input_length,
-                                                   text_features, (size_t)feature_count,
-                                                   &response_text, &tmpl_conf) == 0) {
-                    confidence = tmpl_conf;
-                    response_code = 0;
-                } else {
-                    if (text_features) safe_free((void**)&text_features);
-                    if (created_new_context) dialogue_context_free(target_context);
-                    safe_free((void**)&response);
-                    return NULL;
-                }
-            }
-        } else {
-            float tmpl_conf = 0.0f;
-            if (dialogue_generate_with_template(user_input, input_length,
-                                               NULL, 0,
-                                               &response_text, &tmpl_conf) == 0) {
-                confidence = tmpl_conf;
-                response_code = 0;
-            } else {
+                /* ZSF-ZNB修复H-004: 模板回退已禁用，返回NULL让后端LNN直连处理 */
                 if (text_features) safe_free((void**)&text_features);
                 if (created_new_context) dialogue_context_free(target_context);
                 safe_free((void**)&response);
                 return NULL;
             }
+        } else {
+            /* ZSF-ZNB修复H-004: 无特征时返回NULL让后端处理 */
+            if (text_features) safe_free((void**)&text_features);
+            if (created_new_context) dialogue_context_free(target_context);
+            safe_free((void**)&response);
+            return NULL;
         }
     }
     
@@ -2873,21 +2850,22 @@ static int dialogue_generate_with_template(const char* user_input,
                                             float* confidence) {
     if (!user_input || input_length == 0 || !response_text || !confidence) return -1;
 
-    /* S-019修复: 统一使用二级匹配策略从1000+扩展模板库中选择最佳响应 */
     float match_sim = 0.0f;
     const char* best_resp = template_select_two_level(
         features, (int)feature_count, user_input, &match_sim);
 
-    /* 复制最佳匹配模板响应文本 */
-    size_t rlen = strlen(best_resp) + 1;
+    /* ZSF-ZNB修复H-004: 模板响应添加引导前缀并限定置信度
+     * 模板匹配是神经网络的冷启动引导数据，非主推理路径。
+     * 模板响应必须标注其引导性质，且置信度严格限制在0.05~0.12范围。 */
+    size_t rlen = strlen(best_resp) + 256;
     *response_text = (char*)safe_malloc(rlen);
     if (!*response_text) return -1;
-    memcpy(*response_text, best_resp, rlen);
+    snprintf(*response_text, rlen,
+        "[引导模式] LNN尚未充分训练，以下为知识库模板响应。"
+        "模型训练完成后将切换为LNN自回归生成。\n\n%s", best_resp);
 
-    /* 置信度基于余弦相似度映射到合理范围 */
-    *confidence = 0.3f + match_sim * 0.4f;
-    if (*confidence < 0.2f) *confidence = 0.2f;
-    if (*confidence > 0.7f) *confidence = 0.7f;
+    *confidence = 0.05f + match_sim * 0.07f;
+    if (*confidence > 0.12f) *confidence = 0.12f;
 
     return 0;
 }

@@ -98,14 +98,18 @@ typedef struct {
  * @brief 卡尔曼滤波学习状态
  */
 typedef struct {
-    float* P;                       /**< 误差协方差矩阵 */
-    float* K;                       /**< 卡尔曼增益 */
-    float* x;                       /**< 状态估计 */
-    float* z;                       /**< 测量值 */
-    float R;                        /**< 测量噪声协方差 */
-    float Q;                        /**< 过程噪声协方差 */
-    size_t state_size;              /**< 状态维度 */
-    int is_initialized;             /**< 是否已初始化 */
+    float* P;                          /**< 误差协方差矩阵 */
+    float* K;                          /**< 卡尔曼增益 */
+    float* x;                          /**< 状态估计 */
+    float* z;                          /**< 测量值 */
+    float R;                           /**< 测量噪声协方差 */
+    float Q;                           /**< 过程噪声协方差 */
+    size_t state_size;                 /**< 状态维度 */
+    int is_initialized;                /**< 是否已初始化 */
+    /* ZSF-ZNB修复H-007: 添加速度估计所需的字段 */
+    float* last_measurement;           /**< 上次测量值 [state_size] */
+    time_t last_measurement_time;      /**< 上次测量时间戳 */
+    int last_measurement_available;    /**< 上次测量是否可用 */
 } KalmanFilterState;
 
 /**
@@ -2247,6 +2251,19 @@ static int initialize_kalman_filter(KalmanFilterState* state, size_t state_size,
         return -1;
     }
     
+    /* ZSF-ZNB修复H-007: 分配速度估计所需的字段 */
+    state->last_measurement = (float*)safe_calloc(state_size, sizeof(float));
+    if (!state->last_measurement) {
+        safe_free((void**)&state->z);
+        safe_free((void**)&state->x);
+        safe_free((void**)&state->K);
+        safe_free((void**)&state->P);
+        return -1;
+    }
+    
+    state->last_measurement_time = 0;
+    state->last_measurement_available = 0;
+    
     // 初始化协方差矩阵为单位矩阵（表示初始不确定性）
     for (size_t i = 0; i < state_size; i++) {
         state->P[i * state_size + i] = 1.0f;
@@ -2277,24 +2294,21 @@ static int update_kalman_filter(KalmanFilterState* state, const float* measureme
     size_t n = state->state_size;
     
     if (!state->is_initialized) {
-        // 首次更新：直接将测量值作为状态估计
         for (size_t i = 0; i < n; i++) {
             state->x[i] = measurement[i];
             state_estimate[i] = measurement[i];
+            state->last_measurement[i] = measurement[i]; /* ZSF-ZNB修复H-007 */
         }
         state->is_initialized = 1;
+        state->last_measurement_available = 1;
+        state->last_measurement_time = time(NULL);
         return 0;
     }
     
-    // === 预测步骤 ===
-    // N-003修复: 使用速度估计的真实状态转移
-    // 状态模型: x(t+dt) = x(t) + velocity * dt
-    // 简单恒定速度模型，利用历史测量值差分估计速度
     {
-        float dt = (state->last_measurement_time > 0)
-            ? (float)(time(NULL) - state->last_measurement_time) * 1e-6f
-            : 0.0f;
-        if (dt <= 0.0f) dt = 0.01f; /* 默认10ms步长 */
+        /* ZSF-ZNB修复H-007: 修正dt计算——time()返回秒，差值就是秒 */
+        float dt = (float)(time(NULL) - state->last_measurement_time);
+        if (dt <= 0.0f) dt = 0.01f;
 
         /* 速度估计：最近两次测量的差分 */
         for (size_t i = 0; i < n; i++) {
@@ -2352,6 +2366,9 @@ static void free_kalman_filter(KalmanFilterState* state) {
     safe_free((void**)&state->K);
     safe_free((void**)&state->x);
     safe_free((void**)&state->z);
+    safe_free((void**)&state->last_measurement); /* ZSF-ZNB修复H-007 */
+    state->last_measurement_available = 0;
+    state->last_measurement_time = 0;
     state->state_size = 0;
     state->is_initialized = 0;
 }

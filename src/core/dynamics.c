@@ -1723,9 +1723,21 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
     }
 
     const float epsilon = 1e-5f;
-    /* ZSFBUILD: time_scale和damping不在DynamicsSystem中，使用默认值 */
-    float k = 1.0f;
-    float c = 0.1f;
+    /* ZSF-ZNB修复M-003: 使用config中的实际参数替代硬编码 */
+    float k = (system && system->config.time_scale > 0.0f) ? system->config.time_scale : 1.0f;
+    float c = (system && system->config.damping > 0.0f) ? system->config.damping : 0.1f;
+
+    /* ZSF-ZNB修复C-002: 创建零输入缓冲区替代NULL
+     * compute_derivatives要求所有参数非NULL，NULL会导致函数立即返回
+     * 而无法计算JVP。使用零向量作为无外力输入。 */
+    float* zero_input = (float*)safe_calloc(state_dim, sizeof(float));
+    if (!zero_input) {
+        safe_free((void**)&perturb_plus); safe_free((void**)&perturb_minus);
+        safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);
+        safe_free((void**)&dvel_plus); safe_free((void**)&dvel_minus);
+        safe_free((void**)&adjoint_q); safe_free((void**)&adjoint_v);
+        return -1;
+    }
 
     /* 反向积分：从终端到初始 */
     for (int step = num_steps; step > 0; step--) {
@@ -1745,8 +1757,8 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
             perturb_minus[d] = current_state[d] - epsilon * unit_dir_q;
         }
 
-        compute_derivatives(system, perturb_plus,  system->velocity, NULL, dstate_plus,  dvel_plus);
-        compute_derivatives(system, perturb_minus, system->velocity, NULL, dstate_minus, dvel_minus);
+        compute_derivatives(system, perturb_plus,  system->velocity, zero_input, dstate_plus,  dvel_plus);
+        compute_derivatives(system, perturb_minus, system->velocity, zero_input, dstate_minus, dvel_minus);
 
         const float scale = 1.0f / (2.0f * epsilon + 1e-12f);
 
@@ -1781,6 +1793,7 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
     safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);
     safe_free((void**)&dvel_plus); safe_free((void**)&dvel_minus);
     safe_free((void**)&adjoint_q); safe_free((void**)&adjoint_v);
+    safe_free((void**)&zero_input); /* ZSF-ZNB修复C-002: 释放零输入缓冲区 */
     return 0;
 }
 

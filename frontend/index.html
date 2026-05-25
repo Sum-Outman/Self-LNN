@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="css/style.css">
     <link rel="stylesheet" href="css/api-docs.css">
     <link rel="stylesheet" href="css/knowledge-graph.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <script src="js/api-service.js?v=15"></script>
     <script src="js/selflnn-chart.js?v=1"></script>
@@ -78,6 +79,9 @@
             <div class="logo">
                 <h1>SELF-LNN</h1>
             </div>
+            <div id="hamburger-menu" onclick="var n=document.getElementById('main-nav');n.classList.toggle('collapsed');n.classList.toggle('visible');">
+                 <span></span><span></span><span></span>
+             </div>
             <nav class="nav" id="main-nav">
                 <ul>
                     <li><a href="#dashboard" class="active">仪表盘</a></li>
@@ -93,6 +97,7 @@
                             <li><a href="#learning">学习状态</a></li>
                             <li><a href="#knowledge">知识库管理</a></li>
                             <li><a href="#dialogue">对话交互</a></li>
+                            <li><a href="#lnn-monitor">LNN监控</a></li>
                         </ul>
                     </li>
                     <li class="nav-dropdown">
@@ -122,6 +127,7 @@
                             <li><a href="#settings">系统设置</a></li>
                             <li><a href="#hardware-setup">硬件设置</a></li>
                             <li><a href="#api-keys">API密钥</a></li>
+                            <li><a href="#api-service">API服务</a></li>
                             <li><a href="#api-docs">API文档</a></li>
                             <li><a href="#usage-logs">使用日志</a></li>
                         </ul>
@@ -1026,6 +1032,14 @@
                                             <label>视觉处理:</label>
                                             <span style="color:#00c8ff;font-size:0.85rem;display:block;padding:4px 0;">CfC LNN统一视觉处理（液态神经网络直接处理像素输入）</span>
                                         </div>
+                                        <div class="form-group">
+                                            <label>视觉模型:</label>
+                                            <select class="form-select" id="vision-model">
+                                                <option value="cfc_vision" selected>CfC 视觉液态网络</option>
+                                                <option value="resnet">ResNet</option>
+                                                <option value="vit">Vision Transformer</option>
+                                            </select>
+                                        </div>
                                     </div>
                                     
                                     <div class="config-section">
@@ -1053,6 +1067,14 @@
                                             <label>音频处理:</label>
                                             <span style="color:#00c8ff;font-size:0.85rem;display:block;padding:4px 0;">CfC LNN统一音频处理（液态神经网络直接处理波形输入）</span>
                                         </div>
+                                        <div class="form-group">
+                                            <label>音频模型:</label>
+                                            <select class="form-select" id="audio-model">
+                                                <option value="cfc_audio" selected>CfC 音频液态网络</option>
+                                                <option value="wav2vec">Wav2Vec 2.0</option>
+                                                <option value="whisper">Whisper</option>
+                                            </select>
+                                        </div>
                                     </div>
                                     
                                     <div class="config-section">
@@ -1066,11 +1088,18 @@
                                         <div class="form-group">
                                             <label>语言:</label>
                                             <select class="form-select" id="text-language">
-                                                <option value="zh">中文</option>
                                                 <option value="zh" selected>中文</option>
                                                 <option value="en">英文</option>
                                                 <option value="ja">日文</option>
                                                 <option value="auto">自动检测</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label>文本模型:</label>
+                                            <select class="form-select" id="text-model">
+                                                <option value="cfc_text" selected>CfC 文本液态网络</option>
+                                                <option value="transformer">Transformer</option>
+                                                <option value="lstm">LSTM</option>
                                             </select>
                                         </div>
                                         <div class="form-group">
@@ -3590,6 +3619,7 @@
                                 </button>
                             </div>
                             <div class="card-content">
+                                <div id="network-test-result" style="margin-bottom:10px;padding:6px;font-size:0.8rem;color:#aaa;"></div>
                                 <div class="settings-form">
                                     <div class="form-group">
                                         <label>API端口:</label>
@@ -3962,52 +3992,7 @@ response = requests.get(
             </div>
             <div id="pw-status" class="pw-status-bar"></div>
     </div>
-<!-- ZSFZS-F049: 编程工作台onclick函数补全 -->
-<script>
-    function checkProgrammingStatus() {
-        var s = document.getElementById('pw-status');
-        if (s) s.textContent = '编程引擎状态: 待初始化为LNN子网络';
-        showNotification('编程引擎已就绪', 'info');
-    }
-    function switchProgrammingTab(tab) {
-        document.querySelectorAll('.pw-tab-btn').forEach(function(b) { b.classList.remove('active'); });
-        var btn = document.querySelector('.pw-tab-btn[data-tab="' + tab + '"]');
-        if (btn) btn.classList.add('active');
-    }
-    function loadSampleCode() {
-        var editor = document.getElementById('pw-code-editor');
-        if (editor) editor.value = '/* C语言示例 */\n#include <stdio.h>\n\nint main() {\n    printf("Hello from LNN self-programming!\\n");\n    return 0;\n}';
-    }
-    function clearEditor() {
-        var editor = document.getElementById('pw-code-editor');
-        if (editor) editor.value = '';
-    }
-    function clearOutput() {
-        var out = document.getElementById('pw-output');
-        if (out) out.textContent = '';
-    }
-    function runCodeAnalysis() {
-        var s = document.getElementById('pw-status'); if (s) s.textContent = '代码分析中...';
-        setTimeout(function() { if (s) s.textContent = '分析完成: 无语法错误'; }, 800);
-    }
-    function runCodeCompilation() {
-        var s = document.getElementById('pw-status'); if (s) s.textContent = '编译中...';
-        setTimeout(function() { if (s) s.textContent = '编译完成(LNN-C解释器)'; }, 1200);
-    }
-    function runCodeExecution() {
-        var s = document.getElementById('pw-status'); if (s) s.textContent = '执行中...';
-        var out = document.getElementById('pw-output');
-        if (out) out.textContent = '[LNN解释器] 代码已提交执行\n';
-    }
-    function runCodeGeneration() {
-        var s = document.getElementById('pw-status'); if (s) s.textContent = 'CfC代码生成中...';
-        setTimeout(function() { if (s) s.textContent = '代码生成完成'; }, 1000);
-    }
-    function runCodeOptimization() {
-        var s = document.getElementById('pw-status'); if (s) s.textContent = '代码优化中...';
-        setTimeout(function() { if (s) s.textContent = '优化完成: 循环展开+常量折叠'; }, 900);
-    }
-</script>
+<!-- ZSF-ZNB修复S-001: 删除内联假数据脚本，恢复programming-workbench.js真实实现 -->
 <!-- page-specific script loaded via main.js -->
 
             </section>
@@ -4118,6 +4103,9 @@ response = requests.get(
         <div class="safety-grid">
             <div class="safety-card">
                 <h3>安全状态</h3>
+                <div id="safety-level" style="display:none;"></div>
+                <div id="safety-score" style="display:none;"></div>
+                <div id="safety-events" style="display:none;"></div>
                 <div class="level-indicator">
                     <div class="level-circle" id="level-circle">正常</div>
                     <div>
@@ -4402,7 +4390,7 @@ response = requests.get(
                     if (vdata.command) {
                         document.getElementById('cmd-type').textContent = vdata.command.type||'move';
                         document.getElementById('cmd-param').textContent = vdata.command.param1||0;
-                        document.getElementById('cmd-conf').textContent = vdata.command.confidence ? (vdata.command.confidence*100).toFixed(1)+'%' : '50%';
+                        document.getElementById('cmd-conf').textContent = vdata.command.confidence ? (vdata.command.confidence*100).toFixed(1)+'%' : '--';
                         document.getElementById('exec-status').textContent = '已执行';
                     }
                 },
@@ -4920,6 +4908,7 @@ response = requests.get(
             <section id="skills" class="section">
 
             <span id="skills-conn-status" class="status-badge" style="display:none">检测中...</span>
+            <div id="skills-total" style="display:none;"></div>
 
         <div class="stat-grid">
             <div class="stat-card"><div class="stat-value" id="total-skills">-</div><div class="stat-label">总技能数</div></div>
@@ -4932,6 +4921,7 @@ response = requests.get(
             <div class="skill-list">
                 <input type="text" class="search-box" id="skill-search" placeholder="搜索技能..." oninput="filterSkills()">
                 <div class="filter-bar">
+                    <select id="skill-filter-select" style="display:none;" onchange="renderSkillList(this.value)"><option value="all">全部</option></select>
                     <button class="filter-btn active" onclick="setFilter('all', this)">全部</button>
                     <button class="filter-btn" onclick="setFilter('atomic', this)">原子</button>
                     <button class="filter-btn" onclick="setFilter('composite', this)">组合</button>
@@ -6239,8 +6229,9 @@ response = requests.get(
         });
     </script>
 
-        <!-- ZSFABC-024: 系统运行日志面板 -->
-        <!-- ZSFAB-M05修复: 日志面板保持始终可见，添加id用于DOM定位 -->
+        </section>
+
+        <!-- ZSF-ZNB前端修复: 系统运行日志面板从hardware-setup内移出，作为独立板块 -->
         <section id="sys-log-panel-section" class="card full-width" style="margin-bottom:20px">
             <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
                 <h3>📋 系统运行日志</h3>
@@ -6251,8 +6242,6 @@ response = requests.get(
                     <div style="color:#666">等待系统事件...</div>
                 </div>
             </div>
-        </section>
-
         </section>
 
     </main>

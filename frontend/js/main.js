@@ -1761,13 +1761,14 @@ function updateRealTimeMetrics(systemStatus) {
         if (mf) mf.style.strokeDashoffset = circ3 - (entPct / 100) * circ3;
     }
     
-    // === AGI对话状态（ZSFABC-015修复: WebSocket已启用，支持流式对话） ===
+    // === AGI对话状态 ===
     var dlgStatus = document.getElementById('dialogue-model-status');
-    if (dlgStatus) dlgStatus.textContent = 'WS就绪';
     var wsStatus = document.getElementById('dialogue-ws-status');
+    var wsReady = (typeof window.g_dataEngine !== 'undefined' && window.g_dataEngine && window.g_dataEngine.wsReady);
+    if (dlgStatus) dlgStatus.textContent = wsReady ? 'WS就绪' : 'HTTP模式';
     if (wsStatus) {
-        wsStatus.textContent = 'WS流式模式';
-        wsStatus.style.color = '#22c55e';
+        wsStatus.textContent = wsReady ? 'WebSocket流式' : 'HTTP轮询';
+        wsStatus.style.color = wsReady ? '#22c55e' : '#ffc107';
     }
     
     // === 自我认知 ===
@@ -3138,7 +3139,7 @@ function updateSensorDisplay(sensorData) {
 function updateSensorChart(sensorData) {
     if (!sensorData || !sensorData.values || sensorData.values.length === 0) return;
     
-    var canvas = document.getElementById('sensor-chart-canvas');
+    var canvas = document.getElementById('sensor-chart');
     if (!canvas) return;
     var ctx = canvas.getContext('2d');
     var w = canvas.width, h = canvas.height;
@@ -7835,7 +7836,7 @@ function updateStats(data) {
  * 如果HTML内联版本未加载，回退到main.js版本 */
 if (typeof setFilter === 'undefined') {
 function renderSkillList(filterType) {
-    var container = document.getElementById('skill-list');
+    var container = document.getElementById('skill-list-container');
     if (!container) return;
     var filtered = skillsData;
     if (filterType && filterType !== 'all') {
@@ -7923,7 +7924,7 @@ async function toggleVoice() {
     if (_voiceCapturing) {
         _voiceCapturing = false;
         if (_voiceRecorder) { try { _voiceRecorder.stop(); } catch(e) { console.error('[语音] 录制器停止失败:', e&&e.message?e.message:e); } _voiceRecorder = null; }
-        var btn = document.getElementById('voice-toggle-btn');
+        var btn = document.getElementById('voice-btn');
         if (btn) { btn.textContent = '开始录音'; btn.className = btn.className.replace('active',''); }
         showNotification('录音已停止', 'info');
     } else {
@@ -7936,7 +7937,7 @@ async function toggleVoice() {
                 maxDuration: 10000,
                 onResult: function(result) {
                     if (result && result.text) {
-                        var inp = document.getElementById('voice-text-output');
+                        var inp = document.getElementById('voice-text');
                         if (inp) inp.value = result.text;
                         showNotification('语音识别: ' + result.text, 'success');
                     }
@@ -7950,7 +7951,7 @@ async function toggleVoice() {
 
 if (typeof sendTextCommand === 'undefined') {
 async function sendTextCommand() {
-    var inp = document.getElementById('text-command-input');
+    var inp = document.getElementById('text-cmd');
     var text = inp ? inp.value.trim() : '';
     if (!text) { showNotification('请输入指令', 'warning'); return; }
     try {

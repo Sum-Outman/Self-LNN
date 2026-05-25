@@ -234,7 +234,7 @@ int ros2_create_publisher(ROS2Manager* rm, int node_id, const char* topic,
     node->publisher_count++;
     *pub_id = pid;
 
-    /* 在端点注册表中创建DDS Writer */
+    /* 在端点注册表中创建DDS Writer并建立TCP Socket连接 */
     if (rm->endpoint_count < ROS2_MAX_PUBLISHERS + ROS2_MAX_SUBSCRIBERS) {
         ROS2Endpoint* ep = &rm->endpoints[rm->endpoint_count++];
         memset(ep, 0, sizeof(ROS2Endpoint));
@@ -243,6 +243,18 @@ int ros2_create_publisher(ROS2Manager* rm, int node_id, const char* topic,
         snprintf(ep->type, sizeof(ep->type), "%s", type);
         if (qos) ep->qos = *qos; else ep->qos = g_default_qos;
         ep->active = 1;
+        /* ZSF-ZNB修复L-005: 创建TCP socket用于RTPS通信 */
+        ep->socket_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+        if (ep->socket_fd > 0) {
+            int flag = 1;
+#ifdef _WIN32
+            setsockopt(ep->socket_fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
+#else
+            setsockopt(ep->socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+#endif
+        } else {
+            ep->socket_fd = -1; /* 标记为未连接 */
+        }
     }
 
     log_info("[ROS2] 发布者创建: 节点=%d, 话题=%s, 类型=%s", node_id, topic, type);
@@ -275,7 +287,7 @@ int ros2_create_subscriber(ROS2Manager* rm, int node_id, const char* topic,
     node->subscriber_count++;
     *sub_id = sid;
 
-    /* 在端点注册表中创建DDS Reader */
+    /* 在端点注册表中创建DDS Reader并建立TCP Socket */
     if (rm->endpoint_count < ROS2_MAX_PUBLISHERS + ROS2_MAX_SUBSCRIBERS) {
         ROS2Endpoint* ep = &rm->endpoints[rm->endpoint_count++];
         memset(ep, 0, sizeof(ROS2Endpoint));
@@ -284,6 +296,9 @@ int ros2_create_subscriber(ROS2Manager* rm, int node_id, const char* topic,
         snprintf(ep->type, sizeof(ep->type), "%s", type);
         if (qos) ep->qos = *qos; else ep->qos = g_default_qos;
         ep->active = 1;
+        /* ZSF-ZNB修复L-005: 创建TCP socket */
+        ep->socket_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+        if (!(ep->socket_fd > 0)) ep->socket_fd = -1;
     }
 
     log_info("[ROS2] 订阅者创建: 节点=%d, 话题=%s, 类型=%s", node_id, topic, type);

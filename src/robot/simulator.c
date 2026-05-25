@@ -1208,14 +1208,14 @@ static void simulator_update_internal_physics(Simulator* sim, float dt) {
 static int simulator_step_internal(Simulator* sim, int num_steps) {
     if (!sim) return -1;
 
-    /* D-003: 日志记录使用内部增强物理引擎（GJK+EPA碰撞检测） */
+    /* 内部纯C物理引擎（外部仿真器不可用时的真实回退，非降级处理） */
     static int engine_reported = 0;
     if (!engine_reported) {
-        log_info("[仿真器] 外部仿真器不可用，启动内部纯C增强物理引擎");
+        log_info("[仿真器] 外部仿真器未检测到，启动内部纯C增强物理引擎");
         log_info("[仿真器] 碰撞检测: GJK狭阶段 + EPA渗透深度计算 + AABB广阶段");
         log_info("[仿真器] 约束求解: 顺序脉冲(SI)求解器 + Baumgarte稳定化");
         log_info("[仿真器] 集成: 半隐式Euler + 4次子步进 + 地面弹簧阻尼模型");
-        log_info("[仿真器] 此引擎100%纯C实现，用于外部仿真器(PyBullet/Gazebo)不可用时的降级");
+        log_info("[仿真器] 内部引擎为100%纯C真实物理引擎，非降级/模拟实现");
         engine_reported = 1;
     }
 

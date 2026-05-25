@@ -43,6 +43,7 @@ typedef enum {
     MSG_BROADCAST_DATA     = 0x0B,  /**< 广播数据 */
     MSG_GATHER_DATA        = 0x0C,  /**< 收集数据 */
     MSG_ALLGATHER_DATA     = 0x0D,  /**< 全收集数据 */
+    MSG_ALLGATHER_CHUNK    = 0x0E,  /**< 全收集数据块（非阻塞流水线AllGather分块） */
     MSG_ERROR              = 0xFE,  /**< 错误消息 */
     MSG_SHUTDOWN           = 0xFF   /**< 关闭连接 */
 } DistributedMessageType;

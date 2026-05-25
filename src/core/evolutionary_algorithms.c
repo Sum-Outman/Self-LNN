@@ -27,22 +27,7 @@
 #include <math.h>
 #include <float.h>
 
-/**
- * @brief 高斯随机数生成器（静态辅助函数）
- */
-/* K-114: Box-Muller线程安全 —— static变量无锁保护,并发调用产生错误分布 */
-static float gaussian_random(float mean, float stddev) {
-    /* 简化版: 每两次调用生成一个独立样本(丢弃第二个) */
-    float u, v, s;
-    do {
-        u = rng_uniform(0.0f, 1.0f) * 2.0f - 1.0f;
-        v = rng_uniform(0.0f, 1.0f) * 2.0f - 1.0f;
-        s = u * u + v * v;
-    } while (s >= 1.0f || s == 0.0f);
-    
-    s = sqrtf(-2.0f * logf(s) / s);
-    return mean + stddev * u * s;
-}
+/* ZSF-ZNB修复L-003: 已使用math_utils中的rng_normal替代重复gaussian_random */
 
 /**
  * @brief 均匀随机数生成器（静态辅助函数）返回0-1之间的随机数
@@ -214,7 +199,7 @@ int individual_mutate(Individual* ind, float mutation_rate, float mutation_stren
     for (size_t i = 0; i < ind->genome_size; i++) {
         if (uniform_random() < mutation_rate) {
             // 高斯突变
-            float mutation = gaussian_random(0.0f, mutation_strength);
+            float mutation = rng_normal(0.0f, mutation_strength);
             ind->genome[i] += mutation;
         }
     }

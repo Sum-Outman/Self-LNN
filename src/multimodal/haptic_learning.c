@@ -356,6 +356,28 @@ int hl_list_grasps(const HapticLearner* hl, const char* object_type, GraspConfig
 int hl_fuse_vision_haptic(HapticLearner* hl, const float* visual, int vdim,
     const float* haptic, int hdim, float* fused, int fdim) {
     if (!hl || !visual || !haptic || !fused) return -1;
+    /* ZSF-ZNB修复H-009: 使用CfC-LNN进行视触统一融合
+     * 替代简单的0.5x+0.5y加权平均。
+     * 将视觉和触觉特征拼接后注入LnN获得统一多模态表示 */
+    if (hl->lnn_instance) {
+        size_t cat_size = (size_t)(vdim + hdim);
+        float* cat_input = (float*)safe_malloc(cat_size * sizeof(float));
+        float* lnn_output = (float*)safe_malloc((size_t)fdim * sizeof(float));
+        if (cat_input && lnn_output) {
+            memset(cat_input, 0, cat_size * sizeof(float));
+            memcpy(cat_input, visual, (size_t)vdim * sizeof(float));
+            memcpy(cat_input + vdim, haptic, (size_t)hdim * sizeof(float));
+            if (lnn_forward((LNN*)hl->lnn_instance, cat_input, lnn_output) == 0) {
+                memcpy(fused, lnn_output, (size_t)fdim * sizeof(float));
+                safe_free((void**)&cat_input);
+                safe_free((void**)&lnn_output);
+                return 0;
+            }
+        }
+        safe_free((void**)&cat_input);
+        safe_free((void**)&lnn_output);
+    }
+    /* LNN未绑定或前向失败时回退到加权平均（保持可用性） */
     for (int i = 0; i < fdim; i++) {
         float v = (i < vdim) ? visual[i] : 0.0f;
         float h = (i < hdim) ? haptic[i] : 0.0f;

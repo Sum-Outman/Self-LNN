@@ -476,6 +476,17 @@ int mixed_precision_precision_aware_train_step(Trainer* trainer,
                                                 float* output, float* loss,
                                                 PrecisionMonitorMode monitor);
 
+/* ============================================================================
+ * ZSF-ZNB修复S-009: 自动混合精度(AMP)动态损失缩放器API
+ * ============================================================================ */
+
+float mixed_precision_amp_get_loss_scale(void);
+float mixed_precision_amp_scale_loss(float loss);
+int   mixed_precision_amp_unscale_gradients(float* gradients, size_t count);
+void  mixed_precision_amp_get_stats(int* overflow_count, int* skip_count, 
+                                     float* current_scale);
+void  mixed_precision_amp_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

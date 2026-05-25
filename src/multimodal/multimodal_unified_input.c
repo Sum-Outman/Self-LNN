@@ -139,8 +139,12 @@ static int validate_modality_signals(const float* signals[SELFLNN_MAX_MODALITIES
 }
 
 /**
- * @brief 核心统一输入处理：所有模态信号直接拼接为统一输入向量，
- *        通过单一LNN连续动态系统进行统一状态演化
+ * @brief 核心统一输入处理：所有模态信号通过独立线性投影矩阵映射到统一维度，
+ *        然后element-wise求和注入单一LNN连续动态系统
+ * 
+ * ZSF-ZNB修复S-002: 架构从"直接拼接"改为"线性投影+求和"
+ *   统一输入 = Σ_i (W_i · x_i + b_i)
+ *   其中 W_i: SELFLNN_UNIFIED_PROJECTION_DIM × input_dim_i
  */
 static int unified_input_dynamic_process(
     UnifiedInputState* state,
@@ -153,117 +157,113 @@ static int unified_input_dynamic_process(
 {
     (void)n_modalities;
 
-    if (!state || !state->unified_input_buffer) {
+    if (!state || !unified_output || max_output_size == 0) {
         return -1;
     }
 
-    /* B-015: 验证输出缓冲区大小 */
-    if (!unified_output || max_output_size == 0) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
-                              "统一输入动态处理: 输出缓冲区无效");
-        return -1;
-    }
-
-    memset(state->unified_input_buffer, 0, state->unified_buffer_size * sizeof(float));
-
-    size_t cumulative_offset = 0;
-    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
-        if (modality_present[m] && signals[m]) {
-            size_t copy = signal_sizes[m];
-            if (copy > SELFLNN_MAX_CONTROL_DIM) {
-                copy = SELFLNN_MAX_CONTROL_DIM;
+    /* ZSF-ZNB修复S-002: 延迟初始化投影矩阵 */
+    if (!state->projections_initialized) {
+        /* Xavier初始化每个模态的投影矩阵和偏置 */
+        for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+            if (!state->projection_matrices[m]) {
+                size_t mod_size = SELFLNN_MAX_CONTROL_DIM;
+                size_t total_elems = SELFLNN_UNIFIED_PROJECTION_DIM * mod_size;
+                state->projection_matrices[m] = (float*)safe_calloc(total_elems, sizeof(float));
+                state->projection_biases[m] = (float*)safe_calloc(SELFLNN_UNIFIED_PROJECTION_DIM, sizeof(float));
+                if (state->projection_matrices[m]) {
+                    float xavier_std = sqrtf(2.0f / (float)(SELFLNN_UNIFIED_PROJECTION_DIM + mod_size));
+                    for (size_t i = 0; i < total_elems; i++) {
+                        float u1 = (float)rand() / (float)RAND_MAX;
+                        float u2 = (float)rand() / (float)RAND_MAX;
+                        if (u1 < 1e-8f) u1 = 1e-8f;
+                        state->projection_matrices[m][i] = xavier_std * 
+                            sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+                    }
+                }
+                state->projection_input_sizes[m] = mod_size;
             }
-            if (copy == 0) {
-                continue;
-            }
-            if (cumulative_offset + copy > state->unified_buffer_size) {
-                copy = state->unified_buffer_size - cumulative_offset;
-            }
-            if (copy == 0) {
-                break;
-            }
-            for (size_t d = 0; d < copy; d++) {
-                state->unified_input_buffer[cumulative_offset + d] = signals[m][d];
-            }
-            state->modality_metrics[m].offset = cumulative_offset;
-            state->modality_metrics[m].active_size = copy;
-            cumulative_offset += copy;
-        } else {
-            state->modality_metrics[m].offset = 0;
-            state->modality_metrics[m].active_size = 0;
         }
-    }
-    state->total_active_size = cumulative_offset;
-
-    size_t output_dim = max_output_size;
-    /* B-015: 输出维度上限检查 */
-    if (output_dim > SELFLNN_MAX_CONTROL_DIM * 2) {
-        output_dim = SELFLNN_MAX_CONTROL_DIM * 2;
-    }
-    if (output_dim > state->unified_buffer_size) {
-        output_dim = state->unified_buffer_size;
+        state->projections_initialized = 1;
     }
 
+    /* 分配统一投影缓冲区 */
+    float* combined = (float*)safe_calloc(SELFLNN_UNIFIED_PROJECTION_DIM, sizeof(float));
+    if (!combined) return -1;
+
+    /* 步骤1: 对每个活跃模态进行线性投影并求和 */
+    int active_modalities = 0;
+    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        if (!modality_present[m] || !signals[m] || signal_sizes[m] == 0) continue;
+        if (!state->projection_matrices[m] || !state->projection_biases[m]) continue;
+
+        size_t input_dim = signal_sizes[m];
+        if (input_dim > SELFLNN_MAX_CONTROL_DIM) input_dim = SELFLNN_MAX_CONTROL_DIM;
+
+        /* 计算 W_m · x_m + b_m 并累加到combined */
+        float* W = state->projection_matrices[m];
+        float* b = state->projection_biases[m];
+        for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
+            float proj_val = b[j];
+            for (size_t k = 0; k < input_dim; k++) {
+                proj_val += W[j * input_dim + k] * signals[m][k];
+            }
+            combined[j] += proj_val;
+        }
+        active_modalities++;
+    }
+
+    if (active_modalities == 0) {
+        safe_free((void**)&combined);
+        return -1;
+    }
+
+    /* 步骤2: 通过共享LNN处理统一输入 */
     if (state->lnn_instance) {
         LNNConfig lnn_cfg;
         if (lnn_get_config(state->lnn_instance, &lnn_cfg) == 0) {
-            if (lnn_cfg.input_size == state->unified_buffer_size) {
-                float* lnn_output_buf = (float*)safe_malloc(
-                    (lnn_cfg.output_size > output_dim ? lnn_cfg.output_size : output_dim)
-                    * sizeof(float));
-                if (lnn_output_buf) {
-                    int fwd_ret = lnn_forward(state->lnn_instance,
-                                              state->unified_input_buffer,
-                                              lnn_output_buf);
-                    if (fwd_ret == 0) {
-                        size_t copy = lnn_cfg.output_size;
-                        if (copy > output_dim) copy = output_dim;
-                        memcpy(unified_output, lnn_output_buf, copy * sizeof(float));
-                        if (copy < output_dim) {
-                            memset(unified_output + copy, 0,
-                                   (output_dim - copy) * sizeof(float));
-                        }
-                        safe_free((void**)&lnn_output_buf);
-                        return (int)output_dim;
-                    }
-                    safe_free((void**)&lnn_output_buf);
-                }
-            } else {
-                size_t proj_dim = lnn_cfg.input_size < state->unified_buffer_size
-                                  ? lnn_cfg.input_size : state->unified_buffer_size;
-                float* proj_input = (float*)safe_malloc(
-                    lnn_cfg.input_size * sizeof(float));
-                if (proj_input) {
-                    memset(proj_input, 0, lnn_cfg.input_size * sizeof(float));
-                    memcpy(proj_input, state->unified_input_buffer,
-                           proj_dim * sizeof(float));
-                    float* lnn_output_buf = (float*)safe_malloc(
-                        (lnn_cfg.output_size > output_dim
-                         ? lnn_cfg.output_size : output_dim) * sizeof(float));
-                    if (lnn_output_buf) {
-                        int fwd_ret = lnn_forward(state->lnn_instance,
-                                                  proj_input, lnn_output_buf);
-                        if (fwd_ret == 0) {
-                            size_t copy = lnn_cfg.output_size;
-                            if (copy > output_dim) copy = output_dim;
-                            memcpy(unified_output, lnn_output_buf, copy * sizeof(float));
-                            if (copy < output_dim) {
-                                memset(unified_output + copy, 0,
-                                       (output_dim - copy) * sizeof(float));
-                            }
-                            safe_free((void**)&lnn_output_buf);
-                            safe_free((void**)&proj_input);
-                            return (int)output_dim;
-                        }
-                        safe_free((void**)&lnn_output_buf);
-                    }
-                    safe_free((void**)&proj_input);
+            float* lnn_input = combined;
+            size_t lnn_in_dim = SELFLNN_UNIFIED_PROJECTION_DIM;
+            
+            /* 如果LNN输入维度与投影维度不同，需要调整 */
+            float* adjusted_input = NULL;
+            if (lnn_cfg.input_size != SELFLNN_UNIFIED_PROJECTION_DIM) {
+                adjusted_input = (float*)safe_calloc(lnn_cfg.input_size, sizeof(float));
+                if (adjusted_input) {
+                    size_t copy_dim = (lnn_cfg.input_size < SELFLNN_UNIFIED_PROJECTION_DIM) 
+                        ? lnn_cfg.input_size : SELFLNN_UNIFIED_PROJECTION_DIM;
+                    memcpy(adjusted_input, combined, copy_dim * sizeof(float));
+                    lnn_input = adjusted_input;
+                    lnn_in_dim = lnn_cfg.input_size;
                 }
             }
+
+            size_t output_dim = max_output_size;
+            if (output_dim > lnn_cfg.output_size) output_dim = lnn_cfg.output_size;
+            float* lnn_output_buf = (float*)safe_malloc(
+                (lnn_cfg.output_size > output_dim ? lnn_cfg.output_size : output_dim) * sizeof(float));
+            
+            if (lnn_output_buf) {
+                int fwd_ret = lnn_forward(state->lnn_instance, lnn_input, lnn_output_buf);
+                if (fwd_ret == 0) {
+                    size_t copy = lnn_cfg.output_size;
+                    if (copy > output_dim) copy = output_dim;
+                    memcpy(unified_output, lnn_output_buf, copy * sizeof(float));
+                    if (copy < output_dim)
+                        memset(unified_output + copy, 0, (output_dim - copy) * sizeof(float));
+                    safe_free((void**)&lnn_output_buf);
+                    if (adjusted_input) safe_free((void**)&adjusted_input);
+                    safe_free((void**)&combined);
+                    return (int)output_dim;
+                }
+                safe_free((void**)&lnn_output_buf);
+            }
+            if (adjusted_input) safe_free((void**)&adjusted_input);
         }
     }
 
-    /* LNN未绑定或前向传播失败：禁止直通退化处理，返回错误 */
+    safe_free((void**)&combined);
+
+    /* LNN未绑定或前向传播失败：返回错误，禁止直通退化 */
     selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
                           "多模态统一输入：共享LNN未绑定或前向传播失败，禁止直通退化处理");
     return -1;
@@ -321,6 +321,9 @@ int multimodal_unified_input_init(UnifiedInputState* state, const UnifiedInputCo
 
     state->is_initialized = 1;
     state->historical_process_quality = 0.5f;
+
+    /* ZSF-ZNB修复S-002: 投影矩阵延迟初始化标志 */
+    state->projections_initialized = 0;
 
     return 0;
 }
@@ -480,6 +483,18 @@ int multimodal_unified_input_get_weights(const UnifiedInputState* state,
 int multimodal_unified_input_reset(UnifiedInputState* state)
 {
     if (!state) return -1;
+
+    /* ZSF-ZNB修复S-002: 释放投影矩阵 */
+    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        if (state->projection_matrices[m]) {
+            safe_free((void**)&state->projection_matrices[m]);
+        }
+        if (state->projection_biases[m]) {
+            safe_free((void**)&state->projection_biases[m]);
+        }
+        state->projection_input_sizes[m] = 0;
+    }
+    state->projections_initialized = 0;
 
     safe_free((void**)&state->unified_buffer);
     safe_free((void**)&state->unified_input_buffer);

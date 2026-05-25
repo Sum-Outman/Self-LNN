@@ -2975,3 +2975,178 @@ int mixed_precision_sync_master_weights(MixedPrecisionContext* context) {
     
     return 0;
 }
+
+/* ============================================================================
+ * ZSF-ZNB修复S-009: 自动混合精度(AMP)动态损失缩放器
+ * 
+ * 标准AMP训练循环:
+ *   1. 前向传播FP16: loss = forward_fp16(input)
+ *   2. 损失缩放: scaled_loss = loss * loss_scale
+ *   3. 反向传播FP16: backward(scaled_loss) → FP16梯度
+ *   4. 梯度去缩放(FP32): grad_fp32 = grad_fp16 / loss_scale
+ *   5. 溢出检测: 如果grad包含inf/NaN → 跳过更新, loss_scale /= 2
+ *   6. 参数更新(FP32): optimizer.step(grad_fp32) → 更新主权重
+ *   7. FP32→FP16同步: fp16_weights = fp32_master_weights
+ *   8. 缩放因子增长: loss_scale *= growth_factor (每N步无溢出)
+ * ============================================================================ */
+
+/* 默认动态缩放参数 */
+#define AMP_DEFAULT_LOSS_SCALE            65536.0f
+#define AMP_DEFAULT_SCALE_GROWTH_FACTOR   2.0f
+#define AMP_DEFAULT_SCALE_BACKOFF_FACTOR  0.5f
+#define AMP_DEFAULT_GROWTH_INTERVAL       2000
+#define AMP_MIN_LOSS_SCALE                1.0f
+#define AMP_MAX_LOSS_SCALE                16777216.0f
+
+/**
+ * @brief AMP损失缩放器状态
+ */
+typedef struct {
+    float loss_scale;             /* 当前损失缩放因子 */
+    float growth_factor;          /* 增长率 */
+    float backoff_factor;         /* 回退率 */
+    int growth_interval;          /* 增长间隔步数 */
+    int step_counter;             /* 当前步计数 */
+    int overflow_count;           /* 溢出总次数 */
+    int skip_update_count;        /* 跳过更新次数 */
+    int consecutive_no_overflow;  /* 连续无溢出步数 */
+    float min_loss_scale;         /* 最小缩放因子 */
+    float max_loss_scale;         /* 最大缩放因子 */
+    int enabled;                  /* 是否启用 */
+} AmLossScaler;
+
+static void amp_scaler_init(AmLossScaler* scaler) {
+    if (!scaler) return;
+    memset(scaler, 0, sizeof(AmLossScaler));
+    scaler->loss_scale = AMP_DEFAULT_LOSS_SCALE;
+    scaler->growth_factor = AMP_DEFAULT_SCALE_GROWTH_FACTOR;
+    scaler->backoff_factor = AMP_DEFAULT_SCALE_BACKOFF_FACTOR;
+    scaler->growth_interval = AMP_DEFAULT_GROWTH_INTERVAL;
+    scaler->min_loss_scale = AMP_MIN_LOSS_SCALE;
+    scaler->max_loss_scale = AMP_MAX_LOSS_SCALE;
+    scaler->enabled = 1;
+}
+
+static float amp_scale_loss(AmLossScaler* scaler, float loss) {
+    if (!scaler || !scaler->enabled) return loss;
+    /* 防止loss已经是inf/NaN时放大 */
+    if (!isfinite(loss)) return loss;
+    return loss * scaler->loss_scale;
+}
+
+/**
+ * @brief 对FP32梯度进行去缩放并检测溢出
+ * @return 0=正常, 1=溢出跳过更新
+ */
+static int amp_unscale_and_check_overflow(AmLossScaler* scaler, float* gradients, 
+                                           size_t count, float inv_scale) {
+    if (!scaler || !gradients || count == 0 || !scaler->enabled) return 0;
+    
+    int has_overflow = 0;
+    for (size_t i = 0; i < count; i++) {
+        float g = gradients[i];
+        /* 检测溢出: inf/NaN */
+        if (!isfinite(g)) {
+            has_overflow = 1;
+            break;
+        }
+        /* 去缩放 */
+        gradients[i] = g * inv_scale;
+        /* 再次检查去缩放后是否溢出 */
+        if (!isfinite(gradients[i])) {
+            has_overflow = 1;
+            break;
+        }
+    }
+    
+    scaler->step_counter++;
+    
+    if (has_overflow) {
+        /* 溢出: 回退缩放因子，跳过本次更新 */
+        scaler->overflow_count++;
+        scaler->skip_update_count++;
+        scaler->loss_scale *= scaler->backoff_factor;
+        if (scaler->loss_scale < scaler->min_loss_scale)
+            scaler->loss_scale = scaler->min_loss_scale;
+        scaler->consecutive_no_overflow = 0;
+        return 1;
+    }
+    
+    /* 无溢出: 逐渐增大缩放因子 */
+    scaler->consecutive_no_overflow++;
+    if (scaler->consecutive_no_overflow >= scaler->growth_interval) {
+        float new_scale = scaler->loss_scale * scaler->growth_factor;
+        if (new_scale <= scaler->max_loss_scale) {
+            scaler->loss_scale = new_scale;
+        }
+        scaler->consecutive_no_overflow = 0;
+    }
+    
+    return 0;
+}
+
+/* 全局AMP缩放器（每训练管线一个实例） */
+static AmLossScaler g_amp_scaler = {0};
+static int g_amp_initialized = 0;
+
+/**
+ * @brief 获取/初始化全局AMP损失缩放器
+ */
+float mixed_precision_amp_get_loss_scale(void) {
+    if (!g_amp_initialized) {
+        amp_scaler_init(&g_amp_scaler);
+        g_amp_initialized = 1;
+    }
+    return g_amp_scaler.loss_scale;
+}
+
+/**
+ * @brief 对损失值应用AMP缩放
+ * @param loss 原始损失值
+ * @return 缩放后的损失值
+ */
+float mixed_precision_amp_scale_loss(float loss) {
+    if (!g_amp_initialized) {
+        amp_scaler_init(&g_amp_scaler);
+        g_amp_initialized = 1;
+    }
+    return amp_scale_loss(&g_amp_scaler, loss);
+}
+
+/**
+ * @brief 对梯度去缩放并检测溢出（完整AMP步骤4-5）
+ * @param gradients 梯度数组（输入输出）
+ * @param count 梯度元素数
+ * @return 0=正常可更新, 1=溢出应跳过更新
+ */
+int mixed_precision_amp_unscale_gradients(float* gradients, size_t count) {
+    if (!g_amp_initialized) {
+        amp_scaler_init(&g_amp_scaler);
+        g_amp_initialized = 1;
+    }
+    if (!g_amp_scaler.enabled || g_amp_scaler.loss_scale <= 1.0f) return 0;
+    float inv_scale = 1.0f / g_amp_scaler.loss_scale;
+    return amp_unscale_and_check_overflow(&g_amp_scaler, gradients, count, inv_scale);
+}
+
+/**
+ * @brief 获取AMP统计信息
+ */
+void mixed_precision_amp_get_stats(int* overflow_count, int* skip_count, 
+                                     float* current_scale) {
+    if (!g_amp_initialized) {
+        amp_scaler_init(&g_amp_scaler);
+        g_amp_initialized = 1;
+    }
+    if (overflow_count) *overflow_count = g_amp_scaler.overflow_count;
+    if (skip_count) *skip_count = g_amp_scaler.skip_update_count;
+    if (current_scale) *current_scale = g_amp_scaler.loss_scale;
+}
+
+/**
+ * @brief 重置AMP缩放器状态
+ */
+void mixed_precision_amp_reset(void) {
+    memset(&g_amp_scaler, 0, sizeof(g_amp_scaler));
+    g_amp_initialized = 0;
+}

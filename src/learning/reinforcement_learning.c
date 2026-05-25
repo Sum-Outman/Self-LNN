@@ -1367,10 +1367,13 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
     int state_act_dim = agent->config.state_dim + (agent->config.discrete_actions ?
                         agent->config.num_actions : agent->config.action_dim);
 
+    /* ZSF-ZNB修复M-016: 预分配缓冲区替代每样本malloc */
+    float* sa_pair = (float*)safe_malloc((size_t)state_act_dim * sizeof(float));
+    float* next_sa = (float*)safe_malloc((size_t)state_act_dim * sizeof(float));
+
     for (int i = 0; i < actual; i++)
     {
-        float* sa_pair = (float*)safe_malloc((size_t)state_act_dim * sizeof(float));
-        if (!sa_pair) continue;
+        if (!sa_pair || !next_sa) break;
 
         memcpy(sa_pair, samples[i].state, (size_t)samples[i].state_dim * sizeof(float));
         memcpy(sa_pair + samples[i].state_dim, samples[i].action, (size_t)samples[i].action_dim * sizeof(float));
@@ -1383,15 +1386,15 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
         float new_log_prob = 0.0f;
         rl_sac_get_action(agent, samples[i].next_state, new_action, &new_log_prob, samples[i].next_state_dim);
 
-        float* next_sa = (float*)safe_malloc((size_t)state_act_dim * sizeof(float));
-        if (next_sa)
+        float* next_sa_buf = next_sa;
+        if (next_sa_buf)
         {
-            memcpy(next_sa, samples[i].next_state, (size_t)samples[i].next_state_dim * sizeof(float));
-            memcpy(next_sa + samples[i].next_state_dim, new_action, (size_t)samples[i].action_dim * sizeof(float));
+            memcpy(next_sa_buf, samples[i].next_state, (size_t)samples[i].next_state_dim * sizeof(float));
+            memcpy(next_sa_buf + samples[i].next_state_dim, new_action, (size_t)samples[i].action_dim * sizeof(float));
 
             float nq1 = 0.0f, nq2 = 0.0f;
-            lnn_forward(critic1, next_sa, &nq1);
-            lnn_forward(critic2, next_sa, &nq2);
+            lnn_forward(critic1, next_sa_buf, &nq1);
+            lnn_forward(critic2, next_sa_buf, &nq2);
 
             float min_q = RL_MIN(nq1, nq2);
             float target_q = samples[i].reward + sc->gamma * (min_q - agent->alpha * new_log_prob);
@@ -1407,34 +1410,67 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
 
             float q_for_actor = RL_MIN(q1, q2);
             float actor_loss = agent->alpha * new_log_prob - q_for_actor;
-            /* ZSFWS-M005修复: SAC Actor反向传播使用正确的策略梯度目标
-             * 原实现: actor_target[1] = {actor_loss} 将标量损失当作输出目标，语义不正确
-             * 正确做法: 构建动作方向的目标向量
-             *   target_a = current_a + lr * sign(-∇_a(Q) + α·∇_a(logπ))
-             * 近似: 对于离散动作，target=action_one_hot，对连续动作用Q引导方向 */
+            /* ZSF-ZNB修复S-005: 标准SAC重参数化梯度更新
+             * 标准SAC演员梯度(J_actor = E[α·logπ(a|s) - Q(s,a)])通过重参数化计算:
+             *   a = tanh(μ + σ·ε), ε~N(0,1)
+             *   ∂J/∂μ_i = α·∂logπ/∂μ_i - ∂Q/∂a_i·∂a_i/∂μ_i
+             *   ∂logπ/∂μ_i = (u_i-μ_i)/σ²_i (Gaussian)
+             *   ∂a_i/∂μ_i = 1 - tanh²(u_i) = 1 - a²_i
+             * 对于Q梯度∂Q/∂a,使用有限差分估计: (Q(a+ε)-Q(a-ε))/(2ε) */
             LNNConfig acfg;
             memset(&acfg, 0, sizeof(LNNConfig));
             lnn_get_config(actor, &acfg);
-            float* actor_out = (float*)safe_malloc((size_t)(acfg.output_size > 0 ? acfg.output_size : 1) * sizeof(float));
-            float* actor_target_full = (float*)safe_malloc((size_t)(acfg.output_size > 0 ? acfg.output_size : 1) * sizeof(float));
-            if (actor_out && actor_target_full) {
+            int out_dim = (int)acfg.output_size;
+            int act_dim = out_dim / 2;
+            float* actor_out = (float*)safe_malloc((size_t)(out_dim > 0 ? out_dim : 1) * sizeof(float));
+            float* actor_target = (float*)safe_malloc((size_t)(out_dim > 0 ? out_dim : 1) * sizeof(float));
+            if (actor_out && actor_target) {
                 lnn_forward(actor, sa_pair, actor_out);
-                float lr_scale = sc->actor_lr * 0.5f;
-                for (int k = 0; k < (int)acfg.output_size; k++) {
-                    /* 目标 = 当前输出 + lr * Q方向（最大化Q值）+ 熵正则（保持探索）
-                     * Q方向: 朝着动作分布中得分更高的方向微调 */
-                    float q_direction = (actor_out[k] > 0.5f) ? 1.0f : -0.5f;
-                    actor_target_full[k] = actor_out[k] + lr_scale * q_for_actor * q_direction
-                                          - lr_scale * agent->alpha * actor_out[k] * 0.1f;
-                    if (actor_target_full[k] > 1.0f) actor_target_full[k] = 1.0f;
-                    if (actor_target_full[k] < -1.0f) actor_target_full[k] = -1.0f;
+                float lr = sc->actor_lr * 0.3f;
+                /* 构造Q梯度估计的perturbed state-action对 */
+                float* ap_plus  = (float*)safe_malloc((size_t)(act_dim * 2) * sizeof(float));
+                float* ap_minus = (float*)safe_malloc((size_t)(act_dim * 2) * sizeof(float));
+                if (ap_plus && ap_minus) {
+                    for (int k = 0; k < act_dim; k++) {
+                        float mu = actor_out[k];
+                        float logstd = RL_CLAMP(actor_out[k + act_dim], -5.0f, 2.0f);
+                        float sigma = expf(logstd);
+                        /* 从actor_out重构当前动作 */
+                        int sdim = samples[i].state_dim;
+                        float u_i = (sa_pair[sdim + k] - agent->config.action_low[k]) / 
+                                     RL_MAX(agent->config.action_high[k] - agent->config.action_low[k], 1e-7f) 
+                                   * 2.0f - 1.0f;
+                        u_i = RL_CLAMP(u_i, -0.9999f, 0.9999f);
+                        float a_i = tanhf(u_i);
+                        float da_dmu = 1.0f - a_i * a_i + 1e-8f;
+                        /* 有限差分估计∂Q/∂a_i */
+                        float eps = 0.001f;
+                        memcpy(ap_plus, sa_pair, (size_t)(sdim + act_dim) * sizeof(float));
+                        memcpy(ap_minus, sa_pair, (size_t)(sdim + act_dim) * sizeof(float));
+                        ap_plus[sdim + k] += eps;
+                        ap_minus[sdim + k] -= eps;
+                        float qp = 0.0f, qm = 0.0f;
+                        float qp_out[1] = {0}, qm_out[1] = {0};
+                        lnn_forward(critic1, ap_plus, qp_out);  qp = qp_out[0];
+                        lnn_forward(critic1, ap_minus, qm_out); qm = qm_out[0];
+                        float dq_da = (qp - qm) / (2.0f * eps);
+                        /* 重参数化梯度 */
+                        float dlogpi_dmu = (u_i - mu) / (sigma * sigma + 1e-8f);
+                        float dJ_dmu = agent->alpha * dlogpi_dmu - dq_da * da_dmu;
+                        float target_mu = mu - lr * dJ_dmu;
+                        target_mu = RL_CLAMP(target_mu, -3.0f, 3.0f);
+                        actor_target[k] = target_mu;
+                        /* log_std梯度: ∂J/∂logσ = α·( (u-μ)²/σ² - 1 ) */
+                        float dJ_dlogstd = agent->alpha * ((u_i - mu) * (u_i - mu) / (sigma * sigma + 1e-8f) - 1.0f);
+                        actor_target[k + act_dim] = logstd - lr * 0.5f * dJ_dlogstd;
+                    }
+                    lnn_backward(actor, actor_target, &actor_loss);
                 }
-                lnn_backward(actor, actor_target_full, &actor_loss);
+                safe_free((void**)&ap_minus);
+                safe_free((void**)&ap_plus);
             }
             safe_free((void**)&actor_out);
-            safe_free((void**)&actor_target_full);
-
-            safe_free((void**)&next_sa);
+            safe_free((void**)&actor_target);
         }
 
         if (sc->automatic_entropy_tuning && agent->log_alpha)
@@ -1468,9 +1504,10 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
             }
         }
 
-        safe_free((void**)&sa_pair);
     }
     agent->total_steps++;
+    safe_free((void**)&sa_pair);
+    safe_free((void**)&next_sa);
     safe_free((void**)&samples);
     return 0;
 }

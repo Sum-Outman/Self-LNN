@@ -445,7 +445,7 @@ class DeviceManager {
             }
         }
         try {
-            var compat = window.g_browserCompat || new BrowserCompat();
+            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
             var videoConstraints = {
                 deviceId: { exact: camera.deviceId }
             };
@@ -950,7 +950,7 @@ class DeviceManager {
         html += '<div class="device-section" style="margin-bottom:20px;">';
         html += '<h4 style="margin:0 0 8px 0;color:#3498db;border-bottom:1px solid rgba(52,152,219,0.3);padding-bottom:6px;"> 麦克风设备</h4>';
         html += '<div style="margin-bottom:8px;">';
-        html += '<button onclick="window.DEVICE_MGR.scanAudioDevices()" class="btn btn-sm" style="background:#3498db;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
+        html += '<button onclick="window.g_deviceManager.scanAudioDevices()" class="btn btn-sm" style="background:#3498db;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
         html += '</div>';
         if (microphones.length === 0) {
             html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到麦克风设备，请检查浏览器权限设置</p>';
@@ -968,7 +968,7 @@ class DeviceManager {
                 if (isAdded) {
                     html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
                 } else {
-                    html += '<button onclick="window.DEVICE_MGR.addMicrophone(\'' + self._escAttr(mic.deviceId) + '\').then(function(r){if(r.success){window.DEVICE_MGR.deviceAddPanel_show();window.DEVICE_MGR.startMicrophone(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                    html += '<button onclick="window.g_deviceManager.addMicrophone(\'' + self._escAttr(mic.deviceId) + '\').then(function(r){if(r.success){window.g_deviceManager.deviceAddPanel_show();window.g_deviceManager.startMicrophone(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
                 }
                 html += '</div>';
                 html += '</div>';
@@ -981,7 +981,7 @@ class DeviceManager {
         html += '<div class="device-section" style="margin-bottom:20px;">';
         html += '<h4 style="margin:0 0 8px 0;color:#e67e22;border-bottom:1px solid rgba(230,126,34,0.3);padding-bottom:6px;"> 扬声器设备</h4>';
         html += '<div style="margin-bottom:8px;">';
-        html += '<button onclick="window.DEVICE_MGR.scanAudioDevices()" class="btn btn-sm" style="background:#e67e22;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
+        html += '<button onclick="window.g_deviceManager.scanAudioDevices()" class="btn btn-sm" style="background:#e67e22;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
         html += '</div>';
         if (speakers.length === 0) {
             html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到扬声器设备，请检查浏览器权限设置</p>';
@@ -999,7 +999,7 @@ class DeviceManager {
                 if (isAdded) {
                     html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
                 } else {
-                    html += '<button onclick="window.DEVICE_MGR.addSpeaker(\'' + self._escAttr(spk.deviceId) + '\').then(function(r){if(r.success){window.DEVICE_MGR.deviceAddPanel_show();window.DEVICE_MGR.startSpeaker(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                    html += '<button onclick="window.g_deviceManager.addSpeaker(\'' + self._escAttr(spk.deviceId) + '\').then(function(r){if(r.success){window.g_deviceManager.deviceAddPanel_show();window.g_deviceManager.startSpeaker(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
                 }
                 html += '</div>';
                 html += '</div>';
@@ -1012,7 +1012,7 @@ class DeviceManager {
         html += '<div class="device-section" style="margin-bottom:20px;">';
         html += '<h4 style="margin:0 0 8px 0;color:#9b59b6;border-bottom:1px solid rgba(155,89,182,0.3);padding-bottom:6px;"> 摄像头设备</h4>';
         html += '<div style="margin-bottom:8px;">';
-        html += '<button onclick="window.DEVICE_MGR.scanVideoDevices()" class="btn btn-sm" style="background:#9b59b6;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新视频设备列表</button>';
+        html += '<button onclick="window.g_deviceManager.scanVideoDevices()" class="btn btn-sm" style="background:#9b59b6;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新视频设备列表</button>';
         html += '</div>';
         if (cameras.length === 0) {
             html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到摄像头设备，请检查浏览器权限设置</p>';
@@ -1030,7 +1030,7 @@ class DeviceManager {
                 if (isAdded) {
                     html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
                 } else {
-                    html += '<button onclick="window.DEVICE_MGR.addCamera(\'' + self._escAttr(cam.deviceId) + '\').then(function(r){if(r.success){window.DEVICE_MGR.deviceAddPanel_show();window.DEVICE_MGR.startCamera(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                    html += '<button onclick="window.g_deviceManager.addCamera(\'' + self._escAttr(cam.deviceId) + '\').then(function(r){if(r.success){window.g_deviceManager.deviceAddPanel_show();window.g_deviceManager.startCamera(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
                 }
                 html += '</div>';
                 html += '</div>';

@@ -22,6 +22,7 @@ struct ImitationDeepLearner {
     ImDemonstration current_demo;
     LNN* irl_network;
     LNN* bc_network;
+    LNN* policy_network;        /* ZSF-ZNB修复H-005: IRL策略优化网络 */
     float* observation_buffer;
     int obs_pos;
     int obs_capacity;
@@ -42,6 +43,7 @@ void imitation_deep_free(ImitationDeepLearner* idl) {
     if (!idl) return;
     if (idl->irl_network) lnn_free(idl->irl_network);
     if (idl->bc_network) lnn_free(idl->bc_network);
+    if (idl->policy_network) lnn_free(idl->policy_network); /* ZSF-ZNB修复H-005 */
     safe_free((void**)&idl->observation_buffer);
     if (idl->current_demo.trajectory.waypoints) safe_free((void**)&idl->current_demo.trajectory.waypoints);
     if (idl->current_demo.trajectory.encoded_trajectory) safe_free((void**)&idl->current_demo.trajectory.encoded_trajectory);
@@ -401,8 +403,6 @@ int im_irl_train(ImitationDeepLearner* idl, ImDemonstration* demos, int demo_cou
             float* target = (float*)safe_malloc(8 * sizeof(float));
             if (!input || !output || !target) { safe_free((void**)&input); safe_free((void**)&output); safe_free((void**)&target); continue; }
             memcpy(input, demos[d].keyframes[0].joint_positions, IM_MAX_JOINTS * sizeof(float));
-            /* P0-012修复: IRL奖励网络目标应为专家轨迹高奖励+非专家低奖励
-             * 使用当前迭代步骤的状态作为对比，专家轨迹target=1.0提供正向学习信号 */
             for (int ti = 0; ti < 8; ti++) {
                 target[ti] = 1.0f;
             }
@@ -414,6 +414,114 @@ int im_irl_train(ImitationDeepLearner* idl, ImDemonstration* demos, int demo_cou
             safe_free((void**)&input); safe_free((void**)&output); safe_free((void**)&target);
         }
     }
+    return 0;
+}
+
+/* ZSF-ZNB修复H-005: IRL完成后执行策略优化
+ * 在学习到的奖励函数上训练一个策略网络。
+ * 使用REINFORCE风格策略梯度：
+ *   1. 用当前策略采样动作
+ *   2. 用IRL奖励网络评估动作
+ *   3. 用策略梯度更新策略参数
+ * 
+ * @param idl 深度模仿学习器
+ * @param demo 专家演示（提供状态分布）
+ * @param state_dim 状态维度
+ * @param action_dim 动作维度
+ * @param policy_steps 策略优化步数
+ * @return 0成功，负值失败
+ */
+int im_irl_policy_optimize(ImitationDeepLearner* idl, const ImDemonstration* demo,
+                           int state_dim, int action_dim, int policy_steps) {
+    if (!idl || !demo || !idl->irl_network || state_dim <= 0 || action_dim <= 0) return -1;
+    if (policy_steps <= 0) policy_steps = 50;
+    
+    /* 创建策略LNN */
+    LNNConfig pcfg;
+    memset(&pcfg, 0, sizeof(pcfg));
+    pcfg.input_size = (size_t)state_dim;
+    pcfg.hidden_size = 128;
+    pcfg.output_size = (size_t)action_dim;
+    pcfg.learning_rate = 0.005f;
+    pcfg.enable_training = 1;
+    pcfg.num_layers = 2;
+    
+    if (!idl->policy_network) {
+        idl->policy_network = lnn_create(&pcfg);
+        if (!idl->policy_network) return -2;
+    }
+    
+    LNN* policy = (LNN*)idl->policy_network;
+    LNN* reward = (LNN*)idl->irl_network;
+    
+    /* 从专家演示提取状态分布 */
+    int kf = demo->keyframe_count > 0 ? demo->keyframe_count : 1;
+    float* states = (float*)safe_calloc((size_t)(kf * state_dim), sizeof(float));
+    if (!states) return -3;
+    
+    for (int f = 0; f < kf; f++) {
+        for (int j = 0; j < IM_MAX_JOINTS && j < state_dim; j++) {
+            states[f * state_dim + j] = demo->keyframes[f].joint_positions[j];
+        }
+    }
+    
+    /* REINFORCE策略优化 */
+    for (int step = 0; step < policy_steps; step++) {
+        float total_reward = 0.0f;
+        int valid_steps = 0;
+        
+        for (int s = 0; s < kf; s++) {
+            float* state = states + s * state_dim;
+            float* act_out = (float*)safe_malloc((size_t)action_dim * sizeof(float));
+            float* rew_out = (float*)safe_malloc((size_t)action_dim * sizeof(float));
+            float* rew_in = (float*)safe_malloc((size_t)(state_dim + action_dim) * sizeof(float));
+            if (!act_out || !rew_out || !rew_in) {
+                safe_free((void**)&act_out); safe_free((void**)&rew_out); safe_free((void**)&rew_in);
+                continue;
+            }
+            
+            /* 策略前向：生成动作 */
+            if (lnn_forward(policy, state, act_out) == 0) {
+                /* 构建状态-动作对 */
+                memcpy(rew_in, state, (size_t)state_dim * sizeof(float));
+                memcpy(rew_in + state_dim, act_out, (size_t)action_dim * sizeof(float));
+                
+                /* 奖励网络前向：评估状态-动作对 */
+                if (lnn_forward(reward, rew_in, rew_out) == 0) {
+                    /* 计算奖励值（最大值作为即时奖励） */
+                    float r = 0.0f;
+                    for (int ai = 0; ai < action_dim && ai < 8; ai++) {
+                        if (rew_out[ai] > r) r = rew_out[ai];
+                    }
+                    r = RL_CLAMP(r, -1.0f, 1.0f);
+                    
+                    /* REINFORCE：构造策略梯度目标
+                     * target = act_out + lr * reward * (1 - act_out²) 引导探索 */
+                    float lr = pcfg.learning_rate * (1.0f - (float)step / (float)policy_steps);
+                    float* act_target = (float*)safe_malloc((size_t)action_dim * sizeof(float));
+                    if (act_target) {
+                        for (int ai = 0; ai < action_dim; ai++) {
+                            float grad = r * (1.0f - act_out[ai] * act_out[ai] + 1e-6f);
+                            act_target[ai] = RL_CLAMP(act_out[ai] + lr * grad, -1.0f, 1.0f);
+                        }
+                        float loss = -r; /* negative reward = loss */
+                        lnn_backward(policy, act_target, &loss);
+                        safe_free((void**)&act_target);
+                    }
+                    total_reward += r;
+                    valid_steps++;
+                }
+            }
+            
+            safe_free((void**)&act_out); safe_free((void**)&rew_out); safe_free((void**)&rew_in);
+        }
+        
+        if (valid_steps > 0) {
+            total_reward /= (float)valid_steps;
+        }
+    }
+    
+    safe_free((void**)&states);
     return 0;
 }
 
