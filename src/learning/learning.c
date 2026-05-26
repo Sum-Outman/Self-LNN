@@ -11,6 +11,8 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/xorshift_prng.h"
+#include "selflnn/utils/secure_random.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"
@@ -712,50 +714,35 @@ int learning_evolutionary_evolve(LearningEngine* engine,
     memcpy(new_population + best_offset, engine->best_individual, 
            engine->best_individual_size * sizeof(float));
     
-    // 生成新个体：交叉和突变
+    /* 生成新个体：交叉和突变
+     * H-004修复：使用xorshift PRNG替代确定性LCG伪随机
+     */
+    XorshiftPrng prng;
+    xorshift_prng_seed_secure(&prng);
+
     for (size_t i = 1; i < engine->population_size; i++) {
         size_t new_offset = i * engine->individual_size;
-        
-        // 选择父代（完整实现：确定性随机选择）
-        // 确定性随机数生成器：基于引擎指针、迭代索引和种群大小
-        unsigned int parent_seed1 = (unsigned int)(uintptr_t)engine ^ (unsigned int)i ^ (unsigned int)engine->population_size ^ 0x2000;
-        parent_seed1 = parent_seed1 * 1103515245 + 12345;
-        unsigned int parent_rand1 = (parent_seed1 >> 16) & 0x7FFF;
-        int parent1_idx = parent_rand1 % engine->population_size;
-        
-        unsigned int parent_seed2 = parent_seed1 ^ 0x5555; // 不同的种子
-        parent_seed2 = parent_seed2 * 1103515245 + 12345;
-        unsigned int parent_rand2 = (parent_seed2 >> 16) & 0x7FFF;
-        int parent2_idx = parent_rand2 % engine->population_size;
-        
-        size_t parent1_offset = parent1_idx * engine->individual_size;
-        size_t parent2_offset = parent2_idx * engine->individual_size;
-        
-        // 交叉
+
+        /* 使用xorshift PRNG进行真正的随机选择 */
+        int parent1_idx = (int)xorshift_prng_next_u32(&prng, (uint32_t)engine->population_size);
+        int parent2_idx = (int)xorshift_prng_next_u32(&prng, (uint32_t)engine->population_size);
+
+        size_t parent1_offset = (size_t)parent1_idx * engine->individual_size;
+        size_t parent2_offset = (size_t)parent2_idx * engine->individual_size;
+
+        /* 交叉 */
         for (size_t g = 0; g < engine->individual_size; g++) {
-            // 确定性交叉选择：基于引擎指针、迭代索引和基因索引
-            unsigned int cross_seed = (unsigned int)(uintptr_t)engine ^ (unsigned int)i ^ (unsigned int)g ^ 0x3000;
-            cross_seed = cross_seed * 1103515245 + 12345;
-            unsigned int cross_rand = (cross_seed >> 16) & 0x7FFF;
-            if (cross_rand % 2 == 0) {
+            float cross_rand = xorshift_prng_next_float(&prng);
+            if (cross_rand < 0.5f) {
                 new_population[new_offset + g] = engine->population[parent1_offset + g];
             } else {
                 new_population[new_offset + g] = engine->population[parent2_offset + g];
             }
-            
-            // 突变（确定性版本）
-            // 突变检查：基于引擎指针、迭代索引、基因索引和突变率
-            unsigned int mut_check_seed = (unsigned int)(uintptr_t)engine ^ (unsigned int)i ^ (unsigned int)g ^ (unsigned int)engine->config.mutation_rate ^ 0x4000;
-            mut_check_seed = mut_check_seed * 1103515245 + 12345;
-            unsigned int mut_check_rand = (mut_check_seed >> 16) & 0x7FFF;
-            float mutation_chance = (float)mut_check_rand / 32767.0f;
-            
+
+            /* 突变 */
+            float mutation_chance = xorshift_prng_next_float(&prng);
             if (mutation_chance < engine->config.mutation_rate) {
-                // 突变值：基于不同种子生成
-                unsigned int mut_val_seed = mut_check_seed ^ 0xAAAA;
-                mut_val_seed = mut_val_seed * 1103515245 + 12345;
-                unsigned int mut_val_rand = (mut_val_seed >> 16) & 0x7FFF;
-                float mutation_value = ((float)mut_val_rand / 32767.0f) * 0.2f - 0.1f; // ±0.1的突变
+                float mutation_value = xorshift_prng_next_signed_float(&prng) * 0.2f;
                 new_population[new_offset + g] += mutation_value;
             }
         }
@@ -3529,46 +3516,26 @@ int learning_self_correct_verify(LearningEngine* engine,
             input_dim = net_config.input_size;
             output_dim = net_config.output_size;
         } else {
-            use_lnn = 0; // 无法获取配置，回退
+            // M-006修复: 获取LNN配置失败时返回错误
+            fprintf(stderr, "[自我修正错误] 无法获取LNN配置，拒绝估算维度进行验证！\n");
+            return -1;
         }
     }
 
     if (!use_lnn) {
-        // 回退：从policy_weights估算维度
-        input_dim = engine->policy_weights_size > 0 ?
-                    engine->policy_weights_size / 2 : engine->individual_size;
-        if (input_dim == 0) input_dim = 64;
-        output_dim = engine->policy_weights_size > 0 ?
-                     engine->policy_weights_size - input_dim : engine->individual_size;
-        if (output_dim == 0) output_dim = 16;
+        // M-006修复: LNN不可用时直接返回错误
+        fprintf(stderr, "[自我修正错误] LNN网络不可用，无法执行自我修正验证！\n");
+        return -1;
     }
 
     // 分配预测缓冲区（使用完整维度，无限制）
     float* predictions = (float*)safe_malloc(num_samples * output_dim * sizeof(float));
     if (!predictions) return -1;
 
-    if (use_lnn) {
-        // ===== 使用真实LNN前向传播 =====
-        if (lnn_forward_batch(engine->network, inputs, predictions, num_samples) != 0) {
-            safe_free((void**)&predictions);
-            return -1;
-        }
-    } else {
-        // ===== 回退：使用policy_weights的线性前向传播 =====
-        size_t max_input = (input_dim < engine->policy_weights_size) ? input_dim : engine->policy_weights_size;
-        size_t max_output = (output_dim < 64) ? output_dim : 64;
-        for (size_t s = 0; s < num_samples; s++) {
-            const float* sample_input = inputs + s * input_dim;
-            for (size_t o = 0; o < max_output; o++) {
-                float sum = 0.0f;
-                size_t usable_i = (max_input < 32) ? max_input : 32;
-                for (size_t i = 0; i < usable_i; i++) {
-                    size_t w_idx = (o * 32 + i) % engine->policy_weights_size;
-                    sum += engine->policy_weights[w_idx] * sample_input[i % 32];
-                }
-                predictions[s * output_dim + o] = tanhf(sum);
-            }
-        }
+    // ===== 使用真实LNN前向传播 =====
+    if (lnn_forward_batch(engine->network, inputs, predictions, num_samples) != 0) {
+        safe_free((void**)&predictions);
+        return -1;
     }
 
     // ===== 计算实证误差分布（After误差） =====

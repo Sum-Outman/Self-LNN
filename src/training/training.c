@@ -1084,6 +1084,11 @@ TrainingConfig training_config_default(void) {
     config.epochs = 100;
     config.patience = 10;
     config.validation_split = 20;  // 20%
+    config.convergence_threshold = 1e-6f;  /* ZSFWS-003: 默认绝对收敛阈值 */
+    config.convergence_rate_window = 5;    /* ZSFWS-004: 收敛速率窗口5 epoch */
+    config.enable_mini_validation = 0;     /* ZSFWS-007: 默认禁用微验证 */
+    config.mini_validation_interval = 20;  /* ZSFWS-007: 每20个batch微验证 */
+    config.mini_validation_samples = 128;  /* ZSFWS-007: 128个采样点 */
     
     config.shuffle_data = 1;
     config.verbose = 1;
@@ -6013,6 +6018,37 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             
             batch_num++;
             trainer->state.samples_processed += batch_size;
+            
+            /* ZSFWS-007: 阶段内微验证 —— 每N个batch执行一次快速验证，
+             * 比epoch级验证更早发现过拟合趋势。使用验证集的随机子集。 */
+            if (trainer->config.enable_mini_validation &&
+                trainer->config.mini_validation_interval > 0 &&
+                validation_samples > 0 &&
+                batch_num % trainer->config.mini_validation_interval == 0) {
+                float mini_val_loss = 0.0f;
+                float mini_val_acc = 0.0f;
+                /* 从验证集中随机采样mini_validation_samples个样本 */
+                size_t mini_samples = trainer->config.mini_validation_samples;
+                if (mini_samples > validation_samples) mini_samples = validation_samples;
+                size_t start_idx = (size_t)(secure_random_int((int)mini_samples) % 
+                    (validation_samples - mini_samples + 1));
+                trainer_validate(trainer, val_inputs + start_idx * input_dim,
+                                val_targets + start_idx * output_dim,
+                                mini_samples, &mini_val_loss, &mini_val_acc);
+                /* 微验证过拟合检测：验证损失连续上升则记录警告 */
+                static float last_mini_val_loss = 0.0f;
+                if (last_mini_val_loss > 0.0f && mini_val_loss > last_mini_val_loss * 1.2f) {
+                    if (trainer->config.verbose) {
+                        log_warning("[微验证] 批次%d: 验证损失显著上升 %.4f → %.4f, 可能存在过拟合",
+                                   (int)batch_num, last_mini_val_loss, mini_val_loss);
+                    }
+                }
+                last_mini_val_loss = mini_val_loss;
+                if (trainer->monitor) {
+                    training_monitor_log_metric(trainer->monitor, TM_LOSS,
+                        (int)(batch_num / trainer->config.mini_validation_interval), 2, mini_val_loss);
+                }
+            }
         }
         
         // 计算平均损失和准确率
@@ -6064,14 +6100,36 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             trainer->state.steps_without_improvement++;
         }
         
-        // 早停检查
+        /* ZSFWS-004: 计算收敛速率（最近N轮的平均损失下降率） */
+        {
+            float prev_loss = trainer->state.prev_val_loss;
+            if (prev_loss > 0.0f && val_loss > 0.0f) {
+                float instant_rate = (prev_loss - val_loss) / prev_loss;
+                float alpha = 0.3f;  /* EMA平滑因子 */
+                trainer->state.convergence_rate = trainer->state.convergence_rate * (1.0f - alpha)
+                                                + instant_rate * alpha;
+            } else if (trainer->state.convergence_rate == 0.0f) {
+                trainer->state.convergence_rate = 0.0f;
+            }
+            trainer->state.prev_val_loss = val_loss;
+        }
+
+        /* ZSFWS-003修复: 早停检查（含绝对收敛阈值） */
         if (trainer->config.patience > 0) {
-            if (early_stopping_check(val_loss, trainer->state.best_loss,
+            if (early_stopping_check_ex(val_loss, trainer->state.best_loss,
                                     trainer->config.patience,
-                                    &trainer->state.steps_without_improvement)) {
+                                    &trainer->state.steps_without_improvement,
+                                    trainer->config.convergence_threshold)) {
                 should_stop = 1;
                 if (trainer->config.verbose) {
-                    printf("早停触发于轮次 %zu\n", epoch);
+                    if (trainer->config.convergence_threshold > 0.0f &&
+                        val_loss < trainer->config.convergence_threshold) {
+                        printf("绝对收敛触发于轮次 %zu (损失=%.6e < 阈值=%.6e)\n",
+                               epoch, val_loss, trainer->config.convergence_threshold);
+                    } else {
+                        printf("早停触发于轮次 %zu (收敛速率=%.6f)\n",
+                               epoch, trainer->state.convergence_rate);
+                    }
                 }
             }
         }
@@ -7527,12 +7585,26 @@ void gradient_health_report_print(const GradientHealthReport* report) {
 }
 
 /**
- * @brief 早停检查
+ * @brief 早停检查（ZSFWS-003修复：添加绝对收敛阈值双重判断）
+ * @param current_loss 当前验证损失
+ * @param best_loss 最佳历史验证损失
+ * @param patience 早停耐心值
+ * @param steps_without_improvement 连续未改善步数
+ * @param convergence_threshold 绝对收敛阈值（损失低于此值立即触发收敛）
+ * @return 1=应停止训练，0=继续训练
  */
-int early_stopping_check(float current_loss, float best_loss,
-                         size_t patience, size_t* steps_without_improvement) {
+int early_stopping_check_ex(float current_loss, float best_loss,
+                         size_t patience, size_t* steps_without_improvement,
+                         float convergence_threshold) {
     if (!steps_without_improvement) {
         return 0;
+    }
+    
+    /* ZSFWS-003: 绝对收敛阈值检测 —— 损失低于阈值时立即停止，无需等待patience */
+    if (convergence_threshold > 0.0f && current_loss < convergence_threshold) {
+        printf("  ✅ 绝对收敛阈值触发: 当前损失 %.6e < 收敛阈值 %.6e\n",
+               current_loss, convergence_threshold);
+        return 1;
     }
     
     if (current_loss < best_loss) {
@@ -7542,6 +7614,15 @@ int early_stopping_check(float current_loss, float best_loss,
         (*steps_without_improvement)++;
         return (*steps_without_improvement >= patience) ? 1 : 0;
     }
+}
+
+/**
+ * @brief 早停检查（兼容旧接口，默认无绝对收敛阈值）
+ */
+int early_stopping_check(float current_loss, float best_loss,
+                         size_t patience, size_t* steps_without_improvement) {
+    return early_stopping_check_ex(current_loss, best_loss, patience,
+                                   steps_without_improvement, 0.0f);
 }
 
 /**

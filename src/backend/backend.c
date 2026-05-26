@@ -2444,6 +2444,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/simulation/plan_path") == 0)      return API_POST_SIMULATION_PLAN_PATH;
     if (strcmp(p, "/api/simulation/robot_control") == 0)  return API_POST_SIMULATION_ROBOT_CTRL;
     if (strcmp(p, "/api/simulation/reconstruct") == 0)     return API_POST_SIMULATION_RECONSTRUCT;
+    if (strcmp(p, "/api/simulation/reconstruct3d") == 0)   return API_POST_SIMULATION_RECONSTRUCT;  /* GAP-3: 前端使用reconstruct3d别名 */
     if (strcmp(p, "/api/simulation/view/reset") == 0)      return API_POST_SIMULATION_VIEW_RESET;
     if (strcmp(p, "/api/simulation/view/toggle_grid") == 0) return API_POST_SIMULATION_TOGGLE_GRID;
     if (strcmp(p, "/api/simulation/robot/add") == 0)       return API_POST_SIMULATION_ROBOT_ADD;
@@ -3476,6 +3477,15 @@ static void* server_thread_func(void* param) {
                     request_type = API_POST_SERIAL_CLOSE;
                 } else if (strcmp(path, "/api/serial/send") == 0) {
                     request_type = API_POST_SERIAL_SEND;
+                } else if (strcmp(path, "/api/serial/receive") == 0) {
+                    /* GAP-1修复: 串口接收路由，复用serial_send handler（内部已支持receive命令） */
+                    request_type = API_POST_SERIAL_SEND;
+                } else if (strcmp(path, "/api/checkpoint/list") == 0) {
+                    /* GAP-2修复: 检查点列表 → 模型加载（slot 18, handle_api_post_model_load） */
+                    request_type = 18;
+                } else if (strcmp(path, "/api/checkpoint/load") == 0) {
+                    /* GAP-2修复: 检查点加载 → 模型加载（slot 18, handle_api_post_model_load） */
+                    request_type = 18;
                 } else if (strcmp(path, "/api/multi_robot/sync") == 0) {
                     request_type = API_POST_MULTI_ROBOT_SYNC;
                 } else if (strcmp(path, "/api/agi/feature_list") == 0) {
@@ -3837,16 +3847,18 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/devices/discover") == 0) {
                     request_type = 261;
                 } else if (strcmp(path, "/api/devices/register") == 0) {
-                    request_type = 262;
+                    /* C-1修复: 使用正确的枚举常量API_POST_DEVICES_REGISTER_V1=57，替代错误魔术数字262 */
+                    request_type = API_POST_DEVICES_REGISTER_V1;
                 } else if (strcmp(path, "/api/devices/unregister") == 0) {
-                    /* ZSFABC-014: 添加设备注销路由 */
-                    request_type = 263;
+                    request_type = API_POST_DEVICES_UNREGISTER_V1;
                 } else if (strcmp(path, "/api/devices/list") == 0) {
                     request_type = (method && strcmp(method, "GET") == 0) ? API_GET_DEVICE_LIST : API_POST_DEVICES_LIST;
                 } else if (strcmp(path, "/api/devices/command") == 0) {
-                    request_type = 265;
+                    /* C-2修复: 使用正确的枚举常量API_POST_DEVICE_COMMAND_V1=41，替代错误魔术数字265 */
+                    request_type = API_POST_DEVICE_COMMAND_V1;
                 } else if (strcmp(path, "/api/devices/status") == 0) {
-                    request_type = 266;
+                    /* C-3修复: 使用正确的枚举常量API_POST_DEVICES_STATUS=59，替代错误魔术数字266 */
+                    request_type = API_POST_DEVICES_STATUS;
                 /* ZSFWS-B009: 前端-后端API端点对齐修复 - 旧路由链新增路由 */
                 } else if (strcmp(path, "/api/programming/sample") == 0) {
                     request_type = API_GET_PROGRAMMING_SAMPLE;
@@ -8943,6 +8955,8 @@ static int handle_api_post_dialogue_multimodal(BackendServer* server,
             unified_input[dim++] = image_features[i];
         }
         float lnn_out[128] = {0};
+        /* Phase5: 多模态特征馈入共享LNN进行状态演化（感知馈入，正确行为）
+         * lnn_out用于后续状态追踪，不直接生成回复文本 */
         lnn_forward(server->lnn_instance, unified_input, lnn_out);
 
         const char* default_resp = "已收到您的多模态信息，CfC液态神经网络正在全模态融合处理。";
@@ -14817,18 +14831,51 @@ static int handle_api_post_simulation_start(BackendServer* server,
         if (dt_ptr) { dt_ptr = strchr(dt_ptr, ':'); if (dt_ptr) dt = (float)atof(dt_ptr + 1); }
     }
     int sim_started = 0;
-    if (!server->internal_simulator) {
-        SimulatorConfig sim_config;
-        memset(&sim_config, 0, sizeof(sim_config));
-        sim_config.timestep = dt;
-        sim_config.gravity = 9.81f;
-        sim_config.enable_visualization = 0;
-        sim_config.enable_sensors = 1;
-        server->internal_simulator = simulator_create(&sim_config);
+
+    /* S-NEW-2修复: 根据engine参数路由到对应的仿真引擎
+     * 原实现忽略engine参数，始终使用internal_simulator */
+    if (strcmp(engine, "pybullet") == 0) {
+        /* 尝试连接PyBullet仿真器 */
+        extern int pybullet_is_available(void);
+        if (pybullet_is_available()) {
+            PyBulletConfig pb_config;
+            memset(&pb_config, 0, sizeof(pb_config));
+            pb_config.timestep = dt;
+            extern int pybullet_connect(const PyBulletConfig* config);
+            if (pybullet_connect(&pb_config) >= 0) {
+                sim_started = 1;
+                log_info("[仿真] PyBullet引擎启动成功");
+            }
+        }
+        if (!sim_started) log_warning("[仿真] PyBullet不可用，回退到内部仿真器");
+    } else if (strcmp(engine, "gazebo") == 0) {
+        /* 尝试连接Gazebo仿真器 */
+        extern int gazebo_is_available(void);
+        if (gazebo_is_available()) {
+            extern int gazebo_connect(void);
+            if (gazebo_connect() >= 0) {
+                sim_started = 1;
+                log_info("[仿真] Gazebo引擎启动成功");
+            }
+        }
+        if (!sim_started) log_warning("[仿真] Gazebo不可用，回退到内部仿真器");
     }
-    if (server->internal_simulator) {
-        if (simulator_start(server->internal_simulator) == 0) {
-            sim_started = 1;
+
+    /* 内部仿真器作为统一回退 */
+    if (!sim_started) {
+        if (!server->internal_simulator) {
+            SimulatorConfig sim_config;
+            memset(&sim_config, 0, sizeof(sim_config));
+            sim_config.timestep = dt;
+            sim_config.gravity = 9.81f;
+            sim_config.enable_visualization = 0;
+            sim_config.enable_sensors = 1;
+            server->internal_simulator = simulator_create(&sim_config);
+        }
+        if (server->internal_simulator) {
+            if (simulator_start(server->internal_simulator) == 0) {
+                sim_started = 1;
+            }
         }
     }
     json_data = (char*)safe_malloc(512);
@@ -19642,7 +19689,13 @@ static int handle_api_post_dialogue_send(BackendServer* server,
         }
         float lnn_out[256];
         memset(lnn_out, 0, sizeof(lnn_out));
-        if (lnn_forward(server->lnn_instance, input_vec, lnn_out) == 0) {
+        /* Phase5: 对话回退路径——使用lnn_get_output只读查询替代lnn_forward
+         * 避免对话回复生成修改共享LNN的hidden_state */
+        if (lnn_get_output(server->lnn_instance, lnn_out, 256) != 0) {
+            /* 输出不可用时使用输入特征作为回退 */
+            memcpy(lnn_out, input_vec, sizeof(input_vec));
+        }
+        {
             char reply[1024];
             /* 从LNN输出计算平均激活水平作为置信度 */
             float avg_out = 0.0f, max_out = -1e9f;

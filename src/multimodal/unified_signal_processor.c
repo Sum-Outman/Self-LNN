@@ -68,6 +68,9 @@ struct UnifiedSignalProcessor {
     float* bias_momentum;                 /**< 偏移动量缓冲区 [unified_dim] */
     size_t momentum_matrix_size;          /**< 动量矩阵当前大小（用于重新分配检查） */
     size_t momentum_bias_size;            /**< 动量偏置当前大小（用于重新分配检查） */
+
+    /* Phase4: 投影矩阵锁定标记——Xavier初始化后不参与反向传播 */
+    int projection_locked;                /**< 1=锁定（固定投影），0=可学习 */
     
     /* 传感器统计信息（用于归一化） */
     float* sensor_means;                  /**< 传感器均值统计 [sensor_dimension] */
@@ -98,11 +101,6 @@ struct UnifiedSignalProcessor {
 };
 
 /* 静态辅助函数 */
-
-/* 状态演化辅助函数声明 */
-/* 线性演化、混合演化和apply_state_evolution已移除 */
-/* CfC细胞单元作为唯一的连续状态演化路径，直接集成在encode()中 */
-/* 分离的模态处理器初始化函数已移除 —— 所有模态通过统一信号处理路径处理 */
 
 /**
  * @brief 获取处理器配置
@@ -183,7 +181,12 @@ int unified_signal_processor_train(UnifiedSignalProcessor* processor,
         total_loss += error * error;
     }
     total_loss /= (float)unified_dim;
-    
+
+    /* Phase4: 投影矩阵锁定——跳过SGD梯度更新 */
+    if (processor->projection_locked) {
+        return total_loss;
+    }
+
     /* 如果投影矩阵存在，执行真实梯度反向传播和SGD权重更新 */
     if (processor->unified_projection_matrix && total_input_dim > 0) {
         
@@ -768,6 +771,8 @@ UnifiedSignalProcessor* unified_signal_processor_create(const UnifiedSignalProce
                     processor->unified_projection_matrix[i] = r * xavier_limit;
                 }
                 memset(processor->unified_projection_bias, 0, config->unified_dimension * sizeof(float));
+                /* Phase4: Xavier初始化后立即锁定，投影矩阵不参与反向传播 */
+                processor->projection_locked = 1;
             }
         } else {
             processor->unified_projection_matrix = NULL;
@@ -1078,7 +1083,9 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
     // 将拼接的输入特征投影到统一维度
     size_t input_dim = processor->total_input_dim;
     
-    // M-002修复: 使用学习型投影矩阵替代简单子采样/补零
+    /* M-004修复: 使用学习型投影矩阵编码。投影矩阵必须已初始化。
+     * 投影矩阵未分配时拒绝降级到均匀采样/补零。
+     * 均匀采样丢失所有模态间关系信息，对后续LNN处理造成不可逆损害 */
     if (processor->unified_projection_matrix) {
         for (size_t d = 0; d < unified_dim; d++) {
             float sum = processor->unified_projection_bias ? processor->unified_projection_bias[d] : 0.0f;
@@ -1089,18 +1096,8 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
             unified_output[d] = sum;
         }
     } else {
-        // 回退: 均匀采样/补零（当投影矩阵未分配时，如维度为0的情况）
-        if (input_dim >= unified_dim) {
-            float step = (float)input_dim / (float)unified_dim;
-            for (size_t d = 0; d < unified_dim; d++) {
-                size_t src_idx = (size_t)(d * step);
-                if (src_idx >= input_dim) src_idx = input_dim - 1;
-                unified_output[d] = unified_input[src_idx];
-            }
-        } else {
-            memcpy(unified_output, unified_input, input_dim * sizeof(float));
-            memset(unified_output + input_dim, 0, (unified_dim - input_dim) * sizeof(float));
-        }
+        fprintf(stderr, "[信号处理器错误] 统一投影矩阵未分配，拒绝使用均匀采样降级处理！请先调用 unified_signal_processor_init_projections()。\n");
+        return SELFLNN_ERROR_INVALID_STATE;
     }
     
     /* 所有模态特征已完成拼接并投影到统一维度

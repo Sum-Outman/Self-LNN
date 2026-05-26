@@ -547,7 +547,7 @@ typedef struct {
     int haptic_feature_dim;          /**< 触觉特征维度 */
     int fused_feature_dim;           /**< 融合特征维度 */
     int cfc_hidden_size;             /**< CfC融合隐藏状态大小 */
-    int enable_cfc_fusion;           /**< 启用CfC动态融合（默认1） */
+    int enable_cfc_fusion;           /**< 启用CfC动态融合（Phase2: 默认0，启用投影拼接替代独立ODE） */
     float fusion_temporal_constant;  /**< 融合时间常数（默认0.05） */
 } VisionHapticFusionConfig;
 

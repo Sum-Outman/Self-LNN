@@ -19,6 +19,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/deep_copy_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/xorshift_prng.h"
 #include "selflnn/abstraction.h"
 #include "selflnn/core/laplace.h"
 
@@ -37,6 +38,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
+
+/* L-005修复：知识演化用的安全PRNG，替代time(NULL)种子 */
+static XorshiftPrng micro_prng;
+static int micro_prng_initialized = 0;
 
 /**
  * @brief 计算文本匹配分数（0-3分）
@@ -3001,6 +3006,88 @@ LearningResult* knowledge_self_learn(KnowledgeBase* kb, const void* config, cons
             
             // 设置新知识属性
             new_entry.type = KNOWLEDGE_CONCEPT;
+
+            /* H-002修复: 语义验证 —— 使用CfC嵌入计算三元组语义一致性
+             * 仅高频统计拼接会生成无意义三元组（如"苹果 属于 地球"）
+             * 通过CfC嵌入验证subject和object在embedding空间中的语义关联度 */
+            if (kb->cfc_embed && kb->cfc_embed_dim > 0) {
+                int subj_eid = cfc_embed_get_entity_id(kb->cfc_embed, new_entry.subject);
+                int obj_eid = cfc_embed_get_entity_id(kb->cfc_embed, new_entry.object);
+
+                if (subj_eid >= 0 && obj_eid >= 0) {
+                    int dim = kb->cfc_embed_dim;
+                    float* subj_vec = (float*)safe_malloc((size_t)dim * sizeof(float));
+                    float* obj_vec = (float*)safe_malloc((size_t)dim * sizeof(float));
+                    if (subj_vec && obj_vec) {
+                        cfc_embed_get_entity_embedding(kb->cfc_embed, subj_eid, subj_vec, dim);
+                        cfc_embed_get_entity_embedding(kb->cfc_embed, obj_eid, obj_vec, dim);
+                        float cosine_sim = 0.0f;
+                        float norm_s = 0.0f, norm_o = 0.0f;
+                        for (int d = 0; d < dim; d++) {
+                            cosine_sim += subj_vec[d] * obj_vec[d];
+                            norm_s += subj_vec[d] * subj_vec[d];
+                            norm_o += obj_vec[d] * obj_vec[d];
+                        }
+                        norm_s = sqrtf(norm_s + 1e-8f);
+                        norm_o = sqrtf(norm_o + 1e-8f);
+                        cosine_sim /= (norm_s * norm_o);
+
+                        /* 语义一致性阈值：余弦相似度低于0.15说明无关联，拒绝生成 */
+                        if (cosine_sim < 0.15f) {
+                            safe_free((void**)&subj_vec);
+                            safe_free((void**)&obj_vec);
+                            safe_free((void**)&new_entry.subject);
+                            safe_free((void**)&new_entry.predicate);
+                            safe_free((void**)&new_entry.object);
+                            continue;
+                        }
+                        /* 根据语义一致性调整置信度 */
+                        new_entry.weight = new_entry.weight * 0.6f + (cosine_sim * 0.4f);
+                    }
+                    safe_free((void**)&subj_vec);
+                    safe_free((void**)&obj_vec);
+                }
+            }
+
+            /* H-002修复: 矛盾检测 —— 检查生成的三元组是否与已有知识矛盾
+             * 搜索subject相同的已有三元组，检测谓词冲突 */
+            {
+                int has_contradiction = 0;
+                for (size_t chk = 0; chk < kb->entry_count && chk < 200; chk++) {
+                    KnowledgeInternalEntry* exist = &kb->entries[chk];
+                    if (exist->is_active && exist->entry.subject &&
+                        strcmp(exist->entry.subject, new_entry.subject) == 0) {
+                        /* 相同主语，检查谓词是否冲突 */
+                        if (exist->entry.predicate && new_entry.predicate) {
+                            /* 简单冲突检测：同主语+同谓词+不同宾语 = 可能的矛盾 */
+                            if (strcmp(exist->entry.predicate, new_entry.predicate) == 0) {
+                                if (exist->entry.object && new_entry.object &&
+                                    strcmp(exist->entry.object, new_entry.object) != 0) {
+                                    /* 同一谓词下不同宾语，可能冲突 */
+                                    if (exist->entry.confidence >= CONFIDENCE_MEDIUM) {
+                                        has_contradiction = 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            /* 反向谓词检测：如 "是" vs "不是" */
+                            if ((strcmp(exist->entry.predicate, "是") == 0 &&
+                                 strcmp(new_entry.predicate, "不是") == 0) ||
+                                (strcmp(exist->entry.predicate, "属于") == 0 &&
+                                 strcmp(new_entry.predicate, "不属于") == 0)) {
+                                has_contradiction = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (has_contradiction) {
+                    safe_free((void**)&new_entry.subject);
+                    safe_free((void**)&new_entry.predicate);
+                    safe_free((void**)&new_entry.object);
+                    continue;
+                }
+            }
             
             // 基于频率计算置信度：高频项组合产生更高置信度
             float subject_freq_norm = (float)subject_freq[subject_idx].count / total_entries;
@@ -3617,10 +3704,12 @@ EvolutionResult* knowledge_self_evolve(KnowledgeBase* kb, const void* config, co
                         entry->weight += mutation_strength * (1.5f - current_fitness);
                         if (entry->weight > 1.0f) entry->weight = 1.0f;
                     } else {
-                        // 高权重知识：确定性微调
-                        unsigned int micro_seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)kb ^ (unsigned int)i ^ (unsigned int)selected_idx;
-                        micro_seed = micro_seed * 1103515245 + 12345;
-                        if ((micro_seed & 1) == 0) {
+                        /* L-005修复：使用安全随机数替代 time(NULL) */
+                        if (micro_prng_initialized == 0) {
+                            xorshift_prng_seed_secure(&micro_prng);
+                            micro_prng_initialized = 1;
+                        }
+                        if (xorshift_prng_next_float(&micro_prng) < 0.5f) {
                             entry->weight += mutation_strength * 0.5f; // 小幅增加
                             if (entry->weight > 1.0f) entry->weight = 1.0f;
                         } else {
@@ -6218,7 +6307,20 @@ int knowledge_base_load_from_file(KnowledgeBase* kb, const char* filepath) {
 
 int knowledge_base_populate_preset(KnowledgeBase* kb) {
     if (!kb) return -1;
-    
+
+    /* H-001修复: 优先尝试从外部JSON文件加载预置知识
+     * 文件路径: knowledge_preset.json（与可执行文件同目录）
+     * 若文件存在且加载成功，则跳过硬编码预设数据 */
+    int external_loaded = knowledge_base_load_from_file(kb, "knowledge_preset.json");
+    if (external_loaded > 0) {
+        log_info("[知识库] 从外部文件 knowledge_preset.json 加载预置知识: %d条", external_loaded);
+        return external_loaded;
+    }
+    /* 外部文件不存在或加载失败时回退到硬编码预设 */
+    if (external_loaded == 0) {
+        log_info("[知识库] knowledge_preset.json 未找到，使用内置281条预设种子知识");
+    }
+
     size_t added = 0;
     for (size_t i = 0; i < PRESET_COUNT; i++) {
         KnowledgeEntry entry;

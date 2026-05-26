@@ -1139,7 +1139,7 @@ static int eskf_update(ESKFFilter* eskf, const float* observation, int obs_model
     return 0;
 }
 
-int eskf_get_state(const ESKFFilter* eskf, float* nom_state, float* error_state, float* covariance) {
+static int deep_eskf_get_state(const ESKFFilter* eskf, float* nom_state, float* error_state, float* covariance) {
     if (!eskf || !nom_state) return -1;
     int ns = eskf->config.nom_state_dim;
     int es = eskf->config.error_state_dim;
@@ -1165,7 +1165,7 @@ static void eskf_reset(ESKFFilter* eskf, const float* init_nom_state) {
  * Particle Filter - 粒子滤波器（SIR）
  * ============================================================================ */
 
-struct ParticleFilter {
+struct DeepParticleFilter {
     ParticleFilterConfig config;
     float* particles;        /* 粒子状态 [num_particles x state_dim] */
     float* weights;          /* 粒子权重 [num_particles] */
@@ -1178,9 +1178,9 @@ struct ParticleFilter {
     float* cfc_tau;
 };
 
-static ParticleFilter* particle_filter_create(const ParticleFilterConfig* config) {
+static DeepParticleFilter* deep_particle_filter_create(const ParticleFilterConfig* config) {
     if (!config) return NULL;
-    ParticleFilter* pf = (ParticleFilter*)safe_calloc(1, sizeof(ParticleFilter));
+    DeepParticleFilter* pf = (DeepParticleFilter*)safe_calloc(1, sizeof(DeepParticleFilter));
     if (!pf) return NULL;
     memcpy(&pf->config, config, sizeof(ParticleFilterConfig));
     int s = config->state_dim;
@@ -1190,7 +1190,7 @@ static ParticleFilter* particle_filter_create(const ParticleFilterConfig* config
     pf->weights = (float*)safe_calloc(n, sizeof(float));
     pf->weighted_sum = (float*)safe_calloc(s, sizeof(float));
     if (!pf->particles || !pf->weights || !pf->weighted_sum) {
-        particle_filter_free(pf);
+        deep_particle_filter_free(pf);
         return NULL;
     }
     for (int i = 0; i < n; i++) pf->weights[i] = 1.0f / (float)n;
@@ -1203,7 +1203,7 @@ static ParticleFilter* particle_filter_create(const ParticleFilterConfig* config
         pf->cfc_tau = (float*)safe_calloc(hs, sizeof(float));
         if (!pf->cfc_W_h || !pf->cfc_W_in || !pf->cfc_b_g ||
             !pf->cfc_b_a || !pf->cfc_tau) {
-            particle_filter_free(pf);
+            deep_particle_filter_free(pf);
             return NULL;
         }
         for (int i = 0; i < hs; i++) {
@@ -1220,7 +1220,7 @@ static ParticleFilter* particle_filter_create(const ParticleFilterConfig* config
     return pf;
 }
 
-static void particle_filter_free(ParticleFilter* pf) {
+static void deep_particle_filter_free(DeepParticleFilter* pf) {
     if (!pf) return;
     safe_free((void**)&pf->particles);
     safe_free((void**)&pf->weights);
@@ -1233,7 +1233,7 @@ static void particle_filter_free(ParticleFilter* pf) {
     safe_free((void**)&pf);
 }
 
-static int particle_filter_predict(ParticleFilter* pf, const float* control, float dt) {
+static int deep_particle_filter_predict(DeepParticleFilter* pf, const float* control, float dt) {
     (void)control;
     if (!pf || dt <= 0.0f) return -1;
     int s = pf->config.state_dim;
@@ -1258,7 +1258,7 @@ static int particle_filter_predict(ParticleFilter* pf, const float* control, flo
     return 0;
 }
 
-int particle_filter_update(ParticleFilter* pf, const float* observation) {
+static int deep_particle_filter_update(DeepParticleFilter* pf, const float* observation) {
     if (!pf || !observation) return -1;
     int s = pf->config.state_dim;
     int o = pf->config.obs_dim;
@@ -1289,12 +1289,12 @@ int particle_filter_update(ParticleFilter* pf, const float* observation) {
     neff = 1.0f / (neff + 1e-30f);
     float threshold = pf->config.resampling_threshold * (float)n;
     if (neff < threshold) {
-        particle_filter_resample(pf);
+        deep_particle_filter_resample(pf);
     }
     return 0;
 }
 
-static int particle_filter_resample(ParticleFilter* pf) {
+static int deep_particle_filter_resample(DeepParticleFilter* pf) {
     if (!pf) return -1;
     int s = pf->config.state_dim;
     int n = pf->config.num_particles;
@@ -1322,7 +1322,7 @@ static int particle_filter_resample(ParticleFilter* pf) {
     return 0;
 }
 
-static int particle_filter_get_state(const ParticleFilter* pf, float* mean_state, float* covariance, int* effective_particles) {
+static int deep_particle_filter_get_state(const DeepParticleFilter* pf, float* mean_state, float* covariance, int* effective_particles) {
     if (!pf || !mean_state) return -1;
     int s = pf->config.state_dim;
     int n = pf->config.num_particles;
@@ -1349,7 +1349,7 @@ static int particle_filter_get_state(const ParticleFilter* pf, float* mean_state
     return 0;
 }
 
-static int particle_filter_get_particles(const ParticleFilter* pf, float* particles, float* weights, int max_particles) {
+static int deep_particle_filter_get_particles(const DeepParticleFilter* pf, float* particles, float* weights, int max_particles) {
     if (!pf || !particles) return -1;
     int s = pf->config.state_dim;
     int n = pf->config.num_particles;
@@ -1360,7 +1360,7 @@ static int particle_filter_get_particles(const ParticleFilter* pf, float* partic
     return copy_n;
 }
 
-int particle_filter_reset(ParticleFilter* pf, const float* init_mean, float init_std) {
+static int deep_particle_filter_reset(DeepParticleFilter* pf, const float* init_mean, float init_std) {
     if (!pf || !init_mean) return -1;
     int s = pf->config.state_dim;
     int n = pf->config.num_particles;
@@ -1380,7 +1380,7 @@ int particle_filter_reset(ParticleFilter* pf, const float* init_mean, float init
  * Info Filter - 信息滤波器
  * ============================================================================ */
 
-struct InfoFilter {
+struct DeepInfoFilter {
     InfoFilterConfig config;
     float* information_vector;   /* 信息向量 y [state_dim] */
     float* information_matrix;   /* 信息矩阵 Y [state_dim x state_dim] */
@@ -1398,9 +1398,9 @@ struct InfoFilter {
     float* buffer;
 };
 
-static InfoFilter* info_filter_create(const InfoFilterConfig* config) {
+static DeepInfoFilter* deep_info_filter_create(const InfoFilterConfig* config) {
     if (!config) return NULL;
-    InfoFilter* inf = (InfoFilter*)safe_calloc(1, sizeof(InfoFilter));
+    DeepInfoFilter* inf = (DeepInfoFilter*)safe_calloc(1, sizeof(DeepInfoFilter));
     if (!inf) return NULL;
     memcpy(&inf->config, config, sizeof(InfoFilterConfig));
     int s = config->state_dim;
@@ -1415,7 +1415,7 @@ static InfoFilter* info_filter_create(const InfoFilterConfig* config) {
     inf->buffer = (float*)safe_calloc(s * s * 4, sizeof(float));
     if (!inf->information_vector || !inf->information_matrix || !inf->state ||
         !inf->covariance || !inf->process_info || !inf->obs_info || !inf->buffer) {
-        info_filter_free(inf);
+        deep_info_filter_free(inf);
         return NULL;
     }
     _sf_mat_identity(inf->information_matrix, s);
@@ -1433,7 +1433,7 @@ static InfoFilter* info_filter_create(const InfoFilterConfig* config) {
         inf->cfc_tau = (float*)safe_calloc(hs, sizeof(float));
         if (!inf->cfc_W_h || !inf->cfc_W_in || !inf->cfc_b_g ||
             !inf->cfc_b_a || !inf->cfc_tau) {
-            info_filter_free(inf);
+            deep_info_filter_free(inf);
             return NULL;
         }
         for (int i = 0; i < hs; i++) {
@@ -1450,7 +1450,7 @@ static InfoFilter* info_filter_create(const InfoFilterConfig* config) {
     return inf;
 }
 
-static void info_filter_free(InfoFilter* inf) {
+static void deep_info_filter_free(DeepInfoFilter* inf) {
     if (!inf) return;
     safe_free((void**)&inf->information_vector);
     safe_free((void**)&inf->information_matrix);
@@ -1467,7 +1467,7 @@ static void info_filter_free(InfoFilter* inf) {
     safe_free((void**)&inf);
 }
 
-int info_filter_predict(InfoFilter* inf, const float* control, float dt) {
+static int deep_info_filter_predict(DeepInfoFilter* inf, const float* control, float dt) {
     (void)control;
     if (!inf || dt <= 0.0f) return -1;
     int s = inf->config.state_dim;
@@ -1582,7 +1582,7 @@ int info_filter_predict(InfoFilter* inf, const float* control, float dt) {
     return 0;
 }
 
-int info_filter_update(InfoFilter* inf, const float* observation, const float* obs_jacobian) {
+static int deep_info_filter_update(DeepInfoFilter* inf, const float* observation, const float* obs_jacobian) {
     if (!inf || !observation) return -1;
     int s = inf->config.state_dim;
     int o = inf->config.obs_dim;
@@ -1633,7 +1633,7 @@ int info_filter_update(InfoFilter* inf, const float* observation, const float* o
     return 0;
 }
 
-static int info_filter_get_state(const InfoFilter* inf, float* state, float* information_matrix, float* covariance) {
+static int deep_info_filter_get_state(const DeepInfoFilter* inf, float* state, float* information_matrix, float* covariance) {
     if (!inf || !state) return -1;
     int s = inf->config.state_dim;
     memcpy(state, inf->state, s * sizeof(float));
@@ -1644,7 +1644,7 @@ static int info_filter_get_state(const InfoFilter* inf, float* state, float* inf
     return 0;
 }
 
-static void info_filter_reset(InfoFilter* inf, const float* init_state, const float* init_covariance) {
+static void deep_info_filter_reset(DeepInfoFilter* inf, const float* init_state, const float* init_covariance) {
     if (!inf) return;
     int s = inf->config.state_dim;
     if (init_state) memcpy(inf->state, init_state, s * sizeof(float));
@@ -1675,8 +1675,8 @@ static void info_filter_reset(InfoFilter* inf, const float* init_state, const fl
  */
 typedef struct SensorDeepPreprocessor {
     ESKFFilter* eskf;
-    ParticleFilter* pf;
-    InfoFilter* inf;
+    DeepParticleFilter* pf;
+    DeepInfoFilter* inf;
     int is_initialized;
     size_t state_dim;
     size_t obs_dim;
@@ -1728,7 +1728,7 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
     pf_cfg.resampling_threshold = 0.5f;
     pf_cfg.use_cfc_motion_model = 0; /* ZSFWS-M007: 默认禁用随机CfC运动模型 */
     pf_cfg.cfc_hidden_size = (int)state_dim;
-    sdp->pf = particle_filter_create(&pf_cfg);
+    sdp->pf = deep_particle_filter_create(&pf_cfg);
     if (!sdp->pf) { sensor_deep_preprocessor_free(sdp); return NULL; }
 
     /* 创建信息滤波器（CfC状态转移） */
@@ -1740,7 +1740,7 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
     inf_cfg.observation_info_std = 0.01f;
     inf_cfg.use_cfc_transition = 0; /* ZSFWS-M007: 默认禁用随机CfC转移 */
     inf_cfg.cfc_hidden_size = (int)state_dim;
-    sdp->inf = info_filter_create(&inf_cfg);
+    sdp->inf = deep_info_filter_create(&inf_cfg);
     if (!sdp->inf) { sensor_deep_preprocessor_free(sdp); return NULL; }
 
     sdp->output_buffer = (float*)safe_calloc(state_dim, sizeof(float));
@@ -1756,8 +1756,8 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
 void sensor_deep_preprocessor_free(SensorDeepPreprocessor* sdp) {
     if (!sdp) return;
     if (sdp->eskf) { eskf_free(sdp->eskf); sdp->eskf = NULL; }
-    if (sdp->pf) { particle_filter_free(sdp->pf); sdp->pf = NULL; }
-    if (sdp->inf) { info_filter_free(sdp->inf); sdp->inf = NULL; }
+    if (sdp->pf) { deep_particle_filter_free(sdp->pf); sdp->pf = NULL; }
+    if (sdp->inf) { deep_info_filter_free(sdp->inf); sdp->inf = NULL; }
     safe_free((void**)&sdp->output_buffer);
     safe_free((void**)&sdp);
 }
@@ -1792,7 +1792,7 @@ int sensor_deep_preprocess_frame(SensorDeepPreprocessor* sdp,
         eskf_update(sdp->eskf, raw_data, 0);
         float nom_state[64];
         float error_state[32];
-        eskf_get_state(sdp->eskf, nom_state, error_state, NULL);
+        deep_eskf_get_state(sdp->eskf, nom_state, error_state, NULL);
         /* 拷贝ESKF名义状态前sdp->state_dim维 */
         size_t copy_dim = sdp->state_dim < 16 ? sdp->state_dim : 16;
         memcpy(output, nom_state, copy_dim * sizeof(float));
@@ -1800,11 +1800,11 @@ int sensor_deep_preprocess_frame(SensorDeepPreprocessor* sdp,
 
     /* 粒子滤波预测+更新 */
     if (sdp->pf) {
-        particle_filter_predict(sdp->pf, NULL, dt);
-        particle_filter_update(sdp->pf, raw_data);
+        deep_particle_filter_predict(sdp->pf, NULL, dt);
+        deep_particle_filter_update(sdp->pf, raw_data);
         float pf_state[64];
         int effective;
-        particle_filter_get_state(sdp->pf, pf_state, NULL, &effective);
+        deep_particle_filter_get_state(sdp->pf, pf_state, NULL, &effective);
         /* 融合粒子滤波估计 */
         for (size_t i = 0; i < sdp->state_dim && i < 64; i++) {
             output[i] = output[i] * 0.5f + pf_state[i] * 0.5f;
@@ -1813,10 +1813,10 @@ int sensor_deep_preprocess_frame(SensorDeepPreprocessor* sdp,
 
     /* 信息滤波预测+更新 */
     if (sdp->inf) {
-        info_filter_predict(sdp->inf, NULL, dt);
-        info_filter_update(sdp->inf, raw_data, NULL);
+        deep_info_filter_predict(sdp->inf, NULL, dt);
+        deep_info_filter_update(sdp->inf, raw_data, NULL);
         float inf_state[64];
-        info_filter_get_state(sdp->inf, inf_state, NULL, NULL);
+        deep_info_filter_get_state(sdp->inf, inf_state, NULL, NULL);
         /* 三重滤波融合平均 */
         for (size_t i = 0; i < sdp->state_dim && i < 64; i++) {
             output[i] = output[i] * 0.667f + inf_state[i] * 0.333f;

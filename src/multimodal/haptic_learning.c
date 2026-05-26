@@ -1,6 +1,8 @@
 /**
  * @file haptic_learning.c
  * @brief 触觉/力觉感官学习系统完整实现
+ *
+ * H-006修复：集成 haptic_enhance.c 的CfC增强触觉处理能力
  */
 #include "selflnn/multimodal/haptic_learning.h"
 #include "selflnn/core/lnn.h"
@@ -380,7 +382,23 @@ int hl_fuse_vision_haptic(HapticLearner* hl, const float* visual, int vdim,
         safe_free((void**)&cat_input);
         safe_free((void**)&lnn_output);
     }
-    /* LNN未绑定或前向失败时回退到加权平均（保持可用性） */
+    /* LNN不可用时，尝试haptic_enhance.c的CfC增强触觉处理器
+     * H-006修复：添加对haptic_enhance.c增强功能的引用 */
+    {
+        extern HapticCfcProcessor* haptic_enhance_get_global_processor(void);
+        HapticCfcProcessor* enh_proc = haptic_enhance_get_global_processor();
+        if (enh_proc) {
+            float visual_haptic[192];
+            int total_dim = vdim + hdim;
+            if (total_dim <= 192) {
+                memcpy(visual_haptic, visual, (size_t)vdim * sizeof(float));
+                memcpy(visual_haptic + vdim, haptic, (size_t)hdim * sizeof(float));
+                haptic_cfc_process(enh_proc, visual_haptic, total_dim, fused, fdim);
+                return 0;
+            }
+        }
+    }
+    /* LNN未绑定或增强器不可用时的回退：加权平均 */
     for (int i = 0; i < fdim; i++) {
         float v = (i < vdim) ? visual[i] : 0.0f;
         float h = (i < hdim) ? haptic[i] : 0.0f;

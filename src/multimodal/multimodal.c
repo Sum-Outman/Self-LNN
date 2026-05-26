@@ -10,6 +10,7 @@
 
 #include "selflnn/multimodal/multimodal.h"
 #include "selflnn/multimodal/liquid_vision.h"
+#include "selflnn/multimodal/image_recognition_deep.h"
 #include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -37,6 +38,9 @@ struct MultimodalProcessor {
 
     /* P0-003修复: CfC深度视觉处理器替代传统CV特征提取 */
     CfcVisionProcessor* cfc_vision_proc;
+
+    /* S-NEW-1: 深度图像识别分类器（细粒度/开放集/少样本/零样本） */
+    IRDFineClassifier* ird_classifier;
 
     float* vision_features_cache;
     size_t vision_features_size;
@@ -110,6 +114,17 @@ MultimodalProcessor* multimodal_processor_create(const MultimodalConfig* config)
             safe_free((void**)&processor);
             return NULL;
         }
+
+        /* S-NEW-1: 创建深度图像识别分类器
+         * image_recognition_deep.c之前孤立未被调用 */
+        IRDFineConfig ird_cfg;
+        memset(&ird_cfg, 0, sizeof(ird_cfg));
+        ird_cfg.feature_dim = 256;
+        ird_cfg.patch_size = 16;
+        ird_cfg.num_parts = 8;
+        ird_cfg.discriminative_threshold = 0.5f;
+        ird_cfg.num_classify_classes = 100;
+        processor->ird_classifier = ird_fine_classifier_create(&ird_cfg);
     }
 
     processor->is_training = 0;
@@ -141,6 +156,11 @@ void multimodal_processor_free(MultimodalProcessor* processor) {
     if (processor->cfc_vision_proc) {
         cfc_vision_processor_destroy(processor->cfc_vision_proc);
         processor->cfc_vision_proc = NULL;
+    }
+    /* S-NEW-1: 释放深度图像识别分类器 */
+    if (processor->ird_classifier) {
+        ird_fine_free(processor->ird_classifier);
+        processor->ird_classifier = NULL;
     }
 
     safe_free((void**)&processor->vision_features_cache);
@@ -188,70 +208,19 @@ int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* 
                                                      data, width, height, channels,
                                                      features, max_features);
         if (extracted > 0) {
-            /* CfC特征提取成功，直接返回CfC特征 */
+            /* CfC特征提取成功 */
             return extracted;
         }
-        /* CfC提取失败，回退到LNN前向传播 */
+        /* M-001修复: CfC提取失败时返回明确错误码，禁止静默降级到LNN回退路径 */
+        fprintf(stderr, "[多模态错误] CfC视觉特征提取失败，拒绝降级处理\n");
+        return 0;
     }
 
-    /* 回退路径：使用主LNN进行视觉特征提取
-     * 将图像降采样后通过液态神经网络前向传播 */
-    {
-        int total_values = width * height * channels;
-        int input_dim = total_values < MMC_VISION_CFC_INPUT_DIM
-                       ? total_values : MMC_VISION_CFC_INPUT_DIM;
-
-        float* cfc_input = (float*)safe_calloc((size_t)input_dim, sizeof(float));
-        float* cfc_output = (float*)safe_calloc(MMC_VISION_CFC_OUTPUT_DIM, sizeof(float));
-        if (!cfc_input || !cfc_output) {
-            safe_free((void**)&cfc_input);
-            safe_free((void**)&cfc_output);
-            return 0;
-        }
-
-        /* 自适应降采样：双线性空间插值到32x32网格 */
-        if (total_values <= input_dim) {
-            memcpy(cfc_input, data, (size_t)total_values * sizeof(float));
-        } else {
-            float scale_x = (float)(width) / 32.0f;
-            float scale_y = (float)(height) / 32.0f;
-            int in_idx = 0;
-            for (int gy = 0; gy < 32 && in_idx < input_dim; gy++) {
-                for (int gx = 0; gx < 32 && in_idx < input_dim; gx++) {
-                    int px = (int)((float)gx * scale_x);
-                    int py = (int)((float)gy * scale_y);
-                    if (px >= width) px = width - 1;
-                    if (py >= height) py = height - 1;
-                    for (int c = 0; c < channels && in_idx < input_dim; c++) {
-                        cfc_input[in_idx++] = data[(py * width + px) * channels + c];
-                    }
-                }
-            }
-        }
-
-        /* 通过主LNN液态神经网络前向传播 */
-        if (processor->main_lnn) {
-            lnn_forward(processor->main_lnn, cfc_input, cfc_output);
-        }
-
-        /* L2归一化 */
-        float norm = 0.0f;
-        for (int i = 0; i < MMC_VISION_CFC_OUTPUT_DIM; i++)
-            norm += cfc_output[i] * cfc_output[i];
-        if (norm > 1e-8f) {
-            float inv = 1.0f / sqrtf(norm);
-            for (int i = 0; i < MMC_VISION_CFC_OUTPUT_DIM; i++)
-                cfc_output[i] *= inv;
-        }
-
-        size_t out_count = MMC_VISION_CFC_OUTPUT_DIM < max_features
-                          ? MMC_VISION_CFC_OUTPUT_DIM : max_features;
-        memcpy(features, cfc_output, out_count * sizeof(float));
-
-        safe_free((void**)&cfc_input);
-        safe_free((void**)&cfc_output);
-        return (int)out_count;
-    }
+    /* M-001修复: CfC视觉处理器未初始化时同样拒绝降级
+     * 原先的回退路径（LNN降采样+双线性插值）已禁用
+     * 调用方必须先初始化CfC视觉处理器再使用视觉功能 */
+    fprintf(stderr, "[多模态错误] CfC视觉处理器未初始化，无法提取视觉特征\n");
+    return 0;
 }
 
 /**

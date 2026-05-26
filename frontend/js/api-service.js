@@ -1872,7 +1872,8 @@ class ApiService {
             const response = await this.request('/agi/decide', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ goal: goal || '系统优化', context: context || {} })
+                /* FIX-1: 添加 goal_priority, risk_tolerance 匹配后端parse_json */
+                body: JSON.stringify({ goal: goal || '系统优化', goal_priority: 0.8, risk_tolerance: 0.5, context: context || {} })
             });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
@@ -1891,7 +1892,8 @@ class ApiService {
             const response = await this.request('/agi/learn', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ data: data || [], mode: mode || 'auto' })
+                /* FIX-1: mode→target, 添加store_knowledge匹配后端 */
+                body: JSON.stringify({ data: data || [], target: mode || 'auto', store_knowledge: 1 })
             });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const dataJson = await response.json();
@@ -1910,7 +1912,8 @@ class ApiService {
             const response = await this.request('/agi/evolve', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ generations: (config && config.generations) || 10, mode: (config && config.mode) || 'auto' })
+                /* FIX-1: mode→target 匹配后端parse_json_string("target",...) */
+                body: JSON.stringify({ generations: (config && config.generations) || 10, target: (config && config.mode) || 'auto' })
             });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
@@ -1929,7 +1932,8 @@ class ApiService {
             const response = await this.request('/agi/memory', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: action || 'read', key: key || 'latest', data: data || [] })
+                /* FIX-1: action→op, data→value, 添加priority/strength */
+                body: JSON.stringify({ op: action || 'read', key: key || 'latest', value: data || [], priority: 5, strength: 0.8 })
             });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const dataJson = await response.json();
@@ -1948,7 +1952,8 @@ class ApiService {
             const response = await this.request('/agi/plan', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ goal: goal || '系统优化', horizon: horizon || 10 })
+                /* FIX-1: horizon→steps, 添加long_term */
+                body: JSON.stringify({ goal: goal || '系统优化', steps: horizon || 10, long_term: 0 })
             });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
@@ -3629,7 +3634,8 @@ class ApiService {
         try {
             var resp = await this.request('/device/command', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({device_id: deviceId, command})
+                /* FIX-1: device_id → device_type 匹配后端 parse_json_string("device_type",...) */
+                body: JSON.stringify({device_type: deviceId, command})
             });
             var data = await resp.json();
             return { success: resp.ok, data: data };
@@ -4199,7 +4205,8 @@ class ApiService {
         try {
             var resp = await this.request('/device/control', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ device_id: deviceId, action: action, params: params || {} })
+                /* FIX-1: device_id→device 匹配后端 parse_json_string("device",...) */
+                body: JSON.stringify({ device: deviceId, action: action, params: params || {} })
             });
             var data = await resp.json();
             return { success: resp.ok, data: data };
@@ -4677,7 +4684,8 @@ class ApiService {
             const response = await this.request('/agi/think', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ input: inputText, mode: mode || 0 })
+                /* FIX-1: input→query 匹配后端parse_json_string("query",...) */
+                body: JSON.stringify({ query: inputText, deep: mode || 0 })
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
@@ -5120,6 +5128,182 @@ class ApiService {
         }
     }
 
+    /* ==================== ZSFWS-005修复: 补充缺失的API端点封装 ==================== */
+
+    /* --- 知识库高级操作 --- */
+    async knowledgeStats() {
+        try { var r = await this.request('/knowledge/stats'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async knowledgeExport() {
+        try { var r = await this.request('/knowledge/export'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async knowledgeDelete(entryId) {
+        try { var r = await this.request('/knowledge/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({id:entryId}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async knowledgeEntry(entryId) {
+        try { var r = await this.request('/knowledge/entry/' + entryId); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 记忆系统高级操作 --- */
+    async memoryAdd(key, data, strength) {
+        try {
+            var r = await this.request('/memory/add', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:key, data:data, strength:strength||0.8}) });
+            var d = await r.json(); return { success: true, data: d };
+        } catch(e) { return { success: false, error: e.message }; }
+    }
+    async memoryEntry(entryId) {
+        try { var r = await this.request('/memory/entry/' + entryId); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async memoryExport() {
+        try { var r = await this.request('/memory/export'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async memoryClear() {
+        try { var r = await this.request('/memory/clear', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async memorySearch(query) {
+        try { var r = await this.request('/memory/search', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query:query}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async memorySleepConsolidation() {
+        try { var r = await this.request('/memory/sleep_consolidation', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 技能库 --- */
+    async skillsList() {
+        try { var r = await this.request('/skills'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async skillsSearch(query) {
+        try { var r = await this.request('/skills/search', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query:query}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async skillsCompose(skillIds) {
+        try { var r = await this.request('/skills/compose', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({skills:skillIds}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async skillsStats() {
+        try { var r = await this.request('/skills/stats'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 多智能体 --- */
+    async multiAgentStatus() {
+        try { var r = await this.request('/multi-agent/status'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async multiAgentNegotiate(params) {
+        try { var r = await this.request('/multi-agent/negotiate', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(params||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async multiAgentConsensus(params) {
+        try { var r = await this.request('/multi-agent/consensus', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(params||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async multiAgentMessage(msg) {
+        try { var r = await this.request('/multi-agent/message', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(msg||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async multiAgentTask(task) {
+        try { var r = await this.request('/multi-agent/task', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(task||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 编程工具 --- */
+    async programmingAnalyze(code, language) {
+        try { var r = await this.request('/programming/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, language:language||'c'}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async programmingGenerate(spec) {
+        try { var r = await this.request('/programming/generate', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(spec||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async programmingOptimize(code) {
+        try { var r = await this.request('/programming/optimize', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async programmingCompile(code, language) {
+        try { var r = await this.request('/programming/compile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, language:language||'c'}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async programmingExecute(code, language) {
+        try { var r = await this.request('/programming/execute', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, language:language||'c'}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async programmingStatus() {
+        try { var r = await this.request('/programming/status'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 超参数搜索 --- */
+    async hyperparameterStart(params) {
+        try { var r = await this.request('/hyperparameter/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(params||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async hyperparameterStatus() {
+        try { var r = await this.request('/hyperparameter/status'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 系统管理 --- */
+    async systemLogs(lines) {
+        try { var r = await this.request('/system/logs?lines=' + (lines||100)); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async systemConfigUpdate(config) {
+        try { var r = await this.request('/system/config/update', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(config||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async systemSettings() {
+        try { var r = await this.request('/system/settings'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async systemRestart() {
+        try { var r = await this.request('/system/restart', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async systemDiagnostic() {
+        try { var r = await this.request('/system/diagnostic'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 数据集管理 --- */
+    async datasetList() {
+        try { var r = await this.request('/dataset/list'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async datasetCreate(name, config) {
+        try { var r = await this.request('/dataset/create', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name, config:config||{}}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async datasetStats() {
+        try { var r = await this.request('/dataset/stats'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 推理引擎高级操作 --- */
+    async reasoningStart(params) {
+        try { var r = await this.request('/reasoning/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(params||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async reasoningStopAll() {
+        try { var r = await this.request('/reasoning/stop_all', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 能力诊断 --- */
+    async capabilityDiagnose() {
+        try { var r = await this.request('/capability/diagnose'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
 }
 
 /**
@@ -5129,9 +5313,11 @@ class ApiService {
 class WebSocketManager {
     constructor(url) {
         /* BUG-5修复: 运行时动态读取window.SELFLNN_CONFIG而非静态捕获 */
-        /* ZSFWXJ-FIX001修复: WebSocket使用独立端口9090而非复用HTTP端口8080 */
         var cfg = window.SELFLNN_CONFIG || { host: 'localhost', port: 8080 };
-        this.url = url || ('ws://' + cfg.host + ':9090/ws');
+        /* FIX-7: WebSocket端口从SELFLNN_CONFIG.wsPort读取，默认9090 */
+        var wsPort = cfg.wsPort || 9090;
+        var wsProtocol = (cfg.host === 'localhost' || cfg.host === '127.0.0.1') ? 'ws://' : 'wss://';
+        this.url = url || (wsProtocol + cfg.host + ':' + wsPort + '/ws');
         this.ws = null;
         this.isConnected = false;
         this.isManualDisconnect = false;

@@ -1825,7 +1825,9 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
          * 当共享LNN网络已连接时，通过lnn_forward进行连续状态演化；
          * 未连接时使用自包含CfC封闭形式解 */
         if (recognizer->shared_lnn) {
-            /* 通过核心LNN的连续动态系统进行状态演化 */
+            /* Phase3: 语音作为感知模态，通过共享LNN处理是正确行为
+             * 与对话生成的污染不同——感知模态应馈入共享LNN进行状态演化
+             * hidden_state的修改是共享LNN的核心功能 */
             float* lnn_input = (float*)safe_malloc((size_t)feature_dim * sizeof(float));
             if (lnn_input) {
                 memcpy(lnn_input, feat, (size_t)feature_dim * sizeof(float));
@@ -1843,32 +1845,12 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
                 safe_free((void**)&lnn_input);
             }
         } else {
-            /* 方案C修复: 共享LNN未连接时回退到可学习参数简化路径。
-             * self_contained_cfc已移除（遵循单一LNN原则）。
-             * 使用gate_scale/act_scale可学习参数执行CfC简化动态。 */
-            float nonlinear_term[256];
-            memset(nonlinear_term, 0, sizeof(nonlinear_term));
-
-            /* 回退路径：可学习参数版CfC简化动态 */
-                for (size_t i = 0; i < hs && i < 256; i++) {
-                    double sum = 0.0;
-                    if (recognizer->input_projection_weight) {
-                        for (int j = 0; j < feature_dim && j < feature_dim; j++) {
-                            sum += (double)recognizer->input_projection_weight[i * (size_t)feature_dim + j] * feat[j];
-                        }
-                    } else {
-                        if (i < (size_t)feature_dim) sum = (double)feat[i];
-                    }
-                    float gate = 1.0f / (1.0f + expf(-(float)sum * recognizer->gate_scale));
-                    float act = tanhf((float)sum * recognizer->act_scale);
-                    nonlinear_term[i] = gate * act;
-                }
-
-            float decay = expf(-dt / tau);
-            for (size_t i = 0; i < hs && i < 256; i++) {
-                recognizer->hidden_state[i] = decay * recognizer->hidden_state[i] +
-                                               (1.0f - decay) * nonlinear_term[i];
-            }
+            /* M-002修复: 共享LNN未连接时拒绝降级处理
+             * 语音识别必须依赖全LNN动态系统，简化参数版CfC无法达到相同性能
+             * 调用方必须先绑定共享LNN再进行语音识别 */
+            fprintf(stderr, "[语音识别错误] 共享LNN未连接，拒绝使用简化路径进行语音识别\n");
+            safe_free((void**)&all_logits);
+            return NULL;
         }
 
         float* logits = all_logits + (size_t)t * vocab_size;

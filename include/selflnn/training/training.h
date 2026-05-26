@@ -92,7 +92,12 @@ typedef struct {
     size_t validation_split;          /**< 验证集分割比例（百分比） */
     
     float target_accuracy;            /**< 目标准确率 */
+    float convergence_threshold;      /**< ZSFWS-003: 绝对收敛阈值（损失低于此值立即停止） */
+    size_t convergence_rate_window;   /**< ZSFWS-004: 收敛速率计算窗口（epoch数） */
     int enable_validation;            /**< 是否启用验证 */
+    int enable_mini_validation;       /**< ZSFWS-007: 是否启用阶段内微验证 */
+    size_t mini_validation_interval;  /**< ZSFWS-007: 微验证间隔（每N个batch验证一次，0=禁用） */
+    size_t mini_validation_samples;   /**< ZSFWS-007: 微验证采样数（从验证集中随机抽取） */
     
     int shuffle_data;                 /**< 是否打乱数据 */
     int verbose;                      /**< 是否显示训练信息 */
@@ -192,6 +197,9 @@ typedef struct {
     float learning_rate;              /**< 当前学习率 */
     float gradient_norm;              /**< 梯度范数 */
     float weight_norm;                /**< 权重范数 */
+    
+    float convergence_rate;           /**< ZSFWS-004: 收敛速率（最近N轮的损失平均下降率） */
+    float prev_val_loss;              /**< ZSFWS-004: 上一轮验证损失（用于计算收敛速率） */
     
     uint64_t training_time_ms;        /**< 训练时间（毫秒） */
     uint64_t start_time;              /**< 开始时间 */
@@ -665,6 +673,19 @@ void gradient_health_report_print(const GradientHealthReport* report);
  */
 int early_stopping_check(float current_loss, float best_loss,
                          size_t patience, size_t* steps_without_improvement);
+
+/**
+ * @brief 早停检查（增强版，ZSFWS-003修复）
+ * @param current_loss 当前验证损失
+ * @param best_loss 最佳历史验证损失
+ * @param patience 早停耐心值
+ * @param steps_without_improvement 没有改进的步数
+ * @param convergence_threshold 绝对收敛阈值（损失低于此值立即停止，0表示禁用）
+ * @return int 应该停止返回1，否则返回0
+ */
+int early_stopping_check_ex(float current_loss, float best_loss,
+                            size_t patience, size_t* steps_without_improvement,
+                            float convergence_threshold);
 
 /**
  * @brief 模型检查点

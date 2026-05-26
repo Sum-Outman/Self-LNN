@@ -95,7 +95,11 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
     {
         HapticCfcConfig hc_cfg = haptic_cfc_get_default_config();
         manager->haptic_cfc_proc = haptic_cfc_create(&hc_cfg);
-        
+
+        /* H-006修复：注册全局处理器供haptic_learning.c使用 */
+        extern void haptic_enhance_set_global_processor(HapticCfcProcessor* proc);
+        haptic_enhance_set_global_processor(manager->haptic_cfc_proc);
+
         HapticTextureConfig ht_cfg = haptic_texture_get_default_config();
         manager->haptic_texture_analyzer = haptic_texture_create(&ht_cfg);
     }

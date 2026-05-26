@@ -1,7 +1,7 @@
 # SELF-LNN 全液态神经网络 AGI 系统
 # SELF-LNN Full Liquid Neural Network AGI System
 
-> **版本 / Version:** 1.4.0 | **语言 / Language:** 100% Pure C (C11) | **许可证 / License:** Apache 2.0
+> **版本 / Version:** 1.5.0 | **语言 / Language:** 100% Pure C (C11) | **许可证 / License:** Apache 2.0
 > **构建 / Build:** CMake 3.10+ | **平台 / Platform:** Windows / Linux / macOS
 > **开源仓库 / Repository:** https://github.com/Sum-Outman/Self-LNN
 > **开发者邮箱 / Developer Email:** silencecrowtom@qq.com
@@ -155,8 +155,28 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 系统分为四层架构：
 1. **前端交互层**：单页面应用（SPA，1个index.html）+ 19个JS模块（18个主模块 + 1个Worker）组成，提供完整的Web控制台界面
 2. **后端服务层**：提供HTTP REST API和WebSocket通信，处理路由、认证、安全等功能
-3. **统一多模态输入层**：将9种模态数据通过线性投影求和后注入单一CfC动态系统
+3. **统一多模态输入层**：将9种模态数据通过固定Xavier投影矩阵注入单一CfC动态系统
 4. **核心引擎层**：包含唯一的共享LNN实例，所有子系统共享该模型进行处理
+
+### 渐进分层架构 / Progressive Layering Architecture
+
+```
+共享LNN [唯一核心引擎]
+    │
+    ├─ 感知馈入(lnn_forward): 视觉CfC/语音/传感器/统一信号 → 修改hidden_state ← 正确
+    │
+    └─ 生成隔离(lnn_get_output): 对话/TTS/后端回退 → 只读输出 → 私有ODE演化
+         ↑                                    ↑
+    gen_private_hidden (对话私有CfC ODE)    embedding_table (TTS自包含CfC)
+    gen_projection_lnn (独立投影LNN)        waveform_projection (独立权重)
+```
+
+**关键原则**：
+- **感知模态**（视觉/语音/传感器）通过 `lnn_forward` 馈入共享LNN，修改 `hidden_state` — 这是共享LNN的核心功能
+- **生成模态**（对话生成/TTS合成）通过 `lnn_get_output` 只读查询共享LNN输出，使用**私有ODE状态**进行自回归生成 — 不修改共享LNN的 `hidden_state`
+- **投影矩阵** Xavier初始化后锁定（`projection_locked=1`），不参与反向传播
+- **VH融合** 废弃独立CfC ODE，改用投影拼接+指数移动平均
+- 对话生成每token需进行512次共享LNN状态重写的问题已消除（→0次）
 
 ### English
 The system is divided into four architectural layers:

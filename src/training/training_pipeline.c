@@ -123,6 +123,9 @@ struct TrainingPipeline {
     int plateau_threshold;                     /**< 平台阈值（超过此时长触发LR衰减） */
     float plateau_lr_decay_factor;             /**< 平台时学习率衰减因子（0.5=减半） */
     int convergence_max_patience;              /**< 早停最大耐心值 */
+    float convergence_rate;                    /**< ZSFWS-008: EMA平滑收敛速率 */
+    float prev_epoch_loss;                     /**< ZSFWS-008: 上一轮损失（计算收敛速率用） */
+    float convergence_threshold;               /**< ZSFWS-008: 绝对收敛阈值 */
 
     /* ZSFX-P0: BPTT时间反向传播配置 */
     int bptt_enabled;                          /**< 是否启用BPTT（序列数据训练时启用） */
@@ -138,14 +141,14 @@ static float compute_loss_value(const float* output, const float* target, size_t
 }
 
 /**
- * @brief 训练收敛检测与自适应学习率调整
+ * @brief 训练收敛检测与自适应学习率调整 (ZSFWS-008统一版)
  *
  * 在每个epoch结束后调用，执行以下功能：
- * 1. 早停检测：当验证损失连续不改善时，patience_counter递增，
- *    超过convergence_max_patience时返回1触发早停。
- * 2. 损失监控日志：每convergence_log_interval个epoch打印当前损失。
- * 3. 平台自适应学习率衰减：当损失连续plateau_threshold个epoch
- *    未改善时，学习率乘以plateau_lr_decay_factor（默认减半）。
+ * 1. 绝对收敛阈值检测：损失 < convergence_threshold 时立即停止
+ * 2. 收敛速率计算：EMA平滑的损失下降率
+ * 3. 早停检测：连续patience_counter次不改善时停止
+ * 4. 损失监控日志：每convergence_log_interval个epoch打印
+ * 5. 平台自适应学习率衰减：损失停滞时LR *= plateau_lr_decay_factor
  *
  * @param pipeline 训练管线
  * @param epoch 当前epoch编号（从1开始）
@@ -164,6 +167,29 @@ static int pipeline_convergence_check(TrainingPipeline* pipeline,
                                        const char* phase_name) {
     if (!pipeline || !lr_ptr || !phase_name) return 0;
 
+    /* ZSFWS-008: 绝对收敛阈值检测 — 损失低于阈值立即停止 */
+    if (pipeline->convergence_threshold > 0.0f &&
+        current_loss < pipeline->convergence_threshold) {
+        log_info("[训练收敛] %s | 绝对收敛阈值触发! 当前损失 %.6e < 阈值 %.6e, "
+                 "在epoch %d/%d自动停止",
+                 phase_name, current_loss, pipeline->convergence_threshold,
+                 epoch, total_epochs);
+        return 1;
+    }
+
+    /* ZSFWS-008: EMA平滑收敛速率计算 */
+    {
+        float prev_loss = pipeline->prev_epoch_loss;
+        if (prev_loss > 0.0f && prev_loss < FLT_MAX &&
+            current_loss > 0.0f && current_loss < FLT_MAX) {
+            float instant_rate = (prev_loss - current_loss) / prev_loss;
+            float alpha = 0.3f;  /* EMA平滑因子 */
+            pipeline->convergence_rate = pipeline->convergence_rate * (1.0f - alpha)
+                                       + instant_rate * alpha;
+        }
+        pipeline->prev_epoch_loss = current_loss;
+    }
+
     /* 更新最佳损失 */
     float prev_best = pipeline->last_best_train_loss;
     if (current_loss < pipeline->last_best_train_loss - 1e-7f) {
@@ -180,10 +206,11 @@ static int pipeline_convergence_check(TrainingPipeline* pipeline,
         const char* trend = (current_loss < prev_best) ? "↓改善" : "→未改善";
         float mse_sqrt = sqrtf(current_loss > 0 ? current_loss : 0.0f);
         log_info("[训练收敛] %s | Epoch %d/%d | 损失=%.6f (RMSE=%.4f) %s | "
-                 "最佳=%.6f | LR=%.8f | 耐心=%d/%d",
+                 "最佳=%.6f | LR=%.8f | 耐心=%d/%d | 收敛速率=%.4f",
                  phase_name, epoch, total_epochs, current_loss, mse_sqrt,
                  trend, pipeline->last_best_train_loss, *lr_ptr,
-                 pipeline->patience_counter, pipeline->convergence_max_patience);
+                 pipeline->patience_counter, pipeline->convergence_max_patience,
+                 pipeline->convergence_rate);
 
         /* 在monitor中记录详细损失日志 */
         if (pipeline->monitor) {
@@ -198,10 +225,10 @@ static int pipeline_convergence_check(TrainingPipeline* pipeline,
     if (use_early_stopping &&
         pipeline->patience_counter >= pipeline->convergence_max_patience) {
         log_warning("[训练收敛] %s | 触发早停! 连续%d个epoch损失未改善 "
-                    "(当前=%.6f, 最佳=%.6f), 在epoch %d/%d停止",
+                    "(当前=%.6f, 最佳=%.6f, 收敛速率=%.4f), 在epoch %d/%d停止",
                     phase_name, pipeline->patience_counter,
                     current_loss, pipeline->last_best_train_loss,
-                    epoch, total_epochs);
+                    pipeline->convergence_rate, epoch, total_epochs);
         return 1;
     }
 
@@ -1007,6 +1034,11 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     tp->plateau_lr_decay_factor = 0.5f;               /**< 平台时学习率减半 */
     tp->convergence_max_patience = (tp->config.early_stopping_patience > 0)
         ? tp->config.early_stopping_patience : 10;     /**< 默认早停耐心为10 */
+    /* ZSFWS-008: 统一收敛检测初始化 */
+    tp->convergence_rate = 0.0f;
+    tp->prev_epoch_loss = FLT_MAX;
+    tp->convergence_threshold = (tp->config.convergence_threshold > 0.0f)
+        ? tp->config.convergence_threshold : 1e-6f;   /**< 默认绝对收敛阈值1e-6 */
 
     /* R3P2修复: BPTT默认启用，序列训练时保持跨时间步隐藏状态连续性。
      * 多模态/深度训练阶段使用BPTT展开（unroll_steps=4），
@@ -1547,6 +1579,8 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
 int training_pipeline_get_state(const TrainingPipeline* pipeline, TrainingPipelineState* state) {
     if (!pipeline || !state) return -1;
     memcpy(state, &pipeline->state, sizeof(TrainingPipelineState));
+    /* ZSFWS-008: 将收敛速率从Pipeline内部字段拷贝到对外暴露的State */
+    state->convergence_rate = pipeline->convergence_rate;
     return 0;
 }
 

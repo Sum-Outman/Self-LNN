@@ -297,12 +297,13 @@ int ird_fine_classify(IRDFineClassifier* clf, const float* img,
     if (!clf || !img || !res) return -1;
     memset(res, 0, sizeof(IRDFineGrainedResult));
 
-    /* H-008修复: 未训练状态下不再使用硬编码场景原型做余弦相似度匹配，
-     * 直接使用CfC网络前向传播进行推理（即使权重随机初始化）。
-     * H-009修复: 置信度直接使用softmax/sigmoid自然输出值，不进行人为[0.1,0.85]区间映射。
-     * 最终置信度由CfC动态系统自然产生，未训练时接近均匀分布。 */
+    /* M-003修复: 未训练状态下拒绝推理，不产生随机噪声输出
+     * 随机初始化权重的CfC网络输出本质为噪声，对系统决策有害
+     * 必须先完成训练（ird_fine_train）后才能使用图像识别功能 */
     if (!clf->training_completed) {
-        fprintf(stderr, "[图像识别警告] 图像识别模块未训练，使用CfC网络随机初始化权重进行推理，结果不可靠，请先训练模型！\n");
+        fprintf(stderr, "[图像识别错误] 图像识别模块未训练，拒绝使用随机权重推理！请先调用 ird_fine_train() 完成训练。\n");
+        res->confidence = 0.0f;
+        return -2;
     }
     int hd = clf->cfg.feature_dim, ps = clf->cfg.patch_size, st = ps / 2;
     int cols = (w - ps) / st + 1;

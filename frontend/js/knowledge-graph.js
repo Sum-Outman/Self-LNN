@@ -734,6 +734,11 @@
             }
         }
         drawGraph();
+        /* FIX-5: 所有节点稳定后停止动画循环，CPU使用从~5%降至0% */
+        if (!moved) {
+            graphState._rafId = null;
+            return;
+        }
         graphState._rafId = requestAnimationFrame(animate);
     }
 
@@ -957,6 +962,8 @@
 
         cancelAnimationFrame(gl3d.animId);
         function loop() {
+            /* FIX-5: 页面隐藏时暂停3D渲染，节省GPU */
+            if (document.hidden) { gl3d.animId = requestAnimationFrame(loop); return; }
             if (view3d.autoRotate) view3d.rotY += 0.002;
             render3D();
             gl3d.animId = requestAnimationFrame(loop);

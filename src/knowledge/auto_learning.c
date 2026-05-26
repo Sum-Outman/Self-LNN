@@ -201,7 +201,93 @@ static int extract_entities(const char* text, char*** entities, int* entity_coun
     return 0;
 }
 
-/* 抽取关系（简单模式匹配） */
+/* H-005增强: 实体质量过滤 —— 基于语言学特征的实体语义分型
+ * 对已抽取的实体进行质量评分和类型推断
+ * 过滤明显非实体的噪声词，提高后续知识学习质量 */
+static int filter_entities_by_quality(char*** entities, int* entity_count,
+                                       char*** entity_types) {
+    if (!entities || !*entities || !entity_count || *entity_count <= 0) return -1;
+    int count = *entity_count;
+
+    /* 为每个实体分配类型标签 */
+    char** types = (char**)safe_calloc((size_t)count, sizeof(char*));
+    if (!types) return -1;
+
+    int filtered_count = 0;
+    char** filtered_ents = (char**)safe_calloc((size_t)count, sizeof(char*));
+    if (!filtered_ents) { safe_free((void**)&types); return -1; }
+
+    static const char* person_titles[] = {
+        "先生","女士","教授","博士","总统","主席","总理","部长","局长","经理","主任","书记", NULL
+    };
+    static const char* org_suffixes[] = {
+        "公司","集团","银行","大学","学院","医院","研究所","实验室","中心","协会", NULL
+    };
+    static const char* location_suffixes[] = {
+        "省","市","县","区","镇","村","路","街","大道","广场","公园", NULL
+    };
+    static const char* concept_keywords[] = {
+        "学","论","法","术","器","体","性","化","率","度","量","值","力","能", NULL
+    };
+
+    for (int i = 0; i < count; i++) {
+        char* ent = (*entities)[i];
+        if (!ent) continue;
+        size_t len = strlen(ent);
+
+        /* 噪声过滤：过短或过长 */
+        if (len < 2 || len > 48) { safe_free((void**)&(*entities)[i]); continue; }
+
+        /* 噪声过滤：纯数字/标点 */
+        int is_pure_noise = 1;
+        for (size_t c = 0; c < len; c++) {
+            if ((ent[c] & 0x80) || (ent[c] >= 'A' && ent[c] <= 'Z') ||
+                (ent[c] >= 'a' && ent[c] <= 'z')) { is_pure_noise = 0; break; }
+        }
+        if (is_pure_noise) { safe_free((void**)&(*entities)[i]); continue; }
+
+        /* H-005: 语义类型推断 */
+        const char* etype = "ENTITY";
+        for (const char** t = person_titles; *t; t++) {
+            if (len > strlen(*t) && memcmp(ent + len - strlen(*t), *t, strlen(*t)) == 0)
+                { etype = "PERSON"; break; }
+        }
+        if (etype[0] == 'E') {
+            for (const char** s = org_suffixes; *s; s++) {
+                if (len > strlen(*s) && memcmp(ent + len - strlen(*s), *s, strlen(*s)) == 0)
+                    { etype = "ORGANIZATION"; break; }
+            }
+        }
+        if (etype[0] == 'E') {
+            for (const char** l = location_suffixes; *l; l++) {
+                if (len > strlen(*l) && memcmp(ent + len - strlen(*l), *l, strlen(*l)) == 0)
+                    { etype = "LOCATION"; break; }
+            }
+        }
+        if (etype[0] == 'E' && (ent[0] & 0x80)) {
+            for (const char** k = concept_keywords; *k; k++) {
+                if (len > strlen(*k) && memcmp(ent + len - strlen(*k), *k, strlen(*k)) == 0)
+                    { etype = "CONCEPT"; break; }
+            }
+        }
+
+        types[filtered_count] = string_duplicate(etype);
+        filtered_ents[filtered_count] = ent;
+        filtered_count++;
+    }
+
+    /* 替换原数组 */
+    for (int i = filtered_count; i < count; i++)
+        safe_free((void**)&(*entities)[i]);
+    safe_free((void**)*entities);
+    *entities = filtered_ents;
+    *entity_count = filtered_count;
+    if (entity_types) *entity_types = types;
+    else { for (int i = 0; i < filtered_count; i++) safe_free((void**)&types[i]); safe_free((void**)&types); }
+    return 0;
+}
+
+/* 增强的实体抽取入口 —— H-005修复 */
 static int extract_relations(const char* text, char*** relations, int* relation_count) {
     int count = 0;
     int capacity = 16;
@@ -676,6 +762,8 @@ int auto_learning_learn_text(AutoLearningSystem* system, const char* text,
     char** entities = NULL;
     int entity_count = 0;
     extract_entities(text, &entities, &entity_count);
+    /* H-005: 实体质量过滤 —— 去除噪声词并推断语义类型 */
+    filter_entities_by_quality(&entities, &entity_count, NULL);
     entry->entity_count = entity_count < 16 ? entity_count : 16;
     for (int i = 0; i < entry->entity_count; i++) {
         entry->extracted_entities[i] = entities[i];
@@ -1011,6 +1099,8 @@ int auto_learning_incremental_update(AutoLearningSystem* system, const char* top
         char** temp_entities = NULL;
         int temp_entity_count = 0;
         extract_entities(content, &temp_entities, &temp_entity_count);
+        /* H-005: 实体质量过滤 */
+        filter_entities_by_quality(&temp_entities, &temp_entity_count, NULL);
 
         for (int i = 0; i < temp_entity_count && entry->entity_count < 16; i++) {
             if (!string_in_array(temp_entities[i], entry->extracted_entities, entry->entity_count)) {
@@ -1514,6 +1604,8 @@ int auto_learning_relearn_expired(AutoLearningSystem* system, int max_days) {
             char** entities = NULL;
             int entity_count = 0;
             extract_entities(file_content, &entities, &entity_count);
+            /* H-005: 实体质量过滤 */
+            filter_entities_by_quality(&entities, &entity_count, NULL);
             entry->entity_count = entity_count < 16 ? entity_count : 16;
             for (int j = 0; j < entry->entity_count; j++) {
                 entry->extracted_entities[j] = entities[j];

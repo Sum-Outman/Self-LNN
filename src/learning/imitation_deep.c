@@ -301,13 +301,30 @@ int im_irl_infer_reward(ImitationDeepLearner* idl, const ImDemonstration* demo, 
         }
     }
     
-    /* F-015: 提取专家演示的特征期望 */
+    /* F-015: 提取专家演示的特征期望
+     * H-003增强: 除关节位置外加入速度和加速度特征，
+     * 使奖励信号反映运动学一致性而非仅位置哈希 */
     float* expert_features = (float*)safe_calloc(dim, sizeof(float));
     int kf = demo->keyframe_count > 0 ? demo->keyframe_count : 1;
-    
+
     for (int f = 0; f < kf; f++) {
         for (int j = 0; j < IM_MAX_JOINTS && j < dim; j++) {
             expert_features[j % dim] += demo->keyframes[f].joint_positions[j] / (float)kf;
+        }
+        /* H-003: 添加轨迹速度特征 */
+        if (f > 0) {
+            for (int j = 0; j < IM_MAX_JOINTS && j < (dim / 3); j++) {
+                float vel = demo->keyframes[f].joint_positions[j] - demo->keyframes[f-1].joint_positions[j];
+                expert_features[(dim / 3 + j) % dim] += vel / (float)(kf - 1);
+            }
+        }
+        /* H-003: 添加轨迹加速度特征 */
+        if (f > 1) {
+            for (int j = 0; j < IM_MAX_JOINTS && j < (dim / 3); j++) {
+                float v1 = demo->keyframes[f].joint_positions[j] - demo->keyframes[f-1].joint_positions[j];
+                float v0 = demo->keyframes[f-1].joint_positions[j] - demo->keyframes[f-2].joint_positions[j];
+                expert_features[(2 * dim / 3 + j) % dim] += (v1 - v0) / (float)(kf - 2);
+            }
         }
     }
     /* 归一化专家特征 */

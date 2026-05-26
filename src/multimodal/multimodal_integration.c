@@ -1102,18 +1102,15 @@ static float _fusion_compute_mse(const float *fused, const float *target, int n)
 }
 
 /* ============================================================================
- * mm_cfc_unified_fusion_init: [DEPRECATED 方案C]
- * 创建并初始化 CfC 跨模态ODE融合状态。
+ * mm_cfc_unified_fusion_init: [DEPRECATED 方案C] - 已禁用
  *
  * ⚠️ 方案C废弃说明:
  *  此模块在手写CfC ODE + 独立参数 + 独立训练，与共享LNN功能完全重叠。
  *  应使用 unified_lnn_state_step() + selflnn_get_shared_lnn() 替代。
- *  统一LNN状态处理器已实现相同的多模态投影求和工作流，
- *  且受益于共享梯度流和全局优化。
  *
- * 保留此实现仅用于向后兼容，新代码不应依赖于此接口。
- * 计划在后续版本中完全移除此模块。
+ * 全部方案C代码已禁用。仅在编译时定义 SELFLNN_ENABLE_DEPRECATED_SCHEME_C 恢复。
  * ============================================================================ */
+#ifdef SELFLNN_ENABLE_DEPRECATED_SCHEME_C
 MmCfcFusionState* mm_cfc_unified_fusion_init(
     int num_modalities,
     const int *modality_input_dims,
@@ -1968,66 +1965,94 @@ int mm_cfc_unified_fusion_train(
     return 0;
 }
 
+#endif /* SELFLNN_ENABLE_DEPRECATED_SCHEME_C */
+
 /* ============================================================================
- * multimodal_unified_pipeline: 兼容接口
+ * _mm_fusion_via_shared_lnn: 通过共享LNN进行多模态融合（主路径）
  *
- * 保留原始函数名，内部使用 CfC ODE 融合替代简单拼接。
- * 兼容原有调用方，同时升级为真正的连续动态融合。
+ * 使用 unified_lnn_state_step() + selflnn_get_shared_lnn() 替代方案C。
+ * ============================================================================ */
+static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* modality_dims,
+                                      int num_modalities, float* unified_output, int output_dim) {
+    LNNHandle* shared_lnn = selflnn_get_shared_lnn();
+    if (!shared_lnn) return -1;
+
+    UnifiedLNNState* ul_state = unified_lnn_state_get();
+    if (!ul_state) return -1;
+
+    int n_mod = num_modalities;
+    int ret = unified_lnn_state_set_inputs(ul_state, modality_data, modality_dims, n_mod);
+    if (ret != 0) return ret;
+
+    ret = unified_lnn_state_step(ul_state, shared_lnn, 0.01f);
+    if (ret != 0) return ret;
+
+    int state_dim = unified_lnn_state_get_dim(ul_state);
+    float* state_buf = (float*)safe_calloc((size_t)state_dim, sizeof(float));
+    if (!state_buf) return -1;
+
+    unified_lnn_state_get(ul_state, state_buf, state_dim);
+
+    int copy_dim = (state_dim < output_dim) ? state_dim : output_dim;
+    memcpy(unified_output, state_buf, (size_t)copy_dim * sizeof(float));
+    if (output_dim > copy_dim)
+        memset(unified_output + copy_dim, 0, (size_t)(output_dim - copy_dim) * sizeof(float));
+    safe_free((void**)&state_buf);
+    return 0;
+}
+
+/* ============================================================================
+ * multimodal_unified_pipeline: 兼容接口（主路径使用共享LNN）
  * ============================================================================ */
 int multimodal_unified_pipeline(const float** modality_data, const int* modality_dims,
                                  int num_modalities, void* main_cfc,
                                  float* unified_output, int output_dim) {
     if (!modality_data || !modality_dims || !unified_output) return -1;
     if (output_dim <= 0 || num_modalities <= 0) return -1;
-    (void)main_cfc; /* 兼容保留, 内部已使用 CfC ODE 替代外部 LNN */
+    (void)main_cfc;
 
+    /* 主路径：使用共享LNN统一状态处理器 */
+    int ret = _mm_fusion_via_shared_lnn(modality_data, modality_dims,
+                                         num_modalities, unified_output, output_dim);
+    if (ret == 0) return 0;
+
+#ifdef SELFLNN_ENABLE_DEPRECATED_SCHEME_C
+    /* 回退路径：使用废弃的方案C CfC ODE融合 */
     int n_mod = (num_modalities < MM_FUSION_MAX_MODALITIES) ? num_modalities : MM_FUSION_MAX_MODALITIES;
-
-    /* 使用默认融合参数 */
-    int latent_dim = MM_FUSION_DEFAULT_LATENT;
     int max_input_dim = 0;
-    for (int m = 0; m < n_mod; m++) {
+    for (int m = 0; m < n_mod; m++)
         if (modality_dims[m] > max_input_dim) max_input_dim = modality_dims[m];
-    }
-    if (max_input_dim <= 0) return -1;
+    if (max_input_dim <= 0) { memset(unified_output, 0, (size_t)output_dim * sizeof(float)); return -1; }
 
-    /* 创建临时融合状态 */
     int *input_dims = (int*)safe_calloc((size_t)n_mod, sizeof(int));
-    if (!input_dims) return -1;
+    if (!input_dims) { memset(unified_output, 0, (size_t)output_dim * sizeof(float)); return -1; }
     for (int m = 0; m < n_mod; m++) input_dims[m] = modality_dims[m];
 
+    int latent_dim = MM_FUSION_DEFAULT_LATENT;
     int hidden_dim = (output_dim < MM_FUSION_DEFAULT_HIDDEN) ? output_dim : MM_FUSION_DEFAULT_HIDDEN;
-
     MmCfcFusionState *fusion = mm_cfc_unified_fusion_init(
         n_mod, input_dims, latent_dim, hidden_dim,
         MM_FUSION_DEFAULT_ODE_STEPS, MM_FUSION_DEFAULT_TAU, MM_FUSION_DEFAULT_DT);
     safe_free((void**)&input_dims);
+    if (!fusion) { memset(unified_output, 0, (size_t)output_dim * sizeof(float)); return -1; }
 
-    if (!fusion) return -1;
-
-    /* 执行 CfC ODE 融合 */
     float *fusion_out = (float*)safe_calloc((size_t)hidden_dim, sizeof(float));
-    if (!fusion_out) {
-        mm_cfc_unified_fusion_free(fusion);
-        return -1;
-    }
+    if (!fusion_out) { mm_cfc_unified_fusion_free(fusion); memset(unified_output, 0, (size_t)output_dim * sizeof(float)); return -1; }
 
-    int ret = mm_cfc_unified_fusion(fusion, modality_data, modality_dims,
-                                     n_mod, fusion_out, hidden_dim);
-
+    ret = mm_cfc_unified_fusion(fusion, modality_data, modality_dims, n_mod, fusion_out, hidden_dim);
     if (ret == 0) {
-        /* 复制融合结果，不足部分填零 */
         int copy_dim = (hidden_dim < output_dim) ? hidden_dim : output_dim;
         memcpy(unified_output, fusion_out, (size_t)copy_dim * sizeof(float));
-        if (output_dim > copy_dim) {
-            memset(unified_output + copy_dim, 0,
-                   (size_t)(output_dim - copy_dim) * sizeof(float));
-        }
+        if (output_dim > copy_dim) memset(unified_output + copy_dim, 0, (size_t)(output_dim - copy_dim) * sizeof(float));
     } else {
         memset(unified_output, 0, (size_t)output_dim * sizeof(float));
     }
-
     safe_free((void**)&fusion_out);
     mm_cfc_unified_fusion_free(fusion);
     return ret;
+#else
+    /* 方案C未启用且共享LNN不可用：返回错误 */
+    memset(unified_output, 0, (size_t)output_dim * sizeof(float));
+    return -1;
+#endif
 }

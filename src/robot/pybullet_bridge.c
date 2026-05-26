@@ -51,16 +51,21 @@ static void pybullet_init_once(void) {
 }
 
 int pybullet_is_available(void) {
-    /* 检测 Python 是否可用 */
+    /* S-NEW-4修复: 分层检查Python和PyBullet包
+     * 原实现仅检查Python是否安装，未验证PyBullet包 */
 #ifdef _WIN32
-    int result = system("python --version >nul 2>&1");
+    int python_ok = (system("python --version >nul 2>&1") == 0);
+    if (!python_ok) return 0;
+    /* 检查PyBullet包是否可导入 */
+    int pb_ok = (system("python -c \"import pybullet\" >nul 2>&1") == 0);
 #else
-    int result = system("python3 --version >/dev/null 2>&1");
-    if (result != 0) {
-        result = system("python --version >/dev/null 2>&1");
-    }
+    int python_ok = (system("python3 --version >/dev/null 2>&1") == 0);
+    if (!python_ok) python_ok = (system("python --version >/dev/null 2>&1") == 0);
+    if (!python_ok) return 0;
+    int pb_ok = (system("python3 -c \"import pybullet\" >/dev/null 2>&1") == 0);
+    if (!pb_ok) pb_ok = (system("python -c \"import pybullet\" >/dev/null 2>&1") == 0);
 #endif
-    return (result == 0) ? 1 : 0;
+    return pb_ok ? 1 : 0;
 }
 
 int pybullet_connect(const PyBulletConfig* config) {

@@ -15,7 +15,8 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)
 add_library(selflnn_concurrency ${CONCURRENCY_SOURCES})
 
 # 链接库
-target_link_libraries(selflnn_concurrency selflnn_core)
+# S-NEW-3修复: 明确PRIVATE防止循环依赖传染传播
+target_link_libraries(selflnn_concurrency PRIVATE selflnn_core)
 if(WIN32)
     target_link_libraries(selflnn_concurrency)
 else()

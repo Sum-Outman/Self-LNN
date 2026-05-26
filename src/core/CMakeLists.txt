@@ -98,7 +98,8 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/graph_optimization_ext.h
     DESTINATION include/selflnn/core
 )
-install(FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/backend/websocket_push.h
-    DESTINATION include/selflnn/backend
-)
+# M-010修复: websocket_push.h 属于 backend 模块，不应由 core 模块安装
+# install(FILES
+#     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/backend/websocket_push.h
+#     DESTINATION include/selflnn/backend
+# )

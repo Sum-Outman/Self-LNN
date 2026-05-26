@@ -1124,6 +1124,8 @@ VisionHapticFusion* vision_haptic_fusion_create(const VisionHapticFusionConfig* 
     VisionHapticFusion* vf = (VisionHapticFusion*)safe_calloc(1, sizeof(VisionHapticFusion));
     if (!vf) return NULL;
     memcpy(&vf->config, config, sizeof(VisionHapticFusionConfig));
+    /* Phase2: 强制默认使用投影拼接路径，独立CfC ODE已废弃 */
+    vf->config.enable_cfc_fusion = 0;
     int hs = config->cfc_hidden_size;
     int vd = config->visual_feature_dim;
     int hd = config->haptic_feature_dim;
@@ -1191,7 +1193,8 @@ int vision_haptic_fusion_fuse(VisionHapticFusion* vf,
     if (!input) return -1;
     memcpy(input, visual_features, vd * sizeof(float));
     memcpy(input + vd, haptic_features, hd * sizeof(float));
-    /* CfC ODE融合（联合视觉和触觉输入演化隐藏状态） */
+    /* Phase2: CfC ODE融合（已废弃——默认禁用，使用投影拼接路径）
+     * 仅在enable_cfc_fusion=1时使用独立CfC ODE */
     if (vf->config.enable_cfc_fusion) {
         float* combined_input = (float*)safe_malloc(hs * sizeof(float));
         if (!combined_input) { safe_free((void**)&input); return -1; }
@@ -1208,8 +1211,19 @@ int vision_haptic_fusion_fuse(VisionHapticFusion* vf,
                             vf->tau, hs, dt, 2);
         safe_free((void**)&combined_input);
     } else {
-        for (int i = 0; i < hs; i++)
-            vf->fusion_hidden[i] = _hc_tanh(vf->fusion_hidden[i] + input[i % (vd + hd)]);
+        /* Phase2: 投影拼接路径（默认）—— 固定线性投影替代CfC ODE
+         * 视觉特征(vd) + 触觉特征(hd) → 投影到hs → 非线性激活
+         * 不使用独立ODE演化，符合"渐进分层"架构原则 */
+        for (int i = 0; i < hs; i++) {
+            float sum = 0.0f;
+            for (int j = 0; j < vd; j++)
+                sum += vf->W_vis[i * vd + j] * visual_features[j];
+            for (int j = 0; j < hd; j++)
+                sum += vf->W_hap[i * hd + j] * haptic_features[j];
+            sum += vf->b_g[i];
+            /* 指数移动平均融合（替代ODE时间演化） */
+            vf->fusion_hidden[i] = 0.9f * vf->fusion_hidden[i] + 0.1f * tanhf(sum);
+        }
     }
     /* 解码融合特征 */
     for (int i = 0; i < fd; i++) {
@@ -1226,4 +1240,18 @@ void vision_haptic_fusion_reset(VisionHapticFusion* vf) {
     if (!vf) return;
     int hs = vf->config.cfc_hidden_size;
     memset(vf->fusion_hidden, 0, hs * sizeof(float));
+}
+
+/* ============================================================================
+ * 全局处理器引用（H-006修复）
+ * 供haptic_learning.c等模块获取增强CfC触觉处理器实例
+ * ============================================================================ */
+static HapticCfcProcessor* g_global_haptic_cfc_proc = NULL;
+
+void haptic_enhance_set_global_processor(HapticCfcProcessor* proc) {
+    g_global_haptic_cfc_proc = proc;
+}
+
+HapticCfcProcessor* haptic_enhance_get_global_processor(void) {
+    return g_global_haptic_cfc_proc;
 }

@@ -4108,6 +4108,58 @@ response = requests.get(
                         </div>
                     </div>
                 </div>
+                </div>
+
+                <!-- FIX-2: 添加训练中心缺失的9个DOM元素 -->
+                <div class="card full-width">
+                    <div class="card-header"><h3>检查点管理</h3></div>
+                    <div class="card-content">
+                        <div id="checkpoint-list" style="max-height:200px;overflow-y:auto;"></div>
+                        <div class="form-group" style="margin-top:8px">
+                            <button onclick="loadCheckpointList()" class="btn btn-sm">刷新检查点</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card" style="display:none">
+                    <div id="train-history-chart" style="width:100%;height:200px;"></div>
+                    <div id="train-history-placeholder" style="text-align:center;padding:40px;color:#888;">暂无训练历史</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header"><h3>超参数搜索</h3></div>
+                    <div class="card-content">
+                        <div class="form-group">
+                            <label>搜索密度</label>
+                            <input type="number" id="hyper-grid-size" value="10" min="3" max="50" class="form-input">
+                        </div>
+                        <button onclick="startHyperparameterSearch()" class="btn btn-sm">开始搜索</button>
+                        <div id="hyper-status" style="margin-top:8px;font-size:0.85rem;">未启动</div>
+                        <div id="hyper-best" style="margin-top:4px;font-size:0.8rem;color:#00e676;"></div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header"><h3>GPU配置</h3></div>
+                    <div class="card-content">
+                        <select id="gpu-selector" class="form-input" onchange="refreshGpuList()">
+                            <option value="auto">自动检测</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header"><h3>数据集</h3></div>
+                    <div class="card-content">
+                        <div id="dataset-list" style="max-height:150px;overflow-y:auto;">加载中...</div>
+                        <div class="form-group" style="margin-top:8px">
+                            <label>数据集路径</label>
+                            <input type="text" id="train-dataset" value="./data/training" class="form-input">
+                        </div>
+                        <button onclick="loadDatasetList()" class="btn btn-sm">刷新数据集</button>
+                    </div>
+                </div>
+
             </div>
     <!-- page-specific script loaded via main.js -->
 
@@ -5179,6 +5231,8 @@ response = requests.get(
             <!-- ====== knowledge-graph (从 knowledge-graph.html 合并) ====== -->
             <section id="knowledge-graph" class="section">
 
+    <!-- FIX-3: 添加 knowledge-graph-page 包装器使 knowledge-graph.css 246行生效 -->
+    <div class="knowledge-graph-page">
     <div class="app-container" style="height:calc(100vh - 64px)">
         <div class="sidebar">
             <div class="sidebar-header">
@@ -5300,6 +5354,7 @@ response = requests.get(
         </div>
     </div>
 
+    </div><!-- /.knowledge-graph-page FIX-3 -->
 
             </section>
             <!-- ====== multimodal-learn (从 multimodal-learn.html 合并) ====== -->
@@ -7158,7 +7213,7 @@ response = requests.get(
                 <div style="font-size: 48px; margin-bottom: 12px;">🔌</div>
                 <h3 style="margin: 0 0 8px 0; font-size: 18px;">连接已断开</h3>
                 <p id="reconnect-toast-message" style="margin: 0 0 20px 0; color: #aaa; font-size: 14px;">
-                    无法连接到后端服务器 (localhost:8080)
+                    <!-- FIX-6: 动态显示实际主机端口 -->
                 </p>
                 <div id="reconnect-countdown" style="font-size: 13px; color: #e74c3c; margin-bottom: 16px;">
                     等待自动重连...
@@ -7249,7 +7304,9 @@ response = requests.get(
             toast.style.display = 'block';
             const message = document.getElementById('reconnect-toast-message');
             if (message) {
-                message.textContent = '无法连接到后端服务器 (localhost:8080)\n已离线 ' + elapsed + ' 秒';
+                /* FIX-6: 使用动态配置的主机和端口 */
+                var cfg = window.SELFLNN_CONFIG || { host: 'localhost', port: 8080 };
+                message.textContent = '无法连接到后端服务器 (' + cfg.host + ':' + cfg.port + ')\n已离线 ' + elapsed + ' 秒';
             }
             
             // 添加遮罩层

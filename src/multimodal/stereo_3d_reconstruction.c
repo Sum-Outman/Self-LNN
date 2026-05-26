@@ -1,4 +1,5 @@
 #include "selflnn/multimodal/stereo_3d_reconstruction.h"
+#include "selflnn/multimodal/stereo_depth_enhance.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,8 @@ struct SR3DReconstructor {
     int calibrated;
     float* disparity_buffer;
     size_t disp_size;
+    /* S-NEW-1: 集成双目深度增强处理器（SGM半全局匹配+点云融合） */
+    SDEHandler* sde_handler;
 };
 
 SR3DReconstructor* sr3d_create(void) {
@@ -23,6 +26,8 @@ SR3DReconstructor* sr3d_create(void) {
     sr->calibrated = 0;
     sr->disparity_buffer = NULL;
     sr->disp_size = 0;
+    /* 创建SDE增强处理器作为可选增强路径 */
+    sr->sde_handler = sde_create();
     return sr;
 }
 
@@ -30,6 +35,8 @@ void sr3d_free(SR3DReconstructor* sr) {
     if (!sr) return;
     safe_free((void**)&sr->disparity_buffer);
     sr->disp_size = 0;
+    /* 释放SDE增强处理器 */
+    if (sr->sde_handler) { sde_free(sr->sde_handler); sr->sde_handler = NULL; }
     safe_free((void**)&sr);
 }
 
@@ -68,6 +75,14 @@ static int sr3d_popcount64(unsigned long long x) {
 int sr3d_compute_dense_disparity(SR3DReconstructor* sr, const float* left, const float* right,
     int w, int h, float* disparity) {
     if (!sr || !left || !right || !disparity || w <= 0 || h <= 0) return -1;
+
+    /* S-NEW-1: 优先使用SDE增强处理器（SGM半全局匹配）
+     * 比Census+Hamming匹配提供更好的视差连续性和边缘保持 */
+    if (sr->sde_handler) {
+        int sde_ret = sde_compute_disparity(sr->sde_handler, left, right, w, h, disparity);
+        if (sde_ret == 0) return 0;
+        /* SDE失败时回退到Census匹配 */
+    }
 
     size_t needed = (size_t)w * h * sizeof(float);
     if (needed > sr->disp_size) {

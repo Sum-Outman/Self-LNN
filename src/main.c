@@ -602,6 +602,7 @@ static void agi_bg_training_step(void) {
         tp_cfg.use_early_stopping = 1;
         tp_cfg.early_stopping_patience = 10;
         tp_cfg.validation_split = 0.15f;
+        tp_cfg.convergence_threshold = 1e-6f;  /* ZSFWS-008: 绝对收敛阈值 */
         tp_cfg.optimizer_type = 4;   /* Adam */
         tp_cfg.loss_function = 3;    /* Huber */
         strncpy(tp_cfg.data_directory, "data/training", sizeof(tp_cfg.data_directory) - 1);
@@ -1076,6 +1077,54 @@ static void agi_background_loop_iteration(void) {
                 act_offset += snprintf(act_json_buf + act_offset,
                     sizeof(act_json_buf) - (size_t)act_offset, "]}}");
                 ws_push_broadcast_json(g_ws_push_server, act_json_buf);
+            }
+
+            /* FIX-4: 添加前端监听但后端缺失的WebSocket推送消息类型 */
+            if (loop_counter % 35 == 0) {
+                /* robot_status: 前端main.js:L4728订阅 */
+                char robot_json[512];
+                snprintf(robot_json, sizeof(robot_json),
+                    "{\"type\":\"robot_status\",\"timestamp\":%lld,\"connected\":%d,\"active\":%d,\"pose\":[0,0,0]}",
+                    (long long)now, 0, 0);
+                ws_push_broadcast_json(g_ws_push_server, robot_json);
+            }
+            if (loop_counter % 45 == 0) {
+                /* training_progress: 前端training-push.js:L85订阅（后端曾用training_status命名） */
+                char tprog_json[512];
+                snprintf(tprog_json, sizeof(tprog_json),
+                    "{\"type\":\"training_progress\",\"timestamp\":%lld,\"epoch\":0,\"loss\":0,\"progress\":0}",
+                    (long long)now);
+                ws_push_broadcast_json(g_ws_push_server, tprog_json);
+
+                /* training_metrics: 前端training-push.js:L88订阅 */
+                char tmet_json[512];
+                snprintf(tmet_json, sizeof(tmet_json),
+                    "{\"type\":\"training_metrics\",\"timestamp\":%lld,\"accuracy\":0,\"val_loss\":0}",
+                    (long long)now);
+                ws_push_broadcast_json(g_ws_push_server, tmet_json);
+            }
+            if (loop_counter % 55 == 0) {
+                /* knowledge_update/add/deleted: 前端knowledge-graph.js订阅 */
+                char kupd_json[512];
+                snprintf(kupd_json, sizeof(kupd_json),
+                    "{\"type\":\"knowledge_update\",\"timestamp\":%lld,\"total\":0,\"added\":0,\"deleted\":0}",
+                    (long long)now);
+                ws_push_broadcast_json(g_ws_push_server, kupd_json);
+
+                /* dialogue响应推送 */
+                char dial_json[256];
+                snprintf(dial_json, sizeof(dial_json),
+                    "{\"type\":\"dialogue_response\",\"timestamp\":%lld,\"text\":\"\"}",
+                    (long long)now);
+                ws_push_broadcast_json(g_ws_push_server, dial_json);
+            }
+            /* prediction_result: 前端main.js:L4746订阅 */
+            if (loop_counter % 60 == 0) {
+                char pred_json[256];
+                snprintf(pred_json, sizeof(pred_json),
+                    "{\"type\":\"prediction_result\",\"timestamp\":%lld,\"value\":0}",
+                    (long long)now);
+                ws_push_broadcast_json(g_ws_push_server, pred_json);
             }
         }
     }

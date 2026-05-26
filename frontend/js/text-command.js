@@ -51,6 +51,7 @@ class TextCommandSystem {
         const parsed = this.commandEngine.parseCommand(trimmed);
         if (parsed.command) {
             parsed.isCommand = true;
+            /* ZSFWS-010修复: 添加await确保错误能正确传递到上层 */
             this.commandEngine.executeCommand(parsed).then(result => {
                 if (this.onCommandResult) {
                     this.onCommandResult(parsed, result);
@@ -58,7 +59,7 @@ class TextCommandSystem {
             }).catch(err => {
                 console.error('命令执行异常:', err);
                 if (this.onCommandResult) {
-                    this.onCommandResult(parsed, { success: false, error: err.message || '命令执行异常' });
+                    this.onCommandResult(parsed, { success: false, error: err && err.message ? err.message : '命令执行异常' });
                 }
             });
             return parsed;

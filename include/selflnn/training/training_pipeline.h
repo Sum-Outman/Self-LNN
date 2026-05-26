@@ -45,6 +45,7 @@ typedef struct {
     float gpu_utilization;
     float estimated_time_remaining;
     TrainingStage current_stage;   /**< 当前训练阶段 */
+    float convergence_rate;        /**< ZSFWS-008: 收敛速率（暴露给前端） */
 } TrainingPipelineState;
 
 typedef struct {
@@ -69,6 +70,7 @@ typedef struct {
     int use_early_stopping;
     int early_stopping_patience;
     float validation_split;
+    float convergence_threshold;     /**< ZSFWS-008: 绝对收敛阈值（损失低于此值立即停止管线） */
     int optimizer_type;              /**< 优化器类型 0=SGD 1=Momentum 2=AdaGrad 3=RMSProp 4=Adam 5=AdamW 6=AdaDelta 7=LAMB 8=LARS 9=Ranger 10=NovoGrad */
     int loss_function;               /**< 损失函数（LossType枚举值, loss.h）: 0=MSE 1=MAE 2=Huber 3=CategoricalCrossEntropy 4=BinaryCrossEntropy 5=KLD 6=Cosine 7=Contrastive 8=Focal 9=Dice 10=Triplet 11=Quantile */
     char data_directory[512];

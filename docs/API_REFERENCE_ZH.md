@@ -4,7 +4,7 @@
 
 ## 概述 / Overview
 
-SELF-LNN AGI 基于**单一 CfC 液态神经网络**架构。所有模态数据直接拼接为统一输入向量，通过同一 CfC 连续动态系统演化。
+SELF-LNN AGI 基于**单一 CfC 液态神经网络 + 渐进分层架构**。感知模态通过 `lnn_forward` 馈入共享LNN，生成模态通过 `lnn_get_output` 只读查询后使用私有ODE自回归，确保零全局状态污染。
 默认服务端口：`http://localhost:8080`（可通过 `--port` 参数修改）
 
 SELF-LNN AGI is based on a **single CfC Liquid Neural Network** architecture. All modality data is concatenated into a unified input vector and evolved through the same CfC continuous dynamic system.

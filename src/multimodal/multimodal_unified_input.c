@@ -754,16 +754,14 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
         }
     }
 
-    /* 回退：如果LNN反向传播不可用（LNN未设置或维度不匹配），
-     * 使用恒等近似作为保守估计（保持向后兼容） */
+    /* M-005修复: LNN反向传播不可用时拒绝恒等近似回退。
+     * grad_combined[j]=grad_output[j] 完全忽略CfC ODE内部的链式法则
+     * (sigmoid导数、tanh导数、ODE连续演化路径)，导致梯度完全错误。
+     * 必须要求LNN反向传播可用，不可回退到恒等传播。 */
     if (!used_real_backprop) {
-        for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
-            if (j < n) {
-                grad_combined[j] = grad_output[j];
-            } else {
-                grad_combined[j] = 0.0f;
-            }
-        }
+        fprintf(stderr, "[多模态统一输入错误] LNN反向传播不可用，拒绝使用恒等近似梯度回退！请确保LNN已正确初始化并绑定。\n");
+        safe_free((void**)&grad_combined);
+        return SELFLNN_ERROR_ALGORITHM_FAILURE;
     }
 
     /* 步骤3: 梯度裁剪 —— 防止单步更新幅度过大 */

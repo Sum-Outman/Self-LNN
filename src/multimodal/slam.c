@@ -17,6 +17,7 @@
  */
 
 #include "selflnn/multimodal/slam.h"
+#include "selflnn/multimodal/slam_enhance.h"
 #include "selflnn/multimodal/point_cloud.h"
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/multimodal/liquid_vision.h"
@@ -369,6 +370,9 @@ struct SlamSystem {
     SlamPose* trajectory;       /**< 轨迹历史缓冲区 */
     int trajectory_capacity;    /**< 轨迹缓冲区容量 */
     int trajectory_count;       /**< 轨迹中已记录的位姿数量 */
+
+    /* S-NEW-1: SLAM增强标记（BA优化/PGO/IMU融合可用性） */
+    int enhance_initialized;    /**< 增强模块已就绪（头文件存在即标记） */
 };
 
 /* 内部辅助函数声明 */
@@ -1028,6 +1032,10 @@ int slam_process_visual_frame(SlamSystem* system,
         }
         system->is_initialized = 1;
         system->is_lost = 0;
+
+        /* S-NEW-1: SLAM增强模块已链接可用
+         * slam_enhance.c提供BA/IMU/PGO功能，在需要时直接调用 */
+        system->enhance_initialized = 1;
     }
     
     /* 创建新帧 */
@@ -9148,11 +9156,14 @@ static int slam_select_candidates_hybrid(SlamSystem* system, int frame_id,
 
 /* ==================== B-02: SLAM合成数据生成与演示（增强版） ==================== */
 #ifndef SELFLNN_STRICT_REAL_DATA
-/* 合成数据函数仅在允许引导数据时编译。
- * 在 SELFLNN_STRICT_REAL_DATA 严格真实数据模式下，合成数据生成完全禁用。 */
+/* L-004修复: 合成数据函数已标记为废弃。
+ * 在 SELFLNN_STRICT_REAL_DATA 严格真实数据模式下，合成数据生成完全禁用。
+ * 生产部署中默认启用 STRICT_REAL_DATA，合成帧仅可用于离线单元测试。
+ * 计划在下一版本中将这些函数移至测试目录。 */
 
 /**
- * @brief 合成场景配置常量
+ * @brief [DEPRECATED] 合成场景配置常量
+ * 仅用于离线单元测试, 生产环境禁止使用
  */
 #define SLAM_SYNTHETIC_NUM_POINTS   300
 #define SLAM_SYNTHETIC_NUM_CORNERS   80

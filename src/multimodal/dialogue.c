@@ -1755,6 +1755,24 @@ DialogueProcessor* dialogue_processor_create(const DialogueConfig* config) {
     }
     /* dialogue_init_generator成功时内部已将gen_initialized设为1 */
 
+    /* S-NEW-1: 初始化深度对话增强模块（信念状态+多轮推理+策略优化）
+     * dialogue_deep.c 提供完整的对话信念追踪和策略学习能力，
+     * 之前虽有完整实现但从未被调用 */
+    if (!processor->deep_belief) {
+        int hidden = config->dialogue_hidden_size > 0 ? config->dialogue_hidden_size : 128;
+        processor->deep_belief = dialogue_belief_state_create(16, (size_t)hidden);
+        processor->deep_belief_owned = 1;
+    }
+    if (!processor->deep_policy) {
+        processor->deep_policy = dialogue_policy_create(8, 64);
+        processor->deep_policy_owned = 1;
+    }
+    if (!processor->deep_reasoner) {
+        processor->deep_reasoner = multi_turn_reasoner_create(128, processor->deep_belief);
+        processor->deep_reasoner_owned = 1;
+    }
+    processor->deep_initialized = 1;
+
     return processor;
 }
 
@@ -1807,7 +1825,11 @@ void dialogue_processor_free(DialogueProcessor* processor) {
     if (processor->gen_projection_b) {
         safe_free((void**)&processor->gen_projection_b);
     }
-    
+    /* Phase1: 释放对话私有ODE状态 */
+    if (processor->gen_private_hidden) {
+        safe_free((void**)&processor->gen_private_hidden);
+    }
+
     // 释放处理器本身
     safe_free((void**)&processor);
 }
@@ -3119,6 +3141,14 @@ int dialogue_init_generator(DialogueProcessor* processor, size_t hidden_dim) {
         }
     }
 
+    /* Phase1: 分配对话私有ODE状态 — 替代共享LNN hidden_state污染 */
+    if (!processor->gen_private_hidden) {
+        int pdim = (int)hidden;
+        processor->gen_private_dim = pdim;
+        processor->gen_private_hidden = (float*)safe_calloc((size_t)pdim, sizeof(float));
+        processor->gen_private_tau = 0.1f;
+    }
+
     processor->gen_initialized = 1;
     init_generator_weights(processor);
     GEN_UNLOCK();
@@ -3161,7 +3191,7 @@ int dialogue_generate_text(DialogueProcessor* processor,
         return -1;
     }
     
-    /* 步骤1: 融合对话状态与上下文特征，初始化LNN */
+    /* 步骤1: 从共享LNN只读获取输出——不修改hidden_state（Phase1核心修复） */
     memset(blended_input, 0, hidden * sizeof(float));
     {
         size_t copy_n = context_size < hidden ? context_size : hidden;
@@ -3177,53 +3207,85 @@ int dialogue_generate_text(DialogueProcessor* processor,
             blended_input[i] += 0.3f * processor->dialogue_state_buffer[i];
         }
     }
-    if (lnn_forward_with_memory_context(lnn, blended_input, lnn_out) != 0) {
-        safe_free((void**)&lnn_out);
-        safe_free((void**)&logits);
-        safe_free((void**)&blended_input);
-        return -1;
+    /* Phase1: 只读获取共享LNN输出 — 替代 lnn_forward_with_memory_context(共享LNN) */
+    if (lnn_get_output(lnn, lnn_out, (int)hidden) != 0) {
+        /* 如果LNN输出不可用，使用上下文特征初始化私有状态 */
+        memcpy(lnn_out, blended_input, hidden * sizeof(float));
     }
-    
-    /* 步骤2: 自回归生成循环 */
+
+    /* Phase1: 用共享LNN的输出初始化对话私有ODE状态 */
+    if (processor->gen_private_hidden && processor->gen_private_dim > 0) {
+        int d = processor->gen_private_dim < (int)hidden ? processor->gen_private_dim : (int)hidden;
+        memcpy(processor->gen_private_hidden, lnn_out, (size_t)d * sizeof(float));
+    }
+
+    /* 步骤2: 自回归生成循环 — 使用私有ODE，不触碰共享LNN */
     size_t output_len = 0;
     int current_token = GEN_BOS_TOKEN;
-    
+    float* private_next = (float*)safe_malloc(hidden * sizeof(float));
+    if (!private_next) {
+        safe_free((void**)&lnn_out); safe_free((void**)&logits); safe_free((void**)&blended_input);
+        return -1;
+    }
+
     for (int step = 0; step < max_tokens; step++) {
         const float* emb = gen_embedding_lookup(processor, current_token);
         if (!emb) { current_token = GEN_EOS_TOKEN; break; }
-        
-        /* 构建LNN输入：嵌入向量 + 对话状态上下文 */
+
+        /* Phase1: 构建私有ODE输入 — token嵌入 + LNN输出上下文 */
         for (size_t i = 0; i < hidden; i++) {
-            blended_input[i] = emb[i];
+            blended_input[i] = emb[i] + 0.3f * lnn_out[i];
         }
         if (processor->dialogue_state_buffer) {
             size_t state_n = processor->dialogue_buffer_size < hidden ?
                              processor->dialogue_buffer_size : hidden;
             for (size_t i = 0; i < state_n; i++) {
-                blended_input[i] += 0.2f * processor->dialogue_state_buffer[i];
+                blended_input[i] += 0.15f * processor->dialogue_state_buffer[i];
             }
         }
-        
-        if (lnn_forward_with_memory_context(lnn, blended_input, lnn_out) != 0) break;
+
+        /* Phase1: 对话私有ODE演化（CfC闭式解近似）
+         * dh/dt = -h/τ + σ(W_h·h + W_in·blended) ⊙ tanh(h + blended)
+         * 使用简化的Euler步骤近似 */
+        if (processor->gen_private_hidden && processor->gen_private_dim > 0) {
+            int d = processor->gen_private_dim < (int)hidden ? processor->gen_private_dim : (int)hidden;
+            float tau = processor->gen_private_tau > 0.0f ? processor->gen_private_tau : 0.1f;
+            for (int i = 0; i < d; i++) {
+                float h = processor->gen_private_hidden[i];
+                float inp = blended_input[i];
+                float gate = 1.0f / (1.0f + expf(-(h + inp)));   /* sigmoid门控 */
+                float act = tanhf(h + inp);                        /* tanh激活 */
+                float dh = -h / tau + gate * act;                  /* CfC ODE */
+                private_next[i] = h + processor->config.dialogue_delta_t * dh;
+            }
+            memcpy(processor->gen_private_hidden, private_next, (size_t)d * sizeof(float));
+            /* 私有状态作为生成输出 */
+            memcpy(lnn_out, processor->gen_private_hidden, (size_t)d * sizeof(float));
+            if (d < (int)hidden) memset(lnn_out + d, 0, ((size_t)hidden - (size_t)d) * sizeof(float));
+        } else {
+            /* 无私有状态时的最小回退：直接从嵌入估计 */
+            memcpy(lnn_out, blended_input, hidden * sizeof(float));
+        }
+
+        /* Phase1: 使用独立gen_projection_lnn投影到logits（不经过共享LNN） */
         gen_project_to_logits(processor, lnn_out, logits);
         current_token = sample_token_from_distribution(logits, vocab, temperature, top_k);
-        
+
         if (current_token == GEN_EOS_TOKEN) break;
-        
-        /* 使用统一LNN状态演化生成状态 */
-        if (processor->unified_state_ref && processor->dialogue_state_buffer) {
+
+        /* Phase1: 私有对话状态演化 — 替代 dialogue_unified_step(共享LNN) */
+        if (processor->dialogue_state_buffer) {
             size_t dim = hidden < processor->dialogue_buffer_size ? hidden : processor->dialogue_buffer_size;
-            float* cfc_input = (float*)safe_malloc(processor->dialogue_buffer_size * sizeof(float));
-            if (cfc_input) {
-                memset(cfc_input, 0, processor->dialogue_buffer_size * sizeof(float));
-                memcpy(cfc_input, emb, dim * sizeof(float));
-                dialogue_unified_step(processor, cfc_input, dim,
-                                     processor->config.dialogue_delta_t,
-                                     processor->dialogue_state_buffer);
-                safe_free((void**)&cfc_input);
+            float tau_d = processor->config.dialogue_delta_t > 0.0f ? processor->config.dialogue_delta_t : 0.1f;
+            for (size_t i = 0; i < dim; i++) {
+                float dh = -processor->dialogue_state_buffer[i] / tau_d + 0.1f * emb[i];
+                processor->dialogue_state_buffer[i] += processor->config.dialogue_delta_t * dh;
+                /* 钳制防止梯度爆炸 */
+                if (processor->dialogue_state_buffer[i] > 10.0f) processor->dialogue_state_buffer[i] = 10.0f;
+                if (processor->dialogue_state_buffer[i] < -10.0f) processor->dialogue_state_buffer[i] = -10.0f;
             }
         }
-        
+
         /* UTF-8编码输出 */
         char utf8_buf[6];
         int utf8_len;
@@ -3232,11 +3294,11 @@ int dialogue_generate_text(DialogueProcessor* processor,
         } else {
             utf8_len = unicode_to_utf8(0xFFFD, utf8_buf);
         }
-        
+
         if (output_len + (size_t)utf8_len >= max_output) break;
         memcpy(output + output_len, utf8_buf, (size_t)utf8_len);
         output_len += (size_t)utf8_len;
-        
+
         /* 句末标点终止 */
         if ((size_t)current_token < vocab) {
             uint32_t code = processor->gen_vocab_codes[current_token];
@@ -3245,8 +3307,9 @@ int dialogue_generate_text(DialogueProcessor* processor,
             }
         }
     }
-    
+
     output[output_len] = '\0';
+    safe_free((void**)&private_next);
     safe_free((void**)&lnn_out);
     safe_free((void**)&logits);
     safe_free((void**)&blended_input);
@@ -3310,33 +3373,59 @@ int dialogue_generate_text_streaming(DialogueProcessor* processor,
             blended_input[i] += 0.3f * processor->dialogue_state_buffer[i];
         }
     }
-    if (lnn_forward_with_memory_context(lnn, blended_input, lnn_out) != 0) {
-        safe_free((void**)&lnn_out);
-        safe_free((void**)&logits);
-        safe_free((void**)&blended_input);
-        return -1;
+    /* Phase1: 只读获取共享LNN输出 */
+    if (lnn_get_output(lnn, lnn_out, (int)hidden) != 0) {
+        memcpy(lnn_out, blended_input, hidden * sizeof(float));
+    }
+    if (processor->gen_private_hidden && processor->gen_private_dim > 0) {
+        int d = processor->gen_private_dim < (int)hidden ? processor->gen_private_dim : (int)hidden;
+        memcpy(processor->gen_private_hidden, lnn_out, (size_t)d * sizeof(float));
     }
 
     size_t output_len = 0;
     int current_token = GEN_BOS_TOKEN;
     int total_steps = max_tokens;
+    float* private_next = (float*)safe_malloc(hidden * sizeof(float));
+    if (!private_next) {
+        safe_free((void**)&lnn_out); safe_free((void**)&logits); safe_free((void**)&blended_input);
+        return -1;
+    }
 
     for (int step = 0; step < max_tokens; step++) {
         const float* emb = gen_embedding_lookup(processor, current_token);
         if (!emb) { current_token = GEN_EOS_TOKEN; break; }
 
+        /* Phase1: 私有ODE输入 */
         for (size_t i = 0; i < hidden; i++) {
-            blended_input[i] = emb[i];
+            blended_input[i] = emb[i] + 0.3f * lnn_out[i];
         }
         if (processor->dialogue_state_buffer) {
             size_t state_n = processor->dialogue_buffer_size < hidden ?
                              processor->dialogue_buffer_size : hidden;
             for (size_t i = 0; i < state_n; i++) {
-                blended_input[i] += 0.2f * processor->dialogue_state_buffer[i];
+                blended_input[i] += 0.15f * processor->dialogue_state_buffer[i];
             }
         }
 
-        if (lnn_forward_with_memory_context(lnn, blended_input, lnn_out) != 0) break;
+        /* Phase1: 私有ODE演化 */
+        if (processor->gen_private_hidden && processor->gen_private_dim > 0) {
+            int d = processor->gen_private_dim < (int)hidden ? processor->gen_private_dim : (int)hidden;
+            float tau = processor->gen_private_tau > 0.0f ? processor->gen_private_tau : 0.1f;
+            for (int i = 0; i < d; i++) {
+                float h = processor->gen_private_hidden[i];
+                float inp = blended_input[i];
+                float gate = 1.0f / (1.0f + expf(-(h + inp)));
+                float act = tanhf(h + inp);
+                float dh = -h / tau + gate * act;
+                private_next[i] = h + processor->config.dialogue_delta_t * dh;
+            }
+            memcpy(processor->gen_private_hidden, private_next, (size_t)d * sizeof(float));
+            memcpy(lnn_out, processor->gen_private_hidden, (size_t)d * sizeof(float));
+            if (d < (int)hidden) memset(lnn_out + d, 0, ((size_t)hidden - (size_t)d) * sizeof(float));
+        } else {
+            memcpy(lnn_out, blended_input, hidden * sizeof(float));
+        }
+
         gen_project_to_logits(processor, lnn_out, logits);
         current_token = sample_token_from_distribution(logits, vocab, temperature, top_k);
 
@@ -3347,17 +3436,15 @@ int dialogue_generate_text_streaming(DialogueProcessor* processor,
             break;
         }
 
-        /* 使用统一LNN状态演化生成状态 */
-        if (processor->unified_state_ref && processor->dialogue_state_buffer) {
+        /* Phase1: 私有对话状态演化 */
+        if (processor->dialogue_state_buffer) {
             size_t dim = hidden < processor->dialogue_buffer_size ? hidden : processor->dialogue_buffer_size;
-            float* cfc_input = (float*)safe_malloc(processor->dialogue_buffer_size * sizeof(float));
-            if (cfc_input) {
-                memset(cfc_input, 0, processor->dialogue_buffer_size * sizeof(float));
-                memcpy(cfc_input, emb, dim * sizeof(float));
-                dialogue_unified_step(processor, cfc_input, dim,
-                                     processor->config.dialogue_delta_t,
-                                     processor->dialogue_state_buffer);
-                safe_free((void**)&cfc_input);
+            float tau_d = processor->config.dialogue_delta_t > 0.0f ? processor->config.dialogue_delta_t : 0.1f;
+            for (size_t i = 0; i < dim; i++) {
+                float dh = -processor->dialogue_state_buffer[i] / tau_d + 0.1f * emb[i];
+                processor->dialogue_state_buffer[i] += processor->config.dialogue_delta_t * dh;
+                if (processor->dialogue_state_buffer[i] > 10.0f) processor->dialogue_state_buffer[i] = 10.0f;
+                if (processor->dialogue_state_buffer[i] < -10.0f) processor->dialogue_state_buffer[i] = -10.0f;
             }
         }
 
@@ -3394,6 +3481,7 @@ int dialogue_generate_text_streaming(DialogueProcessor* processor,
     safe_free((void**)&lnn_out);
     safe_free((void**)&logits);
     safe_free((void**)&blended_input);
+    safe_free((void**)&private_next);
     return (int)output_len;
 }
 
@@ -4868,6 +4956,9 @@ int dialogue_encode_with_history(const float* current_query, int query_dim,
         }
     }
 
+    /* Phase5: ⚠️ 死代码风险 — 此函数未被任何代码调用
+     * 如果未来启用且lnn为共享LNN，将成为生成污染源
+     * 必须确保调用方传入的是独立LNN实例 */
     lnn_forward(lnn, lnn_input, fused_output);
 
     safe_free((void**)&lnn_input);

@@ -114,6 +114,11 @@ struct DialogueProcessor {
     float* gen_projection_w;         /**< 投影权重（回退路径） */
     float* gen_projection_b;         /**< 投影偏置（回退路径） */
 
+    /* Phase1: 对话私有ODE状态 — 消除对共享LNN hidden_state的污染 */
+    float* gen_private_hidden;       /**< 对话私有ODE隐藏状态 */
+    float gen_private_tau;           /**< 私有ODE时间常数 */
+    int gen_private_dim;             /**< 私有状态维度 */
+
     DialogueBeliefState* deep_belief;     /**< DST信念状态 */
     int deep_belief_owned;
     DialoguePolicy* deep_policy;          /**< 对话策略 */

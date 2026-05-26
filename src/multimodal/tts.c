@@ -966,6 +966,8 @@ static void tts_extract_mfcc(const float* frame, float* mfcc_out,
  * @param hidden_state CfC隐藏状态（可复用的工作缓冲区，hs维）
  * @return 0成功，-1失败
  */
+/* Phase5: [DEPRECATED] 此函数使用 lnn_forward(共享LNN)，属于生成污染
+ * 不再被任何代码调用。保留仅作参考，编译器将消除死代码 */
 static int tts_lnn_acoustic_forward(TTSEngine* engine,
                                      const float* mfcc,
                                      float* acoustic_out,
@@ -2076,17 +2078,10 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
         memcpy(input_buf, embed, (size_t)ed * sizeof(float));
         input_buf[ed] = engine->prev_output;
 
-        if (lnn) {
-            float lnn_out[256] = {0};
-            if (lnn_forward(lnn, input_buf, lnn_out) == 0) {
-                for (int i = 0; i < hs; i++) {
-                    engine->hidden_state[i] = 0.7f * engine->hidden_state[i] + 0.3f * lnn_out[i];
-                }
-            }
-        } else {
-            /* ZSFWS-M022修复: 自包含CfC回退路径
-             * 复用嵌入表作为权重矩阵时，嵌入表为Xavier×0.1缩放，
-             * 添加0.2尺度因子使门控和激活计算与标准CfC权重范围匹配 */
+        /* Phase5: 强制使用自包含CfC路径，移除lnn_forward(共享LNN)污染
+         * TTS为生成任务，不应修改共享LNN的hidden_state
+         * 自包含CfC使用嵌入表权重，独立于共享LNN演化 */
+        {
             const float embed_weight_scale = 0.2f;
             for (int i = 0; i < hs; i++) {
                 float gate_sum = 0.0f;
@@ -2701,8 +2696,12 @@ TTSAudio* tts_synthesize(TTSEngine* engine, const char* text) {
 
     int actual_samples = 0;
 
-    /* H-004修复: 始终使用CfC液态神经网络路径，即使权重随机初始化。
-     * 自包含CfC+声门脉冲+共振峰滤波确保安全运行 */
+    /* L-006修复: 未训练检查 —— CfC权重随机初始化时发出警告
+     * 确定性声门脉冲+共振峰滤波能保证基本可听性，
+     * 但语音自然度依赖训练后的CfC权重。 */
+    if (tts_is_untrained(engine)) {
+        fprintf(stderr, "[TTS警告] TTS模型未训练，语音自然度将受限。建议先运行 tts_train() 训练模型。\n");
+    }
     actual_samples = generate_waveform(engine, engine->token_buffer, num_tokens,
                                         audio->samples, max_samples);
 

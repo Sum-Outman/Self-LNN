@@ -325,6 +325,15 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
     if (!kernel || count == 0) return -1;
     if (kernel->arg_count < 2) return -1;
 
+    /* ZSFWS-006修复: 首次CPU回退时记录日志，告知用户实际计算设备 */
+    static int cpu_fallback_logged = 0;
+    if (!cpu_fallback_logged) {
+        log_info("[GPU硬件自适应] NPU/GPU原生SDK未检测到,"
+                 "计算自动回退到CPU执行(真实浮点计算,结果精确保留),"
+                 "不影响模型训练/推理精度");
+        cpu_fallback_logged = 1;
+    }
+
     const float* input  = (const float*)kernel->arg_values[0];
     float*       output = (float*)kernel->arg_values[1];
     const char*  name   = kernel->kernel_name;
