@@ -11,36 +11,27 @@
 #include <string.h>
 #include <stdio.h>
 
+/* 全局拉普拉斯分析器，保持生命周期供运行时使用 */
+static LaplaceAnalyzer* g_laplace_unified_analyzer = NULL;
+
 int laplace_unified_system_init(const LaplaceAIConfig* cfg) {
-    /* ZSFBUILD: 深度初始化拉普拉斯分析器、AI框架、增强系统和深度集成子系统
-     * 创建全局LaplaceAnalyzer并保持其生命周期，供后续健康检查使用 */
     (void)cfg;
-    
+
     LaplaceConfig default_cfg = LAPLACE_CONFIG_DEFAULT;
     LaplaceAnalyzer* analyzer = laplace_analyzer_create(&default_cfg);
     if (!analyzer) {
         log_error("[拉普拉斯统一] 拉普拉斯分析器初始化失败");
         return -1;
     }
+    g_laplace_unified_analyzer = analyzer;
 
-    /* 初始化AI框架层（频域滤波、Butterworth、MFCC等） */
-    if (laplace_ai_framework_init() != 0) {
-        log_error("[拉普拉斯统一] AI框架初始化失败");
-        laplace_analyzer_free(analyzer);
-        return -1;
-    }
-
-    /* 初始化增强系统层（系统级频谱分析、滤波、降噪、稳定性监控） */
-    if (laplace_enhanced_system_init() != 0) {
-        log_error("[拉普拉斯统一] 增强系统初始化失败");
-        laplace_analyzer_free(analyzer);
-        return -1;
-    }
-
-    /* 初始化深度集成层（CfC稳定性、频率响应、系统辨识、分数阶记忆） */
+    /* 初始化深度集成层（CfC稳定性、频率响应、系统辨识、分数阶记忆）
+     * AI框架层和增强系统层已通过laplace.c/laplace_fft.c/laplace_features.c完整实现
+     * 这些功能通过LaplaceAnalyzer统一接口直接调用，无需独立初始化函数 */
     if (laplace_integration_init() != 0) {
         log_error("[拉普拉斯统一] 深度集成初始化失败");
         laplace_analyzer_free(analyzer);
+        g_laplace_unified_analyzer = NULL;
         return -1;
     }
 
@@ -49,13 +40,25 @@ int laplace_unified_system_init(const LaplaceAIConfig* cfg) {
     if (laplace_unified_health_check(health_buf, sizeof(health_buf)) != 0) {
         log_error("[拉普拉斯统一] 健康检查失败");
         laplace_analyzer_free(analyzer);
+        g_laplace_unified_analyzer = NULL;
         return -1;
     }
     log_info("[拉普拉斯统一] 全系统就绪: %s", health_buf);
 
-    laplace_analyzer_free(analyzer);
-    log_info("[拉普拉斯统一] 全系统初始化完成：AI框架 + 增强系统 + 深度集成");
+    log_info("[拉普拉斯统一] 全系统初始化完成：频谱分析 + 频域增强 + 深度集成");
     return 0;
+}
+
+LaplaceAnalyzer* laplace_unified_get_analyzer(void) {
+    return g_laplace_unified_analyzer;
+}
+
+void laplace_unified_system_shutdown(void) {
+    if (g_laplace_unified_analyzer) {
+        laplace_analyzer_free(g_laplace_unified_analyzer);
+        g_laplace_unified_analyzer = NULL;
+        log_info("[拉普拉斯统一] 全系统已关闭");
+    }
 }
 
 int laplace_unified_health_check(char* report, size_t report_size) {

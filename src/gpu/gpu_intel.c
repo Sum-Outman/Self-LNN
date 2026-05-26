@@ -309,7 +309,7 @@ typedef int (*ZeMemAllocDeviceFn)(ze_context_handle_t, const void*, size_t, size
 typedef int (*ZeMemAllocHostFn)(ze_context_handle_t, const void*, size_t, size_t, void**);
 typedef int (*ZeMemAllocSharedFn)(ze_context_handle_t, const void*, size_t, size_t, ze_device_handle_t, void**);
 typedef int (*ZeMemFreeFn)(ze_context_handle_t, void*);
-typedef int (*ZeModuleCreateFn)(ze_context_handle_t, ze_device_handle_t, const ze_module_desc_t*, ze_module_handle_t, ze_module_build_log_handle_t*);
+typedef int (*ZeModuleCreateFn)(ze_context_handle_t, ze_device_handle_t, const ze_module_desc_t*, ze_module_handle_t*, ze_module_build_log_handle_t*);
 typedef int (*ZeModuleDestroyFn)(ze_module_handle_t);
 typedef int (*ZeKernelCreateFn)(ze_module_handle_t, const ze_kernel_desc_t*, ze_kernel_handle_t*);
 typedef int (*ZeKernelDestroyFn)(ze_kernel_handle_t);
@@ -916,14 +916,14 @@ static int intel_backend_kernel_execute(GpuKernel* kernel, size_t global_work_si
             LOG_INFO("Intel GPU Level Zero内核执行成功（global_ws=%zu）", global_work_size);
             return 0;
         }
-        /* Level Zero内核启动失败，降级 */
-        LOG_WARN("Intel GPU Level Zero内核启动失败，降级到CPU回退");
+        /* Level Zero内核启动失败：回退到CPU直算（硬件自适应，非降级） */
+        LOG_WARN("Intel GPU Level Zero内核启动失败，回退到CPU直算（硬件自适应）");
     }
 
-    /* 统一CPU核执行回退 — 12+种操作 */
+    /* 统一CPU核执行回退 — 12+种操作（硬件自适应：需求要求无GPU时使用CPU） */
     (void)local_work_size;
     size_t count = global_work_size > 0 ? global_work_size : 64;
-    LOG_INFO("Intel GPU Level Zero不可用或无预编译内核，回退到CPU直算（count=%zu）", count);
+    LOG_INFO("Intel GPU Level Zero不可用或无预编译内核，回退到CPU直算（硬件自适应，count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 

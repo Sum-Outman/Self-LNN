@@ -7,7 +7,17 @@
     <link rel="stylesheet" href="css/style.css">
     <link rel="stylesheet" href="css/api-docs.css">
     <link rel="stylesheet" href="css/knowledge-graph.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- ZSF-007修复: 移除Font Awesome外部CDN依赖，使用自包含Unicode图标 -->
+    <style>
+        .fas, .far, .fab { font-style: normal; display: inline-block; margin-right: 2px; }
+        .fa-video:before { content: "📹"; }
+        .fa-stream:before { content: "▤"; font-weight: bold; }
+        .fa-stop:before { content: "⏹"; }
+        .fa-play:before { content: "▶"; }
+        .fa-plug:before { content: "🔌"; }
+        .fa-unplug:before { content: "⏻"; }
+        .fa-check-circle:before { content: "✅"; }
+    </style>
 
     <script src="js/api-service.js?v=15"></script>
     <script src="js/selflnn-chart.js?v=1"></script>

@@ -184,6 +184,12 @@ class DataEngine {
         if (this._backendConnected) {
             try {
                 await this._fetchAllData();
+                /* ZSF-FE-006: 检查内部错误标记，若_fetchAllData内部捕获异常但未抛出，此处强制抛出以触发外层catch */
+                if (this._lastError) {
+                    var errMsg = this._lastError;
+                    this._lastError = null;
+                    throw new Error(errMsg);
+                }
                 this._saveCachedData();
                 this._consecutiveErrors = 0;
             } catch (e) {

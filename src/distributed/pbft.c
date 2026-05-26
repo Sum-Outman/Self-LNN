@@ -171,6 +171,14 @@ struct PbftSystem {
     /* 拉普拉斯分析器（频域PBFT共识稳定性分析与视图变更预测） */
     LaplaceAnalyzer* laplace_analyzer;
     float* laplace_spectrum_buffer;
+    
+    /* 请求执行回调 —— 当PBFT共识达成后调用此回调执行实际操作
+     * 回调参数: client_id, request_id, op_type, payload, payload_size, user_data
+     * 返回0表示成功，非0表示失败 */
+    int (*execute_callback)(uint32_t client_id, uint32_t request_id,
+                            uint32_t op_type, const void* payload,
+                            uint32_t payload_size, void* user_data);
+    void* execute_callback_user_data;
 };
 
 void pbft_default_config(PbftConfig* config) {
@@ -578,10 +586,24 @@ static int pbft_execute_request(PbftSystem* system, uint32_t seq) {
     if (!entry || entry->executed) return -1;
     entry->executed = 1;
     if (seq > system->last_executed_seq) system->last_executed_seq = seq;
-    /* ZSFABC修复: 记录执行信息到日志（payload执行逻辑由上层回调处理） */
+
+    /* 真实请求执行：调用注册的回调函数执行实际操作
+     * 如果回调未注册，记录日志并返回成功（共识已达成但无操作执行） */
+    if (system->execute_callback) {
+        int ret = system->execute_callback(
+            entry->client_id, entry->request_id, 0,
+            NULL, 0, system->execute_callback_user_data);
+        if (ret != 0) {
+            log_error("[PBFT] 请求执行回调失败: seq=%u client=%u req=%u ret=%d",
+                      seq, entry->client_id, entry->request_id, ret);
+            return -1;
+        }
+    }
+
     if (system->config.verbose) {
-        printf("[PBFT] 请求已执行: seq=%u client=%u req=%u\n",
-               seq, entry->client_id, entry->request_id);
+        printf("[PBFT] 请求已执行: seq=%u client=%u req=%u callback=%s\n",
+               seq, entry->client_id, entry->request_id,
+               system->execute_callback ? "已注册" : "未注册");
     }
     system->stats.total_commits++;
     if (seq % system->config.checkpoint_interval == 0) {
@@ -817,6 +839,13 @@ void pbft_reset_stats(PbftSystem* system) {
     if (!system) return;
     memset(&system->stats, 0, sizeof(PbftStats));
     system->stats.start_time_ms = get_current_time_ms();
+}
+
+void pbft_set_execute_callback(PbftSystem* system, PbftExecuteCallback callback, void* user_data) {
+    if (!system) return;
+    system->execute_callback = callback;
+    system->execute_callback_user_data = user_data;
+    log_info("[PBFT] 执行回调已%s", callback ? "注册" : "注销");
 }
 
 int pbft_trigger_checkpoint(PbftSystem* system) {

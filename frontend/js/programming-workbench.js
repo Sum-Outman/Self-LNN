@@ -95,7 +95,7 @@
         clearOutput();
         appendOutput('正在分析代码...');
         try {
-            var result = await SelfLnnApi.programmingAnalyze(code);
+            var result = await window.SelfLnnApi.programmingAnalyze(code);
             if (result.success && result.data) {
                 var data = result.data;
                 updateAnalysisResult(data);
@@ -120,7 +120,7 @@
         clearOutput();
         appendOutput('正在生成代码...');
         try {
-            var result = await SelfLnnApi.programmingGenerate(funcName, desc, paramCount);
+            var result = await window.SelfLnnApi.programmingGenerate(funcName, desc, paramCount);
             if (result.success && result.data) {
                 var data = result.data;
                 if (data.success && data.code) {
@@ -149,7 +149,7 @@
         clearOutput();
         appendOutput('正在优化代码 (迭代' + iterations + '次)...');
         try {
-            var result = await SelfLnnApi.programmingOptimize(code, iterations);
+            var result = await window.SelfLnnApi.programmingOptimize(code, iterations);
             if (result.success && result.data) {
                 var data = result.data;
                 if (data.success && data.code) {
@@ -176,7 +176,7 @@
         clearOutput();
         appendOutput('正在编译验证...');
         try {
-            var result = await SelfLnnApi.programmingCompile(code);
+            var result = await window.SelfLnnApi.programmingCompile(code);
             if (result.success && result.data) {
                 var data = result.data;
                 if (data.compilation) {
@@ -205,7 +205,7 @@
         clearOutput();
         appendOutput('正在沙箱中执行代码...');
         try {
-            var result = await SelfLnnApi.programmingExecute(code, input);
+            var result = await window.SelfLnnApi.programmingExecute(code, input);
             if (result.success && result.data) {
                 var data = result.data;
                 if (data.success) {
@@ -231,7 +231,7 @@
         clearOutput();
         appendOutput('正在检查编程引擎状态...');
         try {
-            var result = await SelfLnnApi.programmingStatus();
+            var result = await window.SelfLnnApi.programmingStatus();
             if (result.success && result.data) {
                 var data = result.data;
                 if (data.status) {
@@ -255,7 +255,7 @@
     window.loadSampleCode = async function() {
         /* L-004修复：移除硬编码回退代码，API失败时显示提示而非假数据 */
         try {
-            var result = await SelfLnnApi.programmingSample();
+            var result = await window.SelfLnnApi.programmingSample();
             if (result.success && result.code) {
                 setEditorCode(result.code);
                 showStatus('示例代码已加载（来自后端）');

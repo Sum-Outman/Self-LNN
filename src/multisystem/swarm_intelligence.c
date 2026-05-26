@@ -3212,6 +3212,53 @@ static void marl_iterate(Swarm* swarm) {
 }
 
 
+/* ========== 多系统集群状态查询 ========== */
+
+/**
+ * @brief 获取多系统集群状态（MSSwarmState）
+ *
+ * 从Swarm实例提取当前的优化状态信息，
+ * 供multisystem_control调用以进行跨系统协调。
+ */
+int swarm_get_ms_state(Swarm* swarm, MSSwarmState* state) {
+    if (!swarm || !state) return -1;
+
+    memset(state, 0, sizeof(MSSwarmState));
+
+    state->best_fitness = swarm->global_best_fitness;
+    state->iteration = swarm->current_iteration;
+    state->converged = (swarm->convergence_reason != 0) ? 1 : 0;
+    state->converged_at_iteration = swarm->convergence_reason ? swarm->current_iteration : 0;
+    state->converged_at_fitness = swarm->convergence_reason ? swarm->global_best_fitness : 0.0f;
+
+    if (swarm->global_best_position && swarm->config.dimensions > 0) {
+        state->best_position = (float*)safe_malloc(
+            (size_t)swarm->config.dimensions * sizeof(float));
+        if (state->best_position) {
+            memcpy(state->best_position, swarm->global_best_position,
+                   (size_t)swarm->config.dimensions * sizeof(float));
+        }
+    }
+
+    state->swarm_size = swarm->config.swarm_size;
+    state->dimensions = swarm->config.dimensions;
+
+    float avg_fitness = 0.0f;
+    int valid_count = 0;
+    for (int i = 0; i < swarm->config.swarm_size; i++) {
+        if (swarm->individuals[i].is_initialized) {
+            avg_fitness += swarm->individuals[i].current_fitness;
+            valid_count++;
+        }
+    }
+    if (valid_count > 0) {
+        state->average_fitness = avg_fitness / (float)valid_count;
+    }
+
+    return 0;
+}
+
+
 /* ========== 工具函数实现 ========== */
 
 /**

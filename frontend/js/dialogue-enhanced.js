@@ -394,8 +394,8 @@ class DialogueEnhanced {
         }
         if (!wsUrl) {
             var host = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.host) || 'localhost';
-            var port = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.port) || 8080;
-            wsUrl = 'ws://' + host + ':' + port + '/ws';
+            /* ZSFWXJ-FIX001修复: WebSocket使用独立端口9090而非复用HTTP端口8080 */
+            wsUrl = 'ws://' + host + ':9090/ws';
         }
         this.wsUrl = wsUrl;
         this.wsReconnectAttempts = 0;

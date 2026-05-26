@@ -103,6 +103,23 @@ RosRobotControllerConfig ros_robot_controller_config_default(void) {
     return cfg;
 }
 
+/* ZSFWXJ-FIX009: 真实JSON解析回调前向声明 */
+static void rrc_joint_states_cb(const void* msg, size_t msg_size, void* user_data);
+static void rrc_odom_cb(const void* msg, size_t msg_size, void* user_data);
+
+/* 简易JSON浮点数提取 */
+static float rrc_find_float(const char* json, const char* key) {
+    const char* p = strstr(json, key);
+    if (!p) return 0.0f;
+    p += strlen(key);
+    while (*p && (*p == ' ' || *p == ':' || *p == '"')) p++;
+    if ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.') {
+        char* end = NULL;
+        return (float)strtod(p, &end);
+    }
+    return 0.0f;
+}
+
 RosRobotController* ros_robot_controller_create(const RosRobotControllerConfig* config) {
     if (!config) return NULL;
     RosRobotController* ctrl = (RosRobotController*)safe_calloc(1, sizeof(RosRobotController));
@@ -183,6 +200,7 @@ int ros_robot_controller_connect_robot(RosRobotController* controller, int robot
     RobotEntry* robot = &controller->robots[robot_id];
     robot->conn_state = ROS_ROBOT_CONNECTION_STATE_CONNECTING;
 
+    /* ZSFWXJ-FIX009修复: 使用真实JSON解析回调替代NULL */
     /* 连接ROS节点 */
     if (robot->ros_node) {
         if (ros_node_connect_to_master(robot->ros_node, NULL) == 0) {
@@ -191,12 +209,12 @@ int ros_robot_controller_connect_robot(RosRobotController* controller, int robot
             snprintf(joint_state_topic, sizeof(joint_state_topic),
                      "/%s/joint_states", robot->name);
             ros_node_subscribe(robot->ros_node, joint_state_topic,
-                              "sensor_msgs/JointState", NULL, robot);
+                              "sensor_msgs/JointState", rrc_joint_states_cb, robot);
 
             char odom_topic[256];
             snprintf(odom_topic, sizeof(odom_topic), "/%s/odom", robot->name);
             ros_node_subscribe(robot->ros_node, odom_topic,
-                              "nav_msgs/Odometry", NULL, robot);
+                              "nav_msgs/Odometry", rrc_odom_cb, robot);
 
             /* 广告控制话题 */
             char cmd_vel_topic[256];
@@ -717,4 +735,81 @@ const char* ros_robot_controller_get_last_error(RosRobotController* controller) 
 
 int ros_robot_controller_get_error_code(RosRobotController* controller) {
     return controller ? controller->error_code : -1;
+}
+
+/* ZSFWXJ-FIX009: 真实JSON解析回调 — 基于RobotEntry结构体直接访问 */
+
+static void rrc_joint_states_cb(const void* msg, size_t msg_size, void* user_data) {
+    RobotEntry* robot = (RobotEntry*)user_data;
+    if (!robot || !msg || msg_size == 0 || !robot->active) return;
+
+    const char* json = (const char*)msg;
+    robot->num_joints = 0;
+    const char* pp = strstr(json, "\"position\"");
+    if (pp) {
+        const char* start = strstr(pp, "[");
+        if (start) {
+            start++;
+            for (int i = 0; i < MAX_JOINTS && *start; i++) {
+                while (*start == ' ' || *start == ',') start++;
+                if (*start == ']' || *start == 0) break;
+                char* end = NULL;
+                robot->joint_positions[i] = (float)strtod(start, &end);
+                if (end == start) break;
+                start = end;
+                robot->num_joints = i + 1;
+            }
+        }
+    }
+    const char* vp = strstr(json, "\"velocity\"");
+    if (vp) {
+        const char* start = strstr(vp, "[");
+        if (start) {
+            start++;
+            for (int i = 0; i < robot->num_joints && *start; i++) {
+                while (*start == ' ' || *start == ',') start++;
+                if (*start == ']' || *start == 0) break;
+                char* end = NULL;
+                robot->joint_velocities[i] = (float)strtod(start, &end);
+                if (end == start) break;
+                start = end;
+            }
+        }
+    }
+    const char* ep = strstr(json, "\"effort\"");
+    if (ep) {
+        const char* start = strstr(ep, "[");
+        if (start) {
+            start++;
+            for (int i = 0; i < robot->num_joints && *start; i++) {
+                while (*start == ' ' || *start == ',') start++;
+                if (*start == ']' || *start == 0) break;
+                char* end = NULL;
+                robot->joint_efforts[i] = (float)strtod(start, &end);
+                if (end == start) break;
+                start = end;
+            }
+        }
+    }
+}
+
+static void rrc_odom_cb(const void* msg, size_t msg_size, void* user_data) {
+    RobotEntry* robot = (RobotEntry*)user_data;
+    if (!robot || !msg || msg_size == 0 || !robot->active) return;
+
+    const char* json = (const char*)msg;
+    robot->position[0] = rrc_find_float(json, "\"x\":");
+    robot->position[1] = rrc_find_float(json, "\"y\":");
+    robot->position[2] = rrc_find_float(json, "\"z\":");
+    robot->orientation[0] = rrc_find_float(json, "\"x\":");
+    robot->orientation[1] = rrc_find_float(json, "\"y\":");
+    robot->orientation[2] = rrc_find_float(json, "\"z\":");
+    robot->orientation[3] = rrc_find_float(json, "\"w\":");
+    robot->linear_velocity[0] = rrc_find_float(json, "\"x\":");
+    robot->linear_velocity[1] = rrc_find_float(json, "\"y\":");
+    robot->linear_velocity[2] = rrc_find_float(json, "\"z\":");
+    robot->angular_velocity[0] = rrc_find_float(json, "\"x\":");
+    robot->angular_velocity[1] = rrc_find_float(json, "\"y\":");
+    robot->angular_velocity[2] = rrc_find_float(json, "\"z\":");
+    robot->last_heartbeat = (double)time(NULL);
 }

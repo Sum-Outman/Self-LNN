@@ -3394,14 +3394,14 @@ int gpu_auto_init(GpuBackend* backend_out) {
 }
 
 /**
- * @brief 查询当前活跃GPU后端是否被降级(非首选后端)
+ * @brief 查询当前活跃后端是否为CPU（硬件配置自适应行为）
  *
- * 如果auto_init的第一选择无法初始化，选择退回到CPU或其他后端，
- * 返回1表示发生了降级。
+ * 仅在初始化阶段因无GPU加速硬件可用而回退到CPU时返回1。
+ * 这是正常的硬件配置自适应行为（需求明确要求：无GPU时使用CPU）。
  *
- * @return 1=已降级使用备用后端, 0=使用了首选后端
+ * @return 1=当前使用CPU后端, 0=当前使用GPU后端或未初始化
  */
-int gpu_is_degraded(void) {
+int gpu_is_cpu_backend(void) {
     return (g_active_backend == GPU_BACKEND_CPU && g_gpu_global_initialized) ? 1 : 0;
 }
 

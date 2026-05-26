@@ -101,7 +101,7 @@ static hipError_t (*hipFuncSetAttribute)(const void*, int, int) = NULL;
 static hipError_t (*hipModuleLoad)(void**, const char*) = NULL;
 static hipError_t (*hipModuleUnload)(void*) = NULL;
 static hipError_t (*hipModuleGetFunction)(void**, void*, const char*) = NULL;
-static hipError_t (*hipModuleLaunchKernel)(void*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, void**, void**) = NULL;
+static hipError_t (*hipModuleLaunchKernel)(void*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, void*, void**, void**) = NULL;
 static hipError_t (*hipOccupancyMaxPotentialBlockSize)(int*, int*, const void*, size_t, int) = NULL;
 static hipError_t (*hipMemGetInfo)(size_t*, size_t*) = NULL;
 static hipError_t (*hipDeviceReset)(void) = NULL;
@@ -403,7 +403,7 @@ static void rocm_hash_kernel(const char* source, const char* name, char* hash_ou
     if (s) {
         while ((c = (unsigned char)*s++) != 0) hash = ((hash << 5) + hash) + c;
     }
-    unsigned long len_hash = (source ? strlen(source) : 0) * 2654435761u;
+    unsigned long len_hash = (unsigned long)(source ? strlen(source) : 0) * 2654435761u;
     hash ^= len_hash;
     hash += (hash << 3);
     hash ^= (hash >> 11);
@@ -860,6 +860,7 @@ static int rocm_backend_kernel_execute(GpuKernel* kernel, size_t global_work_siz
     void* hip_func = kern->backend_data;
     /* ZSFWS修复 P3-006: 移除无意义的NULL参数kernel启动尝试 */
     hipError_t err = hipModuleLaunchKernel(hip_func, grid_dim, 1, 1, block_dim, 1, 1, 0, stream, kern->arg_values, NULL);
+    (void)err;
     if (err != hipSuccess) return -1;
     return 0;
 }
@@ -885,6 +886,7 @@ static int rocm_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
                                             grid_dim[0], grid_dim[1], grid_dim[2],
                                             block_dim[0], block_dim[1], block_dim[2],
                                             0, stream, kern->arg_values, NULL);
+    (void)err;
     if (err != hipSuccess) return -1;
     return 0;
 }

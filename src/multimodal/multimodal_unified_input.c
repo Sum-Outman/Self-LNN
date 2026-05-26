@@ -12,6 +12,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/secure_random.h"
 #include "selflnn/core/lnn.h"
 
 #include <stdlib.h>
@@ -173,8 +174,8 @@ static int unified_input_dynamic_process(
                 if (state->projection_matrices[m]) {
                     float xavier_std = sqrtf(2.0f / (float)(SELFLNN_UNIFIED_PROJECTION_DIM + mod_size));
                     for (size_t i = 0; i < total_elems; i++) {
-                        float u1 = (float)rand() / (float)RAND_MAX;
-                        float u2 = (float)rand() / (float)RAND_MAX;
+                        float u1 = secure_random_float();
+                        float u2 = secure_random_float();
                         if (u1 < 1e-8f) u1 = 1e-8f;
                         state->projection_matrices[m][i] = xavier_std * 
                             sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
@@ -190,7 +191,11 @@ static int unified_input_dynamic_process(
     float* combined = (float*)safe_calloc(SELFLNN_UNIFIED_PROJECTION_DIM, sizeof(float));
     if (!combined) return -1;
 
-    /* 步骤1: 对每个活跃模态进行线性投影并求和 */
+    /* 步骤1: 对每个活跃模态进行线性投影并求和
+     * ZSF-005修复: 添加跨模态维度差异均衡
+     * 不同模态维度差异巨大（视觉1024 vs 触觉64），直接投影求和导致
+     * 高维模态主导输出。先对原始输入做L2归一化，再按sqrt(dim)缩放，
+     * 使各模态对combined_input的贡献处于相同量级。 */
     int active_modalities = 0;
     for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
         if (!modality_present[m] || !signals[m] || signal_sizes[m] == 0) continue;
@@ -199,22 +204,54 @@ static int unified_input_dynamic_process(
         size_t input_dim = signal_sizes[m];
         if (input_dim > SELFLNN_MAX_CONTROL_DIM) input_dim = SELFLNN_MAX_CONTROL_DIM;
 
-        /* 计算 W_m · x_m + b_m 并累加到combined */
+        /* ZSF-005: 跨模态维度差异归一化
+         * 先计算原始输入的L2范数，用于归一化，使不同模态的原始信号
+         * 处于相同量级后再投影。sqrt(proj_dim/input_dim)缩放因子
+         * 补偿维度差异，确保高低维模态贡献均衡。 */
+        float raw_l2_norm = 0.0f;
+        for (size_t k = 0; k < input_dim; k++) {
+            raw_l2_norm += signals[m][k] * signals[m][k];
+        }
+        raw_l2_norm = sqrtf(raw_l2_norm + 1e-12f);
+        float inv_norm = 1.0f / raw_l2_norm;
+        float dim_scale = sqrtf((float)SELFLNN_UNIFIED_PROJECTION_DIM / ((float)input_dim + 1.0f));
+
+        /* 计算 W_m · (x_m * inv_norm) + b_m，累加到combined */
         float* W = state->projection_matrices[m];
         float* b = state->projection_biases[m];
         for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
             float proj_val = b[j];
             for (size_t k = 0; k < input_dim; k++) {
-                proj_val += W[j * input_dim + k] * signals[m][k];
+                proj_val += W[j * input_dim + k] * signals[m][k] * inv_norm;
             }
-            combined[j] += proj_val;
+            combined[j] += proj_val * dim_scale;
         }
         active_modalities++;
     }
 
     if (active_modalities == 0) {
+        state->last_active_count = 0;
         safe_free((void**)&combined);
         return -1;
+    }
+
+    /* ZSF-009: 存储当前投影结果和活跃模态数，供在线训练使用 */
+    state->last_active_count = active_modalities;
+    for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
+        state->last_combined[j] = combined[j];
+    }
+
+    /* 存储各模态原始信号和维度 */
+    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        state->last_raw_sizes[m] = 0;
+        if (modality_present[m] && signals[m] && signal_sizes[m] > 0) {
+            size_t sz = signal_sizes[m];
+            if (sz > SELFLNN_MAX_CONTROL_DIM) sz = SELFLNN_MAX_CONTROL_DIM;
+            state->last_raw_sizes[m] = sz;
+            for (size_t k = 0; k < sz; k++) {
+                state->last_raw_signals[m][k] = signals[m][k];
+            }
+        }
     }
 
     /* 步骤2: 通过共享LNN处理统一输入 */
@@ -250,6 +287,10 @@ static int unified_input_dynamic_process(
                     memcpy(unified_output, lnn_output_buf, copy * sizeof(float));
                     if (copy < output_dim)
                         memset(unified_output + copy, 0, (output_dim - copy) * sizeof(float));
+                    /* ZSF-009: 存储统一输出供在线训练使用 */
+                    size_t prev_copy = copy < SELFLNN_MAX_CONTROL_DIM ? copy : SELFLNN_MAX_CONTROL_DIM;
+                    memcpy(state->prev_output, lnn_output_buf, prev_copy * sizeof(float));
+                    state->prev_output_dim = prev_copy;
                     safe_free((void**)&lnn_output_buf);
                     if (adjusted_input) safe_free((void**)&adjusted_input);
                     safe_free((void**)&combined);
@@ -594,6 +635,99 @@ int multimodal_unified_input_diagnose_modalities(const UnifiedInputState* state,
                        modality_active[i] ? "活跃" : "空");
     }
     log_info("%s | %d/%d模态活跃", buf, active, SELFLNN_MAX_MODALITIES);
+
+    return 0;
+}
+
+/* ================================================================
+ * ZSF-009: 统一输入在线训练步骤
+ *
+ * 基于目标输出对投影矩阵进行在线学习更新。
+ * 使用MSE损失 + SGD优化器：
+ *   损失: L = (1/N) * Σ (output[j] - target[j])²
+ *   梯度: dL/d_combined[j] = 2 * (output[j] - target[j]) / N
+ *         dL/d_W_m[j][k] = dL/d_combined[j] * signal[m][k] * inv_norm * dim_scale
+ *         dL/d_b_m[j] = dL/d_combined[j] * dim_scale
+ *   更新: W_m[j][k] -= lr * dL/d_W_m[j][k]
+ *        b_m[j] -= lr * dL/d_b_m[j]
+ * ================================================================ */
+int multimodal_unified_input_train_step(UnifiedInputState* state,
+                                        const float* target_output,
+                                        size_t target_size,
+                                        float learning_rate,
+                                        const int* active_modalities_present) {
+    if (!state || !target_output || target_size == 0) return -1;
+    if (state->last_active_count <= 0) return -1;
+    if (!state->projections_initialized) return -1;
+
+    size_t out_dim = state->prev_output_dim;
+    if (out_dim == 0 || out_dim > SELFLNN_MAX_CONTROL_DIM) return -1;
+    size_t n = out_dim < target_size ? out_dim : target_size;
+
+    /* 步骤1: 计算输出层MSE梯度 dL/d_output = 2*(output-target)/n */
+    float grad_output[SELFLNN_MAX_CONTROL_DIM];
+    float total_loss = 0.0f;
+    for (size_t j = 0; j < n; j++) {
+        float error = state->prev_output[j] - target_output[j];
+        grad_output[j] = 2.0f * error / (float)n;
+        total_loss += error * error;
+    }
+    total_loss /= (float)n;
+
+    /* 步骤2: 反传梯度到combined投影和（简化：假设LNN近似恒等映射）
+     * 实际梯度链为 dL/d_combined = dL/d_output · d_output/d_hnn · d_hnn/d_combined
+     * 在线学习中我们使用梯度近似：dL/d_combined ≈ grad_output（假设LNN通带增益≈1） */
+    float grad_combined[SELFLNN_UNIFIED_PROJECTION_DIM];
+    for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
+        if (j < n) {
+            grad_combined[j] = grad_output[j];
+        } else {
+            grad_combined[j] = 0.0f;
+        }
+    }
+
+    /* 步骤3: 对每个活跃模态的投影矩阵和偏置进行SGD更新 */
+    int updated_modalities = 0;
+    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        if (active_modalities_present && !active_modalities_present[m]) continue;
+        if (state->last_raw_sizes[m] == 0) continue;
+        if (!state->projection_matrices[m] || !state->projection_biases[m]) continue;
+
+        size_t input_dim = state->last_raw_sizes[m];
+        if (input_dim > SELFLNN_MAX_CONTROL_DIM) input_dim = SELFLNN_MAX_CONTROL_DIM;
+
+        /* 计算L2归一化因子（与forward pass一致） */
+        float raw_l2_norm = 0.0f;
+        for (size_t k = 0; k < input_dim; k++) {
+            raw_l2_norm += state->last_raw_signals[m][k] * state->last_raw_signals[m][k];
+        }
+        raw_l2_norm = sqrtf(raw_l2_norm + 1e-12f);
+        float inv_norm = 1.0f / raw_l2_norm;
+        float dim_scale = sqrtf((float)SELFLNN_UNIFIED_PROJECTION_DIM / ((float)input_dim + 1.0f));
+
+        float* W = state->projection_matrices[m];
+        float* b = state->projection_biases[m];
+
+        /* 更新投影矩阵 W[j][k] -= lr * grad_combined[j] * signal[k] * inv_norm * dim_scale */
+        /* 更新偏置 b[j] -= lr * grad_combined[j] * dim_scale */
+        for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
+            float common = learning_rate * grad_combined[j];
+            /* 偏置更新 */
+            b[j] -= common * dim_scale;
+            /* 权重更新 */
+            for (size_t k = 0; k < input_dim; k++) {
+                float grad_w = common * state->last_raw_signals[m][k] * inv_norm * dim_scale;
+                W[j * input_dim + k] -= grad_w;
+            }
+        }
+        updated_modalities++;
+    }
+
+    if (updated_modalities == 0) return -1;
+
+    /* 步骤4: 更新历史质量指标 */
+    float quality = 1.0f / (1.0f + total_loss);
+    state->historical_process_quality = state->historical_process_quality * 0.9f + quality * 0.1f;
 
     return 0;
 }

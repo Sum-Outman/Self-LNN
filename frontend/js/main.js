@@ -8109,3 +8109,102 @@ window.scanHardwareFull = window.scanHardwareFull || (async function() {
     try { if (typeof HardwareScanUtil !== 'undefined') { await HardwareScanUtil.scanAll(true); showNotification('全硬件扫描完成', 'success'); } }
     catch(e) { showNotification('硬件扫描失败', 'danger'); }
 });
+
+/* ZSF-FE-001: 多模态统一学习 - 开始教学 */
+async function startMultimodalLearnTeaching() {
+    var modeEl = document.getElementById('mm-teach-mode');
+    var sourceEl = document.getElementById('mm-teach-source');
+    var mode = modeEl ? modeEl.value : 'full';
+    var source = sourceEl ? sourceEl.value : 'camera';
+    showNotification('多模态教学启动中: ' + mode + ' (数据源:' + source + ')', 'info');
+    try {
+        if (window.SelfLnnApi && typeof window.SelfLnnApi.multimodalTeach === 'function') {
+            var result = await window.SelfLnnApi.multimodalTeach({ mode: mode, source: source });
+            if (result && result.success) {
+                showNotification('多模态教学已开始', 'success');
+            } else {
+                showNotification('教学启动失败: ' + ((result && result.error) || '未知错误'), 'danger');
+            }
+        } else {
+            showNotification('多模态教学API不可用（后端未连接）', 'warning');
+        }
+    } catch(e) {
+        showNotification('教学异常: ' + e.message, 'danger');
+    }
+}
+window.startMultimodalLearnTeaching = startMultimodalLearnTeaching;
+
+/* ZSF-FE-002: 多模态统一学习 - 测试学习成果 */
+async function testMultimodalLearnTeaching() {
+    showNotification('正在测试多模态学习成果...', 'info');
+    try {
+        if (window.SelfLnnApi && typeof window.SelfLnnApi.multimodalTest === 'function') {
+            var result = await window.SelfLnnApi.multimodalTest();
+            var statusEl = document.getElementById('mm-test-result');
+            if (statusEl) {
+                statusEl.textContent = result && result.success ? '测试通过 ✓' : '测试未通过 ✗';
+                statusEl.style.color = result && result.success ? '#00ff88' : '#ff4444';
+            }
+            showNotification(result && result.success ? '学习成果测试通过' : '学习成果测试未通过', result && result.success ? 'success' : 'warning');
+        } else {
+            showNotification('测试API不可用（后端未连接）', 'warning');
+        }
+    } catch(e) {
+        showNotification('测试异常: ' + e.message, 'danger');
+    }
+}
+window.testMultimodalLearnTeaching = testMultimodalLearnTeaching;
+
+/* ZSF-FE-003: 摄像头预览切换 */
+function toggleCameraPreview() {
+    var video = document.getElementById('camera-preview');
+    var statusEl = document.getElementById('mm-camera-status');
+    var btn = document.querySelector('#camera-preview-button') || document.querySelector('button[onclick="toggleCameraPreview()"]');
+    if (!video) return;
+    if (video.style.display === 'block' || video.style.display === '') {
+        video.style.display = 'none';
+        if (video.srcObject) { video.srcObject.getTracks().forEach(function(t) { t.stop(); }); video.srcObject = null; }
+        if (statusEl) statusEl.textContent = '摄像头已停止';
+        if (btn) btn.textContent = '启动摄像头';
+    } else {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } }).then(function(stream) {
+                video.srcObject = stream;
+                video.style.display = 'block';
+                if (statusEl) statusEl.textContent = '摄像头预览中...';
+                if (btn) btn.textContent = '停止摄像头';
+            }).catch(function(e) {
+                if (statusEl) statusEl.textContent = '摄像头访问被拒绝或不可用';
+                showNotification('无法访问摄像头: ' + e.message, 'warning');
+            });
+        } else {
+            if (statusEl) statusEl.textContent = '浏览器不支持摄像头';
+            showNotification('当前浏览器不支持摄像头API', 'warning');
+        }
+    }
+}
+window.toggleCameraPreview = toggleCameraPreview;
+
+/* ================================================================
+ * ZSF-FE-007: 全局定时器清理 - 页面卸载时清除所有活跃定时器
+ * 防止内存泄漏和后台持续请求
+ * ================================================================ */
+window.addEventListener('beforeunload', function() {
+    /* 清理已知的全局定时器 */
+    if (window._trainingPollInterval) { clearInterval(window._trainingPollInterval); delete window._trainingPollInterval; }
+    if (window._statusPollInterval) { clearInterval(window._statusPollInterval); delete window._statusPollInterval; }
+    if (window._sensorStreamInterval) { clearInterval(window._sensorStreamInterval); delete window._sensorStreamInterval; }
+    if (window._rosGazeboRefreshTimer) { clearInterval(window._rosGazeboRefreshTimer); delete window._rosGazeboRefreshTimer; }
+    if (window._multimodalStreamInterval) { clearInterval(window._multimodalStreamInterval); delete window._multimodalStreamInterval; }
+    /* 停止数据引擎 */
+    if (g_dataEngine && typeof g_dataEngine.stop === 'function') {
+        g_dataEngine.stop();
+    }
+    /* 停止所有摄像头流 */
+    var videos = document.querySelectorAll('video');
+    videos.forEach(function(video) {
+        if (video.srcObject) {
+            video.srcObject.getTracks().forEach(function(track) { track.stop(); });
+        }
+    });
+});

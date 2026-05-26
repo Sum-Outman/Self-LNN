@@ -268,10 +268,12 @@ int ros_bridge_publish(RosBridge* bridge, const char* topic,
     
     char msg[ROS_BRIDGE_MAX_MESSAGE];
     bridge->request_id++;
+    /* ZSFWXJ-FIX006修复: 移除二次包装 — rosbridge协议期望msg直接包含消息字段，
+     * 不再是 "msg":{"data":%s}。调用方负责传入合法的msg JSON对象。 */
     snprintf(msg, sizeof(msg),
         "{\"op\":\"publish\",\"id\":\"pub_%d\","
-        "\"topic\":\"%s\",\"msg\":{\"data\":%s}}",
-        bridge->request_id, topic, json_data);
+        "\"topic\":\"%s\",\"type\":\"%s\",\"msg\":%s}",
+        bridge->request_id, topic, message_type, json_data);
     
     return ws_send_frame(bridge->socket_fd, msg, strlen(msg));
 }

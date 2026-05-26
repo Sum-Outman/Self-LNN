@@ -2818,7 +2818,8 @@ int agi_system_process_image(AGISystem* system,
 
     if (system->knowledge) {
         char key[64];
-        sprintf(key, "vision_%d_%ld", system->total_cycles, (long)time(NULL));
+        /* ZSFWXJ-FIX012修复: sprintf→snprintf防止缓冲区溢出 */
+        snprintf(key, sizeof(key), "vision_%d_%ld", system->total_cycles, (long)time(NULL));
         KnowledgeEntry entry;
         memset(&entry, 0, sizeof(entry));
         entry.subject = key;

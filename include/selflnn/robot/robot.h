@@ -942,29 +942,39 @@ int robot_get_hardware_result(const Robot* robot, HDDetectionResult* result);
  */
 int robot_get_hardware_by_type(const Robot* robot, int type, HDDeviceInfo* out, size_t max_count, size_t* count);
 
-/* 力顺应控制器 (FCC) */
-int fcc_init(Robot* robot, float stiffness, float damping);
-int fcc_compute_command(Robot* robot, const float* desired_force, const float* measured_force, float* command, size_t dof);
-int fcc_set_desired_trajectory(Robot* robot, const float* trajectory, size_t points, size_t dof);
-int fcc_enable_force_axis(Robot* robot, int axis, int enable);
+/* ZSFWXJ-FIX011修复: 力顺应控制器(FCC)签名与robot.c实现同步 */
+int fcc_init(float stiffness, float damping, float force_limit);
+int fcc_compute_command(const float* measured_force, const float* current_pos, const float* current_vel, const float* desired_force, float* output_command, float dt);
+int fcc_set_desired_trajectory(const float* position, const float* velocity, const float* force);
+int fcc_enable_force_axis(int axis_bitmask);
+
+/* ZSFWXJ-FIX011修复: NMPCConfig前向定义 — 从robot.c移至header供签名引用 */
+#define NMPC_MAX_HORIZON 20
+typedef struct {
+    float Q_diag[6];
+    float R_diag[6];
+    float u_min[6], u_max[6];
+    int horizon;
+    float dt;
+} NMPCConfig;
 
 /* 非线性模型预测控制 (NMPC) */
-int nmpc_init(Robot* robot, int horizon, float dt);
-int nmpc_solve(Robot* robot, const float* state, const float* reference, float* control, size_t dof);
+int nmpc_init(const NMPCConfig* config);
+int nmpc_solve(const float* current_state, const float* reference_traj, float* control_output);
 
 /* 语音到运动控制 */
-int robot_voice_to_motion(const char* voice_command, float* joint_targets, size_t num_joints);
+int robot_voice_to_motion(const float* mfcc_features, int feature_dim, void* main_cfc_network, float* joint_commands, int num_joints, float* confidence);
 
 /* 传感器有效性验证 */
-int robot_read_sensor_valid(Robot* robot, int sensor_id, SensorData* data);
-int robot_get_all_sensor_validity(Robot* robot, int* validity, size_t max_sensors);
+int robot_read_sensor_valid(Robot* robot, int sensor_type, float* value, int* valid);
+int robot_get_all_sensor_validity(Robot* robot, int* validity_bitmask);
 
 /* 重连管理 */
 int robot_update_reconnect_state_impl(int connection_ok);
 int robot_get_reconnect_delay_ms(Robot* robot);
 
 /* EKF传感器融合 */
-int robot_ekf_fuse_sensors(Robot* robot, const float* sensor_data, size_t num_sensors, float* fused_state, size_t state_dim);
+int robot_ekf_fuse_sensors(const float* imu_accel, const float* imu_gyro, const float* joint_positions, const float* joint_velocities, const float* force_torque, float* fused_state, float* state_covariance);
 
 
 /* ============================

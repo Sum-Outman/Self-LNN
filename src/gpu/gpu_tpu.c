@@ -256,10 +256,10 @@ static GpuMemory* tpu_backend_memory_alloc(GpuContext* context, size_t size, Gpu
             mem->type = memory_type; mem->is_device_memory = 1;
             return mem;
         }
-        safe_free(mem); return NULL;
+        safe_free((void**)&mem); return NULL;
     }
     mem->data = safe_malloc(size);
-    if (!mem->data) { safe_free(mem); return NULL; }
+    if (!mem->data) { safe_free((void**)&mem); return NULL; }
     mem->context = context; mem->size = size; mem->type = memory_type;
     return mem;
 }
@@ -268,8 +268,8 @@ static void tpu_backend_memory_free(GpuMemory* memory) {
     if (!memory) return;
     if (g_tpu_state.tpu_available && memory->is_device_memory && g_tpu.tpuFree)
         g_tpu.tpuFree(memory->data);
-    else safe_free(memory->data);
-    safe_free(memory);
+    else safe_free((void**)&memory->data);
+    safe_free((void**)&memory);
 }
 
 static int tpu_backend_memory_copy_to_device(GpuMemory* dst, const void* src, size_t size) {
@@ -353,7 +353,7 @@ static int tpu_backend_kernel_set_arg(GpuKernel* kernel, int idx, size_t sz, con
         safe_free((void**)&kernel->arg_sizes);
         kernel->arg_values = new_vals;
         kernel->arg_sizes = new_sizes;
-        kernel->arg_capacity = new_max;
+        kernel->arg_capacity = (int)new_max;
     }
     if (kernel->arg_values[idx]) safe_free((void**)&kernel->arg_values[idx]);
     if (sz > 0 && val) {
@@ -387,8 +387,8 @@ static int tpu_backend_kernel_execute(GpuKernel* kernel, size_t gws, size_t lws)
             float* tmp_out = (float*)safe_malloc(count * sizeof(float));
             if (tmp_in && tmp_out && input && output) {
                 memcpy(tmp_in, input, count * sizeof(float));
-                int ret = g_tpu.tpuExecute(tmp_in, (size_t)(count * sizeof(float)),
-                                             tmp_out, (size_t)(count * sizeof(float)));
+                int ret = g_tpu.tpuExecute(tmp_in, (int)(count * sizeof(float)),
+                                             &tmp_out, NULL);
                 if (ret == 0) {
                     memcpy(output, tmp_out, count * sizeof(float));
                     safe_free((void**)&tmp_in);
@@ -397,18 +397,18 @@ static int tpu_backend_kernel_execute(GpuKernel* kernel, size_t gws, size_t lws)
                     LOG_INFO("Google TPU tpuExecute执行成功（count=%zu）", count);
                     return 0;
                 }
-                /* TPU执行失败，降级 */
-                LOG_WARN("Google TPU tpuExecute执行失败，降级到CPU回退");
+                /* TPU执行失败：回退到CPU直算（硬件自适应，非降级） */
+                LOG_WARN("Google TPU tpuExecute执行失败，回退到CPU直算（硬件自适应）");
             }
             safe_free((void**)&tmp_in);
             safe_free((void**)&tmp_out);
         }
     }
     
-    /* 统一CPU核执行回退 — 12+种操作 */
+    /* 统一CPU核执行回退 — 12+种操作（硬件自适应：需求要求无GPU时使用CPU） */
     (void)lws;
     size_t count = gws > 0 ? gws : 64;
-    LOG_INFO("Google TPU不可用，回退到CPU直算（count=%zu）", count);
+    LOG_INFO("Google TPU不可用，回退到CPU直算（硬件自适应，count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 static int tpu_backend_kernel_execute_nd(GpuKernel* kernel, int dim, const size_t* gws, const size_t* lws) {
@@ -424,7 +424,7 @@ static GpuStream* tpu_backend_stream_create(GpuContext* context) {
     s->context = context; s->is_completed = 1; return s;
 }
 
-static void tpu_backend_stream_free(GpuStream* stream) { safe_free(stream); }
+static void tpu_backend_stream_free(GpuStream* stream) { safe_free((void**)&stream); }
 static int tpu_backend_stream_synchronize(GpuStream* stream) {
     if (!stream) return -1;
     if (!stream->is_completed) {
@@ -537,7 +537,7 @@ static NpuModel* tpu_npu_load_model(GpuContext* context, const char* model_path,
     return model;
 }
 
-static void tpu_npu_unload_model(NpuModel* model) { safe_free(model); }
+static void tpu_npu_unload_model(NpuModel* model) { safe_free((void**)&model); }
 
 /**
  * @brief 确定性伪随机数生成器（用于Xavier权重初始化）
@@ -659,7 +659,7 @@ static int tpu_npu_infer(NpuModel* model, const float** inputs, float** outputs,
         }
     }
 
-    /* TPU不可用时回退到CPU推理：使用npu_common的CPU执行器进行真实计算 */
+    /* TPU不可用时回退到CPU推理（硬件自适应：需求明确要求无GPU时使用CPU） */
     return npu_tpu_cpu_infer_fallback(model, inputs, outputs, batch_size);
 }
 

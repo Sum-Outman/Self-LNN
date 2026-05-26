@@ -35,8 +35,14 @@ extern "C" {
 #define laplace_unified_init(cfg)       laplace_analyzer_create((const LaplaceConfig*)(cfg))
 #define laplace_unified_free(ptr)       laplace_analyzer_free((LaplaceAnalyzer*)(ptr))
 
-/* 拉普拉斯统一系统初始化（整合三个子系统） */
+/* 拉普拉斯统一系统初始化（整合频谱分析+频域增强+深度集成） */
 int laplace_unified_system_init(const LaplaceAIConfig* cfg);
+
+/* 获取全局拉普拉斯分析器（保持生命周期，供运行时使用） */
+LaplaceAnalyzer* laplace_unified_get_analyzer(void);
+
+/* 拉普拉斯统一系统关闭（释放全局分析器） */
+void laplace_unified_system_shutdown(void);
 
 /* 获取拉普拉斯系统健康状态 */
 int laplace_unified_health_check(char* report, size_t report_size);

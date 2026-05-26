@@ -252,6 +252,14 @@ int pbft_verify_digest(const void* data, uint32_t length, const uint32_t expecte
 /* 配置辅助 */
 void pbft_default_config(PbftConfig* config);
 
+/* 请求执行回调注册 —— 当PBFT共识达成后执行实际操作
+ * 回调签名: int callback(client_id, request_id, op_type, payload, payload_size, user_data)
+ * 返回0表示成功，非0表示失败 */
+typedef int (*PbftExecuteCallback)(uint32_t client_id, uint32_t request_id,
+                                    uint32_t op_type, const void* payload,
+                                    uint32_t payload_size, void* user_data);
+void pbft_set_execute_callback(PbftSystem* system, PbftExecuteCallback callback, void* user_data);
+
 /* 错误字符串 */
 const char* pbft_error_string(int error_code);
 

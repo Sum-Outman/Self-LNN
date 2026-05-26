@@ -984,8 +984,9 @@ static void dynamics_internal_solve_bdf2(DynamicsSystem* system, const float* in
             float target_vel = (4.0f/3.0f) * initial_velocity[i] - (1.0f/3.0f) * vel_n_minus_1[i] +
                                (2.0f/3.0f) * dt * total_force;
 
-            /* 欠松弛迭代更新 */
-            float omega = 0.6f;
+            /* 自适应欠松弛：残差大时减小ω增强收敛稳定性，残差小时增大ω加速收敛 */
+            float residual_mag = fabsf(target_state - temp_state[i]) + fabsf(target_vel - temp_velocity[i]);
+            float omega = (residual_mag > 1.0f) ? 0.4f : ((residual_mag > 0.3f) ? 0.6f : 0.9f);
             float d = target_state - temp_state[i];
             float dv = target_vel - temp_velocity[i];
             temp_state[i] += omega * d;

@@ -213,7 +213,7 @@
         };
 
         /* 通过后端API添加 */
-        SelfLnnApi.addKnowledge({
+        window.SelfLnnApi.addKnowledge({
             subject: subject,
             predicate: predicate,
             object: object,
@@ -236,7 +236,7 @@
     }
 
     function deleteEntry(id) {
-        SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ entry_id: id }) })
+        window.SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ entry_id: id }) })
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
@@ -302,7 +302,7 @@
     function refreshStats() {
         var statEntries = document.getElementById('stat-entries');
         var statMemory = document.getElementById('stat-memory');
-        SelfLnnApi.request('/knowledge', {method: 'GET'})
+        window.SelfLnnApi.request('/knowledge', {method: 'GET'})
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
@@ -762,7 +762,7 @@
 
     function clearGraph() {
         if (confirm('确定要清空所有知识条目吗？')) {
-            SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ clear_all: true }) })
+            window.SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ clear_all: true }) })
                 .then(function(response) {
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     return response.json();
@@ -911,7 +911,7 @@
 
     function start3DView() {
         if (!gl3d.program && !initWebGL3D()) {
-            if (typeof showNotification === 'function') showNotification('WebGL不可用，使用2D渲染', 'info');
+            if (typeof window.showNotification === 'function') window.showNotification('WebGL不可用，使用2D渲染', 'info');
             return;
         }
         var cv2d = document.getElementById('graph-canvas');

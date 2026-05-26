@@ -1835,29 +1835,54 @@ static int quaternion_lnn_initialize(QuaternionLNN* network) {
 static void quaternion_lnn_compute_gradients(QuaternionLNN* network, 
                                             const float* target,
                                             QuaternionLNNResult* result) {
-    (void)target;  // 未使用参数
-    // 梯度计算（基于隐藏状态变化）
+    /* ZSFWXJ-FIX003修复: 使用真实target计算梯度，而非仅基于隐藏状态自变化率 */
     size_t hidden_quaternions = network->config.quaternion_hidden_size;
+    size_t output_size = network->config.output_size;
     
-    // 计算损失：隐藏状态的变化率
+    /* 计算损失：输出与目标之间的误差（真实监督信号） */
     network->current_loss = 0.0f;
-    if (network->previous_state && hidden_quaternions > 0) {
+    if (target && network->output_buffer && output_size > 0 && hidden_quaternions > 0) {
+        /* 基于真实target的MSE损失和梯度 */
+        for (size_t i = 0; i < output_size && i < hidden_quaternions * 4; i++) {
+            float error = network->output_buffer[i] - target[i];
+            network->current_loss += error * error;
+        }
+        network->current_loss /= (float)output_size;
+        
+        /* 基于target误差计算隐藏状态梯度 */
+        if (network->previous_state) {
+            for (size_t i = 0; i < hidden_quaternions; i++) {
+                Quaternion current_hidden = network->hidden_state[i];
+                Quaternion previous = network->previous_state[i];
+                Quaternion diff = quaternion_subtract(&current_hidden, &previous);
+                
+                /* 将输出误差反传到隐藏状态的近似梯度 */
+                float error_scale = 0.0f;
+                for (size_t d = 0; d < 4 && (i * 4 + d) < output_size; d++) {
+                    float err = network->output_buffer[i * 4 + d] - target[i * 4 + d];
+                    error_scale += err * logf(quaternion_norm(&diff) + 1e-8f);
+                }
+                error_scale /= 4.0f;
+                
+                network->gradient_buffer[i].w = diff.w * error_scale;
+                network->gradient_buffer[i].x = diff.x * error_scale;
+                network->gradient_buffer[i].y = diff.y * error_scale;
+                network->gradient_buffer[i].z = diff.z * error_scale;
+            }
+        }
+    } else if (network->previous_state && hidden_quaternions > 0) {
+        /* 无target时回退：基于隐藏状态自变化率（保持原逻辑兼容性） */
         for (size_t i = 0; i < hidden_quaternions; i++) {
-            // 计算隐藏状态的变化（从previous_state到当前hidden_state）
             Quaternion current_hidden = network->hidden_state[i];
             Quaternion previous = network->previous_state[i];
-            
-            // 计算四元数差值（对数映射近似）
             Quaternion diff = quaternion_subtract(&current_hidden, &previous);
             network->gradient_buffer[i] = diff;
-            
-            // 损失：变化量的范数平方
             float norm = quaternion_norm(&diff);
             network->current_loss += norm * norm;
         }
         network->current_loss /= hidden_quaternions;
     } else {
-        // 回退：小随机梯度
+        /* 完全回退：微小随机梯度（仅当无状态历史时） */
         for (size_t i = 0; i < hidden_quaternions; i++) {
             Quaternion grad = quaternion_random_uniform(-0.001f, 0.001f);
             network->gradient_buffer[i] = grad;
@@ -1865,12 +1890,12 @@ static void quaternion_lnn_compute_gradients(QuaternionLNN* network,
         network->current_loss = 0.001f;
     }
     
-    // 旋转一致性损失：基于四元数范数偏离1的程度
+    /* 旋转一致性损失：基于四元数范数偏离1的程度 */
     network->rotation_loss = 0.0f;
     if (network->config.rotation_invariance_strength > 0.0f && hidden_quaternions > 0) {
         for (size_t i = 0; i < hidden_quaternions; i++) {
             float norm = quaternion_norm(&network->hidden_state[i]);
-            float deviation = fabsf(norm - 1.0f);  // 四元数应保持单位范数
+            float deviation = fabsf(norm - 1.0f);  /* 四元数应保持单位范数 */
             network->rotation_loss += deviation * deviation;
         }
         network->rotation_loss /= hidden_quaternions;

@@ -5000,7 +5000,6 @@ static int gated_cfc_pyramidal_gate(GatedCfCData* gd, float* gate_signal, size_t
 static int gated_cfc_adaptive_bandwidth(GatedCfCData* gd, const float* input,
                                          float* bandwidth, size_t input_size, size_t hidden_size) {
     if (!gd || !input || !bandwidth) return -1;
-    (void)hidden_size;
     float input_mean = 0.0f, input_var = 0.0f;
     for (size_t i = 0; i < input_size; i++) input_mean += input[i];
     input_mean /= (float)input_size;
@@ -5009,7 +5008,11 @@ static int gated_cfc_adaptive_bandwidth(GatedCfCData* gd, const float* input,
     float input_std = sqrtf(input_var + 1e-8f);
     float raw = gd->bandwidth_params[0] * input_std + gd->bandwidth_params[1];
     float gate = 1.0f / (1.0f + expf(-raw));
-    bandwidth[0] = gd->bandwidth_min + gate * (gd->bandwidth_max - gd->bandwidth_min);
+    float base_bandwidth = gd->bandwidth_min + gate * (gd->bandwidth_max - gd->bandwidth_min);
+    for (size_t i = 0; i < hidden_size; i++) {
+        float unit_gate = 1.0f / (1.0f + expf(-(raw + 0.1f * (float)i)));
+        bandwidth[i] = base_bandwidth * (0.9f + 0.1f * unit_gate);
+    }
     return 0;
 }
 

@@ -247,6 +247,7 @@ class AGIController {
     }
 
     async _executeSystemTask(task) {
+        if (!task.params) task.params = {};
         switch (task.action) {
             case 'get_status':
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.getSystemStatus === 'function') {

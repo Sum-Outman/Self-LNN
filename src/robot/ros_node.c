@@ -268,23 +268,21 @@ int ros_node_publish(RosNode* node, const char* topic,
     if (!node || !topic || !msg || msg_size == 0) return -1;
 
     if (node->bridge && node->connected) {
-        /* 构建JSON格式消息 */
-        char json_buf[4096];
+        /* ZSFWXJ-FIX006修复: 构建符合rosbridge协议的JSON,
+         * msg字段内容直接按字节数组构建，不再嵌套额外"op"层 */
+        char json_buf[8192];
         size_t json_len = 0;
-
-        /* 将二进制消息转换为JSON格式发布 */
         const uint8_t* data = (const uint8_t*)msg;
-        json_len = (size_t)snprintf(json_buf, sizeof(json_buf),
-                   "{\"op\":\"publish\",\"topic\":\"%s\",\"msg\":{\"data\":[", topic);
 
+        json_len = (size_t)snprintf(json_buf, sizeof(json_buf),
+                   "{\"data\":[");
         for (size_t i = 0; i < msg_size && json_len < sizeof(json_buf) - 10; i++) {
-            if (i > 0) {
+            if (i > 0)
                 json_len += (size_t)snprintf(json_buf + json_len, sizeof(json_buf) - json_len, ",");
-            }
             json_len += (size_t)snprintf(json_buf + json_len, sizeof(json_buf) - json_len,
                        "%u", (unsigned int)data[i]);
         }
-        snprintf(json_buf + json_len, sizeof(json_buf) - json_len, "]}}");
+        snprintf(json_buf + json_len, sizeof(json_buf) - json_len, "]}");
 
         return ros_bridge_publish(node->bridge, topic, "std_msgs/UInt8MultiArray", json_buf);
     }

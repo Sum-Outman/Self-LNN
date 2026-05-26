@@ -2,6 +2,7 @@
 #include "selflnn/backend/websocket_push.h"
 #include "selflnn/self_cognition.h"
 #include "selflnn/core/lnn.h"
+#include "selflnn/core/unified_lnn_state.h"                  /* ZSF-014: 统一液态状态处理器 */
 #include "selflnn/core/laplace_unified.h"                    /* 已恢复: 拉普拉斯统一 */
 #include "selflnn/multimodal/audio.h"                       /* 音频采集 */
 #include "selflnn/multimodal/speech_recognition.h"           /* 语音识别 */
@@ -36,6 +37,12 @@
 #include "selflnn/evolution/evolution_engine.h"
 #include "selflnn/neural_architecture_search.h"             /* NAS周期触发 */
 #include "selflnn/safety/safety_monitor.h"
+#include "selflnn/safety/audit_logger.h"         /* ZSF-P0-004: 审计日志 */
+#include "selflnn/safety/content_filter.h"        /* ZSF-P0-004: 内容过滤 */
+#include "selflnn/safety/security_monitor_deep.h" /* ZSF-P0-004: 深度安全监控 */
+#include "selflnn/distributed/load_balancer.h"    /* ZSF-P0-004: 分布式负载均衡 */
+#include "selflnn/training/distributed_training.h" /* ZSF-P0-004: 分布式训练初始化 */
+#include "selflnn/programming/programming_enhanced.h" /* ZSF-P0-004: 编程增强 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,17 +68,30 @@
 static int is_subsystem_healthy_int(const char* name, void* handle, int (*is_init)(void*));
 
 /* AGI后台任务常量 */
-#define AGI_BG_INTERVAL_MS       10000  /* 主循环间隔10秒（降低负载防栈溢出） */
+#define AGI_BG_INTERVAL_MS       10000  /* 主循环间隔10秒 */
 #ifndef CLAMP
 #define CLAMP(x,min,max) (((x)<(min))?(min):(((x)>(max))?(max):(x)))
 #endif
-#define ONLINE_LEARN_INTERVAL    36000  /* 在线学习每10小时（降低负载测试用） */
-#define SELF_REFLECTION_INTERVAL 86400  /* 自我反思每24小时（降低负载测试用） */
-#define KNOWLEDGE_CONSOLIDATE    3600  /* P38修复: 知识固化每1小时 */
-#define EVOLUTION_STEP_INTERVAL  3600  /* P38修复: 演化步每1小时 */
-#define COGNITION_UPDATE_INTERVAL 300  /* P38修复: 认知更新每5分钟 */
+/* ZSF-P2-006: 动态自适应间隔 - 默认值(高负载) */
+#define ONLINE_LEARN_INTERVAL_MIN    300   /* 在线学习最小5分钟 */
+#define ONLINE_LEARN_INTERVAL_MAX    3600  /* 在线学习最大1小时 */
+#define SELF_REFLECTION_INTERVAL_MIN 1800  /* 自我反思最小30分钟 */
+#define SELF_REFLECTION_INTERVAL_MAX 7200  /* 自我反思最大2小时 */
+#define KNOWLEDGE_CONSOLIDATE_MIN    600   /* 知识固化最小10分钟 */
+#define KNOWLEDGE_CONSOLIDATE_MAX    3600  /* 知识固化最大1小时 */
+#define EVOLUTION_STEP_INTERVAL_MIN  600   /* 演化步最小10分钟 */
+#define EVOLUTION_STEP_INTERVAL_MAX  3600  /* 演化步最大1小时 */
 #define SAFETY_CHECK_INTERVAL      60  /* P38修复: 安全检查每1分钟(安全关键) */
-#define TRAINING_STEP_INTERVAL   3600  /* P38修复: 训练步每1小时 */
+#define TRAINING_STEP_INTERVAL_MIN   300   /* 训练步最小5分钟 */
+#define TRAINING_STEP_INTERVAL_MAX   3600  /* 训练步最大1小时 */
+#define COGNITION_UPDATE_INTERVAL 300  /* P38修复: 认知更新每5分钟 */
+
+/* 当前运行动态间隔(由认知更新根据负载自适应调整) */
+static int g_online_learn_interval_sec = 300;
+static int g_reflection_interval_sec   = 1800;
+static int g_consolidate_interval_sec  = 600;
+static int g_evolution_interval_sec    = 600;
+static int g_training_interval_sec     = 300;
 
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 4
@@ -81,6 +101,7 @@ static BackendServer* g_server = NULL;
 static WSPushServer* g_ws_push_server = NULL;
 static void* g_online_learner_handle = NULL;
 static void* g_evolution_engine_handle = NULL;
+static void* g_unified_lnn_state = NULL;       /* ZSF-014: 统一液态状态处理器 */
 static volatile sig_atomic_t g_agi_running = 1;
 static time_t g_start_time = 0;
 static time_t g_last_online_learn = 0;
@@ -100,12 +121,19 @@ static void* g_audio_capture = NULL;                       /* 音频采集实例
 static void* g_speech_recognizer = NULL;                   /* 语音识别实例 */
 static void* g_tts_engine = NULL;                          /* TTS语音合成 */
 static void* g_computer_op = NULL;                         /* 计算机操作 */
+static DistributedContext* g_distributed = NULL;           /* ZSF-P0-004: 分布式训练上下文 */
+static LbBalancer* g_load_balancer = NULL;                /* ZSF-P0-004: 分布式负载均衡器 */
+static AuditLogger* g_audit_logger = NULL;                /* ZSF-P0-004: 审计日志系统 */
+static ContentFilter* g_content_filter = NULL;            /* ZSF-P0-004: 内容过滤器 */
+static SecBehaviorMonitor* g_sec_behavior = NULL;         /* ZSF-P0-004: 深度安全行为监控 */
+static SelfProgrammingEngine* g_prog_engine = NULL;       /* ZSF-P0-004: 自我编程引擎 */
 
 /* P28修复: 演化引擎默认适应度函数 — 基于LNN权重的一致性评估
  * 将染色体(晶片)中的权重写入LNN，运行前向传播，
  * 通过输出稳定性评估适应度(激活输出方差越小→越稳定→适应度越高)。
- * P3-002分析: 此处使用确定性正弦测试信号(sinf)属于演化算法的标准适应度评估方式
- * ——测试信号仅作为固定评估探针，不参与训练数据流。与实际数据训练路径完全隔离。 */
+ * P3-002分析: 此处使用确定性正弦测试信号属于演化算法的标准适应度评估方式
+ * ——测试信号仅作为固定评估探针，不参与训练数据流。与实际数据训练路径完全隔离。
+ * ZSFWXJ-FIX005修复: 增加多种测试信号（随机/阶跃/脉冲）综合评估泛化能力 */
 static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_size, void* user_data) {
     LNN* lnn = (LNN*)user_data;
     if (!lnn || chrom_size == 0) return 0.0f;
@@ -116,9 +144,10 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
     if (!lnn_params) return 0.0f;
     size_t copy_count = (chrom_size < lnn_param_count) ? chrom_size : lnn_param_count;
     memcpy(lnn_params, chromosome, copy_count * sizeof(float));
-    /* 使用均匀采样输入评估输出稳定性 */
+    /* 使用多种信号类型综合评估输出稳定性 */
     float avg_activation = 0.0f, avg_variance = 0.0f;
-    int test_samples = 8;
+    float total_response = 0.0f;  /* 总响应强度（阶跃/脉冲响应） */
+    int test_samples = 12;
     size_t input_dim = 64;
     float* test_input = (float*)safe_calloc(input_dim, sizeof(float));
     float* output = (float*)safe_malloc(128 * sizeof(float));
@@ -128,15 +157,31 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
         return 0.0f;
     }
     for (int s = 0; s < test_samples; s++) {
-        for (size_t i = 0; i < input_dim; i++)
-            test_input[i] = sinf((float)(s * 17 + i) * 0.314159f);
+        float sig_type = (float)(s % 4);  /* 0=正弦, 1=随机, 2=阶跃, 3=脉冲 */
+        for (size_t i = 0; i < input_dim; i++) {
+            if (sig_type < 1.0f) {
+                /* 类型0: 确定性正弦信号（保持原有逻辑） */
+                test_input[i] = sinf((float)(s * 17 + i) * 0.314159f);
+            } else if (sig_type < 2.0f) {
+                /* 类型1: 密码学安全随机信号 */
+                test_input[i] = secure_random_float() * 2.0f - 1.0f;
+            } else if (sig_type < 3.0f) {
+                /* 类型2: 阶跃信号（测试网络阶跃响应） */
+                test_input[i] = (i < input_dim / 2) ? -0.5f : 0.5f;
+            } else {
+                /* 类型3: 脉冲信号（测试网络瞬态响应） */
+                test_input[i] = (i == input_dim / 2) ? 1.0f : 0.0f;
+            }
+        }
         memset(output, 0, 128 * sizeof(float));
         lnn_forward(lnn, test_input, output);
         float sum = 0.0f, sq_sum = 0.0f;
         size_t count = 0;
+        float max_out = 0.0f;
         for (size_t i = 0; i < 128 && count < 64; i++) {
             if (fabsf(output[i]) > 1e-8f) {
                 sum += output[i]; sq_sum += output[i] * output[i]; count++;
+                if (fabsf(output[i]) > max_out) max_out = fabsf(output[i]);
             }
         }
         if (count > 0) {
@@ -144,14 +189,16 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
             float var = sq_sum / (float)count - mean * mean;
             avg_activation += fabsf(mean);
             avg_variance += var;
+            total_response += max_out;
         }
     }
     safe_free((void**)&test_input);
     safe_free((void**)&output);
     avg_activation /= (float)test_samples;
     avg_variance /= (float)test_samples;
-    /* 适应度 = 激活强度 - 惩罚项(方差) + 小常数 */
-    float fitness = avg_activation * 0.5f - avg_variance * 0.3f + 0.001f;
+    total_response /= (float)test_samples;
+    /* 适应度 = 激活强度 + 响应强度 - 惩罚项(方差) + 小常数 */
+    float fitness = avg_activation * 0.4f + total_response * 0.15f - avg_variance * 0.3f + 0.001f;
     if (fitness < 0.0f) fitness = 0.001f;
     return fitness;
 }
@@ -309,6 +356,31 @@ static void agi_bg_cognition_update(void) {
         log_debug("[AGI后台] 认知更新：活动任务=%d, 记忆=%d, 知识=%d",
                    status.active_tasks, status.total_memories, 
                    status.total_knowledge);
+
+        /* ZSF-P2-006: 根据系统负载自适应调整AGI后台任务间隔 */
+        float load_factor = (float)status.active_tasks / 100.0f;
+        if (load_factor > 0.7f) {
+            /* 高负载：延长间隔降低系统压力 */
+            g_online_learn_interval_sec = ONLINE_LEARN_INTERVAL_MAX;
+            g_reflection_interval_sec   = SELF_REFLECTION_INTERVAL_MAX;
+            g_consolidate_interval_sec  = KNOWLEDGE_CONSOLIDATE_MAX;
+            g_evolution_interval_sec    = EVOLUTION_STEP_INTERVAL_MAX;
+            g_training_interval_sec     = TRAINING_STEP_INTERVAL_MAX;
+        } else if (load_factor > 0.3f) {
+            /* 中等负载：温和间隔 */
+            g_online_learn_interval_sec = ONLINE_LEARN_INTERVAL_MIN * 2;
+            g_reflection_interval_sec   = SELF_REFLECTION_INTERVAL_MIN * 2;
+            g_consolidate_interval_sec  = KNOWLEDGE_CONSOLIDATE_MIN * 2;
+            g_evolution_interval_sec    = EVOLUTION_STEP_INTERVAL_MIN * 2;
+            g_training_interval_sec     = TRAINING_STEP_INTERVAL_MIN * 2;
+        } else {
+            /* 低负载：加速学习和迭代 */
+            g_online_learn_interval_sec = ONLINE_LEARN_INTERVAL_MIN;
+            g_reflection_interval_sec   = SELF_REFLECTION_INTERVAL_MIN;
+            g_consolidate_interval_sec  = KNOWLEDGE_CONSOLIDATE_MIN;
+            g_evolution_interval_sec    = EVOLUTION_STEP_INTERVAL_MIN;
+            g_training_interval_sec     = TRAINING_STEP_INTERVAL_MIN;
+        }
     }
     /* APP13: 群智优化 — 认知更新时触发蜂群迭代优化 */
     void* ms_ctrl = selflnn_get_multisystem_control();
@@ -639,7 +711,7 @@ static void agi_background_loop_iteration(void) {
 
     /* 在线学习（受自我学习能力开关控制） */
     if (g_online_learner_handle && capability_is_enabled(CAP_SELF_LEARNING) &&
-        (now - g_last_online_learn >= ONLINE_LEARN_INTERVAL)) {
+        (now - g_last_online_learn >= g_online_learn_interval_sec)) {
         agi_bg_online_learning();
         g_last_online_learn = now;
         void* learner = selflnn_get_online_learner();
@@ -656,7 +728,7 @@ static void agi_background_loop_iteration(void) {
     }
 
     /* 知识固化 */
-    if (now - g_last_consolidate >= KNOWLEDGE_CONSOLIDATE) {
+    if (now - g_last_consolidate >= g_consolidate_interval_sec) {
         agi_bg_knowledge_consolidate();
         g_last_consolidate = now;
     }
@@ -680,7 +752,7 @@ static void agi_background_loop_iteration(void) {
 
     /* 自我反思（受自我反思能力开关控制 + ZSFWS-027 LNN就绪检查） */
     if (capability_is_enabled(CAP_REFLECTION) &&
-        now - g_last_reflection >= SELF_REFLECTION_INTERVAL) {
+        now - g_last_reflection >= g_reflection_interval_sec) {
         /* ZSFWS-027: 在发起深度自我反思前检查LNN是否已训练，
          * 避免随机权重LNN产生无意义的自我评估和错误修正决策 */
         void* scs_check = selflnn_get_self_cognition();
@@ -706,7 +778,7 @@ static void agi_background_loop_iteration(void) {
 
     /* 演化步（受自我演化能力开关控制） */
     if (g_evolution_engine_handle && capability_is_enabled(CAP_SELF_EVOLUTION) &&
-        (now - g_last_evolution >= EVOLUTION_STEP_INTERVAL)) {
+        (now - g_last_evolution >= g_evolution_interval_sec)) {
         agi_bg_evolution_step();
         g_last_evolution = now;
         void* evo = selflnn_get_evolution_engine();
@@ -723,7 +795,7 @@ static void agi_background_loop_iteration(void) {
 
     /* ZSFABC: 训练步（受自我学习能力开关控制，每5分钟执行一步） */
     if (capability_is_enabled(CAP_SELF_LEARNING) &&
-        now - g_last_training_step >= TRAINING_STEP_INTERVAL) {
+        now - g_last_training_step >= g_training_interval_sec) {
         agi_bg_training_step();
         g_last_training_step = now;
     }
@@ -801,7 +873,7 @@ static void agi_background_loop_iteration(void) {
 
     /* 目标重评估（受规划能力开关控制） */
     if (capability_is_enabled(CAP_PLANNING) &&
-        now - g_agi_self.last_goal_eval >= SELF_REFLECTION_INTERVAL * 3) {
+        now - g_agi_self.last_goal_eval >= g_reflection_interval_sec * 3) {
         agi_bg_goal_reevaluate();
         g_agi_self.last_goal_eval = now;
     }
@@ -861,9 +933,49 @@ static void agi_background_loop_iteration(void) {
     /* 模仿学习触发（受模仿学习开关控制）：在发现优秀执行轨迹时自动触发 */
     if (is_feature_enabled_internal(FEATURE_IMITATION_LEARNING) &&
         g_agi_self.avg_reflection_score > 0.7f &&
-        (now - g_last_reflection) < SELF_REFLECTION_INTERVAL + 10) {
+        (now - g_last_reflection) < g_reflection_interval_sec + 10) {
         log_debug("[模仿学习] 检测到高评分(%.3f)，可触发模仿学习",
                  g_agi_self.avg_reflection_score);
+    }
+
+    /* ZSF-P0-004: 安全深度行为监控周期性检查（每5个主循环周期） */
+    {
+        static int sec_deep_counter = 0;
+        sec_deep_counter++;
+        if (sec_deep_counter % 5 == 0 && g_content_filter) {
+            ContentFilterStats cf_stats;
+            memset(&cf_stats, 0, sizeof(cf_stats));
+            content_filter_get_stats(g_content_filter, &cf_stats);
+            if (cf_stats.total_checks > 0) {
+                log_debug("[ZSF安全] 内容过滤: %zu次检查, %zu次拦截",
+                         cf_stats.total_checks, cf_stats.total_blocked);
+            }
+        }
+    }
+
+    /* ZSF-P0-004: 审计日志合规检查（每10个主循环周期） */
+    {
+        static int audit_check_counter = 0;
+        audit_check_counter++;
+        if (audit_check_counter % 10 == 0 && g_audit_logger) {
+            AuditReportOptions opts;
+            memset(&opts, 0, sizeof(opts));
+            opts.include_details = 0;
+            int compliant = audit_check_compliance(g_audit_logger, &opts);
+            if (compliant != 0) {
+                log_warning("[ZSF审计] 合规检查发现异常，请查看审计报告");
+            }
+        }
+    }
+
+    /* ZSF-P0-004: 负载均衡器健康检查（每15个主循环周期） */
+    {
+        static int lb_check_counter = 0;
+        lb_check_counter++;
+        if (lb_check_counter % 15 == 0 && g_load_balancer) {
+            lb_check_health(g_load_balancer);
+            lb_rebalance(g_load_balancer);
+        }
     }
 
     /* 错误计数 */
@@ -1060,12 +1172,25 @@ int main(int argc, char* argv[])
         printf("未找到持久化配置文件 %s，使用默认配置\n", SELFLNN_CONFIG_FILE);
     }
 
+    /* ZSFWXJ-FIX013修复: 升级信号处理 — Linux/macOS使用sigaction替代signal;
+     * sigaction提供一致的跨平台行为、信号阻塞、发送方信息。
+     * Windows上使用signal（sigaction不可用）。 */
+#ifdef _WIN32
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-#ifdef _WIN32
     signal(SIGBREAK, signal_handler);
 #else
-    signal(SIGHUP, signal_handler);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    /* SIGSEGV紧急状态保存 */
+    sa.sa_flags = SA_RESETHAND;
+    sigaction(SIGSEGV, &sa, NULL);
 #endif
 
     print_system_info(config.port, SELFLNN_WEBSOCKET_PORT);
@@ -1201,8 +1326,8 @@ int main(int argc, char* argv[])
             /* P20修复: 从selflnn获取已创建的学习器并附着LNN，避免双重创建 */
             OnlineLearner* learner_raw = (OnlineLearner*)selflnn_get_online_learner();
             if (!learner_raw) {
-                float placeholder_weight = 0.0f;
-                learner_raw = online_learner_create(&ol_config, &placeholder_weight, 1);
+                float initial_weight = 0.0f;
+                learner_raw = online_learner_create(&ol_config, &initial_weight, 1);
             }
             if (learner_raw) {
                 void* shared_lnn_ptr = selflnn_get_shared_lnn();
@@ -1261,6 +1386,41 @@ int main(int argc, char* argv[])
             } else {
                 printf("  拉普拉斯增强系统初始化失败(底层已在训练管线中集成)\n");
             }
+            /* ZSF-014: 初始化统一液态状态处理器
+             * 将所有模态（视觉/语音/文本/传感器等）统一映射到共享LNN状态空间。
+             * 这是"单一液态神经网络统一多模态"架构的核心组件，
+             * 负责跨模态维度均衡和在线学习梯度传播。 */
+            {
+                void* shared_lnn = selflnn_get_shared_lnn();
+                if (shared_lnn) {
+                    UnifiedLNNStateConfig ulsc = unified_lnn_state_get_default_config();
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_VISION] = 1024;
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_AUDIO] = 256;
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_TEXT] = 512;
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_SENSOR] = 128;
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_TACTILE] = 64;
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_PROPRIOCEPTION] = 32;
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_THERMAL] = 16;
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_RADAR] = 32;
+                    ulsc.raw_dimensions[UNIFIED_MODALITY_MOTOR] = 64;
+                    ulsc.state_dimension = UNIFIED_LNN_DEFAULT_STATE_DIM;
+                    ulsc.output_dimension = UNIFIED_LNN_DEFAULT_OUTPUT_DIM;
+                    ulsc.enable_online_learning = 1;
+                    ulsc.learning_rate = 0.001f;
+                    ulsc.ode_solver_type = 0;  /* 闭式解（默认） */
+                    ulsc.evolution_delta_t = 0.01f;
+                    ulsc.enable_noise_injection = 0;
+                    g_unified_lnn_state = unified_lnn_state_create(&ulsc);
+                    if (g_unified_lnn_state) {
+                        unified_lnn_state_set_shared_lnn((UnifiedLNNState*)g_unified_lnn_state, shared_lnn);
+                        printf("  统一液态状态处理器初始化成功（%d模态→共享LNN）\n", UNIFIED_LNN_MAX_MODALITIES);
+                    } else {
+                        printf("  统一液态状态处理器初始化失败（内存不足）\n");
+                    }
+                } else {
+                    printf("  统一液态状态处理器跳过（共享LNN未就绪）\n");
+                }
+            }
              /* APP15: 初始化音频管道（VAD+语音识别+TTS） */
             {
                 g_audio_capture = audio_capture_create("default", 16000, 1, 16);
@@ -1304,6 +1464,61 @@ int main(int argc, char* argv[])
                     printf("  计算机操作模块初始化成功\n");
                 } else {
                     printf("  计算机操作模块初始化失败\n");
+                }
+            }
+            /* ZSF-P0-004: 初始化审计日志系统 */
+            {
+                g_audit_logger = audit_logger_create();
+                if (g_audit_logger) {
+                    printf("  审计日志系统初始化成功\n");
+                } else {
+                    printf("  审计日志系统初始化失败\n");
+                }
+            }
+            /* ZSF-P0-004: 初始化内容过滤器 */
+            {
+                g_content_filter = content_filter_create();
+                if (g_content_filter) {
+                    content_filter_load_rules_from_file(g_content_filter, "config/content_filter_rules.txt");
+                    printf("  内容过滤器初始化成功\n");
+                } else {
+                    printf("  内容过滤器初始化失败\n");
+                }
+            }
+            /* ZSF-P0-004: 初始化自我编程引擎 */
+            {
+                g_prog_engine = self_programming_engine_create(PROGRAMMING_LANGUAGE_C);
+                if (g_prog_engine) {
+                    printf("  自我编程引擎初始化成功\n");
+                } else {
+                    printf("  自我编程引擎初始化失败\n");
+                }
+            }
+            /* ZSF-P0-004: 初始化分布式训练上下文 */
+            {
+                DistributedConfig dcfg;
+                memset(&dcfg, 0, sizeof(dcfg));
+                dcfg.is_coordinator = 1;
+                dcfg.local_rank = 0;
+                dcfg.world_size = 1;
+                g_distributed = distributed_init(&dcfg);
+                if (g_distributed) {
+                    printf("  分布式训练上下文初始化成功(单节点模式)\n");
+                } else {
+                    printf("  分布式训练上下文初始化跳过(单节点模式)\n");
+                }
+            }
+            /* ZSF-P0-004: 初始化负载均衡器 */
+            {
+                LbConfig lb_cfg;
+                memset(&lb_cfg, 0, sizeof(lb_cfg));
+                lb_cfg.strategy = LB_STRATEGY_LEAST_LOADED;
+                lb_cfg.max_nodes = 8;
+                g_load_balancer = lb_create(&lb_cfg);
+                if (g_load_balancer) {
+                    printf("  负载均衡器初始化成功\n");
+                } else {
+                    printf("  负载均衡器初始化失败\n");
                 }
             }
             /* Z8-002: 能力开关重置移到在线学习器创建之后
@@ -1456,6 +1671,36 @@ int main(int argc, char* argv[])
     if (g_computer_op) {
         co_system_destroy((COSystem*)g_computer_op);
         g_computer_op = NULL;
+    }
+    /* ZSF-P0-004: 销毁审计日志系统 */
+    if (g_audit_logger) {
+        audit_logger_free(g_audit_logger);
+        g_audit_logger = NULL;
+    }
+    /* ZSF-P0-004: 销毁内容过滤器 */
+    if (g_content_filter) {
+        content_filter_destroy(g_content_filter);
+        g_content_filter = NULL;
+    }
+    /* ZSF-P0-004: 销毁自我编程引擎 */
+    if (g_prog_engine) {
+        self_programming_engine_destroy(g_prog_engine);
+        g_prog_engine = NULL;
+    }
+    /* ZSF-P0-004: 销毁负载均衡器 */
+    if (g_load_balancer) {
+        lb_destroy(g_load_balancer);
+        g_load_balancer = NULL;
+    }
+    /* ZSF-014: 销毁统一液态状态处理器 */
+    if (g_unified_lnn_state) {
+        unified_lnn_state_free((UnifiedLNNState*)g_unified_lnn_state);
+        g_unified_lnn_state = NULL;
+    }
+    /* ZSF-P0-004: 释放分布式上下文 */
+    if (g_distributed) {
+        distributed_shutdown(g_distributed);
+        g_distributed = NULL;
     }
     selflnn_shutdown();
 

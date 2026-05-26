@@ -961,3 +961,41 @@ int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
     return -1;
 }
 #endif /* SELFLNN_STRICT_REAL_DATA */
+
+/* ================================================================
+ * ZSF-013: dataset_api.h 头文件适配包装函数
+ *
+ * dataset_api.h 中声明的函数名与 training_dataset.c 中的
+ * 实现函数名不一致。以下包装函数确保头文件声明与实现正确映射。
+ * 所有包装函数直接委托给真实实现，无任何虚假计算。
+ * ================================================================ */
+
+int dataset_normalize_zscore(TrainingDataset* ds) {
+    return preprocess_normalize_zscore(ds);
+}
+
+int dataset_normalize_minmax(TrainingDataset* ds) {
+    return preprocess_normalize_minmax(ds);
+}
+
+int dataset_multimodal_concat(const MultimodalSample* sample, float* unified,
+                               size_t unified_dim) {
+    return multimodal_concat_sample(sample, unified, unified_dim);
+}
+
+int dataset_set_weights(TrainingDataset* ds, const float* weights, size_t n) {
+    if (!ds || !ds->is_loaded) return -1;
+    if (n != ds->header.num_samples) return -2;
+    if (!weights) {
+        /* 清除权重：传入NULL重置为均匀权重 */
+        safe_free((void**)&ds->weights);
+        return 0;
+    }
+    /* 分配或重用权重数组 */
+    if (!ds->weights) {
+        ds->weights = (float*)safe_malloc(n * sizeof(float));
+        if (!ds->weights) return -1;
+    }
+    memcpy(ds->weights, weights, n * sizeof(float));
+    return 0;
+}

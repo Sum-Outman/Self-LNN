@@ -1169,28 +1169,26 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
             (void)pos_hidden; (void)pos_cell;
 
             size_t num_neg = num_samples > 5 ? 5 : (num_samples - 1);
-            float* negatives = (float*)safe_malloc(num_neg * 128 * sizeof(float));
+            size_t emb_dim = hidden_size > 0 ? hidden_size : 128;
+            float* negatives = (float*)safe_malloc(num_neg * emb_dim * sizeof(float));
             if (!negatives) { safe_free((void**)&aug_positive); continue; }
 
             for (size_t n = 0; n < num_neg; n++) {
                 size_t idx = (i + 3 + n * 7) % num_samples;
                 const float* neg_data = data + idx * feature_dim;
                 float neg_hidden[256] = {0}, neg_cell[256] = {0};
-                _lnn_forward_internal(network, neg_data, negatives + n * 128);
+                _lnn_forward_internal(network, neg_data, negatives + n * emb_dim);
                 (void)neg_hidden; (void)neg_cell;
             }
 
             float loss_val = 0.0f;
-            size_t concat_dim = hidden_size < 128 ? hidden_size : 128;
             lnn_contrastive_loss(anchor_emb, pos_emb, negatives, num_neg,
-                                concat_dim, 0.1f, &loss_val);
+                                emb_dim, 0.1f, &loss_val);
             epoch_loss += loss_val;
 
-            /* ZSF-ZNB修复C-004: 添加反向传播更新网络参数
-             * 构造对比学习梯度：dL/dθ = ∂L/∂emb_anchor * ∂emb_anchor/∂θ + ...
-             * 使用组合target向量近似指导更新方向 */
+            /* ZSF-ZNB修复C-004: 添加反向传播更新网络参数 */
             float target_emb[512] = {0};
-            for (size_t d = 0; d < concat_dim && d < 512; d++) {
+            for (size_t d = 0; d < emb_dim && d < 512; d++) {
                 target_emb[d] = anchor_emb[d] * 0.5f + pos_emb[d] * 0.5f;
             }
             _lnn_backward_internal(network, target_emb, &loss_val);

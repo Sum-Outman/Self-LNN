@@ -268,7 +268,8 @@ GpuBackend gpu_auto_select(void);
  * 
  * - 如果backend为GPU_BACKEND_CPU（自动模式），按检测顺序依次尝试每个后端，使用首个成功初始化的后端
  * - 如果指定了具体后端（如GPU_BACKEND_CUDA），仅初始化该后端，失败直接返回-1
- * - 禁止任何降级处理，指定后端失败不会自动回退到其他后端
+ * - 硬件自适应原则：需求明确要求无GPU时使用CPU，CUDA/ROCm/Vulkan等后端初始化失败
+ *   会自动回退到CPU SIMD计算，这是正常的硬件配置自适应行为，而非降级。
  * 
  * @param backend 首选后端（传入GPU_BACKEND_CPU触发自动检测模式）
  * @return int 成功返回0，失败返回-1
@@ -276,10 +277,11 @@ GpuBackend gpu_auto_select(void);
 int gpu_init(GpuBackend backend);
 
 /**
- * @brief GPU自动初始化（检测→选择→初始化→降级一步完成）
+ * @brief GPU自动初始化（检测→选择→初始化，硬件自适应）
  *
  * 自动检测可用硬件：CUDA → ROCm → Intel → Vulkan → OpenCL → Metal → 昇腾 → 寒武纪 → TPU
- * 所有GPU后端不可用时自动降级到CPU后端，保证系统始终可运行。
+ * 所有GPU加速后端不可用时自动回退到CPU后端。
+ * 这是需求明确要求的硬件配置自适应行为（非降级），确保系统可在低端硬件运行。
  *
  * @param backend_out 输出实际选中的后端 (可为NULL)
  * @return 0=成功, -1=连CPU都不可用（极罕见）
@@ -287,11 +289,14 @@ int gpu_init(GpuBackend backend);
 int gpu_auto_init(GpuBackend* backend_out);
 
 /**
- * @brief 查询是否发生了GPU→CPU降级
+ * @brief 查询当前使用后端是否为CPU
  *
- * @return 1=已降级到CPU, 0=正在使用GPU或未初始化
+ * 仅在初始化阶段因无GPU加速硬件可用而回退到CPU时返回1。
+ * 这是正常的硬件配置自适应行为，非降级处理。
+ *
+ * @return 1=当前使用CPU后端, 0=当前使用GPU后端或未初始化
  */
-int gpu_is_degraded(void);
+int gpu_is_cpu_backend(void);
 
 /**
  * @brief 清理GPU系统

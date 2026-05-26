@@ -217,7 +217,7 @@ static ExtendedDialogueTemplate g_extended_templates[] = {
     {"自我学习模块运行中，当前学习率0.001，梯度更新频率每10秒一次。", TCAT_SYSTEM_STATUS, kw_sys_train, 13, {0}, 0},
     {"系统温度正常，CPU核心温度42°C，GPU核心温度38°C，散热良好。", TCAT_SYSTEM_STATUS, kw_sys_power, 6, {0}, 0},
     {"CfC网络深度：文本分支8层，视觉分支12层，融合层6层，总计26层可微分连续动态。", TCAT_SYSTEM_STATUS, kw_sys_model, 11, {0}, 0},
-    {"API网关状态：HTTP端口8080，WebSocket端口8081，均已监听，连接数12。", TCAT_SYSTEM_STATUS, kw_sys_network, 9, {0}, 0},
+    {"API网关状态：HTTP端口8080，WebSocket端口9090，均已监听，连接数12。", TCAT_SYSTEM_STATUS, kw_sys_network, 9, {0}, 0},
     {"模型参数总量：约8500万可训练参数，全部存储在统一连续状态空间中。", TCAT_SYSTEM_STATUS, kw_sys_model, 11, {0}, 0},
     {"推理延迟：平均文本响应时间45ms，视觉识别时间120ms，控制信号生成8ms。", TCAT_SYSTEM_STATUS, kw_sys_perf, 9, {0}, 0},
     {"系统磁盘占用：模型权重820MB，知识库索引1.2GB，日志缓存150MB。", TCAT_SYSTEM_STATUS, kw_sys_backup, 14, {0}, 0},

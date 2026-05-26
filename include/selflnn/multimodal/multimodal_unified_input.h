@@ -3,10 +3,12 @@
 
 /**
  * @file multimodal_unified_input.h
- * @brief 多模态统一输入处理接口（兼容适配层）
+ * @brief 多模态统一输入处理接口（9模态版本）
  *
- * **已弃用**: 新代码应使用 unified_lnn_state.h 作为唯一多模态统一入口。
- * 本文件保留用于向后兼容。
+ * 与 unified_lnn_state.h 互补：
+ * - unified_lnn_state.h：核心统一液态状态处理器（5模态，带在线学习）
+ * - multimodal_unified_input.h：扩展多模态处理器（9模态，带诊断功能）
+ * 两个模块均可独立使用，共享同一个LNN实例。
  * 严格遵循：所有模态直接拼接输入到同一个LNN连续动态系统。
  */
 
@@ -79,6 +81,11 @@ typedef struct {
     float* projection_biases[SELFLNN_MAX_MODALITIES];   /**< 投影偏置 [proj_dim] */
     size_t projection_input_sizes[SELFLNN_MAX_MODALITIES]; /**< 各投影输入维度 */
     int projections_initialized;                         /**< 投影矩阵是否已初始化 */
+    /* ZSF-009: 在线学习支持 —— 存储上次前向传播数据 */
+    float last_raw_signals[SELFLNN_MAX_MODALITIES][SELFLNN_MAX_CONTROL_DIM]; /**< 上次各模态原始信号 */
+    size_t last_raw_sizes[SELFLNN_MAX_MODALITIES];      /**< 上次各模态信号维度 */
+    float last_combined[SELFLNN_UNIFIED_PROJECTION_DIM];/**< 上次投影求和结果 */
+    int last_active_count;                              /**< 上次活跃模态数量 */
 } UnifiedInputState;
 
 /**
@@ -199,6 +206,26 @@ int multimodal_unified_input_diagnose_modalities(const UnifiedInputState* state,
                                                   int* modality_active,
                                                   int* total_modalities,
                                                   int* active_count);
+
+/**
+ * @brief ZSF-009: 统一输入在线训练步骤
+ *
+ * 基于目标输出对投影矩阵进行在线学习更新。
+ * 使用MSE损失 + SGD优化器，对每个活跃模态的投影矩阵W_i和偏置b_i进行梯度更新。
+ * 梯度链: MSE(output, target) → dL/d_output → dL/d_combined → dL/d_W_i, dL/d_b_i
+ *
+ * @param state 统一输入状态指针
+ * @param target_output 目标输出（期望值）
+ * @param target_size 目标输出维度
+ * @param learning_rate 学习率（建议0.001-0.01）
+ * @param active_modalities_present 各模态活跃标志（1=活跃）
+ * @return 0=成功，-1=失败
+ */
+int multimodal_unified_input_train_step(UnifiedInputState* state,
+                                        const float* target_output,
+                                        size_t target_size,
+                                        float learning_rate,
+                                        const int* active_modalities_present);
 
 #ifdef __cplusplus
 }

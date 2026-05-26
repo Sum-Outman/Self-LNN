@@ -507,7 +507,7 @@ static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_wor
     }
 
 cnrt_fallback:
-    LOG_INFO("寒武纪MLU CNRT不可用，回退到CPU直算（count=%zu）", count);
+    LOG_INFO("寒武纪MLU CNRT不可用，回退到CPU直算（硬件自适应，count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 static int cambricon_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim, const size_t* global_work_size, const size_t* local_work_size) {

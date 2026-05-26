@@ -2762,13 +2762,14 @@ int mixed_precision_enable(Trainer* trainer, const MixedPrecisionConfig* config)
         mixed_precision_default_config(&effective_config);
     }
     
-    // 步骤4：硬件能力驱动的自动降级逻辑
+    /* 步骤4：硬件FP16能力检查与配置调整 */
     int hw_supports_fp16 = (hw.has_fp16_native || hw.has_tensor_cores || hw.has_fp16_arithmetic);
     
     if (!hw_supports_fp16 && effective_config.mode != MIXED_PRECISION_DISABLED) {
-        /* 硬件不支持FP16：自动降级到FP32 */
-        printf("警告：当前硬件不支持FP16计算（设备：%s），自动降级到FP32模式\n",
-               hw.device_name[0] ? hw.device_name : "CPU（未检测到GPU）");
+        /* 硬件不支持FP16：无法启用混合精度，自动使用FP32模式 */
+        LOG_INFO("当前硬件不支持FP16计算（设备：%s），无法启用混合精度，使用FP32模式",
+                 hw.device_name[0] ? hw.device_name : "CPU（未检测到GPU）");
+        LOG_INFO("提示：FP32模式下训练精度不受影响，仅无法享受FP16加速。可连接支持FP16/NV Tensor Cores的GPU后重新初始化。");
         
         effective_config.mode = MIXED_PRECISION_DISABLED;
         effective_config.use_fp16_for_forward = 0;

@@ -62,6 +62,7 @@ static void internal_mat_mul(const float* A, const float* B, float* C, int m, in
 }
 
 static int internal_cholesky_decompose(float* L, const float* A, int n) {
+    static int regularization_count = 0;
     for (int j = 0; j < n; j++) {
         float s = 0.0f;
         for (int k = 0; k < j; k++)
@@ -69,6 +70,12 @@ static int internal_cholesky_decompose(float* L, const float* A, int n) {
         float d = A[j * n + j] - s;
         if (d <= 1e-12f) {
             d = 1e-8f;
+            regularization_count++;
+            if (regularization_count >= 3) {
+                log_warning("[Cholesky] 矩阵严重病态(已正则化%d次)，结果可能不稳定，"
+                           "建议检查输入数据或增加正则化", regularization_count);
+                regularization_count = 0;
+            }
         }
         L[j * n + j] = sqrtf(d);
         if (!SELFLNN_IS_FINITE(L[j * n + j])) {
@@ -369,7 +376,7 @@ static float dogleg_compute_step(float* step, const float* gn, const float* cauc
         internal_vec_scale(step, cauchy, scale, n);
         return trust_radius;
     }
-    float* diff = (float*)malloc((size_t)n * sizeof(float));
+    float* diff = (float*)safe_malloc((size_t)n * sizeof(float));
     if (!diff) return 0.0f;
     for (int i = 0; i < n; i++) diff[i] = gn[i] - cauchy[i];
     float diff_norm = internal_norm2(diff, n);
@@ -384,7 +391,7 @@ static float dogleg_compute_step(float* step, const float* gn, const float* cauc
     tau = fmaxf(0.0f, fminf(1.0f, tau));
     for (int i = 0; i < n; i++)
         step[i] = cauchy[i] + tau * diff[i];
-    safe_free((void**)&(diff));
+    safe_free((void**)&diff);
     return internal_norm2(step, n);
 }
 
@@ -497,7 +504,7 @@ int dogleg_optimizer_solve(DoglegOptimizer* opt, float* initial_params,
 static float powell_brent_line_search(const float* x, const float* d, PowellFunc func,
                                        void* user_data, int n, float* fx) {
     float a = 0.0f, b = 1.0f, c = 0.5f;
-    float* xt = (float*)malloc((size_t)n * sizeof(float));
+    float* xt = (float*)safe_malloc((size_t)n * sizeof(float));
     if (!xt) { *fx = (float)func(x, fx, user_data); return 0.0f; }
 
     for (int i = 0; i < n; i++) xt[i] = x[i] + b * d[i];

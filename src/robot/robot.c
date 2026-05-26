@@ -3520,9 +3520,17 @@ int robot_controller_step_pybullet(RobotController* controller, int num_steps) {
     if (!controller->pb_connected) return -1;
 
 #ifdef _MSC_VER
-    /* ZSFBUILD: PyBullet API在MSVC构建中不可用，跳过仿真同步 */
+    /* MSVC构建: PyBullet不可用，使用纯C内部物理引擎作为回退
+     * 内部模拟器(simulator.c+physics_engine.c)提供真实刚体动力学仿真 */
     (void)num_steps;
-    return 0;
+    if (controller->internal_sim) {
+        for (int s = 0; s < num_steps; s++) {
+            simulator_step(controller->internal_sim, 0.016f); /* 60Hz步长 */
+        }
+        return 0;
+    }
+    log_warn("[Robot] PyBullet在MSVC中不可用且内部模拟器未初始化，仿真步进跳过");
+    return -1;
 #else
     if (pb_step_simulation_n(num_steps) != 0) return -1;
 

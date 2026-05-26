@@ -3532,6 +3532,32 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* ZSF-FE-004: 系统命令接口 - 向SELF-LNN后端发送系统级命令 */
+    async systemCommand(command, params) {
+        try {
+            var resp = await this.request('/system/command', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ command: command, params: params || {} })
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* ZSF-FE-005: 通用命令发送接口 - 支持设备/机器人/模块等多种目标 */
+    async sendCommand(target, command, payload) {
+        try {
+            var body = { target: target, command: command };
+            if (payload) { body.payload = payload; }
+            var resp = await this.request('/command/send', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     // ==================== 语音控制 API ====================
 
     /* ZSFABC-026修复: 使用统一request()替代裸fetch，获得认证/重试/熔断保护 */
@@ -5064,8 +5090,9 @@ class ApiService {
 class WebSocketManager {
     constructor(url) {
         /* BUG-5修复: 运行时动态读取window.SELFLNN_CONFIG而非静态捕获 */
+        /* ZSFWXJ-FIX001修复: WebSocket使用独立端口9090而非复用HTTP端口8080 */
         var cfg = window.SELFLNN_CONFIG || { host: 'localhost', port: 8080 };
-        this.url = url || ('ws://' + cfg.host + ':' + cfg.port + '/ws');
+        this.url = url || ('ws://' + cfg.host + ':9090/ws');
         this.ws = null;
         this.isConnected = false;
         this.isManualDisconnect = false;
