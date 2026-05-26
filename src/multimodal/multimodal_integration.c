@@ -1102,14 +1102,17 @@ static float _fusion_compute_mse(const float *fused, const float *target, int n)
 }
 
 /* ============================================================================
- * mm_cfc_unified_fusion_init: 创建并初始化 CfC 跨模态ODE融合状态
+ * mm_cfc_unified_fusion_init: [DEPRECATED 方案C]
+ * 创建并初始化 CfC 跨模态ODE融合状态。
  *
- * 初始化流程:
- *   1. 分配融合状态结构体
- *   2. 为每个模态分配投影权重矩阵 (Xavier初始化) 和偏置 (零初始化)
- *   3. 分配 CfC 融合核心矩阵 W_fusion (He初始化), U_fusion (Xavier), b_fusion (零)
- *   4. 分配梯度累积缓冲区 (零初始化)
- *   5. 初始化 ODE 隐状态 h 为零
+ * ⚠️ 方案C废弃说明:
+ *  此模块在手写CfC ODE + 独立参数 + 独立训练，与共享LNN功能完全重叠。
+ *  应使用 unified_lnn_state_step() + selflnn_get_shared_lnn() 替代。
+ *  统一LNN状态处理器已实现相同的多模态投影求和工作流，
+ *  且受益于共享梯度流和全局优化。
+ *
+ * 保留此实现仅用于向后兼容，新代码不应依赖于此接口。
+ * 计划在后续版本中完全移除此模块。
  * ============================================================================ */
 MmCfcFusionState* mm_cfc_unified_fusion_init(
     int num_modalities,

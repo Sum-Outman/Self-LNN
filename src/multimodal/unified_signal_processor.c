@@ -364,15 +364,9 @@ int unified_signal_processor_save(const UnifiedSignalProcessor* processor, const
     fwrite(&processor->cross_modal_alignment, sizeof(float), 1, file);
     fwrite(&processor->temporal_consistency, sizeof(float), 1, file);
     
-    // 写入CfC细胞单元数据
-    int has_cfc = (processor->cfc_cell != NULL) ? 1 : 0;
-    fwrite(&has_cfc, sizeof(int), 1, file);
-    if (has_cfc) {
-        if (cfc_cell_save(processor->cfc_cell, file) != 0) {
-            fclose(file);
-            return -1;
-        }
-    }
+    // 方案C: CfC细胞已移除（遵循单一LNN原则，状态演化由共享LNN统一管理）
+    int no_cfc = 0;
+    fwrite(&no_cfc, sizeof(int), 1, file);
     
     fclose(file);
     return 0;
@@ -518,20 +512,13 @@ UnifiedSignalProcessor* unified_signal_processor_load(const char* filepath) {
         return NULL;
     }
     
-    // 版本4+：读取CfC细胞单元数据
+    // 方案C: 跳过旧版CfC细胞字段（遵循单一LNN原则，共享LNN统一状态演化）
     if (version >= 4) {
-        int has_cfc = 0;
-        if (fread(&has_cfc, sizeof(int), 1, file) != 1) {
+        int dummy_cfc;
+        if (fread(&dummy_cfc, sizeof(int), 1, file) != 1) {
             unified_signal_processor_free(processor);
             fclose(file);
             return NULL;
-        }
-        if (has_cfc && processor->cfc_cell) {
-            if (cfc_cell_load(processor->cfc_cell, file) != 0) {
-                unified_signal_processor_free(processor);
-                fclose(file);
-                return NULL;
-            }
         }
     }
     
@@ -548,10 +535,7 @@ void unified_signal_processor_reset(UnifiedSignalProcessor* processor) {
         return;
     }
     
-    // 重置CfC细胞状态
-    if (processor->cfc_cell) {
-        cfc_cell_reset(processor->cfc_cell);
-    }
+    // 状态演化由共享LNN统一管理（方案C：遵循单一LNN原则）
     
     // 重置状态向量
     if (processor->state_vector) {
@@ -819,39 +803,10 @@ UnifiedSignalProcessor* unified_signal_processor_create(const UnifiedSignalProce
         init_status = -1;
     }
     
-    /* 创建CfC细胞单元作为所有模态的统一ODE状态演化路径
-     * 当 enable_state_evolution == 1 且 evolution_type 为
-     * STATE_EVOLUTION_NONLINEAR 或 STATE_EVOLUTION_HYBRID 时启用 */
-    if (config->enable_state_evolution &&
-        (config->evolution_type == STATE_EVOLUTION_NONLINEAR ||
-         config->evolution_type == STATE_EVOLUTION_HYBRID)) {
-        
-        CfCCellConfig cfc_config;
-        memset(&cfc_config, 0, sizeof(CfCCellConfig));
-        
-        size_t state_dim = config->state_dimension > 0 ?
-                           config->state_dimension : config->unified_dimension;
-        
-        cfc_config.input_size = config->unified_dimension;
-        cfc_config.hidden_size = state_dim;
-        cfc_config.time_constant = 1.0f;
-        cfc_config.delta_t = config->evolution_delta_t > 0.0f ?
-                              config->evolution_delta_t : 0.1f;
-        cfc_config.noise_std = 0.001f;
-        cfc_config.enable_adaptation = config->enable_online_learning;
-        cfc_config.ode_solver_type = ODE_SOLVER_CLOSED_FORM;
-        cfc_config.feedback_strength = 0.5f;
-        cfc_config.input_gain = 1.0f;
-        cfc_config.output_gain = 1.0f;
-        
-        processor->cfc_cell = cfc_cell_create(&cfc_config);
-        if (!processor->cfc_cell) {
-            unified_signal_processor_free(processor);
-            return NULL;
-        }
-    } else {
-        processor->cfc_cell = NULL;
-    }
+    /* 方案C修复：删除独立CfC细胞单元。遵循单一液态神经网络原则，
+     * 所有模态的状态演化由共享LNN统一管理。
+     * 原cfc_cell_create代码从未被cfc_cell_forward调用，属于死代码。 */
+    processor->cfc_cell = NULL;
     
     /* 创建自适应路由器，用于信号质量感知和模态权重动态调整 */
     {
@@ -896,11 +851,7 @@ void unified_signal_processor_free(UnifiedSignalProcessor* processor) {
     safe_free((void**)&processor->temporal_aligner.alignment_weights);
     safe_free((void**)&processor->temporal_aligner.aligned_output);
     
-    // 释放CfC细胞单元
-    if (processor->cfc_cell) {
-        cfc_cell_free(processor->cfc_cell);
-        processor->cfc_cell = NULL;
-    }
+    // 方案C: CfC细胞已移除（状态演化由共享LNN统一管理）
     
     // 释放自适应路由器
     if (processor->adaptive_router) {

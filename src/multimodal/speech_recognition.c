@@ -1541,29 +1541,10 @@ SpeechRecognizer* speech_recognizer_create(const SpeechRecognitionConfig* config
         sr->act_scale = rng_uniform(-xavier_scale, xavier_scale);
     }
 
-    /* P0-014: 尝试创建自包含CfC单元用于独立状态演化
-     * 当shared_lnn未连接时，此CfCCell提供完整的多时间尺度CfC动态 */
-    {
-        CfCCellConfig cfc_cfg;
-        memset(&cfc_cfg, 0, sizeof(CfCCellConfig));
-        cfc_cfg.input_size = (size_t)sr->config.feature_dimension;
-        cfc_cfg.hidden_size = sr->config.hidden_size;
-        cfc_cfg.time_constant = sr->config.time_constant > 0.0f ? sr->config.time_constant : 0.1f;
-        cfc_cfg.noise_std = 0.01f;
-        cfc_cfg.enable_adaptation = 1;
-        cfc_cfg.ode_solver_type = ODE_SOLVER_CLOSED_FORM;
-        cfc_cfg.delta_t = 1.0f;
-        cfc_cfg.use_xavier_init = 1;
-        cfc_cfg.use_cell_layer_norm = 1;
-        cfc_cfg.use_residual = 1;
-        cfc_cfg.residual_scale = 0.3f;
-
-        sr->self_contained_cfc = cfc_cell_create(&cfc_cfg);
-        if (!sr->self_contained_cfc) {
-            /* CfCCell创建失败，回退到可学习参数简化路径（gate_scale/act_scale） */
-            sr->self_contained_cfc = NULL;
-        }
-    }
+    /* 方案C修复: 删除独立 self_contained_cfc。遵循单一LNN原则，
+     * 语音识别状态演化由共享LNN统一管理。
+     * 当shared_lnn==NULL时回退到可学习参数简化路径（gate_scale/act_scale）。 */
+    sr->self_contained_cfc = NULL;
 
     sr->is_initialized = 1;
     return sr;
@@ -1595,11 +1576,7 @@ void speech_recognizer_free(SpeechRecognizer* recognizer) {
     safe_free((void**)&recognizer->adam_m_proj_b);
     safe_free((void**)&recognizer->adam_v_proj_b);
 
-    /* P0-014: 释放自包含CfC单元 */
-    if (recognizer->self_contained_cfc) {
-        cfc_cell_free(recognizer->self_contained_cfc);
-        recognizer->self_contained_cfc = NULL;
-    }
+    // 方案C: self_contained_cfc已移除（状态演化由共享LNN统一管理）
 
     safe_free((void**)&recognizer);
 }
@@ -1818,10 +1795,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
 
     /* 重置隐藏状态 */
     memset(recognizer->hidden_state, 0, hs * sizeof(float));
-    /* P0-014: 同步重置自包含CfC单元内部状态 */
-    if (recognizer->self_contained_cfc) {
-        cfc_cell_reset(recognizer->self_contained_cfc);
-    }
+    // 方案C: self_contained_cfc已移除，状态演化由共享LNN统一管理
 
     for (int t = 0; t < num_timesteps; t++) {
         const float* feat = recognizer->feature_buffer + (size_t)t * feature_dim;
@@ -1848,31 +1822,13 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
                 safe_free((void**)&lnn_input);
             }
         } else {
-            /* P0-014: 自包含CfC状态演化 — 优先使用完整CfCCell动态系统
-             * CfCCell提供多时间尺度门控、液时域缩放、层归一化、残差连接等完整CfC特性
-             * 若CfCCell未创建成功，回退到可学习参数简化路径 */
+            /* 方案C修复: 共享LNN未连接时回退到可学习参数简化路径。
+             * self_contained_cfc已移除（遵循单一LNN原则）。
+             * 使用gate_scale/act_scale可学习参数执行CfC简化动态。 */
             float nonlinear_term[256];
             memset(nonlinear_term, 0, sizeof(nonlinear_term));
 
-            if (recognizer->self_contained_cfc) {
-                /* 主路径：通过完整CfCCell进行状态演化
-                 * cfc_cell_forward_with_dt内部执行：
-                 *   1. 输入投影（Xavier初始化权重）
-                 *   2. 多时间尺度门控动态
-                 *   3. 液时域缩放（输入依赖时间常数）
-                 *   4. CfC封闭形式ODE解
-                 *   5. 残差连接 + 层归一化
-                 * 比简化 σ(sum*scale)⊙tanh(sum*scale) 强大得多 */
-                if (cfc_cell_forward_with_dt(recognizer->self_contained_cfc,
-                     feat, dt, nonlinear_term) != 0) {
-                    /* CfCCell前向失败，回退到可学习参数简化路径 */
-                    goto fallback_self_contained;
-                }
-            } else {
-fallback_self_contained:
-                /* 回退路径：可学习参数版自包含CfC简化动态
-                 * τ·dh/dt = -h + σ(sum*gate_scale) ⊙ tanh(sum*act_scale)
-                 * gate_scale/act_scale为Xavier初始化的可学习参数，替代硬编码0.5/0.3 */
+            /* 回退路径：可学习参数版CfC简化动态 */
                 for (size_t i = 0; i < hs && i < 256; i++) {
                     double sum = 0.0;
                     if (recognizer->input_projection_weight) {
@@ -1886,7 +1842,6 @@ fallback_self_contained:
                     float act = tanhf((float)sum * recognizer->act_scale);
                     nonlinear_term[i] = gate * act;
                 }
-            }
 
             float decay = expf(-dt / tau);
             for (size_t i = 0; i < hs && i < 256; i++) {
@@ -2060,11 +2015,8 @@ int speech_recognizer_recognize_stream(SpeechRecognizer* recognizer,
             memset(recognizer->hidden_state, 0,
                    recognizer->config.hidden_size * sizeof(float));
         }
-        /* P0-014: 流结束时同步重置自包含CfC单元内部状态 */
-        if (recognizer->self_contained_cfc) {
-            cfc_cell_reset(recognizer->self_contained_cfc);
-        }
     }
+        /* P0-014: 流结束时同步重置自包含CfC单元内部状态 */
 
     return 0;
 }
@@ -2090,9 +2042,6 @@ void speech_recognizer_reset(SpeechRecognizer* recognizer) {
                recognizer->config.hidden_size * sizeof(float));
     }
     /* P0-014: 同步重置自包含CfC单元内部状态 */
-    if (recognizer->self_contained_cfc) {
-        cfc_cell_reset(recognizer->self_contained_cfc);
-    }
     recognizer->decoded_token_count = 0;
 }
 
@@ -2160,8 +2109,8 @@ int speech_recognizer_compute_wer(const char* reference, const char* hypothesis,
             min = (min < sub) ? min : sub;
             dist[i * (hyp_len + 1) + j] = min;
         }
-    }
 
+    }
     int total = dist[(ref_len) * (hyp_len + 1) + hyp_len];
 
     if (substitutions) *substitutions = total;
@@ -2170,8 +2119,8 @@ int speech_recognizer_compute_wer(const char* reference, const char* hypothesis,
 
     if (wer) {
         *wer = (ref_len > 0) ? (float)total / ref_len : 0.0f;
-    }
 
+    }
     safe_free((void**)&dist);
     return 0;
 }
@@ -2306,9 +2255,6 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
             memset(recognizer->hidden_state, 0,
                    recognizer->config.hidden_size * sizeof(float));
             /* P0-014: 训练时同步重置自包含CfC单元内部状态 */
-            if (recognizer->self_contained_cfc) {
-                cfc_cell_reset(recognizer->self_contained_cfc);
-            }
 
             /* ZSFWS-M023修复: 使用音频数据实际长度计算帧数
              * 原实现用 transcript_len * 100 估算，存在不精确问题。
@@ -2339,7 +2285,8 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                         int char_class = (int)(ch) % vs;
                         target_dist[char_class] = 1.0f / (float)transcript_len;
                     }
-                } else {
+                }
+                else {
                     target_dist[0] = 1.0f;
                 }
                 float* frame_logits = (float*)safe_malloc((size_t)vs * sizeof(float));
@@ -2388,8 +2335,8 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                                 }
                                 recognizer->output_projection_bias[c] = old;
                                 grad_b[c] = (pos_loss - base_loss) / eps;
-                            }
-                        } else {
+                                }
+                            } else {
                             /* 大参数量: 分析梯度（Softmax交叉熵闭式解，O(N)单次前向传播） */
                             /* 计算Softmax概率 */
                             float* probs = (float*)safe_malloc((size_t)vs * sizeof(float));
@@ -2422,8 +2369,8 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
 
                                 safe_free((void**)&probs);
                             }
-                        }
 
+                        }
                         /* Adam更新 */
                         float beta1 = 0.9f, beta2 = 0.999f, epsilon = 1e-8f;
                         recognizer->adam_step++;
@@ -2445,14 +2392,13 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                             recognizer->output_projection_bias[c] -= lr_t * m_hat / (sqrtf(v_hat) + epsilon);
                         }
 
-                        total_loss += base_loss / vs;
-                        safe_free((void**)&grad_w);
-                        safe_free((void**)&grad_b);
-                    }
-                    safe_free((void**)&frame_logits);
+                    total_loss += base_loss / vs;
+                    safe_free((void**)&grad_w);
+                    safe_free((void**)&grad_b);
                 }
-                safe_free((void**)&target_dist);
+                safe_free((void**)&frame_logits);
             }
+            safe_free((void**)&target_dist);
         }
         if (out_loss) *out_loss = total_loss / (float)(num_samples > 0 ? num_samples : 1);
     }
@@ -2462,6 +2408,7 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
     log_info("[语音识别] 模型训练完成，权重已优化，可以进行识别。");
 
     return 0;
+}
 }
 
 int speech_recognizer_save_model(SpeechRecognizer* recognizer,

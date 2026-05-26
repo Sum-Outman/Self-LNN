@@ -787,27 +787,9 @@ int dataset_augment_noise(TrainingDataset* ds, float stddev) {
 }
 
 int dataset_augment_mixup(TrainingDataset* ds, float alpha) {
-    if (!ds || ds->header.num_samples < 2) return -1;
-    size_t n = ds->header.num_samples;
-    size_t input_dim = ds->header.input_dim;
-    size_t output_dim = ds->header.output_dim;
-    /* MixUp: 随机配对两个样本，加权混合 */
-    for (size_t i = 0; i < n; i += 2) {
-        if (i + 1 >= n) break;
-        /* MID-011修复: 使用alpha控制MixUp混合比例 */
-        float lambda = alpha > 0.0f ? alpha * 0.5f : (float)((uint32_t)((i + 7) * 2654435761U) % 1000) / 1000.0f;
-        for (size_t d = 0; d < input_dim; d++) {
-            float a = ds->inputs[i * input_dim + d];
-            float b = ds->inputs[(i + 1) * input_dim + d];
-            ds->inputs[i * input_dim + d] = lambda * a + (1.0f - lambda) * b;
-        }
-        for (size_t d = 0; d < output_dim; d++) {
-            float a = ds->outputs[i * output_dim + d];
-            float b = ds->outputs[(i + 1) * output_dim + d];
-            ds->outputs[i * output_dim + d] = lambda * a + (1.0f - lambda) * b;
-        }
-    }
-    return 0;
+    /* 方案C修复: 统一委托到augment_mixup，消除双重MixUp实现。
+     * augment_mixup使用随机配对+Beta分布lambda，比旧版的相邻配对更优。 */
+    return augment_mixup(ds, alpha);
 }
 
 int dataset_augment_dropout(TrainingDataset* ds, float drop_prob) {

@@ -137,6 +137,9 @@ struct RobotController {
     int pb_num_bodies;              /**< 已加载的PyBullet body数量 */
     int* pb_body_ids;               /**< 已加载的PyBullet body ID数组 */
     size_t pb_body_capacity;        /**< body ID数组容量 */
+    
+    // 内部仿真器
+    void* internal_sim;             /**< 内部物理仿真器句柄 (Simulator*) */
 };
 
 /* ==================== 静态函数声明 ==================== */
@@ -886,7 +889,6 @@ int robot_control_gripper(Robot* robot, float position, float force) {
         const float position_gain = 5.0f;          // 位置控制增益
         const float damping_coeff = 0.1f;          // 阻尼系数
         const float force_tolerance = 0.1f;        // 力容差 (N)
-        (void)damping_coeff; (void)force_tolerance;
         const float min_gripper_gap = 0.01f;       // 最小夹爪间隙 (m)
         
         // 夹持力限制和缩放
@@ -896,7 +898,6 @@ int robot_control_gripper(Robot* robot, float position, float force) {
         // 假设夹持器刚度为 100 N/m
         const float gripper_stiffness = 100.0f;    // 夹持器刚度 (N/m)
         float position_offset = clamped_force / gripper_stiffness;
-        (void)position_offset;
         
         // 位置-力混合控制：
         // 1. 首先移动到目标位置附近
@@ -1021,7 +1022,6 @@ int robot_execute_trajectory(Robot* robot, const float* waypoints,
     const float jerk_limit = 10.0f;      // 加加速度限制 (m/s³)
     const float acceleration_limit = 2.0f; // 加速度限制 (m/s²)
     const float velocity_limit = 1.0f;   // 速度限制 (m/s)
-    (void)jerk_limit; (void)acceleration_limit; (void)velocity_limit;
     
     // 1. 路径生成：完整三次样条插值（工业级实现）
     // 使用自然三次样条（natural cubic spline）：二阶导数边界条件为零

@@ -67,6 +67,7 @@ struct RosGazeboBridge {
         float linear_vel[3];
         float angular_vel[3];
         int has_data;
+        double timestamp;
         char model_name[64];
     } cached_model_state;
 
@@ -496,11 +497,34 @@ int ros_gazebo_bridge_get_model_state(RosGazeboBridge* bridge, const char* model
                         req_json, strlen(req_json));
     }
 
-    /* ZSFX-002修复: Gazebo未实际连接时拒绝返回默认零值假数据
-     * 调用方应检查返回值和输出参数的有效性 */
-    (void)position; (void)orientation; (void)linear_vel; (void)angular_vel;
-    log_warning("[ROS Gazebo桥接] get_model_state: 外部Gazebo未连接，"
-                "禁止返回默认零值假数据。模型状态查询失败。");
+    /* 从缓存模型状态返回真实数据 */
+    if (bridge->cached_model_state.has_data) {
+        if (position) {
+            position[0] = bridge->cached_model_state.position[0];
+            position[1] = bridge->cached_model_state.position[1];
+            position[2] = bridge->cached_model_state.position[2];
+        }
+        if (orientation) {
+            orientation[0] = bridge->cached_model_state.orientation[0];
+            orientation[1] = bridge->cached_model_state.orientation[1];
+            orientation[2] = bridge->cached_model_state.orientation[2];
+            orientation[3] = bridge->cached_model_state.orientation[3];
+        }
+        if (linear_vel) {
+            linear_vel[0] = bridge->cached_model_state.linear_vel[0];
+            linear_vel[1] = bridge->cached_model_state.linear_vel[1];
+            linear_vel[2] = bridge->cached_model_state.linear_vel[2];
+        }
+        if (angular_vel) {
+            angular_vel[0] = bridge->cached_model_state.angular_vel[0];
+            angular_vel[1] = bridge->cached_model_state.angular_vel[1];
+            angular_vel[2] = bridge->cached_model_state.angular_vel[2];
+        }
+        return 0;
+    }
+
+    log_warning("[ROS Gazebo桥接] get_model_state: 无缓存模型状态数据，"
+                "模型状态查询失败。");
     return -1;
 }
 
@@ -652,14 +676,17 @@ int ros_gazebo_bridge_get_robot_info(RosGazeboBridge* bridge, int robot_id,
                                       RosGazeboRobotInfo* info) {
     if (!bridge || !info) return -1;
     memset(info, 0, sizeof(RosGazeboRobotInfo));
-    /* P03修复: 从ROS话题缓存返回真实机器人状态数据 */
     if (bridge->cached_model_state.has_data) {
-        /* ZSFBUILD: RosGazeboRobotInfo无position/orientation/robot_id/active成员，使用简化实现 */
-        (void)bridge;
-        (void)robot_id;
-    } else {
-        (void)bridge;
-        (void)robot_id;
+        info->num_joints = 0;
+        for (int j = 0; j < 32 && j < bridge->cached_joint_state.has_data ? bridge->cached_joint_state.joint_count : 0; j++) {
+            if (j < 32) {
+                info->joint_positions[j] = bridge->cached_joint_state.positions[j];
+                info->joint_velocities[j] = bridge->cached_joint_state.velocities[j];
+                info->joint_efforts[j] = bridge->cached_joint_state.efforts[j];
+            }
+        }
+        info->num_joints = bridge->cached_joint_state.has_data ? 
+            (bridge->cached_joint_state.joint_count > 32 ? 32 : bridge->cached_joint_state.joint_count) : 0;
     }
     return 0;
 }

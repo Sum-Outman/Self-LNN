@@ -147,7 +147,7 @@ struct KnowledgeBase {
 
     /* Z4-002: 线程安全 —— 知识库全局读写锁 */
 #ifdef _WIN32
-    CRITICAL_SECTION kb_lock;
+    SRWLOCK kb_lock;
 #else
     pthread_rwlock_t kb_lock;
 #endif
@@ -559,7 +559,7 @@ KnowledgeBase* knowledge_base_create(size_t max_entries) {
 
     /* Z4-002: 初始化知识库读写锁 */
 #ifdef _WIN32
-    InitializeCriticalSection(&kb->kb_lock);
+    InitializeSRWLock(&kb->kb_lock);
 #else
     pthread_rwlock_init(&kb->kb_lock, NULL);
 #endif
@@ -661,7 +661,7 @@ void knowledge_base_free(KnowledgeBase* kb) {
 
     /* Z4-002: 销毁知识库锁 */
 #ifdef _WIN32
-    if (kb->kb_lock_initialized) DeleteCriticalSection(&kb->kb_lock);
+    /* SRWLOCK 无需销毁 */
 #else
     if (kb->kb_lock_initialized) pthread_rwlock_destroy(&kb->kb_lock);
 #endif
@@ -671,12 +671,19 @@ void knowledge_base_free(KnowledgeBase* kb) {
 }
 
 /* Z4-002: 知识库线程安全宏 */
+/* 写锁（独占） */
 #ifdef _WIN32
-#define KB_WLOCK(kb) do { if ((kb)->kb_lock_initialized) EnterCriticalSection(&(kb)->kb_lock); } while(0)
-#define KB_WUNLOCK(kb) do { if ((kb)->kb_lock_initialized) LeaveCriticalSection(&(kb)->kb_lock); } while(0)
+#define KB_WLOCK(kb) do { if ((kb)->kb_lock_initialized) AcquireSRWLockExclusive(&(kb)->kb_lock); } while(0)
+#define KB_WUNLOCK(kb) do { if ((kb)->kb_lock_initialized) ReleaseSRWLockExclusive(&(kb)->kb_lock); } while(0)
+/* 读锁（共享） */
+#define KB_RLOCK(kb) do { if ((kb)->kb_lock_initialized) AcquireSRWLockShared(&(kb)->kb_lock); } while(0)
+#define KB_RUNLOCK(kb) do { if ((kb)->kb_lock_initialized) ReleaseSRWLockShared(&(kb)->kb_lock); } while(0)
 #else
 #define KB_WLOCK(kb) do { if ((kb)->kb_lock_initialized) pthread_rwlock_wrlock(&(kb)->kb_lock); } while(0)
 #define KB_WUNLOCK(kb) do { if ((kb)->kb_lock_initialized) pthread_rwlock_unlock(&(kb)->kb_lock); } while(0)
+/* 读锁（共享） */
+#define KB_RLOCK(kb) do { if ((kb)->kb_lock_initialized) pthread_rwlock_rdlock(&(kb)->kb_lock); } while(0)
+#define KB_RUNLOCK(kb) do { if ((kb)->kb_lock_initialized) pthread_rwlock_unlock(&(kb)->kb_lock); } while(0)
 #endif
 
 int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
@@ -861,6 +868,8 @@ int knowledge_base_update(KnowledgeBase* kb, int entry_id, const KnowledgeEntry*
         return -1;
     }
     
+    KB_WLOCK(kb);
+    
     /* 查找条目 */
     for (size_t i = 0; i < kb->size; i++) {
         if (kb->entries[i].id == entry_id) {
@@ -869,8 +878,8 @@ int knowledge_base_update(KnowledgeBase* kb, int entry_id, const KnowledgeEntry*
             
             /* 复制新条目数据 */
             if (copy_knowledge_entry(&kb->entries[i].entry, entry) != 0) {
-                /* 复制失败，条目可能已损坏 */
                 memset(&kb->entries[i], 0, sizeof(InternalKnowledgeEntry));
+                KB_WUNLOCK(kb);
                 return -1;
             }
             
@@ -879,11 +888,13 @@ int knowledge_base_update(KnowledgeBase* kb, int entry_id, const KnowledgeEntry*
                 kb->entries[i].entry.timestamp = (long)time(NULL);
             }
             
+            KB_WUNLOCK(kb);
             return 0;
         }
     }
     
     /* 未找到 */
+    KB_WUNLOCK(kb);
     return -1;
 }
 
@@ -896,17 +907,19 @@ int knowledge_base_query(KnowledgeBase* kb, const KnowledgeQuery* query,
         return -1;
     }
     
+    KB_RLOCK(kb);
+    
     size_t match_count = 0;
     
     for (size_t i = 0; i < kb->size && match_count < max_results; i++) {
         if (entry_matches_query(&kb->entries[i].entry, query)) {
-            /* 复制到结果缓冲区 */
             if (copy_knowledge_entry(&results[match_count], &kb->entries[i].entry) == 0) {
                 match_count++;
             }
         }
     }
     
+    KB_RUNLOCK(kb);
     return (int)match_count;
 }
 
@@ -937,8 +950,10 @@ int knowledge_base_query_state_aware(KnowledgeBase* kb,
         return -1;
     }
 
+    KB_RLOCK(kb);
+
     size_t count = kb->size;
-    if (count == 0) return 0;
+    if (count == 0) { KB_RUNLOCK(kb); return 0; }
 
     /* 收集所有候选条目的索引和得分 */
     typedef struct {
@@ -947,7 +962,7 @@ int knowledge_base_query_state_aware(KnowledgeBase* kb,
     } ScoredEntry;
 
     ScoredEntry* scored = (ScoredEntry*)safe_malloc(count * sizeof(ScoredEntry));
-    if (scored == NULL) return -1;
+    if (scored == NULL) { KB_RUNLOCK(kb); return -1; }
     size_t scored_count = 0;
 
     /* 当前时间用于计算时效性 */
@@ -1053,6 +1068,7 @@ int knowledge_base_query_state_aware(KnowledgeBase* kb,
 
     if (scored_count == 0) {
         safe_free((void**)&scored);
+        KB_RUNLOCK(kb);
         return 0;
     }
 
@@ -1081,6 +1097,7 @@ int knowledge_base_query_state_aware(KnowledgeBase* kb,
                 free_knowledge_entry(&results[j]);
             }
             safe_free((void**)&scored);
+            KB_RUNLOCK(kb);
             return -1;
         }
         if (result_scores) {
@@ -1089,6 +1106,7 @@ int knowledge_base_query_state_aware(KnowledgeBase* kb,
     }
 
     safe_free((void**)&scored);
+    KB_RUNLOCK(kb);
     return (int)out_count;
 }
 
@@ -1097,12 +1115,17 @@ int knowledge_base_get_by_id(KnowledgeBase* kb, int entry_id, KnowledgeEntry* en
         return -1;
     }
     
+    KB_RLOCK(kb);
+    
     for (size_t i = 0; i < kb->size; i++) {
         if (kb->entries[i].id == entry_id) {
-            return copy_knowledge_entry(entry, &kb->entries[i].entry);
+            int ret = copy_knowledge_entry(entry, &kb->entries[i].entry);
+            KB_RUNLOCK(kb);
+            return ret;
         }
     }
     
+    KB_RUNLOCK(kb);
     return -1;
 }
 
@@ -1110,6 +1133,8 @@ int knowledge_base_get_stats(KnowledgeBase* kb, size_t* total_entries, size_t* m
     if (kb == NULL) {
         return -1;
     }
+    
+    KB_RLOCK(kb);
     
     if (total_entries != NULL) {
         *total_entries = kb->size;
@@ -1141,6 +1166,7 @@ int knowledge_base_get_stats(KnowledgeBase* kb, size_t* total_entries, size_t* m
         *memory_usage = usage;
     }
     
+    KB_RUNLOCK(kb);
     return 0;
 }
 
@@ -1173,13 +1199,19 @@ int knowledge_base_save(KnowledgeBase* kb, const char* filename) {
         return -1;
     }
     
+    KB_RLOCK(kb);
+    
     char resolved_path[1024];
-    if (!knowledge_resolve_path(filename, resolved_path, sizeof(resolved_path))) return -1;
+    if (!knowledge_resolve_path(filename, resolved_path, sizeof(resolved_path))) {
+        KB_RUNLOCK(kb);
+        return -1;
+    }
     
     knowledge_ensure_data_dir();
     
     FILE* file = fopen(resolved_path, "wb");
     if (file == NULL) {
+        KB_RUNLOCK(kb);
         return -1;
     }
     
@@ -1229,6 +1261,7 @@ int knowledge_base_save(KnowledgeBase* kb, const char* filename) {
     }
     
     fclose(file);
+    KB_RUNLOCK(kb);
     return 0;
 }
 
@@ -1475,6 +1508,8 @@ void knowledge_base_clear(KnowledgeBase* kb) {
         return;
     }
     
+    KB_WLOCK(kb);
+    
     /* 释放所有条目 */
     for (size_t i = 0; i < kb->size; i++) {
         free_knowledge_entry(&kb->entries[i].entry);
@@ -1484,6 +1519,7 @@ void knowledge_base_clear(KnowledgeBase* kb) {
     kb->size = 0;
     kb->next_id = 1;
     
+    KB_WUNLOCK(kb);
     /* 注意：不清除容量，以便重用 */
 }
 
@@ -1921,6 +1957,9 @@ int knowledge_base_enable_cfc_embedding(KnowledgeBase* kb, int embedding_dim) {
     if (!kb) return -1;
     if (kb->cfc_embed) return 0;
 
+    KB_WLOCK(kb);
+    if (kb->cfc_embed) { KB_WUNLOCK(kb); return 0; }
+
     if (embedding_dim <= 0) embedding_dim = CFC_EMBED_DEFAULT_DIM;
     if (embedding_dim > CFC_EMBED_MAX_DIM) embedding_dim = CFC_EMBED_MAX_DIM;
 
@@ -1967,6 +2006,7 @@ int knowledge_base_enable_cfc_embedding(KnowledgeBase* kb, int embedding_dim) {
         }
     }
 
+    KB_WUNLOCK(kb);
     return 0;
 }
 
@@ -2302,6 +2342,8 @@ int knowledge_base_merge(KnowledgeBase* dest, KnowledgeBase* src, int conflict_r
     if (dest == NULL || src == NULL) {
         return -1;
     }
+    
+    KB_WLOCK(dest);
     
     /* 完整合并实现：支持多种冲突解决策略，使用拉普拉斯变换增强权重合并 */
     
@@ -2742,6 +2784,7 @@ int knowledge_base_merge(KnowledgeBase* dest, KnowledgeBase* src, int conflict_r
         /* 冲突解决策略0：保留目标，不执行操作（已默认处理） */
     }
     
+    KB_WUNLOCK(dest);
     return 0;
 }
 
@@ -3820,6 +3863,8 @@ EvolutionResult* knowledge_self_evolve(KnowledgeBase* kb, const void* config, co
 LearningResult* knowledge_self_correct(KnowledgeBase* kb, const void* config, const char* description) {
     if (!kb) return NULL;
     
+    KB_WLOCK(kb);
+    
     /* 使用配置参数控制修正行为 */
     int max_corrections_limit = 100;
     float low_confidence_threshold = 0.3f;
@@ -4088,12 +4133,13 @@ LearningResult* knowledge_self_correct(KnowledgeBase* kb, const void* config, co
              result->updated_knowledge_count, result->learning_score);
     result->learning_summary = string_duplicate(summary);
     
+    KB_WUNLOCK(kb);
     return result;
 }
 
 /* ============================================================================
  * 高级推理引擎增强
- * =========================================================================== */
+ * ============================================================================ */
 
 /**
  * @brief 前向链接推理 - 从已知事实出发，应用规则推导新事实
@@ -6409,9 +6455,12 @@ static void text_to_feature_vector(const char* text, float* features, size_t dim
 int knowledge_train_from_lnn(KnowledgeBase* kb, LNN* lnn, int epochs) {
     if (!kb || !lnn) return -1;
 
+    KB_WLOCK(kb);
+
     LNNConfig cfg;
     if (lnn_get_config(lnn, &cfg) != 0) {
         log_error("[知识训练] 无法获取LNN配置");
+        KB_WUNLOCK(kb);
         return -1;
     }
 
@@ -6422,6 +6471,7 @@ int knowledge_train_from_lnn(KnowledgeBase* kb, LNN* lnn, int epochs) {
 
     if (input_size == 0 || output_size == 0) {
         log_error("[知识训练] LNN配置无效: input=%zu output=%zu", input_size, output_size);
+        KB_WUNLOCK(kb);
         return -1;
     }
 
@@ -6708,6 +6758,7 @@ int knowledge_train_from_lnn(KnowledgeBase* kb, LNN* lnn, int epochs) {
     log_info("[知识训练]   - 知识库内存: %zu 字节", post_mem);
     log_info("[知识训练] ============================");
 
+    KB_WUNLOCK(kb);
     return added_count + updated_count;
 }
 

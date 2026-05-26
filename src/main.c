@@ -408,7 +408,6 @@ static void agi_bg_safety_check(void) {
             stats.current_safety_score > 0.7f) {
             time_t now = time(NULL);
             if (now - stats.last_incident_time > 600) {
-                (void)sm;
                 log_info("[AGI后台] 安全状态自动恢复至正常");
             }
         }
@@ -831,8 +830,8 @@ static void agi_background_loop_iteration(void) {
                         "{\"type\":\"lnn_state\",\"timestamp\":%lld,"
                         "\"input_dim\":%zu,\"hidden_dim\":%zu,\"output_dim\":%zu,"
                         "\"solver_type\":%d,\"convergence_rate\":%.4f}",
-                        (long long)now, (size_t)cfg.input_dim, (size_t)cfg.hidden_dim,
-                        (size_t)cfg.output_dim, cfg.ode_solver_type, cfg.convergence_rate);
+                        (long long)now, (size_t)cfg.input_size, (size_t)cfg.hidden_size,
+                        (size_t)cfg.output_size, cfg.ode_solver_type, cfg.learning_rate);
                     ws_push_broadcast_json(g_ws_push_server, buf);
                 }
             }
@@ -1002,20 +1001,24 @@ static void agi_background_loop_iteration(void) {
                     ws_push_broadcast_json(g_ws_push_server, buf);
                 }
             }
-            /* 预测结果推送 */
+            /* 元认知状态推送 */
             {
                 SystemStatus st_pred;
                 memset(&st_pred, 0, sizeof(st_pred));
                 if (selflnn_get_status(&st_pred) == 0) {
-                    (void)st_pred;
                     snprintf(buf, sizeof(buf),
-                        "{\"type\":\"prediction_result\",\"timestamp\":%lld,"
-                        "\"actual\":%.4f,\"predicted\":%.4f,\"confidence\":%.2f}",
+                        "{\"type\":\"metacognition_status\",\"timestamp\":%lld,"
+                        "\"reflection_score\":%.4f,\"cognitive_load\":%.4f,"
+                        "\"learn_success_rate\":%.2f,\"active_tasks\":%d,"
+                        "\"memory_usage_mb\":%.1f,\"uptime_sec\":%ld}",
                         (long long)now,
                         g_agi_self.avg_reflection_score,
                         g_agi_self.avg_cognitive_load,
                         (float)(g_agi_self.online_learn_success + 1) /
-                        (float)(g_agi_self.online_learn_success + g_agi_self.online_learn_fail + 1));
+                        (float)(g_agi_self.online_learn_success + g_agi_self.online_learn_fail + 1),
+                        st_pred.active_tasks,
+                        st_pred.memory_usage_mb,
+                        (long)(st_pred.uptime));
                     ws_push_broadcast_json(g_ws_push_server, buf);
                 }
             }
@@ -1120,12 +1123,11 @@ static void agi_background_loop_iteration(void) {
         static int sec_deep_counter = 0;
         sec_deep_counter++;
         if (sec_deep_counter % 5 == 0 && g_content_filter) {
-            ContentFilterStats cf_stats;
-            memset(&cf_stats, 0, sizeof(cf_stats));
-            content_filter_get_stats(g_content_filter, &cf_stats);
-            if (cf_stats.total_checks > 0) {
+            size_t cf_checked = 0, cf_blocked = 0, cf_flagged = 0;
+            content_filter_get_stats(g_content_filter, &cf_checked, &cf_blocked, &cf_flagged);
+            if (cf_checked > 0) {
                 log_debug("[ZSF安全] 内容过滤: %zu次检查, %zu次拦截",
-                         cf_stats.total_checks, cf_stats.total_blocked);
+                         cf_checked, cf_blocked);
             }
         }
     }
@@ -1135,11 +1137,12 @@ static void agi_background_loop_iteration(void) {
         static int audit_check_counter = 0;
         audit_check_counter++;
         if (audit_check_counter % 10 == 0 && g_audit_logger) {
-            AuditReportOptions opts;
-            memset(&opts, 0, sizeof(opts));
-            opts.include_details = 0;
-            int compliant = audit_check_compliance(g_audit_logger, &opts);
-            if (compliant != 0) {
+            AuditComplianceResult compliance_results[16];
+            float compliance_score = 0.0f;
+            memset(compliance_results, 0, sizeof(compliance_results));
+            int compliant = audit_check_compliance(g_audit_logger,
+                compliance_results, 16, &compliance_score);
+            if (compliant <= 0 || compliance_score < 0.5f) {
                 log_warning("[ZSF审计] 合规检查发现异常，请查看审计报告");
             }
         }
@@ -1563,39 +1566,17 @@ int main(int argc, char* argv[])
             } else {
                 printf("  拉普拉斯增强系统初始化失败(底层已在训练管线中集成)\n");
             }
-            /* ZSF-014: 初始化统一液态状态处理器
-             * 将所有模态（视觉/语音/文本/传感器等）统一映射到共享LNN状态空间。
-             * 这是"单一液态神经网络统一多模态"架构的核心组件，
-             * 负责跨模态维度均衡和在线学习梯度传播。 */
+            /* 方案C修复: 统一液态状态处理器由selflnn.c统一管理。
+             * 不再在此重复创建实例，改为获取selflnn已创建的全局单例。
+             * 消除双重UnifiedLNNState问题，确保多模态统一到同一个LNN状态空间。 */
             {
-                void* shared_lnn = selflnn_get_shared_lnn();
-                if (shared_lnn) {
-                    UnifiedLNNStateConfig ulsc = unified_lnn_state_get_default_config();
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_VISION] = 1024;
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_AUDIO] = 256;
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_TEXT] = 512;
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_SENSOR] = 128;
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_TACTILE] = 64;
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_PROPRIOCEPTION] = 32;
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_THERMAL] = 16;
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_RADAR] = 32;
-                    ulsc.raw_dimensions[UNIFIED_MODALITY_MOTOR] = 64;
-                    ulsc.state_dimension = UNIFIED_LNN_DEFAULT_STATE_DIM;
-                    ulsc.output_dimension = UNIFIED_LNN_DEFAULT_OUTPUT_DIM;
-                    ulsc.enable_online_learning = 1;
-                    ulsc.learning_rate = 0.001f;
-                    ulsc.ode_solver_type = 0;  /* 闭式解（默认） */
-                    ulsc.evolution_delta_t = 0.01f;
-                    ulsc.enable_noise_injection = 0;
-                    g_unified_lnn_state = unified_lnn_state_create(&ulsc);
-                    if (g_unified_lnn_state) {
-                        unified_lnn_state_set_shared_lnn((UnifiedLNNState*)g_unified_lnn_state, shared_lnn);
-                        printf("  统一液态状态处理器初始化成功（%d模态→共享LNN）\n", UNIFIED_LNN_MAX_MODALITIES);
-                    } else {
-                        printf("  统一液态状态处理器初始化失败（内存不足）\n");
-                    }
+                void* unified_state = selflnn_get_unified_lnn_state();
+                if (unified_state) {
+                    g_unified_lnn_state = unified_state;
+                    printf("  统一液态状态处理器已就绪（%d模态→共享LNN，由selflnn管理）\n",
+                           UNIFIED_LNN_MAX_MODALITIES);
                 } else {
-                    printf("  统一液态状态处理器跳过（共享LNN未就绪）\n");
+                    printf("  统一液态状态处理器未就绪（selflnn子系统初始化中...）\n");
                 }
             }
              /* APP15: 初始化音频管道（VAD+语音识别+TTS） */
@@ -1664,7 +1645,7 @@ int main(int argc, char* argv[])
             }
             /* ZSF-P0-004: 初始化自我编程引擎 */
             {
-                g_prog_engine = self_programming_engine_create(PROGRAMMING_LANGUAGE_C);
+                g_prog_engine = self_programming_engine_create(LANG_C);
                 if (g_prog_engine) {
                     printf("  自我编程引擎初始化成功\n");
                 } else {
@@ -1673,11 +1654,8 @@ int main(int argc, char* argv[])
             }
             /* ZSF-P0-004: 初始化分布式训练上下文 */
             {
-                DistributedConfig dcfg;
-                memset(&dcfg, 0, sizeof(dcfg));
-                dcfg.is_coordinator = 1;
-                dcfg.local_rank = 0;
-                dcfg.world_size = 1;
+                DistributedConfig dcfg = distributed_config_default();
+                dcfg.verbose = 0;
                 g_distributed = distributed_init(&dcfg);
                 if (g_distributed) {
                     printf("  分布式训练上下文初始化成功(单节点模式)\n");
@@ -1688,8 +1666,8 @@ int main(int argc, char* argv[])
             /* ZSF-P0-004: 初始化负载均衡器 */
             {
                 LbConfig lb_cfg;
-                memset(&lb_cfg, 0, sizeof(lb_cfg));
-                lb_cfg.strategy = LB_STRATEGY_LEAST_LOADED;
+                lb_default_config(&lb_cfg);
+                lb_cfg.default_policy = LB_POLICY_LEAST_LOADED;
                 lb_cfg.max_nodes = 8;
                 g_load_balancer = lb_create(&lb_cfg);
                 if (g_load_balancer) {
@@ -1869,11 +1847,9 @@ int main(int argc, char* argv[])
         lb_destroy(g_load_balancer);
         g_load_balancer = NULL;
     }
-    /* ZSF-014: 销毁统一液态状态处理器 */
-    if (g_unified_lnn_state) {
-        unified_lnn_state_free((UnifiedLNNState*)g_unified_lnn_state);
-        g_unified_lnn_state = NULL;
-    }
+    /* 方案C修复: 统一液态状态处理器由selflnn.c管理生命周期。
+     * g_unified_lnn_state仅为借用的指针引用，不负责释放。 */
+    g_unified_lnn_state = NULL;
     /* ZSF-P0-004: 释放分布式上下文 */
     if (g_distributed) {
         distributed_shutdown(g_distributed);

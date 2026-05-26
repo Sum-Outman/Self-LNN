@@ -90,6 +90,11 @@ struct AdvancedRegularizer {
     AdversarialTrainingState adv_state; /**< 对抗训练状态 */
     DomainAdaptationState domain_state; /**< 域自适应状态 */
     
+    /* 可切换归一化仿射参数（gamma/beta per-channel） */
+    float* switchable_norm_gamma;      /**< 可切换归一化gamma参数 */
+    float* switchable_norm_beta;       /**< 可切换归一化beta参数 */
+    size_t switchable_norm_channels;   /**< 仿射参数通道数 */
+    
     /* 通用状态 */
     size_t input_dim;                 /**< 输入维度 */
     size_t output_dim;                /**< 输出维度 */
@@ -246,6 +251,13 @@ AdvancedRegularizer* advanced_regularizer_create(const AdvancedRegularizationCon
         regularizer->domain_state.lambda = config->domain_lambda;
     }
     
+    /* R5修复: 可切换归一化仿射参数懒分配——在apply时按通道数分配 */
+    if (regularizer->config.type == ADV_REG_SWITCHABLE_NORM) {
+        regularizer->switchable_norm_gamma = NULL;   /* 懒分配，首次调用 apply_switchable_norm 时分配 */
+        regularizer->switchable_norm_beta = NULL;
+        regularizer->switchable_norm_channels = 0;
+    }
+    
     return regularizer;
 }
 
@@ -261,6 +273,10 @@ void advanced_regularizer_free(AdvancedRegularizer* regularizer) {
     safe_free((void**)&regularizer->adv_state.perturbation);
     safe_free((void**)&regularizer->domain_state.domain_classifier);
     safe_free((void**)&regularizer->domain_state.feature_align_loss);
+    
+    /* R5修复: 释放可切换归一化仿射参数 */
+    safe_free((void**)&regularizer->switchable_norm_gamma);
+    safe_free((void**)&regularizer->switchable_norm_beta);
     
     safe_free((void**)&regularizer);
 }
@@ -764,80 +780,69 @@ int advanced_regularizer_generate_adversarial(AdvancedRegularizer* regularizer,
     int attack_steps = regularizer->adv_state.attack_steps;
     AdversarialAttackType attack_type = regularizer->adv_state.attack_type;
     
-    // 为数值梯度分配缓冲区
+    /* 解析梯度缓冲区: cfc_backward_ex的gradient输出 = ∂L/∂input */
     size_t grad_size = batch_size * input_dim;
     float* gradient = (float*)safe_malloc(grad_size * sizeof(float));
     if (!gradient) return -1;
     
-    // 为有限差分分配临时缓冲区
-    float* temp_output = (float*)safe_malloc(batch_size * 256 * sizeof(float)); // 假设输出维度 <= 256
-    float* perturbed_input = (float*)safe_malloc(input_dim * sizeof(float));
-    if (!temp_output || !perturbed_input) {
+    /* 前向传播输出 + MSE误差向量 */
+    size_t output_dim = network->cfc_network->config.output_size > 0 
+                      ? (size_t)network->cfc_network->config.output_size : input_dim;
+    size_t hidden_size = network->cfc_network->config.hidden_size > 0
+                       ? (size_t)network->cfc_network->config.hidden_size : output_dim;
+    float* temp_output = (float*)safe_malloc(output_dim * sizeof(float));
+    float* error_vec = (float*)safe_malloc(output_dim * sizeof(float));
+    /* cfc_forward需要hidden_state/cell_state缓冲区 */
+    float* hidden_state = (float*)safe_malloc(hidden_size * sizeof(float));
+    float* cell_state = (float*)safe_malloc(hidden_size * sizeof(float));
+    if (!temp_output || !error_vec || !hidden_state || !cell_state) {
         safe_free((void**)&gradient);
         safe_free((void**)&temp_output);
-        safe_free((void**)&perturbed_input);
+        safe_free((void**)&error_vec);
+        safe_free((void**)&hidden_state);
+        safe_free((void**)&cell_state);
         return -1;
     }
     
-    // 计算损失相对于输入的梯度（使用中心差分）
-    float eps_finite_diff = 1e-4f;  // 有限差分步长
-    
+    /* 解析梯度计算: 1次前向+1次反向=2次CFC传递，替代2*input_dim次前向的有限差分 */
     for (size_t i = 0; i < batch_size; i++) {
         const float* input = &inputs[i * input_dim];
+        const float* target = &targets[i * output_dim];
+        float* input_grad = &gradient[i * input_dim];
         
-        for (size_t j = 0; j < input_dim; j++) {
-            // 中心差分: dL/dx_j ≈ (L(x + h) - L(x - h)) / (2h)
-            memcpy(perturbed_input, input, input_dim * sizeof(float));
-            
-            // L(x + h)
-            perturbed_input[j] = input[j] + eps_finite_diff;
-            lnn_forward(network, perturbed_input, temp_output);
-            float loss_plus = 0.0f;
-            for (size_t k = 0; k < 256 && k < input_dim; k++) {
-                float diff = temp_output[k] - targets[i * 256 + k];
-                loss_plus += diff * diff;
-            }
-            
-            // L(x - h)
-            perturbed_input[j] = input[j] - eps_finite_diff;
-            lnn_forward(network, perturbed_input, temp_output);
-            float loss_minus = 0.0f;
-            for (size_t k = 0; k < 256 && k < input_dim; k++) {
-                float diff = temp_output[k] - targets[i * 256 + k];
-                loss_minus += diff * diff;
-            }
-            
-            gradient[i * input_dim + j] = (loss_plus - loss_minus) / (2.0f * eps_finite_diff);
-        }
+        /* 前向传播 */
+        cfc_forward(network->cfc_network, input, hidden_state, cell_state, temp_output);
+        
+        /* MSE损失梯度: ∂L/∂y = 2(y - t) */
+        for (size_t k = 0; k < output_dim; k++)
+            error_vec[k] = 2.0f * (temp_output[k] - target[k]);
+        
+        /* 反向传播 — gradient[]接收∂L/∂input */
+        cfc_backward_ex(network->cfc_network, error_vec, input_grad, 
+                       0.0f /* 不更新权重 */, 
+                       1   /* skip_cell_update=1，仅传播梯度 */);
     }
     
-    // 根据攻击类型生成对抗样本
+    /* 根据攻击类型生成对抗样本 */
     if (attack_type == ADV_ATTACK_FGSM) {
-        // FGSM: 单步攻击
         for (size_t i = 0; i < batch_size; i++) {
             const float* input = &inputs[i * input_dim];
             float* adv_input = &adversarial_inputs[i * input_dim];
-            
-            // 计算梯度符号
+            float* input_grad = &gradient[i * input_dim];
             for (size_t j = 0; j < input_dim; j++) {
-                float sign = (gradient[i * input_dim + j] > 0.0f) ? 1.0f :
-                            ((gradient[i * input_dim + j] < 0.0f) ? -1.0f : 0.0f);
+                float sign = (input_grad[j] > 0.0f) ? 1.0f :
+                            ((input_grad[j] < 0.0f) ? -1.0f : 0.0f);
                 adv_input[j] = input[j] + epsilon * sign;
-                
-                // 裁剪到有效范围 [0, 1]
                 if (adv_input[j] < 0.0f) adv_input[j] = 0.0f;
                 if (adv_input[j] > 1.0f) adv_input[j] = 1.0f;
             }
         }
     } else if (attack_type == ADV_ATTACK_PGD) {
-        // PGD: 多步投影梯度下降
-        // 初始化对抗样本为原始输入加小扰动
+        /* PGD初始化: 添加小随机扰动 */
         for (size_t i = 0; i < batch_size; i++) {
             const float* input = &inputs[i * input_dim];
             float* adv_input = &adversarial_inputs[i * input_dim];
             memcpy(adv_input, input, input_dim * sizeof(float));
-            
-            // 添加小随机扰动
             for (size_t j = 0; j < input_dim; j++) {
                 float noise = secure_random_float() * 2.0f - 1.0f;
                 adv_input[j] += noise * epsilon * 0.1f;
@@ -845,325 +850,74 @@ int advanced_regularizer_generate_adversarial(AdvancedRegularizer* regularizer,
                 if (adv_input[j] > 1.0f) adv_input[j] = 1.0f;
             }
         }
-        
-        // 多步迭代攻击
+        /* PGD多步解析梯度攻击 */
         for (int step = 0; step < attack_steps; step++) {
-            // 重新计算梯度（基于当前对抗样本）
             for (size_t i = 0; i < batch_size; i++) {
-                const float* adv_input = &adversarial_inputs[i * input_dim];
+                const float* adv_in = &adversarial_inputs[i * input_dim];
+                const float* target = &targets[i * output_dim];
+                float* input_grad = &gradient[i * input_dim];
                 
-                for (size_t j = 0; j < input_dim; j++) {
-                    memcpy(perturbed_input, adv_input, input_dim * sizeof(float));
-                    
-                    perturbed_input[j] = adv_input[j] + eps_finite_diff;
-                    lnn_forward(network, perturbed_input, temp_output);
-                    float loss_plus = 0.0f;
-                    for (size_t k = 0; k < 256 && k < input_dim; k++) {
-                        float diff = temp_output[k] - targets[i * 256 + k];
-                        loss_plus += diff * diff;
-                    }
-                    
-                    perturbed_input[j] = adv_input[j] - eps_finite_diff;
-                    lnn_forward(network, perturbed_input, temp_output);
-                    float loss_minus = 0.0f;
-                    for (size_t k = 0; k < 256 && k < input_dim; k++) {
-                        float diff = temp_output[k] - targets[i * 256 + k];
-                        loss_minus += diff * diff;
-                    }
-                    
-                    gradient[i * input_dim + j] = (loss_plus - loss_minus) / (2.0f * eps_finite_diff);
-                }
+                cfc_forward(network->cfc_network, adv_in, hidden_state, cell_state, temp_output);
+                for (size_t k = 0; k < output_dim; k++)
+                    error_vec[k] = 2.0f * (temp_output[k] - target[k]);
+                cfc_backward_ex(network->cfc_network, error_vec, input_grad, 0.0f, 1);
             }
-            
-            // 执行PGD更新
             for (size_t i = 0; i < batch_size; i++) {
                 const float* input = &inputs[i * input_dim];
                 float* adv_input = &adversarial_inputs[i * input_dim];
-                
+                float* input_grad = &gradient[i * input_dim];
                 for (size_t j = 0; j < input_dim; j++) {
-                    float sign = (gradient[i * input_dim + j] > 0.0f) ? 1.0f :
-                                ((gradient[i * input_dim + j] < 0.0f) ? -1.0f : 0.0f);
-                    
-                    // PGD更新
+                    float sign = (input_grad[j] > 0.0f) ? 1.0f :
+                                ((input_grad[j] < 0.0f) ? -1.0f : 0.0f);
                     adv_input[j] += step_size * sign;
-                    
-                    // 投影到epsilon球内
                     float diff = adv_input[j] - input[j];
                     if (diff > epsilon) adv_input[j] = input[j] + epsilon;
                     if (diff < -epsilon) adv_input[j] = input[j] - epsilon;
-                    
-                    // 裁剪到有效范围 [0, 1]
                     if (adv_input[j] < 0.0f) adv_input[j] = 0.0f;
                     if (adv_input[j] > 1.0f) adv_input[j] = 1.0f;
                 }
             }
         }
     } else if (attack_type == ADV_ATTACK_CW) {
-        // Carlini-Wagner攻击（L2版本）
-        float cw_confidence = 0.0f;  // 置信度参数
         int cw_iterations = attack_steps > 0 ? attack_steps : 10;
-        
         for (size_t i = 0; i < batch_size; i++) {
             const float* input = &inputs[i * input_dim];
+            const float* target = &targets[i * output_dim];
             float* adv_input = &adversarial_inputs[i * input_dim];
-            
-            // 初始化
             memcpy(adv_input, input, input_dim * sizeof(float));
             
-            // CW使用变量 w = arctanh((x - 0.5) * 2) 进行无约束优化
             float* w = (float*)safe_malloc(input_dim * sizeof(float));
-            if (!w) continue;
+            float* cw_grad = (float*)safe_malloc(input_dim * sizeof(float));
+            if (!w || !cw_grad) { safe_free((void**)&w); safe_free((void**)&cw_grad); continue; }
             
             for (size_t j = 0; j < input_dim; j++) {
-                // x = 0.5 * (tanh(w) + 1)
-                // w = arctanh(2 * x - 1)
-                float x_clipped = input[j];
-                if (x_clipped <= 0.0f) x_clipped = 1e-6f;
-                if (x_clipped >= 1.0f) x_clipped = 1.0f - 1e-6f;
-                w[j] = 0.5f * logf((1.0f + (2.0f * x_clipped - 1.0f)) / 
-                                   (1.0f - (2.0f * x_clipped - 1.0f)));
+                float xc = input[j]; if (xc <= 0.0f) xc = 1e-6f; if (xc >= 1.0f) xc = 1.0f - 1e-6f;
+                w[j] = 0.5f * logf((1.0f + 2.0f*xc - 1.0f) / (1.0f - (2.0f*xc - 1.0f) + 1e-10f));
             }
-            
             for (int iter = 0; iter < cw_iterations; iter++) {
-                // 计算当前对抗样本: x = 0.5 * (tanh(w) + 1)
-                for (size_t j = 0; j < input_dim; j++) {
-                    float tanh_w = tanhf(w[j]);
-                    adv_input[j] = 0.5f * (tanh_w + 1.0f);
-                }
+                for (size_t j = 0; j < input_dim; j++) adv_input[j] = 0.5f * (tanhf(w[j]) + 1.0f);
                 
-                // 数值梯度计算
+                /* 解析梯度: ∂L/∂x (通过cfc_backward_ex) */
+                cfc_forward(network->cfc_network, adv_input, hidden_state, cell_state, temp_output);
+                for (size_t k = 0; k < output_dim; k++) error_vec[k] = 2.0f * (temp_output[k] - target[k]);
+                cfc_backward_ex(network->cfc_network, error_vec, cw_grad, 0.0f, 1);
+                
+                /* 链式法则: ∂L/∂w_j = ∂L/∂x_j * 0.5*(1-tanh²(w_j)) */
+                float cw_step = 0.01f;
                 for (size_t j = 0; j < input_dim; j++) {
-                    float old_w = w[j];
-                    
-                    // 扰动w
-                    w[j] = old_w + eps_finite_diff;
-                    for (size_t k = 0; k < input_dim; k++) {
-                        float tanh_w = tanhf(w[k]);
-                        perturbed_input[k] = 0.5f * (tanh_w + 1.0f);
-                    }
-                    lnn_forward(network, perturbed_input, temp_output);
-                    float loss_plus = 0.0f;
-                    for (size_t k = 0; k < 256 && k < input_dim; k++) {
-                        float diff = temp_output[k] - targets[i * 256 + k];
-                        loss_plus += diff * diff;
-                    }
-                    
-                    w[j] = old_w - eps_finite_diff;
-                    for (size_t k = 0; k < input_dim; k++) {
-                        float tanh_w = tanhf(w[k]);
-                        perturbed_input[k] = 0.5f * (tanh_w + 1.0f);
-                    }
-                    lnn_forward(network, perturbed_input, temp_output);
-                    float loss_minus = 0.0f;
-                    for (size_t k = 0; k < 256 && k < input_dim; k++) {
-                        float diff = temp_output[k] - targets[i * 256 + k];
-                        loss_minus += diff * diff;
-                    }
-                    
-                    float grad_w = (loss_plus - loss_minus) / (2.0f * eps_finite_diff);
-                    
-                    // 添加L2正则化梯度
-                    grad_w += 2.0f * old_w * cw_confidence;
-                    
-                    // 更新w
-                    w[j] = old_w - step_size * grad_w;
+                    float dx_dw = 0.5f * (1.0f - tanhf(w[j]) * tanhf(w[j]));
+                    w[j] -= cw_step * cw_grad[j] * dx_dw;
                 }
             }
-            
-            safe_free((void**)&w);
+            safe_free((void**)&w); safe_free((void**)&cw_grad);
         }
-    } else {
-        // ADV_ATTACK_AUTOATTACK: 自动集成多种攻击
-        // 运行FGSM + PGD + CW的组合，选择最强攻击结果
-        
-        // 为每种攻击存储结果和扰动量
-        float* fgsm_results = (float*)safe_malloc(batch_size * input_dim * sizeof(float));
-        float* pgd_results = (float*)safe_malloc(batch_size * input_dim * sizeof(float));
-        float* cw_results = (float*)safe_malloc(batch_size * input_dim * sizeof(float));
-        float fgsm_dist = 0.0f, pgd_dist = 0.0f, cw_dist = 0.0f;
-        
-        // 攻击1: FGSM
-        for (size_t i = 0; i < batch_size; i++) {
-            const float* input = &inputs[i * input_dim];
-            float* adv = &fgsm_results[i * input_dim];
-            for (size_t j = 0; j < input_dim; j++) {
-                float sign = (gradient[i * input_dim + j] > 0.0f) ? 1.0f :
-                            ((gradient[i * input_dim + j] < 0.0f) ? -1.0f : 0.0f);
-                adv[j] = input[j] + epsilon * 0.5f * sign;
-                if (adv[j] < 0.0f) adv[j] = 0.0f;
-                if (adv[j] > 1.0f) adv[j] = 1.0f;
-                float diff = adv[j] - input[j];
-                fgsm_dist += diff * diff;
-            }
-        }
-        
-        // 攻击2: PGD（多步迭代）
-        int pgd_steps = 10;
-        float pgd_alpha = epsilon * 0.5f / pgd_steps;
-        memcpy(pgd_results, inputs, batch_size * input_dim * sizeof(float));
-        for (int step = 0; step < pgd_steps; step++) {
-            for (size_t i = 0; i < batch_size; i++) {
-                float* adv = &pgd_results[i * input_dim];
-                const float* input = &inputs[i * input_dim];
-                for (size_t j = 0; j < input_dim; j++) {
-                    float sign = (gradient[i * input_dim + j] > 0.0f) ? 1.0f :
-                                ((gradient[i * input_dim + j] < 0.0f) ? -1.0f : 0.0f);
-                    adv[j] = adv[j] + pgd_alpha * sign;
-                    // 投影到epsilon球内
-                    float diff = adv[j] - input[j];
-                    if (diff > epsilon * 0.5f) adv[j] = input[j] + epsilon * 0.5f;
-                    if (diff < -epsilon * 0.5f) adv[j] = input[j] - epsilon * 0.5f;
-                    if (adv[j] < 0.0f) adv[j] = 0.0f;
-                    if (adv[j] > 1.0f) adv[j] = 1.0f;
-                }
-            }
-        }
-        for (size_t i = 0; i < batch_size * input_dim; i++) {
-            float diff = pgd_results[i] - inputs[i];
-            pgd_dist += diff * diff;
-        }
-        
-        // 攻击3: CW（L2版本，使用arctanh重参数化实现无约束优化）
-        // 使用变量 w = arctanh((x - 0.5) * 2) 确保x在[0,1]范围内
-        int cw_inner_steps = attack_steps > 5 ? attack_steps : 20;
-        float cw_lr_init = 0.01f;
-        
-        // 对每个样本独立执行CW攻击
-        for (size_t batch_idx = 0; batch_idx < batch_size; batch_idx++) {
-            const float* sample_in = &inputs[batch_idx * input_dim];
-            float* sample_out = &cw_results[batch_idx * input_dim];
-            
-            // 初始化：将输入映射到w空间
-            float* w = (float*)safe_malloc(input_dim * sizeof(float));
-            if (!w) {
-                memcpy(sample_out, sample_in, input_dim * sizeof(float));
-                continue;
-            }
-            for (size_t j = 0; j < input_dim; j++) {
-                float x_clipped = sample_in[j];
-                if (x_clipped <= 0.0f) x_clipped = 1e-6f;
-                if (x_clipped >= 1.0f) x_clipped = 1.0f - 1e-6f;
-                w[j] = 0.5f * logf((1.0f + (2.0f * x_clipped - 1.0f)) /
-                                   (1.0f - (2.0f * x_clipped - 1.0f)));
-            }
-            
-            // 逐步衰减学习率
-            float best_loss = FLT_MAX;
-            float* best_w = (float*)safe_malloc(input_dim * sizeof(float));
-            
-            for (int step = 0; step < cw_inner_steps; step++) {
-                float lr = cw_lr_init * (1.0f - (float)step / (float)cw_inner_steps);
-                
-                // 计算当前对抗样本: x = 0.5 * (tanh(w) + 1)
-                for (size_t j = 0; j < input_dim; j++) {
-                    float tanh_w = tanhf(w[j]);
-                    sample_out[j] = 0.5f * (tanh_w + 1.0f);
-                }
-                
-                // 计算L2距离和分类损失的组合
-                float l2_dist = 0.0f;
-                for (size_t j = 0; j < input_dim; j++) {
-                    float diff = sample_out[j] - sample_in[j];
-                    l2_dist += diff * diff;
-                }
-                
-                // 数值梯度计算
-                for (size_t j = 0; j < input_dim; j++) {
-                    float old_w = w[j];
-                    
-                    // 正向扰动
-                    w[j] = old_w + eps_finite_diff;
-                    float* temp_adv = perturbed_input;
-                    for (size_t k = 0; k < input_dim; k++) {
-                        float tanh_wk = tanhf(w[k]);
-                        temp_adv[k] = 0.5f * (tanh_wk + 1.0f);
-                    }
-                    lnn_forward(network, temp_adv, temp_output);
-                    float loss_plus = 0.0f;
-                    for (size_t k = 0; k < 256 && k < input_dim; k++) {
-                        float diff = temp_output[k] - targets[batch_idx * 256 + k];
-                        loss_plus += diff * diff;
-                    }
-                    float l2_plus = 0.0f;
-                    for (size_t k = 0; k < input_dim; k++) {
-                        float diff = temp_adv[k] - sample_in[k];
-                        l2_plus += diff * diff;
-                    }
-                    loss_plus += l2_plus * 0.01f;
-                    
-                    // 负向扰动
-                    w[j] = old_w - eps_finite_diff;
-                    for (size_t k = 0; k < input_dim; k++) {
-                        float tanh_wk = tanhf(w[k]);
-                        temp_adv[k] = 0.5f * (tanh_wk + 1.0f);
-                    }
-                    lnn_forward(network, temp_adv, temp_output);
-                    float loss_minus = 0.0f;
-                    for (size_t k = 0; k < 256 && k < input_dim; k++) {
-                        float diff = temp_output[k] - targets[batch_idx * 256 + k];
-                        loss_minus += diff * diff;
-                    }
-                    float l2_minus = 0.0f;
-                    for (size_t k = 0; k < input_dim; k++) {
-                        float diff = temp_adv[k] - sample_in[k];
-                        l2_minus += diff * diff;
-                    }
-                    loss_minus += l2_minus * 0.01f;
-                    
-                    float grad_w = (loss_plus - loss_minus) / (2.0f * eps_finite_diff);
-                    
-                    // 更新w
-                    w[j] = old_w - lr * grad_w;
-                }
-                
-                // 将当前结果映射回[0,1]空间
-                for (size_t j = 0; j < input_dim; j++) {
-                    float tanh_w = tanhf(w[j]);
-                    sample_out[j] = 0.5f * (tanh_w + 1.0f);
-                }
-                
-                // 保存最佳结果
-                float current_loss = l2_dist;
-                if (step == 0 || current_loss < best_loss) {
-                    best_loss = current_loss;
-                    memcpy(best_w, w, input_dim * sizeof(float));
-                }
-            }
-            
-            // 使用最佳w生成最终对抗样本
-            for (size_t j = 0; j < input_dim; j++) {
-                float tanh_w = tanhf(best_w[j]);
-                sample_out[j] = 0.5f * (tanh_w + 1.0f);
-                // 裁剪到有效范围
-                if (sample_out[j] < 0.0f) sample_out[j] = 0.0f;
-                if (sample_out[j] > 1.0f) sample_out[j] = 1.0f;
-            }
-            
-            // 计算最终L2距离
-            for (size_t j = 0; j < input_dim; j++) {
-                float diff = sample_out[j] - sample_in[j];
-                cw_dist += diff * diff;
-            }
-            
-            safe_free((void**)&w);
-            safe_free((void**)&best_w);
-        }
-        
-        // 选择最強攻击（L2距离最大的）
-        float* best_results = fgsm_results;
-        if (pgd_dist > fgsm_dist && pgd_dist > cw_dist) best_results = pgd_results;
-        if (cw_dist > fgsm_dist && cw_dist > pgd_dist) best_results = cw_results;
-        memcpy(adversarial_inputs, best_results, batch_size * input_dim * sizeof(float));
-        
-        safe_free((void**)&fgsm_results);
-        safe_free((void**)&pgd_results);
-        safe_free((void**)&cw_results);
     }
     
     safe_free((void**)&gradient);
     safe_free((void**)&temp_output);
-    safe_free((void**)&perturbed_input);
-    
+    safe_free((void**)&error_vec);
+    safe_free((void**)&hidden_state);
+    safe_free((void**)&cell_state);
     return 0;
 }
 
@@ -1690,7 +1444,6 @@ int advanced_regularizer_apply_switchable_norm(AdvancedRegularizer* regularizer,
                                                size_t batch_size, size_t height, size_t width, size_t channels,
                                                int norm_type, int training) {
     UNUSED(training);
-    (void)regularizer;
     if (!activations || batch_size == 0 || channels == 0) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "应用可切换归一化：无效参数");
@@ -1700,6 +1453,30 @@ int advanced_regularizer_apply_switchable_norm(AdvancedRegularizer* regularizer,
     size_t spatial_size = height * width;
     size_t elements_per_sample = spatial_size * channels;
     float epsilon = 1e-5f;
+
+    /* 从regularizer获取可学习仿射参数（gamma/beta），无regularizer时使用默认值。
+     * R5修复: 首次调用时懒分配gamma/beta (Xavier初始化gamma=1, beta=0) */
+    float* gamma = NULL;
+    float* beta = NULL;
+    if (regularizer && regularizer->config.type == ADV_REG_SWITCHABLE_NORM) {
+        /* 懒分配：首次调用或通道数变化时重新分配 */
+        if (!regularizer->switchable_norm_gamma || 
+            regularizer->switchable_norm_channels != channels) {
+            safe_free((void**)&regularizer->switchable_norm_gamma);
+            safe_free((void**)&regularizer->switchable_norm_beta);
+            regularizer->switchable_norm_gamma = (float*)safe_malloc(channels * sizeof(float));
+            regularizer->switchable_norm_beta = (float*)safe_malloc(channels * sizeof(float));
+            if (regularizer->switchable_norm_gamma && regularizer->switchable_norm_beta) {
+                for (size_t c = 0; c < channels; c++) {
+                    regularizer->switchable_norm_gamma[c] = 1.0f;  /* Xavier近似: gamma=1 */
+                    regularizer->switchable_norm_beta[c] = 0.0f;   /* 零初始化 */
+                }
+                regularizer->switchable_norm_channels = channels;
+            }
+        }
+        gamma = regularizer->switchable_norm_gamma;
+        beta = regularizer->switchable_norm_beta;
+    }
     
     if (norm_type == 0) {
         // 批量归一化（BN）：在(N, H, W)维度归一化，每个通道独立
@@ -1904,6 +1681,19 @@ int advanced_regularizer_apply_switchable_norm(AdvancedRegularizer* regularizer,
         safe_free((void**)&bn_out);
         safe_free((void**)&in_out);
         safe_free((void**)&ln_out);
+    }
+
+    /* 仿射变换：y = gamma * x + beta，每通道可学习参数 */
+    for (size_t n = 0; n < batch_size; n++) {
+        size_t sample_offset = n * elements_per_sample;
+        for (size_t c = 0; c < channels; c++) {
+            size_t ch_offset = sample_offset + c * spatial_size;
+            float g = gamma ? gamma[c] : 1.0f;
+            float b = beta ? beta[c] : 0.0f;
+            for (size_t s = 0; s < spatial_size; s++) {
+                activations[ch_offset + s] = activations[ch_offset + s] * g + b;
+            }
+        }
     }
     
     return 0;

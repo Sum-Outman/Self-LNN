@@ -245,7 +245,15 @@ static void pipeline_apply_optimizer(TrainingPipeline* pipeline, LNN* network, f
         optimizer_step(pipeline->optimizer, biases, bgrads, bc, step);
     }
     pipeline->optimizer_step++;
-    (void)lr;
+
+    /* 若优化器未初始化lr或lr为0，动态设置优化器学习率 */
+    OptimizerConfig opt_cfg;
+    if (optimizer_get_config(pipeline->optimizer, &opt_cfg) == 0) {
+        if (opt_cfg.learning_rate <= 1e-10f && lr > 1e-10f) {
+            opt_cfg.learning_rate = lr;
+            optimizer_set_config(pipeline->optimizer, &opt_cfg);
+        }
+    }
 }
 
 /** P0-BPTT: 统一使用Adam自适应学习率更新cell级参数，消除与主优化器的分裂 */
@@ -254,19 +262,24 @@ static void pipeline_apply_cell_gradients_adam(TrainingPipeline* pipeline) {
     if (!pipeline->optimizer) {
         cfc_apply_cell_gradients(pipeline->network->cfc_network,
             pipeline->network->config.learning_rate);
-        return;
+    } else {
+        OptimizerConfig opt_cfg;
+        if (optimizer_get_config(pipeline->optimizer, &opt_cfg) != 0) {
+            cfc_apply_cell_gradients(pipeline->network->cfc_network,
+                pipeline->network->config.learning_rate);
+        } else {
+            size_t t = pipeline->optimizer_step > 0 ? pipeline->optimizer_step : 1;
+            cfc_apply_cell_gradients_adam(pipeline->network->cfc_network,
+                pipeline->network->config.learning_rate,
+                opt_cfg.beta1, opt_cfg.beta2, opt_cfg.epsilon, t);
+        }
     }
-    OptimizerConfig opt_cfg;
-    if (optimizer_get_config(pipeline->optimizer, &opt_cfg) != 0) {
-        cfc_apply_cell_gradients(pipeline->network->cfc_network,
-            pipeline->network->config.learning_rate);
-        return;
-    }
-    size_t t = pipeline->optimizer_step > 0 ? pipeline->optimizer_step : 1;
-    cfc_apply_cell_gradients_adam(pipeline->network->cfc_network,
-        pipeline->network->config.learning_rate,
-        opt_cfg.beta1, opt_cfg.beta2, opt_cfg.epsilon, t);
+    /* R5-FATAL1: 统一更新W_out输出投影参数。cfc_apply_out_proj_gradients内部有
+     * output_size==hidden_size的guard，无W_out时自动跳过，对所有调用路径安全。 */
+    cfc_apply_out_proj_gradients(pipeline->network->cfc_network,
+        pipeline->network->config.learning_rate);
 }
+
 
 /** 梯度稳定性分析与滤波 */
 static void pipeline_apply_laplace_enhancement(TrainingPipeline* pipeline, LNN* network) {
@@ -995,8 +1008,10 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     tp->convergence_max_patience = (tp->config.early_stopping_patience > 0)
         ? tp->config.early_stopping_patience : 10;     /**< 默认早停耐心为10 */
 
-    /* ZSFX-P0: BPTT配置默认值（序列训练时自动启用） */
-    tp->bptt_enabled = 0;
+    /* R3P2修复: BPTT默认启用，序列训练时保持跨时间步隐藏状态连续性。
+     * 多模态/深度训练阶段使用BPTT展开（unroll_steps=4），
+     * 非BPTT阶段（预训练/微调）自动关闭BPTT不留状态。 */
+    tp->bptt_enabled = 1;
     tp->bptt_unroll_steps = 4;
 
     tp->monitor = training_monitor_create("selflnn_training",
@@ -1275,9 +1290,22 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
     if (warmup_steps < 10) warmup_steps = 10;
     size_t current_step_in_epoch = 0;
 
+    /* R5-FATAL2修复: bptt_step_count必须在循环外声明，保持跨batch的BPTT状态连续性 */
+    size_t bptt_step_count = 0;
+
     for (size_t i = 0; i < samples_this_epoch; i += batch_samples) {
         size_t actual_batch = (i + batch_samples <= samples_this_epoch) ? batch_samples : (samples_this_epoch - i);
         float batch_loss = 0.0f;
+
+        /* R3P2修复: BPTT状态持久化 —— 序列训练时保持跨时间步的隐藏状态连续性。
+         * 非BPTT模式（预训练/微调）每次前向传播重置hidden_state；
+         * BPTT模式（多模态/深度训练）在unroll窗口内保持hidden_state连续性。 */
+        int use_bptt = pipeline->bptt_enabled && 
+                       (stage == TRAIN_STAGE_MULTIMODAL || stage == TRAIN_STAGE_DEEP_TRAIN);
+        if (i == 0 || (use_bptt && bptt_step_count >= (size_t)pipeline->bptt_unroll_steps)) {
+            cfc_reset(pipeline->network->cfc_network);
+            bptt_step_count = 0;
+        }
 
         /* FIX-011: 每批次开始前清零网络级梯度缓冲区（支持批量梯度累加） */
         /* P0-002: 同时清零cell各级梯度缓冲区（gate/tau等），改为用+=在batch内累积 */
@@ -1392,6 +1420,7 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 lnn_backward_accumulate(pipeline->network, target, &loss);
             }
             batch_loss += loss;
+            if (use_bptt) bptt_step_count++;
         }
 
         /* FIX-010: 优化器在每个batch结束后统一调用一次（而非每个样本后），
@@ -1552,6 +1581,7 @@ int pipeline_multimodal_train_step(TrainingPipeline* pipeline,
         if (pipeline->network->cfc_network->weight_gradients)
             memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
         if (pipeline->network->cfc_network->bias_gradients)
+    cfc_zero_cell_gradients(pipeline->network->cfc_network);
             memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
     }
 
@@ -1630,6 +1660,7 @@ int pipeline_local_train(TrainingPipeline* pipeline, const char* module_name,
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
+        cfc_zero_cell_gradients(pipeline->network->cfc_network);
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
         }
         float epoch_loss = 0.0f;
@@ -1899,6 +1930,8 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                     memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
                 if (pipeline->network->cfc_network->bias_gradients)
                     memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+                /* R6修复: 每批次清零cell内部梯度 */
+                cfc_zero_cell_gradients(pipeline->network->cfc_network);
             }
 
             for (size_t b = 0; b < current_batch; b++) {
@@ -2026,6 +2059,7 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
                 if (pipeline->network->cfc_network->weight_gradients)
                     memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
                 if (pipeline->network->cfc_network->bias_gradients)
+            cfc_zero_cell_gradients(pipeline->network->cfc_network);
                     memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
             }
 
@@ -2157,6 +2191,7 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
+        cfc_zero_cell_gradients(pipeline->network->cfc_network);
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
         }
 
@@ -2276,6 +2311,7 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
+        cfc_zero_cell_gradients(pipeline->network->cfc_network);
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
         }
 
@@ -2391,6 +2427,7 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
+        cfc_zero_cell_gradients(pipeline->network->cfc_network);
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
         }
 

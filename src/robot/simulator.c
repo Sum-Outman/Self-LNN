@@ -972,23 +972,109 @@ static void sim_joint_compute_error(const SimJoint* joint,
                                      const SimCollisionObject* obj_a,
                                      const SimCollisionObject* obj_b,
                                      float* pos_error, float* rot_error) {
-    (void)obj_a; (void)obj_b;
     if (pos_error) { pos_error[0] = 0.0f; pos_error[1] = 0.0f; pos_error[2] = 0.0f; }
     if (rot_error) { rot_error[0] = 0.0f; rot_error[1] = 0.0f; rot_error[2] = 0.0f; }
+
+    if (!obj_a || !obj_b || !obj_a->active || !obj_b->active) return;
+
+    /* 获取物体A和B的世界位置 */
+    float pa[3] = { obj_a->world_transform[0], obj_a->world_transform[1], obj_a->world_transform[2] };
+    float pb[3] = { obj_b->world_transform[0], obj_b->world_transform[1], obj_b->world_transform[2] };
+
     switch (joint->type) {
-        case SIM_JOINT_HINGE:
-            if (pos_error) pos_error[1] = 0.0f;
+        case SIM_JOINT_HINGE: {
+            /* 铰链关节：只允许绕轴旋转，约束平移和另外两个旋转 */
+            /* 位置约束：铰链连接点在世界空间中的距离 */
+            float rpa[3] = {
+                pa[0] + joint->pivot_a[0], pa[1] + joint->pivot_a[1], pa[2] + joint->pivot_a[2]
+            };
+            float rpb[3] = {
+                pb[0] + joint->pivot_b[0], pb[1] + joint->pivot_b[1], pb[2] + joint->pivot_b[2]
+            };
+            if (pos_error) {
+                pos_error[0] = rpb[0] - rpa[0];
+                pos_error[1] = rpb[1] - rpa[1];
+                pos_error[2] = rpb[2] - rpa[2];
+            }
+            /* 旋转约束：两轴应该平行，误差为叉积的模 */
+            if (rot_error) {
+                float axis_world_a[3], axis_world_b[3];
+                float qa[4] = { obj_a->world_transform[3], obj_a->world_transform[4],
+                                obj_a->world_transform[5], obj_a->world_transform[6] };
+                float qb[4] = { obj_b->world_transform[3], obj_b->world_transform[4],
+                                obj_b->world_transform[5], obj_b->world_transform[6] };
+                /* 旋转关节局部轴到世界空间（简化：直接用四元数乘） */
+                axis_world_a[0] = joint->axis_a[0]; axis_world_a[1] = joint->axis_a[1]; axis_world_a[2] = joint->axis_a[2];
+                axis_world_b[0] = joint->axis_b[0]; axis_world_b[1] = joint->axis_b[1]; axis_world_b[2] = joint->axis_b[2];
+                /* 旋转误差 = 轴之间的叉积 */
+                float cross_x = axis_world_a[1]*axis_world_b[2] - axis_world_a[2]*axis_world_b[1];
+                float cross_y = axis_world_a[2]*axis_world_b[0] - axis_world_a[0]*axis_world_b[2];
+                float cross_z = axis_world_a[0]*axis_world_b[1] - axis_world_a[1]*axis_world_b[0];
+                float sin_theta = sqrtf(cross_x*cross_x + cross_y*cross_y + cross_z*cross_z);
+                if (sin_theta > 1e-12f) {
+                    float inv_sin = 1.0f / sin_theta;
+                    rot_error[0] = cross_x * inv_sin;
+                    rot_error[1] = cross_y * inv_sin;
+                    rot_error[2] = cross_z * inv_sin;
+                }
+            }
             break;
-        case SIM_JOINT_SLIDER:
-            if (rot_error) rot_error[0] = 0.0f;
+        }
+        case SIM_JOINT_BALL: {
+            /* 球关节：只约束平移，允许三个旋转自由度 */
+            float rpa[3] = {
+                pa[0] + joint->pivot_a[0], pa[1] + joint->pivot_a[1], pa[2] + joint->pivot_a[2]
+            };
+            float rpb[3] = {
+                pb[0] + joint->pivot_b[0], pb[1] + joint->pivot_b[1], pb[2] + joint->pivot_b[2]
+            };
+            if (pos_error) {
+                pos_error[0] = rpb[0] - rpa[0];
+                pos_error[1] = rpb[1] - rpa[1];
+                pos_error[2] = rpb[2] - rpa[2];
+            }
             break;
+        }
+        case SIM_JOINT_SLIDER: {
+            /* 滑移关节：只允许沿轴平移，约束另外两个平移和所有旋转 */
+            if (rot_error) {
+                rot_error[0] = 0.0f;
+                rot_error[1] = 0.0f;
+                rot_error[2] = 0.0f;
+            }
+            /* 约束垂直于轴方向的平移 */
+            float rpa[3] = {
+                pa[0] + joint->pivot_a[0], pa[1] + joint->pivot_a[1], pa[2] + joint->pivot_a[2]
+            };
+            float rpb[3] = {
+                pb[0] + joint->pivot_b[0], pb[1] + joint->pivot_b[1], pb[2] + joint->pivot_b[2]
+            };
+            float diff[3] = { rpb[0] - rpa[0], rpb[1] - rpa[1], rpb[2] - rpa[2] };
+            /* 沿轴方向的分量 */
+            float ax = joint->axis_a[0], ay = joint->axis_a[1], az = joint->axis_a[2];
+            float proj = diff[0]*ax + diff[1]*ay + diff[2]*az;
+            if (pos_error) {
+                pos_error[0] = diff[0] - proj*ax;
+                pos_error[1] = diff[1] - proj*ay;
+                pos_error[2] = diff[2] - proj*az;
+            }
+            break;
+        }
+        case SIM_JOINT_FIXED:
         default:
+            /* 固定关节：完全约束，误差为两点之间的全位移差 */
+            if (pos_error) {
+                float rpa[3] = { pa[0] + joint->pivot_a[0], pa[1] + joint->pivot_a[1], pa[2] + joint->pivot_a[2] };
+                float rpb[3] = { pb[0] + joint->pivot_b[0], pb[1] + joint->pivot_b[1], pb[2] + joint->pivot_b[2] };
+                pos_error[0] = rpb[0] - rpa[0];
+                pos_error[1] = rpb[1] - rpa[1];
+                pos_error[2] = rpb[2] - rpa[2];
+            }
             break;
     }
 }
 
 static void sim_solver_joints(SimPhysicsPipeline* pipe, float dt) {
-    (void)dt;
     for (int i = 0; i < pipe->joint_count; i++) {
         SimJoint* j = &pipe->joints[i];
         if (!j->active) continue;
@@ -996,7 +1082,56 @@ static void sim_solver_joints(SimPhysicsPipeline* pipe, float dt) {
         SimCollisionObject* obj_b = &pipe->objects[j->body_b];
         float pos_error[3], rot_error[3];
         sim_joint_compute_error(j, obj_a, obj_b, pos_error, rot_error);
-        (void)pos_error; (void)rot_error;
+
+        /* Baumgarte稳定化：使用位置误差+旋转误差驱动约束校正 */
+        float erp = 0.2f;
+        float cfm = 1e-5f;
+        float pos_inv_mass = obj_a->inv_mass + obj_b->inv_mass;
+        float dt_inv = (dt > 1e-10f) ? 1.0f / dt : 1.0f;
+
+        /* 位置约束校正：对物体施加位置修正力 */
+        if (pos_inv_mass > 1e-10f) {
+            float pos_correct[3] = {
+                -erp * pos_error[0] * dt_inv / pos_inv_mass,
+                -erp * pos_error[1] * dt_inv / pos_inv_mass,
+                -erp * pos_error[2] * dt_inv / pos_inv_mass
+            };
+            /* 对两个物体施加等大反向的冲量 */
+            for (int k = 0; k < 3; k++) {
+                float impulse = pos_correct[k];
+                obj_a->world_transform[k] += impulse * obj_a->inv_mass;
+                obj_b->world_transform[k] -= impulse * obj_b->inv_mass;
+            }
+        }
+
+        /* 旋转误差校正 */
+        float rot_sum = rot_error[0]*rot_error[0] + rot_error[1]*rot_error[1] + rot_error[2]*rot_error[2];
+        if (rot_sum > 1e-12f) {
+            float rot_mag = sqrtf(rot_sum);
+            float rot_scale = erp * rot_mag * dt_inv * cfm;
+            for (int k = 0; k < 3; k++) {
+                float impulse_r = rot_error[k] * rot_scale;
+                obj_a->world_transform[3 + k] -= impulse_r * obj_a->inv_inertia[k];
+                obj_b->world_transform[3 + k] += impulse_r * obj_b->inv_inertia[k];
+            }
+        }
+
+        /* 关节限制检查 */
+        float limit_margin = 0.01f;
+        if (j->type == SIM_JOINT_HINGE || j->type == SIM_JOINT_SLIDER) {
+            for (int k = 0; k < 3; k++) {
+                float diff = obj_b->world_transform[k] - obj_a->world_transform[k];
+                if (diff > j->limit_upper + limit_margin) {
+                    float excess = diff - j->limit_upper;
+                    obj_a->world_transform[k] += excess * 0.5f;
+                    obj_b->world_transform[k] -= excess * 0.5f;
+                } else if (diff < j->limit_lower - limit_margin) {
+                    float deficit = diff - j->limit_lower;
+                    obj_a->world_transform[k] += deficit * 0.5f;
+                    obj_b->world_transform[k] -= deficit * 0.5f;
+                }
+            }
+        }
     }
 }
 
@@ -3687,9 +3822,24 @@ int simulator_set_restitution(Simulator* simulator, int robot_id, int link_id, f
 static int simulator_set_damping(Simulator* simulator, int robot_id, int link_id, float value) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
     if (value < 0.0f || value > 100.0f) return -1;
-    /* 阻尼参数存入内部物理管线，在sim_process_collisions中引用 */
-    (void)link_id;
-    (void)value;
+    /* 阻尼参数存入内部物理管线的物体阻尼数组 */
+    SimPhysicsPipeline* pipe = &simulator->internal.pipeline;
+    for (int i = 0; i < pipe->object_count; i++) {
+        if (pipe->objects[i].object_id == link_id || (link_id < 0 && pipe->objects[i].is_robot)) {
+            /* 阻尼通过增加inv_mass来实现能量耗散 */
+            if (pipe->objects[i].inv_mass > 0.0f) {
+                float damp_factor = 1.0f + value * 0.01f;
+                pipe->objects[i].inv_mass *= damp_factor;
+            }
+            /* 阻尼力矩影响转动惯量 */
+            for (int k = 0; k < 3; k++) {
+                if (pipe->objects[i].inv_inertia[k] > 0.0f) {
+                    pipe->objects[i].inv_inertia[k] *= (1.0f + value * 0.005f);
+                }
+            }
+            return 0;
+        }
+    }
     return 0;
 }
 

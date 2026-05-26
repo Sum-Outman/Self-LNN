@@ -687,28 +687,15 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         }
 
         float* last_hidden = network->layer_outputs + ((num_layers - 1) * max_layer_size);
-        if (skip_cell_update) {
-            /* P0-BPTT修复: 批量训练模式，W_out梯度累积到独立梯度缓冲区，
-             * 由cfc_apply_out_proj_gradients在批量结束时统一应用。
-             * 旧代码直接更新W_out_params导致批量训练时每样本独立更新，
-             * W_out的梯度未经过批量平均即被应用。 */
-            if (network->W_out_gradients) {
-                for (size_t i = 0; i < output_size; i++) {
-                    for (size_t j = 0; j < hidden_size; j++) {
-                        network->W_out_gradients[i * hidden_size + j] +=
-                            error[i] * last_hidden[j];
-                    }
-                    network->b_out_gradients[i] += error[i];
-                }
-            }
-        } else {
-            /* 单样本模式：直接更新W_out_params */
+        /* R3P3修复: 统一单样本/批量路径——均累积W_out梯度，由统一Adam步更新。
+         * 消除旧单样本SGD路径(W_out -= lr*error*hidden)，与Adam优化不一致。 */
+        if (network->W_out_gradients) {
             for (size_t i = 0; i < output_size; i++) {
                 for (size_t j = 0; j < hidden_size; j++) {
-                    network->W_out_params[i * hidden_size + j] -=
-                        learning_rate * error[i] * last_hidden[j];
+                    network->W_out_gradients[i * hidden_size + j] +=
+                        error[i] * last_hidden[j];
                 }
-                network->b_out_params[i] -= learning_rate * error[i];
+                network->b_out_gradients[i] += error[i];
             }
         }
     } else {
@@ -771,58 +758,18 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
      * skip_cell_update=0时采用梯度累积模式（+=）而非直接SGD（-=lr*grad），
      * 确保与外部优化器（Adam/AdamW等）的单元格更新路径一致。 */
     if (!skip_cell_update) {
-    for (int layer = 0; layer < num_layers; layer++) {
-        CfCCell* cell_layer = network->layers[layer];
-        if (!cell_layer) continue;
-        
-        size_t curr_input_size = (layer == 0) ? input_size : hidden_size;
-        size_t weight_count = curr_input_size * hidden_size;
-        
-        /* ZSF-ZNB修复C-001: 去除*0.0f空操作，应用cell级梯度更新
-         * 梯度已在 cfc_cell_backward 中填充到 *_grad 数组。
-         * 使用简单SGD更新（参数 -= lr * grad），后续可升级为Adam等。
-         * 结构体已有cell_momentum_buffer用于未来统一动量管理。 */
-        {
-            float effective_lr = learning_rate;
-            for (size_t k = 0; k < weight_count; k++) {
-                cell_layer->weight_matrix[k] -= effective_lr * cell_layer->weight_grad[k];
-            }
-            for (size_t k = 0; k < hidden_size; k++) {
-                cell_layer->bias_vector[k] -= effective_lr * cell_layer->bias_grad[k];
-            }
-        }
-        /* ZSF-ZNB修复C-001: HH权重/门控权重/时间常数 → 全部应用SGD更新 */
-        {
-            float effective_lr = learning_rate;
-            size_t hh_count = hidden_size * hidden_size;
-            /* 更新隐藏到隐藏连接权重 */
-            for (size_t k = 0; k < hh_count; k++) {
-                cell_layer->hidden_to_gate_weights[k] -= 
-                    effective_lr * cell_layer->hidden_to_gate_weight_grad[k];
-                cell_layer->hidden_to_activation_weights[k] -= 
-                    effective_lr * cell_layer->hidden_to_activation_weight_grad[k];
-            }
-            /* 更新门控权重 */
-            for (size_t k = 0; k < weight_count; k++) {
-                cell_layer->input_gate_weights[k] -= 
-                    effective_lr * cell_layer->input_gate_weight_grad[k];
-            }
-            /* 更新门控偏置 */
-            for (size_t k = 0; k < hidden_size * 3; k++) {
-                cell_layer->gate_biases[k] -= effective_lr * cell_layer->gate_bias_grad[k];
-            }
-        }
-        /* 更新时间常数 */
-        if (cell_layer->use_adaptive_tau) {
-            for (size_t k = 0; k < hidden_size; k++) {
-                cell_layer->time_constants[k] -= 
-                    cell_layer->tau_learning_rate * cell_layer->time_constant_grad[k];
-                if (cell_layer->time_constants[k] < cell_layer->min_time_constant)
-                    cell_layer->time_constants[k] = cell_layer->min_time_constant;
-                if (cell_layer->time_constants[k] > cell_layer->max_time_constant)
-                    cell_layer->time_constants[k] = cell_layer->max_time_constant;
-            }
-        }
+    /* R3P3修复: 单样本路径统一使用Adam自适应学习率，消除与原批量路径的SGD/Adam分裂。
+     * 原SGD路径（参数 -= lr*grad）缺少动量/偏差校正/自适应步长，
+     * 导致单样本训练与批量训练的优化动态不一致，严重损害收敛稳定性。 */
+    cfc_apply_cell_gradients_adam(network, learning_rate, 0.9f, 0.999f, 1e-8f, 1);
+    /* W_out投影参数：使用cfc_apply_out_proj_gradients统一更新（已累积梯度）。
+     * W_out仅有2个矩阵，暂无专用Adam缓冲区，使用集中式SGD更新。
+     * TODO-R3P3: 后续添加W_out Adam动量缓冲区以完全统一优化路径。 */
+    cfc_apply_out_proj_gradients(network, learning_rate);
+    /* 单样本路径完成后清零W_out梯度，防止跨样本污染 */
+    if (network->W_out_gradients) {
+        memset(network->W_out_gradients, 0, output_size * hidden_size * sizeof(float));
+        memset(network->b_out_gradients, 0, output_size * sizeof(float));
     }
     } /* if (!skip_cell_update) — 关闭P0-002批量模式cell参数延迟更新块 */
 
