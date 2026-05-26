@@ -991,38 +991,43 @@ int robot_execute_trajectory(Robot* robot, const float* waypoints,
     SELFLNN_CHECK(num_waypoints > 0, SELFLNN_ERROR_INVALID_ARGUMENT,
                  "轨迹点数量无效: %zu", num_waypoints);
     
-    (void)velocities;      // 消除未使用参数警告
-    (void)num_velocities;  // 消除未使用参数警告
-    
-    // 完整工业级轨迹规划实现：样条插值 + S曲线速度规划
-    // 支持多段轨迹、连续性和同步控制
-    
-    // 检查轨迹内存分配
-    size_t max_trajectory_points = 1000; // 最大轨迹点数
-    size_t points_per_segment = 100;     // 每段轨迹的点数
+    // 工业级轨迹规划参数
+    const float default_velocity_limit = 1.0f;   // 默认速度限制 (m/s)
+    const float jerk_limit = 10.0f;      // 加加速度限制 (m/s³)
+    const float acceleration_limit = 2.0f; // 加速度限制 (m/s²)
+
+    /* ZSFWS-R002修复: 真实使用调用者传入的速度参数进行轨迹速度规划
+     * 原代码用 (void)velocities/(void)num_velocities 丢弃传入速度，
+     * 使用硬编码默认速度限制,导致外部指令速度参数完全无效。
+     * 修复: 传入速度数组有效时,动态计算有效速度限制替代硬编码常量。 */
+    float effective_velocity_limit = default_velocity_limit;
+    if (velocities && num_velocities > 0) {
+        float vel_sum_sq = 0.0f;
+        size_t vel_count = num_velocities > 100 ? 100 : num_velocities;
+        for (size_t vi = 0; vi < vel_count; vi++) {
+            vel_sum_sq += velocities[vi] * velocities[vi];
+        }
+        float vel_rms = sqrtf(vel_sum_sq / (float)vel_count);
+        effective_velocity_limit = (vel_rms > default_velocity_limit) ?
+            ((vel_rms < 5.0f) ? vel_rms : 5.0f) : default_velocity_limit;
+    }
+
+    /* 检查轨迹内存分配 */
+    size_t max_trajectory_points = 1000;
+    size_t points_per_segment = 100;
     size_t total_points = num_waypoints * points_per_segment;
-    
     if (total_points > max_trajectory_points) {
         total_points = max_trajectory_points;
         points_per_segment = total_points / num_waypoints;
         if (points_per_segment < 10) points_per_segment = 10;
     }
-    
-    // 分配或重新分配轨迹缓冲区
     if (!robot->joint_trajectory || robot->trajectory_size < total_points * 3) {
         safe_free((void**)&robot->joint_trajectory);
         robot->joint_trajectory = (float*)safe_malloc(total_points * 3 * sizeof(float));
-        if (!robot->joint_trajectory) {
-            return SELFLNN_ERROR_OUT_OF_MEMORY;
-        }
+        if (!robot->joint_trajectory) return SELFLNN_ERROR_OUT_OF_MEMORY;
         robot->trajectory_size = total_points * 3;
     }
-    
-    // 工业级轨迹规划参数
-    const float jerk_limit = 10.0f;      // 加加速度限制 (m/s³)
-    const float acceleration_limit = 2.0f; // 加速度限制 (m/s²)
-    const float velocity_limit = 1.0f;   // 速度限制 (m/s)
-    
+
     // 1. 路径生成：完整三次样条插值（工业级实现）
     // 使用自然三次样条（natural cubic spline）：二阶导数边界条件为零
     // 算法：三弯矩法（tridiagonal matrix algorithm）求解二阶导数
@@ -1228,9 +1233,9 @@ int robot_execute_trajectory(Robot* robot, const float* waypoints,
         }
         
         // S曲线参数
-        float accel_time = velocity_limit / acceleration_limit;
-        float decel_time = velocity_limit / acceleration_limit;
-        float cruise_time = (total_path_length / velocity_limit) - accel_time - decel_time;
+        float accel_time = effective_velocity_limit / acceleration_limit;
+        float decel_time = effective_velocity_limit / acceleration_limit;
+        float cruise_time = (total_path_length / effective_velocity_limit) - accel_time - decel_time;
         if (cruise_time < 0) cruise_time = 0;
         
         // 计算每个点的时间戳（基于S曲线）
@@ -1257,11 +1262,11 @@ int robot_execute_trajectory(Robot* robot, const float* waypoints,
                     current_velocity = acceleration_limit * current_time;
                 } else if (current_time < accel_time + cruise_time) {
                     // 匀速段
-                    current_velocity = velocity_limit;
+                    current_velocity = effective_velocity_limit;
                 } else {
                     // 减速段
                     float time_in_decel = current_time - (accel_time + cruise_time);
-                    current_velocity = velocity_limit - acceleration_limit * time_in_decel;
+                    current_velocity = effective_velocity_limit - acceleration_limit * time_in_decel;
                     if (current_velocity < 0) current_velocity = 0;
                 }
                 
@@ -1784,16 +1789,6 @@ int robot_is_hardware_enabled(const Robot* robot) {
         return -1;
     }
     return robot->hardware_enabled ? 1 : 0;
-}
-
-/**
- * @brief P0-007修复: simulation_mode已移除，无硬件时始终返回错误
- * @deprecated 不再支持仿真模式，无硬件连接时所有传感器数据返回错误
- */
-int robot_set_simulation_mode(Robot* robot, int enable) {
-    (void)robot;
-    (void)enable;
-    return -1;
 }
 
 int robot_is_simulation_data_unsafe(Robot* robot) {

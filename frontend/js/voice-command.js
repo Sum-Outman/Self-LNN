@@ -6,7 +6,7 @@
 
 class VoiceCommandSystem {
     constructor() {
-        this._capturer = new VoiceCaptureUtil({ maxDuration: 15000 });
+        this._capturer = new window.VoiceCaptureUtil({ maxDuration: 15000 });
         this._capturer.onStart = function() {
             this.isProcessing = false;
             if (this.onRecordingStart) this.onRecordingStart();
@@ -68,7 +68,7 @@ class VoiceCommandSystem {
             return;
         }
         try {
-            var uploadResult = await VoiceCaptureUtil.uploadBlob(audioBlob);
+            var uploadResult = await window.VoiceCaptureUtil.uploadBlob(audioBlob);
             /* F-004修复: 严格区分三层返回状态：API失败 / 识别无内容 / 识别成功 */
             if (!uploadResult.success) {
                 if (this.onCommandResult) {
@@ -411,17 +411,17 @@ class CommandEngine {
     async _callSystemApi(action, params) {
         if (!window.SelfLnnApi) return { success: false, error: '系统API服务未加载' };
         const apiMap = {
-            'launch_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand({action:'launch_app',name:params.name}) : null,
-            'close_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand({action:'close_app',name:params.name}) : null,
-            'type_text': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand({action:'type_text',text:params.text}) : null,
-            'screenshot': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('screenshot',{}) : null,
-            'restart': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('restart',{}) : null,
-            'shutdown': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('shutdown',{}) : null,
-            'sleep': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('sleep',{}) : null,
-            'lock': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('lock',{}) : null,
-            'volume_up': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('volume_up',{value:params.value}) : null,
-            'volume_down': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('volume_down',{value:params.value}) : null,
-            'mute_toggle': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('mute_toggle',{}) : null,
+            'launch_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('launch_app', {name:params.name}) : null,
+            'close_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('close_app', {name:params.name}) : null,
+            'type_text': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('type_text', {text:params.text}) : null,
+            'screenshot': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','screenshot',{}) : null,
+            'restart': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','restart',{}) : null,
+            'shutdown': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','shutdown',{}) : null,
+            'sleep': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','sleep',{}) : null,
+            'lock': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','lock',{}) : null,
+            'volume_up': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','volume_up',{value:params.value}) : null,
+            'volume_down': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','volume_down',{value:params.value}) : null,
+            'mute_toggle': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','mute_toggle',{}) : null,
             'start_training': async () => window.SelfLnnApi.startTraining ? await window.SelfLnnApi.startTraining(params) : null,
             'stop_training': async () => window.SelfLnnApi.stopTrainingJob ? await window.SelfLnnApi.stopTrainingJob() : null,
             'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : null,

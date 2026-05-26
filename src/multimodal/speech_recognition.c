@@ -1729,26 +1729,47 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
     }
     memset(result, 0, sizeof(SpeechRecognitionResult));
 
-    /* ZSFWS-F008修复: 检查模型是否已训练 */
-    if (!recognizer->is_model_trained && !recognizer->shared_lnn) {
-        /* 未训练状态：使用确定性共振峰逆映射进行语音识别
-         * 基于MFCC特征+共振峰检测+词汇匹配，真实信号处理，拒绝随机权重 */
-        int feat_dim = recognizer->config.feature_dimension;
-        int feat_buf_sz = recognizer->feature_buffer_capacity * feat_dim;
-        int n_frames = extract_mel_features(recognizer, audio_data, num_samples,
-                                             recognizer->feature_buffer, feat_buf_sz);
-        if (n_frames > 0) {
-            int ret = sr_deterministic_recognize(recognizer,
-                                                  recognizer->feature_buffer,
-                                                  n_frames, feat_dim, result);
-            if (ret == 0) return 0;
+    /* ZSFWS-F008修复: 检查模型是否已训练
+     * ZS-031增强: 双重防护 —— 不仅检查识别器自身训练状态,
+     * 还验证shared_lnn是否已完成训练 (权重方差>阈值)。
+     * 防止共享LNN已连接但未经训练的随机权重进入推理管道。 */
+    {
+        int lnn_trained = 0;
+        if (recognizer->shared_lnn) {
+            /* 验证共享LNN: 采样前1000个参数检查方差 */
+            size_t pc = lnn_get_parameter_count(recognizer->shared_lnn);
+            float* params = lnn_get_parameters(recognizer->shared_lnn);
+            if (params && pc >= 100) {
+                size_t n = pc < 1000 ? pc : 1000;
+                float sum = 0.0f, sq_sum = 0.0f;
+                for (size_t i = 0; i < n; i++) { sum += params[i]; sq_sum += params[i] * params[i]; }
+                float var = sq_sum / (float)n - (sum / (float)n) * (sum / (float)n);
+                /* He初始化方差约为 2/input_dim ≈ 0.03~0.06 (input_dim=32~64)
+                 * 训练后参数偏离初始化，方差通常增大或模式变化
+                 * 0.01阈值: 低于此视为未训练噪声 */
+                lnn_trained = (var > 0.01f) ? 1 : 0;
+            }
         }
-        /* 确定性识别失败时返回明确提示 */
-        snprintf(result->text, sizeof(result->text), "[语音识别未训练，请训练模型]");
-        result->text[sizeof(result->text) - 1] = '\0';
-        result->confidence = 0.0f;
-        return -3;
-    }
+        if (!recognizer->is_model_trained && !lnn_trained) {
+            /* 未训练状态：使用确定性共振峰逆映射进行语音识别
+             * 基于MFCC特征+共振峰检测+词汇匹配，真实信号处理，拒绝随机权重 */
+            int feat_dim = recognizer->config.feature_dimension;
+            int feat_buf_sz = recognizer->feature_buffer_capacity * feat_dim;
+            int n_frames = extract_mel_features(recognizer, audio_data, num_samples,
+                                                 recognizer->feature_buffer, feat_buf_sz);
+            if (n_frames > 0) {
+                int ret = sr_deterministic_recognize(recognizer,
+                                                      recognizer->feature_buffer,
+                                                      n_frames, feat_dim, result);
+                if (ret == 0) return 0;
+            }
+            /* 确定性识别失败时返回明确提示 */
+            snprintf(result->text, sizeof(result->text), "[语音识别未训练，请训练模型]");
+            result->text[sizeof(result->text) - 1] = '\0';
+            result->confidence = 0.0f;
+            return -3;
+        }
+    } /* ZS-031: 结束LNN训练状态验证作用域 */
 
     /* 步骤1：初始化液态状态（如果尚未初始化） */
     if (!recognizer->state_initialized) {

@@ -114,6 +114,7 @@ struct OcrProcessor {
     int use_enhanced_segmentation;       /**< 是否使用增强分割 */
     void* cfc_ocr_net;                   /**< CfC-LNN OCR网络句柄（单一模型共享） */
     int use_cfc_ocr;                     /**< F-011: 优先使用CfC-LNN OCR网络识别 */
+    int cfc_ocr_is_trained;              /**< ZSFWS-M006: CfC OCR网络是否已完成训练 */
     OcrCnnClassifier* cnn_classifier;    /**< CNN字符分类器（优先使用，回退到模板匹配） */
     /* H-002: N-gram语言模型存储 */
     void* lm_ngram_table;                /**< N-gram频率表（OcrNgram*） */
@@ -2272,8 +2273,8 @@ int ocr_recognize_chars(OcrProcessor* processor,
     
     memset(result, 0, sizeof(CharRecognitionResult));
     
-    /* F-011修复: 若已启用CfC OCR网络模式，优先使用LNN识别替代硬编码模板 */
-    if (processor->use_cfc_ocr && processor->cfc_ocr_net) {
+    /* F-011修复: 若已启用CfC OCR网络模式且已完成训练，优先使用LNN识别 */
+    if (processor->use_cfc_ocr && processor->cfc_ocr_net && processor->cfc_ocr_is_trained) {
         float conf = 0.9f;
         char text_buffer[512];
         memset(text_buffer, 0, sizeof(text_buffer));
@@ -2828,6 +2829,7 @@ int ocr_processor_load_model(OcrProcessor* processor, const char* model_path) {
         }
         processor->cfc_ocr_net = loaded_net;
         processor->use_cfc_ocr = 1;
+        processor->cfc_ocr_is_trained = 1; /* ZSFWS-M006: 模型加载成功标记已训练 */
         log_info("[OCR] ocr_processor_load_model: CfC OCR模型加载成功，路径=%s", model_path);
         return 0;
     }
@@ -2978,6 +2980,7 @@ int ocr_processor_train_model(OcrProcessor* processor,
     }
     log_info("[OCR] ocr_processor_train_model: 训练完成，共%d轮，%d个样本",
              num_epochs, num_samples);
+    processor->cfc_ocr_is_trained = 1; /* ZSFWS-M006: 训练完成后标记 */
     return 0;
 }
 

@@ -1030,6 +1030,18 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config);
 void dialogue_gen_free(DialogueGenerator* gen);
 
 /**
+ * ZSFWS-M005: 标记对话生成器已训练
+ * 权重加载或训练完成后调用，解除未训练保护
+ */
+void dialogue_gen_mark_trained(DialogueGenerator* gen);
+
+/**
+ * ZSFWS-M005: 查询对话生成器训练状态
+ * @return 1=已训练, 0=未训练或句柄无效
+ */
+int dialogue_gen_is_trained(const DialogueGenerator* gen);
+
+/**
  * @brief 基于状态生成对话文本
  *
  * 将上下文特征作为初始条件，生成token序列。

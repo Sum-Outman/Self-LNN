@@ -3503,6 +3503,30 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* ZSFWS-R12: 多模态教学 — 前端调用的语义对应/multimodal/teach */
+    async multimodalTeach(params) {
+        try {
+            var resp = await this.request('/multimodal/teach', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(params || {})
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* ZSFWS-R12: 多模态测试 — 运行教学后的验证测试 */
+    async multimodalTest() {
+        try {
+            var resp = await this.request('/multimodal/teach/test', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'test'})
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     // ==================== 自主学习 API ====================
 
     async autoLearnToggle(enabled) {
@@ -4840,6 +4864,21 @@ class ApiService {
         } catch (error) {
             console.error('知识搜索失败:', error);
             return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /* ZSFWS-R12: getKnowledgeBase — 前端fallback分支调用的知识库查询(语义等同/knowledge) */
+    async getKnowledgeBase(params) {
+        try {
+            var queryStr = '';
+            if (params && params.search) queryStr = '?search=' + encodeURIComponent(params.search);
+            if (params && params.type) queryStr += (queryStr ? '&' : '?') + 'type=' + encodeURIComponent(params.type);
+            var resp = await this.request('/knowledge' + queryStr, { method: 'GET' });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) {
+            console.error('getKnowledgeBase失败:', e);
+            return { success: false, error: e.message };
         }
     }
 

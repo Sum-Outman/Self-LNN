@@ -86,6 +86,7 @@ typedef struct {
     size_t last_raw_sizes[SELFLNN_MAX_MODALITIES];      /**< 上次各模态信号维度 */
     float last_combined[SELFLNN_UNIFIED_PROJECTION_DIM];/**< 上次投影求和结果 */
     int last_active_count;                              /**< 上次活跃模态数量 */
+    int is_trained;                                     /**< ZSFWS-S006: 投影权重是否已完成训练 */
 } UnifiedInputState;
 
 /**

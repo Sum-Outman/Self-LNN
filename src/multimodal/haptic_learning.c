@@ -180,9 +180,12 @@ int hl_learn_force_profile(HapticLearner* hl, const float* force_trajectory, int
         if (label) snprintf(hl->grasps[found].object_type, sizeof(hl->grasps[found].object_type), "%s", label);
     }
     if (found >= 0) {
+        /* ZSFWS-S002修复: 使用真实 attempt_count/success_count 比率替代合成数学公式
+         * 原公式 0.5+0.3*(1-1/n) 为虚假收敛估计，与 hl_learn_grasp 的真实比率不一致 */
+        hl->grasps[found].attempt_count++;
         hl->grasps[found].success_count++;
-        int n = hl->grasps[found].success_count;
-        hl->grasps[found].success_rate = 0.5f + 0.3f * (1.0f - 1.0f / (float)n);
+        hl->grasps[found].success_rate = (float)hl->grasps[found].success_count /
+                                         (float)hl->grasps[found].attempt_count;
     }
     return 0;
 }

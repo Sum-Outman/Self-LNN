@@ -34,7 +34,7 @@ class DialogueEnhanced {
         if (this._capturer) { this._capturer.destroy(); this._capturer = null; }
         try {
             if (!micStream) throw new Error('麦克风流不可用');
-            this._capturer = new VoiceCaptureUtil();
+            this._capturer = new window.VoiceCaptureUtil();
             this._capturer.onStart = function() {
                 if (this.onVoiceInputStart) this.onVoiceInputStart();
             }.bind(this);
@@ -42,7 +42,7 @@ class DialogueEnhanced {
                 if (this.onVoiceInputStop) this.onVoiceInputStop();
             }.bind(this);
             this._capturer.onBlobReady = async function(blob) {
-                var result = await VoiceCaptureUtil.uploadBlob(blob);
+                var result = await window.VoiceCaptureUtil.uploadBlob(blob);
                 if (this.onVoiceInputResult) this.onVoiceInputResult(result);
             }.bind(this);
             return this._capturer.start(micStream);

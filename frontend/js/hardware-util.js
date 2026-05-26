@@ -243,8 +243,10 @@ var HardwareScanUtil = {
                 result.supportsCompute = d.supports_compute === true || d.supports_compute === 'true';
                 result.supportsFp16 = d.supports_fp16 === true || d.supports_fp16 === 'true';
                 result.supportsFp64 = d.supports_fp64 === true || d.supports_fp64 === 'true';
+                result.supportsBf16 = d.supports_bf16 === true || d.supports_bf16 === 'true';
                 result.cpuFallback = d.cpu_backend_fallback === true || d.cpu_backend_fallback === 'true';
                 result.health = d.health || '未知';
+                result.isWindows = d.is_windows === true || d.is_windows === 'true';
 
                 result.lines.push('✅ GPU诊断完成');
                 result.lines.push('后端: ' + result.backend);
@@ -253,6 +255,8 @@ var HardwareScanUtil = {
                 result.lines.push('显存: ' + result.totalMemoryMb + ' MB');
                 result.lines.push('计算支持: ' + (result.supportsCompute ? '是' : '否'));
                 result.lines.push('FP16: ' + (result.supportsFp16 ? '是' : '否'));
+                result.lines.push('BF16: ' + (result.supportsBf16 ? '是' : '否') +
+                    (result.isWindows && !result.supportsBf16 ? ' (Windows平台使用float模拟，无真实2字节内存节省)' : ''));
                 result.lines.push('FP64: ' + (result.supportsFp64 ? '是' : '否'));
                 result.lines.push('CPU回退: ' + (result.cpuFallback ? '已启用' : '未启用'));
                 result.lines.push('健康: ' + result.health);

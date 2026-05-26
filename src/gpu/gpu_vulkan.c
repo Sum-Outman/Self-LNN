@@ -71,6 +71,7 @@
 #define VK_FALSE 0
 #define VK_TRUE  1
 #define VK_NULL_HANDLE 0
+#define VK_WHOLE_SIZE (~0ULL)     /* 描述符缓冲区范围：整个缓冲区 */
 
 // Vulkan错误码
 #define VK_SUCCESS                      0
@@ -757,6 +758,18 @@ typedef struct VulkanKernel {
     VulkanContext* vulkan_context;
     char* kernel_name;
     unsigned int workgroup_size[3];
+    /* ZSFWS-S004修复: 描述符集持久化存储
+     * 之前 descriptor_set/descriptor_pool 在管线创建后即被销毁,
+     * 导致内核执行时无法将存储缓冲区绑定到着色器。
+     * 现在持久化保存,执行前通过 vkCmdBindDescriptorSets 绑定。 */
+    VkDescriptorSet descriptor_set;
+    VkDescriptorPool descriptor_pool;
+    unsigned int descriptor_buffer_count;  /* 绑定的缓冲区数量 */
+    /* ZSFWS-S004: 持久化绑定的GPU缓冲区句柄
+     * 每个内核需要访问 input/weight/output 三个StorageBuffer。
+     * 在 dispatch 前通过 vkUpdateDescriptorSets 写入实际 VkBuffer。 */
+    VkBuffer io_buffers[3];        /* [0]=input, [1]=weight, [2]=output */
+    int io_buffers_valid;          /* 缓冲区是否已设置（0=未设置, 1=已设置） */
     
     // 内核参数存储（用于推送常量）
     void* parameters[16];          // 最多16个参数
@@ -2653,7 +2666,6 @@ static int spirv_emit_op(SpirvBuilder* sb, unsigned int opcode, unsigned int wor
 
     /* L-003: 字数范围校验——word_count不能小于固定部分，也不能超出最大支持字数 */
     if (word_count < fixed_words || word_count > (fixed_words + 6)) {
-        sb->error = 1;
         return -1;
     }
 
@@ -3171,8 +3183,10 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
 /**
  * @brief 编译GLSL计算着色器为SPIR-V字节码
  *
- * G-006修复: 优先使用进程内SPIR-V生成器，glslangValidator作为回退方案。
- * 生成器支持matmul、conv2d、elementwise三种内核的完整SPIR-V二进制。
+ * ZSFWS-S003修复: 优先使用进程内SPIR-V生成器，glslangValidator作为回退方案。
+ * 生成器支持matmul、conv2d、elementwise、cfc四种内核的完整SPIR-V二进制。
+ * CfC液态神经网络内核（cfc_ode_step/cfc_forward_step/cfc_liquid_tau等）
+ * 本质是逐元素数学运算（sigmoid/tanh/乘法/加法），基于elementwise SPIR-V模板。
  * 通过SPIR-V Magic Number (0x07230203) 验证生成的二进制有效性。
  *
  * @param glsl_source GLSL源代码（用于解析内核名称）
@@ -3202,6 +3216,16 @@ static unsigned int* compile_glsl_to_spirv(const char* glsl_source, size_t* spir
             } else if (strstr(glsl_source, "conv2d") || strstr(glsl_source, "Conv2D") ||
                        strstr(glsl_source, "in_channels") || strstr(glsl_source, "kernel_h")) {
                 kernel_name = "conv2d";
+            }
+            /* ZSFWS-S003: 检测CfC液态神经网络内核
+             * cfc_ode_step/cfc_forward_step/cfc_liquid_tau/cfc_multi_timescale
+             * 本质是逐元素数学运算（sigmoid/tanh/指数/乘法/加法）
+             * 此类内核的函数体包含 CfC 闭式解的特征运算符 */
+            else if (strstr(glsl_source, "cfc_ode_step") || strstr(glsl_source, "cfc_forward") ||
+                     strstr(glsl_source, "cfc_liquid") || strstr(glsl_source, "cfc_multi") ||
+                     strstr(glsl_source, "cfc_backward") || strstr(glsl_source, "liquid_time") ||
+                     strstr(glsl_source, "CfC") || strstr(glsl_source, "CFC")) {
+                kernel_name = "cfc";
             }
         }
     }
@@ -3474,7 +3498,73 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
         return NULL;
     }
     
-    // 创建管线布局（使用推送常量）
+    // 创建管线布局（使用推送常量 + 描述符集）
+    /* ZSFWS-S004修复: 添加描述符集布局到管线布局
+     * 之前 setLayoutCount=0 导致 SPIR-V 着色器的 StorageBuffer 变量无法绑定,
+     * 所有缓冲区数据仅通过 Push Constants(最大256字节)传递,
+     * 大数据张量(input/output/weight)无法通过着色器访问。
+     * 现在创建3槽位描述符集布局(input=0, weight=1, output=2)并绑定到管线。 */
+    VkDescriptorSetLayoutBinding ds_bindings[3];
+    memset(ds_bindings, 0, sizeof(ds_bindings));
+    for (int i = 0; i < 3; i++) {
+        ds_bindings[i].binding = (unsigned int)i;
+        ds_bindings[i].descriptorType = 7; /* VK_DESCRIPTOR_TYPE_STORAGE_BUFFER */
+        ds_bindings[i].descriptorCount = 1;
+        ds_bindings[i].stageFlags = 0x00000020; /* VK_SHADER_STAGE_COMPUTE_BIT */
+        ds_bindings[i].pImmutableSamplers = NULL;
+    }
+    VkDescriptorSetLayoutCreateInfo ds_layout_info;
+    memset(&ds_layout_info, 0, sizeof(ds_layout_info));
+    ds_layout_info.sType = 0x00000007; /* VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO */
+    ds_layout_info.bindingCount = 3;
+    ds_layout_info.pBindings = ds_bindings;
+    VkDescriptorSetLayout ds_layout = NULL;
+    result = vkCreateDescriptorSetLayout(vulkan_context->device, &ds_layout_info, NULL, &ds_layout);
+    if (result != VK_SUCCESS || !ds_layout) {
+        vkDestroyShaderModule(vulkan_context->device, vulkan_kernel->shader_module, NULL);
+        safe_free((void**)&vulkan_kernel->kernel_name);
+        safe_free((void**)&vulkan_kernel);
+        return NULL;
+    }
+
+    /* 创建描述符池（持久化，内核生命周期内有效） */
+    VkDescriptorPoolSize pool_size;
+    memset(&pool_size, 0, sizeof(pool_size));
+    pool_size.type = 7; /* VK_DESCRIPTOR_TYPE_STORAGE_BUFFER */
+    pool_size.descriptorCount = 3;
+    VkDescriptorPoolCreateInfo dp_info;
+    memset(&dp_info, 0, sizeof(dp_info));
+    dp_info.sType = 0x00000008; /* VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO */
+    dp_info.maxSets = 1;
+    dp_info.poolSizeCount = 1;
+    dp_info.pPoolSizes = &pool_size;
+    result = vkCreateDescriptorPool(vulkan_context->device, &dp_info, NULL, &vulkan_kernel->descriptor_pool);
+    if (result != VK_SUCCESS) {
+        vkDestroyDescriptorSetLayout(vulkan_context->device, ds_layout, NULL);
+        vkDestroyShaderModule(vulkan_context->device, vulkan_kernel->shader_module, NULL);
+        safe_free((void**)&vulkan_kernel->kernel_name);
+        safe_free((void**)&vulkan_kernel);
+        return NULL;
+    }
+
+    /* 分配描述符集 */
+    VkDescriptorSetAllocateInfo ds_alloc_info;
+    memset(&ds_alloc_info, 0, sizeof(ds_alloc_info));
+    ds_alloc_info.sType = 0x0000000A; /* VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO */
+    ds_alloc_info.descriptorPool = vulkan_kernel->descriptor_pool;
+    ds_alloc_info.descriptorSetCount = 1;
+    ds_alloc_info.pSetLayouts = &ds_layout;
+    result = vkAllocateDescriptorSets(vulkan_context->device, &ds_alloc_info, &vulkan_kernel->descriptor_set);
+    vulkan_kernel->descriptor_buffer_count = 3;
+    if (result != VK_SUCCESS) {
+        vkDestroyDescriptorPool(vulkan_context->device, vulkan_kernel->descriptor_pool, NULL);
+        vkDestroyDescriptorSetLayout(vulkan_context->device, ds_layout, NULL);
+        vkDestroyShaderModule(vulkan_context->device, vulkan_kernel->shader_module, NULL);
+        safe_free((void**)&vulkan_kernel->kernel_name);
+        safe_free((void**)&vulkan_kernel);
+        return NULL;
+    }
+
     VkPushConstantRange push_constant_range = {0};
     push_constant_range.stageFlags = 0x00000020;  // VK_SHADER_STAGE_COMPUTE_BIT
     push_constant_range.offset = 0;
@@ -3482,13 +3572,20 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
     
     VkPipelineLayoutCreateInfo layout_info = {0};
     layout_info.sType = 0x0000001C;  // VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &ds_layout;
     layout_info.pushConstantRangeCount = 1;
     layout_info.pPushConstantRanges = &push_constant_range;
     
     result = vkCreatePipelineLayout(vulkan_context->device, &layout_info, NULL, &vulkan_kernel->pipeline_layout);
+    /* ZSFWS-S004: ds_layout已注入管线布局,按Vulkan规范可安全销毁 */
+    vkDestroyDescriptorSetLayout(vulkan_context->device, ds_layout, NULL);
+    ds_layout = NULL;
     if (result != VK_SUCCESS || !vulkan_kernel->pipeline_layout) {
         snprintf(g_vulkan_error_string, sizeof(g_vulkan_error_string),
                 "Vulkan管线布局创建失败: %u", result);
+        vkFreeDescriptorSets(vulkan_context->device, vulkan_kernel->descriptor_pool, 1, &vulkan_kernel->descriptor_set);
+        vkDestroyDescriptorPool(vulkan_context->device, vulkan_kernel->descriptor_pool, NULL);
         vkDestroyShaderModule(vulkan_context->device, vulkan_kernel->shader_module, NULL);
         safe_free((void**)&vulkan_kernel->kernel_name);
         safe_free((void**)&vulkan_kernel);
@@ -3512,6 +3609,8 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
         snprintf(g_vulkan_error_string, sizeof(g_vulkan_error_string),
                 "Vulkan计算管线创建失败: %u", result);
         vkDestroyPipelineLayout(vulkan_context->device, vulkan_kernel->pipeline_layout, NULL);
+        vkFreeDescriptorSets(vulkan_context->device, vulkan_kernel->descriptor_pool, 1, &vulkan_kernel->descriptor_set);
+        vkDestroyDescriptorPool(vulkan_context->device, vulkan_kernel->descriptor_pool, NULL);
         vkDestroyShaderModule(vulkan_context->device, vulkan_kernel->shader_module, NULL);
         safe_free((void**)&vulkan_kernel->kernel_name);
         safe_free((void**)&vulkan_kernel);
@@ -3525,6 +3624,8 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
                 "内存分配失败: GPU内核包装");
         vkDestroyPipeline(vulkan_context->device, vulkan_kernel->pipeline, NULL);
         vkDestroyPipelineLayout(vulkan_context->device, vulkan_kernel->pipeline_layout, NULL);
+        vkFreeDescriptorSets(vulkan_context->device, vulkan_kernel->descriptor_pool, 1, &vulkan_kernel->descriptor_set);
+        vkDestroyDescriptorPool(vulkan_context->device, vulkan_kernel->descriptor_pool, NULL);
         vkDestroyShaderModule(vulkan_context->device, vulkan_kernel->shader_module, NULL);
         safe_free((void**)&vulkan_kernel->kernel_name);
         safe_free((void**)&vulkan_kernel);
@@ -3540,6 +3641,25 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
             "Vulkan内核创建成功: %s", kernel_name);
     
     return gpu_kernel;
+}
+
+/**
+ * @brief ZSFWS-S004: 设置Vulkan内核的IO缓冲区
+ * 在dispatch前将input/weight/output的VkBuffer绑定到描述符集。
+ * 调用者必须确保缓冲区在dispatch期间保持有效。
+ * @param gpu_kernel 内核句柄
+ * @param input_buf  输入StorageBuffer (slot 0)
+ * @param weight_buf 权重StorageBuffer (slot 1)  
+ * @param output_buf 输出StorageBuffer (slot 2)
+ */
+void vulkan_kernel_set_io_buffers(GpuKernel* gpu_kernel,
+                                   VkBuffer input_buf, VkBuffer weight_buf, VkBuffer output_buf) {
+    if (!gpu_kernel || !gpu_kernel->backend_data) return;
+    VulkanKernel* vk = (VulkanKernel*)gpu_kernel->backend_data;
+    vk->io_buffers[0] = input_buf;
+    vk->io_buffers[1] = weight_buf;
+    vk->io_buffers[2] = output_buf;
+    vk->io_buffers_valid = (input_buf || weight_buf || output_buf) ? 1 : 0;
 }
 
 /**
@@ -3569,6 +3689,11 @@ static void vulkan_backend_kernel_free(GpuKernel* kernel) {
         
         if (vulkan_kernel->shader_module) {
             vkDestroyShaderModule(vulkan_kernel->vulkan_context->device, vulkan_kernel->shader_module, NULL);
+        }
+        /* ZSFWS-S004: 释放持久化描述符集 */
+        if (vulkan_kernel->descriptor_pool) {
+            vkDestroyDescriptorPool(vulkan_kernel->vulkan_context->device,
+                                     vulkan_kernel->descriptor_pool, NULL);
         }
     }
     
@@ -3752,6 +3877,36 @@ static int vulkan_backend_kernel_execute(GpuKernel* kernel, size_t global_work_s
     // 计算工作组数量
     size_t workgroup_count = (global_work_size + local_work_size - 1) / local_work_size;
     if (workgroup_count == 0) workgroup_count = 1;
+
+    /* ZSFWS-S004修复: 绑定描述符集 — 将存储缓冲区(input/weight/output)连接到着色器
+     * vkCmdBindDescriptorSets必须在vkCmdDispatch之前调用,否则着色器无法访问缓冲区数据。
+     * 首先更新描述符写入实际的VkBuffer句柄,然后绑定到命令缓冲区。 */
+    if (vulkan_kernel->descriptor_set && vkCmdBindDescriptorSets && vkUpdateDescriptorSets) {
+        /* 如果缓冲区已设置,更新描述符写入实际GPU缓冲区句柄 */
+        if (vulkan_kernel->io_buffers_valid) {
+            VkDescriptorBufferInfo buf_infos[3];
+            VkWriteDescriptorSet write_sets[3];
+            memset(buf_infos, 0, sizeof(buf_infos));
+            memset(write_sets, 0, sizeof(write_sets));
+            for (int b = 0; b < 3; b++) {
+                buf_infos[b].buffer = vulkan_kernel->io_buffers[b];
+                buf_infos[b].offset = 0;
+                buf_infos[b].range = VK_WHOLE_SIZE;
+                write_sets[b].sType = 0x00000007; /* VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET */
+                write_sets[b].dstSet = vulkan_kernel->descriptor_set;
+                write_sets[b].dstBinding = (unsigned int)b;
+                write_sets[b].descriptorCount = 1;
+                write_sets[b].descriptorType = 7; /* VK_DESCRIPTOR_TYPE_STORAGE_BUFFER */
+                write_sets[b].pBufferInfo = &buf_infos[b];
+            }
+            vkUpdateDescriptorSets(vulkan_context->device, 3, write_sets, 0, NULL);
+        }
+        vkCmdBindDescriptorSets(vulkan_context->command_buffer,
+                                0x00000004,  /* VK_PIPELINE_BIND_POINT_COMPUTE */
+                                vulkan_kernel->pipeline_layout,
+                                0, 1, &vulkan_kernel->descriptor_set,
+                                0, NULL);
+    }
     
     // 调度计算工作
     vkCmdDispatch(vulkan_context->command_buffer, 

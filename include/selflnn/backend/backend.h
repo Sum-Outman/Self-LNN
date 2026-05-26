@@ -218,6 +218,8 @@ typedef enum {
     API_POST_SIMULATION_CLEAR = 308,       /**< 清空仿真场景 */
     API_POST_SIMULATION_COMMAND = 309,     /**< 仿真命令 */
     API_POST_ROBOT_PATH_PLAN = 310,        /**< 机器人路径规划 */
+    API_POST_CAMERA_SWITCH = 325,          /**< 切换摄像头 */
+    API_POST_VIDEO_QUALITY = 326,          /**< 设置视频质量 */
 
     /* ===== 多模态学习新端点 ===== */
     API_POST_MULTIMODAL_LEARN = 122,       /**< 启动多模态学习 */
@@ -455,6 +457,10 @@ typedef enum {
     /* ===== ZSFWS-B009扩展: 系统命令统一接口 ===== */
     API_POST_SYSTEM_COMMAND = 296,           /**< 系统级命令发送 /api/system/command */
     API_POST_COMMAND_SEND = 297,             /**< 通用命令发送 /api/command/send */
+
+    /* ===== ZSFWS-INT-FIX: 系统状态/日志导出路由补全 ===== */
+    API_GET_SYSTEM_FULL_STATUS = 298,        /**< 获取系统完整状态 /api/system/status */
+    API_GET_SYSTEM_LOGS_EXPORT = 299,        /**< 导出系统日志 /api/system/logs/export */
 } ApiRequestType;
 
 /**

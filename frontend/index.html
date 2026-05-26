@@ -1322,7 +1322,7 @@
                                         <div class="config-form">
                                             <div class="form-group">
                                                 <label>学习率:</label>
-                                                <input type="number" id="lnn-learning-rate" value="0.001" min="0.00001" max="1.0" step="0.0001" style="width:100%;padding:8px;background:#1a1a2e;border:1px solid #444;color:#fff;border-radius:4px;">
+                                                <input type="number" id="model-lnn-learning-rate" value="0.001" min="0.00001" max="1.0" step="0.0001" style="width:100%;padding:8px;background:#1a1a2e;border:1px solid #444;color:#fff;border-radius:4px;">
                                             </div>
                                             <div class="form-group">
                                                 <label>时间常数τ范围:</label>
@@ -4197,7 +4197,7 @@ response = requests.get(
         async function pollSafety() {
             try {
                 /* 使用已验证的 getSecurityStatus API */
-                var data = await SelfLnnApi.getSecurityStatus();
+                var data = await window.SelfLnnApi.getSecurityStatus();
                 if (!data || !data.success) return;
                 updateSafetyUI(data.data || data);
             } catch(e) { console.warn('安全状态轮询失败:', e.message); }
@@ -4244,7 +4244,7 @@ response = requests.get(
 
         async function pollResources() {
             try {
-                var resp = await SelfLnnApi.request('/status', {method: 'GET'}, 1);
+                var resp = await window.SelfLnnApi.request('/status', {method: 'GET'}, 1);
                 if (!resp.ok) return;
                 var data = await resp.json();
                 var sys = data.system || data;
@@ -4271,7 +4271,7 @@ response = requests.get(
         /* 物理安全边界——必须从后端获取真实数据，不使用默认值 */
         async function fetchSafetyBounds() {
             try {
-                var resp = await SelfLnnApi.request('/safety/bounds', { method: 'GET' }, 3);
+                var resp = await window.SelfLnnApi.request('/safety/bounds', { method: 'GET' }, 3);
                 if (resp.ok) {
                     var data = await resp.json();
                     updateSafetyBoundsUI(data.bounds || data);
@@ -4301,8 +4301,10 @@ response = requests.get(
         /* ZSFABC-025修复: safety区独立checkConnection→checkSafetyConnection */
         async function checkSafetyConnection() {
             try {
-                var status = await SelfLnnApi.checkConnection();
+                var status = await window.SelfLnnApi.checkConnection();
                 var badge = document.getElementById('safety-conn-status');
+                if (!badge) return;
+                badge.style.display = 'inline-block';
                 if (status.connected) {
                     badge.textContent = '已连接';
                     badge.style.background = '#2ecc71';
@@ -4314,6 +4316,8 @@ response = requests.get(
                 }
             } catch(e) {
                 var badge = document.getElementById('safety-conn-status');
+                if (!badge) return;
+                badge.style.display = 'inline-block';
                 badge.textContent = '未连接';
                 badge.style.background = '#e74c3c';
                 badge.style.color = '#fff';
@@ -4393,7 +4397,12 @@ response = requests.get(
                 return;
             }
             if (_voiceCapture) { _voiceCapture.destroy(); _voiceCapture = null; }
-            var result = await VoiceCaptureUtil.quickCapture({
+            if (typeof VoiceCaptureUtil === 'undefined' || !VoiceCaptureUtil.quickCapture) {
+                showNotification('语音采集模块未加载，请刷新页面', 'warning');
+                return;
+            }
+            try {
+            var result = await window.VoiceCaptureUtil.quickCapture({
                 onStart: function() {
                     btn.textContent = '⏹ 停止录音'; btn.style.background = '#e74c3c';
                     document.getElementById('voice-text').textContent = '正在录音...';
@@ -4420,6 +4429,11 @@ response = requests.get(
                 _voiceStream = result.stream;
             } else {
                 showNotification('麦克风访问失败: ' + result.error, 'danger');
+            }
+            } catch(e) {
+                console.warn('[语音] toggleVoice异常:', e.message);
+                showNotification('语音采集失败: ' + (e.message || '未知错误'), 'danger');
+                if (_voiceCapture) { _voiceCapture.destroy(); _voiceCapture = null; }
             }
         }
         /* P2-006修复: 统一使用main.js中的TextCommandSystem处理文本指令 */
@@ -4621,7 +4635,7 @@ response = requests.get(
         var apiDataLoaded = false;
         /* ZSFAB-M02修复: apiDataLoaded由统一初始化管理 */
         (function loadFromBackend() {
-            SelfLnnApi.getApiDocs().then(function(result) {
+            window.SelfLnnApi.getApiDocs().then(function(result) {
                 if (!result.success) throw new Error('后端不可用');
                 var data = result.data;
                 // 支持categories格式和flat endpoints格式
@@ -4743,10 +4757,10 @@ response = requests.get(
             var panel = document.getElementById('feature-panel');
             
             Promise.all([
-                SelfLnnApi.request('/agi/features', {method:'GET'}).catch(function() { return null; }),
-                SelfLnnApi.request('/agi/feature_list', {method:'GET'}).catch(function() { return null; }),
-                SelfLnnApi.request('/knowledge', {method:'GET'}).catch(function() { return null; }),
-                SelfLnnApi.request('/status', {method:'GET'}).catch(function() { return null; })
+                window.SelfLnnApi.request('/agi/features', {method:'GET'}).catch(function() { return null; }),
+                window.SelfLnnApi.request('/agi/feature_list', {method:'GET'}).catch(function() { return null; }),
+                window.SelfLnnApi.request('/knowledge', {method:'GET'}).catch(function() { return null; }),
+                window.SelfLnnApi.request('/status', {method:'GET'}).catch(function() { return null; })
             ]).then(function(results) {
                 var features = results[0];
                 var featureList = results[1];
@@ -4776,7 +4790,8 @@ response = requests.get(
                         multimodal: { label: '多模态统一处理', desc: '多模态信息经同一LNN统一处理' }
                     };
                     
-                    for (var key in list) {
+                    Object.keys(list).forEach(function(key) {
+                        if (!Object.prototype.hasOwnProperty.call(list, key)) return;
                         var item = list[key];
                         var info = knownFeatures[key] || { label: key, desc: '' };
                         var enabled = item.enabled !== undefined ? item.enabled : (item.status === 'running' || item.active);
@@ -4788,8 +4803,8 @@ response = requests.get(
                         html += '<div class="fc-desc">' + (item.description || info.desc || '') + '</div>';
                         html += '<span class="fc-badge ' + enabledClass + '">' + enabledText + '</span>';
                         html += '</div>';
-                    }
-                    
+                    });
+
                     if (html) grid.innerHTML = html;
                     else grid.innerHTML = '<div class="feature-loading">后端未返回能力列表数据</div>';
                 } else if (features && features.features) {
@@ -4798,7 +4813,8 @@ response = requests.get(
                     
                     var html = '';
                     var feat = features.features;
-                    for (var key in feat) {
+                    Object.keys(feat).forEach(function(key) {
+                        if (!Object.prototype.hasOwnProperty.call(feat, key)) return;
                         var val = feat[key];
                         var enabled = val === true || (typeof val === 'object' && val !== null && (val.enabled || val.status === 'running'));
                         var enabledClass = enabled ? 'on' : 'off';
@@ -4809,7 +4825,7 @@ response = requests.get(
                         html += '<div class="fc-desc">' + (typeof val === 'object' && val.description ? val.description : '') + '</div>';
                         html += '<span class="fc-badge ' + enabledClass + '">' + enabledText + '</span>';
                         html += '</div>';
-                    }
+                    });
                     if (html) grid.innerHTML = html;
                     else grid.innerHTML = '<div class="feature-loading">后端返回数据格式不支持直接显示</div>';
                 } else if (knowledge && knowledge.knowledge) {
@@ -4968,7 +4984,7 @@ response = requests.get(
 
         async function loadSkills() {
             try {
-                var data = await SelfLnnApi.request('/skills', {method: 'GET'});
+                var data = await window.SelfLnnApi.request('/skills', {method: 'GET'});
                 if (data) {
                     skillsData = data.skills || [];
                 } else {
@@ -5129,7 +5145,7 @@ response = requests.get(
 
         async function testSkill(id) {
             try {
-                var data = await SelfLnnApi.executeSkill(id);
+                var data = await window.SelfLnnApi.executeSkill(id);
                 showNotification(data && data.success ? '技能测试执行成功' : '技能测试失败: ' + ((data&&data.error) || '未知错误'), data && data.success ? 'success' : 'danger');
             } catch(e) {
                 showNotification('执行失败: ' + e.message, 'danger');
@@ -5139,7 +5155,7 @@ response = requests.get(
         /* ZSFABC-025修复: skills区独立checkConnection→checkSkillsConnection */
         async function checkSkillsConnection() {
             try {
-                var data = await SelfLnnApi.request('/status', {method: 'GET'});
+                var data = await window.SelfLnnApi.request('/status', {method: 'GET'});
                 var badge = document.getElementById('skills-conn-status');
                 if (data) { badge.textContent = '已连接'; badge.style.background = '#2ecc71'; badge.style.color = '#000'; }
                 else { badge.textContent = '未连接'; badge.style.background = '#e74c3c'; badge.style.color = '#fff'; }
@@ -5419,7 +5435,7 @@ response = requests.get(
 
         async function pollMultimodal() {
             try {
-                var data = await SelfLnnApi.multimodalStatus();
+                var data = await window.SelfLnnApi.multimodalStatus();
                 document.getElementById('contrast-loss').textContent = data.contrast_loss != null ? data.contrast_loss.toFixed(4) : '-';
                 document.getElementById('align-loss').textContent = data.align_loss != null ? data.align_loss.toFixed(4) : '-';
                 document.getElementById('cross-accuracy').textContent = data.cross_accuracy != null ? (data.cross_accuracy*100).toFixed(1)+'%' : '-';
@@ -5430,7 +5446,7 @@ response = requests.get(
 
         async function loadStatus() {
             try {
-                var data = await SelfLnnApi.multimodalStatus();
+                var data = await window.SelfLnnApi.multimodalStatus();
                 document.getElementById('vis-status').textContent = data.vision_ready ? '就绪' : '未就绪';
                 document.getElementById('mm-audio-status').textContent = data.audio_ready ? '就绪' : '未就绪';
                 document.getElementById('mm-text-status').textContent = data.text_ready ? '就绪' : '未就绪';
@@ -5540,7 +5556,7 @@ response = requests.get(
             if (!name) { showNotification('请输入物体名称', 'warning'); return; }
             var method = document.getElementById('teach-method').value;
             try {
-                var resp = await SelfLnnApi.request('/multimodal/teach', {
+                var resp = await window.SelfLnnApi.request('/multimodal/teach', {
                     method: 'POST',
                     body: JSON.stringify({object_name: name, method: method})
                 }, 1);
@@ -5558,7 +5574,7 @@ response = requests.get(
             var name = document.getElementById('teach-object-name').value;
             if (!name) { showNotification('请先教学一个物体', 'warning'); return; }
             try {
-                var resp = await SelfLnnApi.request('/multimodal/teach/test', {
+                var resp = await window.SelfLnnApi.request('/multimodal/teach/test', {
                     method: 'POST',
                     body: JSON.stringify({object_name: name})
                 }, 1);
@@ -5624,7 +5640,7 @@ response = requests.get(
             var label = document.getElementById('demo-label').value;
             var actions = document.getElementById('demo-actions').value;
             if (!label) { showNotification('请输入演示标签', 'warning'); return; }
-            SelfLnnApi.request('/robot/command', { method:'POST', body:JSON.stringify({command:'record_demo',params:{label:label,actions:actions}}) }, 1)
+            window.SelfLnnApi.request('/robot/command', { method:'POST', body:JSON.stringify({command:'record_demo',params:{label:label,actions:actions}}) }, 1)
                 .then(function(r){ return r.json(); })
                 .then(function(d){ showNotification(d.success?'演示已记录':'记录失败', d.success?'success':'danger'); }).catch(function(){ showNotification('连接失败', 'danger'); });
         }
@@ -5763,7 +5779,7 @@ response = requests.get(
             var expiry = parseInt(document.getElementById('key-expiry').value);
             if (!name) { showNotification('请填写密钥名称', 'warning'); return; }
             try {
-                var resp = await SelfLnnApi.request('/key/create', {
+                var resp = await window.SelfLnnApi.request('/key/create', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({name:name, permission:permission, expiration_days:expiry})
@@ -5790,7 +5806,7 @@ response = requests.get(
 
         async function loadKeys() {
             try {
-                var resp = await SelfLnnApi.request('/key/list');
+                var resp = await window.SelfLnnApi.request('/key/list');
                 var data = await resp.json();
                 var tbody = document.getElementById('key-list');
                 var keys = data.key_list ? (data.key_list.keys || []) : (data.keys || []);
@@ -5829,7 +5845,7 @@ response = requests.get(
         async function loadStats() {
             try {
                 /* 使用 getKeyStatus 获取全局统计 */
-                var data = await SelfLnnApi.getKeyStatus();
+                var data = await window.SelfLnnApi.getKeyStatus();
                 var s = (data && data.success) ? (data.data || data) : {};
                 var tk = s.current_keys != null ? s.current_keys : (s.total_keys != null ? s.total_keys : '-');
                 document.getElementById('stat-total-keys').textContent = tk;
@@ -5842,7 +5858,7 @@ response = requests.get(
         async function loadRateLimit() {
             try {
                 /* 使用 getRateLimitStatus 获取速率限制 */
-                var data = await SelfLnnApi.getRateLimitStatus();
+                var data = await window.SelfLnnApi.getRateLimitStatus();
                 var r = (data && data.success) ? (data.data || data) : {};
                 var tokens = r.available_tokens != null ? r.available_tokens : (r.min_remaining != null ? r.min_remaining : '-');
                 document.getElementById('rate-tokens').textContent = tokens;
@@ -5854,7 +5870,7 @@ response = requests.get(
 
         async function toggleKey(prefix, enable) {
             try {
-                var resp = await SelfLnnApi.request('/key/toggle', {
+                var resp = await window.SelfLnnApi.request('/key/toggle', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({key_prefix: prefix, enable: enable})
                 });
@@ -5867,7 +5883,7 @@ response = requests.get(
         async function deleteKey(prefix) {
             if (!confirm('确认删除密钥 "' + prefix + '..."？此操作不可恢复。')) return;
             try {
-                var resp = await SelfLnnApi.request('/key/delete', {
+                var resp = await window.SelfLnnApi.request('/key/delete', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({key_prefix: prefix})
                 });
@@ -5922,7 +5938,7 @@ response = requests.get(
         async function loadLogs() {
             try {
                 /* 使用系统状态API和API统计接口获取使用日志 */
-                var resp = await SelfLnnApi.getServerStats();
+                var resp = await window.SelfLnnApi.getServerStats();
                 var data = resp.success ? resp.data : null;
                 var stats = (data && data.system) ? data.system : {};
                 document.getElementById('today-total').textContent = (stats.requests && stats.requests.total) ? stats.requests.total : '-';
@@ -5933,7 +5949,7 @@ response = requests.get(
                 /* 尝试获取详细API使用日志 */
                 var logs = [];
                 try {
-                    var logResp = await SelfLnnApi.getApiStats();
+                    var logResp = await window.SelfLnnApi.getApiStats();
                     if (logResp.success && logResp.data) {
                         logs = logResp.data.logs || logResp.data.requests || [];
                     }
@@ -6097,7 +6113,7 @@ response = requests.get(
         /* ===== 音频设备枚举 ===== */
         async function enumerateAudioDevices() {
             try {
-                var resp = await SelfLnnApi.request('/audio/devices', { method:'GET' }, 1);
+                var resp = await window.SelfLnnApi.request('/audio/devices', { method:'GET' }, 1);
                 var data = await resp.json();
                 if (data.success && data.audio_devices) {
                     g_audioDevices = data.audio_devices;
@@ -6121,7 +6137,7 @@ response = requests.get(
 
         async function startAudioCapture() {
             try {
-                var resp = await SelfLnnApi.request('/audio/capture/start', { method:'POST', body:'{}' }, 1);
+                var resp = await window.SelfLnnApi.request('/audio/capture/start', { method:'POST', body:'{}' }, 1);
                 var data = await resp.json();
                 if (data.success) {
                     g_audioCapturing = true;
@@ -6133,7 +6149,7 @@ response = requests.get(
 
         async function stopAudioCapture() {
             try {
-                var resp = await SelfLnnApi.request('/audio/capture/stop', { method:'POST', body:'{}' }, 1);
+                var resp = await window.SelfLnnApi.request('/audio/capture/stop', { method:'POST', body:'{}' }, 1);
                 var data = await resp.json();
                 if (data.success) {
                     g_audioCapturing = false;
@@ -6146,7 +6162,7 @@ response = requests.get(
         /* ===== 摄像头设备枚举 ===== */
         async function enumerateCameraDevices() {
             try {
-                var resp = await SelfLnnApi.request('/camera/devices', { method:'GET' }, 1);
+                var resp = await window.SelfLnnApi.request('/camera/devices', { method:'GET' }, 1);
                 var data = await resp.json();
                 if (data.success && data.camera_devices) {
                     g_cameraDevices = data.camera_devices;
@@ -6170,7 +6186,7 @@ response = requests.get(
 
         async function startCameraCapture() {
             try {
-                var resp = await SelfLnnApi.request('/camera/capture/start', { method:'POST', body:'{}' }, 1);
+                var resp = await window.SelfLnnApi.request('/camera/capture/start', { method:'POST', body:'{}' }, 1);
                 var data = await resp.json();
                 if (data.success) {
                     g_cameraCapturing = true;
@@ -6182,7 +6198,7 @@ response = requests.get(
 
         async function stopCameraCapture() {
             try {
-                var resp = await SelfLnnApi.request('/camera/capture/stop', { method:'POST', body:'{}' }, 1);
+                var resp = await window.SelfLnnApi.request('/camera/capture/stop', { method:'POST', body:'{}' }, 1);
                 var data = await resp.json();
                 if (data.success) {
                     g_cameraCapturing = false;
@@ -6195,7 +6211,7 @@ response = requests.get(
         /* ===== 数据集管理 ===== */
         async function listDatasets() {
             try {
-                var resp = await SelfLnnApi.request('/dataset/list', { method:'GET' }, 1);
+                var resp = await window.SelfLnnApi.request('/dataset/list', { method:'GET' }, 1);
                 var data = await resp.json();
                 if (data.success) {
                     document.getElementById('dataset-count').textContent = data.count || 0;
@@ -6206,7 +6222,7 @@ response = requests.get(
 
         async function createDataset() {
             try {
-                var resp = await SelfLnnApi.request('/dataset/create', { method:'POST', body:'{}' }, 1);
+                var resp = await window.SelfLnnApi.request('/dataset/create', { method:'POST', body:'{}' }, 1);
                 var data = await resp.json();
                 if (data.success) showNotification('数据集已创建: ' + (data.dataset_id || ''), 'success');
             } catch(e) { showNotification('创建失败: ' + e.message, 'danger'); }
@@ -6214,7 +6230,7 @@ response = requests.get(
 
         async function augmentDataset() {
             try {
-                var resp = await SelfLnnApi.request('/dataset/augment', { method:'POST', body:'{}' }, 1);
+                var resp = await window.SelfLnnApi.request('/dataset/augment', { method:'POST', body:'{}' }, 1);
                 var data = await resp.json();
                 if (data.success) showNotification('数据增强完成，增强样本数: ' + (data.augmented_samples || 0), 'success');
             } catch(e) { showNotification('增强失败: ' + e.message, 'danger'); }
@@ -6224,7 +6240,7 @@ response = requests.get(
         async function configureGpu() {
             var backend = document.getElementById('gpu-backend').value;
             try {
-                var resp = await SelfLnnApi.request('/hardware/config', { method:'POST', body:JSON.stringify({backend:backend}) }, 1);
+                var resp = await window.SelfLnnApi.request('/hardware/config', { method:'POST', body:JSON.stringify({backend:backend}) }, 1);
                 var data = await resp.json();
                 document.getElementById('gpu-current').textContent = data.success ? backend : '配置失败';
             } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }

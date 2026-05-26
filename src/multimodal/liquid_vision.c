@@ -3621,6 +3621,7 @@ struct LiquidVisionProcessor {
 
     int cnn_weights_initialized;  /* CNN权重是否已He初始化 */
     int cnn_weights_loaded;       /* CNN权重是否已从文件加载 */
+    int is_trained;               /* ZSFWS-S005: 模型是否已完成训练（默认0，加载权重后置1） */
 };
 
 LiquidVisionProcessor* liquid_vision_processor_create(const LiquidVisionConfig* config) {
@@ -3760,8 +3761,15 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
     if (!processor || !data || !features || max_features == 0) return -1;
     if (width <= 0 || height <= 0 || channels <= 0) return -1;
 
+    /* ZSFWS-S005修复: 未训练保护的液态视觉管线
+     * 检查模型是否已完成训练（权重从文件加载或通过直接训练获得）
+     * 未训练状态下使用随机权重会产生随机输出，对自主学习和决策造成严重误导 */
+    int is_ready = processor->is_trained ||
+                   processor->cnn_weights_loaded ||
+                   (processor->lnn_instance && processor->config.enable_cfc);
+
     /* 主路径：如果启用了CfC，优先使用液态视觉管线 */
-    if (processor->config.enable_cfc) {
+    if (processor->config.enable_cfc && is_ready) {
         /* 确保LiquidVisionManager已创建 */
         if (!processor->liquid_manager) {
             LiquidVisionManagerConfig mgr_cfg = liquid_vision_manager_get_default_config();
@@ -3779,16 +3787,14 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
         }
     }
 
-    /* 兼容路径：尝试使用CfcVisionProcessor进行YOLO风格检测 */
-    if (processor->config.enable_cfc) {
+    /* ZSFWS-S005修复: 兼容路径同样需要训练状态保护 */
+    if (processor->config.enable_cfc && is_ready) {
         if (!processor->cfc_compat_processor) {
             CfcVisionConfig cv_cfg = cfc_vision_get_default_config();
             cv_cfg.image_width = width;
             cv_cfg.image_height = height;
             cv_cfg.image_channels = channels;
             processor->cfc_compat_processor = cfc_vision_processor_create(&cv_cfg);
-            if (processor->cfc_compat_processor)
-                cfc_vision_mark_trained(processor->cfc_compat_processor);
         }
 
         if (processor->cfc_compat_processor) {
@@ -3798,12 +3804,15 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
         }
     }
 
-    /* 辅助路径：传统CV预处理特征提取 */
-    return _vision_extract_traditional_cv(data, width, height, channels,
-        processor->config.enable_multiscale_pyramid,
-        processor->config.enable_hog,
-        processor->config.enable_color_histogram,
-        features, max_features);
+    /* ZSFWS-S005: CfC路径不可用时（未训练），进入传统CV特征提取
+     * 仅在CfC未就绪时使用，返回特征维度而非空数据 */
+    if (!is_ready) {
+        return _vision_extract_traditional_cv(data, width, height, channels,
+            processor->config.enable_multiscale_pyramid,
+            processor->config.enable_hog,
+            processor->config.enable_color_histogram,
+            features, max_features);
+    }
 }
 
 /* ===================================================================
@@ -4272,6 +4281,7 @@ int lv_load_weights(LiquidVisionProcessor* processor, const char* filepath) {
 
     fclose(fp);
     processor->cnn_weights_loaded = 1;
+    processor->is_trained = 1; /* ZSFWS-S005: 权重加载成功后标记为已训练 */
     return 0;
 }
 

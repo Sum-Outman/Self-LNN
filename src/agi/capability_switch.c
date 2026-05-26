@@ -33,6 +33,7 @@ extern void* selflnn_get_thread_pool(void);
 extern void* selflnn_get_dialogue_processor(void);
 extern void* selflnn_get_planning_system(void);
 extern void* selflnn_get_lnn(void);
+extern void* selflnn_get_multi_agent_system(void); /* H-015集成 */
 
 static const char* g_capability_names[CAP_COUNT] = {
     "自我认知",
@@ -62,7 +63,8 @@ static const char* g_capability_descriptions[CAP_COUNT] = {
     "主动探索未知领域和知识缺口的内在驱动力",
     "BFS/DFS/HTN层次任务网络规划",
     "基于LNN状态空间的自然语言对话生成",
-    "多线程并行执行认知周期和并发任务调度"
+    "多线程并行执行认知周期和并发任务调度",
+    "多智能体协作学习、知识共享和分布式决策"  /* H-015: CAP_MULTI_AGENT */
 };
 
 static int g_capability_states[CAP_COUNT] = {
@@ -76,7 +78,7 @@ static CapabilityCheckFunc g_check_funcs[CAP_COUNT] = {NULL};
 static CapabilitySetFunc g_set_funcs[CAP_COUNT] = {NULL};
 
 static const int g_default_states[CAP_COUNT] = {
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 };
 
 /* ========== 真实回调函数实现 ========== */
@@ -381,6 +383,18 @@ static int cap_set_concurrency(int enable) {
     return 0;
 }
 
+/* 多智能体协作：检查多智能体系统 */
+static int cap_check_multi_agent(void) {
+    void* ma = selflnn_get_multi_agent_system();
+    return ma ? 1 : 0;
+}
+static int cap_set_multi_agent(int enable) {
+    g_capability_states[CAP_MULTI_AGENT] = (enable != 0) ? 1 : 0;
+    if (g_capability_forced_on[CAP_MULTI_AGENT]) { g_capability_states[CAP_MULTI_AGENT] = 1; return 0; }
+    log_info("[能力开关] 多智能体协作 %s", enable ? "开启" : "关闭");
+    return 0;
+}
+
 /* 初始化时自动注册所有回调 */
 /* L-021: 使用原子操作保护一次性注册，避免多线程竞态条件 */
 static void ensure_callbacks_registered(void) {
@@ -403,7 +417,8 @@ static void ensure_callbacks_registered(void) {
     capability_register_module(CAP_PLANNING,              cap_check_planning,          cap_set_planning);
     capability_register_module(CAP_DIALOGUE,              cap_check_dialogue,          cap_set_dialogue);
     capability_register_module(CAP_CONCURRENCY,           cap_check_concurrency,       cap_set_concurrency);
-    log_info("[能力开关] 全部12个能力开关回调注册完成");
+    capability_register_module(CAP_MULTI_AGENT,          cap_check_multi_agent,        cap_set_multi_agent);
+    log_info("[能力开关] 全部13个能力开关回调注册完成");
 #ifdef _WIN32
     registered_lock = 0;
 #else
@@ -668,18 +683,19 @@ int capability_health_check(void)
 /* 能力依赖关系矩阵 [被依赖方][依赖方] = 1 表示依赖 */
 /* 读取方式：cap_deps[前置能力][目标能力] = 1 表示"启用目标必须先启用前置" */
 static const int g_capability_deps[CAP_COUNT][CAP_COUNT] = {
-    /* 自我认知 */ {0,0,0,0,0,0,0,0,0,0,0,0},
-    /* 自我决策 */ {0,0,1,1,0,0,0,0,0,1,0,0},  /* 自主执行、自我学习、规划依赖自我决策 */
-    /* 自主执行 */ {0,0,0,0,0,0,0,0,0,0,0,0},
-    /* 自我学习 */ {0,0,0,0,1,1,0,0,0,0,0,0},  /* 演化、模仿学习依赖自我学习 */
-    /* 自我演化 */ {0,0,0,0,0,0,0,0,0,0,0,0},
-    /* 模仿学习 */ {0,0,0,0,0,0,0,0,0,0,0,0},
-    /* 自我修正 */ {0,0,0,0,0,0,0,0,0,0,0,0},
-    /* 自我反思 */ {0,1,0,0,0,0,1,0,0,0,0,0},  /* 反思驱动决策和修正 */
-    /* 好奇心 */   {0,0,0,0,0,0,0,0,0,0,0,0},
-    /* 规划能力 */ {0,0,1,0,0,0,0,0,0,0,0,0},  /* 自主执行依赖规划 */
-    /* 对话能力 */ {0,0,0,0,0,0,0,0,0,0,0,0},
-    /* 并发能力 */ {0,0,0,0,0,0,0,0,0,0,0,0},
+    /* 自我认知 */ {0,0,0,0,0,0,0,0,0,0,0,0,0},
+    /* 自我决策 */ {0,0,1,1,0,0,0,0,0,1,0,0,1},  /* 多智能体协作依赖自我决策 */
+    /* 自主执行 */ {0,0,0,0,0,0,0,0,0,0,0,0,1},  /* 多智能体依赖自主执行(任务分发) */
+    /* 自我学习 */ {0,0,0,0,1,1,0,0,0,0,0,0,0},
+    /* 自我演化 */ {0,0,0,0,0,0,0,0,0,0,0,0,0},
+    /* 模仿学习 */ {0,0,0,0,0,0,0,0,0,0,0,0,0},
+    /* 自我修正 */ {0,0,0,0,0,0,0,0,0,0,0,0,0},
+    /* 自我反思 */ {0,1,0,0,0,0,1,0,0,0,0,0,0},
+    /* 好奇心 */   {0,0,0,0,0,0,0,0,0,0,0,0,0},
+    /* 规划能力 */ {0,0,1,0,0,0,0,0,0,0,0,0,0},
+    /* 对话能力 */ {0,0,0,0,0,0,0,0,0,0,0,0,1},  /* 对话是智能体间通信基础 */
+    /* 并发能力 */ {0,0,0,0,0,0,0,0,0,0,0,0,1},  /* 多智能体依赖并发 */
+    /* 多智能体 */ {0,0,0,0,0,0,0,0,0,0,0,0,0},  /* CAP_MULTI_AGENT自身无被依赖项 */
 };
 
 /* 能力冲突关系矩阵 [A][B] = 1 表示 A和B 不能同时启用 */

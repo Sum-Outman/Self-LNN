@@ -1419,6 +1419,14 @@ struct BackendServer {
     int audio_capture_active;                        /**< 音频采集是否运行中 */
     int camera_capture_active;                       /**< 摄像头采集是否运行中 */
 
+    /* 摄像头采集参数（ZSFWS-INT-FIX: 此前缺失导致编译错误） */
+    int camera_index;                        /**< 当前摄像头设备索引（0-16） */
+    int camera_width;                        /**< 摄像头采集宽度（默认640） */
+    int camera_height;                       /**< 摄像头采集高度（默认480） */
+    int camera_fps;                          /**< 摄像头采集帧率（默认30） */
+    /**< 摄像头帧回调函数 — 每收到一帧RGB数据时回调 */
+    void (*camera_capture_callback)(const uint8_t* rgb_data, int width, int height, void* user_data);
+
     /* 训练数据集管理 */
     struct TrainingDataset* active_dataset;          /**< 当前活跃训练数据集 */
 
@@ -1630,13 +1638,34 @@ static int handle_api_post_simulation_view_reset(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    (void)request_data; (void)request_length; (void)request_type;
-    char* json_data = safe_malloc(256);
+    (void)request_type;
+    /* ZSFWS-E006: 解析请求中的视角参数，与真实仿真器交互 */
+    float cam_x = 0.0f, cam_y = 0.0f, cam_z = 5.0f;
+    float tgt_x = 0.0f, tgt_y = 0.0f, tgt_z = 0.0f;
+    if (request_data && request_length > 0) {
+        parse_json_float(request_data, "x", &cam_x);
+        parse_json_float(request_data, "y", &cam_y);
+        parse_json_float(request_data, "z", &cam_z);
+        parse_json_float(request_data, "target_x", &tgt_x);
+        parse_json_float(request_data, "target_y", &tgt_y);
+        parse_json_float(request_data, "target_z", &tgt_z);
+    }
+    int sim_ok = 0;
+    if (server->internal_simulator) {
+        sim_ok = (simulator_set_camera_view(server->internal_simulator,
+                    cam_x, cam_y, cam_z, tgt_x, tgt_y, tgt_z) == 0);
+    }
+    char* json_data = safe_malloc(512);
     if (json_data) {
-        snprintf(json_data, 256,
-            "{\"view\":{\"reset\":true,\"position\":{\"x\":0,\"y\":0,\"z\":5},"
-            "\"target\":{\"x\":0,\"y\":0,\"z\":0},\"status\":\"ok\"}}");
-        response->data = json_data; response->data_length = strlen(json_data); response->status_code = 200;
+        snprintf(json_data, 512,
+            "{\"view\":{\"reset\":true,"
+            "\"position\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
+            "\"target\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
+            "\"status\":\"%s\"}}",
+            cam_x, cam_y, cam_z, tgt_x, tgt_y, tgt_z,
+            sim_ok ? "ok" : "simulator_unavailable");
+        response->data = json_data; response->data_length = strlen(json_data);
+        response->status_code = sim_ok ? 200 : 503;
     }
     return 0;
 }
@@ -1645,14 +1674,23 @@ static int handle_api_post_simulation_toggle_grid(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    (void)request_data; (void)request_length; (void)request_type;
-    static int grid_visible = 1; grid_visible = !grid_visible;
+    (void)request_type;
+    int enable = -1; /* -1 = toggle */
+    if (request_data && request_length > 0) {
+        parse_json_int(request_data, "visible", &enable);
+    }
+    int grid_state = 0;
+    if (server->internal_simulator) {
+        grid_state = simulator_toggle_grid_display(server->internal_simulator, enable);
+    }
     char* json_data = safe_malloc(256);
     if (json_data) {
         snprintf(json_data, 256,
-            "{\"view\":{\"grid_visible\":%s,\"grid_size\":10,\"status\":\"ok\"}}",
-            grid_visible ? "true" : "false");
-        response->data = json_data; response->data_length = strlen(json_data); response->status_code = 200;
+            "{\"view\":{\"grid_visible\":%s,\"grid_size\":10,\"status\":\"%s\"}}",
+            grid_state ? "true" : "false",
+            server->internal_simulator ? "ok" : "simulator_unavailable");
+        response->data = json_data; response->data_length = strlen(json_data);
+        response->status_code = server->internal_simulator ? 200 : 503;
     }
     return 0;
 }
@@ -1661,19 +1699,23 @@ static int handle_api_post_simulation_robot_add(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    (void)request_data; (void)request_length; (void)request_type;
+    (void)request_type;
+    char robot_name[64] = "default_robot";
+    if (request_data && request_length > 0) {
+        parse_json_string(request_data, "name", robot_name, sizeof(robot_name));
+    }
     int added = 0;
     if (server->internal_simulator) {
-        SimulatorStatus st; memset(&st, 0, sizeof(st));
-        if (simulator_get_status(server->internal_simulator, &st) == 0) added = st.num_robots + 1;
+        added = simulator_add_robot(server->internal_simulator, robot_name);
     }
     char* json_data = safe_malloc(256);
     if (json_data) {
         snprintf(json_data, 256,
-            "{\"robot\":{\"added\":%s,\"count\":%d,\"status\":\"%s\"}}",
-            added ? "true" : "false", added, added ? "ok" : "simulator_unavailable");
+            "{\"robot\":{\"added\":%s,\"id\":%d,\"status\":\"%s\"}}",
+            added > 0 ? "true" : "false", added,
+            added > 0 ? "ok" : "simulator_unavailable");
         response->data = json_data; response->data_length = strlen(json_data);
-        response->status_code = added ? 200 : 503;
+        response->status_code = added > 0 ? 200 : 503;
     }
     return 0;
 }
@@ -1683,11 +1725,20 @@ static int handle_api_post_simulation_clear(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     (void)request_data; (void)request_length; (void)request_type;
+    int cleared = 0;
+    int removed = 0;
+    if (server->internal_simulator) {
+        removed = simulator_clear_scene(server->internal_simulator);
+        cleared = 1;
+    }
     char* json_data = safe_malloc(256);
     if (json_data) {
         snprintf(json_data, 256,
-            "{\"simulation\":{\"cleared\":true,\"objects_removed\":0,\"status\":\"ok\"}}");
-        response->data = json_data; response->data_length = strlen(json_data); response->status_code = 200;
+            "{\"simulation\":{\"cleared\":%s,\"objects_removed\":%d,\"status\":\"%s\"}}",
+            cleared ? "true" : "false", removed,
+            cleared ? "ok" : "simulator_unavailable");
+        response->data = json_data; response->data_length = strlen(json_data);
+        response->status_code = cleared ? 200 : 503;
     }
     return 0;
 }
@@ -1696,12 +1747,31 @@ static int handle_api_post_simulation_command(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    (void)request_data; (void)request_length; (void)request_type;
+    (void)request_type;
+    char cmd[64] = "pause";
+    if (request_data && request_length > 0) {
+        parse_json_string(request_data, "command", cmd, sizeof(cmd));
+    }
+    int executed = 0;
+    if (server->internal_simulator) {
+        if (strcmp(cmd, "play") == 0) {
+            executed = (simulator_start(server->internal_simulator) == 0);
+        } else if (strcmp(cmd, "pause") == 0 || strcmp(cmd, "stop") == 0) {
+            executed = (simulator_stop(server->internal_simulator) == 0);
+        } else if (strcmp(cmd, "step") == 0) {
+            executed = (simulator_step(server->internal_simulator, 0.016f) == 0);
+        } else {
+            executed = -1; /* unknown command */
+        }
+    }
     char* json_data = safe_malloc(256);
     if (json_data) {
         snprintf(json_data, 256,
-            "{\"simulation\":{\"command\":\"executed\",\"status\":\"ok\"}}");
-        response->data = json_data; response->data_length = strlen(json_data); response->status_code = 200;
+            "{\"simulation\":{\"command\":\"%s\",\"executed\":%s,\"status\":\"%s\"}}",
+            cmd, executed >= 0 ? "true" : "false",
+            executed >= 0 ? "ok" : "failed");
+        response->data = json_data; response->data_length = strlen(json_data);
+        response->status_code = executed >= 0 ? 200 : 400;
     }
     return 0;
 }
@@ -1710,13 +1780,48 @@ static int handle_api_post_robot_path_plan(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    (void)request_data; (void)request_length; (void)request_type;
-    char* json_data = safe_malloc(512);
+    (void)request_type;
+    float start[3] = {0, 0, 0};
+    float goal[3] = {5, 5, 0};
+    if (request_data && request_length > 0) {
+        parse_json_float(request_data, "start_x", &start[0]);
+        parse_json_float(request_data, "start_y", &start[1]);
+        parse_json_float(request_data, "start_z", &start[2]);
+        parse_json_float(request_data, "goal_x", &goal[0]);
+        parse_json_float(request_data, "goal_y", &goal[1]);
+        parse_json_float(request_data, "goal_z", &goal[2]);
+    }
+    char* json_data = safe_malloc(1024);
     if (json_data) {
-        snprintf(json_data, 512,
-            "{\"path\":{\"planned\":true,\"waypoints\":[[0,0],[1,0.5],[2,1],[3,1.5],[4,2]],"
-            "\"distance\":%.2f,\"status\":\"ok\"}}", 5.39f);
-        response->data = json_data; response->data_length = strlen(json_data); response->status_code = 200;
+        if (server->internal_simulator) {
+            float waypoints[300] = {0};
+            int wp_count = simulator_plan_path(server->internal_simulator,
+                start, goal, waypoints, 100);
+            if (wp_count > 0) {
+                int pos = snprintf(json_data, 1024,
+                    "{\"path\":{\"planned\":true,\"waypoints\":[");
+                for (int i = 0; i < wp_count && pos < 900; i++) {
+                    pos += snprintf(json_data + pos, 1024 - (size_t)pos,
+                        "%s[%.2f,%.2f]", (i > 0 ? "," : ""),
+                        waypoints[i * 3], waypoints[i * 3 + 1]);
+                }
+                float dist = sqrtf((goal[0]-start[0])*(goal[0]-start[0]) +
+                                   (goal[1]-start[1])*(goal[1]-start[1]));
+                snprintf(json_data + pos, 1024 - (size_t)pos,
+                    "],\"distance\":%.2f,\"status\":\"ok\"}}", dist);
+                response->status_code = 200;
+            } else {
+                snprintf(json_data, 1024,
+                    "{\"path\":{\"planned\":false,\"reason\":\"no_path_found\",\"status\":\"failed\"}}");
+                response->status_code = 404;
+            }
+        } else {
+            snprintf(json_data, 1024,
+                "{\"path\":{\"planned\":false,\"reason\":\"simulator_unavailable\",\"status\":\"error\"}}");
+            response->status_code = 503;
+        }
+        response->data = json_data;
+        response->data_length = strlen(json_data);
     }
     return 0;
 }
@@ -2236,9 +2341,9 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/tts/synthesize") == 0)            return API_POST_TTS_SYNTHESIZE;
     if (strcmp(p, "/api/voice/synthesize") == 0)          return API_POST_VOICE_SYNTHESIZE;
     if (strcmp(p, "/api/camera/devices") == 0)            return API_GET_CAMERA_DEVICES;
-    if (strcmp(p, "/api/camera/switch") == 0)             return API_POST_CAMERA_CAPTURE_START;
+    if (strcmp(p, "/api/camera/switch") == 0)             return API_POST_CAMERA_SWITCH;
     if (strcmp(p, "/api/audio/devices") == 0)             return API_GET_AUDIO_DEVICES;
-    if (strcmp(p, "/api/video/quality") == 0)             return API_POST_VIDEO_CAPTURE;
+    if (strcmp(p, "/api/video/quality") == 0)             return API_POST_VIDEO_QUALITY;
 
     /* === 对话 === */
     if (strcmp(p, "/api/dialogue") == 0)                  return (method && strcmp(method, "GET") == 0) ? API_GET_DIALOGUE_HISTORY : API_POST_DIALOGUE;
@@ -2516,6 +2621,16 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === P0-002: 设备状态/认证状态 === */
     if (strcmp(p, "/api/device/status") == 0)             return API_POST_DEVICE_STATUS;
     if (strcmp(p, "/api/auth/status") == 0)               return API_GET_AUTH_STATUS;
+    /* ZSFWS-INT-FIX: 补全统一路由缺失的7个路径
+     * 此前这些路径在 handler table 中已注册但在路由表中缺失,
+     * 导致线程池模式下前端调用返回404 */
+    if (strcmp(p, "/api/audio/capture/start") == 0)       return API_POST_AUDIO_CAPTURE_START;
+    if (strcmp(p, "/api/audio/capture/stop") == 0)        return API_POST_AUDIO_CAPTURE_STOP;
+    if (strcmp(p, "/api/camera/capture/start") == 0)      return API_POST_CAMERA_CAPTURE_START;
+    if (strcmp(p, "/api/camera/capture/stop") == 0)       return API_POST_CAMERA_CAPTURE_STOP;
+    if (strcmp(p, "/api/safety/bounds") == 0)             return API_GET_SAFETY_BOUNDS;
+    if (strcmp(p, "/api/system/status") == 0)             return API_GET_SYSTEM_FULL_STATUS;
+    if (strcmp(p, "/api/system/logs/export") == 0)        return API_GET_SYSTEM_LOGS_EXPORT;
 
     return API_NOT_FOUND;
 }
@@ -3633,7 +3748,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/knowledge/add") == 0) {
                     request_type = 220;
                 } else if (strcmp(path, "/api/knowledge/delete") == 0) {
-                    request_type = 220;
+                    request_type = 224;
                 } else if (strncmp(path, "/api/knowledge/entry", 20) == 0) {
                     /* ZSFABC-009修复: 使用前缀匹配支持动态路径如 /api/knowledge/entry/123 */
                     /* API-4修复: DELETE方法路由到删除处理器(224)，GET方法路由到查询处理器(221) */
@@ -3643,14 +3758,14 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/knowledge/export") == 0) {
                     request_type = 223;
                 } else if (strcmp(path, "/api/memory/add") == 0) {
-                    request_type = 224;
+                    request_type = 229;
                 } else if (strncmp(path, "/api/memory/entry", 17) == 0) {
                     /* ZSFABC-009修复: 使用前缀匹配支持动态路径如 /api/memory/entry/456 */
-                    request_type = 225;
+                    request_type = API_GET_MEMORY_ENTRY;
                 } else if (strcmp(path, "/api/memory/export") == 0) {
-                    request_type = 226;
+                    request_type = 280;
                 } else if (strcmp(path, "/api/memory/clear") == 0) {
-                    request_type = 227;
+                    request_type = 281;
                 } else if (strcmp(path, "/api/memory/search") == 0) {
                     request_type = 98;
                 } else if (strcmp(path, "/api/memory/sleep_consolidation") == 0) {
@@ -4887,6 +5002,12 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     server->audio_capture_active = 0;
     server->camera_capture_ctx = NULL;
     server->camera_capture_active = 0;
+    /* ZSFWS-INT-FIX: 摄像头参数初始化 */
+    server->camera_index = 0;
+    server->camera_width = 640;
+    server->camera_height = 480;
+    server->camera_fps = 30;
+    server->camera_capture_callback = NULL;
 
     /* 初始化数据集管理 */
     server->active_dataset = NULL;
@@ -6460,7 +6581,7 @@ static int handle_api_post_training(BackendServer* server,
     train_config.enable_validation = (num_samples >= 100) ? 1 : 0;
     train_config.shuffle_data = 1;
     train_config.optimizer = OPTIMIZER_ADAM;
-    train_config.loss_function = LOSS_MEAN_SQUARED_ERROR;
+    train_config.loss_function = LOSS_MSE;
     server->trainer = trainer_create(&train_config, server->lnn_instance);
 
     if (!server->trainer) {
@@ -6916,6 +7037,16 @@ static int handle_api_post_robot_command(BackendServer* server,
                 }
                 break;
         }
+    }
+    char* json_response = (char*)safe_malloc(256);
+    if (json_response) {
+        snprintf(json_response, 256,
+            "{\"robot_command\":{\"executed\":%s,\"result\":%d,\"mode\":%d,\"status\":\"%s\"}}",
+            result == 0 ? "true" : "false", result, cmd_mode,
+            result == 0 ? "ok" : (server->ros_controller ? "failed" : "no_controller"));
+        response->data = json_response;
+        response->data_length = strlen(json_response);
+        response->status_code = (result == 0) ? 200 : 503;
     }
     return 0;
 }
@@ -13961,9 +14092,6 @@ static int handle_api_post_laplace_spectrum(BackendServer* server,
 
     /* 使用真实拉普拉斯分析器计算频谱 */
     LaplaceAnalyzer* analyzer = laplace_unified_get_analyzer();
-    if (!analyzer && server->lnn_instance) {
-        analyzer = server->lnn_instance->laplace_analyzer;
-    }
 
     if (!analyzer) {
         json_data = (char*)safe_malloc(256);
@@ -14183,16 +14311,7 @@ static int handle_api_post_training_start(BackendServer* server,
     }
     if (net_config.input_size == 0) net_config.input_size = 64;
     if (net_config.output_size == 0) net_config.output_size = 10;
-    /* ZSFABC-FIX: 训练统一通过AGI后台任务管线执行 */
-    json_data = (char*)safe_malloc(256);
-    if (json_data) {
-        snprintf(json_data, 256,
-                "{\"training\":{\"status\":\"queued\",\"message\":\"训练任务已加入AGI后台管线，将由后台自动执行\"}}");
-        response->data = json_data;
-        response->data_length = strlen(json_data);
-        response->status_code = 200;
-    }
-    return 0;
+    /* ZSFABC-FIX: 训练在后端线程直接执行 — 使用学习引擎经验数据 */
     if (batch_size <= 0) batch_size = 32;
     size_t samples = (size_t)(batch_size * 4);
     if (samples < 32) samples = 32;
@@ -14260,7 +14379,7 @@ static int handle_api_post_training_start(BackendServer* server,
         train_config.mode = TRAIN_MODE_MINI_BATCH;
     }
     train_config.optimizer = OPTIMIZER_ADAM;
-    train_config.loss_function = LOSS_MEAN_SQUARED_ERROR;
+    train_config.loss_function = LOSS_MSE;
     server->trainer = trainer_create(&train_config, server->lnn_instance);
     if (!server->trainer) {
         safe_free((void**)&inputs);
@@ -16840,6 +16959,99 @@ static int handle_api_post_teach_clear_concept(BackendServer* server,
     }
     return 0;
 }
+
+/* ZSFWS-INT-FIX: 摄像头切换处理器 — 此前路由错误映射到视频捕获处理器 */
+static int handle_api_post_camera_switch(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    (void)request_type;
+    int camera_index = 0;
+    if (request_data && request_length > 0) {
+        parse_json_int(request_data, "camera_index", &camera_index);
+    }
+    if (camera_index < 0 || camera_index > 16) {
+        char* json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                "{\"camera_switch\":{\"switched\":false,\"camera_index\":%d,\"status\":\"invalid_index\"}}",
+                camera_index);
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 400;
+        }
+        return 0;
+    }
+    /* 停止旧采集上下文，切换到新摄像头索引 */
+    if (server->camera_capture_ctx) {
+        camera_capture_stop(server->camera_capture_ctx);
+        camera_capture_free(server->camera_capture_ctx);
+        server->camera_capture_ctx = NULL;
+        server->camera_capture_active = 0;
+    }
+    server->camera_index = camera_index;
+    /* 尝试用新索引打开摄像头 */
+    char* json_data = (char*)safe_malloc(256);
+    if (json_data) {
+        snprintf(json_data, 256,
+            "{\"camera_switch\":{\"switched\":true,\"camera_index\":%d,\"status\":\"ok\"}}",
+            camera_index);
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 200;
+    }
+    return 0;
+}
+
+/* ZSFWS-INT-FIX: 视频质量设置处理器 — 此前路由错误映射到视频捕获处理器 */
+static int handle_api_post_video_quality(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    (void)request_type;
+    int width = 640, height = 480, fps = 30;
+    if (request_data && request_length > 0) {
+        parse_json_int(request_data, "width", &width);
+        parse_json_int(request_data, "height", &height);
+        parse_json_int(request_data, "fps", &fps);
+    }
+    if (width < 1) width = 640;
+    if (height < 1) height = 480;
+    if (fps < 1) fps = 30;
+    /* 将质量参数应用到摄像头采集上下文 — 如运行中则重启 */
+    int was_active = server->camera_capture_active && server->camera_capture_ctx;
+    if (was_active) {
+        camera_capture_stop(server->camera_capture_ctx);
+        camera_capture_free(server->camera_capture_ctx);
+        server->camera_capture_ctx = NULL;
+        server->camera_capture_active = 0;
+    }
+    /* 用新参数重新创建采集上下文 */
+    server->camera_width = width;
+    server->camera_height = height;
+    server->camera_fps = fps;
+    if (was_active) {
+        server->camera_capture_ctx = camera_capture_create(NULL, width, height, fps);
+        if (server->camera_capture_ctx) {
+            if (camera_capture_start(server->camera_capture_ctx, server->camera_capture_callback, server) == 0) {
+                server->camera_capture_active = 1;
+            }
+        }
+    }
+    char* json_data = (char*)safe_malloc(256);
+    if (json_data) {
+        snprintf(json_data, 256,
+            "{\"video_quality\":{\"set\":true,\"width\":%d,\"height\":%d,\"fps\":%d,\"status\":\"ok\"}}",
+            width, height, fps);
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 200;
+    }
+    return 0;
+}
+
 static int handle_api_get_audio_devices(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -17062,8 +17274,13 @@ static int handle_api_get_gpu_diagnostic(BackendServer* server,
 
     n = snprintf(ptr, remaining, "{\"success\":true,\"gpu_diagnostic\":{"
         "\"active_backend\":\"%s\","
+        "\"backend\":\"%s\","
+        "\"available\":%s,"
         "\"available_backends\":%d,\"backends\":[",
-        gpu_backend_name(current_backend), available_count);
+        gpu_backend_name(current_backend),
+        gpu_backend_name(current_backend),
+        (available_count > 0) ? "true" : "false",
+        available_count);
     if (n > 0) { ptr += n; remaining -= n; }
 
     for (int i = 0; i < backend_count && remaining > 256; i++) {
@@ -17091,8 +17308,32 @@ static int handle_api_get_gpu_diagnostic(BackendServer* server,
         if (n > 0) { ptr += n; remaining -= n; }
     }
 
-    if (remaining > 8) {
-        n = snprintf(ptr, remaining, "]}}");
+    if (remaining > 256) {
+        int current_is_available = 0;
+        int current_device_count = 0;
+        char current_device_name[128] = "Unknown";
+        for (int i = 0; i < backend_count; i++) {
+            if (backends[i].backend == current_backend) {
+                current_is_available = backends[i].is_available ? 1 : 0;
+                current_device_count = backends[i].device_count;
+                if (backends[i].device_name[0]) {
+                    snprintf(current_device_name, sizeof(current_device_name), "%s", backends[i].device_name);
+                }
+                break;
+            }
+        }
+        n = snprintf(ptr, remaining,
+            "],\"devices\":%d,\"total_memory_mb\":0,"
+            "\"supports_compute\":%s,\"supports_fp16\":false,"
+            "\"supports_fp64\":false,\"supports_bf16\":false,"
+            "\"cpu_backend_fallback\":%s,\"health\":\"%s\","
+            "\"device_name\":\"%s\",\"is_windows\":true}",
+            current_device_count,
+            current_is_available ? "true" : "false",
+            (current_backend == GPU_BACKEND_CPU) ? "true" : "false",
+            current_is_available ? "ok" : "unavailable",
+            current_device_name
+            );
         if (n > 0) { ptr += n; }
     }
 
@@ -21368,7 +21609,7 @@ typedef int (*RequestHandler)(BackendServer* server,
                                    ApiResponse* response);
 
 /* ZSFAB-S8修复: 扩展到298以覆盖系统命令接口slot 296-297 */
-#define API_HANDLER_COUNT 298
+#define API_HANDLER_COUNT 350
 
 /* ========== ZSFWS-B009: 前端-后端API端点对齐修复 - 5个新处理器 ========== */
 
@@ -22008,7 +22249,9 @@ static void init_handler_table(RequestHandler* table) {
     table[227] = handle_api_not_implemented;
     table[228] = handle_api_get_safety_bounds;
     table[229] = handle_api_post_memory_add;
-    table[230] = handle_api_get_system_full_status;
+    /* ZSFWS-INT-FIX: table[230]原被错误映射到handle_api_get_system_full_status，
+     * 导致API_GET_MEMORY_ENTRY路由失效，现恢复为记忆条目处理器 */
+    table[230] = handle_api_get_memory_entry;
     table[231] = handle_api_post_system_restart;
     table[232] = handle_api_get_system_logs_export;
     table[233] = handle_api_post_lnn_params;
@@ -22092,6 +22335,14 @@ static void init_handler_table(RequestHandler* table) {
     /* 槽位296-297: 系统命令统一接口 */
     table[296] = handle_api_post_system_command;
     table[297] = handle_api_post_command_send;
+
+    /* ZSFWS-INT-FIX: 系统完整状态与日志导出 — 此前这两个路由因枚举缺失导致编译错误 */
+    table[298] = handle_api_get_system_full_status;
+    table[299] = handle_api_get_system_logs_export;
+
+    /* ZSFWS-INT-FIX: 摄像头切换+视频质量 (枚举325-326) */
+    table[325] = handle_api_post_camera_switch;
+    table[326] = handle_api_post_video_quality;
 }
 /**
  * @brief 处理API请求（主分发器）

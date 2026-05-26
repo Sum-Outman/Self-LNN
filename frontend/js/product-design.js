@@ -40,9 +40,6 @@
 
     /* 后端API基础URL — 使用统一api-service.exe进行请求 */
     function pdGetBaseUrl() {
-        if (typeof window.SelfLnnApi !== 'undefined' && window.SelfLnnApi && window.SelfLnnApi.getBaseUrl) {
-            return window.SelfLnnApi.getBaseUrl();
-        }
         var host = window.location.hostname || '127.0.0.1';
         var port = 8080;
         return 'http://' + host + ':' + port;
@@ -145,7 +142,7 @@
         pdInit();
         pdSetStatus('<div style="text-align:center;padding:20px"><span style="color:#4fc3f7">查询引擎状态...</span></div>', true);
 
-        SelfLnnApi.request('/product/design', {
+        window.SelfLnnApi.request('/product/design', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: '{}'

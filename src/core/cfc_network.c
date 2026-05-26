@@ -154,6 +154,11 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     } else {
         network->W_out_params = NULL;
         network->b_out_params = NULL;
+        network->W_out_m = NULL;
+        network->W_out_v = NULL;
+        network->b_out_m = NULL;
+        network->b_out_v = NULL;
+        network->out_adam_step = 0;
     }
 
     /* 梯度块——与参数块相同布局，完全分离 */
@@ -181,6 +186,12 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         for (size_t i = 0; i < output_size_cfg; i++) {
             network->b_out_params[i] = 0.0f;
         }
+        /* ZSFWS-M001: 分配 W_out/b_out Adam动量缓冲区并清零 */
+        network->W_out_m = (float*)safe_calloc(output_size_cfg * hidden_size_cfg, sizeof(float));
+        network->W_out_v = (float*)safe_calloc(output_size_cfg * hidden_size_cfg, sizeof(float));
+        network->b_out_m = (float*)safe_calloc(output_size_cfg, sizeof(float));
+        network->b_out_v = (float*)safe_calloc(output_size_cfg, sizeof(float));
+        network->out_adam_step = 0;
     }
     
     // 检查内存分配
@@ -298,6 +309,12 @@ void cfc_free(CfCNetwork* network) {
     network->bias_gradients = NULL;
     network->W_out_gradients = NULL;
     network->b_out_gradients = NULL;
+    /* ZSFWS-M001: 释放 W_out Adam动量缓冲区 */
+    safe_free((void**)&network->W_out_m);
+    safe_free((void**)&network->W_out_v);
+    safe_free((void**)&network->b_out_m);
+    safe_free((void**)&network->b_out_v);
+    network->out_adam_step = 0;
 
     /* ZSFWS-MLW: 释放每层偏移追踪数组 */
     safe_free((void**)&network->per_layer_w_offset);
@@ -762,9 +779,9 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
      * 原SGD路径（参数 -= lr*grad）缺少动量/偏差校正/自适应步长，
      * 导致单样本训练与批量训练的优化动态不一致，严重损害收敛稳定性。 */
     cfc_apply_cell_gradients_adam(network, learning_rate, 0.9f, 0.999f, 1e-8f, 1);
-    /* W_out投影参数：使用cfc_apply_out_proj_gradients统一更新（已累积梯度）。
-     * W_out仅有2个矩阵，暂无专用Adam缓冲区，使用集中式SGD更新。
-     * TODO-R3P3: 后续添加W_out Adam动量缓冲区以完全统一优化路径。 */
+    /* ZSFWS-M001: W_out/b_out Adam动量缓冲区已添加，全部参数统一使用Adam更新。
+     * cfc_apply_out_proj_gradients 内部已改为完整Adam(β1=0.9, β2=0.999)自适应学习率。
+     * W_out优化路径现已与cell级参数完全统一，消除双轨运行导致的收敛分裂问题。 */
     cfc_apply_out_proj_gradients(network, learning_rate);
     /* 单样本路径完成后清零W_out梯度，防止跨样本污染 */
     if (network->W_out_gradients) {
@@ -1096,11 +1113,12 @@ int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate) {
 }
 
 /**
- * @brief 应用输出投影矩阵(W_out+b_out)梯度
+ * @brief 应用输出投影矩阵(W_out+b_out)梯度 —— Adam自适应学习率更新
  * 
- * P0-014修复: W_out_params/b_out_params 存储在 param_block 扩展区，
- * W_out_gradients/b_out_gradients 存储在 grad_block 扩展区，
- * 两者完全分离。此函数将累积的梯度应用到参数上。
+ * ZSFWS-M001修复: 原SGD更新路径与cell级Adam更新双轨运行,收敛动态不一致。
+ * 改为使用完整的 Adam(β1=0.9, β2=0.999) 自适应学习率,
+ * 独立维护 W_out/b_out 的一阶动量(m)和二阶速度(v)缓冲区,
+ * 消除优化路径分裂问题,统一全部参数使用Adam更新。
  */
 int cfc_apply_out_proj_gradients(CfCNetwork* network, float learning_rate) {
     SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
@@ -1110,19 +1128,33 @@ int cfc_apply_out_proj_gradients(CfCNetwork* network, float learning_rate) {
     size_t output_size = network->config.output_size;
     
     if (output_size == hidden_size || !network->W_out_params || !network->W_out_gradients) return 0;
-    
-    /* P0-014修复: 参数与梯度完全分离，使用独立缓冲区 */
-    for (size_t i = 0; i < output_size * hidden_size; i++) {
-        float g = network->W_out_gradients[i];
-        if (isfinite(g)) network->W_out_params[i] -= learning_rate * g;
-    }
-    /* 更新b_out */
-    for (size_t i = 0; i < output_size; i++) {
-        float g = network->b_out_gradients[i];
-        if (isfinite(g)) network->b_out_params[i] -= learning_rate * g;
-    }
+    if (!network->W_out_m || !network->W_out_v || !network->b_out_m || !network->b_out_v) return -1;
+
+    /* Adam超参数 */
+    const float beta1 = 0.9f;
+    const float beta2 = 0.999f;
+    const float epsilon = 1e-8f;
+
+    /* 步数计数器递增 + 偏差校正因子 */
+    network->out_adam_step++;
+    size_t t = network->out_adam_step;
+    float b1_corr = 1.0f / (1.0f - powf(beta1, (float)t));
+    float b2_corr = 1.0f / (1.0f - powf(beta2, (float)t));
+
+    size_t w_count = output_size * hidden_size;
+
+    /* W_out 矩阵: Adam更新 */
+    cfc_adam_update_group(network->W_out_params, network->W_out_gradients,
+                          network->W_out_m, network->W_out_v, w_count,
+                          learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+
+    /* b_out 偏置: Adam更新 */
+    cfc_adam_update_group(network->b_out_params, network->b_out_gradients,
+                          network->b_out_m, network->b_out_v, output_size,
+                          learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+
     /* 应用后清零梯度缓冲区 */
-    memset(network->W_out_gradients, 0, output_size * hidden_size * sizeof(float));
+    memset(network->W_out_gradients, 0, w_count * sizeof(float));
     memset(network->b_out_gradients, 0, output_size * sizeof(float));
     return 0;
 }

@@ -1095,6 +1095,7 @@ struct DialogueGenerator {
 
     /* 内部状态 */
     int initialized;
+    int is_trained;  /* ZSFWS-M005: 输出投影权重是否已完成训练 */
 };
 
 /* ============================================================================
@@ -1509,6 +1510,18 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config)
     return gen;
 }
 
+/* ZSFWS-M005: 标记对话生成器已训练（权重加载或训练完成后调用） */
+void dialogue_gen_mark_trained(DialogueGenerator* gen)
+{
+    if (gen) gen->is_trained = 1;
+}
+
+/* ZSFWS-M005: 查询对话生成器训练状态 */
+int dialogue_gen_is_trained(const DialogueGenerator* gen)
+{
+    return (gen && gen->is_trained) ? 1 : 0;
+}
+
 void dialogue_gen_free(DialogueGenerator* gen)
 {
     if (!gen) return;
@@ -1531,6 +1544,13 @@ static int dialogue_gen_step(DialogueGenerator* gen,
                               int* output_token_id)
 {
     if (!gen || !gen->initialized || !output_token_id) return -1;
+
+    /* ZSFWS-M005修复: 对话生成器训练状态检查
+     * 未训练时输出投影权重为随机值，生成的token序列无意义。
+     * 返回-2错误码通知调用者回退到模板匹配系统。 */
+    if (!gen->is_trained) {
+        return -2;
+    }
 
     size_t vs = gen->config.vocab_size;
     size_t hs = gen->config.hidden_size;

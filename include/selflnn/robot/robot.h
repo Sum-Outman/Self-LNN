@@ -452,12 +452,6 @@ int robot_enable_hardware(Robot* robot, int enable);
 int robot_is_hardware_enabled(const Robot* robot);
 
 /**
- * @brief P0-007修复: simulation_mode已移除，无硬件时始终返回错误
- * @deprecated 不再支持仿真模式，无硬件连接时所有传感器数据返回错误
- */
-int robot_set_simulation_mode(Robot* robot, int enable);
-
-/**
  * @brief 检查机器人数据是否来自仿真模式（不可用于自主学习训练）
  *
  * P0-007修复: 仿真模式已移除，无硬件连接时所有数据为空，此函数保留用于兼容检查。

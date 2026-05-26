@@ -2319,9 +2319,6 @@ int simulator_apply_robot_command(Simulator* simulator, int robot_id, const Robo
  */
 int simulator_add_sensor(Simulator* simulator, int robot_id, const SensorConfig* sensor_config, 
                          const float* mount_position, const float* mount_orientation) {
-    (void)robot_id;
-    (void)mount_position;
-    (void)mount_orientation;
     if (!simulator || !sensor_config) {
         return -1;
     }
@@ -2352,6 +2349,21 @@ int simulator_add_sensor(Simulator* simulator, int robot_id, const SensorConfig*
     sensor->data_size = 0;
     sensor->noise_level = 0.01f;  // 默认噪声级别
     sensor->is_valid = 1;
+
+    /* ZSFWS-E003: 存储传感器空间位姿
+     * 之前 mount_position/mount_orientation 被(void)丢弃,
+     * 传感器安装位置信息完全丢失,导致空间感知数据缺失坐标参考。
+     * 现在真实存储到传感器数据结构中供下游空间融合使用。 */
+    sensor->robot_id = robot_id;
+    if (mount_position) {
+        memcpy(sensor->position, mount_position, 3 * sizeof(float));
+    }
+    if (mount_orientation) {
+        memcpy(sensor->orientation, mount_orientation, 4 * sizeof(float));
+    } else {
+        /* 无姿态数据时使用默认四元数 (1,0,0,0) */
+        sensor->orientation[0] = 1.0f;
+    }
     
     // 增加传感器计数
     simulator->sensor_count++;

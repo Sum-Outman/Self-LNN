@@ -387,6 +387,13 @@ int multimodal_unified_input_process(UnifiedInputState* state,
         if (unified_size) *unified_size = 0;
         return -1;
     }
+    /* ZSFWS-S006修复: 多模态统一输入训练状态检查
+     * 未训练时投影矩阵和LNN均为随机权重，输出为随机噪声，
+     * 对自主学习和决策造成严重误导。仅在训练完成后允许使用。 */
+    if (!state->is_trained && !state->lnn_instance) {
+        if (unified_size) *unified_size = 0;
+        return -3; /* 返回特殊错误码表示模型未训练 */
+    }
     /* B-015: 输出大小上限验证 */
     if (max_output_size > SELFLNN_MAX_CONTROL_DIM)
         max_output_size = SELFLNN_MAX_CONTROL_DIM;
@@ -819,6 +826,7 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
     /* 步骤5: 更新历史质量指标 */
     float quality = 1.0f / (1.0f + total_loss);
     state->historical_process_quality = state->historical_process_quality * 0.9f + quality * 0.1f;
+    state->is_trained = 1;  /* ZSFWS-S006: 首次成功训练后标记为已训练 */
 
     return 0;
 }

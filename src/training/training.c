@@ -6670,6 +6670,45 @@ static void optimizer_free(OptimizerState* optimizer) {
 }
 
 /**
+ * @brief ZSFWS-M002: 获取优化器内部状态（检查点序列化用）
+ * 
+ * 将优化器的核心运行时状态打包为紧凑浮点数组，
+ * 供检查点保存/加载时序列化使用，避免直接访问 OptimizerState 私有字段。
+ * 
+ * @param optimizer 优化器状态
+ * @param state 输出缓冲区[4] = [beta1, beta2, epsilon, (float)t]
+ * @return 0成功，-1参数无效
+ */
+static int optimizer_get_internal_state(const OptimizerState* optimizer, float state[4]) {
+    if (!optimizer || !state) return -1;
+    state[0] = optimizer->beta1;
+    state[1] = optimizer->beta2;
+    state[2] = optimizer->epsilon;
+    state[3] = (float)optimizer->t;
+    return 0;
+}
+
+/**
+ * @brief ZSFWS-M002: 设置优化器内部状态（检查点加载恢复用）
+ * 
+ * 从检查点读取的紧凑浮点数组恢复优化器核心运行时状态。
+ * 仅在动量缓冲区已分配的前提下恢复元参数。
+ * 
+ * @param optimizer 优化器状态
+ * @param state 输入数组[4] = [beta1, beta2, epsilon, (float)t]
+ * @return 0成功，-1参数无效或缓冲区未分配
+ */
+static int optimizer_set_internal_state(OptimizerState* optimizer, const float state[4]) {
+    if (!optimizer || !state) return -1;
+    if (!optimizer->m_buffer) return -1; /* 动量缓冲区未分配，拒绝恢复 */
+    optimizer->beta1 = state[0];
+    optimizer->beta2 = state[1];
+    optimizer->epsilon = state[2];
+    optimizer->t = (size_t)(unsigned int)state[3];
+    return 0;
+}
+
+/**
  * @brief 学习率调度器创建
  */
 static LearningRateScheduler* scheduler_create_internal(
@@ -7716,11 +7755,8 @@ int save_model_checkpoint(const Trainer* trainer, const char* filename) {
         uint32_t opt_count = (trainer->optimizer.m_buffer && trainer->network) ? 1 : 0;
         float opt_m_v[4] = {0}; /* [beta1, beta2, epsilon, total_steps] */
         if (opt_count > 0) {
-            /* ZSFBUILD: optimizer_get_internal_state未实现，直接访问OptimizerState字段 */
-            opt_m_v[0] = trainer->optimizer.beta1;
-            opt_m_v[1] = trainer->optimizer.beta2;
-            opt_m_v[2] = trainer->optimizer.epsilon;
-            opt_m_v[3] = (float)trainer->optimizer.t;
+            /* ZSFWS-M002: 使用正式API封装优化器状态，替代直接访问OptimizerState字段 */
+            optimizer_get_internal_state(&trainer->optimizer, opt_m_v);
             crc = ckpt_crc32c(crc, &opt_state_flag, sizeof(uint32_t));
             fwrite(&opt_state_flag, sizeof(uint32_t), 1, file);
             crc = ckpt_crc32c(crc, opt_m_v, sizeof(opt_m_v));
@@ -7916,11 +7952,8 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
                 if (fread(opt_m_v, sizeof(opt_m_v), 1, file) == 1) {
                     crc = ckpt_crc32c(crc, opt_m_v, sizeof(opt_m_v));
                     if (trainer->optimizer.m_buffer) {
-                        /* ZSFBUILD: optimizer_set_internal_state未实现，直接恢复OptimizerState字段 */
-                        trainer->optimizer.beta1 = opt_m_v[0];
-                        trainer->optimizer.beta2 = opt_m_v[1];
-                        trainer->optimizer.epsilon = opt_m_v[2];
-                        trainer->optimizer.t = (size_t)opt_m_v[3];
+                        /* ZSFWS-M002: 使用正式API恢复优化器状态 */
+                        optimizer_set_internal_state(&trainer->optimizer, opt_m_v);
                         if (trainer->config.verbose) {
                             printf("优化器状态恢复: beta1=%.4f beta2=%.4f eps=%.6f steps=%d\n",
                                    opt_m_v[0], opt_m_v[1], opt_m_v[2], (int)opt_m_v[3]);

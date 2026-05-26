@@ -372,6 +372,14 @@ struct CfCNetwork {
     float* b_out_params;          /**< 输出投影偏置参数 [output_size] */
     float* W_out_gradients;       /**< 输出投影矩阵梯度 [output_size * hidden_size] */
     float* b_out_gradients;       /**< 输出投影偏置梯度 [output_size] */
+    /* ZSFWS-M001: W_out/b_out Adam动量缓冲区 —— 统一优化路径
+     * 之前 W_out 使用 SGD 更新而 cell 级参数使用 Adam，收敛动态不一致。
+     * 添加独立的 Adam 一阶动量(m)和二阶速度(v)缓冲区，消除双轨更新问题。 */
+    float* W_out_m;               /**< W_out Adam一阶动量 [output_size * hidden_size] */
+    float* W_out_v;               /**< W_out Adam二阶速度 [output_size * hidden_size] */
+    float* b_out_m;               /**< b_out Adam一阶动量 [output_size] */
+    float* b_out_v;               /**< b_out Adam二阶速度 [output_size] */
+    size_t out_adam_step;         /**< W_out Adam步数计数器（偏差校正） */
     /* ZSFWS-MLW: 多层权重独立存储——每层独立权重矩阵，消除权重共享瓶颈
      * 内存布局: [layer0_w(input*hidden)] [layer1_w(hidden*hidden)] ... [bias_all] [W_out] */
     size_t* per_layer_w_offset;   /**< 每层权重在param_block中的偏移量[num_layers] */

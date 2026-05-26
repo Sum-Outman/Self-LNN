@@ -294,7 +294,7 @@ class DataEngine {
      */
     stop() {
         if (this.timerId) {
-            clearInterval(this.timerId);
+            clearTimeout(this.timerId);
             this.timerId = null;
         }
         this.initialized = false;
