@@ -135,10 +135,16 @@ int unified_signal_processor_set_config(UnifiedSignalProcessor* processor, const
 }
 
 /**
- * @brief 训练统一信号处理器（完整实现：通过CfC细胞单元自适应）
+ * @brief 训练统一信号处理器（完整实现：真实梯度反向传播 + SGD权重更新）
  *
- * 使用CfC细胞单元作为唯一的处理路径进行训练。
- * CfC前向传播时已进行内部自适应，训练函数计算损失并驱动梯度更新。
+ * 前向传播：通过unified_signal_processor_encode()获取输出信号。
+ * 反向传播：计算代理损失对投影矩阵和偏置的梯度。
+ *   损失: L = (1/D) * Σ_d (y_d - t_d)²
+ *   dL/dy_d = 2*(y_d - t_d) / D
+ *   投影: y_d = b_d + Σ_s W[d][s] * x_s
+ *   dL/db_d = dL/dy_d
+ *   dL/dW[d][s] = dL/dy_d * x_s
+ * 参数更新：W -= lr * dL/dW, b -= lr * dL/db（带动量）
  */
 int unified_signal_processor_train(UnifiedSignalProcessor* processor,
                          const VisionInput* vision,
@@ -156,7 +162,7 @@ int unified_signal_processor_train(UnifiedSignalProcessor* processor,
         return 0;
     }
     
-    // 处理输入以获取输出信号
+    /* 处理输入以获取输出信号 */
     UnifiedOutput output;
     memset(&output, 0, sizeof(UnifiedOutput));
     
@@ -167,9 +173,10 @@ int unified_signal_processor_train(UnifiedSignalProcessor* processor,
         return -1;
     }
     
-    // 计算损失（均方误差）
+    /* 计算损失（均方误差） */
     float total_loss = 0.0f;
     size_t unified_dim = processor->config.unified_dimension;
+    size_t total_input_dim = processor->total_input_dim;
     
     for (size_t i = 0; i < unified_dim; i++) {
         float error = output.unified_signal[i] - target[i];
@@ -177,10 +184,145 @@ int unified_signal_processor_train(UnifiedSignalProcessor* processor,
     }
     total_loss /= (float)unified_dim;
     
-    // 更新信号处理质量指标（时序反向传播由处理器内部CfC细胞统一管理）
+    /* 如果投影矩阵存在，执行真实梯度反向传播和SGD权重更新 */
+    if (processor->unified_projection_matrix && total_input_dim > 0) {
+        
+        /* 重建统一输入向量（encode()内部已释放，此处重建用于梯度计算） */
+        float* unified_input = (float*)safe_calloc(total_input_dim, sizeof(float));
+        if (unified_input) {
+            size_t current_offset = 0;
+            
+            /* 视觉特征 */
+            if (vision && vision->features && vision->feature_count > 0 &&
+                vision->feature_count <= processor->config.vision_dimension) {
+                memcpy(unified_input + current_offset, vision->features,
+                       vision->feature_count * sizeof(float));
+            }
+            current_offset += processor->config.vision_dimension;
+            
+            /* 音频特征 */
+            if (audio && audio->mfcc_features && audio->mfcc_count > 0 &&
+                audio->mfcc_count <= processor->config.audio_dimension) {
+                memcpy(unified_input + current_offset, audio->mfcc_features,
+                       audio->mfcc_count * sizeof(float));
+            }
+            current_offset += processor->config.audio_dimension;
+            
+            /* 文本特征 */
+            if (text && text->embeddings && text->embedding_dim > 0 &&
+                text->embedding_dim <= processor->config.text_dimension) {
+                memcpy(unified_input + current_offset, text->embeddings,
+                       text->embedding_dim * sizeof(float));
+            }
+            current_offset += processor->config.text_dimension;
+            
+            /* 传感器特征（含归一化） */
+            if (sensor && sensor->sensor_values && sensor->sensor_count > 0 &&
+                sensor->sensor_count <= processor->config.sensor_dimension) {
+                float* normalized_sensor = (float*)safe_malloc(sensor->sensor_count * sizeof(float));
+                if (normalized_sensor) {
+                    if (align_and_normalize_sensor_data(processor, sensor, normalized_sensor) == 0) {
+                        memcpy(unified_input + current_offset, normalized_sensor,
+                               sensor->sensor_count * sizeof(float));
+                    }
+                    safe_free((void**)&normalized_sensor);
+                }
+            }
+            
+            /* 获取学习率 */
+            float lr = processor->config.learning_rate;
+            if (lr <= 0.0f) lr = 0.001f;
+            float momentum = 0.9f;
+            float inv_dim = 1.0f / (float)unified_dim;
+            
+            /* 分配梯度缓冲区 */
+            float* dL_dy = (float*)safe_calloc(unified_dim, sizeof(float));
+            if (dL_dy) {
+                /* dL/dy_d = 2*(y_d - t_d) / D */
+                for (size_t d = 0; d < unified_dim; d++) {
+                    dL_dy[d] = 2.0f * (output.unified_signal[d] - target[d]) * inv_dim;
+                }
+                
+                /* 确保动量缓冲区已分配 */
+                size_t matrix_size = unified_dim * total_input_dim;
+                if (!processor->weight_momentum || processor->momentum_matrix_size != matrix_size) {
+                    safe_free((void**)&processor->weight_momentum);
+                    processor->weight_momentum = (float*)safe_calloc(matrix_size, sizeof(float));
+                    processor->momentum_matrix_size = matrix_size;
+                }
+                if (!processor->bias_momentum || processor->momentum_bias_size != unified_dim) {
+                    safe_free((void**)&processor->bias_momentum);
+                    processor->bias_momentum = (float*)safe_calloc(unified_dim, sizeof(float));
+                    processor->momentum_bias_size = unified_dim;
+                }
+                
+                /* 更新偏置：b_d -= lr * dL/db_d（带动量） */
+                if (processor->unified_projection_bias && processor->bias_momentum) {
+                    for (size_t d = 0; d < unified_dim; d++) {
+                        processor->bias_momentum[d] = momentum * processor->bias_momentum[d] - lr * dL_dy[d];
+                        processor->unified_projection_bias[d] += processor->bias_momentum[d];
+                    }
+                } else if (processor->unified_projection_bias) {
+                    for (size_t d = 0; d < unified_dim; d++) {
+                        processor->unified_projection_bias[d] -= lr * dL_dy[d];
+                    }
+                }
+                
+                /* 更新权重：W[d][s] -= lr * dL/dy_d * x_s（带动量） */
+                if (processor->weight_momentum) {
+                    for (size_t d = 0; d < unified_dim; d++) {
+                        float grad_y = dL_dy[d];
+                        if (fabsf(grad_y) < 1e-20f) continue;
+                        float* row = processor->unified_projection_matrix + d * total_input_dim;
+                        float* mom_row = processor->weight_momentum + d * total_input_dim;
+                        for (size_t s = 0; s < total_input_dim; s++) {
+                            float dw = grad_y * unified_input[s];
+                            /* 梯度裁剪 */
+                            if (dw > 1.0f) dw = 1.0f;
+                            if (dw < -1.0f) dw = -1.0f;
+                            mom_row[s] = momentum * mom_row[s] - lr * dw;
+                            row[s] += mom_row[s];
+                        }
+                    }
+                } else {
+                    for (size_t d = 0; d < unified_dim; d++) {
+                        float grad_y = dL_dy[d];
+                        if (fabsf(grad_y) < 1e-20f) continue;
+                        float* row = processor->unified_projection_matrix + d * total_input_dim;
+                        for (size_t s = 0; s < total_input_dim; s++) {
+                            float dw = grad_y * unified_input[s];
+                            if (dw > 1.0f) dw = 1.0f;
+                            if (dw < -1.0f) dw = -1.0f;
+                            row[s] -= lr * dw;
+                        }
+                    }
+                }
+                
+                /* 将梯度范数存入gradient_buffer作为监控指标 */
+                if (processor->gradient_buffer) {
+                    float grad_norm = 0.0f;
+                    for (size_t d = 0; d < unified_dim; d++) {
+                        grad_norm += dL_dy[d] * dL_dy[d];
+                    }
+                    if (unified_dim > 0) {
+                        size_t fill_count = (unified_dim < 10000) ? unified_dim : 10000;
+                        for (size_t i = 0; i < fill_count; i++) {
+                            processor->gradient_buffer[i] = dL_dy[i % unified_dim];
+                        }
+                    }
+                }
+                
+                safe_free((void**)&dL_dy);
+            }
+            
+            safe_free((void**)&unified_input);
+        }
+    }
+    
+    /* 更新信号处理质量指标 */
     processor->encoding_quality = 1.0f / (1.0f + total_loss);
     
-    // 清理内存
+    /* 清理内存 */
     safe_free((void**)&output.unified_signal);
     safe_free((void**)&output.temporal_features);
     

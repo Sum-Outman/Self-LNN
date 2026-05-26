@@ -6,6 +6,9 @@
  * 对抗训练、域自适应等。 ，提供完整的正则化算法。
  */
 
+/* 暴露LNN内部结构体定义，使DropPath能直接操作隐藏状态 */
+#define SELFLNN_IMPLEMENTATION
+
 #include "selflnn/training/regularization.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -397,13 +400,43 @@ int advanced_regularizer_apply_drop_path(AdvancedRegularizer* regularizer,
         }
     }
     
-    // 在残差网络结构中，被丢弃的层输出为零，残差连接直接传递输入
-    // 保留层输出按 1/survival_prob 缩放以保持训练和推理的期望一致
-    size_t network_size = 0;
-    float* hidden_state = NULL;
-    UNUSED(network_size); UNUSED(hidden_state);
-    if (network) {
-        // 获取网络隐藏状态大小
+    /* 在残差网络结构中，被丢弃的层输出为零，残差连接直接传递输入
+     * 保留层输出按 1/survival_prob 缩放以保持训练和推理的期望一致 */
+    if (network && network->hidden_state && network->config.hidden_size > 0) {
+        size_t hidden_size = network->config.hidden_size;
+        /* 按层数均分隐藏状态维度，每层对应一个连续段 */
+        size_t seg_size = (num_layers > 0) ? hidden_size / num_layers : hidden_size;
+        if (seg_size < 1) seg_size = 1;
+
+        for (size_t i = 0; i < num_layers; i++) {
+            int layer_idx = layer_indices[i];
+            if (layer_idx < 0) continue;
+
+            size_t seg_start = i * seg_size;
+            if (seg_start >= hidden_size) seg_start = hidden_size - 1;
+            size_t seg_end = seg_start + seg_size;
+            if (seg_end > hidden_size) seg_end = hidden_size;
+
+            int is_dropped = 0;
+            if (layer_idx < (int)regularizer->drop_path_state.num_layers) {
+                is_dropped = regularizer->drop_path_state.dropped_layers[layer_idx];
+            }
+
+            if (is_dropped) {
+                /* 丢弃层：输出归零，残差连接直通 */
+                memset(&network->hidden_state[seg_start], 0,
+                       (seg_end - seg_start) * sizeof(float));
+            } else {
+                /* 保留层：按 1/survival_prob 缩放保持期望一致性 */
+                float survival = (layer_idx < (int)regularizer->drop_path_state.num_layers) ?
+                    regularizer->drop_path_state.survival_probs[layer_idx] : 0.9f;
+                if (survival < 0.01f) survival = 0.01f;
+                float scale = 1.0f / survival;
+                for (size_t j = seg_start; j < seg_end; j++) {
+                    network->hidden_state[j] *= scale;
+                }
+            }
+        }
     }
     
     return 0;

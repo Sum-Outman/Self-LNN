@@ -901,8 +901,9 @@ int multimodal_teaching_evaluate_skill(MultimodalTeachingSystem* system, size_t 
         precision = best_sim;
         recall = best_sim * 0.9f;
     } else {
-        precision = 0.5f;
-        recall = 0.5f;
+        /* 无已学技能：无法计算精确率和召回率，应返回0 */
+        precision = 0.0f;
+        recall = 0.0f;
     }
 
     float temporal_consistency = 0.0f;
@@ -1758,7 +1759,25 @@ int teaching_evaluate_skill(MultimodalTeachingSystem* system, int skill_idx,
             NULL, 0, NULL, 0, NULL, 0, action_test, 64, &feedback, &loss) != 0) return -1;
 
     *success_prob = 1.0f / (1.0f + loss);
-    *smoothness = 0.8f;
+
+    /* 基于实际生成的动作向量计算空间特征平滑度：
+     * 度量相邻特征维间的差异一致性，替代硬编码0.8f */
+    {
+        float smooth_sum = 0.0f;
+        int smooth_count = 0;
+        size_t ndim = 64 < TEACH_FUSED_FEAT_DIM ? 64 : TEACH_FUSED_FEAT_DIM;
+        for (size_t d = 1; d < ndim; d++) {
+            float diff = fabsf(action_test[d] - action_test[d - 1]);
+            smooth_sum += diff;
+            smooth_count++;
+        }
+        if (smooth_count > 0) {
+            float avg_step = smooth_sum / (float)smooth_count;
+            *smoothness = 1.0f / (1.0f + avg_step * 3.0f);
+        } else {
+            *smoothness = 0.0f;
+        }
+    }
     return 0;
 }
 

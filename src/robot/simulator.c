@@ -3,7 +3,24 @@
  * @brief 仿真器接口实现
  * 
  * 提供PyBullet、Gazebo等外部仿真器的IPC通信接口。
- * 外部仿真器不可用时直接返回错误，不降级到任何内部虚拟引擎。
+ * 提供100%纯C内部物理引擎（碰撞检测+约束求解+刚体动力学）。
+ * 
+ * 数据来源规则【P2-03修复】：
+ *   凡使用内部纯C物理引擎生成的数据，必须在数据产出入口标明：
+ *   "[数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)]"
+ *   凡使用外部仿真器（PyBullet/Gazebo）生成的数据，标明：
+ *   "[数据来源: 外部仿真器(PyBullet/Gazebo)]"
+ * 
+ * 宏保护体系：
+ *   SELFLNN_USE_PURE_C_PHYSICS  — CMakeLists.txt控制，启用内部纯C物理引擎
+ *   SELFLNN_HAS_EXTERNAL_SIM    — CMakeLists.txt控制，启用外部仿真器接口
+ *   SELFLNN_STRICT_REAL_DATA    — 严格真实数据模式，禁绝所有内部虚拟物理仿真
+ * 
+ * 决策层级：
+ *   1. SELFLNN_STRICT_REAL_DATA  → 强制仅用外部仿真器，内部引擎全部禁用
+ *   2. SELFLNN_USE_PURE_C_PHYSICS → 优先/允许使用内部纯C物理引擎
+ *   3. SELFLNN_HAS_EXTERNAL_SIM   → 允许使用外部仿真器
+ *   4. 运行时 use_internal_simulator 标志 → 动态切换内部/外部引擎
  * 
  * 严格真实数据原则：
  * - 优先通过IPC连接PyBullet/Gazebo外部仿真器
@@ -61,6 +78,25 @@ typedef int SimShmHandle;
 #endif
 
 #define SIM_SHM_SIZE (256 * 1024)  /* 256KB共享内存区域 */
+
+/* [P2-03修复] 编译期宏保护确认：
+ * 以下映射关系确保仅在正确的编译选项下内部纯C物理引擎才可用：
+ *   CMakeLists.txt SELFLNN_ENABLE_PURE_C_SIM=ON → -DSELFLNN_USE_PURE_C_PHYSICS
+ *   CMakeLists.txt SELFLNN_ENABLE_EXTERNAL_SIM=ON → -DSELFLNN_HAS_EXTERNAL_SIM
+ * 
+ * 运行时 use_internal_simulator 标志由 simulator_auto_connect() 根据宏和
+ * 外部仿真器可用性动态设置，后续所有数据访问入口据此标记数据来源。 */
+#ifdef SELFLNN_USE_PURE_C_PHYSICS
+#define INTERNAL_PHYSICS_AVAILABLE 1
+#else
+#define INTERNAL_PHYSICS_AVAILABLE 0
+#endif
+
+#ifdef SELFLNN_HAS_EXTERNAL_SIM
+#define EXTERNAL_SIM_AVAILABLE 1
+#else
+#define EXTERNAL_SIM_AVAILABLE 0
+#endif
 
 typedef struct {
     int initialized;
@@ -280,6 +316,9 @@ static void internal_quat_from_angular_vel(const float* ang_vel, float dt, float
 
 static int simulator_connect_internal(Simulator* sim) {
     if (!sim) return -1;
+    /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
+     * 初始化内部物理引擎的资源（物理对象数组、增强碰撞管线、传感器仿真上下文）
+     * 后续所有通过此引擎生成的物理数据均标记为内部纯C引擎数据。 */
 #ifdef SELFLNN_STRICT_REAL_DATA
     log_warning("[仿真器] 严格真实数据模式：拒绝连接内部虚拟物理引擎");
     return -1;
@@ -322,6 +361,9 @@ static int simulator_disconnect_internal(Simulator* sim) {
 
 static int simulator_start_internal(Simulator* sim) {
     if (!sim) return -1;
+    /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
+     * 启动内部物理引擎仿真，重置物理时间和机器人运动状态
+     * 后续step产生的所有关节/位姿/速度数据均由内部纯C物理学计算。 */
     sim->internal.physics_time = 0.0f;
     sim->internal.last_update_time = 0.0f;
     sim->internal.accumulator = 0.0f;
@@ -996,6 +1038,9 @@ static int sim_process_collisions(Simulator* sim, float friction_coeff, float re
 
 static void simulator_update_internal_physics(Simulator* sim, float dt) {
     if (!sim || dt <= 0.0f) return;
+    /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
+     * 本函数为内部物理引擎的核心计算入口，所有仿真的关节位置/速度/力矩、
+     * 刚体位姿/速度/加速度、接触力、IMU数据均由此函数通过纯C数学模型计算产生。 */
 #ifdef SELFLNN_STRICT_REAL_DATA
     log_warning("[仿真器] 严格真实数据模式：内部虚拟物理引擎已禁用");
     return;
@@ -1218,7 +1263,10 @@ static void simulator_update_internal_physics(Simulator* sim, float dt) {
 static int simulator_step_internal(Simulator* sim, int num_steps) {
     if (!sim) return -1;
 
-    /* 内部纯C物理引擎（外部仿真器不可用时的真实回退，非降级处理） */
+    /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
+     * 内部纯C物理引擎（外部仿真器不可用时的真实回退，非降级处理）
+     * 所有物理数据：关节状态、刚体运动、碰撞响应、传感器仿真均
+     * 由100%纯C代码（GJK/EPA/SI/半隐式Euler）直接计算产生，不经任何外部程序。 */
     static int engine_reported = 0;
     if (!engine_reported) {
         log_info("[仿真器] 外部仿真器未检测到，启动内部纯C增强物理引擎");
@@ -1270,6 +1318,8 @@ static int simulator_disconnect_external(Simulator* sim) {
 
 /**
  * @brief 外部仿真器启动
+ * [P2-03修复] 数据来源: 外部仿真器(PyBullet/Gazebo)
+ * 启动外部仿真器运行，所有物理数据由外部仿真器通过IPC通信提供。
  */
 static int simulator_start_external(Simulator* sim) {
     if (!sim) return -1;
@@ -1303,6 +1353,8 @@ static int simulator_stop_external(Simulator* sim) {
 
 /**
  * @brief 外部仿真器单步执行
+ * [P2-03修复] 数据来源: 外部仿真器(PyBullet/Gazebo)
+ * 所有物理数据由外部仿真器通过IPC通信提供，本函数仅负责指令转发。
  */
 static int simulator_step_external(Simulator* sim, int num_steps) {
     if (!sim) return -1;
@@ -1746,8 +1798,25 @@ int simulator_step(Simulator* simulator, int num_steps) {
     int result;
     
     if (simulator->use_internal_simulator) {
+        /* [P2-03修复] 数据来源标记：使用内部纯C物理引擎生成仿真数据 */
+        static int internal_source_reported = 0;
+        if (!internal_source_reported) {
+            log_info("[仿真器] [数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)] "
+                     "SELFLNN_USE_PURE_C_PHYSICS已启用，内部物理引擎正在运行");
+            log_info("[仿真器] 动力学: 半隐式Euler + 4子步进 | 碰撞: GJK+EPA+AABB | 约束: SI求解器+Baumgarte");
+            log_info("[仿真器] 所有关节状态、IMU数据、接触力、位姿数据均由内部纯C物理引擎生成");
+            internal_source_reported = 1;
+        }
         result = simulator_step_internal(simulator, num_steps);
     } else {
+        /* [P2-03修复] 数据来源标记：使用外部仿真器生成仿真数据 */
+        static int external_source_reported = 0;
+        if (!external_source_reported) {
+            log_info("[仿真器] [数据来源: 外部仿真器(PyBullet/Gazebo)] "
+                     "外部仿真器通过IPC通信提供物理仿真数据");
+            log_info("[仿真器] 所有关节状态、IMU数据、接触力、位姿数据均由外部仿真器生成");
+            external_source_reported = 1;
+        }
         result = simulator_step_external(simulator, num_steps);
     }
     
@@ -1892,7 +1961,11 @@ int simulator_remove_robot(Simulator* simulator, int robot_id) {
 }
 
 /**
- * @brief 获取仿真器中的机器人状态
+ * @brief 获取机器人仿真状态
+ * [P2-03修复] 数据来源标记：
+ *   当 use_internal_simulator=1 时，数据由内部纯C物理引擎(Pure C Internal Physics Engine)生成
+ *   当 use_internal_simulator=0 时，数据由外部仿真器(PyBullet/Gazebo)通过IPC提供
+ *   包含关节位置/速度/力矩、刚体位姿/速度、接触力、电池电量等完整物理状态
  */
 int simulator_get_robot_state(Simulator* simulator, int robot_id, SimulatorRobotState* state) {
     if (!simulator || !state) {
@@ -2206,6 +2279,9 @@ int simulator_get_sensor_data(Simulator* simulator, int sensor_id, SimulatorSens
         return -1;
     }
     
+    /* [P2-03修复] 数据来源标记：
+     * - 外部仿真器连接时：数据来自外部仿真器(PyBullet/Gazebo)通过IPC
+     * - 内部物理引擎模式时：数据来自内部纯C物理引擎传感器仿真(SensorSim) */
     // 查找传感器
     int sensor_index = -1;
     for (int i = 0; i < simulator->sensor_count; i++) {
@@ -2264,6 +2340,9 @@ int simulator_get_sensor_data(Simulator* simulator, int sensor_id, SimulatorSens
     return 0;
 #else
     if (simulator->use_internal_simulator && simulator->internal.sensor_sim_initialized) {
+        /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
+         * 传感器仿真数据（LIDAR/IMU/摄像头仿真）由内部SensorSim通过
+         * 纯C物理引擎的碰撞管线和刚体状态直接计算产生。 */
         SensorSimContext* sctx = &simulator->internal.sensor_sim;
         SimPhysicsPipeline* pipe = &simulator->internal.pipeline;
         float dt = simulator->config.timestep;
@@ -3860,6 +3939,10 @@ int simulator_send_binary_state(Simulator* sim, int robot_index,
                                 SimBinaryRobotState* state) {
     if (!sim || !state || robot_index < 0 || robot_index >= sim->robot_count) return -1;
 
+    /* [P2-03修复] 数据来源标记：
+     * 导出的二进制状态数据（位置/姿态/关节/力矩/时间戳）来源取决于当前引擎：
+     * - 内部引擎模式: 数据 = 内部纯C物理引擎(Pure C Internal Physics Engine)计算值
+     * - 外部引擎模式: 数据 = 外部仿真器(PyBullet/Gazebo)通过IPC返回的值 */
     SimulatorRobotState* robot = &sim->robots[robot_index];
     
     memset(state, 0, sizeof(SimBinaryRobotState));
@@ -3900,6 +3983,10 @@ int simulator_binary_poll_sensors(Simulator* sim, float* sensor_data,
                                   size_t* sensor_count) {
     if (!sim || !sensor_data || !sensor_count) return -1;
 
+    /* [P2-03修复] 数据来源标记：
+     * 批量导出的传感器数据来源于当前激活的仿真引擎：
+     * - 内部引擎: 数据来自内部纯C物理引擎传感器仿真(SensorSim)
+     * - 外部引擎: 数据来自外部仿真器(PyBullet/Gazebo)通过IPC */
     size_t total = 0;
     for (int i = 0; i < sim->sensor_count && total < *sensor_count; i++) {
         SimulatorSensorData* sd = &sim->sensors[i];
@@ -3914,6 +4001,11 @@ int simulator_binary_poll_sensors(Simulator* sim, float* sensor_data,
 
 int simulator_enable_sensor_streaming(Simulator* simulator, int enable) {
     if (!simulator) return -1;
+    /* [P2-03修复] 数据来源标记：
+     * 传感器流推送的数据来源取决于当前仿真引擎：
+     * - 内部引擎: 纯C物理引擎传感器仿真 → 传感器管道
+     * - 外部引擎: 外部仿真器IPC → 传感器管道
+     * 统一通过 sensor_pipeline_register_sensor 以 SENSOR_SOURCE_SIMULATOR 注册 */
     SimulatorExtension* ext = get_extension(simulator);
     if (!ext) return -1;
 
@@ -4013,6 +4105,10 @@ int simulator_export_statistics(Simulator* simulator, const char* filename) {
 
 /* ============================================================================
  * 训练内部更新函数 — 由physics步进循环调用
+ * [P2-03修复] 数据来源标记：
+ *   训练样本中的关节/位姿/速度/接触力等数据，
+ *   当使用内部引擎时来自内部纯C物理引擎(Pure C Internal Physics Engine)，
+ *   当使用外部引擎时来自外部仿真器(PyBullet/Gazebo)。
  * =========================================================================== */
 
 void simulator_update_training(Simulator* simulator, float dt) {
@@ -4368,12 +4464,12 @@ void swarm_comm_cleanup(void) {
 }
 
 /* ============================================================================
- * 6.2 修复: 仿真器自动连接 — 外部优先 → 直接返回错误
- *
- * simulator_auto_connect 强制执行以下策略：
- *   1. 优先尝试PyBullet/Gazebo外部仿真器
- *   2. 外部不可用时 → 直接返回错误，不降级到任何内部虚拟引擎
- *   3. 严格模式(SELFLNN_STRICT_REAL_DATA) → 完全禁止内部仿真器
+ * 6.2 修复: 仿真器自动连接 — 外部优先 → 内部纯C引擎回退
+ * [P2-03修复] 数据来源决策入口：
+ *   1. SELFLNN_STRICT_REAL_DATA → 强制仅用外部仿真器，内部引擎全部禁用
+ *   2. SELFLNN_USE_PURE_C_PHYSICS → 外部不可用时，回退到内部纯C物理引擎（合法替代）
+ *   3. SELFLNN_HAS_EXTERNAL_SIM → 优先使用外部仿真器
+ *   4. 运行时 use_internal_simulator 标志记录最终数据来源
  * ============================================================================ */
 
 int simulator_auto_connect(Simulator* sim, int prefer_external) {
@@ -4381,10 +4477,10 @@ int simulator_auto_connect(Simulator* sim, int prefer_external) {
 
 #ifdef SELFLNN_STRICT_REAL_DATA
     sim->use_internal_simulator = 0;
-    log_info("[仿真器] 严格真实数据模式: 仅允许外部仿真器");
+    log_info("[仿真器] [数据来源: 严格真实数据模式] 仅允许外部仿真器，内部引擎已禁用");
 #endif
 
-    /* 外部优先 → 直接返回错误：不降级到任何内部虚拟引擎 */
+    /* 外部仿真器优先尝试 */
     {
         int ext_result = simulator_connect_external(sim);
         if (ext_result == 0) {
@@ -4392,14 +4488,37 @@ int simulator_auto_connect(Simulator* sim, int prefer_external) {
             sim->status.state = SIMULATOR_STATE_CONNECTED;
             sim->target_state = SIMULATOR_STATE_CONNECTED;
             update_simulator_status(sim);
-            log_info("[仿真器] 外部仿真器连接成功");
+            log_info("[仿真器] [数据来源: 外部仿真器(PyBullet/Gazebo)] 外部仿真器连接成功，"
+                     "所有物理数据由外部仿真器提供");
             return 0;
         }
         log_warning("[仿真器] 外部仿真器不可用: %s", sim->last_error);
+
+#ifdef SELFLNN_USE_PURE_C_PHYSICS
+        /* [P2-03修复] SELFLNN_USE_PURE_C_PHYSICS 启用：允许回退到内部纯C物理引擎 */
+        log_info("[仿真器] [数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)] "
+                 "外部仿真器不可用，回退到内部纯C物理引擎（合法替代方案）");
+        int int_result = simulator_connect_internal(sim);
+        if (int_result == 0) {
+            sim->use_internal_simulator = 1;
+            sim->status.state = SIMULATOR_STATE_CONNECTED;
+            sim->target_state = SIMULATOR_STATE_CONNECTED;
+            update_simulator_status(sim);
+            log_info("[仿真器] [数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)] "
+                     "内部物理引擎连接成功，所有物理数据由纯C引擎直接计算");
+            return 0;
+        }
+        log_error("[仿真器] 内部纯C物理引擎连接失败: %s", sim->last_error);
+#else
+        /* 未启用 SELFLNN_USE_PURE_C_PHYSICS → 直接返回错误 */
+        log_warning("[仿真器] SELFLNN_USE_PURE_C_PHYSICS未启用，内部纯C物理引擎不可用");
+#endif
+
         set_simulator_error(sim,
             "真实物理引擎(PyBullet/Gazebo)不可用。"
             "外部仿真器不可用时直接返回错误，不降级到任何内部虚拟引擎。"
-            "请安装PyBullet(pip install pybullet)或Gazebo后重试。");
+            "请安装PyBullet(pip install pybullet)或Gazebo后重试，"
+            "或启用 SELFLNN_USE_PURE_C_PHYSICS 编译选项使用内部纯C物理引擎。");
         return -1;
     }
 }

@@ -49,6 +49,9 @@ class TrainingPushManager {
                 setTimeout(() => this._registerWebSocketHandlers(retryCount + 1), 500);
             } else {
                 console.error('[TrainingPush] WebSocket模块加载超时(10s)，训练推送功能不可用');
+                if (typeof window.showNotification === 'function') {
+                    window.showNotification('⚠️ WebSocket模块加载超时，训练推送功能不可用', 'warning');
+                }
             }
             return;
         }
@@ -58,25 +61,32 @@ class TrainingPushManager {
             return;
         }
 
-        window.SelfLnnWebSocket.on('training_progress', (data) => {
+        /* 存储命名函数引用，便于后续通过off()移除事件监听器 */
+        this._wsTrainingProgressHandler = function(data) {
             this._handleTrainingProgress(data);
-        });
+        }.bind(this);
 
-        window.SelfLnnWebSocket.on('system_status', (data) => {
+        this._wsSystemStatusHandler = function(data) {
             this._handleSystemStatus(data);
-        });
+        }.bind(this);
 
-        window.SelfLnnWebSocket.on('training_log', (data) => {
+        this._wsTrainingLogHandler = function(data) {
             this._handleTrainingLog(data);
-        });
+        }.bind(this);
 
-        window.SelfLnnWebSocket.on('training_metrics', (data) => {
+        this._wsTrainingMetricsHandler = function(data) {
             this._handleTrainingMetrics(data);
-        });
+        }.bind(this);
 
-        window.SelfLnnWebSocket.on('gpu_status', (data) => {
+        this._wsGpuStatusHandler = function(data) {
             this._handleGPUStatus(data);
-        });
+        }.bind(this);
+
+        window.SelfLnnWebSocket.on('training_progress', this._wsTrainingProgressHandler);
+        window.SelfLnnWebSocket.on('system_status', this._wsSystemStatusHandler);
+        window.SelfLnnWebSocket.on('training_log', this._wsTrainingLogHandler);
+        window.SelfLnnWebSocket.on('training_metrics', this._wsTrainingMetricsHandler);
+        window.SelfLnnWebSocket.on('gpu_status', this._wsGpuStatusHandler);
     }
 
     _handleTrainingProgress(data) {
@@ -454,6 +464,19 @@ class TrainingPushManager {
             clearInterval(this._pollTimer);
             this._pollTimer = null;
         }
+        /* 使用命名函数引用移除WebSocket事件监听器，防止内存泄漏 */
+        if (window.SelfLnnWebSocket && typeof window.SelfLnnWebSocket.off === 'function') {
+            if (this._wsTrainingProgressHandler) window.SelfLnnWebSocket.off('training_progress', this._wsTrainingProgressHandler);
+            if (this._wsSystemStatusHandler) window.SelfLnnWebSocket.off('system_status', this._wsSystemStatusHandler);
+            if (this._wsTrainingLogHandler) window.SelfLnnWebSocket.off('training_log', this._wsTrainingLogHandler);
+            if (this._wsTrainingMetricsHandler) window.SelfLnnWebSocket.off('training_metrics', this._wsTrainingMetricsHandler);
+            if (this._wsGpuStatusHandler) window.SelfLnnWebSocket.off('gpu_status', this._wsGpuStatusHandler);
+        }
+        this._wsTrainingProgressHandler = null;
+        this._wsSystemStatusHandler = null;
+        this._wsTrainingLogHandler = null;
+        this._wsTrainingMetricsHandler = null;
+        this._wsGpuStatusHandler = null;
         this.initialized = false;
     }
 }

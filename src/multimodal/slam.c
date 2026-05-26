@@ -9147,6 +9147,9 @@ static int slam_select_candidates_hybrid(SlamSystem* system, int frame_id,
 }
 
 /* ==================== B-02: SLAM合成数据生成与演示（增强版） ==================== */
+#ifndef SELFLNN_STRICT_REAL_DATA
+/* 合成数据函数仅在允许引导数据时编译。
+ * 在 SELFLNN_STRICT_REAL_DATA 严格真实数据模式下，合成数据生成完全禁用。 */
 
 /**
  * @brief 合成场景配置常量
@@ -9434,6 +9437,8 @@ int slam_generate_synthetic_frame(float* image_data,
     log_error("[SLAM] 合成帧生成已永久禁用，请连接真实相机。");
     return -1;
 }
+
+#endif /* SELFLNN_STRICT_REAL_DATA */
 
 /**
  * @brief 计算绝对轨迹误差(ATE)
@@ -10330,8 +10335,14 @@ CameraInput* camera_input_create(const CameraInputConfig* config)
     /* 根据源类型创建对应的底层读取器 */
     switch (config->source_type) {
         case CAMERA_SOURCE_SYNTHETIC: {
+#ifdef SELFLNN_STRICT_REAL_DATA
+            log_error("[SLAM] 严格真实数据模式下禁用合成相机输入，请使用CAMERA_SOURCE_FILE或CAMERA_SOURCE_HARDWARE");
+            safe_free((void**)&camera);
+            return NULL;
+#else
             camera->current_total_frames = config->synthetic_total_frames > 0 ?
                                             config->synthetic_total_frames : 100;
+#endif
             break;
         }
         case CAMERA_SOURCE_FILE: {
@@ -10402,6 +10413,11 @@ int camera_input_read_frame(CameraInput* camera, CameraInputFrame* frame)
     
     switch (camera->source_type) {
         case CAMERA_SOURCE_SYNTHETIC: {
+#ifdef SELFLNN_STRICT_REAL_DATA
+            log_error("[SLAM] 严格真实数据模式下禁用合成帧生成，请使用真实相机或文件序列输入");
+            frame->is_valid = 0;
+            return -1;
+#else
             if (camera->frame_id >= camera->current_total_frames) {
                 frame->is_valid = 0;
                 return 0; /* 已到末尾 */
@@ -10434,6 +10450,7 @@ int camera_input_read_frame(CameraInput* camera, CameraInputFrame* frame)
             frame->is_valid = 1;
             camera->frame_id++;
             return 1;
+#endif /* SELFLNN_STRICT_REAL_DATA */
         }
         case CAMERA_SOURCE_FILE: {
             float* frame_data = NULL;
@@ -10524,7 +10541,12 @@ int camera_input_reset(CameraInput* camera)
     
     switch (camera->source_type) {
         case CAMERA_SOURCE_SYNTHETIC:
+#ifdef SELFLNN_STRICT_REAL_DATA
+            log_error("[SLAM] 严格真实数据模式下禁用合成相机重置");
+            return -1;
+#else
             return 0;
+#endif
         case CAMERA_SOURCE_FILE:
             if (camera->source.file_source.reader)
                 return slam_frame_reader_reset(camera->source.file_source.reader);

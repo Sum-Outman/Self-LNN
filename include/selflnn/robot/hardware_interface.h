@@ -169,12 +169,11 @@ typedef struct {
  * @brief 硬件运行模式枚举
  *
  * 决定硬件接口在无法连接真实硬件时的行为。
- * 在不接入硬件的情况下整个AGI也可正常运行的核心支持。
+ * HW_MODE_SIMULATION(2) 已永久禁用——不再允许生成仿真传感器数据。
  */
 typedef enum {
-    HW_MODE_AUTO = 0,         /**< 自动模式：优先连接真实硬件，失败时自动回退到物理仿真 */
-    HW_MODE_REAL = 1,         /**< 真实模式：必须连接真实硬件，失败时返回错误 */
-    HW_MODE_SIMULATION = 2    /**< 纯仿真模式：不连接任何真实硬件，使用物理仿真引擎生成数据 */
+    HW_MODE_AUTO = 0,         /**< 自动模式：尝试连接真实硬件，失败时返回错误 */
+    HW_MODE_REAL = 1          /**< 真实模式：必须连接真实硬件，失败时返回错误 */
 } HardwareMode;
 
 /**
@@ -251,27 +250,25 @@ int hardware_interface_disconnect(HardwareInterface* hw);
 int hardware_interface_is_connected(HardwareInterface* hw);
 
 /**
- * @brief 检查是否处于仿真模式
+ * @brief 检查是否处于仿真模式（已永久禁用）
  * 
- * 当未连接真实硬件时，系统可在仿真模式下正常运行。
- * 仿真模式下所有传感器数据由物理仿真引擎生成。
+ * 仿真模式已永久禁用，此函数始终返回0（非仿真模式）。
  * 
  * @param hw 硬件接口句柄
- * @return int 仿真模式返回1，真实硬件模式返回0，错误返回-1
+ * @return int 始终返回0（仿真模式已禁用），错误返回-1
  */
 int hardware_interface_is_simulation(HardwareInterface* hw);
 
 /**
- * @brief 设置仿真模式下的机器人运动状态
+ * @brief 设置仿真模式下的机器人运动状态（已永久禁用）
  * 
- * 在HW_MODE_SIMULATION模式下，IMU/编码器读数基于此运动状态计算。
- * 提供线速度、角速度和线加速度，用于基于物理定律的传感器仿真。
+ * 仿真模式已永久禁用，此函数始终返回错误。
  * 
  * @param hw 硬件接口句柄
  * @param linear_velocity 线速度[m/s] (x,y,z)，可为NULL
  * @param angular_velocity 角速度[rad/s] (roll,pitch,yaw)，可为NULL
  * @param linear_acceleration 线加速度[m/s²] (x,y,z)，可为NULL
- * @return int 成功返回0，失败返回-1
+ * @return int 始终返回-1（仿真模式已禁用）
  */
 int hardware_interface_set_simulation_motion(HardwareInterface* hw,
                                              const double linear_velocity[3],
@@ -279,17 +276,15 @@ int hardware_interface_set_simulation_motion(HardwareInterface* hw,
                                              const double linear_acceleration[3]);
 
 /**
- * @brief 设置仿真模式下的机器人地理位置
+ * @brief 设置仿真模式下的机器人地理位置（已永久禁用）
  * 
- * L-004修复: 用于WMM2025地磁场动态计算。
- * 在HW_MODE_SIMULATION模式下，IMU磁力计读数基于此位置通过WMM2025球谐模型动态计算，
- * 而不是使用硬编码的北半球典型值。温度也会根据纬度和海拔动态调节。
+ * 仿真模式已永久禁用，此函数始终返回错误。
  * 
  * @param hw              硬件接口句柄
  * @param latitude_deg    纬度（度，-90~90，北半球为正）
  * @param longitude_deg   经度（度，-180~180，东半球为正）
  * @param altitude_m      海拔高度（米）
- * @return int            成功返回0，失败返回-1
+ * @return int            始终返回-1（仿真模式已禁用）
  */
 int hardware_interface_set_simulation_position(HardwareInterface* hw,
                                                 double latitude_deg,

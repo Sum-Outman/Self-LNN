@@ -607,7 +607,15 @@ class DeviceManager {
         /* M-026: 创建Web Worker用于Census变换立体匹配，避免阻塞主线程 */
         try {
             if (!this.stereoVision.worker) {
-                this.stereoVision.worker = new Worker('js/workers/stereo-worker.js');
+                /* M-026-FIX: 使用根相对路径确保子路径部署时Worker正常加载 */
+                var stereoWorkerPath = '/js/workers/stereo-worker.js';
+                if (typeof document.currentScript !== 'undefined' && document.currentScript) {
+                    var scriptSrc = document.currentScript.getAttribute('src');
+                    if (scriptSrc) {
+                        stereoWorkerPath = scriptSrc.replace(/[^\/]+$/, '') + 'workers/stereo-worker.js';
+                    }
+                }
+                this.stereoVision.worker = new Worker(stereoWorkerPath);
                 var self = this;
                 this.stereoVision.worker.onmessage = function(e) {
                     self._onStereoWorkerResult(e.data);

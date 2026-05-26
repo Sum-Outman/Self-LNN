@@ -129,6 +129,74 @@ int camera_capture_enumerate_devices_win(char device_names[][256],
 }
 
 /**
+ * @brief 查询MF摄像头的最大支持分辨率
+ * 通过激活媒体源并读取原生媒体类型的帧尺寸来获取真实分辨率。
+ * 无法查询时max_w和max_h保持为0，表示未知分辨率。
+ */
+static void mf_query_max_resolution(int device_index, int* max_w, int* max_h) {
+    *max_w = 0;
+    *max_h = 0;
+
+    HRESULT hr;
+    IMFAttributes* attr = NULL;
+    IMFActivate** devices = NULL;
+    UINT32 count = 0;
+
+    hr = MFCreateAttributes(&attr, 1);
+    if (FAILED(hr)) return;
+
+    hr = IMFAttributes_SetGUID(attr, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
+    if (FAILED(hr)) { IMFAttributes_Release(attr); return; }
+
+    hr = MFEnumDeviceSources(attr, &devices, &count);
+    IMFAttributes_Release(attr);
+    if (FAILED(hr) || count == 0 || (UINT32)device_index >= count) {
+        if (devices) {
+            for (UINT32 i = 0; i < count; i++) IMFActivate_Release(devices[i]);
+            CoTaskMemFree(devices);
+        }
+        return;
+    }
+
+    IMFMediaSource* media_source = NULL;
+    hr = IMFActivate_ActivateObject(devices[device_index],
+                                     &IID_IMFMediaSource,
+                                     (void**)&media_source);
+    if (SUCCEEDED(hr) && media_source) {
+        IMFSourceReader* reader = NULL;
+        IMFAttributes* reader_attr = NULL;
+        MFCreateAttributes(&reader_attr, 0);
+        hr = MFCreateSourceReaderFromMediaSource(media_source, reader_attr, &reader);
+        if (reader_attr) IMFAttributes_Release(reader_attr);
+
+        if (SUCCEEDED(hr) && reader) {
+            for (DWORD stream_idx = 0; stream_idx < 3; stream_idx++) {
+                IMFMediaType* native_type = NULL;
+                hr = IMFSourceReader_GetNativeMediaType(reader, stream_idx, 0, &native_type);
+                if (SUCCEEDED(hr) && native_type) {
+                    GUID major_type;
+                    if (SUCCEEDED(IMFMediaType_GetGUID(native_type, &MF_MT_MAJOR_TYPE, &major_type)) &&
+                        IsEqualGUID(major_type, MFMediaType_Video)) {
+                        UINT32 w = 0, h = 0;
+                        if (SUCCEEDED(MFGetAttributeSize(native_type, &MF_MT_FRAME_SIZE, &w, &h))) {
+                            if ((int)w > *max_w) *max_w = (int)w;
+                            if ((int)h > *max_h) *max_h = (int)h;
+                        }
+                    }
+                    IMFMediaType_Release(native_type);
+                }
+            }
+            IMFSourceReader_Release(reader);
+        }
+        IMFMediaSource_Release(media_source);
+    }
+
+    for (UINT32 i = 0; i < count; i++) IMFActivate_Release(devices[i]);
+    CoTaskMemFree(devices);
+}
+
+/**
  * @brief 创建MF摄像头采集上下文
  */
 MFCameraContext* mf_camera_create(int device_index, int width, int height, int fps) {
@@ -487,6 +555,32 @@ static int camera_capture_enumerate_devices_win(char names[][256], char ids[][12
     return 0;
 }
 
+/**
+ * @brief 查询VFW摄像头的原生分辨率
+ * 通过临时创建采集窗口并读取视频格式来获取真实分辨率。
+ * 无法查询时max_w和max_h保持为0，表示未知分辨率。
+ */
+static void vfw_query_max_resolution(int device_index, int* max_w, int* max_h) {
+    *max_w = 0;
+    *max_h = 0;
+
+    HWND hwnd = capCreateCaptureWindowA("ResQueryWnd", WS_CHILD, 0, 0, 320, 240,
+                                         GetDesktopWindow(), 200);
+    if (!hwnd) return;
+
+    if (SendMessageA(hwnd, WM_CAP_DRIVER_CONNECT, (WPARAM)(WORD)device_index, 0)) {
+        BITMAPINFO bmp_info;
+        memset(&bmp_info, 0, sizeof(bmp_info));
+        bmp_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        if (capGetVideoFormat(hwnd, &bmp_info, sizeof(bmp_info))) {
+            *max_w = (int)bmp_info.bmiHeader.biWidth;
+            *max_h = (int)bmp_info.bmiHeader.biHeight;
+        }
+        capDriverDisconnect(hwnd);
+    }
+    DestroyWindow(hwnd);
+}
+
 static void* mf_camera_create(int dev_idx, int width, int height, int fps) {
     VFWCameraContext* ctx = (VFWCameraContext*)calloc(1, sizeof(VFWCameraContext));
     if (!ctx) return NULL;
@@ -667,6 +761,76 @@ int camera_capture_enumerate_devices_linux(char device_names[][256],
 
     *num_devices = device_count;
     return 0;
+}
+
+/**
+ * @brief 查询V4L2摄像头的最大支持分辨率
+ * 使用VIDIOC_ENUM_FRAMESIZES遍历设备支持的所有帧尺寸，取最大值。
+ * 无法查询时max_w和max_h保持为0，表示未知分辨率。
+ */
+static void v4l2_query_max_resolution(const char* dev_path, int* max_w, int* max_h) {
+    *max_w = 0;
+    *max_h = 0;
+
+    int fd = open(dev_path, O_RDWR | O_NONBLOCK);
+    if (fd < 0) return;
+
+    int max_w_found = 0, max_h_found = 0;
+
+    /* 尝试MJPEG格式的帧尺寸枚举 */
+    struct v4l2_frmsizeenum frmsize;
+    memset(&frmsize, 0, sizeof(frmsize));
+    frmsize.pixel_format = V4L2_PIX_FMT_MJPEG;
+
+    int idx = 0;
+    while (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize) == 0) {
+        int w = 0, h = 0;
+        if (frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+            w = (int)frmsize.discrete.width;
+            h = (int)frmsize.discrete.height;
+        } else if (frmsize.type == V4L2_FRMSIZE_TYPE_STEPWISE) {
+            w = (int)frmsize.stepwise.max_width;
+            h = (int)frmsize.stepwise.max_height;
+        }
+        if (w > max_w_found) max_w_found = w;
+        if (h > max_h_found) max_h_found = h;
+        frmsize.index = (unsigned int)(++idx);
+    }
+
+    /* 如果MJPEG枚举失败，尝试YUYV格式 */
+    if (max_w_found == 0 && max_h_found == 0) {
+        memset(&frmsize, 0, sizeof(frmsize));
+        frmsize.pixel_format = V4L2_PIX_FMT_YUYV;
+        idx = 0;
+        while (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize) == 0) {
+            int w = 0, h = 0;
+            if (frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+                w = (int)frmsize.discrete.width;
+                h = (int)frmsize.discrete.height;
+            } else if (frmsize.type == V4L2_FRMSIZE_TYPE_STEPWISE) {
+                w = (int)frmsize.stepwise.max_width;
+                h = (int)frmsize.stepwise.max_height;
+            }
+            if (w > max_w_found) max_w_found = w;
+            if (h > max_h_found) max_h_found = h;
+            frmsize.index = (unsigned int)(++idx);
+        }
+    }
+
+    /* 如果仍然没有结果，回退到VIDIOC_G_FMT获取当前格式 */
+    if (max_w_found == 0 && max_h_found == 0) {
+        struct v4l2_format fmt;
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (ioctl(fd, VIDIOC_G_FMT, &fmt) == 0) {
+            max_w_found = (int)fmt.fmt.pix.width;
+            max_h_found = (int)fmt.fmt.pix.height;
+        }
+    }
+
+    close(fd);
+    *max_w = max_w_found;
+    *max_h = max_h_found;
 }
 
 /**
@@ -942,8 +1106,15 @@ int camera_capture_enumerate_devices(CameraDeviceInfo* devices, int max_devices)
             devices[count].name[255] = '\0';
             strncpy(devices[count].device_id, ids[i], 127);
             devices[count].device_id[127] = '\0';
-            devices[count].max_width = 1920;
-            devices[count].max_height = 1080;
+            /* 查询真实摄像头最大分辨率，无法查询则为0表示未知 */
+            int max_w = 0, max_h = 0;
+#ifdef __cplusplus
+            mf_query_max_resolution(i, &max_w, &max_h);
+#else
+            vfw_query_max_resolution(i, &max_w, &max_h);
+#endif
+            devices[count].max_width = max_w;
+            devices[count].max_height = max_h;
             count++;
         }
     }
@@ -954,8 +1125,11 @@ int camera_capture_enumerate_devices(CameraDeviceInfo* devices, int max_devices)
             devices[count].name[255] = '\0';
             strncpy(devices[count].device_id, ids[i], 127);
             devices[count].device_id[127] = '\0';
-            devices[count].max_width = 1920;
-            devices[count].max_height = 1080;
+            /* 查询真实摄像头最大分辨率，无法查询则为0表示未知 */
+            int max_w = 0, max_h = 0;
+            v4l2_query_max_resolution(ids[i], &max_w, &max_h);
+            devices[count].max_width = max_w;
+            devices[count].max_height = max_h;
             count++;
         }
     }

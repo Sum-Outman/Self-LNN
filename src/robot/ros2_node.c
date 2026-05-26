@@ -1,10 +1,29 @@
 /**
  * @file ros2_node.c
- * @brief ROS2节点系统完整实现 —— 基于纯C的DDS风格RTPS通信
+ * @brief ROS2节点系统 —— 简化TCP实现（非标准DDS，仅供内部节点间通信）
+ *
+ * ⚠️ 重要说明：
+ * 本实现使用TCP socket模拟数据分发，采用自定义RTPS风格包头。
+ * 这不是标准的DDS/RTPS协议实现，无法与真实ROS2生态（rclcpp/rclpy）互操作。
+ * 与标准ROS2的差异包括但不限于：
+ * - 未实现DDS发现协议（SPDP/SEDP）
+ * - 未实现RTPS Writer/Reader匹配
+ * - 未实现标准的DDS QoS策略
+ * - 不支持ROS2的Topic命名空间和Node Graph
+ *
+ * 如需与真实ROS2生态互操作，需要：
+ * - 方案1: 安装CycloneDDS（推荐），通过dlsym/LoadLibrary动态加载libcyclonedds，
+ *          或通过标准DDS接口桥接通信。
+ * - 方案2: 安装ROS2官方发布的rmw实现（rmw_fastrtps/rmw_cyclonedds），
+ *          通过进程间通信（IPC）与ros2cli工具交互。
+ * - 方案3: 使用rosbridge_suite（WebSocket桥接），在TCP层面实现JSON消息转发。
+ *
+ * 当前状态：所有TCP socket连接仅在同进程内节点间有效，
+ * 外部ROS2节点无法发现本进程内的Publisher/Subscriber。
  *
  * 实现ROS2节点生命周期管理：
  * - 节点创建/配置/激活/停用/销毁
- * - 发布者/订阅者管理（基于TCP直连数据分发）
+ * - 发布者/订阅者管理（基于TCP直连数据分发，非标准DDS）
  * - 服务/动作管理
  * - QoS配置
  * - ROS1-ROS2桥接
@@ -222,6 +241,21 @@ int ros2_get_node_state(const ROS2Manager* rm, int node_id, ROS2NodeState* state
 
 /* ============ 发布者/订阅者 ============ */
 
+/**
+ * @brief 创建ROS2发布者 — 简化TCP实现（非标准DDS）
+ *
+ * ⚠️ DDS互操作状态：
+ * 本函数创建TCP socket并维护端点注册表，用于同进程内节点间数据传输。
+ * 这不是标准DDS Writer——外部ROS2节点无法发现此发布者。
+ *
+ * 启用标准DDS的方法（需要CycloneDDS库）：
+ *   1. 通过dlsym/LoadLibrary加载libcyclonedds.so或cyclonedds.dll
+ *   2. 调用dds_create_participant()创建DDS域参与者
+ *   3. 调用dds_create_topic()注册ROS2 Topic（添加rt/前缀）
+ *   4. 调用dds_create_writer()创建DDS DataWriter
+ *   5. 将dds_entity_t句柄存入endpoint注册表的socket_fd字段
+ *   若无法加载CycloneDDS，则回退到当前TCP socket实现（仅限进程内通信）
+ */
 int ros2_create_publisher(ROS2Manager* rm, int node_id, const char* topic,
                            const char* type, const ROS2QoSConfig* qos, int* pub_id) {
     ROS2Node* node = find_node(rm, node_id);
@@ -272,6 +306,17 @@ int ros2_create_publisher(ROS2Manager* rm, int node_id, const char* topic,
     return 0;
 }
 
+/**
+ * @brief 创建ROS2订阅者 — 简化TCP实现（非标准DDS）
+ *
+ * ⚠️ DDS互操作状态：
+ * 本函数创建TCP socket并维护端点注册表，用于同进程内节点间数据接收。
+ * 这不是标准DDS Reader——外部ROS2节点无法向此订阅者发送数据。
+ *
+ * 启用标准DDS的方法：
+ *   参见 ros2_create_publisher() 注释中的DDS集成方案。
+ *   使用dds_create_reader()替代TCP socket进行订阅。
+ */
 int ros2_create_subscriber(ROS2Manager* rm, int node_id, const char* topic,
                             const char* type, const ROS2QoSConfig* qos,
                             void (*cb)(const void*, size_t, void*), void* user_data, int* sub_id) {
@@ -316,6 +361,13 @@ int ros2_create_subscriber(ROS2Manager* rm, int node_id, const char* topic,
     return 0;
 }
 
+/**
+ * @brief 发布数据到话题 — 简化TCP实现（非标准DDS）
+ *
+ * ⚠️ 本函数通过TCP socket发送自定义RTPS风格数据包，仅对同进程内
+ * 通过ros2_create_subscriber创建的端点有效。外部ROS2节点无法接收。
+ * 数据格式：4字节"RTPS"魔数 + 4字节数据长度(小端) + 1字节话题名长度 + 话题名 + 有效数据
+ */
 int ros2_publish(ROS2Manager* rm, int node_id, int pub_id, const void* data, size_t size) {
     ROS2Node* node = find_node(rm, node_id);
     if (!node || !data || size == 0) return -1;
@@ -361,6 +413,12 @@ int ros2_publish(ROS2Manager* rm, int node_id, int pub_id, const void* data, siz
     return 0;
 }
 
+/**
+ * @brief 从话题接收数据 — 简化TCP实现（非标准DDS）
+ *
+ * ⚠️ 本函数通过TCP socket接收自定义RTPS风格数据包，仅能接收同进程内
+ * 通过ros2_publish发送的数据。无法接收外部ROS2节点发布的消息。
+ */
 int ros2_receive(ROS2Manager* rm, int node_id, int sub_id, void* buffer, size_t* size) {
     ROS2Node* node = find_node(rm, node_id);
     if (!node || !buffer || !size) return -1;

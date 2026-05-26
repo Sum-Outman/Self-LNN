@@ -455,8 +455,8 @@ class VisualizationManager {
         this.initDefaultNetwork();
         /* 后端连接检测与真实拓扑加载 */
         this._checkBackendAndUpdate = () => {
-            if (typeof SelfLnnApi !== 'undefined') {
-                SelfLnnApi.getLNNStatus().then((statusData) => {
+            if (typeof window.SelfLnnApi !== 'undefined') {
+                window.SelfLnnApi.getLNNStatus().then((statusData) => {
                     if (statusData && statusData.success) {
                         var lnn = (statusData.data && statusData.data.lnn) || statusData.lnn || statusData;
                         var layers = lnn.layers || lnn.network_layers || lnn.topology;

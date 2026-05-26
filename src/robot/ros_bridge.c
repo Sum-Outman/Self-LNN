@@ -13,6 +13,7 @@
 #include "selflnn/robot/ros_bridge.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/secure_random.h"
 
 #ifdef _WIN32
 static void* memmem(const void* haystack, size_t haystack_len,
@@ -43,6 +44,27 @@ static void* memmem(const void* haystack, size_t haystack_len,
 #include <arpa/inet.h>
 #include <netdb.h>
 #endif
+
+/**
+ * @brief RFC 4648 Base64编码（用于Sec-WebSocket-Key）
+ * 符合RFC 6455第4.1节要求：将16字节随机数据编码为24字符Base64字符串
+ */
+static int ws_base64_encode(const uint8_t* data, size_t len, char* out, size_t out_size) {
+    static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t v = ((uint32_t)data[i] << 16) |
+                     ((i + 1 < len ? (uint32_t)data[i + 1] : 0) << 8) |
+                     (i + 2 < len ? (uint32_t)data[i + 2] : 0);
+        if (o + 4 > out_size) return -1;
+        out[o++] = table[(v >> 18) & 63];
+        out[o++] = table[(v >> 12) & 63];
+        out[o++] = (i + 1 < len) ? table[(v >> 6) & 63] : '=';
+        out[o++] = (i + 2 < len) ? table[v & 63] : '=';
+    }
+    out[o] = '\0';
+    return (int)o;
+}
 
 /* rosbridge WebSocket 操作码 */
 #define WS_OPCODE_TEXT  0x1
@@ -192,10 +214,11 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
         return NULL;
     }
     
-    /* 发送 WebSocket 升级请求 - 每次连接生成新随机Key */
+    /* 发送 WebSocket 升级请求 - 使用RFC 6455标准Sec-WebSocket-Key（16字节随机数Base64编码） */
+    uint8_t ws_key_random[16];
+    secure_random_bytes(ws_key_random, 16);
     char ws_key_b64[32];
-    snprintf(ws_key_b64, sizeof(ws_key_b64), "LLNN-AGI-KEY-%08x", 
-             (uint32_t)(time(NULL) ^ (uintptr_t)bridge));
+    ws_base64_encode(ws_key_random, 16, ws_key_b64, sizeof(ws_key_b64));
     char upgrade_request[2048];
     snprintf(upgrade_request, sizeof(upgrade_request),
         "GET / HTTP/1.1\r\n"

@@ -420,7 +420,14 @@ class DialogueEnhanced {
             };
             wsElement.addEventListener('close', this._wsCloseHandler);
         }
-        /* 使用全局SelfLnnWebSocket的connect方法 */
+        /* 使用全局SelfLnnWebSocket的connect方法，设置URL后连接 */
+        var cfg = window.SELFLNN_CONFIG || { host: 'localhost' };
+        var defaultUrl = 'ws://' + cfg.host + ':9090/ws';
+        if (wsUrl && gws.url !== wsUrl) {
+            gws.url = wsUrl;
+        } else if (!gws.url) {
+            gws.url = defaultUrl;
+        }
         gws.connect();
         return true;
     }

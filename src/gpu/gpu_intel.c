@@ -1169,22 +1169,29 @@ static int intel_simd_matmul(const float* a, const float* b, float* c,
 }
 
 /**
- * @brief Intel SIMD加速的CfC ODE步进
+ * @brief Intel SIMD加速的CfC ODE步进（完整矩阵化）
  *
- * h_out[i] = h_in[i] * exp(-dt/tau[i]) + (1 - exp(-dt/tau[i])) * sigmoid(b[dim+i]) * tanh(b[i])
- * 对标 npu_common_cpu_cfc_step 的功能完整性
+ * h_out[i] = h_in[i] * exp(-dt/tau[i]) + (1 - exp(-dt/tau[i])) * sigmoid(total) * tanh(total)
+ * 其中 total = sum_j(W[i*dim+j] * h_in[j]) + b[dim+i]
+ * W按行主序存储，W[i*dim+j]是第i个输出对第j个输入的权重
  */
 static int intel_simd_cfc_ode_step(const float* h_in, const float* W,
                                     const float* b, const float* tau, float* h_out,
                                     float dt, int dim) {
     if (!h_in || !W || !b || !tau || !h_out) return -1;
     if (dim <= 0) return -1;
-    (void)W; /* W参数保留用于未来矩阵化CfC扩展 */
 
     for (int i = 0; i < dim; i++) {
         float t = tau[i] > 0.001f ? tau[i] : 0.001f;
         float decay = expf(-dt / t);
-        float driver = 1.0f / (1.0f + expf(-b[dim + i])) * tanhf(b[i]);
+        /* 计算 W*h_in 的加权和: total = sum_j(W[i*dim + j] * h_in[j]) + b[dim+i] */
+        float total = b[dim + i];
+        for (int j = 0; j < dim; j++) {
+            total += W[i * dim + j] * h_in[j];
+        }
+        float sigmoid_val = 1.0f / (1.0f + expf(-total));
+        float tanh_val = tanhf(total);
+        float driver = sigmoid_val * tanh_val;
         h_out[i] = h_in[i] * decay + (1.0f - decay) * driver;
     }
     return 0;

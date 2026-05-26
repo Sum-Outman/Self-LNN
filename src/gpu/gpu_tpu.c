@@ -495,8 +495,10 @@ static const char* tpu_get_builtin_kernel(const char* name) {
 }
 
 static const char* tpu_backend_get_error_string(void) { return g_tpu_state.error_string; }
-static int tpu_backend_memory_copy_to_device_async(GpuMemory* dst, const void* src, size_t sz, GpuStream* st) { (void)st; return tpu_backend_memory_copy_to_device(dst, src, sz); }
-static int tpu_backend_memory_copy_from_device_async(void* dst, GpuMemory* src, size_t sz, GpuStream* st) { (void)st; return tpu_backend_memory_copy_from_device(dst, src, sz); }
+/* P1-03修复: TPU无异步DMA引擎，异步接口实际为同步实现。
+ * 移除 _async 命名误导，重命名为 _sync 明确标识同步执行特性。 */
+static int tpu_backend_memory_copy_to_device_sync(GpuMemory* dst, const void* src, size_t sz, GpuStream* st) { (void)st; return tpu_backend_memory_copy_to_device(dst, src, sz); }
+static int tpu_backend_memory_copy_from_device_sync(void* dst, GpuMemory* src, size_t sz, GpuStream* st) { (void)st; return tpu_backend_memory_copy_from_device(dst, src, sz); }
 
 /* ==================== NPU接口 ==================== */
 
@@ -964,8 +966,8 @@ const GpuBackendInterface* tpu_get_backend_interface(void) {
         .memory_copy_to_device = tpu_backend_memory_copy_to_device,
         .memory_copy_from_device = tpu_backend_memory_copy_from_device,
         .memory_copy_device_to_device = tpu_backend_memory_copy_device_to_device,
-        .memory_copy_to_device_async = tpu_backend_memory_copy_to_device_async,
-        .memory_copy_from_device_async = tpu_backend_memory_copy_from_device_async,
+        .memory_copy_to_device_async = tpu_backend_memory_copy_to_device_sync,
+        .memory_copy_from_device_async = tpu_backend_memory_copy_from_device_sync,
         .kernel_create = tpu_backend_kernel_create,
         .kernel_free = tpu_backend_kernel_free,
         .kernel_set_arg = tpu_backend_kernel_set_arg,

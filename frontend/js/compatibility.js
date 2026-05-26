@@ -184,9 +184,27 @@ class BrowserCompat {
     getSpeechSynthesisVoice(lang) {
         if (!this.features.speechSynthesis) return null;
         var voices = window.speechSynthesis.getVoices();
-        /* BUG-17修复：重复调用getVoices()时必须赋值给voices变量，否则后续for循环遍历的仍是空数组 */
         if (voices.length === 0) {
             voices = window.speechSynthesis.getVoices();
+        }
+        /* 如果voices仍为空（某些浏览器异步加载），注册voiceschanged事件重试 */
+        if (voices.length === 0) {
+            var self = this;
+            var retryHandler = function() {
+                window.speechSynthesis.removeEventListener('voiceschanged', retryHandler);
+                var retryVoices = window.speechSynthesis.getVoices();
+                for (var i = 0; i < retryVoices.length; i++) {
+                    if (retryVoices[i].lang.indexOf(lang) >= 0) {
+                        self._cachedVoice = retryVoices[i];
+                        return;
+                    }
+                }
+            };
+            window.speechSynthesis.addEventListener('voiceschanged', retryHandler);
+            setTimeout(function() {
+                window.speechSynthesis.removeEventListener('voiceschanged', retryHandler);
+            }, 5000);
+            return null;
         }
         lang = lang || 'zh-CN';
         for (var i = 0; i < voices.length; i++) {

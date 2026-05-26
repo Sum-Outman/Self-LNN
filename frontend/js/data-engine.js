@@ -232,25 +232,20 @@ class DataEngine {
         }
         this.initialized = true;
         var self = this;
-        (async () => {
-            var connected = false;
-            for (var attempt = 0; attempt < 5; attempt++) {
-                await self.checkConnection();
-                if (self._backendConnected) { connected = true; break; }
-                if (attempt < 4) await new Promise(function(r) { setTimeout(r, 2000); });
-            }
-            if (!connected) {
-                console.warn('数据引擎: 后端未连接，将显示断开状态（绝不生成虚假数据）');
-                self._loadCachedData();
-                self._notifyListeners();
-            } else {
-                await self._fetchAllData();
-                self._saveCachedData();
-                self._notifyListeners();
-            }
-        })();
-
-        this.timerId = setInterval(() => { this._tick(); }, this._baseInterval);
+        /* BUG修复: 使用递归setTimeout替代setInterval，防止_tick()并发重叠执行 */
+        var scheduleNext = function() {
+            if (!self.initialized || !self.timerId) return;
+            self.timerId = setTimeout(function() {
+                self._tick().finally(function() {
+                    scheduleNext();
+                });
+            }, self._baseInterval);
+        };
+        this.timerId = setTimeout(function() {
+            self._tick().finally(function() {
+                scheduleNext();
+            });
+        }, self._baseInterval);
     }
 
     /**

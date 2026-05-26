@@ -142,6 +142,7 @@
                             <li><a href="#api-service">API服务</a></li>
                             <li><a href="#api-docs">API文档</a></li>
                             <li><a href="#usage-logs">使用日志</a></li>
+                            <li><a href="#sys-log-panel-section">系统日志</a></li>
                         </ul>
                     </li>
                 </ul>
@@ -1321,12 +1322,12 @@
                                         <div class="config-form">
                                             <div class="form-group">
                                                 <label>学习率:</label>
-                                                
-                                                <span class="slider-value">0.001</span>
+                                                <input type="number" id="lnn-learning-rate" value="0.001" min="0.00001" max="1.0" step="0.0001" style="width:100%;padding:8px;background:#1a1a2e;border:1px solid #444;color:#fff;border-radius:4px;">
                                             </div>
                                             <div class="form-group">
                                                 <label>时间常数τ范围:</label>
-                                                <span style="color:rgba(255,255,255,0.7);font-size:0.85rem;">0.01 ~ 10.0（ODE时间尺度自适应）</span>
+                                                <input type="text" id="lnn-tau-range" value="0.01 ~ 10.0" readonly style="width:100%;padding:8px;background:#1a1a2e;border:1px solid #444;color:rgba(255,255,255,0.7);border-radius:4px;">
+                                                <span style="color:rgba(255,255,255,0.4);font-size:0.7rem;">ODE时间尺度自适应</span>
                                             </div>
                                             <div class="form-group">
                                                 <label>批处理大小:</label>
@@ -1339,11 +1340,11 @@
                                             </div>
                                             <div class="form-group">
                                                 <label>隐藏层维度:</label>
-                                                
+                                                <input type="number" id="lnn-hidden-dim" value="128" min="16" max="2048" step="16" style="width:100%;padding:8px;background:#1a1a2e;border:1px solid #444;color:#fff;border-radius:4px;">
                                             </div>
                                             <div class="form-group">
                                                 <label>时间常数 (τ):</label>
-                                                
+                                                <input type="number" id="model-lnn-time-constant" value="1.0" min="0.01" max="10.0" step="0.01" style="width:100%;padding:8px;background:#1a1a2e;border:1px solid #444;color:#fff;border-radius:4px;">
                                             </div>
                                             <button class="btn btn-primary" onclick="saveModelConfig()">
                                                  保存配置
@@ -2781,12 +2782,11 @@
                                         </div>
                                         <div class="form-group">
                                             <label>最大推理时间 (秒):</label>
-                                            
+                                            <input type="number" id="reasoning-max-time" value="60" min="1" max="3600" step="1" style="width:100%;padding:8px;background:#1a1a2e;border:1px solid #444;color:#fff;border-radius:4px;">
                                         </div>
                                         <div class="form-group">
                                             <label>并行推理任务数:</label>
-                                            
-                                            <span class="slider-value">4</span>
+                                            <input type="number" id="reasoning-parallel-tasks" value="4" min="1" max="32" step="1" style="width:100%;padding:8px;background:#1a1a2e;border:1px solid #444;color:#fff;border-radius:4px;">
                                         </div>
                                         <button class="btn btn-primary" onclick="saveReasoningConfig()">
                                              保存配置
@@ -3895,14 +3895,16 @@ response = requests.get(
                 </div>
             </div>
     <script>
-        /* ZSFABC: 设备管理初始化 —— 函数定义已迁移至 main.js*/
+        /* ZSFABC: 设备管理初始化 —— 函数定义已迁移至 main.js */
+        /* ZSFBUG1修复: devicePollTimer声明提升到脚本块顶层作用域，使beforeunload回调可访问 */
+        var devicePollTimer = null;
         document.addEventListener('DOMContentLoaded', function() {
             if (typeof refreshDevices === 'function') refreshDevices();
             if (typeof scanHardware === 'function') scanHardware();
-            var devicePollTimer = setInterval(function(){ if(typeof refreshDevices==='function')refreshDevices(); }, 5000);
+            devicePollTimer = setInterval(function(){ if(typeof refreshDevices==='function')refreshDevices(); }, 5000);
         });
         window.addEventListener('beforeunload', function() {
-            if (typeof devicePollTimer !== 'undefined' && devicePollTimer) clearInterval(devicePollTimer);
+            if (devicePollTimer) clearInterval(devicePollTimer);
         });
     </script>
 
@@ -4250,7 +4252,7 @@ response = requests.get(
                 var mem = sys.memory_usage || sys.memory || 0;
                 var gpu = sys.gpu_usage || sys.gpu || 0;
                 var disk = sys.disk_usage || sys.disk || 0;
-                document.getElementById('cpu-usage').textContent = cpu + '%';
+                document.getElementById('cog-cpu-usage').textContent = cpu + '%';
                 document.getElementById('cpu-bar').style.width = cpu + '%';
                 document.getElementById('mem-usage').textContent = mem + '%';
                 document.getElementById('mem-bar').style.width = mem + '%';
@@ -4330,7 +4332,7 @@ response = requests.get(
             _safetyTimers = [];
         });
 
-        var pollTimer, resTimer;
+        /* ZSFBUG2修复: 移除pollTimer/resTimer重复声明，统一使用L4193处的声明 var pollTimer = null, resTimer = null; */
         window.addEventListener('DOMContentLoaded', function() {
             checkSafetyConnection();
             pollSafety();
@@ -4549,7 +4551,6 @@ response = requests.get(
         </div>
 
         <div id="api-list"></div>
-    </div>
 
     <div class="nav-bar" id="nav-bar"></div>
 
@@ -4887,11 +4888,18 @@ response = requests.get(
                             <canvas id="training-chart"></canvas>
                         </div>
                         <div class="metrics-grid" style="margin-top:12px">
+                            <div class="metric"><span class="metric-label">当前任务</span><span class="metric-value" id="train-current-task">-</span></div>
                             <div class="metric"><span class="metric-label">当前轮次</span><span class="metric-value" id="current-epoch">-</span></div>
                             <div class="metric"><span class="metric-label">训练损失</span><span class="metric-value" id="train-loss">-</span></div>
                             <div class="metric"><span class="metric-label">验证损失</span><span class="metric-value" id="val-loss">-</span></div>
                             <div class="metric"><span class="metric-label">准确率</span><span class="metric-value" id="train-accuracy">-</span></div>
                             <div class="metric"><span class="metric-label">已用时间</span><span class="metric-value" id="train-time">-</span></div>
+                        </div>
+                        <div class="chart-container" style="height:auto; margin-top:12px">
+                            <div class="progress-bar" style="height:20px;border-radius:10px;background:rgba(255,255,255,0.1);">
+                                <div class="progress-fill" id="train-progress-fill" style="width:0%;height:100%;border-radius:10px;background:linear-gradient(90deg,#00c8ff,#00e676);"></div>
+                            </div>
+                            <span id="train-progress-text" style="display:block;text-align:center;font-size:20px;font-weight:600;color:#00c8ff;margin-top:6px;">0%</span>
                         </div>
                         <div class="form-group" style="margin-top:12px">
                             <button onclick="pauseTraining()" class="btn btn-warning">暂停</button>

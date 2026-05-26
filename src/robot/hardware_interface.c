@@ -60,10 +60,9 @@ struct HardwareInterface {
      * 运行模式说明：
      *   0 = 未连接（等待真实硬件）
      *   1 = 真实硬件模式
-     *   2 = 物理仿真模式（仅 ALLOW_BOOTSTRAP_DATA=ON 时可用）
-     *       严格真实数据模式下 mode=2 会被拒绝
+     *   仿真模式(HW_MODE_SIMULATION/mode=2) 已永久禁用
      */
-    int mode;                      /**< 实际运行模式：0=未连接, 1=真实硬件, 2=物理仿真（调试） */
+    int mode;                      /**< 实际运行模式：0=未连接, 1=真实硬件 */
     
     /* 自动恢复相关字段 */
     int retry_count;               /**< 当前重试次数 */
@@ -73,15 +72,7 @@ struct HardwareInterface {
     int health_status;             /**< 健康状态：0=健康，1=警告，2=故障 */
     float health_score;            /**< 健康评分（0.0-1.0） */
     
-    /* 仿真模式机器人运动状态（仅调试模式使用，字段始终存在以保持ABI兼容） */
-    /* SELFLNN_STRICT_REAL_DATA 运行时阻止仿真数据路径 */
-    int sim_motion_valid;          /**< 仿真运动状态是否已设置 */
-    double sim_linear_velocity[3]; /**< 仿真线速度[m/s] (vx,vy,vz) */
-    double sim_angular_velocity[3]; /**< 仿真角速度[rad/s] (ωx,ωy,ωz) */
-    double sim_linear_acceleration[3]; /**< 仿真线加速度[m/s²] (ax,ay,az) */
-    /* L-004修复: 仿真机器人地理位置（用于WMM2025地磁场动态计算） */
-    int sim_position_valid;        /**< 仿真位置是否已设置 */
-    double sim_position[3];        /**< 仿真地理位置[lat_deg, lon_deg, alt_m]（纬度°，经度°，海拔m） */
+    /* 仿真模式字段已永久移除 —— 所有仿真数据生成均已禁用 */
     
     union {
         struct {
@@ -512,23 +503,15 @@ HardwareInterface* robot_hardware_interface_create(const HardwareConfig* config)
     hw->error_count = 0;
 
     /* V3关键修复：初始化硬件运行模式
-     * HW_MODE_AUTO(0): 自动模式，优先连接硬件，失败回退到仿真
+     * HW_MODE_AUTO(0): 自动模式，尝试连接硬件
      * HW_MODE_REAL(1): 纯硬件模式，无硬件则全部失败
-     * HW_MODE_SIMULATION(2): 纯仿真模式，不连接硬件，使用物理仿真生成数据
-     *
-     * 初始化时，如果配置为HW_MODE_SIMULATION，立即标记为仿真模式可用。
-     * HW_MODE_AUTO在后续connect失败时切换。
+     * HW_MODE_SIMULATION(2): 已永久禁用，传入时应拒绝
      */
-    if (config->mode == HW_MODE_SIMULATION) {
-        hw->mode = HW_MODE_SIMULATION; /* 纯仿真模式 */
-        /*
-         * 仿真模式下标记为已连接，但所有传感器/执行器数据
-         * 由物理仿真引擎（PyBullet/Gazebo/内部引擎）生成。
-         * 这与真实硬件连接的区别可通过 hardware_interface_is_simulation()
-         * 和 API 返回的 hardware_mode 字段识别。
-         * 不生成任何虚假数据——仿真引擎进行真实的物理计算。
-         */
-        hw->is_connected = 1;
+    if (config->mode == 2) { /* 显式检查 mode=2（原HW_MODE_SIMULATION） */
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "仿真模式(HW_MODE_SIMULATION)已永久禁用，请使用HW_MODE_REAL或HW_MODE_AUTO");
+        free(hw);
+        return NULL;
     } else if (config->mode == HW_MODE_REAL) {
         hw->mode = 0;        /* 尚未连接 */
     } else {
@@ -986,10 +969,10 @@ static int basic_hardware_connect(HardwareInterface* hw) {
  * @brief 硬件接口连接（公共API）
  * 
  * 这个函数提供了智能连接功能，包括自动重试、健康检查和错误恢复。
- * 支持三种模式：
+ * 仿真模式(HW_MODE_SIMULATION)已永久禁用。
+ * 支持两种模式：
  * - HW_MODE_REAL: 只尝试真实硬件连接，失败返回错误
- * - HW_MODE_AUTO: 优先尝试真实硬件，失败自动切换到物理仿真
- * - HW_MODE_SIMULATION: 直接进入物理仿真模式
+ * - HW_MODE_AUTO: 尝试真实硬件连接，失败返回错误
  * 
  * @param hw 硬件接口句柄
  * @return int 成功返回0，失败返回错误码
@@ -1011,16 +994,11 @@ int hardware_interface_connect(HardwareInterface* hw) {
 
     /* V3关键修复：根据运行模式决定连接策略 */
 
-    /* 纯仿真模式：不尝试任何真实硬件连接，直接标记为仿真在线 */
-    if (hw->config.mode == HW_MODE_SIMULATION) {
-        hw->mode = 2;
-        hw->is_connected = 1;
-        hw->health_status = 0;
-        hw->health_score = 1.0f;
-        hw->connection_count++;
-        snprintf(hw->last_error, sizeof(hw->last_error),
-                "仿真模式已激活，所有传感器数据由物理仿真引擎生成");
-        return 0;
+    /* 纯仿真模式：已永久禁用，拒绝连接 */
+    if (hw->config.mode == 2) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "仿真模式(HW_MODE_SIMULATION)已永久禁用，无法连接");
+        return -1;
     }
 
     /* 真实硬件模式：必须连接成功 */
@@ -1028,7 +1006,7 @@ int hardware_interface_connect(HardwareInterface* hw) {
         return smart_hardware_connect(hw, 3, 1);
     }
 
-    /* F-021修复：HW_MODE_AUTO 尝试硬件连接，失败时报告状态而非静默回退 */
+    /* HW_MODE_AUTO：尝试硬件连接，失败时返回错误 */
     int result = smart_hardware_connect(hw, 1, 1);
     if (result == 0) {
         hw->mode = 1;
@@ -1231,40 +1209,31 @@ int hardware_interface_is_connected(HardwareInterface* hw) {
     return hw->is_connected ? 1 : 0;
 }
 
+/**
+ * @brief 检查是否处于仿真模式（已永久禁用）
+ *
+ * 仿真模式(HW_MODE_SIMULATION)已永久禁用，此函数始终返回0。
+ */
 int hardware_interface_is_simulation(HardwareInterface* hw) {
     if (!hw) {
         return -1;
     }
-    return (hw->mode == HW_MODE_SIMULATION) ? 1 : 0;
+    return 0; /* 仿真模式已永久禁用 */
 }
 
+/**
+ * @brief 设置仿真模式下的机器人运动状态（已永久禁用）
+ *
+ * 仿真模式(HW_MODE_SIMULATION)已永久禁用，此函数始终返回错误。
+ */
 int hardware_interface_set_simulation_motion(HardwareInterface* hw,
                                              const double linear_velocity[3],
                                              const double angular_velocity[3],
                                              const double linear_acceleration[3]) {
-    SELFLNN_CHECK_NULL(hw, "硬件接口句柄为空");
-    if (hw->mode != HW_MODE_SIMULATION) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
-                              "只能在仿真模式(HW_MODE_SIMULATION)下设置仿真运动状态");
-        return -1;
-    }
-    if (linear_velocity) {
-        hw->sim_linear_velocity[0] = linear_velocity[0];
-        hw->sim_linear_velocity[1] = linear_velocity[1];
-        hw->sim_linear_velocity[2] = linear_velocity[2];
-    }
-    if (angular_velocity) {
-        hw->sim_angular_velocity[0] = angular_velocity[0];
-        hw->sim_angular_velocity[1] = angular_velocity[1];
-        hw->sim_angular_velocity[2] = angular_velocity[2];
-    }
-    if (linear_acceleration) {
-        hw->sim_linear_acceleration[0] = linear_acceleration[0];
-        hw->sim_linear_acceleration[1] = linear_acceleration[1];
-        hw->sim_linear_acceleration[2] = linear_acceleration[2];
-    }
-    hw->sim_motion_valid = 1;
-    return 0;
+    (void)hw; (void)linear_velocity; (void)angular_velocity; (void)linear_acceleration;
+    selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                          "仿真模式(HW_MODE_SIMULATION)已永久禁用，无法设置仿真运动状态");
+    return -1;
 }
 
 /*
@@ -1405,32 +1374,18 @@ static int wmm2025_simplified_field(double lat_deg, double lon_deg, double alt_m
 }
 
 /**
- * @brief 设置仿真模式下的机器人地理位置
+ * @brief 设置仿真模式下的机器人地理位置（已永久禁用）
  * 
- * L-004修复: 用于WMM2025地磁场动态计算和温度随纬度变化。
- * 在HW_MODE_SIMULATION模式下，IMU磁力计和温度计读数基于此位置动态计算。
- * 
- * @param hw              硬件接口句柄
- * @param latitude_deg    纬度（度，-90~90，北半球为正）
- * @param longitude_deg   经度（度，-180~180，东半球为正）
- * @param altitude_m      海拔高度（米）
- * @return int            成功返回0，失败返回-1
+ * 仿真模式(HW_MODE_SIMULATION)已永久禁用，此函数始终返回错误。
  */
 int hardware_interface_set_simulation_position(HardwareInterface* hw,
                                                 double latitude_deg,
                                                 double longitude_deg,
                                                 double altitude_m) {
-    SELFLNN_CHECK_NULL(hw, "硬件接口句柄为空");
-    if (hw->mode != HW_MODE_SIMULATION) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
-                              "只能在仿真模式(HW_MODE_SIMULATION)下设置仿真位置");
-        return -1;
-    }
-    hw->sim_position[0] = latitude_deg;
-    hw->sim_position[1] = longitude_deg;
-    hw->sim_position[2] = altitude_m;
-    hw->sim_position_valid = 1;
-    return 0;
+    (void)hw; (void)latitude_deg; (void)longitude_deg; (void)altitude_m;
+    selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                          "仿真模式(HW_MODE_SIMULATION)已永久禁用，无法设置仿真位置");
+    return -1;
 }
 
 int hardware_interface_send(HardwareInterface* hw, const void* data, size_t size) {
@@ -1439,10 +1394,11 @@ int hardware_interface_send(HardwareInterface* hw, const void* data, size_t size
     SELFLNN_CHECK(size > 0, SELFLNN_ERROR_INVALID_ARGUMENT, "发送数据大小无效: %zu", size);
     SELFLNN_CHECK(hw->is_connected, SELFLNN_ERROR_INVALID_ARGUMENT, "硬件未连接");
 
-    /* 物理计算模式：不执行真实硬件写入，记录发送数据量后返回 */
-    if (hw->mode == HW_MODE_SIMULATION) {
-        hw->bytes_sent += size;
-        return (int)size;
+    /* 仿真模式已永久禁用，不再允许虚拟发送 */
+    if (hw->config.mode == 2) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_STATE, __func__, __FILE__, __LINE__,
+                              "仿真模式(HW_MODE_SIMULATION)已永久禁用，无法发送数据");
+        return -1;
     }
     
     int result = -1;
@@ -1515,10 +1471,10 @@ int hardware_interface_receive(HardwareInterface* hw, void* buffer, size_t size)
     SELFLNN_CHECK(size > 0, SELFLNN_ERROR_INVALID_ARGUMENT, "接收缓冲区大小无效: %zu", size);
     SELFLNN_CHECK(hw->is_connected, SELFLNN_ERROR_INVALID_ARGUMENT, "硬件未连接");
 
-    /* 物理计算模式：不执行真实硬件读取，返回错误码避免生成虚假数据 */
-    if (hw->mode == HW_MODE_SIMULATION) {
+    /* 仿真模式已永久禁用，拒绝虚拟数据接收 */
+    if (hw->config.mode == 2) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_STATE, __func__, __FILE__, __LINE__,
-                              "物理计算模式下无真实硬件数据，返回错误");
+                              "仿真模式(HW_MODE_SIMULATION)已永久禁用，无法接收数据");
         return -1;
     }
     
@@ -3345,116 +3301,15 @@ static int hardware_interface_i2c_write_read(uint8_t dev_addr, uint8_t reg_addr,
 int hardware_interface_imu_read_raw(HardwareInterface* hw, ImuRawData* data) {
     if (!data) return -1;
 
-    /* 物理计算模式：基于机器人实际运动状态计算传感器读数
-     * 仅在仿真模式(sim_motion_valid=1)时计算基于真实物理模型的IMU数据。
-     * 若仿真运动状态未初始化，返回全零数据并标记为无效。
-     * 这不是假数据——这是基于牛顿力学的真实物理计算结果。 */
     double current_time = (double)get_time_us() / 1000000.0;
     data->timestamp = current_time;
 
-    if (hw && hw->mode == HW_MODE_SIMULATION) {
-        /* 仿真模式下需要运动状态已初始化 */
-        if (!hw->sim_motion_valid) {
-            memset(data, 0, sizeof(ImuRawData));
-            data->timestamp = current_time;
-            snprintf(hw->last_error, sizeof(hw->last_error),
-                    "IMU物理计算：仿真运动状态未初始化，返回零值（无虚假数据）");
-            return -1;
-        }
-        /* P2-01: 使用机器人实际运动状态计算IMU读数
-         *
-         * 加速度计物理模型：
-         *   a_meas = a_linear + g_gravity + 高斯噪声
-         *   其中 a_linear 来自仿真运动状态的线加速度
-         *   g_gravity = (0, 0, 9.81) 重力加速度
-         *
-         * 陀螺仪物理模型：
-         *   ω_meas = ω_angular + 高斯漂移噪声
-         *   其中 ω_angular 来自仿真运动状态的角速度
-         *
-         * 磁力计：WMM2025地磁场模型 + 高斯噪声
-         * 温度：热模型 + 功率耗散 + 噪声
-         *
-         * 使用 xorshift128+ PRNG 通过Box-Muller变换生成高斯噪声
-         * 噪声种子基于系统时间，确保确定性可重复
-         */
-        static XorshiftPrng imu_prng = {{0}};
-        static int prng_initialized = 0;
-        if (!prng_initialized) {
-            uint64_t seed = (uint64_t)(current_time * 1e6) ^ 0x4A3B2C1D6E5F4A3BULL;
-            xorshift_prng_seed(&imu_prng, seed);
-            prng_initialized = 1;
-        }
-
-        /* 获取当前运动状态 */
-        double accel_x = 0.0, accel_y = 0.0, accel_z = 0.0;
-        double gyro_x = 0.0, gyro_y = 0.0, gyro_z = 0.0;
-        if (hw->sim_motion_valid) {
-            accel_x = hw->sim_linear_acceleration[0];
-            accel_y = hw->sim_linear_acceleration[1];
-            accel_z = hw->sim_linear_acceleration[2];
-            gyro_x = hw->sim_angular_velocity[0];
-            gyro_y = hw->sim_angular_velocity[1];
-            gyro_z = hw->sim_angular_velocity[2];
-        }
-
-        /* 加速度计：线加速度 + 重力加速度 + 传感器噪声 */
-        double accel_noise_scale = 0.05;
-        data->accelerometer[0] = accel_x + (double)xorshift_prng_next_gaussian(&imu_prng) * accel_noise_scale;
-        data->accelerometer[1] = accel_y + (double)xorshift_prng_next_gaussian(&imu_prng) * accel_noise_scale;
-        data->accelerometer[2] = accel_z + 9.81 + (double)xorshift_prng_next_gaussian(&imu_prng) * accel_noise_scale;
-
-        /* 陀螺仪：真实角速度 + 传感器噪声 */
-        double gyro_noise_scale = 0.005;
-        data->gyroscope[0] = gyro_x + (double)xorshift_prng_next_gaussian(&imu_prng) * gyro_noise_scale;
-        data->gyroscope[1] = gyro_y + (double)xorshift_prng_next_gaussian(&imu_prng) * gyro_noise_scale;
-        data->gyroscope[2] = gyro_z + (double)xorshift_prng_next_gaussian(&imu_prng) * gyro_noise_scale;
-
-        /* 磁力计物理模型：WMM2025简化地磁场动态计算 (L-004修复) */
-        double mag_noise_scale = 0.5;
-        if (hw->sim_position_valid) {
-            /* 基于机器人地理位置的 WMM2025 简化球谐模型计算地磁矢量 (nT) */
-            double B_enu[3];
-            if (wmm2025_simplified_field(hw->sim_position[0], hw->sim_position[1],
-                                         hw->sim_position[2], B_enu) == 0) {
-                /* B_enu 输出单位为 nT，转换为 µT（1 µT = 1000 nT）并添加传感器噪声 */
-                data->magnetometer[0] = B_enu[0] / 1000.0
-                    + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-                data->magnetometer[1] = B_enu[1] / 1000.0
-                    + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-                data->magnetometer[2] = B_enu[2] / 1000.0
-                    + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-            } else {
-                /* WMM2025计算失败时使用默认地磁基准值 */
-                data->magnetometer[0] = 21.5 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-                data->magnetometer[1] = 4.8 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-                data->magnetometer[2] = -24.3 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-            }
-        } else {
-            /* 位置未设置时使用默认地磁基准值（北半球中纬度典型值） */
-            data->magnetometer[0] = 21.5 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-            data->magnetometer[1] = 4.8 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-            data->magnetometer[2] = -24.3 + (double)xorshift_prng_next_gaussian(&imu_prng) * mag_noise_scale;
-        }
-
-        /* 温度模型：基础温度 + 纬度调节 + 海拔调节 + 功率耗散加热效应 (L-004修复) */
-        double t_noise_scale = 0.2;
-        double base_temp = 25.0;  /* 赤道海平面基准温度 (°C) */
-        if (hw->sim_position_valid) {
-            /* 纬度温度梯度: ~0.6°C/纬度（热带→极地降温） */
-            double lat_effect = -0.6 * fabs(hw->sim_position[0]);
-            /* 海拔温度梯度: ~6.5°C/km（对流层递减率） */
-            double alt_effect = -0.0065 * hw->sim_position[2];
-            base_temp += lat_effect + alt_effect;
-        }
-        data->temperature = base_temp + (double)xorshift_prng_next_gaussian(&imu_prng) * t_noise_scale;
-
-        snprintf(hw->last_error, sizeof(hw->last_error),
-                "物理计算IMU(仿真): 运动加速度(%.4f,%.4f,%.4f) 角速度(%.4f,%.4f,%.4f)",
-                accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
-        /* ZSFWS-M005修复: 显式标记仿真数据，区分真实硬件传感器 */
-        data->is_simulated_data = 1;
-        return 0;
+    /* 仿真模式已永久禁用，拒绝生成虚拟IMU数据 */
+    if (hw && hw->config.mode == 2) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_STATE, __func__, __FILE__, __LINE__,
+                              "IMU读取失败：仿真模式(HW_MODE_SIMULATION)已永久禁用，请连接真实IMU硬件");
+        memset(data, 0, sizeof(ImuRawData));
+        return -1;
     }
 
     /* 检查硬件是否已连接，未连接时返回错误 */

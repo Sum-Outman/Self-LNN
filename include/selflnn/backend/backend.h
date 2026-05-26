@@ -451,6 +451,10 @@ typedef enum {
     API_POST_MULTI_AGENT_CONSENSUS = 293,   /**< 智能体共识达成 /api/multi-agent/consensus */
     API_POST_MULTI_AGENT_MESSAGE = 294,     /**< 智能体消息发送 /api/multi-agent/message */
     API_POST_MULTI_AGENT_TASK = 295,        /**< 分配协作任务 /api/multi-agent/task */
+
+    /* ===== ZSFWS-B009扩展: 系统命令统一接口 ===== */
+    API_POST_SYSTEM_COMMAND = 296,           /**< 系统级命令发送 /api/system/command */
+    API_POST_COMMAND_SEND = 297,             /**< 通用命令发送 /api/command/send */
 } ApiRequestType;
 
 /**

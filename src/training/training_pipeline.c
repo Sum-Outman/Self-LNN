@@ -1240,6 +1240,13 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
 
     size_t batch_samples = pipeline->config.batch_size;
     size_t input_dim = 512, output_dim = 256;
+    {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            input_dim = lnn_cfg.input_size;
+            output_dim = lnn_cfg.output_size;
+        }
+    }
     size_t sample_size = (input_dim + output_dim) * sizeof(float);
     size_t total_samples = pipeline->data_size / sample_size;
     if (total_samples == 0) return -1;
@@ -1735,6 +1742,13 @@ int pipeline_auto_tune(TrainingPipeline* pipeline,
         /* 在真实数据上运行一次前向传播并计算损失 */
         float trial_loss = 0.0f;
         size_t input_dim = 512, output_dim = 256;
+        {
+            LNNConfig lnn_cfg;
+            if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+                input_dim = lnn_cfg.input_size;
+                output_dim = lnn_cfg.output_size;
+            }
+        }
         size_t sample_stride = input_dim + output_dim;
         size_t total_elements = pipeline->data_size / sizeof(float);
         size_t total_samples = total_elements / sample_stride;
@@ -2091,6 +2105,13 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
     pipeline->network->config.learning_rate = multimodal_lr;
 
     size_t input_size = 512, output_size = 256;
+    {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            input_size = lnn_cfg.input_size;
+            output_size = lnn_cfg.output_size;
+        }
+    }
     size_t total_elements = pipeline->data_size / sizeof(float);
     size_t sample_stride = input_size + output_size;
     size_t total_samples = total_elements / sample_stride;
@@ -2577,6 +2598,13 @@ static int compute_evaluation_metrics(TrainingPipeline* pipeline) {
     if (!data_source || data_source_size == 0) return -1;
 
     size_t input_dim = 512, output_dim = 256;
+    {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            input_dim = lnn_cfg.input_size;
+            output_dim = lnn_cfg.output_size;
+        }
+    }
     size_t sample_stride = input_dim + output_dim;
     size_t total_elements = data_source_size / sizeof(float);
     size_t total_samples = total_elements / sample_stride;
@@ -2793,6 +2821,13 @@ static void async_load_task(void* arg) {
     }
     size_t input_dim = pipeline->sources[0].feature_dim;
     size_t output_dim = pipeline->sources[0].label_dim;
+    if (input_dim == 0 || output_dim == 0) {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            if (input_dim == 0) input_dim = lnn_cfg.input_size;
+            if (output_dim == 0) output_dim = lnn_cfg.output_size;
+        }
+    }
     if (input_dim == 0) input_dim = 512;
     if (output_dim == 0) output_dim = 256;
     buf->feature_dim = input_dim;
@@ -2828,6 +2863,13 @@ int pipeline_enable_async_loading(TrainingPipeline* pipeline, int buffer_count,
     if (buffer_count < 2) buffer_count = 2;
     if (num_loader_threads < 1) num_loader_threads = 1;
     size_t input_dim = 512, output_dim = 256;
+    {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            input_dim = lnn_cfg.input_size;
+            output_dim = lnn_cfg.output_size;
+        }
+    }
     if (pipeline->source_count > 0 && pipeline->sources[0].loaded) {
         input_dim = pipeline->sources[0].feature_dim;
         output_dim = pipeline->sources[0].label_dim;

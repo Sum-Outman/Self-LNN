@@ -209,26 +209,6 @@ OcrConfig ocr_get_default_config(void) {
 static int cfc_based_char_feature_extract(OcrProcessor* processor, uint16_t codepoint,
                                            float* feature_out, int feature_dim);
 
-/**
- * @brief 计算CJK汉字笔画属性（已弃用）
- * @deprecated 自v1.0起弃用，汉字特征现在由CfC网络从真实图像中学习。
- *             此函数保留仅用于API兼容性，返回默认属性值0。
- *             新代码应使用 cfc_based_char_feature_extract() 替代。
- * @param codepoint Unicode码点（未使用）
- * @return 始终返回0（默认笔画属性）
- */
-#if defined(__GNUC__)
-__attribute__((deprecated("已弃用: 汉字特征由CfC网络学习，请使用cfc_based_char_feature_extract")))
-#elif defined(_MSC_VER)
-__declspec(deprecated("已弃用: 汉字特征由CfC网络学习，请使用cfc_based_char_feature_extract"))
-#endif
-static uint16_t compute_cjk_stroke_attr(uint16_t codepoint) {
-    /* 此函数已弃用：汉字特征现在由CfC网络从真实图像中学习
-     * 保留作为兼容性接口，返回默认属性 */
-    (void)codepoint;
-    return 0;
-}
-
 /* M-013: 1000个常用中文字符 UTF-16 码点数组 */
 static const unsigned short common_chinese[] = {
     0x7684,0x4E00,0x662F,0x5728,0x4E0D,0x4E86,0x6709,0x548C,0x4EBA,0x8FD9,

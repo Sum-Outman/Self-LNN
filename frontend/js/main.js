@@ -249,8 +249,12 @@ function initApiUsageChart() {
  * 配置并连接ROS Master
  */
 async function configureROS() {
-    var host = document.getElementById('ros-master-host').value;
-    var port = parseInt(document.getElementById('ros-master-port').value) || 11311;
+    var hostEl = document.getElementById('ros-master-host');
+    var portEl = document.getElementById('ros-master-port');
+    if (!hostEl) { console.warn('[ROS配置] ros-master-host元素不存在，使用默认值localhost'); }
+    if (!portEl) { console.warn('[ROS配置] ros-master-port元素不存在，使用默认值11311'); }
+    var host = hostEl ? hostEl.value : 'localhost';
+    var port = parseInt(portEl ? portEl.value : '11311') || 11311;
     showNotification('正在连接ROS Master...', 'info');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.configureRos === 'function') {
@@ -487,10 +491,14 @@ function selectTrainingMode(mode) {
  * 开始机器人训练
  */
 async function startRobotTraining() {
-    var lr = parseFloat(document.getElementById('training-learning-rate').value) || 0.001;
-    var er = parseFloat(document.getElementById('training-exploration-rate').value) || 0.1;
-    var df = parseFloat(document.getElementById('training-discount-factor').value) || 0.99;
-    var iters = parseInt(document.getElementById('training-iterations').value) || 1000;
+    var lrEl = document.getElementById('training-learning-rate');
+    var erEl = document.getElementById('training-exploration-rate');
+    var dfEl = document.getElementById('training-discount-factor');
+    var itersEl = document.getElementById('training-iterations');
+    var lr = lrEl ? (parseFloat(lrEl.value) || 0.001) : 0.001;
+    var er = erEl ? (parseFloat(erEl.value) || 0.1) : 0.1;
+    var df = dfEl ? (parseFloat(dfEl.value) || 0.99) : 0.99;
+    var iters = itersEl ? (parseInt(itersEl.value, 10) || 1000) : 1000;
     showNotification('正在启动机器人训练...', 'info');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.controlRobotTraining === 'function') {
@@ -535,7 +543,8 @@ async function pauseRobotTraining() {
                 action: 'pause'
             });
             if (result && result.success) {
-                document.getElementById('training-global-status').textContent = '已暂停';
+                var pauseStatusEl = document.getElementById('training-global-status');
+                if (pauseStatusEl) pauseStatusEl.textContent = '已暂停';
                 showNotification('⏸️ 机器人训练已暂停', 'warning');
             } else {
                 showNotification('❌ 暂停机器人训练失败: ' + ((result && result.error) || '未知错误'), 'error');
@@ -680,7 +689,8 @@ async function refreshTrainingStatus() {
                     var r = robots[0];
                     if (r.training_state !== undefined) {
                         var stateNames = {0:'空闲',1:'录制中',2:'训练中',3:'评估中',4:'已完成',5:'错误'};
-                        document.getElementById('training-state-label').textContent = stateNames[r.training_state] || ('状态:'+r.training_state);
+                        var stateLabelEl = document.getElementById('training-state-label');
+                        if (stateLabelEl) stateLabelEl.textContent = stateNames[r.training_state] || ('状态:'+r.training_state);
                     }
                     if (r.training_episode !== undefined) {
                         document.getElementById('training-episode').textContent = r.training_episode;
@@ -7298,16 +7308,17 @@ console.warn = function() {
 /* ================================================================
  * prompt() 兼容层 — 嵌入式浏览器不支持原生prompt
  * ================================================================ */
-if (typeof window._origPrompt === 'undefined') {
-    window._origPrompt = window.prompt;
+/* ZSF-FE-010: 保存原生prompt引用，避免后续覆盖丢失 */
+if (typeof window._nativePrompt === 'undefined') {
+    window._nativePrompt = window.prompt;
 }
 window.prompt = function(msg, defVal) {
     try {
-        if (typeof window._origPrompt === 'function' && 
+        if (typeof window._nativePrompt === 'function' && 
             !navigator.userAgent.includes('Trae')) {
-            return window._origPrompt(msg, defVal);
+            return window._nativePrompt(msg, defVal);
         }
-    } catch(e) { console.error('[prompt兼容层] _origPrompt调用失败:', e&&e.message?e.message:e); }
+    } catch(e) { console.error('[prompt兼容层] _nativePrompt调用失败:', e&&e.message?e.message:e); }
     console.warn('[prompt兼容层] 异步提示弹窗已触发，因原生prompt不可用。请使用SelfLnnNotify.prompt进行异步交互。');
     SelfLnnNotify.prompt(msg || '', defVal || '', function(val) {});
     return defVal || '';
@@ -8196,6 +8207,8 @@ window.addEventListener('beforeunload', function() {
     if (window._sensorStreamInterval) { clearInterval(window._sensorStreamInterval); delete window._sensorStreamInterval; }
     if (window._rosGazeboRefreshTimer) { clearInterval(window._rosGazeboRefreshTimer); delete window._rosGazeboRefreshTimer; }
     if (window._multimodalStreamInterval) { clearInterval(window._multimodalStreamInterval); delete window._multimodalStreamInterval; }
+    if (window._allPanelsRefreshTimer) { clearInterval(window._allPanelsRefreshTimer); delete window._allPanelsRefreshTimer; }
+    if (typeof fleetPollInterval !== 'undefined' && fleetPollInterval) { clearInterval(fleetPollInterval); fleetPollInterval = null; }
     /* 停止数据引擎 */
     if (g_dataEngine && typeof g_dataEngine.stop === 'function') {
         g_dataEngine.stop();

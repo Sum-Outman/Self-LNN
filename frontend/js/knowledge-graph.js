@@ -64,6 +64,12 @@
     function connectKnowledgeWebSocket() {
         var ws = window.SelfLnnWebSocket;
         if (!ws) {
+            /* ZSFABC-F006: 最大重试30次(60秒)，超限停止递归 */
+            graphState._kgWsRetryCount = (graphState._kgWsRetryCount || 0) + 1;
+            if (graphState._kgWsRetryCount > 30) {
+                console.error('[知识图谱WebSocket] 重试已达上限（30次），停止连接');
+                return;
+            }
             setTimeout(connectKnowledgeWebSocket, 2000);
             return;
         }
@@ -187,10 +193,18 @@
     }
 
     function addKnowledge() {
-        var subject = document.getElementById('input-subject').value.trim();
-        var predicate = document.getElementById('input-predicate').value;
-        var object = document.getElementById('input-object').value.trim();
-        var type = document.getElementById('input-type').value;
+        var subjectEl = document.getElementById('input-subject');
+        var predicateEl = document.getElementById('input-predicate');
+        var objectEl = document.getElementById('input-object');
+        var typeEl = document.getElementById('input-type');
+        if (!subjectEl || !objectEl) {
+            showStatus('add-status', '知识输入表单元素未找到', 'error');
+            return;
+        }
+        var subject = subjectEl.value.trim();
+        var predicate = predicateEl ? predicateEl.value : '';
+        var object = objectEl.value.trim();
+        var type = typeEl ? typeEl.value : '';
 
         if (!subject || !object) {
             showStatus('add-status', '主体和客体不能为空', 'error');
@@ -236,7 +250,7 @@
     }
 
     function deleteEntry(id) {
-        window.SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ entry_id: id }) })
+        window.SelfLnnApi.request('/knowledge/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_id: id }) })
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
@@ -302,6 +316,10 @@
     function refreshStats() {
         var statEntries = document.getElementById('stat-entries');
         var statMemory = document.getElementById('stat-memory');
+        if (!window.SelfLnnApi) {
+            console.warn('[知识图谱统计] SelfLnnApi不可用，跳过统计刷新');
+            return;
+        }
         window.SelfLnnApi.request('/knowledge', {method: 'GET'})
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
@@ -813,16 +831,27 @@
         gl3d.uMVP = gl.getUniformLocation(gl3d.program, 'uMVP');
         gl3d.uZoom = gl.getUniformLocation(gl3d.program, 'uZoom');
 
-        cv.addEventListener('mousedown', function(e) { drag3d.active = true; drag3d.lastX = e.clientX; drag3d.lastY = e.clientY; });
-        cv.addEventListener('mouseup', function() { drag3d.active = false; });
-        cv.addEventListener('mousemove', function(e) {
+        /* ZSF-FE-007: WebGL事件处理器使用命名函数并加入清理列表 */
+        var _kgMouseDown = function(e) { drag3d.active = true; drag3d.lastX = e.clientX; drag3d.lastY = e.clientY; };
+        var _kgMouseUp = function() { drag3d.active = false; };
+        var _kgMouseMove = function(e) {
             if (!drag3d.active) return;
             view3d.rotY += (e.clientX - drag3d.lastX) * 0.01;
             view3d.rotX += (e.clientY - drag3d.lastY) * 0.01;
             view3d.autoRotate = false;
             drag3d.lastX = e.clientX; drag3d.lastY = e.clientY;
-        });
-        cv.addEventListener('wheel', function(e) { view3d.zoom += e.deltaY * 0.05; if (view3d.zoom < 20) view3d.zoom = 20; e.preventDefault(); });
+        };
+        var _kgWheel = function(e) { view3d.zoom += e.deltaY * 0.05; if (view3d.zoom < 20) view3d.zoom = 20; e.preventDefault(); };
+
+        cv.addEventListener('mousedown', _kgMouseDown);
+        cv.addEventListener('mouseup', _kgMouseUp);
+        cv.addEventListener('mousemove', _kgMouseMove);
+        cv.addEventListener('wheel', _kgWheel);
+
+        _kgCleanupList.push({el: cv, evt: 'mousedown', fn: _kgMouseDown});
+        _kgCleanupList.push({el: cv, evt: 'mouseup', fn: _kgMouseUp});
+        _kgCleanupList.push({el: cv, evt: 'mousemove', fn: _kgMouseMove});
+        _kgCleanupList.push({el: cv, evt: 'wheel', fn: _kgWheel});
 
         resize3D();
         window.addEventListener('resize', resize3D);

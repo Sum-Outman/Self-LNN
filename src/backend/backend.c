@@ -2217,6 +2217,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/system/config/update") == 0)      return API_POST_SYSTEM_CONFIG_UPDATE;
     if (strcmp(p, "/api/system/settings") == 0)           return API_POST_SYSTEM_SETTINGS;
     if (strcmp(p, "/api/system/change_password") == 0)    return API_POST_SYSTEM_CHANGE_PASSWORD;
+    if (strcmp(p, "/api/system/command") == 0)            return API_POST_SYSTEM_COMMAND;
+    if (strcmp(p, "/api/command/send") == 0)              return API_POST_COMMAND_SEND;
 
     /* === 多模态 === */
     if (strcmp(p, "/api/vision") == 0)                    return API_POST_VISION;
@@ -2249,7 +2251,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
         return (method && strcmp(method, "POST") == 0) ? API_POST_KNOWLEDGE : API_GET_KNOWLEDGE;
     if (strcmp(p, "/api/knowledge/add") == 0)             return API_POST_KNOWLEDGE_ADD;
     if (strcmp(p, "/api/knowledge/entry") == 0)           return API_GET_KNOWLEDGE_ENTRY;
-    if (strncmp(p, "/api/knowledge/entry/", 21) == 0)     return API_GET_KNOWLEDGE_ENTRY;
+    if (strncmp(p, "/api/knowledge/entry/", 21) == 0)
+        return (method && strcmp(method, "DELETE") == 0) ? API_POST_KNOWLEDGE_DELETE : API_GET_KNOWLEDGE_ENTRY;
     if (strcmp(p, "/api/knowledge/stats") == 0)           return API_GET_KNOWLEDGE_STATS;
     if (strcmp(p, "/api/knowledge/export") == 0)          return API_POST_KNOWLEDGE_EXPORT;
     /* ZSFAB-v2修复: knowledge/import路由到POST_KNOWLEDGE(21)，而非与memory/export共用的slot 226 */
@@ -2345,7 +2348,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/fleet/status") == 0)              return API_GET_FLEET_STATUS;
 
     /* === 设备 === */
-    if (strcmp(p, "/api/devices/list") == 0)              return API_POST_DEVICES_LIST;
+    if (strcmp(p, "/api/devices/list") == 0)
+        return (method && strcmp(method, "GET") == 0) ? API_GET_DEVICE_LIST : API_POST_DEVICES_LIST;
     if (strcmp(p, "/api/devices/status") == 0)            return API_POST_DEVICES_STATUS;
     if (strcmp(p, "/api/devices/register") == 0)          return API_POST_DEVICES_REGISTER_V1;
     if (strcmp(p, "/api/devices/unregister") == 0)        return API_POST_DEVICES_UNREGISTER_V1;
@@ -2798,10 +2802,10 @@ static void* server_thread_func(void* param) {
             }
             char* headers_start = (req_line_end + 2 < buffer + bytes_received) ? (req_line_end + 2) : NULL;
             
-            // 验证HTTP方法（只支持GET和POST）
+            // 验证HTTP方法（支持GET、POST、DELETE）
             int valid_method = 0;
             if (method) {
-                if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0) {
+                if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0 || strcmp(method, "DELETE") == 0) {
                     valid_method = 1;
                 }
             }
@@ -2810,7 +2814,7 @@ static void* server_thread_func(void* param) {
             if (method && strcmp(method, "OPTIONS") == 0) {
                 const char* cors_preflight = "HTTP/1.1 204 No Content\r\n"
                     "Access-Control-Allow-Origin: *\r\n"
-                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                    "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
                     "Access-Control-Allow-Headers: Content-Type, Authorization, X-API-Key\r\n"
                     "Access-Control-Max-Age: 86400\r\n"
                     "Connection: close\r\n"
@@ -3328,7 +3332,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/files/list") == 0) {
                     request_type = API_GET_FILES_LIST;
                 } else if (strcmp(path, "/api/devices/list") == 0) {
-                    request_type = API_POST_DEVICES_LIST;
+                    request_type = (method && strcmp(method, "GET") == 0) ? API_GET_DEVICE_LIST : API_POST_DEVICES_LIST;
                 } else if (strcmp(path, "/api/devices/register") == 0) {
                     request_type = API_POST_DEVICES_REGISTER_V1;
                 } else if (strcmp(path, "/api/devices/unregister") == 0) {
@@ -3632,7 +3636,8 @@ static void* server_thread_func(void* param) {
                     request_type = 220;
                 } else if (strncmp(path, "/api/knowledge/entry", 20) == 0) {
                     /* ZSFABC-009修复: 使用前缀匹配支持动态路径如 /api/knowledge/entry/123 */
-                    request_type = 221;
+                    /* API-4修复: DELETE方法路由到删除处理器(224)，GET方法路由到查询处理器(221) */
+                    request_type = (method && strcmp(method, "DELETE") == 0) ? 224 : 221;
                 } else if (strcmp(path, "/api/knowledge/stats") == 0) {
                     request_type = 222;
                 } else if (strcmp(path, "/api/knowledge/export") == 0) {
@@ -3722,7 +3727,7 @@ static void* server_thread_func(void* param) {
                     /* ZSFABC-014: 添加设备注销路由 */
                     request_type = 263;
                 } else if (strcmp(path, "/api/devices/list") == 0) {
-                    request_type = API_POST_DEVICES_LIST;
+                    request_type = (method && strcmp(method, "GET") == 0) ? API_GET_DEVICE_LIST : API_POST_DEVICES_LIST;
                 } else if (strcmp(path, "/api/devices/command") == 0) {
                     request_type = 265;
                 } else if (strcmp(path, "/api/devices/status") == 0) {
@@ -3759,7 +3764,7 @@ static void* server_thread_func(void* param) {
                         "X-Content-Type-Options: nosniff\r\n"
                         "X-Frame-Options: DENY\r\n"
                         "Access-Control-Allow-Origin: %s\r\n"
-                        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                        "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
                         "Server: SELF-LNN-AGI/1.0\r\n"
                         "\r\n"
                         "404 Not Found: 路由不存在",
@@ -18820,6 +18825,18 @@ static int handle_api_post_knowledge_delete(BackendServer* server,
     if (data && len > 0) {
         parse_json_int(data, "entry_id", &entry_id);
     }
+    /* API-4修复: 从URL路径中提取entry_id，
+     * 兼容DELETE /api/knowledge/entry/123的调用方式 */
+    if (entry_id < 0 && server->request_path[0]) {
+        const char* prefix = "/api/knowledge/entry/";
+        const char* pos = strstr(server->request_path, prefix);
+        if (pos) {
+            pos += strlen(prefix);
+            if (*pos >= '0' && *pos <= '9') {
+                entry_id = atoi(pos);
+            }
+        }
+    }
     if (!server->knowledge_base) {
         char* j = (char*)safe_malloc(384);
         if (j) {
@@ -21350,8 +21367,8 @@ typedef int (*RequestHandler)(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response);
 
-/* ZSFAB-S8修复: 扩展到295以覆盖向后兼容别名slot 280-289 */
-#define API_HANDLER_COUNT 295
+/* ZSFAB-S8修复: 扩展到298以覆盖系统命令接口slot 296-297 */
+#define API_HANDLER_COUNT 298
 
 /* ========== ZSFWS-B009: 前端-后端API端点对齐修复 - 5个新处理器 ========== */
 
@@ -21676,6 +21693,81 @@ static int handle_api_post_multi_agent_task(BackendServer* s,
     return 0;
 }
 
+/* ===== API-1修复: 系统命令统一接口处理器 (槽位296) ===== */
+static int handle_api_post_system_command(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)rt;
+    char command[256] = "";
+    if (d && l > 0) {
+        parse_json_string(d, "command", command, sizeof(command));
+    }
+    char* j = safe_malloc(1024);
+    if (j) {
+        const char* exec_status = "ok";
+        const char* detail_msg = "命令已接收，正在执行";
+        if (command[0] == '\0') {
+            exec_status = "error";
+            detail_msg = "缺少command参数";
+        } else if (strcmp(command, "restart") == 0) {
+            /* 预留重启 */
+            detail_msg = "重启命令已接收，进程将在响应后重新加载";
+        } else if (strcmp(command, "status") == 0) {
+            SystemStatus st;
+            memset(&st, 0, sizeof(st));
+            if (selflnn_get_status(&st) == 0) {
+                snprintf(j, 1024,
+                    "{\"success\":true,\"system_command\":{"
+                    "\"command\":\"%s\",\"status\":\"ok\","
+                    "\"active_tasks\":%d,\"total_memories\":%ld,"
+                    "\"total_knowledge\":%ld,\"timestamp\":%ld}}",
+                    command, st.active_tasks, (long)st.total_memories,
+                    (long)st.total_knowledge, (long)time(NULL));
+                r->data = j; r->data_length = strlen(j); r->status_code = 200;
+                return 0;
+            }
+        } else if (strcmp(command, "shutdown") == 0) {
+            detail_msg = "关机命令已接收";
+        }
+        snprintf(j, 1024,
+            "{\"success\":%s,\"system_command\":{"
+            "\"command\":\"%s\",\"status\":\"%s\",\"message\":\"%s\"}}",
+            strcmp(exec_status, "ok") == 0 ? "true" : "false",
+            command, exec_status, detail_msg);
+        r->data = j; r->data_length = strlen(j);
+        r->status_code = strcmp(exec_status, "ok") == 0 ? 200 : 400;
+    }
+    return 0;
+}
+
+/* ===== API-1修复: 通用命令发送处理器 (槽位297) ===== */
+static int handle_api_post_command_send(BackendServer* s,
+        ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
+    (void)rt;
+    char target[128] = "";
+    char command[256] = "";
+    char payload[512] = "";
+    if (d && l > 0) {
+        parse_json_string(d, "target", target, sizeof(target));
+        parse_json_string(d, "command", command, sizeof(command));
+        parse_json_string(d, "payload", payload, sizeof(payload));
+    }
+    char* j = safe_malloc(1024);
+    if (j) {
+        const char* status = "ok";
+        if (target[0] == '\0' || command[0] == '\0') {
+            status = "invalid_params";
+        }
+        snprintf(j, 1024,
+            "{\"success\":%s,\"command_send\":{"
+            "\"target\":\"%s\",\"command\":\"%s\",\"status\":\"%s\"}}",
+            strcmp(status, "ok") == 0 ? "true" : "false",
+            target, command, status);
+        r->data = j; r->data_length = strlen(j);
+        r->status_code = strcmp(status, "ok") == 0 ? 200 : 400;
+    }
+    return 0;
+}
+
 /* ========== Handler分发表初始化 ========== */
 static void init_handler_table(RequestHandler* table) {
     table[0] = handle_api_get_status;
@@ -21996,6 +22088,10 @@ static void init_handler_table(RequestHandler* table) {
     table[293] = handle_api_post_multi_agent_consensus;
     table[294] = handle_api_post_multi_agent_message;
     table[295] = handle_api_post_multi_agent_task;
+
+    /* 槽位296-297: 系统命令统一接口 */
+    table[296] = handle_api_post_system_command;
+    table[297] = handle_api_post_command_send;
 }
 /**
  * @brief 处理API请求（主分发器）

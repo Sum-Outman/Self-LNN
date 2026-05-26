@@ -77,7 +77,7 @@
         var url = '/product/spec';
         var postData = JSON.stringify({ requirement: reqText });
 
-        SelfLnnApi.request(url, {
+        window.SelfLnnApi.request(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: postData

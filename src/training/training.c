@@ -1034,10 +1034,11 @@ static void gradient_topk_decompress(float* output, size_t num_params,
 /* ============================================================================
  * B-027: Ring AllReduce 梯度聚合
  *
- * ZSFABC-S003修复: 移除单进程内存模拟实现。
- * ring_allreduce_scatter_reduce/ring_allreduce_all_gather 是单进程内存操作模拟，
- * 不会产生任何实际的跨节点通信效果，且可能错误地缩放梯度值。
- * 当前实现: 单节点时返回0(无操作)，多节点时必须使用distributed_training.c的真网络实现。
+ * 单节点时返回0(无操作)。
+ * 多节点(total_nodes > 1)时，必须使用 distributed_training.c 的真网络通信实现。
+ * 当前函数为静态本地后备路径，调用者对 distributed_comm_context 的检查已失败，
+ * 意味着多节点场景下缺少真正的分布式通信上下文。
+ * 在此情况下返回 -1 明确报错，而非返回 0 假装成功。
  * ============================================================================ */
 
 /* B-027: Ring AllReduce - 单节点时无需梯度聚合 */
@@ -1048,9 +1049,11 @@ static int ring_allreduce_complete(float* gradients, size_t num_parameters,
     (void)num_parameters;
     (void)node_id;
     if (total_nodes <= 1) return 0;
-    /* ZSFABC-S003修复: 多节点场景无分布式上下文不可模拟
-     * 真实多节点Ring AllReduce需要使用distributed_training.c的网络通信 */
-    return 0;
+    /* P0-04修复: 多节点场景无分布式通信上下文时，返回-1明确报错，
+     * 而非返回0(成功)掩盖失败。
+     * 真实多节点Ring AllReduce需要通过distributed_sync_gradients_ex()
+     * 配合 DistributedContext 进行TCP网络通信。 */
+    return -1;
 }
 
 /**
@@ -2485,8 +2488,8 @@ static int distributed_sync_gradients(Trainer* trainer, float* gradients, size_t
         }
         return result;
     }
-    /* B-027: 无分布式通信上下文时，使用本地Ring AllReduce模拟环状通信
-     * 替代原来的简单平均法（直接返回0不做任何操作） */
+    /* P0-04修复: 无分布式通信上下文时，ring_allreduce_complete 返回-1明确报错。
+     * 调用者(如trainer_step)应当检查返回值并决定是否重试或中止训练。 */
     {
         int node_id = trainer->distributed_node_id;
         int total_nodes = trainer->distributed_num_nodes;

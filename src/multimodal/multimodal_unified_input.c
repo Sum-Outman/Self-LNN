@@ -14,6 +14,7 @@
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/core/lnn.h"
+#include "selflnn/core/cfc_network.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -640,16 +641,22 @@ int multimodal_unified_input_diagnose_modalities(const UnifiedInputState* state,
 }
 
 /* ================================================================
- * ZSF-009: 统一输入在线训练步骤
+ * ZSF-009: 统一输入在线训练步骤 —— P0-05修复版
  *
  * 基于目标输出对投影矩阵进行在线学习更新。
- * 使用MSE损失 + SGD优化器：
- *   损失: L = (1/N) * Σ (output[j] - target[j])²
- *   梯度: dL/d_combined[j] = 2 * (output[j] - target[j]) / N
- *         dL/d_W_m[j][k] = dL/d_combined[j] * signal[m][k] * inv_norm * dim_scale
- *         dL/d_b_m[j] = dL/d_combined[j] * dim_scale
- *   更新: W_m[j][k] -= lr * dL/d_W_m[j][k]
- *        b_m[j] -= lr * dL/d_b_m[j]
+ * 使用真实链式法则梯度反向传播（通过cfc_backward_ex穿越LNN/CfC动态系统），
+ * 不再使用"LNN恒等映射"近似。
+ *
+ * 完整梯度链:
+ *   MSE损失: L = (1/N) * Σ (LNN_output[j] - target[j])²
+ *   dL/d_LNN_output = 2*(LNN_output - target)/N
+ *   ↓ [cfc_backward_ex: 穿越CfC网络内部ODE/sigmoid/tanh链式法则]
+ *   dL/d_combined (LNN输入梯度) = cfc_backward_ex的gradient输出
+ *   ↓ [投影层链式法则]
+ *   dL/d_W_m[j][k] = dL/d_combined[j] * signal[k] * inv_norm * dim_scale
+ *   dL/d_b_m[j] = dL/d_combined[j] * dim_scale
+ *
+ * SGD更新: W -= lr * dW, b -= lr * db
  * ================================================================ */
 int multimodal_unified_input_train_step(UnifiedInputState* state,
                                         const float* target_output,
@@ -672,21 +679,106 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
         grad_output[j] = 2.0f * error / (float)n;
         total_loss += error * error;
     }
+    for (size_t j = n; j < SELFLNN_MAX_CONTROL_DIM; j++) {
+        grad_output[j] = 0.0f;
+    }
     total_loss /= (float)n;
 
-    /* 步骤2: 反传梯度到combined投影和（简化：假设LNN近似恒等映射）
-     * 实际梯度链为 dL/d_combined = dL/d_output · d_output/d_hnn · d_hnn/d_combined
-     * 在线学习中我们使用梯度近似：dL/d_combined ≈ grad_output（假设LNN通带增益≈1） */
+    /* 步骤2: P0-05修复 —— 使用真实CfC反向传播穿越LNN动态系统
+     *
+     * 旧代码使用恒等近似 grad_combined[j] ≈ grad_output[j]，
+     * 完全忽略了LNN/CfC内部的sigmoid/tanh/ODE指数衰减链。
+     * 现在通过 cfc_backward_ex 进行真实链式法则回传。
+     *
+     * 梯度链: dL/d_combined = W_out^T · dL/d_hidden · d_hidden/d_combined
+     * 其中 d_hidden/d_combined 包含CfC内部完整的 ODE/sigmoid/tanh 链
+     */
     float grad_combined[SELFLNN_UNIFIED_PROJECTION_DIM];
-    for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
-        if (j < n) {
-            grad_combined[j] = grad_output[j];
-        } else {
-            grad_combined[j] = 0.0f;
+    memset(grad_combined, 0, SELFLNN_UNIFIED_PROJECTION_DIM * sizeof(float));
+
+    int used_real_backprop = 0;
+    if (state->lnn_instance) {
+        /* 获取LNN内部的CfC网络，使用skip_cell_update=1模式进行纯梯度计算
+         * 不更新CfC内部参数（学习率传0），仅获取输入梯度 dL/d_input */
+        CfCNetwork* cfc_net = lnn_get_cfc_network(state->lnn_instance);
+        if (cfc_net) {
+            LNNConfig lnn_cfg;
+            if (lnn_get_config(state->lnn_instance, &lnn_cfg) == 0) {
+                /* 清零cell梯度缓冲区（上一次训练可能残留的累积梯度） */
+                cfc_zero_cell_gradients(cfc_net);
+
+                /* 调整梯度输出维度以匹配CfC输出大小 */
+                size_t cfc_out_dim = lnn_cfg.output_size;
+                float* cfc_error = (float*)safe_calloc(cfc_out_dim, sizeof(float));
+                if (cfc_error) {
+                    /* 将MSE输出梯度适配到CfC输出维度 */
+                    size_t copy_n = (cfc_out_dim < (size_t)SELFLNN_MAX_CONTROL_DIM)
+                                    ? cfc_out_dim : (size_t)SELFLNN_MAX_CONTROL_DIM;
+                    for (size_t j = 0; j < copy_n && j < n; j++) {
+                        cfc_error[j] = grad_output[j];
+                    }
+                    for (size_t j = copy_n; j < cfc_out_dim; j++) {
+                        cfc_error[j] = 0.0f;
+                    }
+
+                    /* cfc_backward_ex: error→gradient(输入梯度), skip_cell_update=1仅累积不更新
+                     * 学习率=0防止任何参数更新（我们只训练投影矩阵，不训练LNN） */
+                    float* input_gradient_buf = (float*)safe_calloc(lnn_cfg.input_size, sizeof(float));
+                    if (input_gradient_buf) {
+                        int bw_ret = cfc_backward_ex(cfc_net, cfc_error,
+                                                     input_gradient_buf, 0.0f, 1);
+                        if (bw_ret == 0) {
+                            /* 将LNN输入梯度（dL/d_combined）复制到grad_combined */
+                            size_t copy_dim = (lnn_cfg.input_size < SELFLNN_UNIFIED_PROJECTION_DIM)
+                                              ? lnn_cfg.input_size : SELFLNN_UNIFIED_PROJECTION_DIM;
+                            for (size_t j = 0; j < copy_dim; j++) {
+                                grad_combined[j] = input_gradient_buf[j];
+                            }
+                            used_real_backprop = 1;
+                        }
+                        safe_free((void**)&input_gradient_buf);
+                    }
+
+                    /* 清理cell梯度——我们不训练LNN */
+                    cfc_zero_cell_gradients(cfc_net);
+                    safe_free((void**)&cfc_error);
+                }
+            }
         }
     }
 
-    /* 步骤3: 对每个活跃模态的投影矩阵和偏置进行SGD更新 */
+    /* 回退：如果LNN反向传播不可用（LNN未设置或维度不匹配），
+     * 使用恒等近似作为保守估计（保持向后兼容） */
+    if (!used_real_backprop) {
+        for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
+            if (j < n) {
+                grad_combined[j] = grad_output[j];
+            } else {
+                grad_combined[j] = 0.0f;
+            }
+        }
+    }
+
+    /* 步骤3: 梯度裁剪 —— 防止单步更新幅度过大 */
+    float grad_max = 0.0f;
+    for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
+        float abs_g = fabsf(grad_combined[j]);
+        if (abs_g > grad_max) grad_max = abs_g;
+    }
+    if (grad_max > 10.0f) {
+        float scale = 10.0f / grad_max;
+        for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
+            grad_combined[j] *= scale;
+        }
+    }
+
+    /* 步骤4: 对每个活跃模态的投影矩阵和偏置进行SGD更新
+     *
+     * 链式法则（与forward pass一致）:
+     *   forward: combined[j] += (Σ_k W[j][k]·signal[k]·inv_norm + b[j]) · dim_scale
+     *   因此: dL/d_W[j][k] = dL/d_combined[j] · signal[k] · inv_norm · dim_scale
+     *         dL/d_b[j]     = dL/d_combined[j] · dim_scale
+     */
     int updated_modalities = 0;
     for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
         if (active_modalities_present && !active_modalities_present[m]) continue;
@@ -708,8 +800,7 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
         float* W = state->projection_matrices[m];
         float* b = state->projection_biases[m];
 
-        /* 更新投影矩阵 W[j][k] -= lr * grad_combined[j] * signal[k] * inv_norm * dim_scale */
-        /* 更新偏置 b[j] -= lr * grad_combined[j] * dim_scale */
+        /* SGD更新: W[j][k] -= lr * dL/d_W[j][k], b[j] -= lr * dL/d_b[j] */
         for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
             float common = learning_rate * grad_combined[j];
             /* 偏置更新 */
@@ -725,7 +816,7 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
 
     if (updated_modalities == 0) return -1;
 
-    /* 步骤4: 更新历史质量指标 */
+    /* 步骤5: 更新历史质量指标 */
     float quality = 1.0f / (1.0f + total_loss);
     state->historical_process_quality = state->historical_process_quality * 0.9f + quality * 0.1f;
 

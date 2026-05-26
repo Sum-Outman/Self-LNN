@@ -92,6 +92,26 @@ MultimodalProcessor* multimodal_processor_create(const MultimodalConfig* config)
     memset(processor, 0, sizeof(MultimodalProcessor));
     memcpy(&processor->config, config, sizeof(MultimodalConfig));
 
+    /* P0-01修复: 初始化CfC液态视觉处理器，适配图像特征提取参数 */
+    {
+        CfcVisionConfig vis_config = cfc_vision_get_default_config();
+        vis_config.image_width   = 224;      /* 标准视觉输入分辨率 */
+        vis_config.image_height  = 224;
+        vis_config.image_channels = 3;       /* RGB三通道 */
+        vis_config.patch_size    = 16;       /* 补丁大小（适配14×14补丁网格） */
+        vis_config.output_dim    = MMC_VISION_CFC_OUTPUT_DIM;  /* 256维输出 */
+        vis_config.num_ode_layers = 3;       /* 3层CfC ODE深度特征提取 */
+        vis_config.time_constant = 1.0f;     /* 连续时间常数τ */
+        vis_config.delta_t       = 0.1f;     /* ODE数值积分步长 */
+
+        processor->cfc_vision_proc = cfc_vision_processor_create(&vis_config);
+        if (!processor->cfc_vision_proc) {
+            /* CfC视觉处理器创建失败，整体失败，释放已分配资源 */
+            safe_free((void**)&processor);
+            return NULL;
+        }
+    }
+
     processor->is_training = 0;
     processor->learning_rate = 0.001f;
     processor->is_initialized = 1;
@@ -116,6 +136,12 @@ int multimodal_processor_set_lnn(MultimodalProcessor* processor, LNN* lnn) {
  */
 void multimodal_processor_free(MultimodalProcessor* processor) {
     if (!processor) return;
+
+    /* P0-01修复: 释放CfC液态视觉处理器 */
+    if (processor->cfc_vision_proc) {
+        cfc_vision_processor_destroy(processor->cfc_vision_proc);
+        processor->cfc_vision_proc = NULL;
+    }
 
     safe_free((void**)&processor->vision_features_cache);
     safe_free((void**)&processor->audio_features_cache);

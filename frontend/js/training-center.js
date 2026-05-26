@@ -14,7 +14,7 @@
             var batch = 64;
             var epochs = 100;
             var datasetPath = '/data/training';
-            var lrEl = document.getElementById('training-learning-rate');
+            var lrEl = document.getElementById('train-lr');
             if (lrEl) lr = parseFloat(lrEl.value) || 0.001;
             var batchEl = document.getElementById('train-batch');
             if (batchEl) batch = parseInt(batchEl.value, 10) || 64;
@@ -40,7 +40,7 @@
             var data = await window.SelfLnnApi.getTrainingStatus();
             if (data) {
                 /* FIX-JS-005: accuracy和estimated_time写入loss值所在区域的边距span */
-                var taskEl = document.getElementById('training-current-task');
+                var taskEl = document.getElementById('train-current-task');
                 if (taskEl) taskEl.textContent = data.current_stage || data.stage || '--';
                 var epochEl = document.getElementById('current-epoch');
                 if (epochEl) epochEl.textContent = data.current_epoch || data.epoch || '--';
@@ -51,9 +51,9 @@
                     var timeInfo = data.estimated_time ? (' | 预计:' + data.estimated_time) : '';
                     lossEl.textContent = (typeof lossVal === 'number' ? lossVal.toFixed(4) : String(lossVal || '--')) + accInfo + timeInfo;
                 }
-                var progressEl = document.getElementById('training-progress-fill');
+                var progressEl = document.getElementById('train-progress-fill');
                 if (progressEl) progressEl.style.width = data.progress ? data.progress + '%' : '0%';
-                var progressText = document.getElementById('training-progress-text');
+                var progressText = document.getElementById('train-progress-text');
                 if (progressText) progressText.textContent = data.progress ? data.progress.toFixed(1) + '%' : '--';
 
                 if (data.running === false) stopPolling();

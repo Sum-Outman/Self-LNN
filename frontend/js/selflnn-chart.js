@@ -23,6 +23,8 @@ class SelfLnnChart {
         this._animStart = null;
         this._resizeObserver = null;
         this._dpr = window.devicePixelRatio || 1;
+        /* 最大数据点数量，可通过options.maxDataPoints配置，默认60 */
+        this.maxDataPoints = (options && options.maxDataPoints) ? options.maxDataPoints : 60;
 
         this._initDpr();
         this._bindEvents();
@@ -76,12 +78,13 @@ class SelfLnnChart {
     }
 
     addData(label, values) {
+        var maxPts = this.maxDataPoints || 60;
         this.data.labels.push(label);
-        if (this.data.labels.length > 60) this.data.labels.shift();
+        if (this.data.labels.length > maxPts) this.data.labels.shift();
         for (let i = 0; i < this.data.datasets.length; i++) {
             if (i < values.length) {
                 this.data.datasets[i].data.push(values[i]);
-                if (this.data.datasets[i].data.length > 60) {
+                if (this.data.datasets[i].data.length > maxPts) {
                     this.data.datasets[i].data.shift();
                 }
             }

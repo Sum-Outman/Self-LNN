@@ -5316,7 +5316,7 @@ class WebSocketManager {
                 });
             }
         } catch (error) {
-            console.warn('WebSocket消息解析失败, 原文:', message.data);
+            console.warn('WebSocket消息解析失败(JSON格式错误)');
         }
     }
 

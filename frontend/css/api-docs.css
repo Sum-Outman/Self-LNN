@@ -215,13 +215,13 @@
     font-weight: bold;
 }
 #api-docs .feature-card .fc-desc {
-    font-size: 0.68rem;
+    font-size: 0.72rem;
     color: rgba(255,255,255,0.35);
     margin-top: 0.2rem;
 }
 #api-docs .feature-card .fc-badge {
     display: inline-block;
-    font-size: 0.6rem;
+    font-size: 0.7rem;
     padding: 0.1rem 0.4rem;
     border-radius: 3px;
     margin-top: 0.3rem;
@@ -237,6 +237,6 @@
 }
 @media (max-width: 768px) {
     #api-docs .container { padding: 1rem; }
-    #api-docs .desc { display: none; }
+    #api-docs .desc { font-size: 0.7rem; display: block !important; }
     #api-docs .endpoint-header { flex-wrap: wrap; }
 }

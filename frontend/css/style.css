@@ -193,6 +193,12 @@ body {
     display: block;
 }
 
+@media (min-width: 769px) {
+    .nav-dropdown:hover .dropdown-menu {
+        display: block;
+    }
+}
+
 .dropdown-menu li {
     width: 100%;
 }
@@ -879,7 +885,7 @@ body {
     }
 }
 
-@media (max-width: 992px) {
+@media (max-width: 1024px) {
     .header {
         flex-direction: column;
         gap: 1rem;
@@ -1284,7 +1290,7 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-    z-index: 1000;
+    z-index: 2001;
     overflow: hidden;
 }
 
@@ -1462,7 +1468,7 @@ body {
     height: 100vh;
     background: #1a1a2e;
     border-left: 1px solid rgba(255, 255, 255, 0.1);
-    z-index: 2000;
+    z-index: 2001;
     overflow-y: auto;
     animation: slideInRight 0.3s ease;
 }
@@ -4571,7 +4577,7 @@ body {
     position: fixed;
     top: 20px;
     right: 20px;
-    z-index: 10000;
+    z-index: 10001;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -6318,7 +6324,7 @@ body {
 /* ============================================
    可视化图表增强响应式
    ============================================ */
-@media (max-width: 992px) {
+@media (max-width: 1024px) {
     .chart-grid-2col {
         grid-template-columns: 1fr;
     }
@@ -7940,7 +7946,7 @@ body {
 /* FIX-CSS-001: 孤立.slider片段已合并到6208行统一规范 */
 
 /* 响应式 */
-@media (max-width: 900px) {
+@media (max-width: 768px) {
     .media-control-grid {
         grid-template-columns: 1fr;
     }
@@ -8248,7 +8254,7 @@ body {
 }
 
 /* 认知卡片响应式 */
-@media (max-width: 1100px) {
+@media (max-width: 1024px) {
     .cognition-grid {
         grid-template-columns: 1fr;
     }
@@ -8258,7 +8264,7 @@ body {
     }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 576px) {
     .cognition-learning-stats,
     .cog-goal-metrics,
     .cognition-identity-grid {
@@ -8445,13 +8451,13 @@ body {
 .legend-dot.correction-after { background: #4a9eff; }
 .legend-dot.correction-improvement { background: #00ff88; }
 
-@media (max-width: 800px) {
+@media (max-width: 768px) {
     .tom-agent-container {
         grid-template-columns: 1fr 1fr;
     }
 }
 
-@media (max-width: 500px) {
+@media (max-width: 480px) {
     .tom-agent-container {
         grid-template-columns: 1fr;
     }
@@ -8470,7 +8476,7 @@ body {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    z-index: 99999;
+    z-index: 100000;
     animation: overlayFadeIn 0.3s ease;
 }
 

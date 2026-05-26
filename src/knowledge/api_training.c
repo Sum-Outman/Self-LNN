@@ -1915,56 +1915,92 @@ int api_training_fetch_dataset(const char* api_url, const char* api_key,
     return (int)parsed;
 }
 
-/* 使用外部数据训练模型：创建临时网络和训练器执行完整训练 */
+/* 使用外部数据训练模型：优先使用session中的配置，否则使用默认值创建临时网络和训练器 */
 int api_training_train_with_external(void* session,
                                        const float* external_data,
                                        size_t data_count, size_t feature_dim,
                                        int epochs) {
-    (void)session;
     if (!external_data || data_count == 0 || feature_dim == 0) return -1;
 
-    /* 创建训练配置 */
+    TrainingSession* ts = (TrainingSession*)session;
+    int has_valid_session = (ts != NULL && ts->network != NULL);
+
+    /* 从session提取训练配置，无session或无效时使用默认值 */
     TrainingConfig config;
-    memset(&config, 0, sizeof(TrainingConfig));
-    config.learning_rate = 0.001f;
-    config.epochs = epochs > 0 ? epochs : 10;
-    config.batch_size = 32;
-    config.mode = TRAIN_MODE_MINI_BATCH;
-    config.optimizer = OPTIMIZER_ADAM;
-    config.loss_function = LOSS_MSE;
-    config.regularization = REGULARIZATION_L2;
-    config.enable_validation = 1;
-    config.verbose = 0;
-    config.patience = 5;
+    if (ts != NULL && ts->config.epochs > 0) {
+        /* 存在有效session，复制其训练配置 */
+        memcpy(&config, &ts->config, sizeof(TrainingConfig));
+        /* 外部传入的epochs参数优先级最高（如果显式指定） */
+        if (epochs > 0) config.epochs = (size_t)epochs;
+    } else {
+        /* 无有效session，使用安全默认值 */
+        memset(&config, 0, sizeof(TrainingConfig));
+        config.learning_rate = 0.001f;
+        config.epochs = epochs > 0 ? (size_t)epochs : 10;
+        config.batch_size = 32;
+        config.mode = TRAIN_MODE_MINI_BATCH;
+        config.optimizer = OPTIMIZER_ADAM;
+        config.loss_function = LOSS_MSE;
+        config.regularization = REGULARIZATION_L2;
+        config.enable_validation = 1;
+        config.verbose = 0;
+        config.patience = 5;
+    }
 
-    /* 创建临时LNN网络 */
-    LNNConfig net_cfg;
-    memset(&net_cfg, 0, sizeof(LNNConfig));
-    net_cfg.input_size = (int)feature_dim;
-    int hidden = (int)(feature_dim * 2);
-    if (hidden < 64) hidden = 64;
-    net_cfg.hidden_size = hidden;
-    net_cfg.output_size = 1;
-    net_cfg.learning_rate = config.learning_rate;
-    net_cfg.time_constant = 0.1f;
-    net_cfg.enable_training = 1;
-    net_cfg.enable_adaptation = 1;
+    LNN* network = NULL;
+    Trainer* trainer = NULL;
+    int created_network = 0;
+    int created_trainer = 0;
+    int result = 0;
 
-    LNN* network = lnn_create(&net_cfg);
-    if (!network) return -1;
+    if (has_valid_session) {
+        /* 复用session中已有的网络和训练器，无需重新创建 */
+        network = ts->network;
+        if (ts->trainer != NULL) {
+            trainer = ts->trainer;
+            /* 更新训练器的配置以反映当前参数 */
+            memcpy(&trainer->config, &config, sizeof(TrainingConfig));
+        }
+    }
 
-    /* 创建训练器 */
-    Trainer* trainer = trainer_create(&config, network);
+    if (!network) {
+        /* 无可用网络，创建临时LNN网络 */
+        LNNConfig net_cfg;
+        memset(&net_cfg, 0, sizeof(LNNConfig));
+        net_cfg.input_size = (int)feature_dim;
+        int hidden = (int)(feature_dim * 2);
+        if (hidden < 64) hidden = 64;
+        net_cfg.hidden_size = hidden;
+        net_cfg.output_size = 1;
+        net_cfg.learning_rate = config.learning_rate;
+        net_cfg.time_constant = 0.1f;
+        net_cfg.enable_training = 1;
+        net_cfg.enable_adaptation = 1;
+        network = lnn_create(&net_cfg);
+        if (!network) return -1;
+        created_network = 1;
+    }
+
     if (!trainer) {
-        lnn_free(network);
-        return -1;
+        /* 无可用训练器，创建临时训练器 */
+        trainer = trainer_create(&config, network);
+        if (!trainer) {
+            if (created_network) lnn_free(network);
+            return -1;
+        }
+        created_trainer = 1;
     }
 
     /* 执行训练 */
-    int result = trainer_train(trainer, external_data, NULL, data_count, NULL, NULL);
+    result = trainer_train(trainer, external_data, NULL, data_count, NULL, NULL);
 
-    trainer_free(trainer);
-    lnn_free(network);
+    /* 仅清理临时创建的资源，不销毁session中的资源 */
+    if (created_trainer) {
+        trainer_free(trainer);
+    }
+    if (created_network) {
+        lnn_free(network);
+    }
 
     return result;
 }

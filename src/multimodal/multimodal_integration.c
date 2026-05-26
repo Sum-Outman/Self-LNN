@@ -451,7 +451,7 @@ int multimodal_integration_process_vision(
     vision_output->width = width;
     vision_output->height = height;
     vision_output->channels = channels;
-    vision_output->timestamp = 0; /* 实际应用中应使用真实时间戳 */
+    vision_output->timestamp = (float)time(NULL); /* 使用系统实时时间戳 */
     
     return 0;
 }
@@ -636,7 +636,7 @@ int multimodal_integration_process_audio(
     audio_output->sample_rate = (float)sample_rate;
     audio_output->mfcc_features = audio_features;
     audio_output->mfcc_count = feature_count;
-    audio_output->timestamp = 0;
+    audio_output->timestamp = (float)time(NULL); /* 使用系统实时时间戳 */
     
     return 0;
 }
@@ -663,6 +663,11 @@ int multimodal_integration_process_text(
     }
     
     int feature_count = 0;
+    
+    /* OCR识别结果（提升到函数作用域，供后续填充text_output->text使用） */
+    OcrResult ocr_result;
+    memset(&ocr_result, 0, sizeof(OcrResult));
+    int ocr_result_code = -1;
     
     /* 文本检测 */
     if (processor->text_detection_processor && processor->config.ocr_config.enable_text_detection) {
@@ -724,10 +729,9 @@ int multimodal_integration_process_text(
     
     /* OCR识别 */
     if (processor->ocr_processor && processor->config.ocr_config.enable_ocr) {
-        OcrResult ocr_result;
         memset(&ocr_result, 0, sizeof(OcrResult));
         
-        int ocr_result_code = ocr_recognize(processor->ocr_processor,
+        ocr_result_code = ocr_recognize(processor->ocr_processor,
                                          image_data, width, height, channels,
                                          &ocr_result);
         
@@ -744,9 +748,23 @@ int multimodal_integration_process_text(
     /* 填充文本输出 */
     text_output->embeddings = text_features;
     text_output->embedding_dim = feature_count; /* 特征数量作为嵌入维度 */
-    text_output->text = NULL; /* 实际应用中可设置识别到的文本 */
-    text_output->text_length = 0;
-    text_output->timestamp = 0;
+    
+    /* 使用OCR识别的真实文本内容 */
+    if (ocr_result_code == 0 && ocr_result.text[0] != '\0') {
+        size_t text_len = strlen(ocr_result.text);
+        text_output->text = (char*)safe_malloc(text_len + 1);
+        if (text_output->text) {
+            memcpy(text_output->text, ocr_result.text, text_len + 1);
+            text_output->text_length = (int)text_len;
+        } else {
+            text_output->text = NULL;
+            text_output->text_length = 0;
+        }
+    } else {
+        text_output->text = NULL;
+        text_output->text_length = 0;
+    }
+    text_output->timestamp = (float)time(NULL); /* 使用系统实时时间戳 */
     
     return 0;
 }
@@ -1511,16 +1529,31 @@ int mm_fusion_load_weights(MmCfcFusionState *state, const char *filepath) {
 }
 
 /* ============================================================================
- * mm_cfc_unified_fusion_train: 单步融合训练
+ * mm_cfc_unified_fusion_train: 单步融合训练 —— P0-06修复版
  *
- * 基于MSE损失的有限差分梯度估计 + SGD参数更新。
- * 仅更新核心融合参数 W_fusion, U_fusion, b_fusion,
- * 以及各模态投影权重 W_proj[m]。
+ * 使用真实链式法则分析梯度反向传播替代原来的有限差分梯度估计。
+ * 完整梯度链穿越 CfC ODE 动态系统:
  *
- * 使用中央差分法估计梯度:
- *   ∂L/∂θ ≈ (L(θ+ε) - L(θ-ε)) / (2ε)
+ *   损失: L = (1/hidden_dim) * Σ (h_final[i] - target[i])²
  *
- * 这是真实数值梯度, 虽然计算开销较大, 但保证了数学正确性。
+ *   dL/d_h_final = 2*(h_final - target) / hidden_dim
+ *   ↓ [穿越 ODE Euler 步骤, 每步链式法则]
+ *   dL/d_gate += Σ_t dL/d_hadamard_t ⊙ tanh_t
+ *   dL/d_U_fusion += Σ_t dL/d_(U*h_t+b) ⊗ h_t
+ *   dL/d_b_fusion += Σ_t dL/d_(U*h_t+b)
+ *   ↓ [门控路径]
+ *   dL/d_W_fusion = [dL/d_gate ⊙ gate ⊙ (1-gate)] ⊗ X
+ *   dL/d_X = W_fusion^T · [dL/d_gate ⊙ gate ⊙ (1-gate)]
+ *   ↓ [投影层]
+ *   dL/d_W_proj[m][i][j] = dL/d_latent[m][i] * modality[m][j]
+ *   dL/d_b_proj[m][i] = dL/d_latent[m][i]
+ *
+ * ODE Euler 步反向传播 (ht → h_{t+1}):
+ *   h_{t+1} = (1-α)*h_t + α*gate⊙tanh(U*h_t+b)    [α = dt/τ]
+ *   dL/d_tanh_t = α · dL/d_h_{t+1} ⊙ gate
+ *   dL/d_gate  += α · dL/d_h_{t+1} ⊙ tanh_t
+ *   dL/d_(U*h_t+b) = dL/d_tanh_t ⊙ (1 - tanh_t²)
+ *   dL/d_h_t = (1-α)*dL/d_h_{t+1} + U^T · dL/d_(U*h_t+b)
  * ============================================================================ */
 int mm_cfc_unified_fusion_train(
     MmCfcFusionState *state,
@@ -1536,157 +1569,399 @@ int mm_cfc_unified_fusion_train(
     if (target_dim != state->hidden_dim) return -3;
 
     int n_mod = (num_modalities < state->num_modalities) ? num_modalities : state->num_modalities;
+    if (n_mod <= 0) return -4;
 
-    /* 临时融合输出缓冲区 */
-    float *fused_temp = (float*)safe_calloc((size_t)state->hidden_dim, sizeof(float));
-    float *h_backup = (float*)safe_calloc((size_t)state->hidden_dim, sizeof(float));
-    if (!fused_temp || !h_backup) {
-        safe_free((void**)&fused_temp);
-        safe_free((void**)&h_backup);
-        return -4;
-    }
-
-    /* 备份当前状态 h */
-    memcpy(h_backup, state->h, (size_t)state->hidden_dim * sizeof(float));
-
-    /* 前向传播 → 计算当前损失 */
-    /* 重置 h 为零以确保一致的初始条件 */
-    memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-    int ret = mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                                     n_mod, fused_temp, state->hidden_dim);
-    if (ret != 0) {
-        memcpy(state->h, h_backup, (size_t)state->hidden_dim * sizeof(float));
-        safe_free((void**)&fused_temp);
-        safe_free((void**)&h_backup);
-        return -5;
-    }
-    float base_loss = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-    *loss_out = base_loss;
-
-    float epsilon = 1e-4f;       /* 有限差分扰动 */
+    int hidden = state->hidden_dim;
+    int latent = state->latent_dim;
+    int concat = state->concat_dim;
+    int steps = state->ode_steps;
+    float alpha = state->dt / state->tau;
     float lr = state->learning_rate;
-    float inv_2eps = 1.0f / (2.0f * epsilon);
+    float inv_hidden = 1.0f / (float)hidden;
 
-    /* ---- 更新 U_fusion (使用子集随机采样减少计算量) ---- */
-    int u_fusion_size = state->hidden_dim * state->hidden_dim;
-    int u_sample_count = (u_fusion_size > 200) ? 200 : u_fusion_size;
-    for (int s = 0; s < u_sample_count; s++) {
-        int idx = (int)(secure_random_float() * (float)(u_fusion_size - 1));
-        if (idx >= u_fusion_size) idx = u_fusion_size - 1;
-
-        float orig = state->U_fusion[idx];
-
-        /* 正扰动 */
-        state->U_fusion[idx] = orig + epsilon;
-        memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-        mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                              n_mod, fused_temp, state->hidden_dim);
-        float loss_plus = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-
-        /* 负扰动 */
-        state->U_fusion[idx] = orig - epsilon;
-        memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-        mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                              n_mod, fused_temp, state->hidden_dim);
-        float loss_minus = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-
-        /* 梯度估计与SGD更新 */
-        float grad = (loss_plus - loss_minus) * inv_2eps;
-        state->U_fusion[idx] = orig - lr * grad;
-
-        /* 梯度裁剪: 限制单步更新幅度 */
-        if (state->U_fusion[idx] > orig + 0.1f) state->U_fusion[idx] = orig + 0.1f;
-        if (state->U_fusion[idx] < orig - 0.1f) state->U_fusion[idx] = orig - 0.1f;
-    }
-
-    /* ---- 更新 W_fusion ---- */
-    int w_fusion_size = state->hidden_dim * state->concat_dim;
-    int w_sample_count = (w_fusion_size > 300) ? 300 : w_fusion_size;
-    for (int s = 0; s < w_sample_count; s++) {
-        int idx = (int)(secure_random_float() * (float)(w_fusion_size - 1));
-        if (idx >= w_fusion_size) idx = w_fusion_size - 1;
-
-        float orig = state->W_fusion[idx];
-
-        state->W_fusion[idx] = orig + epsilon;
-        memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-        mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                              n_mod, fused_temp, state->hidden_dim);
-        float loss_plus = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-
-        state->W_fusion[idx] = orig - epsilon;
-        memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-        mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                              n_mod, fused_temp, state->hidden_dim);
-        float loss_minus = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-
-        float grad = (loss_plus - loss_minus) * inv_2eps;
-        state->W_fusion[idx] = orig - lr * grad;
-
-        if (state->W_fusion[idx] > orig + 0.1f) state->W_fusion[idx] = orig + 0.1f;
-        if (state->W_fusion[idx] < orig - 0.1f) state->W_fusion[idx] = orig - 0.1f;
-    }
-
-    /* ---- 更新 b_fusion (全参数更新) ---- */
-    for (int i = 0; i < state->hidden_dim; i++) {
-        float orig = state->b_fusion[i];
-
-        state->b_fusion[i] = orig + epsilon;
-        memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-        mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                              n_mod, fused_temp, state->hidden_dim);
-        float loss_plus = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-
-        state->b_fusion[i] = orig - epsilon;
-        memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-        mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                              n_mod, fused_temp, state->hidden_dim);
-        float loss_minus = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-
-        float grad = (loss_plus - loss_minus) * inv_2eps;
-        state->b_fusion[i] = orig - lr * grad;
-
-        if (state->b_fusion[i] > orig + 0.1f) state->b_fusion[i] = orig + 0.1f;
-        if (state->b_fusion[i] < orig - 0.1f) state->b_fusion[i] = orig - 0.1f;
-    }
-
-    /* ---- 更新各模态投影权重 (W_proj[m]) ---- */
+    /* ===========================================================
+     * Phase 1: 前向传播 —— 保存 ODE 每步的隐状态快照
+     * =========================================================== */
+    /* 为每个模态投影到隐空间 */
+    float **latents = (float**)safe_calloc((size_t)n_mod, sizeof(float*));
+    if (!latents) return -5;
     for (int m = 0; m < n_mod; m++) {
-        if (!modality_data[m] || modality_dims[m] <= 0) continue;
-
-        int w_size = state->latent_dim * state->input_dims[m];
-        int sample_count = (w_size > 100) ? 100 : w_size;
-        for (int s = 0; s < sample_count; s++) {
-            int idx = (int)(secure_random_float() * (float)(w_size - 1));
-            if (idx >= w_size) idx = w_size - 1;
-
-            float orig = state->W_proj[m][idx];
-
-            state->W_proj[m][idx] = orig + epsilon;
-            memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-            mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                                  n_mod, fused_temp, state->hidden_dim);
-            float loss_plus = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-
-            state->W_proj[m][idx] = orig - epsilon;
-            memset(state->h, 0, (size_t)state->hidden_dim * sizeof(float));
-            mm_cfc_unified_fusion(state, modality_data, modality_dims,
-                                  n_mod, fused_temp, state->hidden_dim);
-            float loss_minus = _fusion_compute_mse(fused_temp, target, state->hidden_dim);
-
-            float grad = (loss_plus - loss_minus) * inv_2eps;
-            state->W_proj[m][idx] = orig - lr * grad;
-
-            if (state->W_proj[m][idx] > orig + 0.1f) state->W_proj[m][idx] = orig + 0.1f;
-            if (state->W_proj[m][idx] < orig - 0.1f) state->W_proj[m][idx] = orig - 0.1f;
+        latents[m] = (float*)safe_calloc((size_t)latent, sizeof(float));
+        if (!latents[m]) {
+            for (int k = 0; k < m; k++) safe_free((void**)&latents[k]);
+            safe_free((void**)&latents);
+            return -5;
+        }
+        if (modality_data[m] && modality_dims[m] > 0) {
+            if (modality_dims[m] != state->input_dims[m]) {
+                for (int k = 0; k <= m; k++) safe_free((void**)&latents[k]);
+                safe_free((void**)&latents);
+                return -6;
+            }
+            _fusion_matvec(state->W_proj[m], modality_data[m],
+                          latent, state->input_dims[m], latents[m]);
+            _fusion_vec_add(latents[m], state->b_proj[m], latent, latents[m]);
         }
     }
 
-    /* 恢复 h 状态 */
-    memcpy(state->h, h_backup, (size_t)state->hidden_dim * sizeof(float));
+    /* 拼接各模态投影 → X */
+    float *X = (float*)safe_calloc((size_t)concat, sizeof(float));
+    if (!X) {
+        for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+        safe_free((void**)&latents);
+        return -5;
+    }
+    for (int m = 0; m < n_mod; m++) {
+        memcpy(X + m * latent, latents[m], (size_t)latent * sizeof(float));
+    }
 
-    safe_free((void**)&fused_temp);
-    safe_free((void**)&h_backup);
+    /* 计算门控 gate = σ(W_fusion * X) —— 与 h 无关，仅计算一次 */
+    float *gate = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    if (!gate) {
+        for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+        safe_free((void**)&latents); safe_free((void**)&X);
+        return -5;
+    }
+    _fusion_matvec(state->W_fusion, X, hidden, concat, gate);
+    _fusion_sigmoid_vec(gate, hidden, gate);
+
+    /* ODE 前向积分 —— 保存每步的隐状态 h_snapshots[step] */
+    float **h_snapshots = (float**)safe_calloc((size_t)(steps + 1), sizeof(float*));
+    if (!h_snapshots) {
+        for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+        safe_free((void**)&latents); safe_free((void**)&X); safe_free((void**)&gate);
+        return -5;
+    }
+    for (int s = 0; s <= steps; s++) {
+        h_snapshots[s] = (float*)safe_calloc((size_t)hidden, sizeof(float));
+        if (!h_snapshots[s]) {
+            for (int t = 0; t < s; t++) safe_free((void**)&h_snapshots[t]);
+            safe_free((void**)&h_snapshots);
+            for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+            safe_free((void**)&latents); safe_free((void**)&X); safe_free((void**)&gate);
+            return -5;
+        }
+    }
+
+    /* 保存初始状态（零）并执行ODE积分 */
+    memset(h_snapshots[0], 0, (size_t)hidden * sizeof(float));
+    float *h = state->h;
+    memset(h, 0, (size_t)hidden * sizeof(float));
+
+    float *Uh = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *Uhpb = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *tanh_out = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *hadamard_out = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *dh = (float*)safe_calloc((size_t)hidden, sizeof(float));
+
+    if (!Uh || !Uhpb || !tanh_out || !hadamard_out || !dh) {
+        for (int s = 0; s <= steps; s++) safe_free((void**)&h_snapshots[s]);
+        safe_free((void**)&h_snapshots);
+        for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+        safe_free((void**)&latents); safe_free((void**)&X); safe_free((void**)&gate);
+        safe_free((void**)&Uh); safe_free((void**)&Uhpb);
+        safe_free((void**)&tanh_out); safe_free((void**)&hadamard_out); safe_free((void**)&dh);
+        return -5;
+    }
+
+    float inv_tau = 1.0f / state->tau;
+    for (int step = 0; step < steps; step++) {
+        /* 保存当前步的 h */
+        memcpy(h_snapshots[step], h, (size_t)hidden * sizeof(float));
+
+        _fusion_matvec(state->U_fusion, h, hidden, hidden, Uh);
+        _fusion_vec_add(Uh, state->b_fusion, hidden, Uhpb);
+        _fusion_tanh_vec(Uhpb, hidden, tanh_out);
+        _fusion_hadamard(gate, tanh_out, hidden, hadamard_out);
+
+        for (int i = 0; i < hidden; i++) {
+            dh[i] = inv_tau * (-h[i] + hadamard_out[i]);
+            h[i] = h[i] + state->dt * dh[i];
+        }
+    }
+    /* 保存最终 h (h_final = fused output) */
+    memcpy(h_snapshots[steps], h, (size_t)hidden * sizeof(float));
+
+    /* ===========================================================
+     * Phase 2: MSE 损失 + dL/d_h_final
+     * =========================================================== */
+    float *fused_out = h_snapshots[steps];
+    float base_loss = _fusion_compute_mse(fused_out, target, hidden);
+    *loss_out = base_loss;
+
+    /* dL/d_h_final[j] = 2*(fused[j] - target[j]) / hidden_dim */
+    float *dL_dh = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    if (!dL_dh) {
+        for (int s = 0; s <= steps; s++) safe_free((void**)&h_snapshots[s]);
+        safe_free((void**)&h_snapshots);
+        for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+        safe_free((void**)&latents); safe_free((void**)&X); safe_free((void**)&gate);
+        safe_free((void**)&Uh); safe_free((void**)&Uhpb);
+        safe_free((void**)&tanh_out); safe_free((void**)&hadamard_out); safe_free((void**)&dh);
+        return -5;
+    }
+    for (int j = 0; j < hidden; j++) {
+        dL_dh[j] = 2.0f * (fused_out[j] - target[j]) * inv_hidden;
+    }
+
+    /* ===========================================================
+     * Phase 3: 反向传播通过 ODE 步骤
+     *
+     * 缓冲区:
+     *   dL_dgate_acc[hidden]      : dL/d_gate 累积 (各步求和)
+     *   dL_dU_acc[hidden*hidden] : dL/d_U_fusion 累积
+     *   dL_db_acc[hidden]         : dL/d_b_fusion 累积
+     *   dL_dtanh[hidden]          : 当前步 dL/d_tanh
+     *   dL_dUhpb[hidden]          : 当前步 dL/d(U*h+b)
+     *   temp_hidden[hidden]       : 临时向量
+     * =========================================================== */
+    float *dL_dgate_acc = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *dL_dU_acc = (float*)safe_calloc((size_t)(hidden * hidden), sizeof(float));
+    float *dL_db_acc = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *dL_dtanh = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *dL_dUhpb = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *tanh_prime = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *temp_hidden = (float*)safe_calloc((size_t)hidden, sizeof(float));
+
+    if (!dL_dgate_acc || !dL_dU_acc || !dL_db_acc || !dL_dtanh ||
+        !dL_dUhpb || !tanh_prime || !temp_hidden) {
+        safe_free((void**)&dL_dh);
+        for (int s = 0; s <= steps; s++) safe_free((void**)&h_snapshots[s]);
+        safe_free((void**)&h_snapshots);
+        for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+        safe_free((void**)&latents); safe_free((void**)&X); safe_free((void**)&gate);
+        safe_free((void**)&Uh); safe_free((void**)&Uhpb);
+        safe_free((void**)&tanh_out); safe_free((void**)&hadamard_out); safe_free((void**)&dh);
+        safe_free((void**)&dL_dgate_acc); safe_free((void**)&dL_dU_acc);
+        safe_free((void**)&dL_db_acc); safe_free((void**)&dL_dtanh);
+        safe_free((void**)&dL_dUhpb); safe_free((void**)&tanh_prime);
+        safe_free((void**)&temp_hidden);
+        return -5;
+    }
+
+    /* 反向遍历每个ODE步 (从最后一轮到第一轮) */
+    for (int step = steps - 1; step >= 0; step--) {
+        float *h_t = h_snapshots[step];
+        float *h_next = h_snapshots[step + 1];
+
+        /* 重计算当前步的中间值：
+         *   tanh_t = tanh(U_fusion * h_t + b_fusion)
+         *   tanh_prime = 1 - tanh_t²
+         */
+        _fusion_matvec(state->U_fusion, h_t, hidden, hidden, Uh);
+        _fusion_vec_add(Uh, state->b_fusion, hidden, Uhpb);
+        _fusion_tanh_vec(Uhpb, hidden, tanh_out);
+
+        for (int i = 0; i < hidden; i++) {
+            tanh_prime[i] = 1.0f - tanh_out[i] * tanh_out[i];
+        }
+
+        /* 反向传播公式 (h_{t+1} = h_t + dt/τ * (-h_t + gate⊙tanh_t)):
+         *   dL/d_hadamard_t = dL/d_h_{t+1} · (dt/τ)
+         *   dL/d_tanh_t = dL/d_hadamard_t ⊙ gate
+         *   dL/d_gate += dL/d_hadamard_t ⊙ tanh_t
+         *   dL/d_(U*h_t+b) = dL/d_tanh_t ⊙ tanh_prime
+         *   dL/d_h_t = dL/d_h_{t+1} · (1 - dt/τ) + U_fusion^T · dL/d_(U*h_t+b)
+         */
+        for (int i = 0; i < hidden; i++) {
+            float dL_dhadamard = dL_dh[i] * alpha;
+            dL_dtanh[i] = dL_dhadamard * gate[i];
+            dL_dgate_acc[i] += dL_dhadamard * tanh_out[i];
+            dL_dUhpb[i] = dL_dtanh[i] * tanh_prime[i];
+        }
+
+        /* U_fusion^T · dL_dUhpb → temp_hidden */
+        /* temp_hidden[j] = Σ_i U_fusion[i][j] * dL_dUhpb[i] */
+        memset(temp_hidden, 0, (size_t)hidden * sizeof(float));
+        for (int i = 0; i < hidden; i++) {
+            float g_i = dL_dUhpb[i];
+            if (fabsf(g_i) < 1e-30f) continue;
+            for (int j = 0; j < hidden; j++) {
+                temp_hidden[j] += state->U_fusion[i * hidden + j] * g_i;
+            }
+        }
+
+        /* dL/d_U_fusion += dL_dUhpb ⊗ h_t (外积) */
+        for (int i = 0; i < hidden; i++) {
+            float g_i = dL_dUhpb[i];
+            if (fabsf(g_i) < 1e-30f) continue;
+            for (int j = 0; j < hidden; j++) {
+                dL_dU_acc[i * hidden + j] += g_i * h_t[j];
+            }
+        }
+
+        /* dL/d_b_fusion += dL_dUhpb */
+        for (int i = 0; i < hidden; i++) {
+            dL_db_acc[i] += dL_dUhpb[i];
+        }
+
+        /* dL/d_h_t = (1-α) * dL/d_h_{t+1} + temp_hidden (U^T · dL_dUhpb) */
+        for (int i = 0; i < hidden; i++) {
+            dL_dh[i] = dL_dh[i] * (1.0f - alpha) + temp_hidden[i];
+        }
+    }
+
+    /* ===========================================================
+     * Phase 4: dL/d_W_fusion 和 dL/d_X (门控路径)
+     *
+     *   s_gate = W_fusion * X
+     *   gate = σ(s_gate)
+     *   dL/d_s_gate = dL/d_gate ⊙ gate ⊙ (1-gate)
+     *   dL/d_W_fusion = dL/d_s_gate ⊗ X
+     *   dL/d_X = W_fusion^T · dL/d_s_gate
+     * =========================================================== */
+    float *dL_ds_gate = (float*)safe_calloc((size_t)hidden, sizeof(float));
+    float *dL_dX = (float*)safe_calloc((size_t)concat, sizeof(float));
+
+    if (!dL_ds_gate || !dL_dX) {
+        safe_free((void**)&dL_dh); safe_free((void**)&dL_ds_gate); safe_free((void**)&dL_dX);
+        for (int s = 0; s <= steps; s++) safe_free((void**)&h_snapshots[s]);
+        safe_free((void**)&h_snapshots);
+        for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+        safe_free((void**)&latents); safe_free((void**)&X); safe_free((void**)&gate);
+        safe_free((void**)&Uh); safe_free((void**)&Uhpb);
+        safe_free((void**)&tanh_out); safe_free((void**)&hadamard_out); safe_free((void**)&dh);
+        safe_free((void**)&dL_dgate_acc); safe_free((void**)&dL_dU_acc);
+        safe_free((void**)&dL_db_acc); safe_free((void**)&dL_dtanh);
+        safe_free((void**)&dL_dUhpb); safe_free((void**)&tanh_prime);
+        safe_free((void**)&temp_hidden);
+        return -5;
+    }
+
+    /* dL/d_s_gate[i] = dL_dgate_acc[i] · gate[i] · (1-gate[i]) */
+    for (int i = 0; i < hidden; i++) {
+        dL_ds_gate[i] = dL_dgate_acc[i] * gate[i] * (1.0f - gate[i]);
+    }
+
+    /* dL/d_W_fusion[i][j] = dL/d_s_gate[i] * X[j] */
+    for (int i = 0; i < hidden; i++) {
+        float g_i = dL_ds_gate[i];
+        if (fabsf(g_i) < 1e-30f) continue;
+        for (int j = 0; j < concat; j++) {
+            state->dW_fusion[i * concat + j] = g_i * X[j];
+        }
+    }
+
+    /* dL/d_X = W_fusion^T · dL/d_s_gate */
+    memset(dL_dX, 0, (size_t)concat * sizeof(float));
+    for (int i = 0; i < hidden; i++) {
+        float g_i = dL_ds_gate[i];
+        if (fabsf(g_i) < 1e-30f) continue;
+        for (int j = 0; j < concat; j++) {
+            dL_dX[j] += state->W_fusion[i * concat + j] * g_i;
+        }
+    }
+
+    /* ===========================================================
+     * Phase 5: 反向传播到投影层 → dL/d_W_proj[m], dL/d_b_proj[m]
+     *
+     *   latent[m][i] = Σ_j W_proj[m][i][j] * modality[m][j] + b_proj[m][i]
+     *   dL/d_W_proj[m][i][j] = dL/d_X[m*latent_dim + i] * modality[m][j]
+     *   dL/d_b_proj[m][i] = dL/d_X[m*latent_dim + i]
+     * =========================================================== */
+    for (int m = 0; m < n_mod; m++) {
+        if (!modality_data[m] || modality_dims[m] <= 0) continue;
+
+        int in_dim = state->input_dims[m];
+        float *dL_dlatent = dL_dX + m * latent;
+
+        for (int i = 0; i < latent; i++) {
+            float dL_dl_i = dL_dlatent[i];
+            if (fabsf(dL_dl_i) < 1e-30f) continue;
+
+            /* dL/d_b_proj[m][i] */
+            state->db_proj[m][i] = dL_dl_i;
+
+            /* dL/d_W_proj[m][i][j] */
+            for (int j = 0; j < in_dim; j++) {
+                state->dW_proj[m][i * in_dim + j] = dL_dl_i * modality_data[m][j];
+            }
+        }
+    }
+
+    /* ===========================================================
+     * Phase 6: 梯度裁剪 + SGD参数更新
+     *
+     * 更新顺序：U_fusion → W_fusion → b_fusion → W_proj[m] → b_proj[m]
+     * 使用梯度缓存区 (state->dW_fusion, state->dU_fusion, state->db_fusion,
+     *                  state->dW_proj[m], state->db_proj[m])
+     * =========================================================== */
+    float grad_clip = 1.0f;  /* 单步梯度裁剪阈值 */
+
+    /* 6a: 更新 U_fusion */
+    {
+        int u_size = hidden * hidden;
+        for (int i = 0; i < u_size; i++) {
+            state->dU_fusion[i] = dL_dU_acc[i];
+            /* 梯度裁剪 */
+            if (state->dU_fusion[i] >  grad_clip) state->dU_fusion[i] =  grad_clip;
+            if (state->dU_fusion[i] < -grad_clip) state->dU_fusion[i] = -grad_clip;
+            state->U_fusion[i] -= lr * state->dU_fusion[i];
+        }
+    }
+
+    /* 6b: 更新 W_fusion */
+    {
+        int w_size = hidden * concat;
+        for (int i = 0; i < w_size; i++) {
+            if (state->dW_fusion[i] >  grad_clip) state->dW_fusion[i] =  grad_clip;
+            if (state->dW_fusion[i] < -grad_clip) state->dW_fusion[i] = -grad_clip;
+            state->W_fusion[i] -= lr * state->dW_fusion[i];
+        }
+    }
+
+    /* 6c: 更新 b_fusion */
+    for (int i = 0; i < hidden; i++) {
+        state->db_fusion[i] = dL_db_acc[i];
+        if (state->db_fusion[i] >  grad_clip) state->db_fusion[i] =  grad_clip;
+        if (state->db_fusion[i] < -grad_clip) state->db_fusion[i] = -grad_clip;
+        state->b_fusion[i] -= lr * state->db_fusion[i];
+    }
+
+    /* 6d: 更新各模态投影权重 W_proj[m] 和偏置 b_proj[m] */
+    for (int m = 0; m < n_mod; m++) {
+        if (!modality_data[m] || modality_dims[m] <= 0) continue;
+
+        int in_dim = state->input_dims[m];
+        int w_size = latent * in_dim;
+
+        for (int i = 0; i < w_size; i++) {
+            if (state->dW_proj[m][i] >  grad_clip) state->dW_proj[m][i] =  grad_clip;
+            if (state->dW_proj[m][i] < -grad_clip) state->dW_proj[m][i] = -grad_clip;
+            state->W_proj[m][i] -= lr * state->dW_proj[m][i];
+        }
+        for (int i = 0; i < latent; i++) {
+            if (state->db_proj[m][i] >  grad_clip) state->db_proj[m][i] =  grad_clip;
+            if (state->db_proj[m][i] < -grad_clip) state->db_proj[m][i] = -grad_clip;
+            state->b_proj[m][i] -= lr * state->db_proj[m][i];
+        }
+    }
+
+    /* ===========================================================
+     * Phase 7: 清理所有临时缓冲区
+     * =========================================================== */
+    safe_free((void**)&dL_dh);
+    safe_free((void**)&dL_ds_gate);
+    safe_free((void**)&dL_dX);
+    for (int s = 0; s <= steps; s++) safe_free((void**)&h_snapshots[s]);
+    safe_free((void**)&h_snapshots);
+    for (int k = 0; k < n_mod; k++) safe_free((void**)&latents[k]);
+    safe_free((void**)&latents);
+    safe_free((void**)&X);
+    safe_free((void**)&gate);
+    safe_free((void**)&Uh);
+    safe_free((void**)&Uhpb);
+    safe_free((void**)&tanh_out);
+    safe_free((void**)&hadamard_out);
+    safe_free((void**)&dh);
+    safe_free((void**)&dL_dgate_acc);
+    safe_free((void**)&dL_dU_acc);
+    safe_free((void**)&dL_db_acc);
+    safe_free((void**)&dL_dtanh);
+    safe_free((void**)&dL_dUhpb);
+    safe_free((void**)&tanh_prime);
+    safe_free((void**)&temp_hidden);
+
     return 0;
 }
 

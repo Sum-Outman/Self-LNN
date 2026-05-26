@@ -584,11 +584,13 @@ static const char* cambricon_backend_get_error_string(void) {
     return g_cb_state.error_string;
 }
 
-static int cambricon_backend_memory_copy_to_device_async(GpuMemory* dst, const void* src, size_t size, GpuStream* stream) {
+/* P1-03修复: 寒武纪MLU无异步DMA引擎，异步接口实际为同步实现。
+ * 移除 _async 命名误导，重命名为 _sync 明确标识同步执行特性。 */
+static int cambricon_backend_memory_copy_to_device_sync(GpuMemory* dst, const void* src, size_t size, GpuStream* stream) {
     (void)stream; return cambricon_backend_memory_copy_to_device(dst, src, size);
 }
 
-static int cambricon_backend_memory_copy_from_device_async(void* dst, GpuMemory* src, size_t size, GpuStream* stream) {
+static int cambricon_backend_memory_copy_from_device_sync(void* dst, GpuMemory* src, size_t size, GpuStream* stream) {
     (void)stream; return cambricon_backend_memory_copy_from_device(dst, src, size);
 }
 
@@ -781,8 +783,8 @@ const GpuBackendInterface* cambricon_get_backend_interface(void) {
         .memory_copy_to_device = cambricon_backend_memory_copy_to_device,
         .memory_copy_from_device = cambricon_backend_memory_copy_from_device,
         .memory_copy_device_to_device = cambricon_backend_memory_copy_device_to_device,
-        .memory_copy_to_device_async = cambricon_backend_memory_copy_to_device_async,
-        .memory_copy_from_device_async = cambricon_backend_memory_copy_from_device_async,
+        .memory_copy_to_device_async = cambricon_backend_memory_copy_to_device_sync,
+        .memory_copy_from_device_async = cambricon_backend_memory_copy_from_device_sync,
         .kernel_create = cambricon_backend_kernel_create,
         .kernel_free = cambricon_backend_kernel_free,
         .kernel_set_arg = cambricon_backend_kernel_set_arg,
