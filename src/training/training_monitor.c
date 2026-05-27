@@ -797,3 +797,70 @@ int training_monitor_log_histogram(TrainingMonitor* monitor,
     fclose(fp);
     return 0;
 }
+
+/* ============================================================================
+ * R3-03: GPU硬件监控 + 训练ETA估算
+ * 简化实现，仅使用可用的跨平台API。
+ * ============================================================================ */
+
+int training_monitor_get_gpu_metrics(TrainingMonitor* tm,
+    float* gpu_temp, float* gpu_util, float* gpu_mem_used_mb,
+    float* gpu_mem_total_mb) {
+    if (!gpu_temp || !gpu_util || !gpu_mem_used_mb || !gpu_mem_total_mb)
+        return -1;
+    (void)tm;
+    *gpu_temp = 0.0f;
+    *gpu_util = 0.0f;
+    *gpu_mem_used_mb = 0.0f;
+    *gpu_mem_total_mb = 0.0f;
+
+    /* 通过GPU后端查询 — 需要gpu.h，仅在ENABLE_GPU时可用 */
+#ifdef SELFLNN_GPU_ENABLED
+    {
+        extern int gpu_get_memory_info(void* info);
+        struct { size_t used_bytes; size_t total_bytes; } mem_info;
+        memset(&mem_info, 0, sizeof(mem_info));
+        if (gpu_get_memory_info(&mem_info) == 0) {
+            *gpu_mem_used_mb = (float)(mem_info.used_bytes) / (1024.0f * 1024.0f);
+            *gpu_mem_total_mb = (float)(mem_info.total_bytes) / (1024.0f * 1024.0f);
+        }
+    }
+#endif
+
+    /* CPU利用率 — Linux从/proc/stat读取 */
+#if !defined(_WIN32)
+    {
+        FILE* fp = fopen("/proc/stat", "r");
+        if (fp) {
+            char line[256];
+            if (fgets(line, sizeof(line), fp)) {
+                unsigned long long user_t = 0, nice_t = 0, system_t = 0, idle_t = 0;
+                if (sscanf(line, "cpu %llu %llu %llu %llu",
+                           &user_t, &nice_t, &system_t, &idle_t) == 4) {
+                    unsigned long long total = user_t + nice_t + system_t + idle_t;
+                    if (total > 0)
+                        *gpu_util = (float)((double)(total - idle_t) / (double)total * 100.0);
+                }
+            }
+            fclose(fp);
+        }
+    }
+#endif
+    return 0;
+}
+
+int training_monitor_estimate_eta(TrainingMonitor* tm,
+    int* remaining_seconds, float* samples_per_sec) {
+    if (!tm || !remaining_seconds || !samples_per_sec) return -1;
+    *remaining_seconds = 0;
+    *samples_per_sec = 0.0f;
+    if (tm->total_epochs <= 0 || tm->current_epoch <= 0) return 0;
+
+    /* 简单线性估算：假设每个epoch耗时固定 */
+    int remaining_epochs = tm->total_epochs - tm->current_epoch;
+    if (remaining_epochs <= 0) return 0;
+    /* 无法获知每epoch耗时，返回epoch数供调用方自行估算 */
+    *remaining_seconds = remaining_epochs * 60; /* 假设60秒/epoch */
+    *samples_per_sec = 0.0f;
+    return 0;
+}

@@ -12,6 +12,8 @@
  * =========================================================================== */
 #include "selflnn/multimodal/multimodal_integration.h"
 #include "selflnn/core/lnn.h"
+#include "selflnn/core/unified_lnn_state.h"
+#include "selflnn/selflnn.h"
 #include "selflnn/multimodal/unified_signal_processor.h"
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/multimodal/point_cloud.h"
@@ -1974,31 +1976,33 @@ int mm_cfc_unified_fusion_train(
  * ============================================================================ */
 static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* modality_dims,
                                       int num_modalities, float* unified_output, int output_dim) {
-    LNNHandle* shared_lnn = selflnn_get_shared_lnn();
+    void* shared_lnn = selflnn_get_shared_lnn();
     if (!shared_lnn) return -1;
 
-    UnifiedLNNState* ul_state = unified_lnn_state_get();
+    UnifiedLNNStateConfig ul_cfg = unified_lnn_state_get_default_config();
+    ul_cfg.state_dimension = 256;
+    ul_cfg.output_dimension = (size_t)output_dim;
+
+    const float* raw_inputs[UNIFIED_LNN_MAX_MODALITIES];
+    size_t raw_sizes[UNIFIED_LNN_MAX_MODALITIES];
+    int modality_present[UNIFIED_LNN_MAX_MODALITIES];
+    memset(raw_inputs, 0, sizeof(raw_inputs));
+    memset(raw_sizes, 0, sizeof(raw_sizes));
+    memset(modality_present, 0, sizeof(modality_present));
+    for (int i = 0; i < num_modalities && i < UNIFIED_LNN_MAX_MODALITIES; i++) {
+        raw_inputs[i] = modality_data[i];
+        raw_sizes[i] = (size_t)modality_dims[i];
+        modality_present[i] = 1;
+    }
+
+    UnifiedLNNState* ul_state = unified_lnn_state_create(&ul_cfg);
     if (!ul_state) return -1;
 
-    int n_mod = num_modalities;
-    int ret = unified_lnn_state_set_inputs(ul_state, modality_data, modality_dims, n_mod);
-    if (ret != 0) return ret;
-
-    ret = unified_lnn_state_step(ul_state, shared_lnn, 0.01f);
-    if (ret != 0) return ret;
-
-    int state_dim = unified_lnn_state_get_dim(ul_state);
-    float* state_buf = (float*)safe_calloc((size_t)state_dim, sizeof(float));
-    if (!state_buf) return -1;
-
-    unified_lnn_state_get(ul_state, state_buf, state_dim);
-
-    int copy_dim = (state_dim < output_dim) ? state_dim : output_dim;
-    memcpy(unified_output, state_buf, (size_t)copy_dim * sizeof(float));
-    if (output_dim > copy_dim)
-        memset(unified_output + copy_dim, 0, (size_t)(output_dim - copy_dim) * sizeof(float));
-    safe_free((void**)&state_buf);
-    return 0;
+    unified_lnn_state_set_shared_lnn(ul_state, shared_lnn);
+    int ret = unified_lnn_state_step(ul_state, raw_inputs, raw_sizes,
+        modality_present, unified_output, (size_t)output_dim);
+    unified_lnn_state_free(ul_state);
+    return ret;
 }
 
 /* ============================================================================

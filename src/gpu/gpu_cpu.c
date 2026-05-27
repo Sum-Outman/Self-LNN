@@ -2311,14 +2311,125 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
         }
         break;
     }
-    case CPU_KERNEL_MATMUL:
-    case CPU_KERNEL_DENSE_FORWARD:
-    case CPU_KERNEL_L2_GRADIENT:
-    case CPU_KERNEL_CROSS_ENTROPY_GRADIENT:
-    case CPU_KERNEL_BATCH_NORM_FORWARD:
-    case CPU_KERNEL_BATCH_NORM_BACKWARD:
-    case CPU_KERNEL_ACTIVATION_FORWARD:
-    case CPU_KERNEL_ACTIVATION_BACKWARD:
+    case CPU_KERNEL_MATMUL: {
+        /* R5-GPU1修复: MATMUL/DENSE_FORWARD不再直通拷贝，路由到真实矩阵乘法
+         * 从arg_values读取M/N/K维度和A/B矩阵进行三重循环计算 */
+        if (k->arg_count >= 8) {
+            int M = (k->arg_count >= 3 && k->arg_values[2]) ? *(int*)k->arg_values[2] : 64;
+            int K = (k->arg_count >= 4 && k->arg_values[3]) ? *(int*)k->arg_values[3] : 64;
+            int N = (k->arg_count >= 5 && k->arg_values[4]) ? *(int*)k->arg_values[4] : 64;
+            const float* A = (const float*)k->arg_values[5];
+            const float* B = (const float*)k->arg_values[6];
+            float* C = (float*)k->arg_values[7];
+            int lda = (k->arg_count >= 9 && k->arg_values[8]) ? *(int*)k->arg_values[8] : K;
+            int ldb = (k->arg_count >= 10 && k->arg_values[9]) ? *(int*)k->arg_values[9] : N;
+            int ldc = (k->arg_count >= 11 && k->arg_values[10]) ? *(int*)k->arg_values[10] : N;
+            if (A && B && C && M > 0 && K > 0 && N > 0) {
+                for (int mi = 0; mi < M; mi++) {
+                    for (int ni = 0; ni < N; ni++) {
+                        float sum = 0.0f;
+                        for (int ki = 0; ki < K; ki++)
+                            sum += A[mi * lda + ki] * B[ki * ldb + ni];
+                        C[mi * ldc + ni] = sum;
+                    }
+                }
+            } else {
+                for (int i = 0; i < n; i++) output[i] = input[i];
+            }
+        } else {
+            for (int i = 0; i < n; i++) output[i] = input[i];
+        }
+        break;
+    }
+    case CPU_KERNEL_DENSE_FORWARD: {
+        /* 全连接前向：W*x + b */
+        if (k->arg_count >= 5) {
+            int in_dim = (k->arg_count >= 3 && k->arg_values[2]) ? *(int*)k->arg_values[2] : 64;
+            int out_dim = (k->arg_count >= 4 && k->arg_values[3]) ? *(int*)k->arg_values[3] : 64;
+            const float* W = (const float*)k->arg_values[4];
+            const float* b = (k->arg_count >= 6 && k->arg_values[5]) ? (const float*)k->arg_values[5] : NULL;
+            if (W && in_dim > 0 && out_dim > 0) {
+                for (int o = 0; o < out_dim && o < n; o++) {
+                    float sum = (b ? b[o] : 0.0f);
+                    for (int i = 0; i < in_dim; i++)
+                        sum += input[i] * W[o * in_dim + i];
+                    output[o] = sum;
+                }
+            } else {
+                for (int i = 0; i < n; i++) output[i] = input[i];
+            }
+        } else {
+            for (int i = 0; i < n; i++) output[i] = input[i];
+        }
+        break;
+    }
+    case CPU_KERNEL_L2_GRADIENT: {
+        /* L2梯度: d/dx (0.5*||x||²) = x */
+        for (int i = 0; i < n; i++) output[i] = input[i];
+        break;
+    }
+    case CPU_KERNEL_CROSS_ENTROPY_GRADIENT: {
+        /* CE梯度: dL/dx = pred - target，需要target作为额外参数 */
+        const float* target = (k->arg_count >= 3 && k->arg_values[2]) ? (const float*)k->arg_values[2] : NULL;
+        if (target) {
+            for (int i = 0; i < n; i++) {
+                float p = 1.0f / (1.0f + expf(-input[i]));
+                if (p < 1e-7f) p = 1e-7f; if (p > 1.0f - 1e-7f) p = 1.0f - 1e-7f;
+                output[i] = p - target[i];
+            }
+        } else {
+            for (int i = 0; i < n; i++) output[i] = 0.0f;
+        }
+        break;
+    }
+    case CPU_KERNEL_BATCH_NORM_FORWARD: {
+        /* 批归一化前向：y = gamma*(x-mean)/sqrt(var+eps) + beta */
+        float gamma = (k->arg_count >= 3 && k->arg_values[2]) ? *(float*)k->arg_values[2] : 1.0f;
+        float beta  = (k->arg_count >= 4 && k->arg_values[3]) ? *(float*)k->arg_values[3] : 0.0f;
+        float eps   = (k->arg_count >= 5 && k->arg_values[4]) ? *(float*)k->arg_values[4] : 1e-5f;
+        float mean = 0.0f, var = 0.0f;
+        for (int i = 0; i < n; i++) mean += input[i];
+        mean /= (float)(n + 1);
+        for (int i = 0; i < n; i++) { float d = input[i] - mean; var += d * d; }
+        var /= (float)(n + 1);
+        float inv_std = 1.0f / sqrtf(var + eps);
+        for (int i = 0; i < n; i++)
+            output[i] = gamma * (input[i] - mean) * inv_std + beta;
+        break;
+    }
+    case CPU_KERNEL_BATCH_NORM_BACKWARD: {
+        /* 批归一化反向：粗略梯度传递 */
+        for (int i = 0; i < n; i++) output[i] = input[i];
+        break;
+    }
+    case CPU_KERNEL_ACTIVATION_FORWARD: {
+        /* 激活函数前向：支持relu/sigmoid/tanh，通过arg_values[2]指定类型 */
+        int act_type = (k->arg_count >= 3 && k->arg_values[2]) ? *(int*)k->arg_values[2] : 0;
+        if (act_type == 0) { /* ReLU */
+            for (int i = 0; i < n; i++) output[i] = input[i] > 0.0f ? input[i] : 0.0f;
+        } else if (act_type == 1) { /* Sigmoid */
+            for (int i = 0; i < n; i++) output[i] = 1.0f / (1.0f + expf(-input[i]));
+        } else if (act_type == 2) { /* Tanh */
+            for (int i = 0; i < n; i++) output[i] = tanhf(input[i]);
+        } else { /* 默认ReLU */
+            for (int i = 0; i < n; i++) output[i] = input[i] > 0.0f ? input[i] : 0.0f;
+        }
+        break;
+    }
+    case CPU_KERNEL_ACTIVATION_BACKWARD: {
+        /* 激活函数反向 */
+        int act_type = (k->arg_count >= 3 && k->arg_values[2]) ? *(int*)k->arg_values[2] : 0;
+        if (act_type == 0) { /* ReLU grad */
+            for (int i = 0; i < n; i++) output[i] = input[i] > 0.0f ? output[i] : 0.0f;
+        } else if (act_type == 1) { /* Sigmoid grad: y*(1-y) */
+            for (int i = 0; i < n; i++) { float y = 1.0f/(1.0f+expf(-input[i])); output[i] = y*(1.0f-y); }
+        } else if (act_type == 2) { /* Tanh grad: 1-y² */
+            for (int i = 0; i < n; i++) { float y = tanhf(input[i]); output[i] = 1.0f - y*y; }
+        } else {
+            for (int i = 0; i < n; i++) output[i] = input[i] > 0.0f ? output[i] : 0.0f;
+        }
+        break;
+    }
     case CPU_KERNEL_PASS_THROUGH:
     default:
         for (int i = 0; i < n; i++) output[i] = input[i];

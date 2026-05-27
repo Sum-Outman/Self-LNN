@@ -2199,17 +2199,41 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
                                 cell->config.delta_t,
                                 cell->state->activation);
     } else if (cell->config.ode_solver_type == ODE_SOLVER_RHS) {
-        /* P2-041修复: 使用cfc_cell_compute_rhs进行直接RHS评估（前向欧拉步）
-         * 作为备选数值求解器，对动态系统进行单步欧拉积分 */
+        /* R3-07/M-001修复: 升级RHS求解器从前向欧拉到RK2(Heun方法)
+         * 二阶精度，每步2次RHS评估，显著优于欧拉法O(h)→O(h²) */
+        size_t hs = cell->config.hidden_size;
+        float dt = cell->config.delta_t;
         float* rhs = cell->state->noise_buffer;
+        float* k2_buf = (float*)safe_malloc(hs * sizeof(float)); /* 临时中间态缓冲区 */
+        if (!k2_buf) {
+            /* 内存不足回退到欧拉法 */
+            for (size_t i = 0; i < hs; i++) {
+                float new_h = cell->state->state[i] + dt * rhs[i];
+                if (isnan(new_h) || isinf(new_h)) new_h = cell->state->state[i];
+                cell->state->activation[i] = new_h;
+            }
+            return;
+        }
+        /* 第1步: k1 = f(t, y) * dt */
         cfc_cell_compute_rhs(cell, cell->state->input_buffer,
                             cell->state->state, rhs);
-        size_t hs = cell->config.hidden_size;
+        /* 构建中间态: y_mid = y + k1 */
         for (size_t i = 0; i < hs; i++) {
-            float new_h = cell->state->state[i] + cell->config.delta_t * rhs[i];
-            if (isnan(new_h) || isinf(new_h)) new_h = 0.0f;
+            k2_buf[i] = cell->state->state[i] + dt * rhs[i];
+            if (isnan(k2_buf[i]) || isinf(k2_buf[i])) k2_buf[i] = cell->state->state[i];
+        }
+        /* 第2步: k2 = f(t+dt, y_mid) * dt，使用k2_buf作为中间状态 */
+        float* k2_rhs = rhs; /* 重用rhs缓冲区存k2 */
+        cfc_cell_compute_rhs(cell, cell->state->input_buffer, k2_buf, k2_rhs);
+        /* Heun更新: y_new = y + 0.5*(k1 + k2) */
+        for (size_t i = 0; i < hs; i++) {
+            float k1 = dt * rhs[i];
+            float k2 = dt * k2_rhs[i];
+            float new_h = cell->state->state[i] + 0.5f * (k1 + k2);
+            if (isnan(new_h) || isinf(new_h)) new_h = cell->state->state[i];
             cell->state->activation[i] = new_h;
         }
+        safe_free((void**)&k2_buf);
     } else {
         cfc_closed_form_solution(cell,
                                 cell->state->input_buffer,

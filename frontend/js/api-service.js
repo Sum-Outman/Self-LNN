@@ -5216,42 +5216,6 @@ class ApiService {
         catch(e) { return { success: false, error: e.message }; }
     }
 
-    /* --- 编程工具 --- */
-    async programmingAnalyze(code, language) {
-        try { var r = await this.request('/programming/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, language:language||'c'}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async programmingGenerate(spec) {
-        try { var r = await this.request('/programming/generate', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(spec||{}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async programmingOptimize(code) {
-        try { var r = await this.request('/programming/optimize', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async programmingCompile(code, language) {
-        try { var r = await this.request('/programming/compile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, language:language||'c'}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async programmingExecute(code, language) {
-        try { var r = await this.request('/programming/execute', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, language:language||'c'}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async programmingStatus() {
-        try { var r = await this.request('/programming/status'); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-
-    /* --- 超参数搜索 --- */
-    async hyperparameterStart(params) {
-        try { var r = await this.request('/hyperparameter/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(params||{}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async hyperparameterStatus() {
-        try { var r = await this.request('/hyperparameter/status'); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-
     /* --- 系统管理 --- */
     async systemLogs(lines) {
         try { var r = await this.request('/system/logs?lines=' + (lines||100)); var d = await r.json(); return { success: true, data: d }; }

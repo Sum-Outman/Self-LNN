@@ -647,6 +647,16 @@ int backend_server_enable_feature(BackendServer* server,
 int backend_server_is_feature_enabled(BackendServer* server,
                                       FeatureType feature);
 
+/**
+ * @brief 获取后端服务器的机器人实例指针
+ *
+ * 供AGI后台循环获取机器人真实状态用于WebSocket推送。
+ *
+ * @param server 后端服务器句柄
+ * @return void* 机器人实例指针，未创建则返回NULL
+ */
+void* backend_server_get_robot(BackendServer* server);
+
 #ifdef __cplusplus
 }
 #endif

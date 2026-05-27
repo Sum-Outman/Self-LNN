@@ -3053,27 +3053,27 @@ LearningResult* knowledge_self_learn(KnowledgeBase* kb, const void* config, cons
              * 搜索subject相同的已有三元组，检测谓词冲突 */
             {
                 int has_contradiction = 0;
-                for (size_t chk = 0; chk < kb->entry_count && chk < 200; chk++) {
-                    KnowledgeInternalEntry* exist = &kb->entries[chk];
-                    if (exist->is_active && exist->entry.subject &&
-                        strcmp(exist->entry.subject, new_entry.subject) == 0) {
+                for (size_t chk = 0; chk < kb->size && chk < 200; chk++) {
+                    InternalKnowledgeEntry* existing = &kb->entries[chk];
+                    if (existing->entry.subject &&
+                        strcmp(existing->entry.subject, new_entry.subject) == 0) {
                         /* 相同主语，检查谓词是否冲突 */
-                        if (exist->entry.predicate && new_entry.predicate) {
+                        if (existing->entry.predicate && new_entry.predicate) {
                             /* 简单冲突检测：同主语+同谓词+不同宾语 = 可能的矛盾 */
-                            if (strcmp(exist->entry.predicate, new_entry.predicate) == 0) {
-                                if (exist->entry.object && new_entry.object &&
-                                    strcmp(exist->entry.object, new_entry.object) != 0) {
+                            if (strcmp(existing->entry.predicate, new_entry.predicate) == 0) {
+                                if (existing->entry.object && new_entry.object &&
+                                    strcmp(existing->entry.object, new_entry.object) != 0) {
                                     /* 同一谓词下不同宾语，可能冲突 */
-                                    if (exist->entry.confidence >= CONFIDENCE_MEDIUM) {
+                                    if (existing->entry.confidence >= CONFIDENCE_MEDIUM) {
                                         has_contradiction = 1;
                                         break;
                                     }
                                 }
                             }
                             /* 反向谓词检测：如 "是" vs "不是" */
-                            if ((strcmp(exist->entry.predicate, "是") == 0 &&
+                            if ((strcmp(existing->entry.predicate, "是") == 0 &&
                                  strcmp(new_entry.predicate, "不是") == 0) ||
-                                (strcmp(exist->entry.predicate, "属于") == 0 &&
+                                (strcmp(existing->entry.predicate, "属于") == 0 &&
                                  strcmp(new_entry.predicate, "不属于") == 0)) {
                                 has_contradiction = 1;
                                 break;

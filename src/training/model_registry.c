@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <time.h>
 #include <sys/stat.h>
 
@@ -195,6 +196,140 @@ int mr_trace_lineage(const ModelRegistry* mr, int model_id, int version_id, int*
                 if (e->versions[i].version_id == parent) { cur = &e->versions[i]; break; }
     }
     return count;
+}
+
+/* ============================================================================
+ * R4-01: 模型注册表持久化 — 二进制文件save/load
+ * 此前model_registry.c完全没有持久化功能(严重缺失)。
+ * 重启后所有模型版本注册信息丢失。
+ * ============================================================================ */
+
+#define MR_FILE_MAGIC 0x4D524547  /* "MREG" */
+#define MR_FILE_VERSION 1
+
+int mr_save(ModelRegistry* mr, const char* filepath) {
+    if (!mr || !filepath) return -1;
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) return -1;
+
+    /* 文件头 */
+    uint32_t magic = MR_FILE_MAGIC;
+    uint32_t version = MR_FILE_VERSION;
+    int32_t model_count = mr->model_count;
+    fwrite(&magic, 4, 1, fp);
+    fwrite(&version, 4, 1, fp);
+    fwrite(&model_count, 4, 1, fp);
+
+    for (int m = 0; m < model_count; m++) {
+        ModelEntry* entry = &mr->models[m];
+        fwrite(&entry->model_id, 4, 1, fp);
+        fwrite(entry->name, sizeof(entry->name), 1, fp);
+        fwrite(entry->description, sizeof(entry->description), 1, fp);
+        fwrite(entry->task_type, sizeof(entry->task_type), 1, fp);
+        fwrite(&entry->version_count, 4, 1, fp);
+        fwrite(&entry->version_capacity, 4, 1, fp);
+        fwrite(&entry->current_version, 4, 1, fp);
+        fwrite(&entry->stable_version, 4, 1, fp);
+        fwrite(&entry->ab_test_active, 4, 1, fp);
+        fwrite(&entry->ab_version_a, 4, 1, fp);
+        fwrite(&entry->ab_version_b, 4, 1, fp);
+        fwrite(&entry->ab_split_ratio, 4, 1, fp);
+
+        for (int v = 0; v < entry->version_count; v++) {
+            ModelVersion* ver = &entry->versions[v];
+            fwrite(&ver->version_id, 4, 1, fp);
+            fwrite(&ver->model_id, 4, 1, fp);
+            fwrite(ver->name, sizeof(ver->name), 1, fp);
+            fwrite(ver->file_path, sizeof(ver->file_path), 1, fp);
+            fwrite(&ver->train_loss, 4, 1, fp);
+            fwrite(&ver->val_loss, 4, 1, fp);
+            fwrite(&ver->accuracy, 4, 1, fp);
+            fwrite(&ver->f1_score, 4, 1, fp);
+            fwrite(&ver->parameter_count, 8, 1, fp);
+            fwrite(&ver->model_size_bytes, 8, 1, fp);
+            fwrite(&ver->created_at, 8, 1, fp);
+            fwrite(&ver->deployed_at, 8, 1, fp);
+            fwrite(&ver->is_deployed, 4, 1, fp);
+            fwrite(&ver->is_stable, 4, 1, fp);
+            fwrite(ver->training_config, sizeof(ver->training_config), 1, fp);
+            fwrite(&ver->parent_version, 4, 1, fp);
+            fwrite(ver->notes, sizeof(ver->notes), 1, fp);
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+int mr_load(ModelRegistry* mr, const char* filepath) {
+    if (!mr || !filepath) return -1;
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return -1;
+
+    uint32_t magic = 0, version = 0;
+    int32_t model_count = 0;
+    if (fread(&magic, 4, 1, fp) != 1 || magic != MR_FILE_MAGIC) {
+        fclose(fp); return -1;
+    }
+    if (fread(&version, 4, 1, fp) != 1 || version != MR_FILE_VERSION) {
+        fclose(fp); return -1;
+    }
+    if (fread(&model_count, 4, 1, fp) != 1 || model_count < 0 || model_count > MR_MAX_MODELS) {
+        fclose(fp); return -1;
+    }
+
+    /* 清空现有数据 */
+    for (int m = 0; m < mr->model_count; m++) {
+        if (mr->models[m].versions) {
+            safe_free((void**)&mr->models[m].versions);
+        }
+    }
+    mr->model_count = 0;
+
+    for (int m = 0; m < model_count; m++) {
+        ModelEntry* entry = &mr->models[mr->model_count];
+        memset(entry, 0, sizeof(ModelEntry));
+        if (fread(&entry->model_id, 4, 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(entry->name, sizeof(entry->name), 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(entry->description, sizeof(entry->description), 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(entry->task_type, sizeof(entry->task_type), 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&entry->version_count, 4, 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&entry->version_capacity, 4, 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&entry->current_version, 4, 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&entry->stable_version, 4, 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&entry->ab_test_active, 4, 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&entry->ab_version_a, 4, 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&entry->ab_version_b, 4, 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&entry->ab_split_ratio, 4, 1, fp) != 1) { fclose(fp); return -1; }
+
+        if (entry->version_count > 0 && entry->version_count <= MR_MAX_VERSIONS) {
+            entry->version_capacity = entry->version_count;
+            entry->versions = (ModelVersion*)safe_calloc((size_t)entry->version_capacity, sizeof(ModelVersion));
+            if (!entry->versions) { fclose(fp); return -1; }
+            for (int v = 0; v < entry->version_count; v++) {
+                ModelVersion* ver = &entry->versions[v];
+                if (fread(&ver->version_id, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->model_id, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(ver->name, sizeof(ver->name), 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(ver->file_path, sizeof(ver->file_path), 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->train_loss, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->val_loss, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->accuracy, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->f1_score, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->parameter_count, 8, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->model_size_bytes, 8, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->created_at, 8, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->deployed_at, 8, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->is_deployed, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->is_stable, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(ver->training_config, sizeof(ver->training_config), 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(&ver->parent_version, 4, 1, fp) != 1) { fclose(fp); return -1; }
+                if (fread(ver->notes, sizeof(ver->notes), 1, fp) != 1) { fclose(fp); return -1; }
+            }
+        }
+        mr->model_count++;
+    }
+    fclose(fp);
+    return 0;
 }
 
 int mr_get_stats(const ModelRegistry* mr, ModelRegistryStats* stats) {

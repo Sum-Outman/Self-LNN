@@ -1178,6 +1178,8 @@ struct DeepParticleFilter {
     float* cfc_tau;
 };
 
+typedef struct DeepParticleFilter DeepParticleFilter;
+
 static DeepParticleFilter* deep_particle_filter_create(const ParticleFilterConfig* config) {
     if (!config) return NULL;
     DeepParticleFilter* pf = (DeepParticleFilter*)safe_calloc(1, sizeof(DeepParticleFilter));
@@ -1397,6 +1399,8 @@ struct DeepInfoFilter {
     /* 工作缓冲区 */
     float* buffer;
 };
+
+typedef struct DeepInfoFilter DeepInfoFilter;
 
 static DeepInfoFilter* deep_info_filter_create(const InfoFilterConfig* config) {
     if (!config) return NULL;

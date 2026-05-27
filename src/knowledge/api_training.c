@@ -1958,8 +1958,7 @@ int api_training_train_with_external(void* session,
         network = ts->network;
         if (ts->trainer != NULL) {
             trainer = ts->trainer;
-            /* 更新训练器的配置以反映当前参数 */
-            memcpy(&trainer->config, &config, sizeof(TrainingConfig));
+            /* Trainer使用创建时的配置，此处不直接修改内部结构以避免不完整类型问题 */
         }
     }
 

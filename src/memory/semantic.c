@@ -371,7 +371,7 @@ int semantic_memory_generalize(SemanticMemory* memory, const char* concept_id,
                 generalized_concept[i] = original_concept[i];
             }
         }
-        free(cov_matrix); free(eigen_vecs); free(eigen_vals);
+        safe_free((void**)&cov_matrix); safe_free((void**)&eigen_vecs); safe_free((void**)&eigen_vals);
     } else {
         /* 回退：按方差缩放 */
         float mean = 0.0f, var = 0.0f;
@@ -386,7 +386,7 @@ int semantic_memory_generalize(SemanticMemory* memory, const char* concept_id,
             float factor = (diff * diff > var * 0.3f) ? (0.7f + 0.3f * keep_ratio) : (keep_ratio * 0.5f);
             generalized_concept[i] = mean + diff * factor;
         }
-        free(cov_matrix); free(eigen_vecs); free(eigen_vals);
+        safe_free((void**)&cov_matrix); safe_free((void**)&eigen_vecs); safe_free((void**)&eigen_vals);
     }
     
     safe_free((void**)&original_concept);

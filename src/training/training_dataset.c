@@ -981,3 +981,80 @@ int dataset_set_weights(TrainingDataset* ds, const float* weights, size_t n) {
     memcpy(ds->weights, weights, n * sizeof(float));
     return 0;
 }
+
+/* ============================================================================
+ * R3-06修复: dataset_split — 数据集划分为训练/验证/测试集
+ * 此前training_dataset.c完全没有train/val/test划分功能(严重缺失)。
+ * 使用Fisher-Yates洗牌后按比例分割。
+ * ============================================================================ */
+
+int dataset_split(TrainingDataset* ds,
+    float train_ratio, float val_ratio, float test_ratio,
+    TrainingDataset** out_train, TrainingDataset** out_val,
+    TrainingDataset** out_test) {
+    if (!ds || !out_train || !out_val || !out_test) return -1;
+
+    size_t n = ds->header.num_samples;
+    if (n < 3) return -1;
+
+    float total_ratio = train_ratio + val_ratio + test_ratio;
+    if (total_ratio < 0.99f || total_ratio > 1.01f) {
+        train_ratio = 0.7f; val_ratio = 0.15f; test_ratio = 0.15f;
+    }
+    if (train_ratio < 0.01f) train_ratio = 0.01f;
+
+    int* indices = (int*)safe_malloc(n * sizeof(int));
+    if (!indices) return -1;
+    for (size_t i = 0; i < n; i++) indices[i] = (int)i;
+    for (size_t i = n - 1; i > 0; i--) {
+        size_t j = (size_t)(secure_random_float() * (float)(i + 1));
+        if (j > i) j = i;
+        int tmp = indices[i]; indices[i] = indices[j]; indices[j] = tmp;
+    }
+
+    size_t train_count = (size_t)((float)n * train_ratio);
+    size_t val_count   = (size_t)((float)n * val_ratio);
+    size_t test_count  = n - train_count - val_count;
+    if (train_count < 1) { train_count = 1; test_count = (n > 2) ? n - 2 : 1; val_count = (n > 2) ? 1 : 0; }
+    if (val_count < 1 && val_ratio > 0.01f) { val_count = 1; test_count--; }
+    if (test_count < 1) test_count = (n > train_count + val_count) ? n - train_count - val_count : 0;
+
+    size_t in_dim = ds->header.input_dim;
+    size_t out_dim = ds->header.output_dim;
+
+    *out_train = dataset_create("train_split", train_count, in_dim, out_dim);
+    *out_val   = dataset_create("val_split", val_count, in_dim, out_dim);
+    *out_test  = dataset_create("test_split", test_count, in_dim, out_dim);
+    if (!*out_train || !*out_val || !*out_test) {
+        if (*out_train) { dataset_free(*out_train); *out_train = NULL; }
+        if (*out_val)   { dataset_free(*out_val);   *out_val   = NULL; }
+        if (*out_test)  { dataset_free(*out_test);  *out_test  = NULL; }
+        safe_free((void**)&indices);
+        return -1;
+    }
+
+    size_t sample_bytes = in_dim * sizeof(float);
+    size_t output_bytes = out_dim * sizeof(float);
+    for (size_t s = 0; s < train_count; s++) {
+        size_t src = (size_t)indices[s];
+        memcpy((*out_train)->inputs + s * in_dim, ds->inputs + src * in_dim, sample_bytes);
+        memcpy((*out_train)->outputs + s * out_dim, ds->outputs + src * out_dim, output_bytes);
+    }
+    for (size_t s = 0; s < val_count; s++) {
+        size_t src = (size_t)indices[train_count + s];
+        memcpy((*out_val)->inputs + s * in_dim, ds->inputs + src * in_dim, sample_bytes);
+        memcpy((*out_val)->outputs + s * out_dim, ds->outputs + src * out_dim, output_bytes);
+    }
+    for (size_t s = 0; s < test_count; s++) {
+        size_t src = (size_t)indices[train_count + val_count + s];
+        memcpy((*out_test)->inputs + s * in_dim, ds->inputs + src * in_dim, sample_bytes);
+        memcpy((*out_test)->outputs + s * out_dim, ds->outputs + src * out_dim, output_bytes);
+    }
+
+    (*out_train)->header.num_samples = (uint32_t)train_count;
+    (*out_val)->header.num_samples   = (uint32_t)val_count;
+    (*out_test)->header.num_samples  = (uint32_t)test_count;
+
+    safe_free((void**)&indices);
+    return 0;
+}

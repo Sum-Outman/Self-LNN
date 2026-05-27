@@ -27,7 +27,8 @@ SR3DReconstructor* sr3d_create(void) {
     sr->disparity_buffer = NULL;
     sr->disp_size = 0;
     /* 创建SDE增强处理器作为可选增强路径 */
-    sr->sde_handler = sde_create();
+    SDEStereoConfig sde_cfg = sde_get_default_config();
+    sr->sde_handler = sde_create(&sde_cfg);
     return sr;
 }
 
@@ -79,7 +80,7 @@ int sr3d_compute_dense_disparity(SR3DReconstructor* sr, const float* left, const
     /* S-NEW-1: 优先使用SDE增强处理器（SGM半全局匹配）
      * 比Census+Hamming匹配提供更好的视差连续性和边缘保持 */
     if (sr->sde_handler) {
-        int sde_ret = sde_compute_disparity(sr->sde_handler, left, right, w, h, disparity);
+        int sde_ret = sde_compute_disparity(sr->sde_handler, left, right, w, h, 3, disparity, NULL);
         if (sde_ret == 0) return 0;
         /* SDE失败时回退到Census匹配 */
     }

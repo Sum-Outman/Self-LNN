@@ -1116,11 +1116,11 @@ int ontology_evolution_rollback(OntologyEvolution* evo, int version) {
 
     OntVersionSnapshot* snap = &evo->snapshots[snap_idx];
 
-    /* 构建新本体 */
+    /* R5-M007修复: 扩展回滚解析以恢复公理关系
+     * 原实现仅重建类/属性/实例名称，丢失所有公理(子类/等价/不相交/定义域/值域等)。
+     * 现在解析序列化中的 ;axioom_type:related_id 片段并调用 ontology_add_axiom 恢复。 */
     Ontology* new_ont = ontology_create(evo->ontology->name, evo->ontology->description);
     if (!new_ont) return -1;
-
-    /* 解析序列化数据 */
     const char* data = snap->serialized;
     size_t len = snap->serialized_len;
     const char* end = data + len;
@@ -1131,22 +1131,76 @@ int ontology_evolution_rollback(OntologyEvolution* evo, int version) {
         if (!nl) break;
         size_t line_len = nl - line;
         if (line_len > 2) {
-            char line_copy[1024] = {0};
-            size_t copy_len = line_len < 1023 ? line_len : 1023;
+            char line_copy[2048] = {0};
+            size_t copy_len = line_len < 2047 ? line_len : 2047;
             memcpy(line_copy, line, copy_len);
 
             char type = line_copy[0];
             if (type == 'C' || type == 'P' || type == 'I') {
                 int elem_id = 0;
                 char name_str[256] = {0};
-                if (sscanf(line_copy, "%*c:%d:%255s", &elem_id, name_str) >= 1) {
+                if (sscanf(line_copy, "%*c:%d:%255[^;\n]", &elem_id, name_str) >= 1) {
                     if (type == 'C') ontology_add_class(new_ont, name_str, NULL);
                     else if (type == 'P') ontology_add_object_property(new_ont, name_str, NULL, NULL, NULL);
                     else if (type == 'I') ontology_add_individual(new_ont, name_str, NULL);
                 }
+                /* M-007修复: 解析 ;axioom_type:rel_id 公理片段 */
+                const char* semi = strchr(line_copy, ';');
+                while (semi) {
+                    int ax_type = 0, rel_id = -1;
+                    if (sscanf(semi, ";%d:%d", &ax_type, &rel_id) == 2 && ax_type >= 0 && rel_id >= 0) {
+                        /* 延迟添加公理：先记录，等所有元素创建后再统一添加 */
+                    }
+                    semi = strchr(semi + 1, ';');
+                }
             }
         }
         line = nl + 1;
+    }
+
+    /* M-007修复: 第二轮遍历-在所有元素创建后添加公理 */
+    {
+        const char* data2 = snap->serialized;
+        const char* line2 = data2;
+        const char* end2 = data2 + snap->serialized_len;
+        while (line2 < end2) {
+            const char* nl2 = strchr(line2, '\n');
+            if (!nl2) break;
+            size_t line_len2 = nl2 - line2;
+            if (line_len2 > 2 && (line2[0] == 'C' || line2[0] == 'P' || line2[0] == 'I')) {
+                char lcopy[2048] = {0};
+                memcpy(lcopy, line2, line_len2 < 2047 ? line_len2 : 2047);
+                int elem_id = 0;
+                sscanf(lcopy, "%*c:%d:", &elem_id);
+                /* 查找对应元素 */
+                OntElement* subj = NULL;
+                if (line2[0] == 'C' && elem_id < new_ont->class_count)
+                    subj = new_ont->classes[elem_id];
+                else if (line2[0] == 'P' && elem_id < new_ont->property_count)
+                    subj = new_ont->properties[elem_id];
+                else if (line2[0] == 'I' && elem_id < new_ont->individual_count)
+                    subj = new_ont->individuals[elem_id];
+                if (subj) {
+                    const char* semi2 = strchr(lcopy, ';');
+                    while (semi2) {
+                        int ax_type = 0, rel_id = -1;
+                        if (sscanf(semi2, ";%d:%d", &ax_type, &rel_id) == 2 && ax_type >= 0) {
+                            OntElement* obj = NULL;
+                            if (rel_id >= 0 && rel_id < new_ont->class_count)
+                                obj = new_ont->classes[rel_id];
+                            if (!obj && rel_id >= 0 && rel_id < new_ont->property_count)
+                                obj = new_ont->properties[rel_id];
+                            if (!obj && rel_id >= 0 && rel_id < new_ont->individual_count)
+                                obj = new_ont->individuals[rel_id];
+                            if (obj && ax_type >= AXIOM_SUBCLASS && ax_type <= AXIOM_VALUE_RESTRICTION)
+                                ontology_add_axiom(new_ont, (OntAxiomType)ax_type, subj, obj, 1.0f);
+                        }
+                        semi2 = strchr(semi2 + 1, ';');
+                    }
+                }
+            }
+            line2 = nl2 + 1;
+        }
     }
 
     /* 替换本体 */

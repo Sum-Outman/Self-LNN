@@ -385,14 +385,14 @@ static int gr_load_from_adjacency_list(GraphReasoner* reasoner) {
         }
 
         /* ZSFWS-M013修复: 从邻接表出边加载关系
-         * 使用adjacency_list_get_out_neighbors获取出邻居节点ID
-         * 边的语义为"adjacent"关系类型 */
-        int* out_neighbors = NULL;
-        /* ZSFBUILD: adjacency_list_get_out_neighbors传NULL作为output参数 */
+         * M-003修复: adjacency_list_get_out_neighbors需要int*缓冲区，
+         * 不能将int**强转为int*传入。使用栈分配缓冲区替代。 */
+        int out_neighbors_buf[64];
+        memset(out_neighbors_buf, 0, sizeof(out_neighbors_buf));
         int out_cnt = adjacency_list_get_out_neighbors(reasoner->adjacency_list, i,
-                                                        (int*)(&out_neighbors), NULL, 0);
-        for (int oe = 0; oe < out_cnt && out_neighbors; oe++) {
-            int tgt_id = out_neighbors[oe];
+                                                        out_neighbors_buf, NULL, 64);
+        for (int oe = 0; oe < out_cnt && oe < 64; oe++) {
+            int tgt_id = out_neighbors_buf[oe];
             int cfc_rel_id = cfc_embed_add_relation(reasoner->embed_state, "adjacent");
             if (cfc_rel_id >= 0) {
                 int tgt_cfc = reasoner->entity_to_cfc_id[tgt_id];

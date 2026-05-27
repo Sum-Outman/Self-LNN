@@ -123,7 +123,7 @@ MultimodalProcessor* multimodal_processor_create(const MultimodalConfig* config)
         ird_cfg.patch_size = 16;
         ird_cfg.num_parts = 8;
         ird_cfg.discriminative_threshold = 0.5f;
-        ird_cfg.num_classify_classes = 100;
+        ird_cfg.num_fine_categories = 100;
         processor->ird_classifier = ird_fine_classifier_create(&ird_cfg);
     }
 

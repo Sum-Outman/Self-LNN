@@ -154,21 +154,89 @@ static int rank_selection(const EvolutionPopulation* pop, unsigned int* rng) {
         return 0;
     }
 
-    for (size_t i = 0; i < pop->size; i++) {
-        ranks[i] = (int)i;
-        sorted_fitness[i] = pop->individuals[i].fitness;
-    }
-
-    for (size_t i = 0; i < pop->size; i++) {
-        for (size_t j = i + 1; j < pop->size; j++) {
-            if (sorted_fitness[j] < sorted_fitness[i]) {
-                float tmpf = sorted_fitness[i];
-                sorted_fitness[i] = sorted_fitness[j];
-                sorted_fitness[j] = tmpf;
-                int tmpi = ranks[i];
-                ranks[i] = ranks[j];
-                ranks[j] = tmpi;
+    /* M-006修复: 使用qsort替代冒泡排序O(n²)→O(n log n)
+     * 使用简单插入排序处理小数组(<50)，大数组用qsort+pair结构 */
+    {
+        typedef struct { float fitness; int idx; } FitRank;
+        size_t n = pop->size;
+        /* 小种群直接用插入排序O(n²)但常数小，大种群用qsort */
+        if (n <= 50) {
+            for (size_t i = 0; i < n; i++) {
+                ranks[i] = (int)i;
+                sorted_fitness[i] = pop->individuals[i].fitness;
             }
+            for (size_t i = 1; i < n; i++) {
+                float key_f = sorted_fitness[i];
+                int key_r = ranks[i];
+                size_t j = i;
+                while (j > 0 && sorted_fitness[j - 1] > key_f) {
+                    sorted_fitness[j] = sorted_fitness[j - 1];
+                    ranks[j] = ranks[j - 1];
+                    j--;
+                }
+                sorted_fitness[j] = key_f;
+                ranks[j] = key_r;
+            }
+        } else {
+            FitRank* pairs = (FitRank*)safe_malloc(n * sizeof(FitRank));
+            if (!pairs) {
+                safe_free((void**)&ranks);
+                safe_free((void**)&sorted_fitness);
+                return 0;
+            }
+            for (size_t i = 0; i < n; i++) {
+                pairs[i].fitness = pop->individuals[i].fitness;
+                pairs[i].idx = (int)i;
+            }
+            /* 手动实现堆排序（不依赖qsort），O(n log n)且无需比较函数指针 */
+            {
+                size_t heap_size = n;
+                /* 建堆 */
+                {
+                    size_t i_start = n / 2;
+                    size_t i_local = i_start;
+                    do {
+                        if (i_local == (size_t)(-1)) break;
+                        size_t root = i_local;
+                        while (root * 2 + 1 < heap_size) {
+                            size_t child = root * 2 + 1;
+                            if (child + 1 < heap_size &&
+                                pairs[child].fitness < pairs[child + 1].fitness)
+                                child++;
+                            if (pairs[root].fitness >= pairs[child].fitness) break;
+                            FitRank tmp = pairs[root];
+                            pairs[root] = pairs[child];
+                            pairs[child] = tmp;
+                            root = child;
+                        }
+                        i_local--;
+                    } while (i_local + 1 > 0);
+                }
+                /* 排序 */
+                while (heap_size > 1) {
+                    heap_size--;
+                    FitRank tmp = pairs[0];
+                    pairs[0] = pairs[heap_size];
+                    pairs[heap_size] = tmp;
+                    size_t root = 0;
+                    while (root * 2 + 1 < heap_size) {
+                        size_t child = root * 2 + 1;
+                        if (child + 1 < heap_size &&
+                            pairs[child].fitness < pairs[child + 1].fitness)
+                            child++;
+                        if (pairs[root].fitness >= pairs[child].fitness) break;
+                        tmp = pairs[root];
+                        pairs[root] = pairs[child];
+                        pairs[child] = tmp;
+                        root = child;
+                    }
+                }
+            }
+            for (size_t i = 0; i < n; i++) {
+                ranks[i] = pairs[i].idx;
+                sorted_fitness[i] = pairs[i].fitness;
+            }
+            safe_free((void**)&pairs);
         }
     }
 

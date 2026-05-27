@@ -94,6 +94,10 @@ int mr_trace_lineage(const ModelRegistry* mr, int model_id, int version_id, int*
 int mr_get_stats(const ModelRegistry* mr, ModelRegistryStats* stats);
 int mr_list_models(const ModelRegistry* mr, int* model_ids, int max_count);
 
+/* R4-01: 模型注册表持久化 — 此前完全没有save/load，重启后所有注册信息丢失 */
+int mr_save(ModelRegistry* mr, const char* filepath);
+int mr_load(ModelRegistry* mr, const char* filepath);
+
 #ifdef __cplusplus
 }
 #endif

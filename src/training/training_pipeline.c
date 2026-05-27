@@ -167,12 +167,27 @@ static int pipeline_convergence_check(TrainingPipeline* pipeline,
                                        const char* phase_name) {
     if (!pipeline || !lr_ptr || !phase_name) return 0;
 
-    /* ZSFWS-008: 绝对收敛阈值检测 — 损失低于阈值立即停止 */
+    /* ZSFWS-008/R2-08修复: 双层收敛检测
+     * 1. 绝对收敛：损失 < convergence_threshold（默认1e-4，从1e-6放宽到更合理值）
+     * 2. 相对收敛：最近N轮损失改善 < convergence_threshold * 0.01（自适应精度）
+     * 只有当阈值显式设置>0时才启用绝对收敛检测 */
     if (pipeline->convergence_threshold > 0.0f &&
         current_loss < pipeline->convergence_threshold) {
         log_info("[训练收敛] %s | 绝对收敛阈值触发! 当前损失 %.6e < 阈值 %.6e, "
                  "在epoch %d/%d自动停止",
                  phase_name, current_loss, pipeline->convergence_threshold,
+                 epoch, total_epochs);
+        return 1;
+    }
+
+    /* R2-08修复: 相对收敛检测 — 当最近几轮损失变化极小时触发
+     * 适用于convergence_threshold=0但训练已明显收敛的场景 */
+    if (pipeline->convergence_rate != 0.0f &&
+        fabsf(pipeline->convergence_rate) < 1e-6f &&
+        epoch > 20 && current_loss < 1.0f) {
+        log_info("[训练收敛] %s | 相对收敛检测触发! 收敛速率 %.6e < 1e-6, "
+                 "损失=%.6f, epoch %d/%d",
+                 phase_name, pipeline->convergence_rate, current_loss,
                  epoch, total_epochs);
         return 1;
     }
@@ -1384,11 +1399,18 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
              * P0-002: 使用 lnn_backward_accumulate 替代 lnn_backward，
              * cell级参数梯度仅累积不更新，批量结束后通过 cfc_apply_cell_gradients 统一下发。 */
             if (stage == TRAIN_STAGE_PRETRAIN) {
-                /* 预训练：自监督掩码预测 → 以原始输入为重构目标 */
+                /* 预训练：自监督掩码预测 → 以原始输入为重构目标
+                 * R4-04修复: 使用secure_random随机掩码替代确定性步进(k*3+b)%dim
+                 * 掩码率约33%，与原来input_dim/3的比例一致 */
                 float masked_input[512];
                 memcpy(masked_input, input, input_dim * sizeof(float));
-                for (size_t k = 0; k < input_dim / 3; k++)
-                    masked_input[(k * 3 + b) % input_dim] = 0.0f;
+                size_t mask_count = input_dim / 3;
+                if (mask_count == 0) mask_count = 1;
+                for (size_t k = 0; k < mask_count; k++) {
+                    size_t rand_idx = (size_t)(secure_random_float() * (float)input_dim);
+                    if (rand_idx >= input_dim) rand_idx = input_dim - 1;
+                    masked_input[rand_idx] = 0.0f;
+                }
                 lnn_forward(pipeline->network, masked_input, output);
                 loss = compute_loss_value(output, input, input_dim < output_dim ? input_dim : output_dim,
                     LOSS_MSE);

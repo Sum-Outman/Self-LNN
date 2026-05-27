@@ -167,6 +167,13 @@ int early_stopping_should_stop(const EarlyStopping* es);
 void early_stopping_reset(EarlyStopping* es);
 float early_stopping_get_best(const EarlyStopping* es);
 
+/* R9-A修复: 补充两个在.c中已实现但头文件缺失声明的函数 */
+int training_monitor_get_gpu_metrics(TrainingMonitor* tm,
+    float* gpu_temp, float* gpu_util, float* gpu_mem_used_mb,
+    float* gpu_mem_total_mb);
+int training_monitor_estimate_eta(TrainingMonitor* tm,
+    int* remaining_seconds, float* samples_per_sec);
+
 #ifdef __cplusplus
 }
 #endif

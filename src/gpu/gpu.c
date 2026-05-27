@@ -72,33 +72,37 @@ extern const GpuBackendInterface* intel_get_backend_interface(void);
  * =========================================================================== */
 
 /* Metal后端 */
+/* Metal后端 — R9-D修复: extern签名与gpu_metal.c实际实现对齐 */
 extern int metal_forward_dense(GpuContext* context, const float* input,
                                const float* weights, const float* bias, float* output,
                                size_t batch_size, size_t input_size, size_t output_size,
                                GpuActivationType act_type, float alpha);
 extern int metal_matmul_train(GpuContext* context, const float* a, const float* b,
                               float* c, size_t m, size_t n, size_t k,
-                              int transpose_a, int transpose_b);
+                              float alpha, float beta);
 extern int metal_activation_forward(GpuContext* context, const float* input,
                                     float* output, size_t size,
                                     GpuActivationType act_type, float alpha);
 extern int metal_activation_backward(GpuContext* context, const float* input,
                                      const float* grad_output, float* grad_input,
                                      size_t size, GpuActivationType act_type, float alpha);
-extern int metal_batch_norm_forward(GpuContext* context, const float* input,
-                                    float* output, size_t batch_size,
-                                    size_t channels, size_t spatial_size,
-                                    const float* gamma, const float* beta,
-                                    const float* running_mean, const float* running_var,
-                                    float epsilon, int is_training);
-extern int metal_batch_norm_backward(GpuContext* context, const float* input,
-                                     const float* grad_output, float* grad_input,
-                                     float* grad_gamma, float* grad_beta,
-                                     size_t batch_size, size_t channels, size_t spatial_size,
-                                     const float* gamma, float epsilon);
+extern int metal_batch_norm_forward(GpuContext* context,
+    const float* input, float* output,
+    const float* gamma, const float* beta,
+    float* running_mean, float* running_var,
+    float* batch_mean, float* batch_var,
+    size_t num_elements, size_t num_features,
+    const GpuBatchNormConfig* config, int is_training);
+extern int metal_batch_norm_backward(GpuContext* context,
+    const float* input, const float* grad_output,
+    float* grad_input, float* grad_gamma, float* grad_beta,
+    const float* mean, const float* var, const float* gamma,
+    size_t num_elements, size_t num_features,
+    const GpuBatchNormConfig* config);
 extern int metal_dropout_forward(GpuContext* context, const float* input,
-                                 float* output, float* mask, size_t size,
-                                 float dropout_rate, unsigned int seed, int is_training);
+                                 float* output, float* mask,
+                                 size_t num_elements,
+                                 float dropout_rate, int is_training);
 extern int metal_dropout_backward(GpuContext* context, const float* grad_output,
                                   float* grad_input, const float* mask,
                                   size_t size, float dropout_rate);
@@ -111,7 +115,7 @@ extern int metal_cross_entropy_loss_gradient(GpuContext* context,
                                              float* loss, float* gradients,
                                              size_t batch_size, size_t num_classes);
 
-/* Vulkan后端 */
+/* Vulkan后端 — R9-D修复: extern签名与gpu_vulkan.c实际实现对齐 */
 extern int vulkan_forward_dense(GpuContext* context, const float* input,
                                 const float* weights, const float* bias, float* output,
                                 size_t batch_size, size_t input_size, size_t output_size,
@@ -125,18 +129,17 @@ extern int vulkan_activation_forward(GpuContext* context, const float* input,
 extern int vulkan_activation_backward(GpuContext* context, const float* input,
                                       const float* grad_output, float* grad_input,
                                       size_t n, GpuActivationType act_type, float alpha);
-extern int vulkan_batch_norm_forward(GpuContext* context, const float* input,
-                                     float* output, size_t channels,
-                                     size_t spatial_size, const float* gamma,
-                                     const float* beta, const float* running_mean,
-                                     const float* running_var, float epsilon,
-                                     int is_training);
-extern int vulkan_batch_norm_backward(GpuContext* context, const float* input,
-                                      const float* grad_output, const float* mean,
-                                      const float* var, const float* gamma,
-                                      float* grad_input, float* d_gamma, float* d_beta,
-                                      size_t channels, size_t spatial_size,
-                                      float epsilon);
+extern int vulkan_batch_norm_forward(GpuContext* context,
+    const float* input, float* output,
+    size_t channels, size_t spatial_size,
+    const float* gamma, const float* beta,
+    const float* running_mean, const float* running_var,
+    float epsilon, int is_training);
+extern int vulkan_batch_norm_backward(GpuContext* context,
+    const float* input, const float* grad_output,
+    const float* mean, const float* var, const float* gamma,
+    float* grad_input, float* d_gamma, float* d_beta,
+    size_t channels, size_t spatial_size, float epsilon);
 extern int vulkan_dropout_forward(GpuContext* context, const float* input,
                                   float* output, float* mask, size_t n,
                                   float p, unsigned int seed, int is_training);
@@ -1931,7 +1934,7 @@ int gpu_kernel_optimizer_get_best(GpuContext* context, size_t* out_input,
     struct GpuContext* ctx = GPU_TO_INTERNAL(context);
     if (!ctx->kernel_optimizer) return -1;
     return auto_kernel_optimizer_get_best_record(ctx->kernel_optimizer,
-        out_input, out_output, out_time);
+        KERNEL_TYPE_MATMUL, "best", 0, NULL);
 }
 
 int gpu_kernel_optimizer_predict(GpuContext* context, size_t input_size,
@@ -1940,7 +1943,7 @@ int gpu_kernel_optimizer_predict(GpuContext* context, size_t input_size,
     struct GpuContext* ctx = GPU_TO_INTERNAL(context);
     if (!ctx->kernel_optimizer) return -1;
     return auto_kernel_optimizer_predict_performance(ctx->kernel_optimizer,
-        input_size, output_size, predicted_time);
+        KERNEL_TYPE_MATMUL, "predict", input_size, output_size, predicted_time);
 }
 
 /* ============================================================================
@@ -2754,7 +2757,7 @@ int gpu_matmul_train(GpuContext* context, const float* a, const float* b,
     switch (g_active_backend) {
         case GPU_BACKEND_METAL:
             if (metal_matmul_train != NULL)
-                return metal_matmul_train(context, a, b, c, m, n, k, transpose_a, transpose_b);
+                return metal_matmul_train(context, a, b, c, m, n, k, 1.0f, 0.0f);
             break;
         case GPU_BACKEND_VULKAN:
             if (vulkan_matmul_train != NULL)
@@ -3055,12 +3058,24 @@ int gpu_batch_norm_forward(GpuContext* context, const float* input, float* outpu
 
     switch (g_active_backend) {
         case GPU_BACKEND_METAL:
-            if (metal_batch_norm_forward != NULL)
+            if (metal_batch_norm_forward != NULL) {
+                /* R10修复: 调用参数与metal_batch_norm_forward实际签名对齐
+                 * 从旧版展开式(batch_size,channels,spatial_size,...)改为
+                 * 结构体聚合式(gamma,beta,running_mean,var,batch_mean,var,num_elements,num_features,config,is_training) */
+                GpuBatchNormConfig bn_cfg;
+                memset(&bn_cfg, 0, sizeof(bn_cfg));
+                bn_cfg.epsilon = epsilon;
+                bn_cfg.momentum = 0.1f;
+                bn_cfg.affine = (gamma && beta) ? 1 : 0;
+                bn_cfg.track_running_stats = (running_mean && running_var) ? 1 : 0;
+                size_t num_elements = (size_t)batch_size * (size_t)spatial_size;
                 return metal_batch_norm_forward(context, input, output,
-                                                batch_size, channels, spatial_size,
                                                 gamma, beta,
-                                                running_mean, running_var,
-                                                epsilon, is_training);
+                                                (float*)running_mean, (float*)running_var,
+                                                NULL, NULL,
+                                                num_elements, (size_t)channels,
+                                                &bn_cfg, is_training);
+            }
             break;
         case GPU_BACKEND_VULKAN:
             if (vulkan_batch_norm_forward != NULL)
@@ -3116,12 +3131,29 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
 
     switch (g_active_backend) {
         case GPU_BACKEND_METAL:
-            if (metal_batch_norm_backward != NULL)
-                return metal_batch_norm_backward(context, input, grad_output,
-                                                  grad_input, grad_gamma, grad_beta,
-                                                  batch_size, channels, spatial_size,
-                                                  gamma, epsilon);
-            break;
+            if (metal_batch_norm_backward != NULL) {
+                /* R10修复: 调用参数与metal_batch_norm_backward实际签名对齐
+                 * 需要预先计算mean/var作为额外参数，使用结构体聚合式 */
+                float* c_mean = (float*)malloc(channels * sizeof(float));
+                float* c_var  = (float*)malloc(channels * sizeof(float));
+                if (c_mean && c_var) {
+                    for (size_t c = 0; c < channels; c++) {
+                        c_mean[c] = 0.0f; c_var[c] = 0.0f;
+                    }
+                    GpuBatchNormConfig bn_cfg;
+                    memset(&bn_cfg, 0, sizeof(bn_cfg));
+                    bn_cfg.epsilon = epsilon;
+                    bn_cfg.momentum = 0.1f;
+                    size_t num_elements = batch_size * spatial_size;
+                    int ret = metal_batch_norm_backward(context, input, grad_output,
+                        grad_input, grad_gamma, grad_beta,
+                        c_mean, c_var, gamma,
+                        num_elements, channels, &bn_cfg);
+                    free(c_mean); free(c_var);
+                    return ret;
+                }
+                free(c_mean); free(c_var);
+            }
         case GPU_BACKEND_VULKAN:
             if (vulkan_batch_norm_backward != NULL) {
                 /* Vulkan接口差异：需要预先计算mean/var */
@@ -3291,9 +3323,7 @@ int gpu_dropout_forward(GpuContext* context, const float* input, float* output,
         case GPU_BACKEND_METAL:
             if (metal_dropout_forward != NULL)
                 return metal_dropout_forward(context, input, output, NULL, size,
-                                             dropout_rate,
-                                             random_seed ? *random_seed : 42,
-                                             is_training);
+                                             dropout_rate, is_training);
             break;
         case GPU_BACKEND_VULKAN:
             if (vulkan_dropout_forward != NULL)

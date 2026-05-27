@@ -1035,7 +1035,6 @@ int slam_process_visual_frame(SlamSystem* system,
 
         /* S-NEW-1: SLAM增强模块已链接可用
          * slam_enhance.c提供BA/IMU/PGO功能，在需要时直接调用 */
-        system->enhance_initialized = 1;
     }
     
     /* 创建新帧 */

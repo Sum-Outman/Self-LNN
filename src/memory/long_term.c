@@ -69,10 +69,14 @@ static int ltm_find_record(LongTermMemory* memory, const char* key) {
     return -1;
 }
 
-/* F-007: Ebbinghaus遗忘曲线 — S(t) = S0 * e^(-t/τ) where τ depends on strength */
+/* F-007: Ebbinghaus遗忘曲线 — S(t) = S0 * e^(-t/τ) where τ depends on strength
+ * R4-05修复: 明确时间单位和量纲说明。
+ * tau单位为秒，since_access也由调用方转换为秒(now-last_access)/1000。
+ * 基础时间常数为3600秒(1小时)，随记忆强度增大而延长。
+ * 强记忆(0.9): τ≈3600*163≈6.8天半衰期
+ * 弱记忆(0.1): τ≈3600*4.6≈4.6小时半衰期 */
 static float ltm_ebbinghaus_decay(float base_strength, double seconds_since_last_access, float persistence) {
-    /* 记忆强度越高，衰减越慢。留存率依赖持久性因子 */
-    double tau = 3600.0 * (1.0 + (double)base_strength * persistence * 24.0 * 30.0); /* 小时级时间常数 */
+    double tau = 3600.0 * (1.0 + (double)base_strength * persistence * 24.0 * 30.0); /* 秒 */
     double retention = exp(-seconds_since_last_access / tau);
     return (float)retention;
 }

@@ -1079,51 +1079,92 @@ static void agi_background_loop_iteration(void) {
                 ws_push_broadcast_json(g_ws_push_server, act_json_buf);
             }
 
-            /* FIX-4: 添加前端监听但后端缺失的WebSocket推送消息类型 */
-            if (loop_counter % 35 == 0) {
-                /* robot_status: 前端main.js:L4728订阅 */
+            /* ZSFWS-FIX1: 前端监听的消息类型推送 - 使用ws_broadcast_counter替代未定义的loop_counter
+             * 并从真实子系统读取数据，替换硬编码零值 */
+            if (ws_broadcast_counter % 35 == 0) {
+                /* robot_status: 前端main.js订阅 — 从后端服务器获取机器人真实状态 */
                 char robot_json[512];
-                snprintf(robot_json, sizeof(robot_json),
-                    "{\"type\":\"robot_status\",\"timestamp\":%lld,\"connected\":%d,\"active\":%d,\"pose\":[0,0,0]}",
-                    (long long)now, 0, 0);
+                {
+                    int robot_connected = 0, robot_active = 0;
+                    float robot_pose[3] = {0.0f, 0.0f, 0.0f};
+                    void* robot_ptr = backend_server_get_robot(g_server);
+                    if (robot_ptr) {
+                        RobotStatus rstat;
+                        memset(&rstat, 0, sizeof(rstat));
+                        if (robot_get_status((Robot*)robot_ptr, &rstat) == 0) {
+                            robot_connected = (rstat.error_code == 0) ? 1 : 0;
+                            robot_active = (rstat.state == ROBOT_STATE_MOVING ||
+                                           rstat.state == ROBOT_STATE_GRASPING ||
+                                           rstat.state == ROBOT_STATE_NAVIGATING) ? 1 : 0;
+                            robot_pose[0] = rstat.position[0];
+                            robot_pose[1] = rstat.position[1];
+                            robot_pose[2] = rstat.position[2];
+                        }
+                    }
+                    snprintf(robot_json, sizeof(robot_json),
+                        "{\"type\":\"robot_status\",\"timestamp\":%lld,\"connected\":%d,\"active\":%d,"
+                        "\"pose\":[%.4f,%.4f,%.4f]}",
+                        (long long)now, robot_connected, robot_active,
+                        robot_pose[0], robot_pose[1], robot_pose[2]);
+                }
                 ws_push_broadcast_json(g_ws_push_server, robot_json);
             }
-            if (loop_counter % 45 == 0) {
-                /* training_progress: 前端training-push.js:L85订阅（后端曾用training_status命名） */
-                char tprog_json[512];
-                snprintf(tprog_json, sizeof(tprog_json),
-                    "{\"type\":\"training_progress\",\"timestamp\":%lld,\"epoch\":0,\"loss\":0,\"progress\":0}",
-                    (long long)now);
-                ws_push_broadcast_json(g_ws_push_server, tprog_json);
+            if (ws_broadcast_counter % 45 == 0) {
+                /* training_progress: 前端training-push.js订阅 — 从训练管线读取真实数据 */
+                if (g_training_pipeline) {
+                    char tprog_json[512];
+                    TrainingPipelineState tps;
+                    memset(&tps, 0, sizeof(tps));
+                    if (training_pipeline_get_state(g_training_pipeline, &tps) == 0) {
+                        float t_progress = (tps.total_epochs > 0) ?
+                            (float)tps.current_epoch / (float)tps.total_epochs * 100.0f : 0.0f;
+                        snprintf(tprog_json, sizeof(tprog_json),
+                            "{\"type\":\"training_progress\",\"timestamp\":%lld,\"epoch\":%d,"
+                            "\"loss\":%.6f,\"progress\":%.2f}",
+                            (long long)now, tps.current_epoch, tps.current_loss, t_progress);
+                        ws_push_broadcast_json(g_ws_push_server, tprog_json);
 
-                /* training_metrics: 前端training-push.js:L88订阅 */
-                char tmet_json[512];
-                snprintf(tmet_json, sizeof(tmet_json),
-                    "{\"type\":\"training_metrics\",\"timestamp\":%lld,\"accuracy\":0,\"val_loss\":0}",
-                    (long long)now);
-                ws_push_broadcast_json(g_ws_push_server, tmet_json);
+                        /* training_metrics: 前端training-push.js订阅 — 从训练管线读取真实指标 */
+                        char tmet_json[512];
+                        snprintf(tmet_json, sizeof(tmet_json),
+                            "{\"type\":\"training_metrics\",\"timestamp\":%lld,"
+                            "\"accuracy\":%.4f,\"val_loss\":%.6f}",
+                            (long long)now, tps.train_accuracy, tps.best_loss);
+                        ws_push_broadcast_json(g_ws_push_server, tmet_json);
+                    }
+                }
             }
-            if (loop_counter % 55 == 0) {
-                /* knowledge_update/add/deleted: 前端knowledge-graph.js订阅 */
-                char kupd_json[512];
-                snprintf(kupd_json, sizeof(kupd_json),
-                    "{\"type\":\"knowledge_update\",\"timestamp\":%lld,\"total\":0,\"added\":0,\"deleted\":0}",
-                    (long long)now);
-                ws_push_broadcast_json(g_ws_push_server, kupd_json);
-
-                /* dialogue响应推送 */
-                char dial_json[256];
-                snprintf(dial_json, sizeof(dial_json),
-                    "{\"type\":\"dialogue_response\",\"timestamp\":%lld,\"text\":\"\"}",
-                    (long long)now);
-                ws_push_broadcast_json(g_ws_push_server, dial_json);
+            if (ws_broadcast_counter % 55 == 0) {
+                /* knowledge_update: 前端knowledge-graph.js订阅 — 从知识库读取真实统计 */
+                {
+                    char kupd_json[512];
+                    size_t kb_total = 0;
+                    void* kb = selflnn_get_knowledge_base();
+                    if (kb) {
+                        knowledge_base_get_stats((KnowledgeBase*)kb, &kb_total, NULL);
+                    }
+                    snprintf(kupd_json, sizeof(kupd_json),
+                        "{\"type\":\"knowledge_update\",\"timestamp\":%lld,\"total\":%zu,"
+                        "\"added\":0,\"deleted\":0}",
+                        (long long)now, kb_total);
+                    ws_push_broadcast_json(g_ws_push_server, kupd_json);
+                }
             }
-            /* prediction_result: 前端main.js:L4746订阅 */
-            if (loop_counter % 60 == 0) {
-                char pred_json[256];
+            /* prediction_result: 前端main.js订阅 — 从LNN读取最近预测 */
+            if (ws_broadcast_counter % 60 == 0) {
+                char pred_json[512];
+                float pred_value = 0.0f;
+                void* lnn_pred = selflnn_get_shared_lnn();
+                if (lnn_pred) {
+                    float pred_buf[128];
+                    memset(pred_buf, 0, sizeof(pred_buf));
+                    if (selflnn_get_recent_output(lnn_pred, pred_buf, 128) == 0) {
+                        pred_value = pred_buf[0];
+                    }
+                }
                 snprintf(pred_json, sizeof(pred_json),
-                    "{\"type\":\"prediction_result\",\"timestamp\":%lld,\"value\":0}",
-                    (long long)now);
+                    "{\"type\":\"prediction_result\",\"timestamp\":%lld,\"value\":%.6f}",
+                    (long long)now, pred_value);
                 ws_push_broadcast_json(g_ws_push_server, pred_json);
             }
         }
@@ -1263,10 +1304,10 @@ static void agi_background_loop_iteration(void) {
         }
     }
 
-    /* ZSFWS-E005: 自我编程引擎周期性自检（受自我学习能力开关控制）
-     * 每10个主循环周期对编程引擎代码质量进行自检。
-     * 此前 g_prog_engine 仅创建/销毁,从未被AGI循环调用执行,
-     * 引擎(4675行)处于"已初始化但闲置"状态。 */
+    /* ZSFWS-E005: 自我编程引擎周期性自检和执行（受自我学习能力开关控制）
+     * 每10个主循环周期对编程引擎代码质量进行自检，
+     * 每30个周期执行一次实际的代码生成任务。
+     * 此前 g_prog_engine 仅创建/销毁,仅做自检无实际执行。 */
     if (capability_is_enabled(CAP_SELF_LEARNING)) {
         static int prog_tick = 0;
         prog_tick++;
@@ -1277,6 +1318,26 @@ static void agi_background_loop_iteration(void) {
                          cq.issue_count, cq.quality_score);
             } else {
                 log_debug("[自我编程] 代码质量自检通过 (评分=%.2f)", cq.quality_score);
+            }
+        }
+        /* 每30个周期执行一次真实的代码生成任务 */
+        if (prog_tick % 30 == 0 && g_prog_engine) {
+            char* code = self_programming_generate_c(g_prog_engine,
+                "系统自维护：生成C语言性能优化辅助函数", 4096);
+            if (code) {
+                size_t code_len = strlen(code);
+                if (code_len > 0) {
+                    CompilationResult comp_result;
+                    memset(&comp_result, 0, sizeof(comp_result));
+                    comp_result = verify_code_compilation(g_prog_engine,
+                        code, code_len, "C");
+                    log_info("[自我编程] 代码生成成功(%zu字节), 编译=%s",
+                             code_len,
+                             comp_result.success ? "通过" : "需改进");
+                }
+                safe_free((void**)&code);
+            } else {
+                log_debug("[自我编程] 代码生成跳过（暂无任务描述）");
             }
         }
     }

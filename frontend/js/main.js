@@ -2984,7 +2984,7 @@ function cancelTask(taskId) {
 function resumeTask(taskId) {
     showNotification('继续任务中...', 'info');
     if (window.SelfLnnApi && typeof window.SelfLnnApi.resumeTask === 'function') {
-        SelfLnnApi.resumeTask(taskId).then(result => {
+        window.SelfLnnApi.resumeTask(taskId).then(function(result) {
             if (result && result.success) {
                 showNotification('✅ 任务已恢复', 'success');
                 updateTaskUI(taskId, '运行中', 'rgba(40, 167, 69, 0.1)', '#28a745');
@@ -7578,8 +7578,17 @@ async function refreshLearningMetrics() {
                     var set = function(id, val) { var e=document.getElementById(id); if(e){e.textContent=val; e.classList.remove('skeleton-loading');} };
                     var setQ = function(sel, val) { var e=document.querySelector(sel); if(e)e.textContent=val; };
                     
-                    // 系统健康
-                    set('health-status-text', '运行正常');
+                    // R3-02修复: 从API返回数据动态判断，不再硬编码'运行正常'
+                    var healthText = '运行正常';
+                    var healthClass = '';
+                    if (sys.modules && sys.modules.lnn && sys.modules.lnn.convergence_rate !== undefined) {
+                        healthText = (sys.modules.lnn.convergence_rate > 0.001) ? '运行正常' : '训练中';
+                    } else if (sys.uptime && sys.uptime > 0) {
+                        healthText = '运行正常';
+                    } else {
+                        healthText = '初始化中...';
+                    }
+                    set('health-status-text', healthText);
                     setQ('.metric:nth-child(1) .metric-value', Math.round(sys.cpu_usage||0) + '%');
                     set('active-tasks', String(sys.requests?sys.requests.connections||0:'0'));
                     
@@ -7588,19 +7597,25 @@ async function refreshLearningMetrics() {
                         set('uptime-display', d2+'天 '+h2+'小时');
                     }
                     
-                    // 底部状态栏
-                    set('status-bar-api', '在线');
-                    set('status-bar-db', '已连接');
-                    set('status-bar-network', '连接正常');
-                    set('conn-status', '已连接');
+                    // 底部状态栏 - 从API数据动态判断
+                    set('status-bar-api', (sys.requests && sys.requests.connections >= 0) ? '在线' : '离线');
+                    set('status-bar-db', (sys.modules && sys.modules.knowledge) ? '已连接' : '未连接');
+                    set('status-bar-network', (sys.requests && sys.requests.connections > 0) ? '连接正常' : '无连接');
+                    set('conn-status', (sys.requests && sys.requests.connections > 0) ? '已连接' : '未连接');
                     
                     // LNN状态
                     var ms = document.querySelectorAll('.model-stats .stat-value');
                     if (ms.length>=3) { ms[0].textContent='单一液态神经网络(CfC)'; ms[1].textContent=sys.modules?(sys.modules.lnn?sys.modules.lnn.hidden_size||'--':'--'):'--'; ms[2].textContent=sys.modules?(sys.modules.lnn?sys.modules.lnn.total_params||'--':'--'):'--'; }
                     
-                    // 多模态编码
+                    // 多模态编码 - 从API数据动态判断而非硬编码'就绪'
                     var subs = document.querySelectorAll('#lnn-submodules .model-status, .model-status');
-                    if (subs.length>=3) { subs[0].textContent='就绪'; subs[0].className='model-status active'; subs[1].textContent='就绪'; subs[1].className='model-status active'; subs[2].textContent='就绪'; subs[2].className='model-status active'; }
+                    if (subs.length>=3) {
+                        var subReady = (sys.modules && sys.modules.multimodal) ? '就绪' : '待初始化';
+                        var subActive = (sys.modules && sys.modules.multimodal) ? 'active' : 'inactive';
+                        subs[0].textContent=subReady; subs[0].className='model-status '+subActive;
+                        subs[1].textContent=subReady; subs[1].className='model-status '+subActive;
+                        subs[2].textContent=subReady; subs[2].className='model-status '+subActive;
+                    }
                     
                     // 内存
                     if (sys.modules && sys.modules.memory) {
@@ -7972,8 +7987,8 @@ async function toggleVoice() {
         toggleVoiceInput();
         return;
     }
-    /* 回退路径：独立的VoiceCaptureUtil快速采集 */
-    if (typeof VoiceCaptureUtil === 'undefined') {
+    /* R3-01修复: VoiceCaptureUtil使用window.前缀 */
+    if (typeof window.VoiceCaptureUtil === 'undefined') {
         showNotification('语音采集模块未加载', 'warning');
         return;
     }
@@ -7989,7 +8004,7 @@ async function toggleVoice() {
         if (btn) { btn.textContent = '停止录音'; if (!btn.className.match(/active/)) btn.className += ' active'; }
         try {
             /* ZSFZS-F042修复: quickCapture参数正确传递——使用options对象而非回调函数 */
-            _voiceRecorder = await VoiceCaptureUtil.quickCapture({
+            _voiceRecorder = await window.VoiceCaptureUtil.quickCapture({
                 maxDuration: 10000,
                 onResult: function(result) {
                     if (result && result.text) {
@@ -8026,7 +8041,7 @@ async function startMultimodalLearn() {
     var modeEl = document.getElementById('learn-mode');
     var mode = modeEl ? modeEl.value : 'single-cfc-lnn';
     try {
-        var data = await SelfLnnApi.multimodalLearn(mode, 'single-cfc-lnn');
+        var data = await window.SelfLnnApi.multimodalLearn(mode, 'single-cfc-lnn');
         showNotification(data.success ? 'LNN统一学习已启动' : '启动失败: '+(data.error||''), data.success ? 'success' : 'danger');
         if (data.success) {
             /* FIX-JS-006: 先清理旧定时器再设置新的 */
@@ -8048,7 +8063,7 @@ async function toggleMultimodalVoiceInput() {
         if (btn) { btn.textContent = '开始录音'; btn.style.background = ''; }
         return;
     }
-    if (typeof VoiceCaptureUtil === 'undefined' || !VoiceCaptureUtil.quickCapture) {
+    if (typeof window.VoiceCaptureUtil === 'undefined' || !window.VoiceCaptureUtil.quickCapture) {
         showNotification('录音功能不可用：VoiceCaptureUtil未加载', 'warning');
         return;
     }
@@ -8100,13 +8115,13 @@ async function startTeaching() {
     try {
         var resp;
         if (modality === 'vision') {
-            resp = await SelfLnnApi.teachLookAndLearn(name, label, null);
+            resp = await window.SelfLnnApi.teachLookAndLearn(name, label, null);
         } else if (modality === 'audio') {
-            resp = await SelfLnnApi.teachSayAndAssociate(name, label, null, null);
+            resp = await window.SelfLnnApi.teachSayAndAssociate(name, label, null, null);
         } else if (modality === 'sensor') {
-            resp = await SelfLnnApi.teachTouchAndUnderstand(name, label, null);
+            resp = await window.SelfLnnApi.teachTouchAndUnderstand(name, label, null);
         } else {
-            resp = await SelfLnnApi.teachLookAndLearn(name, label, null);
+            resp = await window.SelfLnnApi.teachLookAndLearn(name, label, null);
         }
         if (resp && resp.success) {
             var lastEl = document.getElementById('last-concept');
@@ -8121,7 +8136,7 @@ window.startTeaching = startTeaching;
 
 async function testTeaching() {
     try {
-        var data = await SelfLnnApi.teachGetConcepts();
+        var data = await window.SelfLnnApi.teachGetConcepts();
         if (data && data.success) {
             var concepts = data.data ? (data.data.concepts||data.data.results||[]) : [];
             var count = concepts.length || (data.data && data.data.count) || 0;

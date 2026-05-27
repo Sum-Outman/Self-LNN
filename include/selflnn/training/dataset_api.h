@@ -101,6 +101,22 @@ int dataset_get_batch(TrainingDataset* ds, size_t batch_size,
                      float* input_batch, float* output_batch);
 
 /**
+ * @brief R3-06: 数据集划分为训练集/验证集/测试集
+ * @param ds 输入完整数据集
+ * @param train_ratio 训练集比例 (默认0.7)
+ * @param val_ratio 验证集比例 (默认0.15)
+ * @param test_ratio 测试集比例 (默认0.15)
+ * @param out_train 输出训练集(调用者负责释放)
+ * @param out_val 输出验证集
+ * @param out_test 输出测试集
+ * @return 成功返回0，失败返回-1
+ */
+int dataset_split(TrainingDataset* ds,
+    float train_ratio, float val_ratio, float test_ratio,
+    TrainingDataset** out_train, TrainingDataset** out_val,
+    TrainingDataset** out_test);
+
+/**
  * @brief 计算数据集统计信息
  */
 int dataset_compute_stats(const TrainingDataset* ds, DatasetStats* stats);

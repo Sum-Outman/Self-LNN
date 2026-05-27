@@ -50,6 +50,11 @@ add_library(selflnn_multimodal
     audio_loader.c
     speech_language_model.c
     environment_sound.c
+    # R8-B修复: 注册新增的4个模态专用预处理器
+    proprioception.c
+    thermal.c
+    radar.c
+    motor.c
 )
 
 target_include_directories(selflnn_multimodal PUBLIC

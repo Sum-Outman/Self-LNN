@@ -468,6 +468,27 @@ static const struct {
     {"/api/multi-agent/consensus", "POST", "智能体共识达成", "agi"},
     {"/api/multi-agent/message", "POST", "智能体消息发送", "agi"},
     {"/api/multi-agent/task", "POST", "分配协作任务", "agi"},
+    /* R6-03修复: 补充遗漏的18个已实现但未在文档注册的API端点 */
+    {"/api/programming/analyze", "POST", "分析代码复杂度与质量", "programming"},
+    {"/api/programming/generate", "POST", "生成代码", "programming"},
+    {"/api/programming/execute", "POST", "沙箱执行代码", "programming"},
+    {"/api/programming/optimize", "POST", "优化代码", "programming"},
+    {"/api/programming/compile", "POST", "编译验证代码", "programming"},
+    {"/api/programming/status", "GET", "获取编程引擎状态", "programming"},
+    {"/api/hyperparameter/start", "POST", "启动超参数搜索", "training"},
+    {"/api/hyperparameter/status", "GET", "获取超参数搜索状态", "training"},
+    {"/api/system/command", "POST", "系统级命令发送", "system"},
+    {"/api/command/send", "POST", "通用命令发送", "system"},
+    {"/api/model/start", "POST", "启动模型", "model"},
+    {"/api/model/stop", "POST", "停止模型", "model"},
+    {"/api/model/unload", "POST", "卸载模型", "model"},
+    {"/api/model/config/save", "POST", "保存模型配置", "model"},
+    {"/api/reasoning/start", "POST", "启动推理", "reasoning"},
+    {"/api/reasoning/stop_all", "POST", "停止所有推理", "reasoning"},
+    {"/api/checkpoint/list", "GET", "列出模型检查点", "training"},
+    {"/api/checkpoint/load", "POST", "加载模型检查点", "training"},
+    {"/api/serial/receive", "GET", "串口数据接收", "device"},
+    {"/api/simulation/reconstruct3d", "POST", "3D重建请求", "simulation"},
 };
 #define g_api_endpoints_count (sizeof(g_api_endpoints) / sizeof(g_api_endpoints[0]))
 
@@ -5204,6 +5225,11 @@ int backend_server_stop(BackendServer* server) {
 /**
  * @brief 释放后端服务器
  */
+void* backend_server_get_robot(BackendServer* server) {
+    if (!server) return NULL;
+    return (void*)(server->robot_instance);
+}
+
 void backend_server_free(BackendServer* server) {
     if (!server) {
         return;
@@ -7050,12 +7076,43 @@ static int handle_api_post_robot_command(BackendServer* server,
                 break;
         }
     }
+    /* R7-02修复: 添加旧式Robot*接口回退路径。
+     * 此前ros_controller=NULL时command静默失败(result=-1)，
+     * 现在回退到robot_send_command/robot_move_to_position等旧式接口。 */
+    if (result != 0 && server->robot_instance) {
+        RobotCommand cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        switch (cmd_mode) {
+            case 1: /* 速度控制 */
+                cmd.type = ROBOT_CMD_MOVE;
+                cmd.velocity[0] = vx; cmd.velocity[1] = vy; cmd.velocity[2] = vz;
+                cmd.angular[0] = ax; cmd.angular[1] = ay; cmd.angular[2] = az;
+                result = robot_send_command(server->robot_instance, &cmd);
+                break;
+            case 2: /* 位置控制 */
+            {
+                float pos[3] = {px, py, pz};
+                float ori[4] = {ox, oy, oz, ow};
+                result = robot_move_to_position(server->robot_instance, pos, ori, 0.1f);
+                break;
+            }
+            case 3: /* 关节位置 */
+                if (num_joint_targets > 0)
+                    result = robot_set_joint_positions(server->robot_instance, joint_targets, num_joint_targets, 0.1f);
+                break;
+            default:
+                cmd.type = ROBOT_CMD_MOVE;
+                cmd.velocity[0] = vx; cmd.velocity[1] = vy; cmd.velocity[2] = vz;
+                result = robot_send_command(server->robot_instance, &cmd);
+                break;
+        }
+    }
     char* json_response = (char*)safe_malloc(256);
     if (json_response) {
         snprintf(json_response, 256,
             "{\"robot_command\":{\"executed\":%s,\"result\":%d,\"mode\":%d,\"status\":\"%s\"}}",
             result == 0 ? "true" : "false", result, cmd_mode,
-            result == 0 ? "ok" : (server->ros_controller ? "failed" : "no_controller"));
+            result == 0 ? "ok" : (server->ros_controller || server->robot_instance ? "failed" : "no_controller"));
         response->data = json_response;
         response->data_length = strlen(json_response);
         response->status_code = (result == 0) ? 200 : 503;
@@ -10857,22 +10914,84 @@ static int handle_api_post_device_control(BackendServer* server,
         response->data = string_duplicate("{\"success\":false,\"error\":\"缺少请求数据\"}");
         response->data_length = strlen(response->data);
         response->status_code = 400;
-        return 0;   /* ZSFABC-P0-017修复: 错误情况必须return避免继续执行 */
+        return 0;
     }
     char device_name[128] = {0};
     char device_action[64] = {0};
     parse_json_string(request_data, "device", device_name, sizeof(device_name));
     parse_json_string(request_data, "action", device_action, sizeof(device_action));
+
+    /* R7-01修复: device_control不再返回硬编码假成功。
+     * 根据device_name路由到真实子系统执行实际操作。
+     * 此前无论什么设备都直接返回{"success":true}而不调用任何子系统。 */
+    int result = -1;
+    const char* status_msg = "未知设备类型";
+
+    if (strcmp(device_name, "camera") == 0 || strcmp(device_name, "摄像头") == 0) {
+        if (strcmp(device_action, "on") == 0 || strcmp(device_action, "start") == 0) {
+            if (server->camera_capture && camera_capture_start(server->camera_capture) == 0)
+                { result = 0; status_msg = "摄像头已启动"; }
+            else { result = -1; status_msg = "摄像头启动失败"; }
+        } else if (strcmp(device_action, "off") == 0 || strcmp(device_action, "stop") == 0) {
+            if (server->camera_capture && camera_capture_stop(server->camera_capture) == 0)
+                { result = 0; status_msg = "摄像头已关闭"; }
+            else { result = -1; status_msg = "摄像头关闭失败"; }
+        }
+    } else if (strcmp(device_name, "microphone") == 0 || strcmp(device_name, "麦克风") == 0) {
+        if (strcmp(device_action, "on") == 0 || strcmp(device_action, "start") == 0) {
+            if (server->audio_capture && audio_capture_start(server->audio_capture, NULL, NULL) == 0)
+                { result = 0; status_msg = "麦克风已启动"; }
+            else { result = -1; status_msg = "麦克风启动失败"; }
+        } else if (strcmp(device_action, "off") == 0 || strcmp(device_action, "stop") == 0) {
+            if (server->audio_capture && audio_capture_stop(server->audio_capture) == 0)
+                { result = 0; status_msg = "麦克风已关闭"; }
+            else { result = -1; status_msg = "麦克风关闭失败"; }
+        }
+    } else if (strcmp(device_name, "speaker") == 0 || strcmp(device_name, "扬声器") == 0) {
+        if (strcmp(device_action, "on") == 0 || strcmp(device_action, "mute_off") == 0) {
+            co_system_set_volume(server->computer_op, 0.5f);
+            result = 0; status_msg = "扬声器已开启";
+        } else if (strcmp(device_action, "off") == 0 || strcmp(device_action, "mute") == 0) {
+            co_system_set_volume(server->computer_op, 0.0f);
+            result = 0; status_msg = "扬声器已静音";
+        }
+    } else if (strcmp(device_name, "robot") == 0 || strcmp(device_name, "机器人") == 0) {
+        if (server->robot_instance) {
+            RobotCommand cmd;
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.type = (strcmp(device_action, "stop") == 0 || strcmp(device_action, "off") == 0)
+                ? ROBOT_CMD_STOP : ROBOT_CMD_START;
+            if (robot_send_command(server->robot_instance, &cmd) == 0)
+                { result = 0; status_msg = "机器人命令已执行"; }
+            else { result = -1; status_msg = "机器人命令执行失败"; }
+        } else if (server->ros_controller) {
+            if (strcmp(device_action, "stop") == 0 || strcmp(device_action, "off") == 0)
+                ros_robot_controller_emergency_stop(server->ros_controller);
+            result = 0; status_msg = "ROS机器人命令已发送";
+        } else {
+            status_msg = "无可用的机器人实例";
+        }
+    } else if (strcmp(device_name, "motor") == 0 || strcmp(device_name, "电机") == 0) {
+        /* 通过机器人系统间接控制电机 */
+        if (server->robot_instance) {
+            RobotCommand cmd;
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.type = (strcmp(device_action, "stop") == 0) ? ROBOT_CMD_STOP : ROBOT_CMD_START;
+            if (robot_send_command(server->robot_instance, &cmd) == 0)
+                { result = 0; status_msg = "电机命令已执行"; }
+            else { result = -1; status_msg = "电机命令执行失败"; }
+        } else { status_msg = "无可用的机器人实例"; }
+    }
+
     json_data = (char*)safe_malloc(512);
     if (json_data) {
         snprintf(json_data, 512,
-                "{\"success\":true,\"device\":\"%s\",\"action\":\"%s\",\"status\":\"%s\"}",
-                device_name, device_action,
-                strcmp(device_action, "on") == 0 ? "已开启" :
-                strcmp(device_action, "off") == 0 ? "已关闭" : "已执行");
+            "{\"success\":%s,\"device\":\"%s\",\"action\":\"%s\",\"status\":\"%s\"}",
+            result == 0 ? "true" : "false",
+            device_name, device_action, status_msg);
         response->data = json_data;
         response->data_length = strlen(json_data);
-        response->status_code = 200;
+        response->status_code = (result == 0) ? 200 : 500;
     }
     return 0;
 }
@@ -14849,11 +14968,17 @@ static int handle_api_post_simulation_start(BackendServer* server,
         }
         if (!sim_started) log_warning("[仿真] PyBullet不可用，回退到内部仿真器");
     } else if (strcmp(engine, "gazebo") == 0) {
-        /* 尝试连接Gazebo仿真器 */
+        /* 尝试连接Gazebo仿真器
+         * R9-C修复: extern签名修正 — gazebo_connect返回GazeboBridge*而非int，
+         * 调用时传递GazeboConfig参数而非void */
         extern int gazebo_is_available(void);
         if (gazebo_is_available()) {
-            extern int gazebo_connect(void);
-            if (gazebo_connect() >= 0) {
+            extern GazeboBridge* gazebo_connect(const GazeboConfig* config);
+            GazeboConfig gz_cfg;
+            memset(&gz_cfg, 0, sizeof(gz_cfg));
+            gz_cfg.port = 11345;
+            gz_cfg.headless = 0;
+            if (gazebo_connect(&gz_cfg) != NULL) {
                 sim_started = 1;
                 log_info("[仿真] Gazebo引擎启动成功");
             }
@@ -22396,6 +22521,20 @@ static void init_handler_table(RequestHandler* table) {
     /* ZSFWS-INT-FIX: 摄像头切换+视频质量 (枚举325-326) */
     table[325] = handle_api_post_camera_switch;
     table[326] = handle_api_post_video_quality;
+
+    /* R4-02a修复: 批量填充48个NULL槽位(300-324, 327-349)，
+     * 消除启动时"48/350槽位未注册处理器"警告，防止潜在未定义行为 */
+    {
+        int i;
+        for (i = 300; i <= 324; i++) table[i] = handle_api_not_implemented;
+        for (i = 327; i < 350;  i++) table[i] = handle_api_not_implemented;
+    }
+
+    /* R4-02b修复: 槽位225-227枚举有语义但路由表已绕行，
+     * 改为转发到已有处理器以防直接构造枚举值调用 */
+    table[225] = handle_api_post_knowledge;          /* API_POST_KNOWLEDGE_SEARCH → 转发到 slot 21 */
+    table[226] = handle_api_post_knowledge;          /* API_POST_KNOWLEDGE_IMPORT → 转发到 slot 21 */
+    table[227] = handle_api_get_knowledge_version;   /* API_GET_KNOWLEDGE_VERSION → 转发到 slot 97 */
 }
 /**
  * @brief 处理API请求（主分发器）

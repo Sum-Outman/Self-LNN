@@ -386,6 +386,9 @@ int hl_fuse_vision_haptic(HapticLearner* hl, const float* visual, int vdim,
      * H-006修复：添加对haptic_enhance.c增强功能的引用 */
     {
         extern HapticCfcProcessor* haptic_enhance_get_global_processor(void);
+        extern int haptic_cfc_process(HapticCfcProcessor* proc,
+            const float* raw_signal, int signal_len,
+            float* features, int feature_dim);
         HapticCfcProcessor* enh_proc = haptic_enhance_get_global_processor();
         if (enh_proc) {
             float visual_haptic[192];
