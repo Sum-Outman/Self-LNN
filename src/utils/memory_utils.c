@@ -532,10 +532,8 @@ void safe_free(void** ptr) {
     // 检查对齐：header应该至少对齐到sizeof(void*)
     uintptr_t header_addr = (uintptr_t)header;
     if (header_addr % sizeof(void*) != 0) {
-        // 未对齐，可能不是通过safe_malloc分配的
-        // 在这种情况下，我们不知道内存是如何分配的
-        // 使用标准free释放data_ptr（假设这是原始分配指针）
-        free(data_ptr);
+        /* ZSFX-DEEP-R12-001: 修复堆损坏 — header才是malloc原始指针,data_ptr是偏移后的用户指针 */
+        free(header);
         *ptr = NULL;
         return;
     }
@@ -545,19 +543,18 @@ void safe_free(void** ptr) {
     
     // 验证魔法数字
     if (header->magic == 0) {
-        // 内存可能已经被释放，或者不是通过safe_malloc分配的
-        // 不要尝试再次释放，只设置指针为NULL
+        /* ZSFX-DEEP-R12-001: 魔法数字为零 — 检测到重复释放或堆损坏 */
         fprintf(stderr, "警告：检测到可能的重复释放或无效内存指针 %p\n", data_ptr);
         alloc_track_remove(data_ptr);
+        free(header);  /* 仍然释放底层内存防止泄漏 */
         *ptr = NULL;
         return;
     }
     
     if (header->magic != MEMORY_MAGIC) {
-        // 可能不是通过safe_malloc分配的，使用标准free释放原始数据指针
-        // data_ptr是malloc/calloc返回的原始指针，不能用free(header)因为header不是分配起点
+        /* ZSFX-DEEP-R12-001: 魔法数字不匹配 — header才是malloc原始指针 */
         alloc_track_remove(data_ptr);
-        free(data_ptr);
+        free(header);
         *ptr = NULL;
         return;
     }
@@ -613,10 +610,12 @@ void safe_free(void** ptr) {
     // 计算总大小（与新safe_malloc布局匹配）
     size_t total_size = BLOCK_OVERHEAD + align_size(header->size, 16) + guard_size;
     
-    // 更新统计
+    // 更新统计（R13-003: 加锁保护并发安全）
+    MEM_LOCK();
     g_memory_stats.total_freed += total_size;
     g_memory_stats.current_usage -= total_size;
     g_memory_stats.free_count++;
+    MEM_UNLOCK();
     
     // 从分配跟踪链表移除
     alloc_track_remove(data_ptr);

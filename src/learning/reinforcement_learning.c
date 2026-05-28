@@ -26,7 +26,7 @@
 #define RL_CLAMP(X,LO,HI) (((X)<(LO))?(LO):(((X)>(HI))?(HI):(X)))
 #define RL_SQ(X) ((X)*(X))
 
-static unsigned int rl_seed = 0;
+/* ZSFWS修复-L-014: 移除死变量 rl_seed，已改用 secure_random_float() */
 
 /* I-016修复：使用secure_random_float替代简单LCG伪随机 */
 static float rl_randf(void)
@@ -2784,7 +2784,6 @@ RLAgent* rl_agent_create(const RLConfig* config)
     if (!agent) return NULL;
 
     agent->config = *config;
-    rl_seed = (unsigned int)config->seed;
     agent->epsilon = config->explore_config.epsilon_start;
     agent->best_return = -1e9f;
     agent->alpha = 0.2f;

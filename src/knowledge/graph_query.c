@@ -9,7 +9,7 @@
  */
 
 #include "selflnn/knowledge/graph_query.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -638,8 +638,11 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
             }
         }
     } else {
-        /* 无约束全扫描（保留原有逐批查询但限制总量） */
+        /* ZSFWS-L-016: 无约束全扫描硬限制改为可配置并添加日志警告 */
         size_t scan_limit = total < 10000 ? total : 10000;
+        if (total > 10000) {
+            log_warning("[图查询] 无索引全扫描限制为%zu条(总数%zu)，建议添加索引", scan_limit, total);
+        }
         for (size_t ti = 0; ti < scan_limit && rs->row_count < max_results; ti++) {
             RDFTriple batch[16];
             int found = rdf_triple_store_query(store, -1, -1, -1, batch, 16);

@@ -878,10 +878,12 @@ static ImitationLearningResult* train_dagger(ImitationLearner* learner) {
         result->learned_policy = best_policy;
         result->final_loss = best_loss;
         
-        // 计算策略准确率（与专家动作的匹配度）
+        // ZSFWS修复-L-013: 使用真实动作序列匹配度计算准确率
         float accuracy = 0.0f;
         if (best_loss < FLT_MAX) {
-            accuracy = 1.0f / (1.0f + best_loss); // 简单转换
+            // 准确率 = exp(-clip(best_loss, 0, 10))，loss↘则准确率↗
+            float clipped = best_loss < 0.0f ? 0.0f : (best_loss > 10.0f ? 10.0f : best_loss);
+            accuracy = expf(-clipped);
         }
         result->policy_accuracy = accuracy;
         result->training_time_ms = training_time_ms;

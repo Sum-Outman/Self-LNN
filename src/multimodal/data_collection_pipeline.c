@@ -23,6 +23,16 @@
 #include <winsock2.h>
 #pragma comment(lib, "ws2_32.lib")
 #endif
+
+/* Z-P1修复: 模态掩码标志 —— 允许调用方按模态筛选训练数据
+ * 配合unified_lnn_state的逐模态归一化，彻底消除跨模态数据污染 */
+#define DC_MODALITY_VISION       (1u << 0)
+#define DC_MODALITY_AUDIO        (1u << 1)
+#define DC_MODALITY_SENSOR       (1u << 2)
+#define DC_MODALITY_TEXT         (1u << 3)
+#define DC_MODALITY_TACTILE      (1u << 4)
+#define DC_MODALITY_PROPRIOCEPT  (1u << 5)
+#define DC_MODALITY_ALL          (0xFFFFFFFFu)
 #include <time.h>
 #include <stdarg.h>
 
@@ -1082,13 +1092,18 @@ static int dcpipeline_collect_internal(DataCollectionPipeline* pipeline,
 
 /* Z5-005: 训练数据批量采集入口 —— 之前此函数声明但从未实现
  * 将多模态采集管道的实时数据转换为训练批次格式
- * 供训练管线(training_pipeline.c)调用以获取真实训练数据 */
+ * 供训练管线(training_pipeline.c)调用以获取真实训练数据
+ * Z-P1修复: 添加modality_mask参数，允许调用方按模态筛选数据，
+ *   消除不同模态数据在训练批次中的交叉污染 */
 int dcpipeline_collect_training_batch(DataCollectionPipeline* pipeline,
                                        float* batch_data, size_t batch_size,
                                        float* batch_labels, size_t label_size,
-                                       int max_samples) {
+                                       int max_samples, uint32_t modality_mask) {
     if (!pipeline || !batch_data || !batch_labels || max_samples <= 0) return -1;
     if (!pipeline->initialized) return -2;
+
+    /* 默认采集所有模态（向后兼容） */
+    if (modality_mask == 0) modality_mask = DC_MODALITY_ALL;
 
     mutex_lock(pipeline->lock);
 
@@ -1110,23 +1125,26 @@ int dcpipeline_collect_training_batch(DataCollectionPipeline* pipeline,
         /* 采集一份快照 */
         if (dcpipeline_collect_internal(pipeline, &snapshot) != 0) break;
 
-        /* 将多模态数据展平到训练批次中 */
-        /* 图像数据（取第一帧RGB） */
-        if (snapshot.num_images > 0 && snapshot.images[0].rgb_data) {
-            size_t img_size = (size_t)(snapshot.images[0].width * snapshot.images[0].height * snapshot.images[0].channels);
-            size_t copy_size = img_size < (batch_size / (size_t)(max_samples)) ? img_size : (batch_size / (size_t)(max_samples));
-            if (collected * (batch_size / (size_t)max_samples) + copy_size <= batch_size) {
-                memcpy(batch_data + collected * (batch_size / (size_t)max_samples),
-                       snapshot.images[0].rgb_data, copy_size * sizeof(float));
+        /* 按模态掩码筛选：只采集请求的模态数据 */
+        if (modality_mask & DC_MODALITY_VISION) {
+            if (snapshot.num_images > 0 && snapshot.images[0].rgb_data) {
+                size_t img_size = (size_t)(snapshot.images[0].width * snapshot.images[0].height * snapshot.images[0].channels);
+                size_t copy_size = img_size < (batch_size / (size_t)(max_samples)) ? img_size : (batch_size / (size_t)(max_samples));
+                if (collected * (batch_size / (size_t)max_samples) + copy_size <= batch_size) {
+                    memcpy(batch_data + collected * (batch_size / (size_t)max_samples),
+                           snapshot.images[0].rgb_data, copy_size * sizeof(float));
+                }
             }
         }
-        /* 音频数据 */
-        if (snapshot.num_audio_frames > 0 && snapshot.audio_frames[0].samples) {
-            float avg = 0;
-            for (int j = 0; j < snapshot.audio_frames[0].num_samples && j < 256; j++) {
-                avg += snapshot.audio_frames[0].samples[j];
+        /* 音频数据：仅在掩码允许时采集 */
+        if (modality_mask & DC_MODALITY_AUDIO) {
+            if (snapshot.num_audio_frames > 0 && snapshot.audio_frames[0].samples) {
+                float avg = 0;
+                for (int j = 0; j < snapshot.audio_frames[0].num_samples && j < 256; j++) {
+                    avg += snapshot.audio_frames[0].samples[j];
+                }
+                batch_labels[collected] = avg / 256.0f;
             }
-            batch_labels[collected] = avg / 256.0f;
         }
 
         dcpipeline_free_snapshot(&snapshot);

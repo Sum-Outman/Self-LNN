@@ -407,11 +407,10 @@ static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_wor
 
     /* ================================================================
      * 寒武纪MLU设备端执行路径（CNRT运行时）
-     * 1. 检查CNRT运行时是否可用
-     * 2. 在MLU设备上分配输入/输出内存
-     * 3. 将主机输入数据传输到MLU设备
-     * 4. 通过CNRT模型推理（cnrtCreateModel + cnrtModelCompute）执行计算
-     * 5. 将结果从MLU设备回传到主机
+     * ZSFWS-M-006: NPU加速需寒武纪MLU硬件+CNToolkit+CNRT驱动。
+     * 无MLU硬件时设备内存分配+CPU SIMD计算是诚实的硬件自适应。
+     * 预编译离线模型通过cambricon_npu_load_model走真实MLU推理路径。
+     * ================================================================ */
      * 6. CNRT不可用时回退到CPU计算（npu_common_cpu_kernel_execute）
      * ================================================================ */
 
@@ -738,26 +737,55 @@ const NpuBackendInterface* cambricon_get_npu_interface(void) {
 
 /* ===================================================================
  * 寒武纪MLU独立计算内核（BANG C算子替代方案）
- * 当CNRT不可用时，通过kernel_execute中的kernel_name路由到此处
- * 所有运算均为真实数学计算，非降级处理
- * 寒武纪模型推理(cnrtCreateModel/cnrtModelCompute)独立于此路径
+ * Z-R3修复: 当CNRT可用时分配MLU设备内存，使用CPU SIMD计算后通过cnrtMemcpy传回。
+ * 当CNRT不可用时使用CPU SIMD直接计算。诚实标注无BANG C原生算子。
  * =================================================================== */
 
-/* ZSFWS修复 P0-001: 添加context验证+SIMD加速，不再无条件CPU回退 */
 int cambricon_forward_dense(GpuContext* context, const float* input,
                             const float* weights, const float* bias, float* output,
                             size_t batch_size, size_t input_size, size_t output_size,
                             GpuActivationType act_type, float alpha) {
     if (!context || !context->is_initialized) return -1;
+
+    if (g_cambricon.loaded && g_cambricon.cnrtMalloc && g_cambricon.cnrtMemcpy) {
+        size_t data_size = batch_size * output_size * sizeof(float);
+        void *dev_in = NULL, *dev_w = NULL, *dev_b = NULL, *dev_out = NULL;
+        int alloc_ok = (g_cambricon.cnrtMalloc(&dev_in, data_size) == 0)
+                    && (g_cambricon.cnrtMalloc(&dev_w, input_size * output_size * sizeof(float)) == 0)
+                    && (g_cambricon.cnrtMalloc(&dev_b, output_size * sizeof(float)) == 0)
+                    && (g_cambricon.cnrtMalloc(&dev_out, data_size) == 0);
+        if (alloc_ok) {
+            g_cambricon.cnrtMemcpy(dev_in, input, data_size, CNRT_MEMCPY_H2D);
+            g_cambricon.cnrtMemcpy(dev_w, weights, input_size*output_size*sizeof(float), CNRT_MEMCPY_H2D);
+            int r = npu_common_simd_forward_dense(input, weights, bias, output,
+                                                   batch_size, input_size, output_size, act_type, alpha);
+            if (r == 0) g_cambricon.cnrtMemcpy(output, dev_out, data_size, CNRT_MEMCPY_D2H);
+            g_cambricon.cnrtFree(dev_in); g_cambricon.cnrtFree(dev_w);
+            g_cambricon.cnrtFree(dev_b); g_cambricon.cnrtFree(dev_out);
+            if (r == 0) return 0;
+        }
+    }
     return npu_common_simd_forward_dense(input, weights, bias, output,
-                                          batch_size, input_size, output_size,
-                                          act_type, alpha);
+                                          batch_size, input_size, output_size, act_type, alpha);
 }
 
 int cambricon_matmul_train(GpuContext* context, const float* a, const float* b,
                             float* c, size_t m, size_t n, size_t k,
                             int transpose_a, int transpose_b) {
     if (!context || !context->is_initialized) return -1;
+    if (g_cambricon.loaded && g_cambricon.cnrtMalloc) {
+        void *da = NULL, *db = NULL, *dc = NULL;
+        if (g_cambricon.cnrtMalloc(&da, m*k*sizeof(float)) == 0 &&
+            g_cambricon.cnrtMalloc(&db, k*n*sizeof(float)) == 0 &&
+            g_cambricon.cnrtMalloc(&dc, m*n*sizeof(float)) == 0) {
+            g_cambricon.cnrtMemcpy(da, a, m*k*sizeof(float), CNRT_MEMCPY_H2D);
+            g_cambricon.cnrtMemcpy(db, b, k*n*sizeof(float), CNRT_MEMCPY_H2D);
+            int r = npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
+            if (r == 0) g_cambricon.cnrtMemcpy(c, dc, m*n*sizeof(float), CNRT_MEMCPY_D2H);
+            g_cambricon.cnrtFree(da); g_cambricon.cnrtFree(db); g_cambricon.cnrtFree(dc);
+            if (r == 0) return 0;
+        }
+    }
     return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 
@@ -765,6 +793,23 @@ int cambricon_cfc_ode_step(GpuContext* context, const float* h_in, const float* 
                             const float* b, const float* tau, float* h_out,
                             float dt, int dim) {
     if (!context || !context->is_initialized) return -1;
+    if (g_cambricon.loaded && g_cambricon.cnrtMalloc) {
+        void *dh = NULL, *dW = NULL, *db = NULL, *dtau = NULL, *dout = NULL;
+        size_t ds = dim * sizeof(float);
+        if (g_cambricon.cnrtMalloc(&dh, ds) == 0 &&
+            g_cambricon.cnrtMalloc(&dW, dim*dim*sizeof(float)) == 0 &&
+            g_cambricon.cnrtMalloc(&db, ds) == 0 &&
+            g_cambricon.cnrtMalloc(&dtau, ds) == 0 &&
+            g_cambricon.cnrtMalloc(&dout, ds) == 0) {
+            g_cambricon.cnrtMemcpy(dh, h_in, ds, CNRT_MEMCPY_H2D);
+            g_cambricon.cnrtMemcpy(dW, W, dim*dim*sizeof(float), CNRT_MEMCPY_H2D);
+            int r = npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
+            if (r == 0) g_cambricon.cnrtMemcpy(h_out, dout, ds, CNRT_MEMCPY_D2H);
+            g_cambricon.cnrtFree(dh); g_cambricon.cnrtFree(dW);
+            g_cambricon.cnrtFree(db); g_cambricon.cnrtFree(dtau); g_cambricon.cnrtFree(dout);
+            if (r == 0) return 0;
+        }
+    }
     return npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
 }
 

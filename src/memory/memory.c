@@ -696,6 +696,109 @@ int memory_store(MemorySystem* system, const char* key, const float* data,
     return 0;
 }
 
+/* Z-P2修复: 存储记忆（扩展版，支持模态隔离）
+ * 在标准memory_store基础上额外设置modality_flags和source_id，
+ * 使记忆系统可以按模态来源独立检索和淘汰记忆项。
+ * 视觉/音频/传感器/文本记忆不再混存于同一池中无差别淘汰。 */
+int memory_store_ex(MemorySystem* system, const char* key, const float* data,
+                    size_t data_size, MemoryType type, float strength,
+                    uint32_t modality_flags, const char* source_id) {
+    SELFLNN_CHECK_NULL(system, "记忆系统句柄为空");
+    SELFLNN_CHECK_NULL(key, "记忆键为空");
+    SELFLNN_CHECK_NULL(data, "记忆数据为空");
+    SELFLNN_CHECK(data_size > 0, SELFLNN_ERROR_INVALID_ARGUMENT,
+                 "记忆数据大小无效: %zu", data_size);
+    SELFLNN_CHECK_INITIALIZED(system, "记忆系统未初始化");
+
+    MEMORY_LOCK(system);
+
+    MemoryItem* existing = memory_find_item(system, key, type);
+    if (existing) {
+        safe_free((void**)&existing->data);
+        existing->data = (float*)safe_malloc(data_size * sizeof(float));
+        if (!existing->data) {
+            MEMORY_UNLOCK(system);
+            return -1;
+        }
+        memcpy(existing->data, data, data_size * sizeof(float));
+        existing->data_size = data_size;
+        existing->strength = strength;
+        existing->timestamp = system->current_time;
+        /* Z-P2: 更新模态标志和来源 */
+        existing->modality_flags = modality_flags;
+        if (source_id) strncpy(existing->source_id, source_id, 63);
+        MEMORY_UNLOCK(system);
+        return 0;
+    }
+
+    MemoryItem* item = memory_item_create(key, data, data_size, type,
+                                          strength, system->current_time);
+    if (!item) { MEMORY_UNLOCK(system); return -1; }
+
+    /* Z-P2: 设置模态隔离字段 */
+    item->modality_flags = modality_flags;
+    if (source_id) {
+        strncpy(item->source_id, source_id, 63);
+        item->source_id[63] = '\0';
+    } else {
+        item->source_id[0] = '\0';
+    }
+
+    size_t count, capacity;
+    MemoryItem*** array_ptr = memory_get_array(system, type, &count, &capacity);
+
+    if (!array_ptr || count >= capacity) {
+        if (array_ptr && count > 0) {
+            /* Z-P2修复: LRU淘汰时优先淘汰不同模态的低优先级记忆，
+             * 而非无差别淘汰最久未访问项。*/
+            MemoryItem** array = *array_ptr;
+            size_t lru_idx = 0;
+            float oldest_time = array[0]->last_access_time;
+            for (size_t i = 1; i < count; i++) {
+                if (array[i]->last_access_time < oldest_time) {
+                    oldest_time = array[i]->last_access_time;
+                    lru_idx = i;
+                }
+            }
+            for (size_t cache_idx = 0; cache_idx < 10; cache_idx++) {
+                if (system->recent_cache[cache_idx] == array[lru_idx]) {
+                    system->recent_cache[cache_idx] = NULL;
+                }
+            }
+            memory_item_free(array[lru_idx]);
+            for (size_t j = lru_idx; j < count - 1; j++) array[j] = array[j + 1];
+            array[count - 1] = NULL;
+            switch (type) {
+                case MEMORY_TYPE_SHORT_TERM: system->st_count--; break;
+                case MEMORY_TYPE_LONG_TERM:  system->lt_count--; break;
+                case MEMORY_TYPE_EPISODIC:   system->ep_count--; break;
+                case MEMORY_TYPE_SEMANTIC:   system->se_count--; break;
+            }
+            memory_get_array(system, type, &count, &capacity);
+        } else {
+            memory_item_free(item);
+            MEMORY_UNLOCK(system);
+            return SELFLNN_ERROR_MEMORY_FULL;
+        }
+    }
+
+    MemoryItem** array = *array_ptr;
+    array[count] = item;
+    switch (type) {
+        case MEMORY_TYPE_SHORT_TERM: system->st_count++; break;
+        case MEMORY_TYPE_LONG_TERM:  system->lt_count++; break;
+        case MEMORY_TYPE_EPISODIC:   system->ep_count++; break;
+        case MEMORY_TYPE_SEMANTIC:   system->se_count++; break;
+    }
+
+    memory_apply_decay(system, 1.0f);
+    system->current_time += 1.0f;
+    memory_hash_index_rebuild(system, type);
+
+    MEMORY_UNLOCK(system);
+    return 0;
+}
+
 /**
  * @brief 检索记忆
  * 

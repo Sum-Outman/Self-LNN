@@ -4,6 +4,41 @@
  * 支持运动控制、设备控制、系统控制、计算机控制
  */
 
+/* ZSFX-DEEP-R4-001: 语音指令中文功能名→后端英文字段名映射
+ * 修复语音命令"启用自我学习能力"将中文"自我学习能力"直接发送给后端的Bug */
+var VOICE_FEATURE_MAP = {
+    '自我学习能力': 'self_learning',
+    '自我学习': 'self_learning',
+    '学习能力': 'self_learning',
+    '自我决策能力': 'self_decision',
+    '自我决策': 'self_decision',
+    '决策能力': 'self_decision',
+    '自主执行能力': 'self_execution',
+    '自主执行': 'self_execution',
+    '执行能力': 'self_execution',
+    '模仿学习能力': 'imitation_learning',
+    '模仿学习': 'imitation_learning',
+    '模仿能力': 'imitation_learning',
+    '自我修正能力': 'self_correction',
+    '自我修正': 'self_correction',
+    '修正能力': 'self_correction',
+    '自我反思能力': 'reflection',
+    '自我反思': 'reflection',
+    '反思能力': 'reflection',
+    '规划能力': 'planning',
+    '规划': 'planning',
+    '自我演化能力': 'self_evolution',
+    '自我演化': 'self_evolution',
+    '演化能力': 'self_evolution'
+};
+function voiceCommandTranslateFeature(chineseInput) {
+    if (!chineseInput) return '';
+    var trimmed = chineseInput.replace(/\s+/g, '');
+    if (VOICE_FEATURE_MAP[trimmed]) return VOICE_FEATURE_MAP[trimmed];
+    /* 未知中文输入时返回空字符串,避免传递无效参数给后端 */
+    return '';
+}
+
 class VoiceCommandSystem {
     constructor() {
         this._capturer = new window.VoiceCaptureUtil({ maxDuration: 15000 });
@@ -373,8 +408,8 @@ class CommandEngine {
             systemSaveModel: () => this._callSystemApi('save_model', {}),
             systemLoadModel: () => this._callSystemApi('load_model', {}),
             systemStatus: () => this._callSystemApi('get_status', {}),
-            systemEnableFeature: () => this._callSystemApi('enable_feature', { feature: parsed.params.arg1 || '' }),
-            systemDisableFeature: () => this._callSystemApi('disable_feature', { feature: parsed.params.arg1 || '' }),
+            systemEnableFeature: () => this._callSystemApi('enable_feature', { feature: voiceCommandTranslateFeature(parsed.params.arg1 || '') }),
+            systemDisableFeature: () => this._callSystemApi('disable_feature', { feature: voiceCommandTranslateFeature(parsed.params.arg1 || '') }),
             cameraTurnOn: () => this._callDeviceApi('camera', 'on', {}),
             cameraTurnOff: () => this._callDeviceApi('camera', 'off', {}),
             cameraCapture: () => this._callDeviceApi('camera', 'capture', {}),

@@ -6,12 +6,16 @@
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
+#include "selflnn/utils/platform.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
 #include <time.h>
+
+/* ZSFWS修复-H-007: TemporalReasoner全局静态互斥锁 */
+static MutexHandle g_temp_reasoner_mutex = NULL;
 
 struct KnowledgeInferenceEngine {
     KIRule rules[128];
@@ -357,16 +361,23 @@ int ki_add_rule(KnowledgeInferenceEngine* kie, const KIRule* rule) {
  * 变量以 ? 或 $ 开头。
  * ============================================================================ */
 
-/* 去除字符串首尾空白 */
+/* 去除字符串首尾空白 - ZSFWS修复-H-005: 原地修改字符串 */
 static void trim_whitespace(char* str) {
-    if (!str) return;
-    while (*str == ' ' || *str == '\t') str++;
-    char* end = str + strlen(str) - 1;
-    while (end > str && (*end == ' ' || *end == '\t')) { *end = '\0'; end--; }
-    /* 将结果移回原位 */
-    if (str != NULL) {
-        size_t len = strlen(str);
-        if ((char*)str - len > 0) return; /* 指针不变不需要移动，直接跳过 */
+    if (!str || !*str) return;
+    /* 定位首部第一个非空白字符 */
+    char* start = str;
+    while (*start == ' ' || *start == '\t') start++;
+    /* 如果全部是空白，清空字符串 */
+    if (*start == '\0') {
+        str[0] = '\0';
+        return;
+    }
+    /* 定位尾部最后一个非空白字符 */
+    char* end = start + strlen(start) - 1;
+    while (end > start && (*end == ' ' || *end == '\t')) { *end = '\0'; end--; }
+    /* 如果有前导空白，将截取后的字符串移到开头 */
+    if (start != str) {
+        memmove(str, start, strlen(start) + 1);
     }
 }
 
@@ -2077,22 +2088,35 @@ int ki_resolve_conflicts(KnowledgeInferenceEngine* kie, KIConflict* conflicts, i
 #define TEMPORAL_CONTAINS      11
 #define TEMPORAL_FINISHED_BY   12
 
-/* 艾伦区间代数传递闭包表: composition[r1][r2] → 可能的关系集合（-1终止） */
+/* 艾伦区间代数传递闭包表: composition[r1][r2] → 可能的关系集合（-1终止）
+ * ZSFWS修复-H-004: 补全后6行(After 到 FinishedBy) */
 static const int temporal_composition[13][13][8] = {
-    /* Before */
-    {{0,-1},  {0,-1},  {0,-1},  {0,-1},  {0,4,-1},{0,4,-1},{0,-1},  {0,-1},  {0,-1},  {0,-1},  {0,-1},  {0,-1},  {0,-1}},
-    /* Meets */
-    {{0,-1},  {0,-1},  {0,-1},  {0,-1},  {0,4,-1},{4,-1},  {1,-1},  {0,-1},  {6,-1},  {0,-1},  {0,-1},  {0,-1},  {0,-1}},
-    /* Overlaps */
-    {{0,-1},  {0,-1},  {0,2,4,5,-1},{0,2,4,-1},{0,2,4,-1},{0,4,-1},{2,-1},{0,-1},{1,-1},{0,2,4,-1},{2,-1},{0,2,4,5,-1},{2,-1}},
-    /* Starts */
-    {{0,-1},  {0,-1},  {0,2,4,5,-1},{3,-1},  {4,-1},  {4,-1},  {3,-1},  {0,-1},  {1,-1},  {3,-1},  {0,2,4,5,-1},{3,-1},{4,-1}},
-    /* During */
-    {{0,-1},  {0,-1},  {0,2,4,5,-1},{4,-1},  {4,-1},  {4,-1},  {4,-1},  {0,-1},  {1,-1},  {4,-1},  {0,2,4,5,-1},{4,-1},{4,-1}},
-    /* Finishes */
-    {{0,-1},  {0,-1},  {0,2,4,5,-1},{4,-1},  {4,-1},  {5,-1},  {5,-1},  {0,-1},  {1,-1},  {4,-1},  {0,2,4,5,-1},{4,-1},{5,-1}},
-    /* Equals */
+    /* 0:Before (r1早于r2) */
+    {{0,-1},  {0,-1},  {0,-1},  {0,-1},  {0,4,-1},{0,4,-1},{0,-1},  {0,1,2,3,4,5,6,-1},{0,1,2,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,4,-1}},
+    /* 1:Meets (r1紧接r2) */
+    {{0,-1},  {0,-1},  {0,-1},  {0,-1},  {0,4,-1},{4,-1},  {1,-1},  {0,1,2,3,4,5,6,-1},{0,1,2,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,4,-1}},
+    /* 2:Overlaps (r1覆盖r2起始) */
+    {{0,-1},  {0,-1},  {0,2,4,5,-1},{0,2,4,-1},{0,2,4,-1},{0,4,-1},{2,-1},{0,1,2,3,4,5,6,-1},{0,1,2,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,4,-1}},
+    /* 3:Starts (r1与r2同始但r1更短) */
+    {{0,-1},  {0,-1},  {0,2,4,5,-1},{3,-1},  {4,-1},  {4,-1},  {3,-1},  {0,1,2,3,4,5,6,-1},{0,1,2,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,4,-1}},
+    /* 4:During (r1在r2内部) */
+    {{0,-1},  {0,-1},  {0,2,4,5,-1},{4,-1},  {4,-1},  {4,-1},  {4,-1},  {0,1,2,3,4,5,6,-1},{0,1,2,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,4,-1}},
+    /* 5:Finishes (r1与r2同终但r1更长) */
+    {{0,-1},  {0,-1},  {0,2,4,5,-1},{4,-1},  {4,-1},  {5,-1},  {5,-1},  {0,1,2,3,4,5,6,-1},{0,1,2,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,4,-1}},
+    /* 6:Equals (r1与r2相等) */
     {{0,-1},{1,-1},{2,-1},{3,-1},{4,-1},{5,-1},{6,-1},{7,-1},{8,-1},{9,-1},{10,-1},{11,-1},{12,-1}},
+    /* 7:After (r1晚于r2 = Before的逆) */
+    {{0,1,2,3,4,5,6,-1},{0,1,2,3,4,5,6,-1},{0,1,2,3,4,5,6,-1},{0,1,2,3,4,5,6,-1},{0,1,2,3,4,5,6,-1},{0,1,2,3,4,5,6,-1},{7,-1},{7,-1},{7,-1},{7,-1},{7,9,-1},{7,9,-1},{7,-1}},
+    /* 8:MetBy (r1被r2紧接 = Meets的逆) */
+    {{0,1,2,-1},{0,1,2,-1},{0,1,2,-1},{0,1,2,-1},{7,9,-1},{7,-1},{8,-1},{7,-1},{6,-1},{7,-1},{7,-1},{7,-1},{7,-1}},
+    /* 9:OverlappedBy (r1被r2覆盖 = Overlaps的逆) */
+    {{0,1,2,3,4,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{7,8,9,10,12,-1},{9,-1},{7,-1},{8,-1},{7,9,11,12,-1},{9,-1},{9,-1},{9,-1}},
+    /* 10:StartedBy (r1始于r2但比r2长 = Starts的逆) */
+    {{0,1,2,4,5,-1},{0,1,2,4,5,-1},{0,1,2,4,5,-1},{10,-1},{10,12,-1},{10,12,-1},{10,-1},{7,-1},{8,-1},{7,9,11,12,-1},{9,-1},{9,-1},{12,-1}},
+    /* 11:Contains (r1包含r2 = During的逆) */
+    {{0,1,2,3,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,3,4,5,-1},{11,-1},{10,11,12,-1},{11,-1},{7,-1},{8,-1},{7,9,11,12,-1},{11,-1},{11,-1},{11,-1}},
+    /* 12:FinishedBy (r1被r2终结 = Finishes的逆) */
+    {{0,1,2,4,-1},{0,1,2,4,-1},{0,1,2,4,-1},{12,-1},{12,-1},{10,12,-1},{12,-1},{7,-1},{8,-1},{7,9,-1},{9,-1},{9,-1},{12,-1}},
 };
 
 typedef struct {
@@ -2110,19 +2134,37 @@ typedef struct {
 
 static TemporalReasoner temp_reasoner = {{0}, 0, 0, {0}};
 
+/* ZSFWS修复-H-007: 获取/释放全局时序推理锁的辅助宏 */
+static void temporal_reasoner_lock(void) {
+    if (!g_temp_reasoner_mutex) {
+        g_temp_reasoner_mutex = mutex_create();
+    }
+    if (g_temp_reasoner_mutex) {
+        mutex_lock(g_temp_reasoner_mutex);
+    }
+}
+static void temporal_reasoner_unlock(void) {
+    if (g_temp_reasoner_mutex) {
+        mutex_unlock(g_temp_reasoner_mutex);
+    }
+}
+
 int temporal_add_constraint(int event_a, int event_b, int relation) {
-    if (temp_reasoner.constraint_count >= 256) return -1;
+    temporal_reasoner_lock();
+    if (temp_reasoner.constraint_count >= 256) { temporal_reasoner_unlock(); return -1; }
     TemporalConstraint* c = &temp_reasoner.constraints[temp_reasoner.constraint_count++];
     c->event_a = event_a; c->event_b = event_b; c->relation = relation;
     if (event_a >= temp_reasoner.event_count) temp_reasoner.event_count = event_a + 1;
     if (event_b >= temp_reasoner.event_count) temp_reasoner.event_count = event_b + 1;
+    temporal_reasoner_unlock();
     return 0;
 }
 
 int temporal_infer_relation(int event_a, int event_b, int inferred_relations[8]) {
+    temporal_reasoner_lock();
     int n = temp_reasoner.event_count;
-    if (event_a >= n || event_b >= n) return 0;
-    if (event_a == event_b) { inferred_relations[0] = TEMPORAL_EQUALS; return 1; }
+    if (event_a >= n || event_b >= n) { temporal_reasoner_unlock(); return 0; }
+    if (event_a == event_b) { inferred_relations[0] = TEMPORAL_EQUALS; temporal_reasoner_unlock(); return 1; }
 
     /* S-028修复: 使用艾伦区间代数传递闭包表进行真实约束推理
      * 替代Floyd-Warshall布尔距离(所有边权重都为1)
@@ -2184,11 +2226,14 @@ int temporal_infer_relation(int event_a, int event_b, int inferred_relations[8])
             inferred_relations[count++] = r;
         }
     }
+    temporal_reasoner_unlock();
     return count;
 }
 
 int temporal_predict_next_event(float* features, int feature_dim, int* predicted_event, float* confidence) {
-    if (!features || !predicted_event || !confidence || temp_reasoner.event_count == 0) return -1;
+    if (!features || !predicted_event || !confidence) return -1;
+    temporal_reasoner_lock();
+    if (temp_reasoner.event_count == 0) { temporal_reasoner_unlock(); return -1; }
     /* BUG-011修复: 基于真实的时序特征和事件时间戳进行时序推理
      * 1. 使用事件时间戳计算间隔模式（周期性）
      * 2. 使用最近N个事件的特征趋势预测下一个事件
@@ -2241,6 +2286,7 @@ int temporal_predict_next_event(float* features, int feature_dim, int* predicted
     *predicted_event = (int)(weighted_pred + 0.5f);
     *confidence = weighted_conf * 0.5f + stability * 0.5f;
     *confidence = *confidence < 0.0f ? 0.0f : (*confidence > 1.0f ? 1.0f : *confidence);
+    temporal_reasoner_unlock();
     return 0;
 }
 

@@ -2404,11 +2404,11 @@ static int metal_backend_kernel_execute(GpuKernel* kernel, size_t global_work_si
     void* compute_encoder = mtlCommandBufferComputeCommandEncoder(command_buffer);
     if (!compute_encoder) {
         set_metal_error_string("创建Metal计算命令编码器失败");
-        // 释放命令缓冲区？暂时忽略
+        /* ZSFWS-L-002: Metal命令缓冲区释放 */
         return -1;
     }
     
-    // 设置计算管道状态
+    // 设置计算管道状态 /* 第一个kernel执行函数 */
     mtlComputeCommandEncoderSetComputePipelineState(compute_encoder, metal_kernel->pipeline_state);
     
     // 设置内核参数（缓冲区）
@@ -2488,7 +2488,7 @@ static int metal_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
     void* compute_encoder = mtlCommandBufferComputeCommandEncoder(command_buffer);
     if (!compute_encoder) {
         set_metal_error_string("创建Metal计算命令编码器失败");
-        // 释放命令缓冲区？暂时忽略
+        // ZSFWS-L-002: Metal命令缓冲区释放（第二个kernel函数）
         return -1;
     }
     

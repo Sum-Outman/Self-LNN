@@ -32,14 +32,20 @@
 
 /**
  * @brief Hamilton梯度：输入梯度
- * grad_a = M_plus(b)^T * grad_r
- */
+/* ZSFX-DEEP-R8-001: 修复输入梯度公式。
+ * 前向: r = input ⊗ weight (Hamilton积, input在左, weight在右)
+ * 正确梯度: ∂L/∂input = M_R(weight)^T · grad_r
+ * M_R(b)^T = [  b0   b1   b2   b3 ]
+ *            [ -b1   b0  -b3   b2 ]
+ *            [ -b2   b3   b0  -b1 ]
+ *            [ -b3  -b2   b1   b0 ]
+ * 原作错误使用了 M_L(b)^T, 6个off-diagonal项符号相反。 */
 static void quat_grad_input(const float* b, const float* grad_r, float* grad_a)
 {
     grad_a[0] = b[0] * grad_r[0] + b[1] * grad_r[1] + b[2] * grad_r[2] + b[3] * grad_r[3];
-    grad_a[1] = -b[1] * grad_r[0] + b[0] * grad_r[1] + b[3] * grad_r[2] - b[2] * grad_r[3];
-    grad_a[2] = -b[2] * grad_r[0] - b[3] * grad_r[1] + b[0] * grad_r[2] + b[1] * grad_r[3];
-    grad_a[3] = -b[3] * grad_r[0] + b[2] * grad_r[1] - b[1] * grad_r[2] + b[0] * grad_r[3];
+    grad_a[1] = -b[1] * grad_r[0] + b[0] * grad_r[1] - b[3] * grad_r[2] + b[2] * grad_r[3];
+    grad_a[2] = -b[2] * grad_r[0] + b[3] * grad_r[1] + b[0] * grad_r[2] - b[1] * grad_r[3];
+    grad_a[3] = -b[3] * grad_r[0] - b[2] * grad_r[1] + b[1] * grad_r[2] + b[0] * grad_r[3];
 }
 
 /**
@@ -190,16 +196,16 @@ int quaternion_conv1d_forward(QuaternionConv1D* layer,
 
                 for (size_t ii = 0; ii < ic; ii++) {
                     for (size_t k = 0; k < ks; k++) {
-                        /* 输入索引 = seq_start + k */
-                        size_t seq_start = ol * stride;
-                        size_t pos = seq_start + k;
-
-                        /* 处理填充: 使用零填充 */
-                        if (pos >= seq_len) {
+                        /* ZSFX-DEEP-R10-002: 修正padding处理
+                         * 原作: seq_start = ol*stride, 仅检查pos>=seq_len上界, padding完全未实现
+                         * 修正: 考虑padding左偏移, 同时检查下界和上界 */
+                        int pos = (int)(ol * stride) - (int)(cfg->padding);
+                        pos += (int)k;
+                        if (pos < 0 || (size_t)pos >= seq_len) {
                             continue;
                         }
 
-                        size_t in_idx = ((b * ic + ii) * seq_len + pos) * 4;
+                        size_t in_idx = ((b * ic + ii) * seq_len + (size_t)pos) * 4;
                         size_t w_idx = ((oi * ic + ii) * ks + k) * 4;
 
                         float temp[4];

@@ -14,6 +14,7 @@
 #include "selflnn/knowledge/graph_storage.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/secure_random.h"   /* ZSFWS-L-012: 统一安全随机数 */
 /* CfC知识库集成——通过cfc_knowledge_embedding引擎进行语义嵌入与推理 */
 /* #include "selflnn/core/cfc_cell.h" —— 所有连续演化由主LNN统一管理 */
 #include <stdlib.h>
@@ -30,33 +31,10 @@
 #define GR_MAX_NEG_SAMPLES  100
 #define GR_ENERGY_NORMALIZE 10.0f
 
-/* ========== 线程安全：RNG种子锁 ========== */
-#ifdef _WIN32
-static CRITICAL_SECTION g_gr_seed_lock;
-static int g_gr_seed_lock_init = 0;
-static void gr_seed_lock_init(void) {
-    if (!g_gr_seed_lock_init) {
-        InitializeCriticalSection(&g_gr_seed_lock);
-        g_gr_seed_lock_init = 1;
-    }
-}
-#define GR_SEED_LOCK() do { gr_seed_lock_init(); EnterCriticalSection(&g_gr_seed_lock); } while(0)
-#define GR_SEED_UNLOCK() LeaveCriticalSection(&g_gr_seed_lock)
-#else
-#include <pthread.h>
-static pthread_mutex_t g_gr_seed_lock = PTHREAD_MUTEX_INITIALIZER;
-#define GR_SEED_LOCK() pthread_mutex_lock(&g_gr_seed_lock)
-#define GR_SEED_UNLOCK() pthread_mutex_unlock(&g_gr_seed_lock)
-#endif
-
-static unsigned int gr_seed = 67890;
+/* ZSFWS-L-012: 已改用secure_random，移除旧LCG锁机制 */
 
 static float gr_rand_float(void) {
-    GR_SEED_LOCK();
-    gr_seed = gr_seed * 1103515245 + 12345;
-    float result = (float)((gr_seed >> 16) & 0x7FFF) / 32768.0f;
-    GR_SEED_UNLOCK();
-    return result;
+    return secure_random_float();
 }
 
 static int gr_rand_int(int min, int max) {

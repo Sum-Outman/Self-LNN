@@ -689,14 +689,24 @@ int advanced_regularizer_apply_multimodal_mix(AdvancedRegularizer* regularizer,
         return 0;
     }
     
-    /* 模态边界定义（基于比例） */
-    float modal_ratios[4][2] = {
-        {0.0f, 0.4f},   /* 视觉: 0~40% */
-        {0.4f, 0.6f},   /* 文本: 40~60% */
-        {0.6f, 0.8f},   /* 语音: 60~80% */
-        {0.8f, 1.0f}    /* 传感器: 80~100% */
-    };
-    const int num_modals = 4;
+    /* R6-⑥修复: 动态模态边界——替代硬编码40/20/20/20固定比例。
+     * 原代码假设仅4个模态(视/文/语/传)且固定比例，实际系统支持9+模态。
+     * 现在使用配置中的num_modalities或默认等分策略，若配置为0则禁用该正则化。 */
+    int num_modals = regularizer->config.num_multimodal_modalities > 0
+                     ? regularizer->config.num_multimodal_modalities : 0;
+    if (num_modals < 2) {
+        /* 模态数不足，直接复制返回，不做跨模态混合 */
+        memcpy(augmented_inputs, inputs, batch_size * input_dim * sizeof(float));
+        memcpy(augmented_targets, targets, batch_size * output_dim * sizeof(float));
+        return 0;
+    }
+    
+    /* 等分边界计算：N个模态平均分配输入维度 */
+    float modal_ratios[9][2];
+    for (int m = 0; m < num_modals && m < 9; m++) {
+        modal_ratios[m][0] = (float)m / (float)num_modals;
+        modal_ratios[m][1] = (float)(m + 1) / (float)num_modals;
+    }
     
     /* 复制原始数据作为基准 */
     memcpy(augmented_inputs, inputs, batch_size * input_dim * sizeof(float));

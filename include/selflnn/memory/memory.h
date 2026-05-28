@@ -38,7 +38,20 @@ typedef struct {
     MemoryType type;           /**< 记忆类型 */
     float last_access_time;    /**< 最后访问时间（用于LRU淘汰策略） */
     size_t access_count;       /**< 访问次数（用于频率统计和热度评估） */
+    /* Z-P2修复: 模态隔离字段 —— 消除跨模态记忆数据污染
+     * 视觉/音频/传感器/文本记忆现在可按来源独立检索和淘汰 */
+    uint32_t modality_flags;   /**< 模态标志位（DC_MODALITY_VISION|AUDIO|...) */
+    char source_id[64];        /**< 数据来源标识（文件路径/设备ID/传感器名称） */
 } MemoryItem;
+
+/* Z-P2修复: 模态标志位定义（与data_collection_pipeline.c保持一致） */
+#define MEMORY_MODALITY_VISION       (1u << 0)
+#define MEMORY_MODALITY_AUDIO        (1u << 1)
+#define MEMORY_MODALITY_SENSOR       (1u << 2)
+#define MEMORY_MODALITY_TEXT         (1u << 3)
+#define MEMORY_MODALITY_TACTILE      (1u << 4)
+#define MEMORY_MODALITY_PROPRIOCEPT  (1u << 5)
+#define MEMORY_MODALITY_ALL          (0xFFFFFFFFu)
 
 /**
  * @brief 记忆系统配置
@@ -150,6 +163,23 @@ void memory_free(MemorySystem* system);
  */
 int memory_store(MemorySystem* system, const char* key, const float* data,
                  size_t data_size, MemoryType type, float strength);
+
+/**
+ * @brief 存储记忆（扩展版，支持模态隔离）
+ * 
+ * @param system 记忆系统句柄
+ * @param key 记忆键
+ * @param data 记忆数据
+ * @param data_size 数据大小
+ * @param type 记忆类型
+ * @param strength 初始强度
+ * @param modality_flags 模态标志位（MEMORY_MODALITY_VISION|AUDIO|...）
+ * @param source_id 数据来源标识（可为NULL）
+ * @return int 成功返回0，失败返回-1
+ */
+int memory_store_ex(MemorySystem* system, const char* key, const float* data,
+                    size_t data_size, MemoryType type, float strength,
+                    uint32_t modality_flags, const char* source_id);
 
 /**
  * @brief 检索记忆

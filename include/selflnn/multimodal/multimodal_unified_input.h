@@ -81,6 +81,7 @@ typedef struct {
     float* projection_biases[SELFLNN_MAX_MODALITIES];   /**< 投影偏置 [proj_dim] */
     size_t projection_input_sizes[SELFLNN_MAX_MODALITIES]; /**< 各投影输入维度 */
     int projections_initialized;                         /**< 投影矩阵是否已初始化 */
+    int projection_locked;                               /**< ZSFX-DEEP-R8-002: 1=锁定投影矩阵不参与训练 */
     /* ZSF-009: 在线学习支持 —— 存储上次前向传播数据 */
     float last_raw_signals[SELFLNN_MAX_MODALITIES][SELFLNN_MAX_CONTROL_DIM]; /**< 上次各模态原始信号 */
     size_t last_raw_sizes[SELFLNN_MAX_MODALITIES];      /**< 上次各模态信号维度 */

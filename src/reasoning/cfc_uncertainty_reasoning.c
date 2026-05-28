@@ -73,6 +73,14 @@ struct CfCUncertainReasoningState {
     /* 结果缓存 */
     float* result_cache;
     int result_cache_count;
+
+    /* Z-R3-P03修复: 门控权重从全局静态变量移入结构体。
+     * 原全局静态变量导致所有CfCUncertainReasoningState实例共享同一套参数，
+     * 多实例并行训练时相互覆盖，无法按实例独立学习。 */
+    float gate_w_g;
+    float gate_w_a;
+    float gate_b_g;
+    float gate_b_a;
 };
 
 /* ============================================================================
@@ -99,8 +107,8 @@ static float softmax_2d(const float* logits, int n, int i, float temperature) {
     return expf((logits[i] - max_val) / temperature) / (sum + CFC_UNCERTAIN_EPSILON);
 }
 
-/* ZSFWS修复 P1-005: 门控权重从硬编码改为可学习参数（默认值保留原硬编码值） */
-static float gate_w_g = 1.0f, gate_w_a = 0.8f, gate_b_g = 0.1f, gate_b_a = 0.0f;
+/* Z-R3-P03修复: 门控权重已移入CfCUncertainReasoningState结构体，每实例独立可学习。默认值保留。 */
+/* static float gate_w_g/w_a/b_g/b_a 已移除 —— 见结构体定义 */
 
 /* CfC液态门控计算（权重参数可学习） */
 static void cfc_liquid_gate(const float* h, const float* input, float* gate,
@@ -159,7 +167,16 @@ float cfc_uncertain_compute_membership(FuzzyMembershipType mf_type,
             return 1.0f / (1.0f + powf(fabsf((x - c) / a), 2.0f * b));
         }
         case FUZZY_MF_LIQUID_CFC:
-            return sigmoidf(1.0f * x + params[0]);
+            /* ZSFWS修复-L-009: 使用三个参数的液态CFC隶属函数，实现ODE动力学驱动的隶属度计算 */
+            {
+                float w = params[0] > CFC_UNCERTAIN_EPSILON ? params[0] : CFC_UNCERTAIN_EPSILON;
+                float b = params[1];
+                float tau = fabsf(params[2]) > CFC_UNCERTAIN_EPSILON ? fabsf(params[2]) : 1.0f;
+                /* sigmoid(w*x + b) × exp(-|x|/tau) 液态衰减调制 */
+                float sig = sigmoidf(w * x + b);
+                float damp = expf(-fabsf(x) / tau);
+                return sig * damp;
+            }
         default:
             return 0.0f;
     }
@@ -204,6 +221,11 @@ CfCUncertainReasoningState* cfc_uncertain_create(const CfCUncertainConfig* confi
 
     state->result_cache = (float*)safe_calloc(256, sizeof(float));
     state->result_cache_count = 0;
+    /* Z-R3-P03修复: 初始化门控权重为默认值 */
+    state->gate_w_g = 1.0f;
+    state->gate_w_a = 0.8f;
+    state->gate_b_g = 0.1f;
+    state->gate_b_a = 0.0f;
     state->is_initialized = 1;
 
     return state;
@@ -392,7 +414,7 @@ int cfc_uncertain_liquid_fuzzy_infer(CfCUncertainReasoningState* state,
     for (int step = 0; step < evolution_steps; step++) {
         cfc_liquid_gate(state->cfc_state, inputs, state->cfc_gate,
                          state->cfc_act, dim,
-                         gate_w_g, gate_w_a, gate_b_g, gate_b_a);
+                         state->gate_w_g, state->gate_w_a, state->gate_b_g, state->gate_b_a);
         cfc_ode_step(state->cfc_state, state->cfc_gate, state->cfc_act,
                       dim, state->config.cfc_tau, state->config.cfc_dt);
 
@@ -621,7 +643,13 @@ int cfc_uncertain_ds_fuse(CfCUncertainReasoningState* state,
     float* combined_mass = (float*)safe_calloc(max_h, sizeof(float));
     if (!combined_mass) return -1;
 
-    for (int h = 0; h < max_h; h++) combined_mass[h] = 1.0f;
+    /* Z-R3-P06修复: Dempster组合规则初始mass修正。
+     * 原代码 combined_mass[h]=1.0 违反D-S基本公理(sum(m)=1)。
+     * D-S理论要求初始mass全部分配给识别框架全集Θ(表示"全知无知")。
+     * 正确初始化：第一个假设(mass[0])设为1.0，其余为0，
+     * 表示初始状态完全不确定(全部mass分配给全集)。 */
+    for (int h = 0; h < max_h; h++) combined_mass[h] = 0.0f;
+    combined_mass[0] = 1.0f;
 
     for (int s = 0; s < num_sources; s++) {
         int sid = source_ids[s];

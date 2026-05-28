@@ -15,6 +15,10 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 
+/* ZSFX-DEEP-R6-003: 外部互斥锁函数声明(用于LNN并发保护) */
+extern void mutex_lock(void*);
+extern void mutex_unlock(void*);
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -1313,6 +1317,9 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
     log_info("[演化验证] 开始写入LNN权重: 染色体大小=%zu, LNN参数数=%zu, 适应度=%.6f",
              best->chromosome_size, total_params, best->fitness);
 
+    /* ZSFX-DEEP-R6-003: 获取LNN写锁，防止与HTTP推理/在线学习/训练管线产生竞态 */
+    mutex_lock(&lnn->lock);
+
     /* ZSFWS-012 Step1: 写入规范参数块（weight_matrix + bias_vector连续块） */
     memcpy(params, best->chromosome, copy_count * sizeof(float));
 
@@ -1405,6 +1412,9 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
                  "染色体总消耗=%zu/%zu",
                  num_layers, cell_params_written, chrom_offset, best->chromosome_size);
     }
+
+    /* ZSFX-DEEP-R6-003: 释放LNN写锁 */
+    mutex_unlock(&lnn->lock);
 
     /* K-013: 记录权重变更日志 */
     float rel_change = (orig_norm > 1e-8f) ? (float)(l2_diff / orig_norm) * 100.0f : 0.0f;

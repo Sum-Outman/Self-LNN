@@ -9,7 +9,7 @@
  */
 
 #include "selflnn/knowledge/graph_storage.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -1423,6 +1423,8 @@ int rdf_triple_store_query(RDFTripleStore* store, int subject_id,
                 if (store->spo_index[i].subject_id != subject_id ||
                     store->spo_index[i].predicate_id != predicate_id ||
                     store->spo_index[i].object_id != object_id) break;
+                /* ZSFWS-L-017: 索引命中后全表回查——性能优化空间：
+                 * 可在SPOEntry中直接存储triple索引避免O(n)全扫描 */
                 for (size_t t = 0; t < store->triple_count; t++) {
                     if (store->triples[t].subject_id == subject_id &&
                         store->triples[t].predicate_id == predicate_id &&

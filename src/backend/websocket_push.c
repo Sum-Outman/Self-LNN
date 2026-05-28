@@ -327,7 +327,10 @@ static void ws_client_close(WSClientInternal* cli)
     cli->closing = 0;
 }
 
-/* K-071: WebSocket推送线程安全 —— 用平台互斥锁保护客户端列表操作 */
+/* R5-⑦修复: ws_lock/ws_unlock为死代码，实际锁机制使用platform.c的mutex_lock/mutex_unlock
+ * (Windows下用WaitForSingleObject, 非EnterCriticalSection)。
+ * 保留此代码仅供文档参考，标注为DEPRECATED。 */
+#if 0  /* DEPRECATED: 使用mutex_lock/mutex_unlock替代 */
 static void ws_lock(void* mutex)
 {
 #ifdef _WIN32
@@ -345,6 +348,7 @@ static void ws_unlock(void* mutex)
     if (mutex) pthread_mutex_unlock((pthread_mutex_t*)mutex);
 #endif
 }
+#endif /* DEPRECATED */
 
 /* WebSocket推送accept线程函数 */
 #ifdef _WIN32
@@ -379,13 +383,17 @@ static void* ws_push_accept_thread(void* arg)
         }
         if (slot < 0) { mutex_unlock(srv->mutex); WS_CLOSE(client); continue; }
 
+        /* Z-R3-P02修复: 将ws_client_init移到锁内执行，消除竞态窗口。
+         * 原代码在mutex_unlock之后才调用ws_client_init，导致另一个线程
+         * (如ws_push_broadcast_json)在active=1但sock未设置时访问，
+         * 可能使用未初始化的socket导致崩溃或数据损坏。 */
+        ws_client_init(&srv->clients[slot], client);
         srv->clients[slot].active = 1;
         mutex_unlock(srv->mutex);
 
         if (ws_do_handshake(client) != 0) { WS_CLOSE(client); continue; }
 
         ws_set_nonblock(client, 1);
-        ws_client_init(&srv->clients[slot], client);
     }
 #ifdef _WIN32
     return 0;
@@ -422,6 +430,8 @@ int ws_push_server_start(WSPushServer* srv)
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 #else
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    /* ZSFX-DEEP-R7-002: Linux需要SO_REUSEPORT与HTTP服务器共享8080端口 */
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -447,7 +457,8 @@ int ws_push_server_start(WSPushServer* srv)
     {
         pthread_t tid;
         if (pthread_create(&tid, NULL, ws_push_accept_thread, srv) == 0) {
-            pthread_detach(tid);
+            /* Z-R3-P01修复: 移除pthread_detach，因为ws_push_server_stop中调用了pthread_join。
+             * POSIX规范明确禁止对已分离线程调用pthread_join，导致未定义行为(EINVAL或静默崩溃)。 */
             srv->accept_thread = (void*)(uintptr_t)tid;
         }
     }

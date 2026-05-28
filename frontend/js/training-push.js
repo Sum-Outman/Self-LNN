@@ -90,6 +90,9 @@ class TrainingPushManager {
     }
 
     _handleTrainingProgress(data) {
+        /* FIX-F2-CRIT-6: 后端发送epoch/loss/progress/progress_pct,映射到前端字段 */
+        if (data.epoch !== undefined) data.current_epoch = data.epoch;
+        if (data.progress_pct !== undefined && data.progress === undefined) data.progress = data.progress_pct;
         if (data.current_epoch !== undefined) {
             this.trainingState.currentEpoch = data.current_epoch;
         }
@@ -155,11 +158,12 @@ class TrainingPushManager {
     }
 
     _handleSystemStatus(data) {
+        /* FIX-F2-CRIT-6: 后端发送active_tasks/total_memories/reflection_count,无cpu/memory/gpu */
         if (window.visualizationManager) {
             window.visualizationManager.updateSystemResourceData(
-                data.cpu_usage || 0,
-                data.memory_usage || 0,
-                data.gpu_usage || 0
+                data.cpu_usage || data.cpu_percent || 0,
+                data.memory_usage || data.memory_percent || 0,
+                data.gpu_usage || data.gpu_percent || 0
             );
         }
         this._updateGPUDisplay(data);

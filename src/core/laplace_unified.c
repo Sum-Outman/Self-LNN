@@ -43,10 +43,17 @@ static int laplace_integration_init(void) {
 }
 
 int laplace_unified_system_init(const LaplaceAIConfig* cfg) {
-    (void)cfg;
-
-    LaplaceConfig default_cfg = LAPLACE_CONFIG_DEFAULT;
-    LaplaceAnalyzer* analyzer = laplace_analyzer_create(&default_cfg);
+    LaplaceConfig default_cfg;
+    LaplaceAnalyzer* analyzer;
+    /* ZSFWS修复-H-008: 使用调用方传入的配置，cfg为NULL时使用默认值。
+     * LaplaceAIConfig是不透明类型，通过强制转换为LaplaceConfig*传递配置，
+     * 与laplace_unified_init宏使用相同策略。 */
+    if (cfg) {
+        analyzer = laplace_analyzer_create((const LaplaceConfig*)cfg);
+    } else {
+        default_cfg = LAPLACE_CONFIG_DEFAULT;
+        analyzer = laplace_analyzer_create(&default_cfg);
+    }
     if (!analyzer) {
         log_error("[拉普拉斯统一] 拉普拉斯分析器初始化失败");
         return -1;

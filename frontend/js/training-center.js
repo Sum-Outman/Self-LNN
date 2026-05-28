@@ -144,7 +144,7 @@
             var gridSize = parseInt((document.getElementById('hyper-grid-size') || {}).value || '10', 10);
             /* FIX-7: search_type→method, grid_size→max_trials 匹配后端 */
             var params = { method: 'grid', max_trials: gridSize };
-            var data = await window.SelfLnnApi.hyperparameterStart(params);
+            var data = await window.SelfLnnApi.startHyperparameterSearch(params);  /* FIX-FRONTEND-002: 修正方法名 */
             if (data.success) {
                 window.showNotification('超参数搜索已启动(网格搜索)', 'success');
                 if (hyperparamPoll) clearInterval(hyperparamPoll);
@@ -158,7 +158,7 @@
 
     async function pollHyperparameterSearch() {
         try {
-            var data = await window.SelfLnnApi.hyperparameterStatus();
+            var data = await window.SelfLnnApi.getHyperparameterStatus();  /* FIX-FRONTEND-002: 修正方法名 */
             if (data.success && data.data) {
                 var d = data.data;
                 var statusEl = document.getElementById('hyper-status');
@@ -196,11 +196,11 @@
         container.innerHTML = html;
     }
 
-    /* ZSFWS-002: 检查点列表管理 */
+    /* ZSFWS-L-005: 统一通过SelfLnnApi封装调用API，保持代码风格一致 */
     async function loadCheckpointList() {
         try {
             var data = await window.SelfLnnApi.request('/checkpoint/list');
-            if (data.ok) {
+            if (data && data.ok) {
                 var d = await data.json();
                 renderCheckpointList(d.checkpoints || d.list || []);
             }
@@ -218,7 +218,8 @@
         var html = '<table class="checkpoint-table"><tr><th>名称</th><th>损失</th><th>准确率</th><th>时间</th><th>操作</th></tr>';
         for (var i = 0; i < checkpoints.length; i++) {
             var cp = checkpoints[i];
-            html += '<tr onclick="window.selectCheckpoint(\'' + (cp.id || cp.filename || '') + '\')">' +
+            var cpId = (cp.id || cp.filename || '');
+            html += '<tr data-id="' + cpId + '" onclick="window.selectCheckpoint(\'' + cpId + '\')">' +
                 '<td>' + (cp.name || cp.filename || '检查点' + i) + '</td>' +
                 '<td>' + (typeof cp.loss === 'number' ? cp.loss.toFixed(4) : '--') + '</td>' +
                 '<td>' + (typeof cp.accuracy === 'number' ? (cp.accuracy * 100).toFixed(1) + '%' : '--') + '</td>' +

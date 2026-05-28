@@ -200,7 +200,10 @@ class DialogueEnhanced {
     }
 
     async captureCameraImage(cameraId) {
-        const videoEl = document.getElementById('camera-preview-' + cameraId);
+        /* FIX-FRONTEND-004: camera-preview ID映射 */
+        var videoEl = document.getElementById('camera-preview-' + cameraId);
+        if (!videoEl) videoEl = document.getElementById('camera-preview-fallback');
+        if (!videoEl) { var allVids = document.querySelectorAll('[id^="camera-preview-"]'); if (allVids.length) videoEl = allVids[0]; }
         if (!videoEl) return null;
         const canvas = document.createElement('canvas');
         canvas.width = videoEl.videoWidth || 640;

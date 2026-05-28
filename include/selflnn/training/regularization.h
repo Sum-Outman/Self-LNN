@@ -30,7 +30,8 @@ typedef enum {
     ADV_REG_SPATIAL_DROPOUT = 7,      /**< 空间Dropout */
     ADV_REG_DROPCONNECT = 8,          /**< DropConnect */
     ADV_REG_SWITCHABLE_NORM = 9,      /**< 可切换归一化 */
-    ADV_REG_ENSEMBLE = 10             /**< 集成正则化 */
+    ADV_REG_ENSEMBLE = 10,            /**< 集成正则化 */
+    ADV_REG_MULTIMODAL_MIX = 11       /**< Z-R3-P07: 跨模态混合正则化 */
 } AdvancedRegularizationType;
 
 /**
@@ -75,6 +76,7 @@ typedef struct {
     
     /* 跨模态混合参数 */
     float multimodal_mix_probability; /**< 跨模态混合应用概率 */
+    int   num_multimodal_modalities;  /**< R6-⑥: 多模态数量(0=禁用, 默认等分) */
     
     /* 对抗训练参数 */
     AdversarialAttackType attack_type; /**< 攻击类型 */

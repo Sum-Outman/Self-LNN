@@ -18,7 +18,7 @@
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/core/memory.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include <math.h>
 #include <string.h>
@@ -862,7 +862,7 @@ AudioSemanticConfig audio_semantic_get_default_config(void) {
     cfg.use_prosodic = 1;
     cfg.mfcc_coefficients = 13;
     cfg.spectral_bands = 64;
-    cfg.enable_emotion_analysis = 1;
+    cfg.enable_emotion_analysis = 0;  /* ZSFX-DEEP-R5-EMOTION: 需求明确禁止情感功能,默认禁用 */
     cfg.enable_speaker_recognition = 0;
     cfg.enable_intent_recognition = 1;
     cfg.enable_keyword_extraction = 1;

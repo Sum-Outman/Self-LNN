@@ -17,7 +17,6 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
-#include "selflnn/utils/deep_copy_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/xorshift_prng.h"
 #include "selflnn/abstraction.h"
@@ -939,6 +938,33 @@ int knowledge_base_query(KnowledgeBase* kb, const KnowledgeQuery* query,
         }
     }
     
+    KB_RUNLOCK(kb);
+    return (int)match_count;
+}
+
+/* ZSFWS-P2: 按来源过滤的知识查询 */
+int knowledge_base_query_by_source(KnowledgeBase* kb, const KnowledgeQuery* query,
+                                   int source_filter,
+                                   KnowledgeEntry* results, size_t max_results) {
+    if (kb == NULL) return -1;
+    if (query == NULL || results == NULL || max_results == 0) return -1;
+
+    KB_RLOCK(kb);
+
+    size_t match_count = 0;
+    for (size_t i = 0; i < kb->size && match_count < max_results; i++) {
+        /* 来源过滤：-1=全部，否则严格匹配source */
+        if (source_filter >= 0 &&
+            (int)kb->entries[i].entry.source != source_filter) {
+            continue;
+        }
+        if (entry_matches_query(&kb->entries[i].entry, query)) {
+            if (copy_knowledge_entry(&results[match_count], &kb->entries[i].entry) == 0) {
+                match_count++;
+            }
+        }
+    }
+
     KB_RUNLOCK(kb);
     return (int)match_count;
 }

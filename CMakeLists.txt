@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(selflnn VERSION 1.4.0 LANGUAGES C)
+project(selflnn VERSION 1.5.0 LANGUAGES C)
 
 # 禁用 vcpkg applocal 复制步骤（本系统无 pwsh.exe，该步骤仅为噪音）
 if(MSVC AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
@@ -96,6 +96,10 @@ else()
     message(STATUS "📚 种子知识加载已启用 — 基础常识将被预置到知识库")
 endif()
 
+# ZSFX-DEEP-R5-EMOTION: 需求明确禁止情感功能，编译期强制禁用
+add_definitions(-DSELFLNN_NO_EMOTION)
+message(STATUS "🔒 情感功能已编译期禁用（符合需求规范）")
+
 message(STATUS "构建配置: BUILD_TESTS=${BUILD_TESTS}")
 
 # 包含目录
@@ -180,7 +184,7 @@ endif()
 # ================================================================
 
 add_custom_target(build_info
-    COMMAND ${CMAKE_COMMAND} -E echo "SELF-LNN v1.4.0 Build System"
+    COMMAND ${CMAKE_COMMAND} -E echo "SELF-LNN v1.5.0 Build System"
     COMMAND ${CMAKE_COMMAND} -E echo "Source dir: ${CMAKE_SOURCE_DIR}"
     COMMAND ${CMAKE_COMMAND} -E echo "Build dir:  ${CMAKE_BINARY_DIR}"
     COMMAND ${CMAKE_COMMAND} -E echo "Generator:  ${CMAKE_GENERATOR}"

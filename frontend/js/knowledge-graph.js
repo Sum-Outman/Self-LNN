@@ -234,7 +234,8 @@
             type: type
         }).then(function(result) {
             var data = result.data || result;
-            if (data && data.knowledge && data.knowledge.status === 'success') {
+            /* FIX-F2-CRIT-3: 后端返回knowledge.added非knowledge.status */
+            if (data && data.knowledge && (data.knowledge.status === 'success' || data.knowledge.added === 'true')) {
                 showStatus('add-status', '知识添加成功 (ID: ' + (data.knowledge.entry_id || '') + ')', 'success');
                 graphState.backendOnline = true;
                 fetchKnowledgeFromBackend();

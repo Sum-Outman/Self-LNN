@@ -231,6 +231,11 @@ class DataEngine {
             return;
         }
         this.initialized = true;
+        /* FIX-F2-7: 立即执行一次连接检查,消除18秒冷启动延迟 */
+        this.checkConnection().then(function() {
+            /* 连接成功后立即拉取第一批数据 */
+            if (this._backendConnected) { this._fetchAllData(); }
+        }.bind(this)).catch(function() {});
         var self = this;
         /* BUG修复: 使用递归setTimeout替代setInterval，防止_tick()并发重叠执行 */
         var scheduleNext = function() {

@@ -722,6 +722,8 @@ int online_learner_update(OnlineLearner* learner,
     }
     
     // 根据算法类型更新权重
+    /* ZSFX-DEEP-R9-001: 保护LNN权重写入操作 */
+    lnn_lock(learner->attached_lnn);
     switch (learner->config.algorithm_type) {
         case ONLINE_LEARNING_SGD: {
             // 流式梯度下降
@@ -791,6 +793,7 @@ int online_learner_update(OnlineLearner* learner,
             }
             break;
     }
+    lnn_unlock(learner->attached_lnn);
     
     // 更新学习器状态
     learner->total_samples++;

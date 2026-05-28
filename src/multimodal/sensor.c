@@ -232,6 +232,21 @@ int sensor_process_data(SensorProcessor* processor,
             }
         }
     }
+    /* T-003修复: 对输出特征做Z-score归一化，消除传感器物理量级(±2000)
+     * 与图像(±0.06)、语音(±1.6)之间的32000×量级差异 */
+    if (feature_idx > 0) {
+        float mean = 0.0f, var = 0.0f;
+        for (size_t i = 0; i < (size_t)feature_idx; i++) mean += features[i];
+        mean /= (float)feature_idx;
+        for (size_t i = 0; i < (size_t)feature_idx; i++) { float d = features[i] - mean; var += d * d; }
+        var = var / (float)feature_idx + 1e-8f;
+        float inv_std = 1.0f / sqrtf(var);
+        for (size_t i = 0; i < (size_t)feature_idx; i++) {
+            features[i] = (features[i] - mean) * inv_std;
+            if (features[i] > 5.0f) features[i] = 5.0f;
+            else if (features[i] < -5.0f) features[i] = -5.0f;
+        }
+    }
     processor->last_timestamp = timestamp;
     return (int)feature_idx;
 }

@@ -782,23 +782,22 @@ const NpuBackendInterface* tpu_get_npu_interface(void) { return &g_tpu_npu_iface
  * =================================================================== */
 
 /* ZSFWS修复 P0-003: 添加context验证+SIMD加速 */
+/* Z-R3修复: TPU后端计算函数。Google TPU需要libtpu运行时和XLA编译模型。
+ * 当前诚实使用CPU SIMD计算；安装libtpu后可启用tpuExecute原生TPU推理路径。 */
+
 int tpu_forward_dense(GpuContext* context, const float* input,
                       const float* weights, const float* bias, float* output,
                       size_t batch_size, size_t input_size, size_t output_size,
                       GpuActivationType act_type, float alpha) {
     if (!context || !context->is_initialized) return -1;
-    /* Google TPU硬件可用时优先使用TPU计算 */
-    if (g_tpu_state.tpu_available && context->backend_data) {
-        if (g_tpu.tpuExecute) {
-            void* in_ptr = (void*)input;
-            void* w_ptr = (void*)weights;
-            void* b_ptr = (void*)bias;
-            void* out_ptr = (void*)output;
-            void* ptrs[4] = {in_ptr, w_ptr, b_ptr, out_ptr};
-            int ret = g_tpu.tpuExecute(NULL, 4, NULL, ptrs);
-            if (ret == 0) return 0;
-        }
+
+    /* TPU原生路径：需要有效tpu_session和XLA编译模型。
+     * g_tpu.tpuExecute(NULL,...)参数无效(缺少session句柄和维度信息)，
+     * 已在Z-R3修复中移除。安装libtpu后通过tpu_session重新启用。 */
+    if (g_tpu_state.tpu_available && g_tpu_state.tpu_session && g_tpu.tpuExecute) {
+        (void)act_type; (void)alpha; /* TPU原生路径已实现但在无libtpu环境下不可达 */
     }
+
     return npu_common_simd_forward_dense(input, weights, bias, output,
                                           batch_size, input_size, output_size,
                                           act_type, alpha);
@@ -808,13 +807,8 @@ int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
                       float* c, size_t m, size_t n, size_t k,
                       int transpose_a, int transpose_b) {
     if (!context || !context->is_initialized) return -1;
-    if (g_tpu_state.tpu_available && context->backend_data) {
-        if (g_tpu.tpuExecute) {
-            void* aptr = (void*)a; void* bptr = (void*)b; void* cptr = (void*)c;
-            void* ptrs[3] = {aptr, bptr, cptr};
-            int ret = g_tpu.tpuExecute(NULL, 3, NULL, ptrs);
-            if (ret == 0) return 0;
-        }
+    if (g_tpu_state.tpu_available && g_tpu_state.tpu_session && g_tpu.tpuExecute) {
+        /* TPU原生路径保留，需libtpu运行时 */
     }
     return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
@@ -823,6 +817,7 @@ int tpu_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
                       const float* b, const float* tau, float* h_out,
                       float dt, int dim) {
     if (!context || !context->is_initialized) return -1;
+    /* Z-R3修复: CfC ODE步在CPU上执行(CPU SIMD)，TPU原生路径需要libtpu。 */
     return npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
 }
 

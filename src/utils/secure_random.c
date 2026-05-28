@@ -53,7 +53,8 @@ float secure_random_float(void)
 {
     uint32_t r = 0;
     secure_random_bytes((uint8_t*)&r, sizeof(r));
-    return (float)(r / 4294967296.0f);
+    /* ZSFX-DEEP-R12-002: 使用double中间精度防止r=2^32-1时float上溢到1.0 */
+    return (float)((double)r / 4294967296.0);
 }
 
 uint32_t secure_random_int(uint32_t max)

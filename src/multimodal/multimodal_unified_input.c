@@ -186,6 +186,8 @@ static int unified_input_dynamic_process(
             }
         }
         state->projections_initialized = 1;
+        /* ZSFX-DEEP-R8-002: Xavier初始化后锁定投影矩阵,不参与反向传播训练 */
+        state->projection_locked = 1;
     }
 
     /* 分配统一投影缓冲区 */
@@ -675,6 +677,8 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
     if (!state || !target_output || target_size == 0) return -1;
     if (state->last_active_count <= 0) return -1;
     if (!state->projections_initialized) return -1;
+    /* ZSFX-DEEP-R8-002: 投影矩阵锁定状态下跳过训练,SGD更新仅返回监控损失 */
+    if (state->projection_locked) return 0;
 
     size_t out_dim = state->prev_output_dim;
     if (out_dim == 0 || out_dim > SELFLNN_MAX_CONTROL_DIM) return -1;

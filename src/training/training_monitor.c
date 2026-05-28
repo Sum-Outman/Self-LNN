@@ -18,6 +18,11 @@ TrainingMonitor* training_monitor_create(const char* run_name, int total_epochs)
     tm->current_epoch = 0;
     tm->total_epochs = total_epochs > 0 ? total_epochs : 100;
     tm->history_count = 0;
+    /* R5-②修复: 初始化计时字段 */
+    tm->start_time_sec = (long)time(NULL);
+    tm->last_epoch_time_sec = tm->start_time_sec;
+    tm->epochs_recorded = 0;
+    tm->avg_epoch_seconds = 0.0f;
     return tm;
 }
 
@@ -817,12 +822,14 @@ int training_monitor_get_gpu_metrics(TrainingMonitor* tm,
     /* 通过GPU后端查询 — 需要gpu.h，仅在ENABLE_GPU时可用 */
 #ifdef SELFLNN_GPU_ENABLED
     {
-        extern int gpu_get_memory_info(void* info);
-        struct { size_t used_bytes; size_t total_bytes; } mem_info;
-        memset(&mem_info, 0, sizeof(mem_info));
-        if (gpu_get_memory_info(&mem_info) == 0) {
-            *gpu_mem_used_mb = (float)(mem_info.used_bytes) / (1024.0f * 1024.0f);
-            *gpu_mem_total_mb = (float)(mem_info.total_bytes) / (1024.0f * 1024.0f);
+        /* ZSFX-DEEP-R3-005修复: extern声明与真实签名(int gpu_get_memory_info(GpuContext*, size_t*, size_t*))匹配 */
+        extern int gpu_get_memory_info(GpuContext* context, size_t* total_memory, size_t* free_memory);
+        extern void* selflnn_get_gpu_context(void);
+        GpuContext* gpu_ctx = (GpuContext*)selflnn_get_gpu_context();
+        size_t mem_total = 0, mem_free = 0;
+        if (gpu_ctx && gpu_get_memory_info(gpu_ctx, &mem_total, &mem_free) == 0) {
+            *gpu_mem_used_mb = (float)(mem_total - mem_free) / (1024.0f * 1024.0f);
+            *gpu_mem_total_mb = (float)(mem_total) / (1024.0f * 1024.0f);
         }
     }
 #endif
@@ -849,18 +856,35 @@ int training_monitor_get_gpu_metrics(TrainingMonitor* tm,
     return 0;
 }
 
+/* R5-②修复: 在每个epoch结束时调用，记录实际耗时 */
+int training_monitor_epoch_tick(TrainingMonitor* tm) {
+    if (!tm) return -1;
+    long now = (long)time(NULL);
+    if (tm->epochs_recorded > 0) {
+        float elapsed = (float)(now - tm->last_epoch_time_sec);
+        if (elapsed > 0.0f) {
+            float alpha = 0.3f;
+            tm->avg_epoch_seconds = tm->avg_epoch_seconds * (1.0f - alpha) + elapsed * alpha;
+        }
+    }
+    tm->last_epoch_time_sec = now;
+    tm->epochs_recorded++;
+    tm->current_epoch = tm->epochs_recorded;
+    return 0;
+}
+
 int training_monitor_estimate_eta(TrainingMonitor* tm,
     int* remaining_seconds, float* samples_per_sec) {
     if (!tm || !remaining_seconds || !samples_per_sec) return -1;
     *remaining_seconds = 0;
     *samples_per_sec = 0.0f;
-    if (tm->total_epochs <= 0 || tm->current_epoch <= 0) return 0;
+    if (tm->total_epochs <= 0 || tm->epochs_recorded <= 0) return 0;
 
-    /* 简单线性估算：假设每个epoch耗时固定 */
-    int remaining_epochs = tm->total_epochs - tm->current_epoch;
+    /* R5-②修复: 基于实际epoch耗时做EMA平滑估算，替代硬编码60秒/epoch */
+    int remaining_epochs = tm->total_epochs - tm->epochs_recorded;
     if (remaining_epochs <= 0) return 0;
-    /* 无法获知每epoch耗时，返回epoch数供调用方自行估算 */
-    *remaining_seconds = remaining_epochs * 60; /* 假设60秒/epoch */
-    *samples_per_sec = 0.0f;
+    float sec_per_epoch = tm->avg_epoch_seconds > 0.0f ? tm->avg_epoch_seconds : 60.0f;
+    *remaining_seconds = (int)(remaining_epochs * sec_per_epoch);
+    *samples_per_sec = 1.0f / (sec_per_epoch + 1e-6f);
     return 0;
 }

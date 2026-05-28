@@ -384,7 +384,7 @@ int reasoning_infer(ReasoningEngine* engine,
     const char* prem_strs[8];
     int n = (int)(num_premises < 8 ? num_premises : 8);
     for (int i = 0; i < n; i++) {
-        snprintf(prem_buf[i], sizeof(prem_buf[i]), "%.4f", premises[i]);
+        snprintf(prem_buf[i], sizeof(prem_buf[i]), "%.8g", premises[i]); /* ZSFWS修复-L-007: %.8g保留float全精度 */
         prem_strs[i] = prem_buf[i];
     }
 

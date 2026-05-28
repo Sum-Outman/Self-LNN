@@ -350,6 +350,25 @@ static int extract_mel_features(SpeechRecognizer* sr,
         }
     }
 
+    /* R6-②修复: 语音特征全局Z-score归一化。
+     * log-Mel能量值范围约[-12,0]且受输入音量影响大，
+     * 与已归一化的视觉[0,1]和文本[L2单位范数]量级不匹配。
+     * 此处对所有帧的全部特征做Z-score→mean=0, std=1, ±5截断。 */
+    if (num_frames > 0) {
+        size_t total = (size_t)num_frames * feature_dim;
+        float mean = 0.0f, var = 0.0f;
+        for (size_t i = 0; i < total; i++) mean += features[i];
+        mean /= (float)total;
+        for (size_t i = 0; i < total; i++) { float d = features[i] - mean; var += d * d; }
+        var = var / (float)total + 1e-8f;
+        float inv_std = 1.0f / sqrtf(var);
+        for (size_t i = 0; i < total; i++) {
+            features[i] = (features[i] - mean) * inv_std;
+            if (features[i] > 5.0f) features[i] = 5.0f;
+            else if (features[i] < -5.0f) features[i] = -5.0f;
+        }
+    }
+
     return num_frames;
 }
 
@@ -1825,8 +1844,12 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
         (size_t)num_timesteps * vocab_size * sizeof(float));
     if (!all_logits) return -1;
 
+    /* T-005修复: dt从1.0f改为tau*0.5f。
+     * 原dt=1.0配合tau=0.1导致exp(-10)≈0→CfC每步完全重置隐藏状态，
+     * 液态网络退化为前馈网络，失去时序记忆能力。
+     * 新dt=0.05使exp(-0.05/0.1)=exp(-0.5)≈0.606→每步保留60%历史信息。 */
     float tau = recognizer->config.time_constant > 0.0f ? recognizer->config.time_constant : 0.1f;
-    float dt = 1.0f;
+    float dt = tau * 0.5f;
     float alpha_val = 1.0f - expf(-dt / tau);
 
     /* ZSFABC-F007: 输入投影权重改为实例成员，每个识别器独立分配

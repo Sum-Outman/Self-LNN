@@ -773,7 +773,17 @@ static GpuKernel* rocm_backend_kernel_create(GpuContext* context, const char* ke
     snprintf(compile_cmd, sizeof(compile_cmd),
              "hipcc -x hip -target amdgcn-amd-amdhsa --offload-arch=gfx900,gfx906,gfx908,gfx90a,gfx1030,gfx1100 -o %s %s 2>/dev/null",
              hsaco_path, real_src_path);
-    int compile_result = system(compile_cmd);
+    /* ZSFWS-M-005: 路径注入防护 - 确保路径中不包含shell特殊字符 */
+    int compile_result;
+    if (strchr(real_src_path, ';') || strchr(real_src_path, '&') ||
+        strchr(real_src_path, '|') || strchr(real_src_path, '`') ||
+        strchr(real_src_path, '$') || strchr(hsaco_path, ';') ||
+        strchr(hsaco_path, '&') || strchr(hsaco_path, '|')) {
+        log_warning("[ROCm] 路径包含非法字符，拒绝JIT编译");
+        remove(real_src_path);
+        return NULL;
+    }
+    compile_result = system(compile_cmd);
     if (compile_result != 0) {
         /* ZSFZS-F021修复: hipcc编译失败时提供详细的错误日志，
          * 帮助定位是hipcc未安装还是目标架构不支持。

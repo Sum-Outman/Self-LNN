@@ -77,7 +77,6 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/ode_solvers.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/optimizer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/port_config.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/safe_memory.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/tensor.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/decision_engine.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/system_scheduler.h

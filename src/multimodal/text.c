@@ -291,6 +291,15 @@ int text_process_string(TextProcessor* processor,
         size_t copy_dim = (hidden_dim < max_features) ? hidden_dim : max_features;
         memcpy(features, processor->hidden_state, copy_dim * sizeof(float));
 
+        /* T-010修复: L2归一化文本特征，与图像特征(单位范数)对齐量级 */
+        float l2 = 0.0f;
+        for (size_t k = 0; k < copy_dim; k++) l2 += features[k] * features[k];
+        l2 = sqrtf(l2 + 1e-12f);
+        if (l2 > 0.0f) {
+            float inv = 1.0f / l2;
+            for (size_t k = 0; k < copy_dim; k++) features[k] *= inv;
+        }
+
         /* 如果输出维度小于隐藏维度，对剩余维度降采样 */
         if (max_features < hidden_dim) {
             /* 已复制完整部分 */

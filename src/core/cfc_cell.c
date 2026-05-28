@@ -2094,12 +2094,17 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
         return cfc_cell_forward_quaternion(cell, input, hidden_state);
     }
 
-    /* R8-FIX: 门控/分层/液态记忆变体前向传播尚未适配三门CfC。
-     * 强制回退到标准三门CfC前向传播。
-     * 这些变体将在后续版本升级为三门后重新启用。 */
-    if (cell->gated_data) cell->gated_data = NULL;
-    if (cell->hierarchical_data) cell->hierarchical_data = NULL;
-    if (cell->liquid_memory_data) cell->liquid_memory_data = NULL;
+    /* Z-009修复: 门控/分层/液态记忆变体已实现三门CfC适配。
+     * 直接路由到对应的变体前向传播函数，不再强制回退到标准路径。 */
+    if (cell->gated_data) {
+        return cfc_cell_forward_gated(cell, input, hidden_state);
+    }
+    if (cell->hierarchical_data) {
+        return cfc_cell_forward_hierarchical(cell, input, hidden_state);
+    }
+    if (cell->liquid_memory_data) {
+        return cfc_cell_forward_liquid_memory(cell, input, hidden_state);
+    }
     
     size_t hidden_size = cell->config.hidden_size;
     size_t input_size = cell->config.input_size;
@@ -2826,17 +2831,16 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
     SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
     CHECK_CFC_STATE_INT(cell);
 
-    /* R5-FIX(已升级): 伴随法已重写为三门(遗忘门+输入门+输出门梯度完整)。
-     * 门控/分层/液态记忆变体尚未适配三门，暂时回退到标准反向传播。
-     * 伴随法路径已重新启用。 */
+    /* Z-009修复: 门控/分层/液态记忆变体已实现三门CfC反向传播。
+     * 直接路由到对应的变体反向传播函数，不再强制回退到标准路径。 */
     if (cell->gated_data) {
-        cell->gated_data = NULL;
+        return cfc_cell_backward_gated(cell, gradient, input_gradient);
     }
     if (cell->hierarchical_data) {
-        cell->hierarchical_data = NULL;
+        return cfc_cell_backward_hierarchical(cell, gradient, input_gradient);
     }
     if (cell->liquid_memory_data) {
-        cell->liquid_memory_data = NULL;
+        return cfc_cell_backward_liquid_memory(cell, gradient, input_gradient);
     }
 
     /* 神经ODE伴随法路径：使用连续伴随法计算精确梯度，O(1)内存。

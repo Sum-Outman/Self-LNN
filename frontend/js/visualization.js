@@ -380,32 +380,16 @@ class VisualizationManager {
             type: 'radar',
             data: {
                 labels: ['运动能力', '传感器精度', '响应速度', '稳定性', '能耗效率', '负载能力'],
-                datasets: [
-                    {
-                        label: '机器人 #1',
-                        data: [0, 0, 0, 0, 0, 0],
-                        borderColor: '#00ff88',
-                        backgroundColor: 'rgba(0,255,136,0.1)',
-                        borderWidth: 2,
-                        pointBackgroundColor: '#00ff88'
-                    },
-                    {
-                        label: '机器人 #2',
-                        data: [0, 0, 0, 0, 0, 0],
-                        borderColor: '#4488ff',
-                        backgroundColor: 'rgba(68,136,255,0.1)',
-                        borderWidth: 2,
-                        pointBackgroundColor: '#4488ff'
-                    },
-                    {
-                        label: '机器人 #3',
-                        data: [0, 0, 0, 0, 0, 0],
-                        borderColor: '#ffaa00',
-                        backgroundColor: 'rgba(255,170,0,0.1)',
-                        borderWidth: 2,
-                        pointBackgroundColor: '#ffaa00'
-                    }
-                ]
+                datasets: [{
+                    /* R5-④修复: 初始NaN→Chart.js显示空白/虚线, 而非误导性0值 */
+                    label: '机器人 (未连接后端)',
+                    data: [NaN, NaN, NaN, NaN, NaN, NaN],
+                    borderColor: '#888888',
+                    backgroundColor: 'rgba(136,136,136,0.05)',
+                    borderWidth: 1,
+                    borderDash: [5, 5],
+                    pointBackgroundColor: '#888888'
+                }]
             },
             options: {
                 responsive: true,

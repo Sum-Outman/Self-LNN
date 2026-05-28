@@ -82,6 +82,11 @@ struct MetacognitionSystem {
     float ema_innovation_variance;                   /**< EMA平滑创新方差 */
     float ema_process_noise;                         /**< EMA平滑过程噪声 */
     
+    /* ZSFWS修复-L-008: 不确定性EMA状态（移到结构体避免多实例污染） */
+    float ema_uncertainty_variance;                  /**< EMA平滑不确定性方差 */
+    size_t ema_uncertainty_samples;                  /**< 累计不确定性样本数 */
+    float ema_uncertainty_mean;                      /**< EMA平滑不确定性均值 */
+    
     int is_initialized;                              /**< 是否已初始化 */
 };
 
@@ -124,7 +129,7 @@ static int predict_adaptation_needs(MetacognitionSystem* system,
                                    PredictiveSelfResult* result);
 
 static float calculate_confidence(const float* data, size_t data_size);
-static float calculate_uncertainty(const float* data, size_t data_size);
+static float calculate_uncertainty(MetacognitionSystem* system, const float* data, size_t data_size);
 static float calculate_trend(const float* history, size_t history_size);
 static int requires_action_based_on_monitoring(MetacognitionSystem* system,
                                               const MetacognitionMonitoringResult* result);
@@ -285,6 +290,10 @@ MetacognitionSystem* metacognition_system_create(
     system->kalman_window_filled = 0;
     system->ema_innovation_variance = 0.01f;
     system->ema_process_noise = 0.001f;
+    /* ZSFWS修复-L-008: 初始化不确定性EMA状态 */
+    system->ema_uncertainty_variance = 0.01f;
+    system->ema_uncertainty_samples = 0;
+    system->ema_uncertainty_mean = 0.0f;
     memset(system->innovation_window, 0, sizeof(system->innovation_window));
     
     system->is_initialized = 1;
@@ -350,7 +359,7 @@ int metacognition_monitor(MetacognitionSystem* system,
     result->type = system->monitoring_config.monitoring_type;
     result->current_value = calculate_confidence(input_data, data_size);
     result->confidence = calculate_confidence(input_data, data_size);
-    result->uncertainty = calculate_uncertainty(input_data, data_size);
+    result->uncertainty = calculate_uncertainty(system, input_data, data_size); /* ZSFWS-L-008 */
     
     /* 计算趋势（基于历史） */
     if (system->history_size > 0) {
@@ -517,7 +526,7 @@ int meta_cognition_update_self_model(void* self_model_cfc, const float* meta_res
 
     float update_sum = 0.0f;
     for (int i = 0; i < nd; i++) update_sum += fabsf(grad[i]);
-    return (update_sum > 0.0f) ? 0 : 0;
+    return (update_sum > 1e-8f) ? 1 : 0;  /* Z-025修复: 两个分支都返回0无意义，改为返回是否有实际更新 */
 }
 
 /* ============================================================================
@@ -2676,15 +2685,12 @@ static float calculate_confidence(const float* data, size_t data_size) {
  * @param data_size 数据大小
  * @return float 不确定性值 (0-1)
  */
-static float calculate_uncertainty(const float* data, size_t data_size) {
-    if (!data || data_size == 0) {
+static float calculate_uncertainty(MetacognitionSystem* system, const float* data, size_t data_size) {
+    if (!data || data_size == 0 || !system) {
         return 0.5f; /* 无数据时默认中等不确定性 */
     }
 
-    /* 静态状态：维护EMA方差和历史样本数 */
-    static float s_ema_variance = 0.01f;   /* EMA平滑方差，初始0.01 */
-    static size_t s_total_samples = 0;      /* 累计历史样本数 */
-    static float s_ema_mean = 0.0f;         /* EMA平滑均值 */
+    /* ZSFWS修复-L-008: 使用实例级EMA状态替代全局静态变量 */
 
     /* 计算当前批次的均值和方差 */
     float sum = 0.0f;
@@ -2699,23 +2705,22 @@ static float calculate_uncertainty(const float* data, size_t data_size) {
 
     /* 更新EMA均值和方差（指数移动平均，平滑因子α=0.1） */
     float alpha = 0.1f;
-    if (s_total_samples == 0) {
-        s_ema_mean = batch_mean;
-        s_ema_variance = batch_variance;
+    if (system->ema_uncertainty_samples == 0) {
+        system->ema_uncertainty_mean = batch_mean;
+        system->ema_uncertainty_variance = batch_variance;
     } else {
-        s_ema_mean = alpha * batch_mean + (1.0f - alpha) * s_ema_mean;
+        system->ema_uncertainty_mean = alpha * batch_mean + (1.0f - alpha) * system->ema_uncertainty_mean;
         /* 批量方差与EMA均值的结合 */
-        float centered_var = batch_variance + (batch_mean - s_ema_mean) * (batch_mean - s_ema_mean);
-        s_ema_variance = alpha * centered_var + (1.0f - alpha) * s_ema_variance;
+        float centered_var = batch_variance + (batch_mean - system->ema_uncertainty_mean) * (batch_mean - system->ema_uncertainty_mean);
+        system->ema_uncertainty_variance = alpha * centered_var + (1.0f - alpha) * system->ema_uncertainty_variance;
     }
 
     /* 更新累计样本数 */
-    s_total_samples += data_size;
+    system->ema_uncertainty_samples += data_size;
 
     /* 贝叶斯后验方差不确定性 */
-    /* sqrt(ema_variance) / (1 + log(1 + N)) */
-    float posterior_std = sqrtf(s_ema_variance);
-    float log_term = logf(1.0f + (float)s_total_samples);
+    float posterior_std = sqrtf(system->ema_uncertainty_variance);
+    float log_term = logf(1.0f + (float)system->ema_uncertainty_samples);
     float uncertainty = posterior_std / (1.0f + log_term);
 
     /* 上限裁剪: 不确定性最大不超过1.0 */

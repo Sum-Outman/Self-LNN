@@ -2586,9 +2586,10 @@ int cfc_enas_step(CfcENASSearch* searcher,
             searcher, hidden_state, cell_state);
         architecture->layer_widths[i] = enas_controller_sample_hidden_size(
             searcher, hidden_state, cell_state);
-        architecture->kernel_sizes[i] = 3;
-        architecture->operations[i] = 1;
-        architecture->activations[i] = 1;
+        /* ZSFWS修复-M-014: 从搜索空间采样而非硬编码固定值 */
+        architecture->kernel_sizes[i] = 1 + (int)(cfc_nas_rand_float() * 6.0f);  /* 1-7 */
+        architecture->operations[i] = (int)(cfc_nas_rand_float() * 4.0f);        /* 0-4 */
+        architecture->activations[i] = (int)(cfc_nas_rand_float() * 5.0f);       /* 0-5 */
 
         /* 前几层连接（跳接） */
         if (searcher->config.enable_skip_connections && i > 1) {
@@ -2672,9 +2673,10 @@ int cfc_enas_sample_architectures(CfcENASSearch* searcher,
                 searcher, hidden_state, cell_state);
             architectures[i].layer_widths[j] = enas_controller_sample_hidden_size(
                 searcher, hidden_state, cell_state);
-            architectures[i].kernel_sizes[j] = 3;
-            architectures[i].operations[j] = 1;
-            architectures[i].activations[j] = 1;
+            /* ZSFWS修复-M-014: 从搜索空间采样 */
+            architectures[i].kernel_sizes[j] = 1 + (int)(cfc_nas_rand_float() * 6.0f);
+            architectures[i].operations[j] = (int)(cfc_nas_rand_float() * 4.0f);
+            architectures[i].activations[j] = (int)(cfc_nas_rand_float() * 5.0f);
 
             total_complexity += (float)architectures[i].layer_widths[j];
 

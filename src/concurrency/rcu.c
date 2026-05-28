@@ -36,6 +36,17 @@ typedef int atomic_int32;
 #define DEFAULT_GRACE_PERIOD_MS 10
 #define DEFAULT_RECLAMATION_BATCH 32
 
+/* ZSFX-DEEP-R3-002: TLS存储当前线程RCU线程ID
+ * 解决rcu_read_lock(操作active_readers)与rcu_wait_for_quiescent_state
+ * (检查thread_in_read_section)互不通信的致命缺陷。 */
+#ifdef _MSC_VER
+static __declspec(thread) int g_tls_rcu_thread_id = -1;
+#elif defined(__GNUC__) || defined(__clang__)
+static __thread int g_tls_rcu_thread_id = -1;
+#else
+static int g_tls_rcu_thread_id = -1;
+#endif
+
 typedef struct RcuCallbackNode {
     void* old_ptr;
     RcuCallback callback;
@@ -116,7 +127,7 @@ static int rcu_wait_for_quiescent_state(RcuDomain* domain) {
                 break;
             }
         }
-        if (all_quiescent) return 0;
+        if (all_quiescent && domain->active_readers == 0) return 0;  /* ZSFX-DEEP-R3-002: 双重检查 */
         sleep_ms(1);
         retry++;
     }
@@ -215,6 +226,8 @@ RcuThread* rcu_thread_register(RcuDomain* domain) {
         return NULL;
     }
     thread->is_registered = 1;
+    /* ZSFX-DEEP-R3-002: 保存线程ID到TLS，使rcu_read_lock能访问 */
+    g_tls_rcu_thread_id = thread->thread_id;
     atomic_thread_fence();
     return thread;
 }
@@ -231,6 +244,11 @@ void rcu_thread_unregister(RcuDomain* domain, RcuThread* thread) {
 void rcu_read_lock(RcuDomain* domain) {
     if (!domain || !domain->is_initialized) return;
     atomic_thread_fence();
+    /* ZSFX-DEEP-R3-002修复: 同时维护active_readers和thread_in_read_section
+     * 确保rcu_wait_for_quiescent_state能正确检测到该线程在读侧临界区中 */
+    if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
+        domain->thread_in_read_section[g_tls_rcu_thread_id] = 1;
+    }
     atomic_increment(&domain->active_readers);
     atomic_thread_fence();
 }
@@ -238,6 +256,10 @@ void rcu_read_lock(RcuDomain* domain) {
 void rcu_read_unlock(RcuDomain* domain) {
     if (!domain || !domain->is_initialized) return;
     atomic_thread_fence();
+    /* ZSFX-DEEP-R3-002: 先清除读侧标记再递减计数器(顺序重要) */
+    if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
+        domain->thread_in_read_section[g_tls_rcu_thread_id] = 0;
+    }
     atomic_decrement(&domain->active_readers);
     atomic_thread_fence();
 }

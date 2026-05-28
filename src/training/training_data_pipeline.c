@@ -69,7 +69,8 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
         if (dp) {
             real_samples = dcpipeline_collect_training_batch(
                 (DataCollectionPipeline*)dp,
-                inputs, targets, actual_samples, input_dim, output_dim);
+                inputs, targets, actual_samples, input_dim, output_dim,
+                0 /* Z-P1修复: modality_mask=0表示DC_MODALITY_ALL(向后兼容) */);
         }
         if (real_samples <= 0) {
             log_warning("[训练管线] 无真实训练数据，跳过训练步骤：%s", module_name);

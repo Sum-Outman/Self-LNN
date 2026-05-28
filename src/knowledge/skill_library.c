@@ -62,23 +62,42 @@ static void generate_embedding_impl(const SkillRecord* record, float* embedding,
     memset(embedding, 0, dim * sizeof(float));
     if (!record || dim <= 0) return;
 
-    /* ZSFWS-017修复: 优先使用共享LNN生成真实语义嵌入
-     * 原实现使用djb2哈希产生伪随机嵌入，违反"全液态神经网络"原则。
-     * 现优先通过共享LNN对技能文本进行语义编码，无LNN时回退到n-gram哈希。 */
+    /* ZSFX-DEEP-R5-001修复: 直接使用lnn_forward进行文本语义编码
+     * 替代缺失的selflnn_shared_lnn_encode_text函数。文本→bigram特征→LNN前向。 */
     {
         extern void* selflnn_get_shared_lnn(void);
-        extern int selflnn_shared_lnn_encode_text(void*, const char*, float*, int);
+        extern int lnn_forward(void*, const float*, float*);
         void* shared_lnn = selflnn_get_shared_lnn();
         if (shared_lnn) {
-            /* 构建技能文本: "名称: [name] 描述: [desc] 标签: [tags]" */
             char text_buf[2048];
             int text_len = snprintf(text_buf, sizeof(text_buf), "%s %s", record->name, record->description);
             for (int t = 0; t < record->tag_count && text_len < (int)sizeof(text_buf) - 64; t++) {
                 text_len += snprintf(text_buf + text_len, sizeof(text_buf) - (size_t)text_len,
                                      " %s", record->tags[t]);
             }
-            if (selflnn_shared_lnn_encode_text(shared_lnn, text_buf, embedding, dim) == 0) {
-                /* L2归一化确保嵌入用于余弦相似度计算 */
+            /* 文本→bigram哈希特征向量(128维) */
+            float input_features[128];
+            memset(input_features, 0, sizeof(input_features));
+            size_t tlen = strlen(text_buf);
+            for (size_t i = 0; i + 1 < tlen && i < 1023; i++) {
+                unsigned int h = ((unsigned int)(unsigned char)text_buf[i] << 8) | (unsigned int)(unsigned char)text_buf[i + 1];
+                h = h * 2654435761u;
+                size_t idx = (size_t)(h % 128);
+                input_features[idx] += 1.0f;
+            }
+            /* L2归一化输入特征 */
+            float inorm = 0.0f;
+            for (int i = 0; i < 128; i++) inorm += input_features[i] * input_features[i];
+            if (inorm > 1e-10f) {
+                float inv_n = 1.0f / sqrtf(inorm);
+                for (int i = 0; i < 128; i++) input_features[i] *= inv_n;
+            }
+            float lnn_output[256];
+            memset(lnn_output, 0, sizeof(lnn_output));
+            if (lnn_forward(shared_lnn, input_features, lnn_output) == 0) {
+                int copy_dim = (dim < 256) ? dim : 256;
+                memcpy(embedding, lnn_output, (size_t)copy_dim * sizeof(float));
+                /* L2归一化 */
                 float norm = 0.0f;
                 for (int i = 0; i < dim; i++) norm += embedding[i] * embedding[i];
                 norm = sqrtf(norm);

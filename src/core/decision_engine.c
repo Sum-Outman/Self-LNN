@@ -12,7 +12,6 @@
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
-#include "selflnn/utils/deep_copy_utils.h"
 #include "selflnn/utils/perf.h"
 #include <stdlib.h>
 #include <string.h>

@@ -195,8 +195,10 @@ SELFLNN_API const ProductDesignLabels* selflnn_get_product_design_labels(void);
  * ================================================================ */
 
 /* ---- 4a. 核心认知模块 ---- */
-SELFLNN_API void* selflnn_get_self_cognition(void);
-SELFLNN_API void* selflnn_get_metacognition(void);
+SELFLNN_API void* selflnn_get_self_cognition(void);          /* ZSFZS-F019: 自我认知系统 */
+SELFLNN_API void* selflnn_get_metacognition(void);            /* ZSFZS-F019: 元认知系统 */
+SELFLNN_API void* selflnn_get_knowledge_graph(void);          /* ZSFX-DEEP-005: 知识图谱 */
+SELFLNN_API void* selflnn_get_gpu_context(void);              /* ZSFX-DEEP-005: GPU上下文 */
 SELFLNN_API void* selflnn_get_dialogue_processor(void);
 SELFLNN_API void* selflnn_get_planning_system(void);
 
@@ -221,6 +223,18 @@ SELFLNN_API void selflnn_set_speech_recognizer(void* sr);
 SELFLNN_API void* selflnn_get_product_design_engine(void);  /* APP10: 产品设计引擎 */
 SELFLNN_API void selflnn_set_product_design_engine(void* engine);
 SELFLNN_API void* selflnn_get_multisystem_control(void);     /* APP13: 多系统控制 */
+SELFLNN_API void* selflnn_get_self_programming_engine(void);  /* ZSFWS-H-001: 自我编程引擎 */
+SELFLNN_API void* selflnn_get_distributed_context(void);      /* ZSFWS-H-001: 分布式上下文 */
+SELFLNN_API void* selflnn_get_nas_system(void);              /* ZSFWS-M-001: NAS系统 */
+SELFLNN_API void* selflnn_get_laplace_unified(void);         /* ZSFWS-M-001: 拉普拉斯 */
+SELFLNN_API void* selflnn_get_audio_capture(void);           /* ZSFWS-M-001: 音频采集 */
+SELFLNN_API void* selflnn_get_tts_engine(void);              /* ZSFWS-M-001: TTS引擎 */
+SELFLNN_API void* selflnn_get_computer_operation(void);      /* ZSFWS-M-001: 计算机操作 */
+SELFLNN_API void* selflnn_get_audit_logger(void);            /* ZSFWS-M-001: 审计日志 */
+SELFLNN_API void* selflnn_get_content_filter(void);          /* ZSFWS-M-001: 内容过滤 */
+SELFLNN_API void* selflnn_get_load_balancer(void);           /* ZSFWS-M-001: 负载均衡 */
+SELFLNN_API void* selflnn_get_training_pipeline(void);       /* ZSFWS-M-001: 训练管线 */
+SELFLNN_API void* selflnn_get_security_monitor_deep(void);  /* ZSFX-DEEP-004: 深度安全监控 */
 
 /* ---- 4e. 事件驱动即时自检（ZSFWS-038） ---- */
 SELFLNN_API void dcpipeline_request_immediate_check(void);
@@ -251,6 +265,7 @@ SELFLNN_API int selflnn_module_uses_shared_lnn(int module_id);
  * ================================================================ */
 
 SELFLNN_API int selflnn_checkpoints_auto_load(void);
+SELFLNN_API int selflnn_save_checkpoint(const char* filepath);  /* ZSFX-DEEP-R5-003: 检查点保存 */
 
 /* ================================================================
  * 7. 知识推理→LNN连接通道

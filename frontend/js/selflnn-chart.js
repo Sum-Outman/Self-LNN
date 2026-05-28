@@ -7,6 +7,13 @@
 
 class SelfLnnChart {
     constructor(canvas, options) {
+        /* FIX-F2-7: null canvas保护,避免TypeError中断后续图表初始化 */
+        if (!canvas) {
+            console.warn('[SelfLnnChart] canvas参数为null,跳过初始化');
+            this.canvas = null;
+            this.ctx = null;
+            return;
+        }
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
         this.options = options || {};

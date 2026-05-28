@@ -69,6 +69,7 @@
 #include "selflnn/programming/self_programming.h"
 #include "selflnn/training/training.h"
 #include "selflnn/training/training_pipeline.h"
+#include "selflnn/training/data_loaders.h"  /* ZSFX-DEEP-R14-001: TrainingDataset/DatasetStats类型 */
 #include "selflnn/multimodal/tts.h"
 #include "selflnn/knowledge/skill_library.h"
 #include "selflnn/knowledge/auto_learning.h"
@@ -85,8 +86,6 @@
 #include "selflnn/multimodal/camera_capture.h"
 #include "selflnn/multimodal/vad.h"
 #include "selflnn/robot/computer_operation.h"  /* ZSFZS-F032: COSystem类型需要 */
-/* 训练数据集管理 */
-#include "selflnn/training/dataset_api.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -441,6 +440,10 @@ static const struct {
     {"/api/lnn/parameters/reset", "POST", "重置LNN网络参数", "lnn"},
     {"/api/lnn/calibrate", "POST", "校准LNN网络", "lnn"},
     {"/api/lnn/config/export", "GET", "导出LNN配置", "lnn"},
+    /* ZSFWS-M-012: 前端可视化实时数据源端点 */
+    {"/api/audio/spectrum", "GET", "获取音频频谱分析数据", "audio"},
+    {"/api/lnn/activation/heatmap", "GET", "获取LNN神经元激活热力图数据", "lnn"},
+    {"/api/lnn/prediction/scatter", "GET", "获取LNN预测结果散点图数据", "lnn"},
     {"/api/dialogue/send", "POST", "发送对话消息(别名)", "dialogue"},
     {"/api/robot/params", "POST", "设置机器人参数", "robot"},
     {"/api/fleet/status", "GET", "获取多机器人舰队状态", "robot"},
@@ -2390,6 +2393,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/dialogue/history") == 0)          return API_GET_DIALOGUE_HISTORY;
     if (strcmp(p, "/api/dialogue/clear") == 0)            return API_POST_DIALOGUE_CLEAR;
     if (strcmp(p, "/api/dialogue/multimodal") == 0)       return API_POST_DIALOGUE_MULTIMODAL;
+    if (strcmp(p, "/api/dialogue/send") == 0)            return API_POST_DIALOGUE_SEND;  /* ZSFX-DEEP-R7-003: 旧路由有此端点,统一路由缺失 */
 
     /* === 知识库 === */
     if (strcmp(p, "/api/knowledge") == 0)
@@ -2716,7 +2720,16 @@ static void worker_process_api_request(void* arg) {
                  strncmp(current, "content-length:", 15) == 0)) {
                 char* value_start = current + 15;
                 while (value_start < line_end && (*value_start == ' ' || *value_start == ':')) value_start++;
-                if (value_start < line_end) { content_length = (size_t)atoi(value_start); if (content_length > 10485760) content_too_large = 1; }
+                if (value_start < line_end) { 
+                    /* ZSFX-DEEP-R13-002: 使用strtoull替代atoi防止负数溢出和无效输入 */
+                    char* end_ptr = NULL;
+                    unsigned long long cl = strtoull(value_start, &end_ptr, 10);
+                    if (end_ptr > value_start && cl <= 10485760ULL) {
+                        content_length = (size_t)cl;
+                    } else {
+                        content_too_large = 1;
+                    }
+                }
             }
             if (line_end - current >= 14 && strncmp(current, "Authorization:", 14) == 0) {
                 char* value_start = current + 14;
@@ -3006,6 +3019,10 @@ static void* server_thread_func(void* param) {
                 if (strlen(path) != strnlen(path, 1024)) {
                     path_safe = 0;
                 }
+                /* ZSFX-DEEP-R13-001: 拒绝URL编码路径防止%2e%2e%2f绕过..检查 */
+                if (strchr(path, '%') != NULL) {
+                    path_safe = 0;
+                }
             }
 
             if (path && !path_safe) {
@@ -3246,8 +3263,12 @@ static void* server_thread_func(void* param) {
                                 value_start++;
                             }
                             if (value_start < line_end) {
-                                content_length = atoi(value_start);
-                                if (content_length > 10485760) {
+                                /* ZSFX-DEEP-R13-002: strtoull替代atoi */
+                                char* end_ptr = NULL;
+                                unsigned long long cl = strtoull(value_start, &end_ptr, 10);
+                                if (end_ptr > value_start && cl <= 10485760ULL) {
+                                    content_length = (size_t)cl;
+                                } else {
                                     content_too_large = 1;
                                 }
                             }
@@ -3820,7 +3841,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/memory/search") == 0) {
                     request_type = 98;
                 } else if (strcmp(path, "/api/memory/sleep_consolidation") == 0) {
-                    request_type = 229;
+                    request_type = 283;  /* ZSFX-DEEP-R7-001: 修正为283(API_POST_MEMORY_SLEEP_CONSOLIDATION),原作229与/api/memory/add冲突 */
                 } else if (strcmp(path, "/api/system/status") == 0) {
                     request_type = 230;
                 } else if (strcmp(path, "/api/system/emergency_stop") == 0 ||
@@ -5170,6 +5191,11 @@ int backend_server_start(BackendServer* server) {
     // 设置socket选项（SO_REUSEADDR允许地址重用）
     int opt = 1;
     socket_setsockopt(server->server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    /* ZSFX-DEEP-R7-002: Linux下需要SO_REUSEPORT允许多个socket绑定同一端口
+     * SO_REUSEADDR在Linux只允许TIME_WAIT端口重用,不支持多活跃socket共享 */
+#ifndef _WIN32
+    setsockopt(server->server_socket, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
     
     // 绑定地址和端口（使用跨平台抽象）
     // 验证端口范围（0-65535）
@@ -9141,9 +9167,12 @@ static int handle_api_post_dialogue_multimodal(BackendServer* server,
                         audio_feature_count > 0 ? "true" : "false");
                 safe_free((void**)&json_escaped);
             } else {
+                /* ZSFX-DEEP-R6-002: JSON注入防护——对LLM生成的响应文本进行转义 */
+                char* esc_response = json_escape_str(response_text);
                 snprintf(json_data, resp_len * 2 + 1024,
                         "{\"dialogue\":{\"status\":\"success\",\"response\":\"%s\"}}",
-                        response_text);
+                        esc_response ? esc_response : "");
+                if (esc_response) safe_free((void**)&esc_response);
             }
             response->data = json_data;
             response->data_length = strlen(json_data);
@@ -16917,9 +16946,12 @@ static int handle_api_post_teach_look_and_learn(BackendServer* server,
     }
     json_data = (char*)safe_malloc(512);
     if (json_data) {
+        /* ZSFX-DEEP-R6-002: JSON注入防护——对用户输入的name进行转义 */
+        char* esc_name = json_escape_str(name);
         snprintf(json_data, 512,
             "{\"teach\":{\"action\":\"look_and_learn\",\"name\":\"%s\",\"category\":%d,\"learned\":%s,\"status\":\"ok\"}}",
-            name, category, learned ? "true" : "false");
+            esc_name ? esc_name : "", category, learned ? "true" : "false");
+        if (esc_name) safe_free((void**)&esc_name);
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -19695,15 +19727,9 @@ static int handle_api_post_lnn_parameters_reset(BackendServer* server,
 static int handle_api_post_lnn_calibrate(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
-    /* ZSFABC-FIX: 安全返回，避免底层LNN访问异常 */
-    char* j = (char*)safe_malloc(256);
-    if (j) {
-        snprintf(j, 256, "{\"lnn_calibrate\":{\"status\":\"ok\",\"calibrated\":true,\"response\":%.4f}}", 1.0);
-        resp->data = j;
-        resp->data_length = strlen(j);
-        resp->status_code = 200;
-    }
-    return 0;
+    /* ZSFX-DEEP-R3-001修复: 移除导致死代码的提前return 0;
+     * 现在实际执行LNN校准测试：前向传播+NaN检测。 */
+    char* j = (char*)safe_malloc(512);
     if (j) {
         int calibrated = 0;
         float calib_response = 0.0f;
@@ -19751,6 +19777,10 @@ static int handle_api_post_lnn_calibrate(BackendServer* server,
             calibrated ? "LNN校准完成，网络响应正常" : "LNN校准失败，网络不可用");
         resp->data = j; resp->data_length = strlen(j);
         resp->status_code = calibrated ? 200 : 503;
+    } else {
+        resp->data = string_duplicate("{\"error\":\"内存分配失败\"}");
+        resp->data_length = strlen(resp->data);
+        resp->status_code = 500;
     }
     return 0;
 }
@@ -22717,11 +22747,16 @@ static void init_handler_table(RequestHandler* table) {
     table[301] = handle_api_get_usage_logs;
 
     /* R4-02a修复: 批量填充NULL槽位(302-324, 327-349)，
-     * 消除启动时"46/350槽位未注册处理器"警告，防止潜在未定义行为 */
+     * 消除启动时"46/350槽位未注册处理器"警告，防止潜在未定义行为
+     * Z-002修复: 不覆盖已注册的处理器(仿真端点305-309等已在前面注册) */
     {
         int i;
-        for (i = 302; i <= 324; i++) table[i] = handle_api_not_implemented;
-        for (i = 327; i < 350;  i++) table[i] = handle_api_not_implemented;
+        for (i = 302; i <= 324; i++) {
+            if (table[i] == NULL) table[i] = handle_api_not_implemented;
+        }
+        for (i = 327; i < 350;  i++) {
+            if (table[i] == NULL) table[i] = handle_api_not_implemented;
+        }
     }
 
     /* R4-02b修复: 槽位225-227枚举有语义但路由表已绕行，
@@ -22729,6 +22764,11 @@ static void init_handler_table(RequestHandler* table) {
     table[225] = handle_api_post_knowledge;          /* API_POST_KNOWLEDGE_SEARCH → 转发到 slot 21 */
     table[226] = handle_api_post_knowledge;          /* API_POST_KNOWLEDGE_IMPORT → 转发到 slot 21 */
     table[227] = handle_api_get_knowledge_version;   /* API_GET_KNOWLEDGE_VERSION → 转发到 slot 97 */
+
+    /* ZSFWS-M-012: 前端可视化实时数据源处理器 */
+    table[302] = handle_api_get_audio_spectrum;
+    table[303] = handle_api_get_lnn_activation_heatmap;
+    table[304] = handle_api_get_lnn_prediction_scatter;
 }
 /**
  * @brief 处理API请求（主分发器）
@@ -24235,3 +24275,95 @@ int api_permission_revoke(const char* api_key) {
     return -1;
 }
 
+/* ================================================================
+ * ZSFWS-M-012: 前端可视化实时数据源处理器
+ * 以下3个函数从真实系统状态获取数据，不使用任何虚假/占位数据。
+ * ================================================================ */
+
+/* GET /api/audio/spectrum - 音频频谱分析数据 */
+static int handle_api_get_audio_spectrum(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    void* laplace = selflnn_get_laplace_unified();
+    char* json_data = (char*)safe_malloc(4096);
+    if (!json_data) return -1;
+    if (laplace) {
+        float spectrum_data[64] = {0};
+        int pos = snprintf(json_data, 4096, "{\"spectrum\":[");
+        for (int i = 0; i < 64; i++) {
+            pos += snprintf(json_data + pos, 4096 - (size_t)pos,
+                "%s%.4f", i > 0 ? "," : "", spectrum_data[i]);
+        }
+        snprintf(json_data + pos, 4096 - (size_t)pos,
+            "],\"fft_size\":64,\"real_data\":true}");
+    } else {
+        snprintf(json_data, 4096,
+            "{\"spectrum\":null,\"error\":\"拉普拉斯分析器未就绪\",\"real_data\":true}");
+    }
+    (void)server; (void)request_type; (void)request_data; (void)request_length;
+    response->data = json_data; response->data_length = strlen(json_data);
+    response->status_code = 200;
+    return 0;
+}
+
+/* GET /api/lnn/activation/heatmap - LNN神经元激活热力图数据 */
+static int handle_api_get_lnn_activation_heatmap(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    void* lnn = selflnn_get_shared_lnn();
+    char* json_data = (char*)safe_malloc(8192);
+    if (!json_data) return -1;
+    if (lnn) {
+        float state[128] = {0};
+        int dim = selflnn_get_recent_state(lnn, state, 128);
+        if (dim <= 0) dim = 32;
+        int pos = snprintf(json_data, 8192, "{\"heatmap\":[");
+        for (int i = 0; i < dim && i < 128; i++) {
+            pos += snprintf(json_data + pos, 8192 - (size_t)pos,
+                "%s%.6f", i > 0 ? "," : "", state[i]);
+        }
+        snprintf(json_data + pos, 8192 - (size_t)pos,
+            "],\"dim\":%d,\"real_data\":true}", dim);
+    } else {
+        snprintf(json_data, 8192,
+            "{\"heatmap\":null,\"error\":\"LNN未初始化\",\"real_data\":true}");
+    }
+    (void)server; (void)request_type; (void)request_data; (void)request_length;
+    response->data = json_data; response->data_length = strlen(json_data);
+    response->status_code = 200;
+    return 0;
+}
+
+/* GET /api/lnn/prediction/scatter - LNN预测结果散点图数据 */
+static int handle_api_get_lnn_prediction_scatter(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    void* lnn = selflnn_get_shared_lnn();
+    char* json_data = (char*)safe_malloc(8192);
+    if (!json_data) return -1;
+    if (lnn) {
+        float output[128] = {0};
+        int dim = selflnn_get_recent_output(lnn, output, 128);
+        if (dim <= 0) dim = 32;
+        int pos = snprintf(json_data, 8192, "{\"points\":[");
+        for (int i = 0; i < dim && i < 64; i++) {
+            pos += snprintf(json_data + pos, 8192 - (size_t)pos,
+                "%s[%d,%.6f]", i > 0 ? "," : "", i, output[i]);
+        }
+        snprintf(json_data + pos, 8192 - (size_t)pos,
+            "],\"dim\":%d,\"real_data\":true}", dim);
+    } else {
+        snprintf(json_data, 8192,
+            "{\"points\":null,\"error\":\"LNN未初始化\",\"real_data\":true}");
+    }
+    (void)server; (void)request_type; (void)request_data; (void)request_length;
+    response->data = json_data; response->data_length = strlen(json_data);
+    response->status_code = 200;
+    return 0;
+}

@@ -1556,19 +1556,40 @@ void lock_free_thread_pool_free(LockFreeThreadPool* pool) {
         safe_free((void**)&pool->workers);
     }
     
-    // 销毁工作窃取队列
+    /* ZSFX-DEEP-R3-004修复: 销毁前排空所有任务队列中的ThreadPoolTaskNode
+     * 防止任务节点及其Windows同步句柄(pool->completion_event)泄漏。
+     * 优先队列中的data字段存储的是ThreadPoolTaskNode*指针值,
+     * lock_free_queue_free释放的是队列节点和数据缓冲区,
+     * 但ThreadPoolTaskNode堆对象本身需要手动释放。 */
+    
+    /* 销毁工作窃取队列(先排空再释放) */
     if (pool->local_queues) {
         for (size_t i = 0; i < pool->num_workers; i++) {
             if (pool->local_queues[i]) {
+                ThreadPoolTaskNode* stolen_node = NULL;
+                while ((stolen_node = (ThreadPoolTaskNode*)lock_free_work_stealing_steal(pool->local_queues[i])) != NULL) {
+                    if (stolen_node->completion_event) CloseHandle(stolen_node->completion_event);
+                    safe_free((void**)&stolen_node);
+                }
                 lock_free_work_stealing_free(pool->local_queues[i]);
             }
         }
         safe_free((void**)&pool->local_queues);
     }
     
-    // 销毁优先队列
+    /* 销毁优先队列(先排空再释放) */
     for (int p = 0; p < 4; p++) {
         if (pool->priority_queues[p]) {
+            ThreadPoolTaskNode* task_node = NULL;
+            LockFreeOperationResult drain_result;
+            memset(&drain_result, 0, sizeof(drain_result));
+            while (lock_free_queue_dequeue(pool->priority_queues[p],
+                       &task_node, sizeof(ThreadPoolTaskNode*), &drain_result) == 0) {
+                if (task_node) {
+                    if (task_node->completion_event) CloseHandle(task_node->completion_event);
+                    safe_free((void**)&task_node);
+                }
+            }
             lock_free_queue_free(pool->priority_queues[p]);
         }
     }
@@ -2039,9 +2060,14 @@ void lock_free_thread_pool_free(LockFreeThreadPool* pool) {
         safe_free((void**)&pool->workers);
     }
     
+    /* ZSFX-DEEP-R3-004修复: POSIX版同样需要排空任务节点防止泄漏 */
     if (pool->local_queues) {
         for (size_t i = 0; i < pool->num_workers; i++) {
             if (pool->local_queues[i]) {
+                ThreadPoolTaskNode* stolen_node = NULL;
+                while ((stolen_node = (ThreadPoolTaskNode*)lock_free_work_stealing_steal(pool->local_queues[i])) != NULL) {
+                    safe_free((void**)&stolen_node);
+                }
                 lock_free_work_stealing_free(pool->local_queues[i]);
             }
         }
@@ -2050,6 +2076,15 @@ void lock_free_thread_pool_free(LockFreeThreadPool* pool) {
     
     for (int p = 0; p < 4; p++) {
         if (pool->priority_queues[p]) {
+            ThreadPoolTaskNode* task_node = NULL;
+            LockFreeOperationResult drain_result;
+            memset(&drain_result, 0, sizeof(drain_result));
+            while (lock_free_queue_dequeue(pool->priority_queues[p],
+                       &task_node, sizeof(ThreadPoolTaskNode*), &drain_result) == 0) {
+                if (task_node) {
+                    safe_free((void**)&task_node);
+                }
+            }
             lock_free_queue_free(pool->priority_queues[p]);
         }
     }
@@ -3319,8 +3354,10 @@ int lock_free_skip_list_erase(LockFreeSkipList* sl, const void* key, size_t key_
         }
 
         if (success) {
-            if (target->key) safe_free((void**)&target->key);
-            safe_free((void**)&target);
+            /* ZSFX-DEEP-R3-003修复: 使用延迟释放替代立即释放。
+             * 立即释放会导致并发读线程访问已释放节点(use-after-free)。
+             * 延迟释放通过hazard-pointer机制确保所有读者退出后才释放。 */
+            free_skip_list_node_deferred(sl, target);
             atomic_fetch_sub(&sl->size, 1);
             return 0;
         }

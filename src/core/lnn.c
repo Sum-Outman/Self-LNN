@@ -381,6 +381,29 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
     size_t input_size = network->config.input_size;
     memcpy(network->input_buffer, input, input_size * sizeof(float));
 
+    /* T-004修复: 输入层归一化 —— 消除多模态输入的量级差异。
+     * 传感器原始值(±2000)与图像L2归一化特征(±0.06)量级差32000×，
+     * 直接馈入CfC会导致传感器主导。此处做每样本独立LayerNorm风格归一化：
+     * mean→0, std→1, 截断±4防止极端值。 */
+    {
+        float mean = 0.0f, var = 0.0f;
+        size_t n = input_size;
+        for (size_t i = 0; i < n; i++) mean += network->input_buffer[i];
+        mean /= (float)n;
+        for (size_t i = 0; i < n; i++) {
+            float d = network->input_buffer[i] - mean;
+            var += d * d;
+        }
+        var = var / (float)n + 1e-8f;
+        float inv_std = 1.0f / sqrtf(var);
+        for (size_t i = 0; i < n; i++) {
+            float z = (network->input_buffer[i] - mean) * inv_std;
+            if (z > 4.0f) z = 4.0f;
+            else if (z < -4.0f) z = -4.0f;
+            network->input_buffer[i] = z;
+        }
+    }
+
     /* 拉普拉斯频域预处理：在CfC前向传播之前对输入进行稳定性滤波，
      * 避免后处理覆盖CfC的输出投影矩阵计算结果 */
     if (network->laplace_analyzer != NULL && network->laplace_forward_modulation) {
@@ -482,6 +505,18 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
     clock_t end_time = clock();
     network->total_training_time += (double)(end_time - start_time) / CLOCKS_PER_SEC;
     return 0;
+}
+
+/* ZSFX-DEEP-R9-001: 公开LNN锁API
+ * 允许外部模块(在线学习器/演化引擎)在跨越多个LNN操作时持有锁。
+ * 调用者必须确保lock/unlock成对使用,且不在锁内嵌套获取同一把锁。 */
+SELFLNN_API void lnn_lock(LNN* network) {
+    if (!network) return;
+    LNN_LOCK(network);
+}
+SELFLNN_API void lnn_unlock(LNN* network) {
+    if (!network) return;
+    LNN_UNLOCK(network);
 }
 
 /**
@@ -1774,7 +1809,12 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
                 }
             }
             
-            // 可选：梯度裁剪（防止梯度爆炸）
+            
+            /* R6-④修复: 移除lnn内部梯度裁剪, 消除与training.c gradient_clip的双重裁剪。
+             * 训练循环(training.c)在lnn_backward_batch返回后统一调用gradient_clip,
+             * 内部裁剪会导致梯度被两次衰减, 过度抑制训练信号。
+             * NaN检测保留以确保数值稳定性。 */
+#if 0  /* R6-④: 双重梯度裁剪——已禁用, 梯度裁剪统一由训练循环负责 */
             float max_gradient_norm = network->config.max_grad_norm;
             float weight_gradient_norm = 0.0f;
             float bias_gradient_norm = 0.0f;
@@ -1808,6 +1848,7 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
                     accumulated_bias_gradients[i] *= bias_scale;
                 }
             }
+#endif /* R6-④ */
         }
         
         // 更新网络统计信息

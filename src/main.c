@@ -113,7 +113,7 @@ static int g_evolution_interval_sec    = 600;
 static int g_training_interval_sec     = 300;
 
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 4
+#define VERSION_MINOR 5
 #define VERSION_PATCH 0
 
 static BackendServer* g_server = NULL;
@@ -132,20 +132,20 @@ static time_t g_last_safety = 0;
 static int g_bg_task_error_count = 0;
 static TrainingPipeline* g_training_pipeline = NULL;   /* ZSFABC: 训练管线 */
 static time_t g_last_training_step = 0;                 /* ZSFABC: 上次训练步时间 */
-void* g_global_lnn = NULL;                              /* H-003: 全局LNN指针供GPU后端TPU回退使用 */
-static ProductDesignEngine* g_product_design = NULL;    /* APP10: 产品设计引擎 */
-static void* g_nas_system = NULL;                         /* 神经架构搜索系统 */
-static void* g_laplace_unified = NULL;                    /* 拉普拉斯统一系统 */
-static void* g_audio_capture = NULL;                       /* 音频采集实例 */
-static void* g_speech_recognizer = NULL;                   /* 语音识别实例 */
-static void* g_tts_engine = NULL;                          /* TTS语音合成 */
-static void* g_computer_op = NULL;                         /* 计算机操作 */
-static DistributedContext* g_distributed = NULL;           /* ZSF-P0-004: 分布式训练上下文 */
-static LbBalancer* g_load_balancer = NULL;                /* ZSF-P0-004: 分布式负载均衡器 */
-static AuditLogger* g_audit_logger = NULL;                /* ZSF-P0-004: 审计日志系统 */
-static ContentFilter* g_content_filter = NULL;            /* ZSF-P0-004: 内容过滤器 */
-static SecBehaviorMonitor* g_sec_behavior = NULL;         /* ZSF-P0-004: 深度安全行为监控 */
-static SelfProgrammingEngine* g_prog_engine = NULL;       /* ZSF-P0-004: 自我编程引擎 */
+void* volatile g_global_lnn = NULL;                              /* H-003: 全局LNN指针供GPU后端TPU回退使用(volatile确保多线程可见性) */
+static ProductDesignEngine* g_product_design = NULL;    /* APP10: 产品设计引擎(selflnn管理) */
+static void* g_nas_system = NULL;                         /* 神经架构搜索(selflnn管理) */
+static void* g_laplace_unified = NULL;                    /* 拉普拉斯统一(selflnn管理) */
+static void* g_audio_capture = NULL;                       /* 音频采集(selflnn管理) */
+static void* g_speech_recognizer = NULL;                   /* 语音识别(selflnn管理) */
+static void* g_tts_engine = NULL;                          /* TTS语音合成(selflnn管理) */
+static void* g_computer_op = NULL;                         /* 计算机操作(selflnn管理) */
+static DistributedContext* g_distributed = NULL;           /* 分布式上下文(selflnn管理) */
+static LbBalancer* g_load_balancer = NULL;                /* 负载均衡(selflnn管理) */
+static AuditLogger* g_audit_logger = NULL;                /* 审计日志(selflnn管理) */
+static ContentFilter* g_content_filter = NULL;            /* 内容过滤(selflnn管理) */
+static SelfProgrammingEngine* g_prog_engine = NULL;       /* 自我编程引擎(selflnn管理) */
+static SecBehaviorMonitor* g_sec_behavior = NULL;         /* 深度安全行为监控 */
 static AGISystem* g_agi_system = NULL;                      /* ZSFZS-F015: AGI认知系统 */
 static TaskScheduler* g_task_scheduler = NULL;              /* ZSFZS-F015: 任务调度器 */
 
@@ -163,6 +163,8 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
     if (lnn_param_count == 0) return 0.0f;
     float* lnn_params = lnn_get_parameters(lnn);
     if (!lnn_params) return 0.0f;
+    /* ZSFX-DEEP-R9-001: 保护染色体memcpy写入LNN参数的原子性 */
+    lnn_lock(lnn);
     size_t copy_count = (chrom_size < lnn_param_count) ? chrom_size : lnn_param_count;
     memcpy(lnn_params, chromosome, copy_count * sizeof(float));
     /* R6-FIX: 将染色体剩余部分写入cell级三门参数 */
@@ -212,6 +214,8 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
             }
         }
     }
+    /* ZSFX-DEEP-R9-001: 染色体写入完成,释放锁(lnn_forward内部有独立LNN_LOCK) */
+    lnn_unlock(lnn);
     /* 使用多种信号类型综合评估输出稳定性 */
     float avg_activation = 0.0f, avg_variance = 0.0f;
     float total_response = 0.0f;  /* 总响应强度（阶跃/脉冲响应） */
@@ -1821,28 +1825,20 @@ int main(int argc, char* argv[])
             } else {
                 printf("  产品设计引擎未就绪\n");
             }
-            /* APP11: 初始化神经架构搜索系统 */
+            /* ZSFWS-M-001: NAS + Laplace由selflnn统一管理 */
             {
-                NASConfig nas_cfg;
-                memset(&nas_cfg, 0, sizeof(nas_cfg));
-                nas_cfg.population_size = 20;
-                nas_cfg.max_generations = 50;
-                nas_cfg.mutation_rate = 0.15f;
-                nas_cfg.crossover_rate = 0.7f;
-                g_nas_system = nas_system_create(&nas_cfg, NULL, 0);
+                g_nas_system = selflnn_get_nas_system();
                 if (g_nas_system) {
-                    nas_initialize_search_space((NASSystem*)g_nas_system);
-                    printf("  神经架构搜索(NAS)系统初始化成功\n");
+                    printf("  NAS系统就绪(由selflnn统一管理)\n");
                 } else {
-                    printf("  NAS系统初始化失败\n");
+                    printf("  NAS系统未就绪\n");
                 }
             }
-            /* APP12: 初始化拉普拉斯增强系统 */
-            g_laplace_unified = laplace_unified_init(NULL);
+            g_laplace_unified = selflnn_get_laplace_unified();
             if (g_laplace_unified) {
-                printf("  拉普拉斯增强系统初始化成功\n");
+                printf("  拉普拉斯增强系统就绪(由selflnn统一管理)\n");
             } else {
-                printf("  拉普拉斯增强系统初始化失败(底层已在训练管线中集成)\n");
+                printf("  拉普拉斯增强系统未就绪\n");
             }
             /* 方案C修复: 统一液态状态处理器由selflnn.c统一管理。
              * 不再在此重复创建实例，改为获取selflnn已创建的全局单例。
@@ -1857,101 +1853,73 @@ int main(int argc, char* argv[])
                     printf("  统一液态状态处理器未就绪（selflnn子系统初始化中...）\n");
                 }
             }
-             /* APP15: 初始化音频管道（VAD+语音识别+TTS） */
+             /* ZSFWS-M-001: 音频采集+TTS由selflnn统一管理 */
             {
-                g_audio_capture = audio_capture_create("default", 16000, 1, 16);
+                g_audio_capture = selflnn_get_audio_capture();
                 if (g_audio_capture) {
-                    audio_capture_start(g_audio_capture, NULL, NULL);
-                    printf("  音频采集管道初始化成功 (16kHz单声道)\n");
+                    printf("  音频采集管道就绪(由selflnn统一管理)\n");
                 } else {
-                    printf("  音频采集管道未就绪(无可用的麦克风设备)\n");
+                    printf("  音频采集管道未就绪\n");
                 }
-                SpeechRecognitionConfig sr_cfg;
-                memset(&sr_cfg, 0, sizeof(sr_cfg));
-                sr_cfg.sample_rate = 16000;
-                sr_cfg.num_mel_bins = 80;
-                sr_cfg.hidden_size = 256;
-                sr_cfg.beam_width = 5;
-                g_speech_recognizer = speech_recognizer_create(&sr_cfg);
+                g_speech_recognizer = selflnn_get_speech_recognizer();
                 if (g_speech_recognizer) {
-                    selflnn_set_speech_recognizer(g_speech_recognizer);
-                    printf("  语音识别引擎初始化成功\n");
+                    printf("  语音识别引擎就绪(由selflnn统一管理)\n");
                 } else {
-                    printf("  语音识别引擎初始化失败(需要训练语言模型)\n");
+                    printf("  语音识别引擎不可用\n");
                 }
-                TTSConfig tts_cfg;
-                memset(&tts_cfg, 0, sizeof(tts_cfg));
-                tts_cfg.sample_rate = 16000;
-                tts_cfg.speed = 1.0f;
-                tts_cfg.hidden_size = 512;
-                g_tts_engine = (void*)tts_engine_create(&tts_cfg);
+                g_tts_engine = selflnn_get_tts_engine();
                 if (g_tts_engine) {
-                    printf("  TTS语音合成初始化成功\n");
+                    printf("  TTS语音合成就绪(由selflnn统一管理)\n");
                 } else {
-                    printf("  TTS语音合成初始化失败\n");
+                    printf("  TTS语音合成不可用\n");
                 }
             }
-            /* APP16: 初始化计算机操作模块 */
+            /* ZSFWS-M-001: 计算机操作/审计/内容过滤由selflnn统一管理 */
             {
-                COConfig co_cfg = CO_CONFIG_DEFAULT;
-                co_cfg.enable_safety_check = 1;
-                g_computer_op = (void*)co_system_create(co_cfg);
+                g_computer_op = selflnn_get_computer_operation();
                 if (g_computer_op) {
-                    printf("  计算机操作模块初始化成功\n");
+                    printf("  计算机操作模块就绪(由selflnn统一管理)\n");
                 } else {
-                    printf("  计算机操作模块初始化失败\n");
+                    printf("  计算机操作模块未就绪\n");
                 }
             }
-            /* ZSF-P0-004: 初始化审计日志系统 */
-            {
-                g_audit_logger = audit_logger_create();
-                if (g_audit_logger) {
-                    printf("  审计日志系统初始化成功\n");
-                } else {
-                    printf("  审计日志系统初始化失败\n");
-                }
+            g_audit_logger = selflnn_get_audit_logger();
+            if (g_audit_logger) {
+                printf("  审计日志系统就绪(由selflnn统一管理)\n");
+            } else {
+                printf("  审计日志系统未就绪\n");
             }
-            /* ZSF-P0-004: 初始化内容过滤器 */
-            {
-                g_content_filter = content_filter_create();
-                if (g_content_filter) {
-                    content_filter_load_rules_from_file(g_content_filter, "config/content_filter_rules.txt");
-                    printf("  内容过滤器初始化成功\n");
-                } else {
-                    printf("  内容过滤器初始化失败\n");
-                }
+            g_content_filter = selflnn_get_content_filter();
+            if (g_content_filter) {
+                printf("  内容过滤器就绪(由selflnn统一管理)\n");
+            } else {
+                printf("  内容过滤器未就绪\n");
             }
-            /* ZSF-P0-004: 初始化自我编程引擎 */
+            /* ZSFWS-H-001: 从selflnn获取已创建的自我编程引擎，消除重复创建 */
             {
-                g_prog_engine = self_programming_engine_create(LANG_C);
+                g_prog_engine = selflnn_get_self_programming_engine();
                 if (g_prog_engine) {
-                    printf("  自我编程引擎初始化成功\n");
+                    printf("  自我编程引擎初始化成功(从selflnn获取)\n");
                 } else {
                     printf("  自我编程引擎初始化失败\n");
                 }
             }
-            /* ZSF-P0-004: 初始化分布式训练上下文 */
+            /* ZSFWS-H-001: 从selflnn获取已创建的分布式训练上下文，消除重复创建 */
             {
-                DistributedConfig dcfg = distributed_config_default();
-                dcfg.verbose = 0;
-                g_distributed = distributed_init(&dcfg);
+                g_distributed = selflnn_get_distributed_context();
                 if (g_distributed) {
-                    printf("  分布式训练上下文初始化成功(单节点模式)\n");
+                    printf("  分布式训练上下文初始化成功(从selflnn获取)\n");
                 } else {
-                    printf("  分布式训练上下文初始化跳过(单节点模式)\n");
+                    printf("  分布式训练上下文初始化跳过\n");
                 }
             }
-            /* ZSF-P0-004: 初始化负载均衡器 */
+            /* ZSFWS-M-001: 负载均衡器由selflnn统一管理 */
             {
-                LbConfig lb_cfg;
-                lb_default_config(&lb_cfg);
-                lb_cfg.default_policy = LB_POLICY_LEAST_LOADED;
-                lb_cfg.max_nodes = 8;
-                g_load_balancer = lb_create(&lb_cfg);
+                g_load_balancer = selflnn_get_load_balancer();
                 if (g_load_balancer) {
-                    printf("  负载均衡器初始化成功\n");
+                    printf("  负载均衡器就绪(由selflnn统一管理)\n");
                 } else {
-                    printf("  负载均衡器初始化失败\n");
+                    printf("  负载均衡器未就绪\n");
                 }
             }
             /* Z8-002: 能力开关重置移到在线学习器创建之后
@@ -2054,7 +2022,7 @@ int main(int argc, char* argv[])
                 printf("  WebSocket推送服务器已启动 (端口:%d，与HTTP共享)\n", SELFLNN_WEBSOCKET_PORT);
                 g_ws_push_server = ws_push;
             } else {
-                printf("  WebSocket推送服务器启动失败 (端口:%d)，尝试备用端口\n", SELFLNN_WEBSOCKET_PORT);
+                printf("  WebSocket推送服务器启动失败 (端口:%d)，系统将继续运行但无实时推送功能\n", SELFLNN_WEBSOCKET_PORT);
                 ws_push_server_destroy(ws_push);
             }
         } else {
@@ -2104,12 +2072,34 @@ int main(int argc, char* argv[])
             agi_cycle_counter++;
             /* 每10个间隔执行一次完整认知循环，避免过度消耗CPU */
             if (agi_cycle_counter % 10 == 0) {
-                float idle_input[256];
-                float idle_output[256];
-                memset(idle_input, 0, sizeof(idle_input));
-                memset(idle_output, 0, sizeof(idle_output));
-                /* 使用空输入作为idle状态的认知维持信号 */
-                agi_system_cognitive_cycle(g_agi_system, idle_input, 256, idle_output, 256);
+                float cycle_input[256];
+                float cycle_output[256];
+                memset(cycle_input, 0, sizeof(cycle_input));
+                memset(cycle_output, 0, sizeof(cycle_output));
+                /* P1-002修复: 从系统真实状态采样作为认知循环输入，替代全零idle信号。
+                 * 采样优先级：LNN状态 > 系统状态 > 零向量（最后一层回退）。 */
+                {
+                    void* lnn = selflnn_get_shared_lnn();
+                    int got_data = 0;
+                    if (lnn && selflnn_get_recent_state(lnn, cycle_input, 128) == 0) {
+                        got_data = 1;
+                    }
+                    if (!got_data) {
+                        SystemStatus st;
+                        memset(&st, 0, sizeof(st));
+                        if (selflnn_get_status(&st) == 0) {
+                            cycle_input[0] = (float)st.active_tasks / 100.0f;
+                            cycle_input[1] = (float)(st.total_memories % 256) / 256.0f;
+                            cycle_input[2] = (float)(st.total_knowledge % 256) / 256.0f;
+                            cycle_input[3] = st.memory_usage_mb / 1024.0f;
+                            got_data = 1;
+                        }
+                    }
+                    if (!got_data) {
+                        memset(cycle_input, 0, sizeof(cycle_input));
+                    }
+                }
+                agi_system_cognitive_cycle(g_agi_system, cycle_input, 256, cycle_output, 256);
                 agi_cycle_counter = 0;
             }
         }
@@ -2170,53 +2160,17 @@ int main(int argc, char* argv[])
     g_online_learner_handle = NULL;
     g_evolution_engine_handle = NULL;
     g_product_design = NULL;
-    /* APP11: 销毁NAS系统（main.c独有） */
-    if (g_nas_system) {
-        nas_system_free((NASSystem*)g_nas_system);
-        g_nas_system = NULL;
-    }
-    /* APP12: 销毁拉普拉斯增强 */
-    if (g_laplace_unified) {
-        laplace_unified_free(g_laplace_unified);
-        g_laplace_unified = NULL;
-    }
-    /* APP15: 销毁音频管道 */
-    if (g_audio_capture) {
-        audio_capture_stop(g_audio_capture);
-        audio_capture_free(g_audio_capture);
-        g_audio_capture = NULL;
-    }
-    /* speech_recognizer 由selflnn shutdown管理释放，只需置空指针 */
+    /* ZSFWS-M-001: NAS/Laplace/Audio/TTS由selflnn统一管理释放，仅置空指针 */
+    g_nas_system = NULL;
+    g_laplace_unified = NULL;
+    g_audio_capture = NULL;
     g_speech_recognizer = NULL;
-    if (g_tts_engine) {
-        tts_engine_free((TTSEngine*)g_tts_engine);
-        g_tts_engine = NULL;
-    }
-    /* APP16: 销毁计算机操作 */
-    if (g_computer_op) {
-        co_system_destroy((COSystem*)g_computer_op);
-        g_computer_op = NULL;
-    }
-    /* ZSF-P0-004: 销毁审计日志系统 */
-    if (g_audit_logger) {
-        audit_logger_free(g_audit_logger);
-        g_audit_logger = NULL;
-    }
-    /* ZSF-P0-004: 销毁内容过滤器 */
-    if (g_content_filter) {
-        content_filter_destroy(g_content_filter);
-        g_content_filter = NULL;
-    }
-    /* ZSF-P0-004: 销毁自我编程引擎 */
-    if (g_prog_engine) {
-        self_programming_engine_destroy(g_prog_engine);
-        g_prog_engine = NULL;
-    }
-    /* ZSF-P0-004: 销毁负载均衡器 */
-    if (g_load_balancer) {
-        lb_destroy(g_load_balancer);
-        g_load_balancer = NULL;
-    }
+    g_tts_engine = NULL;
+    g_computer_op = NULL;
+    g_audit_logger = NULL;
+    g_content_filter = NULL;
+    g_prog_engine = NULL;
+    g_load_balancer = NULL;
     /* 方案C修复: 统一液态状态处理器由selflnn.c管理生命周期。
      * g_unified_lnn_state仅为借用的指针引用，不负责释放。 */
     g_unified_lnn_state = NULL;

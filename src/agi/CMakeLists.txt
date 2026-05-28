@@ -12,6 +12,10 @@ include_directories(
 
 add_library(selflnn_agi STATIC ${AGI_SOURCES})
 
+target_include_directories(selflnn_agi PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+
 set_target_properties(selflnn_agi PROPERTIES
     OUTPUT_NAME "selflnn_agi"
     VERSION 1.0.0
@@ -26,4 +30,9 @@ target_link_libraries(selflnn_agi PRIVATE
     selflnn_learning
     selflnn_memory
     selflnn_multimodal
+)
+
+install(TARGETS selflnn_agi
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
 )

@@ -14,6 +14,12 @@ extern "C" {
 #define UNIFIED_LNN_DEFAULT_OUTPUT_DIM 256
 #define UNIFIED_LNN_MAX_RAW_DIM 4096
 
+/* 架构优化: 模态隔离分区常量 */
+#define MODALITY_PRIVATE_DIM      45   /* 每个模态私有状态维度 (9×45=405) */
+#define CROSS_MODAL_FUSION_DIM    107  /* 跨模态融合状态维度 (405+107=512) */
+#define MODALITY_STATE_OFFSET(m)  ((m) * MODALITY_PRIVATE_DIM)  /* 模态私有区偏移 */
+#define FUSION_STATE_OFFSET       (UNIFIED_LNN_MAX_MODALITIES * MODALITY_PRIVATE_DIM) /* 融合区偏移 */
+
 typedef enum {
     UNIFIED_MODALITY_VISION = 0,
     UNIFIED_MODALITY_AUDIO = 1,
@@ -36,6 +42,7 @@ typedef struct {
     int enable_online_learning;
     int enable_noise_injection;
     float noise_std;
+    int enable_modality_isolation;  /* 架构优化: 启用模态隔离+稀疏门控 */
 } UnifiedLNNStateConfig;
 
 typedef struct UnifiedLNNState UnifiedLNNState;
@@ -82,6 +89,16 @@ UnifiedLNNStateConfig unified_lnn_state_get_default_config(void);
 int unified_lnn_state_set_modality_raw_dim(UnifiedLNNState* state,
                                           UnifiedModalityType modality,
                                           size_t raw_dim);
+
+/* 架构优化: 模态隔离API */
+int unified_lnn_state_get_modality_state(const UnifiedLNNState* state,
+                                         UnifiedModalityType modality,
+                                         float* private_state_out, size_t max_size);
+int unified_lnn_state_get_fusion_state(const UnifiedLNNState* state,
+                                       float* fusion_out, size_t max_size);
+void unified_lnn_state_set_isolation_mode(UnifiedLNNState* state, int enable);
+int  unified_lnn_state_get_isolation_enabled(const UnifiedLNNState* state);
+int  unified_lnn_state_suggest_next_modality(UnifiedLNNState* state);  /* 模态轮换调度器 */
 
 #ifdef __cplusplus
 }

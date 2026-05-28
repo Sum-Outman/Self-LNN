@@ -66,32 +66,19 @@ static int stm_find_record(ShortTermMemory* memory, const char* key) {
     return -1;
 }
 
-/* F-006: LRU驱逐 — 选择最久未访问的条目 */
+/* F-006: LRU驱逐 — 选择最久未访问且最弱的条目
+ * ZSFWS修复-M-004: 综合评分 = 时间衰减 × (1-强度)，使用评分而非独立比较 */
 static int stm_select_lru_victim(ShortTermMemory* memory) {
     int victim = -1;
-    uint64_t oldest_time = UINT64_MAX;
-    float weakest_strength = 1.0f;
+    float best_score = -1.0f;
     
-    /* 优先找最久未访问的弱记忆 */
     for (size_t i = 0; i < memory->record_count; i++) {
-        float score = (float)(stm_get_time_ms() - memory->access_records[i].last_access_time);
-        score *= (1.0f - memory->access_records[i].current_strength);
-        if (score > 0 && memory->access_records[i].last_access_time < oldest_time) {
-            if (memory->access_records[i].current_strength < weakest_strength) {
-                weakest_strength = memory->access_records[i].current_strength;
-                oldest_time = memory->access_records[i].last_access_time;
-                victim = (int)i;
-            }
-        }
-    }
-    /* 回退：纯最旧驱逐 */
-    if (victim < 0) {
-        oldest_time = UINT64_MAX;
-        for (size_t i = 0; i < memory->record_count; i++) {
-            if (memory->access_records[i].last_access_time < oldest_time) {
-                oldest_time = memory->access_records[i].last_access_time;
-                victim = (int)i;
-            }
+        float time_score = (float)(stm_get_time_ms() - memory->access_records[i].last_access_time);
+        float strength_penalty = (1.0f - memory->access_records[i].current_strength);
+        float score = time_score * strength_penalty;
+        if (score > best_score) {
+            best_score = score;
+            victim = (int)i;
         }
     }
     return victim;

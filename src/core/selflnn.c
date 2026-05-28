@@ -54,6 +54,17 @@
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/agi/capability_switch.h"
 #include "selflnn/multi_agent.h"  /* H-015集成: 多智能体协作框架 */
+/* ZSFWS-M-001: 10个模块统一集成到selflnn生命周期管理 */
+#include "selflnn/neural_architecture_search.h"
+#include "selflnn/core/laplace_unified.h"
+#include "selflnn/multimodal/audio.h"                       /* 音频采集(提供audio_capture_*函数声明) */
+#include "selflnn/multimodal/tts.h"
+#include "selflnn/robot/computer_operation.h"
+#include "selflnn/safety/audit_logger.h"
+#include "selflnn/safety/content_filter.h"
+#include "selflnn/safety/security_monitor_deep.h"
+#include "selflnn/distributed/load_balancer.h"
+#include "selflnn/training/training_pipeline.h"
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
@@ -215,6 +226,17 @@ static struct {
     void* data_pipeline;
     void* speech_recognizer;
     void* multi_agent_system;   /* H-015: 多智能体协作系统 */
+    /* ZSFWS-M-001: 新增10个模块统一生命周期管理 */
+    void* nas_system;               /* 神经架构搜索系统 */
+    void* laplace_unified;          /* 拉普拉斯增强系统 */
+    void* audio_capture;            /* 音频采集管道 */
+    void* tts_engine;               /* TTS语音合成引擎 */
+    void* computer_operation;       /* 计算机操作系统 */
+    void* audit_logger;             /* 审计日志系统 */
+    void* content_filter;           /* 内容过滤器 */
+    void* load_balancer;            /* 负载均衡器 */
+    void* training_pipeline;        /* 训练管线 */
+    void* security_monitor_deep;    /* 深度安全监控 */
     int dcpipeline_immediate_check_requested;   /* ZSFWS-038: 事件驱动即时自检标志 */
     int knowledge_refresh_needed;               /* ZSFZS-F026: 知识库更新后触发LNN嵌入重编码标志 */
     int last_error;
@@ -1172,6 +1194,29 @@ void* selflnn_get_multisystem_control(void) {
     return g_system_state.multisystem_controller;
 }
 
+/* ZSFWS-H-001: 自我编程引擎和分布式上下文访问器 - 消除main.c重复创建 */
+void* selflnn_get_self_programming_engine(void) {
+    return g_system_state.programming_engine;
+}
+
+void* selflnn_get_distributed_context(void) {
+    return g_system_state.distributed_training;
+}
+
+/* ZSFWS-M-001: 10个新增模块访问器 */
+void* selflnn_get_nas_system(void) { return g_system_state.nas_system; }
+void* selflnn_get_laplace_unified(void) { return g_system_state.laplace_unified; }
+void* selflnn_get_audio_capture(void) { return g_system_state.audio_capture; }
+void* selflnn_get_tts_engine(void) { return g_system_state.tts_engine; }
+void* selflnn_get_computer_operation(void) { return g_system_state.computer_operation; }
+void* selflnn_get_audit_logger(void) { return g_system_state.audit_logger; }
+void* selflnn_get_content_filter(void) { return g_system_state.content_filter; }
+void* selflnn_get_load_balancer(void) { return g_system_state.load_balancer; }
+void* selflnn_get_training_pipeline(void) { return g_system_state.training_pipeline; }
+void* selflnn_get_security_monitor_deep(void) { return g_system_state.security_monitor_deep; }  /* ZSFX-DEEP-004: 深度安全监控公共访问器 */
+void* selflnn_get_knowledge_graph(void) { return g_system_state.knowledge_graph; }            /* ZSFX-DEEP-005: 知识图谱公共访问器 */
+void* selflnn_get_gpu_context(void) { return g_system_state.gpu_context; }                    /* ZSFX-DEEP-005: GPU上下文公共访问器 */
+
 /* ZSF-001修复: AGI后台任务所需的状态访问器函数
  * 这些函数为真实实现，提供LNN状态读取和知识库访问。
  * MSVC平台使用reasoning_internal.c作为推理引擎实现。 */
@@ -1779,6 +1824,16 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
     
+    /* ZSFWS-H-002: 在selflnn中创建语音识别器，消除main.c独立创建 */
+    {
+        g_system_state.speech_recognizer = speech_recognizer_create(NULL);  /* R15-001: 传递默认配置 */
+        if (g_system_state.speech_recognizer) {
+            log_info("语音识别器初始化成功(通过selflnn统一管理)");
+        } else {
+            log_warning("语音识别器创建失败，跳过（语音功能不可用）");
+        }
+    }
+    
     // 14. 初始化自我演化引擎
     {
         EvolutionConfig evo_config;
@@ -1985,7 +2040,98 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
 
-    log_info("所有子系统初始化完成");
+    /* ZSFWS-M-001: 统一初始化10个此前在main.c中分散管理的模块 */
+    /* NAS神经架构搜索 */
+    {
+        NASConfig nas_cfg;
+        memset(&nas_cfg, 0, sizeof(nas_cfg));
+        nas_cfg.population_size = 20;
+        nas_cfg.max_layers = 8;
+        nas_cfg.min_layers = 2;
+        /* R15-002: search_method字段不存在于NASConfig,已移除; strategy+encoding替代 */
+        g_system_state.nas_system = nas_system_create(&nas_cfg, NULL, NULL);  /* R15-003: 补全3个参数 */
+        if (g_system_state.nas_system) {
+            nas_initialize_search_space((NASSystem*)g_system_state.nas_system);
+            log_info("NAS神经架构搜索初始化成功");
+        } else { log_warning("NAS创建失败"); }
+    }
+    /* 拉普拉斯增强系统 */
+    {
+        g_system_state.laplace_unified = (void*)laplace_analyzer_create(&LAPLACE_CONFIG_DEFAULT);
+        if (g_system_state.laplace_unified) {
+            log_info("拉普拉斯增强系统初始化成功");
+        } else { log_warning("拉普拉斯系统创建失败"); }
+    }
+    /* 音频采集管道 */
+    {
+        /* R15-004: AudioCaptureConfig类型已随audio_capture.h删除,
+         * 改用audio_capture_create直接参数调用 */
+        g_system_state.audio_capture = audio_capture_create("default", 16000, 1, 16);
+        if (g_system_state.audio_capture) {
+            log_info("音频采集管道初始化成功");
+        } else { log_warning("音频采集创建失败（无硬件时正常）"); }
+    }
+    /* TTS语音合成 */
+    {
+        TTSConfig tts_cfg;
+        memset(&tts_cfg, 0, sizeof(tts_cfg));
+        tts_cfg.sample_rate = 16000;
+        tts_cfg.speed = 1.0f;
+        tts_cfg.hidden_size = 512;
+        g_system_state.tts_engine = (void*)tts_engine_create(&tts_cfg);
+        if (g_system_state.tts_engine) {
+            log_info("TTS语音合成初始化成功");
+        } else { log_warning("TTS创建失败"); }
+    }
+    /* 计算机操作系统 */
+    {
+        g_system_state.computer_operation = co_system_create((COConfig)CO_CONFIG_DEFAULT);
+        if (g_system_state.computer_operation) {
+            log_info("计算机操作系统初始化成功");
+        } else { log_warning("计算机操作创建失败"); }
+    }
+    /* 审计日志 */
+    {
+        g_system_state.audit_logger = audit_logger_create();
+        if (g_system_state.audit_logger) {
+            log_info("审计日志系统初始化成功");
+        } else { log_warning("审计日志创建失败"); }
+    }
+    /* 内容过滤器 */
+    {
+        g_system_state.content_filter = content_filter_create();
+        if (g_system_state.content_filter) {
+            log_info("内容过滤器初始化成功");
+        } else { log_warning("内容过滤创建失败"); }
+    }
+    /* 负载均衡器 */
+    {
+        LbConfig lb_cfg;
+        lb_default_config(&lb_cfg);
+        lb_cfg.default_policy = LB_POLICY_LEAST_LOADED;
+        lb_cfg.max_nodes = 8;
+        g_system_state.load_balancer = lb_create(&lb_cfg);
+        if (g_system_state.load_balancer) {
+            log_info("负载均衡器初始化成功");
+        } else { log_warning("负载均衡创建失败"); }
+    }
+    /* 训练管线（延迟初始化，由AGI后台训练循环按需创建） */
+    {
+        g_system_state.training_pipeline = NULL;
+        log_info("训练管线标记为延迟初始化（按需创建）");
+    }
+    /* 深度安全监控 */
+    {
+        SecBehaviorMonitor* sec_mon = sec_behavior_monitor_create(0.85f);
+        g_system_state.security_monitor_deep = (void*)sec_mon;
+        if (sec_mon) {
+            log_info("深度安全监控初始化成功");
+        } else {
+            log_warning("深度安全监控创建失败，安全管理将降级");
+        }
+    }
+
+    log_info("总共完成 34 个子系统初始化（含10个新增模块）");
     return result;
 
 cleanup:
@@ -2151,7 +2297,19 @@ static void shutdown_subsystems(void)
         g_system_state.speech_recognizer = NULL;
     }
 
-    log_info("所有子系统已关闭");
+    /* ZSFWS-M-001: 销毁10个新增模块 */
+    if (g_system_state.nas_system) { nas_system_free((NASSystem*)g_system_state.nas_system); g_system_state.nas_system = NULL; }
+    if (g_system_state.laplace_unified) { laplace_analyzer_free((LaplaceAnalyzer*)g_system_state.laplace_unified); g_system_state.laplace_unified = NULL; }
+    if (g_system_state.audio_capture) { audio_capture_free(g_system_state.audio_capture); g_system_state.audio_capture = NULL; }
+    if (g_system_state.tts_engine) { tts_engine_free((TTSEngine*)g_system_state.tts_engine); g_system_state.tts_engine = NULL; }
+    if (g_system_state.computer_operation) { co_system_free(g_system_state.computer_operation); g_system_state.computer_operation = NULL; }
+    if (g_system_state.audit_logger) { audit_logger_free(g_system_state.audit_logger); g_system_state.audit_logger = NULL; }
+    if (g_system_state.content_filter) { content_filter_free(g_system_state.content_filter); g_system_state.content_filter = NULL; }
+    if (g_system_state.load_balancer) { lb_destroy(g_system_state.load_balancer); g_system_state.load_balancer = NULL; }
+    if (g_system_state.training_pipeline) { training_pipeline_free((TrainingPipeline*)g_system_state.training_pipeline); g_system_state.training_pipeline = NULL; }
+    if (g_system_state.security_monitor_deep) { sec_behavior_monitor_free((SecBehaviorMonitor*)g_system_state.security_monitor_deep); g_system_state.security_monitor_deep = NULL; }
+
+    log_info("所有子系统已关闭（含11个新增模块）");
 }
 
 static double get_current_time(void)
@@ -3714,6 +3872,21 @@ SELFLNN_API int selflnn_checkpoints_auto_load(void)
              shared_config.output_size, shared_config.num_layers);
 
     return 0;
+}
+
+/* ZSFX-DEEP-R5-003: 自包含检查点保存接口
+ * 将当前共享LNN完整序列化到指定文件路径 */
+SELFLNN_API int selflnn_save_checkpoint(const char* filepath) {
+    if (!g_system_state.is_initialized || !filepath) return -1;
+    LNN* lnn = (LNN*)g_system_state.lnn_instance;
+    if (!lnn) {
+        log_error("[selflnn] 保存检查点失败: 共享LNN未初始化");
+        return -1;
+    }
+    /* 确保checkpoints目录存在 */
+    (void)mkdir("checkpoints");
+    log_info("[selflnn] 正在保存检查点到: %s", filepath);
+    return lnn_save(lnn, filepath);
 }
 
 // 模块初始化函数（供CMake调用）

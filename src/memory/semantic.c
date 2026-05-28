@@ -298,16 +298,22 @@ int semantic_memory_generalize(SemanticMemory* memory, const char* concept_id,
     float* eigen_vals = (float*)safe_calloc(matrix_dim, sizeof(float));
     
     if (cov_matrix && eigen_vecs && eigen_vals) {
-        /* 构建协方差矩阵：C = x * x^T */
+        /* ZSFWS修复-M-002: 正确构建协方差矩阵
+         * 将数据重塑为 (num_chunks × matrix_dim) 矩阵，
+         * C[i][j] = Σ_chunk data[chunk*dim+i] * data[chunk*dim+j] / num_chunks */
+        size_t num_chunks = data_size / matrix_dim;
+        if (num_chunks < 1) num_chunks = 1;
+
         for (size_t i = 0; i < matrix_dim; i++) {
             for (size_t j = 0; j < matrix_dim; j++) {
                 float val = 0.0f;
-                for (size_t k = 0; k < data_size / matrix_dim && k < matrix_dim; k++) {
-                    float xi = original_concept[i * matrix_dim + k < data_size ? i * matrix_dim + k : 0];
-                    float xj = original_concept[j * matrix_dim + k < data_size ? j * matrix_dim + k : 0];
-                    val += xi * xj;
+                for (size_t chunk = 0; chunk < num_chunks; chunk++) {
+                    size_t base = chunk * matrix_dim;
+                    if (base + i < data_size && base + j < data_size) {
+                        val += original_concept[base + i] * original_concept[base + j];
+                    }
                 }
-                cov_matrix[i * matrix_dim + j] = val / (float)matrix_dim;
+                cov_matrix[i * matrix_dim + j] = val / (float)num_chunks;
             }
         }
         

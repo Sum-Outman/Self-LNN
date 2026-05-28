@@ -707,7 +707,26 @@ static const int g_capability_deps[CAP_COUNT][CAP_COUNT] = {
 };
 
 /* 能力冲突关系矩阵 [A][B] = 1 表示 A和B 不能同时启用 */
-static const int g_capability_conflicts[CAP_COUNT][CAP_COUNT] = {0};
+/* ZSFWS修复-L-015: 定义合理的能力冲突关系，而非全零矩阵 */
+static int g_capability_conflicts[CAP_COUNT][CAP_COUNT] = {0};
+
+static void capability_init_conflicts(void) {
+    /* 自主执行(索引2) 与 模仿学习(索引5) 冲突：自主执行期间不应被模仿行为干扰 */
+    g_capability_conflicts[CAP_AUTONOMOUS_EXECUTION][CAP_IMITATION_LEARNING] = 1;
+    g_capability_conflicts[CAP_IMITATION_LEARNING][CAP_AUTONOMOUS_EXECUTION] = 1;
+    /* 自我演化(索引4) 与 模仿学习(索引5) 冲突：演化过程中模仿会引入噪声 */
+    g_capability_conflicts[CAP_SELF_EVOLUTION][CAP_IMITATION_LEARNING] = 1;
+    g_capability_conflicts[CAP_IMITATION_LEARNING][CAP_SELF_EVOLUTION] = 1;
+}
+
+/* 在首次检查冲突前初始化 */
+static int g_conflicts_initialized = 0;
+static void capability_ensure_conflicts_init(void) {
+    if (!g_conflicts_initialized) {
+        capability_init_conflicts();
+        g_conflicts_initialized = 1;
+    }
+}
 
 int capability_get_dependencies(CapabilityType type, int* dependencies, int max_count)
 {
@@ -726,6 +745,8 @@ int capability_check_conflict(CapabilityType type_a, CapabilityType type_b)
 {
     if (type_a < 0 || type_a >= CAP_COUNT || type_b < 0 || type_b >= CAP_COUNT)
         return -1;
+    /* ZSFWS-L-015: 确保冲突矩阵已初始化 */
+    capability_ensure_conflicts_init();
     return g_capability_conflicts[type_a][type_b];
 }
 

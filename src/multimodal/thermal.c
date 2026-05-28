@@ -6,7 +6,7 @@
  */
 
 #include "selflnn/multimodal/thermal.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>

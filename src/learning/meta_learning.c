@@ -1045,10 +1045,8 @@ static float compute_default_accuracy_based_on_model(NeuralNetwork* model, const
  */
 static float compute_task_accuracy(NeuralNetwork* model, const MetaTask* task) {
     if (!model || !task) {
-        // 参数无效时返回基于指针哈希的确定性值，而不是固定值
-        uintptr_t ptr1 = (uintptr_t)model;
-        uintptr_t ptr2 = (uintptr_t)task;
-        return 0.3f + 0.4f * (((ptr1 ^ ptr2) % 100) / 100.0f);
+        /* Z-013修复: 参数无效时明确返回-1.0f错误码，不再使用指针哈希生成伪随机值 */
+        return -1.0f;
     }
     
     // 真实实现：计算模型在任务数据上的准确率

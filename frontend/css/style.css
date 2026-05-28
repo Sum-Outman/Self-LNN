@@ -7862,3 +7862,33 @@ body {
 .monitor-item{background:rgba(0,200,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:6px;padding:12px;text-align:center}
 .monitor-item .label{font-size:.7rem;color:#888;margin-bottom:4px}
 .monitor-item .value{font-size:1.1rem;font-weight:600;color:#00c8ff}
+
+/* === FIX-FRONTEND-003: 补充前端缺失CSS类定义 === */
+.empty-state{text-align:center;padding:32px 16px;color:#666;font-size:.85rem}
+.checkpoint-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.checkpoint-table th{background:rgba(0,200,255,.08);color:#00c8ff;padding:8px 10px;text-align:left;border-bottom:1px solid rgba(255,255,255,.08)}
+.checkpoint-table td{padding:7px 10px;border-bottom:1px solid rgba(255,255,255,.04);color:#ccc}
+.checkpoint-table tr[data-id].selected{background:rgba(0,200,255,.12)}
+.checkpoint-table tr:hover{background:rgba(255,255,255,.04)}
+.dataset-item{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border:1px solid rgba(255,255,255,.06);border-radius:6px;margin-bottom:6px}
+.ds-info{color:#00c8ff;font-weight:500;font-size:.82rem}
+.entry-list{display:flex;flex-direction:column;gap:6px}
+.entry-item{display:flex;justify-content:space-between;align-items:flex-start;padding:8px 12px;background:rgba(0,200,255,.03);border:1px solid rgba(255,255,255,.05);border-radius:6px}
+.triple{display:flex;flex-wrap:wrap;gap:4px 0;align-items:center}
+.triple .s{color:#00c8ff;font-weight:600}
+.triple .p{color:#888;margin:0 6px}
+.triple .o{color:#ccc}
+.triple .meta{color:#555;font-size:.7rem;margin-left:8px}
+.status-msg{padding:6px 12px;border-radius:4px;font-size:.78rem;margin-top:6px}
+.status-msg.success{background:rgba(0,200,100,.1);color:#0c8}
+.status-msg.error{background:rgba(255,60,60,.1);color:#f66}
+.del-btn{background:rgba(255,60,60,.15);color:#f66;border:1px solid rgba(255,60,60,.3);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:.72rem}
+.del-btn:hover{background:rgba(255,60,60,.3)}
+.num{font-size:1.4rem;font-weight:700;color:#00c8ff}
+.tab-btn{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);padding:6px 16px;border-radius:6px 6px 0 0;cursor:pointer;color:#888;font-size:.8rem}
+.tab-btn.active{background:rgba(0,200,255,.1);color:#00c8ff;border-color:rgba(0,200,255,.3)}
+.tab-content{display:none;border:1px solid rgba(255,255,255,.08);border-radius:0 6px 6px 6px;padding:16px}
+.tab-content.active{display:block}
+.node-tooltip{position:absolute;background:rgba(0,20,40,.95);border:1px solid rgba(0,200,255,.4);border-radius:6px;padding:8px 12px;font-size:.75rem;color:#ccc;pointer-events:none;z-index:9999}
+.graph-info{position:absolute;bottom:12px;left:12px;background:rgba(0,20,40,.9);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:8px 14px;font-size:.75rem;color:#888;z-index:100}
+.main-area{position:relative;flex:1;min-height:400px}

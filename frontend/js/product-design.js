@@ -130,15 +130,14 @@
         });
     }
 
-    /* 检查引擎状态 */
+    /* 检查引擎状态 - ZSFWS修复-L-006: 使用正确端点GET /product/status */
     function pdCheckStatus() {
         pdInit();
         pdSetStatus('<div style="text-align:center;padding:20px"><span style="color:#4fc3f7">查询引擎状态...</span></div>', true);
 
-        window.SelfLnnApi.request('/product/design', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: '{}'
+        window.SelfLnnApi.request('/product/status', {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' }
         })
         .then(function(resp) { return resp.json(); })
         .then(function(data) {

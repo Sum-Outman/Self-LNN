@@ -7,7 +7,7 @@
  */
 
 #include "selflnn/multimodal/proprioception.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include <string.h>
 #include <math.h>
 

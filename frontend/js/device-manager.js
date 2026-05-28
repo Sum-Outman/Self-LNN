@@ -503,7 +503,10 @@ class DeviceManager {
     captureSnapshot(id) {
         const camera = this.cameras.find(c => c.id === id);
         if (!camera || !camera.active) return null;
-        const videoEl = document.getElementById('camera-preview-' + id);
+        /* FIX-FRONTEND-004: camera-preview ID映射 — 设备ID→HTML元素名 */
+        var videoEl = document.getElementById('camera-preview-' + id);
+        if (!videoEl) videoEl = document.getElementById('camera-preview-fallback');
+        if (!videoEl) { var allVids = document.querySelectorAll('[id^="camera-preview-"]'); if (allVids.length) videoEl = allVids[0]; }
         if (!videoEl) return null;
         const canvas = document.createElement('canvas');
         canvas.width = videoEl.videoWidth;
@@ -650,8 +653,11 @@ class DeviceManager {
 
     async _processStereoFrame() {
         try {
-            const leftCanvas = document.getElementById('camera-preview-' + this.stereoVision.leftCameraId);
-            const rightCanvas = document.getElementById('camera-preview-' + this.stereoVision.rightCameraId);
+            /* FIX-FRONTEND-004: 立体视觉camera-preview ID映射 */
+            var leftCanvas = document.getElementById('camera-preview-' + this.stereoVision.leftCameraId);
+            if (!leftCanvas) leftCanvas = document.getElementById('camera-preview-left') || document.getElementById('camera-preview-fallback');
+            var rightCanvas = document.getElementById('camera-preview-' + this.stereoVision.rightCameraId);
+            if (!rightCanvas) rightCanvas = document.getElementById('camera-preview-right') || document.getElementById('camera-preview-fallback');
             if (!leftCanvas || !rightCanvas) return;
 
             const leftData = this._captureCanvasData(leftCanvas);

@@ -426,7 +426,32 @@ static void json_to_string_core(const JsonValue* v, char* buf, size_t* pos, size
             APPEND(tmp); break;
         case JSON_STRING:
             APPEND_CHAR('"');
-            if (v->data.string_val) APPEND(v->data.string_val);
+            if (v->data.string_val) {
+                /* ZSFX-DEEP-R12-003: 添加JSON字符串转义输出
+                 * 原作直接拼接string_val无转义→含\"或\n会生成非法JSON */
+                const char* s = v->data.string_val;
+                while (*s) {
+                    switch (*s) {
+                        case '"':  APPEND("\\\""); break;
+                        case '\\': APPEND("\\\\"); break;
+                        case '\n': APPEND("\\n");  break;
+                        case '\r': APPEND("\\r");  break;
+                        case '\t': APPEND("\\t");  break;
+                        case '\b': APPEND("\\b");  break;
+                        case '\f': APPEND("\\f");  break;
+                        default:
+                            if ((unsigned char)*s < 0x20) {
+                                char esc[8];
+                                snprintf(esc, sizeof(esc), "\\u%04x", (unsigned char)*s);
+                                APPEND(esc);
+                            } else {
+                                APPEND_CHAR(*s);
+                            }
+                            break;
+                    }
+                    s++;
+                }
+            }
             APPEND_CHAR('"'); break;
         case JSON_ARRAY:
             APPEND_CHAR('[');

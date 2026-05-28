@@ -463,28 +463,31 @@ static void simd_convert_fp32_to_fp16_batch(const float* src, fp16_t* dst, size_
 #endif
 
 /**
- * @brief 转换FP32数组到FP16
+ * @brief 转换FP32数组到FP16（R5-⑥修复: 统一使用运行时CPU特性检测）
+ * 原代码用编译时#if defined(__F16C__)选择路径，导致：
+ * - 编译时无F16C但CPU支持→无法使用F16C加速
+ * - 编译时有F16C但CPU不支持→运行时崩溃
+ * 现在统一使用cpu_has_f16c()运行时检测，自动选择最优路径。
  */
 static int convert_fp32_to_fp16(const float* src, fp16_t* dst, size_t count) {
-    if (!src || !dst || count == 0) {
-        return -1;
+    if (!src || !dst || count == 0) return -1;
+    
+    if (cpu_has_f16c()) {
+        fp32_to_fp16_batch_f16c(src, dst, count);
+    } else {
+        simd_convert_fp32_to_fp16_batch(src, dst, count);
     }
-    
-    simd_convert_fp32_to_fp16_batch(src, dst, count);
-    
     return 0;
 }
 
-/**
- * @brief 转换FP16数组到FP32（自动选择最优路径：SIMD加速或标量回退）
- */
 static int convert_fp16_to_fp32(const fp16_t* src, float* dst, size_t count) {
-    if (!src || !dst || count == 0) {
-        return -1;
+    if (!src || !dst || count == 0) return -1;
+    
+    if (cpu_has_f16c()) {
+        fp16_to_fp32_batch_f16c(src, dst, count);
+    } else {
+        simd_convert_fp16_to_fp32_batch(src, dst, count);
     }
-    
-    simd_convert_fp16_to_fp32_batch(src, dst, count);
-    
     return 0;
 }
 

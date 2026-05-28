@@ -763,10 +763,11 @@ int forward_kinematics_stateful(const KinematicModel* model, const float* joint_
     state->prev_pos_x = ee_pos.x;
     state->prev_pos_y = ee_pos.y;
     state->prev_pos_z = ee_pos.z;
-    state->prev_quat_x = result->orientation[1];
-    state->prev_quat_y = result->orientation[2];
-    state->prev_quat_z = result->orientation[3];
-    state->prev_quat_w = result->orientation[0];
+    /* ZSFX-DEEP-R9-003: mat4_extract_quat输出格式为{x,y,z,w}, 修正索引映射 */
+    state->prev_quat_x = result->orientation[0];
+    state->prev_quat_y = result->orientation[1];
+    state->prev_quat_z = result->orientation[2];
+    state->prev_quat_w = result->orientation[3];
     return 0;
 }
 

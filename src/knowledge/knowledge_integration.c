@@ -1418,8 +1418,12 @@ KnowledgeIntegrationSystem* knowledge_integration_load_state(const char* filenam
     KnowledgeIntegrationSystem* system = knowledge_integration_create(&config);
     if (!system) return NULL;
     
-    // 注意：由于无法重新注册句柄，我们只恢复配置
-    // 调用者需要手动重新注册知识库、图谱等
+    /* ZSFWS-L-018: 函数仅恢复配置参数（enable_auto_sync/sync_interval等）。
+     * 知识库/图谱/推理引擎句柄需调用者在返回后通过以下方式重新绑定：
+     *   knowledge_integration_register_knowledge_base(system, kb);
+     *   knowledge_integration_register_graph(system, graph);
+     *   knowledge_integration_register_reasoning_engine(system, engine);
+     * 这是设计上的限制——句柄为不透明指针，序列化/反序列化需外部管理。 */
     
     return system;
 }

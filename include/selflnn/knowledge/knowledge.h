@@ -206,6 +206,23 @@ int knowledge_base_query_state_aware(KnowledgeBase* kb,
                                      float* result_scores);
 
 /**
+ * @brief 按来源过滤的知识查询（防止自主学习污染用户教学知识）
+ *
+ * ZSFWS-P2: 在查询时按KnowledgeSource过滤，
+ * source_filter=-1 表示不过滤（返回所有来源）。
+ *
+ * @param kb 知识库句柄
+ * @param query 查询条件
+ * @param source_filter 期望的知识来源（-1=全部, 0=用户教学, 1=自主学习等）
+ * @param results 结果输出缓冲区
+ * @param max_results 最大结果数
+ * @return int 匹配条目数
+ */
+int knowledge_base_query_by_source(KnowledgeBase* kb, const KnowledgeQuery* query,
+                                   int source_filter,
+                                   KnowledgeEntry* results, size_t max_results);
+
+/**
  * @brief 根据ID获取知识条目
  * 
  * @param kb 知识库句柄

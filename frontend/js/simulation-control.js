@@ -335,8 +335,19 @@
         if (sim3dAnimId) { cancelAnimationFrame(sim3dAnimId); sim3dAnimId = null; }
     }
 
-    initSim3D();
-    startRenderLoop();
+    /* FIX-F2-CRIT-2: 延迟到DOMContentLoaded后初始化WebGL,此时canvas已存在 */
+    var _simInitDone = false;
+    function _ensureSimInit() {
+        if (_simInitDone) return;
+        _simInitDone = true;
+        initSim3D();
+        startRenderLoop();
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _ensureSimInit);
+    } else {
+        _ensureSimInit();
+    }
 
     async function startSimulation() {
         if (_simStarting) { window.showNotification('仿真正在启动中，请稍候', 'warning'); return; }
@@ -384,7 +395,9 @@
 
     async function pollSimulation() {
         try {
-            var data = await window.SelfLnnApi.simulationStatus();
+            var resp = await window.SelfLnnApi.simulationStatus();
+            /* FIX-F2-CRIT-1: SelfLnnApi包装响应为{success,data},需取.data层 */
+            var data = (resp && resp.data) ? resp.data : resp;
             if (data) {
                 /* ZSFABC-Fix: 仿真停止时自动清除轮询，防止资源泄漏 */
                 if (data.running === false) {
@@ -471,9 +484,9 @@
     /* 页面卸载时清理定时器和WebGL资源 */
     window.addEventListener('beforeunload', function() {
         if (simPolling) { clearInterval(simPolling); simPolling = null; }
-        /* FIX-5: 清理WebGL渲染循环和GPU资源 */
+        /* ZSFWS修复-M-013: 修复变量名错误 gl→sim3dGl, gl3dAnimId→sim3dAnimId */
         stopRenderLoop();
-        if (gl && gl.getExtension && gl3dAnimId) { cancelAnimationFrame(gl3dAnimId); }
+        if (sim3dGl && sim3dGl.getExtension && sim3dAnimId) { cancelAnimationFrame(sim3dAnimId); }
     });
 
 })();

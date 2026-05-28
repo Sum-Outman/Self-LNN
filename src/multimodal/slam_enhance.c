@@ -15,7 +15,7 @@
 #include "selflnn/multimodal/slam.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/memory.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/logging.h"
 #include <stdlib.h>

@@ -98,7 +98,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 │  │  机器人控制/Robot Ctrl | 仿真控制/Simulation | 多模态学习/Multimodal  │  │
 │  │  语音控制/Voice Ctrl | 对话界面/Dialogue | 安全面板/Safety Panel      │  │
 │  │  知识图谱/Knowledge Graph | API文档/API Docs | 使用记录/Usage Logs   │  │
-│  │  通信/Comm: WebSocket 9090 (实时推送/Real-time) + HTTP REST 8080   │  │
+│  │  通信/Comm: WebSocket 8080 (实时推送，与HTTP共享端口/Shared Port) + HTTP REST 8080   │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 │                                    │  ↕ HTTP/WebSocket                     │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │

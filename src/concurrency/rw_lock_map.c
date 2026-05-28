@@ -203,12 +203,12 @@ int rw_lock_map_insert(RwLockMap* map, const char* key, void* value) {
         return -1;
     }
 
-    /* ZSF-036修复: 跨平台字符串复制，Windows用_strdup，POSIX用strdup */
-#ifdef _WIN32
-    new_entry->key = _strdup(key);
-#else
-    new_entry->key = strdup(key);
-#endif
+    /* ZSFX-DEEP-002修复: 使用safe_malloc替代strdup，确保与safe_free API匹配 */
+    size_t key_len = strlen(key) + 1;
+    new_entry->key = (char*)safe_malloc(key_len);
+    if (new_entry->key) {
+        memcpy(new_entry->key, key, key_len);
+    }
     if (!new_entry->key) {
         safe_free((void**)&new_entry);
         rw_map_spin_unlock(lock);
@@ -286,29 +286,39 @@ int rw_lock_map_insert_int_key(RwLockMap* map, int64_t key, void* value) {
 void* rw_lock_map_get(RwLockMap* map, const char* key) {
     if (!map || !key || !map->is_initialized) return NULL;
     size_t idx = rw_map_hash_string(key, map->capacity);
+    rw_map_lock_t* lock = &map->bucket_locks[idx];
+    rw_map_spin_lock(lock);   /* ZSFX-DEEP-003: 读操作必须持有桶锁，防止与insert/remove产生数据竞争 */
     RwLockMapEntry* entry = map->buckets[idx];
     map->lookup_count++;
+    void* value = NULL;
     while (entry) {
         if (!entry->use_int_key && entry->key && strcmp(entry->key, key) == 0) {
-            return entry->value;
+            value = entry->value;
+            break;
         }
         entry = entry->next;
     }
-    return NULL;
+    rw_map_spin_unlock(lock);
+    return value;
 }
 
 void* rw_lock_map_get_int_key(RwLockMap* map, int64_t key) {
     if (!map || !map->is_initialized) return NULL;
     size_t idx = rw_map_hash_int(key, map->capacity);
+    rw_map_lock_t* lock = &map->bucket_locks[idx];
+    rw_map_spin_lock(lock);   /* ZSFX-DEEP-003: 读操作必须持有桶锁 */
     RwLockMapEntry* entry = map->buckets[idx];
     map->lookup_count++;
+    void* value = NULL;
     while (entry) {
         if (entry->use_int_key && entry->int_key == key) {
-            return entry->value;
+            value = entry->value;
+            break;
         }
         entry = entry->next;
     }
-    return NULL;
+    rw_map_spin_unlock(lock);
+    return value;
 }
 
 int rw_lock_map_remove(RwLockMap* map, const char* key) {

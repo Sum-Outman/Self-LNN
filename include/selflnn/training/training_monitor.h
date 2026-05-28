@@ -49,6 +49,11 @@ typedef struct {
     const char* run_name;
     int current_epoch;
     int total_epochs;
+    /* R5-②修复: ETA真实估算所需的计时字段 */
+    long start_time_sec;         /**< 训练开始时间戳 */
+    long last_epoch_time_sec;    /**< 上一个epoch结束时间戳 */
+    int  epochs_recorded;        /**< 已记录的epoch数量(用于计算平均速度) */
+    float avg_epoch_seconds;     /**< 每个epoch的平均秒数(EMA平滑) */
 } TrainingMonitor;
 
 TrainingMonitor* training_monitor_create(const char* run_name, int total_epochs);

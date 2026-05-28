@@ -59,8 +59,9 @@ void* selflnn_get_shared_lnn(void);
  * agi.c 中这些 cap_check_* 和 cap_set_* 函数是死代码，
  * 仅通过 g_agi_cap_system 全局指针引用（也仅用于agi.c内部）。
  * 如果 capability_switch 要使用这些函数，应通过 selflnn_get_*() 访问器连接。 */
-/* 子系统接口前向声明（实现位于对应子系统模块） */
-#ifdef SELFLNN_AGI_DIRECT_CAPCALL  /* 默认未定义，避免链接错误 */
+/* 子系统接口前向声明（实现位于对应子系统模块）*/
+/* ZSFX-DEEP-R16-001: 移除#ifdef保护并内联实现11个缺失的能力控制函数
+ * 这些函数被cap_check_*/cap_set_*静态函数调用,需要在agi.c中直接实现 */
 extern int learning_engine_is_imitation_enabled(void* learner);
 extern int learning_engine_set_imitation_enabled(void* learner, int enable);
 extern int deep_reflection_is_enabled(void* reflection);
@@ -72,7 +73,64 @@ extern void planning_disable(void* planner);
 extern int dialogue_is_enabled(void* dialogue);
 extern void dialogue_enable(void* dialogue);
 extern void dialogue_disable(void* dialogue);
-#endif
+
+/* R16-001: 能力控制函数实现 — 通过capability_switch统一管理 */
+ static int learning_engine_is_imitation_enabled_impl(void* learner) {
+     (void)learner;
+     return capability_is_enabled(CAP_IMITATION_LEARNING);
+ }
+ static int learning_engine_set_imitation_enabled_impl(void* learner, int enable) {
+     (void)learner;
+     return capability_set_enabled(CAP_IMITATION_LEARNING, enable);
+ }
+static int deep_reflection_is_enabled_impl(void* reflection) {
+    (void)reflection;
+    return capability_is_enabled(CAP_SELF_REFLECTION);
+}
+static void deep_reflection_enable_impl(void* reflection) {
+    (void)reflection;
+    capability_set_enabled(CAP_SELF_REFLECTION, 1);
+}
+static void deep_reflection_disable_impl(void* reflection) {
+    (void)reflection;
+    capability_set_enabled(CAP_SELF_REFLECTION, 0);
+}
+static int planning_is_enabled_impl(void* planner) {
+    (void)planner;
+    return capability_is_enabled(CAP_PLANNING);
+}
+static void planning_enable_impl(void* planner) {
+    (void)planner;
+    capability_set_enabled(CAP_PLANNING, 1);
+}
+static void planning_disable_impl(void* planner) {
+    (void)planner;
+    capability_set_enabled(CAP_PLANNING, 0);
+}
+static int dialogue_is_enabled_impl(void* dialogue) {
+    (void)dialogue;
+    return capability_is_enabled(CAP_DIALOGUE);
+}
+static void dialogue_enable_impl(void* dialogue) {
+    (void)dialogue;
+    capability_set_enabled(CAP_DIALOGUE, 1);
+}
+static void dialogue_disable_impl(void* dialogue) {
+    (void)dialogue;
+    capability_set_enabled(CAP_DIALOGUE, 0);
+}
+/* 宏重定向: extern声明指向静态实现 */
+#define learning_engine_is_imitation_enabled    learning_engine_is_imitation_enabled_impl
+#define learning_engine_set_imitation_enabled   learning_engine_set_imitation_enabled_impl
+#define deep_reflection_is_enabled              deep_reflection_is_enabled_impl
+#define deep_reflection_enable                  deep_reflection_enable_impl
+#define deep_reflection_disable                 deep_reflection_disable_impl
+#define planning_is_enabled                     planning_is_enabled_impl
+#define planning_enable                         planning_enable_impl
+#define planning_disable                        planning_disable_impl
+#define dialogue_is_enabled                     dialogue_is_enabled_impl
+#define dialogue_enable                         dialogue_enable_impl
+#define dialogue_disable                        dialogue_disable_impl
 #include "selflnn/concurrency/thread_pool.h"
 #include <stdlib.h>
 #include <string.h>

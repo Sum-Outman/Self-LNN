@@ -465,17 +465,49 @@ static int dynamics_gjk_with_simplex(const float* shape_a, int num_a,
             direction[1] = ab[1] * vec3_dot(ab, ao) - ao[1] * vec3_dot(ab, ab);
             direction[2] = ab[2] * vec3_dot(ab, ao) - ao[2] * vec3_dot(ab, ab);
         } else if (simplex_count == 3) {
-            float ab[3], ac[3], ao[3], n[3];
+            /* ZSFX-DEEP-R11-001: 完整Voronoi区域检查(与kinematics.c正确实现一致)
+             * 原作仅用三角形法向量搜索,缺少边区域检查导致假阴性和迭代超限 */
+            float ab[3], ac[3], ao[3], abc[3];
             vec3_sub(simplex[1], simplex[0], ab);
             vec3_sub(simplex[2], simplex[0], ac);
             ao[0] = -simplex[0][0]; ao[1] = -simplex[0][1]; ao[2] = -simplex[0][2];
-            n[0] = ab[1]*ac[2] - ab[2]*ac[1];
-            n[1] = ab[2]*ac[0] - ab[0]*ac[2];
-            n[2] = ab[0]*ac[1] - ab[1]*ac[0];
-            if (vec3_dot(n, ao) > 0.0f) {
-                direction[0] = n[0]; direction[1] = n[1]; direction[2] = n[2];
-            } else {
-                direction[0] = -n[0]; direction[1] = -n[1]; direction[2] = -n[2];
+            abc[0] = ab[1]*ac[2] - ab[2]*ac[1];
+            abc[1] = ab[2]*ac[0] - ab[0]*ac[2];
+            abc[2] = ab[0]*ac[1] - ab[1]*ac[0];
+
+            /* Voronoi区域1: 原点靠近AB边 */
+            float abc_ao[3];
+            abc_ao[0] = abc[1]*ao[2] - abc[2]*ao[1];
+            abc_ao[1] = abc[2]*ao[0] - abc[0]*ao[2];
+            abc_ao[2] = abc[0]*ao[1] - abc[1]*ao[0];
+            if (ab[0]*abc_ao[0] + ab[1]*abc_ao[1] + ab[2]*abc_ao[2] > 0.0f) {
+                simplex[0][0] = simplex[1][0]; simplex[0][1] = simplex[1][1]; simplex[0][2] = simplex[1][2];
+                simplex_count = 2;
+                float ab_ao[3];
+                ab_ao[0] = ab[1]*ao[2] - ab[2]*ao[1]; ab_ao[1] = ab[2]*ao[0] - ab[0]*ao[2]; ab_ao[2] = ab[0]*ao[1] - ab[1]*ao[0];
+                direction[0] = ab_ao[1]*ab[2] - ab_ao[2]*ab[1];
+                direction[1] = ab_ao[2]*ab[0] - ab_ao[0]*ab[2];
+                direction[2] = ab_ao[0]*ab[1] - ab_ao[1]*ab[0];
+            }
+            /* Voronoi区域2: 原点靠近AC边 */
+            else {
+                float ac_ao[3];
+                ac_ao[0] = ac[1]*ao[2] - ac[2]*ao[1]; ac_ao[1] = ac[2]*ao[0] - ac[0]*ao[2]; ac_ao[2] = ac[0]*ao[1] - ac[1]*ao[0];
+                if (ac[0]*ac_ao[0] + ac[1]*ac_ao[1] + ac[2]*ac_ao[2] > 0.0f) {
+                    simplex[1][0] = simplex[2][0]; simplex[1][1] = simplex[2][1]; simplex[1][2] = simplex[2][2];
+                    simplex_count = 2;
+                    direction[0] = ac_ao[1]*ac[2] - ac_ao[2]*ac[1];
+                    direction[1] = ac_ao[2]*ac[0] - ac_ao[0]*ac[2];
+                    direction[2] = ac_ao[0]*ac[1] - ac_ao[1]*ac[0];
+                } else {
+                    /* 原点在三角形面Voronoi区域 */
+                    float dot = abc[0]*ao[0] + abc[1]*ao[1] + abc[2]*ao[2];
+                    if (dot > 0.0f) {
+                        direction[0] = abc[0]; direction[1] = abc[1]; direction[2] = abc[2];
+                    } else {
+                        direction[0] = -abc[0]; direction[1] = -abc[1]; direction[2] = -abc[2];
+                    }
+                }
             }
         } else if (simplex_count == 4) {
             /* 四面体: 原点在内部则碰撞，输出单形体 */
@@ -927,13 +959,8 @@ int dynamics_rnea(const DynamicsModel* model,
                     dvec3_scale(wxz, qd[i], tmp1);
                     dvec3_add(&alpha[i * 3], tmp1, &alpha[i * 3]);
                 } else if (model->config.joint_types[i] == JOINT_TYPE_PRISMATIC) {
-                    float q_dd_z[3], two_wxz[3];
-                    dvec3_scale(z_world, qdd[i], q_dd_z);
-                    dvec3_add(&accel[parent * 3], q_dd_z, tmp1);
-                    dvec3_cross(&omega[i * 3], z_world, two_wxz);
-                    dvec3_scale(two_wxz, 2.0f * qd[i], tmp2);
-                    dvec3_add(tmp1, tmp2, tmp3);
-                    dvec3_add(&accel[parent * 3], tmp3, &accel[i * 3]);
+                    /* ZSFX-DEEP-R10-001: 平动关节角速度/角加速度不受影响,
+                     * 滑动加速度由循环末尾的专用后处理块累加 */
                 }
                 {
                     float w_x_p[3], w_x_wxp[3];
@@ -942,6 +969,16 @@ int dynamics_rnea(const DynamicsModel* model,
                     dvec3_add(&accel[parent * 3], w_x_wxp, tmp1);
                     dvec3_cross(&alpha[parent * 3], p_vec, tmp2);
                     dvec3_add(tmp1, tmp2, &accel[i * 3]);
+                }
+                /* ZSFX-DEEP-R10-001: 平动关节滑动加速度后处理
+                 * 基础旋转加速度已写入accel[i],现在累加z*qdd+2*ω×(z*qd) */
+                if (model->config.joint_types[i] == JOINT_TYPE_PRISMATIC) {
+                    float q_dd_z[3], two_wxz[3], sliding[3];
+                    dvec3_scale(z_world, qdd[i], q_dd_z);
+                    dvec3_cross(&omega[i * 3], z_world, two_wxz);
+                    dvec3_scale(two_wxz, 2.0f * qd[i], sliding);
+                    dvec3_add(sliding, q_dd_z, sliding);  /* sliding = z*qdd + 2*ω×(z*qd) */
+                    dvec3_add(&accel[i * 3], sliding, &accel[i * 3]);
                 }
             }
         }
@@ -1059,10 +1096,16 @@ int dynamics_mass_matrix(const DynamicsModel* model, const float* q, float* mass
         return -1;
     }
     memset(qd_zero, 0, (size_t)n * sizeof(float));
+    /* ZSFX-DEEP-R9-002: 临时清零重力计算纯质量矩阵M(q)
+     * RNEA(q,0,ej) = M(q)·ej + G(q), 必须排除G(q)才能得到M(q)的准确列 */
+    float saved_gravity[3];
+    memcpy(saved_gravity, model->config.gravity, sizeof(saved_gravity));
+    memset(model->config.gravity, 0, sizeof(model->config.gravity));
     for (i = 0; i < n; i++) {
         memset(qdd_ej, 0, (size_t)n * sizeof(float));
         qdd_ej[i] = 1.0f;
         if (dynamics_rnea(model, q, qd_zero, qdd_ej, torques_j) != 0) {
+            memcpy(model->config.gravity, saved_gravity, sizeof(saved_gravity));
             safe_free((void**)&qd_zero);
             safe_free((void**)&qdd_ej);
             safe_free((void**)&torques_j);
@@ -1072,6 +1115,7 @@ int dynamics_mass_matrix(const DynamicsModel* model, const float* q, float* mass
             mass_matrix[j * n + i] = torques_j[j];
         }
     }
+    memcpy(model->config.gravity, saved_gravity, sizeof(saved_gravity));
     safe_free((void**)&qd_zero);
     safe_free((void**)&qdd_ej);
     safe_free((void**)&torques_j);

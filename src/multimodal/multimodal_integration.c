@@ -335,22 +335,11 @@ int multimodal_integration_process_vision(
                 float sum_xy = 0.0f, sum_xz = 0.0f, sum_yz = 0.0f;
                 int point_count = 0;
                 
-                /* ZSFWS-007修复: 相机内参——优先使用立体标定结果，无标定时使用合理默认值 */
-                float fx = width * 0.7f;   /* 默认: 约70°水平视场角 */
-                float fy = height * 0.7f;  /* 默认: 约70°垂直视场角 */
+                /* ZSFX-DEEP-R5-002修复: 使用默认相机内参(70°视场角) */
+                float fx = width * 0.7f;
+                float fy = height * 0.7f;
                 float cx = width * 0.5f;
                 float cy = height * 0.5f;
-                /* 尝试获取立体标定的相机内参 */
-                {
-                    extern StereoCalibrationParams* stereo_calibration_get_global(void);
-                    StereoCalibrationParams* calib = stereo_calibration_get_global();
-                    if (calib && calib->left_intrinsics.fx > 0.0f) {
-                        fx = calib->left_intrinsics.fx;
-                        fy = calib->left_intrinsics.fy;
-                        cx = calib->left_intrinsics.cx;
-                        cy = calib->left_intrinsics.cy;
-                    }
-                }
                 
                 for (int y = 0; y < height; y += 2) {
                     for (int x = 0; x < width; x += 2) {

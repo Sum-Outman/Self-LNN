@@ -110,6 +110,7 @@ struct LNN {
     /* 中间激活值缓存（用于梯度检查点重计算） */
     float** activation_checkpoints;                   /**< 激活检查点数组 */
     size_t* activation_checkpoint_sizes;              /**< 各检查点大小 */
+    size_t* activation_checkpoint_layers;             /**< ZSFWS-M-011: 各检查点对应的层索引 */
     size_t num_activation_checkpoints;                /**< 检查点数量 */
     size_t activation_checkpoint_capacity;            /**< 检查点容量 */
 
@@ -161,6 +162,10 @@ void lnn_free(LNN* network);
  * @return int 成功返回0，失败返回-1
  */
 int lnn_forward(LNN* network, const float* input, float* output);
+
+/* ZSFX-DEEP-R9-001: 公开LNN锁API - 外部模块跨操作原子性 */
+SELFLNN_API void lnn_lock(LNN* network);
+SELFLNN_API void lnn_unlock(LNN* network);
 
 /**
  * @brief 安全前向传播（含边界检查和维度适配）

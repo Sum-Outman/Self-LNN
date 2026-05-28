@@ -374,9 +374,13 @@ int dtc_expand_branch(DTCSystem* system,
         branch->parent_index = node_index;
 
         float branch_input[DTC_EMBED_DIM];
+        /* R5-③修复: LCG确定性噪声→加密安全随机+Box-Muller变换，
+         * 与dtc_reason_chain(N-003修复)保持一致 */
         for (size_t j = 0; j < DTC_EMBED_DIM; j++) {
-            float noise = ((float)((seed + b * 73 + j * 11) % 1000) / 1000.0f - 0.5f) * 0.5f;
-            branch_input[j] = parent->thought_embedding[j] + noise;
+            float u1 = secure_random_float();
+            float u2 = secure_random_float();
+            float gauss = sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.28318530f * u2);
+            branch_input[j] = parent->thought_embedding[j] + gauss * 0.05f;
         }
 
         float branch_out[DTC_EMBED_DIM] = {0};
@@ -479,9 +483,11 @@ int dtc_beam_search(DTCSystem* system,
             int expansions = 2 + (step % 3);
             for (int e = 0; e < expansions && candidate_count < 8 * 4; e++) {
                 float thought_input[DTC_EMBED_DIM];
+                /* R5-③修复: 束搜索噪声统一使用secure_random */
                 for (size_t j = 0; j < DTC_EMBED_DIM; j++) {
-                    float noise = ((float)((seed + step * 53 + b * 31 + e * 17 + j * 7) % 1000) / 1000.0f - 0.5f);
-                    thought_input[j] = current[j] + noise * system->config.temperature * (1.0f + (float)e * 0.2f);
+                    float u1 = secure_random_float(), u2 = secure_random_float();
+                    float gauss = sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.28318530f * u2);
+                    thought_input[j] = current[j] + gauss * 0.03f;
                 }
 
                 float thought_out[DTC_EMBED_DIM] = {0};
@@ -722,7 +728,15 @@ int dtc_self_consistency_rerank(DTCSystem* system,
     for (size_t i = 0; i < bp->path_len && i < (size_t)DTC_MAX_CHAIN_LEN; i++) {
         memcpy(&reranked_out->nodes[i], &chain->nodes[bp->path_nodes[i]],
                sizeof(DTCThoughtNode));
-        reranked_out->nodes[i].thought_text = chain->nodes[bp->path_nodes[i]].thought_text;
+        /* Z-R3-P04修复: 深拷贝thought_text避免悬空指针。
+         * 原代码直接赋值指针(浅拷贝)，若调用方释放chain则reranked_out中的指针失效。
+         * 现在使用safe_strdup进行独立深拷贝，调用方负责释放reranked_out。 */
+        if (chain->nodes[bp->path_nodes[i]].thought_text) {
+            reranked_out->nodes[i].thought_text =
+                safe_strdup(chain->nodes[bp->path_nodes[i]].thought_text);
+        } else {
+            reranked_out->nodes[i].thought_text = NULL;
+        }
         reranked_out->num_nodes = i + 1;
     }
 
@@ -763,8 +777,9 @@ int dtc_merge_thoughts(DTCSystem* system,
     memcpy(merge_input, chain->nodes[merge_node_a].thought_embedding, DTC_EMBED_DIM * sizeof(float));
     memcpy(merge_input + DTC_EMBED_DIM, chain->nodes[merge_node_b].thought_embedding, DTC_EMBED_DIM * sizeof(float));
 
-    float merge_out[DTC_EMBED_DIM] = {0};
-    lnn_forward(system->merge_net, merge_input, merge_out);
+    /* ZSFWS修复-L-010: 变量名merged_embedding消除与merged_out的歧义 */
+    float merged_embedding[DTC_EMBED_DIM] = {0};
+    lnn_forward(system->merge_net, merge_input, merged_embedding);
 
     size_t write_idx = 0;
     for (size_t i = 0; i < chain->num_nodes; i++) {
@@ -775,7 +790,7 @@ int dtc_merge_thoughts(DTCSystem* system,
 
         memcpy(dst, src, sizeof(DTCThoughtNode));
         if (i == merge_node_a) {
-            memcpy(dst->thought_embedding, merge_out, DTC_EMBED_DIM * sizeof(float));
+            memcpy(dst->thought_embedding, merged_embedding, DTC_EMBED_DIM * sizeof(float));
             dst->confidence = (src->confidence + chain->nodes[merge_node_b].confidence) * 0.5f;
 
             dst->thought_text = (char*)safe_calloc(512, 1);
@@ -796,7 +811,7 @@ int dtc_merge_thoughts(DTCSystem* system,
 
     merged_out->final_output = (float*)safe_calloc(DTC_EMBED_DIM, sizeof(float));
     if (merged_out->num_nodes > 0) {
-        memcpy(merged_out->final_output, merge_out, DTC_EMBED_DIM * sizeof(float));
+        memcpy(merged_out->final_output, merged_embedding, DTC_EMBED_DIM * sizeof(float));
     }
     merged_out->output_dim = DTC_EMBED_DIM;
 

@@ -17,7 +17,6 @@
 #include "selflnn/core/common.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/memory.h"
-#include "selflnn/core/safe_memory.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"

@@ -1285,6 +1285,28 @@ int cfc_save(const CfCNetwork* network, FILE* file) {
                          "保存第%d层CfC细胞参数失败", i);
         }
     }
+
+    /* ZSFX-DEEP-R6-001: 保存层归一化可学习参数(gamma/beta)
+     * 此前cfc_save完全遗漏了layer_norm参数，导致加载后归一化回退到初始值 */
+    if (network->layer_norms && network->config.use_layer_norm) {
+        uint32_t ln_marker = 0x4C4E4F52;  /* "LNOR" */
+        fwrite(&ln_marker, sizeof(uint32_t), 1, file);
+        for (int i = 0; i < network->config.num_layers; i++) {
+            LayerNorm* ln = (LayerNorm*)network->layer_norms[i];
+            if (!ln) {
+                /* 写入零长度标记表示该层无LN实例 */
+                uint16_t zero_dim = 0;
+                fwrite(&zero_dim, sizeof(uint16_t), 1, file);
+                continue;
+            }
+            const float* gamma = layer_norm_get_gamma(ln);
+            const float* beta  = layer_norm_get_beta(ln);
+            uint16_t dim = (uint16_t)network->config.hidden_size;
+            fwrite(&dim, sizeof(uint16_t), 1, file);
+            fwrite(gamma, sizeof(float), (size_t)dim, file);
+            fwrite(beta,  sizeof(float), (size_t)dim, file);
+        }
+    }
     
     return 0;
 }
@@ -1380,6 +1402,34 @@ int cfc_load(CfCNetwork* network, FILE* file) {
         } else {
             /* 旧格式checkpoint（无细胞参数），回退文件指针 */
             fseek(file, saved_pos, SEEK_SET);
+        }
+    }
+
+    /* ZSFX-DEEP-R6-001: 加载层归一化可学习参数(gamma/beta) - 向后兼容 */
+    if (network->layer_norms && network->config.use_layer_norm) {
+        uint32_t ln_marker = 0;
+        long ln_pos = ftell(file);
+        if (fread(&ln_marker, sizeof(uint32_t), 1, file) == 1 &&
+            ln_marker == 0x4C4E4F52) {  /* "LNOR" */
+            for (int i = 0; i < network->config.num_layers; i++) {
+                LayerNorm* ln = (LayerNorm*)network->layer_norms[i];
+                uint16_t dim = 0;
+                if (fread(&dim, sizeof(uint16_t), 1, file) != 1) break;
+                if (dim == 0 || !ln) continue;
+                if (dim > (uint16_t)network->config.hidden_size) {
+                    dim = (uint16_t)network->config.hidden_size;
+                }
+                float* gamma_buf = (float*)safe_malloc((size_t)dim * 2 * sizeof(float));
+                if (!gamma_buf) { fseek(file, dim * 2 * sizeof(float), SEEK_CUR); continue; }
+                if (fread(gamma_buf, sizeof(float), dim, file) == dim &&
+                    fread(gamma_buf + dim, sizeof(float), dim, file) == dim) {
+                    layer_norm_set_params(ln, gamma_buf);
+                }
+                safe_free((void**)&gamma_buf);
+            }
+        } else {
+            /* 旧格式checkpoint（无layer_norm参数），回退文件指针，gamma/beta保持原值 */
+            fseek(file, ln_pos, SEEK_SET);
         }
     }
     

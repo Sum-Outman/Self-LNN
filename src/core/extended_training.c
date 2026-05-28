@@ -95,8 +95,7 @@ static int _lnn_save_activation_checkpoint_internal(LNN* network, size_t layer_i
                                                      const float* activation_data,
                                                      size_t activation_size)
 {
-    /* I-002修复：使用layer_index记录检查点对应的层号 */
-    (void)layer_index;
+    /* ZSFWS修复-M-011: 存储layer_index用于恢复时正确匹配 */
     if (!network || !activation_data || activation_size == 0) {
         return SELFLNN_ERROR_INVALID_ARGUMENT;
     }
@@ -110,19 +109,30 @@ static int _lnn_save_activation_checkpoint_internal(LNN* network, size_t layer_i
         }
         float** new_ckpts = (float**)safe_malloc(new_cap * sizeof(float*));
         size_t* new_sizes = (size_t*)safe_malloc(new_cap * sizeof(size_t));
-        if (!new_ckpts || !new_sizes) {
+        size_t* new_layers = (size_t*)safe_malloc(new_cap * sizeof(size_t)); /* ZSFWS-M-011 */
+        if (!new_ckpts || !new_sizes || !new_layers) {
             safe_free((void**)&new_ckpts);
             safe_free((void**)&new_sizes);
+            safe_free((void**)&new_layers);
             return SELFLNN_ERROR_OUT_OF_MEMORY;
         }
         memcpy(new_ckpts, network->activation_checkpoints,
                network->activation_checkpoint_capacity * sizeof(float*));
         memcpy(new_sizes, network->activation_checkpoint_sizes,
                network->activation_checkpoint_capacity * sizeof(size_t));
+        /* ZSFWS-M-011: 复制层索引数组 */
+        if (network->activation_checkpoint_layers) {
+            memcpy(new_layers, network->activation_checkpoint_layers,
+                   network->activation_checkpoint_capacity * sizeof(size_t));
+        } else {
+            memset(new_layers, 0, network->activation_checkpoint_capacity * sizeof(size_t));
+        }
         safe_free((void**)&network->activation_checkpoints);
         safe_free((void**)&network->activation_checkpoint_sizes);
+        safe_free((void**)&network->activation_checkpoint_layers);
         network->activation_checkpoints = new_ckpts;
         network->activation_checkpoint_sizes = new_sizes;
+        network->activation_checkpoint_layers = new_layers;
         network->activation_checkpoint_capacity = new_cap;
     }
     size_t idx = network->num_activation_checkpoints;
@@ -133,6 +143,7 @@ static int _lnn_save_activation_checkpoint_internal(LNN* network, size_t layer_i
     memcpy(network->activation_checkpoints[idx], activation_data,
            activation_size * sizeof(float));
     network->activation_checkpoint_sizes[idx] = activation_size;
+    network->activation_checkpoint_layers[idx] = layer_index; /* ZSFWS-M-011 */
     network->num_activation_checkpoints++;
     return SELFLNN_SUCCESS;
 }

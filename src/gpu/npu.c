@@ -1,6 +1,7 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/platform.h"
 #include "gpu_internal.h"
 #include "npu_internal.h"
 #include <stdlib.h>
@@ -8,6 +9,8 @@
 #include <stdio.h>
 
 static NpuBackendInterface* g_active_npu_backend = NULL;
+/* ZSFWS修复-M-008: NPU异步推理互斥锁 */
+static MutexHandle g_npu_async_mutex = NULL;
 
 NpuBackendInterface* npu_get_backend_for_context(GpuContext* context) {
     if (!context) return NULL;
@@ -88,14 +91,21 @@ int gpu_npu_infer_async(NpuModel* model, const float** inputs, float** outputs,
         LOG_ERROR("gpu_npu_infer_async: 参数无效");
         return -1;
     }
+    /* ZSFWS修复-M-008: 互斥锁保护async_in_flight竞态 */
+    if (!g_npu_async_mutex) {
+        g_npu_async_mutex = mutex_create();
+    }
+    if (g_npu_async_mutex) mutex_lock(g_npu_async_mutex);
     if (model->async_in_flight) {
         LOG_ERROR("gpu_npu_infer_async: 上一次异步推理尚未完成");
+        if (g_npu_async_mutex) mutex_unlock(g_npu_async_mutex);
         return -1;
     }
     int ret = model->backend->npu_infer_async(model, inputs, outputs, batch_size);
     if (ret == 0) {
         model->async_in_flight = 1;
     }
+    if (g_npu_async_mutex) mutex_unlock(g_npu_async_mutex);
     return ret;
 }
 
@@ -104,10 +114,13 @@ int gpu_npu_infer_wait(NpuModel* model, int timeout_ms) {
         LOG_ERROR("gpu_npu_infer_wait: 参数无效");
         return -1;
     }
+    /* ZSFWS修复-M-008: 互斥锁保护async_in_flight */
+    if (g_npu_async_mutex) mutex_lock(g_npu_async_mutex);
     int ret = model->backend->npu_infer_wait(model, timeout_ms);
     if (ret == 0) {
         model->async_in_flight = 0;
     }
+    if (g_npu_async_mutex) mutex_unlock(g_npu_async_mutex);
     return ret;
 }
 

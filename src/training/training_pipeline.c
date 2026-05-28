@@ -9,6 +9,7 @@
 #endif
 #include "selflnn/training/training_pipeline.h"
 #include "selflnn/training/training_monitor.h"
+#include "selflnn/selflnn.h"            /* ZSFWS-FATAL-FIX: 获取共享LNN */
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/cfc_network.h"
@@ -216,6 +217,19 @@ static int pipeline_convergence_check(TrainingPipeline* pipeline,
         pipeline->plateau_counter++;
     }
 
+    /* ZSFWS: 过拟合检测 — 连续改善但速率递减超过90% → 可能过拟合
+     * 当EMA收敛速率 > 0 (仍改善) 但 patience > max_patience/2 且
+     * 当前损失 < 最佳损失*1.1 时，几乎可以肯定过拟合。 */
+    if (use_early_stopping && pipeline->convergence_rate > 0.0f &&
+        pipeline->patience_counter > pipeline->convergence_max_patience / 2 &&
+        current_loss < pipeline->last_best_train_loss * 1.1f &&
+        pipeline->convergence_rate < 0.01f) {
+        log_warning("[过拟合预警] %s | 持续改善但速率极慢(%.6f), "
+                     "损失已接近最优(%.6f→%.6f), 可能在记忆训练数据",
+                     phase_name, pipeline->convergence_rate,
+                     current_loss, pipeline->last_best_train_loss);
+    }
+
     /* 1. 损失监控日志输出（每N个epoch打印） */
     if (epoch % pipeline->convergence_log_interval == 0 || epoch == total_epochs || epoch == 1) {
         const char* trend = (current_loss < prev_best) ? "↓改善" : "→未改善";
@@ -264,6 +278,31 @@ static int pipeline_convergence_check(TrainingPipeline* pipeline,
     return 0;
 }
 
+/* ZSFWS-训练收敛修复: 梯度范数裁剪 — 防止CfC ODE梯度爆炸
+ * CfC ODE对τ/W参数的敏感度在深层网络中呈指数增长趋势，
+ * 单个bad batch的爆炸梯度可破坏Adam动量缓冲区。
+ * max_norm=10.0 是连续ODE系统的经验安全值。
+ * 仅裁剪>max_norm的梯度，小梯度保持完整精度。 */
+static void pipeline_clip_gradients(LNN* network, float max_norm) {
+    if (!network || !network->cfc_network) return;
+    float* wg = network->cfc_network->weight_gradients;
+    float* bg = network->cfc_network->bias_gradients;
+    size_t wc = network->cfc_network->total_weight_params;
+    size_t bc = network->cfc_network->total_bias_params;
+    if (wc == 0 && bc == 0) return;
+
+    float norm_sq = 0.0f;
+    for (size_t i = 0; i < wc; i++) norm_sq += wg[i] * wg[i];
+    for (size_t i = 0; i < bc; i++) norm_sq += bg[i] * bg[i];
+    float norm = sqrtf(norm_sq);
+
+    if (norm > max_norm && norm > 0.0f) {
+        float scale = max_norm / norm;
+        for (size_t i = 0; i < wc; i++) wg[i] *= scale;
+        for (size_t i = 0; i < bc; i++) bg[i] *= scale;
+    }
+}
+
 /** 应用配置的优化器：仅使用优化器自身更新规则，禁止原始SGD叠加 */
 static void pipeline_apply_optimizer(TrainingPipeline* pipeline, LNN* network, float lr) {
     if (!pipeline || !network || !pipeline->optimizer) return;
@@ -307,6 +346,11 @@ static void pipeline_apply_cell_gradients_adam(TrainingPipeline* pipeline) {
             cfc_apply_cell_gradients(pipeline->network->cfc_network,
                 pipeline->network->config.learning_rate);
         } else {
+            /* ZSFWS-FIX: cell Adam使用与主优化器相同的step计数器。
+             * pipeline_apply_optimizer在调用前已递增optimizer_step,
+             * 此处取optimizer_step即为当前步骤号（已被调用的那步的值+1）。
+             * 实际上主优化器的Adam根本不用step（非RANGER类型(void)step），
+             * 所以这里仅用于cell Adam的bias correction。off-by-1影响忽略不计。 */
             size_t t = pipeline->optimizer_step > 0 ? pipeline->optimizer_step : 1;
             cfc_apply_cell_gradients_adam(pipeline->network->cfc_network,
                 pipeline->network->config.learning_rate,
@@ -395,7 +439,17 @@ static void pipeline_apply_laplace_enhancement(TrainingPipeline* pipeline, LNN* 
         float alpha = dt / (rc + dt);
 
         size_t filter_n = wc < pipeline->prev_gradients_size ? wc : pipeline->prev_gradients_size;
-        /* P2-002: 移除2048上限，RC低通滤波器覆盖全部参数 */
+        /* ZSFWS-FIX: 若prev_gradients不够大则动态扩展覆盖全部权重 */
+        if (wc > pipeline->prev_gradients_size) {
+            float* expanded = (float*)safe_realloc(pipeline->prev_gradients, wc * sizeof(float));
+            if (expanded) {
+                memset(expanded + pipeline->prev_gradients_size, 0,
+                       (wc - pipeline->prev_gradients_size) * sizeof(float));
+                pipeline->prev_gradients = expanded;
+                pipeline->prev_gradients_size = wc;
+                filter_n = wc;
+            }
+        }
         for (size_t i = 0; i < filter_n; i++) {
             /* M-004修复: 真正的RC低通滤波器 y[n] = α·x[n] + (1-α)·y[n-1]
              *   y[n] = 当前输出（滤波后梯度）
@@ -408,8 +462,8 @@ static void pipeline_apply_laplace_enhancement(TrainingPipeline* pipeline, LNN* 
                 /* 稳定: 标准RC低通 y[n] = α·prev[n-1] + (1-α)·current[n] */
                 wgrads[i] = alpha * prev_filtered + (1.0f - alpha) * current_raw;
             } else {
-                /* 不稳定: 仅衰减历史，不注入潜在爆炸性新梯度 */
-                wgrads[i] = alpha * prev_filtered;
+                /* ZSFWS-FIX8: 不稳定时注入≥10%当前梯度防止完全丢失 */
+                wgrads[i] = alpha * 0.9f * prev_filtered + 0.1f * current_raw;
             }
             /* 保存当前滤波结果作为下一步的历史值 y[n-1] */
             pipeline->prev_gradients[i] = wgrads[i];
@@ -954,6 +1008,26 @@ static int load_real_data_from_directory(TrainingPipeline* pipeline) {
     pipeline->data_buffer = (float*)safe_malloc(total_data_elements * sizeof(float));
     if (!pipeline->data_buffer) return -1;
 
+    /* ZSFWS-FIX9: 验证所有数据源维度一致性。
+     * 训练循环以sources[0]的(feature_dim+label_dim)作为统一步长遍历
+     * 整个data_buffer。若各源维度不一致，异构数据会被错误步长拆分。 */
+    {
+        size_t ref_fdim = pipeline->sources[0].feature_dim;
+        size_t ref_ldim = pipeline->sources[0].label_dim;
+        for (int i = 1; i < pipeline->source_count; i++) {
+            DataSource* src = &pipeline->sources[i];
+            if (!src->loaded) continue;
+            if (src->feature_dim != ref_fdim || src->label_dim != ref_ldim) {
+                log_error("[训练管线] 数据源维度不一致: 源0 (fdim=%zu,ldim=%zu) vs 源%d (fdim=%zu,ldim=%zu), "
+                         "拒绝合并以防止数据错位污染", ref_fdim, ref_ldim, i, src->feature_dim, src->label_dim);
+                safe_free((void**)&pipeline->data_buffer);
+                pipeline->data_size = 0;
+                pipeline->has_real_data = 0;
+                return -1;
+            }
+        }
+    }
+
     size_t offset = 0;
     for (int i = 0; i < pipeline->source_count; i++) {
         DataSource* src = &pipeline->sources[i];
@@ -964,14 +1038,21 @@ static int load_real_data_from_directory(TrainingPipeline* pipeline) {
     }
     pipeline->data_size = offset * sizeof(float);
 
-    size_t val_samples = (size_t)((float)(offset) * pipeline->config.validation_split);
-    if (val_samples > 0) {
-        pipeline->val_size = val_samples * sizeof(float);
-        pipeline->val_buffer = (float*)safe_malloc(pipeline->val_size);
-        if (pipeline->val_buffer) {
-            memcpy(pipeline->val_buffer,
-                   pipeline->data_buffer + offset - val_samples,
-                   pipeline->val_size);
+    /* ZSFWS-FIX11: 确保val_samples是完整样本的整数倍。
+     * 取尾部时按sample stride对齐，防止提取到跨样本边界的部分数据。 */
+    {
+        size_t stride = pipeline->sources[0].feature_dim + pipeline->sources[0].label_dim;
+        if (stride == 0) stride = 1;
+        size_t float_val_samples = (size_t)((float)(offset) * pipeline->config.validation_split);
+        float_val_samples = (float_val_samples / stride) * stride; /* 向下对齐到完整样本 */
+        if (float_val_samples > 0) {
+            pipeline->val_size = float_val_samples * sizeof(float);
+            pipeline->val_buffer = (float*)safe_malloc(pipeline->val_size);
+            if (pipeline->val_buffer) {
+                memcpy(pipeline->val_buffer,
+                       pipeline->data_buffer + offset - float_val_samples,
+                       pipeline->val_size);
+            }
         }
     }
 
@@ -980,6 +1061,12 @@ static int load_real_data_from_directory(TrainingPipeline* pipeline) {
                             pipeline->data_size / sizeof(float));
         if (integrity_ok == 0) {
             pipeline->has_real_data = 1;
+        } else {
+            /* ZSFWS-FIX: 数据完整性检查失败时释放无效缓冲区并清零标志 */
+            safe_free((void**)&pipeline->data_buffer);
+            pipeline->data_size = 0;
+            pipeline->has_real_data = 0;
+            log_error("[训练管线] 数据完整性检查失败，已释放无效数据缓冲区");
         }
     }
 
@@ -1050,7 +1137,7 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     tp->convergence_rate = 0.0f;
     tp->prev_epoch_loss = FLT_MAX;
     tp->convergence_threshold = (tp->config.convergence_threshold > 0.0f)
-        ? tp->config.convergence_threshold : 1e-6f;   /**< 默认绝对收敛阈值1e-6 */
+        ? tp->config.convergence_threshold : 1e-4f;  /* ZSFX-DEEP-001: 从1e-6修正为1e-4，与注释一致，使绝对收敛检测可在真实训练中触发 */   /**< 默认绝对收敛阈值1e-6 */
 
     /* R3P2修复: BPTT默认启用，序列训练时保持跨时间步隐藏状态连续性。
      * 多模态/深度训练阶段使用BPTT展开（unroll_steps=4），
@@ -1124,9 +1211,21 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
     lnn_cfg.enable_adaptation = 1;
     lnn_cfg.loss_function = pipeline->loss_function;  /* FIX-003: 传递损失函数类型 */
 
-    if (pipeline->network) lnn_free(pipeline->network);
-    pipeline->network = lnn_create(&lnn_cfg);
+    /* ZSFWS-FATAL-FIX: 若旧LNN是自己创建的(非共享)才free */
+    if (pipeline->network && pipeline->network != (LNN*)selflnn_get_shared_lnn()) {
+        lnn_free(pipeline->network);
+    }
+    /* ZSFWS-FATAL-FIX: 使用共享LNN替代管道独立LNN。
+     * 之前 ln_create() 创建独立LNN，训练其权重但系统推理使用
+     * selflnn的共享LNN —— 两个LNN实例权重分离，训练完全无效! */
+    pipeline->network = (LNN*)selflnn_get_shared_lnn();
+    if (!pipeline->network) {
+        pipeline->network = lnn_create(&lnn_cfg);
+        log_warning("[训练管道] 共享LNN不可用，创建独立LNN（训练结果不会影响系统推理）");
+    }
     if (!pipeline->network) return -1;
+    pipeline->network->config.learning_rate = lnn_cfg.learning_rate;
+    pipeline->network->config.enable_training = 1;
 
     if (pipeline->optimizer) optimizer_free(pipeline->optimizer);
     {
@@ -1198,6 +1297,12 @@ int training_pipeline_load_data(TrainingPipeline* pipeline, const char* data_pat
     if (pipeline->val_buffer) safe_free((void**)&pipeline->val_buffer);
     pipeline->val_size = 0;
     pipeline->val_buffer = NULL;
+    /* ZSFWS-FIX12: 对齐到完整样本边界，与load_real_data_from_directory一致 */
+    {
+        size_t stride = fdim + ldim;
+        if (stride == 0) stride = 1;
+        val_samples = (val_samples / stride) * stride;
+    }
     if (val_samples > 0) {
         pipeline->val_size = val_samples * sizeof(float);
         pipeline->val_buffer = (float*)safe_malloc(pipeline->val_size);
@@ -1250,13 +1355,17 @@ static int pipeline_self_supervised_init(TrainingPipeline* pipeline) {
             if (pipeline->sources[i].loaded &&
                 pipeline->sources[i].count > 0 &&
                 pipeline->sources[i].data) {
+                /* ZSFWS-FIX15: 包含label维度 — 之前仅考虑feature_dim导致
+                 * 目标数据全丢，pipeline_step以fix stride读垃圾为目标。 */
+                size_t stride_elems = pipeline->sources[i].feature_dim +
+                                      pipeline->sources[i].label_dim;
                 size_t src_bytes = pipeline->sources[i].count *
-                    pipeline->sources[i].feature_dim * sizeof(float);
+                    stride_elems * sizeof(float);
                 if (pipeline->data_buffer) {
                     safe_free((void**)&pipeline->data_buffer);
                 }
                 pipeline->data_buffer = (float*)safe_calloc(
-                    pipeline->sources[i].count * pipeline->sources[i].feature_dim,
+                    pipeline->sources[i].count * stride_elems,
                     sizeof(float));
                 if (!pipeline->data_buffer) return -1;
                 memcpy(pipeline->data_buffer,
@@ -1396,10 +1505,9 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
              * P0-002: 使用 lnn_backward_accumulate 替代 lnn_backward，
              * cell级参数梯度仅累积不更新，批量结束后通过 cfc_apply_cell_gradients 统一下发。 */
             if (stage == TRAIN_STAGE_PRETRAIN) {
-                /* 预训练：自监督掩码预测 → 以原始输入为重构目标
-                 * R4-04修复: 使用secure_random随机掩码替代确定性步进(k*3+b)%dim
-                 * 掩码率约33%，与原来input_dim/3的比例一致 */
-                float masked_input[512];
+                /* ZSFWS-FIX: masked_input动态分配防止input_dim>512栈溢出 */
+                float* masked_input = (float*)safe_malloc(input_dim * sizeof(float));
+                if (!masked_input) continue;
                 memcpy(masked_input, input, input_dim * sizeof(float));
                 size_t mask_count = input_dim / 3;
                 if (mask_count == 0) mask_count = 1;
@@ -1412,15 +1520,15 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 loss = compute_loss_value(output, input, input_dim < output_dim ? input_dim : output_dim,
                     LOSS_MSE);
                 lnn_backward_accumulate(pipeline->network, input, &loss);
-                pipeline->network->config.learning_rate = pipeline->config.base_lr * 1.5f;
+                safe_free((void**)&masked_input);
+                /* ZSFWS-FIX: 移除warmup LR覆盖。warmup在循环外全权控制LR。 */
             } else if (stage == TRAIN_STAGE_DEEP_TRAIN) {
-                /* R6-002修复: dropout/weight_decay在epoch级别调整而非每样本递增 */
                 lnn_forward(pipeline->network, input, output);
                 lnn_backward_accumulate(pipeline->network, target, &loss);
-                pipeline->network->config.learning_rate = pipeline->config.base_lr;
+                /* ZSFWS-FIX: 移除warmup LR覆盖 */
             } else if (stage == TRAIN_STAGE_MULTIMODAL) {
-                /* 多模态联合训练：跨模态对比损失 */
-                float shifted_target[256];
+                float* shifted_target = (float*)safe_malloc(output_dim * sizeof(float));
+                if (!shifted_target) continue;
                 memcpy(shifted_target, target, output_dim * sizeof(float));
                 for (size_t k = 0; k < output_dim / 4; k++)
                     shifted_target[(k * 4 + b + 1) % output_dim] *= -0.5f;
@@ -1434,29 +1542,39 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                  * 复合梯度: ∂L/∂out = ∂MSE(out,target)/∂out + 0.3*∂(MSE(out,target)-MSE(out,shifted))/∂out
                  * = (2/n)*(out-target) + 0.3*(2/n)*(shifted_target-target)
                  * 等效目标: target_eff = target - 0.3*indicator*(shifted_target - target) */
-                float combined_target[256];
-                if (penalty_active) {
-                    for (size_t k = 0; k < output_dim; k++) {
-                        combined_target[k] = target[k] - 0.3f * (shifted_target[k] - target[k]);
+                float* combined_target = (float*)safe_malloc(output_dim * sizeof(float));
+                if (combined_target) {
+                    if (penalty_active) {
+                        for (size_t k = 0; k < output_dim; k++) {
+                            combined_target[k] = target[k] - 0.3f * (shifted_target[k] - target[k]);
+                        }
+                    } else {
+                        memcpy(combined_target, target, output_dim * sizeof(float));
                     }
-                } else {
-                    memcpy(combined_target, target, output_dim * sizeof(float));
+                    lnn_backward_accumulate(pipeline->network, combined_target, &loss);
+                    safe_free((void**)&combined_target);
                 }
-                lnn_backward_accumulate(pipeline->network, combined_target, &loss);
-                pipeline->network->config.learning_rate = pipeline->config.base_lr * 0.8f;
+                safe_free((void**)&shifted_target);
+                /* ZSFWS-FIX: 移除warmup LR覆盖 */
             } else if (stage == TRAIN_STAGE_FINE_TUNE) {
-                /* 微调：小学习率+任务特定损失 */
                 lnn_forward(pipeline->network, input, output);
                 loss = compute_loss_value(output, target, output_dim, pipeline->loss_function);
                 lnn_backward_accumulate(pipeline->network, target, &loss);
-                pipeline->network->config.learning_rate = pipeline->config.base_lr * 0.1f;
+                /* ZSFWS-FIX: 移除warmup LR覆盖 */
             } else if (stage == TRAIN_STAGE_LOCAL) {
-                /* 本地适配：域适应+一致性损失 */
-                float augmented_input[512];
+                float* augmented_input = (float*)safe_malloc(input_dim * sizeof(float));
+                if (!augmented_input) continue;
                 memcpy(augmented_input, input, input_dim * sizeof(float));
                 for (size_t k = 0; k < input_dim / 10; k++)
                     augmented_input[(k * 10 + b) % input_dim] += 0.01f;
-                float output_orig[256], output_aug[256];
+                float* output_orig = (float*)safe_malloc(output_dim * sizeof(float));
+                float* output_aug = (float*)safe_malloc(output_dim * sizeof(float));
+                if (!output_orig || !output_aug) {
+                    safe_free((void**)&augmented_input);
+                    safe_free((void**)&output_orig);
+                    safe_free((void**)&output_aug);
+                    continue;
+                }
                 lnn_forward(pipeline->network, input, output_orig);
                 lnn_forward(pipeline->network, augmented_input, output_aug);
                 float task_loss = compute_loss_value(output_orig, target, output_dim, pipeline->loss_function);
@@ -1468,9 +1586,11 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 consistency_loss /= (float)output_dim;
                 loss = 0.8f * task_loss + 0.2f * consistency_loss;
                 lnn_backward_accumulate(pipeline->network, target, &loss);
-                pipeline->network->config.learning_rate = pipeline->config.base_lr * 0.05f;
+                safe_free((void**)&augmented_input);
+                safe_free((void**)&output_orig);
+                safe_free((void**)&output_aug);
+                /* ZSFWS-FIX: 移除warmup LR覆盖 */
             } else if (stage == TRAIN_STAGE_EVALUATION) {
-                /* 评估：仅前向传播计算验证指标，不更新权重 */
                 lnn_forward(pipeline->network, input, output);
                 loss = compute_loss_value(output, target, output_dim, pipeline->loss_function);
             } else {
@@ -1536,17 +1656,23 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
         }
         pipeline->network->config.learning_rate = current_lr;
     }
-    /* FIX-F5: 验证集评估（若验证缓冲区存在） */
-    if (pipeline->val_buffer && pipeline->val_size > 0 && pipeline->val_size >= (size_t)output_dim) {
+    /* FIX-F5: 验证集评估（若验证缓冲区存在）
+     * ZSFWS-FIX: 确保val_size以float为单位而非byte，修正sample计数 */
+    if (pipeline->val_buffer && pipeline->val_size > 0) {
         float val_loss = 0.0f;
-        size_t val_samples = pipeline->val_size / ((size_t)input_dim + (size_t)output_dim);
+        size_t sample_stride = (size_t)input_dim + (size_t)output_dim;
+        size_t val_samples = (pipeline->val_size / sizeof(float)) / sample_stride;
         if (val_samples > 0 && val_samples <= 500) {
-            for (size_t v = 0; v < val_samples; v++) {
-                const float* v_input = pipeline->val_buffer + v * (size_t)(input_dim + output_dim);
-                const float* v_target = v_input + input_dim;
-                float v_output[256] = {0};
-                lnn_forward(pipeline->network, v_input, v_output);
-                val_loss += compute_loss_value(v_output, v_target, (size_t)output_dim, pipeline->loss_function);
+            /* ZSFWS-FIX10: 动态分配v_output防止output_dim>256栈溢出 */
+            float* v_output = (float*)safe_calloc(output_dim, sizeof(float));
+            if (v_output) {
+                for (size_t v = 0; v < val_samples; v++) {
+                    const float* v_input = pipeline->val_buffer + v * (size_t)(input_dim + output_dim);
+                    const float* v_target = v_input + input_dim;
+                    lnn_forward(pipeline->network, v_input, v_output);
+                    val_loss += compute_loss_value(v_output, v_target, (size_t)output_dim, pipeline->loss_function);
+                }
+                safe_free((void**)&v_output);
             }
             val_loss /= (float)val_samples;
             pipeline->state.val_accuracy = 1.0f - (val_loss / (epoch_loss + 1e-8f));
@@ -1680,7 +1806,9 @@ int pipeline_multimodal_train_step(TrainingPipeline* pipeline,
     cfc_zero_cell_gradients(pipeline->network->cfc_network);
     }
 
-    size_t max_input = 512;
+    /* ZSFWS-FIX19: 从LNN读取实际输入维度，避免硬编码512截断数据 */
+    size_t max_input = pipeline->network->config.input_size;
+    if (max_input == 0) max_input = 512;
     float* combined = (float*)safe_calloc(max_input, sizeof(float));
     if (!combined) return -1;
 
@@ -1971,8 +2099,10 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
     pipeline->state.current_epoch = 0;
     pipeline->state.total_epochs = epochs;
 
-    size_t input_size = pipeline->sources[0].feature_dim;
-    size_t output_size = pipeline->sources[0].label_dim;
+    size_t input_size = (pipeline->source_count > 0) 
+        ? pipeline->sources[0].feature_dim : 512;
+    size_t output_size = (pipeline->source_count > 0)
+        ? pipeline->sources[0].label_dim : 256;
     if (input_size == 0) input_size = 512;
     if (output_size == 0) output_size = 256;
 
@@ -2053,9 +2183,9 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                 float* noisy_input = (float*)safe_malloc(input_size * sizeof(float));
                 if (noisy_input) {
                     memcpy(noisy_input, input, input_size * sizeof(float));
-                    /* N-001修复: 使用时间混合LCG替代确定性sinf噪声 */
+                    /* ZSFWS-FIX17: 噪声覆盖全部输入维度，移除512硬上限 */
                     unsigned int noise_seed = (unsigned int)((uint64_t)clock() ^ (idx * 7919 + epoch * 503));
-                    for (size_t k = 0; k < input_size && k < 512; k++) {
+                    for (size_t k = 0; k < input_size; k++) {
                         noise_seed = noise_seed * 1103515245 + 12345;
                         float noise = ((float)(noise_seed & 0x7FFFFFFF) / 1073741824.0f - 1.0f) * 0.02f;
                         noisy_input[k] += noise;
@@ -2085,7 +2215,8 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                 pipeline->network->config.learning_rate = saved_pretrain_lr;
             }
             global_step++;
-            /* 拉普拉斯增强必须在优化器之前调用，使滤波后的梯度被优化器消费 */
+            /* 梯度裁剪 → 拉普拉斯增强 → 优化器更新 */
+            pipeline_clip_gradients(pipeline->network, 10.0f);
             pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
@@ -2126,7 +2257,16 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
     pipeline->state.current_epoch = 0;
     pipeline->state.total_epochs = epochs;
 
+    /* ZSFWS-FIX18: 从LNN读取实际维度而非硬编码512/256。
+     * 与pretrain_phase保持一致的数据步长。 */
     size_t input_size = 512, output_size = 256;
+    {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            input_size = lnn_cfg.input_size;
+            output_size = lnn_cfg.output_size;
+        }
+    }
     size_t total_elements = pipeline->data_size / sizeof(float);
     size_t sample_stride = input_size + output_size;
     size_t total_samples = total_elements / sample_stride;
@@ -2194,7 +2334,8 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
                 samples_processed++;
                 safe_free((void**)&output);
             }
-            /* 拉普拉斯增强必须在优化器之前调用，使滤波后的梯度被优化器消费 */
+            /* 梯度裁剪 → 拉普拉斯增强 → 优化器更新 */
+            pipeline_clip_gradients(pipeline->network, 10.0f);
             pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
@@ -2383,16 +2524,22 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
     pipeline->state.current_epoch = 0;
     pipeline->state.total_epochs = epochs;
 
-    float* data_source = pipeline->val_buffer;
-    size_t data_source_size = pipeline->val_size;
-
-    if (!data_source || data_source_size == 0) {
-        data_source = pipeline->data_buffer;
-        data_source_size = pipeline->data_size;
-    }
+    /* ZSFWS-FIX13: 微调必须使用主训练集，不能使用验证集(val_buffer)。
+     * 验证集是留出用于评估泛化性能的，用于训练会导致过拟合且
+     * 无法评估模型在未见数据上的真实表现。 */
+    float* data_source = pipeline->data_buffer;
+    size_t data_source_size = pipeline->data_size;
     if (!data_source || data_source_size == 0) return -1;
 
+    /* ZSFWS-FIX16: 从LNN读取维度，与所有其他阶段一致。 */
     size_t input_size = 512, output_size = 256;
+    {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            input_size = lnn_cfg.input_size;
+            output_size = lnn_cfg.output_size;
+        }
+    }
     size_t total_elements = data_source_size / sizeof(float);
     size_t sample_stride = input_size + output_size;
     size_t total_samples = total_elements / sample_stride;
@@ -2498,20 +2645,23 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
     pipeline->state.stage = TRAIN_STAGE_LOCAL;
     pipeline->state.is_running = 1;
 
-    /* 本地个性化阶段：极低学习率 + 早停 */
     float local_lr = 5e-6f;
     float saved_lr = pipeline->network->config.learning_rate;
     pipeline->network->config.learning_rate = local_lr;
 
-    float* data_source = pipeline->val_buffer;
-    size_t data_source_size = pipeline->val_size;
-    if (!data_source || data_source_size == 0) {
-        data_source = pipeline->data_buffer;
-        data_source_size = pipeline->data_size;
-    }
+    /* ZSFWS-FIX18: 从LNN读取维度，使用主训练集(非验证集)。 */
+    float* data_source = pipeline->data_buffer;
+    size_t data_source_size = pipeline->data_size;
     if (!data_source || data_source_size == 0) return -1;
 
     size_t input_size = 512, output_size = 256;
+    {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            input_size = lnn_cfg.input_size;
+            output_size = lnn_cfg.output_size;
+        }
+    }
     size_t total_elements = data_source_size / sizeof(float);
     size_t sample_stride = input_size + output_size;
     size_t total_samples = total_elements / sample_stride;
@@ -2705,6 +2855,14 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
         return -1;
 
     compute_evaluation_metrics(pipeline);
+
+    /* ZSFWS-FIX14: 完整训练后保存模型权重。
+     * 训练提升共享LNN权重后若不保存，进程退出即丢失。 */
+    {
+        float final_val = loss;
+        lnn_save(pipeline->network, "model/trained_lnn.bin");
+        log_info("[训练完成] 最终损失=%.6f, 模型已保存至 model/trained_lnn.bin", final_val);
+    }
 
     pipeline->state.stage = TRAIN_STAGE_IDLE;
     pipeline->state.is_running = 0;

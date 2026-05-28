@@ -90,6 +90,19 @@ int memory_manager_store(MemoryManager* manager, const char* key,
                         int priority, float strength);
 
 /**
+ * @brief 存储记忆（扩展版，支持模态来源隔离）
+ * R6-⑤修复: 添加modality_flags和source_id参数，
+ * 使记忆管理器可以按模态来源(视觉/音频/文本/传感器)检索和淘汰记忆。
+ * 
+ * @param modality_flags 模态标志位(MEMORY_MODALITY_VISION|AUDIO|...)
+ * @param source_id 数据来源标识(可为NULL)
+ */
+int memory_manager_store_modal(MemoryManager* manager, const char* key,
+                        const float* data, size_t data_size,
+                        int priority, float strength,
+                        uint32_t modality_flags, const char* source_id);
+
+/**
  * @brief 检索记忆（自动搜索所有类型）
  * 
  * @param manager 记忆管理器句柄

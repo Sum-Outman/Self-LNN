@@ -8,7 +8,7 @@
 #define _CRT_NONSTDC_NO_DEPRECATE
 
 #include "selflnn/knowledge/uncertainty_reasoning.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include <stdlib.h>
 #include <string.h>

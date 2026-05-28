@@ -284,24 +284,24 @@ class AGIController {
             case 'get_feature_list':
                 return await this._apiGet('/api/agi/features');
             case 'start_evolution':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_evolution', enabled: true });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_evolution', enabled: true });
             case 'stop_evolution':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_evolution', enabled: false });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_evolution', enabled: false });
             case 'toggle_self_learning':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_learning', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_learning', enabled: task.params.enabled });
             case 'toggle_self_decision':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_decision', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_decision', enabled: task.params.enabled });
             case 'toggle_self_execution':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_execution', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_execution', enabled: task.params.enabled });
             case 'toggle_imitation_learning':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'imitation_learning', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'imitation_learning', enabled: task.params.enabled });
             case 'toggle_self_correction':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_correction', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_correction', enabled: task.params.enabled });
             /* Z7-004: 补充缺失的能力开关前端接口 */  
             case 'toggle_self_reflection':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'reflection', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'reflection', enabled: task.params.enabled });
             case 'toggle_planning':
-                return await this._apiPost('/api/agi/feature/toggle', { feature: 'planning', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/features/toggle', { feature: 'planning', enabled: task.params.enabled });
             case 'trigger_self_correction':
                 return await this._apiPost('/api/agi/self_correction', { trigger: task.params.trigger || 'manual', context: task.params.context || {} });
             default:

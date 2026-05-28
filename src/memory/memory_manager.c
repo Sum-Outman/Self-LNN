@@ -964,6 +964,51 @@ int memory_manager_store(MemoryManager* manager, const char* key,
     return result;
 }
 
+/* R6-⑤修复: 存储记忆（扩展版，支持模态来源隔离）
+ * 调用memory_store_ex设置modality_flags和source_id，
+ * 使记忆系统可以按模态来源独立检索和淘汰。 */
+int memory_manager_store_modal(MemoryManager* manager, const char* key,
+                        const float* data, size_t data_size,
+                        int priority, float strength,
+                        uint32_t modality_flags, const char* source_id)
+{
+    SELFLNN_CHECK_NULL(manager, "存储记忆：管理器为空");
+    SELFLNN_CHECK_NULL(key, "存储记忆：键为空");
+    SELFLNN_CHECK_NULL(data, "存储记忆：数据为空");
+    SELFLNN_CHECK(data_size > 0, SELFLNN_ERROR_INVALID_ARGUMENT, "存储记忆：数据大小为零");
+    SELFLNN_CHECK(manager->is_initialized, SELFLNN_ERROR_NOT_INITIALIZED, "存储记忆：管理器未初始化");
+
+    MemoryType type = select_memory_type(priority);
+    int result = memory_store_ex(manager->memory_system, key, data, data_size,
+                                  type, strength, modality_flags, source_id);
+    if (result != 0) return result;
+
+    if (manager->config.enable_laplace_stability_check && data && data_size > 0) {
+        size_t spec_size = data_size < 512 ? data_size : 512;
+        float den_coeffs[2] = {1.0f, -0.5f};
+        int is_stable = 0;
+        float stability_margin = 0.0f;
+        if (laplace_check_stability_fast(den_coeffs, 2, &is_stable, &stability_margin) == 0) {
+            float stability_factor = is_stable ? 1.0f : 0.7f;
+            if (stability_margin > 0.0f && stability_margin < 1.0f) {
+                stability_factor = 0.7f + 0.3f * stability_margin;
+            }
+            float* enhanced_data = (float*)safe_malloc(data_size * sizeof(float));
+            if (enhanced_data) {
+                memcpy(enhanced_data, data, data_size * sizeof(float));
+                for (size_t i = 0; i < spec_size; i++)
+                    enhanced_data[i] *= (0.9f + 0.1f * stability_factor);
+                memory_store_ex(manager->memory_system, key, enhanced_data,
+                               data_size, type, strength * stability_factor,
+                               modality_flags, source_id);
+                safe_free((void**)&enhanced_data);
+            }
+        }
+    }
+
+    return result;
+}
+
 /**
  * @brief 检索记忆（自动搜索所有类型）
  */

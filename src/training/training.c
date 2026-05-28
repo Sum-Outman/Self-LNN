@@ -1088,7 +1088,7 @@ TrainingConfig training_config_default(void) {
     config.epochs = 100;
     config.patience = 10;
     config.validation_split = 20;  // 20%
-    config.convergence_threshold = 1e-6f;  /* ZSFWS-003: 默认绝对收敛阈值 */
+    config.convergence_threshold = 1e-4f;   /* ZSFX-DEEP-001: 从1e-6修正为1e-4 */  /* ZSFWS-003: 默认绝对收敛阈值 */
     config.min_delta = 1e-8f;              /* ZSFZS-F009: 默认最小改善阈值 */
     config.convergence_rate_window = 5;    /* ZSFWS-004: 收敛速率窗口5 epoch */
     config.enable_mini_validation = 0;     /* ZSFWS-007: 默认禁用微验证 */
@@ -6082,9 +6082,9 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                     cfc_zero_cell_gradients(trainer->network->cfc_network);
                 }
                 
-                // ZSFZS-F013: 更新学习率（集成预热调度器）
+                // T-008修复: 学习率调度——warmup结束后继续使用warmup_scheduler的cosine退火
                 size_t global_step = epoch * trainer->state.total_batches + batch_num;
-                if (trainer->warmup_scheduler && global_step < trainer->config.warmup_steps) {
+                if (trainer->warmup_scheduler) {
                     trainer->state.learning_rate = lr_warmup_scheduler_get(
                         trainer->warmup_scheduler, global_step);
                 } else {
@@ -6102,6 +6102,11 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             trainer->state.gradient_norm = gradient_norm(trainer->gradients,
                                                         trainer->gradients_size);
             
+            /* T-001修复: 接入增强训练step回调 —— 启用EMA权重更新和WarmupCosine学习率调度 */
+            if (trainer->enhanced_trainer) {
+                trainer_enhanced_on_step_end(trainer->enhanced_trainer, trainer, global_step);
+            }
+
             // 调用回调函数
             if (callback) {
                 callback(&trainer->state, user_data);
@@ -6247,6 +6252,15 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
         }
 
         /* ZSFZS-F008修复: 早停检查（含绝对收敛阈值和最小改善阈值） */
+        /* T-001修复: 增强训练epoch回调 —— 启用ReduceLROnPlateau和日志输出
+         * R6-①修复: trainer_enhanced_on_epoch_end签名是(Trainer*), 传入1个参数即可 */
+        if (trainer->enhanced_trainer) {
+            /* 先同步验证损失到训练状态, 供epoch_end内的Plateau检测使用 */
+            trainer->state.validation_loss = val_loss;
+            trainer->state.current_epoch = epoch;
+            trainer_enhanced_on_epoch_end(trainer);
+        }
+
         if (trainer->config.patience > 0) {
             if (early_stopping_check_ex(val_loss, trainer->state.best_loss,
                                     trainer->config.patience,

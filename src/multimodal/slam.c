@@ -23,7 +23,7 @@
 #include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/memory.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/platform.h"

@@ -4461,17 +4461,17 @@ function knowledgeRefreshStatus() {
         statusEl.style.background = 'rgba(0,200,255,0.1)';
         statusEl.style.color = '#00c8ff';
         window.SelfLnnApi.getKnowledgeStats().then(function(data) {
-            var entries = (data && data.total_entries) ? data.total_entries : '--';
-            var domains = (data && data.domain_count) ? data.domain_count : '--';
+            /* FIX-F2-CRIT-4: getKnowledgeStats包装为{success,data},后端返回{stats:{...}} */
+            var stats = (data && data.data && data.data.stats) ? data.data.stats : (data && data.stats) ? data.stats : null;
+            var entries = (stats && stats.total_entries != null) ? stats.total_entries : '--';
+            var domains = (stats && stats.domain_count != null) ? stats.domain_count : '--';
             statusEl.textContent = '📁 存储路径: knowledge_data/knowledge_base.skb | 条目: ' + entries + ' | 领域: ' + domains;
-            /* ZSFAB-H04修复: 知识条目数和领域信息动态更新 */
             var countEl = document.getElementById('knowledge-entry-count');
             if (countEl) countEl.textContent = entries + ' 条目';
             var domainCountEl = document.getElementById('knowledge-domain-count');
             if (domainCountEl) domainCountEl.textContent = domains + ' 领域';
-            /* 加载并渲染知识领域列表 */
-            if (data && data.domains && data.domains.length > 0) {
-                _renderKnowledgeDomains(data.domains);
+            if (stats && stats.domains && stats.domains.length > 0) {
+                _renderKnowledgeDomains(stats.domains);
             }
         }).catch(function() {
             statusEl.textContent = '📁 存储路径: knowledge_data/knowledge_base.skb | 条目: -- | 领域: --';
@@ -7289,6 +7289,33 @@ var SelfLnnNotify = {
 var _origShowNotification = window.showNotification;
 window.showNotification = function(message, type, duration) {
     return SelfLnnNotify.show(message, type, duration);
+};
+
+/* FIX-FRONTEND-001: 安全设置保存函数(index.html中onchange引用) */
+window.saveSafetySetting = function(key, value) {
+    try {
+        var payload = {};
+        payload[key] = value;
+        if (window.SelfLnnApi && window.SelfLnnApi.request) {
+            /* FIX-F2-CRIT-5: request第2参数为options对象非method字符串 */
+            window.SelfLnnApi.request('/safety/bounds', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(function(r) {
+                if (r && r.success) {
+                    window.showNotification('安全设置已保存', 'success');
+                } else {
+                    window.showNotification('保存失败: ' + ((r && r.message) || '未知错误'), 'error');
+                }
+            }).catch(function(e) {
+                console.warn('安全设置保存失败:', e);
+                window.showNotification('安全设置保存失败，请检查网络连接', 'error');
+            });
+        }
+    } catch (e) {
+        console.warn('saveSafetySetting异常:', e);
+    }
 };
 
 /* ================================================================

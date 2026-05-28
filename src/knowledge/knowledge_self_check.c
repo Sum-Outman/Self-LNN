@@ -985,12 +985,11 @@ int ksc_incremental_check(KnowledgeBase* kb, KSSelfCheckConfig* config,
         }
     }
 
-    /* 更新报告 */
+    /* 更新报告 - ZSFWS修复-L-004: 不再将跳过计数误写入逻辑问题字段 */
     report->contradictions_found += contradictions;
     report->redundancies_found += redundancies;
     report->total_entries_scanned = (size_t)incremental_count;
-    /* 将跳过计数写入逻辑问题字段供统计 */
-    report->logical_issues_found += skipped_count;
+    /* skipped_count仅用于日志统计，不写入逻辑问题字段 */
 
     if (total > 0) {
         float issue_ratio = (float)(contradictions + redundancies) / (float)incremental_count;

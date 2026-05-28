@@ -245,18 +245,7 @@ TrainingDataset* dataset_load(const char* file_path) {
 /**
  * @brief 数据集统计信息
  */
-typedef struct {
-    size_t num_samples;        /**< 样本数 */
-    size_t input_dim;          /**< 输入维度 */
-    size_t output_dim;         /**< 输出维度 */
-    float input_mean[256];     /**< 输入均值 */
-    float input_std[256];      /**< 输入标准差 */
-    float input_min[256];      /**< 输入最小值 */
-    float input_max[256];      /**< 输入最大值 */
-    float output_mean[256];    /**< 输出均值 */
-    float output_std[256];     /**< 输出标准差 */
-    float total_memory_mb;     /**< 内存占用(MB) */
-} DatasetStats;
+/* DatasetStats 类型定义已移至 data_loaders.h */
 
 /**
  * @brief 计算数据集统计信息
@@ -858,7 +847,9 @@ int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
               "系统必须使用真实多模态数据训练。");
     return -1;
 }
-#else  /* !SELFLNN_STRICT_REAL_DATA */
+#else  /* !SELFLNN_STRICT_REAL_DATA —— ZSFWS-L-011: 以下代码在正式编译中永不参与，
+         * fractal_texture/physics_vibration/zipf_frequency_encode 仅为DEBUG测试辅助函数。
+         * 生产环境SELFLNN_STRICT_REAL_DATA始终定义，此#else块为死代码。 */
 /* DEBUG模式编译开关：仅当显式定义SELFLNN_ALLOW_BOOTSTRAP_DATA时允许引导数据生成 */
 #ifndef SELFLNN_ALLOW_BOOTSTRAP_DATA
 #define SELFLNN_BOOTSTRAP_DISABLED 1

@@ -9,7 +9,7 @@
 #define SELFLNN_KNOWLEDGE_INTERNAL  /* ZSFZS-F034: 与knowledge_graph.h保持一致 */
 #include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/core/errors.h"
-#include "selflnn/core/safe_memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include <stdlib.h>
 #include <string.h>

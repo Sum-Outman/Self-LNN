@@ -41,6 +41,27 @@ typedef struct TrainingDataset {
     char file_path[512];
 } TrainingDataset;
 
+/* ZSFX-DEEP-R14-001: DatasetStats类型移到头文件供backend.c等多模块使用 */
+typedef struct {
+    size_t num_samples;
+    size_t input_dim;
+    size_t output_dim;
+    float input_mean[256];
+    float input_std[256];
+    float input_min[256];
+    float input_max[256];
+    float output_mean[256];
+    float output_std[256];
+    float total_memory_mb;
+} DatasetStats;
+
+/**
+ * @brief 计算数据集统计信息
+ */
+int dataset_compute_stats(const TrainingDataset* ds, DatasetStats* stats);
+
+int dataset_validate(const TrainingDataset* ds);
+
 /**
  * @brief CSV数据加载器：解析分隔符文本文件为训练数据集
  *

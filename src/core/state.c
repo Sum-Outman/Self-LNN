@@ -329,6 +329,9 @@ typedef struct {
     size_t state_size;
     int step;
     char label[64];
+    /* Z-P3修复: 添加任务ID字段 —— 使状态快照与任务/模态上下文关联
+     * 在多任务训练中可区分不同任务的状态快照，避免跨任务状态串扰 */
+    char task_id[64];
 } StateSnapshot;
 
 static StateSnapshot g_snapshots[MAX_SNAPSHOTS];
@@ -366,9 +369,36 @@ int network_state_snapshot_save(NetworkState* state, const char* label) {
         snprintf(g_snapshots[idx].label, sizeof(g_snapshots[idx].label),
                 "snapshot_%d", idx);
     }
+    /* Z-P3修复: 初始化task_id（由调用方通过snapshot_save_ex设置） */
+    g_snapshots[idx].task_id[0] = '\0';
     g_snapshot_count++;
     mutex_unlock(g_snapshot_mutex);
     return 0;
+}
+
+/* Z-P3修复: 保存状态快照（带任务上下文标识）
+ * 使状态快照与特定任务关联，方便多任务训练中切换和恢复 */
+int network_state_snapshot_save_ex(NetworkState* state, const char* label,
+                                    const char* task_id) {
+    int ret = network_state_snapshot_save(state, label);
+    if (ret == 0 && task_id && g_snapshot_count > 0) {
+        mutex_lock(g_snapshot_mutex);
+        int idx = g_snapshot_count - 1;
+        snprintf(g_snapshots[idx].task_id, sizeof(g_snapshots[idx].task_id), "%s", task_id);
+        mutex_unlock(g_snapshot_mutex);
+    }
+    return ret;
+}
+
+const char* network_state_snapshot_task_id(int idx) {
+    if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
+    mutex_lock(g_snapshot_mutex);
+    const char* result = NULL;
+    if (idx >= 0 && idx < g_snapshot_count) {
+        result = g_snapshots[idx].task_id[0] ? g_snapshots[idx].task_id : NULL;
+    }
+    mutex_unlock(g_snapshot_mutex);
+    return result;
 }
 
 int network_state_snapshot_restore(NetworkState* state, int snapshot_idx) {
