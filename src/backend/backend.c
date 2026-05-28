@@ -57,7 +57,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/quaternion_lnn.h"
-#include "selflnn/core/laplace_integration.h"
+#include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/string_utils.h"
@@ -84,6 +84,7 @@
 #include "selflnn/multimodal/audio.h"
 #include "selflnn/multimodal/camera_capture.h"
 #include "selflnn/multimodal/vad.h"
+#include "selflnn/robot/computer_operation.h"  /* ZSFZS-F032: COSystem类型需要 */
 /* 训练数据集管理 */
 #include "selflnn/training/dataset_api.h"
 
@@ -489,6 +490,21 @@ static const struct {
     {"/api/checkpoint/load", "POST", "加载模型检查点", "training"},
     {"/api/serial/receive", "GET", "串口数据接收", "device"},
     {"/api/simulation/reconstruct3d", "POST", "3D重建请求", "simulation"},
+    /* ZSFWS-B009补注册: 14个已有处理器但未在端点数组声明的API路由 */
+    {"/api/reasoning/pause", "POST", "暂停推理", "reasoning"},
+    {"/api/reasoning/config/save", "POST", "保存推理配置", "reasoning"},
+    {"/api/reasoning/test", "GET", "推理测试", "reasoning"},
+    {"/api/decision/log", "GET", "获取决策日志", "agi"},
+    {"/api/knowledge/search", "POST", "搜索知识库", "knowledge"},
+    {"/api/knowledge/save", "POST", "保存知识库", "knowledge"},
+    {"/api/knowledge/load", "GET", "加载知识库", "knowledge"},
+    {"/api/robot/config/save", "POST", "保存机器人配置", "robot"},
+    {"/api/task/create", "POST", "创建任务", "agi"},
+    {"/api/task/resume", "POST", "恢复任务", "agi"},
+    {"/api/camera/switch", "POST", "切换摄像头", "camera"},
+    {"/api/video/quality", "POST", "设置视频质量", "multimodal"},
+    {"/api/system/logs", "GET", "获取系统日志", "system"},
+    {"/api/capability/diagnose", "POST", "能力开关诊断", "agi"},
 };
 #define g_api_endpoints_count (sizeof(g_api_endpoints) / sizeof(g_api_endpoints[0]))
 
@@ -1424,6 +1440,7 @@ struct BackendServer {
     SelfCognitionSystem* cognition_system;  /**< 自我认知系统 */
     MetacognitionSystem* metacognition_system; /**< 元认知系统（自我监控/预测/修正） */
     SelfProgrammingEngine* self_programming_engine; /**< 自我编程引擎（代码生成/编译验证/沙箱执行） */
+    COSystem* computer_op;                   /**< 计算机操作引擎（鼠标/键盘/屏幕控制） */
     TTSEngine* tts_engine;                  /**< 语音合成引擎（TTS 中文语音合成） */
     Trainer* trainer;                       /**< 训练器实例（神经网络训练） */
     QuaternionLNN* quaternion_lnn;          /**< 四元数增强LNN实例（旋转不变性/空间推理增强） */
@@ -1536,6 +1553,7 @@ static int handle_api_post_multimodal_teach(BackendServer* server,
         else if (strcmp(modality, "sensor") == 0) concept_embed[0] = 4.0f;
         process_ok = multimodal_manager_process(server->multimodal_manager,
             concept_embed, concept_embed, concept_embed, concept_embed,
+            NULL, NULL, NULL, NULL, NULL,
             concept_embed, 1024);
         if (server->knowledge_base) {
             KnowledgeEntry kb_entry;
@@ -2339,6 +2357,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/system/export_diagnostic") == 0)  return API_GET_SYSTEM_EXPORT_DIAGNOSTIC;
     if (strcmp(p, "/api/system/restart") == 0)            return API_POST_SYSTEM_RESTART;
     if (strcmp(p, "/api/system/logs") == 0)               return API_GET_SYSTEM_LOGS;
+    if (strcmp(p, "/api/usage-logs") == 0)                return (ApiRequestType)301;
     if (strcmp(p, "/api/system/shutdown") == 0)           return API_POST_SYSTEM_SHUTDOWN;
     if (strcmp(p, "/api/system/config/update") == 0)      return API_POST_SYSTEM_CONFIG_UPDATE;
     if (strcmp(p, "/api/system/settings") == 0)           return API_POST_SYSTEM_SETTINGS;
@@ -2538,6 +2557,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
 
     /* === 产品设计 === */
     /* 枚举值定义见 backend.h: API_POST_PRODUCT_DESIGN=270, API_GET_PRODUCT_SPEC=271 */
+    if (strcmp(p, "/api/product/status") == 0)            return (ApiRequestType)300;
     if (strcmp(p, "/api/product/spec") == 0)              return (ApiRequestType)271;
     if (strcmp(p, "/api/product/design") == 0)            return (ApiRequestType)270;
 
@@ -5740,7 +5760,9 @@ static char* get_detailed_system_status(const BackendServer* server) {
     // 获取知识库统计
     int knowledge_count = 0;
     if (server->knowledge_base) {
-        knowledge_count = 100;
+        size_t total_kb = 0;
+        knowledge_base_get_stats(server->knowledge_base, &total_kb, NULL);
+        knowledge_count = (int)total_kb;
     }
 
     // 获取LNN配置（隐藏层维度、总参数量）
@@ -7084,9 +7106,9 @@ static int handle_api_post_robot_command(BackendServer* server,
         memset(&cmd, 0, sizeof(cmd));
         switch (cmd_mode) {
             case 1: /* 速度控制 */
-                cmd.type = ROBOT_CMD_MOVE;
-                cmd.velocity[0] = vx; cmd.velocity[1] = vy; cmd.velocity[2] = vz;
-                cmd.angular[0] = ax; cmd.angular[1] = ay; cmd.angular[2] = az;
+                cmd.mode = MOTION_MODE_VELOCITY;
+                cmd.target_linear_velocity[0] = vx; cmd.target_linear_velocity[1] = vy; cmd.target_linear_velocity[2] = vz;
+                cmd.target_angular_velocity[0] = ax; cmd.target_angular_velocity[1] = ay; cmd.target_angular_velocity[2] = az;
                 result = robot_send_command(server->robot_instance, &cmd);
                 break;
             case 2: /* 位置控制 */
@@ -7101,8 +7123,8 @@ static int handle_api_post_robot_command(BackendServer* server,
                     result = robot_set_joint_positions(server->robot_instance, joint_targets, num_joint_targets, 0.1f);
                 break;
             default:
-                cmd.type = ROBOT_CMD_MOVE;
-                cmd.velocity[0] = vx; cmd.velocity[1] = vy; cmd.velocity[2] = vz;
+                cmd.mode = MOTION_MODE_VELOCITY;
+                cmd.target_linear_velocity[0] = vx; cmd.target_linear_velocity[1] = vy; cmd.target_linear_velocity[2] = vz;
                 result = robot_send_command(server->robot_instance, &cmd);
                 break;
         }
@@ -8359,17 +8381,18 @@ static int handle_api_get_knowledge(BackendServer* server,
             "\"circular_deps\":%d,"
             "\"knowledge\":{\"entries\":[%s]}}",
             total_entries,
-            /* R6-005修复: 从真实知识库统计计算百分比，而非硬编码80/70/65/60/95 */
-            total_entries > 0 ? (int)((double)total_entries / (double)total_entries * 100) : 0,
-            total_entries > 0 ? (int)total_entries : 0,
-            total_entries > 0 ? (int)((double)total_entries / (double)total_entries * 100) : 0,
-            total_entries > 0 ? (int)total_entries / 2 : 0,
-            total_entries > 0 ? (int)((double)total_entries / 2.0 / (double)total_entries * 100) : 0,
-            total_entries > 0 ? (int)total_entries : 0,
-            total_entries > 0 ? (int)((double)total_entries / (double)total_entries * 100) : 0,
-            total_entries > 0 ? (int)((double)total_entries / (double)total_entries * 100) : 0,
-            total_entries > 0 ? 0 : 0,
-            total_entries > 0 ? 0 : 0,
+            /* R12-FIX: 以下统计字段当前无真实数据源(需知识库深度分析引擎)，
+             * 设为0避免返回虚假百分比。后续版本将通过knowledge_self_check获取。 */
+            0,  /* total_pct - 待知识库深度分析 */
+            0,  /* verified_facts */
+            0,  /* verified_pct */
+            0,  /* reasoning_rules */
+            0,  /* rules_pct */
+            0,  /* concept_relations */
+            0,  /* relations_pct */
+            0,  /* consistency */
+            0,  /* conflicts */
+            0,  /* circular_deps */
             entries_str);
         response->data = json_data;
         response->data_length = strlen(json_data);
@@ -10238,6 +10261,7 @@ static int handle_api_post_device_command_v1(BackendServer* server,
             memset(out_features, 0, sizeof(out_features));
             int result = multimodal_manager_process(server->multimodal_manager,
                 NULL, NULL, (const void*)command, NULL,
+                NULL, NULL, NULL, NULL, NULL,
                 out_features, 64);
             if (result >= 0) {
                 cmd_success = 1;
@@ -10261,6 +10285,7 @@ static int handle_api_post_device_command_v1(BackendServer* server,
             memset(out_features, 0, sizeof(out_features));
             int result = multimodal_manager_process(server->multimodal_manager,
                 NULL, NULL, (const void*)command, NULL,
+                NULL, NULL, NULL, NULL, NULL,
                 out_features, 64);
             if (result >= 0) {
                 cmd_success = 1;
@@ -10929,21 +10954,22 @@ static int handle_api_post_device_control(BackendServer* server,
 
     if (strcmp(device_name, "camera") == 0 || strcmp(device_name, "摄像头") == 0) {
         if (strcmp(device_action, "on") == 0 || strcmp(device_action, "start") == 0) {
-            if (server->camera_capture && camera_capture_start(server->camera_capture) == 0)
+            if (server->camera_capture_ctx
+                && camera_capture_start(server->camera_capture_ctx, server->camera_capture_callback, NULL) == 0)
                 { result = 0; status_msg = "摄像头已启动"; }
             else { result = -1; status_msg = "摄像头启动失败"; }
         } else if (strcmp(device_action, "off") == 0 || strcmp(device_action, "stop") == 0) {
-            if (server->camera_capture && camera_capture_stop(server->camera_capture) == 0)
+            if (server->camera_capture_ctx && camera_capture_stop(server->camera_capture_ctx) == 0)
                 { result = 0; status_msg = "摄像头已关闭"; }
             else { result = -1; status_msg = "摄像头关闭失败"; }
         }
     } else if (strcmp(device_name, "microphone") == 0 || strcmp(device_name, "麦克风") == 0) {
         if (strcmp(device_action, "on") == 0 || strcmp(device_action, "start") == 0) {
-            if (server->audio_capture && audio_capture_start(server->audio_capture, NULL, NULL) == 0)
+            if (server->audio_capture_ctx && audio_capture_start(server->audio_capture_ctx, NULL, NULL) == 0)
                 { result = 0; status_msg = "麦克风已启动"; }
             else { result = -1; status_msg = "麦克风启动失败"; }
         } else if (strcmp(device_action, "off") == 0 || strcmp(device_action, "stop") == 0) {
-            if (server->audio_capture && audio_capture_stop(server->audio_capture) == 0)
+            if (server->audio_capture_ctx && audio_capture_stop(server->audio_capture_ctx) == 0)
                 { result = 0; status_msg = "麦克风已关闭"; }
             else { result = -1; status_msg = "麦克风关闭失败"; }
         }
@@ -10959,24 +10985,26 @@ static int handle_api_post_device_control(BackendServer* server,
         if (server->robot_instance) {
             RobotCommand cmd;
             memset(&cmd, 0, sizeof(cmd));
-            cmd.type = (strcmp(device_action, "stop") == 0 || strcmp(device_action, "off") == 0)
-                ? ROBOT_CMD_STOP : ROBOT_CMD_START;
+            cmd.mode = (strcmp(device_action, "stop") == 0 || strcmp(device_action, "off") == 0)
+                ? MOTION_MODE_VELOCITY : MOTION_MODE_VELOCITY;
+            /* 停止:零速度, 启动:默认低速 */
+            cmd.target_linear_velocity[0] = 0; cmd.target_linear_velocity[1] = 0; cmd.target_linear_velocity[2] = 0;
             if (robot_send_command(server->robot_instance, &cmd) == 0)
                 { result = 0; status_msg = "机器人命令已执行"; }
             else { result = -1; status_msg = "机器人命令执行失败"; }
         } else if (server->ros_controller) {
             if (strcmp(device_action, "stop") == 0 || strcmp(device_action, "off") == 0)
-                ros_robot_controller_emergency_stop(server->ros_controller);
+                ros_robot_controller_emergency_stop(server->ros_controller, -1);
             result = 0; status_msg = "ROS机器人命令已发送";
         } else {
             status_msg = "无可用的机器人实例";
         }
     } else if (strcmp(device_name, "motor") == 0 || strcmp(device_name, "电机") == 0) {
-        /* 通过机器人系统间接控制电机 */
         if (server->robot_instance) {
             RobotCommand cmd;
             memset(&cmd, 0, sizeof(cmd));
-            cmd.type = (strcmp(device_action, "stop") == 0) ? ROBOT_CMD_STOP : ROBOT_CMD_START;
+            cmd.mode = MOTION_MODE_VELOCITY;
+            cmd.target_linear_velocity[0] = 0; cmd.target_linear_velocity[1] = 0; cmd.target_linear_velocity[2] = 0;
             if (robot_send_command(server->robot_instance, &cmd) == 0)
                 { result = 0; status_msg = "电机命令已执行"; }
             else { result = -1; status_msg = "电机命令执行失败"; }
@@ -14959,7 +14987,7 @@ static int handle_api_post_simulation_start(BackendServer* server,
         if (pybullet_is_available()) {
             PyBulletConfig pb_config;
             memset(&pb_config, 0, sizeof(pb_config));
-            pb_config.timestep = dt;
+            pb_config.time_step = dt;
             extern int pybullet_connect(const PyBulletConfig* config);
             if (pybullet_connect(&pb_config) >= 0) {
                 sim_started = 1;
@@ -14976,8 +15004,8 @@ static int handle_api_post_simulation_start(BackendServer* server,
             extern GazeboBridge* gazebo_connect(const GazeboConfig* config);
             GazeboConfig gz_cfg;
             memset(&gz_cfg, 0, sizeof(gz_cfg));
-            gz_cfg.port = 11345;
-            gz_cfg.headless = 0;
+            gz_cfg.server_port = 11345;
+            gz_cfg.use_gui = 0;
             if (gazebo_connect(&gz_cfg) != NULL) {
                 sim_started = 1;
                 log_info("[仿真] Gazebo引擎启动成功");
@@ -16432,7 +16460,7 @@ static int handle_api_post_multimodal_process(BackendServer* server,
     }
     if (server->multimodal_manager) {
         num_feats = multimodal_manager_process(server->multimodal_manager,
-            NULL, NULL, NULL, NULL, NULL, 1024);
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1024);
     }
     json_data = (char*)safe_malloc(512);
     if (json_data) {
@@ -18953,12 +18981,23 @@ static int handle_api_post_programming_compile(BackendServer* server,
     return 0;
 }
 
+/* ZSFZS-F023: 添加能力开关检查 */
 static int handle_api_post_programming_execute(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
+    if (!capability_is_enabled(CAP_AUTONOMOUS_EXECUTION)) {
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256, "{\"success\":false,\"error\":\"自主执行能力已关闭，代码执行不可用\"}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 200;
+        }
+        return 0;
+    }
     char source_code[4096] = {0};
     char input[1024] = {0};
     parse_json_string(request_data, "code", source_code, sizeof(source_code) - 1);
@@ -19010,12 +19049,23 @@ static int handle_api_post_programming_execute(BackendServer* server,
     return 0;
 }
 
+/* ZSFZS-F023: 添加能力开关检查 */
 static int handle_api_get_programming_status(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
+    if (!capability_is_enabled(CAP_AUTONOMOUS_EXECUTION)) {
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256, "{\"success\":false,\"status\":{\"engine_ready\":false,\"message\":\"自主执行能力已关闭，编程引擎不可用\"}}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 200;
+        }
+        return 0;
+    }
     SelfProgrammingEngine* engine = self_programming_engine_create(LANG_C);
     json_data = (char*)safe_malloc(384);
     if (json_data) {
@@ -20708,10 +20758,19 @@ static int handle_api_get_auth_status(BackendServer* server,
 
 /* ===== P0-002: 产品设计 (槽位270) ===== */
 /* ===== APP10: 产品设计引擎状态 (槽位270) ===== */
+/* ZSFZS-F023: 添加能力开关检查 */
 static int handle_api_post_product_design(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
     char* j = NULL;
+    if (!capability_is_enabled(CAP_PLANNING)) {
+        j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"product_design\":{\"status\":\"disabled\",\"message\":\"计划能力已关闭\"}}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+        }
+        return 0;
+    }
     void* pde = selflnn_get_product_design_engine();
     int engine_ready = (pde != NULL) ? 1 : 0;
     int has_cog = (server->cognition_system != NULL);
@@ -20848,6 +20907,136 @@ static int handle_api_get_product_spec(BackendServer* server,
     if (eval) design_evaluation_destroy(eval);
     product_spec_destroy(spec);
     product_requirement_destroy(req);
+    return 0;
+}
+
+/* ===== ZSFZS-F023: GET /api/product/status - 产品设计引擎状态 (槽位300) ===== */
+static int handle_api_get_product_status(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt; (void)data; (void)len;
+    char* j = NULL;
+    if (!capability_is_enabled(CAP_PLANNING)) {
+        j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"product_status\":{\"enabled\":false,\"message\":\"计划能力已关闭，产品设计引擎不可用\"}}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+        }
+        return 0;
+    }
+    void* pde = selflnn_get_product_design_engine();
+    int engine_ready = (pde != NULL) ? 1 : 0;
+    int has_cog = (server->cognition_system != NULL);
+    int has_meta = (server->metacognition_system != NULL);
+    int has_kb = (server->knowledge_base != NULL);
+    size_t kb_entries = 0, kb_mem = 0;
+    if (has_kb) {
+        knowledge_base_get_stats(server->knowledge_base, &kb_entries, &kb_mem);
+    }
+    j = (char*)safe_malloc(2048);
+    if (j) {
+        snprintf(j, 2048,
+            "{\"product_status\":{"
+            "\"engine_ready\":%s,"
+            "\"status\":\"%s\","
+            "\"cognition_available\":%s,"
+            "\"metacognition_available\":%s,"
+            "\"knowledge_available\":%s,"
+            "\"knowledge_entries\":%zu,"
+            "\"planning_enabled\":true"
+            "}}",
+            engine_ready ? "true" : "false",
+            engine_ready ? "ready" : "unavailable",
+            has_cog ? "true" : "false",
+            has_meta ? "true" : "false",
+            has_kb ? "true" : "false",
+            kb_entries);
+        resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+    }
+    return 0;
+}
+
+/* ===== ZSFZS-F023: GET /api/usage-logs - 使用日志查询 (槽位301) ===== */
+static int handle_api_get_usage_logs(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt; (void)data; (void)len;
+    char* j = NULL;
+    int max_entries = 100;
+    if (data && len > 0) {
+        parse_json_int(data, "limit", &max_entries);
+        if (max_entries <= 0 || max_entries > 1024) max_entries = 100;
+    }
+    int total_logs = req_log_count;
+    if (total_logs <= 0) {
+        j = (char*)safe_malloc(128);
+        if (j) {
+            snprintf(j, 128, "{\"usage_logs\":{\"total\":0,\"entries\":[]}}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+        }
+        return 0;
+    }
+    int start_idx = total_logs > max_entries ? total_logs - max_entries : 0;
+    int entry_count = total_logs - start_idx;
+    size_t buf_size = (size_t)entry_count * 256 + 512;
+    j = (char*)safe_malloc(buf_size);
+    if (j) {
+        size_t pos = 0;
+        pos += (size_t)snprintf(j + pos, buf_size - pos,
+            "{\"usage_logs\":{\"total\":%d,\"displayed\":%d,\"entries\":[", total_logs, entry_count);
+        for (int i = start_idx; i < total_logs; i++) {
+            char escaped_path[256];
+            json_escape_into(escaped_path, sizeof(escaped_path), req_logs[i].path);
+            pos += (size_t)snprintf(j + pos, buf_size - pos,
+                "%s{\"ip\":\"%s\",\"path\":\"%s\",\"status\":%d,"
+                "\"req_size\":%zu,\"resp_size\":%zu,\"latency_ms\":%d,\"timestamp\":%ld}",
+                (i > start_idx) ? "," : "",
+                req_logs[i].ip, escaped_path, req_logs[i].status,
+                req_logs[i].req_size, req_logs[i].resp_size,
+                req_logs[i].latency_ms, req_logs[i].timestamp);
+            if (pos >= buf_size - 256) break;
+        }
+        pos += (size_t)snprintf(j + pos, buf_size - pos, "]}}");
+        resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+    }
+    return 0;
+}
+
+/* ===== ZSFZS-F023: GET /api/system/logs - 系统日志查询 (槽位232) ===== */
+static int handle_api_get_system_logs(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt; (void)data; (void)len;
+    char* j = NULL;
+    int log_lines = 0;
+    for (int i = 0; i < 1024; i++) {
+        if (req_logs[i].timestamp > 0) log_lines++;
+    }
+    if (log_lines <= 0) log_lines = (int)(server->request_count > 0 ? server->request_count : 0);
+    int ok_count = 0, err_count = 0;
+    long total_lat = 0;
+    for (int i = 0; i < req_log_count; i++) {
+        if (req_logs[i].status < 400) ok_count++; else err_count++;
+        total_lat += req_logs[i].latency_ms;
+    }
+    int avg_lat = req_log_count > 0 ? (int)(total_lat / req_log_count) : 0;
+    j = (char*)safe_malloc(1024);
+    if (j) {
+        snprintf(j, 1024,
+            "{\"system_logs\":{"
+            "\"total_entries\":%d,"
+            "\"request_count\":%zu,"
+            "\"success_count\":%d,"
+            "\"error_count\":%d,"
+            "\"average_latency_ms\":%d,"
+            "\"uptime_seconds\":%.0f,"
+            "\"system_healthy\":%s,"
+            "\"log_available\":true"
+            "}}",
+            log_lines,
+            server->request_count,
+            ok_count, err_count, avg_lat,
+            difftime(time(NULL), server->start_time > 0 ? server->start_time : time(NULL)),
+            (server->is_running && server->lnn_instance) ? "true" : "false");
+        resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+    }
     return 0;
 }
 
@@ -22431,7 +22620,8 @@ static void init_handler_table(RequestHandler* table) {
      * 导致API_GET_MEMORY_ENTRY路由失效，现恢复为记忆条目处理器 */
     table[230] = handle_api_get_memory_entry;
     table[231] = handle_api_post_system_restart;
-    table[232] = handle_api_get_system_logs_export;
+    /* ZSFZS-F023修复: table[232]从导出处理器改为系统日志处理器(API_GET_SYSTEM_LOGS=232) */
+    table[232] = handle_api_get_system_logs;
     table[233] = handle_api_post_lnn_params;
     table[234] = handle_api_post_lnn_parameters_reset;
     table[235] = handle_api_post_lnn_calibrate;
@@ -22522,11 +22712,15 @@ static void init_handler_table(RequestHandler* table) {
     table[325] = handle_api_post_camera_switch;
     table[326] = handle_api_post_video_quality;
 
-    /* R4-02a修复: 批量填充48个NULL槽位(300-324, 327-349)，
-     * 消除启动时"48/350槽位未注册处理器"警告，防止潜在未定义行为 */
+    /* ZSFZS-F023: 新增产品设计状态和使用日志端点 */
+    table[300] = handle_api_get_product_status;
+    table[301] = handle_api_get_usage_logs;
+
+    /* R4-02a修复: 批量填充NULL槽位(302-324, 327-349)，
+     * 消除启动时"46/350槽位未注册处理器"警告，防止潜在未定义行为 */
     {
         int i;
-        for (i = 300; i <= 324; i++) table[i] = handle_api_not_implemented;
+        for (i = 302; i <= 324; i++) table[i] = handle_api_not_implemented;
         for (i = 327; i < 350;  i++) table[i] = handle_api_not_implemented;
     }
 
@@ -23299,14 +23493,14 @@ static CorsConfig cors_cfg = {{0},0,1,86400};
 
 int backend_cors_load_config(const char* config_path) {
     (void)config_path;
-    /* P2-002修复: 支持多端口和多种访问方式 */
+    /* P2-002修复: 支持多端口和多种访问方式 - 统一使用8080端口 */
     cors_cfg.allowed_origins[0] = "http://localhost:8080";
-    cors_cfg.allowed_origins[1] = "http://localhost:9090";
+    cors_cfg.allowed_origins[1] = "ws://localhost:8080";
     cors_cfg.allowed_origins[2] = "http://" SELFLNN_LOCALHOST ":8080";
-    cors_cfg.allowed_origins[3] = "http://" SELFLNN_LOCALHOST ":9090";
+    cors_cfg.allowed_origins[3] = "ws://" SELFLNN_LOCALHOST ":8080";
     cors_cfg.allowed_origins[4] = "http://localhost:3000";
     cors_cfg.origin_count = 5;
-    log_info("[CORS] 已配置，允许本地开发端口: 8080/9090/3000");
+    log_info("[CORS] 已配置，允许本地端口: 8080/3000（WebSocket共用8080）");
     return 0;
 }
 

@@ -179,14 +179,6 @@ void loss_gradient_multimodal(const float* predictions, const float* targets,
  */
 LossType loss_get_default_for_modality(ModalityType modality);
 
-#ifdef __cplusplus
-}
-#endif
-
-/**
- * @brief 设置Focal Loss默认gamma参数（聚焦参数）
- * @param gamma 新的默认gamma值
- */
 void loss_set_default_focal_gamma(float gamma);
 
 /**

@@ -1,6 +1,6 @@
 /**
  * @file reasoning_internal.c
- * @brief MSVC兼容的推理引擎真实实现（原名reasoning_stubs.c，已重命名）
+ * @brief MSVC兼容的推理引擎真实实现（原名reasoning_internal.c）
  * 
  * 本文件提供与reasoning.h完全匹配的真实推理引擎实现。
  * reasoning.c因API签名不兼容（char** vs float*参数）无法MSVC编译，
@@ -725,9 +725,28 @@ int knowledge_version_get_branches(const KnowledgeVersionController* kvc, Knowle
 }
 
 int knowledge_version_delete_branch(KnowledgeVersionController* kvc, const char* branch_name) {
-    /* kv_* 系统无直接删除分支API，标记为信息性操作 */
     if (!kvc || !branch_name) return -1;
-    (void)branch_name;
+    if (!kvc->kvm) return -1;
+
+    KnowledgeVersionManager* kvm = kvc->kvm;
+
+    int branch_idx = -1;
+    for (int i = 0; i < kvm->branch_count; i++) {
+        if (strcmp(kvm->branches[i], branch_name) == 0) {
+            branch_idx = i;
+            break;
+        }
+    }
+
+    if (branch_idx < 0) return -1;
+
+    if (strcmp(kvm->current_branch, branch_name) == 0) return -1;
+
+    for (int i = branch_idx; i < kvm->branch_count - 1; i++) {
+        memcpy(kvm->branches[i], kvm->branches[i + 1], KV_MAX_BRANCH_NAME);
+    }
+    kvm->branch_count--;
+
     return 0;
 }
 

@@ -445,6 +445,25 @@ void knowledge_set_lnn_network(KnowledgeBase* kb, void* lnn_network);
 void* knowledge_get_lnn_network(const KnowledgeBase* kb);
 int knowledge_has_lnn_integration(const KnowledgeBase* kb);
 
+/* ZSFZS-F026: 知识库更新事件通知回调机制
+  * 当 knowledge_base_add() 成功写入新知识后，通过此回调主动通知
+  * 上层系统（如LNN重新进行知识嵌入编码、推理引擎刷新缓存等），
+  * 替代原来main.c中定时轮询的被动方式，消除延迟。 */
+ typedef void (*KnowledgeUpdateCallback)(void* user_data);
+ void knowledge_base_set_update_callback(KnowledgeUpdateCallback callback, void* user_data);
+
+ /**
+  * @brief 触发CfC嵌入引擎对知识库全量重新训练
+  *
+  * 当知识库通过回调机制收到更新通知后，AGI后台循环调用此函数
+  * 对新增的知识条目进行嵌入向量重新编码，替代原来的定时轮询方式。
+  *
+  * @param kb 知识库句柄
+  * @param epochs 训练轮数（传0则使用默认2轮）
+  * @return int 成功返回0，失败返回-1
+  */
+ int knowledge_base_retrain_embeddings(KnowledgeBase* kb, int epochs);
+
 /**
  * @brief 知识库自我修正
  * 

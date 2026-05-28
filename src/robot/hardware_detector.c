@@ -12,6 +12,9 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/core/lnn.h"
 
+/* ZSFZS-F022修复: selflnn_get_lnn外部声明 */
+extern void* selflnn_get_lnn(void);
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -57,6 +60,28 @@ static float hd_softplus(float x) {
     if (x > 20.0f) return x;
     if (x < -20.0f) return 0.0f;
     return (float)(log1pf(expf(x)));
+}
+
+/* ZSFZS-F022修复: 大小写不敏感的strstr，跨平台实现 */
+static char hd_char_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+static const char* hd_stristr(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !*needle) return NULL;
+    size_t needle_len = strlen(needle);
+    for (; *haystack; haystack++) {
+        if (hd_char_lower(*haystack) != hd_char_lower(*needle)) continue;
+        size_t i;
+        for (i = 0; i < needle_len; i++) {
+            char hc = haystack[i];
+            char nc = needle[i];
+            if (!hc) return NULL;
+            if (hd_char_lower(hc) != hd_char_lower(nc)) break;
+        }
+        if (i == needle_len) return haystack;
+    }
+    return NULL;
 }
 
 int hd_detect_cpu(HDDeviceInfo* info) {
@@ -1394,7 +1419,7 @@ int hd_hotplug_start_monitor(HDHotplugMonitor* monitor) {
         if (hd_detect_all(default_cfg, &init_result) == 0) {
             uint32_t hash = hd_compute_device_hash(&init_result);
             monitor->last_device_hash = hash;
-            hd_free_detection_result(&init_result);
+            hd_result_free(&init_result);
         }
     }
     return 0;
@@ -1421,7 +1446,7 @@ int hd_hotplug_poll_events(HDHotplugMonitor* monitor) {
         monitor->num_events++;
     }
 
-    hd_free_detection_result(&current);
+    hd_result_free(&current);
     return event_count;
 }
 

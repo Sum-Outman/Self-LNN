@@ -863,6 +863,30 @@ void ma_cfc_default_config(MACfcConfig* config, MACfcAlgorithm algorithm);
  */
 const char* ma_cfc_algorithm_name(MACfcAlgorithm algorithm);
 
+/* ============================================================================
+ * ZSFZS-F024: 多智能体系统启停控制
+ * ============================================================================ */
+
+/**
+ * @brief 设置多智能体系统的启用状态
+ * 
+ * 启用时激活智能体决策、任务调度和集体学习。
+ * 禁用时停止所有智能体活动，保留现有知识和协作关系。
+ * 
+ * @param system 多智能体系统
+ * @param enabled 1=启用, 0=禁用
+ * @return int 成功返回0，失败返回-1
+ */
+int multi_agent_set_enabled(MultiAgentSystem* system, int enabled);
+
+/**
+ * @brief 获取多智能体系统的启用状态
+ * 
+ * @param system 多智能体系统
+ * @return int 1=启用, 0=禁用, -1=错误
+ */
+int multi_agent_get_enabled(MultiAgentSystem* system);
+
 #ifdef __cplusplus
 }
 #endif

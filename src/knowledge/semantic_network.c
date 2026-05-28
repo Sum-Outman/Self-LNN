@@ -8,6 +8,8 @@
 #define _CRT_NONSTDC_NO_DEPRECATE
 
 #include "selflnn/knowledge/semantic_network.h"
+#include "selflnn/knowledge/knowledge.h"          /* ZSFWS: KnowledgeBase/KnowledgeEntry */
+#include "selflnn/knowledge/knowledge_graph.h"    /* ZSFWS: KnowledgeGraph/GraphNode */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
@@ -1739,4 +1741,160 @@ SemanticNetwork* semantic_network_load(const char* filename) {
     safe_free((void**)&loaded_concepts);
     fclose(file);
     return net;
+}
+
+/* ============================================================================
+ * ZSFWS-013修复: semantic_network_infer —— 语义网络推理
+ * 头文件已声明但原.c缺失实现，导致knowledge_integration.c链接失败。
+ * 基于扩散激活和关系传递机制实现多步推理。
+ * ============================================================================ */
+SELFLNN_API size_t semantic_network_infer(SemanticNetwork* network,
+                             Concept** premises, size_t premise_count,
+                             size_t max_inferences,
+                             Concept** results, size_t max_results) {
+    if (!network || !premises || !results || max_results == 0) return 0;
+    if (premise_count == 0) return 0;
+
+    SEMANTIC_LOCK(network);
+    size_t result_count = 0;
+
+    /* 对每个前提概念执行扩散激活，收集关联概念 */
+    int* visited = (int*)safe_calloc(network->concept_count, sizeof(int));
+    if (!visited) { SEMANTIC_UNLOCK(network); return 0; }
+
+    for (size_t p = 0; p < premise_count && result_count < max_results; p++) {
+        Concept* premise = premises[p];
+        if (!premise) continue;
+
+        /* 遍历所有关系，查找与前提概念直接关联的目标概念 */
+        for (size_t r = 0; r < network->relation_count && result_count < max_results; r++) {
+            SemanticRelation* rel = network->relations[r];
+            if (!rel) continue;
+
+            int target_id = -1;
+            if (rel->source_id == premise->id && rel->target_id != premise->id) {
+                target_id = rel->target_id;
+            } else if (rel->target_id == premise->id && rel->source_id != premise->id) {
+                target_id = rel->source_id;
+            }
+            if (target_id < 0 || target_id >= (int)network->concept_count) continue;
+            if (visited[target_id]) continue;
+
+            Concept* inferred = network->concepts[target_id];
+            if (inferred) {
+                results[result_count++] = inferred;
+                visited[target_id] = 1;
+            }
+        }
+
+        /* 同义关系传递闭包：进一步扩散 */
+        if (result_count < max_results && result_count < max_inferences) {
+            for (size_t r2 = 0; r2 < network->relation_count && result_count < max_results; r2++) {
+                SemanticRelation* rel2 = network->relations[r2];
+                if (!rel2 || rel2->type != RELATION_SYNONYM) continue;
+                int sid = rel2->source_id, tid = rel2->target_id;
+                if (sid >= 0 && (size_t)sid < network->concept_count && visited[sid] && !visited[tid]) {
+                    if (network->concepts[tid]) {
+                        results[result_count++] = network->concepts[tid];
+                        visited[tid] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    safe_free((void**)&visited);
+    SEMANTIC_UNLOCK(network);
+    return result_count;
+}
+
+/* ============================================================================
+ * ZSFWS-014修复: semantic_network_import_from_knowledge_base
+ * 从知识库导入概念和关系到语义网络
+ * ============================================================================ */
+SELFLNN_API int semantic_network_import_from_knowledge_base(SemanticNetwork* network,
+                                               KnowledgeBase* kb) {
+    if (!network || !kb) return -1;
+    if (kb->entry_count == 0) return 0;
+
+    SEMANTIC_LOCK(network);
+    int imported = 0;
+
+    /* 遍历知识库条目，将每条知识作为概念导入 */
+    for (size_t i = 0; i < kb->entry_count && i < 100000; i++) {
+        KnowledgeEntry* entry = &kb->entries[i];
+        if (!entry->title || entry->title[0] == '\0') continue;
+        if (entry->confidence < 0.1f) continue;
+
+        /* 创建或获取概念 */
+        int cid = semantic_network_add_concept(network, entry->title, entry->category);
+        if (cid < 0) continue;
+
+        /* 为语义明确的条目创建同义关系 */
+        if (entry->semantic_type > 0) {
+            for (size_t j = 0; j < i; j++) {
+                KnowledgeEntry* other = &kb->entries[j];
+                if (!other->title || other->semantic_type != entry->semantic_type) continue;
+                int oid = semantic_network_find_concept(network, other->title);
+                if (oid >= 0 && oid != cid) {
+                    semantic_network_add_relation(network, cid, oid,
+                        RELATION_SYNONYM, entry->confidence * 0.8f);
+                    imported++;
+                }
+            }
+        }
+        imported++;
+    }
+
+    SEMANTIC_UNLOCK(network);
+    return imported;
+}
+
+/* ============================================================================
+ * ZSFWS-015修复: semantic_network_import_from_knowledge_graph
+ * 从知识图谱导入节点和边到语义网络
+ * ============================================================================ */
+SELFLNN_API int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
+                                               KnowledgeGraph* graph) {
+    if (!network || !graph) return -1;
+    if (graph->node_count == 0) return 0;
+
+    SEMANTIC_LOCK(network);
+    int imported = 0;
+
+    /* 导入图节点作为概念 */
+    for (size_t i = 0; i < graph->node_count && i < 100000; i++) {
+        GraphNode* node = &graph->nodes[i];
+        if (!node->label || node->label[0] == '\0') continue;
+
+        int cid = semantic_network_add_concept(network, node->label,
+            node->type > 0 ? (int)node->type : 0);
+        if (cid >= 0) imported++;
+    }
+
+    /* 导入图边作为关系 */
+    for (size_t i = 0; i < graph->edge_count && i < 100000; i++) {
+        GraphEdge* edge = &graph->edges[i];
+        if (edge->source_id < 0 || edge->target_id < 0) continue;
+        if ((size_t)edge->source_id >= graph->node_count ||
+            (size_t)edge->target_id >= graph->node_count) continue;
+
+        GraphNode* src = &graph->nodes[edge->source_id];
+        GraphNode* tgt = &graph->nodes[edge->target_id];
+        if (!src->label || !tgt->label) continue;
+
+        int src_cid = semantic_network_find_concept(network, src->label);
+        int tgt_cid = semantic_network_find_concept(network, tgt->label);
+        if (src_cid >= 0 && tgt_cid >= 0) {
+            SemanticRelationType rel_type = RELATION_RELATED;
+            if (edge->type == 1) rel_type = RELATION_IS_A;
+            else if (edge->type == 2) rel_type = RELATION_PART_OF;
+            semantic_network_add_relation(network, src_cid, tgt_cid,
+                rel_type, edge->weight > 0.0f ? edge->weight : 0.7f);
+            imported++;
+        }
+    }
+
+    SEMANTIC_UNLOCK(network);
+    return imported;
 }

@@ -107,6 +107,7 @@ SELFLNN_API void logging_log(LogLevel level, const char* file, int line, const c
 #define log_debug(...)    logging_log(LOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #define log_info(...)     logging_log(LOG_LEVEL_INFO, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #define log_warning(...)  logging_log(LOG_LEVEL_WARNING, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#define log_warn(...)     log_warning(__VA_ARGS__)  /* 别名：跨平台兼容 */
 #define log_error(...)    logging_log(LOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #define log_fatal(...)    logging_log(LOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, __VA_ARGS__)
 

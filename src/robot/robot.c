@@ -2453,7 +2453,7 @@ void robot_controller_free(RobotController* controller) {
     
     // 如果PyBullet连接未关闭，先断开
     if (controller->pb_connected) {
-        pb_disconnect();
+        pybullet_disconnect(0);
     }
     
     // 释放所有机器人实例

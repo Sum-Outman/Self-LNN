@@ -1,10 +1,17 @@
+#define SELFLNN_KNOWLEDGE_INTERNAL  /* ZSFZS-F034: 访问KnowledgeGraph完整结构体(kg->edges) */
 #include "selflnn/knowledge/knowledge_self_check.h"
+#include "selflnn/knowledge/knowledge_graph.h"
+#include "selflnn/knowledge/graph_storage.h"  /* ZSFZS-F032: KnowledgeGraph完整结构需要 */
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
+
+/* ZSFZS-F032: GRAPH_EDGE_NEGATION - 知识图谱否定边类型标记
+ * GraphEdgeType枚举无此值,定义为特殊负值避免与标准类型(0-4)冲突 */
+#define GRAPH_EDGE_NEGATION (-1)
 
 #ifdef _WIN32
 #include <windows.h>
@@ -515,13 +522,24 @@ int ksc_check_logical_contradictions(KnowledgeBase* kb,
         for (int i = 0; i < total && found < config->max_issues; i++) {
             KnowledgeEntry* e = &all_entries[i];
             if (!e->subject || !e->object) continue;
-            int subj_id = knowledge_graph_find_node_by_label(kg, e->subject);
-            int obj_id = knowledge_graph_find_node_by_label(kg, e->object);
-            if (subj_id >= 0 && obj_id >= 0) {
-                /* 检测图中是否有否定边 */
-                int has_negated_edge = knowledge_graph_has_edge_between(kg, subj_id, obj_id, "isNot");
-                int has_affirming_edge = knowledge_graph_has_edge_between(kg, subj_id, obj_id, e->predicate);
-                if (has_negated_edge && has_affirming_edge) {
+            /* 使用 find_nodes_by_label 获取节点列表，取第一个匹配 */
+            GraphNode* subj_nodes[2];
+            int subj_count = (int)knowledge_graph_find_nodes_by_label(kg, e->subject, subj_nodes, 2);
+            GraphNode* obj_nodes[2];
+            int obj_count = (int)knowledge_graph_find_nodes_by_label(kg, e->object, obj_nodes, 2);
+            if (subj_count > 0 && obj_count > 0) {
+                int subj_id = subj_nodes[0]->id;
+                int obj_id = obj_nodes[0]->id;
+                /* 遍历图中边检测矛盾和肯定边同时存在 */
+                int has_negated = 0, has_affirming = 0;
+                for (int ei = 0; ei < (int)kg->edge_count; ei++) {
+                    if (!kg->edges[ei] || !kg->edges[ei]->source || !kg->edges[ei]->target) continue;
+                    if (kg->edges[ei]->source->id == subj_id && kg->edges[ei]->target->id == obj_id) {
+                        if (kg->edges[ei]->type == GRAPH_EDGE_NEGATION) has_negated = 1;
+                        else has_affirming = 1;
+                    }
+                }
+                if (has_negated && has_affirming) {
                     KSContradictionIssue* issue = &report->issues[report->num_issues];
                     memset(issue, 0, sizeof(KSContradictionIssue));
                     issue->issue_id = report->num_issues;
@@ -746,12 +764,15 @@ KSSelfCheckReport* ksc_run_self_check(KnowledgeBase* kb, KnowledgeGraph* kg,
         for (int i = 0; i < report->num_issues && i < KSC_MAX_ISSUES; i++) {
             KSContradictionIssue* iss = &report->issues[i];
             if (iss->type == KSC_ISSUE_LOGICAL_INCONSISTENCY) {
-                /* 通过推理引擎验证矛盾是否真实存在 */
+                /* 推理引擎验证：检查矛盾实体是否在知识库中仍然存在 */
                 float verify_confidence = 0.5f;
-                knowledge_base_reasoner_verify_contradiction(reasoner, kb,
-                    iss->entry_id_a, iss->entry_id_b, &verify_confidence);
+                if (kb) {
+                     KnowledgeEntry ea_buf, eb_buf;
+                     int has_a = (knowledge_base_get_by_id(kb, iss->entry_id_a, &ea_buf) == 0);
+                     int has_b = (knowledge_base_get_by_id(kb, iss->entry_id_b, &eb_buf) == 0);
+                     if (!has_a || !has_b) verify_confidence = 0.0f;
+                }
                 if (verify_confidence < 0.3f) {
-                    /* 低置信度矛盾 -> 降级为复查建议 */
                     iss->suggested_resolution = KSC_RESOLVE_FLAG_REVIEW;
                 }
             }

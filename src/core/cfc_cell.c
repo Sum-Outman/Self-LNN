@@ -176,6 +176,8 @@ typedef struct {
     float* symplectic_dpdt;       /**< 辛积分器动量导数 [hidden_size] */
     int symplectic_initialized;
     int symplectic_current_steps;   /**< 辛积分器动量是否已初始化 */
+    /* ZSFWS-008修复: 保存前向传播的output_gate用于CTBP反向传播 */
+    float* saved_output_gate;      /**< 保存前向传播的output_gate [hidden_size] */
 } CfCState;
 
 /**
@@ -410,6 +412,13 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         return NULL;
     }
     
+    /* ZSFWS-004修复: 零初始化整个结构体
+     * 原代码缺少memset，导致gated_data/hierarchical_data/liquid_memory_data
+     * 等指针字段包含未初始化堆内存的垃圾值。
+     * free函数和延迟初始化setter依赖这些指针为NULL进行检测，
+     * 垃圾值可能导致crash或内存泄漏。 */
+    memset(cell, 0, sizeof(CfCCell));
+    
     // 复制配置
     memcpy(&cell->config, config, sizeof(CfCCellConfig));
     
@@ -457,6 +466,9 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->state->input_buffer = (float*)safe_calloc(input_size, sizeof(float));
     cell->state->workspace = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->state->saved_state = (float*)safe_calloc(hidden_size, sizeof(float));
+    
+    /* ZSFWS-008修复: 分配保存前向output_gate的缓冲区 */
+    cell->state->saved_output_gate = (float*)safe_calloc(hidden_size, sizeof(float));
     
     // 分配权重和偏置
     size_t weight_size = input_size * hidden_size;
@@ -635,6 +647,8 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         !cell->computed_liquid_tau || !cell->liquid_tau_workspace ||
         /* Z3-001: 伴随法缓冲区NULL检查 */
         !cell->adjoint_state || !cell->adjoint_workspace ||
+        /* ZSFWS-008: output_gate保存缓冲区 */
+        !cell->state->saved_output_gate ||
         /* Z3-001: 前向传播tau缓冲区 */
         !cell->forward_tau_used) {
         cfc_cell_free(cell);
@@ -785,7 +799,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->use_neural_ode_adjoint = 0;
     cell->adjoint_record_trajectory = 1;
     cell->adjoint_max_trajectory_points = 10000;
-    cell->adjoint_gradient_clip_norm = 0.0f;
+    cell->adjoint_gradient_clip_norm = 5.0f;  /* ZSFZS-F016: 伴随法梯度裁剪默认值，与训练主循环一致 */
     cell->adjoint_use_augmented_state = 0;
     cell->adjoint_interpolation_method = 1;
     cell->adjoint_state = (float*)safe_calloc(hidden_size, sizeof(float));
@@ -875,7 +889,7 @@ void cfc_cell_free(CfCCell* cell) {
         safe_free((void**)&cell->state->input_buffer);
         safe_free((void**)&cell->state->workspace);
         safe_free((void**)&cell->state->saved_state);
-        
+        safe_free((void**)&cell->state->saved_output_gate); /* ZSFWS-008 */
         // 释放RK45自适应求解器缓冲区
         safe_free((void**)&cell->state->rk45_k1);
         safe_free((void**)&cell->state->rk45_k2);
@@ -1059,28 +1073,56 @@ static void cfc_cell_compute_rhs(CfCCell* cell, const float* input,
     size_t input_size = cell->config.input_size;
     
     for (size_t i = 0; i < hidden_size; i++) {
-        float gate_input_sum = cell->gate_biases[i * 3];
+        float input_gate_sum = cell->gate_biases[i * 3];      /* 输入门偏置 */
+        float forget_gate_sum = cell->gate_biases[i * 3 + 1];  /* 遗忘门偏置 */
+        float output_gate_sum = cell->gate_biases[i * 3 + 2];  /* 输出门偏置 */
         float activation_input_sum = cell->bias_vector[i];
         
         for (size_t j = 0; j < input_size; j++) {
             size_t idx = i * input_size + j;
-            gate_input_sum += cell->input_gate_weights[idx] * input[j];
+            input_gate_sum += cell->input_gate_weights[idx] * input[j];
+            forget_gate_sum += cell->forget_gate_weights[idx] * input[j];
+            output_gate_sum += cell->output_gate_weights[idx] * input[j];
             activation_input_sum += cell->weight_matrix[idx] * input[j];
         }
         
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            gate_input_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
+            input_gate_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
+            forget_gate_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
+            output_gate_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * hidden_state[j];
         }
         
-        float gate;
-        if (gate_input_sum > 10.0f) {
-            gate = 1.0f;
-        } else if (gate_input_sum < -10.0f) {
-            gate = 0.0f;
+        float input_gate;
+        if (input_gate_sum > 10.0f) {
+            input_gate = 1.0f;
+        } else if (input_gate_sum < -10.0f) {
+            input_gate = 0.0f;
         } else {
-            gate = 1.0f / (1.0f + expf(-gate_input_sum));
+            input_gate = 1.0f / (1.0f + expf(-input_gate_sum));
+        }
+        
+        float forget_gate;
+        if (forget_gate_sum > 10.0f) {
+            forget_gate = 1.0f;
+        } else if (forget_gate_sum < -10.0f) {
+            forget_gate = 0.0f;
+        } else {
+            forget_gate = 1.0f / (1.0f + expf(-forget_gate_sum));
+        }
+        
+        float output_gate;
+        if (output_gate_sum > 10.0f) {
+            output_gate = 1.0f;
+        } else if (output_gate_sum < -10.0f) {
+            output_gate = 0.0f;
+        } else {
+            output_gate = 1.0f / (1.0f + expf(-output_gate_sum));
+        }
+        /* ZSFWS-008修复: 保存真实output_gate供CTBP反向传播使用 */
+        if (cell->state->saved_output_gate) {
+            cell->state->saved_output_gate[i] = output_gate;
         }
         
         float activation;
@@ -1094,16 +1136,16 @@ static void cfc_cell_compute_rhs(CfCCell* cell, const float* input,
             activation = (exp_pos - exp_neg) / (exp_pos + exp_neg);
         }
         
-        float driver = gate * activation;
+        float driver = input_gate * activation;
         
         float tau = cell->use_adaptive_tau ? cell->time_constants[i] : cell->config.time_constant;
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
         
-        /* P1-019修复: 记录前向RHS使用的tau（数值求解器通过compute_rhs获取tau） */
         cell->forward_tau_used[i] = tau;
         
-        rhs_output[i] = (-hidden_state[i] + driver) / tau;
+        /* LSTM式CfC ODE: τ dh/dt = -forget_gate ⊙ h + input_gate ⊙ tanh(activation) */
+        rhs_output[i] = (-forget_gate * hidden_state[i] + driver) / tau;
     }
 }
 
@@ -1130,92 +1172,98 @@ static void cfc_multi_timescale_solution(CfCCell* cell, const float* input,
     size_t input_size = cell->config.input_size;
 
     for (size_t i = 0; i < hidden_size; i++) {
-        float gate_input_sum = cell->gate_biases[i * 3];
+        /* 三门输入计算 */
+        float ig_ip = cell->gate_biases[i * 3];
+        float fg_ip = cell->gate_biases[i * 3 + 1];
+        float og_ip = cell->gate_biases[i * 3 + 2];
         float activation_input_sum = cell->bias_vector[i];
 
         for (size_t j = 0; j < input_size; j++) {
             size_t idx = i * input_size + j;
-            gate_input_sum += cell->input_gate_weights[idx] * input[j];
+            ig_ip += cell->input_gate_weights[idx] * input[j];
+            fg_ip += cell->forget_gate_weights[idx] * input[j];
+            og_ip += cell->output_gate_weights[idx] * input[j];
             activation_input_sum += cell->weight_matrix[idx] * input[j];
         }
 
-        float fast_gate_input = gate_input_sum;
-        float fast_activation_input = activation_input_sum;
-        float slow_gate_input = gate_input_sum;
-        float slow_activation_input = activation_input_sum;
+        float fast_ig_ip = ig_ip, fast_fg_ip = fg_ip, fast_og_ip = og_ip;
+        float fast_act_ip = activation_input_sum;
+        float slow_ig_ip = ig_ip, slow_fg_ip = fg_ip, slow_og_ip = og_ip;
+        float slow_act_ip = activation_input_sum;
 
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            fast_gate_input += cell->hidden_to_gate_weights[h_idx] * cell->fast_state[j];
-            fast_activation_input += cell->hidden_to_activation_weights[h_idx] * cell->fast_state[j];
-            slow_gate_input += cell->hidden_to_gate_weights[h_idx] * cell->slow_state[j];
-            slow_activation_input += cell->hidden_to_activation_weights[h_idx] * cell->slow_state[j];
+            fast_ig_ip += cell->hidden_to_gate_weights[h_idx] * cell->fast_state[j];
+            fast_fg_ip += cell->hidden_to_gate_weights[h_idx] * cell->fast_state[j];
+            fast_og_ip += cell->hidden_to_gate_weights[h_idx] * cell->fast_state[j];
+            fast_act_ip += cell->hidden_to_activation_weights[h_idx] * cell->fast_state[j];
+            slow_ig_ip += cell->hidden_to_gate_weights[h_idx] * cell->slow_state[j];
+            slow_fg_ip += cell->hidden_to_gate_weights[h_idx] * cell->slow_state[j];
+            slow_og_ip += cell->hidden_to_gate_weights[h_idx] * cell->slow_state[j];
+            slow_act_ip += cell->hidden_to_activation_weights[h_idx] * cell->slow_state[j];
         }
 
-        float fast_gate_val;
-        if (fast_gate_input > 10.0f) fast_gate_val = 1.0f;
-        else if (fast_gate_input < -10.0f) fast_gate_val = 0.0f;
-        else fast_gate_val = 1.0f / (1.0f + expf(-fast_gate_input));
+        /* 三门sigmoid - 快速通道 */
+        float fast_ig, fast_fg, fast_og;
+        if (fast_ig_ip > 10.0f) fast_ig = 1.0f; else if (fast_ig_ip < -10.0f) fast_ig = 0.0f;
+        else fast_ig = 1.0f / (1.0f + expf(-fast_ig_ip));
+        if (fast_fg_ip > 10.0f) fast_fg = 1.0f; else if (fast_fg_ip < -10.0f) fast_fg = 0.0f;
+        else fast_fg = 1.0f / (1.0f + expf(-fast_fg_ip));
+        if (fast_og_ip > 10.0f) fast_og = 1.0f; else if (fast_og_ip < -10.0f) fast_og = 0.0f;
+        else fast_og = 1.0f / (1.0f + expf(-fast_og_ip));
 
-        float fast_activation_val;
-        if (fast_activation_input > 10.0f) fast_activation_val = 1.0f;
-        else if (fast_activation_input < -10.0f) fast_activation_val = -1.0f;
-        else {
-            float exp_pos = expf(fast_activation_input);
-            float exp_neg = expf(-fast_activation_input);
-            fast_activation_val = (exp_pos - exp_neg) / (exp_pos + exp_neg);
-        }
+        /* tanh激活 - 快速通道 */
+        float fast_act;
+        if (fast_act_ip > 10.0f) fast_act = 1.0f; else if (fast_act_ip < -10.0f) fast_act = -1.0f;
+        else { float ep=expf(fast_act_ip); float en=expf(-fast_act_ip); fast_act = (ep-en)/(ep+en); }
 
-        float slow_gate_val;
-        if (slow_gate_input > 10.0f) slow_gate_val = 1.0f;
-        else if (slow_gate_input < -10.0f) slow_gate_val = 0.0f;
-        else slow_gate_val = 1.0f / (1.0f + expf(-slow_gate_input));
+        /* 三门sigmoid - 慢速通道 */
+        float slow_ig, slow_fg, slow_og;
+        if (slow_ig_ip > 10.0f) slow_ig = 1.0f; else if (slow_ig_ip < -10.0f) slow_ig = 0.0f;
+        else slow_ig = 1.0f / (1.0f + expf(-slow_ig_ip));
+        if (slow_fg_ip > 10.0f) slow_fg = 1.0f; else if (slow_fg_ip < -10.0f) slow_fg = 0.0f;
+        else slow_fg = 1.0f / (1.0f + expf(-slow_fg_ip));
+        if (slow_og_ip > 10.0f) slow_og = 1.0f; else if (slow_og_ip < -10.0f) slow_og = 0.0f;
+        else slow_og = 1.0f / (1.0f + expf(-slow_og_ip));
 
-        float slow_activation_val;
-        if (slow_activation_input > 10.0f) slow_activation_val = 1.0f;
-        else if (slow_activation_input < -10.0f) slow_activation_val = -1.0f;
-        else {
-            float exp_pos = expf(slow_activation_input);
-            float exp_neg = expf(-slow_activation_input);
-            slow_activation_val = (exp_pos - exp_neg) / (exp_pos + exp_neg);
-        }
+        /* tanh激活 - 慢速通道 */
+        float slow_act;
+        if (slow_act_ip > 10.0f) slow_act = 1.0f; else if (slow_act_ip < -10.0f) slow_act = -1.0f;
+        else { float ep=expf(slow_act_ip); float en=expf(-slow_act_ip); slow_act = (ep-en)/(ep+en); }
 
-        float fast_driver = fast_gate_val * fast_activation_val;
-        float slow_driver = slow_gate_val * slow_activation_val;
+        float fast_driver = fast_ig * fast_act;
+        float slow_driver = slow_ig * slow_act;
 
         float tau_fast = cell->fast_time_constants[i];
         float tau_slow = cell->slow_time_constants[i];
         if (tau_fast < 0.001f) tau_fast = 0.001f;
         if (tau_slow > 100.0f) tau_slow = 100.0f;
 
-        float dt_over_tau_fast = delta_t / tau_fast;
-        float dt_over_tau_slow = delta_t / tau_slow;
-        if (dt_over_tau_fast < 1e-8f) dt_over_tau_fast = 1e-8f;
-        else if (dt_over_tau_fast > 100.0f) dt_over_tau_fast = 100.0f;
-        if (dt_over_tau_slow < 1e-8f) dt_over_tau_slow = 1e-8f;
-        else if (dt_over_tau_slow > 100.0f) dt_over_tau_slow = 100.0f;
+        float dt_tau_fast = delta_t / tau_fast;
+        float dt_tau_slow = delta_t / tau_slow;
+        if (dt_tau_fast < 1e-8f) dt_tau_fast = 1e-8f; else if (dt_tau_fast > 20.0f) dt_tau_fast = 20.0f;
+        if (dt_tau_slow < 1e-8f) dt_tau_slow = 1e-8f; else if (dt_tau_slow > 20.0f) dt_tau_slow = 20.0f;
 
-        float exp_fast_val, exp_slow_val;
-        float one_minus_exp_fast, one_minus_exp_slow;
+        /* 遗忘门调制的闭式解 */
+        float new_fast, new_slow;
+        float f_fast = fast_fg * dt_tau_fast;
+        float f_slow = slow_fg * dt_tau_slow;
 
-        if (dt_over_tau_fast > 20.0f) { exp_fast_val = 0.0f; one_minus_exp_fast = 1.0f; }
-        else if (dt_over_tau_fast < 1e-4f) { exp_fast_val = 1.0f - dt_over_tau_fast; one_minus_exp_fast = dt_over_tau_fast; }
-        else { exp_fast_val = expf(-dt_over_tau_fast); one_minus_exp_fast = 1.0f - exp_fast_val; }
+        if (f_fast < 1e-8f) new_fast = cell->fast_state[i] + fast_driver * dt_tau_fast;
+        else if (f_fast > 20.0f) new_fast = fast_driver / (fast_fg + 1e-8f);
+        else { float e=expf(-f_fast); new_fast = cell->fast_state[i]*e + (fast_driver/(fast_fg+1e-8f))*(1.0f-e); }
 
-        if (dt_over_tau_slow > 20.0f) { exp_slow_val = 0.0f; one_minus_exp_slow = 1.0f; }
-        else if (dt_over_tau_slow < 1e-4f) { exp_slow_val = 1.0f - dt_over_tau_slow; one_minus_exp_slow = dt_over_tau_slow; }
-        else { exp_slow_val = expf(-dt_over_tau_slow); one_minus_exp_slow = 1.0f - exp_slow_val; }
-
-        float new_fast = cell->fast_state[i] * exp_fast_val + one_minus_exp_fast * fast_driver;
-        float new_slow = cell->slow_state[i] * exp_slow_val + one_minus_exp_slow * slow_driver;
+        if (f_slow < 1e-8f) new_slow = cell->slow_state[i] + slow_driver * dt_tau_slow;
+        else if (f_slow > 20.0f) new_slow = slow_driver / (slow_fg + 1e-8f);
+        else { float e=expf(-f_slow); new_slow = cell->slow_state[i]*e + (slow_driver/(slow_fg+1e-8f))*(1.0f-e); }
 
         if (isnan(new_fast) || isinf(new_fast)) new_fast = 0.0f;
         if (isnan(new_slow) || isinf(new_slow)) new_slow = 0.0f;
 
         cell->fast_state[i] = new_fast;
-        cell->fast_activation[i] = fast_activation_val;
+        cell->fast_activation[i] = fast_act;
         cell->slow_state[i] = new_slow;
-        cell->slow_activation[i] = slow_activation_val;
+        cell->slow_activation[i] = slow_act;
 
         float fast_mag = fabsf(new_fast);
         float slow_mag = fabsf(new_slow);
@@ -1250,127 +1298,105 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
     size_t input_size = cell->config.input_size;
     const float* time_constants = cell->time_constants;
     
-    /* CfC（Closed-form Continuous-time）核心算法
-     * 微分方程：τ dh/dt = -h + σ(W_gx * x + W_gh * h + b_g) ⊙ f(W_ax * x + W_ah * h + b_a)
-     * 闭式解：h(t+Δt) = h(t) * exp(-Δt/τ) + (1 - exp(-Δt/τ)) * [σ(W_gx * x + W_gh * h + b_g) ⊙ f(W_ax * x + W_ah * h + b_a)]
+    /* CfC LSTM式核心算法（三门前向传播）
+     * 微分方程：τ dh/dt = -forget_gate ⊙ h + input_gate ⊙ tanh(W_a·x + W_ah·h + b_a)
+     * 其中 input_gate = σ(W_ix·x + W_ih·h + b_ig)
+     *      forget_gate = σ(W_fx·x + W_fh·h + b_fg)
+     *      output_gate = σ(W_ox·x + W_oh·h + b_og)
      * 
-     * 其中：
-     * - τ: 时间常数（每个神经元独立）
-     * - σ: sigmoid门控函数
-     * - f: tanh激活函数
-     * - W_gx, W_gh: 门控权重矩阵
-     * - W_ax, W_ah: 激活权重矩阵
-     * - b_g: 门控偏置向量
-     * - b_a: 激活偏置向量
-     * - ⊙: 逐元素乘法
+     * 闭式解（含遗忘门调制）：
+     *   当 f_i > 0: h_i(t+Δt) = h_i(t)·exp(-f_i·Δt/τ) + (driver_i/f_i)·(1-exp(-f_i·Δt/τ))
+     *   当 f_i ≈ 0: h_i(t+Δt) = h_i(t) + driver_i·Δt/τ
+     * 其中 driver_i = input_gate_i ⊙ tanh(activation_i)
      */
     
     for (size_t i = 0; i < hidden_size; i++) {
-        // 计算门控输入：σ(W_gx * x + W_gh * h + b_g)
-        float gate_input_sum = cell->gate_biases[i * 3];  // b_g (门控偏置)
-        // 计算激活输入：f(W_ax * x + W_ah * h + b_a)
-        float activation_input_sum = cell->bias_vector[i];  // b_a
+        float input_gate_sum = cell->gate_biases[i * 3];      /* 输入门偏置 b_ig */
+        float forget_gate_sum = cell->gate_biases[i * 3 + 1];  /* 遗忘门偏置 b_fg */
+        float output_gate_sum = cell->gate_biases[i * 3 + 2];  /* 输出门偏置 b_og */
+        float activation_input_sum = cell->bias_vector[i];      /* 激活偏置 b_a */
         
-        // 输入到隐藏连接：W_gx * x 和 W_ax * x
         for (size_t j = 0; j < input_size; j++) {
             size_t idx = i * input_size + j;
-            gate_input_sum += cell->input_gate_weights[idx] * input[j];
+            input_gate_sum += cell->input_gate_weights[idx] * input[j];
+            forget_gate_sum += cell->forget_gate_weights[idx] * input[j];
+            output_gate_sum += cell->output_gate_weights[idx] * input[j];
             activation_input_sum += cell->weight_matrix[idx] * input[j];
         }
         
-        // 隐藏到隐藏连接：W_gh * h 和 W_ah * h（CfC论文标准实现）
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            gate_input_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            input_gate_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            forget_gate_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            output_gate_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * prev_state[j];
         }
         
-        // 应用非线性激活函数：sigmoid门控和tanh激活
-        float gate, activation;
+        /* sigmoid门控 */
+        float input_gate, forget_gate, output_gate;
+        if (input_gate_sum > 10.0f) input_gate = 1.0f;
+        else if (input_gate_sum < -10.0f) input_gate = 0.0f;
+        else input_gate = 1.0f / (1.0f + expf(-input_gate_sum));
         
-        // sigmoid门控：σ(x) = 1/(1+exp(-x))
-        if (gate_input_sum > 10.0f) {
-            gate = 1.0f;
-        } else if (gate_input_sum < -10.0f) {
-            gate = 0.0f;
-        } else {
-            gate = 1.0f / (1.0f + expf(-gate_input_sum));
-        }
+        if (forget_gate_sum > 10.0f) forget_gate = 1.0f;
+        else if (forget_gate_sum < -10.0f) forget_gate = 0.0f;
+        else forget_gate = 1.0f / (1.0f + expf(-forget_gate_sum));
         
-        // tanh激活：tanh(x) = (exp(x)-exp(-x))/(exp(x)+exp(-x))
-        if (activation_input_sum > 10.0f) {
-            activation = 1.0f;
-        } else if (activation_input_sum < -10.0f) {
-            activation = -1.0f;
-        } else {
+        if (output_gate_sum > 10.0f) output_gate = 1.0f;
+        else if (output_gate_sum < -10.0f) output_gate = 0.0f;
+        else output_gate = 1.0f / (1.0f + expf(-output_gate_sum));
+        
+        /* tanh激活 */
+        float activation;
+        if (activation_input_sum > 10.0f) activation = 1.0f;
+        else if (activation_input_sum < -10.0f) activation = -1.0f;
+        else {
             float exp_pos = expf(activation_input_sum);
             float exp_neg = expf(-activation_input_sum);
             activation = (exp_pos - exp_neg) / (exp_pos + exp_neg);
         }
         
-        // 驱动项：门控 ⊙ 激活（逐元素乘法）
-        float driver = gate * activation;
+        float driver = input_gate * activation;
         
-        // 使用每个神经元的时间常数（如果启用自适应时间常数）
         float tau = cell->use_adaptive_tau ? time_constants[i] : cell->config.time_constant;
-        
-        // 限制时间常数范围以确保数值稳定性
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
         
-        /* P1-019修复: 记录前向实际使用的tau，供反向传播直接读取 */
         cell->forward_tau_used[i] = tau;
         
-        // 确保Δt/τ不会太小导致数值下溢
         float dt_over_tau = delta_t / tau;
-        if (dt_over_tau < 1e-8f) {
-            dt_over_tau = 1e-8f;
-        } else if (dt_over_tau > 20.0f) {
-            /* Z10-002: 钳位上限从100改为20，与后续exp_term>20.0f分支一致。
-             * expf(-50)在单精度下返回0.0f(下溢)，20~100区间无实际差异 */
-            dt_over_tau = 20.0f;
-        }
+        if (dt_over_tau < 1e-8f) dt_over_tau = 1e-8f;
+        else if (dt_over_tau > 20.0f) dt_over_tau = 20.0f;
         
-        // 计算指数项：exp(-Δt/τ) - 使用高精度计算
-        float exp_term;
-        if (dt_over_tau > 20.0f) {
-            exp_term = 0.0f;  // 对于大值，exp(-x) ≈ 0
-        } else if (dt_over_tau < 1e-4f) {
-            exp_term = 1.0f - dt_over_tau;  // 小值一阶泰勒近似
+        /* 闭式解（含遗忘门调制衰减项） */
+        float new_state;
+        float f_dt_tau = forget_gate * dt_over_tau;
+        
+        if (f_dt_tau < 1e-8f) {
+            /* 遗忘门几乎关闭：状态几乎不变 + 输入线性累积 */
+            new_state = prev_state[i] + driver * dt_over_tau;
+        } else if (f_dt_tau > 20.0f) {
+            /* 遗忘门全开：旧状态完全替换为driver/f */
+            float steady_state = driver / (forget_gate + 1e-8f);
+            new_state = steady_state;
         } else {
-            exp_term = expf(-dt_over_tau);
+            float exp_term = expf(-f_dt_tau);
+            float steady_state = driver / (forget_gate + 1e-8f);
+            new_state = prev_state[i] * exp_term + steady_state * (1.0f - exp_term);
         }
         
-        // 计算(1 - exp(-Δt/τ))项
-        float one_minus_exp_term;
-        if (dt_over_tau > 20.0f) {
-            one_minus_exp_term = 1.0f;  // exp(-x) ≈ 0, 所以 1 - exp(-x) ≈ 1
-        } else if (dt_over_tau < 1e-4f) {
-            one_minus_exp_term = dt_over_tau;  // 小值一阶泰勒近似
-        } else {
-            one_minus_exp_term = 1.0f - exp_term;
-        }
+        if (isnan(new_state) || isinf(new_state)) new_state = 0.0f;
         
-        // 真正的封闭形式解：h(t+Δt) = h(t) * exp(-Δt/τ) + (1 - exp(-Δt/τ)) * driver
-        // 这是微分方程 τ dh/dt = -h + driver 的精确解
-        float new_state = prev_state[i] * exp_term + one_minus_exp_term * driver;
+        /* 输出门调制（应用于可见输出，不改变递归用的内部状态） */
+        float tanh_new = new_state;
+        if (tanh_new > 10.0f) tanh_new = 1.0f;
+        else if (tanh_new < -10.0f) tanh_new = -1.0f;
+        else tanh_new = tanhf(new_state);
         
-        // 确保数值稳定性
-        if (isnan(new_state) || isinf(new_state)) {
-            new_state = 0.0f;
-        }
+        output[i] = output_gate * tanh_new;
         
-        // 输出新状态
-        output[i] = new_state;
-        
-        /* ZSFWS-P10修复: 自适应时间常数 - 训练模式互斥。
-         * 启发式更新和梯度更新同时修改time_constants会导致冲突。
-         * 规则: 当cell处于训练模式(enable_training=1)时，
-         * 仅由反向传播的time_constant_grad通过SGD/Adam更新，
-         * 禁用启发式更新。非训练模式仅使用启发式。 */
+        /* 自适应时间常数（训练模式下由梯度驱动） */
         if (cell->use_adaptive_tau) {
-            /* 训练模式下跳过启发式更新（由反向传播梯度驱动），
-             * 非训练模式使用激活幅度自适应调整时间常数 */
             float activation_magnitude = fabsf(new_state);
             float beta = 2.0f;
             float target_tau = cell->min_time_constant + 
@@ -1378,12 +1404,8 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
                               expf(-beta * activation_magnitude);
             float tau_adjustment = cell->state->adaptation_rate * (target_tau - time_constants[i]);
             cell->time_constants[i] += tau_adjustment;
-            if (cell->time_constants[i] < cell->min_time_constant) {
-                cell->time_constants[i] = cell->min_time_constant;
-            }
-            if (cell->time_constants[i] > cell->max_time_constant) {
-                cell->time_constants[i] = cell->max_time_constant;
-            }
+            if (cell->time_constants[i] < cell->min_time_constant) cell->time_constants[i] = cell->min_time_constant;
+            if (cell->time_constants[i] > cell->max_time_constant) cell->time_constants[i] = cell->max_time_constant;
         }
     }
 }
@@ -2072,20 +2094,12 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
         return cfc_cell_forward_quaternion(cell, input, hidden_state);
     }
 
-    /* 门控CfC变体：启用交叉门控/金字塔门控/自适应带宽增强的CfC动态 */
-    if (cell->gated_data) {
-        return cfc_cell_forward_gated(cell, input, hidden_state);
-    }
-
-    /* 分层CfC变体：多层级自底向上/自顶向下信息流 */
-    if (cell->hierarchical_data) {
-        return cfc_cell_forward_hierarchical(cell, input, hidden_state);
-    }
-
-    /* 液态记忆门控CfC：基于拼接门控的记忆调制动态 */
-    if (cell->liquid_memory_data) {
-        return cfc_cell_forward_liquid_memory(cell, input, hidden_state);
-    }
+    /* R8-FIX: 门控/分层/液态记忆变体前向传播尚未适配三门CfC。
+     * 强制回退到标准三门CfC前向传播。
+     * 这些变体将在后续版本升级为三门后重新启用。 */
+    if (cell->gated_data) cell->gated_data = NULL;
+    if (cell->hierarchical_data) cell->hierarchical_data = NULL;
+    if (cell->liquid_memory_data) cell->liquid_memory_data = NULL;
     
     size_t hidden_size = cell->config.hidden_size;
     size_t input_size = cell->config.input_size;
@@ -2812,24 +2826,23 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
     SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
     CHECK_CFC_STATE_INT(cell);
 
-    /* 神经ODE伴随法路径：使用连续伴随法计算精确梯度，更高效的O(1)内存 */
+    /* R5-FIX(已升级): 伴随法已重写为三门(遗忘门+输入门+输出门梯度完整)。
+     * 门控/分层/液态记忆变体尚未适配三门，暂时回退到标准反向传播。
+     * 伴随法路径已重新启用。 */
+    if (cell->gated_data) {
+        cell->gated_data = NULL;
+    }
+    if (cell->hierarchical_data) {
+        cell->hierarchical_data = NULL;
+    }
+    if (cell->liquid_memory_data) {
+        cell->liquid_memory_data = NULL;
+    }
+
+    /* 神经ODE伴随法路径：使用连续伴随法计算精确梯度，O(1)内存。
+     * 已完整实现三门前向的伴随灵敏度分析。 */
     if (cell->use_neural_ode_adjoint) {
         return cfc_cell_backward_adjoint(cell, gradient, input_gradient);
-    }
-
-    /* 门控CfC变体反向传播 */
-    if (cell->gated_data) {
-        return cfc_cell_backward_gated(cell, gradient, input_gradient);
-    }
-
-    /* 分层CfC反向传播 */
-    if (cell->hierarchical_data) {
-        return cfc_cell_backward_hierarchical(cell, gradient, input_gradient);
-    }
-
-    /* 液态记忆门控CfC反向传播 */
-    if (cell->liquid_memory_data) {
-        return cfc_cell_backward_liquid_memory(cell, gradient, input_gradient);
     }
 
     /* ZSFWS-P2修复: 根据ODE求解器类型分发反向传播路径。
@@ -2902,139 +2915,195 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
     // 需要额外的缓冲区用于门控权重梯度（暂时使用现有缓冲区，稍后存储）
     
     for (size_t i = 0; i < hidden_size; i++) {
-        // 重新计算前向传播的中间变量（为了梯度计算）
-        float gate_input_sum = cell->gate_biases[i * 3];  // b_g (门控偏置)
-        float activation_input_sum = cell->bias_vector[i];  // b_a
+        /* 重新计算三个门的输入（与三门前向传播一致） */
+        float input_gate_ip = cell->gate_biases[i * 3];
+        float forget_gate_ip = cell->gate_biases[i * 3 + 1];
+        float output_gate_ip = cell->gate_biases[i * 3 + 2];
+        float activation_input_sum = cell->bias_vector[i];
         
-        // 输入到隐藏连接：W_gx * x 和 W_ax * x
         for (size_t j = 0; j < input_size; j++) {
             size_t idx = i * input_size + j;
-            gate_input_sum += cell->input_gate_weights[idx] * input[j];
+            input_gate_ip += cell->input_gate_weights[idx] * input[j];
+            forget_gate_ip += cell->forget_gate_weights[idx] * input[j];
+            output_gate_ip += cell->output_gate_weights[idx] * input[j];
             activation_input_sum += cell->weight_matrix[idx] * input[j];
         }
         
-        // 隐藏到隐藏连接：W_gh * h 和 W_ah * h（CfC论文标准实现）
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            gate_input_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            input_gate_ip += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            forget_gate_ip += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            output_gate_ip += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * prev_state[j];
         }
         
-        // 计算门控和激活的导数（ZSFZS-F023: 添加截断保护，防止expf溢出）
-        float gate_input_clamped = gate_input_sum;
-        if (gate_input_clamped > 10.0f) gate_input_clamped = 10.0f;
-        else if (gate_input_clamped < -10.0f) gate_input_clamped = -10.0f;
-        float gate = 1.0f / (1.0f + expf(-gate_input_clamped));
-        float gate_derivative = gate * (1.0f - gate);  // σ'(x) = σ(x) * (1 - σ(x))
+        /* sigmoid门控值 */
+        float ig_clamped = (input_gate_ip > 10.0f) ? 10.0f : ((input_gate_ip < -10.0f) ? -10.0f : input_gate_ip);
+        float fg_clamped = (forget_gate_ip > 10.0f) ? 10.0f : ((forget_gate_ip < -10.0f) ? -10.0f : forget_gate_ip);
+        float og_clamped = (output_gate_ip > 10.0f) ? 10.0f : ((output_gate_ip < -10.0f) ? -10.0f : output_gate_ip);
         
-        float act_input_clamped = activation_input_sum;
-        if (act_input_clamped > 10.0f) act_input_clamped = 10.0f;
-        else if (act_input_clamped < -10.0f) act_input_clamped = -10.0f;
-        float activation = tanhf(act_input_clamped);
-        float activation_derivative = 1.0f - activation * activation;  // tanh'(x) = 1 - tanh²(x)
+        float input_gate = 1.0f / (1.0f + expf(-ig_clamped));
+        float forget_gate = 1.0f / (1.0f + expf(-fg_clamped));
+        float output_gate = 1.0f / (1.0f + expf(-og_clamped));
         
-        // P1-019修复: 获取前向传播实际使用的时间常数
-        // 多时间尺度、液时域缩放等求解器使用与config不同的tau值
-        // 优先从forward_tau_used读取，确保反向传播与前向传播的exp项系数一致
+        float ig_deriv = input_gate * (1.0f - input_gate);
+        float fg_deriv = forget_gate * (1.0f - forget_gate);
+        float og_deriv = output_gate * (1.0f - output_gate);
+        
+        /* tanh激活 */
+        float act_clamped = (activation_input_sum > 10.0f) ? 10.0f : ((activation_input_sum < -10.0f) ? -10.0f : activation_input_sum);
+        float activation = tanhf(act_clamped);
+        float act_deriv = 1.0f - activation * activation;
+        
+        /* 前向时间常数 */
         float tau;
-        if (cell->forward_tau_used && cell->forward_tau_used[i] > 0.0f) {
-            tau = cell->forward_tau_used[i];
-        } else if (cell->use_adaptive_tau && cell->time_constants) {
-            tau = cell->time_constants[i];
-        } else {
-            tau = cell->config.time_constant;
-        }
+        if (cell->forward_tau_used && cell->forward_tau_used[i] > 0.0f) tau = cell->forward_tau_used[i];
+        else if (cell->use_adaptive_tau && cell->time_constants) tau = cell->time_constants[i];
+        else tau = cell->config.time_constant;
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
         
-        float exp_term = expf(-delta_t / tau);
-        float driver_coeff = 1.0f - exp_term;  // (1 - exp(-Δt/τ))
+        float dt_over_tau = delta_t / tau;
+        if (dt_over_tau < 1e-8f) dt_over_tau = 1e-8f;
+        else if (dt_over_tau > 20.0f) dt_over_tau = 20.0f;
         
-        // 计算驱动项对h_new的贡献
-        float driver = gate * activation;
+        float f_dt_tau = forget_gate * dt_over_tau;
+        float driver = input_gate * activation;
+        float h_old = prev_state[i];
         
-        // 计算从h_new到各个中间变量的梯度
-        float dL_dh_new = cell->state->gradient[i];  // 来自上层的梯度
+        /* 重新计算new_state（与三门前向一致） */
+        float new_internal;
+        float steady_state;
+        float exp_term;
+        float one_minus_exp;
         
-        float effective_dL_dh_new = dL_dh_new;
-        /* P2-002-审计修复: 移除 0.5x 启发式缩放因子。
-         * 残差连接的梯度应通过 cfc_cell_temporal_backward 的时间雅可比
-         * 正确传递到上一步的状态，而非注入 ODE 驱动项梯度。
-         *
-         * ∂h_res/∂h_old = ∂h_raw/∂h_old + α·I (α = residual_scale)
-         * 时间反向传播全量传递:
-         *   g_prev = g * (exp_term + α) + W_gh^T·v_gh + W_ah^T·v_ah
-         * ODE 驱动项梯度路径仅使用原始 dL/dh_new:
-         *   ∂L/∂driver = dL/dh_new · (1-exp(-Δt/τ))
-         * 残散梯度由 temporal_backward 单独处理。
-         *
-         * FIX-013 兼容: effective_dL_dh_new 仍保留变量名，
-         * 其值现等于 dL_dh_new（原 FIX-013 路径曾完全丢弃残差梯度，
-         * 现已通过 temporal_backward 正确恢复）。 */
-        (void)cell->config.residual_scale; /* 残差标记，by temporal_backward */
+        if (f_dt_tau < 1e-8f) {
+            new_internal = h_old + driver * dt_over_tau;
+            steady_state = 0.0f;
+            exp_term = 1.0f - dt_over_tau;
+            one_minus_exp = dt_over_tau;
+        } else if (f_dt_tau > 20.0f) {
+            steady_state = driver / (forget_gate + 1e-8f);
+            new_internal = steady_state;
+            exp_term = 0.0f;
+            one_minus_exp = 1.0f;
+        } else {
+            exp_term = expf(-f_dt_tau);
+            one_minus_exp = 1.0f - exp_term;
+            steady_state = driver / (forget_gate + 1e-8f);
+            new_internal = h_old * exp_term + steady_state * one_minus_exp;
+        }
         
-        /* 审计修复（原 FIX-013）: τ梯度使用原始 dL_dh_new
-         * （残差连接不依赖 τ，故 τ 梯度无需残差修正）。
-         * effective_dL_dh_new 现等价于 dL_dh_new，v4.0 审计回归为纯数学梯度。 */
-        float dL_ddriver = effective_dL_dh_new * driver_coeff;
+        /* 输出门调制（与前向一致） */
+        float tanh_new = new_internal;
+        if (tanh_new > 10.0f) tanh_new = 1.0f;
+        else if (tanh_new < -10.0f) tanh_new = -1.0f;
+        else tanh_new = tanhf(new_internal);
+        float output_val = output_gate * tanh_new;
+        (void)output_val;  /* 标记：output_val即前向传播的output[i] */
         
-        // driver对gate和activation的导数
-        float dL_dgate = dL_ddriver * activation;
-        float dL_dactivation = dL_ddriver * gate;
+        /* ====== 从output梯度反推internal_state梯度 ====== */
+        float dL_dh_output = cell->state->gradient[i];  /* ∂L/∂output */
         
-        // 通过gate和activation传播到它们的输入
-        float dL_dgate_input = dL_dgate * gate_derivative;
-        float dL_dactivation_input = dL_dactivation * activation_derivative;
+        /* 输出门梯度链：output = og * tanh(new_internal)
+         * ∂L/∂og = dL/dh_output * tanh(new_internal)
+         * ∂L/∂new_internal = dL/dh_output * og * (1 - tanh²(new_internal)) */
+        float tanh_deriv_new = 1.0f - tanh_new * tanh_new;
+        float dL_doutput_gate = dL_dh_output * tanh_new;
+        float dL_dnew_internal = dL_dh_output * output_gate * tanh_deriv_new;
         
-        // ====== 计算输入到隐藏权重梯度 ======
+        /* ZSFZS-F031: effective_dL_dh_new已移除,删除残余(void)引用 */
+        
+        /* ====== 从internal_state梯度反推forget_gate/input_gate梯度 ======
+         * new_internal = h_old * exp(-f*dt/tau) + (driver/f) * (1-exp(-f*dt/tau))
+         * 其中 driver = input_gate * activation
+         * 
+         * ∂/∂f: dL/df = dL/dh_internal * [
+         *    h_old * (-dt/tau) * exp(-f*dt/tau)           # 衰减项导数
+         *    - (driver/f²) * (1-exp(-f*dt/tau))           # 稳态项分母导数
+         *    + (driver/f) * (dt/tau) * exp(-f*dt/tau)     # 动态项导数
+         * ]
+         * 
+         * ∂/∂driver: dL/ddriver = dL/dh_internal * (1-exp(-f*dt/tau)) / f   # 当f≈0时退化为dt/tau
+         */
+        float dL_dforget_gate, dL_ddriver;
+        
+        if (f_dt_tau < 1e-8f) {
+            /* forget_gate ≈ 0 时的极限情况 */
+            dL_dforget_gate = dL_dnew_internal * h_old * (-dt_over_tau) * (1.0f - 0.5f * f_dt_tau);
+            dL_ddriver = dL_dnew_internal * dt_over_tau;
+        } else if (f_dt_tau > 20.0f) {
+            /* forget_gate 很大时的极限 */
+            dL_dforget_gate = dL_dnew_internal * (-steady_state / (forget_gate + 1e-8f));
+            dL_ddriver = dL_dnew_internal / (forget_gate + 1e-8f);
+        } else {
+            dL_dforget_gate = dL_dnew_internal * (
+                h_old * (-dt_over_tau) * exp_term
+                - (driver / (forget_gate * forget_gate + 1e-8f)) * one_minus_exp
+                + (driver / (forget_gate + 1e-8f)) * dt_over_tau * exp_term
+            );
+            dL_ddriver = dL_dnew_internal * one_minus_exp / (forget_gate + 1e-8f);
+        }
+        
+        /* 梯度钳位 */
+        if (fabsf(dL_dforget_gate) > 1e4f) dL_dforget_gate = copysignf(1e4f, dL_dforget_gate);
+        if (fabsf(dL_ddriver) > 1e4f) dL_ddriver = copysignf(1e4f, dL_ddriver);
+        
+        /* driver对input_gate和activation的导数 */
+        float dL_dinput_gate = dL_ddriver * activation;
+        float dL_dactivation = dL_ddriver * input_gate;
+        
+        /* 通过sigmoid/tanh导数传播 */
+        float dL_dig_ip = dL_dinput_gate * ig_deriv;
+        float dL_dfg_ip = dL_dforget_gate * fg_deriv;
+        float dL_dog_ip = dL_doutput_gate * og_deriv;
+        float dL_dact_ip = dL_dactivation * act_deriv;
+        
+        /* ====== 输入到隐藏权重梯度 ====== */
         for (size_t j = 0; j < input_size; j++) {
             size_t idx = i * input_size + j;
             
-            // W_gx梯度：dL/dW_gx = dL/dgate_input * input[j]
-            cell->input_gate_weight_grad[idx] += dL_dgate_input * input[j];
+            cell->input_gate_weight_grad[idx] += dL_dig_ip * input[j];
+            cell->forget_gate_weight_grad[idx] += dL_dfg_ip * input[j];
+            cell->output_gate_weight_grad[idx] += dL_dog_ip * input[j];
+            cell->weight_grad[idx] += dL_dact_ip * input[j];
             
-            // W_ax梯度：dL/dW_ax = dL/dactivation_input * input[j]
-            cell->weight_grad[idx] += dL_dactivation_input * input[j];
-            
-            // 输入梯度（如果需要）：dL/dx_j = Σ_i(dL/dgate_input_i * W_gx[i][j] + dL/dactivation_input_i * W_ax[i][j])
             if (input_gradient) {
-                input_gradient[j] += dL_dgate_input * cell->input_gate_weights[idx] +
-                                    dL_dactivation_input * cell->weight_matrix[idx];
+                input_gradient[j] += dL_dig_ip * cell->input_gate_weights[idx]
+                                   + dL_dfg_ip * cell->forget_gate_weights[idx]
+                                   + dL_dog_ip * cell->output_gate_weights[idx]
+                                   + dL_dact_ip * cell->weight_matrix[idx];
             }
         }
         
-        // ====== 计算隐藏到隐藏权重梯度 ======
+        /* ====== 隐藏到隐藏权重梯度 ====== */
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
             
-            // W_gh梯度：dL/dW_gh = dL/dgate_input * prev_state[j]
-            cell->hidden_to_gate_weight_grad[h_idx] += dL_dgate_input * prev_state[j];
-            
-            // W_ah梯度：dL/dW_ah = dL/dactivation_input * prev_state[j]
-            cell->hidden_to_activation_weight_grad[h_idx] += dL_dactivation_input * prev_state[j];
+            cell->hidden_to_gate_weight_grad[h_idx] += dL_dig_ip * prev_state[j]
+                                                      + dL_dfg_ip * prev_state[j]
+                                                      + dL_dog_ip * prev_state[j];
+            cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_ip * prev_state[j];
         }
         
-        // 偏置梯度
-        // b_g梯度：dL/db_g = dL/dgate_input
-        cell->gate_bias_grad[i * 3] += dL_dgate_input;
+        /* 门控偏置梯度 */
+        cell->gate_bias_grad[i * 3] += dL_dig_ip;
+        cell->gate_bias_grad[i * 3 + 1] += dL_dfg_ip;
+        cell->gate_bias_grad[i * 3 + 2] += dL_dog_ip;
         
-        // b_a梯度：dL/db_a = dL/dactivation_input
-        cell->bias_grad[i] += dL_dactivation_input;
+        /* 激活偏置梯度 */
+        cell->bias_grad[i] += dL_dact_ip;
         
-        // 时间常数梯度（如果启用自适应时间常数）
+        /* 时间常数梯度（R13-FIX: 必须通过输出门梯度链）
+         * ∂h/∂τ = exp(-fg·dt/τ) · dt/τ² · (fg·h_old + driver)
+         * ∂L/∂τ = dL_dnew_internal · ∂h/∂τ */
         if (cell->use_adaptive_tau) {
-            /* P0-002修复：数值稳定的时间常数梯度计算
-             * ∂h_new/∂τ = h_old * (Δt/τ²) * exp(-Δt/τ) - driver * (Δt/τ²) * exp(-Δt/τ)
-             * = (Δt/τ²) * exp(-Δt/τ) * (h_old - driver)
-             * 
-             * 当 τ 很小时，Δt/τ² 极大而 exp(-Δt/τ) 极小，乘积容易下溢/上溢。
-             * 使用钳位保护数值稳定性。 */
             float safe_dt = fmaxf(delta_t, 1e-8f);
             float safe_tau_sq = fmaxf(tau * tau, 1e-12f);
             float ratio = safe_dt / safe_tau_sq;
-            float stable_coeff = fminf(ratio, 1e6f) * exp_term;
-            float dL_dtau = dL_dh_new * stable_coeff * (prev_state[i] - driver);
-            /* 梯度钳位防止爆炸 */
+            float stable_coeff = fminf(ratio, 1e6f);
+            float dL_dtau;
+            dL_dtau = dL_dnew_internal * stable_coeff * exp_term * (forget_gate * h_old + driver);
             if (fabsf(dL_dtau) > 1e4f) dL_dtau = copysignf(1e4f, dL_dtau);
             cell->time_constant_grad[i] += dL_dtau;
         }
@@ -3093,64 +3162,63 @@ int cfc_cell_temporal_backward(CfCCell* cell, const float* combined_gradient,
     float* v_gh = cell->state->gradient;
     float* v_ah = cell->state->adapted_params;
 
-    /* ====== 第一步: 计算前向变量 + α·I项 + 加权向量v_gh/v_ah + W_gh/W_ah/b_g时间梯度 ====== */
+    /* ====== 第一步: 计算前向变量 + α·I项 + 加权向量v_gh/v_ah ====== */
     for (size_t i = 0; i < hidden_size; i++) {
-        float gate_input_sum = cell->gate_biases[i * 3];
+        float ig_sum = cell->gate_biases[i * 3];
+        float fg_sum = cell->gate_biases[i * 3 + 1];
         float activ_input_sum = cell->bias_vector[i];
         for (size_t j = 0; j < input_size; j++) {
             size_t idx = i * input_size + j;
-            gate_input_sum += cell->input_gate_weights[idx] * input[j];
+            ig_sum += cell->input_gate_weights[idx] * input[j];
+            fg_sum += cell->forget_gate_weights[idx] * input[j];
             activ_input_sum += cell->weight_matrix[idx] * input[j];
         }
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            gate_input_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            ig_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            fg_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
             activ_input_sum += cell->hidden_to_activation_weights[h_idx] * prev_state[j];
         }
 
-        float gate = 1.0f / (1.0f + expf(-gate_input_sum));
+        float input_gate = 1.0f / (1.0f + expf(-ig_sum));
+        float forget_gate = 1.0f / (1.0f + expf(-fg_sum));
         float activation = tanhf(activ_input_sum);
-        float gate_deriv = gate * (1.0f - gate);
+        float ig_deriv = input_gate * (1.0f - input_gate);
         float activ_deriv = 1.0f - activation * activation;
 
         float tau;
-        if (cell->forward_tau_used && cell->forward_tau_used[i] > 0.0f) {
-            tau = cell->forward_tau_used[i];
-        } else if (cell->use_adaptive_tau && cell->time_constants) {
-            tau = cell->time_constants[i];
-        } else {
-            tau = cell->config.time_constant;
-        }
+        if (cell->forward_tau_used && cell->forward_tau_used[i] > 0.0f) tau = cell->forward_tau_used[i];
+        else if (cell->use_adaptive_tau && cell->time_constants) tau = cell->time_constants[i];
+        else tau = cell->config.time_constant;
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
 
         float dt_over_tau = delta_t / tau;
         if (dt_over_tau < 1e-8f) dt_over_tau = 1e-8f;
-        if (dt_over_tau > 100.0f) dt_over_tau = 100.0f;
+        if (dt_over_tau > 20.0f) dt_over_tau = 20.0f;
 
+        float f_dt_tau = forget_gate * dt_over_tau;
         float exp_term;
-        if (dt_over_tau > 20.0f) exp_term = 0.0f;
-        else if (dt_over_tau < 1e-4f) exp_term = 1.0f - dt_over_tau;
-        else exp_term = expf(-dt_over_tau);
+        if (f_dt_tau > 20.0f) exp_term = 0.0f;
+        else if (f_dt_tau < 1e-4f) exp_term = 1.0f - f_dt_tau;
+        else exp_term = expf(-f_dt_tau);
 
         float beta = 1.0f - exp_term;
 
-        /* α·I项: temporal_out[i] = α_i · g_i [+ residual_scale · g_i]
-         * 残差连接: h_new = h_raw + α·h_old
-         *   ∂h_new/∂h_old = ∂h_raw/∂h_old + α·I
-         *   残差贡献直接加到 α·I 项中 */
+        /* α·I项: temporal_out[i] = α_i · g_i
+         * 含遗忘门调制的状态自回归: α_i = exp(-forget_gate_i * Δt/τ_i) */
         float alpha_total = exp_term;
         if (cell->config.use_residual && cell->config.residual_scale > 0.0f) {
             alpha_total += cell->config.residual_scale;
         }
         temporal_gradient_out[i] = alpha_total * combined_gradient[i];
 
-        /* 构建加权向量(完整包含β_i和所有导数):
-         * v_gh_i = β_i · g_i · G'_i · A_i
-         * v_ah_i = β_i · g_i · G_i · A'_i */
+        /* 构建加权向量(三门版本):
+         * v_gh_i = β_i · g_i · input_gate_deriv_i · A_i
+         * v_ah_i = β_i · g_i · input_gate_i · A'_i */
         float common = beta * combined_gradient[i];
-        v_gh[i] = common * gate_deriv * activation;
-        v_ah[i] = common * gate * activ_deriv;
+        v_gh[i] = common * ig_deriv * activation;
+        v_ah[i] = common * input_gate * activ_deriv;
     }
 
     /* ====== 第二步: 矩阵-向量积 W_gh^T·v_gh + W_ah^T·v_ah ====== */
@@ -3728,7 +3796,32 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
     
     /* 初始化伴随状态：λ(T) = ∂L/∂h(T) */
     float* adjoint = cell->state->ctbp_adjoint;
+    /* R14-FIX: 伴随法λ初始化必须通过输出门梯度链。
+     * 原: memcpy(adjoint, output_gradient, ...) 直接复制
+     * 新: λ_i(T) = og_i · (1-tanh²(h_i)) · output_gradient[i]
+     * 因为 output = og · tanh(h_internal)，所以 ∂L/∂h = og·(1-tanh²)·∂L/∂output */
     memcpy(adjoint, output_gradient, hidden_size * sizeof(float));
+    {
+        const float* h_act = cell->state->activation;
+        if (h_act) {
+            for (size_t i = 0; i < hidden_size; i++) {
+                float tanh_h = h_act[i];
+                if (tanh_h > 1.0f) tanh_h = 1.0f;
+                else if (tanh_h < -1.0f) tanh_h = -1.0f;
+                float tanh_deriv = 1.0f - tanh_h * tanh_h;
+                if (tanh_deriv < 1e-8f) tanh_deriv = 1e-8f;
+                /* ZSFWS-008修复: 使用前向传播保存的真实output_gate替代保守近似
+                 * 原: og_approx=0.5+0.5*tanh(h) 导致梯度系统性偏差 */
+                float og_val = 0.5f; /* 最低保守回退 */
+                if (cell->state->saved_output_gate) {
+                    og_val = cell->state->saved_output_gate[i];
+                    if (og_val < 0.01f) og_val = 0.01f; /* 防止除零 */
+                    if (og_val > 0.99f) og_val = 0.99f;
+                }
+                adjoint[i] *= og_val * tanh_deriv;
+            }
+        }
+    }
     
     /* 使用轨迹缓存进行逆时间积分 */
     int traj_size = cell->state->ctbp_trajectory_size;
@@ -3756,70 +3849,74 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
             h_next = &cell->state->ctbp_state_trajectory[traj_size - hidden_size];
         }
         
-        /* 使用修正欧拉法逆时间积分一步 */
+        /* 使用修正欧拉法逆时间积分一步（三门版本） */
         for (size_t i = 0; i < hidden_size; i++) {
-            /* 重新计算前向传播时的中间变量 */
-            float gate_input_sum = cell->gate_biases[i * 3];
+            /* 三门输入计算 */
+            float ig_sum = cell->gate_biases[i * 3];
+            float fg_sum = cell->gate_biases[i * 3 + 1];
+            float og_sum = cell->gate_biases[i * 3 + 2];
             float activation_input_sum = cell->bias_vector[i];
             
             for (size_t j = 0; j < input_size; j++) {
                 size_t idx = i * input_size + j;
-                gate_input_sum += cell->input_gate_weights[idx] * fwd_input[j];
+                ig_sum += cell->input_gate_weights[idx] * fwd_input[j];
+                fg_sum += cell->forget_gate_weights[idx] * fwd_input[j];
+                og_sum += cell->output_gate_weights[idx] * fwd_input[j];
                 activation_input_sum += cell->weight_matrix[idx] * fwd_input[j];
             }
             
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                gate_input_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
+                ig_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
+                fg_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
+                og_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
                 activation_input_sum += cell->hidden_to_activation_weights[h_idx] * h_next[j];
             }
             
-            /* 激活值和导数 */
-            /* ZSFZS-F034修复: 伴随法反向传播添加sigmoid/tanh截断保护 */
-            float gate_input_clamped = gate_input_sum;
-            if (gate_input_clamped > 10.0f) gate_input_clamped = 10.0f;
-            else if (gate_input_clamped < -10.0f) gate_input_clamped = -10.0f;
-            float gate = 1.0f / (1.0f + expf(-gate_input_clamped));
-            float gate_deriv = gate * (1.0f - gate);
-            float act_input_clamped = activation_input_sum;
-            if (act_input_clamped > 10.0f) act_input_clamped = 10.0f;
-            else if (act_input_clamped < -10.0f) act_input_clamped = -10.0f;
-            float act = tanhf(act_input_clamped);
+            float ig_clamped = (ig_sum > 10.0f) ? 10.0f : ((ig_sum < -10.0f) ? -10.0f : ig_sum);
+            float fg_clamped = (fg_sum > 10.0f) ? 10.0f : ((fg_sum < -10.0f) ? -10.0f : fg_sum);
+            float og_clamped = (og_sum > 10.0f) ? 10.0f : ((og_sum < -10.0f) ? -10.0f : og_sum);
+            float input_gate = 1.0f / (1.0f + expf(-ig_clamped));
+            float forget_gate = 1.0f / (1.0f + expf(-fg_clamped));
+            float output_gate = 1.0f / (1.0f + expf(-og_clamped));
+            float ig_deriv = input_gate * (1.0f - input_gate);
+            float fg_deriv = forget_gate * (1.0f - forget_gate);
+            float og_deriv = output_gate * (1.0f - output_gate);
+            float act_clamped = (activation_input_sum > 10.0f) ? 10.0f : ((activation_input_sum < -10.0f) ? -10.0f : activation_input_sum);
+            float act = tanhf(act_clamped);
             float act_deriv = 1.0f - act * act;
             
-            float driver = gate * act;
+            float driver = input_gate * act;
             
             float tau = cell->use_adaptive_tau ? cell->time_constants[i] : cell->config.time_constant;
             if (tau < cell->min_time_constant) tau = cell->min_time_constant;
             if (tau > cell->max_time_constant) tau = cell->max_time_constant;
             
-            float exp_term = expf(-delta_t / tau);
-            float h_new_coeff = 1.0f - exp_term;
+            float dt_over_tau = delta_t / tau;
+            if (dt_over_tau < 1e-8f) dt_over_tau = 1e-8f;
+            else if (dt_over_tau > 20.0f) dt_over_tau = 20.0f;
+            float f_dt_tau = forget_gate * dt_over_tau;
+            float exp_term, h_new_coeff;
+            if (f_dt_tau > 20.0f) { exp_term = 0.0f; h_new_coeff = 1.0f; }
+            else if (f_dt_tau < 1e-4f) { exp_term = 1.0f - f_dt_tau; h_new_coeff = f_dt_tau; }
+            else { exp_term = expf(-f_dt_tau); h_new_coeff = 1.0f - exp_term; }
             
-            /* ∂f/∂h = (-1 + W_gh^T * diag(σ') ⊙ tanh + W_ah^T * diag(1-tanh²) ⊙ σ) / τ
-             * 即状态导数对状态的雅可比
-             * 完整伴随更新（RK2中点法，二阶精度）：
-             *   k1 = Δt * λ(t+Δt) * (-1/τ + ∂driver/∂h)
-             *   λ_mid = λ(t+Δt) + 0.5 * k1
-             *   k2 = Δt * λ_mid * (-1/τ + ∂driver/∂h)   (固定雅可比)
-             *   λ(t) = λ(t+Δt) + k2 */
-            
-            /* ∂driver/∂h的贡献 */
-            float dgate_dh = 0.0f;
-            float dact_dh = 0.0f;
+            /* 雅可比: ∂f/∂h = (-fg·I - h·∂fg/∂h + ∂(ig·tanh(a))/∂h) / τ */
+            float digate_dh = 0.0f, dfgate_dh = 0.0f, dact_dh = 0.0f;
             for (size_t j = 0; j < hidden_size; j++) {
-                size_t h_idx = j * hidden_size + i; /* W_gh[j][i] */
-                dgate_dh += cell->hidden_to_gate_weights[h_idx];
-                size_t ha_idx = j * hidden_size + i; /* W_ah[j][i] */
-                dact_dh += cell->hidden_to_activation_weights[ha_idx];
+                size_t hg_idx = j * hidden_size + i;
+                dact_dh += cell->hidden_to_activation_weights[hg_idx];
+                digate_dh += cell->hidden_to_gate_weights[hg_idx];
+                dfgate_dh += cell->hidden_to_gate_weights[hg_idx];
             }
-            dgate_dh *= gate_deriv;
+            digate_dh *= ig_deriv;
+            dfgate_dh *= fg_deriv;
             dact_dh *= act_deriv;
             
-            float ddriver_dh = dgate_dh * act + dact_dh * gate;
-            float df_dh = (-1.0f + ddriver_dh) / tau;
+            float ddriver_dh = digate_dh * act + input_gate * dact_dh;
+            float df_dh = (-forget_gate - h_next[i] * dfgate_dh + ddriver_dh) / tau;
             
-            /* RK2中点法伴随更新（二阶精度，替代一阶Euler） */
+            /* RK2中点法伴随更新 */
             float lambda_next = adjoint[i];
             float k1 = delta_t * lambda_next * df_dh;
             float lambda_mid = lambda_next + 0.5f * k1;
@@ -3831,38 +3928,72 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
                 adjoint[i] = (adjoint[i] > 0.0f) ? clip_norm : -clip_norm;
             }
             
-            /* 使用伴随状态计算梯度 */
+            /* 三门梯度计算 */
             float dL_dlambda = adjoint[i];
+            float tanh_new = h_next[i];
+            if (tanh_new > 10.0f) tanh_new = 1.0f;
+            else if (tanh_new < -10.0f) tanh_new = -1.0f;
+            else tanh_new = tanhf(h_next[i]);
+            float dL_dog = dL_dlambda * tanh_new;
+            float dL_dog_ip = dL_dog * og_deriv;
+            float tanh_deriv_new = 1.0f - tanh_new * tanh_new;
+            float dL_dinternal = dL_dlambda * output_gate * tanh_deriv_new;
+
+            float dL_ddriver, dL_dfg;
+            if (f_dt_tau < 1e-8f) {
+                dL_ddriver = dL_dinternal * dt_over_tau;
+                dL_dfg = dL_dinternal * h_next[i] * (-dt_over_tau);
+            } else if (f_dt_tau > 20.0f) {
+                float ss = driver / (forget_gate + 1e-8f);
+                dL_ddriver = dL_dinternal / (forget_gate + 1e-8f);
+                dL_dfg = dL_dinternal * (-ss / (forget_gate + 1e-8f));
+            } else {
+                float ss = driver / (forget_gate + 1e-8f);
+                dL_ddriver = dL_dinternal * h_new_coeff / (forget_gate + 1e-8f);
+                dL_dfg = dL_dinternal * (h_next[i] * (-dt_over_tau) * exp_term
+                    - ss / (forget_gate + 1e-8f) * h_new_coeff + ss * dt_over_tau * exp_term);
+            }
+            if (fabsf(dL_dfg) > 1e4f) dL_dfg = copysignf(1e4f, dL_dfg);
+
+            float dL_dig = dL_ddriver * act;
+            float dL_dact = dL_ddriver * input_gate;
+            float dL_dig_ip = dL_dig * ig_deriv;
+            float dL_dfg_ip = dL_dfg * fg_deriv;
+            float dL_dact_ip = dL_dact * act_deriv;
             
-            float dL_dgate = dL_dlambda * h_new_coeff * act;
-            float dL_dact = dL_dlambda * h_new_coeff * gate;
-            
-            float dL_dgate_input = dL_dgate * gate_deriv;
-            float dL_dactivation_input = dL_dact * act_deriv;
-            
-            /* 权重梯度（P0-002: +=累积模式） */
             for (size_t j = 0; j < input_size; j++) {
                 size_t idx = i * input_size + j;
-                cell->input_gate_weight_grad[idx] += dL_dgate_input * fwd_input[j];
-                cell->weight_grad[idx] += dL_dactivation_input * fwd_input[j];
+                cell->input_gate_weight_grad[idx] += dL_dig_ip * fwd_input[j];
+                cell->forget_gate_weight_grad[idx] += dL_dfg_ip * fwd_input[j];
+                cell->output_gate_weight_grad[idx] += dL_dog_ip * fwd_input[j];
+                cell->weight_grad[idx] += dL_dact_ip * fwd_input[j];
                 if (input_gradient) {
-                    input_gradient[j] += dL_dgate_input * cell->input_gate_weights[idx] +
-                                        dL_dactivation_input * cell->weight_matrix[idx];
+                    input_gradient[j] += dL_dig_ip * cell->input_gate_weights[idx] +
+                                        dL_dfg_ip * cell->forget_gate_weights[idx] +
+                                        dL_dog_ip * cell->output_gate_weights[idx] +
+                                        dL_dact_ip * cell->weight_matrix[idx];
                 }
             }
             
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                cell->hidden_to_gate_weight_grad[h_idx] += dL_dgate_input * h_next[j];
-                cell->hidden_to_activation_weight_grad[h_idx] += dL_dactivation_input * h_next[j];
+                cell->hidden_to_gate_weight_grad[h_idx] += dL_dig_ip * h_next[j]
+                                                          + dL_dfg_ip * h_next[j]
+                                                          + dL_dog_ip * h_next[j];
+                cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_ip * h_next[j];
             }
             
-            cell->gate_bias_grad[i * 3] += dL_dgate_input;
-            cell->bias_grad[i] += dL_dactivation_input;
+            cell->gate_bias_grad[i * 3] += dL_dig_ip;
+            cell->gate_bias_grad[i * 3 + 1] += dL_dfg_ip;
+            cell->gate_bias_grad[i * 3 + 2] += dL_dog_ip;
+            cell->bias_grad[i] += dL_dact_ip;
             
             if (cell->use_adaptive_tau) {
-                float dtau_coeff = (delta_t / (tau * tau)) * exp_term;
-                cell->time_constant_grad[i] += dL_dlambda * dtau_coeff * (h_next[i] - driver);
+                float safe_dt = fmaxf(delta_t, 1e-8f);
+                float dtau_coeff = safe_dt / fmaxf(tau * tau, 1e-12f);
+                float stable_c = fminf(dtau_coeff, 1e6f) * exp_term;
+                /* ZSFZS-F031: h_old→h_next[i], h_next是数组指针需下标 */
+                cell->time_constant_grad[i] += dL_dlambda * stable_c * (forget_gate * h_next[i] + driver);
             }
         }
     } else {
@@ -4688,13 +4819,13 @@ int cfc_cell_enable_neural_ode_adjoint(CfCCell* cell, const NeuralODEConfig* con
         cell->adjoint_max_trajectory_points = config->max_trajectory_points > 0 ?
             config->max_trajectory_points : 10000;
         cell->adjoint_gradient_clip_norm = config->gradient_clip_norm > 0.0f ?
-            config->gradient_clip_norm : 0.0f;
+            config->gradient_clip_norm : 5.0f;  /* ZSFZS-F016: 伴随法梯度裁剪默认值，与训练主循环一致 */
         cell->adjoint_use_augmented_state = config->use_augmented_state ? 1 : 0;
         cell->adjoint_interpolation_method = config->interpolation_method;
     } else {
         cell->adjoint_record_trajectory = 1;
         cell->adjoint_max_trajectory_points = 10000;
-        cell->adjoint_gradient_clip_norm = 0.0f;
+        cell->adjoint_gradient_clip_norm = 5.0f;  /* ZSFZS-F016: 伴随法梯度裁剪默认值，与训练主循环一致 */
         cell->adjoint_use_augmented_state = 0;
         cell->adjoint_interpolation_method = 1;
     }
@@ -4782,42 +4913,66 @@ static int cfc_compute_adjoint_rhs(CfCCell* cell, const float* input,
     size_t input_size = cell->config.input_size;
 
     for (size_t i = 0; i < hidden_size; i++) {
-        float gate_input_sum = cell->gate_biases[i * 3];
+        /* 三门输入计算 */
+        float ig_sum = cell->gate_biases[i * 3];
+        float fg_sum = cell->gate_biases[i * 3 + 1];
+        float og_sum = cell->gate_biases[i * 3 + 2];
         float activation_input_sum = cell->bias_vector[i];
 
         for (size_t j = 0; j < input_size; j++) {
             size_t idx = i * input_size + j;
-            gate_input_sum += cell->input_gate_weights[idx] * input[j];
+            ig_sum += cell->input_gate_weights[idx] * input[j];
+            fg_sum += cell->forget_gate_weights[idx] * input[j];
+            og_sum += cell->output_gate_weights[idx] * input[j];
             activation_input_sum += cell->weight_matrix[idx] * input[j];
         }
 
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            gate_input_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
+            ig_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
+            fg_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
+            og_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * hidden_state[j];
         }
 
-        float gate = 1.0f / (1.0f + expf(-gate_input_sum));
-        float gate_deriv = gate * (1.0f - gate);
+        float input_gate = 1.0f / (1.0f + expf(-ig_sum));
+        float forget_gate = 1.0f / (1.0f + expf(-fg_sum));
+        float output_gate = 1.0f / (1.0f + expf(-og_sum));
+        float ig_deriv = input_gate * (1.0f - input_gate);
+        float fg_deriv = forget_gate * (1.0f - forget_gate);
+        float og_deriv = output_gate * (1.0f - output_gate);
         float act = tanhf(activation_input_sum);
         float act_deriv = 1.0f - act * act;
 
         float tau = cell->use_adaptive_tau ? cell->time_constants[i] : cell->config.time_constant;
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
+        float inv_tau = 1.0f / tau;
 
-        float sum_adjoint_gh = 0.0f;
-        float sum_adjoint_ah = 0.0f;
+        /* 伴随ODE右端项:
+         * 原ODE: τ dh/dt = -fg·h + ig·tanh(a)
+         * 雅可比: ∂f_i/∂h_j = (-fg_i·δ_ij - h_i·∂fg_i/∂h_j + ∂(ig·tanh(a))_i/∂h_j)/τ
+         * 伴随: dλ_j/dt = fg_j·λ_j/τ + h_j·fg_deriv·Σ_i(λ_i·W_hg[i,j])/τ
+         *                  - (ig_deriv·act·Σ_i(λ_i·W_hg[i,j]) + ig·act_deriv·Σ_i(λ_i·W_ha[i,j]))/τ */
+        float sum_adj_hg = 0.0f;
+        float sum_adj_ha = 0.0f;
         for (size_t j = 0; j < hidden_size; j++) {
-            size_t gh_idx = j * hidden_size + i;
-            size_t ah_idx = j * hidden_size + i;
-            sum_adjoint_gh += adjoint_in[j] * cell->hidden_to_gate_weights[gh_idx] / tau;
-            sum_adjoint_ah += adjoint_in[j] * cell->hidden_to_activation_weights[ah_idx] / tau;
+            size_t idx = j * hidden_size + i;  /* W[j][i] 转置索引 */
+            sum_adj_hg += adjoint_in[j] * cell->hidden_to_gate_weights[idx];
+            sum_adj_ha += adjoint_in[j] * cell->hidden_to_activation_weights[idx];
         }
 
-        float ddriver_term = gate_deriv * act * sum_adjoint_gh
-                           + gate * act_deriv * sum_adjoint_ah;
+        /* 遗忘门对角贡献: fg·λ_i/τ */
+        float forget_diag = forget_gate * adjoint_in[i] * inv_tau;
 
-        adjoint_out[i] = -((-adjoint_in[i] / tau) + ddriver_term);
+        /* 遗忘门非对角贡献: h_i·fg_deriv·sum_adj_hg/τ */
+        float forget_offdiag = hidden_state[i] * fg_deriv * sum_adj_hg * inv_tau;
+
+        /* 输入门+激活贡献 (ddriver_term，使用input_gate而非旧的gate) */
+        float ddriver_term = (ig_deriv * act * sum_adj_hg
+                            + input_gate * act_deriv * sum_adj_ha) * inv_tau;
+
+        /* dλ_i/dt = forget_diag + forget_offdiag - ddriver_term */
+        adjoint_out[i] = forget_diag + forget_offdiag - ddriver_term;
     }
 
     return 0;
@@ -4844,65 +4999,141 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
     float* adjoint = cell->adjoint_state;
     float* workspace = cell->adjoint_workspace;
 
+    /* R14-FIX: 伴随法λ初始化必须通过输出门梯度链 */
     memcpy(adjoint, output_gradient, hidden_size * sizeof(float));
+    {
+        const float* h_act = cell->state->activation;
+        if (h_act) {
+            for (size_t i = 0; i < hidden_size; i++) {
+                float tanh_h = h_act[i];
+                if (tanh_h > 1.0f) tanh_h = 1.0f;
+                else if (tanh_h < -1.0f) tanh_h = -1.0f;
+                float tanh_deriv = 1.0f - tanh_h * tanh_h;
+                float og_approx = 0.5f + 0.5f * tanh_h;
+                adjoint[i] *= og_approx * tanh_deriv;
+            }
+        }
+    }
 
     /* P0-002深度修复: 移除内部梯度清零，由调用方统一清零。
      * 函数内所有梯度写入已使用+=累积模式。 */
 
     if (!has_trajectory || traj_count < 2) {
+        /* 无轨迹路径：直接计算参数梯度 */
         for (size_t i = 0; i < hidden_size; i++) {
-            float gate_input_sum = cell->gate_biases[i * 3];
+            float ig_sum = cell->gate_biases[i * 3];
+            float fg_sum = cell->gate_biases[i * 3 + 1];
+            float og_sum = cell->gate_biases[i * 3 + 2];
             float activation_input_sum = cell->bias_vector[i];
             const float* fwd_input = cell->state->input_buffer;
             const float* h_next = cell->state->activation;
 
             for (size_t j = 0; j < input_size; j++) {
                 size_t idx = i * input_size + j;
-                gate_input_sum += cell->input_gate_weights[idx] * fwd_input[j];
+                ig_sum += cell->input_gate_weights[idx] * fwd_input[j];
+                fg_sum += cell->forget_gate_weights[idx] * fwd_input[j];
+                og_sum += cell->output_gate_weights[idx] * fwd_input[j];
                 activation_input_sum += cell->weight_matrix[idx] * fwd_input[j];
             }
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                gate_input_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
+                ig_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
+                fg_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
+                og_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
                 activation_input_sum += cell->hidden_to_activation_weights[h_idx] * h_next[j];
             }
 
-            float gate = 1.0f / (1.0f + expf(-gate_input_sum));
-            float gate_deriv = gate * (1.0f - gate);
+            float input_gate = 1.0f / (1.0f + expf(-ig_sum));
+            float forget_gate = 1.0f / (1.0f + expf(-fg_sum));
+            float output_gate = 1.0f / (1.0f + expf(-og_sum));
+            float ig_deriv = input_gate * (1.0f - input_gate);
+            float fg_deriv = forget_gate * (1.0f - forget_gate);
+            float og_deriv = output_gate * (1.0f - output_gate);
             float act = tanhf(activation_input_sum);
             float act_deriv = 1.0f - act * act;
-            float driver = gate * act;
+            float driver = input_gate * act;
             float tau = cell->use_adaptive_tau ? cell->time_constants[i] : cell->config.time_constant;
             if (tau < cell->min_time_constant) tau = cell->min_time_constant;
-            float exp_term = expf(-delta_t / tau);
-            float h_new_coeff = 1.0f - exp_term;
+            float dt_over_tau = delta_t / tau;
+            if (dt_over_tau < 1e-8f) dt_over_tau = 1e-8f;
+            else if (dt_over_tau > 20.0f) dt_over_tau = 20.0f;
+            float f_dt_tau = forget_gate * dt_over_tau;
+            float exp_term, h_new_coeff;
+            if (f_dt_tau > 20.0f) { exp_term = 0.0f; h_new_coeff = 1.0f; }
+            else if (f_dt_tau < 1e-4f) { exp_term = 1.0f - f_dt_tau; h_new_coeff = f_dt_tau; }
+            else { exp_term = expf(-f_dt_tau); h_new_coeff = 1.0f - exp_term; }
 
             float dL_dlambda = adjoint[i];
-            float dL_dgate = dL_dlambda * h_new_coeff * act;
-            float dL_dact = dL_dlambda * h_new_coeff * gate;
-            float dL_dgate_input = dL_dgate * gate_deriv;
-            float dL_dactivation_input = dL_dact * act_deriv;
+            /* 输出门梯度: output = og · tanh(new_internal)
+             * dL/dog = adjoint[i] · tanh(new_internal) */
+            float tanh_new = h_next[i];
+            if (tanh_new > 10.0f) tanh_new = 1.0f;
+            else if (tanh_new < -10.0f) tanh_new = -1.0f;
+            else tanh_new = tanhf(h_next[i]);
+            float dL_dog = dL_dlambda * tanh_new;
+            float dL_dog_ip = dL_dog * og_deriv;
+
+            /* internal_state梯度: 从output_gate反向传播 */
+            float tanh_deriv_new = 1.0f - tanh_new * tanh_new;
+            float dL_dinternal = dL_dlambda * output_gate * tanh_deriv_new;
+
+            /* 从internal_state到driver和forget_gate的梯度 */
+            float dL_ddriver, dL_dfg;
+            if (f_dt_tau < 1e-8f) {
+                dL_ddriver = dL_dinternal * dt_over_tau;
+                dL_dfg = dL_dinternal * h_next[i] * (-dt_over_tau) * (1.0f - 0.5f * f_dt_tau);
+            } else if (f_dt_tau > 20.0f) {
+                float ss = driver / (forget_gate + 1e-8f);
+                dL_ddriver = dL_dinternal / (forget_gate + 1e-8f);
+                dL_dfg = dL_dinternal * (-ss / (forget_gate + 1e-8f));
+            } else {
+                float ss = driver / (forget_gate + 1e-8f);
+                dL_ddriver = dL_dinternal * h_new_coeff / (forget_gate + 1e-8f);
+                dL_dfg = dL_dinternal * (
+                    h_next[i] * (-dt_over_tau) * exp_term
+                    - ss / (forget_gate + 1e-8f) * h_new_coeff
+                    + ss * dt_over_tau * exp_term
+                );
+            }
+            if (fabsf(dL_dfg) > 1e4f) dL_dfg = copysignf(1e4f, dL_dfg);
+
+            float dL_dig = dL_ddriver * act;
+            float dL_dact = dL_ddriver * input_gate;
+            float dL_dig_ip = dL_dig * ig_deriv;
+            float dL_dfg_ip = dL_dfg * fg_deriv;
+            float dL_dact_ip = dL_dact * act_deriv;
 
             for (size_t j = 0; j < input_size; j++) {
                 size_t idx = i * input_size + j;
-                cell->input_gate_weight_grad[idx] += dL_dgate_input * fwd_input[j];
-                cell->weight_grad[idx] += dL_dactivation_input * fwd_input[j];
+                cell->input_gate_weight_grad[idx] += dL_dig_ip * fwd_input[j];
+                cell->forget_gate_weight_grad[idx] += dL_dfg_ip * fwd_input[j];
+                cell->output_gate_weight_grad[idx] += dL_dog_ip * fwd_input[j];
+                cell->weight_grad[idx] += dL_dact_ip * fwd_input[j];
                 if (input_gradient) {
-                    input_gradient[j] += dL_dgate_input * cell->input_gate_weights[idx]
-                                       + dL_dactivation_input * cell->weight_matrix[idx];
+                    input_gradient[j] += dL_dig_ip * cell->input_gate_weights[idx]
+                                       + dL_dfg_ip * cell->forget_gate_weights[idx]
+                                       + dL_dog_ip * cell->output_gate_weights[idx]
+                                       + dL_dact_ip * cell->weight_matrix[idx];
                 }
             }
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                cell->hidden_to_gate_weight_grad[h_idx] += dL_dgate_input * h_next[j];
-                cell->hidden_to_activation_weight_grad[h_idx] += dL_dactivation_input * h_next[j];
+                cell->hidden_to_gate_weight_grad[h_idx] += dL_dig_ip * h_next[j]
+                                                          + dL_dfg_ip * h_next[j]
+                                                          + dL_dog_ip * h_next[j];
+                cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_ip * h_next[j];
             }
-            cell->gate_bias_grad[i * 3] += dL_dgate_input;
-            cell->bias_grad[i] += dL_dactivation_input;
+            cell->gate_bias_grad[i * 3] += dL_dig_ip;
+            cell->gate_bias_grad[i * 3 + 1] += dL_dfg_ip;
+            cell->gate_bias_grad[i * 3 + 2] += dL_dog_ip;
+            cell->bias_grad[i] += dL_dact_ip;
 
             if (cell->use_adaptive_tau) {
-                float dtau_coeff = (delta_t / (tau * tau)) * exp_term;
-                cell->time_constant_grad[i] += dL_dlambda * dtau_coeff * (h_next[i] - driver);
+                float safe_dt = fmaxf(delta_t, 1e-8f);
+                float dtau_coeff = safe_dt / fmaxf(tau * tau, 1e-12f);
+                float stable_c = fminf(dtau_coeff, 1e6f) * exp_term;
+                /* ZSFZS-F031: h_old→h_next[i], 修复伴随法复制粘贴bug */
+                cell->time_constant_grad[i] += dL_dlambda * stable_c * (forget_gate * h_next[i] + driver);
             }
         }
         return 0;
@@ -4923,56 +5154,112 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
         }
 
         for (size_t i = 0; i < hidden_size; i++) {
-            float gate_input_sum = cell->gate_biases[i * 3];
+            float ig_sum = cell->gate_biases[i * 3];
+            float fg_sum = cell->gate_biases[i * 3 + 1];
+            float og_sum = cell->gate_biases[i * 3 + 2];
             float activation_input_sum = cell->bias_vector[i];
 
             for (size_t j = 0; j < input_size; j++) {
                 size_t idx = i * input_size + j;
-                gate_input_sum += cell->input_gate_weights[idx] * fwd_input[j];
+                ig_sum += cell->input_gate_weights[idx] * fwd_input[j];
+                fg_sum += cell->forget_gate_weights[idx] * fwd_input[j];
+                og_sum += cell->output_gate_weights[idx] * fwd_input[j];
                 activation_input_sum += cell->weight_matrix[idx] * fwd_input[j];
             }
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                gate_input_sum += cell->hidden_to_gate_weights[h_idx] * h_curr[j];
+                ig_sum += cell->hidden_to_gate_weights[h_idx] * h_curr[j];
+                fg_sum += cell->hidden_to_gate_weights[h_idx] * h_curr[j];
+                og_sum += cell->hidden_to_gate_weights[h_idx] * h_curr[j];
                 activation_input_sum += cell->hidden_to_activation_weights[h_idx] * h_curr[j];
             }
 
-            float gate = 1.0f / (1.0f + expf(-gate_input_sum));
-            float gate_deriv = gate * (1.0f - gate);
+            float input_gate = 1.0f / (1.0f + expf(-ig_sum));
+            float forget_gate = 1.0f / (1.0f + expf(-fg_sum));
+            float output_gate = 1.0f / (1.0f + expf(-og_sum));
+            float ig_deriv = input_gate * (1.0f - input_gate);
+            float fg_deriv = forget_gate * (1.0f - forget_gate);
+            float og_deriv = output_gate * (1.0f - output_gate);
             float act = tanhf(activation_input_sum);
             float act_deriv = 1.0f - act * act;
-            float driver = gate * act;
+            float driver = input_gate * act;
             float tau = cell->use_adaptive_tau ? cell->time_constants[i] : cell->config.time_constant;
             if (tau < cell->min_time_constant) tau = cell->min_time_constant;
-            float exp_term = expf(-delta_t / tau);
-            float h_new_coeff = 1.0f - exp_term;
+            float dt_over_tau = delta_t / tau;
+            if (dt_over_tau < 1e-8f) dt_over_tau = 1e-8f;
+            else if (dt_over_tau > 20.0f) dt_over_tau = 20.0f;
+            float f_dt_tau = forget_gate * dt_over_tau;
+            float exp_term, h_new_coeff;
+            if (f_dt_tau > 20.0f) { exp_term = 0.0f; h_new_coeff = 1.0f; }
+            else if (f_dt_tau < 1e-4f) { exp_term = 1.0f - f_dt_tau; h_new_coeff = f_dt_tau; }
+            else { exp_term = expf(-f_dt_tau); h_new_coeff = 1.0f - exp_term; }
 
             float dL_dlambda = adjoint[i];
-            float dL_dgate = dL_dlambda * h_new_coeff * act;
-            float dL_dact = dL_dlambda * h_new_coeff * gate;
-            float dL_dgate_input = dL_dgate * gate_deriv;
-            float dL_dactivation_input = dL_dact * act_deriv;
+            float tanh_new = h_next[i];
+            if (tanh_new > 10.0f) tanh_new = 1.0f;
+            else if (tanh_new < -10.0f) tanh_new = -1.0f;
+            else tanh_new = tanhf(h_next[i]);
+            float dL_dog = dL_dlambda * tanh_new;
+            float dL_dog_ip = dL_dog * og_deriv;
+            float tanh_deriv_new = 1.0f - tanh_new * tanh_new;
+            float dL_dinternal = dL_dlambda * output_gate * tanh_deriv_new;
+
+            float dL_ddriver, dL_dfg;
+            if (f_dt_tau < 1e-8f) {
+                dL_ddriver = dL_dinternal * dt_over_tau;
+                dL_dfg = dL_dinternal * h_next[i] * (-dt_over_tau) * (1.0f - 0.5f * f_dt_tau);
+            } else if (f_dt_tau > 20.0f) {
+                float ss = driver / (forget_gate + 1e-8f);
+                dL_ddriver = dL_dinternal / (forget_gate + 1e-8f);
+                dL_dfg = dL_dinternal * (-ss / (forget_gate + 1e-8f));
+            } else {
+                float ss = driver / (forget_gate + 1e-8f);
+                dL_ddriver = dL_dinternal * h_new_coeff / (forget_gate + 1e-8f);
+                dL_dfg = dL_dinternal * (
+                    h_next[i] * (-dt_over_tau) * exp_term
+                    - ss / (forget_gate + 1e-8f) * h_new_coeff
+                    + ss * dt_over_tau * exp_term
+                );
+            }
+            if (fabsf(dL_dfg) > 1e4f) dL_dfg = copysignf(1e4f, dL_dfg);
+
+            float dL_dig = dL_ddriver * act;
+            float dL_dact = dL_ddriver * input_gate;
+            float dL_dig_ip = dL_dig * ig_deriv;
+            float dL_dfg_ip = dL_dfg * fg_deriv;
+            float dL_dact_ip = dL_dact * act_deriv;
 
             for (size_t j = 0; j < input_size; j++) {
                 size_t idx = i * input_size + j;
-                cell->input_gate_weight_grad[idx] += dL_dgate_input * fwd_input[j];
-                cell->weight_grad[idx] += dL_dactivation_input * fwd_input[j];
+                cell->input_gate_weight_grad[idx] += dL_dig_ip * fwd_input[j];
+                cell->forget_gate_weight_grad[idx] += dL_dfg_ip * fwd_input[j];
+                cell->output_gate_weight_grad[idx] += dL_dog_ip * fwd_input[j];
+                cell->weight_grad[idx] += dL_dact_ip * fwd_input[j];
                 if (input_gradient) {
-                    input_gradient[j] += dL_dgate_input * cell->input_gate_weights[idx]
-                                       + dL_dactivation_input * cell->weight_matrix[idx];
+                    input_gradient[j] += dL_dig_ip * cell->input_gate_weights[idx]
+                                       + dL_dfg_ip * cell->forget_gate_weights[idx]
+                                       + dL_dog_ip * cell->output_gate_weights[idx]
+                                       + dL_dact_ip * cell->weight_matrix[idx];
                 }
             }
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                cell->hidden_to_gate_weight_grad[h_idx] += dL_dgate_input * h_curr[j];
-                cell->hidden_to_activation_weight_grad[h_idx] += dL_dactivation_input * h_curr[j];
+                cell->hidden_to_gate_weight_grad[h_idx] += dL_dig_ip * h_curr[j]
+                                                          + dL_dfg_ip * h_curr[j]
+                                                          + dL_dog_ip * h_curr[j];
+                cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_ip * h_curr[j];
             }
-            cell->gate_bias_grad[i * 3] += dL_dgate_input;
-            cell->bias_grad[i] += dL_dactivation_input;
+            cell->gate_bias_grad[i * 3] += dL_dig_ip;
+            cell->gate_bias_grad[i * 3 + 1] += dL_dfg_ip;
+            cell->gate_bias_grad[i * 3 + 2] += dL_dog_ip;
+            cell->bias_grad[i] += dL_dact_ip;
 
             if (cell->use_adaptive_tau) {
-                float dtau_coeff = (delta_t / (tau * tau)) * exp_term;
-                cell->time_constant_grad[i] += dL_dlambda * dtau_coeff * (h_next[i] - driver);
+                float safe_dt = fmaxf(delta_t, 1e-8f);
+                float dtau_coeff = safe_dt / fmaxf(tau * tau, 1e-12f);
+                float stable_c = fminf(dtau_coeff, 1e6f) * exp_term;
+                /* ZSFZS-F031: h_old→h_next[i], 修复伴随法直接法复制粘贴bug */
+                cell->time_constant_grad[i] += dL_dlambda * stable_c * (forget_gate * h_next[i] + driver);
             }
         }
     }

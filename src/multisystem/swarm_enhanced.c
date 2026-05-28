@@ -11,6 +11,7 @@
  */
 
 #include "selflnn/multisystem/swarm_enhanced.h"
+#include "selflnn/utils/xorshift_prng.h"  /* FIX-011: 替换LCG为高质量Xorshift */
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/utils/memory_utils.h"
@@ -28,22 +29,23 @@
 #define SWARM_INF 1e20f
 
 /* MID-013修复: 使用时间+地址生成唯一种子，替代硬编码54321 */
-static unsigned int swarm_rand_seed = 0;
+/* FIX-011修复: 使用Xorshift128+高质量PRNG替代LCG */
+static XorshiftPrng g_swarm_xorshift;
 static int swarm_seed_initialized = 0;
+static float swarm_rand_seed = 0.0f;
 
 static void swarm_seed_init(void) {
     if (!swarm_seed_initialized) {
-        swarm_rand_seed = (unsigned int)((uintptr_t)time(NULL) ^
-                          ((uintptr_t)&swarm_rand_seed * 2654435761U));
-        if (swarm_rand_seed == 0) swarm_rand_seed = 1;
+        uint64_t secure_seed = ((uint64_t)(uintptr_t)&g_swarm_xorshift ^ (uint64_t)clock());
+        xorshift_prng_seed(&g_swarm_xorshift, secure_seed ? secure_seed : 1);
         swarm_seed_initialized = 1;
+        swarm_rand_seed = 1.0f;
     }
 }
 
 static float swarm_rand_float(void) {
     swarm_seed_init();
-    swarm_rand_seed = swarm_rand_seed * 1103515245 + 12345;
-    return (float)((swarm_rand_seed >> 16) & 0x7FFF) / 32768.0f;
+    return xorshift_prng_next_float(&g_swarm_xorshift);
 }
 
 static int swarm_rand_int(int min, int max) {

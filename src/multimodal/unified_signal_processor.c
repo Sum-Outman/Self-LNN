@@ -182,8 +182,26 @@ int unified_signal_processor_train(UnifiedSignalProcessor* processor,
     }
     total_loss /= (float)unified_dim;
 
-    /* Phase4: 投影矩阵锁定——跳过SGD梯度更新 */
+    /* Phase4: 投影矩阵锁定检查
+     * 
+     * projection_locked 触发条件：
+     *   unified_signal_processor_create() 中使用 Xavier 初始化投影矩阵后，
+     *   立即设置 projection_locked = 1（见第773-775行）。
+     *   此时投影矩阵作为固定的随机投影层，仅进行维度变换，
+     *   不参与反向传播的梯度更新。
+     * 
+     * 适用场景：
+     *   1. 初始化阶段：Xavier 随机投影已提供足够的特征表达能力，
+     *      冻结投影层避免早期训练中的梯度不稳定。
+     *   2. 共享推理：多个下游模块共用同一投影矩阵时，
+     *      锁定投影防止模块间梯度互相干扰。
+     *   3. 调试/分析：需要固定输入映射关系以分析 LNN 行为时。
+     * 
+     * 若要启用投影矩阵的在线学习（可训练投影），
+     *   调用 unified_signal_processor_set_projection_locked(processor, 0)。
+     *   此时投影权重将通过 SGD 带动量更新参与反向传播。 */
     if (processor->projection_locked) {
+        /* 锁定状态：跳过 SGD 梯度更新，仅返回损失值供监控 */
         return total_loss;
     }
 

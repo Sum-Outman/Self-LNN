@@ -19,6 +19,7 @@
 /* C-003修复：定义SELFLNN_IMPLEMENTATION以访问内部结构体（LNN内部字段等）
  * 系统级入口需要直接访问LNN内部结构以满足子系统管理和模块注册需求。 */
 #define SELFLNN_IMPLEMENTATION
+#define SELFLNN_CORE_INTERNAL   /* ZSFZS-F034: 访问CfCCell完整结构体(cell->use_adaptive_tau等) */
 
 #include "selflnn/selflnn.h"
 #include "selflnn/core/common.h"
@@ -37,6 +38,7 @@
 #include "selflnn/reasoning/planning.h"
 #include "selflnn/multimodal/unified_signal_processor.h"
 #include "selflnn/multimodal/data_collection_pipeline.h"
+#include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/self_cognition.h"
@@ -214,6 +216,7 @@ static struct {
     void* speech_recognizer;
     void* multi_agent_system;   /* H-015: 多智能体协作系统 */
     int dcpipeline_immediate_check_requested;   /* ZSFWS-038: 事件驱动即时自检标志 */
+    int knowledge_refresh_needed;               /* ZSFZS-F026: 知识库更新后触发LNN嵌入重编码标志 */
     int last_error;
 } g_system_state = {0};
 
@@ -399,7 +402,10 @@ int selflnn_init(const SystemConfig* config)
     
     /* H-015集成: 注册多智能体协作系统 */
     if (g_system_state.multi_agent_system) selflnn_register_module(MODULE_ID_MULTI_AGENT, g_system_state.multi_agent_system, 1);
-    
+
+    /* FIX-007: 注册数据采集流水线（此前创建但未注册） */
+    if (g_system_state.data_pipeline) selflnn_register_module(MODULE_ID_AUTO_LEARNING + 1, g_system_state.data_pipeline, 1);
+
     /* P0-001修复: 所有子系统注册完毕后，强制执行单一LNN模式
      * 此后所有模块的 lnn_create() 调用将被自动重定向到全局唯一LNN
      * 确保 "所有模态 → 统一输入到同一个连续动态系统" 原则 */
@@ -477,7 +483,7 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     (void)0; /* 利用下一行开始的前计数确保c0为第一个下标 */
 #endif
     int init_count = 0;
-    /* 下面每行if检查对应一个子系统槽位，共18个： */
+    /* FIX-005修复: 统计全部24个子系统，与g_system_state结构体字段一致 */
     if (g_system_state.memory_manager)          init_count++;
     if (g_system_state.knowledge_graph)          init_count++;
     if (g_system_state.knowledge_base)           init_count++;
@@ -488,15 +494,21 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     if (g_system_state.self_cognition_system)    init_count++;
     if (g_system_state.metacognition_system)     init_count++;
     if (g_system_state.programming_engine)       init_count++;
+    if (g_system_state.product_design_engine)    init_count++;
+    if (g_system_state.multisystem_controller)   init_count++;
     if (g_system_state.gpu_context)              init_count++;
     if (g_system_state.dialogue_processor)       init_count++;
     if (g_system_state.evolution_engine)         init_count++;
     if (g_system_state.safety_monitor)           init_count++;
+    if (g_system_state.distributed_training)     init_count++;
     if (g_system_state.thread_pool)              init_count++;
+    if (g_system_state.online_learner)           init_count++;
     if (g_system_state.planning_system)          init_count++;
     if (g_system_state.auto_learning)            init_count++;
+    if (g_system_state.knowledge_inference)      init_count++;
     if (g_system_state.data_pipeline)            init_count++;
-#define SUBSYSTEM_EXPECTED_COUNT 18   /* 与上面if检查行数一致 */
+    if (g_system_state.multi_agent_system)       init_count++;  /* H-015 */
+#define SUBSYSTEM_EXPECTED_COUNT 24   /* 与上面if检查行数一致 */
     SYSTEM_UNLOCK();
     
     if (channels <= 0) channels = 64;
@@ -1168,6 +1180,23 @@ void* selflnn_get_knowledge_base(void) {
     return g_system_state.knowledge_base;
 }
 
+/* ZSFZS-F026: 知识库更新事件 → LNN刷新触发机制
+ * 由知识库回调调用，设置标志位通知AGI后台循环进行知识嵌入重编码。
+ * 不在此函数中直接执行LNN重新嵌入，避免在写锁内进行耗时的LNN计算。
+ * 实际的知识嵌入更新由 selflnn_check_and_reset_knowledge_refresh() 在
+ * AGI后台循环中调度执行。 */
+void selflnn_trigger_knowledge_refresh(void) {
+    g_system_state.knowledge_refresh_needed = 1;
+}
+
+int selflnn_check_and_reset_knowledge_refresh(void) {
+    if (g_system_state.knowledge_refresh_needed) {
+        g_system_state.knowledge_refresh_needed = 0;
+        return 1;
+    }
+    return 0;
+}
+
 /* S-008修复: 后端子系统共享访问器（单一LNN架构原则） */
 void* selflnn_get_reasoning_engine(void) {
     return g_system_state.reasoning_engine;
@@ -1759,7 +1788,33 @@ static int initialize_subsystems(const SystemConfig* config)
         evo_config.mutation = EVO_MUTATION_ADAPTIVE;
         evo_config.direction = EVO_FITNESS_MAXIMIZE;
         evo_config.population_size = 100;
-        evo_config.chromosome_size = (size_t)(config->state_dimension > 0 ? (size_t)config->state_dimension : 128);
+        /* R6-FIX: 染色体大小必须包含共享参数+所有cell级三门参数。
+         * 原代码使用state_dimension(128)远小于实际参数总数(~6万)，
+         * 导致演化引擎无法优化forget/output_gate_weights等门控权重。 */
+        {
+            size_t chrom_size = 0;
+            if (g_system_state.lnn_instance) {
+                size_t shared = lnn_get_parameter_count((LNN*)g_system_state.lnn_instance);
+                chrom_size += shared;
+                CfCNetwork* cfc = lnn_get_cfc_network((LNN*)g_system_state.lnn_instance);
+                if (cfc && cfc->layers) {
+                    for (int cl = 0; cl < cfc->config.num_layers; cl++) {
+                        CfCCell* cell = cfc->layers[cl];
+                        if (!cell) continue;
+                        size_t li = (cl == 0) ? cfc->config.input_size : cfc->config.hidden_size;
+                        size_t hs = cfc->config.hidden_size;
+                        chrom_size += li * hs * 3;  /* input/forget/output gate weights */
+                        chrom_size += hs * 3;        /* gate_biases */
+                        if (cell->use_adaptive_tau) chrom_size += hs;  /* time_constants */
+                        if (cell->hidden_to_gate_weights) chrom_size += hs * hs;
+                        if (cell->hidden_to_activation_weights) chrom_size += hs * hs;
+                    }
+                }
+            }
+            if (chrom_size < 128) chrom_size = 128;
+            evo_config.chromosome_size = chrom_size;
+            log_info("演化引擎染色体大小: %zu (包含共享参数+三门门控权重)", chrom_size);
+        }
         evo_config.max_generations = 1000;
         evo_config.elite_count = 5;
         evo_config.crossover_rate = 0.85f;
@@ -2003,6 +2058,7 @@ static void shutdown_subsystems(void)
     if (g_system_state.lnn_instance) {
         lnn_free((LNN*)g_system_state.lnn_instance);
         g_system_state.lnn_instance = NULL;
+        g_global_singleton_lnn = NULL;  /* FIX-004: 防止悬空指针 */
     }
     
     // 8. 销毁自我编程引擎
@@ -2087,6 +2143,12 @@ static void shutdown_subsystems(void)
     if (g_system_state.online_learner) {
         online_learner_free((OnlineLearner*)g_system_state.online_learner);
         g_system_state.online_learner = NULL;
+    }
+
+    /* FIX-008: 销毁语音识别器（生命周期管理） */
+    if (g_system_state.speech_recognizer) {
+        speech_recognizer_free(g_system_state.speech_recognizer);
+        g_system_state.speech_recognizer = NULL;
     }
 
     log_info("所有子系统已关闭");

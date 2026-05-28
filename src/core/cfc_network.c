@@ -110,7 +110,8 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     network->layer_outputs = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     network->layer_gradients = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     network->activation_buffer = (float*)safe_calloc(max_layer_size, sizeof(float));
-    network->dropout_mask = (float*)safe_calloc(max_layer_size, sizeof(float));
+    /* ZSFZS-F018修复: 逐层分配dropout掩码，避免多层共享单一掩码导致反向传播使用错误掩码 */
+    network->dropout_mask = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     
     /* ZSFWS-MLW: 多层权重独立存储——每层分配独立权重矩阵
      * 单层: param = [input*hidden w]  [hidden b]  [W_out] [b_out]
@@ -227,9 +228,9 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         }
     }
     
-    // 初始化Dropout掩码
-    for (size_t i = 0; i < max_layer_size; i++) {
-        network->dropout_mask[i] = 1.0f;  // 初始全为1（不丢弃）
+    /* ZSFZS-F018修复: 初始化所有层的Dropout掩码为1（不丢弃） */
+    for (size_t i = 0; i < total_layers * max_layer_size; i++) {
+        network->dropout_mask[i] = 1.0f;
     }
 
     /* P0-001: 创建每层级联层归一化(LayerNorm)实例
@@ -253,6 +254,8 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
                     }
                     safe_free((void**)&network->layer_norms);
                     safe_free((void**)&network->ln_temp_buffer);
+                    cfc_free(network);
+                    return NULL;
                 }
             }
         }
@@ -390,18 +393,19 @@ int cfc_forward(CfCNetwork* network, const float* input,
             memcpy(layer_output, network->ln_temp_buffer, hidden_size * sizeof(float));
         }
         
-        // 应用Dropout（如果启用）
+        /* ZSFZS-F018修复: 使用逐层独立dropout掩码，每层掩码写入对应偏移位置 */
         if (config->dropout_rate > 0.0f && config->dropout_rate < 1.0f && config->enable_training) {
+            float* layer_mask = network->dropout_mask + (size_t)layer * max_layer_size;
             for (size_t i = 0; i < hidden_size; i++) {
                 if (rng_uniform(0.0f, 1.0f) < config->dropout_rate) {
-                    network->dropout_mask[i] = 0.0f;
+                    layer_mask[i] = 0.0f;
                     layer_output[i] = 0.0f;
                 } else {
                     /* K-055: 除零防护 —— dropout_rate接近1.0时回退到0.999999f */
                     float safe_inv = (config->dropout_rate < 0.999999f)
                         ? (1.0f - config->dropout_rate) : 0.000001f;
-                    network->dropout_mask[i] = 1.0f / safe_inv;
-                    layer_output[i] *= network->dropout_mask[i];
+                    layer_mask[i] = 1.0f / safe_inv;
+                    layer_output[i] *= layer_mask[i];
                 }
             }
         }
@@ -633,6 +637,8 @@ void cfc_zero_cell_gradients(CfCNetwork* network) {
         if (cell->weight_grad) memset(cell->weight_grad, 0, lw * sizeof(float));
         if (cell->bias_grad) memset(cell->bias_grad, 0, network->config.hidden_size * sizeof(float));
         if (cell->input_gate_weight_grad) memset(cell->input_gate_weight_grad, 0, lw * sizeof(float));
+        if (cell->forget_gate_weight_grad) memset(cell->forget_gate_weight_grad, 0, lw * sizeof(float));
+        if (cell->output_gate_weight_grad) memset(cell->output_gate_weight_grad, 0, lw * sizeof(float));
         if (cell->hidden_to_gate_weight_grad) memset(cell->hidden_to_gate_weight_grad, 0, hh * sizeof(float));
         if (cell->hidden_to_activation_weight_grad) memset(cell->hidden_to_activation_weight_grad, 0, hh * sizeof(float));
         if (cell->gate_bias_grad) memset(cell->gate_bias_grad, 0, network->config.hidden_size * 3 * sizeof(float));
@@ -762,10 +768,13 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
             return SELFLNN_ERROR_INITIALIZATION_FAILED;
         }
 
-        // 应用Dropout掩码到传播的梯度
+        /* ZSFZS-F018修复: 使用前一层(layer-1)的dropout掩码，而非当前层掩码
+         * 原因: prev_gradient = dL/d(前一层输出_经dropout后)，需要乘以前一层的掩码
+         * 才能正确得到 dL/d(前一层输出_dropout前)，从而正确传递梯度穿过前一层的dropout */
         if (config->dropout_rate > 0.0f && layer > 0) {
+            float* prev_mask = network->dropout_mask + (size_t)(layer - 1) * max_layer_size;
             for (size_t i = 0; i < hidden_size; i++) {
-                prev_gradient[i] *= network->dropout_mask[i];
+                prev_gradient[i] *= prev_mask[i];
             }
         }
     }
@@ -926,11 +935,12 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
             return SELFLNN_ERROR_INITIALIZATION_FAILED;
         }
         
-        // 应用Dropout掩码（反向传播时）
-        if (config->dropout_rate > 0.0f) {
+        /* ZSFZS-F018修复: 使用前一层(layer-1)的dropout掩码，与cfc_backward_ex一致 */
+        if (config->dropout_rate > 0.0f && layer > 0) {
+            float* prev_mask = network->dropout_mask + (size_t)(layer - 1) * max_layer_size;
             for (size_t i = 0; i < hidden_size; i++) {
                 if (prev_gradient) {
-                    prev_gradient[i] *= network->dropout_mask[i];
+                    prev_gradient[i] *= prev_mask[i];
                 }
             }
         }
@@ -1716,33 +1726,33 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
         size_t input_size = cell->config.input_size;
 
         for (size_t i = 0; i < layer_size; i++) {
-            /* 门控: σ(W_gi·x + U_gi·h + b_gi)，使用input_gate_weights */
-            float gate_sum = cell->gate_biases[i * 3];  /* 输入门偏置 */
+            /* 三门: input_gate使用input_gate_weights, forget_gate使用forget_gate_weights */
+            float input_gate_sum = cell->gate_biases[i * 3];  /* 输入门偏置 */
+            float forget_gate_sum = cell->gate_biases[i * 3 + 1];  /* 遗忘门偏置 */
             for (size_t j = 0; j < input_size; j++) {
-                gate_sum += cell->input_gate_weights[i * input_size + j] * input[j];
+                input_gate_sum += cell->input_gate_weights[i * input_size + j] * input[j];
+                forget_gate_sum += cell->forget_gate_weights[i * input_size + j] * input[j];
             }
-            /* 隐藏到门控: U_gi·h */
             for (size_t k = 0; k < layer_size; k++) {
-                gate_sum += cell->hidden_to_gate_weights[i * layer_size + k] * layer_y[k];
+                input_gate_sum += cell->hidden_to_gate_weights[i * layer_size + k] * layer_y[k];
+                forget_gate_sum += cell->hidden_to_gate_weights[i * layer_size + k] * layer_y[k];
             }
-            float gate = 1.0f / (1.0f + expf(-gate_sum));
+            float input_gate = 1.0f / (1.0f + expf(-input_gate_sum));
+            float forget_gate = 1.0f / (1.0f + expf(-forget_gate_sum));
 
             /* 激活: tanh(W_a·x + U_a·h + b_a) */
             float act_sum = cell->bias_vector[i];
             for (size_t j = 0; j < input_size; j++) {
                 act_sum += cell->weight_matrix[i * input_size + j] * input[j];
             }
-            /* 隐藏到激活: U_a·h */
             for (size_t k = 0; k < layer_size; k++) {
                 act_sum += cell->hidden_to_activation_weights[i * layer_size + k] * layer_y[k];
             }
             float act = tanhf(act_sum);
 
-            /* CfC RHS: dh/dt = (-h + gate·act) / τ */
-            float decay_term = -layer_y[i];
-            float drive_term = gate * act;
+            /* CfC RHS: dh/dt = (-forget_gate·h + input_gate·act) / τ */
             float rh_tau = tau[i] > 0.001f ? tau[i] : 0.001f;
-            dydt[offset + i] = (decay_term + drive_term) / rh_tau;
+            dydt[offset + i] = (-forget_gate * layer_y[i] + input_gate * act) / rh_tau;
         }
         offset += layer_size;
     }
@@ -1832,7 +1842,8 @@ int cfc_detect_stiffness(CfCNetwork* network, const float* input,
         float* inv_v = (float*)safe_calloc(n, sizeof(float));
         float* inv_w = (float*)safe_calloc(n, sizeof(float));
         if (inv_v && inv_w) {
-            for (size_t i = 0; i < n; i++) inv_v[i] = (float)((i * 1103515245u + 12345u) & 0x7fffffff) / 2147483648.0f;
+            /* ZSFWS-012修复: 使用secure_random_float替代硬编码LCG */
+            for (size_t i = 0; i < n; i++) inv_v[i] = secure_random_float();
             float norm = 0.0f;
             for (size_t i = 0; i < n; i++) norm += inv_v[i] * inv_v[i];
             if (norm > 1e-10f) { norm = sqrtf(norm); for (size_t i = 0; i < n; i++) inv_v[i] /= norm; }
@@ -1925,12 +1936,12 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
         if (cfc_detect_stiffness(network, input, hidden_state, &sr) == 0) {
             stats->stiffness_ratio = sr;
             if (sr > 100.0f) {
-                current_solver = 5; /* ROSENBROCK */
+                current_solver = ODE_SOLVER_ROSENBROCK; /* ZSFWS-011: 使用枚举常量替代魔法数字5 */
                 cfc_set_solver_type(network, current_solver);
                 using_stiff_solver = 1;
                 stats->solver_switches++;
             } else if (sr > 10.0f) {
-                current_solver = 4; /* DP54自适应 */
+                current_solver = ODE_SOLVER_DP54; /* ZSFWS-011: 使用枚举常量替代魔法数字4 */
                 cfc_set_solver_type(network, current_solver);
             }
         }

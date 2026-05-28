@@ -303,7 +303,7 @@ static GpuContext* cambricon_backend_context_create(int device_index) {
 
 static void cambricon_backend_context_free(GpuContext* context) {
     if (!context) return;
-    safe_free(context);
+    safe_free((void**)&context);
 }
 
 static GpuMemory* cambricon_backend_memory_alloc(GpuContext* context, size_t size, GpuMemoryType memory_type) {
@@ -317,10 +317,10 @@ static GpuMemory* cambricon_backend_memory_alloc(GpuContext* context, size_t siz
             mem->type = memory_type; mem->is_device_memory = 1;
             return mem;
         }
-        safe_free(mem); return NULL;
+        safe_free((void**)&mem); return NULL;
     }
     mem->data = safe_malloc(size);
-    if (!mem->data) { safe_free(mem); return NULL; }
+    if (!mem->data) { safe_free((void**)&mem); return NULL; }
     mem->context = context; mem->size = size; mem->type = memory_type;
     return mem;
 }
@@ -330,8 +330,8 @@ static void cambricon_backend_memory_free(GpuMemory* memory) {
     if (g_cb_state.cnrt_available && memory->is_device_memory && g_cambricon.cnrtFree)
         g_cambricon.cnrtFree(memory->data);
     else
-        safe_free(memory->data);
-    safe_free(memory);
+        safe_free((void**)&memory->data);
+    safe_free((void**)&memory);
 }
 
 static int cambricon_backend_memory_copy_to_device(GpuMemory* dst, const void* src, size_t size) {
@@ -391,7 +391,7 @@ static int cambricon_backend_kernel_set_arg(GpuKernel* kernel, int arg_index, si
         if (!nv || !ns) { safe_free((void**)&nv); safe_free((void**)&ns); return -1; }
         for (size_t i=0;i<kernel->arg_count;i++){nv[i]=kernel->arg_values[i];ns[i]=kernel->arg_sizes[i];}
         safe_free((void**)&kernel->arg_values); safe_free((void**)&kernel->arg_sizes);
-        kernel->arg_values=nv; kernel->arg_sizes=ns; kernel->arg_capacity=nm;
+        kernel->arg_values=nv; kernel->arg_sizes=ns; kernel->arg_capacity=(int)nm;
     }
     if (kernel->arg_values[arg_index]) safe_free((void**)&kernel->arg_values[arg_index]);
     if (arg_size > 0 && arg_value) { kernel->arg_values[arg_index]=safe_malloc(arg_size); if (!kernel->arg_values[arg_index]) return -1; memcpy(kernel->arg_values[arg_index], arg_value, arg_size); kernel->arg_sizes[arg_index]=arg_size; }
@@ -526,7 +526,7 @@ static GpuStream* cambricon_backend_stream_create(GpuContext* context) {
 }
 
 static void cambricon_backend_stream_free(GpuStream* stream) {
-    safe_free(stream);
+    safe_free((void**)&stream);
 }
 
 static int cambricon_backend_stream_synchronize(GpuStream* stream) {
@@ -644,9 +644,9 @@ static void cambricon_npu_unload_model(NpuModel* model) {
         CambriconModelData* md = (CambriconModelData*)model->backend_data;
         if (md->model_handle && g_cambricon.cnrtDestroyModel)
             g_cambricon.cnrtDestroyModel(md->model_handle);
-        safe_free(md);
+        safe_free((void**)&md);
     }
-    safe_free(model);
+    safe_free((void**)&model);
 }
 
 static int cambricon_npu_infer(NpuModel* model, const float** inputs, float** outputs, int batch_size) {

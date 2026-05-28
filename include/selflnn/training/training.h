@@ -93,6 +93,7 @@ typedef struct {
     
     float target_accuracy;            /**< 目标准确率 */
     float convergence_threshold;      /**< ZSFWS-003: 绝对收敛阈值（损失低于此值立即停止） */
+    float min_delta;                  /**< ZSFZS-F009: 早停最小改善阈值（改善幅度小于此值视为无改善） */
     size_t convergence_rate_window;   /**< ZSFWS-004: 收敛速率计算窗口（epoch数） */
     int enable_validation;            /**< 是否启用验证 */
     int enable_mini_validation;       /**< ZSFWS-007: 是否启用阶段内微验证 */
@@ -176,6 +177,14 @@ typedef struct {
     int curriculum_stages;                  /**< 课程学习阶段数（默认8） */
     int curriculum_warmup;                  /**< 课程学习预热轮数（默认3） */
     size_t num_samples;                     /**< 训练样本总数（课程学习需要） */
+
+    /* ZSFZS-F013: 学习率预热步数配置（集成到主训练循环） */
+    size_t warmup_steps;                   /**< 学习率预热步数（0=禁用，>0时在训练初期线性增加学习率） */
+    float warmup_init_lr;                  /**< 预热起始学习率（通常为目标学习率的1/10~1/100） */
+    int warmup_cosine_after;               /**< 预热完成后是否启用余弦退火（0=否, 1=是） */
+
+    /* ZSFZS-F025: 训练指标JSON日志导出间隔（epoch数，0=禁用，默认10） */
+    size_t metrics_export_interval;        /**< JSON指标导出间隔（每N个epoch导出一次，0=禁用） */
 } TrainingConfig;
 
 /**
@@ -675,17 +684,18 @@ int early_stopping_check(float current_loss, float best_loss,
                          size_t patience, size_t* steps_without_improvement);
 
 /**
- * @brief 早停检查（增强版，ZSFWS-003修复）
+ * @brief 早停检查（增强版，ZSFZS-F010修复：增加min_delta参数）
  * @param current_loss 当前验证损失
  * @param best_loss 最佳历史验证损失
  * @param patience 早停耐心值
  * @param steps_without_improvement 没有改进的步数
  * @param convergence_threshold 绝对收敛阈值（损失低于此值立即停止，0表示禁用）
+ * @param min_delta 最小改善阈值（改善幅度小于此值视为无改善，0=禁用）
  * @return int 应该停止返回1，否则返回0
  */
 int early_stopping_check_ex(float current_loss, float best_loss,
                             size_t patience, size_t* steps_without_improvement,
-                            float convergence_threshold);
+                            float convergence_threshold, float min_delta);
 
 /**
  * @brief 模型检查点

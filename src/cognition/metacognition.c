@@ -2807,17 +2807,27 @@ static int perform_online_learning_update(MetacognitionSystem* system,
     }
     
     /* 更新模型置信度（基于准确度和不确定性） */
+    /* FIX-012修复: 使用加权EMA而非前10个样本简单平均，提高对分布突变的敏感度 */
     float uncertainty_weight = system->model_update_config.uncertainty_weight;
     float avg_uncertainty = 0.0f;
-    size_t uncertainty_samples = system->self_model_state.uncertainty_size < 10 ? 
-                                 system->self_model_state.uncertainty_size : 10;
+    float weighted_sum = 0.0f;
+    float decay_sum = 0.0f;
+    float decay = 0.85f;  /* EMA衰减因子，越近的样本权重越高 */
+    float weight = 1.0f;
+    size_t uncertainty_samples = system->self_model_state.uncertainty_size < 20 ? 
+                                 system->self_model_state.uncertainty_size : 20;
     
     for (size_t i = 0; i < uncertainty_samples; i++) {
-        avg_uncertainty += system->self_model_state.uncertainty_estimates[i];
+        size_t idx = system->self_model_state.uncertainty_size - 1 - i;
+        if (idx < system->self_model_state.uncertainty_size) {
+            weighted_sum += system->self_model_state.uncertainty_estimates[idx] * weight;
+            decay_sum += weight;
+            weight *= decay;
+        }
     }
     
-    if (uncertainty_samples > 0) {
-        avg_uncertainty /= uncertainty_samples;
+    if (decay_sum > 0.001f) {
+        avg_uncertainty = weighted_sum / decay_sum;
     }
     
     system->self_model_state.model_confidence = 

@@ -17,11 +17,8 @@ set(KNOWLEDGE_SOURCES
     ontology_engineering.c
     cfc_knowledge_embedding.c
     knowledge_integration.c
+    uncertainty_reasoning.c
 )
-# ZSFBUILD: MSVC下BayesianNetwork在reasoning.h和uncertainty_reasoning.h中冲突定义
-if(NOT MSVC)
-    list(APPEND KNOWLEDGE_SOURCES uncertainty_reasoning.c)
-endif()
 
 add_library(selflnn_knowledge ${KNOWLEDGE_SOURCES})
 

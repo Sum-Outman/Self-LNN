@@ -149,6 +149,15 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
     if (!optimizer || !parameters || !gradients || num_params == 0) return -1;
 
     if (ensure_buffers(optimizer, num_params) != 0) return -1;
+    
+    {
+        size_t k;
+        for (k = 0; k < num_params; k++) {
+            if (!isfinite(gradients[k])) break;
+        }
+        if (k < num_params) return -1;  /* NaN/Inf梯度，放弃本次更新 */
+    }
+    
     /* P2-004修复：(void)step仅限于非RANGER优化器分支，
        RANGER使用step进行预热调度，需保留该参数 */ 
     if (optimizer->config.type != OPTIMIZER_RANGER) {
@@ -214,8 +223,11 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
         case OPTIMIZER_RMSPROP:
         {
             float decay_rate = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.9f;
+            float wd = optimizer->config.weight_decay;
             for (i = 0; i < num_params; i++)
             {
+                /* ZSFZS-F002: 添加解耦权重衰减，与其他优化器一致 */
+                parameters[i] *= (1.0f - lr * wd);
                 optimizer->cache_buffer[i] = decay_rate * optimizer->cache_buffer[i] +
                                              (1.0f - decay_rate) * gradients[i] * gradients[i];
                 float adjusted_lr = lr / (sqrtf(optimizer->cache_buffer[i]) + eps);
@@ -228,11 +240,14 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
         {
             float b1 = optimizer->config.beta1 > 0.0f ? optimizer->config.beta1 : 0.9f;
             float b2 = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.999f;
+            float wd = optimizer->config.weight_decay;
             *optimizer->beta1_power *= b1;
             *optimizer->beta2_power *= b2;
 
             for (i = 0; i < num_params; i++)
             {
+                /* ZSFZS-F003: 添加解耦权重衰减，与其他优化器一致 */
+                parameters[i] *= (1.0f - lr * wd);
                 optimizer->momentum_buffer[i] = b1 * optimizer->momentum_buffer[i] +
                                                 (1.0f - b1) * gradients[i];
                 optimizer->velocity_buffer[i] = b2 * optimizer->velocity_buffer[i] +
@@ -272,8 +287,11 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
         case OPTIMIZER_ADADELTA:
         {
             float rho = optimizer->config.momentum > 0.0f ? optimizer->config.momentum : 0.95f;
+            float wd = optimizer->config.weight_decay;
             for (i = 0; i < num_params; i++)
             {
+                /* ZSFZS-F004: 添加解耦权重衰减，与其他优化器一致 */
+                parameters[i] *= (1.0f - lr * wd);
                 optimizer->velocity_buffer[i] = rho * optimizer->velocity_buffer[i] +
                                                 (1.0f - rho) * gradients[i] * gradients[i];
 
@@ -437,7 +455,13 @@ int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradien
         {
             float b1 = optimizer->config.beta1 > 0.0f ? optimizer->config.beta1 : 0.9f;
             float b2 = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.999f;
+            float wd = optimizer->config.weight_decay;
             *optimizer->beta1_power *= b1;
+
+            /* ZSFZS-F005: 添加解耦权重衰减，与其他优化器一致 */
+            for (i = 0; i < num_params; i++) {
+                parameters[i] *= (1.0f - lr * wd);
+            }
 
             /* 全局梯度L2范数平方（分层级v） */
             float grad_l2_sq = 0.0f;

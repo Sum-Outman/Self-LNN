@@ -37,7 +37,7 @@ struct MultimodalManager {
     UnifiedSignalProcessor* unified_signal_processor; /**< P0-002: 引用全局统一信号处理器 */
     int unified_signal_processor_owned;   /**< 是否拥有信号处理器（1=自建需释放，0=外部引用） */
     LNN* lnn_instance;                    /**< 关联的LNN实例（不拥有，不释放） */
-    float modality_weights[4];            /**< 各模态权重（仅用于外部路由查询，不影响CfC内部状态演化） */
+    float modality_weights[9];            /**< P2-001统一: 各模态权重9种（视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机）仅用于外部路由查询，不影响CfC内部状态演化 */
     HapticCfcProcessor* haptic_cfc_proc;  /**< H-018: CfC触觉信号处理器 */
     HapticTextureAnalyzer* haptic_texture_analyzer; /**< H-018: 触觉纹理分析器 */
 };
@@ -88,8 +88,10 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
         manager->unified_signal_processor = NULL;
     }
 
-    manager->modality_weights[2] = 0.0f;
-    manager->modality_weights[3] = 0.0f;
+    /* P2-001统一: 显式初始化全部9个模态权重为等权 1/9 ≈ 0.1111 */
+    for (int i = 0; i < 9; i++) {
+        manager->modality_weights[i] = 1.0f / 9.0f;
+    }
     
     /* H-018集成: 创建CfC触觉处理器和纹理分析器 */
     {
@@ -145,6 +147,11 @@ int multimodal_manager_process(MultimodalManager* manager,
                               const void* audio_data,
                               const void* text_data,
                               const void* sensor_data,
+                              const void* haptic_data,
+                              const void* proprioception_data,
+                              const void* thermal_data,
+                              const void* radar_data,
+                              const void* motor_data,
                               float* fused_features, size_t max_features) {
     if (!manager || !fused_features || max_features == 0) {
         return -1;
@@ -173,29 +180,11 @@ int multimodal_manager_process(MultimodalManager* manager,
         return -1;
     }
     unified_output->signal_dimension = max_features;
-    /* ZSFAB P2-006修复: 实现时序特征融合——计算帧间差分特征 */
-    {
-        static float prev_frame_features[256] = {0};
-        static int has_prev_frame = 0;
-        size_t tdim = (max_features < 256) ? max_features : 256;
-        unified_output->temporal_features = (float*)safe_malloc(tdim * sizeof(float));
-        if (unified_output->temporal_features && has_prev_frame) {
-            unified_output->temporal_dimension = tdim;
-            /* 计算当前帧与前一帧的特征差分 */
-            for (size_t d = 0; d < tdim; d++) {
-                unified_output->temporal_features[d] = unified_output->unified_signal[d] - prev_frame_features[d];
-            }
-        } else if (unified_output->temporal_features) {
-            /* 首帧：无前一帧，特征差分为0 */
-            unified_output->temporal_dimension = tdim;
-            memset(unified_output->temporal_features, 0, tdim * sizeof(float));
-        }
-        /* 保存当前帧作为下次的参考帧 */
-        for (size_t d = 0; d < tdim; d++) {
-            prev_frame_features[d] = unified_output->unified_signal[d];
-        }
-        has_prev_frame = 1;
-    }
+    /* ZSFWS-001修复: 时序特征计算必须在encode之后执行
+     * 原代码在encode前读取unified_signal导致temporal_features永远为0，
+     * 因为unified_signal在encode调用后才被填充真实数据。 */
+    unified_output->temporal_features = NULL;
+    unified_output->temporal_dimension = 0;
     unified_output->encoding_quality = 0.0f;
     unified_output->cross_modal_alignment = 0.0f;
 
@@ -207,6 +196,27 @@ int multimodal_manager_process(MultimodalManager* manager,
     int result = unified_signal_processor_encode(manager->unified_signal_processor,
                                        vision_input, audio_input, text_input, sensor_input,
                                        unified_output);
+
+    /* ZSFWS-001修复: 时序特征计算移到这里——unified_signal已在encode中填充完毕 */
+    {
+        static float prev_frame_features[256] = {0};
+        static int has_prev_frame = 0;
+        size_t tdim = (max_features < 256) ? max_features : 256;
+        unified_output->temporal_features = (float*)safe_malloc(tdim * sizeof(float));
+        if (unified_output->temporal_features && has_prev_frame) {
+            unified_output->temporal_dimension = tdim;
+            for (size_t d = 0; d < tdim; d++) {
+                unified_output->temporal_features[d] = unified_output->unified_signal[d] - prev_frame_features[d];
+            }
+        } else if (unified_output->temporal_features) {
+            unified_output->temporal_dimension = tdim;
+            memset(unified_output->temporal_features, 0, tdim * sizeof(float));
+        }
+        for (size_t d = 0; d < tdim; d++) {
+            prev_frame_features[d] = unified_output->unified_signal[d];
+        }
+        has_prev_frame = 1;
+    }
 
     if (result != 0) {
         safe_free((void**)&unified_output->temporal_features);
@@ -302,6 +312,33 @@ int multimodal_manager_process(MultimodalManager* manager,
 
     size_t copy_count = lnn_copy;
 
+    /* P2-001统一: 额外5种模态处理（触觉/本体感/热感/雷达/电机）
+     * 将5种额外模态信号按modality_weights权重直接混合到统一融合输出中
+     * 若额外模态数据指针非空则进行融合，否则跳过 */
+    {
+        const float* haptic_ptr = (const float*)haptic_data;
+        const float* proprioception_ptr = (const float*)proprioception_data;
+        const float* thermal_ptr = (const float*)thermal_data;
+        const float* radar_ptr = (const float*)radar_data;
+        const float* motor_ptr = (const float*)motor_data;
+
+        const float* extra_signals[5] = {
+            haptic_ptr, proprioception_ptr, thermal_ptr, radar_ptr, motor_ptr
+        };
+        size_t extra_sizes[5] = {64, 32, 16, 128, 64};
+        int extra_indices[5] = {4, 5, 6, 7, 8};
+
+        for (int m = 0; m < 5; m++) {
+            if (extra_signals[m] && extra_sizes[m] > 0) {
+                float weight = manager->modality_weights[extra_indices[m]];
+                size_t copy_sz = (extra_sizes[m] < lnn_copy) ? extra_sizes[m] : lnn_copy;
+                for (size_t i = 0; i < copy_sz; i++) {
+                    fused_features[i] += extra_signals[m][i] * weight;
+                }
+            }
+        }
+    }
+
     safe_free((void**)&lnn_input);
     safe_free((void**)&lnn_output);
     safe_free((void**)&unified_output->temporal_features);
@@ -320,7 +357,8 @@ int multimodal_manager_set_weight(MultimodalManager* manager,
         return -1;
     }
 
-    if (modality_type < 0 || modality_type >= 4) {
+    /* P2-001统一: 边界从4扩展到9 */
+    if (modality_type < 0 || modality_type >= 9) {
         return -1;
     }
 
@@ -340,7 +378,8 @@ int multimodal_manager_get_weight(const MultimodalManager* manager,
         return -1;
     }
 
-    if (modality_type < 0 || modality_type >= 4) {
+    /* P2-001统一: 边界从4扩展到9 */
+    if (modality_type < 0 || modality_type >= 9) {
         return -1;
     }
 

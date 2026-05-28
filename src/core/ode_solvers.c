@@ -93,6 +93,7 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
     float* y_temp = k7 + n;
 
     float h = (delta_t > h_max) ? h_max : delta_t;
+    if (h <= 0.0f) return 0;  /* 零或负步长，无操作 */
     float t_current = t;
     float t_target = t + delta_t;
     int total_steps = 0;
@@ -160,7 +161,7 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
         else
         {
             float factor = safety * (float)pow((double)max_err, (double)SELFLNN_DP54_PSHRINK);
-            h = h * dp54_max(0.1f, factor);
+            h = h * dp54_max(0.1f, dp54_min(1.0f, factor));
             if (h < h_min) h = h_min;
         }
     }
@@ -1286,6 +1287,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                           float* h_actual, int* steps_used)
 {
     if (!y || !rhs || !cfg || !workspace || n == 0) return -1;
+    if (delta_t <= 0.0f) return 0;  /* 零或负步长 */
 
     float h_max = (cfg->max_step_size > 0.0f) ? cfg->max_step_size : 1.0f;
     float gamma_val = (cfg->gamma_coeff > 0.0f) ? cfg->gamma_coeff : 0.435866521508f;
@@ -1623,6 +1625,7 @@ int ode_forest_ruth_solve(float* q, float* p, float delta_t,
                            float* workspace, int* steps_used)
 {
     if (!q || !p || !dqdt || !dpdt || !cfg || !workspace || n == 0) return -1;
+    if (delta_t <= 0.0f) return 0;  /* 零或负步长 */
 
     /* Forest-Ruth 4阶辛积分器系数（硬编码，直接取自Forest & Ruth 1990） */
     const float c1 =  0.6756035959798288f;
@@ -1737,6 +1740,7 @@ int ode_verlet_solve(float* q, float* p, float delta_t,
                      size_t n, float* workspace)
 {
     if (!q || !p || !dpdt || !workspace || n == 0) return -1;
+    if (delta_t <= 0.0f) return 0;  /* 零或负步长 */
 
     float* accel = workspace;
     float half_h = delta_t * 0.5f;
@@ -1798,6 +1802,7 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                    float* h_actual, int* steps_used)
 {
     if (!y || !rhs || !cfg || !workspace || n == 0) return -1;
+    if (delta_t <= 0.0f) return 0;  /* 零或负步长 */
 
     float abs_tol = (cfg->abs_tolerance > 0.0f) ? cfg->abs_tolerance : 1e-8f;
     float rel_tol = (cfg->rel_tolerance > 0.0f) ? cfg->rel_tolerance : 1e-6f;
@@ -1835,7 +1840,8 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
         {
             /* 第一步：使用向后欧拉法启动
              * y_{n+1} = y_n + h · f(t_{n+1}, y_{n+1})
-             * 简化不动点迭代求解 */
+             * ZSFWS-019: 向后欧拉的Picard迭代 y^{(k+1)}=y_n+h·f(t,y^{(k)})
+             * 对隐式Euler是标准收敛格式，后续BDF2步骤使用完整牛顿迭代。 */
             if (rhs(t_current + h, y, rhs_temp, ctx) != 0) return -2;
 
             /* 不动点迭代 */

@@ -38,13 +38,6 @@
         PD_INITIALIZED = true;
     }
 
-    /* 后端API基础URL — 使用统一api-service.exe进行请求 */
-    function pdGetBaseUrl() {
-        var host = window.location.hostname || '127.0.0.1';
-        var port = 8080;
-        return 'http://' + host + ':' + port;
-    }
-
     function pdSetStatus(html, show) {
         if (!PD_STATUS_CARD || !PD_STATUS_CONTENT) return;
         PD_STATUS_CONTENT.innerHTML = html;

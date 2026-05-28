@@ -24,6 +24,20 @@
 #include <stdio.h>
 #include <time.h>
 
+/* ZSFZS-F022修复: 网络相关头文件 */
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#endif
+
 struct RosGazeboBridge {
     RosGazeboBridgeConfig config;
     RosNode* ros_node;
@@ -322,10 +336,13 @@ int ros_gazebo_bridge_connect(RosGazeboBridge* bridge) {
     }
 
     /* ZSFWXJ-FIX007修复: 使用真实JSON解析回调替代NULL，Gazebo数据现在会填充缓存 */
+    /* ZSFZS-F022修复: 显式类型转换以兼容MSVC调用约定 */
     ros_node_subscribe(bridge->ros_node, bridge->model_states_topic,
-                      "gazebo_msgs/ModelStates", gazebo_model_states_callback, bridge);
+                      "gazebo_msgs/ModelStates",
+                      (RosMessageCallback)gazebo_model_states_callback, bridge);
     ros_node_subscribe(bridge->ros_node, bridge->link_states_topic,
-                      "gazebo_msgs/LinkStates", gazebo_link_states_callback, bridge);
+                      "gazebo_msgs/LinkStates",
+                      (RosMessageCallback)gazebo_link_states_callback, bridge);
 
     /* 设置仿真控制服务 */
     ros_node_advertise_service(bridge->ros_node, bridge->pause_physics_srv, NULL, bridge);

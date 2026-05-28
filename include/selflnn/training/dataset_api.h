@@ -188,6 +188,18 @@ size_t dataset_get_epoch(const TrainingDataset* ds);
 size_t dataset_get_num_samples(const TrainingDataset* ds);
 
 /**
+ * @brief ZSFZS-F029: 设置数据集的训练/验证模式
+ *
+ * 训练模式(is_training=1)：数据增强函数正常执行
+ * 验证模式(is_training=0)：所有增强函数直接跳过，保护原始数据不被污染
+ *
+ * @param ds 数据集
+ * @param is_training 1=训练模式, 0=验证模式
+ * @return 成功返回0，失败返回-1
+ */
+int dataset_set_training_mode(TrainingDataset* ds, int is_training);
+
+/**
  * @brief 设置样本权重数组
  */
 int dataset_set_weights(TrainingDataset* ds, const float* weights, size_t n);

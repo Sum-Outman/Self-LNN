@@ -263,6 +263,12 @@ SELFLNN_API int selflnn_consume_knowledge_inference(void* lnn_instance, void* ki
                                                      int max_hops,
                                                      float perturbation_strength);
 
+/* ZSFZS-F026: 知识库更新事件通知机制
+ * selflnn_trigger_knowledge_refresh: 知识库回调调用，设置刷新标志
+ * selflnn_check_and_reset_knowledge_refresh: AGI后台循环查询并重置标志 */
+SELFLNN_API void selflnn_trigger_knowledge_refresh(void);
+SELFLNN_API int selflnn_check_and_reset_knowledge_refresh(void);
+
 /* ================================================================
  * 8. AGI后台任务所需的状态访问器
  *    供main.c后台任务读取LNN状态和知识库信息。

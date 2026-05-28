@@ -18,6 +18,7 @@
 #include "selflnn/multimodal/environment_sound.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <float.h>
@@ -27,6 +28,11 @@
 #define ESC_TIME_FRAMES 32
 #define ESC_HIDDEN_DIM 128
 #define ESC_CFC_TIMESTEPS 8
+
+/* ZSFZS-F020: 权重文件魔数 "ESSW" = 0x45535357 (Environment Sound System Weights) */
+#define ESC_WEIGHTS_MAGIC 0x45535357U
+#define ESC_WEIGHTS_VERSION 1U
+#define ESC_DEFAULT_WEIGHTS_PATH "env_sound_weights.bin"
 
 static const char* g_esc_class_names[ESC_MAX_CLASSES] = {
     "火灾报警", "玻璃破碎", "婴儿哭声", "狗叫",
@@ -43,6 +49,7 @@ typedef struct {
     float fc_b[ESC_MAX_CLASSES];
     int num_classes;
     int initialized;
+    int is_trained;    /* ZSFZS-F020: 标记是否已加载训练好的权重 */
 } EnvironmentSoundClassifier;
 
 static EnvironmentSoundClassifier* g_esc = NULL;
@@ -88,17 +95,26 @@ void* environment_sound_classifier_create(int num_classes) {
     if (!esc) return NULL;
 
     esc->num_classes = num_classes;
+    esc->is_trained = 0;
+
+    /* ZSFZS-F020: 先构建梅尔滤波器组（滤波器不依赖训练数据） */
     esc_build_mel_filters(esc);
 
-    /* F-014修复：初始化CfC权重（使用密码学安全随机数替代rand()） */
-    for (int i = 0; i < ESC_HIDDEN_DIM * ESC_HIDDEN_DIM; i++) {
-        esc->cfc_w[i] = (secure_random_float() - 0.5f) * 0.1f;
+    /* ZSFZS-F020: 优先尝试加载预训练权重，加载成功则跳过随机初始化 */
+    if (env_sound_load_weights(esc, ESC_DEFAULT_WEIGHTS_PATH) == 0) {
+        esc->is_trained = 1;
+    } else {
+        /* ZSFZS-F020: 权重文件不存在或校验失败，回退到随机初始化（标记为未训练） */
+        for (int i = 0; i < ESC_HIDDEN_DIM * ESC_HIDDEN_DIM; i++) {
+            esc->cfc_w[i] = (secure_random_float() - 0.5f) * 0.1f;
+        }
+        memset(esc->cfc_b, 0, sizeof(esc->cfc_b));
+        for (int i = 0; i < ESC_MAX_CLASSES * ESC_HIDDEN_DIM; i++) {
+            esc->fc_w[i] = (secure_random_float() - 0.5f) * 0.1f;
+        }
+        memset(esc->fc_b, 0, sizeof(esc->fc_b));
     }
-    memset(esc->cfc_b, 0, sizeof(esc->cfc_b));
-    for (int i = 0; i < ESC_MAX_CLASSES * ESC_HIDDEN_DIM; i++) {
-        esc->fc_w[i] = (secure_random_float() - 0.5f) * 0.1f;
-    }
-    memset(esc->fc_b, 0, sizeof(esc->fc_b));
+
     esc->initialized = 1;
 
     g_esc = esc;
@@ -123,6 +139,15 @@ int environment_sound_classify(void* classifier,
                                 float* confidence) {
     EnvironmentSoundClassifier* esc = (EnvironmentSoundClassifier*)classifier;
     if (!esc || !audio_samples || num_samples <= 0) return -1;
+
+    /* ZSFZS-F020: 未训练时返回低置信度结果，避免使用随机权重产生虚假预测 */
+    if (!esc->is_trained) {
+        if (class_name && max_name_len > 0) {
+            snprintf(class_name, max_name_len, "未训练");
+        }
+        if (confidence) *confidence = 0.001f;
+        return 0;
+    }
 
     /* 帧大小: 16ms at 16kHz = 256 samples */
     int frame_size = sample_rate * 16 / 1000;
@@ -225,6 +250,80 @@ int environment_sound_classify(void* classifier,
     if (confidence) *confidence = best_conf;
 
     return best_class;
+}
+
+/* ======================================================================== */
+/* ZSFZS-F020: 环境声音权重保存与加载                                      */
+/* 权重文件格式：魔数0x45535357("ESSW") + 版本号(uint32_t) + 类别数(int)   */
+/* + mel_filters(ESC_FREQ_BINS*128) + cfc_w(ESC_HIDDEN_DIM*ESC_HIDDEN_DIM)  */
+/* + cfc_b(ESC_HIDDEN_DIM) + fc_w(ESC_MAX_CLASSES*ESC_HIDDEN_DIM)          */
+/* + fc_b(ESC_MAX_CLASSES)                                                  */
+/* ======================================================================== */
+
+int env_sound_save_weights(void* classifier, const char* filepath) {
+    if (!classifier || !filepath) return -1;
+    EnvironmentSoundClassifier* esc = (EnvironmentSoundClassifier*)classifier;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) return -1;
+
+    uint32_t magic = ESC_WEIGHTS_MAGIC;
+    uint32_t version = ESC_WEIGHTS_VERSION;
+    int num_classes = esc->num_classes;
+
+    if (fwrite(&magic, sizeof(uint32_t), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fwrite(&version, sizeof(uint32_t), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fwrite(&num_classes, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    if (fwrite(esc->mel_filters, sizeof(float), ESC_FREQ_BINS * 128, fp) != (size_t)(ESC_FREQ_BINS * 128)) { fclose(fp); return -1; }
+    if (fwrite(esc->cfc_w, sizeof(float), ESC_HIDDEN_DIM * ESC_HIDDEN_DIM, fp) != (size_t)(ESC_HIDDEN_DIM * ESC_HIDDEN_DIM)) { fclose(fp); return -1; }
+    if (fwrite(esc->cfc_b, sizeof(float), ESC_HIDDEN_DIM, fp) != (size_t)ESC_HIDDEN_DIM) { fclose(fp); return -1; }
+    if (fwrite(esc->fc_w, sizeof(float), ESC_MAX_CLASSES * ESC_HIDDEN_DIM, fp) != (size_t)(ESC_MAX_CLASSES * ESC_HIDDEN_DIM)) { fclose(fp); return -1; }
+    if (fwrite(esc->fc_b, sizeof(float), ESC_MAX_CLASSES, fp) != (size_t)ESC_MAX_CLASSES) { fclose(fp); return -1; }
+
+    fclose(fp);
+    return 0;
+}
+
+int env_sound_load_weights(void* classifier, const char* filepath) {
+    if (!classifier || !filepath) return -1;
+    EnvironmentSoundClassifier* esc = (EnvironmentSoundClassifier*)classifier;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return -1;
+
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    int loaded_num_classes = 0;
+
+    if (fread(&magic, sizeof(uint32_t), 1, fp) != 1 || magic != ESC_WEIGHTS_MAGIC) {
+        fclose(fp);
+        return -1;
+    }
+    if (fread(&version, sizeof(uint32_t), 1, fp) != 1 || version != ESC_WEIGHTS_VERSION) {
+        fclose(fp);
+        return -1;
+    }
+    if (fread(&loaded_num_classes, sizeof(int), 1, fp) != 1 || loaded_num_classes != esc->num_classes) {
+        fclose(fp);
+        return -1;
+    }
+
+    if (fread(esc->mel_filters, sizeof(float), ESC_FREQ_BINS * 128, fp) != (size_t)(ESC_FREQ_BINS * 128)) { fclose(fp); return -1; }
+    if (fread(esc->cfc_w, sizeof(float), ESC_HIDDEN_DIM * ESC_HIDDEN_DIM, fp) != (size_t)(ESC_HIDDEN_DIM * ESC_HIDDEN_DIM)) { fclose(fp); return -1; }
+    if (fread(esc->cfc_b, sizeof(float), ESC_HIDDEN_DIM, fp) != (size_t)ESC_HIDDEN_DIM) { fclose(fp); return -1; }
+    if (fread(esc->fc_w, sizeof(float), ESC_MAX_CLASSES * ESC_HIDDEN_DIM, fp) != (size_t)(ESC_MAX_CLASSES * ESC_HIDDEN_DIM)) { fclose(fp); return -1; }
+    if (fread(esc->fc_b, sizeof(float), ESC_MAX_CLASSES, fp) != (size_t)ESC_MAX_CLASSES) { fclose(fp); return -1; }
+
+    fclose(fp);
+    esc->is_trained = 1;
+    return 0;
+}
+
+int env_sound_is_trained(void* classifier) {
+    if (!classifier) return 0;
+    EnvironmentSoundClassifier* esc = (EnvironmentSoundClassifier*)classifier;
+    return esc->is_trained;
 }
 
 void environment_sound_classifier_free(void* classifier) {

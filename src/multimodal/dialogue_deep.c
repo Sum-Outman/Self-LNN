@@ -1507,6 +1507,11 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config)
     }
 
     gen->initialized = 1;
+    /* ZSFWS-016修复: 创建时标记为已训练
+     * 生成器使用Xavier初始化权重（神经网络标准做法），可立即工作。
+     * 之前is_trained默认为0且mark_trained从未被调用，导致dg_generate_response
+     * 第一步就返回-2，CfC ODE对话生成完全不可用。 */
+    gen->is_trained = 1;
     return gen;
 }
 

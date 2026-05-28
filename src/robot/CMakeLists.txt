@@ -1,13 +1,9 @@
-# ZSFBUILD: MSVC不支持以下文件（头文件成员名不匹配，预存结构断裂）
-# ros_gazebo_bridge.c hardware_detector.c 的struct成员名与头文件不兼容
-if(NOT MSVC)
-    set(ROBOT_EXTRA_SOURCES
-        ros_gazebo_bridge.c
-        hardware_detector.c
-    )
-else()
-    set(ROBOT_EXTRA_SOURCES "")
-endif()
+# ZSFZS-F022修复: MSVC编译兼容性问题已解决（函数名统一、缺失头文件补全）
+# ros_gazebo_bridge.c和hardware_detector.c现在所有平台均可编译
+set(ROBOT_EXTRA_SOURCES
+    ros_gazebo_bridge.c
+    hardware_detector.c
+)
 
 # 机器人控制库
 add_library(selflnn_robot

@@ -20,7 +20,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/core/loss.h"          /* FIX-003: loss_gradient_ex 支持 */
-#include "selflnn/core/laplace_integration.h"
+#include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
@@ -635,6 +635,88 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
         }
     }
 
+    /* FIX-022修复: 对权重梯度和偏置梯度也进行全局裁剪。
+     * 之前仅裁剪gradient_buffer（隐藏状态中间梯度），
+     * 实际用于参数更新的weight_gradients/bias_gradients从未被裁剪，
+     * 导致训练初期可能梯度爆炸产生NaN。 */
+    {
+        float* wgrads = NULL;
+        float* bgrads = NULL;
+        size_t wc = 0, bc = 0;
+        if (cfc_get_weight_matrix(network->cfc_network, &wgrads, &wc) == 0 && wgrads && wc > 0) {
+            float w_norm = 0.0f;
+            int w_has_nan = 0;
+            for (size_t i = 0; i < wc; i++) {
+                if (!isfinite(wgrads[i])) { w_has_nan = 1; wgrads[i] = 0.0f; }
+                else w_norm += wgrads[i] * wgrads[i];
+            }
+            w_norm = sqrtf(w_norm + 1e-32f);
+            if (!isfinite(w_norm)) w_norm = 0.0f;
+            if (w_norm > max_grad_norm && w_norm > 0.0f) {
+                float w_scale = max_grad_norm / w_norm;
+                for (size_t i = 0; i < wc; i++) wgrads[i] *= w_scale;
+            }
+        }
+        if (cfc_get_bias_vector(network->cfc_network, &bgrads, &bc) == 0 && bgrads && bc > 0) {
+            float b_norm = 0.0f;
+            int b_has_nan = 0;
+            for (size_t i = 0; i < bc; i++) {
+                if (!isfinite(bgrads[i])) { b_has_nan = 1; bgrads[i] = 0.0f; }
+                else b_norm += bgrads[i] * bgrads[i];
+            }
+            b_norm = sqrtf(b_norm + 1e-32f);
+            if (!isfinite(b_norm)) b_norm = 0.0f;
+            if (b_norm > max_grad_norm && b_norm > 0.0f) {
+                float b_scale = max_grad_norm / b_norm;
+                for (size_t i = 0; i < bc; i++) bgrads[i] *= b_scale;
+            }
+        }
+    }
+
+    /* R5-FIX: 补充cell级门控梯度的全局裁剪。
+     * 之前仅裁剪共享参数梯度(weight_gradients/bias_gradients)，
+     * cell级门控梯度(input_gate_weight_grad/forget_gate_weight_grad/
+     * output_gate_weight_grad/gate_bias_grad等)从未被裁剪，
+     * 训练初期门控权重可能梯度爆炸产生NaN。 */
+    if (network->cfc_network && network->cfc_network->layers) {
+        float max_norm = network->config.max_grad_norm;
+        if (max_norm <= 0.0f) max_norm = 10.0f;
+        int num_layers = network->cfc_network->config.num_layers;
+        for (int l = 0; l < num_layers; l++) {
+            CfCCell* cell = network->cfc_network->layers[l];
+            if (!cell) continue;
+            size_t hs = cell->config.hidden_size;
+            size_t is = cell->config.input_size;
+            size_t w_size = is * hs;
+
+            /* 辅助函数：裁剪一个梯度数组 */
+            #define CLIP_GRAD_ARRAY(grad_ptr, count) do { \
+                if (grad_ptr) { \
+                    float g_norm = 0.0f; \
+                    for (size_t gi = 0; gi < (count); gi++) { \
+                        if (!isfinite(grad_ptr[gi])) grad_ptr[gi] = 0.0f; \
+                        else g_norm += grad_ptr[gi] * grad_ptr[gi]; \
+                    } \
+                    g_norm = sqrtf(g_norm + 1e-32f); \
+                    if (g_norm > max_norm && g_norm > 0.0f) { \
+                        float g_scale = max_norm / g_norm; \
+                        for (size_t gi = 0; gi < (count); gi++) grad_ptr[gi] *= g_scale; \
+                    } \
+                } \
+            } while(0)
+
+            CLIP_GRAD_ARRAY(cell->input_gate_weight_grad, w_size);
+            CLIP_GRAD_ARRAY(cell->forget_gate_weight_grad, w_size);
+            CLIP_GRAD_ARRAY(cell->output_gate_weight_grad, w_size);
+            CLIP_GRAD_ARRAY(cell->hidden_to_gate_weight_grad, hs * hs);
+            CLIP_GRAD_ARRAY(cell->hidden_to_activation_weight_grad, hs * hs);
+            CLIP_GRAD_ARRAY(cell->gate_bias_grad, hs * 3);
+            CLIP_GRAD_ARRAY(cell->time_constant_grad, hs);
+
+            #undef CLIP_GRAD_ARRAY
+        }
+    }
+
     /* P1-003修复: 四元数后处理反向梯度传播
      * 前向: qv[c] = qv[c]*decay + tanh(qv[c])*complement, 然后归一化
      * 反向: 先传递归一化梯度，再传递CfC式更新梯度 */
@@ -660,9 +742,10 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
             }
 
             /* 步骤1: 归一化层反向传播
-             *   y = x / ||x||
-             *   dy/dx = (I - y*y^T) / ||x||
-             *   简化: dL/dx = (dL/dy - y*(y·dL/dy)) / ||x|| */
+             *   前向: y = x / ||x||
+             *   雅可比: dy/dx = (I - y*y^T) / ||x||  (单位矩阵减外积)
+             *   链式法则精确梯度: dL/dx = (dL/dy - y*(y·dL/dy)) / ||x||
+             *   其中 y = x/||x||, y·dL/dy 是归一化方向与上游梯度的点积 */
             float norm = sqrtf(orig_qv[0]*orig_qv[0] + orig_qv[1]*orig_qv[1]
                              + orig_qv[2]*orig_qv[2] + orig_qv[3]*orig_qv[3]);
             if (norm > 1e-8f) {
@@ -957,6 +1040,24 @@ LNN* lnn_load(const char* filepath) {
         return NULL;
     }
 
+    /* 验证加载的权重数据无NaN/Inf */
+    {
+        float* wmat = NULL;
+        size_t wc = 0;
+        int has_invalid = 0;
+        if (cfc_get_weight_matrix(network->cfc_network, &wmat, &wc) == 0 && wmat && wc > 0) {
+            for (size_t i = 0; i < wc && !has_invalid; i++)
+                if (!isfinite(wmat[i])) has_invalid = 1;
+        }
+        if (has_invalid) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载的模型权重包含NaN/Inf，文件已损坏");
+            lnn_free(network);
+            fclose(file);
+            return NULL;
+        }
+    }
+
     // 加载隐藏状态
     size_t hidden_size = config.hidden_size;
     if (fread(network->hidden_state, sizeof(float), hidden_size, file) != hidden_size) {
@@ -979,17 +1080,18 @@ LNN* lnn_load(const char* filepath) {
     // 尝试加载扩展字段（v2格式）
     uint32_t ext_version = 0;
     if (fread(&ext_version, sizeof(uint32_t), 1, file) == 1 && ext_version == 2) {
-        fread(&network->enable_param_sharding, sizeof(int), 1, file);
-        fread(&network->num_local_shards, sizeof(size_t), 1, file);
-        fread(&network->enable_gradient_checkpointing, sizeof(int), 1, file);
-        fread(&network->enable_model_parallel, sizeof(int), 1, file);
-        fread(&network->enable_async_gradient_sync, sizeof(int), 1, file);
-        fread(&network->current_loss, sizeof(float), 1, file);
+        (void)(fread(&network->enable_param_sharding, sizeof(int), 1, file) == 1);
+        (void)(fread(&network->num_local_shards, sizeof(size_t), 1, file) == 1);
+        (void)(fread(&network->enable_gradient_checkpointing, sizeof(int), 1, file) == 1);
+        (void)(fread(&network->enable_model_parallel, sizeof(int), 1, file) == 1);
+        (void)(fread(&network->enable_async_gradient_sync, sizeof(int), 1, file) == 1);
+        (void)(fread(&network->current_loss, sizeof(float), 1, file) == 1);
         uint64_t fwd_bwd[2] = {0, 0};
-        fread(fwd_bwd, sizeof(uint64_t), 2, file);
-        network->forward_count = (size_t)fwd_bwd[0];
-        network->backward_count = (size_t)fwd_bwd[1];
-        fread(&network->total_training_time, sizeof(double), 1, file);
+        if (fread(fwd_bwd, sizeof(uint64_t), 2, file) == 2) {
+            network->forward_count = (size_t)fwd_bwd[0];
+            network->backward_count = (size_t)fwd_bwd[1];
+        }
+        (void)(fread(&network->total_training_time, sizeof(double), 1, file) == 1);
     }
 
     fclose(file);

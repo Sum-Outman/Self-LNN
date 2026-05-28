@@ -136,6 +136,11 @@ typedef struct CfCState {
     float time;                    /**< 当前时间 */
     float adaptation_rate;         /**< 自适应率 */
 
+    /* ZSFWS-008修复: 保存前向传播的output_gate用于CTBP反向传播
+     * 原代码用 og_approx=0.5+0.5*tanh(h) 保守估计，存在系统性偏差。
+     * 现在前向传播时存储真实的sigmoid(W*x+U*h+b)值。 */
+    float* saved_output_gate;      /**< 保存前向传播的output_gate [hidden_size] */
+
     /* RK45求解器中间状态 */
     float* rk45_k1;                /**< RK45 k1 */
     float* rk45_k2;                /**< RK45 k2 */

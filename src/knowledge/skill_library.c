@@ -61,10 +61,37 @@ static float cosine_similarity(const float* a, const float* b, int dim) {
 static void generate_embedding_impl(const SkillRecord* record, float* embedding, int dim) {
     memset(embedding, 0, dim * sizeof(float));
     if (!record || dim <= 0) return;
-    
-    /* P2-039修复: 使用n-gram哈希嵌入替代ASCII/255加权和
-     * 对技能名称、描述、标签分别哈希嵌入后加权混合，再进行L2归一化
-     * 确保不同技能文本产生有语义区分度的嵌入向量 */
+
+    /* ZSFWS-017修复: 优先使用共享LNN生成真实语义嵌入
+     * 原实现使用djb2哈希产生伪随机嵌入，违反"全液态神经网络"原则。
+     * 现优先通过共享LNN对技能文本进行语义编码，无LNN时回退到n-gram哈希。 */
+    {
+        extern void* selflnn_get_shared_lnn(void);
+        extern int selflnn_shared_lnn_encode_text(void*, const char*, float*, int);
+        void* shared_lnn = selflnn_get_shared_lnn();
+        if (shared_lnn) {
+            /* 构建技能文本: "名称: [name] 描述: [desc] 标签: [tags]" */
+            char text_buf[2048];
+            int text_len = snprintf(text_buf, sizeof(text_buf), "%s %s", record->name, record->description);
+            for (int t = 0; t < record->tag_count && text_len < (int)sizeof(text_buf) - 64; t++) {
+                text_len += snprintf(text_buf + text_len, sizeof(text_buf) - (size_t)text_len,
+                                     " %s", record->tags[t]);
+            }
+            if (selflnn_shared_lnn_encode_text(shared_lnn, text_buf, embedding, dim) == 0) {
+                /* L2归一化确保嵌入用于余弦相似度计算 */
+                float norm = 0.0f;
+                for (int i = 0; i < dim; i++) norm += embedding[i] * embedding[i];
+                norm = sqrtf(norm);
+                if (norm > 1e-10f) {
+                    float inv_norm = 1.0f / norm;
+                    for (int i = 0; i < dim; i++) embedding[i] *= inv_norm;
+                }
+                return;
+            }
+        }
+    }
+
+    /* 回退路径: n-gram字符哈希嵌入（LNN不可用时的备选方案） */
     float* name_emb = (float*)safe_calloc((size_t)dim, sizeof(float));
     float* desc_emb = (float*)safe_calloc((size_t)dim, sizeof(float));
     float* tag_emb = (float*)safe_calloc((size_t)dim, sizeof(float));

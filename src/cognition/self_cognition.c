@@ -44,6 +44,7 @@
 #include "selflnn/evolution/evolution_engine.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/gpu/gpu.h"
@@ -3830,9 +3831,8 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                                             (unsigned int)system->last_update_time * 12345 +
                                             (unsigned int)system->update_count * 67890;
             
-            // 线性同余生成器确定性伪随机序列（避免rand()的模拟性质）
-            deterministic_seed = (deterministic_seed * 1103515245 + 12345) & 0x7fffffff;
-            float deterministic_ratio = (float)(deterministic_seed % 10000) / 10000.0f;
+            // 使用密码学安全随机生成器确定性伪随机序列（避免LCG的不确定性）
+            float deterministic_ratio = secure_random_float();
             
             // 基于系统性能历史调整风险因子：性能越稳定，风险越小
             float stability_factor = 1.0f;

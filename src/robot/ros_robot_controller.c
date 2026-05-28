@@ -798,18 +798,45 @@ static void rrc_odom_cb(const void* msg, size_t msg_size, void* user_data) {
     if (!robot || !msg || msg_size == 0 || !robot->active) return;
 
     const char* json = (const char*)msg;
-    robot->position[0] = rrc_find_float(json, "\"x\":");
-    robot->position[1] = rrc_find_float(json, "\"y\":");
-    robot->position[2] = rrc_find_float(json, "\"z\":");
-    robot->orientation[0] = rrc_find_float(json, "\"x\":");
-    robot->orientation[1] = rrc_find_float(json, "\"y\":");
-    robot->orientation[2] = rrc_find_float(json, "\"z\":");
-    robot->orientation[3] = rrc_find_float(json, "\"w\":");
-    robot->linear_velocity[0] = rrc_find_float(json, "\"x\":");
-    robot->linear_velocity[1] = rrc_find_float(json, "\"y\":");
-    robot->linear_velocity[2] = rrc_find_float(json, "\"z\":");
-    robot->angular_velocity[0] = rrc_find_float(json, "\"x\":");
-    robot->angular_velocity[1] = rrc_find_float(json, "\"y\":");
-    robot->angular_velocity[2] = rrc_find_float(json, "\"z\":");
+
+    /* ZSFZS-F011: 修复JSON解析偏移bug
+     * rrc_find_float每次都从字符串开头搜索，而Odometry消息中
+     * position/orientation/linear/angular都有相同的"x":"y":"z":子字段，
+     * 导致不同区域读取到同一个值。修复：先用strstr定位到各区域，
+     * 再从该区域的起始位置开始解析对应字段。 */
+
+    /* 解析position区域: 定位到"position"后解析x/y/z */
+    const char* pos_ptr = strstr(json, "\"position\"");
+    if (pos_ptr) {
+        robot->position[0] = rrc_find_float(pos_ptr, "\"x\":");
+        robot->position[1] = rrc_find_float(pos_ptr, "\"y\":");
+        robot->position[2] = rrc_find_float(pos_ptr, "\"z\":");
+    }
+
+    /* 解析orientation区域: 定位到"orientation"后解析x/y/z/w */
+    const char* ori_ptr = strstr(json, "\"orientation\"");
+    if (ori_ptr) {
+        robot->orientation[0] = rrc_find_float(ori_ptr, "\"x\":");
+        robot->orientation[1] = rrc_find_float(ori_ptr, "\"y\":");
+        robot->orientation[2] = rrc_find_float(ori_ptr, "\"z\":");
+        robot->orientation[3] = rrc_find_float(ori_ptr, "\"w\":");
+    }
+
+    /* 解析linear速度区域: 定位到"linear"后解析x/y/z */
+    const char* lin_ptr = strstr(json, "\"linear\"");
+    if (lin_ptr) {
+        robot->linear_velocity[0] = rrc_find_float(lin_ptr, "\"x\":");
+        robot->linear_velocity[1] = rrc_find_float(lin_ptr, "\"y\":");
+        robot->linear_velocity[2] = rrc_find_float(lin_ptr, "\"z\":");
+    }
+
+    /* 解析angular速度区域: 定位到"angular"后解析x/y/z */
+    const char* ang_ptr = strstr(json, "\"angular\"");
+    if (ang_ptr) {
+        robot->angular_velocity[0] = rrc_find_float(ang_ptr, "\"x\":");
+        robot->angular_velocity[1] = rrc_find_float(ang_ptr, "\"y\":");
+        robot->angular_velocity[2] = rrc_find_float(ang_ptr, "\"z\":");
+    }
+
     robot->last_heartbeat = (double)time(NULL);
 }

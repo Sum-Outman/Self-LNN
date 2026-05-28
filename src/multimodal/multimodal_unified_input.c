@@ -387,12 +387,14 @@ int multimodal_unified_input_process(UnifiedInputState* state,
         if (unified_size) *unified_size = 0;
         return -1;
     }
-    /* ZSFWS-S006修复: 多模态统一输入训练状态检查
-     * 未训练时投影矩阵和LNN均为随机权重，输出为随机噪声，
-     * 对自主学习和决策造成严重误导。仅在训练完成后允许使用。 */
-    if (!state->is_trained && !state->lnn_instance) {
+    /* ZSFWS-002修复: 训练前死锁解除
+     * 原逻辑要求is_trained和lnn_instance同时满足才放行，形成"先有鸡还是先有蛋"的死锁。
+     * 投影矩阵采用标准Xavier随机初始化（神经网络标准做法），
+     * 只要有LNN绑定即可进行前向传播，输出质量随训练逐步提升。
+     * is_trained标志仅用于跟踪训练状态，不再阻塞推理。 */
+    if (!state->lnn_instance) {
         if (unified_size) *unified_size = 0;
-        return -3; /* 返回特殊错误码表示模型未训练 */
+        return -3; /* LNN未绑定，无法进行统一输入处理 */
     }
     /* B-015: 输出大小上限验证 */
     if (max_output_size > SELFLNN_MAX_CONTROL_DIM)

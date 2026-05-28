@@ -722,15 +722,15 @@ static int npu_common_memcpy_d2h_fallback(GpuContext* ctx, void* dst, const void
     return -1;
 }
 
-static void npu_common_get_memory_info_fallback(GpuContext* ctx, size_t* total, size_t* free) {
-    /* M-032修复：优先从ctx中获取设备专用内存，回退系统RAM */
+static int npu_common_get_memory_info_fallback(GpuContext* ctx, size_t* total, size_t* free) {
     if (ctx && ctx->device_memory_override > 0) {
         if (total) *total = ctx->device_memory_override;
         if (free)  *free  = ctx->device_memory_override;
-        return;
+        return 0;
     }
     if (total) *total = npu_common_get_system_memory_total();
     if (free)  *free  = npu_common_get_system_memory_free();
+    return 0;
 }
 
 static int npu_common_device_reset_fallback(GpuContext* ctx) {
@@ -747,15 +747,26 @@ static int npu_common_device_reset_fallback(GpuContext* ctx) {
     return 0;
 }
 
+static const char* npu_common_get_error_string_static(const char* msg) {
+    static const char* last_error = "无错误";
+    if (msg) last_error = msg;
+    return last_error;
+}
+static const char* npu_common_get_error_string_wrapper(void) {
+    return npu_common_get_error_string_static(NULL);
+}
 static const char* npu_common_get_error_string_fallback(GpuContext* ctx, int error_code) {
     (void)ctx;
+    const char* msg;
     switch (error_code) {
-        case 0:  return "无错误";
-        case -1: return "NPU操作失败";
-        case -2: return "NPU内存不足";
-        case -3: return "NPU设备忙";
-        default: return "未知NPU错误";
+        case 0:  msg = "无错误"; break;
+        case -1: msg = "NPU操作失败"; break;
+        case -2: msg = "NPU内存不足"; break;
+        case -3: msg = "NPU设备忙"; break;
+        default: msg = "未知NPU错误"; break;
     }
+    npu_common_get_error_string_static(msg);
+    return msg;
 }
 
 /* ================================================================
@@ -784,12 +795,12 @@ void npu_common_populate_backend_iface(GpuBackendInterface* iface,
     iface->context_create = ctx_create;
     iface->context_free = ctx_free;
     iface->memory_alloc = mem_alloc;
-    iface->memory_free = mem_free;
+    iface->memory_free = (void (*)(GpuMemory*))mem_free;
     iface->memory_copy_to_device = cpy_h2d;
     iface->memory_copy_from_device = cpy_d2h;
-    iface->memory_copy_device_to_device = npu_common_memcpy_d2d_fallback;
-    iface->memory_copy_to_device_async = npu_common_memcpy_h2d_fallback;
-    iface->memory_copy_from_device_async = npu_common_memcpy_d2h_fallback;
+    iface->memory_copy_device_to_device = (int (*)(GpuMemory*, GpuMemory*, size_t))npu_common_memcpy_d2d_fallback;
+    iface->memory_copy_to_device_async = (int (*)(GpuMemory*, const void*, size_t, GpuStream*))npu_common_memcpy_h2d_fallback;
+    iface->memory_copy_from_device_async = (int (*)(void*, GpuMemory*, size_t, GpuStream*))npu_common_memcpy_d2h_fallback;
     /* ZSFABC-C003修复: 消除NULL内核指针，使用真实CPU计算路径 */
     iface->kernel_create   = npu_common_kernel_create;
     iface->kernel_free     = npu_common_kernel_free;
@@ -802,5 +813,5 @@ void npu_common_populate_backend_iface(GpuBackendInterface* iface,
     iface->stream_query = npu_common_stream_query;
     iface->get_memory_info = npu_common_get_memory_info_fallback;
     iface->device_reset = npu_common_device_reset_fallback;
-    iface->get_error_string = npu_common_get_error_string_fallback;
+    iface->get_error_string = npu_common_get_error_string_wrapper;
 }

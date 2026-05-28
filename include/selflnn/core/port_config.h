@@ -51,10 +51,10 @@ extern "C" {
  *
  * WebSocket实时数据推送端口。
  * 用于前端实时接收系统状态更新。
- * ZSFWS-S008修复: 实际实现为独立的WebSocket服务器（非HTTP Upgrade复用），
- * 监听独立端口9090，由main.c中的ws_push_server独立管理。
+ * 使用HTTP升级（HTTP Upgrade）机制，与HTTP服务共用同一端口8080。
+ * 禁止使用独立端口，遵循README确定端口配置原则。
  */
-#define SELFLNN_WEBSOCKET_PORT      9090
+#define SELFLNN_WEBSOCKET_PORT      8080
 
 /**
  * @brief 分布式训练通信端口

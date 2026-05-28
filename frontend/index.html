@@ -48,7 +48,7 @@
         /* 前端配置 - 可在此处修改服务器地址和端口 */
         window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
             host: window.location.hostname || 'localhost',
-            port: 8080         /* HTTP端口，WebSocket通过HTTP Upgrade共用此端口 */
+            port: 8080         /* 统一端口，WebSocket通过HTTP Upgrade共用8080 */
         };
         /* 全局保护：合并页面中hidden section的DOM引用安全 */
         window._e = function(id,fn) { var el=document.getElementById(id); if(el) try{fn(el)}catch(e){} };

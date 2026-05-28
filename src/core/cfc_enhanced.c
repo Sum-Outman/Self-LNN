@@ -62,6 +62,9 @@ CfcEnhancedState* cfc_enhanced_state_create(void)
     state->solver_switches = 0;
     state->stiffness_detected_count = 0;
     state->multi_rate_active = 0;
+    state->saved_use_multi_timescale = 0;
+    state->saved_fast_tau_ratio = 0.1f;
+    state->saved_slow_tau_ratio = 10.0f;
     state->power_iter_buffer = NULL;
     state->power_iter_buffer2 = NULL;
     state->power_iter_buffer_size = 0;
@@ -198,22 +201,6 @@ static void cfc_simd_tanh_batch(const float* x, float* y, size_t n) {
     for (; i < n; i++) y[i] = tanhf(x[i]);
 }
 
-/* SSE CfC门控：y[i] = gate[i]*tanh(x[i]) + (1-gate[i])*state[i] */
-static void cfc_simd_gate_apply(const float* gate, const float* x, 
-                                 const float* state, float* y, size_t n) {
-    size_t i = 0;
-    __m128 one = _mm_set1_ps(1.0f);
-    for (; i + 4 <= n; i += 4) {
-        __m128 vg = _mm_loadu_ps(gate + i);
-        __m128 vx = _mm_loadu_ps(x + i);
-        __m128 vs = _mm_loadu_ps(state + i);
-        __m128 term1 = _mm_mul_ps(vg, vx);
-        __m128 term2 = _mm_mul_ps(_mm_sub_ps(one, vg), vs);
-        _mm_storeu_ps(y + i, _mm_add_ps(term1, term2));
-    }
-    for (; i < n; i++) y[i] = gate[i] * x[i] + (1.0f - gate[i]) * state[i];
-}
-
 /* SSE/AVX ReLU批量：y[i] = max(0, x[i]) */
 static void cfc_simd_relu_batch_x86(const float* x, float* y, size_t n) {
     __m128 zero = _mm_setzero_ps();
@@ -305,21 +292,6 @@ static void cfc_simd_tanh_batch(const float* x, float* y, size_t n) {
     for (; i < n; i++) y[i] = tanhf(x[i]);
 }
 
-static void cfc_simd_gate_apply(const float* gate, const float* x,
-                                 const float* state, float* y, size_t n) {
-    size_t i = 0;
-    float32x4_t one = vdupq_n_f32(1.0f);
-    for (; i + 4 <= n; i += 4) {
-        float32x4_t vg = vld1q_f32(gate + i);
-        float32x4_t vx = vld1q_f32(x + i);
-        float32x4_t vs = vld1q_f32(state + i);
-        float32x4_t term1 = vmulq_f32(vg, vx);
-        float32x4_t term2 = vmulq_f32(vsubq_f32(one, vg), vs);
-        vst1q_f32(y + i, vaddq_f32(term1, term2));
-    }
-    for (; i < n; i++) y[i] = gate[i] * x[i] + (1.0f - gate[i]) * state[i];
-}
-
 /* NEON ReLU批量：y[i] = max(0, x[i]) */
 static void cfc_simd_relu_batch_neon(const float* x, float* y, size_t n) {
     float32x4_t zero = vdupq_n_f32(0.0f);
@@ -350,9 +322,6 @@ static void cfc_scalar_sigmoid(const float* x, float* y, size_t n) {
 static void cfc_scalar_tanh(const float* x, float* y, size_t n) {
     for (size_t i = 0; i < n; i++) y[i] = tanhf(x[i]);
 }
-static void cfc_scalar_gate(const float* gate, const float* x, const float* state, float* y, size_t n) {
-    for (size_t i = 0; i < n; i++) y[i] = gate[i] * x[i] + (1.0f - gate[i]) * state[i];
-}
 #endif
 
 /* 统一调度：根据enable_simd选择SIMD或标量路径 */
@@ -364,15 +333,6 @@ float cfc_simd_dot(const float* a, const float* b, size_t n, int use_simd) {
     float s = 0.0f;
     for (size_t i = 0; i < n; i++) s += a[i] * b[i];
     return s;
-}
-
-void cfc_simd_gate_forward(const float* gate, const float* x, const float* state,
-                            float* y, size_t n, int use_simd) {
-#if CFC_SIMD_AVAILABLE
-    if (use_simd) { cfc_simd_gate_apply(gate, x, state, y, n); return; }
-#endif
-    (void)use_simd;
-    for (size_t i = 0; i < n; i++) y[i] = gate[i] * x[i] + (1.0f - gate[i]) * state[i];
 }
 
 void cfc_simd_activation_batch(const float* x, float* y, size_t n, int act_type, int use_simd) {
@@ -414,6 +374,9 @@ int cfc_enhanced_state_reset(CfcEnhancedState* state)
     state->solver_switches = 0;
     state->stiffness_detected_count = 0;
     state->multi_rate_active = 0;
+    state->saved_use_multi_timescale = 0;
+    state->saved_fast_tau_ratio = 0.1f;
+    state->saved_slow_tau_ratio = 10.0f;
     return 0;
 }
 
@@ -618,18 +581,25 @@ static int cfc_configure_multi_rate(CfCCell* cell, const CfcMultiRateConfig* mr_
 {
     if (!cell || !mr_config || !estate) return -1;
 
+    CfCCellConfig cfg;
+    if (cfc_cell_get_config(cell, &cfg) != 0) return -1;
+
+    /* P3-004修复: 首次调用时保存原始tau_ratio值（批量保存） */
+    if (!estate->multi_rate_active && !estate->saved_use_multi_timescale) {
+        estate->saved_use_multi_timescale = cfg.use_multi_timescale;
+        estate->saved_fast_tau_ratio = cfg.fast_tau_ratio;
+        estate->saved_slow_tau_ratio = cfg.slow_tau_ratio;
+    }
+
     if (!mr_config->enable_multi_rate) {
-        CfCCellConfig cfg;
-        if (cfc_cell_get_config(cell, &cfg) == 0) {
-            cfg.use_multi_timescale = 0;
-            cfc_cell_set_config(cell, &cfg);
-        }
+        /* P3-004修复: 禁用多速率时恢复原始tau_ratio值 */
+        cfg.use_multi_timescale = 0;
+        cfg.fast_tau_ratio = estate->saved_fast_tau_ratio;
+        cfg.slow_tau_ratio = estate->saved_slow_tau_ratio;
+        cfc_cell_set_config(cell, &cfg);
         estate->multi_rate_active = 0;
         return 0;
     }
-
-    CfCCellConfig cfg;
-    if (cfc_cell_get_config(cell, &cfg) != 0) return -1;
 
     cfg.use_multi_timescale = 1;
     cfg.fast_tau_ratio = mr_config->fast_ratio;

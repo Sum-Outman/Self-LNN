@@ -11,6 +11,7 @@
 
 #include "selflnn/robot/ros_node.h"
 #include "selflnn/robot/ros_bridge.h"
+#include "selflnn/core/port_config.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
@@ -61,7 +62,7 @@ struct RosNode {
 /* 构建rosbridge连接URI */
 static void build_rosbridge_uri(const RosNodeConfig* config, char* uri, size_t size) {
     snprintf(uri, size, "ws://%s:%d", config->master_host,
-             config->master_port == 11311 ? 9090 : config->master_port);
+             config->master_port == 11311 ? SELFLNN_WEBSOCKET_PORT : config->master_port);
 }
 
 RosNodeConfig ros_node_config_default(const char* node_name) {
@@ -131,7 +132,7 @@ int ros_node_connect_to_master(RosNode* node, const char* master_uri) {
     memset(bridge_host, 0, sizeof(node->bridge_host_buf));
     snprintf(bridge_host, sizeof(node->bridge_host_buf), "%s", node->config.master_host);
     bridge_cfg.bridge_host = bridge_host;
-    bridge_cfg.bridge_port = 9090;
+    bridge_cfg.bridge_port = SELFLNN_WEBSOCKET_PORT;
 
     /* 释放旧连接 */
     if (node->bridge) {

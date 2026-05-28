@@ -35,9 +35,15 @@
  *     建议：correction的根因分析结果可传递给reflection作为高级认知的输入
  * ============================================================
  */
+/* ZSFZS-F034: 必须在include之前定义,确保cfc_network.h完整结构可见 */
+#define SELFLNN_IMPLEMENTATION
+
 #include "selflnn/cognition/deep_correction.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/selflnn.h"
+#include "selflnn/core/lnn.h"
+#include "selflnn/core/cfc_network.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1385,11 +1391,150 @@ int dc_get_rules(const DCCorrectionSystem* dcs, DCCorrectionRule* out, int max_c
 }
 
 /* ================================================================
+ * ZSFZS-F027: 修正结果到LNN权重的实际应用通道
+ *
+ * 将自我修正系统的文本修正建议转化为LNN输出投影层的SGD微调。
+ * 解决修正假设仅停留在文本层面、不产生实际模型效果的问题。
+ *
+ * 工作原理：
+ *   1. 修正文本通过字符哈希嵌入转为64维归一化方向向量
+ *   2. 仅对高置信度(>0.7)的修正执行，避免权重抖动
+ *   3. 使用极小的学习率(0.001 * confidence)，防止破坏已训练权重
+ *   4. 优先微调输出投影层(W_out + b_out)，
+ *      若无独立投影层(output_size==hidden_size)则微调偏置层
+ *   5. 微调后自动同步共享参数到各层活跃权重
+ *
+ * 参数布局（param_block一维展开）：
+ *   [weights(total_w)] [biases(total_b)] [W_out_opt] [b_out_opt]
+ * ================================================================ */
+static int dc_apply_correction_to_lnn(const DCCorrectionHypothesis* hyp) {
+    if (!hyp) return -1;
+
+    /* 仅对高置信度(>0.7)的修正执行LNN权重调整，避免低质量修正导致权重抖动 */
+    if (hyp->confidence <= 0.70f) {
+        return -2;
+    }
+
+    /* 获取全局共享LNN实例 */
+    void* raw_ptr = selflnn_get_shared_lnn();
+    if (!raw_ptr) return -3;
+    LNN* lnn = (LNN*)raw_ptr;
+
+    /* 获取CfC网络句柄以直接操作参数 */
+    CfCNetwork* cfc = lnn_get_cfc_network(lnn);
+    if (!cfc) return -4;
+
+    /* 获取权重矩阵和偏置向量，用于计算输出投影层偏移 */
+    float* weight_matrix = NULL;
+    size_t weight_count = 0;
+    if (cfc_get_weight_matrix(cfc, &weight_matrix, &weight_count) != 0 || !weight_matrix) {
+        return -5;
+    }
+
+    float* bias_vector = NULL;
+    size_t bias_count = 0;
+    if (cfc_get_bias_vector(cfc, &bias_vector, &bias_count) != 0 || !bias_vector) {
+        return -6;
+    }
+
+    /* 获取网络配置以确定维度 */
+    size_t hidden_size = cfc->config.hidden_size;
+    size_t output_size = cfc->config.output_size;
+    size_t has_out_proj = (output_size != hidden_size) ? 1 : 0;
+
+    /* ================================================================
+     * 步骤1: 字符嵌入 — 将修正文本转为64维方向向量
+     *   使用乘性哈希(a*2654435761)将每个字符映射到嵌入维度索引，
+     *   累加归一化字符值，然后L2归一化获得单位方向向量。
+     * ================================================================ */
+    #define DC_EMBEDDING_DIM 64
+    float embedding[DC_EMBEDDING_DIM];
+    memset(embedding, 0, sizeof(embedding));
+
+    const char* text = hyp->proposed_fix;
+    size_t text_len = strlen(text);
+    unsigned int hash_seed = 2654435761u;
+    for (size_t i = 0; i < text_len; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        int idx = (int)(((unsigned int)ch * hash_seed) % (unsigned int)DC_EMBEDDING_DIM);
+        embedding[idx] += (float)ch / 255.0f;
+    }
+
+    /* L2归一化：确保嵌入向量的模长为1 */
+    float norm = 0.0f;
+    for (int i = 0; i < DC_EMBEDDING_DIM; i++) {
+        norm += embedding[i] * embedding[i];
+    }
+    if (norm > 1e-10f) {
+        norm = sqrtf(norm);
+        float inv_norm = 1.0f / norm;
+        for (int i = 0; i < DC_EMBEDDING_DIM; i++) {
+            embedding[i] *= inv_norm;
+        }
+    }
+
+    /* ================================================================
+     * 步骤2: 计算学习率 — 极小学习率 = 0.001 * 置信度
+     *   高置信度(0.7~1.0) → lr范围: 0.0007 ~ 0.001
+     *   确保权重变化远小于正常训练步长，防止破坏已有知识
+     * ================================================================ */
+    float lr = 0.001f * hyp->confidence;
+
+    /* ================================================================
+     * 步骤3: 对输出投影层做SGD微调
+     *   param_block布局: [weights(weight_count)] [biases(bias_count)] [W_out] [b_out]
+     *   W_out起始偏移 = weight_count + bias_count
+     *
+     *   如果有独立输出投影层：微调W_out + b_out
+     *   如果无独立投影层（output_size==hidden_size）：微调偏置向量区
+     *   因为CfC输出直接作为最终输出，偏置调整影响输出分布
+     * ================================================================ */
+    float* params = lnn_get_parameters(lnn);
+    if (!params) return -7;
+
+    size_t out_offset = weight_count + bias_count; /* W_out起始位置 */
+    size_t out_w_size = has_out_proj ? (output_size * hidden_size) : 0;
+    size_t out_b_size = has_out_proj ? output_size : bias_count;
+
+    if (has_out_proj) {
+        /* 独立输出投影层存在：微调W_out矩阵 */
+        for (size_t i = 0; i < out_w_size; i++) {
+            int emb_idx = (int)(i % (size_t)DC_EMBEDDING_DIM);
+            params[out_offset + i] -= lr * embedding[emb_idx];
+        }
+        /* 微调b_out偏置（使用一半的嵌入强度） */
+        size_t b_out_offset = out_offset + out_w_size;
+        int start_emb_idx = (int)(out_w_size % (size_t)DC_EMBEDDING_DIM);
+        for (size_t i = 0; i < out_b_size; i++) {
+            int emb_idx = (start_emb_idx + (int)i) % DC_EMBEDDING_DIM;
+            params[b_out_offset + i] -= lr * 0.5f * embedding[emb_idx];
+        }
+    } else {
+        /* 无独立投影层：微调偏置向量区（输出直接来自CfC最终层） */
+        size_t bias_start = weight_count;
+        for (size_t i = 0; i < bias_count; i++) {
+            int emb_idx = (int)(i % (size_t)DC_EMBEDDING_DIM);
+            params[bias_start + i] -= lr * 0.3f * embedding[emb_idx];
+        }
+    }
+
+    /* ================================================================
+     * 步骤4: 同步共享参数块到各层活跃细胞权重
+     *   必须调用此函数，否则cfc_forward使用的仍是旧权重
+     * ================================================================ */
+    cfc_sync_shared_to_cells(cfc);
+
+    return 0;
+}
+
+/* ================================================================
  * 完整5步自我修正流水线：
  *   Step1: dc_detect_error → 检测错误
  *   Step2: dc_diagnose → 分析根因（贝叶斯+规则融合）
  *   Step3: dc_generate → 生成修正方案
- *   Step4: dc_apply → 应用修正
+ *   Step4: dc_apply → 应用修正（标记已解决）
+ *   ZSFZS-F027: Step4.5 → dc_apply_correction_to_lnn() 
+ *               将高置信度修正转为LNN输出投影层权重微调
  *   Step5: dc_verify → 验证修正效果
  * ================================================================ */
 
@@ -1428,6 +1573,10 @@ int dc_run_full_correction_pipeline(DCCorrectionSystem* dcs,
     /* Step 4: 应用修正 */
     int applied = dc_apply_correction(dcs, hyps[0].hypothesis_id);
     if (applied != 0) return -1;
+
+    /* ZSFZS-F027: 将高置信度修正转化为LNN输出投影层权重微调
+     * 仅当置信度>0.7时执行，使用极小学习率(0.001*confidence)防止破坏已知权重 */
+    dc_apply_correction_to_lnn(&hyps[0]);
 
     if (out_hypothesis) *out_hypothesis = hyps[0];
 

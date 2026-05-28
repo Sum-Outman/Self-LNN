@@ -5278,8 +5278,8 @@ class WebSocketManager {
     constructor(url) {
         /* BUG-5修复: 运行时动态读取window.SELFLNN_CONFIG而非静态捕获 */
         var cfg = window.SELFLNN_CONFIG || { host: 'localhost', port: 8080 };
-        /* FIX-7: WebSocket端口从SELFLNN_CONFIG.wsPort读取，默认9090 */
-        var wsPort = cfg.wsPort || 9090;
+        /* WebSocket端口与HTTP共用8080端口，通过HTTP Upgrade升级连接 */
+        var wsPort = cfg.wsPort || 8080;
         var wsProtocol = (cfg.host === 'localhost' || cfg.host === '127.0.0.1') ? 'ws://' : 'wss://';
         this.url = url || (wsProtocol + cfg.host + ':' + wsPort + '/ws');
         this.ws = null;

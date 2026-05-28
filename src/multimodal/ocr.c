@@ -112,7 +112,7 @@ struct OcrProcessor {
     int text_feature_dim;                /**< 文本特征维度 */
     CharSegmentationProcessor* char_seg_proc; /**< 增强字符分割处理器 */
     int use_enhanced_segmentation;       /**< 是否使用增强分割 */
-    void* cfc_ocr_net;                   /**< CfC-LNN OCR网络句柄（单一模型共享） */
+    CfCOcrNet* cfc_ocr_net;              /**< CfC-LNN OCR网络句柄（单一模型共享） */
     int use_cfc_ocr;                     /**< F-011: 优先使用CfC-LNN OCR网络识别 */
     int cfc_ocr_is_trained;              /**< ZSFWS-M006: CfC OCR网络是否已完成训练 */
     OcrCnnClassifier* cnn_classifier;    /**< CNN字符分类器（优先使用，回退到模板匹配） */
@@ -2278,7 +2278,7 @@ int ocr_recognize_chars(OcrProcessor* processor,
         float conf = 0.9f;
         char text_buffer[512];
         memset(text_buffer, 0, sizeof(text_buffer));
-        int text_len = cfc_ocr_recognize(processor->cfc_ocr_net, char_images, 
+        int text_len = cfc_ocr_recognize((void*)processor->cfc_ocr_net, char_images, 
                                           char_width, char_height, text_buffer, 
                                           (int)(sizeof(text_buffer)-1), &conf);
         if (text_len > 0) {
@@ -2611,17 +2611,17 @@ int crnn_recognize_text(OcrProcessor* processor, const float* image,
     if (!processor || !image || !text_out) return -1;
 
     /* F-011: 优先使用处理器上的持久CfC OCR网络，避免每次创建新的 */
-    void* net = processor->cfc_ocr_net;
+    CfCOcrNet* net = processor->cfc_ocr_net;
     if (!net) {
-        if (cfc_ocr_net_create(image_h, image_w, CRNN_NUM_CHAR_CLASSES, 256, 128, &net) != 0) return -1;
+        if (cfc_ocr_net_create(image_h, image_w, CRNN_NUM_CHAR_CLASSES, 256, 128, (void**)&net) != 0) return -1;
         if (!net) return -1;
     }
 
-    int ret = cfc_ocr_recognize(net, image, image_w, image_h, text_out, max_text_len, confidence);
+    int ret = cfc_ocr_recognize((void*)net, image, image_w, image_h, text_out, max_text_len, confidence);
     
     /* 仅在临时创建的网络时才释放 */
     if (!processor->cfc_ocr_net || net != processor->cfc_ocr_net) {
-        cfc_ocr_net_free(net);
+        cfc_ocr_net_free((void*)net);
     }
     return ret;
 }
@@ -2640,10 +2640,10 @@ int ocr_enable_cfc_mode(OcrProcessor* processor, int enable) {
 /* F-011: 设置/替换CfC OCR网络 */
 int ocr_set_cfc_network(OcrProcessor* processor, void* cfc_net) {
     if (!processor) return -1;
-    if (processor->cfc_ocr_net && processor->cfc_ocr_net != cfc_net) {
-        cfc_ocr_net_free(processor->cfc_ocr_net);
+    if (processor->cfc_ocr_net && processor->cfc_ocr_net != (CfCOcrNet*)cfc_net) {
+        cfc_ocr_net_free((void*)processor->cfc_ocr_net);
     }
-    processor->cfc_ocr_net = cfc_net;
+    processor->cfc_ocr_net = (CfCOcrNet*)cfc_net;
     processor->use_cfc_ocr = (cfc_net != NULL) ? 1 : 0;
     return 0;
 }
@@ -2821,11 +2821,11 @@ int ocr_processor_load_model(OcrProcessor* processor, const char* model_path) {
     }
     
     /* 第二优先级：尝试加载CfC OCR网络模型文件 */
-    void* loaded_net = NULL;
-    int ret = cfc_ocr_net_load(&loaded_net, model_path);
+    CfCOcrNet* loaded_net = NULL;
+    int ret = cfc_ocr_net_load((void**)&loaded_net, model_path);
     if (ret == 0 && loaded_net) {
         if (processor->cfc_ocr_net) {
-            cfc_ocr_net_free(processor->cfc_ocr_net);
+            cfc_ocr_net_free((void*)processor->cfc_ocr_net);
         }
         processor->cfc_ocr_net = loaded_net;
         processor->use_cfc_ocr = 1;
@@ -2875,7 +2875,7 @@ int ocr_processor_save_model(OcrProcessor* processor, const char* model_path) {
     
     /* 第二优先级：保存CfC OCR网络 */
     if (processor->cfc_ocr_net) {
-        int ret = cfc_ocr_net_save(processor->cfc_ocr_net, model_path);
+        int ret = cfc_ocr_net_save((void*)processor->cfc_ocr_net, model_path);
         if (ret == 0) {
             log_info("[OCR] ocr_processor_save_model: CfC OCR模型保存成功，路径=%s", model_path);
             return 0;
@@ -2943,8 +2943,8 @@ int ocr_processor_train_model(OcrProcessor* processor,
     if (!processor->cfc_ocr_net) {
         int num_classes = (processor->config.num_char_classes > 0) ?
                           processor->config.num_char_classes : 256;
-        void* net = NULL;
-        if (cfc_ocr_net_create(image_height, image_width, num_classes, 256, 128, &net) != 0) {
+        CfCOcrNet* net = NULL;
+        if (cfc_ocr_net_create(image_height, image_width, num_classes, 256, 128, (void**)&net) != 0) {
             log_error("[OCR] ocr_processor_train_model: CfC网络创建失败");
             return -1;
         }
@@ -2962,7 +2962,7 @@ int ocr_processor_train_model(OcrProcessor* processor,
                 int idx = b + s;
                 const float* image = training_images + (size_t)idx * (size_t)(image_width * image_height);
                 int label_len = (training_labels[idx]) ? (int)strlen(training_labels[idx]) : 0;
-                int ret = cfc_ocr_net_train_step(processor->cfc_ocr_net,
+                int ret = cfc_ocr_net_train_step((void*)processor->cfc_ocr_net,
                                                   image, image_height, image_width, 1,
                                                   (const int*)training_labels[idx], label_len,
                                                   learning_rate, NULL);

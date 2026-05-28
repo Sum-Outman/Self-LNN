@@ -40,7 +40,7 @@ struct VadProcessor {
     int history_index;               /**< 历史缓冲区索引 */
     
     // 机器学习模型（如果需要）
-    void* ml_model;                  /**< 机器学习模型句柄 */
+    LNN* ml_model;                   /**< 液态神经网络模型句柄 */
     int ml_model_trained;            /**< 机器学习模型是否已训练 */
     int ml_model_owns;               /**< 是否拥有模型所有权（0=共享全局LNN） */
     
@@ -756,7 +756,7 @@ int vad_train_machine_learning(VadProcessor* processor,
     
     // 如果已有旧的LNN模型，先释放
     if (processor->ml_model && processor->ml_model_owns) {
-        lnn_free((LNN*)processor->ml_model);
+        lnn_free(processor->ml_model);
         processor->ml_model = NULL;
     }
     
@@ -895,7 +895,7 @@ int vad_train_machine_learning(VadProcessor* processor,
     }
     
     // 保存训练好的模型到处理器
-    processor->ml_model = (void*)lnn_net;
+    processor->ml_model = lnn_net;
     processor->config.algorithm = VAD_MACHINE_LEARNING;
     processor->ml_model_trained = 1;
     
@@ -1217,7 +1217,7 @@ void vad_processor_free(VadProcessor* processor) {
     
     // 如果使用了机器学习模型（LNN），仅释放自建的
     if (processor->ml_model && processor->ml_model_owns) {
-        lnn_free((LNN*)processor->ml_model);
+        lnn_free(processor->ml_model);
         processor->ml_model = NULL;
     }
     

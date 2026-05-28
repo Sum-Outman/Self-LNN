@@ -1699,10 +1699,6 @@ MixedPrecisionContext* mixed_precision_create(NeuralNetwork* network,
     context->fp32_buffer = NULL;
     context->buffer_size = 0;
 
-    // 初始化GPU转换函数指针
-    context->gpu_fp32_to_fp16 = NULL;
-    context->gpu_fp16_to_fp32 = NULL;
-
     // 执行硬件FP16支持检测并设置最优转换路径
     context->hardware = mixed_precision_detect_hardware_support();
     mixed_precision_setup_gpu_conversion_paths(context);
@@ -1741,6 +1737,15 @@ MixedPrecisionContext* mixed_precision_create(NeuralNetwork* network,
                     layer->gradient_size = 0;
                 }
             }
+        }
+        /* FIX-F3: 分配FP16转换缓冲区（输入+隐藏状态的最大大小） */
+        {
+            size_t max_buffer = network_config.input_size;
+            if (network_config.hidden_size > max_buffer) max_buffer = network_config.hidden_size;
+            max_buffer = (max_buffer + 7) & ~7u;  /* 8字节对齐 */
+            context->buffer_size = max_buffer;
+            context->fp16_buffer = safe_malloc(max_buffer * sizeof(fp16_t) + 32);
+            context->fp32_buffer = safe_malloc(max_buffer * sizeof(float) + 32);
         }
     } else {
         // 无法获取网络配置，使用默认值

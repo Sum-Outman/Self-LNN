@@ -43,6 +43,13 @@
 static XorshiftPrng micro_prng;
 static int micro_prng_initialized = 0;
 
+/* ZSFZS-F026: 知识库更新事件通知回调
+ * 当 knowledge_base_add() 成功写入新知识后调用此回调，
+ * 上层系统可注册回调以主动触发LNN知识嵌入重新编码、推理引擎缓存刷新等操作。
+ * 写锁内调用，回调应轻量（设置标志位），禁止在回调内再次操作知识库。 */
+static KnowledgeUpdateCallback g_kb_update_notify = NULL;
+static void* g_kb_notify_user_data = NULL;
+
 /**
  * @brief 计算文本匹配分数（0-3分）
  * @param text 待检查文本
@@ -780,6 +787,14 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     }
     if (internal_entry->entry.object) {
         inverted_index_add_key(&kb->object_index, internal_entry->entry.object, internal_entry->id);
+    }
+
+    /* ZSFZS-F026: 知识库更新事件通知
+     * 在写锁内调用回调，通知上层系统有新知识写入。
+     * 回调应极其轻量（仅设置标志位），不能操作知识库（避免死锁）。
+     * 实际的知识嵌入重新编码由上层在AGI后台循环中异步处理。 */
+    if (g_kb_update_notify) {
+        g_kb_update_notify(g_kb_notify_user_data);
     }
 
     KB_WUNLOCK(kb);
@@ -5704,6 +5719,40 @@ void* knowledge_get_lnn_network(const KnowledgeBase* kb) {
 int knowledge_has_lnn_integration(const KnowledgeBase* kb) {
     if (!kb || !kb->cfc_embed) return 0;
     return cfc_embed_get_lnn_network(kb->cfc_embed) != NULL;
+}
+
+/* ZSFZS-F026: 注册知识库更新事件通知回调
+ * 回调在 knowledge_base_add() 的写锁内调用，必须轻量（仅设置标志位），
+ * 禁止在回调内再次操作知识库（会导致死锁）。
+ * callback: 通知回调函数指针，传NULL可取消注册
+ * user_data: 透传到回调的用户数据 */
+void knowledge_base_set_update_callback(KnowledgeUpdateCallback callback, void* user_data) {
+    g_kb_update_notify = callback;
+    g_kb_notify_user_data = user_data;
+}
+
+/* ZSFZS-F026: 触发CfC嵌入引擎全量重新训练
+ * 当知识库通过回调机制收到更新通知后，AGI后台循环调用此函数
+ * 对新增的知识条目进行嵌入向量重新编码。
+ * 使用外部LNN进行前向传播（如果已连接），提升嵌入质量。
+ * epochs: 训练轮数，传0则使用默认2轮（轻量刷新） */
+int knowledge_base_retrain_embeddings(KnowledgeBase* kb, int epochs) {
+    if (!kb || !kb->cfc_embed) return -1;
+
+    int train_epochs = (epochs > 0) ? epochs : 2;
+
+    /* 将共享LNN连接到CfC嵌入引擎以提升嵌入质量 */
+    void* shared_lnn = knowledge_get_lnn_network(kb);
+    if (!shared_lnn) {
+        /* 尝试通过全局LNN注册获取（如果尚未通过 knowledge_set_lnn_network 设置） */
+        extern void* g_global_lnn;
+        if (g_global_lnn) {
+            cfc_embed_set_lnn_network(kb->cfc_embed, g_global_lnn);
+        }
+    }
+
+    int ret = cfc_embed_train(kb->cfc_embed, train_epochs);
+    return ret;
 }
 
 /* ============================================================================

@@ -257,7 +257,11 @@ typedef struct {
 
 /**
  * @brief 贝叶斯网络
+ * 
+ * 注意：若 reasoning.h 已包含（定义了SELFLNN_REASONING_H），
+ * 则跳过此定义使用 reasoning.h 中的 BayesianNetwork 兼容定义。
  */
+#ifndef SELFLNN_REASONING_H
 typedef struct {
     char name[UR_MAX_TERM_LEN];          /**< 网络名称 */
     ProbVariable* variables;             /**< 变量数组 */
@@ -268,6 +272,7 @@ typedef struct {
     int* adj_matrix;                     /**< 邻接矩阵（var_count x var_count） */
     int adj_capacity;                    /**< 邻接矩阵容量 */
 } BayesianNetwork;
+#endif /* !SELFLNN_REASONING_H */
 
 /**
  * @brief 贝叶斯推理引擎

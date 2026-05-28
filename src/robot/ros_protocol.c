@@ -1057,8 +1057,8 @@ const char* ros_topic_type_to_string(int type_id) {
     }
 }
 
-/* 简单MD5计算（用于消息类型匹配验证） */
-static void simple_md5_compute(const char* data, size_t len, char* output, size_t output_size) {
+/* 简单消息哈希计算（用于ROS消息类型匹配验证，非标准MD5） */
+static void ros_msg_hash_compute(const char* data, size_t len, char* output, size_t output_size) {
     /* 使用简单哈希算法生成MD5风格的32字符十六进制串 */
     uint32_t h0 = 0x67452301;
     uint32_t h1 = 0xEFCDAB89;
@@ -1165,9 +1165,9 @@ int ros_get_md5_from_type(const char* type_name, char* md5_out, size_t md5_size)
 
     if (!definition) {
         /* 未知类型，生成基于名称的哈希 */
-        simple_md5_compute(type_name, strlen(type_name), md5_out, md5_size);
+        ros_msg_hash_compute(type_name, strlen(type_name), md5_out, md5_size);
     } else {
-        simple_md5_compute(definition, strlen(definition), md5_out, md5_size);
+        ros_msg_hash_compute(definition, strlen(definition), md5_out, md5_size);
     }
 
     return ROS_OK;
@@ -1798,7 +1798,9 @@ static int dds_send_discovery(DDSContext* ctx) {
 }
 
 /* 处理收到的DDS发现数据包 */
-static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, size_t data_size) {
+/* ZSFZS-F019: 新增 from_addr 参数，用于获取远程参与者真实IP地址 */
+static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, size_t data_size,
+                                          const struct sockaddr_in* from_addr) {
     if (data_size < 20) return;
 
     /* 验证RTPS头 */
@@ -1827,6 +1829,7 @@ static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, s
     /* 解析子消息 */
     uint32_t remote_user_traffic_port = 0;
     uint32_t remote_discovery_port = 0;
+    uint32_t remote_ip_addr = 0;            /* ZSFZS-F019: 从SPDP解析的远程IP */
     char remote_node_name[128] = {0};
 
     while ((size_t)(ptr - data) + 4 <= data_size) {
@@ -1861,10 +1864,15 @@ static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, s
 
                 switch (param_id) {
                     case 0x0031: /* PID_DEFAULT_UNICAST_LOCATOR */
-                        if (param_len >= 8) {
+                        if (param_len >= 12) {
                             read_u32_le(&ptr); /* kind */
                             remote_user_traffic_port = read_u32_le(&ptr);
-                            /* skip address */
+                            /* ZSFZS-F019: 提取远程IP地址（little-endian -> 网络字节序） */
+                            remote_ip_addr = read_u32_le(&ptr);
+                            ptr += (size_t)(param_len - 12);
+                        } else if (param_len >= 8) {
+                            read_u32_le(&ptr); /* kind */
+                            remote_user_traffic_port = read_u32_le(&ptr);
                             ptr += (size_t)(param_len - 8);
                         } else {
                             ptr += param_len;
@@ -1916,6 +1924,20 @@ static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, s
                 dp->domain_id = ctx->domain_id;
                 dp->user_traffic_port = remote_user_traffic_port;
                 dp->discovery_port = remote_discovery_port;
+
+                /* ZSFZS-F019: 确定远程参与者真实IP地址 */
+                /* 优先使用SPDP中宣告的远程IP，若为无效/回环则用recvfrom源地址回退 */
+                {
+                    uint8_t first_octet = (uint8_t)(remote_ip_addr >> 24);
+                    if (remote_ip_addr != 0 && first_octet != 127 && from_addr) {
+                        dp->remote_ip = remote_ip_addr;
+                    } else if (from_addr && from_addr->sin_addr.s_addr != 0) {
+                        dp->remote_ip = from_addr->sin_addr.s_addr;
+                    } else {
+                        dp->remote_ip = htonl(INADDR_BROADCAST);
+                    }
+                }
+
                 dp->protocol_version_major = version_major;
                 dp->protocol_version_minor = version_minor;
                 dp->vendor_id = vendor_id;
@@ -1929,10 +1951,22 @@ static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, s
                     ctx->participant_callback(dp, 1, ctx->participant_callback_data);
                 }
             } else if (participant_idx >= 0) {
-                /* 更新已存在参与者的最后可见时间 */
+                /* 更新已存在参与者的最后可见时间和远程IP */
                 ctx->remote_participants[participant_idx].participant.last_seen_ms =
                     (int64_t)time(NULL) * 1000;
                 ctx->remote_participants[participant_idx].participant.is_alive = 1;
+
+                /* ZSFZS-F019: 更新远程IP（防止地址变更） */
+                {
+                    DDSDomainParticipant* dp = &ctx->remote_participants[participant_idx].participant;
+                    uint8_t first_octet = (uint8_t)(remote_ip_addr >> 24);
+                    if (remote_ip_addr != 0 && first_octet != 127) {
+                        dp->remote_ip = remote_ip_addr;
+                    } else if (from_addr && from_addr->sin_addr.s_addr != 0 &&
+                               dp->remote_ip == 0) {
+                        dp->remote_ip = from_addr->sin_addr.s_addr;
+                    }
+                }
             }
         } else {
             /* 跳过未知子消息 */
@@ -1965,7 +1999,8 @@ int dds_discovery_step(DDSContext* ctx) {
                                   sizeof(recv_buf), 0,
                                   (struct sockaddr*)&from_addr, &from_len);
         if (recvd > 0) {
-            dds_process_discovery_packet(ctx, recv_buf, (size_t)recvd);
+            /* ZSFZS-F019: 传入实际源地址用于确定远程IP */
+            dds_process_discovery_packet(ctx, recv_buf, (size_t)recvd, &from_addr);
         }
 
         FD_ZERO(&read_fds);
@@ -2130,7 +2165,13 @@ int dds_write_data(DDSContext* ctx, const char* topic_name,
         memset(&dest, 0, sizeof(dest));
         dest.sin_family = AF_INET;
         dest.sin_port = htons((unsigned short)dp->user_traffic_port);
-        dest.sin_addr.s_addr = htonl(0x7F000001u | ((uint32_t)(i + 1) << 24));
+        /* ZSFZS-F019: 使用SPDP发现阶段获得的远程IP地址替代硬编码127.0.0.x */
+        if (dp->remote_ip != 0) {
+            dest.sin_addr.s_addr = dp->remote_ip;
+        } else {
+            /* 回退：远程IP未知时使用广播地址 */
+            dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+        }
 
         /* 发送数据 */
         sendto(ctx->user_traffic_socket, (const char*)packet, (int)written, 0,

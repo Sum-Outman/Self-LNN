@@ -126,6 +126,7 @@ struct MultiAgentSystem {
     int synchronization_counter;
     float synchronization_error;
     void* cfc_private_data;
+    int enabled;            /* ZSFZS-F024: 多智能体系统启停控制标志 */
 };
 
 /* 静态函数原型声明 */
@@ -1389,6 +1390,8 @@ MultiAgentSystem* multi_agent_system_create(const MultiAgentConfig* config) {
         }
     }
     
+    system->enabled = 1;  /* ZSFZS-F024: 默认启用多智能体系统 */
+    
     return system;
 }
 
@@ -1453,6 +1456,104 @@ void multi_agent_system_destroy(MultiAgentSystem* system) {
     
     // 释放系统结构体本身
     safe_free((void**)&system);
+}
+
+/* ============================================================================
+ * ZSFZS-F024: 多智能体系统启停控制
+ * ============================================================================ */
+
+/**
+ * @brief 设置多智能体系统的启用状态
+ *
+ * 启用时激活智能体决策、任务调度和集体学习。
+ * 禁用时停止所有智能体活动，清空消息队列和任务队列，
+ * 但保留智能体状态、知识和协作关系。
+ *
+ * @param system 多智能体系统
+ * @param enabled 1=启用, 0=禁用
+ * @return int 成功返回0，失败返回-1
+ */
+int multi_agent_set_enabled(MultiAgentSystem* system, int enabled) {
+    if (!system) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "多智能体系统设置启用状态：参数为空");
+        return -1;
+    }
+
+    int val = (enabled != 0) ? 1 : 0;
+
+    if (val == system->enabled) {
+        return 0;  /* 状态未变化，无需操作 */
+    }
+
+    system_mutex_lock(&system->system_mutex);
+
+    if (val) {
+        /* 启用：恢复智能体可用状态 */
+        for (int i = 0; i < system->agent_count; i++) {
+            Agent* ag = system->agents[i];
+            if (ag) {
+                ag->state.available = 1;
+                ag->state.busy = 0;
+                ag->state.energy_level = 0.5f;  /* 恢复初始能量 */
+            }
+        }
+        system->enabled = 1;
+        system->synchronization_counter = 0;  /* 重置同步计数器 */
+        log_info("[多智能体] 系统已启用，%d个智能体就绪", system->agent_count);
+    } else {
+        /* 禁用：停止所有智能体活动 */
+        for (int i = 0; i < system->agent_count; i++) {
+            Agent* ag = system->agents[i];
+            if (ag) {
+                ag->state.available = 0;
+                ag->state.busy = 0;
+            }
+        }
+        /* 清空消息队列 */
+        for (int i = 0; i < system->global_message_count; i++) {
+            if (system->global_messages[i]) {
+                safe_free((void**)&system->global_messages[i]->message_type);
+                safe_free((void**)&system->global_messages[i]->message_data);
+                safe_free((void**)&system->global_messages[i]);
+            }
+        }
+        system->global_message_count = 0;
+        /* 取消所有活动任务 */
+        for (int i = 0; i < system->active_task_count; i++) {
+            if (system->active_tasks[i]) {
+                system->active_tasks[i]->task_status = TASK_STATUS_CANCELLED;
+                /* 释放智能体 */
+                for (int j = 0; j < system->active_tasks[i]->assigned_agents; j++) {
+                    int aidx = system->active_tasks[i]->assigned_agents_list[j];
+                    if (aidx >= 0 && aidx < system->agent_count && system->agents[aidx]) {
+                        system->agents[aidx]->state.busy = 0;
+                    }
+                }
+                collaborative_task_destroy(system->active_tasks[i]);
+                system->active_tasks[i] = NULL;
+            }
+        }
+        system->active_task_count = 0;
+        system->enabled = 0;
+        log_info("[多智能体] 系统已禁用，活动任务和消息已清理");
+    }
+
+    system_mutex_unlock(&system->system_mutex);
+    return 0;
+}
+
+/**
+ * @brief 获取多智能体系统的启用状态
+ *
+ * @param system 多智能体系统
+ * @return int 1=启用, 0=禁用, -1=错误
+ */
+int multi_agent_get_enabled(MultiAgentSystem* system) {
+    if (!system) {
+        return -1;
+    }
+    return system->enabled;
 }
 
 /* 前向声明（提前声明以避免隐式int声明冲突） */

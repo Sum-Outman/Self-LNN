@@ -384,7 +384,7 @@ static void ascend_backend_context_free(GpuContext* context) {
     if (ctx->is_initialized && g_ascend_cl.aclrtResetDevice) {
         g_ascend_cl.aclrtResetDevice(ctx->device_index);
     }
-    safe_free(ctx);
+    safe_free((void**)&ctx);
 }
 
 static GpuMemory* ascend_backend_memory_alloc(GpuContext* context, size_t size,
@@ -406,14 +406,14 @@ static GpuMemory* ascend_backend_memory_alloc(GpuContext* context, size_t size,
             mem->is_device_memory = 1;
             return mem;
         }
-        safe_free(mem);
+        safe_free((void**)&mem);
         ascend_set_error("aclrtMalloc失败: 大小=%zu", size);
         return NULL;
     }
 
     void* cpu_ptr = safe_malloc(size);
     if (!cpu_ptr) {
-        safe_free(mem);
+        safe_free((void**)&mem);
         return NULL;
     }
     mem->context = context;
@@ -429,9 +429,9 @@ static void ascend_backend_memory_free(GpuMemory* memory) {
     if (g_ascend_state.ascendcl_available && memory->is_device_memory && g_ascend_cl.aclrtFree) {
         g_ascend_cl.aclrtFree(memory->data);
     } else {
-        safe_free(memory->data);
+        safe_free((void**)&memory->data);
     }
-    safe_free(memory);
+    safe_free((void**)&memory);
 }
 
 static int ascend_backend_memory_copy_to_device(GpuMemory* dst, const void* src,
@@ -522,7 +522,7 @@ static int ascend_backend_kernel_set_arg(GpuKernel* kernel, int arg_index,
         for (size_t i = 0; i < kernel->arg_count; i++) { nv[i] = kernel->arg_values[i]; ns[i] = kernel->arg_sizes[i]; }
         safe_free((void**)&kernel->arg_values);
         safe_free((void**)&kernel->arg_sizes);
-        kernel->arg_values = nv; kernel->arg_sizes = ns; kernel->arg_capacity = new_max;
+        kernel->arg_values = nv; kernel->arg_sizes = ns; kernel->arg_capacity = (int)new_max;
     }
     if (kernel->arg_values[arg_index]) safe_free((void**)&kernel->arg_values[arg_index]);
     if (arg_size > 0 && arg_value) {
@@ -571,8 +571,8 @@ static int ascend_backend_kernel_execute(GpuKernel* kernel,
 
             g_ascend_cl.aclrtMemcpy(dev_input, data_size, host_input, data_size, 1);
 
-            uint32_t model_id = (uint32_t)(uintptr_t)kernel->backend_data;
-            int ret = g_ascend_cl.aclmdlExecute(model_id, dev_input,
+            uint32_t model_id_num = (uint32_t)(uintptr_t)kernel->backend_data;
+            int ret = g_ascend_cl.aclmdlExecute((void*)(uintptr_t)kernel->backend_data, dev_input,
                                                  (uint32_t)data_size,
                                                  dev_output,
                                                  (uint32_t)data_size);
@@ -611,7 +611,7 @@ static int ascend_backend_kernel_execute(GpuKernel* kernel,
                 goto ascend_fallback;
             }
 
-            const float* saved_input = (const float*)kernel->arg_values[0];
+            float* saved_input = (float*)kernel->arg_values[0];
             float* saved_output = (float*)kernel->arg_values[1];
             kernel->arg_values[1] = temp_output;
             int result = npu_common_cpu_kernel_execute(kernel, count);
@@ -679,7 +679,7 @@ static void ascend_backend_stream_free(GpuStream* stream) {
             }
         }
     }
-    safe_free(s);
+    safe_free((void**)&s);
 }
 
 static int ascend_backend_stream_synchronize(GpuStream* stream) {
@@ -814,9 +814,9 @@ static NpuModel* ascend_npu_load_model(GpuContext* context,
         return NULL;
 
     uint32_t model_id = 0;
-    int ret = g_ascend_cl.aclmdlLoadFromFile(model_path, &model_id);
-    if (ret != 0) {
-        ascend_set_error("模型加载失败: %s, 错误=%d", model_path, ret);
+    void* model_desc = g_ascend_cl.aclmdlLoadFromFile(model_path, &model_id);
+    if (!model_desc) {
+        ascend_set_error("模型加载失败: %s", model_path);
         return NULL;
     }
 
@@ -857,7 +857,7 @@ static NpuModel* ascend_npu_load_model(GpuContext* context,
     AscendModelData* ad = (AscendModelData*)safe_calloc(1, sizeof(AscendModelData));
     if (ad) {
         ad->model_id = model_id;
-        ad->model_desc = (void*)(uintptr_t)model_id;
+        ad->model_desc = model_desc;
         ad->input_size = model->input_sizes[0];
         ad->output_size = model->output_sizes[0];
     }
@@ -874,9 +874,9 @@ static void ascend_npu_unload_model(NpuModel* model) {
         if (ad->model_desc && g_ascend_state.ascendcl_available && g_ascend_cl.aclmdlUnload) {
             g_ascend_cl.aclmdlUnload(ad->model_desc);
         }
-        safe_free(ad);
+        safe_free((void**)&ad);
     }
-    safe_free(model);
+    safe_free((void**)&model);
 }
 
 static int ascend_npu_infer(NpuModel* model, const float** inputs,
@@ -901,8 +901,7 @@ static int ascend_npu_infer(NpuModel* model, const float** inputs,
     g_ascend_cl.aclrtMemcpy(dev_input, in_size * sizeof(float),
                              inputs[0], in_size * sizeof(float), 1);
 
-    uint32_t model_id = (uint32_t)(uintptr_t)ad->model_desc;
-    int ret = g_ascend_cl.aclmdlExecute(model_id, dev_input,
+    int ret = g_ascend_cl.aclmdlExecute(ad->model_desc, dev_input,
                                          (uint32_t)(in_size * sizeof(float)),
                                          dev_output,
                                          (uint32_t)(out_size * sizeof(float)));

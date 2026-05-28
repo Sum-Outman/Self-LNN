@@ -11,6 +11,7 @@
 #include "selflnn/multimodal/multimodal.h"
 #include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/multimodal/image_recognition_deep.h"
+#include "selflnn/multimodal/multimodal_integration.h" /* ZSFWS-005: 统一融合管道 */
 #include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -736,7 +737,11 @@ int multimodal_process_sensor(MultimodalProcessor* processor, const MultimodalSe
 }
 
 /**
- * @brief 融合多模态特征（CfC ODE跨模态预演化 + 拼接，供单一LNN统一动态演化）
+ * ZSFWS-005修复: 融合多模态特征 —— 真CfC ODE跨模态统一演化
+ *
+ * 需求要求"所有模态→统一输入到同一个连续动态系统→统一状态演化→统一输出"。
+ * 原实现为独立4步Euler+简单拼接，完全无法实现跨模态交互。
+ * 现改为调用multimodal_integration.c的方案C——真正的CfC ODE统一演化。
  */
 int multimodal_fuse_features(MultimodalProcessor* processor,
                             const float* vision_features, size_t vision_count,
@@ -750,71 +755,75 @@ int multimodal_fuse_features(MultimodalProcessor* processor,
                  "融合特征缓冲区大小无效: %zu", max_fused_features);
     SELFLNN_CHECK_INITIALIZED(processor, "多模态处理器未初始化");
 
-    size_t fused_count = 0;
-    /* CfC ODE跨模态预演化参数 */
-    float cfc_tau = 0.8f;
-    float cfc_dt  = 0.05f;
-    size_t cfc_dim = 64;
-    float cfc_state[64] = {0};
+    /* ZSFWS-005: 收集活跃模态数据，调用统一CfC ODE融合管道 */
+    const float* modality_data[SELFLNN_MAX_MODALITIES] = {NULL};
+    int modality_dims[SELFLNN_MAX_MODALITIES] = {0};
+    int active_count = 0;
 
-    /* 视觉 → CfC预演化 → 拼接到融合向量 */
     if (vision_features && vision_count > 0 && processor->config.enable_vision) {
-        size_t copy = (vision_count < max_fused_features - fused_count) ? vision_count : (max_fused_features - fused_count);
-        size_t evolve_n = (copy < cfc_dim) ? copy : cfc_dim;
-        for (size_t i = 0; i < evolve_n; i++) cfc_state[i] = vision_features[i];
-        for (int s = 0; s < 4; s++) {
-            for (size_t i = 0; i < evolve_n; i++) {
-                float gate = 1.0f / (1.0f + expf(-cfc_state[i]));
-                float act = tanhf(cfc_state[i]);
-                float dh = -cfc_state[i] / (cfc_tau + 1e-8f) + gate * act;
-                cfc_state[i] += dh * cfc_dt;
-            }
-        }
-        if (copy > 0) { 
-            for (size_t i = 0; i < evolve_n && fused_count < max_fused_features; i++)
-                fused_features[fused_count++] = cfc_state[i];
-            if (copy > evolve_n && fused_count + copy - evolve_n <= max_fused_features) {
-                memcpy(&fused_features[fused_count], &vision_features[evolve_n], (copy - evolve_n) * sizeof(float));
-                fused_count += copy - evolve_n;
-            }
-        }
+        modality_data[active_count] = vision_features;
+        modality_dims[active_count] = (int)vision_count;
+        active_count++;
     }
-
-    /* 音频 → CfC预演化 → 拼接 */
     if (audio_features && audio_count > 0 && processor->config.enable_audio) {
-        size_t copy = (audio_count < max_fused_features - fused_count) ? audio_count : (max_fused_features - fused_count);
-        size_t evolve_n = (copy < cfc_dim) ? copy : cfc_dim;
-        for (size_t i = 0; i < evolve_n; i++) cfc_state[i] = audio_features[i];
-        for (int s = 0; s < 4; s++) {
-            for (size_t i = 0; i < evolve_n; i++) {
-                float gate = 1.0f / (1.0f + expf(-cfc_state[i]));
-                float act = tanhf(cfc_state[i]);
-                float dh = -cfc_state[i] / (cfc_tau + 1e-8f) + gate * act;
-                cfc_state[i] += dh * cfc_dt;
-            }
-        }
-        if (copy > 0) {
-            for (size_t i = 0; i < evolve_n && fused_count < max_fused_features; i++)
-                fused_features[fused_count++] = cfc_state[i];
-            if (copy > evolve_n && fused_count + copy - evolve_n <= max_fused_features) {
-                memcpy(&fused_features[fused_count], &audio_features[evolve_n], (copy - evolve_n) * sizeof(float));
-                fused_count += copy - evolve_n;
-            }
-        }
+        modality_data[active_count] = audio_features;
+        modality_dims[active_count] = (int)audio_count;
+        active_count++;
     }
-
-    /* 文本 → 直接拼接（文本特征已通过LNN编码） */
     if (text_features && text_count > 0 && processor->config.enable_text) {
-        size_t copy = (text_count < max_fused_features - fused_count) ? text_count : (max_fused_features - fused_count);
-        if (copy > 0) { memcpy(&fused_features[fused_count], text_features, copy * sizeof(float)); fused_count += copy; }
+        modality_data[active_count] = text_features;
+        modality_dims[active_count] = (int)text_count;
+        active_count++;
     }
-
-    /* 传感器 → 直接拼接 */
     if (sensor_features && sensor_count > 0 && processor->config.enable_sensor) {
-        size_t copy = (sensor_count < max_fused_features - fused_count) ? sensor_count : (max_fused_features - fused_count);
-        if (copy > 0) { memcpy(&fused_features[fused_count], sensor_features, copy * sizeof(float)); fused_count += copy; }
+        modality_data[active_count] = sensor_features;
+        modality_dims[active_count] = (int)sensor_count;
+        active_count++;
     }
 
+    if (active_count == 0) return 0;
+
+    /* 委托给真正的CfC ODE统一融合管道 */
+    int result = multimodal_unified_pipeline(modality_data, modality_dims,
+        active_count, NULL, fused_features, (int)max_fused_features);
+    
+    /* 如果统一融合成功，直接返回 */
+    if (result == 0) {
+        /* 计算实际非零输出维度 */
+        size_t actual_dim = 0;
+        for (size_t i = 0; i < max_fused_features; i++) {
+            if (fabsf(fused_features[i]) > 1e-10f) actual_dim = i + 1;
+        }
+        return (int)(actual_dim > 0 ? actual_dim : max_fused_features);
+    }
+
+    /* 回退路径：如果CfC ODE融合不可用，执行简单的归一化拼接
+     * （此处保留作为极端情况下的安全网，不对真正融合造成影响） */
+    size_t fused_count = 0;
+    const float* sources[4] = {vision_features, audio_features, text_features, sensor_features};
+    size_t counts[4] = {vision_count, audio_count, text_count, sensor_count};
+    int enabled[4] = {
+        processor->config.enable_vision,
+        processor->config.enable_audio,
+        processor->config.enable_text,
+        processor->config.enable_sensor
+    };
+    for (int m = 0; m < 4; m++) {
+        if (sources[m] && counts[m] > 0 && enabled[m]) {
+            size_t copy = (counts[m] < max_fused_features - fused_count) ?
+                counts[m] : (max_fused_features - fused_count);
+            if (copy > 0) {
+                /* 归一化后拼接，避免高维模态主导 */
+                float norm = 0.0f;
+                for (size_t i = 0; i < copy; i++) norm += sources[m][i] * sources[m][i];
+                norm = sqrtf(norm + 1e-12f);
+                float inv_norm = 1.0f / norm;
+                for (size_t i = 0; i < copy; i++)
+                    fused_features[fused_count + i] = sources[m][i] * inv_norm;
+                fused_count += copy;
+            }
+        }
+    }
     return (int)fused_count;
 }
 

@@ -6,6 +6,7 @@
  * 支持图遍历、路径查找、子图匹配、图分析等高级功能。
  */
 
+#define SELFLNN_KNOWLEDGE_INTERNAL  /* ZSFZS-F034: 与knowledge_graph.h保持一致 */
 #include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/safe_memory.h"
@@ -52,27 +53,7 @@ static uint32_t crc32_compute(const void* data, size_t length) {
  * 内部数据结构
  * =========================================================================== */
 
-/**
- * @brief 知识图谱内部结构
- */
-struct KnowledgeGraph {
-    GraphNode** nodes;          /**< 节点数组 */
-    size_t node_count;          /**< 节点数量 */
-    size_t node_capacity;       /**< 节点数组容量 */
-    
-    GraphEdge** edges;          /**< 边数组 */
-    size_t edge_count;          /**< 边数量 */
-    size_t edge_capacity;       /**< 边数组容量 */
-    
-    int next_node_id;           /**< 下一个节点ID */
-    int next_edge_id;           /**< 下一个边ID */
-    
-    size_t max_nodes;           /**< 最大节点数（0表示无限制） */
-    size_t max_edges;           /**< 最大边数（0表示无限制） */
-    
-    int dirty;                  /**< 脏标志：自上次保存后是否有修改 */
-    char* auto_save_path;       /**< 自动保存路径（为NULL时不自动保存） */
-};
+/* ZSFZS-F034: KnowledgeGraph完整结构已移至knowledge_graph.h(#ifdef SELFLNN_KNOWLEDGE_INTERNAL) */
 
 /* ============================================================================
  * 内部辅助函数

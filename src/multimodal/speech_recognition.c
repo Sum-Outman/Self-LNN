@@ -355,12 +355,40 @@ static int extract_mel_features(SpeechRecognizer* sr,
 
 /* =============================================================== *
  * 输出投影：隐藏状态 → 字符logits                                   *
+ *                                                                   *
+ * P2-005修复: 优先使用共享LNN进行输出投影（非线性液态动态），         *
+ * 当LNN可用且维度匹配时通过lnn_forward处理；否则回退到线性投影。       *
  * =============================================================== */
 
 static void compute_output_logits(SpeechRecognizer* sr,
                                    const float* hidden_state,
                                    float* logits, int vocab_size) {
     int hs = (int)sr->config.hidden_size;
+
+    /* P2-005: 尝试共享LNN做输出投影（非线性液态动态） */
+    if (sr->shared_lnn) {
+        LNNConfig lnn_cfg;
+        if (lnn_get_config(sr->shared_lnn, &lnn_cfg) == 0) {
+            if ((size_t)hs == lnn_cfg.input_size && (size_t)vocab_size == lnn_cfg.output_size) {
+                float* lnn_input = (float*)safe_malloc(lnn_cfg.input_size * sizeof(float));
+                float* lnn_output = (float*)safe_malloc(lnn_cfg.output_size * sizeof(float));
+                if (lnn_input && lnn_output) {
+                    memcpy(lnn_input, hidden_state, lnn_cfg.input_size * sizeof(float));
+                    if (lnn_forward(sr->shared_lnn, lnn_input, lnn_output) == 0) {
+                        memcpy(logits, lnn_output, (size_t)vocab_size * sizeof(float));
+                        safe_free((void**)&lnn_input);
+                        safe_free((void**)&lnn_output);
+                        return;
+                    }
+                }
+                safe_free((void**)&lnn_input);
+                safe_free((void**)&lnn_output);
+            }
+        }
+        /* LNN维度不匹配或投影失败时回退到线性投影 */
+    }
+
+    /* 线性投影回退（Xavier初始化权重） */
     const float* W = sr->output_projection_weight;
     const float* b = sr->output_projection_bias;
 

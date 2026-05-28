@@ -9,6 +9,7 @@
 
 #include "selflnn/product_design/product_design_enhanced.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/xorshift_prng.h"  /* FIX-011: 替换LCG为高质量Xorshift */
 #include "selflnn/core/laplace.h"
 #include <stdlib.h>
 #include <string.h>
@@ -55,15 +56,30 @@ static pthread_mutex_t g_pde_rng_lock = PTHREAD_MUTEX_INITIALIZER;
 #define PDE_RNG_LOCK() pthread_mutex_lock(&g_pde_rng_lock)
 #define PDE_RNG_UNLOCK() pthread_mutex_unlock(&g_pde_rng_lock)
 #endif
-/* N-008修复: 使用时间混合种子替代固定12345 */
-static unsigned int pde_rand_state = 0;
-static void pde_srand(unsigned int seed) { PDE_RNG_LOCK(); pde_rand_state = seed; PDE_RNG_UNLOCK(); }
+/* FIX-011修复: 使用Xorshift128+高质量PRNG替代LCG */
+#include "selflnn/utils/secure_random.h"
+
+static XorshiftPrng g_pde_xorshift;
+static int g_pde_prng_inited = 0;
+static void pde_srand(unsigned int seed) {
+    PDE_RNG_LOCK();
+    if (!g_pde_prng_inited) {
+        uint64_t secure_seed = ((uint64_t)secure_random_int(0xFFFFFFFF) << 32) | secure_random_int(0xFFFFFFFF);
+        xorshift_prng_seed(&g_pde_xorshift, secure_seed);
+        g_pde_prng_inited = 1;
+    }
+    PDE_RNG_UNLOCK();
+    (void)seed;
+}
 static double pde_rand_double(void)
 {
     PDE_RNG_LOCK();
-    if (pde_rand_state == 0) pde_rand_state = (unsigned int)((uint64_t)clock() & 0xFFFFFFFF) | 1;
-    pde_rand_state = pde_rand_state * 1103515245 + 12345;
-    double r = (double)(pde_rand_state & 0x7FFFFFFF) / 2147483648.0;
+    if (!g_pde_prng_inited) {
+        uint64_t secure_seed = ((uint64_t)secure_random_int(0xFFFFFFFF) << 32) | secure_random_int(0xFFFFFFFF);
+        xorshift_prng_seed(&g_pde_xorshift, secure_seed);
+        g_pde_prng_inited = 1;
+    }
+    double r = (double)xorshift_prng_next_float(&g_pde_xorshift);
     PDE_RNG_UNLOCK();
     return r;
 }

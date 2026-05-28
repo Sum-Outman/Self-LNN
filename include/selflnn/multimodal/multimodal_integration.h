@@ -409,6 +409,24 @@ int mm_cfc_unified_fusion_train(
     int target_dim,
     float *loss_out);
 
+/**
+ * ZSFWS-005修复: 多模态统一融合管道
+ *
+ * 主路径使用方案C的CfC ODE跨模态融合（真正的统一连续动态系统），
+ * 回退到共享LNN统一状态处理器。确保"所有模态→统一连续动态系统"。
+ *
+ * @param modality_data 各模态数据数组（索引=模态类型）
+ * @param modality_dims 各模态维度数组
+ * @param num_modalities 有效模态数
+ * @param main_cfc 主CFC网络（保留兼容，当前未使用）
+ * @param unified_output 融合输出缓冲区
+ * @param output_dim 输出维度
+ * @return int 成功返回0，失败返回-1
+ */
+int multimodal_unified_pipeline(const float** modality_data, const int* modality_dims,
+                                 int num_modalities, void* main_cfc,
+                                 float* unified_output, int output_dim);
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,7 +26,7 @@ typedef enum {
 } NpuVendor;
 
 /** 最大扫描路径数 */
-#define NPU_MAX_SCAN_PATHS 16
+#define NPU_MAX_SCAN_PATHS 64
 
 /** 最大路径长度 */
 #define NPU_PATH_MAX 512

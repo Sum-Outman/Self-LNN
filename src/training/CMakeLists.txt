@@ -13,6 +13,7 @@ add_library(selflnn_training
     training_enhanced.c
     data_loaders.c
     training_data_pipeline.c
+    # ZSFZS-F028: dataset_api.c已删除(20个重复定义+0有效代码,垃圾文件)
 )
 
 target_include_directories(selflnn_training PUBLIC

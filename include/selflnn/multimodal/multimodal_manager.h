@@ -53,16 +53,22 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
 void multimodal_manager_free(MultimodalManager* manager);
 
 /**
- * @brief 处理多模态输入
+ * @brief 处理多模态输入（P2-001统一：扩展至9种模态）
  *
  * 所有模态通过统一信号处理器处理后，输入到同一个LNN连续动态系统进行状态演化，
  * 输出融合特征。严格遵循统一信号→统一演化→统一输出的架构原则。
+ * 9种模态: 视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机
  *
  * @param manager 管理器句柄
  * @param vision_data 视觉数据 (可为NULL)
  * @param audio_data 音频数据 (可为NULL)
  * @param text_data 文本数据 (可为NULL)
  * @param sensor_data 传感器数据 (可为NULL)
+ * @param haptic_data 触觉数据 (可为NULL)
+ * @param proprioception_data 本体感数据 (可为NULL)
+ * @param thermal_data 热感数据 (可为NULL)
+ * @param radar_data 雷达数据 (可为NULL)
+ * @param motor_data 电机数据 (可为NULL)
  * @param fused_features 融合特征输出缓冲区
  * @param max_features 最大特征数
  * @return int 成功返回融合特征数，失败返回-1
@@ -72,6 +78,11 @@ int multimodal_manager_process(MultimodalManager* manager,
                               const void* audio_data,
                               const void* text_data,
                               const void* sensor_data,
+                              const void* haptic_data,
+                              const void* proprioception_data,
+                              const void* thermal_data,
+                              const void* radar_data,
+                              const void* motor_data,
                               float* fused_features, size_t max_features);
 
 /**

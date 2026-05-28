@@ -1,5 +1,5 @@
-#ifndef SELFLNN_DYNAMICS_H
-#define SELFLNN_DYNAMICS_H
+#ifndef SELFLNN_ROBOT_DYNAMICS_H
+#define SELFLNN_ROBOT_DYNAMICS_H
 
 #include "selflnn/robot/kinematics.h"
 #include <stddef.h>
@@ -177,4 +177,4 @@ int dynamics_epa_penetration(const float* shape_a, int num_a,
 }
 #endif
 
-#endif /* SELFLNN_DYNAMICS_H */
+#endif /* SELFLNN_ROBOT_DYNAMICS_H */

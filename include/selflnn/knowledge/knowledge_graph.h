@@ -75,6 +75,24 @@ typedef struct GraphEdge {
  */
 typedef struct KnowledgeGraph KnowledgeGraph;
 
+#ifdef SELFLNN_KNOWLEDGE_INTERNAL
+/* 知识图谱完整结构（仅内部模块可见，与CfCNetwork/CfCCell模式一致） */
+struct KnowledgeGraph {
+    struct GraphNode** nodes;
+    size_t node_count;
+    size_t node_capacity;
+    struct GraphEdge** edges;
+    size_t edge_count;
+    size_t edge_capacity;
+    int next_node_id;
+    int next_edge_id;
+    size_t max_nodes;
+    size_t max_edges;
+    int dirty;
+    char* auto_save_path;
+};
+#endif
+
 /**
  * @brief 知识图谱完整统计结构
  *

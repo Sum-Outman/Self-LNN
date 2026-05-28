@@ -250,75 +250,13 @@ int content_filter_check(ContentFilter* filter, const char* content,
     content_to_lower(content, content_lower, content_length + 1);
 
     float highest_score = 0.0f;
+    float semantic_score = 0.0f;
     ContentCategory highest_category = CONTENT_CATEGORY_VIOLENCE;
     char detected_pattern[CONTENT_FILTER_PATTERN_LEN];
     detected_pattern[0] = '\0';
     int highest_action = 0;
 
-    /* 语义过滤层：通过LNN嵌入进行语义安全检测 */
-    if (filter->lnn_instance && filter->enable_semantic) {
-        float input_embed[CONTENT_FILTER_EMBED_DIM];
-        memset(input_embed, 0, sizeof(input_embed));
-        size_t text_len = strlen(content);
-        /* ZSFABC修复: 使用真实LNN编码器进行文本嵌入预处理
-         * 替代字符字节值/255的简化方式。
-         * 实现: 使用汉字/ASCII映射编码 + 正弦位置编码的组合嵌入 */
-        for (size_t t = 0; t < text_len && t < CONTENT_FILTER_EMBED_DIM; t++) {
-            unsigned char ch = (unsigned char)content[t];
-            /* 字符值嵌入: 映射到[-1, 1]范围 */
-            float char_embed = ((float)ch - 128.0f) / 128.0f;
-            /* 正弦位置编码: 基于字符位置的频率编码 */
-            float pos_embed = sinf((float)t * 0.02f) * 0.25f;
-            input_embed[t] = char_embed + pos_embed;
-        }
-        /* 对超长文本使用窗口平均池化 */
-        if (text_len > CONTENT_FILTER_EMBED_DIM) {
-            size_t stride = text_len / CONTENT_FILTER_EMBED_DIM;
-            for (size_t t = 0; t < CONTENT_FILTER_EMBED_DIM; t++) {
-                float window_avg = 0.0f;
-                size_t start = t * stride;
-                size_t count = 0;
-                for (size_t k = 0; k < stride && (start + k) < text_len; k++) {
-                    unsigned char ch = (unsigned char)content[start + k];
-                    float char_embed = ((float)ch - 128.0f) / 128.0f;
-                    float pos_embed = sinf((float)(start + k) * 0.02f) * 0.25f;
-                    window_avg += char_embed + pos_embed;
-                    count++;
-                }
-                input_embed[t] = count > 0 ? window_avg / (float)count : 0.0f;
-            }
-        }
-        float lnn_output[CONTENT_FILTER_EMBED_DIM];
-        if (lnn_forward((LNN*)filter->lnn_instance, input_embed, lnn_output) == 0) {
-            /* F-007修复: 基于LNN输出实际统计特性计算语义安全评分
-             * 使用激活能量(幅度)和激活密度(稀疏度)组合评估内容安全性
-             * 高强度+低稀疏度=潜在的违规模式 */
-            float output_energy = 0.0f;
-            int active_dims = 0;
-            float max_activation = 0.0f;
-            for (int d = 0; d < CONTENT_FILTER_EMBED_DIM; d++) {
-                float val = lnn_output[d];
-                output_energy += val * val;
-                if (fabsf(val) > 0.1f) active_dims++;
-                if (fabsf(val) > max_activation) max_activation = fabsf(val);
-            }
-            output_energy = sqrtf(output_energy);
-            float activation_density = (float)active_dims / (float)CONTENT_FILTER_EMBED_DIM;
-            /* 语义评分：LNN输出能量 * 激活密度，高强度稀疏模式=高风险 */
-            float semantic_score = output_energy * (0.3f + 0.7f * activation_density);
-            if (semantic_score > 0.8f) {
-                highest_score = semantic_score;
-                highest_category = CONTENT_CATEGORY_VIOLENCE;
-                highest_action = 1;
-                strncpy(detected_pattern, "[语义检测-高风险]", sizeof(detected_pattern) - 1);
-            } else if (semantic_score > 0.5f && highest_score < semantic_score) {
-                highest_score = semantic_score;
-                strncpy(detected_pattern, "[语义检测-需审核]", sizeof(detected_pattern) - 1);
-            }
-        }
-    }
-
-    /* 关键词匹配层（保留原有逻辑） */
+    /* ===== 第一层：关键词模式匹配 ===== */
     for (int i = 0; i < filter->rule_count; i++) {
         const ContentFilterRule* r = &filter->rules[i];
         if (!r->enabled || r->pattern_count == 0) continue;
@@ -344,6 +282,73 @@ int content_filter_check(ContentFilter* filter, const char* content,
                 if (match_count == 1) {
                     strncpy(detected_pattern, r->patterns[0], sizeof(detected_pattern) - 1);
                 }
+            }
+        }
+    }
+
+    /* ===== 第二层：LNN语义评估（补充过滤维度） =====
+     * 在关键词匹配之后，使用共享LNN对完整文本进行语义级安全评估。
+     * 语义评分作为补充维度：与关键词分数加权融合，提升对隐晦违规内容的检测能力。 */
+    if (filter->lnn_instance && filter->enable_semantic) {
+        float input_embed[CONTENT_FILTER_EMBED_DIM];
+        memset(input_embed, 0, sizeof(input_embed));
+        size_t text_len = strlen(content);
+        for (size_t t = 0; t < text_len && t < CONTENT_FILTER_EMBED_DIM; t++) {
+            unsigned char ch = (unsigned char)content[t];
+            float char_embed = ((float)ch - 128.0f) / 128.0f;
+            float pos_embed = sinf((float)t * 0.02f) * 0.25f;
+            input_embed[t] = char_embed + pos_embed;
+        }
+        if (text_len > CONTENT_FILTER_EMBED_DIM) {
+            size_t stride = text_len / CONTENT_FILTER_EMBED_DIM;
+            for (size_t t = 0; t < CONTENT_FILTER_EMBED_DIM; t++) {
+                float window_avg = 0.0f;
+                size_t start = t * stride;
+                size_t count = 0;
+                for (size_t k = 0; k < stride && (start + k) < text_len; k++) {
+                    unsigned char ch = (unsigned char)content[start + k];
+                    float char_embed = ((float)ch - 128.0f) / 128.0f;
+                    float pos_embed = sinf((float)(start + k) * 0.02f) * 0.25f;
+                    window_avg += char_embed + pos_embed;
+                    count++;
+                }
+                input_embed[t] = count > 0 ? window_avg / (float)count : 0.0f;
+            }
+        }
+        float lnn_output[CONTENT_FILTER_EMBED_DIM];
+        if (lnn_forward((LNN*)filter->lnn_instance, input_embed, lnn_output) == 0) {
+            float output_energy = 0.0f;
+            int active_dims = 0;
+            float max_activation = 0.0f;
+            for (int d = 0; d < CONTENT_FILTER_EMBED_DIM; d++) {
+                float val = lnn_output[d];
+                output_energy += val * val;
+                if (fabsf(val) > 0.1f) active_dims++;
+                if (fabsf(val) > max_activation) max_activation = fabsf(val);
+            }
+            output_energy = sqrtf(output_energy);
+            float activation_density = (float)active_dims / (float)CONTENT_FILTER_EMBED_DIM;
+            semantic_score = output_energy * (0.3f + 0.7f * activation_density);
+
+            /* 语义评分作为补充维度：与关键词分数加权融合
+             * - 关键词匹配到高风险时：语义评分提供置信度修正
+             * - 关键词未匹配时：语义评分独立作为潜在风险检测 */
+            if (highest_score > 0.0f) {
+                /* 关键词已命中：加权融合(关键词70% + 语义30%) */
+                float blended_score = highest_score * 0.7f + semantic_score * 0.3f;
+                if (blended_score > 1.0f) blended_score = 1.0f;
+                highest_score = blended_score;
+                if (semantic_score > 0.7f && strstr(detected_pattern, "[语义") == NULL) {
+                    /* 语义评分确认高风险：追加语义标记 */
+                    char sem_tag[64];
+                    snprintf(sem_tag, sizeof(sem_tag), "%s [语义确认:%.2f]",
+                             detected_pattern, semantic_score);
+                    strncpy(detected_pattern, sem_tag, sizeof(detected_pattern) - 1);
+                }
+            } else if (semantic_score > 0.6f) {
+                /* 关键词未命中但语义评分较高：作为独立补充维度 */
+                highest_score = semantic_score;
+                strncpy(detected_pattern, "[语义检测]", sizeof(detected_pattern) - 1);
             }
         }
     }

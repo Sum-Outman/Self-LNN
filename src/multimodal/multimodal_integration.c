@@ -335,11 +335,22 @@ int multimodal_integration_process_vision(
                 float sum_xy = 0.0f, sum_xz = 0.0f, sum_yz = 0.0f;
                 int point_count = 0;
                 
-                /* 相机内参（从标定获取或使用默认值） */
-                float fx = width * 0.8f;
-                float fy = height * 0.8f;
+                /* ZSFWS-007修复: 相机内参——优先使用立体标定结果，无标定时使用合理默认值 */
+                float fx = width * 0.7f;   /* 默认: 约70°水平视场角 */
+                float fy = height * 0.7f;  /* 默认: 约70°垂直视场角 */
                 float cx = width * 0.5f;
                 float cy = height * 0.5f;
+                /* 尝试获取立体标定的相机内参 */
+                {
+                    extern StereoCalibrationParams* stereo_calibration_get_global(void);
+                    StereoCalibrationParams* calib = stereo_calibration_get_global();
+                    if (calib && calib->left_intrinsics.fx > 0.0f) {
+                        fx = calib->left_intrinsics.fx;
+                        fy = calib->left_intrinsics.fy;
+                        cx = calib->left_intrinsics.cx;
+                        cy = calib->left_intrinsics.cy;
+                    }
+                }
                 
                 for (int y = 0; y < height; y += 2) {
                     for (int x = 0; x < width; x += 2) {
@@ -1104,15 +1115,13 @@ static float _fusion_compute_mse(const float *fused, const float *target, int n)
 }
 
 /* ============================================================================
- * mm_cfc_unified_fusion_init: [DEPRECATED 方案C] - 已禁用
+ * mm_cfc_unified_fusion_init: 方案C — CfC ODE跨模态统一融合（ZSFWS-003修复后启用）
  *
- * ⚠️ 方案C废弃说明:
- *  此模块在手写CfC ODE + 独立参数 + 独立训练，与共享LNN功能完全重叠。
- *  应使用 unified_lnn_state_step() + selflnn_get_shared_lnn() 替代。
- *
- * 全部方案C代码已禁用。仅在编译时定义 SELFLNN_ENABLE_DEPRECATED_SCHEME_C 恢复。
+ * ZSFWS-003: 需求明确规定"所有模态→统一输入到同一个连续动态系统"。
+ * 方案C是该项目中唯一真正实现跨模态CfC ODE统一演化的路径：
+ * 各模态线性投影到统一隐空间→拼接→CfC ODE连续时间演化。
+ * 原被禁用，现恢复为主动融合路径。与共享LNN互为补充。
  * ============================================================================ */
-#ifdef SELFLNN_ENABLE_DEPRECATED_SCHEME_C
 MmCfcFusionState* mm_cfc_unified_fusion_init(
     int num_modalities,
     const int *modality_input_dims,
@@ -1967,21 +1976,33 @@ int mm_cfc_unified_fusion_train(
     return 0;
 }
 
-#endif /* SELFLNN_ENABLE_DEPRECATED_SCHEME_C */
-
 /* ============================================================================
- * _mm_fusion_via_shared_lnn: 通过共享LNN进行多模态融合（主路径）
- *
- * 使用 unified_lnn_state_step() + selflnn_get_shared_lnn() 替代方案C。
+ * _mm_fusion_via_shared_lnn: ZSFWS-003修复后降为辅助路径
+ * 当方案C的CfC ODE融合实例未初始化时，回退到共享LNN。
+ * ZSFWS-006修复: 缓存UnifiedLNNState避免每次调用创建/释放。
  * ============================================================================ */
 static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* modality_dims,
                                       int num_modalities, float* unified_output, int output_dim) {
     void* shared_lnn = selflnn_get_shared_lnn();
     if (!shared_lnn) return -1;
 
-    UnifiedLNNStateConfig ul_cfg = unified_lnn_state_get_default_config();
-    ul_cfg.state_dimension = 256;
-    ul_cfg.output_dimension = (size_t)output_dim;
+    /* ZSFWS-006: 静态缓存UnifiedLNNState，避免每次调用malloc/free */
+    static UnifiedLNNState* cached_ul_state = NULL;
+    static size_t cached_output_dim = 0;
+    static void* cached_shared_lnn = NULL;
+
+    if (!cached_ul_state || cached_output_dim != (size_t)output_dim ||
+        cached_shared_lnn != shared_lnn) {
+        if (cached_ul_state) unified_lnn_state_free(cached_ul_state);
+        UnifiedLNNStateConfig ul_cfg = unified_lnn_state_get_default_config();
+        ul_cfg.state_dimension = 256;
+        ul_cfg.output_dimension = (size_t)output_dim;
+        cached_ul_state = unified_lnn_state_create(&ul_cfg);
+        if (!cached_ul_state) return -1;
+        unified_lnn_state_set_shared_lnn(cached_ul_state, shared_lnn);
+        cached_output_dim = (size_t)output_dim;
+        cached_shared_lnn = shared_lnn;
+    }
 
     const float* raw_inputs[UNIFIED_LNN_MAX_MODALITIES];
     size_t raw_sizes[UNIFIED_LNN_MAX_MODALITIES];
@@ -1995,18 +2016,12 @@ static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* mod
         modality_present[i] = 1;
     }
 
-    UnifiedLNNState* ul_state = unified_lnn_state_create(&ul_cfg);
-    if (!ul_state) return -1;
-
-    unified_lnn_state_set_shared_lnn(ul_state, shared_lnn);
-    int ret = unified_lnn_state_step(ul_state, raw_inputs, raw_sizes,
+    return unified_lnn_state_step(cached_ul_state, raw_inputs, raw_sizes,
         modality_present, unified_output, (size_t)output_dim);
-    unified_lnn_state_free(ul_state);
-    return ret;
 }
 
 /* ============================================================================
- * multimodal_unified_pipeline: 兼容接口（主路径使用共享LNN）
+ * multimodal_unified_pipeline: ZSFWS-003修复后方案C主路径 + 共享LNN回退
  * ============================================================================ */
 int multimodal_unified_pipeline(const float** modality_data, const int* modality_dims,
                                  int num_modalities, void* main_cfc,
@@ -2015,48 +2030,49 @@ int multimodal_unified_pipeline(const float** modality_data, const int* modality
     if (output_dim <= 0 || num_modalities <= 0) return -1;
     (void)main_cfc;
 
-    /* 主路径：使用共享LNN统一状态处理器 */
-    int ret = _mm_fusion_via_shared_lnn(modality_data, modality_dims,
-                                         num_modalities, unified_output, output_dim);
-    if (ret == 0) return 0;
-
-#ifdef SELFLNN_ENABLE_DEPRECATED_SCHEME_C
-    /* 回退路径：使用废弃的方案C CfC ODE融合 */
+    /* ZSFWS-003: 主路径——方案C CfC ODE跨模态统一融合
+     * 各模态线性投影到统一隐空间→拼接→CfC ODE连续时间演化
+     * 这是需求要求的"所有模态→统一连续动态系统"的正确实现 */
     int n_mod = (num_modalities < MM_FUSION_MAX_MODALITIES) ? num_modalities : MM_FUSION_MAX_MODALITIES;
     int max_input_dim = 0;
     for (int m = 0; m < n_mod; m++)
         if (modality_dims[m] > max_input_dim) max_input_dim = modality_dims[m];
-    if (max_input_dim <= 0) { memset(unified_output, 0, (size_t)output_dim * sizeof(float)); return -1; }
-
-    int *input_dims = (int*)safe_calloc((size_t)n_mod, sizeof(int));
-    if (!input_dims) { memset(unified_output, 0, (size_t)output_dim * sizeof(float)); return -1; }
-    for (int m = 0; m < n_mod; m++) input_dims[m] = modality_dims[m];
-
-    int latent_dim = MM_FUSION_DEFAULT_LATENT;
-    int hidden_dim = (output_dim < MM_FUSION_DEFAULT_HIDDEN) ? output_dim : MM_FUSION_DEFAULT_HIDDEN;
-    MmCfcFusionState *fusion = mm_cfc_unified_fusion_init(
-        n_mod, input_dims, latent_dim, hidden_dim,
-        MM_FUSION_DEFAULT_ODE_STEPS, MM_FUSION_DEFAULT_TAU, MM_FUSION_DEFAULT_DT);
-    safe_free((void**)&input_dims);
-    if (!fusion) { memset(unified_output, 0, (size_t)output_dim * sizeof(float)); return -1; }
-
-    float *fusion_out = (float*)safe_calloc((size_t)hidden_dim, sizeof(float));
-    if (!fusion_out) { mm_cfc_unified_fusion_free(fusion); memset(unified_output, 0, (size_t)output_dim * sizeof(float)); return -1; }
-
-    ret = mm_cfc_unified_fusion(fusion, modality_data, modality_dims, n_mod, fusion_out, hidden_dim);
-    if (ret == 0) {
-        int copy_dim = (hidden_dim < output_dim) ? hidden_dim : output_dim;
-        memcpy(unified_output, fusion_out, (size_t)copy_dim * sizeof(float));
-        if (output_dim > copy_dim) memset(unified_output + copy_dim, 0, (size_t)(output_dim - copy_dim) * sizeof(float));
-    } else {
-        memset(unified_output, 0, (size_t)output_dim * sizeof(float));
+    if (max_input_dim > 0) {
+        int *input_dims = (int*)safe_calloc((size_t)n_mod, sizeof(int));
+        if (input_dims) {
+            for (int m = 0; m < n_mod; m++) input_dims[m] = modality_dims[m];
+            int latent_dim = MM_FUSION_DEFAULT_LATENT;
+            int hidden_dim = (output_dim < MM_FUSION_DEFAULT_HIDDEN) ? output_dim : MM_FUSION_DEFAULT_HIDDEN;
+            MmCfcFusionState *fusion = mm_cfc_unified_fusion_init(
+                n_mod, input_dims, latent_dim, hidden_dim,
+                MM_FUSION_DEFAULT_ODE_STEPS, MM_FUSION_DEFAULT_TAU, MM_FUSION_DEFAULT_DT);
+            safe_free((void**)&input_dims);
+            if (fusion) {
+                float *fusion_out = (float*)safe_calloc((size_t)hidden_dim, sizeof(float));
+                if (fusion_out) {
+                    int ret = mm_cfc_unified_fusion(fusion, modality_data, modality_dims, n_mod, fusion_out, hidden_dim);
+                    if (ret == 0) {
+                        int copy_dim = (hidden_dim < output_dim) ? hidden_dim : output_dim;
+                        memcpy(unified_output, fusion_out, (size_t)copy_dim * sizeof(float));
+                        if (output_dim > copy_dim) memset(unified_output + copy_dim, 0, (size_t)(output_dim - copy_dim) * sizeof(float));
+                    }
+                    safe_free((void**)&fusion_out);
+                    mm_cfc_unified_fusion_free(fusion);
+                    if (ret == 0) return 0;
+                } else {
+                    mm_cfc_unified_fusion_free(fusion);
+                }
+            }
+        }
     }
-    safe_free((void**)&fusion_out);
-    mm_cfc_unified_fusion_free(fusion);
-    return ret;
-#else
-    /* 方案C未启用且共享LNN不可用：返回错误 */
+
+    /* ZSFWS-003: 回退路径——共享LNN统一状态处理器
+     * 当方案C CfC ODE融合初始化失败时使用共享LNN作为备选 */
+    int ret = _mm_fusion_via_shared_lnn(modality_data, modality_dims,
+                                         num_modalities, unified_output, output_dim);
+    if (ret == 0) return 0;
+
+    /* 两条路径均失败：返回错误，禁止使用零值假数据 */
     memset(unified_output, 0, (size_t)output_dim * sizeof(float));
     return -1;
-#endif
 }

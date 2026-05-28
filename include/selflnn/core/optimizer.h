@@ -143,23 +143,35 @@ int optimizer_set_learning_rate(Optimizer* optimizer, float learning_rate);
 
 /**
  * @brief AdamW权重衰减步进（含解耦权重衰减）
- * @param optimizer 优化器句柄
- * @param params 参数数组
+ * 
+ * 直接操作底层数组的AdamW更新，适合外部独立调用。
+ * @param params 参数数组（原地更新）
  * @param grads 梯度数组
- * @param num_params 参数数量
+ * @param m 一阶动量缓冲区
+ * @param v 二阶动量缓冲区
+ * @param n 参数数量
+ * @param lr 学习率
+ * @param beta1 一阶动量衰减因子
+ * @param beta2 二阶动量衰减因子
+ * @param eps 防除零常数
+ * @param weight_decay 权重衰减系数
+ * @param step 当前步数（用于偏差校正）
  * @return int 成功返回0
  */
-int optimizer_adamw_step(Optimizer* optimizer, float* params, const float* grads, size_t num_params);
+int optimizer_adamw_step(float* params, float* grads, float* m, float* v,
+                         size_t n, float lr, float beta1, float beta2,
+                         float eps, float weight_decay, int step);
 
 /**
- * @brief 余弦退火学习率调度
+ * @brief 余弦退火学习率调度（带热重启）
  * @param base_lr 基础学习率
  * @param min_lr 最小学习率
- * @param current_step 当前步数
- * @param total_steps 总步数
+ * @param epoch 当前epoch
+ * @param T_0 首次重启周期
+ * @param T_mult 重启周期倍增因子
  * @return float 调整后的学习率
  */
-float lr_cosine_annealing(float base_lr, float min_lr, size_t current_step, size_t total_steps);
+float lr_cosine_annealing(float base_lr, float min_lr, int epoch, int T_0, int T_mult);
 
 #ifdef __cplusplus
 }

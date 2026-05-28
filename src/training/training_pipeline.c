@@ -127,9 +127,9 @@ struct TrainingPipeline {
     float prev_epoch_loss;                     /**< ZSFWS-008: 上一轮损失（计算收敛速率用） */
     float convergence_threshold;               /**< ZSFWS-008: 绝对收敛阈值 */
 
-    /* ZSFX-P0: BPTT时间反向传播配置 */
-    int bptt_enabled;                          /**< 是否启用BPTT（序列数据训练时启用） */
-    int bptt_unroll_steps;                     /**< BPTT展开步数（默认4步，序列任务需更大值） */
+    /* 状态持续性序列训练配置（非真正BPTT，CfC内部ODE状态跨步保持即提供时间编码） */
+    int bptt_enabled;                          /**< 启用状态持续性序列训练 */
+    int bptt_unroll_steps;                     /**< cfc_reset间隔步数（默认4） */
 };
 
 /* FIX-013: compute_loss_value 直接委托 loss_compute，确保与 LossType 枚举严格一致。
@@ -288,13 +288,10 @@ static void pipeline_apply_optimizer(TrainingPipeline* pipeline, LNN* network, f
     }
     pipeline->optimizer_step++;
 
-    /* 若优化器未初始化lr或lr为0，动态设置优化器学习率 */
+    /* 始终同步优化器学习率与训练管线学习率 */
     OptimizerConfig opt_cfg;
     if (optimizer_get_config(pipeline->optimizer, &opt_cfg) == 0) {
-        if (opt_cfg.learning_rate <= 1e-10f && lr > 1e-10f) {
-            opt_cfg.learning_rate = lr;
-            optimizer_set_config(pipeline->optimizer, &opt_cfg);
-        }
+        optimizer_set_learning_rate(pipeline->optimizer, lr);
     }
 }
 
@@ -1430,14 +1427,22 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 lnn_forward(pipeline->network, input, output);
                 float mse_loss = compute_loss_value(output, target, output_dim, LOSS_MSE);
                 float contrast_loss = compute_loss_value(output, shifted_target, output_dim, LOSS_MSE);
-                /* R6-001修复: 对比损失公式修正。
-                 * 原公式 0.3*(1/(1+contrast)) 会鼓励与负样本相似——完全反了。
-                 * 正确语义: 正样本MSE应小；负样本MSE应大（惩罚与负样本的相似性）。
-                 * 使用 max(0, margin + mse_loss - contrast_loss) 三元组损失形式。 */
                 float margin = 0.2f;
-                loss = mse_loss + 0.3f * (mse_loss - contrast_loss + margin > 0.0f ?
-                                          mse_loss - contrast_loss + margin : 0.0f);
-                lnn_backward_accumulate(pipeline->network, target, &loss);
+                int penalty_active = (mse_loss - contrast_loss + margin > 0.0f);
+                loss = mse_loss + 0.3f * (penalty_active ? mse_loss - contrast_loss + margin : 0.0f);
+                /* FIX-021修复: 对比损失梯度注入。
+                 * 复合梯度: ∂L/∂out = ∂MSE(out,target)/∂out + 0.3*∂(MSE(out,target)-MSE(out,shifted))/∂out
+                 * = (2/n)*(out-target) + 0.3*(2/n)*(shifted_target-target)
+                 * 等效目标: target_eff = target - 0.3*indicator*(shifted_target - target) */
+                float combined_target[256];
+                if (penalty_active) {
+                    for (size_t k = 0; k < output_dim; k++) {
+                        combined_target[k] = target[k] - 0.3f * (shifted_target[k] - target[k]);
+                    }
+                } else {
+                    memcpy(combined_target, target, output_dim * sizeof(float));
+                }
+                lnn_backward_accumulate(pipeline->network, combined_target, &loss);
                 pipeline->network->config.learning_rate = pipeline->config.base_lr * 0.8f;
             } else if (stage == TRAIN_STAGE_FINE_TUNE) {
                 /* 微调：小学习率+任务特定损失 */
@@ -1481,6 +1486,8 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
          * 实现真正的批量梯度更新。weight_gradients/bias_gradients 已在 batch 内
          * 通过 cfc_backward 累加（+=），零梯度在 batch 开始前执行。 */
         if (!is_eval_stage) {
+            /* 拉普拉斯增强必须在优化器之前调用，使滤波后的梯度被优化器消费 */
+            pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
             /* P0-BPTT: 统一使用Adam更新cell级参数（gate/tau/LN等），
@@ -1489,9 +1496,6 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
         }
         epoch_loss += batch_loss / (float)actual_batch;
     }
-
-    /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
-    pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
 
     /* 梯度频谱自适应学习率调整 */
     if (pipeline->config.use_laplace_enhancement && pipeline->gradient_history
@@ -1517,6 +1521,41 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
     epoch_loss /= (float)(samples_this_epoch > 0 ? samples_this_epoch : 1);
     pipeline->state.current_loss = epoch_loss;
     if (epoch_loss < pipeline->state.best_loss) pipeline->state.best_loss = epoch_loss;
+
+    /* FIX-F5: 添加收敛检查（每epoch结束后）和验证集评估 */
+    {
+        float current_lr = pipeline->network->config.learning_rate;
+        if (pipeline_convergence_check(pipeline, pipeline->state.current_epoch,
+                pipeline->state.total_epochs, epoch_loss, &current_lr,
+                pipeline->config.use_early_stopping, "主训练流水线") != 0) {
+            pipeline->network->config.learning_rate = current_lr;
+            pipeline->state.is_running = 0;
+            log_info("[训练管线] 早停触发，当前epoch=%d，损失=%.6f",
+                     pipeline->state.current_epoch, epoch_loss);
+            return 0;
+        }
+        pipeline->network->config.learning_rate = current_lr;
+    }
+    /* FIX-F5: 验证集评估（若验证缓冲区存在） */
+    if (pipeline->val_buffer && pipeline->val_size > 0 && pipeline->val_size >= (size_t)output_dim) {
+        float val_loss = 0.0f;
+        size_t val_samples = pipeline->val_size / ((size_t)input_dim + (size_t)output_dim);
+        if (val_samples > 0 && val_samples <= 500) {
+            for (size_t v = 0; v < val_samples; v++) {
+                const float* v_input = pipeline->val_buffer + v * (size_t)(input_dim + output_dim);
+                const float* v_target = v_input + input_dim;
+                float v_output[256] = {0};
+                lnn_forward(pipeline->network, v_input, v_output);
+                val_loss += compute_loss_value(v_output, v_target, (size_t)output_dim, pipeline->loss_function);
+            }
+            val_loss /= (float)val_samples;
+            pipeline->state.val_accuracy = 1.0f - (val_loss / (epoch_loss + 1e-8f));
+            if (pipeline->monitor) {
+                training_monitor_log_metric(pipeline->monitor, TM_LOSS,
+                    pipeline->state.current_epoch, 0, val_loss);
+            }
+        }
+    }
 
     if (pipeline->monitor) {
         training_monitor_log_metric(pipeline->monitor, TM_LOSS,
@@ -1637,8 +1676,8 @@ int pipeline_multimodal_train_step(TrainingPipeline* pipeline,
         if (pipeline->network->cfc_network->weight_gradients)
             memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
         if (pipeline->network->cfc_network->bias_gradients)
-    cfc_zero_cell_gradients(pipeline->network->cfc_network);
             memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+    cfc_zero_cell_gradients(pipeline->network->cfc_network);
     }
 
     size_t max_input = 512;
@@ -1710,14 +1749,20 @@ int pipeline_local_train(TrainingPipeline* pipeline, const char* module_name,
     for (int e = 0; e < epochs && num_samples > 0; e++) {
         /* FIX-014: 每epoch开始前清零网络级梯度，防止跨epoch累积污染 */
         if (pipeline->network && pipeline->network->cfc_network) {
-            size_t wg_sz = (size_t)pipeline->network->config.input_size *
+            size_t wg_sz, bg_sz;
+            if (pipeline->network->cfc_network->total_weight_params > 0) {
+                wg_sz = pipeline->network->cfc_network->total_weight_params;
+                bg_sz = pipeline->network->cfc_network->total_bias_params;
+            } else {
+                wg_sz = (size_t)pipeline->network->config.input_size *
                            (size_t)pipeline->network->config.hidden_size;
-            size_t bg_sz = (size_t)pipeline->network->config.hidden_size;
+                bg_sz = (size_t)pipeline->network->config.hidden_size;
+            }
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
-        cfc_zero_cell_gradients(pipeline->network->cfc_network);
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+        cfc_zero_cell_gradients(pipeline->network->cfc_network);
         }
         float epoch_loss = 0.0f;
         for (size_t s = 0; s < num_samples; s++) {
@@ -1979,9 +2024,15 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
 
             /* FIX-011: 每批次开始前清零网络级梯度缓冲区 */
             {
-                size_t wg_sz = (size_t)pipeline->network->config.input_size *
+                size_t wg_sz, bg_sz;
+                if (pipeline->network->cfc_network->total_weight_params > 0) {
+                    wg_sz = pipeline->network->cfc_network->total_weight_params;
+                    bg_sz = pipeline->network->cfc_network->total_bias_params;
+                } else {
+                    wg_sz = (size_t)pipeline->network->config.input_size *
                                (size_t)pipeline->network->config.hidden_size;
-                size_t bg_sz = (size_t)pipeline->network->config.hidden_size;
+                    bg_sz = (size_t)pipeline->network->config.hidden_size;
+                }
                 if (pipeline->network->cfc_network->weight_gradients)
                     memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
                 if (pipeline->network->cfc_network->bias_gradients)
@@ -2034,13 +2085,12 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                 pipeline->network->config.learning_rate = saved_pretrain_lr;
             }
             global_step++;
-            /* FIX-010: 优化器在每个batch结束后统一调用一次 */
+            /* 拉普拉斯增强必须在优化器之前调用，使滤波后的梯度被优化器消费 */
+            pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
             pipeline_apply_cell_gradients_adam(pipeline);
         }
-        /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
-        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         if (samples_processed > 0) epoch_loss /= (float)samples_processed;
         if (epoch_loss < best_loss) best_loss = epoch_loss;
         pipeline->state.current_epoch = epoch + 1;
@@ -2109,14 +2159,20 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
 
             /* FIX-011: 每批次开始前清零网络级梯度缓冲区 */
             {
-                size_t wg_sz = (size_t)pipeline->network->config.input_size *
+                size_t wg_sz, bg_sz;
+                if (pipeline->network->cfc_network->total_weight_params > 0) {
+                    wg_sz = pipeline->network->cfc_network->total_weight_params;
+                    bg_sz = pipeline->network->cfc_network->total_bias_params;
+                } else {
+                    wg_sz = (size_t)pipeline->network->config.input_size *
                                (size_t)pipeline->network->config.hidden_size;
-                size_t bg_sz = (size_t)pipeline->network->config.hidden_size;
+                    bg_sz = (size_t)pipeline->network->config.hidden_size;
+                }
                 if (pipeline->network->cfc_network->weight_gradients)
                     memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
                 if (pipeline->network->cfc_network->bias_gradients)
-            cfc_zero_cell_gradients(pipeline->network->cfc_network);
                     memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+            cfc_zero_cell_gradients(pipeline->network->cfc_network);
             }
 
             for (size_t b = 0; b < current_batch; b++) {
@@ -2138,13 +2194,12 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
                 samples_processed++;
                 safe_free((void**)&output);
             }
-            /* FIX-010: 优化器在每个batch结束后统一调用一次 */
+            /* 拉普拉斯增强必须在优化器之前调用，使滤波后的梯度被优化器消费 */
+            pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
             pipeline_apply_cell_gradients_adam(pipeline);
         }
-        /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
-        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         if (samples_processed > 0) loss /= (float)samples_processed;
         if (loss < best_loss) best_loss = loss;
         pipeline->state.current_epoch = epoch + 1;
@@ -2241,14 +2296,20 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
 
         /* FIX-011: 每epoch开始前清零网络级梯度缓冲区 */
         {
-            size_t wg_sz = (size_t)pipeline->network->config.input_size *
+            size_t wg_sz, bg_sz;
+            if (pipeline->network->cfc_network->total_weight_params > 0) {
+                wg_sz = pipeline->network->cfc_network->total_weight_params;
+                bg_sz = pipeline->network->cfc_network->total_bias_params;
+            } else {
+                wg_sz = (size_t)pipeline->network->config.input_size *
                            (size_t)pipeline->network->config.hidden_size;
-            size_t bg_sz = (size_t)pipeline->network->config.hidden_size;
+                bg_sz = (size_t)pipeline->network->config.hidden_size;
+            }
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
-        cfc_zero_cell_gradients(pipeline->network->cfc_network);
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+        cfc_zero_cell_gradients(pipeline->network->cfc_network);
         }
 
         for (size_t s = 0; s < total_samples; s++) {
@@ -2272,15 +2333,13 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
             processed_count++;
         }
 
-        /* FIX-010: 优化器在每个epoch结束后统一调用一次 */
+        /* 拉普拉斯增强必须在优化器之前调用 */
+        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
         pipeline_apply_cell_gradients_adam(pipeline);
 
         if (processed_count > 0) epoch_loss /= (float)processed_count;
-
-        /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
-        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
 
         pipeline->state.current_epoch = epoch + 1;
         pipeline->state.current_loss = epoch_loss;
@@ -2361,14 +2420,20 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
 
         /* FIX-011: 每epoch开始前清零网络级梯度缓冲区 */
         {
-            size_t wg_sz = (size_t)pipeline->network->config.input_size *
+            size_t wg_sz, bg_sz;
+            if (pipeline->network->cfc_network->total_weight_params > 0) {
+                wg_sz = pipeline->network->cfc_network->total_weight_params;
+                bg_sz = pipeline->network->cfc_network->total_bias_params;
+            } else {
+                wg_sz = (size_t)pipeline->network->config.input_size *
                            (size_t)pipeline->network->config.hidden_size;
-            size_t bg_sz = (size_t)pipeline->network->config.hidden_size;
+                bg_sz = (size_t)pipeline->network->config.hidden_size;
+            }
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
-        cfc_zero_cell_gradients(pipeline->network->cfc_network);
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+        cfc_zero_cell_gradients(pipeline->network->cfc_network);
         }
 
         float l = 0.0f;
@@ -2390,13 +2455,11 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
                 : sample_loss;
             safe_free((void**)&output);
         }
-        /* FIX-010: 优化器在每个epoch结束后统一调用一次 */
+        /* 拉普拉斯增强必须在优化器之前调用 */
+        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
-        /* P0-BPTT: cell参数使用Adam统一更新 */
         pipeline_apply_cell_gradients_adam(pipeline);
-        /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
-        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         l /= (float)total_samples;
 
         if (l < best_loss - 1e-6f) { best_loss = l; no_improve = 0; }
@@ -2477,14 +2540,20 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
 
         /* FIX-011: 每epoch开始前清零网络级梯度缓冲区 */
         {
-            size_t wg_sz = (size_t)pipeline->network->config.input_size *
+            size_t wg_sz, bg_sz;
+            if (pipeline->network->cfc_network->total_weight_params > 0) {
+                wg_sz = pipeline->network->cfc_network->total_weight_params;
+                bg_sz = pipeline->network->cfc_network->total_bias_params;
+            } else {
+                wg_sz = (size_t)pipeline->network->config.input_size *
                            (size_t)pipeline->network->config.hidden_size;
-            size_t bg_sz = (size_t)pipeline->network->config.hidden_size;
+                bg_sz = (size_t)pipeline->network->config.hidden_size;
+            }
             if (pipeline->network->cfc_network->weight_gradients)
                 memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
-        cfc_zero_cell_gradients(pipeline->network->cfc_network);
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+        cfc_zero_cell_gradients(pipeline->network->cfc_network);
         }
 
         float l = 0.0f;
@@ -2506,13 +2575,11 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
                 : sample_loss;
             safe_free((void**)&output);
         }
-        /* FIX-010: 优化器在每个epoch结束后统一调用一次 */
+        /* 拉普拉斯增强必须在优化器之前调用 */
+        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
-        /* P0-BPTT: cell参数使用Adam统一更新 */
         pipeline_apply_cell_gradients_adam(pipeline);
-        /* 拉普拉斯增强：梯度频谱滤波与稳定性监控 */
-        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
         l /= (float)total_samples;
 
         if (l < best_loss - 1e-6f) { best_loss = l; no_improve = 0; }

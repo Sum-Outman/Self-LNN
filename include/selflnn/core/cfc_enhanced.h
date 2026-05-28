@@ -81,6 +81,9 @@ typedef struct {
     int solver_switches;
     int stiffness_detected_count;
     int multi_rate_active;
+    int saved_use_multi_timescale;  /**< P3-004修复: 保存原始多时间尺度标志 */
+    float saved_fast_tau_ratio;     /**< P3-004修复: 保存原始快速时间常数比例 */
+    float saved_slow_tau_ratio;     /**< P3-004修复: 保存原始慢速时间常数比例 */
     float* power_iter_buffer;
     float* power_iter_buffer2;
     int power_iter_buffer_size;

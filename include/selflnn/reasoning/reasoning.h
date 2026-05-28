@@ -645,7 +645,12 @@ typedef struct {
 
 /**
  * @brief 贝叶斯网络
+ * 
+ * 规范定义：此为 BayesianNetwork 主类型定义。
+ * 若 uncertainty_reasoning.h 也在同一编译单元中，使用此定义。
  */
+#ifndef SELFLNN_BAYESIAN_NETWORK_DEFINED
+#define SELFLNN_BAYESIAN_NETWORK_DEFINED
 typedef struct {
     BayesianNode* nodes;            /**< 节点数组 */
     size_t num_nodes;               /**< 节点数量 */
@@ -658,6 +663,7 @@ typedef struct {
     size_t cpd_capacity;            /**< 条件概率表容量 */
     float** adjacency_matrix;       /**< 邻接矩阵（用于图算法） */
 } BayesianNetwork;
+#endif /* !SELFLNN_BAYESIAN_NETWORK_DEFINED */
 
 /**
  * @brief 贝叶斯查询结果

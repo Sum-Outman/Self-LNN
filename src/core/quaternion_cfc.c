@@ -226,6 +226,17 @@ int quaternion_cfc_cell_update(QuaternionCfcCell* cell, const Quaternion* input,
         cell->state.x += rng_normal(0.0f, cell->noise_std) * dt;
         cell->state.y += rng_normal(0.0f, cell->noise_std) * dt;
         cell->state.z += rng_normal(0.0f, cell->noise_std) * dt;
+        /* ZSFWS-010修复: 噪声注入后重新归一化四元数到S^3流形
+         * 噪声直接加到分量会破坏单位范数性质，导致后续四元数乘法不正确 */
+        float norm = sqrtf(cell->state.w * cell->state.w + cell->state.x * cell->state.x +
+                          cell->state.y * cell->state.y + cell->state.z * cell->state.z);
+        if (norm > 1e-12f) {
+            float inv_norm = 1.0f / norm;
+            cell->state.w *= inv_norm;
+            cell->state.x *= inv_norm;
+            cell->state.y *= inv_norm;
+            cell->state.z *= inv_norm;
+        }
     }
     
     if (output) {

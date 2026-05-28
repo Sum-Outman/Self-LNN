@@ -7,10 +7,11 @@
  * 无需链接 ROS C++ 库。
  *
  * 协议文档：http://wiki.ros.org/rosbridge_suite
- * WebSocket 连接 ws://host:9090
+ * WebSocket 连接 ws://host:8080（与HTTP共用端口）
  */
 
 #include "selflnn/robot/ros_bridge.h"
+#include "selflnn/core/port_config.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -172,7 +173,7 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
     bridge->request_id = 0;
     
     /* 设置默认值 */
-    if (bridge->config.bridge_port == 0) bridge->config.bridge_port = 9090;
+    if (bridge->config.bridge_port == 0) bridge->config.bridge_port = SELFLNN_WEBSOCKET_PORT;
     if (!bridge->config.bridge_host || !bridge->config.bridge_host[0]) {
         bridge->config.bridge_host = "localhost";
     }

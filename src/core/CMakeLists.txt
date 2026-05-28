@@ -71,7 +71,7 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_fft.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_features.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_integration.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_unified.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/loss.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/memory.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/ode_solvers.h

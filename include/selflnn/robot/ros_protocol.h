@@ -362,6 +362,7 @@ typedef struct {
     uint32_t domain_id;                     // 域ID
     uint32_t user_traffic_port;             // 用户流量端口
     uint32_t discovery_port;                // 发现端口
+    uint32_t remote_ip;                     /* ZSFZS-F019: 远程参与者IP地址（网络字节序，从SPDP发现获取） */
     uint8_t protocol_version_major;         // RTPS 主版本
     uint8_t protocol_version_minor;         // RTPS 次版本
     uint16_t vendor_id;                     // 厂商ID

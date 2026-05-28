@@ -1008,90 +1008,94 @@ size_t knowledge_integration_cooperative_reasoning(KnowledgeIntegrationSystem* s
         return 0;
     }
     
-    // 使用第一个可用的语义网络进行推理
     if (system->network_count == 0) return 0;
     
-    SemanticNetwork* network = system->networks[0].network;
-    if (!network) return 0;
+    /* K-03修复：遍历所有语义网络进行协作推理，而非仅使用第一个网络。
+     * 每个网络独立执行推理，结果跨网络去重后合并输出。
+     * 这样多个知识域（如常识网络、专业网络、领域网络）可协同贡献推理结论。 */
     
-    // 将前提字符串转换为概念指针
-    Concept** concept_premises = (Concept**)safe_malloc(premise_count * sizeof(Concept*));
-    if (!concept_premises) return 0;
-    
-    size_t valid_premises = 0;
-    
-    // 在所有语义网络中查找概念
-    for (size_t i = 0; i < premise_count; i++) {
-        const char* premise_name = premises[i];
-        if (!premise_name) continue;
-        
-        Concept* found_concept = NULL;
-        // 在所有语义网络中查找
-        for (size_t n = 0; n < system->network_count && !found_concept; n++) {
-            SemanticNetwork* net = system->networks[n].network;
-            if (!net) continue;
-            
-            // 使用现有的语义网络查找函数
-            Concept* found = semantic_network_find_concept_by_name(net, premise_name);
-            if (found) {
-                found_concept = found;
-                break;
-            }
-        }
-        
-        if (found_concept) {
-            concept_premises[valid_premises++] = found_concept;
-        } else {
-            // 如果未找到，创建临时概念
-            Concept* temp_concept = semantic_network_add_concept(
-                network, CONCEPT_TYPE_ENTITY, premise_name, NULL, NULL, 0, 0.5f, 0.5f);
-            if (temp_concept) {
-                concept_premises[valid_premises++] = temp_concept;
-            }
-        }
-    }
-    
-    if (valid_premises == 0) {
-        safe_free((void**)&concept_premises);
-        return 0;
-    }
-    
-    // 执行推理
-    Concept** inference_results = (Concept**)safe_malloc(max_results * sizeof(Concept*));
-    if (!inference_results) {
-        safe_free((void**)&concept_premises);
-        return 0;
-    }
-    
-    size_t inference_count = semantic_network_infer(
-        network, concept_premises, valid_premises,
-        max_inferences, inference_results, max_results
-    );
-    
-    // 将推理结果转换为知识条目
+    /* 已见概念名称去重表（跨网络去重） */
+    #define MAX_INFERRED_CONCEPTS 256
+    const char* seen_names[MAX_INFERRED_CONCEPTS];
+    size_t seen_count = 0;
     size_t result_count = 0;
-    for (size_t i = 0; i < inference_count && result_count < max_results; i++) {
-        Concept* concept = inference_results[i];
-        if (!concept || !concept->name) continue;
-        
-        KnowledgeEntry* entry = &results[result_count];
-        memset(entry, 0, sizeof(KnowledgeEntry));
-        
-        entry->subject = string_duplicate_nullable(concept->name);
-        entry->predicate = string_duplicate_nullable("inferred_from");
-        entry->object = string_duplicate_nullable("cooperative_reasoning");
-        entry->type = KNOWLEDGE_FACT;
-        entry->confidence = 0.7f; // 默认置信度
-        entry->source = SOURCE_INFERENCE;
-        entry->weight = 1.0f;
-        entry->timestamp = (long)time(NULL);
-        
-        result_count++;
-    }
     
-    // 清理
-    safe_free((void**)&concept_premises);
-    safe_free((void**)&inference_results);
+    /* 遍历所有语义网络，各自独立推理并合并结果 */
+    for (size_t net_idx = 0; net_idx < system->network_count && result_count < max_results; net_idx++) {
+        SemanticNetwork* network = system->networks[net_idx].network;
+        if (!network) continue;
+        
+        /* 将前提字符串映射到当前语义网络中的概念 */
+        Concept** concept_premises = (Concept**)safe_malloc(premise_count * sizeof(Concept*));
+        if (!concept_premises) continue;
+        
+        size_t valid_premises = 0;
+        for (size_t i = 0; i < premise_count; i++) {
+            const char* premise_name = premises[i];
+            if (!premise_name) continue;
+            
+            Concept* found = semantic_network_find_concept_by_name(network, premise_name);
+            if (found) {
+                concept_premises[valid_premises++] = found;
+            } else {
+                /* 当前网络中未找到，创建临时概念供推理使用 */
+                Concept* temp_concept = semantic_network_add_concept(
+                    network, CONCEPT_TYPE_ENTITY, premise_name, NULL, NULL, 0, 0.5f, 0.5f);
+                if (temp_concept) {
+                    concept_premises[valid_premises++] = temp_concept;
+                }
+            }
+        }
+        
+        if (valid_premises > 0) {
+            /* 在当前网络中执行语义推理 */
+            Concept** network_results = (Concept**)safe_malloc(max_results * sizeof(Concept*));
+            if (network_results) {
+                size_t net_inf_count = semantic_network_infer(
+                    network, concept_premises, valid_premises,
+                    max_inferences, network_results, max_results
+                );
+                
+                /* 跨网络去重：将本网络推理结果与已有结果比对后加入 */
+                for (size_t i = 0; i < net_inf_count && result_count < max_results; i++) {
+                    Concept* concept = network_results[i];
+                    if (!concept || !concept->name) continue;
+                    
+                    /* 跨网络名称去重检查 */
+                    int already_seen = 0;
+                    for (size_t s = 0; s < seen_count; s++) {
+                        if (seen_names[s] && strcmp(seen_names[s], concept->name) == 0) {
+                            already_seen = 1;
+                            break;
+                        }
+                    }
+                    if (already_seen) continue;
+                    
+                    /* 记录已见概念名（生命周期为函数作用域内安全） */
+                    if (seen_count < MAX_INFERRED_CONCEPTS) {
+                        seen_names[seen_count++] = concept->name;
+                    }
+                    
+                    /* 转换为知识条目 */
+                    KnowledgeEntry* entry = &results[result_count];
+                    memset(entry, 0, sizeof(KnowledgeEntry));
+                    entry->subject = string_duplicate_nullable(concept->name);
+                    entry->predicate = string_duplicate_nullable("inferred_from");
+                    entry->object = string_duplicate_nullable("cooperative_reasoning");
+                    entry->type = KNOWLEDGE_FACT;
+                    entry->confidence = 0.7f;
+                    entry->source = SOURCE_INFERENCE;
+                    entry->weight = 1.0f;
+                    entry->timestamp = (long)time(NULL);
+                    result_count++;
+                }
+                
+                safe_free((void**)&network_results);
+            }
+        }
+        
+        safe_free((void**)&concept_premises);
+    }
     
     return result_count;
 }

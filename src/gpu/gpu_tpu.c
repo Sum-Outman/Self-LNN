@@ -243,7 +243,7 @@ static GpuContext* tpu_backend_context_create(int device_index) {
     return ctx;
 }
 
-static void tpu_backend_context_free(GpuContext* context) { safe_free(context); }
+static void tpu_backend_context_free(GpuContext* context) { safe_free((void**)&context); }
 
 static GpuMemory* tpu_backend_memory_alloc(GpuContext* context, size_t size, GpuMemoryType memory_type) {
     if (!context || size == 0) return NULL;

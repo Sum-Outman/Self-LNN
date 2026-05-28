@@ -7,6 +7,7 @@
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/self_cognition.h"
 #include "selflnn/metacognition.h"
+#include "selflnn/multi_agent.h"   /* ZSFZS-F024: 多智能体系统启停控制 */
 #include <string.h>
 #include <stdio.h>
 
@@ -386,11 +387,18 @@ static int cap_set_concurrency(int enable) {
 /* 多智能体协作：检查多智能体系统 */
 static int cap_check_multi_agent(void) {
     void* ma = selflnn_get_multi_agent_system();
-    return ma ? 1 : 0;
+    if (!ma) return 0;
+    return multi_agent_get_enabled((MultiAgentSystem*)ma);
 }
+/* ZSFZS-F024修复: 多智能体协作启停控制
+ * 此前只设置标志位+日志，没有实际控制多智能体系统的启停。
+ * 现在通过 multi_agent_set_enabled() 真实控制智能体活动、
+ * 消息队列和任务调度，与其他深度集成开关（如自我学习→online_learner_set_enabled）一致。 */
 static int cap_set_multi_agent(int enable) {
     g_capability_states[CAP_MULTI_AGENT] = (enable != 0) ? 1 : 0;
     if (g_capability_forced_on[CAP_MULTI_AGENT]) { g_capability_states[CAP_MULTI_AGENT] = 1; return 0; }
+    void* ma = selflnn_get_multi_agent_system();
+    if (ma) multi_agent_set_enabled((MultiAgentSystem*)ma, enable ? 1 : 0);
     log_info("[能力开关] 多智能体协作 %s", enable ? "开启" : "关闭");
     return 0;
 }

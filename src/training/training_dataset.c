@@ -13,7 +13,7 @@
 #include "selflnn/training/training.h"
 #include "selflnn/training/data_loaders.h"
 #include "selflnn/core/errors.h"
-#include "selflnn/core/laplace_integration.h"
+#include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
@@ -133,6 +133,7 @@ TrainingDataset* dataset_create(const char* name, size_t num_samples,
 
     ds->is_loaded = 1;
     ds->is_shuffled = 0;
+    ds->is_training_data = 1;  /* ZSFZS-F029: 默认训练模式，增强函数将正常执行 */
     ds->current_index = 0;
     ds->epoch = 0;
 
@@ -525,6 +526,7 @@ int augment_mixup(TrainingDataset* ds, float alpha) {
  */
 int augment_feature_dropout(TrainingDataset* ds, float drop_prob) {
     if (!ds || !ds->is_loaded) return -1;
+    if (!ds->is_training_data) return 0;  /* ZSFZS-F029: 验证模式跳过增强，保护原始数据 */
     if (drop_prob <= 0.0f) drop_prob = 0.1f;
     if (drop_prob > 0.9f) drop_prob = 0.9f;
 
@@ -793,13 +795,8 @@ int dataset_augment_mixup(TrainingDataset* ds, float alpha) {
 }
 
 int dataset_augment_dropout(TrainingDataset* ds, float drop_prob) {
-    if (!ds || drop_prob <= 0.0f || drop_prob >= 1.0f) return 0;
-    size_t n = ds->header.num_samples * ds->header.input_dim;
-    for (size_t i = 0; i < n; i++) {
-        unsigned int rnd = (unsigned int)((i * 1103515245 + 12345) & 0x7FFFFFFF);
-        if ((float)(rnd % 1000) / 1000.0f < drop_prob) ds->inputs[i] = 0.0f;
-    }
-    return 0;
+    /* ZSFZS-F028: 委托给 augment_feature_dropout 统一实现，消除重复实现 */
+    return augment_feature_dropout(ds, drop_prob);
 }
 
 /**
@@ -982,6 +979,13 @@ int dataset_set_weights(TrainingDataset* ds, const float* weights, size_t n) {
     return 0;
 }
 
+/* ZSFZS-F029: 设置训练/验证模式 */
+int dataset_set_training_mode(TrainingDataset* ds, int is_training) {
+    if (!ds || !ds->is_loaded) return -1;
+    ds->is_training_data = is_training ? 1 : 0;
+    return 0;
+}
+
 /* ============================================================================
  * R3-06修复: dataset_split — 数据集划分为训练/验证/测试集
  * 此前training_dataset.c完全没有train/val/test划分功能(严重缺失)。
@@ -1054,6 +1058,11 @@ int dataset_split(TrainingDataset* ds,
     (*out_train)->header.num_samples = (uint32_t)train_count;
     (*out_val)->header.num_samples   = (uint32_t)val_count;
     (*out_test)->header.num_samples  = (uint32_t)test_count;
+
+    /* ZSFZS-F029: 训练集开启训练模式, 验证集和测试集关闭训练模式(增强函数将跳过) */
+    (*out_train)->is_training_data = 1;
+    (*out_val)->is_training_data   = 0;
+    (*out_test)->is_training_data  = 0;
 
     safe_free((void**)&indices);
     return 0;
