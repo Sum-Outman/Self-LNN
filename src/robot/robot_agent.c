@@ -3,6 +3,7 @@
 #include "selflnn/robot/kinematics.h"
 #include "selflnn/robot/hardware_interface.h"
 #include "selflnn/reasoning/planning.h"
+#include "selflnn/learning/exploration_strategies.h" /* ZSFA-FIX-P0-007: 探索策略集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/time_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -252,6 +253,11 @@ void robot_agent_free(RobotAgent* agent) {
     safe_free((void**)&agent->target_policy.bias_h2);
     safe_free((void**)&agent->target_policy.bias_h3);
     safe_free((void**)&agent->target_policy.bias_o);
+    /* ZSFA-FIX-P0-007: 释放UCB探索状态 */
+    if (agent->ucb_explore_state) {
+        exploration_ucb_free(agent->ucb_explore_state);
+        agent->ucb_explore_state = NULL;
+    }
     safe_free((void**)&agent);
 }
 
@@ -374,6 +380,9 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
     agent->evolution_rate = 0.001f;
     agent->training_step_count = 0;   /* ZSFX-012: Xavier初始化权重为随机值，训练步数从0开始 */
 
+    /* ZSFA-FIX-P0-007: 初始化UCB探索策略 */
+    agent->ucb_explore_state = exploration_ucb_create(AGENT_ACTION_DIM, 0.01f);
+
     for (int i = 0; i < AGENT_STATE_DIM; i++) {
         agent->state_mean[i] = 0.0f;
         agent->state_std[i] = 1.0f;
@@ -430,8 +439,27 @@ int robot_agent_act(RobotAgent* agent, float* action) {
     float explore = agent->policy.exploration_rate +
                     compute_curiosity(agent, agent->state_vec);
     if (AGENT_RAND_FLOAT < explore) {
-        for (int i = 0; i < AGENT_ACTION_DIM; i++) {
-            action[i] += (AGENT_RAND_FLOAT - 0.5f) * 2.0f * explore;
+        /* ZSFA-FIX-P0-007: 使用UCB探索替代纯随机探索 */
+        if (agent->ucb_explore_state) {
+            /* 使用UCB从动作值中选择探索动作 */
+            int selected = exploration_ucb_select(agent->ucb_explore_state,
+                                                   action, AGENT_ACTION_DIM);
+            if (selected >= 0 && selected < AGENT_ACTION_DIM) {
+                /* UCB选中的动作：在已有动作值上加探索噪声 */
+                float ucb_action = action[selected];
+                for (int i = 0; i < AGENT_ACTION_DIM; i++) {
+                    action[i] = (i == selected) ? ucb_action * 1.2f :
+                                action[i] + (AGENT_RAND_FLOAT - 0.5f) * 0.1f * explore;
+                }
+            } else {
+                for (int i = 0; i < AGENT_ACTION_DIM; i++) {
+                    action[i] += (AGENT_RAND_FLOAT - 0.5f) * 2.0f * explore;
+                }
+            }
+        } else {
+            for (int i = 0; i < AGENT_ACTION_DIM; i++) {
+                action[i] += (AGENT_RAND_FLOAT - 0.5f) * 2.0f * explore;
+            }
         }
     }
 

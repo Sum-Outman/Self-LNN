@@ -21,6 +21,18 @@ float speech_language_model_score(void* model, const int* tokens, int num_tokens
 int speech_language_model_vocab_size(void* model);
 void speech_language_model_free(void* model);
 
+/**
+ * @brief ZSFA-FIX-P0-003: 语言模型后处理纠错
+ * 使用N-gram语言模型对语音识别结果进行置信度评估和纠错处理。
+ * @param model 语言模型实例
+ * @param input_text 输入待纠错文本
+ * @param corrected 输出纠错后文本缓冲区
+ * @param corrected_size 输出缓冲区大小
+ * @return int 成功返回0，失败返回-1
+ */
+int speech_language_model_correct(void* model, const char* input_text,
+                                   char* corrected, size_t corrected_size);
+
 #ifdef __cplusplus
 }
 #endif

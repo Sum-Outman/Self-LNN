@@ -974,15 +974,19 @@ SubgraphMatchSet* graph_query_find_path_pattern(AdjacencyList* al,
                     int edge_matched = 0;
                     for (int ei = 0; ei < (int)src_node->out_degree; ei++) {
                         if (src_node->out_neighbors[ei] == nbs[ni]) {
-                            /* 如果邻接表有边标签，检查是否匹配 */
-                            if (src_node->label &&
-                                strcmp(src_node->label, path_edge_labels[step]) == 0) {
-                                edge_matched = 1;
-                                break;
-                            }
-                            /* 尝试通过边ID获取边标签 */
+                            /* C-006修复: 通过边ID获取边标签进行匹配，而非节点标签 */
                             if (src_node->out_edge_ids && ei < (int)src_node->out_degree) {
-                                /* 使用边ID作为关系类型标识 */
+                                const ALEdge* edge = adjacency_list_get_edge_by_id(
+                                    al, src_node->out_edge_ids[ei]);
+                                if (edge && edge->label &&
+                                    strcmp(edge->label, path_edge_labels[step]) == 0) {
+                                    edge_matched = 1;
+                                    break;
+                                }
+                            }
+                            /* 回退: 如果没有out_edge_ids，尝试节点标签匹配（传统兼容） */
+                            if (!edge_matched && src_node->label &&
+                                strcmp(src_node->label, path_edge_labels[step]) == 0) {
                                 edge_matched = 1;
                                 break;
                             }

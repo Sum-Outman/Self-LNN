@@ -109,6 +109,10 @@ typedef HMODULE CbLibHandle;
 typedef void* CbLibHandle;
 #endif
 
+/* CNRT数据拷贝方向常量 */
+#define CNRT_MEMCPY_H2D 0
+#define CNRT_MEMCPY_D2H 1
+
 typedef int (*CnrtInitFn)(void);
 typedef int (*CnrtDestroyFn)(void);
 typedef int (*CnrtGetDeviceCountFn)(int*);
@@ -410,7 +414,6 @@ static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_wor
      * ZSFWS-M-006: NPU加速需寒武纪MLU硬件+CNToolkit+CNRT驱动。
      * 无MLU硬件时设备内存分配+CPU SIMD计算是诚实的硬件自适应。
      * 预编译离线模型通过cambricon_npu_load_model走真实MLU推理路径。
-     * ================================================================ */
      * 6. CNRT不可用时回退到CPU计算（npu_common_cpu_kernel_execute）
      * ================================================================ */
 

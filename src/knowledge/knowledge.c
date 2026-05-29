@@ -38,6 +38,10 @@
 #include <sys/types.h>
 #endif
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4047 4102 4702)
+#endif
+
 /* L-005修复：知识演化用的安全PRNG，替代time(NULL)种子 */
 static XorshiftPrng micro_prng;
 static int micro_prng_initialized = 0;

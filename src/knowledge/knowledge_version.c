@@ -3,6 +3,7 @@
  * @brief 知识版本管理系统完整实现
  */
 
+#define SELFLNN_CORE_INTERNAL
 #include "selflnn/knowledge/knowledge_version.h"
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/utils/memory_utils.h"
@@ -46,28 +47,6 @@ typedef struct {
 } SnapshotFileHeader;
 
 /* 版本管理器内部结构 */
-struct KnowledgeVersionManager {
-    KnowledgeSnapshot snapshots[KV_MAX_SNAPSHOTS];
-    int snapshot_count;
-    int current_snapshot;
-    char storage_dir[512];
-    char current_branch[KV_MAX_BRANCH_NAME];
-    char branches[16][KV_MAX_BRANCH_NAME];
-    int branch_count;
-    int auto_interval_min;
-    int auto_max_snapshots;
-    time_t last_auto_snapshot;
-    int next_snapshot_id;
-
-    /* 条目历史追踪表 */
-    KnowledgeEntryHistory entry_histories[KV_MAX_HISTORY];
-    int history_count;
-
-    /* 当前知识库条目快照（用于差异比较） */
-    SnapshotEntryRecord current_entries[KV_MAX_ENTRIES_PER_SNAPSHOT];
-    int current_entry_count;
-};
-
 /* 内部辅助函数：从知识库提取条目到快照记录 */
 static int capture_knowledge_entries(void* knowledge_base,
                                      SnapshotEntryRecord* records, int max_records) {

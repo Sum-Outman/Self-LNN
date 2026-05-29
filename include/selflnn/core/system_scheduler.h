@@ -177,6 +177,12 @@ int system_scheduler_get_stats(SystemScheduler* scheduler, SchedulerStats* stats
 int system_scheduler_set_mode(SystemScheduler* scheduler, SchedulerMode mode);
 
 int system_scheduler_register_event_callback(SystemScheduler* scheduler, scheduler_event_callback callback, void* user_data);
+
+/* P3-002: 硬件热插拔管理API */
+int system_scheduler_start_hotplug_monitor(SystemScheduler* scheduler);
+int system_scheduler_stop_hotplug_monitor(SystemScheduler* scheduler);
+int system_scheduler_poll_hotplug_events(SystemScheduler* scheduler);
+int system_scheduler_is_hotplug_active(const SystemScheduler* scheduler);
 int system_scheduler_get_events(SystemScheduler* scheduler, SchedulerEvent* events, size_t* count, size_t max_count);
 
 int system_scheduler_get_module_by_type(SystemScheduler* scheduler, ModuleType type, SystemModule* modules, size_t* count, size_t max_count);

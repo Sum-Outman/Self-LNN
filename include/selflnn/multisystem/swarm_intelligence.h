@@ -85,6 +85,7 @@ typedef struct Swarm Swarm;
 typedef struct {
     int id;
     int is_active;
+    int is_initialized;
     float* position;
     float* velocity;
     float* best_position;
@@ -129,6 +130,8 @@ typedef struct {
     float best_fitness;
     int iteration;
     int converged;
+    int converged_at_iteration;
+    float converged_at_fitness;
     float average_fitness;
     float fitness_std_dev;
     float position_diversity;
@@ -136,6 +139,8 @@ typedef struct {
     int is_converged;
     int convergence_reason;
     float computation_time_ms;
+    int swarm_size;
+    int dimensions;
 } MSSwarmState;
 
 /** @brief SwarmState —— 内部状态（用于 swarm_get_state） */

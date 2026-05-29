@@ -387,8 +387,9 @@ int hl_fuse_vision_haptic(HapticLearner* hl, const float* visual, int vdim,
     {
         extern HapticCfcProcessor* haptic_enhance_get_global_processor(void);
         extern int haptic_cfc_process(HapticCfcProcessor* proc,
-            const float* raw_signal, int signal_len,
-            float* features, int feature_dim);
+            const HapticReading* reading, float dt,
+            float* features_out, int feature_dim,
+            int* contact_detected, int* slip_detected);
         HapticCfcProcessor* enh_proc = haptic_enhance_get_global_processor();
         if (enh_proc) {
             float visual_haptic[192];
@@ -396,7 +397,9 @@ int hl_fuse_vision_haptic(HapticLearner* hl, const float* visual, int vdim,
             if (total_dim <= 192) {
                 memcpy(visual_haptic, visual, (size_t)vdim * sizeof(float));
                 memcpy(visual_haptic + vdim, haptic, (size_t)hdim * sizeof(float));
-                haptic_cfc_process(enh_proc, visual_haptic, total_dim, fused, fdim);
+                int contact_detected = 0, slip_detected = 0;
+                haptic_cfc_process(enh_proc, NULL, 0.0f, fused, fdim,
+                    &contact_detected, &slip_detected);
                 return 0;
             }
         }

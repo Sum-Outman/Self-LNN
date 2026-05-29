@@ -681,3 +681,82 @@ int training_pipeline_train_unified_processor(
 
     return total_trained > 0 ? 0 : -1;
 }
+
+/**
+ * @brief ZSFA-FIX-P0-002: 训练数据预处理 — 数据归一化和验证
+ *
+ * 对训练数据缓冲区进行Z-Score归一化处理，并检测异常值。
+ * 在训练循环开始前调用，确保输入数据质量。
+ *
+ * @param data_buffer 训练数据缓冲区（input+output拼接）
+ * @param data_size 数据缓冲区总字节大小
+ * @param input_dim 输入维度
+ * @param output_dim 输出维度
+ * @return int 成功返回0，失败返回-1
+ */
+int training_data_pipeline_preprocess(float* data_buffer,
+                                       size_t data_size,
+                                       size_t input_dim,
+                                       size_t output_dim)
+{
+    if (!data_buffer || data_size == 0 || input_dim == 0 || output_dim == 0) {
+        return -1;
+    }
+
+    size_t total_dim = input_dim + output_dim;
+    size_t sample_size = total_dim * sizeof(float);
+    size_t total_samples = data_size / sample_size;
+
+    if (total_samples == 0) {
+        log_warning("[训练管线预处理] 数据缓冲区无有效样本");
+        return -1;
+    }
+
+    /* Z-Score归一化：计算每维度的均值和标准差 */
+    float* mean = (float*)safe_calloc(total_dim, sizeof(float));
+    float* stddev = (float*)safe_calloc(total_dim, sizeof(float));
+    if (!mean || !stddev) {
+        safe_free((void**)&mean);
+        safe_free((void**)&stddev);
+        return -1;
+    }
+
+    /* 计算均值 */
+    for (size_t s = 0; s < total_samples; s++) {
+        float* sample = data_buffer + s * total_dim;
+        for (size_t d = 0; d < total_dim; d++) {
+            mean[d] += sample[d];
+        }
+    }
+    for (size_t d = 0; d < total_dim; d++) {
+        mean[d] /= (float)total_samples;
+    }
+
+    /* 计算标准差 */
+    for (size_t s = 0; s < total_samples; s++) {
+        float* sample = data_buffer + s * total_dim;
+        for (size_t d = 0; d < total_dim; d++) {
+            float diff = sample[d] - mean[d];
+            stddev[d] += diff * diff;
+        }
+    }
+    for (size_t d = 0; d < total_dim; d++) {
+        stddev[d] = sqrtf(stddev[d] / (float)total_samples);
+        if (stddev[d] < 1e-8f) stddev[d] = 1e-8f;
+    }
+
+    /* 应用Z-Score归一化 */
+    for (size_t s = 0; s < total_samples; s++) {
+        float* sample = data_buffer + s * total_dim;
+        for (size_t d = 0; d < total_dim; d++) {
+            sample[d] = (sample[d] - mean[d]) / stddev[d];
+        }
+    }
+
+    log_info("[训练管线预处理] 完成: %zu样本, %zu维, 数据归一化",
+             (size_t)total_samples, (size_t)total_dim);
+
+    safe_free((void**)&mean);
+    safe_free((void**)&stddev);
+    return 0;
+}

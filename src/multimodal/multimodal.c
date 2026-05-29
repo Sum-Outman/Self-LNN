@@ -12,6 +12,7 @@
 #include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/multimodal/image_recognition_deep.h"
 #include "selflnn/multimodal/multimodal_integration.h" /* ZSFWS-005: 统一融合管道 */
+#include "selflnn/multimodal/multimodal_unified_input.h" /* SELFLNN_MAX_MODALITIES */
 #include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -125,7 +126,7 @@ MultimodalProcessor* multimodal_processor_create(const MultimodalConfig* config)
         ird_cfg.num_parts = 8;
         ird_cfg.discriminative_threshold = 0.5f;
         ird_cfg.num_fine_categories = 100;
-        processor->ird_classifier = ird_fine_classifier_create(&ird_cfg);
+        processor->ird_classifier = ird_fine_create(&ird_cfg);
     }
 
     processor->is_training = 0;

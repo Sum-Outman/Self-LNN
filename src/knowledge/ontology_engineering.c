@@ -19,6 +19,10 @@
 #include <math.h>
 #include <float.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4133)
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #endif

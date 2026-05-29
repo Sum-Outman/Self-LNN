@@ -10,8 +10,10 @@
 #define SELFLNN_UNCERTAINTY_REASONING_H
 
 #include "selflnn/knowledge/logic_reasoning.h"
-#include "selflnn/reasoning/reasoning.h"
 #include <stddef.h>
+
+/* 前向声明（避免引入reasoning.h中的BayesianNetwork冲突） */
+typedef struct ReasoningEngine ReasoningEngine;
 
 #ifdef __cplusplus
 extern "C" {
@@ -258,10 +260,11 @@ typedef struct {
 /**
  * @brief 贝叶斯网络
  * 
- * 注意：若 reasoning.h 已包含（定义了SELFLNN_REASONING_H），
- * 则跳过此定义使用 reasoning.h 中的 BayesianNetwork 兼容定义。
+ * 注意：若 reasoning.h 已包含并使用不同的 BayesianNetwork 定义，
+ * 则此处跳过。使用 SELFLNN_BAYESIAN_NETWORK_DEFINED 统一控制。
  */
-#ifndef SELFLNN_REASONING_H
+#ifndef SELFLNN_BAYESIAN_NETWORK_DEFINED
+#define SELFLNN_BAYESIAN_NETWORK_DEFINED
 typedef struct {
     char name[UR_MAX_TERM_LEN];          /**< 网络名称 */
     ProbVariable* variables;             /**< 变量数组 */
@@ -272,7 +275,7 @@ typedef struct {
     int* adj_matrix;                     /**< 邻接矩阵（var_count x var_count） */
     int adj_capacity;                    /**< 邻接矩阵容量 */
 } BayesianNetwork;
-#endif /* !SELFLNN_REASONING_H */
+#endif /* !SELFLNN_BAYESIAN_NETWORK_DEFINED */
 
 /**
  * @brief 贝叶斯推理引擎

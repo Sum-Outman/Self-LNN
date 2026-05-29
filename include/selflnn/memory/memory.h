@@ -10,6 +10,7 @@
 #define SELFLNN_MEMORY_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {

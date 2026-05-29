@@ -69,6 +69,10 @@ static MutexHandle g_train_lr_mutex = NULL;
 #include <float.h>
 #include <stdint.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4047)
+#endif
+
 /* F-13 WebSocket分布式训练模块 */
 #include "selflnn/training/distributed_training.h"
 #include "distributed_internal.h"
@@ -627,6 +631,7 @@ typedef struct Trainer {
     OptimizerState optimizer;      /**< 优化器状态 */
     LearningRateScheduler* scheduler; /**< 学习率调度器 */
     void* warmup_scheduler;        /**< ZSFZS-F013: 学习率预热调度器（NULL=未启用） */
+    void* enhanced_trainer;        /**< T-001: 增强训练上下文（EMA权重/学习率调度） */
     TrainingState state;           /**< 训练状态 */
     TrainingHistory history;       /**< 训练历史 */
     char current_training_phase[32]; /**< 当前训练阶段名称（如"预训练"、"微调"、"持续训练"等） */
@@ -6113,7 +6118,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             
             /* T-001修复: 接入增强训练step回调 —— 启用EMA权重更新和WarmupCosine学习率调度 */
             if (trainer->enhanced_trainer) {
-                trainer_enhanced_on_step_end(trainer->enhanced_trainer, trainer, global_step);
+                trainer_enhanced_on_step_end(trainer);
             }
 
             // 调用回调函数
@@ -8383,11 +8388,10 @@ int trainer_load_pretrained_weights(Trainer* trainer, const char* weights_path) 
     fclose(fp);
 
     /* 通过LNN的标准加载路径读取权重 */
-    if (lnn_load(trainer->network, weights_path) != 0) {
-        /* 回退：尝试使用检查点加载 */
-        return lnn_load_checkpoint(trainer->network, weights_path);
+    if (lnn_load(weights_path) != NULL) {
+        return 0;
     }
-    return 0;
+    return -1;
 }
 
 int trainer_configure_fine_tuning(Trainer* trainer, int freeze_base, float fine_tune_lr) {

@@ -70,7 +70,8 @@
 #define SLAM_DRIFT_PROPAGATION_RADIUS 50.0f /* 漂移传播半径（米） */
 #define SLAM_BOW_SIMILARITY_THRESHOLD 0.05f /* 词袋相似度阈值 */
 
-/* 内部数据结构定义 */
+/* 内部数据结构定义 — 若slam_internal.h已加载则跳过以避免重定义 */
+#ifndef SELFLNN_SLAM_INTERNAL_H
 
 /**
  * @brief 特征点结构体（内部使用）
@@ -301,6 +302,12 @@ typedef struct {
     int bow_vector_size;                     /**< BoW向量大小 */
 } InternalLoopClosure;
 
+#endif /* !SELFLNN_SLAM_INTERNAL_H */
+
+/* 防止与slam_internal.h中的SlamSystem重定义
+ * 从slam.h间接引入slam_internal.h时,已有该结构体定义 */
+#ifndef SELFLNN_SLAM_INTERNAL_H
+
 /**
  * @brief SLAM系统内部结构体
  */
@@ -375,7 +382,13 @@ struct SlamSystem {
     int enhance_initialized;    /**< 增强模块已就绪（头文件存在即标记） */
 };
 
-/* 内部辅助函数声明 */
+#endif /* !SELFLNN_SLAM_INTERNAL_H */
+
+/* 内部辅助函数声明 — 子模块实现，签名可能有历史差异，禁用C4030/C4031 */
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable:4030 4031)
+#endif
 static int slam_initialize_vo(SlamSystem* system);
 static int slam_initialize_map(SlamSystem* system);
 static int slam_extract_features(SlamSystem* system, const float* image_data,
@@ -417,6 +430,10 @@ static int slam_solve_optimization_problem(OptimizationProblem* problem,
 static int slam_update_from_optimization(SlamSystem* system,
                                         const OptimizationProblem* problem);
 static void slam_free_optimization_problem(OptimizationProblem* problem);
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 /* MUL-06: 视觉词汇表内部函数 */
 static int slam_vocabulary_init(InternalVocabulary* vocab, const VisualVocabularyConfig* config);
@@ -7677,6 +7694,9 @@ static int compare_float_desc(const void* a, const void* b) {
     return (fa > fb) ? 1 : (fa < fb) ? -1 : 0;
 }
 
+/* 防止与slam_internal.h函数声明及slam_vocabulary.c定义冲突
+ * 静态版本仅在slam_internal.h未引入时编译 */
+#ifndef SELFLNN_SLAM_INTERNAL_H
 static void slam_kmeans_plus_plus(const float* descriptors, int num_descriptors,
                                   int descriptor_length, int k,
                                   float* centers) {
@@ -7759,6 +7779,7 @@ static void slam_kmeans_plus_plus(const float* descriptors, int num_descriptors,
     slam_free(new_centers);
     slam_free(counts);
 }
+#endif /* !SELFLNN_SLAM_INTERNAL_H */
 
 static int slam_vocab_node_train(VocabTreeNode* node, const float* descriptors,
                                 int num_descriptors, int descriptor_length,
@@ -8233,6 +8254,8 @@ static void slam_build_design_matrix(const float* pts1, const float* pts2,
     }
 }
 
+/* 防止与slam_internal.h函数声明及slam_frontend.c定义冲突 */
+#ifndef SELFLNN_SLAM_INTERNAL_H
 static void slam_svd_3x3(const float* A, float* U, float* S, float* VT) {
     float AT[9];
     for (int i = 0; i < 3; i++) {
@@ -8307,6 +8330,7 @@ static void slam_svd_3x3(const float* A, float* U, float* S, float* VT) {
         }
     }
 }
+#endif /* !SELFLNN_SLAM_INTERNAL_H */
 
 static int slam_compute_fundamental_matrix_8point(const float* points1, const float* points2,
                                                   int num_points, float* F) {
@@ -8649,6 +8673,8 @@ static int slam_fuse_loop_closure_map(SlamSystem* system, int frame_id, int matc
 
 /* ==================== MUL-06: 漂移校正传播 ==================== */
 
+/* 防止与slam_internal.h函数声明及slam_frontend.c定义冲突 */
+#ifndef SELFLNN_SLAM_INTERNAL_H
 static int slam_compute_relative_pose(const SlamPose* from, const SlamPose* to,
                                      float* delta_pose) {
     if (!from || !to || !delta_pose) return -1;
@@ -8699,6 +8725,8 @@ static int slam_apply_delta_to_pose(SlamPose* pose, const float* delta) {
     }
     return 0;
 }
+
+#endif /* !SELFLNN_SLAM_INTERNAL_H */
 
 static int slam_propagate_drift_correction(SlamSystem* system, int matched_frame_id,
                                           int current_frame_id,

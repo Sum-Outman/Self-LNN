@@ -26,6 +26,10 @@
 #include <sys/time.h>
 #endif
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4102 4702)
+#endif
+
 /**
  * @brief 决策引擎内部结构体
  */

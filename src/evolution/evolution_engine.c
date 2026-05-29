@@ -14,10 +14,7 @@
 #include "selflnn/core/cma_es.h"          /* F-010/F-019: CMA-ES集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
-
-/* ZSFX-DEEP-R6-003: 外部互斥锁函数声明(用于LNN并发保护) */
-extern void mutex_lock(void*);
-extern void mutex_unlock(void*);
+#include "selflnn/utils/platform.h"
 
 #include <stdlib.h>
 #include <string.h>

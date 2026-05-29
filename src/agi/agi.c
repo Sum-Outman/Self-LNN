@@ -61,7 +61,7 @@ void* selflnn_get_shared_lnn(void);
  * 如果 capability_switch 要使用这些函数，应通过 selflnn_get_*() 访问器连接。 */
 /* 子系统接口前向声明（实现位于对应子系统模块）*/
 /* ZSFX-DEEP-R16-001: 移除#ifdef保护并内联实现11个缺失的能力控制函数
- * 这些函数被cap_check_*/cap_set_*静态函数调用,需要在agi.c中直接实现 */
+ * 这些函数被cap_check_* / cap_set_* 静态函数调用,需要在agi.c中直接实现 */
 extern int learning_engine_is_imitation_enabled(void* learner);
 extern int learning_engine_set_imitation_enabled(void* learner, int enable);
 extern int deep_reflection_is_enabled(void* reflection);
@@ -85,15 +85,15 @@ extern void dialogue_disable(void* dialogue);
  }
 static int deep_reflection_is_enabled_impl(void* reflection) {
     (void)reflection;
-    return capability_is_enabled(CAP_SELF_REFLECTION);
+    return capability_is_enabled(CAP_REFLECTION);
 }
 static void deep_reflection_enable_impl(void* reflection) {
     (void)reflection;
-    capability_set_enabled(CAP_SELF_REFLECTION, 1);
+    capability_set_enabled(CAP_REFLECTION, 1);
 }
 static void deep_reflection_disable_impl(void* reflection) {
     (void)reflection;
-    capability_set_enabled(CAP_SELF_REFLECTION, 0);
+    capability_set_enabled(CAP_REFLECTION, 0);
 }
 static int planning_is_enabled_impl(void* planner) {
     (void)planner;

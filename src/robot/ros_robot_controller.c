@@ -18,6 +18,10 @@
 #include <stdio.h>
 #include <math.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4113)
+#endif
+
 #define MAX_ROBOTS 64
 #define MAX_JOINTS 32
 

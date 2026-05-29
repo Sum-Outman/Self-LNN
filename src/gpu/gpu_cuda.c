@@ -1520,10 +1520,10 @@ typedef struct {
  * @param hash_out 输出缓冲区（至少CUDA_CACHE_HASH_SIZE+1字节）
  */
 static void compute_kernel_hash(const char* source, const char* name, char* hash_out) {
-    unsigned long hash = 5381;
+    uint64_t hash = 5381;
     int c;
     
-    // 哈希源代码
+    /* 哈希源代码 */
     const char* s = source;
     if (s) {
         while ((c = (unsigned char)*s++) != 0) {
@@ -1531,7 +1531,7 @@ static void compute_kernel_hash(const char* source, const char* name, char* hash
         }
     }
     
-    // 哈希内核名称（混合）
+    /* 哈希内核名称（混合） */
     s = name;
     if (s) {
         while ((c = (unsigned char)*s++) != 0) {
@@ -1539,18 +1539,18 @@ static void compute_kernel_hash(const char* source, const char* name, char* hash
         }
     }
     
-    // 额外混合：基于长度的二次哈希
-    unsigned long len_hash = (source ? strlen(source) : 0) * 2654435761u;
+    /* 额外混合：基于长度的二次哈希 */
+    uint64_t len_hash = (source ? strlen(source) : 0) * UINT64_C(2654435761);
     hash ^= len_hash;
     hash += (hash << 3);
     hash ^= (hash >> 11);
     hash += (hash << 15);
     
-    // 转换为十六进制字符串
+    /* 转换为十六进制字符串 */
     static const char hex_chars[] = "0123456789abcdef";
     for (int i = 0; i < CUDA_CACHE_HASH_SIZE; i++) {
         hash_out[i] = hex_chars[(hash >> (i * 4 % 60)) & 0x0F];
-        // 每8个字符旋转一次哈希值以增加扩散
+        /* 每8个字符旋转一次哈希值以增加扩散 */
         if (i > 0 && i % 8 == 7) {
             hash = (hash << 3) | (hash >> 61);
         }
@@ -3976,9 +3976,10 @@ int gpu_get_device_capabilities(int device_id, CUDADeviceCap* caps) {
     /* CUDA API不可用时通过驱动API获取 */
     if (g_cuda_cl.cuDeviceGetAttribute && g_cuda_state.cuda_available) {
         int cc_major = 0, cc_minor = 0, sm_count = 0;
-        g_cuda_cl.cuDeviceGetAttribute(&cc_major, 75, device_id);  /* CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR */
-        g_cuda_cl.cuDeviceGetAttribute(&cc_minor, 76, device_id);  /* CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR */
-        g_cuda_cl.cuDeviceGetAttribute(&sm_count, 16, device_id);  /* CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT */
+        CUdevice cu_dev = (CUdevice)(intptr_t)device_id;
+        g_cuda_cl.cuDeviceGetAttribute(&cc_major, 75, cu_dev);  /* CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR */
+        g_cuda_cl.cuDeviceGetAttribute(&cc_minor, 76, cu_dev);  /* CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR */
+        g_cuda_cl.cuDeviceGetAttribute(&sm_count, 16, cu_dev);  /* CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT */
         if (cc_major > 0) {
             caps->major = cc_major;
             caps->minor = cc_minor;

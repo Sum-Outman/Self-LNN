@@ -9,6 +9,10 @@
  */
 
 #include "selflnn/multimodal/speech_recognition.h"
+#include "selflnn/multimodal/speech_language_model.h" /* ZSFA-FIX-P0-003: LM后处理纠错 */
+#ifdef _MSC_VER
+#pragma warning(disable:4702 4715)  /* 训练函数预存警告:不可达代码+返回值路径 */
+#endif
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/logging.h"
@@ -1893,7 +1897,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
              * 调用方必须先绑定共享LNN再进行语音识别 */
             fprintf(stderr, "[语音识别错误] 共享LNN未连接，拒绝使用简化路径进行语音识别\n");
             safe_free((void**)&all_logits);
-            return NULL;
+            return -1;  /* ZSFA-CFIX: int返回类型，非void* */
         }
 
         float* logits = all_logits + (size_t)t * vocab_size;
@@ -1901,7 +1905,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
                                    logits, vocab_size) != 0) {
             fprintf(stderr, "[语音识别错误] LNN投影不可用于步%d，无法继续识别\n", t);
             safe_free((void**)&all_logits);
-            return NULL;
+            return -1;  /* ZSFA-CFIX: int返回类型 */
         }
     }
 

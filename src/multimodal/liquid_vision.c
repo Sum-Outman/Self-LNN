@@ -3769,6 +3769,7 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
             processor->config.enable_color_histogram,
             features, max_features);
     }
+    return 0;
 }
 
 /* ===================================================================

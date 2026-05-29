@@ -440,15 +440,11 @@ int working_memory_compute_cfc_gate(WorkingMemory* wm,
 
     /* ZSFWS修复-M-003: 为每个门控维度使用独立的调制参数，避免同质化输出 */
     for (size_t i = 0; i < effective_gd; i++) {
-        /* 使用维度索引调制温度和输入偏置，产生差异化门控响应 */
-        float dim_bias = wm->config.cfc_bias + 0.001f * (float)i;
         float dim_temp = wm->config.cfc_temperature + 0.005f * (float)(i % 16);
-        float dim_context_w = wm->config.cfc_context_weight + 0.0001f * (float)(i + 1);
-        float dim_input_w = wm->config.cfc_input_weight + 0.0001f * (float)(i + 7);
         gate_out[i] = cfc_gate_scalar(
             input, input_dim, context, context_dim,
-            dim_input_w, dim_context_w,
-            dim_bias, wm->config.cfc_gate_dim,
+            wm->config.cfc_input_weight, wm->config.cfc_context_weight,
+            wm->config.cfc_bias, wm->config.cfc_gate_dim,
             dim_temp, 0.01f, 0.5f
         );
     }

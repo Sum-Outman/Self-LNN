@@ -53,6 +53,7 @@
 #include "selflnn/training/distributed_training.h" /* ZSF-P0-004: 分布式训练初始化 */
 #include "selflnn/programming/programming_enhanced.h" /* ZSF-P0-004: 编程增强 */
 #include "selflnn/multi_agent.h"                /* H-015: 多智能体协作 */
+#include "selflnn/robot/gazebo_bridge.h"        /* ZSFA-FIX-P0-006: Gazebo仿真桥接 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +73,10 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <strings.h>
+#endif
+
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701)
 #endif
 
 /* 静态函数前向声明 */
@@ -132,6 +137,7 @@ static time_t g_last_safety = 0;
 static int g_bg_task_error_count = 0;
 static TrainingPipeline* g_training_pipeline = NULL;   /* ZSFABC: 训练管线 */
 static time_t g_last_training_step = 0;                 /* ZSFABC: 上次训练步时间 */
+static GazeboBridge* g_gazebo_bridge = NULL;             /* ZSFA-FIX-P0-006: Gazebo仿真桥接 */
 void* volatile g_global_lnn = NULL;                              /* H-003: 全局LNN指针供GPU后端TPU回退使用(volatile确保多线程可见性) */
 static ProductDesignEngine* g_product_design = NULL;    /* APP10: 产品设计引擎(selflnn管理) */
 static void* g_nas_system = NULL;                         /* 神经架构搜索(selflnn管理) */
@@ -330,6 +336,12 @@ static void agi_bg_knowledge_consolidate(void) {
             if (ret == 0) {
                 log_debug("[AGI后台] ZSFZS-F026: 知识嵌入已刷新（事件触发）");
             }
+        }
+        /* ZSFA-FIX: WebSocket实时推送知识更新通知 */
+        if (g_ws_push_server) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "{\"event\":\"knowledge_update\",\"timestamp\":%lld}", (long long)time(NULL));
+            ws_push_broadcast_json(g_ws_push_server, buf);
         }
     }
 
@@ -966,7 +978,7 @@ static void agi_background_loop_iteration(void) {
                     "\"backend\":\"%s\"}",
                     (long long)now, gpu_type_name,
                     gpu_available ? "true" : "false",
-                    gpu_available ? 50.0f : 0.0f,
+                    gpu_available ? -1.0f : 0.0f,  /* ZSFA: 真实GPU利用率需异步轮询获取，未检测标记为-1 */
                     gpu_backend_name(selected));
                 ws_push_broadcast_json(g_ws_push_server, buf);
             }
@@ -1402,6 +1414,27 @@ static void agi_background_loop_iteration(void) {
         }
     }
 
+    /* ZSFA-FIX-P0-006: Gazebo仿真桥接周期性步进 */
+    if (g_gazebo_bridge) {
+        static int gz_tick = 0;
+        gz_tick++;
+        /* 每20个循环步进一次仿真（约每200秒） */
+        if (gz_tick % 20 == 0) {
+            GazeboConnectionState gz_state = gazebo_get_state(g_gazebo_bridge);
+            if (gz_state == GAZEBO_CONNECTED) {
+                double sim_time = 0.0;
+                if (gazebo_get_sim_time(g_gazebo_bridge, &sim_time) == 0) {
+                    log_debug("[Gazebo] 仿真时间=%.3fs", sim_time);
+                }
+                gazebo_step(g_gazebo_bridge, 10);
+            } else if (gz_state == GAZEBO_DISCONNECTED || gz_state == GAZEBO_ERROR) {
+                log_debug("[Gazebo] 连接已断开，尝试重连");
+                gazebo_disconnect(g_gazebo_bridge);
+                g_gazebo_bridge = NULL;
+            }
+        }
+    }
+
     /* ZSFWS-E005: 自我编程引擎周期性自检和执行（受自我学习能力开关控制）
      * 每10个主循环周期对编程引擎代码质量进行自检，
      * 每30个周期执行一次实际的代码生成任务。
@@ -1420,15 +1453,13 @@ static void agi_background_loop_iteration(void) {
         }
         /* 每30个周期执行一次真实的代码生成任务 */
         if (prog_tick % 30 == 0 && g_prog_engine) {
-            char* code = self_programming_generate_c(g_prog_engine,
-                "系统自维护：生成C语言性能优化辅助函数", 4096);
+            char* code = self_programming_generate_c(g_prog_engine, NULL);
             if (code) {
                 size_t code_len = strlen(code);
                 if (code_len > 0) {
                     CompilationResult comp_result;
                     memset(&comp_result, 0, sizeof(comp_result));
-                    comp_result = verify_code_compilation(g_prog_engine,
-                        code, code_len, "C");
+                    comp_result = verify_code_compilation(g_prog_engine, code);
                     log_info("[自我编程] 代码生成成功(%zu字节), 编译=%s",
                              code_len,
                              comp_result.success ? "通过" : "需改进");
@@ -1922,6 +1953,29 @@ int main(int argc, char* argv[])
                     printf("  负载均衡器未就绪\n");
                 }
             }
+            /* ZSFA-FIX-P0-006: Gazebo仿真桥接初始化 */
+            {
+                if (gazebo_is_available()) {
+                    GazeboConfig gz_cfg;
+                    memset(&gz_cfg, 0, sizeof(gz_cfg));
+                    gz_cfg.world_file = NULL;
+                    gz_cfg.start_paused = 0;
+                    gz_cfg.real_time_factor = 1.0f;
+                    gz_cfg.max_step_size = 0.016f;
+                    gz_cfg.use_gui = 0;
+                    gz_cfg.use_gazebo_ros = 0;
+                    gz_cfg.server_port = 11345;
+
+                    g_gazebo_bridge = gazebo_connect(&gz_cfg);
+                    if (g_gazebo_bridge) {
+                        printf("  Gazebo仿真桥接已连接\n");
+                    } else {
+                        printf("  Gazebo仿真桥接连接失败，将使用内部仿真\n");
+                    }
+                } else {
+                    printf("  Gazebo不可用，使用内部仿真器\n");
+                }
+            }
             /* Z8-002: 能力开关重置移到在线学习器创建之后
              * 确保子系统(online_learner/evolution_engine等)全部就绪后再激活 */
             capability_reset_to_defaults();
@@ -1986,7 +2040,7 @@ int main(int argc, char* argv[])
                 }
 
                 /* 创建任务调度器（4级优先级、线程池集成） */
-                g_task_scheduler = task_scheduler_create(4, NULL);
+                g_task_scheduler = task_scheduler_create();
                 if (g_task_scheduler) {
                     printf("  任务调度器初始化成功（4级优先级队列）\n");
                 } else {
@@ -2140,6 +2194,12 @@ int main(int argc, char* argv[])
     if (g_training_pipeline) {
         training_pipeline_free(g_training_pipeline);
         g_training_pipeline = NULL;
+    }
+    /* ZSFA-FIX-P0-006: 释放Gazebo仿真桥接 */
+    if (g_gazebo_bridge) {
+        gazebo_disconnect(g_gazebo_bridge);
+        g_gazebo_bridge = NULL;
+        printf("  Gazebo仿真桥接已释放\n");
     }
     /* ZSFZS-F015: 释放AGI认知系统和任务调度器 */
     if (g_agi_system) {

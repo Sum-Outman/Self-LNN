@@ -94,6 +94,26 @@ typedef struct {
 /* 知识版本管理器句柄 */
 typedef struct KnowledgeVersionManager KnowledgeVersionManager;
 
+#ifdef SELFLNN_CORE_INTERNAL
+struct KnowledgeVersionManager {
+    KnowledgeSnapshot snapshots[KV_MAX_SNAPSHOTS];
+    int snapshot_count;
+    int current_snapshot;
+    char storage_dir[512];
+    char current_branch[KV_MAX_BRANCH_NAME];
+    char branches[16][KV_MAX_BRANCH_NAME];
+    int branch_count;
+    int auto_interval_min;
+    int auto_max_snapshots;
+    time_t last_auto_snapshot;
+    int next_snapshot_id;
+    KnowledgeEntryHistory entry_histories[KV_MAX_HISTORY];
+    int history_count;
+    SnapshotEntryRecord current_entries[KV_MAX_ENTRIES_PER_SNAPSHOT];
+    int current_entry_count;
+};
+#endif
+
 KnowledgeVersionManager* knowledge_version_create(const char* storage_dir);
 void knowledge_version_free(KnowledgeVersionManager* kvm);
 

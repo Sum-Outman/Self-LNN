@@ -37,6 +37,8 @@
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/planning.h"
 #include "selflnn/multimodal/unified_signal_processor.h"
+#include "selflnn/multimodal/unified_signal_processor_advanced.h" /* P2-003: 高级信号处理器 */
+#include "selflnn/multimodal/unified_signal_processor_training.h" /* P2-003: 训练信号处理器 */
 #include "selflnn/multimodal/data_collection_pipeline.h"
 #include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/core/lnn.h"
@@ -176,6 +178,7 @@ typedef enum {
     MODULE_ID_AUTO_LEARNING = 21,
     MODULE_ID_KNOWLEDGE_INFERENCE = 22,
     MODULE_ID_MULTI_AGENT = 23,  /* H-015: 多智能体协作框架 */
+    MODULE_ID_DATA_PIPELINE = 24, /* ZSFA-FIX-P0-001: 数据采集管线独立模块ID */
     MODULE_COUNT
 } ModuleId;
 
@@ -184,7 +187,7 @@ static const char* g_module_names[MODULE_COUNT] = {
     "推理引擎", "统一信号处理器", "对话系统", "自我认知", "元认知",
     "自我编程", "产品设计", "多系统控制", "GPU上下文", "演化引擎",
     "安全监控", "分布式训练", "线程池", "在线学习器", "规划系统", "机器人"
-    , "自动知识学习", "知识推理增强", "多智能体系统"
+    , "自动知识学习", "知识推理增强", "多智能体系统", "数据采集管线"
 };
 
 /* 模块注册：每个子系统只能获取共享LNN引用，不能拥有独立LNN */
@@ -210,6 +213,8 @@ static struct {
     void* multisystem_controller;
     void* gpu_context;
     void* unified_signal_processor;
+    void* unified_signal_processor_advanced;  /* P2-003: 高级自适应路由器 */
+    void* unified_signal_processor_training;  /* P2-003: 训练混合策略状态 */
     void* lnn_instance;
     void* unified_lnn_state;
     void* self_cognition_system;
@@ -246,6 +251,11 @@ static struct {
 static LNN* g_global_singleton_lnn = NULL;
 static int g_single_lnn_enforced = 0;
 
+/* selflnn_get_lnn 并发安全注意事项：
+ * 此函数返回的LNN句柄是全局共享的单例实例。
+ * 多个线程同时对该LNN调用lnn_forward()会竞争CfC隐藏状态（ODE求解器的内部状态），
+ * 导致前向传播结果不可预测。在高并发场景（如对话处理、训练、感知管线）中，
+ * 请使用selflnn_safe_forward()替代直接调用lnn_forward()，该函数会自动加锁保护。 */
 void* selflnn_get_lnn(void) {
     /* Z9-002: 添加读取锁 —— 防止与selflnn_enforce_single_lnn写入竞态 */
     SYSTEM_LOCK();
@@ -293,6 +303,18 @@ int selflnn_register_module(ModuleId mid, void* instance, int uses_shared_lnn) {
 int selflnn_module_uses_shared_lnn(ModuleId mid) {
     if (mid < 0 || mid >= MODULE_COUNT) return 0;
     return g_modules[mid].uses_shared_lnn;
+}
+
+/* LNN并发安全：带锁保护的前向传播
+ * 使用LNN内部锁保护整个前向传播过程，确保并发调用不会互相污染CfC隐藏状态。
+ * 调用者在多线程/高并发场景下应使用此函数替代直接调用lnn_forward()。 */
+SELFLNN_API int selflnn_safe_forward(void* lnn, const float* input, float* output) {
+    if (!lnn || !input || !output) return -1;
+    LNN* lnn_ptr = (LNN*)lnn;
+    lnn_lock(lnn_ptr);
+    int ret = lnn_forward(lnn_ptr, input, output);
+    lnn_unlock(lnn_ptr);
+    return ret;
 }
 
 /* 密码学安全随机数生成 */
@@ -426,7 +448,7 @@ int selflnn_init(const SystemConfig* config)
     if (g_system_state.multi_agent_system) selflnn_register_module(MODULE_ID_MULTI_AGENT, g_system_state.multi_agent_system, 1);
 
     /* FIX-007: 注册数据采集流水线（此前创建但未注册） */
-    if (g_system_state.data_pipeline) selflnn_register_module(MODULE_ID_AUTO_LEARNING + 1, g_system_state.data_pipeline, 1);
+    if (g_system_state.data_pipeline) selflnn_register_module(MODULE_ID_DATA_PIPELINE, g_system_state.data_pipeline, 1);
 
     /* P0-001修复: 所有子系统注册完毕后，强制执行单一LNN模式
      * 此后所有模块的 lnn_create() 调用将被自动重定向到全局唯一LNN
@@ -1129,6 +1151,16 @@ void* selflnn_get_unified_signal_processor(void) {
     return g_system_state.unified_signal_processor;
 }
 
+/* P2-003: 高级信号处理器（自适应路由器）getter */
+void* selflnn_get_unified_signal_processor_advanced(void) {
+    return g_system_state.unified_signal_processor_advanced;
+}
+
+/* P2-003: 训练信号处理器（数据混合策略）getter */
+void* selflnn_get_unified_signal_processor_training(void) {
+    return g_system_state.unified_signal_processor_training;
+}
+
 /* selflnn_get_lnn 已在F-017单LNN强制执行区定义 */
 
 void* selflnn_get_shared_lnn(void) {
@@ -1481,7 +1513,20 @@ static int initialize_subsystems(const SystemConfig* config)
         log_warning("知识库创建失败，使用空知识库");
     }
     
-    /* 2.2 预设基础知识条目（完整知识库要求） */
+    /* 2.2 预设基础知识条目（完整知识库要求）
+     * 
+     * 种子知识加载路径说明：
+     *   路径A（主路径）：knowledge.c::knowledge_base_populate_preset() 加载 281 条种子知识
+     *     - 通过 knowledge_base_create_with_preset() 自动调用
+     *     - 包含物理常数/数学规则/逻辑公理/常识概念/时空单位/色彩/机器人学/安全规则等
+     *   路径B（selflnn.c补充）：本处硬编码 24 条基础种子知识
+     *     - 当调用 knowledge_base_create()（非with_preset版本）时，作为保底的常识注入
+     * 
+     * 去重策略：
+     *   路径B的24条在路径A的281条中已有覆盖（物理常数/数学规则/概念/颜色/单位）。
+     *   定义 SELFLNN_SKIP_SEED_KNOWLEDGE 可跳过路径A和路径B的种子加载，
+     *   此时知识库从零开始，所有知识从真实数据源学习获得。 */
+#ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
     {
         long now = (long)time(NULL);
         
@@ -1519,8 +1564,11 @@ static int initialize_subsystems(const SystemConfig* config)
         ADD_PRESET("动作前", "应检查", "安全条件", KNOWLEDGE_RULE, CONFIDENCE_HIGH);
         
         #undef ADD_PRESET
-        log_info("知识库预设条目已加载：24条基础知识");
+        log_info("知识库预设条目已加载：24条基础知识（selflnn.c内置种子）");
     }
+#else
+    log_info("知识库种子数据已跳过（SELFLNN_SKIP_SEED_KNOWLEDGE已定义），知识库从零开始学习");
+#endif
     
     // 3. 初始化推理引擎（真实实现）
     ReasoningConfig reasoning_config = {
@@ -1588,6 +1636,34 @@ static int initialize_subsystems(const SystemConfig* config)
         log_error("统一信号处理器创建失败");
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
+    }
+    
+    /* P2-003: 初始化高级信号处理器（自适应路由器）
+     * 基于信号质量动态计算各模态路由权重，质量感知前向传播。
+     * 路由权重仅用于信号质量评估和稳定性控制，不产生跨模态交互。 */
+    {
+        AdaptiveRouterConfig router_config = adaptive_router_get_default_config();
+        g_system_state.unified_signal_processor_advanced = (void*)adaptive_router_create(&router_config);
+        if (g_system_state.unified_signal_processor_advanced) {
+            log_info("高级信号处理器（自适应路由器）初始化成功");
+        } else {
+            log_warning("高级信号处理器创建失败，跳过（基础处理器仍可用）");
+        }
+    }
+    
+    /* P2-003: 初始化训练信号处理器（数据混合策略）
+     * 存储默认数据混合配置，用于训练时的课程学习/动态比例/模态丢弃。
+     * 训练函数接受 UnifiedSignalProcessor* 句柄，在训练管线中按需调用。 */
+    {
+        DataMixingConfig mixing_config = unified_signal_processor_get_default_mixing_config();
+        DataMixingConfig* mixing_state = (DataMixingConfig*)safe_malloc(sizeof(DataMixingConfig));
+        if (mixing_state) {
+            memcpy(mixing_state, &mixing_config, sizeof(DataMixingConfig));
+            g_system_state.unified_signal_processor_training = (void*)mixing_state;
+            log_info("训练信号处理器（数据混合策略）初始化成功");
+        } else {
+            log_warning("训练信号处理器状态分配失败，跳过");
+        }
     }
     
     /* Z6-001: GPU后端检测移到LNN之前 —— 确保LNN创建时GPU上下文已可用 */
@@ -2180,6 +2256,17 @@ static void shutdown_subsystems(void)
     if (g_system_state.unified_signal_processor) {
         unified_signal_processor_free((UnifiedSignalProcessor*)g_system_state.unified_signal_processor);
         g_system_state.unified_signal_processor = NULL;
+    }
+    
+    /* P2-003: 销毁高级信号处理器（自适应路由器） */
+    if (g_system_state.unified_signal_processor_advanced) {
+        adaptive_router_free((AdaptiveRouter*)g_system_state.unified_signal_processor_advanced);
+        g_system_state.unified_signal_processor_advanced = NULL;
+    }
+    
+    /* P2-003: 销毁训练信号处理器状态（数据混合配置） */
+    if (g_system_state.unified_signal_processor_training) {
+        safe_free((void**)&g_system_state.unified_signal_processor_training);
     }
     
     // 5. 销毁元认知系统（在LNN之前，因为它引用了LNN）

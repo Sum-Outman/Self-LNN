@@ -475,6 +475,38 @@ int explore_save(const ExploreState* state, ExploreStrategyType strategy_type,
  */
 ExploreState* explore_load(ExploreStrategyType strategy_type, const char* filepath);
 
+/* ============================================================================
+ * ZSFA-FIX-P0-007: UCB/Thompson/Boltzmann 动作选择接口
+ * ============================================================================ */
+
+/* --- UCB (Upper Confidence Bound) --- */
+void* exploration_ucb_create(int num_actions, float c);
+void exploration_ucb_free(void* state);
+int exploration_ucb_select(void* state, float* action_values, int num_actions);
+void exploration_ucb_update(void* state, int action, float reward);
+float exploration_ucb_get_best(void* state);
+int exploration_ucb_is_converged(void* state);
+
+/* --- Boltzmann (Softmax) --- */
+void* exploration_boltzmann_create(float temperature, float decay);
+void exploration_boltzmann_free(void* state);
+int exploration_boltzmann_select(void* state, float* action_values, int num_actions);
+void exploration_boltzmann_update(void* state, int action, float reward);
+float exploration_boltzmann_get_temperature(void* state);
+float exploration_boltzmann_get_best(void* state);
+void exploration_boltzmann_get_probabilities(void* state, float* probs, int num_actions);
+int exploration_boltzmann_is_converged(void* state);
+void exploration_boltzmann_set_temperature(void* state, float T);
+
+/* --- Thompson Sampling --- */
+void* exploration_thompson_create(int num_actions);
+void exploration_thompson_free(void* state);
+int exploration_thompson_select(void* state, float* action_values, int num_actions);
+void exploration_thompson_update(void* state, int action, float reward);
+float exploration_thompson_get_best(void* state);
+void exploration_thompson_get_posterior(void* state, int action, float* alpha_out, float* beta_out);
+int exploration_thompson_is_converged(void* state);
+
 #ifdef __cplusplus
 }
 #endif

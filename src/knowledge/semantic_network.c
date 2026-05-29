@@ -1766,7 +1766,7 @@ SemanticNetwork* semantic_network_load(const char* filename) {
  * 基于扩散激活和关系传递机制实现多步推理。
  * Z-001修复: 更正API签名 —— rel->source_id → rel->source->id (SemanticRelation使用Concept*指针)
  * ============================================================================ */
-SELFLNN_API size_t semantic_network_infer(SemanticNetwork* network,
+size_t semantic_network_infer(SemanticNetwork* network,
                              Concept** premises, size_t premise_count,
                              size_t max_inferences,
                              Concept** results, size_t max_results) {
@@ -1839,7 +1839,7 @@ SELFLNN_API size_t semantic_network_infer(SemanticNetwork* network,
  *   - KnowledgeEntry字段: subject/predicate/object/type/confidence(枚举)/weight
  *   - kb->size 替代不存在的kb->entry_count
  * ============================================================================ */
-SELFLNN_API int semantic_network_import_from_knowledge_base(SemanticNetwork* network,
+int semantic_network_import_from_knowledge_base(SemanticNetwork* network,
                                                KnowledgeBase* kb) {
     if (!network || !kb) return -1;
     if (kb->size == 0) return 0;
@@ -1895,7 +1895,7 @@ SELFLNN_API int semantic_network_import_from_knowledge_base(SemanticNetwork* net
  *   - semantic_network_add_concept 需要8个参数,返回Concept*
  *   - semantic_network_add_relation 需要Concept*源和目标指针
  * ============================================================================ */
-SELFLNN_API int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
+int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
                                                KnowledgeGraph* graph) {
     if (!network || !graph) return -1;
     if (graph->node_count == 0) return 0;

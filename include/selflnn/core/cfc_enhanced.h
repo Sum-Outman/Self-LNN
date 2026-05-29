@@ -7,6 +7,7 @@
  * 两者为互补层级关系，cfc_enhanced依赖cfc_cell。 */
 #define SELFLNN_CFC_ENHANCED_WRAPPER 1
 
+#include <stdint.h>
 #include "selflnn/core/cfc_cell.h"
 
 #ifdef __cplusplus

@@ -30,7 +30,9 @@ typedef enum {
     PLANNING_SEQUENTIAL = 1,     /**< 顺序规划 */
     PLANNING_PARALLEL = 2,       /**< 并行规划 */
     PLANNING_REACTIVE = 3,       /**< 反应式规划 */
-    PLANNING_MCTS = 4            /**< 蒙特卡洛树搜索规划 */
+    PLANNING_MCTS = 4,           /**< 蒙特卡洛树搜索规划 */
+    PLANNING_ENHANCED = 5,       /**< 增强规划（时间推理STN+CfC+HTN+条件规划） */
+    PLANNING_REFINED = 6         /**< 精炼规划（Landmark+FF+FFD+符号规划） */
 } PlanningAlgorithm;
 
 /**

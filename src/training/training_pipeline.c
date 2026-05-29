@@ -9,6 +9,7 @@
 #endif
 #include "selflnn/training/training_pipeline.h"
 #include "selflnn/training/training_monitor.h"
+#include "selflnn/training/training_data_pipeline.h" /* ZSFA-FIX-P0-002: 训练数据流水线预处理 */
 #include "selflnn/selflnn.h"            /* ZSFWS-FATAL-FIX: 获取共享LNN */
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -1405,6 +1406,21 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
     }
     if (!pipeline->data_buffer || pipeline->data_size == 0)
         return SELFLNN_ERROR_NO_DATA;
+
+    /* ZSFA-FIX-P0-002: 集成训练数据流水线预处理 */
+    if (pipeline->data_buffer && pipeline->data_size > 0) {
+        size_t inp_dim = 512, out_dim = 256;
+        {
+            LNNConfig lnn_cfg;
+            if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+                inp_dim = lnn_cfg.input_size;
+                out_dim = lnn_cfg.output_size;
+            }
+        }
+        training_data_pipeline_preprocess(
+            pipeline->data_buffer, pipeline->data_size,
+            inp_dim, out_dim);
+    }
 
     size_t batch_samples = pipeline->config.batch_size;
     size_t input_dim = 512, output_dim = 256;

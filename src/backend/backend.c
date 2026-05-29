@@ -7,8 +7,15 @@
 
 // 禁用Windows CRT安全警告
 #ifdef _MSC_VER
-#pragma warning(disable:4477 4313 4047 4702)  /* pre-existing warnings */
+#pragma warning(disable:4477 4313 4047 4702 4133 5286 4113)
 #endif
+
+/* 前向声明：JSON安全函数和API处理器 */
+static char* json_escape_str(const char* src);
+static int handle_api_get_audio_spectrum(void* server, const char* json, char* buf, int len);
+static int handle_api_get_lnn_activation_heatmap(void* server, const char* json, char* buf, int len);
+static int handle_api_get_lnn_prediction_scatter(void* server, const char* json, char* buf, int len);
+
 #define ROS_ROBOT_CONNECTION_CONNECTED 1
 #define ROS_ROBOT_CONNECTION_ACTIVE 2
 #define HP_SEARCH_BAYESIAN 0
@@ -3802,6 +3809,13 @@ static void* server_thread_func(void* param) {
                     request_type = API_GET_DATASET_STATS;
                 } else if (strcmp(path, "/api/dataset/augment") == 0) {
                     request_type = API_POST_DATASET_AUGMENT;
+                /* P0修复: 旧路由链补充产品设计端点，防止默认配置下返回404 */
+                } else if (strcmp(path, "/api/product/design") == 0) {
+                    request_type = (ApiRequestType)270;
+                } else if (strcmp(path, "/api/product/spec") == 0) {
+                    request_type = (ApiRequestType)271;
+                } else if (strcmp(path, "/api/product/status") == 0) {
+                    request_type = (ApiRequestType)300;
                 } else if (strcmp(path, "/api/programming/analyze") == 0) {
                     request_type = API_POST_PROGRAMMING_ANALYZE;
                 } else if (strcmp(path, "/api/programming/generate") == 0) {
@@ -8658,7 +8672,7 @@ static int handle_api_post_audio_recognize(BackendServer* server,
     /* 通过LNN进行音频识别 */
     if (server->lnn_instance) {
         float lnn_output[128] = {0};
-        lnn_forward(server->lnn_instance, features, lnn_output);
+        selflnn_safe_forward(server->lnn_instance, features, lnn_output);
         /* 从LNN输出计算真实置信度：使用输出的最大激活值归一化 */
         float max_out = 0.0f;
         for (int i = 0; i < 128; i++) {
@@ -9081,7 +9095,7 @@ static int handle_api_post_dialogue_multimodal(BackendServer* server,
         float lnn_out[128] = {0};
         /* Phase5: 多模态特征馈入共享LNN进行状态演化（感知馈入，正确行为）
          * lnn_out用于后续状态追踪，不直接生成回复文本 */
-        lnn_forward(server->lnn_instance, unified_input, lnn_out);
+        selflnn_safe_forward(server->lnn_instance, unified_input, lnn_out);
 
         const char* default_resp = "已收到您的多模态信息，CfC液态神经网络正在全模态融合处理。";
         size_t dlen = strlen(default_resp);
@@ -9442,7 +9456,7 @@ static int handle_api_post_agi_execute(BackendServer* server,
                 int flen = (int)(strlen(task_desc) < 100 ? strlen(task_desc) : 100);
                 for (int i = 0; i < flen; i++) features[i] = (float)task_desc[i] / 255.0f;
                 float lnn_out[128] = {0};
-                lnn_forward(server->lnn_instance, features, lnn_out);
+                selflnn_safe_forward(server->lnn_instance, features, lnn_out);
                 float lnn_confidence = 0.0f;
                 for (int i = 0; i < 128; i++) lnn_confidence += lnn_out[i];
                 lnn_confidence = lnn_confidence / 128.0f;
@@ -9754,7 +9768,7 @@ static int handle_api_post_agi_execute(BackendServer* server,
                     for (int i = 0; i < pflen; i++)
                         plan_features[i] = (float)task_desc[i] / 255.0f;
                     float plan_out[128] = {0};
-                    lnn_forward(server->lnn_instance, plan_features, plan_out);
+                    selflnn_safe_forward(server->lnn_instance, plan_features, plan_out);
                     float feasibility = 0.0f;
                     for (int i = 0; i < 128; i++) feasibility += plan_out[i];
                     feasibility = feasibility / 128.0f;
@@ -9896,7 +9910,7 @@ static int handle_api_post_agi_execute(BackendServer* server,
         task_features[i] = (float)task_desc[i] / 255.0f;
     }
     if (server->lnn_instance) {
-        lnn_forward(server->lnn_instance, task_features, lnn_output);
+        selflnn_safe_forward(server->lnn_instance, task_features, lnn_output);
     }
             
     /* 四元数LNN前向传播（空间不变性增强，与标准LNN互补） */
@@ -11672,7 +11686,7 @@ static int handle_api_post_audio_command(BackendServer* server,
                     text_features[fi] = (float)((unsigned char)command_text[fi]) / 255.0f;
                 }
                 float lnn_output[128] = {0};
-                lnn_forward(server->lnn_instance, text_features, lnn_output);
+                selflnn_safe_forward(server->lnn_instance, text_features, lnn_output);
                 float max_act = 0.0f;
                 for (int oi = 0; oi < 128; oi++) {
                     if (lnn_output[oi] > max_act) max_act = lnn_output[oi];
@@ -17979,7 +17993,7 @@ static int handle_api_post_agi_think(BackendServer* server,
                     causal_confidence, q_len);
         } else {
             int discover_result = reasoning_discover_causal_structure(engine,
-                cause_vec, cause_len, effect_len > 0 ? effect_vec : NULL, effect_len,
+                cause_vec, cause_len, effect_len,
                 reasoning_result, 128);
             if (discover_result == 0) {
                 reasoning_active = 1;
@@ -19358,6 +19372,29 @@ static int handle_api_post_knowledge_delete(BackendServer* server,
         }
         return 0;
     }
+    /* 知识库清空功能：当请求中clear_all=1时，清空全部知识条目 */
+    {
+        int clear_all_flag = 0;
+        if (data && len > 0) {
+            parse_json_int(data, "clear_all", &clear_all_flag);
+        }
+        if (clear_all_flag) {
+            size_t total_before = 0, mem_before = 0;
+            knowledge_base_get_stats(server->knowledge_base, &total_before, &mem_before);
+            knowledge_base_clear(server->knowledge_base);
+            size_t total_after = 0, mem_after = 0;
+            knowledge_base_get_stats(server->knowledge_base, &total_after, &mem_after);
+            size_t deleted_count = total_before - total_after;
+            char* j = (char*)safe_malloc(384);
+            if (j) {
+                snprintf(j, 384, "{\"success\":true,\"knowledge\":{\"deleted_count\":%zu,\"remaining\":%zu}}",
+                    deleted_count, total_after);
+                resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+            }
+            log_info("[知识库] 清空全部知识条目: 删除%zu条，剩余%zu条", deleted_count, total_after);
+            return 0;
+        }
+    }
     if (entry_id < 0) {
         char subject[256] = "";
         char predicate[256] = "";
@@ -19764,7 +19801,7 @@ static int handle_api_post_lnn_calibrate(BackendServer* server,
                     if (input_size > 1) test_input[input_size / 2] = 0.5f;
                     float* test_output = (float*)safe_calloc(cfg.output_size > 0 ? cfg.output_size : 64, sizeof(float));
                     if (test_output) {
-                        if (lnn_forward((LNN*)server->lnn_instance, test_input, test_output) == 0) {
+                        if (selflnn_safe_forward(server->lnn_instance, test_input, test_output) == 0) {
                             /* 检查输出是否有效（非NaN非Inf） */
                             int output_valid = 1;
                             size_t out_size = cfg.output_size > 0 ? cfg.output_size : 64;
@@ -23726,7 +23763,7 @@ int backend_multimodal_dialogue_api(const float* input_data, int input_dim,
     if (!input_data || !cfc_network || !response || !text_response) return -1;
 
     float cfc_hidden[256] = {0};
-    lnn_forward((LNN*)cfc_network, input_data, cfc_hidden);
+    selflnn_safe_forward(cfc_network, input_data, cfc_hidden);
 
     memcpy(response, cfc_hidden, (size_t)(response_dim < 256 ? response_dim : 256) * sizeof(float));
 
@@ -24304,21 +24341,38 @@ static int handle_api_get_audio_spectrum(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    void* laplace = selflnn_get_laplace_unified();
-    char* json_data = (char*)safe_malloc(4096);
+    char* json_data = (char*)safe_malloc(8192);
     if (!json_data) return -1;
+
+    float spectrum_data[256] = {0};
+    int fft_size = 64;
+    int has_data = 0;
+
+    void* laplace = selflnn_get_laplace_unified();
     if (laplace) {
-        float spectrum_data[64] = {0};
-        int pos = snprintf(json_data, 4096, "{\"spectrum\":[");
-        for (int i = 0; i < 64; i++) {
-            pos += snprintf(json_data + pos, 4096 - (size_t)pos,
+        fft_size = 128;
+        laplace_unified_get_spectrum(laplace, spectrum_data, (size_t)fft_size);
+        has_data = 1;
+    }
+
+    void* audio_cap = selflnn_get_audio_capture();
+    if (audio_cap && !has_data) {
+        audio_capture_get_spectrum(audio_cap, spectrum_data, &fft_size);
+        if (fft_size > 0) has_data = 1;
+    }
+
+    if (has_data && fft_size > 0) {
+        int pos = snprintf(json_data, 8192,
+            "{\"spectrum\":[");
+        for (int i = 0; i < fft_size && i < 256; i++) {
+            pos += snprintf(json_data + pos, 8192 - (size_t)pos,
                 "%s%.4f", i > 0 ? "," : "", spectrum_data[i]);
         }
-        snprintf(json_data + pos, 4096 - (size_t)pos,
-            "],\"fft_size\":64,\"real_data\":true}");
+        snprintf(json_data + pos, 8192 - (size_t)pos,
+            "],\"fft_size\":%d,\"real_data\":true}", fft_size);
     } else {
-        snprintf(json_data, 4096,
-            "{\"spectrum\":null,\"error\":\"拉普拉斯分析器未就绪\",\"real_data\":true}");
+        snprintf(json_data, 8192,
+            "{\"spectrum\":[],\"fft_size\":0,\"error\":\"音频频谱数据源未就绪\",\"real_data\":true}");
     }
     (void)server; (void)request_type; (void)request_data; (void)request_length;
     response->data = json_data; response->data_length = strlen(json_data);

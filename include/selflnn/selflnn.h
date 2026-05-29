@@ -243,6 +243,8 @@ SELFLNN_API void dcpipeline_clear_immediate_check(void);
 
 /* ---- 4f. 多模态处理模块 ---- */
 SELFLNN_API void* selflnn_get_unified_signal_processor(void);
+SELFLNN_API void* selflnn_get_unified_signal_processor_advanced(void);  /* P2-003: 高级自适应路由器 */
+SELFLNN_API void* selflnn_get_unified_signal_processor_training(void);  /* P2-003: 训练混合策略 */
 
 /* ================================================================
  * 5. 单一LNN模型管理 —— 全模态共享同一个连续动态系统
@@ -259,6 +261,11 @@ SELFLNN_API void selflnn_enforce_single_lnn(void);
 SELFLNN_API int selflnn_is_single_lnn_enforced(void);
 SELFLNN_API int selflnn_register_module(int module_id, void* instance, int uses_shared_lnn);
 SELFLNN_API int selflnn_module_uses_shared_lnn(int module_id);
+
+/* LNN并发安全：带锁保护的前向传播
+ * 在调用lnn_forward()前后自动加锁/解锁，确保并发调用不会互相污染CfC隐藏状态。
+ * 所有多线程环境下对LNN的前向传播调用应使用此函数替代直接调用lnn_forward()。 */
+SELFLNN_API int selflnn_safe_forward(void* lnn, const float* input, float* output);
 
 /* ================================================================
  * 6. 训练与检查点 —— 模型训练/加载/保存

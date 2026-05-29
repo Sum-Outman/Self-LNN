@@ -223,6 +223,14 @@ int adjacency_list_bfs(AdjacencyList* al, int start_id,
  */
 int adjacency_list_has_edge(AdjacencyList* al, int source_id, int target_id);
 
+/**
+ * @brief 通过边ID获取邻接表边指针
+ * @param al 句柄
+ * @param edge_id 边ID
+ * @return const ALEdge* 边指针，不存在返回NULL
+ */
+const ALEdge* adjacency_list_get_edge_by_id(AdjacencyList* al, int edge_id);
+
 /* ============ 属性图存储引擎 ============ */
 
 /** @brief 属性图节点 */

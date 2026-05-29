@@ -27,6 +27,10 @@
 #include <string.h>
 #include <math.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4033 4715)
+#endif
+
 /**
  * @brief CfC单元状态缓冲区安全检查宏（用于返回int的函数）
  * 在关键函数入口处验证所有必要的状态缓冲区已分配，防止空指针访问
@@ -271,6 +275,10 @@ struct CfCCell {
     GatedCfCData* gated_data;                /**< 门控CfC内部数据 */
     /* 分层CfC数据 */
     HierarchicalCfCData* hierarchical_data;  /**< 分层CfC内部数据 */
+    float* hierarchical_gate_weights;         /**< 分层CfC门控权重矩阵 */
+    float* hierarchical_activation_weights;   /**< 分层CfC激活融合权重 */
+    float* hierarchical_gate_weight_grad;     /**< 分层CfC门控权重梯度 */
+    float* hierarchical_activation_weight_grad; /**< 分层CfC激活权重梯度 */
     /* 液态记忆门控CfC数据 */
     LiquidMemoryCfCData* liquid_memory_data;  /**< 液态记忆门控CfC内部数据 */
     /* 四元数CfC数据（P2.4） */

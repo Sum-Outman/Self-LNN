@@ -7,6 +7,10 @@
 #include <math.h>
 #include <float.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4101 4090)
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif

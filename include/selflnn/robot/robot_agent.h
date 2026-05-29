@@ -138,6 +138,7 @@ typedef struct {
     float confidence_score;
     float curiosity_factor;
     int training_step_count;   /* ZSFX-012: DQN策略网络训练步数，推理前验证 */
+    void* ucb_explore_state;   /* ZSFA-FIX-P0-007: UCB探索策略状态 */
 } RobotAgent;
 
 typedef struct {

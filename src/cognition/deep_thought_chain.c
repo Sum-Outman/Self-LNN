@@ -53,6 +53,10 @@
 #include <float.h>
 #include <time.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4047)
+#endif
+
 #define DTC_SIGMOID(x) (1.0f / (1.0f + expf(-(x))))
 #define DTC_TANH(x) (tanhf(x))
 #define DTC_MAX(a,b) (((a)>(b))?(a):(b))

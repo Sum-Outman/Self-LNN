@@ -18,6 +18,10 @@
 #include <string.h>
 #include <float.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4101)
+#endif
+
 /* 内联四元数旋转（复用math_utils.h的quat_rotate_vec3） */
 static void sim_quat_rotate_vec3(const float* q, const float* v, float* result) {
 	float qv[3] = { q[0], q[1], q[2] };

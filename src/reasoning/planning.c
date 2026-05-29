@@ -18,6 +18,7 @@
  */
 
 #include "selflnn/reasoning/planning.h"
+#include "selflnn/reasoning/planning_enhanced.h" /* ZSFA-FIX-P0-005: 增强规划集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -2406,6 +2407,86 @@ int planning_generate(PlanningSystem* system,
                 steps = s + 1;
                 if (dist < system->config.goal_tolerance) break;
             }
+            break;
+        }
+        case PLANNING_ENHANCED: {
+            /* P2-002: 增强规划统一调度 — 调用planning_enhanced.c的时间推理STN规划
+             * 使用STN(Simple Temporal Network) + CfC液态优化进行时序约束规划。
+             * 输入: goal/current_state → 输出: PlanEnhancedResult(action_ids, start_times, end_times) */
+            PlanEnhancedEngine* enh = plan_enhanced_create(NULL);
+            if (!enh) return -1;
+
+            PlanEnhancedResult enh_result;
+            memset(&enh_result, 0, sizeof(enh_result));
+
+            float state_vec[PLAN_ENH_MAX_CONSTRAINTS];
+            size_t vec_len = state_size < PLAN_ENH_MAX_CONSTRAINTS ? state_size : PLAN_ENH_MAX_CONSTRAINTS;
+            memcpy(state_vec, current_state, vec_len * sizeof(float));
+
+            int enh_steps = plan_enhanced_generate_temporal(enh,
+                state_vec, vec_len,
+                goal, goal_size < vec_len ? goal_size : vec_len,
+                &enh_result);
+
+            if (enh_steps > 0 && enh_result.action_count > 0) {
+                size_t interp_steps = (size_t)enh_result.action_count;
+                if (interp_steps > max_steps) interp_steps = max_steps;
+                for (size_t i = 0; i < interp_steps; i++) {
+                    float t = (float)(i + 1) / (float)interp_steps;
+                    for (size_t d = 0; d < state_size && steps * state_size + d < max_plan_size; d++) {
+                        plan[steps * state_size + d] = current_state[d] + (goal[d] - current_state[d]) * t;
+                    }
+                    steps++;
+                }
+                system->last_feasibility = enh_result.plan_confidence;
+            }
+            plan_enhanced_free_result(&enh_result);
+            plan_enhanced_destroy(enh);
+            break;
+        }
+        case PLANNING_REFINED: {
+            /* P2-002: 精炼规划 — 先尝试Landmark-based规划，失败则回退到FF/FFD规划
+             * 使用planning_enhanced.c的Landmark/FF/FFD/符号规划进行精细状态搜索。 */
+            PlanEnhancedEngine* enh = plan_enhanced_create(NULL);
+            if (!enh) return -1;
+
+            PlanEnhancedResult enh_result;
+            memset(&enh_result, 0, sizeof(enh_result));
+
+            float state_vec[PLAN_ENH_MAX_CONSTRAINTS];
+            size_t vec_len = state_size < PLAN_ENH_MAX_CONSTRAINTS ? state_size : PLAN_ENH_MAX_CONSTRAINTS;
+            memcpy(state_vec, current_state, vec_len * sizeof(float));
+
+            /* 优先尝试Landmark-based规划 */
+            int enh_steps = plan_enhanced_generate_landmark_based(enh,
+                goal, goal_size < vec_len ? goal_size : vec_len,
+                state_vec, vec_len,
+                &enh_result);
+
+            /* Landmark失败则尝试FF/FFD规划 */
+            if (enh_steps <= 0) {
+                float ffd_goal[PLAN_ENH_MAX_CONSTRAINTS];
+                memcpy(ffd_goal, goal, (goal_size < vec_len ? goal_size : vec_len) * sizeof(float));
+                enh_steps = plan_enhanced_generate_ffd(enh,
+                    ffd_goal, goal_size < vec_len ? goal_size : vec_len,
+                    state_vec, vec_len,
+                    &enh_result);
+            }
+
+            if (enh_steps > 0 && enh_result.action_count > 0) {
+                size_t interp_steps = (size_t)enh_result.action_count;
+                if (interp_steps > max_steps) interp_steps = max_steps;
+                for (size_t i = 0; i < interp_steps; i++) {
+                    float t = (float)(i + 1) / (float)interp_steps;
+                    for (size_t d = 0; d < state_size && steps * state_size + d < max_plan_size; d++) {
+                        plan[steps * state_size + d] = current_state[d] + (goal[d] - current_state[d]) * t;
+                    }
+                    steps++;
+                }
+                system->last_feasibility = enh_result.plan_confidence;
+            }
+            plan_enhanced_free_result(&enh_result);
+            plan_enhanced_destroy(enh);
             break;
         }
         default:

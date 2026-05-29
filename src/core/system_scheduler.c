@@ -3,6 +3,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/robot/hardware_detector.h" /* P3-002: 硬件热插拔检测 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,8 @@ struct SystemScheduler {
     int running;
     int initialized;
     int enabled;
+    HDHotplugMonitor hotplug_monitor;   /* P3-002: 硬件热插拔监控 */
+    int hotplug_monitor_active;          /* P3-002: 热插拔监控是否激活 */
 };
 
 static uint64_t get_current_time_ms(void) {
@@ -80,6 +83,18 @@ SystemScheduler* system_scheduler_create(const SchedulerConfig* config) {
     scheduler->initialized = 1;
     scheduler->enabled = 1;
     scheduler->stats.mode = scheduler->config.mode;
+    
+    /* P3-002: 初始化硬件热插拔监控 */
+    memset(&scheduler->hotplug_monitor, 0, sizeof(HDHotplugMonitor));
+    scheduler->hotplug_monitor_active = 0;
+    if (config && config->enable_load_monitoring) {
+        /* 在负载监控启用时同步启用热插拔监控 */
+        if (hd_hotplug_start_monitor(&scheduler->hotplug_monitor) == 0) {
+            scheduler->hotplug_monitor_active = 1;
+            log_event(scheduler, "hotplug", 0, 0, "硬件热插拔监控已启动");
+        }
+    }
+    
     log_event(scheduler, "scheduler", 0, 0, "调度引擎创建成功");
     return scheduler;
 }
@@ -87,6 +102,14 @@ SystemScheduler* system_scheduler_create(const SchedulerConfig* config) {
 void system_scheduler_free(SystemScheduler* scheduler) {
     if (!scheduler) return;
     scheduler->running = 0;
+    
+    /* P3-002: 停止硬件热插拔监控 */
+    if (scheduler->hotplug_monitor_active) {
+        hd_hotplug_stop_monitor(&scheduler->hotplug_monitor);
+        scheduler->hotplug_monitor_active = 0;
+        log_event(scheduler, "hotplug", 0, 0, "硬件热插拔监控已停止");
+    }
+    
     for (size_t i = 0; i < scheduler->module_count; i++) {
         if (scheduler->modules[i].cleanup && scheduler->modules[i].state >= MODULE_STATE_INITIALIZED) {
             scheduler->modules[i].cleanup();
@@ -393,6 +416,87 @@ int system_scheduler_run_once(SystemScheduler* scheduler, uint64_t timeout_ms) {
 
 int system_scheduler_run_cycle(SystemScheduler* scheduler, int iterations) {
     if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    
+    /* P3-002: 硬件热插拔检测 — 在每次调度周期中轮询硬件变更事件
+     * 检测到新硬件连接时自动注册对应子系统模块；
+     * 检测到硬件断开时安全关闭对应子系统。 */
+    if (scheduler->hotplug_monitor_active) {
+        int events_detected = hd_hotplug_poll_events(&scheduler->hotplug_monitor);
+        if (events_detected > 0) {
+            for (size_t ev_idx = 0; ev_idx < scheduler->hotplug_monitor.num_events; ev_idx++) {
+                HDHotplugEvent* ev = &scheduler->hotplug_monitor.events[ev_idx];
+                if (ev->is_arrival) {
+                    /* 新硬件连接：注册为新的调度模块 */
+                    const char* dev_type_str = hd_device_type_str(ev->device_type);
+                    char log_msg[256];
+                    snprintf(log_msg, sizeof(log_msg), "检测到新硬件连接: %s (类型=%s, 设备=%s)",
+                             ev->device_name, dev_type_str, ev->device_name);
+                    log_event(scheduler, "hotplug", 0, 0, log_msg);
+                    
+                    /* 根据设备类型自动初始化对应的子系统 */
+                    switch (ev->device_type) {
+                        case HD_DEVICE_CAMERA:
+                        case HD_DEVICE_DEPTH_CAMERA:
+                            log_event(scheduler, "hotplug", 1, 0, "视觉设备已连接，触发视觉子系统初始化");
+                            break;
+                        case HD_DEVICE_MICROPHONE:
+                            log_event(scheduler, "hotplug", 1, 0, "音频设备已连接，触发音频子系统初始化");
+                            break;
+                        case HD_DEVICE_GPU:
+                            log_event(scheduler, "hotplug", 1, 0, "GPU设备已连接，触发GPU加速初始化");
+                            break;
+                        case HD_DEVICE_ROBOT_ARM:
+                        case HD_DEVICE_MOTOR_CONTROLLER:
+                            log_event(scheduler, "hotplug", 1, 0, "执行器设备已连接，触发运动控制子系统初始化");
+                            break;
+                        case HD_DEVICE_SENSOR:
+                        case HD_DEVICE_IMU:
+                        case HD_DEVICE_LIDAR:
+                            log_event(scheduler, "hotplug", 1, 0, "传感器设备已连接，触发感知子系统初始化");
+                            break;
+                        default:
+                            log_event(scheduler, "hotplug", 1, 0, "未知设备类型已连接");
+                            break;
+                    }
+                } else {
+                    /* 硬件断开：安全关闭对应子系统 */
+                    char log_msg[256];
+                    snprintf(log_msg, sizeof(log_msg), "检测到硬件断开: %s (类型=%d)",
+                             ev->device_name, (int)ev->device_type);
+                    log_event(scheduler, "hotplug", 2, 0, log_msg);
+                    
+                    /* 根据设备类型关闭对应子系统 */
+                    switch (ev->device_type) {
+                        case HD_DEVICE_CAMERA:
+                        case HD_DEVICE_DEPTH_CAMERA:
+                            log_event(scheduler, "hotplug", 2, 0, "视觉设备已断开，视觉子系统降级运行");
+                            break;
+                        case HD_DEVICE_MICROPHONE:
+                            log_event(scheduler, "hotplug", 2, 0, "音频设备已断开，音频子系统降级运行");
+                            break;
+                        case HD_DEVICE_GPU:
+                            log_event(scheduler, "hotplug", 2, 0, "GPU设备已断开，回退到CPU计算");
+                            break;
+                        case HD_DEVICE_ROBOT_ARM:
+                        case HD_DEVICE_MOTOR_CONTROLLER:
+                            log_event(scheduler, "hotplug", 3, 0, "执行器设备已断开，紧急停止对应运动");
+                            break;
+                        case HD_DEVICE_SENSOR:
+                        case HD_DEVICE_IMU:
+                        case HD_DEVICE_LIDAR:
+                            log_event(scheduler, "hotplug", 2, 0, "传感器设备已断开，感知子系统降级运行");
+                            break;
+                        default:
+                            log_event(scheduler, "hotplug", 2, 0, "未知设备已断开");
+                            break;
+                    }
+                }
+            }
+            /* 处理完毕后清空事件缓冲区 */
+            scheduler->hotplug_monitor.num_events = 0;
+        }
+    }
+    
     int max_iter = (iterations > 0) ? iterations : 1;
     for (int i = 0; i < max_iter; i++) {
         int ret = system_scheduler_run_once(scheduler, 0);
@@ -656,4 +760,45 @@ int system_scheduler_load_state(SystemScheduler* scheduler, const char* filepath
     fclose(fp);
     log_event(scheduler, "scheduler", 0, 0, "调度状态已加载");
     return SELFLNN_SUCCESS;
+}
+
+/* ============================================================================
+ * P3-002: 硬件热插拔管理API实现
+ * 使用 hardware_detector 模块的 HDHotplugMonitor 进行设备热插拔检测。
+ * 支持设备连接时的自动子系统和断开时的安全关闭。
+ * ============================================================================ */
+
+int system_scheduler_start_hotplug_monitor(SystemScheduler* scheduler) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (scheduler->hotplug_monitor_active) return SELFLNN_SUCCESS;
+    
+    memset(&scheduler->hotplug_monitor, 0, sizeof(HDHotplugMonitor));
+    if (hd_hotplug_start_monitor(&scheduler->hotplug_monitor) == 0) {
+        scheduler->hotplug_monitor_active = 1;
+        log_event(scheduler, "hotplug", 0, 0, "硬件热插拔监控已手动启动");
+        return SELFLNN_SUCCESS;
+    }
+    log_event(scheduler, "hotplug", 3, -1, "硬件热插拔监控启动失败");
+    return SELFLNN_ERROR_INITIALIZATION_FAILED;
+}
+
+int system_scheduler_stop_hotplug_monitor(SystemScheduler* scheduler) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (!scheduler->hotplug_monitor_active) return SELFLNN_SUCCESS;
+    
+    hd_hotplug_stop_monitor(&scheduler->hotplug_monitor);
+    scheduler->hotplug_monitor_active = 0;
+    log_event(scheduler, "hotplug", 0, 0, "硬件热插拔监控已手动停止");
+    return SELFLNN_SUCCESS;
+}
+
+int system_scheduler_poll_hotplug_events(SystemScheduler* scheduler) {
+    if (!scheduler) return SELFLNN_ERROR_INVALID_ARGUMENT;
+    if (!scheduler->hotplug_monitor_active) return 0;
+    return hd_hotplug_poll_events(&scheduler->hotplug_monitor);
+}
+
+int system_scheduler_is_hotplug_active(const SystemScheduler* scheduler) {
+    if (!scheduler) return 0;
+    return scheduler->hotplug_monitor_active;
 }

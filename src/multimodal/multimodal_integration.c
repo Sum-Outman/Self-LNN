@@ -754,9 +754,9 @@ int multimodal_integration_process_text(
     /* 使用OCR识别的真实文本内容 */
     if (ocr_result_code == 0 && ocr_result.text[0] != '\0') {
         size_t text_len = strlen(ocr_result.text);
-        text_output->text = (char*)safe_malloc(text_len + 1);
+        text_output->text = (const char*)safe_malloc(text_len + 1);
         if (text_output->text) {
-            memcpy(text_output->text, ocr_result.text, text_len + 1);
+            memcpy((char*)text_output->text, ocr_result.text, text_len + 1);
             text_output->text_length = (int)text_len;
         } else {
             text_output->text = NULL;
@@ -1996,7 +1996,7 @@ static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* mod
     const float* raw_inputs[UNIFIED_LNN_MAX_MODALITIES];
     size_t raw_sizes[UNIFIED_LNN_MAX_MODALITIES];
     int modality_present[UNIFIED_LNN_MAX_MODALITIES];
-    memset(raw_inputs, 0, sizeof(raw_inputs));
+    memset((void*)raw_inputs, 0, sizeof(raw_inputs));
     memset(raw_sizes, 0, sizeof(raw_sizes));
     memset(modality_present, 0, sizeof(modality_present));
     for (int i = 0; i < num_modalities && i < UNIFIED_LNN_MAX_MODALITIES; i++) {

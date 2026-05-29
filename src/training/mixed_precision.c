@@ -24,6 +24,10 @@
 #include <float.h>
 #include <stdint.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4756)
+#endif
+
 // 平台特定的动态库加载头文件
 #ifdef _WIN32
 #include <windows.h>

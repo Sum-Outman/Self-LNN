@@ -524,15 +524,21 @@ static inline void v3_scale(const float v[3], float s, float out[3]) {
     out[0] = v[0] * s; out[1] = v[1] * s; out[2] = v[2] * s;
 }
 /** 3D向量点积 */
+#ifndef SELFLNN_VEC3_OPS_DEFINED_DOT
+#define SELFLNN_VEC3_OPS_DEFINED_DOT
 static inline float vec3_dot(const float a[3], const float b[3]) {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
+#endif
 /** 3D向量叉积：out = a × b */
+#ifndef SELFLNN_VEC3_OPS_DEFINED_CROSS
+#define SELFLNN_VEC3_OPS_DEFINED_CROSS
 static inline void vec3_cross(const float a[3], const float b[3], float out[3]) {
     out[0] = a[1] * b[2] - a[2] * b[1];
     out[1] = a[2] * b[0] - a[0] * b[2];
     out[2] = a[0] * b[1] - a[1] * b[0];
 }
+#endif
 /** 3D向量长度 */
 static inline float vec3_len(const float v[3]) {
     return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
@@ -542,12 +548,15 @@ static inline float vec3_lensq(const float v[3]) {
     return v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
 }
 /** 3D向量归一化 */
+#ifndef SELFLNN_VEC3_OPS_DEFINED_NORMALIZE
+#define SELFLNN_VEC3_OPS_DEFINED_NORMALIZE
 static inline void vec3_normalize(const float v[3], float out[3]) {
     float len = vec3_len(v);
     if (len < 1e-8f) { out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.0f; return; }
     float inv = 1.0f / len;
     out[0] = v[0] * inv; out[1] = v[1] * inv; out[2] = v[2] * inv;
 }
+#endif
 
 /** 四元数乘法：out = a * b */
 static inline void quat_multiply(const float a[4], const float b[4], float out[4]) {

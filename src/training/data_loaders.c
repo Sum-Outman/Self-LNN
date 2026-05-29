@@ -9,6 +9,10 @@
 #include <float.h>
 #include <ctype.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4047)
+#endif
+
 /* ========================================================================
  * 内部工具函数
  * 

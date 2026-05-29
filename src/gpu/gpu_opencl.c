@@ -172,9 +172,18 @@
 #define CL_MEM_SVM_ATOMICS                          (1 << 11)
 #define CL_MAP_WRITE                                0x2
 #define CL_MAP_READ                                 0x1
+
+/* OpenCL位域基本类型（必须在SVM类型之前定义） */
+typedef unsigned long cl_bitfield;
+#ifndef cl_svm_mem_flags
 typedef cl_bitfield cl_svm_mem_flags;
+#endif
+#ifndef cl_map_flags
 typedef cl_bitfield cl_map_flags;
+#endif
+#ifndef cl_bool
 typedef unsigned int cl_bool;
+#endif
 
 /* ============================================================================
  * P3-069修复: 编译时断言——验证手动定义常量与标准OpenCL头文件一致
@@ -914,10 +923,11 @@ static const char* OPENCL_RESIZE_BILINEAR_KERNEL =
 typedef int cl_int;
 typedef unsigned int cl_uint;
 typedef unsigned long cl_ulong;
+#ifndef cl_bitfield
 typedef unsigned long cl_bitfield;
+#endif
 typedef unsigned long cl_device_type;
 typedef unsigned long cl_context_properties;
-typedef unsigned char cl_bool;
 typedef void* cl_platform_id;
 typedef void* cl_device_id;
 typedef void* cl_context;

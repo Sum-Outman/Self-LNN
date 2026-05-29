@@ -17,6 +17,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/errors.h"
+#define SELFLNN_CORE_INTERNAL
 #include "selflnn/knowledge/knowledge_version.h"
 #include <stdlib.h>
 #include <string.h>

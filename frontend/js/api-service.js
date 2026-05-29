@@ -977,9 +977,22 @@ class ApiService {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
             const data = await response.json();
+            /* ZSFA-FIX-BUG-4: 规范化后端robot_status.old_interface格式为前端期望的robot.battery平铺格式 */
+            var rs = (data && data.robot_status) ? data.robot_status : data;
+            var oi = (rs && rs.old_interface) ? rs.old_interface : {};
+            var robot = {
+                available: rs.hasOwnProperty('hardware_mode') ? (rs.hardware_mode !== 'none') : (oi.battery > 0),
+                hardware_mode: rs.hardware_mode || 'unknown',
+                battery: (typeof oi.battery === 'number') ? oi.battery : 0,
+                temperature: (typeof oi.temperature === 'number') ? oi.temperature : 0,
+                position: Array.isArray(oi.position) ? oi.position : [0, 0, 0],
+                state: (oi.state !== undefined) ? oi.state : '--',
+                is_simulation: rs.is_simulation || false,
+                ros_controller: rs.ros_controller || { robot_count: 0, connected: 0 }
+            };
             return {
                 success: true,
-                data: data
+                data: { robot: robot, robot_status: rs }
             };
         } catch (error) {
             console.warn('获取机器人状态:', error.message);
@@ -1855,25 +1868,6 @@ class ApiService {
             return { success: true, data: data };
         } catch (error) {
             console.error('获取认知状态失败:', error);
-            return { success: false, error: error.message, data: null };
-        }
-    }
-
-    /**
-     * AGI全模态思考
-     */
-    async agiThink(query, deep) {
-        try {
-            const response = await this.request('/agi/think', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: query || '系统状态分析', deep: deep || 0 })
-            });
-            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
-            const data = await response.json();
-            return { success: true, data: data };
-        } catch (error) {
-            console.error('AGI思考失败:', error);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -5328,10 +5322,6 @@ class ApiService {
         try { var r = await this.request('/computer/type', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:text}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
-    async controlGazebo(action, params) {
-        try { var r = await this.request('/gazebo/control', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:action, params:params||{}}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
     async simulationPlanPath(start, goal) {
         try { var r = await this.request('/simulation/plan_path', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start:start, goal:goal}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
@@ -5362,10 +5352,6 @@ class ApiService {
     }
     async getHardwareInfo() {
         try { var r = await this.request('/hardware/info', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async scanHardware() {
-        try { var r = await this.request('/hardware/scan', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
 

@@ -1180,6 +1180,8 @@ struct DeepParticleFilter {
 
 typedef struct DeepParticleFilter DeepParticleFilter;
 
+static void deep_particle_filter_free(DeepParticleFilter* pf);
+
 static DeepParticleFilter* deep_particle_filter_create(const ParticleFilterConfig* config) {
     if (!config) return NULL;
     DeepParticleFilter* pf = (DeepParticleFilter*)safe_calloc(1, sizeof(DeepParticleFilter));
@@ -1401,6 +1403,8 @@ struct DeepInfoFilter {
 };
 
 typedef struct DeepInfoFilter DeepInfoFilter;
+
+static void deep_info_filter_free(DeepInfoFilter* inf);
 
 static DeepInfoFilter* deep_info_filter_create(const InfoFilterConfig* config) {
     if (!config) return NULL;

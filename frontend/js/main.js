@@ -738,7 +738,7 @@ async function refreshSensorPipeline() {
                 document.getElementById('pipeline-running').textContent = d.running ? '运行中' : '已停止';
                 document.getElementById('pipeline-sensor-count').textContent = d.sensor_count || 0;
                 document.getElementById('pipeline-sample-rate').textContent = (d.sample_rate || 0) + ' Hz';
-                document.getElementById('pipeline-stream-port').textContent = d.stream_port || 5556;
+                document.getElementById('pipeline-stream-port').textContent = d.stream_port || '未配置';
                 // 状态徽章
                 var badge = document.getElementById('pipeline-status-badge');
                 if (d.running) {

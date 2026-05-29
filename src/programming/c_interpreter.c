@@ -562,3 +562,61 @@ int self_programming_interpreter_available(void) {
 const char* self_programming_interpreter_capability(void) {
     return "C子集解释器: 算术表达式/变量赋值/math函数(sin,cos,sqrt,abs,rand)/比较运算";
 }
+
+/**
+ * @brief ZSFA-FIX-P0-004: C解释器可用性检查（包装接口）
+ *
+ * 直接复用 self_programming_interpreter_available() 的实现。
+ * 内置解释器始终可用。
+ *
+ * @return int 1=可用，0=不可用
+ */
+int c_interpreter_available(void) {
+    return self_programming_interpreter_available();
+}
+
+/**
+ * @brief ZSFA-FIX-P0-004: C解释器代码执行（包装接口）
+ *
+ * 对 self_programming_interpret_expr() 的瘦包装。
+ * 当外部C编译器不可用时，自我编程模块使用此函数执行代码。
+ *
+ * @param code C代码字符串
+ * @param result_buffer 结果输出缓冲区
+ * @param result_size 缓冲区大小
+ * @return int 成功返回0，失败返回-1
+ */
+int c_interpreter_execute(const char* code, char* result_buffer, size_t result_size) {
+    if (!code || !result_buffer || result_size == 0) return -1;
+
+    float expr_result = 0.0f;
+    char error_msg[256] = {0};
+
+    int ret = self_programming_interpret_expr(code, &expr_result, error_msg);
+    if (ret == 0) {
+        snprintf(result_buffer, result_size, "%.6f", (double)expr_result);
+        return 0;
+    }
+
+    /* 解释失败时返回错误信息 */
+    if (error_msg[0]) {
+        snprintf(result_buffer, result_size, "解释器错误: %s", error_msg);
+    } else {
+        snprintf(result_buffer, result_size, "解释器执行失败");
+    }
+    return -1;
+}
+
+/**
+ * @brief ZSFA-FIX-P0-004: C解释器表达式求值（包装接口）
+ *
+ * 对 self_programming_interpret_expr() 的直接包装。
+ *
+ * @param code 表达式代码
+ * @param result 浮点结果输出
+ * @param error_msg 错误信息输出
+ * @return int 成功返回0，失败返回-1
+ */
+int c_interpreter_interpret_expr(const char* code, float* result, char* error_msg) {
+    return self_programming_interpret_expr(code, result, error_msg);
+}

@@ -53,6 +53,7 @@ struct QuaternionLNN {
     Quaternion* activation_buffer;           /**< 四元数激活缓冲区 */
     Quaternion* gradient_buffer;             /**< 四元数梯度缓冲区 */
     float* scalar_buffer;                    /**< 标量缓冲区 */
+    float* output_buffer;                    /**< 输出缓冲区（标量输出） */
     
     // 训练状态
     int is_training;                         /**< 是否在训练中 */

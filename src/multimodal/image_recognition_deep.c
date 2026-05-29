@@ -302,7 +302,7 @@ int ird_fine_classify(IRDFineClassifier* clf, const float* img,
      * 必须先完成训练（ird_fine_train）后才能使用图像识别功能 */
     if (!clf->training_completed) {
         fprintf(stderr, "[图像识别错误] 图像识别模块未训练，拒绝使用随机权重推理！请先调用 ird_fine_train() 完成训练。\n");
-        res->confidence = 0.0f;
+        res->fine_confidence = 0.0f;
         return -2;
     }
     int hd = clf->cfg.feature_dim, ps = clf->cfg.patch_size, st = ps / 2;

@@ -3717,14 +3717,6 @@ int fcc_enable_force_axis(int axis_bitmask) {
 #define NMPC_REG_MAX     1e10f
 
 typedef struct {
-    float Q_diag[6];
-    float R_diag[6];
-    float u_min[6], u_max[6];
-    int horizon;
-    float dt;
-} NMPCConfig;
-
-typedef struct {
     NMPCConfig config;
     float predicted_states[NMPC_MAX_HORIZON + 1][12];
     float optimal_controls[NMPC_MAX_HORIZON][6];

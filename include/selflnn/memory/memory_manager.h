@@ -9,6 +9,7 @@
 #define SELFLNN_MEMORY_MANAGER_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* 前向声明 */
 typedef struct MemorySystem MemorySystem;

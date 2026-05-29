@@ -41,6 +41,10 @@
 #include <windows.h>
 #endif
 
+#ifdef _MSC_VER
+#pragma warning(disable:4100 4189 4244 4267 4701 4456)
+#endif
+
 /**
  * @brief 简单32位哈希 - 用于确定性伪随机权重初始化
  */

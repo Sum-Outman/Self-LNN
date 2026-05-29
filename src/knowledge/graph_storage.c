@@ -459,6 +459,12 @@ int adjacency_list_has_edge(AdjacencyList* al, int source_id, int target_id) {
     return 0;
 }
 
+const ALEdge* adjacency_list_get_edge_by_id(AdjacencyList* al, int edge_id) {
+    if (!al) return NULL;
+    if (edge_id < 0 || (size_t)edge_id >= al->edge_capacity) return NULL;
+    return al->edges[edge_id];
+}
+
 /* ============================================================================
  * 属性图存储引擎
  * =========================================================================== */
