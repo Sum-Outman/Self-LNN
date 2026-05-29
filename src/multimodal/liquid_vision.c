@@ -2290,36 +2290,30 @@ CfcOdeLayer* cfc_ode_layer_create(const CfcOdeLayerConfig* config) {
     {
         float scale_input = sqrtf(2.0f / (float)(input_dim + hidden_dim));
         float scale_hidden = sqrtf(2.0f / (float)(hidden_dim + hidden_dim));
-        unsigned int seed = 42;
 
         for (int i = 0; i < input_dim * hidden_dim; i++) {
-            seed = seed * 1103515245u + 12345u;
-            float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+            float r = secure_random_float();
             layer->w_input[i] = (r * 2.0f - 1.0f) * scale_input;
         }
         for (int i = 0; i < hidden_dim * hidden_dim; i++) {
-            seed = seed * 1103515245u + 12345u;
-            float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+            float r = secure_random_float();
             layer->w_hidden[i] = (r * 2.0f - 1.0f) * scale_hidden;
         }
         memset(layer->b_hidden, 0, (size_t)hidden_dim * sizeof(float));
 
         for (int i = 0; i < input_dim * hidden_dim; i++) {
-            seed = seed * 1103515245u + 12345u;
-            float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+            float r = secure_random_float();
             layer->w_gate[i] = (r * 2.0f - 1.0f) * scale_input;
         }
         for (int i = 0; i < hidden_dim * hidden_dim; i++) {
-            seed = seed * 1103515245u + 12345u;
-            float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+            float r = secure_random_float();
             layer->u_gate[i] = (r * 2.0f - 1.0f) * 0.1f;
         }
         for (int i = 0; i < hidden_dim; i++) layer->b_gate[i] = 1.0f;
 
         if (layer->tau_weights) {
             for (int i = 0; i < input_dim + hidden_dim; i++) {
-                seed = seed * 1103515245u + 12345u;
-                float r = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
+                float r = secure_random_float();
                 layer->tau_weights[i] = (r * 2.0f - 1.0f) * 0.01f;
             }
         }
@@ -2702,9 +2696,8 @@ CfcVisionProcessor* cfc_vision_processor_create(const CfcVisionConfig* config) {
                 float brightness = (nx + ny) * 0.5f + 0.5f * (1.0f - fabsf(nx*ny));
                 weight = color_w[cidx % img_c] * 0.1f + brightness * 0.05f;
             } else {
-                static unsigned int seed_local = 200;
-                seed_local = seed_local * 1103515245u + 12345u;
-                weight = ((float)(seed_local & 0x7FFFFFFF) / 2147483648.0f * 2.0f - 1.0f)
+                float r = secure_random_float();
+                weight = (r * 2.0f - 1.0f)
                          * sqrtf(2.0f / (float)(proc->patch_dim + proc->proj_hidden_dim));
             }
             proc->patch_proj_weight[(size_t)d * proc->patch_dim + i] = weight;
@@ -2747,10 +2740,8 @@ CfcVisionProcessor* cfc_vision_processor_create(const CfcVisionConfig* config) {
         proc->detect_bias = (float*)safe_malloc((size_t)detect_out_dim * sizeof(float));
         if (!proc->detect_weight || !proc->detect_bias) { cfc_vision_processor_destroy(proc); return NULL; }
         float det_scale = sqrtf(2.0f / (float)(proc->proj_hidden_dim + detect_out_dim));
-        unsigned int det_seed = 200;
         for (int i = 0; i < proc->proj_hidden_dim * detect_out_dim; i++) {
-            det_seed = det_seed * 1103515245u + 12345u;
-            float r = (float)(det_seed & 0x7FFFFFFF) / 2147483648.0f;
+            float r = secure_random_float();
             proc->detect_weight[i] = (r * 2.0f - 1.0f) * det_scale;
         }
         memset(proc->detect_bias, 0, (size_t)detect_out_dim * sizeof(float));
@@ -2790,45 +2781,10 @@ int cfc_vision_extract_features(CfcVisionProcessor* processor,
     if (!processor || !processor->is_initialized || !image_data || !features) return -1;
 
     if (!processor->training_completed) {
-        /* 未训练状态：使用确定性传统CV特征（HOG梯度直方图+颜色直方图）
-         * 真实特征提取，拒绝返回全零向量（违反禁止虚假数据原则） */
-        int gray_w = width < 128 ? width : 128;
-        int gray_h = height < 128 ? height : 128;
-        /* 下采样到128x128以控制特征维度 */
-        float* gray_img = (float*)safe_malloc((size_t)gray_w * gray_h * sizeof(float));
-        if (gray_img) {
-            for (int y = 0; y < gray_h; y++) {
-                for (int x = 0; x < gray_w; x++) {
-                    int sx = (int)((float)x * width / gray_w);
-                    int sy = (int)((float)y * height / gray_h);
-                    int idx = sy * width + sx;
-                    float r = (channels >= 1 && image_data) ? image_data[(size_t)idx * channels + 0] : 0.0f;
-                    float g = (channels >= 2) ? image_data[(size_t)idx * channels + 1] : r;
-                    float b = (channels >= 3) ? image_data[(size_t)idx * channels + 2] : r;
-                    gray_img[y * gray_w + x] = 0.299f * r + 0.587f * g + 0.114f * b;
-                }
-            }
-            /* 提取HOG特征 */
-            int hog_dim = vision_extract_hog_features(gray_img, gray_w, gray_h, features,
-                                                        (int)max_features);
-            /* 追加颜色直方图 */
-            int color_start = hog_dim > 0 ? hog_dim : 0;
-            int remaining = (int)max_features - color_start;
-            if (remaining > 32 && hog_dim > 0) {
-                int ch = vision_extract_color_histogram(image_data, width, height, channels,
-                                                          features + color_start, remaining);
-                if (ch > 0) {
-                    size_t total_feats = (size_t)(color_start + ch);
-                    if (total_feats < max_features) features[total_feats] = 1.0f;
-                }
-            }
-            safe_free((void**)&gray_img);
-            return (hog_dim > 0) ? (hog_dim + 1) : hog_dim;
-        }
-        /* 内存分配失败 → 返回零向量作为最后回退 */
-        size_t zero_count = max_features < (size_t)processor->config.output_dim ? max_features : (size_t)processor->config.output_dim;
-        memset(features, 0, zero_count * sizeof(float));
-        return -3;
+        /* LNN尚未训练完成，需要先完成LNN训练才能进行特征提取
+         * 不执行任何非LNN的传统CV特征回退（HOG/颜色直方图等），
+         * 返回错误码让上层调用者知道需要先完成LNN训练 */
+        return -1;
     }
 
     if (width != processor->config.image_width || height != processor->config.image_height ||

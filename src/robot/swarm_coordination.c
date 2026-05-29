@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <math.h>
 #include <time.h>
 
@@ -56,6 +57,14 @@ typedef struct {
     int committed;
 } RaftEntryInternal;
 
+/* Raft日志快照 */
+typedef struct {
+    int last_included_index;   /* 快照覆盖的最后日志索引 */
+    int last_included_term;    /* 快照对应的任期 */
+    char* state_data;          /* 序列化的状态机数据 */
+    int state_data_len;        /* 状态数据长度 */
+} RaftSnapshot;
+
 /* Raft节点内部结构 */
 struct RaftNode {
     int node_id;
@@ -72,6 +81,13 @@ struct RaftNode {
     int leader_id;
     time_t last_heartbeat;
     int election_timeout_ms;
+    /* 快照与持久化 */
+    RaftSnapshot* snapshot;    /* 当前快照（可为NULL） */
+    int snapshot_threshold;    /* 日志达到此阈值触发快照压缩 */
+    char log_file_path[256];   /* 日志持久化文件路径 */
+    int membership_changing;   /* 是否正在进行成员变更 */
+    int new_config_peer_ids[SW_MAX_ROBOTS]; /* 新配置的成员列表 */
+    int new_config_peer_count; /* 新配置成员数 */
 };
 
 /* 群体协调器 */
@@ -136,15 +152,129 @@ static void compute_grid_formation(Formation* f) {
     }
 }
 
+static void compute_diamond_formation(Formation* f) {
+    /* 领导者居中，其他成员等间距分布在菱形四边上
+     * 菱形四个顶点：前(front)、右(right)、后(back)、左(left)
+     * 尺寸随成员数自适应缩放，确保间距一致 */
+    int count = f->robot_count;
+    if (count <= 0) return;
+
+    /* 领导者占据中心位置 */
+    f->targets[0][0] = f->center[0];
+    f->targets[0][1] = f->center[1];
+    f->targets[0][2] = f->center[2];
+
+    if (count <= 1) return;
+
+    /* 菱形尺寸：基础半径随成员数自适应缩放 */
+    float diamond_radius = f->spacing * (1.0f + (float)(count - 1) * 0.3f);
+
+    /* 四个顶点相对于中心的方向向量（未旋转） */
+    float verts[4][2] = {
+        { 0.0f,  diamond_radius},   /* 前(北) */
+        { diamond_radius,  0.0f},   /* 右(东) */
+        { 0.0f, -diamond_radius},   /* 后(南) */
+        {-diamond_radius,  0.0f}    /* 左(西) */
+    };
+
+    /* 将成员均匀分布在四边上（不包括领导者已占中心） */
+    int remaining = count - 1;
+    int per_edge = remaining / 4;
+    int extra = remaining % 4;
+
+    int idx = 1;
+    for (int edge = 0; edge < 4; edge++) {
+        /* 每条边从顶点_edge 到 顶点_(edge+1)%4 */
+        int next_edge = (edge + 1) % 4;
+        int seg_count = per_edge + (extra > 0 ? 1 : 0);
+        if (extra > 0) extra--;
+
+        for (int s = 1; s <= seg_count && idx < count; s++, idx++) {
+            float t = (float)s / (float)(seg_count + 1);
+            float lx = verts[edge][0] + t * (verts[next_edge][0] - verts[edge][0]);
+            float ly = verts[edge][1] + t * (verts[next_edge][1] - verts[edge][1]);
+
+            /* 应用编队旋转 */
+            float cos_a = cosf(f->orientation);
+            float sin_a = sinf(f->orientation);
+            f->targets[idx][0] = f->center[0] + lx * cos_a - ly * sin_a;
+            f->targets[idx][1] = f->center[1] + lx * sin_a + ly * cos_a;
+            f->targets[idx][2] = f->center[2];
+        }
+    }
+}
+
+static void compute_wedge_formation(Formation* f) {
+    /* 楔形编队：领导者在前端顶点，后续列逐层展宽
+     * V形楔子，有深度层次，不同于V形的直线排列 */
+    int count = f->robot_count;
+    if (count <= 0) return;
+
+    /* 领导者占据前端顶点 */
+    f->targets[0][0] = f->center[0];
+    f->targets[0][1] = f->center[1];
+    f->targets[0][2] = f->center[2];
+
+    if (count <= 1) return;
+
+    /* 计算层数：每层容纳的人数逐层递增
+     * 第1层: 1人(领导者)，第2层: 2人，第3层: 3人... */
+    int remaining = count - 1;
+    int layer = 1;
+    int placed = 1;
+
+    while (remaining > 0) {
+        int layer_capacity = layer + 1;
+        int in_this_layer = remaining < layer_capacity ? remaining : layer_capacity;
+
+        float depth = f->spacing * (float)layer;                /* 纵向深度 */
+        float half_width = f->spacing * (float)(layer_capacity - 1) * 0.5f; /* 层半宽 */
+
+        for (int m = 0; m < in_this_layer && placed < count; m++, placed++) {
+            float offset_x = -depth;
+            float offset_y = -half_width + f->spacing * (float)m;
+
+            float cos_a = cosf(f->orientation);
+            float sin_a = sinf(f->orientation);
+            f->targets[placed][0] = f->center[0] + offset_x * cos_a - offset_y * sin_a;
+            f->targets[placed][1] = f->center[1] + offset_x * sin_a + offset_y * cos_a;
+            f->targets[placed][2] = f->center[2];
+        }
+
+        remaining -= in_this_layer;
+        layer++;
+    }
+}
+
+static void compute_column_formation(Formation* f) {
+    /* 纵队编队：领导者在前，其他成员严格单列排布
+     * 纵向间距相等，区别于线形的横向排列 */
+    int count = f->robot_count;
+    if (count <= 0) return;
+
+    for (int i = 0; i < count; i++) {
+        /* 所有成员在运动方向上排成一列
+         * 领导者(i=0)在前，后续成员依次向后排列 */
+        float offset_x = -(float)i * f->spacing;
+        float offset_y = 0.0f;
+
+        float cos_a = cosf(f->orientation);
+        float sin_a = sinf(f->orientation);
+        f->targets[i][0] = f->center[0] + offset_x * cos_a - offset_y * sin_a;
+        f->targets[i][1] = f->center[1] + offset_x * sin_a + offset_y * cos_a;
+        f->targets[i][2] = f->center[2];
+    }
+}
+
 static void compute_formation_targets(Formation* f) {
     switch (f->type) {
         case FORMATION_LINE:    compute_line_formation(f); break;
         case FORMATION_V:       compute_v_formation(f); break;
         case FORMATION_CIRCLE:  compute_circle_formation(f); break;
         case FORMATION_GRID:    compute_grid_formation(f); break;
-        case FORMATION_DIAMOND: compute_line_formation(f); break;
-        case FORMATION_WEDGE:   compute_v_formation(f); break;
-        case FORMATION_COLUMN:  compute_line_formation(f); break;
+        case FORMATION_DIAMOND: compute_diamond_formation(f); break;
+        case FORMATION_WEDGE:   compute_wedge_formation(f); break;
+        case FORMATION_COLUMN:  compute_column_formation(f); break;
         default:                compute_line_formation(f); break;
     }
 }
@@ -728,14 +858,24 @@ RaftNode* raft_node_create(int node_id, const int* peer_ids, int peer_count) {
     /* ZSFZS-F032修复: rand()→secure_random_float进行安全随机选举超时 */
     node->election_timeout_ms = RAFT_ELECTION_TIMEOUT_MIN +
         (int)(secure_random_float() * (float)(RAFT_ELECTION_TIMEOUT_MAX - RAFT_ELECTION_TIMEOUT_MIN));
+    /* 快照与持久化初始化 */
+    node->snapshot = NULL;
+    node->snapshot_threshold = 100;   /* 日志超过100条触发快照 */
+    node->log_file_path[0] = '\0';
+    node->membership_changing = 0;
+    node->new_config_peer_count = 0;
 
-    log_info("[Raft] 节点 %d 已创建, 同伴数=%d", node_id, peer_count);
+    log_info("[Raft] 节点 %d 已创建, 同伴数=%d, 快照阈值=%d", node_id, peer_count, node->snapshot_threshold);
     return node;
 }
 
 void raft_node_free(RaftNode* node) {
     if (!node) return;
     safe_free((void**)&node->log_entries);
+    if (node->snapshot) {
+        safe_free((void**)&node->snapshot->state_data);
+        safe_free((void**)&node->snapshot);
+    }
     safe_free((void**)&node);
 }
 
@@ -915,6 +1055,404 @@ int raft_get_state(RaftNode* node) {
 
 int raft_get_term(RaftNode* node) {
     return node ? node->current_term : -1;
+}
+
+/* ==================== Raft日志快照压缩 ==================== */
+
+#define RAFT_SNAPSHOT_MAGIC 0x52414654  /* "RAFT" 魔数 */
+
+int raft_create_snapshot(RaftNode* node) {
+    if (!node) return -1;
+
+    /* 释放旧快照 */
+    if (node->snapshot) {
+        safe_free((void**)&node->snapshot->state_data);
+        safe_free((void**)&node->snapshot);
+        node->snapshot = NULL;
+    }
+
+    /* 确定快照点：使用最后提交的日志索引 */
+    int snap_index = node->commit_index;
+    int snap_term = node->current_term;
+    if (snap_index >= 0 && snap_index < node->log_count) {
+        snap_term = node->log_entries[snap_index].term;
+    }
+
+    /* 序列化已提交的日志命令为快照数据 */
+    int total_cmd_len = 0;
+    for (int i = 0; i <= snap_index && i < node->log_count; i++) {
+        if (node->log_entries[i].committed) {
+            total_cmd_len += node->log_entries[i].command_len + 1;
+        }
+    }
+
+    if (total_cmd_len <= 0 && snap_index < 0) return 0;
+
+    char* snap_data = (char*)safe_calloc(1, total_cmd_len > 0 ? total_cmd_len : 1);
+    if (!snap_data) return -1;
+
+    int offset = 0;
+    for (int i = 0; i <= snap_index && i < node->log_count; i++) {
+        if (node->log_entries[i].committed) {
+            int len = node->log_entries[i].command_len;
+            memcpy(snap_data + offset, node->log_entries[i].command, len);
+            snap_data[offset + len] = '\n';
+            offset += len + 1;
+        }
+    }
+
+    /* 创建快照结构 */
+    RaftSnapshot* snap = (RaftSnapshot*)safe_calloc(1, sizeof(RaftSnapshot));
+    if (!snap) {
+        safe_free((void**)&snap_data);
+        return -1;
+    }
+    snap->last_included_index = snap_index;
+    snap->last_included_term = snap_term;
+    snap->state_data = snap_data;
+    snap->state_data_len = total_cmd_len;
+
+    node->snapshot = snap;
+
+    /* 压缩日志：删除快照已覆盖的条目 */
+    int new_count = node->log_count - (snap_index + 1);
+    if (new_count > 0 && snap_index + 1 < node->log_count) {
+        memmove(node->log_entries,
+                node->log_entries + snap_index + 1,
+                new_count * sizeof(RaftEntryInternal));
+        node->log_count = new_count;
+    } else {
+        node->log_count = 0;
+    }
+    node->commit_index = node->log_count - 1;
+
+    log_info("[Raft] 快照已创建: 包含索引=%d, 任期=%d, 数据长度=%d, 压缩后日志数=%d",
+             snap->last_included_index, snap->last_included_term,
+             snap->state_data_len, node->log_count);
+    return 0;
+}
+
+int raft_auto_snapshot(RaftNode* node) {
+    /* 当日志数超过阈值时自动触发快照 */
+    if (!node) return -1;
+    if (node->log_count < node->snapshot_threshold) return 0;
+    return raft_create_snapshot(node);
+}
+
+int raft_apply_snapshot(RaftNode* node, int last_included_index, int last_included_term,
+                         const char* state_data, int data_len) {
+    if (!node || !state_data || data_len <= 0) return -1;
+
+    /* 释放旧快照 */
+    if (node->snapshot) {
+        safe_free((void**)&node->snapshot->state_data);
+        safe_free((void**)&node->snapshot);
+        node->snapshot = NULL;
+    }
+
+    /* 分配并复制快照数据 */
+    char* data_copy = (char*)safe_malloc(data_len);
+    if (!data_copy) return -1;
+    memcpy(data_copy, state_data, data_len);
+
+    RaftSnapshot* snap = (RaftSnapshot*)safe_calloc(1, sizeof(RaftSnapshot));
+    if (!snap) {
+        safe_free((void**)&data_copy);
+        return -1;
+    }
+
+    snap->last_included_index = last_included_index;
+    snap->last_included_term = last_included_term;
+    snap->state_data = data_copy;
+    snap->state_data_len = data_len;
+
+    node->snapshot = snap;
+
+    /* 丢弃快照覆盖的日志 */
+    int discard_count = last_included_index + 1;
+    if (discard_count >= node->log_count) {
+        node->log_count = 0;
+    } else {
+        memmove(node->log_entries,
+                node->log_entries + discard_count,
+                (node->log_count - discard_count) * sizeof(RaftEntryInternal));
+        node->log_count -= discard_count;
+    }
+
+    if (last_included_index > node->commit_index) {
+        node->commit_index = last_included_index;
+    }
+    if (last_included_index > node->last_applied) {
+        node->last_applied = last_included_index;
+    }
+
+    log_info("[Raft] 已应用快照: 最后索引=%d, 任期=%d, 数据=%d字节",
+             last_included_index, last_included_term, data_len);
+    return 0;
+}
+
+/* ==================== Raft日志持久化 ==================== */
+
+int raft_persist_log(RaftNode* node) {
+    if (!node) return -1;
+
+    const char* path = node->log_file_path;
+    if (path[0] == '\0') {
+        snprintf(node->log_file_path, sizeof(node->log_file_path),
+                 "raft_log_node_%d.dat", node->node_id);
+        path = node->log_file_path;
+    }
+
+    FILE* fp = fopen(path, "wb");
+    if (!fp) {
+        log_error("[Raft] 无法打开日志文件进行写入: %s", path);
+        return -1;
+    }
+
+    /* 写入文件头 */
+    uint32_t magic = RAFT_SNAPSHOT_MAGIC;
+    uint32_t version = 1;
+    int32_t term = node->current_term;
+    int32_t voted = node->voted_for;
+    int32_t log_count = node->log_count;
+
+    fwrite(&magic, sizeof(magic), 1, fp);
+    fwrite(&version, sizeof(version), 1, fp);
+    fwrite(&term, sizeof(term), 1, fp);
+    fwrite(&voted, sizeof(voted), 1, fp);
+    fwrite(&log_count, sizeof(log_count), 1, fp);
+
+    /* 写入快照信息 */
+    int32_t has_snapshot = (node->snapshot != NULL) ? 1 : 0;
+    fwrite(&has_snapshot, sizeof(has_snapshot), 1, fp);
+    if (node->snapshot) {
+        fwrite(&node->snapshot->last_included_index,
+               sizeof(node->snapshot->last_included_index), 1, fp);
+        fwrite(&node->snapshot->last_included_term,
+               sizeof(node->snapshot->last_included_term), 1, fp);
+        fwrite(&node->snapshot->state_data_len,
+               sizeof(node->snapshot->state_data_len), 1, fp);
+        fwrite(node->snapshot->state_data, 1,
+               node->snapshot->state_data_len, fp);
+    }
+
+    /* 写入日志条目 */
+    for (int i = 0; i < node->log_count; i++) {
+        RaftEntryInternal* e = &node->log_entries[i];
+        fwrite(&e->index, sizeof(e->index), 1, fp);
+        fwrite(&e->term, sizeof(e->term), 1, fp);
+        fwrite(&e->command_len, sizeof(e->command_len), 1, fp);
+        fwrite(&e->committed, sizeof(e->committed), 1, fp);
+        fwrite(e->command, 1, e->command_len, fp);
+    }
+
+    fclose(fp);
+    log_info("[Raft] 日志已持久化: %s (条目数=%d)", path, node->log_count);
+    return 0;
+}
+
+int raft_load_log(RaftNode* node) {
+    if (!node) return -1;
+
+    const char* path = node->log_file_path;
+    if (path[0] == '\0') {
+        snprintf(node->log_file_path, sizeof(node->log_file_path),
+                 "raft_log_node_%d.dat", node->node_id);
+        path = node->log_file_path;
+    }
+
+    FILE* fp = fopen(path, "rb");
+    if (!fp) {
+        log_warn("[Raft] 日志文件不存在，使用初始状态: %s", path);
+        return 0;
+    }
+
+    /* 读取文件头 */
+    uint32_t magic = 0, version = 0;
+    int32_t term = 0, voted = -1, log_count = 0;
+
+    if (fread(&magic, sizeof(magic), 1, fp) != 1 || magic != RAFT_SNAPSHOT_MAGIC) {
+        log_error("[Raft] 日志文件魔数错误");
+        fclose(fp);
+        return -1;
+    }
+
+    fread(&version, sizeof(version), 1, fp);
+    fread(&term, sizeof(term), 1, fp);
+    fread(&voted, sizeof(voted), 1, fp);
+    fread(&log_count, sizeof(log_count), 1, fp);
+
+    node->current_term = term;
+    node->voted_for = voted;
+
+    /* 读取快照 */
+    int32_t has_snapshot = 0;
+    fread(&has_snapshot, sizeof(has_snapshot), 1, fp);
+    if (has_snapshot) {
+        if (node->snapshot) {
+            safe_free((void**)&node->snapshot->state_data);
+            safe_free((void**)&node->snapshot);
+        }
+        node->snapshot = (RaftSnapshot*)safe_calloc(1, sizeof(RaftSnapshot));
+        if (node->snapshot) {
+            fread(&node->snapshot->last_included_index,
+                  sizeof(node->snapshot->last_included_index), 1, fp);
+            fread(&node->snapshot->last_included_term,
+                  sizeof(node->snapshot->last_included_term), 1, fp);
+            fread(&node->snapshot->state_data_len,
+                  sizeof(node->snapshot->state_data_len), 1, fp);
+            node->snapshot->state_data = (char*)safe_malloc(
+                node->snapshot->state_data_len);
+            if (node->snapshot->state_data) {
+                fread(node->snapshot->state_data, 1,
+                      node->snapshot->state_data_len, fp);
+            }
+        }
+    }
+
+    /* 读取日志条目 */
+    node->log_count = 0;
+    if (log_count > node->log_capacity) {
+        safe_free((void**)&node->log_entries);
+        node->log_capacity = log_count < RAFT_DEFAULT_LOG_CAP ?
+                             RAFT_DEFAULT_LOG_CAP : log_count;
+        node->log_entries = (RaftEntryInternal*)safe_calloc(
+            node->log_capacity, sizeof(RaftEntryInternal));
+    }
+
+    for (int i = 0; i < log_count; i++) {
+        RaftEntryInternal* e = &node->log_entries[i];
+        fread(&e->index, sizeof(e->index), 1, fp);
+        fread(&e->term, sizeof(e->term), 1, fp);
+        fread(&e->command_len, sizeof(e->command_len), 1, fp);
+        fread(&e->committed, sizeof(e->committed), 1, fp);
+        fread(e->command, 1, e->command_len, fp);
+        e->command[e->command_len] = '\0';
+        node->log_count = i + 1;
+        if (e->committed && e->index > node->commit_index) {
+            node->commit_index = e->index;
+        }
+    }
+
+    fclose(fp);
+    log_info("[Raft] 日志已加载: %s (任期=%d, 条目数=%d)",
+             path, node->current_term, node->log_count);
+    return 0;
+}
+
+int raft_set_log_path(RaftNode* node, const char* file_path) {
+    if (!node || !file_path) return -1;
+    snprintf(node->log_file_path, sizeof(node->log_file_path), "%s", file_path);
+    return 0;
+}
+
+int raft_set_snapshot_threshold(RaftNode* node, int threshold) {
+    if (!node || threshold < 10) return -1;
+    node->snapshot_threshold = threshold;
+    return 0;
+}
+
+/* ==================== Raft成员变更协议 ==================== */
+
+int raft_add_server(RaftNode* node, int new_server_id) {
+    if (!node || node->role != RAFT_LEADER) return -1;
+    if (new_server_id < 0 || node->peer_count >= SW_MAX_ROBOTS) return -1;
+
+    /* 检查是否已存在 */
+    if (new_server_id == node->node_id) return -1;
+    for (int i = 0; i < node->peer_count; i++) {
+        if (node->peer_ids[i] == new_server_id) return -1;
+    }
+
+    /* 创建成员变更命令（联合共识标记） */
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "CONFIG:ADD_SERVER:%d:%d",
+             new_server_id, node->current_term);
+
+    int log_idx = raft_append_log(node, cmd, (int)strlen(cmd));
+    if (log_idx < 0) return -1;
+
+    /* 保存新配置信息 */
+    memcpy(node->new_config_peer_ids, node->peer_ids,
+           node->peer_count * sizeof(int));
+    node->new_config_peer_ids[node->peer_count] = new_server_id;
+    node->new_config_peer_count = node->peer_count + 1;
+    node->membership_changing = 1;
+
+    log_info("[Raft] 成员变更: 添加服务器 %d (日志索引=%d)", new_server_id, log_idx);
+    return 0;
+}
+
+int raft_remove_server(RaftNode* node, int server_id) {
+    if (!node || node->role != RAFT_LEADER) return -1;
+    if (server_id < 0) return -1;
+
+    /* 查找目标 */
+    int found = -1;
+    for (int i = 0; i < node->peer_count; i++) {
+        if (node->peer_ids[i] == server_id) {
+            found = i;
+            break;
+        }
+    }
+    if (found < 0) return -1;
+
+    /* 创建成员变更命令 */
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "CONFIG:REMOVE_SERVER:%d:%d",
+             server_id, node->current_term);
+
+    int log_idx = raft_append_log(node, cmd, (int)strlen(cmd));
+    if (log_idx < 0) return -1;
+
+    /* 保存新配置（移除目标） */
+    node->new_config_peer_count = 0;
+    for (int i = 0; i < node->peer_count; i++) {
+        if (node->peer_ids[i] != server_id) {
+            node->new_config_peer_ids[node->new_config_peer_count++] =
+                node->peer_ids[i];
+        }
+    }
+    node->membership_changing = 1;
+
+    log_info("[Raft] 成员变更: 移除服务器 %d (日志索引=%d)", server_id, log_idx);
+    return 0;
+}
+
+int raft_commit_membership_change(RaftNode* node) {
+    /* 当成员变更日志被提交后调用，正式应用新配置 */
+    if (!node || !node->membership_changing) return -1;
+
+    node->peer_count = node->new_config_peer_count;
+    memcpy(node->peer_ids, node->new_config_peer_ids,
+           node->new_config_peer_count * sizeof(int));
+    node->membership_changing = 0;
+    node->new_config_peer_count = 0;
+
+    log_info("[Raft] 成员变更已提交: 当前成员数=%d", node->peer_count);
+    return 0;
+}
+
+int raft_advance_commit_with_membership(RaftNode* node) {
+    if (!node || node->role != RAFT_LEADER) return -1;
+
+    /* 领导者推进提交索引 */
+    for (int i = node->commit_index + 1; i < node->log_count; i++) {
+        node->log_entries[i].committed = 1;
+        node->commit_index = i;
+
+        /* 检查是否成员变更命令 */
+        if (node->log_entries[i].command_len > 7) {
+            if (strncmp(node->log_entries[i].command, "CONFIG:", 7) == 0) {
+                raft_commit_membership_change(node);
+            }
+        }
+    }
+
+    /* 自动快照检查 */
+    raft_auto_snapshot(node);
+
+    return node->commit_index;
 }
 
 /* ==================== 拍卖算法任务分配 ==================== */

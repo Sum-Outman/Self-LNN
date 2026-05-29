@@ -2584,10 +2584,33 @@ static int vulkan_backend_memory_copy_from_device_async(void* dst, GpuMemory* sr
 #define SPV_OP_FCONVERT_GE         136 /* OpFConvert: 浮点宽度转换 */
 #define SPV_OP_IMUL                125
 #define SPV_OP_IADD                128
+#define SPV_OP_ISUB                130  /* 有符号整数减法 */
 #define SPV_OP_FNEG                127
+#define SPV_OP_CONVERT_FLOAT_TO_SINT 111 /* OpConvertFToS: 浮点→有符号整数 */
 #define SPV_OP_FCONVERT_SINT_FLOAT 113 /* OpConvertSToF: 有符号整数→浮点 */
 #define SPV_OP_COMPOSITE_CONSTRUCT 80
 #define SPV_OP_COMPOSITE_EXTRACT   81
+#define SPV_OP_BITCAST             124  /* 位转换（uint↔int, float↔int） */
+#define SPV_OP_EXT_INST            12   /* 扩展指令：调用GLSL.std.450等 */
+#define SPV_OP_FDIV                136  /* 浮点除法 */
+#define SPV_OP_UDIV                140  /* 无符号整数除法 */
+#define SPV_OP_UMOD                141  /* 无符号整数取模 */
+#define SPV_OP_SDIV                142  /* 有符号整数除法 */
+#define SPV_OP_SREM                143  /* 有符号整数取余 */
+#define SPV_OP_SELECT              169  /* 三元选择 */
+#define SPV_OP_ULTHAN              175  /* 无符号小于比较 */
+#define SPV_OP_SLESSTHAN           177  /* 有符号小于比较 */
+#define SPV_OP_SGE                 182  /* 有符号大于等于比较 */
+#define SPV_OP_LOGICAL_AND         200  /* 逻辑与 */
+#define SPV_OP_PHI                 245  /* Phi节点（SSA循环变量） */
+#define SPV_OP_LOOP_MERGE          246  /* 循环合并点标记 */
+#define SPV_OP_SELECTION_MERGE     247  /* 选择合并点标记 */
+#define SPV_OP_BRANCH              249  /* 无条件分支 */
+#define SPV_OP_BRANCH_CONDITIONAL  250  /* 条件分支 */
+
+/* GLSL.std.450扩展指令编号 */
+#define GLSL_EXT_TANH              21   /* tanh(x) */
+#define GLSL_EXT_EXP               27   /* exp(x) */
 
 /* SPIR-V生成器结构体 */
 typedef struct {
@@ -2903,11 +2926,19 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
      */
 
     /* 分析内核名称确定生成哪种SPIR-V */
-    int is_matmul = 0, is_conv2d = 0, is_elementwise = 0;
+    int is_matmul = 0, is_conv2d = 0, is_cfc = 0, is_elementwise = 0;
     if (kernel_name) {
-        if (strstr(kernel_name, "matmul") || strstr(kernel_name, "MATMUL")) is_matmul = 1;
-        else if (strstr(kernel_name, "conv2d") || strstr(kernel_name, "CONV2D")) is_conv2d = 1;
-        else is_elementwise = 1;
+        if (strstr(kernel_name, "matmul") || strstr(kernel_name, "MATMUL")) {
+            is_matmul = 1;
+        } else if (strstr(kernel_name, "conv2d") || strstr(kernel_name, "CONV2D")) {
+            is_conv2d = 1;
+        } else if (strstr(kernel_name, "cfc") || strstr(kernel_name, "CFC") ||
+                   strstr(kernel_name, "CfC") || strstr(kernel_name, "ode") ||
+                   strstr(kernel_name, "liquid") || strstr(kernel_name, "LIQUID")) {
+            is_cfc = 1;
+        } else {
+            is_elementwise = 1;
+        }
     }
 
     /* ============================================================
@@ -2933,7 +2964,7 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
      */
 
     /* 构建SPIR-V缓冲器 */
-    if (spirv_builder_init(&sb2, 2048) != 0) {
+    if (spirv_builder_init(&sb2, 8192) != 0) {
         return NULL;
     }
 
@@ -2983,6 +3014,25 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
     unsigned int t_pc = bid++;
     unsigned int v_pc = bid++;
     unsigned int t_ptrpc = bid++;
+
+    /* 新增：布尔类型和PushConstant成员指针类型（matmul/conv2d/cfc需要） */
+    unsigned int t_bool = bid++;            /* 布尔类型，用于循环条件和分支 */
+    unsigned int t_int_ptr_pc = bid++;      /* PushConstant存储类的int指针 */
+    unsigned int t_float_ptr_pc = bid++;    /* PushConstant存储类的float指针 */
+
+    /* 常量ID：整数0/1/2和浮点0.0/1.0（循环控制和数学运算需要） */
+    unsigned int c_zero_int = bid++;        /* int 0 */
+    unsigned int c_one_int = bid++;         /* int 1 */
+    unsigned int c_two_int = bid++;         /* int 2（用于访问推送常量成员2） */
+    unsigned int c_three_int = bid++;       /* int 3 */
+    unsigned int c_four_int = bid++;        /* int 4 */
+    unsigned int c_five_int = bid++;        /* int 5 */
+    unsigned int c_six_int = bid++;         /* int 6 */
+    unsigned int c_seven_int = bid++;       /* int 7 */
+    unsigned int c_eight_int = bid++;       /* int 8（推送常量浮点成员索引） */
+    unsigned int c_nine_int = bid++;        /* int 9（推送常量浮点成员索引） */
+    unsigned int c_zero_float = bid++;      /* float 0.0 */
+    unsigned int c_one_float = bid++;       /* float 1.0 */
 
     /* 保留一些临时ID */
     unsigned int tid_acc_reg = bid++;
@@ -3082,6 +3132,11 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
     SPIRV_EMIT_OP(&sb2, SPV_OP_TYPE_POINTER, 4, 0, t_ptr_in, SPV_STORAGE_CLASS_INPUT, t_v3uint);
     SPIRV_EMIT_OP(&sb2, SPV_OP_TYPE_FUNCTION, 3, 0, t_func, t_void, 0);
 
+    /* -- 新增类型：布尔类型和PushConstant成员指针（matmul/conv2d/cfc循环与分支需要） -- */
+    SPIRV_EMIT_OP(&sb2, SPV_OP_TYPE_BOOL, 2, 0, t_bool, 0, 0);
+    SPIRV_EMIT_OP(&sb2, SPV_OP_TYPE_POINTER, 4, 0, t_int_ptr_pc, SPV_STORAGE_CLASS_PUSH_CONSTANT, t_int);
+    SPIRV_EMIT_OP(&sb2, SPV_OP_TYPE_POINTER, 4, 0, t_float_ptr_pc, SPV_STORAGE_CLASS_PUSH_CONSTANT, t_float);
+
     /* 推送常量结构体: 8个int + 2个float */
     spirv_emit(&sb2, (12u << 16) | SPV_OP_TYPE_STRUCT);
     spirv_emit(&sb2, t_pc);
@@ -3089,6 +3144,20 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
     spirv_emit(&sb2, t_int); spirv_emit(&sb2, t_int); spirv_emit(&sb2, t_int); spirv_emit(&sb2, t_int);
     spirv_emit(&sb2, t_float); spirv_emit(&sb2, t_float);
     SPIRV_EMIT_OP(&sb2, SPV_OP_TYPE_POINTER, 4, 0, t_ptrpc, SPV_STORAGE_CLASS_PUSH_CONSTANT, t_pc);
+
+    /* -- OpConstant常量声明（供所有内核类型的循环/数学运算使用） -- */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_zero_int,   1, 0u);           /* int 0 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_one_int,    1, 1u);           /* int 1 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_two_int,    1, 2u);           /* int 2 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_three_int,  1, 3u);           /* int 3 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_four_int,   1, 4u);           /* int 4 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_five_int,   1, 5u);           /* int 5 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_six_int,    1, 6u);           /* int 6 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_seven_int,  1, 7u);           /* int 7 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_eight_int,  1, 8u);           /* int 8 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_int,   c_nine_int,   1, 9u);           /* int 9 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_float, c_zero_float, 1, 0x00000000u);  /* float 0.0 */
+    spirv_emit_literal(&sb2, SPV_OP_CONSTANT, t_float, c_one_float,  1, 0x3f800000u);  /* float 1.0 */
 
     /* -- 全局变量 -- */
     SPIRV_EMIT_OP5(&sb2, SPV_OP_VARIABLE, 4, t_ptrsb, v_in, SPV_STORAGE_CLASS_STORAGE_BUFFER, 0, 0);
@@ -3110,57 +3179,574 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
     SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_entry, 0, 0);
 
     /* 根据内核类型生成不同的指令流
-     * G-006: 根据内核类型选择不同的计算模式。
-     * - matmul: 2D线程网格，每个线程计算C[i,j] = sum(A[i,k] * B[k,j])
-     * - conv2d: 3D线程网格, 每个线程计算一个输出通道的输出像素
-     * - elementwise: 1D线性索引，output[i] = input[i] * weight[i]
-     * 完整SPIR-V由进程内生成，通过Magic Number验证。
+     * G-006-R: 重写为三种真正的SPIR-V着色器逻辑
+     * - matmul: 矩阵乘法 C[i,j]=sum_k(A[i,k]*B[k,j])，内层K循环 + Phi累加
+     * - conv2d: 2D卷积，展平kernel*in_channel循环 + stride/padding支持
+     * - cfc: CfC ODE步进，sigmoid门控(tanh激活) + 指数衰减状态更新
+     * - elementwise: 逐元素乘法（回退默认）
      */
-    {
-        /* 加载 gl_GlobalInvocationID */
+    if (is_matmul) {
+        /* ================================================================
+         * MATMUL 内核：真正的矩阵乘法
+         * 输出 C[i][j] = sum_{k=0}^{K-1} A[i][k] * B[k][j]
+         * 2D全局工作组：x=j(列), y=i(行)
+         * 推送常量: pc[0]=M, pc[1]=N, pc[2]=K
+         * ================================================================ */
+        unsigned int gid_mul = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_v3uint, gid_mul, v_giid, 0, 0);
+
+        unsigned int col_u = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_COMPOSITE_EXTRACT, 5, t_uint, col_u, gid_mul, 0, 0);
+        unsigned int row_u = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_COMPOSITE_EXTRACT, 5, t_uint, row_u, gid_mul, 1, 0);
+
+        /* 转为有符号整数 */
+        unsigned int col_s = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BITCAST, 4, t_int, col_s, col_u, 0, 0);
+        unsigned int row_s = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BITCAST, 4, t_int, row_s, row_u, 0, 0);
+
+        /* 加载推送常量 M, N, K */
+        unsigned int pc_m_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_m_ptr, v_pc, c_zero_int, 0);
+        unsigned int M_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, M_val, pc_m_ptr, 0, 0);
+
+        unsigned int pc_n_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_n_ptr, v_pc, c_one_int, 0);
+        unsigned int N_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, N_val, pc_n_ptr, 0, 0);
+
+        unsigned int pc_k_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_k_ptr, v_pc, c_two_int, 0);
+        unsigned int K_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, K_val, pc_k_ptr, 0, 0);
+
+        /* 边界检查: if(row < M && col < N) */
+        unsigned int row_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, row_ok, row_s, M_val, 0);
+        unsigned int col_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, col_ok, col_s, N_val, 0);
+        unsigned int in_bound = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOGICAL_AND, 5, t_bool, in_bound, row_ok, col_ok, 0);
+
+        unsigned int l_mm_merge = bid++;
+        spirv_emit_op(&sb2, SPV_OP_SELECTION_MERGE, 3, 0, 0, l_mm_merge, 0, 0, 0, 0, 0);
+        unsigned int l_mm_pre = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH_CONDITIONAL, 4, 0, 0, in_bound, l_mm_pre, l_mm_merge);
+
+        /* 循环前置块 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_mm_pre, 0, 0);
+        unsigned int l_mm_loop = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_mm_loop, 0, 0);
+
+        /* 循环头：Phi(accum, k) */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_mm_loop, 0, 0);
+        unsigned int accum_phi = bid++;
+        unsigned int k_phi = bid++;
+        /* accum = phi(0.0 from l_mm_pre, new_accum from l_mm_cont) */
+        spirv_emit_op(&sb2, SPV_OP_PHI, 7, t_float, accum_phi,
+                      c_zero_float, l_mm_pre, 0, 0, 0, 0);
+        spirv_emit_op(&sb2, SPV_OP_PHI, 7, t_int, k_phi,
+                      c_zero_int, l_mm_pre, 0, 0, 0, 0);
+
+        unsigned int k_lt = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, k_lt, k_phi, K_val, 0);
+
+        unsigned int l_mm_done = bid++;
+        unsigned int l_mm_body = bid++;
+        unsigned int l_mm_cont = bid++;
+        spirv_emit_op(&sb2, SPV_OP_LOOP_MERGE, 4, 0, 0, l_mm_done, l_mm_cont, 0, 0, 0, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH_CONDITIONAL, 4, 0, 0, k_lt, l_mm_body, l_mm_done);
+
+        /* 循环体 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_mm_body, 0, 0);
+        /* a_idx = row * K + k */
+        unsigned int rowK = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, rowK, row_s, K_val, 0);
+        unsigned int a_idx = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, a_idx, rowK, k_phi, 0);
+        unsigned int a_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, a_ptr, v_in, a_idx, 0);
+        unsigned int a_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, a_val, a_ptr, 0, 0);
+
+        /* b_idx = k * N + col */
+        unsigned int kN = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, kN, k_phi, N_val, 0);
+        unsigned int b_idx = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, b_idx, kN, col_s, 0);
+        unsigned int b_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, b_ptr, v_wt, b_idx, 0);
+        unsigned int b_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, b_val, b_ptr, 0, 0);
+
+        /* prod = a_val * b_val; new_accum = accum + prod */
+        unsigned int prod_m = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FMUL, 5, t_float, prod_m, a_val, b_val, 0);
+        unsigned int new_accum = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FADD, 5, t_float, new_accum, accum_phi, prod_m, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_mm_cont, 0, 0);
+
+        /* 循环继续块 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_mm_cont, 0, 0);
+        unsigned int k_next = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, k_next, k_phi, c_one_int, 0);
+        /* 回填Phi的操作数：accum(0.0,l_mm_pre) → accum(new_accum,l_mm_cont), k(0,l_mm_pre)→k(k_next,l_mm_cont) */
+        /* SPIR-V规范要求Phi操作数完整，此处用后修补丁方式修正 */
+        {
+            unsigned int phi_idx = 0;
+            for (unsigned int i = 5; i < sb2.count; i++) {
+                unsigned int wc_op = sb2.code[i];
+                unsigned int op = wc_op & 0xFFFF;
+                if (op == SPV_OP_PHI) {
+                    unsigned int rid = sb2.code[i + 2];
+                    if (phi_idx == 0 && rid == accum_phi) {
+                        sb2.code[i + 5] = new_accum;
+                        sb2.code[i + 6] = l_mm_cont;
+                        phi_idx++;
+                    } else if (phi_idx == 1 && rid == k_phi) {
+                        sb2.code[i + 5] = k_next;
+                        sb2.code[i + 6] = l_mm_cont;
+                        break;
+                    }
+                }
+            }
+        }
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_mm_loop, 0, 0);
+
+        /* 循环结束：存储结果 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_mm_done, 0, 0);
+        unsigned int rowN = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, rowN, row_s, N_val, 0);
+        unsigned int out_idx_m = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, out_idx_m, rowN, col_s, 0);
+        unsigned int out_ptr_m = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, out_ptr_m, v_out, out_idx_m, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_STORE, 3, 0, out_ptr_m, accum_phi, 0, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_mm_merge, 0, 0);
+
+        /* 合并块 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_mm_merge, 0, 0);
+        SPIRV_EMIT_OP(&sb2, SPV_OP_RETURN, 1, 0, 0, 0, 0);
+        SPIRV_EMIT_OP(&sb2, 56, 1, 0, 0, 0, 0);
+
+    } else if (is_conv2d) {
+        /* ================================================================
+         * CONV2D 内核：真正的2D卷积
+         * 输出 out[oc][oy][ox] = sum_{ic,ky,kx} in[ic][iy][ix] * w[oc][ic][ky][kx]
+         * 3D全局工作组：x=ox(列), y=oy(行), z=oc(输出通道)
+         * 推送常量: pc[0]=in_h, pc[1]=in_w, pc[2]=out_h, pc[3]=out_w,
+         *           pc[4]=in_c, pc[5]=out_c, pc[6]=kh, pc[7]=kw,
+         *           pc[8]=stride(float), pc[9]=pad(float)
+         * ================================================================ */
+        unsigned int gid_cv = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_v3uint, gid_cv, v_giid, 0, 0);
+
+        unsigned int ox_u = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_COMPOSITE_EXTRACT, 5, t_uint, ox_u, gid_cv, 0, 0);
+        unsigned int oy_u = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_COMPOSITE_EXTRACT, 5, t_uint, oy_u, gid_cv, 1, 0);
+        unsigned int oc_u = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_COMPOSITE_EXTRACT, 5, t_uint, oc_u, gid_cv, 2, 0);
+
+        unsigned int ox_s = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BITCAST, 4, t_int, ox_s, ox_u, 0, 0);
+        unsigned int oy_s = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BITCAST, 4, t_int, oy_s, oy_u, 0, 0);
+        unsigned int oc_s = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BITCAST, 4, t_int, oc_s, oc_u, 0, 0);
+
+        /* 加载推送常量 */
+        unsigned int pc_inh = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_inh, v_pc, c_zero_int, 0);
+        unsigned int in_h = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, in_h, pc_inh, 0, 0);
+
+        unsigned int pc_inw = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_inw, v_pc, c_one_int, 0);
+        unsigned int in_w = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, in_w, pc_inw, 0, 0);
+
+        unsigned int pc_outh = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_outh, v_pc, c_two_int, 0);
+        unsigned int out_h = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, out_h, pc_outh, 0, 0);
+
+        unsigned int pc_outw = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_outw, v_pc, c_three_int, 0);
+        unsigned int out_w = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, out_w, pc_outw, 0, 0);
+
+        unsigned int pc_inc = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_inc, v_pc, c_four_int, 0);
+        unsigned int in_c = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, in_c, pc_inc, 0, 0);
+
+        unsigned int pc_outc = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_outc, v_pc, c_five_int, 0);
+        unsigned int out_c = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, out_c, pc_outc, 0, 0);
+
+        unsigned int pc_kh = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_kh, v_pc, c_six_int, 0);
+        unsigned int kh = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, kh, pc_kh, 0, 0);
+
+        unsigned int pc_kw = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_int_ptr_pc, pc_kw, v_pc, c_seven_int, 0);
+        unsigned int kw = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_int, kw, pc_kw, 0, 0);
+
+        /* 加载浮点推送常量：stride (pc[8]), pad (pc[9]) */
+        unsigned int pc_stride_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_float_ptr_pc, pc_stride_ptr, v_pc, c_eight_int, 0);
+        unsigned int stride_f = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, stride_f, pc_stride_ptr, 0, 0);
+
+        unsigned int pc_pad_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_float_ptr_pc, pc_pad_ptr, v_pc, c_nine_int, 0);
+        unsigned int pad_f = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, pad_f, pc_pad_ptr, 0, 0);
+
+        /* stride和pad转为有符号整数（真正的类型转换） */
+        unsigned int stride_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_CONVERT_FLOAT_TO_SINT, 4, t_int, stride_val, stride_f, 0, 0);
+        unsigned int pad_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_CONVERT_FLOAT_TO_SINT, 4, t_int, pad_val, pad_f, 0, 0);
+
+        /* 边界检查: oc < out_c && oy < out_h && ox < out_w */
+        unsigned int oc_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, oc_ok, oc_s, out_c, 0);
+        unsigned int oy_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, oy_ok, oy_s, out_h, 0);
+        unsigned int ox_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, ox_ok, ox_s, out_w, 0);
+        unsigned int oc_oy_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOGICAL_AND, 5, t_bool, oc_oy_ok, oc_ok, oy_ok, 0);
+        unsigned int cv_in_bound = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOGICAL_AND, 5, t_bool, cv_in_bound, oc_oy_ok, ox_ok, 0);
+
+        unsigned int l_cv_merge = bid++;
+        spirv_emit_op(&sb2, SPV_OP_SELECTION_MERGE, 3, 0, 0, l_cv_merge, 0, 0, 0, 0, 0);
+        unsigned int l_cv_pre = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH_CONDITIONAL, 4, 0, 0, cv_in_bound, l_cv_pre, l_cv_merge);
+
+        /* 循环前置 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_cv_pre, 0, 0);
+        /* 计算总迭代次数: total = kh * kw * in_c */
+        unsigned int kw_inc = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, kw_inc, kw, in_c, 0);
+        unsigned int total_k = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, total_k, kh, kw_inc, 0);
+
+        unsigned int l_cv_loop = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_cv_loop, 0, 0);
+
+        /* 循环头 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_cv_loop, 0, 0);
+        unsigned int cv_accum = bid++;
+        unsigned int cv_idx = bid++;
+        spirv_emit_op(&sb2, SPV_OP_PHI, 7, t_float, cv_accum,
+                      c_zero_float, l_cv_pre, 0, 0, 0, 0);
+        spirv_emit_op(&sb2, SPV_OP_PHI, 7, t_int, cv_idx,
+                      c_zero_int, l_cv_pre, 0, 0, 0, 0);
+
+        unsigned int cv_lt = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, cv_lt, cv_idx, total_k, 0);
+
+        unsigned int l_cv_done = bid++;
+        unsigned int l_cv_body = bid++;
+        unsigned int l_cv_cont = bid++;
+        spirv_emit_op(&sb2, SPV_OP_LOOP_MERGE, 4, 0, 0, l_cv_done, l_cv_cont, 0, 0, 0, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH_CONDITIONAL, 4, 0, 0, cv_lt, l_cv_body, l_cv_done);
+
+        /* 循环体: 分解 idx → ky, kx, ic */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_cv_body, 0, 0);
+        /* ky = idx / (kw * in_c); rem = idx % (kw * in_c) */
+        unsigned int ky_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SDIV, 5, t_int, ky_val, cv_idx, kw_inc, 0);
+        unsigned int rem_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SREM, 5, t_int, rem_val, cv_idx, kw_inc, 0);
+        /* kx = rem / in_c; ic = rem % in_c */
+        unsigned int kx_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SDIV, 5, t_int, kx_val, rem_val, in_c, 0);
+        unsigned int ic_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SREM, 5, t_int, ic_val, rem_val, in_c, 0);
+
+        /* 计算输入坐标: iy = oy*stride - pad + ky; ix = ox*stride - pad + kx */
+        unsigned int oy_sd = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, oy_sd, oy_s, stride_val, 0);
+        unsigned int iy_tmp = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ISUB, 5, t_int, iy_tmp, oy_sd, pad_val, 0);
+        unsigned int iy_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, iy_val, iy_tmp, ky_val, 0);
+
+        unsigned int ox_sd = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, ox_sd, ox_s, stride_val, 0);
+        unsigned int ix_tmp = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ISUB, 5, t_int, ix_tmp, ox_sd, pad_val, 0);
+        unsigned int ix_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, ix_val, ix_tmp, kx_val, 0);
+
+        /* 边界检查输入坐标 */
+        unsigned int iy_ge0 = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SGE, 5, t_bool, iy_ge0, iy_val, c_zero_int, 0);
+        unsigned int ix_ge0 = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SGE, 5, t_bool, ix_ge0, ix_val, c_zero_int, 0);
+        unsigned int iy_lt_h = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, iy_lt_h, iy_val, in_h, 0);
+        unsigned int ix_lt_w = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_SLESSTHAN, 5, t_bool, ix_lt_w, ix_val, in_w, 0);
+        unsigned int iy_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOGICAL_AND, 5, t_bool, iy_ok, iy_ge0, iy_lt_h, 0);
+        unsigned int ix_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOGICAL_AND, 5, t_bool, ix_ok, ix_ge0, ix_lt_w, 0);
+        unsigned int in_ok = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOGICAL_AND, 5, t_bool, in_ok, iy_ok, ix_ok, 0);
+
+        /* if(in_ok) 加载输入/权重并累加 */
+        unsigned int l_cv_if_in = bid++;
+        unsigned int l_cv_if_merge = bid++;
+        spirv_emit_op(&sb2, SPV_OP_SELECTION_MERGE, 3, 0, 0, l_cv_if_merge, 0, 0, 0, 0, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH_CONDITIONAL, 4, 0, 0, in_ok, l_cv_if_in, l_cv_if_merge);
+
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_cv_if_in, 0, 0);
+        /* in_idx = iy*in_w*in_c + ix*in_c + ic */
+        unsigned int iy_iw = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, iy_iw, iy_val, in_w, 0);
+        unsigned int iy_iw_ic = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, iy_iw_ic, iy_iw, in_c, 0);
+        unsigned int ix_ic = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, ix_ic, ix_val, in_c, 0);
+        unsigned int in_idx_v = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, in_idx_v, iy_iw_ic, ix_ic, 0);
+        unsigned int in_idx_f = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, in_idx_f, in_idx_v, ic_val, 0);
+
+        unsigned int cv_in_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, cv_in_ptr, v_in, in_idx_f, 0);
+        unsigned int cv_in_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, cv_in_val, cv_in_ptr, 0, 0);
+
+        /* w_idx = oc*kh*kw*in_c + ky*kw*in_c + kx*in_c + ic */
+        unsigned int oc_total = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, oc_total, oc_s, total_k, 0);
+        unsigned int ky_kwic = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, ky_kwic, ky_val, kw_inc, 0);
+        unsigned int kx_ic_v = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, kx_ic_v, kx_val, in_c, 0);
+        unsigned int w_idx_t = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, w_idx_t, oc_total, ky_kwic, 0);
+        unsigned int w_idx_v = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, w_idx_v, w_idx_t, kx_ic_v, 0);
+        unsigned int w_idx_f = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, w_idx_f, w_idx_v, ic_val, 0);
+
+        unsigned int cv_wt_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, cv_wt_ptr, v_wt, w_idx_f, 0);
+        unsigned int cv_wt_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, cv_wt_val, cv_wt_ptr, 0, 0);
+
+        /* new_accum = accum + in_val * wt_val */
+        unsigned int cv_prod = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FMUL, 5, t_float, cv_prod, cv_in_val, cv_wt_val, 0);
+        unsigned int cv_new_acc = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FADD, 5, t_float, cv_new_acc, cv_accum, cv_prod, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_cv_if_merge, 0, 0);
+
+        /* if合并（输入边界内/外的交汇点） */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_cv_if_merge, 0, 0);
+        /* Phi选择: 若在边界内用new_accum，否则保持原accum */
+        unsigned int cv_accum_sel = bid++;
+        spirv_emit_op(&sb2, SPV_OP_PHI, 7, t_float, cv_accum_sel,
+                      cv_new_acc, l_cv_if_in, cv_accum, l_cv_body, 0, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_cv_cont, 0, 0);
+
+        /* 循环继续 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_cv_cont, 0, 0);
+        unsigned int cv_idx_next = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, cv_idx_next, cv_idx, c_one_int, 0);
+        /* 回填Phi: accum和idx */
+        {
+            unsigned int phi_cv_count = 0;
+            for (unsigned int i = 5; i < sb2.count; i++) {
+                unsigned int wc_op = sb2.code[i];
+                unsigned int op = wc_op & 0xFFFF;
+                if (op == SPV_OP_PHI) {
+                    unsigned int rid = sb2.code[i + 2];
+                    if (phi_cv_count == 0 && rid == cv_accum) {
+                        sb2.code[i + 5] = cv_accum_sel;
+                        sb2.code[i + 6] = l_cv_cont;
+                        phi_cv_count++;
+                    } else if (phi_cv_count == 1 && rid == cv_idx) {
+                        sb2.code[i + 5] = cv_idx_next;
+                        sb2.code[i + 6] = l_cv_cont;
+                        phi_cv_count++;
+                        if (phi_cv_count >= 2) break;
+                    }
+                }
+            }
+        }
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_cv_loop, 0, 0);
+
+        /* 循环结束：存储结果 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_cv_done, 0, 0);
+        /* out_idx = oc*out_h*out_w + oy*out_w + ox */
+        unsigned int oc_oh = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, oc_oh, oc_s, out_h, 0);
+        unsigned int oc_oh_ow = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, oc_oh_ow, oc_oh, out_w, 0);
+        unsigned int oy_ow = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IMUL, 5, t_int, oy_ow, oy_s, out_w, 0);
+        unsigned int cv_out_t = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, cv_out_t, oc_oh_ow, oy_ow, 0);
+        unsigned int cv_out_idx = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_IADD, 5, t_int, cv_out_idx, cv_out_t, ox_s, 0);
+        unsigned int cv_out_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, cv_out_ptr, v_out, cv_out_idx, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_STORE, 3, 0, cv_out_ptr, cv_accum, 0, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BRANCH, 2, 0, 0, l_cv_merge, 0, 0);
+
+        /* 合并块 */
+        SPIRV_EMIT_OP(&sb2, SPV_OP_LABEL, 2, 0, l_cv_merge, 0, 0);
+        SPIRV_EMIT_OP(&sb2, SPV_OP_RETURN, 1, 0, 0, 0, 0);
+        SPIRV_EMIT_OP(&sb2, 56, 1, 0, 0, 0, 0);
+
+    } else if (is_cfc) {
+        /* ================================================================
+         * CFC 内核：CfC ODE步进着色器
+         * x(t+dt) = decay * x(t) + omd * sigmoid(w) * tanh(w)
+         * 1D全局工作组：x=线性索引
+         * v_in = 当前状态 x(t)
+         * v_wt = 网络权重（合并输入*权重的结果）
+         * pc[8] = decay_factor (float) = exp(-dt/tau)
+         * pc[9] = one_minus_decay (float) = 1 - exp(-dt/tau)
+         * 
+         * 每元素操作：
+         *   x = input[i] (当前状态)
+         *   w = weight[i] (合并网络输入)
+         *   neg_w = -w
+         *   exp_neg_w = exp(neg_w)            [GLSL.Ext #27]
+         *   denom = 1.0 + exp_neg_w
+         *   gate = 1.0 / denom                [sigmoid(w)]
+         *   cand = tanh(w)                    [GLSL.Ext #21]
+         *   gate_cand = gate * cand
+         *   scaled_gc = omd * gate_cand
+         *   decayed_x = decay * x
+         *   new_state = decayed_x + scaled_gc
+         *   output[i] = new_state
+         * ================================================================ */
+        /* 加载全局ID */
+        unsigned int gid_cfc = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_v3uint, gid_cfc, v_giid, 0, 0);
+        unsigned int idx_cfc = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_COMPOSITE_EXTRACT, 5, t_uint, idx_cfc, gid_cfc, 0, 0);
+        unsigned int sidx_cfc = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BITCAST, 4, t_int, sidx_cfc, idx_cfc, 0, 0);
+
+        /* 加载状态 x(t) = input[i] */
+        unsigned int cfc_state_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, cfc_state_ptr, v_in, sidx_cfc, 0);
+        unsigned int cfc_state = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, cfc_state, cfc_state_ptr, 0, 0);
+
+        /* 加载权重 w = weight[i] */
+        unsigned int cfc_wt_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, cfc_wt_ptr, v_wt, sidx_cfc, 0);
+        unsigned int cfc_wt = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, cfc_wt, cfc_wt_ptr, 0, 0);
+
+        /* 加载推送常量: decay_factor (pc[8]), one_minus_decay (pc[9]) */
+        unsigned int cfc_pc_decay = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_float_ptr_pc, cfc_pc_decay, v_pc, c_eight_int, 0);
+        unsigned int decay_f = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, decay_f, cfc_pc_decay, 0, 0);
+
+        unsigned int cfc_pc_omd = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_float_ptr_pc, cfc_pc_omd, v_pc, c_nine_int, 0);
+        unsigned int omd_f = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, omd_f, cfc_pc_omd, 0, 0);
+
+        /* --- sigmoid(w) = 1.0 / (1.0 + exp(-w)) --- */
+        /* neg_w = -w */
+        unsigned int neg_w = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FNEG, 4, t_float, neg_w, cfc_wt, 0, 0);
+        /* exp_neg_w = exp(neg_w) -- GLSL.std.450 ExtInst #27 */
+        unsigned int exp_neg_w = bid++;
+        spirv_emit_op(&sb2, SPV_OP_EXT_INST, 6, t_float, exp_neg_w,
+                      ext_glsl, GLSL_EXT_EXP, neg_w, 0, 0, 0);
+        /* denom = 1.0 + exp_neg_w */
+        unsigned int denom = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FADD, 5, t_float, denom, c_one_float, exp_neg_w, 0);
+        /* gate = 1.0 / denom */
+        unsigned int gate_val = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FDIV, 5, t_float, gate_val, c_one_float, denom, 0);
+
+        /* --- tanh(w) -- GLSL.std.450 ExtInst #21 --- */
+        unsigned int cand_val = bid++;
+        spirv_emit_op(&sb2, SPV_OP_EXT_INST, 6, t_float, cand_val,
+                      ext_glsl, GLSL_EXT_TANH, cfc_wt, 0, 0, 0);
+
+        /* --- gate * cand --- */
+        unsigned int gate_cand = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FMUL, 5, t_float, gate_cand, gate_val, cand_val, 0);
+
+        /* --- omd * gate_cand --- */
+        unsigned int scaled_gc = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FMUL, 5, t_float, scaled_gc, omd_f, gate_cand, 0);
+
+        /* --- decay * x --- */
+        unsigned int decayed_x = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FMUL, 5, t_float, decayed_x, decay_f, cfc_state, 0);
+
+        /* --- new_state = decayed_x + scaled_gc --- */
+        unsigned int new_state = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_FADD, 5, t_float, new_state, decayed_x, scaled_gc, 0);
+
+        /* 存储输出 */
+        unsigned int cfc_out_ptr = bid++;
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, cfc_out_ptr, v_out, sidx_cfc, 0);
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_STORE, 3, 0, cfc_out_ptr, new_state, 0, 0);
+
+        SPIRV_EMIT_OP(&sb2, SPV_OP_RETURN, 1, 0, 0, 0, 0);
+        SPIRV_EMIT_OP(&sb2, 56, 1, 0, 0, 0, 0);
+
+    } else {
+        /* ================================================================
+         * ELEMENTWISE 内核：逐元素乘法（回退默认）
+         * output[i] = input[i] * weight[i]
+         * ================================================================ */
         unsigned int gid_id = bid++;
         SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_v3uint, gid_id, v_giid, 0, 0);
-        /* 提取 x 分量得到全局线性索引 */
         unsigned int idx_id = bid++;
         SPIRV_EMIT_OP5(&sb2, SPV_OP_COMPOSITE_EXTRACT, 5, t_uint, idx_id, gid_id, 0, 0);
-
-        /* 将索引转为有符号整数 */
         unsigned int sidx_id = bid++;
-        SPIRV_EMIT_OP5(&sb2, 123, 4, t_int, sidx_id, idx_id, 0, 0); /* Bitcast */
+        SPIRV_EMIT_OP5(&sb2, SPV_OP_BITCAST, 4, t_int, sidx_id, idx_id, 0, 0);
 
-        /* 访问输入数组：ptr = OpAccessChain %t_ptrfn %v_in %sidx */
         unsigned int in_ptr_id = bid++;
         SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, in_ptr_id, v_in, sidx_id, 0);
-        /* 加载输入: val = OpLoad %float %in_ptr */
         unsigned int val_id = bid++;
         SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, val_id, in_ptr_id, 0, 0);
 
-        /* 访问权重数组并加载 */
         unsigned int wt_ptr_id = bid++;
         SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, wt_ptr_id, v_wt, sidx_id, 0);
         unsigned int wt_val_id = bid++;
         SPIRV_EMIT_OP5(&sb2, SPV_OP_LOAD, 4, t_float, wt_val_id, wt_ptr_id, 0, 0);
 
-        /* mul: %prod = OpFMul %float %val %wt_val */
         unsigned int prod_id = bid++;
         SPIRV_EMIT_OP5(&sb2, SPV_OP_FMUL, 5, t_float, prod_id, val_id, wt_val_id, 0);
 
-        /* 输出指针 */
         unsigned int out_ptr_id = bid++;
         SPIRV_EMIT_OP5(&sb2, SPV_OP_ACCESS_CHAIN, 5, t_ptrfn, out_ptr_id, v_out, sidx_id, 0);
-        /* 存储: OpStore %out_ptr %prod */
         SPIRV_EMIT_OP5(&sb2, SPV_OP_STORE, 3, 0, out_ptr_id, prod_id, 0, 0);
+
+        SPIRV_EMIT_OP(&sb2, SPV_OP_RETURN, 1, 0, 0, 0, 0);
+        SPIRV_EMIT_OP(&sb2, 56, 1, 0, 0, 0, 0);
     }
 
-    sb2.bound = bid + 10;
-
-    /* 返回 */
-    SPIRV_EMIT_OP(&sb2, SPV_OP_RETURN, 1, 0, 0, 0, 0);
-
-    /* 结束函数 */
-    SPIRV_EMIT_OP(&sb2, 56, 1, 0, 0, 0, 0); /* OpFunctionEnd */
-
-    /* 更新Bound */
+    /* 更新Bound（所有内核类型都共享此操作） */
+    sb2.bound = bid + 20;
     sb2.code[3] = sb2.bound;
 
     /* 验证SPIR-V魔数 */
@@ -3175,7 +3761,7 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
     snprintf(g_vulkan_error_string, sizeof(g_vulkan_error_string),
             "进程内SPIR-V生成成功: %zu 字节, Bound=%u, 内核类型=%s",
             *out_size, sb2.bound,
-            is_matmul ? "matmul" : (is_conv2d ? "conv2d" : "elementwise"));
+            is_matmul ? "matmul" : (is_conv2d ? "conv2d" : (is_cfc ? "cfc" : "elementwise")));
 
     return sb2.code;
 }

@@ -115,6 +115,7 @@ static const struct {
     {SELFLNN_ERROR_LEARNING_RATE, "学习率错误"},
     {SELFLNN_ERROR_GRADIENT_EXPLOSION, "梯度爆炸"},
     {SELFLNN_ERROR_GRADIENT_VANISHING, "梯度消失"},
+    {SELFLNN_ERROR_PROJECTION_LOCKED, "投影矩阵已锁定（不参与训练,前向监控损失仍返回）"},
     
     // 并发处理错误
     {SELFLNN_ERROR_THREAD_CREATION, "线程创建错误"},

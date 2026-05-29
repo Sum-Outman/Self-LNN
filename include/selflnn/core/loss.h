@@ -55,6 +55,7 @@ typedef struct {
     float focal_alpha;       /**< Focal Loss类别平衡参数（默认0.25） */
     float dice_smooth;       /**< Dice Loss平滑因子（默认1e-6） */
     float triplet_margin;    /**< Triplet Loss边界值（默认1.0） */
+    float huber_delta;       /**< Huber Loss delta阈值（默认1.0） */
     float quantile_tau;      /**< Quantile Loss分位数（默认0.5） */
 } LossConfig;
 
@@ -204,5 +205,11 @@ void loss_set_default_triplet_margin(float margin);
  * @param tau 新的默认分位数值
  */
 void loss_set_default_quantile_tau(float tau);
+
+/**
+ * @brief 设置Huber Loss默认delta阈值
+ * @param delta 新的默认delta值
+ */
+void loss_set_default_huber_delta(float delta);
 
 #endif // SELFLNN_LOSS_H

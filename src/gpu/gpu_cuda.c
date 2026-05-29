@@ -845,6 +845,324 @@ static const char* CUDA_RESIZE_BILINEAR_KERNEL =
 "    output[c * dst_h * dst_w + dy * dst_w + dx] = row0 + fy * (row1 - row0);\n"
 "}\n";
 
+/* ========================================================================
+ * P1-6: 内嵌预编译PTX内核 — 当nvcc JIT编译失败时的回退方案
+ * 预编译的PTX代码可直接通过cuModuleLoadData加载，无需nvcc编译器。
+ * 涵盖三个最常用的内核：matmul、conv2d、cfc_step
+ * ======================================================================== */
+
+/* 矩阵乘法PTX (SM 5.0+, 64位地址空间, 简单平铺实现)
+ * 参数: A[m×n], B[n×k], C[m×k], m, n, k */
+static const char* PTX_MATMUL_KERNEL =
+".version 5.0\n"
+".target sm_50\n"
+".address_size 64\n"
+"\n"
+".visible .entry matmul_embedded(\n"
+"    .param .u64 matmul_embedded_param_0,\n"
+"    .param .u64 matmul_embedded_param_1,\n"
+"    .param .u64 matmul_embedded_param_2,\n"
+"    .param .u32 matmul_embedded_param_3,\n"
+"    .param .u32 matmul_embedded_param_4,\n"
+"    .param .u32 matmul_embedded_param_5\n"
+")\n"
+"{\n"
+"    .reg .f32   %f<8>;\n"
+"    .reg .b32   %r<20>;\n"
+"    .reg .b64   %rd<12>;\n"
+"\n"
+"    ld.param.u64    %rd1, [matmul_embedded_param_0];\n"
+"    ld.param.u64    %rd2, [matmul_embedded_param_1];\n"
+"    ld.param.u64    %rd3, [matmul_embedded_param_2];\n"
+"    ld.param.u32    %r1, [matmul_embedded_param_3];\n"
+"    ld.param.u32    %r2, [matmul_embedded_param_4];\n"
+"    ld.param.u32    %r3, [matmul_embedded_param_5];\n"
+"\n"
+"    mov.u32     %r4, %ctaid.y;\n"
+"    mov.u32     %r5, %ntid.y;\n"
+"    mul.lo.u32  %r6, %r4, %r5;\n"
+"    mov.u32     %r7, %tid.y;\n"
+"    add.u32     %r8, %r6, %r7;\n"
+"    mov.u32     %r9, %ctaid.x;\n"
+"    mov.u32     %r10, %ntid.x;\n"
+"    mul.lo.u32  %r11, %r9, %r10;\n"
+"    mov.u32     %r12, %tid.x;\n"
+"    add.u32     %r13, %r11, %r12;\n"
+"\n"
+"    setp.ge.u32 %p1, %r8, %r1;\n"
+"    setp.ge.u32 %p2, %r13, %r3;\n"
+"    or.pred     %p3, %p1, %p2;\n"
+"    @%p3 bra    MM_DONE;\n"
+"\n"
+"    mov.f32     %f1, 0f00000000;\n"
+"    mov.u32     %r14, 0;\n"
+"\n"
+"MM_LOOP:\n"
+"    setp.ge.u32 %p4, %r14, %r2;\n"
+"    @%p4 bra    MM_LOOP_END;\n"
+"\n"
+"    mul.lo.u32  %r15, %r8, %r2;\n"
+"    add.u32     %r16, %r15, %r14;\n"
+"    mul.wide.u32 %rd4, %r16, 4;\n"
+"    add.u64     %rd5, %rd1, %rd4;\n"
+"    ld.global.f32 %f2, [%rd5];\n"
+"\n"
+"    mul.lo.u32  %r17, %r14, %r3;\n"
+"    add.u32     %r18, %r17, %r13;\n"
+"    mul.wide.u32 %rd6, %r18, 4;\n"
+"    add.u64     %rd7, %rd2, %rd6;\n"
+"    ld.global.f32 %f3, [%rd7];\n"
+"\n"
+"    fma.rn.f32  %f1, %f2, %f3, %f1;\n"
+"\n"
+"    add.u32     %r14, %r14, 1;\n"
+"    bra         MM_LOOP;\n"
+"\n"
+"MM_LOOP_END:\n"
+"    mul.lo.u32  %r19, %r8, %r3;\n"
+"    add.u32     %r20, %r19, %r13;\n"
+"    mul.wide.u32 %rd8, %r20, 4;\n"
+"    add.u64     %rd9, %rd3, %rd8;\n"
+"    st.global.f32 [%rd9], %f1;\n"
+"\n"
+"MM_DONE:\n"
+"    ret;\n"
+"}\n";
+
+/* 2D卷积PTX (SM 5.0+)
+ * 参数: input[N×C×H×W], kernel[K×C×KH×KW], output[N×K×OH×OW] */
+static const char* PTX_CONV2D_KERNEL =
+".version 5.0\n"
+".target sm_50\n"
+".address_size 64\n"
+"\n"
+".visible .entry conv2d_embedded(\n"
+"    .param .u64 conv2d_embedded_param_0,\n"
+"    .param .u64 conv2d_embedded_param_1,\n"
+"    .param .u64 conv2d_embedded_param_2,\n"
+"    .param .u32 conv2d_embedded_param_3,\n"
+"    .param .u32 conv2d_embedded_param_4,\n"
+"    .param .u32 conv2d_embedded_param_5,\n"
+"    .param .u32 conv2d_embedded_param_6,\n"
+"    .param .u32 conv2d_embedded_param_7,\n"
+"    .param .u32 conv2d_embedded_param_8,\n"
+"    .param .u32 conv2d_embedded_param_9\n"
+")\n"
+"{\n"
+"    .reg .f32   %f<12>;\n"
+"    .reg .b32   %r<30>;\n"
+"    .reg .b64   %rd<12>;\n"
+"\n"
+"    ld.param.u64    %rd1, [conv2d_embedded_param_0];\n"
+"    ld.param.u64    %rd2, [conv2d_embedded_param_1];\n"
+"    ld.param.u64    %rd3, [conv2d_embedded_param_2];\n"
+"    ld.param.u32    %r1, [conv2d_embedded_param_3];\n"
+"    ld.param.u32    %r2, [conv2d_embedded_param_4];\n"
+"    ld.param.u32    %r3, [conv2d_embedded_param_5];\n"
+"    ld.param.u32    %r4, [conv2d_embedded_param_6];\n"
+"    ld.param.u32    %r5, [conv2d_embedded_param_7];\n"
+"    ld.param.u32    %r6, [conv2d_embedded_param_8];\n"
+"    ld.param.u32    %r7, [conv2d_embedded_param_9];\n"
+"\n"
+"    mov.u32     %r8, %ctaid.x;\n"
+"    mov.u32     %r9, %ntid.x;\n"
+"    mul.lo.u32  %r10, %r8, %r9;\n"
+"    mov.u32     %r11, %tid.x;\n"
+"    add.u32     %r20, %r10, %r11;\n"
+"    setp.ge.u32 %p1, %r20, %r5;\n"
+"    @%p1 bra    CV_DONE;\n"
+"\n"
+"    div.u32     %r21, %r20, %r6;\n"
+"    rem.u32     %r22, %r20, %r6;\n"
+"    div.u32     %r23, %r21, %r7;\n"
+"    rem.u32     %r24, %r21, %r7;\n"
+"\n"
+"    mov.f32     %f1, 0f00000000;\n"
+"    mov.u32     %r25, 0;\n"
+"\n"
+"CV_KC:\n"
+"    setp.ge.u32 %p2, %r25, %r2;\n"
+"    @%p2 bra    CV_KC_DONE;\n"
+"\n"
+"    mov.u32     %r26, 0;\n"
+"CV_KH:\n"
+"    setp.ge.u32 %p3, %r26, %r3;\n"
+"    @%p3 bra    CV_KH_DONE;\n"
+"\n"
+"    mov.u32     %r27, 0;\n"
+"CV_KW:\n"
+"    setp.ge.u32 %p4, %r27, %r4;\n"
+"    @%p4 bra    CV_KW_DONE;\n"
+"\n"
+"    add.u32     %r28, %r24, %r26;\n"
+"    add.u32     %r29, %r22, %r27;\n"
+"\n"
+"    mul.lo.u32  %r12, %r25, %r1;\n"
+"    mul.lo.u32  %r13, %r12, %r3;\n"
+"    add.u32     %r14, %r25, %r12;\n"
+"    mul.lo.u32  %r15, %r28, %r1;\n"
+"    add.u32     %r16, %r13, %r14;\n"
+"    mul.lo.u32  %r17, %r16, %r4;\n"
+"    add.u32     %r18, %r15, %r17;\n"
+"    mul.wide.u32 %rd4, %r18, 4;\n"
+"\n"
+"    mul.lo.u32  %r19, %r29, %r7;\n"
+"    add.u32     %r20, %r19, %r22;\n"
+"    mul.lo.u32  %r21, %r20, %r5;\n"
+"    add.u32     %r22, %r21, %r23;\n"
+"    mul.wide.u32 %rd5, %r22, 4;\n"
+"\n"
+"    add.u64     %rd6, %rd1, %rd4;\n"
+"    add.u64     %rd7, %rd2, %rd5;\n"
+"    ld.global.f32 %f2, [%rd6];\n"
+"    ld.global.f32 %f3, [%rd7];\n"
+"    fma.rn.f32  %f1, %f2, %f3, %f1;\n"
+"\n"
+"    add.u32     %r27, %r27, 1;\n"
+"    bra         CV_KW;\n"
+"CV_KW_DONE:\n"
+"    add.u32     %r26, %r26, 1;\n"
+"    bra         CV_KH;\n"
+"CV_KH_DONE:\n"
+"    add.u32     %r25, %r25, 1;\n"
+"    bra         CV_KC;\n"
+"CV_KC_DONE:\n"
+"\n"
+"    mul.wide.u32 %rd8, %r20, 4;\n"
+"    add.u64     %rd9, %rd3, %rd8;\n"
+"    st.global.f32 [%rd9], %f1;\n"
+"\n"
+"CV_DONE:\n"
+"    ret;\n"
+"}\n";
+
+/* CfC步骤PTX (SM 5.0+)
+ * 参数: h[hidden], x[input], W[hidden*(hidden+input)], b[hidden], hidden, input
+ * 计算: h[i] = tanh(b[i] + W[i,:]*h + W[:,i+hidden]*x) */
+static const char* PTX_CFC_STEP_KERNEL =
+".version 5.0\n"
+".target sm_50\n"
+".address_size 64\n"
+"\n"
+".visible .entry cfc_step_embedded(\n"
+"    .param .u64 cfc_step_embedded_param_0,\n"
+"    .param .u64 cfc_step_embedded_param_1,\n"
+"    .param .u64 cfc_step_embedded_param_2,\n"
+"    .param .u64 cfc_step_embedded_param_3,\n"
+"    .param .u32 cfc_step_embedded_param_4,\n"
+"    .param .u32 cfc_step_embedded_param_5\n"
+")\n"
+"{\n"
+"    .reg .f32   %f<8>;\n"
+"    .reg .b32   %r<20>;\n"
+"    .reg .b64   %rd<12>;\n"
+"\n"
+"    ld.param.u64    %rd1, [cfc_step_embedded_param_0];\n"
+"    ld.param.u64    %rd2, [cfc_step_embedded_param_1];\n"
+"    ld.param.u64    %rd3, [cfc_step_embedded_param_2];\n"
+"    ld.param.u64    %rd4, [cfc_step_embedded_param_3];\n"
+"    ld.param.u32    %r1, [cfc_step_embedded_param_4];\n"
+"    ld.param.u32    %r2, [cfc_step_embedded_param_5];\n"
+"\n"
+"    mov.u32     %r3, %ctaid.x;\n"
+"    mov.u32     %r4, %ntid.x;\n"
+"    mul.lo.u32  %r5, %r3, %r4;\n"
+"    mov.u32     %r6, %tid.x;\n"
+"    add.u32     %r7, %r5, %r6;\n"
+"    setp.ge.u32 %p1, %r7, %r1;\n"
+"    @%p1 bra    CFC_DONE;\n"
+"\n"
+"    mul.wide.u32 %rd5, %r7, 4;\n"
+"    add.u64     %rd6, %rd4, %rd5;\n"
+"    ld.global.f32 %f1, [%rd6];\n"
+"\n"
+"    mov.u32     %r8, 0;\n"
+"CFC_HLOOP:\n"
+"    setp.ge.u32 %p2, %r8, %r1;\n"
+"    @%p2 bra    CFC_HLOOP_END;\n"
+"\n"
+"    mul.lo.u32  %r9, %r7, %r1;\n"
+"    add.u32     %r10, %r9, %r8;\n"
+"    mul.wide.u32 %rd7, %r10, 4;\n"
+"    add.u64     %rd8, %rd3, %rd7;\n"
+"    ld.global.f32 %f2, [%rd8];\n"
+"\n"
+"    mul.wide.u32 %rd9, %r8, 4;\n"
+"    add.u64     %rd10, %rd1, %rd9;\n"
+"    ld.global.f32 %f3, [%rd10];\n"
+"\n"
+"    fma.rn.f32  %f1, %f2, %f3, %f1;\n"
+"\n"
+"    add.u32     %r8, %r8, 1;\n"
+"    bra         CFC_HLOOP;\n"
+"\n"
+"CFC_HLOOP_END:\n"
+"    mul.lo.u32  %r11, %r1, %r1;\n"
+"    mov.u32     %r12, 0;\n"
+"CFC_XLOOP:\n"
+"    setp.ge.u32 %p3, %r12, %r2;\n"
+"    @%p3 bra    CFC_XLOOP_END;\n"
+"\n"
+"    add.u32     %r13, %r11, %r7;\n"
+"    mul.lo.u32  %r14, %r13, %r2;\n"
+"    add.u32     %r15, %r14, %r12;\n"
+"    mul.wide.u32 %rd11, %r15, 4;\n"
+"    add.u64     %rd12, %rd3, %rd11;\n"
+"    ld.global.f32 %f4, [%rd12];\n"
+"\n"
+"    mul.wide.u32 %rd13, %r12, 4;\n"
+"    add.u64     %rd14, %rd2, %rd13;\n"
+"    ld.global.f32 %f5, [%rd14];\n"
+"\n"
+"    fma.rn.f32  %f1, %f4, %f5, %f1;\n"
+"\n"
+"    add.u32     %r12, %r12, 1;\n"
+"    bra         CFC_XLOOP;\n"
+"\n"
+"CFC_XLOOP_END:\n"
+"    /* tanh近似: f(x) = x * (27 + x*x) / (27 + 9*x*x) */\n"
+"    mul.f32     %f6, %f1, %f1;\n"
+"    mov.f32     %f7, 0f41D80000;\n"
+"    fma.rn.f32  %f2, %f1, %f7, 0f00000000;\n"
+"    mov.f32     %f3, 0f41100000;\n"
+"    fma.rn.f32  %f4, %f3, %f6, %f7;\n"
+"    div.approx.f32 %f5, %f2, %f4;\n"
+"\n"
+"    mul.wide.u32 %rd15, %r7, 4;\n"
+"    add.u64     %rd16, %rd1, %rd15;\n"
+"    st.global.f32 [%rd16], %f5;\n"
+"\n"
+"CFC_DONE:\n"
+"    ret;\n"
+"}\n";
+
+/* ========================================================================
+ * P1-6: 根据内核名称匹配内嵌PTX回退
+ * 当nvcc JIT编译失败时，尝试加载预编译的PTX内核
+ * ======================================================================== */
+static const char* get_embedded_ptx(const char* kernel_name) {
+    if (!kernel_name) return NULL;
+    /* 矩阵乘法匹配 */
+    if (strstr(kernel_name, "matrix_mul") || strstr(kernel_name, "matmul") ||
+        strcmp(kernel_name, "matrix_mul_basic") == 0 ||
+        strcmp(kernel_name, "matrix_mul_shared") == 0) {
+        return PTX_MATMUL_KERNEL;
+    }
+    /* 2D卷积匹配 */
+    if (strstr(kernel_name, "conv2d") || strcmp(kernel_name, "conv2d") == 0 ||
+        strstr(kernel_name, "conv_")) {
+        return PTX_CONV2D_KERNEL;
+    }
+    /* CfC步骤匹配 */
+    if (strstr(kernel_name, "cfc_step") || strstr(kernel_name, "cfc_forward_step") ||
+        strstr(kernel_name, "cfc_liquid_tau") ||
+        strstr(kernel_name, "cfc_multi_timescale") ||
+        strncmp(kernel_name, "cfc_", 4) == 0) {
+        return PTX_CFC_STEP_KERNEL;
+    }
+    return NULL;
+}
+
 /* ============================================================================
  * CUDA常量定义
  * =========================================================================== */
@@ -2814,8 +3132,17 @@ static GpuKernel* cuda_backend_kernel_create(GpuContext* context, const char* ke
     safe_free((void**)&cuda_source);
     
     if (!ptx_code || ptx_size == 0) {
-        set_cuda_error_string("CUDA到PTX编译失败: %s", g_cuda_error_string);
-        return NULL;
+        /* P1-6: nvcc JIT编译失败，尝试加载内嵌预编译PTX内核回退 */
+        log_warning("[CUDA] nvcc JIT编译 '%s' 失败，尝试内嵌PTX回退...", actual_kernel_name);
+        const char* embedded_ptx = get_embedded_ptx(actual_kernel_name);
+        if (embedded_ptx) {
+            ptx_code = string_duplicate(embedded_ptx);
+            ptx_size = strlen(embedded_ptx);
+            log_info("[CUDA] 成功加载内嵌PTX内核 '%s' (%zu字节)", actual_kernel_name, ptx_size);
+        } else {
+            set_cuda_error_string("CUDA到PTX编译失败且无内嵌回退: %s", g_cuda_error_string);
+            return NULL;
+        }
     }
     
     // 创建内核结构

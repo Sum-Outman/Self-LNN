@@ -117,11 +117,32 @@ int pybullet_load_urdf(int connection_id, const char* urdf_path,
                        int use_fixed_base);
 
 /**
+ * @brief 加载机器人模型（pybullet_load_urdf的别名）
+ * @param connection_id 连接句柄
+ * @param urdf_path URDF文件路径
+ * @param base_position 基座初始位置 [x,y,z]
+ * @param base_orientation 基座初始方向（四元数）[x,y,z,w]
+ * @param use_fixed_base 是否固定基座
+ * @return 机器人ID（正整数），失败返回-1
+ */
+int pybullet_load_robot(int connection_id, const char* urdf_path,
+                        const float base_position[3],
+                        const float base_orientation[4],
+                        int use_fixed_base);
+
+/**
  * @brief 执行仿真步进
  * @param connection_id 连接句柄
  * @return 0成功，-1失败
  */
 int pybullet_step_simulation(int connection_id);
+
+/**
+ * @brief 步进仿真（pybullet_step_simulation的别名）
+ * @param connection_id 连接句柄
+ * @return 0成功，-1失败
+ */
+int pybullet_step(int connection_id);
 
 /**
  * @brief 获取关节数量
@@ -132,7 +153,7 @@ int pybullet_step_simulation(int connection_id);
 int pybullet_get_num_joints(int connection_id, int robot_id);
 
 /**
- * @brief 获取关节状态
+ * @brief 获取单个关节状态
  * @param connection_id 连接句柄
  * @param robot_id 机器人ID
  * @param joint_index 关节索引
@@ -141,6 +162,28 @@ int pybullet_get_num_joints(int connection_id, int robot_id);
  */
 int pybullet_get_joint_state(int connection_id, int robot_id,
                              int joint_index, PyBulletJointState* state);
+
+/**
+ * @brief 获取所有关节状态
+ * @param connection_id 连接句柄
+ * @param robot_id 机器人ID
+ * @param states 输出关节状态数组（调用者分配，至少num_joints个元素）
+ * @param max_joints 最大关节数
+ * @return 实际获取的关节数，失败返回-1
+ */
+int pybullet_get_joint_states(int connection_id, int robot_id,
+                              PyBulletJointState* states, int max_joints);
+
+/**
+ * @brief 施加关节力矩
+ * @param connection_id 连接句柄
+ * @param robot_id 机器人ID
+ * @param joint_index 关节索引
+ * @param torque 力矩值
+ * @return 0成功，-1失败
+ */
+int pybullet_apply_torque(int connection_id, int robot_id,
+                          int joint_index, float torque);
 
 /**
  * @brief 设置关节控制

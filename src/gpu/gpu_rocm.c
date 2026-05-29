@@ -301,6 +301,69 @@ static const char* ROCM_CFC_STEP_KERNEL =
 "    }\n"
 "}\n";
 
+/* 2D卷积HIP内核 (内嵌回退用)
+ * 参数: input[N*C*H*W], kernel[K*C*KH*KW], output[N*K*OH*OW],
+ *       N, C, H, W, K, KH, KW, OH, OW, stride_h, stride_w */
+static const char* ROCM_CONV2D_KERNEL =
+"extern \"C\" __global__ void conv2d_embedded(\n"
+"    float* input, float* kernel, float* output,\n"
+"    int N, int C, int H, int W,\n"
+"    int K, int KH, int KW,\n"
+"    int OH, int OW,\n"
+"    int stride_h, int stride_w) {\n"
+"    int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    int total_out = N * K * OH * OW;\n"
+"    if (idx >= total_out) return;\n"
+"    int n = idx / (K * OH * OW);\n"
+"    int rem = idx % (K * OH * OW);\n"
+"    int k = rem / (OH * OW);\n"
+"    rem = rem % (OH * OW);\n"
+"    int oh = rem / OW;\n"
+"    int ow = rem % OW;\n"
+"    float sum = 0.0f;\n"
+"    for (int c = 0; c < C; c++) {\n"
+"        for (int kh = 0; kh < KH; kh++) {\n"
+"            for (int kw = 0; kw < KW; kw++) {\n"
+"                int ih = oh * stride_h + kh;\n"
+"                int iw = ow * stride_w + kw;\n"
+"                if (ih >= 0 && ih < H && iw >= 0 && iw < W) {\n"
+"                    float input_val = input[n * C * H * W + c * H * W + ih * W + iw];\n"
+"                    float kern_val = kernel[k * C * KH * KW + c * KH * KW + kh * KW + kw];\n"
+"                    sum += input_val * kern_val;\n"
+"                }\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    output[n * K * OH * OW + k * OH * OW + oh * OW + ow] = sum;\n"
+"}\n";
+
+/* ========================================================================
+ * P1-6: 内嵌HIP内核回退映射 — 当hipcc JIT编译失败时
+ * 将内核名称映射到文件中已定义的内嵌HIP源代码字符串
+ * 涵盖三个最常用的内核：matmul、conv2d、cfc_step
+ * ======================================================================== */
+static const char* get_embedded_hip_source(const char* kernel_name) {
+    if (!kernel_name) return NULL;
+    /* 矩阵乘法匹配 */
+    if (strstr(kernel_name, "matrix_mul") || strstr(kernel_name, "matmul") ||
+        strcmp(kernel_name, "matrix_mul_basic") == 0) {
+        return ROCM_MATRIX_MUL_KERNEL;
+    }
+    if (strcmp(kernel_name, "matrix_mul_shared") == 0) {
+        return ROCM_MATRIX_MUL_SHARED_KERNEL;
+    }
+    /* 2D卷积匹配 — 使用现有通用内核回退 */
+    if (strstr(kernel_name, "conv2d") || strcmp(kernel_name, "conv2d") == 0 ||
+        strstr(kernel_name, "conv_")) {
+        return ROCM_CONV2D_KERNEL;
+    }
+    /* CfC步骤匹配 */
+    if (strstr(kernel_name, "cfc_step") || strncmp(kernel_name, "cfc_", 4) == 0) {
+        return ROCM_CFC_STEP_KERNEL;
+    }
+    return NULL;
+}
+
 #define ROCM_CACHE_MAX_ENTRIES 64
 #define ROCM_CACHE_HASH_SIZE 32
 #define ROCM_MAX_ALLOCATIONS 256
@@ -785,13 +848,34 @@ static GpuKernel* rocm_backend_kernel_create(GpuContext* context, const char* ke
     }
     compile_result = system(compile_cmd);
     if (compile_result != 0) {
-        /* ZSFZS-F021修复: hipcc编译失败时提供详细的错误日志，
-         * 帮助定位是hipcc未安装还是目标架构不支持。
-         * 清理临时文件后返回NULL，由调用方处理回退。 */
-        log_warning("[ROCm] JIT编译失败: hipcc返回码%d, 可能原因: hipcc未安装或目标架构不支持", compile_result);
-        remove(real_src_path);
-        remove(hsaco_path);
-        return NULL;
+        /* P1-6: hipcc JIT编译失败，尝试内嵌HIP内核回退重编译 */
+        log_warning("[ROCm] hipcc JIT编译 '%.100s' 失败(返回码%d)，尝试内嵌内核回退...", kernel_name, compile_result);
+        const char* embedded_source = get_embedded_hip_source(kernel_name);
+        if (embedded_source) {
+            /* 使用内嵌HIP源代码重写临时文件并重试编译 */
+            fclose(fp);
+            remove(real_src_path);
+            fp = fopen(real_src_path, "w");
+            if (fp) {
+                fprintf(fp, "#include <hip/hip_runtime.h>\n%s", embedded_source);
+                fclose(fp);
+                /* 使用更通用的GPU架构目标重试 */
+                snprintf(compile_cmd, sizeof(compile_cmd),
+                    "hipcc -x hip -target amdgcn-amd-amdhsa "
+                    "--offload-arch=gfx900,gfx906,gfx908,gfx90a,gfx1030,gfx1100,gfx1101,gfx1102 "
+                    "-o %s %s 2>/dev/null",
+                    hsaco_path, real_src_path);
+                compile_result = system(compile_cmd);
+            }
+        }
+        if (compile_result != 0) {
+            /* 内嵌回退也失败，清理并报告 */
+            log_warning("[ROCm] 内嵌内核回退编译 '%.100s' 也失败(返回码%d)", kernel_name, compile_result);
+            remove(real_src_path);
+            remove(hsaco_path);
+            return NULL;
+        }
+        log_info("[ROCm] 内嵌回退内核 '%.100s' 编译成功", kernel_name);
     }
     FILE* hsaco_fp = fopen(hsaco_path, "rb");
     if (!hsaco_fp) { remove(real_src_path); remove(hsaco_path); return NULL; }

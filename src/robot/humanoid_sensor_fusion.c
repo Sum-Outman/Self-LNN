@@ -8,6 +8,55 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* ================================================================
+ * P3-3: WGS84椭球模型参数
+ * 长半轴 a = 6378137.0 米
+ * 扁率 f = 1/298.257223563
+ * 第一偏心率平方 e2 = 2f - f²
+ * ================================================================ */
+#define WGS84_A      6378137.0
+#define WGS84_F      (1.0 / 298.257223563)
+#define WGS84_E2     (2.0 * WGS84_F - WGS84_F * WGS84_F)
+#define WGS84_MEAN_R 6371008.7714  /* 平均半径用于简化回退 */
+
+/* WGS84椭球: LLA(纬度/经度/高程) → ECEF(地心地固坐标)
+ * 使用Bowring闭合公式，无需迭代，精度优于1mm */
+static void wgs84_lla_to_ecef(double lat_deg, double lon_deg, double alt_m,
+                              double* x, double* y, double* z)
+{
+    double lat = lat_deg * M_PI / 180.0;
+    double lon = lon_deg * M_PI / 180.0;
+    double sin_lat = sin(lat);
+    double cos_lat = cos(lat);
+    double sin_lon = sin(lon);
+    double cos_lon = cos(lon);
+
+    /* 卯酉圈曲率半径 */
+    double n = WGS84_A / sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat);
+
+    *x = (n + alt_m) * cos_lat * cos_lon;
+    *y = (n + alt_m) * cos_lat * sin_lon;
+    *z = (n * (1.0 - WGS84_E2) + alt_m) * sin_lat;
+}
+
+/* ECEF差分向量 → ENU(东-北-天)局部坐标系变换
+ * 以参考点(ref_lat, ref_lon)为原点建立ENU坐标系 */
+static void ecef_delta_to_enu(double dX, double dY, double dZ,
+                              double ref_lat_deg, double ref_lon_deg,
+                              double* e, double* n, double* u)
+{
+    double lat = ref_lat_deg * M_PI / 180.0;
+    double lon = ref_lon_deg * M_PI / 180.0;
+    double sin_lat = sin(lat);
+    double cos_lat = cos(lat);
+    double sin_lon = sin(lon);
+    double cos_lon = cos(lon);
+
+    *e = -sin_lon * dX + cos_lon * dY;
+    *n = -sin_lat * cos_lon * dX - sin_lat * sin_lon * dY + cos_lat * dZ;
+    *u =  cos_lat * cos_lon * dX + cos_lat * sin_lon * dY + sin_lat * dZ;
+}
+
 struct HumanoidSensorFusion {
     FusionConfig config;
     FusionHumanoidState state;
@@ -1084,41 +1133,60 @@ int humanoid_sensor_fusion_feed_gnss(HumanoidSensorFusion* fusion,
     fusion->gnss_data.accuracy = accuracy;
     fusion->gnss_data.available = 1;
 
-    /* 首次GNSS定位：设置全局位置基准点 */
+    /* 首次GNSS定位：设置全局位置基准点（同时计算ECEF参考坐标） */
     if (fusion->gnss_data.ref_lat == 0.0 && fusion->gnss_data.ref_lon == 0.0) {
         fusion->gnss_data.ref_lat = latitude;
         fusion->gnss_data.ref_lon = longitude;
         fusion->gnss_data.ref_alt = altitude;
     }
 
-    /* 计算相对基准点的位移（米）
-     * 简化球面近似: 纬度1°≈111320m, 经度1°≈111320*cos(lat) */
-    double lat_rad = latitude * M_PI / 180.0;
-    double dlat = (latitude - fusion->gnss_data.ref_lat) * 111320.0;
-    double dlon = (longitude - fusion->gnss_data.ref_lon) * 111320.0 * cos(lat_rad);
-    double dalt = altitude - fusion->gnss_data.ref_alt;
+    /* P3-3: WGS84椭球模型 LLA→ECEF→ENU 精确坐标变换
+     * 将基准点和当前点都转换到ECEF，计算差分后投影到局部ENU坐标系
+     * 精度远优于简化球面近似（极地/大范围场景差异显著） */
+    double ref_x, ref_y, ref_z;
+    double cur_x, cur_y, cur_z;
+    wgs84_lla_to_ecef(fusion->gnss_data.ref_lat, fusion->gnss_data.ref_lon,
+                      fusion->gnss_data.ref_alt, &ref_x, &ref_y, &ref_z);
+    wgs84_lla_to_ecef(latitude, longitude, altitude, &cur_x, &cur_y, &cur_z);
+
+    double dX = cur_x - ref_x;
+    double dY = cur_y - ref_y;
+    double dZ = cur_z - ref_z;
+
+    double enu_e, enu_n, enu_u;
+    ecef_delta_to_enu(dX, dY, dZ, fusion->gnss_data.ref_lat,
+                      fusion->gnss_data.ref_lon, &enu_e, &enu_n, &enu_u);
 
     /* 更新全局位置（ENU坐标系：东-北-天） */
-    fusion->state.global_position[0] = (float)dlon; /* 东向 */
-    fusion->state.global_position[1] = (float)dlat; /* 北向 */
-    fusion->state.global_position[2] = (float)dalt; /* 天向 */
+    fusion->state.global_position[0] = (float)enu_e;  /* 东向 */
+    fusion->state.global_position[1] = (float)enu_n;  /* 北向 */
+    fusion->state.global_position[2] = (float)enu_u;  /* 天向 */
     fusion->state.gnss_accuracy = accuracy;
     fusion->state.gnss_updated = 1;
 
-    /* GNSS速度估计：相邻定位差/时间差 */
+    /* GNSS速度估计：使用WGS84椭球计算相邻定位差/时间差 */
     if (fusion->gnss_data.last_timestamp > 0.0) {
         double dt_s = timestamp - fusion->gnss_data.last_timestamp;
         if (dt_s > 0.01) {
-            double dv_lon = (longitude - fusion->gnss_data.last_lon) * 111320.0 * cos(lat_rad);
-            double dv_lat = (latitude - fusion->gnss_data.last_lat) * 111320.0;
-            double dv_alt = altitude - fusion->gnss_data.last_alt;
+            double last_x, last_y, last_z;
+            wgs84_lla_to_ecef(fusion->gnss_data.last_lat, fusion->gnss_data.last_lon,
+                              fusion->gnss_data.last_alt, &last_x, &last_y, &last_z);
+
+            double dX_v = cur_x - last_x;
+            double dY_v = cur_y - last_y;
+            double dZ_v = cur_z - last_z;
+
+            double dv_e, dv_n, dv_u;
+            ecef_delta_to_enu(dX_v, dY_v, dZ_v, fusion->gnss_data.ref_lat,
+                              fusion->gnss_data.ref_lon, &dv_e, &dv_n, &dv_u);
+
             /* 低通滤波融合IMU速度与GNSS速度 */
             float alpha = (accuracy < 5.0f) ? 0.8f : 0.3f; /* GPS精度越高权重越大 */
-            fusion->state.velocity[0] = alpha * (float)(dv_lon / dt_s)
+            fusion->state.velocity[0] = alpha * (float)(dv_e / dt_s)
                                       + (1.0f - alpha) * fusion->state.velocity[0];
-            fusion->state.velocity[1] = alpha * (float)(dv_lat / dt_s)
+            fusion->state.velocity[1] = alpha * (float)(dv_n / dt_s)
                                       + (1.0f - alpha) * fusion->state.velocity[1];
-            fusion->state.velocity[2] = alpha * (float)(dv_alt / dt_s)
+            fusion->state.velocity[2] = alpha * (float)(dv_u / dt_s)
                                       + (1.0f - alpha) * fusion->state.velocity[2];
         }
     }

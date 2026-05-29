@@ -20,6 +20,17 @@ extern int sensor_deep_quality_assess(SensorDeepPreprocessor* sdp,
     const float** modality_data, const size_t* modality_dims,
     float* quality_scores);
 
+/* P1-7: 全局互斥锁 — 保护深度预处理器惰性初始化的竞态条件 */
+static MutexHandle g_deep_preprocessor_mutex = NULL;
+
+/* P1-7: 惰性获取全局互斥锁（首次调用时创建） */
+static MutexHandle deep_preprocessor_get_mutex(void) {
+    if (!g_deep_preprocessor_mutex) {
+        g_deep_preprocessor_mutex = mutex_create();
+    }
+    return g_deep_preprocessor_mutex;
+}
+
 /* ============ 传感器处理器基础实现 ============ */
 
 /* B-016: 环形缓冲区四种状态检测宏 */
@@ -327,17 +338,28 @@ int sensor_deep_process(const float* raw_data, size_t num_values,
     static size_t cached_state_dim = 0;
     static size_t cached_obs_dim = 0;
 
-    /* 惰性初始化深度预处理器 */
-    if (!initialized || cached_state_dim != output_dim || cached_obs_dim != num_values) {
-        if (sdp) {
-            sensor_deep_preprocessor_free(sdp);
-            sdp = NULL;
+    /* P1-7: 双重检查锁定 — 线程安全的惰性初始化 */
+    int need_init = (!initialized || cached_state_dim != output_dim || cached_obs_dim != num_values);
+    if (need_init) {
+        MutexHandle mtx = deep_preprocessor_get_mutex();
+        if (mtx) mutex_lock(mtx);
+        /* 二次检查（在锁内） */
+        need_init = (!initialized || cached_state_dim != output_dim || cached_obs_dim != num_values);
+        if (need_init) {
+            if (sdp) {
+                sensor_deep_preprocessor_free(sdp);
+                sdp = NULL;
+            }
+            sdp = sensor_deep_preprocessor_create(output_dim, num_values);
+            if (!sdp) {
+                if (mtx) mutex_unlock(mtx);
+                return -1;
+            }
+            cached_state_dim = output_dim;
+            cached_obs_dim = num_values;
+            initialized = 1;
         }
-        sdp = sensor_deep_preprocessor_create(output_dim, num_values);
-        if (!sdp) return -1;
-        cached_state_dim = output_dim;
-        cached_obs_dim = num_values;
-        initialized = 1;
+        if (mtx) mutex_unlock(mtx);
     }
 
     return sensor_deep_preprocess_frame(sdp, raw_data, gyro, acc, dt, output);
@@ -360,15 +382,25 @@ int sensor_deep_quality(const float** modality_data,
     static SensorDeepPreprocessor* q_sdp = NULL;
     static int q_initialized = 0;
 
+    /* P1-7: 双重检查锁定 — 线程安全的惰性初始化 */
     if (!q_initialized) {
-        size_t max_dim = 0;
-        for (int i = 0; i < 4 && modality_dims; i++) {
-            if (modality_dims[i] > max_dim) max_dim = modality_dims[i];
+        MutexHandle mtx = deep_preprocessor_get_mutex();
+        if (mtx) mutex_lock(mtx);
+        /* 二次检查（在锁内） */
+        if (!q_initialized) {
+            size_t max_dim = 0;
+            for (int i = 0; i < 4 && modality_dims; i++) {
+                if (modality_dims[i] > max_dim) max_dim = modality_dims[i];
+            }
+            if (max_dim == 0) max_dim = 16;
+            q_sdp = sensor_deep_preprocessor_create(max_dim, max_dim);
+            if (!q_sdp) {
+                if (mtx) mutex_unlock(mtx);
+                return -1;
+            }
+            q_initialized = 1;
         }
-        if (max_dim == 0) max_dim = 16;
-        q_sdp = sensor_deep_preprocessor_create(max_dim, max_dim);
-        if (!q_sdp) return -1;
-        q_initialized = 1;
+        if (mtx) mutex_unlock(mtx);
     }
 
     return sensor_deep_quality_assess(q_sdp, modality_data, modality_dims, quality_scores);

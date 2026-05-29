@@ -1001,12 +1001,12 @@
 
     /* ==================== 自动初始化（延迟加载） ==================== */
     document.addEventListener('DOMContentLoaded', function() {
-        /* 延迟15秒后首次获取知识库数据，避免首屏API竞争 */
+        /* 延迟3秒后首次获取知识库数据，避免首屏API竞争 */
         setTimeout(function() {
             fetchKnowledgeFromBackend();
             refreshStats();
             renderEntryList();
-        }, 15000);
+        }, 3000);
 
         /* 3秒后连接WebSocket */
         setTimeout(function() { connectKnowledgeWebSocket(); }, 3000);

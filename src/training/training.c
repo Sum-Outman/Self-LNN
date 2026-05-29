@@ -872,6 +872,12 @@ typedef struct Trainer {
 
     /* ZSFZS-F025: 训练指标JSON日志导出 */
     FILE* metrics_export_file;               /**< JSON指标导出文件句柄（NULL=未初始化/已关闭） */
+
+    /* P1-002修复: ReduceLROnPlateau状态从static迁移到Trainer结构体
+     * 原为静态变量导致多Trainer实例共享状态，分布式/多实验训练时LR衰减错误 */
+    size_t lr_patience_counter;              /**< LR Plateau耐心计数器（每Trainer实例独立） */
+    float  lr_best_val_loss;                 /**< LR Plateau最佳验证损失（每Trainer实例独立） */
+    float  lr_current_factor;                /**< LR Plateau当前衰减因子（每Trainer实例独立） */
 } Trainer;
 
 /**
@@ -4057,6 +4063,9 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
     trainer->config = *config;
     trainer->network = network;
     trainer->metrics_export_file = NULL;  /* ZSFZS-F025: 初始化为NULL，训练时按需创建 */
+    trainer->lr_patience_counter = 0;     /* P1-002修复: 初始化LR Plateau计数器 */
+    trainer->lr_best_val_loss = FLT_MAX;  /* P1-002修复: 初始化最佳验证损失 */
+    trainer->lr_current_factor = 1.0f;    /* P1-002修复: 初始化LR衰减因子 */
     
     // 获取网络配置用于调试（net_config已在上方定义）
     if (config->verbose) {
@@ -6350,20 +6359,17 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
         
         // 自适应学习率调整（ReduceLROnPlateau）
         if (trainer->config.enable_adaptive_lr && validation_samples > 0) {
-            static size_t lr_patience_counter = 0;
-            static float lr_best_val_loss = FLT_MAX;
-            static float lr_current_factor = 1.0f;
             TRAIN_LR_LOCK();
-            if (val_loss < lr_best_val_loss - trainer->config.lr_min_delta) {
-                lr_best_val_loss = val_loss;
-                lr_patience_counter = 0;
+            if (val_loss < trainer->lr_best_val_loss - trainer->config.lr_min_delta) {
+                trainer->lr_best_val_loss = val_loss;
+                trainer->lr_patience_counter = 0;
             } else {
-                lr_patience_counter++;
-                if (lr_patience_counter >= trainer->config.lr_patience) {
+                trainer->lr_patience_counter++;
+                if (trainer->lr_patience_counter >= trainer->config.lr_patience) {
                     // 减少学习率
-                    lr_current_factor *= trainer->config.lr_factor;
-                    if (lr_current_factor < trainer->config.lr_min_factor) {
-                        lr_current_factor = trainer->config.lr_min_factor;
+                    trainer->lr_current_factor *= trainer->config.lr_factor;
+                    if (trainer->lr_current_factor < trainer->config.lr_min_factor) {
+                        trainer->lr_current_factor = trainer->config.lr_min_factor;
                     }
                     
                     /* ZSFZS-F012: 修复学习率调度器与自适应LR竞争问题
@@ -6375,10 +6381,10 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                     
                     if (trainer->config.verbose) {
                         printf("自适应学习率调整：新学习率=%.6f（因子=%.2f）\n",
-                               trainer->state.learning_rate, lr_current_factor);
+                               trainer->state.learning_rate, trainer->lr_current_factor);
                     }
                     
-                    lr_patience_counter = 0;
+                    trainer->lr_patience_counter = 0;
                 }
             }
             TRAIN_LR_UNLOCK();

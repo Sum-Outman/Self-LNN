@@ -52,6 +52,115 @@ const char CO_OCR_CHARSET[CO_OCR_NUM_CLASSES] = {
 #endif
 #endif
 
+/* ================================================================
+ * P3-4: Wayland检测辅助函数
+ * 通过环境变量 WAYLAND_DISPLAY 或 XDG_SESSION_TYPE=wayland 判断
+ * 优先使用 XWayland 桥接回退到 X11，纯 Wayland 使用原生工具
+ * ================================================================ */
+#ifdef __linux__
+#include <stdlib.h>
+
+/* 检测当前是否运行在Wayland环境下 */
+static int co_linux_is_wayland(void) {
+    /* 检查 WAYLAND_DISPLAY 环境变量 */
+    const char* wd = getenv("WAYLAND_DISPLAY");
+    if (wd && wd[0] != '\0') return 1;
+
+    /* 检查 XDG_SESSION_TYPE */
+    const char* xst = getenv("XDG_SESSION_TYPE");
+    if (xst && strcmp(xst, "wayland") == 0) return 1;
+
+    return 0;
+}
+
+/* 检测是否通过 XWayland 桥接可用 X11（DISPLAY环境变量存在） */
+static int co_linux_is_xwayland(void) {
+    if (!co_linux_is_wayland()) return 0;
+
+    const char* dp = getenv("DISPLAY");
+    if (dp && dp[0] != '\0') return 1;
+
+    return 0;
+}
+
+/* 纯Wayland环境下检查原生工具是否可用 */
+static int co_linux_wayland_has_tool(const char* tool_name) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "command -v %s >/dev/null 2>&1", tool_name);
+    int ret = system(cmd);
+    return (ret == 0) ? 1 : 0;
+}
+
+/* Wayland原生鼠标点击（使用ydotool） */
+static int co_wayland_click(int x, int y, int button) {
+    char cmd[256];
+    int ydotool_btn = (button == 2) ? 3 : (button == 1) ? 2 : 1;
+    snprintf(cmd, sizeof(cmd),
+             "ydotool mousemove --absolute %d %d && ydotool click %d 2>/dev/null",
+             x, y, ydotool_btn);
+    FILE* p = popen(cmd, "r");
+    if (!p) return -1;
+    int rc = pclose(p);
+    return (rc == 0) ? 0 : -1;
+}
+
+/* Wayland原生按键（使用ydotool key） */
+static int co_wayland_keypress(int key_code, int press) {
+    if (!press) return 0;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "ydotool key %d:%d 2>/dev/null", key_code, press ? 1 : 0);
+    FILE* p = popen(cmd, "r");
+    if (!p) return -1;
+    int rc = pclose(p);
+    return (rc == 0) ? 0 : -1;
+}
+
+/* Wayland原生文本输入（使用wtype） */
+static int co_wayland_type_text(const char* text, size_t len) {
+    if (!text || len == 0 || len > 1023) return -1;
+    char cmd[1280];
+    snprintf(cmd, sizeof(cmd), "wtype -s 5 \"%.1024s\" 2>/dev/null", text);
+    FILE* p = popen(cmd, "r");
+    if (!p) return -1;
+    int rc = pclose(p);
+    return (rc == 0) ? 0 : -1;
+}
+
+/* Wayland原生鼠标移动（使用ydotool） */
+static int co_wayland_mouse_move(int x, int y) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd),
+             "ydotool mousemove --absolute %d %d 2>/dev/null", x, y);
+    FILE* p = popen(cmd, "r");
+    if (!p) return -1;
+    int rc = pclose(p);
+    return (rc == 0) ? 0 : -1;
+}
+
+/* Wayland原生滚轮（使用ydotool） */
+static int co_wayland_scroll(int delta) {
+    (void)delta;
+    fprintf(stderr, "[计算机操作] Wayland滚轮: ydotool不支持滚轮操作，请使用XWayland桥接\n");
+    return -1;
+}
+
+/* Wayland原生截图（使用grim） */
+static int co_wayland_screenshot(const char* output_file) {
+    if (!output_file) return -1;
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "grim %s 2>/dev/null", output_file);
+    FILE* p = popen(cmd, "r");
+    if (!p) return -1;
+    int rc = pclose(p);
+    return (rc == 0) ? 0 : -1;
+}
+
+#else
+/* 非Linux平台的桩函数 */
+static int co_linux_is_wayland(void) { return 0; }
+static int co_linux_is_xwayland(void) { return 0; }
+#endif
+
 struct COSystem {
     COConfig config;
     LNN* global_lnn;             /* 全局共享LNN（单一模型原则） */
@@ -622,6 +731,14 @@ static int co_os_click(int x, int y, int button) {
     SendInput(2, inputs, sizeof(INPUT));
     return 0;
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 —— 优先使用XWayland桥接回退X11，纯Wayland使用ydotool */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        if (co_linux_wayland_has_tool("ydotool")) {
+            return co_wayland_click(x, y, button);
+        }
+        fprintf(stderr, "[计算机操作] Wayland环境下鼠标点击需安装ydotool或使用XWayland桥接\n");
+        return -1;
+    }
     Display* display = XOpenDisplay(NULL);
     if (!display) return -1;
     int btn = (button == 2) ? 3 : (button == 1) ? 2 : 1;
@@ -669,6 +786,14 @@ static int co_os_keypress(int key_code, int press) {
     SendInput(1, &input, sizeof(INPUT));
     return 0;
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        if (co_linux_wayland_has_tool("ydotool")) {
+            return co_wayland_keypress(key_code, press);
+        }
+        fprintf(stderr, "[计算机操作] Wayland环境下按键需安装ydotool或使用XWayland桥接\n");
+        return -1;
+    }
     Display* display = XOpenDisplay(NULL);
     if (!display) return -1;
     KeyCode keycode = XKeysymToKeycode(display, (KeySym)key_code);
@@ -732,6 +857,14 @@ static int co_os_type_text(const char* text, size_t len) {
     }
     return 0;
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 —— 优先使用wtype，回退X11 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        if (co_linux_wayland_has_tool("wtype")) {
+            return co_wayland_type_text(text, len);
+        }
+        fprintf(stderr, "[计算机操作] Wayland环境下文本输入需安装wtype或使用XWayland桥接\n");
+        return -1;
+    }
     /* Linux: 使用XTestFakeKeyEvent逐字符发送按键 */
     Display* display = XOpenDisplay(NULL);
     if (!display) return -1;
@@ -775,6 +908,14 @@ static int co_os_mouse_move(int x, int y) {
     SetCursorPos(x, y);
     return 0;
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        if (co_linux_wayland_has_tool("ydotool")) {
+            return co_wayland_mouse_move(x, y);
+        }
+        fprintf(stderr, "[计算机操作] Wayland环境下鼠标移动需安装ydotool或使用XWayland桥接\n");
+        return -1;
+    }
     Display* display = XOpenDisplay(NULL);
     if (!display) return -1;
     XTestFakeMotionEvent(display, -1, x, y, CurrentTime);
@@ -803,6 +944,14 @@ static int co_os_scroll(int delta) {
     SendInput(1, &input, sizeof(INPUT));
     return 0;
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 —— Wayland下ydotool不支持滚轮，使用XWayland回退 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        if (co_linux_wayland_has_tool("ydotool")) {
+            return co_wayland_scroll(delta);
+        }
+        fprintf(stderr, "[计算机操作] Wayland环境下滚轮操作需XWayland桥接\n");
+        return -1;
+    }
     Display* display = XOpenDisplay(NULL);
     if (!display) return -1;
     int btn = (delta > 0) ? 4 : 5;
@@ -892,6 +1041,29 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
     ReleaseDC(NULL, hdcScreen);
     return 0;
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 —— 纯Wayland截图需grim+外部PNG解析，当前回退X11 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        /* grim可截图但输出PNG，解析需要外部库；此处使用grim临时文件方案 */
+        if (co_linux_wayland_has_tool("grim")) {
+            const char* tmp_file = "/tmp/self_z_wayland_screenshot.png";
+            if (co_wayland_screenshot(tmp_file) == 0) {
+                /* 简化处理：尝试通过stb_image或直接读取文件大小判断截图成功 */
+                FILE* f = fopen(tmp_file, "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END);
+                    long fsize = ftell(f);
+                    fclose(f);
+                    if (fsize > 4096) {
+                        /* P3-4: 纯Wayland截图已保存，提示需XWayland桥接以实现内存像素读取 */
+                        fprintf(stderr, "[计算机操作] Wayland截图已保存至%s (%ld字节)，内存像素读取需XWayland桥接\n",
+                                tmp_file, fsize);
+                    }
+                }
+            }
+        }
+        fprintf(stderr, "[计算机操作] Wayland环境下屏幕截图内存解析需XWayland桥接\n");
+        return -1;
+    }
     Display* display = XOpenDisplay(NULL);
     if (!display) return -1;
 
@@ -1008,7 +1180,15 @@ static int co_os_drag(int start_x, int start_y, int end_x, int end_y) {
         SendInput(1, &down, sizeof(INPUT));
     }
 #elif defined(__linux__)
-    {
+    /* P3-4: Wayland检测 —— 鼠标按下 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        if (co_linux_wayland_has_tool("ydotool")) {
+            char cmd[128];
+            snprintf(cmd, sizeof(cmd), "ydotool mousemove --absolute %d %d && ydotool mousedown 1 2>/dev/null", start_x, start_y);
+            FILE* pd = popen(cmd, "r");
+            if (pd) pclose(pd);
+        }
+    } else {
         Display* dpy = XOpenDisplay(NULL);
         if (dpy) {
             XTestFakeButtonEvent(dpy, 1, True, CurrentTime);
@@ -1044,7 +1224,15 @@ static int co_os_drag(int start_x, int start_y, int end_x, int end_y) {
         SendInput(1, &up, sizeof(INPUT));
     }
 #elif defined(__linux__)
-    {
+    /* P3-4: Wayland检测 —— 鼠标释放 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        if (co_linux_wayland_has_tool("ydotool")) {
+            char cmd[128];
+            snprintf(cmd, sizeof(cmd), "ydotool mousemove --absolute %d %d && ydotool mouseup 1 2>/dev/null", end_x, end_y);
+            FILE* pu = popen(cmd, "r");
+            if (pu) pclose(pu);
+        }
+    } else {
         Display* dpy = XOpenDisplay(NULL);
         if (dpy) {
             XTestFakeButtonEvent(dpy, 1, False, CurrentTime);
@@ -1209,12 +1397,19 @@ COSystem* co_system_create(COConfig config) {
 
     /* ================================================================
      * 平台检测日志: 记录当前运行平台和API可用性
+     * P3-4: 增加Wayland/XWayland检测
      * ================================================================ */
     fprintf(stderr, "[计算机操作] 平台检测: ");
 #ifdef _WIN32
     fprintf(stderr, "Windows (Win32 GDI+ / SendInput / GetDC)\n");
 #elif defined(__linux__)
-    fprintf(stderr, "Linux (X11 / XTest / XGetImage)\n");
+    if (co_linux_is_xwayland()) {
+        fprintf(stderr, "Linux Wayland (XWayland桥接 → X11/XTest/XGetImage)\n");
+    } else if (co_linux_is_wayland()) {
+        fprintf(stderr, "Linux Wayland (纯Wayland → ydotool/wtype/grim)\n");
+    } else {
+        fprintf(stderr, "Linux X11 (XTest/XGetImage)\n");
+    }
 #elif defined(__APPLE__)
     fprintf(stderr, "macOS (CoreGraphics / CGEvent / CGDisplay)\n");
 #else
@@ -1224,7 +1419,12 @@ COSystem* co_system_create(COConfig config) {
 #if defined(_WIN32)
            "Win32 GDI BitBlt", "SendInput", "SetCursorPos+SendInput"
 #elif defined(__linux__)
-           "X11 XGetImage", "XTestFakeKeyEvent", "XTestFakeMotionEvent"
+           co_linux_is_xwayland() ? "XWayland(X11 XGetImage)" :
+           co_linux_is_wayland() ? "Wayland(grim)" : "X11 XGetImage",
+           co_linux_is_xwayland() ? "XWayland(XTestFakeKeyEvent)" :
+           co_linux_is_wayland() ? "Wayland(wtype/ydotool)" : "XTestFakeKeyEvent",
+           co_linux_is_xwayland() ? "XWayland(XTestFakeMotionEvent)" :
+           co_linux_is_wayland() ? "Wayland(ydotool)" : "XTestFakeMotionEvent"
 #elif defined(__APPLE__)
            "CoreGraphics CGDisplay", "CGEventPost", "CGEventPost"
 #else
@@ -1455,6 +1655,11 @@ static int co_close_window_by_title(COSystem* system, const char* title) {
     }
     return -1;
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 —— 窗口管理在Wayland下需合成器协议支持，回退X11 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        fprintf(stderr, "[计算机操作] Wayland环境下窗口关闭操作需XWayland桥接\n");
+        return -1;
+    }
     Display* dpy = XOpenDisplay(NULL);
     if (!dpy) return -1;
     Window root = DefaultRootWindow(dpy);
@@ -1497,6 +1702,11 @@ static int co_focus_window_by_title(COSystem* system, const char* title) {
     }
     return -1;
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 —— 窗口管理在Wayland下需合成器协议支持，回退X11 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        fprintf(stderr, "[计算机操作] Wayland环境下窗口聚焦操作需XWayland桥接\n");
+        return -1;
+    }
     Display* dpy = XOpenDisplay(NULL);
     if (!dpy) return -1;
     Window root = DefaultRootWindow(dpy);
@@ -1559,7 +1769,15 @@ int co_execute_action(COSystem* system, const COAction* action) {
                 SendInput(1, &down, sizeof(INPUT));
             }
 #elif defined(__linux__)
-            {
+            /* P3-4: Wayland检测 —— 鼠标按下 */
+            if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+                if (co_linux_wayland_has_tool("ydotool")) {
+                    char cmd[128];
+                    snprintf(cmd, sizeof(cmd), "ydotool mousemove --absolute %d %d && ydotool mousedown 1 2>/dev/null", x1, y1);
+                    FILE* pd = popen(cmd, "r");
+                    if (pd) pclose(pd);
+                }
+            } else {
                 Display* dpy = XOpenDisplay(NULL);
                 if (dpy) {
                     XTestFakeButtonEvent(dpy, 1, True, CurrentTime);
@@ -1594,7 +1812,15 @@ int co_execute_action(COSystem* system, const COAction* action) {
                 SendInput(1, &up, sizeof(INPUT));
             }
 #elif defined(__linux__)
-            {
+            /* P3-4: Wayland检测 —— 鼠标释放 */
+            if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+                if (co_linux_wayland_has_tool("ydotool")) {
+                    char cmd[128];
+                    snprintf(cmd, sizeof(cmd), "ydotool mousemove --absolute %d %d && ydotool mouseup 1 2>/dev/null", x2, y2);
+                    FILE* pu = popen(cmd, "r");
+                    if (pu) pclose(pu);
+                }
+            } else {
                 Display* dpy = XOpenDisplay(NULL);
                 if (dpy) {
                     XTestFakeButtonEvent(dpy, 1, False, CurrentTime);
@@ -2007,6 +2233,12 @@ int co_browser_get_tabs(COSystem* system, COBrowserTab* tabs, size_t* num_tabs) 
         }
     }
 #elif defined(__linux__)
+    /* P3-4: Wayland检测 —— 浏览器标签查询需X11窗口树遍历，Wayland下回退X11 */
+    if (co_linux_is_wayland() && !co_linux_is_xwayland()) {
+        fprintf(stderr, "[计算机操作] Wayland环境下浏览器标签枚举需XWayland桥接\n");
+        *num_tabs = 0;
+        return 0;
+    }
     /* Linux下通过wmctrl或xdotool查询，简化实现使用X11查询 */
     Display* dpy = XOpenDisplay(NULL);
     if (dpy) {

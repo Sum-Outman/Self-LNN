@@ -15,7 +15,7 @@ extern "C" {
 
 #define CFC_ENHANCED_MAX_NEWTON_ITER 50
 #define CFC_ENHANCED_DEFAULT_STIFFNESS_THRESHOLD 100.0f
-#define CFC_ENHANCED_DEFAULT_STIFFNESS_CHECK_INTERVAL 10
+#define CFC_ENHANCED_DEFAULT_STIFFNESS_CHECK_INTERVAL 100
 #define CFC_ENHANCED_MIN_PARALLEL_SIZE 64
 #define CFC_ENHANCED_POWER_ITER_EPS 1e-8f
 #define CFC_ENHANCED_MAX_POWER_ITER 100
@@ -88,6 +88,11 @@ typedef struct {
     float* power_iter_buffer2;
     int power_iter_buffer_size;
     int initialized;
+    /* P3-002: 刚度估计结果缓存 */
+    uint32_t stiffness_cache_input_hash;    /**< 上次缓存的输入哈希 */
+    uint32_t stiffness_cache_state_hash;    /**< 上次缓存的状态哈希 */
+    float stiffness_cache_ratio;            /**< 缓存的刚度比 */
+    int stiffness_cache_age;                /**< 缓存年龄（步数） */
 } CfcEnhancedState;
 
 CfcEnhancedConfig cfc_enhanced_default_config(void);

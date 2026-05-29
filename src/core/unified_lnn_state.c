@@ -10,10 +10,32 @@
 #include <stdio.h>
 #include <float.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#define MUTEX_T CRITICAL_SECTION
+#define MUTEX_INIT(m) InitializeCriticalSection(m)
+#define MUTEX_DESTROY(m) DeleteCriticalSection(m)
+#define MUTEX_LOCK(m) EnterCriticalSection(m)
+#define MUTEX_UNLOCK(m) LeaveCriticalSection(m)
+#else
+#include <pthread.h>
+#define MUTEX_T pthread_mutex_t
+#define MUTEX_INIT(m) pthread_mutex_init(m, NULL)
+#define MUTEX_DESTROY(m) pthread_mutex_destroy(m)
+#define MUTEX_LOCK(m) pthread_mutex_lock(m)
+#define MUTEX_UNLOCK(m) pthread_mutex_unlock(m)
+#endif
+
 struct UnifiedLNNState {
     UnifiedLNNStateConfig config;
 
     LNN* shared_lnn;
+
+    /* P1-001修复: 添加互斥锁保护并发访问，防止多线程数据污染
+     * 保护范围: combined_input_buffer, hidden_state_buffer,
+     *          modality_running_mean/var, output_weight/bias,
+     *          cross_modal_gates, average_activation, step_count */
+    MUTEX_T state_lock;
 
     float* modality_projections[UNIFIED_LNN_MAX_MODALITIES];
     float* modality_biases[UNIFIED_LNN_MAX_MODALITIES];
@@ -359,6 +381,8 @@ UnifiedLNNState* unified_lnn_state_create(const UnifiedLNNStateConfig* config) {
     state->gate_regularization_strength = 0.001f;
     init_cross_modal_gates(state);
 
+    MUTEX_INIT(&state->state_lock);
+
     return state;
 }
 
@@ -375,6 +399,7 @@ void unified_lnn_state_free(UnifiedLNNState* state) {
     safe_free((void**)&state->output_bias);
     safe_free((void**)&state->combined_input_buffer);
     safe_free((void**)&state->hidden_state_buffer);
+    MUTEX_DESTROY(&state->state_lock);
     safe_free((void**)&state);
 }
 
@@ -385,6 +410,8 @@ int unified_lnn_state_step(UnifiedLNNState* state,
                           float* output, size_t max_output_size) {
     if (!state || !state->is_initialized) return -1;
     if (!output || max_output_size == 0) return -1;
+
+    MUTEX_LOCK(&state->state_lock);
 
     size_t state_dim = state->config.state_dimension;
 
@@ -521,6 +548,7 @@ int unified_lnn_state_step(UnifiedLNNState* state,
                                  state->hidden_state_buffer);
     if (lnn_result != 0) {
         memset(output, 0, max_output_size * sizeof(float));
+        MUTEX_UNLOCK(&state->state_lock);
         return -1;
     }
 
@@ -545,6 +573,7 @@ int unified_lnn_state_step(UnifiedLNNState* state,
     state->average_activation = state->average_activation * 0.9f + act * 0.1f;
     state->step_count++;
 
+    MUTEX_UNLOCK(&state->state_lock);
     return (int)copy_out;
 }
 

@@ -1,6 +1,22 @@
 #ifndef SELFLNN_SWARM_ENHANCED_H
 #define SELFLNN_SWARM_ENHANCED_H
 
+/**
+ * @file swarm_enhanced.h
+ * @brief 增强群体智能引擎 — 【高级增强功能（与基础版互补，非替代）】
+ *
+ * P3-004 功能边界说明:
+ *   ✅ 本文件: 自适应ACO蚁群（自适应信息素更新）、自适应ABC蜂群
+ *   ✅ 本文件: 分布式共识算法（Raft协议）、CfC液态通信集群
+ *   ✅ 本文件: 自愈集群（节点故障检测+自动恢复）、拉普拉斯增强集群通信
+ *   ✅ 本文件: 与 swarm_intelligence.h 基础版协同，提供高级集群智能能力
+ *   ❌ 非本文件: 基础群体算法(ACO/ABC/PSO/GWO/WOA)、基础拓扑管理、收敛控制
+ *                → 请使用 swarm_intelligence.h（基础功能实现）
+ *
+ *   基础版 (swarm_intelligence.h) → 群体智能核心算法 + 基础拓扑
+ *   增强版 (swarm_enhanced.h)     → 自适应群体 + 分布式共识 + CfC液态通信 + 自愈
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 

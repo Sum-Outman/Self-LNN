@@ -476,3 +476,96 @@ int pybullet_reset_simulation(int connection_id) {
     fflush(conn->process_stdin);
     return 0;
 }
+
+/* P2-003修复: pybullet_load_robot — pybullet_load_urdf的别名 */
+int pybullet_load_robot(int connection_id, const char* urdf_path,
+                        const float base_position[3],
+                        const float base_orientation[4],
+                        int use_fixed_base) {
+    return pybullet_load_urdf(connection_id, urdf_path,
+                              base_position, base_orientation, use_fixed_base);
+}
+
+/* P2-003修复: pybullet_step — pybullet_step_simulation的别名 */
+int pybullet_step(int connection_id) {
+    return pybullet_step_simulation(connection_id);
+}
+
+/* P2-003修复: pybullet_get_joint_states — 获取所有关节状态 */
+int pybullet_get_joint_states(int connection_id, int robot_id,
+                              PyBulletJointState* states, int max_joints) {
+    if (connection_id < 1 || connection_id > PYBULLET_MAX_CONNECTIONS) return -1;
+    PyBulletConnection* conn = &g_pybullet_connections[connection_id - 1];
+    if (conn->state != PYBULLET_CONNECTED || !states || max_joints <= 0) return -1;
+
+    /* 发送批量获取所有关节状态的命令 */
+    fprintf(conn->process_stdin,
+        "{\"action\":\"get_all_joints\",\"robot\":%d,\"max\":%d}\n",
+        robot_id, max_joints);
+    fflush(conn->process_stdin);
+
+    char buf[8192];
+    if (!conn->process_stdout || !fgets(buf, (int)sizeof(buf), conn->process_stdout)) {
+        return 0;
+    }
+
+    /* 解析JSON数组格式: {"joints":[{"pos":...,"vel":...,...}, ...]} */
+    int count = 0;
+    const char* p = buf;
+    const char* arr_start = strstr(p, "\"joints\":[");
+    if (!arr_start) {
+        /* 回退: 尝试逐行读取每个关节 */
+        for (int j = 0; j < max_joints; j++) {
+            PyBulletJointState js;
+            memset(&js, 0, sizeof(PyBulletJointState));
+            int ret = pybullet_get_joint_state(connection_id, robot_id, j, &js);
+            if (ret < 0) break;
+            states[count++] = js;
+        }
+        return count;
+    }
+
+    p = arr_start + 10; /* 跳过"joints":[ */
+    while (*p && count < max_joints) {
+        while (*p && *p != '{') p++;
+        if (!*p) break;
+        
+        float pos = 0, vel = 0, tor = 0, tpos = 0, tvel = 0;
+        if (sscanf(p, "{\"pos\":%f,\"vel\":%f,\"torque\":%f,\"tpos\":%f,\"tvel\":%f}",
+            &pos, &vel, &tor, &tpos, &tvel) >= 2) {
+            states[count].position = pos;
+            states[count].velocity = vel;
+            states[count].torque = tor;
+            states[count].target_position = tpos;
+            states[count].target_velocity = tvel;
+            count++;
+        }
+        while (*p && *p != '}') p++;
+        if (*p == '}') p++;
+        while (*p && (*p == ',' || *p == ' ')) p++;
+    }
+    return count;
+}
+
+/* P2-003修复: pybullet_apply_torque — 施加关节力矩 */
+int pybullet_apply_torque(int connection_id, int robot_id,
+                          int joint_index, float torque) {
+    if (connection_id < 1 || connection_id > PYBULLET_MAX_CONNECTIONS) return -1;
+    PyBulletConnection* conn = &g_pybullet_connections[connection_id - 1];
+    if (conn->state != PYBULLET_CONNECTED) return -1;
+
+    /* 发送施加力矩命令到Python子进程 */
+    fprintf(conn->process_stdin,
+        "{\"action\":\"apply_torque\",\"robot\":%d,\"joint\":%d,\"torque\":%f}\n",
+        robot_id, joint_index, (double)torque);
+    fflush(conn->process_stdin);
+
+    /* 读取确认响应 */
+    char buf[256];
+    if (conn->process_stdout && fgets(buf, (int)sizeof(buf), conn->process_stdout)) {
+        if (strstr(buf, "\"status\":\"ok\"") || strstr(buf, "\"ok\"")) {
+            return 0;
+        }
+    }
+    return 0;
+}

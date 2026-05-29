@@ -673,12 +673,31 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
                                         const float* target_output,
                                         size_t target_size,
                                         float learning_rate,
-                                        const int* active_modalities_present) {
+                                        const int* active_modalities_present,
+                                        float* loss) {
     if (!state || !target_output || target_size == 0) return -1;
     if (state->last_active_count <= 0) return -1;
     if (!state->projections_initialized) return -1;
-    /* ZSFX-DEEP-R8-002: 投影矩阵锁定状态下跳过训练,SGD更新仅返回监控损失 */
-    if (state->projection_locked) return 0;
+
+    /* ZSFX-DEEP-R8-002: 投影矩阵锁定状态下跳过SGD训练更新，
+     * 但仍计算前向监控损失值并通过loss参数返回，
+     * 返回 SELFLNN_ERROR_PROJECTION_LOCKED(-506) 以便调用者区分"训练成功"与"锁定跳过"。 */
+    if (state->projection_locked) {
+        size_t out_dim = state->prev_output_dim;
+        size_t n = (out_dim > 0 && out_dim < target_size) ? out_dim : target_size;
+        float monitor_loss = 0.0f;
+        if (n > 0) {
+            for (size_t j = 0; j < n; j++) {
+                float error = state->prev_output[j] - target_output[j];
+                monitor_loss += error * error;
+            }
+            monitor_loss /= (float)n;
+        }
+        if (loss) *loss = monitor_loss;
+        selflnn_set_last_error(SELFLNN_ERROR_PROJECTION_LOCKED, __func__, __FILE__, __LINE__,
+                               "投影矩阵已锁定：跳过SGD训练更新（监控损失=%.6f）", (double)monitor_loss);
+        return SELFLNN_ERROR_PROJECTION_LOCKED;
+    }
 
     size_t out_dim = state->prev_output_dim;
     if (out_dim == 0 || out_dim > SELFLNN_MAX_CONTROL_DIM) return -1;
@@ -831,6 +850,9 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
     float quality = 1.0f / (1.0f + total_loss);
     state->historical_process_quality = state->historical_process_quality * 0.9f + quality * 0.1f;
     state->is_trained = 1;  /* ZSFWS-S006: 首次成功训练后标记为已训练 */
+
+    /* ZSFX-DEEP-R8: 训练成功时通过loss参数返回监控损失值 */
+    if (loss) *loss = total_loss;
 
     return 0;
 }

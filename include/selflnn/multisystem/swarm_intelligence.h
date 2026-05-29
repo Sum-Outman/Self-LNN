@@ -1,6 +1,17 @@
 /**
  * @file swarm_intelligence.h
- * @brief 群体智能优化器 —— 兼容性桥接头文件
+ * @brief 群体智能优化器 — 【基础功能实现】
+ *
+ * P3-004 功能边界说明:
+ *   ✅ 本文件: 核心群体智能算法（ACO蚁群、ABC蜂群、PSO粒子群、GWO灰狼、WOA鲸鱼等）
+ *   ✅ 本文件: 基础拓扑管理（星型/网格/环形/全局/随机/层次）
+ *   ✅ 本文件: 群体收敛控制、适应度评估、多智能体协同基础框架
+ *   ❌ 非本文件: 自适应ACO/ABC、分布式共识(Raft)、液态通信(CfC ODE)、自愈集群、
+ *                拉普拉斯增强集群通信
+ *                → 请使用 swarm_enhanced.h（高级增强功能，与本基础版互补，非替代）
+ *
+ *   基础版 (swarm_intelligence.h) → 群体智能核心算法 + 基础拓扑
+ *   增强版 (swarm_enhanced.h)     → 自适应群体 + 分布式共识 + CfC液态通信 + 自愈
  *
  * ZSFWS-修复: 原 multisystem/swarm_intelligence.c 已合并至 robot/swarm_control.c。
  * 本头文件提供 multisystem_control 模块所需的 Swarm/SwarmConfig/MSSwarmState 等

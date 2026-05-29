@@ -132,6 +132,17 @@ int gazebo_apply_force(GazeboBridge* bridge, const char* model_name,
                        const float force[3], const float torque[3]);
 
 /**
+ * @brief 施加关节力矩/力
+ * @param bridge 桥接句柄
+ * @param model_name 模型名称
+ * @param joint_name 关节名称
+ * @param force 力标量（N）施加在关节运动方向
+ * @return 0成功，-1失败
+ */
+int gazebo_apply_joint_force(GazeboBridge* bridge, const char* model_name,
+                             const char* joint_name, float force);
+
+/**
  * @brief 控制关节
  * @param bridge 桥接句柄
  * @param model_name 模型名称

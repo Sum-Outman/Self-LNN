@@ -510,6 +510,7 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
         [WS_MSG_MODEL_OUTPUT] = "model_output",
         [WS_MSG_ERROR] = "error",
         [WS_MSG_LOG] = "log",
+        [WS_MSG_CUSTOM] = "custom",
         [WS_MSG_DIALOGUE_RESPONSE] = "dialogue_response",
         [WS_MSG_DIALOGUE_TOKEN] = "dialogue_token",
         [WS_MSG_EVOLUTION_EVENT] = "evolution_event",
@@ -519,6 +520,16 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
         [WS_MSG_DIAGNOSTIC] = "diagnostic",
         [WS_MSG_MULTIMODAL_DATA] = "multimodal_data",
         [WS_MSG_TRAINING_METRICS] = "training_metrics",
+        [WS_MSG_GPU_STATUS] = "gpu_status",
+        [WS_MSG_MEMORY_STATUS] = "memory_status",
+        [WS_MSG_KNOWLEDGE_STATUS] = "knowledge_status",
+        [WS_MSG_PREDICTION_RESULT] = "prediction_result",
+        [WS_MSG_CONCEPT_EVOLUTION] = "concept_evolution",
+        [WS_MSG_STATE_ACTIVATION] = "state_activation_data",
+        [WS_MSG_WEIGHT_DISTRIBUTION] = "weight_distribution",
+        [WS_MSG_ACTIVATION_STATS] = "activation_stats",
+        [WS_MSG_LNN_STATE] = "lnn_state",
+        [WS_MSG_METACOGNITION] = "metacognition_status",
     };
     static const size_t num_msg_types = sizeof(msg_type_names) / sizeof(msg_type_names[0]);
     const char* type_name = (type < num_msg_types && msg_type_names[type]) ? msg_type_names[type] : "custom";

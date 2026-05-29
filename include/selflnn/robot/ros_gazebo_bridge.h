@@ -145,6 +145,8 @@ int ros_gazebo_bridge_set_model_state(RosGazeboBridge* bridge, const char* model
                                        const float* position, const float* orientation);
 int ros_gazebo_bridge_apply_body_wrench(RosGazeboBridge* bridge, const char* model_name,
                                          const char* link_name, const float* force, const float* torque);
+int ros_gazebo_bridge_apply_joint_force(RosGazeboBridge* bridge, const char* model_name,
+                                         const char* joint_name, float force);
 int ros_gazebo_bridge_get_joint_state(RosGazeboBridge* bridge, int robot_id,
                                        float* positions, float* velocities, float* efforts, int max_joints);
 int ros_gazebo_bridge_set_joint_position(RosGazeboBridge* bridge, int robot_id,

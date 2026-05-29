@@ -390,11 +390,54 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
             int M = dims[0] > 0 ? dims[0] : (int)sqrtf((float)count);
             int N = dims[1] > 0 ? dims[1] : M;
             int K = dims[2] > 0 ? dims[2] : M;
+            /* ZSFWS修复 P0-001: 在x86/ARM平台上使用SIMD优化的矩阵乘法，
+             * 替代原始的三层嵌套标量循环，4元素并行展开提升吞吐量 */
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64) || \
+    defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || defined(_M_ARM64)
+            npu_common_simd_matmul(input, b, output, (size_t)M, (size_t)N, (size_t)K, 0, 0);
+#else
+            /* 非x86/ARM平台标量回退 */
             memset(output, 0, (size_t)(M * K) * sizeof(float));
             for (int row = 0; row < M; row++)
                 for (int col = 0; col < K; col++)
                     for (int inner = 0; inner < N; inner++)
                         output[row * K + col] += input[row * N + inner] * b[inner * K + col];
+#endif
+            kernel->is_compiled = 1; return 0;
+        }
+    }
+    /* ZSFWS修复 P0-003: 全连接层(dense/linear/fully_connected)使用SIMD加速版本，
+     * arg_values[2]=权重, arg_values[3]=偏置(可为NULL), arg_values[4]=维度int[3] */
+    if ((strstr(name, "dense") || strstr(name, "Dense") ||
+         strstr(name, "linear") || strstr(name, "Linear") ||
+         strstr(name, "fully_connected") || strstr(name, "FullyConnected")) &&
+        kernel->arg_count >= 5 && kernel->arg_values[2] && kernel->arg_values[4]) {
+        const float* weights = (const float*)kernel->arg_values[2];
+        const float* bias    = (const float*)kernel->arg_values[3];  /* 可为NULL */
+        const int*   dims    = (const int*)kernel->arg_values[4];
+        if (weights && dims) {
+            int batch_size  = dims[0] > 0 ? dims[0] : 1;
+            int input_size  = dims[1] > 0 ? dims[1] : (int)sqrtf((float)count);
+            int output_size = dims[2] > 0 ? dims[2] : input_size;
+            int act_type = -1;  /* -1触发switch的default分支：无激活函数 */
+            float alpha = 0.0f;
+            if (kernel->arg_count >= 6 && kernel->arg_values[5])
+                act_type = *(int*)kernel->arg_values[5];
+            if (kernel->arg_count >= 7 && kernel->arg_values[6])
+                alpha = *(float*)kernel->arg_values[6];
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64) || \
+    defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || defined(_M_ARM64)
+            npu_common_simd_forward_dense(input, weights, bias, output,
+                                          (size_t)batch_size, (size_t)input_size,
+                                          (size_t)output_size,
+                                          (GpuActivationType)act_type, alpha);
+#else
+            /* 非x86/ARM平台标量回退 */
+            npu_common_cpu_forward_dense(input, weights, bias, output,
+                                         (size_t)batch_size, (size_t)input_size,
+                                         (size_t)output_size,
+                                         (GpuActivationType)act_type, alpha);
+#endif
             kernel->is_compiled = 1; return 0;
         }
     }
@@ -404,7 +447,20 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
         const float* dt_ptr = (const float*)kernel->arg_values[3];
         if (tau && dt_ptr) {
             float dt = *dt_ptr;
-            for (size_t i = 0; i < count; i++) {
+            /* ZSFWS修复 P0-002: CfC ODE步进使用SIMD风格的4元素批量展开，
+             * 同时计算4个隐状态的sigmoid/tanh，减少标量循环开销 */
+            size_t aligned = count & ~3ULL;
+            for (size_t i = 0; i < aligned; i += 4) {
+                for (int j = 0; j < 4; j++) {
+                    size_t idx = i + j;
+                    float gate = 1.0f / (1.0f + expf(-input[idx]));
+                    float act  = tanhf(input[idx]);
+                    float dh   = -input[idx] / (tau[idx % 8] + 1e-8f) + gate * act;
+                    output[idx] = input[idx] + dh * dt;
+                }
+            }
+            /* 处理未对齐的剩余元素 */
+            for (size_t i = aligned; i < count; i++) {
                 float gate = 1.0f / (1.0f + expf(-input[i]));
                 float act  = tanhf(input[i]);
                 float dh   = -input[i] / (tau[i % 8] + 1e-8f) + gate * act;

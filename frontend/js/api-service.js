@@ -1828,6 +1828,20 @@ class ApiService {
         }
     }
 
+    /* P2-4: 设置安全边界 — 封装/safety/bounds端点 */
+    async setSafetyBounds(bounds) {
+        try {
+            var resp = await this.request('/safety/bounds', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(bounds)
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data, message: data && data.message };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    }
+
     /**
      * 获取认知状态（含心智理论数据）
      */
@@ -3933,6 +3947,18 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* P2-4: 设置API密钥 — 封装/key/set端点 */
+    async setKey(apiKey) {
+        try {
+            var resp = await this.request('/key/set', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({api_key: apiKey})
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     /* ==================== ROS 增强 API ==================== */
 
     async rosPublish(topic, type, data) {
@@ -5225,8 +5251,8 @@ class ApiService {
         try { var r = await this.request('/system/config/update', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(config||{}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
-    async systemSettings() {
-        try { var r = await this.request('/system/settings'); var d = await r.json(); return { success: true, data: d }; }
+    async systemSettings(settings) {
+        try { var r = await this.request('/system/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(settings||{}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
     async systemRestart() {
@@ -5265,6 +5291,81 @@ class ApiService {
     /* --- 能力诊断 --- */
     async capabilityDiagnose() {
         try { var r = await this.request('/capability/diagnose'); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* ==================== P2-002: 补充的API封装方法 ==================== */
+
+    async emergencyStopRobots() {
+        try { var r = await this.request('/robot/emergency_stop', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async serialList() {
+        try { var r = await this.request('/serial/list', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async serialOpen(port, baudRate) {
+        try { var r = await this.request('/serial/open', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({port:port, baud_rate:baudRate||115200}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async serialClose(port) {
+        try { var r = await this.request('/serial/close', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({port:port}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async serialSend(port, data) {
+        try { var r = await this.request('/serial/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({port:port, data:data}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async computerLaunch(appName) {
+        try { var r = await this.request('/computer/launch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:appName}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async computerScreenshot() {
+        try { var r = await this.request('/computer/screenshot', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async computerType(text) {
+        try { var r = await this.request('/computer/type', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:text}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async controlGazebo(action, params) {
+        try { var r = await this.request('/gazebo/control', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:action, params:params||{}}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async simulationPlanPath(start, goal) {
+        try { var r = await this.request('/simulation/plan_path', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start:start, goal:goal}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async teachGetConcepts() {
+        try { var r = await this.request('/teach/get_concepts', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async teachTestConcept(concept) {
+        try { var r = await this.request('/teach/test_concept', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({concept:concept}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async apiKeyCreate(name, permission) {
+        try { var r = await this.request('/key/create', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name, permission:permission}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async apiKeyList() {
+        try { var r = await this.request('/key/list', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async apiKeyDelete(keyId) {
+        try { var r = await this.request('/key/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key_id:keyId}) }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async devicesEmergencyStop() {
+        try { var r = await this.request('/devices/emergency_stop', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async getHardwareInfo() {
+        try { var r = await this.request('/hardware/info', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+    async scanHardware() {
+        try { var r = await this.request('/hardware/scan', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
 

@@ -126,6 +126,10 @@ struct EmergencyStopSystem {
     /* GPIO/串口断电 (平台相关) */
     void (*physical_power_cut)(void);
     
+    /* P3-001修复: 系统运行时指标缓存（供快照打包使用） */
+    EmergencySystemMetrics last_metrics;
+    int metrics_valid;
+    int snapshot_sequence_counter;
 };
 
 EmergencyStopSystem* emergency_stop_create(const EmergencyStopConfig* config) {
@@ -161,6 +165,11 @@ EmergencyStopSystem* emergency_stop_create(const EmergencyStopConfig* config) {
     system->status.status_message[0] = '\0';
     strncpy(system->status.status_message, "系统正常运行",
             sizeof(system->status.status_message) - 1);
+    
+    /* P3-001修复: 初始化指标缓存 */
+    memset(&system->last_metrics, 0, sizeof(EmergencySystemMetrics));
+    system->metrics_valid = 0;
+    system->snapshot_sequence_counter = 0;
     
     /* 初始化拉普拉斯分析器（频域紧急停止稳定性分析） */
     return system;
@@ -433,10 +442,81 @@ int emergency_stop_snapshot(EmergencyStopSystem* system,
         strncpy(snap->description, description, sizeof(snap->description) - 1);
     }
 
-    /* R5-005修复: 分配并初始化快照缓冲区 */
+    /* P3-001修复: 使用紧凑二进制打包格式填充真实系统状态 */
+    /* 二进制格式布局 (1024字节):
+     *  [0-3]   魔数: 0x53534E41 ("SSNA" = Snapshot AGI)
+     *  [4-7]   版本: 1
+     *  [8-11]  AGI活跃任务数 (int32)
+     *  [12-15] AGI总任务数 (int32)
+     *  [16-19] AGI活跃目标数 (int32)
+     *  [20-23] AGI总目标数 (int32)
+     *  [24-27] AGI认知循环计数 (int32)
+     *  [28-31] AGI认知负载率 (float32)
+     *  [32-35] LNN平均激活值 (float32)
+     *  [36-39] LNN最大激活值 (float32)
+     *  [40-43] LNN最小激活值 (float32)
+     *  [44-47] LNN步数 (int32)
+     *  [48-51] LNN隐藏维度 (int32)
+     *  [52-55] LNN输入维度 (int32)
+     *  [56-59] LNN输出维度 (int32)
+     *  [60-67] 总分配内存字节 (uint64)
+     *  [68-75] 总释放内存字节 (uint64)
+     *  [76-83] 当前使用内存字节 (uint64)
+     *  [84-87] 活跃分配计数 (int32)
+     *  [88-91] 内存使用率 (float32)
+     *  [92-99] 快照时间戳微秒 (int64)
+     *  [100-103] 快照序列号 (int32)
+     */
     snap->system_state = safe_calloc(1024, 1);
     snap->state_size = 1024;
-    /* 注意: current_system_state字段在v2.0中将添加到EmergencyStopSystem结构体 */
+    
+    if (snap->system_state) {
+        uint8_t* buf = (uint8_t*)snap->system_state;
+        EmergencySystemMetrics m;
+        if (system->metrics_valid) {
+            m = system->last_metrics;
+            m.snapshot_timestamp_us = snap->timestamp_us;
+            m.snapshot_sequence = system->snapshot_sequence_counter++;
+        } else {
+            /* 无外部指标时使用系统内部可获取的信息填充 */
+            memset(&m, 0, sizeof(EmergencySystemMetrics));
+            m.snapshot_timestamp_us = snap->timestamp_us;
+            m.snapshot_sequence = system->snapshot_sequence_counter++;
+            m.cognitive_cycle_count = system->status.trigger_count;
+            m.active_task_count = system->trigger_count;
+            m.active_goal_count = system->triggered_count;
+            m.cognitive_load = system->status.cfc_anomaly_score;
+        }
+        
+        /* 写入魔数 "SSNA" */
+        buf[0] = 'S'; buf[1] = 'S'; buf[2] = 'N'; buf[3] = 'A';
+        /* 写入版本 */
+        *(int32_t*)(buf + 4) = 1;
+        /* AGI认知状态 */
+        *(int32_t*)(buf + 8)  = m.active_task_count;
+        *(int32_t*)(buf + 12) = m.total_task_count;
+        *(int32_t*)(buf + 16) = m.active_goal_count;
+        *(int32_t*)(buf + 20) = m.total_goal_count;
+        *(int32_t*)(buf + 24) = m.cognitive_cycle_count;
+        *(float*)(buf + 28)   = m.cognitive_load;
+        /* LNN状态摘要 */
+        *(float*)(buf + 32)  = m.lnn_mean_activation;
+        *(float*)(buf + 36)  = m.lnn_max_activation;
+        *(float*)(buf + 40)  = m.lnn_min_activation;
+        *(int32_t*)(buf + 44) = m.lnn_step_count;
+        *(int32_t*)(buf + 48) = m.lnn_hidden_dim;
+        *(int32_t*)(buf + 52) = m.lnn_input_dim;
+        *(int32_t*)(buf + 56) = m.lnn_output_dim;
+        /* 内存使用摘要 */
+        *(uint64_t*)(buf + 60) = (uint64_t)m.total_allocated_bytes;
+        *(uint64_t*)(buf + 68) = (uint64_t)m.total_freed_bytes;
+        *(uint64_t*)(buf + 76) = (uint64_t)m.current_used_bytes;
+        *(int32_t*)(buf + 84)  = m.active_allocation_count;
+        *(float*)(buf + 88)    = m.memory_usage_ratio;
+        /* 时间戳 */
+        *(int64_t*)(buf + 92)  = (int64_t)m.snapshot_timestamp_us;
+        *(int32_t*)(buf + 100) = m.snapshot_sequence;
+    }
 
     system->snapshot_count++;
 
@@ -680,6 +760,24 @@ int emergency_stop_get_triggered_list(const EmergencyStopSystem* system,
     }
 
     return count;
+}
+
+/* P3-001修复: 设置系统运行时指标 — 供快照捕获使用 */
+int emergency_stop_set_metrics(EmergencyStopSystem* system,
+                                const EmergencySystemMetrics* metrics) {
+    if (!system || !metrics) return -1;
+    memcpy(&system->last_metrics, metrics, sizeof(EmergencySystemMetrics));
+    system->metrics_valid = 1;
+    return 0;
+}
+
+/* P3-001修复: 获取最近一次设置的指标 */
+int emergency_stop_get_metrics(const EmergencyStopSystem* system,
+                                EmergencySystemMetrics* metrics) {
+    if (!system || !metrics) return -1;
+    if (!system->metrics_valid) return -1;
+    memcpy(metrics, &system->last_metrics, sizeof(EmergencySystemMetrics));
+    return 0;
 }
 
 int emergency_stop_clear(EmergencyStopSystem* system, const char* password) {

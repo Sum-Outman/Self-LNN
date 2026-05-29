@@ -379,12 +379,12 @@ static int extract_mel_features(SpeechRecognizer* sr,
  * 当LNN可用且维度匹配时通过lnn_forward处理；否则回退到线性投影。       *
  * =============================================================== */
 
-static void compute_output_logits(SpeechRecognizer* sr,
+static int compute_output_logits(SpeechRecognizer* sr,
                                    const float* hidden_state,
                                    float* logits, int vocab_size) {
     int hs = (int)sr->config.hidden_size;
 
-    /* P2-005: 尝试共享LNN做输出投影（非线性液态动态） */
+    /* 尝试共享LNN做输出投影（非线性液态动态） */
     if (sr->shared_lnn) {
         LNNConfig lnn_cfg;
         if (lnn_get_config(sr->shared_lnn, &lnn_cfg) == 0) {
@@ -397,27 +397,19 @@ static void compute_output_logits(SpeechRecognizer* sr,
                         memcpy(logits, lnn_output, (size_t)vocab_size * sizeof(float));
                         safe_free((void**)&lnn_input);
                         safe_free((void**)&lnn_output);
-                        return;
+                        return 0;
                     }
                 }
                 safe_free((void**)&lnn_input);
                 safe_free((void**)&lnn_output);
             }
         }
-        /* LNN维度不匹配或投影失败时回退到线性投影 */
+        /* LNN不可用或维度不匹配 → 返回错误码让上层处理，不执行线性投影回退 */
     }
 
-    /* 线性投影回退（Xavier初始化权重） */
-    const float* W = sr->output_projection_weight;
-    const float* b = sr->output_projection_bias;
-
-    for (int c = 0; c < vocab_size; c++) {
-        double sum = 0.0;
-        for (int h = 0; h < hs; h++) {
-            sum += (double)hidden_state[h] * W[(size_t)h * vocab_size + c];
-        }
-        logits[c] = (float)(sum + b[c]);
-    }
+    /* LNN不可用，不执行任何非LNN回退，返回错误码供上层自行处理 */
+    memset(logits, 0, (size_t)vocab_size * sizeof(float));
+    return -1;
 }
 
 /* =============================================================== *
@@ -1905,8 +1897,12 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
         }
 
         float* logits = all_logits + (size_t)t * vocab_size;
-        compute_output_logits(recognizer, recognizer->hidden_state,
-                              logits, vocab_size);
+        if (compute_output_logits(recognizer, recognizer->hidden_state,
+                                   logits, vocab_size) != 0) {
+            fprintf(stderr, "[语音识别错误] LNN投影不可用于步%d，无法继续识别\n", t);
+            safe_free((void**)&all_logits);
+            return NULL;
+        }
     }
 
     /* 步骤4：Beam Search CTC解码（beam_width=5）
@@ -2346,8 +2342,12 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                 float* frame_logits = (float*)safe_malloc((size_t)vs * sizeof(float));
                 if (frame_logits) {
                     /* 使用当前投影权重 */
-                    compute_output_logits(recognizer, recognizer->hidden_state,
-                                          frame_logits, vs);
+                    if (compute_output_logits(recognizer, recognizer->hidden_state,
+                                               frame_logits, vs) != 0) {
+                        /* LNN不可用，跳过此帧的训练 */
+                        safe_free((void**)&frame_logits);
+                        continue;
+                    }
 
                     /* P2-050修复: 参数量>1000时使用分析梯度，避免数值梯度O(N)前向传播 */
                     int total_params = hs * vs + vs; /* 权重参数 + 偏置参数 */
@@ -2367,8 +2367,11 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                                 for (int c = 0; c < vs; c++) {
                                     float old = recognizer->output_projection_weight[(size_t)h * vs + c];
                                     recognizer->output_projection_weight[(size_t)h * vs + c] = old + eps;
-                                    compute_output_logits(recognizer, recognizer->hidden_state,
-                                                          frame_logits, vs);
+                                    if (compute_output_logits(recognizer, recognizer->hidden_state,
+                                                               frame_logits, vs) != 0) {
+                                        recognizer->output_projection_weight[(size_t)h * vs + c] = old;
+                                        continue;
+                                    }
                                     float pos_loss = 0.0f;
                                     for (int cc = 0; cc < vs; cc++) {
                                         pos_loss -= target_dist[cc] * logf(frame_logits[cc] + 1e-10f);
@@ -2381,8 +2384,11 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                             for (int c = 0; c < vs; c++) {
                                 float old = recognizer->output_projection_bias[c];
                                 recognizer->output_projection_bias[c] = old + eps;
-                                compute_output_logits(recognizer, recognizer->hidden_state,
-                                                      frame_logits, vs);
+                                if (compute_output_logits(recognizer, recognizer->hidden_state,
+                                                           frame_logits, vs) != 0) {
+                                    recognizer->output_projection_bias[c] = old;
+                                    continue;
+                                }
                                 float pos_loss = 0.0f;
                                 for (int cc = 0; cc < vs; cc++) {
                                     pos_loss -= target_dist[cc] * logf(frame_logits[cc] + 1e-10f);

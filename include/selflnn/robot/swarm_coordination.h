@@ -164,6 +164,24 @@ int raft_get_leader(RaftNode* node);
 int raft_get_state(RaftNode* node);
 int raft_get_term(RaftNode* node);
 
+/* Raft日志快照压缩 */
+int raft_create_snapshot(RaftNode* node);
+int raft_auto_snapshot(RaftNode* node);
+int raft_apply_snapshot(RaftNode* node, int last_included_index, int last_included_term,
+                         const char* state_data, int data_len);
+
+/* Raft日志持久化 */
+int raft_persist_log(RaftNode* node);
+int raft_load_log(RaftNode* node);
+int raft_set_log_path(RaftNode* node, const char* file_path);
+int raft_set_snapshot_threshold(RaftNode* node, int threshold);
+
+/* Raft成员变更协议 */
+int raft_add_server(RaftNode* node, int new_server_id);
+int raft_remove_server(RaftNode* node, int server_id);
+int raft_commit_membership_change(RaftNode* node);
+int raft_advance_commit_with_membership(RaftNode* node);
+
 /* ============================================================================
  * V-028: 分布式任务分配 —— 拍卖算法
  * ============================================================================ */

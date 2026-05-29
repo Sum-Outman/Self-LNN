@@ -13,6 +13,7 @@ static float g_default_focal_gamma = 2.0f;
 static float g_default_focal_alpha = 0.25f;
 static float g_default_dice_smooth = 1e-6f;
 static float g_default_triplet_margin = 1.0f;
+static float g_default_huber_delta = 1.0f;
 static float g_default_quantile_tau = 0.5f;
 
 /* 可配置超参数setter函数 */
@@ -20,6 +21,7 @@ void loss_set_default_focal_gamma(float gamma) { g_default_focal_gamma = gamma; 
 void loss_set_default_focal_alpha(float alpha) { g_default_focal_alpha = alpha; }
 void loss_set_default_dice_smooth(float smooth) { g_default_dice_smooth = smooth; }
 void loss_set_default_triplet_margin(float margin) { g_default_triplet_margin = margin; }
+void loss_set_default_huber_delta(float delta) { g_default_huber_delta = delta; }
 void loss_set_default_quantile_tau(float tau) { g_default_quantile_tau = tau; }
 
 static float get_gamma(const LossConfig* c) {
@@ -36,6 +38,9 @@ static float get_margin(const LossConfig* c) {
 }
 static float get_tau(const LossConfig* c) {
     return (c && c->quantile_tau > 0.0f) ? c->quantile_tau : g_default_quantile_tau;
+}
+static float get_huber_delta(const LossConfig* c) {
+    return (c && c->huber_delta > 0.0f) ? c->huber_delta : g_default_huber_delta;
 }
 
 float loss_compute_ex(const float* predictions, const float* targets, int n,
@@ -69,7 +74,7 @@ float loss_compute_ex(const float* predictions, const float* targets, int n,
         }
         case LOSS_HUBER:
         {
-            float delta = 1.0f;
+            float delta = get_huber_delta(config);
             for (i = 0; i < n; i++)
             {
                 float diff = predictions[i] - targets[i];
@@ -255,7 +260,7 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
         }
         case LOSS_HUBER:
         {
-            float delta = 1.0f;
+            float delta = get_huber_delta(config);
             float scale = 1.0f / (float)n;
             for (i = 0; i < n; i++)
             {
@@ -557,6 +562,7 @@ float loss_compute_multimodal(const float* predictions, const float* targets,
         /* 若config全零则传NULL使用默认值 */
         if (seg->loss_config.focal_gamma > 0.0f || seg->loss_config.focal_alpha > 0.0f ||
             seg->loss_config.dice_smooth > 0.0f || seg->loss_config.triplet_margin > 0.0f ||
+            seg->loss_config.huber_delta > 0.0f ||
             seg->loss_config.quantile_tau > 0.0f) {
             loss_cfg = &seg->loss_config;
         } else {
@@ -620,6 +626,7 @@ void loss_gradient_multimodal(const float* predictions, const float* targets,
 
         if (seg->loss_config.focal_gamma > 0.0f || seg->loss_config.focal_alpha > 0.0f ||
             seg->loss_config.dice_smooth > 0.0f || seg->loss_config.triplet_margin > 0.0f ||
+            seg->loss_config.huber_delta > 0.0f ||
             seg->loss_config.quantile_tau > 0.0f) {
             loss_cfg = &seg->loss_config;
         } else {

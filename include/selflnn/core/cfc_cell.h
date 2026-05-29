@@ -250,6 +250,11 @@ struct CfCCell {
     GatedCfCData* gated_data;
     HierarchicalCfCData* hierarchical_data;
     LiquidMemoryCfCData* liquid_memory_data;
+    /* 分层CfC门控权重矩阵（可学习参数，替代硬编码0.1f） */
+    float* hierarchical_gate_weights;         /**< 分层CfC门控权重矩阵 [hidden_size × input_size] */
+    float* hierarchical_activation_weights;   /**< 分层CfC激活融合权重 [hidden_size × input_size] */
+    float* hierarchical_gate_weight_grad;     /**< 分层CfC门控权重梯度 */
+    float* hierarchical_activation_weight_grad; /**< 分层CfC激活权重梯度 */
     /* P0-BPTT: 统一参数更新 — cell级动量缓冲区 */
     float* cell_momentum_buffer;     /**< 所有cell级参数的动量缓冲区（一维平坦） */
     float* cell_velocity_buffer;     /**< 所有cell级参数的速度缓冲区（Adam二阶矩） */

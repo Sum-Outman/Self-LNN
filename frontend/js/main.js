@@ -5650,27 +5650,25 @@ async function sendDialogueMessage() {
 /* ZSFABC-002修复: 通过统一API服务发送多模态对话请求，获得完整认证/重试/熔断保护 */
 async function sendMultimodalRequest(message, imageData, audioData, params) {
     try {
-        var tempVal = params.temperature !== undefined ? Math.round(params.temperature * 10) : -1;
-        if (tempVal < 1) tempVal = 10;
-        if (tempVal > 20) tempVal = 20;
-        const payload = {
-            message: message || '',
-            temperature: tempVal,
-            max_length: params.maxLength || 128,
-            top_k: params.topK || 40,
-            memory: params.memoryRounds || 5
-        };
-        if (imageData) payload.image = imageData;
-        if (audioData) payload.audio = audioData;
+        /* P2-4: 使用api-service封装的sendMultimodalDialogue方法 */
+        var api = window.SelfLnnApi;
+        if (!api) throw new Error('API服务未初始化');
 
-        /* ZSFABC-002修复: 使用统一API服务，自动附加X-Api-Key、指数退避重试、熔断保护 */
-        const response = await window.SelfLnnApi.request('/dialogue/multimodal', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        var jsonData = await response.json();
+        var options = {
+            temperature: params.temperature || 0.8,
+            maxLength: params.maxLength || 128,
+            topK: params.topK || 40,
+            memoryRounds: params.memoryRounds || 5
+        };
+        /* api-service期望images/audio数组格式 */
+        if (imageData) options.images = [imageData];
+        if (audioData) options.audio = [audioData];
+
+        var resp = await api.sendMultimodalDialogue(message, options);
+        if (!resp.success) {
+            return { success: false, error: resp.error || '多模态对话请求失败' };
+        }
+        var jsonData = resp.data;
         if (jsonData && jsonData.dialogue) {
             return {
                 success: true,
@@ -6073,6 +6071,75 @@ function toggleVoiceOutput() {
     }
 }
 
+/* P3-005: 多模态独立输入入口函数 */
+function triggerVisionInput() {
+    if (!g_dialogueEnhanced) {
+        showNotification('对话增强系统未就绪', 'warning');
+        return;
+    }
+    if (!window.SelfLnnApi) {
+        showNotification('后端API未连接', 'error');
+        return;
+    }
+    var input = document.getElementById('dialogue-input');
+    var imageData = g_dialogueEnhanced.getLastCameraFrame ? g_dialogueEnhanced.getLastCameraFrame() : null;
+    if (!imageData) {
+        showNotification('请先启用摄像头并获取画面', 'warning');
+        return;
+    }
+    window.SelfLnnApi.request('/api/vision', { method: 'POST', body: JSON.stringify({ image: imageData }) })
+        .then(function(r) { return r ? r.json() : null; })
+        .then(function(data) {
+            if (input) input.value += '\n[视觉输入已处理]';
+        })
+        .catch(function() { showNotification('视觉输入API请求失败', 'error'); });
+}
+
+function triggerAudioInput() {
+    if (!g_dialogueEnhanced || !g_deviceManager) {
+        showNotification('设备管理器未就绪', 'warning');
+        return;
+    }
+    if (!window.SelfLnnApi) {
+        showNotification('后端API未连接', 'error');
+        return;
+    }
+    var activeMic = g_deviceManager.microphones.find(function(m) { return m.active; });
+    if (!activeMic) {
+        showNotification('请先在设备管理中启动麦克风', 'warning');
+        return;
+    }
+    var input = document.getElementById('dialogue-input');
+    if (input) input.value += '\n[音频输入模式已激活，请说话...]';
+    if (typeof g_dialogueEnhanced.startVoiceInput === 'function') {
+        toggleVoiceInput();
+    }
+}
+
+function triggerTextInput() {
+    var input = document.getElementById('dialogue-input');
+    if (input) {
+        input.focus();
+        input.placeholder = '请输入纯文本信息...';
+        showNotification('文本输入模式已激活，请直接输入文字', 'info');
+    }
+}
+
+function triggerSensorInput() {
+    if (!window.SelfLnnApi) {
+        showNotification('后端API未连接', 'error');
+        return;
+    }
+    var input = document.getElementById('dialogue-input');
+    window.SelfLnnApi.request('/api/sensor/pipeline/status', { method: 'GET' })
+        .then(function(r) { return r ? r.json() : null; })
+        .then(function(data) {
+            if (input) input.value += '\n[传感器数据已请求]';
+            showNotification('传感器输入已触发', 'success');
+        })
+        .catch(function() { showNotification('传感器输入API请求失败', 'error'); });
+}
+
 /**
  * API密钥管理函数
  */
@@ -6118,12 +6185,12 @@ function copyApiKey() {
 async function refreshApiKeyStatus() {
     showNotification('正在获取API密钥状态...', 'info');
     try {
-        /* F-014: 使用ApiService统一认证替代直接fetch */
-        var result = window.SelfLnnApi ? 
-            await window.SelfLnnApi.request('/key/status', {method:'GET'}) : 
-            await fetch('/api/key/status');
-        if (result.ok) {
-            var data = await result.json();
+        /* P2-4: 使用api-service封装方法替代直接request调用 */
+        var api = window.SelfLnnApi;
+        if (!api) throw new Error('API服务未初始化');
+        var resp = await api.getKeyStatus();
+        if (resp.success) {
+            var data = resp.data;
             var keyInput = document.getElementById('api-key-current');
             var statusBadge = document.getElementById('api-key-enabled-status');
             if (data && data.key_status) {
@@ -6159,19 +6226,12 @@ async function setNewApiKey() {
     var newKey = input.value.trim();
     showNotification('正在设置新API密钥...', 'info');
     try {
-        /* F-014: 使用ApiService统一认证替代直接fetch */
-        var result = window.SelfLnnApi ?
-            await window.SelfLnnApi.request('/key/set', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({api_key:newKey})
-            }) :
-            await fetch('/api/key/set', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ api_key: newKey })
-            });
-        if (result.ok) {
-            var data = await result.json();
+        /* P2-4: 使用api-service封装方法替代直接request调用 */
+        var api = window.SelfLnnApi;
+        if (!api) throw new Error('API服务未初始化');
+        var resp = await api.setKey(newKey);
+        if (resp.success) {
+            var data = resp.data;
             if (data && data.key_manage && data.key_manage.status === 'success') {
                 showNotification('✅ API密钥设置成功', 'success');
                 input.value = '';
@@ -6211,12 +6271,12 @@ async function refreshApiEndpointList() {
     var listEl = document.getElementById('api-endpoint-list');
     if (!listEl) return;
     try {
-        /* F-014: 使用ApiService统一认证替代直接fetch */
-        var result = window.SelfLnnApi ?
-            await window.SelfLnnApi.request('/key/docs', {method:'GET'}) :
-            await fetch('/api/key/docs');
-        if (result.ok) {
-            var data = await result.json();
+        /* P2-4: 使用api-service封装方法替代直接request调用 */
+        var api = window.SelfLnnApi;
+        if (!api) throw new Error('API服务未初始化');
+        var resp = await api.getApiKeyDocs();
+        if (resp.success) {
+            var data = resp.data;
             if (data && data.api_key_docs && data.api_key_docs.endpoints) {
                 var html = '';
                 data.api_key_docs.endpoints.forEach(function(ep) {
@@ -6475,11 +6535,12 @@ function navigateTo(sectionId) {
 /** 刷新仪表盘API KEY快捷卡片 */
 async function refreshDashApiKey() {
     try {
-        /* F-014: 使用ApiService统一认证替代直接fetch */
-        var result = window.SelfLnnApi ?
-            await window.SelfLnnApi.request('/key/status', {method:'GET'}) :
-            await fetch('/api/key/status');
-        var data = await result.json();
+        /* P2-4: 使用api-service封装方法替代直接request调用 */
+        var api = window.SelfLnnApi;
+        if (!api) return;
+        var resp = await api.getKeyStatus();
+        if (!resp.success) return;
+        var data = resp.data;
         var addrEl = document.getElementById('dash-api-address');
         var statusEl = document.getElementById('dash-api-key-status');
         /* BUG-6修复: 统一使用带/api后缀的完整地址格式 */
@@ -7296,13 +7357,10 @@ window.saveSafetySetting = function(key, value) {
     try {
         var payload = {};
         payload[key] = value;
-        if (window.SelfLnnApi && window.SelfLnnApi.request) {
-            /* FIX-F2-CRIT-5: request第2参数为options对象非method字符串 */
-            window.SelfLnnApi.request('/safety/bounds', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            }).then(function(r) {
+        /* P2-4: 使用api-service封装的setSafetyBounds方法 */
+        var api = window.SelfLnnApi;
+        if (api && api.setSafetyBounds) {
+            api.setSafetyBounds(payload).then(function(r) {
                 if (r && r.success) {
                     window.showNotification('安全设置已保存', 'success');
                 } else {
@@ -7596,9 +7654,12 @@ async function refreshLearningMetrics() {
             
             async function refreshAllPanels() {
                 try {
-                    var r = await window.SelfLnnApi.request('/status', {}, 2);
-                    if (!r.ok) return;
-                    var d = await r.json();
+                    /* P2-4: 使用api-service封装的getSystemStatus方法 */
+                    var api = window.SelfLnnApi;
+                    if (!api) return;
+                    var resp = await api.getSystemStatus();
+                    if (!resp.success) return;
+                    var d = resp.data;
                     var sys = d.system || d;
                     
                     // 直接设置所有关键元素（P3-004修复: 移除骨架屏类）

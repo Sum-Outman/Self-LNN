@@ -2386,6 +2386,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/camera/devices") == 0)            return API_GET_CAMERA_DEVICES;
     if (strcmp(p, "/api/camera/switch") == 0)             return API_POST_CAMERA_SWITCH;
     if (strcmp(p, "/api/audio/devices") == 0)             return API_GET_AUDIO_DEVICES;
+    if (strcmp(p, "/api/audio/spectrum") == 0)            return API_GET_AUDIO_SPECTRUM;
     if (strcmp(p, "/api/video/quality") == 0)             return API_POST_VIDEO_QUALITY;
 
     /* === 对话 === */
@@ -2449,6 +2450,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/lnn/parameters/reset") == 0)      return API_POST_LNN_PARAMETERS_RESET;
     if (strcmp(p, "/api/lnn/calibrate") == 0)             return API_POST_LNN_CALIBRATE;
     if (strcmp(p, "/api/lnn/config/export") == 0)         return API_GET_LNN_CONFIG_EXPORT;
+    if (strcmp(p, "/api/lnn/activation/heatmap") == 0)    return API_GET_LNN_ACTIVATION_HEATMAP;
+    if (strcmp(p, "/api/lnn/prediction/scatter") == 0)    return API_GET_LNN_PREDICTION_SCATTER;
 
     /* === GPU === */
     if (strcmp(p, "/api/gpu/status") == 0)                return API_GET_GPU_STATUS;
@@ -3829,6 +3832,18 @@ static void* server_thread_func(void* param) {
                     request_type = 222;
                 } else if (strcmp(path, "/api/knowledge/export") == 0) {
                     request_type = 223;
+                } else if (strcmp(path, "/api/knowledge/save") == 0) {
+                    /* ZSFAB-v2: knowledge/save → POST_KNOWLEDGE */
+                    request_type = API_POST_KNOWLEDGE;
+                } else if (strcmp(path, "/api/knowledge/load") == 0) {
+                    /* ZSFAB-v2: knowledge/load → GET_KNOWLEDGE */
+                    request_type = API_GET_KNOWLEDGE;
+                } else if (strcmp(path, "/api/knowledge/search") == 0) {
+                    /* ZSFAB-v2: knowledge/search → POST_KNOWLEDGE */
+                    request_type = API_POST_KNOWLEDGE;
+                } else if (strcmp(path, "/api/knowledge/import") == 0) {
+                    /* ZSFAB-v2: knowledge/import → POST_KNOWLEDGE */
+                    request_type = API_POST_KNOWLEDGE;
                 } else if (strcmp(path, "/api/memory/add") == 0) {
                     request_type = 229;
                 } else if (strncmp(path, "/api/memory/entry", 17) == 0) {
@@ -3930,6 +3945,9 @@ static void* server_thread_func(void* param) {
                     request_type = API_GET_AGI_COGNITION_STATE;
                 } else if (strcmp(path, "/api/cognition/tom") == 0) {
                     request_type = API_GET_COGNITION_TOM;
+                } else if (strcmp(path, "/api/task/create") == 0) {
+                    /* ZSFAB-S10: task/create → POST_TASK_CREATE */
+                    request_type = API_POST_TASK_CREATE;
                 } else if (strcmp(path, "/api/task/queue") == 0) {
                     request_type = API_GET_TASK_QUEUE;
                 } else if (strcmp(path, "/api/task/assign") == 0) {

@@ -86,6 +86,7 @@ typedef enum {
     SELFLNN_ERROR_GRADIENT_EXPLOSION = -503, /**< 梯度爆炸 */
     SELFLNN_ERROR_GRADIENT_VANISHING = -504, /**< 梯度消失 */
     SELFLNN_ERROR_NO_DATA = -505,             /**< 无可用数据 */
+    SELFLNN_ERROR_PROJECTION_LOCKED = -506,   /**< ZSFX-DEEP-R8: 投影矩阵已锁定不参与训练（前向损失仍可用） */
     
     // 并发处理错误 (600-699)
     SELFLNN_ERROR_THREAD_CREATION = -600,   /**< 线程创建错误 */

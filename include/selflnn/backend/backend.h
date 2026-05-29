@@ -461,6 +461,11 @@ typedef enum {
     /* ===== ZSFWS-INT-FIX: 系统状态/日志导出路由补全 ===== */
     API_GET_SYSTEM_FULL_STATUS = 298,        /**< 获取系统完整状态 /api/system/status */
     API_GET_SYSTEM_LOGS_EXPORT = 299,        /**< 导出系统日志 /api/system/logs/export */
+
+    /* ===== ZSFWS-M-012: 前端可视化实时数据源 ===== */
+    API_GET_AUDIO_SPECTRUM = 302,            /**< 获取音频频谱分析数据 /api/audio/spectrum */
+    API_GET_LNN_ACTIVATION_HEATMAP = 303,    /**< 获取LNN神经元激活热力图数据 /api/lnn/activation/heatmap */
+    API_GET_LNN_PREDICTION_SCATTER = 304,    /**< 获取LNN预测结果散点图数据 /api/lnn/prediction/scatter */
 } ApiRequestType;
 
 /**

@@ -210,24 +210,32 @@ int multimodal_unified_input_diagnose_modalities(const UnifiedInputState* state,
                                                   int* active_count);
 
 /**
- * @brief ZSF-009: 统一输入在线训练步骤
+ * @brief ZSF-009/ZSFX-DEEP-R8: 统一输入在线训练步骤
  *
  * 基于目标输出对投影矩阵进行在线学习更新。
  * 使用MSE损失 + SGD优化器，对每个活跃模态的投影矩阵W_i和偏置b_i进行梯度更新。
  * 梯度链: MSE(output, target) → dL/d_output → dL/d_combined → dL/d_W_i, dL/d_b_i
+ *
+ * 当投影矩阵锁定时（projection_locked=1），跳过SGD更新但仍在loss中返回前向
+ * 监控损失值，并返回 SELFLNN_ERROR_PROJECTION_LOCKED（-506）以便调用者区分
+ * "训练成功"与"锁定跳过"两种状态。
  *
  * @param state 统一输入状态指针
  * @param target_output 目标输出（期望值）
  * @param target_size 目标输出维度
  * @param learning_rate 学习率（建议0.001-0.01）
  * @param active_modalities_present 各模态活跃标志（1=活跃）
- * @return 0=成功，-1=失败
+ * @param loss [输出] 监控损失值指针，可为NULL（不关心损失值时传入NULL）
+ * @return SELFLNN_SUCCESS(0)=训练成功,
+ *         SELFLNN_ERROR_PROJECTION_LOCKED(-506)=投影锁定跳过训练(损失仍输出),
+ *         -1=失败
  */
 int multimodal_unified_input_train_step(UnifiedInputState* state,
                                         const float* target_output,
                                         size_t target_size,
                                         float learning_rate,
-                                        const int* active_modalities_present);
+                                        const int* active_modalities_present,
+                                        float* loss);
 
 #ifdef __cplusplus
 }

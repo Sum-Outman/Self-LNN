@@ -408,11 +408,28 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
 {
     if (!cell || !estate) return 1.0f;
 
+    /* P3-002: 哈希缓存检测——输入和状态不变时复用上次结果 */
+    uint32_t input_hash = 0, state_hash = 0;
     CfCCellConfig config;
     if (cfc_cell_get_config(cell, &config) != 0) return 1.0f;
-
     size_t hidden_size = config.hidden_size;
     if (hidden_size == 0) return 1.0f;
+
+    if (input && state && hidden_size < 4096) {
+        for (size_t i = 0; i < hidden_size; i++) {
+            input_hash = input_hash * 31 + (uint32_t)(int)(input[i] * 10000.0f);
+            state_hash = state_hash * 31 + (uint32_t)(int)(state[i] * 10000.0f);
+        }
+        if (estate->stiffness_cache_age < 200 &&
+            input_hash == estate->stiffness_cache_input_hash &&
+            state_hash == estate->stiffness_cache_state_hash) {
+            estate->stiffness_cache_age++;
+            return estate->stiffness_cache_ratio;
+        }
+        estate->stiffness_cache_input_hash = input_hash;
+        estate->stiffness_cache_state_hash = state_hash;
+        estate->stiffness_cache_age = 0;
+    }
 
     float stiffness_ratio = 1.0f;
 
@@ -506,6 +523,7 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
     if (stiffness_ratio < 1.0f) stiffness_ratio = 1.0f;
 
     estate->current_stiffness_ratio = stiffness_ratio;
+    estate->stiffness_cache_ratio = stiffness_ratio;  /* P3-002: 缓存刚度比结果 */
     if (stiffness_ratio > estate->peak_stiffness_ratio)
         estate->peak_stiffness_ratio = stiffness_ratio;
 

@@ -161,6 +161,39 @@ typedef struct {
 } EmergencyStopStatus;
 
 /**
+ * @brief 系统运行时指标（用于快照捕获）
+ *
+ * 紧凑打包格式，用于紧急停止快照中保存系统运行时状态。
+ */
+typedef struct {
+    /* AGI认知状态 */
+    int active_task_count;                  /**< 活跃任务数 */
+    int total_task_count;                   /**< 总任务数 */
+    int active_goal_count;                  /**< 活跃目标数 */
+    int total_goal_count;                   /**< 总目标数 */
+    int cognitive_cycle_count;              /**< 认知循环计数 */
+    float cognitive_load;                   /**< 认知负载率(0~1) */
+    /* LNN状态摘要 */
+    float lnn_mean_activation;              /**< LNN平均激活值 */
+    float lnn_max_activation;               /**< LNN最大激活值 */
+    float lnn_min_activation;               /**< LNN最小激活值 */
+    int lnn_step_count;                     /**< LNN步数 */
+    int lnn_hidden_dim;                     /**< LNN隐藏状态维度 */
+    int lnn_input_dim;                      /**< LNN输入维度 */
+    int lnn_output_dim;                     /**< LNN输出维度 */
+    /* 内存使用摘要 */
+    size_t total_allocated_bytes;           /**< 总分配内存(字节) */
+    size_t total_freed_bytes;              /**< 总释放内存(字节) */
+    size_t current_used_bytes;              /**< 当前使用内存(字节) */
+    int active_allocation_count;            /**< 活跃分配计数 */
+    float memory_usage_ratio;               /**< 内存使用率(0~1) */
+    /* 时间戳 */
+    long snapshot_timestamp_us;             /**< 快照时间戳(微秒) */
+    int snapshot_sequence;                  /**< 快照序列号 */
+    int reserved_padding;                   /**< 对齐填充 */
+} EmergencySystemMetrics;
+
+/**
  * @brief 紧急停止系统句柄
  */
 typedef struct EmergencyStopSystem EmergencyStopSystem;
@@ -387,6 +420,29 @@ EmergencyStopSystem* emergency_stop_load(const char* filepath);
  * @return EmergencyStopConfig 默认配置
  */
 EmergencyStopConfig emergency_stop_default_config(void);
+
+/**
+ * @brief 设置系统运行时指标（供快照捕获使用）
+ *
+ * 在调用 emergency_stop_snapshot 之前调用，填充当前系统指标。
+ * 指标将被紧凑打包到快照的system_state缓冲区中。
+ *
+ * @param system 系统句柄
+ * @param metrics 系统运行时指标
+ * @return int 成功返回0，失败返回-1
+ */
+int emergency_stop_set_metrics(EmergencyStopSystem* system,
+                                const EmergencySystemMetrics* metrics);
+
+/**
+ * @brief 获取最近一次快照保存的系统指标
+ *
+ * @param system 系统句柄
+ * @param metrics 输出指标
+ * @return int 成功返回0，失败返回-1
+ */
+int emergency_stop_get_metrics(const EmergencyStopSystem* system,
+                                EmergencySystemMetrics* metrics);
 
 /**
  * @brief 注册硬件停止回调

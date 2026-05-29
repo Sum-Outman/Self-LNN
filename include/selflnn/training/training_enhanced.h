@@ -1,6 +1,22 @@
 #ifndef SELFLNN_TRAINING_ENHANCED_H
 #define SELFLNN_TRAINING_ENHANCED_H
 
+/**
+ * @file training_enhanced.h
+ * @brief 增强训练模块 — 【高级增强功能（与基础版互补，非替代）】
+ *
+ * P3-004 功能边界说明:
+ *   ✅ 本文件: EMA权重管理器（指数移动平均）、Warmup+余弦退火学习率调度器
+ *   ✅ 本文件: 知识蒸馏训练器（教师-学生网络）、混合精度训练(MixedPrecision)
+ *   ✅ 本文件: CfC ODE特化训练、拉普拉斯增强训练、梯度累积
+ *   ✅ 本文件: 与 training.h 基础版协同工作，依赖基础版的训练循环和优化器
+ *   ❌ 非本文件: 核心训练循环、SGD/Adam/RMSprop优化器、L1/L2正则化、模型版本管理
+ *                → 请使用 training.h（基础功能实现）
+ *
+ *   基础版 (training.h)         → 核心训练循环 + 基础优化器 + 基础正则化
+ *   增强版 (training_enhanced.h) → EMA + 余弦退火 + 知识蒸馏 + 混合精度 + CfC特化训练
+ */
+
 #include "selflnn/core/lnn.h"
 #include "selflnn/training/training.h"
 

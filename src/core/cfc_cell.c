@@ -327,6 +327,7 @@ struct HierarchicalCfCData {
     float* top_down_weights;            /**< 自顶向下连接权重 [num_levels-1 × hidden_size] */
     float* top_down_weight_grad;        /**< 自顶向下权重梯度 */
     float* workspace;                   /**< 工作空间 [hidden_size × 2] */
+    float* saved_input;                 /**< 保存前向传播输入用于反向梯度计算 [input_size] */
 };
 
 /* ============ 液态记忆门控CfC内部数据结构 ============ */
@@ -360,7 +361,7 @@ static int gated_cfc_cross_gate_update(GatedCfCData* gd, const float* gate_input
 static int gated_cfc_pyramidal_gate(GatedCfCData* gd, float* gate_signal, size_t hidden_size);
 static int gated_cfc_adaptive_bandwidth(GatedCfCData* gd, const float* input,
                                          float* bandwidth, size_t input_size, size_t hidden_size);
-static int hierarchical_level_update(HierarchicalCfCData* hd, int level,
+static int hierarchical_level_update(HierarchicalCfCData* hd, CfCCell* cell, int level,
                                       const float* input, float* merged_state,
                                       size_t hidden_size, size_t input_size, float delta_t);
 static int liquid_memory_compute_modulation(LiquidMemoryCfCData* ld, const float* hidden_state,
@@ -1006,7 +1007,13 @@ void cfc_cell_free(CfCCell* cell) {
         safe_free((void**)&hd->top_down_weights);
         safe_free((void**)&hd->top_down_weight_grad);
         safe_free((void**)&hd->workspace);
+        safe_free((void**)&hd->saved_input);
         safe_free((void**)&cell->hierarchical_data);
+        /* 释放分层门控权重可学习参数 */
+        safe_free((void**)&cell->hierarchical_gate_weights);
+        safe_free((void**)&cell->hierarchical_activation_weights);
+        safe_free((void**)&cell->hierarchical_gate_weight_grad);
+        safe_free((void**)&cell->hierarchical_activation_weight_grad);
     }
     
     // 释放液态记忆门控CfC数据
@@ -5637,18 +5644,20 @@ int cfc_cell_get_gated_stats(const CfCCell* cell, float* cross_gate_values,
  *
  * 第l层使用自身的状态、时间常数以及来自上下层的信息进行更新。
  */
-static int hierarchical_level_update(HierarchicalCfCData* hd, int level,
+static int hierarchical_level_update(HierarchicalCfCData* hd, CfCCell* cell, int level,
                                       const float* input, float* merged_state,
                                       size_t hidden_size, size_t input_size, float delta_t) {
-    if (!hd || !input || !merged_state) return -1;
+    if (!hd || !cell || !input || !merged_state) return -1;
     float* h_level = hd->level_states + (size_t)level * hidden_size;
     float* a_level = hd->level_activations + (size_t)level * hidden_size;
     float tau_level = hd->level_time_constants[level];
+    float* gate_w = cell->hierarchical_gate_weights;
+    float* act_w = cell->hierarchical_activation_weights;
     for (size_t i = 0; i < hidden_size; i++) {
         float gate_sum = 0.0f, act_sum = 0.0f;
         for (size_t j = 0; j < input_size; j++) {
-            gate_sum += input[j] * 0.1f;
-            act_sum += input[j] * 0.1f;
+            gate_sum += input[j] * gate_w[i * input_size + j];
+            act_sum += input[j] * act_w[i * input_size + j];
         }
         if (level > 0 && hd->enable_bidirectional) {
             float* h_lower = hd->level_states + (size_t)(level - 1) * hidden_size;
@@ -5687,11 +5696,18 @@ int cfc_cell_enable_hierarchical(CfCCell* cell, const HierarchicalCfCConfig* con
         safe_free((void**)&hd->top_down_weights);
         safe_free((void**)&hd->top_down_weight_grad);
         safe_free((void**)&hd->workspace);
+        safe_free((void**)&hd->saved_input);
         safe_free((void**)&cell->hierarchical_data);
+        /* 释放分层门控可学习权重参数 */
+        safe_free((void**)&cell->hierarchical_gate_weights);
+        safe_free((void**)&cell->hierarchical_activation_weights);
+        safe_free((void**)&cell->hierarchical_gate_weight_grad);
+        safe_free((void**)&cell->hierarchical_activation_weight_grad);
     }
     HierarchicalCfCData* hd = (HierarchicalCfCData*)safe_calloc(1, sizeof(HierarchicalCfCData));
     if (!hd) return -1;
     size_t hidden_size = cell->config.hidden_size;
+    size_t input_size = cell->config.input_size;
     HierarchicalCfCConfig default_config = {3, 0.01f, 1.0f, 0.5f, 0.3f, 1, 0.01f};
     if (!config) config = &default_config;
     hd->num_levels = config->num_levels;
@@ -5710,9 +5726,19 @@ int cfc_cell_enable_hierarchical(CfCCell* cell, const HierarchicalCfCConfig* con
     hd->top_down_weights = (float*)safe_calloc((n_levels - 1) * hidden_size, sizeof(float));
     hd->top_down_weight_grad = (float*)safe_calloc((n_levels - 1) * hidden_size, sizeof(float));
     hd->workspace = (float*)safe_calloc(hidden_size * 2, sizeof(float));
+    /* 分配分层门控可学习权重矩阵 [hidden_size × input_size] */
+    size_t hier_weight_size = hidden_size * input_size;
+    cell->hierarchical_gate_weights = (float*)safe_calloc(hier_weight_size, sizeof(float));
+    cell->hierarchical_activation_weights = (float*)safe_calloc(hier_weight_size, sizeof(float));
+    cell->hierarchical_gate_weight_grad = (float*)safe_calloc(hier_weight_size, sizeof(float));
+    cell->hierarchical_activation_weight_grad = (float*)safe_calloc(hier_weight_size, sizeof(float));
+    hd->saved_input = (float*)safe_calloc(input_size, sizeof(float));
     if (!hd->level_time_constants || !hd->level_states || !hd->level_activations ||
         !hd->level_gradients || !hd->bottom_up_weights || !hd->bottom_up_weight_grad ||
-        !hd->top_down_weights || !hd->top_down_weight_grad || !hd->workspace) {
+        !hd->top_down_weights || !hd->top_down_weight_grad || !hd->workspace ||
+        !cell->hierarchical_gate_weights || !cell->hierarchical_activation_weights ||
+        !cell->hierarchical_gate_weight_grad || !cell->hierarchical_activation_weight_grad ||
+        !hd->saved_input) {
         safe_free((void**)&hd->level_time_constants);
         safe_free((void**)&hd->level_states);
         safe_free((void**)&hd->level_activations);
@@ -5722,6 +5748,11 @@ int cfc_cell_enable_hierarchical(CfCCell* cell, const HierarchicalCfCConfig* con
         safe_free((void**)&hd->top_down_weights);
         safe_free((void**)&hd->top_down_weight_grad);
         safe_free((void**)&hd->workspace);
+        safe_free((void**)&hd->saved_input);
+        safe_free((void**)&cell->hierarchical_gate_weights);
+        safe_free((void**)&cell->hierarchical_activation_weights);
+        safe_free((void**)&cell->hierarchical_gate_weight_grad);
+        safe_free((void**)&cell->hierarchical_activation_weight_grad);
         safe_free((void**)&hd);
         return -1;
     }
@@ -5740,6 +5771,19 @@ int cfc_cell_enable_hierarchical(CfCCell* cell, const HierarchicalCfCConfig* con
         hd->bottom_up_weights[i] = v;
         hd->top_down_weights[i] = v * 0.5f;
     }
+    /* Xavier初始化分层门控权重和激活权重 */
+    {
+        float hier_gate_limit = xavier_uniform_limit(input_size, hidden_size) * 0.5f;
+        float hier_act_limit = xavier_uniform_limit(input_size, hidden_size);
+        for (size_t i = 0; i < hier_weight_size; i++) {
+            seed = seed * 1103515245 + 12345;
+            float r1 = ((float)((seed >> 16) & 0x7FFF) / 32767.0f - 0.5f) * 2.0f;
+            seed = seed * 1103515245 + 12345;
+            float r2 = ((float)((seed >> 16) & 0x7FFF) / 32767.0f - 0.5f) * 2.0f;
+            cell->hierarchical_gate_weights[i] = r1 * hier_gate_limit;
+            cell->hierarchical_activation_weights[i] = r2 * hier_act_limit;
+        }
+    }
     cell->hierarchical_data = hd;
     return 0;
 }
@@ -5757,9 +5801,11 @@ int cfc_cell_forward_hierarchical(CfCCell* cell, const float* input, float* hidd
     size_t input_size = cell->config.input_size;
     float delta_t = cell->config.delta_t;
     memset(hidden_state, 0, hidden_size * sizeof(float));
+    /* 保存输入用于反向传播梯度计算 */
+    memcpy(hd->saved_input, input, input_size * sizeof(float));
     /* 自底向上更新 */
     for (int l = 0; l < hd->num_levels; l++) {
-        hierarchical_level_update(hd, l, input, hidden_state, hidden_size, input_size, delta_t);
+        hierarchical_level_update(hd, cell, l, input, hidden_state, hidden_size, input_size, delta_t);
     }
     if (hd->enable_bidirectional) {
         /* 自顶向下精化 */
@@ -5808,6 +5854,9 @@ int cfc_cell_backward_hierarchical(CfCCell* cell, const float* gradient, float* 
         float* a_level = hd->level_activations + (size_t)l * hidden_size;
         float* h_grad = hd->level_gradients + (size_t)l * hidden_size;
         float tau_level = hd->level_time_constants[l];
+        float* gate_w = cell->hierarchical_gate_weights;
+        float* act_w = cell->hierarchical_activation_weights;
+        float* saved_in = hd->saved_input;
         for (size_t i = 0; i < hidden_size; i++) {
             float tau_i = tau_level;
             float exp_term = expf(-delta_t / tau_i);
@@ -5822,7 +5871,10 @@ int cfc_cell_backward_hierarchical(CfCCell* cell, const float* gradient, float* 
             float dL_dact_input = dL_dact * act_deriv;
             if (input_gradient) {
                 for (size_t j = 0; j < input_size; j++) {
-                    input_gradient[j] += (dL_dgate_input + dL_dact_input) * 0.1f;
+                    size_t widx = i * input_size + j;
+                    input_gradient[j] += dL_dgate_input * gate_w[widx] + dL_dact_input * act_w[widx];
+                    cell->hierarchical_gate_weight_grad[widx] += dL_dgate_input * saved_in[j];
+                    cell->hierarchical_activation_weight_grad[widx] += dL_dact_input * saved_in[j];
                 }
             }
             if (l > 0) {

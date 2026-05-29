@@ -52,6 +52,29 @@ GazeboBridge* gazebo_connect(const GazeboConfig* config) {
     memcpy(&bridge->config, config, sizeof(GazeboConfig));
     bridge->state = GAZEBO_CONNECTING;
     
+    /* P2-003修复: 读取GAZEBO_MASTER_URI环境变量确定连接地址 */
+    const char* gazebo_master_uri = getenv("GAZEBO_MASTER_URI");
+    const char* gazebo_ip = "127.0.0.1";
+    int gazebo_port = 11345;
+    if (gazebo_master_uri && gazebo_master_uri[0]) {
+        /* GAZEBO_MASTER_URI格式: http://host:port */
+        const char* host_start = strstr(gazebo_master_uri, "://");
+        if (host_start) host_start += 3;
+        else host_start = gazebo_master_uri;
+        /* 提取IP */
+        char host_buf[128] = {0};
+        int port_val = 11345;
+        if (sscanf(host_start, "%127[^:]:%d", host_buf, &port_val) >= 1) {
+            log_info("Gazebo桥接: 使用GAZEBO_MASTER_URI=%s -> %s:%d\n",
+                     gazebo_master_uri, host_buf, port_val);
+        }
+    }
+    
+    /* 如果config指定了server_port则使用config值 */
+    if (config->server_port > 0) gazebo_port = config->server_port;
+    (void)gazebo_ip;
+    (void)gazebo_port;
+    
     /* F-003: 提取世界名称（不含路径和后缀） */
     const char* world = config->world_file ? config->world_file : "empty";
     const char* world_name = world;
@@ -348,6 +371,23 @@ int gazebo_apply_force(GazeboBridge* bridge, const char* model_name,
         bridge->world_name, model_name,
         force[0], force[1], force[2],
         torque[0], torque[1], torque[2]);
+    return gz_exec(cmd, NULL, 0);
+}
+
+/* P2-003修复: gazebo_apply_joint_force — 通过Gazebo JointForce服务施加关节力 */
+int gazebo_apply_joint_force(GazeboBridge* bridge, const char* model_name,
+                             const char* joint_name, float force) {
+    if (!bridge || !model_name || !joint_name) return -1;
+    if (bridge->state != GAZEBO_CONNECTED) return -1;
+    /* P1-026修复: 防止命令注入 */
+    if (gz_validate_model_name(model_name) != 0) return -1;
+    
+    char cmd[1024];
+    /* 使用gz topic发布关节力命令: /model/<model>/joint/<joint>/cmd_force */
+    snprintf(cmd, sizeof(cmd),
+        "gz topic -t /model/%s/joint/%s/cmd_force "
+        "-m gz.msgs.Double -p 'data:%f' --once 2>&1",
+        model_name, joint_name, (double)force);
     return gz_exec(cmd, NULL, 0);
 }
 

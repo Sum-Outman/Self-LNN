@@ -596,6 +596,28 @@ int ros_gazebo_bridge_apply_body_wrench(RosGazeboBridge* bridge, const char* mod
     return -1;
 }
 
+/* P2-003修复: ros_gazebo_bridge_apply_joint_force — 通过rosbridge施加关节力 */
+int ros_gazebo_bridge_apply_joint_force(RosGazeboBridge* bridge, const char* model_name,
+                                         const char* joint_name, float force) {
+    if (!bridge || !model_name || !joint_name) return -1;
+    if (!bridge->connected) return -1;
+
+    if (bridge->ros_node) {
+        char force_json[512];
+        snprintf(force_json, sizeof(force_json),
+                 "{\"op\":\"publish\",\"topic\":\"/gazebo/apply_joint_force\","
+                 "\"msg\":{\"model_name\":\"%s\","
+                 "\"joint_name\":\"%s\","
+                 "\"force\":%.6f}}",
+                 model_name, joint_name, force);
+
+        return ros_node_publish(bridge->ros_node, "/rosbridge/publish",
+                               force_json, strlen(force_json));
+    }
+
+    return -1;
+}
+
 /* 获取关节状态 */
 int ros_gazebo_bridge_get_joint_state(RosGazeboBridge* bridge, int robot_id,
                                        float* positions, float* velocities,

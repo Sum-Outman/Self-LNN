@@ -1,6 +1,22 @@
 #ifndef SELFLNN_PRODUCT_DESIGN_ENHANCED_H
 #define SELFLNN_PRODUCT_DESIGN_ENHANCED_H
 
+/**
+ * @file product_design_enhanced.h
+ * @brief 增强产品设计引擎 — 【高级增强功能（与基础版互补，非替代）】
+ *
+ * P3-004 功能边界说明:
+ *   ✅ 本文件: A09.5.1 需求分析引擎（需求追踪矩阵、需求验证、变更管理）
+ *   ✅ 本文件: A09.5.2 多目标优化引擎（NSGA-II遗传算法、帕累托前沿、约束处理）
+ *   ✅ 本文件: A09.5.3 系统工程V模型（需求→架构→详细设计→实现→验证）
+ *   ✅ 本文件: 与 product_design.h 基础版协同，提供高级设计分析和优化能力
+ *   ❌ 非本文件: 基础产品规格管理、产品类型枚举、基础评估和比较
+ *                → 请使用 product_design.h（基础功能实现）
+ *
+ *   基础版 (product_design.h)         → 核心产品设计 + 基础规格管理
+ *   增强版 (product_design_enhanced.h) → 需求分析引擎 + NSGA-II多目标优化 + 系统工程V模型
+ */
+
 #include <stddef.h>
 #include "selflnn/product_design/product_design.h"
 
