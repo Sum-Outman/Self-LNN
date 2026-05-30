@@ -407,13 +407,14 @@ int voice_motion_load_dict(VoiceMotionControl* vmc, const char* dict_path) {
     return (vmc->dict_count > 0) ? 0 : -1;
 }
 
-static int voice_motion_set_lnn(VoiceMotionControl* vmc, LNN* lnn) {
+/* ZSFLYF-P1-002修复: 移除static声明，使外部可调用设置LNN和动态管理命令词典 */
+int voice_motion_set_lnn(VoiceMotionControl* vmc, LNN* lnn) {
     if (!vmc) return -1;
     vmc->shared_lnn = lnn;
     return 0;
 }
 
-static int voice_motion_add_command(VoiceMotionControl* vmc, const char* keyword,
+int voice_motion_add_command(VoiceMotionControl* vmc, const char* keyword,
                               MotionCommandType cmd_type, float param1, float param2) {
     if (!vmc || !keyword || vmc->dict_count >= VMC_MAX_DICT) return -1;
     snprintf(vmc->dict[vmc->dict_count].keyword, 32, "%s", keyword);
@@ -424,7 +425,7 @@ static int voice_motion_add_command(VoiceMotionControl* vmc, const char* keyword
     return 0;
 }
 
-static int voice_motion_remove_command(VoiceMotionControl* vmc, const char* keyword) {
+int voice_motion_remove_command(VoiceMotionControl* vmc, const char* keyword) {
     if (!vmc || !keyword) return -1;
     for (int i = 0; i < vmc->dict_count; i++) {
         if (strcmp(vmc->dict[i].keyword, keyword) == 0) {

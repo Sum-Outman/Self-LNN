@@ -11,39 +11,33 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/logging.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/core/port_config.h"
+#include <time.h>
 
-/* 日志级别定义 */
+/* P3-012: 本地日志函数改为转发到统一日志系统，
+ * 替代原有的printf直接输出，确保日志一致性。 */
+static void multi_system_log(int level, const char* format, ...) {
+    char msg_buf[4096];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(msg_buf, sizeof(msg_buf), format, args);
+    va_end(args);
+    switch (level) {
+        case 0: logging_log(LOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, "%s", msg_buf); break;
+        case 1: logging_log(LOG_LEVEL_INFO, __FILE__, __LINE__, __func__, "%s", msg_buf); break;
+        case 2: logging_log(LOG_LEVEL_WARNING, __FILE__, __LINE__, __func__, "%s", msg_buf); break;
+        case 3: default: logging_log(LOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, "%s", msg_buf); break;
+    }
+}
 #define MULTI_LOG_LEVEL_DEBUG 0
 #define MULTI_LOG_LEVEL_INFO 1
 #define MULTI_LOG_LEVEL_WARNING 2
 #define MULTI_LOG_LEVEL_ERROR 3
 #define MULTI_LOG_WARNING MULTI_LOG_LEVEL_WARNING
-
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <stdio.h>
-#include <time.h>
-#include <stdarg.h>
-
-/* 本地日志函数 */
-static void multi_system_log(int level, const char* format, ...) {
-    static const char* level_names[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
-    va_list args;
-    va_start(args, format);
-    if (level >= 0 && level <= 3) {
-        printf("[多系统控制][%s] ", level_names[level]);
-    } else {
-        printf("[多系统控制] ");
-    }
-    vprintf(format, args);
-    printf("\n");
-    va_end(args);
-}
 
 /* TCP RPC 传输层 — 使用 Winsock2 (Windows) */
 #ifdef _WIN32
@@ -3505,7 +3499,17 @@ int rpc_transport_start(TcpRpcTransport* transport, const char* node_id) {
     }
 #else
     pthread_mutex_init(&transport->lock, NULL);
-    pthread_create(&transport->recv_thread, NULL, rpc_server_thread, transport);
+    /* ZSFLYF-NEW-8修复: 检查pthread_create返回值。
+     * 若线程创建失败，recv_thread未初始化，后续pthread_join会操作垃圾数据导致崩溃。 */
+    int create_ret = pthread_create(&transport->recv_thread, NULL, rpc_server_thread, transport);
+    if (create_ret != 0) {
+        transport->running = 0;
+        pthread_mutex_destroy(&transport->lock);
+        tcp_close_socket(transport->server_sock);
+        transport->server_sock = INVALID_TCP_SOCKET;
+        log_error("[RPC] 接收线程创建失败(errno=%d)，关闭传输层", create_ret);
+        return -1;
+    }
 #endif
 
     return 0;

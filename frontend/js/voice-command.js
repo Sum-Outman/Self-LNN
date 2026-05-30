@@ -209,6 +209,90 @@ class VoiceCommandSystem {
 /**
  * 指令解析引擎（语音和文字共享）
  */
+
+/* ZSFUSA-F04: 指令路由常量表（数据驱动，新增指令只需添加条目）
+ * 以 parsed.params 为输入参数源，支持机器人/系统/设备三类API路由。
+ * 优先级：VOICE_COMMAND_ROUTES(数据驱动) > handlerMap(回退) */
+var VOICE_COMMAND_ROUTES = {
+    /* 机器人运动控制 */
+    'robotMoveForward':      { type: 'robot', action: 'move_forward' },
+    'robotMoveBackward':     { type: 'robot', action: 'move_backward' },
+    'robotTurnLeft':         { type: 'robot', action: 'turn_left' },
+    'robotTurnRight':        { type: 'robot', action: 'turn_right' },
+    'robotStop':             { type: 'robot', action: 'stop' },
+    'robotSetSpeed':         { type: 'robot', action: 'set_speed', paramMap: { speed: 'arg1' }, defaults: { speed: 0.5 } },
+    'robotStandUp':          { type: 'robot', action: 'stand_up' },
+    'robotSitDown':          { type: 'robot', action: 'sit_down' },
+    'robotGoHome':           { type: 'robot', action: 'go_home' },
+    'robotConnect':          { type: 'robot', action: 'connect' },
+    'robotDisconnect':       { type: 'robot', action: 'disconnect' },
+    'robotEmergencyStop':    { type: 'robot', action: 'emergency_stop' },
+    /* 计算机控制 */
+    'computerLaunchApp':     { type: 'system', action: 'launch_app', paramMap: { name: 'arg1' } },
+    'computerCloseApp':      { type: 'system', action: 'close_app', paramMap: { name: 'arg1' } },
+    'computerTypeText':      { type: 'system', action: 'type_text', paramMap: { text: 'arg1' } },
+    'computerScreenshot':    { type: 'system', action: 'screenshot' },
+    'computerRestart':       { type: 'system', action: 'restart' },
+    'computerShutdown':      { type: 'system', action: 'shutdown' },
+    'computerSleep':         { type: 'system', action: 'sleep' },
+    'computerLock':          { type: 'system', action: 'lock' },
+    'computerVolumeUp':      { type: 'system', action: 'volume_up', paramMap: { value: 'arg1' }, defaults: { value: 10 } },
+    'computerVolumeDown':    { type: 'system', action: 'volume_down', paramMap: { value: 'arg1' }, defaults: { value: 10 } },
+    'computerMuteToggle':    { type: 'system', action: 'mute_toggle' },
+    /* 系统控制 */
+    'systemStartTraining':   { type: 'system', action: 'start_training' },
+    'systemStopTraining':    { type: 'system', action: 'stop_training' },
+    'systemPauseTraining':   { type: 'system', action: 'pause_training' },
+    'systemStartEvolution':  { type: 'system', action: 'start_evolution' },
+    'systemStopEvolution':   { type: 'system', action: 'stop_evolution' },
+    'systemSaveModel':       { type: 'system', action: 'save_model' },
+    'systemLoadModel':       { type: 'system', action: 'load_model' },
+    'systemStatus':          { type: 'system', action: 'get_status' },
+    'systemEnableFeature':   { type: 'system', action: 'enable_feature', paramMap: { feature: 'arg1' }, transform: { feature: function(v) { return voiceCommandTranslateFeature(v || ''); } } },
+    'systemDisableFeature':  { type: 'system', action: 'disable_feature', paramMap: { feature: 'arg1' }, transform: { feature: function(v) { return voiceCommandTranslateFeature(v || ''); } } },
+    /* 摄像头控制 */
+    'cameraTurnOn':          { type: 'device', device: 'camera', action: 'on' },
+    'cameraTurnOff':         { type: 'device', device: 'camera', action: 'off' },
+    'cameraCapture':         { type: 'device', device: 'camera', action: 'capture' },
+    'cameraSwitch':          { type: 'device', device: 'camera', action: 'switch', paramMap: { target: 'arg1' } },
+    /* 麦克风控制 */
+    'microphoneTurnOn':      { type: 'device', device: 'microphone', action: 'on' },
+    'microphoneTurnOff':     { type: 'device', device: 'microphone', action: 'off' },
+    'microphoneMuteToggle':  { type: 'device', device: 'microphone', action: 'mute_toggle' },
+    /* 扬声器控制 */
+    'speakerTurnOn':         { type: 'device', device: 'speaker', action: 'on' },
+    'speakerTurnOff':        { type: 'device', device: 'speaker', action: 'off' },
+    'speakerVolumeUp':       { type: 'device', device: 'speaker', action: 'volume_up', paramMap: { value: 'arg1' }, defaults: { value: 10 } },
+    'speakerVolumeDown':     { type: 'device', device: 'speaker', action: 'volume_down', paramMap: { value: 'arg1' }, defaults: { value: 10 } },
+    'speakerMuteToggle':     { type: 'device', device: 'speaker', action: 'mute_toggle' }
+};
+
+/* ZSFUSA-F04: 数据驱动路由分发函数
+ * 从 VOICE_COMMAND_ROUTES 表读取配置，动态调用对应的API方法 */
+function voiceCommandDataDrivenRoute(routeDef, parsed) {
+    var params = parsed.params || {};
+    var resolved = {};
+    /* 解析参数映射：将 parsed.params 中的参数按 paramMap 映射到目标参数 */
+    if (routeDef.paramMap) {
+        var defaults = routeDef.defaults || {};
+        var keys = Object.keys(routeDef.paramMap);
+        for (var k = 0; k < keys.length; k++) {
+            var targetKey = keys[k];
+            var sourceKey = routeDef.paramMap[targetKey];
+            var raw = params[sourceKey];
+            if (routeDef.transform && routeDef.transform[targetKey]) {
+                resolved[targetKey] = routeDef.transform[targetKey](raw);
+            } else {
+                resolved[targetKey] = raw;
+            }
+            if (resolved[targetKey] === undefined && defaults[targetKey] !== undefined) {
+                resolved[targetKey] = defaults[targetKey];
+            }
+        }
+    }
+    return resolved;
+}
+
 class CommandEngine {
     constructor() {
         this.commands = this._initCommands();
@@ -333,13 +417,15 @@ class CommandEngine {
                 }
             }
         }
+        /* ZSFUSA-F12修复: command为null时应标记failure */
         return {
-            success: true,
+            success: false,
             command: null,
             category: '未识别',
             params: {},
             rawText: trimmed,
-            matchedPattern: null
+            matchedPattern: null,
+            error: '无法解析语音指令: "' + trimmed + '"'
         };
     }
 
@@ -375,59 +461,18 @@ class CommandEngine {
         return { allowed: true, reason: '' };
     }
 
+    /* ZSFUSA-F04: 指令路由常量表（数据驱动，新增指令只需添加条目）
+     * 以 parsed.params 为输入参数源，支持机器人/系统/设备三类API路由。
+     * 优先级：VOICE_COMMAND_ROUTES(数据驱动) > handlerMap(回退) */
     async _routeCommand(parsed) {
-        const handlerMap = {
-            robotMoveForward: () => this._callRobotApi('move_forward', parsed.params),
-            robotMoveBackward: () => this._callRobotApi('move_backward', parsed.params),
-            robotTurnLeft: () => this._callRobotApi('turn_left', parsed.params),
-            robotTurnRight: () => this._callRobotApi('turn_right', parsed.params),
-            robotStop: () => this._callRobotApi('stop', {}),
-            robotSetSpeed: () => this._callRobotApi('set_speed', { speed: parsed.params.arg1 || 0.5 }),
-            robotStandUp: () => this._callRobotApi('stand_up', {}),
-            robotSitDown: () => this._callRobotApi('sit_down', {}),
-            robotGoHome: () => this._callRobotApi('go_home', {}),
-            robotConnect: () => this._callRobotApi('connect', {}),
-            robotDisconnect: () => this._callRobotApi('disconnect', {}),
-            robotEmergencyStop: () => this._callRobotApi('emergency_stop', {}),
-            computerLaunchApp: () => this._callSystemApi('launch_app', { name: parsed.params.arg1 || '' }),
-            computerCloseApp: () => this._callSystemApi('close_app', { name: parsed.params.arg1 || '' }),
-            computerTypeText: () => this._callSystemApi('type_text', { text: parsed.params.arg1 || '' }),
-            computerScreenshot: () => this._callSystemApi('screenshot', {}),
-            computerRestart: () => this._callSystemApi('restart', {}),
-            computerShutdown: () => this._callSystemApi('shutdown', {}),
-            computerSleep: () => this._callSystemApi('sleep', {}),
-            computerLock: () => this._callSystemApi('lock', {}),
-            computerVolumeUp: () => this._callSystemApi('volume_up', { value: parsed.params.arg1 || 10 }),
-            computerVolumeDown: () => this._callSystemApi('volume_down', { value: parsed.params.arg1 || 10 }),
-            computerMuteToggle: () => this._callSystemApi('mute_toggle', {}),
-            systemStartTraining: () => this._callSystemApi('start_training', {}),
-            systemStopTraining: () => this._callSystemApi('stop_training', {}),
-            systemPauseTraining: () => this._callSystemApi('pause_training', {}),
-            systemStartEvolution: () => this._callSystemApi('start_evolution', {}),
-            systemStopEvolution: () => this._callSystemApi('stop_evolution', {}),
-            systemSaveModel: () => this._callSystemApi('save_model', {}),
-            systemLoadModel: () => this._callSystemApi('load_model', {}),
-            systemStatus: () => this._callSystemApi('get_status', {}),
-            systemEnableFeature: () => this._callSystemApi('enable_feature', { feature: voiceCommandTranslateFeature(parsed.params.arg1 || '') }),
-            systemDisableFeature: () => this._callSystemApi('disable_feature', { feature: voiceCommandTranslateFeature(parsed.params.arg1 || '') }),
-            cameraTurnOn: () => this._callDeviceApi('camera', 'on', {}),
-            cameraTurnOff: () => this._callDeviceApi('camera', 'off', {}),
-            cameraCapture: () => this._callDeviceApi('camera', 'capture', {}),
-            cameraSwitch: () => this._callDeviceApi('camera', 'switch', { target: parsed.params.arg1 || '' }),
-            microphoneTurnOn: () => this._callDeviceApi('microphone', 'on', {}),
-            microphoneTurnOff: () => this._callDeviceApi('microphone', 'off', {}),
-            microphoneMuteToggle: () => this._callDeviceApi('microphone', 'mute_toggle', {}),
-            speakerTurnOn: () => this._callDeviceApi('speaker', 'on', {}),
-            speakerTurnOff: () => this._callDeviceApi('speaker', 'off', {}),
-            speakerVolumeUp: () => this._callDeviceApi('speaker', 'volume_up', { value: parsed.params.arg1 || 10 }),
-            speakerVolumeDown: () => this._callDeviceApi('speaker', 'volume_down', { value: parsed.params.arg1 || 10 }),
-            speakerMuteToggle: () => this._callDeviceApi('speaker', 'mute_toggle', {})
-        };
-        const handler = handlerMap[parsed.command];
-        if (!handler) {
-            return { success: false, error: '未知指令处理器: ' + parsed.command };
+        var route = VOICE_COMMAND_ROUTES[parsed.command];
+        if (route) {
+            var params = voiceCommandDataDrivenRoute(route, parsed);
+            if (route.type === 'robot') return await this._callRobotApi(route.action, params);
+            if (route.type === 'system') return await this._callSystemApi(route.action, params);
+            if (route.type === 'device') return await this._callDeviceApi(route.device, route.action, params);
         }
-        return await handler();
+        return { success: false, error: '未知指令处理器: ' + parsed.command };
     }
 
     async _callRobotApi(action, params) {
@@ -460,15 +505,26 @@ class CommandEngine {
             'start_training': async () => window.SelfLnnApi.startTraining ? await window.SelfLnnApi.startTraining(params) : null,
             'stop_training': async () => window.SelfLnnApi.stopTrainingJob ? await window.SelfLnnApi.stopTrainingJob() : null,
             'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : null,
-            'start_evolution': async () => window.SelfLnnApi.startEvolution ? await window.SelfLnnApi.startEvolution(params) : null,
+            'start_evolution': async () => {
+                /* ZSF-005修复: 统一使用 toggleAgiFeature 控制进化开关，与stop_evolution保持一致 */
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
+                    return await window.SelfLnnApi.toggleAgiFeature('self_evolution', true);
+                }
+                return null;
+            },
             'stop_evolution': async () => {
-                // 使用 toggleAgiFeature 正确关闭自我演化功能，而非错误调用 startEvolution
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
                     return await window.SelfLnnApi.toggleAgiFeature('self_evolution', false);
                 }
                 return null;
             },
-            'save_model': async () => window.SelfLnnApi.backupSystem ? await window.SelfLnnApi.backupSystem() : null,
+            'save_model': async () => {
+                /* ZSF-006修复: save_model应保存模型配置而非系统备份 */
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.saveModelConfig === 'function') {
+                    return await window.SelfLnnApi.saveModelConfig({ action: 'voice_command_save' });
+                }
+                return null;
+            },
             'load_model': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.loadModel === 'function') {
                     var loadParams = params || {};

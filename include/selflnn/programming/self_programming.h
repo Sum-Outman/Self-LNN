@@ -261,6 +261,21 @@ CompilationResult verify_code_compilation(SelfProgrammingEngine* engine,
                                           const char* source_code);
 
 /**
+ * @brief 编译错误反馈 — 将编译失败信息反馈回引擎用于代码质量改进
+ * 
+ * 当 verify_code_compilation 返回失败时，此函数将错误信息注入引擎的
+ * 错误历史记录，使后续代码生成能避开已知的编译错误模式。
+ * ZSFUSA-P2-003修复: 闭合编译→生成反馈循环。
+ * 
+ * @param engine 引擎句柄
+ * @param source_code 编译失败的源代码
+ * @param error_message 编译器错误信息
+ */
+void self_programming_feedback_compile_error(SelfProgrammingEngine* engine,
+                                              const char* source_code,
+                                              const char* error_message);
+
+/**
  * @brief 在沙箱环境中执行代码片段
  * 
  * 创建隔离的执行环境：

@@ -94,7 +94,7 @@ void optimizer_free(Optimizer* optimizer);
  * @param step 当前步数（用于学习率调度）
  * @return int 成功返回0，失败返回-1
  */
-int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradients,
+int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                    size_t num_params, size_t step);
 
 /**

@@ -14,6 +14,36 @@ var SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
     host: 'localhost'
 };
 
+/* ZSFUSA-F01: 端点→子系统映射表（配置驱动，替代字符串匹配） */
+var SUBSYSTEM_ENDPOINT_MAP = {
+    '/status':        'system',
+    '/lnn':           'lnn',
+    '/memory':        'memory',
+    '/reasoning':     'reasoning',
+    '/learning':      'learning',
+    '/training':      'training',
+    '/knowledge':     'knowledge',
+    '/robot':         'robot',
+    '/ros':           'robot',
+    '/gazebo':        'robot',
+    '/simulation':    'simulation',
+    '/dialogue':      'dialogue',
+    '/multimodal':    'multimodal',
+    '/voice':         'voice',
+    '/tts':           'voice',
+    '/gpu':           'gpu',
+    '/evolution':     'evolution',
+    '/programming':   'programming',
+    '/safety':        'safety',
+    '/files':         'files',
+    '/device':        'device',
+    '/computer':      'computer',
+    '/serial':        'serial',
+    '/hyperparam':    'training',
+    '/checkpoint':    'training',
+    '/api':           'system'
+};
+
 class ApiService {
     constructor() {
         this.baseURL = `http://${SELFLNN_CONFIG.host}:${SELFLNN_CONFIG.port}/api`;
@@ -176,23 +206,15 @@ class ApiService {
      * @returns {string} 子系统名称
      */
     guessSubsystemFromEndpoint(endpoint) {
-        if (!endpoint) return 'general';
-        const ep = endpoint.toLowerCase();
-        if (ep.includes('/status') || ep.includes('/health') || ep.includes('/stats') || ep.includes('/system/')) return 'general';
-        if (ep.includes('/dialogue') || ep.includes('/tts')) return 'dialogue';
-        if (ep.includes('/reasoning') || ep.includes('/agi/')) return 'reasoning';
-        if (ep.includes('/learning') || ep.includes('/imitation') || ep.includes('/auto_learn')) return 'learning';
-        if (ep.includes('/knowledge') || ep.includes('/skill')) return 'knowledge';
-        if (ep.includes('/vision') || ep.includes('/audio') || ep.includes('/text') ||
-            ep.includes('/sensor') || ep.includes('/multimodal') || ep.includes('/teach/')) return 'multimodal';
-        if (ep.includes('/training')) return 'training';
-        if (ep.includes('/robot') || ep.includes('/ros') || ep.includes('/gazebo') ||
-            ep.includes('/serial') || ep.includes('/device')) return 'robot';
-        if (ep.includes('/memory')) return 'memory';
-        if (ep.includes('/lnn')) return 'lnn';
-        if (ep.includes('/gpu')) return 'gpu';
-        if (ep.includes('/evolution') || ep.includes('/pareto')) return 'evolution';
-        return 'general';
+        if (!endpoint) return 'unknown';
+        /* ZSFUSA-F01: 配置驱动查找 */
+        var path = endpoint.replace(/^https?:\/\/[^\/]+/, '');
+        for (var prefix in SUBSYSTEM_ENDPOINT_MAP) {
+            if (path.indexOf(prefix) === 0) {
+                return SUBSYSTEM_ENDPOINT_MAP[prefix];
+            }
+        }
+        return 'unknown';
     }
 
     /**
@@ -249,7 +271,12 @@ class ApiService {
                 const timeoutId = setTimeout(() => controller.abort(), timeout);
 
                 /* BUG-16修复：URL拼接增加斜杠保护，避免baseURL无尾斜杠且endpoint无前导斜杠导致404 */
-                const response = await fetch(this.baseURL + (endpoint.startsWith('/') ? endpoint : '/' + endpoint), {
+                /* L03修复：自动剥离/api/前缀，防止双重/api/api/xxx导致404 */
+                var safeEndpoint = endpoint;
+                if (safeEndpoint.indexOf('/api/') === 0) {
+                    safeEndpoint = safeEndpoint.substring(4);
+                }
+                const response = await fetch(this.baseURL + (safeEndpoint.startsWith('/') ? safeEndpoint : '/' + safeEndpoint), {
                     ...options,
                     signal: controller.signal
                 });
@@ -537,6 +564,51 @@ class ApiService {
                 error: error.message,
                 data: null
             };
+        }
+    }
+    
+    /**
+     * 获取音频频谱分析数据
+     */
+    async getAudioSpectrum() {
+        try {
+            const response = await this.request('/audio/spectrum');
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('[API] 获取音频频谱失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 获取LNN神经元激活热力图数据
+     */
+    async getLnnActivationHeatmap() {
+        try {
+            const response = await this.request('/lnn/activation/heatmap');
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('[API] 获取LNN激活热力图失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 获取LNN预测结果散点图数据
+     */
+    async getLnnPredictionScatter() {
+        try {
+            const response = await this.request('/lnn/prediction/scatter');
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('[API] 获取LNN预测散点图失败:', error);
+            return { success: false, error: error.message, data: null };
         }
     }
     
@@ -875,16 +947,13 @@ class ApiService {
         try {
             const response = await this.request('/reset', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ action: 'reset' })
+                headers: { 'Content-Type': 'application/json' }
             });
-            
+
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
-            
+
             const data = await response.json();
             return {
                 success: true,
@@ -939,16 +1008,13 @@ class ApiService {
         try {
             const response = await this.request('/backup', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ action: 'system_backup' })
+                headers: { 'Content-Type': 'application/json' }
             });
-            
+
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
-            
+
             const data = await response.json();
             return {
                 success: true,
@@ -1192,25 +1258,25 @@ class ApiService {
     /**
      * 更新机器人固件
      */
-    async updateFirmware() {
+    async updateFirmware(data) {
         try {
-            // 尝试调用后端API更新固件
-            const response = await this.request('/robot/firmware', {
+            var options = {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ action: 'update_firmware' })
-            });
-            
+                headers: { 'Content-Type': 'application/json' }
+            };
+            if (data !== undefined) {
+                options.body = JSON.stringify(data);
+            }
+            const response = await this.request('/robot/firmware', options);
+
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
-            
-            const data = await response.json();
+
+            const result = await response.json();
             return {
                 success: true,
-                data: data
+                data: result
             };
         } catch (error) {
             console.error('更新固件失败:', error);
@@ -1326,19 +1392,15 @@ class ApiService {
      */
     async runSelfDiagnostic() {
         try {
-            // 尝试调用后端API运行系统自检
             const response = await this.request('/system/diagnostic', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ action: 'run_self_diagnostic' })
+                headers: { 'Content-Type': 'application/json' }
             });
-            
+
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
-            
+
             const data = await response.json();
             return {
                 success: true,
@@ -1359,19 +1421,14 @@ class ApiService {
      */
     async exportDiagnosticData() {
         try {
-            // 尝试调用后端API导出诊断数据
             const response = await this.request('/system/export_diagnostic', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ action: 'export_diagnostic_data' })
+                method: 'GET'
             });
-            
+
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
-            
+
             const data = await response.json();
             return {
                 success: true,
@@ -1699,11 +1756,18 @@ class ApiService {
     async getModelStatus() {
         try {
             const response = await this.request('/status');
-            if (!response.ok) throw new Error('HTTP\u9519\u8BEF: ' + response.status);
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
-            return { success: true, data: data };
+            /* 从系统状态中提取模型相关信息 */
+            return {
+                success: true,
+                data: {
+                    model: data.lnn || data,
+                    status: data.status || 'unknown',
+                    uptime: data.uptime || 0
+                }
+            };
         } catch (error) {
-            /* 静默回退：/model/load 是POST-only路由，前端用GET /status 代替 */
             return { success: false, error: error.message, data: null };
         }
     }
@@ -1841,7 +1905,19 @@ class ApiService {
         }
     }
 
-    /* P2-4: 设置安全边界 — 封装/safety/bounds端点 */
+    /**
+     * ZSF-002/ZSF-005修复: 设置安全边界配置
+     * 向 /api/safety/bounds 发送POST请求更新机器人安全边界参数
+     *
+     * @param {Object} bounds - 安全边界配置对象，包含以下可选字段：
+     *   @param {number} [bounds.maxSpeed]       - 最大速度限制 (m/s)，默认2.5
+     *   @param {number} [bounds.maxAccel]       - 最大加速度限制 (m/s²)，默认5.0
+     *   @param {number} [bounds.maxTorque]      - 最大扭矩限制 (Nm)，默认150.0
+     *   @param {number} [bounds.safetyZoneRadius] - 安全区域半径 (m)，默认1.2
+     *   @param {number} [bounds.collisionDistance] - 最小碰撞距离 (m)，默认0.3
+     * @returns {Promise<{success:boolean, data:Object, message:string}>}
+     *   成功时 data.bounds 包含更新后的边界值
+     */
     async setSafetyBounds(bounds) {
         try {
             var resp = await this.request('/safety/bounds', {
@@ -3859,37 +3935,9 @@ class ApiService {
     }
 
     /* ==================== 密钥管理增强 API ==================== */
+    /* ZSFAAA-DEEP-010修复: 删除与第一组重复的getKeyList/keyCreate/keyDelete/keySet */
 
-    async getKeyList() {
-        try {
-            var resp = await this.request('/key/list', {method: 'GET'});
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
-    }
-
-    async keyCreate(name, permission, expiresIn) {
-        try {
-            var resp = await this.request('/key/create', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ name: name, permission: permission, expiration_days: expiresIn || 30 })
-            });
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
-    }
-
-    async keyDelete(keyPrefix) {
-        try {
-            var resp = await this.request('/key/delete', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ key_prefix: keyPrefix })
-            });
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
-    }
-
+    /* 密钥更新（唯一功能，保留） */
     async keyUpdate(keyPrefix, updates) {
         try {
             var up = updates || {};
@@ -3922,32 +3970,23 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    async keySet(name, value, permission) {
-        try {
-            var resp = await this.request('/key/set', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ name: name, api_key: value, permission: permission || 1 })
-            });
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
-    }
-
-    async getKeyStatus() {
-        try {
-            var resp = await this.request('/key/status', {method: 'GET'});
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
-    }
-
-    /* P2-4: 设置API密钥 — 封装/key/set端点 */
+    /* P2-4: 设置API密钥 — 封装/key/set端点
+     * ZSFAAA-DEEP-010修复: 删除重复的keySet，保留setKey为唯一入口 */
     async setKey(apiKey) {
         try {
             var resp = await this.request('/key/set', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({api_key: apiKey})
             });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* 获取API密钥状态（被main.js多处调用） */
+    async getKeyStatus() {
+        try {
+            var resp = await this.request('/key/status', {method: 'GET'});
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -4685,27 +4724,19 @@ class ApiService {
      * 获取认知系统状态（自我认知、元认知、深度反思）
      */
     async getCognitionState() {
-        try {
-            const response = await this.request('/cognition/state');
-            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
-            const data = await response.json();
-            return { success: true, data: data };
-        } catch (error) {
-            console.error('获取认知状态失败:', error);
-            return { success: false, error: error.message, data: null };
-        }
+        return this.getCognitionStatus();
     }
 
     /**
      * AGI思考推理（带目标导向的深度推理）
+     * @param {string} prompt - 推理提示词
      */
-    async agiThink(inputText, mode) {
+    async agiThink(prompt) {
         try {
             const response = await this.request('/agi/think', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                /* FIX-1: input→query 匹配后端parse_json_string("query",...) */
-                body: JSON.stringify({ query: inputText, deep: mode || 0 })
+                body: JSON.stringify({ prompt: prompt })
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
@@ -4832,10 +4863,10 @@ class ApiService {
      */
     async pauseTask(taskId) {
         try {
-            const response = await this.request('/agi/task/status', {
+            const response = await this.request('/task/pause', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ task_id: taskId, action: 'pause' })
+                body: JSON.stringify({ task_id: taskId })
             });
             const data = await response.json();
             return { success: response.ok, data: data };
@@ -4848,10 +4879,10 @@ class ApiService {
      */
     async cancelTask(taskId) {
         try {
-            const response = await this.request('/agi/task/status', {
+            const response = await this.request('/task/cancel', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ task_id: taskId, action: 'cancel' })
+                body: JSON.stringify({ task_id: taskId })
             });
             const data = await response.json();
             return { success: response.ok, data: data };
@@ -5030,7 +5061,7 @@ class ApiService {
     }
 
     /**
-     * 创建任务
+     * 创建AGI任务
      * @param {object} taskData - 任务数据
      */
     async createTask(taskData) {
@@ -5051,14 +5082,14 @@ class ApiService {
 
     /**
      * 切换摄像头源
-     * @param {string|number} cameraIndex - 摄像头索引
+     * @param {object} source - 摄像头源配置 {camera: ...}
      */
-    async switchCameraSource(cameraIndex) {
+    async switchCameraSource(source) {
         try {
             const response = await this.request('/camera/switch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ camera_index: cameraIndex || 0 })
+                body: JSON.stringify(source || {})
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
@@ -5071,14 +5102,14 @@ class ApiService {
 
     /**
      * 设置视频质量
-     * @param {object} qualityParams - 质量参数 (width, height, fps等)
+     * @param {object} quality - 质量参数 (width, height, fps等)
      */
-    async setVideoQuality(qualityParams) {
+    async setVideoQuality(quality) {
         try {
             const response = await this.request('/video/quality', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(qualityParams || {})
+                body: JSON.stringify(quality || {})
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
@@ -5106,8 +5137,8 @@ class ApiService {
     }
 
     /**
-     * 恢复/继续任务（ZSFAB-BUG-3修复: 添加缺失的API方法）
-     * 调用 POST /api/task/resume
+     * 恢复/继续AGI任务
+     * 调用 POST /api/agi/task/resume
      * @param {string|number} taskId - 任务ID
      */
     async resumeTask(taskId) {
@@ -5334,18 +5365,8 @@ class ApiService {
         try { var r = await this.request('/teach/test_concept', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({concept:concept}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
-    async apiKeyCreate(name, permission) {
-        try { var r = await this.request('/key/create', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name, permission:permission}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async apiKeyList() {
-        try { var r = await this.request('/key/list', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async apiKeyDelete(keyId) {
-        try { var r = await this.request('/key/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key_id:keyId}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
+    /* ZSFAAA-DEEP-010修复: 删除3个重复/错误API KEY函数
+     * apiKeyCreate 缺少api_key字段 | apiKeyList第三次重复 | apiKeyDelete发送key_id而非key_prefix */
     async devicesEmergencyStop() {
         try { var r = await this.request('/devices/emergency_stop', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
@@ -5570,7 +5591,7 @@ class WebSocketManager {
                 }
                 return;
             }
-            const type = data.type || data.action || 'message';
+            const type = data.type || data.event || data.action || 'message';
             const handlers = this.messageHandlers[type];
             if (handlers) {
                 handlers.forEach(handler => {

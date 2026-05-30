@@ -1632,6 +1632,23 @@ int depth_estimate_save_model(const DepthEstimator* estimator, const char* filep
     return 0;
 }
 
+/* ZSFUSA: 获取默认深度估计配置 */
+DepthEstimationConfig depth_estimation_get_default_config(void) {
+    DepthEstimationConfig config;
+    memset(&config, 0, sizeof(config));
+    config.method = DEPTH_METHOD_STEREO;
+    config.stereo_algorithm = STEREO_MATCHING_SGBM;
+    config.enable_filtering = 1;
+    config.enable_stereo_depth = 1;
+    config.disparity_range = 128;
+    config.window_size = 9;
+    config.min_depth = 0.1f;
+    config.max_depth = 10.0f;
+    config.use_gpu = 0;
+    config.output_format = 0;
+    return config;
+}
+
 /**
  * @brief 加载深度估计模型
  */

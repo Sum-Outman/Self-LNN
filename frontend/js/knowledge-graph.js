@@ -314,6 +314,7 @@
         return div.innerHTML;
     }
 
+    /* ZSFUSA-F03修复: 不再发起独立HTTP请求，使用fetchKnowledgeFromBackend已有缓存数据 */
     function refreshStats() {
         var statEntries = document.getElementById('stat-entries');
         var statMemory = document.getElementById('stat-memory');
@@ -321,27 +322,14 @@
             console.warn('[知识图谱统计] SelfLnnApi不可用，跳过统计刷新');
             return;
         }
-        window.SelfLnnApi.request('/knowledge', {method: 'GET'})
-            .then(function(response) {
-                if (!response.ok) throw new Error('HTTP ' + response.status);
-                return response.json();
-            })
-            .then(function(data) {
-                var resp = data.data || data;
-                if (resp && resp.knowledge) {
-                    graphState.backendOnline = true;
-                    if (statEntries) statEntries.textContent = resp.knowledge.total_entries || knowledgeEntries.length;
-                    var mem = resp.knowledge.memory_usage_bytes || (knowledgeEntries.length * 128);
-                    if (statMemory) statMemory.textContent = formatBytes(mem);
-                } else {
-                    if (statEntries) statEntries.textContent = knowledgeEntries.length;
-                    if (statMemory) statMemory.textContent = formatBytes(knowledgeEntries.length * 128);
-                }
-            })
-            .catch(function() {
-                if (statEntries) statEntries.textContent = '离线';
-                if (statMemory) statMemory.textContent = '离线';
-            });
+        /* 使用本地缓存数据 (由fetchKnowledgeFromBackend统一更新) */
+        if (graphState.backendOnline) {
+            if (statEntries) statEntries.textContent = knowledgeEntries.length;
+            if (statMemory) statMemory.textContent = formatBytes(knowledgeEntries.length * 128);
+        } else {
+            if (statEntries) statEntries.textContent = '离线';
+            if (statMemory) statMemory.textContent = '离线';
+        }
     }
 
     function formatBytes(bytes) {
@@ -396,6 +384,13 @@
 
         /* 根据节点数量动态调整迭代次数 */
         var maxIterations = Math.min(Math.max(Math.floor(nodes.length * 1.5), 20), 200);
+        /* ZSFUSA-F13: 力布局节流，200节点时限制每帧计算量 */
+        var MAX_FORCE_OPS_PER_FRAME = 50000;
+        var forceOps = nodes.length * nodes.length * maxIterations;
+        if (forceOps > MAX_FORCE_OPS_PER_FRAME) {
+            maxIterations = Math.max(Math.floor(MAX_FORCE_OPS_PER_FRAME / (nodes.length * nodes.length)), 1);
+            console.log('[知识图谱] 力布局节流: ' + nodes.length + '节点, 限制迭代=' + maxIterations);
+        }
         for (var iter = 0; iter < maxIterations; iter++) {
             for (var i = 0; i < nodes.length; i++) {
                 var fx = 0, fy = 0;
@@ -1019,12 +1014,12 @@
             _kgIntervalIds.push(kgInterval);
         }
 
-        /* 16秒后初始化Canvas（确保DOM已渲染完整） */
+        /* 3秒后初始化Canvas（DOM已渲染完成，原16秒延迟过长） */
         setTimeout(function() {
             if (document.getElementById('graph-canvas')) {
                 initCanvas();
             }
-        }, 16000);
+        }, 3000);
     });
 
     /* ZSFABC修复: 知识图谱清理函数，移除所有事件监听器和定时器 */

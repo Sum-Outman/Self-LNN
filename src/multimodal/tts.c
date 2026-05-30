@@ -966,120 +966,6 @@ static void tts_extract_mfcc(const float* frame, float* mfcc_out,
  * @param hidden_state CfC隐藏状态（可复用的工作缓冲区，hs维）
  * @return 0成功，-1失败
  */
-/* Phase5: [DEPRECATED] 此函数使用 lnn_forward(共享LNN)，属于生成污染
- * 不再被任何代码调用。保留仅作参考，编译器将消除死代码 */
-static int tts_lnn_acoustic_forward(TTSEngine* engine,
-                                     const float* mfcc,
-                                     float* acoustic_out,
-                                     float* hidden_state) {
-    int hs = (int)engine->config.hidden_size;
-    int ed = engine->config.embedding_dim;
-    float tau = engine->config.time_constant;
-    LNN* lnn = engine->shared_lnn;
-
-    if (!mfcc || !acoustic_out || !hidden_state) return -1;
-
-    /* CfC演化步数：每个MFCC帧对应多步CfC演化（声学特征需更多动力学自由度） */
-    int cfc_steps = 8;
-    float dt = tau / (float)cfc_steps;
-    float exp_base = expf(-dt / tau);
-    float one_minus_base = 1.0f - exp_base;
-
-    for (int step = 0; step < cfc_steps; step++) {
-        if (lnn) {
-            /* 有共享LNN：MFCC输入LNN得到隐藏状态增量 */
-            float lnn_out[512] = {0};
-            /* 构建LNN输入：MFCC特征 + 当前隐藏状态摘要 */
-            float lnn_input[64] = {0};
-            int input_dim = (ed > 0 && ed < 64) ? ed : 39;
-            for (int d = 0; d < input_dim && d < 39; d++) {
-                lnn_input[d] = mfcc[d];
-            }
-            /* 附加隐藏状态的能量作为上下文 */
-            float h_energy = 0.0f;
-            for (int h = 0; h < hs; h++) h_energy += hidden_state[h] * hidden_state[h];
-            lnn_input[input_dim] = sqrtf(h_energy / (float)hs);
-
-            if (lnn_forward(lnn, lnn_input, lnn_out) == 0) {
-                for (int h = 0; h < hs; h++) {
-                    hidden_state[h] = hidden_state[h] * exp_base + one_minus_base * lnn_out[h];
-                }
-            }
-        } else {
-            /* 无共享LNN：使用嵌入表作为权重矩阵的CfC自演化 */
-            for (int h = 0; h < hs; h++) {
-                float gate_sum = 0.0f, act_sum = 0.0f;
-                for (int d = 0; d < 39; d++) {
-                    float w_g = engine->embedding_table[(size_t)((h + d) % ed)];
-                    float w_a = engine->embedding_table[(size_t)((h + d + hs / 2) % ed)];
-                    gate_sum += mfcc[d] * w_g;
-                    act_sum  += mfcc[d] * w_a;
-                }
-                gate_sum += hidden_state[h] * 0.1f;
-                act_sum  += hidden_state[h] * 0.1f;
-                float gate = 1.0f / (1.0f + expf(-gate_sum * 0.3f));
-                float activation = tanhf(act_sum * 0.3f);
-                float driver = gate * activation;
-                float new_h = hidden_state[h] * exp_base + one_minus_base * driver;
-                if (isnan(new_h) || isinf(new_h)) new_h = hidden_state[h];
-                hidden_state[h] = new_h;
-            }
-        }
-    }
-
-    /* 投影隐藏状态 → 声学特征（42维） */
-    memset(acoustic_out, 0, TTS_ACOUSTIC_DIM * sizeof(float));
-
-    /* 精细化MFCC: 线性投影 + sigmoid门控 */
-    for (int c = 0; c < 13; c++) {
-        float sum = 0.0f;
-        for (int h = 0; h < hs; h++) {
-            sum += hidden_state[h] * engine->embedding_table[(size_t)((h + c) % ed)] * 0.5f;
-        }
-        /* 门控混合：原始MFCC和LNN增强MFCC */
-        float gate = 1.0f / (1.0f + expf(-sum * 0.5f));
-        acoustic_out[c] = gate * tanhf(sum * 0.8f) + (1.0f - gate) * mfcc[c] * 0.3f;
-    }
-
-    /* 谐波幅度包络: 通过前13个隐藏状态的投影生成 */
-    for (int c = 0; c < 13; c++) {
-        float sum = 0.0f;
-        for (int h = 0; h < 13 && h < hs; h++) {
-            sum += hidden_state[h] * engine->embedding_table[(size_t)((h * 3 + c) % ed)] * 0.4f;
-        }
-        acoustic_out[13 + c] = fabsf(tanhf(sum));
-    }
-
-    /* 基频F0（对数域）: -1.0 ~ 1.0 映射到 ~60Hz ~ 400Hz */
-    {
-        float f0_sum = 0.0f;
-        for (int h = 0; h < hs; h++) {
-            f0_sum += hidden_state[h] * engine->embedding_table[(size_t)((h + 7) % ed)] * 0.3f;
-        }
-        acoustic_out[26] = tanhf(f0_sum);
-    }
-
-    /* 清浊音判决 */
-    {
-        float vuv_sum = 0.0f;
-        for (int h = 0; h < hs; h++) {
-            vuv_sum += hidden_state[h] * engine->embedding_table[(size_t)((h + 19) % ed)] * 0.3f;
-        }
-        acoustic_out[27] = 1.0f / (1.0f + expf(-vuv_sum));
-    }
-
-    /* 共振峰频率 + 带宽：14维（F1~F5频率 + F1~F5带宽 + 4维余量） */
-    for (int c = 0; c < 14; c++) {
-        float sum = 0.0f;
-        for (int h = 0; h < hs; h++) {
-            sum += hidden_state[h] * engine->embedding_table[(size_t)((h + 31 + c) % ed)] * 0.25f;
-        }
-        acoustic_out[28 + c] = tanhf(sum);
-    }
-
-    return 0;
-}
-
 /* =============================================================== *
  * 深度声学模型：CfC ODE编码器前向传播 —— 3层CfC堆叠                   *
  * =============================================================== */
@@ -1390,11 +1276,30 @@ static int tts_neural_vocoder_forward(TTSEngine* engine,
     if (total_samples > max_wave_samples) total_samples = max_wave_samples;
     if (total_samples <= 0) return -1;
 
-    /* 如果声码器未初始化，回退到谐波叠加合成 */
+    /* ZSFUSA-P1-007修复: 声码器训练感知初始化。
+     * 当声码器未初始化(engine->vocoder_initialized=0)但模型已训练时，
+     * 主动尝试初始化声码器而非直接回退到谐波叠加合成。
+     * 只有在is_trained=0且vocoder也未初始化时才使用确定性回退，
+     * 明确标注为"未训练回退"而非伪装神经合成。 */
+    if (!engine->vocoder_initialized) {
+        /* 模型已训练但声码器未初始化：尝试自动初始化 */
+        if (engine->is_trained || engine->model_loaded) {
+            log_info("[TTS] 声码器未初始化，模型已训练，尝试自动初始化...");
+            if (init_neural_vocoder(engine) == 0) {
+                engine->vocoder_initialized = 1;
+                log_info("[TTS] 声码器自动初始化成功，使用神经合成");
+                /* 继续执行下面的神经声码器路径 */
+            } else {
+                log_warning("[TTS] 声码器自动初始化失败，回退到确定性谐波合成");
+                /* 继续执行回退路径 */
+            }
+        }
+    }
+
+    /* 如果声码器仍未初始化，回退到谐波叠加合成 */
     if (!engine->vocoder_initialized) {
         /* 回退：使用梅尔频谱的逆变换近似作为波形
-         * 谐波叠加合成 —— 基频(220Hz) + 4个泛音(440/660/880/1100Hz)
-         * 每个谐波幅度由梅尔频谱能量包络调制，产生比单正弦波更真实的语音质感 */
+         * 这是确定性回退路径(not neural)，明确告知：未训练状态不可用 */
         int sr = engine->config.sample_rate;
         if (sr <= 0) sr = TTS_SAMPLE_RATE_DEFAULT;
 
@@ -1658,7 +1563,7 @@ static void tts_griffin_lim(const float* log_mag_spec, float* waveform_out, int 
  * 谐波部分由声学特征中的F0和谐波幅度驱动，
  * 噪声部分由共振峰参数调制的滤波白噪声生成。
  *
- * @param acoustic 增强声学特征（42维，来自tts_lnn_acoustic_forward）
+ * @param acoustic 增强声学特征（42维，来自深度CfC编码器）
  * @param waveform_out 输出波形（TTS_FFT_WINDOW个样本）
  * @param sample_rate 采样率
  * @param phase 相位累加器（输入/输出，用于帧间连续性）
@@ -2078,9 +1983,10 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
         memcpy(input_buf, embed, (size_t)ed * sizeof(float));
         input_buf[ed] = engine->prev_output;
 
-        /* Phase5: 强制使用自包含CfC路径，移除lnn_forward(共享LNN)污染
-         * TTS为生成任务，不应修改共享LNN的hidden_state
-         * 自包含CfC使用嵌入表权重，独立于共享LNN演化 */
+        /* ZSFLYF-P3-003: 自包含CfC路径说明。
+         * 当shared_lnn不可用时，使用embedding_table作为CfC权重源。
+         * 这是退化路径(非独立LNN)，嵌入表权重语义不同于独立CfC权重。
+         * 训练后的TTS模型会使用独立的CfC权重文件。 */
         {
             const float embed_weight_scale = 0.2f;
             for (int i = 0; i < hs; i++) {
@@ -2696,11 +2602,14 @@ TTSAudio* tts_synthesize(TTSEngine* engine, const char* text) {
 
     int actual_samples = 0;
 
-    /* L-006修复: 未训练检查 —— CfC权重随机初始化时发出警告
-     * 确定性声门脉冲+共振峰滤波能保证基本可听性，
-     * 但语音自然度依赖训练后的CfC权重。 */
+    /* P1-010修复: 未训练检查 —— 模型未训练时明确拒绝生成音频
+     * CfC权重随机初始化时输出本质为噪声，对应用无实际价值
+     * 必须先完成训练（tts_train()）后才能使用TTS生成功能 */
     if (tts_is_untrained(engine)) {
-        fprintf(stderr, "[TTS警告] TTS模型未训练，语音自然度将受限。建议先运行 tts_train() 训练模型。\n");
+        fprintf(stderr, "[TTS错误] TTS模型未训练，拒绝生成音频！请先运行 tts_train() 完成训练。\n");
+        safe_free((void**)&audio->samples);
+        safe_free((void**)&audio);
+        return NULL;
     }
     actual_samples = generate_waveform(engine, engine->token_buffer, num_tokens,
                                         audio->samples, max_samples);

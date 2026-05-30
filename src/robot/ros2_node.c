@@ -1091,7 +1091,9 @@ int ros2_create_publisher(ROS2Manager* rm, int node_id, const char* topic,
         rosbridge_advertise_topic(rm, topic, type);
     }
 
-    /* 创建TCP端点作为回退通道 */
+    /* ZSFLYF-P1-006修复: TCP回退通道必须正确bind和listen才能使用。
+     * 如果rosbridge可用，优先使用rosbridge（WebSocket）；如果不可用，
+     * TCP回退端点应通过端口bind+listen建立独立TCP服务器。 */
     if (rm->endpoint_count < ROS2_MAX_PUBLISHERS + ROS2_MAX_SUBSCRIBERS) {
         ROS2Endpoint* ep = &rm->endpoints[rm->endpoint_count++];
         memset(ep, 0, sizeof(ROS2Endpoint));
@@ -1099,18 +1101,8 @@ int ros2_create_publisher(ROS2Manager* rm, int node_id, const char* topic,
         snprintf(ep->topic, sizeof(ep->topic), "%s", topic);
         snprintf(ep->type, sizeof(ep->type), "%s", type);
         if (qos) ep->qos = *qos; else ep->qos = g_default_qos;
-        ep->active = 1;
-        ep->socket_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
-        if (ep->socket_fd > 0) {
-            int flag = 1;
-#ifdef _WIN32
-            setsockopt(ep->socket_fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
-#else
-            setsockopt(ep->socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-#endif
-        } else {
-            ep->socket_fd = -1;
-        }
+        ep->active = 0; /* 默认不激活，仅在rosbridge不可用时激活 */
+        ep->socket_fd = -1; /* 延迟创建: bind/listen需要在确定端口后执行 */
     }
 
     log_info("[ROS2] 发布者创建: 节点=%d, 话题=%s, 类型=%s (rosbridge=%s)",

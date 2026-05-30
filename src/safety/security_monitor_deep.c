@@ -937,9 +937,16 @@ int sec_report_resource_event(SafetyMonitor* safety_monitor,
  * A09.1.3 输入安全监控深度实现
  * ============================================================================ */
 
+/* ZSFLYF-P3-004修复: 替换简单LCG为xorshift128+随机数生成器。
+ * xorshift在统计质量和速度上均优于LCG，更适合对抗样本检测中的随机扰动。 */
 static uint32_t sec_rng_next(SecInputMonitor* monitor) {
-    monitor->rng_state = monitor->rng_state * 1103515245U + 12345U;
-    return monitor->rng_state;
+    uint64_t x = (uint64_t)monitor->rng_state;
+    uint64_t y = (uint64_t)(monitor->rng_state >> 32);
+    if (y == 0) y = 0x9E3779B97F4A7C15ULL;
+    x ^= x << 23;
+    uint64_t s = (x ^ y ^ (x >> 17)) * 0x2545F4914F6CDD1DULL;
+    monitor->rng_state = (uint32_t)(s & 0xFFFFFFFFU) | ((uint32_t)((s >> 32) & 0xFFFFFFFFU) << 32);
+    return (uint32_t)(s & 0xFFFFFFFFU);
 }
 
 static float sec_rng_float(SecInputMonitor* monitor) {

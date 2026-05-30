@@ -8,6 +8,7 @@
  */
 
 #include "selflnn/multimodal/audio.h"
+#include "selflnn/multimodal/audio_loader.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
 

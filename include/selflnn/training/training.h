@@ -642,12 +642,13 @@ int trainer_gradient_check(Trainer* trainer, const float* inputs, const float* t
 void gradient_check_result_free(GradientCheckResult* result);
 
 /* ========================================================================
- * P2-001: 梯度流健康度监控
+ * P2-001: 梯度流健康度监控（GradientFlowReport）
  * 监控各层梯度范数、检测梯度消失/爆炸、辅助训练诊断
+ * 注意：GradientFlowReport ≠ GradientHealthReport（本文档尾部ZSFWS-P0-002定义）
  * ======================================================================== */
 
 /**
- * @brief 梯度流健康度报告
+ * @brief 梯度流详细报告（按层分解的梯度范数）
  */
 typedef struct {
     float output_grad_norm;          /**< 输出层梯度范数 */
@@ -663,22 +664,20 @@ typedef struct {
     float vanishing_threshold;       /**< 梯度消失阈值 */
     float exploding_threshold;       /**< 梯度爆炸阈值 */
     float recommended_clip_norm;     /**< 建议的梯度裁剪范数 */
-} GradientHealthReport;
+} GradientFlowReport;
 
 /**
- * @brief 获取当前训练步骤的梯度流健康度报告
- * 从LNN网络内部提取各层梯度统计并分析健康状态
- *
+ * @brief 获取当前训练步骤的逐层梯度流报告
  * @param trainer 训练器句柄
- * @param report 输出健康报告
+ * @param report 输出流报告（GradientFlowReport*）
  * @return int 成功返回0，失败返回-1
  */
-int trainer_check_gradient_health(Trainer* trainer, GradientHealthReport* report);
+int trainer_check_gradient_flow(Trainer* trainer, GradientFlowReport* report);
 
 /**
- * @brief 打印梯度流健康度报告到控制台
+ * @brief 打印梯度流报告到控制台
  */
-void gradient_health_report_print(const GradientHealthReport* report);
+void gradient_flow_report_print(const GradientFlowReport* report);
 
 /**
  * @brief 早停检查
@@ -1072,6 +1071,15 @@ int trainer_resume(Trainer* trainer);
  * @return int 成功返回0，失败返回-1
  */
 int trainer_stop(Trainer* trainer);
+
+/**
+ * @brief 更新训练器配置（运行时修改）
+ *
+ * @param trainer 训练器句柄
+ * @param config 新训练配置
+ * @return int 成功返回0，失败返回-1
+ */
+int trainer_update_config(Trainer* trainer, const TrainingConfig* config);
 
 /**
  * @brief 获取训练配置
@@ -2039,6 +2047,35 @@ int trainer_set_training_phase(Trainer* trainer, int phase);
  * @return int 当前阶段编号，失败返回-1
  */
 int trainer_get_training_phase(Trainer* trainer);
+
+/* ================================================================
+ * ZSFWS-P0-002: 梯度健康度监测系统
+ * 在每个训练epoch后收集梯度统计信息，检测梯度消失/爆炸/NaN率，
+ * 防止训练静默进入无效状态（所有梯度被跳过但无告警）。
+ * ================================================================ */
+
+/** @brief 梯度健康度报告 */
+typedef struct {
+    float gradient_mean;        /**< 梯度均值 */
+    float gradient_stddev;      /**< 梯度标准差 */
+    float gradient_max_abs;     /**< 梯度最大绝对值 */
+    float gradient_min_abs;     /**< 梯度最小非零绝对值 */
+    size_t total_params;        /**< 总参数数 */
+    size_t nan_count;           /**< NaN梯度数量 */
+    size_t inf_count;           /**< Inf梯度数量 */
+    size_t skipped_count;       /**< 被跳过的参数数（NaN/Inf） */
+    size_t active_count;        /**< 有效梯度更新数 */
+    float update_ratio;         /**< 有效更新比例 = active/total */
+    float gradient_norm_l2;     /**< 梯度L2范数 */
+    int is_healthy;             /**< 健康标志: 1=正常, 0=异常 */
+    char warning[256];          /**< 健康告警信息 */
+} GradientHealthReport;
+
+/** @brief 收集梯度健康度报告 */
+int trainer_collect_gradient_health(Trainer* trainer, GradientHealthReport* report);
+
+/** @brief 检查梯度是否健康（快速检查，不生成完整报告） */
+int trainer_check_gradient_health(Trainer* trainer);
 
 #ifdef __cplusplus
 }

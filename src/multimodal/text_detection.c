@@ -7,7 +7,7 @@
  */
 
 #include "selflnn/multimodal/text_detection.h"
-#include "selflnn/core/memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/platform.h"

@@ -93,6 +93,14 @@ typedef struct {
     int enable_safety;          /**< 是否启用安全功能 */
     float safety_distance;      /**< 安全距离 (m) */
     int enable_sync;            /**< 是否启用同步控制 */
+    /* 动力学参数（用于力矩控制和物理仿真） */
+    float link_mass;            /**< 连杆质量 (kg) */
+    float link_length;          /**< 连杆长度 (m) */
+    float friction_coeff;       /**< 粘性摩擦系数 (Nm·s/rad) */
+    float inertia;              /**< 转动惯量 (kg·m²) */
+    float static_friction;      /**< 静摩擦力 (Nm) */
+    float max_torque;           /**< 最大关节力矩 (Nm) */
+    int use_real_hardware;      /**< 是否使用真实硬件（1=真实硬件，0=仿真/无硬件） */
 } RobotConfig;
 
 /**

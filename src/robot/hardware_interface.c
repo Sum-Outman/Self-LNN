@@ -48,6 +48,10 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
+/* P1-002: Linux硬件I2C支持 */
+#ifdef __linux__
+#include <linux/i2c-dev.h>
+#endif
 #endif
 
 /**
@@ -3187,6 +3191,10 @@ typedef struct {
     int timeout_ms;
     int64_t last_transaction_time_us;
     int bus_busy;
+    /* P1-002: Linux硬件I2C支持 */
+    int use_hw_i2c;           /**< 1=使用/dev/i2c-N硬件I2C，0=GPIO位敲 */
+    int i2c_fd;               /**< /dev/i2c-N文件描述符 */
+    int i2c_bus_num;          /**< I2C总线编号 */
 } I2cBusState;
 
 static I2cBusState g_i2c_buses[I2C_MAX_BUSES];
@@ -3805,6 +3813,34 @@ int hardware_interface_i2c_init(int scl_pin, int sda_pin, int speed_khz) {
             g_i2c_buses[i].retry_count = 3;
             g_i2c_buses[i].timeout_ms = 1000;
             g_i2c_buses[i].bus_busy = 0;
+            /* P1-002: 尝试Linux硬件I2C (/dev/i2c-N)，不可用时回退GPIO位敲 */
+            g_i2c_buses[i].use_hw_i2c = 0;
+            g_i2c_buses[i].i2c_fd = -1;
+#ifdef __linux__
+            {
+                /* 尝试打开 /dev/i2c-0 到 /dev/i2c-3 */
+                for (int bn = 0; bn < 4; bn++) {
+                    char dev_path[32];
+                    snprintf(dev_path, sizeof(dev_path), "/dev/i2c-%d", bn);
+                    int fd = open(dev_path, O_RDWR);
+                    if (fd >= 0) {
+                        g_i2c_buses[i].use_hw_i2c = 1;
+                        g_i2c_buses[i].i2c_fd = fd;
+                        g_i2c_buses[i].i2c_bus_num = bn;
+                        log_info("[I2C] P1-002: 已启用硬件I2C /dev/i2c-%d (速度=%dkHz)",
+                                 bn, g_i2c_buses[i].speed_khz);
+                        break;
+                    }
+                }
+            }
+            if (!g_i2c_buses[i].use_hw_i2c) {
+                log_info("[I2C] 未检测到硬件I2C设备，使用GPIO位敲(SCL=%d,SDA=%d,速度=%dkHz)",
+                         scl_pin, sda_pin, g_i2c_buses[i].speed_khz);
+            }
+#else
+            log_debug("[I2C] 非Linux平台，使用GPIO位敲(SCL=%d,SDA=%d,速度=%dkHz)",
+                     scl_pin, sda_pin, g_i2c_buses[i].speed_khz);
+#endif
             HW_UNLOCK();
             return 0;
         }

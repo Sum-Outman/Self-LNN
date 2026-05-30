@@ -227,24 +227,60 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
 
     int* open_list = (int*)malloc(total_cells * sizeof(int));
     if (!open_list) { free(nodes); return -1; }
-    int open_count = 1;
-    open_list[0] = start_idx;
-
+    
+    /* 二叉堆优先队列索引数组：heap_idx[node_idx] = 在heap中的位置(-1表示不在堆中) */
+    int* heap_idx = (int*)malloc(total_cells * sizeof(int));
+    if (!heap_idx) { free(open_list); free(nodes); return -1; }
+    for (int i = 0; i < total_cells; i++) heap_idx[i] = -1;
+    
+    int heap_size = 0;
+    
+    /* 二叉堆上浮操作 */
+    #define HEAP_SIFT_UP(h, idx_arr, n_arr) do { \
+        int _ci = h; \
+        while (_ci > 0) { \
+            int _pi = (_ci - 1) >> 1; \
+            if (n_arr[idx_arr[_ci]].f >= n_arr[idx_arr[_pi]].f) break; \
+            int _tmp = idx_arr[_ci]; idx_arr[_ci] = idx_arr[_pi]; idx_arr[_pi] = _tmp; \
+            heap_idx[idx_arr[_ci]] = _ci; heap_idx[idx_arr[_pi]] = _pi; \
+            _ci = _pi; \
+        } \
+    } while(0)
+    
+    /* 二叉堆下沉操作 */
+    #define HEAP_SIFT_DOWN(h, sz, idx_arr, n_arr) do { \
+        int _ci = h; \
+        while (1) { \
+            int _l = (_ci << 1) + 1, _r = _l + 1, _min_i = _ci; \
+            if (_l < sz && n_arr[idx_arr[_l]].f < n_arr[idx_arr[_min_i]].f) _min_i = _l; \
+            if (_r < sz && n_arr[idx_arr[_r]].f < n_arr[idx_arr[_min_i]].f) _min_i = _r; \
+            if (_min_i == _ci) break; \
+            int _tmp = idx_arr[_ci]; idx_arr[_ci] = idx_arr[_min_i]; idx_arr[_min_i] = _tmp; \
+            heap_idx[idx_arr[_ci]] = _ci; heap_idx[idx_arr[_min_i]] = _min_i; \
+            _ci = _min_i; \
+        } \
+    } while(0)
+    
+    /* 初始节点入堆 */
+    open_list[0] = start_idx; heap_size = 1; heap_idx[start_idx] = 0;
+    
     int found = 0;
     int goal_idx = -1;
     int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{-1,1},{1,-1},{-1,-1}};
     float dir_costs[8] = {1.0f, 1.0f, 1.0f, 1.0f, 1.414f, 1.414f, 1.414f, 1.414f};
 
-    while (open_count > 0)
+    while (heap_size > 0)
     {
-        int best_f_idx = 0;
-        for (int i = 1; i < open_count; i++)
-        {
-            if (nodes[open_list[i]].f < nodes[open_list[best_f_idx]].f)
-                best_f_idx = i;
+        /* 二叉堆弹出最小f值节点 O(log n) */
+        int current = open_list[0];
+        heap_idx[current] = -1;
+        if (heap_size > 1) {
+            open_list[0] = open_list[--heap_size];
+            heap_idx[open_list[0]] = 0;
+            HEAP_SIFT_DOWN(0, heap_size, open_list, nodes);
+        } else {
+            heap_size = 0;
         }
-        int current = open_list[best_f_idx];
-        open_list[best_f_idx] = open_list[--open_count];
 
         nodes[current].in_open = 0;
         nodes[current].in_closed = 1;
@@ -277,7 +313,15 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
                 if (!nodes[nidx].in_open)
                 {
                     nodes[nidx].in_open = 1;
-                    open_list[open_count++] = nidx;
+                    /* 二叉堆插入 O(log n) */
+                    open_list[heap_size] = nidx;
+                    heap_idx[nidx] = heap_size;
+                    HEAP_SIFT_UP(heap_size, open_list, nodes);
+                    heap_size++;
+                }
+                else if (heap_idx[nidx] >= 0) {
+                    /* 节点已在堆中，调整位置 */
+                    HEAP_SIFT_UP(heap_idx[nidx], open_list, nodes);
                 }
             }
         }
@@ -315,6 +359,7 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
     }
 
     free(open_list);
+    free(heap_idx);
     free(nodes);
     return result->success ? 0 : -1;
 }

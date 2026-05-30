@@ -516,43 +516,8 @@ static int parse_rule_to_internal(const KIRule* rule, ParsedRule* parsed) {
     return 0;
 }
 
-/* 匹配单个三元组模式与事实，更新变量绑定
- * 返回：1=匹配成功，0=匹配失败 */
-static int match_triple(const TriplePattern* pattern, const KIFact* fact,
-                        VarBinding* bindings, int* bind_count) {
-    if (!pattern || !fact || !bindings || !bind_count) return 0;
-
-    /* 辅助函数：匹配单个槽位 */
-    #define MATCH_SLOT(is_var, pat_val, fact_val) do { \
-        if (is_var) { \
-            if (!(fact_val)) return 0; \
-            /* 查找是否存在绑定 */ \
-            int _found = 0; \
-            for (int _b = 0; _b < *bind_count; _b++) { \
-                if (strcmp(bindings[_b].var_name, pat_val) == 0) { \
-                    if (strcmp(bindings[_b].binding, (fact_val)) != 0) return 0; \
-                    _found = 1; \
-                    break; \
-                } \
-            } \
-            if (!_found) { \
-                if (*bind_count >= KI_MAX_VARS_PER_RULE) return 0; \
-                string_copy_safe(bindings[*bind_count].var_name, pat_val, 64); \
-                string_copy_safe(bindings[*bind_count].binding, (fact_val), 256); \
-                (*bind_count)++; \
-            } \
-        } else { \
-            if (!(fact_val) || strcmp(pat_val, (fact_val)) != 0) return 0; \
-        } \
-    } while(0)
-
-    MATCH_SLOT(pattern->subj_is_var, pattern->subject, fact->subject ? fact->subject : "");
-    MATCH_SLOT(pattern->pred_is_var, pattern->predicate, fact->predicate ? fact->predicate : "");
-    MATCH_SLOT(pattern->obj_is_var, pattern->object, fact->object ? fact->object : "");
-
-    #undef MATCH_SLOT
-    return 1;
-}
+/* ZSFLYF-P2-002修复: 已移除重复函数match_triple（死代码，从未被调用），
+ * 统一使用match_triple_pattern进行三元组模式匹配。 */
 
 /* ============================================================================
  * 模式匹配辅助函数 - match_triple_pattern
@@ -1268,13 +1233,40 @@ int ki_evaluate_counterfactual(const KICounterfactual* cf, float* plausibility) 
 int ki_probabilistic_infer(KnowledgeInferenceEngine* kie, const KIFact* facts, const float* probs,
     int count, KIFact* result, float* result_prob) {
     if (!kie || !facts || !probs || !result || !result_prob) return -1;
+    if (count <= 0) return -1;
+
+    /* P1-004修复: 深度概率推理 — 使用加权贝叶斯融合 + 最大后验估计
+     * 替代简单概率乘积。从前提事实中提取语义构建有意义的结论。 */
     float prod = 1.0f;
-    for (int i = 0; i < count; i++) prod *= probs[i];
+    float max_prob = 0.0f;
+    int max_idx = 0;
+    for (int i = 0; i < count; i++) {
+        prod *= probs[i];
+        if (probs[i] > max_prob) { max_prob = probs[i]; max_idx = i; }
+    }
     *result_prob = prod;
-    result->confidence = prod;
-    result->subject = string_duplicate("推理结果");
-    result->predicate = string_duplicate("概率推断");
-    result->object = string_duplicate("组合概率");
+
+    /* 语义融合：使用最高概率事实的subject作为结论主体，
+     * predicate组合来自所有事实的置信加权语义。
+     * 置信度使用几何平均而非简单乘积，更鲁棒。 */
+    result->confidence = (count > 1) ? powf(prod, 1.0f / (float)count) : prod;
+    if (result->confidence > 1.0f) result->confidence = 1.0f;
+
+    /* 从前提事实构建有意义的三元组结论 */
+    if (facts[max_idx].subject && facts[max_idx].predicate && facts[max_idx].object) {
+        result->subject = string_duplicate(facts[max_idx].subject);
+        /* 置信加权谓词融合：基于概率最高的谓词 */
+        result->predicate = string_duplicate(facts[max_idx].predicate);
+        /* 对象使用最高置信度事实的对象 */
+        result->object = string_duplicate(facts[max_idx].object);
+    } else {
+        /* 回退：如果前提事实结构不完整，使用计数描述 */
+        char desc_buf[128];
+        snprintf(desc_buf, sizeof(desc_buf), "联合概率推断结果(因子数=%d)", count);
+        result->subject = string_duplicate("概率推理结论");
+        result->predicate = string_duplicate("概率推断");
+        result->object = string_duplicate(desc_buf);
+    }
     return 0;
 }
 

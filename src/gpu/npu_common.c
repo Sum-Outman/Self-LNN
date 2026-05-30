@@ -27,6 +27,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <math.h>
+
+/* ZSFUSA-P0-006: SIMD intrinsics headers for real vectorized computation */
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE__) || defined(__SSE2__)
+#include <immintrin.h>
+#endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -590,33 +599,138 @@ int npu_common_simd_matmul(const float* a, const float* b, float* c,
                             size_t m, size_t n, size_t k,
                             int transpose_a, int transpose_b) {
     if (!a || !b || !c) return -1;
-    size_t k_aligned = k & ~3ULL;
-    
-    for (size_t row = 0; row < m; row++) {
-        for (size_t col = 0; col < k_aligned; col += 4) {
-            float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-            for (size_t inner = 0; inner < n; inner++) {
-                float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
-                float bv0 = transpose_b ? b[col * n + inner]     : b[inner * k + col];
-                float bv1 = transpose_b ? b[(col+1) * n + inner] : b[inner * k + col + 1];
-                float bv2 = transpose_b ? b[(col+2) * n + inner] : b[inner * k + col + 2];
-                float bv3 = transpose_b ? b[(col+3) * n + inner] : b[inner * k + col + 3];
-                sum0 += av * bv0; sum1 += av * bv1;
-                sum2 += av * bv2; sum3 += av * bv3;
+
+    /* ZSFUSA-P0-006修复: 真正的SIMD矩阵乘法。
+     * 原实现仅4路标量循环展开，命名"s_imd_"具有误导性。
+     * 现实现分层SIMD: AVX2-FMA(8路) → SSE(4路) → NEON(4路) → 标量。
+     * 编译时根据目标架构自动选择最优路径。 */
+    memset(c, 0, m * k * sizeof(float));
+
+#if defined(__AVX2__) || defined(__FMA__)
+    /* AVX2 + FMA: 每次处理8个输出列 */
+    {
+        const size_t k_avx = k & ~7ULL;
+        for (size_t row = 0; row < m; row++) {
+            for (size_t col = 0; col < k_avx; col += 8) {
+                __m256 sum0 = _mm256_setzero_ps();
+                __m256 sum1 = _mm256_setzero_ps();
+                for (size_t inner = 0; inner < n; inner++) {
+                    float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
+                    __m256 av8 = _mm256_set1_ps(av);
+                    __m256 bv0 = transpose_b ?
+                        _mm256_set_ps(b[(col+7)*n+inner], b[(col+6)*n+inner],
+                                      b[(col+5)*n+inner], b[(col+4)*n+inner],
+                                      b[(col+3)*n+inner], b[(col+2)*n+inner],
+                                      b[(col+1)*n+inner], b[col*n+inner]) :
+                        _mm256_loadu_ps(&b[inner * k + col]);
+                    sum0 = _mm256_fmadd_ps(av8, bv0, sum0);
+                }
+                _mm256_storeu_ps(&c[row * k + col], sum0);
             }
-            c[row * k + col] = sum0; c[row * k + col + 1] = sum1;
-            c[row * k + col + 2] = sum2; c[row * k + col + 3] = sum3;
-        }
-        for (size_t col = k_aligned; col < k; col++) {
-            float sum = 0.0f;
-            for (size_t inner = 0; inner < n; inner++) {
-                float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
-                float bv = transpose_b ? b[col * n + inner] : b[inner * k + col];
-                sum += av * bv;
+            for (size_t col = k_avx; col < k; col++) {
+                float sum = 0.0f;
+                for (size_t inner = 0; inner < n; inner++) {
+                    float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
+                    float bv = transpose_b ? b[col * n + inner] : b[inner * k + col];
+                    sum += av * bv;
+                }
+                c[row * k + col] = sum;
             }
-            c[row * k + col] = sum;
         }
     }
+#elif defined(__SSE__) || defined(__SSE2__)
+    /* SSE: 每次处理4个输出列 */
+    {
+        const size_t k_sse = k & ~3ULL;
+        for (size_t row = 0; row < m; row++) {
+            for (size_t col = 0; col < k_sse; col += 4) {
+                __m128 sum0 = _mm_setzero_ps();
+                for (size_t inner = 0; inner < n; inner++) {
+                    float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
+                    __m128 av4 = _mm_set1_ps(av);
+                    __m128 bv0 = transpose_b ?
+                        _mm_set_ps(b[(col+3)*n+inner], b[(col+2)*n+inner],
+                                   b[(col+1)*n+inner], b[col*n+inner]) :
+                        _mm_loadu_ps(&b[inner * k + col]);
+                    sum0 = _mm_add_ps(_mm_mul_ps(av4, bv0), sum0);
+                }
+                _mm_storeu_ps(&c[row * k + col], sum0);
+            }
+            for (size_t col = k_sse; col < k; col++) {
+                float sum = 0.0f;
+                for (size_t inner = 0; inner < n; inner++) {
+                    float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
+                    float bv = transpose_b ? b[col * n + inner] : b[inner * k + col];
+                    sum += av * bv;
+                }
+                c[row * k + col] = sum;
+            }
+        }
+    }
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)
+    /* ARM NEON: 每次处理4个输出列 */
+    {
+        const size_t k_neon = k & ~3ULL;
+        for (size_t row = 0; row < m; row++) {
+            for (size_t col = 0; col < k_neon; col += 4) {
+                float32x4_t sum0 = vdupq_n_f32(0.0f);
+                for (size_t inner = 0; inner < n; inner++) {
+                    float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
+                    float32x4_t av4 = vdupq_n_f32(av);
+                    float32x4_t bv0;
+                    if (transpose_b) {
+                        float32_t b_tmp[4] = {b[col*n+inner], b[(col+1)*n+inner],
+                                              b[(col+2)*n+inner], b[(col+3)*n+inner]};
+                        bv0 = vld1q_f32(b_tmp);
+                    } else {
+                        bv0 = vld1q_f32(&b[inner * k + col]);
+                    }
+                    sum0 = vmlaq_f32(sum0, av4, bv0);
+                }
+                vst1q_f32(&c[row * k + col], sum0);
+            }
+            for (size_t col = k_neon; col < k; col++) {
+                float sum = 0.0f;
+                for (size_t inner = 0; inner < n; inner++) {
+                    float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
+                    float bv = transpose_b ? b[col * n + inner] : b[inner * k + col];
+                    sum += av * bv;
+                }
+                c[row * k + col] = sum;
+            }
+        }
+    }
+#else
+    /* 标量回退（无SIMD平台）: 4路展开减少流水线停顿 */
+    {
+        size_t k_aligned = k & ~3ULL;
+        for (size_t row = 0; row < m; row++) {
+            for (size_t col = 0; col < k_aligned; col += 4) {
+                float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+                for (size_t inner = 0; inner < n; inner++) {
+                    float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
+                    float bv0 = transpose_b ? b[col * n + inner]     : b[inner * k + col];
+                    float bv1 = transpose_b ? b[(col+1) * n + inner] : b[inner * k + col + 1];
+                    float bv2 = transpose_b ? b[(col+2) * n + inner] : b[inner * k + col + 2];
+                    float bv3 = transpose_b ? b[(col+3) * n + inner] : b[inner * k + col + 3];
+                    sum0 += av * bv0; sum1 += av * bv1;
+                    sum2 += av * bv2; sum3 += av * bv3;
+                }
+                c[row * k + col] = sum0; c[row * k + col + 1] = sum1;
+                c[row * k + col + 2] = sum2; c[row * k + col + 3] = sum3;
+            }
+            for (size_t col = k_aligned; col < k; col++) {
+                float sum = 0.0f;
+                for (size_t inner = 0; inner < n; inner++) {
+                    float av = transpose_a ? a[inner * m + row] : a[row * n + inner];
+                    float bv = transpose_b ? b[col * n + inner] : b[inner * k + col];
+                    sum += av * bv;
+                }
+                c[row * k + col] = sum;
+            }
+        }
+    }
+#endif
     return 0;
 }
 
@@ -655,9 +769,9 @@ int npu_common_simd_cfc_step(const float* h_in, const float* W,
  * 零虚拟数据 —— 所有操作均为精确数学实现。
  * ================================================================ */
 
-static GpuKernel* npu_common_kernel_create(GpuContext* context,
-                                            const char* kernel_source,
-                                            const char* kernel_name) {
+static GpuKernel* npu_common_gpu_kernel_create(GpuContext* context,
+                                               const char* kernel_source,
+                                               const char* kernel_name) {
     (void)context;
     if (!kernel_name) return NULL;
 
@@ -689,7 +803,7 @@ static GpuKernel* npu_common_kernel_create(GpuContext* context,
     return k;
 }
 
-static void npu_common_kernel_free(GpuKernel* kernel) {
+static void npu_common_gpu_kernel_free(GpuKernel* kernel) {
     if (!kernel) return;
     if (kernel->kernel_name)   safe_free((void**)&kernel->kernel_name);
     if (kernel->kernel_source) safe_free((void**)&kernel->kernel_source);
@@ -700,8 +814,8 @@ static void npu_common_kernel_free(GpuKernel* kernel) {
     safe_free((void**)&kernel);
 }
 
-static int npu_common_kernel_set_arg(GpuKernel* kernel, int arg_index,
-                                      size_t arg_size, const void* arg_value) {
+static int npu_common_gpu_kernel_set_arg(GpuKernel* kernel, int arg_index,
+                                          size_t arg_size, const void* arg_value) {
     if (!kernel || arg_index < 0) return -1;
 
     if (arg_index >= kernel->arg_capacity) {
@@ -750,6 +864,32 @@ static int npu_common_kernel_execute_nd_entry(GpuKernel* kernel, int work_dim,
     }
     kernel->work_dim = work_dim;
     return npu_common_cpu_kernel_execute(kernel, total);
+}
+
+/* ================================================================
+ * 5c. NPU内核管理公共接口（void*句柄，各后端可重载实现）
+ *
+ * 提供统一的void*句柄内核管理API，与GpuKernel*内部实现解耦。
+ * 当前为空操作存根，由Ascend/Cambricon/TPU/Intel后端按需重载。
+ * ================================================================ */
+
+int npu_common_kernel_create(void** handle, const char* name) {
+    (void)name;
+    if (handle) *handle = NULL;
+    return 0;
+}
+
+int npu_common_kernel_set_arg(void* handle, int index, size_t size, const void* value) {
+    (void)handle;
+    (void)index;
+    (void)size;
+    (void)value;
+    return 0;
+}
+
+int npu_common_kernel_free(void* handle) {
+    (void)handle;
+    return 0;
 }
 
 /* ================================================================
@@ -885,9 +1025,9 @@ void npu_common_populate_backend_iface(GpuBackendInterface* iface,
     iface->memory_copy_to_device_async = (int (*)(GpuMemory*, const void*, size_t, GpuStream*))npu_common_memcpy_h2d_fallback;
     iface->memory_copy_from_device_async = (int (*)(void*, GpuMemory*, size_t, GpuStream*))npu_common_memcpy_d2h_fallback;
     /* ZSFABC-C003修复: 消除NULL内核指针，使用真实CPU计算路径 */
-    iface->kernel_create   = npu_common_kernel_create;
-    iface->kernel_free     = npu_common_kernel_free;
-    iface->kernel_set_arg  = npu_common_kernel_set_arg;
+    iface->kernel_create   = npu_common_gpu_kernel_create;
+    iface->kernel_free     = npu_common_gpu_kernel_free;
+    iface->kernel_set_arg  = npu_common_gpu_kernel_set_arg;
     iface->kernel_execute  = npu_common_kernel_execute_entry;
     iface->kernel_execute_nd = npu_common_kernel_execute_nd_entry;
     iface->stream_create = npu_common_stream_create;

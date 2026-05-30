@@ -298,6 +298,9 @@ int gpu_auto_init(GpuBackend* backend_out);
  */
 int gpu_is_cpu_backend(void);
 
+/* ZSFUSA: GPU可用性快速检测 */
+int gpu_is_available(void);
+
 /**
  * @brief 清理GPU系统
  */
@@ -1031,15 +1034,15 @@ int gpu_multi_gpu_all_reduce(GpuMultiGpuContext* mg_ctx,
  * 将源设备上的数据广播到所有其他设备。
  * 
  * @param mg_ctx 多GPU上下文
- * @param src_device 源设备索引
- * @param data GPU上的数据指针（源设备发送，目标设备接收）
+ * @param data 数据指针
  * @param size 数据元素数量
+ * @param root_device 根设备索引（广播源）
+ * @param comm_mode 通信模式
  * @return int 成功返回0，失败返回-1
  */
 int gpu_multi_gpu_broadcast(GpuMultiGpuContext* mg_ctx,
-                            int src_device,
-                            float* data,
-                            size_t size);
+                            float* data, size_t size,
+                            int root_device, GpuCommMode comm_mode);
 
 /**
  * @brief 同步所有GPU设备
@@ -1383,24 +1386,21 @@ int gpu_matmul_train(GpuContext* context,
  * 所有权重、偏置、数据均已在设备内存中。
  * 
  * @param context GPU上下文
- * @param weights GPU权重数组指针
- * @param biases GPU偏置数组指针
- * @param inputs GPU训练输入数据指针
- * @param targets GPU训练目标数据指针
- * @param weight_count 权重数组数量
- * @param bias_count 偏置数组数量
- * @param input_size 输入大小
- * @param output_size 输出大小
- * @param batch_size 批大小
+ * @param input 输入数据指针
+ * @param target 目标数据指针
+ * @param output 输出数据指针
+ * @param weights 权重张量（一维展开）
+ * @param input_size 输入维度
+ * @param output_size 输出维度
  * @param config 训练配置
+ * @param step 当前训练步数
  * @return int 成功返回0，失败返回-1
  */
 int gpu_train_step(GpuContext* context,
-                   float** weights, float** biases,
-                   const float* inputs, const float* targets,
-                   int weight_count, int bias_count,
+                   const float* input, const float* target,
+                   float* output, float* weights,
                    size_t input_size, size_t output_size,
-                   int batch_size, const GpuTrainConfig* config);
+                   const GpuTrainConfig* config, int step);
 
 // ==================== GPU高级训练算子接口 ====================
 
@@ -1691,8 +1691,8 @@ float gpu_lr_scheduler_step(int current_step, const GpuLRConfig* config);
  * @return int 成功返回0，失败返回-1
  */
 int gpu_forward_dense(GpuContext* context,
-                      const float* input, const float* weights,
-                      const float* bias, float* output,
+                      const float* input, float* output,
+                      const float* weights, const float* bias,
                       size_t batch_size, size_t input_size, size_t output_size,
                       GpuActivationType act_type, float alpha);
 

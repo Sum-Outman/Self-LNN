@@ -100,6 +100,11 @@ endif()
 add_definitions(-DSELFLNN_NO_EMOTION)
 message(STATUS "🔒 情感功能已编译期禁用（符合需求规范）")
 
+# ZSFLNN-C-001修复: 启用SLAM高级模块 (CfC Direct VO / TSDF / Semantic Map / Dynamic Map)
+# 原先 SELFLNN_SLAM_ADVANCED 从未定义, 导致20个函数成为空壳存根
+add_definitions(-DSELFLNN_SLAM_ADVANCED)
+message(STATUS "🗺️ SLAM高级模块已启用: CfC Direct VO + TSDF Volume + Semantic Map + Dynamic Map")
+
 message(STATUS "构建配置: BUILD_TESTS=${BUILD_TESTS}")
 
 # 包含目录
@@ -218,7 +223,7 @@ target_link_libraries(selflnn PRIVATE
     selflnn_concurrency
     selflnn_cognition
     selflnn_agi
-    selflnn_nas
+    selflnn_evolution
     selflnn_programming
     selflnn_product_design
     selflnn_safety

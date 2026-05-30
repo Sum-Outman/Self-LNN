@@ -1041,7 +1041,6 @@ int causal_model_instrumental_variable(StructuralCausalModel* model,
     float cov_zy = causal_model_covariance(z_samples, y_samples, (size_t)num_samples);
     float cov_zx = causal_model_covariance(z_samples, x_samples, (size_t)num_samples);
 
-    safe_free((void**)&z_samples);
     safe_free((void**)&x_samples);
     safe_free((void**)&y_samples);
 
@@ -1059,6 +1058,9 @@ int causal_model_instrumental_variable(StructuralCausalModel* model,
     mean_z /= (float)num_samples;
     for (int s = 0; s < num_samples; s++) var_z += (z_samples[s] - mean_z) * (z_samples[s] - mean_z);
     var_z /= (float)(num_samples - 1);
+
+    /* ZSFA-FIX-F006: safe_free(z_samples)移至方差计算之后，避免use-after-free */
+    safe_free((void**)&z_samples);
 
     float se = sqrtf(var_z / (cov_zx * cov_zx * (float)num_samples));
     result->effect_variance = se * se;

@@ -52,6 +52,7 @@ typedef struct {
  * @brief 产品需求结构体
  */
 typedef struct {
+    char* name;                  /**< 需求名称 */
     char* requirement_text;      /**< 需求文本 */
     char** keywords;             /**< 关键词数组 */
     size_t keyword_count;        /**< 关键词数量 */
@@ -325,8 +326,39 @@ void rank_design_variants(DesignVariant* variants, size_t variant_count);
 void design_variant_destroy(DesignVariant* variant);
 
 /* ============================================================================
+ * ZSF-002: 参考设计案例管理API
+ * ============================================================================ */
+
+/**
+ * @brief 向产品设计引擎注入参考设计案例
+ *
+ * 将跨领域工业设计先验案例注入引擎内部案例库，
+ * 供设计优化、类比推理和设计空间探索时作为参考基线。
+ * 应在引擎初始化后、产品设计任务开始前调用。
+ *
+ * @param engine 引擎句柄
+ * @param case_name 案例名称
+ * @param category_name 类别名称（如"消费电子"、"机械设计"等）
+ * @param feature_tags 关键特征标签（逗号分隔字符串）
+ * @param constraint_summary 设计约束摘要
+ * @param category 类别枚举值
+ * @return int 成功返回0，失败返回-1
+ */
+int product_design_engine_add_reference_case(struct ProductDesignEngine* engine,
+    const char* case_name, const char* category_name,
+    const char* feature_tags, const char* constraint_summary, int category);
+
+/**
+ * @brief 获取引擎中已加载的参考案例数量
+ *
+ * @param engine 引擎句柄
+ * @return int 参考案例数量，engine为NULL返回0
+ */
+int product_design_engine_get_reference_case_count(struct ProductDesignEngine* engine);
+
+/* ============================================================================
  * F-10: 拓扑优化API
- * =========================================================================== */
+ * ============================================================================ */
 
 /**
  * @brief 创建拓扑优化状态

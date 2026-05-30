@@ -408,7 +408,7 @@ static int tpu_backend_kernel_execute(GpuKernel* kernel, size_t gws, size_t lws)
     /* 统一CPU核执行回退 — 12+种操作（硬件自适应：需求要求无GPU时使用CPU） */
     (void)lws;
     size_t count = gws > 0 ? gws : 64;
-    LOG_INFO("Google TPU不可用，回退到CPU直算（硬件自适应，count=%zu）", count);
+    log_warning("Google TPU不可用，回退到CPU直算（硬件自适应，count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 static int tpu_backend_kernel_execute_nd(GpuKernel* kernel, int dim, const size_t* gws, const size_t* lws) {
@@ -791,12 +791,10 @@ int tpu_forward_dense(GpuContext* context, const float* input,
                       GpuActivationType act_type, float alpha) {
     if (!context || !context->is_initialized) return -1;
 
-    /* TPU原生路径：需要有效tpu_session和XLA编译模型。
-     * g_tpu.tpuExecute(NULL,...)参数无效(缺少session句柄和维度信息)，
-     * 已在Z-R3修复中移除。安装libtpu后通过tpu_session重新启用。 */
-    if (g_tpu_state.tpu_available && g_tpu_state.tpu_session && g_tpu.tpuExecute) {
-        (void)act_type; (void)alpha; /* TPU原生路径已实现但在无libtpu环境下不可达 */
-    }
+    /* P0-005修复: TPU硬件不可用（无libtpu运行时），直接使用CPU SIMD计算。
+     * 不进行任何TPU设备内存分配或数据拷贝，零开销回退。 */
+    LOG_INFO("Google TPU不可用，使用CPU SIMD计算全连接前向传播（batch=%zu, in=%zu, out=%zu）",
+             batch_size, input_size, output_size);
 
     return npu_common_simd_forward_dense(input, weights, bias, output,
                                           batch_size, input_size, output_size,
@@ -807,9 +805,12 @@ int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
                       float* c, size_t m, size_t n, size_t k,
                       int transpose_a, int transpose_b) {
     if (!context || !context->is_initialized) return -1;
-    if (g_tpu_state.tpu_available && g_tpu_state.tpu_session && g_tpu.tpuExecute) {
-        /* TPU原生路径保留，需libtpu运行时 */
-    }
+
+    /* P0-005修复: TPU硬件不可用（无libtpu运行时），直接使用CPU SIMD计算。
+     * 不进行任何TPU设备内存分配或数据拷贝，零开销回退。 */
+    LOG_INFO("Google TPU不可用，使用CPU SIMD计算矩阵乘法训练（M=%zu, N=%zu, K=%zu, transA=%d, transB=%d）",
+             m, n, k, transpose_a, transpose_b);
+
     return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 

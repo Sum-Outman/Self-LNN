@@ -68,6 +68,12 @@ struct GpuContext {
     int kernel_cache_misses;              /**< 缓存未命中次数 */
     int kernel_cache_evictions;           /**< 淘汰次数 */
     long cache_timestamp;                 /**< 全局缓存时间戳（LRU用） */
+
+    /* NPU相关字段 */
+    void** npu_device_memory;            /**< NPU设备内存缓冲区数组 */
+    int    npu_memory_count;             /**< NPU内存缓冲区数量 */
+    int    npu_backend_type;             /**< NPU后端类型 */
+    int    npu_initialized;              /**< NPU是否已初始化 */
 };
 
 /**
@@ -84,6 +90,18 @@ struct GpuMemory {
     
     /** 后端私有数据指针（由具体后端实现使用） */
     void* backend_data;
+
+    /* ZSFLYF-P0-001: NPU算子执行上下文
+     * op_handle: ACL算子句柄 / 其他NPU算子对象
+     * op_attrs : 算子属性列表
+     * op_inputs: 算子输入描述符列表
+     * op_outputs: 算子输出描述符列表
+     * op_stream: 算子执行流（用于异步执行） */
+    void* op_handle;
+    void** op_attrs;
+    void** op_inputs;
+    void** op_outputs;
+    void* op_stream;
 };
 
 /**
@@ -108,6 +126,18 @@ struct GpuKernel {
     
     /** 后端私有数据指针（由具体后端实现使用） */
     void* backend_data;
+
+    /* ZSFLYF-P0-001: NPU算子执行上下文（核函数使用）
+     * op_handle: ACL算子句柄 / 其他NPU算子对象
+     * op_attrs : 算子属性列表
+     * op_inputs: 算子输入描述符列表
+     * op_outputs: 算子输出描述符列表
+     * op_stream: 算子执行流（用于异步执行） */
+    void* op_handle;
+    void** op_attrs;
+    void** op_inputs;
+    void** op_outputs;
+    void* op_stream;
 };
 
 /**

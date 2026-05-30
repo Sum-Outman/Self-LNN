@@ -113,19 +113,58 @@ struct RosGazeboBridge {
     int error_code;
 };
 
-/* ZSFWXJ-FIX007: 真实JSON解析回调 — 解析rosbridge发布数据并填充缓存 */
+/* ZSFLYF-P1-009修复: 增强JSON解析器，支持按层级定位字段。
+ * 原实现使用简单strstr查找键名，在Gazebo嵌套JSON中
+ * position.x和orientation.x会混淆。现在先定位父级对象再在范围内搜索。 */
 
-/* 简易JSON浮点数提取器: 在json中找到key对应的值 */
-static int json_extract_float(const char* json, const char* key, float* out) {
-    const char* p = strstr(json, key);
-    if (!p) return -1;
-    p += strlen(key);
-    while (*p && (*p == ' ' || *p == ':' || *p == '"')) p++;
-    if (*p >= '0' && *p <= '9' || *p == '-' || *p == '.') {
+/* JSON字段提取器：先在json中定位parent_section（如"position"），
+ * 然后在section范围内定位子键（如"x"），返回section结束位置供下次调用。 */
+static int json_extract_float_in_section(const char* json, const char* section_key,
+                                          const char* field_key, float* out,
+                                          const char** next_start) {
+    *out = 0.0f;
+    if (next_start) *next_start = json;
+    const char* sec = strstr(json, section_key);
+    if (!sec) return -1;
+    sec += strlen(section_key);
+    /* 跳过冒号和引号 */
+    while (*sec && (*sec == ' ' || *sec == ':' || *sec == '"')) sec++;
+    /* 找到section的结束花括号 */
+    int brace_depth = 0;
+    const char* sec_end = sec;
+    if (*sec == '{') { sec++; brace_depth = 1; }
+    while (*sec_end && brace_depth > 0) {
+        if (*sec_end == '{') brace_depth++;
+        else if (*sec_end == '}') brace_depth--;
+        sec_end++;
+    }
+    /* 在section范围内查找子键 */
+    const char* field = sec;
+    const char* p = NULL;
+    size_t key_len = strlen(field_key);
+    while (field < sec_end) {
+        field = strstr(field, field_key);
+        if (!field || field >= sec_end) break;
+        /* 确保是键名而非值的一部分：键名前应有引号或空格或逗号 */
+        const char* before = field - 1;
+        if (before >= json && (*before == '"' || *before == ' ' || *before == ',' || *before == '{')) {
+            p = field + key_len;
+            break;
+        }
+        field += key_len;
+    }
+    if (!p || p >= sec_end) {
+        if (next_start) *next_start = sec_end;
+        return -1;
+    }
+    while (*p && p < sec_end && (*p == ' ' || *p == ':' || *p == '"')) p++;
+    if (p < sec_end && (*p >= '0' && *p <= '9' || *p == '-' || *p == '.')) {
         char* end = NULL;
         *out = (float)strtod(p, &end);
+        if (next_start) *next_start = sec_end;
         return (end != p) ? 0 : -1;
     }
+    if (next_start) *next_start = sec_end;
     return -1;
 }
 
@@ -135,23 +174,37 @@ static void gazebo_model_states_callback(const void* msg, size_t msg_size, void*
     if (!bridge || !msg || msg_size == 0) return;
 
     const char* json = (const char*)msg;
-    /* 解析pose.position字段 */
-    json_extract_float(json, "\"x\"", &bridge->cached_model_state.position[0]);
-    json_extract_float(json, "\"y\"", &bridge->cached_model_state.position[1]);
-    json_extract_float(json, "\"z\"", &bridge->cached_model_state.position[2]);
-    /* 解析pose.orientation字段 */
-    json_extract_float(json, "\"x\"", &bridge->cached_model_state.orientation[0]);
-    json_extract_float(json, "\"y\"", &bridge->cached_model_state.orientation[1]);
-    json_extract_float(json, "\"z\"", &bridge->cached_model_state.orientation[2]);
-    json_extract_float(json, "\"w\"", &bridge->cached_model_state.orientation[3]);
-    /* 解析twist.linear字段 */
-    json_extract_float(json, "\"x\"", &bridge->cached_model_state.linear_vel[0]);
-    json_extract_float(json, "\"y\"", &bridge->cached_model_state.linear_vel[1]);
-    json_extract_float(json, "\"z\"", &bridge->cached_model_state.linear_vel[2]);
-    /* 解析twist.angular字段 */
-    json_extract_float(json, "\"x\"", &bridge->cached_model_state.angular_vel[0]);
-    json_extract_float(json, "\"y\"", &bridge->cached_model_state.angular_vel[1]);
-    json_extract_float(json, "\"z\"", &bridge->cached_model_state.angular_vel[2]);
+    const char* pos_end = NULL;
+    /* ZSFLYF-P1-009修复: 使用分级JSON解析，在"position"区块内搜索x/y/z */
+    json_extract_float_in_section(json, "\"position\"", "\"x\"",
+        &bridge->cached_model_state.position[0], &pos_end);
+    json_extract_float_in_section(json, "\"position\"", "\"y\"",
+        &bridge->cached_model_state.position[1], NULL);
+    json_extract_float_in_section(json, "\"position\"", "\"z\"",
+        &bridge->cached_model_state.position[2], NULL);
+    /* 在"orientation"区块内搜索x/y/z/w */
+    json_extract_float_in_section(json, "\"orientation\"", "\"x\"",
+        &bridge->cached_model_state.orientation[0], NULL);
+    json_extract_float_in_section(json, "\"orientation\"", "\"y\"",
+        &bridge->cached_model_state.orientation[1], NULL);
+    json_extract_float_in_section(json, "\"orientation\"", "\"z\"",
+        &bridge->cached_model_state.orientation[2], NULL);
+    json_extract_float_in_section(json, "\"orientation\"", "\"w\"",
+        &bridge->cached_model_state.orientation[3], NULL);
+    /* 在"linear"区块内搜索x/y/z */
+    json_extract_float_in_section(json, "\"linear\"", "\"x\"",
+        &bridge->cached_model_state.linear_vel[0], NULL);
+    json_extract_float_in_section(json, "\"linear\"", "\"y\"",
+        &bridge->cached_model_state.linear_vel[1], NULL);
+    json_extract_float_in_section(json, "\"linear\"", "\"z\"",
+        &bridge->cached_model_state.linear_vel[2], NULL);
+    /* 在"angular"区块内搜索x/y/z */
+    json_extract_float_in_section(json, "\"angular\"", "\"x\"",
+        &bridge->cached_model_state.angular_vel[0], NULL);
+    json_extract_float_in_section(json, "\"angular\"", "\"y\"",
+        &bridge->cached_model_state.angular_vel[1], NULL);
+    json_extract_float_in_section(json, "\"angular\"", "\"z\"",
+        &bridge->cached_model_state.angular_vel[2], NULL);
     bridge->cached_model_state.has_data = 1;
     bridge->cached_model_state.timestamp = (double)time(NULL);
 }
@@ -162,20 +215,33 @@ static void gazebo_link_states_callback(const void* msg, size_t msg_size, void* 
     if (!bridge || !msg || msg_size == 0) return;
 
     const char* json = (const char*)msg;
-    /* 将连杆状态映射到里程计缓存 */
-    json_extract_float(json, "\"x\"", &bridge->cached_odom.position[0]);
-    json_extract_float(json, "\"y\"", &bridge->cached_odom.position[1]);
-    json_extract_float(json, "\"z\"", &bridge->cached_odom.position[2]);
-    json_extract_float(json, "\"x\"", &bridge->cached_odom.orientation[0]);
-    json_extract_float(json, "\"y\"", &bridge->cached_odom.orientation[1]);
-    json_extract_float(json, "\"z\"", &bridge->cached_odom.orientation[2]);
-    json_extract_float(json, "\"w\"", &bridge->cached_odom.orientation[3]);
-    json_extract_float(json, "\"x\"", &bridge->cached_odom.linear_vel[0]);
-    json_extract_float(json, "\"y\"", &bridge->cached_odom.linear_vel[1]);
-    json_extract_float(json, "\"z\"", &bridge->cached_odom.linear_vel[2]);
-    json_extract_float(json, "\"x\"", &bridge->cached_odom.angular_vel[0]);
-    json_extract_float(json, "\"y\"", &bridge->cached_odom.angular_vel[1]);
-    json_extract_float(json, "\"z\"", &bridge->cached_odom.angular_vel[2]);
+    /* ZSFLYF-P1-009修复: 使用分级JSON解析 */
+    json_extract_float_in_section(json, "\"position\"", "\"x\"",
+        &bridge->cached_odom.position[0], NULL);
+    json_extract_float_in_section(json, "\"position\"", "\"y\"",
+        &bridge->cached_odom.position[1], NULL);
+    json_extract_float_in_section(json, "\"position\"", "\"z\"",
+        &bridge->cached_odom.position[2], NULL);
+    json_extract_float_in_section(json, "\"orientation\"", "\"x\"",
+        &bridge->cached_odom.orientation[0], NULL);
+    json_extract_float_in_section(json, "\"orientation\"", "\"y\"",
+        &bridge->cached_odom.orientation[1], NULL);
+    json_extract_float_in_section(json, "\"orientation\"", "\"z\"",
+        &bridge->cached_odom.orientation[2], NULL);
+    json_extract_float_in_section(json, "\"orientation\"", "\"w\"",
+        &bridge->cached_odom.orientation[3], NULL);
+    json_extract_float_in_section(json, "\"linear\"", "\"x\"",
+        &bridge->cached_odom.linear_vel[0], NULL);
+    json_extract_float_in_section(json, "\"linear\"", "\"y\"",
+        &bridge->cached_odom.linear_vel[1], NULL);
+    json_extract_float_in_section(json, "\"linear\"", "\"z\"",
+        &bridge->cached_odom.linear_vel[2], NULL);
+    json_extract_float_in_section(json, "\"angular\"", "\"x\"",
+        &bridge->cached_odom.angular_vel[0], NULL);
+    json_extract_float_in_section(json, "\"angular\"", "\"y\"",
+        &bridge->cached_odom.angular_vel[1], NULL);
+    json_extract_float_in_section(json, "\"angular\"", "\"z\"",
+        &bridge->cached_odom.angular_vel[2], NULL);
     bridge->cached_odom.has_data = 1;
     bridge->cached_odom.timestamp = (double)time(NULL);
 }

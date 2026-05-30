@@ -135,6 +135,25 @@ int knowledge_base_populate_preset(KnowledgeBase* kb);
 int knowledge_base_load_from_file(KnowledgeBase* kb, const char* filepath);
 
 /**
+ * @brief ZSFWS-P0-003: 从JSON种子知识文件加载知识条目
+ * 格式: {"version":1, "entries":[{"s":"主体","p":"谓词","o":"客体","t":"FACT","c":"HIGH","w":1.0},...]}
+ * 使用紧凑键名(s/p/o/t/c/w)减少文件体积。
+ * @param kb 知识库句柄
+ * @param filepath JSON文件路径
+ * @return int 成功加载的条目数，失败返回-1
+ */
+int knowledge_base_import_seed_json(KnowledgeBase* kb, const char* filepath);
+
+/**
+ * @brief ZSFWS-P0-003: 导出知识库到JSON文件
+ * 格式与 knowledge_base_import_seed_json() 兼容，支持备份和迁移。
+ * @param kb 知识库句柄
+ * @param filepath 输出JSON文件路径
+ * @return int 成功导出的条目数，失败返回-1
+ */
+int knowledge_base_export_json(KnowledgeBase* kb, const char* filepath);
+
+/**
  * @brief 释放知识库
  * 
  * @param kb 知识库句柄
@@ -780,6 +799,18 @@ void temporal_conflicts_free(TemporalConflict* conflicts, size_t count);
  * @return float 相似度 (0-1)
  */
 float knowledge_string_similarity(const char* str1, const char* str2);
+
+/* ZSFUSA: 知识库辅助函数 */
+size_t knowledge_base_get_total_facts(KnowledgeBase* kb);
+float knowledge_base_output_consistency(KnowledgeBase* kb, const float* output, size_t dim);
+
+/* ZSFAAA-DEEP-002: 查找知识库中与给定向量的嵌入最相似的事实
+ * 当LNN输出爆炸或异常时，用于找到知识库中最近的锚定事实约束修正 */
+int knowledge_base_nearest_fact(KnowledgeBase* kb, const float* query_vec, size_t dim,
+                                char* subject_out, size_t subj_size,
+                                char* predicate_out, size_t pred_size,
+                                char* object_out, size_t obj_size,
+                                float* similarity_out);
 
 #ifdef __cplusplus
 }

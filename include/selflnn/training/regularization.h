@@ -329,6 +329,39 @@ int advanced_regularizer_apply_switchable_norm(AdvancedRegularizer* regularizer,
                                                size_t batch_size, size_t height, size_t width, size_t channels,
                                                int norm_type, int training);
 
+/* ZSFLNN-C-012修复: 集成正则化 (ADV_REG_ENSEMBLE) */
+/**
+ * @brief 应用集成正则化
+ *
+ * 对多个子模型输出进行集成：模型平均 + 多样性约束 + 自适应加权
+ *
+ * @param regularizer 正则化器句柄（可为NULL使用默认参数）
+ * @param predictions [num_models × num_samples × output_dim] 多模型预测
+ * @param targets [num_samples × output_dim] 目标值
+ * @param num_models 子模型数量
+ * @param num_samples 样本数
+ * @param output_dim 输出维度
+ * @return int 成功返回0，失败返回-1
+ */
+int advanced_regularizer_apply_ensemble(AdvancedRegularizer* regularizer,
+                                         float* predictions, const float* targets,
+                                         int num_models, size_t num_samples, size_t output_dim);
+
+/**
+ * @brief 获取集成多样性分数
+ *
+ * @param regularizer 正则化器句柄
+ * @return float 多样性分数 [0-1]，0=完全重复
+ */
+float advanced_regularizer_get_ensemble_diversity(const AdvancedRegularizer* regularizer);
+
+/**
+ * @brief 释放集成正则化器内部资源
+ *
+ * @param regularizer 正则化器句柄
+ */
+void advanced_regularizer_ensemble_free(AdvancedRegularizer* regularizer);
+
 /**
  * @brief 更新正则化调度
  * 

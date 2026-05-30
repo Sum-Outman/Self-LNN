@@ -1007,16 +1007,18 @@ int auto_tune_power_mode(EnergyEfficiencyEngine* engine) {
     }
     /* 负载判断 */
     else if (cpu_usage >= 0.0) {
-        if (cpu_usage > 75.0 && cpu_temp < temp_limit * 0.85) {
+        /* ZSFA-FIX-F-010: get_cpu_usage_real返回0.0~1.0，阈值需百分比比较 */
+        float cpu_pct = cpu_usage * 100.0f;
+        if (cpu_pct > 75.0 && cpu_temp < temp_limit * 0.85) {
             /* 高负载+温度正常 → 高性能 */
             suggested_mode = POWER_MODE_PERFORMANCE;
-        } else if (cpu_usage > 50.0) {
+        } else if (cpu_pct > 50.0) {
             /* 中负载 → 均衡 */
             suggested_mode = POWER_MODE_BALANCED;
-        } else if (cpu_usage < 20.0 && cpu_temp < 50.0) {
+        } else if (cpu_pct < 20.0 && cpu_temp < 50.0) {
             /* 低负载+低温 → 节能 */
             suggested_mode = POWER_MODE_POWER_SAVING;
-        } else if (cpu_usage < 10.0 && cpu_temp < 40.0) {
+        } else if (cpu_pct < 10.0 && cpu_temp < 40.0) {
             /* 极低负载+常温 → 超节能 */
             suggested_mode = POWER_MODE_ULTRA_SAVING;
         }

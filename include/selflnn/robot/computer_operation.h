@@ -249,6 +249,9 @@ int co_get_system_status(COSystem* system, char* status_out, size_t status_size)
 
 int co_learn_from_demo(COSystem* system, const float* screen_sequence, const COAction* action_sequence, size_t num_frames, size_t width, size_t height, const char* task_label);
 
+/* ZSFUSA: 设置计算机系统音量 */
+int co_system_set_volume(void* system, float volume);
+
 #ifdef __cplusplus
 }
 #endif

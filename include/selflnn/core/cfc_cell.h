@@ -90,6 +90,14 @@ typedef struct {
     int use_multi_timescale;       /**< 是否启用多时间尺度并行演化（快速/慢速双通道） */
     float fast_tau_ratio;          /**< 快速通道时间常数比例，默认0.1（τ_fast = τ * ratio） */
     float slow_tau_ratio;          /**< 慢速通道时间常数比例，默认10.0（τ_slow = τ * ratio） */
+    /* ZSFUSA-P1-002修复: 拉普拉斯频域调制参数。
+     * laplace_stability_score: 由拉普拉斯分析器计算，范围[0,1]，
+     *   0=系统不稳定(需要强阻尼) 1=系统稳定(正常时间常数)
+     * laplace_stability_alpha: 调制强度系数，默认0.3，越大阻尼越强
+     * use_laplace_modulation: 开关，0=禁用 1=启用拉普拉斯tau调制 */
+    float laplace_stability_score;
+    float laplace_stability_alpha;
+    int use_laplace_modulation;
     /* 统一自适应步长选择配置 */
     int use_adaptive_step;                 /**< 是否启用统一自适应步长选择，默认0=禁用（使用固定delta_t） */
     AdaptiveStepConfig adaptive_step_cfg;  /**< 自适应步长配置 */
@@ -203,6 +211,9 @@ struct CfCCell {
     float* output_gate_weight_grad;
     float* forget_gate_weight_grad;
     float* gate_bias_grad;
+    float* input_gate_grads;        /**< 输入门激活梯度 [hidden_size] */
+    float* forget_gate_grads;       /**< 遗忘门激活梯度 [hidden_size] */
+    float* output_gate_grads;       /**< 输出门激活梯度 [hidden_size] */
     float* time_constant_grad;
     float tau_learning_rate;
     float* hidden_to_gate_weights;
@@ -260,6 +271,11 @@ struct CfCCell {
     float* cell_velocity_buffer;     /**< 所有cell级参数的速度缓冲区（Adam二阶矩） */
     size_t cell_momentum_size;       /**< 动量缓冲区总大小（元素数） */
     int cell_momentum_initialized;   /**< 动量缓冲区是否已初始化 */
+    /* ZSFUSA-P1-002: 拉普拉斯频域tau调制（运行时字段）
+     * LNN层周期性将network_state的laplace_stability_score复制到这些字段，
+     * cfc_closed_form_solution据此动态调整有效时间常数。
+     * use_laplace_modulation和laplace_stability_alpha来自CfCCellConfig。 */
+    float laplace_stability_score;
 };
 #endif
 

@@ -14,7 +14,6 @@
 #include "selflnn/multimodal/slam_enhance.h"
 #include "selflnn/multimodal/slam.h"
 #include "selflnn/utils/math_utils.h"
-#include "selflnn/core/memory.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/logging.h"

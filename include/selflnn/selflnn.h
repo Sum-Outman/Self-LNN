@@ -47,13 +47,25 @@
 #include "selflnn/memory/long_term.h"
 #include "selflnn/memory/episodic.h"
 #include "selflnn/memory/semantic.h"
+#include "selflnn/memory/working_memory.h"
+
+// ZSFLYF-NEW: 集成孤儿子多模态传感器模块
+#include "selflnn/multimodal/motor.h"
+#include "selflnn/multimodal/radar.h"
+#include "selflnn/multimodal/thermal.h"
+#include "selflnn/multimodal/proprioception.h"
+#include "selflnn/multimodal/environment_sound.h"
 
 // 应用能力
 #include "selflnn/programming/self_programming.h"
 #include "selflnn/product_design/product_design.h"
+#include "selflnn/product_design/product_design_enhanced.h"
 #include "selflnn/multisystem/multisystem_control.h"
 #include "selflnn/robot/hardware_interface.h"
 #include "selflnn/robot/simulator.h"
+#include "selflnn/robot/dynamics.h"
+#include "selflnn/robot/swarm_coordination.h"
+#include "selflnn/robot/physics_engine.h"
 
 // 基础设施
 #include "selflnn/gpu/gpu.h"
@@ -234,6 +246,9 @@ SELFLNN_API void* selflnn_get_audit_logger(void);            /* ZSFWS-M-001: 审
 SELFLNN_API void* selflnn_get_content_filter(void);          /* ZSFWS-M-001: 内容过滤 */
 SELFLNN_API void* selflnn_get_load_balancer(void);           /* ZSFWS-M-001: 负载均衡 */
 SELFLNN_API void* selflnn_get_training_pipeline(void);       /* ZSFWS-M-001: 训练管线 */
+SELFLNN_API void  selflnn_set_training_pipeline(void* pipeline); /* ZSFUSA-P0-004: 训练管线注册 */
+SELFLNN_API size_t selflnn_get_config_state_dimension(void);  /* ZSFUSA-P1-004: 获取状态维度 */
+SELFLNN_API void   selflnn_set_laplace_metrics(const float* metrics, int count); /* ZSFUSA-P3-001: 拉普拉斯指标更新 */
 SELFLNN_API void* selflnn_get_security_monitor_deep(void);  /* ZSFX-DEEP-004: 深度安全监控 */
 
 /* ---- 4e. 事件驱动即时自检（ZSFWS-038） ---- */

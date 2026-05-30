@@ -767,6 +767,12 @@ class DeviceManager {
            替代原始灰度值匹配，对光照变化和相机增益差异具有鲁棒性 */
         let censusLeft  = new Array(w * h);
         let censusRight = new Array(w * h);
+        /* ZSFUSA-F08: BigInt兼容性检查，旧浏览器回退到32位汉明距离 */
+        var hasBigInt = (typeof BigInt !== 'undefined');
+        if (!hasBigInt) {
+            console.warn('[SELF-LNN] BigInt不可用，立体匹配精度降低');
+        }
+
         const computeCensus = (gray, imgW, imgH) => {
             const census = new Array(imgW * imgH);
             const cRad = 3;
@@ -775,13 +781,19 @@ class DeviceManager {
                 for (let x = cRad; x < imgW - cRad; x++) {
                     const idx = y * imgW + x;
                     const center = gray[idx];
-                    let val = BigInt(0);
+                    let val = hasBigInt ? BigInt(0) : 0;
                     let bit = 0;
                     for (let dy = -cRad; dy <= cRad; dy++) {
                         for (let dx = -cRad; dx <= cRad; dx++) {
                             if (dx === 0 && dy === 0) continue;
                             const nIdx = (y + dy) * imgW + (x + dx);
-                            if (gray[nIdx] >= center) val |= (BigInt(1) << BigInt(bit));
+                            if (gray[nIdx] >= center) {
+                                if (hasBigInt) {
+                                    val |= (BigInt(1) << BigInt(bit));
+                                } else {
+                                    val |= (1 << bit);
+                                }
+                            }
                             bit++;
                             if (bit >= 48) break;
                         }
@@ -796,10 +808,18 @@ class DeviceManager {
         censusLeft  = computeCensus(leftGray, w, h);
         censusRight = computeCensus(rightGray, w, h);
         const hammingDist = (a, b) => {
-            let diff = a ^ b;
-            let count = 0;
-            while (diff > BigInt(0)) { count++; diff &= (diff - BigInt(1)); }
-            return count;
+            if (hasBigInt) {
+                let diff = a ^ b;
+                let count = 0;
+                while (diff > BigInt(0)) { count++; diff &= (diff - BigInt(1)); }
+                return count;
+            } else {
+                /* ZSFUSA-F08: 32位回退路径 - 逐字节异或+查表汉明距离 */
+                let diff = (a ^ b) >>> 0;
+                let count = 0;
+                while (diff) { count++; diff &= (diff - 1); }
+                return count;
+            }
         };
         /* P1-026修复：改进的块匹配 - Census变换汉明距离 + 自适应窗口 + 亚像素插值 */
         for (let y = blockSize; y < h - blockSize; y += 2) {

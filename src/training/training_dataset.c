@@ -12,6 +12,7 @@
 
 #include "selflnn/training/training.h"
 #include "selflnn/training/data_loaders.h"
+#include "selflnn/training/training_dataset.h"  /* OR-001: 数据集模块独立头文件 */
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/utils/memory_utils.h"
@@ -25,6 +26,58 @@
 #include <math.h>
 #include <float.h>
 #include <time.h>
+
+/* ================================================================
+ * ZSFUSA-C14: Cooley-Tukey基-2 FFT/IFFT (O(N log N)替代朴素DFT O(N²))
+ * ================================================================ */
+
+/* 位逆序重排：将数组元素按位逆序重新排列 */
+static void fft_bit_reverse(float* real, float* imag, int n) {
+    int j = 0;
+    for (int i = 0; i < n; i++) {
+        if (i < j) {
+            float tr = real[i]; real[i] = real[j]; real[j] = tr;
+            float ti = imag[i]; imag[i] = imag[j]; imag[j] = ti;
+        }
+        int m = n >> 1;
+        while (m >= 1 && j >= m) { j -= m; m >>= 1; }
+        j += m;
+    }
+}
+
+/* Cooley-Tukey基-2快速傅里叶变换（原地操作） */
+static void cooley_tukey_fft(float* real, float* imag, int n) {
+    fft_bit_reverse(real, imag, n);
+    for (int len = 2; len <= n; len <<= 1) {
+        float ang = 6.283185307f / (float)len;
+        float wlen_r = cosf(ang), wlen_i = -sinf(ang);
+        for (int i = 0; i < n; i += len) {
+            float w_r = 1.0f, w_i = 0.0f;
+            int half = len >> 1;
+            for (int j = 0; j < half; j++) {
+                int even = i + j, odd = i + j + half;
+                float t_r = w_r * real[odd] - w_i * imag[odd];
+                float t_i = w_r * imag[odd] + w_i * real[odd];
+                real[odd] = real[even] - t_r;
+                imag[odd] = imag[even] - t_i;
+                real[even] += t_r;
+                imag[even] += t_i;
+                float nw_r = w_r * wlen_r - w_i * wlen_i;
+                w_i = w_r * wlen_i + w_i * wlen_r;
+                w_r = nw_r;
+            }
+        }
+    }
+}
+
+/* Cooley-Tukey基-2快速傅里叶逆变换（原地操作） */
+static void cooley_tukey_ifft(float* real, float* imag, int n) {
+    for (int i = 0; i < n; i++) imag[i] = -imag[i];
+    cooley_tukey_fft(real, imag, n);
+    for (int i = 0; i < n; i++) {
+        real[i] /= (float)n; imag[i] = -imag[i] / (float)n;
+    }
+}
 
 /* ================================================================
  * 数据集格式定义
@@ -592,16 +645,10 @@ int augment_spectral(TrainingDataset* ds, float freq_mask_param, float time_mask
             safe_free((void**)&freq_imag);
             break;
         }
-        memset(freq_real, 0, fft_size * sizeof(float));
-        memset(freq_imag, 0, fft_size * sizeof(float));
-
-        for (size_t k = 0; k < fft_size; k++) {
-            for (size_t t = 0; t < fft_size; t++) {
-                float angle = -2.0f * 3.14159265f * (float)(k * t) / (float)fft_size;
-                freq_real[k] += real[t] * cosf(angle);
-                freq_imag[k] += real[t] * sinf(angle);
-            }
-        }
+        /* ZSFUSA-C14: Cooley-Tukey FFT O(N log N)替代朴素DFT O(N²) */
+        memcpy(freq_real, real, fft_size * sizeof(float));
+        memcpy(freq_imag, imag, fft_size * sizeof(float));
+        cooley_tukey_fft(freq_real, freq_imag, (int)fft_size);
 
         /* 3. 频率掩码：随机置零一段连续频率区间 */
         if (freq_mask_param > 0.0f) {
@@ -638,15 +685,9 @@ int augment_spectral(TrainingDataset* ds, float freq_mask_param, float time_mask
             }
         }
 
-        /* 5. 执行IDFT (频域→时域) */
-        memset(real, 0, fft_size * sizeof(float));
-        for (size_t t = 0; t < fft_size; t++) {
-            for (size_t k = 0; k < fft_size; k++) {
-                float angle = 2.0f * 3.14159265f * (float)(k * t) / (float)fft_size;
-                real[t] += (freq_real[k] * cosf(angle) - freq_imag[k] * sinf(angle));
-            }
-            real[t] /= (float)fft_size;
-        }
+        /* 5. ZSFUSA-C14: Cooley-Tukey IFFT O(N log N)替代朴素IDFT O(N²) */
+        cooley_tukey_ifft(freq_real, freq_imag, (int)fft_size);
+        memcpy(real, freq_real, fft_size * sizeof(float));
 
         /* 6. 将结果复制回样本 */
         for (size_t d = 0; d < idim; d++) {
@@ -669,7 +710,7 @@ int augment_spectral(TrainingDataset* ds, float freq_mask_param, float time_mask
 /**
  * @brief 多模态样本
  */
-typedef struct {
+struct MultimodalSample {
     float* vision_features;     /**< 视觉特征 */
     size_t vision_dim;          /**< 视觉特征维度 */
     float* audio_features;      /**< 音频特征 */
@@ -680,7 +721,7 @@ typedef struct {
     size_t sensor_dim;          /**< 传感器特征维度 */
     float* output;              /**< 输出标签 */
     size_t output_dim;          /**< 输出维度 */
-} MultimodalSample;
+};
 
 /**
  * @brief 多模态数据集
@@ -837,100 +878,13 @@ int dataset_augment_spectral(TrainingDataset* ds, float freq_mask_param, float t
  *   - 编译所有辅助函数和常量
  *   - 函数入口由 SELFLNN_ALLOW_BOOTSTRAP_DATA 控制
  * ============================================================================ */
-#ifdef SELFLNN_STRICT_REAL_DATA
-/* ===== 严格真实数据模式：编译时彻底排除所有合成数据生成代码 ===== */
+/* ZSFUSA-O01: 合成数据已永久移除，仅保留真实数据路径 */
 int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
     (void)out_ds;
     (void)num_samples;
-    log_error("[数据集] SELFLNN_STRICT_REAL_DATA 编译时已彻底禁用合成数据引导。"
-              "整个合成数据生成代码路径已在编译阶段完全排除。"
-              "系统必须使用真实多模态数据训练。");
+    log_error("[数据集] 合成数据引导已永久禁用。系统必须使用真实多模态数据训练。");
     return -1;
 }
-#else  /* !SELFLNN_STRICT_REAL_DATA —— ZSFWS-L-011: 以下代码在正式编译中永不参与，
-         * fractal_texture/physics_vibration/zipf_frequency_encode 仅为DEBUG测试辅助函数。
-         * 生产环境SELFLNN_STRICT_REAL_DATA始终定义，此#else块为死代码。 */
-/* DEBUG模式编译开关：仅当显式定义SELFLNN_ALLOW_BOOTSTRAP_DATA时允许引导数据生成 */
-#ifndef SELFLNN_ALLOW_BOOTSTRAP_DATA
-#define SELFLNN_BOOTSTRAP_DISABLED 1
-#endif
-
-#define BS_MAX_SAMPLES 10000
-#define BS_VISION_DIM 256
-#define BS_AUDIO_DIM 256
-#define BS_TEXT_DIM 128
-#define BS_SENSOR_DIM 128
-#define BS_FUSED_DIM (BS_VISION_DIM + BS_AUDIO_DIM + BS_TEXT_DIM + BS_SENSOR_DIM)
-
-/**
- * @brief 分形纹理生成器（Mandelbrot集映射到特征空间）
- * 产生真实的数学分形结构，用于测试视觉特征提取能力
- * 注意：此函数仅在 SELFLNN_STRICT_REAL_DATA 未定义时参与编译
- */
-static float fractal_texture(int x, int y, int seed, int width, int height) {
-    float cx = ((float)x / (float)width - 0.5f) * 3.0f;
-    float cy = ((float)y / (float)height - 0.5f) * 2.0f;
-    float zx = cx + (float)(seed % 13 - 6) * 0.01f;
-    float zy = cy + (float)((seed * 7) % 13 - 6) * 0.01f;
-    int iter;
-    for (iter = 0; iter < 64; iter++) {
-        float zx2 = zx * zx;
-        float zy2 = zy * zy;
-        if (zx2 + zy2 > 4.0f) break;
-        zy = 2.0f * zx * zy + cy;
-        zx = zx2 - zy2 + cx;
-    }
-    return (float)iter / 64.0f;
-}
-
-/**
- * @brief 谐振子叠加模型（确定性物理振动）
- * 基于确定性的阻尼谐振子叠加原理生成频谱数据
- * 注意：此函数仅在 SELFLNN_STRICT_REAL_DATA 未定义时参与编译
- */
-static float physics_vibration(float t, float base_freq, float damping, int mode) {
-    float result = 0.0f;
-    int num_modes = 5;
-    for (int m = 1; m <= num_modes; m++) {
-        float freq = base_freq * (float)m * (1.0f + 0.05f * (float)(mode % 3));
-        float amp = 1.0f / (float)m;
-        float decay = expf(-damping * t * (float)m);
-        float phase = (float)(mode * m) * 0.5236f; /* π/6 倍数相位偏移 */
-        result += amp * decay * sinf(2.0f * 3.14159265f * freq * t + phase);
-    }
-    return result * 0.5f;
-}
-
-/**
- * @brief Zipf分布编码（确定性频率分布）
- * 基于确定性的Zipf定律生成词频分布编码
- * 注意：此函数仅在 SELFLNN_STRICT_REAL_DATA 未定义时参与编译
- */
-static float zipf_frequency_encode(int rank, int total_ranks, unsigned int seed) {
-    float zipf = 1.0f / (float)(rank + 1);
-    float normalization = 0.0f;
-    for (int i = 0; i < total_ranks; i++) {
-        normalization += 1.0f / (float)(i + 1);
-    }
-    zipf /= normalization;
-    unsigned int hash = (unsigned int)(rank * 2654435761U ^ seed);
-    hash = ((hash >> 16) ^ hash) * 0x45d9f3b;
-    hash = (hash >> 16) ^ hash;
-    return zipf * 0.8f + (float)(hash & 0xFFFF) / 65536.0f * 0.2f;
-}
-
-int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
-    /* ZSFABC-S004深度修复: 永久禁用合成数据生成。
-     * 需求明确要求"禁止使用任何预训练模型"、"不可以使用任何假数据和虚拟数据"。
-     * 合成数学函数数据(分形/谐振子/Zipf/sin-cos方程)违反此原则。
-     * 系统必须从真实多模态传感器/摄像头/麦克风数据中学习。 */
-    (void)out_ds;
-    (void)num_samples;
-    log_error("[数据集] 引导数据生成已永久禁用（ZSFABC-S004修复）。"
-              "系统必须使用真实多模态数据训练。禁止使用合成数学函数数据。");
-    return -1;
-}
-#endif /* SELFLNN_STRICT_REAL_DATA */
 
 /* ================================================================
  * ZSF-013: dataset_api.h 头文件适配包装函数

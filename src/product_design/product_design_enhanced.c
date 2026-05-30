@@ -10,7 +10,11 @@
 #include "selflnn/product_design/product_design_enhanced.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/xorshift_prng.h"  /* FIX-011: 替换LCG为高质量Xorshift */
+#include "selflnn/utils/secure_random.h"
+#include "selflnn/utils/logging.h"
 #include "selflnn/core/laplace.h"
+#include "selflnn/core/lnn.h"           /* LNN前向传播用于设计评估 */
+#include "selflnn/selflnn.h"           /* selflnn_get_lnn() 获取全局LNN实例 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -64,12 +68,18 @@ static int g_pde_prng_inited = 0;
 static void pde_srand(unsigned int seed) {
     PDE_RNG_LOCK();
     if (!g_pde_prng_inited) {
-        uint64_t secure_seed = ((uint64_t)secure_random_int(0xFFFFFFFF) << 32) | secure_random_int(0xFFFFFFFF);
-        xorshift_prng_seed(&g_pde_xorshift, secure_seed);
+        /* ZSF-003修复: 当seed非0时使用调用者提供的种子，确保可复现性；
+         * 当seed为0时使用安全随机数生成种子 */
+        uint64_t final_seed;
+        if (seed != 0) {
+            final_seed = (uint64_t)seed;
+        } else {
+            final_seed = ((uint64_t)secure_random_int(0xFFFFFFFF) << 32) | secure_random_int(0xFFFFFFFF);
+        }
+        xorshift_prng_seed(&g_pde_xorshift, final_seed);
         g_pde_prng_inited = 1;
     }
     PDE_RNG_UNLOCK();
-    (void)seed;
 }
 static double pde_rand_double(void)
 {
@@ -125,34 +135,79 @@ static void pde_free_params(DesignParameter* params, size_t count)
     safe_free((void**)&params);
 }
 
-/* 评估一个设计方案的各目标值 */
+/* 评估一个设计方案的各目标值 — 使用LNN液态神经网络进行真实推理评估 */
 static int pde_evaluate_design(const ProductRequirement* req,
                                 const DesignParameter* params, size_t param_count,
                                 float* objectives, int obj_count)
 {
     if (!req || !params || !objectives) return -1;
-    float cost = 0.5f, feasibility = 0.7f, innovation = 0.5f, market = 0.6f, complexity = 0.4f;
-    for (size_t i = 0; i < param_count && i < 5; ++i) {
-        double norm = (params[i].current_value - params[i].min_value) /
-                      (params[i].max_value - params[i].min_value + 1e-12);
-        if (norm < 0) norm = 0; if (norm > 1) norm = 1;
-        cost += (float)norm * 0.3f;
-        feasibility += (float)(1.0 - norm) * 0.2f;
-        innovation += (float)norm * 0.3f;
-        market += (float)(0.5 + norm * 0.5) * 0.2f;
-        complexity += (float)norm * 0.4f;
+
+    void* lnn_raw = selflnn_get_lnn();
+    if (!lnn_raw) {
+        log_error("LNN实例不可用，拒绝启发式评估（违反'禁止任何降级处理'原则）");
+        return -1;
     }
-    if (cost > 1.0f) cost = 1.0f;
-    if (feasibility > 1.0f) feasibility = 1.0f;
-    if (innovation > 1.0f) innovation = 1.0f;
-    if (market > 1.0f) market = 1.0f;
-    for (int i = 0; i < obj_count && i < PDE_MAX_OBJECTIVES; ++i)
-        objectives[i] = 0.5f;
-    if (obj_count >= 1) objectives[0] = cost;
-    if (obj_count >= 2) objectives[1] = feasibility;
-    if (obj_count >= 3) objectives[2] = innovation;
-    if (obj_count >= 4) objectives[3] = market;
-    if (obj_count >= 5) objectives[4] = complexity;
+
+    LNN* lnn = (LNN*)lnn_raw;
+    LNNConfig lnn_cfg;
+    if (lnn_get_config(lnn, &lnn_cfg) != 0) {
+        log_error("无法获取LNN配置，拒绝设计评估");
+        return -1;
+    }
+
+    size_t input_size  = lnn_cfg.input_size;
+    size_t output_size = lnn_cfg.output_size;
+    size_t eval_dim = (size_t)obj_count < output_size ? (size_t)obj_count : output_size;
+
+    float* input_vec = (float*)safe_calloc(input_size, sizeof(float));
+    if (!input_vec) return -1;
+
+    /* 编码设计参数到LNN输入向量 */
+    size_t char_idx = 0;
+    if (req->name && char_idx < input_size) {
+        const char* nm = req->name;
+        while (*nm && char_idx < input_size) {
+            input_vec[char_idx++] = ((float)(unsigned char)(*nm) - 64.0f) / 128.0f;
+            nm++;
+        }
+    }
+    for (size_t i = 0; i < param_count && char_idx + 4 < input_size; i++) {
+        double norm = (params[i].current_value - params[i].min_value) /
+                      (params[i].max_value - params[i].min_value + 1e-12f);
+        if (norm < 0.0) norm = 0.0; if (norm > 1.0) norm = 1.0;
+        input_vec[char_idx++] = (float)norm;
+        input_vec[char_idx++] = (float)(params[i].current_value * 0.01);
+        input_vec[char_idx++] = (float)(params[i].min_value * 0.01);
+        input_vec[char_idx++] = (float)(params[i].max_value * 0.01);
+    }
+    if (req->max_cost > 0.0f && char_idx < input_size)
+        input_vec[char_idx++] = (float)(req->max_cost / 1000000.0);
+    if (req->max_time > 0.0f && char_idx < input_size)
+        input_vec[char_idx++] = (float)(req->max_time / 365.0);
+
+    float* lnn_output = (float*)safe_calloc(output_size, sizeof(float));
+    if (!lnn_output) { safe_free((void**)&input_vec); return -1; }
+
+    if (lnn_forward(lnn, input_vec, lnn_output) != 0) {
+        safe_free((void**)&lnn_output);
+        safe_free((void**)&input_vec);
+        log_error("LNN前向传播失败，拒绝设计评估");
+        return -1;
+    }
+
+    /* 从LNN输出提取多目标评估值，映射到[0,1]范围 */
+    for (int i = 0; i < obj_count && i < PDE_MAX_OBJECTIVES; i++) {
+        if ((size_t)i < eval_dim) {
+            objectives[i] = 0.5f + 0.5f * tanhf(lnn_output[i]);
+            if (objectives[i] < 0.0f) objectives[i] = 0.0f;
+            if (objectives[i] > 1.0f) objectives[i] = 1.0f;
+        } else {
+            objectives[i] = 0.5f;
+        }
+    }
+
+    safe_free((void**)&lnn_output);
+    safe_free((void**)&input_vec);
     return 0;
 }
 
@@ -1769,21 +1824,39 @@ int product_design_load_seed_cases(ProductDesignEngine* engine)
 {
     if (!engine) return -1;
 
-    /* 种子案例作为设计优化的先验知识库，
-     * 在引擎初始化时加载到内部案例库中。
+    /* ZSF-002修复: 实际将55个种子案例注入引擎内部参考案例库。
+     * 种子案例作为设计优化的先验知识库，在引擎初始化时加载到内部案例库中。
      * 后续设计优化时可以通过类比推理引用这些案例。
-     *
-     * 注意：案例数据已在本文件顶部的静态数组 g_seed_cases 中定义，
-     * 包含55个案例覆盖6大领域。
-     * 实际应用时通过 pde_tracker_register_requirements 等接口
-     * 将案例作为需求模板注入需求追踪器。
-     */
-    (void)engine;
+     * 案例数据来自本文件顶部的静态数组 g_seed_cases，覆盖6大领域。 */
 
-    fprintf(stdout, "[产品设计引擎] 种子案例库已加载：%d个案例 (消费电子:%d, 机械设计:%d, 软件界面:%d, 建筑结构:%d, 机器人设计:%d, 其他:%d)\n",
-            PDE_SEED_CASES_COUNT, 10, 10, 10, 5, 5, 10);
+    int loaded_count = 0;
+    for (int i = 0; i < PDE_SEED_CASES_COUNT; i++) {
+        int ret = product_design_engine_add_reference_case(engine,
+            g_seed_cases[i].name,
+            g_seed_cases[i].category_name,
+            g_seed_cases[i].feature_tags,
+            g_seed_cases[i].constraint_summary,
+            (int)g_seed_cases[i].category);
+        if (ret == 0) {
+            loaded_count++;
+        } else {
+            fprintf(stderr, "[产品设计引擎] 警告: 种子案例[%d] '%s' 注入失败\n",
+                    i, g_seed_cases[i].name);
+        }
+    }
 
-    return PDE_SEED_CASES_COUNT;
+    /* 按类别统计加载数量 */
+    int cat_counts[6] = {0};
+    for (int i = 0; i < loaded_count; i++) {
+        /* 通过已加载的案例统计（引擎内部存储） */
+        cat_counts[(int)g_seed_cases[i].category]++;
+    }
+
+    fprintf(stdout, "[产品设计引擎] 种子案例库已真实注入引擎：%d个案例 (消费电子:%d, 机械设计:%d, 软件界面:%d, 建筑结构:%d, 机器人设计:%d, 其他:%d)\n",
+            loaded_count, cat_counts[0], cat_counts[1], cat_counts[2],
+            cat_counts[3], cat_counts[4], cat_counts[5]);
+
+    return loaded_count;
 }
 
 /**

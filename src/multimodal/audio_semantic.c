@@ -17,7 +17,6 @@
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/string_utils.h"
-#include "selflnn/core/memory.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include <math.h>
@@ -2347,8 +2346,19 @@ heuristic_intent:
         }
     }
     
-    /* 计算整体置信度 */
-    result->overall_confidence = 0.8f; /* 文本分析置信度较高 */
+    /* ZSFLYF-P1-005修复: 计算整体置信度。
+     * 从音频信号的实际特征分布计算熵，而非硬编码固定值。 */
+    result->overall_confidence = 0.0f;
+    if (result->mfcc_features && result->feature_dim > 0) {
+        float entropy = 0.0f;
+        for (size_t i = 0; i < result->feature_dim; i++) {
+            float p = fabsf(result->mfcc_features[i]);
+            if (p > 1e-9f && p < 1.0f) entropy -= p * logf(p);
+        }
+        result->overall_confidence = 1.0f - (entropy / (logf((float)result->feature_dim) + 1e-9f));
+        if (result->overall_confidence < 0.0f) result->overall_confidence = 0.0f;
+        if (result->overall_confidence > 1.0f) result->overall_confidence = 1.0f;
+    }
     result->semantic_coherence = 0.7f;
     result->contextual_fit = 0.8f;
     

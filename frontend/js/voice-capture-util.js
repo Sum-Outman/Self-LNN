@@ -145,21 +145,28 @@ class VoiceCaptureUtil {
      * 统一快捷语音采集方法 — 封装 getUserMedia + VoiceCaptureUtil 创建 + 回调绑定
      * 消除 voice-control.html / multimodal-learn.html / dialogue-enhanced.js 中的重复模板代码
      * @param {Object} options - { maxDuration, onStart, onStop, onResult, onError }
+     * @param {Object} options - { maxDuration, onStart, onStop, onResult, onError, stream(可选传入已获取的流) }
      * @returns {Promise<{success:boolean, capturer:VoiceCaptureUtil|null, error:string|null}>}
      */
     static async quickCapture(options) {
         options = options || {};
         var maxDuration = options.maxDuration || 15000;
         try {
-            var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            var stream = options.stream || null;
+            var ownStream = false;
+            if (!stream) {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                ownStream = true;
+            }
             var capturer = new VoiceCaptureUtil({ maxDuration: maxDuration });
 
             capturer.onStart = function() {
                 if (options.onStart) options.onStart();
             };
             capturer.onStop = function() {
-                /* ZSFWS-VC1修复: 无论是否有自定义onStop，都必须停止MediaStream释放资源 */
-                stream.getTracks().forEach(function(t) { t.stop(); });
+                if (ownStream) {
+                    stream.getTracks().forEach(function(t) { t.stop(); });
+                }
                 if (options.onStop) options.onStop();
             };
             capturer.onBlobReady = async function(blob) {
@@ -176,7 +183,7 @@ class VoiceCaptureUtil {
 
             var startResult = await capturer.start(stream);
             if (!startResult || !startResult.success) {
-                stream.getTracks().forEach(function(t) { t.stop(); });
+                if (ownStream) stream.getTracks().forEach(function(t) { t.stop(); });
                 return { success: false, capturer: null, stream: null, error: (startResult && startResult.error) || '录音启动失败' };
             }
             return { success: true, capturer: capturer, stream: stream, error: null };

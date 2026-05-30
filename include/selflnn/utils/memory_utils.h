@@ -10,6 +10,11 @@
 
 #include <stddef.h>
 
+/* ZSFUSA: 清理释放宏 — 安全释放单字段 */
+#define DEEP_COPY_CLEANUP_FREE(ptr) do { \
+    if (ptr) { free(ptr); (ptr) = NULL; } \
+} while(0)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -254,8 +259,38 @@ int memory_lock(void* ptr, size_t size);
  */
 int memory_unlock(void* ptr, size_t size);
 
+/* ZSFUSA: 深拷贝宏定义 (用于知识库和决策引擎) */
+#define DEEP_COPY_STRING(dest, src) do { \
+    if (dest) { free(dest); dest = NULL; } \
+    if (src) { dest = (char*)malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
+} while(0)
+
+#define DEEP_COPY_SCALAR(dest, src) do { (dest) = (src); } while(0)
+
+#define DEEP_COPY_BLOB(dest, size_dest, src, size_src) do { \
+    if (dest) { free(dest); dest = NULL; (size_dest) = 0; } \
+    if (src && (size_src) > 0) { \
+        dest = (char*)malloc(size_src); \
+        if (dest) { memcpy(dest, src, size_src); (size_dest) = (size_src); } \
+    } \
+} while(0)
+
+#define DEEP_COPY_STRING_SAFE(dest, src, free_fn) do { \
+    if (dest) { free_fn((void**)&(dest)); dest = NULL; } \
+    if (src) { dest = (char*)malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
+} while(0)
+
+/* ZSFUSA: float数组深拷贝 */
+#define DEEP_COPY_FLOAT_ARRAY(dest, dest_count, src, src_count) do { \
+    if (dest) { free(dest); dest = NULL; (dest_count) = 0; } \
+    if (src && (src_count) > 0) { \
+        dest = (float*)malloc((src_count) * sizeof(float)); \
+        if (dest) { memcpy(dest, src, (src_count) * sizeof(float)); (dest_count) = (src_count); } \
+    } \
+} while(0)
+
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* SELFLNN_MEMORY_UTILS_H */
+#endif

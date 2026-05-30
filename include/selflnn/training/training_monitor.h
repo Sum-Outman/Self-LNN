@@ -34,6 +34,7 @@ typedef struct {
     float value;
     double timestamp_sec;
     char custom_name[64];
+    float throughput;            /**< 训练吞吐量（样本/秒） */
 } MetricRecord;
 
 typedef struct {
@@ -54,6 +55,8 @@ typedef struct {
     long last_epoch_time_sec;    /**< 上一个epoch结束时间戳 */
     int  epochs_recorded;        /**< 已记录的epoch数量(用于计算平均速度) */
     float avg_epoch_seconds;     /**< 每个epoch的平均秒数(EMA平滑) */
+    /* GPU/训练性能指标记录 */
+    MetricRecord records[TM_MAX_METRIC_TYPES]; /**< 训练吞吐量等性能记录 */
 } TrainingMonitor;
 
 TrainingMonitor* training_monitor_create(const char* run_name, int total_epochs);

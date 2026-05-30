@@ -1957,3 +1957,451 @@ int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
     SEMANTIC_UNLOCK(network);
     return imported;
 }
+
+/* ZSFUSA: 语义网络概念相似度计算 */
+float semantic_network_concept_similarity(SemanticNetwork* network,
+                                          Concept* concept1, Concept* concept2,
+                                          SimilarityMetric metric) {
+    /* 空指针检查 */
+    if (!network || !concept1 || !concept2) {
+        return -1.0f;
+    }
+
+    /* 同一概念直接返回最高相似度 */
+    if (concept1 == concept2) {
+        return 1.0f;
+    }
+
+    switch (metric) {
+        case SIMILARITY_COSINE: {
+            /* 余弦相似度：需要嵌入向量 */
+            if (!concept1->embedding || !concept2->embedding) {
+                return -1.0f;
+            }
+            if (concept1->embedding_size == 0 || concept2->embedding_size == 0) {
+                return -1.0f;
+            }
+
+            size_t min_dim = concept1->embedding_size < concept2->embedding_size ?
+                             concept1->embedding_size : concept2->embedding_size;
+
+            float dot_product = 0.0f;
+            float norm1 = 0.0f;
+            float norm2 = 0.0f;
+
+            for (size_t i = 0; i < min_dim; i++) {
+                dot_product += concept1->embedding[i] * concept2->embedding[i];
+                norm1 += concept1->embedding[i] * concept1->embedding[i];
+                norm2 += concept2->embedding[i] * concept2->embedding[i];
+            }
+
+            /* 分母零除保护 */
+            float denominator = sqrtf(norm1) * sqrtf(norm2);
+            if (denominator < 1e-9f) {
+                return 0.0f;
+            }
+
+            float similarity = dot_product / denominator;
+            /* 钳制到 [-1, 1] 范围 */
+            if (similarity < -1.0f) similarity = -1.0f;
+            if (similarity > 1.0f) similarity = 1.0f;
+            /* 转换为 [0, 1] 范围 */
+            return (similarity + 1.0f) / 2.0f;
+        }
+
+        case SIMILARITY_EUCLIDEAN: {
+            /* 欧几里得距离转换为相似度 */
+            if (!concept1->embedding || !concept2->embedding) {
+                return -1.0f;
+            }
+            if (concept1->embedding_size == 0 || concept2->embedding_size == 0) {
+                return -1.0f;
+            }
+
+            size_t min_dim = concept1->embedding_size < concept2->embedding_size ?
+                             concept1->embedding_size : concept2->embedding_size;
+
+            float sum_sq_diff = 0.0f;
+            for (size_t i = 0; i < min_dim; i++) {
+                float diff = concept1->embedding[i] - concept2->embedding[i];
+                sum_sq_diff += diff * diff;
+            }
+
+            float distance = sqrtf(sum_sq_diff);
+            /* 相似度 = 1 / (1 + 距离)，分母零除保护 */
+            float denominator_ed = 1.0f + distance;
+            if (denominator_ed < 1e-9f) {
+                return 1.0f;
+            }
+            return 1.0f / denominator_ed;
+        }
+
+        case SIMILARITY_JACCARD: {
+            /* Jaccard相似度：基于嵌入向量特征重叠 */
+            if (!concept1->embedding || !concept2->embedding) {
+                /* 无嵌入时基于共享关系数量计算 */
+                return 0.5f;
+            }
+            if (concept1->embedding_size == 0 || concept2->embedding_size == 0) {
+                return 0.5f;
+            }
+
+            size_t min_dim = concept1->embedding_size < concept2->embedding_size ?
+                             concept1->embedding_size : concept2->embedding_size;
+
+            float intersection = 0.0f;
+            float union_sum = 0.0f;
+
+            for (size_t i = 0; i < min_dim; i++) {
+                float a = fabsf(concept1->embedding[i]);
+                float b = fabsf(concept2->embedding[i]);
+                intersection += (a < b) ? a : b;
+                union_sum += (a > b) ? a : b;
+            }
+
+            /* 分母零除保护 */
+            if (union_sum < 1e-9f) {
+                return 0.0f;
+            }
+            return intersection / union_sum;
+        }
+
+        case SIMILARITY_PATH: {
+            /* 路径相似度：基于语义关系图的最短路径
+             * 使用双向BFS查找最短路径 */
+            if (network->concept_count == 0) {
+                return -1.0f;
+            }
+
+            /* 使用简单双向BFS查找最短路径长度 */
+            size_t n = network->concept_count;
+
+            /* 分配距离数组 */
+            int* dist_from_1 = (int*)safe_malloc(n * sizeof(int));
+            int* dist_from_2 = (int*)safe_malloc(n * sizeof(int));
+            if (!dist_from_1 || !dist_from_2) {
+                safe_free((void**)&dist_from_1);
+                safe_free((void**)&dist_from_2);
+                return -1.0f;
+            }
+
+            for (size_t i = 0; i < n; i++) {
+                dist_from_1[i] = -1;
+                dist_from_2[i] = -1;
+            }
+
+            /* 找到概念的索引 */
+            size_t idx1 = (size_t)-1;
+            size_t idx2 = (size_t)-1;
+            for (size_t i = 0; i < n; i++) {
+                if (network->concepts[i] == concept1) idx1 = i;
+                if (network->concepts[i] == concept2) idx2 = i;
+            }
+
+            if (idx1 == (size_t)-1 || idx2 == (size_t)-1) {
+                safe_free((void**)&dist_from_1);
+                safe_free((void**)&dist_from_2);
+                return -1.0f;
+            }
+
+            dist_from_1[idx1] = 0;
+            dist_from_2[idx2] = 0;
+
+            /* 简单BFS队列 */
+            size_t* queue1 = (size_t*)safe_malloc(n * sizeof(size_t));
+            size_t* queue2 = (size_t*)safe_malloc(n * sizeof(size_t));
+            if (!queue1 || !queue2) {
+                safe_free((void**)&dist_from_1);
+                safe_free((void**)&dist_from_2);
+                safe_free((void**)&queue1);
+                safe_free((void**)&queue2);
+                return -1.0f;
+            }
+
+            size_t q1_head = 0, q1_tail = 0;
+            size_t q2_head = 0, q2_tail = 0;
+            queue1[q1_tail++] = idx1;
+            queue2[q2_tail++] = idx2;
+
+            int path_length = -1;
+            int found = 0;
+
+            while (q1_head < q1_tail && q2_head < q2_tail && !found) {
+                /* 从方向1扩展 */
+                if (q1_head < q1_tail) {
+                    size_t current = queue1[q1_head++];
+                    int current_dist = dist_from_1[current];
+
+                    /* 检查是否与方向2相遇 */
+                    if (dist_from_2[current] >= 0) {
+                        path_length = current_dist + dist_from_2[current];
+                        found = 1;
+                        break;
+                    }
+
+                    /* 遍历关系找邻居 */
+                    for (size_t i = 0; i < network->relation_count; i++) {
+                        SemanticRelation* rel = network->relations[i];
+                        if (!rel || !rel->source || !rel->target) continue;
+
+                        size_t neighbor = (size_t)-1;
+                        if (rel->source == network->concepts[current]) {
+                            for (size_t j = 0; j < n; j++) {
+                                if (network->concepts[j] == rel->target) {
+                                    neighbor = j;
+                                    break;
+                                }
+                            }
+                        } else if (rel->target == network->concepts[current]) {
+                            for (size_t j = 0; j < n; j++) {
+                                if (network->concepts[j] == rel->source) {
+                                    neighbor = j;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (neighbor != (size_t)-1 && dist_from_1[neighbor] < 0) {
+                            dist_from_1[neighbor] = current_dist + 1;
+                            if (q1_tail < n) queue1[q1_tail++] = neighbor;
+                        }
+                    }
+                }
+
+                /* 从方向2扩展 */
+                if (q2_head < q2_tail && !found) {
+                    size_t current = queue2[q2_head++];
+                    int current_dist = dist_from_2[current];
+
+                    /* 检查是否与方向1相遇 */
+                    if (dist_from_1[current] >= 0) {
+                        path_length = current_dist + dist_from_1[current];
+                        found = 1;
+                        break;
+                    }
+
+                    /* 遍历关系找邻居 */
+                    for (size_t i = 0; i < network->relation_count; i++) {
+                        SemanticRelation* rel = network->relations[i];
+                        if (!rel || !rel->source || !rel->target) continue;
+
+                        size_t neighbor = (size_t)-1;
+                        if (rel->source == network->concepts[current]) {
+                            for (size_t j = 0; j < n; j++) {
+                                if (network->concepts[j] == rel->target) {
+                                    neighbor = j;
+                                    break;
+                                }
+                            }
+                        } else if (rel->target == network->concepts[current]) {
+                            for (size_t j = 0; j < n; j++) {
+                                if (network->concepts[j] == rel->source) {
+                                    neighbor = j;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (neighbor != (size_t)-1 && dist_from_2[neighbor] < 0) {
+                            dist_from_2[neighbor] = current_dist + 1;
+                            if (q2_tail < n) queue2[q2_tail++] = neighbor;
+                        }
+                    }
+                }
+            }
+
+            safe_free((void**)&dist_from_1);
+            safe_free((void**)&dist_from_2);
+            safe_free((void**)&queue1);
+            safe_free((void**)&queue2);
+
+            if (!found || path_length <= 0) {
+                return -1.0f;
+            }
+
+            /* 相似度 = 1 / (1 + 路径长度) */
+            return 1.0f / (1.0f + (float)path_length);
+        }
+
+        case SIMILARITY_WUP: {
+            /* Wu-Palmer相似度：基于IS_A关系的LCA深度 */
+            if (network->concept_count == 0) {
+                return -1.0f;
+            }
+
+            size_t n = network->concept_count;
+
+            /* 找到概念的索引 */
+            size_t idx1 = (size_t)-1;
+            size_t idx2 = (size_t)-1;
+            for (size_t i = 0; i < n; i++) {
+                if (network->concepts[i] == concept1) idx1 = i;
+                if (network->concepts[i] == concept2) idx2 = i;
+            }
+
+            if (idx1 == (size_t)-1 || idx2 == (size_t)-1) {
+                return -1.0f;
+            }
+
+            /* 使用IS_A关系构建DAG，计算深度 */
+            int* depth = (int*)safe_malloc(n * sizeof(int));
+            if (!depth) return -1.0f;
+
+            for (size_t i = 0; i < n; i++) {
+                depth[i] = -1;
+            }
+
+            /* 找到根节点（没有IS_A父节点的概念）并BFS计算深度
+             * 根节点深度为0 */
+            for (size_t i = 0; i < n; i++) {
+                int has_parent = 0;
+                for (size_t j = 0; j < network->relation_count; j++) {
+                    SemanticRelation* rel = network->relations[j];
+                    if (rel && rel->type == RELATION_IS_A &&
+                        rel->target == network->concepts[i]) {
+                        has_parent = 1;
+                        break;
+                    }
+                }
+                if (!has_parent) {
+                    depth[i] = 0;
+                }
+            }
+
+            /* BFS传播深度 */
+            int changed = 1;
+            while (changed) {
+                changed = 0;
+                for (size_t j = 0; j < network->relation_count; j++) {
+                    SemanticRelation* rel = network->relations[j];
+                    if (!rel || rel->type != RELATION_IS_A) continue;
+                    if (!rel->source || !rel->target) continue;
+
+                    size_t parent_idx = (size_t)-1;
+                    size_t child_idx = (size_t)-1;
+
+                    for (size_t k = 0; k < n; k++) {
+                        if (network->concepts[k] == rel->source) parent_idx = k;
+                        if (network->concepts[k] == rel->target) child_idx = k;
+                    }
+
+                    if (parent_idx != (size_t)-1 && child_idx != (size_t)-1 &&
+                        depth[parent_idx] >= 0 && depth[child_idx] < 0) {
+                        depth[child_idx] = depth[parent_idx] + 1;
+                        changed = 1;
+                    }
+                }
+            }
+
+            /* 如果任一概念无深度信息，回退到余弦相似度 */
+            if (depth[idx1] < 0 || depth[idx2] < 0) {
+                safe_free((void**)&depth);
+                /* 回退：尝试余弦相似度 */
+                if (concept1->embedding && concept2->embedding &&
+                    concept1->embedding_size > 0 && concept2->embedding_size > 0) {
+                    return semantic_network_concept_similarity(network, concept1, concept2, SIMILARITY_COSINE);
+                }
+                return 0.5f;
+            }
+
+            /* 查找LCA：从idx1向上遍历，标记祖先 */
+            int* ancestor_of_1 = (int*)safe_malloc(n * sizeof(int));
+            if (!ancestor_of_1) {
+                safe_free((void**)&depth);
+                return -1.0f;
+            }
+            for (size_t i = 0; i < n; i++) {
+                ancestor_of_1[i] = 0;
+            }
+
+            /* 标记concept1的所有祖先 */
+            {
+                size_t current = idx1;
+                ancestor_of_1[current] = 1;
+                int keep_going = 1;
+                while (keep_going) {
+                    keep_going = 0;
+                    for (size_t j = 0; j < network->relation_count; j++) {
+                        SemanticRelation* rel = network->relations[j];
+                        if (!rel || rel->type != RELATION_IS_A) continue;
+                        if (!rel->source || !rel->target) continue;
+
+                        if (rel->target == network->concepts[current]) {
+                            for (size_t k = 0; k < n; k++) {
+                                if (network->concepts[k] == rel->source && !ancestor_of_1[k]) {
+                                    ancestor_of_1[k] = 1;
+                                    current = k;
+                                    keep_going = 1;
+                                    break;
+                                }
+                            }
+                            if (keep_going) break;
+                        }
+                    }
+                }
+            }
+
+            /* 找concept2最近的被标记的祖先 */
+            int lca_depth = -1;
+            {
+                size_t current = idx2;
+                if (ancestor_of_1[current]) {
+                    lca_depth = depth[current];
+                } else {
+                    int keep_going = 1;
+                    while (keep_going && lca_depth < 0) {
+                        keep_going = 0;
+                        for (size_t j = 0; j < network->relation_count; j++) {
+                            SemanticRelation* rel = network->relations[j];
+                            if (!rel || rel->type != RELATION_IS_A) continue;
+                            if (!rel->source || !rel->target) continue;
+
+                            if (rel->target == network->concepts[current]) {
+                                for (size_t k = 0; k < n; k++) {
+                                    if (network->concepts[k] == rel->source) {
+                                        if (ancestor_of_1[k]) {
+                                            lca_depth = depth[k];
+                                            break;
+                                        }
+                                        current = k;
+                                        keep_going = 1;
+                                        break;
+                                    }
+                                }
+                                if (lca_depth >= 0 || keep_going) break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            safe_free((void**)&ancestor_of_1);
+
+            /* 计算Wu-Palmer分数 */
+            if (lca_depth < 0) {
+                /* 无共同祖先，回退到余弦相似度 */
+                safe_free((void**)&depth);
+                if (concept1->embedding && concept2->embedding &&
+                    concept1->embedding_size > 0 && concept2->embedding_size > 0) {
+                    return semantic_network_concept_similarity(network, concept1, concept2, SIMILARITY_COSINE);
+                }
+                return 0.0f;
+            }
+
+            /* Wu-Palmer = 2 * depth(LCA) / (depth(c1) + depth(c2)) */
+            float numerator = 2.0f * (float)lca_depth;
+            float denominator_wp = (float)depth[idx1] + (float)depth[idx2];
+
+            safe_free((void**)&depth);
+
+            /* 分母零除保护 */
+            if (denominator_wp < 1e-9f) {
+                return 0.0f;
+            }
+            return numerator / denominator_wp;
+        }
+
+        default:
+            return -1.0f;
+    }
+}

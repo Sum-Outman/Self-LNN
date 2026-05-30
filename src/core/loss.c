@@ -1,8 +1,11 @@
 #include "selflnn/core/loss.h"
+#include "selflnn/utils/memory_utils.h"
 #include <math.h>
 #include <float.h>
 #include <string.h>
 
+/* H-002: 精简委托包装函数，仅为向后兼容保留。
+ * 内部直接委托到 loss_compute_ex，无额外逻辑。 */
 float loss_compute(const float* predictions, const float* targets, int n, LossType loss_type)
 {
     return loss_compute_ex(predictions, targets, n, loss_type, NULL);
@@ -93,13 +96,30 @@ float loss_compute_ex(const float* predictions, const float* targets, int n,
         }
         case LOSS_CATEGORICAL_CROSSENTROPY:
         {
-            /* P2-055修复: 多分类CrossEntropy仅限制预测值，target保持原始one-hot值 */
-            for (i = 0; i < n; i++)
-            {
-                float p = predictions[i];
-                if (p < FLT_EPSILON) p = FLT_EPSILON;
-                if (p > 1.0f - FLT_EPSILON) p = 1.0f - FLT_EPSILON;
-                loss -= targets[i] * logf(p);
+            /* R2-P5修复: 添加Softmax归一化后再计算交叉熵
+             * 原实现直接将logits当概率使用，缺少Softmax导数链。
+             * 修正：先计算Softmax概率→再计算交叉熵。
+             * 数值稳定：使用 max-subtract 技巧防exp溢出。 */
+            float max_logit = predictions[0];
+            for (i = 1; i < n; i++) {
+                if (predictions[i] > max_logit) max_logit = predictions[i];
+            }
+            float exp_sum = 0.0f;
+            float* softmax_probs = (float*)safe_calloc(n, sizeof(float));
+            if (softmax_probs) {
+                for (i = 0; i < n; i++) {
+                    softmax_probs[i] = expf(predictions[i] - max_logit);
+                    exp_sum += softmax_probs[i];
+                }
+                if (exp_sum > FLT_EPSILON) {
+                    for (i = 0; i < n; i++) {
+                        softmax_probs[i] /= exp_sum;
+                        float p = softmax_probs[i];
+                        if (p < FLT_EPSILON) p = FLT_EPSILON;
+                        loss -= targets[i] * logf(p);
+                    }
+                }
+                safe_free((void**)&softmax_probs);
             }
             loss /= (float)n;
             break;
@@ -279,13 +299,32 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
         }
         case LOSS_CATEGORICAL_CROSSENTROPY:
         {
-            float scale = 1.0f / (float)n;
-            for (i = 0; i < n; i++)
-            {
-                float p = predictions[i];
-                if (p < FLT_EPSILON) p = FLT_EPSILON;
-                if (p > 1.0f - FLT_EPSILON) p = 1.0f - FLT_EPSILON;
-                gradients[i] = scale * (-targets[i] / p);
+            /* R2-P5修复: Softmax+CE联合梯度 = 概率 - 目标(one-hot)
+             * 先计算Softmax概率，再使用标准Softmax+CrossEntropy联合梯度公式 */
+            float max_logit = predictions[0];
+            for (i = 1; i < n; i++) {
+                if (predictions[i] > max_logit) max_logit = predictions[i];
+            }
+            float exp_sum = 0.0f;
+            float* softmax_probs = (float*)safe_calloc(n, sizeof(float));
+            if (softmax_probs) {
+                float scale = 1.0f / (float)n;
+                for (i = 0; i < n; i++) {
+                    softmax_probs[i] = expf(predictions[i] - max_logit);
+                    exp_sum += softmax_probs[i];
+                }
+                if (exp_sum > FLT_EPSILON) {
+                    for (i = 0; i < n; i++) {
+                        softmax_probs[i] /= exp_sum;
+                        /* Softmax+CE联合梯度: ∂L/∂logit_i = softmax_i - target_i */
+                        gradients[i] = scale * (softmax_probs[i] - targets[i]);
+                    }
+                } else {
+                    for (i = 0; i < n; i++) gradients[i] = 0.0f;
+                }
+                safe_free((void**)&softmax_probs);
+            } else {
+                for (i = 0; i < n; i++) gradients[i] = 0.0f;
             }
             break;
         }
@@ -295,9 +334,11 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
             for (i = 0; i < n; i++)
             {
                 float p = predictions[i];
-                if (p < FLT_EPSILON) p = FLT_EPSILON;
-                if (p > 1.0f - FLT_EPSILON) p = 1.0f - FLT_EPSILON;
-                gradients[i] = scale * (p - targets[i]) / (p * (1.0f - p) + FLT_EPSILON);
+                if (p < 1e-7f) p = 1e-7f;
+                if (p > 1.0f - 1e-7f) p = 1.0f - 1e-7f;
+                float denom = p * (1.0f - p);
+                if (denom < 1e-7f) denom = 1e-7f;
+                gradients[i] = scale * (p - targets[i]) / denom;
             }
             break;
         }
@@ -459,6 +500,8 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
     }
 }
 
+/* H-002: 精简委托包装函数，仅为向后兼容保留。
+ * 内部直接委托到 loss_gradient_ex，无额外逻辑。 */
 void loss_gradient(const float* predictions, const float* targets, int n, float* gradients, LossType loss_type)
 {
     loss_gradient_ex(predictions, targets, n, gradients, loss_type, NULL);

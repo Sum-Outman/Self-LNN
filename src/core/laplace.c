@@ -14,7 +14,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
-
+#include "selflnn/utils/math_utils_internal.h"  /* ZSFUSA: CLAMP宏 */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -50,6 +50,9 @@ struct LaplaceAnalyzer {
     // 分析结果缓存
     StabilityAnalysis last_analysis; /**< 最后一次稳定性分析结果 */
     int has_last_analysis;           /**< 是否有缓存的分析结果 */
+
+    float* spectrum;             /**< 频谱数据缓冲区 */
+    size_t spectrum_size;        /**< 频谱缓冲区大小 */
 };
 
 /* 静态函数声明 */
@@ -212,6 +215,9 @@ LaplaceAnalyzer* laplace_analyzer_create(const LaplaceConfig* config) {
     analyzer->last_analysis.poles = NULL;
     analyzer->last_analysis.num_poles = 0;
     analyzer->has_last_analysis = 0;
+
+    analyzer->spectrum = NULL;
+    analyzer->spectrum_size = 0;
     
     // 分配极点缓冲区（最大极点数为分母阶数）
     size_t max_poles = config->num_samples / 2;
@@ -288,7 +294,10 @@ void laplace_analyzer_free(LaplaceAnalyzer* analyzer) {
     }
     analyzer->last_analysis.num_poles = 0;
     analyzer->has_last_analysis = 0;
-    
+
+    safe_free((void**)&analyzer->spectrum);
+    analyzer->spectrum_size = 0;
+
     // 释放分析器结构
     safe_free((void**)&analyzer);
 }
@@ -1277,6 +1286,55 @@ void laplace_analyzer_reset(LaplaceAnalyzer* analyzer) {
     if (analyzer->complex_buffer && analyzer->complex_capacity > 0) {
         memset(analyzer->complex_buffer, 0, analyzer->complex_capacity * sizeof(Complex));
     }
+}
+
+/* ================================================================
+ * ZSFUSA-P3补: 极点分析和稳定性裕度查询函数
+ * 访问缓存的StabilityAnalysis为laplace_unified_health_check提供数据
+ * ================================================================ */
+
+int laplace_analyzer_count_poles(const LaplaceAnalyzer* analyzer) {
+    if (!analyzer || !analyzer->has_last_analysis) return 0;
+    return (int)analyzer->last_analysis.num_poles;
+}
+
+int laplace_analyzer_count_unstable_poles(const LaplaceAnalyzer* analyzer) {
+    if (!analyzer || !analyzer->has_last_analysis) return 0;
+    if (!analyzer->last_analysis.poles) return 0;
+    int unstable = 0;
+    for (size_t i = 0; i < analyzer->last_analysis.num_poles; i++) {
+        if (!analyzer->last_analysis.poles[i].is_stable) unstable++;
+    }
+    return unstable;
+}
+
+int laplace_analyzer_get_stability_margins(const LaplaceAnalyzer* analyzer,
+                                           float* gain_margin, float* phase_margin) {
+    if (!analyzer || !analyzer->has_last_analysis) return -1;
+    if (!gain_margin || !phase_margin) return -1;
+    /* 稳定裕度直接来自缓存的稳定性分析 */
+    *gain_margin = analyzer->last_analysis.stability_margin;
+    /* 相位裕度从主导极点估计: PM ≈ 180° - atan2(|imag|, |real|) */
+    float dom = analyzer->last_analysis.dominant_pole;
+    if (dom >= 0.0f) {
+        *phase_margin = 0.0f;  /* 正实部极点 → 无相位裕度 */
+    } else {
+        /* 假设主导极点虚部与实部同量级（典型二阶系统近似） */
+        float approx_imag = fabsf(dom) * 0.5f;
+        *phase_margin = 180.0f - (float)(atan2(approx_imag, fabsf(dom)) * 180.0 / M_PI);
+    }
+    return 0;
+}
+
+int laplace_analyzer_get_frequency_response(const LaplaceAnalyzer* analyzer,
+                                            float** freq_response, size_t* size) {
+    if (!analyzer || !freq_response || !size) return -1;
+    if (!analyzer->spectrum || analyzer->spectrum_size == 0) return -1;
+    *size = analyzer->spectrum_size;
+    *freq_response = (float*)safe_malloc(*size * sizeof(float));
+    if (!*freq_response) return -1;
+    memcpy(*freq_response, analyzer->spectrum, *size * sizeof(float));
+    return 0;
 }
 
 /* ============================================================================

@@ -2,6 +2,7 @@
 #include "selflnn/robot/computer_operation.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/selflnn.h"
+#include "selflnn/utils/logging.h"        /* ZSFUSA: log_warn宏 */
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -115,11 +116,23 @@ static int co_wayland_keypress(int key_code, int press) {
     return (rc == 0) ? 0 : -1;
 }
 
-/* Wayland原生文本输入（使用wtype） */
+/* ZSFLYF-P3-005修复: Wayland文本输入增加Shell元字符转义，
+ * 防止特殊字符被误解析为Shell命令。 */
 static int co_wayland_type_text(const char* text, size_t len) {
     if (!text || len == 0 || len > 1023) return -1;
-    char cmd[1280];
-    snprintf(cmd, sizeof(cmd), "wtype -s 5 \"%.1024s\" 2>/dev/null", text);
+    char escaped[2048] = {0};
+    size_t ep = 0;
+    for (size_t i = 0; i < len && ep < 2040; i++) {
+        char c = text[i];
+        /* 转义Shell特殊字符 */
+        if (c == '"' || c == '\\' || c == '$' || c == '`' || c == '!') {
+            escaped[ep++] = '\\';
+        }
+        escaped[ep++] = c;
+    }
+    escaped[ep] = '\0';
+    char cmd[2560];
+    snprintf(cmd, sizeof(cmd), "wtype -s 5 \"%s\" 2>/dev/null", escaped);
     FILE* p = popen(cmd, "r");
     if (!p) return -1;
     int rc = pclose(p);
@@ -137,11 +150,24 @@ static int co_wayland_mouse_move(int x, int y) {
     return (rc == 0) ? 0 : -1;
 }
 
-/* Wayland原生滚轮（使用ydotool） */
+/* Wayland原生滚轮（使用ydotool鼠标相对移动模拟滚轮） */
 static int co_wayland_scroll(int delta) {
-    (void)delta;
-    fprintf(stderr, "[计算机操作] Wayland滚轮: ydotool不支持滚轮操作，请使用XWayland桥接\n");
-    return -1;
+    /* P1-001修复: 通过垂直鼠标移动模拟滚轮操作
+     * ydotool不支持直接滚轮，使用鼠标相对移动 + 按键组合模拟 */
+    char cmd[256];
+    int abs_delta = (delta < 0) ? -delta : delta;
+    int direction = (delta < 0) ? 1 : 0;  /* 1=向上, 0=向下 */
+    for (int i = 0; i < abs_delta; i++) {
+        /* ydotool mousemove相对移动：向上滚=正Y, 向下滚=负Y */
+        int move_y = direction ? 10 : -10;
+        snprintf(cmd, sizeof(cmd), "ydotool mousemove 0 %d 2>/dev/null", move_y);
+        FILE* p = popen(cmd, "r");
+        if (!p) continue;
+        pclose(p);
+        /* 微秒延迟避免过快 */
+        usleep(1000);
+    }
+    return 0;
 }
 
 /* Wayland原生截图（使用grim） */
@@ -197,6 +223,8 @@ struct COSystem {
     COWindowInfo window_list[CO_MAX_WINDOWS];
     size_t num_windows;
     int window_list_dirty;
+
+    float system_volume;
 };
 
 static float pixel_diff(const float* a, const float* b, size_t n) {
@@ -299,7 +327,8 @@ static int global_lnn_projected_forward(COSystem* system,
     /* 全局LNN前向传播 */
     int ret = lnn_forward(lnn, proj_input, proj_output);
     if (ret != 0) {
-        free(proj_input); free(proj_output);
+        /* ZSFLYF-P2-012修复: safe_malloc配对safe_free，避免内存管理不一致 */
+        safe_free((void**)&proj_input); safe_free((void**)&proj_output);
         return ret;
     }
     
@@ -328,8 +357,9 @@ static int global_lnn_projected_forward(COSystem* system,
         }
     }
     
-    free(proj_input);
-    free(proj_output);
+    /* ZSFLYF-P2-012修复: safe_malloc必须配对safe_free，不可混用free() */
+    safe_free((void**)&proj_input);
+    safe_free((void**)&proj_output);
     return 0;
 }
 
@@ -1445,6 +1475,7 @@ COSystem* co_system_create(COConfig config) {
     system->demo_action_buffer = NULL;
     system->demo_label = NULL;
     system->num_safety_rules = 0;
+    system->system_volume = 1.0f;
 
     /* 获取全局共享LNN（单一模型原则） */
     system->global_lnn = (LNN*)selflnn_get_lnn();
@@ -3144,5 +3175,15 @@ int co_learn_from_demo(COSystem* system, const float* screen_sequence, const COA
     system->demo_label = (char*)malloc(label_len + 1);
     if (system->demo_label) memcpy(system->demo_label, task_label, label_len + 1);
 
+    return 0;
+}
+
+/* ZSFUSA: 设置计算机系统音量 */
+int co_system_set_volume(void* co_sys, float volume) {
+    COSystem* ctx = (COSystem*)co_sys;
+    if (!ctx) return -1;
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    ctx->system_volume = volume;
     return 0;
 }

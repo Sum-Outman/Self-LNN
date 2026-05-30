@@ -70,7 +70,7 @@
 // Vulkan布尔值
 #define VK_FALSE 0
 #define VK_TRUE  1
-#define VK_NULL_HANDLE 0
+#define VK_NULL_HANDLE ((void*)0)
 #define VK_WHOLE_SIZE (~0ULL)     /* 描述符缓冲区范围：整个缓冲区 */
 
 // Vulkan错误码

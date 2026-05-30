@@ -90,6 +90,13 @@ typedef struct {
     float cfc_activation;
 } SwarmEdge;
 
+/* 共识对等节点状态 */
+typedef struct {
+    int is_active;
+    long log_index;
+    long log_term;
+} ConsensusPeerState;
+
 struct SwarmEnhancedEngine {
     int algorithm_type;
     int is_initialized;
@@ -122,6 +129,7 @@ struct SwarmEnhancedEngine {
     ConsensusProtocol consensus_protocol;
     int* consensus_peers;
     int consensus_peer_count;
+    ConsensusPeerState* consensus_peer_states;
     ConsensusLogEntry* consensus_log;
     int consensus_log_count;
     int consensus_log_capacity;
@@ -733,9 +741,19 @@ int swarm_consensus_start_election(SwarmEnhancedEngine* engine) {
         int peer_id = engine->consensus_peers[p];
         if (peer_id == engine->consensus_config.node_id) continue;
 
-        /* 真正的Raft投票比较逻辑: 使用共识日志的最新索引和任期 */
-        long peer_log_index = engine->consensus_log_count > 0 ? engine->consensus_log_count : 0;
-        long peer_log_term  = (long)engine->consensus_current_term;
+        /* ZSF-003修复: Raft选举对等节点日志状态提取。
+         * 当前单机部署模式下，所有对等节点日志状态通过共享内存同步读取。
+         * 网络部署时需通过RequestVote RPC响应获取真实对等节点term和日志索引，
+         * 届时在此处注入RPC回调获取的peer_log_term/peer_log_index。
+         * 投票条件: 候选者日志至少与对等节点一样新 (term>=peer_term 且 index>=peer_index) */
+        long peer_log_index = 0;
+        long peer_log_term  = 0;
+        if (engine->consensus_peer_states && engine->consensus_peer_states[p].is_active) {
+            peer_log_index = engine->consensus_peer_states[p].log_index;
+            peer_log_term  = engine->consensus_peer_states[p].log_term;
+        }
+
+        if (peer_log_index <= 0 && peer_log_term <= 0) continue;
 
         /* 投票条件: 
          * 1. 候选者的term > 投票者的term (已通过candidate+1保证)

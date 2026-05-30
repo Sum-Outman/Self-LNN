@@ -374,3 +374,27 @@ void task_scheduler_get_stats(const TaskScheduler* s,
     if (pending) *pending = p;
     if (running) *running = r;
 }
+
+void task_scheduler_pause(TaskScheduler* s) {
+    if (!s) return;
+    TS_MUTEX_LOCK(&s->lock);
+    for (int i = 0; i < s->task_count; i++) {
+        if (s->tasks[i].status == TASK_RUNNING) {
+            s->tasks[i].status = TASK_PREEMPTED;
+            s->total_preempted++;
+        }
+    }
+    s->running_task_id = -1;
+    TS_MUTEX_UNLOCK(&s->lock);
+}
+
+void task_scheduler_cancel_all(TaskScheduler* s) {
+    if (!s) return;
+    TS_MUTEX_LOCK(&s->lock);
+    for (int i = 0; i < s->task_count; i++) {
+        if (s->tasks[i].status == TASK_PENDING || s->tasks[i].status == TASK_PREEMPTED) {
+            s->tasks[i].status = TASK_COMPLETED;
+        }
+    }
+    TS_MUTEX_UNLOCK(&s->lock);
+}

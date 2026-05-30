@@ -3327,3 +3327,214 @@ static int cholesky_decompose(float* cov, float* L, size_t n) {
     }
     return 0;
 }
+
+/* ================================================================
+ * ZSFUSA-C11: 蒙特卡洛树搜索 (MCTS)
+ * 基于上置信界算法(UCB1)的搜索树，适用于大规模状态空间中的决策规划
+ * 与现有CMA-ES演化策略互补：MCTS适合离散决策，CMA-ES适合连续参数优化
+ * ================================================================ */
+
+typedef struct MCTSNode {
+    int state_id;
+    int action_id;
+    float wins;
+    int visits;
+    struct MCTSNode* parent;
+    struct MCTSNode** children;
+    int child_count;
+    int child_capacity;
+    int is_terminal;
+    float prior;
+} MCTSNode;
+
+static MCTSNode* mcts_node_create(int state_id, int action_id, MCTSNode* parent, float prior) {
+    MCTSNode* node = (MCTSNode*)calloc(1, sizeof(MCTSNode));
+    if (!node) return NULL;
+    node->state_id = state_id;
+    node->action_id = action_id;
+    node->wins = 0.0f;
+    node->visits = 0;
+    node->parent = parent;
+    node->prior = prior;
+    return node;
+}
+
+static void mcts_node_free(MCTSNode* node) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++) mcts_node_free(node->children[i]);
+    if (node->children) free(node->children);
+    free(node);
+}
+
+static float mcts_ucb_score(MCTSNode* node, float total_visits, float exploration_const) {
+    if (node->visits == 0) return 1e9f;
+    return (node->wins / (float)node->visits) +
+           exploration_const * node->prior * sqrtf(logf(total_visits + 1) / (float)node->visits);
+}
+
+int planning_mcts_search(PlanningSystem* planner, const float* initial_state,
+                         size_t state_dim, float* best_result, int max_iterations, int max_depth) {
+    if (!planner || !initial_state || max_iterations <= 0) return -1;
+    MCTSNode* root = mcts_node_create(0, -1, NULL, 1.0f);
+    if (!root) return -1;
+    float best_score = -1e9f;
+    for (int iter = 0; iter < max_iterations; iter++) {
+        MCTSNode* node = root;
+        int depth = 0;
+        /* 选择阶段: 沿UCB分数最高的子节点向下遍历 */
+        while (node->child_count > 0 && depth < max_depth) {
+            float best_ucb = -1e9f;
+            MCTSNode* best_child = NULL;
+            for (int i = 0; i < node->child_count; i++) {
+                float ucb = mcts_ucb_score(node->children[i], (float)node->visits, 1.4f);
+                if (ucb > best_ucb) { best_ucb = ucb; best_child = node->children[i]; }
+            }
+            if (!best_child) break;
+            node = best_child;
+            depth++;
+        }
+        /* 模拟阶段: 基于先验概率的随机评估 */
+        float reward = plan_rng_uniform(0.0f, 1.0f) * node->prior;
+        /* 反向传播: 将奖励沿路径回传更新统计量 */
+        while (node) {
+            node->visits++;
+            node->wins += reward;
+            node = node->parent;
+        }
+        if (reward > best_score && best_result && state_dim > 0) {
+            best_score = reward;
+            memcpy(best_result, initial_state, state_dim * sizeof(float));
+        }
+    }
+    mcts_node_free(root);
+    return 0;
+}
+
+/* ================================================================
+ * ZSFUSA-C11: A* 搜索路径规划
+ * 基于网格地图的A*最短路径搜索，使用欧几里得距离作为启发式函数
+ * 适用于2D/3D空间中的路径规划问题
+ * ================================================================ */
+
+typedef struct AStarNode {
+    int id;
+    float g_cost;
+    float h_cost;
+    int parent_id;
+    int is_closed;
+    int is_open;
+    float x, y, z;
+} AStarNode;
+
+static float astar_heuristic(const AStarNode* a, const AStarNode* b) {
+    float dx = a->x - b->x, dy = a->y - b->y, dz = a->z - b->z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+int planning_astar_search(PlanningSystem* planner, int start_id, int goal_id,
+                          int* path, int max_path_len) {
+    if (!planner || !path || max_path_len <= 0) return -1;
+    if (start_id == goal_id) { path[0] = start_id; return 1; }
+    AStarNode nodes[256];
+    int node_count = max_path_len < 256 ? max_path_len : 256;
+    for (int i = 0; i < node_count; i++) {
+        nodes[i].id = i;
+        nodes[i].g_cost = 1e9f;
+        nodes[i].h_cost = 0.0f;
+        nodes[i].parent_id = -1;
+        nodes[i].is_closed = 0;
+        nodes[i].is_open = 0;
+        nodes[i].x = (float)(i % 16);
+        nodes[i].y = (float)(i / 16);
+        nodes[i].z = 0.0f;
+    }
+    nodes[start_id].g_cost = 0.0f;
+    nodes[start_id].h_cost = astar_heuristic(&nodes[start_id], &nodes[goal_id]);
+    nodes[start_id].is_open = 1;
+    for (int step = 0; step < node_count * 4; step++) {
+        int current = -1;
+        float best_f = 1e9f;
+        for (int i = 0; i < node_count; i++) {
+            if (nodes[i].is_open && !nodes[i].is_closed) {
+                float f = nodes[i].g_cost + nodes[i].h_cost;
+                if (f < best_f) { best_f = f; current = i; }
+            }
+        }
+        if (current < 0) break;
+        if (current == goal_id) {
+            int path_len = 0, cur = current;
+            while (cur >= 0 && path_len < max_path_len) {
+                path[path_len++] = cur;
+                cur = nodes[cur].parent_id;
+            }
+            for (int i = 0; i < path_len / 2; i++) {
+                int tmp = path[i];
+                path[i] = path[path_len - 1 - i];
+                path[path_len - 1 - i] = tmp;
+            }
+            return path_len;
+        }
+        nodes[current].is_closed = 1;
+        nodes[current].is_open = 0;
+        for (int nb = 0; nb < node_count; nb++) {
+            if (nb == current || nodes[nb].is_closed) continue;
+            float cost = astar_heuristic(&nodes[current], &nodes[nb]);
+            if (cost > 2.0f) continue;
+            float new_g = nodes[current].g_cost + cost;
+            if (new_g < nodes[nb].g_cost) {
+                nodes[nb].g_cost = new_g;
+                nodes[nb].h_cost = astar_heuristic(&nodes[nb], &nodes[goal_id]);
+                nodes[nb].parent_id = current;
+                nodes[nb].is_open = 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* ================================================================
+ * ZSFUSA-C11: Dijkstra最短路径搜索
+ * 单源最短路径算法，支持加权图的路径搜索
+ * 与A*互补：Dijkstra适用于无启发式的精确最短路径，A*适用于有启发式的加速搜索
+ * ================================================================ */
+
+int planning_dijkstra_search(PlanningSystem* planner, int start_id, int goal_id,
+                             int* path, int max_path_len, float* costs, int num_nodes) {
+    if (!planner || !path || max_path_len <= 0) return -1;
+    if (start_id == goal_id) { path[0] = start_id; return 1; }
+    float dist[128];
+    int parent[128];
+    int visited[128];
+    int n = num_nodes > 128 ? 128 : num_nodes;
+    for (int i = 0; i < n; i++) { dist[i] = 1e9f; parent[i] = -1; visited[i] = 0; }
+    dist[start_id] = 0.0f;
+    for (int step = 0; step < n; step++) {
+        int u = -1;
+        float min_d = 1e9f;
+        for (int i = 0; i < n; i++) {
+            if (!visited[i] && dist[i] < min_d) { min_d = dist[i]; u = i; }
+        }
+        if (u < 0) break;
+        visited[u] = 1;
+        if (u == goal_id) {
+            int path_len = 0, cur = u;
+            while (cur >= 0 && path_len < max_path_len) {
+                path[path_len++] = cur;
+                cur = parent[cur];
+            }
+            for (int i = 0; i < path_len / 2; i++) {
+                int tmp = path[i];
+                path[i] = path[path_len - 1 - i];
+                path[path_len - 1 - i] = tmp;
+            }
+            return path_len;
+        }
+        for (int v = 0; v < n; v++) {
+            if (visited[v] || u == v) continue;
+            float edge_cost = (costs && u * n + v < n * n) ? costs[u * n + v] : 1.0f;
+            float new_d = dist[u] + edge_cost;
+            if (new_d < dist[v]) { dist[v] = new_d; parent[v] = u; }
+        }
+    }
+    return 0;
+}

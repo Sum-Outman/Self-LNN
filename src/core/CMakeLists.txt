@@ -27,6 +27,7 @@ add_library(selflnn_core
     cma_es.c
     laplace_features.c
     system_scheduler.c
+    system_mutex.c
     parameter_shard.c
     extended_training.c
     ode_solvers.c
@@ -73,7 +74,6 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_features.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/laplace_unified.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/loss.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/memory.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/ode_solvers.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/optimizer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/port_config.h

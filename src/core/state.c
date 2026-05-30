@@ -322,7 +322,27 @@ int network_state_set_config(NetworkState* state, const NetworkStateConfig* conf
  * 状态快照与回滚机制
  * ============================================================================ */
 
-#define MAX_SNAPSHOTS 8
+/* ZSFUSA-C16: 全局快照数组。
+ * 
+ * 架构说明：
+ *   快照存储采用全局数组设计，MAX_SNAPSHOTS_PER_INSTANCE=8 每个LNN实例最多保存8个快照。
+ *   通过 instance_id 偏移隔离不同LNN实例的快照空间（instance_id * 8）。
+ * 
+ * 线程安全：
+ *   所有快照存取函数（snapshot_save/restore/count/label/clear/task_id）均通过
+ *   g_snapshot_mutex 互斥锁保护。锁在首次调用时自动创建（懒初始化）。
+ * 
+ * 多LNN实例注意事项：
+ *   由于多LNN实例共享此全局数组，调用者应确保同一时刻仅一个LNN使用快照功能，
+ *   或通过不同的 instance_id 来隔离不同实例的快照空间。
+ * 
+ * 后续演进方向：
+ *   建议将快照存储从全局数组迁移到LNN结构体内部（lnn->state_snapshots），
+ *   以彻底消除全局状态共享和多实例串扰风险。
+ */
+#define MAX_SNAPSHOTS_PER_INSTANCE 8
+#define MAX_LNN_INSTANCES 4
+#define MAX_SNAPSHOTS (MAX_SNAPSHOTS_PER_INSTANCE * MAX_LNN_INSTANCES)
 
 typedef struct {
     float* state_data;
@@ -334,43 +354,52 @@ typedef struct {
     char task_id[64];
 } StateSnapshot;
 
+/* ZSFUSA-C16: g_snapshots 是全局共享数组，所有LNN实例共用。
+ * 已通过 g_snapshot_mutex 保护所有读写操作。
+ * g_snapshot_count 记录当前已使用的快照总数（跨所有实例）。 */
 static StateSnapshot g_snapshots[MAX_SNAPSHOTS];
 static int g_snapshot_count = 0;
 static MutexHandle g_snapshot_mutex = NULL;
 
-int network_state_snapshot_save(NetworkState* state, const char* label) {
+int network_state_snapshot_save(NetworkState* state, const char* label, int instance_id) {
     if (!state || !state->current_state) return -1;
     if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
     mutex_lock(g_snapshot_mutex);
 
-    if (g_snapshot_count >= MAX_SNAPSHOTS) {
+    /* ZSFUSA-C16: 使用instance_id偏移隔离不同LNN实例的快照 */
+    int idx = g_snapshot_count;
+    int slot = idx + (instance_id > 0 ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0);
+
+    if (slot >= MAX_SNAPSHOTS) {
+        /* 实例快照区已满，移除最旧快照 */
         safe_free((void**)&g_snapshots[0].state_data);
         for (int i = 0; i < MAX_SNAPSHOTS - 1; i++) {
             g_snapshots[i] = g_snapshots[i + 1];
         }
         g_snapshot_count = MAX_SNAPSHOTS - 1;
+        slot = MAX_SNAPSHOTS - 1;
+        idx = g_snapshot_count;
     }
 
-    int idx = g_snapshot_count;
-    g_snapshots[idx].state_size = state->config.state_size;
-    g_snapshots[idx].state_data = (float*)safe_malloc(
+    g_snapshots[slot].state_size = state->config.state_size;
+    g_snapshots[slot].state_data = (float*)safe_malloc(
         state->config.state_size * sizeof(float));
-    if (!g_snapshots[idx].state_data) {
+    if (!g_snapshots[slot].state_data) {
         mutex_unlock(g_snapshot_mutex);
         return -1;
     }
 
-    memcpy(g_snapshots[idx].state_data, state->current_state,
+    memcpy(g_snapshots[slot].state_data, state->current_state,
            state->config.state_size * sizeof(float));
-    g_snapshots[idx].step = state->history_index;
+    g_snapshots[slot].step = state->history_index;
     if (label) {
-        snprintf(g_snapshots[idx].label, sizeof(g_snapshots[idx].label), "%s", label);
+        snprintf(g_snapshots[slot].label, sizeof(g_snapshots[slot].label), "%s", label);
     } else {
-        snprintf(g_snapshots[idx].label, sizeof(g_snapshots[idx].label),
+        snprintf(g_snapshots[slot].label, sizeof(g_snapshots[slot].label),
                 "snapshot_%d", idx);
     }
     /* Z-P3修复: 初始化task_id（由调用方通过snapshot_save_ex设置） */
-    g_snapshots[idx].task_id[0] = '\0';
+    g_snapshots[slot].task_id[0] = '\0';
     g_snapshot_count++;
     mutex_unlock(g_snapshot_mutex);
     return 0;
@@ -379,8 +408,8 @@ int network_state_snapshot_save(NetworkState* state, const char* label) {
 /* Z-P3修复: 保存状态快照（带任务上下文标识）
  * 使状态快照与特定任务关联，方便多任务训练中切换和恢复 */
 int network_state_snapshot_save_ex(NetworkState* state, const char* label,
-                                    const char* task_id) {
-    int ret = network_state_snapshot_save(state, label);
+                                    const char* task_id, int instance_id) {
+    int ret = network_state_snapshot_save(state, label, instance_id);
     if (ret == 0 && task_id && g_snapshot_count > 0) {
         mutex_lock(g_snapshot_mutex);
         int idx = g_snapshot_count - 1;
@@ -401,25 +430,27 @@ const char* network_state_snapshot_task_id(int idx) {
     return result;
 }
 
-int network_state_snapshot_restore(NetworkState* state, int snapshot_idx) {
+int network_state_snapshot_restore(NetworkState* state, int snapshot_idx, int instance_id) {
     if (!state || !state->current_state) return -1;
     if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
     mutex_lock(g_snapshot_mutex);
-    if (snapshot_idx < 0 || snapshot_idx >= g_snapshot_count) {
+    /* ZSFUSA-C16: 使用instance_id偏移隔离不同LNN实例的快照 */
+    int slot = snapshot_idx + (instance_id > 0 ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0);
+    if (slot < 0 || slot >= g_snapshot_count) {
         mutex_unlock(g_snapshot_mutex);
         return -1;
     }
-    if (g_snapshots[snapshot_idx].state_size != state->config.state_size) {
+    if (g_snapshots[slot].state_size != state->config.state_size) {
         mutex_unlock(g_snapshot_mutex);
         return -1;
     }
 
-    memcpy(state->current_state, g_snapshots[snapshot_idx].state_data,
+    memcpy(state->current_state, g_snapshots[slot].state_data,
            state->config.state_size * sizeof(float));
-    memcpy(state->previous_state, g_snapshots[snapshot_idx].state_data,
+    memcpy(state->previous_state, g_snapshots[slot].state_data,
            state->config.state_size * sizeof(float));
 
-    state->history_index = g_snapshots[snapshot_idx].step;
+    state->history_index = g_snapshots[slot].step;
     state->stability = 1.0f;
     state->convergence = 0.0f;
     state->change_rate = 0.0f;
@@ -471,4 +502,9 @@ void network_state_set_laplace_metrics(NetworkState* state,
     state->laplace_stability_score = stability_score;
     state->laplace_recommended_cutoff = recommended_cutoff;
     state->laplace_frequency_bandwidth = frequency_bandwidth;
+}
+
+float network_state_get_laplace_stability_score(const NetworkState* state) {
+    if (!state) return 0.5f;  /* 默认中性值：未初始化时返回0.5(无调制) */
+    return state->laplace_stability_score;
 }

@@ -32,7 +32,7 @@ class TrainingPushManager {
         this.logFilter = 'all';
         this.initialized = false;
         this._pollTimer = null;
-        this._speedSamples = [];
+        this.lastUpdateTime = 0;    /* ZSFNO2-F004: WebSocket数据时效性追踪 */
     }
 
     init() {
@@ -83,13 +83,77 @@ class TrainingPushManager {
         }.bind(this);
 
         window.SelfLnnWebSocket.on('training_progress', this._wsTrainingProgressHandler);
-        window.SelfLnnWebSocket.on('system_status', this._wsSystemStatusHandler);
-        window.SelfLnnWebSocket.on('training_log', this._wsTrainingLogHandler);
+        /* M03修复: system_status/robot_status/memory_status/knowledge_status等
+         * 仪表盘级事件处理器已统一迁移到 main.js，避免重复注册 */
+        window.SelfLnnWebSocket.on('log', this._wsTrainingLogHandler);
         window.SelfLnnWebSocket.on('training_metrics', this._wsTrainingMetricsHandler);
         window.SelfLnnWebSocket.on('gpu_status', this._wsGpuStatusHandler);
+
+        /* P1-01: 为所有未被消费的WS推送类型添加监听处理器 */
+        this._wsKnowledgeUpdateHandler = (function(data) {
+            console.log('[TrainingPush] knowledge_update:', data);
+            document.dispatchEvent(new CustomEvent('ws-knowledge-update', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('knowledge_update', this._wsKnowledgeUpdateHandler);
+
+        this._wsModelOutputHandler = (function(data) {
+            console.log('[TrainingPush] model_output:', data);
+            document.dispatchEvent(new CustomEvent('ws-model-output', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('model_output', this._wsModelOutputHandler);
+
+        this._wsErrorHandler = (function(data) {
+            console.log('[TrainingPush] error:', data);
+            document.dispatchEvent(new CustomEvent('ws-error', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('error', this._wsErrorHandler);
+
+        this._wsCustomHandler = (function(data) {
+            console.log('[TrainingPush] custom:', data);
+            document.dispatchEvent(new CustomEvent('ws-custom', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('custom', this._wsCustomHandler);
+
+        this._wsDialogueResponseHandler = (function(data) {
+            console.log('[TrainingPush] dialogue_response:', data);
+            document.dispatchEvent(new CustomEvent('ws-dialogue-response', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('dialogue_response', this._wsDialogueResponseHandler);
+
+        this._wsDialogueTokenHandler = (function(data) {
+            console.log('[TrainingPush] dialogue_token:', data);
+            document.dispatchEvent(new CustomEvent('ws-dialogue-token', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('dialogue_token', this._wsDialogueTokenHandler);
+
+        this._wsEvolutionEventHandler = (function(data) {
+            console.log('[TrainingPush] evolution_event:', data);
+            document.dispatchEvent(new CustomEvent('ws-evolution-event', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('evolution_event', this._wsEvolutionEventHandler);
+
+        this._wsCognitionEventHandler = (function(data) {
+            console.log('[TrainingPush] cognition_event:', data);
+            document.dispatchEvent(new CustomEvent('ws-cognition-event', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('cognition_event', this._wsCognitionEventHandler);
+
+        this._wsDiagnosticHandler = (function(data) {
+            console.log('[TrainingPush] diagnostic:', data);
+            document.dispatchEvent(new CustomEvent('ws-diagnostic', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('diagnostic', this._wsDiagnosticHandler);
+
+        this._wsMultimodalDataHandler = (function(data) {
+            console.log('[TrainingPush] multimodal_data:', data);
+            document.dispatchEvent(new CustomEvent('ws-multimodal-data', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('multimodal_data', this._wsMultimodalDataHandler);
     }
 
     _handleTrainingProgress(data) {
+        /* ZSFNO2-F004: 记录数据更新时间戳 */
+        this.lastUpdateTime = Date.now();
         /* FIX-F2-CRIT-6: 后端发送epoch/loss/progress/progress_pct,映射到前端字段 */
         if (data.epoch !== undefined) data.current_epoch = data.epoch;
         if (data.progress_pct !== undefined && data.progress === undefined) data.progress = data.progress_pct;
@@ -185,6 +249,8 @@ class TrainingPushManager {
     }
 
     _handleTrainingMetrics(data) {
+        /* ZSFNO2-F004: 记录数据更新时间戳 */
+        this.lastUpdateTime = Date.now();
         if (data.gradient_mean !== undefined && window.visualizationManager) {
             window.visualizationManager.updateGradientData(
                 data.gradient_mean,
@@ -266,8 +332,6 @@ class TrainingPushManager {
 
     _appendSpeedData(sps) {
         const now = Date.now();
-        this._speedSamples.push({ x: now, y: sps });
-        if (this._speedSamples.length > 100) this._speedSamples.shift();
         this.dataBuffers.speed.samplesPerSec.push({ x: now, y: sps });
         if (this.dataBuffers.speed.samplesPerSec.length > this.bufferSize) {
             this.dataBuffers.speed.samplesPerSec.shift();
@@ -472,15 +536,59 @@ class TrainingPushManager {
         if (window.SelfLnnWebSocket && typeof window.SelfLnnWebSocket.off === 'function') {
             if (this._wsTrainingProgressHandler) window.SelfLnnWebSocket.off('training_progress', this._wsTrainingProgressHandler);
             if (this._wsSystemStatusHandler) window.SelfLnnWebSocket.off('system_status', this._wsSystemStatusHandler);
-            if (this._wsTrainingLogHandler) window.SelfLnnWebSocket.off('training_log', this._wsTrainingLogHandler);
+            if (this._wsTrainingLogHandler) window.SelfLnnWebSocket.off('log', this._wsTrainingLogHandler);
             if (this._wsTrainingMetricsHandler) window.SelfLnnWebSocket.off('training_metrics', this._wsTrainingMetricsHandler);
             if (this._wsGpuStatusHandler) window.SelfLnnWebSocket.off('gpu_status', this._wsGpuStatusHandler);
+            /* P1-01: 清理新增的21个WS监听器 */
+            if (this._wsKnowledgeUpdateHandler) window.SelfLnnWebSocket.off('knowledge_update', this._wsKnowledgeUpdateHandler);
+            if (this._wsModelOutputHandler) window.SelfLnnWebSocket.off('model_output', this._wsModelOutputHandler);
+            if (this._wsErrorHandler) window.SelfLnnWebSocket.off('error', this._wsErrorHandler);
+            if (this._wsCustomHandler) window.SelfLnnWebSocket.off('custom', this._wsCustomHandler);
+            if (this._wsDialogueResponseHandler) window.SelfLnnWebSocket.off('dialogue_response', this._wsDialogueResponseHandler);
+            if (this._wsDialogueTokenHandler) window.SelfLnnWebSocket.off('dialogue_token', this._wsDialogueTokenHandler);
+            if (this._wsEvolutionEventHandler) window.SelfLnnWebSocket.off('evolution_event', this._wsEvolutionEventHandler);
+            if (this._wsSafetyAlertHandler) window.SelfLnnWebSocket.off('safety_alert', this._wsSafetyAlertHandler);
+            if (this._wsRobotStatusHandler) window.SelfLnnWebSocket.off('robot_status', this._wsRobotStatusHandler);
+            if (this._wsCognitionEventHandler) window.SelfLnnWebSocket.off('cognition_event', this._wsCognitionEventHandler);
+            if (this._wsDiagnosticHandler) window.SelfLnnWebSocket.off('diagnostic', this._wsDiagnosticHandler);
+            if (this._wsMultimodalDataHandler) window.SelfLnnWebSocket.off('multimodal_data', this._wsMultimodalDataHandler);
+            if (this._wsMemoryStatusHandler) window.SelfLnnWebSocket.off('memory_status', this._wsMemoryStatusHandler);
+            if (this._wsKnowledgeStatusHandler) window.SelfLnnWebSocket.off('knowledge_status', this._wsKnowledgeStatusHandler);
+            if (this._wsPredictionResultHandler) window.SelfLnnWebSocket.off('prediction_result', this._wsPredictionResultHandler);
+            if (this._wsConceptEvolutionHandler) window.SelfLnnWebSocket.off('concept_evolution', this._wsConceptEvolutionHandler);
+            if (this._wsStateActivationDataHandler) window.SelfLnnWebSocket.off('state_activation_data', this._wsStateActivationDataHandler);
+            if (this._wsWeightDistributionHandler) window.SelfLnnWebSocket.off('weight_distribution', this._wsWeightDistributionHandler);
+            if (this._wsActivationStatsHandler) window.SelfLnnWebSocket.off('activation_stats', this._wsActivationStatsHandler);
+            if (this._wsLnnStateHandler) window.SelfLnnWebSocket.off('lnn_state', this._wsLnnStateHandler);
+            if (this._wsMetacognitionStatusHandler) window.SelfLnnWebSocket.off('metacognition_status', this._wsMetacognitionStatusHandler);
         }
         this._wsTrainingProgressHandler = null;
         this._wsSystemStatusHandler = null;
         this._wsTrainingLogHandler = null;
         this._wsTrainingMetricsHandler = null;
         this._wsGpuStatusHandler = null;
+        /* P1-01: 清理新增的21个WS处理器引用 */
+        this._wsKnowledgeUpdateHandler = null;
+        this._wsModelOutputHandler = null;
+        this._wsErrorHandler = null;
+        this._wsCustomHandler = null;
+        this._wsDialogueResponseHandler = null;
+        this._wsDialogueTokenHandler = null;
+        this._wsEvolutionEventHandler = null;
+        this._wsSafetyAlertHandler = null;
+        this._wsRobotStatusHandler = null;
+        this._wsCognitionEventHandler = null;
+        this._wsDiagnosticHandler = null;
+        this._wsMultimodalDataHandler = null;
+        this._wsMemoryStatusHandler = null;
+        this._wsKnowledgeStatusHandler = null;
+        this._wsPredictionResultHandler = null;
+        this._wsConceptEvolutionHandler = null;
+        this._wsStateActivationDataHandler = null;
+        this._wsWeightDistributionHandler = null;
+        this._wsActivationStatsHandler = null;
+        this._wsLnnStateHandler = null;
+        this._wsMetacognitionStatusHandler = null;
         this.initialized = false;
     }
 }

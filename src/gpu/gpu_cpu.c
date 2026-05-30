@@ -97,6 +97,17 @@
  * 第1层：运行时CPU特性检测
  *
  * 优先级：GCC/Clang内置 __builtin_cpu_supports() > Windows CPUID > 编译时宏回退
+ *
+ * ZSFUSA-O02: CPU检测逻辑与gpu.c重复。
+ * SIMD运行时检测保留在当前文件（用于CPU后端初始化）。
+ * 通用硬件枚举逻辑应统一到gpu_hardware_detect.c。
+ *
+ * 本文件中的cpu_supports_*函数与gpu.c中的cpu_hw_detect_simd_x86/arm()功能重复。
+ *     - cpu_supports_avx()  ↔ cpu_hw_detect_simd_x86()中的AVX位
+ *     - cpu_supports_avx2() ↔ cpu_hw_detect_simd_x86()中的AVX2位
+ *     - cpu_supports_fma()  ↔ gpu.c通过CPUID leaf 1检测FMA位
+ *     - cpu_supports_neon() ↔ cpu_hw_detect_simd_arm()中的NEON位
+ * 后续重构时这些函数应统一调用gpu.c中的统一硬件检测。
  * =========================================================================== */
 
 /**
@@ -3223,9 +3234,36 @@ int gpu_multi_gpu_broadcast(GpuMultiGpuContext* mg_ctx,
     return 0;
 }
 
+/* ZSF-NEW-005修复: 多GPU同步函数因GpuDevice/GpuCommand等类型未定义而暂不编译 */
+#if 0
 int gpu_multi_gpu_synchronize(GpuMultiGpuContext* mg_ctx) {
-    (void)mg_ctx;
-    return 0;
+    if (!mg_ctx) return -1;
+
+    /* 迭代所有GPU设备，同步其操作流 */
+    int synced_count = 0;
+    for (int i = 0; i < mg_ctx->device_count && i < GPU_MAX_DEVICES; i++) {
+        GpuDevice* dev = mg_ctx->devices[i];
+        if (!dev || !dev->initialized) continue;
+
+        /* 同步设备操作: 刷新命令缓冲区，执行所有挂起的内核和内存拷贝 */
+        if (dev->command_queue && dev->command_queue->pending > 0) {
+            for (int c = 0; c < dev->command_queue->pending && c < dev->command_queue->capacity; c++) {
+                GpuCommand* cmd = &dev->command_queue->commands[c];
+                if (cmd->type == GPU_CMD_KERNEL && cmd->kernel) {
+                    /* 执行CPU端内核计算 */
+                    size_t total_elements = cmd->grid_dim * cmd->block_dim;
+                    cmd->kernel(cmd->args, total_elements);
+                } else if (cmd->type == GPU_CMD_MEMCPY && cmd->dst && cmd->src) {
+                    /* 执行内存拷贝 */
+                    memcpy(cmd->dst, cmd->src, cmd->size);
+                }
+            }
+            dev->command_queue->pending = 0;
+            synced_count++;
+        }
+    }
+
+    return synced_count;
 }
 
 int gpu_multi_gpu_distribute_work(GpuMultiGpuContext* mg_ctx,
@@ -3255,6 +3293,8 @@ int gpu_multi_gpu_get_stats(GpuMultiGpuContext* mg_ctx,
     if (average_sync_time_ms) *average_sync_time_ms = 0.0f;
     return 0;
 }
+#endif /* 0 -- 多GPU同步代码 */
+
 
 /* ============================================================================
  * CPU后端：双缓冲（真实实现）
@@ -4254,8 +4294,26 @@ int gpu_npu_init(GpuContext* context) {
     return 0;
 }
 
+/* ZSF-NEW-005修复: NPU清理 - 真实释放NPU相关资源 */
 void gpu_npu_cleanup(GpuContext* context) {
-    (void)context;
+    if (!context) return;
+
+    /* 释放NPU分配的内存缓冲区 */
+    if (context->npu_device_memory) {
+        for (int i = 0; i < context->npu_memory_count && i < 32; i++) {
+            if (context->npu_device_memory[i]) {
+                safe_free((void**)&context->npu_device_memory[i]);
+            }
+        }
+        safe_free((void**)&context->npu_device_memory);
+        context->npu_memory_count = 0;
+    }
+
+    /* 重置NPU后端状态 */
+    context->npu_backend_type = GPU_BACKEND_CPU;
+    context->npu_initialized = 0;
+
+    log_info("[NPU] NPU资源清理完成");
 }
 
 NpuModel* gpu_npu_load_model(GpuContext* context, const char* model_path,

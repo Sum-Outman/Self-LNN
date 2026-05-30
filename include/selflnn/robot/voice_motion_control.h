@@ -70,6 +70,14 @@ int voice_motion_set_safety(VoiceMotionControl* vmc, int require_confirmation);
 /* 多语言词典加载 */
 int voice_motion_load_dict(VoiceMotionControl* vmc, const char* dict_path);
 
+/* ZSFLYF-P1-002: LNN集成接口和动态词典管理 */
+struct LNN;
+int voice_motion_set_lnn(VoiceMotionControl* vmc, struct LNN* lnn);
+int voice_motion_add_command(VoiceMotionControl* vmc, const char* keyword,
+                              MotionCommandType cmd_type, float param1, float param2);
+int voice_motion_remove_command(VoiceMotionControl* vmc, const char* keyword);
+int voice_motion_list_commands(VoiceMotionControl* vmc, MotionCommand* buf, int max_count);
+
 #ifdef __cplusplus
 }
 #endif

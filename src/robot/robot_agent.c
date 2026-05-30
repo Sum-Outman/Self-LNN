@@ -2,6 +2,7 @@
 #include "selflnn/robot/sensor_pipeline.h"
 #include "selflnn/robot/kinematics.h"
 #include "selflnn/robot/hardware_interface.h"
+#include "selflnn/robot/voice_motion_control.h"
 #include "selflnn/reasoning/planning.h"
 #include "selflnn/learning/exploration_strategies.h" /* ZSFA-FIX-P0-007: 探索策略集成 */
 #include "selflnn/utils/memory_utils.h"
@@ -1121,5 +1122,51 @@ int robot_agent_closed_loop_step(RobotAgent* agent,
     }
 
     /* ZSFBUILD: action_vec不在RobotAgent中，动作已通过硬件接口输出 */
+    return 0;
+}
+
+/* 语音运动控制集成：将语音指令文本解析为机器人运动命令
+ * 使用 voice_motion_control 模块进行自然语言→运动指令映射 */
+int robot_agent_process_voice_motion(RobotAgent* agent, const char* voice_text, float* action_cmd, size_t action_dim) {
+    if (!agent || !voice_text || !action_cmd || action_dim < 3) return -1;
+    
+    /* 创建语音运动控制器 */
+    VoiceMotionControl* vmc = voice_motion_create();
+    if (!vmc) return -1;
+    
+    /* 解析语音文本为运动命令 */
+    MotionCommand cmd;
+    int ret = voice_motion_parse_text(vmc, voice_text, &cmd);
+    if (ret != 0) {
+        voice_motion_destroy(vmc);
+        return -1;
+    }
+    
+    /* 将运动命令转换为动作向量 */
+    memset(action_cmd, 0, action_dim * sizeof(float));
+    switch (cmd.type) {
+        case MOTION_CMD_MOVE:
+            action_cmd[0] = cmd.param1;  /* 前进速度 */
+            break;
+        case MOTION_CMD_TURN:
+            action_cmd[1] = cmd.param1;  /* 转向角速度 */
+            break;
+        case MOTION_CMD_STOP:
+            memset(action_cmd, 0, action_dim * sizeof(float));
+            break;
+        case MOTION_CMD_SPEED:
+            action_cmd[2] = cmd.param1;  /* 速度倍率 */
+            break;
+        case MOTION_CMD_GRIP:
+            action_cmd[3] = 1.0f;        /* 抓取 */
+            break;
+        case MOTION_CMD_RELEASE:
+            action_cmd[3] = -1.0f;       /* 释放 */
+            break;
+        default:
+            break;
+    }
+    
+    voice_motion_destroy(vmc);
     return 0;
 }

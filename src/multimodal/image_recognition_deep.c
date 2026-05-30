@@ -116,6 +116,73 @@ static void _cfc_ode_step(const float* in, int in_dim,
     for (int i = 0; i < h_dim; i++) h[i] = h[i] * decay + (1.0f - decay) * gate[i];
 }
 
+/* P1-011: CfC ODE步反向传播 —— 计算参数梯度和输入/状态梯度 */
+static void _cfc_ode_step_backward(const float* in, int in_dim,
+                                    const float* W_gx, const float* W_ax,
+                                    const float* W_gh, const float* W_ah,
+                                    const float* b_g, const float* b_a,
+                                    float* dW_gx, float* dW_ax,
+                                    float* dW_gh, float* dW_ah,
+                                    float* db_g, float* db_a,
+                                    const float* h, const float* dL_dh_new,
+                                    float* dL_dh, float* dL_din,
+                                    int h_dim, float tau, float dt) {
+    float pre_gate[256], pre_act[256], gate[256], act[256];
+    float t1[256], t2[256];
+    memset(pre_gate, 0, h_dim * sizeof(float));
+    memset(pre_act, 0, h_dim * sizeof(float));
+    _mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
+    _mat_vec_mul(W_gh, h, t2, h_dim, h_dim);
+    for (int i = 0; i < h_dim; i++) pre_gate[i] = t1[i] + t2[i] + b_g[i];
+    memcpy(gate, pre_gate, h_dim * sizeof(float));
+    _vec_sigmoid(gate, h_dim);
+    _mat_vec_mul(W_ax, in, t1, h_dim, in_dim);
+    _mat_vec_mul(W_ah, h, t2, h_dim, h_dim);
+    for (int i = 0; i < h_dim; i++) pre_act[i] = t1[i] + t2[i] + b_a[i];
+    memcpy(act, pre_act, h_dim * sizeof(float));
+    _vec_tanh(act, h_dim);
+    float decay = expf(-dt / tau);
+    float d_driver[256], d_gate[256], d_act[256];
+    for (int i = 0; i < h_dim; i++) {
+        d_driver[i] = (1.0f - decay) * dL_dh_new[i];
+        d_gate[i] = d_driver[i] * act[i];
+        d_act[i] = d_driver[i] * gate[i];
+    }
+    float d_pre_gate[256], d_pre_act[256];
+    for (int i = 0; i < h_dim; i++) {
+        d_pre_gate[i] = d_gate[i] * gate[i] * (1.0f - gate[i]);
+        d_pre_act[i] = d_act[i] * (1.0f - act[i] * act[i]);
+    }
+    for (int i = 0; i < h_dim; i++) {
+        for (int j = 0; j < in_dim; j++) {
+            dW_gx[i * in_dim + j] += d_pre_gate[i] * in[j];
+            dW_ax[i * in_dim + j] += d_pre_act[i] * in[j];
+        }
+        for (int j = 0; j < h_dim; j++) {
+            dW_gh[i * h_dim + j] += d_pre_gate[i] * h[j];
+            dW_ah[i * h_dim + j] += d_pre_act[i] * h[j];
+        }
+        db_g[i] += d_pre_gate[i];
+        db_a[i] += d_pre_act[i];
+    }
+    if (dL_din) {
+        for (int j = 0; j < in_dim; j++) {
+            float sum = 0.0f;
+            for (int i = 0; i < h_dim; i++)
+                sum += W_gx[i * in_dim + j] * d_pre_gate[i] + W_ax[i * in_dim + j] * d_pre_act[i];
+            dL_din[j] = sum;
+        }
+    }
+    if (dL_dh) {
+        for (int i = 0; i < h_dim; i++) {
+            float sum = 0.0f;
+            for (int k = 0; k < h_dim; k++)
+                sum += W_gh[k * h_dim + i] * d_pre_gate[k] + W_ah[k * h_dim + i] * d_pre_act[k];
+            dL_dh[i] = decay * dL_dh_new[i] + sum;
+        }
+    }
+}
+
 static void _patch_cfc_encode(const float* img, int w, int h, int ch,
                                int px, int py, int pw, int ph,
                                const float* W_gx, const float* W_ax,
@@ -372,6 +439,11 @@ int ird_fine_train(IRDFineClassifier* clf, const float* im, const int* lb,
                     int n, int w, int h, int ch, int ep, float lr) {
     if (!clf || !im || !lb || n <= 0) return -1;
     int hd = clf->cfg.feature_dim, nf = clf->cfg.num_fine_categories;
+    float tau = clf->cfg.cfc_time_constant, dt = clf->cfg.cfc_delta_t;
+    int ps = clf->cfg.patch_size, st = ps / 2;
+    int cols = (w - ps) / st + 1, rows = (h - ps) / st + 1;
+    if (cols < 1) cols = 1; if (rows < 1) rows = 1;
+    int max_patches = cols * rows; if (max_patches > 256) max_patches = 256;
     for (int e = 0; e < ep; e++) {
         float tl = 0.0f;
         for (int s = 0; s < n; s++) {
@@ -385,9 +457,201 @@ int ird_fine_train(IRDFineClassifier* clf, const float* im, const int* lb,
             tl += -logf(log[la] + 1e-10f);
             float grad[256];
             for (int i = 0; i < nf; i++) grad[i] = log[i] - (i == la ? 1.0f : 0.0f);
+
+            /* 分类头更新: W_fine, b_fine */
             for (int i = 0; i < nf; i++)
                 for (int j = 0; j < hd; j++) clf->W_fine[i * hd + j] -= lr * grad[i] * r.bilinear_feature[j];
             for (int i = 0; i < nf; i++) clf->b_fine[i] -= lr * grad[i];
+
+            /* P1-011: CfC网络参数反向传播 */
+            float d_bf[256] = {0};
+            for (int j = 0; j < hd; j++)
+                for (int k = 0; k < nf; k++) d_bf[j] += clf->W_fine[k * hd + j] * grad[k];
+
+            /* 重新提取patches并记录隐藏状态用于反向传播 */
+            float* hidden_states = (float*)safe_calloc((size_t)max_patches * hd, sizeof(float));
+            float* patch_h_states = (float*)safe_calloc((size_t)max_patches * PCFC_HD, sizeof(float));
+            if (!hidden_states || !patch_h_states) {
+                safe_free((void**)&hidden_states);
+                safe_free((void**)&patch_h_states);
+                continue;
+            }
+            const float* img = &im[s * w * h * ch];
+            int pi = 0;
+            for (int ry = 0; ry < rows && pi < max_patches; ry++) {
+                for (int rx = 0; rx < cols && pi < max_patches; rx++) {
+                    float* patch_h = &patch_h_states[pi * PCFC_HD];
+                    float* hidden = &hidden_states[pi * hd];
+                    memset(patch_h, 0, PCFC_HD * sizeof(float));
+                    memset(hidden, 0, hd * sizeof(float));
+                    int in_dim = (ch < PCFC_MAX_CH) ? ch : PCFC_MAX_CH;
+                    float inp[PCFC_MAX_CH];
+                    for (int dy = 0; dy < ps; dy++) {
+                        for (int dx = 0; dx < ps; dx++) {
+                            int ix = rx * st + dx, iy = ry * st + dy;
+                            if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
+                                for (int c = 0; c < in_dim; c++)
+                                    inp[c] = img[(iy * w + ix) * ch + c];
+                            } else {
+                                memset(inp, 0, in_dim * sizeof(float));
+                            }
+                            _cfc_ode_step(inp, in_dim, clf->pW_gx, clf->pW_ax,
+                                          clf->pW_gh, clf->pW_ah, clf->pb_g, clf->pb_a,
+                                          patch_h, PCFC_HD, tau, dt);
+                        }
+                    }
+                    _cfc_ode_step(patch_h, PCFC_HD, clf->W_gx_p, clf->W_ax_p,
+                                  clf->W_gh_p, clf->W_ah_p, clf->b_g_p, clf->b_a_p,
+                                  hidden, hd, tau, dt);
+                    pi++;
+                }
+            }
+            int np = pi;
+
+            /* 计算显著性权重 */
+            float sal[256];
+            for (int i = 0; i < np; i++) sal[i] = _vec_norm(&hidden_states[i * hd], hd);
+            float mx_sal = 0.0f;
+            for (int i = 0; i < np; i++) if (sal[i] > mx_sal) mx_sal = sal[i];
+            float tw = 0.0f;
+            for (int i = 0; i < np; i++) {
+                if (mx_sal > 1e-6f) sal[i] /= mx_sal;
+                if (sal[i] < clf->cfg.discriminative_threshold) sal[i] = 0.0f;
+                tw += sal[i];
+            }
+
+            /* 梯度从bilinear_feature → global_feature → patches */
+            float d_gf[256] = {0};
+            float d_lf[256] = {0};
+            if (clf->cfg.enable_bilinear_pooling) {
+                float pg[256], pl[256];
+                memset(pg, 0, hd * sizeof(float)); memset(pl, 0, hd * sizeof(float));
+                _mat_vec_mul(clf->bilin_W, r.global_feature, pg, hd, hd);
+                _mat_vec_mul(clf->bilin_W, r.local_feature, pl, hd, hd);
+                float bl_raw[256], bl_sqrt[256], d_bl[256];
+                for (int i = 0; i < hd; i++) {
+                    bl_raw[i] = pg[i] * pl[i];
+                    bl_sqrt[i] = copysignf(sqrtf(fabsf(bl_raw[i]) + 1e-8f), bl_raw[i]);
+                }
+                float norm = _vec_norm(bl_sqrt, hd);
+                for (int i = 0; i < hd; i++) {
+                    float d_sqrt = 0.5f / (sqrtf(fabsf(bl_raw[i]) + 1e-8f) + 1e-8f);
+                    float scale = (norm > 1e-10f) ? (1.0f / norm) : 1.0f;
+                    float sum = 0.0f;
+                    for (int k = 0; k < hd; k++)
+                        sum += d_bf[k] * bl_sqrt[k];
+                    d_bl[i] = d_bf[i] * scale - bl_sqrt[i] * scale * scale * scale * sum * d_sqrt;
+                    d_bl[i] *= d_sqrt * copysignf(1.0f, bl_raw[i]);
+                }
+                for (int j = 0; j < hd; j++) {
+                    for (int i = 0; i < hd; i++) {
+                        d_gf[j] += clf->bilin_W[i * hd + j] * (d_bl[i] * pl[i]);
+                        d_lf[j] += clf->bilin_W[i * hd + j] * (d_bl[i] * pg[i]);
+                    }
+                }
+            } else {
+                memcpy(d_gf, d_bf, hd * sizeof(float));
+            }
+            if (tw > 1e-10f) {
+                for (int j = 0; j < hd; j++) d_gf[j] /= tw;
+            }
+
+            /* CfC参数梯度累积缓冲区 */
+            float dW_gx_p[256 * 32], dW_ax_p[256 * 32], dW_gh_p[256 * 256], dW_ah_p[256 * 256];
+            float db_g_p[256], db_a_p[256];
+            float dpW_gx[PCFC_HD * PCFC_MAX_CH], dpW_ax[PCFC_HD * PCFC_MAX_CH];
+            float dpW_gh[PCFC_HD * PCFC_HD], dpW_ah[PCFC_HD * PCFC_HD];
+            float dpb_g[PCFC_HD], dpb_a[PCFC_HD];
+            memset(dW_gx_p, 0, sizeof(dW_gx_p)); memset(dW_ax_p, 0, sizeof(dW_ax_p));
+            memset(dW_gh_p, 0, sizeof(dW_gh_p)); memset(dW_ah_p, 0, sizeof(dW_ah_p));
+            memset(db_g_p, 0, sizeof(db_g_p)); memset(db_a_p, 0, sizeof(db_a_p));
+            memset(dpW_gx, 0, sizeof(dpW_gx)); memset(dpW_ax, 0, sizeof(dpW_ax));
+            memset(dpW_gh, 0, sizeof(dpW_gh)); memset(dpW_ah, 0, sizeof(dpW_ah));
+            memset(dpb_g, 0, sizeof(dpb_g)); memset(dpb_a, 0, sizeof(dpb_a));
+
+            /* 对每个patch反向传播 */
+            for (int p = 0; p < np; p++) {
+                float wgt = (tw > 1e-10f) ? sal[p] / tw : (1.0f / (float)np);
+                float d_patch[256] = {0};
+                for (int j = 0; j < hd; j++) d_patch[j] = d_gf[j] * wgt;
+
+                /* 主CfC反向传播: hidden = CfC(patch_h) */
+                float d_patch_h[PCFC_HD] = {0};
+                _cfc_ode_step_backward(&patch_h_states[p * PCFC_HD], PCFC_HD,
+                                       clf->W_gx_p, clf->W_ax_p,
+                                       clf->W_gh_p, clf->W_ah_p,
+                                       clf->b_g_p, clf->b_a_p,
+                                       dW_gx_p, dW_ax_p, dW_gh_p, dW_ah_p,
+                                       db_g_p, db_a_p,
+                                       &hidden_states[p * hd], d_patch,
+                                       NULL, d_patch_h,
+                                       hd, tau, dt);
+
+                /* 迷你CfC反向传播: 对每个像素 step 反向传播 */
+                int in_dim = (ch < PCFC_MAX_CH) ? ch : PCFC_MAX_CH;
+                float cur_h[PCFC_HD];
+                memset(cur_h, 0, PCFC_HD * sizeof(float));
+                /* 收集所有像素的输入用于CfC步反向传播 */
+                float pixel_inps[256][PCFC_MAX_CH];
+                int pixel_cnt = 0;
+                for (int dy = 0; dy < ps; dy++) {
+                    for (int dx = 0; dx < ps; dx++) {
+                        int ix = (p % cols) * st + dx, iy = (p / cols) * st + dy;
+                        if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
+                            for (int c = 0; c < in_dim; c++)
+                                pixel_inps[pixel_cnt][c] = img[(iy * w + ix) * ch + c];
+                        } else {
+                            memset(pixel_inps[pixel_cnt], 0, in_dim * sizeof(float));
+                        }
+                        pixel_cnt++;
+                    }
+                }
+                float d_in_accum[PCFC_MAX_CH] = {0};
+                /* 从最后一个像素反向传播到第一个 */
+                for (int pi_step = pixel_cnt - 1; pi_step >= 0; pi_step--) {
+                    float d_h_cur[PCFC_HD] = {0};
+                    for (int j = 0; j < PCFC_HD; j++) d_h_cur[j] = d_patch_h[j];
+                    _cfc_ode_step_backward(pixel_inps[pi_step], in_dim,
+                                           clf->pW_gx, clf->pW_ax,
+                                           clf->pW_gh, clf->pW_ah,
+                                           clf->pb_g, clf->pb_a,
+                                           dpW_gx, dpW_ax, dpW_gh, dpW_ah,
+                                           dpb_g, dpb_a,
+                                           cur_h, d_h_cur,
+                                           cur_h, d_in_accum,
+                                           PCFC_HD, tau, dt);
+                }
+            }
+
+            /* 应用CfC参数更新 */
+            float cfc_lr = lr * 0.1f;
+            for (int i = 0; i < (int)(256 * 32); i++) {
+                clf->W_gx_p[i] -= cfc_lr * dW_gx_p[i];
+                clf->W_ax_p[i] -= cfc_lr * dW_ax_p[i];
+            }
+            for (int i = 0; i < (int)(256 * 256); i++) {
+                clf->W_gh_p[i] -= cfc_lr * dW_gh_p[i];
+                clf->W_ah_p[i] -= cfc_lr * dW_ah_p[i];
+            }
+            for (int i = 0; i < 256; i++) {
+                clf->b_g_p[i] -= cfc_lr * db_g_p[i];
+                clf->b_a_p[i] -= cfc_lr * db_a_p[i];
+            }
+            for (int i = 0; i < (int)(PCFC_HD * PCFC_MAX_CH); i++) {
+                clf->pW_gx[i] -= cfc_lr * dpW_gx[i];
+                clf->pW_ax[i] -= cfc_lr * dpW_ax[i];
+            }
+            for (int i = 0; i < (int)(PCFC_HD * PCFC_HD); i++) {
+                clf->pW_gh[i] -= cfc_lr * dpW_gh[i];
+                clf->pW_ah[i] -= cfc_lr * dpW_ah[i];
+            }
+            for (int i = 0; i < PCFC_HD; i++) {
+                clf->pb_g[i] -= cfc_lr * dpb_g[i];
+                clf->pb_a[i] -= cfc_lr * dpb_a[i];
+            }
+
+            safe_free((void**)&hidden_states);
+            safe_free((void**)&patch_h_states);
         }
         if (tl / (float)n < 0.01f) break;
     }
@@ -1507,6 +1771,8 @@ int ird_deep_manager_recognize(IRDDeepManager* manager, const float* image,
     memset(result, 0, sizeof(IRDDeepRecognitionResult));
     result->primary_mode = manager->current_mode;
 
+    /* H-014修复: 当分类器为NULL时，返回错误码并输出日志，
+     * 不再静默返回空结果（此前无分类器时结果全零、无任何反馈） */
     switch (manager->current_mode) {
     case IRD_MODE_FINE_GRAINED:
         if (manager->fine_classifier) {
@@ -1515,6 +1781,9 @@ int ird_deep_manager_recognize(IRDDeepManager* manager, const float* image,
             result->best_class_id = result->fine_result.fine_category_id;
             result->primary_confidence = result->fine_result.fine_confidence;
             result->is_unknown = 0;
+        } else {
+            fprintf(stderr, "[图像识别错误] 细粒度分类器未初始化，无法执行识别！\n");
+            return -1;
         }
         break;
     case IRD_MODE_OPEN_SET:
@@ -1525,6 +1794,9 @@ int ird_deep_manager_recognize(IRDDeepManager* manager, const float* image,
             result->best_class_id = osp->assigned_class;
             result->primary_confidence = osp->confidence;
             result->is_unknown = osp->is_unknown;
+        } else {
+            fprintf(stderr, "[图像识别错误] 开放集识别器未初始化，无法执行识别！\n");
+            return -1;
         }
         break;
     case IRD_MODE_ZERO_SHOT:
@@ -1534,6 +1806,9 @@ int ird_deep_manager_recognize(IRDDeepManager* manager, const float* image,
             result->best_class_id = result->zero_shot_result.class_id;
             result->primary_confidence = result->zero_shot_result.confidence;
             result->is_unknown = 0;
+        } else {
+            fprintf(stderr, "[图像识别错误] 零样本识别器未初始化，无法执行识别！\n");
+            return -1;
         }
         break;
     case IRD_MODE_FEW_SHOT:
@@ -1543,6 +1818,9 @@ int ird_deep_manager_recognize(IRDDeepManager* manager, const float* image,
             result->best_class_id = result->few_shot_result.class_id;
             result->primary_confidence = result->few_shot_result.confidence;
             result->is_unknown = 0;
+        } else {
+            fprintf(stderr, "[图像识别错误] 少样本识别器未初始化，无法执行识别！\n");
+            return -1;
         }
         break;
     default:

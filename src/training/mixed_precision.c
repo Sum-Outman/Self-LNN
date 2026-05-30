@@ -16,6 +16,11 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/graph_optimization.h"
 #include "selflnn/gpu/gpu.h"
+#include "selflnn/utils/logging.h"         /* ZSFUSA: log_debug/log_info/LOG_INFO宏 */
+/* ZSFUSA: LOG_INFO在npu_internal.h中定义，此处直接补定义 */
+#ifndef LOG_INFO
+#define LOG_INFO(...) log_info(__VA_ARGS__)
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -149,6 +154,55 @@ static void fp16_to_fp32_batch_f16c(const fp16_t* src, float* dst, size_t count)
     }
 #endif
 }
+
+/* ZSFUSA-V02: SSE2批量FP32→FP16转换加速 */
+#ifdef __SSE2__
+static void fp32_to_fp16_batch_sse2(const float* src, uint16_t* dst, size_t count) {
+    size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        __m128 f32 = _mm_loadu_ps(src + i);
+        /* 提取符号位 */
+        __m128i sign = _mm_and_si128(_mm_castps_si128(f32), _mm_set1_epi32(0x80000000));
+        sign = _mm_srli_epi32(sign, 16);
+        /* 提取指数位 */
+        __m128i exp = _mm_and_si128(_mm_castps_si128(f32), _mm_set1_epi32(0x7F800000));
+        __m128i exp_shifted = _mm_srli_epi32(exp, 13);
+        /* 提取尾数位 */
+        __m128i mant = _mm_and_si128(_mm_castps_si128(f32), _mm_set1_epi32(0x007FE000));
+        mant = _mm_srli_epi32(mant, 13);
+        /* 组合 */
+        __m128i h = _mm_or_si128(_mm_or_si128(sign, exp_shifted), mant);
+        /* 溢出处理 */
+        __m128i infinity = _mm_set1_epi32(0x7C00);
+        __m128i cmp = _mm_cmpgt_epi32(exp, _mm_set1_epi32(0x47800000));
+        h = _mm_or_si128(_mm_and_si128(cmp, infinity), _mm_andnot_si128(cmp, h));
+        /* 打包为uint16 */
+        _mm_storeu_si128((__m128i*)(dst + i), _mm_packus_epi32(h, h));
+    }
+    for (; i < count; i++) {
+        uint32_t bits = *(const uint32_t*)(src + i);
+        uint32_t sign = (bits >> 16) & 0x8000;
+        int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
+        uint32_t mant = (bits >> 13) & 0x3FF;
+        if (exp <= 0) { dst[i] = (uint16_t)(sign); }
+        else if (exp >= 31) { dst[i] = (uint16_t)(sign | 0x7C00); }
+        else { dst[i] = (uint16_t)(sign | (exp << 10) | mant); }
+    }
+}
+#else
+/* ZSFUSA-V02: 无SSE2时标量回退（内联实现避免前向引用问题） */
+static void fp32_to_fp16_batch_sse2(const float* src, uint16_t* dst, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        uint32_t bits = *(const uint32_t*)(src + i);
+        uint32_t sign = (bits >> 16) & 0x8000;
+        int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
+        uint32_t mant = (bits >> 13) & 0x3FF;
+        if (exp <= 0) { dst[i] = (uint16_t)(sign); }
+        else if (exp >= 31) { dst[i] = (uint16_t)(sign | 0x7C00); }
+        else { dst[i] = (uint16_t)(sign | (exp << 10) | mant); }
+    }
+}
+#endif
 
 /* ============================================================================
  * 内部数据结构
@@ -479,7 +533,8 @@ static int convert_fp32_to_fp16(const float* src, fp16_t* dst, size_t count) {
     if (cpu_has_f16c()) {
         fp32_to_fp16_batch_f16c(src, dst, count);
     } else {
-        simd_convert_fp32_to_fp16_batch(src, dst, count);
+        /* ZSFUSA-V02: F16C不可用时使用SSE2批量转换（三级回退: SSE2→标量） */
+        fp32_to_fp16_batch_sse2(src, dst, count);
     }
     return 0;
 }
@@ -639,8 +694,14 @@ int mixed_precision_bf16_forward(NeuralNetwork* network, const bf16_t* input,
 }
 
 int mixed_precision_bf16_hardware_support(void) {
+    /* ZSFLNN-M-009修复: 添加静态缓存避免每次调用都重新检测硬件 */
+    static int cached_result = -1;
+    static int cache_initialized = 0;
+    if (cache_initialized) return cached_result;
     HardwareFP16Support hw = mixed_precision_detect_hardware_support();
-    return hw.has_bfloat16 ? 1 : 0;
+    cached_result = hw.has_bfloat16 ? 1 : 0;
+    cache_initialized = 1;
+    return cached_result;
 }
 
 /* ============================================================================
@@ -1233,11 +1294,19 @@ static int check_fp16_stability(fp16_t value, PrecisionStatistics* stats) {
  * 回退到高性能CPU SIMD实现（SSE/AVX/F16C/NEON均已实现）。 */
 
 /* ZSFWS修复 P2-002: 重命名消除歧义，实际使用CPU SIMD加速而非GPU */
+/* ZSFUSA-V02: GPU FP16转换当前使用CPU SIMD路径。
+ * CUDA Runtime不提供原生cudaConvertFP32ToFP16 API。
+ * 当前通过CPU SIMD(SSE/AVX)实现，性能优于标量但有别于GPU原生。
+ * 后续版本将在CUDA kernel中实现GPU原生半精度转换。 */
 static int simd_accelerated_fp32_to_fp16(const float* src, void* dst, size_t count) {
     if (!src || !dst || count == 0) return -1;
     return convert_fp32_to_fp16(src, (fp16_t*)dst, count);
 }
 
+/* ZSFUSA-V02: GPU FP16转换当前使用CPU SIMD路径。
+ * CUDA Runtime不提供原生cudaConvertFP16ToFP32 API。
+ * 当前通过CPU SIMD(SSE/AVX)实现，性能优于标量但有别于GPU原生。
+ * 后续版本将在CUDA kernel中实现GPU原生半精度转换。 */
 static int simd_accelerated_fp16_to_fp32(const void* src, float* dst, size_t count) {
     if (!src || !dst || count == 0) return -1;
     return convert_fp16_to_fp32((const fp16_t*)src, dst, count);
@@ -2871,6 +2940,12 @@ int mixed_precision_disable(Trainer* trainer) {
  * @brief 创建FP16版本的神经网络
  */
 NeuralNetwork* mixed_precision_create_fp16_network(const NeuralNetwork* network) {
+    /* ZSFUSA-V03: FP16网络当前通过FP32↔FP16往返模拟。
+     * CfCNetwork结构体级别改造需要：
+     * 1. 所有权重/激活Buffer改为半精度存储
+     * 2. 前向/反向传播增加半精度kernel路径
+     * 3. 梯度聚合改用FP16→FP32混合累加
+     * 当前实现保证了正确的数值结果，但无内存节省。 */
     if (!network) {
         return NULL;
     }

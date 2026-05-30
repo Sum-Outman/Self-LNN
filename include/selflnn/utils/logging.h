@@ -110,6 +110,7 @@ SELFLNN_API void logging_log(LogLevel level, const char* file, int line, const c
 #define log_warn(...)     log_warning(__VA_ARGS__)  /* 别名：跨平台兼容 */
 #define log_error(...)    logging_log(LOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #define log_fatal(...)    logging_log(LOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#define LOG_INFO(...)     log_info(__VA_ARGS__)   /* 大写别名：跨模块兼容 */
 
 // 条件日志宏
 #define log_if(cond, level, ...) \

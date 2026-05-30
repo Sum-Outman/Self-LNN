@@ -6212,6 +6212,36 @@ float self_cognition_assess_model_accuracy(SelfCognitionSystem* system) {
     return assess_model_accuracy_internal(system);
 }
 
+/* ZSFNO1-P0-002修复: self_cognition.h声明为self_cognition_assess_accuracy(SelfCognitionSystem*, float*)，
+ * 但实际实现为self_cognition_assess_model_accuracy(SelfCognitionSystem*)返回float。
+ * 函数签名不匹配导致链接失败。
+ * 修复方案: 添加兼容性包装函数，将float返回值写入accuracy指针，返回0表示成功。 */
+int self_cognition_assess_accuracy(SelfCognitionSystem* system, float* accuracy) {
+    if (!system || !accuracy) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "评估自我认知准确性：参数为空");
+        return -1;
+    }
+    *accuracy = self_cognition_assess_model_accuracy(system);
+    return 0;
+}
+
+/* ZSFNO1-P0-003修复: self_model_state_free在self_cognition.h中声明但从未实现。
+ * SelfModelState结构体包含动态分配的encoded_state数组，需正确释放。
+ * 添加完整实现以释放SelfModelState中所有动态分配的内存。 */
+void self_model_state_free(SelfModelState* state) {
+    if (!state) return;
+    
+    /* 释放编码后的状态向量 */
+    if (state->encoded_state) {
+        free(state->encoded_state);
+        state->encoded_state = NULL;
+    }
+    
+    /* 清零结构体内容，防止悬空指针被重用 */
+    memset(state, 0, sizeof(SelfModelState));
+}
+
 /**
  * @brief 获取深度自我认知系统统计信息
  */

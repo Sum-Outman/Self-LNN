@@ -26,7 +26,11 @@ struct GazeboBridge {
     GazeboConnectionState state;
     FILE* process_in;
     FILE* process_out;
+    /* ZSFLYF-P2-016修复: popen模式下process_handle不可用(Win32 HANDLE/POSIX pid_t)，
+     * 改用pclose等待+WIFEXITED/WEXITSTATUS检测进程退出状态。
+     * 健康检查通过feof/ferror检测管道断开，关闭时通过pclose获取退出码。 */
     void* process_handle;
+    int process_pid;             /* popen子进程PID(用于kill信号) */
     double sim_time_sec;
     double step_size;
     char world_name[256];     /* F-003: 世界名称(用于gz service调用) */

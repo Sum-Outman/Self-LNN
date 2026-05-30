@@ -85,7 +85,18 @@ struct UnifiedLNNState {
     float  cross_modal_gates[UNIFIED_LNN_MAX_MODALITIES][UNIFIED_LNN_MAX_MODALITIES + 1];
     int    modality_isolation_enabled;     /* 是否启用模态隔离 */
     float  gate_regularization_strength;   /* L1正则强度（默认0.001） */
+
+    /* ZSFSSS-TRA001: 梯度冲突监控——追踪梯度方向一致性
+     * 用于检测多模态训练中的梯度振荡和方向冲突 */
+    float*  prev_gradient_buffer;          /* 上一批次的输出投影梯度 [output_dim * state_dim] */
+    size_t  prev_gradient_size;            /* 缓冲区大小 */
+    float   gradient_cosine_similarity;    /* 连续批次间梯度余弦相似度 (最近EMA) */
+    int     gradient_oscillation_count;    /* 连续振荡计数 */
 };
+
+/* ZSFSSS-TRA001: 梯度冲突监控阈值 */
+#define GRADIENT_OSCILLATION_THRESHOLD 3
+#define GRADIENT_COSINE_WINDOW 0.7f       /* 余弦相似度低于此值视为方向冲突 */
 
 static float uniform_random(void) {
     /* 使用加密安全随机数生成器替代rand()，确保权重初始化安全性 */
@@ -381,6 +392,12 @@ UnifiedLNNState* unified_lnn_state_create(const UnifiedLNNStateConfig* config) {
     state->gate_regularization_strength = 0.001f;
     init_cross_modal_gates(state);
 
+    /* ZSFSSS-TRA001: 初始化梯度冲突监控 */
+    state->prev_gradient_buffer = NULL;
+    state->prev_gradient_size = 0;
+    state->gradient_cosine_similarity = 1.0f;
+    state->gradient_oscillation_count = 0;
+
     MUTEX_INIT(&state->state_lock);
 
     return state;
@@ -399,6 +416,9 @@ void unified_lnn_state_free(UnifiedLNNState* state) {
     safe_free((void**)&state->output_bias);
     safe_free((void**)&state->combined_input_buffer);
     safe_free((void**)&state->hidden_state_buffer);
+    /* ZSFSSS-TRA001: 释放梯度冲突监控缓冲区 */
+    safe_free((void**)&state->prev_gradient_buffer);
+    state->prev_gradient_size = 0;
     MUTEX_DESTROY(&state->state_lock);
     safe_free((void**)&state);
 }
@@ -598,6 +618,12 @@ int unified_lnn_state_reset(UnifiedLNNState* state) {
     }
     state->step_count = 0;
     state->average_activation = 0.0f;
+    /* ZSFSSS-TRA001: 重置梯度冲突监控状态 */
+    if (state->prev_gradient_buffer) {
+        memset(state->prev_gradient_buffer, 0, state->prev_gradient_size * sizeof(float));
+    }
+    state->gradient_cosine_similarity = 1.0f;
+    state->gradient_oscillation_count = 0;
     return 0;
 }
 
@@ -683,6 +709,67 @@ int unified_lnn_state_train_step(UnifiedLNNState* state,
         float dL_dout[UNIFIED_LNN_DEFAULT_OUTPUT_DIM];
         for (size_t i = 0; i < tgt_size; i++) {
             dL_dout[i] = 2.0f * (temp_output[i] - target_output[i]) * inv_n;
+        }
+
+        /* ZSFSSS-TRA001: 梯度方向冲突检测与自适应调和
+         * 计算当前输出投影梯度与上轮梯度的余弦相似度，
+         * 若连续多轮梯度方向剧烈变化（余弦相似度 < 0.7），
+         * 说明多模态梯度方向存在冲突，自动降低学习率以减少振荡。 */
+        {
+            size_t grad_total = out_dim * state_dim;
+            if (grad_total > state->prev_gradient_size && state->prev_gradient_buffer) {
+                safe_free((void**)&state->prev_gradient_buffer);
+                state->prev_gradient_size = 0;
+            }
+            if (!state->prev_gradient_buffer && grad_total > 0) {
+                state->prev_gradient_buffer = (float*)safe_calloc(grad_total, sizeof(float));
+                state->prev_gradient_size = grad_total;
+            }
+            if (state->prev_gradient_buffer && state->prev_gradient_size >= grad_total) {
+                /* 计算输出投影梯度：grad[i*state_dim + j] = dL_dout[i] * h[j] */
+                float dot_product = 0.0f, norm_curr = 0.0f, norm_prev = 0.0f;
+                for (size_t i = 0; i < out_dim && i < tgt_size; i++) {
+                    for (size_t j = 0; j < state_dim; j++) {
+                        float grad_ij = dL_dout[i] * h[j];
+                        float prev_grad_ij = state->prev_gradient_buffer[i * state_dim + j];
+                        dot_product += grad_ij * prev_grad_ij;
+                        norm_curr += grad_ij * grad_ij;
+                        norm_prev += prev_grad_ij * prev_grad_ij;
+                        state->prev_gradient_buffer[i * state_dim + j] = grad_ij;
+                    }
+                }
+                float cos_sim = 0.0f;
+                float norm_prod = sqrtf(norm_curr) * sqrtf(norm_prev);
+                if (norm_prod > 1e-10f) {
+                    cos_sim = dot_product / norm_prod;
+                }
+                /* EMA平滑余弦相似度 */
+                state->gradient_cosine_similarity = 0.9f * state->gradient_cosine_similarity + 0.1f * cos_sim;
+
+                if (cos_sim < GRADIENT_COSINE_WINDOW) {
+                    state->gradient_oscillation_count++;
+                    if (state->gradient_oscillation_count >= GRADIENT_OSCILLATION_THRESHOLD) {
+                        /* 自适应降低学习率以调和多模态梯度冲突 */
+                        float adjusted_lr = lr * 0.5f;
+                        if (adjusted_lr > 1e-6f) {
+                            lr = adjusted_lr;
+                            if (state->gradient_oscillation_count <= 6) {
+                                fprintf(stderr,
+                                    "[梯度监控] 警告: 连续%d步梯度方向冲突 (余弦=%.3f),"
+                                    " 自动降低学习率至%.6f\n",
+                                    state->gradient_oscillation_count, cos_sim, lr);
+                            }
+                        }
+                    }
+                } else {
+                    state->gradient_oscillation_count = 0;
+                    /* 梯度方向稳定时缓慢恢复学习率 */
+                    if (lr < state->config.learning_rate && state->gradient_cosine_similarity > 0.9f) {
+                        lr = lr * 1.05f;
+                        if (lr > state->config.learning_rate) lr = state->config.learning_rate;
+                    }
+                }
+            }
         }
 
         /* 步骤2: 更新输出投影权重（线性层 SGD）
@@ -949,4 +1036,108 @@ int unified_lnn_state_suggest_next_modality(UnifiedLNNState* state) {
     if (!state || !state->is_initialized) return -1;
     if (!state->modality_isolation_enabled) return -1;
     return (int)(state->step_count % UNIFIED_LNN_MAX_MODALITIES);
+}
+
+/* ZSF-012: 多模态贡献度监控
+ * 计算各模态对LNN融合状态的贡献比例，用于检测某一模态是否
+ * 过度主导（可能造成数据污染）或某模态信号过弱（可能被淹没）。
+ * 在模态隔离模式下，检查各模态私有区能量占融合区的比例。
+ * 若某模态贡献占比超过70%连续10步，则在日志中输出警告。
+ * 返回贡献度最高的模态索引，-1表示未启用监控。 */
+int unified_lnn_state_modality_contribution_monitor(UnifiedLNNState* state,
+                                                     float contributions[UNIFIED_LNN_MAX_MODALITIES]) {
+    if (!state || !state->is_initialized || !contributions) return -1;
+
+    const int total_dim = (int)state->config.state_dimension;
+    const int private_dim = MODALITY_PRIVATE_DIM;
+    const int fusion_offset = private_dim * UNIFIED_LNN_MAX_MODALITIES;
+    const int fusion_dim = total_dim - fusion_offset;
+    if (fusion_dim <= 0) return -1;
+
+    float total_energy = 0.0f;
+    float max_contribution = 0.0f;
+    int max_modality = -1;
+
+    for (int m = 0; m < UNIFIED_LNN_MAX_MODALITIES; m++) {
+        float energy = 0.0f;
+        int offset = m * private_dim;
+        for (int i = 0; i < private_dim && (offset + i) < total_dim; i++) {
+            float v = state->hidden_state_buffer[offset + i];
+            energy += v * v;
+        }
+        energy /= (float)private_dim;
+        contributions[m] = energy;
+        total_energy += energy;
+        if (energy > max_contribution) {
+            max_contribution = energy;
+            max_modality = m;
+        }
+    }
+
+    if (total_energy > 1e-8f) {
+        for (int m = 0; m < UNIFIED_LNN_MAX_MODALITIES; m++) {
+            contributions[m] /= total_energy;
+        }
+        /* ZSFSSS-ARC003修复: 检测模态污染——单一模态贡献超过70%时自动启用量化干预 */
+        if (max_contribution / total_energy > 0.70f && state->step_count > 0) {
+            static int pollution_warn_count = 0;
+            static int last_pollution_modality = -1;
+            static int consecutive_pollution_count = 0;
+            const char* modality_names[] = {
+                "视觉", "音频", "文本", "传感器", "触觉", "本体感", "热感", "雷达", "电机"
+            };
+            if (pollution_warn_count < 5) {
+                fprintf(stderr, "[多模态监控] 警告: %s模态贡献占比%.1f%%超过70%%阈值"
+                        " (步骤%zu), 可能存在模态污染\n",
+                        (max_modality >= 0 && max_modality < 9) ? modality_names[max_modality] : "未知",
+                        (max_contribution / total_energy) * 100.0f, state->step_count);
+            }
+            pollution_warn_count++;
+
+            /* ZSFSSS-ARC003修复: 自动权重重平衡
+             * 当某模态持续主导超过3步时，自动衰减其门控权重并提升弱势模态 */
+            if (max_modality >= 0 && max_modality < UNIFIED_LNN_MAX_MODALITIES) {
+                if (max_modality == last_pollution_modality) {
+                    consecutive_pollution_count++;
+                    if (consecutive_pollution_count >= 3 && state->modality_isolation_enabled) {
+                        /* 衰减主导模态的跨模态门控权重 */
+                        float attenuation = 0.85f;
+                        for (int t = 0; t < UNIFIED_LNN_MAX_MODALITIES; t++) {
+                            if (t != max_modality) {
+                                state->cross_modal_gates[max_modality][t] *= attenuation;
+                            }
+                        }
+                        /* 放大弱势模态的自连接和融合门控 */
+                        for (int m = 0; m < UNIFIED_LNN_MAX_MODALITIES; m++) {
+                            if (m != max_modality && contributions[m] < 0.05f) {
+                                float boost = 1.0f + 0.1f * (float)consecutive_pollution_count;
+                                if (boost > 1.5f) boost = 1.5f;
+                                state->cross_modal_gates[m][m] *= boost;
+                                state->cross_modal_gates[m][UNIFIED_LNN_MAX_MODALITIES] *= boost;
+                            }
+                        }
+                        /* 裁剪门控值到合理范围 [0.01, 3.0] */
+                        for (int mi = 0; mi < UNIFIED_LNN_MAX_MODALITIES; mi++) {
+                            for (int mo = 0; mo <= UNIFIED_LNN_MAX_MODALITIES; mo++) {
+                                if (state->cross_modal_gates[mi][mo] < 0.01f)
+                                    state->cross_modal_gates[mi][mo] = 0.01f;
+                                if (state->cross_modal_gates[mi][mo] > 3.0f)
+                                    state->cross_modal_gates[mi][mo] = 3.0f;
+                            }
+                        }
+                        if (pollution_warn_count <= 6) {
+                            fprintf(stderr, "[多模态监控] 已自动执行门控权重再平衡: "
+                                    "%s模态门控衰减至%.2f倍, 弱势模态提升\n",
+                                    modality_names[max_modality], attenuation);
+                        }
+                    }
+                } else {
+                    consecutive_pollution_count = 1;
+                }
+                last_pollution_modality = max_modality;
+            }
+        }
+    }
+
+    return max_modality;
 }

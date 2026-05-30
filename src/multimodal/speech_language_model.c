@@ -202,7 +202,6 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
         }
     }
     fclose(fp);
-    safe_free((void**)&words);
     lm->total_words = total_tokens;
 
     /* 保存模型为文本格式 */
@@ -219,6 +218,8 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
     }
 
     fclose(out);
+    /* ZSFA-FIX-F007: safe_free(words)移至words最后一次访问之后，避免use-after-free/double-free */
+    safe_free((void**)&words);
     lm_free(lm);
 
     log_info("[语言模型] 训练完成: N=%d, 词表=%d, 总token=%d, 输出=%s",

@@ -76,7 +76,12 @@ struct QuaternionCfcCell {
     float min_dt;                    /**< 最小步长 */
     float max_dt;                    /**< 最大步长 */
     int use_cfc_closed_form;         /**< 是否使用闭式解 */
-    float current_input_drive[4];    /**< RHS回调用：当前输入驱动信号（P0-003修复） */
+    float current_input_drive[4];    /**< RHS回调用：当前输入驱动信号 */
+    /* ZSFUSA-P2-004修复: RHS回调并发保护互斥锁。
+     * current_input_drive[4]在quaternion_cfc_rhs中写入，高并发多求解器场景下
+     * 可能被多个ODE求解器实例同时修改，导致竞态条件。
+     * 此互斥锁在rhs回调入口加锁、出口解锁，确保每次只有一个线程访问。 */
+    MutexHandle rhs_mutex;           /**< RHS回调互斥锁 */
     
     // 性能统计
     uint64_t update_count;           /**< 更新次数 */
@@ -117,6 +122,8 @@ QuaternionCfcCell* quaternion_cfc_cell_create(const QuaternionCfcConfig* config)
     cell->min_dt = config->min_dt;
     cell->max_dt = config->max_dt;
     cell->use_cfc_closed_form = config->use_cfc_closed_form;
+    /* ZSFUSA-P2-004: 初始化RHS回调互斥锁，保护current_input_drive并发访问 */
+    cell->rhs_mutex = mutex_create();
     
     cell->last_input.w = 0.0f; cell->last_input.x = 0.0f; cell->last_input.y = 0.0f; cell->last_input.z = 0.0f;
     cell->integrated_error.w = 0.0f; cell->integrated_error.x = 0.0f; cell->integrated_error.y = 0.0f; cell->integrated_error.z = 0.0f;
@@ -136,6 +143,11 @@ void quaternion_cfc_cell_destroy(QuaternionCfcCell* cell) {
         return;
     }
     
+    /* ZSFUSA-P2-004: 销毁RHS互斥锁 */
+    if (cell->rhs_mutex) {
+        mutex_destroy(cell->rhs_mutex);
+        cell->rhs_mutex = NULL;
+    }
     safe_free((void**)&cell);
 }
 
@@ -460,6 +472,11 @@ int quaternion_cfc_rhs(float t, const float* q, float* dqdt, void* ctx) {
 
     QuaternionCfcCell* cell = (QuaternionCfcCell*)ctx;
 
+    /* ZSFUSA-P2-004: 保护current_input_drive的读访问。
+     * 当多线程并发调用同一cell的ODE求解器时，current_input_drive可能被
+     * 另一线程的quaternion_cfc_cell_update同时写入。互斥锁确保原子读写。 */
+    if (cell->rhs_mutex) mutex_lock(cell->rhs_mutex);
+
     float inv_tau_w = 1.0f / fmaxf(cell->time_constant.w, 1e-6f);
     float inv_tau_x = 1.0f / fmaxf(cell->time_constant.x, 1e-6f);
     float inv_tau_y = 1.0f / fmaxf(cell->time_constant.y, 1e-6f);
@@ -490,6 +507,7 @@ int quaternion_cfc_rhs(float t, const float* q, float* dqdt, void* ctx) {
     dqdt[2] = 0.5f * h_dot_y - qy * inv_tau_y;
     dqdt[3] = 0.5f * h_dot_z - qz * inv_tau_z;
 
+    if (cell->rhs_mutex) mutex_unlock(cell->rhs_mutex);
     return 0;
 }
 

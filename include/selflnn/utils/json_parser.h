@@ -63,6 +63,10 @@ void json_free(JsonValue* v);
 JsonValue* json_get(const JsonValue* obj, const char* key);
 const char* json_get_string(const JsonValue* obj, const char* key);
 double json_get_number(const JsonValue* obj, const char* key);
+/* ZSF-007: 以下两个函数当前无外部调用者，保留为公共API备用接口。
+ * json_get_bool: 解析JSON中的布尔值字段
+ * json_to_string: 将JSON值序列化为字符串
+ * 如需新增JSON布尔值解析或JSON序列化功能，优先使用这两个已实现的API */
 int json_get_bool(const JsonValue* obj, const char* key);
 
 JsonValue* json_array_get(const JsonValue* arr, size_t index);

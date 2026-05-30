@@ -411,7 +411,10 @@ static int compute_output_logits(SpeechRecognizer* sr,
         /* LNN不可用或维度不匹配 → 返回错误码让上层处理，不执行线性投影回退 */
     }
 
-    /* LNN不可用，不执行任何非LNN回退，返回错误码供上层自行处理 */
+    /* ZSFNO1-P0-001修复: 移除引用未定义变量mfcc_features/mfcc_dim的MFCC回退代码。
+     * 原ZSFLYF-P2-010尝试添加MFCC能量分类作为兜底，但忘记传递MFCC特征参数。
+     * 当前clean修复：LNN不可用时直接返回-1，调用方已有完善的错误处理逻辑。
+     * 纯液态神经系统严格依赖LNN进行输出投影，不允许非LNN的简化回退路径。 */
     memset(logits, 0, (size_t)vocab_size * sizeof(float));
     return -1;
 }
@@ -1794,20 +1797,11 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
             }
         }
         if (!recognizer->is_model_trained && !lnn_trained) {
-            /* 未训练状态：使用确定性共振峰逆映射进行语音识别
-             * 基于MFCC特征+共振峰检测+词汇匹配，真实信号处理，拒绝随机权重 */
-            int feat_dim = recognizer->config.feature_dimension;
-            int feat_buf_sz = recognizer->feature_buffer_capacity * feat_dim;
-            int n_frames = extract_mel_features(recognizer, audio_data, num_samples,
-                                                 recognizer->feature_buffer, feat_buf_sz);
-            if (n_frames > 0) {
-                int ret = sr_deterministic_recognize(recognizer,
-                                                      recognizer->feature_buffer,
-                                                      n_frames, feat_dim, result);
-                if (ret == 0) return 0;
-            }
-            /* 确定性识别失败时返回明确提示 */
-            snprintf(result->text, sizeof(result->text), "[语音识别未训练，请训练模型]");
+            /* P1-009修复: 未训练状态下明确拒绝推理，不使用确定性回退
+             * 确定性回退（共振峰+MFCC匹配）精度有限且无法处理复杂语音
+             * 必须完成训练后才能使用语音识别功能 */
+            fprintf(stderr, "[语音识别错误] 语音识别模块未训练，拒绝推理！请先训练模型后重试。\n");
+            snprintf(result->text, sizeof(result->text), "[语音识别模块未训练，请先完成训练后重试]");
             result->text[sizeof(result->text) - 1] = '\0';
             result->confidence = 0.0f;
             return -3;

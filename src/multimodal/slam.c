@@ -22,7 +22,6 @@
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/utils/math_utils.h"
-#include "selflnn/core/memory.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/logging.h"
@@ -501,52 +500,11 @@ static float slam_compute_sampson_distance(const float* F, float x1, float y1,
 #define slam_realloc(ptr, size)    safe_realloc(ptr, size)
 #define slam_free(ptr)             safe_free((void**)&(ptr))
 
-/* 数学辅助函数 */
-static inline float slam_norm_squared(const float* v, int n) {
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) {
-        sum += v[i] * v[i];
-    }
-    return sum;
-}
-
-static inline void slam_cross_product(const float* a, const float* b, float* result) {
-    result[0] = a[1] * b[2] - a[2] * b[1];
-    result[1] = a[2] * b[0] - a[0] * b[2];
-    result[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-static inline void slam_rodrigues_rotation(const float* axis, float angle, float* R) {
-    float k[3] = {axis[0], axis[1], axis[2]};
-    float norm = sqrtf(k[0]*k[0] + k[1]*k[1] + k[2]*k[2]);
-    if (norm < SLAM_EPSILON) {
-        /* 角度为0，返回单位矩阵 */
-        R[0] = 1.0f; R[1] = 0.0f; R[2] = 0.0f;
-        R[3] = 0.0f; R[4] = 1.0f; R[5] = 0.0f;
-        R[6] = 0.0f; R[7] = 0.0f; R[8] = 1.0f;
-        return;
-    }
-    
-    k[0] /= norm;
-    k[1] /= norm;
-    k[2] /= norm;
-    
-    float c = cosf(angle);
-    float s = sinf(angle);
-    float v = 1.0f - c;
-    
-    R[0] = k[0]*k[0]*v + c;
-    R[1] = k[0]*k[1]*v - k[2]*s;
-    R[2] = k[0]*k[2]*v + k[1]*s;
-    
-    R[3] = k[1]*k[0]*v + k[2]*s;
-    R[4] = k[1]*k[1]*v + c;
-    R[5] = k[1]*k[2]*v - k[0]*s;
-    
-    R[6] = k[2]*k[0]*v - k[1]*s;
-    R[7] = k[2]*k[1]*v + k[0]*s;
-    R[8] = k[2]*k[2]*v + c;
-}
+/* ZSFUSA-P0-005修复: slam_norm_squared/slam_cross_product/slam_rodrigues_rotation
+ * 三个数学辅助函数已在slam_frontend.c中以外部链接完整实现，
+ * 并在slam_internal.h中声明。此处移除slam.c中的static inline重复定义，
+ * 消除因static inline(内部链接)与extern声明(外部链接)不一致导致的符号冲突。
+ * 这些函数仅在slam_frontend.c中被调用，slam.c本身不使用它们。 */
 
 static inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
@@ -9189,14 +9147,6 @@ static int slam_select_candidates_hybrid(SlamSystem* system, int frame_id,
  * 计划在下一版本中将这些函数移至测试目录。 */
 
 /**
- * @brief [DEPRECATED] 合成场景配置常量
- * 仅用于离线单元测试, 生产环境禁止使用
- */
-#define SLAM_SYNTHETIC_NUM_POINTS   300
-#define SLAM_SYNTHETIC_NUM_CORNERS   80
-#define SLAM_SYNTHETIC_NUM_LINES     40
-
-/**
  * @brief 在图像上绘制一个抗锯齿圆形
  */
 static void draw_circle(float* image, int width, int height,
@@ -10638,4 +10588,10 @@ void camera_input_free(CameraInput* camera)
     safe_free((void**)&camera->frame_buffer);
     
     safe_free((void**)&camera);
+}
+
+/* ZSFUSA: SLAM系统内部重置 */
+void slam_system_reset_internal(SlamSystem* system) {
+    if (!system) return;
+    slam_system_reset(system, 1);
 }

@@ -1043,11 +1043,10 @@ static size_t atomic_add_size_t(volatile size_t* ptr, size_t value) {
     // GCC/Clang: 使用__sync_fetch_and_add内置函数
     return __sync_fetch_and_add(ptr, value) + value;
 #else
-    // 根据项目要求"禁止任何降级处理"，在不支持原子操作的平台上不进行非原子操作
-    // 返回原始值但不进行修改（避免数据竞争）
-    // 在实际生产环境中，应该确保平台支持原子操作
+    /* ZSFA-FIX-F014: 修复原子加fallback，必须执行实际的加法操作 */
     size_t original = *ptr;
-    return original;  // 返回原始值但不进行加法操作（安全但可能不准确）
+    *ptr = original + value;
+    return original;
 #endif
 }
 
@@ -3052,6 +3051,8 @@ static int opencl_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
                 }
                 
                 if (workgroup_product > 1) {
+                    /* ZSFUSA: clGetCommandQueueInfo需要运行时OpenCL支持 */
+#ifdef SELFLNN_HAS_OPENCL_RUNTIME
                     cl_device_id device = NULL;
                     cl_int dev_result = clGetCommandQueueInfo(opencl_kernel->command_queue,
                         0x1090 /* CL_QUEUE_DEVICE */, sizeof(cl_device_id), &device, NULL);
@@ -3069,6 +3070,7 @@ static int opencl_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
                             }
                         }
                     }
+#endif /* SELFLNN_HAS_OPENCL_RUNTIME */
                 }
             }
         }

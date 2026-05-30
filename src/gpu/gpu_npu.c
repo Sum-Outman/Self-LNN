@@ -162,7 +162,7 @@ static int detect_cambricon_hardware(void) {
         NULL
     };
     for (int i = 0; neuware_dirs[i]; i++) {
-        if (npu_dir_exists(newware_dirs[i])) return 1;
+        if (npu_dir_exists(neuware_dirs[i])) return 1;  /* ZSFA-FIX-F-016: neuw→neu typo */
     }
     DIR* dev_dir = opendir("/dev");
     if (dev_dir) {

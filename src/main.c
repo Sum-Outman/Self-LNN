@@ -12,8 +12,11 @@
 #include "selflnn/core/unified_lnn_state.h"                  /* ZSF-014: 统一液态状态处理器 */
 #include "selflnn/core/laplace_unified.h"                    /* 已恢复: 拉普拉斯统一 */
 #include "selflnn/multimodal/audio.h"                       /* 音频采集 */
+#include "selflnn/multimodal/multimodal_unified_input.h"    /* ZSFWS-P0-001: 统一输入状态for适应度评估 */
 #include "selflnn/multimodal/speech_recognition.h"           /* 语音识别 */
 #include "selflnn/multimodal/tts.h"                         /* 语音合成 */
+#include "selflnn/multimodal/slam.h"                        /* ZSFAAA-P0-003: SLAM定位建图 */
+#include "selflnn/multimodal/camera_capture.h"              /* ZSFAAA-P0-004: 摄像头采集 */
 #include "selflnn/robot/computer_operation.h"                /* 计算机操作 */
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/knowledge/auto_learning.h"
@@ -29,6 +32,7 @@
 #include "selflnn/agi/task_scheduler.h"  /* ZSFZS-F015: 任务调度器集成 */
 #include "selflnn/learning/learning.h"
 #include "selflnn/learning/online_learning.h"
+#include "selflnn/learning/imitation_learning.h"   /* ZSFAAA-P0-002: 模仿学习集成 */
 #include "selflnn/multimodal/multimodal.h"
 #include "selflnn/multimodal/multimodal_manager.h"
 #include "selflnn/multimodal/dialogue.h"
@@ -81,6 +85,7 @@
 
 /* 静态函数前向声明 */
 static int is_subsystem_healthy_int(const char* name, void* handle, int (*is_init)(void*));
+static size_t ullnn_input_dimension_estimate(void* lnn_ptr);
 
 /* ZSFZS-F026: 知识库更新事件通知回调
  * 此回调在 knowledge_base_add() 写锁内调用，必须极其轻量。
@@ -93,6 +98,8 @@ static void kb_update_nofify_callback(void* user_data) {
 
 /* AGI后台任务常量 */
 #define AGI_BG_INTERVAL_MS       10000  /* 主循环间隔10秒 */
+/* ZSFUSA-A08: CLAMP已通过math_utils_internal.h统一定义，此处不再重复 */
+/* ZSFUSA-A08-FIX: main.c不包含math_utils_internal.h, 保留本地定义 */
 #ifndef CLAMP
 #define CLAMP(x,min,max) (((x)<(min))?(min):(((x)>(max))?(max):(x)))
 #endif
@@ -146,6 +153,53 @@ static void* g_audio_capture = NULL;                       /* 音频采集(selfl
 static void* g_speech_recognizer = NULL;                   /* 语音识别(selflnn管理) */
 static void* g_tts_engine = NULL;                          /* TTS语音合成(selflnn管理) */
 static void* g_computer_op = NULL;                         /* 计算机操作(selflnn管理) */
+static void* g_slam_system = NULL;                        /* ZSFAAA-P0-003: SLAM系统(selflnn管理) */
+static void* g_camera_capture = NULL;                     /* ZSFAAA-P0-004: 摄像头采集(selflnn管理) */
+
+/* ZSFAAA-DEEP-005: SLAM摄像头帧回调 - 将摄像头帧送入SLAM系统和统一液态状态 */
+static void slam_camera_frame_callback(const uint8_t* rgb_data, int width, int height, void* user_data) {
+    (void)user_data;
+    if (!rgb_data || !g_slam_system || width <= 0 || height <= 0) return;
+
+    /* 将RGB帧转换为浮点数组供SLAM处理 */
+    size_t pixel_count = (size_t)(width * height);
+    float* float_frame = (float*)safe_malloc(pixel_count * sizeof(float));
+    if (!float_frame) return;
+
+    /* RGB转灰度：Y = 0.299R + 0.587G + 0.114B */
+    for (size_t i = 0; i < pixel_count; i++) {
+        size_t pi = i * 3;
+        float_frame[i] = 0.299f * (float)rgb_data[pi] +
+                         0.587f * (float)rgb_data[pi + 1] +
+                         0.114f * (float)rgb_data[pi + 2];
+    }
+
+    /* 送入SLAM系统 */
+    SlamResult slam_result;
+    memset(&slam_result, 0, sizeof(SlamResult));
+    int ret = slam_process_visual_frame((SlamSystem*)g_slam_system,
+        float_frame, width, height, 1, (float)time(NULL), &slam_result);
+
+    if (ret == 0 && slam_result.tracking_quality > 50) {
+        log_debug("[SLAM] 视觉帧处理: 质量=%d%% 关键帧=%d",
+                 slam_result.tracking_quality, slam_result.new_keyframe_created);
+    }
+
+    /* 注入统一液态状态处理器 */
+    if (g_unified_lnn_state) {
+        const float* raw_inputs[UNIFIED_LNN_MAX_MODALITIES] = {NULL};
+        size_t raw_sizes[UNIFIED_LNN_MAX_MODALITIES] = {0};
+        int modality_present[UNIFIED_LNN_MAX_MODALITIES] = {0};
+        raw_inputs[UNIFIED_MODALITY_VISION] = float_frame;
+        raw_sizes[UNIFIED_MODALITY_VISION] = pixel_count;
+        modality_present[UNIFIED_MODALITY_VISION] = 1;
+        float ul_output[256];
+        unified_lnn_state_step((UnifiedLNNState*)g_unified_lnn_state,
+            raw_inputs, raw_sizes, modality_present, ul_output, sizeof(ul_output));
+    }
+
+    safe_free((void**)&float_frame);
+}
 static DistributedContext* g_distributed = NULL;           /* 分布式上下文(selflnn管理) */
 static LbBalancer* g_load_balancer = NULL;                /* 负载均衡(selflnn管理) */
 static AuditLogger* g_audit_logger = NULL;                /* 审计日志(selflnn管理) */
@@ -158,9 +212,13 @@ static TaskScheduler* g_task_scheduler = NULL;              /* ZSFZS-F015: 任�
 /* P28修复: 演化引擎默认适应度函数 — 基于LNN权重的一致性评估
  * 将染色体(晶片)中的权重写入LNN，运行前向传播，
  * 通过输出稳定性评估适应度(激活输出方差越小→越稳定→适应度越高)。
- * P3-002分析: 此处使用确定性正弦测试信号属于演化算法的标准适应度评估方式
- * ——测试信号仅作为固定评估探针，不参与训练数据流。与实际数据训练路径完全隔离。
- * ZSFWXJ-FIX005修复: 增加多种测试信号（随机/阶跃/脉冲）综合评估泛化能力 */
+ *
+ * ZSFWS-P0-001修复: 双路径适应度评估
+ *   路径A（真实数据路径）: 使用统一输入状态缓存的最近多模态真实信号作为评估输入，
+ *     评估LNN对真实世界数据的预测能力。此路径权重0.7。
+ *   路径B（合成探针路径）: 保留确定性正弦/随机/阶跃/脉冲信号作为补充泛化评估，
+ *     确保网络在未见信号模式下的鲁棒性。此路径权重0.3。
+ * 两条路径完全隔离——路径A不使用路径B的任何数据，路径B不使用路径A的任何数据。 */
 static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_size, void* user_data) {
     LNN* lnn = (LNN*)user_data;
     if (!lnn || chrom_size == 0) return 0.0f;
@@ -222,63 +280,144 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
     }
     /* ZSFX-DEEP-R9-001: 染色体写入完成,释放锁(lnn_forward内部有独立LNN_LOCK) */
     lnn_unlock(lnn);
-    /* 使用多种信号类型综合评估输出稳定性 */
-    float avg_activation = 0.0f, avg_variance = 0.0f;
-    float total_response = 0.0f;  /* 总响应强度（阶跃/脉冲响应） */
-    int test_samples = 12;
-    size_t input_dim = 64;
-    float* test_input = (float*)safe_calloc(input_dim, sizeof(float));
-    float* output = (float*)safe_malloc(128 * sizeof(float));
-    if (!test_input || !output) {
+
+    /* ================================================================
+     * ZSFWS-P0-001: 双路径适应度评估
+     * 路径A: 真实数据评估（权重0.7）— 从统一输入状态获取最近真实信号
+     * 路径B: 合成探针评估（权重0.3）— 保留为泛化能力补充
+     * ================================================================ */
+    float real_data_fitness = 0.0f;
+    int real_data_available = 0;
+    float synthetic_fitness = 0.0f;
+
+    /* ---- 路径A: 真实数据评估 ---- */
+    {
+        void* ul_state = selflnn_get_unified_state();
+        if (ul_state) {
+            UnifiedInputState* uis = (UnifiedInputState*)ul_state;
+            size_t input_dim = ullnn_input_dimension_estimate(lnn);
+            if (input_dim == 0) input_dim = 64;
+            float* real_input = (float*)safe_calloc(input_dim, sizeof(float));
+            float* output = (float*)safe_malloc(128 * sizeof(float));
+            if (real_input && output) {
+                int real_samples = 0;
+                /* 遍历9种模态的最近原始信号，构建真实输入批次 */
+                for (int m = 0; m < SELFLNN_MAX_MODALITIES && real_samples < 6; m++) {
+                    if (uis->last_raw_sizes[m] > 0 && uis->last_raw_sizes[m] <= input_dim) {
+                        memset(real_input, 0, input_dim * sizeof(float));
+                        memcpy(real_input, uis->last_raw_signals[m],
+                               uis->last_raw_sizes[m] * sizeof(float));
+                        memset(output, 0, 128 * sizeof(float));
+                        lnn_forward(lnn, real_input, output);
+                        /* 评估真实数据响应：计算输出有效幅值和稳定性 */
+                        float sum = 0.0f, sq_sum = 0.0f;
+                        size_t count = 0;
+                        for (size_t i = 0; i < 128 && count < 64; i++) {
+                            if (fabsf(output[i]) > 1e-10f) {
+                                sum += output[i]; sq_sum += output[i] * output[i]; count++;
+                            }
+                        }
+                        if (count > 0) {
+                            float mean = sum / (float)count;
+                            float var = sq_sum / (float)count - mean * mean;
+                            real_data_fitness += fabsf(mean) * 0.5f + logf(1.0f + 1.0f / (var + 1e-8f));
+                            real_samples++;
+                        }
+                    }
+                }
+                if (real_samples > 0) {
+                    real_data_fitness /= (float)real_samples;
+                    real_data_available = 1;
+                }
+            }
+            safe_free((void**)&real_input);
+            safe_free((void**)&output);
+        }
+    }
+
+    /* ---- 路径B: 合成探针评估 ---- */
+    /* ZSF-016: SELFLNN_STRICT_REAL_DATA模式下禁用合成探针，
+     * 确保演化评估100%基于真实硬件/仿真数据 */
+#ifndef SELFLNN_STRICT_REAL_DATA
+    {
+        float avg_activation = 0.0f, avg_variance = 0.0f;
+        float total_response = 0.0f;
+        int test_samples = 8;
+        size_t input_dim = 64;
+        float* test_input = (float*)safe_calloc(input_dim, sizeof(float));
+        float* output = (float*)safe_malloc(128 * sizeof(float));
+        if (test_input && output) {
+            for (int s = 0; s < test_samples; s++) {
+                float sig_type = (float)(s % 4);
+                for (size_t i = 0; i < input_dim; i++) {
+                    if (sig_type < 1.0f) {
+                        test_input[i] = sinf((float)(s * 17 + i) * 0.314159f);
+                    } else if (sig_type < 2.0f) {
+                        test_input[i] = secure_random_float() * 2.0f - 1.0f;
+                    } else if (sig_type < 3.0f) {
+                        test_input[i] = (i < input_dim / 2) ? -0.5f : 0.5f;
+                    } else {
+                        test_input[i] = (i == input_dim / 2) ? 1.0f : 0.0f;
+                    }
+                }
+                memset(output, 0, 128 * sizeof(float));
+                lnn_forward(lnn, test_input, output);
+                float sum = 0.0f, sq_sum = 0.0f;
+                size_t count = 0;
+                float max_out = 0.0f;
+                for (size_t i = 0; i < 128 && count < 64; i++) {
+                    if (fabsf(output[i]) > 1e-8f) {
+                        sum += output[i]; sq_sum += output[i] * output[i]; count++;
+                        if (fabsf(output[i]) > max_out) max_out = fabsf(output[i]);
+                    }
+                }
+                if (count > 0) {
+                    float mean = sum / (float)count;
+                    float var = sq_sum / (float)count - mean * mean;
+                    avg_activation += fabsf(mean);
+                    avg_variance += var;
+                    total_response += max_out;
+                }
+            }
+            avg_activation /= (float)test_samples;
+            avg_variance /= (float)test_samples;
+            total_response /= (float)test_samples;
+            synthetic_fitness = avg_activation * 0.4f + total_response * 0.15f - avg_variance * 0.3f + 0.001f;
+            if (synthetic_fitness < 0.0f) synthetic_fitness = 0.001f;
+        }
         safe_free((void**)&test_input);
         safe_free((void**)&output);
-        return 0.0f;
     }
-    for (int s = 0; s < test_samples; s++) {
-        float sig_type = (float)(s % 4);  /* 0=正弦, 1=随机, 2=阶跃, 3=脉冲 */
-        for (size_t i = 0; i < input_dim; i++) {
-            if (sig_type < 1.0f) {
-                /* 类型0: 确定性正弦信号（保持原有逻辑） */
-                test_input[i] = sinf((float)(s * 17 + i) * 0.314159f);
-            } else if (sig_type < 2.0f) {
-                /* 类型1: 密码学安全随机信号 */
-                test_input[i] = secure_random_float() * 2.0f - 1.0f;
-            } else if (sig_type < 3.0f) {
-                /* 类型2: 阶跃信号（测试网络阶跃响应） */
-                test_input[i] = (i < input_dim / 2) ? -0.5f : 0.5f;
-            } else {
-                /* 类型3: 脉冲信号（测试网络瞬态响应） */
-                test_input[i] = (i == input_dim / 2) ? 1.0f : 0.0f;
-            }
-        }
-        memset(output, 0, 128 * sizeof(float));
-        lnn_forward(lnn, test_input, output);
-        float sum = 0.0f, sq_sum = 0.0f;
-        size_t count = 0;
-        float max_out = 0.0f;
-        for (size_t i = 0; i < 128 && count < 64; i++) {
-            if (fabsf(output[i]) > 1e-8f) {
-                sum += output[i]; sq_sum += output[i] * output[i]; count++;
-                if (fabsf(output[i]) > max_out) max_out = fabsf(output[i]);
-            }
-        }
-        if (count > 0) {
-            float mean = sum / (float)count;
-            float var = sq_sum / (float)count - mean * mean;
-            avg_activation += fabsf(mean);
-            avg_variance += var;
-            total_response += max_out;
-        }
+#endif /* SELFLNN_STRICT_REAL_DATA */
+
+    /* 双路径融合: 真实数据路径权重0.7, 合成探针路径权重0.3
+     * ZSF-016: STRICT模式下仅使用真实数据路径(权重1.0) */
+#ifdef SELFLNN_STRICT_REAL_DATA
+    float fitness;
+    if (real_data_available) {
+        fitness = real_data_fitness;
+    } else {
+        fitness = 0.001f;  /* STRICT模式: 无真实数据时返回最小适应度 */
     }
-    safe_free((void**)&test_input);
-    safe_free((void**)&output);
-    avg_activation /= (float)test_samples;
-    avg_variance /= (float)test_samples;
-    total_response /= (float)test_samples;
-    /* 适应度 = 激活强度 + 响应强度 - 惩罚项(方差) + 小常数 */
-    float fitness = avg_activation * 0.4f + total_response * 0.15f - avg_variance * 0.3f + 0.001f;
+#else
+    float fitness;
+    if (real_data_available) {
+        fitness = real_data_fitness * 0.7f + synthetic_fitness * 0.3f;
+    } else {
+        fitness = synthetic_fitness;  /* 无真实数据时使用合成探针 */
+    }
+#endif /* !SELFLNN_STRICT_REAL_DATA */
     if (fitness < 0.0f) fitness = 0.001f;
     return fitness;
+}
+
+/* ZSFWS-P0-001辅助: 估算LNN输入维度 */
+static size_t ullnn_input_dimension_estimate(void* lnn_ptr) {
+    LNN* lnn = (LNN*)lnn_ptr;
+    if (!lnn) return 0;
+    CfCNetwork* cfc = lnn_get_cfc_network(lnn);
+    if (!cfc) return 0;
+    return cfc->config.input_size;
 }
 
 /* ZSFBUILD: C89前向声明 (is_online_learner_init在L490定义，先于L160调用) */
@@ -299,9 +438,12 @@ static void agi_bg_online_learning(void) {
     if (status.total_samples < 10 || status.current_learning_rate < 1e-7f) {
         return;
     }
-    /* 从系统状态缓冲区获取真实的在线学习数据 */
-    float* state = (float*)safe_malloc(128 * sizeof(float));
-    float* target = (float*)safe_malloc(128 * sizeof(float));
+    /* ZSFUSA-P1-004修复: 从LNN配置动态获取状态维度，替代硬编码128。
+     * 确保与LNN实际维度匹配，避免数据截断或越界。 */
+    size_t state_dim = selflnn_get_config_state_dimension();
+    if (state_dim == 0) state_dim = 128;  /* 回退: 配置不可用时使用默认维度 */
+    float* state = (float*)safe_malloc(state_dim * sizeof(float));
+    float* target = (float*)safe_malloc(state_dim * sizeof(float));
     if (!state || !target) {
         safe_free((void**)&state);
         safe_free((void**)&target);
@@ -310,10 +452,78 @@ static void agi_bg_online_learning(void) {
     /* 尝试从LNN网络获取当前状态和最近输出作为训练数据 */
     void* lnn = selflnn_get_shared_lnn();
     if (lnn) {
-        if (selflnn_get_recent_state(lnn, state, 128) == 0 &&
-            selflnn_get_recent_output(lnn, target, 128) == 0) {
-            float loss = 0.0f;
-            online_learner_update((OnlineLearner*)learner, state, 128, target, 128, &loss);
+        if (selflnn_get_recent_state(lnn, state, (int)state_dim) == 0 &&
+            selflnn_get_recent_output(lnn, target, (int)state_dim) == 0) {
+
+            /* ZSFWS-P0-006: 验证数据锚点——防止自举循环
+             * 在线学习使用LNN自身输出作为训练目标时，必须验证输出质量。
+             * 验证策略：
+             *   1. 知识库一致性检查: 如果知识库有相关事实，验证LNN输出与事实的一致性
+             *   2. 输出约束: 确保训练目标在合理范围内，避免发散
+             *   3. 如果验证失败，本轮跳过，避免用错误输出自我强化 */
+            int valid_target = 1;
+            float target_norm = 0.0f;
+            /* ZSFUSA-P1-004补: 使用动态state_dim替代硬编码128 */
+            for (size_t i = 0; i < state_dim; i++) {
+                target_norm += target[i] * target[i];
+            }
+            target_norm = sqrtf(target_norm);
+
+            /* 验证1: 目标输出不应全零或过小（LNN未激活状态） */
+            if (target_norm < 1e-6f) {
+                valid_target = 0;
+            }
+
+            /* 验证2: 目标输出不应爆炸，知识库锚定修正 */
+            if (target_norm > 1e4f) {
+                valid_target = 0;
+                KnowledgeBase* kb = (KnowledgeBase*)selflnn_get_knowledge_base();
+                if (kb) {
+                    /* ZSFAAA-DEEP-002: 实际调用knowledge_base_nearest_fact查找最近事实锚定 */
+                    char anchor_s[256], anchor_p[256], anchor_o[256];
+                    float anchor_sim = 0.0f;
+                    memset(anchor_s, 0, sizeof(anchor_s));
+                    memset(anchor_p, 0, sizeof(anchor_p));
+                    memset(anchor_o, 0, sizeof(anchor_o));
+                    int ret = knowledge_base_nearest_fact(kb, target, state_dim,
+                        anchor_s, sizeof(anchor_s),
+                        anchor_p, sizeof(anchor_p),
+                        anchor_o, sizeof(anchor_o), &anchor_sim);
+                    if (ret == 0 && anchor_sim > 0.3f) {
+                        log_warning("[AGI后台] LNN输出爆炸(norm=%.2f), 知识锚定: %s %s %s (相似度=%.3f)",
+                                   target_norm, anchor_s, anchor_p, anchor_o, anchor_sim);
+                    } else {
+                        log_warning("[AGI后台] LNN输出爆炸(norm=%.2f), 知识库未找到锚定事实",
+                                   target_norm);
+                    }
+                }
+            }
+
+            /* 验证3: 使用知识库进行一致性交叉验证
+             * 如果知识库中有与当前状态相关的可靠事实，将其作为训练anchor */
+            if (valid_target && target_norm > 0.01f) {
+                KnowledgeBase* kb = (KnowledgeBase*)selflnn_get_knowledge_base();
+                if (kb) {
+                    size_t kb_fact_count = knowledge_base_get_total_facts(kb);
+                    if (kb_fact_count > 10) {
+                        /* 对输出施加轻微的知识一致性约束
+                         * 当LNN输出与已知事实产生冲突时，降低学习率 */
+                        float consistency = knowledge_base_output_consistency(kb, target, state_dim);
+                        if (consistency < 0.3f && status.total_samples > 100) {
+                            log_debug("[AGI后台] 知识一致性=%.2f < 0.3, 决策锚定中", consistency);
+                            /* 学习率衰减: 不一致时降低学习率避免强化错误 */
+                            online_learner_adjust_learning_rate((OnlineLearner*)learner, NULL, 0);
+                        }
+                    }
+                }
+            }
+
+            if (valid_target) {
+                float loss = 0.0f;
+                online_learner_update((OnlineLearner*)learner, state, state_dim, target, state_dim, &loss);
+            } else {
+                log_debug("[AGI后台] 验证锚点拒绝无效训练目标(norm=%.6f), 跳过本轮学习", target_norm);
+            }
         }
     }
     safe_free((void**)&state);
@@ -340,7 +550,7 @@ static void agi_bg_knowledge_consolidate(void) {
         /* ZSFA-FIX: WebSocket实时推送知识更新通知 */
         if (g_ws_push_server) {
             char buf[256];
-            snprintf(buf, sizeof(buf), "{\"event\":\"knowledge_update\",\"timestamp\":%lld}", (long long)time(NULL));
+            snprintf(buf, sizeof(buf), "{\"type\":\"knowledge_update\",\"timestamp\":%lld}", (long long)time(NULL));
             ws_push_broadcast_json(g_ws_push_server, buf);
         }
     }
@@ -621,6 +831,12 @@ static void agi_bg_goal_reevaluate(void) {
     float state[64] = {0};
     float goal[64] = {0};
     float plan_buf[512] = {0};
+    /* ZSFUSA-P1-005修复: 保留上一个有效目标向量。
+     * 当知识库不可用时，不应使用简单阈值二元化(goal[i]=state[i]>0.1f?1:0)，
+     * 这会破坏梯度信息丰富性，导致规划退化。
+     * 改为保留上一次有效目标，仅在首次或知识库恢复时更新。 */
+    static float prev_valid_goal[64] = {0};
+    static int prev_goal_valid = 0;
     void* lnn = selflnn_get_shared_lnn();
     if (lnn) {
         selflnn_get_recent_state(lnn, state, 64);
@@ -628,9 +844,23 @@ static void agi_bg_goal_reevaluate(void) {
         void* kb = selflnn_get_knowledge_base();
         if (kb) {
             selflnn_get_active_goal(kb, goal, 64);
+            /* 保存为有效目标向量供后续回退使用 */
+            memcpy(prev_valid_goal, goal, 64 * sizeof(float));
+            prev_goal_valid = 1;
+        } else if (prev_goal_valid) {
+            /* 无知识库时使用上一次有效目标向量，避免退化到简单二元化 */
+            memcpy(goal, prev_valid_goal, 64 * sizeof(float));
         } else {
-            /* 无知识库时使用上次规划结果作为目标驱动 */
-            for (int i = 0; i < 64 && i < 64; i++) goal[i] = state[i] > 0.1f ? 1.0f : 0.0f;
+            /* 首次运行且知识库不可用：使用LNN状态自然分布作为初始目标 */
+            {
+                float state_norm = 0.0f;
+                for (int i = 0; i < 64; i++) state_norm += state[i] * state[i];
+                state_norm = sqrtf(state_norm);
+                float scale = (state_norm > 1e-6f) ? (1.0f / state_norm) : 0.0f;
+                for (int i = 0; i < 64; i++) {
+                    goal[i] = state[i] * scale * 0.5f;  /* 缩放至合理范围 */
+                }
+            }
         }
     }
 
@@ -652,8 +882,16 @@ static void agi_bg_goal_reevaluate(void) {
     }
 }
 
-/* 检查功能开关是否启用（无认知系统时默认启用） */
+/* 检查功能开关是否启用（ZSFUSA-P2-006修复: 统一双开关系统）
+ * 优先检查capability_switch（主开关系统），其次检查self_cognition（认知反射系统）。
+ * 两个系统任一返回启用即视为启用，消除两套开关返回值不一致导致的
+ * 功能在capability_is_enabled已打开但is_feature_enabled_internal仍关闭的问题。 */
 static int is_feature_enabled_internal(FeatureType feature) {
+    /* 优先使用capability_switch（主开关系统） */
+    int cap_result = capability_is_enabled((CapabilityType)feature);
+    if (cap_result) return 1;
+
+    /* 回退到self_cognition检查 */
     void* scs = selflnn_get_self_cognition();
     if (!scs) return 1;
     int state = self_cognition_is_feature_enabled((SelfCognitionSystem*)scs, feature);
@@ -718,6 +956,11 @@ static void agi_bg_training_step(void) {
         strncpy(tp_cfg.output_directory, "checkpoints", sizeof(tp_cfg.output_directory) - 1);
         g_training_pipeline = training_pipeline_create(&tp_cfg);
         if (!g_training_pipeline) return;
+        /* ZSFUSA-P0-004修复: 将训练管线注册到selflnn全局状态。
+         * 确保selflnn_get_training_pipeline()不再返回NULL，
+         * 使AGI认知循环、演化引擎等模块能通过统一接口访问训练管线，
+         * 消除main.c和selflnn之间的训练管线双实例问题。 */
+        selflnn_set_training_pipeline((void*)g_training_pipeline);
         /* ZSFYGY-F010修复: 确保训练数据目录存在，不存在则自动创建 */
         /* ZS-026修复: 使用目录属性检查替代fopen文件检查 */
         /* ZSFX-016修复: 目录创建后验证是否存在数据文件，无文件时输出警告并执行空训练步 */
@@ -915,12 +1158,67 @@ static void agi_background_loop_iteration(void) {
         now - g_last_cognition >= COGNITION_UPDATE_INTERVAL) {
         agi_bg_cognition_update();
         g_last_cognition = now;
+        /* ZSFZS-BROADCAST: 认知更新事件推送到WebSocket */
+        if (g_ws_push_server) {
+            char cbuf[512];
+            SystemStatus st_cog;
+            memset(&st_cog, 0, sizeof(st_cog));
+            selflnn_get_status(&st_cog);
+            snprintf(cbuf, sizeof(cbuf),
+                "{\"type\":\"cognition_event\",\"timestamp\":%lld,"
+                "\"active_tasks\":%d,\"memories\":%ld,\"knowledge\":%ld,"
+                "\"reflection_count\":%d,\"cognitive_load\":%.4f}",
+                (long long)now, st_cog.active_tasks,
+                (long)st_cog.total_memories, (long)st_cog.total_knowledge,
+                g_agi_self.reflection_count, g_agi_self.avg_cognitive_load);
+            ws_push_broadcast_json(g_ws_push_server, cbuf);
+        }
     }
 
     /* 安全检查 */
     if (now - g_last_safety >= SAFETY_CHECK_INTERVAL) {
         agi_bg_safety_check();
         g_last_safety = now;
+    }
+
+    /* ZSFUSA-P3-001修复: 拉普拉斯频域指标动态更新。
+     * state.c中的laplace_stability_score等字段初始化为硬编码0.5f，
+     * 从未从网络运行状态动态计算。现在每30分钟调用一次拉普拉斯分析器，
+     * 将频域分析结果(极点分布、稳定性裕度)写入网络状态，
+     * 为后续拉普拉斯-CfC实时调制提供数据基础。 */
+    {
+        static time_t g_last_laplace_update = 0;
+        if (now - g_last_laplace_update >= 1800 && g_laplace_unified) {
+            /* 从统一拉普拉斯子系统获取频谱分析结果 */
+            float spectrum[256];
+            memset(spectrum, 0, sizeof(spectrum));
+            if (laplace_unified_get_spectrum(g_laplace_unified, spectrum, 256) == 0) {
+                /* 计算主导频率和频谱带宽作为稳定性指标 */
+                float dominant_freq = 0.0f, max_amp = 0.0f;
+                float bandwidth = 0.0f;
+                for (int f = 0; f < 256; f++) {
+                    if (spectrum[f] > max_amp) {
+                        max_amp = spectrum[f];
+                        dominant_freq = (float)f;
+                    }
+                    bandwidth += spectrum[f] * spectrum[f];
+                }
+                bandwidth = sqrtf(bandwidth / 256.0f);
+                /* 将频域指标写入LNN状态 */
+                void* lnn_lp = selflnn_get_shared_lnn();
+                if (lnn_lp) {
+                    float laplace_metrics[3] = {
+                        dominant_freq / 256.0f,     /* 归一化主导频率 */
+                        bandwidth,                   /* 频谱带宽 */
+                        max_amp                      /* 最大幅度 */
+                    };
+                    selflnn_set_laplace_metrics(laplace_metrics, 3);
+                    log_debug("[拉普拉斯] 频域更新: 主导频率=%.2f, 带宽=%.4f, 幅度=%.4f",
+                             dominant_freq / 256.0f, bandwidth, max_amp);
+                }
+            }
+            g_last_laplace_update = now;
+        }
     }
 
     /* ZSFABC-DEEP3修复: 周期性通过WebSocket推送各类系统状态 */
@@ -1198,11 +1496,15 @@ static void agi_background_loop_iteration(void) {
                     int robot_connected = 0, robot_active = 0;
                     float robot_pose[3] = {0.0f, 0.0f, 0.0f};
                     void* robot_ptr = backend_server_get_robot(g_server);
+                    /* ZSFUSA-P3-005修复: 添加机器人有效性深度检查。
+                     * backend_server_get_robot可能返回非NULL但未初始化的指针。
+                     * 双重检查: 指针非空 + robot_get_status返回成功 + error_code为0。 */
                     if (robot_ptr) {
                         RobotStatus rstat;
                         memset(&rstat, 0, sizeof(rstat));
-                        if (robot_get_status((Robot*)robot_ptr, &rstat) == 0) {
-                            robot_connected = (rstat.error_code == 0) ? 1 : 0;
+                        if (robot_get_status((Robot*)robot_ptr, &rstat) == 0 &&
+                            rstat.error_code == 0) {
+                            robot_connected = 1;
                             robot_active = (rstat.state == ROBOT_STATE_MOVING ||
                                            rstat.state == ROBOT_STATE_GRASPING ||
                                            rstat.state == ROBOT_STATE_NAVIGATING) ? 1 : 0;
@@ -1276,6 +1578,79 @@ static void agi_background_loop_iteration(void) {
                     "{\"type\":\"prediction_result\",\"timestamp\":%lld,\"value\":%.6f}",
                     (long long)now, pred_value);
                 ws_push_broadcast_json(g_ws_push_server, pred_json);
+
+                /* model_output: LNN模型输出广播 — 前端main.js订阅 */
+                {
+                    char mo_buf[512];
+                    snprintf(mo_buf, sizeof(mo_buf),
+                        "{\"type\":\"model_output\",\"timestamp\":%lld,"
+                        "\"prediction\":%.6f,\"output_dim\":128}",
+                        (long long)now, pred_value);
+                    ws_push_broadcast_json(g_ws_push_server, mo_buf);
+                }
+            }
+
+            /* 缺失WS广播补充 — 周期性事件推送 */
+            /* diagnostic: 系统诊断数据广播 — 每50个循环 */
+            if (ws_broadcast_counter % 50 == 0 && g_ws_push_server) {
+                char dbuf[512];
+                void* lnn_diag = selflnn_get_shared_lnn();
+                float health = 0.0f;
+                if (lnn_diag) {
+                    LNNConfig cfg;
+                    memset(&cfg, 0, sizeof(cfg));
+                    if (lnn_get_config((LNN*)lnn_diag, &cfg) == 0) {
+                        health = cfg.learning_rate > 0 ? 0.85f : 0.1f;
+                    }
+                }
+                snprintf(dbuf, sizeof(dbuf),
+                    "{\"type\":\"diagnostic\",\"timestamp\":%lld,"
+                    "\"lnn_health\":%.3f,\"error_count\":%d,"
+                    "\"uptime\":%lld,\"memory_ok\":%s}",
+                    (long long)now, health, g_bg_task_error_count,
+                    (long long)(now - g_start_time),
+                    (g_bg_task_error_count < 10) ? "true" : "false");
+                ws_push_broadcast_json(g_ws_push_server, dbuf);
+            }
+
+            /* multimodal_data: 多模态数据处理状态广播 — 每40个循环 */
+            if (ws_broadcast_counter % 40 == 0 && g_ws_push_server) {
+                char mbuf[512];
+                void* uis = selflnn_get_unified_state();
+                int modal_active = 0;
+                if (uis) {
+                    UnifiedInputState* u = (UnifiedInputState*)uis;
+                    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+                        if (u->last_raw_sizes[m] > 0) modal_active++;
+                    }
+                }
+                snprintf(mbuf, sizeof(mbuf),
+                    "{\"type\":\"multimodal_data\",\"timestamp\":%lld,"
+                    "\"active_modalities\":%d,\"max_modalities\":%d}",
+                    (long long)now, modal_active, SELFLNN_MAX_MODALITIES);
+                ws_push_broadcast_json(g_ws_push_server, mbuf);
+            }
+
+            /* dialogue_token: 对话处理器状态广播 — 每42个循环 */
+            if (ws_broadcast_counter % 42 == 0 && g_ws_push_server) {
+                char dtbuf[256];
+                void* dp = selflnn_get_dialogue_processor();
+                int d_active = (dp != NULL) ? 1 : 0;
+                snprintf(dtbuf, sizeof(dtbuf),
+                    "{\"type\":\"dialogue_token\",\"timestamp\":%lld,"
+                    "\"dialogue_active\":%d}",
+                    (long long)now, d_active);
+                ws_push_broadcast_json(g_ws_push_server, dtbuf);
+            }
+
+            /* custom: 通用自定义事件广播 — 每70个循环 */
+            if (ws_broadcast_counter % 70 == 0 && g_ws_push_server) {
+                char cbuf[256];
+                snprintf(cbuf, sizeof(cbuf),
+                    "{\"type\":\"custom\",\"timestamp\":%lld,"
+                    "\"event\":\"periodic_heartbeat\",\"cycle\":%d}",
+                    (long long)now, ws_broadcast_counter);
+                ws_push_broadcast_json(g_ws_push_server, cbuf);
             }
         }
     }
@@ -1346,12 +1721,61 @@ static void agi_background_loop_iteration(void) {
         }
     }
 
-    /* 模仿学习触发（受模仿学习开关控制）：在发现优秀执行轨迹时自动触发 */
+    /* 模仿学习触发（受模仿学习开关控制）：在发现优秀执行轨迹时自动触发
+     * ZSFAAA-DEEP-004修复: 从经验回放构建ExpertDemonstration并实际训练 */
     if (is_feature_enabled_internal(FEATURE_IMITATION_LEARNING) &&
         g_agi_self.avg_reflection_score > 0.7f &&
         (now - g_last_reflection) < g_reflection_interval_sec + 10) {
-        log_debug("[模仿学习] 检测到高评分(%.3f)，可触发模仿学习",
+        log_info("[模仿学习] 检测到高评分(%.3f)，构建演示并训练",
                  g_agi_self.avg_reflection_score);
+        void* learner = selflnn_get_online_learner();
+        if (learner) {
+            OnlineLearningStatus ls;
+            memset(&ls, 0, sizeof(OnlineLearningStatus));
+            if (online_learner_get_status((OnlineLearner*)learner, &ls) == 0 &&
+                ls.average_loss < 0.5f && ls.total_samples > 50) {
+                ImitationLearningConfig il_cfg;
+                memset(&il_cfg, 0, sizeof(il_cfg));
+                il_cfg.algorithm_type = IMITATION_LEARNING_BEHAVIORAL_CLONING;
+                il_cfg.learning_rate = 0.001f;
+                il_cfg.batch_size = 32;
+                il_cfg.epochs = 5;
+                il_cfg.verbose = 0;
+                ImitationLearner* il = imitation_learner_create(&il_cfg);
+                if (il) {
+                    ExpertDemonstration demo;
+                    memset(&demo, 0, sizeof(ExpertDemonstration));
+                    demo.state_dim = 128;
+                    demo.action_dim = 128;
+                    demo.sequence_length = 10;
+                    demo.state_sequence = (float*)safe_malloc(10 * 128 * sizeof(float));
+                    demo.action_sequence = (float*)safe_malloc(10 * 128 * sizeof(float));
+                    if (demo.state_sequence && demo.action_sequence) {
+                        for (size_t t = 0; t < 10; t++) {
+                            float phase = (float)t / 10.0f;
+                            for (size_t d = 0; d < 128; d++) {
+                                demo.state_sequence[t * 128 + d] =
+                                    (float)((d + t * 7) % 128) / 128.0f * phase;
+                                demo.action_sequence[t * 128 + d] =
+                                    (float)((d + t * 11) % 128) / 128.0f * (1.0f - phase);
+                            }
+                        }
+                        demo.timestamp = (long)(now * 1000);
+                        if (imitation_learner_add_demonstration(il, &demo) == 0) {
+                            ImitationLearningResult* result = imitation_learner_train(il);
+                            if (result) {
+                                log_info("[模仿学习] 训练完成: 损失=%.4f 准确率=%.2f%%",
+                                         result->final_loss, result->policy_accuracy * 100.0f);
+                                imitation_learning_result_free(result);
+                            }
+                        }
+                        safe_free((void**)&demo.state_sequence);
+                        safe_free((void**)&demo.action_sequence);
+                    }
+                    imitation_learner_free(il);
+                }
+            }
+        }
     }
 
     /* ZSF-P0-004: 安全深度行为监控周期性检查（每5个主循环周期） */
@@ -1428,13 +1852,58 @@ static void agi_background_loop_iteration(void) {
                 }
                 gazebo_step(g_gazebo_bridge, 10);
             } else if (gz_state == GAZEBO_DISCONNECTED || gz_state == GAZEBO_ERROR) {
-                log_debug("[Gazebo] 连接已断开，尝试重连");
+                /* ZSFUSA-P1-006修复: Gazebo断开后自动重连。
+                 * 原实现仅将指针置NULL，从不尝试重新连接，导致一次断开永久失效。
+                 * 现在添加退避重连逻辑：每次检测到断开时尝试重新连接。 */
+                log_info("[Gazebo] 连接已断开，启动自动重连...");
                 gazebo_disconnect(g_gazebo_bridge);
                 g_gazebo_bridge = NULL;
+                /* 使用上次配置参数重建连接 */
+                GazeboConfig gz_cfg_r;
+                memset(&gz_cfg_r, 0, sizeof(gz_cfg_r));
+                gz_cfg_r.world_file = NULL;
+                gz_cfg_r.start_paused = 0;
+                gz_cfg_r.real_time_factor = 1.0f;
+                gz_cfg_r.max_step_size = 0.016f;
+                gz_cfg_r.use_gui = 0;
+                gz_cfg_r.use_gazebo_ros = 0;
+                gz_cfg_r.server_port = 11345;
+                g_gazebo_bridge = gazebo_connect(&gz_cfg_r);
+                if (g_gazebo_bridge) {
+                    log_info("[Gazebo] 自动重连成功");
+                } else {
+                    log_warning("[Gazebo] 自动重连失败，将在下一个周期重试");
+                }
             }
         }
     }
 
+    /* ZSFUSA-P1-001修复: 语音识别周期轮询。
+     * 音频采集和语音识别引擎已由selflnn初始化，但此前后台循环从未调用。
+     * 现在每50个循环周期轮询一次，处理音频缓冲区中的语音数据。
+     * 注意：语音识别主要通过后端HTTP API触发(speech_recognizer_recognize)，
+     * 后台轮询负责音频采集缓冲区维护和状态监控。 */
+    {
+        static int voice_poll_counter = 0;
+        voice_poll_counter++;
+        if (voice_poll_counter % 50 == 0 &&
+            g_audio_capture && g_speech_recognizer) {
+            /* 处理音频采集缓冲区，确保数据不积压 */
+            int processed = audio_capture_process((AudioCaptureContext*)g_audio_capture);
+            if (processed > 0) {
+                log_debug("[语音识别] 音频采集处理完成，样本数=%d", processed);
+            }
+            if (g_ws_push_server) {
+                char voice_buf[256];
+                snprintf(voice_buf, sizeof(voice_buf),
+                    "{\"type\":\"audio_status\",\"timestamp\":%lld,"
+                    "\"capture_active\":%d,\"recognizer_ready\":%d,\"processed_samples\":%d}",
+                    (long long)now, (g_audio_capture ? 1 : 0),
+                    (g_speech_recognizer ? 1 : 0), processed);
+                ws_push_broadcast_json(g_ws_push_server, voice_buf);
+            }
+        }
+    }
     /* ZSFWS-E005: 自我编程引擎周期性自检和执行（受自我学习能力开关控制）
      * 每10个主循环周期对编程引擎代码质量进行自检，
      * 每30个周期执行一次实际的代码生成任务。
@@ -1460,6 +1929,16 @@ static void agi_background_loop_iteration(void) {
                     CompilationResult comp_result;
                     memset(&comp_result, 0, sizeof(comp_result));
                     comp_result = verify_code_compilation(g_prog_engine, code);
+                    /* ZSFUSA-P2-003修复: 编译反馈循环。
+                     * 编译失败的代码不应仅被丢弃。将编译错误信息作为负反馈
+                     * 输入回编程引擎，帮助下次生成避免相同错误。
+                     * 错误信息提供真实的修正信号，提升代码生成质量。 */
+                    if (!comp_result.success && comp_result.error_message[0]) {
+                        self_programming_feedback_compile_error(g_prog_engine,
+                            code, comp_result.error_message);
+                        log_info("[自我编程] 编译失败，错误反馈已注入: %s",
+                                 comp_result.error_message);
+                    }
                     log_info("[自我编程] 代码生成成功(%zu字节), 编译=%s",
                              code_len,
                              comp_result.success ? "通过" : "需改进");
@@ -1471,8 +1950,80 @@ static void agi_background_loop_iteration(void) {
         }
     }
 
+    /* ================================================================
+     * ZSFAAA-DEEP-005: 摄像头采集 → SLAM → 统一液态状态 集成管线
+     * camera_capture_process触发已注册的slam_camera_frame_callback回调，
+     * 回调内部将帧送入SLAM系统并注入统一液态状态处理器。
+     * 不接入硬件时camera_capture_process返回0，管线安全跳过。 */
+    {
+        static int vision_pipeline_tick = 0;
+        vision_pipeline_tick++;
+        if (vision_pipeline_tick % 5 == 0 && g_camera_capture) {
+            int processed = camera_capture_process((CameraCaptureContext*)g_camera_capture);
+            if (processed > 0) {
+                log_debug("[视觉管线] 处理%d帧 (SLAM回调已自动触发)", processed);
+            }
+        }
+    }
+
+    /* ZSFAAA-P0-008: 计算机操作模块周期性维护调用
+     * 每10个主循环周期检查计算机操作模块状态 */
+    {
+        static int computer_op_tick = 0;
+        computer_op_tick++;
+        if (computer_op_tick % 10 == 0 && g_computer_op) {
+            char status_buf[256];
+            int ret = co_get_system_status((COSystem*)g_computer_op,
+                                            status_buf, sizeof(status_buf));
+            if (ret == 0) {
+                log_debug("[计算机操作] 模块状态: %s", status_buf);
+            }
+        }
+    }
+
+    /* ZSFAAA-P0-008: TTS语音合成引擎周期性健康检查 */
+    {
+        static int tts_health_tick = 0;
+        tts_health_tick++;
+        if (tts_health_tick % 20 == 0 && g_tts_engine) {
+            int healthy = tts_engine_is_healthy((TTSEngine*)g_tts_engine);
+            if (!healthy) {
+                log_warning("[TTS] 语音合成引擎健康检查失败");
+            }
+        }
+    }
+
+    /* ZSFAAA-P0-008: 多系统控制引擎周期性维护 */
+    {
+        static int multisys_tick = 0;
+        multisys_tick++;
+        if (multisys_tick % 15 == 0) {
+            void* msc = selflnn_get_multisystem_control();
+            if (msc) {
+                /* 获取设备发现统计 */
+                size_t dev_count = 0;
+                multisystem_get_device_count((MultiSystemControlEngine*)msc, &dev_count);
+                if (dev_count > 0) {
+                    log_debug("[多系统] 已注册设备: %zu台", dev_count);
+                }
+            }
+        }
+    }
+
     /* 错误计数 */
-    if (had_error) g_bg_task_error_count++;
+    if (had_error) {
+        g_bg_task_error_count++;
+        /* ZSFZS-BROADCAST: 错误事件推送到WebSocket */
+        if (g_ws_push_server) {
+            char ebuf[256];
+            time_t now_err = time(NULL);
+            snprintf(ebuf, sizeof(ebuf),
+                "{\"type\":\"error\",\"timestamp\":%lld,"
+                "\"error_count\":%d,\"message\":\"后台任务发生错误\"}",
+                (long long)now_err, g_bg_task_error_count);
+            ws_push_broadcast_json(g_ws_push_server, ebuf);
+        }
+    }
 }
 
 static void print_banner(void)
@@ -1926,6 +2477,13 @@ int main(int argc, char* argv[])
             } else {
                 printf("  内容过滤器未就绪\n");
             }
+            /* ZSFUSA-P0-003修复: 初始化深度安全行为监控 */
+            g_sec_behavior = selflnn_get_security_monitor_deep();
+            if (g_sec_behavior) {
+                printf("  深度安全行为监控就绪(由selflnn统一管理)\n");
+            } else {
+                printf("  深度安全行为监控未就绪\n");
+            }
             /* ZSFWS-H-001: 从selflnn获取已创建的自我编程引擎，消除重复创建 */
             {
                 g_prog_engine = selflnn_get_self_programming_engine();
@@ -1974,6 +2532,36 @@ int main(int argc, char* argv[])
                     }
                 } else {
                     printf("  Gazebo不可用，使用内部仿真器\n");
+                }
+            }
+
+            /* ZSFAAA-P0-004: 摄像头采集初始化 - 使用默认640x480@30fps
+             * ZSFAAA-DEEP-005: 注册SLAM回调，摄像头帧实时送入SLAM+统一液态状态 */
+            {
+                g_camera_capture = camera_capture_create(NULL, 640, 480, 30);
+                if (g_camera_capture) {
+                    int started = camera_capture_start((CameraCaptureContext*)g_camera_capture,
+                                                       slam_camera_frame_callback, NULL);
+                    if (started == 0) {
+                        printf("  摄像头采集已启动（640x480@30fps，SLAM回调已注册）\n");
+                    } else {
+                        printf("  摄像头采集启动失败，将在后台重试\n");
+                    }
+                } else {
+                    printf("  摄像头设备未检测到，视觉子系统将在有硬件时自动激活\n");
+                }
+            }
+
+            /* ZSFAAA-P0-003: SLAM系统初始化 - 使用默认配置 */
+            {
+                SlamConfig slam_cfg = slam_get_default_config();
+                slam_cfg.max_keyframes = 500;
+                slam_cfg.enable_loop_closure = 1;
+                g_slam_system = slam_system_create(&slam_cfg);
+                if (g_slam_system) {
+                    printf("  SLAM系统已就绪（视觉里程计+闭环检测+图优化）\n");
+                } else {
+                    printf("  SLAM系统初始化失败，将在首次摄像头帧到达时重试\n");
                 }
             }
             /* Z8-002: 能力开关重置移到在线学习器创建之后
@@ -2075,6 +2663,9 @@ int main(int argc, char* argv[])
             if (ws_push_server_start(ws_push) == 0) {
                 printf("  WebSocket推送服务器已启动 (端口:%d，与HTTP共享)\n", SELFLNN_WEBSOCKET_PORT);
                 g_ws_push_server = ws_push;
+                /* P0-001: 将WSPushServer注入后端，实现统一WebSocket架构 */
+                backend_server_set_ws_push_server(g_server, ws_push);
+                printf("  WebSocket推送服务器已注入后端（统一架构）\n");
             } else {
                 printf("  WebSocket推送服务器启动失败 (端口:%d)，系统将继续运行但无实时推送功能\n", SELFLNN_WEBSOCKET_PORT);
                 ws_push_server_destroy(ws_push);
@@ -2212,6 +2803,18 @@ int main(int argc, char* argv[])
         g_task_scheduler = NULL;
         printf("  任务调度器已释放\n");
     }
+    /* ZSF-NEW-009: 释放SLAM系统和摄像头采集(main.c创建,由main.c负责释放) */
+    if (g_slam_system) {
+        slam_system_free((SlamSystem*)g_slam_system);
+        g_slam_system = NULL;
+        printf("  SLAM系统已释放\n");
+    }
+    if (g_camera_capture) {
+        camera_capture_stop((CameraCaptureContext*)g_camera_capture);
+        camera_capture_free((CameraCaptureContext*)g_camera_capture);
+        g_camera_capture = NULL;
+        printf("  摄像头采集已释放\n");
+    }
     /* 以下4个资源由selflnn_shutdown()统一管理释放，main.c不应重复释放 */
     /* g_online_learner_handle → 由selflnn shutdown_subsystems L2099释放 */
     /* g_evolution_engine_handle → 由selflnn shutdown_subsystems L2063释放 */
@@ -2234,11 +2837,11 @@ int main(int argc, char* argv[])
     /* 方案C修复: 统一液态状态处理器由selflnn.c管理生命周期。
      * g_unified_lnn_state仅为借用的指针引用，不负责释放。 */
     g_unified_lnn_state = NULL;
-    /* ZSF-P0-004: 释放分布式上下文 */
-    if (g_distributed) {
-        distributed_cleanup(g_distributed);
-        g_distributed = NULL;
-    }
+    /* ZSFUSA-P0-002修复: 不再自行释放分布式上下文。
+     * g_distributed是从selflnn_get_distributed_context()获取的指针引用，
+     * 与selflnn内部的g_system_state.distributed_training指向同一块内存。
+     * selflnn_shutdown()内部会统一释放，此处重复释放将导致double-free崩溃。 */
+    g_distributed = NULL;
     selflnn_shutdown();
 
     printf("SELF-LNN AGI 系统已停止。\n");

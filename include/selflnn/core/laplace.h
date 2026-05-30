@@ -32,6 +32,7 @@ typedef struct {
     float max_frequency;     /**< 最大分析频率 (Hz) */
     float min_frequency;     /**< 最小分析频率 (Hz) */
     int enable_stability;    /**< 是否启用稳定性分析 */
+    size_t buffer_size;      /**< 内部缓冲区大小（字节），用于稳定性分析缓冲区分配 */
     int enable_frequency;    /**< 是否启用频域分析 */
     int enable_optimization; /**< 是否启用优化 */
     float cutoff_frequency;  /**< 截止频率 (Hz) */
@@ -186,6 +187,42 @@ int laplace_analyzer_set_config(LaplaceAnalyzer* analyzer, const LaplaceConfig* 
  * @param analyzer 分析器句柄
  */
 void laplace_analyzer_reset(LaplaceAnalyzer* analyzer);
+
+/* ================================================================
+ * ZSFUSA-P3补: 极点分析和稳定性裕度查询API
+ * 这些函数访问缓存的StabilityAnalysis结果(last_analysis)，
+ * 为laplace_unified_health_check提供真实诊断数据。
+ * ================================================================ */
+
+/**
+ * @brief 获取缓存的极点总数
+ * @return 极点数量（需先调用laplace_analyze_stability填充缓存）
+ */
+int laplace_analyzer_count_poles(const LaplaceAnalyzer* analyzer);
+
+/**
+ * @brief 获取不稳定极点数量（实部>=0）
+ * @return 不稳定极点数量
+ */
+int laplace_analyzer_count_unstable_poles(const LaplaceAnalyzer* analyzer);
+
+/**
+ * @brief 获取稳定性裕度
+ * @param gain_margin 输出: 增益裕度(dB)，越高越稳定
+ * @param phase_margin 输出: 相位裕度(度)
+ * @return 0成功，-1失败(no cached analysis)
+ */
+int laplace_analyzer_get_stability_margins(const LaplaceAnalyzer* analyzer,
+                                           float* gain_margin, float* phase_margin);
+
+/**
+ * @brief 获取频域响应数据
+ * @param freq_response 输出: 频率响应数组(需调用者释放)
+ * @param size 输出: 数组大小
+ * @return 0成功，-1失败
+ */
+int laplace_analyzer_get_frequency_response(const LaplaceAnalyzer* analyzer,
+                                            float** freq_response, size_t* size);
 
 /**
  * @brief 拉普拉斯频域调制隐藏状态
@@ -525,6 +562,12 @@ int laplace_design_pid(const float* numerator, const float* denominator,
  */
 int laplace_check_stability_fast(const float* denominator, size_t den_order,
                                   int* is_stable, float* stability_margin);
+
+/* ZSFUSA: 创建默认拉普拉斯分析器 */
+void* lnn_laplace_create_default_analyzer(void);
+
+/* ZSFUSA: 获取拉普拉斯频谱 */
+int laplace_unified_get_spectrum(void* analyzer, float* spectrum, size_t size);
 
 #ifdef __cplusplus
 }

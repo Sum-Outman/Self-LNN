@@ -1507,11 +1507,11 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config)
     }
 
     gen->initialized = 1;
-    /* ZSFWS-016修复: 创建时标记为已训练
-     * 生成器使用Xavier初始化权重（神经网络标准做法），可立即工作。
-     * 之前is_trained默认为0且mark_trained从未被调用，导致dg_generate_response
-     * 第一步就返回-2，CfC ODE对话生成完全不可用。 */
-    gen->is_trained = 1;
+    /* ZSFLYF-P0-003修复: 删除虚假的"已训练"标记。
+     * Xavier随机初始化不代表已训练，未训练的随机权重不能产生有意义的回复。
+     * 生成器创建后必须经过真实训练(前向传播+反向传播+多轮迭代)后才能标记为已训练。
+     * 调用者在生成器未训练时应正确处理 -2 错误码并告知用户需要先训练模型。 */
+    gen->is_trained = 0;
     return gen;
 }
 
@@ -2830,14 +2830,24 @@ int dg_generate_response(DialogueGenerator* gen,
      * ============================================================ */
     if (confidence) {
         if (total_chars > 0) {
-            /* 置信度基于生成文本长度和知识库使用情况 */
-            *confidence = 0.75f;
-            if (kb_used) *confidence += 0.10f;  /* 知识增强提高置信度 */
-            if (total_chars < 4) *confidence -= 0.15f;  /* 过短回复降低置信度 */
+            /* ZSFLYF-P1-005修复: 置信度从CfC状态向量的输出熵动态计算。 */
+            *confidence = 0.0f;
+            float* final_state = dg_get_current_state(gen);
+            if (final_state && gen->config.hidden_size > 0) {
+                float entropy = 0.0f;
+                for (size_t i = 0; i < gen->config.hidden_size; i++) {
+                    float p = fabsf(final_state[i]);
+                    if (p > 1e-9f && p < 1.0f) entropy -= p * logf(p);
+                }
+                float max_entropy = logf((float)gen->config.hidden_size) + 1e-9f;
+                *confidence = 1.0f - (entropy / max_entropy);
+            }
+            if (kb_used) *confidence *= 1.10f;
+            if (total_chars < 4) *confidence *= 0.80f;
             if (*confidence > 0.95f) *confidence = 0.95f;
-            if (*confidence < 0.40f) *confidence = 0.40f;
+            if (*confidence < 0.20f) *confidence = 0.20f;
         } else {
-            *confidence = 0.10f;
+            *confidence = 0.0f;
         }
     }
 

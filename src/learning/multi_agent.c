@@ -64,6 +64,8 @@ typedef struct {
     float global_reward;
     float evaluation_time;
     AgentPerformance individual_performance[10];
+    float* metrics;
+    int metric_count;
 } MultiAgentPerformance;
 
 /* Agent 内部结构体定义 */
@@ -95,6 +97,13 @@ struct Agent {
     float* reward_buffer;
     float* next_observation_buffer;
     int* done_buffer;
+    int is_active;
+    float reward;
+    float* capability_vector;
+    size_t capability_dim;
+    float* knowledge_vector;
+    size_t knowledge_dim;
+    float workload;
 };
 
 /* MultiAgentSystem 内部结构体定义 */
@@ -4050,7 +4059,7 @@ int ma_cfc_select_actions(MultiAgentSystem* system, const float* states,
             return coma_select_actions(data, states, actions, epsilon);
         }
         default:
-            return multi_agent_system_run(system, 1);
+        return multi_agent_system_run(system, 1);
     }
 }
 
@@ -4094,4 +4103,687 @@ int ma_cfc_train_step(MultiAgentSystem* system, const float* states,
         default:
             return multi_agent_system_run(system, 1);
     }
+}
+
+/* ZSF-NEW-003修复: 多智能体系统评估性能 - 基于真实系统状态计算指标 */
+int multi_agent_evaluate_performance(MultiAgentSystem* system, float* metrics, int max_metrics) {
+    if (!system || !metrics || max_metrics <= 0) return -1;
+
+    int count = 0;
+
+    /* 指标1: 全局奖励 (基于agent平均奖励) */
+    if (count < max_metrics) {
+        float total_reward = 0.0f;
+        int active_count = 0;
+        for (int i = 0; i < system->agent_count && i < 128; i++) {
+            if (system->agents[i] && system->agents[i]->is_active) {
+                total_reward += system->agents[i]->reward;
+                active_count++;
+            }
+        }
+        metrics[count++] = (active_count > 0) ? (total_reward / (float)active_count) : 0.0f;
+    }
+
+    /* 指标2: 通信效率 */
+    if (count < max_metrics) {
+        metrics[count++] = system->communication_efficiency;
+    }
+
+    /* 指标3: 协作效率 (活跃任务完成率) */
+    if (count < max_metrics) {
+        float collab = 0.0f;
+        if (system->active_task_count + system->completed_task_count > 0) {
+            collab = (float)system->completed_task_count /
+                     (float)(system->active_task_count + system->completed_task_count);
+        }
+        metrics[count++] = collab;
+    }
+
+    /* 指标4: 同步误差 (共识质量) */
+    if (count < max_metrics) {
+        metrics[count++] = system->synchronization_error;
+    }
+
+    /* 指标5: 全局状态稳定性 */
+    if (count < max_metrics && system->shared_knowledge && system->shared_knowledge_size > 0) {
+        float variance = 0.0f;
+        float mean = 0.0f;
+        size_t sz = system->shared_knowledge_size < 256 ? system->shared_knowledge_size : 256;
+        for (size_t i = 0; i < sz; i++) {
+            mean += system->shared_knowledge[i];
+        }
+        mean /= (float)sz;
+        for (size_t i = 0; i < sz; i++) {
+            float d = system->shared_knowledge[i] - mean;
+            variance += d * d;
+        }
+        variance /= (float)sz;
+        metrics[count++] = 1.0f / (1.0f + variance);
+    }
+
+    /* 保存到系统性能记录 */
+    for (int i = 0; i < count && i < 8; i++) {
+        system->performance.metrics[i] = metrics[i];
+    }
+    system->performance.metric_count = count;
+
+    return count;
+}
+
+/* ZSF-NEW-003修复: 多智能体执行任务 - 真实分配、调度和初始化 */
+int multi_agent_execute_task(MultiAgentSystem* system, CollaborativeTask* task) {
+    if (!system || !task) return -1;
+    if (!system->enabled) return -1;
+
+    /* 检查任务是否已在队列中 */
+    for (int i = 0; i < system->active_task_count; i++) {
+        if (system->active_tasks[i] == task) {
+            /* 任务已在执行中，推进其进度 */
+            task->task_status = TASK_STATUS_IN_PROGRESS;
+            return 0;
+        }
+    }
+
+    /* 添加到活跃任务队列 */
+    if (system->active_task_count >= 64) return -1;
+    if (!system->active_tasks) {
+        system->active_tasks = (CollaborativeTask**)safe_calloc(64, sizeof(CollaborativeTask*));
+        if (!system->active_tasks) return -1;
+    }
+
+    system->active_tasks[system->active_task_count] = task;
+    system->active_task_count++;
+    task->task_status = TASK_STATUS_IN_PROGRESS;
+
+    /* 根据agent能力分配任务 */
+    int best_agent_idx = -1;
+    float best_score = -1.0f;
+    for (int i = 0; i < system->agent_count && i < 128; i++) {
+        if (!system->agents[i] || !system->agents[i]->is_active) continue;
+        /* 计算任务-智能体匹配分数 */
+        float score = 0.0f;
+        if (system->agents[i]->capability_vector) {
+            for (int j = 0; j < 16; j++) {
+                score += system->agents[i]->capability_vector[j] * (float)(j + 1);
+            }
+        }
+        score *= (1.0f - system->agents[i]->workload);
+        if (score > best_score) {
+            best_score = score;
+            best_agent_idx = i;
+        }
+    }
+
+    if (best_agent_idx >= 0) {
+        task->assigned_agent = best_agent_idx;
+        task->completed_agents = 1;
+        system->agents[best_agent_idx]->workload += 0.2f;
+        if (system->agents[best_agent_idx]->workload > 1.0f)
+            system->agents[best_agent_idx]->workload = 1.0f;
+    } else {
+        task->assigned_agent = -1;
+        task->completed_agents = 0;
+    }
+
+    return 0;
+}
+
+/* ZSF-NEW-003修复: 多智能体发送消息 - 真实消息缓冲和传递 */
+int multi_agent_send_message(MultiAgentSystem* system, const AgentMessage* message) {
+    if (!system || !message) return -1;
+    if (!system->enabled) return -1;
+
+    /* 动态扩容消息缓冲区 */
+    if (system->global_message_count >= system->global_message_capacity) {
+        int new_cap = system->global_message_capacity == 0 ? 64 : system->global_message_capacity * 2;
+        AgentMessage** new_buf = (AgentMessage**)safe_realloc(
+            system->global_messages, new_cap * sizeof(AgentMessage*));
+        if (!new_buf) return -1;
+        system->global_messages = new_buf;
+        system->global_message_capacity = new_cap;
+    }
+
+    /* 复制消息 */
+    AgentMessage* msg_copy = (AgentMessage*)safe_malloc(sizeof(AgentMessage));
+    if (!msg_copy) return -1;
+    memcpy(msg_copy, message, sizeof(AgentMessage));
+    if (message->content && message->content_size > 0) {
+        msg_copy->content = safe_malloc(message->content_size);
+        if (msg_copy->content) {
+            memcpy(msg_copy->content, message->content, message->content_size);
+        }
+    }
+    msg_copy->timestamp = (float)time(NULL);
+
+    /* 投递消息 */
+    system->global_messages[system->global_message_count] = msg_copy;
+    system->global_message_count++;
+
+    /* 更新通信效率 */
+    system->communication_efficiency = system->communication_efficiency * 0.95f + 0.05f;
+
+    return 0;
+}
+
+/* ZSF-NEW-003修复: 多智能体形成联盟 - 基于能力和任务需求匹配 */
+int multi_agent_form_coalition(MultiAgentSystem* system, const CollaborativeTask* task,
+                                int* coalition_ids, int max_ids) {
+    if (!system || !coalition_ids || max_ids <= 0) return 0;
+    if (!system->enabled) return 0;
+
+    /* 收集所有活跃agent的能力评分 */
+    typedef struct { int idx; float score; } AgentScore;
+    AgentScore scores[128];
+    int score_count = 0;
+
+    for (int i = 0; i < system->agent_count && i < 128; i++) {
+        if (!system->agents[i] || !system->agents[i]->is_active) continue;
+        if (system->agents[i]->workload > 0.8f) continue;
+
+        float score = system->agents[i]->reward * 0.3f +
+                      (1.0f - system->agents[i]->workload) * 0.4f;
+
+        /* 能力匹配度 */
+        if (system->agents[i]->capability_vector && task) {
+            float cap_match = 0.0f;
+            for (int j = 0; j < 16; j++) {
+                cap_match += system->agents[i]->capability_vector[j];
+            }
+            score += cap_match * 0.3f;
+        }
+
+        scores[score_count].idx = i;
+        scores[score_count].score = score;
+        score_count++;
+    }
+
+    /* 按分数降序排序（简单选择排序） */
+    for (int i = 0; i < score_count - 1; i++) {
+        int best = i;
+        for (int j = i + 1; j < score_count; j++) {
+            if (scores[j].score > scores[best].score) best = j;
+        }
+        if (best != i) {
+            AgentScore tmp = scores[i];
+            scores[i] = scores[best];
+            scores[best] = tmp;
+        }
+    }
+
+    /* 选择前N个agent形成联盟 */
+    int count = 0;
+    int min_agents = (task && task->required_agents > 0) ? task->required_agents : 2;
+    if (min_agents > max_ids) min_agents = max_ids;
+
+    for (int i = 0; i < score_count && count < min_agents; i++) {
+        coalition_ids[count++] = scores[i].idx;
+    }
+
+    /* 如果agent不够，填充可用agent */
+    for (int i = 0; i < system->agent_count && count < min_agents; i++) {
+        if (!system->agents[i] || !system->agents[i]->is_active) continue;
+        int already_in = 0;
+        for (int j = 0; j < count; j++) {
+            if (coalition_ids[j] == i) { already_in = 1; break; }
+        }
+        if (!already_in) coalition_ids[count++] = i;
+    }
+
+    return count;
+}
+
+/* ZSF-NEW-003修复: 多智能体达成共识 - 真实共识迭代算法 */
+int multi_agent_reach_consensus(MultiAgentSystem* system, const int* agent_ids,
+                                int agent_count, const void* proposal, void* result) {
+    if (!system || !agent_ids || agent_count <= 0 || !proposal || !result) return -1;
+    if (!system->enabled) return -1;
+
+    const float* prop_vec = (const float*)proposal;
+    float* result_vec = (float*)result;
+
+    /* 初始化共识值为提案值的平均 */
+    size_t vec_size = 64; /* 默认向量大小 */
+    float* consensus = (float*)safe_calloc(vec_size, sizeof(float));
+    if (!consensus) return -1;
+
+    for (size_t i = 0; i < vec_size; i++) {
+        consensus[i] = prop_vec[i];
+    }
+
+    /* 共识迭代: 每个agent基于其本地知识对共识值进行加权调整 */
+    int max_rounds = system->consensus_rounds > 0 ? system->consensus_rounds : 10;
+    float prev_error = 1e9f;
+
+    for (int round = 0; round < max_rounds; round++) {
+        float* new_consensus = (float*)safe_calloc(vec_size, sizeof(float));
+        if (!new_consensus) { safe_free((void**)&consensus); return -1; }
+
+        float total_weight = 0.0f;
+
+        for (int a = 0; a < agent_count && a < 128; a++) {
+            int agent_idx = agent_ids[a];
+            if (agent_idx < 0 || agent_idx >= system->agent_count) continue;
+            if (!system->agents[agent_idx] || !system->agents[agent_idx]->is_active) continue;
+
+            /* agent的权重基于其性能（奖励和工作负载） */
+            float weight = system->agents[agent_idx]->reward + 1.0f;
+            weight *= (1.0f - system->agents[agent_idx]->workload * 0.5f);
+            if (weight < 0.01f) weight = 0.01f;
+
+            /* agent贡献: 将共识值靠近agent的本地知识 */
+            float* agent_knowledge = system->agents[agent_idx]->knowledge_vector;
+            if (agent_knowledge) {
+                for (size_t i = 0; i < vec_size; i++) {
+                    new_consensus[i] += weight * (consensus[i] * 0.7f + agent_knowledge[i] * 0.3f);
+                }
+            } else {
+                for (size_t i = 0; i < vec_size; i++) {
+                    new_consensus[i] += weight * consensus[i];
+                }
+            }
+            total_weight += weight;
+        }
+
+        if (total_weight > 1e-10f) {
+            for (size_t i = 0; i < vec_size; i++) {
+                new_consensus[i] /= total_weight;
+            }
+        }
+
+        /* 计算收敛误差 */
+        float error = 0.0f;
+        for (size_t i = 0; i < vec_size; i++) {
+            float diff = new_consensus[i] - consensus[i];
+            error += diff * diff;
+        }
+        error = sqrtf(error / (float)vec_size);
+
+        /* 更新共识值 */
+        memcpy(consensus, new_consensus, vec_size * sizeof(float));
+        safe_free((void**)&new_consensus);
+
+        /* 收敛检测 */
+        if (error < 0.001f || (round > 2 && error >= prev_error * 0.99f)) {
+            break;
+        }
+        prev_error = error;
+    }
+
+    /* 输出共识结果 */
+    memcpy(result_vec, consensus, vec_size * sizeof(float));
+    system->synchronization_error = prev_error;
+
+    /* 更新共识状态 */
+    if (system->consensus_values && vec_size > 0) {
+        memcpy(system->consensus_values, consensus, vec_size * sizeof(float));
+    }
+    system->consensus_convergence = 1.0f / (1.0f + prev_error);
+    system->consensus_reached = (prev_error < 0.01f) ? 1 : 0;
+
+    safe_free((void**)&consensus);
+    return 0;
+}
+
+/* ============================================================================
+ * ZSFZS-F025: 缺失的多智能体接口实现
+ * 以下函数在 multi_agent.h 中声明但之前未实现，现提供完整的真实实现。
+ * ============================================================================ */
+
+/**
+ * @brief 向多智能体系统添加智能体
+ *
+ * 创建一个新的智能体并注册到系统中，分配唯一ID。
+ * @param system 多智能体系统
+ * @param agent_config 智能体配置
+ * @return 智能体ID，失败返回-1
+ */
+int multi_agent_add_agent(MultiAgentSystem* system, const AgentConfig* agent_config) {
+    if (!system || !agent_config) return -1;
+
+    system_mutex_lock(&system->system_mutex);
+
+    if (system->agent_count >= system->agent_capacity) {
+        int new_capacity = system->agent_capacity + 16;
+        Agent** new_agents = (Agent**)safe_realloc(system->agents, new_capacity * sizeof(Agent*));
+        if (!new_agents) {
+            system_mutex_unlock(&system->system_mutex);
+            return -1;
+        }
+        system->agents = new_agents;
+        system->agent_capacity = new_capacity;
+    }
+
+    Agent* agent = agent_create(agent_config);
+    if (!agent) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    agent->state.agent_id = system->agent_count;
+    agent->state.available = 1;
+    agent->state.energy_level = 1.0f;
+    agent->state.capability_level = agent_config->initial_capability;
+
+    system->agents[system->agent_count] = agent;
+    int agent_id = system->agent_count;
+    system->agent_count++;
+
+    system_mutex_unlock(&system->system_mutex);
+    return agent_id;
+}
+
+/**
+ * @brief 从多智能体系统移除智能体
+ *
+ * 清理智能体资源并从系统中注销。
+ * @param system 多智能体系统
+ * @param agent_id 智能体ID
+ * @return 成功返回0，失败返回-1
+ */
+int multi_agent_remove_agent(MultiAgentSystem* system, int agent_id) {
+    if (!system || agent_id < 0 || agent_id >= system->agent_count) return -1;
+
+    system_mutex_lock(&system->system_mutex);
+
+    Agent* agent = system->agents[agent_id];
+    if (!agent) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    agent_destroy(agent);
+
+    for (int i = agent_id; i < system->agent_count - 1; i++) {
+        system->agents[i] = system->agents[i + 1];
+        if (system->agents[i]) {
+            system->agents[i]->state.agent_id = i;
+        }
+    }
+    system->agents[system->agent_count - 1] = NULL;
+    system->agent_count--;
+
+    system_mutex_unlock(&system->system_mutex);
+    return 0;
+}
+
+/**
+ * @brief 接收智能体消息
+ *
+ * 获取指定智能体的消息队列中所有未读消息。
+ * @param system 多智能体系统
+ * @param agent_id 智能体ID
+ * @param messages 消息输出数组
+ * @return 消息数量，失败返回-1
+ */
+int multi_agent_receive_messages(MultiAgentSystem* system, int agent_id, AgentMessage** messages) {
+    if (!system || agent_id < 0 || agent_id >= system->agent_count) return -1;
+    if (!messages) return -1;
+
+    system_mutex_lock(&system->system_mutex);
+
+    Agent* agent = system->agents[agent_id];
+    if (!agent) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    int count = 0;
+    for (int i = 0; i < agent->message_count; i++) {
+        if (agent->message_queue[i] && !agent->message_queue[i]->read) {
+            messages[count] = agent->message_queue[i];
+            agent->message_queue[i]->read = 1;
+            agent->message_queue[i]->delivered = 1;
+            count++;
+        }
+    }
+
+    system_mutex_unlock(&system->system_mutex);
+    return count;
+}
+
+/**
+ * @brief 向智能体分配任务
+ *
+ * 根据智能体能力和可用性选择最合适的智能体执行任务。
+ * @param system 多智能体系统
+ * @param task 协作任务
+ * @param agent_ids 输出分配到的智能体ID数组
+ * @return 分配的智能体数量，失败返回-1
+ */
+int multi_agent_allocate_task(MultiAgentSystem* system, CollaborativeTask* task,
+                              int* agent_ids) {
+    if (!system || !task || !agent_ids) return -1;
+
+    system_mutex_lock(&system->system_mutex);
+
+    int allocated = 0;
+    int required = (task->required_agents > 0) ? task->required_agents : 1;
+    if (required > system->agent_count) required = system->agent_count;
+
+    float* scores = (float*)safe_calloc(system->agent_count, sizeof(float));
+    if (!scores) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    for (int i = 0; i < system->agent_count; i++) {
+        Agent* agent = system->agents[i];
+        if (!agent || !agent->state.available || agent->state.busy) {
+            scores[i] = -1.0f;
+            continue;
+        }
+        scores[i] = compute_task_utility(task, agent);
+    }
+
+    for (int r = 0; r < required; r++) {
+        int best_id = -1;
+        float best_score = -0.1f;
+        for (int i = 0; i < system->agent_count; i++) {
+            int already_selected = 0;
+            for (int j = 0; j < allocated; j++) {
+                if (agent_ids[j] == i) { already_selected = 1; break; }
+            }
+            if (!already_selected && scores[i] > best_score) {
+                best_score = scores[i];
+                best_id = i;
+            }
+        }
+        if (best_id >= 0) {
+            agent_ids[allocated++] = best_id;
+            system->agents[best_id]->state.busy = 1;
+        }
+    }
+
+    if (allocated > 0) {
+        task->task_status = TASK_STATUS_ASSIGNED;
+        task->assigned_agents = allocated;
+    }
+
+    safe_free((void**)&scores);
+    system_mutex_unlock(&system->system_mutex);
+    return allocated;
+}
+
+/**
+ * @brief 更新智能体状态
+ *
+ * 用新的状态数据覆盖指定智能体的当前状态。
+ * @param system 多智能体系统
+ * @param agent_id 智能体ID
+ * @param new_state 新状态
+ * @return 成功返回0，失败返回-1
+ */
+int multi_agent_update_state(MultiAgentSystem* system, int agent_id,
+                             const AgentState* new_state) {
+    if (!system || agent_id < 0 || agent_id >= system->agent_count) return -1;
+    if (!new_state) return -1;
+
+    system_mutex_lock(&system->system_mutex);
+
+    Agent* agent = system->agents[agent_id];
+    if (!agent) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    memcpy(&agent->state, new_state, sizeof(AgentState));
+
+    system_mutex_unlock(&system->system_mutex);
+    return 0;
+}
+
+/**
+ * @brief 获取智能体状态
+ *
+ * 读取指定智能体的当前状态信息。
+ * @param system 多智能体系统
+ * @param agent_id 智能体ID
+ * @param state 状态输出
+ * @return 成功返回0，失败返回-1
+ */
+int multi_agent_get_state(MultiAgentSystem* system, int agent_id, AgentState* state) {
+    if (!system || agent_id < 0 || agent_id >= system->agent_count) return -1;
+    if (!state) return -1;
+
+    system_mutex_lock(&system->system_mutex);
+
+    Agent* agent = system->agents[agent_id];
+    if (!agent) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    memcpy(state, &agent->state, sizeof(AgentState));
+
+    system_mutex_unlock(&system->system_mutex);
+    return 0;
+}
+
+/**
+ * @brief 多智能体集体学习
+ *
+ * 使用分布式学习数据对所有智能体进行联合知识更新。
+ * 每个智能体基于学习数据和自身经验进行增量学习。
+ * @param system 多智能体系统
+ * @param learning_data 学习数据
+ * @param data_size 数据大小
+ * @return 成功返回0，失败返回-1
+ */
+int multi_agent_collective_learning(MultiAgentSystem* system, const void* learning_data,
+                                    size_t data_size) {
+    if (!system || !learning_data || data_size == 0) return -1;
+
+    system_mutex_lock(&system->system_mutex);
+
+    const float* data_vec = (const float*)learning_data;
+    size_t vec_size = data_size / sizeof(float);
+    if (vec_size == 0) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    for (int i = 0; i < system->agent_count; i++) {
+        Agent* agent = system->agents[i];
+        if (!agent || !agent->state.available) continue;
+
+        if (agent->local_knowledge && agent->knowledge_size > 0) {
+            size_t copy_count = (vec_size < (size_t)agent->knowledge_size) ?
+                                vec_size : (size_t)agent->knowledge_size;
+            float lr = agent->config.learning_rate;
+            for (size_t j = 0; j < copy_count; j++) {
+                agent->local_knowledge[j] = (1.0f - lr) * agent->local_knowledge[j]
+                                            + lr * data_vec[j];
+            }
+        }
+
+        if (system->shared_knowledge && system->shared_knowledge_size > 0) {
+            size_t copy_count = (vec_size < system->shared_knowledge_size) ?
+                                vec_size : system->shared_knowledge_size;
+            float lr = agent->config.learning_rate * 0.5f;
+            for (size_t j = 0; j < copy_count; j++) {
+                system->shared_knowledge[j] = (1.0f - lr) * system->shared_knowledge[j]
+                                              + lr * data_vec[j];
+            }
+        }
+
+        agent->cumulative_reward += 1.0f;
+        agent->decisions_made++;
+    }
+
+    system->synchronization_counter++;
+    system_mutex_unlock(&system->system_mutex);
+    return 0;
+}
+
+/**
+ * @brief 智能体间知识共享
+ *
+ * 将源智能体的知识传播给目标智能体列表，实现知识迁移。
+ * @param system 多智能体系统
+ * @param source_agent 源智能体ID
+ * @param target_agents 目标智能体ID数组
+ * @param target_count 目标数量
+ * @param knowledge_data 知识数据
+ * @param data_size 数据大小
+ * @return 成功返回0，失败返回-1
+ */
+int multi_agent_share_knowledge(MultiAgentSystem* system, int source_agent,
+                                const int* target_agents, int target_count,
+                                const void* knowledge_data, size_t data_size) {
+    if (!system || source_agent < 0 || source_agent >= system->agent_count) return -1;
+    if (!target_agents || target_count <= 0) return -1;
+    if (!knowledge_data || data_size == 0) return -1;
+
+    system_mutex_lock(&system->system_mutex);
+
+    Agent* source = system->agents[source_agent];
+    if (!source || !source->state.available) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    const float* knowledge_vec = (const float*)knowledge_data;
+    size_t vec_size = data_size / sizeof(float);
+    if (vec_size == 0) {
+        system_mutex_unlock(&system->system_mutex);
+        return -1;
+    }
+
+    int shared_count = 0;
+    for (int t = 0; t < target_count; t++) {
+        int target_id = target_agents[t];
+        if (target_id < 0 || target_id >= system->agent_count) continue;
+        if (target_id == source_agent) continue;
+
+        Agent* target = system->agents[target_id];
+        if (!target || !target->state.available) continue;
+
+        if (target->local_knowledge && target->knowledge_size > 0) {
+            size_t copy_count = (vec_size < (size_t)target->knowledge_size) ?
+                                vec_size : (size_t)target->knowledge_size;
+            for (size_t j = 0; j < copy_count; j++) {
+                target->local_knowledge[j] = 0.7f * target->local_knowledge[j]
+                                             + 0.3f * knowledge_vec[j];
+            }
+            shared_count++;
+        }
+
+        if (target->collaborator_count < 10) {
+            int already_collaborator = 0;
+            for (int c = 0; c < target->collaborator_count; c++) {
+                if (target->collaborators[c] == source_agent) {
+                    already_collaborator = 1;
+                    break;
+                }
+            }
+            if (!already_collaborator) {
+                target->collaborators[target->collaborator_count] = source_agent;
+                target->collaboration_weights[target->collaborator_count] = 0.2f;
+                target->collaborator_count++;
+            }
+        }
+    }
+
+    system_mutex_unlock(&system->system_mutex);
+    return (shared_count > 0) ? 0 : -1;
 }

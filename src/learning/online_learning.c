@@ -762,7 +762,11 @@ int online_learner_update(OnlineLearner* learner,
                 if (update_kalman_filter(&learner->kalman_state,
                                           learner->weights,  // 当前权重作为测量
                                           learner->weights) != 0) {
-                    // 卡尔曼更新失败，回退到SGD
+                    /* P2-008: 卡尔曼更新失败，临时回退到SGD。
+                     * 卡尔曼滤波需要正定的协方差矩阵，当数值病态（如噪声极小或梯度骤变）
+                     * 时协方差可能退化，导致更新失败。此时回退到SGD作为安全降级路径，
+                     * 保证学习过程不中断。记录警告便于追踪卡尔曼滤波器健康状态。 */
+                    log_warn("[在线学习] 卡尔曼滤波更新失败(协方差可能退化)，临时回退到标准SGD更新");
                     for (size_t i = 0; i < learner->weights_size; i++) {
                         learner->weights[i] -= learner->current_learning_rate * gradient[i];
                     }

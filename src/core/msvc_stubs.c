@@ -35,9 +35,13 @@
  * msvc_stubs.c提供的是void pybullet_disconnect(int)空桩，
  * 两者同时编译到同一二进制会导致符号冲突。
  * 现改为条件编译：仅当未定义PYBULLET_BRIDGE_AVAILABLE时编译此桩。 */
+/* ZSFWS-P0-005修复: pybullet_disconnect返回类型从void改为int，
+ * 与pybullet_bridge.c中真实实现一致（int pybullet_disconnect(int)）。
+ * 之前void vs int签名不一致可导致符号冲突。 */
 #ifndef PYBULLET_BRIDGE_AVAILABLE
-void pybullet_disconnect(int connection_id) {
+int pybullet_disconnect(int connection_id) {
     (void)connection_id;
     log_warn("[MSVC桩] PyBullet断开连接: 此功能需Python/PyBullet环境，MSVC平台不可用");
+    return -1;  /* ZSFWS-P0-005: 返回-1表示不可用，与真实实现的错误语义一致 */
 }
 #endif

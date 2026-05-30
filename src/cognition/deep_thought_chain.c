@@ -46,6 +46,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/secure_random.h"   /* N-003: 安全随机数替代LCG */
+#include "selflnn/utils/string_utils.h"    /* ZSFUSA: safe_strdup宏 */
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>

@@ -12,6 +12,7 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/learning/reinforcement_learning.h" /* ZSFUSA: RL_CLAMP宏 */
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/gpu/gpu.h"

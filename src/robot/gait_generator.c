@@ -297,7 +297,6 @@ static void gait_lipm_compute_preview_gains(float omega, float dt,
      * Riccati方程解析解产生最优预览增益
      * 对于标量输入系统，最优增益 K = -R^(-1)*B'*P 其中P是代数Riccati解
      * 解析解: gain(k) = -(1/(ρ+C*P*C')) * B' * (A' - K*C')^k * C' */
-    (void)zc_over_g;
 
     /* Riccati方程解析解（标量输入LIPM） */
     float rho = 1e-6f; /* 控制代价权重，数值稳定性 */
@@ -499,10 +498,14 @@ GaitGenerator* gait_generator_create(const GaitConfig* config, const KinematicMo
     gen->lipm.com_z = gen->config.com_height;
     gen->lipm.omega = sqrtf(gen->config.gravity / gen->config.com_height);
 
-    /* 计算LIPM预览控制增益 */
+    /* 计算LIPM预览控制增益（X和Y方向） */
     float dt = 1.0f / gen->config.step_frequency / 10.0f;
     gait_lipm_compute_preview_gains(gen->lipm.omega, dt,
                                      GAIT_LIPM_PREVIEW_HORIZON, gen->lipm_gain_x);
+    /* ZSFLYF-P1-008修复: Y方向（侧向）预览控制增益也需计算。
+     * 之前只计算lipm_gain_x导致侧向预览控制完全失效。 */
+    gait_lipm_compute_preview_gains(gen->lipm.omega, dt,
+                                     GAIT_LIPM_PREVIEW_HORIZON, gen->lipm_gain_y);
 
     /* 初始化步态状态 */
     memset(&gen->state, 0, sizeof(GaitState));

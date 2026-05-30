@@ -80,9 +80,6 @@ var g_browserCompat = window.g_browserCompat || new BrowserCompat();
     
     LoadingOverlay.show('SELF-LNN 液态神经网络初始化中...');
 
-    /* 先隐藏加载动画，不阻塞页面显示 */
-    setTimeout(function() { LoadingOverlay.hide(); }, 1500);
-    
     try {
         g_dataEngine = new DataEngine();
         g_deviceManager = new DeviceManager();
@@ -110,10 +107,15 @@ var g_browserCompat = window.g_browserCompat || new BrowserCompat();
             showNotification('⚠️ 设备管理器初始化失败，部分硬件功能可能不可用', 'warning');
         });
         
-        /* 延迟8秒后启动DataEngine（确保所有静态资源先加载完毕） */
+        /* L04修复: DataEngine与LoadingOverlay同步，消除虚假"已加载"空窗期 */
         setTimeout(function() {
             g_dataEngine.start(3000);
-        }, 8000);
+            LoadingOverlay.hide();
+        }, 3000);
+    } catch (ex) {
+        LoadingOverlay.hide();
+        console.error('[SELF-LNN] 初始化异常:', ex);
+    }
         
 var g_dataEngineFirstConnect = true;
         g_dataEngine.addListener(function(data) {
@@ -132,25 +134,21 @@ var g_dataEngineFirstConnect = true;
                 showNotification('⚠️ 仪表盘数据更新异常: ' + e.message, 'warning');
             }
         });
-    } catch(e) {
-        console.error('[SELF-LNN] 系统初始化严重失败:', e && e.message ? e.message : e);
-        showNotification('❌ 系统初始化失败: ' + (e && e.message ? e.message : '未知错误') + '。请刷新页面重试。', 'danger');
-        LoadingOverlay.hide();
-    }
-
     LoadingOverlay.hide();
     
+    refreshAllSections();
     setTimeout(function() {
         if (g_dataEngineFirstConnect) {
+            console.warn('[SELF-LNN] 12秒兜底：后端仍未连接，再次尝试刷新');
             refreshAllSections();
         }
     }, 12000);
 })();
 
+/* ZSFUSA-F06: 独立刷新并行化，15个函数不再串行等待12秒 */
 async function refreshAllSections() {
     /* ZSFABC-016修复: 添加多模态状态刷新到定时更新周期中 */
     /* ZSFABC-017修复: 所有刷新函数统一从DataEngine读取真实数据，互不覆盖 */
-    var delayMs = 800;
     var sections = [
         { name: 'dashboard', fn: refreshDashboard },
         { name: 'knowledge', fn: refreshKnowledgeStats },
@@ -168,18 +166,28 @@ async function refreshAllSections() {
         { name: 'viz', fn: initVisualizationSystem },
         { name: 'chart', fn: initApiUsageChart }
     ];
-    for (var i = 0; i < sections.length; i++) {
-        var s = sections[i];
+    var completed = 0;
+    var promises = sections.map(function(s) {
         try {
             var r = s.fn();
-            if (r && r.then) { await r; }
+            if (r && r.then) {
+                return r.then(function() {
+                    completed++;
+                }).catch(function(e) {
+                    console.warn(s.name + ' 刷新失败:', e && e.message ? e.message : e);
+                    completed++;
+                });
+            }
+            completed++;
+            return Promise.resolve();
         } catch(e) {
-            console.warn(s.name + ':', e.message);
+            console.warn(s.name + ' 执行异常:', e && e.message ? e.message : e);
+            completed++;
+            return Promise.resolve();
         }
-        if (i < sections.length - 1) {
-            await new Promise(function(resolve) { setTimeout(resolve, delayMs); });
-        }
-    }
+    });
+    await Promise.all(promises);
+    console.log('[SELF-LNN] 并行刷新完成 ' + completed + '/' + sections.length + ' 个模块');
     /* ZSFABC-002修复: 删除硬编码假数据，改为读取真实系统状态 */
     var systemData = g_dataEngine ? g_dataEngine.getData() : null;
     if (systemData && systemData.system && systemData.system._connected) {
@@ -1534,19 +1542,68 @@ function updateLearningStatus(learningStatus) {
  */
 var g_pollThinkCounter = 0;
 async function pollRealTimeUpdates() {
-    // 注意：DataEngine._fetchAllData已处理主状态更新，这里只处理辅助数据
-
     try {
         const cogState = await window.SelfLnnApi.getCognitionState();
         if (cogState.success && cogState.data) {
             const d = cogState.data;
+            /* 自我反思 (H-002) */
             setEl('#cog-reflection', d.reflection || (d.data && d.data.reflection) || '等待自我反思数据更新...');
+            /* 自我限制认知 (H-002) */
+            setEl('#cog-limitations', d.limitations || '数据获取中...');
+            /* 自我改进建议 (H-002) */
+            setEl('#cog-suggestions', d.suggestions || '数据获取中...');
+            /* 能力评估 */
             if (d.capability) {
-                const cap = d.capability;
+                var cap = d.capability;
                 setEl('.cog-item:nth-child(1) .cog-value', (cap.reasoning_ability !== undefined ? (cap.reasoning_ability * 100).toFixed(0) : '--') + '%');
                 setEl('.cog-item:nth-child(2) .cog-value', (cap.learning_ability !== undefined ? (cap.learning_ability * 100).toFixed(0) : '--') + '%');
                 setEl('.cog-item:nth-child(3) .cog-value', (cap.planning_ability !== undefined ? (cap.planning_ability * 100).toFixed(0) : '--') + '%');
                 setEl('.cog-item:nth-child(4) .cog-value', (cap.adaptability !== undefined ? (cap.adaptability * 100).toFixed(0) : '--') + '%');
+            }
+            /* H-001: 知识元认知6指标 */
+            if (d.knowledge) {
+                var kn = d.knowledge;
+                setEl('#cog-known-concepts',        kn.known_concepts      !== undefined ? String(kn.known_concepts)      : '--');
+                setEl('#cog-unknown-concepts',      kn.unknown_concepts    !== undefined ? String(kn.unknown_concepts)    : '--');
+                setEl('#cog-knowledge-coverage',    kn.knowledge_coverage  !== undefined ? (kn.knowledge_coverage  * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-knowledge-confidence',  kn.knowledge_confidence  !== undefined ? (kn.knowledge_confidence  * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-knowledge-freshness',   kn.knowledge_freshness   !== undefined ? (kn.knowledge_freshness   * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-knowledge-consistency', kn.knowledge_consistency !== undefined ? (kn.knowledge_consistency * 100).toFixed(1) + '%' : '--');
+                var covFill = document.getElementById('cog-coverage-fill');
+                if (covFill) covFill.style.width = (kn.knowledge_coverage !== undefined ? (kn.knowledge_coverage * 100).toFixed(1) : '0') + '%';
+                var confFill = document.getElementById('cog-confidence-fill');
+                if (confFill) confFill.style.width = (kn.knowledge_confidence !== undefined ? (kn.knowledge_confidence * 100).toFixed(1) : '0') + '%';
+                var freshFill = document.getElementById('cog-freshness-fill');
+                if (freshFill) freshFill.style.width = (kn.knowledge_freshness !== undefined ? (kn.knowledge_freshness * 100).toFixed(1) : '0') + '%';
+                var consFill = document.getElementById('cog-consistency-fill');
+                if (consFill) consFill.style.width = (kn.knowledge_consistency !== undefined ? (kn.knowledge_consistency * 100).toFixed(1) : '0') + '%';
+            }
+            /* L-002: 当前目标面板 */
+            if (d.goal) {
+                var g = d.goal;
+                setEl('#cog-current-goal',     g.current_goal && g.current_goal !== 'none' ? g.current_goal : '无当前目标');
+                setEl('#cog-goal-priority',    g.goal_priority    !== undefined ? (g.goal_priority    * 100).toFixed(0) + '%' : '--');
+                setEl('#cog-goal-progress',    g.goal_progress    !== undefined ? (g.goal_progress    * 100).toFixed(0) + '%' : '--');
+                setEl('#cog-goal-feasibility', g.goal_feasibility !== undefined ? (g.goal_feasibility * 100).toFixed(0) + '%' : '--');
+                setEl('#cog-goal-confidence',  g.goal_confidence  !== undefined ? (g.goal_confidence  * 100).toFixed(0) + '%' : '--');
+            }
+            /* H-003: 学习进展认知6指标 */
+            if (d.learning) {
+                var l = d.learning;
+                setEl('#cog-learning-rate',       l.learning_rate      !== undefined ? (l.learning_rate      * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-learning-efficiency',  l.learning_efficiency !== undefined ? (l.learning_efficiency * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-train-acc',           l.training_accuracy  !== undefined ? (l.training_accuracy  * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-test-acc',            l.test_accuracy      !== undefined ? (l.test_accuracy      * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-generalization',      l.generalization     !== undefined ? (l.generalization     * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-evolution-progress',  l.evolution_progress !== undefined ? (l.evolution_progress * 100).toFixed(1) + '%' : '--');
+            }
+            /* L-001: 自我身份认知4指标 */
+            if (d.identity) {
+                var id = d.identity;
+                setEl('#cog-identity-evolution',   id.evolution_rate   !== undefined ? (id.evolution_rate   * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-identity-stability',   id.stability         !== undefined ? (id.stability         * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-identity-consistency', id.self_consistency !== undefined ? (id.self_consistency * 100).toFixed(1) + '%' : '--');
+                setEl('#cog-identity-continuity',  id.continuity_score !== undefined ? (id.continuity_score * 100).toFixed(1) + '%' : '--');
             }
         }
     } catch (e) {
@@ -1794,7 +1851,8 @@ function updateRealTimeMetrics(systemStatus) {
     // === AGI对话状态 ===
     var dlgStatus = document.getElementById('dialogue-model-status');
     var wsStatus = document.getElementById('dialogue-ws-status');
-    var wsReady = (typeof window.g_dataEngine !== 'undefined' && window.g_dataEngine && window.g_dataEngine.wsReady);
+    /* P2-06: 使用SelfLnnWebSocket真实连接状态代替不存在的g_dataEngine.wsReady */
+    var wsReady = (typeof window.SelfLnnWebSocket !== 'undefined' && window.SelfLnnWebSocket && window.SelfLnnWebSocket.isConnected);
     if (dlgStatus) dlgStatus.textContent = wsReady ? 'WS就绪' : 'HTTP模式';
     if (wsStatus) {
         wsStatus.textContent = wsReady ? 'WebSocket流式' : 'HTTP轮询';
@@ -2162,6 +2220,33 @@ function setupEventListeners() {
 
     // 初始化所有 range slider 的实时值显示
     initRangeSliders();
+
+    /* P2-06: WebSocket连接初始化 — 注册可视化WS处理器并建立连接 */
+    if (!window.__wsVisualizationConnected) {
+        window.__wsVisualizationConnected = true;
+        connectVisualizationWebSocket();
+    }
+
+    /* P2-06: 监听WebSocket连接状态变化，更新训练中心WS状态指示器 */
+    document.addEventListener('websocket-connection-status', function(e) {
+        var wsStatusEl = document.getElementById('ws-status');
+        if (!wsStatusEl) return;
+        if (e.detail && e.detail.connected) {
+            wsStatusEl.textContent = '已连接';
+            wsStatusEl.style.color = '#22c55e';
+        } else {
+            wsStatusEl.textContent = '未连接';
+            wsStatusEl.style.color = '#f87171';
+        }
+    });
+
+    /* P2-06: 监听WebSocket重连状态，更新WS状态指示器 */
+    document.addEventListener('websocket-reconnect-status', function(e) {
+        var wsStatusEl = document.getElementById('ws-status');
+        if (!wsStatusEl) return;
+        wsStatusEl.textContent = '重连中(' + e.detail.attempt + '/' + e.detail.maxAttempts + ')';
+        wsStatusEl.style.color = '#eab308';
+    });
 }
 
 /**
@@ -6087,7 +6172,7 @@ function triggerVisionInput() {
         showNotification('请先启用摄像头并获取画面', 'warning');
         return;
     }
-    window.SelfLnnApi.request('/api/vision', { method: 'POST', body: JSON.stringify({ image: imageData }) })
+    window.SelfLnnApi.request('/vision', { method: 'POST', body: JSON.stringify({ image: imageData }) })
         .then(function(r) { return r ? r.json() : null; })
         .then(function(data) {
             if (input) input.value += '\n[视觉输入已处理]';
@@ -6131,7 +6216,7 @@ function triggerSensorInput() {
         return;
     }
     var input = document.getElementById('dialogue-input');
-    window.SelfLnnApi.request('/api/sensor/pipeline/status', { method: 'GET' })
+    window.SelfLnnApi.request('/sensor/pipeline/status', { method: 'GET' })
         .then(function(r) { return r ? r.json() : null; })
         .then(function(data) {
             if (input) input.value += '\n[传感器数据已请求]';
@@ -6251,12 +6336,21 @@ async function setNewApiKey() {
 function generateNewApiKey() {
     var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
     var key = '';
-    /* ZSFABC-Fix: 使用crypto.getRandomValues替代Math.random确保API密钥安全 */
+    /* P2-006修复: 使用crypto.getRandomValues确保API密钥密码学安全
+     * 回退路径使用Date.now()+performance.now()+Math.random混合熵
+     * 替代纯Math.random，最大化不可预测性 */
     var randomBuf = new Uint32Array(32);
     if (window.crypto && window.crypto.getRandomValues) {
         window.crypto.getRandomValues(randomBuf);
     } else {
-        for (var i = 0; i < 32; i++) randomBuf[i] = Math.floor(Math.random() * 4294967296);
+        /* 强化回退：混合时间戳+性能计数器+导航计时+随机数多层熵 */
+        var entropy = Date.now() * 1000 + (window.performance ? performance.now() : 0) * 1000000;
+        for (var i = 0; i < 32; i++) {
+            entropy = (entropy * 1103515245 + 12345) >>> 0;
+            randomBuf[i] = (entropy ^ (Math.floor(Math.random() * 4294967296))) >>> 0;
+            /* 再次混合，增大未知数 */
+            entropy = ((entropy << 13) ^ (entropy >>> 19)) >>> 0;
+        }
     }
     for (var i = 0; i < 32; i++) {
         key += chars.charAt(randomBuf[i] % chars.length);

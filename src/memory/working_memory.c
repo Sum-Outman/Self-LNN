@@ -189,10 +189,7 @@ static int select_eviction_target(WorkingMemory* wm) {
 }
 
 static void clear_slot(WorkingMemorySlot* slot) {
-    if (slot->data) {
-        free(slot->data);
-        slot->data = NULL;
-    }
+    safe_free((void**)&slot->data);
     memset(slot->key, 0, WM_KEY_MAX);
     slot->data_size = 0;
     slot->focus = 0.0f;

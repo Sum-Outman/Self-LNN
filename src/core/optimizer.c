@@ -8,6 +8,11 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* C-014修复: 梯度裁剪默认阈值从魔法数字抽出为命名常量
+ * 当全局梯度的最大绝对值超过此阈值时，按比例缩放所有梯度
+ * 防止梯度爆炸导致训练不稳定 */
+#define OPTIMIZER_DEFAULT_GRAD_CLIP_NORM 10.0f
+
 struct Optimizer
 {
     OptimizerConfig config;
@@ -143,19 +148,34 @@ static int ensure_buffers(Optimizer* optimizer, size_t num_params)
     return 0;
 }
 
-int optimizer_step(Optimizer* optimizer, float* parameters, const float* gradients,
+int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                    size_t num_params, size_t step)
 {
     if (!optimizer || !parameters || !gradients || num_params == 0) return -1;
 
     if (ensure_buffers(optimizer, num_params) != 0) return -1;
     
+    /* R2-P9修复: 逐元素NaN/Inf梯度过滤，替代全步丢弃
+     * 原实现发现单个NaN梯度就丢弃整步更新，导致偶发NaN时所有参数停止学习。
+     * 修正：将NaN/Inf梯度清零，正常参数继续更新。
+     * ZSFUSA-C10: gradients改为非const以支持原地过滤 */
     {
-        size_t k;
-        for (k = 0; k < num_params; k++) {
-            if (!isfinite(gradients[k])) break;
+        float max_abs_g = 0.0f;
+        for (size_t k = 0; k < num_params; k++) {
+            float g = gradients[k];
+            if (!isfinite(g)) {
+                gradients[k] = 0.0f;
+            } else {
+                float abs_g = fabsf(g);
+                if (abs_g > max_abs_g) max_abs_g = abs_g;
+            }
         }
-        if (k < num_params) return -1;  /* NaN/Inf梯度，放弃本次更新 */
+        if (max_abs_g > OPTIMIZER_DEFAULT_GRAD_CLIP_NORM) {
+            float clip_ratio = OPTIMIZER_DEFAULT_GRAD_CLIP_NORM / max_abs_g;
+            for (size_t k = 0; k < num_params; k++) {
+                gradients[k] *= clip_ratio;
+            }
+        }
     }
     
     /* P2-004修复：(void)step仅限于非RANGER优化器分支，

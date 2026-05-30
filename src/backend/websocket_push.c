@@ -327,28 +327,7 @@ static void ws_client_close(WSClientInternal* cli)
     cli->closing = 0;
 }
 
-/* R5-⑦修复: ws_lock/ws_unlock为死代码，实际锁机制使用platform.c的mutex_lock/mutex_unlock
- * (Windows下用WaitForSingleObject, 非EnterCriticalSection)。
- * 保留此代码仅供文档参考，标注为DEPRECATED。 */
-#if 0  /* DEPRECATED: 使用mutex_lock/mutex_unlock替代 */
-static void ws_lock(void* mutex)
-{
-#ifdef _WIN32
-    if (mutex) EnterCriticalSection((CRITICAL_SECTION*)mutex);
-#else
-    if (mutex) pthread_mutex_lock((pthread_mutex_t*)mutex);
-#endif
-}
-
-static void ws_unlock(void* mutex)
-{
-#ifdef _WIN32
-    if (mutex) LeaveCriticalSection((CRITICAL_SECTION*)mutex);
-#else
-    if (mutex) pthread_mutex_unlock((pthread_mutex_t*)mutex);
-#endif
-}
-#endif /* DEPRECATED */
+/* R5-⑦修复: 实际锁机制使用platform.c的mutex_lock/mutex_unlock */
 
 /* WebSocket推送accept线程函数 */
 #ifdef _WIN32

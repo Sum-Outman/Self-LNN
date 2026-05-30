@@ -314,23 +314,6 @@ class DataEngine {
     }
 
     /**
-     * 获取历史数据（从后端获取）
-     */
-    async getHistory(key, count = 100) {
-        if (!this._backendConnected) return [];
-        try {
-            const response = await window.SelfLnnApi.getSystemStatus();
-            if (response.success && response.data && response.data.history) {
-                const h = response.data.history[key];
-                return h ? h.slice(-count) : [];
-            }
-        } catch (error) {
-            console.warn('获取历史数据失败:', error);
-        }
-        return [];
-    }
-
-    /**
      * 获取后端连接状态
      */
     isConnected() {

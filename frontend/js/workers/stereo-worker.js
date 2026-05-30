@@ -1,176 +1,164 @@
-/**
- * SELF-LNN AGI 立体匹配 Web Worker (M-026)
- * 
- * 将Census变换 + 汉明距离 + 亚像素插值 + 深度图计算移至Worker线程，
- * 避免在主线程阻塞UI。
- * 
- * 输入消息格式:
- *   { type: 'compute', leftData: Uint8ClampedArray, rightData: Uint8ClampedArray, 
- *     width: number, height: number, maxDisparity: number }
- * 
- * 输出消息格式:
- *   { type: 'result', disparityMap: Float32Array, confidenceMap: Float32Array,
- *     width: number, height: number, maxDisparity: number }
+/* ZSF-001修复: 立体视觉Census变换Web Worker
+ * 在独立线程中执行Census变换和Hamming距离立体匹配，避免阻塞主线程UI渲染。
+ * ZSF-001: 统一消息协议，与device-manager.js发送格式对齐
+ * 消息协议:
+ *   输入: { type: 'compute', leftBuffer: ArrayBuffer, rightBuffer: ArrayBuffer, width: number, height: number, maxDisparity: number }
+ *   输出: { type: 'result', disparityBuffer: ArrayBuffer, confidenceBuffer: ArrayBuffer, width: number, height: number }
+ *   错误: { type: 'error', message: string }
  */
 
-(function() {
-    'use strict';
+'use strict';
 
-    function toGrayscale(data, width, height) {
-        var len = width * height;
-        var gray = new Float32Array(len);
-        for (var i = 0; i < len; i++) {
-            var idx = i * 4;
-            gray[i] = data[idx] * 0.299 + data[idx + 1] * 0.587 + data[idx + 2] * 0.114;
-        }
-        return gray;
-    }
+/* Census变换: 将像素邻域编码为二进制描述符 */
+function censusTransform(pixels, width, height, x, y, windowRadius) {
+    var centerValue = pixels[(y * width + x) * 4];
+    var censusBits = 0;
+    var bitIndex = 0;
 
-    function computeCensus(gray, imgW, imgH) {
-        var census = new Array(imgW * imgH);
-        var cRad = 3;
-        var cBits = (2 * cRad + 1) * (2 * cRad + 1) - 1;
-        for (var y = cRad; y < imgH - cRad; y++) {
-            for (var x = cRad; x < imgW - cRad; x++) {
-                var idx = y * imgW + x;
-                var center = gray[idx];
-                var val = 0n;
-                var bit = 0;
-                for (var dy = -cRad; dy <= cRad; dy++) {
-                    for (var dx = -cRad; dx <= cRad; dx++) {
-                        if (dx === 0 && dy === 0) continue;
-                        var nIdx = (y + dy) * imgW + (x + dx);
-                        if (gray[nIdx] >= center) val |= (1n << BigInt(bit));
-                        bit++;
-                        if (bit >= 48) break;
-                    }
-                    if (bit >= 48) break;
+    for (var dy = -windowRadius; dy <= windowRadius; dy++) {
+        for (var dx = -windowRadius; dx <= windowRadius; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            var nx = x + dx;
+            var ny = y + dy;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                var neighborValue = pixels[(ny * width + nx) * 4];
+                if (neighborValue > centerValue) {
+                    censusBits |= (1 << bitIndex);
                 }
-                census[idx] = val;
             }
+            bitIndex++;
+            if (bitIndex >= 31) break;
         }
-        return census;
+        if (bitIndex >= 31) break;
+    }
+    return censusBits;
+}
+
+/* Hamming距离 */
+function hammingDistance(a, b) {
+    var diff = (a ^ b) >>> 0;
+    var dist = 0;
+    while (diff) {
+        dist += (diff & 1);
+        diff >>>= 1;
+    }
+    return dist;
+}
+
+/* 立体匹配主函数: Census变换 + Hamming距离 */
+function stereoMatch(leftPixels, rightPixels, width, height, maxDisparity, windowRadius) {
+    var disparityMap = new Uint8ClampedArray(width * height);
+
+    /* 为左图像每个窗口构建Census描述符 */
+    var leftCensus = new Uint32Array(width * height);
+    for (var y = windowRadius; y < height - windowRadius; y++) {
+        for (var x = windowRadius; x < width - windowRadius; x++) {
+            leftCensus[y * width + x] = censusTransform(leftPixels, width, height, x, y, windowRadius);
+        }
     }
 
-    function hammingDist(a, b) {
-        if (a === undefined || b === undefined) return Infinity;
-        var diff = a ^ b;
-        var count = 0;
-        while (diff > 0n) { count++; diff &= (diff - 1n); }
-        return count;
-    }
+    /* 对右图像行扫描匹配 */
+    for (var y = windowRadius; y < height - windowRadius; y++) {
+        for (var x = maxDisparity + windowRadius; x < width - windowRadius; x++) {
+            var leftBits = leftCensus[y * width + x];
+            var bestDisparity = 0;
+            var minDist = 999999;
 
-    function computeDisparity(grayLeft, grayRight, censusLeft, censusRight, w, h, maxDisparity) {
-        var blockSize = 7;
-        var halfBlock = Math.floor(blockSize / 2);
-        var disparityMap = new Float32Array(w * h);
-        var confidenceMap = new Float32Array(w * h);
-
-        for (var y = blockSize; y < h - blockSize; y += 2) {
-            for (var x = blockSize + maxDisparity; x < w - blockSize; x += 2) {
-                var centerCensus = censusLeft[y * w + x];
-                if (centerCensus === undefined) continue;
-                var bestMatch = 0;
-                var bestScore = Infinity;
-                var bestScorePlus = Infinity;
-                var bestScoreMinus = Infinity;
-                for (var d = 0; d < maxDisparity; d++) {
-                    var rightIdx = y * w + (x - d);
-                    var rCensus = censusRight[rightIdx];
-                    if (rCensus === undefined) continue;
-                    var score = 0;
-                    var count = 0;
-                    var edgeDist = Math.min(x - d, w - x, y, h - y);
-                    var adaptHalf = Math.max(2, Math.min(halfBlock, Math.floor(edgeDist / 2)));
-                    for (var dy = -adaptHalf; dy <= adaptHalf; dy++) {
-                        for (var dx = -adaptHalf; dx <= adaptHalf; dx++) {
-                            var lIdx = (y + dy) * w + (x + dx);
-                            var rIdx = (y + dy) * w + (x + dx - d);
-                            if (lIdx >= 0 && lIdx < w * h && rIdx >= 0 && rIdx < w * h &&
-                                censusLeft[lIdx] !== undefined && censusRight[rIdx] !== undefined) {
-                                score += hammingDist(censusLeft[lIdx], censusRight[rIdx]);
-                                count++;
-                            }
-                        }
-                    }
-                    if (count > 0) {
-                        score /= count;
-                        if (score < bestScore) {
-                            bestScore = score;
-                            bestMatch = d;
-                        }
-                    }
-                    if (d === bestMatch + 1) bestScorePlus = score;
-                    if (d === bestMatch - 1) bestScoreMinus = score;
-                }
-                /* 亚像素插值：抛物线拟合提升视差精度到0.1像素级 */
-                var subpixelDisp = bestMatch;
-                if (bestMatch > 0 && bestMatch < maxDisparity - 1 &&
-                    bestScoreMinus < Infinity && bestScorePlus < Infinity) {
-                    var denom = 2.0 * (bestScoreMinus - 2.0 * bestScore + bestScorePlus);
-                    if (Math.abs(denom) > 1e-8) {
-                        subpixelDisp = bestMatch - (bestScorePlus - bestScoreMinus) / denom;
-                    }
-                }
-                disparityMap[y * w + x] = subpixelDisp / maxDisparity;
-                confidenceMap[y * w + x] = bestScore < Infinity ? Math.min(1.0, 0.05 / (bestScore + 0.001)) : 0.0;
-            }
-        }
-        /* 双向一致性检查空洞填充 + 中值滤波平滑 */
-        for (var y = 1; y < h - 1; y++) {
-            for (var x = 1; x < w - 1; x++) {
-                var idx = y * w + x;
-                if (disparityMap[idx] === 0 && idx > 0) {
-                    var neighbors = [];
-                    for (var dy = -1; dy <= 1; dy++) {
-                        for (var dx = -1; dx <= 1; dx++) {
-                            var ni = (y + dy) * w + (x + dx);
-                            if (ni >= 0 && ni < disparityMap.length && disparityMap[ni] > 0) {
-                                neighbors.push(disparityMap[ni]);
-                            }
-                        }
-                    }
-                    if (neighbors.length > 0) {
-                        neighbors.sort(function(a, b) { return a - b; });
-                        disparityMap[idx] = neighbors[Math.floor(neighbors.length / 2)];
-                        confidenceMap[idx] = 0.3;
+            for (var d = 0; d <= maxDisparity; d++) {
+                var rx = x - d;
+                if (rx >= windowRadius) {
+                    var rightBits = censusTransform(rightPixels, width, height, rx, y, windowRadius);
+                    var dist = hammingDistance(leftBits, rightBits);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        bestDisparity = d;
                     }
                 }
             }
+
+            disparityMap[y * width + x] = (minDist < 999999) ? bestDisparity : 0;
         }
-        return { disparityMap: disparityMap, confidenceMap: confidenceMap };
     }
 
-    self.onmessage = function(e) {
-        var msg = e.data;
-        if (msg.type === 'compute') {
-            var leftData = new Uint8ClampedArray(msg.leftBuffer);
-            var rightData = new Uint8ClampedArray(msg.rightBuffer);
-            var w = msg.width;
-            var h = msg.height;
-            var maxDisp = msg.maxDisparity || 64;
+    return disparityMap;
+}
 
-            var grayLeft = toGrayscale(leftData, w, h);
-            var grayRight = toGrayscale(rightData, w, h);
+/* 置信度图计算: 基于匹配代价计算每个像素的匹配置信度 */
+function computeConfidenceMap(disparityMap, width, height, leftPixels, rightPixels, maxDisparity) {
+    var confidenceMap = new Float32Array(width * height);
+    for (var y = 1; y < height - 1; y++) {
+        for (var x = 1; x < width - 1; x++) {
+            var d = disparityMap[y * width + x];
+            if (d <= 0 || d >= maxDisparity) {
+                confidenceMap[y * width + x] = 0.0;
+                continue;
+            }
+            var leftVal = leftPixels[(y * width + x) * 4];
+            var rx = x - d;
+            if (rx < 0) { confidenceMap[y * width + x] = 0.0; continue; }
+            var rightVal = rightPixels[(y * width + rx) * 4];
+            var diff = Math.abs(leftVal - rightVal);
+            var localConsistency = 0;
+            var count = 0;
+            for (var dy = -1; dy <= 1; dy++) {
+                for (var dx = -1; dx <= 1; dx++) {
+                    var nd = disparityMap[(y + dy) * width + (x + dx)];
+                    if (Math.abs(nd - d) <= 1) { count++; }
+                    localConsistency++;
+                }
+            }
+            var consistency = count / Math.max(localConsistency, 1);
+            confidenceMap[y * width + x] = consistency * Math.max(0, 1.0 - diff / 255.0);
+        }
+    }
+    return confidenceMap;
+}
 
-            var censusLeft = computeCensus(grayLeft, w, h);
-            var censusRight = computeCensus(grayRight, w, h);
+/* 消息处理 */
+self.onmessage = function(e) {
+    var data = e.data;
 
-            var result = computeDisparity(grayLeft, grayRight, censusLeft, censusRight, w, h, maxDisp);
+    try {
+        /* ZSF-001: 统一使用'compute'类型，与device-manager.js发送格式对齐 */
+        if (data.type === 'compute') {
+            if (!data.leftBuffer || !data.rightBuffer) {
+                self.postMessage({ type: 'error', message: '缺少左右图像缓冲区数据' });
+                return;
+            }
 
-            /* 将Float32Array转为可传输的ArrayBuffer */
-            var dispBuffer = result.disparityMap.buffer;
-            var confBuffer = result.confidenceMap.buffer;
+            var width = data.width || 320;
+            var height = data.height || 240;
+            var maxDisparity = data.maxDisparity || 64;
+            var windowRadius = 2;
+
+            /* 将ArrayBuffer转为Uint8ClampedArray用于像素处理 */
+            var leftPixels = new Uint8ClampedArray(data.leftBuffer);
+            var rightPixels = new Uint8ClampedArray(data.rightBuffer);
+
+            var disparityMap = stereoMatch(leftPixels, rightPixels, width, height, maxDisparity, windowRadius);
+
+            /* 计算置信度图 */
+            var confidenceMap = computeConfidenceMap(disparityMap, width, height, leftPixels, rightPixels, maxDisparity);
+
+            /* ZSF-001: 统一输出格式为'result'，与device-manager.js接收格式对齐 */
+            var disparityFloat = new Float32Array(width * height);
+            for (var i = 0; i < disparityMap.length; i++) {
+                disparityFloat[i] = disparityMap[i];
+            }
 
             self.postMessage({
                 type: 'result',
-                disparityBuffer: dispBuffer,
-                confidenceBuffer: confBuffer,
-                width: w,
-                height: h,
-                maxDisparity: maxDisp
-            }, [dispBuffer, confBuffer]);
+                disparityBuffer: disparityFloat.buffer,
+                confidenceBuffer: confidenceMap.buffer,
+                width: width,
+                height: height
+            }, [disparityFloat.buffer, confidenceMap.buffer]);
+        } else if (data.type === 'ping') {
+            self.postMessage({ type: 'pong' });
+        } else {
+            self.postMessage({ type: 'error', message: '未知消息类型: ' + data.type });
         }
-    };
-
-})();
+    } catch (err) {
+        self.postMessage({ type: 'error', message: err.message || 'Worker内部错误' });
+    }
+};

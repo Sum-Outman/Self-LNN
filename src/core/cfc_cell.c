@@ -11,6 +11,8 @@
  * 两者完全一致，保证不同编译单元的一致性。
  */
 
+#define SELFLNN_CORE_INTERNAL 1
+
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/cfc_enhanced.h"
 #include "selflnn/core/ode_solvers.h"
@@ -30,6 +32,12 @@
 #ifdef _MSC_VER
 #pragma warning(disable:4100 4189 4244 4267 4701 4033 4715)
 #endif
+
+/* ZSFLNN-C-014修复: 液时域/自适应率默认值 — 可配置常量替代硬编码魔法数字 */
+#define CFC_DEFAULT_LIQUID_TAU_MIN      0.01f
+#define CFC_DEFAULT_LIQUID_TAU_MAX      2.0f
+#define CFC_DEFAULT_LIQUID_INIT_SCALE   0.01f
+#define CFC_DEFAULT_ADAPTATION_RATE     0.01f
 
 /**
  * @brief CfC单元状态缓冲区安全检查宏（用于返回int的函数）
@@ -456,6 +464,17 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         cell->config.delta_t_explicitly_set = 1;  // P2-042修复: 调用者显式设置了非零delta_t
     }
     
+    /* ZSFUSA-P1-002关键修复: 拉普拉斯调制默认启用。
+     * use_laplace_modulation=1 使cfc_closed_form_solution中的
+     * tau调制路径生效，laplace_stability_alpha=0.3控制最大阻尼强度。
+     * laplace_stability_score在lnn.c前向传播时动态更新(默认0.5=无调制)。 */
+    if (cell->config.use_laplace_modulation == 0 &&
+        cell->config.laplace_stability_alpha <= 0.0f) {
+        cell->config.use_laplace_modulation = 1;
+        cell->config.laplace_stability_alpha = 0.3f;
+    }
+    cell->laplace_stability_score = 0.5f;  /* 中性起始值 */
+    
     // 分配状态
     cell->state = (CfCState*)safe_malloc(sizeof(CfCState));
     if (!cell->state) {
@@ -528,9 +547,9 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->computed_liquid_tau = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->liquid_tau_workspace = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->use_liquid_scaling = 1;  /* 默认启用液时域缩放（LNN核心特性） */
-    cell->liquid_tau_min = 0.01f;
-    cell->liquid_tau_max = 2.0f;
-    cell->liquid_init_scale = 0.01f;
+    cell->liquid_tau_min = CFC_DEFAULT_LIQUID_TAU_MIN;
+    cell->liquid_tau_max = CFC_DEFAULT_LIQUID_TAU_MAX;
+    cell->liquid_init_scale = CFC_DEFAULT_LIQUID_INIT_SCALE;
     cell->liquid_use_layer_norm = 0;
     /* Z3-001修复: liquid_tau初始化延迟到NULL检查之后，避免分配失败时写入NULL崩溃 */
     
@@ -679,7 +698,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     
     // 初始化状态
     cell->state->time = 0.0f;
-    cell->state->adaptation_rate = 0.01f;  // 默认自适应率
+    cell->state->adaptation_rate = CFC_DEFAULT_ADAPTATION_RATE;  /* ZSFLNN-C-014: 可配置默认自适应率 */
     
     // 初始化液态神经网络增强特性
     cell->use_gating = 1;  // 默认启用门控
@@ -1376,7 +1395,26 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         float tau = cell->use_adaptive_tau ? time_constants[i] : cell->config.time_constant;
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
-        
+
+        /* ZSFUSA-P1-002修复: 拉普拉斯频域tau调制。
+         * 当laplace_stability_score低时(系统不稳定)，增大tau以增强阻尼：
+         *   tau_mod = tau * (1 + alpha * (1 - stability_score))
+         * 稳定性≈0.0 → tau_mod = tau*(1+alpha) → 更强阻尼 → 更稳定
+         * 稳定性≈1.0 → tau_mod = tau → 保持原有动态
+         * alpha默认0.3，即使稳定性最差也只将tau增大30%，避免过度阻尼
+         * 导致LNN状态演化完全停滞。 */
+        if (cell->config.use_laplace_modulation) {
+            float stab = cell->laplace_stability_score;
+            if (stab < 0.0f) stab = 0.0f;
+            if (stab > 1.0f) stab = 1.0f;
+            float alpha = cell->config.laplace_stability_alpha;
+            if (alpha < 0.0f) alpha = 0.0f;
+            if (alpha > 1.0f) alpha = 1.0f;
+            float laplace_factor = 1.0f + alpha * (1.0f - stab);
+            tau *= laplace_factor;
+            if (tau > cell->max_time_constant * 2.0f) tau = cell->max_time_constant * 2.0f;
+        }
+
         cell->forward_tau_used[i] = tau;
         
         float dt_over_tau = delta_t / tau;
@@ -1649,9 +1687,9 @@ static int cfc_cell_symplectic_step(CfCCell* cell, const float* input,
 {
     size_t n = cell->config.hidden_size;
 
-    /* 保存输入到input_buffer供dqdt使用 */
+    /* ZSFA-FIX-F004: 使用input_size而非hidden_size(n)作为memcpy大小，避免内存越界 */
     if (cell->state->input_buffer && input)
-        memcpy(cell->state->input_buffer, input, n * sizeof(float));
+        memcpy(cell->state->input_buffer, input, cell->config.input_size * sizeof(float));
 
     if (!cell->state->symplectic_initialized)
     {
@@ -2246,7 +2284,7 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
                 if (isnan(new_h) || isinf(new_h)) new_h = cell->state->state[i];
                 cell->state->activation[i] = new_h;
             }
-            return;
+            return -1;  /* ZSFA-FIX-F-003: int返回类型，不可裸return */
         }
         /* 第1步: k1 = f(t, y) * dt */
         cfc_cell_compute_rhs(cell, cell->state->input_buffer,
@@ -2652,6 +2690,10 @@ static int cfc_cell_backward_quaternion(CfCCell* cell, const float* gradient,
  * 采用"离散化-然后-优化"策略：重新执行数值求解器并用有限差分近似雅可比。
  * ======================================================================== */
 static int cfc_cell_backward_numerical(CfCCell* cell, const float* gradient, float* input_gradient) {
+    /* ZSFUSA-O04: 有限差分数值反向传播。
+     * 注意：此路径精度低(O(ε))、计算量大(O(n²)次前向)。
+     * 强烈建议使用分析导数路径(cfc_cell_backward闭式解)。
+     * 本路径仅在解析梯度不可用时的极端回退场景使用。 */
     size_t hidden_size = cell->config.hidden_size;
     size_t input_size = cell->config.input_size;
     const float epsilon = 1e-5f;

@@ -218,6 +218,7 @@ typedef struct {
     int cnrt_available;
     int initialized;
     int device_count;
+    int offline_model_count;
     char device_names[CAMBRICON_MAX_DEVICES][CAMBRICON_MAX_DEVICE_NAME];
     char error_string[512];
 } CambriconState;
@@ -364,7 +365,7 @@ static GpuKernel* cambricon_backend_kernel_create(GpuContext* context, const cha
     /* ZSFZS-F003修复: 无CNRT时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
      * 不再直接返回NULL，确保调用方在无硬件环境也能正常创建kernels进行计算。 */
     if (!g_cb_state.cnrt_available) {
-        log_info("[Cambricon] CNRT不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
+        log_warning("[Cambricon] CNRT不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
     }
     GpuKernel* k = (GpuKernel*)safe_calloc(1, sizeof(GpuKernel));
     if (!k) return NULL;
@@ -509,7 +510,10 @@ static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_wor
     }
 
 cnrt_fallback:
-    LOG_INFO("寒武纪MLU CNRT不可用，回退到CPU直算（硬件自适应，count=%zu）", count);
+    /* P1-003修复: CNRT不可用时使用npu_common CPU kernel执行作为硬件自适应路径
+     * 用户应安装寒武纪CNRT SDK以获得MLU加速。
+     * 系统将使用CPU标量回退而非虚假的GPU加速，确保计算正确性。 */
+    log_warning("寒武纪MLU CNRT不可用，使用CPU标量计算回退（请安装CNRT SDK以获得MLU加速，count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 static int cambricon_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim, const size_t* global_work_size, const size_t* local_work_size) {
@@ -574,11 +578,45 @@ static const char* CAMBRICON_ADD_BIAS_KERNEL =
 "__mlu_func__ void add_bias(half* d, const half* b, int N, int C) {\n"
 "    int i=taskIdX; if(i>=N)return; d[i]=(half)((float)d[i]+(float)b[i%C]);\n"
 "}\n";
+
+/* ZSFAAA-DEEP-024: 新增2个BANG C内核 */
+static const char* CAMBRICON_VECTOR_ADD_KERNEL =
+"__mlu_func__ void vector_add(const half* a, const half* b, half* c, int N) {\n"
+"    int i=taskIdX; if(i>=N)return;\n"
+"    c[i]=(half)((float)a[i]+(float)b[i]);\n"
+"}\n";
+
+static const char* CAMBRICON_SAXPY_KERNEL =
+"__mlu_func__ void saxpy(float alpha, const half* x, half* y, int N) {\n"
+"    int i=taskIdX; if(i>=N)return;\n"
+"    y[i]=(half)(alpha*(float)x[i]+(float)y[i]);\n"
+"}\n";
+
+/* ZSFAAA-DEEP-024[增强]: 升级matmul为tile分块优化版本 */
+static const char* CAMBRICON_MATMUL_TILED_KERNEL =
+"__mlu_entry__ void matmul_tiled(half* A, half* B, half* C, int M, int N, int K) {\n"
+"    __bang_shared__ half tileA[16][16], tileB[16][16];\n"
+"    int row=taskIdY*16, col=taskIdX*16;\n"
+"    float sum[16][16]={{0}};\n"
+"    for(int k=0;k<K;k+=16){\n"
+"        if(row+taskIdX<M&&k+taskIdY<K) tileA[taskIdY][taskIdX]=A[(row+taskIdY)*K+k+taskIdX];\n"
+"        if(k+taskIdY<K&&col+taskIdX<N) tileB[taskIdY][taskIdX]=B[(k+taskIdY)*N+col+taskIdX];\n"
+"        __sync_cluster();\n"
+"        for(int kk=0;kk<16;kk++) for(int i=0;i<16;i++) for(int j=0;j<16;j++) sum[i][j]+=(float)tileA[i][kk]*(float)tileB[kk][j];\n"
+"        __sync_cluster();\n"
+"    }\n"
+"    for(int i=0;i<16;i++) for(int j=0;j<16;j++) if(row+i<M&&col+j<N) C[(row+i)*N+col+j]=(half)sum[i][j];\n"
+"}\n";
+
+/* ZSFAAA-DEEP-024: 更新查找函数，新增vector_add/saxpy/fma/tiled分支 */
 static const char* cambricon_get_builtin_kernel(const char* name) {
     if(!name)return NULL;
+    if(strstr(name,"matmul_tiled")||strstr(name,"MatMulTiled"))return CAMBRICON_MATMUL_TILED_KERNEL;
     if(strstr(name,"matmul")||strstr(name,"MatMul"))return CAMBRICON_MATMUL_KERNEL;
     if(strstr(name,"relu")||strstr(name,"Relu"))return CAMBRICON_RELU_KERNEL;
     if(strstr(name,"bias")||strstr(name,"Bias"))return CAMBRICON_ADD_BIAS_KERNEL;
+    if(strstr(name,"vector_add")||strstr(name,"VectorAdd")||strstr(name,"add"))return CAMBRICON_VECTOR_ADD_KERNEL;
+    if(strstr(name,"saxpy")||strstr(name,"Saxpy")||strstr(name,"fma")||strstr(name,"Fma"))return CAMBRICON_SAXPY_KERNEL;
     return NULL;
 }
 
@@ -634,7 +672,8 @@ static NpuModel* cambricon_npu_load_model(GpuContext* context, const char* model
         if (g_cambricon.cnrtCreateModel(&handle, model_path) == 0 && handle) {
             CambriconModelData* md = (CambriconModelData*)safe_calloc(1, sizeof(CambriconModelData));
             if (md) { md->model_handle = handle; model->backend_data = md; }
-            LOG_INFO("寒武纪模型加载成功: %s", model_path);
+            g_cb_state.offline_model_count++;
+            LOG_INFO("寒武纪MLU离线模型加载成功: %s (已加载模型数=%d)", model_path, g_cb_state.offline_model_count);
         }
     }
     return model;
@@ -647,6 +686,7 @@ static void cambricon_npu_unload_model(NpuModel* model) {
         if (md->model_handle && g_cambricon.cnrtDestroyModel)
             g_cambricon.cnrtDestroyModel(md->model_handle);
         safe_free((void**)&md);
+        if (g_cb_state.offline_model_count > 0) g_cb_state.offline_model_count--;
     }
     safe_free((void**)&model);
 }
@@ -750,7 +790,8 @@ int cambricon_forward_dense(GpuContext* context, const float* input,
                             GpuActivationType act_type, float alpha) {
     if (!context || !context->is_initialized) return -1;
 
-    if (g_cambricon.loaded && g_cambricon.cnrtMalloc && g_cambricon.cnrtMemcpy) {
+    /* 离线模型已加载：使用MLU设备内存路径执行NPU计算 */
+    if (g_cb_state.offline_model_count > 0 && g_cambricon.cnrtMalloc && g_cambricon.cnrtMemcpy) {
         size_t data_size = batch_size * output_size * sizeof(float);
         void *dev_in = NULL, *dev_w = NULL, *dev_b = NULL, *dev_out = NULL;
         int alloc_ok = (g_cambricon.cnrtMalloc(&dev_in, data_size) == 0)
@@ -768,6 +809,9 @@ int cambricon_forward_dense(GpuContext* context, const float* input,
             if (r == 0) return 0;
         }
     }
+
+    /* 未加载离线模型：直接使用CPU SIMD计算，不分配MLU设备内存 */
+    LOG_INFO("寒武纪MLU前向全连接：使用CPU SIMD加速计算（未加载离线模型）");
     return npu_common_simd_forward_dense(input, weights, bias, output,
                                           batch_size, input_size, output_size, act_type, alpha);
 }
@@ -776,7 +820,9 @@ int cambricon_matmul_train(GpuContext* context, const float* a, const float* b,
                             float* c, size_t m, size_t n, size_t k,
                             int transpose_a, int transpose_b) {
     if (!context || !context->is_initialized) return -1;
-    if (g_cambricon.loaded && g_cambricon.cnrtMalloc) {
+
+    /* 离线模型已加载：使用MLU设备内存路径执行NPU计算 */
+    if (g_cb_state.offline_model_count > 0 && g_cambricon.cnrtMalloc) {
         void *da = NULL, *db = NULL, *dc = NULL;
         if (g_cambricon.cnrtMalloc(&da, m*k*sizeof(float)) == 0 &&
             g_cambricon.cnrtMalloc(&db, k*n*sizeof(float)) == 0 &&
@@ -789,6 +835,9 @@ int cambricon_matmul_train(GpuContext* context, const float* a, const float* b,
             if (r == 0) return 0;
         }
     }
+
+    /* 未加载离线模型：直接使用CPU SIMD计算，不分配MLU设备内存 */
+    LOG_INFO("寒武纪MLU矩阵乘训练：使用CPU SIMD加速计算（未加载离线模型）");
     return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 
@@ -796,7 +845,9 @@ int cambricon_cfc_ode_step(GpuContext* context, const float* h_in, const float* 
                             const float* b, const float* tau, float* h_out,
                             float dt, int dim) {
     if (!context || !context->is_initialized) return -1;
-    if (g_cambricon.loaded && g_cambricon.cnrtMalloc) {
+
+    /* 离线模型已加载：使用MLU设备内存路径执行NPU计算 */
+    if (g_cb_state.offline_model_count > 0 && g_cambricon.cnrtMalloc) {
         void *dh = NULL, *dW = NULL, *db = NULL, *dtau = NULL, *dout = NULL;
         size_t ds = dim * sizeof(float);
         if (g_cambricon.cnrtMalloc(&dh, ds) == 0 &&
@@ -813,6 +864,9 @@ int cambricon_cfc_ode_step(GpuContext* context, const float* h_in, const float* 
             if (r == 0) return 0;
         }
     }
+
+    /* 未加载离线模型：直接使用CPU SIMD计算，不分配MLU设备内存 */
+    LOG_INFO("寒武纪MLU CfC ODE步：使用CPU SIMD加速计算（未加载离线模型）");
     return npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
 }
 

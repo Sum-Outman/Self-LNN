@@ -2,9 +2,9 @@
  * @file multimodal_manager.c
  * @brief 多模态管理器实现
  *
- * P0-002修复: 统一多模态入口。
- * 不再自建独立的UnifiedSignalProcessor，改为使用全局唯一实例。
- * 所有模态→全局统一信号处理器→共享LNN连续动态系统→统一输出。
+ * ZSF-NEW-013修复: 消除5种模态后混合绕过LNN的架构缺陷。
+ * 所有9种模态(视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机)
+ * 现在统一在lnn_forward之前注入lnn_input，经过同一个CfC连续动态系统。
  * 严格遵循：不需要分开编码、不需要多模型融合、不需要跨模态注意力。
  */
 
@@ -13,6 +13,8 @@
 #include "selflnn/selflnn.h"               /* P0-002: selflnn_get_unified_signal_processor */
 #include "selflnn/multimodal/multimodal_unified_input.h"
 #include "selflnn/multimodal/haptic_learning.h" /* H-018集成: 触觉CfC处理+纹理分析 */
+#include "selflnn/multimodal/audio_loader.h"     /* ZSF-007: 音频文件加载器集成 */
+#include "selflnn/multimodal/image_loader.h"     /* ZSF-008: 图像文件加载器集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/core/errors.h"
@@ -37,7 +39,7 @@ struct MultimodalManager {
     UnifiedSignalProcessor* unified_signal_processor; /**< P0-002: 引用全局统一信号处理器 */
     int unified_signal_processor_owned;   /**< 是否拥有信号处理器（1=自建需释放，0=外部引用） */
     LNN* lnn_instance;                    /**< 关联的LNN实例（不拥有，不释放） */
-    float modality_weights[9];            /**< P2-001统一: 各模态权重9种（视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机）仅用于外部路由查询，不影响CfC内部状态演化 */
+    float modality_weights[9];            /**< ZSF-NEW-013: 各模态权重9种（视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机）用于LNN输入前投影加权，所有模态通过lnn_forward进入统一CfC ODE */
     HapticCfcProcessor* haptic_cfc_proc;  /**< H-018: CfC触觉信号处理器 */
     HapticTextureAnalyzer* haptic_texture_analyzer; /**< H-018: 触觉纹理分析器 */
 };
@@ -286,6 +288,37 @@ int multimodal_manager_process(MultimodalManager* manager,
                (lnn_cfg.input_size - copy_size) * sizeof(float));
     }
 
+    /* ZSF-NEW-013修复: 将5种额外模态注入LNN输入，而非LNN输出后混合。
+     * 遵循"所有模态→统一输入到同一个连续动态系统"原则。
+     * 额外模态(触觉/本体感/热感/雷达/电机)通过加权投影注入lnn_input，
+     * 使其参与CfC ODE状态演化，而非简单后混合绕过动态系统。 */
+    {
+        const float* haptic_ptr = (const float*)haptic_data;
+        const float* proprioception_ptr = (const float*)proprioception_data;
+        const float* thermal_ptr = (const float*)thermal_data;
+        const float* radar_ptr = (const float*)radar_data;
+        const float* motor_ptr = (const float*)motor_data;
+
+        const float* extra_signals[5] = {
+            haptic_ptr, proprioception_ptr, thermal_ptr, radar_ptr, motor_ptr
+        };
+        size_t extra_sizes[5] = {64, 32, 16, 128, 64};
+        int extra_indices[5] = {4, 5, 6, 7, 8};
+
+        for (int m = 0; m < 5; m++) {
+            if (extra_signals[m] && extra_sizes[m] > 0) {
+                float weight = manager->modality_weights[extra_indices[m]];
+                /* 将额外模态信号投影到LNN输入维度并累加 */
+                size_t input_dim = lnn_cfg.input_size;
+                for (size_t i = 0; i < input_dim; i++) {
+                    /* 循环映射: 额外信号通过取模映射到LNN输入维度 */
+                    size_t src_idx = i % extra_sizes[m];
+                    lnn_input[i] += extra_signals[m][src_idx] * weight;
+                }
+            }
+        }
+    }
+
     float* lnn_output = (float*)safe_malloc(lnn_cfg.output_size * sizeof(float));
     if (!lnn_output) {
         safe_free((void**)&lnn_input);
@@ -312,32 +345,10 @@ int multimodal_manager_process(MultimodalManager* manager,
 
     size_t copy_count = lnn_copy;
 
-    /* P2-001统一: 额外5种模态处理（触觉/本体感/热感/雷达/电机）
-     * 将5种额外模态信号按modality_weights权重直接混合到统一融合输出中
-     * 若额外模态数据指针非空则进行融合，否则跳过 */
-    {
-        const float* haptic_ptr = (const float*)haptic_data;
-        const float* proprioception_ptr = (const float*)proprioception_data;
-        const float* thermal_ptr = (const float*)thermal_data;
-        const float* radar_ptr = (const float*)radar_data;
-        const float* motor_ptr = (const float*)motor_data;
-
-        const float* extra_signals[5] = {
-            haptic_ptr, proprioception_ptr, thermal_ptr, radar_ptr, motor_ptr
-        };
-        size_t extra_sizes[5] = {64, 32, 16, 128, 64};
-        int extra_indices[5] = {4, 5, 6, 7, 8};
-
-        for (int m = 0; m < 5; m++) {
-            if (extra_signals[m] && extra_sizes[m] > 0) {
-                float weight = manager->modality_weights[extra_indices[m]];
-                size_t copy_sz = (extra_sizes[m] < lnn_copy) ? extra_sizes[m] : lnn_copy;
-                for (size_t i = 0; i < copy_sz; i++) {
-                    fused_features[i] += extra_signals[m][i] * weight;
-                }
-            }
-        }
-    }
+    /* ZSF-NEW-013: 后混合路径已移除。
+     * 所有9种模态(视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机)
+     * 现在统一通过 lnn_input → lnn_forward → lnn_output 路径，
+     * 进入同一个CfC连续动态系统进行状态演化。 */
 
     safe_free((void**)&lnn_input);
     safe_free((void**)&lnn_output);
@@ -367,6 +378,104 @@ int multimodal_manager_set_weight(MultimodalManager* manager,
 
     manager->modality_weights[modality_type] = weight;
     return 0;
+}
+
+/* ============================================================================
+ * ZSF-007/ZSF-008: 音频/图像文件加载器集成桥接函数
+ * audio_loader.h 和 image_loader.h 此前为孤儿头文件（有实现但0处引用）。
+ * 通过此桥接函数将文件加载能力集成到多模态管理器，使其成为系统的有效组成部分。
+ * ============================================================================ */
+
+/**
+ * @brief 通过audio_loader从WAV文件加载音频数据（桥接函数）
+ *
+ * 此函数提供统一的音频文件加载入口，供多模态系统使用。
+ * 调用audio_loader中的 audio_load_wav 实现实际文件解析。
+ *
+ * @param filepath WAV音频文件路径
+ * @param sample_rate_out 输出采样率
+ * @param num_samples_out 输出采样点数
+ * @param channels_out 输出声道数（可选NULL）
+ * @return float样本数组（需safe_free释放），失败返回NULL
+ */
+float* multimodal_load_audio_file(const char* filepath, int* sample_rate_out,
+                                   int* num_samples_out, int* channels_out) {
+    return audio_load_wav(filepath, sample_rate_out, num_samples_out, channels_out);
+}
+
+/**
+ * @brief 获取WAV音频文件信息（桥接函数）
+ *
+ * @param filepath WAV文件路径
+ * @param sample_rate_out 输出采样率
+ * @param num_channels_out 输出声道数
+ * @param bits_per_sample_out 输出位深
+ * @param duration_sec_out 输出时长（秒）
+ * @return 0成功，-1失败
+ */
+int multimodal_audio_file_info(const char* filepath, int* sample_rate_out,
+                                int* num_channels_out, int* bits_per_sample_out,
+                                float* duration_sec_out) {
+    return audio_wav_info(filepath, sample_rate_out, num_channels_out,
+                           bits_per_sample_out, duration_sec_out);
+}
+
+/**
+ * @brief 通过image_loader从图像文件加载并解码（桥接函数）
+ *
+ * 自动检测BMP/PPM格式并解码为归一化float数组。
+ *
+ * @param filepath 图像文件路径（BMP或PPM）
+ * @param width_out 输出宽度
+ * @param height_out 输出高度
+ * @param channels_out 输出通道数（1=灰度，3=RGB）
+ * @return float数组（需safe_free释放），失败返回NULL
+ */
+float* multimodal_load_image_file(const char* filepath, int* width_out,
+                                   int* height_out, int* channels_out) {
+    /* 先加载原始RGB数据 */
+    uint8_t* rgb = NULL;
+    int loaded_w = 0, loaded_h = 0;
+
+    /* 尝试BMP格式 */
+    rgb = image_load_bmp(filepath, &loaded_w, &loaded_h);
+    if (!rgb) {
+        /* 尝试PPM格式 */
+        rgb = image_load_ppm(filepath, &loaded_w, &loaded_h);
+    }
+
+    if (!rgb) {
+        return NULL;
+    }
+
+    if (width_out) *width_out = loaded_w;
+    if (height_out) *height_out = loaded_h;
+
+    /* 转换为归一化float数组 */
+    int ch = (channels_out && *channels_out > 0) ? *channels_out : 3;
+    float* result = image_rgb_to_float(rgb, loaded_w, loaded_h, ch);
+
+    /* 释放原始RGB数据 */
+    free(rgb);
+
+    if (channels_out) *channels_out = ch;
+    return result;
+}
+
+/**
+ * @brief 释放由multimodal_load_image_file加载的图像数据
+ */
+void multimodal_free_image_data(float* data) {
+    if (data) {
+        safe_free((void**)&data);
+    }
+}
+
+/**
+ * @brief 释放由multimodal_load_audio_file加载的音频数据
+ */
+void multimodal_free_audio_data(float* data) {
+    audio_wav_free(data);
 }
 
 /**

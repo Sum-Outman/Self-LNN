@@ -5,6 +5,8 @@
  * 自我学习、自我演化、模仿学习等功能的实现。
  */
 
+#define SELFLNN_IMPLEMENTATION 1
+
 #include "selflnn/learning/learning.h"
 #include "selflnn/learning/online_learning.h"
 #include "selflnn/utils/memory_utils.h"
@@ -432,22 +434,57 @@ int learning_reinforcement_update(LearningEngine* engine,
     PerfTimer timer;
     perf_timer_start(&timer);
     
-    // 完整强化学习更新：Q-learning风格更新
-    // 假设策略权重是状态-动作值函数
-    
-    // 计算当前状态-动作值
+    /* P2-009: Q值计算 —— 优先使用LNN非线性前向传播获取Q值。
+     * LNN的CfC动态系统能捕捉状态-动作间的非线性耦合关系，
+     * 相比线性内积(state·weights)具有更强的表达能力。
+     * 如果LNN不可用，回退到线性计算并记录警告。 */
     float current_q = 0.0f;
-    for (size_t i = 0; i < state_size && i < engine->policy_weights_size; i++) {
-        current_q += state[i] * engine->policy_weights[i];
-    }
-    
-    // 计算下一状态的最大Q值（完整实现）
     float next_max_q = 0.0f;
-    if (next_state) {
-        for (size_t i = 0; i < next_state_size && i < engine->policy_weights_size; i++) {
-            float next_q = next_state[i] * engine->policy_weights[i];
-            if (next_q > next_max_q) {
-                next_max_q = next_q;
+    int lnn_available = 0;
+
+    if (engine->network && engine->network->is_initialized) {
+        /* LNN可用：通过lnn_forward计算非线性Q值 */
+        float* lnn_output = (float*)safe_malloc(engine->network->config.output_size * sizeof(float));
+        if (lnn_output) {
+            int ret = lnn_forward(engine->network, state, lnn_output);
+            if (ret == 0) {
+                /* 输出向量均值作为Q值估计 */
+                current_q = 0.0f;
+                for (size_t i = 0; i < engine->network->config.output_size; i++) {
+                    current_q += lnn_output[i];
+                }
+                current_q /= (float)engine->network->config.output_size;
+                lnn_available = 1;
+
+                /* 计算下一状态的最大Q值 */
+                if (next_state) {
+                    ret = lnn_forward(engine->network, next_state, lnn_output);
+                    if (ret == 0) {
+                        next_max_q = 0.0f;
+                        for (size_t i = 0; i < engine->network->config.output_size; i++) {
+                            if (lnn_output[i] > next_max_q) {
+                                next_max_q = lnn_output[i];
+                            }
+                        }
+                    }
+                }
+            }
+            safe_free((void**)&lnn_output);
+        }
+    }
+
+    if (!lnn_available) {
+        /* LNN不可用：回退到线性内积计算Q值 */
+        log_warn("[强化学习] LNN不可用，回退到线性Q值计算(状态·权重内积)，请初始化LNN以获得非线性Q值估计");
+        for (size_t i = 0; i < state_size && i < engine->policy_weights_size; i++) {
+            current_q += state[i] * engine->policy_weights[i];
+        }
+        if (next_state) {
+            for (size_t i = 0; i < next_state_size && i < engine->policy_weights_size; i++) {
+                float next_q = next_state[i] * engine->policy_weights[i];
+                if (next_q > next_max_q) {
+                    next_max_q = next_q;
+                }
             }
         }
     }
@@ -1361,7 +1398,19 @@ int learning_self_correct(LearningEngine* engine,
     if (!engine->enabled) {
         return -1;
     }
-    
+
+    /* P2-007: 训练前LNN就绪断言 */
+    if (!engine->network) {
+        selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
+                              "LNN网络未设置，无法执行自我修正训练");
+        return -1;
+    }
+    if (!engine->has_real_weights) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_STATE, __func__, __FILE__, __LINE__,
+                              "LNN权重未就绪(has_real_weights=0)，请先调用learning_engine_set_network加载真实CfC权重");
+        return -1;
+    }
+
     // 工业级自我修正：基于规则和统计的错误修正系统
     
     // 1. 分析错误特征
@@ -2779,7 +2828,19 @@ int learning_engine_online_update_batch(LearningEngine* engine,
         selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__, "在线学习器未初始化");
         return -1;
     }
-    
+
+    /* P2-007: 训练前LNN就绪断言 */
+    if (!engine->network) {
+        selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
+                              "LNN网络未设置，无法执行批量在线学习更新");
+        return -1;
+    }
+    if (!engine->has_real_weights) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_STATE, __func__, __FILE__, __LINE__,
+                              "LNN权重未就绪(has_real_weights=0)，请先调用learning_engine_set_network加载真实CfC权重");
+        return -1;
+    }
+
     if (num_samples == 0 || input_size == 0 || target_size == 0) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__, "批量参数无效");
         return -1;
@@ -3149,6 +3210,13 @@ int learning_engine_experience_replay_train_lnn(LearningEngine* engine, size_t b
     if (!engine->network) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
                               "LNN网络未设置，无法直接训练LNN（请先调用learning_engine_set_network）");
+        return -1;
+    }
+
+    /* P2-007: 训练前LNN权重就绪断言 */
+    if (!engine->has_real_weights) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_STATE, __func__, __FILE__, __LINE__,
+                              "LNN权重未就绪(has_real_weights=0)，请先调用learning_engine_set_network加载真实CfC权重");
         return -1;
     }
 

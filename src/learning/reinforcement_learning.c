@@ -23,7 +23,9 @@
 
 #define RL_MIN(X,Y) (((X)<(Y))?(X):(Y))
 #define RL_MAX(X,Y) (((X)>(Y))?(X):(Y))
+#ifndef RL_CLAMP
 #define RL_CLAMP(X,LO,HI) (((X)<(LO))?(LO):(((X)>(HI))?(HI):(X)))
+#endif
 #define RL_SQ(X) ((X)*(X))
 
 /* ZSFWS修复-L-014: 移除死变量 rl_seed，已改用 secure_random_float() */
@@ -172,6 +174,10 @@ static int rl_lnn_create_if(RLAgent* agent, RLNetworkType type, const LNNConfig*
 
 #include "selflnn/robot/pybullet_bridge.h"
 #include "selflnn/robot/simulator.h"
+#include "selflnn/core/ode_solvers.h"
+
+/* 内部物理模拟器前置声明 */
+typedef struct InternalPhysicsEnv InternalPhysicsEnv;
 
 /* 物理引擎状态定义 */
 typedef struct {
@@ -183,9 +189,244 @@ typedef struct {
     float dt;                   /* 仿真步长 */
     int use_pybullet;           /* 使用PyBullet还是内部sim */
     Simulator* sim;             /* 内部simulator实例 */
+    InternalPhysicsEnv* internal_env; /* 内部ODE物理模拟器（无PyBullet时使用） */
     unsigned int seed;          /* 随机种子 */
-    int is_valid;               /**< M-009修复: 环境是否有效（有真实物理后端） */
+    int is_valid;               /**< M-009修复: 环境是否有效（有真实物理后端或内部模拟器） */
 } RLPhysicsEnv;
+
+/* ============================================================================
+ * 内部物理模拟器：基于ODE求解器的简化刚体动力学
+ * 当PyBullet不可用时作为回退物理后端。
+ * 状态格式：二阶系统 [pos_0...pos_{n-1}, vel_0...vel_{n-1}]
+ * 使用项目内置DP54/RK4求解器进行真实的刚性ODE步进。
+ * ============================================================================ */
+struct InternalPhysicsEnv {
+    int state_dim;              /* 总状态维度（= half_dim * 2） */
+    int half_dim;               /* 一半维度（位置或速度的维度数） */
+    int action_dim;             /* 动作维度 */
+    float dt;                   /* 仿真步长（秒） */
+    int max_steps;              /* 最大回合步数 */
+    int current_step;           /* 当前步数 */
+    float* state;               /* 当前状态 [state_dim] */
+    float* init_state;          /* 初始状态 [state_dim] */
+    float* pending_action;      /* 当前步待执行动作 [action_dim] */
+    float* workspace;           /* DP54/RK4 ODE求解器工作空间 */
+    size_t workspace_size;      /* 工作空间大小（字节数） */
+    DP54Config ode_config;      /* ODE求解器配置 */
+    unsigned int seed;          /* 随机种子 */
+    int is_active;              /* 是否已激活 */
+};
+
+/* 内部物理模拟器RHS：二阶动力学系统
+ * d(pos)/dt = vel,  d(vel)/dt = action（控制加速度） - 阻尼*vel + 重力
+ */
+static int internal_physics_rhs(float t, const float* y, float* dydt, void* ctx) {
+    InternalPhysicsEnv* ipenv = (InternalPhysicsEnv*)ctx;
+    if (!ipenv || !ipenv->pending_action) return -1;
+    (void)t;
+
+    int half = ipenv->half_dim;
+
+    /* 位置导数 = 速度 */
+    for (int i = 0; i < half; i++) {
+        dydt[i] = y[half + i];
+    }
+
+    /* 速度导数 = 动作加速度 - 阻尼系数 * 速度 + 重力 */
+    for (int i = 0; i < half; i++) {
+        float acc = (i < ipenv->action_dim) ? ipenv->pending_action[i] : 0.0f;
+        float damping = 0.15f;
+        float gravity_term = 0.0f;
+        /* Z轴（索引2）施加重力 */
+        if (i == 2 && half >= 3) {
+            gravity_term = -9.81f;
+        }
+        dydt[half + i] = acc - damping * y[half + i] + gravity_term;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 初始化内部物理模拟器
+ * @param half_dim 位置/速度的维度数（总状态=half_dim*2）
+ * @param action_dim 动作维度（控制输入维度）
+ * @param dt 仿真步长
+ * @param max_steps 最大步数
+ * @return 模拟器指针，失败返回NULL
+ */
+static InternalPhysicsEnv* internal_physics_env_init(int half_dim, int action_dim,
+                                                      float dt, int max_steps) {
+    if (half_dim <= 0 || action_dim <= 0 || half_dim > 128 || action_dim > 64)
+        return NULL;
+
+    InternalPhysicsEnv* ipenv = (InternalPhysicsEnv*)safe_calloc(1, sizeof(InternalPhysicsEnv));
+    if (!ipenv) return NULL;
+
+    ipenv->half_dim = half_dim;
+    ipenv->state_dim = half_dim * 2;
+    ipenv->action_dim = action_dim;
+    ipenv->dt = dt > 0.0f ? dt : 0.004f;
+    ipenv->max_steps = max_steps > 0 ? max_steps : 1000;
+    ipenv->current_step = 0;
+    ipenv->seed = (unsigned int)time(NULL);
+
+    ipenv->state = (float*)safe_calloc((size_t)ipenv->state_dim, sizeof(float));
+    ipenv->init_state = (float*)safe_calloc((size_t)ipenv->state_dim, sizeof(float));
+    ipenv->pending_action = (float*)safe_calloc((size_t)ipenv->action_dim, sizeof(float));
+
+    if (!ipenv->state || !ipenv->init_state || !ipenv->pending_action) {
+        internal_physics_env_free(ipenv);
+        return NULL;
+    }
+
+    /* 配置DP54 ODE求解器 */
+    ipenv->ode_config = ode_dp54_default_config();
+    ipenv->ode_config.rel_tolerance = 1e-5f;
+    ipenv->ode_config.abs_tolerance = 1e-7f;
+    ipenv->ode_config.min_step_size = 1e-6f;
+    ipenv->ode_config.max_step_size = ipenv->dt * 0.5f;
+
+    ipenv->workspace_size = ode_dp54_workspace_size((size_t)ipenv->state_dim);
+    ipenv->workspace = (float*)safe_malloc(ipenv->workspace_size);
+    if (!ipenv->workspace) {
+        internal_physics_env_free(ipenv);
+        return NULL;
+    }
+
+    /* 设置初始状态：位置随机在[-1,1]，速度随机在[-0.5,0.5] */
+    for (int i = 0; i < half_dim; i++) {
+        ipenv->init_state[i] = rl_randf() * 2.0f - 1.0f;
+        ipenv->init_state[half_dim + i] = rl_randf() * 1.0f - 0.5f;
+    }
+
+    ipenv->is_active = 1;
+    return ipenv;
+}
+
+/**
+ * @brief 释放内部物理模拟器资源
+ */
+static void internal_physics_env_free(InternalPhysicsEnv* ipenv) {
+    if (!ipenv) return;
+    safe_free((void**)&ipenv->state);
+    safe_free((void**)&ipenv->init_state);
+    safe_free((void**)&ipenv->pending_action);
+    safe_free((void**)&ipenv->workspace);
+    safe_free((void**)&ipenv);
+}
+
+/**
+ * @brief 重置内部物理模拟器到初始状态
+ */
+static int internal_physics_env_reset(InternalPhysicsEnv* ipenv, float* state_out, int* state_dim_out) {
+    if (!ipenv || !state_out || !state_dim_out) return -1;
+    if (!ipenv->is_active) return -1;
+
+    ipenv->current_step = 0;
+    *state_dim_out = ipenv->state_dim;
+
+    /* 复制初始状态（带微小随机扰动避免确定性陷阱） */
+    for (int i = 0; i < ipenv->state_dim; i++) {
+        ipenv->state[i] = ipenv->init_state[i] + rl_randf() * 0.01f - 0.005f;
+        state_out[i] = ipenv->state[i];
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 内部物理模拟器步进：使用DP54求解器积分
+ * @param ipenv 模拟器
+ * @param action 动作向量（控制加速度）
+ * @param action_dim 动作维度
+ * @param next_state 输出下一状态
+ * @param next_state_dim 输出状态维度
+ * @param reward 输出奖励
+ * @param done 输出终止标志
+ * @return 0成功，-1失败
+ */
+static int internal_physics_env_step(InternalPhysicsEnv* ipenv,
+                                      const float* action, int action_dim,
+                                      float* next_state, int* next_state_dim,
+                                      float* reward, int* done) {
+    if (!ipenv || !action || !next_state || !next_state_dim || !reward || !done)
+        return -1;
+    if (!ipenv->is_active) return -1;
+
+    *next_state_dim = ipenv->state_dim;
+    *done = 0;
+
+    /* 存储当前动作供RHS函数使用 */
+    int act_count = (action_dim < ipenv->action_dim) ? action_dim : ipenv->action_dim;
+    memset(ipenv->pending_action, 0, (size_t)ipenv->action_dim * sizeof(float));
+    for (int i = 0; i < act_count; i++) {
+        ipenv->pending_action[i] = action[i];
+    }
+
+    /* 使用DP54求解器进行ODE积分步进 */
+    float h_actual = 0.0f;
+    int steps_used = 0;
+    int solve_ret = ode_dp54_solve(
+        ipenv->state,
+        0.0f,                    /* 从t=0开始 */
+        ipenv->dt,
+        internal_physics_rhs,
+        (void*)ipenv,
+        (size_t)ipenv->state_dim,
+        &ipenv->ode_config,
+        ipenv->workspace,
+        &h_actual,
+        &steps_used
+    );
+
+    /* 即使求解器返回非零（如步长限制），也输出当前状态 */
+    for (int i = 0; i < ipenv->state_dim; i++) {
+        next_state[i] = ipenv->state[i];
+    }
+
+    if (solve_ret != 0) {
+        /* ODE求解异常，标记终止 */
+        *done = 1;
+        *reward = -1.0f;
+        ipenv->current_step++;
+        return 0;
+    }
+
+    /* 计算奖励：基于位置跟踪误差 + 能耗惩罚 + 存活奖励 */
+    float tracking_reward = 0.0f;
+    int half = ipenv->half_dim;
+    for (int i = 0; i < half; i++) {
+        /* 目标位置为0，越接近0奖励越高 */
+        float pos_error = fabsf(ipenv->state[i]);
+        tracking_reward -= pos_error * 0.5f;
+    }
+
+    float energy_penalty = 0.0f;
+    for (int i = 0; i < act_count; i++) {
+        energy_penalty += fabsf(action[i]) * 0.02f;
+    }
+
+    float alive_bonus = 1.0f;
+    *reward = alive_bonus + tracking_reward - energy_penalty;
+
+    /* 终止条件：超时或位置发散过大 */
+    ipenv->current_step++;
+    if (ipenv->current_step >= ipenv->max_steps) {
+        *done = 1;
+    }
+
+    /* 检查状态是否发散 */
+    for (int i = 0; i < ipenv->state_dim; i++) {
+        if (fabsf(ipenv->state[i]) > 100.0f) {
+            *done = 1;
+            *reward -= 10.0f;
+            break;
+        }
+    }
+
+    return 0;
+}
 
 /**
  * @brief 创建强化学习物理环境
@@ -208,12 +449,30 @@ static RLPhysicsEnv* rl_physics_env_create(int connection_id, int robot_id,
     env->dt = dt > 0 ? dt : 0.004f;
     env->use_pybullet = (connection_id > 0) ? 1 : 0;
     env->seed = (unsigned int)time(NULL);
-    /* M-009修复: 仅当连接真实物理后端（PyBullet）时环境有效 */
-    env->is_valid = env->use_pybullet ? 1 : 0;
+    env->internal_env = NULL;
+    /* 当PyBullet可用时使用PyBullet，否则初始化内部ODE物理模拟器作为回退 */
+    if (env->use_pybullet) {
+        env->is_valid = 1;
+    } else {
+        /* 使用内部ODE模拟器：half_dim=num_joints（位置+速度各num_joints维） */
+        env->internal_env = internal_physics_env_init(num_joints, num_joints, env->dt, 1000);
+        env->is_valid = (env->internal_env != NULL) ? 1 : 0;
+        if (!env->is_valid) {
+            fprintf(stderr, "[RL-物理环境] 内部物理模拟器初始化失败\n");
+        } else {
+            printf("[RL-物理环境] 使用内部ODE物理模拟器（DP54），状态维度=%d，动作维度=%d\n",
+                   env->internal_env->state_dim, env->internal_env->action_dim);
+        }
+    }
     return env;
 }
 
 static void rl_physics_env_free(RLPhysicsEnv* env) {
+    if (!env) return;
+    if (env->internal_env) {
+        internal_physics_env_free(env->internal_env);
+        env->internal_env = NULL;
+    }
     safe_free((void**)&env);
 }
 
@@ -231,17 +490,16 @@ static void rl_physics_env_free(RLPhysicsEnv* env) {
 static int rl_physics_env_reset(RLPhysicsEnv* env, float* state, int* state_dim) {
     if (!env || !state || !state_dim) return -1;
 
-    /* M-009修复: 检查环境有效性，无物理后端时立即返回错误 */
     if (!env->is_valid) {
         *state_dim = 0;
         memset(state, 0, (size_t)env->state_dim * sizeof(float));
-        fprintf(stderr, "[RL-物理环境] 环境重置失败: 无PyBullet且无内部模拟器\n");
+        fprintf(stderr, "[RL-物理环境] 环境重置失败: 无物理后端\n");
         return -1;
     }
 
-    *state_dim = env->state_dim;
-    memset(state, 0, (size_t)(*state_dim) * sizeof(float));
     if (env->use_pybullet) {
+        *state_dim = env->state_dim;
+        memset(state, 0, (size_t)(*state_dim) * sizeof(float));
         /* PyBullet: 获取初始关节位置 */
         for (int j = 0; j < env->num_joints; j++) {
             PyBulletJointState js;
@@ -258,8 +516,11 @@ static int rl_physics_env_reset(RLPhysicsEnv* env, float* state, int* state_dim)
             memcpy(state + env->num_joints * 2 + 3, bs.orientation, 4 * sizeof(float));
         }
         pybullet_step_simulation(env->connection_id);
+        return 0;
+    } else {
+        /* 使用内部ODE物理模拟器重置 */
+        return internal_physics_env_reset(env->internal_env, state, state_dim);
     }
-    return 0;
 }
 
 /**
@@ -308,22 +569,27 @@ static int rl_physics_env_step(RLPhysicsEnv* env,
             next_state[j] = js.position;
             next_state[env->num_joints + j] = js.velocity;
         }
-    }
 
-    /* 计算奖励：移动奖励 + 能耗惩罚 + 存活奖励 */
-    float move_reward = 0.0f;
-    for (int j = 0; j < env->num_joints && j < action_dim; j++) {
-        float delta = fabsf(next_state[j] - action[j]);
-        move_reward -= delta * 0.1f;
+        /* 计算奖励：移动奖励 + 能耗惩罚 + 存活奖励 */
+        float move_reward = 0.0f;
+        for (int j = 0; j < env->num_joints && j < action_dim; j++) {
+            float delta = fabsf(next_state[j] - action[j]);
+            move_reward -= delta * 0.1f;
+        }
+        float energy_penalty = 0.0f;
+        for (int j = 0; j < env->num_joints; j++) {
+            float vel = next_state[env->num_joints + j];
+            energy_penalty += fabsf(vel) * 0.01f;
+        }
+        *reward = 1.0f + move_reward - energy_penalty;
+        return 0;
+    } else {
+        /* 使用内部ODE物理模拟器步进（自带奖励计算） */
+        return internal_physics_env_step(env->internal_env,
+                                          action, action_dim,
+                                          next_state, next_state_dim,
+                                          reward, done);
     }
-    float energy_penalty = 0.0f;
-    for (int j = 0; j < env->num_joints; j++) {
-        float vel = next_state[env->num_joints + j];
-        energy_penalty += fabsf(vel) * 0.01f;
-    }
-    *reward = 1.0f + move_reward - energy_penalty;
-
-    return 0;
 }
 
 /**

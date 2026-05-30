@@ -60,6 +60,8 @@ struct DynamicsSystem {
     float avg_velocity;         /**< 平均速度 */
     float max_velocity;         /**< 最大速度 */
     float stability;            /**< 稳定性指标 */
+    float state_clamp;          /**< ZSFLNN-C-014修复: 状态限幅值（从config读取） */
+    float velocity_clamp;       /**< ZSFLNN-C-014修复: 速度限幅值（从config读取） */
 };
 
 /**
@@ -99,6 +101,10 @@ DynamicsSystem* dynamics_create(const DynamicsConfig* config) {
     if (system->config.max_step_size <= 0.0f) {
         system->config.max_step_size = 0.1f;  // 默认最大步长
     }
+
+    /* ZSFLNN-C-014修复: 从config读取钳位值，未提供时使用默认值 */
+    system->state_clamp = (config->state_clamp > 0.0f) ? config->state_clamp : 10.0f;
+    system->velocity_clamp = (config->velocity_clamp > 0.0f) ? config->velocity_clamp : 5.0f;
     
     size_t state_size = config->state_size;
     
@@ -420,13 +426,14 @@ int dynamics_update(DynamicsSystem* system, const float* input,
             break;
     }
     
-    // 7. 应用边界约束（防止数值溢出）并更新统计信息
+    /* ZSFLNN-C-014修复: 使用config中的可配置钳位值替代硬编码 ±10.0f/±5.0f */
+    float sc = system->state_clamp;
+    float vc = system->velocity_clamp;
     for (size_t i = 0; i < state_size; i++) {
-        // 应用边界约束
-        if (system->state[i] > 10.0f) system->state[i] = 10.0f;
-        if (system->state[i] < -10.0f) system->state[i] = -10.0f;
-        if (system->velocity[i] > 5.0f) system->velocity[i] = 5.0f;
-        if (system->velocity[i] < -5.0f) system->velocity[i] = -5.0f;
+        if (system->state[i] > sc) system->state[i] = sc;
+        if (system->state[i] < -sc) system->state[i] = -sc;
+        if (system->velocity[i] > vc) system->velocity[i] = vc;
+        if (system->velocity[i] < -vc) system->velocity[i] = -vc;
         
         // 更新统计信息
         float vel_magnitude = fabsf(system->velocity[i]);
@@ -864,10 +871,10 @@ static void dynamics_internal_solve_implicit_euler(DynamicsSystem* system, const
             temp_state[i] += 0.5f * delta[i];
             temp_velocity[i] += 0.5f * delta_vel[i];
 
-            if (temp_state[i] > 10.0f) temp_state[i] = 10.0f;
-            if (temp_state[i] < -10.0f) temp_state[i] = -10.0f;
-            if (temp_velocity[i] > 5.0f) temp_velocity[i] = 5.0f;
-            if (temp_velocity[i] < -5.0f) temp_velocity[i] = -5.0f;
+            if (temp_state[i] > system->state_clamp) temp_state[i] = system->state_clamp;
+            if (temp_state[i] < -system->state_clamp) temp_state[i] = -system->state_clamp;
+            if (temp_velocity[i] > system->velocity_clamp) temp_velocity[i] = system->velocity_clamp;
+            if (temp_velocity[i] < -system->velocity_clamp) temp_velocity[i] = -system->velocity_clamp;
         }
 
         float max_delta = 0.0f;
@@ -992,11 +999,11 @@ static void dynamics_internal_solve_bdf2(DynamicsSystem* system, const float* in
             temp_state[i] += omega * d;
             temp_velocity[i] += omega * dv;
 
-            /* 边界限幅 */
-            if (temp_state[i] > 10.0f) temp_state[i] = 10.0f;
-            if (temp_state[i] < -10.0f) temp_state[i] = -10.0f;
-            if (temp_velocity[i] > 5.0f) temp_velocity[i] = 5.0f;
-            if (temp_velocity[i] < -5.0f) temp_velocity[i] = -5.0f;
+            /* 边界限幅（使用系统可配置参数，非硬编码值） */
+            if (temp_state[i] > system->state_clamp) temp_state[i] = system->state_clamp;
+            if (temp_state[i] < -system->state_clamp) temp_state[i] = -system->state_clamp;
+            if (temp_velocity[i] > system->velocity_clamp) temp_velocity[i] = system->velocity_clamp;
+            if (temp_velocity[i] < -system->velocity_clamp) temp_velocity[i] = -system->velocity_clamp;
 
             float ad = fabsf(d);
             float av = fabsf(dv);
@@ -1700,6 +1707,13 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
      *     计算真实的 ∂f/∂x 雅可比并转置。
      *   - 未来改进方向：将本函数与 CfC 反向传播整合，使用伴随法
      *     (adjoint method) 同时传播状态伴随和参数梯度，消除 J^T≈J 近似。
+     *
+     * ZSFUSA-P2-007: 实现路线图
+     * 1. 短路线(当前): 使用JVP有限差分近似，精度受限于非线性耦合强度
+     * 2. 中路线: 实现cfc_cell_backward_jacobian()计算精确∂f/∂x，
+     *    替换当前J^T@a的有限差分计算，复杂度O(n²)但精度完整
+     * 3. 长路线: 使用伴随ODE+Krylov投影，同时传播状态和参数伴随，
+     *    复杂度O(kn)其中k为Krylov维度(推荐5-10)
      * ============================================================================ */
     /* P06修复: 完整伴随法反向传播
      * 分配 2*state_dim 存储位置伴随(a_q)和速度伴随(a_v)

@@ -3,6 +3,8 @@ message(STATUS "构建推理库")
 
 # ZSFX-007修复: MSVC使用reasoning_internal.c (reasoning.c的函数签名与MSVC C模式存在兼容性问题)
 # reasoning_internal.c 提供完整的推理引擎实现，与reasoning.c功能等价
+# ZSFLYF-KNOWN-2: 两个文件功能等价是MSVC编译器兼容性的有意设计决策，
+# 非代码冗余。合并方案需要测试MSVC/GCC跨平台兼容性。
 if(MSVC)
     set(REASONING_SOURCES
         reasoning_internal.c planning.c long_term_planning.c causal_reasoning.c

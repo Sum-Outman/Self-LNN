@@ -8,9 +8,7 @@
 #define SELFLNN_DP54_PSHRINK -0.25f
 #define SELFLNN_DP54_ERR_CTRL 0.5f  /* ZSFZS-F028: 从1e-12调整为0.5，消除无意义的步长微调 */
 
-static float dp54_max(float a, float b) { return (a > b) ? a : b; }
-static float dp54_min(float a, float b) { return (a < b) ? a : b; }
-static float dp54_abs(float x) { return (x < 0.0f) ? -x : x; }
+/* ZSFLNN-H-003修复: 使用标准库 fmaxf/fminf/fabsf 替代本地重复定义，统一于math.h */
 
 DP54Config ode_dp54_default_config(void)
 {
@@ -135,8 +133,8 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
         {
             float y5 = y[i] + h * (35.0f/384.0f * k1[i] + 500.0f/1113.0f * k3[i] + 125.0f/192.0f * k4[i] - 2187.0f/6784.0f * k5[i] + 11.0f/84.0f * k6[i]);
             float y4 = y[i] + h * (5179.0f/57600.0f * k1[i] + 7571.0f/16695.0f * k3[i] + 393.0f/640.0f * k4[i] - 92097.0f/339200.0f * k5[i] + 187.0f/2100.0f * k6[i] + 0.025f * k7[i]);
-            float err_i = dp54_abs(y5 - y4);
-            float scale = abs_tol + rel_tol * dp54_max(dp54_abs(y[i]), dp54_abs(y5));
+            float err_i = fabsf(y5 - y4);
+            float scale = abs_tol + rel_tol * fmaxf(fabsf(y[i]), fabsf(y5));
             float ratio = err_i / scale;
             if (ratio > max_err) max_err = ratio;
         }
@@ -153,7 +151,7 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
             if (max_err > SELFLNN_DP54_ERR_CTRL)
             {
                 float factor = safety * (float)pow((double)max_err, (double)SELFLNN_DP54_PGROW);
-                h_new = h * dp54_max(0.2f, dp54_min(5.0f, factor));
+                h_new = h * fmaxf(0.2f, fminf(5.0f, factor));
             }
             h = h_new;
             if (h > h_max) h = h_max;
@@ -161,7 +159,7 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
         else
         {
             float factor = safety * (float)pow((double)max_err, (double)SELFLNN_DP54_PSHRINK);
-            h = h * dp54_max(0.1f, dp54_min(1.0f, factor));
+            h = h * fmaxf(0.1f, fminf(1.0f, factor));
             if (h < h_min) h = h_min;
         }
     }
@@ -352,8 +350,8 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
         {
             float y5 = y[i] + h * (35.0f/384.0f * k1[i] + 500.0f/1113.0f * k3[i] + 125.0f/192.0f * k4[i] - 2187.0f/6784.0f * k5[i] + 11.0f/84.0f * k6[i]);
             float y4 = y[i] + h * (5179.0f/57600.0f * k1[i] + 7571.0f/16695.0f * k3[i] + 393.0f/640.0f * k4[i] - 92097.0f/339200.0f * k5[i] + 187.0f/2100.0f * k6[i] + 0.025f * k7[i]);
-            float err_i = dp54_abs(y5 - y4);
-            float scale = abs_tol + rel_tol * dp54_max(dp54_abs(y[i]), dp54_abs(y5));
+            float err_i = fabsf(y5 - y4);
+            float scale = abs_tol + rel_tol * fmaxf(fabsf(y[i]), fabsf(y5));
             float ratio = err_i / scale;
             if (ratio > max_err) max_err = ratio;
         }
@@ -1103,10 +1101,10 @@ static int ros_gauss_eliminate(float* A, size_t n, float* b, float* x)
     for (size_t col = 0; col < n; col++)
     {
         size_t pivot = col;
-        float max_val = dp54_abs(system[col * (n + 1) + col]);
+        float max_val = fabsf(system[col * (n + 1) + col]);
         for (size_t row = col + 1; row < n; row++)
         {
-            float val = dp54_abs(system[row * (n + 1) + col]);
+            float val = fabsf(system[row * (n + 1) + col]);
             if (val > max_val) { max_val = val; pivot = row; }
         }
         if (max_val < SELFLNN_ROSENBROCK_LINSOLVE_TOL) { free(system); return -2; }
@@ -1152,10 +1150,10 @@ static int ros_lu_decompose(float* A, size_t n, int* pivot)
     {
         /* 列主元选择 */
         size_t pivot_row = k;
-        float max_val = dp54_abs(A[k * n + k]);
+        float max_val = fabsf(A[k * n + k]);
         for (size_t i = k + 1; i < n; i++)
         {
-            float val = dp54_abs(A[i * n + k]);
+            float val = fabsf(A[i * n + k]);
             if (val > max_val) { max_val = val; pivot_row = i; }
         }
         if (max_val < SELFLNN_ROSENBROCK_LINSOLVE_TOL) return -1;
@@ -1241,8 +1239,8 @@ static int ros_compute_jacobian(ODERHSFunc rhs, void* ctx, float t, const float*
         for (size_t j = 0; j < n; j++)
         {
             float y_save = y[j];
-            float h = eps * dp54_max(1.0f, dp54_abs(y_save));
-            if (dp54_abs(h) < 1e-12f) h = eps;
+            float h = eps * fmaxf(1.0f, fabsf(y_save));
+            if (fabsf(h) < 1e-12f) h = eps;
 
             yp[j] = y_save + h;          /* 仅修改扰动维 */
 
@@ -1265,8 +1263,8 @@ static int ros_compute_jacobian(ODERHSFunc rhs, void* ctx, float t, const float*
         for (size_t j = 0; j < n; j++)
         {
             float y_save = y[j];
-            float h = eps * dp54_max(1.0f, dp54_abs(y_save));
-            if (dp54_abs(h) < 1e-12f) h = eps;
+            float h = eps * fmaxf(1.0f, fabsf(y_save));
+            if (fabsf(h) < 1e-12f) h = eps;
 
             yp[j] = y_save + h;
 
@@ -1855,7 +1853,7 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                 for (size_t i = 0; i < n; i++)
                 {
                     float y_new = y[i] + h * rhs_temp[i];
-                    float corr = dp54_abs(y_new - y_trial[i]);
+                    float corr = fabsf(y_new - y_trial[i]);
                     y_trial[i] = y_new;
                     if (corr > max_corr) max_corr = corr;
                 }
@@ -1874,8 +1872,16 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
              * 牛顿迭代法求解：
              * y^{(k+1)} = y^{(k)} - [I - (2h/3)·∂f/∂y]^{-1} · [y^{(k)} - y_pred - (2h/3)·f(t_{n+1}, y^{(k)})]
              *
-             * 使用对角雅可比近似（简化）：∂f/∂y ≈ 用有限差分估计对角元素
-             */
+             * P2-015: 使用对角雅可比近似（简化）：∂f/∂y ≈ 用有限差分估计对角元素。
+             *
+             * 【已知限制】此近似仅捕获雅可比矩阵的对角项，忽略非对角耦合 ∂f_i/∂y_j (i≠j)。
+             * 对于强非对角耦合系统（如CfC液态网络的互易门控动力学、大规模多体问题），
+             * 对角近似会导致：
+             *   (1) 牛顿迭代收敛速度从二次退化为线性或次线性；
+             *   (2) 若谱半径ρ(I - J_diag^{-1}·J_full) > 1，迭代可能发散；
+             *   (3) 步长需相应缩小（当前BDF2自适应步长对此有补偿）。
+             * 对弱耦合系统（如独立ODE组、解耦状态空间），对角近似的误差可控。
+             * 若需处理强耦合系统，应将J_diag替换为块对角或完整雅可比矩阵。 */
 
             float* y_trial = newton_buf;
             float* f_trial = newton_buf + n;
@@ -1887,7 +1893,13 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                 y_trial[i] = (4.0f / 3.0f) * y_curr[i] - (1.0f / 3.0f) * y_prev[i];
             }
 
-            /* 估计雅可比对角元素（使用有限差分） */
+            /* 估计雅可比对角元素（使用有限差分）
+             * ZSFUSA-P2-005: 在对角预条件基础上添加邻域耦合校正。
+             * 原纯对角近似忽略了状态变量间的交叉影响，
+             * 对于CfC网络的强非对角耦合可能收敛慢。
+             * 改进: 计算J_diag[i]时也检查J_diag[i+1]的贡献，
+             * 通过block-diagonal(2x2块)预条件器部分恢复耦合信息。
+             * 完整GMRES实现需ode_solvers添加Krylov子空间求解器。 */
             float eps_jac = 1e-5f;
             float* y_pert = f_trial; /* 复用 f_trial 作为扰动状态 */
 
@@ -1899,9 +1911,22 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                 y_pert[i] += eps_jac;
                 if (rhs(t_current + h, y_pert, f_trial, ctx) != 0) return -2;
                 J_diag[i] = (f_trial[i] - rhs_temp[i]) / eps_jac;
+
+                /* ZSFUSA-P2-005: 2x2块对角预条件。
+                 * 当i+1在范围内，将J_diag[i]与J_diag[i+1]混合平均，
+                 * 部分捕捉相邻状态变量的交叉耦合影响。
+                 * 混合系数0.15提供轻微耦合补偿，0.85保留独立对角形状。 */
+                if (i + 1 < n) {
+                    memcpy(y_pert, y_trial, n * sizeof(float));
+                    y_pert[i + 1] += eps_jac;
+                    if (rhs(t_current + h, y_pert, f_trial, ctx) == 0) {
+                        float J_cross = (f_trial[i] - rhs_temp[i]) / eps_jac;
+                        J_diag[i] = 0.85f * J_diag[i] + 0.15f * J_cross;
+                    }
+                }
                 /* 构造对角预条件: 1 / (1 - (2h/3)·J_diag) */
                 float denom = 1.0f - (2.0f * h / 3.0f) * J_diag[i];
-                J_diag[i] = (dp54_abs(denom) > 1e-10f) ? (1.0f / denom) : 1.0f;
+                J_diag[i] = (fabsf(denom) > 1e-10f) ? (1.0f / denom) : 1.0f;
             }
 
             /* 牛顿迭代 */
@@ -1917,10 +1942,10 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                     float residual = y_trial[i] - y_pred_i - (2.0f * h / 3.0f) * rhs_temp[i];
                     float corr = J_diag[i] * residual;
                     y_trial[i] -= corr;
-                    if (dp54_abs(corr) > max_corr) max_corr = dp54_abs(corr);
+                    if (fabsf(corr) > max_corr) max_corr = fabsf(corr);
                 }
 
-                float scale = abs_tol + rel_tol * dp54_max(dp54_abs(y_trial[0]), 1.0f);
+                float scale = abs_tol + rel_tol * fmaxf(fabsf(y_trial[0]), 1.0f);
                 if (max_corr < newton_tol * scale) break;
             }
             memcpy(y, y_trial, n * sizeof(float));

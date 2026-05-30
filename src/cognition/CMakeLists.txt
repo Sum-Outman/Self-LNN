@@ -29,7 +29,14 @@ set_target_properties(selflnn_cognition PROPERTIES
     SOVERSION 1
 )
 
+# ZSFLYF-KNOWN-3修复: 添加cognition头文件独立install规则
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/cognition/
+    DESTINATION include/selflnn/cognition
+    FILES_MATCHING PATTERN "*.h")
+
 # 链接依赖库（ZSFABC-S008修复: 显式添加所有实际使用的模块依赖）
+# ZSFUSA-P0-001修复: 移除selflnn_agi依赖，打破selflnn_agi ↔ selflnn_cognition循环依赖
+# cognition是底层认知模块，不应依赖上层agi模块。如需共享类型，应提取到public头文件。
 target_link_libraries(selflnn_cognition PRIVATE 
     selflnn_core
     selflnn_evolution
@@ -38,6 +45,5 @@ target_link_libraries(selflnn_cognition PRIVATE
     selflnn_memory
     selflnn_reasoning
     selflnn_learning
-    selflnn_agi
     selflnn_safety
 )

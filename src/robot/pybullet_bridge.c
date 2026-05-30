@@ -191,14 +191,13 @@ static int pybullet_ping_process(PyBulletConnection* conn, int timeout_ms) {
         if (fgets(buf, sizeof(buf), conn->process_stdout)) {
             if (strstr(buf, "\"pong\"") || strstr(buf, "\"status\":\"ok\"")) return 1;
         }
-#ifdef _WIN32
-        DWORD exit_code;
-        if (conn->process_handle &&
-            GetExitCodeProcess(conn->process_handle, &exit_code) && exit_code != STILL_ACTIVE) return 0;
-#else
-        int st;
-        if (conn->process_handle && waitpid((pid_t)(uintptr_t)conn->process_handle, &st, WNOHANG) > 0) return 0;
-#endif
+        /* ZSFLYF-P1-007修复: popen模式下使用管道EOF检测而非waitpid。
+         * popen返回FILE*不提供process_handle，Linux下process_handle为NULL导致waitpid无效。
+         * 改用feof检测管道关闭来判断进程退出。 */
+        if (conn->process_stdout) {
+            if (feof(conn->process_stdout)) return 0;
+            if (ferror(conn->process_stdout)) return 0;
+        }
         usleep(10000); waited += 10;
     }
     return 0;

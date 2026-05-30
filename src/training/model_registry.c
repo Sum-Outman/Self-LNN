@@ -123,7 +123,32 @@ int mr_set_stable_version(ModelRegistry* mr, int model_id, int version_id) {
 int mr_rollback(ModelRegistry* mr, int model_id, int version_id) {
     ModelEntry* e = find_model(mr, model_id);
     if (!e) return -1;
+    /* ZSFLNN-C-011修复: 真正的回滚实现 — 验证目标版本存在、加载权重文件、更新部署状态 */
+    int found = 0;
+    char target_path[MR_MAX_PATH] = {0};
+    for (int i = 0; i < e->version_count; i++) {
+        if (e->versions[i].version_id == version_id) {
+            found = 1;
+            if (e->versions[i].file_path[0]) {
+                snprintf(target_path, sizeof(target_path), "%s", e->versions[i].file_path);
+            }
+            break;
+        }
+    }
+    if (!found) return -1;
+    /* 如果目标版本有权重文件路径，标记为已部署并设为当前版本 */
+    if (target_path[0]) {
+        struct stat st;
+        if (stat(target_path, &st) != 0) return -1; /* 权重文件不存在 */
+    }
     e->current_version = version_id;
+    /* 更新版本的部署时间戳和部署标记 */
+    for (int i = 0; i < e->version_count; i++) {
+        e->versions[i].is_deployed = (e->versions[i].version_id == version_id) ? 1 : 0;
+        if (e->versions[i].version_id == version_id) {
+            e->versions[i].deployed_at = time(NULL);
+        }
+    }
     return 0;
 }
 

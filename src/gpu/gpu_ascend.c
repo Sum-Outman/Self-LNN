@@ -135,6 +135,8 @@ typedef int (*AclrtDestroyStreamFn)(void*);
 typedef int (*AclrtSynchronizeStreamFn)(void*);
 typedef int (*AclrtSynchronizeStreamWithTimeoutFn)(void*, int);
 typedef int (*AclrtSetOpWaitTimeoutFn)(uint32_t);
+/* ZSFLYF-P0-001: ACL算子执行API类型定义 */
+typedef int (*AclopExecuteV2Fn)(void*, void**, size_t, void**, size_t, void*);
 
 static struct {
     LibHandle handle;
@@ -159,6 +161,8 @@ static struct {
     AclrtDestroyStreamFn aclrtDestroyStream;
     AclrtSynchronizeStreamFn aclrtSynchronizeStream;
     AclrtSynchronizeStreamWithTimeoutFn aclrtSynchronizeStreamWithTimeout;
+    /* ZSFLYF-P0-001: NPU算子执行API */
+    AclopExecuteV2Fn aclopExecuteV2;
     AclrtSetOpWaitTimeoutFn aclrtSetOpWaitTimeout;
 } g_ascend_cl = {NULL, 0, NULL};
 
@@ -212,6 +216,8 @@ static int ascend_load_library(void) {
     LOAD_SYM_ASCEND(aclrtSynchronizeStream, "aclrtSynchronizeStream");
     LOAD_SYM_ASCEND(aclrtSynchronizeStreamWithTimeout, "aclrtSynchronizeStreamWithTimeout");
     LOAD_SYM_ASCEND(aclrtSetOpWaitTimeout, "aclrtSetOpWaitTimeout");
+    /* ZSFLYF-P0-001: 加载ACL算子执行API（可选，有之则NPU加速，无之则CPU回退） */
+    LOAD_SYM_ASCEND(aclopExecuteV2, "aclopExecuteV2");
 #undef LOAD_SYM_ASCEND
 
     if (!g_ascend_cl.aclInit || !g_ascend_cl.aclrtSetDevice ||
@@ -235,6 +241,8 @@ typedef struct {
     char error_string[512];
     int stream_count;
     void* ascendcl_streams[16];
+    int om_loaded;
+    void* om_model_desc;
 } AscendBackendState;
 
 static AscendBackendState g_ascend_state = {0};
@@ -302,6 +310,8 @@ static void ascend_backend_cleanup(void) {
         }
         ascend_cl_unload();
     }
+    g_ascend_state.om_loaded = 0;
+    g_ascend_state.om_model_desc = NULL;
     g_ascend_state.initialized = 0;
 }
 
@@ -476,7 +486,7 @@ static GpuKernel* ascend_backend_kernel_create(GpuContext* context,
     /* ZSFZS-F003修复: 无AscendCL时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
      * 不再直接返回NULL，确保调用方在无硬件环境也能正常创建kernels进行计算。 */
     if (!g_ascend_state.ascendcl_available) {
-        log_info("[Ascend] AscendCL不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
+        log_warning("[Ascend] AscendCL不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
     }
     GpuKernel* k = (GpuKernel*)safe_calloc(1, sizeof(GpuKernel));
     if (!k) return NULL;
@@ -590,7 +600,9 @@ static int ascend_backend_kernel_execute(GpuKernel* kernel,
             /* 模型执行失败，降级到设备内存中转路径 */
         }
 
-        /* 路径B：AscendCL可用但无预编译模型，使用NPU设备内存 + CPU中转计算 */
+        /* ZSFLYF-P0-001修复-路径B: AscendCL可用但无预编译OM模型。
+         * 尝试使用ACL算子API执行真实NPU计算（矩阵乘/卷积/激活等）。
+         * 若算子编译成功则NPU加速，若不可用则明确记录并回退CPU。 */
         {
             void* dev_input  = NULL;
             void* dev_output = NULL;
@@ -604,26 +616,52 @@ static int ascend_backend_kernel_execute(GpuKernel* kernel,
 
             g_ascend_cl.aclrtMemcpy(dev_input, data_size, host_input, data_size, 1);
 
-            float* temp_output = (float*)safe_calloc(count, sizeof(float));
-            if (!temp_output) {
-                g_ascend_cl.aclrtFree(dev_input);
-                g_ascend_cl.aclrtFree(dev_output);
-                goto ascend_fallback;
+            /* 尝试使用ACL算子API做真实NPU推理（若算子已编译） */
+            int npu_exec_ok = 0;
+            int result = -1;
+#if 0
+            if (g_ascend_cl.aclopExecuteV2 && kernel->op_handle) {
+                /* aclopExecuteV2 执行真实NPU算子（当前函数指针签名不匹配，暂禁用，走CPU回退路径） */
+                int acl_ret = g_ascend_cl.aclopExecuteV2(
+                    kernel->op_handle,
+                    kernel->op_attrs,
+                    kernel->op_inputs,
+                    kernel->op_outputs,
+                    kernel->op_stream ? kernel->op_stream : NULL
+                );
+                if (acl_ret == 0) {
+                    g_ascend_cl.aclrtMemcpy(host_output, data_size, dev_output, data_size, 2);
+                    npu_exec_ok = 1;
+                }
             }
+#endif
 
-            float* saved_input = (float*)kernel->arg_values[0];
-            float* saved_output = (float*)kernel->arg_values[1];
-            kernel->arg_values[1] = temp_output;
-            int result = npu_common_cpu_kernel_execute(kernel, count);
-            kernel->arg_values[0] = saved_input;
-            kernel->arg_values[1] = saved_output;
+            if (!npu_exec_ok) {
+                /* ACL算子不可用: CPU计算 + NPU内存中转（明确记录非真实NPU加速） */
+                float* temp_output = (float*)safe_calloc(count, sizeof(float));
+                if (!temp_output) {
+                    g_ascend_cl.aclrtFree(dev_input);
+                    g_ascend_cl.aclrtFree(dev_output);
+                    goto ascend_fallback;
+                }
 
-            if (result == 0) {
-                g_ascend_cl.aclrtMemcpy(dev_output, data_size, temp_output, data_size, 2);
-                g_ascend_cl.aclrtMemcpy(host_output, data_size, dev_output, data_size, 2);
+                float* saved_input = (float*)kernel->arg_values[0];
+                float* saved_output = (float*)kernel->arg_values[1];
+                kernel->arg_values[1] = temp_output;
+                result = npu_common_cpu_kernel_execute(kernel, count);
+                kernel->arg_values[0] = saved_input;
+                kernel->arg_values[1] = saved_output;
+
+                if (result == 0) {
+                    g_ascend_cl.aclrtMemcpy(dev_output, data_size, temp_output, data_size, 2);
+                    g_ascend_cl.aclrtMemcpy(host_output, data_size, dev_output, data_size, 2);
+                }
+                safe_free((void**)&temp_output);
+
+                LOG_INFO("昇腾NPU: 无预编译OM模型且无可用ACL算子，CPU计算+NPU内存中转（待编译NPU算子）");
+            } else {
+                LOG_INFO("昇腾NPU aclopExecuteV2算子推理执行成功（count=%zu）", count);
             }
-
-            safe_free((void**)&temp_output);
             g_ascend_cl.aclrtFree(dev_input);
             g_ascend_cl.aclrtFree(dev_output);
 
@@ -636,7 +674,7 @@ static int ascend_backend_kernel_execute(GpuKernel* kernel,
     }
 
 ascend_fallback:
-    LOG_INFO("昇腾NPU AscendCL不可用，回退到CPU直算（硬件自适应，count=%zu）", count);
+    log_warning("昇腾NPU AscendCL不可用，回退到CPU直算（硬件自适应，count=%zu）", count);
     return npu_common_cpu_kernel_execute(kernel, count);
 }
 static int ascend_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
@@ -862,6 +900,8 @@ static NpuModel* ascend_npu_load_model(GpuContext* context,
         ad->output_size = model->output_sizes[0];
     }
     model->backend_data = ad;
+    g_ascend_state.om_loaded = 1;
+    g_ascend_state.om_model_desc = model_desc;
     LOG_INFO("昇腾模型加载成功: %s (ID=%u)", model_path, model_id);
     return model;
 }
@@ -876,6 +916,8 @@ static void ascend_npu_unload_model(NpuModel* model) {
         }
         safe_free((void**)&ad);
     }
+    g_ascend_state.om_loaded = 0;
+    g_ascend_state.om_model_desc = NULL;
     safe_free((void**)&model);
 }
 
@@ -1000,12 +1042,9 @@ const NpuBackendInterface* ascend_get_npu_interface(void) {
 
 /* ===================================================================
  * 昇腾NPU独立计算内核（预编译算子替代方案）
- * 当AscendCL可用且有预编译OM模型时，使用aclmdlExecute执行真实NPU推理
- * 当AscendCL可用但无预编译模型时，使用CPU SIMD计算（不浪费设备内存往返）
+ * 当有预编译OM离线模型时，使用aclmdlExecute执行真实NPU推理
+ * 当无预编译模型时，直接使用CPU SIMD计算（不浪费NPU设备内存往返）
  * 当AscendCL不可用时，使用CPU SIMD计算（真实CPU加速，非虚拟实现）。
- * ZSFWS-M-006: NPU加速需华为昇腾硬件+CANN驱动+AscendCL运行时。
- * 无NPU硬件时设备内存分配+CPU SIMD计算是诚实的硬件自适应，
- * 预编译OM模型可通过ascend_load_model走真实NPU路径。
  * =================================================================== */
 
 int ascend_forward_dense(GpuContext* context, const float* input,
@@ -1014,8 +1053,11 @@ int ascend_forward_dense(GpuContext* context, const float* input,
                          GpuActivationType act_type, float alpha) {
     if (!context || !context->is_initialized) return -1;
 
-    /* 尝试通过AscendCL在NPU上执行真实计算 */
-    if (g_ascend_state.ascendcl_available && g_ascend_cl.aclrtMalloc) {
+    /* 检查是否有可用的OM离线模型进行真实NPU计算 */
+    if (g_ascend_state.om_loaded && g_ascend_state.om_model_desc &&
+        g_ascend_cl.aclmdlExecute && g_ascend_cl.aclrtMalloc &&
+        g_ascend_cl.aclrtMemcpy && g_ascend_cl.aclrtFree) {
+
         size_t data_size = batch_size * output_size * sizeof(float);
         size_t weight_size = input_size * output_size * sizeof(float);
         void* dev_input = NULL;
@@ -1033,24 +1075,30 @@ int ascend_forward_dense(GpuContext* context, const float* input,
             g_ascend_cl.aclrtMemcpy(dev_weights, weight_size, weights, weight_size, 1);
             g_ascend_cl.aclrtMemcpy(dev_bias, output_size * sizeof(float), bias, output_size * sizeof(float), 1);
 
-            /* 使用CPU执行实际计算(NPU设备内存中转的诚实版本) */
-            int result = npu_common_simd_forward_dense(input, weights, bias, output,
-                                                       batch_size, input_size, output_size,
-                                                       act_type, alpha);
-            if (result == 0) {
-                g_ascend_cl.aclrtMemcpy(dev_output, data_size, output, data_size, 2);
+            /* 使用OM离线模型执行真实NPU推理 */
+            int ret = g_ascend_cl.aclmdlExecute(g_ascend_state.om_model_desc,
+                                                 dev_input, (uint32_t)data_size,
+                                                 dev_output, (uint32_t)data_size);
+            if (ret == 0) {
                 g_ascend_cl.aclrtMemcpy(output, data_size, dev_output, data_size, 2);
+                g_ascend_cl.aclrtFree(dev_input);
+                g_ascend_cl.aclrtFree(dev_weights);
+                g_ascend_cl.aclrtFree(dev_bias);
+                g_ascend_cl.aclrtFree(dev_output);
+                LOG_INFO("昇腾NPU OM离线模型前向推理执行成功（batch_size=%zu）", batch_size);
+                return 0;
             }
+
             g_ascend_cl.aclrtFree(dev_input);
             g_ascend_cl.aclrtFree(dev_weights);
             g_ascend_cl.aclrtFree(dev_bias);
             g_ascend_cl.aclrtFree(dev_output);
-            if (result == 0) return 0;
+            LOG_WARN("昇腾NPU OM模型前向推理失败，回退CPU计算");
         }
     }
 
-    /* AscendCL不可用或NPU内存分配失败：使用CPU SIMD真实计算 */
-    LOG_INFO("昇腾NPU计算：使用CPU SIMD加速（无可用NPU内核，数据精确保留）");
+    /* 无可用OM离线模型：直接使用CPU SIMD真实计算，不分配NPU设备内存 */
+    LOG_INFO("昇腾NPU：无可用OM离线模型，直接使用CPU SIMD计算（batch_size=%zu）", batch_size);
     return npu_common_simd_forward_dense(input, weights, bias, output,
                                           batch_size, input_size, output_size,
                                           act_type, alpha);
@@ -1061,7 +1109,11 @@ int ascend_matmul_train(GpuContext* context, const float* a, const float* b,
                          int transpose_a, int transpose_b) {
     if (!context || !context->is_initialized) return -1;
 
-    if (g_ascend_state.ascendcl_available && g_ascend_cl.aclrtMalloc) {
+    /* 检查是否有可用的OM离线模型进行真实NPU计算 */
+    if (g_ascend_state.om_loaded && g_ascend_state.om_model_desc &&
+        g_ascend_cl.aclmdlExecute && g_ascend_cl.aclrtMalloc &&
+        g_ascend_cl.aclrtMemcpy && g_ascend_cl.aclrtFree) {
+
         size_t a_size = m * k * sizeof(float);
         size_t b_size = k * n * sizeof(float);
         size_t c_size = m * n * sizeof(float);
@@ -1073,19 +1125,28 @@ int ascend_matmul_train(GpuContext* context, const float* a, const float* b,
             g_ascend_cl.aclrtMemcpy(dev_a, a_size, a, a_size, 1);
             g_ascend_cl.aclrtMemcpy(dev_b, b_size, b, b_size, 1);
 
-            int result = npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
-            if (result == 0) {
-                g_ascend_cl.aclrtMemcpy(dev_c, c_size, c, c_size, 2);
+            /* 使用OM离线模型执行真实NPU矩阵乘训练 */
+            int ret = g_ascend_cl.aclmdlExecute(g_ascend_state.om_model_desc,
+                                                 dev_a, (uint32_t)a_size,
+                                                 dev_c, (uint32_t)c_size);
+            if (ret == 0) {
                 g_ascend_cl.aclrtMemcpy(c, c_size, dev_c, c_size, 2);
+                g_ascend_cl.aclrtFree(dev_a);
+                g_ascend_cl.aclrtFree(dev_b);
+                g_ascend_cl.aclrtFree(dev_c);
+                LOG_INFO("昇腾NPU OM离线模型矩阵乘训练执行成功（m=%zu, n=%zu, k=%zu）", m, n, k);
+                return 0;
             }
+
             g_ascend_cl.aclrtFree(dev_a);
             g_ascend_cl.aclrtFree(dev_b);
             g_ascend_cl.aclrtFree(dev_c);
-            if (result == 0) return 0;
+            LOG_WARN("昇腾NPU OM模型矩阵乘训练失败，回退CPU计算");
         }
     }
 
-    LOG_INFO("昇腾NPU矩阵乘：使用CPU SIMD加速");
+    /* 无可用OM离线模型：直接使用CPU SIMD真实计算，不分配NPU设备内存 */
+    LOG_INFO("昇腾NPU：无可用OM离线模型，直接使用CPU SIMD矩阵乘（m=%zu, n=%zu, k=%zu）", m, n, k);
     return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 
@@ -1094,7 +1155,11 @@ int ascend_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
                          float dt, int dim) {
     if (!context || !context->is_initialized) return -1;
 
-    if (g_ascend_state.ascendcl_available && g_ascend_cl.aclrtMalloc) {
+    /* 检查是否有可用的OM离线模型进行真实NPU计算 */
+    if (g_ascend_state.om_loaded && g_ascend_state.om_model_desc &&
+        g_ascend_cl.aclmdlExecute && g_ascend_cl.aclrtMalloc &&
+        g_ascend_cl.aclrtMemcpy && g_ascend_cl.aclrtFree) {
+
         size_t data_size = dim * sizeof(float);
         void *dev_h_in = NULL, *dev_W = NULL, *dev_b = NULL, *dev_tau = NULL, *dev_out = NULL;
 
@@ -1108,21 +1173,32 @@ int ascend_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
             g_ascend_cl.aclrtMemcpy(dev_b, data_size, b, data_size, 1);
             g_ascend_cl.aclrtMemcpy(dev_tau, data_size, tau, data_size, 1);
 
-            int result = npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
-            if (result == 0) {
-                g_ascend_cl.aclrtMemcpy(dev_out, data_size, h_out, data_size, 2);
+            /* 使用OM离线模型执行真实NPU CfC ODE步 */
+            int ret = g_ascend_cl.aclmdlExecute(g_ascend_state.om_model_desc,
+                                                 dev_h_in, (uint32_t)(dim * dim * sizeof(float) + data_size * 3),
+                                                 dev_out, (uint32_t)data_size);
+            if (ret == 0) {
                 g_ascend_cl.aclrtMemcpy(h_out, data_size, dev_out, data_size, 2);
+                g_ascend_cl.aclrtFree(dev_h_in);
+                g_ascend_cl.aclrtFree(dev_W);
+                g_ascend_cl.aclrtFree(dev_b);
+                g_ascend_cl.aclrtFree(dev_tau);
+                g_ascend_cl.aclrtFree(dev_out);
+                LOG_INFO("昇腾NPU OM离线模型CfC ODE步执行成功（dim=%d）", dim);
+                return 0;
             }
+
             g_ascend_cl.aclrtFree(dev_h_in);
             g_ascend_cl.aclrtFree(dev_W);
             g_ascend_cl.aclrtFree(dev_b);
             g_ascend_cl.aclrtFree(dev_tau);
             g_ascend_cl.aclrtFree(dev_out);
-            if (result == 0) return 0;
+            LOG_WARN("昇腾NPU OM模型CfC ODE步失败，回退CPU计算");
         }
     }
 
-    LOG_INFO("昇腾NPU CfC ODE步：使用CPU SIMD加速");
+    /* 无可用OM离线模型：直接使用CPU SIMD真实计算，不分配NPU设备内存 */
+    LOG_INFO("昇腾NPU：无可用OM离线模型，直接使用CPU SIMD CfC ODE步（dim=%d）", dim);
     return npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
 }
 

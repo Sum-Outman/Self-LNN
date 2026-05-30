@@ -3850,11 +3850,7 @@ response = requests.get(
                         <button class="btn btn-secondary" onclick="copyApiAddress()">📋 复制API地址</button>
                     </div></div>
                 </div>
-            <div class="section-placeholder" style="padding:20px;text-align:center;color:#888;">
-                <p>此功能模块已就绪，等待后端数据连接...</p>
-            </div>
             </section>
-        
             <!-- ====== device-control (从 device-control.html 合并) ====== -->
             <section id="device-control" class="section">
 
@@ -3940,9 +3936,6 @@ response = requests.get(
         });
     </script>
 
-            <div class="section-placeholder" style="padding:20px;text-align:center;color:#888;">
-                <p>此功能模块已就绪，等待后端数据连接...</p>
-            </div>
             </section>
             <!-- ====== programming-workbench (从 programming-workbench.html 合并) ====== -->
             <section id="programming-workbench" class="section">
@@ -4552,7 +4545,7 @@ response = requests.get(
                 }
             }
         }
-    /* ZSFABC-024: 系统日志桥接 - 将console输出同步到页面日志面板 */
+    /* ZSFABC-024/ZSF-013: 系统日志桥接 - 将console输出同步到页面日志面板 */
     window._sysLog = function(level, msg) {
         var panel = document.getElementById('sys-log-panel');
         if (!panel) return;
@@ -4563,10 +4556,20 @@ response = requests.get(
         entry.style.color = color;
         entry.textContent = '[' + time + '] ' + msg;
         panel.insertBefore(entry, panel.firstChild);
-        if (panel.children.length > 100) panel.removeChild(panel.lastChild);
+        /* ZSF-013: 使用可配置的最大条目限制，防止内存无限增长 */
+        var maxEntries = (typeof _sysLogMaxEntries !== 'undefined') ? _sysLogMaxEntries : 100;
+        while (panel.children.length > maxEntries) {
+            panel.removeChild(panel.lastChild);
+        }
     };
-    /* 劫持console方法输出到日志面板 */
+    /* ZSF-005/ZSF-013修复: 生产环境日志劫持优化
+     * 保留日志面板但限制缓冲区大小为1000条，避免内存无限增长。
+     * 通过SELFLNN_DEBUG标志控制是否启用全局console劫持 */
+    var _sysLogMaxEntries = 1000;
     (function(){
+        /* 仅在调试模式下劫持全局console */
+        var _debugMode = (typeof SELFLNN_DEBUG !== 'undefined' && SELFLNN_DEBUG);
+        if (!_debugMode) return;
         var _log=console.log,_warn=console.warn,_err=console.error;
         console.log=function(){ _log.apply(console,arguments); try{window._sysLog('log',Array.prototype.join.call(arguments,' '))}catch(e){} };
         console.warn=function(){ _warn.apply(console,arguments); try{window._sysLog('warn',Array.prototype.join.call(arguments,' '))}catch(e){} };
@@ -5680,9 +5683,6 @@ response = requests.get(
         });
     </script>
 
-            <div class="section-placeholder" style="padding:20px;text-align:center;color:#888;">
-                <p>此功能模块已就绪，等待后端数据连接...</p>
-            </div>
             </section>
             <!-- ====== teach (从 teach.html 合并) ====== -->
             <section id="teach" class="section">
@@ -5739,9 +5739,6 @@ response = requests.get(
         }
     </script>
 
-            <div class="section-placeholder" style="padding:20px;text-align:center;color:#888;">
-                <p>此功能模块已就绪，等待后端数据连接...</p>
-            </div>
             </section>
             <!-- ====== api-keys (从 api-keys.html 合并) ====== -->
             <section id="api-keys" class="section">
@@ -5953,14 +5950,30 @@ response = requests.get(
 
         async function loadRateLimit() {
             try {
-                /* 使用 getRateLimitStatus 获取速率限制 */
+                /* ZSFAAA-DEEP-020修复: 修正字段访问路径
+                 * 原代码访问r.min_remaining但后端返回r.rate_limit.min_remaining
+                 * 导致所有UI元素永远显示默认值 */
                 var data = await window.SelfLnnApi.getRateLimitStatus();
-                var r = (data && data.success) ? (data.data || data) : {};
-                var tokens = r.available_tokens != null ? r.available_tokens : (r.min_remaining != null ? r.min_remaining : '-');
-                document.getElementById('rate-tokens').textContent = tokens;
-                document.getElementById('rate-capacity').textContent = r.capacity != null ? r.capacity : '1000';
-                document.getElementById('rate-consumed').textContent = r.tokens_consumed != null ? r.tokens_consumed : '-';
-                document.getElementById('rate-refilled').textContent = r.tokens_refilled != null ? r.tokens_refilled : '-';
+                var r = (data && data.success && data.data && data.data.rate_limit)
+                      ? data.data.rate_limit : {};
+                document.getElementById('rate-tokens').textContent =
+                    r.min_remaining !== undefined ? r.min_remaining : '-';
+                document.getElementById('rate-capacity').textContent =
+                    r.rate_per_minute !== undefined ? r.rate_per_minute : '1000';
+                document.getElementById('rate-consumed').textContent =
+                    (r.rate_per_minute !== undefined && r.min_remaining !== undefined)
+                    ? (r.rate_per_minute - r.min_remaining) : '-';
+                document.getElementById('rate-refilled').textContent =
+                    r.auth_global_tokens !== undefined ? r.auth_global_tokens : '-';
+                /* 同时填充 API服务状态卡片中的速率限制UI元素 */
+                var elLimit = document.getElementById('api-rate-limit');
+                if (elLimit) elLimit.textContent = r.rate_per_minute !== undefined ? r.rate_per_minute : '--';
+                var elRemain = document.getElementById('api-rate-remain');
+                if (elRemain) elRemain.textContent = r.min_remaining !== undefined ? r.min_remaining : '--';
+                var elWl = document.getElementById('api-whitelist');
+                if (elWl) elWl.textContent = r.active_buckets !== undefined ? r.active_buckets + '个桶' : '--';
+                var elBl = document.getElementById('api-blacklist');
+                if (elBl) elBl.textContent = r.enabled ? '启用' : '禁用';
             } catch(e) { console.warn('API速率限制加载失败:', e.message); }
         }
 
@@ -5997,9 +6010,6 @@ response = requests.get(
         });
     </script>
 
-            <div class="section-placeholder" style="padding:20px;text-align:center;color:#888;">
-                <p>此功能模块已就绪，等待后端数据连接...</p>
-            </div>
             </section>
             <!-- ====== usage-logs (从 usage-logs.html 合并) ====== -->
             <section id="usage-logs" class="section">
@@ -6077,9 +6087,6 @@ response = requests.get(
         });
     </script>
 
-            <div class="section-placeholder" style="padding:20px;text-align:center;color:#888;">
-                <p>此功能模块已就绪，等待后端数据连接...</p>
-            </div>
             </section>
             <!-- ====== hardware-setup (从 hardware-setup.html 合并) ====== -->
             <section id="hardware-setup" class="section">
@@ -6370,9 +6377,6 @@ response = requests.get(
         });
     </script>
 
-        <div class="section-placeholder" style="padding:20px;text-align:center;color:#888;">
-            <p>此功能模块已就绪，等待后端数据连接...</p>
-        </div>
         </section>
 
         <!-- ZSF-ZNB前端修复: 系统运行日志面板从hardware-setup内移出，作为独立板块 -->
@@ -6386,9 +6390,6 @@ response = requests.get(
                     <div style="color:#666">等待系统事件...</div>
                 </div>
             </div>
-        <div class="section-placeholder" style="padding:20px;text-align:center;color:#888;">
-            <p>此功能模块已就绪，等待后端数据连接...</p>
-        </div>
         </section>
 
     </main>

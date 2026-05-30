@@ -8,6 +8,7 @@
 #include "selflnn/robot/device_protocols.h"
 #include "selflnn/core/port_config.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"        /* ZSFUSA: log_warn宏 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

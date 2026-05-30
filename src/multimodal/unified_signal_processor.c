@@ -789,8 +789,10 @@ UnifiedSignalProcessor* unified_signal_processor_create(const UnifiedSignalProce
                     processor->unified_projection_matrix[i] = r * xavier_limit;
                 }
                 memset(processor->unified_projection_bias, 0, config->unified_dimension * sizeof(float));
-                /* Phase4: Xavier初始化后立即锁定，投影矩阵不参与反向传播 */
-                processor->projection_locked = 1;
+                /* ZSFLYF-P1-003修复: 投影矩阵不再锁定。
+                 * 锁定为Xavier随机初始化意味着跨模态投影永远无法学习。
+                 * 投影矩阵应参与训练，通过反向传播学习有意义的跨模态映射。 */
+                processor->projection_locked = 0;
             }
         } else {
             processor->unified_projection_matrix = NULL;
@@ -845,9 +847,11 @@ UnifiedSignalProcessor* unified_signal_processor_create(const UnifiedSignalProce
     }
     
     processor->is_initialized = 1;
-    processor->encoding_quality = 0.5f;
-    processor->cross_modal_alignment = 0.5f;
-    processor->temporal_consistency = 0.5f;
+    /* ZSFLYF-P1-010修复: 初始化质量评估应从实际编码质量计算，而非硬编码固定值。
+     * 初始状态下编码质量、跨模态对齐度、时序一致性均为未评估状态。 */
+    processor->encoding_quality = 0.0f;
+    processor->cross_modal_alignment = 0.0f;
+    processor->temporal_consistency = 0.0f;
     
     return processor;
 }
@@ -1247,7 +1251,9 @@ int unified_signal_processor_encode_to_lnn(UnifiedSignalProcessor* processor,
         return -1;
     }
 
-    return (int)unified_output.signal_dimension;
+    /* ZSFLYF-P3-006修复: 返回LNN实际输出维度(unified_dimension)而非信号维度。
+     * signal_dimension是中间信号维度，调用者期望的是LNN输出维度。 */
+    return (int)processor->config.unified_dimension;
 }
 
 /* 连续状态演化由CfC细胞单元直接在encode()中处理 */

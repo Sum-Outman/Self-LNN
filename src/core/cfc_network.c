@@ -176,11 +176,12 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         network->b_out_gradients = NULL;
     }
 
-    /* P0-014修复: He/Kaiming自适应初始化W_out参数 */
+    /* R2-P1修复: He/Kaiming自适应初始化W_out参数
+     * 原实现使用 sqrt(6/hidden_size) 是Xavier公式，对ReLU类激活函数不正确。
+     * He均匀分布: 范围 = sqrt(6/fan_in)，其中 fan_in = hidden_size。 */
     if (out_proj_param_size > 0 && network->W_out_params) {
         float he_limit = sqrtf(6.0f / (float)hidden_size_cfg);
-        if (he_limit > 0.2f) he_limit = 0.2f;
-        if (he_limit < 0.001f) he_limit = 0.001f;
+        if (he_limit < 0.0001f) he_limit = 0.0001f;
         for (size_t i = 0; i < output_size_cfg * hidden_size_cfg; i++) {
             network->W_out_params[i] = rng_uniform(-he_limit, he_limit);
         }
@@ -205,13 +206,13 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         return NULL;
     }
     
-    /* ZSFWS-MLW: 使用 He/Kaiming 自适应初始化每层独立权重矩阵 */
+    /* R2-P2修复: 使用He/Kaiming自适应初始化每层独立权重矩阵
+     * 移除0.2f硬上限截断（小型网络中该截断严重压缩初始化方差）。 */
     {
         for (int l = 0; l < num_layers_int; l++) {
             size_t l_input = (l == 0) ? input_size_cfg : hidden_size_cfg;
             float he_limit = sqrtf(6.0f / (float)l_input);
-            if (he_limit > 0.2f) he_limit = 0.2f;
-            if (he_limit < 0.001f) he_limit = 0.001f;
+            if (he_limit < 0.0001f) he_limit = 0.0001f;
             float* lw = param_block + network->per_layer_w_offset[l];
             size_t lw_sz = network->per_layer_w_size[l];
             for (size_t i = 0; i < lw_sz; i++) {
@@ -968,6 +969,9 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
             for (size_t i = 0; i < hidden_size; i++) {
                 grad_l0_b[i] += cell0->bias_grad[i];
             }
+            /* ZSFNO2-F001: 防御性清零cell内部梯度缓冲区，防止梯度污染 */
+            memset(cell0->weight_grad, 0, total_weight_size * sizeof(float));
+            memset(cell0->bias_grad, 0, hidden_size * sizeof(float));
         }
     } else {
         // 多层网络完整梯度计算
@@ -998,6 +1002,9 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
                     layer_grad_b[i] += cell->bias_grad[i];
                 }
             }
+            /* ZSFNO2-F001: 防御性清零cell内部梯度缓冲区，防止梯度污染 */
+            if (cell->weight_grad) memset(cell->weight_grad, 0, cell_weight_size * sizeof(float));
+            if (cell->bias_grad) memset(cell->bias_grad, 0, config->hidden_size * sizeof(float));
         }
         
         /* 同步到网络内部梯度缓冲区（保持向后兼容） */
@@ -1888,38 +1895,95 @@ int cfc_detect_stiffness(CfCNetwork* network, const float* input,
      * 逆幂迭代: 求解 (J - shift*I)·x = v, 迭代收敛到最接近shift的特征值。
      * shift=0 时收敛到 |λ| 最小的特征值。 */
     float lambda_min = 1e-10f;
+    /* R2-P12修复: 真正的逆幂迭代法求解最小特征值
+     * 原实现错误地使用 J*v 替代求解 J*w=v，导致收敛到最大特征值。
+     * 修正：每步迭代解线性方程组 J*w = v，使用紧凑高斯消元(带部分主元)。
+     * 对于n<=256的矩阵，高斯消元O(n³)足够高效。 */
     {
         float* inv_v = (float*)safe_calloc(n, sizeof(float));
         float* inv_w = (float*)safe_calloc(n, sizeof(float));
-        if (inv_v && inv_w) {
-            /* ZSFWS-012修复: 使用secure_random_float替代硬编码LCG */
+        float* lu_A = (float*)safe_calloc(n * n, sizeof(float));
+        int*   lu_pivot = (int*)safe_calloc(n, sizeof(int));
+        if (inv_v && inv_w && lu_A && lu_pivot) {
             for (size_t i = 0; i < n; i++) inv_v[i] = secure_random_float();
             float norm = 0.0f;
             for (size_t i = 0; i < n; i++) norm += inv_v[i] * inv_v[i];
             if (norm > 1e-10f) { norm = sqrtf(norm); for (size_t i = 0; i < n; i++) inv_v[i] /= norm; }
+
             float inv_lambda = 0.0f;
             for (int iter = 0; iter < 30; iter++) {
-                for (size_t i = 0; i < n; i++) {
-                    double sum = 0.0;
-                    for (size_t j = 0; j < n; j++)
-                        sum += (double)J[i * n + j] * (double)inv_v[j];
-                    inv_w[i] = (float)sum;
+                /* 复制J到lu_A并做部分主元高斯消元(LU分解) */
+                memcpy(lu_A, J, n * n * sizeof(float));
+                for (size_t k = 0; k < n; k++) {
+                    /* 部分主元选择 */
+                    size_t pivot = k;
+                    float max_val = fabsf(lu_A[k * n + k]);
+                    for (size_t r = k + 1; r < n; r++) {
+                        float val = fabsf(lu_A[r * n + k]);
+                        if (val > max_val) { max_val = val; pivot = r; }
+                    }
+                    lu_pivot[k] = (int)pivot;
+                    if (max_val < 1e-15f) { lu_A[k * n + k] = 1e-15f; continue; }
+                    /* 交换行 */
+                    if (pivot != k) {
+                        for (size_t c = 0; c < n; c++) {
+                            float tmp = lu_A[k * n + c];
+                            lu_A[k * n + c] = lu_A[pivot * n + c];
+                            lu_A[pivot * n + c] = tmp;
+                        }
+                    }
+                    /* 高斯消元 */
+                    float inv_pivot = 1.0f / lu_A[k * n + k];
+                    for (size_t r = k + 1; r < n; r++) {
+                        float factor = lu_A[r * n + k] * inv_pivot;
+                        lu_A[r * n + k] = factor;
+                        for (size_t c = k + 1; c < n; c++) {
+                            lu_A[r * n + c] -= factor * lu_A[k * n + c];
+                        }
+                    }
                 }
+                /* 前向代入(使用LU分解结果求解 J*w = v) */
+                float* b = (float*)safe_calloc(n, sizeof(float));
+                if (!b) break;
+                memcpy(b, inv_v, n * sizeof(float));
+                /* 前向代入: L*y = P*b */
+                for (size_t k = 0; k < n; k++) {
+                    int pk = lu_pivot[k];
+                    float tmp = b[k]; b[k] = b[pk]; b[pk] = tmp;
+                    for (size_t r = k + 1; r < n; r++) {
+                        b[r] -= lu_A[r * n + k] * b[k];
+                    }
+                }
+                /* 回代: U*w = y */
+                for (int k = (int)n - 1; k >= 0; k--) {
+                    float sum = b[k];
+                    for (size_t c = (size_t)k + 1; c < n; c++) {
+                        sum -= lu_A[k * n + c] * b[c];
+                    }
+                    b[k] = sum / (fabsf(lu_A[k * n + k]) > 1e-15f ? lu_A[k * n + k] : 1e-15f);
+                }
+                /* 归一化w并计算瑞利商 */
                 float wnorm = 0.0f;
-                for (size_t i = 0; i < n; i++) wnorm += inv_w[i] * inv_w[i];
-                if (wnorm < 1e-20f) break;
+                for (size_t i = 0; i < n; i++) wnorm += b[i] * b[i];
+                if (wnorm < 1e-20f) { safe_free((void**)&b); break; }
                 wnorm = sqrtf(wnorm);
-                for (size_t i = 0; i < n; i++) inv_w[i] /= wnorm;
+                for (size_t i = 0; i < n; i++) b[i] /= wnorm;
                 inv_lambda = 0.0f;
-                for (size_t i = 0; i < n; i++) inv_lambda += inv_v[i] * inv_w[i];
-                { float* tmp = inv_v; inv_v = inv_w; inv_w = tmp; }
+                for (size_t i = 0; i < n; i++) inv_lambda += inv_v[i] * b[i];
+                memcpy(inv_v, b, n * sizeof(float));
+                safe_free((void**)&b);
                 if (fabsf(inv_lambda) < 1e-10f) break;
             }
-            lambda_min = fabsf(inv_lambda);
+            /* inv_lambda现为1/|λ_min|的估计，lambda_min ≈ 1/|inv_lambda| */
+            if (fabsf(inv_lambda) > 1e-10f) {
+                lambda_min = 1.0f / fabsf(inv_lambda);
+            }
             if (lambda_min < 1e-10f) lambda_min = 1e-10f;
         }
         safe_free((void**)&inv_v);
         safe_free((void**)&inv_w);
+        safe_free((void**)&lu_A);
+        safe_free((void**)&lu_pivot);
     }
     *stiffness_ratio = lambda_max / lambda_min;
     safe_free((void**)&J);

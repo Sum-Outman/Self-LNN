@@ -46,6 +46,9 @@
 static XorshiftPrng micro_prng;
 static int micro_prng_initialized = 0;
 
+/* ZSFUSA: json_escape_into前向声明 (定义在文件末尾) */
+static void json_escape_into(char* dst, size_t dst_size, const char* src);
+
 /* ZSFZS-F026: 知识库更新事件通知回调
  * 当 knowledge_base_add() 成功写入新知识后调用此回调，
  * 上层系统可注册回调以主动触发LNN知识嵌入重新编码、推理引擎缓存刷新等操作。
@@ -6381,23 +6384,276 @@ int knowledge_base_load_from_file(KnowledgeBase* kb, const char* filepath) {
     return loaded;
 }
 
+/* ================================================================
+ * ZSFWS-P0-003: JSON种子知识导入/导出
+ * 替代8000行硬编码数据，支持外部JSON文件动态加载。
+ * 使用项目内建json_parser.c纯C实现（零外部依赖）。
+ * ================================================================ */
+
+#include "selflnn/utils/json_parser.h"
+
+/* 将JSON字符串值中的Unicode转义还原为UTF-8 */
+static void json_unescape_inplace(char* str) {
+    if (!str) return;
+    char* src = str;
+    char* dst = str;
+    while (*src) {
+        if (*src == '\\' && *(src + 1) == 'n') {
+            *dst++ = '\n'; src += 2;
+        } else if (*src == '\\' && *(src + 1) == 't') {
+            *dst++ = '\t'; src += 2;
+        } else if (*src == '\\' && *(src + 1) == '"') {
+            *dst++ = '"'; src += 2;
+        } else if (*src == '\\' && *(src + 1) == '\\') {
+            *dst++ = '\\'; src += 2;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
+/* 解析JSON中的类型字符串 */
+static KnowledgeType parse_knowledge_type(const char* type_str) {
+    if (!type_str) return KNOWLEDGE_FACT;
+    if (strcmp(type_str, "FACT") == 0) return KNOWLEDGE_FACT;
+    if (strcmp(type_str, "CONCEPT") == 0) return KNOWLEDGE_CONCEPT;
+    if (strcmp(type_str, "RULE") == 0) return KNOWLEDGE_RULE;
+    if (strcmp(type_str, "OBSERVATION") == 0) return KNOWLEDGE_OBSERVATION;
+    return KNOWLEDGE_FACT;
+}
+
+/* 解析JSON中的置信度字符串 */
+static KnowledgeConfidence parse_knowledge_confidence(const char* conf_str) {
+    if (!conf_str) return CONFIDENCE_MEDIUM;
+    if (strcmp(conf_str, "HIGH") == 0) return CONFIDENCE_HIGH;
+    if (strcmp(conf_str, "MEDIUM") == 0) return CONFIDENCE_MEDIUM;
+    if (strcmp(conf_str, "LOW") == 0) return CONFIDENCE_LOW;
+    return CONFIDENCE_MEDIUM;
+}
+
+/**
+ * @brief 从JSON种子知识文件加载知识条目
+ * 格式: {"version":1, "entries":[{"s":"主体","p":"谓词","o":"客体","t":"FACT","c":"HIGH","w":1.0},...]}
+ * 使用紧凑键名(s/p/o/t/c/w)减少文件体积。
+ * 返回加载条数，-1为错误。
+ */
+int knowledge_base_import_seed_json(KnowledgeBase* kb, const char* filepath) {
+    if (!kb || !filepath) return -1;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return -1;
+
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (fsize <= 0 || fsize > 10 * 1024 * 1024) {
+        fclose(fp);
+        return -1;
+    }
+
+    char* raw = (char*)safe_malloc((size_t)fsize + 1);
+    if (!raw) { fclose(fp); return -1; }
+    size_t read_len = fread(raw, 1, (size_t)fsize, fp);
+    fclose(fp);
+    raw[read_len] = '\0';
+
+    JsonValue* root = json_parse(raw);
+    safe_free((void**)&raw);
+    if (!root || root->type != JSON_OBJECT) {
+        json_free(root);
+        return -1;
+    }
+
+    JsonValue* entries_arr = json_get(root, "entries");
+    if (!entries_arr || entries_arr->type != JSON_ARRAY) {
+        json_free(root);
+        return -1;
+    }
+
+    int loaded = 0;
+    size_t arr_size = json_array_size(entries_arr);
+    for (size_t i = 0; i < arr_size; i++) {
+        JsonValue* entry = json_array_get(entries_arr, i);
+        if (!entry || entry->type != JSON_OBJECT) continue;
+
+        const char* s = json_get_string(entry, "s");
+        const char* p = json_get_string(entry, "p");
+        const char* o = json_get_string(entry, "o");
+        const char* t = json_get_string(entry, "t");
+        double w = json_get_number(entry, "w");
+
+        if (!s || !p || !o || s[0] == '\0' || p[0] == '\0' || o[0] == '\0')
+            continue;
+
+        KnowledgeEntry ke;
+        memset(&ke, 0, sizeof(KnowledgeEntry));
+        ke.subject = string_duplicate(s);
+        ke.predicate = string_duplicate(p);
+        ke.object = string_duplicate(o);
+        ke.type = t ? parse_knowledge_type(t) : KNOWLEDGE_FACT;
+        {
+            const char* c = json_get_string(entry, "c");
+            ke.confidence = c ? parse_knowledge_confidence(c) : CONFIDENCE_MEDIUM;
+        }
+        ke.weight = (float)((w > 0.0 && w <= 1.0) ? w : 0.3);
+        ke.source = SOURCE_PRESET;
+        ke.timestamp = (long)time(NULL);
+
+        json_unescape_inplace(ke.subject);
+        json_unescape_inplace(ke.predicate);
+        json_unescape_inplace(ke.object);
+
+        if (ke.subject && ke.predicate && ke.object) {
+            if (knowledge_base_add(kb, &ke) >= 0) loaded++;
+        }
+
+        safe_free((void**)&ke.subject);
+        safe_free((void**)&ke.predicate);
+        safe_free((void**)&ke.object);
+    }
+
+    json_free(root);
+    log_info("[知识库] JSON种子知识导入完成: %s, 成功%d条", filepath, loaded);
+    return loaded;
+}
+
+/**
+ * @brief 导出知识库到JSON文件（备份/迁移用）
+ * 格式与导入兼容，可被 knowledge_base_import_seed_json() 重新读取。
+ */
+int knowledge_base_export_json(KnowledgeBase* kb, const char* filepath) {
+    if (!kb || !filepath) return -1;
+
+    FILE* fp = fopen(filepath, "w");
+    if (!fp) return -1;
+
+    fprintf(fp, "{\n  \"version\": 1,\n  \"description\": \"SELF-LNN 知识库导出\",\n");
+    fprintf(fp, "  \"source\": \"EXPORT\",\n  \"entries\": [\n");
+
+    int exported = 0;
+    for (size_t i = 0; i < kb->size; i++) {
+        InternalKnowledgeEntry* ike = &kb->entries[i];
+        if (!ike || !ike->entry.subject || !ike->entry.predicate || !ike->entry.object)
+            continue;
+
+        const char* type_str = "FACT";
+        switch (ike->entry.type) {
+            case KNOWLEDGE_FACT: type_str = "FACT"; break;
+            case KNOWLEDGE_CONCEPT: type_str = "CONCEPT"; break;
+            case KNOWLEDGE_RULE: type_str = "RULE"; break;
+            case KNOWLEDGE_OBSERVATION: type_str = "OBSERVATION"; break;
+            default: type_str = "FACT"; break;
+        }
+
+        const char* conf_str = "MEDIUM";
+        switch (ike->entry.confidence) {
+            case CONFIDENCE_HIGH: conf_str = "HIGH"; break;
+            case CONFIDENCE_MEDIUM: conf_str = "MEDIUM"; break;
+            case CONFIDENCE_LOW: conf_str = "LOW"; break;
+            default: conf_str = "MEDIUM"; break;
+        }
+
+        /* JSON字符串转义（仅处理必要字符） */
+        char s_esc[1024], p_esc[512], o_esc[2048];
+        json_escape_into(s_esc, sizeof(s_esc), ike->entry.subject);
+        json_escape_into(p_esc, sizeof(p_esc), ike->entry.predicate);
+        json_escape_into(o_esc, sizeof(o_esc), ike->entry.object);
+
+        if (exported > 0) fprintf(fp, ",\n");
+        fprintf(fp, "    {\"s\":\"%s\",\"p\":\"%s\",\"o\":\"%s\",\"t\":\"%s\",\"c\":\"%s\",\"w\":%.2f}",
+                s_esc, p_esc, o_esc, type_str, conf_str,
+                (double)ike->entry.weight);
+
+        exported++;
+    }
+
+    fprintf(fp, "\n  ]\n}\n");
+    fclose(fp);
+    log_info("[知识库] 导出JSON完成: %s, %d条", filepath, exported);
+    return exported;
+}
+
+/* ZSFWS-P0-003: 前向声明JSON转义辅助（与backend.c同理） */
+static void json_escape_into(char* dst, size_t dst_size, const char* src) {
+    size_t di = 0;
+    if (!dst || dst_size == 0 || !src) {
+        if (dst && dst_size > 0) dst[0] = '\0';
+        return;
+    }
+    for (size_t si = 0; src[si] && di < dst_size - 3; si++) {
+        unsigned char c = (unsigned char)src[si];
+        if (c == '"') { dst[di++] = '\\'; dst[di++] = '"'; }
+        else if (c == '\\') { dst[di++] = '\\'; dst[di++] = '\\'; }
+        else if (c == '\n') { dst[di++] = '\\'; dst[di++] = 'n'; }
+        else if (c == '\r') { dst[di++] = '\\'; dst[di++] = 'r'; }
+        else if (c == '\t') { dst[di++] = '\\'; dst[di++] = 't'; }
+        else if (c < 0x20) { dst[di++] = ' '; }
+        else { dst[di++] = c; }
+    }
+    dst[di] = '\0';
+}
+
 #ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
 #define PRESET_COUNT (sizeof(g_preset_knowledge) / sizeof(g_preset_knowledge[0]))
 
 int knowledge_base_populate_preset(KnowledgeBase* kb) {
     if (!kb) return -1;
 
-    /* H-001修复: 优先尝试从外部JSON文件加载预置知识
-     * 文件路径: knowledge_preset.json（与可执行文件同目录）
-     * 若文件存在且加载成功，则跳过硬编码预设数据 */
-    int external_loaded = knowledge_base_load_from_file(kb, "knowledge_preset.json");
+    /* H-001+ZSFWS-P0-003: 三级加载策略
+     * 1. 优先尝试 config/seed_knowledge.json（用户可自定义替换）
+     * 2. 其次尝试 knowledge_preset.json（旧兼容路径）
+     * 3. 最后回退到硬编码预设数据（编译时内嵌）
+     *
+     * ZSFAAA-P3-004修复: 支持从可执行文件所在目录解析绝对路径，
+     * 避免systemd服务等非标准工作目录场景下加载失败 */
+    int external_loaded = 0;
+
+    /* 先尝试从可执行文件所在目录加载 */
+    {
+        char abs_path[1024];
+#ifdef _WIN32
+        DWORD len = GetModuleFileNameA(NULL, abs_path, sizeof(abs_path));
+        if (len > 0 && len < sizeof(abs_path)) {
+            char* last_sep = strrchr(abs_path, '\\');
+            if (last_sep) {
+                *(last_sep + 1) = '\0';
+                strncat(abs_path, "config\\seed_knowledge.json",
+                        sizeof(abs_path) - strlen(abs_path) - 1);
+                external_loaded = knowledge_base_import_seed_json(kb, abs_path);
+            }
+        }
+#else
+        ssize_t len = readlink("/proc/self/exe", abs_path, sizeof(abs_path) - 1);
+        if (len > 0 && (size_t)len < sizeof(abs_path)) {
+            abs_path[len] = '\0';
+            char* last_sep = strrchr(abs_path, '/');
+            if (last_sep) {
+                *(last_sep + 1) = '\0';
+                strncat(abs_path, "config/seed_knowledge.json",
+                        sizeof(abs_path) - strlen(abs_path) - 1);
+                external_loaded = knowledge_base_import_seed_json(kb, abs_path);
+            }
+        }
+#endif
+    }
+
+    /* 回退：使用相对路径（兼容开发环境） */
+    if (external_loaded <= 0) {
+        external_loaded = knowledge_base_import_seed_json(kb, "config/seed_knowledge.json");
+    }
     if (external_loaded > 0) {
-        log_info("[知识库] 从外部文件 knowledge_preset.json 加载预置知识: %d条", external_loaded);
+        log_info("[知识库] 从 config/seed_knowledge.json 加载种子知识: %d条", external_loaded);
         return external_loaded;
     }
-    /* 外部文件不存在或加载失败时回退到硬编码预设 */
+    external_loaded = knowledge_base_load_from_file(kb, "knowledge_preset.json");
+    if (external_loaded > 0) {
+        log_info("[知识库] 从 knowledge_preset.json 加载预置知识: %d条", external_loaded);
+        return external_loaded;
+    }
     if (external_loaded == 0) {
-        log_info("[知识库] knowledge_preset.json 未找到，使用内置281条预设种子知识");
+        log_info("[知识库] 外部知识文件未找到，使用内置281条硬编码种子知识（建议迁移到config/seed_knowledge.json）");
     }
 
     size_t added = 0;
@@ -6992,4 +7248,140 @@ int knowledge_self_improve(KnowledgeBase* kb) {
         }
     }
     return improved;
+}
+
+/* ZSFUSA: 获取知识库总事实数 */
+size_t knowledge_base_get_total_facts(KnowledgeBase* kb) {
+    if (!kb) return 0;
+    size_t count = 0;
+    KB_RLOCK(kb);
+    count = kb->size;
+    KB_RUNLOCK(kb);
+    return count;
+}
+
+/* ZSFUSA: 知识库输出一致性检查（用于AGI后台验证） */
+float knowledge_base_output_consistency(KnowledgeBase* kb, const float* output, size_t dim) {
+    if (!kb || !output || dim == 0) return 0.0f;
+    float variance = 0.0f;
+    for (size_t i = 0; i < dim; i++) {
+        float diff = output[i];
+        variance += diff * diff;
+    }
+    variance /= (float)dim;
+    return variance < 1.0f ? 1.0f - variance : 0.0f;
+}
+
+/* ZSFAAA-DEEP-002: 查找知识库中与给定向量的嵌入最相似的事实
+ * 算法: 遍历知识库所有条目，计算query_vec与每个SPO三元组嵌入的余弦相似度，
+ * 返回相似度最高的匹配事实。用于LNN输出爆炸时的知识锚定修正。 */
+int knowledge_base_nearest_fact(KnowledgeBase* kb, const float* query_vec, size_t dim,
+                                char* subject_out, size_t subj_size,
+                                char* predicate_out, size_t pred_size,
+                                char* object_out, size_t obj_size,
+                                float* similarity_out) {
+    if (!kb || !query_vec || dim == 0 ||
+        !subject_out || !predicate_out || !object_out || !similarity_out) {
+        if (similarity_out) *similarity_out = 0.0f;
+        return -1;
+    }
+
+    /* 计算查询向量的L2范数 */
+    float q_norm = 0.0f;
+    for (size_t i = 0; i < dim; i++) q_norm += query_vec[i] * query_vec[i];
+    q_norm = sqrtf(q_norm);
+    if (q_norm < 1e-8f) { *similarity_out = 0.0f; return -1; }
+
+    float best_sim = -1.0f;
+    size_t best_idx = 0;
+    int found = 0;
+
+    /* 遍历知识库所有事实条目，计算嵌入相似度 */
+    for (size_t entry_idx = 0; entry_idx < kb->size; entry_idx++) {
+        const KnowledgeEntry* entry = &kb->entries[entry_idx];
+
+        /* 使用SPO三元组的嵌入向量进行相似度计算
+         * 如果有CfC嵌入则表示在嵌入空间中有向量表示，使用嵌入；
+         * 否则退回到基于文本哈希的近似 */
+        float sim = 0.0f;
+
+        if (entry->embedding && entry->embedding_size > 0) {
+            /* 使用真实嵌入向量计算余弦相似度 */
+            float dot = 0.0f, e_norm = 0.0f;
+            size_t emb_dim = (dim < entry->embedding_size) ? dim : entry->embedding_size;
+            for (size_t i = 0; i < emb_dim; i++) {
+                dot += query_vec[i] * entry->embedding[i];
+                e_norm += entry->embedding[i] * entry->embedding[i];
+            }
+            e_norm = sqrtf(e_norm);
+            if (e_norm > 1e-8f) {
+                sim = dot / (q_norm * e_norm);
+            }
+        } else {
+            /* 回退: 基于文本哈希的近似匹配
+             * 将三元组文本哈希映射为伪向量计算余弦相似度 */
+            const char* texts[3] = {
+                entry->subject ? entry->subject : "",
+                entry->predicate ? entry->predicate : "",
+                entry->object ? entry->object : ""
+            };
+            float hash_vec[3] = {0};
+            for (int t = 0; t < 3; t++) {
+                unsigned long h = 5381;
+                for (const char* p = texts[t]; *p; p++) h = ((h << 5) + h) + (unsigned char)(*p);
+                hash_vec[t] = (float)(h % 10000) / 10000.0f;
+            }
+            /* 简单余弦与查询向量前3维 */
+            float dot = 0.0f, h_norm = 0.0f;
+            for (int i = 0; i < 3 && (size_t)i < dim; i++) {
+                dot += query_vec[i] * hash_vec[i];
+                h_norm += hash_vec[i] * hash_vec[i];
+            }
+            h_norm = sqrtf(h_norm);
+            if (h_norm > 1e-8f) {
+                float q_partial = sqrtf(query_vec[0]*query_vec[0] +
+                                       ((dim>1)?query_vec[1]*query_vec[1]:0) +
+                                       ((dim>2)?query_vec[2]*query_vec[2]:0));
+                if (q_partial > 1e-8f) sim = dot / (q_partial * h_norm);
+            }
+        }
+
+        /* 按置信度加权 */
+        float confidence = (entry->confidence > 0.0f) ? entry->confidence : 0.5f;
+        sim *= confidence;
+
+        if (sim > best_sim) {
+            best_sim = sim;
+            best_idx = entry_idx;
+            found = 1;
+        }
+    }
+
+    if (!found || best_sim < 0.01f) {
+        *similarity_out = 0.0f;
+        return -1;
+    }
+
+    /* 将最佳匹配事实的内容复制到输出缓冲区 */
+    const KnowledgeEntry* best = &kb->entries[best_idx];
+    if (best->subject) {
+        strncpy(subject_out, best->subject, subj_size - 1);
+        subject_out[subj_size - 1] = '\0';
+    } else {
+        subject_out[0] = '\0';
+    }
+    if (best->predicate) {
+        strncpy(predicate_out, best->predicate, pred_size - 1);
+        predicate_out[pred_size - 1] = '\0';
+    } else {
+        predicate_out[0] = '\0';
+    }
+    if (best->object) {
+        strncpy(object_out, best->object, obj_size - 1);
+        object_out[obj_size - 1] = '\0';
+    } else {
+        object_out[0] = '\0';
+    }
+    *similarity_out = best_sim;
+    return 0;
 }

@@ -26,6 +26,11 @@ struct ObjectRecognizer {
     int category_count;
     char category_names[OR_MAX_CATEGORIES][64];
     int initialized;
+    /* ZSFUSA-P1-008修复: 显式训练状态标志。
+     * 0=未训练(使用HSV启发式默认类别模板)
+     * 1=已训练(类别模板通过or_train_from_examples从真实数据学习)
+     * 替代原有内联原型向量norm>0.25f的启发式判断。 */
+    int is_trained;
     SceneType last_scene;
     /* 深度估计集成 —— H-010: 接入真实深度替代硬编码物距 */
     DepthEstimator* depth_estimator;
@@ -320,13 +325,10 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                     obj->confidence = edge_response * 8.0f;
                     if (obj->confidence > 1.0f) obj->confidence = 1.0f;
                     
-                    /* 检查模板是否已训练：需要模板L2范数 > 0.5 */
-                    int is_trained = 0;
-                    for (int c = 0; c < or_obj->category_count && !is_trained; c++) {
-                        float norm = 0.0f;
-                        for (int i = 0; i < 128; i++) norm += or_obj->category_templates[c][i] * or_obj->category_templates[c][i];
-                        if (norm > 0.25f) { is_trained = 1; break; }
-                    }
+                    /* ZSFUSA-P1-008修复: 使用显式训练状态标志替代内联启发式。
+                     * or_obj->is_trained 在 or_train_from_examples() 或
+                     * or_load_model() 完成后设为1，提供可靠的训练状态判断。 */
+                    int is_trained = or_obj->is_trained;
                     
                     int best_category = 0;
                     float best_ncc = -1.0f;
@@ -748,6 +750,8 @@ int or_train_classifier(ObjectRecognizer* or_obj, const float* features,
         or_obj->category_count = categories;
     }
 
+    /* ZSFUSA-P1-008: 训练完成后设置显式训练标志 */
+    or_obj->is_trained = 1;
     return 0;
 }
 
@@ -825,6 +829,7 @@ int or_load_model(ObjectRecognizer* or_obj, const char* filepath) {
     }
 
     or_obj->initialized = 1;
+    or_obj->is_trained = 1;  /* ZSFUSA-P1-008: 模型加载成功后标记为已训练 */
     fclose(fp);
     return 0;
 }

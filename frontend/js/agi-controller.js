@@ -327,7 +327,12 @@ class AGIController {
         }
     }
 
-    /* ZSFABC-001修复: api-service.js.request()已自动添加baseURL(/api)前缀，
+    /* ZSFUSA-F05: 内部API路径约定
+     * _apiPost/_apiGet 使用不带 /api/ 前缀的相对路径。
+     * api-service.js 的 baseURL 自动添加 /api 前缀。
+     * 新增端点时注意遵循此约定。
+     *
+     * ZSFABC-001修复: api-service.js.request()已自动添加baseURL(/api)前缀，
      * 故此处传入endpoint不应再含/api前缀，否则产生双重/api/api/xxx导致404 */
     async _apiPost(endpoint, data) {
         try {

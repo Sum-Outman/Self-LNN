@@ -42,6 +42,18 @@ int task_scheduler_register_thread_pool(TaskScheduler* s,
                                          void* pool,
                                          int (*submit_fn)(void* pool, void (*fn)(void*), void* arg));
 
+/**
+ * @brief 暂停所有任务调度
+ * @param s 调度器句柄
+ */
+void task_scheduler_pause(TaskScheduler* s);
+
+/**
+ * @brief 取消所有待处理任务
+ * @param s 调度器句柄
+ */
+void task_scheduler_cancel_all(TaskScheduler* s);
+
 #ifdef __cplusplus
 }
 #endif

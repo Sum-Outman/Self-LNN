@@ -1245,6 +1245,35 @@ void* selflnn_get_audit_logger(void) { return g_system_state.audit_logger; }
 void* selflnn_get_content_filter(void) { return g_system_state.content_filter; }
 void* selflnn_get_load_balancer(void) { return g_system_state.load_balancer; }
 void* selflnn_get_training_pipeline(void) { return g_system_state.training_pipeline; }
+/* ZSFUSA-P0-004修复: 训练管线注册接口。
+ * main.c中创建的TrainingPipeline需要通过此接口注册到全局状态，
+ * 确保其他模块(如AGI认知循环)通过selflnn_get_training_pipeline()能正确获取。
+ * 该接口与自检函数的原子性由caller保证(单线程初始化阶段调用)。 */
+void selflnn_set_training_pipeline(void* pipeline) {
+    g_system_state.training_pipeline = pipeline;
+}
+/* ZSFUSA-P1-004修复: 获取LNN配置的状态维度，替代硬编码128。
+ * 从selflnn的内部配置中读取实际维度，确保内存分配与LNN匹配。 */
+size_t selflnn_get_config_state_dimension(void) {
+    return (size_t)g_system_state.config.state_dimension;
+}
+/* ZSFUSA-P3-001修复: 设置拉普拉斯频域指标。
+ * 包装network_state_set_laplace_metrics，将频域分析结果
+ * (主导频率、频谱带宽、最大幅度)写入全局网络状态。
+ * 这些指标供后续拉普拉斯-CfC实时调制使用。
+ * ZSFUSA-V2修复: 使用selflnn_get_shared_lnn()获取LNN实例，
+ * 通过LNN→state访问NetworkState，替代不存在的extern g_network_state。 */
+void selflnn_set_laplace_metrics(const float* metrics, int count) {
+    if (!metrics || count < 3) return;
+    void* lnn_ptr = selflnn_get_shared_lnn();
+    if (!lnn_ptr) return;
+    LNN* lnn = (LNN*)lnn_ptr;
+    if (!lnn->state) return;
+    network_state_set_laplace_metrics(lnn->state,
+        metrics[0],        /* stability_score: 主导频率 */
+        metrics[0] * 20.0f,/* recommended_cutoff: 主导频率的20倍作为截止 */
+        metrics[1]);       /* frequency_bandwidth: 频谱带宽 */
+}
 void* selflnn_get_security_monitor_deep(void) { return g_system_state.security_monitor_deep; }  /* ZSFX-DEEP-004: 深度安全监控公共访问器 */
 void* selflnn_get_knowledge_graph(void) { return g_system_state.knowledge_graph; }            /* ZSFX-DEEP-005: 知识图谱公共访问器 */
 void* selflnn_get_gpu_context(void) { return g_system_state.gpu_context; }                    /* ZSFX-DEEP-005: GPU上下文公共访问器 */
@@ -1483,7 +1512,7 @@ static int initialize_subsystems(const SystemConfig* config)
     
     log_info("初始化子系统...");
     
-    // 1. 初始化内存管理器（真实实现）
+    /* ZSFUSA-A03: 1. 初始化内存管理器（关键子系统——记忆存储核心） */
     MemoryManagerConfig memory_config = {
         .short_term_capacity = 1000,
         .long_term_capacity = 10000,
@@ -1494,38 +1523,32 @@ static int initialize_subsystems(const SystemConfig* config)
     };
     g_system_state.memory_manager = memory_manager_create(&memory_config);
     if (!g_system_state.memory_manager) {
-        log_error("内存管理器创建失败");
+        log_error("[SELF-LNN] 关键子系统初始化失败：内存管理器创建失败，正在回滚...");
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
     
-    // 2. 初始化知识图谱（真实实现）
+    /* ZSFUSA-A03: 2. 初始化知识图谱（关键子系统——结构化知识基础） */
     g_system_state.knowledge_graph = knowledge_graph_create(1000, 5000);
     if (!g_system_state.knowledge_graph) {
-        log_error("知识图谱创建失败");
+        log_error("[SELF-LNN] 关键子系统初始化失败：知识图谱创建失败，正在回滚...");
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
     
-    /* 2.1 初始化知识库 */
-    g_system_state.knowledge_base = knowledge_base_create(5000);
+    /* ZSF-NEW-007修复: 知识库初始化（关键子系统）
+     * 使用 knowledge_base_create_with_preset() 自动加载:
+     *   - 281条内置种子知识（物理常数/数学规则/逻辑公理/常识等）
+     *   - config/seed_knowledge.json 外部知识文件
+     * 同时保留24条硬编码种子作为保底（去重策略已在knowledge.c中实现） */
+    g_system_state.knowledge_base = knowledge_base_create_with_preset(5000);
     if (!g_system_state.knowledge_base) {
-        log_warning("知识库创建失败，使用空知识库");
+        log_error("[SELF-LNN] 关键子系统初始化失败：知识库创建失败，正在回滚...");
+        result = SELFLNN_ERROR_INITIALIZATION_FAILED;
+        goto cleanup;
     }
     
-    /* 2.2 预设基础知识条目（完整知识库要求）
-     * 
-     * 种子知识加载路径说明：
-     *   路径A（主路径）：knowledge.c::knowledge_base_populate_preset() 加载 281 条种子知识
-     *     - 通过 knowledge_base_create_with_preset() 自动调用
-     *     - 包含物理常数/数学规则/逻辑公理/常识概念/时空单位/色彩/机器人学/安全规则等
-     *   路径B（selflnn.c补充）：本处硬编码 24 条基础种子知识
-     *     - 当调用 knowledge_base_create()（非with_preset版本）时，作为保底的常识注入
-     * 
-     * 去重策略：
-     *   路径B的24条在路径A的281条中已有覆盖（物理常数/数学规则/概念/颜色/单位）。
-     *   定义 SELFLNN_SKIP_SEED_KNOWLEDGE 可跳过路径A和路径B的种子加载，
-     *   此时知识库从零开始，所有知识从真实数据源学习获得。 */
+    /* ZSF-NEW-007: 补充24条基础常识种子（作为保底，与预设281条去重） */
 #ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
     {
         long now = (long)time(NULL);
@@ -1570,7 +1593,7 @@ static int initialize_subsystems(const SystemConfig* config)
     log_info("知识库种子数据已跳过（SELFLNN_SKIP_SEED_KNOWLEDGE已定义），知识库从零开始学习");
 #endif
     
-    // 3. 初始化推理引擎（真实实现）
+    /* ZSFUSA-A03: 3. 初始化推理引擎（关键子系统——逻辑推理核心） */
     ReasoningConfig reasoning_config = {
         .default_mode = REASONING_DEDUCTIVE,
         .max_iterations = 100,
@@ -1579,7 +1602,7 @@ static int initialize_subsystems(const SystemConfig* config)
     };
     g_system_state.reasoning_engine = reasoning_engine_create(&reasoning_config);
     if (!g_system_state.reasoning_engine) {
-        log_error("推理引擎创建失败");
+        log_error("[SELF-LNN] 关键子系统初始化失败：推理引擎创建失败，正在回滚...");
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
@@ -1624,7 +1647,7 @@ static int initialize_subsystems(const SystemConfig* config)
         log_info("知识推理增强引擎初始化成功（已绑定知识库）");
     }
     
-    // 4. 初始化统一信号处理器（真实实现）
+    /* ZSFUSA-A03: 4. 初始化统一信号处理器（关键子系统——多模态信号统一入口） */
     /* Z5-001: multimodal_channels配置传播 —— 覆盖默认多模态通道数 */
     UnifiedSignalProcessorConfig processor_config = unified_signal_processor_get_default_config();
     if (config->multimodal_channels > 0) {
@@ -1633,7 +1656,7 @@ static int initialize_subsystems(const SystemConfig* config)
     }
     g_system_state.unified_signal_processor = unified_signal_processor_create(&processor_config);
     if (!g_system_state.unified_signal_processor) {
-        log_error("统一信号处理器创建失败");
+        log_error("[SELF-LNN] 关键子系统初始化失败：统一信号处理器创建失败，正在回滚...");
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
@@ -1703,7 +1726,9 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
     
-    // 5. 初始化液态神经网络（LNN核心模型）
+    /* ZSFUSA-A03: 5. 初始化液态神经网络（LNN核心模型）
+     * LNN是整个AGI的唯一神经网络模型，所有模态共享同一连续动态系统。
+     * 此为最关键的子系统，失败则AGI完全无法运行，必须回滚清退。 */
     if (config->state_dimension > 0) {
         LNNConfig lnn_config;
         memset(&lnn_config, 0, sizeof(LNNConfig));
@@ -1738,7 +1763,9 @@ static int initialize_subsystems(const SystemConfig* config)
                 }
             }
         } else {
-            log_warning("LNN液态神经网络创建失败，跳过");
+            log_error("[SELF-LNN] 关键子系统初始化失败：LNN液态神经网络创建失败，正在回滚...");
+            result = SELFLNN_ERROR_INITIALIZATION_FAILED;
+            goto cleanup;
         }
     }
     
@@ -1850,6 +1877,14 @@ static int initialize_subsystems(const SystemConfig* config)
     g_system_state.product_design_engine = product_design_engine_create();
     if (g_system_state.product_design_engine) {
         log_info("产品设计引擎初始化成功");
+        /* ZSF-NEW-008: 加载55个工业设计种子案例 */
+        int seeds_loaded = product_design_load_seed_cases(
+            (ProductDesignEngine*)g_system_state.product_design_engine);
+        if (seeds_loaded > 0) {
+            log_info("产品设计种子案例已加载：%d个", seeds_loaded);
+        } else {
+            log_warning("产品设计种子案例加载失败或返回0");
+        }
     } else {
         log_warning("产品设计引擎创建失败，跳过");
     }
@@ -2203,7 +2238,9 @@ static int initialize_subsystems(const SystemConfig* config)
         if (sec_mon) {
             log_info("深度安全监控初始化成功");
         } else {
-            log_warning("深度安全监控创建失败，安全管理将降级");
+            log_error("深度安全监控创建失败，系统初始化中止（违反'禁止任何降级处理'原则）");
+            result = g_system_state.last_error = SELFLNN_ERROR_INITIALIZATION_FAILED;
+            goto cleanup;
         }
     }
 
@@ -2389,9 +2426,9 @@ static void shutdown_subsystems(void)
     if (g_system_state.laplace_unified) { laplace_analyzer_free((LaplaceAnalyzer*)g_system_state.laplace_unified); g_system_state.laplace_unified = NULL; }
     if (g_system_state.audio_capture) { audio_capture_free(g_system_state.audio_capture); g_system_state.audio_capture = NULL; }
     if (g_system_state.tts_engine) { tts_engine_free((TTSEngine*)g_system_state.tts_engine); g_system_state.tts_engine = NULL; }
-    if (g_system_state.computer_operation) { co_system_free(g_system_state.computer_operation); g_system_state.computer_operation = NULL; }
+    if (g_system_state.computer_operation) { co_system_destroy(g_system_state.computer_operation); g_system_state.computer_operation = NULL; }
     if (g_system_state.audit_logger) { audit_logger_free(g_system_state.audit_logger); g_system_state.audit_logger = NULL; }
-    if (g_system_state.content_filter) { content_filter_free(g_system_state.content_filter); g_system_state.content_filter = NULL; }
+    if (g_system_state.content_filter) { content_filter_destroy(g_system_state.content_filter); g_system_state.content_filter = NULL; }
     if (g_system_state.load_balancer) { lb_destroy(g_system_state.load_balancer); g_system_state.load_balancer = NULL; }
     if (g_system_state.training_pipeline) { training_pipeline_free((TrainingPipeline*)g_system_state.training_pipeline); g_system_state.training_pipeline = NULL; }
     if (g_system_state.security_monitor_deep) { sec_behavior_monitor_free((SecBehaviorMonitor*)g_system_state.security_monitor_deep); g_system_state.security_monitor_deep = NULL; }
@@ -3048,231 +3085,198 @@ int selflnn_design_product(const ProductRequirement* requirement, ProductSpec* d
         }
     }
     
-    /* 如果LNN可用，使用LNN对需求进行推理生成设计 */
-    if (g_system_state.lnn_instance && real_keyword_count > 0) {
-        LNN* lnn = (LNN*)g_system_state.lnn_instance;
-        LNNConfig lnn_cfg;
-        if (lnn_get_config(lnn, &lnn_cfg) != 0) {
-            log_warning("无法获取LNN配置，跳过LNN产品设计");
-            goto lnn_design_fallback;
-        }
-        size_t input_size = lnn_cfg.input_size;
-        size_t output_size = lnn_cfg.output_size;
-        
-        /* 将关键词编码到LNN输入向量 */
-        float* input_vec = (float*)safe_calloc(input_size, sizeof(float));
-        if (input_vec) {
-            size_t char_idx = 0;
-            for (size_t i = 0; i < requirement->keyword_count && char_idx < input_size; i++) {
-                const char* kw = requirement->keywords[i];
-                if (!kw) continue;
-                while (*kw && char_idx < input_size) {
-                    input_vec[char_idx] = ((float)(unsigned char)(*kw) - 64.0f) / 128.0f;
-                    char_idx++;
-                    kw++;
-                }
-            }
-            
-            /* LNN前向传播生成设计信号 */
-            float* lnn_output = (float*)safe_calloc(output_size, sizeof(float));
-            if (lnn_output) {
-                if (lnn_forward(lnn, input_vec, lnn_output) == 0) {
-                    /* 从LNN输出中提取设计参数 */
-                    float design_signal[16];
-                    for (int s = 0; s < 16 && (size_t)s < output_size; s++) {
-                        design_signal[s] = lnn_output[s];
-                    }
-                    
-                    /* 基于LNN输出信号生成产品名称 */
-                    float name_val = design_signal[0] * 0.5f + 0.5f;
-                    int name_length = 4 + (int)(name_val * 28.0f);
-                    if (name_length > 120) name_length = 120;
-                    
-                    int pos = 0;
-                    if (requirement->keywords[0]) {
-                        int copy_len = (int)strlen(requirement->keywords[0]);
-                        if (copy_len > name_length / 2) copy_len = name_length / 2;
-                        if (copy_len > 0) {
-                            snprintf(product_name + pos, sizeof(product_name) - (size_t)pos,
-                                     "%.*s", copy_len, requirement->keywords[0]);
-                            pos += copy_len;
-                        }
-                    }
-                    
-                    float style_val = design_signal[1] * 0.5f + 0.5f;
-                    int style_idx = (int)(style_val * (double)(g_product_design_labels.style_suffix_count - 1) + 0.5f);
-                    if (style_idx < 0) style_idx = 0;
-                    if ((size_t)style_idx >= g_product_design_labels.style_suffix_count)
-                        style_idx = (int)(g_product_design_labels.style_suffix_count - 1);
-                    snprintf(product_name + pos, sizeof(product_name) - (size_t)pos,
-                             "%s%d", g_product_design_labels.style_suffixes[style_idx],
-                             (int)(design_signal[2] * 899.0f + 100.0f));
-                    
-                    /* 基于LNN输出生成设计描述 */
-                    int ti = (int)(requirement->preferred_type < 4 ? requirement->preferred_type : 3);
-                    float conf_val = (design_signal[3] + 1.0f) * 0.5f;
-                    snprintf(description, sizeof(description),
-                             "LNN液态神经网络生成的%s设计方案。"
-                             "基于%zu个需求关键词进行多维度特征分析。"
-                             "置信度%.1f%%。预算%.0f元，开发周期%.0f天。",
-                             g_product_design_labels.type_labels[ti],
-                             requirement->keyword_count,
-                             conf_val * 100.0f,
-                             requirement->max_cost, requirement->max_time);
-                    
-                    /* 基于LNN信号计算合理性估算（替代随机数） */
-                    double lnn_cost_ratio = 0.5 + (double)(design_signal[4] + 1.0f) * 0.25;
-                    if (lnn_cost_ratio < 0.3) lnn_cost_ratio = 0.3;
-                    if (lnn_cost_ratio > 0.95) lnn_cost_ratio = 0.95;
-                    design->estimated_cost = requirement->max_cost * lnn_cost_ratio;
-                    if (design->estimated_cost > requirement->max_cost)
-                        design->estimated_cost = requirement->max_cost;
-                    if (design->estimated_cost < 1.0)
-                        design->estimated_cost = 1.0;
-                    
-                    double lnn_time_ratio = 0.4 + (double)(design_signal[5] + 1.0f) * 0.3;
-                    if (lnn_time_ratio < 0.2) lnn_time_ratio = 0.2;
-                    if (lnn_time_ratio > 0.95) lnn_time_ratio = 0.95;
-                    design->development_time = requirement->max_time * lnn_time_ratio;
-                    if (design->development_time < 1.0)
-                        design->development_time = 1.0;
-                    
-                    /* LNN生成特性列表 */
-                    int feature_cnt = 3 + (int)((design_signal[6] + 1.0f) * 2.5f);
-                    if (feature_cnt < 2) feature_cnt = 2;
-                    if (feature_cnt > 8) feature_cnt = 8;
-                    design->feature_count = feature_cnt;
-                    design->features = (char**)safe_calloc((size_t)feature_cnt, sizeof(char*));
-                    if (design->features) {
-                        for (int f = 0; f < feature_cnt; f++) {
-                            int pref_idx = (int)((design_signal[7 + f % 8] + 1.0f)
-                                * (double)(g_product_design_labels.feat_prefix_count - 1) / 2.0 + 0.5f);
-                            if (pref_idx < 0) pref_idx = 0;
-                            if ((size_t)pref_idx >= g_product_design_labels.feat_prefix_count)
-                                pref_idx = (int)(g_product_design_labels.feat_prefix_count - 1);
-                            int suff_idx = (int)((design_signal[(f + 3) % 8] + 1.0f)
-                                * (double)(g_product_design_labels.feat_suffix_count - 1) / 2.0 + 0.5f);
-                            if (suff_idx < 0) suff_idx = 0;
-                            if ((size_t)suff_idx >= g_product_design_labels.feat_suffix_count)
-                                suff_idx = (int)(g_product_design_labels.feat_suffix_count - 1);
-                            char feat_buf[128];
-                            snprintf(feat_buf, sizeof(feat_buf), "%s%s",
-                                     g_product_design_labels.feat_prefixes[pref_idx],
-                                     g_product_design_labels.feat_suffixes[suff_idx]);
-                            design->features[f] = string_duplicate_nullable(feat_buf);
-                        }
-                    }
-                    
-                    /* 复杂度和可行性基于LNN输出 */
-                    design->complexity_score = 0.3 + (double)(design_signal[8] + 1.0f) * 0.25;
-                    if (design->complexity_score < 0.2) design->complexity_score = 0.2;
-                    if (design->complexity_score > 0.95) design->complexity_score = 0.95;
-                    
-                    design->feasibility_score = 0.4 + (double)(design_signal[9] + 1.0f) * 0.3;
-                    if (design->feasibility_score < 0.2) design->feasibility_score = 0.2;
-                    if (design->feasibility_score > 0.98) design->feasibility_score = 0.98;
-                }
-                safe_free((void**)&lnn_output);
-            }
-            safe_free((void**)&input_vec);
-        }
+    /* LNN液态神经网络必须可用（禁止降级处理） */
+    if (!g_system_state.lnn_instance) {
+        g_system_state.last_error = SELFLNN_ERROR_NOT_INITIALIZED;
+        log_error("LNN实例未初始化，拒绝产品设计（违反'禁止任何降级处理'原则）");
+        return g_system_state.last_error;
+    }
+    
+    if (real_keyword_count == 0) {
+        g_system_state.last_error = SELFLNN_ERROR_INVALID_ARGUMENT;
+        log_error("无有效需求关键词，拒绝产品设计");
+        return g_system_state.last_error;
     }
 
-lnn_design_fallback:
-    /* 如果LNN不可用或无关键词，回退到基于需求参数的确定性计算 */
-    if (product_name[0] == '\0') {
-        if (requirement->keywords && requirement->keyword_count > 0 && requirement->keywords[0]) {
-            snprintf(product_name, sizeof(product_name), "%.120s_设计",
-                     requirement->keywords[0]);
-        } else {
-            int ti = (int)requirement->preferred_type < 4 ? (int)requirement->preferred_type : 3;
-            snprintf(product_name, sizeof(product_name), "%s_设计",
-                     g_product_design_labels.type_labels[ti]);
+    LNN* lnn = (LNN*)g_system_state.lnn_instance;
+    LNNConfig lnn_cfg;
+    if (lnn_get_config(lnn, &lnn_cfg) != 0) {
+        g_system_state.last_error = SELFLNN_ERROR_ALGORITHM_FAILURE;
+        log_error("无法获取LNN配置，拒绝产品设计（违反'禁止任何降级处理'原则）");
+        return g_system_state.last_error;
+    }
+    size_t input_size = lnn_cfg.input_size;
+    size_t output_size = lnn_cfg.output_size;
+
+    /* 将关键词编码到LNN输入向量 */
+    float* input_vec = (float*)safe_calloc(input_size, sizeof(float));
+    if (!input_vec) {
+        g_system_state.last_error = SELFLNN_ERROR_OUT_OF_MEMORY;
+        return g_system_state.last_error;
+    }
+    {
+        size_t char_idx = 0;
+        for (size_t i = 0; i < requirement->keyword_count && char_idx < input_size; i++) {
+            const char* kw = requirement->keywords[i];
+            if (!kw) continue;
+            while (*kw && char_idx < input_size) {
+                input_vec[char_idx] = ((float)(unsigned char)(*kw) - 64.0f) / 128.0f;
+                char_idx++;
+                kw++;
+            }
         }
-    }
-    
-    if (description[0] == '\0') {
-        int ti = (int)requirement->preferred_type < 4 ? (int)requirement->preferred_type : 3;
+
+        /* LNN前向传播生成设计信号 */
+        float* lnn_output = (float*)safe_calloc(output_size, sizeof(float));
+        if (!lnn_output) {
+            safe_free((void**)&input_vec);
+            g_system_state.last_error = SELFLNN_ERROR_OUT_OF_MEMORY;
+            return g_system_state.last_error;
+        }
+
+        if (lnn_forward(lnn, input_vec, lnn_output) != 0) {
+            safe_free((void**)&lnn_output);
+            safe_free((void**)&input_vec);
+            g_system_state.last_error = SELFLNN_ERROR_ALGORITHM_FAILURE;
+            log_error("LNN前向传播失败，拒绝产品设计（违反'禁止任何降级处理'原则）");
+            return g_system_state.last_error;
+        }
+
+        /* 从LNN输出中提取设计参数 */
+        float design_signal[16];
+        for (int s = 0; s < 16 && (size_t)s < output_size; s++) {
+            design_signal[s] = lnn_output[s];
+        }
+
+        /* 基于LNN输出信号生成产品名称 */
+        float name_val = design_signal[0] * 0.5f + 0.5f;
+        int name_length = 4 + (int)(name_val * 28.0f);
+        if (name_length > 120) name_length = 120;
+
+        int pos = 0;
+        if (requirement->keywords[0]) {
+            int copy_len = (int)strlen(requirement->keywords[0]);
+            if (copy_len > name_length / 2) copy_len = name_length / 2;
+            if (copy_len > 0) {
+                snprintf(product_name + pos, sizeof(product_name) - (size_t)pos,
+                         "%.*s", copy_len, requirement->keywords[0]);
+                pos += copy_len;
+            }
+        }
+
+        float style_val = design_signal[1] * 0.5f + 0.5f;
+        int style_idx = (int)(style_val * (double)(g_product_design_labels.style_suffix_count - 1) + 0.5f);
+        if (style_idx < 0) style_idx = 0;
+        if ((size_t)style_idx >= g_product_design_labels.style_suffix_count)
+            style_idx = (int)(g_product_design_labels.style_suffix_count - 1);
+        snprintf(product_name + pos, sizeof(product_name) - (size_t)pos,
+                 "%s%d", g_product_design_labels.style_suffixes[style_idx],
+                 (int)(design_signal[2] * 899.0f + 100.0f));
+
+        /* 基于LNN输出生成设计描述 */
+        int ti = (int)(requirement->preferred_type < 4 ? requirement->preferred_type : 3);
+        float conf_val = (design_signal[3] + 1.0f) * 0.5f;
         snprintf(description, sizeof(description),
-                 "基于需求关键词分析的%s设计，预算%.0f元，开发时间%.0f天",
+                 "LNN液态神经网络生成的%s设计方案。"
+                 "基于%zu个需求关键词进行多维度特征分析。"
+                 "置信度%.1f%%。预算%.0f元，开发周期%.0f天。",
                  g_product_design_labels.type_labels[ti],
+                 requirement->keyword_count,
+                 conf_val * 100.0f,
                  requirement->max_cost, requirement->max_time);
+
+        /* 基于LNN信号计算合理性估算（替代随机数） */
+        double lnn_cost_ratio = 0.5 + (double)(design_signal[4] + 1.0f) * 0.25;
+        if (lnn_cost_ratio < 0.3) lnn_cost_ratio = 0.3;
+        if (lnn_cost_ratio > 0.95) lnn_cost_ratio = 0.95;
+        design->estimated_cost = requirement->max_cost * lnn_cost_ratio;
+        if (design->estimated_cost > requirement->max_cost)
+            design->estimated_cost = requirement->max_cost;
+        if (design->estimated_cost < 1.0)
+            design->estimated_cost = 1.0;
+
+        double lnn_time_ratio = 0.4 + (double)(design_signal[5] + 1.0f) * 0.3;
+        if (lnn_time_ratio < 0.2) lnn_time_ratio = 0.2;
+        if (lnn_time_ratio > 0.95) lnn_time_ratio = 0.95;
+        design->development_time = requirement->max_time * lnn_time_ratio;
+        if (design->development_time < 1.0)
+            design->development_time = 1.0;
+
+        /* LNN生成特性列表 */
+        int feature_cnt = 3 + (int)((design_signal[6] + 1.0f) * 2.5f);
+        if (feature_cnt < 2) feature_cnt = 2;
+        if (feature_cnt > 8) feature_cnt = 8;
+        design->feature_count = feature_cnt;
+        design->features = (char**)safe_calloc((size_t)feature_cnt, sizeof(char*));
+        if (design->features) {
+            for (int f = 0; f < feature_cnt; f++) {
+                int pref_idx = (int)((design_signal[7 + f % 8] + 1.0f)
+                    * (double)(g_product_design_labels.feat_prefix_count - 1) / 2.0 + 0.5f);
+                if (pref_idx < 0) pref_idx = 0;
+                if ((size_t)pref_idx >= g_product_design_labels.feat_prefix_count)
+                    pref_idx = (int)(g_product_design_labels.feat_prefix_count - 1);
+                int suff_idx = (int)((design_signal[(f + 3) % 8] + 1.0f)
+                    * (double)(g_product_design_labels.feat_suffix_count - 1) / 2.0 + 0.5f);
+                if (suff_idx < 0) suff_idx = 0;
+                if ((size_t)suff_idx >= g_product_design_labels.feat_suffix_count)
+                    suff_idx = (int)(g_product_design_labels.feat_suffix_count - 1);
+                char feat_buf[128];
+                snprintf(feat_buf, sizeof(feat_buf), "%s%s",
+                         g_product_design_labels.feat_prefixes[pref_idx],
+                         g_product_design_labels.feat_suffixes[suff_idx]);
+                design->features[f] = string_duplicate_nullable(feat_buf);
+            }
+        }
+
+        /* 复杂度和可行性基于LNN输出 */
+        design->complexity_score = 0.3 + (double)(design_signal[8] + 1.0f) * 0.25;
+        if (design->complexity_score < 0.2) design->complexity_score = 0.2;
+        if (design->complexity_score > 0.95) design->complexity_score = 0.95;
+
+        design->feasibility_score = 0.4 + (double)(design_signal[9] + 1.0f) * 0.3;
+        if (design->feasibility_score < 0.2) design->feasibility_score = 0.2;
+        if (design->feasibility_score > 0.98) design->feasibility_score = 0.98;
+
+        safe_free((void**)&lnn_output);
     }
-    
+    safe_free((void**)&input_vec);
+
+    /* 设置产品名称和描述 */
     design->name = string_duplicate_nullable(product_name);
     if (!design->name) {
         g_system_state.last_error = SELFLNN_ERROR_OUT_OF_MEMORY;
         return g_system_state.last_error;
     }
-    
+
     design->description = string_duplicate_nullable(description);
     if (!design->description) {
         safe_free((void**)&design->name);
         g_system_state.last_error = SELFLNN_ERROR_OUT_OF_MEMORY;
         return g_system_state.last_error;
     }
-    
-    /* 如果特性尚未由LNN生成，用关键词驱动生成 */
+
+    /* 防御性检查：确保LNN生成的值有效（不应触发，因为LNN路径已设置） */
     if (!design->features && design->feature_count == 0) {
-        size_t df_count = g_product_design_labels.default_feature_count;
-        if (df_count < 1) df_count = 1;
-        if (df_count > 8) df_count = 8;
-        design->feature_count = df_count;
-        design->features = (char**)safe_calloc(df_count, sizeof(char*));
-        if (!design->features) {
-            safe_free((void**)&design->name);
-            safe_free((void**)&design->description);
-            g_system_state.last_error = SELFLNN_ERROR_OUT_OF_MEMORY;
-            return g_system_state.last_error;
-        }
-        for (size_t f = 0; f < df_count; f++) {
-            design->features[f] = string_duplicate_nullable(
-                g_product_design_labels.default_features[f]);
-        }
+        safe_free((void**)&design->name);
+        safe_free((void**)&design->description);
+        g_system_state.last_error = SELFLNN_ERROR_ALGORITHM_FAILURE;
+        log_error("LNN未能生成设计特性，拒绝产品设计");
+        return g_system_state.last_error;
     }
-    
-    /* 确保成本和时间为有效值 */
-    if (design->estimated_cost <= 0.0)
-        design->estimated_cost = requirement->max_cost * 0.5;
-    if (design->development_time <= 0.0)
-        design->development_time = requirement->max_time * 0.5;
-    /* 基于设计参数计算真实复杂度评分（替代硬编码0.5）
-     * 综合成本占比、时间占比、特性密度、关键词数量四个维度 */
-    if (design->complexity_score <= 0.0) {
-        double cost_ratio = (requirement->max_cost > 0.0)
-            ? design->estimated_cost / requirement->max_cost : 0.5;
-        double time_ratio = (requirement->max_time > 0.0)
-            ? design->development_time / requirement->max_time : 0.5;
-        double feature_ratio = (double)design->feature_count / 10.0;
-        if (feature_ratio > 1.0) feature_ratio = 1.0;
-        double keyword_ratio = (double)requirement->keyword_count / 15.0;
-        if (keyword_ratio > 1.0) keyword_ratio = 1.0;
-        design->complexity_score = 0.30 * cost_ratio + 0.25 * time_ratio
-                                  + 0.25 * feature_ratio + 0.20 * keyword_ratio;
-        if (design->complexity_score < 0.1) design->complexity_score = 0.1;
-        if (design->complexity_score > 0.95) design->complexity_score = 0.95;
+
+    if (design->estimated_cost <= 0.0 || design->development_time <= 0.0 ||
+        design->complexity_score <= 0.0 || design->feasibility_score <= 0.0) {
+        safe_free((void**)&design->name);
+        safe_free((void**)&design->description);
+        g_system_state.last_error = SELFLNN_ERROR_ALGORITHM_FAILURE;
+        log_error("LNN生成的设计参数无效，拒绝产品设计");
+        return g_system_state.last_error;
     }
-    /* 基于设计参数计算真实可行性评分（替代硬编码0.7）
-     * 综合预算余量、时间余量、特性可行性三个维度 */
-    if (design->feasibility_score <= 0.0) {
-        double budget_slack = (requirement->max_cost > 0.0)
-            ? 1.0 - design->estimated_cost / requirement->max_cost : 0.5;
-        if (budget_slack < 0.0) budget_slack = 0.0;
-        double time_slack = (requirement->max_time > 0.0)
-            ? 1.0 - design->development_time / requirement->max_time : 0.5;
-        if (time_slack < 0.0) time_slack = 0.0;
-        double feature_feasibility = 1.0 - (double)design->feature_count / 12.0;
-        if (feature_feasibility < 0.0) feature_feasibility = 0.0;
-        design->feasibility_score = 0.35 * budget_slack + 0.35 * time_slack
-                                    + 0.30 * feature_feasibility;
-        if (design->feasibility_score < 0.1) design->feasibility_score = 0.1;
-        if (design->feasibility_score > 0.98) design->feasibility_score = 0.98;
-    }
-    
+
     log_info("LNN产品设计完成: %s，成本: %.2f，时间: %.1f天，复杂度: %.2f，可行性: %.2f",
              design->name, design->estimated_cost, design->development_time,
              design->complexity_score, design->feasibility_score);
-    
+
     g_system_state.last_error = SELFLNN_SUCCESS;
     return SELFLNN_SUCCESS;
 }

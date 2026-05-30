@@ -26,6 +26,8 @@ extern void* selflnn_get_speech_recognizer(void);
 #include "selflnn/utils/logging.h"
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/multimodal/speech_recognition.h"
+#include "selflnn/multimodal/multimodal_unified_input.h"
+#include "selflnn/selflnn.h"
 #include <stdlib.h>
 #include <string.h>
 #ifndef _USE_MATH_DEFINES
@@ -132,6 +134,9 @@ struct TrainingPipeline {
     /* 状态持续性序列训练配置（非真正BPTT，CfC内部ODE状态跨步保持即提供时间编码） */
     int bptt_enabled;                          /**< 启用状态持续性序列训练 */
     int bptt_unroll_steps;                     /**< cfc_reset间隔步数（默认4） */
+
+    /* 多模态统一输入投影（训练/推理路径统一） */
+    void* unified_input_state;                 /**< UnifiedInputState* 统一输入投影矩阵 */
 };
 
 /* FIX-013: compute_loss_value 直接委托 loss_compute，确保与 LossType 枚举严格一致。
@@ -1113,6 +1118,20 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     tp->initialized = 1;
     tp->has_real_data = 0;
 
+    /* 多模态统一输入投影初始化：训练路径与推理路径使用相同的投影融合方式 */
+    {
+        UnifiedInputState* uis = (UnifiedInputState*)safe_calloc(1, sizeof(UnifiedInputState));
+        if (uis) {
+            UnifiedInputConfig ucfg;
+            memset(&ucfg, 0, sizeof(ucfg));
+            ucfg.method = UNIFIED_INPUT_DYNAMIC_SYSTEM;
+            ucfg.unified_input_size = SELFLNN_UNIFIED_PROJECTION_DIM;
+            ucfg.unified_output_size = SELFLNN_UNIFIED_PROJECTION_DIM;
+            multimodal_unified_input_init(uis, &ucfg);
+            tp->unified_input_state = (void*)uis;
+        }
+    }
+
     load_real_data_from_directory(tp);
 
     /* 自监督初始化: 无训练数据时data_buffer保持NULL，在首次pipeline_step中自动生成 */
@@ -1167,6 +1186,10 @@ void training_pipeline_free(TrainingPipeline* pipeline) {
     safe_free((void**)&pipeline->prev_gradients);
     safe_free((void**)&pipeline->data_buffer);
     safe_free((void**)&pipeline->val_buffer);
+    if (pipeline->unified_input_state) {
+        multimodal_unified_input_reset((UnifiedInputState*)pipeline->unified_input_state);
+        safe_free((void**)&pipeline->unified_input_state);
+    }
     for (int i = 0; i < pipeline->source_count; i++) {
         safe_free((void**)&pipeline->sources[i].data);
     }
@@ -1828,20 +1851,41 @@ int pipeline_multimodal_train_step(TrainingPipeline* pipeline,
     float* combined = (float*)safe_calloc(max_input, sizeof(float));
     if (!combined) return -1;
 
-    size_t pos = 0;
-    if (vision && vision_size > 0) {
-        memcpy(combined + pos, vision, vision_size * sizeof(float));
-        pos += vision_size;
-    }
-    if (audio && audio_size > 0 && pos < max_input) {
-        size_t copy = audio_size < max_input - pos ? audio_size : max_input - pos;
-        memcpy(combined + pos, audio, copy * sizeof(float));
-        pos += copy;
-    }
-    if (text && text_size > 0 && pos < max_input) {
-        size_t copy = text_size < max_input - pos ? text_size : max_input - pos;
-        memcpy(combined + pos, text, copy * sizeof(float));
-        pos += copy;
+    /* 使用统一输入投影处理（与推理路径一致），替代原始memcpy拼接 */
+    if (pipeline->unified_input_state) {
+        UnifiedInputState* uis = (UnifiedInputState*)pipeline->unified_input_state;
+        size_t unified_out_size = max_input;
+        
+        if (multimodal_unified_input_process(uis,
+                vision, vision_size,
+                audio, audio_size,
+                text, text_size,
+                NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
+                combined, &unified_out_size, max_input) != 0) {
+            safe_free((void**)&combined);
+            log_error("多模态统一输入投影处理失败");
+            return -1;
+        }
+        if (unified_out_size < max_input) {
+            memset(combined + unified_out_size, 0, (max_input - unified_out_size) * sizeof(float));
+        }
+    } else {
+        /* 无统一输入状态时的回退：使用简单拼接（仅用于向后兼容） */
+        size_t pos = 0;
+        if (vision && vision_size > 0) {
+            memcpy(combined + pos, vision, vision_size * sizeof(float));
+            pos += vision_size;
+        }
+        if (audio && audio_size > 0 && pos < max_input) {
+            size_t copy = audio_size < max_input - pos ? audio_size : max_input - pos;
+            memcpy(combined + pos, audio, copy * sizeof(float));
+            pos += copy;
+        }
+        if (text && text_size > 0 && pos < max_input) {
+            size_t copy = text_size < max_input - pos ? text_size : max_input - pos;
+            memcpy(combined + pos, text, copy * sizeof(float));
+            pos += copy;
+        }
     }
 
     float* output = (float*)safe_malloc(pipeline->network->config.output_size * sizeof(float));

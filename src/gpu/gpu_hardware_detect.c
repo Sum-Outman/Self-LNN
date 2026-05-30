@@ -114,70 +114,166 @@ static int try_load_library(const char* lib_path) {
     return 0;
 }
 
+/* CUDA设备属性枚举常量：用于查询GPU计算能力 */
+#define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR 75
+#define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR 76
+
+/** 通过CUDA API查询NVIDIA GPU的真实计算能力（fp16/fp64支持）
+ *  @param gpu                输出：GPU信息结构体指针
+ *  @param cuda_device_ordinal CUDA设备序号（0, 1, 2...）
+ *  @note 不使用CUDA SDK头文件，通过动态加载nvcuda.dll/libcuda.so获取函数指针
+ *  @note fp16判断：SM >= 5.3(Maxwell) 或 SM >= 6.0(Pascal)，保守设0
+ *  @note fp64判断：SM >= 1.3，几乎所有现代NVIDIA GPU都支持 */
+static void query_nvidia_compute_capability(GpuHardwareInfo* gpu, int cuda_device_ordinal) {
+    gpu->supports_fp16 = 0;
+    gpu->supports_fp64 = 0;
+
+    void* cuda_handle = hw_dlopen(NVIDIA_CUDA_LIB);
+    if (!cuda_handle) return;
+
+    typedef int (*cuInit_t)(unsigned int);
+    typedef int (*cuDeviceGet_t)(int*, int);
+    typedef int (*cuDeviceGetAttribute_t)(int*, int, int);
+
+    cuInit_t cuInit_fn = (cuInit_t)hw_dlsym(cuda_handle, "cuInit");
+    cuDeviceGet_t cuDeviceGet_fn = (cuDeviceGet_t)hw_dlsym(cuda_handle, "cuDeviceGet");
+    cuDeviceGetAttribute_t cuDeviceGetAttribute_fn =
+        (cuDeviceGetAttribute_t)hw_dlsym(cuda_handle, "cuDeviceGetAttribute");
+
+    if (!cuInit_fn || !cuDeviceGet_fn || !cuDeviceGetAttribute_fn) {
+        hw_dlclose(cuda_handle);
+        return;
+    }
+    if (cuInit_fn(0) != 0) {
+        hw_dlclose(cuda_handle);
+        return;
+    }
+
+    int device = 0;
+    if (cuDeviceGet_fn(&device, cuda_device_ordinal) != 0) {
+        hw_dlclose(cuda_handle);
+        return;
+    }
+
+    int major = 0, minor = 0;
+    if (cuDeviceGetAttribute_fn(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device) == 0 &&
+        cuDeviceGetAttribute_fn(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device) == 0) {
+        /* fp16原生硬件支持：SM >= 6.0 (Pascal GP100/GP102/GP104/GP106)
+         * 或 SM 5.3 (Maxwell Tegra X1)，否则保守设为0 */
+        if (major >= 6 || (major == 5 && minor >= 3)) {
+            gpu->supports_fp16 = 1;
+        }
+        /* fp64支持：SM >= 1.3 即具备双精度浮点单元 */
+        if (major >= 2 || (major == 1 && minor >= 3)) {
+            gpu->supports_fp64 = 1;
+        }
+    }
+
+    hw_dlclose(cuda_handle);
+}
+
 #ifdef _WIN32
 
-/** Windows: 通过SetupAPI枚举显示适配器 */
+/** Windows: 通过SetupAPI枚举显示适配器 + CUDA补充枚举计算卡 */
 static int detect_gpu_windows(GpuHardwareInfo* info, int max_devices, int* num_found) {
     int count = 0;
     *num_found = 0;
+    int nvidia_display_count = 0;
 
+    /* 第一轮：通过DISPLAY类枚举有显示输出的GPU */
     HDEVINFO dev_info = SetupDiGetClassDevsA(NULL, "DISPLAY", NULL,
         DIGCF_PRESENT | DIGCF_ALLCLASSES);
-    if (dev_info == INVALID_HANDLE_VALUE) return 0;
+    if (dev_info != INVALID_HANDLE_VALUE) {
+        SP_DEVINFO_DATA dev_data;
+        dev_data.cbSize = sizeof(SP_DEVINFO_DATA);
 
-    SP_DEVINFO_DATA dev_data;
-    dev_data.cbSize = sizeof(SP_DEVINFO_DATA);
+        for (DWORD i = 0; SetupDiEnumDeviceInfo(dev_info, i, &dev_data) && count < max_devices; i++) {
+            char desc[256] = {0};
+            SetupDiGetDeviceRegistryPropertyA(dev_info, &dev_data, SPDRP_DEVICEDESC,
+                NULL, (BYTE*)desc, sizeof(desc) - 1, NULL);
 
-    for (DWORD i = 0; SetupDiEnumDeviceInfo(dev_info, i, &dev_data) && count < max_devices; i++) {
-        char desc[256] = {0};
-        SetupDiGetDeviceRegistryPropertyA(dev_info, &dev_data, SPDRP_DEVICEDESC,
-            NULL, (BYTE*)desc, sizeof(desc) - 1, NULL);
+            GpuHardwareInfo* gpu = &info[count];
+            memset(gpu, 0, sizeof(GpuHardwareInfo));
 
-        GpuHardwareInfo* gpu = &info[count];
-        memset(gpu, 0, sizeof(GpuHardwareInfo));
-
-        /* 判断厂商 */
-        if (strstr(desc, "NVIDIA") || strstr(desc, "nvidia")) {
-            gpu->vendor = GPU_VENDOR_NVIDIA;
-        } else if (strstr(desc, "AMD") || strstr(desc, "Radeon") || strstr(desc, "ATI")) {
-            gpu->vendor = GPU_VENDOR_AMD;
-        } else if (strstr(desc, "Intel") || strstr(desc, "intel")) {
-            gpu->vendor = GPU_VENDOR_INTEL;
-            gpu->is_integrated = 1;
-        } else {
-            gpu->vendor = GPU_VENDOR_UNKNOWN;
-        }
-
-        strncpy(gpu->device_name, desc, sizeof(gpu->device_name) - 1);
-
-        /* 尝试获取显存大小（通过注册表或DXGI） */
-        HKEY hKey;
-        char reg_path[512];
-        snprintf(reg_path, sizeof(reg_path),
-            "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\%04d",
-            i);
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, reg_path, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            DWORD mem_size = 0, size = sizeof(DWORD);
-            RegQueryValueExA(hKey, "HardwareInformation.MemorySize", NULL, NULL,
-                (BYTE*)&mem_size, &size);
-            if (mem_size > 0) {
-                gpu->memory_bytes = (size_t)mem_size;
+            if (strstr(desc, "NVIDIA") || strstr(desc, "nvidia")) {
+                gpu->vendor = GPU_VENDOR_NVIDIA;
+            } else if (strstr(desc, "AMD") || strstr(desc, "Radeon") || strstr(desc, "ATI")) {
+                gpu->vendor = GPU_VENDOR_AMD;
+            } else if (strstr(desc, "Intel") || strstr(desc, "intel")) {
+                gpu->vendor = GPU_VENDOR_INTEL;
+                gpu->is_integrated = 1;
+            } else {
+                gpu->vendor = GPU_VENDOR_UNKNOWN;
             }
-            RegCloseKey(hKey);
-        }
 
-        /* 尝试加载CUDA库判断NVIDIA可用性 */
-        if (gpu->vendor == GPU_VENDOR_NVIDIA) {
-            if (try_load_library(NVIDIA_CUDA_LIB)) {
-                gpu->supports_fp16 = 1;
-                gpu->supports_fp64 = 1;
+            strncpy(gpu->device_name, desc, sizeof(gpu->device_name) - 1);
+
+            /* 尝试获取显存大小（通过注册表） */
+            HKEY hKey;
+            char reg_path[512];
+            snprintf(reg_path, sizeof(reg_path),
+                "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\%04d",
+                i);
+            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, reg_path, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                DWORD mem_size = 0, size = sizeof(DWORD);
+                RegQueryValueExA(hKey, "HardwareInformation.MemorySize", NULL, NULL,
+                    (BYTE*)&mem_size, &size);
+                if (mem_size > 0) {
+                    gpu->memory_bytes = (size_t)mem_size;
+                }
+                RegCloseKey(hKey);
             }
-        }
 
-        count++;
+            /* P1-004修复: 通过CUDA API真实查询fp16/fp64能力，而非直接假设支持 */
+            if (gpu->vendor == GPU_VENDOR_NVIDIA) {
+                query_nvidia_compute_capability(gpu, nvidia_display_count);
+                nvidia_display_count++;
+            }
+
+            count++;
+        }
+        SetupDiDestroyDeviceInfoList(dev_info);
     }
 
-    SetupDiDestroyDeviceInfoList(dev_info);
+    /* P1-003修复: 第二轮通过CUDA API补充枚举无显示输出的计算卡(Tesla/T4/A100等)
+     * DISPLAY类只包含有显示输出的GPU，计算专用卡会漏检。
+     * CUDA设备序号 > nvidia_display_count 的即为无头计算卡 */
+    {
+        void* cuda_handle = hw_dlopen(NVIDIA_CUDA_LIB);
+        if (cuda_handle) {
+            typedef int (*cuInit_t)(unsigned int);
+            typedef int (*cuDeviceGetCount_t)(int*);
+            typedef int (*cuDeviceGetName_t)(char*, int, int);
+            cuInit_t cuInit_fn = (cuInit_t)hw_dlsym(cuda_handle, "cuInit");
+            cuDeviceGetCount_t cuDeviceGetCount_fn =
+                (cuDeviceGetCount_t)hw_dlsym(cuda_handle, "cuDeviceGetCount");
+            cuDeviceGetName_t cuDeviceGetName_fn =
+                (cuDeviceGetName_t)hw_dlsym(cuda_handle, "cuDeviceGetName");
+
+            if (cuInit_fn && cuDeviceGetCount_fn && cuDeviceGetName_fn && cuInit_fn(0) == 0) {
+                int cuda_total = 0;
+                if (cuDeviceGetCount_fn(&cuda_total) == 0 && cuda_total > nvidia_display_count) {
+                    for (int ci = nvidia_display_count; ci < cuda_total && count < max_devices; ci++) {
+                        char cuda_name[256] = {0};
+                        if (cuDeviceGetName_fn(cuda_name, sizeof(cuda_name) - 1, ci) != 0) continue;
+
+                        GpuHardwareInfo* gpu = &info[count];
+                        memset(gpu, 0, sizeof(GpuHardwareInfo));
+                        gpu->vendor = GPU_VENDOR_NVIDIA;
+                        gpu->is_discrete = 1;
+                        strncpy(gpu->device_name, cuda_name, sizeof(gpu->device_name) - 1);
+
+                        /* 通过CUDA API查询真实计算能力 */
+                        query_nvidia_compute_capability(gpu, ci);
+
+                        count++;
+                    }
+                }
+            }
+            hw_dlclose(cuda_handle);
+        }
+    }
+
     *num_found = count;
     return (count > 0) ? 0 : -1;
 }
@@ -225,9 +321,9 @@ static int detect_gpu_linux(GpuHardwareInfo* info, int max_devices, int* num_fou
             if (vendor == GPU_VENDOR_INTEL) gpu->is_integrated = 1;
             else gpu->is_discrete = 1;
 
-            /* 检查厂商SDK可用性 */
-            if (vendor == GPU_VENDOR_NVIDIA && try_load_library(NVIDIA_CUDA_LIB)) {
-                gpu->supports_fp16 = 1; gpu->supports_fp64 = 1;
+            /* P1-004修复: 通过CUDA API真实查询fp16/fp64能力 */
+            if (vendor == GPU_VENDOR_NVIDIA) {
+                query_nvidia_compute_capability(gpu, count);
             } else if (vendor == GPU_VENDOR_AMD && try_load_library(AMD_HIP_LIB)) {
                 gpu->supports_fp16 = 1; gpu->supports_fp64 = 1;
             }
@@ -271,8 +367,9 @@ static int detect_gpu_linux(GpuHardwareInfo* info, int max_devices, int* num_fou
         if (vendor == GPU_VENDOR_INTEL) gpu->is_integrated = 1;
         else gpu->is_discrete = 1;
 
-        if (vendor == GPU_VENDOR_NVIDIA && try_load_library(NVIDIA_CUDA_LIB)) {
-            gpu->supports_fp16 = 1; gpu->supports_fp64 = 1;
+        /* P1-004修复: 通过CUDA API真实查询fp16/fp64能力 */
+        if (vendor == GPU_VENDOR_NVIDIA) {
+            query_nvidia_compute_capability(gpu, count);
         } else if (vendor == GPU_VENDOR_AMD && try_load_library(AMD_HIP_LIB)) {
             gpu->supports_fp16 = 1; gpu->supports_fp64 = 1;
         }

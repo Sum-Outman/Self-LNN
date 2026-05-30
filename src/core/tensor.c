@@ -10,7 +10,6 @@
 // 禁用Windows CRT安全警告
 
 #include "selflnn/core/tensor.h"
-#include "selflnn/core/memory.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 #include <stdlib.h>

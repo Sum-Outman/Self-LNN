@@ -1014,7 +1014,8 @@ float decision_engine_compute_utility(UtilityFunctionType utility_type,
             float a = (params && params_size >= 1) ? params[0] : 1.0f;
             float b = (params && params_size >= 2) ? params[1] : 1.0f;
             float c = (params && params_size >= 3) ? params[2] : 1.0f;
-            float d = (params && params_size >= 4) ? params[4] : 0.0f;
+            /* ZSFA-FIX-F005: 修复off-by-one，params[4]→params[3]，索引从0开始第4个参数应为索引3 */
+            float d = (params && params_size >= 4) ? params[3] : 0.0f;
             return a * logf(b * value + c) + d;
         }
         

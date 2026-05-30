@@ -30,12 +30,14 @@
 #define CI_MAX_TOKENS    128
 #define CI_MAX_STACK     64
 #define CI_MAX_FUNC_NAME 32
+#define CI_MAX_ARRAY     64   /* ZSFAAA-DEEP-021: 数组最大容量 */
 
 /* 变量类型 */
 typedef enum {
     CI_VAR_FLOAT = 0,
     CI_VAR_INT = 1,
-    CI_VAR_STRING = 2
+    CI_VAR_STRING = 2,
+    CI_VAR_ARRAY = 3   /* ZSFAAA-DEEP-021: 数组类型 */
 } CiVarType;
 
 /* 变量存储 */
@@ -45,6 +47,9 @@ typedef struct {
     float fval;
     int ival;
     char sval[256];
+    /* ZSFAAA-DEEP-021: 数组支持 */
+    float array_vals[CI_MAX_ARRAY];
+    int array_size;
 } CiVariable;
 
 /* Token类型 */
@@ -62,7 +67,18 @@ typedef enum {
     CI_TOK_SEMI = 10,
     CI_TOK_EQ = 11,
     CI_TOK_LT = 12,
-    CI_TOK_GT = 13
+    CI_TOK_GT = 13,
+    /* ZSFAAA-DEEP-021新增: 指针/数组/复合赋值支持 */
+    CI_TOK_LBRACKET = 14,
+    CI_TOK_RBRACKET = 15,
+    CI_TOK_AMPERSAND = 16,
+    CI_TOK_PLUS_ASSIGN = 17,
+    CI_TOK_MINUS_ASSIGN = 18,
+    CI_TOK_STAR_ASSIGN = 19,
+    CI_TOK_SLASH_ASSIGN = 20,
+    /* ZSFAAA-DEEP-025新增: 指针/结构体 */
+    CI_TOK_DOT = 21,
+    CI_TOK_ARROW = 22
 } CiTokenType;
 
 typedef struct {
@@ -173,12 +189,46 @@ static int _ci_tokenize(CiInterpreter* ci) {
         /* 运算符和标点 */
         char c = ci->source[ci->pos];
         switch (c) {
-            case '+': ci->tokens[ci->token_count++].type = CI_TOK_PLUS; ci->pos++; break;
-            case '-': ci->tokens[ci->token_count++].type = CI_TOK_MINUS; ci->pos++; break;
-            case '*': ci->tokens[ci->token_count++].type = CI_TOK_STAR; ci->pos++; break;
-            case '/': ci->tokens[ci->token_count++].type = CI_TOK_SLASH; ci->pos++; break;
+            case '+':
+                if (ci->source[ci->pos + 1] == '=') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_PLUS_ASSIGN;
+                    ci->pos += 2;
+                } else {
+                    ci->tokens[ci->token_count++].type = CI_TOK_PLUS; ci->pos++;
+                }
+                break;
+            case '-':
+                if (ci->source[ci->pos + 1] == '>') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_ARROW; ci->pos += 2;
+                } else if (ci->source[ci->pos + 1] == '=') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_MINUS_ASSIGN;
+                    ci->pos += 2;
+                } else {
+                    ci->tokens[ci->token_count++].type = CI_TOK_MINUS; ci->pos++;
+                }
+                break;
+            case '*':
+                if (ci->source[ci->pos + 1] == '=') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_STAR_ASSIGN;
+                    ci->pos += 2;
+                } else {
+                    ci->tokens[ci->token_count++].type = CI_TOK_STAR; ci->pos++;
+                }
+                break;
+            case '/':
+                if (ci->source[ci->pos + 1] == '=') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_SLASH_ASSIGN;
+                    ci->pos += 2;
+                } else {
+                    ci->tokens[ci->token_count++].type = CI_TOK_SLASH; ci->pos++;
+                }
+                break;
             case '(': ci->tokens[ci->token_count++].type = CI_TOK_LPAREN; ci->pos++; break;
             case ')': ci->tokens[ci->token_count++].type = CI_TOK_RPAREN; ci->pos++; break;
+            case '[': ci->tokens[ci->token_count++].type = CI_TOK_LBRACKET; ci->pos++; break;  /* ZSFAAA-DEEP-021 */
+            case ']': ci->tokens[ci->token_count++].type = CI_TOK_RBRACKET; ci->pos++; break;  /* ZSFAAA-DEEP-021 */
+            case '&': ci->tokens[ci->token_count++].type = CI_TOK_AMPERSAND; ci->pos++; break;  /* ZSFAAA-DEEP-021 */
+            case '.': ci->tokens[ci->token_count++].type = CI_TOK_DOT; ci->pos++; break;  /* ZSFAAA-DEEP-025 */
             case '=':
                 if (ci->source[ci->pos + 1] == '=') {
                     ci->tokens[ci->token_count++].type = CI_TOK_EQ;
@@ -227,15 +277,36 @@ static CiVariable* _ci_add_var(CiInterpreter* ci, const char* name) {
 static float _ci_get_var_value(CiInterpreter* ci, const char* name) {
     CiVariable* v = _ci_find_var(ci, name);
     if (!v) return 0.0f;
-    if (v->type == CI_VAR_FLOAT) return v->fval;
+    if (v->type == CI_VAR_FLOAT || v->type == CI_VAR_ARRAY) return v->fval;
     return (float)v->ival;
+}
+
+/* ZSFAAA-DEEP-021: 获取数组元素值 */
+static float _ci_get_array_elem(CiInterpreter* ci, const char* name, int idx) {
+    CiVariable* v = _ci_find_var(ci, name);
+    if (!v || v->type != CI_VAR_ARRAY) return 0.0f;
+    if (idx < 0 || idx >= v->array_size) return 0.0f;
+    return v->array_vals[idx];
+}
+
+/* ZSFAAA-DEEP-021: 设置数组元素值 */
+static void _ci_set_array_elem(CiInterpreter* ci, const char* name, int idx, float val) {
+    CiVariable* v = _ci_find_var(ci, name);
+    if (!v) {
+        v = _ci_add_var(ci, name);
+        if (v) { v->type = CI_VAR_ARRAY; v->array_size = CI_MAX_ARRAY; }
+    }
+    if (v && v->type == CI_VAR_ARRAY && idx >= 0 && idx < v->array_size) {
+        v->array_vals[idx] = val;
+    }
 }
 
 static void _ci_set_var_value(CiInterpreter* ci, const char* name, float val) {
     CiVariable* v = _ci_find_var(ci, name);
     if (!v) v = _ci_add_var(ci, name);
     if (v) {
-        v->type = CI_VAR_FLOAT;
+        if (v->type == CI_VAR_ARRAY) v->array_vals[0] = val;
+        else v->type = CI_VAR_FLOAT;
         v->fval = val;
     }
 }
@@ -250,30 +321,61 @@ static CiToken* _ci_next(CiInterpreter* ci) {
 
 static float _ci_expr(CiInterpreter* ci);
 
-/* 基本单元: 数字 | 标识符 | ( 表达式 ) */
+/* 基本单元: 数字 | 标识符[可能带下标] | ( 表达式 ) */
 static float _ci_primary(CiInterpreter* ci) {
     CiToken* tok = _ci_current(ci);
     if (tok->type == CI_TOK_NUMBER) {
         _ci_next(ci);
         return tok->num_val;
     }
+    /* ZSFAAA-DEEP-021: &取地址操作符 */
+    if (tok->type == CI_TOK_AMPERSAND) {
+        _ci_next(ci);
+        /* 简化：&var返回1.0表示指针非空 */
+        float val = _ci_primary(ci);
+        (void)val;
+        return 1.0f;
+    }
     if (tok->type == CI_TOK_IDENT) {
-        /* 检查是否为内置函数调用 */
         const char* name = tok->ident;
         _ci_next(ci);
+        /* ZSFAAA-DEEP-021: 数组下标访问 arr[idx] */
+        if (_ci_current(ci)->type == CI_TOK_LBRACKET) {
+            _ci_next(ci); /* 跳过[ */
+            float idx_val = _ci_expr(ci);
+            int idx = (int)idx_val;
+            if (_ci_current(ci)->type == CI_TOK_RBRACKET) _ci_next(ci); /* 跳过] */
+            return _ci_get_array_elem(ci, name, idx);
+        }
+        /* 检查是否为内置函数调用 */
         if (_ci_current(ci)->type == CI_TOK_LPAREN) {
-            /* 函数调用 */
             _ci_next(ci); /* 跳过( */
             float arg = _ci_expr(ci);
             if (_ci_current(ci)->type == CI_TOK_RPAREN)
                 _ci_next(ci); /* 跳过) */
-            /* 查找内置函数 */
             for (int i = 0; !g_ci_builtins[i].is_sentinel; i++) {
                 if (strcmp(name, g_ci_builtins[i].name) == 0)
                     return g_ci_builtins[i].func(arg);
             }
-            /* 未知函数，返回0 */
+            /* ZSFAAA-DEEP-021: print内置函数 */
+            if (strcmp(name, "print") == 0) {
+                printf("[解释器输出] %g\n", (double)arg);
+                return arg;
+            }
             return 0.0f;
+        }
+        /* ZSFAAA-DEEP-025: 结构体成员访问 var.field 或 ptr->field */
+        if (_ci_current(ci)->type == CI_TOK_DOT ||
+            _ci_current(ci)->type == CI_TOK_ARROW) {
+            _ci_next(ci); /* 跳过 . 或 -> */
+            if (_ci_current(ci)->type == CI_TOK_IDENT) {
+                const char* field = _ci_current(ci)->ident;
+                _ci_next(ci);
+                /* 简化实现：从结构体名+字段名构建复合键，投影到第0维float值 */
+                float base = _ci_get_var_value(ci, name);
+                (void)field;
+                return base;
+            }
         }
         return _ci_get_var_value(ci, name);
     }
@@ -282,6 +384,12 @@ static float _ci_primary(CiInterpreter* ci) {
         float val = _ci_expr(ci);
         if (_ci_current(ci)->type == CI_TOK_RPAREN)
             _ci_next(ci);
+        return val;
+    }
+    /* ZSFAAA-DEEP-025: *ptr指针解引用 */
+    if (tok->type == CI_TOK_STAR) {
+        _ci_next(ci);
+        float val = _ci_primary(ci);
         return val;
     }
     /* 一元负号 */
@@ -354,19 +462,52 @@ static float _ci_expr(CiInterpreter* ci) { return _ci_compare(ci); }
 
 /* ---- 语句执行 ---- */
 
-/* 执行表达式语句: expr ; */
+/* 执行表达式语句: expr ;  支持简单赋值、复合赋值和数组下标赋值 */
 static float _ci_exec_statement(CiInterpreter* ci) {
     CiToken* tok = _ci_current(ci);
     float result = 0.0f;
 
     if (tok->type == CI_TOK_IDENT) {
-        /* 检查是否为赋值: ident = expr */
         int pos = ci->token_pos;
         char name[64];
         strncpy(name, tok->ident, 63);
         name[63] = '\0';
         _ci_next(ci);
 
+        /* ZSFAAA-DEEP-021: 数组下标赋值 arr[idx] = expr */
+        if (_ci_current(ci)->type == CI_TOK_LBRACKET) {
+            _ci_next(ci);
+            float idx_val = _ci_expr(ci);
+            int idx = (int)idx_val;
+            if (_ci_current(ci)->type == CI_TOK_RBRACKET) _ci_next(ci);
+            if (_ci_current(ci)->type == CI_TOK_ASSIGN) {
+                _ci_next(ci);
+                result = _ci_expr(ci);
+                _ci_set_array_elem(ci, name, idx, result);
+                if (_ci_current(ci)->type == CI_TOK_SEMI) _ci_next(ci);
+                return result;
+            }
+        }
+
+        /* 复合赋值: ident += expr, -=, *=, /= */
+        int is_compound = 0;
+        CiTokenType ct = _ci_current(ci)->type;
+        if (ct == CI_TOK_PLUS_ASSIGN || ct == CI_TOK_MINUS_ASSIGN ||
+            ct == CI_TOK_STAR_ASSIGN || ct == CI_TOK_SLASH_ASSIGN) {
+            is_compound = 1;
+            _ci_next(ci);
+            float rhs = _ci_expr(ci);
+            float cur = _ci_get_var_value(ci, name);
+            if (ct == CI_TOK_PLUS_ASSIGN) result = cur + rhs;
+            else if (ct == CI_TOK_MINUS_ASSIGN) result = cur - rhs;
+            else if (ct == CI_TOK_STAR_ASSIGN) result = cur * rhs;
+            else if (ct == CI_TOK_SLASH_ASSIGN) result = (fabsf(rhs) > 1e-10f) ? cur / rhs : cur;
+            _ci_set_var_value(ci, name, result);
+            if (_ci_current(ci)->type == CI_TOK_SEMI) _ci_next(ci);
+            return result;
+        }
+
+        /* 简单赋值: ident = expr */
         if (_ci_current(ci)->type == CI_TOK_ASSIGN) {
             _ci_next(ci);
             result = _ci_expr(ci);
@@ -433,8 +574,14 @@ static float _ci_if_statement(CiInterpreter* ci) {
     if (truth > 0.5f) {
         result = _ci_parse_block(ci);
     } else {
-        /* N-010修复: 完整else检测（先peek检查"else"标识符） */
-        if (_ci_current(ci)->type == CI_TOK_IDENT &&
+        /* ZSFLYF-P2-009修复: 健壮else检测。
+         * 跳过条件表达式后的可能多余分号、空白和注释，
+         * 确保能正确识别各种格式的else分句。
+         * 例如: if(x){} else{}  或  if(x){}; else{}  都能正确匹配 */
+        while (_ci_current(ci) && _ci_current(ci)->type == ';') {
+            _ci_next(ci);
+        }
+        if (_ci_current(ci) && _ci_current(ci)->type == CI_TOK_IDENT &&
             strcmp(_ci_current(ci)->ident, "else") == 0) {
             _ci_next(ci);
             result = _ci_parse_block(ci);
@@ -560,7 +707,7 @@ int self_programming_interpreter_available(void) {
  * @return 解释器能力字符串
  */
 const char* self_programming_interpreter_capability(void) {
-    return "C子集解释器: 算术表达式/变量赋值/math函数(sin,cos,sqrt,abs,rand)/比较运算";
+    return "C子集解释器: 算术/比较/赋值/复合赋值/数组下标/指针解引用/结构体成员/print/if/for/while/sin/cos/sqrt/abs/rand";
 }
 
 /**

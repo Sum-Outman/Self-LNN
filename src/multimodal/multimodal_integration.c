@@ -27,7 +27,6 @@
 #include "selflnn/multimodal/text_detection.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
-#include "selflnn/core/memory.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/cfc_network.h"
 #include "selflnn/core/laplace.h"
@@ -2032,24 +2031,31 @@ int multimodal_unified_pipeline(const float** modality_data, const int* modality
             for (int m = 0; m < n_mod; m++) input_dims[m] = modality_dims[m];
             int latent_dim = MM_FUSION_DEFAULT_LATENT;
             int hidden_dim = (output_dim < MM_FUSION_DEFAULT_HIDDEN) ? output_dim : MM_FUSION_DEFAULT_HIDDEN;
-            MmCfcFusionState *fusion = mm_cfc_unified_fusion_init(
-                n_mod, input_dims, latent_dim, hidden_dim,
-                MM_FUSION_DEFAULT_ODE_STEPS, MM_FUSION_DEFAULT_TAU, MM_FUSION_DEFAULT_DT);
+            /* 静态缓存CfC融合状态，避免每次调用init/free导致无法学习 */
+            static MmCfcFusionState* cached_fusion = NULL;
+            static int cached_n_mod = 0;
+            if (!cached_fusion || cached_n_mod != n_mod) {
+                if (cached_fusion) { mm_cfc_unified_fusion_free(cached_fusion); }
+                cached_fusion = mm_cfc_unified_fusion_init(
+                    n_mod, input_dims, latent_dim, hidden_dim,
+                    MM_FUSION_DEFAULT_ODE_STEPS, MM_FUSION_DEFAULT_TAU, MM_FUSION_DEFAULT_DT);
+                cached_n_mod = n_mod;
+            }
             safe_free((void**)&input_dims);
-            if (fusion) {
+            if (cached_fusion) {
                 float *fusion_out = (float*)safe_calloc((size_t)hidden_dim, sizeof(float));
                 if (fusion_out) {
-                    int ret = mm_cfc_unified_fusion(fusion, modality_data, modality_dims, n_mod, fusion_out, hidden_dim);
+                    int ret = mm_cfc_unified_fusion(cached_fusion, modality_data, modality_dims, n_mod, fusion_out, hidden_dim);
                     if (ret == 0) {
                         int copy_dim = (hidden_dim < output_dim) ? hidden_dim : output_dim;
                         memcpy(unified_output, fusion_out, (size_t)copy_dim * sizeof(float));
                         if (output_dim > copy_dim) memset(unified_output + copy_dim, 0, (size_t)(output_dim - copy_dim) * sizeof(float));
                     }
                     safe_free((void**)&fusion_out);
-                    mm_cfc_unified_fusion_free(fusion);
+                    /* 缓存状态不再释放，保持ODE连续演化 */
                     if (ret == 0) return 0;
                 } else {
-                    mm_cfc_unified_fusion_free(fusion);
+                    /* 缓存状态不再释放 */
                 }
             }
         }

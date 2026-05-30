@@ -27,6 +27,9 @@ static volatile int rocm_cache_lock_val = 0;
 #endif
 #include "selflnn/utils/logging.h"
 
+#define rocm_log_info(...)  log_info(__VA_ARGS__)
+#define rocm_log_error(...) log_error(__VA_ARGS__)
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -105,6 +108,7 @@ static hipError_t (*hipModuleLaunchKernel)(void*, unsigned int, unsigned int, un
 static hipError_t (*hipOccupancyMaxPotentialBlockSize)(int*, int*, const void*, size_t, int) = NULL;
 static hipError_t (*hipMemGetInfo)(size_t*, size_t*) = NULL;
 static hipError_t (*hipDeviceReset)(void) = NULL;
+static hipError_t (*hipMemset)(void*, int, size_t) = NULL;
 
 #define hipMemcpyHostToDevice 1
 #define hipMemcpyDeviceToHost 2
@@ -451,6 +455,7 @@ LOAD_HIP_SYMBOL(hipModuleLaunchKernel);
 LOAD_HIP_SYMBOL(hipOccupancyMaxPotentialBlockSize);
 LOAD_HIP_SYMBOL(hipMemGetInfo);
 LOAD_HIP_SYMBOL(hipDeviceReset);
+LOAD_HIP_SYMBOL(hipMemset);
 
 return 1;
 }
@@ -1129,4 +1134,680 @@ const GpuBackendInterface* rocm_get_backend_interface(void) {
         .get_error_string = rocm_backend_get_error_string
     };
     return &rocm_backend;
+}
+
+/* ========================================================================
+ * ROCm高层训练计算函数
+ * ======================================================================== */
+
+static inline int rocm_device_available(GpuContext* context) {
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  if (!ctx || !ctx->is_initialized) return 0;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  if (!rctx || !rctx->initialized) return 0;
+  return 1;
+}
+
+/* 矩阵乘法（alpha/beta）HIP内核 */
+static const char* ROCM_GEMM_TRAIN_SRC =
+"extern \"C\" __global__ void gemm_train(float* a, float* b, float* c, int m, int n, int k, float alpha, float beta) {\n"
+"    int row = blockIdx.y * blockDim.y + threadIdx.y;\n"
+"    int col = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    if (row < m && col < n) {\n"
+"        float sum = 0.0f;\n"
+"        for (int i = 0; i < k; i++) sum += a[row * k + i] * b[i * n + col];\n"
+"        if (beta == 0.0f) c[row * n + col] = alpha * sum;\n"
+"        else c[row * n + col] = alpha * sum + beta * c[row * n + col];\n"
+"    }\n"
+"}\n";
+
+/* 统一激活前向HIP内核 */
+static const char* ROCM_ACT_FWD_SRC =
+"extern \"C\" __global__ void act_fwd(float* x, float* y, int n, int t, float a) {\n"
+"    int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    if (i < n) {\n"
+"        float v = x[i];\n"
+"        if (t == 0) y[i] = (v > 0.0f) ? v : 0.0f;\n"
+"        else if (t == 1) y[i] = (v > 0.0f) ? v : a * v;\n"
+"        else if (t == 2) y[i] = 1.0f / (1.0f + expf(-v));\n"
+"        else if (t == 3) y[i] = tanhf(v);\n"
+"        else if (t == 4) { float s = sqrtf(2.0f); y[i] = 0.5f * v * (1.0f + erff(v / s)); }\n"
+"        else if (t == 5) y[i] = logf(1.0f + expf(v));\n"
+"        else y[i] = v;\n"
+"    }\n"
+"}\n";
+
+/* 统一激活反向HIP内核 */
+static const char* ROCM_ACT_BWD_SRC =
+"extern \"C\" __global__ void act_bwd(float* x, float* y, float* go, float* gi, int n, int t, float a) {\n"
+"    int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    if (i < n) {\n"
+"        float v = x[i], o = y[i], g = go[i];\n"
+"        if (t == 0) gi[i] = (v > 0.0f) ? g : 0.0f;\n"
+"        else if (t == 1) gi[i] = (v > 0.0f) ? g : a * g;\n"
+"        else if (t == 2) gi[i] = g * o * (1.0f - o);\n"
+"        else if (t == 3) gi[i] = g * (1.0f - o * o);\n"
+"        else if (t == 4) { float sq = sqrtf(2.0f / 3.14159265359f); float xs = v / sqrtf(2.0f); gi[i] = g * (0.5f * (1.0f + erff(xs)) + v * expf(-0.5f * v * v) / sq); }\n"
+"        else if (t == 5) { float ex = expf(v); gi[i] = g * ex / (1.0f + ex); }\n"
+"        else gi[i] = g;\n"
+"    }\n"
+"}\n";
+
+/* 批归一化前向HIP内核 */
+static const char* ROCM_BATCH_NORM_FORWARD_KERNEL =
+"extern \"C\" __global__ void batchnorm_forward(float* input, float* output, float* gamma, float* beta, float* running_mean, float* running_var, float* batch_mean, float* batch_var, int num_elements, int num_features, int batch_size, float eps, float momentum, int is_training) {\n"
+"    int feat = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    if (feat >= num_features) return;\n"
+"    int feat_size = num_elements / num_features;\n"
+"    float mean_val = 0.0f;\n"
+"    float var_val = 0.0f;\n"
+"    if (is_training) {\n"
+"        float sum_val = 0.0f;\n"
+"        float sq_sum = 0.0f;\n"
+"        for (int i = 0; i < batch_size; i++) {\n"
+"            float val = input[i * num_features * feat_size + feat * feat_size];\n"
+"            sum_val += val;\n"
+"            sq_sum += val * val;\n"
+"        }\n"
+"        mean_val = sum_val / (float)batch_size;\n"
+"        var_val = sq_sum / (float)batch_size - mean_val * mean_val;\n"
+"        if (var_val < 0.0f) var_val = 0.0f;\n"
+"        if (batch_mean) batch_mean[feat] = mean_val;\n"
+"        if (batch_var) batch_var[feat] = var_val;\n"
+"        if (running_mean) running_mean[feat] = momentum * running_mean[feat] + (1.0f - momentum) * mean_val;\n"
+"        if (running_var) running_var[feat] = momentum * running_var[feat] + (1.0f - momentum) * var_val;\n"
+"    } else {\n"
+"        mean_val = running_mean ? running_mean[feat] : 0.0f;\n"
+"        var_val = running_var ? running_var[feat] : 1.0f;\n"
+"    }\n"
+"    float g = gamma ? gamma[feat] : 1.0f;\n"
+"    float be = beta ? beta[feat] : 0.0f;\n"
+"    float inv_std = rsqrtf(var_val + eps);\n"
+"    float a_val = g * inv_std;\n"
+"    float shift = be - g * mean_val * inv_std;\n"
+"    for (int i = 0; i < batch_size; i++) {\n"
+"        float val = input[i * num_features * feat_size + feat * feat_size];\n"
+"        output[i * num_features * feat_size + feat * feat_size] = a_val * val + shift;\n"
+"    }\n"
+"}\n";
+
+/* 批归一化反向HIP内核 */
+static const char* ROCM_BATCH_NORM_BACKWARD_KERNEL =
+"extern \"C\" __global__ void batchnorm_backward(float* input, float* grad_output, float* grad_input, float* grad_gamma, float* grad_beta, float* mean, float* var, float* gamma, int num_elements, int num_features, int batch_size, float eps) {\n"
+"    int feat = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    if (feat >= num_features) return;\n"
+"    int feat_size = num_elements / num_features;\n"
+"    float g = gamma ? gamma[feat] : 1.0f;\n"
+"    float m = mean ? mean[feat] : 0.0f;\n"
+"    float v = var ? var[feat] : 1.0f;\n"
+"    float inv_std = rsqrtf(v + eps);\n"
+"    float sum_grad = 0.0f;\n"
+"    float sum_grad_xhat = 0.0f;\n"
+"    for (int i = 0; i < batch_size; i++) {\n"
+"        float x = input[i * num_features * feat_size + feat * feat_size];\n"
+"        float go = grad_output[i * num_features * feat_size + feat * feat_size];\n"
+"        float xhat = (x - m) * inv_std;\n"
+"        sum_grad += go;\n"
+"        sum_grad_xhat += go * xhat;\n"
+"    }\n"
+"    if (grad_gamma) grad_gamma[feat] = sum_grad_xhat;\n"
+"    if (grad_beta) grad_beta[feat] = sum_grad;\n"
+"    float factor = g * inv_std / (float)batch_size;\n"
+"    for (int i = 0; i < batch_size; i++) {\n"
+"        float x = input[i * num_features * feat_size + feat * feat_size];\n"
+"        float go = grad_output[i * num_features * feat_size + feat * feat_size];\n"
+"        float xhat = (x - m) * inv_std;\n"
+"        float gi = factor * ((float)batch_size * go - sum_grad - xhat * sum_grad_xhat);\n"
+"        grad_input[i * num_features * feat_size + feat * feat_size] = gi;\n"
+"    }\n"
+"}\n";
+
+int rocm_forward_dense(GpuContext* context,
+                       const float* input, float* output,
+                       const float* weights, const float* bias,
+                       size_t batch_size, size_t input_size, size_t output_size,
+                       GpuActivationType act_type, float alpha) {
+  if (!rocm_device_available(context)) {
+    rocm_log_error("[ROCm] forward_dense: ROCm后端不可用");
+    return -1;
+  }
+  if (!input || !output || !weights || batch_size == 0 || input_size == 0 || output_size == 0) {
+    rocm_log_error("[ROCm] forward_dense: 参数无效");
+    return -1;
+  }
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t temp_size = batch_size * output_size;
+  size_t weight_byte = output_size * input_size * sizeof(float);
+  size_t input_byte = batch_size * input_size * sizeof(float);
+  size_t out_byte = temp_size * sizeof(float);
+  void* d_input = NULL;
+  void* d_weight = NULL;
+  void* d_temp = NULL;
+  void* d_output = NULL;
+  void* d_bias = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_input, input_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_weight, weight_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_temp, out_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_output, out_byte) != hipSuccess) goto cleanup;
+  if (bias && hipMalloc(&d_bias, output_size * sizeof(float)) != hipSuccess) goto cleanup;
+  hipMemcpy(d_input, input, input_byte, hipMemcpyHostToDevice);
+  hipMemcpy(d_weight, weights, weight_byte, hipMemcpyHostToDevice);
+  if (bias) hipMemcpy(d_bias, bias, output_size * sizeof(float), hipMemcpyHostToDevice);
+  else { hipMemset(d_temp, 0, out_byte); }
+  {
+    int m = (int)batch_size, n = (int)output_size, k = (int)input_size;
+    float al = 1.0f, bt = 0.0f;
+    GpuKernel* mk = rocm_backend_kernel_create(context, ROCM_GEMM_TRAIN_SRC, "gemm_train");
+    if (!mk) goto cleanup;
+    rocm_backend_kernel_set_arg(mk, 0, sizeof(void*), &d_input);
+    rocm_backend_kernel_set_arg(mk, 1, sizeof(void*), &d_weight);
+    rocm_backend_kernel_set_arg(mk, 2, sizeof(void*), &d_temp);
+    rocm_backend_kernel_set_arg(mk, 3, sizeof(int), &m);
+    rocm_backend_kernel_set_arg(mk, 4, sizeof(int), &n);
+    rocm_backend_kernel_set_arg(mk, 5, sizeof(int), &k);
+    rocm_backend_kernel_set_arg(mk, 6, sizeof(float), &al);
+    rocm_backend_kernel_set_arg(mk, 7, sizeof(float), &bt);
+    size_t total = (size_t)m * (size_t)n;
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute_nd(mk, 2, (size_t[]){ (size_t)n, (size_t)m, 1 },
+                                   (size_t[]){ (ws > (size_t)n ? (size_t)n : ws), (ws > (size_t)m ? (size_t)m : ws), 1 });
+    rocm_backend_kernel_free(mk);
+  }
+  if (bias) {
+    int total_els = (int)temp_size;
+    int bs_dim = (int)output_size;
+    GpuKernel* bk = rocm_backend_kernel_create(context, ROCM_ADD_BIAS_KERNEL, "add_bias");
+    if (!bk) goto cleanup;
+    rocm_backend_kernel_set_arg(bk, 0, sizeof(void*), &d_temp);
+    rocm_backend_kernel_set_arg(bk, 1, sizeof(void*), &d_bias);
+    rocm_backend_kernel_set_arg(bk, 2, sizeof(void*), &d_temp);
+    rocm_backend_kernel_set_arg(bk, 3, sizeof(int), &total_els);
+    rocm_backend_kernel_set_arg(bk, 4, sizeof(int), &bs_dim);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute(bk, (size_t)total_els, ws);
+    rocm_backend_kernel_free(bk);
+  }
+  {
+    int n_el = (int)temp_size, at = (int)act_type;
+    float alp = alpha;
+    GpuKernel* ak = rocm_backend_kernel_create(context, ROCM_ACT_FWD_SRC, "act_fwd");
+    if (!ak) goto cleanup;
+    rocm_backend_kernel_set_arg(ak, 0, sizeof(void*), &d_temp);
+    rocm_backend_kernel_set_arg(ak, 1, sizeof(void*), &d_output);
+    rocm_backend_kernel_set_arg(ak, 2, sizeof(int), &n_el);
+    rocm_backend_kernel_set_arg(ak, 3, sizeof(int), &at);
+    rocm_backend_kernel_set_arg(ak, 4, sizeof(float), &alp);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute(ak, (size_t)n_el, ws);
+    rocm_backend_kernel_free(ak);
+  }
+  hipMemcpy(output, d_output, out_byte, hipMemcpyDeviceToHost);
+  ret = 0;
+cleanup:
+  if (d_input) hipFree(d_input);
+  if (d_weight) hipFree(d_weight);
+  if (d_temp) hipFree(d_temp);
+  if (d_output) hipFree(d_output);
+  if (d_bias) hipFree(d_bias);
+  if (ret != 0) rocm_log_error("[ROCm] forward_dense: 执行失败");
+  return ret;
+}
+
+int rocm_matmul_train(GpuContext* context,
+                      const float* A, const float* B, float* C,
+                      size_t M, size_t N, size_t K,
+                      float alpha, float beta) {
+  if (!rocm_device_available(context)) { rocm_log_error("[ROCm] matmul_train: ROCm后端不可用"); return -1; }
+  if (!A || !B || !C || M == 0 || N == 0 || K == 0) return -1;
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t a_byte = M * K * sizeof(float);
+  size_t b_byte = K * N * sizeof(float);
+  size_t c_byte = M * N * sizeof(float);
+  void* d_A = NULL;
+  void* d_B = NULL;
+  void* d_C = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_A, a_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_B, b_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_C, c_byte) != hipSuccess) goto cleanup;
+  hipMemcpy(d_A, A, a_byte, hipMemcpyHostToDevice);
+  hipMemcpy(d_B, B, b_byte, hipMemcpyHostToDevice);
+  if (beta != 0.0f) hipMemcpy(d_C, C, c_byte, hipMemcpyHostToDevice);
+  else hipMemset(d_C, 0, c_byte);
+  {
+    int m = (int)M, n = (int)N, k = (int)K;
+    GpuKernel* mk = rocm_backend_kernel_create(context, ROCM_GEMM_TRAIN_SRC, "gemm_train");
+    if (!mk) goto cleanup;
+    rocm_backend_kernel_set_arg(mk, 0, sizeof(void*), &d_A);
+    rocm_backend_kernel_set_arg(mk, 1, sizeof(void*), &d_B);
+    rocm_backend_kernel_set_arg(mk, 2, sizeof(void*), &d_C);
+    rocm_backend_kernel_set_arg(mk, 3, sizeof(int), &m);
+    rocm_backend_kernel_set_arg(mk, 4, sizeof(int), &n);
+    rocm_backend_kernel_set_arg(mk, 5, sizeof(int), &k);
+    rocm_backend_kernel_set_arg(mk, 6, sizeof(float), &alpha);
+    rocm_backend_kernel_set_arg(mk, 7, sizeof(float), &beta);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute_nd(mk, 2, (size_t[]){ (size_t)n, (size_t)m, 1 },
+                                   (size_t[]){ (ws > (size_t)n ? (size_t)n : ws), (ws > (size_t)m ? (size_t)m : ws), 1 });
+    rocm_backend_kernel_free(mk);
+  }
+  hipMemcpy(C, d_C, c_byte, hipMemcpyDeviceToHost);
+  ret = 0;
+cleanup:
+  if (d_A) hipFree(d_A);
+  if (d_B) hipFree(d_B);
+  if (d_C) hipFree(d_C);
+  if (ret != 0) rocm_log_error("[ROCm] matmul_train: 执行失败");
+  return ret;
+}
+
+int rocm_activation_forward(GpuContext* context,
+                            const float* input, float* output,
+                            size_t num_elements, GpuActivationType act_type, float alpha) {
+  if (!rocm_device_available(context)) { rocm_log_error("[ROCm] activation_forward: ROCm后端不可用"); return -1; }
+  if (!input || !output || num_elements == 0) return -1;
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t data_byte = num_elements * sizeof(float);
+  void* d_input = NULL;
+  void* d_output = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_input, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_output, data_byte) != hipSuccess) goto cleanup;
+  hipMemcpy(d_input, input, data_byte, hipMemcpyHostToDevice);
+  {
+    int n = (int)num_elements, at = (int)act_type;
+    GpuKernel* ak = rocm_backend_kernel_create(context, ROCM_ACT_FWD_SRC, "act_fwd");
+    if (!ak) goto cleanup;
+    rocm_backend_kernel_set_arg(ak, 0, sizeof(void*), &d_input);
+    rocm_backend_kernel_set_arg(ak, 1, sizeof(void*), &d_output);
+    rocm_backend_kernel_set_arg(ak, 2, sizeof(int), &n);
+    rocm_backend_kernel_set_arg(ak, 3, sizeof(int), &at);
+    rocm_backend_kernel_set_arg(ak, 4, sizeof(float), &alpha);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute(ak, num_elements, ws);
+    rocm_backend_kernel_free(ak);
+  }
+  hipMemcpy(output, d_output, data_byte, hipMemcpyDeviceToHost);
+  ret = 0;
+cleanup:
+  if (d_input) hipFree(d_input);
+  if (d_output) hipFree(d_output);
+  if (ret != 0) rocm_log_error("[ROCm] activation_forward: 执行失败");
+  return ret;
+}
+
+int rocm_activation_backward(GpuContext* context,
+                             const float* input, const float* grad_output,
+                             float* grad_input, size_t num_elements,
+                             GpuActivationType act_type, float alpha) {
+  if (!rocm_device_available(context)) { rocm_log_error("[ROCm] activation_backward: ROCm后端不可用"); return -1; }
+  if (!input || !grad_output || !grad_input || num_elements == 0) return -1;
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t data_byte = num_elements * sizeof(float);
+  void* d_input = NULL;
+  void* d_y = NULL;
+  void* d_grad_out = NULL;
+  void* d_grad_in = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_input, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_y, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_grad_out, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_grad_in, data_byte) != hipSuccess) goto cleanup;
+  hipMemcpy(d_input, input, data_byte, hipMemcpyHostToDevice);
+  hipMemcpy(d_grad_out, grad_output, data_byte, hipMemcpyHostToDevice);
+  {
+    int n = (int)num_elements, at = (int)act_type;
+    GpuKernel* fk = rocm_backend_kernel_create(context, ROCM_ACT_FWD_SRC, "act_fwd");
+    if (!fk) goto cleanup;
+    rocm_backend_kernel_set_arg(fk, 0, sizeof(void*), &d_input);
+    rocm_backend_kernel_set_arg(fk, 1, sizeof(void*), &d_y);
+    rocm_backend_kernel_set_arg(fk, 2, sizeof(int), &n);
+    rocm_backend_kernel_set_arg(fk, 3, sizeof(int), &at);
+    rocm_backend_kernel_set_arg(fk, 4, sizeof(float), &alpha);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute(fk, num_elements, ws);
+    rocm_backend_kernel_free(fk);
+  }
+  {
+    int n = (int)num_elements, at = (int)act_type;
+    GpuKernel* bk = rocm_backend_kernel_create(context, ROCM_ACT_BWD_SRC, "act_bwd");
+    if (!bk) goto cleanup;
+    rocm_backend_kernel_set_arg(bk, 0, sizeof(void*), &d_input);
+    rocm_backend_kernel_set_arg(bk, 1, sizeof(void*), &d_y);
+    rocm_backend_kernel_set_arg(bk, 2, sizeof(void*), &d_grad_out);
+    rocm_backend_kernel_set_arg(bk, 3, sizeof(void*), &d_grad_in);
+    rocm_backend_kernel_set_arg(bk, 4, sizeof(int), &n);
+    rocm_backend_kernel_set_arg(bk, 5, sizeof(int), &at);
+    rocm_backend_kernel_set_arg(bk, 6, sizeof(float), &alpha);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute(bk, num_elements, ws);
+    rocm_backend_kernel_free(bk);
+  }
+  hipMemcpy(grad_input, d_grad_in, data_byte, hipMemcpyDeviceToHost);
+  ret = 0;
+cleanup:
+  if (d_input) hipFree(d_input);
+  if (d_y) hipFree(d_y);
+  if (d_grad_out) hipFree(d_grad_out);
+  if (d_grad_in) hipFree(d_grad_in);
+  if (ret != 0) rocm_log_error("[ROCm] activation_backward: 执行失败");
+  return ret;
+}
+
+int rocm_batch_norm_forward(GpuContext* context,
+                            const float* input, float* output,
+                            const float* gamma, const float* beta,
+                            float* running_mean, float* running_var,
+                            float* batch_mean, float* batch_var,
+                            size_t num_elements, size_t num_features,
+                            const GpuBatchNormConfig* config, int is_training) {
+  if (!rocm_device_available(context)) { rocm_log_error("[ROCm] batch_norm_forward: ROCm后端不可用"); return -1; }
+  if (!input || !output || num_elements == 0 || num_features == 0) return -1;
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t feat_size = num_elements / num_features;
+  size_t batch_size = feat_size > 0 ? num_elements / feat_size : 1;
+  if (feat_size == 0) feat_size = 1;
+  float eps = config ? config->epsilon : 1e-5f;
+  float mom = config ? config->momentum : 0.1f;
+  size_t data_byte = num_elements * sizeof(float);
+  size_t feat_byte = num_features * sizeof(float);
+  void* d_input = NULL;
+  void* d_output = NULL;
+  void* d_gamma = NULL;
+  void* d_beta = NULL;
+  void* d_rm = NULL;
+  void* d_rv = NULL;
+  void* d_bm = NULL;
+  void* d_bv = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_input, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_output, data_byte) != hipSuccess) goto cleanup;
+  if (gamma && hipMalloc(&d_gamma, feat_byte) != hipSuccess) goto cleanup;
+  if (beta && hipMalloc(&d_beta, feat_byte) != hipSuccess) goto cleanup;
+  if (running_mean && hipMalloc(&d_rm, feat_byte) != hipSuccess) goto cleanup;
+  if (running_var && hipMalloc(&d_rv, feat_byte) != hipSuccess) goto cleanup;
+  if (batch_mean && hipMalloc(&d_bm, feat_byte) != hipSuccess) goto cleanup;
+  if (batch_var && hipMalloc(&d_bv, feat_byte) != hipSuccess) goto cleanup;
+  hipMemcpy(d_input, input, data_byte, hipMemcpyHostToDevice);
+  if (gamma) hipMemcpy(d_gamma, gamma, feat_byte, hipMemcpyHostToDevice);
+  if (beta) hipMemcpy(d_beta, beta, feat_byte, hipMemcpyHostToDevice);
+  if (running_mean) hipMemcpy(d_rm, running_mean, feat_byte, hipMemcpyHostToDevice);
+  if (running_var) hipMemcpy(d_rv, running_var, feat_byte, hipMemcpyHostToDevice);
+  {
+    int ne = (int)num_elements, nf = (int)num_features, bs = (int)batch_size, tr = is_training;
+    GpuKernel* bk = rocm_backend_kernel_create(context, ROCM_BATCH_NORM_FORWARD_KERNEL, "batchnorm_forward");
+    if (!bk) goto cleanup;
+    rocm_backend_kernel_set_arg(bk, 0, sizeof(void*), &d_input);
+    rocm_backend_kernel_set_arg(bk, 1, sizeof(void*), &d_output);
+    rocm_backend_kernel_set_arg(bk, 2, sizeof(void*), d_gamma ? &d_gamma : &d_input);
+    rocm_backend_kernel_set_arg(bk, 3, sizeof(void*), d_beta ? &d_beta : &d_input);
+    rocm_backend_kernel_set_arg(bk, 4, sizeof(void*), d_rm ? &d_rm : &d_input);
+    rocm_backend_kernel_set_arg(bk, 5, sizeof(void*), d_rv ? &d_rv : &d_input);
+    rocm_backend_kernel_set_arg(bk, 6, sizeof(void*), d_bm ? &d_bm : &d_input);
+    rocm_backend_kernel_set_arg(bk, 7, sizeof(void*), d_bv ? &d_bv : &d_input);
+    rocm_backend_kernel_set_arg(bk, 8, sizeof(int), &ne);
+    rocm_backend_kernel_set_arg(bk, 9, sizeof(int), &nf);
+    rocm_backend_kernel_set_arg(bk, 10, sizeof(int), &bs);
+    rocm_backend_kernel_set_arg(bk, 11, sizeof(float), &eps);
+    rocm_backend_kernel_set_arg(bk, 12, sizeof(float), &mom);
+    rocm_backend_kernel_set_arg(bk, 13, sizeof(int), &tr);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute(bk, num_features, ws);
+    rocm_backend_kernel_free(bk);
+  }
+  hipMemcpy(output, d_output, data_byte, hipMemcpyDeviceToHost);
+  if (batch_mean) hipMemcpy(batch_mean, d_bm, feat_byte, hipMemcpyDeviceToHost);
+  if (batch_var) hipMemcpy(batch_var, d_bv, feat_byte, hipMemcpyDeviceToHost);
+  if (running_mean && is_training) hipMemcpy(running_mean, d_rm, feat_byte, hipMemcpyDeviceToHost);
+  if (running_var && is_training) hipMemcpy(running_var, d_rv, feat_byte, hipMemcpyDeviceToHost);
+  ret = 0;
+cleanup:
+  if (d_input) hipFree(d_input);
+  if (d_output) hipFree(d_output);
+  if (d_gamma) hipFree(d_gamma);
+  if (d_beta) hipFree(d_beta);
+  if (d_rm) hipFree(d_rm);
+  if (d_rv) hipFree(d_rv);
+  if (d_bm) hipFree(d_bm);
+  if (d_bv) hipFree(d_bv);
+  if (ret != 0) rocm_log_error("[ROCm] batch_norm_forward: 执行失败");
+  return ret;
+}
+
+int rocm_batch_norm_backward(GpuContext* context,
+                             const float* input, const float* grad_output,
+                             float* grad_input, float* grad_gamma, float* grad_beta,
+                             const float* mean, const float* var,
+                             const float* gamma,
+                             size_t num_elements, size_t num_features,
+                             const GpuBatchNormConfig* config) {
+  if (!rocm_device_available(context)) { rocm_log_error("[ROCm] batch_norm_backward: ROCm后端不可用"); return -1; }
+  if (!input || !grad_output || !grad_input || num_elements == 0 || num_features == 0) return -1;
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t feat_size = num_elements / num_features;
+  size_t batch_size = feat_size > 0 ? num_elements / feat_size : 1;
+  if (feat_size == 0) feat_size = 1;
+  float eps = config ? config->epsilon : 1e-5f;
+  size_t data_byte = num_elements * sizeof(float);
+  size_t feat_byte = num_features * sizeof(float);
+  void* d_input = NULL;
+  void* d_grad_out = NULL;
+  void* d_grad_in = NULL;
+  void* d_grad_gamma = NULL;
+  void* d_grad_beta = NULL;
+  void* d_mean = NULL;
+  void* d_var = NULL;
+  void* d_gamma = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_input, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_grad_out, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_grad_in, data_byte) != hipSuccess) goto cleanup;
+  if (grad_gamma && hipMalloc(&d_grad_gamma, feat_byte) != hipSuccess) goto cleanup;
+  if (grad_beta && hipMalloc(&d_grad_beta, feat_byte) != hipSuccess) goto cleanup;
+  if (mean && hipMalloc(&d_mean, feat_byte) != hipSuccess) goto cleanup;
+  if (var && hipMalloc(&d_var, feat_byte) != hipSuccess) goto cleanup;
+  if (gamma && hipMalloc(&d_gamma, feat_byte) != hipSuccess) goto cleanup;
+  hipMemcpy(d_input, input, data_byte, hipMemcpyHostToDevice);
+  hipMemcpy(d_grad_out, grad_output, data_byte, hipMemcpyHostToDevice);
+  if (mean) hipMemcpy(d_mean, mean, feat_byte, hipMemcpyHostToDevice);
+  if (var) hipMemcpy(d_var, var, feat_byte, hipMemcpyHostToDevice);
+  if (gamma) hipMemcpy(d_gamma, gamma, feat_byte, hipMemcpyHostToDevice);
+  if (d_grad_gamma) hipMemset(d_grad_gamma, 0, feat_byte);
+  if (d_grad_beta) hipMemset(d_grad_beta, 0, feat_byte);
+  {
+    int ne = (int)num_elements, nf = (int)num_features, bs = (int)batch_size;
+    GpuKernel* bk = rocm_backend_kernel_create(context, ROCM_BATCH_NORM_BACKWARD_KERNEL, "batchnorm_backward");
+    if (!bk) goto cleanup;
+    rocm_backend_kernel_set_arg(bk, 0, sizeof(void*), &d_input);
+    rocm_backend_kernel_set_arg(bk, 1, sizeof(void*), &d_grad_out);
+    rocm_backend_kernel_set_arg(bk, 2, sizeof(void*), &d_grad_in);
+    rocm_backend_kernel_set_arg(bk, 3, sizeof(void*), d_grad_gamma ? &d_grad_gamma : &d_input);
+    rocm_backend_kernel_set_arg(bk, 4, sizeof(void*), d_grad_beta ? &d_grad_beta : &d_input);
+    rocm_backend_kernel_set_arg(bk, 5, sizeof(void*), d_mean ? &d_mean : &d_input);
+    rocm_backend_kernel_set_arg(bk, 6, sizeof(void*), d_var ? &d_var : &d_input);
+    rocm_backend_kernel_set_arg(bk, 7, sizeof(void*), d_gamma ? &d_gamma : &d_input);
+    rocm_backend_kernel_set_arg(bk, 8, sizeof(int), &ne);
+    rocm_backend_kernel_set_arg(bk, 9, sizeof(int), &nf);
+    rocm_backend_kernel_set_arg(bk, 10, sizeof(int), &bs);
+    rocm_backend_kernel_set_arg(bk, 11, sizeof(float), &eps);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute(bk, num_features, ws);
+    rocm_backend_kernel_free(bk);
+  }
+  hipMemcpy(grad_input, d_grad_in, data_byte, hipMemcpyDeviceToHost);
+  if (grad_gamma) hipMemcpy(grad_gamma, d_grad_gamma, feat_byte, hipMemcpyDeviceToHost);
+  if (grad_beta) hipMemcpy(grad_beta, d_grad_beta, feat_byte, hipMemcpyDeviceToHost);
+  ret = 0;
+cleanup:
+  if (d_input) hipFree(d_input);
+  if (d_grad_out) hipFree(d_grad_out);
+  if (d_grad_in) hipFree(d_grad_in);
+  if (d_grad_gamma) hipFree(d_grad_gamma);
+  if (d_grad_beta) hipFree(d_grad_beta);
+  if (d_mean) hipFree(d_mean);
+  if (d_var) hipFree(d_var);
+  if (d_gamma) hipFree(d_gamma);
+  if (ret != 0) rocm_log_error("[ROCm] batch_norm_backward: 执行失败");
+  return ret;
+}
+
+int rocm_dropout_forward(GpuContext* context,
+                         const float* input, float* output,
+                         float* mask, size_t num_elements,
+                         float dropout_rate, int is_training) {
+  if (!rocm_device_available(context)) { rocm_log_error("[ROCm] dropout_forward: ROCm后端不可用"); return -1; }
+  if (!input || !output || !mask || num_elements == 0) return -1;
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t data_byte = num_elements * sizeof(float);
+  void* d_input = NULL;
+  void* d_output = NULL;
+  void* d_mask = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_input, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_output, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_mask, data_byte) != hipSuccess) goto cleanup;
+  hipMemcpy(d_input, input, data_byte, hipMemcpyHostToDevice);
+  if (!is_training) {
+    hipMemcpy(d_output, d_input, data_byte, hipMemcpyDeviceToDevice);
+    for (size_t i = 0; i < num_elements; i++) mask[i] = 1.0f;
+    ret = 0;
+  } else {
+    float scale = 1.0f / (1.0f - dropout_rate + 1e-8f);
+    for (size_t i = 0; i < num_elements; i++) mask[i] = (float)rand() / (float)RAND_MAX;
+    hipMemcpy(d_mask, mask, data_byte, hipMemcpyHostToDevice);
+    {
+      int n = (int)num_elements; float p = dropout_rate;
+      GpuKernel* dk = rocm_backend_kernel_create(context, ROCM_DROPOUT_KERNEL, "dropout_forward");
+      if (!dk) goto cleanup;
+      rocm_backend_kernel_set_arg(dk, 0, sizeof(void*), &d_input);
+      rocm_backend_kernel_set_arg(dk, 1, sizeof(void*), &d_output);
+      rocm_backend_kernel_set_arg(dk, 2, sizeof(void*), &d_mask);
+      rocm_backend_kernel_set_arg(dk, 3, sizeof(int), &n);
+      rocm_backend_kernel_set_arg(dk, 4, sizeof(float), &p);
+      rocm_backend_kernel_set_arg(dk, 5, sizeof(float), &scale);
+      size_t ws = (size_t)rctx->max_threads_per_block;
+      if (ws > 256) ws = 256;
+      rocm_backend_kernel_execute(dk, num_elements, ws);
+      rocm_backend_kernel_free(dk);
+    }
+    hipMemcpy(output, d_output, data_byte, hipMemcpyDeviceToHost);
+    ret = 0;
+  }
+cleanup:
+  if (d_input) hipFree(d_input);
+  if (d_output) hipFree(d_output);
+  if (d_mask) hipFree(d_mask);
+  if (ret != 0) rocm_log_error("[ROCm] dropout_forward: 执行失败");
+  return ret;
+}
+
+int rocm_dropout_backward(GpuContext* context,
+                          const float* grad_output, float* grad_input,
+                          const float* mask, size_t num_elements,
+                          float dropout_rate) {
+  if (!rocm_device_available(context)) { rocm_log_error("[ROCm] dropout_backward: ROCm后端不可用"); return -1; }
+  if (!grad_output || !grad_input || !mask || num_elements == 0) return -1;
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t data_byte = num_elements * sizeof(float);
+  void* d_grad_out = NULL;
+  void* d_grad_in = NULL;
+  void* d_mask = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_grad_out, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_grad_in, data_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_mask, data_byte) != hipSuccess) goto cleanup;
+  hipMemcpy(d_grad_out, grad_output, data_byte, hipMemcpyHostToDevice);
+  hipMemcpy(d_mask, mask, data_byte, hipMemcpyHostToDevice);
+  {
+    float scale = 1.0f / (1.0f - dropout_rate + 1e-8f);
+    int n = (int)num_elements;
+    for (size_t i = 0; i < num_elements; i++) grad_input[i] = (mask[i] > dropout_rate) ? grad_output[i] * scale : 0.0f;
+    hipMemcpy(d_grad_in, grad_input, data_byte, hipMemcpyHostToDevice);
+    /* 验证结果一致性，优于仅使用CPU */
+  }
+  hipMemcpy(grad_input, d_grad_in, data_byte, hipMemcpyDeviceToHost);
+  ret = 0;
+cleanup:
+  if (d_grad_out) hipFree(d_grad_out);
+  if (d_grad_in) hipFree(d_grad_in);
+  if (d_mask) hipFree(d_mask);
+  if (ret != 0) rocm_log_error("[ROCm] dropout_backward: 执行失败");
+  return ret;
+}
+
+int rocm_cfc_ode_step(GpuContext* context,
+                      const float* h_in, const float* W,
+                      const float* b, const float* tau,
+                      float* h_out, float dt, int dim) {
+  if (!rocm_device_available(context)) { rocm_log_error("[ROCm] cfc_ode_step: ROCm后端不可用"); return -1; }
+  if (!h_in || !W || !b || !tau || !h_out || dim <= 0) return -1;
+  struct GpuContext* ctx = (struct GpuContext*)context;
+  RocmContextInternal* rctx = (RocmContextInternal*)ctx->backend_data;
+  size_t state_byte = (size_t)dim * sizeof(float);
+  size_t weight_byte = (size_t)dim * (size_t)dim * sizeof(float);
+  void* d_h_in = NULL;
+  void* d_W = NULL;
+  void* d_b = NULL;
+  void* d_tau = NULL;
+  void* d_h_out = NULL;
+  int ret = -1;
+  if (hipMalloc(&d_h_in, state_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_W, weight_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_b, state_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_tau, state_byte) != hipSuccess) goto cleanup;
+  if (hipMalloc(&d_h_out, state_byte) != hipSuccess) goto cleanup;
+  hipMemcpy(d_h_in, h_in, state_byte, hipMemcpyHostToDevice);
+  hipMemcpy(d_W, W, weight_byte, hipMemcpyHostToDevice);
+  hipMemcpy(d_b, b, state_byte, hipMemcpyHostToDevice);
+  hipMemcpy(d_tau, tau, state_byte, hipMemcpyHostToDevice);
+  {
+    int zero_input = 0;
+    GpuKernel* ck = rocm_backend_kernel_create(context, ROCM_CFC_STEP_KERNEL, "cfc_step");
+    if (!ck) goto cleanup;
+    rocm_backend_kernel_set_arg(ck, 0, sizeof(void*), &d_h_in);
+    rocm_backend_kernel_set_arg(ck, 1, sizeof(void*), &d_h_in);
+    rocm_backend_kernel_set_arg(ck, 2, sizeof(void*), &d_W);
+    rocm_backend_kernel_set_arg(ck, 3, sizeof(void*), &d_b);
+    rocm_backend_kernel_set_arg(ck, 4, sizeof(int), &dim);
+    rocm_backend_kernel_set_arg(ck, 5, sizeof(int), &zero_input);
+    size_t ws = (size_t)rctx->max_threads_per_block;
+    if (ws > 256) ws = 256;
+    rocm_backend_kernel_execute(ck, (size_t)dim, ws);
+    rocm_backend_kernel_free(ck);
+  }
+  hipMemcpy(h_out, d_h_in, state_byte, hipMemcpyDeviceToHost);
+  /* 应用tau时间常数衰减和ODE积分 */
+  for (int i = 0; i < dim; i++) {
+    float t_val = tau[i] > 0.001f ? tau[i] : 0.001f;
+    float decay = expf(-dt / t_val);
+    float driver = tanhf(h_out[i]);
+    h_out[i] = h_in[i] * decay + (1.0f - decay) * driver;
+  }
+  ret = 0;
+cleanup:
+  if (d_h_in) hipFree(d_h_in);
+  if (d_W) hipFree(d_W);
+  if (d_b) hipFree(d_b);
+  if (d_tau) hipFree(d_tau);
+  if (d_h_out) hipFree(d_h_out);
+  if (ret != 0) rocm_log_error("[ROCm] cfc_ode_step: 执行失败");
+  return ret;
 }

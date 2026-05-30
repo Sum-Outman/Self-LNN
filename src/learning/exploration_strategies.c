@@ -13,6 +13,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/secure_random.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -41,21 +42,14 @@ static pthread_mutex_t g_ou_lock = PTHREAD_MUTEX_INITIALIZER;
 #define EXPLORE_EPSILON 1e-8f
 #define EXPLORE_RAND_MAX 2147483647
 
-/* M-020修复: 使用时间混合种子替代纯LCG确定性伪随机 */
-static unsigned int explore_rand_seed = 0;
-
+/* P2-001修复: 使用密码学安全随机数替代简单LCG确定性伪随机 */
 static float explore_rand_float(void) {
-    if (explore_rand_seed == 0) {
-        explore_rand_seed = (unsigned int)time(NULL);
-        if (explore_rand_seed == 0) explore_rand_seed = 12345;
-    }
-    explore_rand_seed = explore_rand_seed * 1103515245 + 12345;
-    return (float)((explore_rand_seed >> 16) & 0x7FFF) / 32768.0f;
+    return secure_random_float();
 }
 
 static float explore_randn(float std) {
-    float u1 = explore_rand_float();
-    float u2 = explore_rand_float();
+    float u1 = secure_random_float();
+    float u2 = secure_random_float();
     if (u1 < EXPLORE_EPSILON) u1 = EXPLORE_EPSILON;
     return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2) * std;
 }

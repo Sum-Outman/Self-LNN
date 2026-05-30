@@ -2018,6 +2018,8 @@ RDFTripleStore* rdf_triple_store_load(const char* filename) {
         store->pos_index[store->pos_count].subject_id = t.subject_id;
         store->pos_count++;
     }
+    /* ZSFLYF-P3-002修复: 加载时排序改为O(n log n) qsort即可，
+     * 因为RDF文件加载是偶发性操作。运行时增量插入已使用二分查找。 */
     qsort(store->spo_index, store->spo_count, sizeof(SPOEntry), spo_compare);
     qsort(store->osp_index, store->osp_count, sizeof(OSPEntry), osp_compare);
     qsort(store->pos_index, store->pos_count, sizeof(POSEntry), pos_compare);

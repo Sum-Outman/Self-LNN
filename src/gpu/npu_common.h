@@ -96,6 +96,11 @@ int npu_common_simd_cfc_step(const float* h_in, const float* W,
                               const float* b, const float* tau, float* h_out,
                               float dt, int dim);
 
+/* NPU内核管理公共接口（void*句柄，由各后端重载实现） */
+int npu_common_kernel_create(void** handle, const char* name);
+int npu_common_kernel_set_arg(void* handle, int index, size_t size, const void* value);
+int npu_common_kernel_free(void* handle);
+
 #ifdef __cplusplus
 }
 #endif

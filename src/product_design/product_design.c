@@ -81,11 +81,24 @@ typedef struct {
 /**
  * @brief 产品设计引擎内部结构体
  */
+/* 参考设计案例条目 */
+#define PDE_MAX_REFERENCE_CASES 128
+typedef struct {
+    char name[128];              /**< 案例名称 */
+    char category_name[32];      /**< 类别名称 */
+    char feature_tags[512];      /**< 关键特征标签 */
+    char constraint_summary[512]; /**< 设计约束摘要 */
+    int category;                /**< 类别枚举值 */
+} ProductReferenceCase;
+
 struct ProductDesignEngine {
     int is_initialized;          /**< 是否已初始化 */
     ProductKnowledgeBase* knowledge_base;  /**< 产品知识库 */
     DesignRuleEngine* rule_engine;         /**< 设计规则引擎 */
     EvaluationModelParams* evaluation_model; /**< 评估模型参数 */
+    ProductReferenceCase* reference_cases; /**< 参考设计案例库 */
+    int reference_case_count;    /**< 参考案例数量 */
+    int reference_case_capacity; /**< 参考案例容量 */
 };
 
 /**
@@ -629,6 +642,19 @@ ProductDesignEngine* product_design_engine_create(void) {
         return NULL;
     }
     
+    /* ZSF-002: 初始化参考案例库 */
+    engine->reference_case_capacity = 64;
+    engine->reference_case_count = 0;
+    engine->reference_cases = (ProductReferenceCase*)safe_calloc(
+        engine->reference_case_capacity, sizeof(ProductReferenceCase));
+    if (!engine->reference_cases) {
+        rule_engine_destroy(engine->rule_engine);
+        knowledge_base_destroy(engine->knowledge_base);
+        evaluation_model_destroy(engine->evaluation_model);
+        safe_free((void**)&engine);
+        return NULL;
+    }
+    
     engine->is_initialized = 1;
     
     return engine;
@@ -643,6 +669,11 @@ void product_design_engine_destroy(ProductDesignEngine* engine) {
     knowledge_base_destroy(engine->knowledge_base);
     rule_engine_destroy(engine->rule_engine);
     evaluation_model_destroy(engine->evaluation_model);
+    
+    /* ZSF-002: 释放参考案例库 */
+    if (engine->reference_cases) {
+        safe_free((void**)&engine->reference_cases);
+    }
     
     safe_free((void**)&engine);
 }
@@ -1741,3 +1772,72 @@ const double* topology_optimization_get_densities(TopologyOptimizationState* sta
 }
 
 /* ZSFWS-S011修复: 删除3个未声明且与公开API重复的孤立函数 */
+
+/* ============================================================================
+ * ZSF-002: 参考设计案例注入API
+ * 为产品设计增强引擎提供跨领域工业设计先验案例的注入接口。
+ * 在引擎初始化后通过此API将种子案例批量注入引擎内部案例库，
+ * 供设计优化、类比推理和设计空间探索时作为参考基线。
+ * ============================================================================ */
+
+/**
+ * @brief 向产品设计引擎注入参考设计案例
+ *
+ * ZSF-002修复: 实际将种子案例写入引擎内部的参考案例库，
+ * 替代原来仅打印日志的空实现。每个案例包含名称、类别、特征标签和约束摘要，
+ * 后续设计优化时可作为类比推理的参考基线。
+ *
+ * @param engine 产品设计引擎句柄
+ * @param case_name 案例名称
+ * @param category_name 类别名称
+ * @param feature_tags 关键特征标签（逗号分隔）
+ * @param constraint_summary 设计约束摘要
+ * @param category 类别枚举值
+ * @return 成功返回0，失败返回-1
+ */
+int product_design_engine_add_reference_case(ProductDesignEngine* engine,
+    const char* case_name, const char* category_name,
+    const char* feature_tags, const char* constraint_summary, int category)
+{
+    if (!engine || !case_name || !category_name) return -1;
+    if (!engine->reference_cases) return -1;
+
+    /* 动态扩容 */
+    if (engine->reference_case_count >= engine->reference_case_capacity) {
+        int new_capacity = engine->reference_case_capacity * 2;
+        if (new_capacity > PDE_MAX_REFERENCE_CASES) {
+            new_capacity = PDE_MAX_REFERENCE_CASES;
+        }
+        if (engine->reference_case_count >= new_capacity) return -1;
+
+        ProductReferenceCase* new_cases = (ProductReferenceCase*)safe_realloc(
+            engine->reference_cases, new_capacity * sizeof(ProductReferenceCase));
+        if (!new_cases) return -1;
+        engine->reference_cases = new_cases;
+        engine->reference_case_capacity = new_capacity;
+    }
+
+    ProductReferenceCase* rc = &engine->reference_cases[engine->reference_case_count];
+    memset(rc, 0, sizeof(ProductReferenceCase));
+
+    strncpy(rc->name, case_name, sizeof(rc->name) - 1);
+    strncpy(rc->category_name, category_name, sizeof(rc->category_name) - 1);
+    strncpy(rc->feature_tags, feature_tags ? feature_tags : "", sizeof(rc->feature_tags) - 1);
+    strncpy(rc->constraint_summary, constraint_summary ? constraint_summary : "", sizeof(rc->constraint_summary) - 1);
+    rc->category = category;
+
+    engine->reference_case_count++;
+    return 0;
+}
+
+/**
+ * @brief 获取引擎中已加载的参考案例数量
+ *
+ * @param engine 产品设计引擎句柄
+ * @return 参考案例数量，失败返回0
+ */
+int product_design_engine_get_reference_case_count(ProductDesignEngine* engine)
+{
+    if (!engine) return 0;
+    return engine->reference_case_count;
+}

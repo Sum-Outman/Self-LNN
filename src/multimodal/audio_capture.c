@@ -1056,6 +1056,9 @@ struct AudioCaptureContext {
     int platform;
     int is_capturing;
     void* backend_ctx;
+
+    float* fft_spectrum;
+    size_t fft_size;
 };
 typedef struct AudioCaptureContext AudioCaptureContext;
 
@@ -1112,6 +1115,9 @@ AudioCaptureContext* audio_capture_create(const char* device_id,
                                            int bits_per_sample) {
     AudioCaptureContext* ctx = (AudioCaptureContext*)safe_calloc(1, sizeof(AudioCaptureContext));
     if (!ctx) return NULL;
+
+    ctx->fft_spectrum = NULL;
+    ctx->fft_size = 0;
 
 #ifdef _WIN32
     ctx->backend_ctx = wasapi_capture_create(device_id, sample_rate, channels, bits_per_sample);
@@ -1211,5 +1217,21 @@ void audio_capture_free(AudioCaptureContext* ctx) {
     }
 #endif
 
+    safe_free((void**)&ctx->fft_spectrum);
     safe_free((void**)&ctx);
+}
+
+/* ZSFUSA: 获取音频频谱 */
+int audio_capture_get_spectrum(void* capture, float* spectrum, size_t* size) {
+    if (!capture || !spectrum || !size) return -1;
+    AudioCaptureContext* ctx = (AudioCaptureContext*)capture;
+    size_t out_size = *size;
+    if (ctx->fft_spectrum && ctx->fft_size > 0) {
+        size_t copy_n = out_size < ctx->fft_size ? out_size : ctx->fft_size;
+        memcpy(spectrum, ctx->fft_spectrum, copy_n * sizeof(float));
+        *size = copy_n;
+        return 0;
+    }
+    *size = 0;
+    return -1;
 }

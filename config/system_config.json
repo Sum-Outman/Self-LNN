@@ -1,0 +1,46 @@
+{
+  "version": "1.0.0",
+  "system": {
+    "name": "SELF-LNN",
+    "log_level": "info",
+    "data_dir": "data",
+    "checkpoint_dir": "checkpoints"
+  },
+  "network": {
+    "backend_host": "0.0.0.0",
+    "backend_port": 8080,
+    "ws_port": 8081,
+    "max_connections": 100
+  },
+  "lnn": {
+    "default_dim": 256,
+    "default_layers": 3,
+    "cfc_time_constant": 1.0,
+    "use_quaternion": true,
+    "use_laplace": true
+  },
+  "training": {
+    "default_batch_size": 32,
+    "default_epochs": 100,
+    "learning_rate": 0.001,
+    "lr_decay": 0.0001,
+    "early_stop_patience": 10,
+    "mixed_precision": true
+  },
+  "gpu": {
+    "preferred_backend": "auto",
+    "allow_cpu_fallback": true,
+    "memory_fraction": 0.9
+  },
+  "knowledge": {
+    "seed_knowledge_file": "config/seed_knowledge.json",
+    "auto_save_interval_minutes": 30
+  },
+  "safety": {
+    "auto_decision_enabled": false,
+    "auto_execution_enabled": false,
+    "self_learning_enabled": true,
+    "evolution_enabled": false,
+    "imitation_learning_enabled": false
+  }
+}

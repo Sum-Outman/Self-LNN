@@ -34,18 +34,24 @@ class DialogueEnhanced {
         if (this._capturer) { this._capturer.destroy(); this._capturer = null; }
         try {
             if (!micStream) throw new Error('麦克风流不可用');
-            this._capturer = new window.VoiceCaptureUtil();
-            this._capturer.onStart = function() {
-                if (this.onVoiceInputStart) this.onVoiceInputStart();
-            }.bind(this);
-            this._capturer.onStop = function() {
-                if (this.onVoiceInputStop) this.onVoiceInputStop();
-            }.bind(this);
-            this._capturer.onBlobReady = async function(blob) {
-                var result = await window.VoiceCaptureUtil.uploadBlob(blob);
-                if (this.onVoiceInputResult) this.onVoiceInputResult(result);
-            }.bind(this);
-            return this._capturer.start(micStream);
+            var result = await window.VoiceCaptureUtil.quickCapture({
+                stream: micStream,
+                onStart: function() {
+                    if (this.onVoiceInputStart) this.onVoiceInputStart();
+                }.bind(this),
+                onStop: function() {
+                    if (this.onVoiceInputStop) this.onVoiceInputStop();
+                }.bind(this),
+                onResult: function(result) {
+                    if (this.onVoiceInputResult) this.onVoiceInputResult(result);
+                }.bind(this),
+                onError: function(msg) {
+                    if (this.onVoiceInputError) this.onVoiceInputError(msg);
+                }.bind(this)
+            });
+            if (!result.success) throw new Error(result.error || '录音启动失败');
+            this._capturer = result.capturer;
+            return { success: true };
         } catch (err) {
             console.error('启动语音输入失败:', err);
             if (this.onVoiceInputError) this.onVoiceInputError(err.message);
@@ -411,7 +417,7 @@ class DialogueEnhanced {
             if (this._wsCloseHandler) {
                 try { wsElement.removeEventListener('close', this._wsCloseHandler); } catch(e) {}
             }
-            var self = this;
+            /* ZSFUSA-F02修复: WebSocket断开时自动重连（之前仅计数未重连） */
             this._wsCloseHandler = function(evt) {
                 self.wsReconnectAttempts++;
                 if (self.wsReconnectAttempts > self.wsMaxReconnect) {
@@ -419,7 +425,12 @@ class DialogueEnhanced {
                     if (self.onWsStatusChange) self.onWsStatusChange('disconnected');
                     return;
                 }
-                console.warn('[SELF-LNN] WebSocket断开，第' + self.wsReconnectAttempts + '/' + self.wsMaxReconnect + '次重连...');
+                var delay = Math.min(1000 * Math.pow(2, self.wsReconnectAttempts - 1), 30000);
+                console.warn('[SELF-LNN] WebSocket断开，第' + self.wsReconnectAttempts + '/' + self.wsMaxReconnect + '次重连，延迟' + delay + 'ms...');
+                if (self.onWsStatusChange) self.onWsStatusChange('reconnecting');
+                setTimeout(function() {
+                    try { gws.connect(); } catch(er) { console.warn('[SELF-LNN] WS重连失败:', er); }
+                }, delay);
             };
             wsElement.addEventListener('close', this._wsCloseHandler);
         }

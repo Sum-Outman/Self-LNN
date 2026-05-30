@@ -30,7 +30,8 @@ extern "C" {
  * @brief 统一输入方法枚举
  */
 typedef enum {
-    UNIFIED_INPUT_DYNAMIC = 6  /**< 统一动态系统输入（通过单个CfC细胞） */
+    UNIFIED_INPUT_DYNAMIC = 6,          /**< 统一动态系统输入（通过单个CfC细胞） */
+    UNIFIED_INPUT_DYNAMIC_SYSTEM = 6    /**< 别名：统一动态系统输入 */
 } UnifiedInputMethod;
 
 /**
@@ -82,6 +83,11 @@ typedef struct {
     size_t projection_input_sizes[SELFLNN_MAX_MODALITIES]; /**< 各投影输入维度 */
     int projections_initialized;                         /**< 投影矩阵是否已初始化 */
     int projection_locked;                               /**< ZSFX-DEEP-R8-002: 1=锁定投影矩阵不参与训练 */
+    /* 投影矩阵Nesterov动量优化器缓冲区 */
+    float* projection_weight_v[SELFLNN_MAX_MODALITIES];  /**< 权重动量速度缓冲区 [proj_dim × input_dim_i] */
+    float* projection_bias_v[SELFLNN_MAX_MODALITIES];    /**< 偏置动量速度缓冲区 [proj_dim] */
+    float projection_momentum;                           /**< 动量系数，默认0.9 */
+    int projection_train_step;                           /**< 投影矩阵训练步数计数器 */
     /* ZSF-009: 在线学习支持 —— 存储上次前向传播数据 */
     float last_raw_signals[SELFLNN_MAX_MODALITIES][SELFLNN_MAX_CONTROL_DIM]; /**< 上次各模态原始信号 */
     size_t last_raw_sizes[SELFLNN_MAX_MODALITIES];      /**< 上次各模态信号维度 */

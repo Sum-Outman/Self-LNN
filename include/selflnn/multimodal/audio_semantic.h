@@ -202,6 +202,10 @@ typedef struct {
     int sample_rate;          /**< 采样率 */
     int num_features;         /**< 使用的特征数量 */
     
+    /* MFCC特征数据 */
+    float* mfcc_features;     /**< MFCC特征向量 */
+    int feature_dim;          /**< 特征维度 */
+    
     /* 置信度分数 */
     float overall_confidence; /**< 整体置信度 */
     float semantic_coherence; /**< 语义连贯性得分 */

@@ -1057,34 +1057,56 @@ const char* ros_topic_type_to_string(int type_id) {
     }
 }
 
-/* 简单消息哈希计算（用于ROS消息类型匹配验证，非标准MD5） */
+/* ZSFLYF-P2-014修复: 标准MD5哈希实现
+ * 替换原自定义哈希算法，使用符合RFC 1321的标准MD5计算。
+ * 确保与真实ROS节点的消息类型MD5校验完全兼容。 */
 static void ros_msg_hash_compute(const char* data, size_t len, char* output, size_t output_size) {
-    /* 使用简单哈希算法生成MD5风格的32字符十六进制串 */
-    uint32_t h0 = 0x67452301;
-    uint32_t h1 = 0xEFCDAB89;
-    uint32_t h2 = 0x98BADCFE;
-    uint32_t h3 = 0x10325476;
+    uint32_t h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476;
+    static const uint32_t K[64] = {
+        0xD76AA478,0xE8C7B756,0x242070DB,0xC1BDCEEE,0xF57C0FAF,0x4787C62A,0xA8304613,0xFD469501,
+        0x698098D8,0x8B44F7AF,0xFFFF5BB1,0x895CD7BE,0x6B901122,0xFD987193,0xA679438E,0x49B40821,
+        0xF61E2562,0xC040B340,0x265E5A51,0xE9B6C7AA,0xD62F105D,0x02441453,0xD8A1E681,0xE7D3FBC8,
+        0x21E1CDE6,0xC33707D6,0xF4D50D87,0x455A14ED,0xA9E3E905,0xFCEFA3F8,0x676F02D9,0x8D2A4C8A,
+        0xFFFA3942,0x8771F681,0x6D9D6122,0xFDE5380C,0xA4BEEA44,0x4BDECFA9,0xF6BB4B60,0xBEBFBC70,
+        0x289B7EC6,0xEAA127FA,0xD4EF3085,0x04881D05,0xD9D4D039,0xE6DB99E5,0x1FA27CF8,0xC4AC5665,
+        0xF4292244,0x432AFF97,0xAB9423A7,0xFC93A039,0x655B59C3,0x8F0CCC92,0xFFEFF47D,0x85845DD1,
+        0x6FA87E4F,0xFE2CE6E0,0xA3014314,0x4E0811A1,0xF7537E82,0xBD3AF235,0x2AD7D2BB,0xEB86D391
+    };
+    static const unsigned S[64] = {
+        7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+        5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+        4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+        6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21
+    };
+    size_t padded_len = ((len + 8) / 64 + 1) * 64;
+    uint8_t* padded = (uint8_t*)calloc(padded_len, 1);
+    if (!padded) { output[0] = '\0'; return; }
+    memcpy(padded, data, len);
+    padded[len] = 0x80;
+    uint64_t bits = (uint64_t)len * 8;
+    memcpy(padded + padded_len - 8, &bits, 8);
 
-    for (size_t i = 0; i < len; i++) {
-        uint32_t b = (uint32_t)((unsigned char)data[i]);
-        h0 = ((h0 << 7) | (h0 >> 25)) + b + 0xD76AA478;
-        h1 = ((h1 << 11) | (h1 >> 21)) + b + 0xE8C7B756;
-        h2 = ((h2 << 13) | (h2 >> 19)) + b + 0x242070DB;
-        h3 = ((h3 << 17) | (h3 >> 15)) + b + 0xC1BDCEEE;
-
-        h0 ^= (h1 >> 3);
-        h1 ^= (h2 >> 5);
-        h2 ^= (h3 >> 7);
-        h3 ^= (h0 >> 11);
+    for (size_t offset = 0; offset < padded_len; offset += 64) {
+        uint32_t M[16];
+        for (int i = 0; i < 16; i++) {
+            M[i] = (uint32_t)padded[offset+i*4] | ((uint32_t)padded[offset+i*4+1]<<8)
+                 | ((uint32_t)padded[offset+i*4+2]<<16) | ((uint32_t)padded[offset+i*4+3]<<24);
+        }
+        uint32_t a = h0, b = h1, c = h2, d = h3;
+        for (int i = 0; i < 64; i++) {
+            uint32_t f, g;
+            if (i < 16) { f = (b & c) | (~b & d); g = (uint32_t)i; }
+            else if (i < 32) { f = (d & b) | (~d & c); g = (uint32_t)((5*i+1)&15); }
+            else if (i < 48) { f = b ^ c ^ d; g = (uint32_t)((3*i+5)&15); }
+            else { f = c ^ (b | ~d); g = (uint32_t)((7*i)&15); }
+            uint32_t tmp = d;
+            d = c; c = b;
+            b = b + ((a + f + K[i] + M[g]) << S[i] | (a + f + K[i] + M[g]) >> (32-S[i]));
+            a = tmp;
+        }
+        h0 += a; h1 += b; h2 += c; h3 += d;
     }
-
-    /* 最终混合 */
-    h0 ^= h2; h1 ^= h3; h2 ^= h0; h3 ^= h1;
-    h0 = ((h0 << 19) | (h0 >> 13));
-    h1 = ((h1 << 23) | (h1 >> 9));
-    h2 = ((h2 << 27) | (h2 >> 5));
-    h3 = ((h3 << 29) | (h3 >> 3));
-
+    free(padded);
     snprintf(output, output_size, "%08x%08x%08x%08x", h0, h1, h2, h3);
 }
 
@@ -2348,18 +2370,36 @@ int dds_deserialize_rtps_data(const uint8_t* buffer, size_t buffer_size,
     memcpy(submsg->writer_id.prefix, ptr, DDS_GUID_PREFIX_LEN);
     ptr += DDS_GUID_PREFIX_LEN;
 
-    /* 跳过后续到子消息的部分 */
-    /* 简单实现：假设DATA子消息紧随RTPS头之后 */
-    /* 查找0x15 (DATA) 子消息 */
+    /* ZSFLYF-P2-015修复: 增强RTPS子消息解析。
+     * 不再简单线性扫描0x15标记，而是按RTPS规范逐个解析子消息头，
+     * 正确处理INFO_TS(0x09)、INFO_SRC(0x0c)、INFO_DST(0x0e)、
+     * HEARTBEAT(0x07)、ACKNACK(0x06)、GAP(0x08)、DATA(0x15)等标准子消息。
+     * 跳过非DATA子消息体，定位到第一个DATA子消息。 */
     const uint8_t* search_ptr = ptr;
     int found_data = 0;
     while ((size_t)(search_ptr - buffer) + 4 <= buffer_size) {
-        if (*search_ptr == 0x15) {
+        uint8_t sub_id = *search_ptr;
+        if (sub_id == 0x15) { /* DATA */
             found_data = 1;
             ptr = search_ptr;
             break;
         }
-        search_ptr++;
+        /* 其他子消息: 读取flags+length跳过其body */
+        uint8_t flags = (search_ptr + 1 < buffer + buffer_size) ? *(search_ptr + 1) : 0;
+        if (search_ptr + 4 > buffer + buffer_size) break;
+        uint16_t sub_len = read_u16_le((const uint8_t**)&search_ptr) - 2;
+        (void)flags;
+        if (sub_id == 0x00) { /* PAD - padding */
+            search_ptr++;
+            continue;
+        }
+        /* 非DATA非PAD子消息: 跳过submessageLength+body */
+        search_ptr += 4;
+        if (sub_len > 0 && (size_t)(search_ptr - buffer) + sub_len <= buffer_size) {
+            search_ptr += sub_len;
+        } else if (sub_id != 0x15) {
+            search_ptr++; /* 无法跳过的边界情况: 前进1字节 */
+        }
     }
 
     if (!found_data) {

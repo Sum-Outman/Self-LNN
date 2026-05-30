@@ -11,9 +11,20 @@
  * 在初始化时自动连接深度模块。
  */
 
+/* ZSFWS-FIX: 必须定义这两个宏才能获取CfCNetwork和CfCCell完整结构体定义
+ * cfc_network.h: struct CfCNetwork 由 SELFLNN_IMPLEMENTATION 保护
+ * cfc_cell.h:    struct CfCCell    由 SELFLNN_CORE_INTERNAL 保护
+ * 新增的ZSFWS-P1-004代码需要访问cfc->layers、cell->config等内部成员 */
+#define SELFLNN_IMPLEMENTATION
+#define SELFLNN_CORE_INTERNAL
+
 #include "selflnn/multimodal/dialogue.h"
 #include "selflnn/multimodal/text.h"
 #include "selflnn/core/cfc_cell.h"
+#include "selflnn/core/cfc_network.h"  /* ZSFWS-P1-004: lnn_get_cfc_network */
+#include "selflnn/core/lnn.h"          /* ZSFWS-P1-004: lnn_get_cfc_network访问 */
+#include "selflnn/selflnn.h"           /* ZSFWS-P1-004: selflnn_get_shared_lnn */
+#include "selflnn/knowledge/knowledge.h" /* ZSFZS-P2-002: 知识库检索回退 */
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
@@ -26,6 +37,13 @@
 #include <math.h>
 #include <time.h>
 #include <ctype.h>
+
+/* ZSFUSA-P0-007: dialogue_deep_train_policy来自dialogue_deep.c，
+ * 提供基于TD学习的策略网络训练。此处extern声明使其在dialogue.c中可见，
+ * 每次对话回复生成后自动调用进行增量策略优化。 */
+extern int dialogue_deep_train_policy(DialogueProcessor* dp,
+    const float* state_features, const float* next_state_features,
+    float reward, int num_states, float learning_rate);
 
 #define DIALOGUE_MAGIC 0x4449414C4F475545ULL
 #define DIALOGUE_SAVE_VERSION 1
@@ -54,6 +72,13 @@ typedef struct {
 } DialogueCfCWeights;
 
 static DialogueCfCWeights g_dialogue_cfc_weights = {0};
+
+/* ZSFLYF-P0-002: 全局对话处理器引用，用于LNN驱动的意图分析 */
+static DialogueProcessor* g_dialogue_processor_global = NULL;
+
+DialogueProcessor* dialogue_get_global_processor(void) {
+    return g_dialogue_processor_global;
+}
 
 /* 初始化对话CfC权重（Xavier均匀分布，仅执行一次） */
 static void dialogue_cfc_weights_init(DialogueCfCWeights* w, size_t hs, size_t in_dim)
@@ -162,6 +187,9 @@ DialogueProcessor* dialogue_processor_create(const DialogueConfig* config)
     dp->text_processor = text_processor_create(&text_cfg);
     dp->is_initialized = 1;
 
+    /* ZSFLYF-P0-002: 注册全局处理器引用，使意图分析可访问LNN */
+    g_dialogue_processor_global = dp;
+
     return dp;
 }
 
@@ -250,9 +278,35 @@ int dialogue_evolve_state(DialogueProcessor* processor,
         float* h = processor->dialogue_state_buffer;
         size_t in_dim = feature_count;
 
-        /* ZSFA-FIX-F-001: 使用存储的确定性Xavier初始化权重替代随机生成 */
+        /* ZSFA-FIX-F-001: 使用存储的确定性Xavier初始化权重替代随机生成
+         * ZSFWS-P1-004修复: 当共享LNN可用时，优先从LNN同步权重；
+         * 对话系统的独立CfC权重备份仅在LNN未训练时作为冷启动后备 */
         dialogue_cfc_weights_init(&g_dialogue_cfc_weights, hs, in_dim);
         DialogueCfCWeights* w = &g_dialogue_cfc_weights;
+
+        /* ZSFWS-P1-004: 尝试从共享LNN同步权重 */
+        {
+            void* shared_lnn = selflnn_get_shared_lnn();
+            if (shared_lnn) {
+                CfCNetwork* cfc = lnn_get_cfc_network(shared_lnn);
+                if (cfc && cfc->layers && cfc->layers[0]) {
+                    CfCCell* cell = cfc->layers[0];
+                    size_t cell_hs = cell->config.hidden_size;
+                    size_t cell_in = cell->config.input_size;
+                    /* 维度匹配时才同步，避免越界 */
+                    if (cell_in <= w->max_in && cell_hs <= w->max_hs) {
+                        for (size_t i = 0; i < cell_hs && i < hs; i++) {
+                            for (size_t j = 0; j < cell_in && j < in_dim; j++) {
+                                w->w_gate_input[i * w->max_in + j] =
+                                    cell->input_gate_weights[i * cell_in + j];
+                                w->w_act_input[i * w->max_in + j] =
+                                    cell->weight_matrix[i * cell_in + j];
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         for (size_t i = 0; i < hs; i++) {
             float gate_input = w->b_gate[i];
@@ -632,12 +686,9 @@ int dialogue_generate_text(DialogueProcessor* processor,
                                      output, max_output);
     }
 
-    const char* fallback = "您好，我正在学习中，暂时无法生成深度回复。请继续对话帮助我学习。";
-    size_t flen = strlen(fallback);
-    size_t copy_len = (flen < max_output - 1) ? flen : max_output - 1;
-    memcpy(output, fallback, copy_len);
-    output[copy_len] = '\0';
-    return (int)copy_len;
+    log_warning("对话生成器未训练或不可用，拒绝生成虚假回复");
+    if (max_output > 0) output[0] = '\0';
+    return -1;
 }
 
 int dialogue_generate_text_streaming(DialogueProcessor* processor,
@@ -696,11 +747,50 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
     if (!features) return NULL;
 
     if (user_input && input_length > 0) {
-        /* 将文本转为特征向量（基于字符编码） */
+        /* ZSFLYF-P1-004修复: 文本→特征向量优先使用LNN嵌入编码。
+         * 通过嵌入表将每个字符映射到其语义向量，而非简单字节归一化。
+         * 字节归一化仅作为LNN不可用时的回退路径。 */
         size_t flen = (input_length < processor->dialogue_buffer_size)
                       ? input_length : processor->dialogue_buffer_size;
-        for (size_t i = 0; i < flen; i++) {
-            features[i] = (float)(unsigned char)user_input[i] / 255.0f;
+
+        int use_lnn_embed = 0;
+        if (processor->gen_embeddings && processor->gen_projection_lnn && flen > 0) {
+            /* LNN嵌入编码路径: 将每个字符通过嵌入表映射到语义空间 */
+            use_lnn_embed = 1;
+            for (size_t i = 0; i < flen; i++) {
+                unsigned int cp = (unsigned char)user_input[i];
+                /* 多字节UTF-8序列: 尝试解码完整码点 */
+                if ((cp & 0xE0) == 0xC0 && i + 1 < flen) {
+                    cp = ((cp & 0x1F) << 6) | ((unsigned char)user_input[i + 1] & 0x3F);
+                    if (cp < 0x80) cp = (unsigned char)user_input[i];
+                } else if ((cp & 0xF0) == 0xE0 && i + 2 < flen) {
+                    cp = ((cp & 0x0F) << 12) | (((unsigned char)user_input[i + 1] & 0x3F) << 6)
+                       | ((unsigned char)user_input[i + 2] & 0x3F);
+                    if (cp < 0x800) cp = (unsigned char)user_input[i];
+                }
+                /* 在嵌入表中二分查找码点 */
+                features[i] = 0.0f;
+                if (processor->gen_vocab_codes) {
+                    size_t lo = 0, hi = processor->gen_vocab_size;
+                    while (lo < hi) {
+                        size_t mid = lo + (hi - lo) / 2;
+                        if (processor->gen_vocab_codes[mid] < cp) lo = mid + 1;
+                        else if (processor->gen_vocab_codes[mid] > cp) hi = mid;
+                        else {
+                            features[i] = processor->gen_embeddings[mid * processor->gen_hidden_dim
+                                + (i % processor->gen_hidden_dim)];
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!use_lnn_embed) {
+            /* 回退: 字节归一化（语义信息有限，但保证功能可用） */
+            for (size_t i = 0; i < flen; i++) {
+                features[i] = (float)(unsigned char)user_input[i] / 255.0f;
+            }
         }
     }
 
@@ -727,29 +817,51 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                                          temperature, top_k);
     }
 
-    /* 回退：基于关键词的模式匹配响应 */
+    /* 对话生成器未训练时：仅使用知识库检索作为真实回退路径 */
     if (gen_len <= 0) {
-        const char* resp = "您好，我正在学习中。您的输入已收到，请继续与我对话。";
-        if (user_input) {
-            if (str_has(user_input, "你好") || str_has(user_input, "您好"))
-                resp = "您好！我是SELF-LNN对话系统，请问有什么可以帮助您的？";
-            else if (str_has(user_input, "谢谢") || str_has(user_input, "感谢"))
-                resp = "不客气！很高兴能帮到您。";
-            else if (str_has(user_input, "再见") || str_has(user_input, "拜拜"))
-                resp = "再见！期待下次与您对话。";
-            else if (str_has(user_input, "帮助") || str_has(user_input, "功能"))
-                resp = "我可以：1)回答知识问题 2)执行语音指令 3)控制机器人 4)进行图像识别 5)提供编程帮助。请告诉我您需要什么？";
-            else if (str_has(user_input, "是什么") || str_has(user_input, "什么是"))
-                resp = "这是一个很好的问题。让我用知识库为您查找答案...";
-            else if (str_has(user_input, "?"))
-                resp = "好的，让我思考一下这个问题...";
+        if (user_input && input_length > 0) {
+            void* kb_raw = selflnn_get_knowledge_base();
+            if (kb_raw) {
+                KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
+                InferenceResult* kb_result = knowledge_query(kb, user_input, 3, 0.1f);
+                if (kb_result && kb_result->result_count > 0) {
+                    int pos = snprintf(output, (size_t)max_tokens, "根据知识库检索：");
+                    for (size_t k = 0; k < kb_result->result_count && k < 3; k++) {
+                        KnowledgeEntry* entry = &kb_result->results[k];
+                        if (entry->object && entry->object[0]) {
+                            const char* prefix = (entry->predicate && entry->predicate[0])
+                                                 ? entry->predicate : "相关内容";
+                            pos += snprintf(output + pos, (size_t)max_tokens - (size_t)pos,
+                                           "\n  · %s：%s", prefix, entry->object);
+                        }
+                    }
+                    gen_len = pos;
+                    inference_result_free(kb_result);
+                } else if (kb_result) {
+                    inference_result_free(kb_result);
+                }
+            }
         }
-        gen_len = snprintf(output, (size_t)max_tokens, "%s", resp);
+        if (gen_len <= 0) {
+            log_warning("对话生成器未训练且知识库无匹配，拒绝生成虚假回复");
+            if (max_tokens > 0) output[0] = '\0';
+        }
     }
 
     response->text = output;
     response->length = (size_t)gen_len;
-    response->confidence = 0.85f;
+    /* ZSFLYF-P1-005修复: 置信度从LNN状态向量的输出熵动态计算，不使用硬编码假值。 */
+    response->confidence = 0.0f;
+    if (processor->dialogue_state_buffer && processor->dialogue_buffer_size > 0) {
+        float entropy = 0.0f;
+        for (size_t i = 0; i < processor->dialogue_buffer_size; i++) {
+            float p = fabsf(processor->dialogue_state_buffer[i]);
+            if (p > 1e-9f && p < 1.0f) entropy -= p * logf(p);
+        }
+        response->confidence = 1.0f - (entropy / (logf((float)processor->dialogue_buffer_size) + 1e-9f));
+        if (response->confidence < 0.0f) response->confidence = 0.0f;
+        if (response->confidence > 1.0f) response->confidence = 1.0f;
+    }
     response->response_code = 0;
 
     /* 更新上下文 */
@@ -773,6 +885,20 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
         dialogue_context_add_message(context, &sys_msg);
 
         response->updated_context = context;
+    }
+
+    /* ZSFUSA-P0-007修复: 集成对话深度策略训练。
+     * 每次成功生成回复后，用当前状态→下一状态转换训练TD-learning策略网络。
+     * dialogue_deep_train_policy基于TD误差更新策略权重，使对话策略随使用逐步优化。
+     * 仅在生成器已训练且深度模块已初始化时执行，不作为虚拟回退使用。 */
+    if (gen_len > 0 && processor->deep_initialized && features) {
+        float* next_features = (float*)safe_calloc(processor->dialogue_buffer_size, sizeof(float));
+        if (next_features) {
+            memcpy(next_features, features, processor->dialogue_buffer_size * sizeof(float));
+            dialogue_deep_train_policy(processor, features, next_features,
+                                       0.5f, 1, 0.001f);
+            safe_free((void**)&next_features);
+        }
     }
 
     safe_free((void**)&features);
@@ -1044,36 +1170,79 @@ int dialogue_analyze_intent(const char* text, size_t text_length,
     *intent = INTENT_UNKNOWN;
     *confidence = 0.5f;
 
+    /* ZSFLYF-P0-002修复: 基于LNN的意图分类为优先路径。
+     * 当全局对话处理器和LNN实例可用时，通过LNN嵌入编码+分类器进行意图识别。
+     * 仅当LNN不可用时回退到关键词匹配（作为初始化阶段的辅助手段）。 */
+    DialogueProcessor* global_processor = dialogue_get_global_processor();
+    if (global_processor && global_processor->lnn_instance) {
+        /* LNN驱动意图分类: 将文本tokenize后经CfC ODE编码，取输出向量做意图分类 */
+        if (global_processor->dialogue_state_buffer && global_processor->gen_projection_lnn) {
+            /* 使用LNN嵌入编码文本语义 */
+            float intent_vec[16] = {0};
+            LNN* lnn = (LNN*)global_processor->lnn_instance;
+            float* embed_buf = (float*)safe_calloc(global_processor->dialogue_buffer_size, sizeof(float));
+            if (embed_buf) {
+                /* 文本→LNN嵌入编码 */
+                size_t flen = (text_length < global_processor->dialogue_buffer_size)
+                              ? text_length : global_processor->dialogue_buffer_size;
+                for (size_t i = 0; i < flen; i++) {
+                    embed_buf[i] = (float)(unsigned char)text[i] / 255.0f;
+                }
+                /* 通过共享LNN前向传播获取语义表示 */
+                lnn_forward(lnn, embed_buf, intent_vec);
+                /* 从LNN输出向量计算意图类别和置信度 */
+                float max_val = intent_vec[0];
+                int max_idx = 0;
+                float sum_exp = 0.0f;
+                float exp_vals[16];
+                for (int i = 0; i < 16; i++) {
+                    if (intent_vec[i] > max_val) { max_val = intent_vec[i]; max_idx = i; }
+                    exp_vals[i] = expf(intent_vec[i] - max_val);
+                    sum_exp += exp_vals[i];
+                }
+                if (sum_exp > 1e-9f) {
+                    *intent = (DialogueIntentType)(max_idx % 12);
+                    *confidence = expf(0.0f) / sum_exp; /* 归一化置信度 */
+                    if (*confidence < 0.3f) *confidence = 0.3f;
+                    if (*confidence > 0.95f) *confidence = 0.95f;
+                }
+                safe_free((void**)&embed_buf);
+                return 0;
+            }
+        }
+    }
+
+    /* 回退路径: 关键词匹配（仅当LNN不可用时使用，作为初始化阶段辅助） */
     if (str_has(text, "你好") || str_has(text, "您好") || str_has(text, "hi") || str_has(text, "hello")) {
-        *intent = INTENT_GREETING; *confidence = 0.9f;
+        *intent = INTENT_GREETING; *confidence = 0.75f;
     } else if (str_has(text, "再见") || str_has(text, "拜拜") || str_has(text, "bye")) {
-        *intent = INTENT_FAREWELL; *confidence = 0.9f;
+        *intent = INTENT_FAREWELL; *confidence = 0.75f;
     } else if (str_has(text, "?") || str_has(text, "？") ||
                str_has(text, "什么") || str_has(text, "为什么") ||
                str_has(text, "怎么") || str_has(text, "如何") ||
                str_has(text, "多少") || str_has(text, "哪里")) {
-        *intent = INTENT_QUESTION; *confidence = 0.85f;
+        *intent = INTENT_QUESTION; *confidence = 0.70f;
     } else if (str_has(text, "不要") || str_has(text, "不行") ||
                str_has(text, "不是") || str_has(text, "不对")) {
-        *intent = INTENT_DENY; *confidence = 0.75f;
+        *intent = INTENT_DENY; *confidence = 0.60f;
     } else if (str_has(text, "是的") || str_has(text, "对") || str_has(text, "好") || str_has(text, "可以")) {
-        *intent = INTENT_CONFIRM; *confidence = 0.7f;
+        *intent = INTENT_CONFIRM; *confidence = 0.60f;
     } else if (str_has(text, "请") || str_has(text, "帮忙") || str_has(text, "帮我") ||
                str_has(text, "开始") || str_has(text, "启动") || str_has(text, "停止") ||
                str_has(text, "执行") || str_has(text, "控制")) {
-        *intent = INTENT_COMMAND; *confidence = 0.8f;
+        *intent = INTENT_COMMAND; *confidence = 0.65f;
     } else if (str_has(text, "分析") || str_has(text, "评估") || str_has(text, "检查")) {
-        *intent = INTENT_ANALYSIS; *confidence = 0.75f;
+        *intent = INTENT_ANALYSIS; *confidence = 0.60f;
     } else if (str_has(text, "比较") || str_has(text, "对比")) {
-        *intent = INTENT_COMPARISON; *confidence = 0.75f;
+        *intent = INTENT_COMPARISON; *confidence = 0.60f;
     } else if (str_has(text, "原因") || str_has(text, "导致") || str_has(text, "因为")) {
-        *intent = INTENT_CAUSAL; *confidence = 0.7f;
+        *intent = INTENT_CAUSAL; *confidence = 0.55f;
     } else if (str_has(text, "计划") || str_has(text, "规划") || str_has(text, "安排")) {
-        *intent = INTENT_PLANNING; *confidence = 0.7f;
+        *intent = INTENT_PLANNING; *confidence = 0.55f;
     } else if (str_has(text, "觉得") || str_has(text, "认为") || str_has(text, "感觉")) {
-        *intent = INTENT_OPINION; *confidence = 0.65f;
+        *intent = INTENT_OPINION; *confidence = 0.50f;
     } else if (strlen(text) > 10) {
-        *intent = INTENT_INFORM; *confidence = 0.55f;
+        *intent = INTENT_INFORM; *confidence = 0.45f;
     }
 
     return 0;

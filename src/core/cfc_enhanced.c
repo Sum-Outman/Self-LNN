@@ -10,8 +10,7 @@
 
 #define CFC_ENHANCED_VERBOSE(fmt, ...) do { if (config && config->verbose) { printf("[CfC增强] " fmt "\n", ##__VA_ARGS__); } } while(0)
 
-static float cfc_enhanced_fmaxf(float a, float b) { return (a > b) ? a : b; }
-static float cfc_enhanced_fminf(float a, float b) { return (a < b) ? a : b; }
+/* ZSFLNN-H-003修复: 使用标准库 fmaxf/fminf 替代本地重复定义 */
 
 CfcEnhancedConfig cfc_enhanced_default_config(void)
 {
@@ -443,7 +442,7 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
             stiffness_ratio = slow_tau / fast_tau;
         }
     } else {
-        stiffness_ratio = time_const / cfc_enhanced_fmaxf(delta_t_val, 1e-8f);
+        stiffness_ratio = time_const / fmaxf(delta_t_val, 1e-8f);
         if (stiffness_ratio < 1.0f) stiffness_ratio = 1.0f;
         if (stiffness_ratio > 1e6f) stiffness_ratio = 1e6f;
     }
@@ -461,7 +460,7 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
                 if (tau_buffer[i] > max_tau) max_tau = tau_buffer[i];
             }
             if (min_tau > 0.0f && max_tau > min_tau) {
-                stiffness_ratio = cfc_enhanced_fmaxf(stiffness_ratio, max_tau / min_tau);
+                stiffness_ratio = fmaxf(stiffness_ratio, max_tau / min_tau);
             }
         }
         safe_free((void**)&tau_buffer);
@@ -505,10 +504,10 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
                 float local_lipschitz = norm_diff / norm_perturb;
                 /* 将Lipschitz常数融入刚度比（高Lipschitz ≈ 高刚度） */
                 if (local_lipschitz > 1.0f) {
-                    stiffness_ratio *= cfc_enhanced_fminf(local_lipschitz, 100.0f);
+                    stiffness_ratio *= fminf(local_lipschitz, 100.0f);
                 }
                 /* 将局部刚度与时间尺度刚度做权重混合 */
-                float jac_stiffness = local_lipschitz * cfc_enhanced_fmaxf(time_const / delta_t_val, 1.0f);
+                float jac_stiffness = local_lipschitz * fmaxf(time_const / delta_t_val, 1.0f);
                 stiffness_ratio = 0.7f * stiffness_ratio + 0.3f * jac_stiffness;
             }
         }
@@ -625,10 +624,10 @@ static int cfc_configure_multi_rate(CfCCell* cell, const CfcMultiRateConfig* mr_
 
     if (mr_config->enable_adaptive_ratio || mr_config->enable_stiffness_adaptive) {
         if (stiffness_detected && stiffness_ratio > mr_config->stiffness_threshold) {
-            float adapt_factor = cfc_enhanced_fminf(stiffness_ratio / mr_config->stiffness_threshold, 10.0f);
-            cfg.fast_tau_ratio = cfc_enhanced_fmaxf(mr_config->min_fast_ratio,
+            float adapt_factor = fminf(stiffness_ratio / mr_config->stiffness_threshold, 10.0f);
+            cfg.fast_tau_ratio = fmaxf(mr_config->min_fast_ratio,
                 mr_config->fast_ratio / adapt_factor);
-            cfg.slow_tau_ratio = cfc_enhanced_fminf(mr_config->max_slow_ratio,
+            cfg.slow_tau_ratio = fminf(mr_config->max_slow_ratio,
                 mr_config->slow_ratio * adapt_factor);
         } else {
             cfg.fast_tau_ratio = mr_config->fast_ratio;
@@ -737,9 +736,9 @@ int cfc_multi_rate_forward(CfCCell* cell, const float* input, float delta_t,
     if (mr_config->enable_adaptive_ratio && state->current_stiffness_ratio > 1.0f) {
         float stiffness = state->current_stiffness_ratio;
         if (stiffness > mr_config->stiffness_threshold) {
-            float adapt = cfc_enhanced_fminf(stiffness / mr_config->stiffness_threshold, 10.0f);
-            cfg.fast_tau_ratio = cfc_enhanced_fmaxf(mr_config->min_fast_ratio, mr_config->fast_ratio / adapt);
-            cfg.slow_tau_ratio = cfc_enhanced_fminf(mr_config->max_slow_ratio, mr_config->slow_ratio * adapt);
+            float adapt = fminf(stiffness / mr_config->stiffness_threshold, 10.0f);
+            cfg.fast_tau_ratio = fmaxf(mr_config->min_fast_ratio, mr_config->fast_ratio / adapt);
+            cfg.slow_tau_ratio = fminf(mr_config->max_slow_ratio, mr_config->slow_ratio * adapt);
         }
     }
 

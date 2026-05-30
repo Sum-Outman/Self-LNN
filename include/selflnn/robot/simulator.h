@@ -162,6 +162,7 @@ typedef struct {
     float friction;               /**< 摩擦系数 */
     float restitution;            /**< 恢复系数 */
     char model_file[256];         /**< 模型文件路径 */
+    int is_dynamic;               /**< 是否动态对象（1=动态，0=静态） */
 } SimulatorSceneObject;
 
 /* ============================================================================
@@ -1085,6 +1086,13 @@ typedef struct {
  * @return const SimulatorInterface* 接口表指针
  */
 const SimulatorInterface* gazebo_get_simulator_interface(void);
+
+/* ZSFUSA: 仿真器辅助操作接口 */
+int simulator_set_camera_view(void* sim, float x, float y, float z, float target_x, float target_y, float target_z);
+int simulator_toggle_grid_display(void* sim, int enable);
+int simulator_add_robot(void* sim, const char* name);
+int simulator_clear_scene(void* sim);
+int simulator_plan_path(void* sim, const float* start, const float* goal, float* waypoints, int max_wp);
 
 #ifdef __cplusplus
 }

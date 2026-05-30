@@ -9,6 +9,9 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/training/distributed_training.h"  /* ZSFNO2-F002: 真实分布式AllReduce */
+#include "../training/distributed_internal.h"        /* ZSFNO2-F002: DistributedContext完整结构定义 */
+#include "selflnn/selflnn.h"                        /* ZSFNO2-F002: selflnn_get_distributed_context */
 
 #include <stdlib.h>
 #include <string.h>
@@ -858,7 +861,9 @@ static int _lnn_model_parallel_backward_internal(LNN* network, const float* targ
         return SELFLNN_ERROR_NETWORK_BACKWARD;
     }
 
-    /* F-003修复：跨设备梯度同步（模型并行AllReduce） */
+    /* ZSFNO2-F002修复：跨设备梯度同步（真实分布式AllReduce）
+     * 优先使用distributed_training.c中的真实Ring/Tree AllReduce实现，
+     * 仅在无分布式上下文时使用进程内模拟作为调试回退。 */
     if (comm_buffer && mp_config->num_devices > 1) {
         size_t grad_size = network->config.hidden_size * network->config.hidden_size;
         size_t param_size = network->config.hidden_size;
@@ -870,25 +875,41 @@ static int _lnn_model_parallel_backward_internal(LNN* network, const float* targ
             if (comm_buffer->send_buffer && network->gradient_buffer) {
                 memcpy(comm_buffer->send_buffer, network->gradient_buffer, copy_size);
             }
-            /* AllReduce: 在模拟多设备环境中，平均所有设备的梯度 */
-            size_t device_count = mp_config->num_devices > 0 ?
-                                  (size_t)mp_config->num_devices : 1;
-            if (device_count > 1 && comm_buffer->recv_buffer) {
-                /* 将所有设备梯度求平均（模拟AllReduce） */
-                float* grad_ptr = (float*)comm_buffer->send_buffer;
-                float* recv_ptr = (float*)comm_buffer->recv_buffer;
+            /* AllReduce: 尝试使用真实分布式通信 */
+            void* dist_ctx = selflnn_get_distributed_context();
+            int did_real_allreduce = 0;
+            if (dist_ctx) {
+                DistributedContext* dctx = (DistributedContext*)dist_ctx;
                 size_t float_count = copy_size / sizeof(float);
-                /* 先清零接收区 */
-                memset(recv_ptr, 0, copy_size);
-                /* 累加发送区梯度 */
-                for (size_t i = 0; i < float_count; i++) {
-                    recv_ptr[i] += grad_ptr[i];
+                int algo = dctx->config.allreduce_algorithm;
+                if (algo == 1) {
+                    did_real_allreduce = (distributed_allreduce_tree(dctx,
+                        (float*)comm_buffer->send_buffer, float_count) == 0);
+                } else {
+                    did_real_allreduce = (distributed_allreduce_ring(dctx,
+                        (float*)comm_buffer->send_buffer, float_count) == 0);
                 }
-                /* 平均后写回梯度缓冲区 */
-                float inv_count = 1.0f / (float)device_count;
-                for (size_t i = 0; i < float_count && i < grad_size; i++) {
-                    if (network->gradient_buffer) {
-                        network->gradient_buffer[i] = recv_ptr[i] * inv_count;
+                if (did_real_allreduce) {
+                    memcpy(network->gradient_buffer, comm_buffer->send_buffer, copy_size);
+                }
+            }
+            if (!did_real_allreduce) {
+                /* 回退：进程内模拟AllReduce（调试/单机多GPU模拟） */
+                size_t device_count = mp_config->num_devices > 0 ?
+                                      (size_t)mp_config->num_devices : 1;
+                if (device_count > 1 && comm_buffer->recv_buffer) {
+                    float* grad_ptr = (float*)comm_buffer->send_buffer;
+                    float* recv_ptr = (float*)comm_buffer->recv_buffer;
+                    size_t float_count = copy_size / sizeof(float);
+                    memset(recv_ptr, 0, copy_size);
+                    for (size_t i = 0; i < float_count; i++) {
+                        recv_ptr[i] += grad_ptr[i];
+                    }
+                    float inv_count = 1.0f / (float)device_count;
+                    for (size_t i = 0; i < float_count && i < grad_size; i++) {
+                        if (network->gradient_buffer) {
+                            network->gradient_buffer[i] = recv_ptr[i] * inv_count;
+                        }
                     }
                 }
             }
@@ -1148,6 +1169,17 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
 
     int total_count = 0;
 
+    /* ZSFUSA-C18: 动态分配替代硬编码512维上限 */
+    float* anchor_emb = (float*)malloc(hidden_size * sizeof(float));
+    float* pos_emb = (float*)malloc(hidden_size * sizeof(float));
+    if (!anchor_emb || !pos_emb) {
+        if (anchor_emb) free(anchor_emb);
+        if (pos_emb) free(pos_emb);
+        if (opt) optimizer_free(opt);
+        ET_LNN_UNLOCK(network);
+        return -3;
+    }
+
     for (int ep = 0; ep < epochs; ep++) {
         float epoch_loss = 0.0f;
         int count = 0;
@@ -1159,14 +1191,27 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
             float* aug_positive = (float*)safe_malloc(feature_dim * sizeof(float));
             if (!aug_positive) continue;
 
+            /* R2-P22修复: 扩展数据增强覆盖非图像数据。
+             * 原阈值feature_dim>=12288仅对64×64×3图像触发，知识库特征(64维)等小型数据永远无增强。
+             * 修正：图像数据使用图像增强；通用数据使用高斯噪声增强(σ=0.05)。 */
             if (feature_dim >= 12288) {
                 lnn_contrastive_augment_image(positive, 64, 64, 3, aug_positive);
             } else {
                 memcpy(aug_positive, positive, feature_dim * sizeof(float));
+                /* 对小维度数据添加轻微高斯噪声作为正样本增强 */
+                for (size_t d = 0; d < feature_dim; d++) {
+                    /* Box-Muller变换生成高斯噪声 N(0, 0.05) */
+                    float u1 = secure_random_float();
+                    float u2 = secure_random_float();
+                    if (u1 < 1e-8f) u1 = 1e-8f;
+                    float noise = 0.05f * sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+                    aug_positive[d] += noise;
+                }
             }
 
-            float anchor_hidden[512] = {0}, anchor_cell[512] = {0}, anchor_emb[512] = {0};
-            float pos_hidden[512] = {0}, pos_cell[512] = {0}, pos_emb[512] = {0};
+            /* ZSFUSA-C18: 动态分配替代硬编码512维上限，anchor_emb/pos_emb已在循环外分配 */
+            memset(anchor_emb, 0, hidden_size * sizeof(float));
+            memset(pos_emb, 0, hidden_size * sizeof(float));
 
             if (_lnn_forward_internal(network, anchor, anchor_emb) != 0) {
                 safe_free((void**)&aug_positive);
@@ -1176,8 +1221,6 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
                 safe_free((void**)&aug_positive);
                 continue;
             }
-            (void)anchor_hidden; (void)anchor_cell;
-            (void)pos_hidden; (void)pos_cell;
 
             size_t num_neg = num_samples > 5 ? 5 : (num_samples - 1);
             size_t emb_dim = hidden_size > 0 ? hidden_size : 128;
@@ -1185,7 +1228,12 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
             if (!negatives) { safe_free((void**)&aug_positive); continue; }
 
             for (size_t n = 0; n < num_neg; n++) {
-                size_t idx = (i + 3 + n * 7) % num_samples;
+                /* R2-P21修复: 密码学安全随机选择负样本，替代确定性模式 */
+                float rnd = secure_random_float();
+                size_t idx = (size_t)(rnd * (float)(num_samples - 1)) % num_samples;
+                if (idx == i || idx == (size_t)((int)idx + 1 < (int)num_samples ? idx + 1 : idx)) {
+                    idx = (idx + 7) % num_samples;
+                }
                 const float* neg_data = data + idx * feature_dim;
                 float neg_hidden[256] = {0}, neg_cell[256] = {0};
                 _lnn_forward_internal(network, neg_data, negatives + n * emb_dim);
@@ -1210,13 +1258,22 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
 
         if (count > 0) {
             epoch_loss /= (float)count;
-            /* ZSF-ZNB修复C-004: 每个epoch应用参数更新 */
+            /* R2-P20修复: 从LNN内部梯度缓冲区提取真实梯度并传递给optimizer_step
+             * 原实现传递NULL导致optimizer_step立即退出，引导训练从未生效。
+             * _lnn_backward_internal已将梯度写入网络内部梯度缓冲区，
+             * 此处通过lnn_get_gradients获取并传递给优化器。 */
             float* current_params = lnn_get_parameters(network);
+            float* current_grads = lnn_get_gradients(network);
             if (current_params && param_buffer) {
                 memcpy(param_buffer, current_params, param_count * sizeof(float));
             }
-            optimizer_step(opt, param_buffer, NULL, param_count, 
-                          (size_t)(ep + total_count));
+            if (current_grads) {
+                optimizer_step(opt, param_buffer, current_grads, param_count,
+                              (size_t)(ep + total_count));
+            } else {
+                /* 如果无法获取梯度缓冲区，跳过本epoch的参数更新 */
+                log_debug("[引导训练] 无法获取梯度缓冲区，跳过epoch %d的参数更新", ep);
+            }
             float* writeback = lnn_get_parameters(network);
             if (writeback) {
                 memcpy(writeback, param_buffer, param_count * sizeof(float));
@@ -1226,6 +1283,8 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
     }
 
     if (opt) optimizer_free(opt);
+    free(anchor_emb);
+    free(pos_emb);
     ET_LNN_UNLOCK(network);
     return 0;
 }
@@ -1268,20 +1327,28 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
         for (size_t i = 0; i < num_samples && count < 50; i++, count++) {
             const float* sample = data + i * feature_dim;
 
-            float t_hidden[256] = {0}, t_cell[256] = {0}, t_output[256] = {0};
-            _lnn_forward_internal(teacher, sample, t_output);
-            (void)t_hidden; (void)t_cell;
-
-            float s_hidden[256] = {0}, s_cell[256] = {0}, s_output[256] = {0};
-            _lnn_forward_internal(student, sample, s_output);
-            (void)s_hidden; (void)s_cell;
-
+            /* ZSFUSA-C18: 动态分配替代硬编码256维上限 */
             size_t out_dim = teacher->config.output_size;
-            if (out_dim > 256) out_dim = 256;
             if (out_dim == 0) out_dim = 128;
+            float* t_output = (float*)malloc(out_dim * sizeof(float));
+            float* s_output = (float*)malloc(out_dim * sizeof(float));
+            float* t_prob = (float*)malloc(out_dim * sizeof(float));
+            float* s_prob = (float*)malloc(out_dim * sizeof(float));
+            if (!t_output || !s_output || !t_prob || !s_prob) {
+                if (t_output) free(t_output);
+                if (s_output) free(s_output);
+                if (t_prob) free(t_prob);
+                if (s_prob) free(s_prob);
+                continue;
+            }
+            memset(t_output, 0, out_dim * sizeof(float));
+            memset(s_output, 0, out_dim * sizeof(float));
+            memset(t_prob, 0, out_dim * sizeof(float));
+            memset(s_prob, 0, out_dim * sizeof(float));
+            _lnn_forward_internal(teacher, sample, t_output);
+            _lnn_forward_internal(student, sample, s_output);
 
             float t_sum = 0.0f, s_sum = 0.0f;
-            float t_prob[256] = {0}, s_prob[256] = {0};
             for (size_t d = 0; d < out_dim; d++) {
                 t_prob[d] = expf(t_output[d] / temperature);
                 s_prob[d] = expf(s_output[d] / temperature);
@@ -1313,14 +1380,22 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
             /* ZSF-ZNB修复C-003: 添加反向传播更新学生网络参数 */
             float loss_val = combined_loss;
             _lnn_backward_internal(student, t_output, &loss_val);
+            /* ZSFSSS-BUG002修复: 获取反向传播后的梯度，传入优化器以正确累积动量/Adam状态 */
+            float* grads = lnn_get_gradients(student);
+            free(t_output);
+            free(s_output);
+            free(t_prob);
+            free(s_prob);
         }
 
         if (count > 0) {
             float* current_params = lnn_get_parameters(student);
+            float* current_grads = lnn_get_gradients(student);
             if (current_params) {
                 memcpy(param_buffer, current_params, param_count * sizeof(float));
             }
-            optimizer_step(opt, param_buffer, NULL, param_count, 
+            /* ZSFSSS-BUG002修复: 传入真实梯度而非NULL，确保优化器动量/Adam状态正确累积 */
+            optimizer_step(opt, param_buffer, current_grads, param_count, 
                           (size_t)(ep + total_count));
             /* 将更新后的参数写回LNN */
             float* writeback = lnn_get_parameters(student);

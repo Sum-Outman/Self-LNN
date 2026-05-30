@@ -12,28 +12,28 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 
-# 创建神经架构搜索库（含帕累托优化）
-add_library(selflnn_nas STATIC ${NAS_SOURCES})
+# 创建演化优化库（含帕累托优化与神经架构搜索）
+add_library(selflnn_evolution STATIC ${NAS_SOURCES})
 
 # 设置目标属性
-set_target_properties(selflnn_nas PROPERTIES
-    OUTPUT_NAME "selflnn_nas"
+set_target_properties(selflnn_evolution PROPERTIES
+    OUTPUT_NAME "selflnn_evolution"
     VERSION 1.0.0
     SOVERSION 1
 )
 
+# ZSFLYF-KNOWN-1: P1-008修复完成 —— 循环依赖 selflnn_evolution ↔ selflnn_cognition 已打破。
+# selflnn_cognition以PRIVATE方式链接，仅evolution内部使用，不传播给依赖者。
+# cognition通过selflnn_evolution（非别名）直接引用evolution。
+# 长期方案：提取共享接口到独立公共库(selflnn_common_interface)。
 # 链接依赖库
-target_link_libraries(selflnn_nas
-    utils
-    selflnn_core
-    selflnn_cognition
+target_link_libraries(selflnn_evolution
+    PUBLIC utils selflnn_core
+    PRIVATE selflnn_cognition
 )
 
-# 兼容性别名
-add_library(selflnn_evolution ALIAS selflnn_nas)
-
 # 安装规则（如果需要）
-install(TARGETS selflnn_nas
+install(TARGETS selflnn_evolution
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin

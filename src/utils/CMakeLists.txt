@@ -1,4 +1,6 @@
 # 实用工具库
+# ZSFNO1-P1-005: xml_parser.c和xml_parser.h已删除（孤儿文件，无外部调用者，~400行死代码）
+# kinematics.c已内置轻量级URDF/XML解析器，无需额外XML工具
 add_library(utils
     math_utils.c
     memory_utils.c
@@ -6,7 +8,6 @@ add_library(utils
     platform.c
     string_utils.c
     json_parser.c
-    xml_parser.c
     energy_efficiency.c
     logging.c
     secure_random.c

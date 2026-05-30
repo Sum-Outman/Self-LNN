@@ -8,14 +8,22 @@
     var datasetIndex = [];
     var convergenceHistory = [];
 
+    /* ZSFUSA-F07: 训练模式映射常量，与后端 TrainingMode 枚举保持同步 */
+    var TRAINING_MODE_MAP = {
+        1: 'imitation',
+        2: 'rl',
+        3: 'primitive',
+        4: 'joint',
+        5: 'task'
+    };
+
     function stopPolling() { if (trainingPollInterval) { clearInterval(trainingPollInterval); trainingPollInterval = null; } }
     function stopHyperparamPoll() { if (hyperparamPoll) { clearInterval(hyperparamPoll); hyperparamPoll = null; } }
 
     async function startTraining() {
         try {
-            var modeMap = {1:'imitation',2:'rl',3:'primitive',4:'joint',5:'task'};
             var selMode = (window.selectedTrainingMode != null) ? window.selectedTrainingMode : 1;
-            var mode = modeMap[selMode] || 'pretrain';
+            var mode = TRAINING_MODE_MAP[selMode] || 'pretrain';
             var lr = 0.001;
             var batch = 64;
             var epochs = 100;
@@ -82,10 +90,42 @@
         } catch(e) { console.warn('训练轮询失败:', e.message); }
     }
 
-    /* ZSFWS-002: 训练历史图表渲染 */
+    /* ZSFWS-002: 训练历史图表渲染 
+     * ZSF-009修复: 优先使用training-push的WebSocket实时数据源，
+     * 避免HTTP轮询和WebSocket推送维护两份独立训练数据导致显示不一致。 */
     function renderTrainingChart() {
         var canvas = document.getElementById('train-history-chart');
-        if (!canvas || trainingHistoryData.length < 2) {
+        if (!canvas) return;
+
+        /* ZSF-009: 优先使用WebSocket推送的实时数据缓冲
+         * ZSFNO2-F004: 添加时效性验证，过期数据回退HTTP轮询 */
+        var lossData = trainingHistoryData;
+        var pushAvailable = window.trainingPushManager && 
+                            window.trainingPushManager.dataBuffers &&
+                            window.trainingPushManager.dataBuffers.loss &&
+                            window.trainingPushManager.dataBuffers.loss.train &&
+                            window.trainingPushManager.dataBuffers.loss.train.length >= 2;
+        /* 检查WebSocket推送数据的时效性（超过10秒视为过期） */
+        if (pushAvailable) {
+            var pushTime = window.trainingPushManager.lastUpdateTime || 0;
+            var now = Date.now();
+            if ((now - pushTime) > 10000) {
+                pushAvailable = false;
+            }
+        }
+        if (pushAvailable) {
+            var pushTrain = window.trainingPushManager.dataBuffers.loss.train;
+            var pushTime = window.trainingPushManager.dataBuffers.loss.timestamps;
+            lossData = [];
+            for (var i = 0; i < pushTrain.length; i++) {
+                lossData.push({ 
+                    loss: pushTrain[i].y || pushTrain[i],
+                    epoch: i
+                });
+            }
+        }
+
+        if (lossData.length < 2) {
             var placeholder = document.getElementById('train-history-placeholder');
             if (placeholder) placeholder.style.display = 'block';
             return;
@@ -196,12 +236,16 @@
         container.innerHTML = html;
     }
 
-    /* ZSFWS-L-005: 统一通过SelfLnnApi封装调用API，保持代码风格一致 */
+    /* ZSFLYF-P2-005修复: 统一API响应格式，使用与SelfLnnApi其他方法一致的
+     * success/data 模式，而非裸 data.ok + data.json() 模式。 */
     async function loadCheckpointList() {
         try {
-            var data = await window.SelfLnnApi.request('/checkpoint/list');
-            if (data && data.ok) {
-                var d = await data.json();
+            var result = await window.SelfLnnApi.request('/checkpoint/list');
+            if (result && result.success && result.data) {
+                renderCheckpointList(result.data.checkpoints || result.data.list || []);
+            } else if (result && result.ok) {
+                /* 兼容旧格式（纯Response对象） */
+                var d = await result.json();
                 renderCheckpointList(d.checkpoints || d.list || []);
             }
         } catch(e) { console.warn('检查点列表加载失败:', e.message); }

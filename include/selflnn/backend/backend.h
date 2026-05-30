@@ -393,6 +393,7 @@ typedef enum {
     API_POST_REASONING_STOP_ALL = 255,     /**< 停止所有推理 /api/reasoning/stop_all */
     API_POST_REASONING_PAUSE = 256,        /**< 暂停推理 /api/reasoning/pause */
     API_POST_REASONING_CONFIG_SAVE = 257,  /**< 保存推理配置 /api/reasoning/config/save */
+    API_GET_REASONING_TEST = 273,           /**< 推理测试 /api/reasoning/test */
     API_POST_HYPERPARAMETER_START = 258,   /**< 启动超参数搜索 /api/hyperparameter/start */
     API_GET_HYPERPARAMETER_STATUS = 259,   /**< 获取超参数搜索状态 /api/hyperparameter/status */
 
@@ -438,6 +439,8 @@ typedef enum {
     /* ===== 产品设计 ===== */
     API_POST_PRODUCT_DESIGN = 270,         /**< 产品设计生成 */
     API_GET_PRODUCT_SPEC = 271,            /**< 获取产品规格 */
+    API_POST_TRAINING_SCHEDULE = 272,      /**< ZSF-010: 创建训练计划 /api/training/schedule */
+    API_POST_PRODUCT_SPEC = 330,           /**< POST产品规格生成 /api/product/spec */
 
     /* ===== ZSFWS-B009: 前端-后端API端点对齐修复 ===== */
     API_GET_PROGRAMMING_SAMPLE = 285,      /**< 获取编程示例代码 /api/programming/sample */
@@ -466,6 +469,8 @@ typedef enum {
     API_GET_AUDIO_SPECTRUM = 302,            /**< 获取音频频谱分析数据 /api/audio/spectrum */
     API_GET_LNN_ACTIVATION_HEATMAP = 303,    /**< 获取LNN神经元激活热力图数据 /api/lnn/activation/heatmap */
     API_GET_LNN_PREDICTION_SCATTER = 304,    /**< 获取LNN预测结果散点图数据 /api/lnn/prediction/scatter */
+    API_POST_TASK_PAUSE = 305,               /**< 暂停AGI任务 /api/task/pause */
+    API_POST_TASK_CANCEL = 306,              /**< 取消AGI任务 /api/task/cancel */
 } ApiRequestType;
 
 /**
@@ -661,6 +666,29 @@ int backend_server_is_feature_enabled(BackendServer* server,
  * @return void* 机器人实例指针，未创建则返回NULL
  */
 void* backend_server_get_robot(BackendServer* server);
+
+/* 前向声明 */
+struct WSPushServer;
+
+/**
+ * @brief 设置WebSocket推送服务器（统一WebSocket架构）
+ *
+ * 将共享的WSPushServer注入到后端，使后端handler可以通过
+ * ws_push_broadcast_json()统一推送所有实时消息。
+ * 替换原有的backend.c内联WebSocket处理。
+ *
+ * @param server 后端服务器句柄
+ * @param ws_push WSPushServer实例
+ */
+void backend_server_set_ws_push_server(BackendServer* server, struct WSPushServer* ws_push);
+
+/**
+ * @brief 获取后端服务器关联的WebSocket推送服务器
+ *
+ * @param server 后端服务器句柄
+ * @return WSPushServer* 推送服务器实例，未设置则返回NULL
+ */
+struct WSPushServer* backend_server_get_ws_push_server(BackendServer* server);
 
 #ifdef __cplusplus
 }

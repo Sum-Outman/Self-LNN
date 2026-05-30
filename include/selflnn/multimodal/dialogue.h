@@ -553,6 +553,35 @@ int dialogue_analyze_intent(const char* text, size_t text_length,
                             DialogueIntentType* intent, float* confidence);
 
 /**
+ * @brief 获取全局对话处理器引用（供LNN驱动意图分析使用）
+ * @return DialogueProcessor* 全局处理器句柄，未创建时返回NULL
+ */
+DialogueProcessor* dialogue_get_global_processor(void);
+
+/**
+ * @brief 解析对话响应文本，提取意图和置信度
+ * @param response_text 响应文本
+ * @param intent [out] 解析出的意图类型
+ * @param confidence [out] 解析置信度
+ * @return int 成功返回0，失败返回-1
+ */
+int dialogue_response_parse(const char* response_text,
+                            DialogueIntentType* intent, float* confidence);
+
+/**
+ * @brief 创建对话记忆系统
+ * @param capacity 记忆容量
+ * @return void* 记忆系统句柄，失败返回NULL
+ */
+void* dialogue_memory_create(size_t capacity);
+
+/**
+ * @brief 释放对话记忆系统（兼容void*接口）
+ * @param memory_handle 记忆系统句柄
+ */
+void dialogue_memory_free(void* memory_handle);
+
+/**
  * @brief 更新对话意图跟踪
  *
  * 将当前轮次的意图更新到跟踪器中。

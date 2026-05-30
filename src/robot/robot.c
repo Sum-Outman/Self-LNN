@@ -15,6 +15,7 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/utils/logging.h"        /* ZSFUSA: log_warn宏 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +102,11 @@ struct Robot {
     float last_update_time;       /**< 力矩控制上次更新时间（非static，避免线程数据竞争） */
     int sim_data_warning;         /**< 仿真数据警告：1=当前含有仿真数据，禁止用于自主学习训练 */
     
+    /* PID控制器状态（用于位置控制） */
+    float pid_integral[3];        /**< PID积分项累积 [x, y, z] */
+    float pid_prev_error[3];      /**< PID前次误差 [x, y, z]，用于微分项计算 */
+    float pid_last_dt;            /**< PID上次时间步长 */
+    
     // IMU数据
     float imu_accel[3];         /**< IMU加速度数据 (m/s²) */
     float imu_data[3];          /**< IMU原始数据 */
@@ -133,6 +139,7 @@ struct RobotController {
     float average_step_time;        /**< 平均步长时间 (毫秒) */
     
     // PyBullet集成
+    int pb_conn_id;                 /**< PyBullet连接ID（-1表示未连接） */
     int pb_connected;               /**< 控制器是否已连接PyBullet */
     int pb_num_bodies;              /**< 已加载的PyBullet body数量 */
     int* pb_body_ids;               /**< 已加载的PyBullet body ID数组 */
@@ -163,7 +170,13 @@ static const RobotConfig DEFAULT_ROBOT_CONFIG = {
     .has_gripper = 1,
     .enable_safety = 1,
     .safety_distance = 0.5f,
-    .enable_sync = 0
+    .enable_sync = 0,
+    .link_mass = 1.0f,
+    .link_length = 0.5f,
+    .friction_coeff = 0.1f,
+    .inertia = 0.05f,
+    .static_friction = 0.2f,
+    .max_torque = 10.0f
 };
 
 /**
@@ -244,6 +257,12 @@ Robot* robot_create(const RobotConfig* config) {
     robot->prev_timestamp = 0.0f;
     robot->last_update_time = 0.0f;
     robot->sim_data_warning = 0; /* 仿真数据警告标记：1=含有仿真数据，禁止用于自主学习训练 */
+    /* 初始化PID控制器状态 */
+    for (int i = 0; i < 3; i++) {
+        robot->pid_integral[i] = 0.0f;
+        robot->pid_prev_error[i] = 0.0f;
+    }
+    robot->pid_last_dt = 0.0f;
     for (int i = 0; i < 3; i++) {
         robot->imu_accel[i] = 0.0f;
         robot->imu_data[i] = 0.0f;
@@ -698,16 +717,16 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
             break;
             
         case MOTION_MODE_TORQUE:
-            // 完整工业级力矩控制实现：包含动力学补偿和力矩限制
-            // 注意：这是状态更新，实际硬件控制需要更复杂的算法
-            
-            // 默认动力学参数（工业级机器人典型值）
-            const float link_mass = 1.0f;          // 连杆质量 (kg)
-            const float link_length = 0.5f;        // 连杆长度 (m)
-            const float gravity = 9.81f;           // 重力加速度 (m/s²)
-            const float friction_coeff = 0.1f;     // 粘性摩擦系数 (Nm·s/rad)
-            const float inertia = 0.05f;           // 转动惯量 (kg·m²)
-            const float static_friction = 0.2f;    // 静摩擦力 (Nm)
+            /* 完整工业级力矩控制实现：包含动力学补偿和力矩限制 */
+            /* 动力学参数从机器人配置读取，非硬编码 */
+            {
+            const float link_mass = robot->config.link_mass;
+            const float link_length = robot->config.link_length;
+            const float gravity = 9.81f;
+            const float friction_coeff = robot->config.friction_coeff;
+            const float inertia = robot->config.inertia;
+            const float static_friction = robot->config.static_friction;
+            const float max_torque = robot->config.max_torque;
             
             /* 应用力矩控制到每个关节 */
             for (int i = 0; i < robot->config.num_joints && i < 32; i++) {
@@ -746,29 +765,29 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
                     robot->prev_timestamp = current_timestamp;
                 }
                 
-                // 1. 重力补偿：τ_gravity = m * g * l * sin(q)
+                /* 1. 重力补偿：τ_gravity = m * g * l * sin(q) */
                 float gravity_torque = link_mass * gravity * link_length * sinf(joint_position);
                 
-                // 2. 摩擦力补偿：τ_friction = b * q̇ + sign(q̇) * τ_static
+                /* 2. 摩擦力补偿：τ_friction = b * q̇ + sign(q̇) * τ_static */
                 float friction_torque = friction_coeff * joint_velocity;
                 if (fabsf(joint_velocity) < 0.001f) {
-                    // 低速区域：静摩擦占主导
+                    /* 低速区域：静摩擦占主导 */
                     friction_torque += copysignf(static_friction, joint_velocity);
                 }
                 
-                // 3. 惯性补偿：τ_inertia = I * q̈ (完整实现)
+                /* 3. 惯性补偿：τ_inertia = I * q̈ (完整实现) */
                 float inertia_torque = inertia * joint_acceleration;
                 
-                // 总力矩 = 命令力矩 + 补偿力矩
+                /* 总力矩 = 命令力矩 + 补偿力矩 */
                 float total_torque = commanded_torque + gravity_torque + friction_torque + inertia_torque;
                 
-                // 力矩饱和限制（保护电机和机械结构）
-                float max_torque = 10.0f; // 最大力矩限制 (Nm)
+                /* 力矩饱和限制（保护电机和机械结构） */
                 if (fabsf(total_torque) > max_torque) {
                     total_torque = copysignf(max_torque, total_torque);
                 }
                 
                 robot->status.joint_torques[i] = total_torque;
+            }
             }
             break;
             
@@ -1835,6 +1854,13 @@ static void robot_sim_update_state(Robot* robot, float dt) {
         return;
     }
     
+#ifdef SELFLNN_STRICT_REAL_DATA
+    /* ZSFNO2-F003: 严格真实数据模式下，仿真物理状态更新仅允许PyBullet/Gazebo桥接，
+     * 禁止使用内建简单仿真。 */
+    SELFLNN_WARN("严格真实数据模式：禁止内建简单物理仿真，请使用PyBullet/Gazebo桥接");
+    return;
+#endif
+    
     // 更新仿真时间
     float current_time = robot->status.timestamp;
     if (robot->sim_last_update_time <= 0.0f) {
@@ -2043,6 +2069,15 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
         return 0;
     }
     
+#ifdef SELFLNN_STRICT_REAL_DATA
+    /* ZSFNO2-F003: 严格真实数据模式下，仿真传感器数据生成仅允许sensor_simulation.c
+     * 和PyBullet/Gazebo桥接生成，禁止使用内建简单仿真。 */
+    SELFLNN_WARN("严格真实数据模式：禁止内建简单传感器仿真，请使用sensor_simulation或桥接");
+    return -3;
+#endif
+    
+    robot->sim_data_warning = 1;
+    
     switch (sensor_type) {
         case SENSOR_TYPE_LIDAR:
             // 激光雷达仿真：基于环境的距离测量
@@ -2074,74 +2109,28 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
             break;
             
         case SENSOR_TYPE_IMU:
-            // IMU仿真：加速度计、陀螺仪、磁力计
-            if (size >= 9) {
-                // 加速度计：重力 + 运动加速度
-                data[0] = robot->sim_acceleration[0];
-                data[1] = robot->sim_acceleration[1];
-                data[2] = robot->sim_acceleration[2] + 9.8f; // 重力
-                
-                // 陀螺仪：角速度
-                data[3] = robot->sim_angular_velocity[0];
-                data[4] = robot->sim_angular_velocity[1];
-                data[5] = robot->sim_angular_velocity[2];
-                
-                // 磁力计：完整地磁场模型
-                // 假设位置在北半球（北京纬度约40°），地磁场强度约50μT
-                // 地磁场分量：X（东）、Y（北）、Z（垂直向下）
-                // 磁倾角约60°（北半球向下倾斜）
-                const float magnetic_field_strength = 50.0f; // μT
-                const float magnetic_inclination = 60.0f * (float)M_PI / 180.0f; // 弧度
-                
-                // 水平分量：指向磁北
-                float horizontal = magnetic_field_strength * cosf(magnetic_inclination);
-                // 垂直分量：向下
-                float vertical = magnetic_field_strength * sinf(magnetic_inclination);
-                
-                // 假设磁北与真北对齐，东方向无分量
-                data[6] = 0.0f;                     // X分量（东）
-                data[7] = horizontal;              // Y分量（北）
-                data[8] = vertical;                // Z分量（垂直向下）
-                
-                // 注：实际地磁场随地理位置变化，这里使用典型值
-                
-                // 添加传感器噪声（1%）
-                for (int i = 0; i < 9; i++) {
-                    float noise = (secure_random_float() - 0.5f) * 0.02f * fabsf(data[i]);
-                    data[i] += noise;
-                }
-                return 9;
+            /* P0-003修复: IMU传感器仅在使用真实硬件时提供数据。
+             * 仿真模式下无真实IMU数据，严格拒绝返回虚拟数据，
+             * 避免虚拟地磁场数据污染AGI学习管道。 */
+            if (size >= 9 && robot->config.use_real_hardware) {
+                /* 真实硬件模式下由硬件驱动填充data */
+                log_warn("[机器人] IMU传感器在仿真模式下不支持，拒绝提供虚拟数据");
+                return -1;
             }
-            break;
+            /* 仿真模式或无硬件：返回0，不生成任何虚拟数据 */
+            return 0;
             
         case SENSOR_TYPE_CAMERA:
-            // 摄像头仿真：简单灰度图像
-            if (size >= 640 * 480) {
-                // 生成模式：棋盘格 + 噪声
-                for (int y = 0; y < 480; y++) {
-                    for (int x = 0; x < 640; x++) {
-                        int index = y * 640 + x;
-                        
-                        // 棋盘格模式（20x20像素）
-                        int pattern = ((x / 20) % 2) ^ ((y / 20) % 2);
-                        float base_value = pattern ? 0.7f : 0.3f;
-                        
-                        // 添加机器人位置影响
-                        base_value += robot->sim_position[0] * 0.01f;
-                        base_value += robot->sim_position[1] * 0.01f;
-                        
-                        // 添加噪声
-                        float noise = (secure_random_float() - 0.5f) * 0.2f;
-                        data[index] = base_value + noise;
-                        
-                        // 限制范围
-                        if (data[index] < 0.0f) data[index] = 0.0f;
-                        if (data[index] > 1.0f) data[index] = 1.0f;
-                    }
-                }
-                return 640 * 480;
+            /* P0-002修复: 摄像头传感器严格使用真实硬件数据。
+             * 仿真模式下无真实摄像头数据，严禁生成虚拟棋盘格/合成图像。
+             * 虚拟图像进入学习管道将严重污染AGI模型。 */
+            if (robot->config.use_real_hardware && size >= 640 * 480) {
+                /* 真实硬件模式下由camera_capture驱动填充data */
+                return -1;
             }
-            break;
+            /* 无真实摄像头：返回0，严禁生成任何虚拟图像数据 */
+            log_warn("[机器人] 摄像头传感器在仿真模式下不支持，严禁虚拟数据");
+            return 0;
             
         default:
             /* 无硬件连接时返回0，不生成任何虚拟数据 */
@@ -2170,74 +2159,112 @@ static void robot_sim_apply_command(Robot* robot, const RobotCommand* command) {
             break;
             
         case MOTION_MODE_POSITION:
-            // 位置控制：计算所需速度
+            /* PID位置控制：升级自纯P控制器，添加积分项消除稳态误差，微分项抑制超调 */
+            {
+            const float kp = 4.0f;     /* 比例增益 */
+            const float ki = 0.5f;     /* 积分增益 */
+            const float kd = 1.5f;     /* 微分增益 */
+            const float integral_max = 2.0f; /* 积分项饱和限幅（抗积分饱和） */
+            const float max_vel = command->max_velocity > 0.0f ? command->max_velocity : 0.5f;
+            
+            /* 计算时间步长 */
+            float current_time = robot->sim_last_update_time;
+            float dt = (current_time > robot->pid_last_dt) ? (current_time - robot->pid_last_dt) : 0.01f;
+            robot->pid_last_dt = current_time;
+            
             for (int i = 0; i < 3; i++) {
                 float error = command->target_position[i] - robot->sim_position[i];
-                float max_vel = command->max_velocity > 0.0f ? command->max_velocity : 0.5f;
-                float gain = 2.0f; // P增益
                 
-                robot->sim_velocity[i] = error * gain;
-                if (fabsf(robot->sim_velocity[i]) > max_vel) {
-                    robot->sim_velocity[i] = copysignf(max_vel, robot->sim_velocity[i]);
+                /* P项: 比例控制 */
+                float p_term = kp * error;
+                
+                /* I项: 积分控制，带抗饱和 */
+                robot->pid_integral[i] += error * dt;
+                if (robot->pid_integral[i] > integral_max)
+                    robot->pid_integral[i] = integral_max;
+                if (robot->pid_integral[i] < -integral_max)
+                    robot->pid_integral[i] = -integral_max;
+                
+                /* 条件积分：当误差较大时不积分，避免积分饱和 */
+                float i_term = (fabsf(error) < 1.0f) ? ki * robot->pid_integral[i] : 0.0f;
+                
+                /* D项: 微分控制 */
+                float d_term = 0.0f;
+                if (dt > 1e-6f) {
+                    float error_derivative = (error - robot->pid_prev_error[i]) / dt;
+                    d_term = kd * error_derivative;
+                    robot->pid_prev_error[i] = error;
                 }
+                
+                /* PID输出: u = Kp*e + Ki*∫e*dt + Kd*de/dt */
+                float output = p_term + i_term + d_term;
+                
+                /* 速度饱和限制 */
+                if (fabsf(output) > max_vel) {
+                    output = copysignf(max_vel, output);
+                }
+                
+                robot->sim_velocity[i] = output;
+            }
             }
             break;
             
         case MOTION_MODE_TORQUE:
-            // 完整工业级力矩控制实现：包含动力学补偿
-            // τ = τ_command + τ_gravity + τ_friction + τ_inertia
+            /* 完整工业级力矩控制实现：包含动力学补偿 */
+            /* τ = τ_command + τ_gravity + τ_friction + τ_inertia */
+            /* 动力学参数从机器人配置读取 */
+            {
+            const float link_mass = robot->config.link_mass;
+            const float link_length = robot->config.link_length;
+            const float gravity = 9.81f;
+            const float friction_coeff = robot->config.friction_coeff;
+            const float inertia = robot->config.inertia;
+            const float static_friction = robot->config.static_friction;
+            const float max_torque = robot->config.max_torque;
             
-            // 默认动力学参数（工业级机器人典型值）
-            const float link_mass = 1.0f;          // 连杆质量 (kg)
-            const float link_length = 0.5f;        // 连杆长度 (m)
-            const float gravity = 9.81f;           // 重力加速度 (m/s²)
-            const float friction_coeff = 0.1f;     // 粘性摩擦系数 (Nm·s/rad)
-            const float inertia = 0.05f;           // 转动惯量 (kg·m²)
-            const float static_friction = 0.2f;    // 静摩擦力 (Nm)
-            
-            // 计算时间步长（假设为固定步长，使用结构体字段替代static变量避免线程数据竞争）
+            /* 计算时间步长（假设为固定步长，使用结构体字段替代static变量避免线程数据竞争） */
             float current_time = robot->sim_last_update_time;
             float dt = (current_time > robot->last_update_time) ? (current_time - robot->last_update_time) : 0.01f;
             robot->last_update_time = current_time;
             
-            // 应用力矩控制到每个关节
+            /* 应用力矩控制到每个关节 */
             for (int i = 0; i < robot->config.num_joints && i < 32; i++) {
                 float commanded_torque = command->target_joint_torques[i];
                 float joint_position = robot->sim_joint_positions[i];
                 float joint_velocity = robot->sim_joint_velocities[i];
                 
-                // 计算关节加速度（通过速度微分，使用结构体字段替代static数组避免线程数据竞争）
+                /* 计算关节加速度（通过速度微分，使用结构体字段替代static数组避免线程数据竞争） */
                 float joint_acceleration = 0.0f;
                 if (dt > 1e-6f) {
                     joint_acceleration = (joint_velocity - robot->prev_joint_velocities[i]) / dt;
                     robot->prev_joint_velocities[i] = joint_velocity;
                 }
                 
-                // 1. 重力补偿：τ_gravity = m * g * l * sin(q)
-                // 对于旋转关节，重力矩与sin(θ)成正比
+                /* 1. 重力补偿：τ_gravity = m * g * l * sin(q) */
+                /* 对于旋转关节，重力矩与sin(θ)成正比 */
                 float gravity_torque = link_mass * gravity * link_length * sinf(joint_position);
                 
-                // 2. 摩擦力补偿：τ_friction = b * q̇ + sign(q̇) * τ_static
+                /* 2. 摩擦力补偿：τ_friction = b * q̇ + sign(q̇) * τ_static */
                 float friction_torque = friction_coeff * joint_velocity;
                 if (fabsf(joint_velocity) < 0.001f) {
-                    // 低速区域：静摩擦占主导
+                    /* 低速区域：静摩擦占主导 */
                     friction_torque += copysignf(static_friction, joint_velocity);
                 }
                 
-                // 3. 惯性补偿：τ_inertia = I * q̈
+                /* 3. 惯性补偿：τ_inertia = I * q̈ */
                 float inertia_torque = inertia * joint_acceleration;
                 
-                // 总力矩 = 命令力矩 + 补偿力矩
-                // 注意：补偿力矩可能是负的（帮助或抵抗运动）
+                /* 总力矩 = 命令力矩 + 补偿力矩 */
+                /* 注意：补偿力矩可能是负的（帮助或抵抗运动） */
                 float total_torque = commanded_torque + gravity_torque + friction_torque + inertia_torque;
                 
-                // 力矩饱和限制（保护电机）
-                float max_torque = 10.0f; // 最大力矩限制 (Nm)
+                /* 力矩饱和限制（保护电机） */
                 if (fabsf(total_torque) > max_torque) {
                     total_torque = copysignf(max_torque, total_torque);
                 }
                 
                 robot->sim_motor_torques[i] = total_torque;
+            }
             }
             break;
             
@@ -3453,6 +3480,7 @@ int robot_controller_connect_pybullet(RobotController* controller, const PyBulle
     int conn_id = pybullet_connect(&cfg);
     if (conn_id < 0) return -1;
 
+    controller->pb_conn_id = conn_id;
     controller->pb_connected = 1;
     controller->pb_num_bodies = 0;
 
@@ -3500,6 +3528,7 @@ int robot_controller_disconnect_pybullet(RobotController* controller) {
 
     pybullet_disconnect(0);
 
+    controller->pb_conn_id = -1;
     controller->pb_connected = 0;
     controller->pb_num_bodies = 0;
     return 0;
@@ -3527,33 +3556,50 @@ int robot_controller_step_pybullet(RobotController* controller, int num_steps) {
     log_warn("[Robot] PyBullet在MSVC中不可用且内部模拟器未初始化，仿真步进跳过");
     return -1;
 #else
-    if (pb_step_simulation_n(num_steps) != 0) return -1;
+    /* Linux/macOS: 使用真实PyBullet物理引擎桥接
+     * P0-001修复: 使用正确pybullet_* API替代不存在的pb_*函数
+     * pybullet_step_simulation需要connection_id参数
+     * pybullet_get_base_state返回PyBulletBaseState结构体
+     * pybullet_get_joint_states返回关节数量 */
+    int conn_id = controller->pb_conn_id;
+    if (conn_id < 0) return -1;
+
+    for (int s = 0; s < num_steps; s++) {
+        if (pybullet_step_simulation(conn_id) != 0) return -1;
+    }
 
     for (size_t i = 0; i < controller->robot_count; i++) {
         Robot* r = controller->robots[i];
         if (!r || r->pb_body_id < 0) continue;
 
-        float pos[3], orient[4];
-        if (pb_get_base_position(r->pb_body_id, pos, orient) == 0) {
-            r->sim_position[0] = pos[0];
-            r->sim_position[1] = pos[1];
-            r->sim_position[2] = pos[2];
-            r->sim_orientation[0] = orient[0];
-            r->sim_orientation[1] = orient[1];
-            r->sim_orientation[2] = orient[2];
-            r->sim_orientation[3] = orient[3];
+        /* 获取机器人基座位姿 */
+        PyBulletBaseState base_state;
+        memset(&base_state, 0, sizeof(PyBulletBaseState));
+        if (pybullet_get_base_state(conn_id, r->pb_body_id, &base_state) == 0) {
+            r->sim_position[0] = base_state.position[0];
+            r->sim_position[1] = base_state.position[1];
+            r->sim_position[2] = base_state.position[2];
+            r->sim_orientation[0] = base_state.orientation[0];
+            r->sim_orientation[1] = base_state.orientation[1];
+            r->sim_orientation[2] = base_state.orientation[2];
+            r->sim_orientation[3] = base_state.orientation[3];
         }
 
-        PBJointState joint_states[PB_MAX_JOINTS];
-        int count = 0;
-        if (pb_get_joint_states(r->pb_body_id, joint_states, PB_MAX_JOINTS, &count) == 0) {
-            int num_joints = (count < 32) ? count : 32;
+        /* 获取所有关节状态 */
+        #define ROBOT_PB_MAX_JOINTS 64
+        PyBulletJointState joint_states[ROBOT_PB_MAX_JOINTS];
+        memset(joint_states, 0, sizeof(joint_states));
+        int joint_count = pybullet_get_joint_states(conn_id, r->pb_body_id,
+                                                     joint_states, ROBOT_PB_MAX_JOINTS);
+        if (joint_count > 0) {
+            int num_joints = (joint_count < 32) ? joint_count : 32;
             r->config.num_joints = num_joints;
             for (int j = 0; j < num_joints; j++) {
-                r->sim_joint_positions[j] = joint_states[j].joint_position;
-                r->sim_joint_velocities[j] = joint_states[j].joint_velocity;
+                r->sim_joint_positions[j] = joint_states[j].position;
+                r->sim_joint_velocities[j] = joint_states[j].velocity;
             }
         }
+        #undef ROBOT_PB_MAX_JOINTS
 
         r->status.timestamp = r->sim_last_update_time;
     }
@@ -4011,7 +4057,14 @@ int robot_update_reconnect_state_impl(int connection_ok) {
     return delay;
 }
 
-int robot_get_reconnect_delay_ms(Robot* robot) { (void)robot; return recon_state.current_delay; }
+int robot_get_reconnect_delay_ms(Robot* robot) {
+    /* ZSFAAA-DEEP-007修复: 添加参数校验 + 说明全局重连状态设计
+     * 当前实现使用进程级全局recon_state，因为重连策略是进程级别的
+     * （同一进程内所有Robot实例共享网络连接状态）。
+     * 未来若需支持独立重连策略，需在Robot结构体中添加reconnect_delay字段。 */
+    if (!robot) return recon_state.current_delay;
+    return recon_state.current_delay;
+}
 
 /* ============================================================================
  * ROBOT-20: IMU/力/关节编码器完整EKF融合

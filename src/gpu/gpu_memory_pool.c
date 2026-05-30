@@ -90,6 +90,18 @@ struct GpuMemoryPool {
 
 /* ============================================================================
  * CPU硬件检测函数（全部基于真实硬件检测，禁止使用模拟值/占位符）
+ *
+ * ZSFUSA-O02: CPU硬件检测已统一在gpu.c中实现。
+ * gpu_memory_pool.c应使用gpu_hardware_get_cpu_info()统一接口。
+ * 当前保留本地初始化代码，标记为待重构（后续版本将彻底消除重复）。
+ *
+ * 本文件中cpu_detect_*函数与gpu.c中的cpu_hw_*函数功能重复：
+ *   - cpu_cpuid_detect()    ↔ cpu_hw_cpuid()
+ *   - cpu_detect_vendor_real() ↔ cpu_hw_get_vendor()
+ *   - cpu_detect_brand_real()  ↔ cpu_hw_get_brand_name()
+ *   - cpu_detect_simd_flags_real() ↔ cpu_hw_detect_simd_x86/arm()
+ *   - cpu_detect_l1/l2/l3_cache_real() ↔ cpu_hw_get_cache_size()
+ * 后续重构时请将所有调用替换为gpu.c中对应函数。
  * =========================================================================== */
 
 /**

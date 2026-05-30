@@ -614,6 +614,11 @@ int rl_cfc_get_training_stats(RLAgent* agent, float* critic_loss,
                               float* actor_loss, float* avg_q_value,
                               int* policy_delay_count);
 
+/* ZSFUSA: 强化学习值裁剪宏 */
+#ifndef RL_CLAMP
+#define RL_CLAMP(X, LO, HI) (((X) < (LO)) ? (LO) : (((X) > (HI)) ? (HI) : (X)))
+#endif
+
 #ifdef __cplusplus
 }
 #endif

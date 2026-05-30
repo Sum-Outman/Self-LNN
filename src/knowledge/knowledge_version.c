@@ -118,8 +118,24 @@ static int find_entry_by_id(const SnapshotEntryRecord* records, int count, int e
  *
  * 策略：提取两个字符串的字符三元组(token tri-gram)集合，
  * 计算 Jaccard 相似度 = |intersection| / |union|。
+ *
+ * ZSFUSA-C13: 对中文字符串额外计算bigram(2-gram) Jaccard，
+ * 与trigram结果取最大值。中文字符通常2-3字构成词语，
+ * bigram粒度更适合捕捉中文语义。
  * 对中文（UTF-8）和英文均适用。
  * ============================================================================ */
+
+/* ZSFUSA-C13: 中文bigram增强 - 中文字符通常2-3字组成词 */
+static int has_chinese(const char* str) {
+    if (!str) return 0;
+    while (*str) {
+        unsigned char c = (unsigned char)*str;
+        if (c >= 0xE4 && c < 0xE9) return 1; /* UTF-8中文首字节范围 */
+        str++;
+    }
+    return 0;
+}
+
 static float compute_semantic_similarity(const char* s1, const char* s2) {
     if (!s1 || !s2) return 0.0f;
     size_t len1 = strlen(s1), len2 = strlen(s2);
@@ -169,7 +185,47 @@ static float compute_semantic_similarity(const char* s1, const char* s2) {
 
     /* Jaccard相似度 */
     int union_count = t1_count + t2_count - intersection;
-    return union_count > 0 ? (float)intersection / (float)union_count : 0.0f;
+    float trigram_score = union_count > 0 ? (float)intersection / (float)union_count : 0.0f;
+
+    /* ZSFUSA-C13: 中文bigram增强 */
+    if (has_chinese(s1) || has_chinese(s2)) {
+        #define MAX_BIGRAMS 384
+        char bigrams1[MAX_BIGRAMS][3];
+        char bigrams2[MAX_BIGRAMS][3];
+        int b1_count = 0, b2_count = 0;
+
+        for (size_t i = 0; i + 1 < len1 && b1_count < MAX_BIGRAMS; i++) {
+            bigrams1[b1_count][0] = s1[i];
+            bigrams1[b1_count][1] = s1[i + 1];
+            bigrams1[b1_count][2] = '\0';
+            b1_count++;
+        }
+
+        for (size_t i = 0; i + 1 < len2 && b2_count < MAX_BIGRAMS; i++) {
+            bigrams2[b2_count][0] = s2[i];
+            bigrams2[b2_count][1] = s2[i + 1];
+            bigrams2[b2_count][2] = '\0';
+            b2_count++;
+        }
+
+        int b_intersection = 0;
+        int b_used2[MAX_BIGRAMS] = {0};
+        for (int i = 0; i < b1_count; i++) {
+            for (int j = 0; j < b2_count; j++) {
+                if (!b_used2[j] && strcmp(bigrams1[i], bigrams2[j]) == 0) {
+                    b_intersection++;
+                    b_used2[j] = 1;
+                    break;
+                }
+            }
+        }
+
+        int b_union = b1_count + b2_count - b_intersection;
+        float bigram_score = b_union > 0 ? (float)b_intersection / (float)b_union : 0.0f;
+        return trigram_score > bigram_score ? trigram_score : bigram_score;
+    }
+
+    return trigram_score;
 }
 
 /* ============================================================================

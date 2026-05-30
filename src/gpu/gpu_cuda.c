@@ -2530,14 +2530,19 @@ static int cuda_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
         return -1;
     }
     
+    /* ZSFA-FIX-F008: 使用动态分配替代局部变量地址赋值，避免悬空指针 */
     if (!g_cuda_device_props) {
-        // 如果属性未缓存，则立即获取
-        cudaDevicePropCompat prop;
-        if (get_cuda_device_properties(device_index, &prop) != 0) {
-            set_cuda_error_string("无法获取设备%d的属性", device_index);
+        g_cuda_device_props = (cudaDevicePropCompat*)safe_calloc(
+            g_cuda_device_count, sizeof(cudaDevicePropCompat));
+        if (!g_cuda_device_props) {
+            set_cuda_error_string("无法分配设备属性内存");
             return -1;
         }
-        g_cuda_device_props = &prop;
+        if (get_cuda_device_properties(device_index, &g_cuda_device_props[device_index]) != 0) {
+            set_cuda_error_string("无法获取设备%d的属性", device_index);
+            safe_free((void**)&g_cuda_device_props);
+            return -1;
+        }
     }
     
     cudaDevicePropCompat* prop = &g_cuda_device_props[device_index];

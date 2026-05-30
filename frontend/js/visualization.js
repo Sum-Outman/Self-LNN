@@ -1389,22 +1389,44 @@ class VisualizationManager {
                 }
             }
 
-            /* M-014修复: 频谱分析数据拉取
-             * 后端光谱接口尚未就绪时记录warning而非使用虚假数据 */
+            /* 频谱分析数据拉取 - 通过真实后端API获取 */
             if (typeof this.updateSpectrumData === 'function') {
-                console.debug('[Visualization] 频谱数据源待后端/api/audio/spectrum接口就绪');
+                window.SelfLnnApi.getAudioSpectrum().then(function(result) {
+                    if (result.success && result.data && result.data.spectrum && result.data.spectrum.length > 0) {
+                        this.updateSpectrumData(result.data.spectrum, result.data.fft_size || 64);
+                    }
+                }.bind(this)).catch(function() {});
             }
 
-            /* M-015修复: 神经元激活热力图定期更新源
-             * 后端神经网络激活值接口尚未就绪时记录warning而非使用虚假数据 */
+            /* 神经元激活热力图 - 通过真实后端API获取 */
             if (this.stateActivationCanvas) {
-                console.debug('[Visualization] 热力图数据源待后端神经网络激活值接口就绪');
+                window.SelfLnnApi.getLnnActivationHeatmap().then(function(result) {
+                    if (result.success && result.data && result.data.heatmap && result.data.heatmap.length > 0) {
+                        var dim = result.data.dim || Math.min(result.data.heatmap.length, 16);
+                        var sz = Math.max(dim, 16);
+                        var heatmapData = new Array(sz);
+                        for (var i = 0; i < sz; i++) {
+                            heatmapData[i] = new Array(sz);
+                            for (var j = 0; j < sz; j++) {
+                                var idx = Math.floor(i * result.data.heatmap.length / sz);
+                                heatmapData[i][j] = result.data.heatmap[idx] || 0;
+                            }
+                        }
+                        this.updateStateActivationData(heatmapData);
+                    }
+                }.bind(this)).catch(function() {});
             }
 
-            /* M-016修复: 预测散点图在fetchAndUpdateAll中定期更新
-             * 后端预测结果接口尚未就绪时记录warning而非使用虚假数据 */
+            /* 预测散点图 - 通过真实后端API获取 */
             if (this.dataBuffers && this.dataBuffers.prediction) {
-                console.debug('[Visualization] 预测散点图数据源待后端预测结果接口就绪');
+                window.SelfLnnApi.getLnnPredictionScatter().then(function(result) {
+                    if (result.success && result.data && result.data.points && result.data.points.length > 0) {
+                        this.updatePredictionData(
+                            result.data.points.map(function(p) { return p[0]; }),
+                            result.data.points.map(function(p) { return p[1]; })
+                        );
+                    }
+                }.bind(this)).catch(function() {});
             }
 
         } catch (error) {

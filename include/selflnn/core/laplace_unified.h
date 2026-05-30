@@ -45,6 +45,12 @@ void laplace_unified_system_shutdown(void);
 /* 获取拉普拉斯系统健康状态 */
 int laplace_unified_health_check(char* report, size_t report_size);
 
+/* ZSFUSA: 创建默认拉普拉斯分析器 */
+void* lnn_laplace_create_default_analyzer(void);
+
+/* ZSFUSA: 获取拉普拉斯频谱 */
+int laplace_unified_get_spectrum(void* analyzer, float* spectrum, size_t size);
+
 #ifdef __cplusplus
 }
 #endif

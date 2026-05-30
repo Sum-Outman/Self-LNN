@@ -32,6 +32,11 @@ target_link_libraries(selflnn_agi PRIVATE
     selflnn_multimodal
 )
 
+# ZSFLYF-KNOWN-3修复: 添加agi头文件独立install规则
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/agi/
+    DESTINATION include/selflnn/agi
+    FILES_MATCHING PATTERN "*.h")
+
 install(TARGETS selflnn_agi
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib

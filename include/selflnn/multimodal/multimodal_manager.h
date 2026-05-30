@@ -2,8 +2,9 @@
  * @file multimodal_manager.h
  * @brief 多模态管理器接口（兼容适配层）
  *
- * **已弃用**: 新代码应使用 unified_lnn_state.h 作为唯一多模态统一入口。
- * 本文件保留用于向后兼容，内部已路由至 unified_lnn_state_step。
+ * ZSF-NEW-013修复: 5种额外模态(触觉/本体感/热感/雷达/电机)已从LNN输出后加权混合
+ * 改为LNN输入前投影注入，确保所有9种模态统一通过同一个CfC连续动态系统进行状态演化。
+ * 新代码应使用 unified_lnn_state.h 作为首选多模态统一入口。
  * 严格遵循：所有模态→统一输入到同一个LNN连续动态系统。
  */
 
@@ -53,11 +54,11 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
 void multimodal_manager_free(MultimodalManager* manager);
 
 /**
- * @brief 处理多模态输入（P2-001统一：扩展至9种模态）
+ * @brief 处理多模态输入（ZSF-NEW-013修复：全部9模态通过LNN前向传播）
  *
- * 所有模态通过统一信号处理器处理后，输入到同一个LNN连续动态系统进行状态演化，
- * 输出融合特征。严格遵循统一信号→统一演化→统一输出的架构原则。
- * 9种模态: 视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机
+ * 所有9种模态(视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机)
+ * 在LNN前向传播之前统一投影注入lnn_input，经过同一个CfC ODE连续动态系统
+ * 进行状态演化后输出融合特征。严格遵循统一输入→统一演化→统一输出的架构原则。
  *
  * @param manager 管理器句柄
  * @param vision_data 视觉数据 (可为NULL)
@@ -191,6 +192,22 @@ int multimodal_manager_train_unified_signal_processor(MultimodalManager* manager
                                            float* loss);
 
 int multimodal_manager_set_lnn(MultimodalManager* manager, LNN* lnn);
+
+/* ============================================================================
+ * ZSF-007/ZSF-008: 音频/图像文件加载器桥接函数
+ * 将 audio_loader.h 和 image_loader.h 的加载能力集成到多模态管理器。
+ * 使这两个模块从"孤儿代码"成为系统的有效组成部分。
+ * ============================================================================ */
+
+float* multimodal_load_audio_file(const char* filepath, int* sample_rate_out,
+                                   int* num_samples_out, int* channels_out);
+int multimodal_audio_file_info(const char* filepath, int* sample_rate_out,
+                                int* num_channels_out, int* bits_per_sample_out,
+                                float* duration_sec_out);
+float* multimodal_load_image_file(const char* filepath, int* width_out,
+                                   int* height_out, int* channels_out);
+void multimodal_free_image_data(float* data);
+void multimodal_free_audio_data(float* data);
 
 #ifdef __cplusplus
 }

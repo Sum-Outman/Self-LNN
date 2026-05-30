@@ -272,7 +272,9 @@ int selflnn_is_warning(SelfLNNErrorCode error_code) {
     return error_code >= 1000 && error_code < 2000;
 }
 
-/* I-001修复：消除重复实现，委托is_warning */
+/* H-002 / I-001: 精简委托包装函数，仅为向后兼容保留。
+ * 内部直接委托到 selflnn_is_warning，无额外逻辑。
+ * I-001修复后消除了重复实现，统一为一个判断入口。 */
 int selflnn_is_warning_code(SelfLNNErrorCode error_code) {
     return selflnn_is_warning(error_code);
 }

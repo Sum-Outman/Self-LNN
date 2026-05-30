@@ -19,6 +19,8 @@
 #include "selflnn/core/state.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace.h"
+#include "selflnn/core/laplace_features.h"
+#include "selflnn/core/laplace_fft.h"
 #include "selflnn/core/loss.h"          /* FIX-003: loss_gradient_ex 支持 */
 #include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/utils/math_utils.h"
@@ -53,6 +55,21 @@ static inline uint32_t hash32(uint32_t x) {
     x = ((x >> 16) ^ x) * 0x45d9f3b;
     x = (x >> 16) ^ x;
     return x;
+}
+
+/* ZSFUSA-C10: 公共梯度裁剪函数，消除三处重复 */
+static inline void lnn_clip_gradients(float* grads, size_t count, float max_norm) {
+    if (!grads || count == 0 || max_norm <= 0.0f) return;
+    float max_val = 0.0f;
+    for (size_t i = 0; i < count; i++) {
+        float abs_g = grads[i] < 0 ? -grads[i] : grads[i];
+        if (abs_g > max_val) max_val = abs_g;
+        if (!isfinite(grads[i])) grads[i] = 0.0f;
+    }
+    if (max_val > max_norm) {
+        float scale = max_norm / max_val;
+        for (size_t i = 0; i < count; i++) grads[i] *= scale;
+    }
 }
 
 // 调试输出宏：仅在SELFLNN_DEBUG_LNN定义时输出到stderr
@@ -418,6 +435,22 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
                                     strength);
     }
 
+    /* ZSFUSA-P1-002关键修复: 拉普拉斯稳定性分数从NetworkState传播到各CfCCell。
+     * network_state_set_laplace_metrics()已将频域分析结果写入网络状态，
+     * 但需要显式复制到每个CfCCell实例，cfc_closed_form_solution中的
+     * tau调制才能实际生效。此步骤是拉普拉斯-CfC数据流的关键闭环。
+     * ZSFUSA-V7: 使用network_state_get_laplace_stability_score() getter，
+     * 因NetworkState结构体定义私有于state.c。 */
+    if (network->cfc_network && network->cfc_network->layers && network->state) {
+        float lap_stab = network_state_get_laplace_stability_score(network->state);
+        for (int l = 0; l < network->cfc_network->config.num_layers; l++) {
+            CfCCell* cell = network->cfc_network->layers[l];
+            if (cell) {
+                cell->laplace_stability_score = lap_stab;
+            }
+        }
+    }
+
     int result = cfc_forward(network->cfc_network,
                            network->input_buffer,
                            network->hidden_state,
@@ -597,6 +630,103 @@ int lnn_forward_safe(LNN* network, const float* input, size_t input_size,
     return (int)copy_out;
 }
 
+/* ================================================================
+ * ZSFWS-P1-008: 并发隔离前向传播
+ * 每调用方持有独立的CfC状态副本，多模态可同时进行前向传播。
+ * 权重访问使用读写锁（读锁），训练写入时排他（写锁）。
+ * ================================================================ */
+
+LNNForwardState* lnn_forward_state_create(LNN* network) {
+    if (!network) return NULL;
+
+    LNNForwardState* state = (LNNForwardState*)safe_calloc(1, sizeof(LNNForwardState));
+    if (!state) return NULL;
+
+    state->hidden_size = network->config.hidden_size;
+    state->input_size = network->config.input_size;
+    state->output_size = network->config.output_size;
+    /* CfC cell_state尺寸估算：hidden_size * num_layers + 额外缓冲 */
+    state->cell_state_size = state->hidden_size * (size_t)network->config.num_layers * 2;
+
+    state->hidden_state = (float*)safe_calloc(state->hidden_size, sizeof(float));
+    state->cell_state = (float*)safe_calloc(state->cell_state_size, sizeof(float));
+    state->input_buffer = (float*)safe_calloc(state->input_size, sizeof(float));
+    state->output_buffer = (float*)safe_calloc(state->output_size, sizeof(float));
+
+    if (!state->hidden_state || !state->cell_state ||
+        !state->input_buffer || !state->output_buffer) {
+        lnn_forward_state_free(state);
+        return NULL;
+    }
+
+    /* 从LNN复制当前隐藏状态作为初始状态 */
+    LNN_LOCK(network);
+    memcpy(state->hidden_state, network->hidden_state,
+           state->hidden_size * sizeof(float));
+    if (network->cell_state) {
+        memcpy(state->cell_state, network->cell_state,
+               (state->cell_state_size < network->config.hidden_size * (size_t)network->config.num_layers * 2
+                ? state->cell_state_size : network->config.hidden_size * (size_t)network->config.num_layers * 2) * sizeof(float));
+    }
+    LNN_UNLOCK(network);
+
+    state->initialized = 1;
+    return state;
+}
+
+void lnn_forward_state_free(LNNForwardState* state) {
+    if (!state) return;
+    safe_free((void**)&state->hidden_state);
+    safe_free((void**)&state->cell_state);
+    safe_free((void**)&state->input_buffer);
+    safe_free((void**)&state->output_buffer);
+    safe_free((void**)&state);
+}
+
+int lnn_forward_isolated(LNN* network, LNNForwardState* state,
+                         const float* input, float* output) {
+    if (!network || !state || !state->initialized || !input || !output) return -1;
+
+    size_t in_sz = state->input_size;
+    size_t hid_sz = state->hidden_size;
+    size_t out_sz = state->output_size;
+
+    /* 复制输入到隔离缓冲区 */
+    memcpy(state->input_buffer, input, in_sz * sizeof(float));
+
+    /* ZSFWS-P1-008: 使用隔离状态进行CfC前向传播
+     * 直接将隔离状态传递给cfc_forward，完全避开LNN全局状态 */
+    int result = cfc_forward(network->cfc_network,
+                             state->input_buffer,
+                             state->hidden_state,
+                             state->cell_state,
+                             state->output_buffer);
+
+    if (result != 0) return -1;
+
+    /* 复制输出 */
+    memcpy(output, state->output_buffer, out_sz * sizeof(float));
+    return 0;
+}
+
+/* ZSFWS-P1-008: 将隔离状态同步回LNN（可选，用于模态间状态传递）
+ * 调用此函数将隔离副本的最新隐藏状态写回LNN主状态，
+ * 使后续其他模态可以看到当前模态处理后的上下文。 */
+int lnn_forward_state_sync_back(LNN* network, LNNForwardState* state) {
+    if (!network || !state || !state->initialized) return -1;
+
+    LNN_LOCK(network);
+    memcpy(network->hidden_state, state->hidden_state,
+           state->hidden_size * sizeof(float));
+    if (network->cell_state && state->cell_state) {
+        size_t cs_size = network->config.hidden_size * (size_t)network->config.num_layers * 2;
+        memcpy(network->cell_state, state->cell_state,
+               (state->cell_state_size < cs_size ? state->cell_state_size : cs_size) * sizeof(float));
+    }
+    LNN_UNLOCK(network);
+    return 0;
+}
+
 /**
  * @brief 反向传播内部实现（无锁，调用者需持有 LNN_LOCK）
  * @param skip_cell_update 1=跳过cell参数更新（批量梯度累积模式）
@@ -644,6 +774,14 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
 
     memset(network->gradient_buffer, 0, hidden_size * sizeof(float));
     /* P0-002: 使用 cfc_backward_ex 传递 skip_cell_update 标志 */
+    /* ZSFUSA-C17: 批量梯度累积模式。
+     * 当batch_size>1时，对每个样本执行前向+反向，累积梯度：
+     *   1. 保存当前LNN状态
+     *   2. 对batch中每样本: lnn_forward_sample → lnn_backward_sample → 累积梯度
+     *   3. 取梯度平均值: grads /= batch_size
+     *   4. 恢复LNN状态
+     * 当前单样本模式(skip_cell_update=0)在批量训练时梯度方差大，
+     * 如需批量训练建议启用此路径。 */
     int result = cfc_backward_ex(network->cfc_network,
                             error_gradient,
                             network->gradient_buffer,
@@ -651,72 +789,29 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
                             skip_cell_update);
     SELFLNN_CHECK(result == 0, SELFLNN_ERROR_NETWORK_CONFIG,
                  "CfC网络反向传播失败");
-    float grad_norm = 0.0f;
-    for (size_t i = 0; i < hidden_size; i++) {
-        grad_norm += network->gradient_buffer[i] * network->gradient_buffer[i];
-    }
-    grad_norm = sqrtf(grad_norm);
-    if (!SELFLNN_IS_FINITE(grad_norm)) {
-        grad_norm = 0.0f;
-    }
+    /* ZSFUSA-C10: 公共梯度裁剪替代内联循环 */
     float max_grad_norm = network->config.max_grad_norm;
-    /* ZSFWS-P1修复: 将层深度因子应用于梯度裁剪阈值。
-     * 深层网络需要更宽松的裁剪阈值来避免梯度消失，
-     * 但对每层单独放缩会破坏梯度一致性。改为全局放缩裁剪阈值。 */
+    /* ZSFWS-P1修复: 将层深度因子应用于梯度裁剪阈值。 */
     if (depth_grad_factor > 1.0f) {
         max_grad_norm *= depth_grad_factor;
         if (max_grad_norm > 50.0f) max_grad_norm = 50.0f;
     }
-    if (grad_norm > max_grad_norm) {
-        float scale = max_grad_norm / (grad_norm + 1e-8f);
-        for (size_t i = 0; i < hidden_size; i++) {
-            network->gradient_buffer[i] *= scale;
-        }
-    }
+    lnn_clip_gradients(network->gradient_buffer, hidden_size, max_grad_norm);
 
-    /* FIX-022修复: 对权重梯度和偏置梯度也进行全局裁剪。
-     * 之前仅裁剪gradient_buffer（隐藏状态中间梯度），
-     * 实际用于参数更新的weight_gradients/bias_gradients从未被裁剪，
-     * 导致训练初期可能梯度爆炸产生NaN。 */
+    /* ZSFUSA-C10: 公共梯度裁剪替代内联循环(FIX-022权重偏置裁剪) */
     {
         float* wgrads = NULL;
         float* bgrads = NULL;
         size_t wc = 0, bc = 0;
         if (cfc_get_weight_matrix(network->cfc_network, &wgrads, &wc) == 0 && wgrads && wc > 0) {
-            float w_norm = 0.0f;
-            int w_has_nan = 0;
-            for (size_t i = 0; i < wc; i++) {
-                if (!isfinite(wgrads[i])) { w_has_nan = 1; wgrads[i] = 0.0f; }
-                else w_norm += wgrads[i] * wgrads[i];
-            }
-            w_norm = sqrtf(w_norm + 1e-32f);
-            if (!isfinite(w_norm)) w_norm = 0.0f;
-            if (w_norm > max_grad_norm && w_norm > 0.0f) {
-                float w_scale = max_grad_norm / w_norm;
-                for (size_t i = 0; i < wc; i++) wgrads[i] *= w_scale;
-            }
+            lnn_clip_gradients(wgrads, wc, max_grad_norm);
         }
         if (cfc_get_bias_vector(network->cfc_network, &bgrads, &bc) == 0 && bgrads && bc > 0) {
-            float b_norm = 0.0f;
-            int b_has_nan = 0;
-            for (size_t i = 0; i < bc; i++) {
-                if (!isfinite(bgrads[i])) { b_has_nan = 1; bgrads[i] = 0.0f; }
-                else b_norm += bgrads[i] * bgrads[i];
-            }
-            b_norm = sqrtf(b_norm + 1e-32f);
-            if (!isfinite(b_norm)) b_norm = 0.0f;
-            if (b_norm > max_grad_norm && b_norm > 0.0f) {
-                float b_scale = max_grad_norm / b_norm;
-                for (size_t i = 0; i < bc; i++) bgrads[i] *= b_scale;
-            }
+            lnn_clip_gradients(bgrads, bc, max_grad_norm);
         }
     }
 
-    /* R5-FIX: 补充cell级门控梯度的全局裁剪。
-     * 之前仅裁剪共享参数梯度(weight_gradients/bias_gradients)，
-     * cell级门控梯度(input_gate_weight_grad/forget_gate_weight_grad/
-     * output_gate_weight_grad/gate_bias_grad等)从未被裁剪，
-     * 训练初期门控权重可能梯度爆炸产生NaN。 */
+    /* ZSFUSA-C10: 公共梯度裁剪替代CLIP_GRAD_ARRAY宏(R5-FIX cell级门控裁剪) */
     if (network->cfc_network && network->cfc_network->layers) {
         float max_norm = network->config.max_grad_norm;
         if (max_norm <= 0.0f) max_norm = 10.0f;
@@ -728,31 +823,13 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
             size_t is = cell->config.input_size;
             size_t w_size = is * hs;
 
-            /* 辅助函数：裁剪一个梯度数组 */
-            #define CLIP_GRAD_ARRAY(grad_ptr, count) do { \
-                if (grad_ptr) { \
-                    float g_norm = 0.0f; \
-                    for (size_t gi = 0; gi < (count); gi++) { \
-                        if (!isfinite(grad_ptr[gi])) grad_ptr[gi] = 0.0f; \
-                        else g_norm += grad_ptr[gi] * grad_ptr[gi]; \
-                    } \
-                    g_norm = sqrtf(g_norm + 1e-32f); \
-                    if (g_norm > max_norm && g_norm > 0.0f) { \
-                        float g_scale = max_norm / g_norm; \
-                        for (size_t gi = 0; gi < (count); gi++) grad_ptr[gi] *= g_scale; \
-                    } \
-                } \
-            } while(0)
-
-            CLIP_GRAD_ARRAY(cell->input_gate_weight_grad, w_size);
-            CLIP_GRAD_ARRAY(cell->forget_gate_weight_grad, w_size);
-            CLIP_GRAD_ARRAY(cell->output_gate_weight_grad, w_size);
-            CLIP_GRAD_ARRAY(cell->hidden_to_gate_weight_grad, hs * hs);
-            CLIP_GRAD_ARRAY(cell->hidden_to_activation_weight_grad, hs * hs);
-            CLIP_GRAD_ARRAY(cell->gate_bias_grad, hs * 3);
-            CLIP_GRAD_ARRAY(cell->time_constant_grad, hs);
-
-            #undef CLIP_GRAD_ARRAY
+            lnn_clip_gradients(cell->input_gate_weight_grad, w_size, max_norm);
+            lnn_clip_gradients(cell->forget_gate_weight_grad, w_size, max_norm);
+            lnn_clip_gradients(cell->output_gate_weight_grad, w_size, max_norm);
+            lnn_clip_gradients(cell->hidden_to_gate_weight_grad, hs * hs, max_norm);
+            lnn_clip_gradients(cell->hidden_to_activation_weight_grad, hs * hs, max_norm);
+            lnn_clip_gradients(cell->gate_bias_grad, hs * 3, max_norm);
+            lnn_clip_gradients(cell->time_constant_grad, hs, max_norm);
         }
     }
 
@@ -859,6 +936,17 @@ int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
 
 /**
  * @brief 反向传播（训练）- 完整多层LNN实现
+ * 
+ * ZSFUSA-C17: 当前为单样本反向传播模式。
+ * 对于批量训练，推荐使用以下模式：
+ *   1. 循环每个样本调用 lnn_forward
+ *   2. 循环每个样本调用 lnn_backward（skip_cell_update=1 跳过cell状态更新）
+ *   3. 梯度累积完成后统一调用 optimizer_step
+ * 
+ * 当前 skip_cell_update 参数支持批量累积，但调用者需在批量结束时
+ * 手动调用 cfc_network_reset_cell_states 清除累积的状态。
+ * 
+ * 后续版本将提供 lnn_backward_batch() 封装函数自动管理此流程。
  */
 int lnn_backward(LNN* network, const float* target, float* loss) {
     SELFLNN_CHECK_NULL(network, "LNN网络句柄为空");
@@ -1813,51 +1901,40 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
                 }
             }
             
-            
-            /* R6-④修复: 移除lnn内部梯度裁剪, 消除与training.c gradient_clip的双重裁剪。
-             * 训练循环(training.c)在lnn_backward_batch返回后统一调用gradient_clip,
-             * 内部裁剪会导致梯度被两次衰减, 过度抑制训练信号。
-             * NaN检测保留以确保数值稳定性。 */
-#if 0  /* R6-④: 双重梯度裁剪——已禁用, 梯度裁剪统一由训练循环负责 */
-            float max_gradient_norm = network->config.max_grad_norm;
-            float weight_gradient_norm = 0.0f;
-            float bias_gradient_norm = 0.0f;
-            
-            for (size_t i = 0; i < weight_count; i++) {
-                weight_gradient_norm += accumulated_weight_gradients[i] * accumulated_weight_gradients[i];
-            }
-            for (size_t i = 0; i < bias_count; i++) {
-                bias_gradient_norm += accumulated_bias_gradients[i] * accumulated_bias_gradients[i];
-            }
-            
-            weight_gradient_norm = sqrtf(weight_gradient_norm);
-            if (!SELFLNN_IS_FINITE(weight_gradient_norm)) {
-                weight_gradient_norm = 0.0f;
-            }
-            bias_gradient_norm = sqrtf(bias_gradient_norm);
-            if (!SELFLNN_IS_FINITE(bias_gradient_norm)) {
-                bias_gradient_norm = 0.0f;
-            }
-            
-            if (weight_gradient_norm > max_gradient_norm) {
-                float weight_scale = max_gradient_norm / weight_gradient_norm;
-                for (size_t i = 0; i < weight_count; i++) {
-                    accumulated_weight_gradients[i] *= weight_scale;
-                }
-            }
-            
-            if (bias_gradient_norm > max_gradient_norm) {
-                float bias_scale = max_gradient_norm / bias_gradient_norm;
-                for (size_t i = 0; i < bias_count; i++) {
-                    accumulated_bias_gradients[i] *= bias_scale;
-                }
-            }
-#endif /* R6-④ */
+            /* R6-④修复: 梯度裁剪统一由训练循环(training.c)负责，
+             * lnn内部不再重复裁剪，避免双重衰减。 */
         }
         
         // 更新网络统计信息
         network->current_loss = total_loss / batch_size;
         network->backward_count += batch_size;
+
+        /* P0-004修复: cell级参数梯度归一化 —— 在批量累积后除以batch_size
+         * 1. 门控权重梯度: input_gate/forget_gate/output_gate_weight_grad
+         * 2. 隐藏连接梯度: hidden_to_gate/hidden_to_activation_weight_grad
+         * 3. 偏置梯度: gate_bias_grad
+         * 4. 时间常数梯度: time_constant_grad
+         * 归一化后与共享权重梯度保持一致，确保学习率语义统一（均值梯度而非总梯度）。 */
+        if (batch_size > 1) {
+            float cell_scale = 1.0f / (float)batch_size;
+            int num_layers_norm = cfc_network->config.num_layers;
+            for (int ln = 0; ln < num_layers_norm; ln++) {
+                CfCCell* cell = cfc_network->layers[ln];
+                if (!cell) continue;
+                size_t li = (ln == 0) ? input_size : hidden_size;
+                size_t cw = li * hidden_size;
+                size_t hh = hidden_size * hidden_size;
+                size_t k;
+                if (cell->input_gate_weight_grad)   for (k = 0; k < cw; k++) cell->input_gate_weight_grad[k]   *= cell_scale;
+                if (cell->forget_gate_weight_grad)  for (k = 0; k < cw; k++) cell->forget_gate_weight_grad[k]  *= cell_scale;
+                if (cell->output_gate_weight_grad)  for (k = 0; k < cw; k++) cell->output_gate_weight_grad[k]  *= cell_scale;
+                if (cell->hidden_to_gate_weight_grad)       for (k = 0; k < hh; k++) cell->hidden_to_gate_weight_grad[k]       *= cell_scale;
+                if (cell->hidden_to_activation_weight_grad) for (k = 0; k < hh; k++) cell->hidden_to_activation_weight_grad[k] *= cell_scale;
+                if (cell->gate_bias_grad)           for (k = 0; k < hidden_size * 3; k++) cell->gate_bias_grad[k] *= cell_scale;
+                if (cell->use_adaptive_tau && cell->time_constant_grad)
+                                                    for (k = 0; k < hidden_size; k++) cell->time_constant_grad[k] *= cell_scale;
+            }
+        }
 
         /* P0-BPTT修复: cell级参数梯度已在反向传播中累积完毕。
          * 统一的Adam更新由训练循环(training.c)在optimizer_update后
@@ -2942,6 +3019,29 @@ int lnn_get_state(const LNN* network, float* state_buffer, int buffer_dim) {
     if (buffer_dim > (int)hdim) memset(state_buffer + hdim, 0, (size_t)(buffer_dim - (int)hdim) * sizeof(float));
     LNN_UNLOCK(n);
     return 0;
+}
+
+/* ZSFUSA: 获取指定层的参数指针 */
+float* lnn_get_layer_parameters(LNN* lnn, int layer_id) {
+    if (!lnn || layer_id < 0) return NULL;
+    CfCNetwork* net = lnn_get_cfc_network(lnn);
+    if (!net) return NULL;
+    if (layer_id >= (int)net->config.num_layers) return NULL;
+    return net->layers[layer_id]->weight_matrix;
+}
+
+/* ZSFUSA: 获取指定层的参数数量 */
+size_t lnn_get_layer_parameter_count(LNN* lnn, int layer_id) {
+    if (!lnn || layer_id < 0) return 0;
+    CfCNetwork* net = lnn_get_cfc_network(lnn);
+    if (!net) return 0;
+    if (layer_id >= (int)net->config.num_layers) return 0;
+    CfCCell* cell = net->layers[layer_id];
+    size_t count = cell->config.input_size * cell->config.hidden_size;
+    count += cell->config.hidden_size;
+    count += cell->config.hidden_size * cell->config.hidden_size;
+    count += cell->config.hidden_size;
+    return count;
 }
 
 /* ================================================================

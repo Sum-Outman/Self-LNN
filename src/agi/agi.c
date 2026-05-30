@@ -54,83 +54,17 @@ void* selflnn_get_shared_lnn(void);
 #include <math.h>
 #include <time.h>
 
-/* ZSFZS-F025修复: 移除agi.c中10个extern未定义符号声明。
+/* M04修复: 移除agi.c中所有能力开关注册死代码。
  * capability_switch.c 的 ensure_callbacks_registered() 是唯一注册点。
- * agi.c 中这些 cap_check_* 和 cap_set_* 函数是死代码，
- * 仅通过 g_agi_cap_system 全局指针引用（也仅用于agi.c内部）。
- * 如果 capability_switch 要使用这些函数，应通过 selflnn_get_*() 访问器连接。 */
-/* 子系统接口前向声明（实现位于对应子系统模块）*/
-/* ZSFX-DEEP-R16-001: 移除#ifdef保护并内联实现11个缺失的能力控制函数
- * 这些函数被cap_check_* / cap_set_* 静态函数调用,需要在agi.c中直接实现 */
-extern int learning_engine_is_imitation_enabled(void* learner);
-extern int learning_engine_set_imitation_enabled(void* learner, int enable);
-extern int deep_reflection_is_enabled(void* reflection);
-extern void deep_reflection_enable(void* reflection);
-extern void deep_reflection_disable(void* reflection);
-extern int planning_is_enabled(void* planner);
-extern void planning_enable(void* planner);
-extern void planning_disable(void* planner);
-extern int dialogue_is_enabled(void* dialogue);
-extern void dialogue_enable(void* dialogue);
-extern void dialogue_disable(void* dialogue);
+ * 移除的代码包括:
+ *   - 11个extern子系统访问器声明
+ *   - 13对cap_check_* / cap_set_*静态函数 (~180行)
+ *   - g_agi_cap_system全局指针
+ *   - agi_register_all_capabilities()死函数
+ *   - R16-001 impl包装函数和宏重定向
+ * 总计清理约250行死代码，消除与capability_switch.c的双注册混淆风险。 */
 
-/* R16-001: 能力控制函数实现 — 通过capability_switch统一管理 */
- static int learning_engine_is_imitation_enabled_impl(void* learner) {
-     (void)learner;
-     return capability_is_enabled(CAP_IMITATION_LEARNING);
- }
- static int learning_engine_set_imitation_enabled_impl(void* learner, int enable) {
-     (void)learner;
-     return capability_set_enabled(CAP_IMITATION_LEARNING, enable);
- }
-static int deep_reflection_is_enabled_impl(void* reflection) {
-    (void)reflection;
-    return capability_is_enabled(CAP_REFLECTION);
-}
-static void deep_reflection_enable_impl(void* reflection) {
-    (void)reflection;
-    capability_set_enabled(CAP_REFLECTION, 1);
-}
-static void deep_reflection_disable_impl(void* reflection) {
-    (void)reflection;
-    capability_set_enabled(CAP_REFLECTION, 0);
-}
-static int planning_is_enabled_impl(void* planner) {
-    (void)planner;
-    return capability_is_enabled(CAP_PLANNING);
-}
-static void planning_enable_impl(void* planner) {
-    (void)planner;
-    capability_set_enabled(CAP_PLANNING, 1);
-}
-static void planning_disable_impl(void* planner) {
-    (void)planner;
-    capability_set_enabled(CAP_PLANNING, 0);
-}
-static int dialogue_is_enabled_impl(void* dialogue) {
-    (void)dialogue;
-    return capability_is_enabled(CAP_DIALOGUE);
-}
-static void dialogue_enable_impl(void* dialogue) {
-    (void)dialogue;
-    capability_set_enabled(CAP_DIALOGUE, 1);
-}
-static void dialogue_disable_impl(void* dialogue) {
-    (void)dialogue;
-    capability_set_enabled(CAP_DIALOGUE, 0);
-}
-/* 宏重定向: extern声明指向静态实现 */
-#define learning_engine_is_imitation_enabled    learning_engine_is_imitation_enabled_impl
-#define learning_engine_set_imitation_enabled   learning_engine_set_imitation_enabled_impl
-#define deep_reflection_is_enabled              deep_reflection_is_enabled_impl
-#define deep_reflection_enable                  deep_reflection_enable_impl
-#define deep_reflection_disable                 deep_reflection_disable_impl
-#define planning_is_enabled                     planning_is_enabled_impl
-#define planning_enable                         planning_enable_impl
-#define planning_disable                        planning_disable_impl
-#define dialogue_is_enabled                     dialogue_is_enabled_impl
-#define dialogue_enable                         dialogue_enable_impl
-#define dialogue_disable                        dialogue_disable_impl
+/* 子系统接口前向声明（实现位于对应子系统模块）*/
 #include "selflnn/concurrency/thread_pool.h"
 #include <stdlib.h>
 #include <string.h>
@@ -220,203 +154,6 @@ struct AGISystem {
     char self_model_description[AGI_DESC_LEN];
     int initialized;
 };
-
-/* 能力开关回调注册（P3.3） */
-static AGISystem* g_agi_cap_system = NULL;
-
-static int cap_check_self_cognition(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->self_cognition) return 0;
-    return self_cognition_system_is_enabled(sys->self_cognition) ? 1 : 0;
-}
-static int cap_set_self_cognition(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->self_cognition) return -1;
-    if (enable) self_cognition_system_enable(sys->self_cognition);
-    else self_cognition_system_disable(sys->self_cognition);
-    return 0;
-}
-
-static int cap_check_decision(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->decision) return 0;
-    return decision_engine_is_enabled(sys->decision);
-}
-static int cap_set_decision(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->decision) return -1;
-    if (enable) decision_engine_enable(sys->decision);
-    else decision_engine_disable(sys->decision);
-    return 0;
-}
-
-static int cap_check_learning(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->learner) return 0;
-    return learning_engine_is_enabled(sys->learner);
-}
-static int cap_set_learning(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->learner) return -1;
-    if (enable) learning_engine_enable(sys->learner);
-    else learning_engine_disable(sys->learner);
-    return 0;
-}
-
-static int cap_check_evolution(void) {
-    /* 演化能力通过学习引擎的自我演化功能控制 */
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->learner) return 0;
-    return learning_engine_is_enabled(sys->learner);
-}
-static int cap_set_evolution(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->learner) return -1;
-    if (enable) {
-        learning_engine_enable(sys->learner);
-        /* 联动LNN演化标志 */
-        if (sys->lnn) lnn_set_evolution_enabled(sys->lnn, 1);
-    } else {
-        learning_engine_disable(sys->learner);
-        if (sys->lnn) lnn_set_evolution_enabled(sys->lnn, 0);
-    }
-    return 0;
-}
-
-/* N-001修复: 移除#ifdef条件编译空壳分支。
- * 所有能力控制函数始终调用真实子系统，无论编译配置如何。
- * 原SELFLNN_AGI_DIRECT_CAPCALL宏的#else分支为无操作空壳，
- * 导致特定构建下模仿/反思/规划/对话开关完全失效。 */
-
-static int cap_check_imitation(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->learner) return 0;
-    return learning_engine_is_imitation_enabled(sys->learner);
-}
-static int cap_set_imitation(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->learner) return -1;
-    return learning_engine_set_imitation_enabled(sys->learner, enable);
-}
-
-static int cap_check_reflection(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->reflection) return 0;
-    return deep_reflection_is_enabled(sys->reflection);
-}
-static int cap_set_reflection(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->reflection) return -1;
-    if (enable) deep_reflection_enable(sys->reflection);
-    else deep_reflection_disable(sys->reflection);
-    return 0;
-}
-
-static int cap_check_planning(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->planner) return 0;
-    return planning_is_enabled(sys->planner);
-}
-static int cap_set_planning(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->planner) return -1;
-    if (enable) planning_enable(sys->planner);
-    else planning_disable(sys->planner);
-    return 0;
-}
-
-static int cap_check_dialogue(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->dialogue) return 0;
-    return dialogue_is_enabled(sys->dialogue);
-}
-static int cap_set_dialogue(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->dialogue) return -1;
-    if (enable) dialogue_enable(sys->dialogue);
-    else dialogue_disable(sys->dialogue);
-    return 0;
-}
-
-static int cap_check_correction(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->correction) return 0;
-    return dc_correction_is_enabled(sys->correction);
-}
-static int cap_set_correction(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->correction) return -1;
-    if (enable) dc_correction_enable(sys->correction);
-    else dc_correction_disable(sys->correction);
-    return 0;
-}
-
-static int cap_check_autonomous_execution(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->scheduler) return 0;
-    return system_scheduler_is_enabled(sys->scheduler);
-}
-static int cap_set_autonomous_execution(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->scheduler) return -1;
-    sys->autonomous_mode = (enable != 0) ? 1 : 0;
-    return system_scheduler_set_enabled(sys->scheduler, enable);
-}
-
-static int cap_check_concurrency(void) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->thread_pool) return 0;
-    /* 检查线程池实际运行状态：通过thread_pool_get_stats获取活跃线程数 */
-    size_t active_threads = 0, pending = 0, completed = 0;
-    thread_pool_get_stats(sys->thread_pool, &active_threads, &pending, &completed);
-    return (active_threads > 0) ? 1 : 0;
-}
-static int cap_set_concurrency(int enable) {
-    AGISystem* sys = g_agi_cap_system;
-    if (!sys || !sys->thread_pool) return -1;
-    if (enable) {
-        ThreadPoolConfig tpcfg;
-        memset(&tpcfg, 0, sizeof(tpcfg));
-        tpcfg.num_threads = 4;
-        tpcfg.max_tasks = 256;
-        tpcfg.dynamic_scaling = 1;
-        tpcfg.enable_priority = 1;
-        tpcfg.enable_work_stealing = 1;
-        tpcfg.max_tasks_per_thread = 64;
-        tpcfg.work_stealing_threshold = 2;
-        tpcfg.task_timeout_ms = 5000;
-        tpcfg.idle_thread_timeout_ms = 30000;
-        return thread_pool_set_config(sys->thread_pool, &tpcfg);
-    } else {
-        ThreadPoolConfig tpcfg;
-        memset(&tpcfg, 0, sizeof(tpcfg));
-        tpcfg.num_threads = 0;
-        tpcfg.max_tasks = 0;
-        tpcfg.dynamic_scaling = 0;
-        return thread_pool_set_config(sys->thread_pool, &tpcfg);
-    }
-}
-
-/* K-029: 好奇心能力共享状态 —— 独立于reflection管理 */
-static int g_agi_curiosity_state = 1;  /* 默认启用 */
-
-static int cap_check_curiosity(void) {
-    return g_agi_curiosity_state;
-}
-static int cap_set_curiosity(int enable) {
-    g_agi_curiosity_state = (enable != 0) ? 1 : 0;
-    return 0;
-}
-
-/* P0-015修复: agi.c不再重复注册能力模块。
- * capability_switch.c中的ensure_callbacks_registered()是唯一的注册点，
- * 使用selflnn_get_*()访问器获取子系统引用。
- * 此处仅设置g_agi_cap_system供agi.c内部回调使用。 */
-static void agi_register_all_capabilities(AGISystem* system) {
-    g_agi_cap_system = system;
-    /* 能力注册已迁移至capability_switch.c的ensure_callbacks_registered()，
-     * 避免双注册覆盖问题。 */
-}
 
 /* 认知循环并行任务结构 */
 typedef struct {
@@ -851,7 +588,6 @@ AGISystem* agi_system_create(const AGIConfig* config)
     system->status.attention_focus = 1.0f;
     system->status.uptime = time(NULL);
     system->status.last_state_change = time(NULL);
-    agi_register_all_capabilities(system);
     system->initialized = 1;
 
     return system;

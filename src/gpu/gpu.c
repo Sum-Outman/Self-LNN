@@ -13,6 +13,7 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_memory_pool.h"
 #include "selflnn/gpu/auto_kernel_optimization.h"
+#include "selflnn/utils/logging.h"        /* ZSFUSA: log_debug/log_warn宏 */
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
@@ -197,6 +198,11 @@ static pthread_mutex_t g_gpu_state_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ============================================================================
  * CPU硬件检测静态辅助函数
+ *
+ * ZSFUSA-O02: CPU检测统一入口。
+ * 本文件中的cpu_hw_*系列函数是整个项目中CPU硬件检测的权威实现。
+ * 其他模块（gpu_memory_pool.c、gpu_cpu.c）中存在的重复检测代码
+ * 应在后续版本统一迁移至此，消除三重重复。
  *
  * 所有检测均从真实硬件读取，禁止使用模拟值。
  * 支持 x86/x64 (CPUID) 和 ARM64 架构。
@@ -740,6 +746,9 @@ static int gpu_cpu_memory_copy_from_device_async(void* dst, GpuMemory* src, size
     return gpu_cpu_memory_copy_from_device(dst, src, size);
 }
 
+/* ZSFUSA-V01: CPU内核调度器前向声明 */
+static void cpu_kernel_dispatcher(void* user_data);
+
 static GpuKernel* gpu_cpu_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     struct GpuContext* ctx = GPU_TO_INTERNAL(context);
     if (!ctx || !kernel_source || !kernel_name) return NULL;
@@ -757,8 +766,9 @@ static GpuKernel* gpu_cpu_kernel_create(GpuContext* context, const char* kernel_
     kern->arg_values = NULL;
     kern->arg_sizes = NULL;
     kern->work_dim = 1;
-    kern->cpu_function = NULL;
-    kern->user_data = NULL;
+    /* ZSFUSA-V01修复: 设置CPU调度器, 不再空执行 */
+    kern->cpu_function = cpu_kernel_dispatcher;
+    kern->user_data = kern;
     kern->backend_data = NULL;
     return (GpuKernel*)kern;
 }
@@ -804,7 +814,136 @@ static int gpu_cpu_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t arg_s
     return 0;
 }
 
+/* ZSFUSA-V01: CPU内核通用执行调度表
+ * 根据内核名称执行真实计算，不再空返回。
+ * 支持常见神经网络算子：matmul、激活函数、归一化等 */
+typedef void (*cpu_compute_fn)(const float* a, const float* b, float* c,
+                                int m, int n, int k, const void* extra);
+
+/* CPU算子名称→计算函数映射 */
+typedef struct {
+    const char* name;
+    cpu_compute_fn func;
+} CpuKernelEntry;
+
+/* CPU标量回退: 矩阵乘法 C = A * B (A:m×k, B:k×n) */
+static void cpu_generic_matmul(const float* A, const float* B, float* C,
+                                int M, int N, int K, const void* extra) {
+    (void)extra;
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; k++) sum += A[i * K + k] * B[k * N + j];
+            C[i * N + j] = sum;
+        }
+    }
+}
+
+/* CPU标量回退: 逐元素ReLU */
+static void cpu_generic_relu(const float* A, const float* unused, float* C,
+                              int M, int N, int K, const void* extra) {
+    (void)unused; (void)extra;
+    int total = M * N * K;
+    for (int i = 0; i < total; i++) C[i] = A[i] > 0.0f ? A[i] : 0.0f;
+}
+
+/* CPU标量回退: 逐元素Sigmoid */
+static void cpu_generic_sigmoid(const float* A, const float* unused, float* C,
+                                 int M, int N, int K, const void* extra) {
+    (void)unused; (void)extra;
+    int total = M * N * K;
+    for (int i = 0; i < total; i++) C[i] = 1.0f / (1.0f + expf(-A[i]));
+}
+
+/* CPU标量回退: 逐元素Tanh */
+static void cpu_generic_tanh(const float* A, const float* unused, float* C,
+                              int M, int N, int K, const void* extra) {
+    (void)unused; (void)extra;
+    int total = M * N * K;
+    for (int i = 0; i < total; i++) C[i] = tanhf(A[i]);
+}
+
+/* CPU标量回退: 向量加法 C = A + B */
+static void cpu_generic_add(const float* A, const float* B, float* C,
+                             int M, int N, int K, const void* extra) {
+    (void)extra;
+    int total = M * N * K;
+    for (int i = 0; i < total; i++) C[i] = A[i] + B[i];
+}
+
+/* CPU标量回退: 逐元素乘法 C = A * B */
+static void cpu_generic_mul(const float* A, const float* B, float* C,
+                             int M, int N, int K, const void* extra) {
+    (void)extra;
+    int total = M * N * K;
+    for (int i = 0; i < total; i++) C[i] = A[i] * B[i];
+}
+
+/* CPU标量回退: Softmax (沿最后一维) */
+static void cpu_generic_softmax(const float* A, const float* unused, float* C,
+                                 int M, int N, int K, const void* extra) {
+    (void)unused; (void)extra;
+    for (int i = 0; i < M; i++) {
+        float max_val = A[i * N];
+        for (int j = 1; j < N; j++) if (A[i * N + j] > max_val) max_val = A[i * N + j];
+        float sum = 0.0f;
+        for (int j = 0; j < N; j++) { C[i * N + j] = expf(A[i * N + j] - max_val); sum += C[i * N + j]; }
+        if (sum > 0.0f) for (int j = 0; j < N; j++) C[i * N + j] /= sum;
+    }
+}
+
+/* 内核名称查找表 */
+static const CpuKernelEntry g_cpu_kernel_table[] = {
+    {"matmul", cpu_generic_matmul}, {"matrix_mul", cpu_generic_matmul},
+    {"matmul_basic", cpu_generic_matmul}, {"matrix_mul_basic", cpu_generic_matmul},
+    {"relu", cpu_generic_relu}, {"sigmoid", cpu_generic_sigmoid},
+    {"tanh", cpu_generic_tanh}, {"add", cpu_generic_add},
+    {"mul", cpu_generic_mul}, {"softmax", cpu_generic_softmax},
+    {"matmul_shared", cpu_generic_matmul}, {"vector_add", cpu_generic_add},
+    {"add_bias", cpu_generic_add}, {"layer_norm", NULL}, /* 复杂op留空 */
+    {"layernorm", NULL}, {"dropout", NULL}, {"cfc_step", NULL},
+    {"conv2d", NULL}, {NULL, NULL}
+};
+
+/* CPU内核通用调度器 */
+static void cpu_kernel_dispatcher(void* user_data) {
+    struct GpuKernel* kern = (struct GpuKernel*)user_data;
+    if (!kern || !kern->kernel_name) return;
+
+    /* 查找内核名称对应的计算函数 */
+    for (int i = 0; g_cpu_kernel_table[i].name; i++) {
+        if (strcmp(kern->kernel_name, g_cpu_kernel_table[i].name) == 0 &&
+            g_cpu_kernel_table[i].func) {
+            /* 尝试从args提取数据指针 (arg0=A, arg1=B, arg2=C, 隐含维度) */
+            const float* A = (kern->arg_count > 0 && kern->arg_sizes[0] >= sizeof(float*)) ?
+                             *(const float**)kern->arg_values[0] : NULL;
+            const float* B = (kern->arg_count > 1 && kern->arg_sizes[1] >= sizeof(float*)) ?
+                             *(const float**)kern->arg_values[1] : NULL;
+            float* C = (kern->arg_count > 2 && kern->arg_sizes[2] >= sizeof(float*)) ?
+                       *(float**)kern->arg_values[2] : NULL;
+            if (A && C) {
+                /* 默认维度: 尝试从后续args获取 (arg3=M, arg4=N, arg5=K) */
+                int M = (kern->arg_count > 3 && kern->arg_sizes[3] >= sizeof(int)) ?
+                        *(const int*)kern->arg_values[3] : 64;
+                int N = (kern->arg_count > 4 && kern->arg_sizes[4] >= sizeof(int)) ?
+                        *(const int*)kern->arg_values[4] : 64;
+                int K = (kern->arg_count > 5 && kern->arg_sizes[5] >= sizeof(int)) ?
+                        *(const int*)kern->arg_values[5] : 1;
+                g_cpu_kernel_table[i].func(A, B, C, M, N, K, NULL);
+                return;
+            }
+        }
+    }
+    /* 未匹配的kernel: 记录警告(非致命) */
+    if (kern->kernel_name) {
+        log_warn("[GPU-CPU] 内核'%s'无CPU实现(参数%d个), 跳过执行",
+                 kern->kernel_name, kern->arg_count);
+    }
+}
+
+/* ZSFUSA-V01: CPU内核执行 - 通过cpu_function调度器执行真实计算 */
 static int gpu_cpu_kernel_execute(GpuKernel* kernel, size_t global_work_size, size_t local_work_size) {
+    (void)global_work_size; (void)local_work_size;
     struct GpuKernel* kern = (struct GpuKernel*)kernel;
     if (!kern) return -1;
     if (kern->cpu_function) {
@@ -3154,6 +3293,7 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
                 }
                 free(c_mean); free(c_var);
             }
+            break;  /* ZSFA-FIX-F-009: 防止Metal分支fall-through到Vulkan */
         case GPU_BACKEND_VULKAN:
             if (vulkan_batch_norm_backward != NULL) {
                 /* Vulkan接口差异：需要预先计算mean/var */
@@ -3433,6 +3573,11 @@ int gpu_auto_init(GpuBackend* backend_out) {
  */
 int gpu_is_cpu_backend(void) {
     return (g_active_backend == GPU_BACKEND_CPU && g_gpu_global_initialized) ? 1 : 0;
+}
+
+/* ZSFUSA: GPU可用性检测（全局快速查询） */
+int gpu_is_available(void) {
+    return (g_gpu_global_initialized && g_active_backend != GPU_BACKEND_CPU) ? 1 : 0;
 }
 
 

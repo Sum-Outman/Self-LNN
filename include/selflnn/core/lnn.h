@@ -183,6 +183,40 @@ SELFLNN_API void lnn_unlock(LNN* network);
 int lnn_forward_safe(LNN* network, const float* input, size_t input_size,
                      float* output, size_t output_size);
 
+/* ================================================================
+ * ZSFWS-P1-008: 并发前向传播——每调用方独立的隐藏状态副本
+ * 解决互斥锁瓶颈：多个模态（视觉/音频/文本/传感器等）可同时
+ * 使用隔离的CfC状态进行前向传播，无需等待彼此释放LNN全局锁。
+ * 权重读取使用RWLock的读锁（多读者并发），仅训练写入时排他。
+ * ================================================================ */
+
+/** @brief 隔离前向传播状态（每模态/每调用方独立分配） */
+typedef struct {
+    float* hidden_state;     /**< 隐藏状态副本 [hidden_size] */
+    float* cell_state;       /**< CfC细胞状态副本 [cell_state_size] */
+    float* input_buffer;     /**< 输入缓冲区 [input_size] */
+    float* output_buffer;    /**< 输出缓冲区 [output_size] */
+    size_t hidden_size;
+    size_t cell_state_size;
+    size_t input_size;
+    size_t output_size;
+    int initialized;
+} LNNForwardState;
+
+/** @brief 创建隔离前向传播状态 */
+LNNForwardState* lnn_forward_state_create(LNN* network);
+
+/** @brief 释放隔离前向传播状态 */
+void lnn_forward_state_free(LNNForwardState* state);
+
+/** @brief 使用隔离状态的前向传播（无全局锁，可并发调用）
+ *  注意：此函数仅对LNN权重加读锁（RWLock），隐藏状态使用state副本。
+ *  多个调用方使用各自的LNNForwardState实例可安全并发。
+ *  训练期间(写锁持有中)调用此函数会阻塞等待。
+ *  @return 0=成功, -1=失败 */
+int lnn_forward_isolated(LNN* network, LNNForwardState* state,
+                         const float* input, float* output);
+
 /**
  * @brief 反向传播（训练）
  * 
@@ -192,6 +226,39 @@ int lnn_forward_safe(LNN* network, const float* input, size_t input_size,
  * @return int 成功返回0，失败返回-1
  */
 int lnn_backward(LNN* network, const float* target, float* loss);
+
+/**
+ * @defgroup batch_training 批量训练API
+ * @brief 液态神经网络批量训练接口族
+ * 
+ * 批量训练的三种推荐模式：
+ * 
+ * 模式一：单样本逐次累积（当前默认）
+ *   for each sample in batch:
+ *       lnn_forward(network, input[i], output[i])
+ *       lnn_backward_accumulate(network, target[i], &loss)
+ *   cfc_apply_cell_gradients(network->cfc_network)
+ *   optimizer_step(optimizer, params, grads, param_count, learning_rate)
+ * 
+ * 模式二：批量反向传播（高性能GPU）
+ *   lnn_forward_batch(network, inputs, outputs, batch_size)
+ *   lnn_backward_batch(network, inputs, output_gradients, param_gradients, batch_size)
+ *   optimizer_step(optimizer, params, param_gradients, param_count, learning_rate)
+ * 
+ * 模式三：手动skip_cell_update累积（高级用法）
+ *   for each sample in batch:
+ *       lnn_forward(network, input[i], output[i])
+ *       _lnn_backward_internal_ex(network, target[i], &loss, 1)
+ *   cfc_network_reset_cell_states(network->cfc_network)
+ *   optimizer_step(optimizer, params, grads, param_count, learning_rate)
+ * 
+ * 注意：
+ *   - lnn_backward() 始终以 skip_cell_update=0 调用，每样本独立反向，无梯度累积
+ *   - lnn_backward_accumulate() 以 skip_cell_update=1 调用，仅累积梯度不更新
+ *   - lnn_backward_batch() 为完整的批量梯度下降实现，支持梯度裁剪和优化策略
+ * 
+ * @{
+ */
 
 /**
  * @brief P0-002修复: 反向传播（仅累积梯度，不更新cell级参数）
@@ -384,6 +451,10 @@ float* lnn_get_parameters(LNN* network);
  */
 float* lnn_get_gradients(LNN* network);
 
+/* ZSFUSA: 获取指定层的参数指针和参数数量 */
+float* lnn_get_layer_parameters(LNN* lnn, int layer_id);
+size_t lnn_get_layer_parameter_count(LNN* lnn, int layer_id);
+
 /**
  * @brief 批量前向传播
  * 
@@ -406,6 +477,8 @@ int lnn_forward_batch(LNN* network, const float* inputs, float* outputs, size_t 
  * @return int 成功返回0，失败返回-1
  */
 int lnn_backward_batch(LNN* network, const float* inputs, const float* output_gradients, float* parameter_gradients, size_t batch_size);
+
+/** @} */ /* 批量训练API组结束 */
 
 /**
  * @brief 设置LNN的记忆系统引用（用于记忆增强前向传播）

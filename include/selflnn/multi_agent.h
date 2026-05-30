@@ -356,6 +356,8 @@ typedef struct {
     char* message_type;             /**< 消息类型 */
     void* message_data;             /**< 消息数据 */
     size_t data_size;               /**< 数据大小 */
+    char* content;                  /**< 消息文本内容 */
+    size_t content_size;            /**< 内容大小（字节数） */
     float timestamp;                /**< 时间戳 */
     float priority;                 /**< 优先级 */
     int ttl;                        /**< 生存时间（time to live） */
@@ -460,6 +462,7 @@ typedef struct {
     // 智能体分配
     int* assigned_agents_list;      /**< 分配到的智能体ID列表（动态分配） */
     int assigned_agents;            /**< 已分配智能体数 */
+    int assigned_agent;             /**< 单个分配智能体索引 */
     int completed_agents;           /**< 已完成智能体数 */
     
     // 时间管理

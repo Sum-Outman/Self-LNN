@@ -131,6 +131,13 @@ void network_state_set_laplace_metrics(NetworkState* state,
                                         float recommended_cutoff,
                                         float frequency_bandwidth);
 
+/**
+ * @brief 获取拉普拉斯稳定性分数
+ * ZSFUSA-V7: 添加getter使LNN层可将score传播到CfCCell，
+ * 补充state.c私有NetworkState结构体的读访问。
+ */
+float network_state_get_laplace_stability_score(const NetworkState* state);
+
 #ifdef __cplusplus
 }
 #endif

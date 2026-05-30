@@ -8,7 +8,7 @@
 
 #include "selflnn/multimodal/character_segmentation.h"
 #include "selflnn/core/lnn.h"           /* 液态神经网络 */
-#include "selflnn/core/memory.h"
+#include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/platform.h"
