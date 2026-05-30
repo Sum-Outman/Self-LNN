@@ -690,14 +690,15 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
                 command->target_position[1] != robot->status.position[1] ||
                 command->target_position[2] != robot->status.position[2]) {
                 
-                // 更新目标位置
-                memcpy(robot->status.position, command->target_position, 3 * sizeof(float));
-                
-                // 更新线速度
+                /* F-029修复: 先计算方向向量，再更新位置。
+                 * 原代码先memcpy覆盖position再计算差值，导致速度永远为0。 */
                 float dx = command->target_position[0] - robot->status.position[0];
                 float dy = command->target_position[1] - robot->status.position[1];
                 float dz = command->target_position[2] - robot->status.position[2];
                 float distance = sqrtf(dx*dx + dy*dy + dz*dz);
+                
+                // 更新目标位置
+                memcpy(robot->status.position, command->target_position, 3 * sizeof(float));
                 
                 if (distance > 0.0f) {
                     float speed = command->max_velocity > 0.0f ? command->max_velocity : 0.5f;

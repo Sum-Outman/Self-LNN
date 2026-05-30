@@ -691,6 +691,7 @@ int teach_evaluate_reproduction(TeachSystem* system,
                                  size_t act_dim,
                                  float* accuracy_out,
                                  float* similarity_out) {
+    float* demo_actions = NULL;
     if (!system || !task_label || !ground_truth_actions || !accuracy_out || !similarity_out) return -1;
 
     size_t best_demo = TEACH_MAX_DEMOS;
@@ -702,7 +703,7 @@ int teach_evaluate_reproduction(TeachSystem* system,
     }
     if (best_demo >= TEACH_MAX_DEMOS) return -2;
 
-    float demo_actions[8192 * 64] = {0};
+    demo_actions = (float*)safe_calloc(8192 * 64, sizeof(float));
     size_t demo_len = 0;
     size_t obs_buf_size = system->obs_dim < 256 ? system->obs_dim : 256;
     float demo_obs[256] = {0};
@@ -742,6 +743,7 @@ int teach_evaluate_reproduction(TeachSystem* system,
         *similarity_out = 0.0f;
     }
 
+    safe_free((void**)&demo_actions);
     return 0;
 }
 

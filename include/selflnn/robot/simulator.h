@@ -187,6 +187,8 @@ typedef struct {
     float inv_mass;
     float inv_inertia[3];
     float radius;              /* 碰撞体包围球半径（传感器模拟用） */
+    float velocity[3];         /* 碰撞体线速度（用于碰撞求解器） */
+    float angular_velocity[3]; /* 碰撞体角速度（用于碰撞求解器） */
     int active;
 } SimCollisionObject;
 

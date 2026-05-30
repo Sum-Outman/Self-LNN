@@ -543,6 +543,12 @@ static void sim_update_collision_objects(Simulator* sim) {
         obj->world_transform[4] = r->orientation[1];
         obj->world_transform[5] = r->orientation[2];
         obj->world_transform[6] = r->orientation[3];
+        obj->velocity[0] = r->velocity[0];
+        obj->velocity[1] = r->velocity[1];
+        obj->velocity[2] = r->velocity[2];
+        obj->angular_velocity[0] = r->angular_velocity[0];
+        obj->angular_velocity[1] = r->angular_velocity[1];
+        obj->angular_velocity[2] = r->angular_velocity[2];
         obj->inv_mass = 1.0f;
         obj->inv_inertia[0] = 1.0f; obj->inv_inertia[1] = 1.0f; obj->inv_inertia[2] = 1.0f;
         obj->active = 1;
@@ -567,6 +573,12 @@ static void sim_update_collision_objects(Simulator* sim) {
         obj->world_transform[4] = p->orientation[1];
         obj->world_transform[5] = p->orientation[2];
         obj->world_transform[6] = p->orientation[3];
+        obj->velocity[0] = p->velocity[0];
+        obj->velocity[1] = p->velocity[1];
+        obj->velocity[2] = p->velocity[2];
+        obj->angular_velocity[0] = p->angular_velocity[0];
+        obj->angular_velocity[1] = p->angular_velocity[1];
+        obj->angular_velocity[2] = p->angular_velocity[2];
         if (p->is_static || p->mass <= 0.0f) {
             obj->inv_mass = 0.0f;
             obj->inv_inertia[0] = 0.0f; obj->inv_inertia[1] = 0.0f; obj->inv_inertia[2] = 0.0f;
@@ -843,7 +855,9 @@ static void sim_solver_solve_contact(SimContactPoint* cp, SimCollisionObject* ob
     if (bias < 0.0f) bias = 0.0f;
     if (bias > 0.2f) bias = 0.2f;
 
-    float rel_vel_n = 0.0f;
+    float rel_vel_n = (obj_a->velocity[0] - obj_b->velocity[0]) * cp->normal[0] +
+                      (obj_a->velocity[1] - obj_b->velocity[1]) * cp->normal[1] +
+                      (obj_a->velocity[2] - obj_b->velocity[2]) * cp->normal[2];
     float normal_impulse = (bias + rel_vel_n * cp->restitution) / inv_mass_sum;
     float old_impulse = cp->impulse_normal;
     cp->impulse_normal += normal_impulse;
@@ -872,7 +886,9 @@ static void sim_solver_solve_contact(SimContactPoint* cp, SimCollisionObject* ob
 
     float max_friction = cp->friction_coeff * cp->impulse_normal;
     for (int t = 0; t < 2; t++) {
-        float rel_vel_t = 0.0f;
+        float rel_vel_t = (obj_a->velocity[0] - obj_b->velocity[0]) * tangent[t][0] +
+                          (obj_a->velocity[1] - obj_b->velocity[1]) * tangent[t][1] +
+                          (obj_a->velocity[2] - obj_b->velocity[2]) * tangent[t][2];
         float friction_impulse = -rel_vel_t / inv_mass_sum;
         float old_friction = cp->impulse_tangent[t];
         cp->impulse_tangent[t] += friction_impulse;

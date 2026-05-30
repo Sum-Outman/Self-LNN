@@ -875,7 +875,10 @@ LaplaceNeuralOperator* laplace_operator_create_1d(const LaplaceOperatorConfig* c
         op->bn_beta = (double*)safe_malloc(config->num_layers * hidden * sizeof(double));
         op->bn_running_mean = (double*)safe_malloc(config->num_layers * hidden * sizeof(double));
         op->bn_running_var = (double*)safe_malloc(config->num_layers * hidden * sizeof(double));
-        if (!op->bn_gamma || !op->bn_beta || !op->bn_running_mean || !op->bn_running_var) {
+        op->bn_d_gamma = (double*)safe_calloc(config->num_layers * hidden, sizeof(double));
+        op->bn_d_beta = (double*)safe_calloc(config->num_layers * hidden, sizeof(double));
+        if (!op->bn_gamma || !op->bn_beta || !op->bn_running_mean || !op->bn_running_var ||
+            !op->bn_d_gamma || !op->bn_d_beta) {
             laplace_operator_destroy(op);
             return NULL;
         }
@@ -972,7 +975,10 @@ LaplaceNeuralOperator* laplace_operator_create_2d(const LaplaceOperatorConfig* c
         op->bn_beta = (double*)safe_malloc(config->num_layers * hidden * sizeof(double));
         op->bn_running_mean = (double*)safe_malloc(config->num_layers * hidden * sizeof(double));
         op->bn_running_var = (double*)safe_malloc(config->num_layers * hidden * sizeof(double));
-        if (!op->bn_gamma || !op->bn_beta || !op->bn_running_mean || !op->bn_running_var) {
+        op->bn_d_gamma = (double*)safe_calloc(config->num_layers * hidden, sizeof(double));
+        op->bn_d_beta = (double*)safe_calloc(config->num_layers * hidden, sizeof(double));
+        if (!op->bn_gamma || !op->bn_beta || !op->bn_running_mean || !op->bn_running_var ||
+            !op->bn_d_gamma || !op->bn_d_beta) {
             laplace_operator_destroy(op);
             return NULL;
         }
@@ -1014,6 +1020,8 @@ void laplace_operator_destroy(LaplaceNeuralOperator* op) {
     safe_free((void**)&op->bn_beta);
     safe_free((void**)&op->bn_running_mean);
     safe_free((void**)&op->bn_running_var);
+    safe_free((void**)&op->bn_d_gamma);
+    safe_free((void**)&op->bn_d_beta);
     safe_free((void**)&op->adam_m);
     safe_free((void**)&op->adam_v);
 
@@ -1388,6 +1396,31 @@ double laplace_operator_train_step_1d(LaplaceNeuralOperator* op,
             dL_dh_next[i] *= activation_derivative(spec_outputs[l][i], op->config.activation);
         }
 
+        /* BN梯度反向传播：计算dL/dgamma和dL/dbeta，dL_dh_next变为BN输入梯度 */
+        if (op->config.use_batch_norm) {
+            for (size_t c = 0; c < hidden; c++) {
+                double gamma = op->bn_gamma[l * hidden + c];
+                double beta_val = op->bn_beta[l * hidden + c];
+                double var = op->bn_running_var[l * hidden + c];
+                double std_inv = 1.0 / sqrt(var + 1e-5);
+                double dgamma = 0.0;
+                double dbeta = 0.0;
+                for (size_t b = 0; b < batch; b++) {
+                    for (size_t s = 0; s < grid_size; s++) {
+                        size_t idx = b * hidden * grid_size + c * grid_size + s;
+                        double dy = dL_dh_next[idx];
+                        double y = spec_outputs[l][idx];
+                        double x_hat = (y - beta_val) / gamma;
+                        dgamma += dy * x_hat;
+                        dbeta += dy;
+                        dL_dh_next[idx] = dy * gamma * std_inv;
+                    }
+                }
+                op->bn_d_gamma[l * hidden + c] = dgamma;
+                op->bn_d_beta[l * hidden + c] = dbeta;
+            }
+        }
+
         /* 谱卷积反向传播 (计算dW, db, 和上一层dL/dh) */
         double* lay_dW = (double*)safe_malloc(w_complex * sizeof(double));
         double* lay_db = (double*)safe_malloc(b_size * sizeof(double));
@@ -1442,11 +1475,11 @@ double laplace_operator_train_step_1d(LaplaceNeuralOperator* op,
 
     safe_free((void**)&dL_dh);
 
-    /* BN参数（简单SGD） */
+    /* BN参数（使用真实梯度更新） */
     if (op->config.use_batch_norm) {
         for (size_t i = 0; i < num_layers * hidden; i++) {
-            op->bn_gamma[i] -= lr * 0.01;
-            op->bn_beta[i] -= lr * 0.01;
+            op->bn_gamma[i] -= lr * op->bn_d_gamma[i];
+            op->bn_beta[i] -= lr * op->bn_d_beta[i];
         }
     }
 
@@ -1635,6 +1668,31 @@ double laplace_operator_train_step_2d(LaplaceNeuralOperator* op,
             dL_dh[i] *= activation_derivative(spec_outputs[l][i], op->config.activation);
         }
 
+        /* BN梯度反向传播 */
+        if (op->config.use_batch_norm) {
+            for (size_t c = 0; c < hidden; c++) {
+                double gamma = op->bn_gamma[l * hidden + c];
+                double beta_val = op->bn_beta[l * hidden + c];
+                double var = op->bn_running_var[l * hidden + c];
+                double std_inv = 1.0 / sqrt(var + 1e-5);
+                double dgamma = 0.0;
+                double dbeta = 0.0;
+                for (size_t b = 0; b < batch; b++) {
+                    for (size_t s = 0; s < spatial; s++) {
+                        size_t idx = b * hidden * spatial + c * spatial + s;
+                        double dy = dL_dh[idx];
+                        double y = spec_outputs[l][idx];
+                        double x_hat = (y - beta_val) / gamma;
+                        dgamma += dy * x_hat;
+                        dbeta += dy;
+                        dL_dh[idx] = dy * gamma * std_inv;
+                    }
+                }
+                op->bn_d_gamma[l * hidden + c] = dgamma;
+                op->bn_d_beta[l * hidden + c] = dbeta;
+            }
+        }
+
         double* lay_dW = (double*)safe_malloc(w_complex * sizeof(double));
         double* lay_db = (double*)safe_malloc(b_size * sizeof(double));
         double* dL_dh_prev = (double*)safe_malloc(batch * hidden * spatial * sizeof(double));
@@ -1688,8 +1746,8 @@ double laplace_operator_train_step_2d(LaplaceNeuralOperator* op,
 
     if (op->config.use_batch_norm) {
         for (size_t i = 0; i < num_layers * hidden; i++) {
-            op->bn_gamma[i] -= lr * 0.01;
-            op->bn_beta[i] -= lr * 0.01;
+            op->bn_gamma[i] -= lr * op->bn_d_gamma[i];
+            op->bn_beta[i] -= lr * op->bn_d_beta[i];
         }
     }
 

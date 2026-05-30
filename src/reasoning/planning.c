@@ -2776,6 +2776,14 @@ int planning_evolve_architecture(PlanningSystem* system, size_t num_generations,
                        system->evolution_population + i * genome_size,
                        genome_size * sizeof(float));
             }
+            if (system->multi_objective_config.enabled && system->pareto_objectives) {
+                system->pareto_objectives[i * system->num_pareto_objectives + 0] =
+                    system->evolution_fitness[i];
+                for (int o = 1; o < system->num_pareto_objectives && o < 4; o++) {
+                    system->pareto_objectives[i * system->num_pareto_objectives + o] =
+                        system->evolution_fitness[i] * (1.0f - (float)o * 0.1f);
+                }
+            }
         }
         system->evolution_average_fitness = sum_fitness / (float)system->evolution_population_size;
         system->evolution_current_generation = 0;
@@ -2862,6 +2870,13 @@ static int planning_evolve_architecture_generation(PlanningSystem* system) {
             memcpy(system->evolution_best_genome, new_population + i * genome_size,
                    genome_size * sizeof(float));
         }
+        if (system->multi_objective_config.enabled && system->pareto_objectives) {
+            system->pareto_objectives[i * system->num_pareto_objectives + 0] = fitness;
+            for (int o = 1; o < system->num_pareto_objectives && o < 4; o++) {
+                system->pareto_objectives[i * system->num_pareto_objectives + o] =
+                    fitness * (1.0f - (float)o * 0.1f);
+            }
+        }
     }
 
     safe_free((void**)&system->evolution_population);
@@ -2884,7 +2899,9 @@ static int planning_evolve_architecture_generation(PlanningSystem* system) {
                 if (i == j) continue;
                 int dominates = 1;
                 for (int o = 0; o < system->num_pareto_objectives; o++) {
-                    if (system->evolution_fitness[j] <= system->evolution_fitness[i]) {
+                    float f_j = system->pareto_objectives[j * system->num_pareto_objectives + o];
+                    float f_i = system->pareto_objectives[i * system->num_pareto_objectives + o];
+                    if (f_j <= f_i) {
                         dominates = 0;
                         break;
                     }
@@ -3037,9 +3054,15 @@ int planning_evolution_get_objectives(PlanningSystem* system, size_t individual_
     if (!system || !objectives || num_objectives <= 0) return -1;
     if (individual_idx >= system->evolution_population_size) return -1;
 
-    objectives[0] = system->evolution_fitness[individual_idx];
-    for (int i = 1; i < num_objectives && i < 4; i++) {
-        objectives[i] = system->evolution_fitness[individual_idx] * (1.0f - (float)i * 0.1f);
+    if (system->pareto_objectives && system->num_pareto_objectives > 0) {
+        for (int i = 0; i < num_objectives && i < system->num_pareto_objectives; i++) {
+            objectives[i] = system->pareto_objectives[individual_idx * system->num_pareto_objectives + i];
+        }
+    } else {
+        objectives[0] = system->evolution_fitness[individual_idx];
+        for (int i = 1; i < num_objectives && i < 4; i++) {
+            objectives[i] = system->evolution_fitness[individual_idx] * (1.0f - (float)i * 0.1f);
+        }
     }
     return 0;
 }

@@ -131,15 +131,12 @@ int pe_world_step_ngs(PEWorld* world, float dt) {
         for (int i = 0; i < world->body_count; i++) {
             PEBody* b = &world->bodies[i];
             if (!b->props.active || b->props.type != PE_BODY_DYNAMIC) continue;
-            /* R4-007修复: 使用局部变量gravity_impulse而非修改全局gravity */
-            float gravity_impulse[3];
-            gravity_impulse[0] = world->gravity[0] * b->props.inv_mass * sub_dt;
-            gravity_impulse[1] = world->gravity[1] * b->props.inv_mass * sub_dt;
-            gravity_impulse[2] = world->gravity[2] * b->props.inv_mass * sub_dt;
-            if (pe_vec3_len_sq(gravity_impulse) > PE_EPS) {
-                b->vel[0] += gravity_impulse[0] * sub_dt;
-                b->vel[1] += gravity_impulse[1] * sub_dt;
-                b->vel[2] += gravity_impulse[2] * sub_dt;
+            /* F-001修复: 重力是加速度，直接加到速度上: v += g*dt。
+             * 原实现错误地乘了inv_mass(重力非力,不需要除质量)和sub_dt²(二阶积分错误) */
+            if (fabsf(world->gravity[0]) > PE_EPS || fabsf(world->gravity[1]) > PE_EPS || fabsf(world->gravity[2]) > PE_EPS) {
+                b->vel[0] += world->gravity[0] * sub_dt;
+                b->vel[1] += world->gravity[1] * sub_dt;
+                b->vel[2] += world->gravity[2] * sub_dt;
             }
             pe_integrate_velocity(b, sub_dt);
         }

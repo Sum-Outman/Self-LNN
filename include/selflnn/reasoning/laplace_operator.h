@@ -100,6 +100,8 @@ typedef struct LaplaceNeuralOperator_t {
     double* bn_beta;                          /**< [num_layers][hidden_channels] */
     double* bn_running_mean;                  /**< [num_layers][hidden_channels] */
     double* bn_running_var;                   /**< [num_layers][hidden_channels] */
+    double* bn_d_gamma;                       /**< [num_layers][hidden_channels] BN gamma梯度 */
+    double* bn_d_beta;                        /**< [num_layers][hidden_channels] BN beta梯度 */
 
     /* 优化器状态(Adam) */
     double* adam_m;                           /**< 一阶动量 */

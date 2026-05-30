@@ -287,7 +287,8 @@ int dynamics_update(DynamicsSystem* system, const float* input,
             dynamics_internal_solve_implicit_euler(system, input, dt);
             break;
         case SOLVER_BDF2: {
-            /* 委托ode_solvers.c的BDF-2实现 */
+            int bdf2_delegate_ok = 0;  /* F-016: 委托求解器成功标志 */
+            /* 尝试委托ode_solvers.c的BDF2实现 */
             float* y = (float*)safe_malloc(2 * state_size * sizeof(float));
             size_t ws_sz = ode_bdf2_workspace_size(2 * state_size);
             float* bdf_ws = (float*)safe_malloc(ws_sz > 0 ? ws_sz : 4096);
@@ -314,9 +315,12 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                     system->velocity[i] = y[state_size + i];
                 }
                 if (!system->bdf2_initialized) system->bdf2_initialized = 1;
+                bdf2_delegate_ok = 1;  /* F-016: 标记委托求解器成功 */
             }
             safe_free((void**)&y); safe_free((void**)&bdf_ws);
-            if (!y || !bdf_ws) {
+            /* F-016修复: 原代码在safe_free后将y和bdf_ws置NULL，条件恒真导致委托求解器永远不被使用。
+             * 改为使用标志位判断委托求解器是否成功，失败时才回退到内部求解器。 */
+            if (!bdf2_delegate_ok) {
                 float* current_state = system->workspace + 10 * state_size;
                 memcpy(current_state, system->state, state_size * sizeof(float));
                 dynamics_internal_solve_bdf2(system, input, dt, system->prev_state);
