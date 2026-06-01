@@ -141,6 +141,11 @@ struct EmergencyStopSystem {
     EmergencySystemMetrics last_metrics;
     int metrics_valid;
     int snapshot_sequence_counter;
+
+    int gpu_kernel_interrupt_flag;
+    void (*gpu_kernel_interrupt_callback)(void* ctx);
+    void* gpu_kernel_interrupt_ctx;
+    int gpu_kernel_count;
 };
 
 EmergencyStopSystem* emergency_stop_create(const EmergencyStopConfig* config) {
@@ -284,6 +289,18 @@ int emergency_stop_execute(EmergencyStopSystem* system, EmergencyStopLevel level
     system->is_executing = 1;
     system->status.current_level = level;
     system->status.total_stop_time_ms = 0;
+
+    if (system->gpu_kernel_interrupt_flag && system->gpu_kernel_interrupt_callback) {
+        system->gpu_kernel_interrupt_callback(system->gpu_kernel_interrupt_ctx);
+        snprintf(system->status.status_message,
+                 sizeof(system->status.status_message),
+                 "紧急停止[级别:%d]: GPU内核中断已发送，中断%d个内核",
+                 (int)level, system->gpu_kernel_count);
+    }
+    if (system->gpu_kernel_interrupt_flag && !system->gpu_kernel_interrupt_callback) {
+        system->gpu_kernel_interrupt_flag = 0;
+        system->gpu_kernel_count = 0;
+    }
 
     /* M-019修复: 执行前验证关键回调是否已注册，任一缺失则返回错误 */
     /* 检查对应级别的关键停止机制是否可用（函数指针+上下文引用必须同时非NULL） */
@@ -1046,6 +1063,16 @@ EmergencyStopSystem* emergency_stop_load(const char* filepath) {
 
     fclose(f);
     return system;
+}
+
+int emergency_stop_register_gpu_kernel_interrupt(EmergencyStopSystem* system,
+                                                  void (*callback)(void*),
+                                                  void* ctx) {
+    if (!system) return -1;
+    system->gpu_kernel_interrupt_callback = callback;
+    system->gpu_kernel_interrupt_ctx = ctx;
+    system->gpu_kernel_interrupt_flag = 1;
+    return 0;
 }
 
 EmergencyStopConfig emergency_stop_default_config(void) {

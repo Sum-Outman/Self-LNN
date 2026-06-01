@@ -25,6 +25,7 @@
 #include "selflnn/core/lnn.h" /* lnn_get_cfc_network访问 */
 #include "selflnn/selflnn.h" /* selflnn_get_shared_lnn */
 #include "selflnn/knowledge/knowledge.h" /* 知识库检索回退 */
+#include "selflnn/backend/websocket_push.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
@@ -75,6 +76,9 @@ static DialogueCfCWeights g_dialogue_cfc_weights = {0};
 
 /* 全局对话处理器引用，用于LNN驱动的意图分析 */
 static DialogueProcessor* g_dialogue_processor_global = NULL;
+
+/* 外部WebSocket推送服务器引用（由main.c管理生命周期） */
+extern WSPushServer* g_ws_push_server;
 
 DialogueProcessor* dialogue_get_global_processor(void) {
     return g_dialogue_processor_global;
@@ -693,6 +697,11 @@ int dialogue_generate_text(DialogueProcessor* processor,
     }
 
     log_warning("对话生成器未训练或不可用，拒绝生成虚假回复");
+    if (g_ws_push_server) {
+        ws_push_broadcast_json(g_ws_push_server,
+            "{\"type\":\"dialogue_status\",\"status\":\"generator_untrained\","
+            "\"message\":\"对话生成器未训练，拒绝生成虚假回复\"}");
+    }
     if (max_output > 0) output[0] = '\0';
     return -1;
 }
@@ -850,6 +859,11 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
         }
         if (gen_len <= 0) {
             log_warning("对话生成器未训练且知识库无匹配，拒绝生成虚假回复");
+            if (g_ws_push_server) {
+                ws_push_broadcast_json(g_ws_push_server,
+                    "{\"type\":\"dialogue_status\",\"status\":\"generator_untrained_no_kb\","
+                    "\"message\":\"对话生成器未训练且知识库无匹配，拒绝生成虚假回复\"}");
+            }
             if (max_tokens > 0) output[0] = '\0';
         }
     }

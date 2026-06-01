@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN AGI 设备管理器
  * 管理麦克风、扬声器、摄像头的添加/删除/开启/关闭
  * 全部使用真实浏览器API，无虚拟实现
@@ -610,13 +610,28 @@ class DeviceManager {
         /* M-026: 创建Web Worker用于Census变换立体匹配，避免阻塞主线程 */
         try {
             if (!this.stereoVision.worker) {
-                /* M-026-FIX: 使用根相对路径确保子路径部署时Worker正常加载 */
-                var stereoWorkerPath = '/js/workers/stereo-worker.js';
+                var stereoWorkerPath = '';
+                var basePath = '';
                 if (typeof document.currentScript !== 'undefined' && document.currentScript) {
                     var scriptSrc = document.currentScript.getAttribute('src');
                     if (scriptSrc) {
-                        stereoWorkerPath = scriptSrc.replace(/[^\/]+$/, '') + 'workers/stereo-worker.js';
+                        basePath = scriptSrc.replace(/[^\/]+$/, '');
+                        stereoWorkerPath = basePath + 'workers/stereo-worker.js';
                     }
+                }
+                if (!stereoWorkerPath) {
+                    var scripts = document.getElementsByTagName('script');
+                    for (var s = 0; s < scripts.length; s++) {
+                        var sp = scripts[s].getAttribute('src');
+                        if (sp && sp.indexOf('device-manager.js') !== -1) {
+                            basePath = sp.replace(/[^\/]+$/, '');
+                            stereoWorkerPath = basePath + 'workers/stereo-worker.js';
+                            break;
+                        }
+                    }
+                }
+                if (!stereoWorkerPath) {
+                    stereoWorkerPath = 'js/workers/stereo-worker.js';
                 }
                 this.stereoVision.worker = new Worker(stereoWorkerPath);
                 var self = this;

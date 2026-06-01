@@ -821,12 +821,12 @@ class ApiService {
      */
     async startTraining(trainingConfig) {
         try {
-            const response = await this.request('/training', {
+            const response = await this.request('/training/start', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ config: trainingConfig })
+                body: JSON.stringify(trainingConfig || {})
             });
             
             if (!response.ok) {
@@ -1948,7 +1948,7 @@ class ApiService {
      */
     async getCognitionStatus() {
         try {
-            const response = await this.request('/agi/cognition/state');
+            const response = await this.request('/cognition/status');
             if (!response.ok) {
                 throw new Error('HTTP错误: ' + response.status);
             }
@@ -3300,19 +3300,6 @@ class ApiService {
         }
     }
 
-    // ==================== 训练中心 API ====================
-
-    async trainingStart(mode, learningRate, batchSize, epochs, dataPath) {
-        try {
-            var resp = await this.request('/training/start', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({mode, learning_rate: learningRate, batch_size: batchSize, num_epochs: epochs, dataset_path: dataPath})
-            });
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
-    }
 
     async trainingStatus() {
         try {
@@ -5366,18 +5353,6 @@ class ApiService {
         try { var r = await this.request('/serial/list', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
-    async serialOpen(port, baudRate) {
-        try { var r = await this.request('/serial/open', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({port:port, baud_rate:baudRate||115200}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async serialClose(port) {
-        try { var r = await this.request('/serial/close', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({port:port}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
-    async serialSend(port, data) {
-        try { var r = await this.request('/serial/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({port:port, data:data}) }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
     async computerLaunch(appName) {
         try { var r = await this.request('/computer/launch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:appName}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
@@ -5497,7 +5472,7 @@ class WebSocketManager {
         /* BUG-5修复: 运行时动态读取window.SELFLNN_CONFIG而非静态捕获 */
         var cfg = window.SELFLNN_CONFIG || { host: 'localhost', port: 8080 };
         /* WebSocket端口与HTTP共用8080端口，通过HTTP Upgrade升级连接 */
-        var wsPort = cfg.wsPort || 8080;
+        var wsPort = cfg.port || 8080;
         var wsProtocol = (cfg.host === 'localhost' || cfg.host === '127.0.0.1') ? 'ws://' : 'wss://';
         this.url = url || (wsProtocol + cfg.host + ':' + wsPort + '/ws');
         this.ws = null;
@@ -5915,7 +5890,7 @@ window.SelfLnnWebSocket = new WebSocketManager;
                 banner.style.cursor = 'pointer';
                 banner.onclick = function() {
                     if (window.SelfLnnWebSocket && !window.SelfLnnWebSocket.isConnected) {
-                        window.SelfLnnWebSocket.connect;
+                        window.SelfLnnWebSocket.connect();
                     }
                 };
                 if (document.body) document.body.appendChild(banner);
@@ -5924,7 +5899,7 @@ window.SelfLnnWebSocket = new WebSocketManager;
         return banner;
     }
     document.addEventListener('websocket-connection-status', function(e) {
-        var b = ensureBanner;
+        var b = ensureBanner();
         if (e.detail && e.detail.connected) {
             b.className = 'connection-banner js-ready connected';
             b.innerHTML = '<span class="connection-dot connected"></span> WebSocket已连接';

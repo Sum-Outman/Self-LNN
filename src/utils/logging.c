@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN 日志系统实现
  * 
  * 提供简单的日志记录功能，支持控制台输出和基本日志级别。
@@ -141,7 +141,21 @@ int logging_init(const LogConfig* config)
     
     g_log_state.is_initialized = 1;
     LOG_UNLOCK();
-    
+
+    {
+        const char* env_level = getenv("SELFLNN_LOG_LEVEL");
+        if (env_level) {
+            if (strcmp(env_level, "DEBUG") == 0 || strcmp(env_level, "debug") == 0)
+                logging_set_level(LOG_LEVEL_DEBUG);
+            else if (strcmp(env_level, "WARNING") == 0 || strcmp(env_level, "warning") == 0)
+                logging_set_level(LOG_LEVEL_WARNING);
+            else if (strcmp(env_level, "ERROR") == 0 || strcmp(env_level, "error") == 0)
+                logging_set_level(LOG_LEVEL_ERROR);
+            else if (strcmp(env_level, "FATAL") == 0 || strcmp(env_level, "fatal") == 0)
+                logging_set_level(LOG_LEVEL_FATAL);
+        }
+    }
+
     log_info("日志系统初始化完成，级别: %s", 
              logging_get_level_name(g_log_state.config.min_level));
     

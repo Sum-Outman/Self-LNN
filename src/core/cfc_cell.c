@@ -218,6 +218,7 @@ struct CfCCell {
     float* weight_grad;     /**< 权重梯度 */
     float* bias_grad;       /**< 偏置梯度 */
     int is_initialized;     /**< 是否已初始化 */
+    int is_trained;         /**< 全局未训练检测标志：0=未训练（仅随机初始化），1=已完成训练 */
     float avg_activation;   /**< 平均激活度 */
     float max_activation;   /**< 最大激活度 */
     /* 液态神经网络增强特性 */
@@ -813,6 +814,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     
     // 初始化统计信息
     cell->is_initialized = 1;
+    cell->is_trained = 0;
     cell->avg_activation = 0.0f;
     cell->max_activation = 0.0f;
     

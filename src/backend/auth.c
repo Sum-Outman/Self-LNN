@@ -1,4 +1,4 @@
-﻿#include "selflnn/backend/auth.h"
+#include "selflnn/backend/auth.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 
@@ -335,10 +335,8 @@ int auth_validate_key(AuthSystem* auth, const char* key, AuthPermission required
     uint8_t key_hash[AUTH_HASH_LEN];
     if (string_to_key(key, key_hash) != 0) return 0;
     for (int i = 0; i < auth->key_count; i++) {
-        /* 使用加盐哈希验证（防御数据库泄露攻击） */
-        int match = auth->keys[i].is_encrypted 
-            ? salted_verify_key(auth->keys[i].salt, auth->keys[i].hash, key_hash)
-            : (memcmp(auth->keys[i].hash, key_hash, AUTH_HASH_LEN) == 0);
+        /* 使用SHA-256加盐哈希验证（强制，不再支持明文memcmp回退） */
+        int match = salted_verify_key(auth->keys[i].salt, auth->keys[i].hash, key_hash);
         if (match) {
             if (!auth->keys[i].enabled) return 0;
             if (auth->keys[i].expires_at > 0 && time(NULL) > auth->keys[i].expires_at) {

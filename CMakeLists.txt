@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.10)
 project(selflnn VERSION 1.5.0 LANGUAGES C)
 
 # 禁用 vcpkg applocal 复制步骤（本系统无 pwsh.exe，该步骤仅为噪音）
@@ -296,6 +296,8 @@ if(BUILD_FRONTEND)
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/programming-workbench.js (编程工作台)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/main.js (主逻辑)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - js/hardware-util.js (硬件工具)"
+        COMMAND ${CMAKE_COMMAND} -E echo "  - js/product-design.js (产品设计)"
+        COMMAND ${CMAKE_COMMAND} -E echo "  - js/knowledge-graph.js (知识图谱)"
         COMMAND ${CMAKE_COMMAND} -E echo "  - css/style.css (样式)"
         COMMAND ${CMAKE_COMMAND} -E echo "前端文件完整性检查完成"
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

@@ -7,7 +7,7 @@
   "power_mode": "balanced",
   "gpu_backend": "auto",
   "http_port": 8080,
-  "websocket_port": 8081,
+  "websocket_port": 8080,
   "distributed_port": 8765,
   "model_path": "",
   "_comment": "扁平化JSON结构，与config_loader.c的加载/保存格式一致。原嵌套格式的额外配置暂不在此文件加载。"

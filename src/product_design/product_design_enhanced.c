@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file product_design_enhanced.c
  * @brief A09.5 产品设计系统增强实现
  *
@@ -316,7 +316,7 @@ int pde_tracker_register_requirements(PdeRequirementTracker* tracker,
         item->source_line = tracker->req_count + 1;
         item->parent_id = -1;
 
-        /* 解析行内格式: [ID] 标题 | 描述 | 优先级 */
+        /* P2-005: 解析行内格式: 标题 | 描述 | 优先级 | 预估工时 | 版本 */
         char* title_start = line;
         char* desc_sep = strstr(line, "|");
         if (desc_sep) {
@@ -334,6 +334,20 @@ int pde_tracker_register_requirements(PdeRequirementTracker* tracker,
                 else if (strstr(prio_str, "低")) item->priority = PDE_PRIORITY_LOW;
                 else if (strstr(prio_str, "可选")) item->priority = PDE_PRIORITY_OPTIONAL;
                 else item->priority = PDE_PRIORITY_MEDIUM;
+                char* effort_sep = strstr(prio_sep + 1, "|");
+                if (effort_sep) {
+                    const char* effort_str = effort_sep + 1;
+                    while (*effort_str == ' ') effort_str++;
+                    item->estimated_effort = (float)atof(effort_str);
+                    if (item->estimated_effort <= 0.0f) item->estimated_effort = 5.0f;
+                    char* ver_sep = strstr(effort_sep + 1, "|");
+                    if (ver_sep) {
+                        const char* ver_str = ver_sep + 1;
+                        while (*ver_str == ' ') ver_str++;
+                        item->version = atoi(ver_str);
+                        if (item->version <= 0) item->version = 1;
+                    }
+                }
             } else {
                 pde_strcpy(item->description, sizeof(item->description), desc);
             }
@@ -342,7 +356,8 @@ int pde_tracker_register_requirements(PdeRequirementTracker* tracker,
             pde_strcpy(item->description, sizeof(item->description), line);
         }
 
-        item->estimated_effort = 1.0f + (float)pde_rand_double() * 9.0f;
+        if (item->estimated_effort <= 0.0f)
+            item->estimated_effort = 1.0f + (float)pde_rand_double() * 9.0f;
         item->business_value = (float)(PDE_PRIORITY_OPTIONAL - item->priority) * 2.5f + 2.0f;
         item->version = 1;
         snprintf(item->source_origin, sizeof(item->source_origin), "需求文本行 %d", item->source_line);

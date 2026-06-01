@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file knowledge_version.c
  * @brief 知识版本管理系统完整实现
  */
@@ -287,6 +287,32 @@ void knowledge_version_free(KnowledgeVersionManager* kvm) {
 int kv_create_snapshot(KnowledgeVersionManager* kvm, const char* message) {
     if (!kvm || !message || kvm->snapshot_count >= KV_MAX_SNAPSHOTS) return -1;
 
+    if (kvm->current_snapshot > 0 && kvm->current_entry_count > 0) {
+        char backup_path[512];
+        snprintf(backup_path, sizeof(backup_path), "%s/rollback_backup_%d.dat",
+                 kvm->storage_dir, kvm->current_snapshot);
+        FILE* backup_fp = fopen(backup_path, "wb");
+        if (backup_fp) {
+            SnapshotFileHeader backup_header;
+            memset(&backup_header, 0, sizeof(SnapshotFileHeader));
+            backup_header.magic = KV_FILE_MAGIC;
+            backup_header.version = KV_FILE_VERSION;
+            backup_header.snapshot_id = kvm->current_snapshot;
+            snprintf(backup_header.message, KV_MAX_MESSAGE, "升级前自动备份: %s", message);
+            backup_header.created_at = time(NULL);
+            backup_header.entry_count = (size_t)kvm->current_entry_count;
+            backup_header.parent_id = kvm->current_snapshot;
+            snprintf(backup_header.branch, KV_MAX_BRANCH_NAME, "%s", kvm->current_branch);
+            backup_header.is_checkpoint = 0;
+            fwrite(&backup_header, sizeof(SnapshotFileHeader), 1, backup_fp);
+            if (kvm->current_entry_count > 0) {
+                fwrite(kvm->current_entries, sizeof(SnapshotEntryRecord),
+                       kvm->current_entry_count, backup_fp);
+            }
+            fclose(backup_fp);
+        }
+    }
+
     KnowledgeSnapshot* sn = &kvm->snapshots[kvm->snapshot_count];
     memset(sn, 0, sizeof(KnowledgeSnapshot));
     sn->snapshot_id = kvm->next_snapshot_id++;
@@ -415,6 +441,71 @@ int kv_restore_snapshot(KnowledgeVersionManager* kvm, int snapshot_id, void* kno
     safe_free((void**)&restore_records);
 
     kvm->current_snapshot = snapshot_id;
+    return 0;
+}
+
+int kv_rollback(KnowledgeVersionManager* kvm, void* knowledge_base) {
+    if (!kvm || !knowledge_base) return -1;
+
+    int rollback_snap_id = kvm->current_snapshot;
+    if (rollback_snap_id <= 0) return -1;
+
+    char backup_path[512];
+    snprintf(backup_path, sizeof(backup_path), "%s/rollback_backup_%d.dat",
+             kvm->storage_dir, rollback_snap_id);
+
+    FILE* fp = fopen(backup_path, "rb");
+    if (!fp) return -1;
+
+    SnapshotFileHeader header;
+    if (fread(&header, sizeof(SnapshotFileHeader), 1, fp) != 1 ||
+        header.magic != KV_FILE_MAGIC) {
+        fclose(fp);
+        return -1;
+    }
+
+    size_t restore_count = header.entry_count;
+    if (restore_count > KV_MAX_ENTRIES_PER_SNAPSHOT) {
+        restore_count = KV_MAX_ENTRIES_PER_SNAPSHOT;
+    }
+
+    SnapshotEntryRecord* restore_records = (SnapshotEntryRecord*)
+        safe_malloc(restore_count * sizeof(SnapshotEntryRecord));
+    if (!restore_records) { fclose(fp); return -1; }
+
+    size_t read_count = fread(restore_records, sizeof(SnapshotEntryRecord),
+                               restore_count, fp);
+    fclose(fp);
+
+    KnowledgeBase* kb = (KnowledgeBase*)knowledge_base;
+
+    for (size_t i = 0; i < read_count; i++) {
+        KnowledgeEntry entry;
+        memset(&entry, 0, sizeof(KnowledgeEntry));
+        entry.subject = restore_records[i].subject;
+        entry.predicate = restore_records[i].predicate;
+        entry.object = restore_records[i].object;
+        entry.type = (KnowledgeType)restore_records[i].type;
+        entry.source = (KnowledgeSource)restore_records[i].source;
+        entry.weight = restore_records[i].confidence;
+        entry.timestamp = restore_records[i].timestamp;
+
+        int existing = find_entry_by_spo(kvm->current_entries, kvm->current_entry_count,
+                                          restore_records[i].subject,
+                                          restore_records[i].predicate);
+        if (existing >= 0) {
+            knowledge_base_update(kb, restore_records[i].entry_id, &entry);
+        } else {
+            knowledge_base_add(kb, &entry);
+        }
+    }
+
+    safe_free((void**)&restore_records);
+    memcpy(kvm->current_entries, restore_records, read_count * sizeof(SnapshotEntryRecord));
+    kvm->current_entry_count = (int)read_count;
+
+    log_info("[知识版本管理] 回滚完成：从升级前备份恢复快照#%d，%zu条记录",
+             rollback_snap_id, read_count);
     return 0;
 }
 

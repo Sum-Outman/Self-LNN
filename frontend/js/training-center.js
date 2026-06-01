@@ -1,4 +1,4 @@
-﻿(function() {
+(function() {
     'use strict';
     var trainingPollInterval = null;
     var trainingHistoryData = [];
@@ -51,6 +51,15 @@
     window.startTraining = startTraining;
 
     async function pollTraining() {
+        if (!window.SelfLnnApi || !window.SelfLnnApi.connected) {
+            stopPolling();
+            var progressEl = document.getElementById('train-progress-fill');
+            if (progressEl) progressEl.style.width = '0%';
+            var progressText = document.getElementById('train-progress-text');
+            if (progressText) progressText.textContent = '后端未连接';
+            window.showNotification('训练服务未就绪，请检查后端连接', 'warning');
+            return;
+        }
         try {
             var data = await window.SelfLnnApi.getTrainingStatus();
             if (data) {
@@ -62,17 +71,20 @@
                 if (lossEl) {
                     var lossVal = data.current_loss;
                     var accInfo = (data.accuracy !== undefined && data.accuracy !== null) ? (' | 准确率:' + (data.accuracy * 100).toFixed(1) + '%') : '';
-/* 显示收敛速率 */
                     var convInfo = (data.convergence_rate !== undefined && data.convergence_rate !== null) ? (' | 收敛速率:' + (data.convergence_rate * 100).toFixed(2) + '%/epoch') : '';
                     var timeInfo = data.estimated_time ? (' | 预计:' + data.estimated_time) : '';
                     lossEl.textContent = (typeof lossVal === 'number' ? lossVal.toFixed(4) : String(lossVal || '--')) + accInfo + convInfo + timeInfo;
                 }
                 var progressEl = document.getElementById('train-progress-fill');
-                if (progressEl) progressEl.style.width = data.progress ? data.progress + '%' : '0%';
                 var progressText = document.getElementById('train-progress-text');
-                if (progressText) progressText.textContent = data.progress ? data.progress.toFixed(1) + '%' : '--';
+                if (data.progress !== undefined && data.progress !== null) {
+                    if (progressEl) progressEl.style.width = data.progress + '%';
+                    if (progressText) progressText.textContent = data.progress.toFixed(1) + '%';
+                } else {
+                    if (progressEl) progressEl.style.width = '0%';
+                    if (progressText) progressText.textContent = '等待训练数据...';
+                }
 
-/* 记录训练历史数据 */
                 if (data.current_epoch !== undefined && data.current_loss !== undefined) {
                     trainingHistoryData.push({
                         epoch: data.current_epoch,

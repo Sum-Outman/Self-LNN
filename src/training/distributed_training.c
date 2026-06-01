@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file distributed_training.c
  * @brief 分布式训练模块 - 完整TCP实现
  *
@@ -1753,6 +1753,7 @@ static void* heartbeat_thread_func(void* arg) {
 
         /* 检查心跳超时 */
         if (ctx->config.enable_fault_tolerance) {
+            int topology_changed = 0;
             for (int i = 0; i < ctx->num_nodes; i++) {
                 if (i == ctx->my_node_id) continue;
                 NodeConnection* conn = &ctx->nodes[i];
@@ -1761,6 +1762,7 @@ static void* heartbeat_thread_func(void* arg) {
                         log_warning("节点 %d 心跳超时", i);
                         conn->is_alive = 0;
                         conn->connection_errors++;
+                        topology_changed = 1;
 
                         mutex_lock(ctx->stats_lock);
                         ctx->stats.node_failures_detected++;
@@ -1768,10 +1770,70 @@ static void* heartbeat_thread_func(void* arg) {
                     }
                 }
             }
+            if (topology_changed && ctx->ring_established) {
+                int alive_ids[DISTRIBUTED_MAX_NODES];
+                int alive_count = 0;
+                for (int i = 0; i < ctx->num_nodes; i++) {
+                    if (i == ctx->my_node_id) {
+                        alive_ids[alive_count++] = i;
+                    } else if (ctx->nodes[i].connected && ctx->nodes[i].is_alive) {
+                        alive_ids[alive_count++] = i;
+                    }
+                }
+                if (alive_count >= 2) {
+                    int old_succ = ctx->ring_successor;
+                    int old_pred = ctx->ring_predecessor;
+                    distributed_build_ring_topology(ctx);
+                    log_info("[环形拓扑] 节点健康变化，自动重建Ring AllReduce拓扑: "
+                             "存活节点=%d, 后继=%d→%d, 前驱=%d→%d",
+                             alive_count,
+                             old_succ, ctx->ring_successor,
+                             old_pred, ctx->ring_predecessor);
+                } else {
+                    ctx->ring_established = 0;
+                    ctx->ring_successor = -1;
+                    ctx->ring_predecessor = -1;
+                    log_warning("[环形拓扑] 存活节点不足(%d)，环形AllReduce已自动降级为本地模式",
+                                alive_count);
+                }
+            }
         }
     }
 
     return NULL;
+}
+
+SELFLNN_API int distributed_node_health_check(DistributedContext* ctx, int node_id) {
+    if (!ctx || node_id < 0 || node_id >= DISTRIBUTED_MAX_NODES) return -1;
+    if (node_id == ctx->my_node_id) return 1;
+    NodeConnection* conn = &ctx->nodes[node_id];
+    if (!conn->connected) return 0;
+    if (!conn->is_alive) return 0;
+    uint64_t now = get_time_ms();
+    if (now - conn->last_heartbeat > (uint64_t)ctx->config.heartbeat_timeout_ms) {
+        conn->is_alive = 0;
+        return 0;
+    }
+    if (conn->connection_errors > ctx->config.max_retries) return 0;
+    return 1;
+}
+
+SELFLNN_API int distributed_verify_ring_topology(DistributedContext* ctx) {
+    if (!ctx) return -1;
+    if (!ctx->ring_established) return 0;
+    int succ = ctx->ring_successor;
+    int pred = ctx->ring_predecessor;
+    int succ_healthy = (succ >= 0 && succ < ctx->num_nodes &&
+                        ctx->nodes[succ].connected && ctx->nodes[succ].is_alive);
+    int pred_healthy = (pred >= 0 && pred < ctx->num_nodes &&
+                        ctx->nodes[pred].connected && ctx->nodes[pred].is_alive);
+    if (!succ_healthy || !pred_healthy) {
+        log_warning("[环形拓扑] 后继或前驱节点不健康(succ=%d:%d,pred=%d:%d)，触发拓扑重建",
+                    succ, succ_healthy, pred, pred_healthy);
+        distributed_build_ring_topology(ctx);
+        return 2;
+    }
+    return 1;
 }
 
 SELFLNN_API int distributed_start_heartbeat(DistributedContext* ctx) {

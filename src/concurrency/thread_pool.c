@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file thread_pool.c
  * @brief 线程池实现
  *
@@ -1092,11 +1092,23 @@ int thread_pool_submit(ThreadPool* pool, TaskFunction function,
         // 传统模式：提交到全局队列（P2-20修复: 按优先级路由）
         int pq_idx = task.priority > 0 ? TASK_PRIORITY_LOW : TASK_PRIORITY_HIGH;
         
-        // 检查任务队列是否已满
-        if (pool->config.max_tasks > 0 && 
-            task_queue_size(&pool->priority_queues[TASK_PRIORITY_HIGH]) +
-            task_queue_size(&pool->priority_queues[TASK_PRIORITY_LOW]) >= pool->config.max_tasks) {
-            return -1;
+        // 检查任务队列是否已满——改为阻塞等待而非丢弃
+        size_t max_retries = 100;
+        size_t retry = 0;
+        while (pool->config.max_tasks > 0 && 
+               task_queue_size(&pool->priority_queues[TASK_PRIORITY_HIGH]) +
+               task_queue_size(&pool->priority_queues[TASK_PRIORITY_LOW]) >= pool->config.max_tasks) {
+            if (retry >= max_retries) {
+                log_error("线程池任务队列持续满(%zu次重试)，放弃提交", max_retries);
+                return -1;
+            }
+            /* 短暂释放CPU，等待队列空闲 */
+#ifdef _WIN32
+            Sleep(10);
+#else
+            usleep(10000);
+#endif
+            retry++;
         }
         
         // 加锁添加任务

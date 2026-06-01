@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file audio_semantic.c
  * @brief 音频特征到语义理解的映射实现
  * 
@@ -1843,7 +1843,7 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
         } else {
             // 模型未训练，使用启发式方法
 heuristic_emotion:
-            // 基于文本的启发式情感分析
+            log_info("[音频语义] 情感分析进入启发式回退模式（模型未训练或资源不足），使用基于规则的启发式分析");
             if (result->recognized_text) {
                 char* txt = result->recognized_text;
                 int has_question = (strstr(txt, "?") != NULL || strstr(txt, "什么") != NULL);
@@ -2007,8 +2007,7 @@ heuristic_emotion:
         } else {
             // 模型未训练，使用启发式方法
 heuristic_intent:
-            // 基于规则的意图识别（改进版）
-            /* 检查文本中的关键词 */
+            log_info("[音频语义] 意图识别进入启发式回退模式（模型未训练或资源不足），使用基于关键词规则的启发式分析");
             if (strstr(text, "?") != NULL || 
                 strstr(text, "什么") != NULL ||
                 strstr(text, "如何") != NULL ||

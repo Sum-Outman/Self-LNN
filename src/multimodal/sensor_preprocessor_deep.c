@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file sensor_preprocessor_deep.c
  * @brief 传感器预处理深度实现：EKF/UKF/ESKF/粒子滤波/信息滤波
  *
@@ -1689,6 +1689,12 @@ typedef struct SensorDeepPreprocessor {
     size_t state_dim;
     size_t obs_dim;
     float* output_buffer;
+    float* drift_accumulator;
+    size_t drift_counter;
+    float drift_threshold;
+    float drift_window_sum;
+    int auto_calibration_enabled;
+    int calibration_count;
 } SensorDeepPreprocessor;
 
 /**
@@ -1730,7 +1736,8 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
     memset(&pf_cfg, 0, sizeof(ParticleFilterConfig));
     pf_cfg.state_dim = (int)state_dim;
     pf_cfg.obs_dim = (int)obs_dim;
-    pf_cfg.num_particles = 500;
+    pf_cfg.num_particles = (state_dim > 64) ? (state_dim * 12) : 
+                           (state_dim > 16) ? (state_dim * 8) : 500;
     pf_cfg.process_noise_std = 0.01f;
     pf_cfg.observation_noise_std = 0.1f;
     pf_cfg.resampling_threshold = 0.5f;
@@ -1754,6 +1761,14 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
     sdp->output_buffer = (float*)safe_calloc(state_dim, sizeof(float));
     if (!sdp->output_buffer) { sensor_deep_preprocessor_free(sdp); return NULL; }
 
+    sdp->drift_accumulator = (float*)safe_calloc(state_dim, sizeof(float));
+    if (!sdp->drift_accumulator) { sensor_deep_preprocessor_free(sdp); return NULL; }
+    sdp->drift_counter = 0;
+    sdp->drift_threshold = 5.0f;
+    sdp->drift_window_sum = 0.0f;
+    sdp->auto_calibration_enabled = 1;
+    sdp->calibration_count = 0;
+
     sdp->is_initialized = 1;
     return sdp;
 }
@@ -1767,6 +1782,7 @@ void sensor_deep_preprocessor_free(SensorDeepPreprocessor* sdp) {
     if (sdp->pf) { deep_particle_filter_free(sdp->pf); sdp->pf = NULL; }
     if (sdp->inf) { deep_info_filter_free(sdp->inf); sdp->inf = NULL; }
     safe_free((void**)&sdp->output_buffer);
+    safe_free((void**)&sdp->drift_accumulator);
     safe_free((void**)&sdp);
 }
 
@@ -1828,6 +1844,39 @@ int sensor_deep_preprocess_frame(SensorDeepPreprocessor* sdp,
         /* 三重滤波融合平均 */
         for (size_t i = 0; i < sdp->state_dim && i < 64; i++) {
             output[i] = output[i] * 0.667f + inf_state[i] * 0.333f;
+        }
+    }
+
+    if (sdp->auto_calibration_enabled && sdp->drift_accumulator) {
+        float frame_norm = 0.0f;
+        for (size_t i = 0; i < sdp->state_dim && i < 64; i++) {
+            float diff = output[i] - sdp->drift_accumulator[i];
+            sdp->drift_accumulator[i] += diff * 0.01f;
+            frame_norm += fabsf(output[i]);
+        }
+        sdp->drift_window_sum += frame_norm;
+        sdp->drift_counter++;
+        if (sdp->drift_counter >= 100) {
+            float avg_drift = sdp->drift_window_sum / (float)sdp->drift_counter;
+            if (avg_drift > sdp->drift_threshold) {
+                if (sdp->eskf) {
+                    float zeros[64] = {0};
+                    eskf_reset(sdp->eskf, zeros, NULL);
+                }
+                if (sdp->pf) {
+                    float pf_init[64] = {0};
+                    for (size_t i = 0; i < sdp->state_dim && i < 64; i++)
+                        pf_init[i] = output[i];
+                    deep_particle_filter_reset(sdp->pf, pf_init, 0.01f);
+                }
+                if (sdp->inf) {
+                    deep_info_filter_reset(sdp->inf, output, NULL);
+                }
+                memset(sdp->drift_accumulator, 0, sdp->state_dim * sizeof(float));
+                sdp->calibration_count++;
+            }
+            sdp->drift_window_sum = 0.0f;
+            sdp->drift_counter = 0;
         }
     }
 

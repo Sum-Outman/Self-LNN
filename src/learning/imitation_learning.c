@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file imitation_learning.c
  * @brief 模仿学习算法实现
  * 
@@ -147,6 +147,44 @@ int imitation_learner_add_demonstration(ImitationLearner* learner,
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "专家演示数据无效");
         return -1;
+    }
+
+    /* 数据完整性校验：检测NaN/Inf */
+    {
+        size_t state_seq_size = demonstration->sequence_length * demonstration->state_dim;
+        size_t action_seq_size = demonstration->sequence_length * demonstration->action_dim;
+        size_t i;
+        for (i = 0; i < state_seq_size; i++) {
+            if (isnan(demonstration->state_sequence[i]) || isinf(demonstration->state_sequence[i])) {
+                selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                      "专家演示状态序列包含NaN或Inf (索引%zu)", i);
+                return -1;
+            }
+        }
+        for (i = 0; i < action_seq_size; i++) {
+            if (isnan(demonstration->action_sequence[i]) || isinf(demonstration->action_sequence[i])) {
+                selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                      "专家演示动作序列包含NaN或Inf (索引%zu)", i);
+                return -1;
+            }
+        }
+    }
+
+    /* 维度一致性校验：与已有演示的状态维度和动作维度必须一致 */
+    if (learner->num_demonstrations > 0 && learner->demonstrations) {
+        ExpertDemonstration* first = &learner->demonstrations[0];
+        if (demonstration->state_dim != first->state_dim) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "专家演示状态维度(%zu)与已有演示(%zu)不一致",
+                                  demonstration->state_dim, first->state_dim);
+            return -1;
+        }
+        if (demonstration->action_dim != first->action_dim) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "专家演示动作维度(%zu)与已有演示(%zu)不一致",
+                                  demonstration->action_dim, first->action_dim);
+            return -1;
+        }
     }
     
     // 重新分配演示数组

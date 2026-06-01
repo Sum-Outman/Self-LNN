@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file online_learning.c
  * @brief 在线学习系统实现
  * 
@@ -603,6 +603,52 @@ int online_learner_update(OnlineLearner* learner,
             safe_free((void**)&learner->input_buffer);
             safe_free((void**)&learner->target_buffer);
             learner->buffer_capacity = 0;
+        }
+    }
+
+    {
+        time_t now_t = time(NULL);
+        float elapsed = (float)(now_t - learner->last_update_time);
+        if (elapsed > 0.1f && learner->processed_samples > 0) {
+            float samples_per_sec = (float)learner->processed_samples / elapsed;
+            size_t sliding_cap = learner->loss_window.capacity;
+            if (samples_per_sec > 500.0f && sliding_cap < 4096) {
+                size_t new_cap = sliding_cap * 2;
+                if (new_cap > 4096) new_cap = 4096;
+                float* new_loss = (float*)safe_realloc(learner->loss_window.samples,
+                    new_cap * sizeof(float));
+                float* new_grad = (float*)safe_realloc(learner->gradient_window.samples,
+                    new_cap * sizeof(float));
+                if (new_loss) {
+                    learner->loss_window.samples = new_loss;
+                    learner->loss_window.capacity = new_cap;
+                }
+                if (new_grad) {
+                    learner->gradient_window.samples = new_grad;
+                    learner->gradient_window.capacity = new_cap;
+                }
+                log_info("[在线学习] 高速数据流检测(%.0f样本/秒)，环形缓冲区自动扩容: %zu→%zu",
+                         (double)samples_per_sec, sliding_cap, new_cap);
+            }
+            if (samples_per_sec > 200.0f && learner->buffer_capacity > 0 &&
+                learner->buffer_capacity < 8192) {
+                size_t new_buf_cap = learner->buffer_capacity * 2;
+                if (new_buf_cap > 8192) new_buf_cap = 8192;
+                float* new_input = (float*)safe_realloc(learner->input_buffer,
+                    new_buf_cap * input_size * sizeof(float));
+                float* new_target = (float*)safe_realloc(learner->target_buffer,
+                    new_buf_cap * target_size * sizeof(float));
+                if (new_input && new_target) {
+                    learner->input_buffer = new_input;
+                    learner->target_buffer = new_target;
+                    learner->buffer_capacity = new_buf_cap;
+                    log_info("[在线学习] 高速数据流I/O缓冲区自动扩容: %zu→%zu",
+                             learner->buffer_capacity / 2, learner->buffer_capacity);
+                } else {
+                    safe_free((void**)&new_input);
+                    safe_free((void**)&new_target);
+                }
+            }
         }
     }
     

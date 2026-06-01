@@ -14,22 +14,40 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifdef _WIN32
+#include <windows.h>
+static SRWLOCK g_config_rwlock = SRWLOCK_INIT;
+#define CONFIG_RDLOCK()  AcquireSRWLockShared(&g_config_rwlock)
+#define CONFIG_RDUNLOCK() ReleaseSRWLockShared(&g_config_rwlock)
+#define CONFIG_WRLOCK()  AcquireSRWLockExclusive(&g_config_rwlock)
+#define CONFIG_WRUNLOCK() ReleaseSRWLockExclusive(&g_config_rwlock)
+#else
+#include <pthread.h>
+static pthread_rwlock_t g_config_rwlock = PTHREAD_RWLOCK_INITIALIZER;
+#define CONFIG_RDLOCK()  pthread_rwlock_rdlock(&g_config_rwlock)
+#define CONFIG_RDUNLOCK() pthread_rwlock_unlock(&g_config_rwlock)
+#define CONFIG_WRLOCK()  pthread_rwlock_wrlock(&g_config_rwlock)
+#define CONFIG_WRUNLOCK() pthread_rwlock_unlock(&g_config_rwlock)
+#endif
+
 #define CONFIG_DEFAULT_PATH "config/system_config.json"
 
 int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     if (!config) return -1;
 
+    CONFIG_WRLOCK();
+
     const char* path = filepath ? filepath : CONFIG_DEFAULT_PATH;
     FILE* fp = fopen(path, "r");
-    if (!fp) { log_warning("[配置] 文件不存在: %s", path); return -1; }
+    if (!fp) { log_warning("[配置] 文件不存在: %s", path); CONFIG_WRUNLOCK(); return -1; }
 
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
-    if (fsize <= 0 || fsize > 65536) { fclose(fp); return -1; }
+    if (fsize <= 0 || fsize > 65536) { fclose(fp); CONFIG_WRUNLOCK(); return -1; }
     fseek(fp, 0, SEEK_SET);
 
     char* json_str = (char*)safe_malloc((size_t)fsize + 1);
-    if (!json_str) { fclose(fp); return -1; }
+    if (!json_str) { fclose(fp); CONFIG_WRUNLOCK(); return -1; }
     fread(json_str, 1, (size_t)fsize, fp);
     json_str[fsize] = '\0';
     fclose(fp);
@@ -39,6 +57,7 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     if (!root) {
         log_error("[配置] JSON解析失败: %s", path);
         safe_free((void**)&json_str);
+        CONFIG_WRUNLOCK();
         return -1;
     }
 
@@ -93,12 +112,24 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
 
 /* 加载端口字段（原只保存不加载） */
     v = json_get(root, "http_port");
-    if (v && v->type == JSON_NUMBER) config->http_port = (int)v->data.number_val;
-    if (config->http_port <= 0 || config->http_port > 65535) config->http_port = SELFLNN_DEFAULT_PORT;
+    if (v && v->type == JSON_NUMBER) {
+        int json_hp = (int)v->data.number_val;
+        if (json_hp > 0 && json_hp <= 65535 && json_hp != SELFLNN_HTTP_PORT) {
+            log_warning("[配置] system_config.json中http_port=%d与port_config.h中SELFLNN_HTTP_PORT=%d不一致，强制使用头文件定义值%d",
+                        json_hp, SELFLNN_HTTP_PORT, SELFLNN_HTTP_PORT);
+        }
+    }
+    config->http_port = SELFLNN_DEFAULT_PORT;
 
     v = json_get(root, "websocket_port");
-    if (v && v->type == JSON_NUMBER) config->websocket_port = (int)v->data.number_val;
-    if (config->websocket_port <= 0 || config->websocket_port > 65535) config->websocket_port = SELFLNN_WEBSOCKET_PORT;
+    if (v && v->type == JSON_NUMBER) {
+        int json_ws = (int)v->data.number_val;
+        if (json_ws > 0 && json_ws <= 65535 && json_ws != SELFLNN_WEBSOCKET_PORT) {
+            log_warning("[配置] system_config.json中websocket_port=%d与port_config.h中SELFLNN_WEBSOCKET_PORT=%d不一致，强制使用头文件定义值%d",
+                        json_ws, SELFLNN_WEBSOCKET_PORT, SELFLNN_WEBSOCKET_PORT);
+        }
+    }
+    config->websocket_port = SELFLNN_WEBSOCKET_PORT;
 
     v = json_get(root, "distributed_port");
     if (v && v->type == JSON_NUMBER) config->distributed_port = (int)v->data.number_val;
@@ -116,6 +147,7 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
         }
     }
 
+    CONFIG_WRUNLOCK();
     return 0;
 }
 

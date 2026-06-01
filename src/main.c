@@ -128,7 +128,7 @@ static int g_training_interval_sec     = 300;
 #define VERSION_PATCH 0
 
 static BackendServer* g_server = NULL;
-static WSPushServer* g_ws_push_server = NULL;
+WSPushServer* g_ws_push_server = NULL;
 static void* g_online_learner_handle = NULL;
 static void* g_evolution_engine_handle = NULL;
 static void* g_unified_lnn_state = NULL;
@@ -2437,10 +2437,18 @@ int main(int argc, char* argv)
 
         if (selflnn_init(&sys_config) == 0) {
             printf("  SELF-LNN核心系统初始化成功\n");
-            /* H-003: 设置全局LNN指针供GPU后端TPU回退使用 + 增加NULL检查 */
+            /* P1-003: 确保LNN先于multimodal_unified_input初始化 */
             g_global_lnn = selflnn_get_shared_lnn();
             if (!g_global_lnn) {
                 fprintf(stderr, "警告: 共享LNN获取失败，GPU回退功能将不可用\n");
+            }
+            {
+                void* unified_state = selflnn_get_unified_lnn_state();
+                if (g_global_lnn && unified_state) {
+                    printf("  初始化顺序检查: LNN → 统一LNN状态 (正确)\n");
+                } else if (unified_state && !g_global_lnn) {
+                    fprintf(stderr, "警告: 统一LNN状态先于核心LNN创建，初始化顺序异常\n");
+                }
             }
             /* M-016: 启动时自动加载检查点模型
              * 扫描 checkpoints/ 目录，如果有预训练模型则加载到共享LNN */

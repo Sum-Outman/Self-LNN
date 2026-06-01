@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN AGI 语音采集共享工具
  * 统一管理 MediaRecorder 生命周期、音频采集、Blob组装
  * 消除 voice-command.js / dialogue-enhanced.js / voice-control.html 中的三重重复实现
@@ -120,11 +120,12 @@ class VoiceCaptureUtil {
         }
     }
 
-    static async uploadBlob(blob) {
+    static async uploadBlob(blob, lang) {
         if (!blob || !(blob instanceof Blob)) return { success: false, error: '无效的音频数据', text: '', confidence: -1 };
         if (!window.SelfLnnApi || typeof window.SelfLnnApi.voiceRecognize !== 'function') return { success: false, error: '语音识别API不可用', text: '', confidence: -1 };
         try {
-            var result = await window.SelfLnnApi.voiceRecognize(blob);
+            var language = lang || 'zh-CN';
+            var result = await window.SelfLnnApi.voiceRecognize(blob, language);
             /* F-004修复: 检查API返回的success状态，失败时不伪装成功 */
             if (!result.success) {
                 return { success: false, error: result.error || '语音识别请求失败', text: '', confidence: -1 };

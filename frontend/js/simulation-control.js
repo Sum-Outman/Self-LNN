@@ -1,4 +1,4 @@
-﻿(function() {
+(function() {
     'use strict';
     var simPolling = null;
     var _simStarting = false;
@@ -335,13 +335,30 @@
         if (sim3dAnimId) { cancelAnimationFrame(sim3dAnimId); sim3dAnimId = null; }
     }
 
-    /* FIX-F2-CRIT-2: 延迟到DOMContentLoaded后初始化WebGL,此时canvas已存在 */
     var _simInitDone = false;
     function _ensureSimInit() {
         if (_simInitDone) return;
         _simInitDone = true;
+        if (!window.SelfLnnApi || !window.SelfLnnApi.connected) {
+            var statusEl = document.getElementById('sim-status');
+            if (statusEl) statusEl.textContent = '后端未连接';
+            return;
+        }
         initSim3D();
         startRenderLoop();
+        window.SelfLnnApi.simulationStatus().then(function(resp) {
+            var data = (resp && resp.data) ? resp.data : resp;
+            if (data && data.robots && data.robots.length > 0) {
+                var robotList = document.getElementById('sim-robot-list');
+                if (robotList) {
+                    robotList.innerHTML = data.robots.map(function(r, i) {
+                        return '<tr><td>' + escapeHtml(r.name || ('机器人' + (i + 1))) + '</td>' +
+                            '<td>' + escapeHtml(r.status || '活跃') + '</td>' +
+                            '<td>' + (r.position ? 'x=' + safeCoord(r.position.x) + ',y=' + safeCoord(r.position.y) + ',z=' + safeCoord(r.position.z) : '--') + '</td></tr>';
+                    }).join('');
+                }
+            }
+        }).catch(function() {});
     }
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', _ensureSimInit);

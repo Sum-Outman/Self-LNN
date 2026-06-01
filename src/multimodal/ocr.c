@@ -2326,6 +2326,7 @@ int ocr_recognize_chars(OcrProcessor* processor,
     }
     
     if (!use_cnn) {
+        log_info("[OCR] CNN分类器权重未加载，当前使用模板匹配模式。识别精度取决于模板库覆盖度和特征质量。");
         /* CNN权重未加载，使用模板匹配作为回退 */
         /* 检查字符模板是否已加载 */
         if (processor->num_char_templates == 0) {

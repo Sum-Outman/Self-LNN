@@ -1,10 +1,19 @@
-﻿#include "selflnn/core/cma_es.h"
+#include "selflnn/core/cma_es.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/logging.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#include <time.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#else
+#include <unistd.h>
+#include <sys/time.h>
+#endif
 
 #define CMAES_EIGEN_MAX_ITER 50
 #define CMAES_EIGEN_TOL 1e-10f
@@ -169,7 +178,25 @@ int cmaes_init(CMAESState* state, size_t dimension, float sigma, int lambda, int
     memset(state, 0, sizeof(CMAESState));
     state->dimension = dimension;
     state->sigma = sigma > 0 ? sigma : CMAES_DEFAULT_SIGMA;
-    state->rng_state = seed != 0 ? (unsigned int)seed : 123456789u;
+    if (seed != 0) {
+        state->rng_state = (unsigned int)seed;
+    } else {
+        /* 混合高精度计时器和进程ID作为随机种子 */
+        unsigned int time_seed, pid_seed;
+#ifdef _WIN32
+        LARGE_INTEGER counter;
+        QueryPerformanceCounter(&counter);
+        time_seed = (unsigned int)(counter.QuadPart & 0xFFFFFFFFu);
+        pid_seed = (unsigned int)_getpid();
+#else
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        time_seed = (unsigned int)((ts.tv_sec * 1000000000u + (unsigned int)ts.tv_nsec) & 0xFFFFFFFFu);
+        pid_seed = (unsigned int)getpid();
+#endif
+        state->rng_state = time_seed ^ (pid_seed << 16) ^ (pid_seed >> 16) ^ 0x9E3779B9u;
+        if (state->rng_state == 0) state->rng_state = 0xDEADBEEFu;
+    }
 
     state->lambda = lambda < CMAES_MIN_POP ? CMAES_DEFAULT_LAMBDA : lambda;
     if (state->lambda > CMAES_MAX_POP) state->lambda = CMAES_MAX_POP;

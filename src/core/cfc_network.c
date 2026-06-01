@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file cfc_network.c
  * @brief CfC网络实现（对应头文件 cfc_network.h）
  * 
@@ -264,6 +264,7 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
 
     // 初始化统计信息
     network->is_initialized = 1;
+    network->is_trained = 0;
     network->current_avg_activation = 0.0f;
     network->current_max_activation = 0.0f;
     network->current_gradient_norm = 0.0f;
@@ -342,6 +343,9 @@ int cfc_forward(CfCNetwork* network, const float* input,
     
     // 初始化状态检查
     SELFLNN_CHECK_INITIALIZED(network, "CfC网络未初始化");
+    if (!network->is_trained) {
+        log_warning("CfC网络未训练，推理结果可能不准确");
+    }
     
     const CfCNetworkConfig* config = &network->config;
     size_t hidden_size = config->hidden_size;

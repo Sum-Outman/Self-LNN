@@ -1366,6 +1366,7 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
     {
         GpuBackend detected = gpu_auto_select;
         if (detected == GPU_BACKEND_CPU || detected < 0) {
+            log_warning("[训练管线] ⚠ GPU后端不可用 — 已回退到CPU后端。训练速度将受CPU单核/多核性能限制，如需加速请安装GPU驱动并重新初始化。");
             log_info("[训练管线] 未检测到GPU硬件，自动使用CPU后端 (支持纯CPU训练)");
         } else {
             const char* name = "未知";
@@ -1414,7 +1415,8 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
         opt_cfg.learning_rate = pipeline->network->config.learning_rate;
         opt_cfg.beta1 = 0.9f;
         opt_cfg.beta2 = 0.999f;
-        opt_cfg.epsilon = 1e-8f;
+        opt_cfg.epsilon = (pipeline->config.optimizer_epsilon > 0.0f)
+                          ? pipeline->config.optimizer_epsilon : 1e-8f;
         pipeline->optimizer = optimizer_create(&opt_cfg);
         pipeline->optimizer_step = 0;
     }

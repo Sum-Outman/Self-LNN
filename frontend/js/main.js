@@ -1,4 +1,4 @@
-﻿// SELF-LNN AGI 管理系统 - 主JavaScript文件
+// SELF-LNN AGI 管理系统 - 主JavaScript文件
 var g_dataEngine = null;
 var g_usingDataEngine = false;
 
@@ -88,39 +88,109 @@ var g_browserCompat = window.g_browserCompat || new BrowserCompat();
     
     LoadingOverlay.show('SELF-LNN 液态神经网络初始化中...');
 
+    var moduleStatus = {};
+    var g_moduleRetryCount = {};
+    var MAX_RETRIES = 3;
+    var RETRY_DELAY_MS = 2000;
+
+    function markModuleStatus(name, status, errorMsg) {
+        moduleStatus[name] = { status: status, error: errorMsg || '', time: Date.now() };
+        console.log('[模块加载] ' + name + ': ' + status + (errorMsg ? ' (' + errorMsg + ')' : ''));
+    }
+
+    function retryModule(name, createFn, onSuccess) {
+        if (!g_moduleRetryCount[name]) g_moduleRetryCount[name] = 0;
+        if (g_moduleRetryCount[name] >= MAX_RETRIES) {
+            console.error('[模块加载] ' + name + ': 已达最大重试次数(' + MAX_RETRIES + ')，放弃');
+            markModuleStatus(name, 'fatal', '最大重试次数已用尽');
+            return;
+        }
+        g_moduleRetryCount[name]++;
+        console.warn('[模块加载] ' + name + ': 第' + g_moduleRetryCount[name] + '次重试...');
+        setTimeout(function() {
+            try {
+                var result = createFn();
+                if (result) {
+                    markModuleStatus(name, 'retry_ok');
+                    if (onSuccess) onSuccess(result);
+                } else {
+                    retryModule(name, createFn, onSuccess);
+                }
+            } catch(e) {
+                markModuleStatus(name, 'retry_failed', e.message);
+                retryModule(name, createFn, onSuccess);
+            }
+        }, RETRY_DELAY_MS * g_moduleRetryCount[name]);
+    }
+
+    function safeCreateModule(name, createFn, onSuccess) {
+        try {
+            var result = createFn();
+            if (!result) {
+                markModuleStatus(name, 'failed', '创建返回null/undefined');
+                retryModule(name, createFn, onSuccess);
+                return null;
+            }
+            markModuleStatus(name, 'ok');
+            return result;
+        } catch(e) {
+            markModuleStatus(name, 'failed', e.message);
+            retryModule(name, createFn, onSuccess);
+            return null;
+        }
+    }
+
     try {
-        g_dataEngine = new DataEngine();
+        g_dataEngine = safeCreateModule('DataEngine', function() { return new DataEngine(); });
         loadTrainingSchedulesFromStorage();
-        g_deviceManager = new DeviceManager();
-        g_commandEngine = new CommandEngine();
-        g_voiceCommandSystem = new VoiceCommandSystem();
-        g_voiceCommandSystem.setCommandEngine(g_commandEngine);
-        g_textCommandSystem = new TextCommandSystem();
-        g_textCommandSystem.setCommandEngine(g_commandEngine);
-        g_dialogueEnhanced = new DialogueEnhanced();
-        g_agiController = new AGIController();
-        g_agiController.init();
-        g_commandEngine.onCommandResult = function(parsed, result) {
-            addDialogueMessage('system', '[指令执行] ' + parsed.rawText + (result.success ? ' - 执行成功' : ' - 失败: ' + result.error));
-        };
-        g_voiceCommandSystem.onCommandResult = function(result) {
-            addDialogueMessage('system', '[语音指令] ' + (result.originalText || result.command || '') + (result.success ? ' - 执行成功' : ' - 失败: ' + (result.error || '')));
-        };
-        g_textCommandSystem.onCommandResult = function(parsed, result) {
-            addDialogueMessage('system', '[文字指令] ' + (parsed.rawText || '') + (result.success ? ' - 执行成功' : ' - 失败: ' + (result.error || '')));
-        };
+        g_deviceManager = safeCreateModule('DeviceManager', function() { return new DeviceManager(); });
+        g_commandEngine = safeCreateModule('CommandEngine', function() { return new CommandEngine(); });
+        g_voiceCommandSystem = safeCreateModule('VoiceCommandSystem', function() {
+            var vcs = new VoiceCommandSystem();
+            if (g_commandEngine) vcs.setCommandEngine(g_commandEngine);
+            return vcs;
+        });
+        g_textCommandSystem = safeCreateModule('TextCommandSystem', function() {
+            var tcs = new TextCommandSystem();
+            if (g_commandEngine) tcs.setCommandEngine(g_commandEngine);
+            return tcs;
+        });
+        g_dialogueEnhanced = safeCreateModule('DialogueEnhanced', function() { return new DialogueEnhanced(); });
+        g_agiController = safeCreateModule('AGIController', function() {
+            var agi = new AGIController();
+            agi.init();
+            return agi;
+        });
+
+        if (g_commandEngine) {
+            g_commandEngine.onCommandResult = function(parsed, result) {
+                addDialogueMessage('system', '[指令执行] ' + parsed.rawText + (result.success ? ' - 执行成功' : ' - 失败: ' + result.error));
+            };
+        }
+        if (g_voiceCommandSystem) {
+            g_voiceCommandSystem.onCommandResult = function(result) {
+                addDialogueMessage('system', '[语音指令] ' + (result.originalText || result.command || '') + (result.success ? ' - 执行成功' : ' - 失败: ' + (result.error || '')));
+            };
+        }
+        if (g_textCommandSystem) {
+            g_textCommandSystem.onCommandResult = function(parsed, result) {
+                addDialogueMessage('system', '[文字指令] ' + (parsed.rawText || '') + (result.success ? ' - 执行成功' : ' - 失败: ' + (result.error || '')));
+            };
+        }
         
         setupEventListeners();
-        g_deviceManager.init().catch(function(err) {
-            console.error('[SELF-LNN] 设备管理器初始化失败:', err && err.message ? err.message : err);
-            showNotification('⚠️ 设备管理器初始化失败，部分硬件功能可能不可用', 'warning');
-        });
+        if (g_deviceManager) {
+            g_deviceManager.init().catch(function(err) {
+                console.error('[SELF-LNN] 设备管理器初始化失败:', err && err.message ? err.message : err);
+                showNotification('⚠️ 设备管理器初始化失败，部分硬件功能可能不可用', 'warning');
+            });
+        }
         
-        /* L04修复: DataEngine与LoadingOverlay同步，消除虚假"已加载"空窗期 */
         setTimeout(function() {
-            g_dataEngine.start(3000);
+            if (g_dataEngine) {
+                g_dataEngine.start(3000);
+            }
             LoadingOverlay.hide();
-            /* L-024修复: 页面初始化后立即同步训练历史占位文本 */
             if (typeof updateTrainingHistoryPlaceholderState === 'function') {
                 updateTrainingHistoryPlaceholderState();
             }

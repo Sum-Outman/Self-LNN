@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN AGI 增强对话系统
  * 支持语音输入/输出、多模态对话（视觉+语音+文字）、摄像头画面发送
  * 集成TTS语音播报和语音识别录制
@@ -480,6 +480,9 @@ class DialogueEnhanced {
      * @returns {Promise<object>} 响应结果
      */
     async sendMultimodalMessage(text, imageData, audioData, params) {
+        if (!window.SelfLnnApi || !window.SelfLnnApi.connected) {
+            return { success: false, error: '会话系统未就绪，请先完成模型训练或检查后端连接。' };
+        }
         var payload = {
             message: text || '',
             mode: 'multimodal'
@@ -519,7 +522,7 @@ class DialogueEnhanced {
             return await response.json();
         } catch (err) {
             console.error('多模态对话失败:', err);
-            return { success: false, error: err.message };
+            return { success: false, error: '会话系统未就绪，请先完成模型训练或检查后端连接。' };
         }
     }
 

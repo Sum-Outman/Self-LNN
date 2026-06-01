@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file graph_query.c
  * @brief 知识图谱查询引擎实现
  *
@@ -15,6 +15,11 @@
 #include <stdio.h>
 #include <math.h>
 #include <ctype.h>
+#include <time.h>
+
+/* 多跳推理最大跳数限制 */
+#define MAX_HOPS_DEFAULT 10
+#define MAX_HOPS_QUERY_TIMEOUT_MS 30000
 
 /* ============================================================================
  * 内部辅助函数
@@ -715,6 +720,9 @@ SubgraphMatchSet* graph_query_match_pattern(AdjacencyList* al,
     if (!al || !pattern || pattern->node_count == 0) return NULL;
     QueryOptions opt = options ? *options : query_options_default();
 
+    /* 超时保护基准时间 */
+    clock_t match_start_time = clock();
+
     SubgraphMatchSet* set = (SubgraphMatchSet*)safe_malloc(sizeof(SubgraphMatchSet));
     if (!set) return NULL;
     set->matches = NULL;
@@ -740,6 +748,13 @@ SubgraphMatchSet* graph_query_match_pattern(AdjacencyList* al,
 
     int used_pattern[32];
     for (int si = 0; si < start_count; si++) {
+        /* 超时保护 */
+        clock_t match_elapsed = clock() - match_start_time;
+        if ((match_elapsed * 1000 / CLOCKS_PER_SEC) > MAX_HOPS_QUERY_TIMEOUT_MS) {
+            log_warning("[图查询] 图模式匹配超时(%dms)，返回部分结果", MAX_HOPS_QUERY_TIMEOUT_MS);
+            break;
+        }
+
         int* matched_ids = (int*)safe_malloc(
             (size_t)pattern->node_count * sizeof(int));
         if (!matched_ids) break;
@@ -938,9 +953,19 @@ SubgraphMatchSet* graph_query_find_path_pattern(AdjacencyList* al,
                                                 const char** path_edge_labels,
                                                 size_t path_length,
                                                 float min_confidence) {
-    /* ZS-004修复: 使用path_edge_labels和min_confidence参数进行边标签匹配和置信度过滤 */
+    /* 使用path_edge_labels和min_confidence参数进行边标签匹配和置信度过滤 */
     if (!al || !start_label || path_length == 0)
         return NULL;
+
+    /* 最大跳数限制：默认10跳，防止无限扩展 */
+    if (path_length > MAX_HOPS_DEFAULT) {
+        log_warning("[图查询] 多跳路径查询跳数(%zu)超过最大限制(%d)，截断为%d跳",
+                    path_length, MAX_HOPS_DEFAULT, MAX_HOPS_DEFAULT);
+        path_length = MAX_HOPS_DEFAULT;
+    }
+
+    /* 超时保护基准时间 */
+    clock_t start_time = clock();
 
     SubgraphMatchSet* set = (SubgraphMatchSet*)safe_malloc(sizeof(SubgraphMatchSet));
     if (!set) return NULL;
@@ -952,6 +977,13 @@ SubgraphMatchSet* graph_query_find_path_pattern(AdjacencyList* al,
     int start_count = adjacency_list_find_by_label(al, start_label, starts, 1024);
 
     for (int si = 0; si < start_count; si++) {
+        /* 超时保护：每处理一个起始节点检查是否超时 */
+        clock_t elapsed = clock() - start_time;
+        if ((elapsed * 1000 / CLOCKS_PER_SEC) > MAX_HOPS_QUERY_TIMEOUT_MS) {
+            log_warning("[图查询] 多跳路径查询超时(%dms)，返回部分结果", MAX_HOPS_QUERY_TIMEOUT_MS);
+            break;
+        }
+
         int path_nodes[1024];
         path_nodes[0] = starts[si];
         int path_len = 1;

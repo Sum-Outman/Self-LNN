@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file slam.c
  * @brief 同步定位与建图(SLAM)系统 —— 全局协调层
  * 
@@ -56,11 +56,11 @@
 #define SLAM_DEFAULT_FOCAL_LENGTH 525.0f  /* 默认焦距（像素） */
 #define SLAM_DEFAULT_PRINCIPAL_POINT 320.0f /* 默认主点（像素） */
 
-/* MUL-06: 闭环检测深度增强新增常量 */
-#define SLAM_VOCABULARY_SIZE 1000         /* 默认词汇表大小 */
-#define SLAM_VOCABULARY_DEPTH 6           /* 默认词汇树深度 */
-#define SLAM_VOCABULARY_BRANCHING 10      /* 默认分支因子 */
-#define SLAM_VOCABULARY_MAX_TRAIN 500     /* 最大训练帧数 */
+/* MUL-06: 闭环检测深度增强新增常量 — P2-004扩展词汇表规模 */
+#define SLAM_VOCABULARY_SIZE 4000         /* 扩展词汇表大小（原1000→4000，提升闭环识别精度） */
+#define SLAM_VOCABULARY_DEPTH 8           /* 扩展词汇树深度（原6→8，更细粒度特征聚类） */
+#define SLAM_VOCABULARY_BRANCHING 16      /* 扩展分支因子（原10→16，更丰富特征空间） */
+#define SLAM_VOCABULARY_MAX_TRAIN 2000    /* 扩展最大训练帧数（原500→2000） */
 #define SLAM_TEMPORAL_WINDOW_SIZE 5       /* 时间一致性窗口大小 */
 #define SLAM_TEMPORAL_CONSISTENCY_THRESHOLD 3 /* 时间一致性阈值 */
 #define SLAM_COVISIBILITY_MIN_WEIGHT 3    /* 共视图最小权重 */

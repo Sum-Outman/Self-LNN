@@ -35,12 +35,13 @@
 #define CI_MEM_POOL_SIZE (1024 * 1024)  /* M-026: 内存池1MB */
 #define CI_MAX_MEM_BLOCKS 256  /* M-026: 最大内存块数量 */
 
-/* 变量类型 */
+/* 变量类型 — P2-006扩展：添加CI_VAR_BOOL支持 */
 typedef enum {
     CI_VAR_FLOAT = 0,
     CI_VAR_INT = 1,
     CI_VAR_STRING = 2,
-    CI_VAR_ARRAY = 3 /* 数组类型 */
+    CI_VAR_ARRAY = 3,
+    CI_VAR_BOOL = 4
 } CiVarType;
 
 /* 变量存储 */
@@ -153,14 +154,25 @@ static float _ci_builtin_sin(float x) { return sinf(x); }
 static float _ci_builtin_cos(float x) { return cosf(x); }
 static float _ci_builtin_sqrt(float x) { return sqrtf(x); }
 static float _ci_builtin_rand(float x) { (void)x; return secure_random_float(); }
+static float _ci_builtin_log(float x) { return (x > 0.0f) ? logf(x) : 0.0f; }
+static float _ci_builtin_exp(float x) { return expf(x); }
+static float _ci_builtin_pow(float x, float y) { return powf(x, y); }
+static float _ci_builtin_tan(float x) { return tanf(x); }
+static float _ci_builtin_floor(float x) { return floorf(x); }
+static float _ci_builtin_ceil(float x) { return ceilf(x); }
 
 static const CiBuiltin g_ci_builtins[] = {
-    {"abs",  _ci_builtin_abs, 0},
-    {"sin",  _ci_builtin_sin, 0},
-    {"cos",  _ci_builtin_cos, 0},
-    {"sqrt", _ci_builtin_sqrt, 0},
-    {"rand", _ci_builtin_rand, 0},
-    {"",     NULL,            1}
+    {"abs",   _ci_builtin_abs, 0},
+    {"sin",   _ci_builtin_sin, 0},
+    {"cos",   _ci_builtin_cos, 0},
+    {"sqrt",  _ci_builtin_sqrt, 0},
+    {"rand",  _ci_builtin_rand, 0},
+    {"log",   _ci_builtin_log, 0},
+    {"exp",   _ci_builtin_exp, 0},
+    {"tan",   _ci_builtin_tan, 0},
+    {"floor", _ci_builtin_floor, 0},
+    {"ceil",  _ci_builtin_ceil, 0},
+    {"",      NULL,            1}
 };
 
 /* M-026: 扩展内置函数实现（多参数/变长参数） */

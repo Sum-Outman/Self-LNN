@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file text.c
  * @brief 文本处理模块实现 —— 基于LNN的语义编码
  *
@@ -321,9 +321,12 @@ int text_process_string(TextProcessor* processor,
 int text_extract_char_features(TextProcessor* processor,
                               const char* text, size_t length,
                               float* char_features, size_t max_features) {
-    /* 委托给主处理函数，确保使用LNN语义编码 */
-    return text_process_string(processor, text, length,
+    int result = text_process_string(processor, text, length,
                               char_features, max_features);
+    if (result == 0 && max_features > 0) {
+        log_warning("[文本] 特征提取返回0维度，LNN可能未就绪或输入为空，请检查系统初始化顺序");
+    }
+    return result;
 }
 
 int text_processor_get_config(const TextProcessor* processor, TextConfig* config) {

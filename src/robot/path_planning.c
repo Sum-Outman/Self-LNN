@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file path_planning.c
  * @brief 路径规划算法实现
  *
@@ -191,6 +191,8 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
     if (!config || !result) return -1;
     const PlanGridMap* map = (const PlanGridMap*)config->user_data;
     if (!map || !map->cells) return -1;
+
+    plan_slam_ensure_fresh((PlanConfig*)config);
 
     memset(result, 0, sizeof(PlanResult));
 
@@ -445,6 +447,8 @@ int plan_dwa(const PlanConfig* config, const float* current_state, PlanResult* r
     if (!config || !result || !current_state) return -1;
     const PlanGridMap* map = (const PlanGridMap*)config->user_data;
 
+    plan_slam_ensure_fresh((PlanConfig*)config);
+
     memset(result, 0, sizeof(PlanResult));
 
     float v0 = current_state[3];
@@ -525,6 +529,8 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
 {
     if (!config || !result) return -1;
     const PlanGridMap* map = (const PlanGridMap*)config->user_data;
+
+    plan_slam_ensure_fresh((PlanConfig*)config);
 
     memset(result, 0, sizeof(PlanResult));
 
@@ -1018,6 +1024,8 @@ int plan_rrt_star(const PlanConfig* config, PlanResult* result)
                      config->rrt_star_config.max_nodes : PLAN_RRT_STAR_MAX_NODES;
     if (!config || !result) return -1;
     if (max_nodes > PLAN_RRT_STAR_MAX_NODES) max_nodes = PLAN_RRT_STAR_MAX_NODES;
+
+    plan_slam_ensure_fresh((PlanConfig*)config);
     nodes[0].x = config->start.x;
     nodes[0].y = config->start.y;
     nodes[0].parent = -1;
@@ -1365,6 +1373,8 @@ int plan_dstar_lite(const PlanConfig* config, PlanResult* result)
     int grid_w, grid_h;
     float res;
     int start_id, goal_id;
+
+    plan_slam_ensure_fresh((PlanConfig*)config);
     int i;
     if (!config || !result) return -1;
     if (!config->user_data) return -1;
@@ -1678,6 +1688,36 @@ int plan_chomp(const PlanConfig* config, PlanResult* result)
     }
     result->success = 1;
     return 0;
+}
+
+static slam_map_update_fn g_slam_map_callback = NULL;
+static void* g_slam_map_ctx = NULL;
+static uint64_t g_last_slam_update_ms = 0;
+
+int plan_register_slam_callback(slam_map_update_fn callback, void* ctx) {
+    g_slam_map_callback = callback;
+    g_slam_map_ctx = ctx;
+    g_last_slam_update_ms = 0;
+    return 0;
+}
+
+int plan_refresh_map_from_slam(PlanConfig* config) {
+    if (!config || !g_slam_map_callback) return 0;
+    PlanGridMap* map = (PlanGridMap*)config->user_data;
+    if (!map || !map->cells) return 0;
+    int result = g_slam_map_callback(map, g_slam_map_ctx);
+    if (result > 0) {
+        g_last_slam_update_ms = (uint64_t)((float)clock() / (float)CLOCKS_PER_SEC * 1000.0f);
+    }
+    return result;
+}
+
+void plan_slam_ensure_fresh(PlanConfig* config) {
+    if (!config || !g_slam_map_callback) return;
+    uint64_t now_ms = (uint64_t)((float)clock() / (float)CLOCKS_PER_SEC * 1000.0f);
+    if (now_ms - g_last_slam_update_ms > 500) {
+        plan_refresh_map_from_slam(config);
+    }
 }
 
 int plan_stomp(const PlanConfig* config, PlanResult* result)
