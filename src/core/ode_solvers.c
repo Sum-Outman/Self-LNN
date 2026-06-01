@@ -1,5 +1,5 @@
 #include "selflnn/core/ode_solvers.h"
-#include "selflnn/utils/memory_utils.h"-MIG
+#include "selflnn/utils/memory_utils.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>

@@ -93,7 +93,7 @@ static size_t ullnn_input_dimension_estimate(void* lnn_ptr);
  * 实际的知识嵌入重编码由 AGI 后台循环异步处理。 */
 static void kb_update_nofify_callback(void* user_data) {
     (void)user_data;
-    selflnn_trigger_knowledge_refresh;
+    selflnn_trigger_knowledge_refresh();
 }
 
 /* AGI后台任务常量 */
@@ -298,7 +298,7 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
 
     /* ---- 路径A: 真实数据评估 ---- */
     {
-        void* ul_state = selflnn_get_unified_state;
+        void* ul_state = selflnn_get_unified_state();
         if (ul_state) {
             UnifiedInputState* uis = (UnifiedInputState*)ul_state;
             size_t input_dim = ullnn_input_dimension_estimate(lnn);
@@ -367,7 +367,7 @@ static int is_online_learner_init(void* h);
 
 /* AGI后台任务：在线学习循环 */
 static void agi_bg_online_learning(void) {
-    void* learner = selflnn_get_online_learner;
+    void* learner = selflnn_get_online_learner();
     /* ZS-020修复: 使用在线学习器专用检查函数替代NULL */
     if (!is_subsystem_healthy_int("在线学习器", learner, is_online_learner_init)) return;
     OnlineLearningStatus status;
@@ -382,7 +382,7 @@ static void agi_bg_online_learning(void) {
     }
 /* 从LNN配置动态获取状态维度，替代硬编码128。
      * 确保与LNN实际维度匹配，避免数据截断或越界。 */
-    size_t state_dim = selflnn_get_config_state_dimension;
+    size_t state_dim = selflnn_get_config_state_dimension();
     if (state_dim == 0) state_dim = 128;  /* 回退: 配置不可用时使用默认维度 */
     float* state = (float*)safe_malloc(state_dim * sizeof(float));
     float* target = (float*)safe_malloc(state_dim * sizeof(float));
@@ -392,7 +392,7 @@ static void agi_bg_online_learning(void) {
         return;
     }
     /* 尝试从LNN网络获取当前状态和最近输出作为训练数据 */
-    void* lnn = selflnn_get_shared_lnn;
+    void* lnn = selflnn_get_shared_lnn();
     if (lnn) {
         if (selflnn_get_recent_state(lnn, state, (int)state_dim) == 0 &&
             selflnn_get_recent_output(lnn, target, (int)state_dim) == 0) {
@@ -418,7 +418,7 @@ static void agi_bg_online_learning(void) {
             /* 验证2: 目标输出不应爆炸，知识库锚定修正 */
             if (target_norm > 1e4f) {
                 valid_target = 0;
-                KnowledgeBase* kb = (KnowledgeBase*)selflnn_get_knowledge_base;
+                KnowledgeBase* kb = (KnowledgeBase*)selflnn_get_knowledge_base();
                 if (kb) {
 /* 实际调用knowledge_base_nearest_fact查找最近事实锚定 */
                     char anchor_s[256], anchor_p[256], anchor_o[256];
@@ -443,7 +443,7 @@ static void agi_bg_online_learning(void) {
             /* 验证3: 使用知识库进行一致性交叉验证
              * 如果知识库中有与当前状态相关的可靠事实，将其作为训练anchor */
             if (valid_target && target_norm > 0.01f) {
-                KnowledgeBase* kb = (KnowledgeBase*)selflnn_get_knowledge_base;
+                KnowledgeBase* kb = (KnowledgeBase*)selflnn_get_knowledge_base();
                 if (kb) {
                     size_t kb_fact_count = knowledge_base_get_total_facts(kb);
                     if (kb_fact_count > 10) {
@@ -520,8 +520,8 @@ static void agi_bg_knowledge_consolidate(void) {
      * 当 knowledge_base_add 成功写入新知识后，通过回调设置刷新标志位。
      * 此处检查标志位并触发CfC嵌入引擎重新训练，实现对新增知识条目的
      * 嵌入向量重新编码。替代原来的纯定时轮询方式，消除延迟。 */
-    if (selflnn_check_and_reset_knowledge_refresh) {
-        KnowledgeBase* kb = (KnowledgeBase*)selflnn_get_knowledge_base;
+    if (selflnn_check_and_reset_knowledge_refresh()) {
+        KnowledgeBase* kb = (KnowledgeBase*)selflnn_get_knowledge_base();
         if (kb) {
             int ret = knowledge_base_retrain_embeddings(kb, 0);
             if (ret == 0) {
@@ -550,7 +550,7 @@ static void agi_bg_knowledge_consolidate(void) {
 
     /* 自动知识学习：每3个固化周期扫描一次知识库文件目录 */
     if (consolidate_cycle % 3 == 0) {
-        void* al = selflnn_get_auto_learning;
+        void* al = selflnn_get_auto_learning();
         if (al) {
             AutoLearnStats astats;
             memset(&astats, 0, sizeof(astats));
@@ -567,8 +567,8 @@ static void agi_bg_knowledge_consolidate(void) {
      * 利用传递性/对称性/逆关系等逻辑规则从三元组中推导新三元组，
      * 实现"向知识库进行学习"的能力闭环。 */
     if (consolidate_cycle % 6 == 0) {
-        void* al = selflnn_get_auto_learning;
-        void* kb = selflnn_get_knowledge_base;
+        void* al = selflnn_get_auto_learning();
+        void* kb = selflnn_get_knowledge_base();
         if (al && kb) {
             int inferred = auto_learning_infer_from_knowledge_base(
                 (AutoLearningSystem*)al, kb, 50);
@@ -586,7 +586,7 @@ static void agi_bg_knowledge_consolidate(void) {
     }
 
         /* FIX-F4: 消费知识推理结果→LNN状态扰动（知识→LNN→决策完整数据通道） */
-        void* kie = selflnn_get_knowledge_inference;
+        void* kie = selflnn_get_knowledge_inference();
         if (kie) {
             void* shared_lnn = g_global_lnn;
             if (shared_lnn) {
@@ -601,7 +601,7 @@ static void agi_bg_knowledge_consolidate(void) {
 
 /* AGI后台任务：自我反思（迭代式元认知循环） */
 static void agi_bg_self_reflection(void) {
-    void* scs = selflnn_get_self_cognition;
+    void* scs = selflnn_get_self_cognition();
     if (!is_subsystem_healthy_int("自我认知", scs, NULL)) {
         log_debug("[AGI后台] 自我认知系统未初始化，跳过自我反思");
         return;
@@ -623,7 +623,7 @@ static void agi_bg_self_reflection(void) {
         log_info("[AGI后台] 认知记忆巩固：%d个片段", consolidated);
     }
     
-    void* learner = selflnn_get_online_learner;
+    void* learner = selflnn_get_online_learner();
     if (learner) {
         OnlineLearningStatus status;
         memset(&status, 0, sizeof(OnlineLearningStatus));
@@ -638,7 +638,7 @@ static void agi_bg_self_reflection(void) {
 
 /* AGI后台任务：演化步 */
 static void agi_bg_evolution_step(void) {
-    void* evo = selflnn_get_evolution_engine;
+    void* evo = selflnn_get_evolution_engine();
     if (!is_subsystem_healthy_int("演化引擎", evo, NULL)) return;
     log_info("[AGI后台] 执行演化步");
     EvolutionStats stats;
@@ -706,7 +706,7 @@ static void agi_bg_cognition_update(void) {
         }
     }
     /* APP13: 群智优化 — 认知更新时触发蜂群迭代优化 */
-    void* ms_ctrl = selflnn_get_multisystem_control;
+    void* ms_ctrl = selflnn_get_multisystem_control();
     if (ms_ctrl) {
         multisystem_swarm_iterate((MultiSystemControlEngine*)ms_ctrl);
     }
@@ -714,7 +714,7 @@ static void agi_bg_cognition_update(void) {
 
 /* AGI后台任务：安全检查 */
 static void agi_bg_safety_check(void) {
-    void* sm = selflnn_get_safety_monitor;
+    void* sm = selflnn_get_safety_monitor();
     if (!sm) return;
 
 /* 主动安全监控 — 原仅被动读取状态, 关键监控函数从未被调用
@@ -759,7 +759,7 @@ static void agi_bg_safety_check(void) {
     pipeline_check_counter++;
     int immediate_requested = dcpipeline_is_immediate_check_requested;
     if (pipeline_check_counter % 3 == 0 || immediate_requested) {
-        void* dp = selflnn_get_data_pipeline;
+        void* dp = selflnn_get_data_pipeline();
         if (dp) {
             DataSourceHealth results[DC_SOURCE_COUNT];
             int checked = dcpipeline_self_check((DataCollectionPipeline*)dp, results);
@@ -819,7 +819,7 @@ static void agi_bg_metacognition(void) {
     if (g_agi_self.avg_cognitive_load > 0.8f) {
         log_warning("[元认知] 认知负荷过高(%.2f)，建议降低并行任务数", g_agi_self.avg_cognitive_load);
         /* 实际校准：降低在线学习率 */
-        void* learner = selflnn_get_online_learner;
+        void* learner = selflnn_get_online_learner();
         if (learner) {
             online_learner_adjust_learning_rate((OnlineLearner*)learner, NULL, 0);
         }
@@ -840,7 +840,7 @@ static void agi_bg_metacognition(void) {
 
 /* AGI后台任务：目标重评估 */
 static void agi_bg_goal_reevaluate(void) {
-    void* planning = selflnn_get_planning_system;
+    void* planning = selflnn_get_planning_system();
     if (!planning) return;
 
     /* 从LNN网络获取真实的当前状态 */
@@ -853,11 +853,11 @@ static void agi_bg_goal_reevaluate(void) {
      * 改为保留上一次有效目标，仅在首次或知识库恢复时更新。 */
     static float prev_valid_goal[64] = {0};
     static int prev_goal_valid = 0;
-    void* lnn = selflnn_get_shared_lnn;
+    void* lnn = selflnn_get_shared_lnn();
     if (lnn) {
         selflnn_get_recent_state(lnn, state, 64);
         /* 从知识库获取当前目标 */
-        void* kb = selflnn_get_knowledge_base;
+        void* kb = selflnn_get_knowledge_base();
         if (kb) {
             selflnn_get_active_goal(kb, goal, 64);
             /* 保存为有效目标向量供后续回退使用 */
@@ -908,7 +908,7 @@ static int is_feature_enabled_internal(FeatureType feature) {
     if (cap_result) return 1;
 
     /* 回退到self_cognition检查 */
-    void* scs = selflnn_get_self_cognition;
+    void* scs = selflnn_get_self_cognition();
     if (!scs) return 1;
     int state = self_cognition_is_feature_enabled((SelfCognitionSystem*)scs, feature);
     return (state == 1) ? 1 : 0;
@@ -1083,7 +1083,7 @@ static void agi_background_loop_iteration(void) {
         (now - g_last_online_learn >= g_online_learn_interval_sec)) {
         agi_bg_online_learning;
         g_last_online_learn = now;
-        void* learner = selflnn_get_online_learner;
+        void* learner = selflnn_get_online_learner();
         if (learner) {
             OnlineLearningStatus ls;
             memset(&ls, 0, sizeof(OnlineLearningStatus));
@@ -1109,7 +1109,7 @@ static void agi_background_loop_iteration(void) {
         static time_t g_last_sleep = 0;
         if (capability_is_enabled(CAP_AUTONOMOUS_EXECUTION) &&
             now - g_last_sleep >= 180) {
-            void* mm = selflnn_get_memory_manager;
+            void* mm = selflnn_get_memory_manager();
             if (mm) {
                 int stats[4] = {0};
                 memory_sleep_consolidation((MemorySystem*)mm, 1.0f, stats);
@@ -1127,7 +1127,7 @@ static void agi_background_loop_iteration(void) {
         now - g_last_reflection >= g_reflection_interval_sec) {
 /* 在发起深度自我反思前检查LNN是否已训练，
          * 避免随机权重LNN产生无意义的自我评估和错误修正决策 */
-        void* scs_check = selflnn_get_self_cognition;
+        void* scs_check = selflnn_get_self_cognition();
         if (scs_check && !self_cognition_is_lnn_ready((SelfCognitionSystem*)scs_check)) {
             log_debug("[AGI后台] LNN尚未完成训练，跳过本次深度自我反思，"
                      "等待模型检查点加载或初始训练完成后自动启用");
@@ -1153,7 +1153,7 @@ static void agi_background_loop_iteration(void) {
         (now - g_last_evolution >= g_evolution_interval_sec)) {
         agi_bg_evolution_step;
         g_last_evolution = now;
-        void* evo = selflnn_get_evolution_engine;
+        void* evo = selflnn_get_evolution_engine();
         if (evo) {
             EvolutionStats es;
             if (evolution_get_stats((EvolutionEngine*)evo, &es) == 0 && es.final_best_fitness > 0.0f) {
@@ -1201,7 +1201,7 @@ static void agi_background_loop_iteration(void) {
         g_last_safety = now;
 /* 同步触发记忆衰减(与安全检查同频, 每分钟) */
         {
-            void* mem_mgr = selflnn_get_memory_manager;
+            void* mem_mgr = selflnn_get_memory_manager();
             if (mem_mgr) {
                 extern int memory_periodic_decay_update(void*);
                 memory_periodic_decay_update(mem_mgr);
@@ -1233,7 +1233,7 @@ static void agi_background_loop_iteration(void) {
                 }
                 bandwidth = sqrtf(bandwidth / 256.0f);
                 /* 将频域指标写入LNN状态 */
-                void* lnn_lp = selflnn_get_shared_lnn;
+                void* lnn_lp = selflnn_get_shared_lnn();
                 if (lnn_lp) {
                     float laplace_metrics[3] = {
                         dominant_freq / 256.0f,     /* 归一化主导频率 */
@@ -1259,7 +1259,7 @@ static void agi_background_loop_iteration(void) {
 
             /* 每5个循环: LNN状态推送 */
             {
-                void* lnn = selflnn_get_shared_lnn;
+                void* lnn = selflnn_get_shared_lnn();
                 LNNConfig cfg;
                 memset(&cfg, 0, sizeof(cfg));
                 if (lnn && lnn_get_config((LNN*)lnn, &cfg) == 0) {
@@ -1311,7 +1311,7 @@ static void agi_background_loop_iteration(void) {
 
             /* 每10个循环: 内存状态 */
             {
-                void* mm = selflnn_get_memory_manager;
+                void* mm = selflnn_get_memory_manager();
                 size_t used_mem = 0;
                 float ratio = 0.0f, level = 0.0f;
                 if (mm) {
@@ -1328,7 +1328,7 @@ static void agi_background_loop_iteration(void) {
 
             /* 每10个循环: 知识库状态 */
             {
-                void* kb = selflnn_get_knowledge_base;
+                void* kb = selflnn_get_knowledge_base();
                 size_t total_entries = 0;
                 if (kb) {
                     knowledge_base_get_stats((KnowledgeBase*)kb, &total_entries, NULL);
@@ -1342,7 +1342,7 @@ static void agi_background_loop_iteration(void) {
 
             /* 每20个循环: 安全状态 */
             if (ws_broadcast_counter % 20 == 0) {
-                void* sm = selflnn_get_safety_monitor;
+                void* sm = selflnn_get_safety_monitor();
                 SafetyStats ss = {0};
                 if (sm && safety_get_stats((SafetyMonitor*)sm, &ss) == 0) {
                     snprintf(buf, sizeof(buf),
@@ -1398,7 +1398,7 @@ static void agi_background_loop_iteration(void) {
             }
             /* 每15个循环: 权重分布推送 */
             {
-                void* lnn = selflnn_get_shared_lnn;
+                void* lnn = selflnn_get_shared_lnn();
                 if (lnn) {
                     size_t param_count = lnn_get_parameter_count((LNN*)lnn);
                     float* params = lnn_get_parameters((LNN*)lnn);
@@ -1422,7 +1422,7 @@ static void agi_background_loop_iteration(void) {
         if (ws_broadcast_counter % 25 == 0) {
             /* 每25个循环: 激活统计推送 */
             char buf[2048];
-            void* lnn = selflnn_get_shared_lnn;
+            void* lnn = selflnn_get_shared_lnn();
             if (lnn) {
                 size_t param_count = lnn_get_parameter_count((LNN*)lnn);
                 float* params = lnn_get_parameters((LNN*)lnn);
@@ -1486,7 +1486,7 @@ static void agi_background_loop_iteration(void) {
 /* 状态激活数据推送 -- 从LNN读取真实激活矩阵
              * 替代之前的硬编码 "synthetic_live" 假数据字符串 */
             {
-                void* lnn_act = selflnn_get_shared_lnn;
+                void* lnn_act = selflnn_get_shared_lnn();
                 float act_state[128] = {0};
                 int state_dim = 128;
                 int got_state = 0;
@@ -1592,7 +1592,7 @@ static void agi_background_loop_iteration(void) {
                 {
                     char kupd_json[512];
                     size_t kb_total = 0;
-                    void* kb = selflnn_get_knowledge_base;
+                    void* kb = selflnn_get_knowledge_base();
                     if (kb) {
                         knowledge_base_get_stats((KnowledgeBase*)kb, &kb_total, NULL);
                     }
@@ -1607,7 +1607,7 @@ static void agi_background_loop_iteration(void) {
             if (ws_broadcast_counter % 60 == 0) {
                 char pred_json[512];
                 float pred_value = 0.0f;
-                void* lnn_pred = selflnn_get_shared_lnn;
+                void* lnn_pred = selflnn_get_shared_lnn();
                 if (lnn_pred) {
                     float pred_buf[128];
                     memset(pred_buf, 0, sizeof(pred_buf));
@@ -1635,7 +1635,7 @@ static void agi_background_loop_iteration(void) {
             /* diagnostic: 系统诊断数据广播 — 每50个循环 */
             if (ws_broadcast_counter % 50 == 0 && g_ws_push_server) {
                 char dbuf[512];
-                void* lnn_diag = selflnn_get_shared_lnn;
+                void* lnn_diag = selflnn_get_shared_lnn();
                 float health = 0.0f;
                 if (lnn_diag) {
                     LNNConfig cfg;
@@ -1657,7 +1657,7 @@ static void agi_background_loop_iteration(void) {
             /* multimodal_data: 多模态数据处理状态广播 — 每40个循环 */
             if (ws_broadcast_counter % 40 == 0 && g_ws_push_server) {
                 char mbuf[512];
-                void* uis = selflnn_get_unified_state;
+                void* uis = selflnn_get_unified_state();
                 int modal_active = 0;
                 if (uis) {
                     UnifiedInputState* u = (UnifiedInputState*)uis;
@@ -1677,7 +1677,7 @@ static void agi_background_loop_iteration(void) {
             if (capability_is_enabled(CAP_DIALOGUE) &&
                 ws_broadcast_counter % 42 == 0 && g_ws_push_server) {
                 char dtbuf[256];
-                void* dp = selflnn_get_dialogue_processor;
+                void* dp = selflnn_get_dialogue_processor();
                 int d_active = (dp != NULL) ? 1 : 0;
                 snprintf(dtbuf, sizeof(dtbuf),
                     "{\"type\":\"dialogue_token\",\"timestamp\":%lld,"
@@ -1739,7 +1739,7 @@ static void agi_background_loop_iteration(void) {
             correction_score += 0.1f;
         
         if (correction_score > 0.5f) {
-            void* scs = selflnn_get_self_cognition;
+            void* scs = selflnn_get_self_cognition();
             if (scs) {
                 char issue_desc[512];
                 snprintf(issue_desc, sizeof(issue_desc),
@@ -1771,8 +1771,8 @@ static void agi_background_loop_iteration(void) {
         static time_t g_last_curiosity = 0;
         if (capability_is_enabled(CAP_CURIOSITY) &&
             now - g_last_curiosity >= COGNITION_UPDATE_INTERVAL * 4) {
-            void* kb = selflnn_get_knowledge_base;
-            void* learner = selflnn_get_online_learner;
+            void* kb = selflnn_get_knowledge_base();
+            void* learner = selflnn_get_online_learner();
             if (kb && learner) {
                 /* 检查当前知识库信息增益趋势 */
                 size_t kb_total = 0, kb_recent = 0;
@@ -1805,7 +1805,7 @@ static void agi_background_loop_iteration(void) {
         (now - g_last_reflection) < g_reflection_interval_sec + 10) {
         log_info("[模仿学习] 检测到高评分(%.3f)，构建演示并训练",
                  g_agi_self.avg_reflection_score);
-        void* learner = selflnn_get_online_learner;
+        void* learner = selflnn_get_online_learner();
         if (learner) {
             OnlineLearningStatus ls;
             memset(&ls, 0, sizeof(OnlineLearningStatus));
@@ -1899,7 +1899,7 @@ static void agi_background_loop_iteration(void) {
         static int multi_agent_tick = 0;
         multi_agent_tick++;
         if (multi_agent_tick % 5 == 0) {
-            void* mas = selflnn_get_multi_agent_system;
+            void* mas = selflnn_get_multi_agent_system();
             if (mas) {
                 float metrics[4] = {0};
                 int ret = multi_agent_evaluate_performance((MultiAgentSystem*)mas,
@@ -2072,7 +2072,7 @@ static void agi_background_loop_iteration(void) {
         static int multisys_tick = 0;
         multisys_tick++;
         if (multisys_tick % 15 == 0) {
-            void* msc = selflnn_get_multisystem_control;
+            void* msc = selflnn_get_multisystem_control();
             if (msc) {
                 /* 获取设备发现统计 */
                 size_t dev_count = 0;
@@ -2438,14 +2438,14 @@ int main(int argc, char* argv)
         if (selflnn_init(&sys_config) == 0) {
             printf("  SELF-LNN核心系统初始化成功\n");
             /* H-003: 设置全局LNN指针供GPU后端TPU回退使用 + 增加NULL检查 */
-            g_global_lnn = selflnn_get_shared_lnn;
+            g_global_lnn = selflnn_get_shared_lnn();
             if (!g_global_lnn) {
                 fprintf(stderr, "警告: 共享LNN获取失败，GPU回退功能将不可用\n");
             }
             /* M-016: 启动时自动加载检查点模型
              * 扫描 checkpoints/ 目录，如果有预训练模型则加载到共享LNN */
             {
-                int load_result = selflnn_checkpoints_auto_load;
+                int load_result = selflnn_checkpoints_auto_load();
                 if (load_result == 0) {
                     printf("  检查点模型自动加载完成\n");
                 } else {
@@ -2454,7 +2454,7 @@ int main(int argc, char* argv)
                      * 通过TF-IDF检索获取知识条目，编码subject+predicate+object为特征向量。
                      * 相比合成正弦波，真实文本特征能提供更有意义的初始梯度方向。 */
                     void* boot_lnn = g_global_lnn;
-                    void* boot_kb = selflnn_get_knowledge_base;
+                    void* boot_kb = selflnn_get_knowledge_base();
                     KnowledgeBase* kb = (KnowledgeBase*)boot_kb;
                     /* 通过knowledge_base_get_stats获取真实条目数 */
                     size_t kb_total = 0;
@@ -2524,7 +2524,7 @@ int main(int argc, char* argv)
                 }
             }
 /* 检查点/引导训练完成后，标记所有模态模块为已训练 */
-            selflnn_bootstrap_trained_modules;
+            selflnn_bootstrap_trained_modules();
 
 /* 在线学习器附着到共享LNN，直接操作LNN权重矩阵
              * 不再使用rand随机权重和独立线性回归器。
@@ -2543,13 +2543,13 @@ int main(int argc, char* argv)
             ol_config.min_learning_rate = 1e-6f;
             ol_config.max_learning_rate = 0.1f;
             /* P20修复: 从selflnn获取已创建的学习器并附着LNN，避免双重创建 */
-            OnlineLearner* learner_raw = (OnlineLearner*)selflnn_get_online_learner;
+            OnlineLearner* learner_raw = (OnlineLearner*)selflnn_get_online_learner();
             if (!learner_raw) {
                 float initial_weight = 0.0f;
                 learner_raw = online_learner_create(&ol_config, &initial_weight, 1);
             }
             if (learner_raw) {
-                void* shared_lnn_ptr = selflnn_get_shared_lnn;
+                void* shared_lnn_ptr = selflnn_get_shared_lnn();
                 if (shared_lnn_ptr && online_learner_attach_lnn(learner_raw, (LNN*)shared_lnn_ptr) == 0) {
                     printf("  在线学习器初始化成功（已附着到共享LNN）\n");
                     g_online_learner_handle = (void*)learner_raw;
@@ -2561,11 +2561,11 @@ int main(int argc, char* argv)
                 printf("  在线学习器创建失败\n");
             }
             /* 获取自我演化引擎句柄（已在selflnn_init中创建） */
-            g_evolution_engine_handle = selflnn_get_evolution_engine;
+            g_evolution_engine_handle = selflnn_get_evolution_engine();
             if (g_evolution_engine_handle) {
                 printf("  自我演化引擎句柄获取成功\n");
                 /* P28修复: 注入适应度函数（基于LNN损失），否则演化引擎无法运行 */
-                void* shared_lnn = selflnn_get_shared_lnn;
+                void* shared_lnn = selflnn_get_shared_lnn();
                 if (shared_lnn) {
                     evolution_set_fitness_function(
                         (EvolutionEngine*)g_evolution_engine_handle,
@@ -2576,7 +2576,7 @@ int main(int argc, char* argv)
                 }
             }
             /* APP10: 获取产品设计引擎（selflnn_init已创建，此处不再重复创建） */
-            g_product_design = (ProductDesignEngine*)selflnn_get_product_design_engine;
+            g_product_design = (ProductDesignEngine*)selflnn_get_product_design_engine();
             if (g_product_design) {
                 printf("  产品设计引擎获取成功（已在selflnn_init中初始化）\n");
             } else {
@@ -2584,14 +2584,14 @@ int main(int argc, char* argv)
             }
 /* NAS + Laplace由selflnn统一管理 */
             {
-                g_nas_system = selflnn_get_nas_system;
+                g_nas_system = selflnn_get_nas_system();
                 if (g_nas_system) {
                     printf("  NAS系统就绪(由selflnn统一管理)\n");
                 } else {
                     printf("  NAS系统未就绪\n");
                 }
             }
-            g_laplace_unified = selflnn_get_laplace_unified;
+            g_laplace_unified = selflnn_get_laplace_unified();
             if (g_laplace_unified) {
                 printf("  拉普拉斯增强系统就绪(由selflnn统一管理)\n");
             } else {
@@ -2601,7 +2601,7 @@ int main(int argc, char* argv)
              * 不再在此重复创建实例，改为获取selflnn已创建的全局单例。
              * 消除双重UnifiedLNNState问题，确保多模态统一到同一个LNN状态空间。 */
             {
-                void* unified_state = selflnn_get_unified_lnn_state;
+                void* unified_state = selflnn_get_unified_lnn_state();
                 if (unified_state) {
                     g_unified_lnn_state = unified_state;
                     printf("  统一液态状态处理器已就绪（%d模态→共享LNN，由selflnn管理）\n",
@@ -2612,19 +2612,19 @@ int main(int argc, char* argv)
             }
 /* 音频采集+TTS由selflnn统一管理 */
             {
-                g_audio_capture = selflnn_get_audio_capture;
+                g_audio_capture = selflnn_get_audio_capture();
                 if (g_audio_capture) {
                     printf("  音频采集管道就绪(由selflnn统一管理)\n");
                 } else {
                     printf("  音频采集管道未就绪\n");
                 }
-                g_speech_recognizer = selflnn_get_speech_recognizer;
+                g_speech_recognizer = selflnn_get_speech_recognizer();
                 if (g_speech_recognizer) {
                     printf("  语音识别引擎就绪(由selflnn统一管理)\n");
                 } else {
                     printf("  语音识别引擎不可用\n");
                 }
-                g_tts_engine = selflnn_get_tts_engine;
+                g_tts_engine = selflnn_get_tts_engine();
                 if (g_tts_engine) {
                     printf("  TTS语音合成就绪(由selflnn统一管理)\n");
                 } else {
@@ -2633,27 +2633,27 @@ int main(int argc, char* argv)
             }
 /* 计算机操作/审计/内容过滤由selflnn统一管理 */
             {
-                g_computer_op = selflnn_get_computer_operation;
+                g_computer_op = selflnn_get_computer_operation();
                 if (g_computer_op) {
                     printf("  计算机操作模块就绪(由selflnn统一管理)\n");
                 } else {
                     printf("  计算机操作模块未就绪\n");
                 }
             }
-            g_audit_logger = selflnn_get_audit_logger;
+            g_audit_logger = selflnn_get_audit_logger();
             if (g_audit_logger) {
                 printf("  审计日志系统就绪(由selflnn统一管理)\n");
             } else {
                 printf("  审计日志系统未就绪\n");
             }
-            g_content_filter = selflnn_get_content_filter;
+            g_content_filter = selflnn_get_content_filter();
             if (g_content_filter) {
                 printf("  内容过滤器就绪(由selflnn统一管理)\n");
             } else {
                 printf("  内容过滤器未就绪\n");
             }
 /* 初始化深度安全行为监控 */
-            g_sec_behavior = selflnn_get_security_monitor_deep;
+            g_sec_behavior = selflnn_get_security_monitor_deep();
             if (g_sec_behavior) {
                 printf("  深度安全行为监控就绪(由selflnn统一管理)\n");
             } else {
@@ -2661,7 +2661,7 @@ int main(int argc, char* argv)
             }
 /* 从selflnn获取已创建的自我编程引擎，消除重复创建 */
             {
-                g_prog_engine = selflnn_get_self_programming_engine;
+                g_prog_engine = selflnn_get_self_programming_engine();
                 if (g_prog_engine) {
                     printf("  自我编程引擎初始化成功(从selflnn获取)\n");
                 } else {
@@ -2670,7 +2670,7 @@ int main(int argc, char* argv)
             }
 /* 从selflnn获取已创建的分布式训练上下文，消除重复创建 */
             {
-                g_distributed = selflnn_get_distributed_context;
+                g_distributed = selflnn_get_distributed_context();
                 if (g_distributed) {
                     printf("  分布式训练上下文初始化成功(从selflnn获取)\n");
                 } else {
@@ -2679,7 +2679,7 @@ int main(int argc, char* argv)
             }
 /* 负载均衡器由selflnn统一管理 */
             {
-                g_load_balancer = selflnn_get_load_balancer;
+                g_load_balancer = selflnn_get_load_balancer();
                 if (g_load_balancer) {
                     printf("  负载均衡器就绪(由selflnn统一管理)\n");
                 } else {
@@ -2762,7 +2762,7 @@ int main(int argc, char* argv)
                 g_agi_system = agi_system_create(&agi_cfg);
                 if (g_agi_system) {
                     /* 注入共享LNN到AGISystem，确保单一液态神经网络 */
-                    LNN* shared_lnn = selflnn_get_shared_lnn;
+                    LNN* shared_lnn = selflnn_get_shared_lnn();
                     if (shared_lnn && agi_system_set_lnn(g_agi_system, shared_lnn) == 0) {
                         printf("  AGI认知系统初始化成功（已注入单一共享LNN）\n");
                     } else {
@@ -2792,7 +2792,7 @@ int main(int argc, char* argv)
                      * 主动触发LNN知识嵌入重新编码（替代原来的定时轮询），
                      * 消除知识写入与嵌入更新之间的延迟。 */
                     {
-                        KnowledgeBase* shared_kb = (KnowledgeBase*)selflnn_get_knowledge_base;
+                        KnowledgeBase* shared_kb = (KnowledgeBase*)selflnn_get_knowledge_base();
                         if (shared_kb) {
                             knowledge_base_set_update_callback(kb_update_nofify_callback, NULL);
                             printf("  知识库更新事件通知回调已注册\n");
@@ -2821,7 +2821,7 @@ int main(int argc, char* argv)
     g_server = backend_server_create(&config);
     if (!g_server) {
         fprintf(stderr, "错误: 无法创建后端服务器\n");
-        selflnn_shutdown;
+        selflnn_shutdown();
         return 1;
     }
 
@@ -2836,7 +2836,7 @@ int main(int argc, char* argv)
                 fprintf(stderr, "错误: 端口 %d 已被占用，请检查是否有其他程序正在使用该端口\n", config.port);
                 backend_server_free(g_server);
                 g_server = NULL;
-                selflnn_shutdown;
+                selflnn_shutdown();
                 return 1;
             }
         }
@@ -2847,7 +2847,7 @@ int main(int argc, char* argv)
         fprintf(stderr, "错误: 无法启动后端服务器\n");
         backend_server_free(g_server);
         g_server = NULL;
-        selflnn_shutdown;
+        selflnn_shutdown();
         return 1;
     }
 
@@ -2919,7 +2919,7 @@ int main(int argc, char* argv)
                 /* P1-002修复: 从系统真实状态采样作为认知循环输入，替代全零idle信号。
                  * 采样优先级：LNN状态 > 系统状态 > 零向量（最后一层回退）。 */
                 {
-                    void* lnn = selflnn_get_shared_lnn;
+                    void* lnn = selflnn_get_shared_lnn();
                     int got_data = 0;
                     if (lnn && selflnn_get_recent_state(lnn, cycle_input, 128) == 0) {
                         got_data = 1;
@@ -3034,7 +3034,7 @@ int main(int argc, char* argv)
      * 与selflnn内部的g_system_state.distributed_training指向同一块内存。
      * selflnn_shutdown内部会统一释放，此处重复释放将导致double-free崩溃。 */
     g_distributed = NULL;
-    selflnn_shutdown;
+    selflnn_shutdown();
 
     printf("SELF-LNN AGI 系统已停止。\n");
     return 0;

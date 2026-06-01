@@ -579,7 +579,7 @@ static int _self_cognition_check_lnn_ready_internal(SelfCognitionSystem* system)
     }
 
     /* 2. 获取全局共享LNN实例并检查其统计信息 */
-    void* shared_lnn = selflnn_get_shared_lnn;
+    void* shared_lnn = selflnn_get_shared_lnn();
     if (!shared_lnn) {
         log_warning("[LNN就绪检查] 全局共享LNN实例不存在，自我认知将使用保守评估模式");
         return 0;
@@ -1744,7 +1744,7 @@ static void update_knowledge_metacognition(SelfCognitionSystem* system) {
     
     /* 1. 知识增长模型：查询真实知识库获取已知/未知概念数量 */
     /* N-001修复: 不再使用硬编码系数 training_samples*0.1f，改为查询真实知识库 */
-    void* kb_raw = selflnn_get_knowledge_base;
+    void* kb_raw = selflnn_get_knowledge_base();
     KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
     size_t kb_total = 0;
     if (kb) knowledge_base_get_stats(kb, &kb_total, NULL);
@@ -1959,7 +1959,7 @@ static void update_learning_progress(SelfCognitionSystem* system) {
     
     /* 6. 进化进展：基于真实演化引擎指标 */
     float real_evo_progress = 0.0f;
-    void* evo = selflnn_get_evolution_engine;
+    void* evo = selflnn_get_evolution_engine();
     if (evo) {
         EvolutionStats estats;
         memset(&estats, 0, sizeof(EvolutionStats));
@@ -2754,7 +2754,7 @@ SelfAwarenessSystem* self_awareness_system_create(const SelfAwarenessConfig* con
     
     /* 深度实现：获取全局LNN实例以进行实时状态感知 */
     {
-        void* raw_lnn = selflnn_get_lnn;
+        void* raw_lnn = selflnn_get_lnn();
         system->lnn_instance = (LNN*)raw_lnn;
     }
     
@@ -3768,7 +3768,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
              */
             LNN* lnn_instance = system->lnn_instance;
             if (!lnn_instance) {
-                lnn_instance = (LNN*)selflnn_get_shared_lnn;
+                lnn_instance = (LNN*)selflnn_get_shared_lnn();
             }
             
             float weight_l2_delta = 0.0f;
@@ -4165,7 +4165,7 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
 /* 未训练状态下执行轻量级启发式修正
          * 基于系统指标调整LNN工作参数，提供最小但真实的修正能力 */
         int applied_adjustments = 0;
-        LNN* lnn = selflnn_get_lnn;
+        LNN* lnn = selflnn_get_lnn();
         if (lnn && real_based_severity > 0.3f) {
             /* 基于严重程度的启发式学习率/温度调整 */
             float adjusted_lr = lnn->config.learning_rate;

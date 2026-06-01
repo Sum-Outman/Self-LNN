@@ -1458,7 +1458,7 @@ static int dc_apply_correction_to_lnn(const DCCorrectionHypothesis* hyp) {
     }
 
     /* 获取全局共享LNN实例 */
-    void* raw_ptr = selflnn_get_shared_lnn;
+    void* raw_ptr = selflnn_get_shared_lnn();
     if (!raw_ptr) return -3;
     LNN* lnn = (LNN*)raw_ptr;
 

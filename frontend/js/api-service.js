@@ -1,4 +1,4 @@
-﻿﻿/**
+﻿/**
  * SELF-LNN AGI 后端API服务
  * 提供与SELF-LNN后端服务器的通信接口
  *
@@ -496,13 +496,13 @@ class ApiService {
      */
     startConnectionMonitor(interval = 5000) {
         /* BUG-9修复：先停止已有监控防止重复，保存setTimeout定时器ID支持取消 */
-        this.stopConnectionMonitor;
-        this._connectionMonitorTimeout = setTimeout(async  => {
+        this.stopConnectionMonitor();
+        this._connectionMonitorTimeout = setTimeout(async () => {
             if (!this._connectionMonitorTimeout) return;
-            const status = await this.checkConnection;
+            const status = await this.checkConnection();
             this.notifyConnectionStatus(status);
-            this.connectionCheckInterval = setInterval(async  => {
-                const status = await this.checkConnection;
+            this.connectionCheckInterval = setInterval(async () => {
+                const status = await this.checkConnection();
                 this.notifyConnectionStatus(status);
             }, interval);
         }, 5000);

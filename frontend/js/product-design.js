@@ -56,14 +56,14 @@
 
     /* 生成设计方案 */
     function pdGenerate() {
-        pdInit;
+        pdInit();
         if (!PD_REQUIREMENT_INPUT) return;
-        var reqText = PD_REQUIREMENT_INPUT.value.trim;
+        var reqText = PD_REQUIREMENT_INPUT.value.trim();
         if (!reqText) {
             pdSetResult('<div style="color:#ff8a65;padding:15px">请输入产品需求描述</div>', true);
             return;
         }
-        pdShowLoading;
+        pdShowLoading();
         var url = '/product/spec';
         var postData = JSON.stringify({ requirement: reqText });
 
@@ -140,7 +140,7 @@
 
     /* 检查引擎状态 - -L-006: 使用正确端点GET /product/status */
     function pdCheckStatus() {
-        pdInit;
+        pdInit();
         pdSetStatus('<div style="text-align:center;padding:20px"><span style="color:#4fc3f7">查询引擎状态...</span></div>', true);
 
         window.SelfLnnApi.request('/product/status', {
@@ -180,14 +180,14 @@
 
     /* 初始化：绑定导航切换事件 */
     document.addEventListener('DOMContentLoaded', function() {
-        pdInit;
+        pdInit();
         /* 监听导航切换，当产品设计面板可见时自动检查引擎状态 */
         var pdSection = document.getElementById('product-design');
         if (pdSection) {
             var observer = new MutationObserver(function(mutations) {
                 mutations.forEach(function(m) {
                     if (pdSection.classList.contains('active')) {
-                        pdCheckStatus;
+                        pdCheckStatus();
                     }
                 });
             });

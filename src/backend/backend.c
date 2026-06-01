@@ -4886,7 +4886,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     
     // 创建液态神经网络实例（始终使用全局共享LNN，严格遵守单一模型原则）
     /* 单一模型原则：强制使用全局共享LNN，禁止创建独立LNN实例 */
-    server->lnn_instance = (LNN*)selflnn_get_lnn;
+    server->lnn_instance = (LNN*)selflnn_get_lnn();
     server->lnn_owns = 0;
     if (!server->lnn_instance) {
         log_error("[后端] 全局共享LNN未初始化，无法启动后端服务。"
@@ -5177,7 +5177,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     
 /* 绑定LNN语义分析层到content_filter，启用语义级内容过滤 */
     if (server->content_filter) {
-        void* shared_lnn = selflnn_get_shared_lnn;
+        void* shared_lnn = selflnn_get_shared_lnn();
         if (shared_lnn) {
             content_filter_set_lnn(server->content_filter, shared_lnn);
             log_info("[后端] content_filter已绑定LNN语义分析层");
@@ -6291,7 +6291,7 @@ static char* get_detailed_learning_status(const BackendServer* server) {
         return string_duplicate("{\"error\":\"memory allocation failed\"}");
     }
 
-    void* learner_raw = selflnn_get_online_learner;
+    void* learner_raw = selflnn_get_online_learner();
     if (!learner_raw) {
         snprintf(json, 1024,
             "{"
@@ -6599,8 +6599,8 @@ static int handle_api_post_learning_consistency(BackendServer* server,
                                                   ApiResponse* response) {
     (void)server; (void)request_type; (void)request_data; (void)request_length;
     /* 调用知识自检模块获取一致性信息 */
-    void* kg_ptr = selflnn_get_knowledge_graph;
-    void* kb_ptr = selflnn_get_knowledge_base;
+    void* kg_ptr = selflnn_get_knowledge_graph();
+    void* kb_ptr = selflnn_get_knowledge_base();
     char buf[1024];
     int conflicts = 0, circular = 0, total_facts = 0;
     float consistency_score = 0.0f;
@@ -8901,7 +8901,7 @@ static int handle_api_get_knowledge(BackendServer* server,
         int real_concept_relations = 0, real_relations_pct = 0;
         int real_consistency = 0, real_conflicts = 0, real_circular_deps = 0;
         if (server->knowledge_base) {
-            void* kg_ptr = selflnn_get_knowledge_graph;
+            void* kg_ptr = selflnn_get_knowledge_graph();
             KSSelfCheckReport* report = ksc_run_self_check(
                 server->knowledge_base, (KnowledgeGraph*)kg_ptr, NULL, NULL);
             if (report) {
@@ -16143,7 +16143,7 @@ static int handle_api_post_voice_recognize(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     /* P21修复: 真实调用语音识别引擎而非返回硬编码假数据 */
-    void* sr = selflnn_get_speech_recognizer;
+    void* sr = selflnn_get_speech_recognizer();
     if (!sr) {
         json_data = (char*)safe_malloc(256);
         if (json_data) {
@@ -18017,7 +18017,7 @@ static int handle_api_post_teach_clear_all_concepts(BackendServer* server,
     char* json_data = NULL;
     int removed = 0;
 /* 真实清除知识库，不再返回虚假成功 */
-    void* kb = selflnn_get_knowledge_base;
+    void* kb = selflnn_get_knowledge_base();
     if (kb) {
         knowledge_base_clear((KnowledgeBase*)kb);
         removed = 1;
@@ -18047,7 +18047,7 @@ static int handle_api_post_teach_clear_concept(BackendServer* server,
     }
 /* 真实删除知识概念 */
     if (name[0]) {
-        void* kb = selflnn_get_knowledge_base;
+        void* kb = selflnn_get_knowledge_base();
         if (kb) {
             removed = knowledge_base_remove_by_key((KnowledgeBase*)kb, name) == 0 ? 1 : 0;
         }
@@ -19008,7 +19008,7 @@ static int handle_api_post_agi_learn(BackendServer* server,
 /* 实现真实的学习触发 —— 调用在线学习器更新 */
     float loss = 0.0f;
     int learn_ok = 0;
-    void* learner = selflnn_get_online_learner;
+    void* learner = selflnn_get_online_learner();
     if (learner && data_dim > 0 && target_dim > 0) {
         int result = online_learner_update((OnlineLearner*)learner,
                                            learn_data, data_dim,
@@ -19084,7 +19084,7 @@ static int handle_api_post_agi_evolve(BackendServer* server,
     int final_gen = 0;
 
 /* 实现真实的演化触发 —— 调用evolution_step并通过后台循环完成 */
-    void* evo = selflnn_get_evolution_engine;
+    void* evo = selflnn_get_evolution_engine();
     (void)evolve_result;
     
     if (evo && capability_is_enabled(CAP_SELF_EVOLUTION)) {
@@ -20436,7 +20436,7 @@ static int handle_api_post_knowledge_import(BackendServer* server,
         else failed = 1;
         /* 同时尝试导入到知识图谱 */
         {
-            void* kg_ptr = selflnn_get_knowledge_graph;
+            void* kg_ptr = selflnn_get_knowledge_graph();
             if (kg_ptr) {
                 extern int knowledge_graph_import_from_knowledge_base(void* graph, void* kb);
                 knowledge_graph_import_from_knowledge_base(kg_ptr, server->knowledge_base);
@@ -20586,7 +20586,7 @@ static int handle_api_post_knowledge_import(BackendServer* server,
 
     /* 导入后同步到知识图谱 */
     if (imported > 0) {
-        void* kg_ptr = selflnn_get_knowledge_graph;
+        void* kg_ptr = selflnn_get_knowledge_graph();
         if (kg_ptr) {
             extern int knowledge_graph_import_from_knowledge_base(void* graph, void* kb);
             knowledge_graph_import_from_knowledge_base(kg_ptr, server->knowledge_base);
@@ -22079,7 +22079,7 @@ static int handle_api_post_product_design(BackendServer* server,
         }
         return 0;
     }
-    void* pde = selflnn_get_product_design_engine;
+    void* pde = selflnn_get_product_design_engine();
     int engine_ready = (pde != NULL) ? 1 : 0;
     int has_cog = (server->cognition_system != NULL);
     int has_meta = (server->metacognition_system != NULL);
@@ -22114,7 +22114,7 @@ static int handle_api_post_product_design(BackendServer* server,
 static int handle_api_get_product_spec(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt;
-    void* pde = selflnn_get_product_design_engine;
+    void* pde = selflnn_get_product_design_engine();
     char* j = NULL;
     if (!pde) {
         j = (char*)safe_malloc(256);
@@ -22231,7 +22231,7 @@ static int handle_api_post_product_spec(BackendServer* server,
         }
         return 0;
     }
-    void* pde = selflnn_get_product_design_engine;
+    void* pde = selflnn_get_product_design_engine();
     if (!pde) {
         j = (char*)safe_malloc(256);
         if (j) snprintf(j, 256, "{\"error\":\"产品设计引擎未初始化\",\"code\":503}");
@@ -22339,7 +22339,7 @@ static int handle_api_get_product_status(BackendServer* server,
         }
         return 0;
     }
-    void* pde = selflnn_get_product_design_engine;
+    void* pde = selflnn_get_product_design_engine();
     int engine_ready = (pde != NULL) ? 1 : 0;
     int has_cog = (server->cognition_system != NULL);
     int has_meta = (server->metacognition_system != NULL);
@@ -24014,7 +24014,7 @@ static int handle_api_post_task_assign(BackendServer* s,
 static int handle_api_get_multi_agent_status(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt; (void)d; (void)l;
-    void* ma_sys = selflnn_get_multi_agent_system;
+    void* ma_sys = selflnn_get_multi_agent_system();
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24042,7 +24042,7 @@ static int handle_api_get_multi_agent_status(BackendServer* s,
 static int handle_api_post_multi_agent_negotiate(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt;
-    void* ma_sys = selflnn_get_multi_agent_system;
+    void* ma_sys = selflnn_get_multi_agent_system();
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24081,7 +24081,7 @@ static int handle_api_post_multi_agent_negotiate(BackendServer* s,
 static int handle_api_post_multi_agent_coalition(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt; (void)d; (void)l;
-    void* ma_sys = selflnn_get_multi_agent_system;
+    void* ma_sys = selflnn_get_multi_agent_system();
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24116,7 +24116,7 @@ static int handle_api_post_multi_agent_consensus(BackendServer* s,
 static int handle_api_post_multi_agent_message(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt;
-    void* ma_sys = selflnn_get_multi_agent_system;
+    void* ma_sys = selflnn_get_multi_agent_system();
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24148,7 +24148,7 @@ static int handle_api_post_multi_agent_message(BackendServer* s,
 static int handle_api_post_multi_agent_task(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt;
-    void* ma_sys = selflnn_get_multi_agent_system;
+    void* ma_sys = selflnn_get_multi_agent_system();
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -26315,14 +26315,14 @@ static int handle_api_get_audio_spectrum(BackendServer* server,
     int fft_size = 64;
     int has_data = 0;
 
-    void* laplace = selflnn_get_laplace_unified;
+    void* laplace = selflnn_get_laplace_unified();
     if (laplace) {
         fft_size = 128;
         laplace_unified_get_spectrum(laplace, spectrum_data, (size_t)fft_size);
         has_data = 1;
     }
 
-    void* audio_cap = selflnn_get_audio_capture;
+    void* audio_cap = selflnn_get_audio_capture();
     if (audio_cap && !has_data) {
         audio_capture_get_spectrum(audio_cap, spectrum_data, &fft_size);
         if (fft_size > 0) has_data = 1;
@@ -26397,7 +26397,7 @@ static int handle_api_get_lnn_activation_heatmap(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    void* lnn = selflnn_get_shared_lnn;
+    void* lnn = selflnn_get_shared_lnn();
     char* json_data = (char*)safe_malloc(8192);
     if (!json_data) return -1;
     if (lnn) {
@@ -26427,7 +26427,7 @@ static int handle_api_get_lnn_prediction_scatter(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    void* lnn = selflnn_get_shared_lnn;
+    void* lnn = selflnn_get_shared_lnn();
     char* json_data = (char*)safe_malloc(8192);
     if (!json_data) return -1;
     if (lnn) {

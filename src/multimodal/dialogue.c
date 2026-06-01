@@ -292,7 +292,7 @@ int dialogue_evolve_state(DialogueProcessor* processor,
 
 /* 尝试从共享LNN同步权重 */
         {
-            void* shared_lnn = selflnn_get_shared_lnn;
+            void* shared_lnn = selflnn_get_shared_lnn();
             if (shared_lnn) {
                 CfCNetwork* cfc = lnn_get_cfc_network(shared_lnn);
                 if (cfc && cfc->layers && cfc->layers[0]) {
@@ -826,7 +826,7 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
     /* 对话生成器未训练时：仅使用知识库检索作为真实回退路径 */
     if (gen_len <= 0) {
         if (user_input && input_length > 0) {
-            void* kb_raw = selflnn_get_knowledge_base;
+            void* kb_raw = selflnn_get_knowledge_base();
             if (kb_raw) {
                 KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
                 InferenceResult* kb_result = knowledge_query(kb, user_input, 3, 0.1f);

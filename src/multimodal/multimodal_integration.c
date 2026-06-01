@@ -1978,7 +1978,7 @@ int mm_cfc_unified_fusion_train(
  * ============================================================================ */
 static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* modality_dims,
                                       int num_modalities, float* unified_output, int output_dim) {
-    void* shared_lnn = selflnn_get_shared_lnn;
+    void* shared_lnn = selflnn_get_shared_lnn();
     if (!shared_lnn) return -1;
 
 /* 静态缓存UnifiedLNNState，避免每次调用malloc/free

@@ -397,7 +397,7 @@ static int pipeline_distributed_gradient_sync(TrainingPipeline* pipeline) {
     if (!pipeline->config.use_distributed_training) return 0;
 
     /* 获取分布式上下文 */
-    void* dist_raw = selflnn_get_distributed_context;
+    void* dist_raw = selflnn_get_distributed_context();
     if (!dist_raw) return 0;
     DistributedContext* dist_ctx = (DistributedContext*)dist_raw;
 
@@ -1397,7 +1397,7 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
 /* 使用共享LNN替代管道独立LNN。
      * 之前 ln_create 创建独立LNN，训练其权重但系统推理使用
      * selflnn的共享LNN —— 两个LNN实例权重分离，训练完全无效! */
-    pipeline->network = (LNN*)selflnn_get_shared_lnn;
+    pipeline->network = (LNN*)selflnn_get_shared_lnn();
     if (!pipeline->network) {
         pipeline->network = lnn_create(&lnn_cfg);
         log_warning("[训练管道] 共享LNN不可用，创建独立LNN（训练结果不会影响系统推理）");
@@ -3567,7 +3567,7 @@ int pipeline_run_speech_phase(TrainingPipeline* pipeline, int epochs, float* fin
     pipeline->state.current_epoch = 0;
     pipeline->state.total_epochs = epochs;
 
-    void* sr_inst = selflnn_get_speech_recognizer;
+    void* sr_inst = selflnn_get_speech_recognizer();
     if (!sr_inst) {
         pipeline->state.is_running = 0;
         *final_loss = 1.0f;
@@ -3668,7 +3668,7 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
 /* 训练开始前检查分布式配置并初始化 */
     {
         if (pipeline->config.use_distributed_training) {
-            void* dist_raw = selflnn_get_distributed_context;
+            void* dist_raw = selflnn_get_distributed_context();
             if (dist_raw) {
                 DistributedContext* dist_ctx = (DistributedContext*)dist_raw;
                 log_info("[分布式] 分布式训练已启用，节点数=%d, 当前节点ID=%d, "
