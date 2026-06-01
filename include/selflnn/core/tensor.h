@@ -11,6 +11,9 @@
 
 #include <stddef.h>
 
+/** @brief 张量最大维度数（用于VLA数组分配） */
+#define SELFLNN_MAX_TENSOR_DIMS 8
+
 #ifdef __cplusplus
 extern "C" {
 #endif

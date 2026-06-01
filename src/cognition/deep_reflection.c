@@ -870,11 +870,60 @@ int dr_reflect_multi_passage(DeepReflectionEngine* engine,
         if (engine->layer_embed_count > 0)
             lr->coherence_score /= (float)engine->layer_embed_count;
 
+        /* ZSFQQ-Q030: S-014 5维深度分析增强（多段落反射版本）
+         * 与 dr_reflect() 对齐，为多段落反射添加完整的5维分析 */
+        float s014_belief_consistency = 0.0f;
+        float s014_hypothesis_strength = 0.0f;
+        float s014_contradiction_level = 0.0f;
+        float s014_risk_score = 0.0f;
+
+        /* 维度1: 信念一致性（跨段落嵌入余弦一致性） */
+        {
+            int bc_count = 0;
+            for (size_t i = 0; i < engine->layer_embed_count; i++) {
+                float sim = cosine_sim_dr(engine->layer_embeddings + i * edim,
+                    lr->content_embedding, edim);
+                s014_belief_consistency += sim;
+                bc_count++;
+            }
+            if (bc_count > 0) s014_belief_consistency /= (float)bc_count;
+        }
+        /* 维度2: 假设检验强度（基于内容嵌入的激活幅度） */
+        {
+            float hyp_mag = 0.0f;
+            for (size_t i = 0; i < edim; i++) {
+                float v = lr->content_embedding[i];
+                hyp_mag += v * v;
+            }
+            s014_hypothesis_strength = sqrtf(hyp_mag) / sqrtf((float)edim);
+        }
+        /* 维度3: 矛盾检测（与先前层的最低一致性即为矛盾度） */
+        {
+            float min_consistency = 1.0f;
+            for (size_t i = 0; i < engine->layer_embed_count; i++) {
+                float sim = cosine_sim_dr(engine->layer_embeddings + i * edim,
+                    lr->content_embedding, edim);
+                if (sim < min_consistency) min_consistency = sim;
+            }
+            s014_contradiction_level = 1.0f - min_consistency;
+        }
+        /* 维度4: 风险评估（基于新颖性和矛盾度） */
+        s014_risk_score = lr->novelty_score * 0.4f + s014_contradiction_level * 0.4f +
+                          (1.0f - s014_belief_consistency) * 0.2f;
+
+        /* 将S-014分析结果融合到coherence_score和contradiction_flag */
+        lr->coherence_score = s014_belief_consistency * 0.6f + lr->coherence_score * 0.4f;
+        lr->contradiction_flag = (s014_contradiction_level > 0.5f) ? 1.0f : 0.0f;
+        lr->depth_score = lr->depth_score * 0.7f + s014_hypothesis_strength * 0.3f;
+
         lr->reflection_text = (char*)safe_calloc(2048, 1);
         snprintf(lr->reflection_text, 2048,
-            "[%s][多段落反射] 深度:%.2f 新颖性:%.2f 一致性:%.2f - %s",
+            "[%s][多段落反射S-014] 深度:%.2f 新颖:%.2f 一致:%.2f "
+            "信念:%.2f 假设:%.2f 矛盾:%.2f 风险:%.2f - %s",
             layer_names[lr->layer], lr->depth_score,
             lr->novelty_score, lr->coherence_score,
+            s014_belief_consistency, s014_hypothesis_strength,
+            s014_contradiction_level, s014_risk_score,
             topic ? topic : "多段落反思");
         lr->text_len = strlen(lr->reflection_text);
 

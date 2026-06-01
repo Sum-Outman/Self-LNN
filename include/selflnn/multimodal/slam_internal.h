@@ -581,6 +581,46 @@ SELFLNN_API int slam_enhance_pose_graph_optimize(
     const float* edge_relative_p, const float* edge_weight,
     const int* fixed_nodes, int num_fixed);
 
+/* ================================================================
+ * ZSFZX-FIX-SLAM-DATASET: 离线数据集回放与轨迹评估API
+ * 实现于 slam_io.c, 使SLAM系统可在无硬件时通过真实记录的数据集验证
+ * ================================================================ */
+
+/** @brief 加载TUM RGB-D数据集
+ * @param directory 数据集目录路径
+ * @param num_frames 输出: 总帧数
+ * @param width 输出: 图像宽度
+ * @param height 输出: 图像高度
+ * @return 0=成功, -1=失败 */
+int slam_load_dataset_tum(const char* directory, int* num_frames, int* width, int* height);
+
+/** @brief 计算绝对轨迹误差(ATE)
+ * @param estimated 估计位姿数组
+ * @param est_count 估计位姿数
+ * @param ground_truth 真值位姿数组
+ * @param gt_count 真值位姿数
+ * @param rmse_out 输出: RMSE (米)
+ * @param mean_out 输出: 平均误差 (米)
+ * @param max_out 输出: 最大误差 (米)
+ * @return 0=成功, -1=失败 */
+int slam_evaluate_ate(const SlamPose* estimated, int est_count,
+                       const SlamPose* ground_truth, int gt_count,
+                       float* rmse_out, float* mean_out, float* max_out);
+
+/** @brief 计算相对位姿误差(RPE)
+ * @param estimated 估计位姿数组
+ * @param est_count 估计位姿数
+ * @param ground_truth 真值位姿数组
+ * @param gt_count 真值位姿数
+ * @param delta_frames 帧间隔
+ * @param rmse_trans_out 输出: 平移RMSE (米)
+ * @param rmse_rot_out 输出: 旋转RMSE (弧度)
+ * @return 0=成功, -1=失败 */
+int slam_evaluate_rpe(const SlamPose* estimated, int est_count,
+                       const SlamPose* ground_truth, int gt_count,
+                       int delta_frames,
+                       float* rmse_trans_out, float* rmse_rot_out);
+
 #ifdef __cplusplus
 }
 #endif

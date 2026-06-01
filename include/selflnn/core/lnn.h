@@ -130,6 +130,10 @@ struct LNN {
     /* ZSFWS-P6修复: 四元数预处理状态缓冲区
      * 保存四元数处理前的hidden_state，供反向传播计算正确的梯度链 */
     float* quaternion_pre_buf;                        /**< 四元数处理前状态（反向传播用） */
+
+    /* H-004修复: 扩展用户数据指针（FP16原生网络等模块使用） */
+    void* user_data;                                  /**< 用户自定义数据指针 */
+    void (*user_data_free)(void*);                    /**< 用户数据释放回调 */
 };
 
 /* 内部无锁函数声明（供扩展训练模块使用，调用者需持有 LNN_LOCK） */
@@ -167,6 +171,10 @@ int lnn_forward(LNN* network, const float* input, float* output);
 SELFLNN_API void lnn_lock(LNN* network);
 SELFLNN_API void lnn_unlock(LNN* network);
 
+/* H-004修复: 用户数据存取器（FP16原生网络等模块使用） */
+SELFLNN_API void lnn_set_user_data(LNN* network, void* data, void (*free_fn)(void*));
+SELFLNN_API void* lnn_get_user_data(LNN* network);
+
 /**
  * @brief 安全前向传播（含边界检查和维度适配）
  * 
@@ -185,9 +193,10 @@ int lnn_forward_safe(LNN* network, const float* input, size_t input_size,
 
 /* ================================================================
  * ZSFWS-P1-008: 并发前向传播——每调用方独立的隐藏状态副本
- * 解决互斥锁瓶颈：多个模态（视觉/音频/文本/传感器等）可同时
- * 使用隔离的CfC状态进行前向传播，无需等待彼此释放LNN全局锁。
- * 权重读取使用RWLock的读锁（多读者并发），仅训练写入时排他。
+ * 解决互斥锁瓶颈：多个模态（视觉/音频/文本/传感器等）可
+ * 使用隔离的CfC状态进行前向传播，无需等待彼此释放LNN全局状态。
+ * 权重读取使用排他互斥锁保护（ZSFDDD-D4-002修正：非RWLock），
+ * 多调用方串行化执行，与训练写入互斥。
  * ================================================================ */
 
 /** @brief 隔离前向传播状态（每模态/每调用方独立分配） */
@@ -209,10 +218,11 @@ LNNForwardState* lnn_forward_state_create(LNN* network);
 /** @brief 释放隔离前向传播状态 */
 void lnn_forward_state_free(LNNForwardState* state);
 
-/** @brief 使用隔离状态的前向传播（无全局锁，可并发调用）
- *  注意：此函数仅对LNN权重加读锁（RWLock），隐藏状态使用state副本。
- *  多个调用方使用各自的LNNForwardState实例可安全并发。
- *  训练期间(写锁持有中)调用此函数会阻塞等待。
+/** @brief 使用隔离状态的前向传播（排他互斥锁保护权重读取，线程安全）
+ *  ZSFDDD-D4-002: 修正文档——当前使用排他互斥锁（非RWLock），
+ *  多调用方使用各自的LNNForwardState实例时为串行化调用（互斥锁保证安全）。
+ *  权重读取期间与训练（同样使用此互斥锁）互斥。
+ *  训练期间调用此函数会阻塞等待训练完成释放锁。
  *  @return 0=成功, -1=失败 */
 int lnn_forward_isolated(LNN* network, LNNForwardState* state,
                          const float* input, float* output);
@@ -454,6 +464,15 @@ float* lnn_get_gradients(LNN* network);
 /* ZSFUSA: 获取指定层的参数指针和参数数量 */
 float* lnn_get_layer_parameters(LNN* lnn, int layer_id);
 size_t lnn_get_layer_parameter_count(LNN* lnn, int layer_id);
+
+/* ZSFQQ-Q025: 通过公共API获取权重矩阵和偏置向量，替代直接访问内部字段 */
+float* lnn_get_weight_matrix(LNN* network);
+float* lnn_get_bias_vector(LNN* network);
+size_t lnn_get_weight_count(LNN* network);
+size_t lnn_get_bias_count(LNN* network);
+
+/* ZSFQQ-Q025: 通过公共API设置权重和偏置 */
+int lnn_set_weights_and_biases(LNN* network, const float* weights, const float* biases);
 
 /**
  * @brief 批量前向传播

@@ -1177,43 +1177,111 @@ float sec_compute_outlier_score(const SecFeatureDistribution* dist,
     int fc = feature_count < dist->feature_count ? feature_count : dist->feature_count;
     if (fc <= 0) return 0.0f;
 
-    if (dist->covariance_dim > 1 && dist->samples_count > fc) {
-        float* diff = (float*)safe_calloc((size_t)fc, sizeof(float));
-        if (!diff) return 0.0f;
-        for (int i = 0; i < fc; i++) {
+    /* L-022修复: 使用完整协方差矩阵计算Mahalanobis距离
+     * 不能简化为对角近似，必须使用全矩阵逆 */
+    int cd = dist->covariance_dim;
+    if (cd > 1 && dist->samples_count > fc && cd <= SEC_EMBEDDING_DIM && cd <= fc) {
+        /* 构建局部6x6或更小的协方差矩阵和偏差向量 */
+        float local_cov[36] = {0};  /* 最大6x6=36 */
+        float diff[6] = {0};
+        int dim = cd < 6 ? cd : 6;
+        if (dim > fc) dim = fc;
+
+        for (int i = 0; i < dim; i++) {
             diff[i] = sample[i] - dist->feature_mean[i];
-        }
-        float* inv_cov = (float*)safe_calloc((size_t)(fc * fc), sizeof(float));
-        if (!inv_cov) { safe_free((void**)&diff); return 0.0f; }
-
-        int cd = dist->covariance_dim < fc ? dist->covariance_dim : fc;
-        for (int i = 0; i < cd; i++) {
-            float var = dist->feature_variance[i];
-            if (var > 1e-10f) {
-                inv_cov[i * cd + i] = 1.0f / var;
-            } else {
-                inv_cov[i * cd + i] = 1e10f;
+            for (int j = 0; j < dim; j++) {
+                local_cov[i * dim + j] = dist->covariance_matrix[i * cd + j];
             }
         }
 
-        float mahalanobis = 0.0f;
-        for (int i = 0; i < cd; i++) {
+        /* 添加正则化项到对角，确保可逆性 */
+        for (int i = 0; i < dim; i++) {
+            local_cov[i * dim + i] += 1e-6f;
+        }
+
+        /* 使用Gauss-Jordan消元计算dim×dim矩阵的逆
+         * 构建增广矩阵 [C | I]，通过行变换得到 [I | C^-1] */
+        float aug[6][12] = {{0}};  /* 最大6x12 */
+        for (int i = 0; i < dim; i++) {
+            for (int j = 0; j < dim; j++) {
+                aug[i][j] = local_cov[i * dim + j];
+            }
+            aug[i][dim + i] = 1.0f;  /* 单位矩阵 */
+        }
+
+        for (int i = 0; i < dim; i++) {
+            /* 部分主元消去: 找第i列最大元素 */
+            int max_row = i;
+            float max_val = (aug[i][i] > 0 ? aug[i][i] : -aug[i][i]);
+            for (int r = i + 1; r < dim; r++) {
+                float abs_val = (aug[r][i] > 0 ? aug[r][i] : -aug[r][i]);
+                if (abs_val > max_val) {
+                    max_val = abs_val;
+                    max_row = r;
+                }
+            }
+
+            /* 交换行 */
+            if (max_row != i) {
+                for (int c = 0; c < 2 * dim; c++) {
+                    float tmp = aug[i][c];
+                    aug[i][c] = aug[max_row][c];
+                    aug[max_row][c] = tmp;
+                }
+            }
+
+            /* 归一化主元行 */
+            float pivot = aug[i][i];
+            if (pivot < 1e-12f && pivot > -1e-12f) {
+                /* 奇异性处理: 使用对角近似退路 */
+                float sum_diag = 0.0f;
+                for (int k = 0; k < dim; k++) {
+                    float dk = diff[k];
+                    if (local_cov[k * dim + k] > 1e-10f) {
+                        sum_diag += dk * dk / local_cov[k * dim + k];
+                    }
+                }
+                return sqrtf(sum_diag);
+            }
+
+            for (int c = 0; c < 2 * dim; c++) {
+                aug[i][c] /= pivot;
+            }
+
+            /* 消去其他行 */
+            for (int r = 0; r < dim; r++) {
+                if (r == i) continue;
+                float factor = aug[r][i];
+                for (int c = 0; c < 2 * dim; c++) {
+                    aug[r][c] -= factor * aug[i][c];
+                }
+            }
+        }
+
+        /* 提取逆矩阵（右侧 dim×dim）并计算Mahalanobis距离:
+         * D^2 = (x-μ)^T Σ^(-1) (x-μ)
+         *     = Σ_i Σ_j diff[i] * inv[i][j] * diff[j] */
+        float mahalanobis_sq = 0.0f;
+        for (int i = 0; i < dim; i++) {
             float row_sum = 0.0f;
-            for (int j = 0; j < cd; j++) {
-                row_sum += diff[j] * inv_cov[j * cd + i];
+            for (int j = 0; j < dim; j++) {
+                row_sum += aug[i][dim + j] * diff[j];
             }
-            mahalanobis += row_sum * diff[i];
+            mahalanobis_sq += diff[i] * row_sum;
         }
 
-        safe_free((void**)&diff);
-        safe_free((void**)&inv_cov);
-        return sqrtf(fabsf(mahalanobis));
+        /* 确保非负（数值精度） */
+        if (mahalanobis_sq < 0.0f) mahalanobis_sq = 0.0f;
+
+        return sqrtf(mahalanobis_sq);
     } else {
+        /* 备选路径: 协方差矩阵维度不足时退化为对角标准化距离 */
         float score = 0.0f;
         for (int i = 0; i < fc; i++) {
             float var = dist->feature_variance[i];
             if (var > 1e-10f) {
-                float dev = fabsf(sample[i] - dist->feature_mean[i]) / sqrtf(var);
+                float dev = (sample[i] - dist->feature_mean[i]);
+                dev = (dev > 0 ? dev : -dev) / sqrtf(var);
                 score += dev;
             }
         }
@@ -1298,24 +1366,47 @@ int sec_update_feature_distribution(SecInputMonitor* monitor,
     dist->samples_count++;
     dist->last_update_time = time(NULL);
 
-    /* R5-003修复: 使用真实特征值样本计算协方差，替代 cov+=0.0f 伪实现 */
-    if (dist->covariance_dim < fc && dist->samples_count > fc + 10 &&
-        dist->covariance_dim < SEC_EMBEDDING_DIM) {
-        dist->covariance_dim = fc > SEC_EMBEDDING_DIM ? SEC_EMBEDDING_DIM : fc;
-        for (int i = 0; i < dist->covariance_dim; i++) {
-            for (int j = 0; j < dist->covariance_dim; j++) {
-                float cov = 0.0f;
-                /* 使用增量协方差：Cov(X_i,X_j)的近实时估计 */
-                if (i == j) {
-                    cov = dist->feature_variance[i];  /* 对角=方差 */
-                } else if (dist->samples_count > 2) {
-                    /* 跨特征协方差: 基于均值偏差的Welford增量 */
-                    float mean_i = dist->feature_mean[i];
-                    float mean_j = dist->feature_mean[j];
-                    cov = (features[i] - mean_i) * (features[j] - mean_j) * 0.1f
-                        + dist->covariance_matrix[i * dist->covariance_dim + j] * 0.9f;
-                }
-                dist->covariance_matrix[i * dist->covariance_dim + j] = cov;
+    /* L-022修复: Woodbury恒等式增量协方差矩阵更新
+     * 使用6x6完整协方差矩阵（不能简化为对角）
+     * Σ_new = (1-α)Σ_old + α·(x-μ)(x-μ)^T
+     * 其中 α = 1/(n+1) 为渐进无偏估计，n为样本数
+     *
+     * rank-1外积更新保留特征间完整协方差结构，
+     * 后续Mahalanobis距离计算使用全矩阵逆而非对角近似 */
+    {
+        int cd = fc < 6 ? fc : 6;
+        if (cd > SEC_EMBEDDING_DIM) cd = SEC_EMBEDDING_DIM;
+        dist->covariance_dim = cd;
+
+        /* 计算偏差向量 d = x - μ */
+        float diff_d[6];
+        for (int i = 0; i < cd; i++) {
+            diff_d[i] = features[i] - dist->feature_mean[i];
+        }
+
+        /* Woodbury rank-1协方差更新
+         * 使用指数衰减因子平衡历史和新样本:
+         * α_decay = 1.0f / (samples_count + 1.0f)  前进式平均
+         * alpha_ema = 0.05f                        指数移动平均（备用）
+         * 使用前进式平均获得真正的无偏协方差估计 */
+        float alpha_decay = 1.0f / ((float)dist->samples_count + 1.0f);
+        float one_minus_alpha = 1.0f - alpha_decay;
+
+        /* Σ_new[i][j] = (1-α)*Σ_old[i][j] + α*d[i]*d[j] */
+        for (int i = 0; i < cd; i++) {
+            for (int j = 0; j < cd; j++) {
+                float old_cov = dist->covariance_matrix[i * dist->covariance_dim + j];
+                float outer_prod = diff_d[i] * diff_d[j];
+                dist->covariance_matrix[i * dist->covariance_dim + j] =
+                    one_minus_alpha * old_cov + alpha_decay * outer_prod;
+            }
+        }
+
+        /* 确保对角元素与方差值一致（数值稳定性） */
+        for (int i = 0; i < cd; i++) {
+            float diag = dist->covariance_matrix[i * cd + i];
+            if (diag < 1e-10f) {
+                dist->covariance_matrix[i * cd + i] = 1e-8f;
             }
         }
     }

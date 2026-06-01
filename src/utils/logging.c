@@ -789,29 +789,39 @@ static void check_auto_rotation(void) {
     fclose(g_log_state.log_file);
     g_log_state.log_file = NULL;
 
-    /* 生成带时间戳的备份文件名 */
-    time_t now = time(NULL);
-    struct tm* tm_ptr = localtime(&now);
-    char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_ptr);
-
-    size_t backup_path_len = strlen(g_log_state.config.file_path) + strlen(timestamp) + 2;
-    char* backup_path = (char*)safe_malloc(backup_path_len);
-    if (backup_path) {
-        snprintf(backup_path, backup_path_len, "%s.%s",
-                 g_log_state.config.file_path, timestamp);
-        rename(g_log_state.config.file_path, backup_path);
-        safe_free((void**)&backup_path);
-    }
-
-    /* 清理超过最大保留数的旧轮转文件 */
-    if (g_log_state.log_rotate_max_files > 0) {
-        /* 查找所有轮转文件：扫描目录匹配文件名模式，删除超出保留数的文件 */
-        for (int i = g_log_state.log_rotate_max_files + 10; i >= g_log_state.log_rotate_max_files; i--) {
-            char old_path[2048];
+    /* ZSFZX-FIX-LOGROT: 修复轮转旧文件清理Bug
+     * 原代码备份文件名使用时间戳格式(file.log.YYYYMMDD_HHMMSS)，
+     * 但清理循环查找的是序号格式(file.log.N)，两者永远不匹配，旧文件永不清理。
+     * 修复：改用序号轮转+移位，确保旧文件被正确清理。 */
+    {
+        /* 计算备份文件名（使用序号而非时间戳） */
+        char backup_path[2048];
+        snprintf(backup_path, sizeof(backup_path), "%s.%d",
+                 g_log_state.config.file_path, 0);
+        /* 移位轮转：.9 → .10, .8 → .9, ..., .0 → .1, 当前 → .0 */
+        int maxf = g_log_state.log_rotate_max_files > 0 ?
+                   g_log_state.log_rotate_max_files : 10;
+        for (int r = maxf - 1; r >= 0; r--) {
+            char old_path[2048], new_path[2048];
             snprintf(old_path, sizeof(old_path), "%s.%d",
-                     g_log_state.config.file_path, i);
-            remove(old_path);
+                     g_log_state.config.file_path, r);
+            snprintf(new_path, sizeof(new_path), "%s.%d",
+                     g_log_state.config.file_path, r + 1);
+            /* 超出保留数时直接删除而非重命名 */
+            if (r + 1 >= maxf) {
+                remove(old_path);
+            } else {
+                /* 在Windows上rename不覆盖已存在文件，需先删除 */
+                remove(new_path);
+                rename(old_path, new_path);
+            }
+        }
+        /* 将当前日志文件重命名为 .0 */
+        if (g_log_state.config.file_path) {
+            snprintf(backup_path, sizeof(backup_path), "%s.0",
+                     g_log_state.config.file_path);
+            remove(backup_path);
+            rename(g_log_state.config.file_path, backup_path);
         }
     }
 

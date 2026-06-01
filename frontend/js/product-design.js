@@ -72,13 +72,22 @@
             headers: { 'Content-Type': 'application/json' },
             body: postData
         })
-        .then(function(resp) { return resp.json(); })
+        .then(function(resp) {
+            /* ZSF999XQ-M-004修复: 统一响应处理，与其他模块保持一致 */
+            return resp.json();
+        })
         .then(function(data) {
+            /* 兼容两种响应格式: {success, data} 和 裸JSON */
+            var payload = (data.success !== undefined) ? data.data : data;
             if (data.error) {
                 pdSetResult('<div style="color:#ef5350;padding:15px">错误：' + pdEscapeHtml(data.error) + '</div>', true);
                 return;
             }
-            var spec = data.product_spec;
+            var spec = payload.product_spec;
+            if (!spec) {
+                /* 兼容直接返回格式: 后端可能返回 {product_spec:...} 或 {data:{product_spec:...}} */
+                spec = data.product_spec;
+            }
             if (!spec) {
                 pdSetResult('<div style="color:#ef5350;padding:15px">未收到设计结果</div>', true);
                 return;

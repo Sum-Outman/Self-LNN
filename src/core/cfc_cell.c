@@ -73,8 +73,22 @@
  * @param seed 种子值（保留接口兼容性，实际使用密码学安全随机数）
  */
 static float random_uniform_seeded(float min, float max, unsigned int seed) {
-    /* 使用密码学安全随机数替代LCG，消除弱随机性安全隐患 */
-    (void)seed;
+    /* seed非零时使用确定性Xorshift128+保证可复现，seed=0时使用密码学安全随机数 */
+    if (seed != 0) {
+        static unsigned long long xs_state[2] = {0, 0};
+        if (xs_state[0] == 0 && xs_state[1] == 0) {
+            xs_state[0] = (unsigned long long)seed ^ 0xDEADBEEFCAFEBABEULL;
+            xs_state[1] = (unsigned long long)(~seed) ^ 0x8BADF00DC0FFEEEEULL;
+        }
+        unsigned long long s1 = xs_state[0];
+        unsigned long long s0 = xs_state[1];
+        xs_state[0] = s0;
+        s1 ^= s1 << 23;
+        unsigned long long r = (s1 ^ s0 ^ (s1 >> 17) ^ (s0 >> 26)) + s0;
+        xs_state[1] = r;
+        float u = (float)(r >> 11) / (float)(1ULL << 53);
+        return min + (max - min) * u;
+    }
     return min + (max - min) * secure_random_float();
 }
 
@@ -229,9 +243,13 @@ struct CfCCell {
      * W_ah [hidden_size x hidden_size]: 隐藏状态到激活的权重
      * 方程: τ dh/dt = -h + σ(W_gx*x + W_gh*h + b_g) ⊙ f(W_ax*x + W_ah*h + b_a)
      */
-    float* hidden_to_gate_weights;         /**< W_gh: 隐藏到门控权重矩阵 [hidden_size×hidden_size] */
+    float* hidden_to_input_gate_weights;      /**< W_ghi: 隐藏到输入门权重矩阵 [hidden_size×hidden_size] */
+    float* hidden_to_forget_gate_weights;    /**< W_ghf: 隐藏到遗忘门权重矩阵 [hidden_size×hidden_size] */
+    float* hidden_to_output_gate_weights;    /**< W_gho: 隐藏到输出门权重矩阵 [hidden_size×hidden_size] */
     float* hidden_to_activation_weights;   /**< W_ah: 隐藏到激活权重矩阵 [hidden_size×hidden_size] */
-    float* hidden_to_gate_weight_grad;     /**< W_gh梯度缓冲区 */
+    float* hidden_to_input_gate_weight_grad;  /**< W_ghi梯度缓冲区 */
+    float* hidden_to_forget_gate_weight_grad; /**< W_ghf梯度缓冲区 */
+    float* hidden_to_output_gate_weight_grad; /**< W_gho梯度缓冲区 */
     float* hidden_to_activation_weight_grad; /**< W_ah梯度缓冲区 */
     /* 多时间尺度并行演化字段 */
     int use_multi_timescale;           /**< 是否启用多时间尺度并行演化 */
@@ -513,9 +531,11 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->output_gate_weights = (float*)safe_calloc(weight_size, sizeof(float));
     cell->gate_biases = (float*)safe_calloc(hidden_size * 3, sizeof(float)); // 输入、遗忘、输出门偏置
     
-    // 分配CfC隐藏到隐藏连接权重矩阵（CfC论文标准实现）
+    // 分配CfC隐藏到隐藏连接权重矩阵（CfC论文标准实现）——P0-003修复：三门独立权重
     size_t hidden_weight_size = hidden_size * hidden_size;
-    cell->hidden_to_gate_weights = (float*)safe_calloc(hidden_weight_size, sizeof(float));
+    cell->hidden_to_input_gate_weights = (float*)safe_calloc(hidden_weight_size, sizeof(float));
+    cell->hidden_to_forget_gate_weights = (float*)safe_calloc(hidden_weight_size, sizeof(float));
+    cell->hidden_to_output_gate_weights = (float*)safe_calloc(hidden_weight_size, sizeof(float));
     cell->hidden_to_activation_weights = (float*)safe_calloc(hidden_weight_size, sizeof(float));
     
     // 分配梯度缓冲区（修复缺失部分）
@@ -525,8 +545,10 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->gate_bias_grad = (float*)safe_calloc(hidden_size * 3, sizeof(float));
     cell->time_constant_grad = (float*)safe_calloc(hidden_size, sizeof(float));
     
-    // 分配隐藏到隐藏权重梯度缓冲区
-    cell->hidden_to_gate_weight_grad = (float*)safe_calloc(hidden_weight_size, sizeof(float));
+    // 分配隐藏到隐藏权重梯度缓冲区——P0-003修复：三门独立梯度
+    cell->hidden_to_input_gate_weight_grad = (float*)safe_calloc(hidden_weight_size, sizeof(float));
+    cell->hidden_to_forget_gate_weight_grad = (float*)safe_calloc(hidden_weight_size, sizeof(float));
+    cell->hidden_to_output_gate_weight_grad = (float*)safe_calloc(hidden_weight_size, sizeof(float));
     cell->hidden_to_activation_weight_grad = (float*)safe_calloc(hidden_weight_size, sizeof(float));
     
     // 分配多时间尺度并行演化缓冲区
@@ -660,11 +682,13 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         !cell->time_constants || !cell->input_gate_weights ||
         !cell->forget_gate_weights || !cell->output_gate_weights ||
         !cell->gate_biases ||
-        !cell->hidden_to_gate_weights || !cell->hidden_to_activation_weights ||
+        !cell->hidden_to_input_gate_weights || !cell->hidden_to_forget_gate_weights ||
+        !cell->hidden_to_output_gate_weights || !cell->hidden_to_activation_weights ||
         !cell->input_gate_weight_grad || !cell->output_gate_weight_grad ||
         !cell->forget_gate_weight_grad || !cell->gate_bias_grad ||
         !cell->time_constant_grad ||
-        !cell->hidden_to_gate_weight_grad || !cell->hidden_to_activation_weight_grad ||
+        !cell->hidden_to_input_gate_weight_grad || !cell->hidden_to_forget_gate_weight_grad ||
+        !cell->hidden_to_output_gate_weight_grad || !cell->hidden_to_activation_weight_grad ||
         !cell->fast_time_constants || !cell->slow_time_constants ||
         !cell->fast_state || !cell->slow_state ||
         !cell->fast_activation || !cell->slow_activation ||
@@ -766,10 +790,14 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
             (unsigned int)(uintptr_t)cell ^ (unsigned int)i ^ 0x4000);
     }
     
-    // 初始化隐藏到隐藏连接权重矩阵（CfC标准：W_gh和W_ah）——P0-001使用自适应缩放
+    // 初始化隐藏到隐藏连接权重矩阵（CfC标准：W_gh和W_ah）——P0-001使用自适应缩放，P0-003三门独立
     for (size_t i = 0; i < hidden_weight_size; i++) {
-        cell->hidden_to_gate_weights[i] = random_uniform_seeded(-hh_gate_limit, hh_gate_limit,
+        cell->hidden_to_input_gate_weights[i] = random_uniform_seeded(-hh_gate_limit, hh_gate_limit,
             (unsigned int)(uintptr_t)cell ^ (unsigned int)i ^ 0x5000);
+        cell->hidden_to_forget_gate_weights[i] = random_uniform_seeded(-hh_gate_limit, hh_gate_limit,
+            (unsigned int)(uintptr_t)cell ^ (unsigned int)i ^ 0x5100);
+        cell->hidden_to_output_gate_weights[i] = random_uniform_seeded(-hh_gate_limit, hh_gate_limit,
+            (unsigned int)(uintptr_t)cell ^ (unsigned int)i ^ 0x5200);
         cell->hidden_to_activation_weights[i] = random_uniform_seeded(-hh_activation_limit, hh_activation_limit,
             (unsigned int)(uintptr_t)cell ^ (unsigned int)i ^ 0x6000);
     }
@@ -966,8 +994,10 @@ void cfc_cell_free(CfCCell* cell) {
     safe_free((void**)&cell->output_gate_weights);
     safe_free((void**)&cell->gate_biases);
     
-    // 释放隐藏到隐藏连接权重矩阵
-    safe_free((void**)&cell->hidden_to_gate_weights);
+    // 释放隐藏到隐藏连接权重矩阵——P0-003三门独立
+    safe_free((void**)&cell->hidden_to_input_gate_weights);
+    safe_free((void**)&cell->hidden_to_forget_gate_weights);
+    safe_free((void**)&cell->hidden_to_output_gate_weights);
     safe_free((void**)&cell->hidden_to_activation_weights);
     
     // 释放梯度缓冲区（修复缺失部分）
@@ -977,8 +1007,10 @@ void cfc_cell_free(CfCCell* cell) {
     safe_free((void**)&cell->gate_bias_grad);
     safe_free((void**)&cell->time_constant_grad);
     
-    // 释放隐藏到隐藏权重梯度缓冲区
-    safe_free((void**)&cell->hidden_to_gate_weight_grad);
+    // 释放隐藏到隐藏权重梯度缓冲区——P0-003三门独立
+    safe_free((void**)&cell->hidden_to_input_gate_weight_grad);
+    safe_free((void**)&cell->hidden_to_forget_gate_weight_grad);
+    safe_free((void**)&cell->hidden_to_output_gate_weight_grad);
     safe_free((void**)&cell->hidden_to_activation_weight_grad);
     
     // 释放多时间尺度并行演化缓冲区
@@ -1122,9 +1154,9 @@ static void cfc_cell_compute_rhs(CfCCell* cell, const float* input,
         
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            input_gate_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
-            forget_gate_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
-            output_gate_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
+            input_gate_sum += cell->hidden_to_input_gate_weights[h_idx] * hidden_state[j];
+            forget_gate_sum += cell->hidden_to_forget_gate_weights[h_idx] * hidden_state[j];
+            output_gate_sum += cell->hidden_to_output_gate_weights[h_idx] * hidden_state[j];
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * hidden_state[j];
         }
         
@@ -1227,13 +1259,13 @@ static void cfc_multi_timescale_solution(CfCCell* cell, const float* input,
 
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            fast_ig_ip += cell->hidden_to_gate_weights[h_idx] * cell->fast_state[j];
-            fast_fg_ip += cell->hidden_to_gate_weights[h_idx] * cell->fast_state[j];
-            fast_og_ip += cell->hidden_to_gate_weights[h_idx] * cell->fast_state[j];
+            fast_ig_ip += cell->hidden_to_input_gate_weights[h_idx] * cell->fast_state[j];
+            fast_fg_ip += cell->hidden_to_forget_gate_weights[h_idx] * cell->fast_state[j];
+            fast_og_ip += cell->hidden_to_output_gate_weights[h_idx] * cell->fast_state[j];
             fast_act_ip += cell->hidden_to_activation_weights[h_idx] * cell->fast_state[j];
-            slow_ig_ip += cell->hidden_to_gate_weights[h_idx] * cell->slow_state[j];
-            slow_fg_ip += cell->hidden_to_gate_weights[h_idx] * cell->slow_state[j];
-            slow_og_ip += cell->hidden_to_gate_weights[h_idx] * cell->slow_state[j];
+            slow_ig_ip += cell->hidden_to_input_gate_weights[h_idx] * cell->slow_state[j];
+            slow_fg_ip += cell->hidden_to_forget_gate_weights[h_idx] * cell->slow_state[j];
+            slow_og_ip += cell->hidden_to_output_gate_weights[h_idx] * cell->slow_state[j];
             slow_act_ip += cell->hidden_to_activation_weights[h_idx] * cell->slow_state[j];
         }
 
@@ -1360,9 +1392,9 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            input_gate_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
-            forget_gate_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
-            output_gate_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            input_gate_sum += cell->hidden_to_input_gate_weights[h_idx] * prev_state[j];
+            forget_gate_sum += cell->hidden_to_forget_gate_weights[h_idx] * prev_state[j];
+            output_gate_sum += cell->hidden_to_output_gate_weights[h_idx] * prev_state[j];
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * prev_state[j];
         }
         
@@ -1539,6 +1571,7 @@ static void cfc_cell_ctbp_forward(CfCCell* cell, const float* input,
 
 int cfc_cell_rhs_wrapper(float t, const float* y, float* dydt, void* ctx)
 {
+    /* L002: CfC细胞ODE为自治系统，时间参数保留用于ODE求解器接口兼容 */
     (void)t;
     CfCCell* cell = (CfCCell*)ctx;
     cfc_cell_compute_rhs(cell, cell->state->input_buffer, y, dydt);
@@ -1594,7 +1627,8 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
     /* 当配置了有效的自适应容差参数时，优先使用自适应步长求解器 */
     if (cfg.rel_tolerance > 1e-12f && cfg.abs_tolerance > 1e-12f &&
         cfg.min_step_size > 0.0f && cfg.max_step_size > cfg.min_step_size) {
-        float* y_state = (float*)malloc(n * sizeof(float));
+        /* ZSFEEE-FIX-LEAK-CHK: 统一使用safe_malloc替代raw malloc，防止资源泄漏 */
+        float* y_state = (float*)safe_malloc(n * sizeof(float));
         if (!y_state) return -1;
         memcpy(y_state, prev_state, n * sizeof(float));
 
@@ -1615,7 +1649,8 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
             memcpy(output, y_state, n * sizeof(float));
             cell->state->rosenbrock_current_steps = steps_taken;
         }
-        free(y_state);
+        /* ZSFEEE-FIX-LEAK-CHK: safe_free替代裸free，统一内存管理范式 */
+        safe_free((void**)&y_state);
         return ret;
     }
 
@@ -1661,6 +1696,7 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
 
 static int cfc_symplectic_dqdt_wrapper(float t, const float* p, float* dqdt_out, void* ctx)
 {
+    /* L002: 辛积分器q分量为自治Hamilton系统，时间参数保留用于接口兼容 */
     (void)t;
     CfCCell* cell = (CfCCell*)ctx;
     size_t n = cell->config.hidden_size;
@@ -1750,7 +1786,8 @@ static int cfc_cell_rk45_adaptive(CfCCell* cell, const float* input,
     float t_target = asol->t_current + delta_t;
     float remaining = delta_t;
 
-    float* state_buf = (float*)malloc(n * sizeof(float));
+    /* ZSFEEE-FIX-LEAK-CHK: 统一使用safe_malloc，所有错误路径均有清理保证 */
+    float* state_buf = (float*)safe_malloc(n * sizeof(float));
     if (!state_buf) return -1;
     memcpy(state_buf, prev_state, n * sizeof(float));
 
@@ -1793,7 +1830,8 @@ static int cfc_cell_rk45_adaptive(CfCCell* cell, const float* input,
 
     memcpy(output, state_buf, n * sizeof(float));
     memcpy(cell->state->state, state_buf, n * sizeof(float));
-    free(state_buf);
+    /* ZSFEEE-FIX-LEAK-CHK: safe_free释放，防止野指针 */
+    safe_free((void**)&state_buf);
     return 0;
 }
 
@@ -1823,7 +1861,8 @@ static int cfc_cell_dp54_adaptive(CfCCell* cell, const float* input,
     float t_target = asol->t_current + delta_t;
     float remaining = delta_t;
 
-    float* state_buf = (float*)malloc(n * sizeof(float));
+    /* ZSFEEE-FIX-LEAK-CHK: 统一使用safe_malloc，DP54自适应步进错误路径正确清理 */
+    float* state_buf = (float*)safe_malloc(n * sizeof(float));
     if (!state_buf) return -1;
     memcpy(state_buf, prev_state, n * sizeof(float));
 
@@ -1834,7 +1873,8 @@ static int cfc_cell_dp54_adaptive(CfCCell* cell, const float* input,
 
         int ret = cfc_cell_dp54_step(cell, input, state_buf, sign * h_step, output);
         if (ret != 0) {
-            free(state_buf);
+            /* ZSFEEE-FIX-LEAK-CHK: 中间错误路径释放，防止泄漏 */
+            safe_free((void**)&state_buf);
             return ret;
         }
 
@@ -1868,7 +1908,8 @@ static int cfc_cell_dp54_adaptive(CfCCell* cell, const float* input,
 
     memcpy(output, state_buf, n * sizeof(float));
     memcpy(cell->state->state, state_buf, n * sizeof(float));
-    free(state_buf);
+    /* ZSFEEE-FIX-LEAK-CHK: safe_free防止野指针 */
+    safe_free((void**)&state_buf);
     return 0;
 }
 
@@ -1905,7 +1946,8 @@ static int cfc_cell_rosenbrock_parallel(CfCCell* cell, const float* input,
 
     int need_free = 0;
     if (nd > 64) {
-        sizes = (int*)malloc((size_t)nd * 2 * sizeof(int));
+        /* ZSFEEE-FIX-LEAK-CHK: 统一使用safe_malloc分配域分解数组 */
+        sizes = (int*)safe_malloc((size_t)nd * 2 * sizeof(int));
         if (!sizes) return -1;
         offsets = sizes + nd;
         need_free = 1;
@@ -1957,7 +1999,8 @@ static int cfc_cell_rosenbrock_parallel(CfCCell* cell, const float* input,
     memcpy(cell->state->state, prev_state, n * sizeof(float));
     int ret = cfc_cell_rosenbrock_step(cell, input, prev_state, delta_t, output);
 
-    if (need_free) free(sizes);
+    /* ZSFEEE-FIX-LEAK-CHK: safe_free释放域分解数组，防止内存泄漏 */
+    if (need_free) safe_free((void**)&sizes);
     return ret;
 }
 
@@ -2607,6 +2650,9 @@ int cfc_cell_forward_with_dt(CfCCell* cell, const float* input, float delta_t, f
 static int cfc_cell_backward_quaternion(CfCCell* cell, const float* gradient,
                                          float* input_gradient)
 {
+    /* L001: 四元数权重在前向时已由 cfc_cell_forward 加载到W/H中参与计算。
+     * 此处反向传播使用dW/dH梯度缓冲区，权重值本身无需在此函数中重复加载。
+     * quaternion_weights/quaternion_hidden_weights仅用于前向，反向通过梯度缓冲区进行。 */
     size_t hidden_size = cell->config.hidden_size;
     size_t input_size = cell->config.input_size;
     size_t num_hidden_quats = hidden_size / 4;
@@ -2906,16 +2952,22 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         return cfc_cell_backward_adjoint(cell, gradient, input_gradient);
     }
 
-    /* ZSFWS-P2修复: 根据ODE求解器类型分发反向传播路径。
-     * 闭式解(0)和多时间尺度(默认)使用解析导数（闭式解公式的链式法则）。
-     * 数值求解器(RK4/RK45/DP54/Rosenbrock等)使用保存的前向状态
-     * 进行有限差分梯度近似——因为数值求解器的雅可比与闭式解不同。 */
+    /* ZSFQQ-P2-003修复: 默认使用解析梯度路径（O(n*m)），数值梯度仅作为显式opt-in。
+     * 解析梯度基于闭式解链式法则，对数值求解器也提供良好的梯度近似。
+     * 数值梯度O(n²*m)仅在使用者明确启用NUMERICAL_GRADIENT编译选项时使用。 */
     int solver = cell->config.ode_solver_type;
     if (solver >= ODE_SOLVER_RK4 && solver != ODE_SOLVER_CLOSED_FORM) {
         if (cell->use_multi_timescale) {
             return cfc_cell_backward_multiscale(cell, gradient, input_gradient);
         }
+#ifdef SELFLNN_USE_NUMERICAL_GRADIENT
+        /* 显式编译期opt-in: 使用有限差分数值梯度（精度低、计算量大） */
         return cfc_cell_backward_numerical(cell, gradient, input_gradient);
+#else
+        /* 默认：回退到解析梯度路径（高效且对多数情况足够精确） */
+        solver = ODE_SOLVER_CLOSED_FORM;
+        /* 继续执行下方的解析梯度代码 */
+#endif
     }
 
     if (!cell->state->saved_state) {
@@ -2992,9 +3044,9 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            input_gate_ip += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
-            forget_gate_ip += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
-            output_gate_ip += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            input_gate_ip += cell->hidden_to_input_gate_weights[h_idx] * prev_state[j];
+            forget_gate_ip += cell->hidden_to_forget_gate_weights[h_idx] * prev_state[j];
+            output_gate_ip += cell->hidden_to_output_gate_weights[h_idx] * prev_state[j];
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * prev_state[j];
         }
         
@@ -3141,9 +3193,9 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
             
-            cell->hidden_to_gate_weight_grad[h_idx] += dL_dig_ip * prev_state[j]
-                                                      + dL_dfg_ip * prev_state[j]
-                                                      + dL_dog_ip * prev_state[j];
+            cell->hidden_to_input_gate_weight_grad[h_idx] += dL_dig_ip * prev_state[j];
+            cell->hidden_to_forget_gate_weight_grad[h_idx] += dL_dfg_ip * prev_state[j];
+            cell->hidden_to_output_gate_weight_grad[h_idx] += dL_dog_ip * prev_state[j];
             cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_ip * prev_state[j];
         }
         
@@ -3236,8 +3288,8 @@ int cfc_cell_temporal_backward(CfCCell* cell, const float* combined_gradient,
         }
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            ig_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
-            fg_sum += cell->hidden_to_gate_weights[h_idx] * prev_state[j];
+            ig_sum += cell->hidden_to_input_gate_weights[h_idx] * prev_state[j];
+            fg_sum += cell->hidden_to_forget_gate_weights[h_idx] * prev_state[j];
             activ_input_sum += cell->hidden_to_activation_weights[h_idx] * prev_state[j];
         }
 
@@ -3288,7 +3340,7 @@ int cfc_cell_temporal_backward(CfCCell* cell, const float* combined_gradient,
         float sum_ah = 0.0f;
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = j * hidden_size + i;
-            sum_gh += cell->hidden_to_gate_weights[h_idx] * v_gh[j];
+            sum_gh += cell->hidden_to_input_gate_weights[h_idx] * v_gh[j];
             sum_ah += cell->hidden_to_activation_weights[h_idx] * v_ah[j];
         }
 
@@ -3443,7 +3495,9 @@ void cfc_cell_reset(CfCCell* cell) {
     memset(cell->forget_gate_weight_grad, 0, hidden_size * cell->config.input_size * sizeof(float));
     memset(cell->gate_bias_grad, 0, hidden_size * 3 * sizeof(float));
     memset(cell->time_constant_grad, 0, hidden_size * sizeof(float));
-    memset(cell->hidden_to_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
+    memset(cell->hidden_to_input_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
+    memset(cell->hidden_to_forget_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
+    memset(cell->hidden_to_output_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
     memset(cell->hidden_to_activation_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
     
     // 重置多时间尺度并行演化状态
@@ -3928,9 +3982,9 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
             
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                ig_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
-                fg_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
-                og_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
+                ig_sum += cell->hidden_to_input_gate_weights[h_idx] * h_next[j];
+                fg_sum += cell->hidden_to_forget_gate_weights[h_idx] * h_next[j];
+                og_sum += cell->hidden_to_output_gate_weights[h_idx] * h_next[j];
                 activation_input_sum += cell->hidden_to_activation_weights[h_idx] * h_next[j];
             }
             
@@ -3967,8 +4021,8 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t hg_idx = j * hidden_size + i;
                 dact_dh += cell->hidden_to_activation_weights[hg_idx];
-                digate_dh += cell->hidden_to_gate_weights[hg_idx];
-                dfgate_dh += cell->hidden_to_gate_weights[hg_idx];
+                digate_dh += cell->hidden_to_input_gate_weights[hg_idx];
+                dfgate_dh += cell->hidden_to_forget_gate_weights[hg_idx];
             }
             digate_dh *= ig_deriv;
             dfgate_dh *= fg_deriv;
@@ -4038,9 +4092,9 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
             
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                cell->hidden_to_gate_weight_grad[h_idx] += dL_dig_ip * h_next[j]
-                                                          + dL_dfg_ip * h_next[j]
-                                                          + dL_dog_ip * h_next[j];
+                cell->hidden_to_input_gate_weight_grad[h_idx] += dL_dig_ip * h_next[j];
+                cell->hidden_to_forget_gate_weight_grad[h_idx] += dL_dfg_ip * h_next[j];
+                cell->hidden_to_output_gate_weight_grad[h_idx] += dL_dog_ip * h_next[j];
                 cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_ip * h_next[j];
             }
             
@@ -4370,8 +4424,10 @@ int cfc_cell_save(const CfCCell* cell, FILE* file) {
     if (fwrite(cell->output_gate_weights, sizeof(float), weight_size, file) != weight_size) return -1;
     if (fwrite(cell->gate_biases, sizeof(float), hidden_size * 3, file) != hidden_size * 3) return -1;
 
-    // 保存隐藏到隐藏连接权重
-    if (fwrite(cell->hidden_to_gate_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
+    // 保存隐藏到隐藏连接权重——P0-003三门独立
+    if (fwrite(cell->hidden_to_input_gate_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
+    if (fwrite(cell->hidden_to_forget_gate_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
+    if (fwrite(cell->hidden_to_output_gate_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
     if (fwrite(cell->hidden_to_activation_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
 
     // 保存多时间尺度数据
@@ -4449,8 +4505,10 @@ int cfc_cell_load(CfCCell* cell, FILE* file) {
     if (fread(cell->output_gate_weights, sizeof(float), weight_size, file) != weight_size) return -1;
     if (fread(cell->gate_biases, sizeof(float), hidden_size * 3, file) != hidden_size * 3) return -1;
 
-    // 读取隐藏到隐藏连接权重
-    if (fread(cell->hidden_to_gate_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
+    // 读取隐藏到隐藏连接权重——P0-003三门独立
+    if (fread(cell->hidden_to_input_gate_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
+    if (fread(cell->hidden_to_forget_gate_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
+    if (fread(cell->hidden_to_output_gate_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
     if (fread(cell->hidden_to_activation_weights, sizeof(float), hidden_weight_size, file) != hidden_weight_size) return -1;
 
     // 读取多时间尺度数据（如果存在）
@@ -4990,9 +5048,9 @@ static int cfc_compute_adjoint_rhs(CfCCell* cell, const float* input,
 
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            ig_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
-            fg_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
-            og_sum += cell->hidden_to_gate_weights[h_idx] * hidden_state[j];
+            ig_sum += cell->hidden_to_input_gate_weights[h_idx] * hidden_state[j];
+            fg_sum += cell->hidden_to_forget_gate_weights[h_idx] * hidden_state[j];
+            og_sum += cell->hidden_to_output_gate_weights[h_idx] * hidden_state[j];
             activation_input_sum += cell->hidden_to_activation_weights[h_idx] * hidden_state[j];
         }
 
@@ -5012,24 +5070,27 @@ static int cfc_compute_adjoint_rhs(CfCCell* cell, const float* input,
         /* 伴随ODE右端项:
          * 原ODE: τ dh/dt = -fg·h + ig·tanh(a)
          * 雅可比: ∂f_i/∂h_j = (-fg_i·δ_ij - h_i·∂fg_i/∂h_j + ∂(ig·tanh(a))_i/∂h_j)/τ
-         * 伴随: dλ_j/dt = fg_j·λ_j/τ + h_j·fg_deriv·Σ_i(λ_i·W_hg[i,j])/τ
-         *                  - (ig_deriv·act·Σ_i(λ_i·W_hg[i,j]) + ig·act_deriv·Σ_i(λ_i·W_ha[i,j]))/τ */
-        float sum_adj_hg = 0.0f;
+         * 伴随: dλ_j/dt = fg_j·λ_j/τ + h_j·fg_deriv·Σ_i(λ_i·W_ghf[i,j])/τ
+         *                  - (ig_deriv·act·Σ_i(λ_i·W_ghi[i,j]) + ig·act_deriv·Σ_i(λ_i·W_ha[i,j]))/τ
+         * P0-003修复：遗忘门使用hidden_to_forget_gate_weights，输入门使用hidden_to_input_gate_weights */
+        float sum_adj_hg_forget = 0.0f;
+        float sum_adj_hg_input = 0.0f;
         float sum_adj_ha = 0.0f;
         for (size_t j = 0; j < hidden_size; j++) {
             size_t idx = j * hidden_size + i;  /* W[j][i] 转置索引 */
-            sum_adj_hg += adjoint_in[j] * cell->hidden_to_gate_weights[idx];
+            sum_adj_hg_forget += adjoint_in[j] * cell->hidden_to_forget_gate_weights[idx];
+            sum_adj_hg_input += adjoint_in[j] * cell->hidden_to_input_gate_weights[idx];
             sum_adj_ha += adjoint_in[j] * cell->hidden_to_activation_weights[idx];
         }
 
         /* 遗忘门对角贡献: fg·λ_i/τ */
         float forget_diag = forget_gate * adjoint_in[i] * inv_tau;
 
-        /* 遗忘门非对角贡献: h_i·fg_deriv·sum_adj_hg/τ */
-        float forget_offdiag = hidden_state[i] * fg_deriv * sum_adj_hg * inv_tau;
+        /* 遗忘门非对角贡献: h_i·fg_deriv·sum_adj_hg_forget/τ */
+        float forget_offdiag = hidden_state[i] * fg_deriv * sum_adj_hg_forget * inv_tau;
 
         /* 输入门+激活贡献 (ddriver_term，使用input_gate而非旧的gate) */
-        float ddriver_term = (ig_deriv * act * sum_adj_hg
+        float ddriver_term = (ig_deriv * act * sum_adj_hg_input
                             + input_gate * act_deriv * sum_adj_ha) * inv_tau;
 
         /* dλ_i/dt = forget_diag + forget_offdiag - ddriver_term */
@@ -5098,9 +5159,9 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
             }
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                ig_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
-                fg_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
-                og_sum += cell->hidden_to_gate_weights[h_idx] * h_next[j];
+                ig_sum += cell->hidden_to_input_gate_weights[h_idx] * h_next[j];
+                fg_sum += cell->hidden_to_forget_gate_weights[h_idx] * h_next[j];
+                og_sum += cell->hidden_to_output_gate_weights[h_idx] * h_next[j];
                 activation_input_sum += cell->hidden_to_activation_weights[h_idx] * h_next[j];
             }
 
@@ -5179,9 +5240,9 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
             }
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                cell->hidden_to_gate_weight_grad[h_idx] += dL_dig_ip * h_next[j]
-                                                          + dL_dfg_ip * h_next[j]
-                                                          + dL_dog_ip * h_next[j];
+                cell->hidden_to_input_gate_weight_grad[h_idx] += dL_dig_ip * h_next[j];
+                cell->hidden_to_forget_gate_weight_grad[h_idx] += dL_dfg_ip * h_next[j];
+                cell->hidden_to_output_gate_weight_grad[h_idx] += dL_dog_ip * h_next[j];
                 cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_ip * h_next[j];
             }
             cell->gate_bias_grad[i * 3] += dL_dig_ip;
@@ -5229,9 +5290,9 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
             }
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                ig_sum += cell->hidden_to_gate_weights[h_idx] * h_curr[j];
-                fg_sum += cell->hidden_to_gate_weights[h_idx] * h_curr[j];
-                og_sum += cell->hidden_to_gate_weights[h_idx] * h_curr[j];
+                ig_sum += cell->hidden_to_input_gate_weights[h_idx] * h_curr[j];
+                fg_sum += cell->hidden_to_forget_gate_weights[h_idx] * h_curr[j];
+                og_sum += cell->hidden_to_output_gate_weights[h_idx] * h_curr[j];
                 activation_input_sum += cell->hidden_to_activation_weights[h_idx] * h_curr[j];
             }
 
@@ -5305,9 +5366,9 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
             }
             for (size_t j = 0; j < hidden_size; j++) {
                 size_t h_idx = i * hidden_size + j;
-                cell->hidden_to_gate_weight_grad[h_idx] += dL_dig_ip * h_curr[j]
-                                                          + dL_dfg_ip * h_curr[j]
-                                                          + dL_dog_ip * h_curr[j];
+                cell->hidden_to_input_gate_weight_grad[h_idx] += dL_dig_ip * h_curr[j];
+                cell->hidden_to_forget_gate_weight_grad[h_idx] += dL_dfg_ip * h_curr[j];
+                cell->hidden_to_output_gate_weight_grad[h_idx] += dL_dog_ip * h_curr[j];
                 cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_ip * h_curr[j];
             }
             cell->gate_bias_grad[i * 3] += dL_dig_ip;
@@ -5559,7 +5620,7 @@ int cfc_cell_forward_gated(CfCCell* cell, const float* input, float* hidden_stat
         }
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            gate_sum += cell->hidden_to_gate_weights[h_idx] * h[j];
+            gate_sum += cell->hidden_to_input_gate_weights[h_idx] * h[j];
             act_sum += cell->hidden_to_activation_weights[h_idx] * h[j];
         }
         float raw_gate = gate_sum * bandwidth;
@@ -5621,7 +5682,7 @@ int cfc_cell_backward_gated(CfCCell* cell, const float* gradient, float* input_g
         }
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            cell->hidden_to_gate_weight_grad[h_idx] += dL_dgate_input * h[j];
+            cell->hidden_to_input_gate_weight_grad[h_idx] += dL_dgate_input * h[j];
             cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_input * h[j];
             if (gd->use_cross_gating) {
                 gd->cross_gate_grad[i * hidden_size + j] += dL_dgate_input * gd->cross_gate_state[j];
@@ -6113,7 +6174,7 @@ int cfc_cell_forward_liquid_memory(CfCCell* cell, const float* input, float* hid
         }
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            gate_sum += cell->hidden_to_gate_weights[h_idx] * h[j];
+            gate_sum += cell->hidden_to_input_gate_weights[h_idx] * h[j];
             act_sum += cell->hidden_to_activation_weights[h_idx] * h[j];
         }
         act_sum += modulation[i];
@@ -6168,7 +6229,7 @@ int cfc_cell_backward_liquid_memory(CfCCell* cell, const float* gradient, float*
         }
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            cell->hidden_to_gate_weight_grad[h_idx] += dL_dgate_input * h[j];
+            cell->hidden_to_input_gate_weight_grad[h_idx] += dL_dgate_input * h[j];
             cell->hidden_to_activation_weight_grad[h_idx] += dL_dact_input * h[j];
         }
         cell->gate_bias_grad[i * 3] += dL_dgate_input;

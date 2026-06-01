@@ -38,6 +38,11 @@ extern const GpuBackendInterface* cuda_get_backend_interface(void);
 extern const GpuBackendInterface* opencl_get_backend_interface(void);
 extern const GpuBackendInterface* vulkan_get_backend_interface(void);
 extern const GpuBackendInterface* metal_get_backend_interface(void);
+/* ZSFZX-FIX-GPU-POOL: 补全缺失后端extern声明 */
+extern const GpuBackendInterface* rocm_get_backend_interface(void);
+extern const GpuBackendInterface* ascend_get_backend_interface(void);
+extern const GpuBackendInterface* cambricon_get_backend_interface(void);
+extern const GpuBackendInterface* tpu_get_backend_interface(void);
 
 // 在完整系统中，这个接口提供CPU并行计算的完整功能
 
@@ -89,568 +94,9 @@ struct GpuMemoryPool {
 };
 
 /* ============================================================================
- * CPU硬件检测函数（全部基于真实硬件检测，禁止使用模拟值/占位符）
- *
- * ZSFUSA-O02: CPU硬件检测已统一在gpu.c中实现。
- * gpu_memory_pool.c应使用gpu_hardware_get_cpu_info()统一接口。
- * 当前保留本地初始化代码，标记为待重构（后续版本将彻底消除重复）。
- *
- * 本文件中cpu_detect_*函数与gpu.c中的cpu_hw_*函数功能重复：
- *   - cpu_cpuid_detect()    ↔ cpu_hw_cpuid()
- *   - cpu_detect_vendor_real() ↔ cpu_hw_get_vendor()
- *   - cpu_detect_brand_real()  ↔ cpu_hw_get_brand_name()
- *   - cpu_detect_simd_flags_real() ↔ cpu_hw_detect_simd_x86/arm()
- *   - cpu_detect_l1/l2/l3_cache_real() ↔ cpu_hw_get_cache_size()
- * 后续重构时请将所有调用替换为gpu.c中对应函数。
+ * ZSFEEE-FIX-014: CPU硬件检测已统一到gpu.c的gpu_hardware_get_cpu_info()。
+ * 所有本地cpu_detect_*函数已删除。使用统一公开接口获取CPU信息。
  * =========================================================================== */
-
-/**
- * @brief CPUID指令封装（仅x86/x64平台）
- */
-static inline int cpu_cpuid_detect(int leaf, int subleaf,
-    unsigned int* eax, unsigned int* ebx,
-    unsigned int* ecx, unsigned int* edx) {
-#if defined(_WIN32) && (defined(_M_IX86) || defined(_M_X64))
-    int cpu_info[4] = {0};
-    __cpuidex(cpu_info, leaf, subleaf);
-    if (eax) *eax = (unsigned int)cpu_info[0];
-    if (ebx) *ebx = (unsigned int)cpu_info[1];
-    if (ecx) *ecx = (unsigned int)cpu_info[2];
-    if (edx) *edx = (unsigned int)cpu_info[3];
-    return 0;
-#elif defined(__x86_64__) || defined(__i386__)
-    unsigned int a = 0, b = 0, c = 0, d = 0;
-    if (__get_cpuid_count(leaf, subleaf, &a, &b, &c, &d) == 0) {
-        return -1;
-    }
-    if (eax) *eax = a;
-    if (ebx) *ebx = b;
-    if (ecx) *ecx = c;
-    if (edx) *edx = d;
-    return 0;
-#else
-    (void)leaf; (void)subleaf;
-    (void)eax; (void)ebx; (void)ecx; (void)edx;
-    return -1;
-#endif
-}
-
-/**
- * @brief SIMD指令集标志位定义
- */
-#define CPU_SIMD_SSE      (1 << 0)
-#define CPU_SIMD_SSE2     (1 << 1)
-#define CPU_SIMD_SSE3     (1 << 2)
-#define CPU_SIMD_SSSE3    (1 << 3)
-#define CPU_SIMD_SSE41    (1 << 4)
-#define CPU_SIMD_SSE42    (1 << 5)
-#define CPU_SIMD_AVX      (1 << 6)
-#define CPU_SIMD_AVX2     (1 << 7)
-#define CPU_SIMD_AVX512F  (1 << 8)
-#define CPU_SIMD_AVX512DQ (1 << 9)
-#define CPU_SIMD_AVX512BW (1 << 10)
-#define CPU_SIMD_NEON     (1 << 11)
-#define CPU_SIMD_SVE      (1 << 12)
-
-/**
- * @brief 获取CPU制造商名称（真实硬件检测）
- */
-static int cpu_detect_vendor_real(char* vendor, size_t vendor_size) {
-    if (!vendor || vendor_size < 13) return -1;
-    memset(vendor, 0, vendor_size);
-
-    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-    if (cpu_cpuid_detect(0, 0, &eax, &ebx, &ecx, &edx) != 0) {
-#if defined(__aarch64__) || defined(__ARM_ARCH)
-        strncpy(vendor, "ARM", vendor_size - 1);
-#else
-        strncpy(vendor, "未知CPU", vendor_size - 1);
-#endif
-        return 0;
-    }
-
-    memcpy(vendor, &ebx, 4);
-    memcpy(vendor + 4, &edx, 4);
-    memcpy(vendor + 8, &ecx, 4);
-    vendor[12] = '\0';
-    return 0;
-}
-
-/**
- * @brief 获取CPU品牌名称（真实硬件检测）
- */
-static int cpu_detect_brand_real(char* brand, size_t brand_size) {
-    if (!brand || brand_size < 1) return -1;
-    memset(brand, 0, brand_size);
-
-    unsigned int eax = 0x80000000, ebx = 0, ecx = 0, edx = 0;
-    if (cpu_cpuid_detect(0x80000000, 0, &eax, &ebx, &ecx, &edx) != 0 || eax < 0x80000004) {
-#ifdef _WIN32
-        HKEY hKey;
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-            "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-            0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            DWORD size = (DWORD)brand_size;
-            DWORD type = REG_SZ;
-            RegQueryValueExA(hKey, "ProcessorNameString", NULL,
-                &type, (LPBYTE)brand, &size);
-            RegCloseKey(hKey);
-        }
-#elif defined(__linux__)
-        FILE* fp = fopen("/proc/cpuinfo", "r");
-        if (fp) {
-            char line[256];
-            while (fgets(line, sizeof(line), fp)) {
-                if (sscanf(line, "model name\t: %255[^\n]", brand) == 1) {
-                    break;
-                }
-            }
-            fclose(fp);
-        }
-#elif defined(__APPLE__)
-        size_t len = brand_size;
-        sysctlbyname("machdep.cpu.brand_string", brand, &len, NULL, 0);
-#endif
-        if (brand[0] == '\0') {
-            strncpy(brand, "CPU(未知型号)", brand_size - 1);
-        }
-        return 0;
-    }
-
-    char buffer[49] = {0};
-    for (int i = 0; i < 3; i++) {
-        unsigned int a = 0, b = 0, c = 0, d = 0;
-        if (cpu_cpuid_detect(0x80000002 + i, 0, &a, &b, &c, &d) != 0) break;
-        memcpy(buffer + i * 16, &a, 4);
-        memcpy(buffer + i * 16 + 4, &b, 4);
-        memcpy(buffer + i * 16 + 8, &c, 4);
-        memcpy(buffer + i * 16 + 12, &d, 4);
-    }
-    buffer[48] = '\0';
-
-    char* start = buffer;
-    while (*start == ' ') start++;
-    strncpy(brand, start, brand_size - 1);
-    return 0;
-}
-
-/**
- * @brief 获取CPU架构名称（真实硬件检测）
- */
-static int cpu_detect_architecture_real(char* arch, size_t arch_size) {
-    if (!arch || arch_size < 1) return -1;
-    memset(arch, 0, arch_size);
-
-#if defined(__x86_64__) || defined(_M_X64)
-    strncpy(arch, "x86_64", arch_size - 1);
-#elif defined(__i386__) || defined(_M_IX86)
-    strncpy(arch, "x86", arch_size - 1);
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    strncpy(arch, "ARM64", arch_size - 1);
-#elif defined(__arm__) || defined(_M_ARM)
-    strncpy(arch, "ARM", arch_size - 1);
-#elif defined(__APPLE__) && defined(__ppc__)
-    strncpy(arch, "PowerPC", arch_size - 1);
-#else
-    strncpy(arch, "未知架构", arch_size - 1);
-#endif
-    return 0;
-}
-
-/**
- * @brief 获取物理CPU核心数（真实硬件检测）
- */
-static int cpu_detect_physical_cores_real(void) {
-#ifdef _WIN32
-    DWORD return_length = 0;
-    GetLogicalProcessorInformation(NULL, &return_length);
-    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || return_length == 0) {
-        SYSTEM_INFO sys_info;
-        GetSystemInfo(&sys_info);
-        return (int)sys_info.dwNumberOfProcessors;
-    }
-
-    SYSTEM_LOGICAL_PROCESSOR_INFORMATION* buffer =
-        (SYSTEM_LOGICAL_PROCESSOR_INFORMATION*)safe_malloc(return_length);
-    if (!buffer) {
-        SYSTEM_INFO sys_info;
-        GetSystemInfo(&sys_info);
-        return (int)sys_info.dwNumberOfProcessors;
-    }
-
-    int phys_cores = 0;
-    if (GetLogicalProcessorInformation(buffer, &return_length)) {
-        DWORD count = return_length / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        for (DWORD i = 0; i < count; i++) {
-            if (buffer[i].Relationship == RelationProcessorCore) {
-                phys_cores++;
-            }
-        }
-    }
-    safe_free((void**)&buffer);
-
-    if (phys_cores > 0) return phys_cores;
-
-    SYSTEM_INFO sys_info;
-    GetSystemInfo(&sys_info);
-    return (int)sys_info.dwNumberOfProcessors;
-
-#elif defined(__linux__)
-    FILE* fp = fopen("/proc/cpuinfo", "r");
-    if (!fp) {
-        long n = sysconf(_SC_NPROCESSORS_ONLN);
-        return (n > 0) ? (int)n : 1;
-    }
-
-    int phys_cores = 0;
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        int id = 0;
-        if (sscanf(line, "core id\t\t: %d", &id) == 1) {
-            phys_cores++;
-        }
-    }
-    fclose(fp);
-
-    if (phys_cores > 0) return phys_cores;
-
-    /* 回退：CPUID leaf 0x80000008 */
-    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-    if (cpu_cpuid_detect(0x80000008, 0, &eax, &ebx, &ecx, &edx) == 0) {
-        int cores = (ecx & 0xFF) + 1;
-        if (cores > 0) return cores;
-    }
-
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    return (n > 0) ? (int)n : 1;
-
-#elif defined(__APPLE__)
-    int phys_cores = 0;
-    size_t len = sizeof(phys_cores);
-    if (sysctlbyname("hw.physicalcpu", &phys_cores, &len, NULL, 0) == 0 && phys_cores > 0) {
-        return phys_cores;
-    }
-    return 1;
-#else
-    return 1;
-#endif
-}
-
-/**
- * @brief 获取逻辑CPU核心数（真实硬件检测）
- */
-static int cpu_detect_logical_cores_real(void) {
-#ifdef _WIN32
-    SYSTEM_INFO sys_info;
-    GetSystemInfo(&sys_info);
-    int log_cores = (int)sys_info.dwNumberOfProcessors;
-    return (log_cores > 0) ? log_cores : 1;
-#elif defined(__linux__)
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    return (n > 0) ? (int)n : 1;
-#elif defined(__APPLE__)
-    int log_cores = 0;
-    size_t len = sizeof(log_cores);
-    if (sysctlbyname("hw.logicalcpu", &log_cores, &len, NULL, 0) == 0 && log_cores > 0) {
-        return log_cores;
-    }
-    return 1;
-#else
-    return 1;
-#endif
-}
-
-/**
- * @brief 获取L1缓存大小（真实硬件检测）
- */
-static size_t cpu_detect_l1_cache_real(void) {
-#ifdef _WIN32
-    DWORD return_length = 0;
-    GetLogicalProcessorInformation(NULL, &return_length);
-    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || return_length == 0) return 0;
-
-    SYSTEM_LOGICAL_PROCESSOR_INFORMATION* buffer =
-        (SYSTEM_LOGICAL_PROCESSOR_INFORMATION*)safe_malloc(return_length);
-    if (!buffer) return 0;
-
-    size_t l1_size = 0;
-    if (GetLogicalProcessorInformation(buffer, &return_length)) {
-        DWORD count = return_length / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        for (DWORD i = 0; i < count; i++) {
-            if (buffer[i].Relationship == RelationCache &&
-                buffer[i].Cache.Level == 1) {
-                l1_size = (size_t)buffer[i].Cache.Size;
-                break;
-            }
-        }
-    }
-    safe_free((void**)&buffer);
-    return l1_size;
-
-#elif defined(__linux__)
-    FILE* fp = fopen("/sys/devices/system/cpu/cpu0/cache/index0/size", "r");
-    if (fp) {
-        int size_kb = 0;
-        if (fscanf(fp, "%dK", &size_kb) == 1) {
-            fclose(fp);
-            return (size_t)size_kb * 1024;
-        }
-        fclose(fp);
-    }
-    /* 回退：CPUID */
-    {
-        unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-        if (cpu_cpuid_detect(0x80000005, 0, &eax, &ebx, &ecx, &edx) == 0) {
-            unsigned int l1_kb = (ecx >> 24) & 0xFF;
-            if (l1_kb > 0) return (size_t)l1_kb * 1024;
-        }
-    }
-    return 0;
-
-#elif defined(__APPLE__)
-    size_t l1_size = 0;
-    size_t len = sizeof(l1_size);
-    if (sysctlbyname("hw.l1dcachesize", &l1_size, &len, NULL, 0) == 0) {
-        return l1_size;
-    }
-    return 0;
-#else
-    return 0;
-#endif
-}
-
-/**
- * @brief 获取L2缓存大小（真实硬件检测）
- */
-static size_t cpu_detect_l2_cache_real(void) {
-#ifdef _WIN32
-    DWORD return_length = 0;
-    GetLogicalProcessorInformation(NULL, &return_length);
-    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || return_length == 0) return 0;
-
-    SYSTEM_LOGICAL_PROCESSOR_INFORMATION* buffer =
-        (SYSTEM_LOGICAL_PROCESSOR_INFORMATION*)safe_malloc(return_length);
-    if (!buffer) return 0;
-
-    size_t l2_size = 0;
-    if (GetLogicalProcessorInformation(buffer, &return_length)) {
-        DWORD count = return_length / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        for (DWORD i = 0; i < count; i++) {
-            if (buffer[i].Relationship == RelationCache &&
-                buffer[i].Cache.Level == 2) {
-                l2_size = (size_t)buffer[i].Cache.Size;
-                break;
-            }
-        }
-    }
-    safe_free((void**)&buffer);
-    return l2_size;
-
-#elif defined(__linux__)
-    const char* paths[] = {
-        "/sys/devices/system/cpu/cpu0/cache/index2/size",
-        "/sys/devices/system/cpu/cpu0/cache/index1/size",
-        NULL
-    };
-    for (int i = 0; paths[i]; i++) {
-        FILE* fp = fopen(paths[i], "r");
-        if (fp) {
-            int size_kb = 0;
-            if (fscanf(fp, "%dK", &size_kb) == 1) {
-                fclose(fp);
-                if (size_kb > 0) return (size_t)size_kb * 1024;
-            }
-            fclose(fp);
-        }
-    }
-    {
-        unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-        if (cpu_cpuid_detect(0x80000006, 0, &eax, &ebx, &ecx, &edx) == 0) {
-            unsigned int l2_kb = (ecx >> 16) & 0xFFFF;
-            if (l2_kb > 0) return (size_t)l2_kb * 1024;
-        }
-    }
-    return 0;
-
-#elif defined(__APPLE__)
-    size_t l2_size = 0;
-    size_t len = sizeof(l2_size);
-    if (sysctlbyname("hw.l2cachesize", &l2_size, &len, NULL, 0) == 0) {
-        return l2_size;
-    }
-    return 0;
-#else
-    return 0;
-#endif
-}
-
-/**
- * @brief 获取L3缓存大小（真实硬件检测）
- */
-static size_t cpu_detect_l3_cache_real(void) {
-#ifdef _WIN32
-    DWORD return_length = 0;
-    GetLogicalProcessorInformation(NULL, &return_length);
-    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || return_length == 0) return 0;
-
-    SYSTEM_LOGICAL_PROCESSOR_INFORMATION* buffer =
-        (SYSTEM_LOGICAL_PROCESSOR_INFORMATION*)safe_malloc(return_length);
-    if (!buffer) return 0;
-
-    size_t l3_size = 0;
-    if (GetLogicalProcessorInformation(buffer, &return_length)) {
-        DWORD count = return_length / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        for (DWORD i = 0; i < count; i++) {
-            if (buffer[i].Relationship == RelationCache &&
-                buffer[i].Cache.Level == 3) {
-                l3_size = (size_t)buffer[i].Cache.Size;
-                break;
-            }
-        }
-    }
-    safe_free((void**)&buffer);
-    return l3_size;
-
-#elif defined(__linux__)
-    FILE* fp = fopen("/sys/devices/system/cpu/cpu0/cache/index3/size", "r");
-    if (fp) {
-        int size_kb = 0;
-        if (fscanf(fp, "%dK", &size_kb) == 1) {
-            fclose(fp);
-            return (size_t)size_kb * 1024;
-        }
-        fclose(fp);
-    }
-    {
-        unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-        if (cpu_cpuid_detect(0x80000006, 0, &eax, &ebx, &ecx, &edx) == 0) {
-            unsigned int l3_512kb = (edx >> 18) & 0x3FFF;
-            if (l3_512kb > 0) return (size_t)l3_512kb * 512 * 1024;
-        }
-    }
-    return 0;
-
-#elif defined(__APPLE__)
-    size_t l3_size = 0;
-    size_t len = sizeof(l3_size);
-    if (sysctlbyname("hw.l3cachesize", &l3_size, &len, NULL, 0) == 0) {
-        return l3_size;
-    }
-    return 0;
-#else
-    return 0;
-#endif
-}
-
-/**
- * @brief 检测CPU SIMD指令集支持（真实硬件检测）
- */
-static unsigned int cpu_detect_simd_flags_real(void) {
-    unsigned int flags = 0;
-
-    unsigned int eax_1 = 0, ebx_1 = 0, ecx_1 = 0, edx_1 = 0;
-    if (cpu_cpuid_detect(1, 0, &eax_1, &ebx_1, &ecx_1, &edx_1) != 0) {
-#if defined(__aarch64__) || defined(__ARM_ARCH)
-        flags |= CPU_SIMD_NEON;
-#if defined(__ARM_FEATURE_SVE)
-        flags |= CPU_SIMD_SVE;
-#endif
-#endif
-        return flags;
-    }
-
-    if (edx_1 & (1 << 25)) flags |= CPU_SIMD_SSE;
-    if (edx_1 & (1 << 26)) flags |= CPU_SIMD_SSE2;
-    if (ecx_1 & (1 << 0))  flags |= CPU_SIMD_SSE3;
-    if (ecx_1 & (1 << 9))  flags |= CPU_SIMD_SSSE3;
-    if (ecx_1 & (1 << 19)) flags |= CPU_SIMD_SSE41;
-    if (ecx_1 & (1 << 20)) flags |= CPU_SIMD_SSE42;
-    if (ecx_1 & (1 << 28)) flags |= CPU_SIMD_AVX;
-
-    unsigned int eax_7 = 0, ebx_7 = 0, ecx_7 = 0, edx_7 = 0;
-    if (cpu_cpuid_detect(7, 0, &eax_7, &ebx_7, &ecx_7, &edx_7) == 0) {
-        if (ebx_7 & (1 << 5))  flags |= CPU_SIMD_AVX2;
-        if (ebx_7 & (1 << 16)) flags |= CPU_SIMD_AVX512F;
-        if (ebx_7 & (1 << 17)) flags |= CPU_SIMD_AVX512DQ;
-        if (ebx_7 & (1 << 30)) flags |= CPU_SIMD_AVX512BW;
-    }
-
-    return flags;
-}
-
-/**
- * @brief 获取CPU真实时钟速度（MHz）（真实硬件检测）
- */
-static float cpu_detect_clock_speed_real(void) {
-#ifdef _WIN32
-    HKEY hKey;
-    DWORD mhz = 0;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-        "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-        0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD size = sizeof(mhz);
-        DWORD type = 0;
-        if (RegQueryValueExA(hKey, "~MHz", NULL, &type,
-            (LPBYTE)&mhz, &size) == ERROR_SUCCESS) {
-            RegCloseKey(hKey);
-            if (mhz > 0) return (float)mhz;
-        }
-        /* 回退：从ProcessorNameString解析频率 */
-        char cpu_name[256];
-        DWORD name_size = sizeof(cpu_name);
-        if (RegQueryValueExA(hKey, "ProcessorNameString", NULL, NULL,
-            (LPBYTE)cpu_name, &name_size) == ERROR_SUCCESS) {
-            const char* at_sign = strstr(cpu_name, "@");
-            if (at_sign) {
-                float ghz = 0.0f;
-                if (sscanf(at_sign, "@ %fGHz", &ghz) == 1 && ghz > 0) {
-                    RegCloseKey(hKey);
-                    return ghz * 1000.0f;
-                }
-            }
-        }
-        RegCloseKey(hKey);
-    }
-    return -1.0f;
-
-#elif defined(__linux__)
-    FILE* fp = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r");
-    if (fp) {
-        int khz = 0;
-        if (fscanf(fp, "%d", &khz) == 1 && khz > 0) {
-            fclose(fp);
-            return (float)(khz / 1000);
-        }
-        fclose(fp);
-    }
-    fp = fopen("/proc/cpuinfo", "r");
-    if (fp) {
-        char line[256];
-        while (fgets(line, sizeof(line), fp)) {
-            float mhz_val = 0.0f;
-            if (sscanf(line, "cpu MHz\t\t: %f", &mhz_val) == 1 && mhz_val > 0) {
-                fclose(fp);
-                return mhz_val;
-            }
-        }
-        fclose(fp);
-    }
-    return -1.0f;
-
-#elif defined(__APPLE__)
-    long long hz = 0;
-    size_t len = sizeof(hz);
-    if (sysctlbyname("hw.cpufrequency", &hz, &len, NULL, 0) == 0 && hz > 0) {
-        return (float)(hz / 1000000);
-    }
-    if (sysctlbyname("hw.cpufrequency_max", &hz, &len, NULL, 0) == 0 && hz > 0) {
-        return (float)(hz / 1000000);
-    }
-    return -1.0f;
-#else
-    return -1.0f;
-#endif
-}
 
 /* ============================================================================
  * CPU后端接口实现（用于内存池管理，全部基于真实硬件检测）
@@ -678,70 +124,19 @@ static int cpu_backend_get_device_count(void) {
 }
 
 /**
- * @brief CPU后端获取设备信息函数（全部从真实硬件检测获取，禁止模拟值）
+ * @brief CPU后端获取设备信息函数（ZSFEEE-FIX-014: 使用统一CPU硬件检测接口）
  */
 static int cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
     if (!info || device_index != 0) {
         return -1;
     }
 
-    memset(info, 0, sizeof(GpuDeviceInfo));
-    info->device_id = 0;
-    info->type = GPU_DEVICE_TYPE_CPU;
-
-    /* 真实CPU品牌名称 */
-    cpu_detect_brand_real(info->name, sizeof(info->name));
-
-    /* 真实CPU制造商 */
-    cpu_detect_vendor_real(info->vendor, sizeof(info->vendor));
-
-    /* 真实CPU架构 */
-    cpu_detect_architecture_real(info->architecture, sizeof(info->architecture));
-
-    /* 真实物理核心数和逻辑核心数 */
-    int phys_cores = cpu_detect_physical_cores_real();
-    int log_cores = cpu_detect_logical_cores_real();
-    info->physical_cores = (phys_cores > 0) ? phys_cores : 0;
-    info->logical_cores = (log_cores > 0) ? log_cores : 0;
-    info->compute_units = (log_cores > 0) ? log_cores : 4;
-
-    /* 真实缓存大小 */
-    info->l1_cache = cpu_detect_l1_cache_real();
-    info->l2_cache = cpu_detect_l2_cache_real();
-    info->l3_cache = cpu_detect_l3_cache_real();
-
-    /* 真实SIMD指令集支持 */
-    info->simd_flags = cpu_detect_simd_flags_real();
-
-    /* 真实CPU时钟速度（硬件检测失败时返回-1.0f表示未知） */
-    float clock_mhz = cpu_detect_clock_speed_real();
-    info->clock_speed = (clock_mhz > 0) ? clock_mhz : -1.0f;
-
-    /* 真实系统内存信息（使用系统API） */
-    int mem_query_ok = 0;
-#ifdef _WIN32
-    MEMORYSTATUSEX mem_status;
-    mem_status.dwLength = sizeof(mem_status);
-    if (GlobalMemoryStatusEx(&mem_status)) {
-        info->total_memory = mem_status.ullTotalPhys;
-        info->free_memory = mem_status.ullAvailPhys;
-        mem_query_ok = 1;
-    }
-#else
-    struct sysinfo sys_mem_info;
-    if (sysinfo(&sys_mem_info) == 0) {
-        info->total_memory = sys_mem_info.totalram * sys_mem_info.mem_unit;
-        info->free_memory = sys_mem_info.freeram * sys_mem_info.mem_unit;
-        mem_query_ok = 1;
-    }
-#endif
-    if (!mem_query_ok) {
-        info->total_memory = 0;
-        info->free_memory = 0;
+    /* ZSFEEE-FIX-014: 调用gpu.c的统一CPU检测接口 */
+    if (gpu_hardware_get_cpu_info(info) != 0) {
+        return -1;
     }
 
-    /* 基于缓存大小优化工作组大小 */
-    info->max_work_group_size = 256;
+    /* 内存池特有的工作组大小优化（基于L2缓存） */
     if (info->l2_cache > 0) {
         size_t optimal = info->l2_cache / 64;
         if (optimal > 0 && optimal < (size_t)info->max_work_group_size) {
@@ -755,8 +150,7 @@ static int cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
     /* 双精度始终支持 */
     info->supports_double = 1;
 
-    /* 半精度支持检测 */
-    info->supports_half = 0;
+    /* 半精度支持检测（除gpu.c统一检测外，额外补充AVX512F和ARM标量半精度） */
     if (info->simd_flags & CPU_SIMD_AVX512F) {
         info->supports_half = 1;
     }
@@ -768,7 +162,7 @@ static int cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
 }
 
 /**
- * @brief CPU后端上下文创建（完整实现，基于真实硬件检测）
+ * @brief CPU后端上下文创建（ZSFEEE-FIX-014: 使用统一CPU硬件检测接口）
  */
 static GpuContext* cpu_pool_context_create(int device_index) {
     GpuContext* ctx = (GpuContext*)safe_calloc(1, sizeof(GpuContext));
@@ -778,33 +172,20 @@ static GpuContext* cpu_pool_context_create(int device_index) {
     ctx->device_index = device_index >= 0 ? device_index : 0;
     ctx->is_initialized = 1;
 
-    /* 真实CPU品牌名称 */
-    cpu_detect_brand_real(ctx->device_name, sizeof(ctx->device_name));
-    if (ctx->device_name[0] == '\0') {
-        strncpy(ctx->device_name, "CPU(内存池)", sizeof(ctx->device_name) - 1);
+    /* ZSFEEE-FIX-014: 使用统一CPU硬件检测获取设备名称和内存信息 */
+    {
+        GpuDeviceInfo cpu_info;
+        if (gpu_hardware_get_cpu_info(&cpu_info) == 0) {
+            strncpy(ctx->device_name, cpu_info.name, sizeof(ctx->device_name) - 1);
+            ctx->device_name[sizeof(ctx->device_name) - 1] = '\0';
+            ctx->total_memory = cpu_info.total_memory;
+            ctx->free_memory = cpu_info.free_memory;
+        } else {
+            strncpy(ctx->device_name, "CPU(内存池)", sizeof(ctx->device_name) - 1);
+            ctx->total_memory = 0;
+            ctx->free_memory = 0;
+        }
     }
-
-    /* 真实系统内存 */
-#ifdef _WIN32
-    MEMORYSTATUSEX mem_status;
-    mem_status.dwLength = sizeof(mem_status);
-    if (GlobalMemoryStatusEx(&mem_status)) {
-        ctx->total_memory = mem_status.ullTotalPhys;
-        ctx->free_memory = mem_status.ullAvailPhys;
-    } else {
-        ctx->total_memory = 0;
-        ctx->free_memory = 0;
-    }
-#else
-    struct sysinfo sys_mem_info;
-    if (sysinfo(&sys_mem_info) == 0) {
-        ctx->total_memory = sys_mem_info.totalram * sys_mem_info.mem_unit;
-        ctx->free_memory = sys_mem_info.freeram * sys_mem_info.mem_unit;
-    } else {
-        ctx->total_memory = 0;
-        ctx->free_memory = 0;
-    }
-#endif
 
     ctx->thread_pool = NULL;
     ctx->backend_data = NULL;
@@ -1273,7 +654,21 @@ static const GpuBackendInterface* get_backend_from_context(GpuContext* context) 
         case GPU_BACKEND_METAL:
             // 获取Metal后端接口（如果可用）
             return metal_get_backend_interface();
-            
+
+        /* ZSFZX-FIX-GPU-POOL: 补全4个缺失后端的内存池支持
+         * 原switch中ROCm/Ascend/Cambricon/TPU落入default返回NULL */
+        case GPU_BACKEND_ROCM:
+            return rocm_get_backend_interface();
+
+        case GPU_BACKEND_ASCEND:
+            return ascend_get_backend_interface();
+
+        case GPU_BACKEND_CAMBRICON:
+            return cambricon_get_backend_interface();
+
+        case GPU_BACKEND_TPU:
+            return tpu_get_backend_interface();
+
         default:
             // 未知后端类型
             return NULL;

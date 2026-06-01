@@ -74,12 +74,16 @@ static int co_linux_is_wayland(void) {
     return 0;
 }
 
-/* 检测是否通过 XWayland 桥接可用 X11（DISPLAY环境变量存在） */
+/* 检测是否通过 XWayland 桥接可用 X11（DISPLAY环境变量或XDG_SESSION_TYPE判断） */
 static int co_linux_is_xwayland(void) {
     if (!co_linux_is_wayland()) return 0;
 
     const char* dp = getenv("DISPLAY");
     if (dp && dp[0] != '\0') return 1;
+
+    /* 通过XDG_SESSION_TYPE进一步确认XWayland桥接（某些环境DISPLAY未设置但实际为XWayland） */
+    const char* xst = getenv("XDG_SESSION_TYPE");
+    if (xst && strcmp(xst, "x11") == 0) return 1;
 
     return 0;
 }

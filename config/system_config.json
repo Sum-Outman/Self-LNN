@@ -1,46 +1,14 @@
 {
-  "version": "1.0.0",
-  "system": {
-    "name": "SELF-LNN",
-    "log_level": "info",
-    "data_dir": "data",
-    "checkpoint_dir": "checkpoints"
-  },
-  "network": {
-    "backend_host": "0.0.0.0",
-    "backend_port": 8080,
-    "ws_port": 8081,
-    "max_connections": 100
-  },
-  "lnn": {
-    "default_dim": 256,
-    "default_layers": 3,
-    "cfc_time_constant": 1.0,
-    "use_quaternion": true,
-    "use_laplace": true
-  },
-  "training": {
-    "default_batch_size": 32,
-    "default_epochs": 100,
-    "learning_rate": 0.001,
-    "lr_decay": 0.0001,
-    "early_stop_patience": 10,
-    "mixed_precision": true
-  },
-  "gpu": {
-    "preferred_backend": "auto",
-    "allow_cpu_fallback": true,
-    "memory_fraction": 0.9
-  },
-  "knowledge": {
-    "seed_knowledge_file": "config/seed_knowledge.json",
-    "auto_save_interval_minutes": 30
-  },
-  "safety": {
-    "auto_decision_enabled": false,
-    "auto_execution_enabled": false,
-    "self_learning_enabled": true,
-    "evolution_enabled": false,
-    "imitation_learning_enabled": false
-  }
+  "version": "1.5.0",
+  "state_dimension": 256,
+  "multimodal_channels": 9,
+  "memory_capacity": 100000,
+  "max_concurrent_tasks": 8,
+  "power_mode": "balanced",
+  "gpu_backend": "auto",
+  "http_port": 8080,
+  "websocket_port": 8081,
+  "distributed_port": 8765,
+  "model_path": "",
+  "_comment": "扁平化JSON结构，与config_loader.c的加载/保存格式一致。原嵌套格式的额外配置暂不在此文件加载。"
 }

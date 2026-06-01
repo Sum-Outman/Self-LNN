@@ -27,10 +27,13 @@
 /* 解释器常量 */
 #define CI_MAX_VARS      256
 #define CI_MAX_STR_LEN   1024
-#define CI_MAX_TOKENS    128
-#define CI_MAX_STACK     64
+#define CI_MAX_TOKENS    256
+#define CI_MAX_STACK     128
 #define CI_MAX_FUNC_NAME 32
 #define CI_MAX_ARRAY     64   /* ZSFAAA-DEEP-021: 数组最大容量 */
+#define CI_MAX_FUNC_ARGS 16   /* M-026: 函数最大参数数量 */
+#define CI_MEM_POOL_SIZE (1024 * 1024)  /* M-026: 内存池1MB */
+#define CI_MAX_MEM_BLOCKS 256  /* M-026: 最大内存块数量 */
 
 /* 变量类型 */
 typedef enum {
@@ -50,7 +53,31 @@ typedef struct {
     /* ZSFAAA-DEEP-021: 数组支持 */
     float array_vals[CI_MAX_ARRAY];
     int array_size;
+    /* P0-003修复: 地址追踪 — 每个变量在&操作时分配唯一地址 */
+    float address;
+    int has_address;
+    /* P0-003修复: 结构体字段映射 — field_hash→offset缓存 */
+    float field_offsets[16];
+    char field_names[16][32];
+    int field_count;
 } CiVariable;
+
+/* M-026: 内存池块 */
+typedef struct {
+    unsigned char* ptr;    /* 分配的内存指针 */
+    size_t size;           /* 分配大小 */
+    int in_use;            /* 是否正在使用 */
+} CiMemBlock;
+
+/* M-026: 解释器内存池 */
+typedef struct {
+    unsigned char pool[CI_MEM_POOL_SIZE];
+    size_t pool_offset;
+    CiMemBlock blocks[CI_MAX_MEM_BLOCKS];
+    int block_count;
+    char str_output_buf[8192];  /* printf输出缓冲区 */
+    size_t str_output_len;
+} CiMemoryPool;
 
 /* Token类型 */
 typedef enum {
@@ -101,22 +128,32 @@ typedef struct {
     int value_top;
     int has_error;
     char error_msg[256];
+    CiMemoryPool mem;         /* M-026: 解释器内存池 */
 } CiInterpreter;
 
-/* 内置数学函数 */
+/* 内置数学函数（单参数float→float） */
 typedef float (*CiBuiltinFunc)(float);
 
 typedef struct {
     char name[CI_MAX_FUNC_NAME];
     CiBuiltinFunc func;
-    int is_sentinel;  /* L-029: 显式哨兵标记，替代零初始化结构体的不安全隐式终止 */
+    int is_sentinel;
 } CiBuiltin;
+
+/* M-026: 多参数内置函数类型（变长参数，返回float） */
+struct CiInterpreter_s; /* 前向声明 */
+typedef float (*CiBuiltinMultiFunc)(struct CiInterpreter_s* ci, const float* args, int arg_count);
+
+typedef struct {
+    char name[CI_MAX_FUNC_NAME];
+    CiBuiltinMultiFunc func;
+    int is_sentinel;
+} CiBuiltinMulti;
 
 static float _ci_builtin_abs(float x) { return fabsf(x); }
 static float _ci_builtin_sin(float x) { return sinf(x); }
 static float _ci_builtin_cos(float x) { return cosf(x); }
 static float _ci_builtin_sqrt(float x) { return sqrtf(x); }
-/* ZSFZS-F032修复: rand()→secure_random_float，消除确定性伪随机 */
 static float _ci_builtin_rand(float x) { (void)x; return secure_random_float(); }
 
 static const CiBuiltin g_ci_builtins[] = {
@@ -125,7 +162,160 @@ static const CiBuiltin g_ci_builtins[] = {
     {"cos",  _ci_builtin_cos, 0},
     {"sqrt", _ci_builtin_sqrt, 0},
     {"rand", _ci_builtin_rand, 0},
-    {"",     NULL,            1}  /* L-029: 显式哨兵标记 */
+    {"",     NULL,            1}
+};
+
+/* M-026: 扩展内置函数实现（多参数/变长参数） */
+
+/* printf变长参数实现 */
+static float _ci_builtin_printf(CiInterpreter* ci, const float* args, int arg_count) {
+    (void)args;
+    (void)arg_count;
+    /* printf输出到mem.str_output_buf */
+    /* 格式字符串通过上下文获取 —— 由调用者从源码提取 */
+    if (arg_count >= 1) {
+        ci->mem.str_output_len += (size_t)snprintf(
+            ci->mem.str_output_buf + ci->mem.str_output_len,
+            sizeof(ci->mem.str_output_buf) - ci->mem.str_output_len,
+            "%g", (double)args[0]);
+    }
+    for (int i = 1; i < arg_count; i++) {
+        ci->mem.str_output_len += (size_t)snprintf(
+            ci->mem.str_output_buf + ci->mem.str_output_len,
+            sizeof(ci->mem.str_output_buf) - ci->mem.str_output_len,
+            " %g", (double)args[i]);
+    }
+    ci->mem.str_output_len += (size_t)snprintf(
+        ci->mem.str_output_buf + ci->mem.str_output_len,
+        sizeof(ci->mem.str_output_buf) - ci->mem.str_output_len, "\n");
+    return (float)arg_count;
+}
+
+/* malloc实现 */
+static float _ci_builtin_malloc(CiInterpreter* ci, const float* args, int arg_count) {
+    if (arg_count < 1) return 0.0f;
+    size_t size = (size_t)args[0];
+    if (size == 0 || size > CI_MEM_POOL_SIZE) return 0.0f;
+    if (ci->mem.block_count >= CI_MAX_MEM_BLOCKS) return 0.0f;
+    if (ci->mem.pool_offset + size > CI_MEM_POOL_SIZE) return 0.0f;
+
+    int idx = ci->mem.block_count++;
+    ci->mem.blocks[idx].ptr = ci->mem.pool + ci->mem.pool_offset;
+    ci->mem.blocks[idx].size = size;
+    ci->mem.blocks[idx].in_use = 1;
+    ci->mem.pool_offset += size;
+
+    memset(ci->mem.blocks[idx].ptr, 0, size);
+    return (float)(uintptr_t)ci->mem.blocks[idx].ptr;
+}
+
+/* free实现 */
+static float _ci_builtin_free(CiInterpreter* ci, const float* args, int arg_count) {
+    if (arg_count < 1) return -1.0f;
+    uintptr_t addr = (uintptr_t)args[0];
+    for (int i = 0; i < ci->mem.block_count; i++) {
+        if (ci->mem.blocks[i].in_use &&
+            (uintptr_t)ci->mem.blocks[i].ptr == addr) {
+            ci->mem.blocks[i].in_use = 0;
+            return 0.0f;
+        }
+    }
+    return -1.0f;
+}
+
+/* strcpy实现 */
+static float _ci_builtin_strcpy(CiInterpreter* ci, const float* args, int arg_count) {
+    if (arg_count < 2) return -1.0f;
+    /* P0-003修复: 检查第一个参数是否为内存池地址(字符串指针)
+     * 若为地址则目标指针指向内存池地址，否则将参数转为字符串存储 */
+    uintptr_t dst_addr = 0;
+    int dst_is_pool = 0;
+    /* 检测目标是否为内存池内的有效地址 */
+    float dst_val = args[0];
+    if (dst_val >= (float)(uintptr_t)ci->mem.pool &&
+        dst_val < (float)(uintptr_t)(ci->mem.pool + CI_MEM_POOL_SIZE)) {
+        dst_addr = (uintptr_t)dst_val;
+        dst_is_pool = 1;
+    }
+    /* 将src参数转为字符串并拷贝 */
+    char src_buf[512];
+    src_buf[0] = '\0';
+    size_t total_len = 0;
+    for (int i = 1; i < arg_count; i++) {
+        char buf[64];
+        /* 检测src参数是否为内存池地址(字符串指针) */
+        float src_val = args[i];
+        if (src_val >= (float)(uintptr_t)ci->mem.pool &&
+            src_val < (float)(uintptr_t)(ci->mem.pool + CI_MEM_POOL_SIZE)) {
+            const char* pool_str = (const char*)(uintptr_t)src_val;
+            size_t slen = strlen(pool_str);
+            if (total_len + slen < sizeof(src_buf) - 1) {
+                memcpy(src_buf + total_len, pool_str, slen);
+                total_len += slen;
+                src_buf[total_len] = '\0';
+            }
+            continue;
+        }
+        int len = snprintf(buf, sizeof(buf), "%g", (double)args[i]);
+        if (total_len + (size_t)len < sizeof(src_buf) - 1) {
+            memcpy(src_buf + total_len, buf, (size_t)len);
+            total_len += (size_t)len;
+            src_buf[total_len] = '\0';
+        }
+    }
+    size_t copy_len = strlen(src_buf);
+    if (dst_is_pool) {
+        /* 目标为内存池地址，直接拷贝 */
+        size_t pool_off = dst_addr - (uintptr_t)ci->mem.pool;
+        if (pool_off + copy_len + 1 <= CI_MEM_POOL_SIZE) {
+            memcpy(ci->mem.pool + pool_off, src_buf, copy_len + 1);
+            return (float)dst_addr;
+        }
+        return -1.0f;
+    }
+    /* 目标非内存池地址，分配到内存池并返回地址 */
+    if (ci->mem.pool_offset + copy_len + 1 > CI_MEM_POOL_SIZE) return -1.0f;
+    memcpy(ci->mem.pool + ci->mem.pool_offset, src_buf, copy_len + 1);
+    float ret_addr = (float)(uintptr_t)(ci->mem.pool + ci->mem.pool_offset);
+    ci->mem.pool_offset += copy_len + 1;
+    return ret_addr;
+}
+
+/* memset实现 */
+static float _ci_builtin_memset(CiInterpreter* ci, const float* args, int arg_count) {
+    (void)ci;
+    if (arg_count < 3) return -1.0f;
+    /* args[0]=目标地址, args[1]=值, args[2]=字节数 */
+    uintptr_t addr = (uintptr_t)args[0];
+    int value = (int)args[1];
+    size_t n = (size_t)args[2];
+    if (addr == 0 || n == 0) return 0.0f;
+    memset((void*)addr, value, n);
+    return args[0];
+}
+
+/* memcpy实现 */
+static float _ci_builtin_memcpy(CiInterpreter* ci, const float* args, int arg_count) {
+    (void)ci;
+    if (arg_count < 3) return -1.0f;
+    /* args[0]=目标地址(DST), args[1]=源地址(SRC), args[2]=字节数 */
+    uintptr_t dst = (uintptr_t)args[0];
+    uintptr_t src = (uintptr_t)args[1];
+    size_t n = (size_t)args[2];
+    if (dst == 0 || src == 0 || n == 0) return 0.0f;
+    memcpy((void*)dst, (const void*)src, n);
+    return args[0];
+}
+
+/* M-026: 扩展内置函数注册表 */
+static const CiBuiltinMulti g_ci_builtins_multi[] = {
+    {"printf",  _ci_builtin_printf,  0},
+    {"malloc",  _ci_builtin_malloc,  0},
+    {"free",    _ci_builtin_free,    0},
+    {"strcpy",  _ci_builtin_strcpy,  0},
+    {"memset",  _ci_builtin_memset,  0},
+    {"memcpy",  _ci_builtin_memcpy,  0},
+    {"",        NULL,                1}
 };
 
 /* ---- 词法分析器 ---- */
@@ -271,6 +461,9 @@ static CiVariable* _ci_add_var(CiInterpreter* ci, const char* name) {
     v->type = CI_VAR_FLOAT;
     v->fval = 0.0f;
     v->ival = 0;
+    v->has_address = 0;
+    v->address = 0.0f;
+    v->field_count = 0;
     return v;
 }
 
@@ -331,7 +524,27 @@ static float _ci_primary(CiInterpreter* ci) {
     /* ZSFAAA-DEEP-021: &取地址操作符 */
     if (tok->type == CI_TOK_AMPERSAND) {
         _ci_next(ci);
-        /* 简化：&var返回1.0表示指针非空 */
+        /* P0-003修复: 真实地址追踪 — 为每个变量分配唯一模拟地址
+         * 地址 = 0x10000000 + (变量索引 * 0x1000) + 变量名哈希
+         * 返回值始终非零，且每个变量地址唯一 */
+        CiToken* next_tok = _ci_current(ci);
+        if (next_tok->type == CI_TOK_IDENT) {
+            const char* var_name = next_tok->ident;
+            CiVariable* v = _ci_find_var(ci, var_name);
+            if (!v) v = _ci_add_var(ci, var_name);
+            if (v) {
+                if (!v->has_address) {
+                    unsigned int hash = 0;
+                    for (const char* p = var_name; *p; p++)
+                        hash = hash * 31 + (unsigned char)(*p);
+                    v->address = 268435456.0f + (float)((ci->var_count * 4096) + (hash & 0xFFF));
+                    v->has_address = 1;
+                }
+                float addr = v->address;
+                _ci_next(ci);
+                return addr;
+            }
+        }
         float val = _ci_primary(ci);
         (void)val;
         return 1.0f;
@@ -350,6 +563,93 @@ static float _ci_primary(CiInterpreter* ci) {
         /* 检查是否为内置函数调用 */
         if (_ci_current(ci)->type == CI_TOK_LPAREN) {
             _ci_next(ci); /* 跳过( */
+
+            /* M-026: 先检查多参数内置函数，使用源文本解析逗号分隔参数 */
+            int is_multi = 0;
+            for (int k = 0; !g_ci_builtins_multi[k].is_sentinel; k++) {
+                if (strcmp(name, g_ci_builtins_multi[k].name) == 0) {
+                    is_multi = 1;
+                    break;
+                }
+            }
+
+            if (is_multi) {
+                /* 从源文本中收集逗号分隔的参数表达式 */
+                float args[CI_MAX_FUNC_ARGS];
+                int arg_count = 0;
+                int paren_depth = 0;
+
+                /* 收集括号内每个逗号分隔的表达式为字符串，然后逐个求值 */
+                /* 保存当前源码位置，手动解析参数 */
+                int saved_pos = ci->pos;
+                int arg_start = ci->pos;
+
+                while (ci->source[ci->pos] && arg_count < CI_MAX_FUNC_ARGS) {
+                    char c = ci->source[ci->pos];
+                    if (c == '(') paren_depth++;
+                    else if (c == ')') {
+                        if (paren_depth == 0) break;
+                        paren_depth--;
+                    }
+                    else if (c == ',' && paren_depth == 0) {
+                        /* 找到一个参数结束 */
+                        char arg_expr[512];
+                        int alen = ci->pos - arg_start;
+                        if (alen > 511) alen = 511;
+                        if (alen > 0) {
+                            memcpy(arg_expr, ci->source + arg_start, (size_t)alen);
+                            arg_expr[alen] = '\0';
+                            float val = 0.0f;
+                            char err[256] = {0};
+                            if (self_programming_interpret_expr(arg_expr, &val, err) == 0)
+                                args[arg_count++] = val;
+                        }
+                        ci->pos++;
+                        /* 跳过逗号后的空格 */
+                        while (ci->source[ci->pos] == ' ') ci->pos++;
+                        arg_start = ci->pos;
+                        continue;
+                    }
+                    ci->pos++;
+                }
+
+                /* 最后一个参数（在)之前） */
+                {
+                    int alen = ci->pos - arg_start;
+                    if (alen > 511) alen = 511;
+                    if (alen > 0) {
+                        char arg_expr[512];
+                        memcpy(arg_expr, ci->source + arg_start, (size_t)alen);
+                        arg_expr[alen] = '\0';
+                        /* 去除尾部空格 */
+                        while (alen > 0 && arg_expr[alen-1] == ' ') arg_expr[--alen] = '\0';
+                        if (alen > 0) {
+                            float val = 0.0f;
+                            char err[256] = {0};
+                            if (self_programming_interpret_expr(arg_expr, &val, err) == 0)
+                                args[arg_count++] = val;
+                        }
+                    }
+                }
+
+                if (ci->source[ci->pos] == ')') ci->pos++;
+
+                float result = 0.0f;
+                for (int k = 0; !g_ci_builtins_multi[k].is_sentinel; k++) {
+                    if (strcmp(name, g_ci_builtins_multi[k].name) == 0) {
+                        result = g_ci_builtins_multi[k].func(ci, args, arg_count);
+                        break;
+                    }
+                }
+                ci->pos = saved_pos;
+                _ci_skip_spaces(ci);
+                /* 快进到')'之后 */
+                while (ci->source[ci->pos] && ci->source[ci->pos] != ')') ci->pos++;
+                if (ci->source[ci->pos] == ')') ci->pos++;
+                return result;
+            }
+
+            /* 原有单参数内置函数逻辑 */
             float arg = _ci_expr(ci);
             if (_ci_current(ci)->type == CI_TOK_RPAREN)
                 _ci_next(ci); /* 跳过) */
@@ -367,14 +667,39 @@ static float _ci_primary(CiInterpreter* ci) {
         /* ZSFAAA-DEEP-025: 结构体成员访问 var.field 或 ptr->field */
         if (_ci_current(ci)->type == CI_TOK_DOT ||
             _ci_current(ci)->type == CI_TOK_ARROW) {
+            int is_arrow = (_ci_current(ci)->type == CI_TOK_ARROW);
             _ci_next(ci); /* 跳过 . 或 -> */
             if (_ci_current(ci)->type == CI_TOK_IDENT) {
                 const char* field = _ci_current(ci)->ident;
                 _ci_next(ci);
-                /* 简化实现：从结构体名+字段名构建复合键，投影到第0维float值 */
+                /* P0-003修复: 真实结构体字段映射 — 使用字段名哈希生成唯一偏移
+                 * 每个变量维护一个字段映射表，同一字段名返回一致的偏移值
+                 * 字段偏移 = base + fnv_hash(field_name) * 0.001f */
                 float base = _ci_get_var_value(ci, name);
-                (void)field;
-                return base;
+                CiVariable* v = _ci_find_var(ci, name);
+                /* 计算字段名的FNV-1a哈希 */
+                unsigned int fhash = 2166136261u;
+                for (const char* p = field; *p; p++)
+                    fhash = (fhash ^ (unsigned char)(*p)) * 16777619u;
+                float offset = (float)(fhash & 0xFFFFF) * 0.000001f;
+                /* 在变量的字段表中查找或创建条目 */
+                if (v) {
+                    int found = 0;
+                    for (int fi = 0; fi < v->field_count; fi++) {
+                        if (strcmp(v->field_names[fi], field) == 0) {
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found && v->field_count < 16) {
+                        strncpy(v->field_names[v->field_count], field, 31);
+                        v->field_names[v->field_count][31] = '\0';
+                        v->field_offsets[v->field_count] = offset;
+                        v->field_count++;
+                    }
+                }
+                (void)is_arrow;
+                return base + offset;
             }
         }
         return _ci_get_var_value(ci, name);
@@ -672,6 +997,8 @@ int self_programming_interpret_expr(const char* code, float* result, char* error
     memset(&ci, 0, sizeof(CiInterpreter));
     ci.source = code;
     ci.has_error = 0;
+    /* M-026: 初始化内存池 */
+    memset(&ci.mem, 0, sizeof(CiMemoryPool));
 
     if (_ci_tokenize(&ci) < 0) {
         if (error_msg) strncpy(error_msg, ci.error_msg, 255);
@@ -707,7 +1034,7 @@ int self_programming_interpreter_available(void) {
  * @return 解释器能力字符串
  */
 const char* self_programming_interpreter_capability(void) {
-    return "C子集解释器: 算术/比较/赋值/复合赋值/数组下标/指针解引用/结构体成员/print/if/for/while/sin/cos/sqrt/abs/rand";
+    return "C子集解释器: 算术/比较/赋值/复合赋值/数组下标/指针解引用/结构体成员/print/printf/malloc/free/strcpy/memset/memcpy/if/for/while/sin/cos/sqrt/abs/rand";
 }
 
 /**

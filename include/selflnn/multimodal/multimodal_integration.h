@@ -227,20 +227,20 @@ int multimodal_integration_process_to_lnn(
 void multimodal_integration_processor_free(MultimodalIntegrationProcessor* processor);
 
 /**
- * @brief 生成离线测试输入数据（无硬件环境下的AGI运行支持）
- * 
- * 当系统未接入物理传感器/摄像头/麦克风等硬件时，
- * 调用此函数生成数学合成数据以保持AGI系统正常运行。
- * 生成的是具有真实数学结构（分形噪声、正弦叠加等）的数据，非虚假占位符。
- * 
+ * @brief 报告多模态硬件可用性状态（H-005修复：替代已禁用的合成数据函数）
+ *
+ * 本函数取代原来的 multimodal_integration_generate_test_data。
+ * 不生成任何合成数据，而是检测并报告硬件传感器的真实可用状态。
+ * 名称变更为 multimodal_integration_check_hardware 以明确语义。
+ *
  * @param processor 多模态集成处理器
- * @param vision_output 输出：视觉测试数据（调用者负责释放image_data和depth_map）
- * @param audio_output 输出：音频测试数据（调用者负责释放audio_data）
- * @param text_output 输出：文本测试数据（调用者负责释放token_ids）
- * @param sensor_output 输出：传感器测试数据（调用者负责释放sensor_types和sensor_values）
+ * @param vision_output 输出：视觉硬件状态（调用者负责释放image_data和depth_map）
+ * @param audio_output 输出：音频硬件状态（调用者负责释放audio_data）
+ * @param text_output 输出：文本硬件状态（调用者负责释放token_ids）
+ * @param sensor_output 输出：传感器硬件状态（调用者负责释放sensor_types和sensor_values）
  * @return int 成功返回0，失败返回-1
  */
-int multimodal_integration_generate_test_data(
+int multimodal_integration_check_hardware(
     MultimodalIntegrationProcessor* processor,
     VisionInput* vision_output,
     AudioInput* audio_output,

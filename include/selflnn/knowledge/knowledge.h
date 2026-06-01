@@ -94,6 +94,24 @@ typedef struct {
 typedef struct KnowledgeBase KnowledgeBase;
 
 /**
+ * @brief 知识库内部结构体（完整定义，供直接字段访问使用）
+ * knowledge.c中定义SELFLNN_KNOWLEDGE_IMPL时使用完整定义，
+ * 其他文件使用兼容的KnowledgeEntry*版本。
+ */
+#ifndef SELFLNN_KNOWLEDGE_IMPL
+struct KnowledgeBase {
+    KnowledgeEntry* entries;     /**< 条目数组 */
+    size_t capacity;             /**< 数组容量 */
+    size_t size;                 /**< 当前条目数 */
+    size_t max_entries;          /**< 最大条目数（0=无限制） */
+    size_t entry_count;          /**< 条目计数（与size等价，兼容不同命名） */
+    int next_id;                 /**< 下一个ID */
+    void* cfc_embed;             /**< CfC嵌入引擎句柄 */
+    int cfc_embed_dim;           /**< 嵌入向量维度 */
+};
+#endif
+
+/**
  * @brief 创建知识库
  * 
  * @param max_entries 最大条目数（0表示无限制）

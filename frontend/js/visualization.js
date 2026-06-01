@@ -1395,7 +1395,9 @@ class VisualizationManager {
                     if (result.success && result.data && result.data.spectrum && result.data.spectrum.length > 0) {
                         this.updateSpectrumData(result.data.spectrum, result.data.fft_size || 64);
                     }
-                }.bind(this)).catch(function() {});
+                }.bind(this)).catch(function(err) {
+                    console.warn('音频频谱API调用失败:', err);
+                });
             }
 
             /* 神经元激活热力图 - 通过真实后端API获取 */
@@ -1414,7 +1416,9 @@ class VisualizationManager {
                         }
                         this.updateStateActivationData(heatmapData);
                     }
-                }.bind(this)).catch(function() {});
+                }.bind(this)).catch(function(err) {
+                    console.warn('神经元激活热力图API调用失败:', err);
+                });
             }
 
             /* 预测散点图 - 通过真实后端API获取 */
@@ -1426,7 +1430,9 @@ class VisualizationManager {
                             result.data.points.map(function(p) { return p[1]; })
                         );
                     }
-                }.bind(this)).catch(function() {});
+                }.bind(this)).catch(function(err) {
+                    console.warn('预测散点图API调用失败:', err);
+                });
             }
 
         } catch (error) {
@@ -1623,6 +1629,26 @@ class VisualizationManager {
         ctx.clearRect(0, 0, w, h);
 
         const data = this.stateActivationData || [];
+        /* ZSF999XQ-L-003修复: 检测全零数据，显示"等待后端数据"提示 */
+        var hasRealData = false;
+        for (var di = 0; di < data.length && !hasRealData; di++) {
+            if (data[di]) {
+                for (var dj = 0; dj < data[di].length; dj++) {
+                    if (data[di][dj] !== 0) { hasRealData = true; break; }
+                }
+            }
+        }
+        if (!hasRealData) {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, w, h);
+            ctx.fillStyle = '#888888';
+            ctx.font = '14px "Microsoft YaHei", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('等待后端数据...', w / 2, h / 2);
+            ctx.fillText('连接后端后将自动加载真实网络状态', w / 2, h / 2 + 22);
+            return;
+        }
+
         const maxVal = Math.max(1, ...data.flat());
 
         for (let i = 0; i < data.length && i < size; i++) {

@@ -90,6 +90,8 @@ struct KnowledgeGraph {
     size_t max_edges;
     int dirty;
     char* auto_save_path;
+    /* ZSFZX-FIX-R6-1: 图操作互斥锁 — 原结构完全无锁, 多线程必然崩溃 */
+    void* graph_lock;           /* MutexHandle */
 };
 #endif
 

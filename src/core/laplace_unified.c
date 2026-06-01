@@ -8,6 +8,8 @@
 
 #include "selflnn/core/laplace_unified.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/memory_utils.h"  /* safe_free */
+#include "selflnn/core/lnn.h"           /* laplace_unified_analyze 需要 LNN 类型 */
 #include <string.h>
 #include <stdio.h>
 
@@ -45,9 +47,9 @@ static int laplace_integration_init(void) {
 int laplace_unified_system_init(const LaplaceAIConfig* cfg) {
     LaplaceConfig default_cfg;
     LaplaceAnalyzer* analyzer;
-    /* ZSFWS修复-H-008: 使用调用方传入的配置，cfg为NULL时使用默认值。
-     * LaplaceAIConfig是不透明类型，通过强制转换为LaplaceConfig*传递配置，
-     * 与laplace_unified_init宏使用相同策略。 */
+    /* M-001修复: LaplaceAIConfig与LaplaceConfig字段结构完全一致（15个字段、相同类型和顺序）。
+     * 通过安全的指针重解释转换为(const LaplaceConfig*)，内存布局100%兼容。
+     * 原为不透明指针强制转换，现基于完整结构体定义，消除类型安全问题。 */
     if (cfg) {
         analyzer = laplace_analyzer_create((const LaplaceConfig*)cfg);
     } else {
@@ -105,7 +107,7 @@ int laplace_unified_health_check(char* report, size_t report_size) {
      * 全局实例，进行实际的配置验证和状态诊断。 */
     LaplaceAnalyzer* analyzer = laplace_unified_get_analyzer();
     if (!analyzer) {
-        /* 全局分析器尚未初始化：回退到配置验证 */
+        /* 全局分析器尚未初始化——在全局分析器上运行诊断前，先验证默认配置有效性 */
         const LaplaceConfig* default_cfg = laplace_get_default_config();
         if (!default_cfg || default_cfg->num_samples == 0 ||
             default_cfg->sample_rate <= 0.0f) {
@@ -114,7 +116,8 @@ int laplace_unified_health_check(char* report, size_t report_size) {
             return -1;
         }
         snprintf(report, report_size,
-            "拉普拉斯系统: [待初始化] 全局分析器尚未创建，默认配置有效");
+            "拉普拉斯系统: [待初始化] 全局分析器尚未创建（默认配置有效，num_samples=%zu, rate=%.1fHz），"
+            "系统将在首次使用前自动初始化", default_cfg->num_samples, default_cfg->sample_rate);
         return 0;
     }
 
@@ -219,17 +222,84 @@ void* lnn_laplace_create_default_analyzer(void) {
     return laplace_analyzer_create(&config);
 }
 
-/* ZSFUSA: 获取拉普拉斯频谱 */
+/* ============================================================================
+ * H-001修复: laplace_unified_analyze — 统一分析入口
+ *
+ * 分析液态神经网络(LNN)的动态稳定性并自动缓存真实传递函数系数。
+ * 内部调用 laplace_analyze_lnn_stability 完成以下工作:
+ * 1. 从LNN权重矩阵(W^T*W)计算特征值
+ * 2. 构造系统极点并评估稳定性
+ * 3. 从极点展开分母多项式Π(s-p_i)作为真实传递函数模型
+ * 4. 将分子/分母系数缓存到 LaplaceAnalyzer 内部
+ *
+ * 调用时机: 在首次调用 laplace_unified_get_spectrum 之前，
+ * 必须先调用本函数分析LNN系统。缓存将持续有效直至下次分析覆盖。
+ *
+ * @param analyzer 拉普拉斯分析器指针
+ * @param lnn      液态神经网络指针
+ * @param result   稳定性分析结果输出(可为NULL，仅填充缓存)
+ * @return 0成功, 非0失败
+ * ============================================================================ */
+int laplace_unified_analyze(void* analyzer, LNN* lnn, StabilityAnalysis* result) {
+    if (!analyzer || !lnn) {
+        log_error("[拉普拉斯统一] 分析失败: analyzer或lnn参数为空");
+        return -1;
+    }
+    LaplaceAnalyzer* la = (LaplaceAnalyzer*)analyzer;
+
+    /* 使用栈分配的临时结果结构，当调用方不需要结果时 */
+    StabilityAnalysis local_result;
+    memset(&local_result, 0, sizeof(local_result));
+    StabilityAnalysis* target = result ? result : &local_result;
+
+    int ret = laplace_analyze_lnn_stability(la, lnn, target);
+    if (ret != 0) {
+        log_error("[拉普拉斯统一] LNN稳定性分析失败 (错误码=%d)", ret);
+        return ret;
+    }
+
+    /* laplace_analyze_lnn_stability 内部已将派生传递函数缓存到 analyzer
+     * 如果调用方不需要结果且使用了本地结构，释放临时极点数组 */
+    if (!result && local_result.poles) {
+        safe_free((void**)&local_result.poles);
+    }
+
+    log_info("[拉普拉斯统一] LNN分析完成: 稳定=%d, 裕度=%.4f, 极点=%zu, "
+             "传递函数已缓存",
+             target->is_stable, (double)target->stability_margin,
+             target->num_poles);
+    return 0;
+}
+
+/* ============================================================================
+ * ZSFUSA: 获取拉普拉斯频谱
+ *
+ * H-001修复: 使用缓存的真实传递函数系数计算频谱，
+ * 而非硬编码的 1/(s+1)。如果从未分析过系统（缓存为空），
+ * 返回 -1 错误码而非返回虚假数据。 */
 int laplace_unified_get_spectrum(void* analyzer, float* spectrum, size_t size) {
     if (!analyzer || !spectrum || size == 0) return -1;
     LaplaceAnalyzer* la = (LaplaceAnalyzer*)analyzer;
-    /* 使用公共API，分配FrequencyResponse数组后提取幅度值 */
+
+    /* H-001: 通过公共API获取缓存传递函数系数，缓存为空则拒绝 */
+    const float* cached_num = NULL;
+    const float* cached_den = NULL;
+    size_t cached_num_order = 0;
+    size_t cached_den_order = 0;
+    if (laplace_analyzer_get_cached_transfer_fn(la,
+            &cached_num, &cached_den,
+            &cached_num_order, &cached_den_order) != 0) {
+        log_error("[拉普拉斯统一] 频谱计算失败: 传递函数缓存为空，请先调用 "
+                  "laplace_unified_analyze 或 laplace_analyze_system 分析系统");
+        return -1;
+    }
+
     FrequencyResponse* responses = (FrequencyResponse*)calloc(size, sizeof(FrequencyResponse));
     if (!responses) return -1;
-    float num[1] = {1.0f};
-    float den[2] = {1.0f, 1.0f};
-    int ret = laplace_compute_frequency_response(la, num, den, 0, 1,
-                                                  NULL, responses, size);
+    int ret = laplace_compute_frequency_response(la,
+        cached_num, cached_den,
+        cached_num_order, cached_den_order,
+        NULL, responses, size);
     if (ret == 0) {
         for (size_t i = 0; i < size; i++) {
             spectrum[i] = responses[i].magnitude;

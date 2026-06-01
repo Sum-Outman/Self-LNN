@@ -199,8 +199,6 @@ int lm_optimizer_solve(LMOptimizer* opt, float* initial_params,
     float* H = opt->workspace;
     float* g = opt->workspace + (size_t)n * n;
     float* delta = opt->workspace + (size_t)n * n + n;
-    float* JL = opt->workspace;
-    (void)JL;
 
     float prev_cost = FLT_MAX;
     int nu = 2;
@@ -405,9 +403,7 @@ int dogleg_optimizer_solve(DoglegOptimizer* opt, float* initial_params,
     internal_vec_copy(opt->params, initial_params, n);
 
     float* H = opt->workspace;
-    float* H_gd = opt->workspace + (size_t)n * n;
-    float* L = opt->workspace + (size_t)n * n * 2;
-    (void)H_gd;
+    float* L = opt->workspace + (size_t)n * n;
 
     float prev_cost = FLT_MAX;
 
@@ -962,12 +958,12 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
             for (int p = f->n_connected_vars - 1; p >= 0; p--) {
                 int vid = f->connected_vars[p];
                 int val = (vid == elim_var) ? elim_val : 0;
+                int dim_for_vid = 2;  /* H-003修复: 使用vid对应变量的实际维度 */
                 for (int a = 0; a < all_n; a++) {
-                    if (all_vars[a] == vid) { val = indices[a]; break; }
+                    if (all_vars[a] == vid) { val = indices[a]; dim_for_vid = all_dims[a]; break; }
                 }
                 f_idx += val * stride;
-                stride *= (vid == elim_var) ? elim_domain :
-                    (all_n > 0 ? all_dims[(all_n > 1 ? 1 : 0)] : 2);
+                stride *= (vid == elim_var) ? elim_domain : dim_for_vid;
             }
             if (f_idx >= 0 && f->values && f_idx < f->n_connected_vars * 4) {
                 product *= f->values[f_idx];
@@ -997,8 +993,8 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
                             for (int vc = 0; vc < ff->n_connected_vars; vc++) {
                                 if (ff->connected_vars[vc] == vid) {
                                     e_f_idx += vval * e_stride;
-                                    e_stride *= (vid == elim_var) ? elim_domain :
-                                        (all_n > 0 ? all_dims[(all_n > 1 ? 1 : 0)] : 2);
+                                    /* H-003修复: 使用vid对应变量的实际维度 */
+                                    e_stride *= (vid == elim_var) ? elim_domain : all_dims[vv];
                                 }
                             }
                         }

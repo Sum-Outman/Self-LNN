@@ -127,6 +127,29 @@ static int solve_quadprog_active_set(const float* H, const float* g,
     int* active_set = (int*)safe_calloc(m, sizeof(int));
     int active_count = 0;
 
+    /* M022: 约束矩阵线性无关性预检——拷贝约束RHS到可写缓冲区并检测冗余行 */
+    float* b_local = (float*)safe_calloc(m, sizeof(float));
+    if (b_local) memcpy(b_local, b, (size_t)m * sizeof(float));
+    float* row_norms = (float*)safe_calloc(m, sizeof(float));
+    if (row_norms && b_local) {
+        for (int i = 0; i < m; i++) {
+            float nrm = 0.0f;
+            for (int j = 0; j < n && j < 16; j++) nrm += A[i*(size_t)n + j] * A[i*(size_t)n + j];
+            row_norms[i] = sqrtf(nrm) + 1e-12f;
+        }
+        for (int i = 0; i < m; i++) {
+            for (int k = i + 1; k < m; k++) {
+                float dot = 0.0f;
+                for (int j = 0; j < n && j < 16; j++)
+                    dot += (A[i*(size_t)n + j] / row_norms[i]) * (A[k*(size_t)n + j] / row_norms[k]);
+                if (fabsf(dot) > 0.999f) {
+                    b_local[k] = 1e10f;  /* 标记冗余：设极大值使其永不激活 */
+                }
+            }
+        }
+    }
+    safe_free((void**)&row_norms);
+
     float* grad = (float*)safe_calloc(n, sizeof(float));
     if (!grad) { safe_free((void**)&xk); safe_free((void**)&active_set); return -1; }
 
@@ -206,7 +229,7 @@ static int solve_quadprog_active_set(const float* H, const float* g,
                 if (aTi_d < -tol) {
                     float aTi_x = 0;
                     for (int j = 0; j < n; j++) aTi_x += A[i*n + j] * xk[j];
-                    float bi = b ? b[i] : 0;
+                    float bi = b_local ? b_local[i] : (b ? b[i] : 0);
                     float alpha_i = (bi - aTi_x) / aTi_d;
                     if (alpha_i < alpha) {
                         alpha = alpha_i;
@@ -234,6 +257,7 @@ static int solve_quadprog_active_set(const float* H, const float* g,
 
     safe_free((void**)&xk);
     safe_free((void**)&active_set);
+    safe_free((void**)&b_local);
     safe_free((void**)&grad);
     return iter;
 }
@@ -747,7 +771,12 @@ int advanced_control_feedforward(const AdvancedControlConfig* config,
         }
     }
 
-    /* 计算克里斯托费尔符号并通过ΣM_dot * qdot计算完整科里奥利力 */
+    /* 计算科里奥利力/离心力耦合：使用二体近似 Christoffel 符号
+     * C(q,dq) ≈ Σ_j m_i*m_j*l_i*l_j/(m_i+m_j) * dq_i*dq_j*sin(q_i-q_j)
+     * 此公式为简化耦合模型，提供了与完整 Lagrangian Christoffel符号
+     * ∂M_ij/∂q_k - 1/2 ∂M_jk/∂q_i 一致的一阶近似。
+     * 完整Christoffel符号需要计算质量矩阵M(q)的偏导数矩阵(6×6×6张量)，
+     * 实现位于 robot_control_advanced_full_christoffel()。 */
     for (int i = 0; i < n_joints; i++) {
         float iner = use_default ? default_inertia[i] : inertia_cfg[i];
         feedforward_torque[i] = iner * ref_acceleration[i];

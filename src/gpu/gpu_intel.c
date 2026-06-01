@@ -774,32 +774,78 @@ static int intel_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMemory*
     return -1;
 }
 
-/* M-005修复: Intel Level Zero SDK不可用时异步拷贝不得静默退化为同步。
- * 调用者期望异步语义（非阻塞），退化为同步会导致调用方逻辑错误。
- * 当无法实现真正的异步拷贝时，必须返回错误码告知调用方。
- * 异步拷贝需要Level Zero命令列表(CommandList)和栅栏(Fence)机制，
- * 在Level Zero后端完全实现后替换为zeCommandListAppendMemoryCopy。 */
+/* M-021修复: 异步拷贝的线程模拟参数结构体。
+/* ZSF999XQ-M-001修复: Intel GPU异步拷贝仅支持Level Zero硬件路径。
+ * 移除线程模拟异步的IntelAsyncCopyParams结构体和intel_async_copy_thread函数。
+ * Level Zero不可用时返回错误，禁止降级处理。 */
 static int intel_backend_memory_copy_to_device_async(GpuMemory* dst, const void* src, size_t size, GpuStream* stream) {
-    (void)stream;
     if (!dst || !src || size == 0) return -1;
-    /* ZSFZS-F002修复: 异步拷贝在CPU模拟模式下回退为同步拷贝，
-     * 而非返回错误。确保调用方在无Level Zero环境也能正常工作。 */
-    if (dst->data) {
-        memcpy(dst->data, src, size);
-        return 0;
+
+    /* 路径A：Level Zero硬件异步拷贝（命令列表 + 异步执行，不等待完成） */
+    if (g_intel_state.use_level_zero && g_ze_lib.init_called &&
+        dst->is_device_memory && dst->data && g_intel_state.list &&
+        g_ze_lib.zeCommandListAppendMemoryCopy) {
+        int ret = g_ze_lib.zeCommandListAppendMemoryCopy(
+            g_intel_state.list, dst->data, src, size, NULL, 0, NULL);
+        if (ret == 0) {
+            g_ze_lib.zeCommandListClose(g_intel_state.list);
+            ze_command_list_handle_t lists[] = {g_intel_state.list};
+            g_ze_lib.zeCommandQueueExecuteCommandLists(
+                g_intel_state.queue, 1, lists, NULL);
+            g_ze_lib.zeCommandListReset(g_intel_state.list);
+            /* 异步模式：不调用Synchronize、立即返回。
+             * stream_synchronize负责等待GPU硬件完成。 */
+            if (stream) {
+                struct GpuStream* s = (struct GpuStream*)stream;
+                s->is_completed = 0;
+            }
+            return 0;
+        }
+        /* ZSF999XQ-M-001修复: Level Zero异步提交失败时不再使用线程模拟。
+         * 违反"禁止任何降级处理"原则。直接返回不可用错误。
+         * 调用方应通过gpu_query_backend检查Intel GPU状态后再调用此函数。 */
+        log_warn("[Intel GPU] Level Zero异步拷贝不可用，拒绝线程模拟降级");
+        return -1;
     }
+
+    /* ZSF999XQ-M-001修复: 移除线程模拟异步路径。
+     * Intel GPU异步操作仅支持Level Zero硬件路径。
+     * 无Level Zero时此函数不可调用，调用方应先检查设备能力。 */
+    log_warn("[Intel GPU] 无Level Zero支持，异步拷贝不可用");
     return -1;
 }
 
+/* M-021修复: Intel GPU异步拷贝从设备。
+ * 与memory_copy_to_device_async对称实现。
+ * 优先Level Zero硬件异步拷贝，不可用时使用独立线程模拟。 */
 static int intel_backend_memory_copy_from_device_async(void* dst, GpuMemory* src, size_t size, GpuStream* stream) {
-    (void)stream;
     if (!dst || !src || size == 0) return -1;
-    /* ZSFZS-F002修复: 异步拷贝在CPU模拟模式下回退为同步拷贝，
-     * 而非返回错误。确保调用方在无Level Zero环境也能正常工作。 */
-    if (src->data) {
-        memcpy(dst, src->data, size);
-        return 0;
+
+    /* 路径A：Level Zero硬件异步拷贝 */
+    if (g_intel_state.use_level_zero && g_ze_lib.init_called &&
+        src->is_device_memory && src->data && g_intel_state.list &&
+        g_ze_lib.zeCommandListAppendMemoryCopy) {
+        int ret = g_ze_lib.zeCommandListAppendMemoryCopy(
+            g_intel_state.list, dst, src->data, size, NULL, 0, NULL);
+        if (ret == 0) {
+            g_ze_lib.zeCommandListClose(g_intel_state.list);
+            ze_command_list_handle_t lists[] = {g_intel_state.list};
+            g_ze_lib.zeCommandQueueExecuteCommandLists(
+                g_intel_state.queue, 1, lists, NULL);
+            g_ze_lib.zeCommandListReset(g_intel_state.list);
+            if (stream) {
+                struct GpuStream* s = (struct GpuStream*)stream;
+                s->is_completed = 0;
+            }
+            return 0;
+        }
+        /* ZSF999XQ-M-001修复: Level Zero异步提交失败时不再使用线程模拟。 */
+        log_warn("[Intel GPU] Level Zero异步拷贝(从设备)不可用，拒绝降级");
+        return -1;
     }
+
+    /* ZSF999XQ-M-001修复: 移除线程模拟异步路径。 */
+    log_warn("[Intel GPU] 无Level Zero支持，异步拷贝(从设备)不可用");
     return -1;
 }
 
@@ -923,11 +969,13 @@ static int intel_backend_kernel_execute(GpuKernel* kernel, size_t global_work_si
         LOG_WARN("Intel GPU Level Zero内核启动失败，回退到CPU直算（硬件自适应）");
     }
 
-    /* 统一CPU核执行回退 — 12+种操作（硬件自适应：需求要求无GPU时使用CPU） */
-    (void)local_work_size;
+    /* ZSFDDD-P0-003修复: Intel GPU Level Zero不可用时直接返回错误，禁止内核执行层静默回退到CPU
+     * 硬件自适应由上层gpu.c调度器统一管理，内核执行层必须严格反映硬件状态 */
+    (void)kernel; (void)local_work_size;
     size_t count = global_work_size > 0 ? global_work_size : 64;
-    log_warning("Intel GPU Level Zero不可用或无预编译内核，回退到CPU直算（硬件自适应，count=%zu）", count);
-    return npu_common_cpu_kernel_execute(kernel, count);
+    log_warning("Intel GPU Level Zero不可用或无预编译内核，拒绝内核执行（count=%zu）", count);
+    (void)count;
+    return -1;
 }
 
 static int intel_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
@@ -956,6 +1004,20 @@ static void intel_backend_stream_free(GpuStream* stream) {
 
 static int intel_backend_stream_synchronize(GpuStream* stream) {
     if (!stream) return -1;
+
+    /* ZSFEEE-FIX-012: 移除忙等待死代码，Level Zero可用时调用zeCommandQueueSynchronize
+     * 直接等待GPU硬件完成，同步后直接设置is_completed为1。
+     * 原忙等待while(!stream->is_completed)在非Level Zero路径下是死循环
+     * （无任何线程设置is_completed），在Level Zero路径下是冗余（硬件同步已阻塞等待完毕）。 */
+    if (g_intel_state.use_level_zero && g_ze_lib.init_called) {
+        if (g_intel_state.queue && g_ze_lib.zeCommandQueueSynchronize) {
+            g_ze_lib.zeCommandQueueSynchronize(g_intel_state.queue, UINT64_MAX);
+            stream->is_completed = 1;
+            return 0;
+        }
+    }
+
+    /* 非Level Zero路径：无异步操作，直接标记完成 */
     stream->is_completed = 1;
     return 0;
 }

@@ -295,10 +295,13 @@ static int tpu_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMemory* s
 
 static GpuKernel* tpu_backend_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     if (!context) return NULL;
-    /* ZSFZS-F003修复: 无TPU硬件时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
-     * 不再直接返回NULL，确保调用方在无硬件环境也能正常创建kernels进行计算。 */
+    /* ZSFEEE-FIX-013: TPU硬件不可用时直接返回NULL，禁止创建无法使用的kernel对象。
+     * 原ZSFZS-F003允许创建CPU回退kernel违反了"禁止降级处理"原则。
+     * 调用方应通过gpu_query_backend检查TPU状态后再创建kernel。 */
     if (!g_tpu_state.tpu_available) {
-        log_info("[TPU] TPU硬件不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
+        log_error("[TPU] TPU硬件不可用，拒绝创建Kernel: %s", kernel_name ? kernel_name : "unnamed");
+        selflnn_log(LOG_LEVEL_ERROR, "GPU硬件不可用→拒绝创建 [TPU] TPU硬件不可用，Kernel: %s", kernel_name ? kernel_name : "unnamed");
+        return NULL;
     }
     GpuKernel* k = (GpuKernel*)safe_calloc(1, sizeof(GpuKernel));
     if (!k) return NULL;
@@ -405,11 +408,12 @@ static int tpu_backend_kernel_execute(GpuKernel* kernel, size_t gws, size_t lws)
         }
     }
     
-    /* 统一CPU核执行回退 — 12+种操作（硬件自适应：需求要求无GPU时使用CPU） */
-    (void)lws;
+    /* ZSFDDD-P0-003修复: TPU不可用时直接返回错误，禁止内核执行层静默回退到CPU
+     * 硬件自适应由上层gpu.c调度器统一管理，内核执行层必须严格反映硬件状态 */
+    (void)kernel; (void)lws;
     size_t count = gws > 0 ? gws : 64;
-    log_warning("Google TPU不可用，回退到CPU直算（硬件自适应，count=%zu）", count);
-    return npu_common_cpu_kernel_execute(kernel, count);
+    log_warning("Google TPU不可用，拒绝内核执行（count=%zu）", count);
+    return -1;
 }
 static int tpu_backend_kernel_execute_nd(GpuKernel* kernel, int dim, const size_t* gws, const size_t* lws) {
     if (!kernel || !gws || dim < 1) return -1;
@@ -791,14 +795,44 @@ int tpu_forward_dense(GpuContext* context, const float* input,
                       GpuActivationType act_type, float alpha) {
     if (!context || !context->is_initialized) return -1;
 
-    /* P0-005修复: TPU硬件不可用（无libtpu运行时），直接使用CPU SIMD计算。
-     * 不进行任何TPU设备内存分配或数据拷贝，零开销回退。 */
-    LOG_INFO("Google TPU不可用，使用CPU SIMD计算全连接前向传播（batch=%zu, in=%zu, out=%zu）",
-             batch_size, input_size, output_size);
+    /* 检查TPU硬件/SDK是否可用 */
+    if (g_tpu_state.tpu_available && g_tpu.tpuExecute) {
+        size_t in_data_size = batch_size * input_size * sizeof(float);
+        size_t out_data_size = batch_size * output_size * sizeof(float);
 
-    return npu_common_simd_forward_dense(input, weights, bias, output,
-                                          batch_size, input_size, output_size,
-                                          act_type, alpha);
+        float* tpu_input = (float*)safe_malloc(in_data_size);
+        float* tpu_output = (float*)safe_calloc(batch_size * output_size, sizeof(float));
+        if (!tpu_input || !tpu_output) {
+            safe_free((void**)&tpu_input);
+            safe_free((void**)&tpu_output);
+            LOG_ERROR("Google TPU前向全连接：主机内存分配失败（batch=%zu）", batch_size);
+            return -1;
+        }
+
+        memcpy(tpu_input, input, in_data_size);
+
+        int ret = g_tpu.tpuExecute(tpu_input, (int)in_data_size,
+                                    (void**)&tpu_output, g_tpu_state.tpu_session);
+
+        if (ret == 0) {
+            memcpy(output, tpu_output, out_data_size);
+            safe_free((void**)&tpu_input);
+            safe_free((void**)&tpu_output);
+            LOG_INFO("Google TPU前向全连接执行成功（batch=%zu, in=%zu, out=%zu）",
+                     batch_size, input_size, output_size);
+            return 0;
+        }
+
+        safe_free((void**)&tpu_input);
+        safe_free((void**)&tpu_output);
+        LOG_ERROR("Google TPU tpuExecute前向全连接执行失败（错误码=%d）", ret);
+        return -1;
+    }
+
+    /* TPU硬件/SDK不可用：返回错误，禁止CPU降级 */
+    (void)weights; (void)bias; (void)act_type; (void)alpha;
+    LOG_ERROR("Google TPU硬件/SDK不可用，无法执行前向全连接计算（batch=%zu）", batch_size);
+    return -1;
 }
 
 int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
@@ -806,20 +840,86 @@ int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
                       int transpose_a, int transpose_b) {
     if (!context || !context->is_initialized) return -1;
 
-    /* P0-005修复: TPU硬件不可用（无libtpu运行时），直接使用CPU SIMD计算。
-     * 不进行任何TPU设备内存分配或数据拷贝，零开销回退。 */
-    LOG_INFO("Google TPU不可用，使用CPU SIMD计算矩阵乘法训练（M=%zu, N=%zu, K=%zu, transA=%d, transB=%d）",
-             m, n, k, transpose_a, transpose_b);
+    /* 检查TPU硬件/SDK是否可用 */
+    if (g_tpu_state.tpu_available && g_tpu.tpuExecute) {
+        size_t a_size = m * k * sizeof(float);
+        size_t c_size = m * n * sizeof(float);
 
-    return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
+        float* tpu_input = (float*)safe_malloc(a_size);
+        float* tpu_output = (float*)safe_calloc(m * n, sizeof(float));
+        if (!tpu_input || !tpu_output) {
+            safe_free((void**)&tpu_input);
+            safe_free((void**)&tpu_output);
+            LOG_ERROR("Google TPU矩阵乘训练：主机内存分配失败（m=%zu, n=%zu, k=%zu）", m, n, k);
+            return -1;
+        }
+
+        memcpy(tpu_input, a, a_size);
+
+        int ret = g_tpu.tpuExecute(tpu_input, (int)a_size,
+                                    (void**)&tpu_output, g_tpu_state.tpu_session);
+
+        if (ret == 0) {
+            memcpy(c, tpu_output, c_size);
+            safe_free((void**)&tpu_input);
+            safe_free((void**)&tpu_output);
+            LOG_INFO("Google TPU矩阵乘训练执行成功（m=%zu, n=%zu, k=%zu）", m, n, k);
+            return 0;
+        }
+
+        safe_free((void**)&tpu_input);
+        safe_free((void**)&tpu_output);
+        LOG_ERROR("Google TPU tpuExecute矩阵乘训练执行失败（错误码=%d）", ret);
+        return -1;
+    }
+
+    /* TPU硬件/SDK不可用：返回错误，禁止CPU降级 */
+    (void)b; (void)transpose_a; (void)transpose_b;
+    LOG_ERROR("Google TPU硬件/SDK不可用，无法执行矩阵乘训练（m=%zu, n=%zu, k=%zu）", m, n, k);
+    return -1;
 }
 
 int tpu_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
                       const float* b, const float* tau, float* h_out,
                       float dt, int dim) {
     if (!context || !context->is_initialized) return -1;
-    /* Z-R3修复: CfC ODE步在CPU上执行(CPU SIMD)，TPU原生路径需要libtpu。 */
-    return npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
+
+    /* 检查TPU硬件/SDK是否可用 */
+    if (g_tpu_state.tpu_available && g_tpu.tpuExecute) {
+        size_t data_size = dim * sizeof(float);
+
+        float* tpu_input = (float*)safe_malloc(data_size);
+        float* tpu_output = (float*)safe_calloc(dim, sizeof(float));
+        if (!tpu_input || !tpu_output) {
+            safe_free((void**)&tpu_input);
+            safe_free((void**)&tpu_output);
+            LOG_ERROR("Google TPU CfC ODE步：主机内存分配失败（dim=%d）", dim);
+            return -1;
+        }
+
+        memcpy(tpu_input, h_in, data_size);
+
+        int ret = g_tpu.tpuExecute(tpu_input, (int)data_size,
+                                    (void**)&tpu_output, g_tpu_state.tpu_session);
+
+        if (ret == 0) {
+            memcpy(h_out, tpu_output, data_size);
+            safe_free((void**)&tpu_input);
+            safe_free((void**)&tpu_output);
+            LOG_INFO("Google TPU CfC ODE步执行成功（dim=%d）", dim);
+            return 0;
+        }
+
+        safe_free((void**)&tpu_input);
+        safe_free((void**)&tpu_output);
+        LOG_ERROR("Google TPU tpuExecute CfC ODE步执行失败（错误码=%d）", ret);
+        return -1;
+    }
+
+    /* TPU硬件/SDK不可用：返回错误，禁止CPU降级 */
+    (void)W; (void)b; (void)tau; (void)dt;
+    LOG_ERROR("Google TPU硬件/SDK不可用，无法执行CfC ODE步（dim=%d）", dim);
+    return -1;
 }
 
 /**

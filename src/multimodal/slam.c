@@ -9139,12 +9139,13 @@ static int slam_select_candidates_hybrid(SlamSystem* system, int frame_id,
     return selected;
 }
 
-/* ==================== B-02: SLAM合成数据生成与演示（增强版） ==================== */
+/* ==================== B-02: SLAM合成数据生成（已废弃，仅单元测试用） ==================== */
 #ifndef SELFLNN_STRICT_REAL_DATA
 /* L-004修复: 合成数据函数已标记为废弃。
  * 在 SELFLNN_STRICT_REAL_DATA 严格真实数据模式下，合成数据生成完全禁用。
  * 生产部署中默认启用 STRICT_REAL_DATA，合成帧仅可用于离线单元测试。
- * 计划在下一版本中将这些函数移至测试目录。 */
+ * v2.0迁移计划: 将这些函数移至 tests/slam_synthetic_test.c 目录。
+ * 当前通过编译宏隔离，确保生产构建零合成数据。 */
 
 /**
  * @brief 在图像上绘制一个抗锯齿圆形

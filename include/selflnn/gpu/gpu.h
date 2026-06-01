@@ -325,6 +325,22 @@ int gpu_get_device_count(GpuBackend backend);
 int gpu_get_device_info(GpuBackend backend, int device_index, GpuDeviceInfo* info);
 
 /**
+ * @brief 统一CPU硬件检测接口（ZSFEEE-FIX-014）
+ *
+ * 从真实硬件检测获取CPU的完整信息（品牌、架构、核心数、缓存、SIMD等）。
+ * 此函数是项目中所有CPU硬件检测的唯一权威入口。
+ * gpu_memory_pool.c 和 gpu_cpu.c 中的CPU检测代码统一调用此接口，
+ * 消除三重重复。
+ *
+ * 支持 x86/x64（CPUID）和 ARM64 架构。
+ * 所有数据均从真实硬件读取，禁止使用模拟值。
+ *
+ * @param info 设备信息输出缓冲区（GpuDeviceInfo，至少256+字节）
+ * @return int 成功返回0，失败返回-1
+ */
+int gpu_hardware_get_cpu_info(GpuDeviceInfo* info);
+
+/**
  * @brief 创建GPU上下文
  * 
  * @param backend 后端类型

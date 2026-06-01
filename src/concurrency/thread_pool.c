@@ -1018,6 +1018,11 @@ int thread_pool_submit(ThreadPool* pool, TaskFunction function,
     if (pool->config.num_threads == 0) {
         return -1;
     }
+
+    /* ZSFZX-FIX-R8-4: 检查线程池是否正在关闭 — 防止free期间提交任务导致丢失 */
+    if (!pool->is_running) {
+        return -1;
+    }
     
     // 创建任务
     ThreadPoolTask task;
@@ -1247,9 +1252,9 @@ int thread_pool_get_stats(const ThreadPool* pool,
     }
     
 #ifdef _WIN32
-    EnterCriticalSection((CRITICAL_SECTION*)&pool->lock);
+    EnterCriticalSection(&pool->lock);
 #else
-    pthread_mutex_lock((pthread_mutex_t*)&pool->lock);
+    pthread_mutex_lock(&pool->lock);
 #endif
     
     if (pending_tasks) {
@@ -1291,9 +1296,9 @@ int thread_pool_get_stats(const ThreadPool* pool,
     }
     
 #ifdef _WIN32
-    LeaveCriticalSection((CRITICAL_SECTION*)&pool->lock);
+    LeaveCriticalSection(&pool->lock);
 #else
-    pthread_mutex_unlock((pthread_mutex_t*)&pool->lock);
+    pthread_mutex_unlock(&pool->lock);
 #endif
     
     return 0;

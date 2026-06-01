@@ -14,6 +14,7 @@
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
 #include "gpu_internal.h"
+#include "npu_common.h"  /* H-016去重: 使用npu_common公共NPU接口 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -43,26 +44,17 @@
 
 /* ============================================================================
  * 文件/路径工具函数
+ * H-016去重: 已委托给npu_common公共实现，消除与npu_common.c的重复代码
  * ============================================================================ */
 
+/* [H-016去重] 已合并到npu_common_file_exists，此处保留为薄封装保持API兼容 */
 static int npu_file_exists(const char* path) {
-#ifdef _WIN32
-    DWORD attr = GetFileAttributesA(path);
-    return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
-#else
-    struct stat st;
-    return (stat(path, &st) == 0 && S_ISREG(st.st_mode));
-#endif
+    return npu_common_file_exists(path);
 }
 
+/* [H-016去重] 已合并到npu_common_dir_exists，此处保留为薄封装保持API兼容 */
 static int npu_dir_exists(const char* path) {
-#ifdef _WIN32
-    DWORD attr = GetFileAttributesA(path);
-    return (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY));
-#else
-    struct stat st;
-    return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
-#endif
+    return npu_common_dir_exists(path);
 }
 
 /* ============================================================================
@@ -254,18 +246,14 @@ static int npu_detect_hardware(void) {
 
 /* ============================================================================
  * NPU SDK 动态加载
+ * H-016去重: NPU_DLOPEN/DLSYM/DLCLOSE宏已合并到npu_common公共接口
  * ============================================================================ */
 
+/* [H-016去重] 类型别名保留：内部仍使用NpuLibHandle，但加载/卸载委托给npu_common */
 #ifdef _WIN32
 typedef HMODULE NpuLibHandle;
-#define NPU_DLOPEN(a) LoadLibraryA(a)
-#define NPU_DLSYM(a,b) GetProcAddress(a,b)
-#define NPU_DLCLOSE(a) FreeLibrary(a)
 #else
 typedef void* NpuLibHandle;
-#define NPU_DLOPEN(a) dlopen(a, RTLD_LAZY | RTLD_LOCAL)
-#define NPU_DLSYM(a,b) dlsym(a,b)
-#define NPU_DLCLOSE(a) dlclose(a)
 #endif
 
 typedef struct {
@@ -300,7 +288,8 @@ static int npu_try_load_sdk(void) {
 #endif
     if (!lib_name) return 0;
 
-    g_npu_sdk.handle = NPU_DLOPEN(lib_name);
+    /* [H-016去重] 使用npu_common_load_library替代NPU_DLOPEN宏 */
+    g_npu_sdk.handle = (NpuLibHandle)npu_common_load_library(lib_name);
     if (!g_npu_sdk.handle) {
         LOG_WARN("无法加载NPU SDK库: %s", lib_name);
         return 0;
@@ -310,17 +299,12 @@ static int npu_try_load_sdk(void) {
     g_npu_sdk.loaded = 1;
     /* 尝试从SDK库中获取真实设备数量 */
     g_npu_sdk.device_count = 1;
-#ifdef _WIN32
+    /* [H-016去重] 使用npu_common_get_symbol替代NPU_DLSYM宏 */
     {
-        int (*count_fn)(void) = (int(*)(void))GetProcAddress(g_npu_sdk.handle, "getDeviceCount");
+        int (*count_fn)(void) = (int(*)(void))npu_common_get_symbol(
+            (void*)g_npu_sdk.handle, "getDeviceCount");
         if (count_fn) { int cnt = count_fn(); if (cnt > 0) g_npu_sdk.device_count = cnt; }
     }
-#else
-    {
-        int (*count_fn)(void) = (int(*)(void))dlsym(g_npu_sdk.handle, "getDeviceCount");
-        if (count_fn) { int cnt = count_fn(); if (cnt > 0) g_npu_sdk.device_count = cnt; }
-    }
-#endif
     snprintf(g_npu_sdk.device_name, sizeof(g_npu_sdk.device_name),
              "NPU-%s", npu_vendor_name(g_detected_vendor));
 

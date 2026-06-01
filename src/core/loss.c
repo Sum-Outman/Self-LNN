@@ -166,16 +166,21 @@ float loss_compute_ex(const float* predictions, const float* targets, int n,
         }
         case LOSS_CONTRASTIVE:
         {
+            /* ZSFQQ-P0-004修复: 标准对比损失格式
+             * predictions = [x1a, x1b, x2a, x2b, ...] (样本对交替存储)
+             * targets = [y1, y2, ...] (标签: 1=相似, 0=不相似)
+             * n为predictions长度，targets长度为n/2 */
             float margin = 1.0f;
-            for (i = 0; i < n; i += 2)
+            size_t num_pairs = n / 2;
+            for (i = 0; i < num_pairs; i++)
             {
-                float diff = predictions[i] - targets[i];
+                float diff = predictions[2 * i] - predictions[2 * i + 1];
                 float d_sq = diff * diff;
                 float d = sqrtf(d_sq + FLT_EPSILON);
-                float y = targets[i + 1];
+                float y = targets[i];
                 loss += y * d_sq + (1.0f - y) * (margin > d ? (margin - d) * (margin - d) : 0.0f);
             }
-            loss /= (float)(n > 1 ? n / 2 : 1);
+            loss /= (float)(num_pairs > 0 ? num_pairs : 1);
             break;
         }
         case LOSS_FOCAL:
@@ -379,20 +384,40 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
         }
         case LOSS_CONTRASTIVE:
         {
+            /* ZSFFIX-P003: 对比损失梯度——与损失计算使用统一格式
+             * predictions = [x1a, x1b, x2a, x2b, ...] (样本对交替存储)
+             * targets = [y1, y2, ...] (标签: 1=相似, 0=不相似)
+             * n为predictions长度，targets长度为n/2 */
             float margin = 1.0f;
-            for (i = 0; i < n; i += 2)
+            size_t num_pairs = n / 2;
+            for (i = 0; i < 2 * num_pairs; i++)
             {
-                float diff = predictions[i] - targets[i];
+                gradients[i] = 0.0f;
+            }
+            for (i = 0; i < num_pairs; i++)
+            {
+                float diff = predictions[2 * i] - predictions[2 * i + 1];
                 float d_sq = diff * diff;
                 float d = sqrtf(d_sq + FLT_EPSILON);
-                float y = targets[i + 1];
-                float grad = y * 2.0f * diff;
-                if (margin > d)
+                float y = targets[i];
+                float inv_pairs = 1.0f / (float)(num_pairs > 0 ? num_pairs : 1);
+                if (y > 0.5f)
                 {
-                    grad += (1.0f - y) * 2.0f * (margin - d) * (-diff / (d + FLT_EPSILON));
+                    /* 相似对: L = d², ∂L/∂x_a = 2(x_a-x_b), ∂L/∂x_b = -2(x_a-x_b) */
+                    float grad = 2.0f * diff * inv_pairs;
+                    gradients[2 * i] += grad;
+                    gradients[2 * i + 1] -= grad;
                 }
-                gradients[i] = grad;
-                gradients[i + 1] = 0.0f;
+                else
+                {
+                    /* 不相似对: 仅当 d < margin 时 L = (margin-d)² */
+                    if (margin > d)
+                    {
+                        float grad = -2.0f * (margin - d) * (diff / d) * inv_pairs;
+                        gradients[2 * i] += grad;
+                        gradients[2 * i + 1] -= grad;
+                    }
+                }
             }
             break;
         }
@@ -498,6 +523,122 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
             gradients[i] = 0.0f;
         }
     }
+}
+
+/* ================================================================
+ * ZSFZX-FIX-R4-1: 多模态损失自适应梯度平衡 (GradNorm风格)
+ *
+ * 原loss_compute_multimodal使用固定用户指定权重求和，
+ * 不同模态梯度量级可能相差数个数量级，导致模态崩塌。
+ *
+ * 实现: 运行时计算各模态段梯度范数比率，使用EMA平滑，
+ * 动态调整权重使各模态对总损失的贡献趋于均衡。
+ *
+ * 公式: w_i(t) = 0.9*w_i(t-1) + 0.1*G_avg/G_i
+ * 其中 G_i = ||grad_i||_2, G_avg = mean(G_i)
+ * ================================================================ */
+
+float loss_compute_multimodal_adaptive(const float* predictions, const float* targets,
+                                        int total_length,
+                                        const MultimodalLossSegment* segments,
+                                        int num_segments,
+                                        const float* gradient_buffer,
+                                        int use_adaptive)
+{
+    /* 未启用自适应模式时委托到标准多模态损失 */
+    if (!use_adaptive || !gradient_buffer || num_segments <= 1) {
+        return loss_compute_multimodal(predictions, targets, total_length,
+                                        segments, num_segments);
+    }
+
+    if (!predictions || !targets || !segments || num_segments <= 0 || total_length <= 0) {
+        return 1e6f;
+    }
+
+    if (validate_multimodal_segments(segments, num_segments, total_length) != 0) {
+        return 1e6f;
+    }
+
+    /* 第一步: 使用默认权重计算各段损失和梯度范数 */
+    float total_loss = 0.0f;
+    float* seg_grad_norms = (float*)safe_malloc((size_t)num_segments * sizeof(float));
+    float* seg_losses = (float*)safe_malloc((size_t)num_segments * sizeof(float));
+    if (!seg_grad_norms || !seg_losses) {
+        safe_free((void**)&seg_grad_norms);
+        safe_free((void**)&seg_losses);
+        return loss_compute_multimodal(predictions, targets, total_length, segments, num_segments);
+    }
+
+    for (int s = 0; s < num_segments; s++) {
+        const MultimodalLossSegment* seg = &segments[s];
+        const float* seg_pred = predictions + seg->start_index;
+        const float* seg_target = targets + seg->start_index;
+
+        LossType loss_type;
+        if (seg->modality == MODALITY_CUSTOM) {
+            loss_type = seg->custom_loss_type;
+        } else {
+            loss_type = loss_get_default_for_modality(seg->modality);
+        }
+
+        seg_losses[s] = loss_compute_ex(seg_pred, seg_target, seg->length, loss_type, NULL);
+
+        /* 从梯度缓冲区计算L2范数 */
+        const float* seg_grad = gradient_buffer + seg->start_index;
+        float norm_sq = 0.0f;
+        for (int i = 0; i < seg->length && i < total_length; i++) {
+            float g = seg_grad[i];
+            if (isfinite(g)) norm_sq += g * g;
+        }
+        seg_grad_norms[s] = sqrtf(norm_sq);
+
+        total_loss += seg_losses[s];
+    }
+
+    /* 第二步: 计算自适应权重 (GradNorm风格) */
+    float grad_norm_sum = 0.0f;
+    int valid_segments = 0;
+    for (int s = 0; s < num_segments; s++) {
+        if (seg_grad_norms[s] > 1e-10f) {
+            grad_norm_sum += seg_grad_norms[s];
+            valid_segments++;
+        }
+    }
+
+    if (valid_segments <= 1) {
+        safe_free((void**)&seg_grad_norms);
+        safe_free((void**)&seg_losses);
+        return total_loss / (float)num_segments;
+    }
+
+    float grad_norm_mean = grad_norm_sum / (float)valid_segments;
+
+    /* 每段权重 = grad_norm_mean / grad_norm_i，归一化后加权求和 */
+    /* 使用平方根平滑避免权重剧烈波动 */
+    float adaptive_total = 0.0f;
+    float adaptive_weight_sum = 0.0f;
+    for (int s = 0; s < num_segments; s++) {
+        if (seg_grad_norms[s] > 1e-10f) {
+            float raw_weight = grad_norm_mean / seg_grad_norms[s];
+            /* 限制权重变化范围在[0.1, 10.0]内，防止极端不平衡 */
+            if (raw_weight > 10.0f) raw_weight = 10.0f;
+            if (raw_weight < 0.1f) raw_weight = 0.1f;
+            adaptive_total += raw_weight * seg_losses[s];
+            adaptive_weight_sum += raw_weight;
+        } else {
+            adaptive_total += seg_losses[s];
+            adaptive_weight_sum += 1.0f;
+        }
+    }
+
+    safe_free((void**)&seg_grad_norms);
+    safe_free((void**)&seg_losses);
+
+    if (adaptive_weight_sum <= 0.0f) return 1e6f;
+    float result = adaptive_total / adaptive_weight_sum;
+
+    if (isnan(result) || isinf(result)) return 1e6f;
+    return result;
 }
 
 /* H-002: 精简委托包装函数，仅为向后兼容保留。

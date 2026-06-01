@@ -88,11 +88,14 @@ typedef struct {
     float temporal_decay;               /**< 时序衰减系数 */
     int use_temporal_fusion;            /**< 是否使用时序融合 */
     float fusion_temperature;           /**< 融合温度参数 */
+    int max_sequences;                  /**< 最大教学序列数 */
+    int frame_dim;                      /**< 帧特征维度 */
+    int max_frames_per_sequence;        /**< 每序列最大帧数 */
 } TeachFusionConfig;
 
 /** @brief 默认教学融合配置 */
 #define TEACH_FUSION_CONFIG_DEFAULT { \
-    0.4f, 0.2f, 0.25f, 0.15f, 0.95f, 1, 0.5f \
+    0.4f, 0.2f, 0.25f, 0.15f, 0.95f, 1, 0.5f, 100, 256, 1000 \
 }
 
 /** @brief 多模态教学系统句柄（不透明类型） */

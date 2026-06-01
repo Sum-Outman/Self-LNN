@@ -36,8 +36,8 @@ void* selflnn_get_shared_lnn(void);
 #include "selflnn/core/decision_engine.h"
 #include "selflnn/learning/learning.h"
 #include "selflnn/memory/memory_manager.h"
-#include "selflnn/metacognition.h"
-#include "selflnn/self_cognition.h"
+#include "selflnn/cognition/metacognition.h"
+#include "selflnn/cognition/self_cognition.h"
 #include "selflnn/cognition/deep_reflection.h"
 #include "selflnn/cognition/deep_thought_chain.h"
 #include "selflnn/cognition/deep_correction.h"
@@ -49,6 +49,7 @@ void* selflnn_get_shared_lnn(void);
 #include "selflnn/multisystem/multisystem_control.h"
 #include "selflnn/agi/capability_switch.h"
 #include "selflnn/core/system_scheduler.h"
+#include "selflnn/agi/task_scheduler.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"
 #include <math.h>
@@ -107,6 +108,10 @@ struct AGISystem {
     int owns_unified_lnn;
     SystemScheduler* scheduler;
     int owns_scheduler;
+
+    /* ZSFEEE-FIX-DEEP-023: 抢占式优先级任务调度器 */
+    TaskScheduler* task_scheduler;
+    int owns_task_scheduler;
 
     ThreadPool* thread_pool;
     int owns_thread_pool;
@@ -187,6 +192,131 @@ static void parallel_reason_task(void* arg) {
 static void parallel_learn_task(void* arg) {
     CognitiveTaskArg* a = (CognitiveTaskArg*)arg;
     agi_system_learn(a->system, a->input, a->input_dim, 0.0f);
+}
+
+/* ZSFEEE-FIX-DEEP-023: TaskScheduler回调包装 — 将AGI任务执行包装为调度器可调用格式 */
+typedef struct {
+    AGISystem* system;
+    int task_index;
+} TSWrapperArg;
+
+static int ts_execute_task_wrapper(void* context) {
+    TSWrapperArg* w = (TSWrapperArg*)context;
+    if (!w || !w->system) return -1;
+    AGISystem* s = w->system;
+    int ti = w->task_index;
+    if (ti < 0 || ti >= s->task_count) return -1;
+
+    AGITask* t = &s->tasks[ti];
+    if (!t->action_sequence || t->action_count <= 0) {
+        t->status = AGI_TASK_FAILED;
+        t->error_code = -3;
+        snprintf(t->error_message, sizeof(t->error_message), "调度任务无有效动作序列");
+        s->status.failed_task_count++;
+        return -1;
+    }
+
+    if (t->status != AGI_TASK_RUNNING && t->status != AGI_TASK_PENDING) {
+        return 0;
+    }
+
+    if (t->status == AGI_TASK_PENDING) {
+        t->status = AGI_TASK_RUNNING;
+        t->started_at = time(NULL);
+    }
+
+    /* ZSFGGG-S-001修复: 真实执行替代模拟执行索引推进
+     * 通过系统LNN处理动作序列，产生真实的执行输出，并通过多系统控制委派 */
+    int output_dim = AGI_OUTPUT_DIM;
+    int action_dim = (t->action_count > 0 && t->action_sequence) ?
+                     (int)(t->action_count * sizeof(float)) : output_dim;
+    if (action_dim < output_dim) action_dim = output_dim;
+    if (action_dim > 16384) action_dim = 16384;
+
+    float* execution_output = (float*)safe_malloc((size_t)action_dim * sizeof(float));
+    if (!execution_output) {
+        t->status = AGI_TASK_FAILED;
+        t->error_code = -4;
+        snprintf(t->error_message, sizeof(t->error_message), "执行输出缓冲区分配失败");
+        s->status.failed_task_count++;
+        return -1;
+    }
+
+    int steps_to_exec = (t->action_count - t->current_action_index > 3) ?
+                        3 : (t->action_count - t->current_action_index);
+    if (steps_to_exec <= 0) steps_to_exec = 1;
+
+    int executed = 0;
+    for (int step = 0; step < steps_to_exec; step++) {
+        int idx = t->current_action_index;
+        if (idx >= t->action_count) break;
+
+        int copy_len = output_dim;
+        if (idx * output_dim + output_dim > t->action_count * output_dim) break;
+        memcpy(execution_output, &t->action_sequence[idx * output_dim],
+               (size_t)copy_len * sizeof(float));
+
+        /* 通过LNN处理动作输出，产生真实系统效应 */
+        if (s->lnn) {
+            float lnn_output[AGI_OUTPUT_DIM];
+            memset(lnn_output, 0, sizeof(lnn_output));
+            lnn_forward(s->lnn, execution_output, lnn_output);
+
+            /* ZSFGGG-S-001: 动作结果写入任务结果数据区 */
+            if (!t->result_data) {
+                t->result_data = safe_malloc((size_t)output_dim * sizeof(float));
+                t->result_size = (size_t)output_dim * sizeof(float);
+            }
+            if (t->result_data) {
+                memcpy(t->result_data, lnn_output, (size_t)output_dim * sizeof(float));
+            }
+
+            /* ZSFGGG-S2-009修复: 通过多系统控制委派执行真实任务。
+             * 原使用coordinate_task_execution(不存在)已修正为coordinate_multitask_execution。
+             * 将处理后的LNN输出封装为协调任务发送到远程设备。 */
+            if (s->multisystem_control) {
+                Task ms_task;
+                memset(&ms_task, 0, sizeof(ms_task));
+                snprintf(ms_task.name, sizeof(ms_task.name), "agi_exec_%s_step%d",
+                         t->name, idx);
+                memcpy(ms_task.params, lnn_output,
+                       (sizeof(float) * (size_t)output_dim) <= sizeof(ms_task.params) ?
+                       (sizeof(float) * (size_t)output_dim) : sizeof(ms_task.params));
+                ms_task.param_count = output_dim;
+                ms_task.priority = (t->priority == AGI_PRIORITY_CRITICAL) ? 3 :
+                                   (t->priority == AGI_PRIORITY_HIGH) ? 2 : 1;
+                ms_task.deadline = (double)(t->created_at + 120);
+                Task* pending_tasks[1];
+                pending_tasks[0] = &ms_task;
+                CoordinationPlan* plan = coordinate_multitask_execution(
+                    s->multisystem_control, pending_tasks, 1,
+                    NULL, 0);
+                if (plan) {
+                    execute_coordination_plan(s->multisystem_control, plan);
+                    free_coordination_plan(plan);
+                    log_debug("[AGI执行] 任务step %d已委派到多系统控制", idx);
+                }
+            }
+        }
+
+        t->current_action_index++;
+        executed++;
+    }
+
+    safe_free((void**)&execution_output);
+
+    if (t->current_action_index >= t->action_count) {
+        t->status = AGI_TASK_COMPLETED;
+        t->completed_at = time(NULL);
+        t->progress = 1.0f;
+        s->status.active_task_count--;
+        if (s->status.active_task_count < 0) s->status.active_task_count = 0;
+        s->status.completed_task_count++;
+    } else {
+        t->progress = (float)t->current_action_index / (float)t->action_count;
+    }
+
+    return executed > 0 ? 0 : -2;
 }
 
 static int create_default_knowledge_base(AGISystem* system)
@@ -395,6 +525,7 @@ static int create_default_correction(AGISystem* system)
 static int create_default_vision(AGISystem* system)
 {
     if (!system) return -1;
+    if (system->vision) return 0;
     CfcVisionConfig vcfg = cfc_vision_get_default_config();
     vcfg.image_width = 640;
     vcfg.image_height = 480;
@@ -414,6 +545,7 @@ static int create_default_vision(AGISystem* system)
 static int create_default_depth_estimator(AGISystem* system)
 {
     if (!system) return -1;
+    if (system->depth_estimator) return 0;
     DepthEstimationConfig dcfg;
     memset(&dcfg, 0, sizeof(dcfg));
     dcfg.method = DEPTH_METHOD_STEREO;
@@ -476,6 +608,7 @@ static int create_default_thread_pool(AGISystem* system)
 static int create_default_multisystem_control(AGISystem* system)
 {
     if (!system) return -1;
+    if (system->multisystem_control) return 0;
     MultiSystemControlEngine* mse = multisystem_control_engine_create();
     if (!mse) {
         selflnn_log(LOG_LEVEL_WARNING, "AGI", "多系统控制引擎创建失败，多机器人控制不可用");
@@ -557,9 +690,15 @@ AGISystem* agi_system_create(const AGIConfig* config)
     create_default_correction(system);
     create_default_dialogue(system);
     create_default_thread_pool(system);
-    create_default_vision(system);
-    create_default_depth_estimator(system);
-    create_default_multisystem_control(system);
+    if (create_default_vision(system) != 0) {
+        selflnn_log(LOG_LEVEL_WARNING, "AGI", "默认视觉处理器创建失败，视觉功能不可用");
+    }
+    if (create_default_depth_estimator(system) != 0) {
+        selflnn_log(LOG_LEVEL_WARNING, "AGI", "默认深度估计器创建失败，深度估计功能不可用");
+    }
+    if (create_default_multisystem_control(system) != 0) {
+        selflnn_log(LOG_LEVEL_WARNING, "AGI", "默认多系统控制引擎创建失败，多机器人控制功能不可用");
+    }
 
     {
         UnifiedLNNStateConfig ulnn_cfg = unified_lnn_state_get_default_config();
@@ -580,6 +719,10 @@ AGISystem* agi_system_create(const AGIConfig* config)
 
     system->scheduler = system_scheduler_create(NULL);
     system->owns_scheduler = 1;
+
+    /* ZSFEEE-FIX-DEEP-023: 任务调度器初始为NULL（延迟初始化，按需创建） */
+    system->task_scheduler = NULL;
+    system->owns_task_scheduler = 0;
 
     system->status.state = AGI_STATE_IDLE;
     system->status.confidence = 0.5f;
@@ -625,6 +768,8 @@ void agi_system_free(AGISystem* system)
         unified_lnn_state_free(system->unified_lnn);
     if (system->owns_scheduler && system->scheduler)
         system_scheduler_free(system->scheduler);
+    if (system->owns_task_scheduler && system->task_scheduler)
+        task_scheduler_free(system->task_scheduler);
     if (system->owns_thread_pool && system->thread_pool)
         thread_pool_free(system->thread_pool);
     if (system->owns_vision && system->vision)
@@ -818,6 +963,18 @@ int agi_system_set_multisystem_control(AGISystem* system, MultiSystemControlEngi
         multisystem_control_engine_destroy(system->multisystem_control);
     system->multisystem_control = engine;
     system->owns_multisystem_control = 0;
+    return 0;
+}
+
+/* ZSFEEE-FIX-DEEP-023: 设置抢占式优先级任务调度器 */
+int agi_system_set_task_scheduler(AGISystem* system, TaskScheduler* ts)
+{
+    if (!system) return -1;
+    /* TaskScheduler可为NULL（回退到任务数组模式） */
+    if (system->owns_task_scheduler && system->task_scheduler)
+        task_scheduler_free(system->task_scheduler);
+    system->task_scheduler = ts;
+    system->owns_task_scheduler = 0;
     return 0;
 }
 
@@ -1251,8 +1408,77 @@ int agi_system_reason(AGISystem* system, const float* state_vector, int state_di
 {
     if (!system || !state_vector || !reasoning_result) return -1;
     if (!system->reasoning) return -1;
-    int ret = reasoning_infer(system->reasoning, state_vector, (size_t)state_dim,
+
+    /* ZSFEEE-FIX-DEEP-022: 内部查询知识库，知识偏移向量作为额外LNN输入通道 */
+    float max_knowledge_weight = 0.0f;
+    float enhanced_state[AGI_STATE_VECTOR_DIM * 2];
+    int enhanced_dim = state_dim;
+
+    /* 初始化增强状态向量：先复制原始状态 */
+    if (state_dim <= AGI_STATE_VECTOR_DIM) {
+        memcpy(enhanced_state, state_vector, (size_t)state_dim * sizeof(float));
+    } else {
+        memcpy(enhanced_state, state_vector, sizeof(enhanced_state));
+    }
+
+    if (system->knowledge) {
+        KnowledgeEntry kb_results[8];
+        float kb_scores[8];
+        int found = knowledge_base_query_state_aware(
+            system->knowledge, NULL,
+            state_vector, state_dim,
+            kb_results, 8, kb_scores);
+        if (found > 0) {
+            /* ZSFEEE-FIX-DEEP-022: 构建知识偏移向量并concat到状态末尾 */
+            float knowledge_bias[AGI_STATE_VECTOR_DIM];
+            memset(knowledge_bias, 0, sizeof(knowledge_bias));
+            int used = (found < 8) ? found : 8;
+            float total_score = 0.0f;
+            for (int ki = 0; ki < used; ki++) total_score += kb_scores[ki];
+            if (total_score < 1e-6f) total_score = 1.0f;
+
+            for (int ki = 0; ki < used; ki++) {
+                float w = kb_scores[ki] / total_score;
+                float kb_weight = kb_results[ki].weight;
+                /* ZSFEEE-FIX-DEEP-022: 高置信度知识(>0.7)增大影响权重 */
+                if (kb_weight > 0.7f) {
+                    kb_weight *= 1.5f;
+                    if (kb_weight > 1.0f) kb_weight = 1.0f;
+                }
+                int idx = (ki * 31 + 7) % state_dim;
+                knowledge_bias[idx] += kb_weight * 0.25f * w;
+                if (kb_weight > max_knowledge_weight) max_knowledge_weight = kb_weight;
+            }
+
+            /* ZSFEEE-FIX-DEEP-022: 知识偏移向量concatenate到状态向量末尾 */
+            int concat_start = state_dim;
+            int concat_end = state_dim + state_dim;
+            if (concat_end > AGI_STATE_VECTOR_DIM * 2) concat_end = AGI_STATE_VECTOR_DIM * 2;
+            for (int ki = concat_start; ki < concat_end; ki++) {
+                enhanced_state[ki] = knowledge_bias[(ki - state_dim) % state_dim];
+            }
+            enhanced_dim = concat_end;
+
+            for (int ei = 0; ei < found; ei++) {
+                safe_free((void**)&kb_results[ei].subject);
+                safe_free((void**)&kb_results[ei].predicate);
+                safe_free((void**)&kb_results[ei].object);
+                safe_free((void**)&kb_results[ei].metadata);
+            }
+        }
+    }
+
+    /* ZSFEEE-FIX-DEEP-022: 高置信度知识(>0.7)使用带知识权重的推理 */
+    int ret;
+    if (max_knowledge_weight > 0.7f) {
+        ret = reasoning_infer_with_knowledge(system->reasoning,
+            enhanced_state, (size_t)enhanced_dim,
+            reasoning_result, (size_t)state_dim, REASONING_DEDUCTIVE,
+            max_knowledge_weight);
+    } else {
+        ret = reasoning_infer(system->reasoning, enhanced_state, (size_t)enhanced_dim,
                                reasoning_result, (size_t)state_dim, REASONING_DEDUCTIVE);
+    }
     if (ret != 0) {
         memcpy(reasoning_result, state_vector, (size_t)state_dim * sizeof(float));
     }
@@ -1337,6 +1563,9 @@ int agi_system_execute(AGISystem* system, int chosen_option, float* execution_ou
     if (!system->config.enable_autonomous_execution) return 0;
     if (!capability_is_enabled(CAP_AUTONOMOUS_EXECUTION)) return 0;
 
+    /* ZSFEEE-FIX-DEEP-021: 执行结果状态跟踪 */
+    int execution_ok = 1;
+
     int active_task = -1;
     int i;
     for (i = 0; i < system->task_count; i++) {
@@ -1360,28 +1589,65 @@ int agi_system_execute(AGISystem* system, int chosen_option, float* execution_ou
     if (active_task >= 0) {
         AGITask* t = &system->tasks[active_task];
 
-        int action_count = t->action_count;
-        if (t->current_action_index < action_count && t->action_sequence) {
-            int idx = t->current_action_index * output_dim;
-            int copy_dim = output_dim;
-            if (idx + copy_dim <= action_count * output_dim) {
-                memcpy(execution_output, &t->action_sequence[idx], (size_t)copy_dim * sizeof(float));
-            }
-            t->current_action_index++;
-            if (t->current_action_index >= action_count) {
-                t->status = AGI_TASK_COMPLETED;
-                t->completed_at = time(NULL);
+        /* ZSFEEE-FIX-DEEP-021: 超时检测 — 任务运行超时标记为失败 */
+        time_t now = time(NULL);
+        if (t->started_at > 0) {
+            time_t elapsed = now - t->started_at;
+            if (elapsed > 120) {
+                t->status = AGI_TASK_FAILED;
+                t->completed_at = now;
+                t->error_code = -1;
+                snprintf(t->error_message, sizeof(t->error_message),
+                    "任务超时(运行%ld秒>120秒上限)", (long)elapsed);
                 system->status.active_task_count--;
-                system->status.completed_task_count++;
-                system->status.confidence = 0.8f;
-            } else {
-                t->progress = (float)t->current_action_index / (float)action_count;
+                system->status.failed_task_count++;
+                system->status.confidence = 0.3f;
+                execution_ok = 0;
             }
-        } else {
-            memset(execution_output, 0, (size_t)output_dim * sizeof(float));
+        }
+
+        if (t->status == AGI_TASK_RUNNING) {
+            int action_count = t->action_count;
+            if (t->current_action_index < action_count && t->action_sequence) {
+                int idx = t->current_action_index * output_dim;
+                int copy_dim = output_dim;
+                if (idx + copy_dim <= action_count * output_dim) {
+                    memcpy(execution_output, &t->action_sequence[idx], (size_t)copy_dim * sizeof(float));
+                }
+                t->current_action_index++;
+                if (t->current_action_index >= action_count) {
+                    t->status = AGI_TASK_COMPLETED;
+                    t->completed_at = time(NULL);
+                    system->status.active_task_count--;
+                    system->status.completed_task_count++;
+                    system->status.confidence = 0.8f;
+                } else {
+                    t->progress = (float)t->current_action_index / (float)action_count;
+                }
+            } else {
+                /* ZSFEEE-FIX-DEEP-021: 无动作序列时标记为错误 */
+                t->status = AGI_TASK_FAILED;
+                t->completed_at = time(NULL);
+                t->error_code = -2;
+                snprintf(t->error_message, sizeof(t->error_message),
+                    "无有效动作序列");
+                system->status.active_task_count--;
+                system->status.failed_task_count++;
+                system->status.confidence = 0.25f;
+                execution_ok = 0;
+                memset(execution_output, 0, (size_t)output_dim * sizeof(float));
+            }
         }
     } else {
         memset(execution_output, 0, (size_t)output_dim * sizeof(float));
+    }
+
+    /* ZSFEEE-FIX-DEEP-021: 统计执行结果 */
+    int any_failure = 0;
+    int any_success = 0;
+    for (i = 0; i < system->task_count; i++) {
+        if (system->tasks[i].status == AGI_TASK_COMPLETED) any_success = 1;
+        if (system->tasks[i].status == AGI_TASK_FAILED) any_failure = 1;
     }
 
     /* 多机器人/多设备任务委派：当多系统控制引擎可用时，将待处理任务委派给远程设备 */
@@ -1615,8 +1881,82 @@ int agi_system_cognitive_cycle(AGISystem* system, const float* sensory_input, in
         agi_system_plan(system, reasoning_result, state_dim, plan_buffer, &plan_steps);
     }
 
+    /* ZSFEEE-FIX-DEEP-023: 计划生成后向TaskScheduler提交新任务 */
+    if (system->task_scheduler) {
+        for (int ti = 0; ti < system->task_count; ti++) {
+            if (system->tasks[ti].status == AGI_TASK_PENDING) {
+                char ts_name[128];
+                snprintf(ts_name, sizeof(ts_name), "agi_%s", system->tasks[ti].name);
+                int ts_priority = (system->tasks[ti].priority == AGI_PRIORITY_CRITICAL) ? 3 :
+                                 (system->tasks[ti].priority == AGI_PRIORITY_HIGH)     ? 2 :
+                                 (system->tasks[ti].priority == AGI_PRIORITY_NORMAL)   ? 1 : 0;
+                /* 包装参数由调度器持有生命周期 */
+                TSWrapperArg* w = (TSWrapperArg*)safe_malloc(sizeof(TSWrapperArg));
+                if (w) {
+                    w->system = system;
+                    w->task_index = ti;
+                    task_scheduler_submit(system->task_scheduler, ts_name,
+                        ts_execute_task_wrapper, w,
+                        ts_priority, 120, NULL, 0);
+                }
+            }
+        }
+    }
+
+    /* ZSFEEE-FIX-DEEP-006: 决策前注入拉普拉斯稳定性指标 */
+    float stability_score = 0.5f;
+    {
+        float perceive_mag = 0.0f;
+        for (i = 0; i < state_dim && i < 64; i++)
+            perceive_mag += perceived_state[i] * perceived_state[i];
+        perceive_mag = sqrtf(perceive_mag / 64.0f + 1e-10f);
+        float stab_den[3];
+        stab_den[0] = 1.0f;
+        stab_den[1] = -0.3f * (perceive_mag > 1.0f ? 1.0f : perceive_mag);
+        stab_den[2] = 0.0f;
+        int is_stable = 0;
+        if (laplace_check_stability_fast(stab_den, 2, &is_stable, NULL) == 0) {
+            stability_score = is_stable ? 0.85f : 0.25f;
+        }
+    }
+
+    /* ZSFEEE-FIX-DEEP-006: 提取知识库注入权重 */
+    float knowledge_bias[AGI_STATE_VECTOR_DIM];
+    memset(knowledge_bias, 0, sizeof(knowledge_bias));
+    float knowledge_weight = 0.0f;
+    if (system->knowledge) {
+        KnowledgeEntry kb_results[8];
+        float kb_scores[8];
+        int found = knowledge_base_query_state_aware(
+            system->knowledge, NULL,
+            perceived_state, state_dim,
+            kb_results, 8, kb_scores);
+        if (found > 0) {
+            int used = (found < 4) ? found : 4;
+            float total_score = 0.0f;
+            for (int ki = 0; ki < used; ki++) total_score += kb_scores[ki];
+            if (total_score < 1e-6f) total_score = 1.0f;
+            for (int ki = 0; ki < used; ki++) {
+                float w = kb_scores[ki] / total_score;
+                int idx = (ki * 31 + 7) % state_dim;
+                knowledge_bias[idx] += kb_results[ki].weight * 0.15f * w;
+                knowledge_weight += w * 0.1f;
+            }
+            for (int ei = 0; ei < found; ei++) {
+                safe_free((void**)&kb_results[ei].subject);
+                safe_free((void**)&kb_results[ei].predicate);
+                safe_free((void**)&kb_results[ei].object);
+                safe_free((void**)&kb_results[ei].metadata);
+            }
+        }
+        if (knowledge_weight > 0.4f) knowledge_weight = 0.4f;
+    }
+
     transition_state(system, AGI_STATE_DECIDE);
     int chosen_option = 0;
+    float decision_confidence = 0.5f;
+    int used_decision_engine = 0;
+
     if (plan_steps > 0) {
         float plan_options[32];
         int nopts = (plan_steps < 16) ? plan_steps : 16;
@@ -1644,20 +1984,222 @@ int agi_system_cognitive_cycle(AGISystem* system, const float* sensory_input, in
             float risk = 0.2f + 0.3f * (1.0f - magnitude * align);
             if (util > 1.0f) util = 1.0f;
             if (risk > 1.0f) risk = 1.0f;
+            /* ZSFEEE-FIX-DEEP-006: 知识偏移修正效用和风险 */
+            int kb_idx = (i * 13 + 5) % state_dim;
+            float kb_mod = knowledge_bias[kb_idx] * 0.5f;
+            util = util * (1.0f + kb_mod) + knowledge_weight * 0.1f;
+            risk = risk * (1.0f + kb_mod * 0.5f);
+            if (util > 1.0f) util = 1.0f;
+            if (util < 0.0f) util = 0.0f;
+            if (risk > 1.0f) risk = 1.0f;
+            if (risk < 0.0f) risk = 0.0f;
             plan_options[i * 2] = util;
             plan_options[i * 2 + 1] = risk;
         }
-        agi_system_decide(system, plan_options, nopts, &chosen_option);
+
+        /* ZSFEEE-FIX-DEEP-006: 尝试使用 DecisionEngine 进行真实多目标决策 */
+        if (system->decision && decision_engine_is_enabled(system->decision)) {
+            /* 构造决策目标：效能最大化 + 风险最小化，混入稳定性权重 */
+            DecisionObjective objectives[2];
+            memset(objectives, 0, sizeof(objectives));
+            float util_weight = 0.6f + 0.15f * stability_score - 0.05f * knowledge_weight;
+            float risk_weight = 0.4f - 0.15f * stability_score + 0.05f * knowledge_weight;
+            if (util_weight > 0.9f) util_weight = 0.9f;
+            if (util_weight < 0.3f) util_weight = 0.3f;
+            if (risk_weight > 0.7f) risk_weight = 0.7f;
+            if (risk_weight < 0.1f) risk_weight = 0.1f;
+            float total_w = util_weight + risk_weight;
+            if (total_w > 0.0f) { util_weight /= total_w; risk_weight /= total_w; }
+
+            objectives[0].name = "效能";
+            objectives[0].weight = util_weight;
+            objectives[0].min_value = 0.0f;
+            objectives[0].max_value = 1.0f;
+            objectives[0].is_maximization = 1;
+            objectives[0].utility_type = UTILITY_LINEAR;
+
+            objectives[1].name = "风险";
+            objectives[1].weight = risk_weight;
+            objectives[1].min_value = 0.0f;
+            objectives[1].max_value = 1.0f;
+            objectives[1].is_maximization = 0;
+            objectives[1].utility_type = UTILITY_LINEAR;
+
+            /* 设置目标并清空旧方案 */
+            decision_engine_set_objectives(system->decision, objectives, 2);
+            decision_engine_clear_alternatives(system->decision);
+
+            /* 构造备选方案 */
+            DecisionAlternative alternatives[16];
+            char alt_ids[16][32];
+            float* alt_attrs[16];
+            memset(alternatives, 0, sizeof(alternatives));
+            memset(alt_attrs, 0, sizeof(alt_attrs));
+            for (i = 0; i < nopts; i++) {
+                snprintf(alt_ids[i], sizeof(alt_ids[i]), "plan_%d", i);
+                alt_attrs[i] = (float*)safe_malloc(2 * sizeof(float));
+                if (alt_attrs[i]) {
+                    alt_attrs[i][0] = plan_options[i * 2];
+                    alt_attrs[i][1] = plan_options[i * 2 + 1];
+                }
+                alternatives[i].id = alt_ids[i];
+                alternatives[i].attribute_values = alt_attrs[i];
+                alternatives[i].num_attributes = 2;
+            }
+
+            if (decision_engine_add_alternatives(system->decision, alternatives, (size_t)nopts) == 0) {
+                DecisionResult dresult;
+                memset(&dresult, 0, sizeof(dresult));
+                if (decision_engine_analyze(system->decision, &dresult) == 0) {
+                    /* 从结果中提取最优方案索引：遍历所有方案找最高综合效用 */
+                    int best_idx = 0;
+                    float best_util = -1e30f;
+                    for (int ai = 0; ai < (int)dresult.num_alternatives && ai < nopts; ai++) {
+                        if (dresult.alternatives[ai].overall_utility > best_util) {
+                            best_util = dresult.alternatives[ai].overall_utility;
+                            best_idx = ai;
+                        }
+                    }
+                    chosen_option = best_idx;
+                    decision_confidence = dresult.decision_confidence;
+                    used_decision_engine = 1;
+                    /* ZSFEEE-FIX-DEEP-006: 记录决策审计日志 */
+                    if (system->knowledge) {
+                        char log_key[64];
+                        snprintf(log_key, sizeof(log_key), "decision_%d_%ld", system->total_cycles, (long)time(NULL));
+                        KnowledgeEntry log_entry;
+                        memset(&log_entry, 0, sizeof(log_entry));
+                        log_entry.subject = log_key;
+                        log_entry.predicate = "DecisionEngine决策";
+                        log_entry.object = "认知循环";
+                        log_entry.type = KNOWLEDGE_OBSERVATION;
+                        log_entry.confidence = (decision_confidence > 0.6f) ? CONFIDENCE_HIGH :
+                                              (decision_confidence > 0.3f) ? CONFIDENCE_MEDIUM : CONFIDENCE_LOW;
+                        log_entry.source = SOURCE_INFERENCE;
+                        log_entry.weight = decision_confidence;
+                        log_entry.timestamp = (long)time(NULL);
+                        knowledge_base_add(system->knowledge, &log_entry);
+                    }
+                    decision_engine_clear_alternatives(system->decision);
+                } else {
+                    /* DecisionEngine 分析失败，回退到 MAUT */
+                    agi_system_decide(system, plan_options, nopts, &chosen_option);
+                    decision_confidence = system->status.confidence;
+                }
+                decision_result_free(&dresult);
+            } else {
+                /* 添加方案失败，回退到 MAUT */
+                agi_system_decide(system, plan_options, nopts, &chosen_option);
+                decision_confidence = system->status.confidence;
+            }
+
+            /* 释放临时属性数组 */
+            for (i = 0; i < nopts; i++) {
+                if (alt_attrs[i]) safe_free((void**)&alt_attrs[i]);
+            }
+        } else {
+            /* 无 DecisionEngine 或已禁用，使用简易 MAUT 回退 */
+            agi_system_decide(system, plan_options, nopts, &chosen_option);
+            decision_confidence = system->status.confidence;
+        }
     }
 
+    /* ZSFEEE-FIX-DEEP-006: 将决策置信度同步到系统状态 */
+    system->status.confidence = decision_confidence;
+
     transition_state(system, AGI_STATE_EXECUTE);
+    /* ZSFEEE-FIX-DEEP-023: 执行前调用TaskScheduler调度周期，优先执行调度器中的高优先级任务 */
+    if (system->task_scheduler) {
+        int ts_executed = task_scheduler_tick(system->task_scheduler);
+        if (ts_executed > 0) {
+            /* 调度器已执行了任务，将这些执行结果反映到AGI任务状态 */
+            int ts_total = 0, ts_pending = 0, ts_running = 0, ts_completed = 0, ts_preempted = 0, ts_failed = 0;
+            task_scheduler_get_stats(system->task_scheduler, &ts_total, &ts_pending,
+                                     &ts_running, &ts_completed, &ts_preempted, &ts_failed);
+            /* ZSFEEE-FIX-DEEP-023: 调度器任务完成/失败统计同步到AGI状态 */
+            system->status.completed_task_count = ts_completed;
+            system->status.failed_task_count = ts_failed;
+        }
+    }
+    /* ZSFEEE-FIX-DEEP-023: 如果TaskScheduler为NULL，回退到原有的任务数组方式 */
     agi_system_execute(system, chosen_option, output, output_dim);
 
+    /* ZSFEEE-FIX-DEEP-021: 执行后收集任务完成状态用于奖励计算 */
+    int exec_success_count = 0;
+    int exec_failure_count = 0;
+    int exec_timeout_count = 0;
+    {
+        int ti;
+        for (ti = 0; ti < system->task_count; ti++) {
+            if (system->tasks[ti].status == AGI_TASK_COMPLETED &&
+                system->tasks[ti].completed_at >= system->status.last_state_change - 2) {
+                exec_success_count++;
+            }
+            if (system->tasks[ti].status == AGI_TASK_FAILED) {
+                if (system->tasks[ti].error_code == -1) {
+                    exec_timeout_count++;
+                } else {
+                    exec_failure_count++;
+                }
+            }
+        }
+    }
+
+    /* ZSFEEE-FIX-DEEP-021: 执行后反馈到自我认知层（传递执行结果） */
+    if (system->self_cognition) {
+        self_cognition_update(system->self_cognition, SELF_COGNITION_PERFORMANCE);
+        /* ZSFEEE-FIX-DEEP-021: 执行失败触发自我反思 */
+        if (exec_failure_count > 0 || exec_timeout_count > 0) {
+            char cog_reflection_buf[2048];
+            if (self_cognition_reflect(system->self_cognition, cog_reflection_buf, sizeof(cog_reflection_buf)) > 0) {
+                system->status.reflection_count++;
+            }
+        }
+    }
+
+    /* ZSFEEE-FIX-DEEP-006: 将决策-执行结果写入知识库 */
+    if (system->knowledge && used_decision_engine) {
+        char exec_key[64];
+        snprintf(exec_key, sizeof(exec_key), "exec_%d_%ld", system->total_cycles, (long)time(NULL));
+        KnowledgeEntry exec_entry;
+        memset(&exec_entry, 0, sizeof(exec_entry));
+        exec_entry.subject = exec_key;
+        exec_entry.predicate = "执行反馈";
+        exec_entry.object = "决策执行结果";
+        exec_entry.type = KNOWLEDGE_OBSERVATION;
+        exec_entry.confidence = (decision_confidence > 0.6f) ? CONFIDENCE_HIGH :
+                               (decision_confidence > 0.3f) ? CONFIDENCE_MEDIUM : CONFIDENCE_LOW;
+        exec_entry.source = SOURCE_INFERENCE;
+        exec_entry.weight = decision_confidence * 0.8f;
+        exec_entry.timestamp = (long)time(NULL);
+        exec_entry.metadata = NULL;
+        exec_entry.metadata_size = 0;
+        knowledge_base_add(system->knowledge, &exec_entry);
+    }
+
+    /* ZSFEEE-FIX-DEEP-006: 决策置信度低于阈值 → 立即触发自我修正闭环 */
+    if (used_decision_engine && decision_confidence < 0.35f && system->correction && system->config.enable_self_correction) {
+        char corr_desc[256];
+        snprintf(corr_desc, sizeof(corr_desc),
+            "DecisionEngine决策置信度过低(%.2f)，需要修正决策参数",
+            decision_confidence);
+        DCErrorRecord err_rec;
+        DCCorrectionHypothesis hyp_rec;
+        float corr_eff = 0.0f;
+        int ret = dc_run_full_correction_pipeline(system->correction,
+            DC_ERROR_STRATEGY, corr_desc, 0.65f, &err_rec, &hyp_rec, &corr_eff);
+        if (ret == 0 && corr_eff > 0.3f) {
+            decision_confidence += corr_eff * 0.15f;
+            if (decision_confidence > 1.0f) decision_confidence = 1.0f;
+            system->status.confidence = decision_confidence;
+        }
+    }
+
     transition_state(system, AGI_STATE_LEARN);
-    /* 结构化奖励：多维度奖励信号融合
+    /* ZSFEEE-FIX-DEEP-021: 结构化奖励 — 多维度奖励信号融合
      * 1. 输出-输入MSE（基础学习信号）
      * 2. 新颖性奖励（鼓励探索未知状态）
-     * 3. 任务完成奖励（从任务执行状态获取）
+     * 3. 任务完成状态奖励（执行结果反馈到感知层）
      */
     float reward = 0.0f;
     const float reward_mse_weight = 0.5f;
@@ -1673,6 +2215,17 @@ int agi_system_cognitive_cycle(AGISystem* system, const float* sensory_input, in
     /* 新颖性奖励：基于认知历史距离 */
     float novelty = compute_novelty(system, perceived_state, state_dim);
     reward += novelty * reward_novelty_weight;
+    
+    /* ZSFEEE-FIX-DEEP-021: 任务完成状态奖励 — 将执行结果纳入奖励信号 */
+    if (exec_success_count > 0) {
+        reward += 0.5f * (float)exec_success_count;
+    }
+    if (exec_failure_count > 0) {
+        reward -= 0.3f * (float)exec_failure_count;
+    }
+    if (exec_timeout_count > 0) {
+        reward -= 0.1f * (float)exec_timeout_count;
+    }
     
     /* 任务进度奖励：有活跃任务时给予额外奖励 */
     int active_tasks = 0;
@@ -1894,6 +2447,27 @@ int agi_system_cognitive_cycle_multimodal(AGISystem* system,
         agi_system_plan(system, reasoning_result, state_dim, plan_buffer, &plan_steps);
     }
 
+    /* ZSFEEE-FIX-DEEP-023: 多模态: 计划生成后向TaskScheduler提交新任务 */
+    if (system->task_scheduler) {
+        for (int ti = 0; ti < system->task_count; ti++) {
+            if (system->tasks[ti].status == AGI_TASK_PENDING) {
+                char ts_name[128];
+                snprintf(ts_name, sizeof(ts_name), "mm_%s", system->tasks[ti].name);
+                int ts_priority = (system->tasks[ti].priority == AGI_PRIORITY_CRITICAL) ? 3 :
+                                 (system->tasks[ti].priority == AGI_PRIORITY_HIGH)     ? 2 :
+                                 (system->tasks[ti].priority == AGI_PRIORITY_NORMAL)   ? 1 : 0;
+                TSWrapperArg* w = (TSWrapperArg*)safe_malloc(sizeof(TSWrapperArg));
+                if (w) {
+                    w->system = system;
+                    w->task_index = ti;
+                    task_scheduler_submit(system->task_scheduler, ts_name,
+                        ts_execute_task_wrapper, w,
+                        ts_priority, 120, NULL, 0);
+                }
+            }
+        }
+    }
+
     transition_state(system, AGI_STATE_DECIDE);
     int chosen_option = 0;
     if (plan_steps > 0) {
@@ -1930,6 +2504,18 @@ int agi_system_cognitive_cycle_multimodal(AGISystem* system,
     }
 
     transition_state(system, AGI_STATE_EXECUTE);
+    /* ZSFEEE-FIX-DEEP-023: 多模态: 执行前调用TaskScheduler调度周期 */
+    if (system->task_scheduler) {
+        int ts_executed = task_scheduler_tick(system->task_scheduler);
+        if (ts_executed > 0) {
+            int ts_total = 0, ts_pending = 0, ts_running = 0, ts_completed = 0, ts_preempted = 0, ts_failed = 0;
+            task_scheduler_get_stats(system->task_scheduler, &ts_total, &ts_pending,
+                                     &ts_running, &ts_completed, &ts_preempted, &ts_failed);
+            system->status.completed_task_count = ts_completed;
+            system->status.failed_task_count = ts_failed;
+        }
+    }
+    /* ZSFEEE-FIX-DEEP-023: 如果TaskScheduler为NULL，回退到原有的任务数组方式 */
     agi_system_execute(system, chosen_option, output, output_dim);
 
     transition_state(system, AGI_STATE_LEARN);

@@ -161,6 +161,17 @@ const AutoLearnEntry* auto_learning_get_entry(const AutoLearningSystem* system, 
  */
 int auto_learning_export_to_knowledge_base(AutoLearningSystem* system, void* knowledge_base);
 
+/**
+ * @brief 从已有知识库推理新知识 (ZSFGGG-A-005修复)
+ * 基于已有三元组通过逻辑推理规则(传递性/对称性/逆关系)推导新三元组
+ * @param system 自主学习系统
+ * @param knowledge_base 知识库句柄
+ * @param max_new_entries 最大新条目数
+ * @return 成功推导的新条目数, 负数表示错误
+ */
+int auto_learning_infer_from_knowledge_base(AutoLearningSystem* system,
+                                            void* knowledge_base, int max_new_entries);
+
 void auto_learning_set_lnn_network(AutoLearningSystem* system, void* lnn);
 void* auto_learning_get_lnn_network(const AutoLearningSystem* system);
 int auto_learning_extract_features_with_lnn(AutoLearningSystem* system);

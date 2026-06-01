@@ -11,6 +11,7 @@
 #include "selflnn/learning/exploration_strategies.h"
 #include "selflnn/selflnn.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/core/optimizer.h"            /* ZSFEEE-FIX-035: 统一优化器替代独立SGD */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -130,6 +131,7 @@ struct ExploreState {
 
     /* 通用 */
     float learning_rate;
+    Optimizer* optimizer;             /**< ZSFEEE-FIX-035: 统一优化器实例 */
     int is_initialized;
 };
 
@@ -229,6 +231,14 @@ ExploreState* explore_icm_create(const ICMConfig* config) {
     state->icm_embed_s = (float*)safe_calloc(emb_dim, sizeof(float));
     state->icm_embed_s_next = (float*)safe_calloc(emb_dim, sizeof(float));
     state->icm_pred_s_next = (float*)safe_calloc(emb_dim, sizeof(float));
+
+    /* ZSFEEE-FIX-035: 创建统一SGD优化器（ICM使用fc_backward中的SGD更新） */
+    {
+        OptimizerConfig opt_cfg = {0};
+        opt_cfg.type = OPTIMIZER_SGD;
+        opt_cfg.learning_rate = config->learning_rate;
+        state->optimizer = optimizer_create(&opt_cfg);
+    }
 
     state->is_initialized = 1;
     return state;
@@ -425,6 +435,14 @@ ExploreState* explore_rnd_create(const RNDConfig* config) {
     state->count_table_size = 1024;
     state->count_dim = config->state_dim;
 
+    /* ZSFEEE-FIX-035: 创建统一SGD优化器（RND使用统一optimizer_step） */
+    {
+        OptimizerConfig opt_cfg = {0};
+        opt_cfg.type = OPTIMIZER_SGD;
+        opt_cfg.learning_rate = config->learning_rate;
+        state->optimizer = optimizer_create(&opt_cfg);
+    }
+
     state->is_initialized = 1;
     return state;
 }
@@ -487,7 +505,8 @@ float explore_rnd_train_batch(ExploreState* state,
         rnd_network_forward(state->rnd_predictor, obs, hidden_buf, pred_out);
         rnd_network_forward(state->rnd_target, obs, hidden_buf, target_out);
 
-        /* 反向传播预测网络 */
+        /* ZSFEEE-FIX-035: 使用统一优化器替代手动SGD权重更新。
+         * 先计算所有梯度到临时数组，再通过optimizer_step统一更新。 */
         float* grad_out = (float*)safe_calloc(emb_dim, sizeof(float));
         if (grad_out) {
             for (int i = 0; i < emb_dim; i++) {
@@ -495,15 +514,23 @@ float explore_rnd_train_batch(ExploreState* state,
                 total_error += (pred_out[i] - target_out[i]) * (pred_out[i] - target_out[i]);
             }
 
-            /* 输出层梯度 */
-            for (int o = 0; o < emb_dim; o++) {
-                for (int h = 0; h < hidden_dim; h++) {
-                    state->rnd_predictor->w2[o * hidden_dim + h] -= lr * grad_out[o] * hidden_buf[h];
+            /* 输出层梯度收集 */
+            size_t w2_total = (size_t)emb_dim * (size_t)hidden_dim;
+            float* w2_grads = (float*)safe_calloc(w2_total, sizeof(float));
+            float* b2_grads = (float*)safe_calloc((size_t)emb_dim, sizeof(float));
+            if (w2_grads && b2_grads) {
+                for (int o = 0; o < emb_dim; o++) {
+                    for (int h = 0; h < hidden_dim; h++) {
+                        w2_grads[(size_t)o * (size_t)hidden_dim + h] = grad_out[o] * hidden_buf[h];
+                    }
+                    b2_grads[o] = grad_out[o];
                 }
-                state->rnd_predictor->b2[o] -= lr * grad_out[o];
+                optimizer_step(state->optimizer, state->rnd_predictor->w2, w2_grads, w2_total, 0);
+                optimizer_step(state->optimizer, state->rnd_predictor->b2, b2_grads, (size_t)emb_dim, 0);
             }
+            safe_free((void**)&w2_grads); safe_free((void**)&b2_grads);
 
-            /* 隐藏层梯度（tanh导数）*/
+            /* 隐藏层梯度收集 */
             float* grad_hidden = (float*)safe_calloc(hidden_dim, sizeof(float));
             if (grad_hidden) {
                 for (int h = 0; h < hidden_dim; h++) {
@@ -515,12 +542,20 @@ float explore_rnd_train_batch(ExploreState* state,
                     }
                     grad_hidden[h] = gh * dh;
                 }
-                for (int h = 0; h < hidden_dim; h++) {
-                    for (int i = 0; i < state_dim; i++) {
-                        state->rnd_predictor->w1[h * state_dim + i] -= lr * grad_hidden[h] * obs[i];
+                size_t w1_total = (size_t)hidden_dim * (size_t)state_dim;
+                float* w1_grads = (float*)safe_calloc(w1_total, sizeof(float));
+                float* b1_grads = (float*)safe_calloc((size_t)hidden_dim, sizeof(float));
+                if (w1_grads && b1_grads) {
+                    for (int h = 0; h < hidden_dim; h++) {
+                        for (int i = 0; i < state_dim; i++) {
+                            w1_grads[(size_t)h * (size_t)state_dim + i] = grad_hidden[h] * obs[i];
+                        }
+                        b1_grads[h] = grad_hidden[h];
                     }
-                    state->rnd_predictor->b1[h] -= lr * grad_hidden[h];
+                    optimizer_step(state->optimizer, state->rnd_predictor->w1, w1_grads, w1_total, 0);
+                    optimizer_step(state->optimizer, state->rnd_predictor->b1, b1_grads, (size_t)hidden_dim, 0);
                 }
+                safe_free((void**)&w1_grads); safe_free((void**)&b1_grads);
                 safe_free((void**)&grad_hidden);
             }
             safe_free((void**)&grad_out);
@@ -983,6 +1018,10 @@ void explore_destroy(ExploreState* state) {
     safe_free((void**)&state->noisynet_noise_out);
 
     safe_free((void**)&state->count_table);
+
+    /* ZSFEEE-FIX-035: 释放统一优化器 */
+    if (state->optimizer) optimizer_free(state->optimizer);
+
     safe_free((void**)&state);
 }
 

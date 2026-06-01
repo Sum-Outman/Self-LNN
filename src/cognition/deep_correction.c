@@ -321,6 +321,39 @@ int dc_bayesian_diagnose(DCCorrectionSystem* dcs, int error_id, DCDiagnosisResul
     }
     if (!target_error) return -1;
 
+    /* ZSFEEE-FIX-002: 拉普拉斯频域分析 → 错误特征频谱诊断
+     * 在贝叶斯诊断前对错误特征向量进行拉普拉斯频域分析，
+     * 频谱稳定性高 → 错误偏向系统性（先验概率应偏向已知模式）；
+     * 频谱稳定性低 → 错误偏向随机性（先验概率应更均等分布）。 */
+    float laplace_stability = 0.5f;
+    float laplace_cutoff = 0.0f;
+    float laplace_bandwidth = 0.0f;
+    if (dcs->laplace_analyzer) {
+        float error_features[32];
+        memset(error_features, 0, sizeof(error_features));
+        error_features[0] = (float)target_error->type / 6.0f;
+        error_features[1] = target_error->severity;
+        error_features[2] = (float)(target_error->detected_at % 1000) / 1000.0f;
+        error_features[3] = target_error->resolved ? 1.0f : 0.0f;
+        const char* desc = target_error->description;
+        size_t dlen = strlen(desc);
+        for (size_t di = 0; di < dlen && di < 100; di++) {
+            int fi = 4 + (int)(di % 28);
+            error_features[fi] += (float)(unsigned char)desc[di] / 2550.0f;
+        }
+        float feature_norm = 0.0f;
+        for (int fi = 0; fi < 32; fi++) feature_norm += error_features[fi] * error_features[fi];
+        if (feature_norm > 1e-10f) {
+            feature_norm = sqrtf(feature_norm);
+            for (int fi = 0; fi < 32; fi++) error_features[fi] /= feature_norm;
+        }
+
+        float time_const = 0.15f;
+        lnn_laplace_analyze_network_dynamics(dcs->laplace_analyzer,
+            time_const, error_features, 32,
+            &laplace_stability, &laplace_cutoff, &laplace_bandwidth);
+    }
+
     /* 选择与错误类型匹配的预设原因节点 */
     int node_idx = 0;
     for (int p = 0; p < g_bayes_presets_count && node_idx < DC_MAX_BAYES_NODES; p++) {
@@ -346,6 +379,15 @@ int dc_bayesian_diagnose(DCCorrectionSystem* dcs, int error_id, DCDiagnosisResul
         /* 根据严重度整体缩放 */
         prior *= (1.0f + target_error->severity * 0.3f);
         if (prior > 0.99f) prior = 0.99f;
+
+        /* ZSFEEE-FIX-002: 拉普拉斯频域稳定性调整先验概率
+         * 高稳定性 → 错误偏向系统性，增强先验置信度
+         * 低稳定性 → 错误偏向随机性，降低先验向均等分布靠拢 */
+        {
+            float lap_weight = 0.6f + 0.4f * laplace_stability;
+            prior = prior * lap_weight + 0.25f * (1.0f - lap_weight);
+        }
+
         node->prior_prob = prior;
 
         /* 设置条件概率表（给定父节点组合的后验） */
@@ -1548,18 +1590,14 @@ int dc_run_full_correction_pipeline(DCCorrectionSystem* dcs,
     if (!dcs || !error_description) return -1;
     if (!dcs->enabled) return -1;
 
-    /* Step 1: 检测错误并记录 — 内联实现 */
-    if (dcs->error_count >= DC_MAX_ERRORS) return -1;
-    int error_id = ++dcs->error_count;
-    DCErrorRecord* e = &dcs->errors[error_id - 1];
-    memset(e, 0, sizeof(DCErrorRecord));
-    e->error_id = error_id;
-    e->type = error_type;
-    if (severity <= 0.0f) severity = 0.5f;
-    e->severity = severity;
-    if (error_description) strncpy(e->description, error_description, 511);
+    /* Step 1: 检测错误并记录 — 调用统一接口 */
+    int error_id = dc_report_error(dcs, error_type, error_description, "full_pipeline", severity);
+    if (error_id < 0) return -1;
 
-    if (out_error) *out_error = *e;
+    if (out_error) {
+        DCErrorRecord* e = &dcs->errors[error_id - 1];
+        *out_error = *e;
+    }
 
     /* Step 2: 分析根因 */
     DCDiagnosisResult diag_result;

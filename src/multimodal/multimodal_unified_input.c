@@ -198,6 +198,40 @@ static int unified_input_dynamic_process(
     float* combined = (float*)safe_calloc(SELFLNN_UNIFIED_PROJECTION_DIM, sizeof(float));
     if (!combined) return -1;
 
+    /* P007: 严格的维度验证和边界检查 —— 防止跨模态数据污染 */
+    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        if (modality_present[m]) {
+            if (!signals[m] || signal_sizes[m] == 0) {
+                log_warning("[统一输入] 模态%d标记为存在但信号数据无效，强制关闭", m);
+                ((int*)modality_present)[m] = 0;
+                continue;
+            }
+            if (signal_sizes[m] > SELFLNN_MAX_CONTROL_DIM) {
+                log_warning("[统一输入] 模态%d维度(%zu)超出上限(%d)，截断处理",
+                           m, (size_t)signal_sizes[m], SELFLNN_MAX_CONTROL_DIM);
+                ((size_t*)signal_sizes)[m] = SELFLNN_MAX_CONTROL_DIM;
+            }
+        } else if (signals[m] && signal_sizes[m] > 0) {
+            log_warning("[统一输入] 模态%d标记为不存在但信号数据有效，修正为存在", m);
+            ((int*)modality_present)[m] = 1;
+        }
+    }
+    /* P007: 计算总输入维度并验证共享缓冲区容量 */
+    size_t total_input_dim = 0;
+    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        if (modality_present[m] && signals[m] && signal_sizes[m] > 0) {
+            total_input_dim += signal_sizes[m];
+        }
+    }
+    if (total_input_dim == 0) {
+        safe_free((void**)&combined);
+        return -1;
+    }
+    if (total_input_dim > SELFLNN_UNIFIED_INPUT_DIM * 4) {
+        log_warning("[统一输入] 总输入维度(%zu)异常过大，可能存在数据污染，限制为%d",
+                   total_input_dim, SELFLNN_UNIFIED_INPUT_DIM * 4);
+    }
+
     /* 步骤1: 对每个活跃模态进行线性投影并求和
      * ZSF-005修复: 添加跨模态维度差异均衡
      * 不同模态维度差异巨大（视觉1024 vs 触觉64），直接投影求和导致

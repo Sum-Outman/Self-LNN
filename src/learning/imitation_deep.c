@@ -369,16 +369,44 @@ int im_irl_infer_reward(ImitationDeepLearner* idl, const ImDemonstration* demo, 
                 /* 反向传播：最小化特征期望差异 */
                 float loss = 0.0f;
                 lnn_backward(idl->irl_network, lnn_target, &loss);
-                
-                /* 学习率衰减 */
-                float lr = irl_learning_rate * (1.0f - (float)iter / (float)irl_iterations);
-                /* 使用梯度下降更新权重（lnn_backward已计算梯度） */
+
+                /* ZSFQQ-Q026: 使用Adam优化器替代原始SGD。
+                 * lnn_backward已计算梯度累积，此处通过Adam更新参数。
+                 * 简单的 params[p] -= lr * grads[p] 忽略了动量和自适应学习率。 */
                 float* params = lnn_get_parameters(idl->irl_network);
                 float* grads  = lnn_get_gradients(idl->irl_network);
                 if (params && grads) {
                     size_t param_count = lnn_get_parameter_count(idl->irl_network);
-                    for (size_t p = 0; p < param_count; p++) {
-                        params[p] -= lr * grads[p];
+                    /* Adam参数 */
+                    static float beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
+                    static size_t adam_t = 0;
+                    static float* adam_m = NULL;
+                    static float* adam_v = NULL;
+                    static size_t adam_capacity = 0;
+                    float lr = irl_learning_rate * (1.0f - (float)iter / (float)irl_iterations);
+                    if (lr < 1e-6f) lr = 1e-6f;
+
+                    /* 动态扩展Adam缓冲区 */
+                    if (!adam_m || param_count > adam_capacity) {
+                        safe_free((void**)&adam_m);
+                        safe_free((void**)&adam_v);
+                        adam_capacity = param_count;
+                        adam_m = (float*)safe_calloc(adam_capacity, sizeof(float));
+                        adam_v = (float*)safe_calloc(adam_capacity, sizeof(float));
+                        adam_t = 0;
+                    }
+
+                    if (adam_m && adam_v) {
+                        adam_t++;
+                        float inv_m = 1.0f / (1.0f - powf(beta1, (float)adam_t));
+                        float inv_v = 1.0f / (1.0f - powf(beta2, (float)adam_t));
+                        for (size_t p = 0; p < param_count; p++) {
+                            adam_m[p] = beta1 * adam_m[p] + (1.0f - beta1) * grads[p];
+                            adam_v[p] = beta2 * adam_v[p] + (1.0f - beta2) * grads[p] * grads[p];
+                            float m_hat = adam_m[p] * inv_m;
+                            float v_hat = adam_v[p] * inv_v;
+                            params[p] -= lr * m_hat / (sqrtf(v_hat) + eps);
+                        }
                     }
                 }
             }

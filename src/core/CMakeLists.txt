@@ -66,6 +66,7 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/cfc_enhanced.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/cfc_network.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/common.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/platform_types.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/dynamics.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/state.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/errors.h

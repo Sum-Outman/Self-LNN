@@ -183,6 +183,19 @@ int swarm_consensus_commit_entry(SwarmEnhancedEngine* engine, long index);
 int swarm_consensus_get_leader(SwarmEnhancedEngine* engine);
 NodeState swarm_consensus_get_state(SwarmEnhancedEngine* engine);
 
+/* H-015修复: Raft协议完整补充 — 心跳/日志复制/提交推进/选举超时/投票接收 */
+int swarm_consensus_send_heartbeat(SwarmEnhancedEngine* engine);
+int swarm_consensus_replicate_log(SwarmEnhancedEngine* engine);
+int swarm_consensus_advance_commit_index(SwarmEnhancedEngine* engine);
+int swarm_consensus_handle_request_vote(SwarmEnhancedEngine* engine, int candidate_id,
+                                         float candidate_term, long candidate_log_index,
+                                         long candidate_log_term);
+int swarm_consensus_handle_append_entries(SwarmEnhancedEngine* engine, int leader_id,
+                                           float leader_term, long prev_log_index,
+                                           long prev_log_term, const ConsensusLogEntry* entries,
+                                           int entry_count, long leader_commit);
+int swarm_consensus_election_timeout_check(SwarmEnhancedEngine* engine);
+
 int swarm_liquid_comm_create(SwarmEnhancedEngine* engine, int num_nodes, int state_dim, int hidden_dim);
 int swarm_liquid_comm_send(SwarmEnhancedEngine* engine, int channel_id, const LiquidMessage* message);
 int swarm_liquid_comm_receive(SwarmEnhancedEngine* engine, int channel_id, LiquidMessage* message, int block);

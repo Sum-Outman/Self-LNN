@@ -1375,6 +1375,39 @@ void math_standardize(float* data, size_t n) {
     }
 }
 
+/**
+ * @brief FNV-1a 64位哈希函数实现
+ *
+ * 使用标准FNV-1a参数：offset_basis = 14695981039346656037，prime = 1099511628211。
+ * 广泛用于哈希表、一致性哈希环、数据去重等场景。
+ */
+uint64_t math_fnv1a_hash64(const void* key, size_t len) {
+    if (!key || len == 0) return 0;
+    uint64_t hash = 14695981039346656037ULL;
+    const unsigned char* data = (const unsigned char*)key;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= data[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+/**
+ * @brief FNV-1a 32位哈希函数实现
+ *
+ * 使用32位FNV-1a参数：offset_basis = 2166136261，prime = 16777619。
+ */
+uint32_t math_fnv1a_hash32(const void* key, size_t len) {
+    if (!key || len == 0) return 0;
+    uint32_t hash = 2166136261u;
+    const unsigned char* data = (const unsigned char*)key;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 /* F-023修复：统一余弦相似度 */
 float math_cosine_similarity(const float* a, const float* b, size_t dim) {
     if (!a || !b || dim == 0) return 0.0f;

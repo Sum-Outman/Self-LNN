@@ -36,6 +36,14 @@ typedef SOCKET ws_socket_t;
 #include <errno.h>
 #include <sys/select.h>
 #include <pthread.h>
+
+/* ZSFEEE-FIX-021: Linux使用epoll，macOS/BSD使用kqueue替代select */
+#ifdef __linux__
+#include <sys/epoll.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#include <sys/event.h>
+#endif
+
 typedef int ws_socket_t;
 #define WS_INVALID (-1)
 #define WS_ERROR (-1)
@@ -67,6 +75,12 @@ struct WSPushServer {
     long last_tick;
     void* mutex;
     void* accept_thread;
+    /* ZSFEEE-FIX-021: epoll/kqueue文件描述符（Linux/macOS/BSD高性能I/O多路复用） */
+#ifdef __linux__
+    int epoll_fd;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    int kqueue_fd;
+#endif
 };
 
 static int ws_global_init(void)
@@ -338,6 +352,21 @@ static void* ws_push_accept_thread(void* arg)
 {
     WSPushServer* srv = (WSPushServer*)arg;
     if (!srv) return 1;
+
+#ifdef __linux__
+    /* ZSFEEE-FIX-021: Linux epoll等待新连接 */
+    struct epoll_event events[1];
+    while (srv->running) {
+        int nfds = epoll_wait(srv->epoll_fd >= 0 ? srv->epoll_fd : 0, events, 1, 100);
+        if (nfds <= 0) continue;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    /* ZSFEEE-FIX-021: macOS/BSD kqueue等待新连接 */
+    struct kevent events[1];
+    struct timespec ts = {0, 100000000}; /* 100ms */
+    while (srv->running) {
+        int nfds = kevent(srv->kqueue_fd >= 0 ? srv->kqueue_fd : 0, NULL, 0, events, 1, &ts);
+        if (nfds <= 0) continue;
+#else
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 100000;
@@ -348,6 +377,7 @@ static void* ws_push_accept_thread(void* arg)
         FD_SET(srv->listen_sock, &readfds);
         int sel = select(0, &readfds, NULL, NULL, &tv);
         if (sel <= 0) continue;
+#endif
 
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
@@ -396,6 +426,12 @@ WSPushServer* ws_push_server_create(int port)
         return NULL;
     }
     srv->last_tick = (long)time(NULL);
+    /* ZSFEEE-FIX-021: 初始化epoll/kqueue FD */
+#ifdef __linux__
+    srv->epoll_fd = -1;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    srv->kqueue_fd = -1;
+#endif
     return srv;
 }
 
@@ -428,6 +464,25 @@ int ws_push_server_start(WSPushServer* srv)
     }
     ws_set_nonblock(sock, 1);
     srv->listen_sock = sock;
+
+    /* ZSFEEE-FIX-021: 创建epoll/kqueue I/O多路复用FD */
+#ifdef __linux__
+    srv->epoll_fd = epoll_create1(0);
+    if (srv->epoll_fd >= 0) {
+        struct epoll_event ev;
+        ev.events = EPOLLIN;
+        ev.data.fd = sock;
+        epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, sock, &ev);
+    }
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    srv->kqueue_fd = kqueue();
+    if (srv->kqueue_fd >= 0) {
+        struct kevent ev;
+        EV_SET(&ev, sock, EVFILT_READ, EV_ADD, 0, 0, NULL);
+        kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
+    }
+#endif
+
     srv->running = 1;
     srv->last_tick = (long)time(NULL);
 #ifdef _WIN32
@@ -466,6 +521,18 @@ void ws_push_server_stop(WSPushServer* srv)
         WS_CLOSE(srv->listen_sock);
         srv->listen_sock = WS_INVALID;
     }
+    /* ZSFEEE-FIX-021: 清理epoll/kqueue FD */
+#ifdef __linux__
+    if (srv->epoll_fd >= 0) {
+        close(srv->epoll_fd);
+        srv->epoll_fd = -1;
+    }
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    if (srv->kqueue_fd >= 0) {
+        close(srv->kqueue_fd);
+        srv->kqueue_fd = -1;
+    }
+#endif
 }
 
 void ws_push_server_destroy(WSPushServer* srv)
@@ -602,6 +669,108 @@ int ws_push_get_next_available_client(WSPushServer* srv)
 int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
 {
     if (!srv || !srv->running) return -1;
+
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    /* ZSFEEE-FIX-021: Linux使用epoll，macOS/BSD使用kqueue替代select */
+#ifdef __linux__
+    if (srv->epoll_fd >= 0) {
+        struct epoll_event evs[WS_MAX_CLIENTS + 1];
+        int nfds = epoll_wait(srv->epoll_fd, evs, WS_MAX_CLIENTS + 1, timeout_ms);
+        if (nfds < 0) return 0;
+        for (int i = 0; i < nfds; i++) {
+            int fd = evs[i].data.fd;
+            if (fd == srv->listen_sock) {
+                struct sockaddr_in client_addr;
+                socklen_t addr_len = sizeof(client_addr);
+                ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
+                if (client != WS_INVALID) {
+                    ws_set_nonblock(client, 1);
+                    mutex_lock(srv->mutex);
+                    int found = -1;
+                    for (int j = 0; j < WS_MAX_CLIENTS; j++) {
+                        if (!srv->clients[j].active) { found = j; break; }
+                    }
+                    if (found >= 0) {
+                        srv->clients[found].active = 1;
+                        mutex_unlock(srv->mutex);
+                        ws_client_init(&srv->clients[found], client);
+                        /* 注册新客户端到epoll */
+                        struct epoll_event ev;
+                        ev.events = EPOLLIN | EPOLLRDHUP;
+                        ev.data.fd = client;
+                        epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, client, &ev);
+                        if (ws_do_handshake(client) != 0) {
+                            epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, client, NULL);
+                            ws_client_close(&srv->clients[found]);
+                        }
+                    } else {
+                        mutex_unlock(srv->mutex);
+                        WS_CLOSE(client);
+                    }
+                }
+            } else {
+                /* 客户端FD事件处理 */
+                for (int j = 0; j < WS_MAX_CLIENTS; j++) {
+                    if (srv->clients[j].active && srv->clients[j].sock == fd) {
+                        ws_client_process(&srv->clients[j]);
+                        break;
+                    }
+                }
+            }
+        }
+        return nfds;
+    }
+#else
+    /* kqueue路径 */
+    if (srv->kqueue_fd >= 0) {
+        struct kevent evs[WS_MAX_CLIENTS + 1];
+        struct timespec ts = {timeout_ms / 1000, (timeout_ms % 1000) * 1000000L};
+        int nfds = kevent(srv->kqueue_fd, NULL, 0, evs, WS_MAX_CLIENTS + 1, &ts);
+        if (nfds < 0) return 0;
+        for (int i = 0; i < nfds; i++) {
+            int fd = (int)(intptr_t)evs[i].udata;
+            if (fd == srv->listen_sock) {
+                struct sockaddr_in client_addr;
+                socklen_t addr_len = sizeof(client_addr);
+                ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
+                if (client != WS_INVALID) {
+                    ws_set_nonblock(client, 1);
+                    mutex_lock(srv->mutex);
+                    int found = -1;
+                    for (int j = 0; j < WS_MAX_CLIENTS; j++) {
+                        if (!srv->clients[j].active) { found = j; break; }
+                    }
+                    if (found >= 0) {
+                        srv->clients[found].active = 1;
+                        mutex_unlock(srv->mutex);
+                        ws_client_init(&srv->clients[found], client);
+                        struct kevent ev;
+                        EV_SET(&ev, client, EVFILT_READ, EV_ADD, 0, 0, (void*)(intptr_t)client);
+                        kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
+                        if (ws_do_handshake(client) != 0) {
+                            EV_SET(&ev, client, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+                            kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
+                            ws_client_close(&srv->clients[found]);
+                        }
+                    } else {
+                        mutex_unlock(srv->mutex);
+                        WS_CLOSE(client);
+                    }
+                }
+            } else {
+                for (int j = 0; j < WS_MAX_CLIENTS; j++) {
+                    if (srv->clients[j].active && srv->clients[j].sock == fd) {
+                        ws_client_process(&srv->clients[j]);
+                        break;
+                    }
+                }
+            }
+        }
+        return nfds;
+    }
+#endif
+#endif
+    /* 回退到select（Windows或不支持epoll/kqueue的场景） */
     fd_set rfds, wfds;
     FD_ZERO(&rfds);
     FD_ZERO(&wfds);

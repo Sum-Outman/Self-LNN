@@ -1,8 +1,8 @@
-#ifndef SELFLNN_DEEP_REFLECTION_H
+﻿#ifndef SELFLNN_DEEP_REFLECTION_H
 #define SELFLNN_DEEP_REFLECTION_H
 
 #include "selflnn/core/tensor.h"
-#include "selflnn/metacognition.h"
+#include "selflnn/cognition/metacognition.h"
 
 #ifdef __cplusplus
 extern "C" {

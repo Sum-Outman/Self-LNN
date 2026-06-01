@@ -10,6 +10,7 @@
  */
 
 #define _CRT_NONSTDC_NO_DEPRECATE
+#define SELFLNN_KNOWLEDGE_IMPL
 
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/knowledge/cfc_knowledge_embedding.h"
@@ -19,7 +20,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/xorshift_prng.h"
-#include "selflnn/abstraction.h"
+#include "selflnn/cognition/abstraction.h"
 #include "selflnn/core/laplace.h"
 
 #include <stdlib.h>
@@ -55,6 +56,12 @@ static void json_escape_into(char* dst, size_t dst_size, const char* src);
  * 写锁内调用，回调应轻量（设置标志位），禁止在回调内再次操作知识库。 */
 static KnowledgeUpdateCallback g_kb_update_notify = NULL;
 static void* g_kb_notify_user_data = NULL;
+
+/* 相似度结果结构体（去重检测用） */
+typedef struct {
+    float similarity;
+    size_t index;
+} SimilarityResult;
 
 /**
  * @brief 计算文本匹配分数（0-3分）
@@ -144,6 +151,7 @@ struct KnowledgeBase {
     size_t capacity;                    /**< 数组容量 */
     size_t size;                        /**< 当前大小 */
     size_t max_entries;                 /**< 最大条目数（0表示无限制） */
+    size_t entry_count;                 /**< 条目计数（与size等价，兼容不同命名） */
     int next_id;                        /**< 下一个ID */
     
     /* 倒排索引结构（高效检索） */
@@ -597,6 +605,7 @@ KnowledgeBase* knowledge_base_create(size_t max_entries) {
     
     kb->capacity = initial_capacity;
     kb->size = 0;
+    kb->entry_count = 0;
     kb->max_entries = max_entries;
     kb->next_id = 1;
     
@@ -738,6 +747,62 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
                (new_capacity - kb->size) * sizeof(InternalKnowledgeEntry));
     }
     
+    /* ZSFZX-FIX-DEDUP: 在分配新条目之前检查重复
+     * 原knowledge_base_add()无任何去重检查，导致8条调用路径可添加重复知识
+     * 使用字符串相似度检测已有条目与新条目的重复度，高于阈值则跳过 */
+    if (kb->size > 0 && entry->subject && entry->predicate && entry->object) {
+        /* 仅在知识库已有数据时执行去重（前50条允许快速初始化） */
+        if (kb->size > 50) {
+            SimilarityResult sim_results[4];
+            memset(sim_results, 0, sizeof(sim_results));
+            int sim_count = 0;
+            /* 在内层遍历知识库计算相似度，同时获取准确条目索引 */
+            for (size_t i = 0; i < kb->size && sim_count < 4; i++) {
+                KnowledgeEntry* existing = &kb->entries[i].entry;
+                if (!existing->subject || !existing->predicate || !existing->object) continue;
+                float subj_sim = knowledge_string_similarity(entry->subject, existing->subject);
+                float pred_sim = knowledge_string_similarity(entry->predicate, existing->predicate);
+                float obj_sim = knowledge_string_similarity(entry->object, existing->object);
+                float total_sim = (subj_sim + pred_sim + obj_sim) / 3.0f;
+                if (total_sim >= 0.75f) {
+                    sim_results[sim_count].similarity = total_sim;
+                    sim_results[sim_count].index = i;
+                    sim_count++;
+                }
+            }
+            if (sim_count > 0) {
+                float avg_sim = 0.0f;
+                for (int si = 0; si < sim_count && si < 4; si++) {
+                    avg_sim += sim_results[si].similarity;
+                }
+                avg_sim /= (float)sim_count;
+                /* 平均相似度>0.85或单个高度匹配>0.95视为重复 */
+                if (avg_sim > 0.85f || sim_results[0].similarity > 0.95f) {
+                    /* ZSFZX-FIX-R4-3: 合并策略增强 - 来源优先级保留
+                     * SOURCE_USER(3) > SOURCE_LEARNING(2) > SOURCE_PRESET(8)
+                     * 用户手动输入的条目不应被自动学习覆盖 */
+                    InternalKnowledgeEntry* existing = &kb->entries[sim_results[0].index];
+                    /* 高优先级来源条目不被低优先级来源覆盖 */
+                    int existing_src_prio = (existing->entry.source == SOURCE_USER) ? 3 :
+                        (existing->entry.source == SOURCE_LEARNING || existing->entry.source == SOURCE_AUTO_LEARN) ? 2 : 1;
+                    int new_src_prio = (entry->source == SOURCE_USER) ? 3 :
+                        (entry->source == SOURCE_LEARNING || entry->source == SOURCE_AUTO_LEARN) ? 2 : 1;
+                    if (new_src_prio > existing_src_prio) {
+                        /* 高优先级来源覆盖: 更新来源标记 */
+                        existing->entry.source = entry->source;
+                    }
+                    if (entry->weight > existing->entry.weight) {
+                        existing->entry.weight = entry->weight;
+                    }
+                    existing->entry.timestamp = entry->timestamp > 0 ?
+                        entry->timestamp : (int64_t)time(NULL);
+                    KB_WUNLOCK(kb);
+                    return 0; /* 视为成功：条目已存在，已更新 */
+                }
+            }
+        }
+    }
+
     /* 分配新条目 */
     InternalKnowledgeEntry* internal_entry = &kb->entries[kb->size];
     
@@ -755,6 +820,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     }
     
     kb->size++;
+    kb->entry_count = kb->size;
 
     /* ZSFWS-M024修复: 新知识点加入后清除搜索结果缓存
      * 缓存的查询结果可能因新知识加入而过期，立即失效避免返回过期数据 */
@@ -1524,6 +1590,7 @@ KnowledgeBase* knowledge_base_load(const char* filename) {
         
         internal_entry->ref_count = 1;
         kb->size++;
+        kb->entry_count = kb->size;
     }
     
     fclose(file);
@@ -5789,507 +5856,17 @@ int knowledge_base_retrain_embeddings(KnowledgeBase* kb, int epochs) {
 }
 
 /* ============================================================================
- * 预置知识数据：当系统首次启动时加载的基础知识
- * 所有知识以三元组（主体-谓词-客体）形式存储
+ * ZSFEEE-FIX-008: 种子知识已从硬编码迁移至 config/seed_knowledge.json
+ * 
+ * 原281条硬编码三元组种子知识（PresetKnowledgeEntry数组）已全部迁移至
+ * config/seed_knowledge.json 配置文件。
+ * 
+ * 加载策略改为强制从JSON文件加载，不再使用编译时内嵌数据。
+ * 如果JSON文件加载失败，知识库将以空库启动（记录错误日志）。
+ * 
+ * 用户可通过编辑 config/seed_knowledge.json 自定义种子知识，
+ * 无需重新编译。格式详见 knowledge_base_import_seed_json() 函数。
  * ============================================================================ */
-
-#define PRESET_KNOWLEDGE_COUNT 281
-
-typedef struct {
-    const char* subject;
-    const char* predicate;
-    const char* object;
-    KnowledgeType type;
-    KnowledgeConfidence confidence;
-    float weight;
-} PresetKnowledgeEntry;
-
-#ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
-static const PresetKnowledgeEntry g_preset_knowledge[] = {
-    /* === 数学基础 === */
-    {"1", "是", "自然数", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"0", "是", "整数", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"圆周率", "近似值", "3.14159", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"自然常数e", "近似值", "2.71828", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"勾股定理", "描述", "直角三角形两直角边平方和等于斜边平方", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"加法", "是", "基本算术运算", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"减法", "是", "基本算术运算", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"乘法", "是", "基本算术运算", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"除法", "是", "基本算术运算", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"质数", "定义", "只能被1和自身整除的大于1的自然数", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"2", "是", "最小的质数", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"微积分", "发明者", "牛顿和莱布尼茨", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"集合", "是", "数学基本概念", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"函数", "定义", "从一个集合到另一个集合的映射关系", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"极限", "是", "微积分的基础概念", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"导数", "表示", "函数的变化率", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"积分", "是", "导数的逆运算", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"矩阵", "是", "二维数组的数学表示", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"概率", "定义", "事件发生的可能性度量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"统计学", "是", "收集、分析、解释数据的科学", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    
-    /* === 物理基础 === */
-    {"光速", "数值", "299792458米/秒", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"牛顿第一定律", "内容", "物体在不受外力时保持静止或匀速直线运动", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"牛顿第二定律", "公式", "F=ma", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"牛顿第三定律", "内容", "作用力与反作用力大小相等方向相反", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"万有引力", "发现者", "牛顿", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"能量守恒定律", "内容", "能量不会凭空产生或消失只会转化", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"相对论", "提出者", "爱因斯坦", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"量子力学", "描述", "微观粒子的运动规律", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"电磁波", "包括", "无线电波、微波、红外线、可见光、紫外线、X射线、伽马射线", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"声音", "传播介质", "空气、液体、固体", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"重力加速度", "约等于", "9.8米/秒²", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"绝对零度", "等于", "-273.15摄氏度", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"欧姆定律", "公式", "V=IR", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"原子", "组成", "质子、中子、电子", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"分子", "定义", "由两个或以上原子组成的粒子", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"熵", "描述", "系统的无序程度", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"热力学第二定律", "内容", "孤立系统的熵不会减少", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"激光", "特点", "单色性好、方向性好、相干性好", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"超导", "现象", "某些材料在低温下电阻为零", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"核聚变", "是", "轻原子核结合成重原子核释放能量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    
-    /* === 化学基础 === */
-    {"水", "化学式", "H₂O", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"氧气", "化学式", "O₂", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"二氧化碳", "化学式", "CO₂", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"元素周期表", "创建者", "门捷列夫", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"氢", "是", "宇宙中最丰富的元素", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"碳", "是", "有机化学的基础元素", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"铁", "符号", "Fe", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"金", "符号", "Au", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"pH值", "范围", "0到14", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"酸", "pH值", "小于7", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"碱", "pH值", "大于7", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    
-    /* === 生物基础 === */
-    {"细胞", "是", "生命的基本单位", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"DNA", "全称", "脱氧核糖核酸", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"RNA", "全称", "核糖核酸", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"蛋白质", "由", "氨基酸组成", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"人体的细胞数量", "约", "37万亿个", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.8f},
-    {"光合作用", "定义", "植物利用光能合成有机物", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"进化论", "提出者", "达尔文", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"自然选择", "是", "进化的主要机制", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"基因", "是", "遗传信息的基本单位", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"人类染色体数量", "是", "46条（23对）", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"线粒体", "功能", "细胞的能量工厂", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"细菌", "是", "单细胞微生物", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"病毒", "特点", "没有细胞结构的感染性颗粒", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"免疫系统", "功能", "保护身体免受病原体侵害", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"神经元", "是", "神经系统的基本单位", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    
-    /* === 地理基础 === */
-    {"地球", "是", "太阳系第三颗行星", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"地球的直径", "约", "12742公里", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"地球的自转周期", "约", "24小时", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"地球的公转周期", "约", "365.25天", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"太阳", "是", "太阳系的中心恒星", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"月球", "是", "地球唯一的天然卫星", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"太平洋", "是", "地球上最大的海洋", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"珠穆朗玛峰", "是", "地球最高峰", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"赤道", "长度", "约40075公里", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"七大洲", "包括", "亚洲、非洲、北美洲、南美洲、南极洲、欧洲、大洋洲", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"中国", "位于", "亚洲东部", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"中国的面积", "约", "960万平方公里", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"中国的邻国数量", "是", "14个陆地邻国", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"长江", "是", "中国最长的河流", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"黄河", "是", "中国的母亲河", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    
-    /* === 计算机科学基础 === */
-    {"计算机", "由", "硬件和软件组成", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"二进制", "使用", "0和1两个数字", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"比特", "是", "信息的最小单位", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"字节", "等于", "8比特", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"CPU", "全称", "中央处理器", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"GPU", "全称", "图形处理器", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"内存", "类型", "RAM", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"操作系统", "功能", "管理计算机硬件和软件资源", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"算法", "定义", "解决特定问题的步骤序列", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"数据结构", "包括", "数组、链表、栈、队列、树、图、哈希表", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"神经网络", "逼近", "人脑神经元的工作方式", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"人工智能", "目标", "使机器具备学习表示和自主决策的能力", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"深度学习", "是", "机器学习的一个分支", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"液态神经网络", "特点", "连续时间动态系统", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"编程语言", "包括", "C、Python、Java、JavaScript等", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"C语言", "特点", "高效、灵活、接近硬件", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"互联网", "定义", "全球互联的计算机网络", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"TCP/IP", "是", "互联网的基础通信协议", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"数据库", "功能", "存储和管理数据", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"加密", "目的", "保护信息的机密性", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    
-    /* === 通用常识 === */
-    {"一年", "有", "12个月", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"一天", "有", "24小时", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"一小时", "有", "60分钟", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"一分钟", "有", "60秒", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"水的沸点", "是", "100摄氏度", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"水的冰点", "是", "0摄氏度", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"颜色三原色", "是", "红绿蓝(RGB)", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"颜料三原色", "是", "青品红黄(CMY)", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"人类感官", "包括", "视觉、听觉、触觉、嗅觉、味觉", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"人体最大的器官", "是", "皮肤", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"人体正常体温", "约", "37摄氏度", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"光的三原色", "是", "红、绿、蓝", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"植物", "需要", "阳光、水分、空气和养分", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"动物", "分类", "哺乳类、鸟类、爬行类、两栖类、鱼类等", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"人类", "属于", "哺乳动物", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"语言", "功能", "交流和表达思想", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"文字", "是", "记录语言的符号系统", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"音乐", "组成", "旋律、节奏、和声", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"机器人的定义", "是", "能自动执行任务的机械装置", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"传感器", "功能", "检测物理量并转换为电信号", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"电机", "功能", "将电能转换为机械能", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"摄像头", "功能", "捕获图像和视频", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"麦克风", "功能", "捕获声音信号", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"扬声器", "功能", "将电信号转换为声音", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"显示器", "功能", "显示图像和文字信息", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    
-    /* === 逻辑推理规则 === */
-    {"如果A蕴含B且A为真", "那么", "B为真", KNOWLEDGE_RULE, CONFIDENCE_HIGH, 1.0f},
-    {"如果A蕴含B且B为假", "那么", "A为假", KNOWLEDGE_RULE, CONFIDENCE_HIGH, 1.0f},
-    {"矛盾律", "内容", "一个命题不能同时为真和假", KNOWLEDGE_RULE, CONFIDENCE_HIGH, 1.0f},
-    {"排中律", "内容", "一个命题要么为真要么为假", KNOWLEDGE_RULE, CONFIDENCE_HIGH, 1.0f},
-    {"同一律", "内容", "每个事物都是自身等同的", KNOWLEDGE_RULE, CONFIDENCE_HIGH, 1.0f},
-    {"因果关系", "定义", "一个事件导致另一个事件", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"归纳推理", "定义", "从特殊到一般的推理", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"演绎推理", "定义", "从一般到特殊的推理", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"类比推理", "定义", "基于相似性的推理", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"溯因推理", "定义", "从结果推断原因的推理", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 化学进阶 === */
-    {"原子序数", "定义", "原子核中质子的数量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"化学键", "类型", "离子键、共价键、金属键", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"中性溶液", "pH值", "等于7", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"氯化钠", "化学式", "NaCl", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"氧", "化学符号", "O", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"氢", "化学符号", "H", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"碳", "化学符号", "C", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"氮", "化学符号", "N", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"银", "化学符号", "Ag", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"铜", "化学符号", "Cu", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"铝", "化学符号", "Al", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"催化剂", "定义", "加速化学反应但不被消耗的物质", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"氧化", "定义", "物质与氧发生反应或失去电子", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"还原", "定义", "物质获得电子的过程", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 生物学进阶 === */
-    {"细胞核", "功能", "存储遗传信息", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"染色体", "组成", "DNA和蛋白质", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"呼吸作用", "定义", "细胞分解有机物释放能量的过程", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"疫苗", "功能", "激活免疫系统产生抗体", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"生态系统", "组成", "生物群落和非生物环境", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"食物链", "描述", "生物间的捕食关系", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"生物多样性", "定义", "地球上所有生物的种类和变异", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"碳水化合物", "功能", "提供能量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"脂肪", "功能", "储存能量和保温", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-
-    /* === 医学基础 === */
-    {"血压", "正常范围", "收缩压90-120mmHg，舒张压60-80mmHg", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"心率", "正常范围", "每分钟60-100次", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"维生素C", "功能", "预防坏血病，增强免疫力", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"抗生素", "功能", "杀死或抑制细菌生长", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"病毒", "特征", "无细胞结构，必须寄生在活细胞中", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"细菌", "特征", "单细胞微生物，有细胞壁", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"骨骼", "功能", "支撑身体、保护器官、运动杠杆", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"人体骨骼", "数量", "206块", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"大脑", "功能", "控制思维、记忆、情感和行为", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"心脏", "功能", "泵送血液到全身", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"肺", "功能", "气体交换", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"肝脏", "功能", "代谢、解毒、合成蛋白质", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-
-    /* === 工程与机器人学 === */
-    {"机器人", "三大定律", "阿西莫夫机器人三定律", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"PID控制", "全称", "比例-积分-微分控制", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"反馈控制", "定义", "根据输出与目标的偏差调整输入", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"正向运动学", "定义", "由关节角度计算机器人末端位置", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"逆向运动学", "定义", "由末端位置计算关节角度", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"自由度", "定义", "机器人在空间中独立运动的数量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"伺服电机", "特点", "精确控制位置和速度", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"步进电机", "特点", "按步进角旋转，适合精确定位", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"陀螺仪", "功能", "测量角速度和方向变化", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"加速度计", "功能", "测量线性加速度", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"磁力计", "功能", "测量磁场强度和方向", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"IMU", "全称", "惯性测量单元", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"LiDAR", "全称", "激光雷达（光探测和测距）", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"SLAM", "全称", "同步定位与建图", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"ROS", "全称", "机器人操作系统", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"运动规划", "定义", "寻找从起点到终点的无碰撞路径", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"力控制", "定义", "通过控制力来实现柔顺交互", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"末端执行器", "定义", "机器人手臂末端的工具装置", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"人形机器人", "特点", "具有类似人体的结构和运动方式", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"仿生学", "定义", "模仿生物结构和功能设计工程系统", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 电气与电子工程 === */
-    {"电阻", "单位", "欧姆", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"电容", "单位", "法拉", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"电感", "单位", "亨利", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"电压", "单位", "伏特", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"电流", "单位", "安培", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"功率", "单位", "瓦特", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"串口通信", "标准", "RS-232、RS-485", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"I2C", "全称", "集成电路间总线", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"SPI", "全称", "串行外设接口", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"UART", "全称", "通用异步收发传输器", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"CAN总线", "应用", "汽车和工业控制通信", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"模数转换", "功能", "将模拟信号转换为数字信号", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"数模转换", "功能", "将数字信号转换为模拟信号", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"PWM", "全称", "脉宽调制", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"微控制器", "功能", "嵌入式系统的核心控制芯片", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-
-    /* === 机器学习与AI深度 === */
-    {"监督学习", "定义", "使用带标签数据训练模型", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"无监督学习", "定义", "使用无标签数据发现模式", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"强化学习", "定义", "通过奖惩信号学习最优策略", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"过拟合", "定义", "模型在训练数据上表现好但在新数据上表现差", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"欠拟合", "定义", "模型在训练数据上表现就差", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"交叉验证", "定义", "将数据分为多份轮流验证的方法", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"早停", "定义", "在验证误差开始上升时停止训练", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"Dropout", "定义", "训练时随机丢弃神经元防止过拟合", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"批归一化", "定义", "对每层输入进行归一化加速训练", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"Transformer", "特点", "基于自注意机制的序列模型", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"注意力机制", "定义", "让模型关注输入中的相关部分", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"自注意机制", "定义", "序列中每个元素与其他所有元素计算相关性", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"RNN", "全称", "循环神经网络", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"LSTM", "全称", "长短期记忆网络", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"CNN", "全称", "卷积神经网络", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"GAN", "全称", "生成对抗网络", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"ODE网络", "特点", "使用微分方程描述隐藏状态演化", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"连续时间序列模型", "优势", "可处理不规则采样时间序列", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"迁移学习", "定义", "将一个任务学到的知识应用到另一个任务", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"元学习", "定义", "学会如何学习", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"小样本学习", "定义", "使用极少样本进行有效学习", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"零样本学习", "定义", "不需样本即可完成新任务", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"数据增强", "定义", "通过对训练数据变换增加数据多样性", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"梯度消失", "问题", "深层网络中梯度趋近于零", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"梯度爆炸", "问题", "深层网络中梯度过大导致不稳定", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"残差连接", "功能", "跳跃连接缓解梯度消失", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"Adam优化器", "特点", "自适应学习率优化算法", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"损失函数", "定义", "衡量模型预测与真实值差异的函数", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"激活函数", "定义", "引入非线性变换的函数", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"ReLU", "全称", "整流线性单元", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"Sigmoid", "特点", "输出范围(0,1)的S形激活函数", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"Tanh", "特点", "输出范围(-1,1)的双曲正切激活函数", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"Softmax", "功能", "将向量转换为概率分布", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 计算机视觉 === */
-    {"图像卷积", "定义", "使用卷积核在图像上滑动提取特征", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"边缘检测", "常用算子", "Sobel、Canny、Prewitt", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"图像分割", "定义", "将图像划分为不同区域或对象", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"目标检测", "定义", "识别图像中物体位置和类别", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"图像分类", "定义", "判断整个图像的类别", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"特征匹配", "常用算法", "SIFT、SURF、ORB", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"立体视觉", "原理", "利用双目视差计算深度信息", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"摄像机标定", "目的", "确定摄像机的内参和外参", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"针孔相机模型", "描述", "三维世界点到二维图像平面的投影关系", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"RGB色彩空间", "通道", "红、绿、蓝三个颜色通道", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"HSV色彩空间", "通道", "色调、饱和度、明度", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"YUV色彩空间", "用途", "视频压缩和传输", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"光流", "定义", "图像中像素运动的瞬时速度", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"三维重建", "方法", "多视图几何重建", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"点云", "定义", "三维空间中点的集合", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 语音与音频处理 === */
-    {"采样率", "定义", "每秒采集的音频样本数", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"CD音质", "采样率", "44100Hz", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"语音识别", "英文", "ASR（Automatic Speech Recognition）", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"语音合成", "英文", "TTS（Text-to-Speech）", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"梅尔频率倒谱系数", "用途", "语音特征提取", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"MFCC", "全称", "梅尔频率倒谱系数", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"傅里叶变换", "功能", "将时域信号转换为频域表示", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"短时傅里叶变换", "用途", "分析信号的时频特性", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"基频", "定义", "声音的最低频率分量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"共振峰", "定义", "声道谐振产生的频谱峰值", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"语音活动检测", "功能", "检测音频流中的人声段", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"VAD", "全称", "语音活动检测", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"噪声抑制", "定义", "从音频信号中去除背景噪声", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"回声消除", "定义", "消除扬声器到麦克风的声学回声", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"波束成形", "定义", "使用麦克风阵列进行定向拾音", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 自然语言处理 === */
-    {"自然语言处理", "英文", "NLP（Natural Language Processing）", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"分词", "定义", "将文本切分为基本语义单元", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"词性标注", "定义", "标注每个词的语法类别", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"命名实体识别", "定义", "识别文本中的人名、地名、组织名等", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"依存句法分析", "定义", "分析句子中词之间的语法依存关系", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"语义角色标注", "定义", "标注谓词与其论元的关系", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"词向量", "定义", "将词映射到低维连续向量空间", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"主题模型", "定义", "从文档集合中发现抽象主题", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"情感分析", "定义", "判断文本的情感倾向", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"文本摘要", "定义", "自动生成文本的简洁概述", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"机器翻译", "定义", "自动将一种语言翻译为另一种", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"问答系统", "定义", "根据问题自动给出答案", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"中文分词", "难点", "词与词之间没有空格分隔", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"Unicode", "定义", "统一的字符编码标准", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"UTF-8", "特点", "可变长度的Unicode编码方式", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 历史与文化 === */
-    {"四大发明", "包括", "造纸术、印刷术、火药、指南针", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"丝绸之路", "功能", "古代连接东西方的贸易路线", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"工业革命", "起始", "18世纪下半叶的英国", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"信息革命", "起始", "20世纪下半叶", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"互联网", "诞生年代", "1960年代ARPANET", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"万维网", "发明者", "蒂姆·伯纳斯-李", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"文艺复兴", "时期", "14-17世纪", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"启蒙运动", "时期", "17-18世纪", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"孔子", "学派", "儒家", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"老子", "学派", "道家", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"孙子兵法", "作者", "孙武", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 操作系统与软件 === */
-    {"Linux", "类型", "开源操作系统内核", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"Windows", "开发公司", "微软", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"macOS", "开发公司", "苹果", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"Git", "用途", "分布式版本控制系统", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"Docker", "用途", "容器化应用部署", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"编译器", "功能", "将源代码转换为目标代码", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"解释器", "功能", "逐行执行源代码", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"调试器", "功能", "查找和修复程序错误", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"API", "全称", "应用程序编程接口", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"SDK", "全称", "软件开发工具包", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"REST API", "特点", "基于HTTP的资源表述性状态转移接口", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"WebSocket", "特点", "全双工实时通信协议", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"JSON", "全称", "JavaScript对象表示法", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"XML", "全称", "可扩展标记语言", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"SQL", "全称", "结构化查询语言", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 网络与通信 === */
-    {"HTTP", "全称", "超文本传输协议", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"HTTPS", "全称", "安全的超文本传输协议", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"DNS", "全称", "域名系统", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"IP地址", "定义", "网络中设备的唯一标识", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"IPv4", "地址数量", "约43亿个", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"IPv6", "地址数量", "约3.4×10^38个", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"MAC地址", "定义", "网络接口的物理地址", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"路由器", "功能", "在不同网络之间转发数据包", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"交换机", "功能", "在同一网络内转发数据帧", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"防火墙", "功能", "监控和控制网络流量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"VPN", "全称", "虚拟专用网络", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"局域网", "范围", "几米到几公里", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"广域网", "范围", "跨城市到跨国", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"WiFi", "标准", "IEEE 802.11", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"蓝牙", "标准", "IEEE 802.15.1", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"5G", "特点", "高速率、低延迟、大连接", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"MQTT", "用途", "物联网轻量级消息协议", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 数学进阶 === */
-    {"傅里叶变换", "用途", "信号频域分析", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"拉普拉斯变换", "用途", "求解微分方程", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"特征值", "应用", "矩阵对角化和主成分分析", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"特征向量", "定义", "线性变换后方向不变的向量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"奇异值分解", "用途", "矩阵压缩和降维", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"雅可比矩阵", "定义", "向量值函数的一阶偏导数矩阵", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"黑塞矩阵", "定义", "多元函数的二阶偏导数方阵", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"梯度", "定义", "函数增长最快的方向", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"散度", "定义", "向量场的源强度", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"旋度", "定义", "向量场的旋转程度", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"贝叶斯定理", "公式", "P(A|B)=P(B|A)P(A)/P(B)", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"马尔可夫链", "定义", "下一状态仅依赖当前状态的随机过程", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"蒙特卡洛方法", "定义", "基于随机采样的数值计算方法", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"信息熵", "定义", "随机变量不确定性的度量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"KL散度", "定义", "两个概率分布差异的度量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"凸优化", "定义", "目标函数为凸函数的优化问题", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"拉格朗日乘数法", "用途", "求解约束优化问题", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"四元数", "用途", "三维空间中的旋转变换", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"欧拉角", "类型", "俯仰角、偏航角、翻滚角", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"齐次坐标", "用途", "统一表示点、向量和变换", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 物理进阶 === */
-    {"爱因斯坦质能方程", "公式", "E=mc²", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"薛定谔方程", "描述", "量子系统的波函数演化", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"海森堡不确定性原理", "内容", "不能同时精确测量位置和动量", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"麦克斯韦方程组", "描述", "电磁场的基本规律", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"热力学第二定律", "内容", "孤立系统的熵永不减少", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"多普勒效应", "定义", "波源与观察者相对运动时频率变化", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"干涉", "定义", "两个波叠加产生强弱分布的现象", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"衍射", "定义", "波绕过障碍物传播的现象", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"折射", "定义", "波进入不同介质时方向改变", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"全反射", "定义", "光从光密介质到光疏介质时全部反射", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"角动量守恒", "条件", "系统不受外力矩时角动量保持不变", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"动量守恒", "条件", "系统不受外力时动量保持不变", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"刚体", "定义", "形状和大小不变的理想物体", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"弹性碰撞", "定义", "碰撞前后动能守恒的碰撞", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"简谐运动", "定义", "回复力与位移成正比的周期运动", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 经济学基础 === */
-    {"GDP", "全称", "国内生产总值", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"通货膨胀", "定义", "物价持续上涨货币购买力下降", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"通货紧缩", "定义", "物价持续下降", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"利率", "定义", "借贷资金的成本", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"汇率", "定义", "两国货币的兑换比率", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"股市", "功能", "股票交易和融资的场所", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"供需法则", "内容", "价格由供给和需求决定", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"边际效用", "定义", "消费额外一单位商品带来的效用增加", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"机会成本", "定义", "为获得某物而放弃的最大替代价值", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"区块链", "定义", "去中心化的分布式账本技术", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 哲学与逻辑 === */
-    {"形而上学", "研究", "存在的本质和实在的基础", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"认识论", "研究", "知识的本质、来源和限度", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"伦理学", "研究", "道德价值和行为准则", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"存在主义", "核心观点", "存在先于本质", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"实证主义", "核心观点", "知识应基于可观测事实", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"奥卡姆剃刀", "原则", "如无必要勿增实体", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"辩证唯物主义", "核心观点", "物质决定意识，矛盾推动发展", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"功利主义", "核心观点", "最大多数人的最大幸福", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"先验知识", "定义", "不依赖经验即可获得的知识", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"后验知识", "定义", "依赖经验获得的知识", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 天文与空间 === */
-    {"光年", "定义", "光在一年内传播的距离", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 1.0f},
-    {"星系的类型", "包括", "螺旋星系、椭圆星系、不规则星系", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"银河系", "形状", "棒旋星系", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"黑洞", "定义", "引力极强连光都无法逃脱的天体", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"超新星", "定义", "恒星生命末期的剧烈爆炸", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"哈勃望远镜", "类型", "太空望远镜", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"国际空间站", "轨道高度", "约400公里", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"火星", "昵称", "红色星球", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"土星环", "组成", "冰和岩石碎片", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"宇宙大爆炸", "定义", "宇宙起源的主流理论", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 环境与气候 === */
-    {"温室效应", "定义", "大气中的温室气体捕获热量导致升温", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"全球变暖", "主要原因", "人类活动排放温室气体", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"可再生能源", "包括", "太阳能、风能、水能、地热能、生物质能", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"碳中和", "定义", "碳排放量与碳吸收量相等", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"臭氧层", "功能", "吸收紫外线保护地球生命", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"酸雨", "原因", "二氧化硫和氮氧化物排放", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"生态足迹", "定义", "人类活动对自然环境的需求量", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"碳循环", "定义", "碳在大气、生物圈、海洋和地壳间循环", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === 安全与密码学 === */
-    {"对称加密", "特点", "加密和解密使用相同密钥", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"非对称加密", "特点", "使用公钥和私钥对", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"哈希函数", "特点", "单向不可逆的变换", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"数字签名", "功能", "验证信息来源和完整性", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"中间人攻击", "定义", "攻击者在通信双方间窃听或篡改信息", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"SQL注入", "定义", "通过输入恶意SQL代码攻击数据库", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"XSS", "全称", "跨站脚本攻击", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"CSRF", "全称", "跨站请求伪造", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"缓冲区溢出", "定义", "程序写入超出缓冲区边界的数据", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"零日漏洞", "定义", "尚未被修复的软件安全漏洞", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-
-    /* === SELF-LNN专属知识 === */
-    {"SELF-LNN", "全称", "Self-Liquid Neural Network（自演化液态神经网络）", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"CfC", "全称", "Closed-form Continuous-time — 闭式连续时间网络", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"液态神经网络", "核心方程", "dx/dt = -x/τ + f(x,I,θ)", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"CfC细胞", "特点", "闭式ODE解、多时间尺度、自适应时间常数", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"四元数液态门", "用途", "在超球面上进行状态演化避免梯度问题", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"拉普拉斯增强", "用途", "频域分析梯度和自适应学习率", KNOWLEDGE_CONCEPT, CONFIDENCE_HIGH, 0.9f},
-    {"SELF-LNN", "模态类型", "视觉、音频、文本、传感器、触觉、本体感知、热成像、雷达、融合", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"SELF-LNN", "工作模式", "训练、推理、自主学习、自我演化、自我修正", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"SELF-LNN", "能力", "对话、图像识别、语音识别、语音合成、空间感知、机器人控制、知识推理、自我认知", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"SELF-LNN", "开源协议", "Apache 2.0", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"SELF-LNN", "开发者邮箱", "silenceceowtom@qq.com", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"SELF-LNN", "操作系统支持", "Windows、Linux、macOS、嵌入式(ESP32/STM32)", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"SELF-LNN", "GPU后端", "CUDA、OpenCL、Vulkan、Metal、ROCm、Intel oneAPI、寒武纪、昇腾、TPU", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 1.0f},
-    {"ODE求解器", "类型", "Euler、RK2、RK4、DP5(4)、Rosenbrock、辛、Verlet、BDF2、Forest-Ruth", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"SELF-LNN", "优化器", "SGD、Momentum、AdaGrad、RMSProp、Adam、AdamW、Adadelta、LAMB、LARS、Ranger、NovoGrad", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"SELF-LNN", "训练方式", "预训练、训练、深度训练、多模态全功能训练、微调、局部功能训练、外部API训练", KNOWLEDGE_FACT, CONFIDENCE_HIGH, 0.9f},
-    {"SELF-LNN", "自学习安全机制", "合成数据生成在Release模式禁用，自主学习需hardware_available标志", KNOWLEDGE_RULE, CONFIDENCE_HIGH, 1.0f},
-};
-#endif /* SELFLNN_SKIP_SEED_KNOWLEDGE */
 
 /**
  * @brief K-006: 从外部知识库文件加载知识条目
@@ -6595,22 +6172,25 @@ static void json_escape_into(char* dst, size_t dst_size, const char* src) {
     dst[di] = '\0';
 }
 
+/* ============================================================================
+ * ZSFEEE-FIX-008: 种子知识加载函数
+ * 
+ * 强制从 config/seed_knowledge.json 加载所有种子知识。
+ * 不再使用编译时硬编码数据，也不再回退到 knowledge_preset.json。
+ * 
+ * JSON文件加载失败时，记录错误日志并返回空知识库（返回-1）。
+ * 用户需要在可执行文件同级目录的 config/ 子目录下放置 
+ * seed_knowledge.json 文件，否则知识库将以空库启动。
+ * ============================================================================ */
 #ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
-#define PRESET_COUNT (sizeof(g_preset_knowledge) / sizeof(g_preset_knowledge[0]))
 
 int knowledge_base_populate_preset(KnowledgeBase* kb) {
     if (!kb) return -1;
 
-    /* H-001+ZSFWS-P0-003: 三级加载策略
-     * 1. 优先尝试 config/seed_knowledge.json（用户可自定义替换）
-     * 2. 其次尝试 knowledge_preset.json（旧兼容路径）
-     * 3. 最后回退到硬编码预设数据（编译时内嵌）
-     *
-     * ZSFAAA-P3-004修复: 支持从可执行文件所在目录解析绝对路径，
-     * 避免systemd服务等非标准工作目录场景下加载失败 */
+    /* ZSFEEE-FIX-008: 仅从 config/seed_knowledge.json 加载，无硬编码回退 */
     int external_loaded = 0;
 
-    /* 先尝试从可执行文件所在目录加载 */
+    /* 优先从可执行文件所在目录的 config/ 子目录加载（绝对路径） */
     {
         char abs_path[1024];
 #ifdef _WIN32
@@ -6639,56 +6219,20 @@ int knowledge_base_populate_preset(KnowledgeBase* kb) {
 #endif
     }
 
-    /* 回退：使用相对路径（兼容开发环境） */
+    /* 回退到相对路径（兼容开发环境直接运行） */
     if (external_loaded <= 0) {
         external_loaded = knowledge_base_import_seed_json(kb, "config/seed_knowledge.json");
     }
+
     if (external_loaded > 0) {
-        log_info("[知识库] 从 config/seed_knowledge.json 加载种子知识: %d条", external_loaded);
+        /* ZSFEEE-FIX-008: 从config/seed_knowledge.json加载了N条种子知识 */
+        log_info("[知识库] ZSFEEE-FIX-008: 从config/seed_knowledge.json加载了%d条种子知识", external_loaded);
         return external_loaded;
-    }
-    external_loaded = knowledge_base_load_from_file(kb, "knowledge_preset.json");
-    if (external_loaded > 0) {
-        log_info("[知识库] 从 knowledge_preset.json 加载预置知识: %d条", external_loaded);
-        return external_loaded;
-    }
-    if (external_loaded == 0) {
-        log_info("[知识库] 外部知识文件未找到，使用内置281条硬编码种子知识（建议迁移到config/seed_knowledge.json）");
     }
 
-    size_t added = 0;
-    for (size_t i = 0; i < PRESET_COUNT; i++) {
-        KnowledgeEntry entry;
-        memset(&entry, 0, sizeof(KnowledgeEntry));
-        
-        entry.subject = string_duplicate(g_preset_knowledge[i].subject);
-        entry.predicate = string_duplicate(g_preset_knowledge[i].predicate);
-        entry.object = string_duplicate(g_preset_knowledge[i].object);
-        entry.type = g_preset_knowledge[i].type;
-        /*
-         * 预置知识使用 SOURCE_PRESET 标记和低权重(0.5)，表示：
-         * - 可由用户学习(SOURCE_USER/感知/推理)覆盖
-         * - 可由自动学习(SOURCE_AUTO_LEARN)覆盖
-         * - 低优先级，真实学习到的知识有更高权重
-         */
-        entry.confidence = CONFIDENCE_MEDIUM;
-        entry.weight = 0.3f;
-        entry.source = SOURCE_PRESET;
-        entry.timestamp = (long)time(NULL);
-        
-        if (entry.subject && entry.predicate && entry.object) {
-            if (knowledge_base_add(kb, &entry) >= 0) {
-                added++;
-            }
-        }
-        
-        safe_free((void**)&entry.subject);
-        safe_free((void**)&entry.predicate);
-        safe_free((void**)&entry.object);
-    }
-    
-    log_info("知识库预设常识加载完成：成功添加 %zu / %zu 条（标记为SOURCE_PRESET可替换）", added, PRESET_COUNT);
-    return (int)added;
+    /* ZSFEEE-FIX-008: JSON文件加载失败，不添加任何硬编码知识，记录错误日志 */
+    log_error("[知识库] ZSFEEE-FIX-008: config/seed_knowledge.json 加载失败！种子知识库为空，请确保配置文件存在且格式正确");
+    return -1;
 }
 #endif /* SELFLNN_SKIP_SEED_KNOWLEDGE */
 
@@ -6704,9 +6248,13 @@ KnowledgeBase* knowledge_base_create_with_preset(size_t max_entries) {
     if (!kb) return NULL;
     
 #ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
-    /* 默认模式：加载种子知识作为知识库的基础常识 */
+    /* ZSFEEE-FIX-008: 默认模式：从config/seed_knowledge.json加载种子知识 */
     int preset_count = knowledge_base_populate_preset(kb);
-    log_info("[知识库] 已加载 %d 条种子知识（SOURCE_PRESET可替换，定义SELFLNN_SKIP_SEED_KNOWLEDGE可跳过）", preset_count);
+    if (preset_count > 0) {
+        log_info("[知识库] ZSFEEE-FIX-008: 已加载 %d 条种子知识（来源: config/seed_knowledge.json，定义SELFLNN_SKIP_SEED_KNOWLEDGE可跳过）", preset_count);
+    } else {
+        log_warning("[知识库] ZSFEEE-FIX-008: 种子知识加载失败，知识库以空库启动（请检查config/seed_knowledge.json）");
+    }
 #else
     /* 跳过种子知识：知识库从零开始，所有知识从真实数据源学习获得 */
     log_info("[知识库] 跳过种子知识 - 知识库从零开始，所有知识从真实数据源学习");
@@ -7258,6 +6806,14 @@ size_t knowledge_base_get_total_facts(KnowledgeBase* kb) {
     count = kb->size;
     KB_RUNLOCK(kb);
     return count;
+}
+
+/* ZSFEEE-FIX-DEEP-EXT-003: knowledge_base_get_fact_count wrapper
+ * backend.c:6594通过extern调用此函数名，但实际只有knowledge_base_get_total_facts存在
+ * 此wrapper提供向后兼容，实际委托给knowledge_base_get_total_facts */
+int knowledge_base_get_fact_count(void* kb) {
+    if (!kb) return 0;
+    return (int)knowledge_base_get_total_facts((KnowledgeBase*)kb);
 }
 
 /* ZSFUSA: 知识库输出一致性检查（用于AGI后台验证） */

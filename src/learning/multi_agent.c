@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file multi_agent.c
  * @brief 多智能体协作框架完整算法实现
  * 
@@ -7,7 +7,7 @@
  */
 
 
-#include "selflnn/multi_agent.h"
+#include "selflnn/learning/multi_agent.h"
 #include "selflnn/learning/learning.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"

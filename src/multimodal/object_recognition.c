@@ -6,6 +6,7 @@
 #include "selflnn/multimodal/object_recognition.h"
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/secure_random.h"  /* ZSFEEE-FIX-041: CfC Xavier初始化 */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -20,6 +21,10 @@
 #define HOG_BINS 9
 /* 每个cell的像素数 */
 #define HOG_CELL_SIZE 8
+
+/* ZSFEEE-FIX-041: CfC深度学习管道常量 —— HOG特征维数=输入层，隐藏层=64，输出=类别数 */
+#define CFC_OR_INPUT_DIM  128
+#define CFC_OR_HIDDEN_DIM 64
 
 struct ObjectRecognizer {
     float category_templates[OR_MAX_CATEGORIES][128];
@@ -38,6 +43,20 @@ struct ObjectRecognizer {
     int depth_map_w;
     int depth_map_h;
     int has_depth_map;
+    /* ZSFEEE-FIX-041: CfC深度学习管道 —— 输入层=HOG特征128维，隐藏层64维，输出层=类别数 */
+    int is_cfc_trained;
+    float cfc_hidden[CFC_OR_HIDDEN_DIM];
+    float cfc_W_gx[CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM];
+    float cfc_W_ax[CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM];
+    float cfc_W_gh[CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM];
+    float cfc_W_ah[CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM];
+    float cfc_b_g[CFC_OR_HIDDEN_DIM];
+    float cfc_b_a[CFC_OR_HIDDEN_DIM];
+    float cfc_W_cls[OR_MAX_CATEGORIES * CFC_OR_HIDDEN_DIM];
+    float cfc_b_cls[OR_MAX_CATEGORIES];
+    float cfc_logits[OR_MAX_CATEGORIES];
+    float cfc_tau;
+    float cfc_dt;
 };
 
 /**
@@ -151,6 +170,161 @@ static float normalized_cross_correlation(const float* a, const float* b, int le
     return sum_ab / denom;
 }
 
+/* ======================================================================== */
+/*  ZSFEEE-FIX-041: CfC深度学习基础数学函数 —— 从image_recognition_deep.c移植  */
+/* ======================================================================== */
+
+static float _or_cfc_sig(float x) { return 1.0f / (1.0f + expf(-x)); }
+
+static float _or_cfc_tanh_f(float x) {
+    float e2x = expf(2.0f * x);
+    return (e2x - 1.0f) / (e2x + 1.0f);
+}
+
+/* ZSFEEE-FIX-041: Xavier初始化 —— 适用于tanh/sigmoid激活函数层 */
+static void _or_cfc_xavier_init(float* w, int fan_in, int fan_out) {
+    float scale = sqrtf(2.0f / (float)(fan_in + fan_out));
+    for (int i = 0; i < fan_in * fan_out; i++) {
+        float u1 = secure_random_float();
+        float u2 = secure_random_float();
+        if (u1 < 1e-7f) u1 = 1e-7f;
+        w[i] = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2) * scale;
+    }
+}
+
+/* ZSFEEE-FIX-041: 向量运算库 */
+static void _or_cfc_mat_vec_mul(const float* mat, const float* vec, float* out, int r, int c) {
+    for (int i = 0; i < r; i++) {
+        out[i] = 0.0f;
+        for (int j = 0; j < c; j++) out[i] += mat[i * c + j] * vec[j];
+    }
+}
+static void _or_cfc_vec_add(float* a, const float* b, int n) { for (int i = 0; i < n; i++) a[i] += b[i]; }
+static void _or_cfc_vec_hadamard(float* a, const float* b, int n) { for (int i = 0; i < n; i++) a[i] *= b[i]; }
+static void _or_cfc_vec_sigmoid(float* a, int n) { for (int i = 0; i < n; i++) a[i] = _or_cfc_sig(a[i]); }
+static void _or_cfc_vec_tanh(float* a, int n) { for (int i = 0; i < n; i++) a[i] = _or_cfc_tanh_f(a[i]); }
+static void _or_cfc_vec_scale(float* a, float s, int n) { for (int i = 0; i < n; i++) a[i] *= s; }
+static void _or_cfc_vec_copy(float* d, const float* s, int n) { memcpy(d, s, n * sizeof(float)); }
+
+static float _or_cfc_vec_dot(const float* a, const float* b, int n) {
+    float s = 0.0f; for (int i = 0; i < n; i++) s += a[i] * b[i]; return s;
+}
+
+/* ZSFEEE-FIX-041: Softmax归一化 */
+static void _or_cfc_softmax(float* logits, int n) {
+    float mv = logits[0];
+    for (int i = 1; i < n; i++) if (logits[i] > mv) mv = logits[i];
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) { logits[i] = expf(logits[i] - mv); sum += logits[i]; }
+    if (sum > 1e-10f) for (int i = 0; i < n; i++) logits[i] /= sum;
+}
+
+/* ZSFEEE-FIX-041: CfC ODE步进 —— 核心连续时间液态神经网络前向传播
+ * 公式: h(t+dt) = h(t)*exp(-dt/τ) + (1-exp(-dt/τ))*σ(W_gx·x+W_gh·h+b_g)⊙tanh(W_ax·x+W_ah·h+b_a) */
+static void _or_cfc_ode_step(const float* in, int in_dim,
+                              const float* W_gx, const float* W_ax,
+                              const float* W_gh, const float* W_ah,
+                              const float* b_g, const float* b_a,
+                              float* h, int h_dim, float tau, float dt) {
+    float* gate = (float*)safe_malloc((size_t)h_dim * sizeof(float) * 4);
+    if (!gate) return;
+    float* act  = gate + h_dim;
+    float* t1   = act + h_dim;
+    float* t2   = t1 + h_dim;
+    memset(gate, 0, h_dim * sizeof(float));
+    memset(act, 0, h_dim * sizeof(float));
+    _or_cfc_mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
+    _or_cfc_mat_vec_mul(W_gh, h, t2, h_dim, h_dim);
+    _or_cfc_vec_add(t1, t2, h_dim); _or_cfc_vec_add(t1, b_g, h_dim); _or_cfc_vec_sigmoid(t1, h_dim);
+    _or_cfc_vec_copy(gate, t1, h_dim);
+    _or_cfc_mat_vec_mul(W_ax, in, t1, h_dim, in_dim);
+    _or_cfc_mat_vec_mul(W_ah, h, t2, h_dim, h_dim);
+    _or_cfc_vec_add(t1, t2, h_dim); _or_cfc_vec_add(t1, b_a, h_dim); _or_cfc_vec_tanh(t1, h_dim);
+    _or_cfc_vec_copy(act, t1, h_dim);
+    _or_cfc_vec_hadamard(gate, act, h_dim);
+    float decay = expf(-dt / tau);
+    for (int i = 0; i < h_dim; i++) h[i] = h[i] * decay + (1.0f - decay) * gate[i];
+    safe_free((void**)&gate);
+}
+
+/* ZSFEEE-FIX-041: CfC ODE步反向传播 —— 计算参数梯度用于训练 */
+static void _or_cfc_ode_step_backward(const float* in, int in_dim,
+                                       const float* W_gx, const float* W_ax,
+                                       const float* W_gh, const float* W_ah,
+                                       const float* b_g, const float* b_a,
+                                       float* dW_gx, float* dW_ax,
+                                       float* dW_gh, float* dW_ah,
+                                       float* db_g, float* db_a,
+                                       const float* h, const float* dL_dh_new,
+                                       float* dL_dh, float* dL_din,
+                                       int h_dim, float tau, float dt) {
+    float* buf = (float*)safe_malloc((size_t)h_dim * sizeof(float) * 8);
+    if (!buf) return;
+    float* pre_gate = buf + h_dim * 0;
+    float* pre_act  = buf + h_dim * 1;
+    float* gate     = buf + h_dim * 2;
+    float* act      = buf + h_dim * 3;
+    float* t1       = buf + h_dim * 4;
+    float* t2       = buf + h_dim * 5;
+    float* d_driver = buf + h_dim * 6;
+    float* d_pre_gate = buf + h_dim * 7;
+    float* d_gate   = d_pre_gate;
+    float* d_act    = pre_gate;
+    float* d_pre_act = pre_act;
+    (void)d_gate; (void)d_act; (void)d_pre_act;
+    memset(pre_gate, 0, h_dim * sizeof(float));
+    memset(pre_act, 0, h_dim * sizeof(float));
+    _or_cfc_mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
+    _or_cfc_mat_vec_mul(W_gh, h, t2, h_dim, h_dim);
+    for (int i = 0; i < h_dim; i++) pre_gate[i] = t1[i] + t2[i] + b_g[i];
+    memcpy(gate, pre_gate, h_dim * sizeof(float));
+    _or_cfc_vec_sigmoid(gate, h_dim);
+    _or_cfc_mat_vec_mul(W_ax, in, t1, h_dim, in_dim);
+    _or_cfc_mat_vec_mul(W_ah, h, t2, h_dim, h_dim);
+    for (int i = 0; i < h_dim; i++) pre_act[i] = t1[i] + t2[i] + b_a[i];
+    memcpy(act, pre_act, h_dim * sizeof(float));
+    _or_cfc_vec_tanh(act, h_dim);
+    float decay = expf(-dt / tau);
+    for (int i = 0; i < h_dim; i++) {
+        d_driver[i] = (1.0f - decay) * dL_dh_new[i];
+        d_gate[i] = d_driver[i] * act[i];
+        d_act[i] = d_driver[i] * gate[i];
+    }
+    for (int i = 0; i < h_dim; i++) {
+        d_pre_gate[i] = d_gate[i] * gate[i] * (1.0f - gate[i]);
+        d_pre_act[i] = d_act[i] * (1.0f - act[i] * act[i]);
+    }
+    for (int i = 0; i < h_dim; i++) {
+        for (int j = 0; j < in_dim; j++) {
+            dW_gx[i * in_dim + j] += d_pre_gate[i] * in[j];
+            dW_ax[i * in_dim + j] += d_pre_act[i] * in[j];
+        }
+        for (int j = 0; j < h_dim; j++) {
+            dW_gh[i * h_dim + j] += d_pre_gate[i] * h[j];
+            dW_ah[i * h_dim + j] += d_pre_act[i] * h[j];
+        }
+        db_g[i] += d_pre_gate[i];
+        db_a[i] += d_pre_act[i];
+    }
+    if (dL_din) {
+        for (int j = 0; j < in_dim; j++) {
+            float sum = 0.0f;
+            for (int i = 0; i < h_dim; i++)
+                sum += W_gx[i * in_dim + j] * d_pre_gate[i] + W_ax[i * in_dim + j] * d_pre_act[i];
+            dL_din[j] = sum;
+        }
+    }
+    if (dL_dh) {
+        for (int i = 0; i < h_dim; i++) {
+            float sum = 0.0f;
+            for (int k = 0; k < h_dim; k++)
+                sum += W_gh[k * h_dim + i] * d_pre_gate[k] + W_ah[k * h_dim + i] * d_pre_act[k];
+            dL_dh[i] = decay * dL_dh_new[i] + sum;
+        }
+    }
+    safe_free((void**)&buf);
+}
+
 ObjectRecognizer* object_recognizer_create(void) {
     ObjectRecognizer* or_obj = (ObjectRecognizer*)safe_calloc(1, sizeof(ObjectRecognizer));
     if (!or_obj) return NULL;
@@ -160,6 +334,21 @@ ObjectRecognizer* object_recognizer_create(void) {
     or_obj->depth_map_w = 0;
     or_obj->depth_map_h = 0;
     or_obj->has_depth_map = 0;
+
+    /* ZSFEEE-FIX-041: 初始化CfC深度学习管道 —— Xavier初始化权重，零初始化偏置和隐藏状态 */
+    or_obj->is_cfc_trained = 0;
+    or_obj->cfc_tau = 0.1f;
+    or_obj->cfc_dt = 0.05f;
+    memset(or_obj->cfc_hidden, 0, CFC_OR_HIDDEN_DIM * sizeof(float));
+    memset(or_obj->cfc_b_g, 0, CFC_OR_HIDDEN_DIM * sizeof(float));
+    memset(or_obj->cfc_b_a, 0, CFC_OR_HIDDEN_DIM * sizeof(float));
+    memset(or_obj->cfc_b_cls, 0, OR_MAX_CATEGORIES * sizeof(float));
+    memset(or_obj->cfc_logits, 0, OR_MAX_CATEGORIES * sizeof(float));
+    _or_cfc_xavier_init(or_obj->cfc_W_gx, CFC_OR_INPUT_DIM, CFC_OR_HIDDEN_DIM);
+    _or_cfc_xavier_init(or_obj->cfc_W_ax, CFC_OR_INPUT_DIM, CFC_OR_HIDDEN_DIM);
+    _or_cfc_xavier_init(or_obj->cfc_W_gh, CFC_OR_HIDDEN_DIM, CFC_OR_HIDDEN_DIM);
+    _or_cfc_xavier_init(or_obj->cfc_W_ah, CFC_OR_HIDDEN_DIM, CFC_OR_HIDDEN_DIM);
+    _or_cfc_xavier_init(or_obj->cfc_W_cls, CFC_OR_HIDDEN_DIM, OR_MAX_CATEGORIES);
 
     /* 预定义类别名称，基于HSV颜色空间生成具有基本区分能力的初始模板 */
     const char* cats[] = {"人","车辆","动物","家具","电子设备","食物","工具","建筑物","植物","自然景观"};
@@ -239,6 +428,201 @@ ObjectRecognizer* object_recognizer_create(void) {
 }
 
 void object_recognizer_free(ObjectRecognizer* or_obj) { safe_free((void**)&or_obj); }
+
+/* ======================================================================== */
+/*  ZSFEEE-FIX-041: CfC深度学习前向传播 —— 核心分类管道                      */
+/* ======================================================================== */
+
+/**
+ * @brief ZSFEEE-FIX-041: CfC前向传播 —— 将HOG特征输入CfC液态神经网络
+ * 管道: HOG特征(128维) → CfC ODE步进(隐藏层64维) → 线性分类头 → softmax概率
+ * @param or_obj 识别器句柄
+ * @param hog_features HOG特征向量 [128]
+ * @param probs 输出类别概率 [category_count]，调用方分配
+ * @return 最优类别ID，失败返回-1
+ */
+static int object_cfc_forward(ObjectRecognizer* or_obj, const float* hog_features, float* probs) {
+    if (!or_obj || !hog_features || !probs) return -1;
+    if (!or_obj->is_cfc_trained) return -1;
+    int hd = CFC_OR_HIDDEN_DIM;
+    int in_dim = CFC_OR_INPUT_DIM;
+    int nc = or_obj->category_count;
+    if (nc <= 0 || nc > OR_MAX_CATEGORIES) return -1;
+
+    /* 归一化输入HOG特征 */
+    float input_norm[CFC_OR_INPUT_DIM];
+    memcpy(input_norm, hog_features, in_dim * sizeof(float));
+    float in_norm = 0.0f;
+    for (int i = 0; i < in_dim; i++) in_norm += input_norm[i] * input_norm[i];
+    in_norm = sqrtf(in_norm) + 1e-8f;
+    for (int i = 0; i < in_dim; i++) input_norm[i] /= in_norm;
+
+    /* CfC ODE步进: 隐藏状态演化 */
+    memset(or_obj->cfc_hidden, 0, hd * sizeof(float));
+    _or_cfc_ode_step(input_norm, in_dim,
+                     or_obj->cfc_W_gx, or_obj->cfc_W_ax,
+                     or_obj->cfc_W_gh, or_obj->cfc_W_ah,
+                     or_obj->cfc_b_g, or_obj->cfc_b_a,
+                     or_obj->cfc_hidden, hd, or_obj->cfc_tau, or_obj->cfc_dt);
+
+    /* 线性分类头: logits = W_cls · hidden + b_cls */
+    memset(or_obj->cfc_logits, 0, nc * sizeof(float));
+    _or_cfc_mat_vec_mul(or_obj->cfc_W_cls, or_obj->cfc_hidden, or_obj->cfc_logits, nc, hd);
+    _or_cfc_vec_add(or_obj->cfc_logits, or_obj->cfc_b_cls, nc);
+
+    /* Softmax概率输出 */
+    memcpy(probs, or_obj->cfc_logits, nc * sizeof(float));
+    _or_cfc_softmax(probs, nc);
+
+    /* 返回最优类别索引 */
+    int best = 0;
+    for (int i = 1; i < nc; i++) if (probs[i] > probs[best]) best = i;
+    return best;
+}
+
+/* ======================================================================== */
+/*  ZSFEEE-FIX-041: CfC深度学习训练 —— SGD + 交叉熵损失                      */
+/* ======================================================================== */
+
+/**
+ * @brief ZSFEEE-FIX-041: CfC训练函数 —— 使用SGD优化器 + 交叉熵损失
+ * 训练流程:
+ *   1. 前向传播: HOG特征 → CfC ODE → 线性分类头 → softmax概率
+ *   2. 损失计算: 交叉熵 L = -log(p_correct)
+ *   3. 反向传播: 分类头梯度 → CfC ODE反向传播 → 权重更新
+ * @param or_obj 识别器句柄
+ * @param features 训练样本特征矩阵 [samples × dim]，行主序
+ * @param labels 训练标签 [samples]
+ * @param samples 样本数
+ * @param dim 特征维度(应为128)
+ * @param categories 类别数
+ * @param epochs 训练轮数
+ * @param lr 学习率
+ * @return 0成功，-1失败
+ */
+int object_cfc_train(ObjectRecognizer* or_obj, const float* features,
+                     const int* labels, int samples, int dim, int categories,
+                     int epochs, float lr) {
+    if (!or_obj || !features || !labels) return -1;
+    if (samples <= 0 || dim < CFC_OR_INPUT_DIM || categories <= 0) return -1;
+    if (categories > OR_MAX_CATEGORIES) categories = OR_MAX_CATEGORIES;
+    int hd = CFC_OR_HIDDEN_DIM;
+    int in_dim = CFC_OR_INPUT_DIM;
+    int feat_dim = dim < in_dim ? dim : in_dim;
+
+    for (int epoch = 0; epoch < epochs; epoch++) {
+        float total_loss = 0.0f;
+        int valid_samples = 0;
+
+        for (int s = 0; s < samples; s++) {
+            int label = labels[s];
+            if (label < 0 || label >= categories) continue;
+
+            const float* sample_features = &features[s * dim];
+
+            /* 归一化输入 */
+            float input_norm[CFC_OR_INPUT_DIM];
+            memcpy(input_norm, sample_features, feat_dim * sizeof(float));
+            if (feat_dim < in_dim)
+                memset(input_norm + feat_dim, 0, (in_dim - feat_dim) * sizeof(float));
+            float in_norm = 0.0f;
+            for (int i = 0; i < in_dim; i++) in_norm += input_norm[i] * input_norm[i];
+            in_norm = sqrtf(in_norm) + 1e-8f;
+            for (int i = 0; i < in_dim; i++) input_norm[i] /= in_norm;
+
+            /* 1. 前向传播: CfC ODE步进 */
+            float hidden_before[CFC_OR_HIDDEN_DIM];
+            memset(hidden_before, 0, hd * sizeof(float));
+            _or_cfc_ode_step(input_norm, in_dim,
+                             or_obj->cfc_W_gx, or_obj->cfc_W_ax,
+                             or_obj->cfc_W_gh, or_obj->cfc_W_ah,
+                             or_obj->cfc_b_g, or_obj->cfc_b_a,
+                             hidden_before, hd, or_obj->cfc_tau, or_obj->cfc_dt);
+
+            /* 2. 线性分类头 */
+            memset(or_obj->cfc_logits, 0, categories * sizeof(float));
+            _or_cfc_mat_vec_mul(or_obj->cfc_W_cls, hidden_before, or_obj->cfc_logits, categories, hd);
+            _or_cfc_vec_add(or_obj->cfc_logits, or_obj->cfc_b_cls, categories);
+
+            /* 3. Softmax */
+            float probs[OR_MAX_CATEGORIES];
+            memcpy(probs, or_obj->cfc_logits, categories * sizeof(float));
+            _or_cfc_softmax(probs, categories);
+
+            /* 4. 交叉熵损失 */
+            total_loss += -logf(probs[label] + 1e-10f);
+            valid_samples++;
+
+            /* 5. 反向传播: 分类头梯度 dL/dlogits = probs - one_hot(label) */
+            float grad_logits[OR_MAX_CATEGORIES];
+            for (int i = 0; i < categories; i++)
+                grad_logits[i] = probs[i] - (i == label ? 1.0f : 0.0f);
+
+            /* 6. 更新分类头权重: W_cls -= lr * grad_logits × hidden^T */
+            for (int i = 0; i < categories; i++) {
+                for (int j = 0; j < hd; j++) {
+                    or_obj->cfc_W_cls[i * hd + j] -= lr * grad_logits[i] * hidden_before[j];
+                }
+                or_obj->cfc_b_cls[i] -= lr * grad_logits[i];
+            }
+
+            /* 7. CfC ODE参数反向传播: dL/dh = W_cls^T × grad_logits */
+            float dL_dh[CFC_OR_HIDDEN_DIM];
+            memset(dL_dh, 0, hd * sizeof(float));
+            for (int j = 0; j < hd; j++) {
+                for (int k = 0; k < categories; k++) {
+                    dL_dh[j] += or_obj->cfc_W_cls[k * hd + j] * grad_logits[k];
+                }
+            }
+
+            /* 8. CfC ODE步反向传播 —— 累积参数梯度 */
+            float dW_gx[CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM];
+            float dW_ax[CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM];
+            float dW_gh[CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM];
+            float dW_ah[CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM];
+            float db_g[CFC_OR_HIDDEN_DIM];
+            float db_a[CFC_OR_HIDDEN_DIM];
+            memset(dW_gx, 0, sizeof(dW_gx)); memset(dW_ax, 0, sizeof(dW_ax));
+            memset(dW_gh, 0, sizeof(dW_gh)); memset(dW_ah, 0, sizeof(dW_ah));
+            memset(db_g, 0, sizeof(db_g)); memset(db_a, 0, sizeof(db_a));
+
+            float zero_h[CFC_OR_HIDDEN_DIM];
+            memset(zero_h, 0, hd * sizeof(float));
+
+            _or_cfc_ode_step_backward(input_norm, in_dim,
+                                      or_obj->cfc_W_gx, or_obj->cfc_W_ax,
+                                      or_obj->cfc_W_gh, or_obj->cfc_W_ah,
+                                      or_obj->cfc_b_g, or_obj->cfc_b_a,
+                                      dW_gx, dW_ax, dW_gh, dW_ah,
+                                      db_g, db_a,
+                                      zero_h, dL_dh,
+                                      NULL, NULL,
+                                      hd, or_obj->cfc_tau, or_obj->cfc_dt);
+
+            /* 9. 应用CfC参数更新 (SGD) */
+            float cfc_lr = lr * 0.5f;
+            for (int i = 0; i < hd * in_dim; i++) {
+                or_obj->cfc_W_gx[i] -= cfc_lr * dW_gx[i];
+                or_obj->cfc_W_ax[i] -= cfc_lr * dW_ax[i];
+            }
+            for (int i = 0; i < hd * hd; i++) {
+                or_obj->cfc_W_gh[i] -= cfc_lr * dW_gh[i];
+                or_obj->cfc_W_ah[i] -= cfc_lr * dW_ah[i];
+            }
+            for (int i = 0; i < hd; i++) {
+                or_obj->cfc_b_g[i] -= cfc_lr * db_g[i];
+                or_obj->cfc_b_a[i] -= cfc_lr * db_a[i];
+            }
+        }
+
+        /* 早停: 平均损失低于阈值则停止 */
+        if (valid_samples > 0 && total_loss / (float)valid_samples < 0.05f) break;
+    }
+
+    /* ZSFEEE-FIX-041: 训练完成后标记CfC管道已训练 */
+    or_obj->is_cfc_trained = 1;
+    return 0;
+}
 
 /* 多尺度滑动窗口检测 */
 int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h, int ch,
@@ -324,15 +708,27 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                     obj->height = (float)win_size;
                     obj->confidence = edge_response * 8.0f;
                     if (obj->confidence > 1.0f) obj->confidence = 1.0f;
-                    
-                    /* ZSFUSA-P1-008修复: 使用显式训练状态标志替代内联启发式。
-                     * or_obj->is_trained 在 or_train_from_examples() 或
-                     * or_load_model() 完成后设为1，提供可靠的训练状态判断。 */
-                    int is_trained = or_obj->is_trained;
-                    
-                    int best_category = 0;
-                    float best_ncc = -1.0f;
-                    if (is_trained) {
+
+                    /* ZSFEEE-FIX-041: 分类管道升级 —— CfC深度学习优先，HOG模板匹配降级为回退 */
+                    int best_category = -1;
+
+                    if (or_obj->is_cfc_trained) {
+                        /* 主路径: CfC深度学习管道 */
+                        float cfc_probs[OR_MAX_CATEGORIES];
+                        int cfc_best = object_cfc_forward(or_obj, hog_features, cfc_probs);
+                        if (cfc_best >= 0 && cfc_best < or_obj->category_count) {
+                            best_category = cfc_best;
+                            obj->confidence = cfc_probs[cfc_best];
+                            if (obj->confidence < edge_response * 8.0f)
+                                obj->confidence = edge_response * 8.0f;
+                            if (obj->confidence > 1.0f) obj->confidence = 1.0f;
+                        }
+                    }
+
+                    /* ZSFEEE-FIX-041: 回退路径 —— HOG+NCC模板匹配
+                     * 当CfC管道未训练或前向传播失败时启用 */
+                    if (best_category < 0 && or_obj->is_trained) {
+                        float best_ncc = -1.0f;
                         for (int c = 0; c < or_obj->category_count; c++) {
                             float ncc = normalized_cross_correlation(
                                 hog_features, or_obj->category_templates[c], 128);
@@ -341,9 +737,17 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                                 best_category = c;
                             }
                         }
+                        if (best_category >= 0) {
+                            obj->confidence = (best_ncc + 1.0f) * 0.5f;
+                            if (obj->confidence < edge_response * 8.0f)
+                                obj->confidence = edge_response * 8.0f;
+                            if (obj->confidence > 1.0f) obj->confidence = 1.0f;
+                        }
                     }
-                    obj->category_id = is_trained ? best_category : -1;
-                    if (is_trained && best_category < or_obj->category_count) {
+
+                    /* ZSFUSA-P1-008: 使用显式训练状态标志（is_trained 和 is_cfc_trained） */
+                    obj->category_id = best_category;
+                    if (best_category >= 0 && best_category < or_obj->category_count) {
                         snprintf(obj->category_name, sizeof(obj->category_name),
                                 "%s", or_obj->category_names[best_category]);
                     } else {
@@ -477,6 +881,47 @@ int or_detect_color(ObjectRecognizer* or_obj, const float* image, int w, int h, 
         }
     }
     color_rgb[0] = sr / (float)n; color_rgb[1] = sg / (float)n; color_rgb[2] = sb / (float)n;
+    return 0;
+}
+
+/* ZSFDDD-D7-005: 添加RGB→颜色名称映射，补全颜色识别功能 */
+static const struct {
+    const char* name;
+    float r, g, b;
+} g_color_reference[] = {
+    {"红色",   0.85f, 0.08f, 0.08f},
+    {"蓝色",   0.08f, 0.08f, 0.85f},
+    {"绿色",   0.08f, 0.80f, 0.12f},
+    {"黄色",   0.88f, 0.88f, 0.08f},
+    {"白色",   0.90f, 0.90f, 0.90f},
+    {"黑色",   0.05f, 0.05f, 0.05f},
+    {"紫色",   0.60f, 0.08f, 0.80f},
+    {"橙色",   0.90f, 0.50f, 0.05f},
+    {"灰色",   0.50f, 0.50f, 0.50f},
+    {"粉色",   0.90f, 0.50f, 0.65f},
+    {"棕色",   0.55f, 0.27f, 0.07f},
+    {"青色",   0.05f, 0.80f, 0.80f},
+    {NULL, 0, 0, 0}
+};
+
+int or_get_color_name(const float* color_rgb, char* name_buf, size_t buf_size, float* confidence) {
+    if (!color_rgb || !name_buf || buf_size < 4) return -1;
+    float min_dist = INFINITY;
+    int best_idx = 0;
+    for (int i = 0; g_color_reference[i].name; i++) {
+        float dr = color_rgb[0] - g_color_reference[i].r;
+        float dg = color_rgb[1] - g_color_reference[i].g;
+        float db = color_rgb[2] - g_color_reference[i].b;
+        float dist = dr * dr + dg * dg + db * db;
+        if (dist < min_dist) { min_dist = dist; best_idx = i; }
+    }
+    snprintf(name_buf, buf_size, "%s", g_color_reference[best_idx].name);
+    if (confidence) {
+        float max_dist = 3.0f;
+        *confidence = 1.0f - (sqrtf(min_dist) / sqrtf(max_dist));
+        if (*confidence < 0.0f) *confidence = 0.0f;
+        if (*confidence > 1.0f) *confidence = 1.0f;
+    }
     return 0;
 }
 
@@ -752,7 +1197,23 @@ int or_train_classifier(ObjectRecognizer* or_obj, const float* features,
 
     /* ZSFUSA-P1-008: 训练完成后设置显式训练标志 */
     or_obj->is_trained = 1;
+
+    /* ZSFEEE-FIX-041: 在HOG模板训练完成后同步训练CfC深度学习管道
+     * 使用相同训练数据进行SGD优化，epochs=10, lr=0.01 */
+    object_cfc_train(or_obj, features, labels, samples, dim, categories, 10, 0.01f);
+
     return 0;
+}
+
+/*
+ * ZSFEEE-FIX-041: or_train_cfc —— 独立CfC深度学习训练接口
+ * 用于仅训练CfC管道，不影响HOG模板
+ */
+int or_train_cfc(ObjectRecognizer* or_obj, const float* features,
+                 const int* labels, int samples, int dim, int categories,
+                 int epochs, float lr) {
+    if (!or_obj || !features || !labels) return -1;
+    return object_cfc_train(or_obj, features, labels, samples, dim, categories, epochs, lr);
 }
 
 /*
@@ -786,6 +1247,23 @@ int or_save_model(const ObjectRecognizer* or_obj, const char* filepath) {
     /* 写入场景信息 */
     int scene = (int)or_obj->last_scene;
     if (fwrite(&scene, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    /* ZSFEEE-FIX-041: 写入CfC深度学习权重段标识和权重数据
+     * 段标识: "CFC1" 4字节，用于v3格式识别
+     * CfC权重按维度写入: W_gx, W_ax, W_gh, W_ah, b_g, b_a, W_cls, b_cls, 元参数 */
+    const char cfc_magic[4] = {'C', 'F', 'C', '1'};
+    if (fwrite(cfc_magic, 1, 4, fp) != 4) { fclose(fp); return -1; }
+    fwrite(&or_obj->is_cfc_trained, sizeof(int), 1, fp);
+    fwrite(&or_obj->cfc_tau, sizeof(float), 1, fp);
+    fwrite(&or_obj->cfc_dt, sizeof(float), 1, fp);
+    fwrite(or_obj->cfc_W_gx, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM, fp);
+    fwrite(or_obj->cfc_W_ax, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM, fp);
+    fwrite(or_obj->cfc_W_gh, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM, fp);
+    fwrite(or_obj->cfc_W_ah, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM, fp);
+    fwrite(or_obj->cfc_b_g, sizeof(float), CFC_OR_HIDDEN_DIM, fp);
+    fwrite(or_obj->cfc_b_a, sizeof(float), CFC_OR_HIDDEN_DIM, fp);
+    fwrite(or_obj->cfc_W_cls, sizeof(float), OR_MAX_CATEGORIES * CFC_OR_HIDDEN_DIM, fp);
+    fwrite(or_obj->cfc_b_cls, sizeof(float), OR_MAX_CATEGORIES, fp);
 
     fclose(fp);
     return 0;
@@ -830,6 +1308,31 @@ int or_load_model(ObjectRecognizer* or_obj, const char* filepath) {
 
     or_obj->initialized = 1;
     or_obj->is_trained = 1;  /* ZSFUSA-P1-008: 模型加载成功后标记为已训练 */
+
+    /* ZSFEEE-FIX-041: 尝试读取CfC深度学习权重段（向后兼容SLO2格式）
+     * 检查是否存在"CFC1"段标识，若存在则加载CfC权重
+     * 若文件到此结束（v2格式），则CfC保持未训练状态 */
+    char cfc_check[4] = {0, 0, 0, 0};
+    long cfc_pos = ftell(fp);
+    if (fread(cfc_check, 1, 4, fp) == 4 &&
+        cfc_check[0] == 'C' && cfc_check[1] == 'F' &&
+        cfc_check[2] == 'C' && cfc_check[3] == '1') {
+        fread(&or_obj->is_cfc_trained, sizeof(int), 1, fp);
+        fread(&or_obj->cfc_tau, sizeof(float), 1, fp);
+        fread(&or_obj->cfc_dt, sizeof(float), 1, fp);
+        fread(or_obj->cfc_W_gx, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM, fp);
+        fread(or_obj->cfc_W_ax, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM, fp);
+        fread(or_obj->cfc_W_gh, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM, fp);
+        fread(or_obj->cfc_W_ah, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM, fp);
+        fread(or_obj->cfc_b_g, sizeof(float), CFC_OR_HIDDEN_DIM, fp);
+        fread(or_obj->cfc_b_a, sizeof(float), CFC_OR_HIDDEN_DIM, fp);
+        fread(or_obj->cfc_W_cls, sizeof(float), OR_MAX_CATEGORIES * CFC_OR_HIDDEN_DIM, fp);
+        fread(or_obj->cfc_b_cls, sizeof(float), OR_MAX_CATEGORIES, fp);
+    } else {
+        /* v2格式: 无CfC段，CfC保持未训练（使用HOG模板匹配作为回退） */
+        fseek(fp, cfc_pos, SEEK_SET);
+    }
+
     fclose(fp);
     return 0;
 }

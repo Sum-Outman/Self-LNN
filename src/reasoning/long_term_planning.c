@@ -578,6 +578,80 @@ int long_term_planning_add_goal(LongTermPlanningSystem* system, const Goal* goal
 }
 
 /**
+ * @brief 移除目标节点
+ * 
+ * 从系统中删除指定ID的目标，包括：
+ * 1. 释放目标内部的子节点和依赖关系
+ * 2. 从goal_nodes数组中移除
+ * 3. 清理其他目标中指向该目标的依赖和父子关系
+ * 
+ * @param system 长期规划系统
+ * @param goal_id 要移除的目标ID
+ * @return 0成功，-1未找到或参数无效
+ */
+int long_term_planning_remove_goal(LongTermPlanningSystem* system, const char* goal_id) {
+    if (!system || !goal_id) return -1;
+
+    /* 查找目标节点索引 */
+    int target_idx = -1;
+    for (int i = 0; i < system->goal_count; i++) {
+        GoalNode* node = system->goal_nodes[i];
+        if (node && node->goal && node->goal->goal_id &&
+            strcmp(node->goal->goal_id, goal_id) == 0) {
+            target_idx = i;
+            break;
+        }
+    }
+    if (target_idx < 0) return -1;
+
+    GoalNode* target = system->goal_nodes[target_idx];
+
+    /* 清理其他目标中指向该目标的依赖关系 */
+    for (int i = 0; i < system->goal_count; i++) {
+        GoalNode* other = system->goal_nodes[i];
+        if (!other || i == target_idx) continue;
+
+        /* 移除依赖引用 */
+        for (int d = 0; d < other->dependency_count; d++) {
+            if (other->dependencies[d] == target) {
+                /* 将最后一个元素移到当前位置 */
+                other->dependencies[d] = other->dependencies[other->dependency_count - 1];
+                other->dependencies[other->dependency_count - 1] = NULL;
+                other->dependency_count--;
+                d--; /* 重新检查当前位置 */
+            }
+        }
+
+        /* 移除父子引用 */
+        for (int c = 0; c < other->child_count; c++) {
+            if (other->children[c] == target) {
+                other->children[c] = other->children[other->child_count - 1];
+                other->children[other->child_count - 1] = NULL;
+                other->child_count--;
+                c--;
+            }
+        }
+    }
+
+    /* 释放目标节点内部资源 */
+    if (target->goal) {
+        safe_free((void**)&target->goal->goal_id);
+        safe_free((void**)&target->goal->description);
+        safe_free((void**)&target->goal);
+    }
+    safe_free((void**)&target->children);
+    safe_free((void**)&target->dependencies);
+    safe_free((void**)&target);
+
+    /* 从数组中移除：将最后一个元素移到目标位置 */
+    system->goal_nodes[target_idx] = system->goal_nodes[system->goal_count - 1];
+    system->goal_nodes[system->goal_count - 1] = NULL;
+    system->goal_count--;
+
+    return 0;
+}
+
+/**
  * @brief 目标分解（分层目标分解）
  */
 char** long_term_planning_decompose_goal(LongTermPlanningSystem* system,

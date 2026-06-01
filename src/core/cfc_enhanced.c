@@ -8,6 +8,10 @@
 #include <string.h>
 #include <math.h>
 
+/* 运行时配置镜像：存储最后一次使用的增强配置，供 cfc_get_enhanced_config 查询 */
+static CfcEnhancedConfig g_runtime_config;
+static int g_runtime_config_set = 0;
+
 #define CFC_ENHANCED_VERBOSE(fmt, ...) do { if (config && config->verbose) { printf("[CfC增强] " fmt "\n", ##__VA_ARGS__); } } while(0)
 
 /* ZSFLNN-H-003修复: 使用标准库 fmaxf/fminf 替代本地重复定义 */
@@ -327,6 +331,8 @@ static void cfc_scalar_tanh(const float* x, float* y, size_t n) {
 float cfc_simd_dot(const float* a, const float* b, size_t n, int use_simd) {
 #if CFC_SIMD_AVAILABLE
     if (use_simd) return cfc_simd_dot_product(a, b, n);
+#else
+    if (use_simd) log_warning("[CfC] SIMD点积请求但编译时SIMD不可用，使用标量路径");
 #endif
     (void)use_simd;
     float s = 0.0f;
@@ -352,6 +358,8 @@ void cfc_simd_activation_batch(const float* x, float* y, size_t n, int act_type,
         { for (size_t i = 0; i < n; i++) y[i] = x[i] > 0 ? x[i] : 0.0f; }
         return;
     }
+#else
+    if (use_simd) log_warning("[CfC] SIMD激活批处理请求但编译时SIMD不可用，使用标量路径");
 #endif
     (void)use_simd;
     if (act_type == 0) { for (size_t i = 0; i < n; i++) y[i] = 1.0f/(1.0f+expf(-x[i])); }
@@ -640,11 +648,18 @@ static int cfc_configure_multi_rate(CfCCell* cell, const CfcMultiRateConfig* mr_
     return 0;
 }
 
-int cfc_enhanced_forward(CfCCell* cell, const float* input, float* hidden_state,
-                          const CfcEnhancedConfig* config,
-                          CfcEnhancedState* state)
+/* L-005: 提取forward和forward_with_dt的公共前置逻辑为static内联函数
+ * 两个函数差异仅在最终调用的底层函数（cell_forward vs cell_forward_with_dt）
+ * mode=0: 调用 cfc_cell_forward; mode=1: 调用 cfc_cell_forward_with_dt */
+static int cfc_enhanced_forward_prelude(CfCCell* cell, const float* input, float* hidden_state,
+                                         const CfcEnhancedConfig* config,
+                                         CfcEnhancedState* state)
 {
     if (!cell || !input || !hidden_state || !config || !state) return -1;
+
+    g_runtime_config = *config;
+    g_runtime_config_set = 1;
+    state->active_config = *config;
 
     SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
     if (!state->initialized) {
@@ -669,9 +684,17 @@ int cfc_enhanced_forward(CfCCell* cell, const float* input, float* hidden_state,
         }
     }
 
-    int ret = cfc_cell_forward(cell, input, hidden_state);
+    return 0;
+}
 
-    return ret;
+int cfc_enhanced_forward(CfCCell* cell, const float* input, float* hidden_state,
+                          const CfcEnhancedConfig* config,
+                          CfcEnhancedState* state)
+{
+    int prelude_ret = cfc_enhanced_forward_prelude(cell, input, hidden_state, config, state);
+    if (prelude_ret != 0) return prelude_ret;
+
+    return cfc_cell_forward(cell, input, hidden_state);
 }
 
 int cfc_enhanced_forward_with_dt(CfCCell* cell, const float* input, float delta_t,
@@ -679,34 +702,10 @@ int cfc_enhanced_forward_with_dt(CfCCell* cell, const float* input, float delta_
                                    const CfcEnhancedConfig* config,
                                    CfcEnhancedState* state)
 {
-    if (!cell || !input || !hidden_state || !config || !state) return -1;
+    int prelude_ret = cfc_enhanced_forward_prelude(cell, input, hidden_state, config, state);
+    if (prelude_ret != 0) return prelude_ret;
 
-    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
-    if (!state->initialized) {
-        int current = cfc_cell_get_solver_type(cell);
-        if (current < 0) current = ODE_SOLVER_CLOSED_FORM;
-        state->original_solver = current;
-        state->current_solver = current;
-        state->initialized = 1;
-    }
-
-    state->total_calls++;
-
-    if (config->enable_auto_solver) {
-        cfc_select_solver_by_stiffness(cell, input, hidden_state,
-                                        &config->auto_solver, state);
-
-        CfCCellConfig cell_cfg;
-        if (cfc_cell_get_config(cell, &cell_cfg) == 0) {
-            int is_stiff = (state->current_stiffness_ratio > config->auto_solver.stiffness_ratio_threshold);
-            cfc_configure_multi_rate(cell, &config->auto_solver.multi_rate,
-                                      is_stiff, state->current_stiffness_ratio, state);
-        }
-    }
-
-    int ret = cfc_cell_forward_with_dt(cell, input, delta_t, hidden_state);
-
-    return ret;
+    return cfc_cell_forward_with_dt(cell, input, delta_t, hidden_state);
 }
 
 int cfc_multi_rate_forward(CfCCell* cell, const float* input, float delta_t,
@@ -870,9 +869,13 @@ int cfc_get_enhanced_stats(const CfcEnhancedState* state, int* current_solver,
     return 0;
 }
 
-int cfc_get_enhanced_config(CfcEnhancedConfig* config)
+int cfc_get_enhanced_config(const CfcEnhancedState* state, CfcEnhancedConfig* config)
 {
-    if (!config) return -1;
-    *config = cfc_enhanced_default_config();
+    if (!state || !config) return -1;
+    if (state->initialized) {
+        *config = state->active_config;
+    } else {
+        *config = cfc_enhanced_default_config();
+    }
     return 0;
 }

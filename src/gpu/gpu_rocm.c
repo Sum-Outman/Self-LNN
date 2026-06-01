@@ -34,6 +34,7 @@ static volatile int rocm_cache_lock_val = 0;
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <io.h>
@@ -305,6 +306,19 @@ static const char* ROCM_CFC_STEP_KERNEL =
 "    }\n"
 "}\n";
 
+/* ZSF999XQ-GPU-H3: 完整CfC ODE积分内核 - 将tau衰减和驱动项全部在GPU上计算 */
+static const char* ROCM_CFC_ODE_FULL_KERNEL =
+"extern \"C\" __global__ void cfc_ode_full(\n"
+"    float* h_out, const float* h_in, const float* tau, int dim, float dt) {\n"
+"    int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    if (idx < dim) {\n"
+"        float t_val = tau[idx] > 0.001f ? tau[idx] : 0.001f;\n"
+"        float decay = __expf(-dt / t_val);\n"
+"        float driver = tanhf(h_out[idx]);\n"
+"        h_out[idx] = h_in[idx] * decay + (1.0f - decay) * driver;\n"
+"    }\n"
+"}\n";
+
 /* 2D卷积HIP内核 (内嵌回退用)
  * 参数: input[N*C*H*W], kernel[K*C*KH*KW], output[N*K*OH*OW],
  *       N, C, H, W, K, KH, KW, OH, OW, stride_h, stride_w */
@@ -361,8 +375,10 @@ static const char* get_embedded_hip_source(const char* kernel_name) {
         strstr(kernel_name, "conv_")) {
         return ROCM_CONV2D_KERNEL;
     }
-    /* CfC步骤匹配 */
+    /* CfC步骤匹配 — ZSF999XQ-GPU-H3: 添加cfc_ode_full内核映射 */
     if (strstr(kernel_name, "cfc_step") || strncmp(kernel_name, "cfc_", 4) == 0) {
+        if (strstr(kernel_name, "ode_full"))
+            return ROCM_CFC_ODE_FULL_KERNEL;
         return ROCM_CFC_STEP_KERNEL;
     }
     return NULL;
@@ -819,17 +835,21 @@ static GpuKernel* rocm_backend_kernel_create(GpuContext* context, const char* ke
     strncpy(temp_dir, "/tmp/", MAX_PATH - 1);
 #endif
     char src_path[MAX_PATH];
-    snprintf(src_path, sizeof(src_path), "%s/rocm_kernel_XXXXXX.rocm", temp_dir);
     char real_src_path[MAX_PATH];
 #ifdef _WIN32
+    snprintf(src_path, sizeof(src_path), "%s/rocm_kernel_XXXXXX.rocm", temp_dir);
     char tmpname[MAX_PATH];
     GetTempFileNameA(temp_dir, "hip", 0, tmpname);
     snprintf(real_src_path, sizeof(real_src_path), "%s.cpp", tmpname);
 #else
-    int fd = mkstemps(src_path, 5);
+    /* 使用进程ID和时间戳生成唯一临时文件名，避免硬编码字面量冲突 */
+    snprintf(src_path, sizeof(src_path), "%s/rocm_kernel_%d_%ld.rocm",
+             temp_dir, (int)getpid(), (long)time(NULL));
+    int fd = open(src_path, O_CREAT | O_EXCL | O_WRONLY, 0600);
     if (fd < 0) return NULL;
     close(fd);
     strncpy(real_src_path, src_path, sizeof(real_src_path) - 1);
+    real_src_path[sizeof(real_src_path) - 1] = '\0';
 #endif
     FILE* fp = fopen(real_src_path, "w");
     if (!fp) return NULL;
@@ -1794,12 +1814,22 @@ int rocm_cfc_ode_step(GpuContext* context,
     rocm_backend_kernel_free(ck);
   }
   hipMemcpy(h_out, d_h_in, state_byte, hipMemcpyDeviceToHost);
-  /* 应用tau时间常数衰减和ODE积分 */
-  for (int i = 0; i < dim; i++) {
-    float t_val = tau[i] > 0.001f ? tau[i] : 0.001f;
-    float decay = expf(-dt / t_val);
-    float driver = tanhf(h_out[i]);
-    h_out[i] = h_in[i] * decay + (1.0f - decay) * driver;
+  /* ZSF999XQ-GPU-H3修复: ODE积分全部在GPU上完成，不再使用CPU for循环 */
+  {
+    GpuKernel* odek = rocm_backend_kernel_create(context, ROCM_CFC_ODE_FULL_KERNEL, "cfc_ode_full");
+    if (!odek) goto cleanup;
+    /* 先将h_in拷贝到d_h_out作为输入，GPU内核会读h_in写h_out */
+    hipMemcpy(d_h_out, h_in, state_byte, hipMemcpyHostToDevice);
+    rocm_backend_kernel_set_arg(odek, 0, sizeof(void*), &d_h_out);
+    rocm_backend_kernel_set_arg(odek, 1, sizeof(void*), &d_h_in);
+    rocm_backend_kernel_set_arg(odek, 2, sizeof(void*), &d_tau);
+    rocm_backend_kernel_set_arg(odek, 3, sizeof(int), &dim);
+    rocm_backend_kernel_set_arg(odek, 4, sizeof(float), &dt);
+    size_t ws2 = (size_t)rctx->max_threads_per_block;
+    if (ws2 > 256) ws2 = 256;
+    rocm_backend_kernel_execute(odek, (size_t)dim, ws2);
+    rocm_backend_kernel_free(odek);
+    hipMemcpy(h_out, d_h_out, state_byte, hipMemcpyDeviceToHost);
   }
   ret = 0;
 cleanup:

@@ -1,8 +1,8 @@
-#ifndef SELFLNN_EVOLUTIONARY_ALGORITHMS_H
+﻿#ifndef SELFLNN_EVOLUTIONARY_ALGORITHMS_H
 #define SELFLNN_EVOLUTIONARY_ALGORITHMS_H
 
 #include "selflnn/core/common.h"
-#include "selflnn/neural_architecture_search.h"
+#include "selflnn/evolution/neural_architecture_search.h"
 
 /* 前向声明LNN类型，避免循环依赖 */
 #ifndef SELFLNN_LNN_H

@@ -166,6 +166,13 @@ int speech_recognizer_extract_features(SpeechRecognizer* recognizer,
 void speech_recognizer_reset(SpeechRecognizer* recognizer);
 
 /**
+ * @brief ZSFQQ-P2-001: 标记语音识别模型为已训练
+ * 在系统加载检查点或完成引导训练后调用，使识别器可以正常工作
+ * @param recognizer 处理器句柄
+ */
+void speech_recognizer_mark_trained(SpeechRecognizer* recognizer);
+
+/**
  * @brief 设置词汇表
  * @param recognizer 处理器句柄
  * @param vocab 词汇表数组（UTF-8字符串）

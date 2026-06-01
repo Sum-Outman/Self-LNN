@@ -364,6 +364,12 @@ void lnn_free(LNN* network) {
         network->lock = NULL;
     }
 
+    /* H-004修复: 释放用户自定义数据 */
+    if (network->user_data && network->user_data_free) {
+        network->user_data_free(network->user_data);
+        network->user_data = NULL;
+    }
+
     // 释放梯度检查点缓冲区
     if (network->gradient_checkpoint_buffer) {
         safe_free((void**)&network->gradient_checkpoint_buffer);
@@ -392,6 +398,21 @@ void lnn_free(LNN* network) {
     
     // 释放网络结构
     safe_free((void**)&network);
+}
+
+/* H-004修复: 用户数据存取器 */
+void lnn_set_user_data(LNN* network, void* data, void (*free_fn)(void*)) {
+    if (!network) return;
+    if (network->user_data && network->user_data_free) {
+        network->user_data_free(network->user_data);
+    }
+    network->user_data = data;
+    network->user_data_free = free_fn;
+}
+
+void* lnn_get_user_data(LNN* network) {
+    if (!network) return NULL;
+    return network->user_data;
 }
 
 /**
@@ -694,6 +715,10 @@ int lnn_forward_isolated(LNN* network, LNNForwardState* state,
     /* 复制输入到隔离缓冲区 */
     memcpy(state->input_buffer, input, in_sz * sizeof(float));
 
+    /* ZSFDDD-D4-001: 添加排他锁保护权重读取
+     * 原实现完全无锁——训练期间并发推理会读到半更新权重
+     * 当前使用互斥锁（非RWLock），多读者实际串行化但保证安全 */
+    LNN_LOCK(network);
     /* ZSFWS-P1-008: 使用隔离状态进行CfC前向传播
      * 直接将隔离状态传递给cfc_forward，完全避开LNN全局状态 */
     int result = cfc_forward(network->cfc_network,
@@ -701,6 +726,7 @@ int lnn_forward_isolated(LNN* network, LNNForwardState* state,
                              state->hidden_state,
                              state->cell_state,
                              state->output_buffer);
+    LNN_UNLOCK(network);
 
     if (result != 0) return -1;
 
@@ -798,16 +824,25 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
     }
     lnn_clip_gradients(network->gradient_buffer, hidden_size, max_grad_norm);
 
-    /* ZSFUSA-C10: 公共梯度裁剪替代内联循环(FIX-022权重偏置裁剪) */
+    /* ZSFQQ-TRAIN-P0-1修复: 原代码cfc_get_weight_matrix返回的是参数(weight_matrix)
+     * 而非梯度(weight_gradients)。调用lnn_clip_gradients会破坏性修改权重参数本身。
+     * 修复：直接裁剪cfc_network内部的weight_gradients/bias_gradients字段。 */
     {
-        float* wgrads = NULL;
-        float* bgrads = NULL;
-        size_t wc = 0, bc = 0;
-        if (cfc_get_weight_matrix(network->cfc_network, &wgrads, &wc) == 0 && wgrads && wc > 0) {
-            lnn_clip_gradients(wgrads, wc, max_grad_norm);
+        CfCNetwork* cfc = network->cfc_network;
+        if (cfc && cfc->weight_gradients) {
+            size_t wc = 0;
+            /* 计算总权重参数数以确定梯度数组大小 */
+            size_t in = cfc->config.input_size, hn = cfc->config.hidden_size;
+            size_t nl = cfc->config.num_layers;
+            if (nl <= 1) wc = in * hn;
+            else wc = in * hn + (nl - 1) * hn * hn;
+            lnn_clip_gradients(cfc->weight_gradients, wc, max_grad_norm);
         }
-        if (cfc_get_bias_vector(network->cfc_network, &bgrads, &bc) == 0 && bgrads && bc > 0) {
-            lnn_clip_gradients(bgrads, bc, max_grad_norm);
+        if (cfc && cfc->bias_gradients) {
+            size_t bc = 0;
+            size_t hn = cfc->config.hidden_size, nl = cfc->config.num_layers;
+            bc = hn * nl;
+            lnn_clip_gradients(cfc->bias_gradients, bc, max_grad_norm);
         }
     }
 
@@ -826,7 +861,9 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
             lnn_clip_gradients(cell->input_gate_weight_grad, w_size, max_norm);
             lnn_clip_gradients(cell->forget_gate_weight_grad, w_size, max_norm);
             lnn_clip_gradients(cell->output_gate_weight_grad, w_size, max_norm);
-            lnn_clip_gradients(cell->hidden_to_gate_weight_grad, hs * hs, max_norm);
+            lnn_clip_gradients(cell->hidden_to_input_gate_weight_grad, hs * hs, max_norm);
+            lnn_clip_gradients(cell->hidden_to_forget_gate_weight_grad, hs * hs, max_norm);
+            lnn_clip_gradients(cell->hidden_to_output_gate_weight_grad, hs * hs, max_norm);
             lnn_clip_gradients(cell->hidden_to_activation_weight_grad, hs * hs, max_norm);
             lnn_clip_gradients(cell->gate_bias_grad, hs * 3, max_norm);
             lnn_clip_gradients(cell->time_constant_grad, hs, max_norm);
@@ -931,7 +968,28 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
  * @brief 反向传播内部实现（无锁，调用者需持有 LNN_LOCK）
  */
 int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
-    return _lnn_backward_internal_ex(network, target, loss, 0);
+    int ret = _lnn_backward_internal_ex(network, target, loss, 0);
+    /* ZSFQQ-TRAIN-P0-2修复: skip=0模式下cfc_backward_ex仅累积weight_gradients
+     * 但不应用。需要在函数返回前应用累积梯度到weight_matrix/bias_vector。 */
+    if (ret == 0 && network->cfc_network) {
+        CfCNetwork* cfc = network->cfc_network;
+        if (cfc->weight_gradients && cfc->weight_matrix) {
+            size_t in = cfc->config.input_size, hn = cfc->config.hidden_size;
+            size_t nl = cfc->config.num_layers;
+            size_t total_w = (nl <= 1) ? (in * hn) : (in * hn + (nl - 1) * hn * hn);
+            size_t total_b = hn * nl;
+            float lr = network->config.learning_rate;
+            for (size_t i = 0; i < total_w; i++)
+                cfc->weight_matrix[i] -= lr * cfc->weight_gradients[i];
+            for (size_t i = 0; i < total_b; i++)
+                cfc->bias_vector[i] -= lr * cfc->bias_gradients[i];
+            memset(cfc->weight_gradients, 0, total_w * sizeof(float));
+            memset(cfc->bias_gradients, 0, total_b * sizeof(float));
+        }
+        /* 同步更新后的权重到各层CfCCell */
+        cfc_sync_shared_to_cells(cfc);
+    }
+    return ret;
 }
 
 /**
@@ -1017,56 +1075,72 @@ int lnn_save(const LNN* network, const char* filepath) {
     header.checksum = config_checksum;
 
     // 写入文件头
-    SELFLNN_CHECK(fwrite(&header, sizeof(header), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR,
-                 "写入模型文件头失败");
-
+    if (fwrite(&header, sizeof(header), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "写入模型文件头失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
     // 保存配置
-    SELFLNN_CHECK(fwrite(&network->config, sizeof(LNNConfig), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR,
-                 "保存LNN网络配置失败");
-
+    if (fwrite(&network->config, sizeof(LNNConfig), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存LNN网络配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
     // 保存CfC网络
-    SELFLNN_CHECK(cfc_save(network->cfc_network, file) == 0,
-                 SELFLNN_ERROR_IO_ERROR,
-                 "保存CfC网络数据失败");
-
+    if (cfc_save(network->cfc_network, file) != 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存CfC网络数据失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
     // 保存隐藏状态
     size_t hidden_size = network->config.hidden_size;
-    SELFLNN_CHECK(fwrite(network->hidden_state, sizeof(float), hidden_size, file) == hidden_size,
-                 SELFLNN_ERROR_IO_ERROR,
-                 "保存隐藏状态失败（大小：%zu）", hidden_size);
-
+    if (fwrite(network->hidden_state, sizeof(float), hidden_size, file) != hidden_size) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存隐藏状态失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
     // 保存细胞状态
-    SELFLNN_CHECK(fwrite(network->cell_state, sizeof(float), hidden_size, file) == hidden_size,
-                 SELFLNN_ERROR_IO_ERROR,
-                 "保存细胞状态失败（大小：%zu）", hidden_size);
-
-    // 保存扩展字段版本标记（v2序列化格式）
+    if (fwrite(network->cell_state, sizeof(float), hidden_size, file) != hidden_size) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存细胞状态失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
+    // 保存扩展字段版本标记
     uint32_t ext_version = 2;
-    SELFLNN_CHECK(fwrite(&ext_version, sizeof(uint32_t), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR, "保存扩展版本标记失败");
-
+    if (fwrite(&ext_version, sizeof(uint32_t), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存扩展版本标记失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
     // 保存分片配置
-    SELFLNN_CHECK(fwrite(&network->enable_param_sharding, sizeof(int), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR, "保存分片配置失败");
-    SELFLNN_CHECK(fwrite(&network->num_local_shards, sizeof(size_t), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR, "保存分片数失败");
-    SELFLNN_CHECK(fwrite(&network->enable_gradient_checkpointing, sizeof(int), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR, "保存梯度检查点配置失败");
-    SELFLNN_CHECK(fwrite(&network->enable_model_parallel, sizeof(int), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR, "保存模型并行配置失败");
-    SELFLNN_CHECK(fwrite(&network->enable_async_gradient_sync, sizeof(int), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR, "保存异步同步配置失败");
-
+    if (fwrite(&network->enable_param_sharding, sizeof(int), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存分片配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
+    if (fwrite(&network->num_local_shards, sizeof(size_t), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存分片数失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
+    if (fwrite(&network->enable_gradient_checkpointing, sizeof(int), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存梯度检查点配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
+    if (fwrite(&network->enable_model_parallel, sizeof(int), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存模型并行配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
+    if (fwrite(&network->enable_async_gradient_sync, sizeof(int), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存异步同步配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
     // 保存统计信息
-    SELFLNN_CHECK(fwrite(&network->current_loss, sizeof(float), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR, "保存当前损失失败");
+    if (fwrite(&network->current_loss, sizeof(float), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存当前损失失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
     uint64_t fwd_bwd[2] = {(uint64_t)network->forward_count, (uint64_t)network->backward_count};
-    SELFLNN_CHECK(fwrite(fwd_bwd, sizeof(uint64_t), 2, file) == 2,
-                 SELFLNN_ERROR_IO_ERROR, "保存前向/反向计数失败");
-    SELFLNN_CHECK(fwrite(&network->total_training_time, sizeof(double), 1, file) == 1,
-                 SELFLNN_ERROR_IO_ERROR, "保存训练时间失败");
+    if (fwrite(fwd_bwd, sizeof(uint64_t), 2, file) != 2) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存前向/反向计数失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
+    if (fwrite(&network->total_training_time, sizeof(double), 1, file) != 1) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "保存训练时间失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+    }
 
     fclose(file);
     return 0;
@@ -1928,7 +2002,9 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
                 if (cell->input_gate_weight_grad)   for (k = 0; k < cw; k++) cell->input_gate_weight_grad[k]   *= cell_scale;
                 if (cell->forget_gate_weight_grad)  for (k = 0; k < cw; k++) cell->forget_gate_weight_grad[k]  *= cell_scale;
                 if (cell->output_gate_weight_grad)  for (k = 0; k < cw; k++) cell->output_gate_weight_grad[k]  *= cell_scale;
-                if (cell->hidden_to_gate_weight_grad)       for (k = 0; k < hh; k++) cell->hidden_to_gate_weight_grad[k]       *= cell_scale;
+                if (cell->hidden_to_input_gate_weight_grad)   for (k = 0; k < hh; k++) cell->hidden_to_input_gate_weight_grad[k]   *= cell_scale;
+                if (cell->hidden_to_forget_gate_weight_grad)  for (k = 0; k < hh; k++) cell->hidden_to_forget_gate_weight_grad[k]  *= cell_scale;
+                if (cell->hidden_to_output_gate_weight_grad)  for (k = 0; k < hh; k++) cell->hidden_to_output_gate_weight_grad[k]  *= cell_scale;
                 if (cell->hidden_to_activation_weight_grad) for (k = 0; k < hh; k++) cell->hidden_to_activation_weight_grad[k] *= cell_scale;
                 if (cell->gate_bias_grad)           for (k = 0; k < hidden_size * 3; k++) cell->gate_bias_grad[k] *= cell_scale;
                 if (cell->use_adaptive_tau && cell->time_constant_grad)
@@ -3044,6 +3120,49 @@ size_t lnn_get_layer_parameter_count(LNN* lnn, int layer_id) {
     return count;
 }
 
+/* ZSFQQ-Q025: 通过公共API获取权重矩阵和偏置向量，替代直接访问内部字段 */
+float* lnn_get_weight_matrix(LNN* network) {
+    if (!network) return NULL;
+    CfCNetwork* cfc = lnn_get_cfc_network(network);
+    if (!cfc || !cfc->is_initialized) return NULL;
+    return cfc->weight_matrix;
+}
+
+float* lnn_get_bias_vector(LNN* network) {
+    if (!network) return NULL;
+    CfCNetwork* cfc = lnn_get_cfc_network(network);
+    if (!cfc || !cfc->is_initialized) return NULL;
+    return cfc->bias_vector;
+}
+
+size_t lnn_get_weight_count(LNN* network) {
+    if (!network) return 0;
+    CfCNetwork* cfc = lnn_get_cfc_network(network);
+    if (!cfc || !cfc->is_initialized) return 0;
+    return (size_t)(cfc->config.input_size) * (size_t)(cfc->config.hidden_size);
+}
+
+size_t lnn_get_bias_count(LNN* network) {
+    if (!network) return 0;
+    CfCNetwork* cfc = lnn_get_cfc_network(network);
+    if (!cfc || !cfc->is_initialized) return 0;
+    return (size_t)(cfc->config.hidden_size);
+}
+
+int lnn_set_weights_and_biases(LNN* network, const float* weights, const float* biases) {
+    if (!network) return -1;
+    CfCNetwork* cfc = lnn_get_cfc_network(network);
+    if (!cfc || !cfc->is_initialized) return -1;
+    if (weights) {
+        size_t count = (size_t)(cfc->config.input_size) * (size_t)(cfc->config.hidden_size);
+        memcpy(cfc->weight_matrix, weights, count * sizeof(float));
+    }
+    if (biases) {
+        memcpy(cfc->bias_vector, biases, (size_t)(cfc->config.hidden_size) * sizeof(float));
+    }
+    return 0;
+}
+
 /* ================================================================
  * P2-010修复: 优化器自动集成到LNN训练管线
  * 提供 lnn_backward_with_optimizer() 函数，
@@ -3082,7 +3201,8 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
      * 修复：
      *   1. 收集规范参数(weight_matrix, bias_vector)及其正确梯度
      *   2. 遍历所有CfC层收集cell级独立参数(input_gate_weights, gate_biases,
-     *      time_constants, hidden_to_gate_weights, hidden_to_activation_weights)
+     *      time_constants, hidden_to_input_gate_weights, hidden_to_forget_gate_weights,
+     *      hidden_to_output_gate_weights, hidden_to_activation_weights)
      *   3. 统一通过优化器更新后分别写回
      *   4. 调用cfc_sync_shared_to_cells同步规范参数到各层 */
     if (optimizer && network->cfc_network) {
@@ -3094,12 +3214,14 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
 
         /* 计算规范参数大小 */
         size_t shared_w_count;
+        /* ZSFQQ-TRAIN-P1修复: 多层网络第一层是input→hidden，后续层是hidden→hidden。
+         * 原代码误用hidden_size*hidden_size(仅一层)，遗漏了第一层和其余层。 */
         if (num_layers <= 1) {
             shared_w_count = input_size * hidden_size;
         } else {
-            shared_w_count = hidden_size * hidden_size;
+            shared_w_count = input_size * hidden_size + (size_t)(num_layers - 1) * hidden_size * hidden_size;
         }
-        size_t shared_b_count = hidden_size;
+        size_t shared_b_count = hidden_size * (size_t)num_layers;
 
         /* 计算cell级独立参数总大小 */
         size_t cell_unique_params = 0;
@@ -3112,7 +3234,9 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
             cell_unique_params += layer_input * hidden_size;  /* output_gate_weights (ZSFWS-023修复: 补充遗漏) */
             if (cell->gate_biases) cell_unique_params += hidden_size * 3;
             if (cell->use_adaptive_tau && cell->time_constants) cell_unique_params += hidden_size;
-            if (cell->hidden_to_gate_weights) cell_unique_params += hidden_size * hidden_size;
+            if (cell->hidden_to_input_gate_weights) cell_unique_params += hidden_size * hidden_size;
+            if (cell->hidden_to_forget_gate_weights) cell_unique_params += hidden_size * hidden_size;
+            if (cell->hidden_to_output_gate_weights) cell_unique_params += hidden_size * hidden_size;
             if (cell->hidden_to_activation_weights) cell_unique_params += hidden_size * hidden_size;
         }
 
@@ -3199,12 +3323,32 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
                     idx += hidden_size;
                 }
 
-                /* hidden_to_gate_weights */
-                if (cell->hidden_to_gate_weights && idx + hidden_size * hidden_size <= total_params) {
+                /* hidden_to_input_gate_weights */
+                if (cell->hidden_to_input_gate_weights && idx + hidden_size * hidden_size <= total_params) {
                     size_t n = hidden_size * hidden_size;
-                    memcpy(all_params + idx, cell->hidden_to_gate_weights, n * sizeof(float));
-                    if (cell->hidden_to_gate_weight_grad) {
-                        memcpy(all_grads + idx, cell->hidden_to_gate_weight_grad, n * sizeof(float));
+                    memcpy(all_params + idx, cell->hidden_to_input_gate_weights, n * sizeof(float));
+                    if (cell->hidden_to_input_gate_weight_grad) {
+                        memcpy(all_grads + idx, cell->hidden_to_input_gate_weight_grad, n * sizeof(float));
+                    }
+                    idx += n;
+                }
+
+                /* hidden_to_forget_gate_weights */
+                if (cell->hidden_to_forget_gate_weights && idx + hidden_size * hidden_size <= total_params) {
+                    size_t n = hidden_size * hidden_size;
+                    memcpy(all_params + idx, cell->hidden_to_forget_gate_weights, n * sizeof(float));
+                    if (cell->hidden_to_forget_gate_weight_grad) {
+                        memcpy(all_grads + idx, cell->hidden_to_forget_gate_weight_grad, n * sizeof(float));
+                    }
+                    idx += n;
+                }
+
+                /* hidden_to_output_gate_weights */
+                if (cell->hidden_to_output_gate_weights && idx + hidden_size * hidden_size <= total_params) {
+                    size_t n = hidden_size * hidden_size;
+                    memcpy(all_params + idx, cell->hidden_to_output_gate_weights, n * sizeof(float));
+                    if (cell->hidden_to_output_gate_weight_grad) {
+                        memcpy(all_grads + idx, cell->hidden_to_output_gate_weight_grad, n * sizeof(float));
                     }
                     idx += n;
                 }
@@ -3282,9 +3426,21 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
                         widx += hidden_size;
                     }
 
-                    if (cell->hidden_to_gate_weights && widx + hidden_size * hidden_size <= idx) {
+                    if (cell->hidden_to_input_gate_weights && widx + hidden_size * hidden_size <= idx) {
                         size_t n = hidden_size * hidden_size;
-                        memcpy(cell->hidden_to_gate_weights, all_params + widx, n * sizeof(float));
+                        memcpy(cell->hidden_to_input_gate_weights, all_params + widx, n * sizeof(float));
+                        widx += n;
+                    }
+
+                    if (cell->hidden_to_forget_gate_weights && widx + hidden_size * hidden_size <= idx) {
+                        size_t n = hidden_size * hidden_size;
+                        memcpy(cell->hidden_to_forget_gate_weights, all_params + widx, n * sizeof(float));
+                        widx += n;
+                    }
+
+                    if (cell->hidden_to_output_gate_weights && widx + hidden_size * hidden_size <= idx) {
+                        size_t n = hidden_size * hidden_size;
+                        memcpy(cell->hidden_to_output_gate_weights, all_params + widx, n * sizeof(float));
                         widx += n;
                     }
 
@@ -3320,8 +3476,12 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
                         memset(cell->gate_bias_grad, 0, hidden_size * 3 * sizeof(float));
                     if (cell->time_constant_grad)
                         memset(cell->time_constant_grad, 0, hidden_size * sizeof(float));
-                    if (cell->hidden_to_gate_weight_grad)
-                        memset(cell->hidden_to_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
+                    if (cell->hidden_to_input_gate_weight_grad)
+                        memset(cell->hidden_to_input_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
+                    if (cell->hidden_to_forget_gate_weight_grad)
+                        memset(cell->hidden_to_forget_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
+                    if (cell->hidden_to_output_gate_weight_grad)
+                        memset(cell->hidden_to_output_gate_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
                     if (cell->hidden_to_activation_weight_grad)
                         memset(cell->hidden_to_activation_weight_grad, 0, hidden_size * hidden_size * sizeof(float));
                 }

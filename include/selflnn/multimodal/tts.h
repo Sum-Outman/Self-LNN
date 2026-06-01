@@ -200,6 +200,13 @@ int tts_engine_reset(TTSEngine* engine);
 int tts_engine_set_speed(TTSEngine* engine, float speed);
 
 /**
+ * @brief ZSFQQ-P2-001: 标记TTS引擎为已训练
+ * 在系统加载检查点或完成引导训练后调用，使TTS可以正常合成语音
+ * @param engine 引擎句柄
+ */
+void tts_engine_mark_trained(TTSEngine* engine);
+
+/**
  * @brief 检查TTS引擎完整性
  * 在调用 tts_synthesize 前验证引擎内部状态完整，避免深层崩溃
  * @param engine 引擎句柄

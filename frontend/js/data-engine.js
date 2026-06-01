@@ -148,6 +148,20 @@ class DataEngine {
     }
 
     /**
+     * L-023修复: 通用骨架屏移除 — 在所有数据成功更新后清除页面骨架屏加载动画
+     */
+    removeAllSkeletonClasses() {
+        try {
+            var skeletonEls = document.querySelectorAll('.skeleton-loading');
+            for (var i = 0; i < skeletonEls.length; i++) {
+                skeletonEls[i].classList.remove('skeleton-loading');
+            }
+        } catch (e) {
+            /* DOM不可用时静默忽略 */
+        }
+    }
+
+    /**
      * 从API响应更新数据
      */
     _updateFromApi(key, apiData) {
@@ -192,6 +206,8 @@ class DataEngine {
                 }
                 this._saveCachedData();
                 this._consecutiveErrors = 0;
+                /* L-023修复: 数据更新成功后清除所有骨架屏加载动画 */
+                this.removeAllSkeletonClasses();
             } catch (e) {
                 this._consecutiveErrors = (this._consecutiveErrors || 0) + 1;
                 if (this._consecutiveErrors > 3) {
@@ -234,7 +250,12 @@ class DataEngine {
         /* FIX-F2-7: 立即执行一次连接检查,消除18秒冷启动延迟 */
         this.checkConnection().then(function() {
             /* 连接成功后立即拉取第一批数据 */
-            if (this._backendConnected) { this._fetchAllData(); }
+            if (this._backendConnected) {
+                this._fetchAllData().then(function() {
+                    /* L-023修复: 首批数据成功后清除骨架屏 */
+                    this.removeAllSkeletonClasses();
+                }.bind(this)).catch(function(){});
+            }
         }.bind(this)).catch(function() {});
         var self = this;
         /* BUG修复: 使用递归setTimeout替代setInterval，防止_tick()并发重叠执行 */

@@ -9,8 +9,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
-#include "selflnn/training/distributed_training.h"  /* ZSFNO2-F002: 真实分布式AllReduce */
-#include "../training/distributed_internal.h"        /* ZSFNO2-F002: DistributedContext完整结构定义 */
+#include "selflnn/training/distributed_training.h"  /* ZSFNO2-F002 + ZSFZX-FIX-P1-001: DistributedContext定义已内移至本头文件 */
 #include "selflnn/selflnn.h"                        /* ZSFNO2-F002: selflnn_get_distributed_context */
 
 #include <stdlib.h>
@@ -23,17 +22,6 @@
 #define ET_LNN_UNLOCK(n) mutex_unlock((n)->lock)
 #define ET_CTX_LOCK(c)   mutex_lock((c)->lock)
 #define ET_CTX_UNLOCK(c) mutex_unlock((c)->lock)
-
-static int compare_float_abs_desc(const void* a, const void* b)
-{
-    float fa = *(const float*)a;
-    float fb = *(const float*)b;
-    if (fa < 0) fa = -fa;
-    if (fb < 0) fb = -fb;
-    if (fa > fb) return -1;
-    if (fa < fb) return 1;
-    return 0;
-}
 
 static size_t find_nearest_checkpoint(const LNN* network, size_t target_layer)
 {
@@ -1088,17 +1076,32 @@ SELFLNN_API int lnn_contrastive_loss(const float* anchor, const float* positive,
     }
     float pos_sim = pos_dot / temperature;
 
-    float sum_exp = expf(pos_sim);
-    for (size_t n = 0; n < num_negatives; n++) {
-        float neg_dot = 0.0f;
-        for (size_t d = 0; d < feature_dim; d++) {
-            neg_dot += anchor[d] * negatives[n * feature_dim + d];
+    /* ZSFGGG-S2-007修复: max-subtract数值稳定化InfoNCE损失。
+     * 收集所有相似度后减去最大值再exp，防止pos_sim过大导致exp(50)溢出为inf。
+     * 标准InfoNCE: loss = -log(exp(s_pos)/sum_i exp(s_i)) = -s_pos + log(sum exp(s_i - max))
+     * max-subtract不改变数学结果但保证数值稳定。 */
+    float max_sim = pos_sim;
+    float* neg_sims = NULL;
+    if (num_negatives > 0) {
+        neg_sims = (float*)safe_malloc(num_negatives * sizeof(float));
+        for (size_t n = 0; n < num_negatives; n++) {
+            float neg_dot = 0.0f;
+            for (size_t d = 0; d < feature_dim; d++) {
+                neg_dot += anchor[d] * negatives[n * feature_dim + d];
+            }
+            neg_sims[n] = neg_dot / temperature;
+            if (neg_sims[n] > max_sim) max_sim = neg_sims[n];
         }
-        sum_exp += expf(neg_dot / temperature);
     }
 
+    float sum_exp = expf(pos_sim - max_sim);
+    for (size_t n = 0; n < num_negatives; n++) {
+        sum_exp += expf(neg_sims[n] - max_sim);
+    }
+    if (neg_sims) safe_free((void**)&neg_sims);
+
     if (sum_exp < 1e-10f) sum_exp = 1e-10f;
-    *loss = -logf(fmaxf(expf(pos_sim) / sum_exp, 1e-10f));
+    *loss = -(pos_sim - max_sim) + logf(sum_exp);
     return 0;
 }
 

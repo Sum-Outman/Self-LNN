@@ -287,7 +287,7 @@ static void quaternion_hamilton_product(const float* a, const float* b, float* o
  * @param s 标量
  * @param out 输出 [4]
  */
-static void quaternion_scale(const float* q, float s, float* out)
+static void quaternion_scale_arr(const float* q, float s, float* out)
 {
     out[0] = q[0] * s; out[1] = q[1] * s;
     out[2] = q[2] * s; out[3] = q[3] * s;
@@ -299,7 +299,7 @@ static void quaternion_scale(const float* q, float s, float* out)
  * @param b 四元数b [4]
  * @param out 输出 [4]
  */
-static void quaternion_add(const float* a, const float* b, float* out)
+static void quaternion_add_arr(const float* a, const float* b, float* out)
 {
     out[0] = a[0] + b[0]; out[1] = a[1] + b[1];
     out[2] = a[2] + b[2]; out[3] = a[3] + b[3];

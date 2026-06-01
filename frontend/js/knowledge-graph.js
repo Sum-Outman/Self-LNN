@@ -302,7 +302,7 @@
             html += '<span style="color:rgba(255,255,255,0.2);font-size:0.6rem;">──></span>';
             html += '<span class="o">' + escapeHtml(e.object) + '</span>';
             html += '</div>';
-            html += '<div class="meta">类型: ' + e.type + ' &middot; 置信度: ' + e.confidence + ' &middot; ' + new Date(e.timestamp).toLocaleString() + '</div>';
+            html += '<div class="meta">类型: ' + e.type + ' &middot; 置信度: ' + (e.confidence === -1 ? '--' : e.confidence) + ' &middot; ' + new Date(e.timestamp).toLocaleString() + '</div>';
             html += '</div>';
         });
         container.innerHTML = html;

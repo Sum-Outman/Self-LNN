@@ -938,9 +938,13 @@ int optimizer_adamw_step(float* params, float* grads, float* m, float* v, size_t
     if (!params || !grads || !m || !v) return -1;
     float b1_corr = 1.0f - powf(beta1, (float)step);
     float b2_corr = 1.0f - powf(beta2, (float)step);
+    /* ZSFGGG-S2-006修复: 添加逐元素NaN/Inf保护，
+     * 防止单次NaN污染动量缓冲区m和v导致永久训练损坏 */
     for (size_t i = 0; i < n; i++) {
-        m[i] = beta1 * m[i] + (1.0f - beta1) * grads[i];
-        v[i] = beta2 * v[i] + (1.0f - beta2) * grads[i] * grads[i];
+        float g = grads[i];
+        if (!isfinite(g)) g = 0.0f;
+        m[i] = beta1 * m[i] + (1.0f - beta1) * g;
+        v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
         float m_hat = m[i] / b1_corr, v_hat = v[i] / b2_corr;
         params[i] = params[i] * (1.0f - lr * weight_decay) - lr * m_hat / (sqrtf(v_hat) + eps);
     }

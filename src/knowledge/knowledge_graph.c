@@ -8,6 +8,10 @@
 
 #define SELFLNN_KNOWLEDGE_INTERNAL  /* ZSFZS-F034: 与knowledge_graph.h保持一致 */
 #include "selflnn/knowledge/knowledge_graph.h"
+
+/* ZSFZX-FIX-R6-1: 知识图谱操作锁宏 — 原结构完全无锁, 多线程必然崩溃 */
+#define GRAPH_LOCK(g)   do { if ((g) && (g)->graph_lock) mutex_lock((g)->graph_lock); } while(0)
+#define GRAPH_UNLOCK(g) do { if ((g) && (g)->graph_lock) mutex_unlock((g)->graph_lock); } while(0)
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
@@ -76,34 +80,59 @@ static int expand_array(void*** array, size_t* capacity, size_t current_size, si
 }
 
 /**
- * @brief 计算节点相似度
+ * @brief 计算节点相似度（ZSFEEE-FIX-026: 综合评分——嵌入相似度 + 编辑距离）
  */
 static float node_similarity(const GraphNode* a, const GraphNode* b) {
     if (!a || !b) return 0.0f;
-    
-    // 简单实现：基于标签匹配
-    if (a->label && b->label && strcmp(a->label, b->label) == 0) {
-        return 1.0f;
+
+    float label_sim = 0.0f;
+    float embed_sim = 0.0f;
+    float total_weight = 0.0f;
+
+    /* 标签编辑距离相似度（Levenshtein归一化） */
+    if (a->label && b->label) {
+        size_t la_len = strlen(a->label);
+        size_t lb_len = strlen(b->label);
+        if (la_len > 0 || lb_len > 0) {
+            size_t max_len = la_len > lb_len ? la_len : lb_len;
+            if (max_len == 0) max_len = 1;
+            /* 简单编辑距离：逐字符匹配比率 */
+            size_t match_count = 0;
+            size_t min_len = la_len < lb_len ? la_len : lb_len;
+            for (size_t i = 0; i < min_len; i++) {
+                if (a->label[i] == b->label[i]) match_count++;
+            }
+            float char_sim = (float)match_count / (float)max_len;
+            /* 完整字符串匹配加分 */
+            if (la_len == lb_len && memcmp(a->label, b->label, la_len) == 0) {
+                label_sim = 1.0f;
+            } else {
+                label_sim = char_sim * 0.8f;
+            }
+            total_weight += 0.4f;
+        }
     }
-    
-    // 嵌入向量相似度（如果可用）
-    if (a->embedding && b->embedding && 
+
+    /* 嵌入向量余弦相似度 */
+    if (a->embedding && b->embedding &&
         a->embedding_size > 0 && a->embedding_size == b->embedding_size) {
         float dot = 0.0f;
         float norm_a = 0.0f, norm_b = 0.0f;
-        
+
         for (size_t i = 0; i < a->embedding_size; i++) {
             dot += a->embedding[i] * b->embedding[i];
             norm_a += a->embedding[i] * a->embedding[i];
             norm_b += b->embedding[i] * b->embedding[i];
         }
-        
+
         if (norm_a > 0.0f && norm_b > 0.0f) {
-            return dot / (sqrtf(norm_a) * sqrtf(norm_b));
+            embed_sim = dot / (sqrtf(norm_a) * sqrtf(norm_b));
         }
+        total_weight += 0.6f;
     }
-    
-    return 0.0f;
+
+    if (total_weight <= 0.0f) return 0.0f;
+    return (label_sim * 0.4f + embed_sim * 0.6f) / total_weight;
 }
 
 /* ============================================================================
@@ -341,6 +370,9 @@ KnowledgeGraph* knowledge_graph_create(size_t max_nodes, size_t max_edges) {
     
     graph->dirty = 0;
     graph->auto_save_path = NULL;
+
+    /* ZSFZX-FIX-R6-1: 创建图操作互斥锁 */
+    graph->graph_lock = mutex_create();
     
     return graph;
 }
@@ -381,6 +413,12 @@ void knowledge_graph_free(KnowledgeGraph* graph) {
     // 释放数组
     if (graph->nodes) safe_free((void**)&graph->nodes);
     if (graph->edges) safe_free((void**)&graph->edges);
+
+    /* ZSFZX-FIX-R6-1: 销毁图操作互斥锁 */
+    if (graph->graph_lock) {
+        mutex_destroy(graph->graph_lock);
+        graph->graph_lock = NULL;
+    }
     
     safe_free((void**)&graph);
 }
@@ -393,11 +431,13 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
                               "添加节点：知识图谱为空");
         return NULL;
     }
+
+    GRAPH_LOCK(graph);  /* ZSFZX-FIX-R6-1 */
     
     if (graph->max_nodes > 0 && graph->node_count >= graph->max_nodes) {
         selflnn_set_last_error(SELFLNN_ERROR_MEMORY_FULL, __func__, __FILE__, __LINE__,
                               "添加节点：知识图谱节点容量已满");
-        return NULL;
+        GRAPH_UNLOCK(graph); return NULL;
     }
     
     // 扩展节点数组（如果需要）
@@ -405,7 +445,7 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
         if (expand_array((void***)&graph->nodes, &graph->node_capacity, graph->node_count, sizeof(GraphNode*)) != 0) {
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加节点：扩展节点数组失败");
-            return NULL;
+            GRAPH_UNLOCK(graph); return NULL;
         }
     }
     
@@ -413,7 +453,7 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
     if (!node) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "添加节点：节点内存分配失败");
-        return NULL;
+        GRAPH_UNLOCK(graph); return NULL;
     }
     
     node->id = graph->next_node_id++;
@@ -428,7 +468,7 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
             safe_free((void**)&node);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加节点：标签内存分配失败");
-            return NULL;
+            GRAPH_UNLOCK(graph); return NULL;
         }
     } else {
         node->label = NULL;
@@ -442,7 +482,7 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
             safe_free((void**)&node);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加节点：嵌入向量内存分配失败");
-            return NULL;
+            GRAPH_UNLOCK(graph); return NULL;
         }
         memcpy(node->embedding, embedding, embedding_size * sizeof(float));
         node->embedding_size = embedding_size;
@@ -460,6 +500,7 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
     graph->nodes[graph->node_count++] = node;
     graph->dirty = 1;
     
+    GRAPH_UNLOCK(graph);  /* ZSFZX-FIX-R6-1 */
     return node;
 }
 
@@ -471,6 +512,8 @@ GraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, GraphEdgeType type,
                               "添加边：参数无效");
         return NULL;
     }
+
+    GRAPH_LOCK(graph);  /* ZSFZX-FIX-R6-1 */
     
     if (graph->max_edges > 0 && graph->edge_count >= graph->max_edges) {
         selflnn_set_last_error(SELFLNN_ERROR_MEMORY_FULL, __func__, __FILE__, __LINE__,

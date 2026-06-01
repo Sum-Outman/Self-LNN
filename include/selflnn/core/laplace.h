@@ -569,6 +569,16 @@ void* lnn_laplace_create_default_analyzer(void);
 /* ZSFUSA: 获取拉普拉斯频谱 */
 int laplace_unified_get_spectrum(void* analyzer, float* spectrum, size_t size);
 
+/* H-001修复: 获取缓存的传递函数系数（只读访问）
+ * 供 laplace_unified_get_spectrum 使用，避免硬编码 1/(s+1)
+ * 返回内部缓存指针（只读），调用者不得修改或释放
+ * 返回值: 0 成功，-1 缓存为空或参数无效 */
+int laplace_analyzer_get_cached_transfer_fn(const LaplaceAnalyzer* analyzer,
+                                             const float** numerator,
+                                             const float** denominator,
+                                             size_t* num_order,
+                                             size_t* den_order);
+
 #ifdef __cplusplus
 }
 #endif

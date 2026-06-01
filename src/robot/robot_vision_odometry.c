@@ -734,7 +734,7 @@ int visual_odometry_compute_essential_matrix(VisualOdometry* vo) {
         (void)inliers;
 
         int total_inliers = 0;
-        for (int i = 0; i < 8 && i < n; i++) {
+        for (int i = 0; i < n; i++) {
             float p1[3] = {pts1[i*2], pts1[i*2+1], 1.0f};
             float p2[3] = {pts2[i*2], pts2[i*2+1], 1.0f};
             float Ep1[3];
@@ -878,32 +878,46 @@ int visual_odometry_get_status(const VisualOdometry* vo,
     return 0;
 }
 
+/* L018: 共享三角测量辅助函数——消除 visual_odometry_triangulate 与
+ * visual_odometry_compute_reprojection_error 中约30行重复代码 */
+static int _vo_triangulate_pair(const CameraIntrinsics* K,
+                                 const float R[9], const float t[3],
+                                 const FeaturePoint* f1, const FeaturePoint* f2,
+                                 float* lambda_out, float p1_out[3]) {
+    float u1 = (f1->x - K->cx) / K->fx;
+    float v1 = (f1->y - K->cy) / K->fy;
+    float u2 = (f2->x - K->cx) / K->fx;
+    float v2 = (f2->y - K->cy) / K->fy;
+    p1_out[0] = u1; p1_out[1] = v1; p1_out[2] = 1.0f;
+    float p2[3] = {u2, v2, 1.0f};
+    float p2_rot[3];
+    mat3_vec3_mul(R, p2, p2_rot);
+    float A[4] = {p1_out[0], -p2_rot[0], p1_out[1], -p2_rot[1]};
+    float bt[2] = {t[0], t[1]};
+    float det = A[0]*A[3] - A[1]*A[2];
+    if (fabsf(det) < 1e-10f || K->fx <= 0.0f) return -1;
+    float lambda = (bt[0]*A[3] - bt[1]*A[1]) / det;
+    *lambda_out = lambda;
+    return 0;
+}
+
 int visual_odometry_triangulate(const VisualOdometry* vo,
                                  const FeatureMatch* match,
                                  float* point_3d) {
     if (!vo || !match || !point_3d) return -1;
     const CameraIntrinsics* K = &vo->intrinsics;
-    (void)K;
     const FeaturePoint* f1 = &vo->features[match->idx_src];
     const FeaturePoint* f2 = &vo->prev_features[match->idx_dst];
-    float u1 = (f1->x - K->cx) / K->fx;
-    float v1 = (f1->y - K->cy) / K->fy;
-    float u2 = (f2->x - K->cx) / K->fx;
-    float v2 = (f2->y - K->cy) / K->fy;
     float R[9], t[3];
     memcpy(R, vo->essential.R, 9 * sizeof(float));
     memcpy(t, vo->essential.t, 3 * sizeof(float));
-    float p1[3] = {u1, v1, 1.0f};
-    float p2[3] = {u2, v2, 1.0f};
-    float p2_rot[3];
-    mat3_vec3_mul(R, p2, p2_rot);
-    float A[4] = {0};
-    float b[2] = {0};
-    A[0] = p1[0]; A[1] = -p2_rot[0]; b[0] = t[0];
-    A[2] = p1[1]; A[3] = -p2_rot[1]; b[1] = t[1];
-    float det = A[0]*A[3] - A[1]*A[2];
-    if (fabsf(det) < 1e-10f) { point_3d[0]=0; point_3d[1]=0; point_3d[2]=0; return -1; }
-    float lambda = (b[0]*A[3] - b[1]*A[1]) / det;
+
+    float p1[3];
+    float lambda;
+    if (_vo_triangulate_pair(K, R, t, f1, f2, &lambda, p1) != 0) {
+        point_3d[0] = 0; point_3d[1] = 0; point_3d[2] = 0;
+        return -1;
+    }
     point_3d[0] = p1[0] * lambda;
     point_3d[1] = p1[1] * lambda;
     point_3d[2] = lambda;
@@ -958,12 +972,7 @@ int visual_odometry_compute_reprojection_error(const VisualOdometry* vo,
         int has_valid_K = (K->fx > 0.0f && K->fy > 0.0f);
 
         if (fabsf(det) < 1e-10f || !has_valid_K) {
-            /* K矩阵不可用或深度求解退化，回退到像素差 */
-            float dx = f1->x - f2->x;
-            float dy = f1->y - f2->y;
-            float err = dx*dx + dy*dy;
-            total += err;
-            if (err > max_e) max_e = err;
+            /* K矩阵不可用或深度求解退化，不降级到像素差——跳过该匹配点 */
             count++;
             continue;
         }

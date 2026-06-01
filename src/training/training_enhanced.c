@@ -97,38 +97,20 @@ static void registry_free(Trainer* trainer)
 static int lnn_get_weight_and_bias(LNN* network, float** weights, size_t* num_weights,
                                     float** biases, size_t* num_biases)
 {
-    if (!network || !network->cfc_network) {
-        return -1;
-    }
-    CfCNetwork* cfc = network->cfc_network;
-    if (!cfc->is_initialized) {
-        return -1;
-    }
-    if (weights) *weights = cfc->weight_matrix;
-    if (num_weights) *num_weights = cfc->config.input_size * cfc->config.hidden_size;
-    if (biases) *biases = cfc->bias_vector;
-    if (num_biases) *num_biases = (size_t)cfc->config.hidden_size;
+    /* ZSFQQ-Q025: 使用公共API替代直接访问cfc_network内部字段 */
+    if (!network) return -1;
+    *weights = lnn_get_weight_matrix(network);
+    *num_weights = lnn_get_weight_count(network);
+    *biases = lnn_get_bias_vector(network);
+    *num_biases = lnn_get_bias_count(network);
+    if (!*weights || !*biases || *num_weights == 0 || *num_biases == 0) return -1;
     return 0;
 }
 
 static int lnn_set_weight_and_bias(LNN* network, const float* weights, const float* biases)
 {
-    if (!network || !network->cfc_network) {
-        return -1;
-    }
-    CfCNetwork* cfc = network->cfc_network;
-    if (!cfc->is_initialized) {
-        return -1;
-    }
-    size_t num_weights = cfc->config.input_size * cfc->config.hidden_size;
-    size_t num_biases = (size_t)cfc->config.hidden_size;
-    if (weights && cfc->weight_matrix) {
-        memcpy(cfc->weight_matrix, weights, num_weights * sizeof(float));
-    }
-    if (biases && cfc->bias_vector) {
-        memcpy(cfc->bias_vector, biases, num_biases * sizeof(float));
-    }
-    return 0;
+    /* ZSFQQ-Q025: 使用公共API替代直接访问cfc_network内部字段 */
+    return lnn_set_weights_and_biases(network, weights, biases);
 }
 
 static int lnn_get_hidden_size(LNN* network)

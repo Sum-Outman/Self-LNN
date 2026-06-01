@@ -17,7 +17,9 @@
 
 
 #include "selflnn/core/quaternion_lnn.h"
-#include "selflnn/core/quaternion_lnn_kernels.h"
+#include "selflnn/core/quaternion_lnn_kernels.h"  /* ZSFDDD-P1-003: OpenCL内核字符串已提取至此头文件，
+                                                       待GPU OpenCL后端集成使用。当前仅预编译，暂未由
+                                                       clCreateProgramWithSource等OpenCL API消费 */
 #include "selflnn/core/quaternion_optimizer.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/math_utils.h"
@@ -632,13 +634,7 @@ int quaternion_lnn_forward(QuaternionLNN* network, const float* input,
                     hidden_quats[i] = sum;
                 }
             } else {
-                // 初始化失败，根据“禁止任何降级处理”原则，不使用降级方案
-                // 改为使用偏置向量作为隐藏状态
-                for (size_t i = 0; i < hidden_quaternions; i++) {
-                    hidden_quats[i] = network->bias_vector[i];
-                }
-                // 继续执行，跳过降级标签
-                // 注意：这里不跳转到fallback_implementation
+                return SELFLNN_ERROR_INVALID_STATE;
             }
         } else {
             // 选项2：不使用降级方案，使用偏置向量和输入投影

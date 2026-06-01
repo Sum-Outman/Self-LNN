@@ -76,6 +76,10 @@ float training_monitor_get_latest_value(const TrainingMonitor* tm,
                                          MetricType type);
 int training_monitor_reset(TrainingMonitor* tm);
 
+/* ZSFEEE-FIX-DEEP-018: 将TrainingMonitor缓冲区中的最新指标格式化为JSON字符串 */
+int training_monitor_get_latest_metrics_json(const TrainingMonitor* tm,
+                                              char* out_buf, size_t buf_size);
+
 /* ============================================================================
  * 超参数调优
  * ============================================================================ */

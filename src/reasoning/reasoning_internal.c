@@ -17,6 +17,12 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/errors.h"
+
+/* ReasoningStats结构体定义（与reasoning.c对齐） */
+struct ReasoningStats {
+    size_t total_inferences;
+    size_t successful_inferences;
+};
 #define SELFLNN_CORE_INTERNAL
 #include "selflnn/knowledge/knowledge_version.h"
 #include <stdlib.h>
@@ -87,6 +93,11 @@ struct ReasoningEngine {
     float* history_outputs;
     size_t history_capacity;
     size_t history_size;
+    /* ZSFZX-FIX-REASONING: 平台统一字段 — 与reasoning.c对齐 */
+    struct ReasoningStats stats;
+    size_t history_input_dim;
+    size_t history_output_dim;
+    char* history_file_path;
 };
 
 /* ---- 推理引擎核心API（真实实现） ---- */

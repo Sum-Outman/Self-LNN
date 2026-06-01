@@ -114,6 +114,25 @@ typedef struct {
 /* 安全监控句柄 */
 typedef struct SafetyMonitor SafetyMonitor;
 
+/**
+ * @brief 安全监控系统内部结构体（完整定义，供直接字段访问使用）
+ * safety_monitor.c中定义SELFLNN_SAFETY_IMPL时使用自有完整定义，
+ * 其他文件使用此兼容版本（含核心字段用于直接访问）。
+ */
+#ifndef SELFLNN_SAFETY_IMPL
+struct SafetyMonitor {
+    SafetyLevel current_level;           /**< 当前安全等级 */
+    int emergency_stop_active;           /**< 紧急停止是否激活 */
+    int soft_stop_active;                /**< 软停止是否激活 */
+    ResourceLimits resource_limits;      /**< 资源限制 */
+    PhysicalBoundaries physical_boundaries; /**< 物理边界 */
+    void* rules;                         /**< 安全规则数组（不透明） */
+    int rule_count;                      /**< 规则数量 */
+    void* events;                        /**< 安全事件数组（不透明） */
+    int event_count;                     /**< 事件数量 */
+};
+#endif
+
 /* 紧急停止系统前向声明（避免循环包含） */
 struct EmergencyStopSystem;
 typedef struct EmergencyStopSystem EmergencyStopSystem;
@@ -127,6 +146,13 @@ SafetyMonitor* safety_monitor_create(void);
  * @brief 释放安全监控系统
  */
 void safety_monitor_free(SafetyMonitor* monitor);
+
+/* ========== ZSFQQ-DEEP-003: 主动熔断器(Circuit Breaker) ========== */
+int safety_circuit_breaker_report_failure(SafetyMonitor* monitor, int subsystem_id);
+int safety_circuit_breaker_report_success(SafetyMonitor* monitor, int subsystem_id);
+int safety_circuit_breaker_check_allowed(SafetyMonitor* monitor, int subsystem_id);
+void safety_circuit_breaker_reset(SafetyMonitor* monitor);
+int safety_circuit_breaker_get_state(const SafetyMonitor* monitor);
 
 /**
  * @brief 关联紧急停止系统（安全事件自动触发紧急停止）

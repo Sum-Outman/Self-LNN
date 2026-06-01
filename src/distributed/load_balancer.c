@@ -3,6 +3,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/utils/math_utils.h"
 #include "selflnn/core/laplace.h"
 #include <stdlib.h>
 #include <string.h>
@@ -605,16 +606,11 @@ const char* lb_error_string(int error_code) {
 /* ============================================================================
  * 一致性哈希环实现 (A08.4.2)
  * 使用 FNV-1a 哈希 + 虚拟节点 + 二分查找
+ * L-012修复: lb_hash_string 复用 math_utils.c 的公共 FNV-1a 哈希实现
  * ============================================================================ */
 
 uint64_t lb_hash_string(const char* key, size_t len) {
-    if (!key || len == 0) return 0;
-    uint64_t hash = 14695981039346656037ULL;
-    for (size_t i = 0; i < len; i++) {
-        hash ^= (unsigned char)key[i];
-        hash *= 1099511628211ULL;
-    }
-    return hash;
+    return math_fnv1a_hash64(key, len);
 }
 
 uint32_t lb_hash_uint64(uint64_t key) {

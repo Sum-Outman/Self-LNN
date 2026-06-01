@@ -29,7 +29,59 @@ var VOICE_FEATURE_MAP = {
     '规划': 'planning',
     '自我演化能力': 'self_evolution',
     '自我演化': 'self_evolution',
-    '演化能力': 'self_evolution'
+    '演化能力': 'self_evolution',
+    /* P2-003修复: 扩展语音命令覆盖需求中所有功能 */
+    '对话功能': 'dialogue',
+    '对话': 'dialogue',
+    '聊天': 'dialogue',
+    '训练功能': 'training',
+    '训练': 'training',
+    '模型训练': 'training',
+    '视觉功能': 'vision',
+    '视觉': 'vision',
+    '图像识别': 'vision',
+    '知识库': 'knowledge',
+    '知识查询': 'knowledge',
+    '搜索知识': 'knowledge',
+    '记忆功能': 'memory',
+    '记忆': 'memory',
+    '回忆': 'memory',
+    '推理功能': 'reasoning',
+    '推理': 'reasoning',
+    '深度思考': 'deep_thinking',
+    '思考': 'deep_thinking',
+    '自我认知': 'self_cognition',
+    '机器人控制': 'robot_control',
+    '控制机器人': 'robot_control',
+    '系统状态': 'system_status',
+    '系统信息': 'system_status',
+    '多模态': 'multimodal',
+    '多模态输入': 'multimodal',
+    '紧急停止': 'emergency_stop',
+    '停止': 'emergency_stop',
+    '关机': 'shutdown',
+    '重启': 'restart',
+    '重新启动': 'restart'
+};
+/* M024: 映射表自检——启动时验证映射表完整性 */
+voiceCommandCheckFeatureMap = function() {
+    var expected = ['self_learning','self_decision','self_execution','imitation_learning',
+                    'self_correction','reflection','planning','self_evolution',
+                    /* P2-003修复: 验证扩展后的映射表 */
+                    'dialogue','training','vision','knowledge','memory','reasoning',
+                    'deep_thinking','self_cognition','robot_control','system_status',
+                    'multimodal','emergency_stop','shutdown','restart'];
+    var found = {};
+    var keys = Object.keys(VOICE_FEATURE_MAP);
+    for (var i = 0; i < keys.length; i++) found[VOICE_FEATURE_MAP[keys[i]]] = true;
+    var missing = [];
+    for (var j = 0; j < expected.length; j++) {
+        if (!found[expected[j]]) missing.push(expected[j]);
+    }
+    if (missing.length > 0) {
+        console.warn('[语音控制] 功能映射表缺少以下后端字段的映射: ' + missing.join(', ') +
+                     '。请更新VOICE_FEATURE_MAP。');
+    }
 };
 function voiceCommandTranslateFeature(chineseInput) {
     if (!chineseInput) return '';

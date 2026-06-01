@@ -57,6 +57,7 @@ struct DynamicsSystem {
     int bdf2_initialized;       /**< BDF-2初始化标记（需要两步历史） */
     int is_initialized;         /**< 是否已初始化 */
     float time;                 /**< 当前时间 */
+    float dt;                   /**< 当前时间步长（自适应调整） */
     float avg_velocity;         /**< 平均速度 */
     float max_velocity;         /**< 最大速度 */
     float stability;            /**< 稳定性指标 */
@@ -149,6 +150,7 @@ DynamicsSystem* dynamics_create(const DynamicsConfig* config) {
     // 初始化变量
     system->is_initialized = 1;
     system->time = 0.0f;
+    system->dt = 0.01f;
     system->avg_velocity = 0.0f;
     system->max_velocity = 0.0f;
     system->stability = 1.0f;
@@ -190,6 +192,14 @@ int dynamics_update(DynamicsSystem* system, const float* input,
     
     if (dt <= 0.0f) {
         return -1;
+    }
+
+    /* ZSFZX-FIX-R5-1: 传感器输入状态NaN/Inf检测 */
+    {
+        size_t check_n = system->config.state_size < 1000 ? system->config.state_size : 1000;
+        for (size_t i = 0; i < check_n; i++) {
+            if (!isfinite(system->state[i])) return -1;
+        }
     }
     
     size_t state_size = system->config.state_size;
@@ -309,7 +319,8 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 if (steps > max_steps) {
                     log_debug("[BDF2] 步数过多 steps=%d, h_actual=%.6f", steps, h_actual);
                 }
-                (void)h_actual; (void)steps;
+                /* 使用求解器返回的实际步长更新系统时间步，实现自适应 */
+                system->dt = (h_actual > 0.0f && h_actual < system->dt * 2.0f) ? h_actual : system->dt;
                 for (size_t i = 0; i < state_size; i++) {
                     system->state[i] = y[i];
                     system->velocity[i] = y[state_size + i];
@@ -390,7 +401,8 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 if (steps >= rb_cfg.max_iterations) {
                     log_debug("[Rosenbrock] 达到最大迭代 steps=%d, h_actual=%.6f", steps, h_actual);
                 }
-                (void)h_actual; (void)steps;
+                /* 使用求解器返回的实际步长进行自适应调整 */
+                system->dt = (h_actual > 0.0f && h_actual < system->dt * 2.0f) ? h_actual : system->dt;
                 for (size_t i = 0; i < state_size; i++) {
                     system->state[i] = y[i];
                     system->velocity[i] = y[state_size + i];
@@ -572,6 +584,8 @@ static int dynamics_ode_rhs(float t, const float* y, float* dydt, void* ctx) {
         memset(input_buf, 0, n * sizeof(float));
     }
     compute_derivatives(s, y, y+n, input_buf, dydt, dydt+n);
+    /* L005: 机械动力学ODE为自治系统——状态演化由位置/速度/外力决定，不含显式时间。
+     * t参数保留用于未来非自治扩展(如时变外力/周期性驱动)。 */
     (void)t;
     return 0;
 }
@@ -674,86 +688,213 @@ static void dynamics_internal_solve_rk4(DynamicsSystem* system, const float* inp
 }
 
 /**
- * @brief 自适应Runge-Kutta求解器（使用RK4-RK5对进行误差估计）
+ * @brief 自适应Runge-Kutta求解器（使用Dormand-Prince 5(4)嵌入对进行误差估计）
+ * 
+ * DP54方法使用7级6次函数求值，同时产生4阶和5阶两个解，
+ * 通过4阶解与5阶解之差估计局部截断误差，实现自适应步长控制。
+ * M-002修复: 原方法使用两个RK4步(半步+半步)与一个全步RK4比较，
+ * 二者同阶无法正确估计误差。现替换为DP54嵌入对(5阶/4阶)，使用
+ * 不同阶数方法对进行精确的误差估计。
  */
 static float dynamics_internal_solve_adaptive_rk(DynamicsSystem* system, const float* input, 
                               float dt_requested) {
     size_t state_size = system->config.state_size;
-    float tolerance = system->config.solver_tolerance;
+    float tolerance = system->config.solver_tolerance > 0.0f ? 
+                      system->config.solver_tolerance : 1e-4f;
     float dt = dt_requested;
     
-    if (dt < system->config.min_step_size) {
-        dt = system->config.min_step_size;
-    }
-    if (dt > system->config.max_step_size) {
-        dt = system->config.max_step_size;
-    }
+    if (dt < system->config.min_step_size) dt = system->config.min_step_size;
+    if (dt > system->config.max_step_size) dt = system->config.max_step_size;
     
-    float* saved_state = system->workspace + 10 * state_size;
-    float* saved_velocity = system->workspace + 10 * state_size + state_size;
+    /* Dormand-Prince 5(4) Butcher Tableau系数
+     * c节点: {0, 1/5, 3/10, 4/5, 8/9, 1, 1}
+     * 7级方法，利用FSAL特性(k7作为下一步k1)，实际每步仅需6次新函数求值 */
+    const float a21 = 1.0f / 5.0f;
+    const float a31 = 3.0f / 40.0f, a32 = 9.0f / 40.0f;
+    const float a41 = 44.0f / 45.0f, a42 = -56.0f / 15.0f, a43 = 32.0f / 9.0f;
+    const float a51 = 19372.0f / 6561.0f, a52 = -25360.0f / 2187.0f;
+    const float a53 = 64448.0f / 6561.0f, a54 = -212.0f / 729.0f;
+    const float a61 = 9017.0f / 3168.0f, a62 = -355.0f / 33.0f;
+    const float a63 = 46732.0f / 5247.0f, a64 = 49.0f / 176.0f, a65 = -5103.0f / 18656.0f;
+    const float a71 = 35.0f / 384.0f, a73 = 500.0f / 1113.0f;
+    const float a74 = 125.0f / 192.0f, a75 = -2187.0f / 6784.0f, a76 = 11.0f / 84.0f;
+    
+    /* 5阶解系数 b (高阶解，作为最终输出) */
+    const float b1 = 35.0f / 384.0f;
+    const float b3 = 500.0f / 1113.0f;
+    const float b4 = 125.0f / 192.0f;
+    const float b5 = -2187.0f / 6784.0f;
+    const float b6 = 11.0f / 84.0f;
+    
+    /* 4阶解系数 b* (嵌入低阶解，用于误差估计: err = ||y5 - y4||) */
+    const float be1 = 5179.0f / 57600.0f;
+    const float be3 = 7571.0f / 16695.0f;
+    const float be4 = 393.0f / 640.0f;
+    const float be5 = -92097.0f / 339200.0f;
+    const float be6 = 187.0f / 2100.0f;
+    const float be7 = 1.0f / 40.0f;
+    
+    /* 工作空间分配: slots 0-6(k1-k7), slot 7(tmp_x), slot 8(tmp_v), slots 9-10(saved) */
+    float* k1 = system->workspace;
+    float* k2 = system->workspace + 1 * state_size;
+    float* k3 = system->workspace + 2 * state_size;
+    float* k4 = system->workspace + 3 * state_size;
+    float* k5 = system->workspace + 4 * state_size;
+    float* k6 = system->workspace + 5 * state_size;
+    float* k7 = system->workspace + 6 * state_size;
+    float* tmp_x = system->workspace + 7 * state_size;
+    float* tmp_v = system->workspace + 8 * state_size;
+    float* saved_state = system->workspace + 9 * state_size;
+    float* saved_velocity = system->workspace + 10 * state_size;
+    
+    /* 保存初始状态，用于步长拒绝时恢复 */
     memcpy(saved_state, system->state, state_size * sizeof(float));
     memcpy(saved_velocity, system->velocity, state_size * sizeof(float));
     
-    float error = 0.0f;
+    float error;
     int attempts = 0;
     const int max_attempts = 10;
     
     do {
         attempts++;
         
-        /* F-021修复: 先保存全步结果，再计算两个半步，然后用两者差异做误差估计 */
-        float* full_state = (float*)safe_malloc(state_size * sizeof(float));
-        float* full_velocity = (float*)safe_malloc(state_size * sizeof(float));
-        if (!full_state || !full_velocity) {
-            if (full_state) free(full_state);
-            if (full_velocity) free(full_velocity);
+        /* ===== Stage 1: k1 = f(x_n, v_n) ===== */
+        /* dx/dt = v → 状态导数即速度; dv/dt → k1 (加速度) */
+        compute_derivatives(system, system->state, system->velocity, input, tmp_x, k1);
+        /* k1^x = v_n (初始速度) */
+        
+        /* ===== Stage 2: k2 = f(x_n + h*a21*v_n, v_n + h*a21*k1) ===== */
+        for (size_t i = 0; i < state_size; i++) {
+            tmp_x[i] = system->state[i] + dt * a21 * system->velocity[i];
+            tmp_v[i] = system->velocity[i] + dt * a21 * k1[i];
+        }
+        compute_derivatives(system, tmp_x, tmp_v, input, tmp_x, k2);
+        /* tmp_x被覆盖为中间速度(=k2^x), tmp_v保持不变 */
+        
+        /* ===== Stage 3: k3 = f(x_n + h*(a31*v_n + a32*k2^x), v_n + h*(a31*k1 + a32*k2)) ===== */
+        for (size_t i = 0; i < state_size; i++) {
+            float k2x = system->velocity[i] + dt * a21 * k1[i];
+            tmp_x[i] = system->state[i] + dt * (a31 * system->velocity[i] + a32 * k2x);
+            tmp_v[i] = system->velocity[i] + dt * (a31 * k1[i] + a32 * k2[i]);
+        }
+        compute_derivatives(system, tmp_x, tmp_v, input, tmp_x, k3);
+        
+        /* ===== Stage 4 ===== */
+        for (size_t i = 0; i < state_size; i++) {
+            float k2x = system->velocity[i] + dt * a21 * k1[i];
+            float k3x = system->velocity[i] + dt * (a31 * k1[i] + a32 * k2[i]);
+            tmp_x[i] = system->state[i] + dt * (a41 * system->velocity[i] + a42 * k2x + a43 * k3x);
+            tmp_v[i] = system->velocity[i] + dt * (a41 * k1[i] + a42 * k2[i] + a43 * k3[i]);
+        }
+        compute_derivatives(system, tmp_x, tmp_v, input, tmp_x, k4);
+        
+        /* ===== Stage 5 ===== */
+        for (size_t i = 0; i < state_size; i++) {
+            float k2x = system->velocity[i] + dt * a21 * k1[i];
+            float k3x = system->velocity[i] + dt * (a31 * k1[i] + a32 * k2[i]);
+            float k4x = system->velocity[i] + dt * (a41 * k1[i] + a42 * k2[i] + a43 * k3[i]);
+            tmp_x[i] = system->state[i] + dt * (a51 * system->velocity[i] + a52 * k2x + a53 * k3x + a54 * k4x);
+            tmp_v[i] = system->velocity[i] + dt * (a51 * k1[i] + a52 * k2[i] + a53 * k3[i] + a54 * k4[i]);
+        }
+        compute_derivatives(system, tmp_x, tmp_v, input, tmp_x, k5);
+        
+        /* ===== Stage 6 ===== */
+        for (size_t i = 0; i < state_size; i++) {
+            float k2x = system->velocity[i] + dt * a21 * k1[i];
+            float k3x = system->velocity[i] + dt * (a31 * k1[i] + a32 * k2[i]);
+            float k4x = system->velocity[i] + dt * (a41 * k1[i] + a42 * k2[i] + a43 * k3[i]);
+            float k5x = system->velocity[i] + dt * (a51 * k1[i] + a52 * k2[i] + a53 * k3[i] + a54 * k4[i]);
+            tmp_x[i] = system->state[i] + dt * (a61 * system->velocity[i] + a62 * k2x + a63 * k3x + a64 * k4x + a65 * k5x);
+            tmp_v[i] = system->velocity[i] + dt * (a61 * k1[i] + a62 * k2[i] + a63 * k3[i] + a64 * k4[i] + a65 * k5[i]);
+        }
+        compute_derivatives(system, tmp_x, tmp_v, input, tmp_x, k6);
+        
+        /* ===== Stage 7 ===== */
+        for (size_t i = 0; i < state_size; i++) {
+            float k2x = system->velocity[i] + dt * a21 * k1[i];
+            float k3x = system->velocity[i] + dt * (a31 * k1[i] + a32 * k2[i]);
+            float k4x = system->velocity[i] + dt * (a41 * k1[i] + a42 * k2[i] + a43 * k3[i]);
+            float k5x = system->velocity[i] + dt * (a51 * k1[i] + a52 * k2[i] + a53 * k3[i] + a54 * k4[i]);
+            float k6x = system->velocity[i] + dt * (a61 * k1[i] + a62 * k2[i] + a63 * k3[i] + a64 * k4[i] + a65 * k5[i]);
+            tmp_x[i] = system->state[i] + dt * (a71 * system->velocity[i] + a73 * k3x + a74 * k4x + a75 * k5x + a76 * k6x);
+            tmp_v[i] = system->velocity[i] + dt * (a71 * k1[i] + a73 * k3[i] + a74 * k4[i] + a75 * k5[i] + a76 * k6[i]);
+        }
+        compute_derivatives(system, tmp_x, tmp_v, input, tmp_x, k7);
+        
+        /* ===== 计算5阶和4阶解，通过二者差异估算误差 ===== */
+        error = 0.0f;
+        for (size_t i = 0; i < state_size; i++) {
+            /* 重建各阶段中间速度用于5阶状态解 */
+            float k2x = system->velocity[i] + dt * a21 * k1[i];
+            float k3x = system->velocity[i] + dt * (a31 * k1[i] + a32 * k2[i]);
+            float k4x = system->velocity[i] + dt * (a41 * k1[i] + a42 * k2[i] + a43 * k3[i]);
+            float k5x = system->velocity[i] + dt * (a51 * k1[i] + a52 * k2[i] + a53 * k3[i] + a54 * k4[i]);
+            float k6x = system->velocity[i] + dt * (a61 * k1[i] + a62 * k2[i] + a63 * k3[i] + a64 * k4[i] + a65 * k5[i]);
+            
+            /* 5阶状态解: x5 = x_n + h*sum(b_j * v_j_int) */
+            float x5 = system->state[i] + dt * (b1 * system->velocity[i] + b3 * k3x + b4 * k4x + b5 * k5x + b6 * k6x);
+            
+            /* 5阶速度解: v5 = v_n + h*sum(b_j * k_j) */
+            float v5 = system->velocity[i] + dt * (b1 * k1[i] + b3 * k3[i] + b4 * k4[i] + b5 * k5[i] + b6 * k6[i]);
+            
+            /* 4阶速度解(嵌入): v4 = v_n + h*sum(be_j * k_j) */
+            float v4 = system->velocity[i] + dt * (be1 * k1[i] + be3 * k3[i] + be4 * k4[i] + be5 * k5[i] + be6 * k6[i] + be7 * k7[i]);
+            
+            /* 暂存5阶解 */
+            tmp_x[i] = x5;
+            tmp_v[i] = v5;
+            
+            /* 5阶与4阶速度之差 → 局部截断误差估计 */
+            float diff = v5 - v4;
+            float scale = fabsf(v5) + fabsf(v4) + 1e-10f;
+            float rel_err = fabsf(diff) / scale;
+            error += rel_err * rel_err;
+        }
+        error = sqrtf(error / (float)state_size);
+        
+        if (error <= tolerance) {
+            /* 误差在容差范围内: 接受本次步长 */
+            memcpy(system->state, tmp_x, state_size * sizeof(float));
+            memcpy(system->velocity, tmp_v, state_size * sizeof(float));
+            
+            /* 标准PI步长预测: h_new = h * 0.9 * (tol/err)^(1/(p+1))
+             * p=4(低阶方法阶数), 指数=1/5=0.2 */
+            if (error > 1e-15f) {
+                float factor = 0.9f * powf(tolerance / error, 0.2f);
+                if (factor < 0.2f) factor = 0.2f;
+                if (factor > 5.0f) factor = 5.0f;
+                dt *= factor;
+            } else {
+                dt *= 2.0f;
+            }
             break;
         }
         
-        dynamics_internal_solve_rk4(system, input, dt);
-        memcpy(full_state, system->state, state_size * sizeof(float));
-        memcpy(full_velocity, system->velocity, state_size * sizeof(float));
+        /* 误差超容差: 拒绝本次步长 */
+        if (attempts >= max_attempts) break;
         
+        /* 用误差估计计算新步长 */
+        float factor = 0.9f * powf(tolerance / error, 0.25f);
+        if (factor < 0.2f) factor = 0.2f;
+        if (factor > 1.0f) factor = 1.0f;
+        dt *= factor;
+        
+        if (dt < system->config.min_step_size) {
+            dt = system->config.min_step_size;
+            /* 已达最小步长，强制接受 */
+            memcpy(system->state, tmp_x, state_size * sizeof(float));
+            memcpy(system->velocity, tmp_v, state_size * sizeof(float));
+            break;
+        }
+        
+        /* 恢复初始状态准备重试 */
         memcpy(system->state, saved_state, state_size * sizeof(float));
         memcpy(system->velocity, saved_velocity, state_size * sizeof(float));
         
-        dynamics_internal_solve_rk4(system, input, dt/2.0f);
-        dynamics_internal_solve_rk4(system, input, dt/2.0f);
-        
-        error = 0.0f;
-        for (size_t i = 0; i < state_size; i++) {
-            float diff_state = fabsf(system->state[i] - full_state[i]);
-            float diff_velocity = fabsf(system->velocity[i] - full_velocity[i]);
-            error += diff_state * diff_state + diff_velocity * diff_velocity;
-        }
-        error = sqrtf(error / (2 * state_size));
-        
-        free(full_state);
-        free(full_velocity);
-        
-        if (error > tolerance && attempts < max_attempts) {
-            dt *= 0.5f;
-            if (dt < system->config.min_step_size) {
-                dt = system->config.min_step_size;
-                break;
-            }
-            memcpy(system->state, saved_state, state_size * sizeof(float));
-            memcpy(system->velocity, saved_velocity, state_size * sizeof(float));
-        } else if (error < tolerance * 0.1f && attempts < max_attempts) {
-            dt *= 2.0f;
-            if (dt > system->config.max_step_size) {
-                dt = system->config.max_step_size;
-            }
-            memcpy(system->state, saved_state, state_size * sizeof(float));
-            memcpy(system->velocity, saved_velocity, state_size * sizeof(float));
-        }
-    } while ((error > tolerance || error < tolerance * 0.1f) && attempts < max_attempts);
+    } while (attempts < max_attempts);
     
-    if (attempts > 1) {
-        memcpy(system->state, saved_state, state_size * sizeof(float));
-        memcpy(system->velocity, saved_velocity, state_size * sizeof(float));
-        dynamics_internal_solve_rk4(system, input, dt);
-    }
+    if (dt > system->config.max_step_size) dt = system->config.max_step_size;
+    if (dt < system->config.min_step_size) dt = system->config.min_step_size;
     
     return dt;
 }

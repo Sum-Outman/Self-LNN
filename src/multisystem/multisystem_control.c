@@ -1018,7 +1018,7 @@ int discover_available_devices(MultiSystemControlEngine* engine,
     
     /* F-004修复: 不再创建虚假默认设备，必须通过API注册真实设备 */
     if (engine->registered_count == 0 && engine->discovered_count == 0) {
-        printf("[多系统控制] 无已注册设备，请通过API注册真实设备\n");
+        selflnn_log(LOG_LEVEL_WARNING, "[多系统控制] 无已注册设备，请通过API注册真实设备");
         *device_list = NULL;
         *device_count = 0;
         return 1;

@@ -478,6 +478,42 @@ int emergency_stop_register_thread_pool(EmergencyStopSystem* system,
 int emergency_stop_register_power_cut(EmergencyStopSystem* system,
                                        void (*cut_fn)(void));
 
+/**
+ * @brief 注册线程池重启回调（H-005修复：用于快照恢复时重新启动线程池）
+ *
+ * @param system 系统句柄
+ * @param pool_ref 线程池引用
+ * @param restart_fn 线程池重启函数
+ * @return int 成功返回0，失败返回-1
+ */
+int emergency_stop_register_thread_pool_restart(EmergencyStopSystem* system,
+                                                  void* pool_ref,
+                                                  void (*restart_fn)(void*));
+
+/**
+ * @brief 注册模型推理恢复回调（H-005修复：用于快照恢复时重新激活模型推理）
+ *
+ * @param system 系统句柄
+ * @param ctx 模型推理上下文
+ * @param resume_fn 模型推理恢复函数
+ * @return int 成功返回0，失败返回-1
+ */
+int emergency_stop_register_model_inference_resume(EmergencyStopSystem* system,
+                                                     void* ctx,
+                                                     void (*resume_fn)(void*));
+
+/**
+ * @brief 注册审计日志回调（H-005修复：用于记录恢复操作审计信息）
+ *
+ * @param system 系统句柄
+ * @param log_fn 日志回调函数
+ * @param ctx 回调上下文
+ * @return int 成功返回0，失败返回-1
+ */
+int emergency_stop_register_audit_log(EmergencyStopSystem* system,
+                                       void (*log_fn)(const char* message, void* ctx),
+                                       void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

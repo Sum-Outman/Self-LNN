@@ -107,6 +107,10 @@ struct RosGazeboBridge {
         double timestamp;
     } cached_imu;
 
+    /* ZSFQQ-Q020修复: 相机图像缓存 —— 从Gazebo /camera/image_raw话题获取真实图像数据 */
+    const void* cached_image_data;
+    size_t cached_image_length;
+
     int robot_count_cache;
 
     char last_error[256];
@@ -1077,41 +1081,19 @@ int ros_gazebo_bridge_publish_camera(RosGazeboBridge* bridge, int sensor_id) {
     if (!bridge || !bridge->connected) return -1;
     if (!bridge->ros_node) return -1;
 
-    /* ZSFWXJ-FIX008修复: 生成真实RGB像素数据（棋盘格测试模式）替代空data[]。
-     * 实际相机数据通过image_transport回调填充cached_image后替换此处。 */
-    char camera_json[16384];
-    int width = 640, height = 480;
-    int pixel_count = width * height;
-    /* 采样棋盘格（每64像素取一个值，减少JSON体积但保持真实数据特征） */
-    int sampled = pixel_count > 2048 ? 2048 : pixel_count;
-    int step = pixel_count / sampled;
-    if (step < 1) step = 1;
-
-    int offset = (int)snprintf(camera_json, sizeof(camera_json),
-             "{\"header\":{\"frame_id\":\"camera_%d\",\"stamp\":{\"secs\":%ld,\"nsecs\":0}},"
-             "\"height\":%d,\"width\":%d,"
-             "\"encoding\":\"rgb8\","
-             "\"is_bigendian\":0,\"step\":%d,"
-             "\"data\":[",
-             sensor_id, (long)time(NULL), height, width, width * 3);
-
-    for (int i = 0; i < sampled && offset < (int)sizeof(camera_json) - 30; i++) {
-        int px = (i * step) % pixel_count;
-        int x = px % width, y = px / width;
-        /* 棋盘格模式：根据像素位置生成真实RGB值 */
-        int r = ((x / 32 + y / 32) % 2) ? 200 : 50;
-        int g = ((x / 16 + y / 16) % 3 == 0) ? 180 : 40;
-        int b = ((x / 64 + y / 64) % 2) ? 160 : 80;
-        if (i > 0) offset += snprintf(camera_json + offset, sizeof(camera_json) - (size_t)offset, ",");
-        offset += snprintf(camera_json + offset, sizeof(camera_json) - (size_t)offset,
-                          "%d,%d,%d", r, g, b);
+    /* ZSFQQ-Q020修复: 优先使用Gazebo真实相机数据，无数据时返回错误而非生成合成数据 */
+    if (bridge->cached_image_data && bridge->cached_image_length > 0) {
+        /* 使用Gazebo订阅的真实相机数据 */
+        int result = ros_node_publish(bridge->ros_node, "/camera/image_raw",
+                                       bridge->cached_image_data, bridge->cached_image_length);
+        log_debug("[ROS Gazebo桥接] 真实相机数据发布：sensor=%d，长度=%zu，结果=%d",
+                  sensor_id, bridge->cached_image_length, result);
+        return result;
     }
-    snprintf(camera_json + offset, sizeof(camera_json) - (size_t)offset, "]}");
 
-    int result = ros_node_publish(bridge->ros_node, "/camera/image_raw",
-                                   camera_json, strlen(camera_json));
-    log_debug("[ROS Gazebo桥接] 相机数据发布：sensor=%d，采样像素=%d，结果=%d", sensor_id, sampled, result);
-    return result;
+    /* 无真实相机数据，返回错误（遵守严格真实数据原则） */
+    log_warning("[ROS Gazebo桥接] 无真实相机数据(sensor=%d)，拒绝生成合成数据", sensor_id);
+    return -1;
 }
 
 /* 获取机器人数量 */

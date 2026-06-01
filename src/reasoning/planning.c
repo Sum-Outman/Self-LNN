@@ -58,15 +58,15 @@
 #define TC_MAX_CONSTRAINTS 256
 #define TC_MAX_STEPS 128
 
-static uint64_t plan_rng_state = 42;
+/* ZSFEEE-FIX-023: 移除自定义LCG PRNG(plan_rng_next/plan_rng_uniform)，
+ * 替换为密码学安全的secure_random_float()。
+ * 原LCG确定性伪随机存在可预测性和分布偏差问题。 */
 
-static uint64_t plan_rng_next(void) {
-    plan_rng_state = plan_rng_state * 6364136223846793005ULL + 1442695040888963407ULL;
-    return plan_rng_state;
-}
+/* 全局RNG状态（planning_system_create中初始化） */
+static uint64_t plan_rng_state = 0;
 
 static float plan_rng_uniform(float min, float max) {
-    return min + (max - min) * ((float)plan_rng_next() / (float)UINT64_MAX);
+    return min + (max - min) * secure_random_float();
 }
 
 struct PlanningSystem {
@@ -344,14 +344,14 @@ static float planning_evolution_evaluate_fitness(PlanningSystem* system, const f
 
 static void planning_evolution_tournament_select(const PlanningSystem* system, int* parent1, int* parent2) {
     int tsize = EVOLUTION_DEFAULT_TOURNAMENT_SIZE;
-    int best1 = (int)(plan_rng_next() % (uint64_t)system->evolution_population_size);
+    int best1 = (int)secure_random_int((uint32_t)system->evolution_population_size);
     for (int i = 1; i < tsize; i++) {
-        int idx = (int)(plan_rng_next() % (uint64_t)system->evolution_population_size);
+        int idx = (int)secure_random_int((uint32_t)system->evolution_population_size);
         if (system->evolution_fitness[idx] > system->evolution_fitness[best1]) best1 = idx;
     }
-    int best2 = (int)(plan_rng_next() % (uint64_t)system->evolution_population_size);
+    int best2 = (int)secure_random_int((uint32_t)system->evolution_population_size);
     for (int i = 1; i < tsize; i++) {
-        int idx = (int)(plan_rng_next() % (uint64_t)system->evolution_population_size);
+        int idx = (int)secure_random_int((uint32_t)system->evolution_population_size);
         if (system->evolution_fitness[idx] > system->evolution_fitness[best2]) best2 = idx;
     }
     *parent1 = best1;
@@ -3292,11 +3292,11 @@ static int gp_subroutine_evolve(PlanningSystem* system, float* gp_weights, size_
 
         for (size_t i = elite_gp; i < gp_pop_size; i++) {
             float* child = new_gp_pop + i * gp_genome_size;
-            int p1 = (int)(plan_rng_next() % (uint64_t)gp_pop_size);
-            int p2 = (int)(plan_rng_next() % (uint64_t)gp_pop_size);
+            int p1 = (int)secure_random_int((uint32_t)gp_pop_size);
+            int p2 = (int)secure_random_int((uint32_t)gp_pop_size);
             for (size_t j = 0; j < gp_genome_size; j++) {
                 if (plan_rng_uniform(0.0f, 1.0f) < 0.7f) {
-                    int src = (plan_rng_next() % 2 == 0) ? p1 : p2;
+                    int src = (secure_random_int(2) == 0) ? p1 : p2;
                     child[j] = gp_pop[(size_t)src * gp_genome_size + j];
                 } else {
                     child[j] = gp_pop[(size_t)p1 * gp_genome_size + j];

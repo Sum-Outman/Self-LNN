@@ -23,6 +23,12 @@
 #define AGENT_RAND_FLOAT secure_random_float()
 #define AGENT_CLAMP(v, lo, hi) (((v) < (lo)) ? (lo) : (((v) > (hi)) ? (hi) : (v)))
 
+/* L019: 机器人代理状态/动作空间说明
+ * AGENT_STATE_DIM=32, AGENT_ACTION_DIM=16 为低维本地控制空间。
+ * 多模态AGI全模态输入(视觉+语音+文本+传感器→统一投影→共享LNN处理)
+ * 不在代理层处理——代理层接收LNN输出后的高层控制信号。
+ * LNN将多模态信号压缩为控制语义向量后传递给代理进行策略决策。 */
+
 /* ZSFX-012: 推理前最小训练步数 — Xavier随机初始化权重无任何语义信息 */
 #define AGENT_MIN_TRAINING_STEPS 100
 
@@ -288,9 +294,10 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
 
     /* 分配3层DQN权重（Xavier初始化） */
     /* ZSFZS-F022修复: 所有malloc添加NULL检查 */
+    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
     if (sd > 0 && hd > 0) {
-        agent->policy.weights_ih = (float*)malloc((size_t)sd * hd * sizeof(float));
-        agent->policy.bias_h1 = (float*)malloc((size_t)hd * sizeof(float));
+        agent->policy.weights_ih = (float*)safe_malloc((size_t)sd * hd * sizeof(float));
+        agent->policy.bias_h1 = (float*)safe_malloc((size_t)hd * sizeof(float));
         if (agent->policy.weights_ih && agent->policy.bias_h1) {
             float scale = sqrtf(2.0f / (float)(sd + hd));
             for (int i = 0; i < sd * hd; i++)
@@ -299,10 +306,10 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
         }
     }
     if (hd > 0) {
-        agent->policy.weights_hh = (float*)malloc((size_t)hd * hd * sizeof(float));
-        agent->policy.weights_hh2 = (float*)malloc((size_t)hd * hd * sizeof(float));
-        agent->policy.bias_h2 = (float*)malloc((size_t)hd * sizeof(float));
-        agent->policy.bias_h3 = (float*)malloc((size_t)hd * sizeof(float));
+        agent->policy.weights_hh = (float*)safe_malloc((size_t)hd * hd * sizeof(float));
+        agent->policy.weights_hh2 = (float*)safe_malloc((size_t)hd * hd * sizeof(float));
+        agent->policy.bias_h2 = (float*)safe_malloc((size_t)hd * sizeof(float));
+        agent->policy.bias_h3 = (float*)safe_malloc((size_t)hd * sizeof(float));
         if (agent->policy.weights_hh) {
             float scale = sqrtf(2.0f / (float)(hd + hd));
             for (int i = 0; i < hd * hd; i++)
@@ -317,8 +324,8 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
         if (agent->policy.bias_h3) memset(agent->policy.bias_h3, 0, (size_t)hd * sizeof(float));
     }
     if (hd > 0 && ad > 0) {
-        agent->policy.weights_ho = (float*)malloc((size_t)hd * ad * sizeof(float));
-        agent->policy.bias_o = (float*)malloc((size_t)ad * sizeof(float));
+        agent->policy.weights_ho = (float*)safe_malloc((size_t)hd * ad * sizeof(float));
+        agent->policy.bias_o = (float*)safe_malloc((size_t)ad * sizeof(float));
         if (agent->policy.weights_ho) {
             float scale = sqrtf(2.0f / (float)(hd + ad));
             for (int i = 0; i < hd * ad; i++)
@@ -338,16 +345,16 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
     agent->target_policy.discount_factor = config->discount_factor;
     /* 为目标网络分配独立内存 */
     if (sd > 0 && hd > 0) {
-        agent->target_policy.weights_ih = (float*)malloc((size_t)sd * hd * sizeof(float));
-        agent->target_policy.bias_h1 = (float*)malloc((size_t)hd * sizeof(float));
-        agent->target_policy.weights_hh = (float*)malloc((size_t)hd * hd * sizeof(float));
-        agent->target_policy.bias_h2 = (float*)malloc((size_t)hd * sizeof(float));
-        agent->target_policy.weights_hh2 = (float*)malloc((size_t)hd * hd * sizeof(float));
-        agent->target_policy.bias_h3 = (float*)malloc((size_t)hd * sizeof(float));
+        agent->target_policy.weights_ih = (float*)safe_malloc((size_t)sd * hd * sizeof(float));
+        agent->target_policy.bias_h1 = (float*)safe_malloc((size_t)hd * sizeof(float));
+        agent->target_policy.weights_hh = (float*)safe_malloc((size_t)hd * hd * sizeof(float));
+        agent->target_policy.bias_h2 = (float*)safe_malloc((size_t)hd * sizeof(float));
+        agent->target_policy.weights_hh2 = (float*)safe_malloc((size_t)hd * hd * sizeof(float));
+        agent->target_policy.bias_h3 = (float*)safe_malloc((size_t)hd * sizeof(float));
     }
     if (hd > 0 && ad > 0) {
-        agent->target_policy.weights_ho = (float*)malloc((size_t)hd * ad * sizeof(float));
-        agent->target_policy.bias_o = (float*)malloc((size_t)ad * sizeof(float));
+        agent->target_policy.weights_ho = (float*)safe_malloc((size_t)hd * ad * sizeof(float));
+        agent->target_policy.bias_o = (float*)safe_malloc((size_t)ad * sizeof(float));
     }
     /* 将策略权重深度复制到目标网络 */
     if (agent->target_policy.weights_ih && agent->policy.weights_ih)
@@ -506,9 +513,23 @@ int robot_agent_learn(RobotAgent* agent, const float* state,
             float td_target[AGENT_ACTION_DIM];
             float reward = batch[b].reward;
             float done_factor = batch[b].done ? 0.0f : 1.0f;
+            /* 先获取当前状态Q值作为基底（保留所有动作维度） */
+            float q_current[AGENT_ACTION_DIM];
+            policy_forward(&agent->policy, batch[b].state, q_current);
             for (int i = 0; i < agent->policy.output_dim; i++) {
-                td_target[i] = (i == 0 ? (reward + agent->policy.discount_factor * max_q * done_factor) : 0.0f);
+                td_target[i] = q_current[i];
             }
+            /* 找到当前经验中实际执行的动作（argmax动作向量） */
+            int chosen_action = 0;
+            float max_action_val = -1e30f;
+            for (int i = 0; i < agent->policy.output_dim; i++) {
+                if (batch[b].action[i] > max_action_val) {
+                    max_action_val = batch[b].action[i];
+                    chosen_action = i;
+                }
+            }
+            /* 仅对实际执行的动作设置TD目标值 */
+            td_target[chosen_action] = reward + agent->policy.discount_factor * max_q * done_factor;
             policy_update(&agent->policy, batch[b].state, td_target,
                           agent->policy.learning_rate);
         }
@@ -988,26 +1009,27 @@ int robot_agent_load(RobotAgent* agent, const char* filepath) {
     safe_free((void**)&agent->policy.bias_h3);
     safe_free((void**)&agent->policy.bias_o);
 
+    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
     if (sd > 0 && hd > 0) {
-        agent->policy.weights_ih = (float*)malloc((size_t)sd * hd * sizeof(float));
+        agent->policy.weights_ih = (float*)safe_malloc((size_t)sd * hd * sizeof(float));
         if (agent->policy.weights_ih) fread(agent->policy.weights_ih, sizeof(float), sd * hd, f);
-        agent->policy.bias_h1 = (float*)malloc((size_t)hd * sizeof(float));
+        agent->policy.bias_h1 = (float*)safe_malloc((size_t)hd * sizeof(float));
         if (agent->policy.bias_h1) fread(agent->policy.bias_h1, sizeof(float), hd, f);
     }
     if (hd > 0) {
-        agent->policy.weights_hh = (float*)malloc((size_t)hd * hd * sizeof(float));
+        agent->policy.weights_hh = (float*)safe_malloc((size_t)hd * hd * sizeof(float));
         if (agent->policy.weights_hh) fread(agent->policy.weights_hh, sizeof(float), hd * hd, f);
-        agent->policy.weights_hh2 = (float*)malloc((size_t)hd * hd * sizeof(float));
+        agent->policy.weights_hh2 = (float*)safe_malloc((size_t)hd * hd * sizeof(float));
         if (agent->policy.weights_hh2) fread(agent->policy.weights_hh2, sizeof(float), hd * hd, f);
-        agent->policy.bias_h2 = (float*)malloc((size_t)hd * sizeof(float));
+        agent->policy.bias_h2 = (float*)safe_malloc((size_t)hd * sizeof(float));
         if (agent->policy.bias_h2) fread(agent->policy.bias_h2, sizeof(float), hd, f);
-        agent->policy.bias_h3 = (float*)malloc((size_t)hd * sizeof(float));
+        agent->policy.bias_h3 = (float*)safe_malloc((size_t)hd * sizeof(float));
         if (agent->policy.bias_h3) fread(agent->policy.bias_h3, sizeof(float), hd, f);
     }
     if (hd > 0 && ad > 0) {
-        agent->policy.weights_ho = (float*)malloc((size_t)hd * ad * sizeof(float));
+        agent->policy.weights_ho = (float*)safe_malloc((size_t)hd * ad * sizeof(float));
         if (agent->policy.weights_ho) fread(agent->policy.weights_ho, sizeof(float), hd * ad, f);
-        agent->policy.bias_o = (float*)malloc((size_t)ad * sizeof(float));
+        agent->policy.bias_o = (float*)safe_malloc((size_t)ad * sizeof(float));
         if (agent->policy.bias_o) fread(agent->policy.bias_o, sizeof(float), ad, f);
     }
 

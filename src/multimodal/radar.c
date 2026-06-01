@@ -346,32 +346,49 @@ int radar_doa_estimation(RadarProcessor* rp,
     if (!rp || !antenna_snapshots || !azimuth || !elevation ||
         num_antennas < 2 || num_snapshots <= 0)
         return -1;
-    /* 波束形成 DOA估计：相位差 → 到达角
-     * Δφ = 2π * d * sin(θ) / λ，θ = arcsin(Δφ * λ / (2π * d)) */
-    float d = 0.5f * (3e8f / rp->start_freq); /* 半波长间距 */
-    float sum_phase_diff = 0.0f;
-    int diff_count = 0;
-    for (int s = 0; s < num_snapshots; s++) {
-        for (int a = 1; a < num_antennas; a++) {
-            float val1 = antenna_snapshots[s * num_antennas + a];
-            float val2 = antenna_snapshots[s * num_antennas + a - 1];
-            /* 简化的相位差估计 */
-            float diff = val1 - val2;
-            if (fabsf(diff) < 1e-6f) continue;
-            /* 反正切相位差 */
-            float phase_diff = atan2f(diff, (val1 + val2) * 0.5f);
-            sum_phase_diff += phase_diff;
-            diff_count++;
+    /* IQ复数互相关DOA估计
+     * 天线采样值为IQ交错复数数据: I0,Q0,I1,Q1,... 每通道每快拍
+     * 对相邻天线对计算复数内积(互相关)，从相位差得到DOA角度
+     *
+     * 互相关: C = Σ z_a * conj(z_{a-1})
+     *   = Σ (I_a*I_{a-1} + Q_a*Q_{a-1}) + j(Q_a*I_{a-1} - I_a*Q_{a-1})
+     * 相位差: Δφ = atan2(imag(C), real(C))
+     * DOA: θ = arcsin(Δφ * λ / (2π * d))
+     */
+    float lambda = 3e8f / rp->start_freq;
+    float d = 0.5f * lambda; /* 半波长间距 */
+    float sum_weighted_phase = 0.0f;
+    float sum_weight = 0.0f;
+    for (int a = 1; a < num_antennas; a++) {
+        /* 对所有快拍累加相邻天线对的复数互相关 */
+        float corr_I = 0.0f, corr_Q = 0.0f;
+        for (int s = 0; s < num_snapshots; s++) {
+            int idx_a   = (s * num_antennas + a) * 2;
+            int idx_am1 = (s * num_antennas + a - 1) * 2;
+            float I_a   = antenna_snapshots[idx_a];
+            float Q_a   = antenna_snapshots[idx_a + 1];
+            float I_am1 = antenna_snapshots[idx_am1];
+            float Q_am1 = antenna_snapshots[idx_am1 + 1];
+            /* 复数内积: z_a * conj(z_{a-1}) */
+            corr_I += I_a * I_am1 + Q_a * Q_am1;
+            corr_Q += Q_a * I_am1 - I_a * Q_am1;
         }
+        /* 互相关幅度作为加权系数(相干性越高权重越大) */
+        float corr_mag = sqrtf(corr_I * corr_I + corr_Q * corr_Q);
+        if (corr_mag < 1e-9f) continue;
+        float phase_diff = atan2f(corr_Q, corr_I);
+        sum_weighted_phase += phase_diff * corr_mag;
+        sum_weight += corr_mag;
     }
-    if (diff_count > 0) {
-        float avg_phase = sum_phase_diff / (float)diff_count;
-        float lambda = 3e8f / rp->start_freq;
+    if (sum_weight > 1e-9f) {
+        float avg_phase = sum_weighted_phase / sum_weight;
         float sin_theta = avg_phase * lambda / (2.0f * (float)M_PI * d);
         if (sin_theta > 1.0f) sin_theta = 1.0f;
         if (sin_theta < -1.0f) sin_theta = -1.0f;
         *azimuth = asinf(sin_theta);
-        *elevation = 0.0f; /* 1D阵列只能估计方位角 */
+        /* 2D阵列时可通过行/列天线相位差联合估计仰角
+         * 此处为1D均匀线阵，仅可估计方位角 */
+        *elevation = 0.0f;
     } else {
         *azimuth = 0.0f;
         *elevation = 0.0f;

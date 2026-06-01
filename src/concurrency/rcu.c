@@ -35,6 +35,24 @@ typedef int atomic_int32;
 #define MAX_RCU_THREADS 128
 #define DEFAULT_GRACE_PERIOD_MS 10
 #define DEFAULT_RECLAMATION_BATCH 32
+#define RCU_EPOCH_SLOTS 3          /**< L-010: epoch槽位数（至少3个） */
+#define RCU_EPOCH_MAX_SPIN 1000000 /**< L-010: epoch自旋最大迭代次数（约几十微秒级） */
+
+/*
+ * L-010: Epoch-based RCU完整实现
+ *
+ * 核心原理：
+ *   全局epoch计数器持续递增。读者进入临界区时记录当前epoch，
+ *   写者通过递增epoch并等待旧epoch的所有读者退出来实现宽限期。
+ *
+ *   3个epoch槽位（循环缓冲区）：
+ *     slot[0] = 当前epoch的待回收对象
+ *     slot[1] = 上一epoch的待回收对象
+ *     slot[2] = epoch-2的待回收对象（安全可释放）
+ *
+ *   宽限期延迟：从原来的sleep_ms(1)轮询（最多1秒）降低到
+ *   cpu_pause_hint()自旋（几十纳秒/次），理论上微秒级别完成。
+ */
 
 /* ZSFX-DEEP-R3-002: TLS存储当前线程RCU线程ID
  * 解决rcu_read_lock(操作active_readers)与rcu_wait_for_quiescent_state
@@ -69,6 +87,12 @@ struct RcuDomain {
     volatile int thread_in_read_section[MAX_RCU_THREADS];
     volatile long long thread_reader_count[MAX_RCU_THREADS];
     RcuCallbackNode* callback_list;
+    /* L-010: Epoch-based RCU字段 */
+    volatile long global_epoch;                              /**< 全局epoch计数器（单调递增） */
+    volatile long reader_epochs[MAX_RCU_THREADS];            /**< 每个读者线程当前所处的epoch（0=不在读侧） */
+    RcuCallbackNode* epoch_callbacks[RCU_EPOCH_SLOTS];       /**< 3个epoch槽位的回调链表 */
+    volatile int epoch_callback_counts[RCU_EPOCH_SLOTS];     /**< 每个槽位的待回收数量 */
+    volatile long last_reclaimed_epoch;                      /**< 最后完成回收的epoch */
 #ifdef _WIN32
     CRITICAL_SECTION callback_lock;
 #else
@@ -97,6 +121,7 @@ static int rcu_allocate_thread_id(RcuDomain* domain) {
 #endif
             domain->thread_in_read_section[i] = 0;
             domain->thread_reader_count[i] = 0;
+            domain->reader_epochs[i] = 0;  /* L-010: 新线程不在读侧 */
             atomic_increment(&domain->registered_thread_count);
             return i;
         }
@@ -108,13 +133,95 @@ static void rcu_release_thread_id(RcuDomain* domain, int thread_id) {
     if (!domain || thread_id < 0 || thread_id >= MAX_RCU_THREADS) return;
     domain->thread_active[thread_id] = 0;
     domain->thread_in_read_section[thread_id] = 0;
+    domain->reader_epochs[thread_id] = 0;
     atomic_decrement(&domain->registered_thread_count);
 }
 
-/* ZSFWS-L012: 当前RCU宽限期检测使用轮询方式(sleep_ms(1)循环)
- * 高负载下最多轮询1000次(1秒超时)，对实时性要求不高的场景可接受。
- * Linux内核RCU使用基于中断的状态机(ZOOM kernel)，具有O(1)延迟。
- * 当前纯用户态实现受限于无内核抢占支持，后续可优化为条件变量通知机制。 */
+/*
+ * L-010: CPU暂停提示——平台无关的轻量级自旋指令
+ * 用于epoch等待循环中，功耗远低于sleep_ms(1)
+ */
+static inline void rcu_cpu_pause(void) {
+#ifdef _WIN32
+    YieldProcessor();
+#elif defined(__x86_64__) || defined(__i386__) || defined(__i386)
+    __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ volatile("yield" ::: "memory");
+#else
+    __sync_synchronize();
+#endif
+}
+
+/*
+ * L-010: Epoch-based宽限期等待——替代原sleep_ms(1)轮询方案
+ *
+ * 原理：递增epoch后，自旋等待所有在旧epoch中的读者退出。
+ *       自旋使用cpu_pause_hint而非sleep，延迟从毫秒级降到微秒级。
+ *
+ * @param domain    RCU域
+ * @param old_epoch 需要等待退出的旧epoch值
+ * @return 0=所有读者已退出旧epoch，-1=超时
+ */
+static int rcu_wait_for_epoch(RcuDomain* domain, long old_epoch) {
+    if (!domain) return -1;
+    for (int spin = 0; spin < RCU_EPOCH_MAX_SPIN; spin++) {
+        int all_done = 1;
+        for (int i = 0; i < MAX_RCU_THREADS; i++) {
+            if (domain->thread_active[i]) {
+                long rep = domain->reader_epochs[i];
+                /* 读者在旧epoch中：尚未退出 */
+                if (rep != 0 && rep == old_epoch) {
+                    all_done = 0;
+                    break;
+                }
+            }
+        }
+        if (all_done) return 0;
+        rcu_cpu_pause();
+        /* 每1000次自旋检查一次active_readers作为额外确认 */
+        if (spin > 0 && (spin & 1023) == 0) {
+            if (domain->active_readers == 0) return 0;
+        }
+    }
+    /* L-010: 超时回退——极端情况下使用原sleep方案作为安全网 */
+    return -1;
+}
+
+/*
+ * L-010: 处理指定epoch槽位的回调
+ */
+static void rcu_process_epoch_callbacks(RcuDomain* domain, int slot) {
+    if (!domain || slot < 0 || slot >= RCU_EPOCH_SLOTS) return;
+#ifdef _WIN32
+    EnterCriticalSection(&domain->callback_lock);
+#else
+    pthread_mutex_lock(&domain->callback_lock);
+#endif
+    RcuCallbackNode* node = domain->epoch_callbacks[slot];
+    while (node) {
+        RcuCallbackNode* next = node->next;
+        if (node->callback) {
+            node->callback(node->old_ptr, node->user_data);
+        } else {
+            safe_free((void**)&node->old_ptr);
+        }
+        safe_free((void**)&node);
+        domain->completed_callback_count++;
+        domain->reclamation_count++;
+        node = next;
+    }
+    domain->epoch_callbacks[slot] = NULL;
+    domain->epoch_callback_counts[slot] = 0;
+#ifdef _WIN32
+    LeaveCriticalSection(&domain->callback_lock);
+#else
+    pthread_mutex_unlock(&domain->callback_lock);
+#endif
+}
+
+/* ZSFWS-L012: 原rcu_wait_for_quiescent_state保留作为epoch超时后的回退方案。
+ * 正常情况下使用epoch-based rcu_wait_for_epoch（微秒级延迟）。 */
 static int rcu_wait_for_quiescent_state(RcuDomain* domain) {
     if (!domain) return -1;
     int max_retries = 1000;
@@ -185,6 +292,13 @@ RcuDomain* rcu_domain_create(const RcuDomainConfig* config) {
     domain->grace_periods_completed = 0;
     domain->reclamation_count = 0;
     domain->callback_list = NULL;
+    /* L-010: 初始化epoch字段 */
+    domain->global_epoch = 1;  /* 从1开始，0表示"不在读侧" */
+    domain->last_reclaimed_epoch = 0;
+    for (int s = 0; s < RCU_EPOCH_SLOTS; s++) {
+        domain->epoch_callbacks[s] = NULL;
+        domain->epoch_callback_counts[s] = 0;
+    }
 #ifdef _WIN32
     InitializeCriticalSection(&domain->callback_lock);
 #else
@@ -196,6 +310,7 @@ RcuDomain* rcu_domain_create(const RcuDomainConfig* config) {
         domain->thread_active[i] = 0;
         domain->thread_in_read_section[i] = 0;
         domain->thread_reader_count[i] = 0;
+        domain->reader_epochs[i] = 0;  /* L-010: reader_epochs初始化为0 */
     }
 
     atomic_thread_fence();
@@ -206,6 +321,10 @@ void rcu_domain_destroy(RcuDomain* domain) {
     if (!domain) return;
     rcu_synchronize(domain);
     rcu_process_callbacks(domain);
+    /* L-010: 处理所有epoch槽位中残留的回调 */
+    for (int s = 0; s < RCU_EPOCH_SLOTS; s++) {
+        rcu_process_epoch_callbacks(domain, s);
+    }
 #ifdef _WIN32
     DeleteCriticalSection(&domain->callback_lock);
 #else
@@ -244,10 +363,12 @@ void rcu_thread_unregister(RcuDomain* domain, RcuThread* thread) {
 void rcu_read_lock(RcuDomain* domain) {
     if (!domain || !domain->is_initialized) return;
     atomic_thread_fence();
-    /* ZSFX-DEEP-R3-002修复: 同时维护active_readers和thread_in_read_section
-     * 确保rcu_wait_for_quiescent_state能正确检测到该线程在读侧临界区中 */
+    /* L-010: Epoch-based RCU——进入读侧时记录当前全局epoch
+     * ZSFX-DEEP-R3-002: 同时维护active_readers和thread_in_read_section
+     * 确保写者能检测到该线程在读侧临界区中 */
     if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
         domain->thread_in_read_section[g_tls_rcu_thread_id] = 1;
+        domain->reader_epochs[g_tls_rcu_thread_id] = domain->global_epoch;
     }
     atomic_increment(&domain->active_readers);
     atomic_thread_fence();
@@ -256,9 +377,10 @@ void rcu_read_lock(RcuDomain* domain) {
 void rcu_read_unlock(RcuDomain* domain) {
     if (!domain || !domain->is_initialized) return;
     atomic_thread_fence();
-    /* ZSFX-DEEP-R3-002: 先清除读侧标记再递减计数器(顺序重要) */
+    /* L-010: 退出读侧时清除epoch记录（顺序重要：先清除标记再递减计数器） */
     if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
         domain->thread_in_read_section[g_tls_rcu_thread_id] = 0;
+        domain->reader_epochs[g_tls_rcu_thread_id] = 0;
     }
     atomic_decrement(&domain->active_readers);
     atomic_thread_fence();
@@ -301,6 +423,10 @@ void rcu_synchronize(RcuDomain* domain) {
     int registered = domain->registered_thread_count;
     if (registered <= 0) {
         rcu_process_callbacks(domain);
+        /* L-010: 无注册线程时也处理epoch回调 */
+        for (int s = 0; s < RCU_EPOCH_SLOTS; s++) {
+            rcu_process_epoch_callbacks(domain, s);
+        }
         domain->grace_periods_completed++;
         return;
     }
@@ -316,17 +442,52 @@ void rcu_synchronize(RcuDomain* domain) {
 #endif
     }
 
-    for (int grace = 0; grace < 2; grace++) {
-        int ret = rcu_wait_for_quiescent_state(domain);
-        if (ret != 0) {
-            for (int sp = 0; sp < domain->config.grace_period_ms; sp += 5) {
-                sleep_ms(5);
-                ret = rcu_wait_for_quiescent_state(domain);
-                if (ret == 0) break;
-            }
+    /*
+     * L-010: Epoch-based宽限期协议
+     *
+     * 步骤1: 记录当前epoch (epoch_N)
+     * 步骤2: 递增global_epoch到epoch_N+1
+     * 步骤3: 自旋等待所有在epoch_N中的读者退出（微秒级）
+     * 步骤4: 安全回收epoch_{N-1}槽位的对象（保证epoch_{N-1}的读者已全部退出）
+     *
+     * 安全论证：
+     *   - 步骤2后，新读者记录的epoch >= N+1
+     *   - 步骤3等待所有epoch==N的读者退出
+     *   - epoch_{N-1}的读者肯定在步骤2前就已退出（因为epoch已经过去了至少2轮）
+     *   - 因此epoch_{N-1}的回调可以安全释放
+     */
+    long old_epoch = domain->global_epoch;
+    long new_epoch = old_epoch + 1;
+
+    /* 递增全局epoch（写者独占synchronize，无需CAS） */
+    atomic_thread_fence();
+    domain->global_epoch = new_epoch;
+    atomic_thread_fence();
+
+    /* 步骤3: 等待所有在旧epoch中的读者退出 */
+    int epoch_ret = rcu_wait_for_epoch(domain, old_epoch);
+    if (epoch_ret != 0) {
+        /* L-010: epoch超时回退——使用传统sleep_ms方案 */
+        for (int fallback = 0; fallback < 10; fallback++) {
+            sleep_ms(domain->config.grace_period_ms > 0 ?
+                     domain->config.grace_period_ms : 1);
+            if (rcu_wait_for_epoch(domain, old_epoch) == 0) break;
         }
     }
 
+    /*
+     * 步骤4: 安全回收epoch_{N-2}的回调
+     * 使用(old_epoch - 2)保证至少2个epoch的间隔
+     */
+    long safe_epoch = old_epoch - 2;
+    if (safe_epoch > 0 && safe_epoch > domain->last_reclaimed_epoch) {
+        int safe_slot = (int)((safe_epoch - 1) % RCU_EPOCH_SLOTS);
+        if (safe_slot < 0) safe_slot += RCU_EPOCH_SLOTS;
+        rcu_process_epoch_callbacks(domain, safe_slot);
+        domain->last_reclaimed_epoch = safe_epoch;
+    }
+
+    /* 处理传统callback_list中的回调（向后兼容） */
     rcu_process_callbacks(domain);
     domain->grace_periods_completed++;
 
@@ -357,13 +518,22 @@ int rcu_defer_reclamation(RcuDomain* domain, void* old_ptr,
     node->callback = callback;
     node->user_data = user_data;
 
+    /*
+     * L-010: Epoch-based回收——将回调加入当前epoch对应的槽位
+     * 槽位索引 = (global_epoch - 1) % RCU_EPOCH_SLOTS
+     * 这样当global_epoch再递增2次后，该槽位可安全释放
+     */
+    int epoch_slot = (int)((domain->global_epoch - 1) % RCU_EPOCH_SLOTS);
+    if (epoch_slot < 0) epoch_slot += RCU_EPOCH_SLOTS;
+
 #ifdef _WIN32
     EnterCriticalSection(&domain->callback_lock);
 #else
     pthread_mutex_lock(&domain->callback_lock);
 #endif
-    node->next = domain->callback_list;
-    domain->callback_list = node;
+    node->next = domain->epoch_callbacks[epoch_slot];
+    domain->epoch_callbacks[epoch_slot] = node;
+    domain->epoch_callback_counts[epoch_slot]++;
     domain->pending_callback_count++;
     int need_sync = (domain->config.enable_async_reclamation &&
                      domain->pending_callback_count >= domain->config.reclamation_batch_size);
@@ -427,5 +597,14 @@ int rcu_reset(RcuDomain* domain) {
     domain->grace_periods_completed = 0;
     domain->reclamation_count = 0;
     domain->state = RCU_STATE_READY;
+    /* L-010: 重置epoch字段 */
+    domain->global_epoch = 1;
+    domain->last_reclaimed_epoch = 0;
+    for (int i = 0; i < MAX_RCU_THREADS; i++) {
+        domain->reader_epochs[i] = 0;
+    }
+    for (int s = 0; s < RCU_EPOCH_SLOTS; s++) {
+        rcu_process_epoch_callbacks(domain, s);
+    }
     return 0;
 }

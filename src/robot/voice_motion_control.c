@@ -14,6 +14,23 @@
 
 #define VMC_MAX_DICT 256
 
+/* 内置CfC回退参数——当共享LNN不可用时使用的硬编码权重
+ * 这些参数应通过训练更新，此处仅作为冷启动合理默认值 */
+#define VMC_FALLBACK_TAU         0.08f   /* CfC时间常数 */
+#define VMC_FALLBACK_DT          0.05f   /* 离散化步长 */
+#define VMC_GATE_LOW_SCALE       0.5f    /* 低频段(0-5)门控缩放 */
+#define VMC_ACT_LOW_SCALE        0.3f    /* 低频段激活缩放 */
+#define VMC_DRIVER_MOVE_SCALE    0.15f   /* 移动驱动强度 */
+#define VMC_DRIVER_STOP_SCALE    0.1f    /* 停止驱动强度 */
+#define VMC_GATE_MID_SCALE       0.4f    /* 中频段(5-10)门控缩放 */
+#define VMC_ACT_MID_SCALE        0.25f   /* 中频段激活缩放 */
+#define VMC_DRIVER_TURN_SCALE    0.12f   /* 转向驱动强度 */
+#define VMC_DRIVER_SPEED_SCALE   0.08f   /* 速度驱动强度 */
+#define VMC_GRIP_SCALE           0.35f   /* 抓取驱动缩放 */
+#define VMC_GRIP_STRENGTH        0.1f    /* 抓取驱动强度 */
+#define VMC_LIFT_SCALE           0.3f    /* 举升驱动缩放 */
+#define VMC_LIFT_STRENGTH        0.1f    /* 举升驱动强度 */
+
 typedef struct {
     char keyword[32];
     MotionCommandType cmd_type;
@@ -258,8 +275,9 @@ int voice_motion_process_audio(VoiceMotionControl* vmc, const float* audio, size
             cfcout_lift   = fabsf(lnn_out[5]);
         }
     } else {
-        /* 内置CfC闭式解：τ dh/dt = -h + σ(W·x+b) ⊙ tanh(W·x+b) */
-        float tau = 0.08f, dt = 0.05f;
+        /* 内置CfC闭式解回退：τ dh/dt = -h + σ(Wx+b) ⊙ tanh(Wx+b)
+         * 使用可配置常量替代硬编码数字，参数见文件顶部VMC_FALLBACK_*定义 */
+        float tau = VMC_FALLBACK_TAU, dt = VMC_FALLBACK_DT;
         float exp_term = expf(-dt / tau);
         float one_minus_exp = 1.0f - exp_term;
         (void)one_minus_exp;
@@ -267,19 +285,19 @@ int voice_motion_process_audio(VoiceMotionControl* vmc, const float* audio, size
         for (int f = 0; f < 20; f++) {
             float input = audio_feat[f];
             if (f < 5) {
-                float gate = 1.0f / (1.0f + expf(-input * 0.5f));
-                float act = tanhf(input * 0.3f);
+                float gate = 1.0f / (1.0f + expf(-input * VMC_GATE_LOW_SCALE));
+                float act = tanhf(input * VMC_ACT_LOW_SCALE);
                 float driver = gate * act;
-                cfcout_move += driver * 0.15f;
-                cfcout_stop += (1.0f - gate) * 0.1f;
+                cfcout_move += driver * VMC_DRIVER_MOVE_SCALE;
+                cfcout_stop += (1.0f - gate) * VMC_DRIVER_STOP_SCALE;
             } else if (f < 10) {
-                float gate = 1.0f / (1.0f + expf(-input * 0.4f));
-                float act = tanhf(input * 0.25f);
-                cfcout_turn += gate * act * 0.12f;
-                cfcout_speed += act * input * 0.08f;
+                float gate = 1.0f / (1.0f + expf(-input * VMC_GATE_MID_SCALE));
+                float act = tanhf(input * VMC_ACT_MID_SCALE);
+                cfcout_turn += gate * act * VMC_DRIVER_TURN_SCALE;
+                cfcout_speed += act * input * VMC_DRIVER_SPEED_SCALE;
             } else if (f < 15) {
-                cfcout_grip += tanhf(input * 0.35f) * 0.1f;
-                cfcout_lift += tanhf(input * 0.3f) * 0.1f;
+                cfcout_grip += tanhf(input * VMC_GRIP_SCALE) * VMC_GRIP_STRENGTH;
+                cfcout_lift += tanhf(input * VMC_LIFT_SCALE) * VMC_LIFT_STRENGTH;
             }
         }
     }

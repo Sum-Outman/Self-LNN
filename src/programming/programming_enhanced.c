@@ -371,7 +371,77 @@ static int function_calls(const ASTNode* func_node, const char* target_name)
  * 模式匹配：检测源代码中的危险函数/模式
  * --------------------------------------------------------------------------- */
 
-/* 检测危险缓冲区操作函数 */
+/* 检测SQL注入拼接模式 M-028 */
+static int match_sql_injection(const char* source_line)
+{
+    if (!source_line) return 0;
+
+    /* SQL关键词列表 */
+    const char* sql_keywords[] = {
+        "SELECT", "select", "INSERT", "insert", "UPDATE", "update",
+        "DELETE", "delete", "DROP", "drop", "CREATE", "create",
+        "ALTER", "alter", "EXEC", "exec", "UNION", "union",
+        "FROM", "from", "WHERE", "where", "ORDER BY", "order by",
+        "GROUP BY", "group by", "HAVING", "having", "JOIN", "join"
+    };
+    int nk = sizeof(sql_keywords) / sizeof(sql_keywords[0]);
+
+    int has_sql = 0;
+    for (int i = 0; i < nk; i++) {
+        if (strstr(source_line, sql_keywords[i])) {
+            has_sql = 1;
+            break;
+        }
+    }
+    if (!has_sql) return 0;
+
+    /* 检测SQL拼接模式 */
+    /* 模式1: sprintf/snprintf构建SQL */
+    if ((strstr(source_line, "sprintf(") || strstr(source_line, "snprintf(")) &&
+        has_sql) {
+        return 1;
+    }
+
+    /* 模式2: 字符串连接符 '+' 或 strcat 拼接SQL片段 */
+    if (strstr(source_line, "+") &&
+        (strstr(source_line, "\"") || strstr(source_line, "'"))) {
+        return 1;
+    }
+
+    /* 模式3: strcat拼接SQL */
+    if (strstr(source_line, "strcat(") && has_sql) {
+        return 1;
+    }
+
+    /* 模式4: 格式化字符串中包含%占位符的SQL语句 */
+    if (has_sql && (strstr(source_line, "%s") || strstr(source_line, "%d") ||
+        strstr(source_line, "%f"))) {
+        return 1;
+    }
+
+    /* 模式5: 直接变量拼接构建SQL（如 query = "SELECT" + var） */
+    if (has_sql && strstr(source_line, "=") &&
+        (strstr(source_line, "\"") || strstr(source_line, "str"))) {
+        /* 进一步检查是否存在类似 query = "SELECT ..." + user_input */
+        const char* quote1 = strchr(source_line, '"');
+        if (quote1) {
+            const char* quote2 = strchr(quote1 + 1, '"');
+            if (quote2) {
+                const char* after = quote2 + 1;
+                while (*after == ' ') after++;
+                if (*after == '+' || *after == ',' ||
+                    strstr(after, "strcat") || strstr(after, "strcpy") ||
+                    strstr(after, "sprintf")) {
+                    return 1;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* 检测危险缓冲区操作函数 M-028增强版 */
 static int match_buffer_dangerous_func(const char* source_line)
 {
     const char* patterns[] = {
@@ -1200,7 +1270,11 @@ int penh_scan_security(const char* source_code, const ASTNode* ast,
     if (ast)
         count += penh_detect_memory_leak(ast, &vulns[count], max_count - count);
 
-    /* 5. 从源代码检测其他漏洞 */
+    /* M-028: 5. 检测SQL注入 */
+    if (source_code)
+        count += penh_detect_sql_injection(source_code, &vulns[count], max_count - count);
+
+    /* 6. 从源代码检测其他漏洞 */
     if (source_code) {
         FunctionCollector fc;
         memset(&fc, 0, sizeof(fc));
@@ -1402,6 +1476,50 @@ int penh_scan_security(const char* source_code, const ASTNode* ast,
     return 0;
 }
 
+int penh_detect_sql_injection(const char* source_code,
+                               PenhVulnerability* vulns, int max_count)
+{
+    if (!source_code || !vulns || max_count <= 0) return 0;
+    int count = 0;
+
+    const char* line_start = source_code;
+    int line_num = 1;
+    while (*line_start && count < max_count) {
+        const char* line_end = strchr(line_start, '\n');
+        char current_line[512];
+        if (line_end) {
+            size_t len = (size_t)(line_end - line_start);
+            if (len >= sizeof(current_line)) len = sizeof(current_line) - 1;
+            memcpy(current_line, line_start, len);
+            current_line[len] = '\0';
+        } else {
+            safe_strcpy(current_line, sizeof(current_line), line_start);
+        }
+
+        if (match_sql_injection(current_line)) {
+            PenhVulnerability* v = &vulns[count];
+            memset(v, 0, sizeof(PenhVulnerability));
+            v->vuln_id = count + 1;
+            v->type = PENH_VULN_SQL_INJECTION;
+            v->line = line_num;
+            v->severity = 9.5f;
+            safe_strcpy(v->function_name, sizeof(v->function_name), "unknown");
+            snprintf(v->description, sizeof(v->description),
+                     "行 %d: 检测到SQL语句字符串拼接，可能存在SQL注入风险", line_num);
+            snprintf(v->recommendation, sizeof(v->recommendation),
+                     "使用参数化查询(预编译语句)替代字符串拼接构建SQL，或使用ORM框架");
+            safe_strcpy(v->code_snippet, sizeof(v->code_snippet), current_line);
+            count++;
+        }
+
+        if (!line_end) break;
+        line_start = line_end + 1;
+        line_num++;
+    }
+
+    return count;
+}
+
 int penh_detect_buffer_overflow(const char* source_code,
                                  PenhVulnerability* vulns, int max_count)
 {
@@ -1422,11 +1540,34 @@ int penh_detect_buffer_overflow(const char* source_code,
             safe_strcpy(current_line, sizeof(current_line), line_start);
         }
 
-        /* 检测 strcpy/strcat/sprintf/gets 等危险函数 */
-        if ((strstr(current_line, "strcpy(") || strstr(current_line, "strcat(") ||
-             strstr(current_line, "gets(") || strstr(current_line, "sprintf(")) &&
-             strstr(current_line, "//") == NULL &&
-             strstr(current_line, "/*") == NULL && count < max_count) {
+        /* M-028增强: 检测 gets/strcpy/strcat/sprintf/scanf/vsprintf 等危险函数 */
+        int is_dangerous = 0;
+        const char* danger_func = NULL;
+        const char* danger_patterns[] = {
+            "gets(", "strcpy(", "strcat(", "sprintf(", "scanf(", "vsprintf(",
+            "memcpy(", "memmove(", "read(", "recv(", "fread(", "sscanf(",
+            "wcscpy(", "wcscat(", "swprintf(", "_tcscpy(", "lstrcpy(",
+            "strcpyA(", "strcpyW("
+        };
+        int nd = sizeof(danger_patterns) / sizeof(danger_patterns[0]);
+        for (int di = 0; di < nd; di++) {
+            if (strstr(current_line, danger_patterns[di])) {
+                /* 排除安全版本 strncpy/strncat/snprintf */
+                if (strcmp(danger_patterns[di], "strcpy(") == 0 &&
+                    strstr(current_line, "strncpy(")) continue;
+                if (strcmp(danger_patterns[di], "strcat(") == 0 &&
+                    strstr(current_line, "strncat(")) continue;
+                if (strcmp(danger_patterns[di], "sprintf(") == 0 &&
+                    strstr(current_line, "snprintf(")) continue;
+                is_dangerous = 1;
+                danger_func = danger_patterns[di];
+                break;
+            }
+        }
+
+        if (is_dangerous &&
+            strstr(current_line, "//") == NULL &&
+            strstr(current_line, "/*") == NULL && count < max_count) {
             PenhVulnerability* v = &vulns[count];
             memset(v, 0, sizeof(PenhVulnerability));
             v->vuln_id = count + 1;
@@ -1435,9 +1576,10 @@ int penh_detect_buffer_overflow(const char* source_code,
             v->severity = 9.0f;
             safe_strcpy(v->function_name, sizeof(v->function_name), "unknown");
             snprintf(v->description, sizeof(v->description),
-                     "行 %d: 使用不安全的字符串操作函数，可能导致缓冲区溢出", line_num);
+                     "行 %d: 使用不安全的函数%s可能导致缓冲区溢出", line_num,
+                     danger_func ? danger_func : "");
             snprintf(v->recommendation, sizeof(v->recommendation),
-                     "改用 strncpy/strncat/snprintf 等安全版本，并指定缓冲区大小");
+                     "改用安全版本(如strncpy/strncat/snprintf/fgets)并指定缓冲区大小");
             safe_strcpy(v->code_snippet, sizeof(v->code_snippet), current_line);
             count++;
         }
@@ -1674,6 +1816,7 @@ const char* penh_vulnerability_type_name(PenhVulnerabilityType type)
     case PENH_VULN_COMMAND_INJECTION: return "命令注入";
     case PENH_VULN_PATH_TRAVERSAL:    return "路径遍历";
     case PENH_VULN_UNCHECKED_RETURN:  return "未检查返回值";
+    case PENH_VULN_SQL_INJECTION:     return "SQL注入";          /* M-028 */
     case PENH_VULN_CUSTOM:            return "自定义漏洞";
     default:                          return "未知";
     }

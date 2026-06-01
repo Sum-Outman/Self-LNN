@@ -12,8 +12,8 @@
  *  ，提供完整的元认知算法。
  */
 
-#include "selflnn/metacognition.h"
-#include "selflnn/self_cognition.h"
+#include "selflnn/cognition/metacognition.h"
+#include "selflnn/cognition/self_cognition.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -67,6 +67,8 @@ struct MetacognitionSystem {
     
     /* 随机数状态 */
     unsigned int random_seed;                        /**< 随机数种子 */
+    XorshiftPrng xorshift_prng;                      /**< ZSFEEE-FIX-027: 实例级Xorshift PRNG（替代全局静态） */
+    int xorshift_seeded;                             /**< ZSFEEE-FIX-027: PRNG是否已播种 */
     
     /* 液态神经网络实例 */
     LNN* lnn_instance;                               /**< 液态神经网络实例指针 */
@@ -74,6 +76,10 @@ struct MetacognitionSystem {
     /* 深度反思引擎（可选） */
     DeepReflectionEngine* dr_engine;                 /**< 深度反思引擎实例指针 */
     DTCSystem* dtc_system;                           /**< 深度思考链系统实例指针 */
+    
+    /* 拉普拉斯分析器（频域元认知稳定性分析） */
+    LaplaceAnalyzer* laplace_analyzer;               /**< 拉普拉斯分析器 */
+    float* laplace_spectrum_buffer;                  /**< 频谱分析缓冲区 */
     
     /* 卡尔曼滤波自适应状态（实例变量，非全局静态，支持多实例） */
     float innovation_window[32];                     /**< 创新序列窗口 */
@@ -134,24 +140,24 @@ static float calculate_trend(const float* history, size_t history_size);
 static int requires_action_based_on_monitoring(MetacognitionSystem* system,
                                               const MetacognitionMonitoringResult* result);
 
-/* 辅助函数 */
-static XorshiftPrng g_meta_xorshift_prng;
-static int g_meta_xorshift_seeded = 0;
+/* ZSFEEE-FIX-027: 移除静态全局PRNG，将XorshiftPrng移到Metacognition上下文结构体中，
+ * 避免多实例竞争同一全局状态。
+ * 原g_meta_xorshift_prng/g_meta_xorshift_seeded已移至MetacognitionSystem.xorshift_prng。 */
 
 static void initialize_random_state(MetacognitionSystem* system) {
     system->random_seed = (unsigned int)time(NULL);
-    if (!g_meta_xorshift_seeded) {
-        xorshift_prng_seed_secure(&g_meta_xorshift_prng);
-        g_meta_xorshift_seeded = 1;
+    if (!system->xorshift_seeded) {
+        xorshift_prng_seed_secure(&system->xorshift_prng);
+        system->xorshift_seeded = 1;
     }
 }
 
-static float random_uniform(float min, float max) {
-    return min + (max - min) * xorshift_prng_next_float(&g_meta_xorshift_prng);
+static float random_uniform(MetacognitionSystem* system, float min, float max) {
+    return min + (max - min) * xorshift_prng_next_float(&system->xorshift_prng);
 }
 
-static float random_normal(float mean, float stddev) {
-    return mean + stddev * xorshift_prng_next_gaussian(&g_meta_xorshift_prng);
+static float random_normal(MetacognitionSystem* system, float mean, float stddev) {
+    return mean + stddev * xorshift_prng_next_gaussian(&system->xorshift_prng);
 }
 
 /**
@@ -253,7 +259,7 @@ MetacognitionSystem* metacognition_system_create(
     /* 初始化权重为小随机值 */
     initialize_random_state(system);
     for (size_t i = 0; i < system->prediction_model_size; i++) {
-        system->prediction_model_weights[i] = random_uniform(-0.1f, 0.1f);
+        system->prediction_model_weights[i] = random_uniform(system, -0.1f, 0.1f);
     }
     
     /* 初始化时间跟踪 */
@@ -284,6 +290,28 @@ MetacognitionSystem* metacognition_system_create(
         DTCConfig dtc_cfg = DTC_CONFIG_DEFAULT;
         dtc_cfg.beam_width = 4;
         system->dtc_system = dtc_system_create(dtc_cfg);
+    }
+    
+    /* 初始化拉普拉斯分析器（频域元认知稳定性分析） */
+    {
+        LaplaceConfig lap_cfg;
+        memset(&lap_cfg, 0, sizeof(lap_cfg));
+        lap_cfg.num_samples = 256;
+        lap_cfg.sample_rate = 1000.0f;
+        lap_cfg.max_frequency = 100.0f;
+        lap_cfg.min_frequency = 0.1f;
+        lap_cfg.enable_stability = 1;
+        lap_cfg.enable_frequency = 1;
+        lap_cfg.enable_optimization = 1;
+        lap_cfg.cutoff_frequency = 50.0f;
+        lap_cfg.filter_order = 2;
+        lap_cfg.alpha = 0.95f;
+        lap_cfg.beta = 0.05f;
+        system->laplace_analyzer = laplace_analyzer_create(&lap_cfg);
+        system->laplace_spectrum_buffer = (float*)safe_malloc(256 * sizeof(float));
+        if (system->laplace_spectrum_buffer) {
+            memset(system->laplace_spectrum_buffer, 0, 256 * sizeof(float));
+        }
     }
     
     system->kalman_window_idx = 0;
@@ -318,6 +346,13 @@ void metacognition_system_free(MetacognitionSystem* system) {
         dtc_system_destroy(system->dtc_system);
         system->dtc_system = NULL;
     }
+    
+    /* 释放拉普拉斯分析器 */
+    if (system->laplace_analyzer) {
+        laplace_analyzer_free(system->laplace_analyzer);
+        system->laplace_analyzer = NULL;
+    }
+    safe_free((void**)&system->laplace_spectrum_buffer);
     
     safe_free((void**)&system->self_model_state.model_parameters);
     safe_free((void**)&system->self_model_state.uncertainty_estimates);
@@ -360,6 +395,36 @@ int metacognition_monitor(MetacognitionSystem* system,
     result->current_value = calculate_confidence(input_data, data_size);
     result->confidence = calculate_confidence(input_data, data_size);
     result->uncertainty = calculate_uncertainty(system, input_data, data_size); /* ZSFWS-L-008 */
+    
+    /* ZSFEEE-FIX-002: 拉普拉斯频域分析 → 元认知监控稳定性修正
+     * 对输入数据进行拉普拉斯频域稳定性分析，
+     * 将频谱稳定性指标整合到监控置信度和不确定性中。
+     * 高频不稳定 → 降低置信度、提升不确定性；
+     * 低频稳定 → 提升置信度、降低不确定性。 */
+    if (system->laplace_analyzer && data_size > 0) {
+        float state_vector[32];
+        memset(state_vector, 0, sizeof(state_vector));
+        size_t copy_n = data_size < 32 ? data_size : 32;
+        memcpy(state_vector, input_data, copy_n * sizeof(float));
+
+        float stability_score = 0.5f;
+        float recommended_cutoff = 0.0f;
+        float frequency_bandwidth = 0.0f;
+        float time_constant = 0.1f;
+
+        lnn_laplace_analyze_network_dynamics(system->laplace_analyzer,
+            time_constant, state_vector, 32,
+            &stability_score, &recommended_cutoff, &frequency_bandwidth);
+
+        /* 频谱稳定性修正置信度和不确定性 */
+        float lap_factor = 0.6f + 0.4f * stability_score;
+        if (lap_factor > 1.0f) lap_factor = 1.0f;
+        if (lap_factor < 0.4f) lap_factor = 0.4f;
+
+        result->confidence = result->confidence * lap_factor;
+        result->uncertainty = result->uncertainty * (2.0f - lap_factor);
+        if (result->uncertainty > 1.0f) result->uncertainty = 1.0f;
+    }
     
     /* 计算趋势（基于历史） */
     if (system->history_size > 0) {
@@ -762,7 +827,7 @@ static int predict_performance(MetacognitionSystem* system,
     for (size_t s = 0; s < steps; s++) {
         float t = (float)(s + 1);
         float trend_contrib = trend * t * decay_factor;
-        float season_contrib = seasonality * sinf(t * MATH_PI / 6.0f) * decay_factor;
+        float season_contrib = seasonality * sinf(t * M_PI / 6.0f) * decay_factor;
         float mean_revert = (mean - current_perf) * (1.0f - expf(-t * 0.2f)) * 0.3f;
         float noise = (float)(s % 3 - 1) * sqrtf(variance + 1e-8f) * 0.1f * decay_factor;
         float pred = current_perf + trend_contrib + season_contrib + mean_revert + noise;
@@ -2318,7 +2383,10 @@ int metacognition_bridge_to_self_cognition(MetacognitionSystem* system,
                  actions, buf[0] ? buf : "模型状态稳定，无需调整");
     }
 
-    return actions > 0 ? 0 : 0;
+    /* ZSFEEE-FIX-028: 修复始终返回0的问题。原代码 return actions > 0 ? 0 : 0 
+     * 两个分支均返回0，导致调用方无法区分桥接是否实际执行了动作。
+     * 修复：返回实际执行的动作数量，0表示无动作但非错误。 */
+    return actions;
 }
 
 #define KALMAN_INNOVATION_WINDOW 32

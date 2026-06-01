@@ -972,7 +972,9 @@ int prob_engine_rejection_sampling(ProbEngine* engine, const char* query_var,
     int topo_count = 0;
     int* topo = prob_topological_sort(&engine->network, &topo_count);
     if (!topo) {
-        /* 降级：判断据图顺序 */
+        /* 拓扑排序失败——回退到顺序节点遍历（降级）
+         * 顺序遍历使采样质量下降但保证系统可继续运行 */
+        log_debug("[不确定性推理] prob_topological_sort返回NULL，使用顺序节点遍历回退");
         topo = (int*)safe_malloc(engine->network.var_count * sizeof(int));
         if (!topo) return -1;
         for (int i = 0; i < engine->network.var_count; i++) topo[i] = i;

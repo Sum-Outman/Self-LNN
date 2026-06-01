@@ -81,6 +81,14 @@ int ird_fine_train(IRDFineClassifier* classifier, const float* images, const int
 int ird_fine_save(const IRDFineClassifier* classifier, const char* path);
 int ird_fine_load(IRDFineClassifier* classifier, const char* path);
 
+/**
+ * @brief ZSFQQ-P2-001: 标记细粒度分类器为已训练
+ * 在系统加载检查点或完成引导训练后调用
+ * @param classifier 分类器句柄
+ */
+void ird_fine_mark_trained(IRDFineClassifier* classifier);
+int ird_fine_is_trained(const IRDFineClassifier* classifier);
+
 /* ======================================================================== */
 /*  开放集识别                                                              */
 /* ======================================================================== */

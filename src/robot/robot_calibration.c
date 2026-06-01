@@ -472,11 +472,16 @@ int robot_calibration_compute(RobotCalibration* calib) {
             build_identification_matrix(calib->nominal_dh, n, q, J_geom);
 
             float p_nominal[3] = {T_nominal[3], T_nominal[7], T_nominal[11]};
-            (void)p_nominal;
 
-            float dx = calib->samples[s].actual_position[0] - calib->samples[s].position[0];
-            float dy = calib->samples[s].actual_position[1] - calib->samples[s].position[1];
-            float dz = calib->samples[s].actual_position[2] - calib->samples[s].position[2];
+            /* 使用末端执行器实际位姿与名义位姿的3D位置差作为标定误差 */
+            float p_actual[3] = {
+                calib->samples[s].actual_position[0],
+                calib->samples[s].actual_position[1],
+                calib->samples[s].actual_position[2]
+            };
+            float dx = p_actual[0] - p_nominal[0];
+            float dy = p_actual[1] - p_nominal[1];
+            float dz = p_actual[2] - p_nominal[2];
             float dr = sqrtf(dx*dx + dy*dy + dz*dz);
 
             float err = dr;

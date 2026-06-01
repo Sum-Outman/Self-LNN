@@ -100,7 +100,12 @@ static void _cfc_ode_step(const float* in, int in_dim,
                            const float* W_gh, const float* W_ah,
                            const float* b_g, const float* b_a,
                            float* h, int h_dim, float tau, float dt) {
-    float gate[256], act[256], t1[256], t2[256];
+    /* ZSFQQ-P2-002修复: 动态分配替代硬编码栈数组256，防止hd>256时栈溢出 */
+    float* gate = (float*)safe_malloc((size_t)h_dim * sizeof(float) * 4);
+    if (!gate) return;
+    float* act  = gate + h_dim;
+    float* t1   = act + h_dim;
+    float* t2   = t1 + h_dim;
     memset(gate, 0, h_dim * sizeof(float));
     memset(act, 0, h_dim * sizeof(float));
     _mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
@@ -114,6 +119,7 @@ static void _cfc_ode_step(const float* in, int in_dim,
     _vec_hadamard(gate, act, h_dim);
     float decay = expf(-dt / tau);
     for (int i = 0; i < h_dim; i++) h[i] = h[i] * decay + (1.0f - decay) * gate[i];
+    safe_free((void**)&gate);
 }
 
 /* P1-011: CfC ODE步反向传播 —— 计算参数梯度和输入/状态梯度 */
@@ -127,8 +133,23 @@ static void _cfc_ode_step_backward(const float* in, int in_dim,
                                     const float* h, const float* dL_dh_new,
                                     float* dL_dh, float* dL_din,
                                     int h_dim, float tau, float dt) {
-    float pre_gate[256], pre_act[256], gate[256], act[256];
-    float t1[256], t2[256];
+    /* ZSFQQ-P2-002修复: 动态分配替代硬编码栈数组256，防止hd>256时栈溢出 */
+    float* buf = (float*)safe_malloc((size_t)h_dim * sizeof(float) * 8);
+    if (!buf) return;
+    float* pre_gate = buf + h_dim * 0;
+    float* pre_act  = buf + h_dim * 1;
+    float* gate     = buf + h_dim * 2;
+    float* act      = buf + h_dim * 3;
+    float* t1       = buf + h_dim * 4;
+    float* t2       = buf + h_dim * 5;
+    float* d_driver = buf + h_dim * 6;
+    float* d_pre_gate_act = buf + h_dim * 7;
+    /* 复用: d_gate = d_pre_gate_act (先后使用不冲突), d_act使用pre_gate(已用完) */
+    float* d_gate = d_pre_gate_act;
+    float* d_act  = pre_gate;
+    float* d_pre_gate = d_pre_gate_act;
+    float* d_pre_act  = pre_act;
+    (void)d_act; (void)d_pre_act;
     memset(pre_gate, 0, h_dim * sizeof(float));
     memset(pre_act, 0, h_dim * sizeof(float));
     _mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
@@ -142,13 +163,11 @@ static void _cfc_ode_step_backward(const float* in, int in_dim,
     memcpy(act, pre_act, h_dim * sizeof(float));
     _vec_tanh(act, h_dim);
     float decay = expf(-dt / tau);
-    float d_driver[256], d_gate[256], d_act[256];
     for (int i = 0; i < h_dim; i++) {
         d_driver[i] = (1.0f - decay) * dL_dh_new[i];
         d_gate[i] = d_driver[i] * act[i];
         d_act[i] = d_driver[i] * gate[i];
     }
-    float d_pre_gate[256], d_pre_act[256];
     for (int i = 0; i < h_dim; i++) {
         d_pre_gate[i] = d_gate[i] * gate[i] * (1.0f - gate[i]);
         d_pre_act[i] = d_act[i] * (1.0f - act[i] * act[i]);
@@ -181,6 +200,7 @@ static void _cfc_ode_step_backward(const float* in, int in_dim,
             dL_dh[i] = decay * dL_dh_new[i] + sum;
         }
     }
+    safe_free((void**)&buf);
 }
 
 static void _patch_cfc_encode(const float* img, int w, int h, int ch,

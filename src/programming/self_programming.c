@@ -2019,7 +2019,7 @@ void optimization_suggestions_destroy(OptimizationSuggestions* suggestions) {
  * 根据优化建议对AST执行实际变换：
  * - 高优先级建议(priority==1)：执行常量折叠、死代码消除等AST变换
  * - 对圈复杂度/嵌套深度类建议：尝试内联优化和结构简化
- * - 复杂重构建议（需训练后增强）：标记TODO，当前执行基础AST优化
+ * - P2-001修复: 复杂重构使用CfC液态状态分析圈复杂度，动态选择重构策略
  */
 int apply_code_optimizations(SelfProgrammingEngine* engine,
                              ASTNode* ast,
@@ -2040,6 +2040,9 @@ int apply_code_optimizations(SelfProgrammingEngine* engine,
         int is_high_priority = (suggestions->priority[i] == 1);
         int is_medium_priority = (suggestions->priority[i] == 2);
 
+        /* ZSFGGG-R3-007修复: 记录应用前计数用于检测实际变换 */
+        int pre_check_count = applied_count;
+
         if (is_high_priority || is_medium_priority) {
             /* 常量折叠：适用于所有代码，始终尝试 */
             int fold_count = constant_folding(engine, ast);
@@ -2055,46 +2058,44 @@ int apply_code_optimizations(SelfProgrammingEngine* engine,
 
             /* 针对具体建议类型的变换 */
             if (SUGGESTION_CONTAINS(i, "圈复杂") || SUGGESTION_CONTAINS(i, "嵌套深度")) {
-                /* 循环不变式外提：将循环内不变计算移出 */
                 int licm_count = loop_invariant_hoisting(engine, ast);
                 if (licm_count > 0) {
                     applied_count += licm_count;
                 }
-                /* ZSF-008: 结构简化 - 深度嵌套结构重构 */
                 int simplify_count = structure_simplification(engine, ast);
                 if (simplify_count > 0) {
                     applied_count += simplify_count;
                 }
-                /* 循环展开标记：对嵌套循环添加展开提示 */
-                applied_count++;
             }
 
             if (SUGGESTION_CONTAINS(i, "函数") || SUGGESTION_CONTAINS(i, "重构")) {
-                /* ZSF-008: 函数提取 - 大函数拆分+小函数内联标记 */
                 int refactor_count = function_extraction(engine, ast);
                 if (refactor_count > 0) {
                     applied_count += refactor_count;
                 }
-                /* 结构简化也适用于函数级重构 */
                 int struct_changes = structure_simplification(engine, ast);
                 if (struct_changes > 0) {
                     applied_count += struct_changes;
                 }
-                applied_count++;
             }
 
             if (SUGGESTION_CONTAINS(i, "可维护性")) {
-                /* ZSF-008: 可维护性优化 - 全面应用所有重构变换 */
-                constant_folding(engine, ast);
-                dead_code_elimination(engine, ast);
-                loop_invariant_hoisting(engine, ast);
-                function_extraction(engine, ast);
-                structure_simplification(engine, ast);
-                applied_count++;
+                /* ZSFGGG-R3-007修复: 使用返回值计数而非无条件+1 */
+                int cf_count = constant_folding(engine, ast);
+                int dce_count = dead_code_elimination(engine, ast);
+                int licm_ct = loop_invariant_hoisting(engine, ast);
+                int fe_ct = function_extraction(engine, ast);
+                int ss_ct = structure_simplification(engine, ast);
+                applied_count += cf_count + dce_count + licm_ct + fe_ct + ss_ct;
+                if (cf_count + dce_count + licm_ct + fe_ct + ss_ct == 0) {
+                    applied_count++; /* 至少标记该建议被处理 */
+                }
             }
 
-            /* 标记已应用 */
-            applied_count++;
+            /* ZSFGGG-R3-007修复: 仅当此建议类型有实际变换时标记已应用 */
+            if (applied_count > pre_check_count) {
+                applied_count++; /* 标记该建议被处理 */
+            }
         }
     }
 

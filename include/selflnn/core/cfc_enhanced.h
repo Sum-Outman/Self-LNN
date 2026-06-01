@@ -85,6 +85,7 @@ typedef struct {
     int saved_use_multi_timescale;  /**< P3-004修复: 保存原始多时间尺度标志 */
     float saved_fast_tau_ratio;     /**< P3-004修复: 保存原始快速时间常数比例 */
     float saved_slow_tau_ratio;     /**< P3-004修复: 保存原始慢速时间常数比例 */
+    CfcEnhancedConfig active_config; /**< L-004修复: 存储当前活跃配置，供cfc_get_enhanced_config查询 */
     float* power_iter_buffer;
     float* power_iter_buffer2;
     int power_iter_buffer_size;
@@ -142,7 +143,7 @@ int cfc_get_enhanced_stats(const CfcEnhancedState* state, int* current_solver,
                             float* stiffness_ratio, int* total_calls,
                             int* solver_switches, int* stiffness_count);
 
-int cfc_get_enhanced_config(CfcEnhancedConfig* config);
+int cfc_get_enhanced_config(const CfcEnhancedState* state, CfcEnhancedConfig* config);
 
 #ifdef __cplusplus
 }

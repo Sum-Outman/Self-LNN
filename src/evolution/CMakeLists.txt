@@ -39,10 +39,14 @@ install(TARGETS selflnn_evolution
     RUNTIME DESTINATION bin
 )
 
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/neural_architecture_search.h
-    DESTINATION include/selflnn
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/evolution/neural_architecture_search.h
+    DESTINATION include/selflnn/evolution
 )
 
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/evolution/pareto_optimization.h
+    DESTINATION include/selflnn/evolution
+)
+
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/evolution/evolution_engine.h
     DESTINATION include/selflnn/evolution
 )

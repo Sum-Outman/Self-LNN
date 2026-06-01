@@ -224,6 +224,12 @@ void dialogue_processor_free(DialogueProcessor* processor)
     safe_free((void**)&processor);
 }
 
+/* ZSFQQ-P2-001: 获取对话生成器句柄 */
+void* dialogue_get_generator(DialogueProcessor* processor) {
+    if (!processor) return NULL;
+    return processor->generator;
+}
+
 int dialogue_set_lnn_instance(DialogueProcessor* processor, void* lnn_instance)
 {
     if (!processor || !processor->is_initialized) return -1;

@@ -469,22 +469,22 @@ int system_scheduler_run_cycle(SystemScheduler* scheduler, int iterations) {
                     switch (ev->device_type) {
                         case HD_DEVICE_CAMERA:
                         case HD_DEVICE_DEPTH_CAMERA:
-                            log_event(scheduler, "hotplug", 2, 0, "视觉设备已断开，视觉子系统降级运行");
+                            log_event(scheduler, "hotplug", 2, 0, "视觉设备已断开，对应视觉模态输入将置零，系统继续使用全模态LNN处理");
                             break;
                         case HD_DEVICE_MICROPHONE:
-                            log_event(scheduler, "hotplug", 2, 0, "音频设备已断开，音频子系统降级运行");
+                            log_event(scheduler, "hotplug", 2, 0, "音频设备已断开，对应音频模态输入将置零，系统继续使用全模态LNN处理");
                             break;
                         case HD_DEVICE_GPU:
-                            log_event(scheduler, "hotplug", 2, 0, "GPU设备已断开，回退到CPU计算");
+                            log_event(scheduler, "hotplug", 2, 0, "GPU设备已断开，自动切换到CPU后端继续计算");
                             break;
                         case HD_DEVICE_ROBOT_ARM:
                         case HD_DEVICE_MOTOR_CONTROLLER:
-                            log_event(scheduler, "hotplug", 3, 0, "执行器设备已断开，紧急停止对应运动");
+                            log_event(scheduler, "hotplug", 3, 0, "执行器设备已断开，对应电机控制模态输入置零，紧急停止对应运动");
                             break;
                         case HD_DEVICE_SENSOR:
                         case HD_DEVICE_IMU:
                         case HD_DEVICE_LIDAR:
-                            log_event(scheduler, "hotplug", 2, 0, "传感器设备已断开，感知子系统降级运行");
+                            log_event(scheduler, "hotplug", 2, 0, "传感器设备已断开，对应传感器模态输入将置零，系统继续使用全模态LNN处理");
                             break;
                         default:
                             log_event(scheduler, "hotplug", 2, 0, "未知设备已断开");

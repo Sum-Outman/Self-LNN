@@ -1037,6 +1037,149 @@ int auto_learning_export_to_knowledge_base(AutoLearningSystem* system, void* kno
 }
 
 /**
+ * @brief ZSFGGG-A-005修复: 从已有知识库推理新知识
+ * 基于已有三元组通过逻辑推理规则(传递性/对称性/逆关系)推导新三元组，
+ * 实现"向知识库进行学习"的能力闭环。
+ * @param system 自主学习系统
+ * @param knowledge_base 知识库句柄
+ * @param max_new_entries 最大新条目数
+ * @return 成功推导的新条目数, 负数表示错误
+ */
+int auto_learning_infer_from_knowledge_base(AutoLearningSystem* system,
+                                            void* knowledge_base, int max_new_entries) {
+    if (!system || !knowledge_base || max_new_entries <= 0) return -1;
+
+    KnowledgeBase* kb = (KnowledgeBase*)knowledge_base;
+    int new_count = 0;
+
+    /* 传递性推理: (A, 是一种, B) + (B, 是一种, C) => (A, 是一种, C) */
+    for (int i = 0; i < (int)kb->entry_count && new_count < max_new_entries; i++) {
+        if (!kb->entries[i].subject || !kb->entries[i].object) continue;
+        if (strcmp(kb->entries[i].predicate, "是一种") != 0 &&
+            strcmp(kb->entries[i].predicate, "属于") != 0 &&
+            strcmp(kb->entries[i].predicate, "包含") != 0) continue;
+
+        for (int j = 0; j < (int)kb->entry_count && new_count < max_new_entries; j++) {
+            if (i == j) continue;
+            if (!kb->entries[j].subject || !kb->entries[j].object) continue;
+            if (strcmp(kb->entries[j].predicate, kb->entries[i].predicate) != 0) continue;
+
+            /* B == B' => (A, 关系, C) */
+            if (strcmp(kb->entries[i].object, kb->entries[j].subject) == 0) {
+                /* 检查是否已存在 */
+                int exists = 0;
+                for (int k = 0; k < (int)kb->entry_count; k++) {
+                    if (kb->entries[k].subject && kb->entries[k].object &&
+                        strcmp(kb->entries[k].subject, kb->entries[i].subject) == 0 &&
+                        strcmp(kb->entries[k].predicate, kb->entries[i].predicate) == 0 &&
+                        strcmp(kb->entries[k].object, kb->entries[j].object) == 0) {
+                        exists = 1;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    KnowledgeEntry ke;
+                    memset(&ke, 0, sizeof(KnowledgeEntry));
+                    ke.subject = string_duplicate(kb->entries[i].subject);
+                    ke.predicate = string_duplicate(kb->entries[i].predicate);
+                    ke.object = string_duplicate(kb->entries[j].object);
+                    ke.type = KNOWLEDGE_FACT;
+                    float conf = kb->entries[i].confidence * kb->entries[j].confidence * 0.85f;
+                    ke.confidence = conf;
+                    ke.source = SOURCE_LEARNING;
+                    ke.timestamp = time(NULL);
+                    knowledge_base_add(kb, &ke);
+                    knowledge_entry_free(&ke);
+                    new_count++;
+                    log_info("[知识推理-传递] %s → %s → %s (置信度=%.3f)",
+                             kb->entries[i].subject, kb->entries[i].predicate,
+                             kb->entries[j].object, conf);
+                }
+            }
+        }
+    }
+
+    /* 对称关系推理: (A, 相关于, B) => (B, 相关于, A) */
+    for (int i = 0; i < (int)kb->entry_count && new_count < max_new_entries; i++) {
+        if (!kb->entries[i].subject || !kb->entries[i].object) continue;
+        if (strcmp(kb->entries[i].predicate, "相关于") != 0 &&
+            strcmp(kb->entries[i].predicate, "类似于") != 0 &&
+            strcmp(kb->entries[i].predicate, "连接") != 0) continue;
+
+        int exists = 0;
+        for (int k = 0; k < (int)kb->entry_count; k++) {
+            if (kb->entries[k].subject && kb->entries[k].object &&
+                strcmp(kb->entries[k].subject, kb->entries[i].object) == 0 &&
+                strcmp(kb->entries[k].predicate, kb->entries[i].predicate) == 0 &&
+                strcmp(kb->entries[k].object, kb->entries[i].subject) == 0) {
+                exists = 1;
+                break;
+            }
+        }
+        if (!exists) {
+            KnowledgeEntry ke;
+            memset(&ke, 0, sizeof(KnowledgeEntry));
+            ke.subject = string_duplicate(kb->entries[i].object);
+            ke.predicate = string_duplicate(kb->entries[i].predicate);
+            ke.object = string_duplicate(kb->entries[i].subject);
+            ke.type = KNOWLEDGE_FACT;
+            ke.confidence = kb->entries[i].confidence * 0.8f;
+            ke.source = SOURCE_LEARNING;
+            ke.timestamp = time(NULL);
+            knowledge_base_add(kb, &ke);
+            knowledge_entry_free(&ke);
+            new_count++;
+            log_info("[知识推理-对称] %s → %s → %s (置信度=%.3f)",
+                     kb->entries[i].object, kb->entries[i].predicate,
+                     kb->entries[i].subject, ke.confidence);
+        }
+    }
+
+    /* 逆关系推理: (A, 包含, B) => (B, 属于, A) */
+    for (int i = 0; i < (int)kb->entry_count && new_count < max_new_entries; i++) {
+        if (!kb->entries[i].subject || !kb->entries[i].object) continue;
+        const char* inv_predicate = NULL;
+        if (strcmp(kb->entries[i].predicate, "包含") == 0) inv_predicate = "属于";
+        else if (strcmp(kb->entries[i].predicate, "属于") == 0) inv_predicate = "包含";
+        else if (strcmp(kb->entries[i].predicate, "拥有") == 0) inv_predicate = "被拥有";
+        else if (strcmp(kb->entries[i].predicate, "位于") == 0) inv_predicate = "包含";
+
+        if (inv_predicate) {
+            int exists = 0;
+            for (int k = 0; k < (int)kb->entry_count; k++) {
+                if (kb->entries[k].subject && kb->entries[k].object &&
+                    strcmp(kb->entries[k].subject, kb->entries[i].object) == 0 &&
+                    strcmp(kb->entries[k].predicate, inv_predicate) == 0 &&
+                    strcmp(kb->entries[k].object, kb->entries[i].subject) == 0) {
+                    exists = 1;
+                    break;
+                }
+            }
+            if (!exists) {
+                KnowledgeEntry ke;
+                memset(&ke, 0, sizeof(KnowledgeEntry));
+                ke.subject = string_duplicate(kb->entries[i].object);
+                ke.predicate = string_duplicate(inv_predicate);
+                ke.object = string_duplicate(kb->entries[i].subject);
+                ke.type = KNOWLEDGE_FACT;
+                ke.confidence = kb->entries[i].confidence * 0.75f;
+                ke.source = SOURCE_LEARNING;
+                ke.timestamp = time(NULL);
+                knowledge_base_add(kb, &ke);
+                knowledge_entry_free(&ke);
+                new_count++;
+                log_info("[知识推理-逆] %s → %s → %s (置信度=%.3f)",
+                         kb->entries[i].object, inv_predicate,
+                         kb->entries[i].subject, ke.confidence);
+            }
+        }
+    }
+
+    log_info("[知识推理] 从已有知识库推理出%d条新知识", new_count);
+    return new_count;
+}
+
+/**
  * @brief 检查字符串是否在字符串数组中
  */
 static int string_in_array(const char* str, char* arr[], int count) {

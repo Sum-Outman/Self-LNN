@@ -381,7 +381,8 @@ void mf_camera_free(MFCameraContext* ctx) {
 
 int hardware_camera_probe(void) {
 #ifdef _WIN32
-    return 1;  /* DirectShow总是可用 */
+    /* DirectShow在Windows上始终可用——返回1表示摄像头API可用，具体设备通过enumerateDShow查询 */
+    return 1;
 #elif defined(__APPLE__)
     return 2;  /* AVFoundation可用 */
 #elif defined(__linux__)

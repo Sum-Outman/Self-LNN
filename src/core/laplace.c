@@ -53,6 +53,16 @@ struct LaplaceAnalyzer {
 
     float* spectrum;             /**< 频谱数据缓冲区 */
     size_t spectrum_size;        /**< 频谱缓冲区大小 */
+
+    /* H-001修复: 传递函数系数缓存 —— 避免硬编码 1/(s+1)
+     * 在 laplace_analyze_system / laplace_analyze_lnn_stability 调用后
+     * 自动保存真实系统的分子/分母多项式系数，
+     * 供 laplace_unified_get_spectrum 使用以计算真实频谱。 */
+    float* cached_numerator;       /**< 缓存的传递函数分子系数 */
+    float* cached_denominator;     /**< 缓存的传递函数分母系数 */
+    size_t cached_num_order;       /**< 缓存的分子阶数(系数数组长度) */
+    size_t cached_den_order;       /**< 缓存的分母阶数(系数数组长度) */
+    int has_cached_transfer_fn;    /**< 是否有缓存的传递函数 */
 };
 
 /* 静态函数声明 */
@@ -161,6 +171,7 @@ const LaplaceConfig LAPLACE_CONFIG_DEFAULT = {
     100.0f,    /* max_frequency */
     0.1f,      /* min_frequency */
     1,         /* enable_stability */
+    65536,     /* buffer_size —— L-001修复：健康检查所需的内部缓冲区大小（64KB） */
     1,         /* enable_frequency */
     1,         /* enable_optimization */
     50.0f,     /* cutoff_frequency */
@@ -218,6 +229,13 @@ LaplaceAnalyzer* laplace_analyzer_create(const LaplaceConfig* config) {
 
     analyzer->spectrum = NULL;
     analyzer->spectrum_size = 0;
+
+    /* H-001修复: 初始化传递函数系数缓存 */
+    analyzer->cached_numerator = NULL;
+    analyzer->cached_denominator = NULL;
+    analyzer->cached_num_order = 0;
+    analyzer->cached_den_order = 0;
+    analyzer->has_cached_transfer_fn = 0;
     
     // 分配极点缓冲区（最大极点数为分母阶数）
     size_t max_poles = config->num_samples / 2;
@@ -297,6 +315,13 @@ void laplace_analyzer_free(LaplaceAnalyzer* analyzer) {
 
     safe_free((void**)&analyzer->spectrum);
     analyzer->spectrum_size = 0;
+
+    /* H-001修复: 释放传递函数系数缓存 */
+    safe_free((void**)&analyzer->cached_numerator);
+    safe_free((void**)&analyzer->cached_denominator);
+    analyzer->cached_num_order = 0;
+    analyzer->cached_den_order = 0;
+    analyzer->has_cached_transfer_fn = 0;
 
     // 释放分析器结构
     safe_free((void**)&analyzer);
@@ -647,6 +672,27 @@ int laplace_analyze_system(LaplaceAnalyzer* analyzer,
     analyzer->last_analysis.is_stable = result->is_stable;
     
     analyzer->has_last_analysis = 1;
+    
+    /* H-001修复: 保存传递函数系数到缓存
+     * 当外部调用方传入真实系统传递函数时，自动缓存以供后续频谱计算使用 */
+    safe_free((void**)&analyzer->cached_numerator);
+    safe_free((void**)&analyzer->cached_denominator);
+    if (num_order > 0 && numerator) {
+        analyzer->cached_numerator = (float*)safe_malloc(num_order * sizeof(float));
+        if (analyzer->cached_numerator) {
+            memcpy(analyzer->cached_numerator, numerator, num_order * sizeof(float));
+            analyzer->cached_num_order = num_order;
+        }
+    }
+    if (den_order > 0 && denominator) {
+        analyzer->cached_denominator = (float*)safe_malloc(den_order * sizeof(float));
+        if (analyzer->cached_denominator) {
+            memcpy(analyzer->cached_denominator, denominator, den_order * sizeof(float));
+            analyzer->cached_den_order = den_order;
+        }
+    }
+    analyzer->has_cached_transfer_fn = (analyzer->cached_numerator
+                                       && analyzer->cached_denominator) ? 1 : 0;
     
     // 注意：结果中的poles数组需要调用者释放
     // 这里我们转移所有权给结果结构
@@ -1337,9 +1383,27 @@ int laplace_analyzer_get_frequency_response(const LaplaceAnalyzer* analyzer,
     return 0;
 }
 
+/* H-001修复: 获取缓存的传递函数系数（只读访问）
+ * 供 laplace_unified_get_spectrum 使用，避免硬编码 1/(s+1)
+ * 返回内部缓存指针（只读），调用者不得修改或释放 */
+int laplace_analyzer_get_cached_transfer_fn(const LaplaceAnalyzer* analyzer,
+                                             const float** numerator,
+                                             const float** denominator,
+                                             size_t* num_order,
+                                             size_t* den_order) {
+    if (!analyzer || !numerator || !denominator || !num_order || !den_order) return -1;
+    if (!analyzer->has_cached_transfer_fn ||
+        !analyzer->cached_numerator || !analyzer->cached_denominator) return -1;
+    *numerator = analyzer->cached_numerator;
+    *denominator = analyzer->cached_denominator;
+    *num_order = analyzer->cached_num_order;
+    *den_order = analyzer->cached_den_order;
+    return 0;
+}
+
 /* ============================================================================
  * 增强的极点/零点计算算法实现
- * =========================================================================== */
+ * ============================================================================ */
 
 /**
  * @brief 改进的Durand-Kerner方法计算极点
@@ -1388,10 +1452,11 @@ static int compute_poles_improved_durand_kerner(const float* denominator, size_t
             Complex poly_val = complex_polyval(denominator, den_order, poles[i]);
             
             // 计算分母导数（多项式导数）
+            /* ZSFGGG-S2-004修复: 循环边界应为 j<=den_order 而非 j<den_order,
+             * 否则遗漏最高阶项 N*a_N*s^(N-1) 导致牛顿法每次迭代计算错误导数 */
             Complex derivative = complex_create(0.0f, 0.0f);
-            for (size_t j = 0; j < den_order; j++) {
-                if (j == 0) continue;
-                float coeff = denominator[j] * j;
+            for (size_t j = 1; j <= den_order; j++) {
+                float coeff = denominator[j] * (float)j;
                 Complex term = complex_create(coeff, 0.0f);
                 Complex power = complex_create(1.0f, 0.0f);
                 
@@ -2193,8 +2258,6 @@ static void analyze_stability_nyquist(const float* numerator, const float* denom
     float best_gain_margin = 100.0f; // dB
     float crossover_freq = 0.0f;
     float phase_crossover_freq = 0.0f;
-    (void)crossover_freq;
-    (void)phase_crossover_freq;
     
     // 寻找增益穿越频率（增益接近0dB）和相位穿越频率（相位接近-180°）
     int found_gain_crossover = 0;
@@ -2222,6 +2285,7 @@ static void analyze_stability_nyquist(const float* numerator, const float* denom
             if (local_phase_margin >= 0.0f && local_phase_margin <= 180.0f) {
                 if (local_phase_margin < best_phase_margin) {
                     best_phase_margin = local_phase_margin;
+                    crossover_freq = (float)i;  /* 使用轮廓索引作为相对穿越频率标记 */
                     found_gain_crossover = 1;
                 }
             }
@@ -2253,6 +2317,7 @@ static void analyze_stability_nyquist(const float* numerator, const float* denom
             if (gain_margin_db >= -60.0f && gain_margin_db <= 60.0f) {
                 if (gain_margin_db < best_gain_margin) {
                     best_gain_margin = gain_margin_db;
+                    phase_crossover_freq = (float)i;  /* 使用轮廓索引作为相对穿越频率标记 */
                     found_phase_crossover = 1;
                 }
             }
@@ -2476,6 +2541,31 @@ int laplace_compute_bode_plot(LaplaceAnalyzer* analyzer,
  * 此函数将液态神经网络视为连续时间动态系统，分析其稳定性特征。
  * 实现基于权重矩阵特征值分析的真实稳定性评估。
  */
+/* H-001修复: 从极点展开分母多项式系数
+ * 输入: real_poles (n个实数极点), n (极点数量)
+ * 输出: den_coeffs (n+1个系数，从常数项到最高次项 s^n)
+ * 算法: 从 [1] 开始，逐次乘以 (s - p_i)
+ *   初始: coeffs = [1]  (即 s^0 项)
+ *   乘 (s - p): new[k] = old[k-1] - p * old[k]
+ * 例如: (s-p0)(s-p1) = s² - (p0+p1)s + p0*p1 → coeffs = [p0*p1, -(p0+p1), 1]
+ * 调用者负责释放返回的 den_coeffs */
+static float* expand_poles_to_denominator(const float* real_poles, size_t n) {
+    if (n == 0) return NULL;
+    size_t den_order = n + 1; /* 系数数组长度 */
+    float* coeffs = (float*)safe_calloc(den_order, sizeof(float));
+    if (!coeffs) return NULL;
+    coeffs[0] = 1.0f; /* 初始: 1 */
+    for (size_t i = 0; i < n; i++) {
+        float p = real_poles[i];
+        /* 从高到低更新: new[k] = old[k] - p * old[k-1] */
+        for (size_t k = i + 1; k > 0; k--) {
+            coeffs[k] = coeffs[k] - p * coeffs[k - 1];
+        }
+        /* coeffs[0] 不变: -p * 0 = 0, 所以 coeffs[0] *= 1 */
+    }
+    return coeffs;
+}
+
 int laplace_analyze_lnn_stability(LaplaceAnalyzer* analyzer,
                                   LNN* lnn,
                                   StabilityAnalysis* result) {
@@ -2537,54 +2627,60 @@ int laplace_analyze_lnn_stability(LaplaceAnalyzer* analyzer,
     // 初始化结果
     memset(result, 0, sizeof(StabilityAnalysis));
     
-    // 对于液态神经网络，系统矩阵A可以从权重矩阵推导
-    // 线性化连续时间动态：dx/dt = -x/τ + f(Wx + b)
-    // 在线性近似下（假设f是线性函数）：dx/dt ≈ (-I/τ + W)x
-    // 因此系统矩阵A = -I/τ + W，其中τ是时间常数，W是权重矩阵
-    // 此线性模型用于初步稳定性分析，完整非线性分析需要更复杂的李雅普诺夫方法
-    // 这里我们分析W^T * W的特征值（奇异值的平方）来评估权重矩阵的谱特性
+    /* M-003修复: 构建完整的系统矩阵 A = -I/τ + W
+     * 原代码错误地分析了W^T*W的特征值，而非系统矩阵A的真实特征值。
+     * 对于连续时间线性系统 dx/dt = A*x，稳定性由A的特征值决定：
+     *   所有特征值实部 < 0 → 渐近稳定
+     *   存在特征值实部 > 0 → 不稳定
+     * 系统矩阵 A = -I/τ + W_eff，其中W_eff是作用于隐藏状态的权重算子。
+     * 
+     * 对于方形权重矩阵(hidden_size×hidden_size)，直接构建A = -I/τ + W
+     * 对于非方形权重矩阵，取W_eff为W的前hidden_size行构成的方形子矩阵 */
     
-    // 创建矩阵 W^T * W (hidden_size x hidden_size)
     size_t n = hidden_size;
-    float* wt_w = (float*)safe_calloc(n * n, sizeof(float));
-    if (!wt_w) {
+    float time_constant = lnn->config.time_constant > 0.0f ? 
+                          lnn->config.time_constant : 1.0f;
+    float inv_tau = 1.0f / time_constant;
+    
+    /* 构建系统矩阵 A = -I/τ + W (n×n) */
+    float* system_matrix = (float*)safe_calloc(n * n, sizeof(float));
+    if (!system_matrix) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
                               __func__, __FILE__, __LINE__,
-                              "无法分配W^T*W矩阵内存");
+                              "无法分配系统矩阵A内存");
         return SELFLNN_ERROR_OUT_OF_MEMORY;
     }
     
-    // 计算 W^T * W
-    // W维度: hidden_size x input_size (权重矩阵按列优先存储: input_size x hidden_size)
-    // 实际存储: weight_matrix[input_size * hidden_size]，行优先: weight_matrix[i * hidden_size + j]
-    // 其中i=0..input_size-1, j=0..hidden_size-1
-    // 因此W(i,j) = weight_matrix[i * hidden_size + j]
-    // W^T * W = Σ_i W(:,i) * W(:,i)^T
-    for (size_t i = 0; i < input_size; i++) {
-        for (size_t j = 0; j < hidden_size; j++) {
-            float w_ij = weight_matrix[i * hidden_size + j];
-            for (size_t k = 0; k < hidden_size; k++) {
-                float w_ik = weight_matrix[i * hidden_size + k];
-                wt_w[j * n + k] += w_ij * w_ik;
+    /* 设置 A_ij = W_ij - δ_ij/τ 
+     * weight_matrix存储: weight_matrix[row * hidden_size + col]
+     * row: 0..weight_count/hidden_size-1, col: 0..hidden_size-1 */
+    size_t weight_rows = weight_count / hidden_size;
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = 0; j < n; j++) {
+            float w_entry = 0.0f;
+            /* 仅当权重矩阵有对应的行时读取W值 */
+            if (i < weight_rows) {
+                w_entry = weight_matrix[i * n + j];
             }
+            system_matrix[i * n + j] = w_entry - (i == j ? inv_tau : 0.0f);
         }
     }
     
-    // 分配特征值数组
+    /* 分配特征值数组 */
     Complex* eigenvalues = (Complex*)safe_malloc(n * sizeof(Complex));
     if (!eigenvalues) {
-        safe_free((void**)&wt_w);
+        safe_free((void**)&system_matrix);
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
                               __func__, __FILE__, __LINE__,
                               "无法分配特征值数组内存");
         return SELFLNN_ERROR_OUT_OF_MEMORY;
     }
     
-    // 计算特征值
-    int eigen_result = compute_eigenvalues_qr(wt_w, n, eigenvalues, 100, 1e-6f);
+    /* 对系统矩阵A进行特征值分解 */
+    int eigen_result = compute_eigenvalues_qr(system_matrix, n, eigenvalues, 100, 1e-6f);
     
-    // 释放W^T*W矩阵
-    safe_free((void**)&wt_w);
+    /* 释放系统矩阵 */
+    safe_free((void**)&system_matrix);
     
     if (eigen_result != SELFLNN_SUCCESS) {
         safe_free((void**)&eigenvalues);
@@ -2594,44 +2690,32 @@ int laplace_analyze_lnn_stability(LaplaceAnalyzer* analyzer,
         return SELFLNN_ERROR_COMPUTATION;
     }
     
-    // 分析稳定性
-    // 对于连续时间系统，稳定性要求所有极点实部小于0
-    // 这里我们使用W^T*W的特征值的平方根（奇异值）来评估
-    // 如果最大奇异值过大，系统可能不稳定
+    /* M-003修复: A的特征值直接就是系统极点
+     * 对于连续时间系统 dx/dt = A*x，稳定性要求所有特征值实部 < 0
+     * A = -I/τ + W，其特征值已包含-1/τ偏移，无需额外处理 */
     
-    float max_singular_value = 0.0f;
-    float min_singular_value = FLT_MAX;
     int is_stable = 1;
     size_t num_stable_poles = 0;
+    float max_real = -FLT_MAX;
+    float min_real = FLT_MAX;
     
-    // 计算奇异值：σ_i = sqrt(|λ_i|)，其中λ_i是W^T*W的特征值（非负实对称矩阵）
+    /* 第一遍: 分析特征值稳定性，计算极值 */
     for (size_t i = 0; i < n; i++) {
         float real = eigenvalues[i].real;
         float imag = eigenvalues[i].imag;
+        (void)imag;
         
-        // W^T*W是实对称矩阵，特征值应该是实数
-        // 忽略小的虚部（数值误差）
-        float magnitude = sqrtf(real * real + imag * imag);
-        
-        // 奇异值是特征值的平方根（特征值应为非负）
-        float singular_value = (magnitude > 0.0f) ? sqrtf(magnitude) : 0.0f;
-        
-        // 更新最大最小奇异值
-        if (singular_value > max_singular_value) {
-            max_singular_value = singular_value;
-        }
-        if (singular_value < min_singular_value) {
-            min_singular_value = singular_value;
-        }
-        
-        // 稳定性判断：如果特征值为负（数值误差可能导致小的负值），可能表示数值问题
-        if (real < -1e-3f) {
-            // W^T*W应该是半正定矩阵，负特征值表示数值问题或不稳定性
+        /* 特征值实部 > 0 → 不稳定 */
+        if (real > 1e-6f) {
             is_stable = 0;
         }
+        
+        /* 跟踪最大/最小实部 */
+        if (real > max_real) max_real = real;
+        if (real < min_real) min_real = real;
     }
     
-    // 分配极点数组
+    /* 分配极点数组 */
     result->num_poles = n;
     result->poles = (SystemPole*)safe_malloc(result->num_poles * sizeof(SystemPole));
     if (!result->poles) {
@@ -2642,49 +2726,28 @@ int laplace_analyze_lnn_stability(LaplaceAnalyzer* analyzer,
         return SELFLNN_ERROR_OUT_OF_MEMORY;
     }
     
-    // 填充极点信息
-    float max_real = -FLT_MAX;
-    float min_real = FLT_MAX;
-    
+    /* 填充极点信息: 特征值即为系统极点 */
     for (size_t i = 0; i < n; i++) {
-        float real = eigenvalues[i].real;
-        float imag = eigenvalues[i].imag;
+        float pole_real = eigenvalues[i].real;   /* 已含 -1/τ 偏移 */
+        float pole_imag = eigenvalues[i].imag;
         
-        // 系统极点：对于连续时间系统，极点p_i = -1/τ + λ_i
-        // 其中τ是时间常数，λ_i是权重矩阵的特征值
-        float time_constant = lnn->config.time_constant;
-        float pole_real = real - 1.0f / time_constant; // 使用实际时间常数
-        float pole_imag = imag;
-        
-        // 创建极点
         result->poles[i].pole = complex_create(pole_real, pole_imag);
         
-        // 计算阻尼比和自然频率
         float magnitude = sqrtf(pole_real * pole_real + pole_imag * pole_imag);
-        float damping_ratio = 0.0f;
-        if (magnitude > 0.0f) {
-            damping_ratio = fabsf(pole_real) / magnitude;
-        }
+        float damping_ratio = (magnitude > 0.0f) ? fabsf(pole_real) / magnitude : 0.0f;
         float natural_freq = magnitude / (2.0f * (float)M_PI);
         
         result->poles[i].damping_ratio = damping_ratio;
         result->poles[i].natural_freq = natural_freq;
         result->poles[i].is_stable = (pole_real < 0.0f) ? 1 : 0;
         
-        // 统计稳定极点
-        if (result->poles[i].is_stable) {
-            num_stable_poles++;
-        }
-        
-        // 跟踪最大最小实部
-        if (pole_real > max_real) max_real = pole_real;
-        if (pole_real < min_real) min_real = pole_real;
+        if (result->poles[i].is_stable) num_stable_poles++;
     }
     
-    // 释放特征值数组
+    /* 释放特征值数组 */
     safe_free((void**)&eigenvalues);
     
-    // 设置稳定性结果
+    /* 设置稳定性结果: 所有极点实部 < 0 才稳定 */
     result->is_stable = is_stable && (num_stable_poles == n);
     
     // 计算稳定裕度：基于控制理论标准方法
@@ -2769,6 +2832,35 @@ int laplace_analyze_lnn_stability(LaplaceAnalyzer* analyzer,
         }
     }
     result->bandwidth = max_natural_freq;
+
+    /* H-001修复: 从LNN极点派生真实传递函数并缓存
+     * 从W^T*W特征值分析得到的极点p_i，构造分母多项式Π(s-p_i)
+     * 分子设为常数1（unity DC gain），后续频谱计算将反映真实系统动态 */
+    {
+        float* pole_reals = (float*)safe_malloc(n * sizeof(float));
+        if (pole_reals) {
+            for (size_t i = 0; i < n; i++) {
+                pole_reals[i] = result->poles[i].pole.real;
+            }
+            float* derived_den = expand_poles_to_denominator(pole_reals, n);
+            safe_free((void**)&pole_reals);
+            if (derived_den) {
+                safe_free((void**)&analyzer->cached_numerator);
+                safe_free((void**)&analyzer->cached_denominator);
+                /* 分子: 直流增益归一化 —— H(0) = num(0)/den(0) = 1
+                 * 即 numerator[0] = denominator[0]（常数项） */
+                analyzer->cached_numerator = (float*)safe_malloc(sizeof(float));
+                if (analyzer->cached_numerator) {
+                    analyzer->cached_numerator[0] = derived_den[0];
+                    analyzer->cached_num_order = 1;
+                }
+                analyzer->cached_denominator = derived_den;
+                analyzer->cached_den_order = n + 1;
+                analyzer->has_cached_transfer_fn = (analyzer->cached_numerator
+                                                   && analyzer->cached_denominator) ? 1 : 0;
+            }
+        }
+    }
 
     return SELFLNN_SUCCESS;
 }

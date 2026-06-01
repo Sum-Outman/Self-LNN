@@ -112,6 +112,12 @@ static char* json_parse_string_core(JsonParser* p) {
     size_t len = 0;
 
     while (p->pos < p->len) {
+        /* ZSFZX-FIX-R7-1: JSON字符串长度限制 — 防止恶意超长字符串耗尽内存 */
+        if (len >= JSON_MAX_STRING_LEN) {
+            parser_error(p, "字符串超过最大长度限制");
+            safe_free((void**)&buf);
+            return NULL;
+        }
         char c = p->src[p->pos++];
         if (c == '"') {
             buf[len] = '\0';
@@ -287,6 +293,25 @@ static JsonValue* json_parse_number(JsonParser* p) {
     JsonValue* v = json_value_create(JSON_NUMBER);
     if (!v) { safe_free((void**)&num_str); return NULL; }
     v->data.number_val = atof(num_str);
+    /* ZSFZX-FIX-R7-2: 拒绝NaN/Inf数字 — RFC 8259不允许, 且污染下游计算 */
+    if (isnan(v->data.number_val) || isinf(v->data.number_val)) {
+        parser_error(p, "JSON不允许NaN或Infinity数字值");
+        safe_free((void**)&num_str);
+        json_value_free(v);
+        return NULL;
+    }
+    /* ZSFZX-FIX-R7-2: 严格数字格式验证 — 拒绝前导零和空数字 */
+    {
+        size_t si = 0;
+        if (num_str[si] == '-') si++;
+        if (si >= num_len || (num_str[si] == '0' && si + 1 < num_len &&
+            num_str[si+1] >= '0' && num_str[si+1] <= '9')) {
+            parser_error(p, "JSON数字不允许前导零");
+            safe_free((void**)&num_str);
+            json_value_free(v);
+            return NULL;
+        }
+    }
     safe_free((void**)&num_str);
     return v;
 }

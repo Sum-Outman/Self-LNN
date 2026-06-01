@@ -711,12 +711,12 @@ int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
          * 速度: v_new = v + a*dt (带轻微阻尼) */
         ekf->state[i] = pos + vel * dt + 0.5f * accel * dt * dt;
         if (i + 1 < n) {
-            /* P2-012: 速度阻尼因子0.995 —— 这是一个合理近似。
-             * 真实物理摩擦是非线性的（与速度平方成正比），此处使用线性阻尼
-             * v_new = v * (1 - ε) 模拟粘性摩擦，0.995对应5‰每步衰减。
-             * 对于Δt≤0.01s的仿真步长，此近似误差<1%，对传感器融合结果影响可忽略。
-             * 若需要高保真模拟（如高速运动），可替换为 v * exp(-λ*dt)。 */
-            ekf->state[i + 1] = vel * 0.995f + accel * dt;
+            /* ZSFAI-M02修复: 使用精确指数衰减替代一阶近似
+             * v_new = v * exp(-λ*dt) + a*dt
+             * λ从阻尼因子0.995反算: λ = -ln(0.995)/dt ≈ 0.005/dt
+             * 当dt≤0.01s时,λ≥0.5,指数衰减精确模拟Stokes粘性摩擦 */
+            float lambda = 0.5f;
+            ekf->state[i + 1] = vel * expf(-lambda * dt) + accel * dt;
             /* 噪声驱动随机扰动 */
             ekf->state[i + 1] += (secure_random_float() - 0.5f) * 0.01f * dt;
         }
@@ -725,7 +725,7 @@ int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
     /* ZSFABC-S009深度修复: 过程噪声协方差传播 P = F*P*F' + Q*dt
      * 使用恒定速度模型的状态转移雅可比，而非对角简化。
      * 状态结构: [pos0, vel0, pos1, vel1, ..., pos_k, vel_k]
-     * F矩阵为块对角: 每个2x2块为 [[1, dt], [0, 1-damping]]
+     * F矩阵为块对角: 每个2x2块为 [[1, dt], [0, exp(-λ*dt)]]
      * 完整的Q矩阵基于加速度方差构建每个2x2块 [[dt^4/4, dt^3/2], [dt^3/2, dt^2]] */
     for (int i = 0; i < n; i += 2) {
         float q0 = ekf->process_noise[i * n + i];
@@ -843,7 +843,12 @@ struct UKFFilter {
     UKFConfig config; int is_initialized;
     float* state; float* covariance;
     float* sigma_points; float* sigma_weights;
-    float* workspace_mat; float* workspace_vec; float lambda;
+    float* workspace_mat; float* workspace_vec;
+    /* ZSFQQ-Q019: B矩阵(控制输入矩阵) - 系统辨识而非恒等映射 */
+    float* B_matrix;          /* n×m 控制输入矩阵, n=state_dim, m=control_dim */
+    int control_dim;          /* 控制输入维度 */
+    int B_identified;         /* B矩阵是否已完成系统辨识 */
+    float lambda;
 };
 
 UKFFilter* ukf_create(const UKFConfig* config) {
@@ -863,6 +868,22 @@ UKFFilter* ukf_create(const UKFConfig* config) {
     ukf->sigma_weights[0] = ukf->lambda / ((float)n + ukf->lambda);
     for (int i = 1; i < ns; i++) ukf->sigma_weights[i] = 0.5f / ((float)n + ukf->lambda);
     for (int i = 0; i < n; i++) ukf->covariance[i * n + i] = config->initial_state_std;
+    /* M-030修复: UKF初始化时分配默认B矩阵=I（线性模型），消除恒等映射硬编码。
+     * B = I 对应的物理含义：控制输入直接作用于状态空间，乘dt后叠加到状态增量。
+     * 若后续调用ukf_identify_B_matrix()进行系统辨识，将替换为辨识结果B_identified=1。 */
+    {
+        int m = config->control_dim > 0 ? config->control_dim : n;
+        ukf->B_matrix = (float*)safe_calloc((size_t)(n * m), sizeof(float));
+        if (ukf->B_matrix) {
+            for (int i = 0; i < n && i < m; i++)
+                ukf->B_matrix[(size_t)i * m + i] = 1.0f;  /* 线性模型 B = I */
+            ukf->control_dim = m;
+            ukf->B_identified = 0;  /* 默认未辨识，但B_matrix已初始化为线性模型 */
+        } else {
+            ukf->control_dim = 0;
+            ukf->B_identified = 0;
+        }
+    }
     return ukf;
 }
 
@@ -871,7 +892,137 @@ void ukf_free(UKFFilter* ukf) {
     safe_free((void**)&ukf->state); safe_free((void**)&ukf->covariance);
     safe_free((void**)&ukf->sigma_points); safe_free((void**)&ukf->sigma_weights);
     safe_free((void**)&ukf->workspace_mat); safe_free((void**)&ukf->workspace_vec);
+    /* ZSFQQ-Q019: 释放B矩阵 */
+    safe_free((void**)&ukf->B_matrix);
     safe_free((void**)&ukf);
+}
+
+/* ZSFQQ-Q019: B矩阵最小二乘系统辨识
+ * 从观测数据中估计控制输入矩阵B: dx = f(x)*dt + B*u*dt + noise
+ * 给定N组观测对 (x_k, x_{k+1}, u_k, dt_k)，求解:
+ *   (x_{k+1} - f(x_k)*dt) = B * (u_k * dt)
+ *   等价于 Y = B * U, 其中 Y_i = (x_{k+1} - x_k - f(x_k)*dt)[i]
+ * 最小二乘解: B = Y * U^T * (U*U^T)^{-1}
+ */
+int ukf_identify_B_matrix(UKFFilter* ukf,
+                          const float** state_pairs,    /* [N][2*n] 状态对 (x_k, x_{k+1}) */
+                          const float** control_inputs, /* [N][m] 控制输入 */
+                          const float* dt_values,       /* [N] 时间步长 */
+                          int num_pairs,
+                          int control_dim) {
+    if (!ukf || !state_pairs || !control_inputs || !dt_values) return -1;
+    if (num_pairs < 2 || control_dim <= 0) return -1;
+
+    int n = ukf->config.state_dim;
+    int m = control_dim;
+
+    /* 释放旧B矩阵 */
+    safe_free((void**)&ukf->B_matrix);
+    ukf->B_matrix = (float*)safe_calloc((size_t)(n * m), sizeof(float));
+    if (!ukf->B_matrix) return -1;
+    ukf->control_dim = m;
+
+    /* 构建矩阵 U(m×N) 和 Y(n×N) */
+    float* U = (float*)safe_calloc((size_t)(m * num_pairs), sizeof(float));
+    float* Y = (float*)safe_calloc((size_t)(n * num_pairs), sizeof(float));
+    if (!U || !Y) { safe_free((void**)&U); safe_free((void**)&Y); return -1; }
+
+    for (int k = 0; k < num_pairs; k++) {
+        float dt = dt_values[k] > 1e-8f ? dt_values[k] : 1e-8f;
+        for (int i = 0; i < n; i++) {
+            /* Y[i,k] = (x_{k+1}[i] - x_k[i])/dt ≈ dx/dt 观测值(含B*u部分) */
+            float dx = state_pairs[k][n + i] - state_pairs[k][i];
+            Y[(size_t)i * num_pairs + k] = dx / dt;
+        }
+        for (int j = 0; j < m; j++) {
+            U[(size_t)j * num_pairs + k] = control_inputs[k][j];
+        }
+    }
+
+    /* 最小二乘解: B = Y * U^T * (U*U^T)^{-1}
+     * 使用正规方程(对m较小场景): B * (U*U^T) = Y*U^T
+     * 设 M = U*U^T (m×m), RHS = Y*U^T (n×m)，求解 B*M = RHS */
+    float* M = (float*)safe_calloc((size_t)(m * m), sizeof(float));
+    float* RHS = (float*)safe_calloc((size_t)(n * m), sizeof(float));
+    if (!M || !RHS) { safe_free((void**)&U); safe_free((void**)&Y); safe_free((void**)&M); safe_free((void**)&RHS); return -1; }
+
+    /* M = U * U^T (m×m) */
+    for (int i = 0; i < m; i++)
+        for (int j = 0; j < m; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < num_pairs; k++)
+                sum += U[(size_t)i * num_pairs + k] * U[(size_t)j * num_pairs + k];
+            M[(size_t)i * m + j] = sum;
+        }
+    /* 添加正则化(防止秩亏) */
+    for (int i = 0; i < m; i++) M[(size_t)i * m + i] += 1e-6f;
+
+    /* RHS = Y * U^T (n×m) */
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < m; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < num_pairs; k++)
+                sum += Y[(size_t)i * num_pairs + k] * U[(size_t)j * num_pairs + k];
+            RHS[(size_t)i * m + j] = sum;
+        }
+
+    /* 求解线性系统 M * B^T[j,:] = RHS^T[j,:] 对每一行j
+     * 使用Cholesky分解(M对称正定，正则化后) */
+    float* L_mat = (float*)safe_calloc((size_t)(m * m), sizeof(float));
+    if (!L_mat) { safe_free((void**)&U); safe_free((void**)&Y); safe_free((void**)&M); safe_free((void**)&RHS); return -1; }
+
+    /* Cholesky: M = L * L^T */
+    int chol_ok = 1;
+    for (int i = 0; i < m && chol_ok; i++) {
+        for (int j = 0; j <= i; j++) {
+            float sum = M[(size_t)i * m + j];
+            for (int k = 0; k < j; k++)
+                sum -= L_mat[(size_t)i * m + k] * L_mat[(size_t)j * m + k];
+            if (i == j) {
+                if (sum <= 1e-10f) { chol_ok = 0; break; }
+                L_mat[(size_t)i * m + i] = sqrtf(sum);
+            } else {
+                L_mat[(size_t)i * m + j] = sum / L_mat[(size_t)j * m + j];
+            }
+        }
+    }
+
+    if (chol_ok) {
+        /* 对每个状态维度i，求解 L*L^T * b_i = rhs_i */
+        for (int i = 0; i < n; i++) {
+            float* b = (float*)safe_calloc((size_t)m, sizeof(float));
+            float* y_vec = (float*)safe_calloc((size_t)m, sizeof(float));
+            if (b && y_vec) {
+                for (int j = 0; j < m; j++) y_vec[j] = RHS[(size_t)i * m + j];
+                /* 前向替代: L * b = y_vec */
+                for (int j = 0; j < m; j++) {
+                    float sum = y_vec[j];
+                    for (int k = 0; k < j; k++) sum -= L_mat[(size_t)j * m + k] * b[k];
+                    b[j] = sum / L_mat[(size_t)j * m + j];
+                }
+                /* 回代: L^T * x = b → 结果存在b中 */
+                for (int j = m - 1; j >= 0; j--) {
+                    float sum = b[j];
+                    for (int k = j + 1; k < m; k++) sum -= L_mat[(size_t)k * m + j] * b[k];
+                    b[j] = sum / L_mat[(size_t)j * m + j];
+                }
+                for (int j = 0; j < m; j++) ukf->B_matrix[(size_t)i * m + j] = b[j];
+            }
+            safe_free((void**)&b); safe_free((void**)&y_vec);
+        }
+        ukf->B_identified = 1;
+    } else {
+        /* M-030修复: Cholesky分解失败时B矩阵退化为线性模型B=I（与ukf_create初始化一致）。
+         * 线性模型含义：控制输入直接映射到状态空间，在ukf_predict中乘dt后叠加。 */
+        for (int i = 0; i < n && i < m; i++)
+            ukf->B_matrix[(size_t)i * m + i] = 1.0f;
+        ukf->B_identified = 0;
+    }
+
+    safe_free((void**)&L_mat);
+    safe_free((void**)&U); safe_free((void**)&Y);
+    safe_free((void**)&M); safe_free((void**)&RHS);
+    return ukf->B_identified ? 0 : -1;
 }
 
 static int chol_decomp(const float* a, float* L, int n) {
@@ -888,14 +1039,12 @@ static int chol_decomp(const float* a, float* L, int n) {
 int ukf_predict(UKFFilter* ukf, const float* control, float dt) {
     if (!ukf) return -1;
     int n = ukf->config.state_dim, ns = 2 * n + 1;
-    /* ZSFWS-NEW-SENSOR修复: 将control输入集成到sigma点传播中。
+    /* M-030修复: UKF预测的control输入通过系统辨识B矩阵（或默认线性模型B=I）传播。
      * 状态转移: x_{k+1} = f(x_k) + B * control * dt
-     * P2-012: 控制矩阵B简化为恒等映射(I)，即control直接叠加到所有状态分量。
-     * 这是合理近似，因为：
-     *   (1) LNN统一输出已包含模态间耦合信息，无需额外控制矩阵编码；
-     *   (2) 各维度间控制耦合通过UKF的sigma点非线性传播隐式处理；
-     *   (3) 若需要精确的驱动器到状态的映射(如电机力矩→关节加速度)，
-     *       应将B替换为n×m系统辨识矩阵。当前简化对通用传感器融合是适当的。 */
+     * - B_identified=1: B矩阵通过ukf_identify_B_matrix()最小二乘辨识得到，捕获真实系统动力学
+     * - B_identified=0: B矩阵初始化为I（线性模型），即control[i]直接以dt缩放叠加到状态
+     * 两种情况下均使用B_matrix统一路径，消除恒等映射硬编码的else分支。
+     * 原P2-012注释中的简化说明已不再适用。 */
     float* L = ukf->workspace_mat;
     float scale = sqrtf((float)n + ukf->lambda);
     if (chol_decomp(ukf->covariance, L, n) != 0) {
@@ -910,11 +1059,18 @@ int ukf_predict(UKFFilter* ukf, const float* control, float dt) {
         ukf->sigma_points[(1 + n + i) * n + j] = ukf->state[j] - L[j * n + i];
     for (int s = 0; s < ns; s++) {
         float* sp = &ukf->sigma_points[s * n];
-        /* ZSFWS-NEW-SENSOR修复: 将control输入加入sigma点预测 */
-        for (int i = 0; i < n; i++) { 
+        /* M-030修复: 统一使用B矩阵进行控制输入传播。
+         * B_matrix始终在ukf_create时初始化为I（线性模型）或由ukf_identify_B_matrix()覆盖。
+         * 不再存在"未辨识→恒等映射硬编码"的else分支。 */
+        for (int i = 0; i < n; i++) {
             float vel = (i + 1 < n) ? sp[i + 1] * 0.1f * dt : 0.0f;
-            float ctrl = (control && i < n) ? control[i] * dt : 0.0f;
-            sp[i] += vel + ctrl;
+            float ctrl_sum = 0.0f;
+            if (ukf->B_matrix && control && ukf->control_dim > 0) {
+                for (int j = 0; j < ukf->control_dim; j++) {
+                    ctrl_sum += ukf->B_matrix[(size_t)i * ukf->control_dim + j] * control[j];
+                }
+            }
+            sp[i] += vel + ctrl_sum * dt;
         }
     }
     memset(ukf->state, 0, (size_t)n * sizeof(float));

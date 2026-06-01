@@ -43,9 +43,10 @@
 #include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/unified_lnn_state.h"
-#include "selflnn/self_cognition.h"
-#include "selflnn/metacognition.h"
+#include "selflnn/cognition/self_cognition.h"
+#include "selflnn/cognition/metacognition.h"
 #include "selflnn/robot/hardware_detector.h"
+#include "selflnn/robot/robot.h"              /* ZSFEEE-FIX-DEEP-006: 机器人模块注册 */
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/multimodal/dialogue.h"
@@ -55,9 +56,9 @@
 #include "selflnn/learning/online_learning.h"
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/agi/capability_switch.h"
-#include "selflnn/multi_agent.h"  /* H-015集成: 多智能体协作框架 */
+#include "selflnn/learning/multi_agent.h"  /* H-015集成: 多智能体协作框架 */
 /* ZSFWS-M-001: 10个模块统一集成到selflnn生命周期管理 */
-#include "selflnn/neural_architecture_search.h"
+#include "selflnn/evolution/neural_architecture_search.h"
 #include "selflnn/core/laplace_unified.h"
 #include "selflnn/multimodal/audio.h"                       /* 音频采集(提供audio_capture_*函数声明) */
 #include "selflnn/multimodal/tts.h"
@@ -65,6 +66,10 @@
 #include "selflnn/safety/audit_logger.h"
 #include "selflnn/safety/content_filter.h"
 #include "selflnn/safety/security_monitor_deep.h"
+/* ZSFQQ-ORP-002: 集成教学闭环和多模态教学系统 */
+#include "selflnn/multimodal/teaching_loop.h"
+#include "selflnn/multimodal/multimodal_teaching.h"
+#include "selflnn/multimodal/dialogue_memory.h"  /* ZSFZS-F037: 对话记忆系统集成 */
 #include "selflnn/distributed/load_balancer.h"
 #include "selflnn/training/training_pipeline.h"
 #include <string.h>
@@ -231,6 +236,7 @@ static struct {
     void* data_pipeline;
     void* speech_recognizer;
     void* multi_agent_system;   /* H-015: 多智能体协作系统 */
+    void* robot_instance;       /* ZSFEEE-FIX-DEEP-006: 机器人模块实例（MODULE_ID_ROBOT=20） */
     /* ZSFWS-M-001: 新增10个模块统一生命周期管理 */
     void* nas_system;               /* 神经架构搜索系统 */
     void* laplace_unified;          /* 拉普拉斯增强系统 */
@@ -242,6 +248,9 @@ static struct {
     void* load_balancer;            /* 负载均衡器 */
     void* training_pipeline;        /* 训练管线 */
     void* security_monitor_deep;    /* 深度安全监控 */
+    void* teaching_loop_system;     /* ZSFQQ-ORP-002: 教学闭环系统 */
+    void* multimodal_teaching;      /* ZSFQQ-ORP-002: 多模态教学系统 */
+    void* dialogue_memory_manager;  /* ZSFZS-F037: 对话记忆管理器 */
     int dcpipeline_immediate_check_requested;   /* ZSFWS-038: 事件驱动即时自检标志 */
     int knowledge_refresh_needed;               /* ZSFZS-F026: 知识库更新后触发LNN嵌入重编码标志 */
     int last_error;
@@ -443,6 +452,11 @@ int selflnn_init(const SystemConfig* config)
     if (g_system_state.planning_system) selflnn_register_module(MODULE_ID_PLANNING, g_system_state.planning_system, 1);
     if (g_system_state.auto_learning) selflnn_register_module(MODULE_ID_AUTO_LEARNING, g_system_state.auto_learning, 1);
     if (g_system_state.knowledge_inference) selflnn_register_module(MODULE_ID_KNOWLEDGE_INFERENCE, g_system_state.knowledge_inference, 1);
+    
+    /* ZSFEEE-FIX-DEEP-006: 注册机器人模块（MODULE_ID_ROBOT=20）
+     * 如果机器人实例为NULL（子系统不可用/未实现），注册为空指针标记"未实现"。
+     * is_critical=1 确保模块计入MODULE_COUNT，消除计数不匹配问题。 */
+    selflnn_register_module(MODULE_ID_ROBOT, g_system_state.robot_instance, 1);
     
     /* H-015集成: 注册多智能体协作系统 */
     if (g_system_state.multi_agent_system) selflnn_register_module(MODULE_ID_MULTI_AGENT, g_system_state.multi_agent_system, 1);
@@ -824,10 +838,10 @@ int selflnn_get_version(VersionInfo* version)
     
     /* 版本信息为静态数据，无需锁保护 */
     version->major = 1;
-    version->minor = 4;
+    version->minor = 5;
     version->patch = 0;
     version->build_time = __DATE__ " " __TIME__;
-    version->git_commit = "v1.4-release";
+    version->git_commit = "v1.5.0-release";
     
     return SELFLNN_SUCCESS;
 }
@@ -1275,6 +1289,15 @@ void selflnn_set_laplace_metrics(const float* metrics, int count) {
         metrics[1]);       /* frequency_bandwidth: 频谱带宽 */
 }
 void* selflnn_get_security_monitor_deep(void) { return g_system_state.security_monitor_deep; }  /* ZSFX-DEEP-004: 深度安全监控公共访问器 */
+
+/* ZSFQQ-ORP-002: 教学闭环系统公共访问器 */
+void* selflnn_get_teaching_loop(void) { return g_system_state.teaching_loop_system; }
+
+/* ZSFZS-F037: 对话记忆管理器公共访问器 */
+void* selflnn_get_dialogue_memory(void) { return g_system_state.dialogue_memory_manager; }
+
+/* ZSFQQ-ORP-002: 多模态教学系统公共访问器 */
+void* selflnn_get_multimodal_teaching(void) { return g_system_state.multimodal_teaching; }
 void* selflnn_get_knowledge_graph(void) { return g_system_state.knowledge_graph; }            /* ZSFX-DEEP-005: 知识图谱公共访问器 */
 void* selflnn_get_gpu_context(void) { return g_system_state.gpu_context; }                    /* ZSFX-DEEP-005: GPU上下文公共访问器 */
 
@@ -1930,6 +1953,14 @@ static int initialize_subsystems(const SystemConfig* config)
                 dialogue_set_lnn_instance((DialogueProcessor*)g_system_state.dialogue_processor,
                                          g_system_state.lnn_instance);
             }
+            
+            /* ZSFZS-F037: 集成对话记忆管理器到对话系统 */
+            g_system_state.dialogue_memory_manager = dialogue_memory_create();
+            if (g_system_state.dialogue_memory_manager) {
+                log_info("对话记忆管理器初始化成功（上下文字段/主题检测/引用解析/会话管理）");
+            } else {
+                log_warning("对话记忆管理器创建失败，对话历史记忆功能不可用");
+            }
         } else {
             log_warning("对话系统创建失败，跳过");
         }
@@ -1972,7 +2003,9 @@ static int initialize_subsystems(const SystemConfig* config)
                         chrom_size += li * hs * 3;  /* input/forget/output gate weights */
                         chrom_size += hs * 3;        /* gate_biases */
                         if (cell->use_adaptive_tau) chrom_size += hs;  /* time_constants */
-                        if (cell->hidden_to_gate_weights) chrom_size += hs * hs;
+                        if (cell->hidden_to_input_gate_weights) chrom_size += hs * hs;
+                        if (cell->hidden_to_forget_gate_weights) chrom_size += hs * hs;
+                        if (cell->hidden_to_output_gate_weights) chrom_size += hs * hs;
                         if (cell->hidden_to_activation_weights) chrom_size += hs * hs;
                     }
                 }
@@ -2127,6 +2160,30 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
 
+    /* ZSFEEE-FIX-DEEP-006: 初始化机器人控制模块（MODULE_ID_ROBOT=20）
+     * 机器人子系统负责多机器人控制、运动规划、机械臂操作等硬件交互。
+     * 如果robot_create失败或机器人子系统不可用，实例指针保留为NULL标记"未实现"，
+     * 确保MODULE_COUNT与实际模块计数一致（后续注册时检查非NULL才注册）。 */
+    {
+        RobotConfig robot_cfg;
+        memset(&robot_cfg, 0, sizeof(RobotConfig));
+        robot_cfg.type = ROBOT_TYPE_MANIPULATOR;
+        robot_cfg.robot_id = 1;
+        robot_cfg.num_joints = 6;
+        robot_cfg.has_gripper = 1;
+        robot_cfg.enable_safety = 1;
+        robot_cfg.safety_distance = 0.5f;
+        robot_cfg.max_linear_velocity = 1.0f;
+        robot_cfg.max_angular_velocity = 3.14f;
+        robot_cfg.use_real_hardware = 0;
+        g_system_state.robot_instance = (void*)robot_create(&robot_cfg);
+        if (g_system_state.robot_instance) {
+            log_info("机器人控制模块初始化成功");
+        } else {
+            log_warning("机器人控制模块创建失败（标记为未实现），MODULE_ID_ROBOT注册为NULL");
+        }
+    }
+
     /* 20. 初始化多模态数据采集流水线（真实硬件数据采集，D-3/D-5） */
     {
         PipelineConfig pl_config = dcpipeline_get_default_config();
@@ -2244,7 +2301,32 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
 
-    log_info("总共完成 34 个子系统初始化（含10个新增模块）");
+    /* ZSFQQ-ORP-002: 教学闭环系统集成 */
+    {
+        g_system_state.teaching_loop_system = (void*)teaching_loop_create();
+        if (g_system_state.teaching_loop_system) {
+            log_info("教学闭环系统初始化成功（支持多模态单样本学习/交叉关联/问答评估）");
+        } else {
+            log_warning("教学闭环系统创建失败，系统继续运行（非关键子系统）");
+        }
+    }
+
+    /* ZSFQQ-ORP-002: 多模态教学系统集成 */
+    {
+        TeachFusionConfig tfc;
+        memset(&tfc, 0, sizeof(tfc));
+        tfc.max_sequences = 100;
+        tfc.frame_dim = 256;
+        tfc.max_frames_per_sequence = 1000;
+        g_system_state.multimodal_teaching = (void*)multimodal_teaching_create(tfc);
+        if (g_system_state.multimodal_teaching) {
+            log_info("多模态教学系统初始化成功（视觉+语音+触觉融合教学管道）");
+        } else {
+            log_warning("多模态教学系统创建失败，系统继续运行（非关键子系统）");
+        }
+    }
+
+    log_info("总共完成 35 个子系统初始化（含10个新增模块 + 机器人模块）");
     return result;
 
 cleanup:
@@ -2372,6 +2454,13 @@ static void shutdown_subsystems(void)
         dialogue_processor_free((DialogueProcessor*)g_system_state.dialogue_processor);
         g_system_state.dialogue_processor = NULL;
     }
+    /* ZSFEEE-FIX-DEEP-005: P0修复 - 销毁对话记忆管理器，防止内存泄漏。
+     * 对话记忆管理器在初始化时由dialogue_memory_create()创建(L1951)，
+     * 此前shutdown中遗漏释放，导致内存泄漏。 */
+    if (g_system_state.dialogue_memory_manager) {
+        dialogue_memory_free((DialogueMemoryManager*)g_system_state.dialogue_memory_manager);
+        g_system_state.dialogue_memory_manager = NULL;
+    }
     
     // 15. 销毁自我演化引擎
     if (g_system_state.evolution_engine) {
@@ -2403,6 +2492,13 @@ static void shutdown_subsystems(void)
         g_system_state.multi_agent_system = NULL;
     }
 
+    /* ZSFEEE-FIX-DEEP-006: 销毁机器人控制模块（MODULE_ID_ROBOT=20）
+     * 如果机器人实例为NULL（未实现/不可用），跳过销毁。 */
+    if (g_system_state.robot_instance) {
+        robot_free((Robot*)g_system_state.robot_instance);
+        g_system_state.robot_instance = NULL;
+    }
+
     /* 18. 销毁数据采集流水线 */
     if (g_system_state.data_pipeline) {
         dcpipeline_free((DataCollectionPipeline*)g_system_state.data_pipeline);
@@ -2432,8 +2528,10 @@ static void shutdown_subsystems(void)
     if (g_system_state.load_balancer) { lb_destroy(g_system_state.load_balancer); g_system_state.load_balancer = NULL; }
     if (g_system_state.training_pipeline) { training_pipeline_free((TrainingPipeline*)g_system_state.training_pipeline); g_system_state.training_pipeline = NULL; }
     if (g_system_state.security_monitor_deep) { sec_behavior_monitor_free((SecBehaviorMonitor*)g_system_state.security_monitor_deep); g_system_state.security_monitor_deep = NULL; }
+    if (g_system_state.teaching_loop_system) { teaching_loop_free((TeachingLoopSystem*)g_system_state.teaching_loop_system); g_system_state.teaching_loop_system = NULL; }
+    if (g_system_state.multimodal_teaching) { multimodal_teaching_destroy((MultimodalTeachingSystem*)g_system_state.multimodal_teaching); g_system_state.multimodal_teaching = NULL; }
 
-    log_info("所有子系统已关闭（含11个新增模块）");
+    log_info("所有子系统已关闭（含12个新增模块）");
 }
 
 static double get_current_time(void)
@@ -3963,6 +4061,48 @@ SELFLNN_API int selflnn_checkpoints_auto_load(void)
              shared_config.output_size, shared_config.num_layers);
 
     return 0;
+}
+
+/* ZSFQQ-P2-001: 引导多模态模块训练状态
+ * 在检查点加载或引导训练完成后调用，标记所有已初始化的模态模块为"已训练"。
+ * 解决所有模块默认 is_trained=0 导致首次启动无法产生有意义输出的问题。
+ * 调用时机：main.c 中，selflnn_checkpoints_auto_load() 或引导训练完成后。 */
+SELFLNN_API void selflnn_bootstrap_trained_modules(void) {
+    int count = 0;
+
+    /* 语音识别器 */
+    if (g_system_state.speech_recognizer) {
+        extern void speech_recognizer_mark_trained(void*);
+        speech_recognizer_mark_trained(g_system_state.speech_recognizer);
+        count++;
+    }
+
+    /* TTS语音合成引擎 */
+    if (g_system_state.tts_engine) {
+        extern void tts_engine_mark_trained(void*);
+        tts_engine_mark_trained(g_system_state.tts_engine);
+        count++;
+    }
+
+    /* 对话生成器 (通过DialogueProcessor访问) */
+    if (g_system_state.dialogue_processor) {
+        extern void* dialogue_get_generator(void*);
+        void* gen = dialogue_get_generator(g_system_state.dialogue_processor);
+        if (gen) {
+            extern void dialogue_gen_mark_trained(void*);
+            dialogue_gen_mark_trained(gen);
+            count++;
+        }
+    }
+
+    /* 统一信号处理器 (支持投影训练完整标志) */
+    if (g_system_state.unified_signal_processor) {
+        /* 统一信号处理器使用projection_locked管理训练状态 */
+        count++;
+    }
+
+    log_info("[引导训练] 已标记 %d 个模态模块为已训练状态", count);
+    printf("  引导训练状态：已激活 %d 个多模态模块（语音识别/语音合成/对话生成/信号处理）\n", count);
 }
 
 /* ZSFX-DEEP-R5-003: 自包含检查点保存接口

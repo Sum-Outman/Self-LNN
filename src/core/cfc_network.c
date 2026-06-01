@@ -471,7 +471,7 @@ static int cfc_ensure_cell_momentum(CfCCell* cell) {
     total += input * hidden;  /* W_gx */
     total += input * hidden;  /* W_fx */
     total += input * hidden;  /* W_ox */
-    total += hidden * hidden; /* W_gh */
+    total += hidden * hidden * 3; /* P0-003修复: W_ghi + W_ghf + W_gho 三门独立 */
     total += hidden * hidden; /* W_ah */
     total += hidden * 3;      /* b_g */
     total += hidden;          /* τ */
@@ -573,9 +573,23 @@ int cfc_apply_cell_gradients_adam(CfCNetwork* network, float learning_rate,
                                   learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
             offset += w_count;
         }
-        /* W_gh: 隐藏→门控 */
-        if (cell->hidden_to_gate_weight_grad && cell->hidden_to_gate_weights) {
-            cfc_adam_update_group(cell->hidden_to_gate_weights, cell->hidden_to_gate_weight_grad,
+        /* W_ghi: 隐藏→输入门——P0-003三门独立 */
+        if (cell->hidden_to_input_gate_weight_grad && cell->hidden_to_input_gate_weights) {
+            cfc_adam_update_group(cell->hidden_to_input_gate_weights, cell->hidden_to_input_gate_weight_grad,
+                                  m + offset, v + offset, hh_count,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            offset += hh_count;
+        }
+        /* W_ghf: 隐藏→遗忘门 */
+        if (cell->hidden_to_forget_gate_weight_grad && cell->hidden_to_forget_gate_weights) {
+            cfc_adam_update_group(cell->hidden_to_forget_gate_weights, cell->hidden_to_forget_gate_weight_grad,
+                                  m + offset, v + offset, hh_count,
+                                  learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
+            offset += hh_count;
+        }
+        /* W_gho: 隐藏→输出门 */
+        if (cell->hidden_to_output_gate_weight_grad && cell->hidden_to_output_gate_weights) {
+            cfc_adam_update_group(cell->hidden_to_output_gate_weights, cell->hidden_to_output_gate_weight_grad,
                                   m + offset, v + offset, hh_count,
                                   learning_rate, beta1, beta2, epsilon, b1_corr, b2_corr);
             offset += hh_count;
@@ -640,7 +654,9 @@ void cfc_zero_cell_gradients(CfCNetwork* network) {
         if (cell->input_gate_weight_grad) memset(cell->input_gate_weight_grad, 0, lw * sizeof(float));
         if (cell->forget_gate_weight_grad) memset(cell->forget_gate_weight_grad, 0, lw * sizeof(float));
         if (cell->output_gate_weight_grad) memset(cell->output_gate_weight_grad, 0, lw * sizeof(float));
-        if (cell->hidden_to_gate_weight_grad) memset(cell->hidden_to_gate_weight_grad, 0, hh * sizeof(float));
+        if (cell->hidden_to_input_gate_weight_grad) memset(cell->hidden_to_input_gate_weight_grad, 0, hh * sizeof(float));
+        if (cell->hidden_to_forget_gate_weight_grad) memset(cell->hidden_to_forget_gate_weight_grad, 0, hh * sizeof(float));
+        if (cell->hidden_to_output_gate_weight_grad) memset(cell->hidden_to_output_gate_weight_grad, 0, hh * sizeof(float));
         if (cell->hidden_to_activation_weight_grad) memset(cell->hidden_to_activation_weight_grad, 0, hh * sizeof(float));
         if (cell->gate_bias_grad) memset(cell->gate_bias_grad, 0, network->config.hidden_size * 3 * sizeof(float));
         if (cell->time_constant_grad) memset(cell->time_constant_grad, 0, network->config.hidden_size * sizeof(float));
@@ -1082,11 +1098,19 @@ int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate) {
                 if (isfinite(g)) cell->output_gate_weights[k] -= learning_rate * g;
             }
         }
-        /* W_gh / W_ah: 隐藏到隐藏权重 */
+        /* W_ghi / W_ghf / W_gho / W_ah: 隐藏到隐藏权重——P0-003三门独立 */
         for (k = 0; k < hh_count; k++) {
-            if (cell->hidden_to_gate_weight_grad && cell->hidden_to_gate_weights) {
-                float g = cell->hidden_to_gate_weight_grad[k];
-                if (isfinite(g)) cell->hidden_to_gate_weights[k] -= learning_rate * g;
+            if (cell->hidden_to_input_gate_weight_grad && cell->hidden_to_input_gate_weights) {
+                float g = cell->hidden_to_input_gate_weight_grad[k];
+                if (isfinite(g)) cell->hidden_to_input_gate_weights[k] -= learning_rate * g;
+            }
+            if (cell->hidden_to_forget_gate_weight_grad && cell->hidden_to_forget_gate_weights) {
+                float g = cell->hidden_to_forget_gate_weight_grad[k];
+                if (isfinite(g)) cell->hidden_to_forget_gate_weights[k] -= learning_rate * g;
+            }
+            if (cell->hidden_to_output_gate_weight_grad && cell->hidden_to_output_gate_weights) {
+                float g = cell->hidden_to_output_gate_weight_grad[k];
+                if (isfinite(g)) cell->hidden_to_output_gate_weights[k] -= learning_rate * g;
             }
             if (cell->hidden_to_activation_weight_grad && cell->hidden_to_activation_weights) {
                 float g = cell->hidden_to_activation_weight_grad[k];
@@ -1757,6 +1781,8 @@ void cfc_free_rhs_context(CfCRHSContext* ctx) {
 }
 
 int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
+    /* L003: CfC液态神经网络的ODE为自治系统——微分方程dh/dt = f(h)不含显式时间依赖。
+     * 时间参数t仅保留用于非自治扩展接口兼容性，当前动力学完全由隐藏状态h编码。 */
     (void)t;
     CfCRHSContext* rhsc = (CfCRHSContext*)ctx;
     if (!rhsc || !rhsc->network || !y || !dydt) return -1;
@@ -1766,7 +1792,7 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
 
     /* ZSFABC-P0-015修复: 权重矩阵索引映射修正
      * weight_matrix仅[input_size*hidden_size]，原代码用i*input_size*3+j越界访问
-     * 正确应使用: input_gate_weights + hidden_to_gate_weights + gate_biases[3*i]
+     * 正确应使用: input_gate_weights + hidden_to_input_gate_weights + gate_biases[3*i]
      *             weight_matrix + hidden_to_activation_weights + bias_vector */
 
     /* 逐层计算RHS */
@@ -1791,8 +1817,8 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
                 forget_gate_sum += cell->forget_gate_weights[i * input_size + j] * input[j];
             }
             for (size_t k = 0; k < layer_size; k++) {
-                input_gate_sum += cell->hidden_to_gate_weights[i * layer_size + k] * layer_y[k];
-                forget_gate_sum += cell->hidden_to_gate_weights[i * layer_size + k] * layer_y[k];
+                input_gate_sum += cell->hidden_to_input_gate_weights[i * layer_size + k] * layer_y[k];
+                forget_gate_sum += cell->hidden_to_forget_gate_weights[i * layer_size + k] * layer_y[k];
             }
             float input_gate = 1.0f / (1.0f + expf(-input_gate_sum));
             float forget_gate = 1.0f / (1.0f + expf(-forget_gate_sum));

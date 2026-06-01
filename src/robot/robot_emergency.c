@@ -387,20 +387,17 @@ int robot_emergency_cut_power(EmergencySystem* system) {
     system->is_power_cut = 1;
     system->system_voltage_v = 0.0f;
     system->system_current_a = 0.0f;
-    /* F-012修复：尝试OS级电源管理（仅在支持平台上） */
+    /* OS级电源管理通知 + 硬件安全状态标记 */
 #ifdef _WIN32
-    /* Windows：设置系统电源状态为低功耗 */
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
-    /* 尝试通过电源策略通知降低功耗 */
     HANDLE hToken;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken)) {
         CloseHandle(hToken);
     }
-#else
-    /* Linux：尝试通过sysfs控制GPIO断电（需要硬件配置） */
-    /* 系统日志记录断电事件用于外部监控 */
 #endif
-    emergency_log("电源已切断（OS级通知已发送）");
+    /* 硬件层断电通过ROS/串口/GPIO接口发送——由robot_calibration/hardware_interface处理。
+     * 本函数职责：设置系统安全状态 + 触发安全回调链 + 记录紧急事件。 */
+    emergency_log("电源已切断（安全状态已标记，等待硬件接口执行物理断电）");
     return 0;
 }
 

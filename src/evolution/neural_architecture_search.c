@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file neural_architecture_search.c
  * @brief 神经架构搜索（NAS）系统实现 —— 全深度实现
  * 
@@ -15,7 +15,7 @@
  * 包括控制器LNN网络、策略梯度采样、双层优化、softmax离散化等全部功能。
  */
 
-#include "selflnn/neural_architecture_search.h"
+#include "selflnn/evolution/neural_architecture_search.h"
 #include "selflnn/core/evolutionary_algorithms.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/cfc_network.h"
@@ -2400,17 +2400,18 @@ static void enas_sample_free(ENASSample* sample) {
 
 /**
  * @brief 控制器生成动作：选择层类型
+ * L-017修复: 使用完整隐藏状态向量（前controller_hidden_size维）作为控制器输入，
+ * 替代原先仅使用hidden_state[0]单一标量，充分利用LNN的状态表示能力。
  */
 static int enas_controller_sample_layer_type(CfcENASSearch* searcher,
                                             float* hidden_state,
                                             float* cell_state) {
     if (!searcher || !searcher->controller) return LAYER_TYPE_CFC;
 
-    /* 控制器输入：当前隐藏状态的摘要 */
-    float input[1] = { hidden_state[0] };
+    /* 使用完整隐藏状态向量作为控制器输入 */
     float output[7]; /* 7种层类型：卷积、全连接、池化、归一化、注意力、CfC、CfC细胞 */
 
-    int ret = lnn_forward(searcher->controller, input, output);
+    int ret = lnn_forward(searcher->controller, hidden_state, output);
     if (ret != 0) return LAYER_TYPE_CFC;
 
     /* 用softmax采样 */
@@ -2438,6 +2439,7 @@ static int enas_controller_sample_layer_type(CfcENASSearch* searcher,
 
 /**
  * @brief 控制器生成动作：选择隐藏层维度
+ * L-017修复: 使用完整隐藏状态向量作为控制器输入。
  */
 static int enas_controller_sample_hidden_size(CfcENASSearch* searcher,
                                              float* hidden_state,
@@ -2446,10 +2448,9 @@ static int enas_controller_sample_hidden_size(CfcENASSearch* searcher,
         return searcher->config.min_hidden_size;
     }
 
-    float input[1] = { hidden_state[0] };
     float output[8]; /* 8种宽度选项：16,32,64,128,256,512,1024,2048 */
 
-    int ret = lnn_forward(searcher->controller, input, output);
+    int ret = lnn_forward(searcher->controller, hidden_state, output);
     if (ret != 0) return searcher->config.min_hidden_size;
 
     float max_val = -FLT_MAX;
@@ -3053,32 +3054,212 @@ int cfc_darts_forward(CfcDARTSearch* searcher,
     return 0;
 }
 
-int cfc_darts_backward(CfcDARTSearch* searcher,
-                      const float* gradient, size_t gradient_size) {
-    if (!searcher || !gradient) return -1;
+/**
+ * @brief 计算单个样本点上的alpha梯度向量（用于HVP有限差分）
+ *
+ * 使用损失函数的有限差分: ∂L/∂α_i ≈ (L(α+δe_i) - L(α-δe_i)) / (2δ)
+ * 逐alpha参数单独扰动，通过前向传播计算损失变化
+ *
+ * @param searcher DARTS搜索器
+ * @param input 输入数据（长度=feat_dim）
+ * @param target 目标数据（长度=feat_dim）
+ * @param feat_dim 特征维度
+ * @param alpha_grad_out 输出alpha梯度向量（长度=total_alpha_count）
+ * @param epsilon 有限差分步长
+ */
+static void darts_compute_alpha_gradient_vector(CfcDARTSearch* searcher,
+                                                  const float* input,
+                                                  const float* target,
+                                                  size_t feat_dim,
+                                                  float* alpha_grad_out,
+                                                  float epsilon) {
+    size_t total_alphas = searcher->total_alpha_count;
+    /* 使用有限差分法逐alpha参数计算梯度 */
+    float delta = epsilon > 0.0f ? epsilon : 1e-4f;
+
+    for (size_t ai = 0; ai < total_alphas; ai++) {
+        /* 保存原始alpha值 */
+        float alpha_orig = searcher->alphas[ai];
+
+        /* α + δ: 前向传播获取损失 */
+        searcher->alphas[ai] = alpha_orig + delta;
+        memset(searcher->output_buffer, 0, feat_dim * sizeof(float));
+        cfc_darts_forward(searcher, input, feat_dim,
+                         searcher->output_buffer, feat_dim);
+        float loss_plus = 0.0f;
+        for (size_t d = 0; d < feat_dim; d++) {
+            float diff = searcher->output_buffer[d] - target[d];
+            loss_plus += diff * diff;
+        }
+
+        /* α - δ: 前向传播获取损失 */
+        searcher->alphas[ai] = alpha_orig - delta;
+        memset(searcher->output_buffer, 0, feat_dim * sizeof(float));
+        cfc_darts_forward(searcher, input, feat_dim,
+                         searcher->output_buffer, feat_dim);
+        float loss_minus = 0.0f;
+        for (size_t d = 0; d < feat_dim; d++) {
+            float diff = searcher->output_buffer[d] - target[d];
+            loss_minus += diff * diff;
+        }
+
+        /* 恢复原始alpha */
+        searcher->alphas[ai] = alpha_orig;
+
+        /* 有限差分梯度 */
+        alpha_grad_out[ai] = (loss_plus - loss_minus) / (2.0f * delta);
+    }
+}
+
+/**
+ * @brief DARTS真正双层优化——带有限差分Hessian-向量积
+ *
+ * 严格DARTS双层优化:
+ *   min_α L_val(w*(α), α)
+ *   s.t. w*(α) = argmin_w L_train(w, α)
+ *
+ * α的梯度链式法则:
+ *   ∇_α L_val(w*(α), α) = ∇_α L_val(w, α) - ξ·∇²_{α,w} L_train(w, α)·∇_w L_val(w, α)
+ *
+ * Hessian-向量积使用有限差分近似:
+ *   hvp ≈ (∇_α L_val(w+, α) - ∇_α L_val(w-, α)) / (2ε)
+ *   其中 w± = w ± ε·∇_w L_train(w, α)
+ *
+ * @param searcher DARTS搜索器
+ * @param input 输入数据（长度=input_size）
+ * @param input_size 输入维度
+ * @param target 目标数据（长度=target_size）
+ * @param target_size 目标维度
+ * @param gradient 权重更新信号（输出值，用于权重更新）
+ * @param gradient_size 信号大小
+ */
+int cfc_darts_backward_with_data(CfcDARTSearch* searcher,
+                                  const float* input, size_t input_size,
+                                  const float* target, size_t target_size,
+                                  const float* gradient, size_t gradient_size) {
+    if (!searcher || !input || !target || !gradient) return -1;
 
     float lr = searcher->config.controller_lr;
     float wd = 0.0001f;
+    size_t feat_dim = (input_size > 0) ? input_size : 1;
 
-    /* 第一层优化：使用训练集更新网络权重（W的梯度更新） */
+    /* ==================================================================
+     * 第一步: 计算训练集上权重的梯度 ∇_w L_train(w, α)
+     * 使用当前输出作为训练信号，L2正则化
+     * ================================================================== */
+    float* weight_train_grad = (float*)safe_calloc(searcher->weight_count, sizeof(float));
+    if (!weight_train_grad) return -1;
+
     for (size_t i = 0; i < searcher->weight_count; i++) {
         float grad = (i < gradient_size) ? gradient[i] : 0.0f;
-        float reg = wd * searcher->weights[i];
-        searcher->weights[i] -= lr * (grad + reg);
+        weight_train_grad[i] = grad + wd * searcher->weights[i];
     }
 
-    /* 第二层优化：使用验证集梯度更新架构参数alpha（DARTS核心双层优化） */
+    /* ==================================================================
+     * 第二步: 计算当前权重下直接的alpha梯度 ∇_α L_val(w, α)
+     * ================================================================== */
+    float* alpha_grad_direct = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
+    if (!alpha_grad_direct) {
+        safe_free((void**)&weight_train_grad);
+        return -1;
+    }
+
+    float delta_fd = 1e-4f;
+    darts_compute_alpha_gradient_vector(searcher, input, target, feat_dim,
+                                         alpha_grad_direct, delta_fd);
+
+    /* ==================================================================
+     * 第三步: Hessian-向量积的有限差分近似
+     * w± = w ± ε·∇_w L_train
+     * hvp ≈ (∇_α L_val(w+) - ∇_α L_val(w-)) / (2ε)
+     * ================================================================== */
+    float hvp_epsilon = 0.01f / (sqrtf((float)searcher->weight_count) + 1e-8f);
+    float norm_w = 0.0f;
+    for (size_t i = 0; i < searcher->weight_count; i++) {
+        norm_w += weight_train_grad[i] * weight_train_grad[i];
+    }
+    if (norm_w < 1e-12f) norm_w = 1e-12f;
+    float scale = hvp_epsilon / (sqrtf(norm_w) + 1e-8f);
+
+    /* 保存原始权重 */
+    float* weights_backup = (float*)safe_calloc(searcher->weight_count, sizeof(float));
+    if (!weights_backup) {
+        safe_free((void**)&alpha_grad_direct);
+        safe_free((void**)&weight_train_grad);
+        return -1;
+    }
+    memcpy(weights_backup, searcher->weights, searcher->weight_count * sizeof(float));
+
+    /* 计算 w+ = w + ε·∇_w L_train */
+    for (size_t i = 0; i < searcher->weight_count; i++) {
+        searcher->weights[i] = weights_backup[i] + scale * weight_train_grad[i];
+    }
+
+    /* 在w+处计算alpha梯度 ∇_α L_val(w+, α) */
+    float* alpha_grad_plus = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
+    if (!alpha_grad_plus) {
+        memcpy(searcher->weights, weights_backup, searcher->weight_count * sizeof(float));
+        safe_free((void**)&weights_backup);
+        safe_free((void**)&alpha_grad_direct);
+        safe_free((void**)&weight_train_grad);
+        return -1;
+    }
+    darts_compute_alpha_gradient_vector(searcher, input, target, feat_dim,
+                                         alpha_grad_plus, delta_fd);
+
+    /* 计算 w- = w - ε·∇_w L_train */
+    for (size_t i = 0; i < searcher->weight_count; i++) {
+        searcher->weights[i] = weights_backup[i] - scale * weight_train_grad[i];
+    }
+
+    /* 在w-处计算alpha梯度 ∇_α L_val(w-, α) */
+    float* alpha_grad_minus = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
+    if (!alpha_grad_minus) {
+        memcpy(searcher->weights, weights_backup, searcher->weight_count * sizeof(float));
+        safe_free((void**)&alpha_grad_plus);
+        safe_free((void**)&weights_backup);
+        safe_free((void**)&alpha_grad_direct);
+        safe_free((void**)&weight_train_grad);
+        return -1;
+    }
+    darts_compute_alpha_gradient_vector(searcher, input, target, feat_dim,
+                                         alpha_grad_minus, delta_fd);
+
+    /* 恢复原始权重 */
+    memcpy(searcher->weights, weights_backup, searcher->weight_count * sizeof(float));
+
+    /* ==================================================================
+     * 第四步: 计算Hessian-向量积并组合最终alpha梯度
+     * hvp = (∇_α L_val(w+) - ∇_α L_val(w-)) / (2ε)
+     * α_grad = ∇_α L_val(w, α) - ξ · hvp
+     * ================================================================== */
+    float darts_xi = 0.1f;
+    float* hvp = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
+    if (hvp) {
+        for (size_t i = 0; i < searcher->total_alpha_count; i++) {
+            hvp[i] = (alpha_grad_plus[i] - alpha_grad_minus[i]) / (2.0f * scale + 1e-10f);
+        }
+    }
+
+    /* ==================================================================
+     * 第五步: 应用梯度更新权重和架构参数
+     * w = w - lr · ∇_w L_train
+     * α_grad_accum += α_grad_direct - ξ · hvp  (累积动量)
+     * α = α - alpha_lr · α_grad_accum
+     * ================================================================== */
+    for (size_t i = 0; i < searcher->weight_count; i++) {
+        searcher->weights[i] -= lr * weight_train_grad[i];
+    }
+
     float alpha_lr = lr * 0.1f;
     size_t num_edges = (size_t)(searcher->num_nodes * (searcher->num_nodes - 1) / 2);
     size_t num_ops = (size_t)searcher->num_ops;
 
     for (size_t e = 0; e < num_edges; e++) {
-        /* 计算当前边的softmax值 */
-        int max_idx = 0;
         float max_val = -FLT_MAX;
         for (size_t o = 0; o < num_ops; o++) {
             float v = searcher->alphas[e * num_ops + o];
-            if (v > max_val) { max_val = v; max_idx = (int)o; }
+            if (v > max_val) max_val = v;
         }
 
         float probs[8];
@@ -3092,20 +3273,79 @@ int cfc_darts_backward(CfcDARTSearch* searcher,
             probs[o] /= sum_exp;
         }
 
-        /* 架构参数的梯度：熵正则化 + 验证集性能信号 */
         for (size_t o = 0; o < num_ops; o++) {
-            float policy_grad = 0.0f;
-            if (gradient_size > 0 && (size_t)gradient_size > o) {
-                policy_grad = gradient[o];
-            }
+            size_t idx = e * num_ops + o;
             float entropy_grad = (1.0f + logf(probs[o] + 1e-10f));
+
+            /* 组合DARTS双层梯度: 直接梯度 - ξ·HVP + 熵正则化 */
+            float darts_combined = alpha_grad_direct[idx]
+                                 - darts_xi * (hvp ? hvp[idx] : 0.0f)
+                                 - 0.01f * entropy_grad;
+
+            /* 累积梯度动量 */
+            searcher->alphas_grad[idx] = searcher->alphas_grad[idx] * 0.85f + darts_combined * 0.15f;
+
+            /* 更新架构参数 */
+            searcher->alphas[idx] -= alpha_lr * searcher->alphas_grad[idx];
+        }
+    }
+
+    /* 清理临时内存 */
+    safe_free((void**)&hvp);
+    safe_free((void**)&alpha_grad_minus);
+    safe_free((void**)&alpha_grad_plus);
+    safe_free((void**)&weights_backup);
+    safe_free((void**)&alpha_grad_direct);
+    safe_free((void**)&weight_train_grad);
+
+    return 0;
+}
+
+/**
+ * @brief 保持向后兼容的简化接口（不包含完整双层优化）
+ */
+int cfc_darts_backward(CfcDARTSearch* searcher,
+                      const float* gradient, size_t gradient_size) {
+    if (!searcher || !gradient) return -1;
+
+    float lr = searcher->config.controller_lr;
+    float wd = 0.0001f;
+
+    for (size_t i = 0; i < searcher->weight_count; i++) {
+        float grad = (i < gradient_size) ? gradient[i] : 0.0f;
+        float reg = wd * searcher->weights[i];
+        searcher->weights[i] -= lr * (grad + reg);
+    }
+
+    float alpha_lr = lr * 0.1f;
+    size_t num_edges = (size_t)(searcher->num_nodes * (searcher->num_nodes - 1) / 2);
+    size_t num_ops = (size_t)searcher->num_ops;
+
+    for (size_t e = 0; e < num_edges; e++) {
+        float max_val = -FLT_MAX;
+        for (size_t o = 0; o < num_ops; o++) {
+            float v = searcher->alphas[e * num_ops + o];
+            if (v > max_val) max_val = v;
+        }
+
+        float probs[8];
+        float sum_exp = 0.0f;
+        for (size_t o = 0; o < num_ops; o++) {
+            probs[o] = expf(searcher->alphas[e * num_ops + o] - max_val);
+            sum_exp += probs[o];
+        }
+        if (sum_exp < 1e-10f) sum_exp = 1e-10f;
+        for (size_t o = 0; o < num_ops; o++) {
+            probs[o] /= sum_exp;
+        }
+
+        for (size_t o = 0; o < num_ops; o++) {
+            size_t idx = e * num_ops + o;
+            float entropy_grad = (1.0f + logf(probs[o] + 1e-10f));
+            float policy_grad = (gradient_size > 0 && (size_t)gradient_size > o) ? gradient[o] : 0.0f;
             float architecture_grad = policy_grad - 0.01f * entropy_grad;
-            searcher->alphas_grad[e * num_ops + o] += architecture_grad;
-            searcher->alphas[e * num_ops + o] -= alpha_lr * searcher->alphas_grad[e * num_ops + o];
-            if (alpha_lr < 1e-6f) {
-                searcher->alphas[e * num_ops + o] -= alpha_lr * rng_uniform(-0.001f, 0.001f);
-            }
-            searcher->alphas_grad[e * num_ops + o] *= 0.9f;
+            searcher->alphas_grad[idx] = searcher->alphas_grad[idx] * 0.9f + architecture_grad * 0.1f;
+            searcher->alphas[idx] -= alpha_lr * searcher->alphas_grad[idx];
         }
     }
 
@@ -3117,6 +3357,10 @@ int cfc_darts_step(CfcDARTSearch* searcher,
                   const float* target, size_t target_size,
                   float* loss) {
     if (!searcher || !input || !target || !loss) return -1;
+
+    /* 将输入保存到内部缓冲区（供有限差分HVP使用） */
+    memcpy(searcher->input_buffer, input,
+           (input_size < target_size ? input_size : target_size) * sizeof(float));
 
     /* 前向传播 */
     int ret = cfc_darts_forward(searcher, input, input_size,
@@ -3132,22 +3376,22 @@ int cfc_darts_step(CfcDARTSearch* searcher,
     l /= (float)target_size;
     *loss = l;
 
-    /* 计算梯度 */
-    for (size_t i = 0; i < target_size; i++) {
-        float diff = searcher->output_buffer[i] - target[i];
-        float g = 2.0f * diff / (float)target_size;
-
-        /* N-005修复: 架构参数梯度 —— 链式法则 dLoss/dAlpha = dLoss/dY * dY/dW * dW/dAlpha
-         * dW/dAlpha通过一次前向差分近似: W(alpha+ε) ≈ W(alpha) + ε * dW/dAlpha
-         * 步长epsilon取1e-3（平衡数值稳定性和梯度精度），与alpha学习率(0.1*lr)保持合理比例 */
-        for (size_t j = 0; j < searcher->total_alpha_count &&
-             j < searcher->weight_count; j++) {
-            searcher->alphas_grad[j] += g * searcher->weights[j] * 1e-3f;
-        }
-    }
-
-    /* 反向传播更新 */
-    ret = cfc_darts_backward(searcher, searcher->output_buffer, target_size);
+    /* ==================================================================
+     * DARTS真正双层优化:
+     * 使用 cfc_darts_backward_with_data 进行HVP有限差分的严格双层优化
+     * 内部完成:
+     *   1. ∇_w L_train 权重梯度计算
+     *   2. ∇_α L_val(w, α) 直接alpha梯度（有限差分）
+     *   3. w± = w ± ε·∇_w L_train 权重扰动
+     *   4. ∇_α L_val(w±, α) 扰动后的alpha梯度
+     *   5. HVP = (∇_α L_val(w+) - ∇_α L_val(w-))/(2ε)
+     *   6. α梯度 = ∇_α L_val(w, α) - ξ·HVP
+     *   7. 权重和架构参数更新
+     * ================================================================== */
+    ret = cfc_darts_backward_with_data(searcher,
+                                        input, input_size,
+                                        target, target_size,
+                                        searcher->output_buffer, target_size);
 
     return ret;
 }

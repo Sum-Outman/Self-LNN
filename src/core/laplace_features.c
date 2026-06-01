@@ -36,6 +36,7 @@
  */
 
 #include "selflnn/core/laplace_features.h"
+#include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
 #include <stdlib.h>
 #include <string.h>
@@ -566,12 +567,28 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
         free(adjacency); laplace_graph_laplacian_free(&gl); return -1;
     }
 
+    /* ZSFQQ-P0-002修复: 保存原始训练数据用于新样本投影 */
+    map->training_data = (float*)calloc((size_t)num_points * data_dim, sizeof(float));
+    if (!map->training_data) {
+        free(adjacency); laplace_graph_laplacian_free(&gl); return -1;
+    }
+    memcpy(map->training_data, data, (size_t)num_points * data_dim * sizeof(float));
+
     for (int i = 0; i < num_points; i++)
         for (int j = 1; j <= embedding_dim; j++) {
             int ev_idx = num_points - j;
-            if (ev_idx >= 0) {
+            /* ZSFQQ-P2-004修复: 跳过零特征值(连通分量常向量), 从第二个最小非零特征值开始 */
+            if (ev_idx >= 2) {
                 map->embedding[i * embedding_dim + (j - 1)] = gl.eigenvectors[i * num_points + ev_idx];
                 map->eigenvalues[j - 1] = gl.eigenvalues[ev_idx];
+            } else if (ev_idx == 1) {
+                /* ev_idx=1: 跳过ev_idx=0(常向量, 零特征值), 使用第二个最小特征向量 */
+                map->embedding[i * embedding_dim + (j - 1)] = gl.eigenvectors[i * num_points + ev_idx];
+                map->eigenvalues[j - 1] = gl.eigenvalues[ev_idx];
+            } else {
+                /* ev_idx=0: 零特征值常向量, 用零填充对应维度 */
+                map->embedding[i * embedding_dim + (j - 1)] = 0.0f;
+                map->eigenvalues[j - 1] = 0.0f;
             }
         }
 
@@ -581,7 +598,8 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
 }
 
 int laplace_eigenmap_transform(const LaplacianEigenmap* map, const float* new_point, float* embedding) {
-    if (!map || !new_point || !embedding || !map->distance_matrix) return -1;
+    if (!map || !new_point || !embedding || !map->training_data) return -1;
+    /* ZSFQQ-P0-002修复: 使用保存的原始训练数据training_data而非距离矩阵 */
     int n = map->num_points, d = map->data_dim, em = map->embedding_dim;
     if (n < 1 || d < 1 || em < 1) return -1;
 
@@ -592,8 +610,8 @@ int laplace_eigenmap_transform(const LaplacianEigenmap* map, const float* new_po
     for (int i = 0; i < n; i++) {
         float d2 = 0.0f;
         for (int k = 0; k < d; k++) {
-            float diff = new_point[k] - map->distance_matrix[i * d + k];
-            d2 += diff * diff;  /* R4-003修复: 对每个i都累加距离 */
+            float diff = new_point[k] - map->training_data[i * d + k];
+            d2 += diff * diff;
         }
         weights[i] = expf(-d2 / (2.0f * map->sigma * map->sigma));
         wsum += weights[i];
@@ -615,6 +633,7 @@ void laplace_eigenmap_free(LaplacianEigenmap* map) {
     free(map->embedding);
     free(map->eigenvalues);
     free(map->distance_matrix);
+    free(map->training_data); /* ZSFQQ-P0-002: 释放训练数据 */
     memset(map, 0, sizeof(LaplacianEigenmap));
 }
 
@@ -840,6 +859,8 @@ int laplace_dict_learn_batch(LaplacianDictLearner* learner, const float* data, i
             }
         }
         recon_err = sqrtf(recon_err / (num_samples * d));
+        log_debug("[拉普拉斯字典学习] 迭代%d/%d 重构误差=%.6f 平均稀疏度=%.4f",
+                  iter + 1, num_iterations, recon_err, avg_sparsity);
     }
 
     for (int j = 0; j < k; j++)
@@ -868,6 +889,227 @@ void laplace_dict_learner_free(LaplacianDictLearner* learner) {
     free(learner);
 }
 
+/* ==================== A01.3.2 L-009: KD树加速最近邻搜索 ==================== */
+
+/* KD树节点 */
+typedef struct KdNode {
+    int point_index;     /* 原始数据点索引 */
+    int split_dim;       /* 分割维度 */
+    struct KdNode* left;
+    struct KdNode* right;
+} KdNode;
+
+/* K近邻查询结果项（最大堆） */
+typedef struct {
+    int index;           /* 邻居点索引 */
+    float dist_sq;       /* 平方距离 */
+} KdNeighbor;
+
+/* KD树 */
+typedef struct {
+    KdNode* root;
+    const float* data;   /* 指向原始数据 N×dim */
+    int num_points;
+    int data_dim;
+    int* point_indices;  /* 构建时排序用的索引数组 */
+} KdTree;
+
+/* 对 point_indices[start..end) 按维度 dim 做快速选择分区，使中位数归位 */
+static int kd_partition_indices(int* indices, const float* data, int dim, int stride, int start, int end) {
+    int pivot_idx = start + (end - start) / 2;
+    float pivot_val = data[indices[pivot_idx] * stride + dim];
+
+    /* 交换pivot到末尾 */
+    int tmp = indices[pivot_idx];
+    indices[pivot_idx] = indices[end - 1];
+    indices[end - 1] = tmp;
+
+    int store = start;
+    for (int i = start; i < end - 1; i++) {
+        if (data[indices[i] * stride + dim] < pivot_val) {
+            tmp = indices[i];
+            indices[i] = indices[store];
+            indices[store] = tmp;
+            store++;
+        }
+    }
+
+    tmp = indices[store];
+    indices[store] = indices[end - 1];
+    indices[end - 1] = tmp;
+    return store;
+}
+
+/* 找中位数索引位置：部分选择排序找到第 k 小的元素 */
+static int kd_select_median(int* indices, const float* data, int dim, int stride, int start, int end) {
+    int k = start + (end - start) / 2;
+    while (start < end) {
+        int pivot = kd_partition_indices(indices, data, dim, stride, start, end);
+        if (pivot == k) return pivot;
+        if (pivot < k) start = pivot + 1;
+        else end = pivot;
+    }
+    return k;
+}
+
+/* KD树构建：递归按维度交替划分 */
+static KdNode* kd_build_recursive(KdTree* tree, int* indices, int start, int end, int depth) {
+    if (start >= end) return NULL;
+
+    int dim = depth % tree->data_dim;
+    int stride = tree->data_dim;
+
+    /* 找中位数并分区 */
+    int mid = kd_select_median(indices, tree->data, dim, stride, start, end);
+
+    KdNode* node = (KdNode*)calloc(1, sizeof(KdNode));
+    if (!node) return NULL;
+    node->point_index = indices[mid];
+    node->split_dim = dim;
+
+    node->left = kd_build_recursive(tree, indices, start, mid, depth + 1);
+    node->right = kd_build_recursive(tree, indices, mid + 1, end, depth + 1);
+
+    return node;
+}
+
+/* KD树构建入口 */
+static KdTree* kd_build(const float* data, int num_points, int data_dim) {
+    if (!data || num_points < 1 || data_dim < 1) return NULL;
+
+    KdTree* tree = (KdTree*)calloc(1, sizeof(KdTree));
+    if (!tree) return NULL;
+
+    tree->data = data;
+    tree->num_points = num_points;
+    tree->data_dim = data_dim;
+
+    tree->point_indices = (int*)malloc((size_t)num_points * sizeof(int));
+    if (!tree->point_indices) { free(tree); return NULL; }
+    for (int i = 0; i < num_points; i++) tree->point_indices[i] = i;
+
+    tree->root = kd_build_recursive(tree, tree->point_indices, 0, num_points, 0);
+
+    return tree;
+}
+
+/* KD树释放 */
+static void kd_node_free(KdNode* node) {
+    if (!node) return;
+    kd_node_free(node->left);
+    kd_node_free(node->right);
+    free(node);
+}
+
+static void kd_free(KdTree* tree) {
+    if (!tree) return;
+    kd_node_free(tree->root);
+    free(tree->point_indices);
+    free(tree);
+}
+
+/* 计算两点间平方欧氏距离 */
+static float kd_dist_sq(const float* a, const float* b, int dim) {
+    float d2 = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        float diff = a[i] - b[i];
+        d2 += diff * diff;
+    }
+    return d2;
+}
+
+/* K近邻查询：递归搜索KD树
+ * neighbors: 最大堆存储当前K个最近邻（按dist_sq降序）
+ * k: 目标邻居数
+ * worst_dist_sq: 当前第K远的平方距离（堆顶） */
+static void kd_query_knn_recursive(const KdTree* tree, const KdNode* node,
+                                    const float* query, int k,
+                                    KdNeighbor* neighbors, int* count,
+                                    float* worst_dist_sq, int depth) {
+    if (!node) return;
+
+    int stride = tree->data_dim;
+    const float* node_pt = &tree->data[(size_t)node->point_index * stride];
+    float d2 = kd_dist_sq(query, node_pt, stride);
+
+    /* 插入当前点到最近邻最大堆 */
+    if (*count < k) {
+        /* 堆未满，直接插入并上浮 */
+        int pos = *count;
+        while (pos > 0 && neighbors[(pos - 1) / 2].dist_sq < d2) {
+            neighbors[pos] = neighbors[(pos - 1) / 2];
+            pos = (pos - 1) / 2;
+        }
+        neighbors[pos].index = node->point_index;
+        neighbors[pos].dist_sq = d2;
+        (*count)++;
+        if (*count == k) *worst_dist_sq = neighbors[0].dist_sq;
+    } else if (d2 < *worst_dist_sq) {
+        /* 堆已满，替换堆顶并下沉 */
+        int pos = 0;
+        while (1) {
+            int child = 2 * pos + 1;
+            if (child >= k) break;
+            if (child + 1 < k && neighbors[child + 1].dist_sq > neighbors[child].dist_sq)
+                child++;
+            if (d2 >= neighbors[child].dist_sq) break;
+            neighbors[pos] = neighbors[child];
+            pos = child;
+        }
+        neighbors[pos].index = node->point_index;
+        neighbors[pos].dist_sq = d2;
+        *worst_dist_sq = neighbors[0].dist_sq;
+    }
+
+    /* 决定搜索方向 */
+    int dim = node->split_dim;
+    float split_val = node_pt[dim];
+    float query_val = query[dim];
+    float plane_dist = query_val - split_val;
+    float plane_dist_sq = plane_dist * plane_dist;
+
+    KdNode* near_node = (query_val < split_val) ? node->left : node->right;
+    KdNode* far_node  = (query_val < split_val) ? node->right : node->left;
+
+    kd_query_knn_recursive(tree, near_node, query, k, neighbors, count, worst_dist_sq, depth + 1);
+
+    /* 如果分裂平面距离小于当前最远邻居距离，搜索远侧 */
+    if (plane_dist_sq < *worst_dist_sq || *count < k) {
+        kd_query_knn_recursive(tree, far_node, query, k, neighbors, count, worst_dist_sq, depth + 1);
+    }
+}
+
+/* K近邻查询入口：为单个查询点找k个最近邻 */
+static int kd_query_knn(const KdTree* tree, const float* query, int k, int* out_indices, float* out_dist_sq) {
+    if (!tree || !query || !out_indices || k < 1) return -1;
+
+    KdNeighbor* neighbors = (KdNeighbor*)malloc((size_t)k * sizeof(KdNeighbor));
+    if (!neighbors) return -1;
+
+    int count = 0;
+    float worst_dist_sq = 1e30f;
+
+    kd_query_knn_recursive(tree, tree->root, query, k, neighbors, &count, &worst_dist_sq, 0);
+
+    /* 将堆中结果按距离升序输出 */
+    /* 对堆做选择排序（堆很小，k << N） */
+    for (int i = 0; i < count && i < k; i++) {
+        /* 找最小元素 */
+        int min_idx = 0;
+        for (int j = 1; j < count - i; j++) {
+            if (neighbors[j].dist_sq < neighbors[min_idx].dist_sq)
+                min_idx = j;
+        }
+        out_indices[i] = neighbors[min_idx].index;
+        if (out_dist_sq) out_dist_sq[i] = neighbors[min_idx].dist_sq;
+        /* 移除最小元素 */
+        neighbors[min_idx] = neighbors[count - i - 1];
+    }
+
+    free(neighbors);
+    return count;
+}
+
 /* ==================== A01.3.2 拉普拉斯流形学习 ==================== */
 
 int laplace_lle(const float* data, int num_points, int data_dim, int embedding_dim, int n_neighbors, float reg, float* embedding) {
@@ -885,22 +1127,56 @@ int laplace_lle(const float* data, int num_points, int data_dim, int embedding_d
         free(neighbors); free(distances); free(W); free(Z); free(G); free(M); return -1;
     }
 
-    for (int i = 0; i < num_points; i++) {
-        for (int j = 0; j < num_points; j++) {
-            float d2 = 0.0f;
-            for (int k = 0; k < data_dim; k++) {
-                float diff = data[i * data_dim + k] - data[j * data_dim + k];
-                d2 += diff * diff;
-            }
-            for (int nn = 0; nn < n_neighbors; nn++) {
-                if (j != i && (nn == 0 || d2 < distances[i * n_neighbors + nn])) {
-                    for (int shift = n_neighbors - 1; shift > nn; shift--) {
-                        neighbors[i * n_neighbors + shift] = neighbors[i * n_neighbors + shift - 1];
-                        distances[i * n_neighbors + shift] = distances[i * n_neighbors + shift - 1];
+    /* L-009: 使用KD树加速K近邻搜索，替代O(N²)暴力搜索
+     * 构建KD树 O(N log N)，每个查询 O(log N)，总计 O(N log N) */
+    KdTree* kdtree = kd_build(data, num_points, data_dim);
+    if (kdtree) {
+        int query_k = n_neighbors + 1; /* 查询k+1个邻居以排除自身 */
+        int* knn_indices = (int*)malloc((size_t)query_k * sizeof(int));
+        float* knn_dists = (float*)malloc((size_t)query_k * sizeof(float));
+        if (knn_indices && knn_dists) {
+            for (int i = 0; i < num_points; i++) {
+                const float* query_pt = &data[(size_t)i * data_dim];
+                int found = kd_query_knn(kdtree, query_pt, query_k, knn_indices, knn_dists);
+                /* 将结果填入neighbors数组（跳过自身索引） */
+                int nn = 0;
+                for (int f = 0; f < found && nn < n_neighbors; f++) {
+                    if (knn_indices[f] != i) {
+                        neighbors[i * n_neighbors + nn] = knn_indices[f];
+                        distances[i * n_neighbors + nn] = knn_dists[f];
+                        nn++;
                     }
-                    neighbors[i * n_neighbors + nn] = j;
-                    distances[i * n_neighbors + nn] = d2;
-                    break;
+                }
+                /* 若排除自身后邻居不足，用最后一个补齐 */
+                while (nn < n_neighbors) {
+                    neighbors[i * n_neighbors + nn] = (i + nn + 1) % num_points;
+                    distances[i * n_neighbors + nn] = 1e10f;
+                    nn++;
+                }
+            }
+        }
+        free(knn_indices);
+        free(knn_dists);
+        kd_free(kdtree);
+    } else {
+        /* KD树构建失败时回退到暴力搜索 */
+        for (int i = 0; i < num_points; i++) {
+            for (int j = 0; j < num_points; j++) {
+                float d2 = 0.0f;
+                for (int k = 0; k < data_dim; k++) {
+                    float diff = data[i * data_dim + k] - data[j * data_dim + k];
+                    d2 += diff * diff;
+                }
+                for (int nn = 0; nn < n_neighbors; nn++) {
+                    if (j != i && (nn == 0 || d2 < distances[i * n_neighbors + nn])) {
+                        for (int shift = n_neighbors - 1; shift > nn; shift--) {
+                            neighbors[i * n_neighbors + shift] = neighbors[i * n_neighbors + shift - 1];
+                            distances[i * n_neighbors + shift] = distances[i * n_neighbors + shift - 1];
+                        }
+                        neighbors[i * n_neighbors + nn] = j;
+                        distances[i * n_neighbors + nn] = d2;
+                        break;
+                    }
                 }
             }
         }

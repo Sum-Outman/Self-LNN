@@ -146,6 +146,14 @@ DialogueProcessor* dialogue_processor_create(const DialogueConfig* config);
 void dialogue_processor_free(DialogueProcessor* processor);
 
 /**
+ * @brief ZSFQQ-P2-001: 获取对话处理器内部的生成器句柄
+ * 用于在系统引导时标记生成器为已训练状态
+ * @param processor 对话处理器句柄
+ * @return DialogueGenerator* 生成器句柄，失败返回NULL
+ */
+void* dialogue_get_generator(DialogueProcessor* processor);
+
+/**
  * @brief 处理对话输入
  * 
  * 处理用户输入，生成系统响应。深度集成液态神经网络进行对话理解和生成。

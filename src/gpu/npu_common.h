@@ -30,6 +30,14 @@ int npu_common_check_directory(const char* dir_path);
 int npu_common_check_device_node(const char* dev_pattern);
 int npu_common_check_library(const char* const* lib_names, int lib_count);
 
+/* H-016修复: 已被gpu_npu.c使用的公共NPU接口 — 消除重复代码
+ * 以下函数原本在gpu_npu.c中为static局部实现，现已提取为npu_common公共接口 */
+int npu_common_file_exists(const char* path);       /* [H-016去重] 替代gpu_npu.c npu_file_exists */
+int npu_common_dir_exists(const char* path);        /* [H-016去重] 替代gpu_npu.c npu_dir_exists */
+void* npu_common_load_library(const char* lib_name); /* [H-016去重] 替代gpu_npu.c NPU_DLOPEN模式 */
+void* npu_common_get_symbol(void* handle, const char* sym); /* [H-016去重] 替代gpu_npu.c NPU_DLSYM模式 */
+void npu_common_close_library(void* handle);         /* [H-016去重] 替代gpu_npu.c NPU_DLCLOSE模式 */
+
 void npu_common_fill_device_info(GpuDeviceInfo* info, int device_id,
                                   const char* vendor_name, const char* device_name,
                                   int compute_units, size_t total_mem, size_t free_mem);

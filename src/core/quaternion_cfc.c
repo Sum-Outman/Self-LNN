@@ -264,6 +264,8 @@ int quaternion_cfc_cell_update(QuaternionCfcCell* cell, const Quaternion* input,
  */
 const Quaternion* quaternion_cfc_cell_get_state(const QuaternionCfcCell* cell) {
     if (!cell) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "四元数CfC细胞句柄为空");
         return NULL;
     }
     

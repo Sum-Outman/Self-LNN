@@ -149,6 +149,115 @@ class TrainingPushManager {
             document.dispatchEvent(new CustomEvent('ws-multimodal-data', { detail: data }));
         }).bind(this);
         window.SelfLnnWebSocket.on('multimodal_data', this._wsMultimodalDataHandler);
+
+        /* ZSFEEE-FIX-DEEP-013: 补全11个后端广播但前端未监听的WS事件类型 */
+        this._wsSafetyAlertHandler = (function(data) {
+            console.warn('[TrainingPush] 安全告警:', data);
+            if (data && data.message && typeof window.showNotification === 'function') {
+                window.showNotification('⚠️ 安全告警: ' + data.message, 'error');
+            }
+            document.dispatchEvent(new CustomEvent('ws-safety-alert', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('safety_alert', this._wsSafetyAlertHandler);
+
+        this._wsRobotStatusHandler = (function(data) {
+            console.log('[TrainingPush] 机器人状态:', data);
+            if (data && window.DataEngine) {
+                window.DataEngine.updateRobotStatus(data);
+            }
+            document.dispatchEvent(new CustomEvent('ws-robot-status', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('robot_status', this._wsRobotStatusHandler);
+
+        this._wsMemoryStatusHandler = (function(data) {
+            console.log('[TrainingPush] 记忆状态:', data);
+            if (data && window.DataEngine) {
+                window.DataEngine.updateMemoryStatus(data);
+            }
+            document.dispatchEvent(new CustomEvent('ws-memory-status', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('memory_status', this._wsMemoryStatusHandler);
+
+        this._wsKnowledgeStatusHandler = (function(data) {
+            console.log('[TrainingPush] 知识状态:', data);
+            if (data && window.DataEngine) {
+                window.DataEngine.updateKnowledgeStatus(data);
+            }
+            document.dispatchEvent(new CustomEvent('ws-knowledge-status', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('knowledge_status', this._wsKnowledgeStatusHandler);
+
+        this._wsPredictionResultHandler = (function(data) {
+            console.log('[TrainingPush] 预测结果:', data);
+            document.dispatchEvent(new CustomEvent('ws-prediction-result', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('prediction_result', this._wsPredictionResultHandler);
+
+        this._wsConceptEvolutionHandler = (function(data) {
+            console.log('[TrainingPush] 概念演化:', data);
+            document.dispatchEvent(new CustomEvent('ws-concept-evolution', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('concept_evolution', this._wsConceptEvolutionHandler);
+
+        this._wsStateActivationDataHandler = (function(data) {
+            console.log('[TrainingPush] 状态激活数据:', data);
+            if (data && window.visualizationManager) {
+                window.visualizationManager.updateStateActivationData(data);
+            }
+            if (data && window.DataEngine) {
+                window.DataEngine.updateStateActivation(data);
+            }
+            document.dispatchEvent(new CustomEvent('ws-state-activation-data', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('state_activation_data', this._wsStateActivationDataHandler);
+
+        this._wsWeightDistributionHandler = (function(data) {
+            console.log('[TrainingPush] 权重分布:', data);
+            if (data && window.visualizationManager) {
+                window.visualizationManager.updateWeightDistributionData(data);
+            }
+            document.dispatchEvent(new CustomEvent('ws-weight-distribution', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('weight_distribution', this._wsWeightDistributionHandler);
+
+        this._wsActivationStatsHandler = (function(data) {
+            console.log('[TrainingPush] 激活统计:', data);
+            if (data && window.visualizationManager) {
+                window.visualizationManager.updateActivationData(
+                    data.layers || [],
+                    data.mean || 0,
+                    data.max || 0,
+                    data.min || 0,
+                    data.std || 0
+                );
+            }
+            document.dispatchEvent(new CustomEvent('ws-activation-stats', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('activation_stats', this._wsActivationStatsHandler);
+
+        this._wsLnnStateHandler = (function(data) {
+            console.log('[TrainingPush] LNN状态:', data);
+            if (data && window.visualizationManager) {
+                window.visualizationManager.updateLnnState(data);
+            }
+            if (data && window.DataEngine) {
+                window.DataEngine.updateLnnState(data);
+            }
+            document.dispatchEvent(new CustomEvent('ws-lnn-state', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('lnn_state', this._wsLnnStateHandler);
+
+        this._wsMetacognitionStatusHandler = (function(data) {
+            console.log('[TrainingPush] 元认知状态:', data);
+            if (data && window.visualizationManager) {
+                window.visualizationManager.updateMetacognitionStatus(data);
+            }
+            if (data && window.DataEngine) {
+                window.DataEngine.updateMetacognitionStatus(data);
+            }
+            document.dispatchEvent(new CustomEvent('ws-metacognition-status', { detail: data }));
+        }).bind(this);
+        window.SelfLnnWebSocket.on('metacognition_status', this._wsMetacognitionStatusHandler);
     }
 
     _handleTrainingProgress(data) {

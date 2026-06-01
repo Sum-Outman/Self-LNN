@@ -153,6 +153,23 @@ float loss_compute_multimodal(const float* predictions, const float* targets,
                                int num_segments);
 
 /**
+ * @brief 多模态损失自适应梯度平衡 (ZSFZX-FIX-R4-1)
+ *
+ * 与loss_compute_multimodal功能相同，但use_adaptive=1时自动调整各模态段权重，
+ * 使梯度范数均衡。消除手动调权的需求，防止模态崩塌。
+ *
+ * @param gradient_buffer 梯度缓冲区（用于计算各段梯度范数）
+ * @param use_adaptive 0=使用固定权重, 1=启用自适应平衡
+ * @return float 自适应加权总损失
+ */
+float loss_compute_multimodal_adaptive(const float* predictions, const float* targets,
+                                        int total_length,
+                                        const MultimodalLossSegment* segments,
+                                        int num_segments,
+                                        const float* gradient_buffer,
+                                        int use_adaptive);
+
+/**
  * @brief 计算多模态损失函数梯度（ZSFWS-024）
  * 
  * 对每个模态段独立计算梯度，然后拼接回统一的梯度数组。

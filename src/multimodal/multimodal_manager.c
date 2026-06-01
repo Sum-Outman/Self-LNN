@@ -17,6 +17,7 @@
 #include "selflnn/multimodal/image_loader.h"     /* ZSF-008: 图像文件加载器集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/secure_random.h"
 #include "selflnn/core/errors.h"
 
 #include <stdlib.h>
@@ -42,6 +43,12 @@ struct MultimodalManager {
     float modality_weights[9];            /**< ZSF-NEW-013: 各模态权重9种（视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机）用于LNN输入前投影加权，所有模态通过lnn_forward进入统一CfC ODE */
     HapticCfcProcessor* haptic_cfc_proc;  /**< H-018: CfC触觉信号处理器 */
     HapticTextureAnalyzer* haptic_texture_analyzer; /**< H-018: 触觉纹理分析器 */
+    /* M-009修复: 5种额外模态的Xavier投影矩阵，替代取模循环映射
+     * 索引: 0=触觉(64维), 1=本体感(32维), 2=热感(16维), 3=雷达(128维), 4=电机(64维)
+     * 每个矩阵维度: [src_dim, input_dim] */
+    float* extra_proj_w[5];
+    size_t extra_proj_input_dim;
+    int extra_proj_initialized;
 };
 
 /**
@@ -134,6 +141,10 @@ void multimodal_manager_free(MultimodalManager* manager) {
     if (manager->haptic_texture_analyzer) {
         haptic_texture_free(manager->haptic_texture_analyzer);
         manager->haptic_texture_analyzer = NULL;
+    }
+    /* M-009: 释放5种额外模态的Xavier投影矩阵 */
+    for (int m = 0; m < 5; m++) {
+        safe_free((void**)&manager->extra_proj_w[m]);
     }
     safe_free((void**)&manager);
 }
@@ -288,10 +299,9 @@ int multimodal_manager_process(MultimodalManager* manager,
                (lnn_cfg.input_size - copy_size) * sizeof(float));
     }
 
-    /* ZSF-NEW-013修复: 将5种额外模态注入LNN输入，而非LNN输出后混合。
-     * 遵循"所有模态→统一输入到同一个连续动态系统"原则。
-     * 额外模态(触觉/本体感/热感/雷达/电机)通过加权投影注入lnn_input，
-     * 使其参与CfC ODE状态演化，而非简单后混合绕过动态系统。 */
+    /* M-009修复: 使用Xavier初始化投影矩阵替代取模循环映射。
+     * 每种额外模态拥有独立的投影矩阵 W_proj[src_dim × input_dim]，
+     * 通过矩阵乘法 proj = W^T * src_signal 将模态信号准确投影到LNN输入空间。 */
     {
         const float* haptic_ptr = (const float*)haptic_data;
         const float* proprioception_ptr = (const float*)proprioception_data;
@@ -305,15 +315,40 @@ int multimodal_manager_process(MultimodalManager* manager,
         size_t extra_sizes[5] = {64, 32, 16, 128, 64};
         int extra_indices[5] = {4, 5, 6, 7, 8};
 
-        for (int m = 0; m < 5; m++) {
-            if (extra_signals[m] && extra_sizes[m] > 0) {
-                float weight = manager->modality_weights[extra_indices[m]];
-                /* 将额外模态信号投影到LNN输入维度并累加 */
-                size_t input_dim = lnn_cfg.input_size;
-                for (size_t i = 0; i < input_dim; i++) {
-                    /* 循环映射: 额外信号通过取模映射到LNN输入维度 */
-                    size_t src_idx = i % extra_sizes[m];
-                    lnn_input[i] += extra_signals[m][src_idx] * weight;
+        /* 惰性初始化Xavier投影矩阵（仅首次调用时分配） */
+        if (!manager->extra_proj_initialized) {
+            size_t input_dim = lnn_cfg.input_size;
+            for (int m = 0; m < 5; m++) {
+                size_t src_dim = extra_sizes[m];
+                size_t total_elems = src_dim * input_dim;
+                manager->extra_proj_w[m] = (float*)safe_malloc(total_elems * sizeof(float));
+                if (manager->extra_proj_w[m]) {
+                    /* Xavier/Glorot均匀分布初始化: U[-scale, +scale]
+                     * scale = sqrt(6 / (fan_in + fan_out)) */
+                    float scale = sqrtf(6.0f / (float)(src_dim + input_dim));
+                    for (size_t i = 0; i < total_elems; i++) {
+                        manager->extra_proj_w[m][i] = (secure_random_float() * 2.0f - 1.0f) * scale;
+                    }
+                }
+            }
+            manager->extra_proj_input_dim = input_dim;
+            manager->extra_proj_initialized = 1;
+        }
+
+        /* 使用投影矩阵进行矩阵-向量乘法: lnn_input += weight * W^T * src_signal */
+        if (manager->extra_proj_input_dim == lnn_cfg.input_size) {
+            for (int m = 0; m < 5; m++) {
+                if (extra_signals[m] && extra_sizes[m] > 0 && manager->extra_proj_w[m]) {
+                    float weight = manager->modality_weights[extra_indices[m]];
+                    size_t src_dim = extra_sizes[m];
+                    size_t input_dim = lnn_cfg.input_size;
+                    for (size_t i = 0; i < input_dim; i++) {
+                        float proj_val = 0.0f;
+                        for (size_t j = 0; j < src_dim; j++) {
+                            proj_val += manager->extra_proj_w[m][j * input_dim + i] * extra_signals[m][j];
+                        }
+                        lnn_input[i] += proj_val * weight;
+                    }
                 }
             }
         }

@@ -20,7 +20,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/perf.h"
-#include "selflnn/neural_architecture_search.h"
+#include "selflnn/evolution/neural_architecture_search.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -68,9 +68,11 @@ struct Population {
     float crossover_rate;           /**< 交叉率 */
     float elitism_rate;             /**< 精英保留率 */
     float selection_pressure;       /**< 选择压力 */
+    int tournament_size;            /**< ZSFZX-FIX-TOURNAMENT: 锦标赛大小(默认3) */
     
     // 多样性度量
     float diversity_score;          /**< 多样性分数 */
+    float diversity_collapse_threshold; /**< ZSFZX-FIX-DIVERSITY: 多样性塌缩阈值 */
     float* centroid_genome;         /**< 种群中心基因组 */
     float* fitness_distribution;    /**< 适应度分布 */
     
@@ -450,8 +452,11 @@ PSOState* pso_create(int swarm_size, int dimension,
         pso->personal_best_fit[i] = 1e10f;  /* 最小化问题，初始为无穷大 */
     }
     pso->global_best_fit = 1e10f;
-    memset(pso->global_best_pos, 0, dimension * sizeof(float));
-    
+    /* L-019修复: 使用第一个粒子的随机位置初始化global_best_pos，
+     * 替代全零初始化。第一个粒子的位置已在上面随机生成，
+     * 作为全局最优的起始点比全零更合理。 */
+    memcpy(pso->global_best_pos, pso->positions, dimension * sizeof(float));
+
     /* 标准PSO参数 */
     pso->inertia_init = 0.9f;
     pso->inertia_final = 0.4f;
@@ -617,8 +622,10 @@ Population* population_create(size_t population_size, size_t genome_size,
     pop->crossover_rate = 0.8f;
     pop->elitism_rate = 0.1f;
     pop->selection_pressure = 2.0f;
+    pop->tournament_size = 3;  /* ZSFZX-FIX-TOURNAMENT: 可配置锦标赛大小, 默认3 */
     
     pop->diversity_score = 0.0f;
+    pop->diversity_collapse_threshold = 0.01f; /* ZSFZX-FIX-DIVERSITY: 低于此值触发恢复 */
     pop->centroid_genome = (float*)safe_calloc(genome_size, sizeof(float));
     pop->fitness_distribution = (float*)safe_calloc(population_size, sizeof(float));
     
@@ -860,7 +867,38 @@ int population_compute_diversity(Population* pop) {
     }
     
     pop->diversity_score = total_distance / pop->population_size;
-    
+
+    /* ZSFZX-FIX-DIVERSITY: 种群多样性塌缩保护
+     * 检测多样性过低并自动注入随机个体来维持探索能力 */
+    if (pop->diversity_collapse_threshold > 0.0f &&
+        pop->diversity_score < pop->diversity_collapse_threshold &&
+        pop->population_size > 2) {
+        log_warning("[进化] 种群多样性塌缩警告: score=%.6f < threshold=%.6f, 注入随机个体恢复多样性",
+                   pop->diversity_score, pop->diversity_collapse_threshold);
+        /* 随机重置最差的5%（至少1个）个体以恢复多样性 */
+        int reset_count = (int)(pop->population_size * 0.05f);
+        if (reset_count < 1) reset_count = 1;
+        if (reset_count > (int)pop->population_size - 2) reset_count = (int)pop->population_size - 2;
+
+        for (int ri = 0; ri < reset_count; ri++) {
+            /* 从最差个体开始重置（适应度排序后索引越大越差） */
+            int worst_idx = (int)(pop->population_size - 1 - ri);
+            if (worst_idx >= 0 && worst_idx < (int)pop->population_size) {
+                Individual* ind = pop->individuals[worst_idx];
+                if (ind && ind->genome && ind->genome_size == genome_size) {
+                    for (size_t j = 0; j < genome_size; j++) {
+                        /* 以质心为中心的高斯扰动 */
+                        float noise = (float)(rand() % 1001 - 500) / 5000.0f;
+                        ind->genome[j] = pop->centroid_genome[j] * (1.0f + noise * 0.5f);
+                    }
+                    /* 重置适应度为无效（迫使重新评估） */
+                    ind->fitness = -FLT_MAX;
+                    log_debug("[进化] 多样性恢复: 重置个体[%d]", worst_idx);
+                }
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -878,7 +916,11 @@ Individual* population_tournament_selection(Population* pop, int tournament_size
     
     // 随机选择tournament_size个个体，选择适应度最高的
     for (int i = 0; i < tournament_size; i++) {
-        size_t idx = (size_t)(uniform_random() * pop->population_size);
+        /* ZSFZX-FIX-BOUNDARY: 浮点截断边界保护, 确保idx < population_size */
+        float ur = uniform_random();
+        if (ur >= 1.0f) ur = 0.999999f; /* uniform_random应返回[0,1)但极罕见边界保护 */
+        size_t idx = (size_t)(ur * (float)pop->population_size);
+        if (idx >= pop->population_size) idx = pop->population_size - 1;
         Individual* candidate = pop->individuals[idx];
         
         if (!candidate) {
@@ -982,8 +1024,8 @@ int population_evolve(Population* pop, FitnessFunction fitness_func, void* user_
     // 生成新个体
     for (size_t i = elite_count; i < pop->population_size; i++) {
         // 选择父代
-        Individual* parent1 = population_tournament_selection(pop, 3);
-        Individual* parent2 = population_tournament_selection(pop, 3);
+        Individual* parent1 = population_tournament_selection(pop, pop->tournament_size);
+        Individual* parent2 = population_tournament_selection(pop, pop->tournament_size);
         
         if (!parent1 || !parent2) {
             // 清理

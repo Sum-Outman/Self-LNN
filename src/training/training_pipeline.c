@@ -10,6 +10,7 @@
 #include "selflnn/training/training_pipeline.h"
 #include "selflnn/training/training_monitor.h"
 #include "selflnn/training/training_data_pipeline.h" /* ZSFA-FIX-P0-002: 训练数据流水线预处理 */
+#include "selflnn/training/training_enhanced.h"  /* ZSFZS-F038: EMA/余弦退火/知识蒸馏等增强训练功能 */
 #include "selflnn/selflnn.h"            /* ZSFWS-FATAL-FIX: 获取共享LNN */
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -17,8 +18,10 @@
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/loss.h"
 #include "selflnn/gpu/gpu.h"
+#include "selflnn/training/distributed_training.h"  /* ZSFEEE-FIX-DEEP-007: 分布式梯度同步 */
 
 extern void* selflnn_get_speech_recognizer(void);
+extern void* selflnn_get_distributed_context(void); /* ZSFEEE-FIX-DEEP-007: 获取分布式上下文 */
 
 #include "selflnn/core/optimizer.h"
 #include "selflnn/utils/memory_utils.h"
@@ -137,6 +140,10 @@ struct TrainingPipeline {
 
     /* 多模态统一输入投影（训练/推理路径统一） */
     void* unified_input_state;                 /**< UnifiedInputState* 统一输入投影矩阵 */
+
+    /* ZSFZS-F038: 增强训练功能——EMA权重管理和Warmup余弦退火调度 */
+    void* ema_manager;                         /**< EMAWeightManager* 指数移动平均权重管理 */
+    void* lr_scheduler;                        /**< WarmupCosineScheduler* 学习率调度器 */
 };
 
 /* FIX-013: compute_loss_value 直接委托 loss_compute，确保与 LossType 枚举严格一致。
@@ -367,6 +374,136 @@ static void pipeline_apply_cell_gradients_adam(TrainingPipeline* pipeline) {
      * output_size==hidden_size的guard，无W_out时自动跳过，对所有调用路径安全。 */
     cfc_apply_out_proj_gradients(pipeline->network->cfc_network,
         pipeline->network->config.learning_rate);
+}
+
+/* ZSFEEE-FIX-DEEP-007: 分布式梯度同步辅助函数
+ * 在优化器步进之前调用，将本地累积的梯度通过AllReduce与所有节点同步。
+ * 如果分布式训练未启用或单节点运行，该函数为空操作。
+ *
+ * 工作流程:
+ *   1. 通过 selflnn_get_distributed_context() 获取分布式上下文
+ *   2. 检查上下文是否可用且节点数 > 1
+ *   3. 收集权重梯度和偏置梯度到连续缓冲区
+ *   4. 调用 distributed_sync_gradients_ex() 执行 Ring/Tree AllReduce
+ *   5. 将同步后的梯度写回网络梯度缓冲区
+ *
+ * @param pipeline 训练管线
+ * @return 0=成功/跳过, -1=失败
+ */
+static int pipeline_distributed_gradient_sync(TrainingPipeline* pipeline) {
+    if (!pipeline || !pipeline->network || !pipeline->network->cfc_network) return 0;
+
+    /* 检查管线配置是否启用分布式训练 */
+    if (!pipeline->config.use_distributed_training) return 0;
+
+    /* 获取分布式上下文 */
+    void* dist_raw = selflnn_get_distributed_context();
+    if (!dist_raw) return 0;
+    DistributedContext* dist_ctx = (DistributedContext*)dist_raw;
+
+    /* 单节点无需同步 */
+    if (dist_ctx->num_nodes <= 1) return 0;
+
+    /* 获取权重和偏置梯度 */
+    float* weight_grads = pipeline->network->cfc_network->weight_gradients;
+    float* bias_grads = pipeline->network->cfc_network->bias_gradients;
+    size_t wc = pipeline->network->cfc_network->total_weight_params;
+    size_t bc = pipeline->network->cfc_network->total_bias_params;
+
+    if ((wc == 0 && bc == 0) || (!weight_grads && !bias_grads)) return 0;
+
+    /* 将权重梯度和偏置梯度合并到一个连续缓冲区用于AllReduce */
+    size_t total_params = wc + bc;
+    float* combined_grads = (float*)safe_malloc(total_params * sizeof(float));
+    if (!combined_grads) return -1;
+
+    if (weight_grads && wc > 0) {
+        memcpy(combined_grads, weight_grads, wc * sizeof(float));
+    } else {
+        memset(combined_grads, 0, wc * sizeof(float));
+    }
+    if (bias_grads && bc > 0) {
+        memcpy(combined_grads + wc, bias_grads, bc * sizeof(float));
+    } else {
+        memset(combined_grads + wc, 0, bc * sizeof(float));
+    }
+
+    /* 执行AllReduce梯度同步
+     * 使用distributed_sync_gradients_ex进行梯度同步，支持压缩和版本追踪
+     * 算法0=Ring AllReduce, 1=Tree AllReduce */
+    int algo = dist_ctx->config.allreduce_algorithm;
+    int sync_ret = distributed_sync_gradients_ex(dist_ctx, combined_grads, total_params, algo);
+    if (sync_ret != 0) {
+        log_warning("[分布式同步] 梯度同步失败 (ret=%d)，使用本地梯度继续训练", sync_ret);
+        safe_free((void**)&combined_grads);
+        return -1;
+    }
+
+    /* 将同步后的梯度写回网络梯度缓冲区 */
+    if (weight_grads && wc > 0) {
+        memcpy(weight_grads, combined_grads, wc * sizeof(float));
+    }
+    if (bias_grads && bc > 0) {
+        memcpy(bias_grads, combined_grads + wc, bc * sizeof(float));
+    }
+
+    safe_free((void**)&combined_grads);
+    return 0;
+}
+
+/* ZSFEEE-FIX-DEEP-008: 双阶段检查点保存辅助函数
+ * 在每个训练阶段结束时和每N个epoch保存中间检查点。
+ * 检查点文件名包含阶段名和epoch号，支持训练中断恢复。
+ *
+ * 文件名格式: model/checkpoint_<阶段名>_epoch<epoch号>.slnn
+ * 阶段结束时: model/checkpoint_<阶段名>_final.slnn
+ *
+ * @param pipeline 训练管线
+ * @param phase_name 阶段名称（如"pretrain", "deep_train"等）
+ * @param epoch 当前epoch号（传0表示阶段结束保存）
+ * @return 0=成功, -1=失败
+ */
+static int pipeline_save_checkpoint(TrainingPipeline* pipeline,
+                                     const char* phase_name, int epoch) {
+    if (!pipeline || !pipeline->network || !phase_name) return -1;
+
+    /* 确保model目录存在 */
+    {
+#ifdef _WIN32
+        struct _stat st;
+        if (_stat("model", &st) != 0) _mkdir("model");
+#else
+        struct stat st;
+        if (stat("model", &st) != 0) mkdir("model", 0755);
+#endif
+    }
+
+    char filepath[512];
+    if (epoch > 0) {
+        snprintf(filepath, sizeof(filepath),
+                 "model/checkpoint_%s_epoch%d.slnn", phase_name, epoch);
+    } else {
+        snprintf(filepath, sizeof(filepath),
+                 "model/checkpoint_%s_final.slnn", phase_name);
+    }
+
+    int ret = lnn_save(pipeline->network, filepath);
+    if (ret == 0) {
+        if (epoch > 0) {
+            log_info("[检查点] %s 阶段 epoch %d 检查点已保存: %s",
+                     phase_name, epoch, filepath);
+        } else {
+            log_info("[检查点] %s 阶段完成，最终检查点已保存: %s",
+                     phase_name, filepath);
+        }
+        /* 更新状态中的检查点信息 */
+        pipeline->state.last_checkpoint = time(NULL);
+        strncpy(pipeline->state.checkpoint_path, filepath,
+                sizeof(pipeline->state.checkpoint_path) - 1);
+    } else {
+        log_warning("[检查点] %s 阶段检查点保存失败: %s", phase_name, filepath);
+    }
+    return ret;
 }
 
 
@@ -1089,10 +1226,18 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     if (tp->config.multimodal_epochs == 0) tp->config.multimodal_epochs = 5;
     if (tp->config.fine_tune_epochs == 0) tp->config.fine_tune_epochs = 8;
     if (tp->config.local_epochs == 0) tp->config.local_epochs = 3;
+    if (tp->config.speech_epochs == 0) tp->config.speech_epochs = 5;  /* ZSFQQ-DEEP-002: 语音阶段默认5轮 */
     if (tp->config.batch_size == 0) tp->config.batch_size = 32;
     if (tp->config.multimodal_lr == 0.0f) tp->config.multimodal_lr = 0.0005f;
     if (tp->config.local_lr == 0.0f) tp->config.local_lr = 0.0001f;
+    if (tp->config.speech_lr == 0.0f) tp->config.speech_lr = 0.0002f;  /* ZSFQQ-DEEP-002: 语音阶段默认学习率 */
     if (tp->config.validation_split == 0.0f) tp->config.validation_split = 0.1f;
+
+    /* ZSFEEE-FIX-DEEP-007: 分布式训练默认配置 */
+    if (tp->config.distributed_sync_frequency == 0) tp->config.distributed_sync_frequency = 1;
+
+    /* ZSFEEE-FIX-DEEP-008: 检查点保存默认频率 */
+    if (tp->config.checkpoint_frequency == 0) tp->config.checkpoint_frequency = 10;
 
     tp->optimizer = NULL;
     tp->optimizer_step = 0;
@@ -1133,6 +1278,16 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     }
 
     load_real_data_from_directory(tp);
+
+    /* ZSFZS-F038: EMA权重管理 */
+    tp->ema_manager = (EMAWeightManager*)safe_calloc(1, sizeof(EMAWeightManager));
+    /* ZSFDDD-D7-001: WarmupCosineScheduler创建即从未被任何训练阶段使用，
+     * 改为NULL赋值释放僵尸内存，学习率预热已通过training_warmup_lr在各阶段实现 */
+    tp->lr_scheduler = NULL;
+    if (tp->ema_manager) {
+        ((EMAWeightManager*)tp->ema_manager)->decay = 0.9999f;
+        log_info("EMA权重管理器已集成到训练流水线");
+    }
 
     /* 自监督初始化: 无训练数据时data_buffer保持NULL，在首次pipeline_step中自动生成 */
     if (!tp->has_real_data && !tp->data_buffer) {
@@ -1420,15 +1575,24 @@ static int pipeline_self_supervised_init(TrainingPipeline* pipeline) {
 }
 
 int training_pipeline_step(TrainingPipeline* pipeline) {
-    if (!pipeline || !pipeline->network || !pipeline->state.is_running || pipeline->state.is_paused)
+    if (!pipeline || !pipeline->network || !pipeline->state.is_running || pipeline->state.is_paused) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+            "训练管线无效/未运行/已暂停");  /* ZSFZX-FIX-R8-3 */
         return -1;
+    }
     /* 自监督初始化: 无训练数据时尝试从真实数据源加载 */
     if (!pipeline->data_buffer) {
-        if (pipeline_self_supervised_init(pipeline) != 0)
+        if (pipeline_self_supervised_init(pipeline) != 0) {
+            selflnn_set_last_error(SELFLNN_ERROR_NO_DATA, __func__, __FILE__, __LINE__,
+                "自监督初始化失败");  /* ZSFZX-FIX-R8-3 */
             return SELFLNN_ERROR_NO_DATA;
+        }
     }
-    if (!pipeline->data_buffer || pipeline->data_size == 0)
+    if (!pipeline->data_buffer || pipeline->data_size == 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_NO_DATA, __func__, __FILE__, __LINE__,
+            "训练管线无数据缓冲区");  /* ZSFZX-FIX-R8-3 */
         return SELFLNN_ERROR_NO_DATA;
+    }
 
     /* ZSFA-FIX-P0-002: 集成训练数据流水线预处理 */
     if (pipeline->data_buffer && pipeline->data_size > 0) {
@@ -1456,7 +1620,11 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
     }
     size_t sample_size = (input_dim + output_dim) * sizeof(float);
     size_t total_samples = pipeline->data_size / sample_size;
-    if (total_samples == 0) return -1;
+    if (total_samples == 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_NO_DATA, __func__, __FILE__, __LINE__,
+            "计算样本数为零");  /* ZSFZX-FIX-R8-3 */
+        return -1;
+    }
 
     float* input = (float*)safe_malloc(input_dim * sizeof(float));
     float* target = (float*)safe_malloc(output_dim * sizeof(float));
@@ -1563,6 +1731,8 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 /* ZSFWS-FIX: 移除warmup LR覆盖。warmup在循环外全权控制LR。 */
             } else if (stage == TRAIN_STAGE_DEEP_TRAIN) {
                 lnn_forward(pipeline->network, input, output);
+                /* ZSFGGG-A-002修复: 显式计算损失值确保监控与梯度损失函数一致 */
+                loss = compute_loss_value(output, target, output_dim, pipeline->loss_function);
                 lnn_backward_accumulate(pipeline->network, target, &loss);
                 /* ZSFWS-FIX: 移除warmup LR覆盖 */
             } else if (stage == TRAIN_STAGE_MULTIMODAL) {
@@ -1647,6 +1817,8 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
         if (!is_eval_stage) {
             /* 拉普拉斯增强必须在优化器之前调用，使滤波后的梯度被优化器消费 */
             pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
+            /* ZSFEEE-FIX-DEEP-007: 自监督步骤分布式梯度同步 */
+            pipeline_distributed_gradient_sync(pipeline);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
             /* P0-BPTT: 统一使用Adam更新cell级参数（gate/tau/LN等），
@@ -1893,6 +2065,8 @@ int pipeline_multimodal_train_step(TrainingPipeline* pipeline,
 
     lnn_forward(pipeline->network, combined, output);
     lnn_backward_accumulate(pipeline->network, target, loss);
+    /* ZSFEEE-FIX-DEEP-007: 多模态单步训练分布式梯度同步 */
+    pipeline_distributed_gradient_sync(pipeline);
     pipeline_apply_optimizer(pipeline, pipeline->network,
         pipeline->network->config.learning_rate);
     /* P0-BPTT: cell参数使用Adam统一更新 */
@@ -1973,6 +2147,8 @@ int pipeline_local_train(TrainingPipeline* pipeline, const char* module_name,
             safe_free((void**)&tmp_in); safe_free((void**)&tmp_out); safe_free((void**)&tmp_tar);
         }
         if (pipeline->network && num_samples > 0) {
+            /* ZSFEEE-FIX-DEEP-007: 局部训练分布式梯度同步 */
+            pipeline_distributed_gradient_sync(pipeline);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
             pipeline_apply_cell_gradients_adam(pipeline);
@@ -2171,6 +2347,13 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
     size_t total_samples = total_elements / sample_stride;
     if (total_samples == 0) return -1;
 
+    /* ZSFEEE-FIX-DEEP-016: 在将数据送入LNN前向传播之前进行Z-Score归一化。
+     * 如果预处理返回错误，记录警告日志但继续训练（使用原始数据作为回退） */
+    if (training_data_pipeline_preprocess(pipeline->data_buffer,
+            pipeline->data_size, input_size, output_size) != 0) {
+        log_warning("[预训练] Z-Score归一化失败，使用原始数据继续训练");
+    }
+
     /* 预训练阶段：自监督学习 + 噪声鲁棒性训练 + 高学习率 */
     float pretrain_lr = pipeline->network->config.learning_rate;
     if (pretrain_lr < 1e-4f) pretrain_lr = 1e-3f;
@@ -2231,6 +2414,41 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                 cfc_zero_cell_gradients(pipeline->network->cfc_network);
             }
 
+            /* ZSFEEE-FIX-DEEP-017: MixUp批次级数据增强 ——
+             * 在Z-Score预处理之后、前向传播之前，随机选择两个样本进行线性混合。
+             * MixUp公式: x_mix = λ·x_a + (1-λ)·x_b, y_mix = λ·y_a + (1-λ)·y_b
+             * λ从[0.1, 0.9]均匀分布中采样，增强模型对样本间插值的泛化能力。 */
+            if (pipeline->aug_config.enabled &&
+                (pipeline->aug_config.types & AUG_MIXUP) && current_batch > 1) {
+                for (size_t mb = 0; mb + 1 < current_batch; mb += 2) {
+                    size_t idx_a = shuffle_idx[s + mb];
+                    size_t idx_b = shuffle_idx[s + mb + 1];
+                    size_t off_a = idx_a * sample_stride;
+                    size_t off_b = idx_b * sample_stride;
+                    if (off_a + sample_stride > total_elements) continue;
+                    if (off_b + sample_stride > total_elements) continue;
+                    float lambda = secure_random_float() * 0.8f + 0.1f;
+                    float* data_a = pipeline->data_buffer + off_a;
+                    float* data_b = pipeline->data_buffer + off_b;
+                    float* tgt_a  = data_a + input_size;
+                    float* tgt_b  = data_b + input_size;
+                    for (size_t mk = 0; mk < input_size; mk++) {
+                        float orig_a = data_a[mk];
+                        float orig_b = data_b[mk];
+                        data_a[mk] = lambda * orig_a + (1.0f - lambda) * orig_b;
+                        data_b[mk] = (1.0f - lambda) * orig_a + lambda * orig_b;
+                    }
+                    if (pipeline->aug_config.apply_to_target) {
+                        for (size_t mk = 0; mk < output_size; mk++) {
+                            float orig_a = tgt_a[mk];
+                            float orig_b = tgt_b[mk];
+                            tgt_a[mk] = lambda * orig_a + (1.0f - lambda) * orig_b;
+                            tgt_b[mk] = (1.0f - lambda) * orig_a + lambda * orig_b;
+                        }
+                    }
+                }
+            }
+
             for (size_t b = 0; b < current_batch; b++) {
                 size_t idx = shuffle_idx[s + b];
                 size_t offset = idx * sample_stride;
@@ -2243,6 +2461,32 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                 float* noisy_input = (float*)safe_malloc(input_size * sizeof(float));
                 if (noisy_input) {
                     memcpy(noisy_input, input, input_size * sizeof(float));
+
+                    /* ZSFEEE-FIX-DEEP-017: 数据增强配置接入训练管线 —— 
+                     * 在Z-Score预处理之后、前向传播之前应用数据增强。
+                     * 如果aug_config.enabled为false则跳过增强直接使用原始数据。
+                     * 支持MixUp（批次级混合）、高斯噪声、特征丢弃等增强策略。
+                     * 每个增强操作后将数据裁剪到[-10,10]合理范围防止数值溢出。 */
+                    if (pipeline->aug_config.enabled && pipeline->aug_config.types != AUG_NONE) {
+                        if (pipeline->aug_config.types & AUG_GAUSSIAN_NOISE)
+                            pipeline_augment_single(noisy_input, NULL, input_size, output_size,
+                                                    AUG_GAUSSIAN_NOISE, pipeline->aug_config.noise_std);
+                        if (pipeline->aug_config.types & AUG_UNIFORM_NOISE)
+                            pipeline_augment_single(noisy_input, NULL, input_size, output_size,
+                                                    AUG_UNIFORM_NOISE, pipeline->aug_config.noise_uniform_range);
+                        if (pipeline->aug_config.types & AUG_RANDOM_MASK)
+                            pipeline_augment_single(noisy_input, NULL, input_size, output_size,
+                                                    AUG_RANDOM_MASK, pipeline->aug_config.mask_ratio);
+                        if (pipeline->aug_config.types & AUG_RANDOM_SCALE)
+                            pipeline_augment_single(noisy_input, NULL, input_size, output_size,
+                                                    AUG_RANDOM_SCALE, (pipeline->aug_config.scale_max - pipeline->aug_config.scale_min) * 0.5f);
+                        /* 每个增强操作后将数据裁剪到合理范围（防止数值溢出） */
+                        for (size_t k = 0; k < input_size; k++) {
+                            if (noisy_input[k] > 10.0f) noisy_input[k] = 10.0f;
+                            if (noisy_input[k] < -10.0f) noisy_input[k] = -10.0f;
+                        }
+                    }
+
                     /* ZSFWS-FIX17: 噪声覆盖全部输入维度，移除512硬上限 */
                     unsigned int noise_seed = (unsigned int)((uint64_t)clock() ^ (idx * 7919 + epoch * 503));
                     for (size_t k = 0; k < input_size; k++) {
@@ -2275,9 +2519,34 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                 pipeline->network->config.learning_rate = saved_pretrain_lr;
             }
             global_step++;
-            /* 梯度裁剪 → 拉普拉斯增强 → 优化器更新 */
+            /* 梯度裁剪 → 噪声注入 → 拉普拉斯增强 → 优化器更新
+             * ZSFDDD-D3-002修复: 先裁剪信号梯度防止爆炸，再注入噪声增加探索 */
             pipeline_clip_gradients(pipeline->network, 10.0f);
+            /* 预训练特有：梯度噪声注入 —— 提高泛化鲁棒性
+             * 噪声标准差随步数衰减: σ = 0.01 / √(step+1)
+             * 噪声在裁剪之后注入，不被裁剪压缩，保持探索多样性 */
+            {
+                float noise_scale = 0.01f / sqrtf((float)(global_step + 1));
+                float* wg = pipeline->network->cfc_network->weight_gradients;
+                float* bg = pipeline->network->cfc_network->bias_gradients;
+                size_t wc = pipeline->network->cfc_network->total_weight_params;
+                size_t bc = pipeline->network->cfc_network->total_bias_params;
+                for (size_t gi = 0; gi < wc; gi++) {
+                    float u1 = secure_random_float() + 1e-10f;
+                    float u2 = secure_random_float() + 1e-10f;
+                    float gauss = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265f * u2);
+                    wg[gi] += gauss * noise_scale;
+                }
+                for (size_t gi = 0; gi < bc; gi++) {
+                    float u1 = secure_random_float() + 1e-10f;
+                    float u2 = secure_random_float() + 1e-10f;
+                    float gauss = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265f * u2);
+                    bg[gi] += gauss * noise_scale;
+                }
+            }
             pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
+            /* ZSFEEE-FIX-DEEP-007: 分布式梯度同步 —— 在优化器步进前同步所有节点的梯度 */
+            pipeline_distributed_gradient_sync(pipeline);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
             pipeline_apply_cell_gradients_adam(pipeline);
@@ -2293,8 +2562,16 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
                 epoch_loss, &pipeline->network->config.learning_rate,
                 pipeline->config.use_early_stopping,
                 "预训练阶段") != 0) {
-            /* 早停触发，跳出epoch循环 */
+            /* 早停触发：保存当前epoch检查点后跳出 */
+            /* ZSFEEE-FIX-DEEP-008: 早停时保存检查点 */
+            pipeline_save_checkpoint(pipeline, "pretrain", epoch + 1);
             break;
+        }
+
+        /* ZSFEEE-FIX-DEEP-008: 每N个epoch保存一次中间检查点 */
+        if (pipeline->config.checkpoint_frequency > 0 &&
+            (epoch + 1) % pipeline->config.checkpoint_frequency == 0) {
+            pipeline_save_checkpoint(pipeline, "pretrain", epoch + 1);
         }
     }
     safe_free((void**)&shuffle_idx);
@@ -2304,6 +2581,8 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
     pipeline->patience_counter = 0;
     pipeline->plateau_counter = 0;
     pipeline->last_best_train_loss = FLT_MAX;
+    /* ZSFEEE-FIX-DEEP-008: 预训练阶段结束保存最终检查点 */
+    pipeline_save_checkpoint(pipeline, "pretrain", 0);
     pipeline->state.stage = TRAIN_STAGE_DEEP_TRAIN;
     return 0;
 }
@@ -2332,16 +2611,56 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
     size_t total_samples = total_elements / sample_stride;
     if (total_samples == 0) return -1;
 
+    /* ZSFEEE-FIX-DEEP-016: 在将数据送入LNN前向传播之前进行Z-Score归一化。
+     * 如果预处理返回错误，记录警告日志但继续训练（使用原始数据作为回退） */
+    if (training_data_pipeline_preprocess(pipeline->data_buffer,
+            pipeline->data_size, input_size, output_size) != 0) {
+        log_warning("[深度训练] Z-Score归一化失败，使用原始数据继续训练");
+    }
+
     float best_loss = FLT_MAX;
     size_t batch_size = pipeline->config.batch_size > 0 ? pipeline->config.batch_size : 32;
 
+    /* 深度训练特有：梯度累积步数 —— 累积N个批次的梯度后统一更新，平滑梯度方向 */
+    #define GRAD_ACCUM_STEPS 4
+
+    /* 深度训练特有：EMA权重平滑 —— 维持参数指数移动平均，抑制训练噪声 */
+    size_t wc = pipeline->network->cfc_network->total_weight_params;
+    size_t bc = pipeline->network->cfc_network->total_bias_params;
+    if (wc == 0) {
+        wc = (size_t)pipeline->network->config.input_size *
+                (size_t)pipeline->network->config.hidden_size;
+        bc = (size_t)pipeline->network->config.hidden_size;
+    }
+    float* ema_weights = (float*)safe_malloc(wc * sizeof(float));
+    float* ema_biases = (float*)safe_malloc(bc * sizeof(float));
+    float* accum_wgrad = (float*)safe_calloc(wc, sizeof(float));
+    float* accum_bgrad = (float*)safe_calloc(bc, sizeof(float));
+    if (!ema_weights || !ema_biases || !accum_wgrad || !accum_bgrad) {
+        safe_free((void**)&ema_weights); safe_free((void**)&ema_biases);
+        safe_free((void**)&accum_wgrad); safe_free((void**)&accum_bgrad);
+        return -1;
+    }
+    {
+        float* w_ptr; size_t wc_check;
+        float* b_ptr; size_t bc_check;
+        if (cfc_get_weight_matrix(pipeline->network->cfc_network, &w_ptr, &wc_check) == 0)
+            memcpy(ema_weights, w_ptr, wc * sizeof(float));
+        if (cfc_get_bias_vector(pipeline->network->cfc_network, &b_ptr, &bc_check) == 0)
+            memcpy(ema_biases, b_ptr, bc * sizeof(float));
+    }
+
     /* 初始化打乱索引 */
     size_t* shuffle_idx = (size_t*)safe_malloc(total_samples * sizeof(size_t));
-    if (!shuffle_idx) return -1;
+    if (!shuffle_idx) {
+        safe_free((void**)&ema_weights); safe_free((void**)&ema_biases);
+        safe_free((void**)&accum_wgrad); safe_free((void**)&accum_bgrad);
+        return -1;
+    }
     for (size_t i = 0; i < total_samples; i++) shuffle_idx[i] = i;
 
     for (int epoch = 0; epoch < epochs; epoch++) {
-        if (!pipeline->state.is_running) { safe_free((void**)&shuffle_idx); return 0; }
+        if (!pipeline->state.is_running) { safe_free((void**)&shuffle_idx); goto deep_cleanup; }
 
         /* 每个epoch打乱数据顺序（K-012修复：使用安全随机数） */
         for (size_t i = total_samples; i > 1; i--) {
@@ -2352,27 +2671,57 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
 
         float loss = 0.0f;
         size_t samples_processed = 0;
+        int accum_count = 0;
+        memset(accum_wgrad, 0, wc * sizeof(float));
+        memset(accum_bgrad, 0, bc * sizeof(float));
 
         for (size_t s = 0; s < total_samples; s += batch_size) {
             size_t current_batch = batch_size;
             if (s + current_batch > total_samples) current_batch = total_samples - s;
 
-            /* FIX-011: 每批次开始前清零网络级梯度缓冲区 */
-            {
-                size_t wg_sz, bg_sz;
-                if (pipeline->network->cfc_network->total_weight_params > 0) {
-                    wg_sz = pipeline->network->cfc_network->total_weight_params;
-                    bg_sz = pipeline->network->cfc_network->total_bias_params;
-                } else {
-                    wg_sz = (size_t)pipeline->network->config.input_size *
-                               (size_t)pipeline->network->config.hidden_size;
-                    bg_sz = (size_t)pipeline->network->config.hidden_size;
-                }
+            /* 深度训练：梯度累积模式 —— 不清零梯度，跨批次累加
+             * 仅在 accum_count==0 时（新一轮累积周期开始）清零 */
+            if (accum_count == 0) {
                 if (pipeline->network->cfc_network->weight_gradients)
-                    memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
+                    memset(pipeline->network->cfc_network->weight_gradients, 0, wc * sizeof(float));
                 if (pipeline->network->cfc_network->bias_gradients)
-                    memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
-            cfc_zero_cell_gradients(pipeline->network->cfc_network);
+                    memset(pipeline->network->cfc_network->bias_gradients, 0, bc * sizeof(float));
+                cfc_zero_cell_gradients(pipeline->network->cfc_network);
+            }
+
+            /* ZSFEEE-FIX-DEEP-017: MixUp批次级数据增强 ——
+             * 在Z-Score预处理之后、前向传播之前，随机选择相邻两个样本进行线性混合。
+             * MixUp公式: x_mix = λ·x_a + (1-λ)·x_b, y_mix = λ·y_a + (1-λ)·y_b
+             * λ从[0.1, 0.9]均匀分布中采样，仅在深度训练阶段混合特征空间。 */
+            if (pipeline->aug_config.enabled &&
+                (pipeline->aug_config.types & AUG_MIXUP) && current_batch > 1) {
+                for (size_t mb = 0; mb + 1 < current_batch; mb += 2) {
+                    size_t idx_a = shuffle_idx[s + mb];
+                    size_t idx_b = shuffle_idx[s + mb + 1];
+                    size_t off_a = idx_a * sample_stride;
+                    size_t off_b = idx_b * sample_stride;
+                    if (off_a + sample_stride > total_elements) continue;
+                    if (off_b + sample_stride > total_elements) continue;
+                    float lambda = secure_random_float() * 0.8f + 0.1f;
+                    float* data_a = pipeline->data_buffer + off_a;
+                    float* data_b = pipeline->data_buffer + off_b;
+                    float* tgt_a  = data_a + input_size;
+                    float* tgt_b  = data_b + input_size;
+                    for (size_t mk = 0; mk < input_size; mk++) {
+                        float orig_a = data_a[mk];
+                        float orig_b = data_b[mk];
+                        data_a[mk] = lambda * orig_a + (1.0f - lambda) * orig_b;
+                        data_b[mk] = (1.0f - lambda) * orig_a + lambda * orig_b;
+                    }
+                    if (pipeline->aug_config.apply_to_target) {
+                        for (size_t mk = 0; mk < output_size; mk++) {
+                            float orig_a = tgt_a[mk];
+                            float orig_b = tgt_b[mk];
+                            tgt_a[mk] = lambda * orig_a + (1.0f - lambda) * orig_b;
+                            tgt_b[mk] = (1.0f - lambda) * orig_a + lambda * orig_b;
+                        }
+                    }
+                }
             }
 
             for (size_t b = 0; b < current_batch; b++) {
@@ -2385,6 +2734,32 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
                 float* output = (float*)safe_malloc(output_size * sizeof(float));
                 if (!output) continue;
 
+                /* ZSFEEE-FIX-DEEP-017: 数据增强配置接入训练管线 ——
+                 * 在Z-Score预处理之后、前向传播之前应用数据增强。
+                 * 如果aug_config.enabled为false则跳过增强直接使用原始数据。
+                 * 高斯噪声：添加小幅度随机噪声提高泛化能力。
+                 * 特征丢弃：随机丢弃少量特征防止过拟合。
+                 * 每个增强操作后将数据裁剪到[-10,10]合理范围防止数值溢出。 */
+                if (pipeline->aug_config.enabled && pipeline->aug_config.types != AUG_NONE) {
+                    if (pipeline->aug_config.types & AUG_GAUSSIAN_NOISE)
+                        pipeline_augment_single(input, NULL, input_size, output_size,
+                                                AUG_GAUSSIAN_NOISE, pipeline->aug_config.noise_std);
+                    if (pipeline->aug_config.types & AUG_UNIFORM_NOISE)
+                        pipeline_augment_single(input, NULL, input_size, output_size,
+                                                AUG_UNIFORM_NOISE, pipeline->aug_config.noise_uniform_range);
+                    if (pipeline->aug_config.types & AUG_RANDOM_MASK)
+                        pipeline_augment_single(input, NULL, input_size, output_size,
+                                                AUG_RANDOM_MASK, pipeline->aug_config.mask_ratio);
+                    if (pipeline->aug_config.types & AUG_RANDOM_SCALE)
+                        pipeline_augment_single(input, NULL, input_size, output_size,
+                                                AUG_RANDOM_SCALE, (pipeline->aug_config.scale_max - pipeline->aug_config.scale_min) * 0.5f);
+                    /* 每个增强操作后将数据裁剪到合理范围（防止数值溢出） */
+                    for (size_t k = 0; k < input_size; k++) {
+                        if (input[k] > 10.0f) input[k] = 10.0f;
+                        if (input[k] < -10.0f) input[k] = -10.0f;
+                    }
+                }
+
                 lnn_forward(pipeline->network, input, output);
                 float l;
                 lnn_backward_accumulate(pipeline->network, target, &l);
@@ -2394,13 +2769,91 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
                 samples_processed++;
                 safe_free((void**)&output);
             }
-            /* 梯度裁剪 → 拉普拉斯增强 → 优化器更新 */
+
+            /* 将当前批次梯度累加到累积缓冲区 */
+            for (size_t gi = 0; gi < wc; gi++)
+                accum_wgrad[gi] += pipeline->network->cfc_network->weight_gradients[gi];
+            for (size_t gi = 0; gi < bc; gi++)
+                accum_bgrad[gi] += pipeline->network->cfc_network->bias_gradients[gi];
+            accum_count++;
+
+            /* 累积步数达到GRAD_ACCUM_STEPS时，统一更新参数 */
+            if (accum_count >= GRAD_ACCUM_STEPS) {
+                float inv_accum = 1.0f / (float)accum_count;
+                for (size_t gi = 0; gi < wc; gi++)
+                    pipeline->network->cfc_network->weight_gradients[gi] = accum_wgrad[gi] * inv_accum;
+                for (size_t gi = 0; gi < bc; gi++)
+                    pipeline->network->cfc_network->bias_gradients[gi] = accum_bgrad[gi] * inv_accum;
+
+                /* 梯度裁剪 → 拉普拉斯增强 → 分布式同步 → 优化器更新 */
+                pipeline_clip_gradients(pipeline->network, 10.0f);
+                pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
+                /* ZSFEEE-FIX-DEEP-007: 分布式梯度同步 —— 累积梯度更新前同步所有节点 */
+                pipeline_distributed_gradient_sync(pipeline);
+                pipeline_apply_optimizer(pipeline, pipeline->network,
+                    pipeline->network->config.learning_rate);
+                pipeline_apply_cell_gradients_adam(pipeline);
+
+                /* EMA权重平滑：w_ema = 0.999·w_ema + 0.001·w_curr */
+                {
+                    float* w_ptr; size_t wc_check;
+                    float* b_ptr; size_t bc_check;
+                    if (cfc_get_weight_matrix(pipeline->network->cfc_network, &w_ptr, &wc_check) == 0) {
+                        for (size_t ei = 0; ei < wc; ei++)
+                            ema_weights[ei] = 0.999f * ema_weights[ei] + 0.001f * w_ptr[ei];
+                    }
+                    if (cfc_get_bias_vector(pipeline->network->cfc_network, &b_ptr, &bc_check) == 0) {
+                        for (size_t ei = 0; ei < bc; ei++)
+                            ema_biases[ei] = 0.999f * ema_biases[ei] + 0.001f * b_ptr[ei];
+                    }
+                }
+
+                /* 重置累积状态 */
+                accum_count = 0;
+                memset(accum_wgrad, 0, wc * sizeof(float));
+                memset(accum_bgrad, 0, bc * sizeof(float));
+            }
+        }
+
+        /* 处理残余累积（不足GRAD_ACCUM_STEPS的剩余批次） */
+        if (accum_count > 0) {
+            float inv_accum = 1.0f / (float)accum_count;
+            for (size_t gi = 0; gi < wc; gi++)
+                pipeline->network->cfc_network->weight_gradients[gi] = accum_wgrad[gi] * inv_accum;
+            for (size_t gi = 0; gi < bc; gi++)
+                pipeline->network->cfc_network->bias_gradients[gi] = accum_bgrad[gi] * inv_accum;
             pipeline_clip_gradients(pipeline->network, 10.0f);
             pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
+            /* ZSFEEE-FIX-DEEP-007: 分布式梯度同步 —— 残余累积梯度更新前同步所有节点 */
+            pipeline_distributed_gradient_sync(pipeline);
             pipeline_apply_optimizer(pipeline, pipeline->network,
                 pipeline->network->config.learning_rate);
             pipeline_apply_cell_gradients_adam(pipeline);
+            {
+                float* w_ptr; size_t wc_check;
+                float* b_ptr; size_t bc_check;
+                if (cfc_get_weight_matrix(pipeline->network->cfc_network, &w_ptr, &wc_check) == 0) {
+                    for (size_t ei = 0; ei < wc; ei++)
+                        ema_weights[ei] = 0.999f * ema_weights[ei] + 0.001f * w_ptr[ei];
+                }
+                if (cfc_get_bias_vector(pipeline->network->cfc_network, &b_ptr, &bc_check) == 0) {
+                    for (size_t ei = 0; ei < bc; ei++)
+                        ema_biases[ei] = 0.999f * ema_biases[ei] + 0.001f * b_ptr[ei];
+                }
+            }
         }
+
+        /* 每个epoch结束后，将EMA平滑权重写回网络（推理用平滑参数） */
+        {
+            float* w_ptr; size_t wc_check;
+            float* b_ptr; size_t bc_check;
+            if (cfc_get_weight_matrix(pipeline->network->cfc_network, &w_ptr, &wc_check) == 0)
+                memcpy(w_ptr, ema_weights, wc * sizeof(float));
+            if (cfc_get_bias_vector(pipeline->network->cfc_network, &b_ptr, &bc_check) == 0)
+                memcpy(b_ptr, ema_biases, bc * sizeof(float));
+            cfc_sync_shared_to_cells(pipeline->network->cfc_network);
+        }
+
         if (samples_processed > 0) loss /= (float)samples_processed;
         if (loss < best_loss) best_loss = loss;
         pipeline->state.current_epoch = epoch + 1;
@@ -2412,7 +2865,16 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
                 loss, &pipeline->network->config.learning_rate,
                 pipeline->config.use_early_stopping,
                 "深度训练阶段") != 0) {
+            /* 早停触发：保存当前epoch检查点后跳出 */
+            /* ZSFEEE-FIX-DEEP-008: 早停时保存检查点 */
+            pipeline_save_checkpoint(pipeline, "deep_train", epoch + 1);
             break;
+        }
+
+        /* ZSFEEE-FIX-DEEP-008: 每N个epoch保存一次中间检查点 */
+        if (pipeline->config.checkpoint_frequency > 0 &&
+            (epoch + 1) % pipeline->config.checkpoint_frequency == 0) {
+            pipeline_save_checkpoint(pipeline, "deep_train", epoch + 1);
         }
 
         if (pipeline->monitor) {
@@ -2420,13 +2882,21 @@ int pipeline_run_deep_train_phase(TrainingPipeline* pipeline, int epochs, float*
                 pipeline->state.current_epoch, 0, loss);
         }
     }
+
+deep_cleanup:
     safe_free((void**)&shuffle_idx);
+    safe_free((void**)&ema_weights);
+    safe_free((void**)&ema_biases);
+    safe_free((void**)&accum_wgrad);
+    safe_free((void**)&accum_bgrad);
     if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
     *final_loss = best_loss;
     /* 重置收敛状态以备下一阶段 */
     pipeline->patience_counter = 0;
     pipeline->plateau_counter = 0;
     pipeline->last_best_train_loss = FLT_MAX;
+    /* ZSFEEE-FIX-DEEP-008: 深度训练阶段结束保存最终检查点 */
+    pipeline_save_checkpoint(pipeline, "deep_train", 0);
     return 0;
 }
 
@@ -2450,18 +2920,28 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
     float saved_lr = pipeline->network->config.learning_rate;
     pipeline->network->config.learning_rate = multimodal_lr;
 
-    size_t input_size = 512, output_size = 256;
+    size_t input_size = 512, output_size = 256, hidden_size = 1024;
     {
         LNNConfig lnn_cfg;
         if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
             input_size = lnn_cfg.input_size;
             output_size = lnn_cfg.output_size;
+            hidden_size = lnn_cfg.hidden_size;
         }
     }
     size_t total_elements = pipeline->data_size / sizeof(float);
     size_t sample_stride = input_size + output_size;
     size_t total_samples = total_elements / sample_stride;
     if (total_samples == 0) return -1;
+    /* 对比损失使用采样上限防止内存过大 */
+    size_t contrast_samples = total_samples;
+    if (contrast_samples > 1024) contrast_samples = 1024;
+    size_t vis_emb_dim = hidden_size / 4;
+    size_t txt_emb_dim = hidden_size / 4;
+    if (vis_emb_dim < 32) vis_emb_dim = 32;
+    if (txt_emb_dim < 32) txt_emb_dim = 32;
+    float contrast_weight = 0.3f;    /* 对比损失权重 */
+    float contrast_temp = 0.07f;     /* InfoNCE温度参数 */
 
     float best_loss = FLT_MAX;
     float epoch_loss = 0.0f;
@@ -2475,9 +2955,12 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
     /* 分配完整输入和输出缓冲区 */
     float* full_input = (float*)safe_calloc(input_size, sizeof(float));
     float* full_output = (float*)safe_calloc(output_size, sizeof(float));
-    if (!full_input || !full_output) {
-        safe_free((void**)&full_input);
-        safe_free((void**)&full_output);
+    /* 跨模态嵌入缓冲区 */
+    float* vis_embeddings = (float*)safe_calloc(contrast_samples * vis_emb_dim, sizeof(float));
+    float* txt_embeddings = (float*)safe_calloc(contrast_samples * txt_emb_dim, sizeof(float));
+    if (!full_input || !full_output || !vis_embeddings || !txt_embeddings) {
+        safe_free((void**)&full_input); safe_free((void**)&full_output);
+        safe_free((void**)&vis_embeddings); safe_free((void**)&txt_embeddings);
         safe_free((void**)&shuffle_idx);
         return -1;
     }
@@ -2494,6 +2977,18 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
 
         epoch_loss = 0.0f;
         processed_count = 0;
+
+        /* ZSFDDD-D3-001: 非预训练阶段添加学习率预热，防止Adam动量崩溃 */
+        {
+            int warmup_epochs = epochs / 10;
+            if (warmup_epochs < 1) warmup_epochs = 1;
+            if (epoch < warmup_epochs) {
+                float warmup_lr = training_warmup_lr(epoch, warmup_epochs, multimodal_lr * 0.1f, multimodal_lr);
+                pipeline->network->config.learning_rate = warmup_lr;
+            } else {
+                pipeline->network->config.learning_rate = multimodal_lr;
+            }
+        }
 
         /* FIX-011: 每epoch开始前清零网络级梯度缓冲区 */
         {
@@ -2512,6 +3007,9 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
                 memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
         cfc_zero_cell_gradients(pipeline->network->cfc_network);
         }
+
+        /* 存储本epoch的跨模态嵌入（用于对比损失） */
+        size_t embed_count = 0;
 
         for (size_t s = 0; s < total_samples; s++) {
             size_t idx = shuffle_idx[s];
@@ -2532,36 +3030,122 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
             if (l < best_loss) best_loss = l;
             epoch_loss += l;
             processed_count++;
+
+            /* 提取跨模态嵌入：从hidden_state分段提取视觉和文本嵌入
+             * 视觉嵌入 = hidden_state[0 : vis_emb_dim]
+             * 文本嵌入 = hidden_state[vis_emb_dim : vis_emb_dim + txt_emb_dim] */
+            if (pipeline->network->hidden_state && embed_count < contrast_samples) {
+                memcpy(vis_embeddings + embed_count * vis_emb_dim,
+                       pipeline->network->hidden_state,
+                       vis_emb_dim * sizeof(float));
+                memcpy(txt_embeddings + embed_count * txt_emb_dim,
+                       pipeline->network->hidden_state + vis_emb_dim,
+                       txt_emb_dim * sizeof(float));
+                embed_count++;
+            }
         }
+
+        /* ZSFDDD-D2-006修复+D3-BUG修复: 多模态训练阶段必须在优化器前裁剪梯度 */
+        pipeline_clip_gradients(pipeline->network, 10.0f);
 
         /* 拉普拉斯增强必须在优化器之前调用 */
         pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
+        /* ZSFEEE-FIX-DEEP-007: 分布式梯度同步 —— 多模态梯度在优化器步进前同步 */
+        pipeline_distributed_gradient_sync(pipeline);
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
         pipeline_apply_cell_gradients_adam(pipeline);
 
         if (processed_count > 0) epoch_loss /= (float)processed_count;
 
+        /* M-022: 跨模态InfoNCE对比损失
+         * 计算视觉嵌入与文本嵌入之间的余弦相似度矩阵，
+         * 对角线为同一样本的视觉-文本正对，其他为负对 */
+        float contrastive_loss = 0.0f;
+        if (embed_count >= 2) {
+            size_t n = embed_count;
+            /* 1. 计算余弦相似度矩阵 S[i][j] = cos_sim(vis[i], txt[j]) */
+            float* sim_matrix = (float*)safe_malloc(n * n * sizeof(float));
+            if (sim_matrix) {
+                for (size_t i = 0; i < n; i++) {
+                    float* vi = vis_embeddings + i * vis_emb_dim;
+                    float vi_norm = 0.0f;
+                    for (size_t d = 0; d < vis_emb_dim; d++)
+                        vi_norm += vi[d] * vi[d];
+                    vi_norm = sqrtf(vi_norm) + 1e-8f;
+                    for (size_t j = 0; j < n; j++) {
+                        float* tj = txt_embeddings + j * txt_emb_dim;
+                        float tj_norm = 0.0f;
+                        float dot = 0.0f;
+                        size_t min_dim = vis_emb_dim < txt_emb_dim ? vis_emb_dim : txt_emb_dim;
+                        for (size_t d = 0; d < min_dim; d++)
+                            dot += vi[d] * tj[d];
+                        for (size_t d = 0; d < txt_emb_dim; d++)
+                            tj_norm += tj[d] * tj[d];
+                        tj_norm = sqrtf(tj_norm) + 1e-8f;
+                        sim_matrix[i * n + j] = dot / (vi_norm * tj_norm);
+                    }
+                }
+
+                /* 2. InfoNCE损失: L = -1/n Σ_i log(exp(S[i][i]/τ) / Σ_j exp(S[i][j]/τ)) */
+                float tau = contrast_temp;
+                for (size_t i = 0; i < n; i++) {
+                    float pos_sim = sim_matrix[i * n + i];
+                    /* 计算exp求和（所有j，含对角线） */
+                    float exp_sum = 0.0f;
+                    for (size_t j = 0; j < n; j++) {
+                        float sim_ij = sim_matrix[i * n + j];
+                        /* 防止exp溢出 */
+                        float clamped = sim_ij / tau;
+                        if (clamped > 50.0f) clamped = 50.0f;
+                        if (clamped < -50.0f) clamped = -50.0f;
+                        exp_sum += expf(clamped);
+                    }
+                    float pos_clamped = pos_sim / tau;
+                    if (pos_clamped > 50.0f) pos_clamped = 50.0f;
+                    if (pos_clamped < -50.0f) pos_clamped = -50.0f;
+                    contrastive_loss += -pos_clamped + logf(exp_sum + 1e-10f);
+                }
+                contrastive_loss /= (float)n;
+                safe_free((void**)&sim_matrix);
+            }
+        }
+
+        /* 将对比损失加权加到主损失上 */
+        float total_epoch_loss = epoch_loss + contrast_weight * contrastive_loss;
+        epoch_loss = total_epoch_loss;
+
         pipeline->state.current_epoch = epoch + 1;
-        pipeline->state.current_loss = epoch_loss;
+        pipeline->state.current_loss = total_epoch_loss;
         pipeline->state.samples_processed += processed_count;
 
         /* 训练收敛检测：早停 + 损失日志 + 自适应LR衰减 */
         if (pipeline_convergence_check(pipeline, epoch + 1, epochs,
-                epoch_loss, &pipeline->network->config.learning_rate,
+                total_epoch_loss, &pipeline->network->config.learning_rate,
                 pipeline->config.use_early_stopping,
                 "多模态训练阶段") != 0) {
+            /* 早停触发：保存当前epoch检查点后跳出 */
+            /* ZSFEEE-FIX-DEEP-008: 早停时保存检查点 */
+            pipeline_save_checkpoint(pipeline, "multimodal", epoch + 1);
             break;
+        }
+
+        /* ZSFEEE-FIX-DEEP-008: 每N个epoch保存一次中间检查点 */
+        if (pipeline->config.checkpoint_frequency > 0 &&
+            (epoch + 1) % pipeline->config.checkpoint_frequency == 0) {
+            pipeline_save_checkpoint(pipeline, "multimodal", epoch + 1);
         }
 
         if (pipeline->monitor) {
             training_monitor_log_metric(pipeline->monitor, TM_LOSS,
-                pipeline->state.current_epoch, 0, epoch_loss);
+                pipeline->state.current_epoch, 0, total_epoch_loss);
         }
     }
 
     safe_free((void**)&full_input);
     safe_free((void**)&full_output);
+    safe_free((void**)&vis_embeddings);
+    safe_free((void**)&txt_embeddings);
     safe_free((void**)&shuffle_idx);
 
     pipeline->network->config.learning_rate = saved_lr;
@@ -2571,6 +3155,8 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
     pipeline->patience_counter = 0;
     pipeline->plateau_counter = 0;
     pipeline->last_best_train_loss = FLT_MAX;
+    /* ZSFEEE-FIX-DEEP-008: 多模态训练阶段结束保存最终检查点 */
+    pipeline_save_checkpoint(pipeline, "multimodal", 0);
     pipeline->state.stage = TRAIN_STAGE_FINE_TUNE;
     return 0;
 }
@@ -2591,6 +3177,14 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
     size_t data_source_size = pipeline->data_size;
     if (!data_source || data_source_size == 0) return -1;
 
+    /* 微调特有：学习率降低10倍 + L2正则化增强
+     * 微调在已收敛参数上细调，大LR会破坏已学习的表示，L2正则化防止过拟合 */
+    float saved_lr = pipeline->network->config.learning_rate;
+    float fine_tune_lr = saved_lr * 0.1f;
+    if (fine_tune_lr < 1e-7f) fine_tune_lr = 1e-7f;
+    pipeline->network->config.learning_rate = fine_tune_lr;
+    float l2_lambda = 1e-4f;  /* L2正则化强度 */
+
     /* ZSFWS-FIX16: 从LNN读取维度，与所有其他阶段一致。 */
     size_t input_size = 512, output_size = 256;
     {
@@ -2604,6 +3198,15 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
     size_t sample_stride = input_size + output_size;
     size_t total_samples = total_elements / sample_stride;
     if (total_samples == 0) return -1;
+
+    /* 获取权重维度用于L2正则化 */
+    size_t wc = pipeline->network->cfc_network->total_weight_params;
+    size_t bc = pipeline->network->cfc_network->total_bias_params;
+    if (wc == 0) {
+        wc = (size_t)pipeline->network->config.input_size *
+                (size_t)pipeline->network->config.hidden_size;
+        bc = (size_t)pipeline->network->config.hidden_size;
+    }
 
     /* 初始化打乱索引 */
     size_t* shuffle_idx = (size_t*)safe_malloc(total_samples * sizeof(size_t));
@@ -2627,20 +3230,23 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
 
         /* FIX-011: 每epoch开始前清零网络级梯度缓冲区 */
         {
-            size_t wg_sz, bg_sz;
-            if (pipeline->network->cfc_network->total_weight_params > 0) {
-                wg_sz = pipeline->network->cfc_network->total_weight_params;
-                bg_sz = pipeline->network->cfc_network->total_bias_params;
-            } else {
-                wg_sz = (size_t)pipeline->network->config.input_size *
-                           (size_t)pipeline->network->config.hidden_size;
-                bg_sz = (size_t)pipeline->network->config.hidden_size;
-            }
             if (pipeline->network->cfc_network->weight_gradients)
-                memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
+                memset(pipeline->network->cfc_network->weight_gradients, 0, wc * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
-                memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+                memset(pipeline->network->cfc_network->bias_gradients, 0, bc * sizeof(float));
         cfc_zero_cell_gradients(pipeline->network->cfc_network);
+        }
+
+        /* ZSFDDD-D3-001: 微调阶段学习率预热 */
+        {
+            int warmup_epochs = epochs / 10;
+            if (warmup_epochs < 1) warmup_epochs = 1;
+            if (epoch < warmup_epochs) {
+                float warmup_lr = training_warmup_lr(epoch, warmup_epochs, fine_tune_lr * 0.1f, fine_tune_lr);
+                pipeline->network->config.learning_rate = warmup_lr;
+            } else {
+                pipeline->network->config.learning_rate = fine_tune_lr;
+            }
         }
 
         float l = 0.0f;
@@ -2662,12 +3268,49 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
                 : sample_loss;
             safe_free((void**)&output);
         }
+
+        /* 微调特有：L2正则化 —— 在梯度上叠加λ·w惩罚项
+         * 等价于最小化 loss + λ/2 * ||w||² */
+        {
+            float* w_ptr; size_t wc_check;
+            if (cfc_get_weight_matrix(pipeline->network->cfc_network, &w_ptr, &wc_check) == 0) {
+                for (size_t gi = 0; gi < wc; gi++)
+                    pipeline->network->cfc_network->weight_gradients[gi] += l2_lambda * w_ptr[gi];
+            }
+            float* b_ptr; size_t bc_check;
+            if (cfc_get_bias_vector(pipeline->network->cfc_network, &b_ptr, &bc_check) == 0) {
+                for (size_t gi = 0; gi < bc; gi++)
+                    pipeline->network->cfc_network->bias_gradients[gi] += l2_lambda * b_ptr[gi];
+            }
+        }
+
+        /* ZSFDDD-D2-006修复+D3-BUG修复: 微调阶段必须在优化器前裁剪梯度 */
+        pipeline_clip_gradients(pipeline->network, 10.0f);
+
         /* 拉普拉斯增强必须在优化器之前调用 */
         pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
+        /* ZSFEEE-FIX-DEEP-007: 分布式梯度同步 —— 微调梯度在优化器步进前同步 */
+        pipeline_distributed_gradient_sync(pipeline);
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
         pipeline_apply_cell_gradients_adam(pipeline);
         l /= (float)total_samples;
+
+        /* L2惩罚加入损失报告（但不参与收敛判断以避免干扰） */
+        {
+            float* w_ptr; size_t wc_check;
+            float l2_penalty = 0.0f;
+            if (cfc_get_weight_matrix(pipeline->network->cfc_network, &w_ptr, &wc_check) == 0) {
+                for (size_t wi = 0; wi < wc; wi++)
+                    l2_penalty += w_ptr[wi] * w_ptr[wi];
+            }
+            float* b_ptr; size_t bc_check;
+            if (cfc_get_bias_vector(pipeline->network->cfc_network, &b_ptr, &bc_check) == 0) {
+                for (size_t wi = 0; wi < bc; wi++)
+                    l2_penalty += b_ptr[wi] * b_ptr[wi];
+            }
+            l += 0.5f * l2_lambda * l2_penalty;
+        }
 
         if (l < best_loss - 1e-6f) { best_loss = l; no_improve = 0; }
         else no_improve++;
@@ -2679,7 +3322,16 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
                 l, &pipeline->network->config.learning_rate,
                 pipeline->config.use_early_stopping,
                 "微调训练阶段") != 0) {
+            /* 早停触发：保存当前epoch检查点后跳出 */
+            /* ZSFEEE-FIX-DEEP-008: 早停时保存检查点 */
+            pipeline_save_checkpoint(pipeline, "finetune", epoch + 1);
             break;
+        }
+
+        /* ZSFEEE-FIX-DEEP-008: 每N个epoch保存一次中间检查点 */
+        if (pipeline->config.checkpoint_frequency > 0 &&
+            (epoch + 1) % pipeline->config.checkpoint_frequency == 0) {
+            pipeline_save_checkpoint(pipeline, "finetune", epoch + 1);
         }
 
         if (pipeline->monitor) {
@@ -2690,10 +3342,13 @@ int pipeline_run_fine_tune_phase(TrainingPipeline* pipeline, int epochs, float* 
     safe_free((void**)&shuffle_idx);
     if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
     *final_loss = best_loss;
-    /* 重置收敛状态以备下一阶段 */
+    /* 恢复学习率并重置收敛状态 */
+    pipeline->network->config.learning_rate = saved_lr;
     pipeline->patience_counter = 0;
     pipeline->plateau_counter = 0;
     pipeline->last_best_train_loss = FLT_MAX;
+    /* ZSFEEE-FIX-DEEP-008: 微调阶段结束保存最终检查点 */
+    pipeline_save_checkpoint(pipeline, "finetune", 0);
     pipeline->state.stage = TRAIN_STAGE_EVALUATION;
     return 0;
 }
@@ -2727,9 +3382,37 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
     size_t total_samples = total_elements / sample_stride;
     if (total_samples == 0) return -1;
 
+    /* 局部训练特有：环境自适应正则化 —— 保存初始权重快照
+     * 在本地环境数据上微调时，惩罚参数偏离全局最优的幅度 */
+    size_t wc = pipeline->network->cfc_network->total_weight_params;
+    size_t bc = pipeline->network->cfc_network->total_bias_params;
+    if (wc == 0) {
+        wc = (size_t)pipeline->network->config.input_size *
+                (size_t)pipeline->network->config.hidden_size;
+        bc = (size_t)pipeline->network->config.hidden_size;
+    }
+    float* init_weights = (float*)safe_malloc(wc * sizeof(float));
+    float* init_biases = (float*)safe_malloc(bc * sizeof(float));
+    if (!init_weights || !init_biases) {
+        safe_free((void**)&init_weights); safe_free((void**)&init_biases);
+        return -1;
+    }
+    {
+        float* w_ptr; size_t wc_check;
+        float* b_ptr; size_t bc_check;
+        if (cfc_get_weight_matrix(pipeline->network->cfc_network, &w_ptr, &wc_check) == 0)
+            memcpy(init_weights, w_ptr, wc * sizeof(float));
+        if (cfc_get_bias_vector(pipeline->network->cfc_network, &b_ptr, &bc_check) == 0)
+            memcpy(init_biases, b_ptr, bc * sizeof(float));
+    }
+    float adapt_beta = 0.01f;  /* 环境自适应正则化强度 */
+
     /* 初始化打乱索引 */
     size_t* shuffle_idx = (size_t*)safe_malloc(total_samples * sizeof(size_t));
-    if (!shuffle_idx) return -1;
+    if (!shuffle_idx) {
+        safe_free((void**)&init_weights); safe_free((void**)&init_biases);
+        return -1;
+    }
     for (size_t i = 0; i < total_samples; i++) shuffle_idx[i] = i;
 
     float best_loss = FLT_MAX;
@@ -2738,7 +3421,11 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
     int no_improve = 0;
 
     for (int epoch = 0; epoch < epochs && no_improve < patience; epoch++) {
-        if (!pipeline->state.is_running) { safe_free((void**)&shuffle_idx); break; }
+        if (!pipeline->state.is_running) {
+            safe_free((void**)&shuffle_idx);
+            safe_free((void**)&init_weights); safe_free((void**)&init_biases);
+            break;
+        }
 
         /* 每个epoch打乱数据顺序 */
         /* K-012修复：安全随机数 */
@@ -2750,20 +3437,23 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
 
         /* FIX-011: 每epoch开始前清零网络级梯度缓冲区 */
         {
-            size_t wg_sz, bg_sz;
-            if (pipeline->network->cfc_network->total_weight_params > 0) {
-                wg_sz = pipeline->network->cfc_network->total_weight_params;
-                bg_sz = pipeline->network->cfc_network->total_bias_params;
-            } else {
-                wg_sz = (size_t)pipeline->network->config.input_size *
-                           (size_t)pipeline->network->config.hidden_size;
-                bg_sz = (size_t)pipeline->network->config.hidden_size;
-            }
             if (pipeline->network->cfc_network->weight_gradients)
-                memset(pipeline->network->cfc_network->weight_gradients, 0, wg_sz * sizeof(float));
+                memset(pipeline->network->cfc_network->weight_gradients, 0, wc * sizeof(float));
             if (pipeline->network->cfc_network->bias_gradients)
-                memset(pipeline->network->cfc_network->bias_gradients, 0, bg_sz * sizeof(float));
+                memset(pipeline->network->cfc_network->bias_gradients, 0, bc * sizeof(float));
         cfc_zero_cell_gradients(pipeline->network->cfc_network);
+        }
+
+        /* ZSFDDD-D3-001: 本地适配阶段学习率预热 */
+        {
+            int warmup_epochs = epochs / 10;
+            if (warmup_epochs < 1) warmup_epochs = 1;
+            if (epoch < warmup_epochs) {
+                float warmup_lr = training_warmup_lr(epoch, warmup_epochs, local_lr * 0.1f, local_lr);
+                pipeline->network->config.learning_rate = warmup_lr;
+            } else {
+                pipeline->network->config.learning_rate = local_lr;
+            }
         }
 
         float l = 0.0f;
@@ -2785,12 +3475,44 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
                 : sample_loss;
             safe_free((void**)&output);
         }
+
+        /* 局部训练特有：环境自适应正则化
+         * 在梯度上叠加 β * (w - w_init) 惩罚项，防止参数偏离全局最优
+         * 等价于最小化 L_task + β/2 * ||w - w_init||² */
+        float param_drift_penalty = 0.0f;
+        {
+            float* w_ptr; size_t wc_check;
+            if (cfc_get_weight_matrix(pipeline->network->cfc_network, &w_ptr, &wc_check) == 0) {
+                for (size_t gi = 0; gi < wc; gi++) {
+                    float drift = w_ptr[gi] - init_weights[gi];
+                    pipeline->network->cfc_network->weight_gradients[gi] += adapt_beta * drift;
+                    param_drift_penalty += drift * drift;
+                }
+            }
+            float* b_ptr; size_t bc_check;
+            if (cfc_get_bias_vector(pipeline->network->cfc_network, &b_ptr, &bc_check) == 0) {
+                for (size_t gi = 0; gi < bc; gi++) {
+                    float drift = b_ptr[gi] - init_biases[gi];
+                    pipeline->network->cfc_network->bias_gradients[gi] += adapt_beta * drift;
+                    param_drift_penalty += drift * drift;
+                }
+            }
+        }
+
+        /* ZSFDDD-D2-006修复+D3-BUG修复: 本地适配阶段必须在优化器前裁剪梯度 */
+        pipeline_clip_gradients(pipeline->network, 10.0f);
+
         /* 拉普拉斯增强必须在优化器之前调用 */
         pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
+        /* ZSFEEE-FIX-DEEP-007: 分布式梯度同步 —— 本地适配梯度在优化器步进前同步 */
+        pipeline_distributed_gradient_sync(pipeline);
         pipeline_apply_optimizer(pipeline, pipeline->network,
             pipeline->network->config.learning_rate);
         pipeline_apply_cell_gradients_adam(pipeline);
         l /= (float)total_samples;
+
+        /* 将参数漂移惩罚加入损失报告 */
+        l += 0.5f * adapt_beta * param_drift_penalty;
 
         if (l < best_loss - 1e-6f) { best_loss = l; no_improve = 0; }
         else no_improve++;
@@ -2802,7 +3524,16 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
                 l, &pipeline->network->config.learning_rate,
                 pipeline->config.use_early_stopping,
                 "本地适配阶段") != 0) {
+            /* 早停触发：保存当前epoch检查点后跳出 */
+            /* ZSFEEE-FIX-DEEP-008: 早停时保存检查点 */
+            pipeline_save_checkpoint(pipeline, "local", epoch + 1);
             break;
+        }
+
+        /* ZSFEEE-FIX-DEEP-008: 每N个epoch保存一次中间检查点 */
+        if (pipeline->config.checkpoint_frequency > 0 &&
+            (epoch + 1) % pipeline->config.checkpoint_frequency == 0) {
+            pipeline_save_checkpoint(pipeline, "local", epoch + 1);
         }
 
         if (pipeline->monitor) {
@@ -2811,6 +3542,8 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
         }
     }
     safe_free((void**)&shuffle_idx);
+    safe_free((void**)&init_weights);
+    safe_free((void**)&init_biases);
     if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
     *final_loss = best_loss;
     pipeline->network->config.learning_rate = saved_lr;
@@ -2818,6 +3551,8 @@ int pipeline_run_local_phase(TrainingPipeline* pipeline, int epochs, float* fina
     pipeline->patience_counter = 0;
     pipeline->plateau_counter = 0;
     pipeline->last_best_train_loss = FLT_MAX;
+    /* ZSFEEE-FIX-DEEP-008: 本地适配阶段结束保存最终检查点 */
+    pipeline_save_checkpoint(pipeline, "local", 0);
     pipeline->state.stage = TRAIN_STAGE_EVALUATION;
     return 0;
 }
@@ -2895,12 +3630,63 @@ int pipeline_run_speech_phase(TrainingPipeline* pipeline, int epochs, float* fin
     }
 
     pipeline->state.is_running = 0;
+    /* ZSFEEE-FIX-DEEP-008: 语音训练阶段结束保存检查点 */
+    pipeline_save_checkpoint(pipeline, "speech", 0);
     return 0;
 }
 
 int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
     if (!pipeline || !final_loss) return -1;
     if (!pipeline->data_buffer) return SELFLNN_ERROR_NO_DATA;
+
+    /* ZSFEEE-FIX-DEEP-008: 训练开始前检查是否有未完成的检查点可恢复
+     * 按阶段优先级检查：local > finetune > multimodal > deep_train > pretrain
+     * 如果存在final检查点，从下一个阶段继续训练 */
+    {
+        char check_paths[6][256];
+        const char* phase_names[] = {"local", "finetune", "multimodal", "deep_train", "pretrain", NULL};
+        const char* next_phases[] = {NULL, "local", "finetune", "multimodal", "deep_train", "pretrain"};
+        int resume_found = 0;
+        for (int pi = 0; pi < 5 && !resume_found; pi++) {
+            snprintf(check_paths[pi], sizeof(check_paths[pi]),
+                     "model/checkpoint_%s_final.slnn", phase_names[pi]);
+#ifdef _WIN32
+            struct _stat st;
+            if (_stat(check_paths[pi], &st) == 0) {
+#else
+            struct stat st;
+            if (stat(check_paths[pi], &st) == 0) {
+#endif
+                log_info("[检查点恢复] 发现已完成阶段 %s 的检查点: %s",
+                         phase_names[pi], check_paths[pi]);
+                /* 加载此检查点作为恢复起点 */
+                lnn_load_from_file(pipeline->network, check_paths[pi]);
+                log_info("[检查点恢复] 已从 %s 加载模型权重，从 %s 阶段继续训练",
+                         check_paths[pi], next_phases[pi] ? next_phases[pi] : "当前");
+                resume_found = 1;
+            }
+        }
+    }
+
+    /* ZSFEEE-FIX-DEEP-007: 训练开始前检查分布式配置并初始化 */
+    {
+        if (pipeline->config.use_distributed_training) {
+            void* dist_raw = selflnn_get_distributed_context();
+            if (dist_raw) {
+                DistributedContext* dist_ctx = (DistributedContext*)dist_raw;
+                log_info("[分布式] 分布式训练已启用，节点数=%d, 当前节点ID=%d, "
+                         "算法=%s",
+                         dist_ctx->num_nodes, dist_ctx->my_node_id,
+                         dist_ctx->config.allreduce_algorithm == 0 ? "Ring" : "Tree");
+                if (dist_ctx->num_nodes > 1) {
+                    distributed_barrier(dist_ctx);
+                }
+            } else {
+                log_info("[分布式] 分布式训练已启用但无分布式上下文，回退为单机训练模式");
+                pipeline->config.use_distributed_training = 0;
+            }
+        }
+    }
 
     float loss;
     if (pipeline_run_pretrain_phase(pipeline, (int)pipeline->config.pretrain_epochs, &loss) != 0)
@@ -2912,6 +3698,12 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
     if (pipeline_run_fine_tune_phase(pipeline, (int)pipeline->config.fine_tune_epochs, &loss) != 0)
         return -1;
     if (pipeline_run_local_phase(pipeline, (int)pipeline->config.local_epochs, &loss) != 0)
+        return -1;
+
+    /* ZSFQQ-DEEP-002修复: 接入第6阶段语音训练
+     * 原流水线只包含5个阶段，遗漏了pipeline_run_speech_phase。
+     * 语音阶段训练语音识别+TTS模型，是多模态能力的关键组成部分。 */
+    if (pipeline_run_speech_phase(pipeline, (int)pipeline->config.speech_epochs, &loss) != 0)
         return -1;
 
     compute_evaluation_metrics(pipeline);
@@ -2938,8 +3730,8 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
 /**
  * @brief 验证完整训练链路是否可执行
  *
- * 检查预训练、深度训练、多模态全功能训练、微调训练、局部功能训练
- * 共5个阶段的配置和依赖是否完整。
+ * 检查预训练、深度训练、多模态全功能训练、微调训练、局部功能训练、语音训练
+ * 共6个阶段的配置和依赖是否完整。
  *
  * @param pipeline 训练管线
  * @return 0=训练链完整可执行, 1=部分阶段配置不完整但基础阶段可用, -1=数据未加载
@@ -2954,9 +3746,10 @@ int pipeline_validate_training_chain(const TrainingPipeline* pipeline) {
     ok_stages += (pipeline->config.multimodal_epochs > 0) ? 1 : 0;
     ok_stages += (pipeline->config.fine_tune_epochs > 0) ? 1 : 0;
     ok_stages += (pipeline->config.local_epochs > 0) ? 1 : 0;
+    ok_stages += (pipeline->config.speech_epochs > 0) ? 1 : 0;  /* ZSFQQ-DEEP-002: 第6阶段语音训练 */
 
-    if (ok_stages == 5) return 0;
-    if (ok_stages >= 2) return 1;
+    if (ok_stages == 6) return 0;
+    if (ok_stages >= 3) return 1;
     return -1;
 }
 

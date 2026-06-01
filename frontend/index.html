@@ -497,7 +497,7 @@
                                      所有agent名称/状态/信念/欲望/意图值均由 data-engine.js
                                      通过API /api/cognition/tom 实时获取并填充。
                                      HTML仅提供DOM骨架，初始值均为0%/"未知"表示未连接状态。 -->
-                                <div class="tom-agent-container" id="tom-agents"></div>
+                                <div class="tom-agent-container" id="tom-agents"><div class="tom-error">心智理论数据获取中...</div></div>
                                     <div class="tom-summary">
                                         <span class="tom-summary-label">群体心智理论状态：</span>
                                         <span class="tom-summary-value" id="tom-summary-text">等待数据...</span>
@@ -3733,25 +3733,26 @@
                                 <div class="api-key-usage">
                                     <h4> API密钥使用说明</h4>
                                     <div class="api-key-docs">
-                                        <p>所有API调用需要在HTTP头中携带 <code>X-API-Key</code> 字段进行认证。</p>
+                                        <p><strong>推荐使用Bearer Token方式进行API认证（Authorization头部）：</strong></p>
                                         <div class="code-block">
-                                            <strong>cURL 示例:</strong>
-                                            <pre><code>curl -H "X-API-Key: your_key_here" http://localhost:8080/api/status</code></pre>
+                                            <strong>cURL 示例 (Bearer Token):</strong>
+                                            <pre><code>curl -H "Authorization: Bearer your_key_here" http://localhost:8080/api/status</code></pre>
                                         </div>
                                         <div class="code-block">
                                             <strong>Python 示例:</strong>
                                             <pre><code>import requests
 response = requests.get(
     'http://localhost:8080/api/status',
-    headers={'X-API-Key': 'your_key_here'}
+    headers={'Authorization': 'Bearer your_key_here'}
 )</code></pre>
                                         </div>
                                         <div class="code-block">
                                             <strong>JavaScript 示例:</strong>
                                             <pre><code>fetch('http://localhost:8080/api/status', {
-    headers: { 'X-API-Key': 'your_key_here' }
+    headers: { 'Authorization': 'Bearer your_key_here' }
 })</code></pre>
                                         </div>
+                                        <p style="color:#888;font-size:12px;margin-top:8px;">旧式 <code>X-API-Key</code> 头部和请求体 <code>api_key</code> 字段仍兼容保留，但建议迁移至Bearer Token。</p>
                                     </div>
                                 </div>
                                 
@@ -3870,6 +3871,26 @@ response = requests.get(
                     </div>
                 </div>
                 <div class="card">
+                    <div class="card-header"><h3>手动添加设备</h3></div>
+                    <div class="card-content">
+                        <div class="form-group"><label>设备类型</label>
+                            <select id="manual-device-type" class="form-input">
+                                <option value="microphone">麦克风</option>
+                                <option value="speaker">扬声器</option>
+                                <option value="camera">摄像头</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-top:6px"><label>设备名称</label>
+                            <input type="text" id="manual-device-name" class="form-input" placeholder="例如: USB麦克风 #2">
+                        </div>
+                        <div class="form-group" style="margin-top:6px"><label>设备ID/路径</label>
+                            <input type="text" id="manual-device-id" class="form-input" placeholder="例如: /dev/video2 或 default:2">
+                        </div>
+                        <button onclick="registerManualDevice()" class="btn btn-success" style="width:100%;margin-top:8px">注册设备</button>
+                        <div style="margin-top:6px;font-size:11px;color:#aaa">用于注册浏览器自动枚举不到的设备(网络摄像头、蓝牙麦克风等)，通过后端API注册到硬件管理器</div>
+                    </div>
+                </div>
+                <div class="card">
                     <div class="card-header"><h3>计算后端配置</h3></div>
                     <div class="card-content">
                         <div class="form-group"><label>主计算后端</label>
@@ -3929,10 +3950,20 @@ response = requests.get(
         document.addEventListener('DOMContentLoaded', function() {
             if (typeof refreshDevices === 'function') refreshDevices();
             if (typeof scanHardware === 'function') scanHardware();
-            devicePollTimer = setInterval(function(){ if(typeof refreshDevices==='function')refreshDevices(); }, 5000);
+            /* ZSF-FE-M025: 设备轮询迁移到DataEngine统一管理，保留fallback */
+            if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
+                g_dataEngine.registerModule('device_poll', 5000, function() {
+                    if (typeof refreshDevices === 'function') refreshDevices();
+                });
+            } else {
+                devicePollTimer = setInterval(function(){ if(typeof refreshDevices==='function')refreshDevices(); }, 5000);
+            }
         });
         window.addEventListener('beforeunload', function() {
             if (devicePollTimer) clearInterval(devicePollTimer);
+            if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
+                g_dataEngine.unregisterModule('device_poll');
+            }
         });
     </script>
 
@@ -4149,9 +4180,9 @@ response = requests.get(
                     </div>
                 </div>
 
-                <div class="card" style="display:none">
+                <div class="card" id="train-history-card" style="display:none">
                     <div id="train-history-chart" style="width:100%;height:200px;"></div>
-                    <div id="train-history-placeholder" style="text-align:center;padding:40px;color:#888;">暂无训练历史</div>
+                    <div id="train-history-placeholder" style="text-align:center;padding:40px;color:#888;">检测连接状态中...</div>
                 </div>
 
                 <div class="card">
@@ -4211,7 +4242,7 @@ response = requests.get(
                     </div>
                 </div>
                 <div class="score-bar"><div class="score-fill" id="score-fill" style="width:100%;background:#2ecc71;"></div></div>
-                <div style="text-align:center;font-size:14px;">安全评分: <strong id="score-value">1.00</strong></div>
+                <div style="text-align:center;font-size:14px;">安全评分: <strong id="score-value">--</strong></div>
 
                 <div style="margin-top:20px;display:flex;gap:10px;">
                     <button class="btn-danger" onclick="emergencyStop()">紧急停止</button>
@@ -5023,7 +5054,7 @@ response = requests.get(
                                     <tr><th>任务ID</th><th>模式</th><th>状态</th><th>损失</th><th>准确率</th><th>用时</th><th>操作</th></tr>
                                 </thead>
                                 <tbody id="history-list">
-                                    <tr><td colspan="7" class="pending-text">等待连接</td></tr>
+                                    <tr id="history-list-placeholder-row"><td colspan="7" class="pending-text" id="history-list-placeholder-text">检测连接状态中...</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -5824,7 +5855,7 @@ response = requests.get(
                             </div>
                             <div class="metric">
                                 <span class="metric-label">最大容量</span>
-                                <span class="metric-value" id="rate-capacity">1000</span>
+                                <span class="metric-value" id="rate-capacity">--</span>
                             </div>
                             <div class="metric">
                                 <span class="metric-label">已消耗令牌</span>
@@ -5890,11 +5921,23 @@ response = requests.get(
             } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
         }
 
+        /* ZSFQQ-Q017: 使用现代navigator.clipboard API替代废弃的execCommand */
         function copyKey() {
             var input = document.getElementById('generated-key');
-            input.select();
-            document.execCommand('copy');
-            showNotification('密钥已复制到剪贴板', 'info');
+            if (!input || !input.value) return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(input.value).then(function() {
+                    showNotification('密钥已复制到剪贴板', 'info');
+                }).catch(function() {
+                    input.select();
+                    document.execCommand('copy');
+                    showNotification('密钥已复制到剪贴板（回退模式）', 'info');
+                });
+            } else {
+                input.select();
+                document.execCommand('copy');
+                showNotification('密钥已复制到剪贴板', 'info');
+            }
         }
 
         async function loadKeys() {
@@ -6219,6 +6262,25 @@ response = requests.get(
             el.textContent = d.lines.join('\n');
         }
 
+        /* H005-修复: 手动注册浏览器自动枚举不到的设备 */
+        async function registerManualDevice() {
+            var type = document.getElementById('manual-device-type').value;
+            var name = document.getElementById('manual-device-name').value.trim();
+            var devId = document.getElementById('manual-device-id').value.trim();
+            if (!name) { showNotification('请输入设备名称', 'warning'); return; }
+            if (!devId) { showNotification('请输入设备ID/路径', 'warning'); return; }
+            try {
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.registerDevice === 'function') {
+                    var resp = await window.SelfLnnApi.registerDevice({type:type, name:name, deviceId:devId});
+                    showNotification('设备 ' + name + ' 已注册: ' + (resp.success ? '成功' : resp.error), resp.success ? 'success' : 'danger');
+                } else {
+                    showNotification('后端API不可用，设备注册需要后端支持', 'warning');
+                }
+            } catch(e) {
+                showNotification('设备注册失败: ' + e.message, 'danger');
+            }
+        }
+
         /* ===== 音频设备枚举 ===== */
         async function enumerateAudioDevices() {
             try {
@@ -6508,62 +6570,7 @@ response = requests.get(
         
 
         
-        // 推理测试函数
-        async function testInference() {
-            try {
-                const query = document.getElementById('inference-query').value;
-                if (!query.trim()) {
-                    showInlineError('请输入查询内容');
-                    return;
-                }
-                
-                showLoading('执行推理中...');
-                
-                const data = await apiService.request('/reasoning/start', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        query: query,
-                        reasoning_type: 'deductive'
-                    })
-                });
-                showInlineSuccess('推理完成');
-                const resultElement = document.getElementById('inference-result-text');
-                if (resultElement) {
-                    resultElement.textContent = data.result || data.conclusion || '推理完成但无明确结果';
-                    if (data.confidence) {
-                        resultElement.textContent += ` (置信度: ${(data.confidence * 100).toFixed(1)}%)`;
-                    }
-                }
-            } catch (error) {
-                showInlineError(`推理异常: ${error.message}`);
-                console.error('推理异常:', error);
-            } finally {
-                hideLoading();
-            }
-        }
-        
-        // 网络测试函数
-        async function testNetwork() {
-            try {
-                showLoading('测试网络连接...');
-                
-                // 使用API服务检查连接
-                const status = await apiService.checkConnection();
-                
-                if (status.connected) {
-                    showInlineSuccess(`网络连接正常: ${status.message}`);
-                    updateNetworkStatus(true);
-                } else {
-                    showInlineError(`网络连接失败: ${status.message}`);
-                    updateNetworkStatus(false);
-                }
-            } catch (error) {
-                showInlineError(`网络测试异常: ${error.message}`);
-                console.error('网络测试异常:', error);
-            } finally {
-                hideLoading();
-            }
-        }
+        /* ZSFQQ-Q013: testInference/testNetwork 已在 main.js 中全局定义，此处不再重复 */
         
         // 状态更新辅助函数
         function updateNetworkStatus(connected) {
@@ -7555,36 +7562,13 @@ response = requests.get(
                 setText('cog-suggestions', data.suggestions);
             }
 
-            // 心智理论（ToM）推导 - 三个智能体信念/愿望/意图
-            var cap = data.capability || {};
-            var gl = data.goal || {};
-            var row2 = cap.reasoning_ability || 0.5;
-            var mem2 = cap.memory_capacity || 0.5;
-            var act2 = cap.action_ability || 0.5;
-            var ada2 = cap.adaptability || 0.5;
-            var pln2 = cap.planning_ability || 0.5;
-            var cre2 = cap.creativity || 0.5;
-            var lrn2 = cap.learning_ability || 0.5;
-            var per2 = cap.perception_ability || 0.5;
-            var tom_agents = [
-                { name: '系统自我',   belief: row2*0.4+mem2*0.3+per2*0.3, desire: pln2*0.5+cre2*0.3+lrn2*0.2, intention: act2*0.5+pln2*0.3+ada2*0.2, status: data.has_cognition ? 'online' : 'offline', belief_content: '我是一个全液态神经网络AGI系统' },
-                { name: '环境模型',   belief: per2*0.5+row2*0.3+mem2*0.2, desire: ada2*0.4+pln2*0.3+act2*0.3, intention: act2*0.4+ada2*0.3+pln2*0.3, status: per2 > 0.3 ? 'online' : 'busy',   belief_content: '环境状态正在动态变化中' },
-                { name: '用户模型',   belief: lrn2*0.4+row2*0.4+mem2*0.2, desire: cre2*0.4+lrn2*0.3+row2*0.3, intention: act2*0.4+lrn2*0.3+ada2*0.3, status: (gl.goal_progress || 0) > 0.1 ? 'online' : 'busy', belief_content: '用户需求需要进一步理解' }
-            ];
-            for (var ai = 0; ai < 3; ai++) {
-                var agent = tom_agents[ai];
-                setWidth('tom-agent' + ai + '-belief', Math.round(agent.belief * 100));
-                setWidth('tom-agent' + ai + '-desire', Math.round(agent.desire * 100));
-                setWidth('tom-agent' + ai + '-intention', Math.round(agent.intention * 100));
-                setText('tom-agent' + ai + '-belief-val', Math.round(agent.belief * 100) + '%');
-                setText('tom-agent' + ai + '-desire-val', Math.round(agent.desire * 100) + '%');
-                setText('tom-agent' + ai + '-intention-val', Math.round(agent.intention * 100) + '%');
-                setText('tom-agent' + ai + '-belief-text', agent.belief_content);
-                setText('tom-agent' + ai + '-name', agent.name);
-                var tomStatusEl = document.querySelector('#tom-agents .tom-agent-card:nth-child(' + (ai + 1) + ') .tom-agent-status');
-                if (tomStatusEl) tomStatusEl.className = 'tom-agent-status ' + agent.status;
+            // 心智理论（ToM）- 使用后端真实API数据动态渲染
+            if (typeof renderTomAgents === 'function') {
+                renderTomAgents(data.tom || null);
+            } else {
+                var tomContainer = document.getElementById('tom-agents');
+                if (tomContainer) tomContainer.innerHTML = '<div class="tom-error">renderTomAgents函数未加载</div>';
             }
-            setText('tom-summary-text', '全局理解得分: ' + Math.round((row2 + mem2 + ada2 + pln2) / 4 * 100) + '%');
         }
 
         async function fetchCognitionStatus() {

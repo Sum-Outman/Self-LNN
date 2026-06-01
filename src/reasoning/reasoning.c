@@ -83,6 +83,13 @@ struct ReasoningEngine {
     struct KnowledgeBase* external_kb;     /**< 外部知识库引用 */
     int kb_auto_sync;                     /**< 是否自动同步知识库 */
     int knowledge_ready;                  /**< P0-009: 知识是否已从真实数据源加载（1=已同步, 0=空白） */
+    /* ZSFZX-FIX-REASONING: 平台统一字段 — 与reasoning_internal.c对齐 */
+    struct KnowledgeBase* kb;
+    int cache_valid;
+    size_t knowledge_sync_count;
+    float knowledge_sync_time;
+    void* memory_system;
+    float memory_sync_time;
     
     /* 液态神经网络集成 */
     LNN* lnn_instance;                /**< 关联的LNN实例 */

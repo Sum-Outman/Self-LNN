@@ -210,7 +210,7 @@ int quaternion_conv1d_forward(QuaternionConv1D* layer,
 
                         float temp[4];
                         quaternion_hamilton_product(&input[in_idx], &layer->weights[w_idx], temp);
-                        quaternion_add(acc, temp, acc);
+                        quaternion_add_arr(acc, temp, acc);
                     }
                 }
 
@@ -523,7 +523,7 @@ int quaternion_conv2d_forward(QuaternionConv2D* layer,
 
                                 float temp[4];
                                 quaternion_hamilton_product(&input[in_idx], &layer->weights[w_idx], temp);
-                                quaternion_add(acc, temp, acc);
+                                quaternion_add_arr(acc, temp, acc);
                             }
                         }
                     }

@@ -33,6 +33,9 @@ int env_sound_load_weights(void* classifier, const char* filepath);
 /* ZSFZS-F020: 检查分类器是否已加载训练好的权重 */
 int env_sound_is_trained(void* classifier);
 
+/* ZSFXXXQ-P0-001: 标记分类器为已训练状态（引导训练模式注册） */
+void env_sound_classifier_mark_trained(void* classifier);
+
 #ifdef __cplusplus
 }
 #endif

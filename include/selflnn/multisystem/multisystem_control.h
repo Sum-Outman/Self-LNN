@@ -82,6 +82,10 @@ typedef struct {
     double required_capability;  /**< 所需能力评分（0-1） */
     DeviceType preferred_device_type; /**< 偏好设备类型 */
     void* task_data;             /**< 任务数据 */
+    char name[256];              /**< 任务名称（AGI执行委派用） */
+    float params[1024];          /**< 任务参数缓冲区（AGI执行委派用） */
+    int param_count;             /**< 任务参数数量 */
+    double deadline;             /**< 任务截止时间 */
 } Task;
 
 /**

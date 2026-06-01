@@ -520,15 +520,90 @@ int augment_gaussian_noise(TrainingDataset* ds, float stddev) {
 }
 
 /**
- * @brief MixUp增强（混合两个样本）
+ * @brief 使用Marsaglia-Tsang方法生成Gamma分布随机数（用于Beta分布采样）
+ * @param shape 形状参数k
+ * @param rng 随机数生成器状态
+ * @return Gamma(k, 1) 分布的随机数
+ */
+static float gamma_random(float shape, unsigned int* rng) {
+    if (shape < 1.0f) {
+        /* Johnk生成器: Gamma(α,1) for α<1 */
+        for (int attempt = 0; attempt < 100; attempt++) {
+            *rng = *rng * 1103515245 + 12345;
+            float u = (float)((*rng >> 16) & 0xFFFF) / 65535.0f;
+            *rng = *rng * 1103515245 + 12345;
+            float v = (float)((*rng >> 16) & 0xFFFF) / 65535.0f;
+            if (u < 1e-10f) u = 1e-10f;
+            if (v < 1e-10f) v = 1e-10f;
+            float x = powf(u, 1.0f / shape);
+            float y = powf(v, 1.0f / (1.0f - shape));
+            if (x + y <= 1.0f) {
+                float e = -logf((float)((*rng * 1103515245 + 12345) & 0xFFFF) / 65535.0f + 1e-10f);
+                *rng = *rng * 1103515245 + 12345;
+                return x / (x + y) * e;
+            }
+        }
+        return 1.0f;
+    }
+    /* Marsaglia-Tsang方法: Gamma(α,1) for α>=1 */
+    float d = shape - 1.0f / 3.0f;
+    float c = 1.0f / sqrtf(9.0f * d);
+    float z2 = 0.0f;
+    for (int attempt = 0; attempt < 100; attempt++) {
+        float x, v;
+        for (;;) {
+            float z;
+            do {
+                *rng = *rng * 1103515245 + 12345;
+                z = ((float)((*rng >> 16) & 0xFFFF) / 65535.0f - 0.5f) * 2.0f;
+                *rng = *rng * 1103515245 + 12345;
+                z2 = ((float)((*rng >> 16) & 0xFFFF) / 65535.0f - 0.5f) * 2.0f;
+                v = 1.0f + c * z;
+                if (v <= 0.0f) continue;
+                v = v * v * v;
+                x = z2 * z2;
+            } while (x > 1.0f - 0.0331f * (z * z) * (z * z) &&
+                     logf(x) > 0.5f * z2 * z2 + d * (1.0f - v + logf(v)));
+            return d * v;
+        }
+    }
+    return shape;
+}
+
+/**
+ * @brief Beta分布采样: Beta(alpha, alpha)
+ * @param alpha Beta分布参数（对称）
+ * @param rng 随机数生成器状态
+ * @return Beta(alpha, alpha)分布的随机数
+ */
+static float beta_random(float alpha, unsigned int* rng) {
+    if (alpha <= 0.0f) alpha = 0.4f;
+    float x = gamma_random(alpha, rng);
+    float y = gamma_random(alpha, rng);
+    if (x + y < 1e-10f) return 0.5f;
+    return x / (x + y);
+}
+
+/**
+ * @brief MixUp增强（混合两个样本）使用标准Beta分布
+ *
+ * 对每对随机选择的样本(i,j)，从Beta(α,α)中采样λ。
+ * 混合公式: x' = λ*x_i + (1-λ)*x_j,  y' = λ*y_i + (1-λ)*y_j
+ * 然后在原位替换样本i的输入和标签。
+ *
+ * @param ds 数据集
+ * @param alpha Beta分布的α参数（推荐0.2~0.4）
  */
 int augment_mixup(TrainingDataset* ds, float alpha) {
     if (!ds || !ds->is_loaded) return -1;
+    if (!ds->is_training_data) return 0;
     if (alpha <= 0.0f) alpha = 0.2f;
+    if (alpha > 1.0f) alpha = 1.0f;
 
     size_t n = ds->header.num_samples;
     size_t idim = ds->header.input_dim;
     size_t odim = ds->header.output_dim;
+    if (n < 2) return 0;
 
     float* mix_inputs = (float*)safe_malloc(idim * sizeof(float));
     float* mix_outputs = (float*)safe_malloc(odim * sizeof(float));
@@ -539,20 +614,19 @@ int augment_mixup(TrainingDataset* ds, float alpha) {
     }
 
     static unsigned int rng = 987654321;
-    for (size_t i = 0; i < n; i++) {
+    size_t half = n / 2;
+    for (size_t i = 0; i < half; i++) {
         rng = rng * 1103515245 + 12345;
         size_t j = (size_t)((float)n * (float)((rng >> 16) & 0xFFFF) / 65535.0f) % n;
+        if (j == i) j = (i + 1) % n;
 
-        rng = rng * 1103515245 + 12345;
-        float lambda = (float)((rng >> 16) & 0xFFFF) / 65535.0f;
-        lambda = lambda * alpha + (1.0f - alpha / 2.0f);
-        if (lambda > 1.0f) lambda = 1.0f;
-        if (lambda < 0.0f) lambda = 0.0f;
+        float lambda = beta_random(alpha, &rng);
+        float lambda_c = 1.0f - lambda;
 
         for (size_t d = 0; d < idim; d++)
-            mix_inputs[d] = lambda * ds->inputs[i * idim + d] + (1.0f - lambda) * ds->inputs[j * idim + d];
+            mix_inputs[d] = lambda * ds->inputs[i * idim + d] + lambda_c * ds->inputs[j * idim + d];
         for (size_t d = 0; d < odim; d++)
-            mix_outputs[d] = lambda * ds->outputs[i * odim + d] + (1.0f - lambda) * ds->outputs[j * odim + d];
+            mix_outputs[d] = lambda * ds->outputs[i * odim + d] + lambda_c * ds->outputs[j * odim + d];
 
         memcpy(ds->inputs + i * idim, mix_inputs, idim * sizeof(float));
         memcpy(ds->outputs + i * odim, mix_outputs, odim * sizeof(float));
@@ -560,6 +634,72 @@ int augment_mixup(TrainingDataset* ds, float alpha) {
 
     safe_free((void**)&mix_inputs);
     safe_free((void**)&mix_outputs);
+    return 0;
+}
+
+/**
+ * @brief CutMix增强（矩形区域替换混合两个样本）
+ *
+ * 对每对随机选择的样本(i,j)，随机选取i中的一个矩形区域，
+ * 用j的对应区域替换。标签按面积比例混合。
+ * 公式: x' = M⊙x_i + (1-M)⊙x_j,  y' = λ*y_i + (1-λ)*y_j
+ * 其中λ是矩形区域占比，M是二进制掩码。
+ *
+ * @param ds 数据集
+ * @param alpha Beta分布参数（控制混合比例λ的分布集中度）
+ */
+int augment_cutmix(TrainingDataset* ds, float alpha) {
+    if (!ds || !ds->is_loaded) return -1;
+    if (!ds->is_training_data) return 0;
+    if (alpha <= 0.0f) alpha = 1.0f;
+    if (alpha > 2.0f) alpha = 2.0f;
+
+    size_t n = ds->header.num_samples;
+    size_t idim = ds->header.input_dim;
+    size_t odim = ds->header.output_dim;
+    if (n < 2 || idim < 4) return 0;
+
+    static unsigned int rng = 765432109;
+    size_t half = n / 2;
+    for (size_t i = 0; i < half; i++) {
+        rng = rng * 1103515245 + 12345;
+        size_t j = (size_t)((float)n * (float)((rng >> 16) & 0xFFFF) / 65535.0f) % n;
+        if (j == i) j = (i + 1) % n;
+
+        float lambda = beta_random(alpha, &rng);
+
+        /* 确定矩形区域：中心坐标(rx, ry)，宽高(rw, rh) */
+        rng = rng * 1103515245 + 12345;
+        float rx_f = ((float)((rng >> 16) & 0xFFFF) / 65535.0f) * (float)idim;
+        rng = rng * 1103515245 + 12345;
+        float ry_f = 0.0f; /* 一维数据的"行"坐标始终为0 */
+        rng = rng * 1103515245 + 12345;
+        float rw = sqrtf(1.0f - lambda) * (float)idim;
+        float rh = 1.0f; /* 一维数据高度始终为1 */
+
+        if (rw < 1.0f) rw = 1.0f;
+
+        size_t start_x = (size_t)(rx_f - rw * 0.5f);
+        if (start_x >= idim) start_x = 0;
+        size_t end_x = start_x + (size_t)rw;
+        if (end_x > idim) end_x = idim;
+        if (end_x <= start_x) { start_x = 0; end_x = idim / 4; if (end_x == 0) end_x = 1; }
+
+        size_t region_size = end_x - start_x;
+        float actual_lambda = (float)region_size / (float)idim;
+
+        for (size_t d = 0; d < start_x; d++)
+            ds->inputs[i * idim + d] = ds->inputs[i * idim + d];
+        for (size_t d = start_x; d < end_x; d++)
+            ds->inputs[i * idim + d] = ds->inputs[j * idim + d];
+        for (size_t d = end_x; d < idim; d++)
+            ds->inputs[i * idim + d] = ds->inputs[i * idim + d];
+
+        for (size_t d = 0; d < odim; d++)
+            ds->outputs[i * odim + d] = actual_lambda * ds->outputs[j * odim + d] +
+                                        (1.0f - actual_lambda) * ds->outputs[i * odim + d];
+    }
+
     return 0;
 }
 
@@ -819,9 +959,13 @@ int dataset_augment_noise(TrainingDataset* ds, float stddev) {
 }
 
 int dataset_augment_mixup(TrainingDataset* ds, float alpha) {
-    /* 方案C修复: 统一委托到augment_mixup，消除双重MixUp实现。
-     * augment_mixup使用随机配对+Beta分布lambda，比旧版的相邻配对更优。 */
+    /* M-023修复: 使用标准Beta分布采样λ的MixUp增强 */
     return augment_mixup(ds, alpha);
+}
+
+int dataset_augment_cutmix(TrainingDataset* ds, float alpha) {
+    /* M-023修复: 矩形区域替换的CutMix增强 */
+    return augment_cutmix(ds, alpha);
 }
 
 int dataset_augment_dropout(TrainingDataset* ds, float drop_prob) {

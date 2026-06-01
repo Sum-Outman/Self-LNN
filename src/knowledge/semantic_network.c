@@ -1550,11 +1550,16 @@ int semantic_analogy_find(const SemanticNetwork* net, const char* concept_a,
             float structural_sim = 0.0f;
             if (r->target && r->target->embedding && net->relations[src_rel_idx]->target &&
                 net->relations[src_rel_idx]->target->embedding) {
-                /* 使用嵌入向量的余弦相似度作为结构相似度 */
+                /* ZSFEEE-FIX-015: 使用实际embedding_size替代硬编码64维，
+                 * 确保不同维度嵌入向量的余弦相似度计算正确 */
+                size_t emb_size = r->target->embedding_size;
+                if (emb_size == 0 || emb_size != net->relations[src_rel_idx]->target->embedding_size) {
+                    emb_size = 64; /* 维度不匹配时使用默认安全值 */
+                }
                 structural_sim = math_cosine_similarity(
                     r->target->embedding,
                     net->relations[src_rel_idx]->target->embedding,
-                    64);
+                    emb_size);
             }
             float sim = r->strength * 0.4f;
             if (r->target && r->target->confidence > 0.0f)
@@ -1848,7 +1853,7 @@ int semantic_network_import_from_knowledge_base(SemanticNetwork* network,
     int imported = 0;
 
     for (size_t i = 0; i < kb->size && i < 100000; i++) {
-        KnowledgeEntry* entry = &kb->entries[i].entry;
+        KnowledgeEntry* entry = &kb->entries[i];
         if (!entry->subject || entry->subject[0] == '\0') continue;
 
         float entry_conf = 0.3f;

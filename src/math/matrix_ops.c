@@ -154,18 +154,45 @@ void matrix_init_zeros(float* mat, size_t rows, size_t cols) {
  * ================================================================ */
 
 /**
- * @brief LU分解（Doolittle算法）：A = L * U
+ * @brief LU分解（Doolittle算法，带部分主元选取）：PA = L * U
  * L是单位下三角矩阵，U是上三角矩阵，结果存储在A中
- * @param A 输入/输出矩阵（n×n）
+ * @param A 输入/输出矩阵（n×n），被覆盖为L和U组合
+ * @param pivot 输出行交换记录数组（至少n个int），pivot[i]=j表示第i行与第j行交换
  * @param n 矩阵维度
  * @return 0成功，-1奇异矩阵
  */
-int matrix_lu_decompose(float* A, size_t n) {
-    if (!A || n == 0) return -1;
-    
+int matrix_lu_decompose(float* A, int* pivot, size_t n) {
+    if (!A || !pivot || n == 0) return -1;
+
+    /* 初始化行交换记录 */
+    for (size_t i = 0; i < n; i++) pivot[i] = (int)i;
+
     for (size_t k = 0; k < n; k++) {
-        if (fabsf(A[k * n + k]) < 1e-12f) return -1; /* 奇异矩阵 */
-        
+        /* 部分主元选取：找第k列中绝对值最大的元素所在行 */
+        size_t max_row = k;
+        float max_val = fabsf(A[k * n + k]);
+        for (size_t i = k + 1; i < n; i++) {
+            float abs_val = fabsf(A[i * n + k]);
+            if (abs_val > max_val) {
+                max_val = abs_val;
+                max_row = i;
+            }
+        }
+        if (max_val < 1e-12f) return -1; /* 奇异矩阵 */
+
+        /* 行交换 */
+        if (max_row != k) {
+            int tmp_pivot = pivot[k];
+            pivot[k] = pivot[max_row];
+            pivot[max_row] = tmp_pivot;
+            for (size_t j = 0; j < n; j++) {
+                float tmp = A[k * n + j];
+                A[k * n + j] = A[max_row * n + j];
+                A[max_row * n + j] = tmp;
+            }
+        }
+
+        /* 消元 */
         for (size_t i = k + 1; i < n; i++) {
             A[i * n + k] /= A[k * n + k];
             for (size_t j = k + 1; j < n; j++) {
@@ -215,39 +242,54 @@ int matrix_lu_solve(const float* A, const float* b, float* x, size_t n) {
  * ================================================================ */
 
 /**
- * @brief 矩阵求逆：A^(-1) 通过LU分解
- * @param A 输入矩阵（n×n），求逆后被覆盖
+ * @brief 矩阵求逆：A^(-1) 通过LU分解（带部分主元选取）
+ * @param A 输入矩阵（n×n），const保证不修改输入
+ * @param invA 输出逆矩阵（n×n），必须已分配内存
  * @param n 维度
  * @return 0成功，-1失败
  */
-int matrix_inverse(float* A, size_t n) {
-    if (!A || n == 0) return -1;
-    
-    /* 先进行LU分解 */
-    if (matrix_lu_decompose(A, n) != 0) return -1;
-    
-    /* 为每列求解 */
-    float* col = (float*)malloc(n * sizeof(float));
-    float* x = (float*)malloc(n * n * sizeof(float));
-    if (!col || !x) {
-        free(col);
-        free(x);
+int matrix_inverse(const float* A, float* invA, size_t n) {
+    if (!A || !invA || n == 0) return -1;
+
+    /* 复制A到工作矩阵，LU分解会修改工作副本 */
+    float* work = (float*)malloc(n * n * sizeof(float));
+    int* pivot = (int*)malloc(n * sizeof(int));
+    if (!work || !pivot) {
+        free(work);
+        free(pivot);
         return -1;
     }
-    
-    for (size_t j = 0; j < n; j++) {
-        /* 设置单位向量作为右端 */
-        memset(col, 0, n * sizeof(float));
-        col[j] = 1.0f;
-        
-        /* 求解得到第j列 */
-        matrix_lu_solve(A, col, &x[j * n], n);
+    memcpy(work, A, n * n * sizeof(float));
+
+    /* LU分解（带部分主元选取） */
+    if (matrix_lu_decompose(work, pivot, n) != 0) {
+        free(work);
+        free(pivot);
+        return -1;
     }
-    
-    /* 将结果复制回A */
-    memcpy(A, x, n * n * sizeof(float));
+
+    /* 为每列求解 */
+    float* col = (float*)malloc(n * sizeof(float));
+    if (!col) {
+        free(work);
+        free(pivot);
+        return -1;
+    }
+
+    for (size_t j = 0; j < n; j++) {
+        /* 设置单位向量作为右端，应用行交换 */
+        memset(col, 0, n * sizeof(float));
+        for (size_t i = 0; i < n; i++) {
+            col[i] = (pivot[i] == (int)j) ? 1.0f : 0.0f;
+        }
+
+        /* 求解得到第j列 */
+        matrix_lu_solve(work, col, &invA[j * n], n);
+    }
+
     free(col);
-    free(x);
+    free(pivot);
+    free(work);
     return 0;
 }
 

@@ -10,7 +10,7 @@
 
 #include <stddef.h>
 #include "selflnn/core/port_config.h"
-#include "selflnn/self_cognition.h"
+#include "selflnn/cognition/self_cognition.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -273,6 +273,7 @@ typedef enum {
 
     /* ===== 机器人扩展控制 ===== */
     API_POST_ROBOT_CONFIG_RESET = 169,     /**< 重置机器人配置 */
+    API_POST_ROBOT_CONFIG_SAVE = 327,      /**< 保存机器人配置 */
     API_POST_ROBOT_ANALYZE_SCREEN = 170,   /**< 分析屏幕UI元素 */
     API_POST_ROBOT_EXECUTE_ACTION = 171,   /**< 执行单个动作 */
     API_POST_ROBOT_EXECUTE_TASK = 172,     /**< 执行任务计划 */
@@ -381,6 +382,7 @@ typedef enum {
     API_GET_AGI_TASKS = 243,               /**< 获取AGI任务列表 /api/agi/tasks */
     API_GET_AGI_DIAGNOSTIC = 244,          /**< AGI诊断信息 /api/agi/diagnostic */
     API_GET_AGI_DIAGNOSTIC_EXPORT = 245,   /**< 导出AGI诊断 /api/agi/diagnostic/export */
+    API_GET_DIALOGUE_SEND = 246,           /**< GET对话发送转发 /api/dialogue/send (转发到POST) */
 
     /* ===== 系统/模型/推理端点（ZSFAB-S8: 对齐路由表248-259） ===== */
     API_POST_SYSTEM_SHUTDOWN = 248,        /**< 关闭系统 /api/system/shutdown */
@@ -440,6 +442,17 @@ typedef enum {
     API_POST_PRODUCT_DESIGN = 270,         /**< 产品设计生成 */
     API_GET_PRODUCT_SPEC = 271,            /**< 获取产品规格 */
     API_POST_TRAINING_SCHEDULE = 272,      /**< ZSF-010: 创建训练计划 /api/training/schedule */
+
+    /* ===== H-012: 串口数据接收独立端点 ===== */
+    API_POST_SERIAL_RECEIVE = 274,           /**< 串口数据接收 /api/serial/receive */
+
+    /* ===== M-016: 双目空间感知 ===== */
+    API_POST_STEREO_PERCEPTION = 275,        /**< 双目空间感知：视差/深度/点云计算 /api/stereo/perception */
+
+    /* ===== ZSFEEE-FIX-005: P0-#5修复 - 模型信息与演化状态端点 ===== */
+    API_GET_MODEL_INFO = 276,                /**< 获取LNN模型详细信息 /api/model/info */
+    API_GET_EVOLUTION_STATUS = 277,          /**< 获取自我演化系统状态 /api/evolution/status */
+
     API_POST_PRODUCT_SPEC = 330,           /**< POST产品规格生成 /api/product/spec */
 
     /* ===== ZSFWS-B009: 前端-后端API端点对齐修复 ===== */
@@ -469,8 +482,14 @@ typedef enum {
     API_GET_AUDIO_SPECTRUM = 302,            /**< 获取音频频谱分析数据 /api/audio/spectrum */
     API_GET_LNN_ACTIVATION_HEATMAP = 303,    /**< 获取LNN神经元激活热力图数据 /api/lnn/activation/heatmap */
     API_GET_LNN_PREDICTION_SCATTER = 304,    /**< 获取LNN预测结果散点图数据 /api/lnn/prediction/scatter */
-    API_POST_TASK_PAUSE = 305,               /**< 暂停AGI任务 /api/task/pause */
-    API_POST_TASK_CANCEL = 306,              /**< 取消AGI任务 /api/task/cancel */
+    API_POST_TASK_PAUSE = 311,               /**< 暂停AGI任务 /api/task/pause（ZSFDDD-P0-001修复：原值305与仿真冲突） */
+    API_POST_TASK_CANCEL = 312,              /**< 取消AGI任务 /api/task/cancel（ZSFDDD-P0-001修复：原值306与仿真冲突） */
+
+    /* ===== ZSFQQ-P1-006: 学习一致性检查 ===== */
+    API_POST_LEARNING_CONSISTENCY = 350,     /**< 学习/知识一致性检查 /api/learning/consistency */
+
+    /* ===== L-016修复: 哨兵值紧随最高枚举值350，自动计算为351 ===== */
+    API_REQUEST_COUNT                        /**< 自动计算枚举最大值+1，反映API处理程序分发表大小 */
 } ApiRequestType;
 
 /**

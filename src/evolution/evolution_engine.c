@@ -15,6 +15,8 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/secure_random.h"  /* ZSFQQ-Q031: 统一随机数生成 */
+#include "selflnn/concurrency/thread_pool.h"  /* ZSFQQ-Q032: 岛模型并行演化 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -69,25 +71,20 @@ static float cmaes_fitness_bridge(const float* x, size_t dim, void* user_data) {
     return engine->fitness_func(x, dim, engine->user_data);
 }
 
-/* 快速随机数生成器 (Xorshift) */
-static unsigned int xorshift_next(unsigned int* state) {
-    unsigned int x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = x;
-    return x;
-}
+/* ZSFQQ-Q031: 使用secure_random替代xorshift，统一随机数生成
+ * 保留rng参数兼容调用者，内部转发到secure_random */
 
 static float rand_float(unsigned int* state) {
-    return (float)(xorshift_next(state) & 0xFFFFFF) / (float)0x1000000;
+    (void)state;  /* ZSFQQ-Q031: rng参数不再使用，统一到secure_random */
+    return secure_random_float();
 }
 
 static float rand_gaussian(unsigned int* state, float mean, float stddev) {
-    float u1 = rand_float(state);
-    float u2 = rand_float(state);
+    (void)state;  /* ZSFQQ-Q031: rng参数不再使用，统一到secure_random */
+    float u1 = secure_random_float();
+    float u2 = secure_random_float();
     if (u1 < 1e-10f) u1 = 1e-10f;
-    float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+    float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265f * u2);
     return mean + stddev * z;
 }
 
@@ -830,6 +827,13 @@ int evolution_initialize_from_existing(EvolutionEngine* engine,
     return 0;
 }
 
+/* 岛模型并行演化任务数据结构（线程池任务参数） */
+typedef struct {
+    EvolutionPopulation* island;
+    EvolutionEngine* engine;
+    int island_index;
+} IslandTaskData;
+
 int evolution_step(EvolutionEngine* engine) {
     if (!engine || !engine->initialized) return -1;
 
@@ -1013,6 +1017,53 @@ int evolution_step(EvolutionEngine* engine) {
     engine->stats.end_time = time(NULL);
     engine->stats.elapsed_seconds = difftime(engine->stats.end_time, engine->stats.start_time);
 
+    /* ZSFQQ-DEEP-004修复: 岛模型真正并行演化
+     * 原代码创建ThreadPool后仍在主线程串行循环处理，线程池未实际使用。
+     * 修复: 为每个岛提交独立任务到线程池，实现真正的岛间并行演化。 */
+    if (engine->island_count > 1 && engine->islands) {
+        ThreadPoolConfig tp_cfg;
+        memset(&tp_cfg, 0, sizeof(tp_cfg));
+        tp_cfg.num_threads = engine->island_count < 8 ? engine->island_count : 8;
+        tp_cfg.max_tasks = engine->island_count * 2;
+        ThreadPool* tp = thread_pool_create(&tp_cfg);
+        if (tp) {
+            /* 为每个岛提交独立的演化任务到线程池 */
+            for (int i = 0; i < engine->island_count; i++) {
+                EvolutionPopulation* isl = &engine->islands[i];
+                /* 复制岛数据到堆上，供线程池任务使用(线程安全) */
+                IslandTaskData* task_data = (IslandTaskData*)safe_malloc(sizeof(IslandTaskData));
+                if (!task_data) continue;
+                task_data->island = isl;
+                task_data->engine = engine;
+                task_data->island_index = i;
+                thread_pool_submit(tp, evolve_island_task, task_data, 0);
+            }
+            /* 等待所有岛演化完成(无限超时) */
+            thread_pool_wait_all(tp, 0);
+            thread_pool_free(tp);
+        } else {
+            /* 线程池创建失败：回退到串行岛演化 */
+            for (int i = 0; i < engine->island_count; i++) {
+                EvolutionPopulation* isl = &engine->islands[i];
+                for (size_t j = engine->config.elite_count; j < isl->size; j++) {
+                    if (isl->individuals[j].chromosome) {
+                        for (size_t k = 0; k < engine->config.chromosome_size; k++) {
+                            if (rand_float(rng) < engine->config.mutation_rate) {
+                                isl->individuals[j].chromosome[k] +=
+                                    rand_gaussian(rng, 0.0f, engine->config.gaussian_sigma);
+                            }
+                        }
+                        float fit = engine->fitness_func ?
+                            engine->fitness_func(isl->individuals[j].chromosome,
+                                engine->config.chromosome_size, engine->user_data) : 0.0f;
+                        if (fit > isl->individuals[j].fitness)
+                            isl->individuals[j].fitness = fit;
+                    }
+                }
+                update_population_stats(isl);
+            }
+        }
+    }
     /* PF-004修复: 岛模型个体迁移 —— 每migration_counter代执行一次岛间精英迁移 */
     if (engine->island_count > 1 && engine->islands) {
         engine->migration_counter++;
@@ -1101,6 +1152,54 @@ static int evolution_island_migrate(EvolutionEngine* engine) {
         dst_worst->fitness = src_best->fitness;
     }
     return 0;
+}
+
+/* ZSFQQ-DEEP-004: 岛模型并行演化任务数据 */
+typedef struct {
+    EvolutionPopulation* island;
+    EvolutionEngine* engine;
+    int island_index;
+} IslandTaskData;
+
+/* ZSFQQ-DEEP-004: 线程池任务：独立演化单个岛 */
+static void evolve_island_task(void* arg) {
+    IslandTaskData* data = (IslandTaskData*)arg;
+    if (!data || !data->island || !data->engine) return;
+
+    EvolutionPopulation* isl = data->island;
+    EvolutionEngine* engine = data->engine;
+
+    /* 每个岛使用独立随机种子(基于岛索引) */
+    unsigned int island_seed = engine->rng_state + (unsigned int)(data->island_index * 2654435761u);
+    for (size_t j = engine->config.elite_count; j < isl->size && j < isl->capacity; j++) {
+        if (!isl->individuals[j].chromosome) continue;
+        for (size_t k = 0; k < engine->config.chromosome_size; k++) {
+            island_seed = island_seed * 1103515245u + 12345u;
+            float r = (float)(island_seed & 0x7FFFFFFFu) / 2147483648.0f;
+            if (r < engine->config.mutation_rate) {
+                island_seed = island_seed * 1103515245u + 12345u;
+                float g = 0.0f;
+                /* Box-Muller生成高斯随机数 */
+                float u1 = (float)(island_seed & 0x7FFFFFFFu) / 2147483648.0f;
+                island_seed = island_seed * 1103515245u + 12345u;
+                float u2 = (float)(island_seed & 0x7FFFFFFFu) / 2147483648.0f;
+                if (u1 > 1e-10f) g = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265f * u2);
+                isl->individuals[j].chromosome[k] += g * engine->config.gaussian_sigma;
+                if (isl->individuals[j].chromosome[k] < engine->config.chromosome_min)
+                    isl->individuals[j].chromosome[k] = engine->config.chromosome_min;
+                if (isl->individuals[j].chromosome[k] > engine->config.chromosome_max)
+                    isl->individuals[j].chromosome[k] = engine->config.chromosome_max;
+            }
+        }
+        if (engine->fitness_func) {
+            float fit = engine->fitness_func(isl->individuals[j].chromosome,
+                engine->config.chromosome_size, engine->user_data);
+            if (fit > isl->individuals[j].fitness)
+                isl->individuals[j].fitness = fit;
+        }
+    }
+    update_population_stats(isl);
+    safe_free((void**)&data);
 }
 
 int evolution_run(EvolutionEngine* engine, int max_generations) {
@@ -1384,11 +1483,31 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
                 }
             }
 
-            /* 写入hidden_to_gate_weights [hidden_size * hidden_size] */
-            if (cell->hidden_to_gate_weights) {
+            /* 写入hidden_to_input_gate_weights [hidden_size * hidden_size] */
+            if (cell->hidden_to_input_gate_weights) {
                 size_t n = hidden_size * hidden_size;
                 if (chrom_offset + n <= best->chromosome_size) {
-                    memcpy(cell->hidden_to_gate_weights, best->chromosome + chrom_offset, n * sizeof(float));
+                    memcpy(cell->hidden_to_input_gate_weights, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+
+            /* 写入hidden_to_forget_gate_weights [hidden_size * hidden_size] */
+            if (cell->hidden_to_forget_gate_weights) {
+                size_t n = hidden_size * hidden_size;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->hidden_to_forget_gate_weights, best->chromosome + chrom_offset, n * sizeof(float));
+                    chrom_offset += n;
+                    cell_params_written++;
+                }
+            }
+
+            /* 写入hidden_to_output_gate_weights [hidden_size * hidden_size] */
+            if (cell->hidden_to_output_gate_weights) {
+                size_t n = hidden_size * hidden_size;
+                if (chrom_offset + n <= best->chromosome_size) {
+                    memcpy(cell->hidden_to_output_gate_weights, best->chromosome + chrom_offset, n * sizeof(float));
                     chrom_offset += n;
                     cell_params_written++;
                 }

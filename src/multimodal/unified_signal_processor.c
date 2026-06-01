@@ -186,20 +186,11 @@ int unified_signal_processor_train(UnifiedSignalProcessor* processor,
      * 
      * projection_locked 触发条件：
      *   unified_signal_processor_create() 中使用 Xavier 初始化投影矩阵后，
-     *   立即设置 projection_locked = 1（见第773-775行）。
-     *   此时投影矩阵作为固定的随机投影层，仅进行维度变换，
-     *   不参与反向传播的梯度更新。
+     *   设置 projection_locked = 0（见第795行），允许投影矩阵参与训练。
+     *   投影矩阵作为可学习的特征映射层参与反向传播。
      * 
-     * 适用场景：
-     *   1. 初始化阶段：Xavier 随机投影已提供足够的特征表达能力，
-     *      冻结投影层避免早期训练中的梯度不稳定。
-     *   2. 共享推理：多个下游模块共用同一投影矩阵时，
-     *      锁定投影防止模块间梯度互相干扰。
-     *   3. 调试/分析：需要固定输入映射关系以分析 LNN 行为时。
-     * 
-     * 若要启用投影矩阵的在线学习（可训练投影），
-     *   调用 unified_signal_processor_set_projection_locked(processor, 0)。
-     *   此时投影权重将通过 SGD 带动量更新参与反向传播。 */
+     * 若要冻结投影层（如初始化阶段或共享推理场景），
+     *   调用 unified_signal_processor_set_projection_locked(processor, 1)。 */
     if (processor->projection_locked) {
         /* 锁定状态：跳过 SGD 梯度更新，仅返回损失值供监控 */
         return total_loss;
@@ -784,9 +775,9 @@ UnifiedSignalProcessor* unified_signal_processor_create(const UnifiedSignalProce
             if (processor->unified_projection_matrix && processor->unified_projection_bias) {
                 float xavier_limit = sqrtf(6.0f / (float)(total_dim + config->unified_dimension));
                 for (size_t i = 0; i < matrix_size; i++) {
-                    uint64_t val = (uint64_t)i * 1103515245ULL + 12345ULL;
-                    float r = ((float)(val & 0x7FFFFFFFULL) / 2147483648.0f) - 1.0f;
-                    processor->unified_projection_matrix[i] = r * xavier_limit;
+                    /* ZSFQQ-P2-006修复: 使用secure_random_float统一随机数生成，与其他模块Xavier初始化保持一致 */
+                    float r = secure_random_float();
+                    processor->unified_projection_matrix[i] = (r * 2.0f - 1.0f) * xavier_limit;
                 }
                 memset(processor->unified_projection_bias, 0, config->unified_dimension * sizeof(float));
                 /* ZSFLYF-P1-003修复: 投影矩阵不再锁定。
@@ -1118,7 +1109,7 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
             unified_output[d] = sum;
         }
     } else {
-        fprintf(stderr, "[信号处理器错误] 统一投影矩阵未分配，拒绝使用均匀采样降级处理！请先调用 unified_signal_processor_init_projections()。\n");
+        fprintf(stderr, "[信号处理器错误] 统一投影矩阵未分配，拒绝使用均匀采样降级处理！请先调用 unified_signal_processor_create() 初始化处理器。\n");
         return SELFLNN_ERROR_INVALID_STATE;
     }
     

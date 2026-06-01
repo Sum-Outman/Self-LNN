@@ -9,6 +9,7 @@
 #include "selflnn/robot/hardware_interface.h"
 #include "selflnn/robot/pybullet_bridge.h"
 #include "selflnn/robot/hardware_detector.h"
+#include "selflnn/robot/ros_robot_controller.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
@@ -116,6 +117,11 @@ struct Robot {
     size_t command_count;       /**< 命令计数 */
     size_t sensor_update_count; /**< 传感器更新计数 */
     float total_operation_time; /**< 总操作时间 */
+
+    int control_mode;            /**< 控制模式（0=仿真 1=ROS 2=硬件直驱） */
+    void* ros_controller;        /**< ROS机器人控制器句柄 */
+    int ros_robot_id;            /**< ROS机器人ID（多机器人标识） */
+    int ros_command_pending;     /**< ROS命令待处理标志 */
 };
 
 /**
@@ -147,6 +153,13 @@ struct RobotController {
     
     // 内部仿真器
     void* internal_sim;             /**< 内部物理仿真器句柄 (Simulator*) */
+    
+    /* H-014修复: 统一控制模式运行时切换机制 */
+    RobotControlMode control_mode;   /**< 当前控制模式（DIRECT_HARDWARE / ROS / SIMULATION） */
+    /* ROS桥接模式专用字段 */
+    RosRobotController* ros_controller; /**< ROS机器人控制器引用 */
+    int ros_robot_id;                /**< 在ROS控制器中对应的机器人ID（-1表示未设置） */
+    int ros_command_pending;         /**< ROS命令等待标志（用于异步命令确认） */
 };
 
 /* ==================== 静态函数声明 ==================== */
@@ -155,6 +168,9 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type, 
 static void robot_sim_apply_command(Robot* robot, const RobotCommand* command);
 static int robot_read_sensor_from_hardware(Robot* robot, int sensor_id, SensorData* sensor_data);
 static int robot_generate_physical_sensor_data(Robot* robot, SensorType sensor_type, float* buffer, size_t buffer_size);
+/* H-014修复: 控制模式分发静态函数 */
+static int robot_forward_ros_command(Robot* robot, const RobotCommand* command);
+static int robot_execute_simulation_command(Robot* robot, const RobotCommand* command);
 
 /**
  * @brief 默认机器人配置
@@ -272,6 +288,12 @@ Robot* robot_create(const RobotConfig* config) {
     // 初始化硬件接口
     robot->hardware = NULL;
     robot->hardware_enabled = 0;
+    
+    /* H-014修复: 统一控制模式初始化 */
+    robot->control_mode = CONTROL_MODE_SIMULATION;  /* 默认仿真模式 */
+    robot->ros_controller = NULL;
+    robot->ros_robot_id = -1;
+    robot->ros_command_pending = 0;
     
     // 初始化传感器管理
     robot->sensor_capacity = 8; // 默认容量
@@ -653,39 +675,175 @@ int robot_get_sensor_data(Robot* robot, int sensor_id, SensorData* sensor_data) 
 
 /**
  * @brief 发送控制命令
+ * 
+ * H-014修复: 根据 RobotControlMode 分发到对应路径。
+ * 三种模式互不干扰：
+ * - CONTROL_MODE_DIRECT_HARDWARE → 硬件接口直接发送
+ * - CONTROL_MODE_ROS → ROS桥接发送
+ * - CONTROL_MODE_SIMULATION → 内建物理仿真
  */
 int robot_send_command(Robot* robot, const RobotCommand* command) {
-    // 参数检查
+    /* 参数检查 */
     SELFLNN_CHECK_NULL(robot, "机器人句柄为空");
     SELFLNN_CHECK_NULL(command, "控制命令为空");
     
-    // 如果硬件接口启用，通过硬件发送命令
-    if (robot->hardware_enabled && robot->hardware) {
-        // 硬件模式下仍然应用仿真命令以保持仿真状态同步
-        robot_sim_apply_command(robot, command);
-        return robot_send_hardware_command(robot, command);
+    /* H-014修复: 根据控制模式分发到对应路径 */
+    switch (robot->control_mode) {
+        case CONTROL_MODE_DIRECT_HARDWARE:
+            /* 直接硬件模式：仿真同步 + 硬件发送 */
+            robot_sim_apply_command(robot, command);
+            return robot_send_hardware_command(robot, command);
+        
+        case CONTROL_MODE_ROS:
+            /* ROS桥接模式：通过RosRobotController转发 */
+            return robot_forward_ros_command(robot, command);
+        
+        case CONTROL_MODE_SIMULATION:
+        default:
+            /* 仿真模式（默认）：内建物理仿真执行 */
+            return robot_execute_simulation_command(robot, command);
+    }
+}
+
+/**
+ * @brief H-014修复: ROS桥接命令转发
+ * 
+ * 将RobotCommand转换为RosRobotController API调用。
+ * 根据机器人类型和命令模式选择合适的ROS控制接口。
+ */
+static int robot_forward_ros_command(Robot* robot, const RobotCommand* command) {
+    /* 检查ROS控制器是否已设置 */
+    if (!robot->ros_controller) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "ROS控制器未设置，无法发送ROS命令。请先调用robot_set_ros_controller()。");
+        return SELFLNN_ERROR_INVALID_ARGUMENT;
     }
     
-    // 应用仿真命令
+    if (robot->ros_robot_id < 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "ROS机器人ID无效（%d），无法发送ROS命令。", robot->ros_robot_id);
+        return SELFLNN_ERROR_INVALID_ARGUMENT;
+    }
+    
+    int result = 0;
+    
+    /* 根据RobotCommand的motion_mode选择ROS控制模式 */
+    switch (command->mode) {
+        case MOTION_MODE_VELOCITY:
+            /* 速度控制 → ros_robot_controller_send_velocity */
+            {
+                int mode_result = ros_robot_controller_set_control_mode(robot->ros_controller,
+                                              robot->ros_robot_id, ROS_ROBOT_CONTROL_MODE_VELOCITY);
+                if (mode_result != 0) return mode_result;
+                
+                result = ros_robot_controller_send_velocity(robot->ros_controller,
+                          robot->ros_robot_id,
+                          command->target_linear_velocity[0],
+                          command->target_linear_velocity[1],
+                          command->target_linear_velocity[2],
+                          command->target_angular_velocity[0],
+                          command->target_angular_velocity[1],
+                          command->target_angular_velocity[2]);
+            }
+            break;
+            
+        case MOTION_MODE_POSITION:
+            /* 位置控制 → ros_robot_controller_send_position */
+            {
+                int mode_result = ros_robot_controller_set_control_mode(robot->ros_controller,
+                                              robot->ros_robot_id, ROS_ROBOT_CONTROL_MODE_POSITION);
+                if (mode_result != 0) return mode_result;
+                
+                result = ros_robot_controller_send_position(robot->ros_controller,
+                          robot->ros_robot_id,
+                          command->target_position[0],
+                          command->target_position[1],
+                          command->target_position[2],
+                          command->target_orientation[0],
+                          command->target_orientation[1],
+                          command->target_orientation[2],
+                          command->target_orientation[3]);
+            }
+            break;
+            
+        case MOTION_MODE_TORQUE:
+            /* 力矩控制 → ros_robot_controller_send_joint_torques */
+            {
+                int mode_result = ros_robot_controller_set_control_mode(robot->ros_controller,
+                                              robot->ros_robot_id, ROS_ROBOT_CONTROL_MODE_JOINT_TORQUE);
+                if (mode_result != 0) return mode_result;
+                
+                result = ros_robot_controller_send_joint_torques(robot->ros_controller,
+                          robot->ros_robot_id,
+                          command->target_joint_torques,
+                          robot->config.num_joints > 0 ? robot->config.num_joints : 6);
+            }
+            break;
+            
+        case MOTION_MODE_TRAJECTORY:
+            /* 轨迹控制 → ros_robot_controller_execute_trajectory */
+            {
+                int mode_result = ros_robot_controller_set_control_mode(robot->ros_controller,
+                                              robot->ros_robot_id, ROS_ROBOT_CONTROL_MODE_TRAJECTORY);
+                if (mode_result != 0) return mode_result;
+                
+                /* 将关节位置作为轨迹点传递（6D姿态轨迹需转换，此处简化处理） */
+                int num_points = (robot->trajectory_size > 0) ? (int)(robot->trajectory_size / 3) : 1;
+                result = ros_robot_controller_execute_trajectory(robot->ros_controller,
+                          robot->ros_robot_id,
+                          command->target_joint_positions,
+                          num_points,
+                          command->trajectory_time > 0.0f ? command->trajectory_time : 5.0f);
+            }
+            break;
+            
+        default:
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "ROS桥接不支持的运动模式: %d", command->mode);
+            return SELFLNN_ERROR_INVALID_ARGUMENT;
+    }
+    
+    /* 更新命令计数 */
+    if (result == 0) {
+        robot->command_count++;
+        robot->ros_command_pending = 0;
+    } else {
+        selflnn_set_last_error(SELFLNN_ERROR_HARDWARE_FAILURE, __func__, __FILE__, __LINE__,
+                              "ROS命令发送失败: %s",
+                              ros_robot_controller_get_last_error(robot->ros_controller));
+        result = SELFLNN_ERROR_HARDWARE_FAILURE;
+    }
+    
+    return result;
+}
+
+/**
+ * @brief H-014修复: 仿真模式命令执行
+ * 
+ * 将原robot_send_command中的仿真路径提取为独立函数。
+ * 仅在 CONTROL_MODE_SIMULATION 模式下调用。
+ */
+static int robot_execute_simulation_command(Robot* robot, const RobotCommand* command) {
+    /* 应用仿真命令 */
     robot_sim_apply_command(robot, command);
     
-    // 性能分析
+    /* 性能分析 */
     PerfTimer timer;
     perf_timer_start(&timer);
     
-    // 检查机器人状态
+    /* 检查机器人状态 */
     SELFLNN_CHECK(robot->status.state != ROBOT_STATE_ERROR &&
                  robot->status.state != ROBOT_STATE_EMERGENCY,
                  SELFLNN_ERROR_INVALID_ARGUMENT,
                  "机器人处于错误状态（当前状态：%d）", robot->status.state);
     
-    // 更新机器人状态
+    /* 更新机器人状态 */
     robot->status.state = ROBOT_STATE_MOVING;
     
-    // 根据控制模式处理命令
+    /* 根据控制模式处理命令 */
     switch (command->mode) {
         case MOTION_MODE_POSITION:
-            // 位置控制
+            /* 位置控制 */
             if (command->target_position[0] != robot->status.position[0] ||
                 command->target_position[1] != robot->status.position[1] ||
                 command->target_position[2] != robot->status.position[2]) {
@@ -697,7 +855,7 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
                 float dz = command->target_position[2] - robot->status.position[2];
                 float distance = sqrtf(dx*dx + dy*dy + dz*dz);
                 
-                // 更新目标位置
+                /* 更新目标位置 */
                 memcpy(robot->status.position, command->target_position, 3 * sizeof(float));
                 
                 if (distance > 0.0f) {
@@ -710,7 +868,7 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
             break;
             
         case MOTION_MODE_VELOCITY:
-            // 速度控制
+            /* 速度控制 */
             memcpy(robot->status.linear_velocity, command->target_linear_velocity, 
                    3 * sizeof(float));
             memcpy(robot->status.angular_velocity, command->target_angular_velocity, 
@@ -793,12 +951,12 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
             break;
             
         case MOTION_MODE_TRAJECTORY:
-            // 轨迹控制
+            /* 轨迹控制 */
             if (command->use_trajectory && robot->joint_trajectory) {
                 robot->trajectory_time = command->trajectory_time;
                 robot->trajectory_progress = 0.0f;
                 
-                // 简单轨迹插值（实际应用中需要更复杂的轨迹规划）
+                /* 简单轨迹插值（实际应用中需要更复杂的轨迹规划） */
                 size_t trajectory_size = robot->trajectory_size < 32 ? 
                                         robot->trajectory_size : 32;
                 memcpy(robot->joint_trajectory, command->target_joint_positions,
@@ -807,13 +965,13 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
             break;
     }
     
-    // 更新关节位置（如果提供了）
+    /* 更新关节位置（如果提供了） */
     if (command->target_joint_positions[0] != 0.0f) {
         memcpy(robot->status.joint_positions, command->target_joint_positions,
                sizeof(robot->status.joint_positions));
     }
     
-    // 更新夹爪位置
+    /* 更新夹爪位置 */
     if (command->target_gripper_position >= 0.0f && command->target_gripper_position <= 1.0f) {
         robot->status.gripper_position = command->target_gripper_position;
         if (command->target_gripper_position > 0.0f) {
@@ -821,13 +979,13 @@ int robot_send_command(Robot* robot, const RobotCommand* command) {
         }
     }
     
-    // 更新命令计数
+    /* 更新命令计数 */
     robot->command_count++;
     
-    // 性能统计
+    /* 性能统计 */
     uint64_t elapsed_ns = perf_timer_stop(&timer);
-    (void)elapsed_ns;  // 消除未使用变量警告
-    // printf("发送命令时间: %llu ns\n", elapsed_ns);
+    (void)elapsed_ns;  /* 消除未使用变量警告 */
+    /* printf("发送命令时间: %llu ns\n", elapsed_ns); */
     
     return 0;
 }
@@ -1752,6 +1910,9 @@ int robot_set_hardware_interface(Robot* robot, HardwareInterface* hardware) {
         int connect_result = hardware_interface_connect(robot->hardware);
         if (connect_result == 0) {
             robot->hardware_enabled = 1;
+            /* H-014修复: 硬件连接成功，自动切换到直接硬件模式 */
+            robot->control_mode = CONTROL_MODE_DIRECT_HARDWARE;
+            robot->sim_data_warning = 0;
         } else {
             robot->hardware_enabled = 0;
             selflnn_set_last_error(SELFLNN_ERROR_HARDWARE_FAILURE, __func__, __FILE__, __LINE__,
@@ -1761,6 +1922,7 @@ int robot_set_hardware_interface(Robot* robot, HardwareInterface* hardware) {
         }
     } else {
         robot->hardware_enabled = 0;
+        /* H-014修复: 未提供硬件接口，保持当前模式不变 */
     }
     
     return 0;
@@ -1785,6 +1947,9 @@ int robot_enable_hardware(Robot* robot, int enable) {
         int connect_result = hardware_interface_connect(robot->hardware);
         if (connect_result == 0) {
             robot->hardware_enabled = 1;
+            /* H-014修复: 硬件启用成功，自动切换到直接硬件模式 */
+            robot->control_mode = CONTROL_MODE_DIRECT_HARDWARE;
+            robot->sim_data_warning = 0;
             return 0;
         } else {
             robot->hardware_enabled = 0;
@@ -1797,6 +1962,11 @@ int robot_enable_hardware(Robot* robot, int enable) {
         // 禁用硬件接口
         hardware_interface_disconnect(robot->hardware);
         robot->hardware_enabled = 0;
+        /* H-014修复: 硬件禁用，回退到仿真模式 */
+        if (robot->control_mode == CONTROL_MODE_DIRECT_HARDWARE) {
+            robot->control_mode = CONTROL_MODE_SIMULATION;
+            robot->sim_data_warning = 1;
+        }
         return 0;
     }
 }
@@ -1840,6 +2010,108 @@ int robot_send_hardware_command(Robot* robot, const RobotCommand* command) {
     
     // 更新命令计数
     robot->command_count++;
+    
+    return 0;
+}
+
+/* ============================
+ * H-014修复: 统一控制模式运行时切换机制
+ * ============================ */
+
+/**
+ * @brief 设置机器人控制模式
+ * 
+ * 在运行时切换 DIRECT_HARDWARE / ROS / SIMULATION 三种控制模式。
+ * 三种模式互不干扰，切换时自动验证依赖条件。
+ */
+int robot_set_control_mode(Robot* robot, RobotControlMode mode) {
+    SELFLNN_CHECK_NULL(robot, "机器人句柄为空");
+    
+    /* 验证控制模式有效性 */
+    if (mode != CONTROL_MODE_DIRECT_HARDWARE &&
+        mode != CONTROL_MODE_ROS &&
+        mode != CONTROL_MODE_SIMULATION) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "无效的控制模式: %d", (int)mode);
+        return SELFLNN_ERROR_INVALID_ARGUMENT;
+    }
+    
+    /* DIRECT_HARDWARE模式依赖检查 */
+    if (mode == CONTROL_MODE_DIRECT_HARDWARE) {
+        if (!robot->hardware) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "切换到直接硬件模式失败：硬件接口未设置。请先调用robot_set_hardware_interface()。");
+            return SELFLNN_ERROR_INVALID_ARGUMENT;
+        }
+        if (!robot->hardware_enabled) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "切换到直接硬件模式失败：硬件接口未启用。请先调用robot_enable_hardware()。");
+            return SELFLNN_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    
+    /* ROS模式依赖检查 */
+    if (mode == CONTROL_MODE_ROS) {
+        if (!robot->ros_controller) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "切换到ROS模式失败：ROS控制器未设置。请先调用robot_set_ros_controller()。");
+            return SELFLNN_ERROR_INVALID_ARGUMENT;
+        }
+        if (robot->ros_robot_id < 0) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "切换到ROS模式失败：ROS机器人ID无效（%d）。", robot->ros_robot_id);
+            return SELFLNN_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    
+    /* 仿真模式无需额外检查，直接切换 */
+    
+    /* 执行模式切换 */
+    robot->control_mode = mode;
+    
+    /* ROS命令等待标志重置 */
+    robot->ros_command_pending = 0;
+    
+    /* 在仿真模式下标记数据安全 */
+    if (mode == CONTROL_MODE_SIMULATION) {
+        robot->sim_data_warning = 1; /* 仿真模式数据标记为不安全用于训练 */
+    } else {
+        robot->sim_data_warning = 0; /* 硬件/ROS模式数据可用于训练 */
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 获取当前控制模式
+ */
+RobotControlMode robot_get_control_mode(const Robot* robot) {
+    if (!robot) {
+        return CONTROL_MODE_SIMULATION; /* 无效句柄回退到仿真模式 */
+    }
+    return robot->control_mode;
+}
+
+/**
+ * @brief 设置ROS控制器桥接引用
+ * 
+ * H-014修复: 为机器人关联ROS控制器实例。
+ * 调用此函数后，可以切换到CONTROL_MODE_ROS模式。
+ */
+int robot_set_ros_controller(Robot* robot, void* ros_controller, int ros_robot_id) {
+    SELFLNN_CHECK_NULL(robot, "机器人句柄为空");
+    SELFLNN_CHECK_NULL(ros_controller, "ROS控制器句柄为空");
+    
+    if (ros_robot_id < 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "ROS机器人ID必须为非负整数，当前值: %d", ros_robot_id);
+        return SELFLNN_ERROR_INVALID_ARGUMENT;
+    }
+    
+    /* 保存ROS控制器引用 */
+    robot->ros_controller = (RosRobotController*)ros_controller;
+    robot->ros_robot_id = ros_robot_id;
+    robot->ros_command_pending = 0;
     
     return 0;
 }
@@ -2110,13 +2382,23 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
             break;
             
         case SENSOR_TYPE_IMU:
-            /* P0-003修复: IMU传感器仅在使用真实硬件时提供数据。
-             * 仿真模式下无真实IMU数据，严格拒绝返回虚拟数据，
-             * 避免虚拟地磁场数据污染AGI学习管道。 */
-            if (size >= 9 && robot->config.use_real_hardware) {
-                /* 真实硬件模式下由硬件驱动填充data */
-                log_warn("[机器人] IMU传感器在仿真模式下不支持，拒绝提供虚拟数据");
-                return -1;
+            /* P0-003修复 + ZSFZX-FIX-P1-008: IMU传感器数据获取
+             * 仿真模式下无真实IMU数据，严格拒绝返回虚拟数据。
+             * 使用hardware_interface的imu_read_raw获取真实IMU数据 */
+            if (robot->config.use_real_hardware && robot->hardware && size >= 9) {
+                ImuRawData imu_raw;
+                memset(&imu_raw, 0, sizeof(ImuRawData));
+                int ret = hardware_interface_imu_read_raw(robot->hardware, &imu_raw);
+                if (ret == 0) {
+                    /* ZSFZX-FIX-P1-008: 成功读取真实IMU数据，填充输出缓冲区 */
+                    float* out = (float*)data;
+                    out[0] = (float)imu_raw.accelerometer[0]; out[1] = (float)imu_raw.accelerometer[1]; out[2] = (float)imu_raw.accelerometer[2];
+                    out[3] = (float)imu_raw.gyroscope[0];  out[4] = (float)imu_raw.gyroscope[1];  out[5] = (float)imu_raw.gyroscope[2];
+                    out[6] = (float)imu_raw.magnetometer[0];   out[7] = (float)imu_raw.magnetometer[1];   out[8] = (float)imu_raw.magnetometer[2];
+                    return 9;
+                }
+                /* IMU读取失败或无传感器，返回0不生成虚拟数据 */
+                return 0;
             }
             /* 仿真模式或无硬件：返回0，不生成任何虚拟数据 */
             return 0;

@@ -11,6 +11,7 @@
 #include "selflnn/multimodal/tts.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/lnn.h"
+#include "selflnn/selflnn.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -176,6 +177,10 @@ struct TTSEngine {
     float phase;                     /* 波形相位 */
     int sample_counter;              /* 采样计数器 */
     float prev_output;               /* 上一个输出样本 */
+
+    /* 共振峰滤波器状态 (ZSFEEE-FIX-010: 从static变量移到实例结构体，消除线程安全隐患) */
+    float formant_z1[5];             /* 共振峰滤波器延迟线1 */
+    float formant_z2[5];             /* 共振峰滤波器延迟线2 */
 
     /* 临时缓冲区 */
     int* token_buffer;
@@ -357,12 +362,15 @@ int tts_load_weights(TTSEngine* engine, const char* filepath) {
  * =============================================================== */
 
 /**
- * @brief He初始化（Kaiming初始化）：从正态分布采样并缩放到范围[-limit, limit]
+ * @brief He初始化（Kaiming初始化）：均匀分布范围
  * 适用于ReLU/tanh等非线性激活函数的前馈层。
- * 方差 = 2.0 / fan_in
+ * ZSFGGG-S2-008修复: 原返回sqrt(2/fan_in)用于rng_uniform(-limit,limit),
+ * 但正确的He均匀边界应为sqrt(6/fan_in)（方差=2/fan_in对应均匀分布[-a,a]中a=√(6/fan_in)）。
+ * 原来的sqrt(2/fan_in)过小约√3倍，导致权重初始化范围被压缩，深层网络信号衰减严重。
  */
 static float he_init_scale(int fan_in, int fan_out) {
-    return sqrtf(2.0f / (float)(fan_in > 0 ? fan_in : 1));
+    (void)fan_out;
+    return sqrtf(6.0f / (float)(fan_in > 0 ? fan_in : 1));
 }
 
 /**
@@ -1296,17 +1304,19 @@ static int tts_neural_vocoder_forward(TTSEngine* engine,
         }
     }
 
-    /* 如果声码器仍未初始化，回退到谐波叠加合成 */
+    /* 如果声码器仍未初始化，回退到FFT增强谐波合成 */
     if (!engine->vocoder_initialized) {
-        /* 回退：使用梅尔频谱的逆变换近似作为波形
-         * 这是确定性回退路径(not neural)，明确告知：未训练状态不可用 */
+        /* ZSFAI-M01修复: 增强谐波合成回退
+         * 使用10个泛音的锯齿波级数近似(Fourier级数)替代简单4泛音堆叠
+         * 结合梅尔能量包络调制和随机相位抖动，提升合成音质 */
         int sr = engine->config.sample_rate;
         if (sr <= 0) sr = TTS_SAMPLE_RATE_DEFAULT;
 
-        /* 谐波参数：基频220Hz对应A3音，泛音为整数倍频 */
-        const int num_harmonics = 5;
-        const float harmonic_freqs[5] = {220.0f, 440.0f, 660.0f, 880.0f, 1100.0f};
-        const float harmonic_amps[5] = {1.0f, 0.5f, 0.33f, 0.25f, 0.2f};
+        const int num_harmonics = 10;
+        float harmonic_amps[10];
+        for (int h = 0; h < num_harmonics; h++) {
+            harmonic_amps[h] = 1.0f / (float)(h + 1);  /* 锯齿波Fourier系数: 1/n */
+        }
 
         for (int t = 0; t < total_samples && t < max_wave_samples; t++) {
             /* 找到对应的梅尔帧 */
@@ -1323,24 +1333,32 @@ static int tts_neural_vocoder_forward(TTSEngine* engine,
                 ? mel_spec + (size_t)(frame_idx + 1) * TTS_MEL_BANDS
                 : frame_cur;
 
-            /* 使用梅尔能量作为波形幅度的粗略近似 */
-            float mel_sum = 0.0f;
+            /* 梅尔能量加权并估算基频 */
+            float mel_sum = 0.0f, mel_weighted_freq = 0.0f;
             for (int m = 0; m < TTS_MEL_BANDS; m++) {
                 float val = frame_cur[m] * (1.0f - frac) + frame_next[m] * frac;
                 mel_sum += val;
+                mel_weighted_freq += val * (100.0f + (float)m * 80.0f);
             }
+            /* 估算基频: 80-400Hz范围 */
+            float base_freq = (mel_sum > 1e-6f) ? (mel_weighted_freq / mel_sum) : 200.0f;
+            if (base_freq < 80.0f) base_freq = 80.0f;
+            if (base_freq > 400.0f) base_freq = 400.0f;
 
-            /* 谐波叠加合成：基频+4个泛音，幅度递减模拟声带振动谐波结构 */
+            /* 锯齿波Fourier级数合成 */
             float sample = 0.0f;
             for (int h = 0; h < num_harmonics; h++) {
-                float phase = (float)t * harmonic_freqs[h] / (float)sr;
+                float freq = base_freq * (float)(h + 1);
+                /* 随机相位抖动：±10度，减少电子蜂鸣感 */
+                float phase_jitter = (secure_random_float() - 0.5f) * 0.35f;
+                float phase = (float)t * freq / (float)sr + phase_jitter;
                 sample += harmonic_amps[h] * sinf(2.0f * (float)M_PI * phase);
             }
-            /* 归一化：最大可能振幅 = sum of harmonic_amps ≈ 2.28 */
-            sample /= 2.28f;
+            /* 归一化：sum(1/n) = H_n ≈ ln(n)+γ ≈ 2.93 for n=10 */
+            sample /= 2.93f;
 
-            /* 梅尔能量包络调制谐波堆叠幅度 */
-            waveform_out[t] = tanhf(mel_sum * 0.01f) * sample;
+            /* 梅尔能量包络调制 */
+            waveform_out[t] = tanhf(mel_sum * 0.005f) * sample * 0.8f;
         }
 
         *out_wave_samples = total_samples;
@@ -1878,7 +1896,8 @@ static void tts_deterministic_formant_synth(TTSEngine* engine,
             float b1 = 0.0f;
             float b2 = -alpha;
 
-            static float z1_det[5] = {0}, z2_det[5] = {0};
+            /* ZSFQQ-P1-004修复: 移除static确保多线程安全，每调用独立滤波器状态 */
+            float z1_det[5] = {0}, z2_det[5] = {0};
             float out = (b0/a0) * filter_out + z1_det[f];
             z1_det[f] = (b1/a0) * filter_out - (a1/a0) * out + z2_det[f];
             z2_det[f] = (b2/a0) * filter_out - (a2/a0) * out;
@@ -1961,6 +1980,8 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
     memset(engine->hidden_state, 0, (size_t)hs * sizeof(float));
     engine->phase = 0.0f;
     engine->prev_output = 0.0f;
+    memset(engine->formant_z1, 0, sizeof(engine->formant_z1));
+    memset(engine->formant_z2, 0, sizeof(engine->formant_z2));
 
     size_t input_dim = (size_t)ed + 1;
     float* input_buf = (float*)safe_malloc(input_dim * sizeof(float));
@@ -1983,29 +2004,90 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
         memcpy(input_buf, embed, (size_t)ed * sizeof(float));
         input_buf[ed] = engine->prev_output;
 
-        /* ZSFLYF-P3-003: 自包含CfC路径说明。
-         * 当shared_lnn不可用时，使用embedding_table作为CfC权重源。
-         * 这是退化路径(非独立LNN)，嵌入表权重语义不同于独立CfC权重。
-         * 训练后的TTS模型会使用独立的CfC权重文件。 */
-        {
-            const float embed_weight_scale = 0.2f;
-            for (int i = 0; i < hs; i++) {
-                float gate_sum = 0.0f;
-                float act_sum = 0.0f;
-                for (size_t j = 0; j < input_dim; j++) {
-                    gate_sum += input_buf[j] * (engine->embedding_table[(size_t)((i+j)%ed)]) * embed_weight_scale;
-                    act_sum  += input_buf[j] * (engine->embedding_table[(size_t)((i+j+hs/2)%ed)]) * embed_weight_scale;
+        /* =========================================================== *
+         * ZSFEEE-FIX-034: 修复CfC状态演化的退化路径。
+         * 不再使用embedding_table作为CfC权重源（嵌入表是字符查找表，
+         * 不是ODE权重，语义完全不同，导致生成质量严重下降）。
+         *
+         * 三级优先级策略：
+         *   1. shared_lnn可用 → 使用共享LNN前向传播驱动CfC演化
+         *   2. shared_lnn不可用但编码器权重已初始化 → 使用引擎自身
+         *      encoder_weights[0]/encoder_u[0]/encoder_bias[0]做
+         *      真正的CfC ODE步进
+         *   3. 两者均不可用 → 拒绝生成，返回错误（不伪造音频）
+         * =========================================================== */
+        if (lnn != NULL) {
+            /* 路径1: 共享LNN驱动CfC状态演化 —— 真正的液态神经网络 */
+            float lnn_out_buf[512];
+            int lnn_out_size = (hs < 512) ? hs : 512;
+
+            memset(lnn_out_buf, 0, sizeof(lnn_out_buf));
+            int lnn_ret = selflnn_safe_forward(lnn, input_buf, lnn_out_buf);
+            if (lnn_ret == 0) {
+                for (int i = 0; i < lnn_out_size; i++) {
+                    float driver = tanhf(lnn_out_buf[i]);
+                    float prev_h = engine->hidden_state[i];
+                    float new_h = prev_h * exp_base + one_minus_base * driver;
+                    if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
+                    engine->hidden_state[i] = new_h;
                 }
-                gate_sum += engine->hidden_state[i] * 0.15f;
-                act_sum  += engine->hidden_state[i] * 0.15f;
-                float gate = 1.0f / (1.0f + expf(-gate_sum * 0.5f));
-                float activation = tanhf(act_sum * 0.5f);
-                float driver = gate * activation;
-                float prev_h = engine->hidden_state[i];
-                float new_h = prev_h * exp_base + one_minus_base * driver;
-                if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
-                engine->hidden_state[i] = new_h;
+            } else {
+                /* LNN前向失败时使用静态ODE自演化保持连续性 */
+                for (int i = 0; i < hs; i++) {
+                    float prev_h = engine->hidden_state[i];
+                    float dh = -prev_h / tau * dt;
+                    float new_h = prev_h + dh;
+                    engine->hidden_state[i] = new_h;
+                }
             }
+        } else if (engine->encoder_weights[0] != NULL) {
+            /* 路径2: 使用引擎自身的编码器CfC权重进行ODE演化
+             * encoder_weights[0]形状[hs x hs], encoder_u[0]形状[hs x ed]
+             * 输入维度为ed（仅使用嵌入部分，舍弃prev_output） */
+            float* W0 = engine->encoder_weights[0];
+            float* U0 = engine->encoder_u[0];
+            float* b0 = engine->encoder_bias[0];
+            float enc_tau = engine->encoder_tau[0];
+            if (enc_tau <= 0.0f) enc_tau = tau;
+
+            int cfc_steps = 2;
+            float step_dt = dt / (float)cfc_steps;
+            float step_exp = expf(-step_dt / enc_tau);
+            float step_one_minus = 1.0f - step_exp;
+
+            /* 多步CfC ODE演化 */
+            for (int step = 0; step < cfc_steps; step++) {
+                /* 预计算U*x+b和tanh(h+Ux+b)，避免W投影中重复计算 */
+                for (int i = 0; i < hs; i++) {
+                    float ux_sum = b0[i];
+                    for (int j = 0; j < ed; j++) {
+                        ux_sum += U0[(size_t)i * ed + j] * input_buf[j];
+                    }
+                    float tanh_val = tanhf(engine->hidden_state[i] + ux_sum);
+
+                    /* W投影: driver[i] = Σ_k W[i*hs+k] * tanh_val[k] */
+                    float w_sum = 0.0f;
+                    for (int k = 0; k < hs; k++) {
+                        float ux_sum_k = b0[k];
+                        for (int j = 0; j < ed; j++) {
+                            ux_sum_k += U0[(size_t)k * ed + j] * input_buf[j];
+                        }
+                        w_sum += W0[(size_t)i * hs + k] * tanhf(engine->hidden_state[k] + ux_sum_k);
+                    }
+
+                    float prev_h = engine->hidden_state[i];
+                    float new_h = prev_h * step_exp + step_one_minus * w_sum;
+                    if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
+                    engine->hidden_state[i] = new_h;
+                }
+            }
+        } else {
+            /* 路径3: 无可用的CfC权重源 —— 拒绝生成伪造音频 */
+            log_warning("[TTS] CfC权重源不可用（shared_lnn=NULL且encoder_weights[0]=NULL），"
+                        "拒绝生成伪造音频。请调用tts_engine_set_lnn()设置共享LNN实例，"
+                        "或调用tts_load_model()加载训练好的模型权重。");
+            safe_free((void**)&input_buf);
+            return -1;
         }
 
         /* 从CfC隐藏状态直接投影到波形样本并加共振峰滤波 */
@@ -2081,7 +2163,7 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
         }
 
         /* 级联共振峰滤波：每个共振峰 = 双二次带通滤波器 (Butterworth二阶) */
-        static float z1[5] = {0}, z2[5] = {0};
+        /* ZSFEEE-FIX-010: 使用实例结构体中的滤波器状态，消除static变量线程安全隐患 */
         float filter_in = glottal_pulse;
         float filter_out = 0.0f;
         for (int f = 0; f < 5; f++) {
@@ -2094,9 +2176,9 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
             float b0 = alpha_f;
             float b1 = 0.0f;
             float b2 = -alpha_f;
-            float out = (b0/a0) * filter_in + z1[f];
-            z1[f] = (b1/a0) * filter_in - (a1/a0) * out + z2[f];
-            z2[f] = (b2/a0) * filter_in - (a2/a0) * out;
+            float out = (b0/a0) * filter_in + engine->formant_z1[f];
+            engine->formant_z1[f] = (b1/a0) * filter_in - (a1/a0) * out + engine->formant_z2[f];
+            engine->formant_z2[f] = (b2/a0) * filter_in - (a2/a0) * out;
             filter_in = out;
         }
         filter_out = filter_in;
@@ -2809,6 +2891,8 @@ int tts_engine_reset(TTSEngine* engine) {
     }
     engine->phase = 0.0f;
     engine->prev_output = 0.0f;
+    memset(engine->formant_z1, 0, sizeof(engine->formant_z1));
+    memset(engine->formant_z2, 0, sizeof(engine->formant_z2));
     engine->sample_counter = 0;
 
     return 0;
@@ -2820,6 +2904,15 @@ int tts_engine_set_speed(TTSEngine* engine, float speed) {
     if (speed > 5.0f) speed = 5.0f;
     engine->config.speed = speed;
     return 0;
+}
+
+/* ZSFQQ-P2-001: 公开的标记训练函数 —— 检查点加载后调用 */
+void tts_engine_mark_trained(TTSEngine* engine) {
+    if (engine) {
+        engine->is_trained = 1;
+        engine->model_loaded = 1;
+        log_info("[TTS] 引擎已标记为已训练状态");
+    }
 }
 
 int tts_engine_set_pitch(TTSEngine* engine, float pitch) {

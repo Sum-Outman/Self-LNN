@@ -446,7 +446,7 @@
     window.sim3dToggleGrid = sim3dToggleGrid;
 
     async function sim3dAddRobot() {
-        try { var d = await window.SelfLnnApi.request('/simulation/robot/add', { method: 'POST', body: JSON.stringify({}) }); window.showNotification(d && d.success ? '机器人已添加' : '添加失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
+        try { var resp = await window.SelfLnnApi.request('/simulation/robot/add', { method: 'POST', body: JSON.stringify({}) }); var d = await resp.json(); window.showNotification(d && d.success ? '机器人已添加' : '添加失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
         catch(e) { window.showNotification('添加失败: ' + (e && e.message || '网络错误'), 'danger'); }
     }
     window.sim3dAddRobot = sim3dAddRobot;
@@ -458,7 +458,7 @@
     window.sim3dClearAll = sim3dClearAll;
 
     async function start3DReconstruction() {
-        try { var d = await window.SelfLnnApi.request('/simulation/reconstruct3d', { method: 'POST', body: JSON.stringify({}) }); window.showNotification(d && d.success ? '三维重建已启动' : '启动失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
+        try { var resp = await window.SelfLnnApi.request('/simulation/reconstruct3d', { method: 'POST', body: JSON.stringify({}) }); var d = await resp.json(); window.showNotification(d && d.success ? '三维重建已启动' : '启动失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
         catch(e) { window.showNotification('启动失败: ' + (e && e.message || '网络错误'), 'danger'); }
     }
     window.start3DReconstruction = start3DReconstruction;
@@ -467,16 +467,19 @@
         var cmd = document.getElementById('cmd-input') ? document.getElementById('cmd-input').value : '';
         if (!cmd) { window.showNotification('请输入命令', 'warning'); return; }
         try {
-            var d = await window.SelfLnnApi.request('/simulation/command', { method: 'POST', body: JSON.stringify({ command: cmd }) });
-            window.showNotification(d.success ? '命令已执行' : '执行失败', d.success ? 'success' : 'danger');
+            var resp = await window.SelfLnnApi.request('/simulation/command', { method: 'POST', body: JSON.stringify({ command: cmd }) });
+            var d = await resp.json();
+            var execOk = d && d.simulation && d.simulation.executed;
+            window.showNotification(execOk ? '命令已执行' : '执行失败', execOk ? 'success' : 'danger');
         } catch(e) { window.showNotification('连接失败', 'danger'); }
     }
     window.executeCommand = executeCommand;
 
     async function planPath() {
         try {
-            var data = await window.SelfLnnApi.request('/robot/path/plan', { method: 'POST', body: JSON.stringify({}) });
-            window.showNotification('路径规划完成，步数: ' + (data && data.steps || 0), 'success');
+            var resp = await window.SelfLnnApi.request('/robot/path/plan', { method: 'POST', body: JSON.stringify({}) });
+            var d = await resp.json();
+            window.showNotification('路径规划完成，步数: ' + (d && d.steps || 0), 'success');
         } catch(e) { window.showNotification('连接失败', 'danger'); }
     }
     window.planPath = planPath;
@@ -484,9 +487,19 @@
     /* 页面卸载时清理定时器和WebGL资源 */
     window.addEventListener('beforeunload', function() {
         if (simPolling) { clearInterval(simPolling); simPolling = null; }
-        /* ZSFWS修复-M-013: 修复变量名错误 gl→sim3dGl, gl3dAnimId→sim3dAnimId */
+        /* ZSFXXXQ-P2-006: 完整清理WebGL资源 */
         stopRenderLoop();
-        if (sim3dGl && sim3dGl.getExtension && sim3dAnimId) { cancelAnimationFrame(sim3dAnimId); }
+        var gl = sim3dGl;
+        if (gl) {
+            if (sim3dProgram) { gl.deleteProgram(sim3dProgram); sim3dProgram = null; }
+            var bufs = ['robotVBuf','robotNBuf','robotCBuf','groundVBuf','groundNBuf','groundCBuf','axisVBuf','axisNBuf','axisCBuf'];
+            for (var i = 0; i < bufs.length; i++) {
+                if (sim3dBuffers[bufs[i]]) { gl.deleteBuffer(sim3dBuffers[bufs[i]]); sim3dBuffers[bufs[i]] = null; }
+            }
+            if (gl.getExtension('WEBGL_lose_context')) { gl.getExtension('WEBGL_lose_context').loseContext(); }
+            sim3dGl = null;
+            sim3dInitialized = false;
+        }
     });
 
 })();

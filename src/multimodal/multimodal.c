@@ -10,6 +10,7 @@
 #include "selflnn/multimodal/image_recognition_deep.h"
 #include "selflnn/multimodal/multimodal_integration.h" /* ZSFWS-005: 统一融合管道 */
 #include "selflnn/multimodal/multimodal_unified_input.h" /* SELFLNN_MAX_MODALITIES */
+#include "selflnn/multimodal/liquid_vision.h"            /* H-010: CfC液态视觉管道 */
 #include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -46,6 +47,9 @@ struct MultimodalProcessor {
     size_t text_features_size;
     float* sensor_features_cache;
     size_t sensor_features_size;
+
+    /* H-010: CfC液态视觉处理器（主路径），替代传统16x16网格下采样 */
+    LiquidVisionProcessor* liquid_vision;
 
     int is_training;
     float learning_rate;
@@ -113,6 +117,24 @@ MultimodalProcessor* multimodal_processor_create(const MultimodalConfig* config)
         processor->ird_classifier = ird_fine_create(&ird_cfg);
     }
 
+    /* H-010: 初始化CfC液态视觉处理器（主路径）
+     * 使用 liquid_vision_process_image 替代原16x16网格下采样+统计特征 */
+    {
+        LiquidVisionConfig lv_cfg;
+        memset(&lv_cfg, 0, sizeof(lv_cfg));
+        lv_cfg.target_width = 224;
+        lv_cfg.target_height = 224;
+        lv_cfg.grayscale = 0;
+        lv_cfg.feature_dimension = MMC_VISION_CFC_OUTPUT_DIM; /* 256维输出 */
+        lv_cfg.enable_cfc = 1;                    /* H-010核心: 启用CfC液态视觉管道 */
+        lv_cfg.cfc_hidden_size = MMC_VISION_CFC_HIDDEN_DIM;  /* 512隐层 */
+        lv_cfg.cfc_time_constant = 0.1f;
+        lv_cfg.enable_multiscale_pyramid = 1;
+        lv_cfg.enable_hog = 1;
+        lv_cfg.enable_color_histogram = 1;
+        processor->liquid_vision = liquid_vision_processor_create(&lv_cfg);
+    }
+
     processor->is_training = 0;
     processor->learning_rate = 0.001f;
     processor->is_initialized = 1;
@@ -129,6 +151,10 @@ int multimodal_processor_set_lnn(MultimodalProcessor* processor, LNN* lnn) {
         return -1;
     }
     processor->main_lnn = lnn;
+    /* H-010: 将共享LNN实例传播到液态视觉处理器 */
+    if (processor->liquid_vision && lnn) {
+        liquid_vision_processor_set_lnn(processor->liquid_vision, lnn);
+    }
     return 0;
 }
 
@@ -138,7 +164,12 @@ int multimodal_processor_set_lnn(MultimodalProcessor* processor, LNN* lnn) {
 void multimodal_processor_free(MultimodalProcessor* processor) {
     if (!processor) return;
 
-    /* P0-01修复: 释放CfC液态视觉处理器 */
+    /* H-010: 释放CfC液态视觉处理器 */
+    if (processor->liquid_vision) {
+        liquid_vision_processor_free(processor->liquid_vision);
+        processor->liquid_vision = NULL;
+    }
+
     /* 释放深度图像识别分类器 */
     if (processor->ird_classifier) {
         ird_fine_free(processor->ird_classifier);
@@ -153,16 +184,17 @@ void multimodal_processor_free(MultimodalProcessor* processor) {
 }
 
 /**
- * @brief 处理视觉数据（P0-003修复：使用CfC液态神经网络替代传统CV）
+ * @brief 处理视觉数据（H-010修复：使用CfC液态视觉管道替代传统16x16网格下采样）
  *
- * 视觉特征提取全部通过CfC连续时间ODE动态系统完成。
- * 不再使用Sobel边缘检测、LBP纹理、HSV直方图等传统计算机视觉方法。
- * 原始像素直接输入CfC神经网络，经ODE连续时间演化后输出视觉特征。
+ * 主路径：调用 liquid_vision_process_image → LiquidVisionManager（PatchEncoder →
+ *         SpatialProcessor → CfCEvolver）完整的CfC连续时间ODE液态视觉管道。
+ *
+ * 回退路径：当液态视觉处理器不可用时，使用传统16x16网格下采样+全局统计特征。
  *
  * 处理流程：
- *   1. 自适应降采样到输入维度
- *   2. CfC深度视觉处理器前向传播
- *   3. 输出CfC连续动态特征
+ *   1. 参数校验
+ *   2. [主路径] liquid_vision_process_image → CfC液态视觉特征输出
+ *   3. [回退路径] 16x16网格RGB均值 + 全局统计特征 + L2归一化
  */
 int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* vision_data,
                              float* features, size_t max_features) {
@@ -183,17 +215,49 @@ int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* 
     SELFLNN_CHECK(width > 0 && height > 0 && channels > 0, SELFLNN_ERROR_INVALID_ARGUMENT,
                  "视觉数据无效（宽：%d，高：%d，通道：%d）", width, height, channels);
 
-    /* 纯C视觉特征提取：统一下采样 + 多尺度统计特征 → 共享LNN处理
-     * 不再使用独立CfC网络，所有视觉特征通过单一LNN演化 */
+    /* ===================================================================
+     * H-010修复 主路径: CfC液态视觉管道
+     *
+     * 调用统一LiquidVisionProcessor，内部执行完整的CfC连续时间ODE演化：
+     *   τ dh/dt = -h + σ(W_gx·x + W_gh·h + b_g) ⊙ tanh(W_ax·x + W_ah·h + b_a)
+     *
+     * 管道: 图像 → PatchEncoder → SpatialProcessor → CfCEvolver → 特征
+     * 不使用任何Transformer、注意力机制或独立处理器。
+     * =================================================================== */
+    if (processor->liquid_vision) {
+        int result = liquid_vision_process_image(processor->liquid_vision,
+            width, height, channels, data, features, max_features);
+
+        /* 如果液态视觉管道成功返回特征，直接返回 */
+        if (result > 0) {
+            /* 统计有效特征维度 */
+            int valid_dim = 0;
+            for (int i = 0; i < result && (size_t)i < max_features; i++) {
+                if (fabsf(features[i]) > 1e-12f) valid_dim = i + 1;
+            }
+            if (valid_dim > 0) return valid_dim;
+
+            /* 液态视觉返回了特征但全为零：标记为CfC未训练，进入回退 */
+        }
+        /* result <= 0 说明液态视觉未能处理（如enable_cfc=0但is_ready=0），进入回退 */
+    }
+
+    /* ===================================================================
+     * H-010 回退路径: 传统CV特征提取
+     *
+     * 仅在液态视觉处理器不可用或CfC未训练时使用。
+     * 使用16x16网格下采样 + 全局统计特征 + L2归一化。
+     * 此路径保留以确保持续可用性，但不应成为默认路径。
+     * =================================================================== */
     {
         int total_pixels = width * height;
         if (total_pixels < 1) return -1;
-        
+
         /* 步骤1: 多尺度下采样到特征维度 */
         size_t fi = 0;
         float step_x = (float)width / 16.0f;
         float step_y = (float)height / 16.0f;
-        
+
         for (int gy = 0; gy < 16 && fi + 16 < max_features; gy++) {
             for (int gx = 0; gx < 16 && fi < max_features; gx++) {
                 int sx = (int)(gx * step_x);
@@ -202,7 +266,7 @@ int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* 
                 int ey = (int)((gy + 1) * step_y);
                 if (ex > width) ex = width; if (ey > height) ey = height;
                 if (sx >= ex || sy >= ey) { features[fi++] = 0; continue; }
-                
+
                 float sum_r = 0, sum_g = 0, sum_b = 0;
                 int count = 0;
                 for (int y = sy; y < ey; y++) {
@@ -221,7 +285,7 @@ int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* 
                 }
             }
         }
-        
+
         /* 步骤2: 全局图像统计特征 */
         float global_mean = 0, global_var = 0;
         for (int i = 0; i < total_pixels * channels; i++) global_mean += data[i];
@@ -231,14 +295,14 @@ int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* 
             global_var += d * d;
         }
         global_var /= (float)(total_pixels * channels);
-        
+
         if (fi + 4 < max_features) {
             features[fi++] = global_mean;
             features[fi++] = global_var;
             features[fi++] = sqrtf(global_var > 0 ? global_var : 1e-6f);  /* 标准差 */
             features[fi++] = (global_var > 1e-6f) ? (global_var / (global_mean * global_mean + 1e-6f)) : 0; /* 变异系数 */
         }
-        
+
         /* 步骤3: L2归一化使特征与LNN输入范围对齐 */
         float norm = 0;
         for (size_t i = 0; i < fi; i++) norm += features[i] * features[i];
@@ -246,7 +310,7 @@ int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* 
             float inv_norm = 1.0f / sqrtf(norm);
             for (size_t i = 0; i < fi; i++) features[i] *= inv_norm;
         }
-        
+
         return (int)fi;
     }
 }
@@ -314,6 +378,45 @@ int multimodal_process_stereo(MultimodalProcessor* processor,
     return (int)fi;
 }
 
+/* M-010修复: 基2 FFT — Cooley-Tukey算法原地计算，O(n log n)
+ * 替换原O(n²) DFT实现，大幅提升频谱分析性能 */
+static void fft_radix2_inline(float* data_real, float* data_imag, int n) {
+    if (n <= 1) return;
+    /* 位反转重排 */
+    int j = 0;
+    for (int i = 0; i < n; i++) {
+        if (i < j) {
+            float tr = data_real[i], ti = data_imag[i];
+            data_real[i] = data_real[j]; data_imag[i] = data_imag[j];
+            data_real[j] = tr; data_imag[j] = ti;
+        }
+        int m = n >> 1;
+        while (m >= 1 && (j & m)) { j -= m; m >>= 1; }
+        j += m;
+    }
+    /* 逐层蝶形运算 */
+    for (int len = 2; len <= n; len <<= 1) {
+        int half = len >> 1;
+        float w_r = 1.0f, w_i = 0.0f;
+        float angle = -2.0f * 3.14159265f / (float)len;
+        float winc_r = cosf(angle), winc_i = sinf(angle);
+        for (int i = 0; i < half; i++) {
+            for (int k = i; k < n; k += len) {
+                int k2 = k + half;
+                float tr = w_r * data_real[k2] - w_i * data_imag[k2];
+                float ti = w_r * data_imag[k2] + w_i * data_real[k2];
+                data_real[k2] = data_real[k] - tr;
+                data_imag[k2] = data_imag[k] - ti;
+                data_real[k] += tr;
+                data_imag[k] += ti;
+            }
+            float w_new_r = w_r * winc_r - w_i * winc_i;
+            w_i = w_r * winc_i + w_i * winc_r;
+            w_r = w_new_r;
+        }
+    }
+}
+
 /**
  * @brief 处理音频数据
  */
@@ -372,16 +475,13 @@ int multimodal_process_audio(MultimodalProcessor* processor, const AudioData* au
         for (int i = 0; i < fft_size; i++)
             window[i] = 0.54f - 0.46f * cosf(2.0f * 3.14159265f * i / (float)(fft_size - 1));
 
-        for (int k = 0; k < fft_size; k++) {
-            for (int n = 0; n < fft_size; n++) {
-                float sample = (num_channels == 1) ? data[n] :
-                              (data[n * num_channels] + (num_channels > 1 ? data[n * num_channels + 1] : 0)) / (float)num_channels;
-                float ws = sample * window[n];
-                float angle = -2.0f * 3.14159265f * k * n / (float)fft_size;
-                fft_real[k] += ws * cosf(angle);
-                fft_imag[k] += ws * sinf(angle);
-            }
+        /* M-010修复: 使用基2 FFT(O(n log n))替代DFT(O(n²)) */
+        for (int n = 0; n < fft_size; n++) {
+            float sample = (num_channels == 1) ? data[n] :
+                          (data[n * num_channels] + (num_channels > 1 ? data[n * num_channels + 1] : 0)) / (float)num_channels;
+            fft_real[n] = sample * window[n];
         }
+        fft_radix2_inline(fft_real, fft_imag, fft_size);
 
         float power_spectrum[128] = {0}, total_power = 0.0f;
         for (int k = 0; k < fft_size / 2; k++) {

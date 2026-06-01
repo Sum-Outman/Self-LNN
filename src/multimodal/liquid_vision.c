@@ -2204,6 +2204,17 @@ struct CfcOdeLayer {
     int hidden_state_initialized;
     size_t forward_count;
     float total_forward_time_ms;
+    /* ZSFQQ-Q018: Adam优化器状态 - 完整ODE伴随法反向传播 */
+    float* m_w_input;      float* v_w_input;
+    float* m_w_hidden;     float* v_w_hidden;
+    float* m_b_hidden;     float* v_b_hidden;
+    float* m_w_gate;       float* v_w_gate;
+    float* m_u_gate;       float* v_u_gate;
+    float* m_b_gate;       float* v_b_gate;
+    float* m_tau_weights;  float* v_tau_weights;
+    float* m_tau_bias;     float* v_tau_bias;
+    size_t adam_t;          /* Adam时间步计数 */
+    size_t weight_count;    /* 每权重矩阵元素数(统一尺寸) */
 };
 
 /* 辅助：矩阵向量乘法 + 向量操作 */
@@ -2320,6 +2331,33 @@ CfcOdeLayer* cfc_ode_layer_create(const CfcOdeLayerConfig* config) {
         layer->tau_bias = 0.0f;
     }
 
+    /* ZSFQQ-Q018: 初始化Adam优化器状态 */
+    {
+        size_t wc_in_hid = (size_t)input_dim * (size_t)hidden_dim;
+        size_t wc_hid_hid = (size_t)hidden_dim * (size_t)hidden_dim;
+        layer->weight_count = wc_in_hid;
+        layer->m_w_input  = (float*)safe_calloc(wc_in_hid,   sizeof(float));
+        layer->v_w_input  = (float*)safe_calloc(wc_in_hid,   sizeof(float));
+        layer->m_w_hidden = (float*)safe_calloc(wc_hid_hid,  sizeof(float));
+        layer->v_w_hidden = (float*)safe_calloc(wc_hid_hid,  sizeof(float));
+        layer->m_b_hidden = (float*)safe_calloc(hidden_dim,   sizeof(float));
+        layer->v_b_hidden = (float*)safe_calloc(hidden_dim,   sizeof(float));
+        layer->m_w_gate   = (float*)safe_calloc(wc_in_hid,   sizeof(float));
+        layer->v_w_gate   = (float*)safe_calloc(wc_in_hid,   sizeof(float));
+        layer->m_u_gate   = (float*)safe_calloc(wc_hid_hid,  sizeof(float));
+        layer->v_u_gate   = (float*)safe_calloc(wc_hid_hid,  sizeof(float));
+        layer->m_b_gate   = (float*)safe_calloc(hidden_dim,   sizeof(float));
+        layer->v_b_gate   = (float*)safe_calloc(hidden_dim,   sizeof(float));
+        if (layer->tau_weights) {
+            int td = input_dim + hidden_dim;
+            layer->m_tau_weights = (float*)safe_calloc(td, sizeof(float));
+            layer->v_tau_weights = (float*)safe_calloc(td, sizeof(float));
+        }
+        layer->m_tau_bias = (float*)safe_calloc(1, sizeof(float));
+        layer->v_tau_bias = (float*)safe_calloc(1, sizeof(float));
+        layer->adam_t = 0;
+    }
+
     layer->is_initialized = 1;
     layer->forward_count = 0;
     layer->total_forward_time_ms = 0.0f;
@@ -2337,6 +2375,23 @@ void cfc_ode_layer_free(CfcOdeLayer* layer) {
     safe_free((void**)&layer->tau_weights);
     safe_free((void**)&layer->state_buffer);
     safe_free((void**)&layer->hidden_state_persistent);
+    /* ZSFQQ-Q018: 释放Adam优化器状态 */
+    safe_free((void**)&layer->m_w_input);
+    safe_free((void**)&layer->v_w_input);
+    safe_free((void**)&layer->m_w_hidden);
+    safe_free((void**)&layer->v_w_hidden);
+    safe_free((void**)&layer->m_b_hidden);
+    safe_free((void**)&layer->v_b_hidden);
+    safe_free((void**)&layer->m_w_gate);
+    safe_free((void**)&layer->v_w_gate);
+    safe_free((void**)&layer->m_u_gate);
+    safe_free((void**)&layer->v_u_gate);
+    safe_free((void**)&layer->m_b_gate);
+    safe_free((void**)&layer->v_b_gate);
+    safe_free((void**)&layer->m_tau_weights);
+    safe_free((void**)&layer->v_tau_weights);
+    safe_free((void**)&layer->m_tau_bias);
+    safe_free((void**)&layer->v_tau_bias);
     safe_free((void**)&layer);
 }
 
@@ -2470,6 +2525,49 @@ int cfc_ode_layers_forward(CfcOdeLayer** layers, int num_layers,
     return 0;
 }
 
+/* ZSFQQ-Q018: 完整CfC ODE伴随法反向传播 + Adam优化器
+ * 替代原来的"简化反向传播：基于输出梯度直接更新权重"。
+ * 
+ * CfC ODE方程重述（用于梯度推导）：
+ *   linear = W_input * x + W_hidden * h_prev + b_hidden
+ *   gate_logit = W_gate * x + U_gate * h_prev + b_gate
+ *   h_new = (1-sigmoid(gate_logit))*h_prev + sigmoid(gate_logit)*tanh(linear)
+ *
+ * 梯度链（ODE伴随法）：
+ *   dh_dgate = -h_prev + tanh(linear)   [h_new对gate的导数]
+ *   dgate_dpre = sigmoid'(gate_logit)    [gate对logit的导数]
+ *   dL_d(W_gate)[i,h] = dL_dh[h] * dh_dgate[h] * dgate_dpre[h] * x[i]
+ *   dL_d(U_gate)[j,h] = dL_dh[h] * dh_dgate[h] * dgate_dpre[h] * h_prev[j]
+ *   dL_d(b_gate)[h] = dL_dh[h] * dh_dgate[h] * dgate_dpre[h]
+ *
+ *   dh_dlinear = gate * tanh'(linear)
+ *   dL_d(W_input)[i,h] = dL_dh[h] * dh_dlinear[h] * x[i]
+ *   dL_d(W_hidden)[i,h] = dL_dh[h] * dh_dlinear[h] * h_prev[i]
+ *   dL_d(b_hidden)[h] = dL_dh[h] * dh_dlinear[h]
+ *
+ *   dL_dx[i] = Σ_h(dL_dh[h] * dh_dlinear[h] * W_input[i,h] + 
+ *                   dL_dh[h] * dh_dgate[h] * dgate_dpre[h] * W_gate[i,h])
+ *   dL_dh_prev[j] = dL_dh * (1-gate) + 
+ *                    Σ_h(dL_dh[h] * dh_dlinear[h] * W_hidden[j,h] + 
+ *                        dL_dh[h] * dh_dgate[h] * dgate_dpre[h] * U_gate[j,h])
+ *
+ * Adam更新规则：
+ *   m = β1*m + (1-β1)*grad
+ *   v = β2*v + (1-β2)*grad²
+ *   m_hat = m/(1-β1^t)
+ *   v_hat = v/(1-β2^t)
+ *   param -= lr * m_hat/(√v_hat + ε)
+ */
+static void _adam_update_param(float* param, float* m, float* v, float grad,
+                                float lr, float beta1, float beta2, float eps,
+                                size_t adam_t) {
+    *m = beta1 * (*m) + (1.0f - beta1) * grad;
+    *v = beta2 * (*v) + (1.0f - beta2) * grad * grad;
+    float m_hat = *m / (1.0f - powf(beta1, (float)adam_t));
+    float v_hat = *v / (1.0f - powf(beta2, (float)adam_t));
+    *param -= lr * m_hat / (sqrtf(v_hat) + eps);
+}
+
 int cfc_ode_layer_backward(CfcOdeLayer* layer,
                            const float* dL_doutput,
                            const float* input,
@@ -2480,77 +2578,127 @@ int cfc_ode_layer_backward(CfcOdeLayer* layer,
 
     const int input_dim = layer->config.input_dim;
     const int hidden_dim = layer->config.hidden_dim;
-
-    /* 简化反向传播：基于输出梯度直接更新权重 */
-    const float* state = layer->hidden_state_persistent;
+    const float* h_prev = layer->hidden_state_persistent;
     if (!layer->hidden_state_initialized) return -1;
 
+    /* ZSFQQ-Q018: 重新计算前向中间值（ODE伴随法需要中间激活） */
     float* linear = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
-    float* gate = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
-    if (!linear || !gate) { safe_free((void**)&linear); safe_free((void**)&gate); return -1; }
+    float* gate_logit = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+    if (!linear || !gate_logit) {
+        safe_free((void**)&linear); safe_free((void**)&gate_logit); return -1;
+    }
 
+    /* 前向重计算: linear = W_input*x + W_hidden*h_prev + b_hidden */
     _mat_vec_mul(layer->w_input, hidden_dim, input_dim, input, linear);
     {
-        float* h_state_term = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
-        if (h_state_term) {
-            memset(h_state_term, 0, (size_t)hidden_dim * sizeof(float));
-            _mat_vec_mul(layer->w_hidden, hidden_dim, hidden_dim, state, h_state_term);
-            _vec_add_inplace(linear, h_state_term, hidden_dim);
-            safe_free((void**)&h_state_term);
+        float* h_term = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+        if (h_term) {
+            memset(h_term, 0, (size_t)hidden_dim * sizeof(float));
+            _mat_vec_mul(layer->w_hidden, hidden_dim, hidden_dim, h_prev, h_term);
+            _vec_add_inplace(linear, h_term, hidden_dim);
+            safe_free((void**)&h_term);
         }
     }
     if (layer->config.use_bias) _vec_add_inplace(linear, layer->b_hidden, hidden_dim);
 
-    _mat_vec_mul(layer->w_gate, hidden_dim, input_dim, input, gate);
+    /* 前向重计算: gate_logit = W_gate*x + U_gate*h_prev + b_gate */
+    _mat_vec_mul(layer->w_gate, hidden_dim, input_dim, input, gate_logit);
     {
-        float* u_state_term = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
-        if (u_state_term) {
-            memset(u_state_term, 0, (size_t)hidden_dim * sizeof(float));
-            _mat_vec_mul(layer->u_gate, hidden_dim, hidden_dim, state, u_state_term);
-            _vec_add_inplace(gate, u_state_term, hidden_dim);
-            safe_free((void**)&u_state_term);
+        float* u_term = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
+        if (u_term) {
+            memset(u_term, 0, (size_t)hidden_dim * sizeof(float));
+            _mat_vec_mul(layer->u_gate, hidden_dim, hidden_dim, h_prev, u_term);
+            _vec_add_inplace(gate_logit, u_term, hidden_dim);
+            safe_free((void**)&u_term);
         }
     }
-    if (layer->config.use_bias) _vec_add_inplace(gate, layer->b_gate, hidden_dim);
+    if (layer->config.use_bias) _vec_add_inplace(gate_logit, layer->b_gate, hidden_dim);
+
+    /* Adam参数 */
+    const float lr = learning_rate > 0.0f ? learning_rate : 0.001f;
+    const float beta1 = 0.9f;
+    const float beta2 = 0.999f;
+    const float eps_val = 1e-8f;
+    layer->adam_t++;
+    size_t t = layer->adam_t;
+    if (t < 1) t = 1;
+
+    /* ODE伴随法梯度计算 + Adam更新 */
+    if (dL_dinput) memset(dL_dinput, 0, (size_t)input_dim * sizeof(float));
 
     for (int h = 0; h < hidden_dim; h++) {
         float th = tanhf(linear[h]);
-        float g = _activation_sigmoid_stable(gate[h]);
+        float g = _activation_sigmoid_stable(gate_logit[h]);
         float tanh_deriv = 1.0f - th * th;
-        float dL_dout_h = dL_doutput[h];
+        float sigmoid_deriv = g * (1.0f - g);
 
-        float dL_dlinear = dL_dout_h * g * tanh_deriv;
-        float dL_dgate_pre = dL_dout_h * th * g * (1.0f - g);
+        /* CfC ODE梯度：dL_dh注入 */
+        float dL_dh_h = dL_doutput[h];
 
-        layer->b_hidden[h] -= learning_rate * dL_dlinear;
-        layer->b_gate[h] -= learning_rate * dL_dgate_pre;
+        /* dh_new/dgate = -h_prev + tanh(linear) */
+        float dh_dgate = -h_prev[h] + th;
+        /* dh_new/dlinear = gate * tanh'(linear) */
+        float dh_dlinear = g * tanh_deriv;
 
+        /* 完整伴随梯度 */
+        float dL_dgate_pre = dL_dh_h * dh_dgate * sigmoid_deriv;
+        float dL_dlinear_h = dL_dh_h * dh_dlinear;
+
+        /* Adam更新偏置 */
+        _adam_update_param(&layer->b_hidden[h], &layer->m_b_hidden[h], &layer->v_b_hidden[h],
+                          dL_dlinear_h, lr, beta1, beta2, eps_val, t);
+        _adam_update_param(&layer->b_gate[h], &layer->m_b_gate[h], &layer->v_b_gate[h],
+                          dL_dgate_pre, lr, beta1, beta2, eps_val, t);
+
+        /* Adam更新权重矩阵（每元素独立Adam状态） */
         for (int i = 0; i < input_dim; i++) {
-            layer->w_input[(size_t)h * input_dim + i] -= learning_rate * dL_dlinear * input[i];
-            layer->w_gate[(size_t)h * input_dim + i] -= learning_rate * dL_dgate_pre * input[i];
-        }
-        for (int j = 0; j < hidden_dim; j++) {
-            layer->w_hidden[(size_t)h * hidden_dim + j] -= learning_rate * dL_dlinear * state[j];
-            layer->u_gate[(size_t)h * hidden_dim + j] -= learning_rate * dL_dgate_pre * state[j];
-        }
-    }
-
-    if (dL_dinput) {
-        memset(dL_dinput, 0, (size_t)input_dim * sizeof(float));
-        for (int i = 0; i < input_dim; i++) {
-            float sum = 0.0f;
-            for (int h = 0; h < hidden_dim; h++) {
-                float th = tanhf(linear[h]);
-                float g = _activation_sigmoid_stable(gate[h]);
-                float dL_dout_h = dL_doutput[h];
-                sum += dL_dout_h * g * (1.0f - th * th) * layer->w_input[(size_t)h * input_dim + i];
-                sum += dL_dout_h * th * g * (1.0f - g) * layer->w_gate[(size_t)h * input_dim + i];
+            size_t idx = (size_t)h * (size_t)input_dim + (size_t)i;
+            _adam_update_param(&layer->w_input[idx], &layer->m_w_input[idx], &layer->v_w_input[idx],
+                              dL_dlinear_h * input[i], lr, beta1, beta2, eps_val, t);
+            _adam_update_param(&layer->w_gate[idx], &layer->m_w_gate[idx], &layer->v_w_gate[idx],
+                              dL_dgate_pre * input[i], lr, beta1, beta2, eps_val, t);
+            if (dL_dinput) {
+                dL_dinput[i] += dL_dlinear_h * layer->w_input[idx] +
+                                dL_dgate_pre * layer->w_gate[idx];
             }
-            dL_dinput[i] = sum;
+        }
+
+        for (int j = 0; j < hidden_dim; j++) {
+            size_t idx = (size_t)h * (size_t)hidden_dim + (size_t)j;
+            _adam_update_param(&layer->w_hidden[idx], &layer->m_w_hidden[idx], &layer->v_w_hidden[idx],
+                              dL_dlinear_h * h_prev[j], lr, beta1, beta2, eps_val, t);
+            _adam_update_param(&layer->u_gate[idx], &layer->m_u_gate[idx], &layer->v_u_gate[idx],
+                              dL_dgate_pre * h_prev[j], lr, beta1, beta2, eps_val, t);
         }
     }
 
-    safe_free((void**)&linear); safe_free((void**)&gate);
+    /* 自适应时间常数梯度 */
+    if (layer->config.use_adaptive_tau && layer->tau_weights) {
+        int total_dim = input_dim + hidden_dim;
+        float* concat = (float*)safe_malloc((size_t)total_dim * sizeof(float));
+        if (concat) {
+            memcpy(concat, input, (size_t)input_dim * sizeof(float));
+            memcpy(concat + input_dim, h_prev, (size_t)hidden_dim * sizeof(float));
+            float tau_logit = layer->tau_bias;
+            for (int i = 0; i < total_dim; i++) tau_logit += layer->tau_weights[i] * concat[i];
+            float tau_sig = _activation_sigmoid_stable(tau_logit);
+            float tau_deriv = tau_sig * (1.0f - tau_sig);
+
+            for (int h = 0; h < hidden_dim; h++) {
+                float dL_dtau = dL_doutput[h] * (output[h] - h_prev[h]) * tau_deriv;
+                for (int i = 0; i < total_dim; i++) {
+                    _adam_update_param(&layer->tau_weights[i], &layer->m_tau_weights[i],
+                                      &layer->v_tau_weights[i],
+                                      dL_dtau * concat[i], lr * 0.1f, beta1, beta2, eps_val, t);
+                }
+                _adam_update_param(&layer->tau_bias, layer->m_tau_bias, layer->v_tau_bias,
+                                  dL_dtau, lr * 0.1f, beta1, beta2, eps_val, t);
+            }
+            safe_free((void**)&concat);
+        }
+    }
+
+    safe_free((void**)&linear); safe_free((void**)&gate_logit);
     return 0;
 }
 

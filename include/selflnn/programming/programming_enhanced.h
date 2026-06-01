@@ -212,6 +212,7 @@ typedef enum {
     PENH_VULN_COMMAND_INJECTION,
     PENH_VULN_PATH_TRAVERSAL,
     PENH_VULN_UNCHECKED_RETURN,
+    PENH_VULN_SQL_INJECTION,          /* M-028: SQL注入检测 */
     PENH_VULN_CUSTOM
 } PenhVulnerabilityType;
 
@@ -276,6 +277,19 @@ int penh_detect_memory_leak(const ASTNode* ast,
  */
 int penh_detect_divide_by_zero(const ASTNode* ast,
                                 PenhVulnerability* vulns, int max_count);
+
+/* M-028: SQL注入检测 */
+
+/**
+ * @brief 检测SQL注入风险
+ *
+ * 扫描源代码中潜在的SQL注入模式：
+ * - 字符串拼接构建SQL查询（如 "SELECT..." + var）
+ * - sprintf/snprintf构建SQL语句
+ * - 直接拼接用户输入到SQL语句
+ */
+int penh_detect_sql_injection(const char* source_code,
+                               PenhVulnerability* vulns, int max_count);
 
 /* ============================================================================
  * 辅助API

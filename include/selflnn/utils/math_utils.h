@@ -31,11 +31,15 @@ typedef enum {
 
 /**
  * @brief 损失函数类型（引用 loss.h 主定义，此处仅为向后兼容）
+ * ZSF999XQ-H-004: 此include造成utils→core反向依赖，违反分层架构。
+ * 需在后续重构中将LossType/OptimizerType提取到独立core_types.h。
+ * 当前保留include以维持向后兼容性，下游文件通过selflnn.h统一包含。
  */
 #include "selflnn/core/loss.h"
 
 /**
  * @brief 优化器类型（引用 optimizer.h 主定义）
+ * ZSF999XQ-H-004: 同上，反向依赖待重构。
  */
 #include "selflnn/core/optimizer.h"
 
@@ -347,6 +351,27 @@ void math_standardize(float* data, size_t n);
  * @return float 余弦相似度 [-1, 1]，零向量返回0
  */
 float math_cosine_similarity(const float* a, const float* b, size_t dim);
+
+/**
+ * @brief FNV-1a 64位哈希函数（用于一致性哈希环、字符串去重等场景）
+ *
+ * FNV-1a: hash = offset_basis; for each byte: hash ^= byte; hash *= prime;
+ * 哈希值分布均匀，适合作为一致哈希的键值。
+ *
+ * @param key 输入数据
+ * @param len 数据长度（字节）
+ * @return uint64_t 64位哈希值，key为NULL或len为0返回0
+ */
+uint64_t math_fnv1a_hash64(const void* key, size_t len);
+
+/**
+ * @brief FNV-1a 32位哈希函数
+ *
+ * @param key 输入数据
+ * @param len 数据长度（字节）
+ * @return uint32_t 32位哈希值，key为NULL或len为0返回0
+ */
+uint32_t math_fnv1a_hash32(const void* key, size_t len);
 
 /**
  * @brief 四元数基本运算

@@ -73,11 +73,13 @@
  * ============================================================================
  */
 
+#define SELFLNN_IMPLEMENTATION  /* ZSFZX-FIX-P1-001: 使distributed_training.h中结构定义可见 */
 #include "distributed_internal.h"
 #include "selflnn/training/distributed_training.h"
 #include "selflnn/core/port_config.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
 
 #include <string.h>
@@ -1557,6 +1559,9 @@ SELFLNN_API int distributed_allreduce_mpi(DistributedContext* ctx, float* data, 
             safe_free((void**)&sendbuf);
             return 0;
         }
+    } else {
+        log_warning("[distributed] SELFLNN_USE_MPI已启用但mpi_allreduce_fn未赋值，"
+                    "回退到TCP Ring AllReduce。请确保已调用mpi_init并设置mpi_allreduce_fn指针。");
     }
     return ring_allreduce_internal(ctx, data, count);
 }
@@ -2396,11 +2401,13 @@ void distributed_gradient_topk_decompress(float* output, size_t num_params,
  * =========================================================================== */
 
 int distributed_elastic_register_node(int node_id, const char* host, unsigned short port) {
-    if (!g_elastic_ctx || !host) return -1;
-    if (node_id < 0 || node_id >= g_elastic_ctx->num_nodes) return -2;
+    /* ZSFDDD-D6-004b: 添加锁保护elastic上下文 */
+    DistributedContext* ctx = elastic_ctx_lock();
+    if (!ctx || !host) { elastic_ctx_unlock(); return -1; }
+    if (node_id < 0 || node_id >= ctx->num_nodes) { elastic_ctx_unlock(); return -2; }
 
     /* 注册节点：设置连接信息和初始状态 */
-    NodeConnection* node = &g_elastic_ctx->nodes[node_id];
+    NodeConnection* node = &ctx->nodes[node_id];
     strncpy(node->host, host, sizeof(node->host) - 1);
     node->host[sizeof(node->host) - 1] = '\0';
     node->port = port;
@@ -2408,51 +2415,53 @@ int distributed_elastic_register_node(int node_id, const char* host, unsigned sh
     node->last_heartbeat = get_time_ms();
     node->is_alive = 1;
 
+    elastic_ctx_unlock();
     log_info("弹性伸缩: 注册节点 node_id=%d, host=%s, port=%d", node_id, host, port);
     return 0;
 }
 
 int distributed_elastic_heartbeat(int node_id) {
-    if (!g_elastic_ctx) return -1;
-    if (node_id < 0 || node_id >= g_elastic_ctx->num_nodes) return -2;
+    DistributedContext* ctx = elastic_ctx_lock();
+    if (!ctx) { elastic_ctx_unlock(); return -1; }
+    if (node_id < 0 || node_id >= ctx->num_nodes) { elastic_ctx_unlock(); return -2; }
 
     /* 心跳更新：刷新节点最后活跃时间 */
-    NodeConnection* node = &g_elastic_ctx->nodes[node_id];
+    NodeConnection* node = &ctx->nodes[node_id];
     node->last_heartbeat = get_time_ms();
 
-    /* 检查是否有节点超时（超过心跳间隔3倍未响应则标记为不健康） */
+    /* 检查是否有节点超时 */
     uint64_t now = get_time_ms();
     int timeout_count = 0;
-    for (int i = 0; i < g_elastic_ctx->num_nodes; i++) {
-        if (i == g_elastic_ctx->my_node_id) continue;
-        NodeConnection* n = &g_elastic_ctx->nodes[i];
+    for (int i = 0; i < ctx->num_nodes; i++) {
+        if (i == ctx->my_node_id) continue;
+        NodeConnection* n = &ctx->nodes[i];
         if (n->connected && n->last_heartbeat > 0 &&
-            (now - n->last_heartbeat) > (uint64_t)g_elastic_ctx->config.heartbeat_timeout_ms * 3) {
+            (now - n->last_heartbeat) > (uint64_t)ctx->config.heartbeat_timeout_ms * 3) {
             n->is_alive = 0;
             timeout_count++;
-            log_warning("弹性伸缩: 节点%d心跳超时 (上次活跃=%llu毫秒前)",
-                       i, (unsigned long long)(now - n->last_heartbeat));
+            log_warning("弹性伸缩: 节点%d心跳超时", i);
         }
     }
 
     if (timeout_count > 0) {
-        /* 触发领导重选举 */
-        distributed_elect_leader(g_elastic_ctx);
+        distributed_elect_leader(ctx);
     }
 
+    elastic_ctx_unlock();
     return 0;
 }
 
 int distributed_elastic_check_nodes(void) {
-    if (!g_elastic_ctx) return 0;
+    DistributedContext* ctx = elastic_ctx_lock();
+    if (!ctx) { elastic_ctx_unlock(); return 0; }
 
-    /* 统计健康节点数量 */
     int healthy_count = 0;
-    for (int i = 0; i < g_elastic_ctx->num_nodes; i++) {
-        if (i == g_elastic_ctx->my_node_id || g_elastic_ctx->nodes[i].connected) {
+    for (int i = 0; i < ctx->num_nodes; i++) {
+        if (i == ctx->my_node_id || ctx->nodes[i].connected) {
             healthy_count++;
         }
     }
+    elastic_ctx_unlock();
     return healthy_count;
 }
 

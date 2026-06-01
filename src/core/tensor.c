@@ -853,6 +853,207 @@ int tensor_matmul(const Tensor* a, const Tensor* b, Tensor* c) {
 }
 
 /* ============================================================================
+ * 7. tensor_slice — 张量切片
+ *
+ * 沿指定维度对张量进行切片：result[i] = src[start[i] + idx*step[i]]
+ * 每个维度切片的范围从 start[d] 到 end[d]（不含），步长为 step[d]
+ * ============================================================================ */
+
+Tensor* tensor_slice(const Tensor* tensor, const int* start, const int* end, const int* step, int ndim) {
+    if (!tensor || !start || !end || !step || ndim <= 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "张量切片参数无效");
+        return NULL;
+    }
+    if (ndim != tensor->ndim) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_DIMENSION, __func__, __FILE__, __LINE__,
+                              "切片维度数与张量维度数不匹配: %d vs %d", ndim, tensor->ndim);
+        return NULL;
+    }
+
+    /* 计算切片形状并验证范围 */
+    int slice_shape[SELFLNN_MAX_TENSOR_DIMS];
+    size_t slice_numel = 1;
+    for (int d = 0; d < ndim; d++) {
+        int s = (start[d] < 0) ? tensor->shape[d] + start[d] : start[d];
+        int e = (end[d] < 0) ? tensor->shape[d] + end[d] : end[d];
+        int st = step[d];
+        if (st <= 0) st = 1;
+        if (s < 0 || e > tensor->shape[d] || s >= e) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "切片范围无效 dim=%d start=%d end=%d shape=%d",
+                                  d, start[d], end[d], tensor->shape[d]);
+            return NULL;
+        }
+        slice_shape[d] = (e - s + st - 1) / st;
+        slice_numel *= (size_t)slice_shape[d];
+    }
+    if (slice_numel == 0) return NULL;
+
+    /* 创建切片张量 */
+    Tensor* result = tensor_create(slice_shape, ndim, tensor->dtype);
+    if (!result) return NULL;
+
+    /* 计算源张量各维步幅 */
+    size_t src_strides[SELFLNN_MAX_TENSOR_DIMS];
+    src_strides[ndim - 1] = dtype_size_bytes(tensor->dtype);
+    for (int d = ndim - 2; d >= 0; d--) {
+        src_strides[d] = src_strides[d + 1] * (size_t)tensor->shape[d + 1];
+    }
+
+    /* 逐元素拷贝切片数据 */
+    int src_idx[SELFLNN_MAX_TENSOR_DIMS];
+    int dst_idx[SELFLNN_MAX_TENSOR_DIMS];
+    memset(src_idx, 0, sizeof(src_idx));
+    memset(dst_idx, 0, sizeof(dst_idx));
+
+    size_t numel = slice_numel;
+    uint8_t* dst_data = (uint8_t*)result->data;
+    const uint8_t* src_data = (const uint8_t*)tensor->data;
+    size_t elem_size = dtype_size_bytes(tensor->dtype);
+
+    for (size_t i = 0; i < numel; i++) {
+        /* 计算源偏移 */
+        size_t src_offset = 0;
+        for (int d = 0; d < ndim; d++) {
+            int s = (start[d] < 0) ? tensor->shape[d] + start[d] : start[d];
+            src_offset += (size_t)(s + src_idx[d]) * src_strides[d] / elem_size;
+        }
+
+        /* 拷贝单个元素 */
+        memcpy(dst_data + (size_t)dst_idx[0] * elem_size + (i - 0) * elem_size,  /* 简化:直接按线性索引 */
+               src_data + src_offset * elem_size, elem_size);
+
+        /* 推进dst_idx和src_idx（从最后一维开始进位） */
+        for (int d = ndim - 1; d >= 0; d--) {
+            src_idx[d] += step[d];
+            dst_idx[d]++;
+            if (dst_idx[d] >= slice_shape[d]) {
+                src_idx[d] = 0;
+                dst_idx[d] = 0;
+            } else {
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
+/* ============================================================================
+ * 8. tensor_transpose — 张量转置
+ *
+ * 按 perm 数组重排维度顺序：result.shape[i] = src.shape[perm[i]]
+ * result.data[new_index] = src.data[old_index]
+ * 通过维度索引映射实现任意轴排列
+ * ============================================================================ */
+
+Tensor* tensor_transpose(const Tensor* tensor, const int* perm, int ndim) {
+    if (!tensor || !perm || ndim <= 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "张量转置参数无效");
+        return NULL;
+    }
+    if (ndim != tensor->ndim) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_DIMENSION, __func__, __FILE__, __LINE__,
+                              "转置维度数与张量维度数不匹配: %d vs %d", ndim, tensor->ndim);
+        return NULL;
+    }
+
+    /* 验证perm是有效排列 */
+    int perm_check[SELFLNN_MAX_TENSOR_DIMS] = {0};
+    for (int d = 0; d < ndim; d++) {
+        if (perm[d] < 0 || perm[d] >= ndim) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "转置排列索引无效 perm[%d]=%d (ndim=%d)", d, perm[d], ndim);
+            return NULL;
+        }
+        perm_check[perm[d]]++;
+    }
+    for (int d = 0; d < ndim; d++) {
+        if (perm_check[d] != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                                  "转置排列不是有效排列，维度%d出现%d次", d, perm_check[d]);
+            return NULL;
+        }
+    }
+
+    /* 检查是否恒等排列（无需转置） */
+    int is_identity = 1;
+    for (int d = 0; d < ndim; d++) {
+        if (perm[d] != d) { is_identity = 0; break; }
+    }
+    if (is_identity) {
+        return tensor_clone(tensor);
+    }
+
+    /* 计算转置后形状 */
+    int new_shape[SELFLNN_MAX_TENSOR_DIMS];
+    for (int d = 0; d < ndim; d++) {
+        new_shape[d] = tensor->shape[perm[d]];
+    }
+
+    /* 创建转置张量 */
+    Tensor* result = tensor_create(new_shape, ndim, tensor->dtype);
+    if (!result) return NULL;
+
+    /* 计算源张量步幅 */
+    size_t src_strides[SELFLNN_MAX_TENSOR_DIMS];
+    size_t elem_size = dtype_size_bytes(tensor->dtype);
+    src_strides[ndim - 1] = elem_size;
+    for (int d = ndim - 2; d >= 0; d--) {
+        src_strides[d] = src_strides[d + 1] * (size_t)tensor->shape[d + 1];
+    }
+
+    /* 计算目标张量步幅 */
+    size_t dst_strides[SELFLNN_MAX_TENSOR_DIMS];
+    dst_strides[ndim - 1] = elem_size;
+    for (int d = ndim - 2; d >= 0; d--) {
+        dst_strides[d] = dst_strides[d + 1] * (size_t)new_shape[d + 1];
+    }
+
+    /* 遍历所有目标位置，通过perm逆映射计算源位置 */
+    size_t total = 1;
+    for (int d = 0; d < ndim; d++) total *= (size_t)new_shape[d];
+
+    const uint8_t* src_bytes = (const uint8_t*)tensor->data;
+    uint8_t* dst_bytes = (uint8_t*)result->data;
+
+    /* 预计算src各维度在目标中的映射 */
+    int inv_perm[SELFLNN_MAX_TENSOR_DIMS];
+    for (int d = 0; d < ndim; d++) {
+        inv_perm[perm[d]] = d;
+    }
+
+    for (size_t dst_linear = 0; dst_linear < total; dst_linear++) {
+        /* 展开目标线性索引为多维索引 */
+        int src_multi_idx[SELFLNN_MAX_TENSOR_DIMS];
+        int dst_multi_idx[SELFLNN_MAX_TENSOR_DIMS];
+        size_t remaining = dst_linear;
+        for (int d = 0; d < ndim; d++) {
+            dst_multi_idx[d] = (int)(remaining / (dst_strides[d] / elem_size));
+            remaining %= (dst_strides[d] / elem_size);
+        }
+
+        /* 目标索引逆映射到源索引: src_idx[perm[d]] = dst_idx[d] */
+        for (int d = 0; d < ndim; d++) {
+            src_multi_idx[perm[d]] = dst_multi_idx[d];
+        }
+
+        /* 计算源线性偏移 */
+        size_t src_offset = 0;
+        for (int d = 0; d < ndim; d++) {
+            src_offset += (size_t)src_multi_idx[d] * (src_strides[d] / elem_size);
+        }
+
+        memcpy(dst_bytes + dst_linear * elem_size,
+               src_bytes + src_offset * elem_size, elem_size);
+    }
+
+    return result;
+}
+
+/* ============================================================================
  * 2. tensor_add — 逐元素加法，支持广播
  *
  * NumPy风格广播：从最后一维对齐，维度为1的可以广播

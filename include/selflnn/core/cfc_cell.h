@@ -216,9 +216,13 @@ struct CfCCell {
     float* output_gate_grads;       /**< 输出门激活梯度 [hidden_size] */
     float* time_constant_grad;
     float tau_learning_rate;
-    float* hidden_to_gate_weights;
+    float* hidden_to_input_gate_weights;      /**< W_ghi: 隐藏到输入门权重矩阵 [hidden_size×hidden_size] */
+    float* hidden_to_forget_gate_weights;    /**< W_ghf: 隐藏到遗忘门权重矩阵 [hidden_size×hidden_size] */
+    float* hidden_to_output_gate_weights;    /**< W_gho: 隐藏到输出门权重矩阵 [hidden_size×hidden_size] */
     float* hidden_to_activation_weights;
-    float* hidden_to_gate_weight_grad;
+    float* hidden_to_input_gate_weight_grad;  /**< W_ghi梯度缓冲区 */
+    float* hidden_to_forget_gate_weight_grad; /**< W_ghf梯度缓冲区 */
+    float* hidden_to_output_gate_weight_grad; /**< W_gho梯度缓冲区 */
     float* hidden_to_activation_weight_grad;
     int use_multi_timescale;
     float* fast_time_constants;

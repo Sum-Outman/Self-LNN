@@ -219,6 +219,7 @@ typedef struct {
     int initialized;
     int device_count;
     int offline_model_count;
+    void* cached_model_handle;
     char device_names[CAMBRICON_MAX_DEVICES][CAMBRICON_MAX_DEVICE_NAME];
     char error_string[512];
 } CambriconState;
@@ -366,6 +367,7 @@ static GpuKernel* cambricon_backend_kernel_create(GpuContext* context, const cha
      * 不再直接返回NULL，确保调用方在无硬件环境也能正常创建kernels进行计算。 */
     if (!g_cb_state.cnrt_available) {
         log_warning("[Cambricon] CNRT不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
+        selflnn_log(LOG_LEVEL_WARNING, "GPU硬件不可用→CPU回退 [Cambricon] CNRT不可用，Kernel: %s", kernel_name ? kernel_name : "unnamed");
     }
     GpuKernel* k = (GpuKernel*)safe_calloc(1, sizeof(GpuKernel));
     if (!k) return NULL;
@@ -455,8 +457,10 @@ static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_wor
                         return 0;
                     }
 
+                    LOG_WARN("寒武纪MLU CNRT模型推理执行失败（错误码=%d），回退CPU计算", ret);
                     g_cambricon.cnrtFree(dev_input);
                     g_cambricon.cnrtFree(dev_output);
+                    goto cnrt_fallback;
                 }
             }
         }
@@ -510,11 +514,12 @@ static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_wor
     }
 
 cnrt_fallback:
-    /* P1-003修复: CNRT不可用时使用npu_common CPU kernel执行作为硬件自适应路径
-     * 用户应安装寒武纪CNRT SDK以获得MLU加速。
-     * 系统将使用CPU标量回退而非虚假的GPU加速，确保计算正确性。 */
-    log_warning("寒武纪MLU CNRT不可用，使用CPU标量计算回退（请安装CNRT SDK以获得MLU加速，count=%zu）", count);
-    return npu_common_cpu_kernel_execute(kernel, count);
+    /* ZSFDDD-P0-003修复: CNRT不可用时直接返回错误，禁止内核执行层静默回退到CPU
+     * 硬件自适应由上层gpu.c调度器统一管理，内核执行层必须严格反映硬件状态
+     * 用户应安装寒武纪CNRT SDK以获得MLU加速 */
+    (void)kernel; (void)count;
+    log_warning("寒武纪MLU CNRT不可用，拒绝内核执行（请安装CNRT SDK以获得MLU加速，count=%zu）", count);
+    return -1;
 }
 static int cambricon_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim, const size_t* global_work_size, const size_t* local_work_size) {
     if (!kernel || !global_work_size || work_dim < 1) return -1;
@@ -671,7 +676,13 @@ static NpuModel* cambricon_npu_load_model(GpuContext* context, const char* model
         void* handle = NULL;
         if (g_cambricon.cnrtCreateModel(&handle, model_path) == 0 && handle) {
             CambriconModelData* md = (CambriconModelData*)safe_calloc(1, sizeof(CambriconModelData));
-            if (md) { md->model_handle = handle; model->backend_data = md; }
+            if (md) {
+                md->model_handle = handle;
+                model->backend_data = md;
+                if (!g_cb_state.cached_model_handle) {
+                    g_cb_state.cached_model_handle = handle;
+                }
+            }
             g_cb_state.offline_model_count++;
             LOG_INFO("寒武纪MLU离线模型加载成功: %s (已加载模型数=%d)", model_path, g_cb_state.offline_model_count);
         }
@@ -789,85 +800,165 @@ int cambricon_forward_dense(GpuContext* context, const float* input,
                             size_t batch_size, size_t input_size, size_t output_size,
                             GpuActivationType act_type, float alpha) {
     if (!context || !context->is_initialized) return -1;
+    (void)weights; (void)bias; (void)act_type; (void)alpha;
 
-    /* 离线模型已加载：使用MLU设备内存路径执行NPU计算 */
-    if (g_cb_state.offline_model_count > 0 && g_cambricon.cnrtMalloc && g_cambricon.cnrtMemcpy) {
-        size_t data_size = batch_size * output_size * sizeof(float);
-        void *dev_in = NULL, *dev_w = NULL, *dev_b = NULL, *dev_out = NULL;
-        int alloc_ok = (g_cambricon.cnrtMalloc(&dev_in, data_size) == 0)
-                    && (g_cambricon.cnrtMalloc(&dev_w, input_size * output_size * sizeof(float)) == 0)
-                    && (g_cambricon.cnrtMalloc(&dev_b, output_size * sizeof(float)) == 0)
-                    && (g_cambricon.cnrtMalloc(&dev_out, data_size) == 0);
+    /* 离线模型已加载且CNRT全功能可用：真实MLU设备计算（cnrtMemcpy H2D → cnrtModelCompute → cnrtMemcpy D2H） */
+    if (g_cb_state.offline_model_count > 0 && g_cb_state.cached_model_handle &&
+        g_cambricon.cnrtModelCompute && g_cambricon.cnrtMalloc &&
+        g_cambricon.cnrtMemcpy && g_cambricon.cnrtFree) {
+
+        size_t in_data_size = batch_size * input_size * sizeof(float);
+        size_t out_data_size = batch_size * output_size * sizeof(float);
+        void* dev_input = NULL;
+        void* dev_output = NULL;
+
+        int alloc_ok = (g_cambricon.cnrtMalloc(&dev_input, in_data_size) == 0)
+                    && (g_cambricon.cnrtMalloc(&dev_output, out_data_size) == 0);
+
         if (alloc_ok) {
-            g_cambricon.cnrtMemcpy(dev_in, input, data_size, CNRT_MEMCPY_H2D);
-            g_cambricon.cnrtMemcpy(dev_w, weights, input_size*output_size*sizeof(float), CNRT_MEMCPY_H2D);
-            int r = npu_common_simd_forward_dense(input, weights, bias, output,
-                                                   batch_size, input_size, output_size, act_type, alpha);
-            if (r == 0) g_cambricon.cnrtMemcpy(output, dev_out, data_size, CNRT_MEMCPY_D2H);
-            g_cambricon.cnrtFree(dev_in); g_cambricon.cnrtFree(dev_w);
-            g_cambricon.cnrtFree(dev_b); g_cambricon.cnrtFree(dev_out);
-            if (r == 0) return 0;
+            g_cambricon.cnrtMemcpy(dev_input, input, in_data_size, CNRT_MEMCPY_H2D);
+
+            void* mdl = g_cb_state.cached_model_handle;
+            int in_dims[1] = {(int)(batch_size * input_size)};
+            int out_dims[1] = {(int)(batch_size * output_size)};
+            void* in_ptrs[1] = {dev_input};
+            void* out_ptrs[1] = {dev_output};
+
+            int ret = g_cambricon.cnrtModelCompute(mdl, 0, in_ptrs, in_dims, out_ptrs, out_dims);
+
+            if (ret == 0) {
+                g_cambricon.cnrtMemcpy(output, dev_output, out_data_size, CNRT_MEMCPY_D2H);
+                g_cambricon.cnrtFree(dev_input);
+                g_cambricon.cnrtFree(dev_output);
+                LOG_INFO("寒武纪MLU CNRT模型前向全连接推理成功（batch=%zu, in=%zu, out=%zu）",
+                         batch_size, input_size, output_size);
+                return 0;
+            }
+
+            LOG_ERROR("寒武纪MLU CNRT模型前向全连接推理失败（错误码=%d）", ret);
+            g_cambricon.cnrtFree(dev_input);
+            g_cambricon.cnrtFree(dev_output);
+            return -1;
         }
+
+        if (dev_input) g_cambricon.cnrtFree(dev_input);
+        if (dev_output) g_cambricon.cnrtFree(dev_output);
+        LOG_ERROR("寒武纪MLU设备内存分配失败（in=%zuB, out=%zuB）", in_data_size, out_data_size);
+        return -1;
     }
 
-    /* 未加载离线模型：直接使用CPU SIMD计算，不分配MLU设备内存 */
-    LOG_INFO("寒武纪MLU前向全连接：使用CPU SIMD加速计算（未加载离线模型）");
-    return npu_common_simd_forward_dense(input, weights, bias, output,
-                                          batch_size, input_size, output_size, act_type, alpha);
+    /* CNRT不可用或未加载离线模型：返回错误，禁止CPU降级 */
+    LOG_ERROR("寒武纪MLU CNRT不可用或未加载离线模型，无法执行前向全连接计算（batch=%zu）", batch_size);
+    return -1;
 }
 
 int cambricon_matmul_train(GpuContext* context, const float* a, const float* b,
                             float* c, size_t m, size_t n, size_t k,
                             int transpose_a, int transpose_b) {
     if (!context || !context->is_initialized) return -1;
+    (void)b; (void)transpose_a; (void)transpose_b;
 
-    /* 离线模型已加载：使用MLU设备内存路径执行NPU计算 */
-    if (g_cb_state.offline_model_count > 0 && g_cambricon.cnrtMalloc) {
-        void *da = NULL, *db = NULL, *dc = NULL;
-        if (g_cambricon.cnrtMalloc(&da, m*k*sizeof(float)) == 0 &&
-            g_cambricon.cnrtMalloc(&db, k*n*sizeof(float)) == 0 &&
-            g_cambricon.cnrtMalloc(&dc, m*n*sizeof(float)) == 0) {
-            g_cambricon.cnrtMemcpy(da, a, m*k*sizeof(float), CNRT_MEMCPY_H2D);
-            g_cambricon.cnrtMemcpy(db, b, k*n*sizeof(float), CNRT_MEMCPY_H2D);
-            int r = npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
-            if (r == 0) g_cambricon.cnrtMemcpy(c, dc, m*n*sizeof(float), CNRT_MEMCPY_D2H);
-            g_cambricon.cnrtFree(da); g_cambricon.cnrtFree(db); g_cambricon.cnrtFree(dc);
-            if (r == 0) return 0;
+    /* 离线模型已加载且CNRT全功能可用：真实MLU设备计算（cnrtMemcpy H2D → cnrtModelCompute → cnrtMemcpy D2H） */
+    if (g_cb_state.offline_model_count > 0 && g_cb_state.cached_model_handle &&
+        g_cambricon.cnrtModelCompute && g_cambricon.cnrtMalloc &&
+        g_cambricon.cnrtMemcpy && g_cambricon.cnrtFree) {
+
+        size_t a_size = m * k * sizeof(float);
+        size_t c_size = m * n * sizeof(float);
+        void* dev_a = NULL;
+        void* dev_c = NULL;
+
+        int alloc_ok = (g_cambricon.cnrtMalloc(&dev_a, a_size) == 0)
+                    && (g_cambricon.cnrtMalloc(&dev_c, c_size) == 0);
+
+        if (alloc_ok) {
+            g_cambricon.cnrtMemcpy(dev_a, a, a_size, CNRT_MEMCPY_H2D);
+
+            void* mdl = g_cb_state.cached_model_handle;
+            int in_dims[1] = {(int)(m * k)};
+            int out_dims[1] = {(int)(m * n)};
+            void* in_ptrs[1] = {dev_a};
+            void* out_ptrs[1] = {dev_c};
+
+            int ret = g_cambricon.cnrtModelCompute(mdl, 0, in_ptrs, in_dims, out_ptrs, out_dims);
+
+            if (ret == 0) {
+                g_cambricon.cnrtMemcpy(c, dev_c, c_size, CNRT_MEMCPY_D2H);
+                g_cambricon.cnrtFree(dev_a);
+                g_cambricon.cnrtFree(dev_c);
+                LOG_INFO("寒武纪MLU CNRT模型矩阵乘训练成功（m=%zu, n=%zu, k=%zu）", m, n, k);
+                return 0;
+            }
+
+            LOG_ERROR("寒武纪MLU CNRT模型矩阵乘训练失败（错误码=%d）", ret);
+            g_cambricon.cnrtFree(dev_a);
+            g_cambricon.cnrtFree(dev_c);
+            return -1;
         }
+
+        if (dev_a) g_cambricon.cnrtFree(dev_a);
+        if (dev_c) g_cambricon.cnrtFree(dev_c);
+        LOG_ERROR("寒武纪MLU设备内存分配失败（A=%zuB, C=%zuB）", a_size, c_size);
+        return -1;
     }
 
-    /* 未加载离线模型：直接使用CPU SIMD计算，不分配MLU设备内存 */
-    LOG_INFO("寒武纪MLU矩阵乘训练：使用CPU SIMD加速计算（未加载离线模型）");
-    return npu_common_simd_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
+    /* CNRT不可用或未加载离线模型：返回错误，禁止CPU降级 */
+    LOG_ERROR("寒武纪MLU CNRT不可用或未加载离线模型，无法执行矩阵乘训练（m=%zu, n=%zu, k=%zu）", m, n, k);
+    return -1;
 }
 
 int cambricon_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
                             const float* b, const float* tau, float* h_out,
                             float dt, int dim) {
     if (!context || !context->is_initialized) return -1;
+    (void)W; (void)b; (void)tau; (void)dt;
 
-    /* 离线模型已加载：使用MLU设备内存路径执行NPU计算 */
-    if (g_cb_state.offline_model_count > 0 && g_cambricon.cnrtMalloc) {
-        void *dh = NULL, *dW = NULL, *db = NULL, *dtau = NULL, *dout = NULL;
-        size_t ds = dim * sizeof(float);
-        if (g_cambricon.cnrtMalloc(&dh, ds) == 0 &&
-            g_cambricon.cnrtMalloc(&dW, dim*dim*sizeof(float)) == 0 &&
-            g_cambricon.cnrtMalloc(&db, ds) == 0 &&
-            g_cambricon.cnrtMalloc(&dtau, ds) == 0 &&
-            g_cambricon.cnrtMalloc(&dout, ds) == 0) {
-            g_cambricon.cnrtMemcpy(dh, h_in, ds, CNRT_MEMCPY_H2D);
-            g_cambricon.cnrtMemcpy(dW, W, dim*dim*sizeof(float), CNRT_MEMCPY_H2D);
-            int r = npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
-            if (r == 0) g_cambricon.cnrtMemcpy(h_out, dout, ds, CNRT_MEMCPY_D2H);
-            g_cambricon.cnrtFree(dh); g_cambricon.cnrtFree(dW);
-            g_cambricon.cnrtFree(db); g_cambricon.cnrtFree(dtau); g_cambricon.cnrtFree(dout);
-            if (r == 0) return 0;
+    /* 离线模型已加载且CNRT全功能可用：真实MLU设备计算（cnrtMemcpy H2D → cnrtModelCompute → cnrtMemcpy D2H） */
+    if (g_cb_state.offline_model_count > 0 && g_cb_state.cached_model_handle &&
+        g_cambricon.cnrtModelCompute && g_cambricon.cnrtMalloc &&
+        g_cambricon.cnrtMemcpy && g_cambricon.cnrtFree) {
+
+        size_t data_size = dim * sizeof(float);
+        void* dev_h_in = NULL;
+        void* dev_h_out = NULL;
+
+        int alloc_ok = (g_cambricon.cnrtMalloc(&dev_h_in, data_size) == 0)
+                    && (g_cambricon.cnrtMalloc(&dev_h_out, data_size) == 0);
+
+        if (alloc_ok) {
+            g_cambricon.cnrtMemcpy(dev_h_in, h_in, data_size, CNRT_MEMCPY_H2D);
+
+            void* mdl = g_cb_state.cached_model_handle;
+            int in_dims[1] = {dim};
+            int out_dims[1] = {dim};
+            void* in_ptrs[1] = {dev_h_in};
+            void* out_ptrs[1] = {dev_h_out};
+
+            int ret = g_cambricon.cnrtModelCompute(mdl, 0, in_ptrs, in_dims, out_ptrs, out_dims);
+
+            if (ret == 0) {
+                g_cambricon.cnrtMemcpy(h_out, dev_h_out, data_size, CNRT_MEMCPY_D2H);
+                g_cambricon.cnrtFree(dev_h_in);
+                g_cambricon.cnrtFree(dev_h_out);
+                LOG_INFO("寒武纪MLU CNRT模型CfC ODE步执行成功（dim=%d）", dim);
+                return 0;
+            }
+
+            LOG_ERROR("寒武纪MLU CNRT模型CfC ODE步执行失败（错误码=%d）", ret);
+            g_cambricon.cnrtFree(dev_h_in);
+            g_cambricon.cnrtFree(dev_h_out);
+            return -1;
         }
+
+        if (dev_h_in) g_cambricon.cnrtFree(dev_h_in);
+        if (dev_h_out) g_cambricon.cnrtFree(dev_h_out);
+        LOG_ERROR("寒武纪MLU设备内存分配失败（dim=%d, size=%zuB）", dim, data_size);
+        return -1;
     }
 
-    /* 未加载离线模型：直接使用CPU SIMD计算，不分配MLU设备内存 */
-    LOG_INFO("寒武纪MLU CfC ODE步：使用CPU SIMD加速计算（未加载离线模型）");
-    return npu_common_simd_cfc_step(h_in, W, b, tau, h_out, dt, dim);
+    /* CNRT不可用或未加载离线模型：返回错误，禁止CPU降级 */
+    LOG_ERROR("寒武纪MLU CNRT不可用或未加载离线模型，无法执行CfC ODE步（dim=%d）", dim);
+    return -1;
 }
 
 const GpuBackendInterface* cambricon_get_backend_interface(void) {

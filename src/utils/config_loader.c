@@ -76,14 +76,94 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     if (str_val) {
         if (strcmp(str_val, "cuda") == 0) config->gpu_backend = GPU_BACKEND_CUDA;
         else if (strcmp(str_val, "opencl") == 0) config->gpu_backend = GPU_BACKEND_OPENCL;
+        else if (strcmp(str_val, "vulkan") == 0) config->gpu_backend = GPU_BACKEND_VULKAN;
+        else if (strcmp(str_val, "metal") == 0) config->gpu_backend = GPU_BACKEND_METAL;
+        else if (strcmp(str_val, "rocm") == 0) config->gpu_backend = GPU_BACKEND_ROCM;
+        else if (strcmp(str_val, "auto") == 0) config->gpu_backend = GPU_BACKEND_CPU;
         else config->gpu_backend = GPU_BACKEND_CPU;
     } else {
         config->gpu_backend = GPU_BACKEND_CPU;
     }
 
+    /* ZSFAI-C07修复: 加载与保存的字段集保持一致 */
+    str_val = json_get_string(root, "model_path");
+    if (str_val && config->model_path) {
+        snprintf((char*)config->model_path, 1024, "%s", str_val);
+    }
+
+    /* ZSFZX-FIX-CONFIG: 加载端口字段（原只保存不加载） */
+    v = json_get(root, "http_port");
+    if (v && v->type == JSON_NUMBER) config->http_port = (int)v->data.number_val;
+    if (config->http_port <= 0 || config->http_port > 65535) config->http_port = SELFLNN_DEFAULT_PORT;
+
+    v = json_get(root, "websocket_port");
+    if (v && v->type == JSON_NUMBER) config->websocket_port = (int)v->data.number_val;
+    if (config->websocket_port <= 0 || config->websocket_port > 65535) config->websocket_port = SELFLNN_WEBSOCKET_PORT;
+
+    v = json_get(root, "distributed_port");
+    if (v && v->type == JSON_NUMBER) config->distributed_port = (int)v->data.number_val;
+    if (config->distributed_port <= 0 || config->distributed_port > 65535) config->distributed_port = 8765;
+
     json_free(root);
     safe_free((void**)&json_str);
     log_info("[配置] 加载成功: %s", path);
+
+    /* ZSFZX-FIX-R4-2: 配置Schema验证 */
+    {
+        char err[256];
+        if (selflnn_config_validate(config, err, sizeof(err)) != 0) {
+            log_warning("[配置] 验证警告: %s", err);
+        }
+    }
+
+    return 0;
+}
+
+/* ================================================================
+ * ZSFZX-FIX-R4-2: 配置Schema验证
+ * ================================================================ */
+int selflnn_config_validate(const SystemConfig* config, char* error_msg, size_t msg_size) {
+    if (!config) {
+        if (error_msg && msg_size > 0) snprintf(error_msg, msg_size, "config为NULL");
+        return -1;
+    }
+
+    if (config->state_dimension < 1 || config->state_dimension > 4096) {
+        if (error_msg && msg_size > 0)
+            snprintf(error_msg, msg_size, "state_dimension=%d超出范围[1,4096]", config->state_dimension);
+        return -1;
+    }
+    if (config->multimodal_channels < 1 || config->multimodal_channels > 256) {
+        if (error_msg && msg_size > 0)
+            snprintf(error_msg, msg_size, "multimodal_channels=%d超出范围[1,256]", config->multimodal_channels);
+        return -1;
+    }
+    if (config->memory_capacity < 100 || config->memory_capacity > 100000000) {
+        if (error_msg && msg_size > 0)
+            snprintf(error_msg, msg_size, "memory_capacity=%d超出范围[100,100000000]", config->memory_capacity);
+        return -1;
+    }
+    if (config->max_concurrent_tasks < 1 || config->max_concurrent_tasks > 1024) {
+        if (error_msg && msg_size > 0)
+            snprintf(error_msg, msg_size, "max_concurrent_tasks=%d超出范围[1,1024]", config->max_concurrent_tasks);
+        return -1;
+    }
+    if (config->http_port > 0 && (config->http_port < 80 || config->http_port > 65535)) {
+        if (error_msg && msg_size > 0)
+            snprintf(error_msg, msg_size, "http_port=%d无效端口号", config->http_port);
+        return -1;
+    }
+    if (config->websocket_port > 0 && (config->websocket_port < 80 || config->websocket_port > 65535)) {
+        if (error_msg && msg_size > 0)
+            snprintf(error_msg, msg_size, "websocket_port=%d无效端口号", config->websocket_port);
+        return -1;
+    }
+    if (config->websocket_port > 0 && config->http_port > 0 &&
+        config->websocket_port == config->http_port) {
+        if (error_msg && msg_size > 0)
+            snprintf(error_msg, msg_size, "http_port和websocket_port不能相同(%d)", config->http_port);
+        return -1;
+    }
     return 0;
 }
 
@@ -98,9 +178,20 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
     if (config->power_mode == POWER_MODE_PERFORMANCE) pm = "performance";
     else if (config->power_mode == POWER_MODE_POWER_SAVING) pm = "power_saving";
 
+    /* ZSFZX-FIX-CONFIG: GPU后端枚举补全 — 原只枚举cuda/opencl */
     const char* gb = "cpu";
-    if (config->gpu_backend == GPU_BACKEND_CUDA) gb = "cuda";
-    if (config->gpu_backend == GPU_BACKEND_OPENCL) gb = "opencl";
+    switch (config->gpu_backend) {
+        case GPU_BACKEND_CUDA:     gb = "cuda"; break;
+        case GPU_BACKEND_OPENCL:   gb = "opencl"; break;
+        case GPU_BACKEND_VULKAN:   gb = "vulkan"; break;
+        case GPU_BACKEND_METAL:    gb = "metal"; break;
+        case GPU_BACKEND_ROCM:     gb = "rocm"; break;
+        case GPU_BACKEND_ASCEND:   gb = "ascend"; break;
+        case GPU_BACKEND_CAMBRICON:gb = "cambricon"; break;
+        case GPU_BACKEND_TPU:      gb = "tpu"; break;
+        case GPU_BACKEND_CPU:      gb = "cpu"; break;
+        default:                   gb = "cpu"; break;
+    }
 
     fprintf(fp, "{\n");
     fprintf(fp, "  \"state_dimension\": %d,\n", config->state_dimension);
@@ -109,10 +200,10 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
     fprintf(fp, "  \"max_concurrent_tasks\": %d,\n", config->max_concurrent_tasks);
     fprintf(fp, "  \"power_mode\": \"%s\",\n", pm);
     fprintf(fp, "  \"gpu_backend\": \"%s\",\n", gb);
-    /* ZSF-038修复: 端口号从port_config.h读取，而非硬编码。添加模型路径字段。 */
-    fprintf(fp, "  \"http_port\": %d,\n", SELFLNN_DEFAULT_PORT);
-    fprintf(fp, "  \"websocket_port\": %d,\n", SELFLNN_WEBSOCKET_PORT);
-    fprintf(fp, "  \"distributed_port\": 8765,\n");
+    /* ZSFZX-FIX-CONFIG: 端口号优先使用配置值，配置未设置时回退port_config.h */
+    fprintf(fp, "  \"http_port\": %d,\n", config->http_port > 0 ? config->http_port : SELFLNN_DEFAULT_PORT);
+    fprintf(fp, "  \"websocket_port\": %d,\n", config->websocket_port > 0 ? config->websocket_port : SELFLNN_WEBSOCKET_PORT);
+    fprintf(fp, "  \"distributed_port\": %d,\n", config->distributed_port > 0 ? config->distributed_port : 8765);
     if (config->model_path && config->model_path[0]) {
         fprintf(fp, "  \"model_path\": \"%s\"\n", config->model_path);
     } else {

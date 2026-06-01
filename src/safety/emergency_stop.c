@@ -125,7 +125,18 @@ struct EmergencyStopSystem {
 
     /* GPIO/串口断电 (平台相关) */
     void (*physical_power_cut)(void);
-    
+
+    /* H-005修复: 线程池恢复回调 (用于快照恢复时重新启动线程池) */
+    void (*thread_pool_restart)(void* pool);
+
+    /* H-005修复: 模型推理恢复回调 (用于快照恢复时重新激活模型推理) */
+    void (*model_inference_resume)(void* ctx);
+    void*  model_inference_ctx;
+
+    /* H-005修复: 审计日志回调 (用于记录恢复审计信息) */
+    void (*audit_log_callback)(const char* message, void* ctx);
+    void*  audit_log_ctx;
+
     /* P3-001修复: 系统运行时指标缓存（供快照打包使用） */
     EmergencySystemMetrics last_metrics;
     int metrics_valid;
@@ -274,6 +285,60 @@ int emergency_stop_execute(EmergencyStopSystem* system, EmergencyStopLevel level
     system->status.current_level = level;
     system->status.total_stop_time_ms = 0;
 
+    /* M-019修复: 执行前验证关键回调是否已注册，任一缺失则返回错误 */
+    /* 检查对应级别的关键停止机制是否可用（函数指针+上下文引用必须同时非NULL） */
+    {
+        int has_valid_callback = 0;
+        const char* missing_callback = NULL;
+
+        switch (level) {
+            case EMERGENCY_LEVEL_SOFT_STOP:
+            case EMERGENCY_LEVEL_PAUSE:
+            case EMERGENCY_LEVEL_HARD_STOP:
+                /* 关键回调: 任务调度器暂停 或 硬件停止 */
+                if ((system->task_scheduler_pause && system->task_scheduler_ref) ||
+                    system->hardware_stop_callback) {
+                    has_valid_callback = 1;
+                } else {
+                    missing_callback = "task_scheduler_pause/ref 和 hardware_stop_callback 均未注册";
+                }
+                break;
+
+            case EMERGENCY_LEVEL_KILL:
+                /* 关键回调: 线程池停止 或 任务调度器终止 */
+                if ((system->thread_pool_stop_all && system->thread_pool_ref) ||
+                    (system->task_scheduler_kill && system->task_scheduler_ref)) {
+                    has_valid_callback = 1;
+                } else {
+                    missing_callback = "thread_pool_stop_all/ref 和 task_scheduler_kill/ref 均未注册";
+                }
+                break;
+
+            case EMERGENCY_LEVEL_PHYSICAL_CUT:
+                /* 关键回调: 线程池停止 或 任务调度器终止 或 物理断电 */
+                if ((system->thread_pool_stop_all && system->thread_pool_ref) ||
+                    (system->task_scheduler_kill && system->task_scheduler_ref) ||
+                    system->physical_power_cut) {
+                    has_valid_callback = 1;
+                } else {
+                    missing_callback = "thread_pool_stop_all/ref、task_scheduler_kill/ref 和 physical_power_cut 均未注册";
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        if (!has_valid_callback) {
+            snprintf(system->status.status_message,
+                     sizeof(system->status.status_message),
+                     "紧急停止失败[级别:%d]: 关键回调未注册 — %s",
+                     (int)level, missing_callback ? missing_callback : "未知");
+            system->is_executing = 0;
+            return -1;
+        }
+    }
+
     switch (level) {
         case EMERGENCY_LEVEL_SOFT_STOP:
             /* 软停止: 设置全局停止标志，等待当前安全操作自然完成 */
@@ -415,6 +480,36 @@ int emergency_stop_register_power_cut(EmergencyStopSystem* system,
     return 0;
 }
 
+/* H-005修复: 注册线程池重启回调（用于快照恢复时重新启动线程池） */
+int emergency_stop_register_thread_pool_restart(EmergencyStopSystem* system,
+                                                  void* pool_ref,
+                                                  void (*restart_fn)(void*)) {
+    if (!system) return -1;
+    system->thread_pool_ref = pool_ref;
+    system->thread_pool_restart = restart_fn;
+    return 0;
+}
+
+/* H-005修复: 注册模型推理恢复回调（用于快照恢复时重新激活模型推理） */
+int emergency_stop_register_model_inference_resume(EmergencyStopSystem* system,
+                                                     void* ctx,
+                                                     void (*resume_fn)(void*)) {
+    if (!system) return -1;
+    system->model_inference_ctx = ctx;
+    system->model_inference_resume = resume_fn;
+    return 0;
+}
+
+/* H-005修复: 注册审计日志回调（用于记录恢复操作审计信息） */
+int emergency_stop_register_audit_log(EmergencyStopSystem* system,
+                                       void (*log_fn)(const char* message, void* ctx),
+                                       void* ctx) {
+    if (!system) return -1;
+    system->audit_log_callback = log_fn;
+    system->audit_log_ctx = ctx;
+    return 0;
+}
+
 int emergency_stop_snapshot(EmergencyStopSystem* system,
                              const char* description,
                              EmergencySnapshot* snapshot) {
@@ -528,14 +623,106 @@ int emergency_stop_restore(EmergencyStopSystem* system,
                             const EmergencySnapshot* snapshot) {
     if (!system || !snapshot) return -1;
     if (!snapshot->is_valid) return -1;
+    if (system->is_executing) return -1;
 
-    system->status.current_level = snapshot->level;
+    system->is_executing = 1;
 
-    snprintf(system->status.status_message,
-             sizeof(system->status.status_message),
-             "从快照[ID:%ld]恢复: %s",
-             snapshot->snapshot_id, snapshot->description);
+    /* 步骤1: 验证快照内系统状态数据的完整性 */
+    int state_valid = 0;
+    if (snapshot->system_state && snapshot->state_size >= 4) {
+        uint8_t* buf = (uint8_t*)snapshot->system_state;
+        if (buf[0] == 'S' && buf[1] == 'S' && buf[2] == 'N' && buf[3] == 'A') {
+            state_valid = 1;
+        }
+    }
 
+    /* 步骤2: 重新初始化/恢复线程池 */
+    int thread_pool_restored = 0;
+    if (system->thread_pool_restart && system->thread_pool_ref) {
+        system->thread_pool_restart(system->thread_pool_ref);
+        thread_pool_restored = 1;
+    }
+
+    /* 步骤3: 恢复任务调度器 */
+    int scheduler_restored = 0;
+    if (system->task_scheduler_resume && system->task_scheduler_ref) {
+        system->task_scheduler_resume(system->task_scheduler_ref);
+        scheduler_restored = 1;
+    }
+
+    /* 步骤4: 重新激活模型推理 */
+    int inference_restored = 0;
+    if (system->model_inference_resume && system->model_inference_ctx) {
+        system->model_inference_resume(system->model_inference_ctx);
+        inference_restored = 1;
+    }
+
+    /* 步骤5: 更新系统状态为正常运行 */
+    system->status.current_level = EMERGENCY_LEVEL_NONE;
+    system->is_disabled = 0;
+    system->status.is_recovering = 0;
+    system->status.recovery_count++;
+    system->status.recovery_success_count++;
+    system->status.cfc_anomaly_score = 0.0f;
+
+    /* 步骤6: 清除已触发的条件列表，重新启用所有触发器 */
+    for (int i = 0; i < system->trigger_count; i++) {
+        system->triggers[i].is_triggered = 0;
+        system->triggers[i].trigger_count = 0;
+    }
+    system->triggered_count = 0;
+
+    /* 步骤7: 构建恢复状态消息 */
+    {
+        char detail_buf[512];
+        snprintf(detail_buf, sizeof(detail_buf),
+                 "从快照[ID:%ld]恢复: %s | 快照级别:%d | 状态数据:%s | "
+                 "线程池:%s | 调度器:%s | 模型推理:%s",
+                 snapshot->snapshot_id, snapshot->description,
+                 (int)snapshot->level,
+                 state_valid ? "有效" : "无效",
+                 thread_pool_restored ? "已重启" : "未注册",
+                 scheduler_restored ? "已恢复" : "未注册",
+                 inference_restored ? "已激活" : "未注册");
+        snprintf(system->status.status_message,
+                 sizeof(system->status.status_message),
+                 "%s", detail_buf);
+    }
+
+    /* 步骤8: 记录恢复审计日志 */
+    long restore_time = emergency_timestamp_us();
+    {
+        char audit_msg[512];
+        snprintf(audit_msg, sizeof(audit_msg),
+                 "[恢复审计] 快照ID:%ld | 时间戳:%ld | "
+                 "快照级别:%d | 描述:%s | "
+                 "线程池:%d | 调度器:%d | 推理:%d",
+                 snapshot->snapshot_id, restore_time,
+                 (int)snapshot->level, snapshot->description,
+                 thread_pool_restored, scheduler_restored,
+                 inference_restored);
+
+        if (system->audit_log_callback) {
+            system->audit_log_callback(audit_msg, system->audit_log_ctx);
+        }
+
+        /* 同时写入本地日志文件 */
+        {
+            FILE* log_fp = fopen(system->config.log_file, "a");
+            if (log_fp) {
+                time_t now = time(NULL);
+                char time_buf[64];
+                strftime(time_buf, sizeof(time_buf),
+                         "%Y-%m-%d %H:%M:%S", localtime(&now));
+                fprintf(log_fp, "[%s] [恢复审计] %s | 恢复耗时:%ldus\n",
+                        time_buf, audit_msg,
+                        restore_time - snapshot->timestamp_us);
+                fclose(log_fp);
+            }
+        }
+    }
+
+    system->is_executing = 0;
     return 0;
 }
 

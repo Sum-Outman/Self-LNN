@@ -915,6 +915,291 @@ static const char* OPENCL_RESIZE_BILINEAR_KERNEL =
 "    output[c * dst_h * dst_w + dy * dst_w + dx] = row0 + fy * (row1 - row0);\n"
 "}\n";
 
+/**
+ * @brief OpenCL通用矩阵乘法训练内核（支持转置和缩放）
+ *
+ * C = alpha * op(A) * op(B) + beta * C
+ * transA=0: op(A)=A, transA=1: op(A)=A^T
+ * transB=0: op(B)=B, transB=1: op(B)=B^T
+ * 每个工作项计算一个输出元素
+ */
+static const char* OPENCL_MATMUL_TRAIN_KERNEL =
+"__kernel void matmul_train(\n"
+"    __global const float* A,\n"
+"    __global const float* B,\n"
+"    __global float* C,\n"
+"    int M,\n"
+"    int N,\n"
+"    int K,\n"
+"    int transA,\n"
+"    int transB,\n"
+"    float alpha,\n"
+"    float beta\n"
+") {\n"
+"    int row = get_global_id(1);\n"
+"    int col = get_global_id(0);\n"
+"    if (row >= M || col >= N) return;\n"
+"    float sum = 0.0f;\n"
+"    for (int i = 0; i < K; i++) {\n"
+"        float a_val = transA ? A[i * M + row] : A[row * K + i];\n"
+"        float b_val = transB ? B[col * K + i] : B[i * N + col];\n"
+"        sum += a_val * b_val;\n"
+"    }\n"
+"    sum *= alpha;\n"
+"    if (beta != 0.0f) sum += beta * C[row * N + col];\n"
+"    C[row * N + col] = sum;\n"
+"}\n";
+
+/**
+ * @brief OpenCL统一激活函数前向内核
+ *
+ * 支持所有激活类型：ReLU/LeakyReLU/Sigmoid/Tanh/GELU/Softplus
+ * act_type: 0=ReLU, 1=LeakyReLU, 2=Sigmoid, 3=Tanh, 4=GELU, 5=Softplus
+ * 每个工作项处理一个元素
+ */
+static const char* OPENCL_ACTIVATION_FORWARD_UNIFIED_KERNEL =
+"__kernel void activation_forward_unified(\n"
+"    __global const float* input,\n"
+"    __global float* output,\n"
+"    int n,\n"
+"    int act_type,\n"
+"    float alpha\n"
+") {\n"
+"    int i = get_global_id(0);\n"
+"    if (i >= n) return;\n"
+"    float x = input[i];\n"
+"    float y = 0.0f;\n"
+"    switch (act_type) {\n"
+"        case 0: y = x > 0.0f ? x : 0.0f; break;\n"
+"        case 1: y = x > 0.0f ? x : alpha * x; break;\n"
+"        case 2: y = 1.0f / (1.0f + exp(-x)); break;\n"
+"        case 3: y = tanh(x); break;\n"
+"        case 4: y = x * 0.5f * (1.0f + erf(x * 0.70710678118f)); break;\n"
+"        case 5: y = log(1.0f + exp(x)); break;\n"
+"        default: y = x; break;\n"
+"    }\n"
+"    output[i] = y;\n"
+"}\n";
+
+/**
+ * @brief OpenCL统一激活函数反向内核
+ *
+ * 支持所有激活类型反向传播梯度
+ * act_type: 0=ReLU, 1=LeakyReLU, 2=Sigmoid, 3=Tanh, 4=GELU, 5=Softplus
+ * 每个工作项处理一个元素
+ */
+static const char* OPENCL_ACTIVATION_BACKWARD_UNIFIED_KERNEL =
+"__kernel void activation_backward_unified(\n"
+"    __global const float* input,\n"
+"    __global const float* output,\n"
+"    __global const float* grad_output,\n"
+"    __global float* grad_input,\n"
+"    int n,\n"
+"    int act_type,\n"
+"    float alpha\n"
+") {\n"
+"    int i = get_global_id(0);\n"
+"    if (i >= n) return;\n"
+"    float x = input[i];\n"
+"    float grad = grad_output[i];\n"
+"    float dydx = 0.0f;\n"
+"    switch (act_type) {\n"
+"        case 0: dydx = x > 0.0f ? 1.0f : 0.0f; break;\n"
+"        case 1: dydx = x > 0.0f ? 1.0f : alpha; break;\n"
+"        case 2: { float s = 1.0f / (1.0f + exp(-x)); dydx = s * (1.0f - s); break; }\n"
+"        case 3: { float th = tanh(x); dydx = 1.0f - th * th; break; }\n"
+"        case 4: { float r2 = 0.70710678118f; float xr = x * r2; dydx = 0.5f * (1.0f + erf(xr)) + x * exp(-x * x * 0.5f) * 0.3989422804f; break; }\n"
+"        case 5: dydx = 1.0f / (1.0f + exp(-x)); break;\n"
+"        default: dydx = 1.0f; break;\n"
+"    }\n"
+"    grad_input[i] = grad * dydx;\n"
+"}\n";
+
+/**
+ * @brief OpenCL批归一化反向传播内核
+ *
+ * 计算批归一化层的梯度：
+ * grad_input = gamma * (grad_out - dbeta/N - x_hat * dgamma/N) / sqrt(var + eps)
+ * grad_gamma = sum(grad_out * x_hat)
+ * grad_beta  = sum(grad_out)
+ * 使用两阶段归约：先局部求和，再全局求和
+ * 每个工作项先独立计算，再用原子操作归约
+ */
+static const char* OPENCL_BATCH_NORM_BACKWARD_KERNEL =
+"__kernel void batch_norm_backward(\n"
+"    __global const float* input,\n"
+"    __global const float* grad_output,\n"
+"    __global float* grad_input,\n"
+"    __global float* grad_gamma,\n"
+"    __global float* grad_beta,\n"
+"    __global const float* x_hat,\n"
+"    __global const float* gamma,\n"
+"    int batch_size,\n"
+"    int features,\n"
+"    float epsilon\n"
+") {\n"
+"    int f = get_global_id(0);\n"
+"    if (f >= features) return;\n"
+"    float sum_dy = 0.0f;\n"
+"    float sum_dy_xhat = 0.0f;\n"
+"    for (int b = 0; b < batch_size; b++) {\n"
+"        int idx = b * features + f;\n"
+"        float dy = grad_output[idx];\n"
+"        sum_dy += dy;\n"
+"        sum_dy_xhat += dy * x_hat[idx];\n"
+"    }\n"
+"    grad_beta[f] = sum_dy;\n"
+"    grad_gamma[f] = sum_dy_xhat;\n"
+"    float inv_n = 1.0f / (float)batch_size;\n"
+"    for (int b = 0; b < batch_size; b++) {\n"
+"        int idx = b * features + f;\n"
+"        float dy = grad_output[idx];\n"
+"        grad_input[idx] = gamma[f] * (dy - sum_dy * inv_n - x_hat[idx] * sum_dy_xhat * inv_n);\n"
+"    }\n"
+"}\n";
+
+/**
+ * @brief OpenCL Dropout前向传播内核
+ *
+ * 训练模式: output = mask * input / (1 - dropout_rate)
+ * 推理模式: output = input
+ * 每个工作项处理一个元素
+ */
+static const char* OPENCL_DROPOUT_FORWARD_KERNEL =
+"__kernel void dropout_forward(\n"
+"    __global const float* input,\n"
+"    __global float* output,\n"
+"    __global float* mask,\n"
+"    int n,\n"
+"    float dropout_rate,\n"
+"    int is_training\n"
+") {\n"
+"    int i = get_global_id(0);\n"
+"    if (i >= n) return;\n"
+"    if (is_training) {\n"
+"        float scale = 1.0f / (1.0f - dropout_rate);\n"
+"        output[i] = mask[i] > dropout_rate ? input[i] * scale : 0.0f;\n"
+"    } else {\n"
+"        output[i] = input[i];\n"
+"    }\n"
+"}\n";
+
+/**
+ * @brief OpenCL Dropout反向传播内核
+ *
+ * grad_input = grad_output * mask / (1 - dropout_rate)
+ * 每个工作项处理一个元素
+ */
+static const char* OPENCL_DROPOUT_BACKWARD_KERNEL =
+"__kernel void dropout_backward(\n"
+"    __global const float* grad_output,\n"
+"    __global float* grad_input,\n"
+"    __global const float* mask,\n"
+"    int n,\n"
+"    float dropout_rate\n"
+") {\n"
+"    int i = get_global_id(0);\n"
+"    if (i >= n) return;\n"
+"    float scale = 1.0f / (1.0f - dropout_rate);\n"
+"    grad_input[i] = mask[i] > dropout_rate ? grad_output[i] * scale : 0.0f;\n"
+"}\n";
+
+/**
+ * @brief OpenCL RMSProp优化器更新内核
+ *
+ * cache = beta * cache + (1 - beta) * grad^2
+ * weights = weights - lr * grad / (sqrt(cache) + eps) - lr * wd * weights
+ * 每个工作项处理一个参数
+ */
+static const char* OPENCL_RMSPROP_UPDATE_KERNEL =
+"__kernel void rmsprop_update(\n"
+"    __global float* weights,\n"
+"    __global const float* gradients,\n"
+"    __global float* cache,\n"
+"    int n,\n"
+"    float lr,\n"
+"    float beta,\n"
+"    float eps,\n"
+"    float wd\n"
+") {\n"
+"    int i = get_global_id(0);\n"
+"    if (i >= n) return;\n"
+"    float g = gradients[i];\n"
+"    cache[i] = beta * cache[i] + (1.0f - beta) * g * g;\n"
+"    weights[i] -= lr * g / (sqrt(cache[i]) + eps) + lr * wd * weights[i];\n"
+"}\n";
+
+/**
+ * @brief OpenCL交叉熵损失及梯度计算内核
+ *
+ * softmax + cross-entropy loss + gradient一体化计算
+ * 支持整数标签和one-hot标签两种模式
+ * 每个工作项处理一个样本
+ */
+static const char* OPENCL_CROSS_ENTROPY_LOSS_GRAD_KERNEL =
+"__kernel void cross_entropy_loss_grad(\n"
+"    __global const float* logits,\n"
+"    __global const float* targets,\n"
+"    __global float* loss,\n"
+"    __global float* gradients,\n"
+"    int batch_size,\n"
+"    int num_classes,\n"
+"    int is_integer_label\n"
+") {\n"
+"    int b = get_global_id(0);\n"
+"    if (b >= batch_size) return;\n"
+"    int offset = b * num_classes;\n"
+"    float max_val = logits[offset];\n"
+"    for (int j = 1; j < num_classes; j++) {\n"
+"        if (logits[offset + j] > max_val) max_val = logits[offset + j];\n"
+"    }\n"
+"    float sum_exp = 0.0f;\n"
+"    for (int j = 0; j < num_classes; j++) {\n"
+"        sum_exp += exp(logits[offset + j] - max_val);\n"
+"    }\n"
+"    for (int j = 0; j < num_classes; j++) {\n"
+"        float prob = exp(logits[offset + j] - max_val) / sum_exp;\n"
+"        if (is_integer_label) {\n"
+"            int target = (int)targets[b];\n"
+"            float t = (j == target) ? 1.0f : 0.0f;\n"
+"            gradients[offset + j] = (prob - t) / (float)batch_size;\n"
+"            if (j == target) loss[b] = -log(prob + 1e-10f);\n"
+"        } else {\n"
+"            float t = targets[offset + j];\n"
+"            gradients[offset + j] = (prob - t) / (float)batch_size;\n"
+"            if (t > 0.5f) loss[b] = -t * log(prob + 1e-10f);\n"
+"        }\n"
+"    }\n"
+"}\n";
+
+/**
+ * @brief OpenCL CfC ODE步进内核（简化版）
+ *
+ * CfC常微分方程步进：h_out = h_in + dt * tanh(W * h_in + b) / tau
+ * 用于CfC液态神经网络的ODE数值积分
+ * 每个工作项处理一个隐藏神经元
+ */
+static const char* OPENCL_CFC_ODE_STEP_KERNEL =
+"__kernel void cfc_ode_step_kernel(\n"
+"    __global const float* h_in,\n"
+"    __global const float* W,\n"
+"    __global const float* b,\n"
+"    __global const float* tau,\n"
+"    __global float* h_out,\n"
+"    float dt,\n"
+"    int dim\n"
+") {\n"
+"    int i = get_global_id(0);\n"
+"    if (i >= dim) return;\n"
+"    float sum = b[i];\n"
+"    for (int j = 0; j < dim; j++) {\n"
+"        sum += W[i * dim + j] * h_in[j];\n"
+"    }\n"
+"    float t = tau[i];\n"
+"    if (t < 1e-6f) t = 1e-6f;\n"
+"    h_out[i] = h_in[i] + dt * tanh(sum) / t;\n"
+"}\n";
+
 /* ============================================================================
  * OpenCL API函数指针定义
  * ============================================================================ */
@@ -2646,6 +2931,24 @@ static GpuKernel* opencl_backend_kernel_create(GpuContext* context, const char* 
         actual_kernel_source = OPENCL_GAUSSIAN_BLUR_KERNEL;
     } else if (strcmp(kernel_name, "resize_bilinear") == 0) {
         actual_kernel_source = OPENCL_RESIZE_BILINEAR_KERNEL;
+    } else if (strcmp(kernel_name, "matmul_train") == 0) {
+        actual_kernel_source = OPENCL_MATMUL_TRAIN_KERNEL;
+    } else if (strcmp(kernel_name, "activation_forward_unified") == 0) {
+        actual_kernel_source = OPENCL_ACTIVATION_FORWARD_UNIFIED_KERNEL;
+    } else if (strcmp(kernel_name, "activation_backward_unified") == 0) {
+        actual_kernel_source = OPENCL_ACTIVATION_BACKWARD_UNIFIED_KERNEL;
+    } else if (strcmp(kernel_name, "batch_norm_backward") == 0) {
+        actual_kernel_source = OPENCL_BATCH_NORM_BACKWARD_KERNEL;
+    } else if (strcmp(kernel_name, "dropout_forward") == 0) {
+        actual_kernel_source = OPENCL_DROPOUT_FORWARD_KERNEL;
+    } else if (strcmp(kernel_name, "dropout_backward") == 0) {
+        actual_kernel_source = OPENCL_DROPOUT_BACKWARD_KERNEL;
+    } else if (strcmp(kernel_name, "rmsprop_update") == 0) {
+        actual_kernel_source = OPENCL_RMSPROP_UPDATE_KERNEL;
+    } else if (strcmp(kernel_name, "cross_entropy_loss_grad") == 0) {
+        actual_kernel_source = OPENCL_CROSS_ENTROPY_LOSS_GRAD_KERNEL;
+    } else if (strcmp(kernel_name, "cfc_ode_step_kernel") == 0) {
+        actual_kernel_source = OPENCL_CFC_ODE_STEP_KERNEL;
     }
     
     cl_int result;
@@ -3554,6 +3857,1026 @@ static const char* opencl_backend_get_error_string(void) {
         return opencl_get_detailed_error();
     }
     return g_opencl_error_string;
+}
+/* ============================================================================
+ * OpenCL核心计算函数实现
+ * 这些函数提供完整的GPU加速计算功能，基于OpenCL内核基础设施
+ * ============================================================================ */
+
+/**
+ * @brief OpenCL全连接层前向传播
+ *
+ * 执行：output = activation(input * weights^T + bias)
+ * 使用matmul_train内核进行矩阵乘法，activation_forward_unified进行激活
+ */
+int opencl_forward_dense(GpuContext* ctx, const float* input, const float* weights,
+    const float* bias, float* output, size_t batch_size,
+    size_t input_size, size_t output_size, GpuActivationType act, float alpha) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!input || !weights || !output || batch_size == 0 || input_size == 0 || output_size == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数：输入/权重/输出为空或维度为零");
+        return -1;
+    }
+
+    size_t input_bytes = batch_size * input_size * sizeof(float);
+    size_t weight_bytes = output_size * input_size * sizeof(float);
+    size_t temp_bytes = batch_size * output_size * sizeof(float);
+    size_t output_bytes = batch_size * output_size * sizeof(float);
+
+    GpuMemory* d_input = opencl_backend_memory_alloc(ctx, input_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_weights = opencl_backend_memory_alloc(ctx, weight_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_temp = opencl_backend_memory_alloc(ctx, temp_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_output = opencl_backend_memory_alloc(ctx, output_bytes, GPU_MEMORY_DEVICE);
+    float* h_temp = NULL;
+
+    if (!d_input || !d_weights || !d_temp || !d_output) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        goto cleanup;
+    }
+
+    h_temp = (float*)safe_malloc(temp_bytes);
+    if (!h_temp) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "主机内存分配失败");
+        goto cleanup;
+    }
+
+    /* 复制数据到设备 */
+    if (opencl_backend_memory_copy_to_device(d_input, input, input_bytes) != 0) goto cleanup;
+    if (opencl_backend_memory_copy_to_device(d_weights, weights, weight_bytes) != 0) goto cleanup;
+
+    /* 矩阵乘法：temp = input * weights^T */
+    {
+        GpuKernel* mk = opencl_backend_kernel_create(ctx, NULL, "matmul_train");
+        if (!mk) goto cleanup;
+        int M_int = (int)batch_size;
+        int N_int = (int)output_size;
+        int K_int = (int)input_size;
+        int tA = 0;
+        int tB = 1;
+        float one = 1.0f;
+        float zero = 0.0f;
+        cl_mem d_input_mem = ((OpenCLMemory*)d_input)->mem_obj;
+        cl_mem d_weights_mem = ((OpenCLMemory*)d_weights)->mem_obj;
+        cl_mem d_temp_mem = ((OpenCLMemory*)d_temp)->mem_obj;
+        opencl_backend_kernel_set_arg(mk, 0, sizeof(cl_mem), &d_input_mem);
+        opencl_backend_kernel_set_arg(mk, 1, sizeof(cl_mem), &d_weights_mem);
+        opencl_backend_kernel_set_arg(mk, 2, sizeof(cl_mem), &d_temp_mem);
+        opencl_backend_kernel_set_arg(mk, 3, sizeof(int), &M_int);
+        opencl_backend_kernel_set_arg(mk, 4, sizeof(int), &N_int);
+        opencl_backend_kernel_set_arg(mk, 5, sizeof(int), &K_int);
+        opencl_backend_kernel_set_arg(mk, 6, sizeof(int), &tA);
+        opencl_backend_kernel_set_arg(mk, 7, sizeof(int), &tB);
+        opencl_backend_kernel_set_arg(mk, 8, sizeof(float), &one);
+        opencl_backend_kernel_set_arg(mk, 9, sizeof(float), &zero);
+        opencl_backend_kernel_execute(mk, (size_t)(batch_size * output_size), 256);
+        opencl_backend_kernel_free(mk);
+    }
+
+    /* 复制结果到主机并加偏置 */
+    if (opencl_backend_memory_copy_from_device(h_temp, d_temp, temp_bytes) != 0) goto cleanup;
+
+    if (bias) {
+        for (size_t b = 0; b < batch_size; b++) {
+            for (size_t o = 0; o < output_size; o++) {
+                h_temp[b * output_size + o] += bias[o];
+            }
+        }
+    }
+
+    /* 激活函数（在GPU上执行） */
+    if (act != GPU_ACTIVATION_RELU || alpha != 0.0f) {
+        /* 将带偏置结果拷贝回设备 */
+        GpuMemory* d_act_in = opencl_backend_memory_alloc(ctx, temp_bytes, GPU_MEMORY_DEVICE);
+        if (!d_act_in) {
+            snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "激活输入内存分配失败");
+            goto cleanup;
+        }
+        if (opencl_backend_memory_copy_to_device(d_act_in, h_temp, temp_bytes) != 0) {
+            opencl_backend_memory_free(d_act_in);
+            goto cleanup;
+        }
+
+        GpuKernel* ak = opencl_backend_kernel_create(ctx, NULL, "activation_forward_unified");
+        if (!ak) {
+            opencl_backend_memory_free(d_act_in);
+            goto cleanup;
+        }
+        int n_elements = (int)(batch_size * output_size);
+        int act_type = (int)act;
+        cl_mem d_act_in_mem = ((OpenCLMemory*)d_act_in)->mem_obj;
+        cl_mem d_output_mem = ((OpenCLMemory*)d_output)->mem_obj;
+        opencl_backend_kernel_set_arg(ak, 0, sizeof(cl_mem), &d_act_in_mem);
+        opencl_backend_kernel_set_arg(ak, 1, sizeof(cl_mem), &d_output_mem);
+        opencl_backend_kernel_set_arg(ak, 2, sizeof(int), &n_elements);
+        opencl_backend_kernel_set_arg(ak, 3, sizeof(int), &act_type);
+        opencl_backend_kernel_set_arg(ak, 4, sizeof(float), &alpha);
+        opencl_backend_kernel_execute(ak, (size_t)n_elements, 256);
+        opencl_backend_kernel_free(ak);
+
+        if (opencl_backend_memory_copy_from_device(output, d_output, output_bytes) != 0) {
+            opencl_backend_memory_free(d_act_in);
+            goto cleanup;
+        }
+        opencl_backend_memory_free(d_act_in);
+    } else {
+        /* 无激活函数，直接拷贝到输出 */
+        memcpy(output, h_temp, output_bytes);
+    }
+
+    safe_free((void**)&h_temp);
+    opencl_backend_memory_free(d_input);
+    opencl_backend_memory_free(d_weights);
+    opencl_backend_memory_free(d_temp);
+    opencl_backend_memory_free(d_output);
+    return 0;
+
+cleanup:
+    if (h_temp) safe_free((void**)&h_temp);
+    if (d_input) opencl_backend_memory_free(d_input);
+    if (d_weights) opencl_backend_memory_free(d_weights);
+    if (d_temp) opencl_backend_memory_free(d_temp);
+    if (d_output) opencl_backend_memory_free(d_output);
+    return -1;
+}
+
+/**
+ * @brief OpenCL矩阵乘法训练内核
+ *
+ * 执行：C = alpha * op(A) * op(B) + beta * C
+ * 支持转置A和转置B，支持缩放和累加
+ */
+int opencl_matmul_train(GpuContext* ctx, const float* A, const float* B, float* C,
+    size_t M, size_t N, size_t K, int transA, int transB,
+    float alpha, float beta) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!A || !B || !C || M == 0 || N == 0 || K == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数：矩阵为空或维度为零");
+        return -1;
+    }
+
+    size_t a_size = transA ? (size_t)K * M : (size_t)M * K;
+    size_t b_size = transB ? (size_t)N * K : (size_t)K * N;
+    size_t c_size = M * N;
+    size_t a_bytes = a_size * sizeof(float);
+    size_t b_bytes = b_size * sizeof(float);
+    size_t c_bytes = c_size * sizeof(float);
+
+    GpuMemory* d_A = opencl_backend_memory_alloc(ctx, a_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_B = opencl_backend_memory_alloc(ctx, b_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_C = opencl_backend_memory_alloc(ctx, c_bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_A || !d_B || !d_C) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        if (d_A) opencl_backend_memory_free(d_A);
+        if (d_B) opencl_backend_memory_free(d_B);
+        if (d_C) opencl_backend_memory_free(d_C);
+        return -1;
+    }
+
+    if (opencl_backend_memory_copy_to_device(d_A, A, a_bytes) != 0) goto matmul_cleanup;
+    if (opencl_backend_memory_copy_to_device(d_B, B, b_bytes) != 0) goto matmul_cleanup;
+
+    /* 如果beta != 0，需要先拷贝C到设备（因为需要累加到原值） */
+    if (beta != 0.0f) {
+        if (opencl_backend_memory_copy_to_device(d_C, C, c_bytes) != 0) goto matmul_cleanup;
+    }
+
+    {
+        GpuKernel* mk = opencl_backend_kernel_create(ctx, NULL, "matmul_train");
+        if (!mk) goto matmul_cleanup;
+        int M_int = (int)M;
+        int N_int = (int)N;
+        int K_int = (int)K;
+        int tA = transA;
+        int tB = transB;
+        cl_mem d_A_mem = ((OpenCLMemory*)d_A)->mem_obj;
+        cl_mem d_B_mem = ((OpenCLMemory*)d_B)->mem_obj;
+        cl_mem d_C_mem = ((OpenCLMemory*)d_C)->mem_obj;
+        opencl_backend_kernel_set_arg(mk, 0, sizeof(cl_mem), &d_A_mem);
+        opencl_backend_kernel_set_arg(mk, 1, sizeof(cl_mem), &d_B_mem);
+        opencl_backend_kernel_set_arg(mk, 2, sizeof(cl_mem), &d_C_mem);
+        opencl_backend_kernel_set_arg(mk, 3, sizeof(int), &M_int);
+        opencl_backend_kernel_set_arg(mk, 4, sizeof(int), &N_int);
+        opencl_backend_kernel_set_arg(mk, 5, sizeof(int), &K_int);
+        opencl_backend_kernel_set_arg(mk, 6, sizeof(int), &tA);
+        opencl_backend_kernel_set_arg(mk, 7, sizeof(int), &tB);
+        opencl_backend_kernel_set_arg(mk, 8, sizeof(float), &alpha);
+        opencl_backend_kernel_set_arg(mk, 9, sizeof(float), &beta);
+        opencl_backend_kernel_execute(mk, (size_t)(M * N), 256);
+        opencl_backend_kernel_free(mk);
+    }
+
+    if (opencl_backend_memory_copy_from_device(C, d_C, c_bytes) != 0) goto matmul_cleanup;
+
+    opencl_backend_memory_free(d_A);
+    opencl_backend_memory_free(d_B);
+    opencl_backend_memory_free(d_C);
+    return 0;
+
+matmul_cleanup:
+    opencl_backend_memory_free(d_A);
+    opencl_backend_memory_free(d_B);
+    opencl_backend_memory_free(d_C);
+    return -1;
+}
+
+/**
+ * @brief OpenCL激活函数前向传播
+ *
+ * 支持ReLU/LeakyReLU/Sigmoid/Tanh/GELU/Softplus六种激活函数
+ */
+int opencl_activation_forward(GpuContext* ctx, const float* input, float* output,
+    size_t size, GpuActivationType act, float alpha) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!input || !output || size == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数：输入/输出为空或大小为零");
+        return -1;
+    }
+
+    size_t bytes = size * sizeof(float);
+    GpuMemory* d_input = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_output = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_input || !d_output) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        if (d_input) opencl_backend_memory_free(d_input);
+        if (d_output) opencl_backend_memory_free(d_output);
+        return -1;
+    }
+
+    if (opencl_backend_memory_copy_to_device(d_input, input, bytes) != 0) goto act_cleanup;
+
+    {
+        GpuKernel* ak = opencl_backend_kernel_create(ctx, NULL, "activation_forward_unified");
+        if (!ak) goto act_cleanup;
+        int n = (int)size;
+        int act_type = (int)act;
+        cl_mem d_input_mem = ((OpenCLMemory*)d_input)->mem_obj;
+        cl_mem d_output_mem = ((OpenCLMemory*)d_output)->mem_obj;
+        opencl_backend_kernel_set_arg(ak, 0, sizeof(cl_mem), &d_input_mem);
+        opencl_backend_kernel_set_arg(ak, 1, sizeof(cl_mem), &d_output_mem);
+        opencl_backend_kernel_set_arg(ak, 2, sizeof(int), &n);
+        opencl_backend_kernel_set_arg(ak, 3, sizeof(int), &act_type);
+        opencl_backend_kernel_set_arg(ak, 4, sizeof(float), &alpha);
+        opencl_backend_kernel_execute(ak, size, 256);
+        opencl_backend_kernel_free(ak);
+    }
+
+    if (opencl_backend_memory_copy_from_device(output, d_output, bytes) != 0) goto act_cleanup;
+
+    opencl_backend_memory_free(d_input);
+    opencl_backend_memory_free(d_output);
+    return 0;
+
+act_cleanup:
+    opencl_backend_memory_free(d_input);
+    opencl_backend_memory_free(d_output);
+    return -1;
+}
+
+/**
+ * @brief OpenCL激活函数反向传播
+ *
+ * 计算激活函数的梯度，支持所有激活类型
+ */
+int opencl_activation_backward(GpuContext* ctx, const float* input, float* output,
+    const float* grad_output, float* grad_input, size_t size,
+    GpuActivationType act, float alpha) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!input || !grad_output || !grad_input || size == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数");
+        return -1;
+    }
+
+    size_t bytes = size * sizeof(float);
+    GpuMemory* d_input = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_output_dev = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grad_out = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grad_in = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_input || !d_output_dev || !d_grad_out || !d_grad_in) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        goto actb_cleanup;
+    }
+
+    if (opencl_backend_memory_copy_to_device(d_input, input, bytes) != 0) goto actb_cleanup;
+
+    /* output 参数可以为 NULL（反向传播中通常不需要forward输出） */
+    if (output) {
+        if (opencl_backend_memory_copy_to_device(d_output_dev, output, bytes) != 0) goto actb_cleanup;
+    }
+
+    if (opencl_backend_memory_copy_to_device(d_grad_out, grad_output, bytes) != 0) goto actb_cleanup;
+
+    {
+        GpuKernel* bk = opencl_backend_kernel_create(ctx, NULL, "activation_backward_unified");
+        if (!bk) goto actb_cleanup;
+        int n = (int)size;
+        int act_type = (int)act;
+        cl_mem d_input_mem = ((OpenCLMemory*)d_input)->mem_obj;
+        cl_mem d_output_mem = output ? ((OpenCLMemory*)d_output_dev)->mem_obj : d_input_mem;
+        cl_mem d_grad_out_mem = ((OpenCLMemory*)d_grad_out)->mem_obj;
+        cl_mem d_grad_in_mem = ((OpenCLMemory*)d_grad_in)->mem_obj;
+        opencl_backend_kernel_set_arg(bk, 0, sizeof(cl_mem), &d_input_mem);
+        opencl_backend_kernel_set_arg(bk, 1, sizeof(cl_mem), &d_output_mem);
+        opencl_backend_kernel_set_arg(bk, 2, sizeof(cl_mem), &d_grad_out_mem);
+        opencl_backend_kernel_set_arg(bk, 3, sizeof(cl_mem), &d_grad_in_mem);
+        opencl_backend_kernel_set_arg(bk, 4, sizeof(int), &n);
+        opencl_backend_kernel_set_arg(bk, 5, sizeof(int), &act_type);
+        opencl_backend_kernel_set_arg(bk, 6, sizeof(float), &alpha);
+        opencl_backend_kernel_execute(bk, size, 256);
+        opencl_backend_kernel_free(bk);
+    }
+
+    if (opencl_backend_memory_copy_from_device(grad_input, d_grad_in, bytes) != 0) goto actb_cleanup;
+
+    opencl_backend_memory_free(d_input);
+    opencl_backend_memory_free(d_output_dev);
+    opencl_backend_memory_free(d_grad_out);
+    opencl_backend_memory_free(d_grad_in);
+    return 0;
+
+actb_cleanup:
+    if (d_input) opencl_backend_memory_free(d_input);
+    if (d_output_dev) opencl_backend_memory_free(d_output_dev);
+    if (d_grad_out) opencl_backend_memory_free(d_grad_out);
+    if (d_grad_in) opencl_backend_memory_free(d_grad_in);
+    return -1;
+}
+
+/**
+ * @brief OpenCL批归一化前向传播
+ *
+ * 训练模式：归一化并更新running mean/var
+ * 推理模式：使用running mean/var进行归一化
+ */
+int opencl_batch_norm_forward(GpuContext* ctx, const float* input, float* output,
+    const float* gamma, const float* beta, float* running_mean, float* running_var,
+    float* batch_mean, float* batch_var, size_t batch_size, size_t features,
+    float momentum, float epsilon, int is_training) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!input || !output || !gamma || !beta || batch_size == 0 || features == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数");
+        return -1;
+    }
+
+    size_t total_elements = batch_size * features;
+    size_t total_bytes = total_elements * sizeof(float);
+    size_t feature_bytes = features * sizeof(float);
+
+    if (is_training) {
+        /* 训练模式：计算批均值/方差，然后归一化 */
+        float* h_input = (float*)safe_malloc(total_bytes);
+        if (!h_input) {
+            snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "主机内存分配失败");
+            return -1;
+        }
+        memcpy(h_input, input, total_bytes);
+
+        /* 计算每个特征的均值 */
+        for (size_t f = 0; f < features; f++) {
+            float sum = 0.0f;
+            for (size_t b = 0; b < batch_size; b++) {
+                sum += h_input[b * features + f];
+            }
+            batch_mean[f] = sum / (float)batch_size;
+        }
+
+        /* 计算每个特征的方差 */
+        for (size_t f = 0; f < features; f++) {
+            float var_sum = 0.0f;
+            for (size_t b = 0; b < batch_size; b++) {
+                float diff = h_input[b * features + f] - batch_mean[f];
+                var_sum += diff * diff;
+            }
+            batch_var[f] = var_sum / (float)batch_size;
+        }
+
+        /* 更新running statistics */
+        if (running_mean) {
+            for (size_t f = 0; f < features; f++) {
+                running_mean[f] = momentum * running_mean[f] + (1.0f - momentum) * batch_mean[f];
+            }
+        }
+        if (running_var) {
+            for (size_t f = 0; f < features; f++) {
+                running_var[f] = momentum * running_var[f] + (1.0f - momentum) * batch_var[f];
+            }
+        }
+
+        /* 归一化：output = gamma * (x - mean) / sqrt(var + eps) + beta */
+        for (size_t b = 0; b < batch_size; b++) {
+            for (size_t f = 0; f < features; f++) {
+                float x_hat = (h_input[b * features + f] - batch_mean[f]) /
+                              (sqrtf(batch_var[f] + epsilon) + 1e-8f);
+                output[b * features + f] = gamma[f] * x_hat + beta[f];
+            }
+        }
+
+        safe_free((void**)&h_input);
+    } else {
+        /* 推理模式：使用running mean/var */
+        GpuMemory* d_input = opencl_backend_memory_alloc(ctx, total_bytes, GPU_MEMORY_DEVICE);
+        GpuMemory* d_gamma = opencl_backend_memory_alloc(ctx, feature_bytes, GPU_MEMORY_DEVICE);
+        GpuMemory* d_beta_dev = opencl_backend_memory_alloc(ctx, feature_bytes, GPU_MEMORY_DEVICE);
+        GpuMemory* d_mean = opencl_backend_memory_alloc(ctx, feature_bytes, GPU_MEMORY_DEVICE);
+        GpuMemory* d_var = opencl_backend_memory_alloc(ctx, feature_bytes, GPU_MEMORY_DEVICE);
+        GpuMemory* d_output = opencl_backend_memory_alloc(ctx, total_bytes, GPU_MEMORY_DEVICE);
+
+        if (!d_input || !d_gamma || !d_beta_dev || !d_mean || !d_var || !d_output) {
+            snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+            goto bn_inf_cleanup;
+        }
+
+        opencl_backend_memory_copy_to_device(d_input, input, total_bytes);
+        opencl_backend_memory_copy_to_device(d_gamma, gamma, feature_bytes);
+        opencl_backend_memory_copy_to_device(d_beta_dev, beta, feature_bytes);
+        opencl_backend_memory_copy_to_device(d_mean, running_mean ? running_mean : batch_mean, feature_bytes);
+        opencl_backend_memory_copy_to_device(d_var, running_var ? running_var : batch_var, feature_bytes);
+
+        {
+            GpuKernel* bnk = opencl_backend_kernel_create(ctx, NULL, "batch_norm");
+            if (!bnk) goto bn_inf_cleanup;
+            int ch = (int)features;
+            int sp = (int)batch_size;
+            float eps = epsilon;
+            cl_mem d_in_mem = ((OpenCLMemory*)d_input)->mem_obj;
+            cl_mem d_g_mem = ((OpenCLMemory*)d_gamma)->mem_obj;
+            cl_mem d_b_mem = ((OpenCLMemory*)d_beta_dev)->mem_obj;
+            cl_mem d_m_mem = ((OpenCLMemory*)d_mean)->mem_obj;
+            cl_mem d_v_mem = ((OpenCLMemory*)d_var)->mem_obj;
+            cl_mem d_out_mem = ((OpenCLMemory*)d_output)->mem_obj;
+            opencl_backend_kernel_set_arg(bnk, 0, sizeof(cl_mem), &d_in_mem);
+            opencl_backend_kernel_set_arg(bnk, 1, sizeof(cl_mem), &d_g_mem);
+            opencl_backend_kernel_set_arg(bnk, 2, sizeof(cl_mem), &d_b_mem);
+            opencl_backend_kernel_set_arg(bnk, 3, sizeof(cl_mem), &d_m_mem);
+            opencl_backend_kernel_set_arg(bnk, 4, sizeof(cl_mem), &d_v_mem);
+            opencl_backend_kernel_set_arg(bnk, 5, sizeof(float), &eps);
+            opencl_backend_kernel_set_arg(bnk, 6, sizeof(int), &ch);
+            opencl_backend_kernel_set_arg(bnk, 7, sizeof(int), &sp);
+            opencl_backend_kernel_set_arg(bnk, 8, sizeof(cl_mem), &d_out_mem);
+            opencl_backend_kernel_execute(bnk, (size_t)(features * batch_size), 256);
+            opencl_backend_kernel_free(bnk);
+        }
+
+        opencl_backend_memory_copy_from_device(output, d_output, total_bytes);
+
+        bn_inf_cleanup:
+        if (d_input) opencl_backend_memory_free(d_input);
+        if (d_gamma) opencl_backend_memory_free(d_gamma);
+        if (d_beta_dev) opencl_backend_memory_free(d_beta_dev);
+        if (d_mean) opencl_backend_memory_free(d_mean);
+        if (d_var) opencl_backend_memory_free(d_var);
+        if (d_output) opencl_backend_memory_free(d_output);
+
+        if (!d_input || !d_gamma || !d_beta_dev || !d_mean || !d_var || !d_output) return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief OpenCL批归一化反向传播
+ *
+ * 计算grad_input/ grad_gamma / grad_beta
+ * 使用batch_norm_backward内核
+ */
+int opencl_batch_norm_backward(GpuContext* ctx, const float* input, const float* grad_output,
+    float* grad_input, float* grad_gamma, float* grad_beta,
+    const float* x_hat, const float* gamma, size_t batch_size,
+    size_t features, float epsilon) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!input || !grad_output || !grad_input || !grad_gamma || !grad_beta || !x_hat || !gamma ||
+        batch_size == 0 || features == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数");
+        return -1;
+    }
+
+    size_t total_elements = batch_size * features;
+    size_t total_bytes = total_elements * sizeof(float);
+    size_t feature_bytes = features * sizeof(float);
+
+    GpuMemory* d_input = opencl_backend_memory_alloc(ctx, total_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grad_out = opencl_backend_memory_alloc(ctx, total_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grad_in = opencl_backend_memory_alloc(ctx, total_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grad_gamma = opencl_backend_memory_alloc(ctx, feature_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grad_beta = opencl_backend_memory_alloc(ctx, feature_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_x_hat = opencl_backend_memory_alloc(ctx, total_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_gamma = opencl_backend_memory_alloc(ctx, feature_bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_input || !d_grad_out || !d_grad_in || !d_grad_gamma || !d_grad_beta ||
+        !d_x_hat || !d_gamma) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        goto bnb_cleanup;
+    }
+
+    opencl_backend_memory_copy_to_device(d_input, input, total_bytes);
+    opencl_backend_memory_copy_to_device(d_grad_out, grad_output, total_bytes);
+    opencl_backend_memory_copy_to_device(d_x_hat, x_hat, total_bytes);
+    opencl_backend_memory_copy_to_device(d_gamma, gamma, feature_bytes);
+
+    {
+        GpuKernel* bk = opencl_backend_kernel_create(ctx, NULL, "batch_norm_backward");
+        if (!bk) goto bnb_cleanup;
+        int bs = (int)batch_size;
+        int ft = (int)features;
+        float eps = epsilon;
+        cl_mem d_in_mem = ((OpenCLMemory*)d_input)->mem_obj;
+        cl_mem d_go_mem = ((OpenCLMemory*)d_grad_out)->mem_obj;
+        cl_mem d_gi_mem = ((OpenCLMemory*)d_grad_in)->mem_obj;
+        cl_mem d_gg_mem = ((OpenCLMemory*)d_grad_gamma)->mem_obj;
+        cl_mem d_gb_mem = ((OpenCLMemory*)d_grad_beta)->mem_obj;
+        cl_mem d_xh_mem = ((OpenCLMemory*)d_x_hat)->mem_obj;
+        cl_mem d_gm_mem = ((OpenCLMemory*)d_gamma)->mem_obj;
+        opencl_backend_kernel_set_arg(bk, 0, sizeof(cl_mem), &d_in_mem);
+        opencl_backend_kernel_set_arg(bk, 1, sizeof(cl_mem), &d_go_mem);
+        opencl_backend_kernel_set_arg(bk, 2, sizeof(cl_mem), &d_gi_mem);
+        opencl_backend_kernel_set_arg(bk, 3, sizeof(cl_mem), &d_gg_mem);
+        opencl_backend_kernel_set_arg(bk, 4, sizeof(cl_mem), &d_gb_mem);
+        opencl_backend_kernel_set_arg(bk, 5, sizeof(cl_mem), &d_xh_mem);
+        opencl_backend_kernel_set_arg(bk, 6, sizeof(cl_mem), &d_gm_mem);
+        opencl_backend_kernel_set_arg(bk, 7, sizeof(int), &bs);
+        opencl_backend_kernel_set_arg(bk, 8, sizeof(int), &ft);
+        opencl_backend_kernel_set_arg(bk, 9, sizeof(float), &eps);
+        opencl_backend_kernel_execute(bk, (size_t)features, 256);
+        opencl_backend_kernel_free(bk);
+    }
+
+    opencl_backend_memory_copy_from_device(grad_input, d_grad_in, total_bytes);
+    opencl_backend_memory_copy_from_device(grad_gamma, d_grad_gamma, feature_bytes);
+    opencl_backend_memory_copy_from_device(grad_beta, d_grad_beta, feature_bytes);
+
+    opencl_backend_memory_free(d_input);
+    opencl_backend_memory_free(d_grad_out);
+    opencl_backend_memory_free(d_grad_in);
+    opencl_backend_memory_free(d_grad_gamma);
+    opencl_backend_memory_free(d_grad_beta);
+    opencl_backend_memory_free(d_x_hat);
+    opencl_backend_memory_free(d_gamma);
+    return 0;
+
+bnb_cleanup:
+    if (d_input) opencl_backend_memory_free(d_input);
+    if (d_grad_out) opencl_backend_memory_free(d_grad_out);
+    if (d_grad_in) opencl_backend_memory_free(d_grad_in);
+    if (d_grad_gamma) opencl_backend_memory_free(d_grad_gamma);
+    if (d_grad_beta) opencl_backend_memory_free(d_grad_beta);
+    if (d_x_hat) opencl_backend_memory_free(d_x_hat);
+    if (d_gamma) opencl_backend_memory_free(d_gamma);
+    return -1;
+}
+
+/**
+ * @brief OpenCL Dropout前向传播
+ *
+ * 训练模式：生成mask并缩放保留的元素
+ * 推理模式：恒等映射
+ */
+int opencl_dropout_forward(GpuContext* ctx, const float* input, float* output,
+    float* mask, float dropout_rate, size_t size, int is_training) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!input || !output || !mask || size == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数");
+        return -1;
+    }
+
+    size_t bytes = size * sizeof(float);
+
+    if (is_training) {
+        /* 在主机生成随机掩码（mask[i] = uniform(0,1)） */
+        for (size_t i = 0; i < size; i++) {
+            mask[i] = (float)rand() / (float)RAND_MAX;
+        }
+    }
+
+    GpuMemory* d_input = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_output = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_mask = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_input || !d_output || !d_mask) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        goto do_cleanup;
+    }
+
+    opencl_backend_memory_copy_to_device(d_input, input, bytes);
+    opencl_backend_memory_copy_to_device(d_mask, mask, bytes);
+
+    {
+        GpuKernel* dk = opencl_backend_kernel_create(ctx, NULL, "dropout_forward");
+        if (!dk) goto do_cleanup;
+        int n = (int)size;
+        float rate = dropout_rate;
+        int train = is_training;
+        cl_mem d_in_mem = ((OpenCLMemory*)d_input)->mem_obj;
+        cl_mem d_out_mem = ((OpenCLMemory*)d_output)->mem_obj;
+        cl_mem d_mk_mem = ((OpenCLMemory*)d_mask)->mem_obj;
+        opencl_backend_kernel_set_arg(dk, 0, sizeof(cl_mem), &d_in_mem);
+        opencl_backend_kernel_set_arg(dk, 1, sizeof(cl_mem), &d_out_mem);
+        opencl_backend_kernel_set_arg(dk, 2, sizeof(cl_mem), &d_mk_mem);
+        opencl_backend_kernel_set_arg(dk, 3, sizeof(int), &n);
+        opencl_backend_kernel_set_arg(dk, 4, sizeof(float), &rate);
+        opencl_backend_kernel_set_arg(dk, 5, sizeof(int), &train);
+        opencl_backend_kernel_execute(dk, size, 256);
+        opencl_backend_kernel_free(dk);
+    }
+
+    opencl_backend_memory_copy_from_device(output, d_output, bytes);
+
+    opencl_backend_memory_free(d_input);
+    opencl_backend_memory_free(d_output);
+    opencl_backend_memory_free(d_mask);
+    return 0;
+
+do_cleanup:
+    if (d_input) opencl_backend_memory_free(d_input);
+    if (d_output) opencl_backend_memory_free(d_output);
+    if (d_mask) opencl_backend_memory_free(d_mask);
+    return -1;
+}
+
+/**
+ * @brief OpenCL Dropout反向传播
+ *
+ * grad_input = grad_output * mask / (1 - dropout_rate)
+ */
+int opencl_dropout_backward(GpuContext* ctx, const float* grad_output, float* grad_input,
+    const float* mask, float dropout_rate, size_t size) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!grad_output || !grad_input || !mask || size == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数");
+        return -1;
+    }
+
+    size_t bytes = size * sizeof(float);
+    GpuMemory* d_grad_out = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grad_in = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_mask = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_grad_out || !d_grad_in || !d_mask) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        goto dob_cleanup;
+    }
+
+    opencl_backend_memory_copy_to_device(d_grad_out, grad_output, bytes);
+    opencl_backend_memory_copy_to_device(d_mask, mask, bytes);
+
+    {
+        GpuKernel* dk = opencl_backend_kernel_create(ctx, NULL, "dropout_backward");
+        if (!dk) goto dob_cleanup;
+        int n = (int)size;
+        float rate = dropout_rate;
+        cl_mem d_go_mem = ((OpenCLMemory*)d_grad_out)->mem_obj;
+        cl_mem d_gi_mem = ((OpenCLMemory*)d_grad_in)->mem_obj;
+        cl_mem d_mk_mem = ((OpenCLMemory*)d_mask)->mem_obj;
+        opencl_backend_kernel_set_arg(dk, 0, sizeof(cl_mem), &d_go_mem);
+        opencl_backend_kernel_set_arg(dk, 1, sizeof(cl_mem), &d_gi_mem);
+        opencl_backend_kernel_set_arg(dk, 2, sizeof(cl_mem), &d_mk_mem);
+        opencl_backend_kernel_set_arg(dk, 3, sizeof(int), &n);
+        opencl_backend_kernel_set_arg(dk, 4, sizeof(float), &rate);
+        opencl_backend_kernel_execute(dk, size, 256);
+        opencl_backend_kernel_free(dk);
+    }
+
+    opencl_backend_memory_copy_from_device(grad_input, d_grad_in, bytes);
+
+    opencl_backend_memory_free(d_grad_out);
+    opencl_backend_memory_free(d_grad_in);
+    opencl_backend_memory_free(d_mask);
+    return 0;
+
+dob_cleanup:
+    if (d_grad_out) opencl_backend_memory_free(d_grad_out);
+    if (d_grad_in) opencl_backend_memory_free(d_grad_in);
+    if (d_mask) opencl_backend_memory_free(d_mask);
+    return -1;
+}
+
+/**
+ * @brief OpenCL RMSProp优化器更新
+ *
+ * RMSProp参数更新：
+ * cache = beta * cache + (1 - beta) * grad^2
+ * weights -= lr * grad / (sqrt(cache) + eps) + lr * wd * weights
+ */
+int opencl_rmsprop_update(GpuContext* ctx, float* weights, const float* gradients,
+    float* cache, size_t size, float lr, float beta, float eps, float wd) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!weights || !gradients || !cache || size == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数");
+        return -1;
+    }
+
+    size_t bytes = size * sizeof(float);
+    GpuMemory* d_weights = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grads = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_cache = opencl_backend_memory_alloc(ctx, bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_weights || !d_grads || !d_cache) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        goto rms_cleanup;
+    }
+
+    opencl_backend_memory_copy_to_device(d_weights, weights, bytes);
+    opencl_backend_memory_copy_to_device(d_grads, gradients, bytes);
+    opencl_backend_memory_copy_to_device(d_cache, cache, bytes);
+
+    {
+        GpuKernel* rk = opencl_backend_kernel_create(ctx, NULL, "rmsprop_update");
+        if (!rk) goto rms_cleanup;
+        int n = (int)size;
+        float lr_f = lr;
+        float beta_f = beta;
+        float eps_f = eps;
+        float wd_f = wd;
+        cl_mem d_w_mem = ((OpenCLMemory*)d_weights)->mem_obj;
+        cl_mem d_g_mem = ((OpenCLMemory*)d_grads)->mem_obj;
+        cl_mem d_c_mem = ((OpenCLMemory*)d_cache)->mem_obj;
+        opencl_backend_kernel_set_arg(rk, 0, sizeof(cl_mem), &d_w_mem);
+        opencl_backend_kernel_set_arg(rk, 1, sizeof(cl_mem), &d_g_mem);
+        opencl_backend_kernel_set_arg(rk, 2, sizeof(cl_mem), &d_c_mem);
+        opencl_backend_kernel_set_arg(rk, 3, sizeof(int), &n);
+        opencl_backend_kernel_set_arg(rk, 4, sizeof(float), &lr_f);
+        opencl_backend_kernel_set_arg(rk, 5, sizeof(float), &beta_f);
+        opencl_backend_kernel_set_arg(rk, 6, sizeof(float), &eps_f);
+        opencl_backend_kernel_set_arg(rk, 7, sizeof(float), &wd_f);
+        opencl_backend_kernel_execute(rk, size, 256);
+        opencl_backend_kernel_free(rk);
+    }
+
+    opencl_backend_memory_copy_from_device(weights, d_weights, bytes);
+    opencl_backend_memory_copy_from_device(cache, d_cache, bytes);
+
+    opencl_backend_memory_free(d_weights);
+    opencl_backend_memory_free(d_grads);
+    opencl_backend_memory_free(d_cache);
+    return 0;
+
+rms_cleanup:
+    if (d_weights) opencl_backend_memory_free(d_weights);
+    if (d_grads) opencl_backend_memory_free(d_grads);
+    if (d_cache) opencl_backend_memory_free(d_cache);
+    return -1;
+}
+
+/**
+ * @brief OpenCL交叉熵损失及梯度计算
+ *
+ * softmax + cross-entropy loss + gradient 一体化计算
+ * 支持整数标签和one-hot标签
+ */
+int opencl_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
+    const float* targets, float* loss, float* gradients,
+    size_t num_elements, size_t num_classes, int is_integer_label) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用");
+        return -1;
+    }
+    if (!logits || !targets || !loss || !gradients || num_elements == 0 || num_classes == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数");
+        return -1;
+    }
+
+    size_t batch_size = num_elements / num_classes;
+    if (batch_size == 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "批次大小为零");
+        return -1;
+    }
+
+    size_t logits_bytes = num_elements * sizeof(float);
+    size_t target_bytes = (is_integer_label ? batch_size : num_elements) * sizeof(float);
+    size_t loss_bytes = batch_size * sizeof(float);
+    size_t grad_bytes = num_elements * sizeof(float);
+
+    float* h_loss = (float*)safe_malloc(loss_bytes);
+    if (!h_loss) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "主机内存分配失败");
+        return -1;
+    }
+    memset(h_loss, 0, loss_bytes);
+
+    GpuMemory* d_logits = opencl_backend_memory_alloc(ctx, logits_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_targets = opencl_backend_memory_alloc(ctx, target_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_loss = opencl_backend_memory_alloc(ctx, loss_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_grad = opencl_backend_memory_alloc(ctx, grad_bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_logits || !d_targets || !d_loss || !d_grad) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败");
+        safe_free((void**)&h_loss);
+        goto ce_cleanup;
+    }
+
+    opencl_backend_memory_copy_to_device(d_logits, logits, logits_bytes);
+    opencl_backend_memory_copy_to_device(d_targets, targets, target_bytes);
+    opencl_backend_memory_copy_to_device(d_loss, h_loss, loss_bytes);
+
+    {
+        GpuKernel* cek = opencl_backend_kernel_create(ctx, NULL, "cross_entropy_loss_grad");
+        if (!cek) {
+            safe_free((void**)&h_loss);
+            goto ce_cleanup;
+        }
+        int bs = (int)batch_size;
+        int nc = (int)num_classes;
+        int iil = is_integer_label;
+        cl_mem d_l_mem = ((OpenCLMemory*)d_logits)->mem_obj;
+        cl_mem d_t_mem = ((OpenCLMemory*)d_targets)->mem_obj;
+        cl_mem d_ls_mem = ((OpenCLMemory*)d_loss)->mem_obj;
+        cl_mem d_g_mem = ((OpenCLMemory*)d_grad)->mem_obj;
+        opencl_backend_kernel_set_arg(cek, 0, sizeof(cl_mem), &d_l_mem);
+        opencl_backend_kernel_set_arg(cek, 1, sizeof(cl_mem), &d_t_mem);
+        opencl_backend_kernel_set_arg(cek, 2, sizeof(cl_mem), &d_ls_mem);
+        opencl_backend_kernel_set_arg(cek, 3, sizeof(cl_mem), &d_g_mem);
+        opencl_backend_kernel_set_arg(cek, 4, sizeof(int), &bs);
+        opencl_backend_kernel_set_arg(cek, 5, sizeof(int), &nc);
+        opencl_backend_kernel_set_arg(cek, 6, sizeof(int), &iil);
+        /* 注意：该内核按批次处理，全局尺寸用batch_size */
+        opencl_backend_kernel_execute(cek, batch_size, 256);
+        opencl_backend_kernel_free(cek);
+    }
+
+    opencl_backend_memory_copy_from_device(gradients, d_grad, grad_bytes);
+    opencl_backend_memory_copy_from_device(h_loss, d_loss, loss_bytes);
+
+    /* 合并损失值：所有样本的平均 */
+    {
+        float total_loss = 0.0f;
+        for (size_t i = 0; i < batch_size; i++) {
+            total_loss += h_loss[i];
+        }
+        *loss = total_loss / (float)batch_size;
+    }
+
+    safe_free((void**)&h_loss);
+    opencl_backend_memory_free(d_logits);
+    opencl_backend_memory_free(d_targets);
+    opencl_backend_memory_free(d_loss);
+    opencl_backend_memory_free(d_grad);
+    return 0;
+
+ce_cleanup:
+    if (d_logits) opencl_backend_memory_free(d_logits);
+    if (d_targets) opencl_backend_memory_free(d_targets);
+    if (d_loss) opencl_backend_memory_free(d_loss);
+    if (d_grad) opencl_backend_memory_free(d_grad);
+    return -1;
+}
+
+/**
+ * @brief OpenCL CfC ODE步进计算
+ *
+ * CfC常微分方程数值积分步进：
+ * h_out = h_in + dt * tanh(W * h_in + b) / tau
+ * 用于 CfC 液态神经网络的 ODE 求解
+ */
+int opencl_cfc_ode_step(GpuContext* ctx, const float* h_in, const float* W,
+    const float* b, const float* tau, float* h_out, float dt, int dim) {
+    if (!g_opencl_initialized || !ctx) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL后端不可用：cfc_ode_step");
+        return -1;
+    }
+    OpenCLContext* octx = (OpenCLContext*)ctx;
+    if (!octx->default_command_queue) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "OpenCL命令队列不可用：cfc_ode_step");
+        return -1;
+    }
+    if (!h_in || !W || !b || !tau || !h_out || dim <= 0) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "无效参数：cfc_ode_step");
+        return -1;
+    }
+
+    size_t state_bytes = (size_t)dim * sizeof(float);
+    size_t weight_bytes = (size_t)dim * (size_t)dim * sizeof(float);
+
+    GpuMemory* d_h_in = opencl_backend_memory_alloc(ctx, state_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_W = opencl_backend_memory_alloc(ctx, weight_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_b = opencl_backend_memory_alloc(ctx, state_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_tau = opencl_backend_memory_alloc(ctx, state_bytes, GPU_MEMORY_DEVICE);
+    GpuMemory* d_h_out = opencl_backend_memory_alloc(ctx, state_bytes, GPU_MEMORY_DEVICE);
+
+    if (!d_h_in || !d_W || !d_b || !d_tau || !d_h_out) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), "设备内存分配失败：cfc_ode_step");
+        goto cfc_cleanup;
+    }
+
+    opencl_backend_memory_copy_to_device(d_h_in, h_in, state_bytes);
+    opencl_backend_memory_copy_to_device(d_W, W, weight_bytes);
+    opencl_backend_memory_copy_to_device(d_b, b, state_bytes);
+    opencl_backend_memory_copy_to_device(d_tau, tau, state_bytes);
+
+    {
+        GpuKernel* ck = opencl_backend_kernel_create(ctx, NULL, "cfc_ode_step_kernel");
+        if (!ck) goto cfc_cleanup;
+        int d = dim;
+        float dt_f = dt;
+        cl_mem d_hi_mem = ((OpenCLMemory*)d_h_in)->mem_obj;
+        cl_mem d_w_mem = ((OpenCLMemory*)d_W)->mem_obj;
+        cl_mem d_b_mem = ((OpenCLMemory*)d_b)->mem_obj;
+        cl_mem d_t_mem = ((OpenCLMemory*)d_tau)->mem_obj;
+        cl_mem d_ho_mem = ((OpenCLMemory*)d_h_out)->mem_obj;
+        opencl_backend_kernel_set_arg(ck, 0, sizeof(cl_mem), &d_hi_mem);
+        opencl_backend_kernel_set_arg(ck, 1, sizeof(cl_mem), &d_w_mem);
+        opencl_backend_kernel_set_arg(ck, 2, sizeof(cl_mem), &d_b_mem);
+        opencl_backend_kernel_set_arg(ck, 3, sizeof(cl_mem), &d_t_mem);
+        opencl_backend_kernel_set_arg(ck, 4, sizeof(cl_mem), &d_ho_mem);
+        opencl_backend_kernel_set_arg(ck, 5, sizeof(float), &dt_f);
+        opencl_backend_kernel_set_arg(ck, 6, sizeof(int), &d);
+        opencl_backend_kernel_execute(ck, (size_t)dim, 256);
+        opencl_backend_kernel_free(ck);
+    }
+
+    opencl_backend_memory_copy_from_device(h_out, d_h_out, state_bytes);
+
+    opencl_backend_memory_free(d_h_in);
+    opencl_backend_memory_free(d_W);
+    opencl_backend_memory_free(d_b);
+    opencl_backend_memory_free(d_tau);
+    opencl_backend_memory_free(d_h_out);
+    return 0;
+
+cfc_cleanup:
+    if (d_h_in) opencl_backend_memory_free(d_h_in);
+    if (d_W) opencl_backend_memory_free(d_W);
+    if (d_b) opencl_backend_memory_free(d_b);
+    if (d_tau) opencl_backend_memory_free(d_tau);
+    if (d_h_out) opencl_backend_memory_free(d_h_out);
+    return -1;
 }
 
 /* ============================================================================

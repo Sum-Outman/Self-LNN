@@ -979,7 +979,8 @@ int multi_turn_reasoner_reason(MultiTurnReasoner* reasoner,
     if (!keys || !values || !attn_out || !attn_weights) {
         safe_free((void**)&keys);   safe_free((void**)&values);
         safe_free((void**)&attn_out); safe_free((void**)&attn_weights);
-        /* 回退到简单加权平均 */
+        /* 内存不足回退：使用上下文加权平均 + 状态残留，保证推理连续性 */
+        log_debug("[DialogueDeep] 注意力矩阵内存分配失败，使用加权平均回退推理");
         for (int i = 0; i < nw; i++) {
             float w = reasoner->context_weights[i];
             if (reasoner->turn_embeddings[i]) {

@@ -286,6 +286,34 @@ int dtc_reason_chain(DTCSystem* system,
         float raw_branching = DTC_SIGMOID(eval_out[2]);
         node->branching_factor = DTC_CLAMP(raw_branching * 2.0f, 0.0f, 1.0f);
 
+        /* ZSFEEE-FIX-002: 拉普拉斯频域分析 → 推理置信度修正
+         * 对当前思维嵌入进行拉普拉斯频域稳定性分析，
+         * 将频域稳定性作为置信度和分支因子的修正项。
+         * 高频不稳定性 → 降低置信度、增加分支探索；
+         * 低频稳定性 → 增强置信度、减少不必要分支。 */
+        if (system->laplace_analyzer) {
+            float stability_score = 0.5f;
+            float recommended_cutoff = 0.0f;
+            float frequency_bandwidth = 0.0f;
+            float time_constant = 0.12f;
+
+            lnn_laplace_analyze_network_dynamics(system->laplace_analyzer,
+                time_constant, current_embed, DTC_EMBED_DIM,
+                &stability_score, &recommended_cutoff, &frequency_bandwidth);
+
+            /* 稳定性修正置信度：不稳定时降低置信度 */
+            float conf_mod = 0.7f + 0.3f * stability_score;
+            if (conf_mod > 1.0f) conf_mod = 1.0f;
+            if (conf_mod < 0.4f) conf_mod = 0.4f;
+            node->confidence *= conf_mod;
+
+            /* 稳定性修正分支因子：不稳定时增加分支探索 */
+            float branch_mod = 1.3f - 0.3f * stability_score;
+            if (branch_mod > 1.5f) branch_mod = 1.5f;
+            if (branch_mod < 0.8f) branch_mod = 0.8f;
+            node->branching_factor = DTC_CLAMP(node->branching_factor * branch_mod, 0.0f, 1.0f);
+        }
+
         node->thought_text = (char*)safe_calloc(1024, 1);
         /* M-011修复: 思维文本融入LNN输出统计分析而非纯格式字符串 */
         float embed_energy = 0.0f;
@@ -583,9 +611,14 @@ int dtc_beam_search(DTCSystem* system,
         node->parent_index = (step > 0) ? (int)write_idx - 1 : 0;
         /* 每步嵌入沿语义轨迹线性演进：从base_embed向beam_embeds方向移动 */
         float alpha = (float)(step + 1) / (float)(beam_lengths[best_beam] + 1);
-        for (size_t j = 0; j < DTC_EMBED_DIM; j++) {
-            step_embed[j] = current[j] * (1.0f - alpha) + beam_embeds[best_beam][j] * alpha;
-        }
+        /* ZSFEEE-FIX-024: 使用LNN merge_net真实前向传播替代线性插值近似。
+         * 原线性插值 step_embed = current * (1-alpha) + beam_embeds * alpha
+         * 无法捕捉束路径间的非线性语义交互。merge_net输入为[current, beam_embeds]
+         * 的双倍维度拼接，通过LNN非线性映射得到融合嵌入。 */
+        float merge_input[DTC_EMBED_DIM * 2];
+        memcpy(merge_input, current, DTC_EMBED_DIM * sizeof(float));
+        memcpy(merge_input + DTC_EMBED_DIM, beam_embeds[best_beam], DTC_EMBED_DIM * sizeof(float));
+        lnn_forward(system->merge_net, merge_input, step_embed);
         memcpy(node->thought_embedding, step_embed, DTC_EMBED_DIM * sizeof(float));
 
         float conf = cosine_sim_dtc(step_embed, current, DTC_EMBED_DIM);

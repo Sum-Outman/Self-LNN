@@ -46,13 +46,41 @@ int thermal_calibrate(ThermalProcessor* tp,
         return -1;
     int n = width * height;
     if (n > THERMAL_MAX_PIXELS) n = THERMAL_MAX_PIXELS;
-    /* Stefan-Boltzmann标定：T_calibrated = (T_raw^4 - (1-ε)*T_ambient^4)^(1/4) / ε^(1/4)
-     * 简化线性标定：T_cal = gain * T_raw + offset */
+
+    /* L-008: Stefan-Boltzmann辐射传热标定
+     * 辐射传热四次方律: P_received = ε·σ·A·T_obj⁴ + (1-ε)·σ·A·T_amb⁴
+     * 求解目标温度: T_obj = (T_raw⁴ - (1-ε)·T_amb⁴)^(1/4) / ε^(1/4)
+     * 同时保留线性近似作为快速路径（当ε≈1或温差小时切换） */
+
     float eps_clamped = (emissivity < 0.1f) ? 0.1f : ((emissivity > 1.0f) ? 1.0f : emissivity);
-    tp->calibration_gain = 1.0f / sqrtf(sqrtf(eps_clamped));
-    tp->calibration_offset = ambient_temp * (1.0f - eps_clamped) * 0.5f;
+
+    /* Stefan-Boltzmann标定参数 */
+    float eps_inv_4th_root = 1.0f / sqrtf(sqrtf(eps_clamped)); /* ε^(-1/4) */
+    float one_minus_eps = 1.0f - eps_clamped;
+    float amb4 = ambient_temp * ambient_temp * ambient_temp * ambient_temp;
+
+    /* 线性近似参数（快速路径） */
+    tp->calibration_gain = eps_inv_4th_root;
+    tp->calibration_offset = ambient_temp * one_minus_eps * 0.5f;
+
+    /* 快速路径阈值：当发射率>0.95时线性误差<2%，直接使用线性路径 */
+    float use_sb_threshold = 0.95f;
+
     for (int i = 0; i < n; i++) {
-        calibrated[i] = tp->calibration_gain * raw_thermal[i] + tp->calibration_offset;
+        if (eps_clamped >= use_sb_threshold) {
+            /* 快速路径：线性近似 */
+            calibrated[i] = tp->calibration_gain * raw_thermal[i] + tp->calibration_offset;
+        } else {
+            /* Stefan-Boltzmann完整辐射模型 */
+            float raw4 = raw_thermal[i] * raw_thermal[i] * raw_thermal[i] * raw_thermal[i];
+            float corrected4 = raw4 - one_minus_eps * amb4;
+            /* 保护：确保辐射项非负 */
+            if (corrected4 < eps_clamped * amb4 * 0.01f)
+                corrected4 = eps_clamped * amb4 * 0.01f;
+            /* T_obj = (corrected4)^(1/4) / ε^(1/4) = (corrected4/ε)^(1/4) */
+            float cal4 = corrected4 / eps_clamped;
+            calibrated[i] = sqrtf(sqrtf(cal4));
+        }
     }
     tp->initialized = 1;
     return 0;
@@ -121,7 +149,8 @@ int thermal_detect_hotspots(ThermalProcessor* tp,
     *num_detected = 0;
     int n = width * height;
     if (n > THERMAL_MAX_PIXELS) n = THERMAL_MAX_PIXELS;
-    /* 连通域分析：4邻域泛洪填充检测热点 */
+    /* 连通域分析：4邻域泛洪填充检测热点
+     * L-013: visited使用标记值2区分当前连通域，精确边界周长计算 */
     int* visited = (int*)safe_calloc((size_t)n, sizeof(int));
     if (!visited) return -1;
     int* queue_x = (int*)safe_malloc((size_t)n * sizeof(int));
@@ -132,23 +161,29 @@ int thermal_detect_hotspots(ThermalProcessor* tp,
         safe_free((void**)&queue_y);
         return -1;
     }
+
     for (int y = 0; y < height && *num_detected < max_hotspots; y++) {
         for (int x = 0; x < width && *num_detected < max_hotspots; x++) {
             int idx = y * width + x;
             if (visited[idx] || thermal_image[idx] < threshold_temp)
                 continue;
-            /* BFS泛洪填充 */
+
+            /* BFS泛洪填充：visited=2标记当前连通域 */
             int q_head = 0, q_tail = 0;
             queue_x[q_tail] = x; queue_y[q_tail] = y; q_tail++;
-            visited[idx] = 1;
+            visited[idx] = 2;
             float sum_x = 0.0f, sum_y = 0.0f, peak = thermal_image[idx];
+            float sum_intensity = 0.0f;
             int area = 0;
+
             while (q_head < q_tail && area < THERMAL_MAX_PIXELS) {
                 int cx = queue_x[q_head], cy = queue_y[q_head]; q_head++;
                 int cidx = cy * width + cx;
                 sum_x += (float)cx; sum_y += (float)cy;
+                sum_intensity += thermal_image[cidx];
                 area++;
                 if (thermal_image[cidx] > peak) peak = thermal_image[cidx];
+
                 /* 4邻域扩展 */
                 int dirs[4][2] = {{0,1},{0,-1},{1,0},{-1,0}};
                 for (int d = 0; d < 4; d++) {
@@ -156,26 +191,53 @@ int thermal_detect_hotspots(ThermalProcessor* tp,
                     if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
                     int nidx = ny * width + nx;
                     if (!visited[nidx] && thermal_image[nidx] >= threshold_temp) {
-                        visited[nidx] = 1;
+                        visited[nidx] = 2;
                         queue_x[q_tail] = nx; queue_y[q_tail] = ny;
                         q_tail++;
                     }
                 }
             }
+
             if (area > 0) {
+                /* L-013: 跟踪连通域边界像素计算精确周长
+                 * 遍历当前连通域所有像素（队列0..q_tail-1），
+                 * 对每个像素检查4邻域，不在当前连通域（visited≠2）的计为边界边 */
+                float exact_perimeter = 0.0f;
+                for (int p = 0; p < q_tail; p++) {
+                    int px = queue_x[p], py = queue_y[p];
+                    for (int d = 0; d < 4; d++) {
+                        int nx = px + ((d == 0) ? 0 : (d == 1) ? 0 : (d == 2) ? 1 : -1);
+                        int ny = py + ((d == 0) ? 1 : (d == 1) ? -1 : (d == 2) ? 0 : 0);
+                        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                            exact_perimeter += 1.0f; /* 图像边界 */
+                        } else {
+                            int nidx = ny * width + nx;
+                            if (visited[nidx] != 2)
+                                exact_perimeter += 1.0f; /* 邻域不属于当前连通域 */
+                        }
+                    }
+                }
+
+                /* 将当前连通域visited标记从2恢复为1 */
+                for (int p = 0; p < q_tail; p++) {
+                    int pidx = queue_y[p] * width + queue_x[p];
+                    visited[pidx] = 1;
+                }
+
                 HotSpot* hs = &hotspots[*num_detected];
                 hs->center_x = sum_x / (float)area;
                 hs->center_y = sum_y / (float)area;
                 hs->peak_temp = peak;
                 hs->area = (float)area;
-                hs->perimeter = sqrtf((float)area) * 4.0f;
+                hs->perimeter = exact_perimeter;
                 hs->circularity = (4.0f * (float)M_PI * (float)area) /
-                    (hs->perimeter * hs->perimeter + 1e-8f);
-                hs->mean_intensity = peak * 0.85f; /* 估计均值 */
+                    (exact_perimeter * exact_perimeter + 1e-8f);
+                hs->mean_intensity = sum_intensity / (float)area;
                 (*num_detected)++;
             }
         }
     }
+
     safe_free((void**)&visited);
     safe_free((void**)&queue_x);
     safe_free((void**)&queue_y);

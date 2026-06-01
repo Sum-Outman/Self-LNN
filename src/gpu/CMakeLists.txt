@@ -28,7 +28,9 @@ if(ENABLE_GPU)
     )
 else()
     # GPU禁用时使用CPU计算后端（完整SSE/AVX SIMD实现）
+    # ZSFEEE-FIX-014: 添加gpu.c以提供统一的CPU硬件检测接口gpu_hardware_get_cpu_info()
     set(GPU_SOURCES
+        gpu.c
         gpu_cpu.c
     )
 endif()

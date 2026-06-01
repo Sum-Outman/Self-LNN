@@ -788,6 +788,13 @@ int multimodal_integration_process_unified(
     if (!processor || !unified_output) {
         return -1;
     }
+
+    /* ZSFZX-FIX-R9-4: 空输入保护 — 所有传感器输入全空时提前返回
+     * 防止将NULL指针传入unified_signal_processor_encode导致崩溃 */
+    if (!vi_in && !ai_in && !txt_in && !sen_in) {
+        memset(unified_output, 0, sizeof(UnifiedOutput));
+        return -1;
+    }
     
     if (!processor->unified_signal_processor) {
         memset(unified_output, 0, sizeof(UnifiedOutput));
@@ -1974,14 +1981,29 @@ static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* mod
     void* shared_lnn = selflnn_get_shared_lnn();
     if (!shared_lnn) return -1;
 
-    /* ZSFWS-006: 静态缓存UnifiedLNNState，避免每次调用malloc/free */
+    /* ZSFWS-006: 静态缓存UnifiedLNNState，避免每次调用malloc/free
+     * ZSFDDD-D2-007修复: 添加静态互斥锁保护缓存操作的线程安全 */
     static UnifiedLNNState* cached_ul_state = NULL;
     static size_t cached_output_dim = 0;
     static void* cached_shared_lnn = NULL;
-
-    if (!cached_ul_state || cached_output_dim != (size_t)output_dim ||
-        cached_shared_lnn != shared_lnn) {
+    static int cache_lock_initialized = 0;
+    static MutexHandle cache_mutex;
+    if (!cache_lock_initialized) {
+        cache_mutex = mutex_create();
+        cache_lock_initialized = 1;
+    }
+    mutex_lock(cache_mutex);
+    int need_recreate = (!cached_ul_state || cached_output_dim != (size_t)output_dim ||
+        cached_shared_lnn != shared_lnn);
+    if (need_recreate) {
         if (cached_ul_state) unified_lnn_state_free(cached_ul_state);
+        cached_ul_state = NULL;
+        cached_shared_lnn = NULL;
+        cached_output_dim = 0;
+    }
+    mutex_unlock(cache_mutex);
+
+    if (need_recreate) {
         UnifiedLNNStateConfig ul_cfg = unified_lnn_state_get_default_config();
         ul_cfg.state_dimension = 256;
         ul_cfg.output_dimension = (size_t)output_dim;
@@ -2068,6 +2090,5 @@ int multimodal_unified_pipeline(const float** modality_data, const int* modality
     if (ret == 0) return 0;
 
     /* 两条路径均失败：返回错误，禁止使用零值假数据 */
-    memset(unified_output, 0, (size_t)output_dim * sizeof(float));
     return -1;
 }

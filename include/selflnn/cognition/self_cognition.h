@@ -11,7 +11,7 @@
 
 #include <stddef.h>
 #include <time.h>
-#include "selflnn/metacognition.h"
+#include "selflnn/cognition/metacognition.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -522,6 +522,7 @@ typedef struct {
     float confidence;                     /**< 修正置信度 (0-1) */
     time_t correction_time;               /**< 修正时间 */
     int correction_id;                    /**< 修正ID（唯一标识） */
+    float weight_change_l2;               /**< ZSFEEE-FIX-CORRECTION-REAL: 权重实际L2变更量 */
 } SelfCorrectionResult;
 
 /**

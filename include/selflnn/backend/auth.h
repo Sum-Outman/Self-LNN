@@ -102,6 +102,9 @@ int auth_global_check_rate(AuthSystem* auth);
 int auth_check_request(AuthSystem* auth, const char* endpoint,
                        const char* auth_header, AuthPermission* out_permission);
 
+/* M-017: 旧式API密钥兼容验证（仅作向后兼容，新客户端应使用Bearer Token） */
+int auth_validate_legacy_key(AuthSystem* auth, const char* key, AuthPermission required_permission);
+
 int auth_save_keys(AuthSystem* auth, const char* filepath);
 int auth_load_keys(AuthSystem* auth, const char* filepath);
 

@@ -23,23 +23,114 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/cfc.h"
 
+/* ZSFEEE-FIX-007: 补充核心液态神经网络模块头文件 */
+#include "selflnn/core/cfc_network.h"
+#include "selflnn/core/cfc_enhanced.h"
+#include "selflnn/core/cma_es.h"
+#include "selflnn/core/decision_engine.h"
+#include "selflnn/core/dynamics.h"
+#include "selflnn/core/evolutionary_algorithms.h"
+#include "selflnn/core/graph_optimization.h"
+#include "selflnn/core/lnn.h"
+#include "selflnn/core/lnn_layer_norm.h"
+#include "selflnn/core/loss.h"
+#include "selflnn/core/ode_solvers.h"
+#include "selflnn/core/optimizer.h"
+#include "selflnn/core/quaternion_cfc.h"
+#include "selflnn/core/quaternion_lnn.h"
+#include "selflnn/core/quaternion_conv.h"
+#include "selflnn/core/quaternion_optimizer.h"
+#include "selflnn/core/quaternion_enhanced.h"
+#include "selflnn/core/quaternion_batchnorm.h"
+#include "selflnn/core/laplace.h"
+#include "selflnn/core/laplace_unified.h"
+#include "selflnn/core/laplace_features.h"
+#include "selflnn/core/state.h"
+#include "selflnn/core/tensor.h"
+#include "selflnn/core/unified_lnn_state.h"
+#include "selflnn/core/system_scheduler.h"
+
+/* ZSFEEE-FIX-007: 补充认知模块头文件 */
+#include "selflnn/cognition/self_cognition.h"
+#include "selflnn/cognition/metacognition.h"
+#include "selflnn/cognition/deep_correction.h"
+#include "selflnn/cognition/deep_reflection.h"
+#include "selflnn/cognition/deep_thought_chain.h"
+#include "selflnn/cognition/abstraction.h"
+#include "selflnn/agi/agi.h"
+#include "selflnn/agi/capability_switch.h"
+#include "selflnn/agi/task_scheduler.h"
+
 // 多模态处理
 #include "selflnn/multimodal/unified_signal_processor.h"
 #include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/multimodal/audio.h"
+#include "selflnn/multimodal/audio_tools.h"       /* ZSF999XQ-L-001: 集成孤立音频工具模块 */
 #include "selflnn/multimodal/text.h"
+/* ZSFEEE-FIX-007: 补充多模态模块头文件 */
+#include "selflnn/multimodal/speech_recognition.h"
+#include "selflnn/multimodal/tts.h"
+#include "selflnn/multimodal/vad.h"
+#include "selflnn/multimodal/dialogue.h"
+#include "selflnn/multimodal/dialogue_memory.h"
+#include "selflnn/multimodal/speech_language_model.h"
+#include "selflnn/multimodal/slam.h"
+#include "selflnn/multimodal/slam_enhance.h"
+#include "selflnn/multimodal/depth_estimation.h"
+#include "selflnn/multimodal/stereo_calibration.h"
+#include "selflnn/multimodal/stereo_depth_enhance.h"
+#include "selflnn/multimodal/stereo_3d_reconstruction.h"
+#include "selflnn/multimodal/ocr.h"
+#include "selflnn/multimodal/object_recognition.h"
+#include "selflnn/multimodal/image_recognition_deep.h"
+#include "selflnn/multimodal/multimodal_unified_input.h"
+#include "selflnn/multimodal/multimodal_integration.h"
+#include "selflnn/multimodal/multimodal_manager.h"
+#include "selflnn/multimodal/multimodal_teaching.h"
+#include "selflnn/multimodal/teaching_loop.h"
+#include "selflnn/multimodal/sensor.h"
+#include "selflnn/multimodal/sensor_preprocessor_deep.h"
+#include "selflnn/multimodal/haptic_enhance.h"
+#include "selflnn/multimodal/haptic_learning.h"
+#include "selflnn/multimodal/data_collection_pipeline.h"
+#include "selflnn/multimodal/camera_capture.h"
+/* audio_capture_* 函数声明已在 audio.h (L208-287) 中提供，无需重复包含 */
+#include "selflnn/multimodal/image_loader.h"
+#include "selflnn/multimodal/audio_loader.h"
+#include "selflnn/multimodal/character_segmentation.h"
+#include "selflnn/multimodal/text_detection.h"
+#include "selflnn/multimodal/point_cloud.h"
 
 // 认知功能
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/planning.h"
 #include "selflnn/reasoning/long_term_planning.h"
 #include "selflnn/reasoning/math_physics_reasoning.h"
+#include "selflnn/reasoning/causal_reasoning.h"
+#include "selflnn/reasoning/hierarchical_planning.h"
+#include "selflnn/reasoning/planning_enhanced.h"
+#include "selflnn/reasoning/cfc_uncertainty_reasoning.h"
+#include "selflnn/reasoning/quaternion_liquid_gate.h"
+#include "selflnn/reasoning/laplace_operator.h"
 
 // 知识库
 #include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/knowledge/semantic_network.h"
 #include "selflnn/knowledge/logic_reasoning.h"
 #include "selflnn/knowledge/knowledge_integration.h"
+#include "selflnn/knowledge/knowledge_inference.h"
+#include "selflnn/knowledge/knowledge_version.h"
+#include "selflnn/knowledge/cfc_knowledge_embedding.h"
+#include "selflnn/knowledge/graph_query.h"
+#include "selflnn/knowledge/graph_reasoning.h"
+#include "selflnn/knowledge/graph_storage.h"
+#include "selflnn/knowledge/knowledge_self_check.h"
+#include "selflnn/knowledge/ontology_engineering.h"
+#include "selflnn/knowledge/semantic_parsing.h"
+#include "selflnn/knowledge/uncertainty_reasoning.h"
+#include "selflnn/knowledge/auto_learning.h"
+#include "selflnn/knowledge/api_training.h"
+#include "selflnn/knowledge/skill_library.h"
 
 // 记忆系统
 #include "selflnn/memory/memory_manager.h"
@@ -71,6 +162,49 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/concurrency/thread_pool.h"
 
+/* ZSFEEE-FIX-007: 补充学习、演化、训练、安全、分布式模块头文件 */
+#include "selflnn/learning/learning.h"
+#include "selflnn/learning/imitation_learning.h"
+#include "selflnn/learning/imitation_deep.h"
+#include "selflnn/learning/meta_learning.h"
+#include "selflnn/learning/exploration_strategies.h"
+#include "selflnn/learning/online_learning.h"
+#include "selflnn/learning/reinforcement_learning.h"
+#include "selflnn/learning/multi_agent.h"
+#include "selflnn/learning/teach_by_showing.h"
+#include "selflnn/learning/manual_learning.h"
+
+#include "selflnn/evolution/evolution_engine.h"
+#include "selflnn/evolution/neural_architecture_search.h"
+#include "selflnn/evolution/pareto_optimization.h"
+
+#include "selflnn/training/training.h"
+#include "selflnn/training/training_pipeline.h"
+#include "selflnn/training/training_enhanced.h"
+#include "selflnn/training/model_parallel.h"
+#include "selflnn/training/mixed_precision.h"
+#include "selflnn/training/data_loaders.h"
+#include "selflnn/training/model_registry.h"
+#include "selflnn/training/model_version.h"
+#include "selflnn/training/regularization.h"
+#include "selflnn/training/training_monitor.h"
+#include "selflnn/training/training_data_pipeline.h"
+#include "selflnn/training/training_dataset.h"
+#include "selflnn/training/distributed_training.h"
+
+#include "selflnn/safety/safety_monitor.h"
+#include "selflnn/safety/emergency_stop.h"
+#include "selflnn/safety/content_filter.h"
+#include "selflnn/safety/audit_logger.h"
+#include "selflnn/safety/security_monitor_deep.h"
+
+#include "selflnn/distributed/load_balancer.h"
+#include "selflnn/distributed/pbft.h"
+
+#include "selflnn/backend/backend.h"
+#include "selflnn/backend/auth.h"
+#include "selflnn/backend/websocket_push.h"
+
 // 实用工具
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
@@ -95,6 +229,10 @@ typedef struct {
     PowerMode power_mode;
     GpuBackend gpu_backend;
     const char* model_path;
+    /* ZSFZX-FIX-CONFIG: 新增端口字段 — 原只在保存时写端口但从不加载 */
+    int http_port;
+    int websocket_port;
+    int distributed_port;
 } SystemConfig;
 
 typedef struct {
@@ -197,6 +335,8 @@ SELFLNN_API const char* selflnn_get_error_message(int error_code);
 
 SELFLNN_API int selflnn_config_load_from_file(const char* filepath, SystemConfig* config);
 SELFLNN_API int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config);
+/* ZSFZX-FIX-R4-2: 配置Schema验证 */
+SELFLNN_API int selflnn_config_validate(const SystemConfig* config, char* error_msg, size_t msg_size);
 SELFLNN_API int selflnn_set_power_mode(PowerMode power_mode);
 SELFLNN_API void selflnn_set_product_design_labels(const ProductDesignLabels* labels);
 SELFLNN_API const ProductDesignLabels* selflnn_get_product_design_labels(void);
@@ -250,6 +390,8 @@ SELFLNN_API void  selflnn_set_training_pipeline(void* pipeline); /* ZSFUSA-P0-00
 SELFLNN_API size_t selflnn_get_config_state_dimension(void);  /* ZSFUSA-P1-004: 获取状态维度 */
 SELFLNN_API void   selflnn_set_laplace_metrics(const float* metrics, int count); /* ZSFUSA-P3-001: 拉普拉斯指标更新 */
 SELFLNN_API void* selflnn_get_security_monitor_deep(void);  /* ZSFX-DEEP-004: 深度安全监控 */
+SELFLNN_API void* selflnn_get_teaching_loop(void);          /* ZSFQQ-ORP-002: 教学闭环系统 */
+SELFLNN_API void* selflnn_get_multimodal_teaching(void);    /* ZSFQQ-ORP-002: 多模态教学系统 */
 
 /* ---- 4e. 事件驱动即时自检（ZSFWS-038） ---- */
 SELFLNN_API void dcpipeline_request_immediate_check(void);
@@ -288,6 +430,9 @@ SELFLNN_API int selflnn_safe_forward(void* lnn, const float* input, float* outpu
 
 SELFLNN_API int selflnn_checkpoints_auto_load(void);
 SELFLNN_API int selflnn_save_checkpoint(const char* filepath);  /* ZSFX-DEEP-R5-003: 检查点保存 */
+
+/* ZSFQQ-P2-001: 引导多模态模块训练状态，检查点加载后调用 */
+SELFLNN_API void selflnn_bootstrap_trained_modules(void);
 
 /* ================================================================
  * 7. 知识推理→LNN连接通道

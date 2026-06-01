@@ -3,6 +3,8 @@
  * @brief AGI安全监控系统完整实现
  */
 
+#define SELFLNN_SAFETY_IMPL
+
 #include "selflnn/safety/safety_monitor.h"
 #include "selflnn/safety/emergency_stop.h"
 #include "selflnn/core/errors.h"
@@ -71,7 +73,23 @@ struct SafetyMonitor {
 
     /* 线程安全锁 */
     MutexHandle lock;
-    
+
+    /* ZSFQQ-DEEP-003: 主动熔断器(Circuit Breaker)
+     * 自动检测连续故障: 关闭→半开→打开→冷却→半开→关闭
+     * 防止级联故障和资源耗尽，与emergency_stop(被动/手动)互补 */
+    int cb_enabled;                 /* 熔断器是否启用 */
+    int cb_state;                   /* 0=关闭 1=半开 2=打开 */
+    int cb_consecutive_failures;    /* 连续失败计数 */
+    int cb_failure_threshold;       /* 触发打开阈值(默认5) */
+    int cb_half_open_max_requests;  /* 半开状态最大探测请求数(默认3) */
+    int cb_half_open_requests;      /* 半开状态当前探测请求数 */
+    int cb_half_open_successes;     /* 半开状态成功请求数 */
+    time_t cb_last_failure_time;    /* 上次失败时间 */
+    int cb_cooldown_seconds;        /* 冷却时间(默认30秒) */
+    time_t cb_opened_at;            /* 熔断器打开时间 */
+    int cb_total_trips;             /* 总跳闸次数 */
+    int cb_subsystem_bitmask;       /* 受保护子系统位掩码 */
+
 };
 
 SafetyMonitor* safety_monitor_create(void) {
@@ -153,7 +171,144 @@ SafetyMonitor* safety_monitor_create(void) {
         monitor->rule_count++;
     }
 
+    /* ZSFQQ-DEEP-003: 熔断器初始化 */
+    monitor->cb_enabled = 1;
+    monitor->cb_state = 0; /* 关闭状态 */
+    monitor->cb_consecutive_failures = 0;
+    monitor->cb_failure_threshold = 5;
+    monitor->cb_half_open_max_requests = 3;
+    monitor->cb_half_open_requests = 0;
+    monitor->cb_half_open_successes = 0;
+    monitor->cb_last_failure_time = 0;
+    monitor->cb_cooldown_seconds = 30;
+    monitor->cb_opened_at = 0;
+    monitor->cb_total_trips = 0;
+    monitor->cb_subsystem_bitmask = 0xFFFF; /* 默认保护所有子系统 */
+
     return monitor;
+}
+
+/* ========== ZSFQQ-DEEP-003: 主动熔断器(Circuit Breaker) ========== */
+
+/* 报告子系统故障，熔断器连续失败计数+1 */
+int safety_circuit_breaker_report_failure(SafetyMonitor* monitor, int subsystem_id) {
+    if (!monitor || !monitor->cb_enabled) return 0;
+    if (!(monitor->cb_subsystem_bitmask & (1 << subsystem_id))) return 0;
+
+    SAFETY_LOCK(monitor);
+    monitor->cb_last_failure_time = time(NULL);
+    monitor->cb_consecutive_failures++;
+    int should_trip = (monitor->cb_consecutive_failures >= monitor->cb_failure_threshold);
+    if (should_trip && monitor->cb_state == 0) {
+        monitor->cb_state = 2; /* 打开(熔断) */
+        monitor->cb_opened_at = monitor->cb_last_failure_time;
+        monitor->cb_total_trips++;
+        log_warn("[熔断器] 子系统%d触发熔断(连续失败%d次), 进入保护状态", 
+                 subsystem_id, monitor->cb_consecutive_failures);
+    }
+    SAFETY_UNLOCK(monitor);
+    return monitor->cb_state;
+}
+
+/* 报告子系统成功，在半开状态下累计成功计数 */
+int safety_circuit_breaker_report_success(SafetyMonitor* monitor, int subsystem_id) {
+    if (!monitor || !monitor->cb_enabled) return 0;
+
+    SAFETY_LOCK(monitor);
+    if (monitor->cb_state == 1) { /* 半开状态 */
+        monitor->cb_half_open_successes++;
+        if (monitor->cb_half_open_successes >= monitor->cb_half_open_max_requests) {
+            monitor->cb_state = 0; /* 关闭(恢复正常) */
+            monitor->cb_consecutive_failures = 0;
+            monitor->cb_half_open_requests = 0;
+            monitor->cb_half_open_successes = 0;
+            log_info("[熔断器] 子系统%d半开探测全部成功, 恢复正常运行", subsystem_id);
+        }
+    } else if (monitor->cb_state == 0) {
+        monitor->cb_consecutive_failures = 0; /* 成功时重置失败计数 */
+    }
+    SAFETY_UNLOCK(monitor);
+    return monitor->cb_state;
+}
+
+/* 检查请求是否被允许(熔断器是否拦截) */
+int safety_circuit_breaker_check_allowed(SafetyMonitor* monitor, int subsystem_id) {
+    if (!monitor || !monitor->cb_enabled) return 1; /* 未启用则允许 */
+
+    SAFETY_LOCK(monitor);
+    int allowed = 1;
+    if (monitor->cb_state == 2) { /* 打开状态: 禁止所有请求 */
+        time_t now = time(NULL);
+        if (now - monitor->cb_opened_at >= monitor->cb_cooldown_seconds) {
+            /* 冷却期结束, 进入半开状态 */
+            monitor->cb_state = 1;
+            monitor->cb_half_open_requests = 0;
+            monitor->cb_half_open_successes = 0;
+            log_info("[熔断器] 冷却期结束, 子系统%d进入半开探测状态", subsystem_id);
+            allowed = 1;
+        } else {
+            allowed = 0;
+        }
+    } else if (monitor->cb_state == 1) {
+        if (monitor->cb_half_open_requests >= monitor->cb_half_open_max_requests) {
+            allowed = 0; /* 半开状态探测请求数已用完 */
+        } else {
+            monitor->cb_half_open_requests++;
+            allowed = 1;
+        }
+    }
+    SAFETY_UNLOCK(monitor);
+    if (!allowed) {
+        log_debug("[熔断器] 子系统%d请求被拦截(状态=%d)", subsystem_id, monitor->cb_state);
+    }
+    return allowed;
+}
+
+/* 手动重置熔断器 */
+void safety_circuit_breaker_reset(SafetyMonitor* monitor) {
+    if (!monitor) return;
+    SAFETY_LOCK(monitor);
+    monitor->cb_state = 0;
+    monitor->cb_consecutive_failures = 0;
+    monitor->cb_half_open_requests = 0;
+    monitor->cb_half_open_successes = 0;
+    monitor->cb_opened_at = 0;
+    log_info("[熔断器] 手动重置, 所有子系统恢复正常");
+    SAFETY_UNLOCK(monitor);
+}
+
+/* ZSFGGG-S2-001修复: 强制打开熔断器(安全评分过低时主动触发) */
+int safety_circuit_breaker_open(SafetyMonitor* monitor) {
+    if (!monitor || !monitor->cb_enabled) return -1;
+    SAFETY_LOCK(monitor);
+    if (monitor->cb_state != 2) {
+        monitor->cb_state = 2;
+        monitor->cb_opened_at = time(NULL);
+        monitor->cb_total_trips++;
+        log_warn("[熔断器] 强制打开熔断器(安全系统主动触发), 进入全保护状态");
+    }
+    SAFETY_UNLOCK(monitor);
+    return monitor->cb_state;
+}
+
+/* ZSFGGG-S2-001修复: 强制关闭熔断器(安全恢复时主动关闭) */
+int safety_circuit_breaker_close(SafetyMonitor* monitor) {
+    if (!monitor) return -1;
+    SAFETY_LOCK(monitor);
+    monitor->cb_state = 0;
+    monitor->cb_consecutive_failures = 0;
+    monitor->cb_half_open_requests = 0;
+    monitor->cb_half_open_successes = 0;
+    monitor->cb_opened_at = 0;
+    log_info("[熔断器] 安全恢复, 强制关闭熔断器, 所有子系统恢复正常");
+    SAFETY_UNLOCK(monitor);
+    return monitor->cb_state;
+}
+
+/* 获取熔断器状态 */
+int safety_circuit_breaker_get_state(const SafetyMonitor* monitor) {
+    if (!monitor) return 0;
+    return monitor->cb_state;
 }
 
 void safety_monitor_free(SafetyMonitor* monitor) {

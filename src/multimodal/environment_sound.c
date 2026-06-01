@@ -104,7 +104,9 @@ void* environment_sound_classifier_create(int num_classes) {
     if (env_sound_load_weights(esc, ESC_DEFAULT_WEIGHTS_PATH) == 0) {
         esc->is_trained = 1;
     } else {
-        /* ZSFZS-F020: 权重文件不存在或校验失败，回退到随机初始化（标记为未训练） */
+        /* 权重文件不存在或校验失败，回退到随机初始化（标记为未训练）
+         * esc->is_trained = 0 确保调用方能区分已训练和未训练的模型状态 */
+        log_debug("[环境声音] 预训练权重加载失败，使用随机初始化(is_trained=0)");
         for (int i = 0; i < ESC_HIDDEN_DIM * ESC_HIDDEN_DIM; i++) {
             esc->cfc_w[i] = (secure_random_float() - 0.5f) * 0.1f;
         }
@@ -324,6 +326,12 @@ int env_sound_is_trained(void* classifier) {
     if (!classifier) return 0;
     EnvironmentSoundClassifier* esc = (EnvironmentSoundClassifier*)classifier;
     return esc->is_trained;
+}
+
+void env_sound_classifier_mark_trained(void* classifier) {
+    if (!classifier) return;
+    EnvironmentSoundClassifier* esc = (EnvironmentSoundClassifier*)classifier;
+    esc->is_trained = 1;
 }
 
 void environment_sound_classifier_free(void* classifier) {

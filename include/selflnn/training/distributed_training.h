@@ -283,6 +283,83 @@ SELFLNN_API int distributed_start_discovery_listener(DistributedContext* ctx);
 
 SELFLNN_API int distributed_stop_discovery_listener(DistributedContext* ctx);
 
+/* ---------------------------------------------------------------------------
+ * ZSFZX-FIX-P1-001: 完整内部结构定义（仅SELFLNN_IMPLEMENTATION可见）
+ * 将原先在src/training/distributed_internal.h中的DistributedContext完整定义
+ * 移至此处，消除core/extended_training.c的跨模块相对路径引用。
+ * 外部API使用者仅能通过不透明指针访问，内部实现模块可获得完整结构体。
+ * --------------------------------------------------------------------------- */
+#ifdef SELFLNN_IMPLEMENTATION
+
+typedef struct {
+    int node_id;
+    SocketHandle socket;
+    char host[64];
+    unsigned short port;
+    uint64_t last_heartbeat;
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    int connected;
+    int is_alive;
+    int connection_errors;
+    int reconnection_count;
+    MutexHandle lock;
+} NodeConnection;
+
+typedef struct {
+    float* data;
+    size_t count;
+    int algorithm;
+    volatile int completed;
+    volatile int result;
+    MutexHandle lock;
+    struct DistributedContext* ctx;
+} AsyncAllreduceRequest;
+
+struct DistributedContext {
+    DistributedConfig config;
+    int num_nodes;
+    int my_node_id;
+    int is_leader;
+    NodeConnection nodes[DISTRIBUTED_MAX_NODES];
+    MutexHandle nodes_lock;
+    SocketHandle server_socket;
+    int server_running;
+    MutexHandle server_lock;
+    int ring_established;
+    int ring_successor;
+    int ring_predecessor;
+    int tree_established;
+    int tree_parent;
+    int tree_left_child;
+    int tree_right_child;
+    uint32_t barrier_counter;
+    uint32_t barrier_generation;
+    MutexHandle barrier_lock;
+    volatile int heartbeat_running;
+    ThreadHandle heartbeat_thread;
+    MutexHandle heartbeat_lock;
+    volatile int async_in_progress;
+    AsyncAllreduceRequest* async_req;
+    ThreadHandle async_thread;
+    MutexHandle async_lock;
+    DistributedCommStats stats;
+    MutexHandle stats_lock;
+    char checkpoint_dir[256];
+    float* retry_gradient_buffer;
+    size_t retry_buffer_size;
+    DistributedQuorumState quorum;
+    int quorum_threshold_percent;
+    GradientVersionTracker grad_versions;
+    uint64_t global_version_counter;
+    DistributedTopologyState topo;
+    int rebalance_check_counter;
+    volatile int discovery_listener_running;
+    ThreadHandle discovery_listener_thread;
+};
+
+#endif /* SELFLNN_IMPLEMENTATION */
+
 #ifdef __cplusplus
 }
 #endif

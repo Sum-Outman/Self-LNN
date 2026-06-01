@@ -1,13 +1,13 @@
-#include "selflnn/agi/capability_switch.h"
+﻿#include "selflnn/agi/capability_switch.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/learning/online_learning.h"
 #include "selflnn/evolution/evolution_engine.h"
 #include "selflnn/reasoning/planning.h"
 #include "selflnn/multimodal/dialogue.h"
 #include "selflnn/concurrency/thread_pool.h"
-#include "selflnn/self_cognition.h"
-#include "selflnn/metacognition.h"
-#include "selflnn/multi_agent.h"   /* ZSFZS-F024: 多智能体系统启停控制 */
+#include "selflnn/cognition/self_cognition.h"
+#include "selflnn/cognition/metacognition.h"
+#include "selflnn/learning/multi_agent.h"   /* ZSFZS-F024: 多智能体系统启停控制 */
 #include <string.h>
 #include <stdio.h>
 

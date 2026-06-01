@@ -1925,7 +1925,8 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
         out_len = beam_len;
         use_beam = 1;
     } else {
-        /* 波束搜索失败，回退到贪心解码 */
+        /* 波束搜索失败，回退到贪心解码——贪心解码为确定性算法无需动态内存 */
+        log_debug("[语音识别] 波束搜索失败(可能内存不足)，回退到贪心解码");
         greedy_decode(all_logits, num_timesteps, vocab_size,
                       recognizer->decoded_tokens, &out_len,
                       recognizer->decoded_token_capacity);
@@ -2093,6 +2094,14 @@ void speech_recognizer_reset(SpeechRecognizer* recognizer) {
     recognizer->decoded_token_count = 0;
 }
 
+/* ZSFQQ-P2-001: 公开的标记训练函数 —— 检查点加载后调用 */
+void speech_recognizer_mark_trained(SpeechRecognizer* recognizer) {
+    if (recognizer) {
+        recognizer->is_model_trained = 1;
+        log_info("[语音识别] 模型已标记为已训练状态");
+    }
+}
+
 int speech_recognizer_set_vocabulary(SpeechRecognizer* recognizer,
                                       const char** vocab, int vocab_size) {
     if (!recognizer || !vocab || vocab_size <= 0) return -1;
@@ -2254,6 +2263,75 @@ int speech_recognizer_set_config(SpeechRecognizer* recognizer,
     return 0;
 }
 
+/* M-008修复: 字符到类别的哈希表映射，替代粗糙的取模映射 */
+#define SR_CHAR_HASH_SIZE 65536
+static int sr_char_ht[SR_CHAR_HASH_SIZE];
+static int sr_char_ht_initialized = 0;
+
+static void sr_init_char_hash_table(void) {
+    for (int i = 0; i < SR_CHAR_HASH_SIZE; i++) sr_char_ht[i] = -1;
+    sr_char_ht_initialized = 1;
+}
+
+/* FNV-1a 哈希函数 */
+static uint32_t sr_fnv1a_hash(const unsigned char* data, size_t len) {
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= (uint32_t)data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+/* UTF-8字符->类别映射: 读取完整多字节字符，FNV-1a哈希后线性探测落位 */
+static int sr_char_to_class(const char* text, int pos, int text_len, int vocab_size) {
+    unsigned char bytes[4] = {0};
+    int char_len = 0;
+
+    unsigned char first = (unsigned char)text[pos];
+    if (first < 0x80) char_len = 1;
+    else if ((first & 0xE0) == 0xC0) char_len = 2;
+    else if ((first & 0xF0) == 0xE0) char_len = 3;
+    else if ((first & 0xF8) == 0xF0) char_len = 4;
+    else char_len = 1;
+
+    if (pos + char_len > text_len) char_len = text_len - pos;
+    if (char_len < 1) char_len = 1;
+
+    for (int i = 0; i < char_len && (pos + i) < text_len; i++) {
+        bytes[i] = (unsigned char)text[pos + i];
+    }
+
+    if (!sr_char_ht_initialized) sr_init_char_hash_table();
+
+    uint32_t hash = sr_fnv1a_hash(bytes, (size_t)char_len);
+    int bucket = (int)(hash % SR_CHAR_HASH_SIZE);
+
+    /* 线性探测: 查找已有映射或空位 */
+    for (int probe = 0; probe < SR_CHAR_HASH_SIZE; probe++) {
+        int idx = (bucket + probe) % SR_CHAR_HASH_SIZE;
+        if (sr_char_ht[idx] >= 0) {
+            /* 已存在映射，直接返回 */
+            return sr_char_ht[idx];
+        }
+        /* 空位: 分配新映射 */
+        sr_char_ht[idx] = (int)(hash % (uint32_t)vocab_size);
+        return sr_char_ht[idx];
+    }
+
+    /* 哈希表满，回退到取模 */
+    return (int)(hash % (uint32_t)vocab_size);
+}
+
+/* 获取UTF-8字符的字节长度 */
+static int sr_utf8_char_len(unsigned char first_byte) {
+    if (first_byte < 0x80) return 1;
+    if ((first_byte & 0xE0) == 0xC0) return 2;
+    if ((first_byte & 0xF0) == 0xE0) return 3;
+    if ((first_byte & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
 int speech_recognizer_train(SpeechRecognizer* recognizer,
                              const float** training_audio,
                              const char** training_transcripts,
@@ -2326,12 +2404,13 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                 const char* transcript = training_transcripts[s];
                 int transcript_len = (int)strlen(transcript);
                 if (transcript_len > 0) {
-                    /* ZSFABC修复: 使用转录文本字符编码构建真实目标分布 */
-                    for (int ci = 0; ci < transcript_len && ci < 32; ci++) {
-                        unsigned char ch = (unsigned char)transcript[ci];
-                        /* 每个字符映射到其Unicode编码在词表中的索引 */
-                        int char_class = (int)(ch) % vs;
-                        target_dist[char_class] = 1.0f / (float)transcript_len;
+                    /* M-008修复: 使用FNV-1a哈希表将UTF-8字符映射到类别，替代取模映射。
+                     * 哈希表同一字符始终映射到同一类别索引，保证映射一致性。
+                     * 正确处理多字节UTF-8字符（中文3字节/英文1字节）。 */
+                    for (int ci = 0; ci < transcript_len && ci < 32; ) {
+                        int char_class = sr_char_to_class(transcript, ci, transcript_len, vs);
+                        target_dist[char_class] += 1.0f / (float)transcript_len;
+                        ci += sr_utf8_char_len((unsigned char)transcript[ci]);
                     }
                 }
                 else {

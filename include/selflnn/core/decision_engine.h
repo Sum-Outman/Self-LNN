@@ -178,6 +178,16 @@ int decision_engine_add_alternatives(DecisionEngine* engine,
                                      size_t num_alternatives);
 
 /**
+ * @brief 清空所有决策备选方案（ZSFEEE-FIX-DEEP-006）
+ *
+ * 清除引擎中所有已添加的备选方案，释放相关内存，
+ * 用于在每次认知循环决策前重置方案列表。
+ *
+ * @param engine 引擎句柄
+ */
+void decision_engine_clear_alternatives(DecisionEngine* engine);
+
+/**
  * @brief 执行决策分析
  * 
  * @param engine 引擎句柄

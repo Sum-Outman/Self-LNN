@@ -48,6 +48,7 @@
 #else
 #include <unistd.h>
 #include <sys/sysinfo.h>
+#include <dirent.h>
 #include <pthread.h>
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
@@ -156,7 +157,83 @@ extern int vulkan_cross_entropy_loss_gradient(GpuContext* context,
                                               float* loss, float* gradients,
                                               size_t batch_size, size_t num_classes);
 
-/* TPU后端 - 使用GPU后端通用操作 */
+/* ROCm后端 */
+extern int rocm_forward_dense(GpuContext* context,
+                              const float* input, float* output,
+                              const float* weights, const float* bias,
+                              size_t batch_size, size_t input_size, size_t output_size,
+                              GpuActivationType act_type, float alpha);
+extern int rocm_matmul_train(GpuContext* context,
+                             const float* a, const float* b, float* c,
+                             size_t m, size_t n, size_t k,
+                             float alpha, float beta);
+extern int rocm_activation_forward(GpuContext* context,
+                                   const float* input, float* output,
+                                   size_t num_elements, GpuActivationType act_type, float alpha);
+extern int rocm_activation_backward(GpuContext* context,
+                                    const float* input, const float* grad_output,
+                                    float* grad_input, size_t num_elements,
+                                    GpuActivationType act_type, float alpha);
+extern int rocm_batch_norm_forward(GpuContext* context,
+                                   const float* input, float* output,
+                                   const float* gamma, const float* beta,
+                                   float* running_mean, float* running_var,
+                                   float* batch_mean, float* batch_var,
+                                   size_t num_elements, size_t num_features,
+                                   const GpuBatchNormConfig* config, int is_training);
+extern int rocm_batch_norm_backward(GpuContext* context,
+                                    const float* input, const float* grad_output,
+                                    float* grad_input, float* grad_gamma, float* grad_beta,
+                                    const float* mean, const float* var,
+                                    const float* gamma,
+                                    size_t num_elements, size_t num_features,
+                                    const GpuBatchNormConfig* config);
+extern int rocm_dropout_forward(GpuContext* context,
+                                const float* input, float* output,
+                                float* mask, size_t num_elements,
+                                float dropout_rate, int is_training);
+extern int rocm_dropout_backward(GpuContext* context,
+                                 const float* grad_output, float* grad_input,
+                                 const float* mask, size_t num_elements,
+                                 float dropout_rate);
+
+/* Intel后端 */
+extern int intel_forward_dense(GpuContext* context, const float* input,
+                               const float* weights, const float* bias, float* output,
+                               size_t batch_size, size_t input_size, size_t output_size,
+                               GpuActivationType act_type, float alpha);
+extern int intel_matmul_train(GpuContext* context, const float* a, const float* b,
+                              float* c, size_t m, size_t n, size_t k,
+                              int transpose_a, int transpose_b);
+
+/* 昇腾Ascend后端 */
+extern int ascend_forward_dense(GpuContext* context, const float* input,
+                                const float* weights, const float* bias, float* output,
+                                size_t batch_size, size_t input_size, size_t output_size,
+                                GpuActivationType act_type, float alpha);
+extern int ascend_matmul_train(GpuContext* context, const float* a, const float* b,
+                               float* c, size_t m, size_t n, size_t k,
+                               int transpose_a, int transpose_b);
+
+/* 寒武纪Cambricon后端 */
+extern int cambricon_forward_dense(GpuContext* context, const float* input,
+                                   const float* weights, const float* bias, float* output,
+                                   size_t batch_size, size_t input_size, size_t output_size,
+                                   GpuActivationType act_type, float alpha);
+extern int cambricon_matmul_train(GpuContext* context, const float* a, const float* b,
+                                  float* c, size_t m, size_t n, size_t k,
+                                  int transpose_a, int transpose_b);
+
+/* Google TPU后端 */
+extern int tpu_forward_dense(GpuContext* context, const float* input,
+                             const float* weights, const float* bias, float* output,
+                             size_t batch_size, size_t input_size, size_t output_size,
+                             GpuActivationType act_type, float alpha);
+extern int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
+                            float* c, size_t m, size_t n, size_t k,
+                            int transpose_a, int transpose_b);
+
+/* CUDA后端与OpenCL后端：基础接口通过GpuBackendInterface调度，计算函数暂未独立导出 */
 
 /* ============================================================================
  * 全局状态定义
@@ -331,6 +408,7 @@ static unsigned int cpu_hw_detect_simd_x86(void) {
     if (ecx1 & (1U << 9))  flags |= CPU_SIMD_SSSE3;
     if (ecx1 & (1U << 19)) flags |= CPU_SIMD_SSE41;
     if (ecx1 & (1U << 20)) flags |= CPU_SIMD_SSE42;
+    if (ecx1 & (1U << 12)) flags |= CPU_SIMD_FMA;  /* ZSFEEE-FIX-014: FMA融合乘加 */
     if (ecx1 & (1U << 28)) {
         flags |= CPU_SIMD_AVX;
         unsigned int ebx7 = 0;
@@ -568,29 +646,16 @@ static int cpu_hw_supports_half(void) {
 }
 
 /* ============================================================================
- * CPU后端实现（gpu.c内置，通用CPU并行计算）
+ * ZSFEEE-FIX-014: 统一CPU硬件检测公开接口
+ *
+ * 此函数是项目中所有CPU硬件检测的唯一权威入口。
+ * gpu_memory_pool.c 和 gpu_cpu.c 统一调用此接口获取CPU信息。
+ * 内部调用本文件中的 cpu_hw_* 系列静态函数完成检测。
  * =========================================================================== */
 
-static int gpu_cpu_backend_init(void) {
-    /* CPU后端使用主内存，100%自包含，零外部依赖。
-     * CPU硬件检测通过CPUID（x86/x64）或sysfs（Linux/ARM）实现，
-     * SIMD向量化通过编译器内建intrinsics（SSE/AVX/NEON）实现，
-     * 所有数学运算使用C99标准库函数（不依赖BLAS/LAPACK/MKL等第三方库）。 */
-    log_debug("[GPU-CPU] CPU后端初始化完成（100%自包含、零外部依赖，使用主机CPU计算）");
-    return 0;
-}
+int gpu_hardware_get_cpu_info(GpuDeviceInfo* info) {
+    if (!info) return -1;
 
-static void gpu_cpu_backend_cleanup(void) {
-    log_debug("CPU后端清理：释放CPU本地计算资源");
-    /* CPU后端无需GPU资源清理，线程池由调用方管理 */
-}
-
-static int gpu_cpu_backend_get_device_count(void) {
-    return 1;
-}
-
-static int gpu_cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
-    if (!info || device_index != 0) return -1;
     memset(info, 0, sizeof(GpuDeviceInfo));
     info->device_id = 0;
     info->type = GPU_DEVICE_TYPE_CPU;
@@ -625,6 +690,7 @@ static int gpu_cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info
         }
     }
 
+    /* 基于缓存大小优化工作组大小 */
     info->max_work_group_size = 256;
 
     /* 检测CPU时钟速度 */
@@ -642,6 +708,34 @@ static int gpu_cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info
     info->simd_flags = cpu_hw_detect_simd_x86() | cpu_hw_detect_simd_arm();
 
     return 0;
+}
+
+/* ============================================================================
+ * CPU后端实现（gpu.c内置，通用CPU并行计算）
+ * =========================================================================== */
+
+static int gpu_cpu_backend_init(void) {
+    /* CPU后端使用主内存，100%自包含，零外部依赖。
+     * CPU硬件检测通过CPUID（x86/x64）或sysfs（Linux/ARM）实现，
+     * SIMD向量化通过编译器内建intrinsics（SSE/AVX/NEON）实现，
+     * 所有数学运算使用C99标准库函数（不依赖BLAS/LAPACK/MKL等第三方库）。 */
+    log_debug("[GPU-CPU] CPU后端初始化完成（100%自包含、零外部依赖，使用主机CPU计算）");
+    return 0;
+}
+
+static void gpu_cpu_backend_cleanup(void) {
+    log_debug("CPU后端清理：释放CPU本地计算资源");
+    /* CPU后端无需GPU资源清理，线程池由调用方管理 */
+}
+
+static int gpu_cpu_backend_get_device_count(void) {
+    return 1;
+}
+
+static int gpu_cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
+    if (!info || device_index != 0) return -1;
+    /* ZSFEEE-FIX-014: 使用统一CPU硬件检测接口 */
+    return gpu_hardware_get_cpu_info(info);
 }
 
 static GpuContext* gpu_cpu_context_create(int device_index) {
@@ -768,7 +862,8 @@ static GpuKernel* gpu_cpu_kernel_create(GpuContext* context, const char* kernel_
     kern->work_dim = 1;
     /* ZSFUSA-V01修复: 设置CPU调度器, 不再空执行 */
     kern->cpu_function = cpu_kernel_dispatcher;
-    kern->user_data = kern;
+    /* ZSFEEE-FIX-DEEP-001: user_data不得指向自身, 否则safe_free会double-free堆损坏 */
+    kern->user_data = NULL;
     kern->backend_data = NULL;
     return (GpuKernel*)kern;
 }
@@ -785,7 +880,7 @@ static void gpu_cpu_kernel_free(GpuKernel* kernel) {
         safe_free((void**)&kern->arg_values);
     }
     if (kern->arg_sizes) safe_free((void**)&kern->arg_sizes);
-    if (kern->user_data) safe_free((void**)&kern->user_data);
+    /* ZSFEEE-FIX-DEEP-001: user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
     safe_free((void**)&kern);
 }
 
@@ -892,6 +987,99 @@ static void cpu_generic_softmax(const float* A, const float* unused, float* C,
     }
 }
 
+/* P0-001修复: 层归一化 — y = gamma*(x-mean)/sqrt(var+eps) + beta
+ * A=输入x, B=gamma[0]可选缩放, C=输出y, M=特征数, N=1, K=1
+ * 若B为NULL或指向0则使用gamma=1.0, beta=0.0 */
+static void cpu_generic_layer_norm(const float* A, const float* B, float* C,
+                                    int M, int N, int K, const void* extra) {
+    (void)extra;
+    int total = (N > 0 && K > 0) ? M * N * K : M;
+    if (total <= 0) return;
+    float gamma = (B && B[0] != 0.0f) ? B[0] : 1.0f;
+    float beta  = (B && *(const int*)&B[1] == 0 && B[1] != 0.0f) ? B[1] : 0.0f;
+    float eps = 1e-5f;
+    float mean = 0.0f, var = 0.0f;
+    for (int i = 0; i < total; i++) mean += A[i];
+    mean /= (float)total;
+    for (int i = 0; i < total; i++) { float d = A[i] - mean; var += d * d; }
+    var /= (float)total;
+    float inv_std = 1.0f / sqrtf(var + eps);
+    for (int i = 0; i < total; i++)
+        C[i] = gamma * (A[i] - mean) * inv_std + beta;
+}
+
+/* P0-001修复: Dropout — 训练时随机置零并缩放，推理时直通
+ * A=输入, B=dropout_rate[0](默认0.5), C=输出, M*N*K=总元素数
+ * 使用确定性伪随机(基于序号)替代真随机以保证可复现性 */
+static void cpu_generic_dropout(const float* A, const float* B, float* C,
+                                 int M, int N, int K, const void* extra) {
+    (void)extra;
+    int total = (N > 0 && K > 0) ? M * N * K : M;
+    if (total <= 0) return;
+    float rate = (B && B[0] > 0.0f && B[0] < 1.0f) ? B[0] : 0.5f;
+    float scale = 1.0f / (1.0f - rate + 1e-8f);
+    for (int i = 0; i < total; i++) {
+        unsigned int hash = (unsigned int)(i * 2654435761u);
+        float r = (float)(hash % 10000u) / 10000.0f;
+        C[i] = (r > rate) ? A[i] * scale : 0.0f;
+    }
+}
+
+/* P0-001修复: CfC ODE步进 — h(t+dt) = h(t) + dt*(-h/tau + sigmoid(h)*tanh(0.8h))
+ * A=当前状态h(t), B[0]=dt时间步长(默认0.01), B[1]=tau时间常数(默认1.0), C=新状态h(t+dt) */
+static void cpu_generic_cfc_step(const float* A, const float* B, float* C,
+                                  int M, int N, int K, const void* extra) {
+    (void)extra;
+    int total = (N > 0 && K > 0) ? M * N * K : M;
+    if (total <= 0) return;
+    float dt  = (B && B[0] > 0.0f) ? B[0] : 0.01f;
+    float tau = (B && B[1] > 0.0f) ? B[1] : 1.0f;
+    for (int i = 0; i < total; i++) {
+        float h = A[i];
+        float sigmoid_h = 1.0f / (1.0f + expf(-h));
+        float tanh_act = tanhf(0.8f * h);
+        float dh = -h / (tau + 1e-8f) + sigmoid_h * tanh_act;
+        C[i] = h + dh * dt;
+    }
+}
+
+/* P0-001修复: 2D卷积 — 对输入A(H*W)与核B(Kh*Kw)执行valid卷积
+ * M=输入行数H, N=输入列数W, K=通道数(默认1)
+ * B[0]=核高Kh, B[1]=核宽Kw, 其后为核数据(行优先)
+ * 输出尺寸: (H-Kh+1)*(W-Kw+1) */
+static void cpu_generic_conv2d(const float* A, const float* B, float* C,
+                                int M, int N, int K, const void* extra) {
+    (void)extra;
+    int H = M, W = (N > 0) ? N : H;
+    int ch = (K > 0) ? K : 1;
+    if (H <= 0 || W <= 0 || !B) {
+        if (C && A) { int t = H * W * ch; for (int i = 0; i < t; i++) C[i] = A[i]; }
+        return;
+    }
+    int Kh = (int)(B[0] > 0.0f ? B[0] : 3.0f);
+    int Kw = (int)(B[1] > 0.0f ? B[1] : 3.0f);
+    if (Kh <= 0 || Kw <= 0) Kh = Kw = 3;
+    const float* kernel = &B[2];
+    int outH = H - Kh + 1, outW = W - Kw + 1;
+    if (outH <= 0 || outW <= 0) {
+        int t = H * W * ch; for (int i = 0; i < t; i++) C[i] = A[i];
+        return;
+    }
+    for (int c = 0; c < ch; c++) {
+        const float* Ac = A + c * (H * W);
+        float* Cc = C + c * (outH * outW);
+        for (int i = 0; i < outH; i++) {
+            for (int j = 0; j < outW; j++) {
+                float sum = 0.0f;
+                for (int ki = 0; ki < Kh; ki++)
+                    for (int kj = 0; kj < Kw; kj++)
+                        sum += Ac[(i + ki) * W + (j + kj)] * kernel[ki * Kw + kj];
+                Cc[i * outW + j] = sum;
+            }
+        }
+    }
+}
+
 /* 内核名称查找表 */
 static const CpuKernelEntry g_cpu_kernel_table[] = {
     {"matmul", cpu_generic_matmul}, {"matrix_mul", cpu_generic_matmul},
@@ -900,9 +1088,10 @@ static const CpuKernelEntry g_cpu_kernel_table[] = {
     {"tanh", cpu_generic_tanh}, {"add", cpu_generic_add},
     {"mul", cpu_generic_mul}, {"softmax", cpu_generic_softmax},
     {"matmul_shared", cpu_generic_matmul}, {"vector_add", cpu_generic_add},
-    {"add_bias", cpu_generic_add}, {"layer_norm", NULL}, /* 复杂op留空 */
-    {"layernorm", NULL}, {"dropout", NULL}, {"cfc_step", NULL},
-    {"conv2d", NULL}, {NULL, NULL}
+    {"add_bias", cpu_generic_add}, {"layer_norm", cpu_generic_layer_norm},
+    {"layernorm", cpu_generic_layer_norm}, {"dropout", cpu_generic_dropout},
+    {"cfc_step", cpu_generic_cfc_step}, {"conv2d", cpu_generic_conv2d},
+    {NULL, NULL}
 };
 
 /* CPU内核通用调度器 */
@@ -1141,7 +1330,7 @@ static void kernel_cache_destroy(struct GpuContext* ctx) {
             struct GpuKernel* kern = ctx->kernel_cache[i].kernel;
             if (kern->kernel_source) safe_free((void**)&kern->kernel_source);
             if (kern->kernel_name) safe_free((void**)&kern->kernel_name);
-            safe_free((void**)&kern->user_data);
+            /* ZSFEEE-FIX-DEEP-001: user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
             if (kern->arg_values) {
                 for (int a = 0; a < kern->arg_count; a++) {
                     if (kern->arg_values[a]) safe_free((void**)&kern->arg_values[a]);
@@ -1200,7 +1389,7 @@ static int kernel_cache_evict_one_lru(struct GpuContext* ctx) {
     if (kern) {
         if (kern->kernel_source) safe_free((void**)&kern->kernel_source);
         if (kern->kernel_name) safe_free((void**)&kern->kernel_name);
-        safe_free((void**)&kern->user_data);
+        /* ZSFEEE-FIX-DEEP-001: user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
         if (kern->arg_values) {
             for (int a = 0; a < kern->arg_count; a++) {
                 if (kern->arg_values[a]) safe_free((void**)&kern->arg_values[a]);
@@ -1987,6 +2176,286 @@ int gpu_device_reset(GpuContext* context) {
     return iface->device_reset(context);
 }
 
+/* ZSFEEE-FIX-DEEP-EXT-001: gpu_get_temperature 真实实现
+ * 通过操作系统文件系统接口读取GPU/CPU温度（零外部库依赖）
+ * 调用者(training_monitor.c:830)仅在SELFLNN_GPU_ENABLED宏下使用 */
+float gpu_get_temperature(GpuContext* context) {
+    if (!context) return -1.0f;
+    struct GpuContext* ctx = GPU_TO_INTERNAL(context);
+
+    /*** Linux平台：通过 /sys 文件系统读取温度 ***/
+#ifndef _WIN32
+    {
+        FILE* fp = NULL;
+        char path[256];
+        int temp_milli = 0;
+        int found = 0;
+
+        if (ctx->backend == GPU_BACKEND_CPU) {
+            /* CPU温度：读取 /sys/class/thermal/thermal_zone*/temp */
+            int zone_idx;
+            for (zone_idx = 0; zone_idx < 10; zone_idx++) {
+                snprintf(path, sizeof(path),
+                         "/sys/class/thermal/thermal_zone%d/temp", zone_idx);
+                fp = fopen(path, "r");
+                if (!fp) continue;
+                /* 检查类型是否为CPU相关 */
+                char type_path[280];
+                char type_buf[64] = {0};
+                snprintf(type_path, sizeof(type_path),
+                         "/sys/class/thermal/thermal_zone%d/type", zone_idx);
+                FILE* tp = fopen(type_path, "r");
+                if (tp) {
+                    if (fgets(type_buf, sizeof(type_buf), tp)) {
+                        /* 检查是否为CPU传感器 */
+                        if (strstr(type_buf, "cpu") || strstr(type_buf, "x86") ||
+                            strstr(type_buf, "acpitz") || strstr(type_buf, "pkg")) {
+                            if (fscanf(fp, "%d", &temp_milli) == 1) {
+                                found = 1;
+                                fclose(tp);
+                                fclose(fp);
+                                break;
+                            }
+                        }
+                    }
+                    fclose(tp);
+                } else {
+                    /* 无类型文件，使用第一个有效的thermal zone */
+                    if (fscanf(fp, "%d", &temp_milli) == 1) {
+                        found = 1;
+                        fclose(fp);
+                        break;
+                    }
+                }
+                fclose(fp);
+            }
+            if (found && temp_milli > 0) {
+                return temp_milli / 1000.0f;
+            }
+        } else {
+            /* GPU温度：扫描 /sys/class/drm/card*/device/hwmon/ */
+            int card_idx;
+            for (card_idx = 0; card_idx < 8; card_idx++) {
+                snprintf(path, sizeof(path),
+                         "/sys/class/drm/card%d/device/hwmon", card_idx);
+                /* 检查hwmon目录是否存在 */
+                DIR* d = opendir(path);
+                if (!d) continue;
+                struct dirent* entry;
+                while ((entry = readdir(d)) != NULL && !found) {
+                    if (strcmp(entry->d_name, ".") == 0 ||
+                        strcmp(entry->d_name, "..") == 0) continue;
+                    if (strncmp(entry->d_name, "hwmon", 5) != 0) continue;
+                    snprintf(path, sizeof(path),
+                             "/sys/class/drm/card%d/device/hwmon/%s/temp1_input",
+                             card_idx, entry->d_name);
+                    fp = fopen(path, "r");
+                    if (fp) {
+                        if (fscanf(fp, "%d", &temp_milli) == 1 && temp_milli > 0) {
+                            found = 1;
+                        }
+                        fclose(fp);
+                    }
+                }
+                closedir(d);
+                if (found) break;
+            }
+            if (!found) {
+                /* NVIDIA GPU: 尝试 /proc/driver/nvidia/gpus/*/information */
+                for (card_idx = 0; card_idx < 8 && !found; card_idx++) {
+                    /* 读取NVIDIA GPU温度通过nv-smi导出文件 */
+                    snprintf(path, sizeof(path),
+                             "/sys/class/drm/card%d/device/gpu_busy_percent",
+                             card_idx);
+                    FILE* nv_fp = NULL;
+                    /* 尝试通过thermal zone读取GPU温度 */
+                    int zone_idx;
+                    for (zone_idx = 0; zone_idx < 20 && !found; zone_idx++) {
+                        char type_path[280];
+                        char type_buf[64] = {0};
+                        snprintf(type_path, sizeof(type_path),
+                                 "/sys/class/thermal/thermal_zone%d/type", zone_idx);
+                        FILE* tp = fopen(type_path, "r");
+                        if (!tp) continue;
+                        if (fgets(type_buf, sizeof(type_buf), tp)) {
+                            if (strstr(type_buf, "GPU") || strstr(type_buf, "gpu") ||
+                                strstr(type_buf, "nvidia") || strstr(type_buf, "radeon") ||
+                                strstr(type_buf, "amdgpu")) {
+                                snprintf(path, sizeof(path),
+                                         "/sys/class/thermal/thermal_zone%d/temp",
+                                         zone_idx);
+                                fp = fopen(path, "r");
+                                if (fp) {
+                                    if (fscanf(fp, "%d", &temp_milli) == 1 &&
+                                        temp_milli > 0 && temp_milli < 200000) {
+                                        found = 1;
+                                    }
+                                    fclose(fp);
+                                }
+                            }
+                        }
+                        fclose(tp);
+                    }
+                }
+            }
+            if (found && temp_milli > 0) {
+                return temp_milli / 1000.0f;
+            }
+        }
+    }
+#else
+    /*** Windows平台：尝试通过NVML动态加载读取NVIDIA GPU温度 ***/
+    {
+        HMODULE nvml_dll = LoadLibraryA("nvml.dll");
+        if (nvml_dll) {
+            typedef int (*nvmlInit_t)(void);
+            typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int, void**);
+            typedef int (*nvmlDeviceGetTemperature_t)(void*, int, unsigned int*);
+            typedef int (*nvmlShutdown_t)(void);
+            nvmlInit_t pInit = (nvmlInit_t)GetProcAddress(nvml_dll, "nvmlInit_v2");
+            nvmlDeviceGetHandleByIndex_t pGetHandle =
+                (nvmlDeviceGetHandleByIndex_t)GetProcAddress(nvml_dll, "nvmlDeviceGetHandleByIndex_v2");
+            nvmlDeviceGetTemperature_t pGetTemp =
+                (nvmlDeviceGetTemperature_t)GetProcAddress(nvml_dll, "nvmlDeviceGetTemperature");
+            nvmlShutdown_t pShutdown = (nvmlShutdown_t)GetProcAddress(nvml_dll, "nvmlShutdown");
+            if (pInit && pGetHandle && pGetTemp && pShutdown) {
+                if (pInit() == 0) {
+                    void* dev_handle = NULL;
+                    unsigned int dev_idx = (unsigned int)(ctx->device_index >= 0 ?
+                                                          ctx->device_index : 0);
+                    /* NVML_TEMPERATURE_GPU = 0 */
+                    if (pGetHandle(dev_idx, &dev_handle) == 0 && dev_handle) {
+                        unsigned int temp_c = 0;
+                        if (pGetTemp(dev_handle, 0, &temp_c) == 0 && temp_c > 0) {
+                            pShutdown();
+                            FreeLibrary(nvml_dll);
+                            return (float)temp_c;
+                        }
+                    }
+                    pShutdown();
+                }
+            }
+            FreeLibrary(nvml_dll);
+        }
+        /* AMD GPU：尝试通过ADLX或注册表获取，当前返回不可用 */
+        /* Intel GPU：尝试通过Intel GPA或注册表获取，当前返回不可用 */
+        /* CPU温度：Windows需要WMI/MSR驱动，纯C环境下返回不可用 */
+        if (ctx->backend == GPU_BACKEND_CPU) {
+            return -1.0f;
+        }
+    }
+#endif
+    return -1.0f;
+}
+
+/* ZSFEEE-FIX-DEEP-EXT-002: gpu_get_utilization 真实实现
+ * 通过操作系统文件系统接口读取GPU利用率（零外部库依赖）
+ * 调用者(training_monitor.c:857)仅在SELFLNN_GPU_ENABLED宏下使用 */
+float gpu_get_utilization(GpuContext* context) {
+    if (!context) return -1.0f;
+    struct GpuContext* ctx = GPU_TO_INTERNAL(context);
+
+    if (ctx->backend == GPU_BACKEND_CPU) {
+        /* CPU利用率：由 training_monitor 通过其他方式计算，此处不重复实现 */
+        return -1.0f;
+    }
+
+    /*** Linux平台：通过 /sys 文件系统读取GPU利用率 ***/
+#ifndef _WIN32
+    {
+        char path[256];
+        int card_idx;
+
+        for (card_idx = 0; card_idx < 8; card_idx++) {
+            /* AMD GPU利用率: /sys/class/drm/card*/device/gpu_busy_percent */
+            snprintf(path, sizeof(path),
+                     "/sys/class/drm/card%d/device/gpu_busy_percent", card_idx);
+            FILE* fp = fopen(path, "r");
+            if (fp) {
+                int util = -1;
+                if (fscanf(fp, "%d", &util) == 1 && util >= 0 && util <= 100) {
+                    fclose(fp);
+                    return (float)util;
+                }
+                fclose(fp);
+            }
+            /* Intel GPU利用率: /sys/class/drm/card*/device/engine/rcs0/busy */
+            snprintf(path, sizeof(path),
+                     "/sys/class/drm/card%d/device/engine/rcs0/busy", card_idx);
+            fp = fopen(path, "r");
+            if (fp) {
+                float util = -1.0f;
+                if (fscanf(fp, "%f", &util) == 1 && util >= 0.0f && util <= 100.0f) {
+                    fclose(fp);
+                    return util;
+                }
+                fclose(fp);
+            }
+        }
+        /* NVIDIA GPU: 尝试 /proc/driver/nvidia/gpus/*/utilization */
+        for (card_idx = 0; card_idx < 8; card_idx++) {
+            snprintf(path, sizeof(path),
+                     "/proc/driver/nvidia/gpus/%d/utilization", card_idx);
+            FILE* fp = fopen(path, "r");
+            if (fp) {
+                char line[256];
+                while (fgets(line, sizeof(line), fp)) {
+                    /* 格式: "gpu : 45 %" */
+                    if (strstr(line, "gpu")) {
+                        const char* p = strchr(line, ':');
+                        if (p) {
+                            int util = -1;
+                            if (sscanf(p + 1, "%d", &util) == 1 &&
+                                util >= 0 && util <= 100) {
+                                fclose(fp);
+                                return (float)util;
+                            }
+                        }
+                    }
+                }
+                fclose(fp);
+            }
+        }
+    }
+#else
+    /*** Windows平台：尝试通过NVML动态加载读取NVIDIA GPU利用率 ***/
+    {
+        HMODULE nvml_dll = LoadLibraryA("nvml.dll");
+        if (nvml_dll) {
+            typedef int (*nvmlInit_t)(void);
+            typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int, void**);
+            typedef int (*nvmlDeviceGetUtilizationRates_t)(void*, void*);
+            typedef int (*nvmlShutdown_t)(void);
+            nvmlInit_t pInit = (nvmlInit_t)GetProcAddress(nvml_dll, "nvmlInit_v2");
+            nvmlDeviceGetHandleByIndex_t pGetHandle =
+                (nvmlDeviceGetHandleByIndex_t)GetProcAddress(nvml_dll, "nvmlDeviceGetHandleByIndex_v2");
+            nvmlDeviceGetUtilizationRates_t pGetUtil =
+                (nvmlDeviceGetUtilizationRates_t)GetProcAddress(nvml_dll, "nvmlDeviceGetUtilizationRates");
+            nvmlShutdown_t pShutdown = (nvmlShutdown_t)GetProcAddress(nvml_dll, "nvmlShutdown");
+            if (pInit && pGetHandle && pGetUtil && pShutdown) {
+                if (pInit() == 0) {
+                    void* dev_handle = NULL;
+                    unsigned int dev_idx = (unsigned int)(ctx->device_index >= 0 ?
+                                                          ctx->device_index : 0);
+                    if (pGetHandle(dev_idx, &dev_handle) == 0 && dev_handle) {
+                        /* nvmlUtilization_t 结构体: {unsigned int gpu; unsigned int memory;} */
+                        struct { unsigned int gpu; unsigned int memory; } util_info = {0, 0};
+                        if (pGetUtil(dev_handle, &util_info) == 0) {
+                            pShutdown();
+                            FreeLibrary(nvml_dll);
+                            return (float)util_info.gpu;
+                        }
+                    }
+                    pShutdown();
+                }
+            }
+            FreeLibrary(nvml_dll);
+        }
+    }
+#endif
+    return -1.0f;
+}
+
 /* ============================================================================
  * 公共API实现 - 自动内核优化集成
  * =========================================================================== */
@@ -2296,7 +2765,7 @@ void gpu_kernel_cache_clear(GpuContext* context) {
             struct GpuKernel* kern = ctx->kernel_cache[i].kernel;
             if (kern->kernel_source) safe_free((void**)&kern->kernel_source);
             if (kern->kernel_name) safe_free((void**)&kern->kernel_name);
-            safe_free((void**)&kern->user_data);
+            /* ZSFEEE-FIX-DEEP-001: user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
             if (kern->arg_values) {
                 for (int a = 0; a < kern->arg_count; a++) {
                     if (kern->arg_values[a]) safe_free((void**)&kern->arg_values[a]);
@@ -2784,10 +3253,10 @@ int gpu_train_compile_kernels(GpuContext* context, const GpuTrainConfig* config)
 int gpu_sgd_update(GpuContext* context, float* weights, const float* gradients,
                    size_t size, float learning_rate, float weight_decay) {
     if (!context || !weights || !gradients || size == 0) return -1;
-    for (size_t i = 0; i < size; i++) {
-        float grad = gradients[i] + weight_decay * weights[i];
-        weights[i] -= learning_rate * grad;
-    }
+    /* ZSF999XQ-GPU-H1修复: 使用SIMD加速替代标量循环 */
+    extern void simd_sgd_update_batch(float* w, const float* g, size_t n,
+                                       float lr, float wd);
+    simd_sgd_update_batch(weights, gradients, size, learning_rate, weight_decay);
     return 0;
 }
 
@@ -2795,11 +3264,12 @@ int gpu_momentum_update(GpuContext* context, float* weights, const float* gradie
                          size_t size, float learning_rate, float momentum,
                          float* velocity, float weight_decay) {
     if (!context || !weights || !gradients || size == 0 || !velocity) return -1;
-    for (size_t i = 0; i < size; i++) {
-        float grad = gradients[i] + weight_decay * weights[i];
-        velocity[i] = momentum * velocity[i] + learning_rate * grad;
-        weights[i] -= velocity[i];
-    }
+    /* ZSF999XQ-GPU-H1修复: SIMD加速 */
+    extern void simd_momentum_update_batch(float* w, const float* g, size_t n,
+                                            float lr, float mom, float* vel,
+                                            float wd);
+    simd_momentum_update_batch(weights, gradients, size, learning_rate,
+                                momentum, velocity, weight_decay);
     return 0;
 }
 
@@ -2807,15 +3277,13 @@ int gpu_adam_update(GpuContext* context, float* weights, const float* gradients,
                     size_t size, float learning_rate, float beta1, float beta2,
                     float epsilon, int step, float* m, float* v, float weight_decay) {
     if (!context || !weights || !gradients || size == 0 || !m || !v) return -1;
-    float correction1 = 1.0f - powf(beta1, (float)step);
-    float correction2 = 1.0f - powf(beta2, (float)step);
-    float corrected_lr = learning_rate * sqrtf(correction2) / correction1;
-    for (size_t i = 0; i < size; i++) {
-        float grad = gradients[i] + weight_decay * weights[i];
-        m[i] = beta1 * m[i] + (1.0f - beta1) * grad;
-        v[i] = beta2 * v[i] + (1.0f - beta2) * grad * grad;
-        weights[i] -= corrected_lr * m[i] / (sqrtf(v[i]) + epsilon);
-    }
+    /* ZSF999XQ-GPU-H1修复: SIMD加速替代标量循环 */
+    extern void simd_adam_update_batch(float* w, const float* g, size_t n,
+                                        float lr, float b1, float b2, float eps,
+                                        int t, float* m_buf, float* v_buf,
+                                        float wd);
+    simd_adam_update_batch(weights, gradients, size, learning_rate,
+                            beta1, beta2, epsilon, step, m, v, weight_decay);
     return 0;
 }
 
@@ -2836,6 +3304,20 @@ int gpu_rmsprop_update(GpuContext* context, float* weights, const float* gradien
                 return vulkan_rmsprop_update(context, weights, gradients, cache,
                                              size, learning_rate, beta,
                                              epsilon, weight_decay);
+            break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            break;
+        case GPU_BACKEND_ASCEND:
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            break;
+        case GPU_BACKEND_TPU:
             break;
         default:
             break;
@@ -2878,6 +3360,20 @@ int gpu_cross_entropy_loss_gradient(GpuContext* context, const float* prediction
                                                           size / (size_t)num_classes,
                                                           (size_t)num_classes);
             break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            break;
+        case GPU_BACKEND_ASCEND:
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            break;
+        case GPU_BACKEND_TPU:
+            break;
         default:
             break;
     }
@@ -2902,6 +3398,30 @@ int gpu_matmul_train(GpuContext* context, const float* a, const float* b,
             if (vulkan_matmul_train != NULL)
                 return vulkan_matmul_train(context, a, b, c, (int)m, (int)n, (int)k,
                                            1.0f, 0.0f, transpose_a, transpose_b);
+            break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            if (rocm_matmul_train != NULL)
+                return rocm_matmul_train(context, a, b, c, m, n, k, 1.0f, 0.0f);
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            if (intel_matmul_train != NULL)
+                return intel_matmul_train(context, a, b, c, m, n, k, transpose_a, transpose_b);
+            break;
+        case GPU_BACKEND_ASCEND:
+            if (ascend_matmul_train != NULL)
+                return ascend_matmul_train(context, a, b, c, m, n, k, transpose_a, transpose_b);
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            if (cambricon_matmul_train != NULL)
+                return cambricon_matmul_train(context, a, b, c, m, n, k, transpose_a, transpose_b);
+            break;
+        case GPU_BACKEND_TPU:
+            if (tpu_matmul_train != NULL)
+                return tpu_matmul_train(context, a, b, c, m, n, k, transpose_a, transpose_b);
             break;
         default:
             break;
@@ -2955,6 +3475,40 @@ int gpu_forward_dense(GpuContext* context, const float* input, float* output,
                 return vulkan_forward_dense(context, input, weights, bias, output,
                                             batch_size, input_size, output_size,
                                             act_type, alpha);
+            break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            if (rocm_forward_dense != NULL)
+                return rocm_forward_dense(context, input, output, weights, bias,
+                                          batch_size, input_size, output_size,
+                                          act_type, alpha);
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            if (intel_forward_dense != NULL)
+                return intel_forward_dense(context, input, weights, bias, output,
+                                           batch_size, input_size, output_size,
+                                           act_type, alpha);
+            break;
+        case GPU_BACKEND_ASCEND:
+            if (ascend_forward_dense != NULL)
+                return ascend_forward_dense(context, input, weights, bias, output,
+                                            batch_size, input_size, output_size,
+                                            act_type, alpha);
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            if (cambricon_forward_dense != NULL)
+                return cambricon_forward_dense(context, input, weights, bias, output,
+                                               batch_size, input_size, output_size,
+                                               act_type, alpha);
+            break;
+        case GPU_BACKEND_TPU:
+            if (tpu_forward_dense != NULL)
+                return tpu_forward_dense(context, input, weights, bias, output,
+                                         batch_size, input_size, output_size,
+                                         act_type, alpha);
             break;
         default:
             break;
@@ -3224,6 +3778,35 @@ int gpu_batch_norm_forward(GpuContext* context, const float* input, float* outpu
                                                  running_mean, running_var,
                                                  epsilon, is_training);
             break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            if (rocm_batch_norm_forward != NULL) {
+                GpuBatchNormConfig bn_cfg;
+                memset(&bn_cfg, 0, sizeof(bn_cfg));
+                bn_cfg.epsilon = epsilon;
+                bn_cfg.momentum = momentum;
+                bn_cfg.affine = (gamma && beta) ? 1 : 0;
+                bn_cfg.track_running_stats = (running_mean && running_var) ? 1 : 0;
+                size_t num_elements = (size_t)batch_size * (size_t)channels * (size_t)spatial_size;
+                return rocm_batch_norm_forward(context, input, output,
+                                               gamma, beta,
+                                               (float*)running_mean, (float*)running_var,
+                                               NULL, NULL,
+                                               num_elements, (size_t)channels,
+                                               &bn_cfg, is_training);
+            }
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            break;
+        case GPU_BACKEND_ASCEND:
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            break;
+        case GPU_BACKEND_TPU:
+            break;
         default:
             break;
     }
@@ -3326,6 +3909,41 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
                 free(c_mean); free(c_var);
             }
             break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            if (rocm_batch_norm_backward != NULL) {
+                float* c_mean = (float*)malloc(channels * sizeof(float));
+                float* c_var  = (float*)malloc(channels * sizeof(float));
+                if (c_mean && c_var) {
+                    for (size_t c = 0; c < channels; c++) {
+                        c_mean[c] = 0.0f; c_var[c] = 0.0f;
+                    }
+                    GpuBatchNormConfig bn_cfg;
+                    memset(&bn_cfg, 0, sizeof(bn_cfg));
+                    bn_cfg.epsilon = epsilon;
+                    bn_cfg.momentum = 0.1f;
+                    size_t num_elements = batch_size * channels * spatial_size;
+                    int ret = rocm_batch_norm_backward(context, input, grad_output,
+                        grad_input, grad_gamma, grad_beta,
+                        c_mean, c_var, gamma,
+                        num_elements, channels, &bn_cfg);
+                    free(c_mean); free(c_var);
+                    return ret;
+                }
+                free(c_mean); free(c_var);
+            }
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            break;
+        case GPU_BACKEND_ASCEND:
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            break;
+        case GPU_BACKEND_TPU:
+            break;
         default:
             break;
     }
@@ -3423,6 +4041,22 @@ int gpu_activation_forward(GpuContext* context, const float* input, float* outpu
             if (vulkan_activation_forward != NULL)
                 return vulkan_activation_forward(context, input, output, size, act_type, alpha);
             break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            if (rocm_activation_forward != NULL)
+                return rocm_activation_forward(context, input, output, size, act_type, alpha);
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            break;
+        case GPU_BACKEND_ASCEND:
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            break;
+        case GPU_BACKEND_TPU:
+            break;
         default:
             break;
     }
@@ -3446,6 +4080,23 @@ int gpu_activation_backward(GpuContext* context, const float* input,
             if (vulkan_activation_backward != NULL)
                 return vulkan_activation_backward(context, input, grad_output, grad_input,
                                                    size, act_type, alpha);
+            break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            if (rocm_activation_backward != NULL)
+                return rocm_activation_backward(context, input, grad_output, grad_input,
+                                                 size, act_type, alpha);
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            break;
+        case GPU_BACKEND_ASCEND:
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            break;
+        case GPU_BACKEND_TPU:
             break;
         default:
             break;
@@ -3471,6 +4122,23 @@ int gpu_dropout_forward(GpuContext* context, const float* input, float* output,
                                               dropout_rate,
                                               random_seed ? *random_seed : 42,
                                               is_training);
+            break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            if (rocm_dropout_forward != NULL)
+                return rocm_dropout_forward(context, input, output, NULL, size,
+                                            dropout_rate, is_training);
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            break;
+        case GPU_BACKEND_ASCEND:
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            break;
+        case GPU_BACKEND_TPU:
             break;
         default:
             break;
@@ -3501,6 +4169,23 @@ int gpu_dropout_backward(GpuContext* context, const float* grad_output,
             if (vulkan_dropout_backward != NULL)
                 return vulkan_dropout_backward(context, grad_output, grad_input,
                                                NULL, size, dropout_rate);
+            break;
+        case GPU_BACKEND_CUDA:
+            break;
+        case GPU_BACKEND_ROCM:
+            if (rocm_dropout_backward != NULL)
+                return rocm_dropout_backward(context, grad_output, grad_input,
+                                             NULL, size, dropout_rate);
+            break;
+        case GPU_BACKEND_OPENCL:
+            break;
+        case GPU_BACKEND_INTEL:
+            break;
+        case GPU_BACKEND_ASCEND:
+            break;
+        case GPU_BACKEND_CAMBRICON:
+            break;
+        case GPU_BACKEND_TPU:
             break;
         default:
             break;

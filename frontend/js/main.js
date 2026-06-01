@@ -2,6 +2,14 @@
 var g_dataEngine = null;
 var g_usingDataEngine = false;
 
+/* L006: 统一API安全调用辅助——消除全文件typeof === 'function'重复检查 */
+window._safeApiCall = function(methodName) {
+    var api = window.SelfLnnApi;
+    if (!api) return null;
+    var fn = api[methodName];
+    return (typeof fn === 'function') ? fn.bind(api) : null;
+};
+
 /* ================================================================
  * 全局加载动画管理器 (P3-05修复)
  * 统一管理全站加载状态，避免各模块各自实现
@@ -82,6 +90,7 @@ var g_browserCompat = window.g_browserCompat || new BrowserCompat();
 
     try {
         g_dataEngine = new DataEngine();
+        loadTrainingSchedulesFromStorage();
         g_deviceManager = new DeviceManager();
         g_commandEngine = new CommandEngine();
         g_voiceCommandSystem = new VoiceCommandSystem();
@@ -111,6 +120,10 @@ var g_browserCompat = window.g_browserCompat || new BrowserCompat();
         setTimeout(function() {
             g_dataEngine.start(3000);
             LoadingOverlay.hide();
+            /* L-024修复: 页面初始化后立即同步训练历史占位文本 */
+            if (typeof updateTrainingHistoryPlaceholderState === 'function') {
+                updateTrainingHistoryPlaceholderState();
+            }
         }, 3000);
     } catch (ex) {
         LoadingOverlay.hide();
@@ -125,9 +138,15 @@ var g_dataEngineFirstConnect = true;
                     if (g_dataEngineFirstConnect) {
                         g_dataEngineFirstConnect = false;
                         g_dataEngine.registerModule('real_time_updates', 5000, pollRealTimeUpdates);
+                        g_dataEngine.registerModule('tom_display', 10000, updateTomDisplay);
                         refreshAllSections();
                         showNotification('✅ 后端服务器已连接', 'success');
                     }
+                }
+
+                /* L-024修复: 每次数据更新时同步训练历史占位文本 */
+                if (typeof updateTrainingHistoryPlaceholderState === 'function') {
+                    updateTrainingHistoryPlaceholderState();
                 }
             } catch(e) {
                 console.error('[SELF-LNN] 仪表盘更新失败:', e.message);
@@ -488,13 +507,19 @@ async function refreshRosGazeboStatus() {
 // 训练控制函数
 // =============================================================================
 
-var selectedTrainingMode = 1; // 默认模仿学习
+/* ZSFEEE-FIX-031: 从localStorage读取上次保存的训练模式，默认模仿学习(1) */
+var selectedTrainingMode = (function() {
+    var saved = localStorage.getItem('selflnn_training_mode');
+    return saved ? parseInt(saved, 10) || 1 : 1;
+})();
 
 /**
  * 选择训练模式
  */
 function selectTrainingMode(mode) {
     selectedTrainingMode = mode;
+    /* ZSFEEE-FIX-031: 用户更改时保存到localStorage */
+    localStorage.setItem('selflnn_training_mode', String(mode));
     var btns = document.querySelectorAll('.training-mode-btn');
     for (var i = 0; i < btns.length; i++) {
         btns[i].className = 'btn btn-sm training-mode-btn' + (parseInt(btns[i].getAttribute('data-mode')) === mode ? ' active' : '');
@@ -972,6 +997,8 @@ function showDisconnectedState(reason) {
     const allMetricValues = document.querySelectorAll('.metric-value, .stat-value, .type-usage, .detail-value, .progress-value');
     allMetricValues.forEach(el => {
         el.textContent = '未连接';
+        /* L-023修复: 断开时移除骨架屏动画，显示真实断开状态文本 */
+        el.classList.remove('skeleton-loading');
     });
     
     const allFills = document.querySelectorAll('.metric-fill, .type-fill, .progress-fill');
@@ -1006,6 +1033,11 @@ function showDisconnectedState(reason) {
         el.textContent = '未知';
         el.className = 'status-badge disconnected';
     });
+
+    /* L-024修复: 后端断开时更新训练历史占位文本 */
+    if (typeof updateTrainingHistoryPlaceholderState === 'function') {
+        updateTrainingHistoryPlaceholderState();
+    }
 }
 
 /**
@@ -1089,6 +1121,8 @@ function showApiUnavailableError() {
     const allMetricValues = document.querySelectorAll('.metric-value, .stat-value, .type-usage, .detail-value, .progress-value');
     allMetricValues.forEach(el => {
         el.textContent = '等待后端...';
+        /* L-023修复: 移除骨架屏动画 */
+        el.classList.remove('skeleton-loading');
     });
     
     const allFills = document.querySelectorAll('.metric-fill, .type-fill, .progress-fill');
@@ -1100,6 +1134,11 @@ function showApiUnavailableError() {
     if (statusBar) {
         statusBar.textContent = '⏳ 等待后端API连接...';
         statusBar.style.color = '#ffaa00';
+    }
+
+    /* L-024修复: API不可用时更新训练历史占位文本 */
+    if (typeof updateTrainingHistoryPlaceholderState === 'function') {
+        updateTrainingHistoryPlaceholderState();
     }
 }
 
@@ -1131,6 +1170,63 @@ function updateTrainingProgressWithError() {
         trainingDetails[1].textContent = '错误';
         trainingDetails[2].textContent = '错误';
         trainingDetails[3].textContent = '错误';
+    }
+}
+
+/**
+ * L-024修复: 根据后端连接状态动态更新训练历史占位文本
+ * 未连接时显示"等待后端连接..."，已连接但无历史时显示"暂无训练历史"
+ */
+function updateTrainingHistoryPlaceholderState() {
+    var connected = false;
+
+    /* 检查后端连接状态: 优先使用DataEngine，其次直接调用SelfLnnApi */
+    if (typeof g_dataEngine !== 'undefined' && g_dataEngine && g_dataEngine._backendConnected) {
+        connected = true;
+    } else if (window.SelfLnnApi && typeof window.SelfLnnApi.checkConnection === 'function') {
+        /* 同步快速路径：若DataEngine不可用则尝试异步检查 */
+        try {
+            window.SelfLnnApi.checkConnection().then(function(result) {
+                var isConn = result && result.connected === true;
+                _applyTrainingHistoryPlaceholderText(isConn);
+            }).catch(function() {
+                _applyTrainingHistoryPlaceholderText(false);
+            });
+            return; /* 异步路径，提前返回 */
+        } catch (e) {
+            connected = false;
+        }
+    }
+
+    _applyTrainingHistoryPlaceholderText(connected);
+}
+
+/**
+ * L-024修复: 内部辅助 — 根据连接状态设置占位文本
+ */
+function _applyTrainingHistoryPlaceholderText(connected) {
+    /* 更新训练历史图表占位符 */
+    var chartPlaceholder = document.getElementById('train-history-placeholder');
+    if (chartPlaceholder) {
+        if (connected) {
+            chartPlaceholder.textContent = '暂无训练历史';
+            chartPlaceholder.style.color = '#888';
+        } else {
+            chartPlaceholder.textContent = '等待后端连接...';
+            chartPlaceholder.style.color = '#ffaa00';
+        }
+    }
+
+    /* 更新训练历史表格占位行 */
+    var historyPlaceholderText = document.getElementById('history-list-placeholder-text');
+    if (historyPlaceholderText) {
+        if (connected) {
+            historyPlaceholderText.textContent = '暂无训练历史';
+            historyPlaceholderText.style.color = '';
+        } else {
+            historyPlaceholderText.textContent = '等待后端连接...';
+            historyPlaceholderText.style.color = '#ffaa00';
+        }
     }
 }
 
@@ -1512,7 +1608,27 @@ function updateLearningStatus(learningStatus) {
                     paragraphs[1].innerHTML = '主要组件: <strong>--</strong>';
                 }
                 
-                paragraphs[2].innerHTML = '状态: <strong style="color:#00ff88">准备就绪</strong>';
+                /* P2-004修复: 从后端真实数据获取学习状态而非硬编码"准备就绪" */
+                var learnStatus = '就绪';
+                var statusColor = '#00ff88';
+                if (learningData.status) {
+                    if (learningData.status === 'training' || learningData.status === 'active') {
+                        learnStatus = '活跃学习中';
+                        statusColor = '#00ff88';
+                    } else if (learningData.status === 'paused') {
+                        learnStatus = '已暂停';
+                        statusColor = '#ffaa00';
+                    } else if (learningData.status === 'error') {
+                        learnStatus = '异常';
+                        statusColor = '#ff5555';
+                    } else if (learningData.status === 'idle') {
+                        learnStatus = '待机';
+                        statusColor = '#88aaff';
+                    } else {
+                        learnStatus = learningData.status;
+                    }
+                }
+                paragraphs[2].innerHTML = '状态: <strong style="color:' + statusColor + '">' + learnStatus + '</strong>';
             }
         }
     } else {
@@ -1674,13 +1790,26 @@ function renderTomAgents(tomData) {
 
 /* ZSFWS-M003: 定期轮询心智理论状态并渲染 */
 function updateTomDisplay() {
-    if (typeof SelfLnnApi === 'undefined' || !SelfLnnApi.getCognitionStatus) return;
+    if (typeof SelfLnnApi === 'undefined' || !SelfLnnApi.getCognitionStatus) {
+        var container = document.getElementById('tom-agents');
+        if (container) container.innerHTML = '<div class="tom-error">API不可用，无法获取心智理论数据</div>';
+        return;
+    }
     window.SelfLnnApi.getCognitionStatus().then(function(res) {
         if (typeof SelfLnnApi === 'undefined') return;
         if (res && res.success && res.data && res.data.tom) {
             renderTomAgents(res.data.tom);
+        } else {
+            var container = document.getElementById('tom-agents');
+            if (container) container.innerHTML = '<div class="tom-error">心智理论数据获取失败：' + (res && res.error ? res.error : '后端未返回有效数据') + '</div>';
         }
-    }).catch(function(e) { console.warn('[认知] ToM更新失败:', e.message); });
+    }).catch(function(e) {
+        console.warn('[认知] ToM更新失败:', e.message);
+        var container = document.getElementById('tom-agents');
+        if (container) container.innerHTML = '<div class="tom-error">心智理论数据获取失败：' + (e.message || '网络错误') + '</div>';
+        var summaryEl = document.getElementById('tom-summary-text');
+        if (summaryEl) summaryEl.textContent = '获取失败';
+    });
 }
 
 /**
@@ -1800,7 +1929,8 @@ function updateRealTimeMetrics(systemStatus) {
     setEl('#gpu-device-name', gpu.name || '未检测');
     setEl('#gpu-memory', gpu.memory_mb ? (gpu.memory_mb/1024).toFixed(1)+' GB' : '--');
     setEl('#gpu-compute-cap', gpu.available ? '已就绪' : '未检测');
-    setEl('#gpu-cuda-version', gpu.usage ? gpu.usage.toFixed(1)+'%' : '--');
+    /* P2-002修复: GPU不可用时usage=-1应显示为'不可用'而非'-1.0%' */
+    setEl('#gpu-cuda-version', (gpu.usage != null && gpu.usage >= 0) ? gpu.usage.toFixed(1)+'%' : '不可用');
     
     // === LNN状态空间（模型管理页卡） ===
     var lnnMod = mods.lnn || {};
@@ -1971,6 +2101,8 @@ function setEl(sel, val, prop) {
     for (var i=0; i<els.length; i++) {
         if (prop === 'width') els[i].style.width = val;
         else els[i].textContent = val;
+        /* L-023修复: 更新数据时同步移除骨架屏加载类 */
+        els[i].classList.remove('skeleton-loading');
     }
 }
 
@@ -2452,7 +2584,7 @@ Ctrl + H: 显示帮助
 - 系统设置: 配置系统参数
     `;
     
-    alert(helpMessage);
+    SelfLnnNotify.show(helpMessage.replace(/\n/g, '<br>'), 'info', 12000);
 }
 
 /* ===== 全局工具函数 - setText/setWidth（供 index.html 内联脚本使用） ===== */
@@ -2902,7 +3034,7 @@ async function executeAction(action) {
 function createNewTask() {
     showNotification('创建新任务...', 'info');
     
-    const taskName = prompt('请输入任务名称:');
+    const taskName = await promptAsync('请输入任务名称:');
     if (taskName) {
         /* 调用后端API创建任务 */
         if (window.SelfLnnApi && typeof window.SelfLnnApi.createTask === 'function') {
@@ -3819,7 +3951,7 @@ async function testMultimodalProcessing() {
         /* 尝试从摄像头获取真实图像帧 */
         let visionData = null;
         let audioData = null;
-        let textData = { content: '' };
+        let textData = { content: '' }; /* 文本模态：由用户通过对话输入框提供真实文本，此处为空占位 */
         
         /* 尝试从摄像头获取真实图像帧（使用正确的DeviceManager API） */
         if (g_deviceManager && typeof g_deviceManager.captureSnapshot === 'function') {
@@ -4242,10 +4374,10 @@ async function addKnowledgeEntry() {
             // 完整实现：提供用户界面以收集知识条目信息
             // 使用浏览器原生prompt函数获取用户输入（这是合理的实现，符合项目要求）
             // 在更完善的系统中，可以扩展为模态框或表单界面
-            const entryType = prompt('请选择知识条目类型 (fact/rule/concept/relation):', 'fact');
+            const entryType = await promptAsync('请选择知识条目类型 (fact/rule/concept/relation):', 'fact');
             if (!entryType) return;
             
-            const content = prompt('请输入知识内容:');
+            const content = await promptAsync('请输入知识内容:');
             if (!content) return;
             
             showNotification('正在添加知识条目...', 'info');
@@ -4290,7 +4422,7 @@ async function viewKnowledgeDetail(id) {
                     container.innerHTML = html;
                     container.style.display = 'block';
                 } else {
-                    alert(entry.content || entry.description || '无内容');
+                    SelfLnnNotify.show(entry.content || entry.description || '无内容', 'info', 5000);
                 }
             } else {
                 showNotification('知识条目未找到', 'warning');
@@ -5068,59 +5200,102 @@ async function startHyperparameterSearch() {
 /**
  * 轮询超参数搜索状态
  */
+/* ZSF-FE-M025: 超参数轮询回调注册到DataEngine统一管理 */
+var _hpPollCount = 0;
+var _hpMaxPolls = 60;
+
 function pollHyperparameterStatus() {
-    let pollCount = 0;
-    const maxPolls = 60;
-    
-    const interval = setInterval(async () => {
-        pollCount++;
-        
-        if (pollCount > maxPolls || !hyperparameterOptimizer) {
-            clearInterval(interval);
-            return;
+    _hpPollCount = 0;
+    _hpMaxPolls = 60;
+    if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
+        g_dataEngine.registerModule('hyperparameter_poll', 5000, _hpPollTick);
+    } else {
+        var hpInterval = setInterval(function() {
+            _hpPollTick();
+            if (_hpPollCount > _hpMaxPolls || !hyperparameterOptimizer) {
+                clearInterval(hpInterval);
+            }
+        }, 5000);
+    }
+}
+
+async function _hpPollTick() {
+    _hpPollCount++;
+    if (_hpPollCount > _hpMaxPolls || !hyperparameterOptimizer) {
+        if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
+            g_dataEngine.unregisterModule('hyperparameter_poll');
         }
-        
-        try {
-            if (window.SelfLnnApi && typeof window.SelfLnnApi.getHyperparameterStatus === 'function') {
-                const status = await window.SelfLnnApi.getHyperparameterStatus(hyperparameterOptimizer.id);
-                
-                if (status.success && status.data) {
-                    const hpStatus = status.data;
-                    
-                    const hpProgress = document.getElementById('hp-search-progress');
-                    if (hpProgress) {
-                        const pct = (hpStatus.completed_trials / hpStatus.total_trials) * 100;
-                        hpProgress.style.width = `${pct}%`;
-                        hpProgress.textContent = `${hpStatus.completed_trials}/${hpStatus.total_trials}`;
+        return;
+    }
+    try {
+        if (window.SelfLnnApi && typeof window.SelfLnnApi.getHyperparameterStatus === 'function') {
+            var status = await window.SelfLnnApi.getHyperparameterStatus(hyperparameterOptimizer.id);
+            if (status.success && status.data) {
+                var hpStatus = status.data;
+                var hpProgress = document.getElementById('hp-search-progress');
+                if (hpProgress) {
+                    var pct = (hpStatus.completed_trials / hpStatus.total_trials) * 100;
+                    hpProgress.style.width = pct + '%';
+                    hpProgress.textContent = hpStatus.completed_trials + '/' + hpStatus.total_trials;
+                }
+                var bestResult = document.getElementById('hp-best-result');
+                if (bestResult && hpStatus.best_trial) {
+                    bestResult.textContent = '最佳: ' + hpStatus.best_trial.metric_value.toFixed(4) + ' (' + hpStatus.best_trial.params.learning_rate.toExponential() + ')';
+                }
+                if (hpStatus.completed_trials >= hpStatus.total_trials) {
+                    if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
+                        g_dataEngine.unregisterModule('hyperparameter_poll');
                     }
-                    
-                    const bestResult = document.getElementById('hp-best-result');
-                    if (bestResult && hpStatus.best_trial) {
-                        bestResult.textContent = `最佳: ${hpStatus.best_trial.metric_value.toFixed(4)} (${hpStatus.best_trial.params.learning_rate.toExponential()})`;
-                    }
-                    
-                    if (hpStatus.completed_trials >= hpStatus.total_trials) {
-                        clearInterval(interval);
-                        showNotification('✅ 超参数搜索完成', 'success');
-                    }
+                    showNotification('✅ 超参数搜索完成', 'success');
                 }
             }
-        } catch (error) {
-            console.error('轮询超参数状态失败:', error);
         }
-    }, 5000);
+    } catch (error) {
+        console.error('轮询超参数状态失败:', error);
+    }
 }
 
 /**
  * 训练计划管理器
+ * ZSFDDD-P1-006: 添加本地持久化（localStorage）防止页面刷新后数据丢失
  */
 let trainingSchedules = [];
 
 /**
+ * 持久化保存训练计划到本地存储和后端
+ */
+function persistTrainingSchedules() {
+    try {
+        localStorage.setItem('selflnn_training_schedules', JSON.stringify(trainingSchedules));
+        SelfLnnApi.request('/system/config/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'training_schedules', value: JSON.stringify(trainingSchedules) })
+        }).catch(function() { });
+    } catch(e) { }
+}
+
+/**
+ * 从本地存储加载训练计划
+ */
+function loadTrainingSchedulesFromStorage() {
+    try {
+        var saved = localStorage.getItem('selflnn_training_schedules');
+        if (saved) {
+            var parsed = JSON.parse(saved);
+            if (Array.isArray(parsed)) {
+                trainingSchedules = parsed;
+                renderTrainingSchedules();
+            }
+        }
+    } catch(e) { trainingSchedules = []; }
+}
+
+/**
  * 创建训练计划
  */
-function createTrainingSchedule() {
-    const scheduleName = prompt('请输入训练计划名称:');
+async function createTrainingSchedule() {
+    const scheduleName = await promptAsync('请输入训练计划名称:');
     if (!scheduleName) return;
     
     const schedule = {
@@ -5135,6 +5310,7 @@ function createTrainingSchedule() {
     };
     
     trainingSchedules.push(schedule);
+    persistTrainingSchedules();
     renderTrainingSchedules();
     showNotification(`训练计划 "${scheduleName}" 已创建`, 'success');
 }
@@ -5193,6 +5369,7 @@ async function startSchedule(scheduleId) {
     if (!schedule) return;
     
     schedule.status = 'running';
+    persistTrainingSchedules();
     renderTrainingSchedules();
     showNotification(`训练计划 "${schedule.name}" 已开始`, 'success');
     
@@ -5209,6 +5386,7 @@ async function pauseSchedule(scheduleId) {
     if (!schedule) return;
     
     schedule.status = 'paused';
+    persistTrainingSchedules();
     renderTrainingSchedules();
     showNotification(`训练计划 "${schedule.name}" 已暂停`, 'warning');
 }
@@ -5218,6 +5396,7 @@ async function pauseSchedule(scheduleId) {
  */
 function deleteSchedule(scheduleId) {
     trainingSchedules = trainingSchedules.filter(s => s.id !== scheduleId);
+    persistTrainingSchedules();
     renderTrainingSchedules();
     showNotification('训练计划已删除', 'info');
 }
@@ -5386,11 +5565,11 @@ function selectRobot(robotId) {
 /**
  * 分配任务给机器人
  */
-function assignTask(robotId) {
+async function assignTask(robotId) {
     const robot = robotFleet[robotId];
     if (!robot) return;
     
-    const taskDesc = prompt(`为 ${robot.name} 分配任务:`, '');
+    const taskDesc = await promptAsync(`为 ${robot.name} 分配任务:`, '');
     if (!taskDesc) return;
     
     robot.task = taskDesc;
@@ -5430,7 +5609,7 @@ function emergencyStopRobot(robotId) {
 let robotGroups = {};
 
 function createRobotGroup() {
-    const groupName = prompt('请输入机器人组名称:');
+    const groupName = await promptAsync('请输入机器人组名称:');
     if (!groupName) return;
     
     const groupId = `group-${Date.now()}`;
@@ -5476,7 +5655,7 @@ function renderRobotGroups() {
 /**
  * 添加机器人到组
  */
-function addRobotToGroup(groupId) {
+async function addRobotToGroup(groupId) {
     const group = robotGroups[groupId];
     if (!group) return;
     
@@ -5486,7 +5665,7 @@ function addRobotToGroup(groupId) {
         return;
     }
     
-    const robotId = prompt(`可添加的机器人: ${availableRobots.join(', ')}\n请输入机器人ID:`);
+    const robotId = await promptAsync(`可添加的机器人: ${availableRobots.join(', ')}\n请输入机器人ID:`);
     if (!robotId || !robotFleet[robotId]) {
         showNotification('无效的机器人ID', 'warning');
         return;
@@ -6172,8 +6351,8 @@ function triggerVisionInput() {
         showNotification('请先启用摄像头并获取画面', 'warning');
         return;
     }
-    window.SelfLnnApi.request('/vision', { method: 'POST', body: JSON.stringify({ image: imageData }) })
-        .then(function(r) { return r ? r.json() : null; })
+    /* ZSFQQ-FE-001修复: 使用封装API而非直接调用request() */
+    window.SelfLnnApi.processVisionInput({ image: imageData })
         .then(function(data) {
             if (input) input.value += '\n[视觉输入已处理]';
         })
@@ -6216,8 +6395,8 @@ function triggerSensorInput() {
         return;
     }
     var input = document.getElementById('dialogue-input');
-    window.SelfLnnApi.request('/sensor/pipeline/status', { method: 'GET' })
-        .then(function(r) { return r ? r.json() : null; })
+    /* ZSFQQ-FE-001修复: 使用封装API而非直接调用request() */
+    window.SelfLnnApi.getSensorPipelineStatus()
         .then(function(data) {
             if (input) input.value += '\n[传感器数据已请求]';
             showNotification('传感器输入已触发', 'success');
@@ -6472,7 +6651,7 @@ async function refreshSystemInfo() {
  * 加载新模型
  */
 async function loadNewModel() {
-    var modelName = prompt('请输入要加载的模型名称:', 'lnn-core');
+    var modelName = await promptAsync('请输入要加载的模型名称:', 'lnn-core');
     if (!modelName) return;
     showNotification('正在加载模型: ' + modelName, 'info');
     try {
@@ -6876,14 +7055,14 @@ async function saveGeneralSettings() {
  * 修改密码
  */
 async function changePassword() {
-    var oldPwd = prompt('请输入当前密码:');
+    var oldPwd = await promptAsync('请输入当前密码:');
     if (!oldPwd) return;
-    var newPwd = prompt('请输入新密码:');
+    var newPwd = await promptAsync('请输入新密码:');
     if (!newPwd || newPwd.length < 6) {
         showNotification('密码长度至少6位', 'error');
         return;
     }
-    var confirmPwd = prompt('请再次输入新密码:');
+    var confirmPwd = await promptAsync('请再次输入新密码:');
     if (newPwd !== confirmPwd) {
         showNotification('两次输入密码不一致', 'error');
         return;
@@ -7135,7 +7314,7 @@ async function refreshMemoryStats() {
 
 /* ===== 记忆条目 - 添加 ===== */
 async function addMemoryEntry() {
-    var content = prompt('请输入记忆内容:');
+    var content = await promptAsync('请输入记忆内容:');
     if (!content) return;
     var type = document.getElementById('memory-type-filter') ? document.getElementById('memory-type-filter').value : 'short-term';
     showNotification('正在添加记忆...', 'info');
@@ -7180,7 +7359,7 @@ async function viewMemoryDetails(id) {
                     container.innerHTML = html;
                     container.style.display = 'block';
                 } else {
-                    alert(entry.content || entry.description || '无内容');
+                    SelfLnnNotify.show(entry.content || entry.description || '无内容', 'info', 5000);
                 }
             } else {
                 showNotification('记忆条目未找到', 'warning');
@@ -7197,7 +7376,7 @@ async function viewMemoryDetails(id) {
  * 编辑记忆条目
  */
 async function editMemoryEntry(id) {
-    var newContent = prompt('请输入新的记忆内容:');
+    var newContent = await promptAsync('请输入新的记忆内容:');
     if (!newContent) return;
     showNotification('正在更新记忆...', 'info');
     try {
@@ -7446,6 +7625,15 @@ window.showNotification = function(message, type, duration) {
     return SelfLnnNotify.show(message, type, duration);
 };
 
+/* ZSFAI-M06: promptAsync() — 将异步SelfLnnNotify.prompt封装为Promise，支持await调用 */
+function promptAsync(message, defaultValue) {
+    return new Promise(function(resolve) {
+        SelfLnnNotify.prompt(message, defaultValue || '', function(val) {
+            resolve(val !== null && val !== undefined ? val : null);
+        });
+    });
+}
+
 /* FIX-FRONTEND-001: 安全设置保存函数(index.html中onchange引用) */
 window.saveSafetySetting = function(key, value) {
     try {
@@ -7506,7 +7694,9 @@ console.warn = function() {
 };
 
 /* ================================================================
- * prompt() 兼容层 — 嵌入式浏览器不支持原生prompt
+ * ZSFAI-M06: prompt() 兼容层 — 统一使用SelfLnnNotify.prompt模态框
+ * 所有原本依赖原生prompt()的代码已迁移至promptAsync()异步调用。
+ * 此兼容层仅保留兜底，确保未迁移代码不会静默失败。
  * ================================================================ */
 /* ZSF-FE-010: 保存原生prompt引用，避免后续覆盖丢失 */
 if (typeof window._nativePrompt === 'undefined') {
@@ -7518,9 +7708,17 @@ window.prompt = function(msg, defVal) {
             !navigator.userAgent.includes('Trae')) {
             return window._nativePrompt(msg, defVal);
         }
-    } catch(e) { console.error('[prompt兼容层] _nativePrompt调用失败:', e&&e.message?e.message:e); }
-    console.warn('[prompt兼容层] 异步提示弹窗已触发，因原生prompt不可用。请使用SelfLnnNotify.prompt进行异步交互。');
-    SelfLnnNotify.prompt(msg || '', defVal || '', function(val) {});
+    } catch(e) { console.error('[ZSFAI-M06] _nativePrompt调用失败:', e&&e.message?e.message:e); }
+    SelfLnnLog.warn('[ZSFAI-M06] 检测到未迁移的prompt()调用，自动降级使用SelfLnnNotify.prompt。请将调用方改用promptAsync()。');
+    SelfLnnNotify.prompt(msg || '', defVal || '', function(val) {
+        var msg2 = '[ZSFAI-M06] prompt()兼容层收到用户输入"' + (val || '') +
+                   '"，但调用方未迁移至异步模式，输入值已通过window._promptLastResult临时存储。' +
+                   '请迁移至promptAsync()。';
+        SelfLnnLog.warn(msg2);
+        if (val && val.trim && val.trim()) {
+            window._promptLastResult = val;
+        }
+    });
     return defVal || '';
 };
 async function refreshReasoningStats() {
@@ -7565,7 +7763,7 @@ async function refreshReasoningStats() {
 
 /* ===== 推理任务 - 新建任务 ===== */
 async function startNewReasoning() {
-    var content = prompt('输入推理问题或任务描述:');
+    var content = await promptAsync('输入推理问题或任务描述:');
     if (!content) return;
     var priority = document.getElementById('reasoning-priority') ? document.getElementById('reasoning-priority').value : 'medium';
     showNotification('正在创建推理任务...', 'info');
@@ -7758,7 +7956,7 @@ async function refreshLearningMetrics() {
                     
                     // 直接设置所有关键元素（P3-004修复: 移除骨架屏类）
                     var set = function(id, val) { var e=document.getElementById(id); if(e){e.textContent=val; e.classList.remove('skeleton-loading');} };
-                    var setQ = function(sel, val) { var e=document.querySelector(sel); if(e)e.textContent=val; };
+                    var setQ = function(sel, val) { var e=document.querySelector(sel); if(e){e.textContent=val; e.classList.remove('skeleton-loading');} };
                     
                     // R3-02修复: 从API返回数据动态判断，不再硬编码'运行正常'
                     var healthText = '运行正常';
@@ -7805,7 +8003,40 @@ async function refreshLearningMetrics() {
                         var totalMem = (mem.total||0)/(1024*1024);
                         setQ('.metric:nth-child(2) .metric-value', totalMem.toFixed(1)+' MB');
                     }
-                    
+
+                    /* ZSFQQ-Q014修复: 系统日志面板自动刷新 + ZSFDDD-D2-002修复: 使用正确的/system/logs端点 */
+                    try {
+                        var logResp = await window.SelfLnnApi.request('/system/logs?lines=50');
+                        if (logResp && logResp.ok) {
+                            var logData = await logResp.json();
+                            var logPanel = document.getElementById('sys-log-content');
+                            if (logPanel) {
+                                var entries = (logData && logData.logs) ? logData.logs :
+                                    (Array.isArray(logData) ? logData : []);
+                                if (entries && entries.length > 0) {
+                                    logPanel.innerHTML = entries.map(function(l) {
+                                        var ts = l.timestamp || l.time || '';
+                                        var msg = l.message || l.msg || l.text || String(l);
+                                        var lvl = (l.level || '').toUpperCase();
+                                        var color = (lvl === 'ERROR' || lvl === 'FATAL') ? '#ff4444' :
+                                            (lvl === 'WARNING' || lvl === 'WARN') ? '#ffaa00' : '#aaa';
+                                        return '<div style="margin:2px 0;color:' + color +
+                                            '"><span style="color:#666">' + (window.escapeHtml ? window.escapeHtml(String(ts)) : ts) +
+                                            '</span> ' + (window.escapeHtml ? window.escapeHtml(String(msg)) : msg) +
+                                            '</div>';
+                                    }).join('');
+                                } else {
+                                    logPanel.innerHTML = '<div style="color:#666">暂无系统日志</div>';
+                                }
+                            }
+                        }
+                    } catch(logErr) { /* 日志刷新静默失败 */ }
+
+                    /* L-024修复: 数据刷新后更新训练历史占位文本（区分连接状态和无数据状态） */
+                    if (typeof updateTrainingHistoryPlaceholderState === 'function') {
+                        updateTrainingHistoryPlaceholderState();
+                    }
+
                 } catch(e) { console.warn('[可靠更新器] 失败:', e.message); }
             }
             
@@ -7976,7 +8207,7 @@ async function sendDeviceCmd(deviceId, command) {
 }
 
 async function setDeviceMode(deviceId) {
-    var mode = prompt('输入模式 (manual/auto/semi/swarm):', 'auto');
+    var mode = await promptAsync('输入模式 (manual/auto/semi/swarm):', 'auto');
     if (!mode) return;
     try {
         var data = await SelfLnnApi.deviceSetMode(deviceId, mode);
@@ -7995,11 +8226,34 @@ async function setGlobalMode() {
 }
 
 async function scanHardware() {
-    if (typeof HardwareScanUtil === 'undefined') return;
-    var result = await HardwareScanUtil.scanAll(false);
-    var gpu = document.getElementById('gpu-count'); if (gpu) gpu.textContent = result.gpu.count;
-    var cpu = document.getElementById('cpu-cores'); if (cpu) cpu.textContent = result.cpu.cores;
-    var mem = document.getElementById('total-memory'); if (mem) mem.textContent = result.memory.total_gb > 0 ? result.memory.total_gb.toFixed(1) + ' GB' : 'N/A';
+    if (typeof HardwareScanUtil === 'undefined') {
+        var gpu2 = document.getElementById('gpu-count'); if (gpu2) gpu2.textContent = '工具未加载';
+        return;
+    }
+    var gpu3 = document.getElementById('gpu-count'); if (gpu3) gpu3.textContent = '扫描中...';
+    var cpu2 = document.getElementById('cpu-cores'); if (cpu2) cpu2.textContent = '扫描中...';
+    var mem2 = document.getElementById('total-memory'); if (mem2) mem2.textContent = '扫描中...';
+    var cam2 = document.getElementById('camera-status'); if (cam2) cam2.textContent = '扫描中...';
+    var mic2 = document.getElementById('mic-status'); if (mic2) mic2.textContent = '扫描中...';
+    try {
+        var result = await HardwareScanUtil.scanAll(false);
+        var gpu = document.getElementById('gpu-count'); if (gpu) gpu.textContent = result.gpu.count > 0 ? result.gpu.count : (result.gpu.count === 0 ? '未检测到GPU' : '未连接');
+        var cpu = document.getElementById('cpu-cores'); if (cpu) cpu.textContent = result.cpu.cores > 0 ? result.cpu.cores : (result.cpu.available ? '未检测到' : '未连接');
+        var mem = document.getElementById('total-memory'); if (mem) mem.textContent = result.memory.total_gb > 0 ? result.memory.total_gb.toFixed(1) + ' GB' : (result.memory.available ? '未检测到' : '未连接');
+        var cam = document.getElementById('camera-status'); if (cam) cam.textContent = result.camera.detected ? '已检测(' + result.camera.count + '个)' : '未检测到';
+        var mic = document.getElementById('mic-status'); if (mic) mic.textContent = result.microphone.detected ? '已检测(' + result.microphone.count + '个)' : '未检测到';
+        if (result.backendOnline) {
+            showNotification('硬件扫描完成', 'success');
+        }
+    } catch (e) {
+        var gpu4 = document.getElementById('gpu-count'); if (gpu4) gpu4.textContent = '扫描失败';
+        var cpu3 = document.getElementById('cpu-cores'); if (cpu3) cpu3.textContent = '扫描失败';
+        var mem3 = document.getElementById('total-memory'); if (mem3) mem3.textContent = '扫描失败';
+        var cam3 = document.getElementById('camera-status'); if (cam3) cam3.textContent = '扫描失败';
+        var mic3 = document.getElementById('mic-status'); if (mic3) mic3.textContent = '扫描失败';
+        console.error('硬件扫描失败:', e);
+        showNotification('硬件扫描失败: ' + (e.message || '未知错误'), 'danger');
+    }
 }
 
 async function applyConfig() {
@@ -8011,19 +8265,20 @@ async function applyConfig() {
 }
 
 async function registerDevice() {
-    var name = prompt('设备名称:');
+    var name = await promptAsync('设备名称:');
     if (!name) return;
-    var type = prompt('设备类型 (robot/camera/sensor):', 'robot');
+    var type = await promptAsync('设备类型 (robot/camera/sensor):', 'robot');
     if (!type) return;
     try {
-        var data = await SelfLnnApi.registerDevice({ name: name, type: type });
+        var deviceId = 'dev_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
+        var data = await SelfLnnApi.registerDevice(deviceId, type, name);
         showNotification(data.success ? '设备注册成功' : '注册失败', data.success ? 'success' : 'danger');
         refreshDevices();
     } catch(e) { showNotification('连接失败', 'danger'); }
 }
 
 async function unregisterDevice() {
-    var id = prompt('设备ID:');
+    var id = await promptAsync('设备ID:');
     if (!id) return;
     try {
         var data = await SelfLnnApi.unregisterDevice(id);
@@ -8037,8 +8292,14 @@ var _safetyPollTimer = null;
 
 async function pollSafety() {
     try {
-        var data = await SelfLnnApi.getSecurityStatus ? SelfLnnApi.getSecurityStatus() : SelfLnnApi.request('/safety/status');
-        if (data && data.safety) updateSafetyUI(data.safety);
+        /* ZSFDDD-D5修复: getSecurityStatus现在调用/safety/status返回{success,data}，
+         * data格式: {level,level_name,safety_score,total_events,...} */
+        var result = await (SelfLnnApi.getSecurityStatus ? SelfLnnApi.getSecurityStatus() : Promise.resolve(null));
+        if (!result || !result.success) {
+            var resp = await SelfLnnApi.request('/safety/status');
+            result = { success: true, data: await resp.json() };
+        }
+        if (result && result.data) updateSafetyUI(result.data);
     } catch(e) { console.warn('[安全] 轮询失败:', e.message); }
 }
 
@@ -8056,8 +8317,9 @@ function updateSafetyUI(safety) {
 async function softStop() {
     if (!confirm('确认执行软停止？')) return;
     try {
-        var data = await SelfLnnApi.request('/safety/emergency_stop', { method: 'POST', body: JSON.stringify({ type: 'soft' }) });
-        showNotification(data && data.safety ? '软停止已执行' : '软停止请求已发送', data && data.safety ? 'success' : 'info');
+        var resp = await SelfLnnApi.request('/safety/emergency_stop', { method: 'POST', body: JSON.stringify({ type: 'soft' }) });
+        var d = await resp.json();
+        showNotification(d && d.safety ? '软停止已执行' : '软停止请求已发送', d && d.safety ? 'success' : 'info');
     } catch(e) { showNotification('连接失败', 'danger'); }
 }
 
@@ -8073,12 +8335,13 @@ var skillsData = [];
 
 async function loadSkills() {
     try {
-        var data = await SelfLnnApi.request('/skills');
-        if (data && data.skills) {
-            skillsData = data.skills;
+        var resp = await SelfLnnApi.request('/skills');
+        var d = await resp.json();
+        if (d && d.skills) {
+            skillsData = d.skills;
             /* ZSFZS-F048修复: 始终确保renderSkillList已定义再调用 */
             if (typeof renderSkillList === 'function') renderSkillList();
-            updateStats(data);
+            updateStats(d);
         }
     } catch(e) { console.warn('[技能] 加载失败:', e.message); }
 }
@@ -8132,8 +8395,9 @@ async function testSkill(index) {
     if (index < 0 || index >= skillsData.length) return;
     var s = skillsData[index];
     try {
-        var data = await SelfLnnApi.request('/skills/execute', { method: 'POST', body: JSON.stringify({ skill_id: s.id||index }) });
-        showNotification(data.success ? '技能执行成功' : '执行失败', data.success ? 'success' : 'warning');
+        var resp = await SelfLnnApi.request('/skills/execute', { method: 'POST', body: JSON.stringify({ skill_id: s.id||index }) });
+        var d = await resp.json();
+        showNotification(d && d.success ? '技能执行成功' : '执行失败', d && d.success ? 'success' : 'warning');
     } catch(e) { showNotification('执行出错: ' + e.message, 'danger'); }
 }
 }
@@ -8208,8 +8472,12 @@ async function sendTextCommand() {
     var text = inp ? inp.value.trim() : '';
     if (!text) { showNotification('请输入指令', 'warning'); return; }
     try {
-        var result = await SelfLnnApi.request('/device/command', { method: 'POST', body: JSON.stringify({ command: text }) });
-        showNotification(result && result.success ? '指令已执行' : '指令执行失败', result && result.success ? 'success' : 'warning');
+        var resp = await SelfLnnApi.request('/device/command', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_type: 'text_terminal', command: text }) });
+        var d = await resp.json();
+        var ok = d && d.device_command && d.device_command.status === 'ok';
+        showNotification(ok ? '指令已执行' : '指令执行失败', ok ? 'success' : 'warning');
     } catch(e) { console.error('[文字指令] 请求失败:', e.message, e.stack); showNotification('连接失败', 'danger');
     }
 }
@@ -8228,9 +8496,15 @@ async function startMultimodalLearn() {
         if (data.success) {
             /* FIX-JS-006: 先清理旧定时器再设置新的 */
             if (window.multimodalPollTimer) clearInterval(window.multimodalPollTimer);
-            window.multimodalPollTimer = setInterval(function() {
-                if (typeof pollMultimodal === 'function') pollMultimodal();
-            }, 2000);
+            if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
+                g_dataEngine.registerModule('multimodal_learn_poll', 2000, function() {
+                    if (typeof pollMultimodal === 'function') pollMultimodal();
+                });
+            } else {
+                window.multimodalPollTimer = setInterval(function() {
+                    if (typeof pollMultimodal === 'function') pollMultimodal();
+                }, 2000);
+            }
         }
     } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
 }

@@ -327,31 +327,27 @@ class AGIController {
         }
     }
 
-    /* ZSFUSA-F05: 内部API路径约定
-     * _apiPost/_apiGet 使用不带 /api/ 前缀的相对路径。
-     * api-service.js 的 baseURL 自动添加 /api 前缀。
-     * 新增端点时注意遵循此约定。
-     *
-     * ZSFABC-001修复: api-service.js.request()已自动添加baseURL(/api)前缀，
-     * 故此处传入endpoint不应再含/api前缀，否则产生双重/api/api/xxx导致404 */
+    /* ZSFAI-M08: API端点前缀剥离统一由api-service.js处理。
+     * _apiPost/_apiGet 直接传递端点给 SelfLnnApi.request()，
+     * api-service.js.request() 负责自动剥离 /api/ 前缀并拼接 baseURL。
+     * 此处不再重复剥离，避免冗余逻辑。 */
     async _apiPost(endpoint, data) {
         try {
             if (!window.SelfLnnApi) {
                 throw new Error('API服务不可用');
             }
-            var fixedEndpoint = endpoint;
-            if (fixedEndpoint.indexOf('/api/') === 0) {
-                fixedEndpoint = fixedEndpoint.substring(4);
-            }
-            const response = await window.SelfLnnApi.request(fixedEndpoint, {
+            const response = await window.SelfLnnApi.request(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
             });
-            if (!response.ok) {
-                throw new Error('请求失败: HTTP ' + response.status);
+            if (response && typeof response.json === 'function') {
+                if (!response.ok) {
+                    throw new Error('请求失败: HTTP ' + response.status);
+                }
+                return await response.json();
             }
-            return await response.json();
+            return response;
         } catch (err) {
             console.warn('API请求失败:', endpoint, err.message);
             document.dispatchEvent(new CustomEvent('agi-control-error', {
@@ -366,15 +362,14 @@ class AGIController {
             if (!window.SelfLnnApi) {
                 throw new Error('API服务不可用');
             }
-            var fixedEndpoint = endpoint;
-            if (fixedEndpoint.indexOf('/api/') === 0) {
-                fixedEndpoint = fixedEndpoint.substring(4);
+            const response = await window.SelfLnnApi.request(endpoint, { method: 'GET' });
+            if (response && typeof response.json === 'function') {
+                if (!response.ok) {
+                    throw new Error('请求失败: HTTP ' + response.status);
+                }
+                return await response.json();
             }
-            const response = await window.SelfLnnApi.request(fixedEndpoint, { method: 'GET' });
-            if (!response.ok) {
-                throw new Error('请求失败: HTTP ' + response.status);
-            }
-            return await response.json();
+            return response;
         } catch (err) {
             console.warn('API请求失败:', endpoint, err.message);
             throw err;

@@ -37,10 +37,14 @@ var SUBSYSTEM_ENDPOINT_MAP = {
     '/safety':        'safety',
     '/files':         'files',
     '/device':        'device',
+    '/devices':       'device',
     '/computer':      'computer',
     '/serial':        'serial',
     '/hyperparam':    'training',
     '/checkpoint':    'training',
+    '/product':       'product_design',
+    '/skills':        'knowledge',
+    '/logs':          'system',
     '/api':           'system'
 };
 
@@ -65,7 +69,7 @@ class ApiService {
 
         /* 客户端熔断器：监控后端子系统健康状态，熔断时直接报错不做降级 */
         this.circuitBreakers = {
-            general:  { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 50, resetTimeoutMs: 5000 },
+            general:  { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 15, resetTimeoutMs: 5000 }, /* ZSFEEE-FIX-032: 阈值从50降低到15 */
             reasoning: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 25, resetTimeoutMs: 15000 },
             learning: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
             knowledge: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
@@ -846,15 +850,22 @@ class ApiService {
     
     /**
      * 开始演化
+     * ZSFDDD-D2-010修复: 后端期望扁平字段(population_size/generations/mutation_rate)，非嵌套config对象
      */
     async startEvolution(evolutionConfig) {
         try {
+            var cfg = evolutionConfig || {};
             const response = await this.request('/agi/evolve', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ config: evolutionConfig })
+                body: JSON.stringify({
+                    generations: cfg.generations || cfg.max_generations || 100,
+                    population_size: cfg.population_size || 50,
+                    mutation_rate: cfg.mutation_rate || 0.01,
+                    crossover_rate: cfg.crossover_rate || 0.7
+                })
             });
             
             if (!response.ok) {
@@ -1852,15 +1863,16 @@ class ApiService {
     }
 
     async getSecurityStatus() {
+        /* ZSFDDD-D2-003修复: 原调用/status通用端点改为/safety/status安全专用端点 */
         try {
-            const response = await this.request('/status');
+            const response = await this.request('/safety/status');
             if (!response.ok) {
-                throw new Error('HTTP\u9519\u8BEF: ' + response.status);
+                throw new Error('HTTP错误: ' + response.status);
             }
             const data = await response.json();
             return { success: true, data: data };
         } catch (error) {
-            console.error('获取系统状态失败:', error);
+            console.error('获取安全状态失败:', error);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -2340,15 +2352,16 @@ class ApiService {
 
     /**
      * 添加仿真机器人到3D视图中
+     * ZSFDDD-D2-005修复: 原调/simulation/robot_control(不存在的路由)→改为/simulation/robot/add
      * @param {object} params - { x, y, z, urdf, model_name }
      */
     async addSimulationRobot(params) {
         try {
             var pos = params || { x: 0, y: 0, z: 0 };
-            const response = await this.request('/simulation/robot_control', {
+            const response = await this.request('/simulation/robot/add', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'add_robot', position: pos, urdf: params.urdf || null, model_name: params.model_name || 'robot' })
+                body: JSON.stringify({ name: params.model_name || 'custom_robot', urdf: params.urdf || null })
             });
             if (!response.ok) throw new Error('HTTP ' + response.status);
             const data = await response.json();
@@ -3934,6 +3947,32 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* ==================== 拉普拉斯频域分析 API ==================== */
+    /* H007: 拉普拉斯分析端点前端调用方 */
+    async laplaceSpectrum(params) {
+        try {
+            var p = params || {};
+            var resp = await this.request('/laplace/spectrum', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(p)
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    async laplaceAdaptiveLR(params) {
+        try {
+            var p = params || {};
+            var resp = await this.request('/laplace/adaptive-lr', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(p)
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data, adaptive_lr: data.adaptive_lr };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     /* ==================== 密钥管理增强 API ==================== */
     /* ZSFAAA-DEEP-010修复: 删除与第一组重复的getKeyList/keyCreate/keyDelete/keySet */
 
@@ -5138,7 +5177,7 @@ class ApiService {
 
     /**
      * 恢复/继续AGI任务
-     * 调用 POST /api/agi/task/resume
+     * 调用 POST /api/task/resume
      * @param {string|number} taskId - 任务ID
      */
     async resumeTask(taskId) {
@@ -5374,6 +5413,79 @@ class ApiService {
     async getHardwareInfo() {
         try { var r = await this.request('/hardware/info', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* ZSFEEE-FIX-DEEP-012: 补充前端缺失的关键API调用 */
+    /**
+     * 获取元认知系统状态
+     * 对应后端 /api/metacognition/state (GET)
+     */
+    async getMetacognitionState() {
+        try {
+            const response = await this.request('/metacognition/state', { method: 'GET' });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('[ZSFEEE-FIX-DEEP-012] 获取元认知状态失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 启动训练管线
+     * 对应后端 /api/training/pipeline (POST)
+     */
+    async postTrainingPipeline(config) {
+        try {
+            const response = await this.request('/training/pipeline', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config || {})
+            });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('[ZSFEEE-FIX-DEEP-012] 训练管线启动失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 获取检查点列表
+     * 对应后端 /api/checkpoint/list (GET)
+     */
+    async getCheckpointList() {
+        try {
+            const response = await this.request('/checkpoint/list', { method: 'GET' });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('[ZSFEEE-FIX-DEEP-012] 获取检查点列表失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 加载检查点
+     * 对应后端 /api/checkpoint/load (POST)
+     */
+    async postCheckpointLoad(checkpointId) {
+        try {
+            const response = await this.request('/checkpoint/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ checkpoint_id: checkpointId || '' })
+            });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('[ZSFEEE-FIX-DEEP-012] 加载检查点失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
     }
 
 }

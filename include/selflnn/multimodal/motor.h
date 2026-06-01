@@ -32,6 +32,13 @@ typedef struct {
     float integral_limit;
     float output_limit;
     float deadband;
+    /* ZSFZX-FIX-MOTOR: 新增安全限位参数
+     * 确保PID输出不超过物理关节的安全范围 */
+    float pos_min;          /* 位置下限 (rad或归一化) */
+    float pos_max;          /* 位置上限 */
+    float vel_limit;        /* 速度上限 (rad/s或归一化) */
+    float torque_limit;     /* 力矩上限 (N·m或归一化) */
+    int estop_active;       /* 急停标志：1=立即停止 */
     float prev_error;
     float integral;
     float derivative;
@@ -53,6 +60,8 @@ int motor_pid_init(MotorController* mc, int joint_id,
     float kp, float ki, float kd);
 int motor_pid_update(MotorController* mc, int joint_id,
     float setpoint, float measurement, float dt, float* output);
+/* ZSFZX-FIX-R8-2: 紧急停止所有关节 — 设置所有PID的estop_active=1 */
+int motor_controller_estop(MotorController* mc);
 int motor_impedance_control(MotorController* mc, int joint_id,
     float desired_pos, float desired_vel, float external_force,
     float stiffness, float damping, float inertia, float dt,

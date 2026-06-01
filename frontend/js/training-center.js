@@ -141,14 +141,14 @@
         ctx.fillStyle = '#0a0a14';
         ctx.fillRect(0, 0, w, h);
 
-        /* 计算边界 */
+        /* 计算边界 - P1-003: 统一使用lossData作为数据源（优先WebSocket推送，回退HTTP轮询） */
         var margin = { top: 10, right: 60, bottom: 25, left: 45 };
         var pw = w - margin.left - margin.right, ph = h - margin.top - margin.bottom;
-        var losses = trainingHistoryData.map(function(d) { return d.loss; });
+        var losses = lossData.map(function(d) { return d.loss; });
         var minLoss = Math.min.apply(null, losses), maxLoss = Math.max.apply(null, losses);
         var range = maxLoss - minLoss || 1;
         var yScale = ph / range;
-        var xScale = pw / Math.max(trainingHistoryData.length - 1, 1);
+        var xScale = pw / Math.max(lossData.length - 1, 1);
 
         /* 网格 */
         ctx.strokeStyle = '#1a1a2e';
@@ -162,9 +162,9 @@
         ctx.strokeStyle = '#00d4ff';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        for (var j = 0; j < trainingHistoryData.length; j++) {
+        for (var j = 0; j < lossData.length; j++) {
             var x = margin.left + j * xScale;
-            var y = margin.top + (maxLoss - trainingHistoryData[j].loss) * yScale;
+            var y = margin.top + (maxLoss - lossData[j].loss) * yScale;
             if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.stroke();
@@ -175,7 +175,7 @@
         ctx.fillText((minLoss).toFixed(3), margin.left + 2, margin.top + ph);
         ctx.fillText((maxLoss).toFixed(3), margin.left + 2, margin.top + 10);
         ctx.fillText('Loss', 2, margin.top + ph / 2 + 4);
-        ctx.fillText('Epoch ' + (trainingHistoryData.length - 1), w - margin.right - 30, h - 3);
+        ctx.fillText('Epoch ' + (lossData.length - 1), w - margin.right - 30, h - 3);
     }
 
     /* ZSFWS-002: 超参数搜索 */
@@ -236,18 +236,12 @@
         container.innerHTML = html;
     }
 
-    /* ZSFLYF-P2-005修复: 统一API响应格式，使用与SelfLnnApi其他方法一致的
-     * success/data 模式，而非裸 data.ok + data.json() 模式。 */
+    /* ZSFDDD-D5修复: request()返回原始Response，必须先.json()解析 */
     async function loadCheckpointList() {
         try {
-            var result = await window.SelfLnnApi.request('/checkpoint/list');
-            if (result && result.success && result.data) {
-                renderCheckpointList(result.data.checkpoints || result.data.list || []);
-            } else if (result && result.ok) {
-                /* 兼容旧格式（纯Response对象） */
-                var d = await result.json();
-                renderCheckpointList(d.checkpoints || d.list || []);
-            }
+            var resp = await window.SelfLnnApi.request('/checkpoint/list');
+            var d = await resp.json();
+            renderCheckpointList(d.checkpoints || d.list || []);
         } catch(e) { console.warn('检查点列表加载失败:', e.message); }
     }
     window.loadCheckpointList = loadCheckpointList;

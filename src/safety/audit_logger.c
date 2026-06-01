@@ -46,10 +46,11 @@ struct AuditLogger {
     int compliance_rule_count;
     int compliance_rule_capacity;
 
-    /* ZSFX-FIX: M-004合规检查统一日志缓冲区 */
+    /* ZSFX-FIX: M-004合规检查统一日志缓冲区（环形缓冲区） */
     AuditUnifiedLogRecord* logs;
     int log_count;
     int max_logs;
+    int logs_next_id;
 };
 
 /* ============================================================================
@@ -103,6 +104,42 @@ static const char* audit_anomaly_type_name(AuditAnomalyType type) {
     return names[idx];
 }
 
+/* H-006修复：向统一日志环形缓冲区追加条目，满了覆盖最旧 */
+static void audit_logs_append(AuditLogger* logger, AuditUnifiedEventType event_type,
+                               AuditDataCategory data_type, AuditAuthorizationStatus status,
+                               const char* source, const char* detail)
+{
+    if (!logger || !logger->logs || logger->max_logs <= 0) return;
+
+    int idx = logger->logs_next_id;
+    AuditUnifiedLogRecord* rec = &logger->logs[idx];
+
+    rec->id = (long)audit_timestamp_now();
+    rec->timestamp = audit_timestamp_now();
+    rec->event_type = event_type;
+    rec->data_type = data_type;
+    rec->status = status;
+
+    if (source) strncpy(rec->source, source, sizeof(rec->source) - 1);
+    else rec->source[0] = '\0';
+
+    if (detail) strncpy(rec->detail, detail, sizeof(rec->detail) - 1);
+    else rec->detail[0] = '\0';
+
+    logger->logs_next_id = (idx + 1) % logger->max_logs;
+    if (logger->log_count < logger->max_logs)
+        logger->log_count++;
+}
+
+/* H-006修复：从统一日志环形缓冲区读取第j个条目（按时间顺序，0为最旧） */
+static const AuditUnifiedLogRecord* audit_logs_get(const AuditLogger* logger, int j)
+{
+    if (!logger || !logger->logs || logger->max_logs <= 0) return NULL;
+    if (j < 0 || j >= logger->log_count) return NULL;
+    int idx = (logger->logs_next_id - logger->log_count + logger->max_logs + j) % logger->max_logs;
+    return &logger->logs[idx];
+}
+
 /* ============================================================================
  * 核心API：创建与销毁
  * ============================================================================ */
@@ -151,6 +188,7 @@ AuditLogger* audit_logger_create(void) {
     logger->logs = (AuditUnifiedLogRecord*)
         safe_calloc((size_t)logger->max_logs, sizeof(AuditUnifiedLogRecord));
     if (!logger->logs) { logger->max_logs = 0; }
+    logger->logs_next_id = 0;
 
     /* 添加默认合规规则 */
     {
@@ -310,6 +348,36 @@ long audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
     if (logger->operation_count < logger->operation_capacity)
         logger->operation_count++;
 
+    /* H-006修复：同时写入统一日志环形缓冲区供合规检查使用 */
+    {
+        AuditUnifiedEventType evt;
+        AuditDataCategory cat;
+        AuditAuthorizationStatus st;
+
+        switch (op_type) {
+            case AUDIT_OP_CONFIG_CHANGE:
+            case AUDIT_OP_PERMISSION_CHANGE:
+                evt = AUDIT_EVENT_CONFIG_MODIFY;
+                cat = AUDIT_DATA_CONFIG_CHANGE;
+                st = success ? AUDIT_STATUS_OK : AUDIT_STATUS_UNAUTHORIZED;
+                break;
+            case AUDIT_OP_DATA_ACCESS:
+            case AUDIT_OP_DATA_MODIFY:
+                evt = success ? AUDIT_EVENT_CONFIG_MODIFY : AUDIT_EVENT_ACCESS_VIOLATION;
+                cat = AUDIT_DATA_ACCESS_LOG;
+                st = success ? AUDIT_STATUS_OK : AUDIT_STATUS_UNAUTHORIZED;
+                break;
+            default:
+                evt = success ? AUDIT_EVENT_CONFIG_MODIFY : AUDIT_EVENT_SYSTEM_ERROR;
+                cat = success ? AUDIT_DATA_SYSTEM_INTEGRITY : AUDIT_DATA_ERROR_LOG;
+                st = success ? AUDIT_STATUS_OK : AUDIT_STATUS_UNAUTHORIZED;
+                break;
+        }
+        audit_logs_append(logger, evt, cat, st,
+                          op_name ? op_name : "操作",
+                          detail ? detail : (success ? "操作成功" : "操作失败"));
+    }
+
     return entry->log_id;
 }
 
@@ -425,6 +493,33 @@ long audit_log_decision(AuditLogger* logger,
     if (logger->decision_count < logger->decision_capacity)
         logger->decision_count++;
 
+    /* H-006修复：同时写入统一日志环形缓冲区供合规检查使用 */
+    {
+        char detail_buf[256];
+        if (has_error && error_message) {
+            snprintf(detail_buf, sizeof(detail_buf), "决策错误: %s (置信度=%.2f)",
+                     error_message, confidence);
+            audit_logs_append(logger, AUDIT_EVENT_SYSTEM_ERROR, AUDIT_DATA_ERROR_LOG,
+                              AUDIT_STATUS_UNAUTHORIZED,
+                              decision_name ? decision_name : "决策",
+                              detail_buf);
+        } else if (human_override) {
+            snprintf(detail_buf, sizeof(detail_buf), "人工覆盖: %s",
+                     override_reason ? override_reason : "无原因说明");
+            audit_logs_append(logger, AUDIT_EVENT_CONFIG_MODIFY, AUDIT_DATA_CONFIG_CHANGE,
+                              AUDIT_STATUS_OK,
+                              decision_name ? decision_name : "决策",
+                              detail_buf);
+        } else if (confidence < 0.3f && is_autonomous) {
+            snprintf(detail_buf, sizeof(detail_buf), "自主决策置信度过低: %.2f, 备选=%d个",
+                     confidence, alternative_count);
+            audit_logs_append(logger, AUDIT_EVENT_CONFIG_MODIFY, AUDIT_DATA_SYSTEM_INTEGRITY,
+                              AUDIT_STATUS_UNAUTHORIZED,
+                              decision_name ? decision_name : "决策",
+                              detail_buf);
+        }
+    }
+
     return entry->decision_id;
 }
 
@@ -497,6 +592,19 @@ long audit_log_change(AuditLogger* logger, AuditChangeType change_type,
     logger->change_next_id = (idx + 1) % logger->change_capacity;
     if (logger->change_count < logger->change_capacity)
         logger->change_count++;
+
+    /* H-006修复：同时写入统一日志环形缓冲区供合规检查使用 */
+    {
+        char detail_buf[256];
+        snprintf(detail_buf, sizeof(detail_buf), "%s -> %s (原因: %s)",
+                 old_value ? old_value : "?",
+                 new_value ? new_value : "?",
+                 reason ? reason : "未提供");
+        audit_logs_append(logger, AUDIT_EVENT_CONFIG_MODIFY, AUDIT_DATA_CONFIG_CHANGE,
+                          approved ? AUDIT_STATUS_OK : AUDIT_STATUS_UNAUTHORIZED,
+                          change_name ? change_name : "变更",
+                          detail_buf);
+    }
 
     return entry->change_id;
 }
@@ -930,8 +1038,10 @@ int audit_generate_report(const AuditLogger* logger, const AuditReportOptions* o
             if (rule->data_type == AUDIT_DATA_ACCESS_LOG) {
                 /* 访问日志规则：检查是否有未授权访问记录 */
                 int violations = 0;
-                for (int j = 0; j < logger->log_count && j < logger->max_logs; j++) {
-                    if (logger->logs[j].event_type == AUDIT_EVENT_ACCESS_VIOLATION) {
+                int log_total = logger->log_count;
+                for (int j = 0; j < log_total; j++) {
+                    const AuditUnifiedLogRecord* rec = audit_logs_get(logger, j);
+                    if (rec && rec->event_type == AUDIT_EVENT_ACCESS_VIOLATION) {
                         violations++;
                     }
                 }
@@ -939,14 +1049,15 @@ int audit_generate_report(const AuditLogger* logger, const AuditReportOptions* o
                 cr->compliance_score = (violations > 0) ? 0.0f : 1.0f;
                 snprintf(cr->evidence, sizeof(cr->evidence),
                          "已检查%d条访问日志，发现%d条违规记录",
-                         (logger->log_count < logger->max_logs ? logger->log_count : logger->max_logs),
-                         violations);
+                         log_total, violations);
             } else if (rule->data_type == AUDIT_DATA_CONFIG_CHANGE) {
                 /* 配置变更规则：检查是否有未授权的配置变更 */
                 int unauthorized = 0;
-                for (int j = 0; j < logger->log_count && j < logger->max_logs; j++) {
-                    if (logger->logs[j].event_type == AUDIT_EVENT_CONFIG_MODIFY &&
-                        logger->logs[j].status == AUDIT_STATUS_UNAUTHORIZED) {
+                int log_total = logger->log_count;
+                for (int j = 0; j < log_total; j++) {
+                    const AuditUnifiedLogRecord* rec = audit_logs_get(logger, j);
+                    if (rec && rec->event_type == AUDIT_EVENT_CONFIG_MODIFY &&
+                        rec->status == AUDIT_STATUS_UNAUTHORIZED) {
                         unauthorized++;
                     }
                 }
@@ -964,8 +1075,10 @@ int audit_generate_report(const AuditLogger* logger, const AuditReportOptions* o
             } else if (rule->data_type == AUDIT_DATA_ERROR_LOG) {
                 /* 错误日志规则：检查是否有严重错误 */
                 int severe = 0;
-                for (int j = 0; j < logger->log_count && j < logger->max_logs; j++) {
-                    if (logger->logs[j].event_type == AUDIT_EVENT_SYSTEM_ERROR) {
+                int log_total = logger->log_count;
+                for (int j = 0; j < log_total; j++) {
+                    const AuditUnifiedLogRecord* rec = audit_logs_get(logger, j);
+                    if (rec && rec->event_type == AUDIT_EVENT_SYSTEM_ERROR) {
                         severe++;
                     }
                 }
@@ -977,10 +1090,12 @@ int audit_generate_report(const AuditLogger* logger, const AuditReportOptions* o
                 /* 通用规则：根据规则阈值进行验证 */
                 int total_relevant = 0;
                 int passed_relevant = 0;
-                for (int j = 0; j < logger->log_count && j < logger->max_logs; j++) {
-                    if (logger->logs[j].data_type == rule->data_type) {
+                int log_total = logger->log_count;
+                for (int j = 0; j < log_total; j++) {
+                    const AuditUnifiedLogRecord* rec = audit_logs_get(logger, j);
+                    if (rec && rec->data_type == rule->data_type) {
                         total_relevant++;
-                        if (logger->logs[j].status == AUDIT_STATUS_OK) passed_relevant++;
+                        if (rec->status == AUDIT_STATUS_OK) passed_relevant++;
                     }
                 }
                 cr->passed = (total_relevant == 0 || (float)passed_relevant / (float)total_relevant >= 0.8f) ? 1 : 0;
@@ -1299,6 +1414,45 @@ int audit_purge_old_logs(AuditLogger* logger, int retention_days) {
     return purged;
 }
 
+/* ============================================================================
+ * JSON字符串转义：将 src 中的特殊字符转义后写入 dst（最多 dst_size 字节）
+ * 转义规则：\" → \\\" , \\ → \\\\ , \n → \\n , \t → \\t , \r → \\r
+ *           控制字符(0x00-0x1F) → \\u00XX
+ * 返回写入的字节数（不含终止符），-1表示缓冲区不足
+ * ============================================================================ */
+static int json_escape_string(const char* src, char* dst, size_t dst_size) {
+    if (!src || !dst || dst_size == 0) return -1;
+    size_t wi = 0;
+    for (const char* p = src; *p && wi < dst_size - 1; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') {
+            if (wi + 2 >= dst_size) return -1;
+            dst[wi++] = '\\'; dst[wi++] = '"';
+        } else if (c == '\\') {
+            if (wi + 2 >= dst_size) return -1;
+            dst[wi++] = '\\'; dst[wi++] = '\\';
+        } else if (c == '\n') {
+            if (wi + 2 >= dst_size) return -1;
+            dst[wi++] = '\\'; dst[wi++] = 'n';
+        } else if (c == '\t') {
+            if (wi + 2 >= dst_size) return -1;
+            dst[wi++] = '\\'; dst[wi++] = 't';
+        } else if (c == '\r') {
+            if (wi + 2 >= dst_size) return -1;
+            dst[wi++] = '\\'; dst[wi++] = 'r';
+        } else if (c < 0x20) {
+            if (wi + 6 >= dst_size) return -1;
+            int n = snprintf(dst + wi, dst_size - wi, "\\u%04x", c);
+            if (n < 0 || (size_t)n >= dst_size - wi) return -1;
+            wi += n;
+        } else {
+            dst[wi++] = (char)c;
+        }
+    }
+    dst[wi] = '\0';
+    return (int)wi;
+}
+
 int audit_export_json(const AuditLogger* logger, time_t start, time_t end,
                        char* json_buffer, size_t buffer_size)
 {
@@ -1331,10 +1485,14 @@ int audit_export_json(const AuditLogger* logger, time_t start, time_t end,
         const AuditOperationEntry* src = &logger->operation_log[idx];
         if (src->timestamp < start || src->timestamp > end) continue;
 
+        char esc_op[256], esc_oper[256], esc_tgt[512];
+        json_escape_string(src->operation_name, esc_op, sizeof(esc_op));
+        json_escape_string(src->operator_name, esc_oper, sizeof(esc_oper));
+        json_escape_string(src->target, esc_tgt, sizeof(esc_tgt));
         written = snprintf(pos, remaining,
             "%s      {\"id\":%ld,\"time\":%ld,\"op\":\"%s\",\"operator\":\"%s\",\"target\":\"%s\",\"success\":%d}",
             first_op ? "" : ",\n", src->log_id, (long)src->timestamp,
-            src->operation_name, src->operator_name, src->target, src->success);
+            esc_op, esc_oper, esc_tgt, src->success);
         if (written > 0 && (size_t)written < remaining) {
             pos += written; remaining -= (size_t)written;
         }
@@ -1359,10 +1517,12 @@ int audit_export_json(const AuditLogger* logger, time_t start, time_t end,
         const AuditDecisionEntry* src = &logger->decision_log[idx];
         if (src->timestamp < start || src->timestamp > end) continue;
 
+        char esc_name[512];
+        json_escape_string(src->decision_name, esc_name, sizeof(esc_name));
         written = snprintf(pos, remaining,
             "%s      {\"id\":%ld,\"time\":%ld,\"name\":\"%s\",\"confidence\":%.2f,\"utility\":%.2f}",
             first_dec ? "" : ",\n", src->decision_id, (long)src->timestamp,
-            src->decision_name, src->confidence, src->utility);
+            esc_name, src->confidence, src->utility);
         if (written > 0 && (size_t)written < remaining) {
             pos += written; remaining -= (size_t)written;
         }
@@ -1387,10 +1547,13 @@ int audit_export_json(const AuditLogger* logger, time_t start, time_t end,
         const AuditChangeEntry* src = &logger->change_log[idx];
         if (src->timestamp < start || src->timestamp > end) continue;
 
+        char esc_chg[256], esc_comp[512];
+        json_escape_string(src->change_name, esc_chg, sizeof(esc_chg));
+        json_escape_string(src->component, esc_comp, sizeof(esc_comp));
         written = snprintf(pos, remaining,
             "%s      {\"id\":%ld,\"time\":%ld,\"change\":\"%s\",\"component\":\"%s\",\"approved\":%d}",
             first_chg ? "" : ",\n", src->change_id, (long)src->timestamp,
-            src->change_name, src->component, src->approved);
+            esc_chg, esc_comp, src->approved);
         if (written > 0 && (size_t)written < remaining) {
             pos += written; remaining -= (size_t)written;
         }

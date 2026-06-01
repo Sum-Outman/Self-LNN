@@ -31,7 +31,6 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <intrin.h>
 
 #if defined(_MSC_VER)
 #pragma warning(disable:4100)
@@ -94,76 +93,46 @@
 #define SIMD_AVX_WIDTH  8
 
 /* ============================================================================
- * 第1层：运行时CPU特性检测
+ * 第1层：运行时CPU特性检测（ZSFEEE-FIX-014: 统一到gpu.c）
  *
- * 优先级：GCC/Clang内置 __builtin_cpu_supports() > Windows CPUID > 编译时宏回退
- *
- * ZSFUSA-O02: CPU检测逻辑与gpu.c重复。
- * SIMD运行时检测保留在当前文件（用于CPU后端初始化）。
- * 通用硬件枚举逻辑应统一到gpu_hardware_detect.c。
- *
- * 本文件中的cpu_supports_*函数与gpu.c中的cpu_hw_detect_simd_x86/arm()功能重复。
- *     - cpu_supports_avx()  ↔ cpu_hw_detect_simd_x86()中的AVX位
- *     - cpu_supports_avx2() ↔ cpu_hw_detect_simd_x86()中的AVX2位
- *     - cpu_supports_fma()  ↔ gpu.c通过CPUID leaf 1检测FMA位
- *     - cpu_supports_neon() ↔ cpu_hw_detect_simd_arm()中的NEON位
- * 后续重构时这些函数应统一调用gpu.c中的统一硬件检测。
+ * 所有CPU特性检测统一使用gpu.c的gpu_hardware_get_cpu_info()接口。
+ * SIMD标志位从GpuDeviceInfo.simd_flags位掩码中读取。
+ * 本文件不再执行独立的CPUID或__builtin_cpu_supports()调用。
  * =========================================================================== */
 
 /**
- * @brief 运行时检测CPU对AVX指令集的支持
+ * @brief ZSFEEE-FIX-014: 使用gpu.c统一检测的SIMD标志缓存
+ */
+static unsigned int g_cached_cpu_simd_flags = 0;
+static int g_cpu_simd_cached = 0;
+
+/**
+ * @brief 运行时检测CPU对AVX指令集的支持（ZSFEEE-FIX-014: 从统一接口缓存读取）
  * @return 1支持AVX，0不支持
  */
 static inline int cpu_supports_avx(void) {
-#if defined(__GNUC__) || defined(__clang__)
-    return __builtin_cpu_supports("avx") ? 1 : 0;
-#elif defined(_WIN32)
-    int cpu_info[4] = {0};
-    __cpuid(cpu_info, 1);
-    return (cpu_info[2] & (1 << 28)) != 0;
-#elif defined(__AVX__)
-    return 1;
-#else
-    return 0;
-#endif
+    if (!g_cpu_simd_cached) simd_lazy_init();
+    return (g_cached_cpu_simd_flags & CPU_SIMD_AVX) ? 1 : 0;
 }
 
 /**
- * @brief 运行时检测CPU对AVX2指令集的支持
+ * @brief 运行时检测CPU对AVX2指令集的支持（ZSFEEE-FIX-014: 从统一接口缓存读取）
  */
 static inline int cpu_supports_avx2(void) {
-#if defined(__GNUC__) || defined(__clang__)
-    return __builtin_cpu_supports("avx2") ? 1 : 0;
-#elif defined(_WIN32)
-    int cpu_info[4] = {0};
-    __cpuid(cpu_info, 7);
-    return (cpu_info[1] & (1 << 5)) != 0;
-#elif defined(__AVX2__)
-    return 1;
-#else
-    return 0;
-#endif
+    if (!g_cpu_simd_cached) simd_lazy_init();
+    return (g_cached_cpu_simd_flags & CPU_SIMD_AVX2) ? 1 : 0;
 }
 
 /**
- * @brief 运行时检测CPU对FMA指令集的支持
+ * @brief 运行时检测CPU对FMA指令集的支持（ZSFEEE-FIX-014: 从统一接口缓存读取）
  */
 static inline int cpu_supports_fma(void) {
-#if defined(__GNUC__) || defined(__clang__)
-    return __builtin_cpu_supports("fma") ? 1 : 0;
-#elif defined(_WIN32)
-    int cpu_info[4] = {0};
-    __cpuid(cpu_info, 1);
-    return (cpu_info[2] & (1 << 12)) != 0;
-#elif defined(__FMA__)
-    return 1;
-#else
-    return 0;
-#endif
+    if (!g_cpu_simd_cached) simd_lazy_init();
+    return (g_cached_cpu_simd_flags & CPU_SIMD_FMA) ? 1 : 0;
 }
 
 /**
- * @brief 运行时检测CPU对ARM NEON的支持
+ * @brief 运行时检测CPU对ARM NEON的支持（ZSFEEE-FIX-014: 编译时检测，NEON始终可在ARM64上使用）
  */
 static inline int cpu_supports_neon(void) {
 #if SELFLNN_HAVE_NEON
@@ -185,13 +154,20 @@ static int g_fallback_scalar_count = 0;
 static int g_fallback_summary_logged = 0;
 
 /**
- * @brief 惰性初始化所有SIMD运行时标志（只执行一次）
+ * @brief 惰性初始化所有SIMD运行时标志（ZSFEEE-FIX-014: 使用gpu.c统一接口）
  */
 static inline void simd_lazy_init(void) {
     if (g_simd_avx_available < 0) {
-        g_simd_avx_available  = cpu_supports_avx();
-        g_simd_avx2_available = cpu_supports_avx2();
-        g_simd_fma_available  = cpu_supports_fma();
+        /* ZSFEEE-FIX-014: 调用gpu.c的统一CPU硬件检测接口获取SIMD标志 */
+        GpuDeviceInfo cpu_info;
+        if (gpu_hardware_get_cpu_info(&cpu_info) == 0) {
+            g_cached_cpu_simd_flags = cpu_info.simd_flags;
+        }
+        g_cpu_simd_cached = 1;
+
+        g_simd_avx_available  = (g_cached_cpu_simd_flags & CPU_SIMD_AVX) ? 1 : 0;
+        g_simd_avx2_available = (g_cached_cpu_simd_flags & CPU_SIMD_AVX2) ? 1 : 0;
+        g_simd_fma_available  = (g_cached_cpu_simd_flags & CPU_SIMD_FMA) ? 1 : 0;
         g_simd_neon_available = cpu_supports_neon();
     }
 }
@@ -1384,234 +1360,12 @@ static float _rand_float(uint32_t* state) {
 }
 
 /* ============================================================================
- * CPU硬件检测（Windows实现）
+ * CPU硬件检测（ZSFEEE-FIX-014: 统一到gpu.c的gpu_hardware_get_cpu_info()）
  * =========================================================================== */
 
 static int _cpu_detect_hardware(GpuDeviceInfo* info) {
-    memset(info, 0, sizeof(*info));
-    info->device_id = 0;
-    info->type = GPU_DEVICE_TYPE_CPU;
-    info->supports_double = 1;
-    info->supports_half = 1;
-    info->max_work_group_size = 1;
-
-#ifdef _WIN32
-    SYSTEM_INFO sys_info;
-    GetNativeSystemInfo(&sys_info);
-
-    info->logical_cores = (int)sys_info.dwNumberOfProcessors;
-    strncpy(info->architecture, "x86_64", sizeof(info->architecture) - 1);
-
-    switch (sys_info.wProcessorArchitecture) {
-        case PROCESSOR_ARCHITECTURE_AMD64:
-            strncpy(info->architecture, "x86_64", sizeof(info->architecture) - 1);
-            break;
-        case PROCESSOR_ARCHITECTURE_INTEL:
-            strncpy(info->architecture, "x86", sizeof(info->architecture) - 1);
-            break;
-        case PROCESSOR_ARCHITECTURE_ARM64:
-            strncpy(info->architecture, "ARM64", sizeof(info->architecture) - 1);
-            break;
-        default:
-            strncpy(info->architecture, "unknown", sizeof(info->architecture) - 1);
-            break;
-    }
-
-    MEMORYSTATUSEX mem_status;
-    mem_status.dwLength = sizeof(mem_status);
-    if (GlobalMemoryStatusEx(&mem_status)) {
-        info->total_memory = (size_t)mem_status.ullTotalPhys;
-        info->free_memory = (size_t)mem_status.ullAvailPhys;
-    }
-
-    /* 获取逻辑处理器信息 */
-    DWORD proc_info_size = 0;
-    GetLogicalProcessorInformation(NULL, &proc_info_size);
-    if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && proc_info_size > 0) {
-        SYSTEM_LOGICAL_PROCESSOR_INFORMATION* proc_info =
-            (SYSTEM_LOGICAL_PROCESSOR_INFORMATION*)malloc(proc_info_size);
-        if (proc_info) {
-            DWORD info_count = proc_info_size / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-            if (GetLogicalProcessorInformation(proc_info, &proc_info_size)) {
-                int physical_count = 0;
-                for (DWORD i = 0; i < info_count; i++) {
-                    if (proc_info[i].Relationship == RelationProcessorCore) {
-                        physical_count++;
-                    }
-                    if (proc_info[i].Relationship == RelationCache) {
-                        if (proc_info[i].Cache.Level == 1 &&
-                            proc_info[i].Cache.Type == CacheData) {
-                            info->l1_cache = (size_t)proc_info[i].Cache.Size;
-                        } else if (proc_info[i].Cache.Level == 2) {
-                            info->l2_cache = (size_t)proc_info[i].Cache.Size;
-                        } else if (proc_info[i].Cache.Level == 3) {
-                            info->l3_cache = (size_t)proc_info[i].Cache.Size;
-                        }
-                    }
-                }
-                info->physical_cores = physical_count;
-            }
-            free(proc_info);
-        }
-    }
-
-    /* CPUID检测厂商和SIMD */
-    int cpu_info[4] = {0};
-    __cpuid(cpu_info, 0);
-    if (cpu_info[0] >= 1) {
-        char vendor_str[13];
-        memcpy(vendor_str, &cpu_info[1], 4);
-        memcpy(vendor_str + 4, &cpu_info[3], 4);
-        memcpy(vendor_str + 8, &cpu_info[2], 4);
-        vendor_str[12] = '\0';
-        strncpy(info->vendor, vendor_str, sizeof(info->vendor) - 1);
-
-        __cpuid(cpu_info, 1);
-        unsigned int simd = 0;
-        if (cpu_info[3] & (1 << 25)) simd |= CPU_SIMD_SSE;
-        if (cpu_info[3] & (1 << 26)) simd |= CPU_SIMD_SSE2;
-        if (cpu_info[2] & (1 << 0))  simd |= CPU_SIMD_SSE3;
-        if (cpu_info[2] & (1 << 9))  simd |= CPU_SIMD_SSSE3;
-        if (cpu_info[2] & (1 << 19)) simd |= CPU_SIMD_SSE41;
-        if (cpu_info[2] & (1 << 20)) simd |= CPU_SIMD_SSE42;
-        if (cpu_info[2] & (1 << 28)) simd |= CPU_SIMD_AVX;
-        if (cpu_info[2] & (1 << 5))  simd |= CPU_SIMD_AVX2;
-
-        /* CPUID函数7,子叶0: 检测AVX-512扩展子集 */
-        __cpuidex(cpu_info, 7, 0);
-        if (cpu_info[1] & (1 << 16)) { /* AVX-512F (EBX bit 16) */
-            simd |= CPU_SIMD_AVX512F;
-            if (cpu_info[1] & (1 << 17)) simd |= CPU_SIMD_AVX512DQ;  /* AVX-512DQ (EBX bit 17) */
-            if (cpu_info[1] & (1 << 30)) simd |= CPU_SIMD_AVX512BW;  /* AVX-512BW (EBX bit 30) */
-            if (cpu_info[1] & (1 << 26)) simd |= CPU_SIMD_AVX512VL;  /* AVX-512VL (EBX bit 26) */
-            if (cpu_info[1] & (1 << 27)) simd |= CPU_SIMD_AVX512ER;  /* AVX-512ER (EBX bit 27) */
-            if (cpu_info[1] & (1 << 28)) simd |= CPU_SIMD_AVX512CD;  /* AVX-512CD (EBX bit 28) */
-            if (cpu_info[2] & (1 << 1))  simd |= CPU_SIMD_AVX512VBMI; /* AVX-512VBMI (ECX bit 1) */
-            if (cpu_info[2] & (1 << 11)) simd |= CPU_SIMD_AVX512VNNI; /* AVX-512VNNI (ECX bit 11) */
-            if (cpu_info[2] & (1 << 10)) simd |= CPU_SIMD_AVX512VPCLMULQDQ; /* VPCLMULQDQ (ECX bit 10) */
-            if (cpu_info[3] & (1 << 2))  simd |= CPU_SIMD_AVX512BITALG; /* AVX-512BITALG (EDX bit 2) */
-            if (cpu_info[3] & (1 << 3))  simd |= CPU_SIMD_AVX512VBMI2; /* AVX-512VBMI2 (EDX bit 3) */
-        }
-        /* FMA (ECX bit 12) */
-        if (cpu_info[2] & (1 << 12)) simd |= CPU_SIMD_FMA;
-
-        info->simd_flags = simd;
-
-        /* 处理器品牌字符串（扩展功能ID） */
-        __cpuid(cpu_info, 0x80000000);
-        if ((unsigned int)cpu_info[0] >= 0x80000004) {
-            char brand[49] = {0};
-            __cpuid(cpu_info, 0x80000002);
-            memcpy(brand, cpu_info, 16);
-            __cpuid(cpu_info, 0x80000003);
-            memcpy(brand + 16, cpu_info, 16);
-            __cpuid(cpu_info, 0x80000004);
-            memcpy(brand + 32, cpu_info, 16);
-            /* 去除首尾空格 */
-            char* start = brand;
-            while (*start == ' ') start++;
-            char* end = start + strlen(start) - 1;
-            while (end > start && *end == ' ') end--;
-            *(end + 1) = '\0';
-            strncpy(info->name, start, sizeof(info->name) - 1);
-        } else {
-            snprintf(info->name, sizeof(info->name), "x86_64 CPU (%d cores)", info->logical_cores);
-        }
-
-        info->compute_units = info->logical_cores;
-    }
-#else
-    /* Linux/macOS真实硬件检测：sysconf + /proc/cpuinfo */
-    info->physical_cores = 1;
-    info->logical_cores = 1;
-
-#ifdef __linux__
-    long nproc = sysconf(_SC_NPROCESSORS_CONF);
-    if (nproc > 0) info->logical_cores = (int)nproc;
-    long phys_proc = sysconf(_SC_NPROCESSORS_ONLN);
-    if (phys_proc > 0 && phys_proc <= nproc) info->physical_cores = (int)phys_proc;
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long page_size = sysconf(_SC_PAGE_SIZE);
-    if (pages > 0 && page_size > 0) {
-        info->total_memory = (size_t)pages * (size_t)page_size;
-    } else {
-        info->total_memory = 4UL * 1024 * 1024 * 1024;
-    }
-    info->free_memory = info->total_memory / 2;
-
-    /* 读取/proc/cpuinfo获取厂商和型号 */
-    FILE* fp = fopen("/proc/cpuinfo", "r");
-    if (fp) {
-        char line[256];
-        while (fgets(line, sizeof(line), fp)) {
-            if (strstr(line, "vendor_id") || strstr(line, "Vendor")) {
-                char* val = strchr(line, ':');
-                if (val) {
-                    val++;
-                    while (*val == ' ' || *val == '\t') val++;
-                    char* end = val;
-                    while (*end && *end != '\n') end++;
-                    if (end > val && (size_t)(end - val) < sizeof(info->vendor)) {
-                        memcpy(info->vendor, val, (size_t)(end - val));
-                        info->vendor[end - val] = '\0';
-                    }
-                }
-            }
-            if (strstr(line, "model name") || strstr(line, "Model")) {
-                char* val = strchr(line, ':');
-                if (val) {
-                    val++;
-                    while (*val == ' ' || *val == '\t') val++;
-                    char* end = val;
-                    while (*end && *end != '\n') end--;
-                    if (end > val && (size_t)(end - val + 1) < sizeof(info->name)) {
-                        memcpy(info->name, val, (size_t)(end - val + 1));
-                        info->name[end - val + 1] = '\0';
-                    }
-                }
-            }
-        }
-        fclose(fp);
-    }
-    if (info->name[0] == '\0')
-        snprintf(info->name, sizeof(info->name), "Linux CPU (%d cores)", info->logical_cores);
-    strncpy(info->architecture, "x86_64", sizeof(info->architecture) - 1);
-#elif defined(__APPLE__)
-    /* macOS: sysctl */
-    size_t len = sizeof(int);
-    int val;
-    if (sysctlbyname("hw.logicalcpu", &val, &len, NULL, 0) == 0) info->logical_cores = val;
-    if (sysctlbyname("hw.physicalcpu", &val, &len, NULL, 0) == 0) info->physical_cores = val;
-    uint64_t mem_val = 0;
-    len = sizeof(mem_val);
-    if (sysctlbyname("hw.memsize", &mem_val, &len, NULL, 0) == 0) {
-        info->total_memory = (size_t)mem_val;
-    } else {
-        info->total_memory = 8UL * 1024 * 1024 * 1024;
-    }
-    info->free_memory = info->total_memory / 2;
-
-    char brand[256] = {0};
-    len = sizeof(brand);
-    if (sysctlbyname("machdep.cpu.brand_string", brand, &len, NULL, 0) == 0 && len > 0) {
-        strncpy(info->name, brand, sizeof(info->name) - 1);
-    } else {
-        snprintf(info->name, sizeof(info->name), "Apple Silicon (%d cores)", info->logical_cores);
-    }
-    strncpy(info->vendor, "Apple", sizeof(info->vendor) - 1);
-    strncpy(info->architecture, "ARM64", sizeof(info->architecture) - 1);
-#else
-    info->total_memory = 8UL * 1024 * 1024 * 1024;
-    info->free_memory = 4UL * 1024 * 1024 * 1024;
-    strncpy(info->vendor, "通用", sizeof(info->vendor) - 1);
-    strncpy(info->architecture, "未知", sizeof(info->architecture) - 1);
-    snprintf(info->name, sizeof(info->name), "CPU后端 (%d cores)", info->logical_cores);
-#endif /* __linux__ / __APPLE__ */
-#endif /* _WIN32 */
-
-    info->max_work_group_size = (size_t)info->logical_cores;
-    info->clock_speed = 0.0f;
-    return 0;
+    /* ZSFEEE-FIX-014: 使用gpu.c的统一CPU硬件检测接口 */
+    return gpu_hardware_get_cpu_info(info);
 }
 
 /* ============================================================================
@@ -1813,7 +1567,9 @@ GpuContext* gpu_cpu_context_create(GpuBackend backend, int device_index) {
 
 #ifndef ENABLE_GPU
 void auto_kernel_optimizer_destroy(AutoKernelOptimizer* optimizer) {
-    if (optimizer) free(optimizer);
+    /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放，
+     * auto_kernel_optimizer_create使用safe_calloc分配optimizer */
+    if (optimizer) safe_free((void**)&optimizer);
 }
 #endif
 
@@ -2062,6 +1818,10 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
     if (!k) return -1;
     int ktype = k->user_data ? (int)(intptr_t)k->user_data : CPU_KERNEL_UNKNOWN;
 
+    if (ktype == CPU_KERNEL_UNKNOWN) {
+        log_debug("[CPU-Kernel] 未知内核类型(未设置user_data)，使用直通复制回退");
+    }
+
     if (k->arg_count < 2 || !k->arg_values[0] || !k->arg_values[1]) return -1;
 
     const float* input  = (const float*)k->arg_values[0];
@@ -2236,7 +1996,15 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
     case CPU_KERNEL_DROPOUT: {
         float rate = (k->arg_count >= 3 && k->arg_values[2]) ? *(float*)k->arg_values[2] : 0.5f;
         float scale = 1.0f / (1.0f - rate + 1e-8f);
-        for (int i = 0; i < n; i++) output[i] = input[i] * scale;
+        /* 使用Xorshift32生成随机掩码，实现真实Dropout正则化 */
+        static unsigned int xorshift_state = 2463534242u;
+        for (int i = 0; i < n; i++) {
+            xorshift_state ^= xorshift_state << 13;
+            xorshift_state ^= xorshift_state >> 17;
+            xorshift_state ^= xorshift_state << 5;
+            float r = (float)(xorshift_state & 0x7FFFFFFF) / (float)0x7FFFFFFF;
+            output[i] = (r > rate) ? input[i] * scale : 0.0f;
+        }
         break;
     }
     case CPU_KERNEL_VECTOR_ADD: {
@@ -2394,23 +2162,64 @@ static int cpu_kernel_dispatch(struct GpuKernel* k, size_t count) {
         break;
     }
     case CPU_KERNEL_BATCH_NORM_FORWARD: {
-        /* 批归一化前向：y = gamma*(x-mean)/sqrt(var+eps) + beta */
+        /* P0-002修复: 批归一化前向 — 保存输入快照供反向传播使用
+         * arg_values[7] 用于存储输入x_i的快照(float*)，由调用方分配n个float空间 */
         float gamma = (k->arg_count >= 3 && k->arg_values[2]) ? *(float*)k->arg_values[2] : 1.0f;
         float beta  = (k->arg_count >= 4 && k->arg_values[3]) ? *(float*)k->arg_values[3] : 0.0f;
         float eps   = (k->arg_count >= 5 && k->arg_values[4]) ? *(float*)k->arg_values[4] : 1e-5f;
+        float* saved_x = (k->arg_count >= 8 && k->arg_values[7]) ? (float*)k->arg_values[7] : NULL;
         float mean = 0.0f, var = 0.0f;
         for (int i = 0; i < n; i++) mean += input[i];
         mean /= (float)(n + 1);
         for (int i = 0; i < n; i++) { float d = input[i] - mean; var += d * d; }
         var /= (float)(n + 1);
         float inv_std = 1.0f / sqrtf(var + eps);
+        if (saved_x) {
+            for (int i = 0; i < n; i++) saved_x[i] = input[i];
+        }
         for (int i = 0; i < n; i++)
             output[i] = gamma * (input[i] - mean) * inv_std + beta;
         break;
     }
     case CPU_KERNEL_BATCH_NORM_BACKWARD: {
-        /* 批归一化反向：粗略梯度传递 */
-        for (int i = 0; i < n; i++) output[i] = input[i];
+        /* P0-002修复: 批归一化完整反向传播 — 使用前向保存的x_i计算精确梯度
+         * input=dL/dy(上游梯度), output=dL/dx(输入梯度)
+         * 完整公式: dL/dx_i = gamma/(N*sigma) * [N*dy_i - sum(dy) - x_hat_i*sum(dy*x_hat)]
+         * 其中 x_hat_i = (x_i - mean) / sigma, sigma = sqrt(var+eps)
+         * 若x_i快照不可用(arg_values[7]为NULL)，回退到momentum style近似 */
+        float gamma = (k->arg_count >= 3 && k->arg_values[2]) ? *(float*)k->arg_values[2] : 1.0f;
+        float eps   = (k->arg_count >= 5 && k->arg_values[4]) ? *(float*)k->arg_values[4] : 1e-5f;
+        float mean  = (k->arg_count >= 7 && k->arg_values[5]) ? *(float*)k->arg_values[5] : 0.0f;
+        float var   = (k->arg_count >= 8 && k->arg_values[6]) ? *(float*)k->arg_values[6] : 1.0f;
+        float* saved_x = (k->arg_count >= 9 && k->arg_values[7]) ? (float*)k->arg_values[7] : NULL;
+        float sigma = sqrtf(var + eps);
+        float inv_std = 1.0f / sigma;
+
+        if (saved_x) {
+            /* 完整精确梯度：使用前向保存的x_i */
+            float sum_dy = 0.0f, sum_dy_xhat = 0.0f;
+            float* x_hat = (float*)alloca((size_t)n * sizeof(float));
+            if (!x_hat) { for (int i = 0; i < n; i++) output[i] = input[i]; break; }
+            for (int i = 0; i < n; i++) {
+                x_hat[i] = (saved_x[i] - mean) * inv_std;
+                sum_dy += input[i];
+                sum_dy_xhat += input[i] * x_hat[i];
+            }
+            float N_inv = 1.0f / (float)n;
+            for (int i = 0; i < n; i++) {
+                float dx = gamma * inv_std * N_inv *
+                           ((float)n * input[i] - sum_dy - x_hat[i] * sum_dy_xhat);
+                output[i] = dx;
+            }
+        } else {
+            /* 回退: momentum style近似 dL/dx = gamma * inv_std * (dy - mean(dy)) */
+            float sum_dy = 0.0f;
+            for (int i = 0; i < n; i++) sum_dy += input[i];
+            float mean_dy = sum_dy / (float)n;
+            for (int i = 0; i < n; i++) {
+                output[i] = gamma * inv_std * (input[i] - mean_dy);
+            }
+        }
         break;
     }
     case CPU_KERNEL_ACTIVATION_FORWARD: {
@@ -2499,8 +2308,21 @@ GpuKernel* gpu_kernel_create(GpuContext* context, const char* kernel_source, con
     if (!k) return NULL;
 
     k->context = context;
-    k->kernel_source = kernel_source ? _strdup(kernel_source) : NULL;
-    k->kernel_name   = kernel_name   ? _strdup(kernel_name)   : NULL;
+    /* ZSFEEE-FIX-DEEP-002: _strdup使用原始malloc, 不带MemoryBlockHeader,
+     * gpu_kernel_free使用safe_free释放, 读取伪Header导致堆损坏.
+     * 统一使用safe_malloc+memcpy模式, 确保分配内存带MemoryBlockHeader */
+    if (kernel_source) {
+        k->kernel_source = (char*)safe_malloc(strlen(kernel_source) + 1);
+        if (k->kernel_source) memcpy(k->kernel_source, kernel_source, strlen(kernel_source) + 1);
+    } else {
+        k->kernel_source = NULL;
+    }
+    if (kernel_name) {
+        k->kernel_name = (char*)safe_malloc(strlen(kernel_name) + 1);
+        if (k->kernel_name) memcpy(k->kernel_name, kernel_name, strlen(kernel_name) + 1);
+    } else {
+        k->kernel_name = NULL;
+    }
     k->arg_values = NULL;
     k->arg_sizes  = NULL;
     k->arg_count  = 0;
@@ -3118,10 +2940,12 @@ GpuMultiGpuContext* gpu_multi_gpu_init(const GpuMultiGpuConfig* config) {
     mg_ctx->contexts = (GpuContext**)safe_calloc((size_t)config->num_devices, sizeof(GpuContext*));
     mg_ctx->device_ids = (int*)safe_calloc((size_t)config->num_devices, sizeof(int));
 
+    /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放，
+     * 确保内存跟踪统计一致，避免safe_calloc+raw free导致的内存泄漏误报 */
     if (!mg_ctx->contexts || !mg_ctx->device_ids) {
-        free(mg_ctx->contexts);
-        free(mg_ctx->device_ids);
-        free(mg_ctx);
+        safe_free((void**)&mg_ctx->contexts);
+        safe_free((void**)&mg_ctx->device_ids);
+        safe_free((void**)&mg_ctx);
         return NULL;
     }
 
@@ -3137,9 +2961,11 @@ GpuMultiGpuContext* gpu_multi_gpu_init(const GpuMultiGpuConfig* config) {
                 gpu_context_free(mg_ctx->contexts[j]);
                 mg_ctx->contexts[j] = NULL;
             }
-            free(mg_ctx->contexts);
-            free(mg_ctx->device_ids);
-            free(mg_ctx);
+            /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放，
+             * 确保内存跟踪统计一致，避免safe_calloc+raw free导致的内存泄漏误报 */
+            safe_free((void**)&mg_ctx->contexts);
+            safe_free((void**)&mg_ctx->device_ids);
+            safe_free((void**)&mg_ctx);
             return NULL;
         }
         mg_ctx->device_ids[i] = dev_idx;
@@ -3159,14 +2985,15 @@ void gpu_multi_gpu_cleanup(GpuMultiGpuContext* mg_ctx) {
                 ctx->contexts[i] = NULL;
             }
         }
-        free(ctx->contexts);
-        ctx->contexts = NULL;
+        /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放 */
+        safe_free((void**)&ctx->contexts);
     }
     if (ctx->device_ids) {
-        free(ctx->device_ids);
-        ctx->device_ids = NULL;
+        /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放 */
+        safe_free((void**)&ctx->device_ids);
     }
-    free(ctx);
+    /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放 */
+    safe_free((void**)&ctx);
 }
 
 int gpu_multi_gpu_get_device_count(GpuMultiGpuContext* mg_ctx) {
@@ -3234,32 +3061,25 @@ int gpu_multi_gpu_broadcast(GpuMultiGpuContext* mg_ctx,
     return 0;
 }
 
-/* ZSF-NEW-005修复: 多GPU同步函数因GpuDevice/GpuCommand等类型未定义而暂不编译 */
-#if 0
+/* ZSF-NEW-005修复: 多GPU同步函数——启用完整编译
+ * 对于CPU后端，多GPU同步即线程并行任务的同步。
+ * 使用CpuMultiGpuContext内部结构，与gpu.c保持一致的实现模式。 */
 int gpu_multi_gpu_synchronize(GpuMultiGpuContext* mg_ctx) {
     if (!mg_ctx) return -1;
-
-    /* 迭代所有GPU设备，同步其操作流 */
+    struct CpuMultiGpuContext* ctx = (struct CpuMultiGpuContext*)mg_ctx;
     int synced_count = 0;
-    for (int i = 0; i < mg_ctx->device_count && i < GPU_MAX_DEVICES; i++) {
-        GpuDevice* dev = mg_ctx->devices[i];
-        if (!dev || !dev->initialized) continue;
 
-        /* 同步设备操作: 刷新命令缓冲区，执行所有挂起的内核和内存拷贝 */
-        if (dev->command_queue && dev->command_queue->pending > 0) {
-            for (int c = 0; c < dev->command_queue->pending && c < dev->command_queue->capacity; c++) {
-                GpuCommand* cmd = &dev->command_queue->commands[c];
-                if (cmd->type == GPU_CMD_KERNEL && cmd->kernel) {
-                    /* 执行CPU端内核计算 */
-                    size_t total_elements = cmd->grid_dim * cmd->block_dim;
-                    cmd->kernel(cmd->args, total_elements);
-                } else if (cmd->type == GPU_CMD_MEMCPY && cmd->dst && cmd->src) {
-                    /* 执行内存拷贝 */
-                    memcpy(cmd->dst, cmd->src, cmd->size);
-                }
+    for (int i = 0; i < ctx->config.num_devices && i < CPU_MULTI_GPU_MAX_DEVICES; i++) {
+        GpuContext* dev_ctx = ctx->contexts[i];
+        if (!dev_ctx) continue;
+
+        /* 同步设备操作: 在CPU后端，同步即确保线程池任务完成 */
+        GpuStream* stream = gpu_stream_create(dev_ctx);
+        if (stream) {
+            if (gpu_stream_synchronize(stream) == 0) {
+                synced_count++;
             }
-            dev->command_queue->pending = 0;
-            synced_count++;
+            gpu_stream_free(stream);
         }
     }
 
@@ -3293,7 +3113,6 @@ int gpu_multi_gpu_get_stats(GpuMultiGpuContext* mg_ctx,
     if (average_sync_time_ms) *average_sync_time_ms = 0.0f;
     return 0;
 }
-#endif /* 0 -- 多GPU同步代码 */
 
 
 /* ============================================================================
@@ -4449,7 +4268,14 @@ int gpu_npu_infer(NpuModel* model, const float** inputs, float** outputs,
         for (int l = 0; l < m->num_layers; l++) {
             CpuNpuDenseLayer* layer = &m->layers[l];
             cur_out = (float*)safe_malloc((size_t)layer->output_dim * sizeof(float));
-            if (!cur_out) return -1;
+            if (!cur_out) {
+                /* ZSFEEE-FIX-DEEP-003: safe_malloc失败时释放前一层已分配的cur_in，
+                 * 避免多层循环中因分配失败导致的内存泄漏 */
+                if (l > 0 && cur_in != (float*)inputs[b]) {
+                    safe_free((void**)&cur_in);
+                }
+                return -1;
+            }
 
             /* Dense前向：y = W * x + b */
             for (int o = 0; o < layer->output_dim; o++) {

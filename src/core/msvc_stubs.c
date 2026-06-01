@@ -29,19 +29,7 @@
 
 /* ============================
  * PyBullet桥接桩 (PyBullet需Python环境，MSVC平台不可用)
+ * ZSF999XQ-M-005修复: 当PYBULLET_BRIDGE_AVAILABLE未定义时，
+ * 不提供静默返回-1的桩函数。直接让链接器报告符号缺失，
+ * 迫使构建系统明确处理缺失依赖，而非静默降级。
  * ============================ */
-/* ZSFWS-018修复: 仅在MSVC平台且未编译pybullet_bridge.c时提供桩函数
- * pybullet_bridge.c已有真实int pybullet_disconnect(int)实现，
- * msvc_stubs.c提供的是void pybullet_disconnect(int)空桩，
- * 两者同时编译到同一二进制会导致符号冲突。
- * 现改为条件编译：仅当未定义PYBULLET_BRIDGE_AVAILABLE时编译此桩。 */
-/* ZSFWS-P0-005修复: pybullet_disconnect返回类型从void改为int，
- * 与pybullet_bridge.c中真实实现一致（int pybullet_disconnect(int)）。
- * 之前void vs int签名不一致可导致符号冲突。 */
-#ifndef PYBULLET_BRIDGE_AVAILABLE
-int pybullet_disconnect(int connection_id) {
-    (void)connection_id;
-    log_warn("[MSVC桩] PyBullet断开连接: 此功能需Python/PyBullet环境，MSVC平台不可用");
-    return -1;  /* ZSFWS-P0-005: 返回-1表示不可用，与真实实现的错误语义一致 */
-}
-#endif

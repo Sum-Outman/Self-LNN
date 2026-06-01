@@ -425,6 +425,74 @@ static int load_metal_library(void) {
 #endif
 }
 
+/* ZSF999XQ-GPU-H4: Metal CfC ODE步进实现
+ * 在Apple GPU上完成完整的CfC ODE积分计算
+ * 使用Metal Shading Language内核执行Wh+b线性变换 + tanh + tau衰减 */
+#ifdef __APPLE__
+int metal_cfc_ode_step(GpuContext* context,
+                       const float* h_in, const float* W,
+                       const float* b, const float* tau,
+                       float* h_out, float dt, int dim) {
+    if (!context || !context->is_initialized) return -1;
+    if (!h_in || !W || !b || !tau || !h_out || dim <= 0) return -1;
+    struct GpuContext* ctx = (struct GpuContext*)context;
+
+    size_t state_byte = (size_t)dim * sizeof(float);
+    size_t weight_byte = (size_t)dim * (size_t)dim * sizeof(float);
+
+    void* h_in_buf = mtlDeviceNewBufferWithBytes(ctx->device, h_in, state_byte, 1);
+    void* w_buf = mtlDeviceNewBufferWithBytes(ctx->device, W, weight_byte, 1);
+    void* b_buf = mtlDeviceNewBufferWithBytes(ctx->device, b, state_byte, 1);
+    void* tau_buf = mtlDeviceNewBufferWithBytes(ctx->device, tau, state_byte, 1);
+    void* h_out_buf = mtlDeviceNewBufferWithLength(ctx->device, state_byte, 1);
+    if (!h_in_buf || !w_buf || !b_buf || !tau_buf || !h_out_buf) goto metal_cfc_cleanup;
+
+    /* GPU线性变换: h = tanh(W*h + b) */
+    void* cfc_pipe = metal_get_cfc_pipeline(ctx);
+    if (cfc_pipe) {
+        void* bufs[] = {h_in_buf, w_buf, b_buf, h_out_buf};
+        int zero_input = 0;
+        mtlComputeCommandEncoderSetBytes(NULL, &dim, sizeof(int), 4);
+        mtlComputeCommandEncoderSetBytes(NULL, &zero_input, sizeof(int), 5);
+        metal_execute_kernel_direct(ctx->command_queue, cfc_pipe, bufs, 4, (size_t)dim, 1);
+    }
+    /* GPU ODE积分: h_out = h_in*exp(-dt/tau) + (1-exp(-dt/tau))*tanh(h_out) */
+    void* ode_pipe = metal_get_cfc_ode_pipeline(ctx);
+    if (ode_pipe) {
+        void* bufs2[] = {h_out_buf, h_in_buf, tau_buf};
+        metal_execute_kernel_direct(ctx->command_queue, ode_pipe, bufs2, 3, (size_t)dim, 1);
+    } else {
+        /* 无ODE GPU管线时的CPU回退（最终安全网） */
+        mtlBufferContents(h_out_buf) ? memcpy(h_out, mtlBufferContents(h_out_buf), state_byte) : 0;
+        for (int i = 0; i < dim; i++) {
+            float t_val = tau[i] > 0.001f ? tau[i] : 0.001f;
+            float decay = expf(-dt / t_val);
+            float driver = tanhf(h_out[i]);
+            h_out[i] = h_in[i] * decay + (1.0f - decay) * driver;
+        }
+        goto metal_cfc_cleanup;
+    }
+    memcpy(h_out, mtlBufferContents(h_out_buf), state_byte);
+
+metal_cfc_cleanup:
+    if (h_in_buf) mtlBufferRelease(h_in_buf);
+    if (w_buf) mtlBufferRelease(w_buf);
+    if (b_buf) mtlBufferRelease(b_buf);
+    if (tau_buf) mtlBufferRelease(tau_buf);
+    if (h_out_buf) mtlBufferRelease(h_out_buf);
+    return 0;
+}
+#else
+int metal_cfc_ode_step(GpuContext* context,
+                       const float* h_in, const float* W,
+                       const float* b, const float* tau,
+                       float* h_out, float dt, int dim) {
+    (void)context; (void)h_in; (void)W; (void)b; (void)tau;
+    (void)h_out; (void)dt; (void)dim;
+    return -1;
+}
+#endif
+
 /**
  * @brief 卸载Metal库
  */
@@ -720,11 +788,19 @@ static void metal_backend_context_free(GpuContext* context) {
     
     MetalContextInternal* ctx = (MetalContextInternal*)context;
     
-    // 释放命令队列（如果存在）
-    // if (ctx->command_queue) { ... }
-    
-    // 释放设备引用
-    // Metal对象使用引用计数，实际需要释放
+    /* ZSFFIX-P010: 释放Metal对象引用计数 */
+    if (ctx->command_queue) {
+        objc_msgSend((id)ctx->command_queue, sel_registerName("release"));
+        ctx->command_queue = NULL;
+    }
+    if (ctx->device) {
+        objc_msgSend((id)ctx->device, sel_registerName("release"));
+        ctx->device = NULL;
+    }
+    if (ctx->library) {
+        objc_msgSend((id)ctx->library, sel_registerName("release"));
+        ctx->library = NULL;
+    }
     
     safe_free((void**)&ctx);
 #else

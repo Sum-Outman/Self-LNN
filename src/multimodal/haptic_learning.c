@@ -398,7 +398,9 @@ int hl_fuse_vision_haptic(HapticLearner* hl, const float* visual, int vdim,
                 memcpy(visual_haptic, visual, (size_t)vdim * sizeof(float));
                 memcpy(visual_haptic + vdim, haptic, (size_t)hdim * sizeof(float));
                 int contact_detected = 0, slip_detected = 0;
-                haptic_cfc_process(enh_proc, NULL, 0.0f, fused, fdim,
+                HapticReading zero_reading;
+                memset(&zero_reading, 0, sizeof(HapticReading));
+                haptic_cfc_process(enh_proc, &zero_reading, 0.0f, fused, fdim,
                     &contact_detected, &slip_detected);
                 return 0;
             }

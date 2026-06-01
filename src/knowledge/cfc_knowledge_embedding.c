@@ -11,6 +11,7 @@
 #include "selflnn/knowledge/cfc_knowledge_embedding.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/cfc_network.h"
+#include "selflnn/core/optimizer.h"           /* ZSFEEE-FIX-035: 统一优化器替代独立Adam */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/secure_random.h"  /* P2-049: 安全随机数替代LCG */
@@ -502,7 +503,8 @@ int cfc_embed_train(CfCEmbedState* state, int epochs) {
                     float hinge = margin + pos_score - neg_score;
                     if (hinge > 0) batch_loss += hinge;
 
-                    /* Adam优化器更新（beta1=0.9, beta2=0.999, epsilon=1e-8） */
+                    /* ZSFEEE-FIX-035: 使用统一优化器optimizer_adamw_step替代独立Adam实现。
+                     * 先计算各参数梯度，再通过optimizer_adamw_step集中进行AdamW更新。 */
                     float beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
                     float* h_emb = &state->entity_embeddings[h * dim];
                     float* r_emb = &state->relation_embeddings[r * dim];
@@ -518,42 +520,35 @@ int cfc_embed_train(CfCEmbedState* state, int epochs) {
                     float* neg_m = &state->entity_momentum[neg_tail * dim];
                     float* neg_v = &state->entity_velocity[neg_tail * dim];
 
+                    /* 分配梯度缓冲区 */
+                    float* h_grads = (float*)safe_calloc((size_t)dim, sizeof(float));
+                    float* r_grads = (float*)safe_calloc((size_t)dim, sizeof(float));
+                    float* pos_grads = (float*)safe_calloc((size_t)dim, sizeof(float));
+                    float* neg_grads = (float*)safe_calloc((size_t)dim, sizeof(float));
+                    if (!h_grads || !r_grads || !pos_grads || !neg_grads) {
+                        safe_free((void**)&h_grads); safe_free((void**)&r_grads);
+                        safe_free((void**)&pos_grads); safe_free((void**)&neg_grads);
+                        continue;
+                    }
+
+                    /* 计算梯度 */
                     for (int d = 0; d < dim; d++) {
                         float grad_p = 2.0f * (h_emb[d] + r_emb[d] - pos_emb[d]);
                         float grad_n = -2.0f * (h_emb[d] + r_emb[d] - neg_emb[d]);
-
-                        /* 实体head: 正样本梯度和负样本梯度累加 */
-                        float gh = grad_p + grad_n * 0.1f;
-                        h_m[d] = beta1 * h_m[d] + (1.0f - beta1) * gh;
-                        h_v[d] = beta2 * h_v[d] + (1.0f - beta2) * gh * gh;
-                        float h_m_hat = h_m[d] / (1.0f - beta1);
-                        float h_v_hat = h_v[d] / (1.0f - beta2);
-                        h_emb[d] -= lr * h_m_hat / (sqrtf(h_v_hat) + eps);
-
-                        /* 关系 */
-                        float gr = grad_p * 0.5f + grad_n * 0.05f;
-                        r_m[d] = beta1 * r_m[d] + (1.0f - beta1) * gr;
-                        r_v[d] = beta2 * r_v[d] + (1.0f - beta2) * gr * gr;
-                        float r_m_hat = r_m[d] / (1.0f - beta1);
-                        float r_v_hat = r_v[d] / (1.0f - beta2);
-                        r_emb[d] -= lr * r_m_hat / (sqrtf(r_v_hat) + eps);
-
-                        /* 实体tail (正向) */
-                        float gp = -grad_p;
-                        pos_m[d] = beta1 * pos_m[d] + (1.0f - beta1) * gp;
-                        pos_v[d] = beta2 * pos_v[d] + (1.0f - beta2) * gp * gp;
-                        float p_m_hat = pos_m[d] / (1.0f - beta1);
-                        float p_v_hat = pos_v[d] / (1.0f - beta2);
-                        pos_emb[d] -= lr * p_m_hat / (sqrtf(p_v_hat) + eps);
-
-                        /* 实体tail (负样本) */
-                        float gn = -grad_n * 0.1f;
-                        neg_m[d] = beta1 * neg_m[d] + (1.0f - beta1) * gn;
-                        neg_v[d] = beta2 * neg_v[d] + (1.0f - beta2) * gn * gn;
-                        float n_m_hat = neg_m[d] / (1.0f - beta1);
-                        float n_v_hat = neg_v[d] / (1.0f - beta2);
-                        neg_emb[d] -= lr * n_m_hat / (sqrtf(n_v_hat) + eps);
+                        h_grads[d] = grad_p + grad_n * 0.1f;
+                        r_grads[d] = grad_p * 0.5f + grad_n * 0.05f;
+                        pos_grads[d] = -grad_p;
+                        neg_grads[d] = -grad_n * 0.1f;
                     }
+
+                    /* 使用统一优化器执行AdamW步进 */
+                    optimizer_adamw_step(h_emb, h_grads, h_m, h_v, (size_t)dim, lr, beta1, beta2, eps, 0.0f, epoch);
+                    optimizer_adamw_step(r_emb, r_grads, r_m, r_v, (size_t)dim, lr, beta1, beta2, eps, 0.0f, epoch);
+                    optimizer_adamw_step(pos_emb, pos_grads, pos_m, pos_v, (size_t)dim, lr, beta1, beta2, eps, 0.0f, epoch);
+                    optimizer_adamw_step(neg_emb, neg_grads, neg_m, neg_v, (size_t)dim, lr, beta1, beta2, eps, 0.0f, epoch);
+
+                    safe_free((void**)&h_grads); safe_free((void**)&r_grads);
+                    safe_free((void**)&pos_grads); safe_free((void**)&neg_grads);
                 }
             }
 

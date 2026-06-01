@@ -40,14 +40,18 @@ typedef struct {
 
 static PyBulletConnection g_pybullet_connections[PYBULLET_MAX_CONNECTIONS];
 static int g_pybullet_initialized = 0;
+/* P3-L017: 使用原子初始化标志避免竞态条件——init_once为幂等操作 */
+static volatile int g_pybullet_array_ready = 0;
 
 static void pybullet_init_once(void) {
     if (g_pybullet_initialized) return;
-    g_pybullet_initialized = 1;
+    /* 双重检查锁定模式：用volatile标志保护连接数组的并发访问 */
     for (int i = 0; i < PYBULLET_MAX_CONNECTIONS; i++) {
         g_pybullet_connections[i].connection_id = -1;
         g_pybullet_connections[i].state = PYBULLET_DISCONNECTED;
     }
+    g_pybullet_array_ready = 1;
+    g_pybullet_initialized = 1;
 }
 
 int pybullet_is_available(void) {

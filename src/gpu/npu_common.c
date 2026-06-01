@@ -103,6 +103,56 @@ int npu_common_check_registry_key(const char* key_path) {
 #endif
 }
 
+/* H-016去重: 文件存在检查（原gpu_npu.c中npu_file_exists的公共版本） */
+int npu_common_file_exists(const char* path) {
+#ifdef _WIN32
+    DWORD attr = GetFileAttributesA(path);
+    return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
+#else
+    struct stat st;
+    return (stat(path, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 0;
+#endif
+}
+
+/* H-016去重: 目录存在检查（原gpu_npu.c中npu_dir_exists的公共版本） */
+int npu_common_dir_exists(const char* path) {
+#ifdef _WIN32
+    DWORD attr = GetFileAttributesA(path);
+    return (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
+#else
+    struct stat st;
+    return (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
+#endif
+}
+
+/* H-016去重: 跨平台动态库加载（原gpu_npu.c中NPU_DLOPEN模式的公共版本） */
+void* npu_common_load_library(const char* lib_name) {
+#ifdef _WIN32
+    return (void*)LoadLibraryA(lib_name);
+#else
+    return dlopen(lib_name, RTLD_LAZY | RTLD_LOCAL);
+#endif
+}
+
+/* H-016去重: 跨平台符号查找（原gpu_npu.c中NPU_DLSYM模式的公共版本） */
+void* npu_common_get_symbol(void* handle, const char* sym) {
+#ifdef _WIN32
+    return (void*)GetProcAddress((HMODULE)handle, sym);
+#else
+    return dlsym(handle, sym);
+#endif
+}
+
+/* H-016去重: 跨平台动态库关闭（原gpu_npu.c中NPU_DLCLOSE模式的公共版本） */
+void npu_common_close_library(void* handle) {
+    if (!handle) return;
+#ifdef _WIN32
+    FreeLibrary((HMODULE)handle);
+#else
+    dlclose(handle);
+#endif
+}
+
 int npu_common_check_directory(const char* dir_path) {
 #ifdef _WIN32
     DWORD attr = GetFileAttributesA(dir_path);
@@ -869,26 +919,74 @@ static int npu_common_kernel_execute_nd_entry(GpuKernel* kernel, int work_dim,
 /* ================================================================
  * 5c. NPU内核管理公共接口（void*句柄，各后端可重载实现）
  *
- * 提供统一的void*句柄内核管理API，与GpuKernel*内部实现解耦。
- * 当前为空操作存根，由Ascend/Cambricon/TPU/Intel后端按需重载。
+ * P1-005修复: 提供完整的内核管理实现，支持动态后端选择。
+ * 内核句柄存储为 NpuCommonKernel 结构体指针，
+ * 由Ascend/Cambricon/TPU/Intel后端按需提供具体的执行函数指针。
  * ================================================================ */
 
+/* NPU内核描述符 — 统一的内核管理结构 */
+typedef struct {
+    char name[128];
+    void* backend_handle;     /* 后端私有句柄 */
+    void* arg_buffer[32];     /* 内核参数缓冲区 */
+    size_t arg_sizes[32];     /* 各参数大小 */
+    int arg_count;            /* 已设置参数数量 */
+    int backend_type;         /* 后端类型: 0=未设置, 1=Ascend, 2=Cambricon, 3=TPU, 4=Intel */
+    int is_compiled;          /* 内核是否已编译 */
+} NpuCommonKernel;
+
 int npu_common_kernel_create(void** handle, const char* name) {
-    (void)name;
-    if (handle) *handle = NULL;
+    if (!handle) return -1;
+    NpuCommonKernel* kernel = (NpuCommonKernel*)calloc(1, sizeof(NpuCommonKernel));
+    if (!kernel) {
+        log_error("[NPU公共] 内核创建失败: 内存不足");
+        *handle = NULL;
+        return -1;
+    }
+    if (name) {
+        strncpy(kernel->name, name, 127);
+        kernel->name[127] = '\0';
+    } else {
+        strcpy(kernel->name, "unnamed");
+    }
+    kernel->arg_count = 0;
+    kernel->is_compiled = 0;
+    kernel->backend_type = 0;
+    kernel->backend_handle = NULL;
+    *handle = kernel;
     return 0;
 }
 
 int npu_common_kernel_set_arg(void* handle, int index, size_t size, const void* value) {
-    (void)handle;
-    (void)index;
-    (void)size;
-    (void)value;
+    if (!handle) return -1;
+    NpuCommonKernel* kernel = (NpuCommonKernel*)handle;
+    if (index < 0 || index >= 32) {
+        log_error("[NPU公共] 内核参数索引越界: %d", index);
+        return -1;
+    }
+    if (size > 0 && value) {
+        void* buf = realloc(kernel->arg_buffer[index], size);
+        if (!buf) return -1;
+        kernel->arg_buffer[index] = buf;
+        memcpy(buf, value, size);
+        kernel->arg_sizes[index] = size;
+    } else {
+        free(kernel->arg_buffer[index]);
+        kernel->arg_buffer[index] = NULL;
+        kernel->arg_sizes[index] = 0;
+    }
+    if (index >= kernel->arg_count) kernel->arg_count = index + 1;
     return 0;
 }
 
 int npu_common_kernel_free(void* handle) {
-    (void)handle;
+    if (!handle) return 0;
+    NpuCommonKernel* kernel = (NpuCommonKernel*)handle;
+    for (int i = 0; i < 32; i++) {
+        free(kernel->arg_buffer[i]);
+        kernel->arg_buffer[i] = NULL;
+    }
+    free(kernel);
     return 0;
 }
 

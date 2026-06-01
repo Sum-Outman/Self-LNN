@@ -117,6 +117,7 @@ struct MemorySystem {
     
     // ---- P1: 线程安全锁 ----
     MutexHandle lock;              /**< 记忆系统内部锁 */
+    time_t last_decay_time;        /**< ZSFQQ-DEEP-005: 上次衰减时间(真实挂钟时间) */
 };
 
 /**
@@ -148,6 +149,8 @@ static MemoryItem* memory_item_create(const char* key, const float* data,
         }
         memcpy(item->data, data, data_size * sizeof(float));
     } else {
+        /* ZSFFIX-P011: data_size==0时data置NULL，调用者需空指针检查
+         * memory_feature_similarity和所有数据访问点已有if(data && data_size>0)守卫 */
         item->data = NULL;
     }
     
@@ -198,6 +201,7 @@ MemorySystem* memory_create(const MemoryConfig* config) {
     
     // 复制配置
     memcpy(&system->config, config, sizeof(MemoryConfig));
+    system->last_decay_time = time(NULL); /* ZSFQQ-DEEP-005: 初始化衰减时间基线 */
     
     // 设置容量
     system->st_capacity = config->max_short_term;
@@ -256,6 +260,25 @@ MemorySystem* memory_create(const MemoryConfig* config) {
 /**
  * @brief 释放记忆系统实例
  */
+
+/* ZSFQQ-DEEP-005: 基于真实时间流逝的记忆衰减更新
+ * 应被AGI后台循环周期性调用(如每60秒)以模拟Ebbinghaus遗忘曲线。
+ * 原实现仅在memory_store时触发衰减，导致长期无写入时记忆不衰减。
+ * @param system 记忆系统
+ * @return 衰减的记忆条目数，-1=失败
+ */
+int memory_periodic_decay_update(MemorySystem* system) {
+    if (!system || system->config.decay_rate <= 0.0f) return 0;
+    time_t now = time(NULL);
+    float elapsed = (float)(now - system->last_decay_time);
+    if (elapsed < 1.0f) return 0; /* 不足1秒跳过 */
+    MEMORY_LOCK(system);
+    memory_apply_decay(system, elapsed);
+    system->last_decay_time = now;
+    MEMORY_UNLOCK(system);
+    return 1;
+}
+
 void memory_free(MemorySystem* system) {
     if (!system) {
         return;

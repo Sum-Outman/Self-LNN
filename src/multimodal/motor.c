@@ -10,13 +10,26 @@
 #include <string.h>
 #include <math.h>
 
+/* 阻抗控制内部状态: 维持完整的二阶微分方程动力学 */
+typedef struct {
+    float position_error;       /* 位置误差 e = q - q_d */
+    float velocity_error;       /* 速度误差 de = dq/dt - dq_d/dt */
+    float last_position_error;  /* 上一帧位置误差 (用于速度差分估计) */
+    int initialized;            /* 状态是否已初始化 */
+} ImpedanceState;
+
 struct MotorController {
     PIDController* pids;
+    ImpedanceState* impedance_states;
     int num_joints;
     MotorControlMode current_mode;
     TrajectoryPoint trajectory_buffer[MOTOR_TRAJECTORY_MAX_PTS];
     int trajectory_count;
     float dt;
+    /* L-006: 前馈补偿动力学参数，从配置结构体读取，非硬编码 */
+    float ff_inertia;    /* 惯性 I (kg·m²) */
+    float ff_damping;    /* 阻尼 B (N·m·s/rad) */
+    float ff_stiffness;  /* 刚度 K (N·m/rad) */
 };
 
 MotorController* motor_controller_create(int num_joints) {
@@ -28,15 +41,26 @@ MotorController* motor_controller_create(int num_joints) {
         safe_free((void**)&mc);
         return NULL;
     }
+    mc->impedance_states = (ImpedanceState*)safe_calloc((size_t)num_joints, sizeof(ImpedanceState));
+    if (!mc->impedance_states) {
+        safe_free((void**)&mc->pids);
+        safe_free((void**)&mc);
+        return NULL;
+    }
     mc->num_joints = num_joints;
     mc->current_mode = MOTOR_CTRL_POSITION;
     mc->trajectory_count = 0;
     mc->dt = 0.02f;
+    /* L-006: 前馈补偿动力学参数默认值 */
+    mc->ff_inertia = 0.1f;
+    mc->ff_damping = 0.5f;
+    mc->ff_stiffness = 1.0f;
     return mc;
 }
 
 void motor_controller_free(MotorController* mc) {
     if (mc) {
+        safe_free((void**)&mc->impedance_states);
         safe_free((void**)&mc->pids);
         safe_free((void**)&mc);
     }
@@ -53,6 +77,13 @@ int motor_pid_init(MotorController* mc, int joint_id,
     pid->integral_limit = 10.0f;
     pid->output_limit = 100.0f;
     pid->deadband = 0.001f;
+    /* ZSFZX-FIX-MOTOR: 安全限位默认值（保守设置，需根据实际关节参数配置） */
+    pid->pos_min = -3.14159f;    /* -π rad */
+    pid->pos_max = 3.14159f;     /* +π rad */
+    pid->vel_limit = 10.0f;      /* 10 rad/s */
+    pid->torque_limit = 0.0f;    /* 0=禁用力矩限幅（需要显式配置） */
+    pid->estop_active = 0;
+    pid->prev_error = 0.0f;  /* 首次调用前初始化为0，消除NAN未定义隐患 */
     return 0;
 }
 
@@ -80,7 +111,28 @@ int motor_pid_update(MotorController* mc, int joint_id,
     /* 输出限幅 */
     if (*output > pid->output_limit) *output = pid->output_limit;
     if (*output < -pid->output_limit) *output = -pid->output_limit;
+
+    /* ZSFZX-FIX-MOTOR: 急停检测 — 激活时立即输出零 */
+    if (pid->estop_active) {
+        *output = 0.0f;
+        pid->integral = 0.0f;
+    }
+    /* ZSFZX-FIX-MOTOR: 力矩安全限幅 — 独立于通用output_limit */
+    if (pid->torque_limit > 0.0f) {
+        if (*output > pid->torque_limit) *output = pid->torque_limit;
+        if (*output < -pid->torque_limit) *output = -pid->torque_limit;
+    }
     pid->prev_error = error;
+    return 0;
+}
+
+/* ZSFZX-FIX-R8-2: 紧急停止 — 设置所有关节PID的estop_active=1
+ * 下一次motor_pid_update调用时输出将被清零 */
+int motor_controller_estop(MotorController* mc) {
+    if (!mc) return -1;
+    for (int i = 0; i < mc->num_joints; i++) {
+        mc->pids[i].estop_active = 1;
+    }
     return 0;
 }
 
@@ -91,16 +143,39 @@ int motor_impedance_control(MotorController* mc, int joint_id,
     if (!mc || joint_id < 0 || joint_id >= mc->num_joints ||
         !output_pos || !output_torque || dt <= 0.0f)
         return -1;
-    /* 阻抗控制：M_d * ¨e + D_d * ˙e + K_d * e = F_ext
-     * 其中 e = q - q_d，解得修正加速度后积分得到修正位置。
-     * 简化实现：直接计算阻抗偏移 */
-    float pos_error = *output_pos - desired_pos;
-    float vel_error = mc->pids[joint_id].prev_error / (dt + 1e-8f);
-    /* 阻抗方程: delta_q = F_ext / K_d */
-    float impedance_offset = external_force / (stiffness + 1e-8f);
-    *output_pos = desired_pos + impedance_offset;
-    /* 力矩输出：τ = K_d * (q_d - q) + D_d * (˙q_d - ˙q) + F_ext */
-    *output_torque = stiffness * pos_error + damping * vel_error + external_force;
+    /* 完整二阶微分方程阻抗控制模型
+     * 动力学方程: M_d * d²e + D_d * de + K_d * e = F_ext
+     * 其中 e = q - q_d (位置误差), de = de/dt (速度误差), d²e = d²e/dt² (加速度误差)
+     * 使用前向欧拉积分求解微分方程 */
+    ImpedanceState* imp = &mc->impedance_states[joint_id];
+    if (!imp->initialized) {
+        /* 首次调用: 使用当前实际关节位置初始化阻抗误差状态 */
+        imp->position_error = *output_pos - desired_pos;
+        imp->velocity_error = 0.0f;
+        imp->last_position_error = imp->position_error;
+        imp->initialized = 1;
+    }
+    /* 当前时刻位置误差 (从实际关节反馈计算) */
+    float current_pos_error = *output_pos - desired_pos;
+    /* 速度误差: 位置误差数值微分 + 低通滤波平滑 */
+    float raw_vel_error = (current_pos_error - imp->last_position_error) / dt - desired_vel;
+    imp->velocity_error = imp->velocity_error * 0.6f + raw_vel_error * 0.4f;
+    imp->last_position_error = current_pos_error;
+    imp->position_error = current_pos_error;
+    /* 保护参数有效性 */
+    float M_d = (inertia > 1e-8f) ? inertia : 1.0f;
+    float D_d = (damping >= 0.0f) ? damping : 0.0f;
+    float K_d = (stiffness >= 0.0f) ? stiffness : 0.0f;
+    /* 求解加速度误差: d²e = (F_ext - D_d * de - K_d * e) / M_d */
+    float accel_error = (external_force - D_d * imp->velocity_error
+                         - K_d * imp->position_error) / M_d;
+    /* 前向欧拉积分: 优先积分速度，再积分位置 */
+    imp->velocity_error += accel_error * dt;
+    imp->position_error += imp->velocity_error * dt;
+    /* 输出阻抗修正后的期望位置 q_cmd = q_d + e */
+    *output_pos = desired_pos + imp->position_error;
+    /* 输出期望力矩: τ = K_d * e + D_d * de (阻抗恢复力矩) */
+    *output_torque = K_d * imp->position_error + D_d * imp->velocity_error;
     return 0;
 }
 
@@ -154,11 +229,12 @@ int motor_feedforward_compensation(MotorController* mc, int joint_id,
     float* ff_torque) {
     if (!mc || joint_id < 0 || joint_id >= mc->num_joints || !ff_torque)
         return -1;
-    /* 前馈补偿：τ_ff = M(q_d) * ¨q_d + C(q_d, ˙q_d) * ˙q_d + G(q_d)
-     * 简化模型：τ_ff = I * ¨q_d + B * ˙q_d + K * q_d
-     * I=惯性, B=阻尼, K=刚度 */
-    float I = 0.1f, B = 0.5f, K = 1.0f;
-    *ff_torque = I * desired_accel + B * desired_vel + K * desired_pos;
+    /* L-006: 前馈补偿动力学参数从MotorController配置结构体读取
+     * τ_ff = I * ¨q_d + B * ˙q_d + K * q_d
+     * I=惯性, B=阻尼, K=刚度（可在motor_controller_create后通过直接访问修改） */
+    *ff_torque = mc->ff_inertia * desired_accel
+               + mc->ff_damping * desired_vel
+               + mc->ff_stiffness * desired_pos;
     return 0;
 }
 

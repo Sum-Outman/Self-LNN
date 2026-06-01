@@ -1,4 +1,5 @@
 #include "selflnn/core/ode_solvers.h"
+#include "selflnn/utils/memory_utils.h" /* ZSFEEE-FIX-RAW-MIG */
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -6,7 +7,21 @@
 #define SELFLNN_DP54_SAFETY 0.9f
 #define SELFLNN_DP54_PGROW -0.2f
 #define SELFLNN_DP54_PSHRINK -0.25f
-#define SELFLNN_DP54_ERR_CTRL 0.5f  /* ZSFZS-F028: 从1e-12调整为0.5，消除无意义的步长微调 */
+#define SELFLNN_DP54_ERR_CTRL 0.9f  /* ZSFQQ-P1-005修复: 从0.5调整为0.9，保留自适应步长控制的有效性 */
+
+/* ZSFZX-FIX-R5-1: ODE求解器NaN/Inf输入快速检测
+ * 在所有求解器入口处调用，防止NaN/Inf传播导致无限循环或数值崩溃 */
+static int ode_check_input_finite(const float* y, size_t n) {
+    if (!y || n == 0) return 0;
+    /* 采样检测而非全量扫描：大维度状态向量全量扫描代价过高 */
+    size_t step = n > 100 ? n / 50 : 1;
+    for (size_t i = 0; i < n; i += step) {
+        if (!isfinite(y[i])) return -1;
+    }
+    /* 也要检测最后一个元素 */
+    if (!isfinite(y[n - 1])) return -1;
+    return 0;
+}
 
 /* ZSFLNN-H-003修复: 使用标准库 fmaxf/fminf/fabsf 替代本地重复定义，统一于math.h */
 
@@ -73,6 +88,7 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                    float* h_actual, int* steps_used)
 {
     if (!y || !rhs || !cfg || !workspace || n == 0) return -1;
+    if (ode_check_input_finite(y, n) != 0) return -1;  /* ZSFZX-FIX-R5-1 */
 
     float rel_tol = (cfg->rel_tolerance > 0.0f) ? cfg->rel_tolerance : 1e-6f;
     float abs_tol = (cfg->abs_tolerance > 0.0f) ? cfg->abs_tolerance : 1e-8f;
@@ -91,7 +107,7 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
     float* y_temp = k7 + n;
 
     float h = (delta_t > h_max) ? h_max : delta_t;
-    if (h <= 0.0f) return 0;  /* 零或负步长，无操作 */
+    if (h <= 0.0f) return -1;  /* 零或负步长，拒绝执行——保护调用者免受错误参数影响 */
     float t_current = t;
     float t_target = t + delta_t;
     int total_steps = 0;
@@ -228,6 +244,7 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
                                ODEEventSolution* event_sol)
 {
     if (!y || !rhs || !workspace || n == 0) return -1;
+    if (ode_check_input_finite(y, n) != 0) return -1;  /* ZSFZX-FIX-R5-1: DP54 events */
 
     /* ========== 初始化事件结果 ========== */
     ODEEventSolution local_event_sol;
@@ -413,10 +430,11 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
                         float* dyn_m = NULL;
 
                         if (n > 32) {
-                            dyn_l = (float*)malloc((size_t)n * sizeof(float));
-                            dyn_m = (float*)malloc((size_t)n * sizeof(float));
+                            /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+                            dyn_l = (float*)safe_malloc((size_t)n * sizeof(float));
+                            dyn_m = (float*)safe_malloc((size_t)n * sizeof(float));
                             if (!dyn_l || !dyn_m) {
-                                free(dyn_l); free(dyn_m);
+                                safe_free((void**)&dyn_l); safe_free((void**)&dyn_m);
                                 return -5;
                             }
                             y_l = dyn_l;
@@ -435,8 +453,8 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
                                                   k1, k7_saved, y_m, n);
                             float v_mid;
                             if (event_cfg->event_func(t_mid, y_m, &v_mid, event_cfg->event_ctx, 1) != 0) {
-                                if (dyn_l) free(dyn_l);
-                                if (dyn_m) free(dyn_m);
+                                safe_free((void**)&dyn_l);
+                                safe_free((void**)&dyn_m);
                                 return -4;
                             }
 
@@ -465,8 +483,8 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
                         event_sol->event_value = event_val;
                         event_sol->event_count++;
 
-                        if (dyn_l) free(dyn_l);
-                        if (dyn_m) free(dyn_m);
+                        if (dyn_l) safe_free((void**)&dyn_l);
+                        if (dyn_m) safe_free((void**)&dyn_m);
 
                         break; /* 只处理第一个检测到的事件 */
                     }
@@ -757,6 +775,10 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
     if (use_omp && pcfg && pcfg->use_domain_decomposition && pcfg->num_domains > 1) {
         int nd = pcfg->num_domains;
 
+        /* ZSFQQ-P1-007/ODE-5修复: 域分解RHS缓冲区溢出
+         * 原代码: local_dydt=dydt+start, rhs(t,y,local_dydt,ctx)
+         * RHS函数写入n个元素到dydt[start..start+n-1]，导致start个元素越界。
+         * 修复: 每线程分配完整dydt缓冲区，RHS写入完整缓冲区后仅复制域片段。 */
 #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic, 1)
 #endif
@@ -765,12 +787,16 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             int size = pcfg->domain_sizes[d];
             if (start < 0 || size <= 0 || (size_t)(start + size) > n) continue;
 
-            float* local_dydt = dydt + start;
-            const float* local_y = y;
-            int ret = rhs(t, local_y, local_dydt, ctx);
-            if (ret != 0) {
-                (void)ret;
+            /* 分配线程局部完整dydt缓冲区 */
+            /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+            float* full_dydt = (float*)safe_calloc(n, sizeof(float));
+            if (!full_dydt) continue;
+            int ret = rhs(t, y, full_dydt, ctx);
+            if (ret == 0) {
+                /* 仅复制域片段到主dydt对应位置 */
+                memcpy(dydt + start, full_dydt + start, (size_t)size * sizeof(float));
             }
+            safe_free((void**)&full_dydt);
         }
     } else if (use_omp) {
         /* P0-007修复: 无域分解并行RHS数据竞争
@@ -783,12 +809,13 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             if (max_threads < 1) max_threads = 1;
             if (max_threads > 64) max_threads = 64;
 
-            float** thread_dydt_buffers = (float**)calloc((size_t)max_threads, sizeof(float*));
+            /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+            float** thread_dydt_buffers = (float**)safe_calloc((size_t)max_threads, sizeof(float*));
             int alloc_ok = (thread_dydt_buffers != NULL);
 
             if (alloc_ok) {
                 for (int ti = 0; ti < max_threads; ti++) {
-                    thread_dydt_buffers[ti] = (float*)calloc(n, sizeof(float));
+                    thread_dydt_buffers[ti] = (float*)safe_calloc(n, sizeof(float));
                     if (!thread_dydt_buffers[ti]) { alloc_ok = 0; break; }
                 }
             }
@@ -824,9 +851,10 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             /* 释放per-thread临时缓冲区 */
             if (thread_dydt_buffers) {
                 for (int ti = 0; ti < max_threads; ti++) {
-                    free(thread_dydt_buffers[ti]);
+                    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+                    safe_free((void**)&thread_dydt_buffers[ti]);
                 }
-                free(thread_dydt_buffers);
+                safe_free((void**)&thread_dydt_buffers);
             }
         }
 #else
@@ -851,6 +879,7 @@ int ode_parallel_solve(float* y, float t, float delta_t,
                        float* h_actual, int* steps_used)
 {
     if (!y || !rhs || !solver_func || n == 0) return -1;
+    if (ode_check_input_finite(y, n) != 0) return -1;  /* ZSFZX-FIX-R5-1 */
 
     int use_parallel = 0;
     int is_mpi_mode = 0;
@@ -876,10 +905,11 @@ int ode_parallel_solve(float* y, float t, float delta_t,
         float local_h = 0.0f;
 
         if (local_n > 0) {
-            local_y = (float*)malloc((size_t)local_n * sizeof(float));
-            local_workspace = (float*)malloc(workspace_size);
+            /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+            local_y = (float*)safe_malloc((size_t)local_n * sizeof(float));
+            local_workspace = (float*)safe_malloc(workspace_size);
             if (!local_y || !local_workspace) {
-                free(local_y); free(local_workspace);
+                safe_free((void**)&local_y); safe_free((void**)&local_workspace);
                 return -4;
             }
             memcpy(local_y, y, (size_t)local_n * sizeof(float));
@@ -893,8 +923,9 @@ int ode_parallel_solve(float* y, float t, float delta_t,
             memcpy(y, local_y, (size_t)local_n * sizeof(float));
         }
 
-        free(local_y);
-        free(local_workspace);
+        /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+        safe_free((void**)&local_y);
+        safe_free((void**)&local_workspace);
 
         if (h_actual) *h_actual = local_h;
         if (steps_used) *steps_used = local_steps;
@@ -916,12 +947,13 @@ int ode_parallel_solve(float* y, float t, float delta_t,
             size_t base_sz = n / (size_t)n_threads;
             size_t rem_sz  = n % (size_t)n_threads;
 
-            float** chunk_y = (float**)calloc((size_t)n_threads, sizeof(float*));
-            float** chunk_ws = (float**)calloc((size_t)n_threads, sizeof(float*));
-            int*    chunk_ret = (int*)calloc((size_t)n_threads, sizeof(int));
-            float*  chunk_h = (float*)calloc((size_t)n_threads, sizeof(float));
-            int*    chunk_steps = (int*)calloc((size_t)n_threads, sizeof(int));
-            size_t* chunk_off = (size_t*)calloc((size_t)n_threads, sizeof(size_t));
+            /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+            float** chunk_y = (float**)safe_calloc((size_t)n_threads, sizeof(float*));
+            float** chunk_ws = (float**)safe_calloc((size_t)n_threads, sizeof(float*));
+            int*    chunk_ret = (int*)safe_calloc((size_t)n_threads, sizeof(int));
+            float*  chunk_h = (float*)safe_calloc((size_t)n_threads, sizeof(float));
+            int*    chunk_steps = (int*)safe_calloc((size_t)n_threads, sizeof(int));
+            size_t* chunk_off = (size_t*)safe_calloc((size_t)n_threads, sizeof(size_t));
 
             int all_alloc_ok = (chunk_y && chunk_ws && chunk_ret &&
                                 chunk_h && chunk_steps && chunk_off);
@@ -933,9 +965,10 @@ int ode_parallel_solve(float* y, float t, float delta_t,
                     chunk_off[ti] = off;
                     off += sz;
                     if (sz > 0) {
-                        chunk_y[ti] = (float*)malloc(sz * sizeof(float));
+                        /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+                        chunk_y[ti] = (float*)safe_malloc(sz * sizeof(float));
                         chunk_ws[ti] = workspace_size ?
-                            (float*)malloc(workspace_size) : NULL;
+                            (float*)safe_malloc(workspace_size) : NULL;
                         if (!chunk_y[ti] || !chunk_ws[ti]) all_alloc_ok = 0;
                     }
                 }
@@ -977,23 +1010,25 @@ int ode_parallel_solve(float* y, float t, float delta_t,
 
                 int final_ret = has_error ? -4 : 0;
 
+                /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
                 for (int ti = 0; ti < n_threads; ti++) {
-                    free(chunk_y[ti]);
-                    free(chunk_ws[ti]);
+                    safe_free((void**)&chunk_y[ti]);
+                    safe_free((void**)&chunk_ws[ti]);
                 }
-                free(chunk_y); free(chunk_ws); free(chunk_ret);
-                free(chunk_h); free(chunk_steps); free(chunk_off);
+                safe_free((void**)&chunk_y); safe_free((void**)&chunk_ws); safe_free((void**)&chunk_ret);
+                safe_free((void**)&chunk_h); safe_free((void**)&chunk_steps); safe_free((void**)&chunk_off);
 
                 return final_ret;
             }
 
             /* 内存分配失败：清理并回退到串行 */
+            /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
             for (int ti = 0; ti < n_threads; ti++) {
-                free(chunk_y[ti]);
-                free(chunk_ws[ti]);
+                safe_free((void**)&chunk_y[ti]);
+                safe_free((void**)&chunk_ws[ti]);
             }
-            free(chunk_y); free(chunk_ws); free(chunk_ret);
-            free(chunk_h); free(chunk_steps); free(chunk_off);
+            safe_free((void**)&chunk_y); safe_free((void**)&chunk_ws); safe_free((void**)&chunk_ret);
+            safe_free((void**)&chunk_h); safe_free((void**)&chunk_steps); safe_free((void**)&chunk_off);
         }
 #endif
         /* 无OpenMP环境或分配失败：回退到串行求解 */
@@ -1033,11 +1068,12 @@ int ode_mpi_sync_domains(float* y, size_t n, const ParallelODERHSConfig* pcfg)
     int rank = pcfg->mpi_rank;
     int num_ranks = pcfg->mpi_num_ranks;
 
-    int* recv_counts = (int*)malloc((size_t)num_ranks * sizeof(int));
-    int* displacements = (int*)malloc((size_t)num_ranks * sizeof(int));
+    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+    int* recv_counts = (int*)safe_malloc((size_t)num_ranks * sizeof(int));
+    int* displacements = (int*)safe_malloc((size_t)num_ranks * sizeof(int));
 
     if (!recv_counts || !displacements) {
-        free(recv_counts); free(displacements);
+        safe_free((void**)&recv_counts); safe_free((void**)&displacements);
         return -2;
     }
 
@@ -1057,17 +1093,18 @@ int ode_mpi_sync_domains(float* y, size_t n, const ParallelODERHSConfig* pcfg)
         }
     }
 
-    float* send_buf = (float*)malloc((size_t)recv_counts[rank] * sizeof(float));
+    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+    float* send_buf = (float*)safe_malloc((size_t)recv_counts[rank] * sizeof(float));
     if (send_buf) {
         memcpy(send_buf, y, (size_t)recv_counts[rank] * sizeof(float));
         MPI_Allgatherv(send_buf, recv_counts[rank], MPI_FLOAT,
                        y, recv_counts, displacements, MPI_FLOAT,
                        MPI_COMM_WORLD);
-        free(send_buf);
+        safe_free((void**)&send_buf);
     }
 
-    free(recv_counts);
-    free(displacements);
+    safe_free((void**)&recv_counts);
+    safe_free((void**)&displacements);
     return 0;
 #else
     (void)y;
@@ -1088,7 +1125,8 @@ int ode_mpi_sync_domains(float* y, size_t n, const ParallelODERHSConfig* pcfg)
 
 static int ros_gauss_eliminate(float* A, size_t n, float* b, float* x)
 {
-    float* system = (float*)malloc((n * (n + 1)) * sizeof(float));
+    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+    float* system = (float*)safe_malloc((n * (n + 1)) * sizeof(float));
     if (!system) return -1;
 
     for (size_t i = 0; i < n; i++)
@@ -1107,7 +1145,7 @@ static int ros_gauss_eliminate(float* A, size_t n, float* b, float* x)
             float val = fabsf(system[row * (n + 1) + col]);
             if (val > max_val) { max_val = val; pivot = row; }
         }
-        if (max_val < SELFLNN_ROSENBROCK_LINSOLVE_TOL) { free(system); return -2; }
+        if (max_val < SELFLNN_ROSENBROCK_LINSOLVE_TOL) { safe_free((void**)&system); return -2; }
 
         if (pivot != col)
             for (size_t j = col; j <= n; j++)
@@ -1136,7 +1174,7 @@ static int ros_gauss_eliminate(float* A, size_t n, float* b, float* x)
             x[i - 1] -= system[(i - 1) * (n + 1) + j] * x[j];
     }
 
-    free(system);
+    safe_free((void**)&system);
     return 0;
 }
 
@@ -1285,7 +1323,8 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                           float* h_actual, int* steps_used)
 {
     if (!y || !rhs || !cfg || !workspace || n == 0) return -1;
-    if (delta_t <= 0.0f) return 0;  /* 零或负步长 */
+    if (delta_t <= 0.0f) return -1;  /* 零或负步长，拒绝执行 */
+    if (ode_check_input_finite(y, n) != 0) return -1;  /* ZSFZX-FIX-R5-1: Rosenbrock */
 
     float h_max = (cfg->max_step_size > 0.0f) ? cfg->max_step_size : 1.0f;
     float gamma_val = (cfg->gamma_coeff > 0.0f) ? cfg->gamma_coeff : 0.435866521508f;
@@ -1343,7 +1382,8 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
 
         /* 主元追踪数组（堆分配以支持任意n）
          * 最小化分配：分配一次，多步复用 */
-        int* pivot = (int*)malloc(n * sizeof(int));
+        /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+        int* pivot = (int*)safe_malloc(n * sizeof(int));
         if (!pivot) {
             /* 内存不足：回退到一阶方法 */
             use_ros3p = 0;
@@ -1358,11 +1398,11 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                 float* jac_fp_ptr = y_tmp;   /* y_tmp = jac_fp */
                 float* jac_yp_ptr = f_tmp;   /* f_tmp = jac_yp */
                 /* 预保存基态RHS */
-                if (rhs(t_current, y, jac_f0_ptr, ctx) != 0) { free(pivot); return -2; }
+                if (rhs(t_current, y, jac_f0_ptr, ctx) != 0) { safe_free((void**)&pivot); return -2; }
 
                 if (ros_compute_jacobian(rhs, ctx, t_current, y, J, n, eps_fd,
                                           jac_f0_ptr, jac_fp_ptr, jac_yp_ptr, bandw) != 0) {
-                    free(pivot); return -3;
+                    safe_free((void**)&pivot); return -3;
                 }
 
                 /* 基态RHS = jac_f0_ptr，f_n中已有f(y) */
@@ -1376,7 +1416,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                     J[i * n + i] += 1.0f;
                 }
 
-                if (ros_lu_decompose(J, n, pivot) != 0) { free(pivot); return -4; }
+                if (ros_lu_decompose(J, n, pivot) != 0) { safe_free((void**)&pivot); return -4; }
 
                 /* --- 3. 阶段1: (I - γhJ) k1 = h f(y_n) --- */
                 for (size_t i = 0; i < n; i++)
@@ -1390,7 +1430,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                 float delta1 = eps_fd / k1_norm;
                 for (size_t i = 0; i < n; i++)
                     y_tmp[i] = y[i] + delta1 * k1[i];
-                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { free(pivot); return -2; }
+                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { safe_free((void**)&pivot); return -2; }
                 /* J@k1 ≈ (f(y+δ·k1) - f(y)) / δ */
                 for (size_t i = 0; i < n; i++)
                     k3[i] = (f_tmp[i] - f_n[i]) / delta1;  /* k3 = J@k1 临时存储 */
@@ -1398,7 +1438,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                 /* --- 5. 阶段2: (I - γhJ) k2 = h f(y + a21 k1) + h J (g21 k1) --- */
                 for (size_t i = 0; i < n; i++)
                     y_tmp[i] = y[i] + a21 * k1[i];
-                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { free(pivot); return -2; }
+                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { safe_free((void**)&pivot); return -2; }
                 for (size_t i = 0; i < n; i++)
                     y_tmp[i] = h_step * (f_tmp[i] + g21 * k3[i]);  /* k3 = J@k1 */
                 ros_lu_solve(J, n, pivot, y_tmp, k2);
@@ -1410,7 +1450,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                 float delta2 = eps_fd / k2_norm;
                 for (size_t i = 0; i < n; i++)
                     y_tmp[i] = y[i] + delta2 * k2[i];
-                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { free(pivot); return -2; }
+                if (rhs(t_current, y_tmp, f_tmp, ctx) != 0) { safe_free((void**)&pivot); return -2; }
                 /* f_tmp[0..n-1]存J@k2结果 */
                 for (size_t i = 0; i < n; i++)
                     f_tmp[i] = (f_tmp[i] - f_n[i]) / delta2;
@@ -1418,7 +1458,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                 /* --- 7. 阶段3: (I - γhJ) k3 = h f(y + a31k1 + a32k2) + h J (g31k1 + g32k2) --- */
                 for (size_t i = 0; i < n; i++)
                     y_tmp[i] = y[i] + a31 * k1[i] + a32 * k2[i];
-                if (rhs(t_current, y_tmp, f_n, ctx) != 0) { free(pivot); return -2; }
+                if (rhs(t_current, y_tmp, f_n, ctx) != 0) { safe_free((void**)&pivot); return -2; }
                 for (size_t i = 0; i < n; i++)
                     y_tmp[i] = h_step * (f_n[i] + g31 * k3[i] + g32 * f_tmp[i]);
                 ros_lu_solve(J, n, pivot, y_tmp, k3);
@@ -1430,7 +1470,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
                 t_current += h_step;
                 total_steps++;
             }
-            free(pivot);
+            safe_free((void**)&pivot);
             if (h_actual) *h_actual = t_current - t;
             if (steps_used) *steps_used = total_steps;
             return 0;
@@ -1529,16 +1569,17 @@ int ode_rosenbrock_adaptive_solve(ODERHSFunc rhs, void* ctx,
     const float grow_factor = 2.0f;
     const float shrink_factor = 0.5f;
     
-    float* y_full = (float*)malloc(n * sizeof(float));
-    float* y_half = (float*)malloc(n * sizeof(float));
-    float* workspace = (float*)malloc(ode_rosenbrock_workspace_size(n) * sizeof(float));
+    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+    float* y_full = (float*)safe_malloc(n * sizeof(float));
+    float* y_half = (float*)safe_malloc(n * sizeof(float));
+    float* workspace = (float*)safe_malloc(ode_rosenbrock_workspace_size(n) * sizeof(float));
     RosenbrockConfig cfg = ode_rosenbrock_default_config();
     float h_used;
     int s_used;
     size_t i;
 
     if (!y_full || !y_half || !workspace) {
-        free(y_full); free(y_half); free(workspace);
+        safe_free((void**)&y_full); safe_free((void**)&y_half); safe_free((void**)&workspace);
         return -2;
     }
 
@@ -1590,7 +1631,8 @@ int ode_rosenbrock_adaptive_solve(ODERHSFunc rhs, void* ctx,
     if (h_final) *h_final = h;
     if (steps_taken) *steps_taken = total_steps;
 
-    free(y_full); free(y_half); free(workspace);
+    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+    safe_free((void**)&y_full); safe_free((void**)&y_half); safe_free((void**)&workspace);
     return (total_steps > 0) ? 0 : -3;
 }
 
@@ -1623,7 +1665,8 @@ int ode_forest_ruth_solve(float* q, float* p, float delta_t,
                            float* workspace, int* steps_used)
 {
     if (!q || !p || !dqdt || !dpdt || !cfg || !workspace || n == 0) return -1;
-    if (delta_t <= 0.0f) return 0;  /* 零或负步长 */
+    if (delta_t <= 0.0f) return -1;  /* 零或负步长，拒绝执行 */
+    if (ode_check_input_finite(q, n) != 0 || ode_check_input_finite(p, n) != 0) return -1;  /* ZSFZX-FIX-R5-1: Forest-Ruth */
 
     /* Forest-Ruth 4阶辛积分器系数（硬编码，直接取自Forest & Ruth 1990） */
     const float c1 =  0.6756035959798288f;
@@ -1738,7 +1781,8 @@ int ode_verlet_solve(float* q, float* p, float delta_t,
                      size_t n, float* workspace)
 {
     if (!q || !p || !dpdt || !workspace || n == 0) return -1;
-    if (delta_t <= 0.0f) return 0;  /* 零或负步长 */
+    if (delta_t <= 0.0f) return -1;  /* 零或负步长，拒绝执行 */
+    if (ode_check_input_finite(q, n) != 0 || ode_check_input_finite(p, n) != 0) return -1;  /* ZSFZX-FIX-R5-1: Verlet */
 
     float* accel = workspace;
     float half_h = delta_t * 0.5f;
@@ -1800,7 +1844,7 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                    float* h_actual, int* steps_used)
 {
     if (!y || !rhs || !cfg || !workspace || n == 0) return -1;
-    if (delta_t <= 0.0f) return 0;  /* 零或负步长 */
+    if (delta_t <= 0.0f) return -1;  /* 零或负步长，拒绝执行 */
 
     float abs_tol = (cfg->abs_tolerance > 0.0f) ? cfg->abs_tolerance : 1e-8f;
     float rel_tol = (cfg->rel_tolerance > 0.0f) ? cfg->rel_tolerance : 1e-6f;

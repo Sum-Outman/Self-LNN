@@ -259,6 +259,19 @@ void decision_engine_destroy(DecisionEngine* engine) {
 }
 
 /**
+ * @brief 清空所有决策备选方案（ZSFEEE-FIX-DEEP-006）
+ */
+void decision_engine_clear_alternatives(DecisionEngine* engine) {
+    if (!engine) return;
+    if (engine->alternatives) {
+        for (size_t i = 0; i < engine->num_alternatives; i++) {
+            free_alternative_internal(&engine->alternatives[i]);
+        }
+        engine->num_alternatives = 0;
+    }
+}
+
+/**
  * @brief 设置决策目标
  */
 int decision_engine_set_objectives(DecisionEngine* engine,
@@ -793,6 +806,9 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
             strategy_profile[i] = (int)i;
         }
         
+        /* ZSFQQ-P0-005修复: 迭代最佳响应中对手策略索引修正
+         * 对于多智能体博弈, 智能体i的对手策略是所有其他智能体策略的聚合
+         * 简化处理: 对于2人博弈, 对手是另一个智能体; 对于n>2, 取其他智能体的多数策略 */
         int converged = 0;
         for (int iter = 0; iter < 100 && !converged; iter++) {
             converged = 1;
@@ -800,8 +816,30 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
                 float best_payoff = -FLT_MAX;
                 int best_action = strategy_profile[i];
                 
+                /* 计算对手聚合策略: 对于2智能体, 对手是另一个; 对于n>2, 取除了i之外的其他智能体中策略的众数 */
+                int opponent_strategy = 0;
+                if (num_alts == 2) {
+                    opponent_strategy = strategy_profile[1 - i]; /* 2人博弈: 另一个智能体 */
+                } else {
+                    /* n>2: 计算其他智能体的策略频率分布，取众数 */
+                    int* freq = (int*)calloc(num_alts, sizeof(int));
+                    if (freq) {
+                        for (size_t o = 0; o < num_alts; o++) {
+                            if (o != i) freq[strategy_profile[o]]++;
+                        }
+                        int max_freq = 0;
+                        for (size_t a = 0; a < num_alts; a++) {
+                            if (freq[a] > max_freq) {
+                                max_freq = freq[a];
+                                opponent_strategy = (int)a;
+                            }
+                        }
+                        free(freq);
+                    }
+                }
+                
                 for (size_t a = 0; a < num_alts; a++) {
-                    float current_payoff = payoff_matrix[a * num_alts + strategy_profile[i]];
+                    float current_payoff = payoff_matrix[a * num_alts + opponent_strategy];
                     if (current_payoff > best_payoff) {
                         best_payoff = current_payoff;
                         best_action = (int)a;

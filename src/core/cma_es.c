@@ -310,14 +310,6 @@ void cmaes_sample_population(CMAESState* state) {
     }
 }
 
-static int cmaes_compare_float_desc(const void* a, const void* b) {
-    float fa = *(const float*)a;
-    float fb = *(const float*)b;
-    if (fa < fb) return -1;
-    if (fa > fb) return 1;
-    return 0;
-}
-
 int cmaes_update(CMAESState* state, const float* fitness_values) {
     if (!state || !fitness_values) return -1;
 
@@ -521,9 +513,19 @@ int cmaes_test_stop_conditions(CMAESState* state) {
         return 1;
     }
 
-    if (state->sigma * state->tol_x < state->tol_x) {
-        state->termination_reason = CMAES_TERM_TOLX;
-        return 1;
+    /* ZSFQQ-P0-001修复: 原条件 sigma*tol_x < tol_x 恒为真
+     * 正确条件: 步长×最大标准差 < tol_x，即检查搜索步长是否已收敛 */
+    {
+        size_t dim = state->dimension;
+        float max_diag = state->covariance[0];
+        for (size_t di = 0; di < dim; di++) {
+            float val = state->covariance[di * dim + di];
+            if (val > max_diag) max_diag = val;
+        }
+        if (state->sigma * sqrtf(max_diag > 0.0f ? max_diag : 1e-30f) < state->tol_x) {
+            state->termination_reason = CMAES_TERM_TOLX;
+            return 1;
+        }
     }
 
     if (state->generation > 2 &&

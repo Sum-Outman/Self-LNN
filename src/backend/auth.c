@@ -457,6 +457,8 @@ int auth_global_check_rate(AuthSystem* auth) {
     return token_bucket_consume(&auth->global_bucket, 1) ? 1 : 0;
 }
 
+/* M-017修复: Bearer Token为统一主认证方式，旧式api_key仅作兼容保留 */
+/* 认证优先级: 1.Bearer Token(Authorization头) > 2.旧式api_key(请求体JSON字段) */
 int auth_check_request(AuthSystem* auth, const char* endpoint,
                        const char* auth_header, AuthPermission* out_permission) {
     if (!auth || !endpoint) return 0;
@@ -470,6 +472,7 @@ int auth_check_request(AuthSystem* auth, const char* endpoint,
     
     if (!auth_header) return 0;
     
+    /* 仅接受标准Bearer Token格式（主认证方式） */
     if (strncmp(auth_header, "Bearer ", 7) != 0) return 0;
     const char* token = auth_header + 7;
     
@@ -481,34 +484,58 @@ int auth_check_request(AuthSystem* auth, const char* endpoint,
     return 0;
 }
 
+/* M-017: 旧式API密钥兼容验证（从请求体JSON中提取api_key字段直接验证） */
+/* 仅作为向后兼容保留，新客户端应使用Bearer Token方式 */
+int auth_validate_legacy_key(AuthSystem* auth, const char* key, AuthPermission required_permission) {
+    if (!auth || !key || key[0] == '\0') return 0;
+    return auth_validate_key(auth, key, required_permission);
+}
+
 static void xor_encrypt_decrypt(uint8_t* data, size_t len, const uint8_t* key, size_t key_len) {
     for (size_t i = 0; i < len; i++)
         data[i] ^= key[i % key_len];
 }
 
 int auth_save_keys(AuthSystem* auth, const char* filepath) {
-    /* F-037修复: 启用XOR加密保护密钥文件，防止明文泄露 */
+    /* ZSFEEE-FIX-020: 使用salt+SHA-256多轮迭代的HKDF风格密钥派生替代简单XOR，
+     * 增强加密密钥安全性。原实现仅对filepath字符简单XOR，攻击者可轻易推测。 */
     if (!auth || !filepath) return -1;
     FILE* fp = fopen(filepath, "wb");
     if (!fp) return -1;
     
-    uint8_t header[16] = "SELFLNN_AUTH_V2"; /* V2表示加密格式 */
+    uint8_t header[16] = "SELFLNN_AUTH_V3"; /* V3表示HKDF加密格式 */
     fwrite(header, 1, 16, fp);
     
     int count = auth->key_count;
     fwrite(&count, sizeof(int), 1, fp);
     
-    /* F-037: XOR加密密钥数据再写入 */
+    /* 生成随机盐值并写入文件 */
+    uint8_t salt[16];
+    generate_random_bytes(salt, 16);
+    fwrite(salt, 1, 16, fp);
+    
     size_t keys_size = (size_t)count * sizeof(AuthKeyEntry);
     uint8_t* keys_copy = (uint8_t*)safe_malloc(keys_size);
     if (keys_copy) {
         memcpy(keys_copy, auth->keys, keys_size);
-        /* 使用文件路径哈希作为XOR密钥 */
-        uint8_t xor_key[32];
-        memset(xor_key, 0, 32);
+        /* 派生加密密钥：SHA-256(salt || SHA-256(salt || filepath || salt)) */
         size_t path_len = strlen(filepath);
-        for (size_t i = 0; i < path_len; i++) xor_key[i % 32] ^= (uint8_t)filepath[i];
-        for (size_t i = 0; i < keys_size; i++) keys_copy[i] ^= xor_key[i % 32];
+        if (path_len > 200) path_len = 200;
+        uint8_t kdf_buf[232];  /* 16(salt) + 200(path) + 16(salt) */
+        memcpy(kdf_buf, salt, 16);
+        memcpy(kdf_buf + 16, filepath, path_len);
+        memcpy(kdf_buf + 16 + path_len, salt, 16);
+        
+        uint8_t h1[AUTH_HASH_LEN];
+        sha256_hash(kdf_buf, 16 + path_len + 16, h1);
+        
+        /* 第二轮：SHA-256(salt || h1) */
+        memcpy(kdf_buf, salt, 16);
+        memcpy(kdf_buf + 16, h1, AUTH_HASH_LEN);
+        uint8_t xor_key[AUTH_HASH_LEN];
+        sha256_hash(kdf_buf, 16 + AUTH_HASH_LEN, xor_key);
+        
+        for (size_t i = 0; i < keys_size; i++) keys_copy[i] ^= xor_key[i % AUTH_HASH_LEN];
         fwrite(keys_copy, 1, keys_size, fp);
         safe_free((void**)&keys_copy);
     } else {
@@ -526,10 +553,14 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
     
     uint8_t header[16];
     int is_encrypted = 0;
+    int is_v3 = 0;
     if (fread(header, 1, 16, fp) != 16) { fclose(fp); return -1; }
     
-    /* F-037: 检测加密格式 */
-    if (memcmp(header, "SELFLNN_AUTH_V2", 16) == 0) {
+    /* ZSFEEE-FIX-020: 检测加密格式版本 */
+    if (memcmp(header, "SELFLNN_AUTH_V3", 16) == 0) {
+        is_encrypted = 1;
+        is_v3 = 1;
+    } else if (memcmp(header, "SELFLNN_AUTH_V2", 16) == 0) {
         is_encrypted = 1;
     } else if (memcmp(header, "SELFLNN_AUTH_V1", 16) != 0) {
         fclose(fp);
@@ -541,21 +572,50 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
         fclose(fp);
         return -1;
     }
+
+    /* V3格式：读取盐值 */
+    uint8_t salt[16] = {0};
+    if (is_v3) {
+        if (fread(salt, 1, 16, fp) != 16) {
+            fclose(fp);
+            return -1;
+        }
+    }
     
     size_t keys_size = (size_t)count * sizeof(AuthKeyEntry);
     if (is_encrypted) {
-        /* F-037: XOR解密 */
         uint8_t* keys_encrypted = (uint8_t*)safe_malloc(keys_size);
         if (!keys_encrypted || fread(keys_encrypted, 1, keys_size, fp) != keys_size) {
             free(keys_encrypted);
             fclose(fp);
             return -1;
         }
-        uint8_t xor_key[32];
-        memset(xor_key, 0, 32);
-        size_t path_len = strlen(filepath);
-        for (size_t i = 0; i < path_len; i++) xor_key[i % 32] ^= (uint8_t)filepath[i];
-        for (size_t i = 0; i < keys_size; i++) keys_encrypted[i] ^= xor_key[i % 32];
+        if (is_v3) {
+            /* ZSFEEE-FIX-020: V3格式使用salt+HKDF风格密钥派生解密 */
+            size_t path_len = strlen(filepath);
+            if (path_len > 200) path_len = 200;
+            uint8_t kdf_buf[232];
+            memcpy(kdf_buf, salt, 16);
+            memcpy(kdf_buf + 16, filepath, path_len);
+            memcpy(kdf_buf + 16 + path_len, salt, 16);
+            
+            uint8_t h1[AUTH_HASH_LEN];
+            sha256_hash(kdf_buf, 16 + path_len + 16, h1);
+            
+            memcpy(kdf_buf, salt, 16);
+            memcpy(kdf_buf + 16, h1, AUTH_HASH_LEN);
+            uint8_t xor_key[AUTH_HASH_LEN];
+            sha256_hash(kdf_buf, 16 + AUTH_HASH_LEN, xor_key);
+            
+            for (size_t i = 0; i < keys_size; i++) keys_encrypted[i] ^= xor_key[i % AUTH_HASH_LEN];
+        } else {
+            /* V2格式：兼容旧的简单XOR密钥派生 */
+            uint8_t xor_key[32];
+            memset(xor_key, 0, 32);
+            size_t path_len = strlen(filepath);
+            for (size_t i = 0; i < path_len; i++) xor_key[i % 32] ^= (uint8_t)filepath[i];
+            for (size_t i = 0; i < keys_size; i++) keys_encrypted[i] ^= xor_key[i % 32];
+        }
         memcpy(auth->keys, keys_encrypted, keys_size);
         safe_free((void**)&keys_encrypted);
     } else {

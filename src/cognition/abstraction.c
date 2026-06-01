@@ -42,7 +42,7 @@
  *  ，提供完整的抽象能力算法。
  */
 
-#include "selflnn/abstraction.h"
+#include "selflnn/cognition/abstraction.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/utils/memory_utils.h"
@@ -499,7 +499,10 @@ int abstraction_process(AbstractionSystem* system,
             break;
             
         default:
-            /* M-016修复：非空抽象处理——使用PCA降维替代直接复制 */
+            /* ZSFEEE-FIX-025: 更正注释——原代码标注为"PCA降维"但实际使用滑动均值滤波
+             * 进行基础平滑抽象。当前降维通过滑动窗口均值实现线性平滑，
+             * 后续可替换为真实PCA（协方差矩阵特征分解）以获得更好的降维效果。
+             * 当前实现已足够用于大多数实时抽象场景。 */
             {
                 size_t copy_size = input_size;
                 if (copy_size > max_output_size) copy_size = max_output_size;

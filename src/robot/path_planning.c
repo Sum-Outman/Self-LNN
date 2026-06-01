@@ -299,7 +299,12 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
             if (nx < 0 || nx >= map->width || ny < 0 || ny >= map->height) continue;
             int nidx = ny * map->width + nx;
             if (nodes[nidx].in_closed) continue;
-            if (map->cells[ny * map->width + nx] > 0) continue;
+            /* ZSFZX-FIX-R10-1: A*碰撞检测安全缺陷 — 原仅检查单个栅格,
+             * 未考虑机器人本体半径。现在使用grid_is_occupied做半径感知检测 */
+            if (grid_is_occupied(map,
+                map->origin_x + ((float)nx + 0.5f) * map->resolution,
+                map->origin_y + ((float)ny + 0.5f) * map->resolution,
+                config->robot_radius)) continue;
 
             float tent_g = nodes[current].g + dir_costs[d];
             if (tent_g < nodes[nidx].g)

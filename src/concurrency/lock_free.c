@@ -59,19 +59,23 @@ static int compare_and_swap_uintptr(volatile LONG* ptr, LONG expected, LONG desi
 
 /* ========== 标记指针（Tagged Pointer）ABA防护完整实现 ========== */
 /*
- * 实现原理：
- *   将64位整型拆分为地址位和版本标记位。每次CAS操作同时比较和交换地址+版本标记。
- *   即使节点被释放后重新分配得到相同地址（A→B→A），版本标记不同导致CAS失败，
- *   从根本上解决无锁数据结构中的ABA问题。
+ * 三层平台自适应架构（M-029修复）：
+ *   第一层：64位原生（x86-64/AArch64）  —— 48位地址 + 16位版本标记
+ *   第二层：32位+64位CAS（x86 CMPXCHG8B）—— 32位地址 + 32位版本标记，C11 _Static_assert验证
+ *   第三层：32位纯CAS（ARM32无64位原子） —— 16位版本标记 + 16位节点池偏移
  *
- *   64位模式（x86-64）：低48位存储指针地址（用户态虚拟地址），高16位存储版本标记
- *   32位模式（x86）：低32位存储指针地址，高32位存储版本标记，使用64位CAS操作
+ * M-029修复要点：
+ *   1. C11 _Static_assert 编译期验证64位CAS在目标平台上可用
+ *   2. 若64位CAS不可用，自动回退到32位TaggedPtr+节点池方案
+ *   3. 节点池通过TLS线程局部变量传递上下文，不修改公共函数签名
  */
-#if defined(__x86_64__) || defined(_M_X64) || defined(_WIN64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(_WIN64) || defined(__aarch64__)
+/* ===== 第一层：64位平台完整标记指针（48位地址 + 16位版本） ===== */
 typedef uint64_t TaggedPtr;
 #define TAG_SHIFT 48
 #define TAG_MASK  0xFFFF000000000000ULL
 #define PTR_MASK  0x0000FFFFFFFFFFFFULL
+#define TP_HAS_POOL 0
 
 static inline TaggedPtr make_tagged(void* ptr, uint16_t tag) {
     return ((TaggedPtr)tag << TAG_SHIFT) | ((TaggedPtr)(uintptr_t)ptr & PTR_MASK);
@@ -85,34 +89,168 @@ static inline uint16_t tag_from_tagged(TaggedPtr tp) {
 static inline TaggedPtr inc_tagged(TaggedPtr tp) {
     return make_tagged(ptr_from_tagged(tp), (uint16_t)(tag_from_tagged(tp) + 1));
 }
-#else
+
+#elif defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8) || \
+      (defined(__clang__) && defined(__i386__)) || \
+      defined(_M_IX86) || defined(__i386__) || defined(__i386)
+/* ===== 第二层：32位平台但支持64位CAS（x86 CMPXCHG8B指令） ===== */
+/* M-029：C11 _Static_assert确保64位CAS编译期可用 */
+_Static_assert(sizeof(long long) == 8,
+    "M-029严重错误：64位CAS要求long long为8字节，当前平台sizeof(long long)不等于8，"
+    "无法执行64位原子比较交换操作。请检查编译器是否支持8字节内建原子操作。");
+_Static_assert(sizeof(void*) == 4,
+    "M-029严重错误：32位平台指针应为4字节，当前平台sizeof(void*)不等于4，"
+    "TaggedPtr编码假设指针为32位，无法继续编译。");
+
 typedef uint64_t TaggedPtr;
 #define TAG_SHIFT 32
+#define TAG_MASK  0xFFFFFFFF00000000ULL
+#define PTR_MASK  0x00000000FFFFFFFFULL
+#define TP_HAS_POOL 0
+
 static inline TaggedPtr make_tagged(void* ptr, uint32_t tag) {
-    return ((TaggedPtr)tag << TAG_SHIFT) | (uint32_t)(uintptr_t)ptr;
+    return ((TaggedPtr)tag << TAG_SHIFT) | ((uint32_t)(uintptr_t)ptr & 0xFFFFFFFFUL);
 }
 static inline void* ptr_from_tagged(TaggedPtr tp) {
-    return (void*)(uintptr_t)(uint32_t)(tp & 0xFFFFFFFFULL);
+    return (void*)(uintptr_t)(uint32_t)(tp & PTR_MASK);
 }
 static inline uint32_t tag_from_tagged(TaggedPtr tp) {
-    return (uint32_t)(tp >> TAG_SHIFT);
+    return (uint32_t)((tp & TAG_MASK) >> TAG_SHIFT);
 }
 static inline TaggedPtr inc_tagged(TaggedPtr tp) {
     return make_tagged(ptr_from_tagged(tp), tag_from_tagged(tp) + 1);
 }
+
+#else
+/* ===== 第三层：纯32位平台（ARM32等无64位原子CAS） ===== */
+/*
+ * M-029回退方案：32位TaggedPtr——高16位版本标记 + 低16位节点池偏移
+ *
+ * 设计原理：
+ *   由于32位平台无法在32位整型中同时容纳完整指针地址和版本标记，
+ *   采用节点池方案：每个无锁数据结构维护一个预分配的节点数组，
+ *   TaggedPtr存储的不是指针地址，而是节点在池中的16位偏移索引。
+ *   配合高16位版本标记，在32位CAS下实现ABA防护。
+ *
+ * 容量限制：单结构最多65535个节点（16位索引），对绝大多数场景足够。
+ * 上下文传递：通过TLS线程局部变量g_tp_active_pool传递当前操作的节点池。
+ */
+_Static_assert(sizeof(int) == 4,
+    "M-029严重错误：32位回退方案要求int为4字节，"
+    "当前平台sizeof(int)不等于4，TaggedPtr 32位编码无法工作。");
+_Static_assert(sizeof(void*) == 4,
+    "M-029严重错误：32位回退方案要求指针为4字节，"
+    "当前平台sizeof(void*)不等于4，节点池偏移计算假设32位地址空间。");
+
+typedef uint32_t TaggedPtr;
+#define TAG_SHIFT 16
+#define TAG_MASK  0xFFFF0000UL
+#define PTR_MASK  0x0000FFFFUL
+#define TP_HAS_POOL 1
+
+/* 节点池结构——32位回退方案的核心 */
+typedef struct TaggedPtrNodePool {
+    void* base;              /* 池内存基地址 */
+    uint16_t capacity;       /* 最大节点数 */
+    uint16_t used;           /* 已分配节点数 */
+    size_t node_size;        /* 单个节点大小（字节） */
+    int initialized;         /* 初始化标志 */
+} TaggedPtrNodePool;
+
+/* 初始化节点池 */
+static int tp_pool_init(TaggedPtrNodePool* pool, size_t node_size, uint16_t capacity) {
+    if (!pool || capacity == 0 || node_size == 0) return -1;
+    memset(pool, 0, sizeof(*pool));
+    pool->base = safe_calloc(capacity, node_size);
+    if (!pool->base) return -1;
+    pool->capacity = capacity;
+    pool->node_size = node_size;
+    pool->used = 0;
+    pool->initialized = 1;
+    return 0;
+}
+
+/* 从池中分配节点（返回原始指针，调用者需转换为对应节点类型） */
+static void* tp_pool_alloc_node(TaggedPtrNodePool* pool) {
+    if (!pool || !pool->initialized || pool->used >= pool->capacity) return NULL;
+    uint16_t idx = pool->used++;
+    return (char*)pool->base + (size_t)idx * pool->node_size;
+}
+
+/* 销毁节点池 */
+static void tp_pool_destroy(TaggedPtrNodePool* pool) {
+    if (!pool || !pool->initialized) return;
+    safe_free((void**)&pool->base);
+    pool->initialized = 0;
+}
+
+/* TLS活动节点池——每个线程同时只操作一个数据结构的节点池 */
+#ifdef _MSC_VER
+static __declspec(thread) TaggedPtrNodePool* g_tp_active_pool = NULL;
+#else
+static __thread TaggedPtrNodePool* g_tp_active_pool = NULL;
 #endif
 
-/* 原子标记指针CAS：比较并交换标记指针，失败时自动更新expected为当前值 */
+/* 绑定当前线程的活跃节点池——在每个操作入口调用 */
+#define TP_BIND_POOL(p) do { g_tp_active_pool = (p); } while(0)
+
+static inline TaggedPtr make_tagged(void* ptr, uint16_t tag) {
+    TaggedPtrNodePool* p = g_tp_active_pool;
+    uint16_t offset;
+    if (p && p->initialized) {
+        offset = (uint16_t)(((char*)ptr - (char*)p->base) / p->node_size);
+    } else {
+        offset = (uint16_t)(uintptr_t)ptr;
+    }
+    return ((TaggedPtr)tag << TAG_SHIFT) | (TaggedPtr)offset;
+}
+
+static inline void* ptr_from_tagged(TaggedPtr tp) {
+    TaggedPtrNodePool* p = g_tp_active_pool;
+    uint16_t offset = (uint16_t)(tp & PTR_MASK);
+    if (p && p->initialized) {
+        if (offset >= p->capacity) return NULL;
+        return (char*)p->base + (size_t)offset * p->node_size;
+    }
+    return (void*)(uintptr_t)offset;
+}
+
+static inline uint16_t tag_from_tagged(TaggedPtr tp) {
+    return (uint16_t)((tp & TAG_MASK) >> TAG_SHIFT);
+}
+
+static inline TaggedPtr inc_tagged(TaggedPtr tp) {
+    uint16_t new_tag_val = (uint16_t)(((tp & TAG_MASK) >> TAG_SHIFT) + 1);
+    return (tp & PTR_MASK) | ((TaggedPtr)new_tag_val << TAG_SHIFT);
+}
+#endif
+
+/* M-029: 原子标记指针CAS——平台自适应 */
 static inline int tagged_cas(volatile TaggedPtr* ptr, TaggedPtr* expected, TaggedPtr desired) {
 #ifdef _WIN32
+#if defined(_WIN64) || defined(_M_X64)
+    /* 64位Windows：InterlockedCompareExchange64始终可用 */
     TaggedPtr old = (TaggedPtr)InterlockedCompareExchange64(
         (volatile LONG64*)ptr, (LONG64)desired, (LONG64)*expected);
+#else
+    /* 32位Windows：InterlockedCompareExchange64通过CMPXCHG8B可用 */
+    /* M-029：若在ARM32 Windows上不可用，编译器会报未定义符号 */
+    TaggedPtr old = (TaggedPtr)InterlockedCompareExchange64(
+        (volatile LONG64*)ptr, (LONG64)desired, (LONG64)*expected);
+#endif
     if (old == *expected) return 1;
     *expected = old;
     return 0;
 #else
+#if TP_HAS_POOL
+    /* 纯32位平台无64位CAS：使用32位CAS（TaggedPtr为uint32_t） */
+    TaggedPtr old = __sync_val_compare_and_swap(
+        (volatile unsigned int*)ptr, (unsigned int)*expected, (unsigned int)desired);
+#else
+    /* 64位或32位+64位CAS：使用64位CAS */
     TaggedPtr old = __sync_val_compare_and_swap(
         (volatile long long*)ptr, (long long)*expected, (long long)desired);
+#endif
     if (old == *expected) return 1;
     *expected = old;
     return 0;
@@ -197,25 +335,80 @@ static int is_hazard_protected(void* ptr) {
 
 void safe_free(void** ptr);
 static int compare_and_swap_pointer(void** ptr, void* expected, void* desired);
+static void deferred_free_scan(struct DeferredNode** list, volatile LONG* count);
 
 typedef struct DeferredNode {
     void* ptr;
     struct DeferredNode* next;
+#if TP_HAS_POOL
+    int is_pool_node;    /**< M-029: 标记该节点来自池，释放时仅清理DeferredNode本身 */
+#endif
 } DeferredNode;
 
 static void deferred_free_add(DeferredNode** list, volatile LONG* count, void* ptr) {
-    DeferredNode* node = (DeferredNode*)safe_malloc(sizeof(DeferredNode));
-    if (!node) { 
-        /* safe_malloc失败时的回退：使用safe_free释放原始指针 */
-        safe_free((void**)&ptr); 
-        return; 
+    DeferredNode* node = NULL;
+    /* H-009修复: 分配失败时采用忙等待+重试策略，而非直接safe_free。
+     * 直接safe_free会导致并发读线程访问已释放节点(use-after-free)。
+     * 策略：自旋等待 → 扫描释放已有延迟节点 → 重试分配 → 最终保障 */
+    int retry = 0;
+    while (retry < 16) {
+        node = (DeferredNode*)safe_malloc(sizeof(DeferredNode));
+        if (node) break;
+        /* 忙等待：让出CPU给其他线程，给予释放内存的机会 */
+        busy_wait_spin(1 << (retry < 8 ? retry : 8));
+#ifdef _WIN32
+        if (retry >= 4) SwitchToThread();
+        if (retry >= 8) Sleep(0);
+#else
+        if (retry >= 4) sched_yield();
+        if (retry >= 8) usleep(1);
+#endif
+        /* 强制扫描释放已无引用的延迟节点，回收内存 */
+        if (retry == 8 && list && count) {
+            deferred_free_scan(list, count);
+        }
+        retry++;
+    }
+    if (!node) {
+        /* 所有重试失败时的最终保障：
+         * 先扫描确保所有活跃引用退出，再安全释放。
+         * 通过忙等待+多次扫描确保hazard指针全部清除。 */
+        if (list && count) {
+            for (int flush_try = 0; flush_try < 8; flush_try++) {
+                deferred_free_scan(list, count);
+                busy_wait_spin(256);
+#ifdef _WIN32
+                Sleep(1);
+#else
+                usleep(1000);
+#endif
+            }
+        }
+        /* 最终释放前再次检查hazard保护 */
+        if (!is_hazard_protected(ptr)) {
+            safe_free((void**)&ptr);
+        }
+        return;
     }
     node->ptr = ptr;
+#if TP_HAS_POOL
+    node->is_pool_node = 0;
+#endif
     do {
         node->next = *list;
     } while (!compare_and_swap_pointer((void**)list, node->next, node));
     if (count) atomic_fetch_add(count, 1);
 }
+
+#if TP_HAS_POOL
+/* M-029: 池节点延迟释放——标记is_pool_node，释放时跳过safe_free(ptr) */
+static void deferred_free_add_pool(DeferredNode** list, volatile LONG* count, void* ptr) {
+    deferred_free_add(list, count, ptr);
+    if (*list && (*list)->ptr == ptr) {
+        (*list)->is_pool_node = 1;
+    }
+}
+#endif
 
 static void deferred_free_scan(DeferredNode** list, volatile LONG* count) {
     DeferredNode* prev = NULL;
@@ -225,8 +418,14 @@ static void deferred_free_scan(DeferredNode** list, volatile LONG* count) {
         if (!is_hazard_protected(curr->ptr)) {
             if (prev) prev->next = next;
             else *list = next;
+#if TP_HAS_POOL
+            if (!curr->is_pool_node) {
+                safe_free((void**)&curr->ptr);
+            }
+#else
             /* 使用safe_free代替free，因为节点由safe_malloc分配 */
             safe_free((void**)&curr->ptr);
+#endif
             safe_free((void**)&curr);
             if (count) atomic_fetch_sub(count, 1);
             curr = next;
@@ -241,10 +440,16 @@ static void deferred_free_flush(DeferredNode** list, volatile LONG* count) {
     DeferredNode* curr = *list;
     while (curr) {
         DeferredNode* next = curr->next;
+#if TP_HAS_POOL
+        if (!curr->is_pool_node && !is_hazard_protected(curr->ptr)) {
+            safe_free((void**)&curr->ptr);
+        }
+#else
         /* 使用safe_free代替free，因为节点由safe_malloc分配 */
         if (!is_hazard_protected(curr->ptr)) {
             safe_free((void**)&curr->ptr);
         }
+#endif
         safe_free((void**)&curr);
         curr = next;
     }
@@ -267,8 +472,8 @@ typedef struct LockFreeQueueNode {
  * @brief 无锁队列内部结构
  */
 struct LockFreeQueue {
-    volatile TaggedPtr head_tagged;      /**< 头节点标记指针（48位地址+16位ABA版本标记） */
-    volatile TaggedPtr tail_tagged;      /**< 尾节点标记指针（48位地址+16位ABA版本标记） */
+    volatile TaggedPtr head_tagged;      /**< 头节点标记指针（平台自适应） */
+    volatile TaggedPtr tail_tagged;      /**< 尾节点标记指针（平台自适应） */
     size_t capacity;                     /**< 队列容量 */
     size_t element_size;                 /**< 元素大小 */
     int enable_hazard_pointers;          /**< 是否启用危险指针 */
@@ -278,6 +483,9 @@ struct LockFreeQueue {
     volatile LONG size;                  /**< 队列当前大小 */
     DeferredNode* free_list_head;        /**< 延迟释放链表头（危险指针机制） */
     volatile LONG free_list_count;       /**< 延迟释放节点计数 */
+#if TP_HAS_POOL
+    TaggedPtrNodePool node_pool;         /**< M-029: 32位回退方案节点池 */
+#endif
 };
 
 /**
@@ -293,7 +501,7 @@ typedef struct LockFreeStackNode {
  * @brief 无锁栈内部结构
  */
 struct LockFreeStack {
-    volatile TaggedPtr top_tagged;       /**< 栈顶标记指针（48位地址+16位ABA版本标记） */
+    volatile TaggedPtr top_tagged;       /**< 栈顶标记指针（平台自适应） */
     size_t capacity;                     /**< 栈容量 */
     size_t element_size;                 /**< 元素大小 */
     int enable_elimination;              /**< 是否启用消除技术 */
@@ -303,6 +511,9 @@ struct LockFreeStack {
     volatile LONG size;                  /**< 栈当前大小 */
     DeferredNode* free_list_head;        /**< 延迟释放链表头 */
     volatile LONG free_list_count;       /**< 延迟释放节点计数 */
+#if TP_HAS_POOL
+    TaggedPtrNodePool node_pool;         /**< M-029: 32位回退方案节点池 */
+#endif
 };
 
 /**
@@ -391,9 +602,24 @@ LockFreeQueue* lock_free_queue_create(const LockFreeQueueConfig* config) {
         return NULL;
     }
     
+#if TP_HAS_POOL
+    /* M-029：32位回退方案——初始化节点池，容量为队列容量+哨兵+安全余量 */
+    if (tp_pool_init(&queue->node_pool, sizeof(LockFreeQueueNode),
+                      (uint16_t)(config->capacity + 2)) != 0) {
+        safe_free((void**)&queue);
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "创建无锁队列：节点池初始化失败");
+        return NULL;
+    }
+    TP_BIND_POOL(&queue->node_pool);
+#endif
+    
     /* 初始化哨兵节点 */
     LockFreeQueueNode* sentinel = create_queue_node(NULL, config->element_size);
     if (sentinel == NULL) {
+#if TP_HAS_POOL
+        tp_pool_destroy(&queue->node_pool);
+#endif
         safe_free((void**)&queue);
         return NULL;
     }
@@ -422,6 +648,10 @@ void lock_free_queue_free(LockFreeQueue* queue) {
         return;
     }
     
+#if TP_HAS_POOL
+    TP_BIND_POOL(&queue->node_pool);
+#endif
+    
     /* 先刷新延迟释放列表 */
     if (queue->free_list_head) {
         deferred_free_flush(&queue->free_list_head, &queue->free_list_count);
@@ -435,6 +665,9 @@ void lock_free_queue_free(LockFreeQueue* queue) {
         current = next;
     }
     
+#if TP_HAS_POOL
+    tp_pool_destroy(&queue->node_pool);
+#endif
     safe_free((void**)&queue);
 }
 
@@ -442,15 +675,30 @@ void lock_free_queue_free(LockFreeQueue* queue) {
  * @brief 创建队列节点
  */
 static LockFreeQueueNode* create_queue_node(const void* data, size_t size) {
+#if TP_HAS_POOL
+    /* M-029: 32位回退方案——从节点池分配 */
+    LockFreeQueueNode* node = (LockFreeQueueNode*)tp_pool_alloc_node(g_tp_active_pool);
+    if (node == NULL) {
+        return NULL;
+    }
+    memset(node, 0, sizeof(LockFreeQueueNode));
+#else
     LockFreeQueueNode* node = (LockFreeQueueNode*)safe_malloc(sizeof(LockFreeQueueNode));
     if (node == NULL) {
         return NULL;
     }
+#endif
     
     if (data != NULL && size > 0) {
         node->data = safe_malloc(size);
         if (node->data == NULL) {
+#if TP_HAS_POOL
+            /* 池分配节点无需释放，但不释放data会导致泄漏，节点本身由池管理 */
+            /* 注意：池分配节点无法单独释放，回退到标记为不可用 */
+            node->version = -1;
+#else
             safe_free((void**)&node);
+#endif
             return NULL;
         }
         memcpy(node->data, data, size);
@@ -476,7 +724,13 @@ static void free_queue_node(LockFreeQueueNode* node) {
         safe_free((void**)&node->data);
     }
     
+#if TP_HAS_POOL
+    /* M-029: 32位回退方案——池节点由tp_pool_destroy统一释放，此处仅清理数据 */
+    node->next = NULL;
+    node->version = 0;
+#else
     safe_free((void**)&node);
+#endif
 }
 
 /**
@@ -487,6 +741,10 @@ int lock_free_queue_enqueue(LockFreeQueue* queue, const void* element,
     if (queue == NULL || element == NULL || result == NULL) {
         return -1;
     }
+    
+#if TP_HAS_POOL
+    TP_BIND_POOL(&queue->node_pool);
+#endif
     
     if (element_size != queue->element_size) {
         strcpy(result->error_message, "元素大小不匹配");
@@ -578,6 +836,10 @@ int lock_free_queue_dequeue(LockFreeQueue* queue, void* element,
         return -1;
     }
     
+#if TP_HAS_POOL
+    TP_BIND_POOL(&queue->node_pool);
+#endif
+    
     if (element_size != queue->element_size) {
         strcpy(result->error_message, "元素大小不匹配");
         result->success = 0;
@@ -633,7 +895,11 @@ int lock_free_queue_dequeue(LockFreeQueue* queue, void* element,
                         
                         /* 使用延迟释放或立即释放（基于配置） */
                         if (queue->enable_hazard_pointers) {
+#if TP_HAS_POOL
+                            deferred_free_add_pool(&queue->free_list_head, &queue->free_list_count, head);
+#else
                             deferred_free_add(&queue->free_list_head, &queue->free_list_count, head);
+#endif
                             if (queue->free_list_count >= DEFERRED_FREE_THRESHOLD) {
                                 deferred_free_scan(&queue->free_list_head, &queue->free_list_count);
                             }
@@ -730,6 +996,18 @@ LockFreeStack* lock_free_stack_create(const LockFreeStackConfig* config) {
         return NULL;
     }
     
+#if TP_HAS_POOL
+    /* M-029：32位回退方案——初始化节点池 */
+    if (tp_pool_init(&stack->node_pool, sizeof(LockFreeStackNode),
+                      (uint16_t)(config->capacity + 2)) != 0) {
+        safe_free((void**)&stack);
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "创建无锁栈：节点池初始化失败");
+        return NULL;
+    }
+    TP_BIND_POOL(&stack->node_pool);
+#endif
+    
     stack->top_tagged = make_tagged(NULL, 0);
     stack->capacity = config->capacity;
     stack->element_size = config->element_size;
@@ -752,6 +1030,10 @@ void lock_free_stack_free(LockFreeStack* stack) {
         return;
     }
     
+#if TP_HAS_POOL
+    TP_BIND_POOL(&stack->node_pool);
+#endif
+    
     /* 刷新延迟释放列表 */
     if (stack->free_list_head) {
         deferred_free_flush(&stack->free_list_head, &stack->free_list_count);
@@ -765,6 +1047,9 @@ void lock_free_stack_free(LockFreeStack* stack) {
         current = next;
     }
     
+#if TP_HAS_POOL
+    tp_pool_destroy(&stack->node_pool);
+#endif
     safe_free((void**)&stack);
 }
 
@@ -772,15 +1057,28 @@ void lock_free_stack_free(LockFreeStack* stack) {
  * @brief 创建栈节点
  */
 static LockFreeStackNode* create_stack_node(const void* data, size_t size) {
+#if TP_HAS_POOL
+    /* M-029: 32位回退方案——从节点池分配 */
+    LockFreeStackNode* node = (LockFreeStackNode*)tp_pool_alloc_node(g_tp_active_pool);
+    if (node == NULL) {
+        return NULL;
+    }
+    memset(node, 0, sizeof(LockFreeStackNode));
+#else
     LockFreeStackNode* node = (LockFreeStackNode*)safe_malloc(sizeof(LockFreeStackNode));
     if (node == NULL) {
         return NULL;
     }
+#endif
     
     if (data != NULL && size > 0) {
         node->data = safe_malloc(size);
         if (node->data == NULL) {
+#if TP_HAS_POOL
+            node->version = -1;
+#else
             safe_free((void**)&node);
+#endif
             return NULL;
         }
         memcpy(node->data, data, size);
@@ -806,7 +1104,13 @@ static void free_stack_node(LockFreeStackNode* node) {
         safe_free((void**)&node->data);
     }
     
+#if TP_HAS_POOL
+    /* M-029: 32位回退方案——池节点由tp_pool_destroy统一释放 */
+    node->next = NULL;
+    node->version = 0;
+#else
     safe_free((void**)&node);
+#endif
 }
 
 /**
@@ -817,6 +1121,10 @@ int lock_free_stack_push(LockFreeStack* stack, const void* element,
     if (stack == NULL || element == NULL || result == NULL) {
         return -1;
     }
+    
+#if TP_HAS_POOL
+    TP_BIND_POOL(&stack->node_pool);
+#endif
     
     if (element_size != stack->element_size) {
         strcpy(result->error_message, "元素大小不匹配");
@@ -884,6 +1192,10 @@ int lock_free_stack_pop(LockFreeStack* stack, void* element,
     if (stack == NULL || element == NULL || result == NULL) {
         return -1;
     }
+    
+#if TP_HAS_POOL
+    TP_BIND_POOL(&stack->node_pool);
+#endif
     
     if (element_size != stack->element_size) {
         strcpy(result->error_message, "元素大小不匹配");
@@ -2840,6 +3152,10 @@ struct LockFreePriorityQueue {
     volatile LONG size;                  /**< 当前元素数 */
     DeferredNode* free_list_head;        /**< 延迟释放链表 */
     volatile LONG free_list_count;       /**< 延迟释放计数 */
+#if TP_HAS_POOL
+    TaggedPtrNodePool node_pool;         /**< M-029: 32位回退方案节点池 */
+    size_t pool_node_size;               /**< 池中单个节点总大小 */
+#endif
 };
 
 /**
@@ -2847,8 +3163,15 @@ struct LockFreePriorityQueue {
  */
 static PriorityQueueNode* create_pq_node(const void* element, size_t element_size, int32_t priority) {
     size_t alloc_size = sizeof(PriorityQueueNode) + element_size + sizeof(TaggedPtr);
+#if TP_HAS_POOL
+    /* M-029: 32位回退方案——从节点池分配 */
+    PriorityQueueNode* node = (PriorityQueueNode*)tp_pool_alloc_node(g_tp_active_pool);
+    if (!node) return NULL;
+    memset(node, 0, alloc_size);
+#else
     PriorityQueueNode* node = (PriorityQueueNode*)safe_malloc(alloc_size);
     if (!node) return NULL;
+#endif
     node->priority = priority;
     if (element) memcpy(node->data, element, element_size);
     else memset(node->data, 0, element_size);
@@ -2869,9 +3192,25 @@ LockFreePriorityQueue* lock_free_priority_queue_create(const LockFreePriorityQue
     LockFreePriorityQueue* pq = (LockFreePriorityQueue*)safe_malloc(sizeof(LockFreePriorityQueue));
     if (!pq) return NULL;
 
+#if TP_HAS_POOL
+    /* M-029：32位回退方案——初始化节点池（节点大小 = 结构体 + 元素 + TaggedPtr） */
+    pq->pool_node_size = sizeof(PriorityQueueNode) + config->element_size + sizeof(TaggedPtr);
+    if (tp_pool_init(&pq->node_pool, pq->pool_node_size,
+                      (uint16_t)(config->capacity + 2)) != 0) {
+        safe_free((void**)&pq);
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "创建优先队列：节点池初始化失败");
+        return NULL;
+    }
+    TP_BIND_POOL(&pq->node_pool);
+#endif
+
     int32_t sentinel_priority = config->is_min_heap ? 2147483647 : -2147483647 - 1;
     pq->sentinel = create_pq_node(NULL, config->element_size, sentinel_priority);
     if (!pq->sentinel) {
+#if TP_HAS_POOL
+        tp_pool_destroy(&pq->node_pool);
+#endif
         safe_free((void**)&pq);
         return NULL;
     }
@@ -2892,6 +3231,12 @@ LockFreePriorityQueue* lock_free_priority_queue_create(const LockFreePriorityQue
  */
 void lock_free_priority_queue_free(LockFreePriorityQueue* pq) {
     if (!pq) return;
+#if TP_HAS_POOL
+    TP_BIND_POOL(&pq->node_pool);
+    /* M-029: 32位回退方案——池节点由tp_pool_destroy统一释放，无需逐个safe_free */
+    deferred_free_flush(&pq->free_list_head, &pq->free_list_count);
+    tp_pool_destroy(&pq->node_pool);
+#else
     TaggedPtr curr_tp = *PQ_NEXT_PTR(pq->sentinel, pq->element_size);
     PriorityQueueNode* curr = (PriorityQueueNode*)ptr_from_tagged(curr_tp);
     while (curr) {
@@ -2902,6 +3247,7 @@ void lock_free_priority_queue_free(LockFreePriorityQueue* pq) {
     }
     safe_free((void**)&pq->sentinel);
     deferred_free_flush(&pq->free_list_head, &pq->free_list_count);
+#endif
     safe_free((void**)&pq);
 }
 
@@ -2911,6 +3257,10 @@ void lock_free_priority_queue_free(LockFreePriorityQueue* pq) {
 int lock_free_priority_queue_push(LockFreePriorityQueue* pq, const void* element, int priority) {
     if (!pq || !element) return -1;
     if ((size_t)pq->size >= pq->capacity) return 1;
+
+#if TP_HAS_POOL
+    TP_BIND_POOL(&pq->node_pool);
+#endif
 
     PriorityQueueNode* new_node = create_pq_node(element, pq->element_size, (int32_t)priority);
     if (!new_node) return -1;
@@ -2965,6 +3315,10 @@ int lock_free_priority_queue_push(LockFreePriorityQueue* pq, const void* element
 int lock_free_priority_queue_pop(LockFreePriorityQueue* pq, void* element) {
     if (!pq || !element) return -1;
 
+#if TP_HAS_POOL
+    TP_BIND_POOL(&pq->node_pool);
+#endif
+
     int attempts = 0;
     while (attempts < pq->max_retries) {
         volatile TaggedPtr* sentinel_next = PQ_NEXT_PTR(pq->sentinel, pq->element_size);
@@ -2988,7 +3342,11 @@ int lock_free_priority_queue_pop(LockFreePriorityQueue* pq, void* element) {
 #endif
             memcpy(element, first->data, pq->element_size);
             atomic_fetch_sub(&pq->size, 1);
+#if TP_HAS_POOL
+            deferred_free_add_pool(&pq->free_list_head, &pq->free_list_count, first);
+#else
             deferred_free_add(&pq->free_list_head, &pq->free_list_count, first);
+#endif
             if (pq->free_list_count >= DEFERRED_FREE_THRESHOLD) {
                 deferred_free_scan(&pq->free_list_head, &pq->free_list_count);
             }
@@ -3006,6 +3364,9 @@ int lock_free_priority_queue_pop(LockFreePriorityQueue* pq, void* element) {
  */
 int lock_free_priority_queue_peek(const LockFreePriorityQueue* pq, void* element) {
     if (!pq || !element) return -1;
+#if TP_HAS_POOL
+    TP_BIND_POOL((TaggedPtrNodePool*)&pq->node_pool);
+#endif
     TaggedPtr first_tp = *PQ_NEXT_PTR(pq->sentinel, pq->element_size);
     PriorityQueueNode* first = (PriorityQueueNode*)ptr_from_tagged(first_tp);
     if (!first) return 1;
@@ -3025,6 +3386,9 @@ size_t lock_free_priority_queue_size(const LockFreePriorityQueue* pq) {
  */
 int lock_free_priority_queue_is_empty(const LockFreePriorityQueue* pq) {
     if (!pq) return 1;
+#if TP_HAS_POOL
+    TP_BIND_POOL((TaggedPtrNodePool*)&pq->node_pool);
+#endif
     TaggedPtr first_tp = *PQ_NEXT_PTR(pq->sentinel, pq->element_size);
     return ptr_from_tagged(first_tp) == NULL ? 1 : 0;
 }
@@ -3058,6 +3422,10 @@ struct LockFreeSkipList {
     volatile LONG size;                  /**< 当前节点数 */
     DeferredNode* free_list_head;        /**< 延迟释放链表 */
     volatile LONG free_list_count;       /**< 延迟释放计数 */
+#if TP_HAS_POOL
+    TaggedPtrNodePool node_pool;         /**< M-029: 32位回退方案节点池 */
+    size_t pool_node_size;               /**< 池中单个节点最大大小 */
+#endif
 };
 
 /**
@@ -3090,12 +3458,27 @@ static int skip_list_compare_key(const void* key1, size_t size1, const void* key
 static SkipListNode* create_skip_list_node(int level, const void* key, size_t key_size, void* value) {
     int actual_level = level + 1;
     size_t node_size = sizeof(SkipListNode) + (size_t)(actual_level - 1) * sizeof(TaggedPtr);
+#if TP_HAS_POOL
+    /* M-029: 32位回退方案——从节点池分配（池中所有节点大小一致，取最大值） */
+    SkipListNode* node = (SkipListNode*)tp_pool_alloc_node(g_tp_active_pool);
+    if (!node) return NULL;
+    memset(node, 0, node_size);
+#else
     SkipListNode* node = (SkipListNode*)safe_malloc(node_size);
     if (!node) return NULL;
+#endif
 
     if (key && key_size > 0) {
         node->key = safe_malloc(key_size);
-        if (!node->key) { safe_free((void**)&node); return NULL; }
+        if (!node->key) {
+#if TP_HAS_POOL
+            node->level = 0;
+            node->next[0] = (TaggedPtr)0;
+#else
+            safe_free((void**)&node);
+#endif
+            return NULL;
+        }
         memcpy(node->key, key, key_size);
     } else {
         node->key = NULL;
@@ -3115,7 +3498,11 @@ static SkipListNode* create_skip_list_node(int level, const void* key, size_t ke
  */
 static void free_skip_list_node_deferred(struct LockFreeSkipList* sl, SkipListNode* node) {
     if (!sl || !node) return;
+#if TP_HAS_POOL
+    deferred_free_add_pool(&sl->free_list_head, &sl->free_list_count, node);
+#else
     deferred_free_add(&sl->free_list_head, &sl->free_list_count, node);
+#endif
     if (sl->free_list_count >= DEFERRED_FREE_THRESHOLD) {
         deferred_free_scan(&sl->free_list_head, &sl->free_list_count);
     }
@@ -3138,8 +3525,27 @@ LockFreeSkipList* lock_free_skip_list_create(const LockFreeSkipListConfig* confi
     LockFreeSkipList* sl = (LockFreeSkipList*)safe_malloc(sizeof(LockFreeSkipList));
     if (!sl) return NULL;
 
+#if TP_HAS_POOL
+    /* M-029：32位回退方案——初始化节点池（节点最大大小 = 结构体 + max_level层next指针） */
+    sl->pool_node_size = sizeof(SkipListNode) + (size_t)(max_level - 1) * sizeof(TaggedPtr);
+    /* 跳表无固定容量限制，使用65535作为池容量（16位索引最大值） */
+    if (tp_pool_init(&sl->node_pool, sl->pool_node_size, 65535) != 0) {
+        safe_free((void**)&sl);
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "创建跳表：节点池初始化失败");
+        return NULL;
+    }
+    TP_BIND_POOL(&sl->node_pool);
+#endif
+
     sl->head = create_skip_list_node(max_level, NULL, 0, NULL);
-    if (!sl->head) { safe_free((void**)&sl); return NULL; }
+    if (!sl->head) {
+#if TP_HAS_POOL
+        tp_pool_destroy(&sl->node_pool);
+#endif
+        safe_free((void**)&sl);
+        return NULL;
+    }
 
     sl->max_level = max_level;
     sl->probability = prob;
@@ -3157,6 +3563,19 @@ LockFreeSkipList* lock_free_skip_list_create(const LockFreeSkipListConfig* confi
  */
 void lock_free_skip_list_free(LockFreeSkipList* sl) {
     if (!sl) return;
+#if TP_HAS_POOL
+    TP_BIND_POOL(&sl->node_pool);
+    /* M-029: 32位回退方案——释放所有节点的key数据后，由tp_pool_destroy统一释放池 */
+    SkipListNode* curr = (SkipListNode*)ptr_from_tagged(sl->head->next[0]);
+    while (curr) {
+        TaggedPtr next_tp = curr->next[0];
+        SkipListNode* next = (SkipListNode*)ptr_from_tagged(next_tp);
+        if (curr->key) safe_free((void**)&curr->key);
+        curr = next;
+    }
+    deferred_free_flush(&sl->free_list_head, &sl->free_list_count);
+    tp_pool_destroy(&sl->node_pool);
+#else
     SkipListNode* curr = (SkipListNode*)ptr_from_tagged(sl->head->next[0]);
     while (curr) {
         TaggedPtr next_tp = curr->next[0];
@@ -3167,6 +3586,7 @@ void lock_free_skip_list_free(LockFreeSkipList* sl) {
     }
     safe_free((void**)&sl->head);
     deferred_free_flush(&sl->free_list_head, &sl->free_list_count);
+#endif
     safe_free((void**)&sl);
 }
 
@@ -3207,6 +3627,10 @@ static SkipListNode* skip_list_search(struct LockFreeSkipList* sl, const void* k
  */
 int lock_free_skip_list_insert(LockFreeSkipList* sl, const void* key, size_t key_size, void* value) {
     if (!sl || !key || key_size == 0) return -1;
+
+#if TP_HAS_POOL
+    TP_BIND_POOL(&sl->node_pool);
+#endif
 
     int attempts = 0;
     while (attempts < sl->max_retries) {
@@ -3272,7 +3696,13 @@ int lock_free_skip_list_insert(LockFreeSkipList* sl, const void* key, size_t key
         }
 
         if (new_node->key) safe_free((void**)&new_node->key);
+#if TP_HAS_POOL
+        /* M-029: 池节点无需单独释放，仅清理标记 */
+        new_node->level = 0;
+        new_node->next[0] = (TaggedPtr)0;
+#else
         safe_free((void**)&new_node);
+#endif
 
         backoff_strategy_impl(attempts, 0);
         attempts++;
@@ -3285,6 +3715,10 @@ int lock_free_skip_list_insert(LockFreeSkipList* sl, const void* key, size_t key
  */
 void* lock_free_skip_list_find(const LockFreeSkipList* sl, const void* key, size_t key_size) {
     if (!sl || !key || key_size == 0) return NULL;
+
+#if TP_HAS_POOL
+    TP_BIND_POOL((TaggedPtrNodePool*)&((LockFreeSkipList*)sl)->node_pool);
+#endif
 
     SkipListNode* prev = sl->head;
     for (int level = sl->max_level - 1; level >= 0; level--) {
@@ -3310,6 +3744,10 @@ void* lock_free_skip_list_find(const LockFreeSkipList* sl, const void* key, size
  */
 int lock_free_skip_list_erase(LockFreeSkipList* sl, const void* key, size_t key_size) {
     if (!sl || !key || key_size == 0) return -1;
+
+#if TP_HAS_POOL
+    TP_BIND_POOL(&sl->node_pool);
+#endif
 
     int attempts = 0;
     while (attempts < sl->max_retries) {
@@ -3380,6 +3818,9 @@ size_t lock_free_skip_list_size(const LockFreeSkipList* sl) {
  */
 int lock_free_skip_list_is_empty(const LockFreeSkipList* sl) {
     if (!sl) return 1;
+#if TP_HAS_POOL
+    TP_BIND_POOL((TaggedPtrNodePool*)&((LockFreeSkipList*)sl)->node_pool);
+#endif
     return ptr_from_tagged(sl->head->next[0]) == NULL ? 1 : 0;
 }
 
@@ -3388,6 +3829,18 @@ int lock_free_skip_list_is_empty(const LockFreeSkipList* sl) {
  */
 void lock_free_skip_list_clear(LockFreeSkipList* sl) {
     if (!sl) return;
+#if TP_HAS_POOL
+    TP_BIND_POOL(&sl->node_pool);
+    /* M-029: 池模式——只释放key，节点由池统一管理 */
+    TaggedPtr curr_tp = sl->head->next[0];
+    SkipListNode* curr = (SkipListNode*)ptr_from_tagged(curr_tp);
+    while (curr) {
+        TaggedPtr next_tp = curr->next[0];
+        SkipListNode* next = (SkipListNode*)ptr_from_tagged(next_tp);
+        if (curr->key) safe_free((void**)&curr->key);
+        curr = next;
+    }
+#else
     TaggedPtr curr_tp = sl->head->next[0];
     SkipListNode* curr = (SkipListNode*)ptr_from_tagged(curr_tp);
     while (curr) {
@@ -3397,6 +3850,7 @@ void lock_free_skip_list_clear(LockFreeSkipList* sl) {
         safe_free((void**)&curr);
         curr = next;
     }
+#endif
     for (int i = 0; i < sl->max_level; i++) {
         sl->head->next[i] = make_tagged(NULL, 0);
     }

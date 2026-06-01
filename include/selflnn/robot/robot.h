@@ -79,6 +79,21 @@ typedef enum {
 } RobotState;
 
 /**
+ * @brief 机器人控制模式枚举
+ * 
+ * H-014修复: 统一的运行时控制模式切换机制。
+ * 三种模式互不干扰：
+ * - DIRECT_HARDWARE: 通过HardwareInterface直接控制真实硬件
+ * - ROS: 通过RosRobotController桥接ROS系统
+ * - SIMULATION: 内建物理仿真模式（默认）
+ */
+typedef enum {
+    CONTROL_MODE_DIRECT_HARDWARE = 0, /**< 直接硬件控制模式 */
+    CONTROL_MODE_ROS = 1,             /**< ROS桥接控制模式 */
+    CONTROL_MODE_SIMULATION = 2       /**< 仿真控制模式（默认） */
+} RobotControlMode;
+
+/**
  * @brief 机器人配置结构体
  */
 typedef struct {
@@ -477,6 +492,42 @@ int robot_is_simulation_data_unsafe(Robot* robot);
  * @return int 成功返回0，失败返回错误码
  */
 int robot_send_hardware_command(Robot* robot, const RobotCommand* command);
+
+/* ============================
+ * H-014修复: 统一控制模式运行时切换机制
+ * ============================ */
+
+/**
+ * @brief 设置机器人控制模式
+ * 
+ * 在运行时切换 DIRECT_HARDWARE / ROS / SIMULATION 三种控制模式。
+ * 三种模式互不干扰，切换时自动保存当前状态。
+ * 
+ * @param robot 机器人句柄
+ * @param mode 目标控制模式
+ * @return int 成功返回0，失败返回-1
+ */
+int robot_set_control_mode(Robot* robot, RobotControlMode mode);
+
+/**
+ * @brief 获取当前控制模式
+ * 
+ * @param robot 机器人句柄
+ * @return RobotControlMode 当前控制模式，无效句柄返回 CONTROL_MODE_SIMULATION
+ */
+RobotControlMode robot_get_control_mode(const Robot* robot);
+
+/**
+ * @brief 设置ROS控制器桥接引用
+ * 
+ * 当控制模式切换为 CONTROL_MODE_ROS 时，需要预先设置ROS控制器。
+ * 
+ * @param robot 机器人句柄
+ * @param ros_controller ROS控制器句柄
+ * @param ros_robot_id 在ROS控制器中对应的机器人ID
+ * @return int 成功返回0，失败返回-1
+ */
+int robot_set_ros_controller(Robot* robot, void* ros_controller, int ros_robot_id);
 
 /**
  * @brief 创建多机器人控制器

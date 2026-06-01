@@ -12,6 +12,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/core/errors.h"
+#include "selflnn/concurrency/thread_pool.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1577,45 +1578,408 @@ int graph_loop_invariant_code_motion(ComputationGraph* graph) {
 }
 
 /* ============================================================================
- * 计算图执行引擎 (M-005修复: 并行执行支持)
+ * 计算图执行引擎 (H-002修复: 真正的多线程并行执行)
  * =========================================================================== */
+
+/* 单节点执行任务数据 */
+typedef struct {
+    GraphNode* node;            /* 要执行的节点 */
+    volatile int* error_flag;   /* 共享错误标记 */
+} ParallelNodeTask;
+
+/* 线程池任务回调：执行单个计算图节点 */
+static void parallel_exec_node(void* arg) {
+    ParallelNodeTask* task = (ParallelNodeTask*)arg;
+    if (!task || !task->node || *(task->error_flag)) return;
+
+    GraphNode* node = task->node;
+    if (node->eliminated || node->fused) return;
+
+    TensorDesc* out_tensor = &node->output_tensors[0];
+    int64_t out_count = calculate_element_count(&out_tensor->shape);
+    if (out_count <= 0) return;
+
+    size_t out_bytes = (size_t)out_count * sizeof(float);
+    if (!out_tensor->data) {
+        out_tensor->data = safe_malloc(out_bytes);
+        if (!out_tensor->data) {
+            *(task->error_flag) = 1;
+            return;
+        }
+        out_tensor->data_size = out_bytes;
+    }
+
+    float* output = (float*)out_tensor->data;
+
+    switch (node->op_type) {
+        case OP_TYPE_INPUT:
+        case OP_TYPE_CONSTANT:
+        case OP_TYPE_WEIGHT:
+            break;
+
+        case OP_TYPE_RELU: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            kernel_relu(output, inp, out_count);
+            break;
+        }
+
+        case OP_TYPE_SIGMOID: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            kernel_sigmoid(output, inp, out_count);
+            break;
+        }
+
+        case OP_TYPE_TANH: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            kernel_tanh(output, inp, out_count);
+            break;
+        }
+
+        case OP_TYPE_ADD: {
+            if (node->input_count < 2 || !node->inputs[0] || !node->inputs[1]) { *(task->error_flag) = 1; return; }
+            float* a = (float*)node->inputs[0]->output_tensors[0].data;
+            float* b = (float*)node->inputs[1]->output_tensors[0].data;
+            kernel_elementwise_add(output, a, b, out_count);
+            break;
+        }
+
+        case OP_TYPE_SUB: {
+            if (node->input_count < 2 || !node->inputs[0] || !node->inputs[1]) { *(task->error_flag) = 1; return; }
+            float* a = (float*)node->inputs[0]->output_tensors[0].data;
+            float* b = (float*)node->inputs[1]->output_tensors[0].data;
+            kernel_elementwise_sub(output, a, b, out_count);
+            break;
+        }
+
+        case OP_TYPE_MUL: {
+            if (node->input_count < 2 || !node->inputs[0] || !node->inputs[1]) { *(task->error_flag) = 1; return; }
+            float* a = (float*)node->inputs[0]->output_tensors[0].data;
+            float* b = (float*)node->inputs[1]->output_tensors[0].data;
+            kernel_elementwise_mul(output, a, b, out_count);
+            break;
+        }
+
+        case OP_TYPE_DIV: {
+            if (node->input_count < 2 || !node->inputs[0] || !node->inputs[1]) { *(task->error_flag) = 1; return; }
+            float* a = (float*)node->inputs[0]->output_tensors[0].data;
+            float* b = (float*)node->inputs[1]->output_tensors[0].data;
+            kernel_elementwise_div(output, a, b, out_count);
+            break;
+        }
+
+        case OP_TYPE_MATMUL: {
+            if (node->input_count < 2 || !node->inputs[0] || !node->inputs[1]) { *(task->error_flag) = 1; return; }
+            TensorShape* sa = &node->inputs[0]->output_tensors[0].shape;
+            TensorShape* sb = &node->inputs[1]->output_tensors[0].shape;
+            if (sa->rank < 2 || sb->rank < 2) { *(task->error_flag) = 1; return; }
+            int M = (int)sa->dims[0];
+            int K = (int)sa->dims[sa->rank - 1];
+            int N = (int)sb->dims[sb->rank - 1];
+            float* a = (float*)node->inputs[0]->output_tensors[0].data;
+            float* b = (float*)node->inputs[1]->output_tensors[0].data;
+            if (kernel_matmul(output, a, b, M, N, K) != 0) { *(task->error_flag) = 1; return; }
+            break;
+        }
+
+        case OP_TYPE_SOFTMAX: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            if (kernel_softmax(output, inp, out_count) != 0) { *(task->error_flag) = 1; return; }
+            break;
+        }
+
+        case OP_TYPE_CONV: {
+            if (node->input_count < 2 || !node->inputs[0] || !node->inputs[1]) { *(task->error_flag) = 1; return; }
+            TensorShape* in_sh = &node->inputs[0]->output_tensors[0].shape;
+            TensorShape* wt_sh = &node->inputs[1]->output_tensors[0].shape;
+            if (in_sh->rank < 4 || wt_sh->rank < 4) { *(task->error_flag) = 1; return; }
+            int N = (int)in_sh->dims[0];
+            int C_in = (int)in_sh->dims[1];
+            int H = (int)in_sh->dims[2];
+            int W = (int)in_sh->dims[3];
+            int C_out = (int)wt_sh->dims[0];
+            int KH = (int)wt_sh->dims[2];
+            int KW = (int)wt_sh->dims[3];
+            int stride_h = 1, stride_w = 1, pad_h = 0, pad_w = 0;
+            for (int a = 0; a < node->attr_count; a++) {
+                if (strcmp(node->attrs[a].name, "stride") == 0 && node->attrs[a].value) {
+                    stride_h = ((int*)node->attrs[a].value)[0];
+                    stride_w = ((int*)node->attrs[a].value)[1];
+                }
+                if (strcmp(node->attrs[a].name, "padding") == 0 && node->attrs[a].value) {
+                    pad_h = ((int*)node->attrs[a].value)[0];
+                    pad_w = ((int*)node->attrs[a].value)[1];
+                }
+            }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            float* wt = (float*)node->inputs[1]->output_tensors[0].data;
+            if (kernel_conv2d(output, inp, wt, N, C_in, H, W, C_out, KH, KW,
+                              stride_h, stride_w, pad_h, pad_w) != 0) { *(task->error_flag) = 1; return; }
+            break;
+        }
+
+        case OP_TYPE_BATCH_NORM: {
+            if (node->input_count < 5 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            float* gamma = node->inputs[1] ? (float*)node->inputs[1]->output_tensors[0].data : NULL;
+            float* beta = node->inputs[2] ? (float*)node->inputs[2]->output_tensors[0].data : NULL;
+            float* run_mean = node->inputs[3] ? (float*)node->inputs[3]->output_tensors[0].data : NULL;
+            float* run_var = node->inputs[4] ? (float*)node->inputs[4]->output_tensors[0].data : NULL;
+            float epsilon = 1e-5f;
+            for (int a = 0; a < node->attr_count; a++) {
+                if (strcmp(node->attrs[a].name, "epsilon") == 0 && node->attrs[a].value) {
+                    epsilon = *(float*)node->attrs[a].value;
+                }
+            }
+            int C = node->inputs[1] ? (int)node->inputs[1]->output_tensors[0].shape.dims[0] : 1;
+            if (kernel_batch_norm(output, inp, out_count, gamma, beta,
+                                  run_mean, run_var, epsilon, C) != 0) { *(task->error_flag) = 1; return; }
+            break;
+        }
+
+        case OP_TYPE_POOL: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            TensorShape* in_sh = &node->inputs[0]->output_tensors[0].shape;
+            if (in_sh->rank < 4) { *(task->error_flag) = 1; return; }
+            int N = (int)in_sh->dims[0];
+            int C = (int)in_sh->dims[1];
+            int H = (int)in_sh->dims[2];
+            int W = (int)in_sh->dims[3];
+            int pool_h = 2, pool_w = 2, stride_h = 2, stride_w = 2;
+            int pool_mode = 0;
+            for (int a = 0; a < node->attr_count; a++) {
+                if (strcmp(node->attrs[a].name, "pool_size") == 0 && node->attrs[a].value) {
+                    pool_h = ((int*)node->attrs[a].value)[0];
+                    pool_w = ((int*)node->attrs[a].value)[1];
+                }
+                if (strcmp(node->attrs[a].name, "stride") == 0 && node->attrs[a].value) {
+                    stride_h = ((int*)node->attrs[a].value)[0];
+                    stride_w = ((int*)node->attrs[a].value)[1];
+                }
+                if (strcmp(node->attrs[a].name, "mode") == 0 && node->attrs[a].value) {
+                    pool_mode = *(int*)node->attrs[a].value;
+                }
+            }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            if (pool_mode == 0) {
+                if (kernel_pool_max(output, inp, N, C, H, W, pool_h, pool_w, stride_h, stride_w) != 0) { *(task->error_flag) = 1; return; }
+            } else {
+                if (kernel_pool_avg(output, inp, N, C, H, W, pool_h, pool_w, stride_h, stride_w) != 0) { *(task->error_flag) = 1; return; }
+            }
+            break;
+        }
+
+        case OP_TYPE_RESHAPE: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            if (kernel_reshape(output, inp, out_count) != 0) { *(task->error_flag) = 1; return; }
+            break;
+        }
+
+        case OP_TYPE_TRANSPOSE: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            TensorShape* in_sh = &node->inputs[0]->output_tensors[0].shape;
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            if (in_sh->rank == 2) {
+                int rows = (int)in_sh->dims[0];
+                int cols = (int)in_sh->dims[1];
+                if (kernel_transpose_2d(output, inp, rows, cols) != 0) { *(task->error_flag) = 1; return; }
+            } else {
+                memcpy(output, inp, out_bytes);
+            }
+            break;
+        }
+
+        case OP_TYPE_REDUCE_SUM: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            if (kernel_reduce_sum(output, inp, out_count) != 0) { *(task->error_flag) = 1; return; }
+            break;
+        }
+
+        case OP_TYPE_REDUCE_MEAN: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            if (kernel_reduce_mean(output, inp, out_count) != 0) { *(task->error_flag) = 1; return; }
+            break;
+        }
+
+        case OP_TYPE_REDUCE_MAX: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            if (kernel_reduce_max(output, inp, out_count) != 0) { *(task->error_flag) = 1; return; }
+            break;
+        }
+
+        case OP_TYPE_CONCAT: {
+            if (node->input_count < 1) { *(task->error_flag) = 1; return; }
+            int64_t offset = 0;
+            for (int in_idx = 0; in_idx < node->input_count; in_idx++) {
+                if (!node->inputs[in_idx]) continue;
+                TensorDesc* in_t = &node->inputs[in_idx]->output_tensors[0];
+                int64_t in_cnt = calculate_element_count(&in_t->shape);
+                if (in_cnt > 0 && in_t->data) {
+                    memcpy((uint8_t*)output + offset * sizeof(float), in_t->data, (size_t)in_cnt * sizeof(float));
+                    offset += in_cnt;
+                }
+            }
+            break;
+        }
+
+        case OP_TYPE_SPLIT: {
+            if (node->input_count < 1 || !node->inputs[0] || node->output_count < 1) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            size_t total_elements = (size_t)node->inputs[0]->output_tensors[0].data_size / sizeof(float);
+            size_t per_output = total_elements / (size_t)node->output_count;
+            for (int o = 0; o < node->output_count; o++) {
+                size_t offset = (size_t)o * per_output;
+                size_t copy_size = (o == node->output_count - 1)
+                    ? total_elements - offset : per_output;
+                if (offset + copy_size <= total_elements) {
+                    memcpy((float*)output + offset, inp + offset,
+                           copy_size * sizeof(float));
+                }
+            }
+            break;
+        }
+
+        case OP_TYPE_DROPOUT: {
+            if (node->input_count < 1 || !node->inputs[0]) { *(task->error_flag) = 1; return; }
+            float* inp = (float*)node->inputs[0]->output_tensors[0].data;
+            size_t elem_count = out_bytes / sizeof(float);
+            float dropout_rate = 0.5f;
+            if (node->attr_count > 0 && node->attrs && node->attrs[0].value)
+                dropout_rate = *(float*)node->attrs[0].value;
+            if (dropout_rate <= 0.0f) dropout_rate = 0.5f;
+            if (dropout_rate >= 1.0f) dropout_rate = 0.5f;
+            float keep_prob = 1.0f - dropout_rate;
+            float scale = 1.0f / keep_prob;
+            unsigned int seed = (unsigned int)((uintptr_t)node * 2654435761u);
+            for (size_t i = 0; i < elem_count; i++) {
+                seed = seed * 1103515245u + 12345u;
+                float mask = ((seed >> 16) & 0x7FFF) / 32768.0f;
+                output[i] = (mask < keep_prob) ? (inp[i] * scale) : 0.0f;
+            }
+            break;
+        }
+
+        case OP_TYPE_OUTPUT:
+            if (node->input_count >= 1 && node->inputs[0]) {
+                memcpy(output, node->inputs[0]->output_tensors[0].data, out_bytes);
+            }
+            break;
+
+        case OP_TYPE_CUSTOM:
+            if (node->input_count >= 1 && node->inputs[0]) {
+                memcpy(output, node->inputs[0]->output_tensors[0].data, out_bytes);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
 
 int graph_execute_parallel(ComputationGraph* graph) {
     if (!graph) return -1;
     if (topological_sort(graph) != 0) return -1;
 
     ComputationGraphInternal* gi = (ComputationGraphInternal*)graph;
+    if (gi->sorted_count <= 0) return 0;
 
-    /* 构建依赖DAG并识别可并行执行的节点组 */
-    for (int si = 0; si < gi->sorted_count; si++) {
-        GraphNode* node = gi->sorted_nodes[si];
-        if (!node || node->eliminated || node->fused) continue;
-
-        /* 标记无数据依赖的下一个节点为可并行 */
-        for (int sj = si + 1; sj < gi->sorted_count; sj++) {
-            GraphNode* next = gi->sorted_nodes[sj];
-            if (!next || next->eliminated || next->fused) continue;
-
-            int depends = 0;
-            for (int k = 0; k < next->input_count && k < 8; k++) {
-                /* 检查next的输入是否依赖当前拓扑层级的节点 */
-                GraphNode* inp = next->inputs[k];
-                if (inp) {
-                    GraphNodeInternal* inp_i = (GraphNodeInternal*)inp;
-                    if (inp_i->topological_order <=
-                        ((GraphNodeInternal*)node)->topological_order + 1)
-                        depends = 1;
+    /* 计算每个节点的拓扑深度（层级） */
+    int* depth = (int*)calloc((size_t)gi->sorted_count, sizeof(int));
+    if (!depth) return -1;
+    int max_depth = 0;
+    for (int i = 0; i < gi->sorted_count; i++) {
+        GraphNode* node = gi->sorted_nodes[i];
+        if (!node) { depth[i] = -1; continue; }
+        int max_input_depth = 0;
+        int has_valid_input = 0;
+        for (int j = 0; j < node->input_count; j++) {
+            if (node->inputs[j] && !node->inputs[j]->eliminated && !node->inputs[j]->fused) {
+                /* 查找输入节点的深度索引 */
+                for (int k = 0; k < gi->sorted_count; k++) {
+                    if (gi->sorted_nodes[k] == node->inputs[j]) {
+                        if (depth[k] > max_input_depth) max_input_depth = depth[k];
+                        has_valid_input = 1;
+                        break;
+                    }
                 }
             }
-            if (!depends) {
-                /* 这些节点可并行执行 */
-                next->fused = 0;
-            }
+        }
+        depth[i] = has_valid_input ? max_input_depth + 1 : 0;
+        if (depth[i] > max_depth) max_depth = depth[i];
+    }
+
+    /* 统计每层节点数并分配任务数组 */
+    int* level_node_counts = (int*)calloc((size_t)(max_depth + 1), sizeof(int));
+    if (!level_node_counts) { free(depth); return -1; }
+    for (int i = 0; i < gi->sorted_count; i++) {
+        if (depth[i] >= 0 && !gi->sorted_nodes[i]->eliminated && !gi->sorted_nodes[i]->fused) {
+            level_node_counts[depth[i]]++;
         }
     }
 
-    /* 按拓扑层级分组并行执行 */
-    return graph_execute(graph);
+    /* 创建线程池 */
+    ThreadPoolConfig tp_cfg;
+    memset(&tp_cfg, 0, sizeof(tp_cfg));
+    tp_cfg.num_threads = 4;
+    tp_cfg.max_tasks = (size_t)(gi->sorted_count > 64 ? gi->sorted_count : 64);
+    tp_cfg.dynamic_scaling = 1;
+    tp_cfg.enable_priority = 0;
+    tp_cfg.enable_work_stealing = 1;
+
+    ThreadPool* pool = thread_pool_create(&tp_cfg);
+    if (!pool) { free(level_node_counts); free(depth); return graph_execute(graph); }
+
+    /* 按层级逐层并行执行 */
+    volatile int error_flag = 0;
+    int result = 0;
+
+    for (int level = 0; level <= max_depth && !error_flag; level++) {
+        if (level_node_counts[level] <= 0) continue;
+
+        /* 收集本层任务 */
+        ParallelNodeTask* tasks = (ParallelNodeTask*)calloc((size_t)level_node_counts[level], sizeof(ParallelNodeTask));
+        if (!tasks) { result = -1; break; }
+
+        int task_idx = 0;
+        for (int i = 0; i < gi->sorted_count && task_idx < level_node_counts[level]; i++) {
+            if (depth[i] == level && !gi->sorted_nodes[i]->eliminated && !gi->sorted_nodes[i]->fused) {
+                tasks[task_idx].node = gi->sorted_nodes[i];
+                tasks[task_idx].error_flag = &error_flag;
+                task_idx++;
+            }
+        }
+
+        /* 提交本层所有任务到线程池 */
+        for (int t = 0; t < level_node_counts[level]; t++) {
+            if (thread_pool_submit(pool, parallel_exec_node, &tasks[t], 0) != 0) {
+                error_flag = 1;
+                result = -1;
+                break;
+            }
+        }
+
+        /* 等待本层所有任务完成 */
+        if (thread_pool_wait_all(pool, 0) != 0) {
+            error_flag = 1;
+            result = -1;
+        }
+
+        free(tasks);
+    }
+
+    thread_pool_free(pool);
+    free(level_node_counts);
+    free(depth);
+
+    if (error_flag) return -1;
+    return result;
 }
 
 /* ============================================================================

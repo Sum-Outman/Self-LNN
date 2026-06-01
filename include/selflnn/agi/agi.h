@@ -11,8 +11,8 @@
 #include "selflnn/core/decision_engine.h"
 #include "selflnn/learning/learning.h"
 #include "selflnn/memory/memory_manager.h"
-#include "selflnn/metacognition.h"
-#include "selflnn/self_cognition.h"
+#include "selflnn/cognition/metacognition.h"
+#include "selflnn/cognition/self_cognition.h"
 #include "selflnn/cognition/deep_reflection.h"
 #include "selflnn/cognition/deep_thought_chain.h"
 #include "selflnn/cognition/deep_correction.h"
@@ -21,6 +21,7 @@
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/multisystem/multisystem_control.h"
 #include "selflnn/core/unified_lnn_state.h"
+#include "selflnn/agi/task_scheduler.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,7 @@ extern "C" {
 #define AGI_NAME_LEN 128
 #define AGI_DESC_LEN 512
 #define AGI_STATE_VECTOR_DIM 256
+#define AGI_OUTPUT_DIM 1024
 
 typedef enum {
     AGI_STATE_IDLE = 0,
@@ -185,6 +187,7 @@ int agi_system_set_unified_lnn(AGISystem* system, UnifiedLNNState* state);
 int agi_system_set_vision_processor(AGISystem* system, CfcVisionProcessor* vision);
 int agi_system_set_depth_estimator(AGISystem* system, DepthEstimator* estimator);
 int agi_system_set_multisystem_control(AGISystem* system, MultiSystemControlEngine* engine);
+int agi_system_set_task_scheduler(AGISystem* system, TaskScheduler* ts);
 
 int agi_system_set_config(AGISystem* system, const AGIConfig* config);
 int agi_system_get_config(const AGISystem* system, AGIConfig* config);

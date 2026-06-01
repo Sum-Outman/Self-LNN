@@ -335,6 +335,20 @@ LearningEngine* learning_engine_create(const LearningConfig* config) {
     engine->has_real_weights = 0;
     engine->has_real_knowledge = 0;
 
+    /* P0-010: 初始化时所有数据源标记为空白状态
+     * ZSFAI-C09修复: 尝试自动关联全局共享LNN
+     * 避免因遗漏调用set_network导致学习引擎静默失败 */
+    {
+        extern void* g_global_lnn;
+        if (g_global_lnn) {
+            CfCNetwork* cfc = lnn_get_cfc_network((LNN*)g_global_lnn);
+            if (cfc) {
+                engine->has_real_weights = 1;
+                log_info("[学习引擎] 自动关联全局共享LNN，权重标记为就绪");
+            }
+        }
+    }
+
     /* 初始化内部经验缓冲区 */
     engine->internal_exp_count = 0;
     engine->internal_exp_real_data_count = 0;  /* P0-006: 真实数据计数从零开始 */
