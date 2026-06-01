@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN 主头文件
  * 
  * 包含所有SELF-LNN模块的公共API接口。
@@ -23,7 +23,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/cfc.h"
 
-/* ZSFEEE-FIX-007: 补充核心液态神经网络模块头文件 */
+/* 补充核心液态神经网络模块头文件 */
 #include "selflnn/core/cfc_network.h"
 #include "selflnn/core/cfc_enhanced.h"
 #include "selflnn/core/cma_es.h"
@@ -50,7 +50,7 @@
 #include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/system_scheduler.h"
 
-/* ZSFEEE-FIX-007: 补充认知模块头文件 */
+/* 补充认知模块头文件 */
 #include "selflnn/cognition/self_cognition.h"
 #include "selflnn/cognition/metacognition.h"
 #include "selflnn/cognition/deep_correction.h"
@@ -65,9 +65,9 @@
 #include "selflnn/multimodal/unified_signal_processor.h"
 #include "selflnn/multimodal/liquid_vision.h"
 #include "selflnn/multimodal/audio.h"
-#include "selflnn/multimodal/audio_tools.h"       /* ZSF999XQ-L-001: 集成孤立音频工具模块 */
+#include "selflnn/multimodal/audio_tools.h"
 #include "selflnn/multimodal/text.h"
-/* ZSFEEE-FIX-007: 补充多模态模块头文件 */
+/* 补充多模态模块头文件 */
 #include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/multimodal/tts.h"
 #include "selflnn/multimodal/vad.h"
@@ -140,7 +140,7 @@
 #include "selflnn/memory/semantic.h"
 #include "selflnn/memory/working_memory.h"
 
-// ZSFLYF-NEW: 集成孤儿子多模态传感器模块
+// 集成孤儿子多模态传感器模块
 #include "selflnn/multimodal/motor.h"
 #include "selflnn/multimodal/radar.h"
 #include "selflnn/multimodal/thermal.h"
@@ -162,7 +162,7 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/concurrency/thread_pool.h"
 
-/* ZSFEEE-FIX-007: 补充学习、演化、训练、安全、分布式模块头文件 */
+/* 补充学习、演化、训练、安全、分布式模块头文件 */
 #include "selflnn/learning/learning.h"
 #include "selflnn/learning/imitation_learning.h"
 #include "selflnn/learning/imitation_deep.h"
@@ -229,7 +229,7 @@ typedef struct {
     PowerMode power_mode;
     GpuBackend gpu_backend;
     const char* model_path;
-    /* ZSFZX-FIX-CONFIG: 新增端口字段 — 原只在保存时写端口但从不加载 */
+/* 新增端口字段 — 原只在保存时写端口但从不加载 */
     int http_port;
     int websocket_port;
     int distributed_port;
@@ -335,7 +335,7 @@ SELFLNN_API const char* selflnn_get_error_message(int error_code);
 
 SELFLNN_API int selflnn_config_load_from_file(const char* filepath, SystemConfig* config);
 SELFLNN_API int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config);
-/* ZSFZX-FIX-R4-2: 配置Schema验证 */
+/* 配置Schema验证 */
 SELFLNN_API int selflnn_config_validate(const SystemConfig* config, char* error_msg, size_t msg_size);
 SELFLNN_API int selflnn_set_power_mode(PowerMode power_mode);
 SELFLNN_API void selflnn_set_product_design_labels(const ProductDesignLabels* labels);
@@ -347,10 +347,10 @@ SELFLNN_API const ProductDesignLabels* selflnn_get_product_design_labels(void);
  * ================================================================ */
 
 /* ---- 4a. 核心认知模块 ---- */
-SELFLNN_API void* selflnn_get_self_cognition(void);          /* ZSFZS-F019: 自我认知系统 */
-SELFLNN_API void* selflnn_get_metacognition(void);            /* ZSFZS-F019: 元认知系统 */
-SELFLNN_API void* selflnn_get_knowledge_graph(void);          /* ZSFX-DEEP-005: 知识图谱 */
-SELFLNN_API void* selflnn_get_gpu_context(void);              /* ZSFX-DEEP-005: GPU上下文 */
+SELFLNN_API void* selflnn_get_self_cognition(void); /* 自我认知系统 */
+SELFLNN_API void* selflnn_get_metacognition(void); /* 元认知系统 */
+SELFLNN_API void* selflnn_get_knowledge_graph(void); /* 知识图谱 */
+SELFLNN_API void* selflnn_get_gpu_context(void); /* GPU上下文 */
 SELFLNN_API void* selflnn_get_dialogue_processor(void);
 SELFLNN_API void* selflnn_get_planning_system(void);
 
@@ -375,25 +375,25 @@ SELFLNN_API void selflnn_set_speech_recognizer(void* sr);
 SELFLNN_API void* selflnn_get_product_design_engine(void);  /* APP10: 产品设计引擎 */
 SELFLNN_API void selflnn_set_product_design_engine(void* engine);
 SELFLNN_API void* selflnn_get_multisystem_control(void);     /* APP13: 多系统控制 */
-SELFLNN_API void* selflnn_get_self_programming_engine(void);  /* ZSFWS-H-001: 自我编程引擎 */
-SELFLNN_API void* selflnn_get_distributed_context(void);      /* ZSFWS-H-001: 分布式上下文 */
-SELFLNN_API void* selflnn_get_nas_system(void);              /* ZSFWS-M-001: NAS系统 */
-SELFLNN_API void* selflnn_get_laplace_unified(void);         /* ZSFWS-M-001: 拉普拉斯 */
-SELFLNN_API void* selflnn_get_audio_capture(void);           /* ZSFWS-M-001: 音频采集 */
-SELFLNN_API void* selflnn_get_tts_engine(void);              /* ZSFWS-M-001: TTS引擎 */
-SELFLNN_API void* selflnn_get_computer_operation(void);      /* ZSFWS-M-001: 计算机操作 */
-SELFLNN_API void* selflnn_get_audit_logger(void);            /* ZSFWS-M-001: 审计日志 */
-SELFLNN_API void* selflnn_get_content_filter(void);          /* ZSFWS-M-001: 内容过滤 */
-SELFLNN_API void* selflnn_get_load_balancer(void);           /* ZSFWS-M-001: 负载均衡 */
-SELFLNN_API void* selflnn_get_training_pipeline(void);       /* ZSFWS-M-001: 训练管线 */
-SELFLNN_API void  selflnn_set_training_pipeline(void* pipeline); /* ZSFUSA-P0-004: 训练管线注册 */
-SELFLNN_API size_t selflnn_get_config_state_dimension(void);  /* ZSFUSA-P1-004: 获取状态维度 */
-SELFLNN_API void   selflnn_set_laplace_metrics(const float* metrics, int count); /* ZSFUSA-P3-001: 拉普拉斯指标更新 */
-SELFLNN_API void* selflnn_get_security_monitor_deep(void);  /* ZSFX-DEEP-004: 深度安全监控 */
-SELFLNN_API void* selflnn_get_teaching_loop(void);          /* ZSFQQ-ORP-002: 教学闭环系统 */
-SELFLNN_API void* selflnn_get_multimodal_teaching(void);    /* ZSFQQ-ORP-002: 多模态教学系统 */
+SELFLNN_API void* selflnn_get_self_programming_engine(void); /* 自我编程引擎 */
+SELFLNN_API void* selflnn_get_distributed_context(void); /* 分布式上下文 */
+SELFLNN_API void* selflnn_get_nas_system(void); /* NAS系统 */
+SELFLNN_API void* selflnn_get_laplace_unified(void); /* 拉普拉斯 */
+SELFLNN_API void* selflnn_get_audio_capture(void); /* 音频采集 */
+SELFLNN_API void* selflnn_get_tts_engine(void); /* TTS引擎 */
+SELFLNN_API void* selflnn_get_computer_operation(void); /* 计算机操作 */
+SELFLNN_API void* selflnn_get_audit_logger(void); /* 审计日志 */
+SELFLNN_API void* selflnn_get_content_filter(void); /* 内容过滤 */
+SELFLNN_API void* selflnn_get_load_balancer(void); /* 负载均衡 */
+SELFLNN_API void* selflnn_get_training_pipeline(void); /* 训练管线 */
+SELFLNN_API void  selflnn_set_training_pipeline(void* pipeline); /* 训练管线注册 */
+SELFLNN_API size_t selflnn_get_config_state_dimension(void); /* 获取状态维度 */
+SELFLNN_API void   selflnn_set_laplace_metrics(const float* metrics, int count); /* 拉普拉斯指标更新 */
+SELFLNN_API void* selflnn_get_security_monitor_deep(void); /* 深度安全监控 */
+SELFLNN_API void* selflnn_get_teaching_loop(void); /* 教学闭环系统 */
+SELFLNN_API void* selflnn_get_multimodal_teaching(void); /* 多模态教学系统 */
 
-/* ---- 4e. 事件驱动即时自检（ZSFWS-038） ---- */
+/* ---- 4e. 事件驱动即时自检 ---- */
 SELFLNN_API void dcpipeline_request_immediate_check(void);
 SELFLNN_API int  dcpipeline_is_immediate_check_requested(void);
 SELFLNN_API void dcpipeline_clear_immediate_check(void);
@@ -406,7 +406,7 @@ SELFLNN_API void* selflnn_get_unified_signal_processor_training(void);  /* P2-00
 /* ================================================================
  * 5. 单一LNN模型管理 —— 全模态共享同一个连续动态系统
  *    整个系统只允许存在一个LNN实例，所有模块共享。
- *    任何模块禁止自行调用 lnn_create() 创建独立LNN。
+ *    任何模块禁止自行调用 lnn_create 创建独立LNN。
  * ================================================================ */
 
 SELFLNN_API void* selflnn_get_lnn(void);
@@ -420,8 +420,8 @@ SELFLNN_API int selflnn_register_module(int module_id, void* instance, int uses_
 SELFLNN_API int selflnn_module_uses_shared_lnn(int module_id);
 
 /* LNN并发安全：带锁保护的前向传播
- * 在调用lnn_forward()前后自动加锁/解锁，确保并发调用不会互相污染CfC隐藏状态。
- * 所有多线程环境下对LNN的前向传播调用应使用此函数替代直接调用lnn_forward()。 */
+ * 在调用lnn_forward前后自动加锁/解锁，确保并发调用不会互相污染CfC隐藏状态。
+ * 所有多线程环境下对LNN的前向传播调用应使用此函数替代直接调用lnn_forward。 */
 SELFLNN_API int selflnn_safe_forward(void* lnn, const float* input, float* output);
 
 /* ================================================================
@@ -429,9 +429,9 @@ SELFLNN_API int selflnn_safe_forward(void* lnn, const float* input, float* outpu
  * ================================================================ */
 
 SELFLNN_API int selflnn_checkpoints_auto_load(void);
-SELFLNN_API int selflnn_save_checkpoint(const char* filepath);  /* ZSFX-DEEP-R5-003: 检查点保存 */
+SELFLNN_API int selflnn_save_checkpoint(const char* filepath); /* 检查点保存 */
 
-/* ZSFQQ-P2-001: 引导多模态模块训练状态，检查点加载后调用 */
+/* 引导多模态模块训练状态，检查点加载后调用 */
 SELFLNN_API void selflnn_bootstrap_trained_modules(void);
 
 /* ================================================================
@@ -445,7 +445,7 @@ SELFLNN_API int selflnn_consume_knowledge_inference(void* lnn_instance, void* ki
                                                      int max_hops,
                                                      float perturbation_strength);
 
-/* ZSFZS-F026: 知识库更新事件通知机制
+/* 知识库更新事件通知机制
  * selflnn_trigger_knowledge_refresh: 知识库回调调用，设置刷新标志
  * selflnn_check_and_reset_knowledge_refresh: AGI后台循环查询并重置标志 */
 SELFLNN_API void selflnn_trigger_knowledge_refresh(void);

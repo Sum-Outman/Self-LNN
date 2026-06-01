@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file npu_common.h
  * @brief NPU后端公共代码接口（内部头文件）
  *
@@ -91,7 +91,7 @@ void npu_common_populate_backend_iface(GpuBackendInterface* iface,
                                         GpuBackendMemCpyToDevFn cpy_h2d,
                                         GpuBackendMemCpyFromDevFn cpy_d2h);
 
-/* ZSFWS修复: SIMD加速版本 */
+/* SIMD加速版本 */
 int npu_common_simd_forward_dense(const float* input, const float* weights,
                                    const float* bias, float* output,
                                    size_t batch_size, size_t input_size,

@@ -67,8 +67,8 @@ struct MetacognitionSystem {
     
     /* 随机数状态 */
     unsigned int random_seed;                        /**< 随机数种子 */
-    XorshiftPrng xorshift_prng;                      /**< ZSFEEE-FIX-027: 实例级Xorshift PRNG（替代全局静态） */
-    int xorshift_seeded;                             /**< ZSFEEE-FIX-027: PRNG是否已播种 */
+    XorshiftPrng xorshift_prng; /**< 实例级Xorshift PRNG（替代全局静态） */
+    int xorshift_seeded; /**< PRNG是否已播种 */
     
     /* 液态神经网络实例 */
     LNN* lnn_instance;                               /**< 液态神经网络实例指针 */
@@ -88,7 +88,6 @@ struct MetacognitionSystem {
     float ema_innovation_variance;                   /**< EMA平滑创新方差 */
     float ema_process_noise;                         /**< EMA平滑过程噪声 */
     
-    /* ZSFWS修复-L-008: 不确定性EMA状态（移到结构体避免多实例污染） */
     float ema_uncertainty_variance;                  /**< EMA平滑不确定性方差 */
     size_t ema_uncertainty_samples;                  /**< 累计不确定性样本数 */
     float ema_uncertainty_mean;                      /**< EMA平滑不确定性均值 */
@@ -140,7 +139,7 @@ static float calculate_trend(const float* history, size_t history_size);
 static int requires_action_based_on_monitoring(MetacognitionSystem* system,
                                               const MetacognitionMonitoringResult* result);
 
-/* ZSFEEE-FIX-027: 移除静态全局PRNG，将XorshiftPrng移到Metacognition上下文结构体中，
+/* 移除静态全局PRNG，将XorshiftPrng移到Metacognition上下文结构体中，
  * 避免多实例竞争同一全局状态。
  * 原g_meta_xorshift_prng/g_meta_xorshift_seeded已移至MetacognitionSystem.xorshift_prng。 */
 
@@ -318,7 +317,6 @@ MetacognitionSystem* metacognition_system_create(
     system->kalman_window_filled = 0;
     system->ema_innovation_variance = 0.01f;
     system->ema_process_noise = 0.001f;
-    /* ZSFWS修复-L-008: 初始化不确定性EMA状态 */
     system->ema_uncertainty_variance = 0.01f;
     system->ema_uncertainty_samples = 0;
     system->ema_uncertainty_mean = 0.0f;
@@ -394,9 +392,9 @@ int metacognition_monitor(MetacognitionSystem* system,
     result->type = system->monitoring_config.monitoring_type;
     result->current_value = calculate_confidence(input_data, data_size);
     result->confidence = calculate_confidence(input_data, data_size);
-    result->uncertainty = calculate_uncertainty(system, input_data, data_size); /* ZSFWS-L-008 */
+    result->uncertainty = calculate_uncertainty(system, input_data, data_size);
     
-    /* ZSFEEE-FIX-002: 拉普拉斯频域分析 → 元认知监控稳定性修正
+/* 拉普拉斯频域分析 → 元认知监控稳定性修正
      * 对输入数据进行拉普拉斯频域稳定性分析，
      * 将频谱稳定性指标整合到监控置信度和不确定性中。
      * 高频不稳定 → 降低置信度、提升不确定性；
@@ -644,39 +642,39 @@ static void analogy_lock_init_func(void) {
         g_analogy_lock_init = 1;
     }
 }
-#define ANALOGY_LOCK() do { analogy_lock_init_func(); EnterCriticalSection(&g_analogy_lock); } while(0)
-#define ANALOGY_UNLOCK() LeaveCriticalSection(&g_analogy_lock)
+#define ANALOGY_LOCK do { analogy_lock_init_func; EnterCriticalSection(&g_analogy_lock); } while(0)
+#define ANALOGY_UNLOCK LeaveCriticalSection(&g_analogy_lock)
 #else
 #include <pthread.h>
 static pthread_mutex_t g_analogy_lock = PTHREAD_MUTEX_INITIALIZER;
-#define ANALOGY_LOCK() pthread_mutex_lock(&g_analogy_lock)
-#define ANALOGY_UNLOCK() pthread_mutex_unlock(&g_analogy_lock)
+#define ANALOGY_LOCK pthread_mutex_lock(&g_analogy_lock)
+#define ANALOGY_UNLOCK pthread_mutex_unlock(&g_analogy_lock)
 #endif
 
 int analogy_add_source_concept(const char* name, const float* features, int dim) {
-    ANALOGY_LOCK();
-    if (src_domain.concept_count >= ANALOGY_MAX_CONCEPTS) { ANALOGY_UNLOCK(); return -1; }
+    ANALOGY_LOCK;
+    if (src_domain.concept_count >= ANALOGY_MAX_CONCEPTS) { ANALOGY_UNLOCK; return -1; }
     AnalogyConcept* c = &src_domain.concepts[src_domain.concept_count++];
     strncpy(c->name, name, 63);
     c->feature_dim = dim < 16 ? dim : 16;
     if (features) memcpy(c->features, features, (size_t)c->feature_dim * sizeof(float));
-    ANALOGY_UNLOCK();
+    ANALOGY_UNLOCK;
     return 0;
 }
 
 int analogy_add_source_relation(int a, int b, int rel_type, float weight) {
-    ANALOGY_LOCK();
-    if (src_domain.relation_count >= ANALOGY_MAX_RELS) { ANALOGY_UNLOCK(); return -1; }
+    ANALOGY_LOCK;
+    if (src_domain.relation_count >= ANALOGY_MAX_RELS) { ANALOGY_UNLOCK; return -1; }
     AnalogyRelation* r = &src_domain.relations[src_domain.relation_count++];
     r->src_a = a; r->src_b = b; r->rel_type = rel_type; r->weight = weight;
-    ANALOGY_UNLOCK();
+    ANALOGY_UNLOCK;
     return 0;
 }
 
 int analogy_find_mapping(AnalogyMapping* best_mapping) {
     if (!best_mapping) return -1;
-    ANALOGY_LOCK();
-    if (src_domain.concept_count == 0) { ANALOGY_UNLOCK(); return -1; }
+    ANALOGY_LOCK;
+    if (src_domain.concept_count == 0) { ANALOGY_UNLOCK; return -1; }
     memset(best_mapping, 0, sizeof(AnalogyMapping));
 
     for (int s = 0; s < src_domain.concept_count; s++) {
@@ -707,7 +705,7 @@ int analogy_find_mapping(AnalogyMapping* best_mapping) {
 
     if (best_mapping->num_mapped > 0)
         best_mapping->score /= (float)best_mapping->num_mapped;
-    ANALOGY_UNLOCK();
+    ANALOGY_UNLOCK;
     return 0;
 }
 
@@ -716,15 +714,15 @@ int analogy_transfer_knowledge(int src_concept, const float* src_knowledge,
     if (!src_knowledge || !target_knowledge || dim <= 0 || dim > 64) return -1;
     AnalogyMapping mapping;
     if (analogy_find_mapping(&mapping) != 0 || mapping.num_mapped == 0) return -1;
-    ANALOGY_LOCK();
-    if (src_concept < 0 || src_concept >= src_domain.concept_count) { ANALOGY_UNLOCK(); return -1; }
+    ANALOGY_LOCK;
+    if (src_concept < 0 || src_concept >= src_domain.concept_count) { ANALOGY_UNLOCK; return -1; }
     int tgt = mapping.mapping[src_concept];
-    if (tgt < 0 || tgt >= tgt_domain.concept_count) { ANALOGY_UNLOCK(); return -1; }
+    if (tgt < 0 || tgt >= tgt_domain.concept_count) { ANALOGY_UNLOCK; return -1; }
     memcpy(target_knowledge, src_knowledge, (size_t)dim * sizeof(float));
     float alpha = 0.3f * mapping.score;
     for (int d = 0; d < dim && d < tgt_domain.concepts[tgt].feature_dim; d++)
         target_knowledge[d] = (1.0f - alpha) * tgt_domain.concepts[tgt].features[d] + alpha * src_knowledge[d];
-    ANALOGY_UNLOCK();
+    ANALOGY_UNLOCK;
     return 0;
 }
 
@@ -2257,7 +2255,7 @@ static int perform_bayesian_update(MetacognitionSystem* system,
 }
 
 /* ============================================================================
- * P1-05: 元认知→自我认知闭环桥接 (ZSFAB P1-003修复: 使用标准头文件代替extern声明)
+ * P1-05: 元认知→自我认知闭环桥接 (P1-003修复: 使用标准头文件代替extern声明)
  *
  * 将元认知系统的深度反思/深度思维链分析结果
  * 推送回自我认知系统进行闭环校准。
@@ -2383,7 +2381,7 @@ int metacognition_bridge_to_self_cognition(MetacognitionSystem* system,
                  actions, buf[0] ? buf : "模型状态稳定，无需调整");
     }
 
-    /* ZSFEEE-FIX-028: 修复始终返回0的问题。原代码 return actions > 0 ? 0 : 0 
+/* 修复始终返回0的问题。原代码 return actions > 0 ? 0 : 0 
      * 两个分支均返回0，导致调用方无法区分桥接是否实际执行了动作。
      * 修复：返回实际执行的动作数量，0表示无动作但非错误。 */
     return actions;
@@ -2739,7 +2737,7 @@ static float calculate_confidence(const float* data, size_t data_size) {
 }
 
 /**
- * @brief ZSFX-024: 基于贝叶斯后验方差的不确定性计算
+ * @brief 基于贝叶斯后验方差的不确定性计算
  *
  * 维护预测误差方差的指数移动平均(EMA)作为贝叶斯后验方差的估计，
  * 使用 uncertainty = sqrt(ema_variance) / (1.0 + log(1 + N)) 公式。
@@ -2758,7 +2756,6 @@ static float calculate_uncertainty(MetacognitionSystem* system, const float* dat
         return 0.5f; /* 无数据时默认中等不确定性 */
     }
 
-    /* ZSFWS修复-L-008: 使用实例级EMA状态替代全局静态变量 */
 
     /* 计算当前批次的均值和方差 */
     float sum = 0.0f;

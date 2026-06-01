@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file multimodal_unified_input.c
  * @brief 多模态统一输入实现
  *
@@ -144,7 +144,7 @@ static int validate_modality_signals(const float* signals[SELFLNN_MAX_MODALITIES
  * @brief 核心统一输入处理：所有模态信号通过独立线性投影矩阵映射到统一维度，
  *        然后element-wise求和注入单一LNN连续动态系统
  * 
- * ZSF-ZNB修复S-002: 架构从"直接拼接"改为"线性投影+求和"
+ *修复S-002: 架构从"直接拼接"改为"线性投影+求和"
  *   统一输入 = Σ_i (W_i · x_i + b_i)
  *   其中 W_i: SELFLNN_UNIFIED_PROJECTION_DIM × input_dim_i
  */
@@ -163,7 +163,6 @@ static int unified_input_dynamic_process(
         return -1;
     }
 
-    /* ZSF-ZNB修复S-002: 延迟初始化投影矩阵 */
     if (!state->projections_initialized) {
         /* Xavier初始化每个模态的投影矩阵和偏置 */
         for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
@@ -188,7 +187,7 @@ static int unified_input_dynamic_process(
             }
         }
         state->projections_initialized = 1;
-        /* ZSFLYF-P1-003修复: 投影矩阵不再锁定。
+/* 投影矩阵不再锁定。
          * 多模态统一输入的投影矩阵需要参与训练以学习跨模态映射。
          * 锁定随机投影会导致视觉+语音+文本无法有效融合到共享LNN。 */
         state->projection_locked = 0;
@@ -233,7 +232,7 @@ static int unified_input_dynamic_process(
     }
 
     /* 步骤1: 对每个活跃模态进行线性投影并求和
-     * ZSF-005修复: 添加跨模态维度差异均衡
+ *修复: 添加跨模态维度差异均衡
      * 不同模态维度差异巨大（视觉1024 vs 触觉64），直接投影求和导致
      * 高维模态主导输出。先对原始输入做L2归一化，再按sqrt(dim)缩放，
      * 使各模态对combined_input的贡献处于相同量级。 */
@@ -245,7 +244,7 @@ static int unified_input_dynamic_process(
         size_t input_dim = signal_sizes[m];
         if (input_dim > SELFLNN_MAX_CONTROL_DIM) input_dim = SELFLNN_MAX_CONTROL_DIM;
 
-        /* ZSF-005: 跨模态维度差异归一化
+/*: 跨模态维度差异归一化
          * 先计算原始输入的L2范数，用于归一化，使不同模态的原始信号
          * 处于相同量级后再投影。sqrt(proj_dim/input_dim)缩放因子
          * 补偿维度差异，确保高低维模态贡献均衡。 */
@@ -276,7 +275,6 @@ static int unified_input_dynamic_process(
         return -1;
     }
 
-    /* ZSF-009: 存储当前投影结果和活跃模态数，供在线训练使用 */
     state->last_active_count = active_modalities;
     for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
         state->last_combined[j] = combined[j];
@@ -328,7 +326,6 @@ static int unified_input_dynamic_process(
                     memcpy(unified_output, lnn_output_buf, copy * sizeof(float));
                     if (copy < output_dim)
                         memset(unified_output + copy, 0, (output_dim - copy) * sizeof(float));
-                    /* ZSF-009: 存储统一输出供在线训练使用 */
                     size_t prev_copy = copy < SELFLNN_MAX_CONTROL_DIM ? copy : SELFLNN_MAX_CONTROL_DIM;
                     memcpy(state->prev_output, lnn_output_buf, prev_copy * sizeof(float));
                     state->prev_output_dim = prev_copy;
@@ -404,7 +401,6 @@ int multimodal_unified_input_init(UnifiedInputState* state, const UnifiedInputCo
     state->is_initialized = 1;
     state->historical_process_quality = 0.5f;
 
-    /* ZSF-ZNB修复S-002: 投影矩阵延迟初始化标志 */
     state->projections_initialized = 0;
 
     /* 动量优化器初始化 */
@@ -433,7 +429,7 @@ int multimodal_unified_input_process(UnifiedInputState* state,
         if (unified_size) *unified_size = 0;
         return -1;
     }
-    /* ZSFWS-002修复: 训练前死锁解除
+/* 训练前死锁解除
      * 原逻辑要求is_trained和lnn_instance同时满足才放行，形成"先有鸡还是先有蛋"的死锁。
      * 投影矩阵采用标准Xavier随机初始化（神经网络标准做法），
      * 只要有LNN绑定即可进行前向传播，输出质量随训练逐步提升。
@@ -581,7 +577,6 @@ int multimodal_unified_input_reset(UnifiedInputState* state)
 {
     if (!state) return -1;
 
-    /* ZSF-ZNB修复S-002: 释放投影矩阵和动量缓冲区 */
     for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
         if (state->projection_matrices[m]) {
             safe_free((void**)&state->projection_matrices[m]);
@@ -702,7 +697,7 @@ int multimodal_unified_input_diagnose_modalities(const UnifiedInputState* state,
 }
 
 /* ================================================================
- * ZSF-009: 统一输入在线训练步骤 —— P0-05修复版
+ *: 统一输入在线训练步骤 —— P0-05修复版
  *
  * 基于目标输出对投影矩阵进行在线学习更新。
  * 使用真实链式法则梯度反向传播（通过cfc_backward_ex穿越LNN/CfC动态系统），
@@ -729,7 +724,7 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
     if (state->last_active_count <= 0) return -1;
     if (!state->projections_initialized) return -1;
 
-    /* ZSFX-DEEP-R8-002: 投影矩阵锁定状态下跳过SGD训练更新，
+/* 投影矩阵锁定状态下跳过SGD训练更新，
      * 但仍计算前向监控损失值并通过loss参数返回，
      * 返回 SELFLNN_ERROR_PROJECTION_LOCKED(-506) 以便调用者区分"训练成功"与"锁定跳过"。 */
     if (state->projection_locked) {
@@ -835,7 +830,7 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
      * 必须要求LNN反向传播可用，不可回退到恒等传播。 */
     if (!used_real_backprop) {
         fprintf(stderr, "[多模态统一输入错误] LNN反向传播不可用，拒绝使用恒等近似梯度回退！请确保LNN已正确初始化并绑定。\n");
-        /* ZSFA-FIX-F-001: grad_combined是栈数组，不可对栈地址调用safe_free */
+/* grad_combined是栈数组，不可对栈地址调用safe_free */
         return SELFLNN_ERROR_ALGORITHM_FAILURE;
     }
 
@@ -917,9 +912,9 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
     /* 步骤5: 更新历史质量指标 */
     float quality = 1.0f / (1.0f + total_loss);
     state->historical_process_quality = state->historical_process_quality * 0.9f + quality * 0.1f;
-    state->is_trained = 1;  /* ZSFWS-S006: 首次成功训练后标记为已训练 */
+    state->is_trained = 1; /* 首次成功训练后标记为已训练 */
 
-    /* ZSFX-DEEP-R8: 训练成功时通过loss参数返回监控损失值 */
+/* 训练成功时通过loss参数返回监控损失值 */
     if (loss) *loss = total_loss;
 
     return 0;

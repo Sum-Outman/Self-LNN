@@ -49,7 +49,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/gpu/gpu.h"
-#include "selflnn/core/optimizer.h"    /* ZSFEEE-FIX-CORRECTION-REAL: 权重修正需要优化器 */
+#include "selflnn/core/optimizer.h" /* 权重修正需要优化器 */
 #include "selflnn/cognition/metacognition.h"
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/cognition/deep_reflection.h"
@@ -568,7 +568,7 @@ int self_cognition_memory_retrieve(SelfCognitionSystem* system, const char* quer
     return found;
 }
 
-/* ZSFWS-027: LNN训练状态检查 —— 检测共享LNN是否已经过训练，
+/* LNN训练状态检查 —— 检测共享LNN是否已经过训练，
  * 避免未训练的随机权重LNN输出无意义的自我评估导致错误修正决策 */
 static int _self_cognition_check_lnn_ready_internal(SelfCognitionSystem* system) {
     if (!system) return 0;
@@ -579,7 +579,7 @@ static int _self_cognition_check_lnn_ready_internal(SelfCognitionSystem* system)
     }
 
     /* 2. 获取全局共享LNN实例并检查其统计信息 */
-    void* shared_lnn = selflnn_get_shared_lnn();
+    void* shared_lnn = selflnn_get_shared_lnn;
     if (!shared_lnn) {
         log_warning("[LNN就绪检查] 全局共享LNN实例不存在，自我认知将使用保守评估模式");
         return 0;
@@ -617,7 +617,7 @@ static int _self_cognition_check_lnn_ready_internal(SelfCognitionSystem* system)
 int self_cognition_iterative_reflection(SelfCognitionSystem* system, int max_iterations) {
     if (!system) return -1;
 
-    /* ZSFWS-027: LNN未训练保护 —— 未训练的LNN随机权重会导致无意义的反思输出 */
+/* LNN未训练保护 —— 未训练的LNN随机权重会导致无意义的反思输出 */
     if (!_self_cognition_check_lnn_ready_internal(system)) {
         log_warning("[迭代反思] LNN未训练，跳过迭代式元认知循环，"
                    "返回0轮次以避免随机噪声状态下的错误自我评估");
@@ -985,7 +985,7 @@ int self_cognition_neutral_assessment(SelfCognitionSystem* system,
         return -1;
     }
 
-    /* ZSFX-009修复: LNN未训练时增强数据驱动保守评估
+/* LNN未训练时增强数据驱动保守评估
      * 即使LNN权重未训练，系统仍可通过以下真实指标评估自身状态:
      * 知识库条目数、记忆条数、活动任务、运行时间、硬件可用性、更新次数等 */
     if (!_self_cognition_check_lnn_ready_internal(system)) {
@@ -1682,7 +1682,7 @@ static void update_capability_assessment(SelfCognitionSystem* system) {
     }
     system->capability.creativity = fminf(0.88f, 0.4f + creativity_factor * 0.5f);
     
-    /* ZSFEEE-FIX-002: 拉普拉斯频域分析 → 能力评估修正
+/* 拉普拉斯频域分析 → 能力评估修正
      * 对系统状态向量进行拉普拉斯频域稳定性分析，
      * 将频谱稳定性指标作为能力评估的修正因子。
      * 稳定性越高 → 能力评估越可信；不稳定 → 降低能力置信度。 */
@@ -1744,7 +1744,7 @@ static void update_knowledge_metacognition(SelfCognitionSystem* system) {
     
     /* 1. 知识增长模型：查询真实知识库获取已知/未知概念数量 */
     /* N-001修复: 不再使用硬编码系数 training_samples*0.1f，改为查询真实知识库 */
-    void* kb_raw = selflnn_get_knowledge_base();
+    void* kb_raw = selflnn_get_knowledge_base;
     KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
     size_t kb_total = 0;
     if (kb) knowledge_base_get_stats(kb, &kb_total, NULL);
@@ -1959,7 +1959,7 @@ static void update_learning_progress(SelfCognitionSystem* system) {
     
     /* 6. 进化进展：基于真实演化引擎指标 */
     float real_evo_progress = 0.0f;
-    void* evo = selflnn_get_evolution_engine();
+    void* evo = selflnn_get_evolution_engine;
     if (evo) {
         EvolutionStats estats;
         memset(&estats, 0, sizeof(EvolutionStats));
@@ -2001,7 +2001,7 @@ static float get_system_cpu_usage(void) {
     FILETIME idle_filetime, kernel_filetime, user_filetime;
     
     if (!GetSystemTimes(&idle_filetime, &kernel_filetime, &user_filetime)) {
-        log_warning("[ZSFX-023] CPU使用率检测失败：GetSystemTimes()调用失败，返回默认值0.3f。"
+        log_warning(" CPU使用率检测失败：GetSystemTimes调用失败，返回默认值0.3f。"
                     "可能原因：系统权限不足或Win32 API异常。");
         return 0.3f;
     }
@@ -2024,7 +2024,7 @@ static float get_system_cpu_usage(void) {
         last_idle_time = idle_time;
         last_kernel_time = kernel_time;
         last_user_time = user_time;
-        log_warning("[ZSFX-023] CPU使用率首次采样：total_time=0（需两次采样的差值），"
+        log_warning(" CPU使用率首次采样：total_time=0（需两次采样的差值），"
                     "返回默认值0.3f，下次调用将返回真实值。");
         return 0.3f;
     }
@@ -2046,7 +2046,7 @@ static float get_system_cpu_usage(void) {
     /* Linux实现：从/proc/stat读取 */
     FILE* stat_file = fopen("/proc/stat", "r");
     if (!stat_file) {
-        log_warning("[ZSFX-023] CPU使用率检测失败：无法打开/proc/stat文件，"
+        log_warning(" CPU使用率检测失败：无法打开/proc/stat文件，"
                     "返回默认值0.3f。可能原因：非Linux系统或文件系统权限不足。");
         return 0.3f;
     }
@@ -2057,7 +2057,7 @@ static float get_system_cpu_usage(void) {
     if (fscanf(stat_file, "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
                &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal, &guest, &guest_nice) != 10) {
         fclose(stat_file);
-        log_warning("[ZSFX-023] CPU使用率解析失败：/proc/stat格式异常，无法解析10个CPU字段，"
+        log_warning(" CPU使用率解析失败：/proc/stat格式异常，无法解析10个CPU字段，"
                     "返回默认值0.3f。");
         return 0.3f;
     }
@@ -2071,7 +2071,7 @@ static float get_system_cpu_usage(void) {
         /* 第一次调用 */
         last_total = total;
         last_idle = total_idle;
-        log_warning("[ZSFX-023] CPU使用率Linux首次采样：last_total=0（需两次采样的差值），"
+        log_warning(" CPU使用率Linux首次采样：last_total=0（需两次采样的差值），"
                     "返回默认值0.3f，下次调用将返回真实值。");
         return 0.3f;
     }
@@ -2080,7 +2080,7 @@ static float get_system_cpu_usage(void) {
     unsigned long long idle_delta = total_idle - last_idle;
     
     if (total_delta == 0) {
-        log_warning("[ZSFX-023] CPU使用率检测异常：total_delta=0（两次采样间系统时间无变化），"
+        log_warning(" CPU使用率检测异常：total_delta=0（两次采样间系统时间无变化），"
                     "返回默认值0.3f。可能原因：系统时钟异常或非正常CPU调度。");
         return 0.3f;
     }
@@ -2104,7 +2104,7 @@ static float get_system_memory_usage(void) {
     memory_status.dwLength = sizeof(memory_status);
     
     if (!GlobalMemoryStatusEx(&memory_status)) {
-        log_warning("[ZSFX-023] 内存使用率检测失败：GlobalMemoryStatusEx()调用失败，"
+        log_warning(" 内存使用率检测失败：GlobalMemoryStatusEx调用失败，"
                     "返回默认值0.5f。可能原因：系统权限不足或Win32 API异常。");
         return 0.5f;
     }
@@ -2117,7 +2117,7 @@ static float get_system_memory_usage(void) {
     /* Linux实现：从/proc/meminfo读取 */
     FILE* meminfo_file = fopen("/proc/meminfo", "r");
     if (!meminfo_file) {
-        log_warning("[ZSFX-023] 内存使用率检测失败：无法打开/proc/meminfo文件，"
+        log_warning(" 内存使用率检测失败：无法打开/proc/meminfo文件，"
                     "返回默认值0.5f。可能原因：非Linux系统或文件权限不足。");
         return 0.5f;
     }
@@ -2140,7 +2140,7 @@ static float get_system_memory_usage(void) {
     fclose(meminfo_file);
     
     if (mem_total == 0) {
-        log_warning("[ZSFX-023] 内存使用率解析失败：/proc/meminfo中MemTotal=0，"
+        log_warning(" 内存使用率解析失败：/proc/meminfo中MemTotal=0，"
                     "返回默认值0.5f。可能原因：/proc/meminfo文件格式异常或损坏。");
         return 0.5f;
     }
@@ -2241,7 +2241,7 @@ static float get_system_gpu_usage(void) {
        3. 无GPU时返回0
     */
     {
-        GpuBackend active_backend = gpu_get_current_backend();
+        GpuBackend active_backend = gpu_get_current_backend;
         if (active_backend != GPU_BACKEND_CPU) {
             int dev_count = gpu_get_device_count(active_backend);
             if (dev_count > 0) {
@@ -2277,14 +2277,14 @@ static float get_system_disk_usage(void) {
     if (!GetDiskFreeSpaceExA("C:\\", &free_bytes_available, &total_bytes, &total_free_bytes)) {
         /* 如果C盘失败，尝试当前工作目录 */
         if (!GetDiskFreeSpaceExA(".", &free_bytes_available, &total_bytes, &total_free_bytes)) {
-            log_warning("[ZSFX-023] 磁盘使用率检测失败：GetDiskFreeSpaceExA(C:\\)和当前目录均失败，"
+            log_warning(" 磁盘使用率检测失败：GetDiskFreeSpaceExA(C:\\)和当前目录均失败，"
                         "返回默认值0.5f。可能原因：磁盘不可访问或Win32 API异常。");
             return 0.5f;
         }
     }
     
     if (total_bytes.QuadPart == 0) {
-        log_warning("[ZSFX-023] 磁盘使用率检测异常：Windows磁盘总容量为0，"
+        log_warning(" 磁盘使用率检测异常：Windows磁盘总容量为0，"
                     "返回默认值0.5f。可能原因：磁盘设备异常或被卸载。");
         return 0.5f;
     }
@@ -2299,7 +2299,7 @@ static float get_system_disk_usage(void) {
     struct statvfs vfs;
     
     if (statvfs("/", &vfs) != 0) {
-        log_warning("[ZSFX-023] 磁盘使用率检测失败：statvfs(/)调用失败，"
+        log_warning(" 磁盘使用率检测失败：statvfs(/)调用失败，"
                     "返回默认值0.5f。可能原因：非Linux系统或根目录不可访问。");
         return 0.5f;
     }
@@ -2308,7 +2308,7 @@ static float get_system_disk_usage(void) {
     unsigned long long free_bytes = vfs.f_bfree * vfs.f_frsize;
     
     if (total_bytes == 0) {
-        log_warning("[ZSFX-023] 磁盘使用率检测异常：Linux根目录磁盘总容量为0，"
+        log_warning(" 磁盘使用率检测异常：Linux根目录磁盘总容量为0，"
                     "返回默认值0.5f。可能原因：文件系统异常或statvfs返回无效数据。");
         return 0.5f;
     }
@@ -2754,7 +2754,7 @@ SelfAwarenessSystem* self_awareness_system_create(const SelfAwarenessConfig* con
     
     /* 深度实现：获取全局LNN实例以进行实时状态感知 */
     {
-        void* raw_lnn = selflnn_get_lnn();
+        void* raw_lnn = selflnn_get_lnn;
         system->lnn_instance = (LNN*)raw_lnn;
     }
     
@@ -3436,7 +3436,7 @@ ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, c
         }
         
         if (similar_errors > 3) {
-            /* ZSFWS-NEW04: 用SAFE_APPEND替代裸strcat防止缓冲区溢出 */
+/* 用SAFE_APPEND替代裸strcat防止缓冲区溢出 */
             SAFE_APPEND(causes_buffer, causes_remaining, "6. 此错误频繁发生，可能存在系统性缺陷\n");
             root_causes++;
             
@@ -3760,7 +3760,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
     
     switch (correction->type) {
         case SELF_CORRECTION_PARAMETER: {
-            /* ZSFEEE-FIX-CORRECTION-REAL: 参数修正分为三个层级：
+/* 参数修正分为三个层级：
              *   高置信度(>0.7): 执行真实的LNN反向传播，产生实际权重变更
              *   中置信度(0.3-0.7): 对权重施加小幅高斯噪声扰动
              *   低置信度(<0.3): 仅调整超参数配置（保留原有行为作为安全底线）
@@ -3768,12 +3768,12 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
              */
             LNN* lnn_instance = system->lnn_instance;
             if (!lnn_instance) {
-                lnn_instance = (LNN*)selflnn_get_shared_lnn();
+                lnn_instance = (LNN*)selflnn_get_shared_lnn;
             }
             
             float weight_l2_delta = 0.0f;
             
-            /* ZSFEEE-FIX-CORRECTION-REAL 第0步：始终先调整超参数配置（基础修正层） */
+/* 第0步：始终先调整超参数配置（基础修正层） */
             if (lnn_instance) {
                 LNNConfig config;
                 if (lnn_get_config(lnn_instance, &config) == 0) {
@@ -3788,7 +3788,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                 }
             }
             
-            /* ZSFEEE-FIX-CORRECTION-REAL 第1步：高置信度修正 --> 真实反向传播+权重更新 */
+/* 第1步：高置信度修正 --> 真实反向传播+权重更新 */
             if (correction->correction_strength > 0.7f && lnn_instance) {
                 uint64_t forward_count = 0;
                 if (lnn_get_stats((const LNN*)lnn_instance, NULL, &forward_count, NULL, NULL) == 0
@@ -3810,7 +3810,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                                         float perturb_scale = correction->correction_strength * 0.005f;
                                         for (size_t i = 0; i < output_size; i++) {
                                             correction_target[i] *= (1.0f + perturb_scale * 
-                                                (secure_random_float() - 0.5f) * 2.0f);
+                            (secure_random_float() - 0.5f) * 2.0f);
                                         }
                                         
                                         float loss = 0.0f;
@@ -3822,7 +3822,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                                             }
                                             weight_l2_delta = sqrtf(l2_sum);
                                             
-                                            log_info("[自我修正-权重ZSFEEE] 高置信度反向传播完成, "
+                                            log_info("[自我修正-权重] 高置信度反向传播完成, "
                                                     "loss=%.6f, L2变更量=%.8f, 参数数=%zu",
                                                     loss, weight_l2_delta, param_count);
                                             correction_applied = 1;
@@ -3836,7 +3836,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                     }
                 }
             }
-            /* ZSFEEE-FIX-CORRECTION-REAL 第2步：中置信度修正 --> 高斯噪声权重扰动 */
+/* 第2步：中置信度修正 --> 高斯噪声权重扰动 */
             else if (correction->correction_strength >= 0.3f && lnn_instance) {
                 size_t param_count = lnn_get_parameter_count(lnn_instance);
                 float* params = lnn_get_parameters(lnn_instance);
@@ -3847,7 +3847,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                     
                     for (size_t i = 0; i < param_count; i++) {
                         float u1 = secure_random_float();
-                        float u2 = secure_random_float();
+                    float u2 = secure_random_float();
                         float gaussian_noise = sqrtf(-2.0f * logf(u1 + 1e-10f)) * 
                                                cosf(6.2831853f * u2);
                         float perturbation = gaussian_noise * noise_magnitude * fabsf(params[i]);
@@ -3858,13 +3858,13 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                     }
                     weight_l2_delta = sqrtf(l2_sum);
                     
-                    log_info("[自我修正-权重ZSFEEE] 中置信度高斯扰动完成, "
+                    log_info("[自我修正-权重] 中置信度高斯扰动完成, "
                             "L2变更量=%.8f, 噪声幅度=%.6f, 参数数=%zu",
                             weight_l2_delta, noise_magnitude, param_count);
                     correction_applied = 1;
                 }
             }
-            /* ZSFEEE-FIX-CORRECTION-REAL 第3步：低置信度 --> 仅保留超参数调整（已在第0步完成） */
+/* 第3步：低置信度 --> 仅保留超参数调整（已在第0步完成） */
             
             correction->weight_change_l2 = weight_l2_delta;
             
@@ -3876,7 +3876,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                     strncpy(correction->description, buffer, sizeof(correction->description) - 1);
                 }
             } else if (weight_l2_delta > 0.0f) {
-                /* ZSFEEE-FIX-CORRECTION-REAL: 在描述中追加权重实际变更量 */
+/* 在描述中追加权重实际变更量 */
                 char weight_info[128];
                 snprintf(weight_info, sizeof(weight_info), " [权重L2变更:%.6f]", weight_l2_delta);
                 size_t desc_len = strlen(correction->description);
@@ -4146,7 +4146,7 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
         return -1;
     }
 
-    /* ZSFGGG-A-004修复: LNN未训练时执行增强的保守修正
+/* LNN未训练时执行增强的保守修正
      * 收集真实系统状态用于诊断，基于实际指标评估修正必要性。
      * 提供基于规则的轻量级LNN参数微调（启发式偏置调整），而非完全空转。 */
     if (!_self_cognition_check_lnn_ready_internal(system)) {
@@ -4162,10 +4162,10 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
         }
         if (real_based_severity > 1.0f) real_based_severity = 1.0f;
         
-        /* ZSFGGG-A-004: 未训练状态下执行轻量级启发式修正
+/* 未训练状态下执行轻量级启发式修正
          * 基于系统指标调整LNN工作参数，提供最小但真实的修正能力 */
         int applied_adjustments = 0;
-        LNN* lnn = selflnn_get_lnn();
+        LNN* lnn = selflnn_get_lnn;
         if (lnn && real_based_severity > 0.3f) {
             /* 基于严重程度的启发式学习率/温度调整 */
             float adjusted_lr = lnn->config.learning_rate;
@@ -4228,7 +4228,7 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
         correction_result->confidence = 0.0f;
         correction_result->correction_time = time(NULL);
         correction_result->correction_id = -1;
-        correction_result->weight_change_l2 = 0.0f; /* ZSFEEE-FIX-CORRECTION-REAL: 功能禁用无权重变更 */
+        correction_result->weight_change_l2 = 0.0f; /* 功能禁用无权重变更 */
         /* 功能已禁用，明确返回-2表示修正被跳过而非执行成功 */
         return -2;
     }
@@ -4275,7 +4275,7 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
     correction_result->confidence = confidence;
     correction_result->correction_time = time(NULL);
     correction_result->correction_id = system->next_correction_id;
-    correction_result->weight_change_l2 = 0.0f; /* ZSFEEE-FIX-CORRECTION-REAL: 初始化为0，由apply_correction更新 */
+    correction_result->weight_change_l2 = 0.0f; /* 初始化为0，由apply_correction更新 */
     
     // 6. 记录修正历史
     if (system->correction_history_size >= system->correction_history_capacity) {
@@ -5227,7 +5227,6 @@ static int perform_metacognitive_reasoning_internal(SelfCognitionSystem* system,
                       "3. 设定更具挑战性目标");
             }
             
-            /* ZSFWS修复 P2-006: 基于修正效果动态计算推理置信度 */
             if (system->correction_count > 0 && system->correction_effectiveness_size > 0) {
                 float avg_effectiveness = 0.0f;
                 for (size_t i = 0; i < system->correction_effectiveness_size; i++) {
@@ -6382,7 +6381,7 @@ float self_cognition_assess_model_accuracy(SelfCognitionSystem* system) {
     return assess_model_accuracy_internal(system);
 }
 
-/* ZSFNO1-P0-002修复: self_cognition.h声明为self_cognition_assess_accuracy(SelfCognitionSystem*, float*)，
+/* self_cognition.h声明为self_cognition_assess_accuracy(SelfCognitionSystem*, float*)，
  * 但实际实现为self_cognition_assess_model_accuracy(SelfCognitionSystem*)返回float。
  * 函数签名不匹配导致链接失败。
  * 修复方案: 添加兼容性包装函数，将float返回值写入accuracy指针，返回0表示成功。 */
@@ -6396,7 +6395,7 @@ int self_cognition_assess_accuracy(SelfCognitionSystem* system, float* accuracy)
     return 0;
 }
 
-/* ZSFNO1-P0-003修复: self_model_state_free在self_cognition.h中声明但从未实现。
+/* self_model_state_free在self_cognition.h中声明但从未实现。
  * SelfModelState结构体包含动态分配的encoded_state数组，需正确释放。
  * 添加完整实现以释放SelfModelState中所有动态分配的内存。 */
 void self_model_state_free(SelfModelState* state) {
@@ -8602,23 +8601,23 @@ static void tom_ac_lock_init(void) {
         g_tom_ac_lock_init = 1;
     }
 }
-#define TOM_AC_LOCK() do { tom_ac_lock_init(); EnterCriticalSection(&g_tom_ac_lock); } while(0)
-#define TOM_AC_UNLOCK() LeaveCriticalSection(&g_tom_ac_lock)
+#define TOM_AC_LOCK do { tom_ac_lock_init; EnterCriticalSection(&g_tom_ac_lock); } while(0)
+#define TOM_AC_UNLOCK LeaveCriticalSection(&g_tom_ac_lock)
 #else
 #include <pthread.h>
 static pthread_mutex_t g_tom_ac_lock = PTHREAD_MUTEX_INITIALIZER;
-#define TOM_AC_LOCK() pthread_mutex_lock(&g_tom_ac_lock)
-#define TOM_AC_UNLOCK() pthread_mutex_unlock(&g_tom_ac_lock)
+#define TOM_AC_LOCK pthread_mutex_lock(&g_tom_ac_lock)
+#define TOM_AC_UNLOCK pthread_mutex_unlock(&g_tom_ac_lock)
 #endif
 
 static ToMAgent tom_agents[TOM_MAX_AGENTS];
 static int tom_agent_count = 0;
 
 int tom_add_agent(const char* name, const float* initial_belief, int dim) {
-    TOM_AC_LOCK();
-    if (tom_agent_count >= TOM_MAX_AGENTS) { TOM_AC_UNLOCK(); return -1; }
+    TOM_AC_LOCK;
+    if (tom_agent_count >= TOM_MAX_AGENTS) { TOM_AC_UNLOCK; return -1; }
     ToMAgent* a = &tom_agents[tom_agent_count++];
-    TOM_AC_UNLOCK();
+    TOM_AC_UNLOCK;
     strncpy(a->agent_name, name, 31);
     int d = dim < 64 ? dim : 64;
     if (initial_belief) memcpy(a->belief_state, initial_belief, (size_t)d * sizeof(float));
@@ -8630,10 +8629,10 @@ int tom_add_agent(const char* name, const float* initial_belief, int dim) {
 int tom_recursive_reason(int perspective_agent, int target_agent, int depth,
                           void* cfc_network, float* output_belief, float* confidence) {
     if (!cfc_network || !output_belief || !confidence) return -1;
-    TOM_AC_LOCK();
-    if (perspective_agent < 0 || perspective_agent >= tom_agent_count) { TOM_AC_UNLOCK(); return -1; }
-    if (target_agent < 0 || target_agent >= tom_agent_count) { TOM_AC_UNLOCK(); return -1; }
-    TOM_AC_UNLOCK();
+    TOM_AC_LOCK;
+    if (perspective_agent < 0 || perspective_agent >= tom_agent_count) { TOM_AC_UNLOCK; return -1; }
+    if (target_agent < 0 || target_agent >= tom_agent_count) { TOM_AC_UNLOCK; return -1; }
+    TOM_AC_UNLOCK;
     if (depth < 1) depth = 1;
     if (depth > TOM_MAX_DEPTH) depth = TOM_MAX_DEPTH;
 
@@ -8921,30 +8920,30 @@ static void strategy_lock_init(void) {
         g_strategy_lock_init = 1;
     }
 }
-#define STRATEGY_LOCK() do { strategy_lock_init(); EnterCriticalSection(&g_strategy_lock); } while(0)
-#define STRATEGY_UNLOCK() LeaveCriticalSection(&g_strategy_lock)
+#define STRATEGY_LOCK do { strategy_lock_init; EnterCriticalSection(&g_strategy_lock); } while(0)
+#define STRATEGY_UNLOCK LeaveCriticalSection(&g_strategy_lock)
 #else
 #include <pthread.h>
 static pthread_mutex_t g_strategy_lock = PTHREAD_MUTEX_INITIALIZER;
-#define STRATEGY_LOCK() pthread_mutex_lock(&g_strategy_lock)
-#define STRATEGY_UNLOCK() pthread_mutex_unlock(&g_strategy_lock)
+#define STRATEGY_LOCK pthread_mutex_lock(&g_strategy_lock)
+#define STRATEGY_UNLOCK pthread_mutex_unlock(&g_strategy_lock)
 #endif
 
 static CorrectionStrategy strategies[STRATEGY_MAX_COUNT];
 static int strategy_count = 0;
 
 int correction_register_strategy(int id) {
-    STRATEGY_LOCK();
-    if (strategy_count >= STRATEGY_MAX_COUNT) { STRATEGY_UNLOCK(); return -1; }
+    STRATEGY_LOCK;
+    if (strategy_count >= STRATEGY_MAX_COUNT) { STRATEGY_UNLOCK; return -1; }
     strategies[strategy_count].strategy_id = id;
     strategies[strategy_count].ema_success_rate = 0.5f;
     strategy_count++;
-    STRATEGY_UNLOCK();
+    STRATEGY_UNLOCK;
     return 0;
 }
 
 int correction_record_outcome(int strategy_id, float improvement, int was_successful) {
-    STRATEGY_LOCK();
+    STRATEGY_LOCK;
     for (int i = 0; i < strategy_count; i++) {
         if (strategies[i].strategy_id == strategy_id) {
             strategies[i].correction_attempts++;
@@ -8953,16 +8952,16 @@ int correction_record_outcome(int strategy_id, float improvement, int was_succes
             float sr = (float)strategies[i].correction_successes /
                         (float)strategies[i].correction_attempts;
             strategies[i].ema_success_rate = strategies[i].ema_success_rate * 0.8f + sr * 0.2f;
-            STRATEGY_UNLOCK();
+            STRATEGY_UNLOCK;
             return 0;
         }
     }
-    STRATEGY_UNLOCK();
+    STRATEGY_UNLOCK;
     return -1;
 }
 
 int correction_select_best_strategy(float* best_rate, int* best_id) {
-    STRATEGY_LOCK();
+    STRATEGY_LOCK;
     int best = -1; float max_rate = 0.0f;
     for (int i = 0; i < strategy_count; i++) {
         if (strategies[i].correction_attempts >= 3 && strategies[i].ema_success_rate > max_rate) {
@@ -8972,7 +8971,7 @@ int correction_select_best_strategy(float* best_rate, int* best_id) {
     }
     if (best < 0 && strategy_count > 0) { best = strategies[0].strategy_id; max_rate = strategies[0].ema_success_rate; }
     *best_rate = max_rate; *best_id = best;
-    STRATEGY_UNLOCK();
+    STRATEGY_UNLOCK;
     return (best >= 0) ? 0 : -1;
 }
 
@@ -9137,7 +9136,7 @@ int cognition_get_system_health(SystemHealth* health) {
             /* 获取已使用内存：通过host_statistics */
             mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
             vm_statistics64_data_t vm_stat;
-            if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS) {
+            if (host_statistics64(mach_host_self, HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS) {
                 int64_t page_size = (int64_t)sysconf(_SC_PAGESIZE);
                 if (page_size <= 0) page_size = 4096;
                 int64_t used = ((int64_t)(vm_stat.active_count + vm_stat.inactive_count + vm_stat.wire_count)) * page_size;
@@ -9155,7 +9154,7 @@ int cognition_get_system_health(SystemHealth* health) {
         processor_info_array_t cpu_info = NULL;
         mach_msg_type_number_t info_count = 0;
         natural_t num_cpus = 0;
-        if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO,
+        if (host_processor_info(mach_host_self, PROCESSOR_CPU_LOAD_INFO,
                                 &num_cpus, &cpu_info, &info_count) == KERN_SUCCESS) {
             float total_user = 0, total_system = 0, total_idle = 0;
             for (natural_t i = 0; i < num_cpus; i++) {
@@ -9211,7 +9210,7 @@ int self_cognition_system_is_enabled(const SelfCognitionSystem* system) {
 }
 
 /* ============================================================================
- * ZSFWS-027: LNN训练就绪检查API
+ *: LNN训练就绪检查API
  *
  * 供外部模块（如main.c）在调用自我认知的深度评估前检查LNN是否已就绪。
  * 未训练的LNN（随机权重）会产生无意义的自我评估输出，可能导致错误的

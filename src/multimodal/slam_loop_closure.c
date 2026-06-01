@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file slam_loop_closure.c
  * @brief SLAM闭环检测与修正模块
  *
@@ -835,7 +835,7 @@ float slam_pose_graph_optimize(PoseGraphNode* nodes, int num_nodes,
             current_residual += cw * (ep[0]*ep[0] + ep[1]*ep[1] + ep[2]*ep[2]) +
                                cw_rot * (er[0]*er[0] + er[1]*er[1] + er[2]*er[2]);
 
-            /* ZSFABC修复: Levenberg-Marquardt增量（带lambda阻尼的Hessian近似） */
+/* Levenberg-Marquardt增量（带lambda阻尼的Hessian近似） */
             float step = 1.0f / (1.0f + lambda);
 
             if (!ni->fixed) {

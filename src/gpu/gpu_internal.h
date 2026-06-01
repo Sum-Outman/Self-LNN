@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_internal.h
  * @brief GPU内部类型定义 - 仅供GPU后端实现使用
  * 
@@ -91,7 +91,7 @@ struct GpuMemory {
     /** 后端私有数据指针（由具体后端实现使用） */
     void* backend_data;
 
-    /* ZSFLYF-P0-001: NPU算子执行上下文
+/* NPU算子执行上下文
      * op_handle: ACL算子句柄 / 其他NPU算子对象
      * op_attrs : 算子属性列表
      * op_inputs: 算子输入描述符列表
@@ -127,7 +127,7 @@ struct GpuKernel {
     /** 后端私有数据指针（由具体后端实现使用） */
     void* backend_data;
 
-    /* ZSFLYF-P0-001: NPU算子执行上下文（核函数使用）
+/* NPU算子执行上下文（核函数使用）
      * op_handle: ACL算子句柄 / 其他NPU算子对象
      * op_attrs : 算子属性列表
      * op_inputs: 算子输入描述符列表

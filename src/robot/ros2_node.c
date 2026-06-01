@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file ros2_node.c
  * @brief ROS2节点系统 —— rosbridge WebSocket桥接 + TCP内部回退模式
  *
@@ -1091,7 +1091,7 @@ int ros2_create_publisher(ROS2Manager* rm, int node_id, const char* topic,
         rosbridge_advertise_topic(rm, topic, type);
     }
 
-    /* ZSFLYF-P1-006修复: TCP回退通道必须正确bind和listen才能使用。
+/* TCP回退通道必须正确bind和listen才能使用。
      * 如果rosbridge可用，优先使用rosbridge（WebSocket）；如果不可用，
      * TCP回退端点应通过端口bind+listen建立独立TCP服务器。 */
     if (rm->endpoint_count < ROS2_MAX_PUBLISHERS + ROS2_MAX_SUBSCRIBERS) {

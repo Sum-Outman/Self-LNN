@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file planning.h
  * @brief 规划系统接口 — 【基础功能实现】
  *
@@ -724,7 +724,7 @@ int planning_repair_validate(const PlanningSystem* system,
                              const float* current_state, size_t state_size,
                              float* feasibility_out);
 
-/* ZSFUSA-C11: 搜索算法接口 */
+/* 搜索算法接口 */
 int planning_mcts_search(PlanningSystem* planner, const float* initial_state,
                          size_t state_dim, float* best_result, int max_iterations, int max_depth);
 int planning_astar_search(PlanningSystem* planner, int start_id, int goal_id,

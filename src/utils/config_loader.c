@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file config_loader.c
  * @brief K-030: 系统配置文件加载与保存 (纯C, 零依赖)
  */
@@ -85,13 +85,13 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
         config->gpu_backend = GPU_BACKEND_CPU;
     }
 
-    /* ZSFAI-C07修复: 加载与保存的字段集保持一致 */
+/* 加载与保存的字段集保持一致 */
     str_val = json_get_string(root, "model_path");
     if (str_val && config->model_path) {
         snprintf((char*)config->model_path, 1024, "%s", str_val);
     }
 
-    /* ZSFZX-FIX-CONFIG: 加载端口字段（原只保存不加载） */
+/* 加载端口字段（原只保存不加载） */
     v = json_get(root, "http_port");
     if (v && v->type == JSON_NUMBER) config->http_port = (int)v->data.number_val;
     if (config->http_port <= 0 || config->http_port > 65535) config->http_port = SELFLNN_DEFAULT_PORT;
@@ -108,7 +108,7 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     safe_free((void**)&json_str);
     log_info("[配置] 加载成功: %s", path);
 
-    /* ZSFZX-FIX-R4-2: 配置Schema验证 */
+/* 配置Schema验证 */
     {
         char err[256];
         if (selflnn_config_validate(config, err, sizeof(err)) != 0) {
@@ -120,7 +120,7 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
 }
 
 /* ================================================================
- * ZSFZX-FIX-R4-2: 配置Schema验证
+ *: 配置Schema验证
  * ================================================================ */
 int selflnn_config_validate(const SystemConfig* config, char* error_msg, size_t msg_size) {
     if (!config) {
@@ -178,7 +178,7 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
     if (config->power_mode == POWER_MODE_PERFORMANCE) pm = "performance";
     else if (config->power_mode == POWER_MODE_POWER_SAVING) pm = "power_saving";
 
-    /* ZSFZX-FIX-CONFIG: GPU后端枚举补全 — 原只枚举cuda/opencl */
+/* GPU后端枚举补全 — 原只枚举cuda/opencl */
     const char* gb = "cpu";
     switch (config->gpu_backend) {
         case GPU_BACKEND_CUDA:     gb = "cuda"; break;
@@ -200,7 +200,7 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
     fprintf(fp, "  \"max_concurrent_tasks\": %d,\n", config->max_concurrent_tasks);
     fprintf(fp, "  \"power_mode\": \"%s\",\n", pm);
     fprintf(fp, "  \"gpu_backend\": \"%s\",\n", gb);
-    /* ZSFZX-FIX-CONFIG: 端口号优先使用配置值，配置未设置时回退port_config.h */
+/* 端口号优先使用配置值，配置未设置时回退port_config.h */
     fprintf(fp, "  \"http_port\": %d,\n", config->http_port > 0 ? config->http_port : SELFLNN_DEFAULT_PORT);
     fprintf(fp, "  \"websocket_port\": %d,\n", config->websocket_port > 0 ? config->websocket_port : SELFLNN_WEBSOCKET_PORT);
     fprintf(fp, "  \"distributed_port\": %d,\n", config->distributed_port > 0 ? config->distributed_port : 8765);

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file ros_bridge.c
  * @brief SELF-LNN 与 ROS/ROS2 的桥接实现
  *
@@ -174,7 +174,7 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
     
     /* 设置默认值 */
     if (bridge->config.bridge_port == 0) bridge->config.bridge_port = SELFLNN_WEBSOCKET_PORT;
-    /* ZSFLYF-P2-013修复: 使用安全字符串复制而非直接赋值字符串常量，
+/* 使用安全字符串复制而非直接赋值字符串常量，
      * 避免后续safe_free释放字符串常量导致崩溃。 */
     if (!bridge->config.bridge_host || !bridge->config.bridge_host[0]) {
         bridge->config.bridge_host = safe_strdup("localhost");
@@ -295,7 +295,7 @@ int ros_bridge_publish(RosBridge* bridge, const char* topic,
     
     char msg[ROS_BRIDGE_MAX_MESSAGE];
     bridge->request_id++;
-    /* ZSFWXJ-FIX006修复: 移除二次包装 — rosbridge协议期望msg直接包含消息字段，
+/* 移除二次包装 — rosbridge协议期望msg直接包含消息字段，
      * 不再是 "msg":{"data":%s}。调用方负责传入合法的msg JSON对象。 */
     snprintf(msg, sizeof(msg),
         "{\"op\":\"publish\",\"id\":\"pub_%d\","

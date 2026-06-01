@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file multisystem_control.c
  * @brief 多系统控制能力实现
  * 
@@ -621,7 +621,6 @@ typedef struct {
  */
 static void discovery_add_peer_device(MultiSystemControlEngine* engine, const char* device_id,
                                        DeviceType type, const char* name, const char* host, int port) {
-    /* ZSF-037修复: 使用host/port记录对端设备信息，而非丢弃 */
     if (!engine || !device_id || !name) return;
     
     /* L-008修复: 如果host和port非空则存储到device_specific_data中
@@ -3499,7 +3498,7 @@ int rpc_transport_start(TcpRpcTransport* transport, const char* node_id) {
     }
 #else
     pthread_mutex_init(&transport->lock, NULL);
-    /* ZSFLYF-NEW-8修复: 检查pthread_create返回值。
+/* 检查pthread_create返回值。
      * 若线程创建失败，recv_thread未初始化，后续pthread_join会操作垃圾数据导致崩溃。 */
     int create_ret = pthread_create(&transport->recv_thread, NULL, rpc_server_thread, transport);
     if (create_ret != 0) {

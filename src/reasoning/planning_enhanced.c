@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file planning_enhanced.c
  * @brief 增强规划引擎完整实现 —— 高级规划层
  *
@@ -646,7 +646,6 @@ int plan_enhanced_generate_temporal(PlanEnhancedEngine* engine,
     result->total_cost = total_cost;
     result->total_duration = current_time;
     result->makespan = current_time;
-    /* ZSFWS修复 P2-005: 基于规划步数动态计算置信度，替代启发式固定公式 */
     {
         float completion_ratio = (plan_len > 0) ? 1.0f / (1.0f + (float)plan_len * 0.1f) : 0.0f;
         result->plan_confidence = 0.2f + 0.6f * completion_ratio;
@@ -1128,7 +1127,6 @@ int plan_enhanced_generate_landmark_based(PlanEnhancedEngine* engine,
         result->makespan = cur_time;
     }
     result->agent_count = 1;
-    /* ZSFWS修复 P2-005: 基于规划步数动态计算置信度，替代启发式固定公式 */
     {
         float completion_ratio = (path_len > 0) ? 1.0f / (1.0f + (float)path_len * 0.1f) : 0.0f;
         result->plan_confidence = 0.2f + 0.6f * completion_ratio;
@@ -1559,7 +1557,6 @@ int plan_enhanced_generate_symbolic(PlanSymbolicPlanner* planner,
         result->makespan = cur_time;
     }
     result->agent_count = 1;
-    /* ZSFWS修复 P2-005: 基于规划步数动态计算置信度，替代启发式固定公式 */
     {
         float completion_ratio = (path_len > 0) ? 1.0f / (1.0f + (float)path_len * 0.1f) : 0.0f;
         result->plan_confidence = 0.2f + 0.6f * completion_ratio;
@@ -1765,7 +1762,6 @@ int plan_enhanced_generate_htn(PlanEnhancedEngine* engine,
     result->total_cost = total_cost;
     result->total_duration = current_time;
     result->makespan = current_time;
-    /* ZSFWS修复 P2-005: 基于规划步数动态计算置信度，替代启发式固定公式 */
     {
         float completion_ratio = (plan_len > 0) ? 1.0f / (1.0f + (float)plan_len * 0.1f) : 0.0f;
         result->plan_confidence = 0.2f + 0.6f * completion_ratio;

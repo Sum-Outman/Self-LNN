@@ -1,4 +1,4 @@
-(function() {
+﻿(function() {
     'use strict';
     var simPolling = null;
     var _simStarting = false;
@@ -268,7 +268,7 @@
         gl.drawArrays(gl.TRIANGLES, 0, count);
     }
 
-    /* ZSFWS-001修复: 完整3D渲染帧 */
+/* 完整3D渲染帧 */
     function renderSim3DFrame() {
         if (!sim3dGl || !sim3dInitialized || !sim3dProgram) return;
         var gl = sim3dGl;
@@ -399,7 +399,7 @@
             /* FIX-F2-CRIT-1: SelfLnnApi包装响应为{success,data},需取.data层 */
             var data = (resp && resp.data) ? resp.data : resp;
             if (data) {
-                /* ZSFABC-Fix: 仿真停止时自动清除轮询，防止资源泄漏 */
+/* 仿真停止时自动清除轮询，防止资源泄漏 */
                 if (data.running === false) {
                     if (simPolling) { clearInterval(simPolling); simPolling = null; }
                     if (window.g_dataEngine && typeof window.g_dataEngine.unregisterModule === 'function') {
@@ -487,7 +487,7 @@
     /* 页面卸载时清理定时器和WebGL资源 */
     window.addEventListener('beforeunload', function() {
         if (simPolling) { clearInterval(simPolling); simPolling = null; }
-        /* ZSFXXXQ-P2-006: 完整清理WebGL资源 */
+/* 完整清理WebGL资源 */
         stopRenderLoop();
         var gl = sim3dGl;
         if (gl) {

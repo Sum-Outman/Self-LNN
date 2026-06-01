@@ -1,4 +1,4 @@
-// SELF-LNN AGI 管理系统 - 主JavaScript文件
+﻿// SELF-LNN AGI 管理系统 - 主JavaScript文件
 var g_dataEngine = null;
 var g_usingDataEngine = false;
 
@@ -65,7 +65,7 @@ window.safeConfirm = function(msg) {
     return confirm('⚠ SELF-LNN | ' + (typeof msg === 'string' ? msg : String(msg || '')));
 };
 
-/* ZSFWS-FEWEB: HTML转义工具 — 防止innerHTML XSS注入 */
+/* HTML转义工具 — 防止innerHTML XSS注入 */
 window.escapeHtml = function(str) {
     if (!str) return '';
     var div = document.createElement('div');
@@ -164,10 +164,10 @@ var g_dataEngineFirstConnect = true;
     }, 12000);
 })();
 
-/* ZSFUSA-F06: 独立刷新并行化，15个函数不再串行等待12秒 */
+/* 独立刷新并行化，15个函数不再串行等待12秒 */
 async function refreshAllSections() {
-    /* ZSFABC-016修复: 添加多模态状态刷新到定时更新周期中 */
-    /* ZSFABC-017修复: 所有刷新函数统一从DataEngine读取真实数据，互不覆盖 */
+/* 添加多模态状态刷新到定时更新周期中 */
+/* 所有刷新函数统一从DataEngine读取真实数据，互不覆盖 */
     var sections = [
         { name: 'dashboard', fn: refreshDashboard },
         { name: 'knowledge', fn: refreshKnowledgeStats },
@@ -207,7 +207,7 @@ async function refreshAllSections() {
     });
     await Promise.all(promises);
     console.log('[SELF-LNN] 并行刷新完成 ' + completed + '/' + sections.length + ' 个模块');
-    /* ZSFABC-002修复: 删除硬编码假数据，改为读取真实系统状态 */
+/* 删除硬编码假数据，改为读取真实系统状态 */
     var systemData = g_dataEngine ? g_dataEngine.getData() : null;
     if (systemData && systemData.system && systemData.system._connected) {
         setEl('#dialogue-total-rounds', systemData.dialogue ? (systemData.dialogue.total_rounds || '0') : '--');
@@ -507,7 +507,7 @@ async function refreshRosGazeboStatus() {
 // 训练控制函数
 // =============================================================================
 
-/* ZSFEEE-FIX-031: 从localStorage读取上次保存的训练模式，默认模仿学习(1) */
+/* 从localStorage读取上次保存的训练模式，默认模仿学习(1) */
 var selectedTrainingMode = (function() {
     var saved = localStorage.getItem('selflnn_training_mode');
     return saved ? parseInt(saved, 10) || 1 : 1;
@@ -518,7 +518,7 @@ var selectedTrainingMode = (function() {
  */
 function selectTrainingMode(mode) {
     selectedTrainingMode = mode;
-    /* ZSFEEE-FIX-031: 用户更改时保存到localStorage */
+/* 用户更改时保存到localStorage */
     localStorage.setItem('selflnn_training_mode', String(mode));
     var btns = document.querySelectorAll('.training-mode-btn');
     for (var i = 0; i < btns.length; i++) {
@@ -1057,7 +1057,7 @@ function updateAllModelStatusBadges(systemStatus) {
     
     // 单一CfC LNN核心状态显示：data-model属性 -> 状态文本/CSS类
     const lnnCoreStatus = {
-        available: false, /* ZSFWS修复 P3-002: 初始未知状态，等待API确认后更新 */
+        available: false,
         label: modules.lnn && modules.lnn.status === 'running' ? '运行中' : '未连接',
         cssClass: modules.lnn && modules.lnn.status === 'running' ? 'active' : 'pending',
         h_dim: modules.lnn && modules.lnn.h_dim ? modules.lnn.h_dim : '--',
@@ -1742,7 +1742,7 @@ async function pollRealTimeUpdates() {
     }
 }
 
-/* ZSFWS-M002: ToM智能体卡片动态渲染器
+/* ToM智能体卡片动态渲染器
  * 从后端API(/api/cognition/tom)获取心智理论数据并动态生成agent卡片。
  * 不再使用HTML硬编码的"智能体#1/#2/#3"模板，所有agent信息由后端提供。 */
 function renderTomAgents(tomData) {
@@ -1788,7 +1788,7 @@ function renderTomAgents(tomData) {
     if (summaryEl) summaryEl.textContent = tomData.summary || '等待数据...';
 }
 
-/* ZSFWS-M003: 定期轮询心智理论状态并渲染 */
+/* 定期轮询心智理论状态并渲染 */
 function updateTomDisplay() {
     if (typeof SelfLnnApi === 'undefined' || !SelfLnnApi.getCognitionStatus) {
         var container = document.getElementById('tom-agents');
@@ -1837,7 +1837,7 @@ function updateRealTimeMetrics(systemStatus) {
     
     // === 系统健康状态 ===
     setEl('.health-status .status-text', sys.status === 'running' ? '运行正常' : '状态异常');
-    /* ZSFABC-FE-Fix: 禁止虚假CPU数据，使用后端真实CPU值 */
+/* 禁止虚假CPU数据，使用后端真实CPU值 */
     var realCpu = (sys.cpu_usage !== undefined && sys.cpu_usage >= 0) ? sys.cpu_usage : ((reqs.cpu !== undefined && reqs.cpu >= 0) ? reqs.cpu : -1);
     setEl('.metric:nth-child(1) .metric-value', realCpu >= 0 ? Math.round(realCpu) + '%' : '--');
     setEl('.metric:nth-child(1) .metric-fill', realCpu >= 0 ? Math.round(realCpu) + '%' : '0%', 'width');
@@ -1937,7 +1937,7 @@ function updateRealTimeMetrics(systemStatus) {
     var lnnSt2 = mods.lnn_state || {};
     setEl('#state-dimension', lnnMod.h_dim ? lnnMod.h_dim + '维' : '--');
     setEl('#lnn-accuracy', sys.training && sys.training.accuracy ? (sys.training.accuracy * 100).toFixed(1) + '%' : '--');
-    /* ZSFABC-FE-Fix: 禁止虚假推理延迟（请求速率反推），必须使用后端真实值 */
+/* 禁止虚假推理延迟（请求速率反推），必须使用后端真实值 */
     var realLatency = (lnnSt2.inference_latency_ms !== undefined && lnnSt2.inference_latency_ms >= 0) ? lnnSt2.inference_latency_ms
                     : (sys.inference_latency_ms !== undefined && sys.inference_latency_ms >= 0) ? sys.inference_latency_ms : -1;
     setEl('#inference-latency', realLatency >= 0 ? realLatency.toFixed(1) + 'ms' : '--');
@@ -2051,7 +2051,7 @@ function updateRealTimeMetrics(systemStatus) {
     var total_req = reqs.total || 0;
     var errors_req = reqs.errors || 0;
     var success_rate = total_req > 0 ? ((total_req - errors_req) / total_req * 100).toFixed(1) : '--';
-    /* ZSFABC-FE-Fix: 禁止虚假响应时间（请求速率反推），必须使用后端真实值 */
+/* 禁止虚假响应时间（请求速率反推），必须使用后端真实值 */
     var avg_resp_time = (reqs.avg_response_time_ms !== undefined && reqs.avg_response_time_ms >= 0) ? reqs.avg_response_time_ms.toFixed(1) + 'ms'
                       : (sys.avg_response_time_ms !== undefined && sys.avg_response_time_ms >= 0) ? sys.avg_response_time_ms.toFixed(1) + 'ms' : '--';
     setEl('.reasoning-stats .stat:nth-child(1) .stat-value', reqs.rate_per_minute ? (reqs.rate_per_minute / 60).toFixed(1) : '0.0');
@@ -2505,7 +2505,7 @@ async function emergencyStop() {
 
 /**
  * 网络连接测试（P0-004修复：实现缺失的testNetwork函数）
- * ZSFABC: 如果HTML内联版本已定义，跳过main.js版本
+ *: 如果HTML内联版本已定义，跳过main.js版本
  */
 if (typeof testNetwork === 'undefined') {
 async function testNetwork() {
@@ -2545,7 +2545,7 @@ async function testNetwork() {
     }
     if (btnEl) { btnEl.disabled = false; btnEl.textContent = '测试连接'; }
 }
-} /* ZSFABC: testNetwork条件定义结束 */
+} /* testNetwork条件定义结束 */
 
 /**
  * 刷新仪表盘
@@ -3196,7 +3196,7 @@ function cancelTask(taskId) {
 }
 
 /**
- * 继续/恢复任务（ZSFABC-FE-Fix: 原函数缺失导致 onclick 崩溃）
+ * 继续/恢复任务（原函数缺失导致 onclick 崩溃）
  */
 function resumeTask(taskId) {
     showNotification('继续任务中...', 'info');
@@ -3526,7 +3526,7 @@ async function captureSnapshot() {
 }
 
 /**
- * 切换摄像头 — ZSFABC修复：实现真实摄像头切换
+ * 切换摄像头 — 实现真实摄像头切换
  */
 function switchCamera(camera) {
     const cameraNames = {
@@ -3966,7 +3966,7 @@ async function testMultimodalProcessing() {
             } catch(e) { console.warn('[采集] 摄像头不可用:', e.message); }
         }
         
-        /* ZSFZS-F026修复: quickCapture返回{success, capturer, stream}对象，非Blob。
+/* quickCapture返回{success, capturer, stream}对象，非Blob。
          * 音频数据通过capturer获取，而非直接检查返回值的size属性。 */
         if (typeof window.VoiceCaptureUtil !== 'undefined' && typeof window.VoiceCaptureUtil.quickCapture === 'function') {
             try {
@@ -4254,13 +4254,13 @@ async function saveLNNParameters() {
  * 开始轮询训练状态
  */
 function startTrainingStatusPolling() {
-    /* ZSFAB-H07修复: 统一到DataEngine调度，避免独立轮询 */
+/* 统一到DataEngine调度，避免独立轮询 */
     if (window.g_dataEngine && typeof window.g_dataEngine.registerModule === 'function') {
         window.g_dataEngine.registerModule('training_status', 5000, async function() {
             try {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.getTrainingStatus === 'function') {
                     var status = await window.SelfLnnApi.getTrainingStatus();
-                    /* ZSFAB-U4修复: 闭包内正确缩进，修复语法结构 */
+/* 闭包内正确缩进，修复语法结构 */
                     if (status && status.running) {
                         var epochEl = document.getElementById('training-current-epoch');
                         var lossEl = document.getElementById('training-current-loss');
@@ -4697,7 +4697,7 @@ function knowledgeRefreshStatus() {
     showNotification('知识库状态已刷新', 'info');
 }
 
-/* ZSFAB-H04修复: 从API动态渲染知识领域 */
+/* 从API动态渲染知识领域 */
 function _renderKnowledgeDomains(domains) {
     var grid = document.getElementById('knowledge-domains-grid');
     if (!grid) return;
@@ -5059,7 +5059,7 @@ function connectVisualizationWebSocket() {
         renderLnnStateTrajectory();
     });
 
-    /* ZSFWS-INT-WS: 安全告警推送消费 — 此前后端每20周期推送但前端无消费 */
+/* 安全告警推送消费 — 此前后端每20周期推送但前端无消费 */
     window.SelfLnnWebSocket.on('safety_alert', function(data) {
         var scoreEl = document.getElementById('safety-score');
         var eventsEl = document.getElementById('safety-events-count');
@@ -5074,7 +5074,7 @@ function connectVisualizationWebSocket() {
         }
     });
 
-    /* ZSFWS-INT-WS: 元认知状态推送消费 — 此前后端每25周期推送但前端无消费 */
+/* 元认知状态推送消费 — 此前后端每25周期推送但前端无消费 */
     window.SelfLnnWebSocket.on('metacognition_status', function(data) {
         var reflectionEl = document.getElementById('meta-reflection-score');
         var loadEl = document.getElementById('meta-cognitive-load');
@@ -5200,7 +5200,6 @@ async function startHyperparameterSearch() {
 /**
  * 轮询超参数搜索状态
  */
-/* ZSF-FE-M025: 超参数轮询回调注册到DataEngine统一管理 */
 var _hpPollCount = 0;
 var _hpMaxPolls = 60;
 
@@ -5257,7 +5256,7 @@ async function _hpPollTick() {
 
 /**
  * 训练计划管理器
- * ZSFDDD-P1-006: 添加本地持久化（localStorage）防止页面刷新后数据丢失
+ *: 添加本地持久化（localStorage）防止页面刷新后数据丢失
  */
 let trainingSchedules = [];
 
@@ -5740,7 +5739,7 @@ async function sendDialogueMessage() {
     if (!message) return;
 
     const messagesContainer = document.getElementById('dialogue-messages');
-    /* ZSFZS-F047修复: messagesContainer为null时安全退出 */
+/* messagesContainer为null时安全退出 */
     if (!messagesContainer) return;
     const welcomeEl = messagesContainer.querySelector('.dialogue-welcome');
     if (welcomeEl) welcomeEl.style.display = 'none';
@@ -5773,11 +5772,11 @@ async function sendDialogueMessage() {
     if (sendMicCheckbox && sendMicCheckbox.checked && g_deviceManager) {
         var mic = g_deviceManager.microphones.find(function(m) { return m.active; });
         if (mic && mic.active) {
-            /* ZSFZS-F046修复: g_voiceCaptureUtil→window.VoiceCaptureUtil，消除未定义变量 */
+/* g_voiceCaptureUtil→window.VoiceCaptureUtil，消除未定义变量 */
             /* 使用VoiceCaptureUtil实时采集音频并设置lastAudioBlob */
             try {
                 var captureResult = await window.VoiceCaptureUtil.quickCapture();
-                /* ZSFZS-F043修复: quickCapture返回{success,capturer,stream}对象，提取capturer */
+/* quickCapture返回{success,capturer,stream}对象，提取capturer */
                 if (captureResult && captureResult.success && captureResult.capturer) {
                     mic.lastAudioBlob = captureResult.capturer;
                     multimodalAudio = 'mic_audio';
@@ -5911,7 +5910,7 @@ async function sendDialogueMessage() {
     input.focus();
 }
 
-/* ZSFABC-002修复: 通过统一API服务发送多模态对话请求，获得完整认证/重试/熔断保护 */
+/* 通过统一API服务发送多模态对话请求，获得完整认证/重试/熔断保护 */
 async function sendMultimodalRequest(message, imageData, audioData, params) {
     try {
         /* P2-4: 使用api-service封装的sendMultimodalDialogue方法 */
@@ -5975,7 +5974,7 @@ function renderMarkdown(text) {
 
 function addDialogueMessage(role, content, tokens) {
     const container = document.getElementById('dialogue-messages');
-    /* ZSFZS-F047修复: container为null时安全退出 */
+/* container为null时安全退出 */
     if (!container) return;
     const div = document.createElement('div');
     div.className = 'dialogue-message ' + role;
@@ -6201,7 +6200,7 @@ setTimeout(initDialogueSystem, 100);
  * 切换自主知识库学习开关
  */
 async function toggleAutoLearn(enabled) {
-    /* ZSFWS-017修复: 后端不可用时明确告知用户，不再显示误导性的"已启用"通知 */
+/* 后端不可用时明确告知用户，不再显示误导性的"已启用"通知 */
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.autoLearnToggle === 'function') {
             var result = await window.SelfLnnApi.autoLearnToggle(enabled);
@@ -6351,7 +6350,7 @@ function triggerVisionInput() {
         showNotification('请先启用摄像头并获取画面', 'warning');
         return;
     }
-    /* ZSFQQ-FE-001修复: 使用封装API而非直接调用request() */
+/* 使用封装API而非直接调用request() */
     window.SelfLnnApi.processVisionInput({ image: imageData })
         .then(function(data) {
             if (input) input.value += '\n[视觉输入已处理]';
@@ -6395,7 +6394,7 @@ function triggerSensorInput() {
         return;
     }
     var input = document.getElementById('dialogue-input');
-    /* ZSFQQ-FE-001修复: 使用封装API而非直接调用request() */
+/* 使用封装API而非直接调用request() */
     window.SelfLnnApi.getSensorPipelineStatus()
         .then(function(data) {
             if (input) input.value += '\n[传感器数据已请求]';
@@ -6847,7 +6846,7 @@ function copyApiAddress() {
  * 切换多模态统一学习开关
  */
 async function toggleMultimodalLearning(enabled) {
-    /* ZSFWS-016修复: 后端不可用时不再显示误导性"离线模式"提示，明确告知用户后端未连接 */
+/* 后端不可用时不再显示误导性"离线模式"提示，明确告知用户后端未连接 */
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.multimodalLearn === 'function') {
             var result = await window.SelfLnnApi.multimodalLearn(
@@ -6917,7 +6916,7 @@ async function refreshSleepConsolidationStats() {
             document.getElementById('sleep-stat-abstract').textContent = sc.abstracted || 0;
             document.getElementById('sleep-consolidation-result').style.display = 'block';
             if (sc.last_run) {
-                /* ZSFABC-Fix: 使用textContent替代insertAdjacentHTML，防止XSS */
+/* 使用textContent替代insertAdjacentHTML，防止XSS */
                 var resultDiv = document.getElementById('sleep-consolidation-result');
                 if (resultDiv) {
                     var innerDiv = resultDiv.querySelector('div');
@@ -7625,7 +7624,7 @@ window.showNotification = function(message, type, duration) {
     return SelfLnnNotify.show(message, type, duration);
 };
 
-/* ZSFAI-M06: promptAsync() — 将异步SelfLnnNotify.prompt封装为Promise，支持await调用 */
+/* promptAsync() — 将异步SelfLnnNotify.prompt封装为Promise，支持await调用 */
 function promptAsync(message, defaultValue) {
     return new Promise(function(resolve) {
         SelfLnnNotify.prompt(message, defaultValue || '', function(val) {
@@ -7694,11 +7693,10 @@ console.warn = function() {
 };
 
 /* ================================================================
- * ZSFAI-M06: prompt() 兼容层 — 统一使用SelfLnnNotify.prompt模态框
+ *: prompt() 兼容层 — 统一使用SelfLnnNotify.prompt模态框
  * 所有原本依赖原生prompt()的代码已迁移至promptAsync()异步调用。
  * 此兼容层仅保留兜底，确保未迁移代码不会静默失败。
  * ================================================================ */
-/* ZSF-FE-010: 保存原生prompt引用，避免后续覆盖丢失 */
 if (typeof window._nativePrompt === 'undefined') {
     window._nativePrompt = window.prompt;
 }
@@ -7708,10 +7706,10 @@ window.prompt = function(msg, defVal) {
             !navigator.userAgent.includes('Trae')) {
             return window._nativePrompt(msg, defVal);
         }
-    } catch(e) { console.error('[ZSFAI-M06] _nativePrompt调用失败:', e&&e.message?e.message:e); }
-    SelfLnnLog.warn('[ZSFAI-M06] 检测到未迁移的prompt()调用，自动降级使用SelfLnnNotify.prompt。请将调用方改用promptAsync()。');
+    } catch(e) { console.error(' _nativePrompt调用失败:', e&&e.message?e.message:e); }
+    SelfLnnLog.warn(' 检测到未迁移的prompt()调用，自动降级使用SelfLnnNotify.prompt。请将调用方改用promptAsync()。');
     SelfLnnNotify.prompt(msg || '', defVal || '', function(val) {
-        var msg2 = '[ZSFAI-M06] prompt()兼容层收到用户输入"' + (val || '') +
+        var msg2 = ' prompt()兼容层收到用户输入"' + (val || '') +
                    '"，但调用方未迁移至异步模式，输入值已通过window._promptLastResult临时存储。' +
                    '请迁移至promptAsync()。';
         SelfLnnLog.warn(msg2);
@@ -8004,7 +8002,7 @@ async function refreshLearningMetrics() {
                         setQ('.metric:nth-child(2) .metric-value', totalMem.toFixed(1)+' MB');
                     }
 
-                    /* ZSFQQ-Q014修复: 系统日志面板自动刷新 + ZSFDDD-D2-002修复: 使用正确的/system/logs端点 */
+/* 系统日志面板自动刷新 + 使用正确的/system/logs端点 */
                     try {
                         var logResp = await window.SelfLnnApi.request('/system/logs?lines=50');
                         if (logResp && logResp.ok) {
@@ -8042,7 +8040,7 @@ async function refreshLearningMetrics() {
             
             // 立即执行一次，然后每10秒刷新
             refreshAllPanels();
-            /* ZSFABC-FE-Fix: 保存定时器句柄防止内存泄漏 */
+/* 保存定时器句柄防止内存泄漏 */
             if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
                 g_dataEngine.registerModule('all_panels_sync', 10000, refreshAllPanels);
             } else {
@@ -8159,7 +8157,7 @@ function showKnowledgeDetail(entryId) {
 }
 
 /* ================================================================
- * ZSFABC-F002修复: 设备管理+安全管理+技能管理+教学 内联函数迁移
+ *修复: 设备管理+安全管理+技能管理+教学 内联函数迁移
  * 从 index.html 内联 <script> 标签迁移到主JS模块
  * ================================================================ */
 
@@ -8292,7 +8290,7 @@ var _safetyPollTimer = null;
 
 async function pollSafety() {
     try {
-        /* ZSFDDD-D5修复: getSecurityStatus现在调用/safety/status返回{success,data}，
+/* getSecurityStatus现在调用/safety/status返回{success,data}，
          * data格式: {level,level_name,safety_score,total_events,...} */
         var result = await (SelfLnnApi.getSecurityStatus ? SelfLnnApi.getSecurityStatus() : Promise.resolve(null));
         if (!result || !result.success) {
@@ -8339,7 +8337,7 @@ async function loadSkills() {
         var d = await resp.json();
         if (d && d.skills) {
             skillsData = d.skills;
-            /* ZSFZS-F048修复: 始终确保renderSkillList已定义再调用 */
+/* 始终确保renderSkillList已定义再调用 */
             if (typeof renderSkillList === 'function') renderSkillList();
             updateStats(d);
         }
@@ -8350,7 +8348,7 @@ function updateStats(data) {
     var total = document.getElementById('skills-total'); if (total) total.textContent = (data ? data.skills.length : skillsData.length);
 }
 
-/* ZSFABC修复: setFilter/selectSkill/testSkill在HTML内联脚本中定义（具有DOM特定UI逻辑）
+/* setFilter/selectSkill/testSkill在HTML内联脚本中定义（具有DOM特定UI逻辑）
  * 如果HTML内联版本未加载，回退到main.js版本 */
 if (typeof setFilter === 'undefined') {
 function renderSkillList(filterType) {
@@ -8424,7 +8422,7 @@ window.testSkill = window.testSkill || testSkill;
 var _voiceCapturing = false;
 var _voiceRecorder = null;
 
-/* ZSFWS-M024修复: toggleVoice统一使用toggleVoiceInput逻辑，
+/* toggleVoice统一使用toggleVoiceInput逻辑，
  * 避免两套独立语音控制路径重复操作麦克风 */
 if (typeof toggleVoice === 'undefined') {
 async function toggleVoice() {
@@ -8449,7 +8447,7 @@ async function toggleVoice() {
         var btn = document.getElementById('voice-toggle-btn');
         if (btn) { btn.textContent = '停止录音'; if (!btn.className.match(/active/)) btn.className += ' active'; }
         try {
-            /* ZSFZS-F042修复: quickCapture参数正确传递——使用options对象而非回调函数 */
+/* quickCapture参数正确传递——使用options对象而非回调函数 */
             _voiceRecorder = await window.VoiceCaptureUtil.quickCapture({
                 maxDuration: 10000,
                 onResult: function(result) {
@@ -8481,12 +8479,12 @@ async function sendTextCommand() {
     } catch(e) { console.error('[文字指令] 请求失败:', e.message, e.stack); showNotification('连接失败', 'danger');
     }
 }
-} /* ZSFABC: sendTextCommand 条件定义结束 */
+} /* sendTextCommand 条件定义结束 */
 
 window.toggleVoice = toggleVoice;
 window.sendTextCommand = sendTextCommand;
 
-/* ---- 多模态学习 + 教学 (ZSFAB-H06修复: 合并HLML内联完整实现) ---- */
+/* ---- 多模态学习 + 教学 (合并HLML内联完整实现) ---- */
 async function startMultimodalLearn() {
     var modeEl = document.getElementById('learn-mode');
     var mode = modeEl ? modeEl.value : 'single-cfc-lnn';
@@ -8616,7 +8614,6 @@ window.scanHardwareFull = window.scanHardwareFull || (async function() {
     catch(e) { showNotification('硬件扫描失败', 'danger'); }
 });
 
-/* ZSF-FE-001: 多模态统一学习 - 开始教学 */
 async function startMultimodalLearnTeaching() {
     var modeEl = document.getElementById('mm-teach-mode');
     var sourceEl = document.getElementById('mm-teach-source');
@@ -8640,7 +8637,6 @@ async function startMultimodalLearnTeaching() {
 }
 window.startMultimodalLearnTeaching = startMultimodalLearnTeaching;
 
-/* ZSF-FE-002: 多模态统一学习 - 测试学习成果 */
 async function testMultimodalLearnTeaching() {
     showNotification('正在测试多模态学习成果...', 'info');
     try {
@@ -8661,7 +8657,6 @@ async function testMultimodalLearnTeaching() {
 }
 window.testMultimodalLearnTeaching = testMultimodalLearnTeaching;
 
-/* ZSF-FE-003: 摄像头预览切换 */
 function toggleCameraPreview() {
     var video = document.getElementById('camera-preview');
     var statusEl = document.getElementById('mm-camera-status');
@@ -8692,7 +8687,7 @@ function toggleCameraPreview() {
 window.toggleCameraPreview = toggleCameraPreview;
 
 /* ================================================================
- * ZSF-FE-007: 全局定时器清理 - 页面卸载时清除所有活跃定时器
+ *: 全局定时器清理 - 页面卸载时清除所有活跃定时器
  * 防止内存泄漏和后台持续请求
  * ================================================================ */
 window.addEventListener('beforeunload', function() {

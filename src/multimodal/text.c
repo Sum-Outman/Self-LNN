@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file text.c
  * @brief 文本处理模块实现 —— 基于LNN的语义编码
  *
@@ -166,7 +166,7 @@ TextProcessor* text_processor_create(const TextConfig* config) {
     processor->input_dim = input_dim;
     processor->hidden_dim = hidden_dim;
 
-    /* 创建文本编码专用LNN（ZSFABC-M001修复：LNN创建失败返回NULL，不降级） */
+    /* 创建文本编码专用LNN（LNN创建失败返回NULL，不降级） */
     {
         LNNConfig lnn_cfg;
         memset(&lnn_cfg, 0, sizeof(LNNConfig));
@@ -312,7 +312,7 @@ int text_process_string(TextProcessor* processor,
         return (int)copy_dim;
     }
 
-    /* ZSFABC-M001修复: LNN不可用时返回0特征维度，不再使用Unicode码点哈希降级
+/* LNN不可用时返回0特征维度，不再使用Unicode码点哈希降级
      * 系统要求液态神经网络模型全部功能，不允许降级到非LNN编码 */
     log_warning("[文本] LNN不可用，文本特征提取返回0维度。请确保系统LNN已初始化。");
     return 0;

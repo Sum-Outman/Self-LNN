@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file safety_monitor.c
  * @brief AGI安全监控系统完整实现
  */
@@ -74,7 +74,7 @@ struct SafetyMonitor {
     /* 线程安全锁 */
     MutexHandle lock;
 
-    /* ZSFQQ-DEEP-003: 主动熔断器(Circuit Breaker)
+/* 主动熔断器(Circuit Breaker)
      * 自动检测连续故障: 关闭→半开→打开→冷却→半开→关闭
      * 防止级联故障和资源耗尽，与emergency_stop(被动/手动)互补 */
     int cb_enabled;                 /* 熔断器是否启用 */
@@ -171,7 +171,7 @@ SafetyMonitor* safety_monitor_create(void) {
         monitor->rule_count++;
     }
 
-    /* ZSFQQ-DEEP-003: 熔断器初始化 */
+/* 熔断器初始化 */
     monitor->cb_enabled = 1;
     monitor->cb_state = 0; /* 关闭状态 */
     monitor->cb_consecutive_failures = 0;
@@ -188,7 +188,7 @@ SafetyMonitor* safety_monitor_create(void) {
     return monitor;
 }
 
-/* ========== ZSFQQ-DEEP-003: 主动熔断器(Circuit Breaker) ========== */
+/* ========== 主动熔断器(Circuit Breaker) ========== */
 
 /* 报告子系统故障，熔断器连续失败计数+1 */
 int safety_circuit_breaker_report_failure(SafetyMonitor* monitor, int subsystem_id) {
@@ -277,7 +277,7 @@ void safety_circuit_breaker_reset(SafetyMonitor* monitor) {
     SAFETY_UNLOCK(monitor);
 }
 
-/* ZSFGGG-S2-001修复: 强制打开熔断器(安全评分过低时主动触发) */
+/* 强制打开熔断器(安全评分过低时主动触发) */
 int safety_circuit_breaker_open(SafetyMonitor* monitor) {
     if (!monitor || !monitor->cb_enabled) return -1;
     SAFETY_LOCK(monitor);
@@ -291,7 +291,7 @@ int safety_circuit_breaker_open(SafetyMonitor* monitor) {
     return monitor->cb_state;
 }
 
-/* ZSFGGG-S2-001修复: 强制关闭熔断器(安全恢复时主动关闭) */
+/* 强制关闭熔断器(安全恢复时主动关闭) */
 int safety_circuit_breaker_close(SafetyMonitor* monitor) {
     if (!monitor) return -1;
     SAFETY_LOCK(monitor);

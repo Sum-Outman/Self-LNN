@@ -6,7 +6,7 @@
  * 分支扩展、剪枝回溯、思维合并与最优路径选择。
  *
  * ============================================================
- * 【模块职责 - ZSFWS-028 认知三模块边界】
+ * 【模块职责 - 认知三模块边界】
  * ============================================================
  * 本模块（深度思考链）的核心职责：构建式推理链生成与优化系统
  *
@@ -46,7 +46,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/secure_random.h"   /* N-003: 安全随机数替代LCG */
-#include "selflnn/utils/string_utils.h"    /* ZSFUSA: safe_strdup宏 */
+#include "selflnn/utils/string_utils.h" /* safe_strdup宏 */
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -286,7 +286,7 @@ int dtc_reason_chain(DTCSystem* system,
         float raw_branching = DTC_SIGMOID(eval_out[2]);
         node->branching_factor = DTC_CLAMP(raw_branching * 2.0f, 0.0f, 1.0f);
 
-        /* ZSFEEE-FIX-002: 拉普拉斯频域分析 → 推理置信度修正
+/* 拉普拉斯频域分析 → 推理置信度修正
          * 对当前思维嵌入进行拉普拉斯频域稳定性分析，
          * 将频域稳定性作为置信度和分支因子的修正项。
          * 高频不稳定性 → 降低置信度、增加分支探索；
@@ -599,7 +599,7 @@ int dtc_beam_search(DTCSystem* system,
     float current[DTC_EMBED_DIM];
     memcpy(current, base_embed, DTC_EMBED_DIM * sizeof(float));
 
-    /* ZSFZS-F014修复: 追踪沿最佳束路径的逐步嵌入，
+/* 追踪沿最佳束路径的逐步嵌入，
      * 而非所有节点共享同一个 beam_embeds[best_beam]。
      * 每步更新current为前一步输出的加权平均，模拟推理过程中的语义漂移。 */
     float step_embed[DTC_EMBED_DIM];
@@ -611,7 +611,7 @@ int dtc_beam_search(DTCSystem* system,
         node->parent_index = (step > 0) ? (int)write_idx - 1 : 0;
         /* 每步嵌入沿语义轨迹线性演进：从base_embed向beam_embeds方向移动 */
         float alpha = (float)(step + 1) / (float)(beam_lengths[best_beam] + 1);
-        /* ZSFEEE-FIX-024: 使用LNN merge_net真实前向传播替代线性插值近似。
+/* 使用LNN merge_net真实前向传播替代线性插值近似。
          * 原线性插值 step_embed = current * (1-alpha) + beam_embeds * alpha
          * 无法捕捉束路径间的非线性语义交互。merge_net输入为[current, beam_embeds]
          * 的双倍维度拼接，通过LNN非线性映射得到融合嵌入。 */
@@ -815,7 +815,6 @@ int dtc_merge_thoughts(DTCSystem* system,
     memcpy(merge_input, chain->nodes[merge_node_a].thought_embedding, DTC_EMBED_DIM * sizeof(float));
     memcpy(merge_input + DTC_EMBED_DIM, chain->nodes[merge_node_b].thought_embedding, DTC_EMBED_DIM * sizeof(float));
 
-    /* ZSFWS修复-L-010: 变量名merged_embedding消除与merged_out的歧义 */
     float merged_embedding[DTC_EMBED_DIM] = {0};
     lnn_forward(system->merge_net, merge_input, merged_embedding);
 

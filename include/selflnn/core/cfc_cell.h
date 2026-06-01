@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file cfc_cell.h
  * @brief 封闭形式连续时间单元（CfC Cell）
  * 
@@ -90,7 +90,7 @@ typedef struct {
     int use_multi_timescale;       /**< 是否启用多时间尺度并行演化（快速/慢速双通道） */
     float fast_tau_ratio;          /**< 快速通道时间常数比例，默认0.1（τ_fast = τ * ratio） */
     float slow_tau_ratio;          /**< 慢速通道时间常数比例，默认10.0（τ_slow = τ * ratio） */
-    /* ZSFUSA-P1-002修复: 拉普拉斯频域调制参数。
+/* 拉普拉斯频域调制参数。
      * laplace_stability_score: 由拉普拉斯分析器计算，范围[0,1]，
      *   0=系统不稳定(需要强阻尼) 1=系统稳定(正常时间常数)
      * laplace_stability_alpha: 调制强度系数，默认0.3，越大阻尼越强
@@ -144,7 +144,7 @@ typedef struct CfCState {
     float time;                    /**< 当前时间 */
     float adaptation_rate;         /**< 自适应率 */
 
-    /* ZSFWS-008修复: 保存前向传播的output_gate用于CTBP反向传播
+/* 保存前向传播的output_gate用于CTBP反向传播
      * 原代码用 og_approx=0.5+0.5*tanh(h) 保守估计，存在系统性偏差。
      * 现在前向传播时存储真实的sigmoid(W*x+U*h+b)值。 */
     float* saved_output_gate;      /**< 保存前向传播的output_gate [hidden_size] */
@@ -275,7 +275,7 @@ struct CfCCell {
     float* cell_velocity_buffer;     /**< 所有cell级参数的速度缓冲区（Adam二阶矩） */
     size_t cell_momentum_size;       /**< 动量缓冲区总大小（元素数） */
     int cell_momentum_initialized;   /**< 动量缓冲区是否已初始化 */
-    /* ZSFUSA-P1-002: 拉普拉斯频域tau调制（运行时字段）
+/* 拉普拉斯频域tau调制（运行时字段）
      * LNN层周期性将network_state的laplace_stability_score复制到这些字段，
      * cfc_closed_form_solution据此动态调整有效时间常数。
      * use_laplace_modulation和laplace_stability_alpha来自CfCCellConfig。 */

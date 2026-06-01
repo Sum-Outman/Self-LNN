@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file slam_internal.h
  * @brief SLAM系统内部数据结构与函数声明（模块间共享）
  *
@@ -582,7 +582,7 @@ SELFLNN_API int slam_enhance_pose_graph_optimize(
     const int* fixed_nodes, int num_fixed);
 
 /* ================================================================
- * ZSFZX-FIX-SLAM-DATASET: 离线数据集回放与轨迹评估API
+ *: 离线数据集回放与轨迹评估API
  * 实现于 slam_io.c, 使SLAM系统可在无硬件时通过真实记录的数据集验证
  * ================================================================ */
 

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file lock_free.c
  * @brief 无锁数据结构实现
  * 
@@ -1868,7 +1868,7 @@ void lock_free_thread_pool_free(LockFreeThreadPool* pool) {
         safe_free((void**)&pool->workers);
     }
     
-    /* ZSFX-DEEP-R3-004修复: 销毁前排空所有任务队列中的ThreadPoolTaskNode
+/* 销毁前排空所有任务队列中的ThreadPoolTaskNode
      * 防止任务节点及其Windows同步句柄(pool->completion_event)泄漏。
      * 优先队列中的data字段存储的是ThreadPoolTaskNode*指针值,
      * lock_free_queue_free释放的是队列节点和数据缓冲区,
@@ -2372,7 +2372,7 @@ void lock_free_thread_pool_free(LockFreeThreadPool* pool) {
         safe_free((void**)&pool->workers);
     }
     
-    /* ZSFX-DEEP-R3-004修复: POSIX版同样需要排空任务节点防止泄漏 */
+/* POSIX版同样需要排空任务节点防止泄漏 */
     if (pool->local_queues) {
         for (size_t i = 0; i < pool->num_workers; i++) {
             if (pool->local_queues[i]) {
@@ -3792,7 +3792,7 @@ int lock_free_skip_list_erase(LockFreeSkipList* sl, const void* key, size_t key_
         }
 
         if (success) {
-            /* ZSFX-DEEP-R3-003修复: 使用延迟释放替代立即释放。
+/* 使用延迟释放替代立即释放。
              * 立即释放会导致并发读线程访问已释放节点(use-after-free)。
              * 延迟释放通过hazard-pointer机制确保所有读者退出后才释放。 */
             free_skip_list_node_deferred(sl, target);

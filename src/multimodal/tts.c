@@ -161,7 +161,7 @@ struct TTSEngine {
     /* 拼音查找表 */
     TTS_PinyinEntry* pinyin_table;
     int pinyin_table_size;
-    int use_real_pinyin_lookup; /**< 使用真实拼音二分查找（替代哨兵指针）ZSFWS-S003 */
+    int use_real_pinyin_lookup; /**< 使用真实拼音二分查找（替代哨兵指针）*/
 
     /* 输出投影权重（隐藏状态 → 波形样本） */
     float* waveform_projection_w;    /* [hidden_size x 1] */
@@ -178,7 +178,7 @@ struct TTSEngine {
     int sample_counter;              /* 采样计数器 */
     float prev_output;               /* 上一个输出样本 */
 
-    /* 共振峰滤波器状态 (ZSFEEE-FIX-010: 从static变量移到实例结构体，消除线程安全隐患) */
+    /* 共振峰滤波器状态 (从static变量移到实例结构体，消除线程安全隐患) */
     float formant_z1[5];             /* 共振峰滤波器延迟线1 */
     float formant_z2[5];             /* 共振峰滤波器延迟线2 */
 
@@ -225,7 +225,7 @@ struct TTSEngine {
     int is_trained;                  /**< 显式训练状态标志：1=已训练(权重从文件加载成功), 0=未训练(仅随机初始化) */
 };
 
-/* ZSFABC: TTS引擎完整性检查 —— 供后端调用前预检，避免深层崩溃 */
+/* TTS引擎完整性检查 —— 供后端调用前预检，避免深层崩溃 */
 int tts_engine_is_healthy(TTSEngine* engine) {
     if (!engine) return 0;
     if (!engine->initialized) return 0;
@@ -316,7 +316,7 @@ const char* tts_get_pinyin_string(const TTS_Pinyin* pinyin) {
 extern int tts_pinyin_lookup(uint16_t codepoint, int* out_init, int* out_final, int* out_tone);
 
 static int init_pinyin_table(TTSEngine* engine) {
-    /* ZSFWS-S003修复: 使用布尔标志替代不安全哨兵指针(uintptr_t)1 */
+/* 使用布尔标志替代不安全哨兵指针(uintptr_t)1 */
     engine->pinyin_table = NULL; /* 不使用预置拼音表 */
     engine->use_real_pinyin_lookup = 1; /* 标记使用真实拼音二分查找 */
     engine->pinyin_table_size = TTS_PINYIN_TABLE_SIZE;
@@ -364,7 +364,7 @@ int tts_load_weights(TTSEngine* engine, const char* filepath) {
 /**
  * @brief He初始化（Kaiming初始化）：均匀分布范围
  * 适用于ReLU/tanh等非线性激活函数的前馈层。
- * ZSFGGG-S2-008修复: 原返回sqrt(2/fan_in)用于rng_uniform(-limit,limit),
+ *修复: 原返回sqrt(2/fan_in)用于rng_uniform(-limit,limit),
  * 但正确的He均匀边界应为sqrt(6/fan_in)（方差=2/fan_in对应均匀分布[-a,a]中a=√(6/fan_in)）。
  * 原来的sqrt(2/fan_in)过小约√3倍，导致权重初始化范围被压缩，深层网络信号衰减严重。
  */
@@ -1284,7 +1284,7 @@ static int tts_neural_vocoder_forward(TTSEngine* engine,
     if (total_samples > max_wave_samples) total_samples = max_wave_samples;
     if (total_samples <= 0) return -1;
 
-    /* ZSFUSA-P1-007修复: 声码器训练感知初始化。
+/* 声码器训练感知初始化。
      * 当声码器未初始化(engine->vocoder_initialized=0)但模型已训练时，
      * 主动尝试初始化声码器而非直接回退到谐波叠加合成。
      * 只有在is_trained=0且vocoder也未初始化时才使用确定性回退，
@@ -1306,7 +1306,7 @@ static int tts_neural_vocoder_forward(TTSEngine* engine,
 
     /* 如果声码器仍未初始化，回退到FFT增强谐波合成 */
     if (!engine->vocoder_initialized) {
-        /* ZSFAI-M01修复: 增强谐波合成回退
+/* 增强谐波合成回退
          * 使用10个泛音的锯齿波级数近似(Fourier级数)替代简单4泛音堆叠
          * 结合梅尔能量包络调制和随机相位抖动，提升合成音质 */
         int sr = engine->config.sample_rate;
@@ -1896,7 +1896,7 @@ static void tts_deterministic_formant_synth(TTSEngine* engine,
             float b1 = 0.0f;
             float b2 = -alpha;
 
-            /* ZSFQQ-P1-004修复: 移除static确保多线程安全，每调用独立滤波器状态 */
+/* 移除static确保多线程安全，每调用独立滤波器状态 */
             float z1_det[5] = {0}, z2_det[5] = {0};
             float out = (b0/a0) * filter_out + z1_det[f];
             z1_det[f] = (b1/a0) * filter_out - (a1/a0) * out + z2_det[f];
@@ -1922,7 +1922,7 @@ static void tts_deterministic_formant_synth(TTSEngine* engine,
 /**
  * @brief 检测TTS引擎是否处于未训练状态
  *
- * 首先检查显式的 is_trained 标志（该标志在 tts_load_model() 成功后设为1）。
+ * 首先检查显式的 is_trained 标志（该标志在 tts_load_model 成功后设为1）。
  * 如果标志为1则直接返回0（已训练）。
  * 如果标志为0但模型已从文件加载(model_loaded=1)，则也视为已训练。
  * 最后才使用方差启发式作为辅助验证。
@@ -2005,7 +2005,7 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
         input_buf[ed] = engine->prev_output;
 
         /* =========================================================== *
-         * ZSFEEE-FIX-034: 修复CfC状态演化的退化路径。
+ *: 修复CfC状态演化的退化路径。
          * 不再使用embedding_table作为CfC权重源（嵌入表是字符查找表，
          * 不是ODE权重，语义完全不同，导致生成质量严重下降）。
          *
@@ -2084,8 +2084,8 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
         } else {
             /* 路径3: 无可用的CfC权重源 —— 拒绝生成伪造音频 */
             log_warning("[TTS] CfC权重源不可用（shared_lnn=NULL且encoder_weights[0]=NULL），"
-                        "拒绝生成伪造音频。请调用tts_engine_set_lnn()设置共享LNN实例，"
-                        "或调用tts_load_model()加载训练好的模型权重。");
+                        "拒绝生成伪造音频。请调用tts_engine_set_lnn设置共享LNN实例，"
+                        "或调用tts_load_model加载训练好的模型权重。");
             safe_free((void**)&input_buf);
             return -1;
         }
@@ -2139,7 +2139,7 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
             glottal_pulse = 0.0f;
         }
 
-        /* ZSFABC-F006修复: 5阶共振峰滤波器级联
+/* 5阶共振峰滤波器级联
          * 使用基于声道的标准共振峰频率范围替代均匀间隔。
          * F1=250-900Hz(开口度), F2=850-2400Hz(舌位前后), 
          * F3=1700-3400Hz, F4=3200-4000Hz, F5=4000-4900Hz
@@ -2163,7 +2163,7 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
         }
 
         /* 级联共振峰滤波：每个共振峰 = 双二次带通滤波器 (Butterworth二阶) */
-        /* ZSFEEE-FIX-010: 使用实例结构体中的滤波器状态，消除static变量线程安全隐患 */
+/* 使用实例结构体中的滤波器状态，消除static变量线程安全隐患 */
         float filter_in = glottal_pulse;
         float filter_out = 0.0f;
         for (int f = 0; f < 5; f++) {
@@ -2537,7 +2537,7 @@ TTSEngine* tts_engine_create(const TTSConfig* config) {
         return NULL;
     }
 
-    /* ZSFABC: 创建时立即初始化状态缓冲区和投影权重。
+/* 创建时立即初始化状态缓冲区和投影权重。
      * 原先采用惰性初始化(仅首次tts_synthesize调用时分配)，
      * 导致健康检查(tts_engine_is_healthy)因state_initialized=0而拦截请求。
      * 现在创建即完整，tts_synthesize内惰性检查变为恒真跳过。 */
@@ -2686,9 +2686,9 @@ TTSAudio* tts_synthesize(TTSEngine* engine, const char* text) {
 
     /* P1-010修复: 未训练检查 —— 模型未训练时明确拒绝生成音频
      * CfC权重随机初始化时输出本质为噪声，对应用无实际价值
-     * 必须先完成训练（tts_train()）后才能使用TTS生成功能 */
+     * 必须先完成训练（tts_train）后才能使用TTS生成功能 */
     if (tts_is_untrained(engine)) {
-        fprintf(stderr, "[TTS错误] TTS模型未训练，拒绝生成音频！请先运行 tts_train() 完成训练。\n");
+        fprintf(stderr, "[TTS错误] TTS模型未训练，拒绝生成音频！请先运行 tts_train 完成训练。\n");
         safe_free((void**)&audio->samples);
         safe_free((void**)&audio);
         return NULL;
@@ -2906,7 +2906,7 @@ int tts_engine_set_speed(TTSEngine* engine, float speed) {
     return 0;
 }
 
-/* ZSFQQ-P2-001: 公开的标记训练函数 —— 检查点加载后调用 */
+/* 公开的标记训练函数 —— 检查点加载后调用 */
 void tts_engine_mark_trained(TTSEngine* engine) {
     if (engine) {
         engine->is_trained = 1;

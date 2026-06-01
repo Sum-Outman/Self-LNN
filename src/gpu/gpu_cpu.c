@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_cpu.c
  * @brief CPU计算后端实现（当ENABLE_GPU=OFF时编译）
  * 
@@ -93,7 +93,7 @@
 #define SIMD_AVX_WIDTH  8
 
 /* ============================================================================
- * 第1层：运行时CPU特性检测（ZSFEEE-FIX-014: 统一到gpu.c）
+ * 第1层：运行时CPU特性检测（统一到gpu.c）
  *
  * 所有CPU特性检测统一使用gpu.c的gpu_hardware_get_cpu_info()接口。
  * SIMD标志位从GpuDeviceInfo.simd_flags位掩码中读取。
@@ -101,13 +101,13 @@
  * =========================================================================== */
 
 /**
- * @brief ZSFEEE-FIX-014: 使用gpu.c统一检测的SIMD标志缓存
+ * @brief 使用gpu.c统一检测的SIMD标志缓存
  */
 static unsigned int g_cached_cpu_simd_flags = 0;
 static int g_cpu_simd_cached = 0;
 
 /**
- * @brief 运行时检测CPU对AVX指令集的支持（ZSFEEE-FIX-014: 从统一接口缓存读取）
+ * @brief 运行时检测CPU对AVX指令集的支持（从统一接口缓存读取）
  * @return 1支持AVX，0不支持
  */
 static inline int cpu_supports_avx(void) {
@@ -116,7 +116,7 @@ static inline int cpu_supports_avx(void) {
 }
 
 /**
- * @brief 运行时检测CPU对AVX2指令集的支持（ZSFEEE-FIX-014: 从统一接口缓存读取）
+ * @brief 运行时检测CPU对AVX2指令集的支持（从统一接口缓存读取）
  */
 static inline int cpu_supports_avx2(void) {
     if (!g_cpu_simd_cached) simd_lazy_init();
@@ -124,7 +124,7 @@ static inline int cpu_supports_avx2(void) {
 }
 
 /**
- * @brief 运行时检测CPU对FMA指令集的支持（ZSFEEE-FIX-014: 从统一接口缓存读取）
+ * @brief 运行时检测CPU对FMA指令集的支持（从统一接口缓存读取）
  */
 static inline int cpu_supports_fma(void) {
     if (!g_cpu_simd_cached) simd_lazy_init();
@@ -132,7 +132,7 @@ static inline int cpu_supports_fma(void) {
 }
 
 /**
- * @brief 运行时检测CPU对ARM NEON的支持（ZSFEEE-FIX-014: 编译时检测，NEON始终可在ARM64上使用）
+ * @brief 运行时检测CPU对ARM NEON的支持（编译时检测，NEON始终可在ARM64上使用）
  */
 static inline int cpu_supports_neon(void) {
 #if SELFLNN_HAVE_NEON
@@ -154,11 +154,11 @@ static int g_fallback_scalar_count = 0;
 static int g_fallback_summary_logged = 0;
 
 /**
- * @brief 惰性初始化所有SIMD运行时标志（ZSFEEE-FIX-014: 使用gpu.c统一接口）
+ * @brief 惰性初始化所有SIMD运行时标志（使用gpu.c统一接口）
  */
 static inline void simd_lazy_init(void) {
     if (g_simd_avx_available < 0) {
-        /* ZSFEEE-FIX-014: 调用gpu.c的统一CPU硬件检测接口获取SIMD标志 */
+/* 调用gpu.c的统一CPU硬件检测接口获取SIMD标志 */
         GpuDeviceInfo cpu_info;
         if (gpu_hardware_get_cpu_info(&cpu_info) == 0) {
             g_cached_cpu_simd_flags = cpu_info.simd_flags;
@@ -1360,11 +1360,11 @@ static float _rand_float(uint32_t* state) {
 }
 
 /* ============================================================================
- * CPU硬件检测（ZSFEEE-FIX-014: 统一到gpu.c的gpu_hardware_get_cpu_info()）
+ * CPU硬件检测（统一到gpu.c的gpu_hardware_get_cpu_info()）
  * =========================================================================== */
 
 static int _cpu_detect_hardware(GpuDeviceInfo* info) {
-    /* ZSFEEE-FIX-014: 使用gpu.c的统一CPU硬件检测接口 */
+/* 使用gpu.c的统一CPU硬件检测接口 */
     return gpu_hardware_get_cpu_info(info);
 }
 
@@ -1567,7 +1567,7 @@ GpuContext* gpu_cpu_context_create(GpuBackend backend, int device_index) {
 
 #ifndef ENABLE_GPU
 void auto_kernel_optimizer_destroy(AutoKernelOptimizer* optimizer) {
-    /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放，
+/* safe_calloc分配的内存必须用safe_free释放，
      * auto_kernel_optimizer_create使用safe_calloc分配optimizer */
     if (optimizer) safe_free((void**)&optimizer);
 }
@@ -2308,7 +2308,7 @@ GpuKernel* gpu_kernel_create(GpuContext* context, const char* kernel_source, con
     if (!k) return NULL;
 
     k->context = context;
-    /* ZSFEEE-FIX-DEEP-002: _strdup使用原始malloc, 不带MemoryBlockHeader,
+/* _strdup使用原始malloc, 不带MemoryBlockHeader,
      * gpu_kernel_free使用safe_free释放, 读取伪Header导致堆损坏.
      * 统一使用safe_malloc+memcpy模式, 确保分配内存带MemoryBlockHeader */
     if (kernel_source) {
@@ -2940,7 +2940,7 @@ GpuMultiGpuContext* gpu_multi_gpu_init(const GpuMultiGpuConfig* config) {
     mg_ctx->contexts = (GpuContext**)safe_calloc((size_t)config->num_devices, sizeof(GpuContext*));
     mg_ctx->device_ids = (int*)safe_calloc((size_t)config->num_devices, sizeof(int));
 
-    /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放，
+/* safe_calloc分配的内存必须用safe_free释放，
      * 确保内存跟踪统计一致，避免safe_calloc+raw free导致的内存泄漏误报 */
     if (!mg_ctx->contexts || !mg_ctx->device_ids) {
         safe_free((void**)&mg_ctx->contexts);
@@ -2961,7 +2961,7 @@ GpuMultiGpuContext* gpu_multi_gpu_init(const GpuMultiGpuConfig* config) {
                 gpu_context_free(mg_ctx->contexts[j]);
                 mg_ctx->contexts[j] = NULL;
             }
-            /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放，
+/* safe_calloc分配的内存必须用safe_free释放，
              * 确保内存跟踪统计一致，避免safe_calloc+raw free导致的内存泄漏误报 */
             safe_free((void**)&mg_ctx->contexts);
             safe_free((void**)&mg_ctx->device_ids);
@@ -2985,14 +2985,14 @@ void gpu_multi_gpu_cleanup(GpuMultiGpuContext* mg_ctx) {
                 ctx->contexts[i] = NULL;
             }
         }
-        /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放 */
+/* safe_calloc分配的内存必须用safe_free释放 */
         safe_free((void**)&ctx->contexts);
     }
     if (ctx->device_ids) {
-        /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放 */
+/* safe_calloc分配的内存必须用safe_free释放 */
         safe_free((void**)&ctx->device_ids);
     }
-    /* ZSFEEE-FIX-DEEP-004: safe_calloc分配的内存必须用safe_free释放 */
+/* safe_calloc分配的内存必须用safe_free释放 */
     safe_free((void**)&ctx);
 }
 
@@ -3061,7 +3061,7 @@ int gpu_multi_gpu_broadcast(GpuMultiGpuContext* mg_ctx,
     return 0;
 }
 
-/* ZSF-NEW-005修复: 多GPU同步函数——启用完整编译
+/*修复: 多GPU同步函数——启用完整编译
  * 对于CPU后端，多GPU同步即线程并行任务的同步。
  * 使用CpuMultiGpuContext内部结构，与gpu.c保持一致的实现模式。 */
 int gpu_multi_gpu_synchronize(GpuMultiGpuContext* mg_ctx) {
@@ -4113,7 +4113,6 @@ int gpu_npu_init(GpuContext* context) {
     return 0;
 }
 
-/* ZSF-NEW-005修复: NPU清理 - 真实释放NPU相关资源 */
 void gpu_npu_cleanup(GpuContext* context) {
     if (!context) return;
 
@@ -4269,7 +4268,7 @@ int gpu_npu_infer(NpuModel* model, const float** inputs, float** outputs,
             CpuNpuDenseLayer* layer = &m->layers[l];
             cur_out = (float*)safe_malloc((size_t)layer->output_dim * sizeof(float));
             if (!cur_out) {
-                /* ZSFEEE-FIX-DEEP-003: safe_malloc失败时释放前一层已分配的cur_in，
+/* safe_malloc失败时释放前一层已分配的cur_in，
                  * 避免多层循环中因分配失败导致的内存泄漏 */
                 if (l > 0 && cur_in != (float*)inputs[b]) {
                     safe_free((void**)&cur_in);

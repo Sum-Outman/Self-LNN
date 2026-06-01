@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file memory_utils.c
  * @brief 内存工具库实现
  * 
@@ -532,7 +532,7 @@ void safe_free(void** ptr) {
     // 检查对齐：header应该至少对齐到sizeof(void*)
     uintptr_t header_addr = (uintptr_t)header;
     if (header_addr % sizeof(void*) != 0) {
-        /* ZSFX-DEEP-R12-001: 修复堆损坏 — header才是malloc原始指针,data_ptr是偏移后的用户指针 */
+/* 修复堆损坏 — header才是malloc原始指针,data_ptr是偏移后的用户指针 */
         free(header);
         *ptr = NULL;
         return;
@@ -543,7 +543,7 @@ void safe_free(void** ptr) {
     
     // 验证魔法数字
     if (header->magic == 0) {
-        /* ZSFX-DEEP-R12-001: 魔法数字为零 — 检测到重复释放或堆损坏 */
+/* 魔法数字为零 — 检测到重复释放或堆损坏 */
         fprintf(stderr, "警告：检测到可能的重复释放或无效内存指针 %p\n", data_ptr);
         alloc_track_remove(data_ptr);
         free(header);  /* 仍然释放底层内存防止泄漏 */
@@ -552,7 +552,7 @@ void safe_free(void** ptr) {
     }
     
     if (header->magic != MEMORY_MAGIC) {
-        /* ZSFX-DEEP-R12-001: 魔法数字不匹配 — header才是malloc原始指针 */
+/* 魔法数字不匹配 — header才是malloc原始指针 */
         alloc_track_remove(data_ptr);
         free(header);
         *ptr = NULL;

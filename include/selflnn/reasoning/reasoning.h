@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file reasoning.h
  * @brief 推理引擎接口
  * 
@@ -835,7 +835,7 @@ int reasoning_engine_set_bayesian_network(ReasoningEngine* engine,
 BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* engine);
 
 /* ============================================================================
- * ZSFX-P1修复: 推理历史管理（4个缺失声明）
+ *修复: 推理历史管理（4个缺失声明）
  * ============================================================================ */
 
 int reasoning_save_history(const ReasoningEngine* engine, const char* filepath);

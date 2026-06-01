@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file regularization.c
  * @brief 高级正则化系统实现
  * 
@@ -95,7 +95,7 @@ struct AdvancedRegularizer {
     float* switchable_norm_beta;       /**< 可切换归一化beta参数 */
     size_t switchable_norm_channels;   /**< 仿射参数通道数 */
 
-    /* ZSFLNN-C-012修复: 集成正则化状态 */
+/* 集成正则化状态 */
     float* ensemble_diversity_scores;  /**< 集成多样性分数数组 */
 
     /* 通用状态 */
@@ -281,7 +281,7 @@ void advanced_regularizer_free(AdvancedRegularizer* regularizer) {
     safe_free((void**)&regularizer->switchable_norm_gamma);
     safe_free((void**)&regularizer->switchable_norm_beta);
 
-    /* ZSFLNN-C-012修复: 释放集成正则化资源 */
+/* 释放集成正则化资源 */
     safe_free((void**)&regularizer->ensemble_diversity_scores);
 
     safe_free((void**)&regularizer);
@@ -948,7 +948,7 @@ static float compute_mmd_loss(const float* source, const float* target,
                               float sigma) {
     if (!source || !target || batch_size == 0 || feature_dim == 0) return 0.0f;
 
-    /* ZSFUSA-C15: MMD多尺度RBF核计算，O(N²·D)复杂度。
+/* MMD多尺度RBF核计算，O(N²·D)复杂度。
      * 大批量时性能受限，建议后续版本引入随机傅里叶特征(RFF)近似。
      * 当样本数>1024时自动降采样以避免OOM和计算超时。 */
     size_t effective_n = batch_size;
@@ -1810,7 +1810,7 @@ int advanced_regularizer_set_strength(AdvancedRegularizer* regularizer, float st
 #define REG_STATE_MAGIC "SELF-REG-STATE"
 
 /* ============================================================================
- * ZSFLNN-C-012修复: 集成正则化 (ADV_REG_ENSEMBLE) — 完整实现
+ *修复: 集成正则化 (ADV_REG_ENSEMBLE) — 完整实现
  * 
  * 集成正则化通过维护多个子模型并约束其多样性来提升泛化性能：
  * 1. 多模型投票/平均预测

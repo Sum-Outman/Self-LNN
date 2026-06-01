@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file tensor.c
  * @brief 张量核心实现
  * 
@@ -18,7 +18,7 @@
 #include <float.h>
 #include <stdlib.h>
 
-/* ZSFBUILD: -INFINITY在MSVC+WX配置下不可用，使用-FLT_MAX替代 */
+/* -INFINITY在MSVC+WX配置下不可用，使用-FLT_MAX替代 */
 #ifndef SELFLNN_NEG_INF
 #define SELFLNN_NEG_INF (-FLT_MAX)
 #endif

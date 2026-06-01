@@ -1,7 +1,7 @@
-#define SELFLNN_KNOWLEDGE_INTERNAL  /* ZSFZS-F034: 访问KnowledgeGraph完整结构体(kg->edges) */
+#define SELFLNN_KNOWLEDGE_INTERNAL /* 访问KnowledgeGraph完整结构体(kg->edges) */
 #include "selflnn/knowledge/knowledge_self_check.h"
 #include "selflnn/knowledge/knowledge_graph.h"
-#include "selflnn/knowledge/graph_storage.h"  /* ZSFZS-F032: KnowledgeGraph完整结构需要 */
+#include "selflnn/knowledge/graph_storage.h" /* KnowledgeGraph完整结构需要 */
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
@@ -9,7 +9,7 @@
 #include <math.h>
 #include <time.h>
 
-/* ZSFZS-F032: GRAPH_EDGE_NEGATION - 知识图谱否定边类型标记
+/* GRAPH_EDGE_NEGATION - 知识图谱否定边类型标记
  * GraphEdgeType枚举无此值,定义为特殊负值避免与标准类型(0-4)冲突 */
 #define GRAPH_EDGE_NEGATION (-1)
 
@@ -985,7 +985,7 @@ int ksc_incremental_check(KnowledgeBase* kb, KSSelfCheckConfig* config,
         }
     }
 
-    /* 更新报告 - ZSFWS修复-L-004: 不再将跳过计数误写入逻辑问题字段 */
+    /* 更新报告 - -L-004: 不再将跳过计数误写入逻辑问题字段 */
     report->contradictions_found += contradictions;
     report->redundancies_found += redundancies;
     report->total_entries_scanned = (size_t)incremental_count;

@@ -1,9 +1,9 @@
-/**
+﻿/**
  * @file thread_pool.c
  * @brief 线程池实现
  *
  * 高性能线程池实现，支持任务队列和工作线程管理。
- * ZSFWS-L011: thread_pool通过lock_free.h复用无锁队列作为任务队列；
+ *: thread_pool通过lock_free.h复用无锁队列作为任务队列；
  * 与lock_free.c中第8项(无锁工作窃取队列)存在概念重叠——
  * 两者互补：thread_pool提供CRITICAL_SECTION/pthread_mutex同步的调度框架，
  * 无锁队列提供lock-free任务队列高性能后端。根据场景选择：
@@ -136,7 +136,7 @@ static TaskNode* task_node_alloc(ThreadPool* pool) {
     pthread_mutex_lock(&pool->node_lock);
 #endif
     
-    /* ZSFWS-F003修复: 消除Windows双重EnterCriticalSection死锁。
+/* 消除Windows双重EnterCriticalSection死锁。
      * 将free_nodes获取 + allocated_nodes检查+递增合并到同一个锁区间，
      * 对外统一释放一次锁，避免非递归临界区的重入死锁。 */
     
@@ -1019,7 +1019,7 @@ int thread_pool_submit(ThreadPool* pool, TaskFunction function,
         return -1;
     }
 
-    /* ZSFZX-FIX-R8-4: 检查线程池是否正在关闭 — 防止free期间提交任务导致丢失 */
+/* 检查线程池是否正在关闭 — 防止free期间提交任务导致丢失 */
     if (!pool->is_running) {
         return -1;
     }

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file product_design_enhanced.c
  * @brief A09.5 产品设计系统增强实现
  *
@@ -68,7 +68,7 @@ static int g_pde_prng_inited = 0;
 static void pde_srand(unsigned int seed) {
     PDE_RNG_LOCK();
     if (!g_pde_prng_inited) {
-        /* ZSF-003修复: 当seed非0时使用调用者提供的种子，确保可复现性；
+/*修复: 当seed非0时使用调用者提供的种子，确保可复现性；
          * 当seed为0时使用安全随机数生成种子 */
         uint64_t final_seed;
         if (seed != 0) {
@@ -298,7 +298,7 @@ int pde_tracker_register_requirements(PdeRequirementTracker* tracker,
     pde_strcpy(text_copy, sizeof(text_copy), requirement_text);
 
     /* 按行分割需求文本 */
-    /* ZSFZS-F041: strtok→strtok_s线程安全 */
+/* strtok→strtok_s线程安全 */
     char* saveptr = NULL;
     char* line = strtok_s(text_copy, "\n", &saveptr);
     while (line && tracker->req_count < PDE_MAX_REQUIREMENTS) {
@@ -1616,7 +1616,7 @@ int pde_local_search(const ProductRequirement* requirement,
 }
 
 /* ============================================================================
- * ZSFWS-036: 工业设计种子案例库
+ *: 工业设计种子案例库
  *
  * 为产品设计增强引擎提供50+个跨领域的工业设计先验案例。
  * 这些案例在设计优化、类比推理、设计空间探索时作为参考基线。
@@ -1813,7 +1813,7 @@ static const PdeSeedCase g_seed_cases[PDE_SEED_CASES_COUNT] = {
 /**
  * @brief 加载种子案例到产品设计引擎
  *
- * ZSFWS-036: 在引擎初始化时加载50+工业设计先验案例，
+ *: 在引擎初始化时加载50+工业设计先验案例，
  * 为设计优化、类比推理和设计空间探索提供基线参考。
  * 案例数据存储在静态数组中，初始化时统一加载。
  *
@@ -1824,7 +1824,7 @@ int product_design_load_seed_cases(ProductDesignEngine* engine)
 {
     if (!engine) return -1;
 
-    /* ZSF-002修复: 实际将55个种子案例注入引擎内部参考案例库。
+/*修复: 实际将55个种子案例注入引擎内部参考案例库。
      * 种子案例作为设计优化的先验知识库，在引擎初始化时加载到内部案例库中。
      * 后续设计优化时可以通过类比推理引用这些案例。
      * 案例数据来自本文件顶部的静态数组 g_seed_cases，覆盖6大领域。 */

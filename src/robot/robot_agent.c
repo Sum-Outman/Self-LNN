@@ -1,10 +1,10 @@
-#include "selflnn/robot/robot_agent.h"
+﻿#include "selflnn/robot/robot_agent.h"
 #include "selflnn/robot/sensor_pipeline.h"
 #include "selflnn/robot/kinematics.h"
 #include "selflnn/robot/hardware_interface.h"
 #include "selflnn/robot/voice_motion_control.h"
 #include "selflnn/reasoning/planning.h"
-#include "selflnn/learning/exploration_strategies.h" /* ZSFA-FIX-P0-007: 探索策略集成 */
+#include "selflnn/learning/exploration_strategies.h" /* 探索策略集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/time_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -29,7 +29,7 @@
  * 不在代理层处理——代理层接收LNN输出后的高层控制信号。
  * LNN将多模态信号压缩为控制语义向量后传递给代理进行策略决策。 */
 
-/* ZSFX-012: 推理前最小训练步数 — Xavier随机初始化权重无任何语义信息 */
+/* 推理前最小训练步数 — Xavier随机初始化权重无任何语义信息 */
 #define AGENT_MIN_TRAINING_STEPS 100
 
 const AgentConfig AGENT_CONFIG_DEFAULT = {
@@ -251,7 +251,7 @@ void robot_agent_free(RobotAgent* agent) {
     safe_free((void**)&agent->policy.bias_h2);
     safe_free((void**)&agent->policy.bias_h3);
     safe_free((void**)&agent->policy.bias_o);
-    /* ZSFZS-F022修复: 释放target_policy的8块内存，修复严重内存泄漏 */
+/* 释放target_policy的8块内存，修复严重内存泄漏 */
     safe_free((void**)&agent->target_policy.weights_ih);
     safe_free((void**)&agent->target_policy.weights_hh);
     safe_free((void**)&agent->target_policy.weights_hh2);
@@ -260,7 +260,7 @@ void robot_agent_free(RobotAgent* agent) {
     safe_free((void**)&agent->target_policy.bias_h2);
     safe_free((void**)&agent->target_policy.bias_h3);
     safe_free((void**)&agent->target_policy.bias_o);
-    /* ZSFA-FIX-P0-007: 释放UCB探索状态 */
+/* 释放UCB探索状态 */
     if (agent->ucb_explore_state) {
         exploration_ucb_free(agent->ucb_explore_state);
         agent->ucb_explore_state = NULL;
@@ -293,8 +293,8 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
     agent->policy.discount_factor = config->discount_factor;
 
     /* 分配3层DQN权重（Xavier初始化） */
-    /* ZSFZS-F022修复: 所有malloc添加NULL检查 */
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* 所有malloc添加NULL检查 */
+/* raw malloc → safe_malloc */
     if (sd > 0 && hd > 0) {
         agent->policy.weights_ih = (float*)safe_malloc((size_t)sd * hd * sizeof(float));
         agent->policy.bias_h1 = (float*)safe_malloc((size_t)hd * sizeof(float));
@@ -386,9 +386,9 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
     agent->self_awareness_level = 1;
     agent->confidence_score = 0.5f;
     agent->evolution_rate = 0.001f;
-    agent->training_step_count = 0;   /* ZSFX-012: Xavier初始化权重为随机值，训练步数从0开始 */
+    agent->training_step_count = 0; /* Xavier初始化权重为随机值，训练步数从0开始 */
 
-    /* ZSFA-FIX-P0-007: 初始化UCB探索策略 */
+/* 初始化UCB探索策略 */
     agent->ucb_explore_state = exploration_ucb_create(AGENT_ACTION_DIM, 0.01f);
 
     for (int i = 0; i < AGENT_STATE_DIM; i++) {
@@ -447,7 +447,7 @@ int robot_agent_act(RobotAgent* agent, float* action) {
     float explore = agent->policy.exploration_rate +
                     compute_curiosity(agent, agent->state_vec);
     if (AGENT_RAND_FLOAT < explore) {
-        /* ZSFA-FIX-P0-007: 使用UCB探索替代纯随机探索 */
+/* 使用UCB探索替代纯随机探索 */
         if (agent->ucb_explore_state) {
             /* 使用UCB从动作值中选择探索动作 */
             int selected = exploration_ucb_select(agent->ucb_explore_state,
@@ -558,7 +558,7 @@ int robot_agent_learn(RobotAgent* agent, const float* state,
             memcpy(agent->target_policy.bias_o, agent->policy.bias_o, (size_t)ad * sizeof(float));
     }
 
-    agent->training_step_count++;  /* ZSFX-012: 每次学习迭代递增训练步数 */
+    agent->training_step_count++; /* 每次学习迭代递增训练步数 */
     return 0;
 }
 
@@ -1009,7 +1009,7 @@ int robot_agent_load(RobotAgent* agent, const char* filepath) {
     safe_free((void**)&agent->policy.bias_h3);
     safe_free((void**)&agent->policy.bias_o);
 
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     if (sd > 0 && hd > 0) {
         agent->policy.weights_ih = (float*)safe_malloc((size_t)sd * hd * sizeof(float));
         if (agent->policy.weights_ih) fread(agent->policy.weights_ih, sizeof(float), sd * hd, f);
@@ -1084,7 +1084,7 @@ int robot_agent_closed_loop_step(RobotAgent* agent,
                         size_t copy_n = entry.data_size;
                         if (state_idx + copy_n > AGENT_STATE_DIM)
                             copy_n = AGENT_STATE_DIM - state_idx;
-                        /* ZSFBUILD: entry.data_buffer不存在，使用entry.data (uint8_t*) */
+/* entry.data_buffer不存在，使用entry.data (uint8_t*) */
                         memcpy(sensor_state + state_idx, entry.data, copy_n * sizeof(float));
                         state_idx += copy_n;
                     }
@@ -1143,7 +1143,7 @@ int robot_agent_closed_loop_step(RobotAgent* agent,
         }
     }
 
-    /* ZSFBUILD: action_vec不在RobotAgent中，动作已通过硬件接口输出 */
+/* action_vec不在RobotAgent中，动作已通过硬件接口输出 */
     return 0;
 }
 

@@ -114,7 +114,7 @@ struct OcrProcessor {
     int use_enhanced_segmentation;       /**< 是否使用增强分割 */
     CfCOcrNet* cfc_ocr_net;              /**< CfC-LNN OCR网络句柄（单一模型共享） */
     int use_cfc_ocr;                     /**< F-011: 优先使用CfC-LNN OCR网络识别 */
-    int cfc_ocr_is_trained;              /**< ZSFWS-M006: CfC OCR网络是否已完成训练 */
+    int cfc_ocr_is_trained; /**< CfC OCR网络是否已完成训练 */
     OcrCnnClassifier* cnn_classifier;    /**< CNN字符分类器（优先使用，回退到模板匹配） */
     /* H-002: N-gram语言模型存储 */
     void* lm_ngram_table;                /**< N-gram频率表（OcrNgram*） */
@@ -156,7 +156,7 @@ static int ocr_cnn_load_weights(OcrCnnClassifier* cnn, const char* filepath);
 static void ocr_cnn_free(OcrCnnClassifier* cnn);
 static OcrCnnClassifier* ocr_cnn_create(void);
 
-/* ZSFBUILD: 汉字字形渲染函数前向声明（纯C位图渲染） */
+/* 汉字字形渲染函数前向声明（纯C位图渲染） */
 static void ocr_render_char_glyph(uint16_t char_code, float* bitmap, int w, int h);
 
 /**
@@ -199,13 +199,12 @@ OcrConfig ocr_get_default_config(void) {
     return config;
 }
 
-/* ZSFWS-M013: CJK统一汉字Unicode范围宏定义 */
+/* CJK统一汉字Unicode范围宏定义 */
 #define CJK_UNIFIED_BEGIN  0x4E00
 #define CJK_UNIFIED_END    0x9FFF
 #define CJK_EXT_A_BEGIN    0x3400
 #define CJK_EXT_A_END      0x4DBF
 
-/* ZSFWS修复 P0-005: 使用CfC液态网络计算汉字视觉特征，替代数学哈希合成 */
 /* 前向声明 */
 static int cfc_based_char_feature_extract(OcrProcessor* processor, uint16_t codepoint,
                                            float* feature_out, int feature_dim);
@@ -367,7 +366,6 @@ OcrProcessor* ocr_processor_create(const OcrConfig* config) {
                 processor->char_templates[idx].avg_distance = 0.5f;
                 
                 if (processor->char_templates[idx].features) {
-                    /* ZSFWS修复 P0-005: 使用CfC液态视觉网络生成真实汉字视觉特征 */
                     int feat_dim = 64;
                     /* 在if/else外部声明渲染缓冲区，使两个分支都能访问 */
                     float rendered_char[32 * 32];
@@ -466,12 +464,12 @@ OcrProcessor* ocr_processor_create(const OcrConfig* config) {
     processor->text_detection_features = (float*)safe_malloc(processor->text_feature_dim * sizeof(float));
     
     // 创建CNN字符分类器（He初始化权重，未加载预训练模型时使用模板匹配回退）
-    processor->cnn_classifier = ocr_cnn_create();
+    processor->cnn_classifier = ocr_cnn_create;
     if (processor->cnn_classifier) {
         ocr_cnn_init_weights(processor->cnn_classifier);
     }
 
-    /* ZSFQQ-P2-005修复: 默认启用CfC-LNN液态OCR网络
+/* 默认启用CfC-LNN液态OCR网络
      * 纯液态神经网络OCR，符合系统'单一CfC液态网络'原则。
      * CNN仅作为CfC不可用时的备选分类器。 */
     {
@@ -534,7 +532,7 @@ int ocr_recognize(OcrProcessor* processor,
     }
     
     memset(result, 0, sizeof(OcrResult));
-    clock_t ocr_start = clock();
+    clock_t ocr_start = clock;
     
     // 1. 图像预处理
     float* processed_data = NULL;
@@ -1906,7 +1904,7 @@ static int load_char_templates(OcrProcessor* processor) {
 }
 
 /**
- * @brief 汉字字形位图渲染（ZSFBUILD修复：纯C实现的简单字形光栅化）
+ * @brief 汉字字形位图渲染（纯C实现的简单字形光栅化）
  * 
  * 将Unicode码点渲染为w×h的灰度位图。
  * 使用简单的笔画模板生成：对常用汉字使用预定义笔画位图。
@@ -2841,7 +2839,7 @@ int ocr_processor_load_model(OcrProcessor* processor, const char* model_path) {
         }
         processor->cfc_ocr_net = loaded_net;
         processor->use_cfc_ocr = 1;
-        processor->cfc_ocr_is_trained = 1; /* ZSFWS-M006: 模型加载成功标记已训练 */
+        processor->cfc_ocr_is_trained = 1; /* 模型加载成功标记已训练 */
         log_info("[OCR] ocr_processor_load_model: CfC OCR模型加载成功，路径=%s", model_path);
         return 0;
     }
@@ -2992,7 +2990,7 @@ int ocr_processor_train_model(OcrProcessor* processor,
     }
     log_info("[OCR] ocr_processor_train_model: 训练完成，共%d轮，%d个样本",
              num_epochs, num_samples);
-    processor->cfc_ocr_is_trained = 1; /* ZSFWS-M006: 训练完成后标记 */
+    processor->cfc_ocr_is_trained = 1; /* 训练完成后标记 */
     return 0;
 }
 
@@ -3305,7 +3303,7 @@ int ocr_extract_text_features(OcrProcessor* processor,
 }
 
 /**
- * @brief 提取字符特征用于识别（ZSFX-004深度实现：归一化+投影直方图+梯度方向）
+ * @brief 提取字符特征用于识别（深度实现：归一化+投影直方图+梯度方向）
  */
 int ocr_extract_char_features(OcrProcessor* processor,
                               const float* char_image, int width, int height,
@@ -3522,7 +3520,7 @@ static int ocr_cnn_init_weights(OcrCnnClassifier* cnn) {
         }
     }
     
-    /* ZSFQQ-P1-003修复: He初始化权重后可立即使用（无需外部预训练权重文件）
+/* He初始化权重后可立即使用（无需外部预训练权重文件）
      * He初始化提供了合理的随机初始权重，配合200+字符模板的网格密度特征，
      * CNN分类器可以产生有意义的初始分类结果，并随在线学习不断改进。 */
     cnn->weights_loaded = 1;

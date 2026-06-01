@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file distributed_training.c
  * @brief 分布式训练模块 - 完整TCP实现
  *
@@ -73,7 +73,7 @@
  * ============================================================================
  */
 
-#define SELFLNN_IMPLEMENTATION  /* ZSFZX-FIX-P1-001: 使distributed_training.h中结构定义可见 */
+#define SELFLNN_IMPLEMENTATION /* 使distributed_training.h中结构定义可见 */
 #include "distributed_internal.h"
 #include "selflnn/training/distributed_training.h"
 #include "selflnn/core/port_config.h"
@@ -1451,7 +1451,7 @@ SELFLNN_API int distributed_allreduce_ring(DistributedContext* ctx, float* data,
     return ring_allreduce_internal(ctx, data, count);
 }
 
-/* ZSF-ZNB修复S-007: 非阻塞流水线Ring AllReduce
+/*修复S-007: 非阻塞流水线Ring AllReduce
  * 标准Ring AllReduce中每个节点串行等待send/recv完成，
  * 非阻塞版本使用双缓冲区交替实现流水线重叠，
  * 在发送第k个chunk的同时接收第k-1个chunk，减少通信时间。 */
@@ -1541,7 +1541,7 @@ SELFLNN_API int distributed_allreduce_ring_nonblocking(DistributedContext* ctx, 
     return 0;
 }
 
-/* ZSF-ZNB修复S-007: MPI后端抽象层
+/*修复S-007: MPI后端抽象层
  * 在纯C约束下提供统一的分布式通信接口。
  * 当前使用TCP + Ring AllReduce，预留MPI/NCCL接口。
  * 编译时通过SELFLNN_USE_MPI宏切换到MPI后端。 */
@@ -2401,7 +2401,7 @@ void distributed_gradient_topk_decompress(float* output, size_t num_params,
  * =========================================================================== */
 
 int distributed_elastic_register_node(int node_id, const char* host, unsigned short port) {
-    /* ZSFDDD-D6-004b: 添加锁保护elastic上下文 */
+/* 添加锁保护elastic上下文 */
     DistributedContext* ctx = elastic_ctx_lock();
     if (!ctx || !host) { elastic_ctx_unlock(); return -1; }
     if (node_id < 0 || node_id >= ctx->num_nodes) { elastic_ctx_unlock(); return -2; }

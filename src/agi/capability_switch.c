@@ -7,11 +7,11 @@
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/cognition/self_cognition.h"
 #include "selflnn/cognition/metacognition.h"
-#include "selflnn/learning/multi_agent.h"   /* ZSFZS-F024: 多智能体系统启停控制 */
+#include "selflnn/learning/multi_agent.h" /* 多智能体系统启停控制 */
 #include <string.h>
 #include <stdio.h>
 
-/* ZSFAB P2-007修复: 跨平台互斥锁保护全局能力状态 */
+/* P2-007修复: 跨平台互斥锁保护全局能力状态 */
 #ifdef _WIN32
 #include <windows.h>
 static CRITICAL_SECTION g_cap_lock;
@@ -84,7 +84,7 @@ static const int g_default_states[CAP_COUNT] = {
 
 /* ========== 真实回调函数实现 ========== */
 
-/* ZSF-021修复: 子系统启用/禁用API — 真实实现
+/*修复: 子系统启用/禁用API — 真实实现
  * 
  * 每个set_enabled函数现在执行实际的控制操作：
  * - 线程池: 使用 thread_pool_pause/resume
@@ -128,7 +128,7 @@ int planning_system_set_enabled(void* planning, int enabled) {
     PlanningSystem* ps = (PlanningSystem*)planning;
     if (!ps) return -1;
     if (enabled) {
-        /* ZSFABC-F001修复: 激活规划系统 —— 重置状态以清空过期缓存计划 */
+/* 激活规划系统 —— 重置状态以清空过期缓存计划 */
         planning_system_reset(ps);
         log_info("[能力开关] 规划系统已激活（状态已重置）");
     } else {
@@ -143,7 +143,7 @@ int dialogue_processor_set_enabled(void* processor, int enabled) {
     DialogueProcessor* dp = (DialogueProcessor*)processor;
     if (!dp) return -1;
     if (enabled) {
-        /* ZSFABC-F001修复: 激活对话处理器 —— 清空旧上下文后重新初始化 */
+/* 激活对话处理器 —— 清空旧上下文后重新初始化 */
         dialogue_reset_state(dp);
         log_info("[能力开关] 对话处理器已激活（上下文已重置）");
     } else {
@@ -158,7 +158,7 @@ int self_cognition_set_enabled(void* sc, int enabled) {
     SelfCognitionSystem* scs = (SelfCognitionSystem*)sc;
     if (!scs) return -1;
     if (enabled) {
-        /* ZSFABC-F001修复: 激活自我认知 —— 重置监控状态并触发更新 */
+/* 激活自我认知 —— 重置监控状态并触发更新 */
         self_cognition_reset(scs);
         self_cognition_update(scs, SELF_COGNITION_STATE);
         log_info("[能力开关] 自我认知系统已激活（监控已重置并启动）");
@@ -175,7 +175,7 @@ int metacognition_set_enabled(void* mc, int enabled) {
     MetacognitionSystem* mcs = (MetacognitionSystem*)mc;
     if (!mcs) return -1;
     if (enabled) {
-        /* ZSFABC-F001修复: 激活元认知 —— 执行中性自评以恢复推理循环 */
+/* 激活元认知 —— 执行中性自评以恢复推理循环 */
         char buf[512];
         metacognition_neutral_self_assessment(mcs, 0, buf, sizeof(buf));
         log_info("[能力开关] 元认知系统已激活（自评循环已恢复）");
@@ -390,7 +390,7 @@ static int cap_check_multi_agent(void) {
     if (!ma) return 0;
     return multi_agent_get_enabled((MultiAgentSystem*)ma);
 }
-/* ZSFZS-F024修复: 多智能体协作启停控制
+/* 多智能体协作启停控制
  * 此前只设置标志位+日志，没有实际控制多智能体系统的启停。
  * 现在通过 multi_agent_set_enabled() 真实控制智能体活动、
  * 消息队列和任务调度，与其他深度集成开关（如自我学习→online_learner_set_enabled）一致。 */
@@ -707,7 +707,6 @@ static const int g_capability_deps[CAP_COUNT][CAP_COUNT] = {
 };
 
 /* 能力冲突关系矩阵 [A][B] = 1 表示 A和B 不能同时启用 */
-/* ZSFWS修复-L-015: 定义合理的能力冲突关系，而非全零矩阵 */
 static int g_capability_conflicts[CAP_COUNT][CAP_COUNT] = {0};
 
 static void capability_init_conflicts(void) {
@@ -745,7 +744,7 @@ int capability_check_conflict(CapabilityType type_a, CapabilityType type_b)
 {
     if (type_a < 0 || type_a >= CAP_COUNT || type_b < 0 || type_b >= CAP_COUNT)
         return -1;
-    /* ZSFWS-L-015: 确保冲突矩阵已初始化 */
+/* 确保冲突矩阵已初始化 */
     capability_ensure_conflicts_init();
     return g_capability_conflicts[type_a][type_b];
 }

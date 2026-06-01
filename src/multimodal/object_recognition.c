@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file object_recognition.c
  * @brief 增强物体识别与场景理解完整实现
  * 使用真实特征提取算法（HOG + 归一化互相关模板匹配）
@@ -6,7 +6,7 @@
 #include "selflnn/multimodal/object_recognition.h"
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/utils/memory_utils.h"
-#include "selflnn/utils/secure_random.h"  /* ZSFEEE-FIX-041: CfC Xavier初始化 */
+#include "selflnn/utils/secure_random.h" /* CfC Xavier初始化 */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -22,7 +22,7 @@
 /* 每个cell的像素数 */
 #define HOG_CELL_SIZE 8
 
-/* ZSFEEE-FIX-041: CfC深度学习管道常量 —— HOG特征维数=输入层，隐藏层=64，输出=类别数 */
+/* CfC深度学习管道常量 —— HOG特征维数=输入层，隐藏层=64，输出=类别数 */
 #define CFC_OR_INPUT_DIM  128
 #define CFC_OR_HIDDEN_DIM 64
 
@@ -31,7 +31,7 @@ struct ObjectRecognizer {
     int category_count;
     char category_names[OR_MAX_CATEGORIES][64];
     int initialized;
-    /* ZSFUSA-P1-008修复: 显式训练状态标志。
+/* 显式训练状态标志。
      * 0=未训练(使用HSV启发式默认类别模板)
      * 1=已训练(类别模板通过or_train_from_examples从真实数据学习)
      * 替代原有内联原型向量norm>0.25f的启发式判断。 */
@@ -43,7 +43,7 @@ struct ObjectRecognizer {
     int depth_map_w;
     int depth_map_h;
     int has_depth_map;
-    /* ZSFEEE-FIX-041: CfC深度学习管道 —— 输入层=HOG特征128维，隐藏层64维，输出层=类别数 */
+/* CfC深度学习管道 —— 输入层=HOG特征128维，隐藏层64维，输出层=类别数 */
     int is_cfc_trained;
     float cfc_hidden[CFC_OR_HIDDEN_DIM];
     float cfc_W_gx[CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM];
@@ -171,7 +171,7 @@ static float normalized_cross_correlation(const float* a, const float* b, int le
 }
 
 /* ======================================================================== */
-/*  ZSFEEE-FIX-041: CfC深度学习基础数学函数 —— 从image_recognition_deep.c移植  */
+/* CfC深度学习基础数学函数 —— 从image_recognition_deep.c移植  */
 /* ======================================================================== */
 
 static float _or_cfc_sig(float x) { return 1.0f / (1.0f + expf(-x)); }
@@ -181,7 +181,7 @@ static float _or_cfc_tanh_f(float x) {
     return (e2x - 1.0f) / (e2x + 1.0f);
 }
 
-/* ZSFEEE-FIX-041: Xavier初始化 —— 适用于tanh/sigmoid激活函数层 */
+/* Xavier初始化 —— 适用于tanh/sigmoid激活函数层 */
 static void _or_cfc_xavier_init(float* w, int fan_in, int fan_out) {
     float scale = sqrtf(2.0f / (float)(fan_in + fan_out));
     for (int i = 0; i < fan_in * fan_out; i++) {
@@ -192,7 +192,7 @@ static void _or_cfc_xavier_init(float* w, int fan_in, int fan_out) {
     }
 }
 
-/* ZSFEEE-FIX-041: 向量运算库 */
+/* 向量运算库 */
 static void _or_cfc_mat_vec_mul(const float* mat, const float* vec, float* out, int r, int c) {
     for (int i = 0; i < r; i++) {
         out[i] = 0.0f;
@@ -210,7 +210,7 @@ static float _or_cfc_vec_dot(const float* a, const float* b, int n) {
     float s = 0.0f; for (int i = 0; i < n; i++) s += a[i] * b[i]; return s;
 }
 
-/* ZSFEEE-FIX-041: Softmax归一化 */
+/* Softmax归一化 */
 static void _or_cfc_softmax(float* logits, int n) {
     float mv = logits[0];
     for (int i = 1; i < n; i++) if (logits[i] > mv) mv = logits[i];
@@ -219,7 +219,7 @@ static void _or_cfc_softmax(float* logits, int n) {
     if (sum > 1e-10f) for (int i = 0; i < n; i++) logits[i] /= sum;
 }
 
-/* ZSFEEE-FIX-041: CfC ODE步进 —— 核心连续时间液态神经网络前向传播
+/* CfC ODE步进 —— 核心连续时间液态神经网络前向传播
  * 公式: h(t+dt) = h(t)*exp(-dt/τ) + (1-exp(-dt/τ))*σ(W_gx·x+W_gh·h+b_g)⊙tanh(W_ax·x+W_ah·h+b_a) */
 static void _or_cfc_ode_step(const float* in, int in_dim,
                               const float* W_gx, const float* W_ax,
@@ -247,7 +247,7 @@ static void _or_cfc_ode_step(const float* in, int in_dim,
     safe_free((void**)&gate);
 }
 
-/* ZSFEEE-FIX-041: CfC ODE步反向传播 —— 计算参数梯度用于训练 */
+/* CfC ODE步反向传播 —— 计算参数梯度用于训练 */
 static void _or_cfc_ode_step_backward(const float* in, int in_dim,
                                        const float* W_gx, const float* W_ax,
                                        const float* W_gh, const float* W_ah,
@@ -335,7 +335,7 @@ ObjectRecognizer* object_recognizer_create(void) {
     or_obj->depth_map_h = 0;
     or_obj->has_depth_map = 0;
 
-    /* ZSFEEE-FIX-041: 初始化CfC深度学习管道 —— Xavier初始化权重，零初始化偏置和隐藏状态 */
+/* 初始化CfC深度学习管道 —— Xavier初始化权重，零初始化偏置和隐藏状态 */
     or_obj->is_cfc_trained = 0;
     or_obj->cfc_tau = 0.1f;
     or_obj->cfc_dt = 0.05f;
@@ -430,11 +430,11 @@ ObjectRecognizer* object_recognizer_create(void) {
 void object_recognizer_free(ObjectRecognizer* or_obj) { safe_free((void**)&or_obj); }
 
 /* ======================================================================== */
-/*  ZSFEEE-FIX-041: CfC深度学习前向传播 —— 核心分类管道                      */
+/* CfC深度学习前向传播 —— 核心分类管道                      */
 /* ======================================================================== */
 
 /**
- * @brief ZSFEEE-FIX-041: CfC前向传播 —— 将HOG特征输入CfC液态神经网络
+ * @brief CfC前向传播 —— 将HOG特征输入CfC液态神经网络
  * 管道: HOG特征(128维) → CfC ODE步进(隐藏层64维) → 线性分类头 → softmax概率
  * @param or_obj 识别器句柄
  * @param hog_features HOG特征向量 [128]
@@ -481,11 +481,11 @@ static int object_cfc_forward(ObjectRecognizer* or_obj, const float* hog_feature
 }
 
 /* ======================================================================== */
-/*  ZSFEEE-FIX-041: CfC深度学习训练 —— SGD + 交叉熵损失                      */
+/* CfC深度学习训练 —— SGD + 交叉熵损失                      */
 /* ======================================================================== */
 
 /**
- * @brief ZSFEEE-FIX-041: CfC训练函数 —— 使用SGD优化器 + 交叉熵损失
+ * @brief CfC训练函数 —— 使用SGD优化器 + 交叉熵损失
  * 训练流程:
  *   1. 前向传播: HOG特征 → CfC ODE → 线性分类头 → softmax概率
  *   2. 损失计算: 交叉熵 L = -log(p_correct)
@@ -619,7 +619,7 @@ int object_cfc_train(ObjectRecognizer* or_obj, const float* features,
         if (valid_samples > 0 && total_loss / (float)valid_samples < 0.05f) break;
     }
 
-    /* ZSFEEE-FIX-041: 训练完成后标记CfC管道已训练 */
+/* 训练完成后标记CfC管道已训练 */
     or_obj->is_cfc_trained = 1;
     return 0;
 }
@@ -709,7 +709,7 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                     obj->confidence = edge_response * 8.0f;
                     if (obj->confidence > 1.0f) obj->confidence = 1.0f;
 
-                    /* ZSFEEE-FIX-041: 分类管道升级 —— CfC深度学习优先，HOG模板匹配降级为回退 */
+/* 分类管道升级 —— CfC深度学习优先，HOG模板匹配降级为回退 */
                     int best_category = -1;
 
                     if (or_obj->is_cfc_trained) {
@@ -725,7 +725,7 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                         }
                     }
 
-                    /* ZSFEEE-FIX-041: 回退路径 —— HOG+NCC模板匹配
+/* 回退路径 —— HOG+NCC模板匹配
                      * 当CfC管道未训练或前向传播失败时启用 */
                     if (best_category < 0 && or_obj->is_trained) {
                         float best_ncc = -1.0f;
@@ -745,7 +745,7 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                         }
                     }
 
-                    /* ZSFUSA-P1-008: 使用显式训练状态标志（is_trained 和 is_cfc_trained） */
+/* 使用显式训练状态标志（is_trained 和 is_cfc_trained） */
                     obj->category_id = best_category;
                     if (best_category >= 0 && best_category < or_obj->category_count) {
                         snprintf(obj->category_name, sizeof(obj->category_name),
@@ -884,7 +884,7 @@ int or_detect_color(ObjectRecognizer* or_obj, const float* image, int w, int h, 
     return 0;
 }
 
-/* ZSFDDD-D7-005: 添加RGB→颜色名称映射，补全颜色识别功能 */
+/* 添加RGB→颜色名称映射，补全颜色识别功能 */
 static const struct {
     const char* name;
     float r, g, b;
@@ -990,7 +990,7 @@ int or_classify_scene(ObjectRecognizer* or_obj, const float* image, int w, int h
     if (!or_obj || !image || !type || !name) return -1;
     /* BUG-002修复: 使用多维特征（亮度+纹理+边缘+色温）进行场景分类
      * 替代原来仅靠平均亮度的降级处理
-     * ZSFWS修复 P2-008: 待ObjectRecognizer集成LNN后，使用LNN增强场景分类
+ *修复 P2-008: 待ObjectRecognizer集成LNN后，使用LNN增强场景分类
      * 替代当前纯启发式阈值评分（魔法数字），改用统一LNN推理 */
     float avg_brightness = 0.0f;
     float avg_variance = 0.0f;
@@ -1195,10 +1195,10 @@ int or_train_classifier(ObjectRecognizer* or_obj, const float* features,
         or_obj->category_count = categories;
     }
 
-    /* ZSFUSA-P1-008: 训练完成后设置显式训练标志 */
+/* 训练完成后设置显式训练标志 */
     or_obj->is_trained = 1;
 
-    /* ZSFEEE-FIX-041: 在HOG模板训练完成后同步训练CfC深度学习管道
+/* 在HOG模板训练完成后同步训练CfC深度学习管道
      * 使用相同训练数据进行SGD优化，epochs=10, lr=0.01 */
     object_cfc_train(or_obj, features, labels, samples, dim, categories, 10, 0.01f);
 
@@ -1206,7 +1206,7 @@ int or_train_classifier(ObjectRecognizer* or_obj, const float* features,
 }
 
 /*
- * ZSFEEE-FIX-041: or_train_cfc —— 独立CfC深度学习训练接口
+ *: or_train_cfc —— 独立CfC深度学习训练接口
  * 用于仅训练CfC管道，不影响HOG模板
  */
 int or_train_cfc(ObjectRecognizer* or_obj, const float* features,
@@ -1248,7 +1248,7 @@ int or_save_model(const ObjectRecognizer* or_obj, const char* filepath) {
     int scene = (int)or_obj->last_scene;
     if (fwrite(&scene, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
 
-    /* ZSFEEE-FIX-041: 写入CfC深度学习权重段标识和权重数据
+/* 写入CfC深度学习权重段标识和权重数据
      * 段标识: "CFC1" 4字节，用于v3格式识别
      * CfC权重按维度写入: W_gx, W_ax, W_gh, W_ah, b_g, b_a, W_cls, b_cls, 元参数 */
     const char cfc_magic[4] = {'C', 'F', 'C', '1'};
@@ -1307,9 +1307,9 @@ int or_load_model(ObjectRecognizer* or_obj, const char* filepath) {
     }
 
     or_obj->initialized = 1;
-    or_obj->is_trained = 1;  /* ZSFUSA-P1-008: 模型加载成功后标记为已训练 */
+    or_obj->is_trained = 1; /* 模型加载成功后标记为已训练 */
 
-    /* ZSFEEE-FIX-041: 尝试读取CfC深度学习权重段（向后兼容SLO2格式）
+/* 尝试读取CfC深度学习权重段（向后兼容SLO2格式）
      * 检查是否存在"CFC1"段标识，若存在则加载CfC权重
      * 若文件到此结束（v2格式），则CfC保持未训练状态 */
     char cfc_check[4] = {0, 0, 0, 0};

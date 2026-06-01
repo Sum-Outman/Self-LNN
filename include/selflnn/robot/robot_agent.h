@@ -1,4 +1,4 @@
-#ifndef SELFLNN_ROBOT_AGENT_H
+﻿#ifndef SELFLNN_ROBOT_AGENT_H
 #define SELFLNN_ROBOT_AGENT_H
 
 #include <stddef.h>
@@ -137,8 +137,8 @@ typedef struct {
     int self_awareness_level;
     float confidence_score;
     float curiosity_factor;
-    int training_step_count;   /* ZSFX-012: DQN策略网络训练步数，推理前验证 */
-    void* ucb_explore_state;   /* ZSFA-FIX-P0-007: UCB探索策略状态 */
+    int training_step_count; /* DQN策略网络训练步数，推理前验证 */
+    void* ucb_explore_state; /* UCB探索策略状态 */
 } RobotAgent;
 
 typedef struct {

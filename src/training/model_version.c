@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file model_version.c
  * @brief 模型版本管理模块实现
  *
@@ -23,7 +23,7 @@
 #include <string.h>
 #include <math.h>
 #include <sys/stat.h>
-/* ZSFZS-F013修复: 跨平台目录创建宏 */
+/* 跨平台目录创建宏 */
 #ifdef _WIN32
 #include <direct.h>
 #define mkdir_p(path) _mkdir(path)

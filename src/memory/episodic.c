@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file episodic.c
  * @brief 情景记忆系统实现
  * 
@@ -534,7 +534,6 @@ int episodic_memory_get_stats(const EpisodicMemory* memory, size_t* total_events
     }
     
     if (avg_association) {
-        /* ZSF-040修复: 从真实关联索引中计算平均关联强度 */
         size_t total_assoc = 0;
         float sum_assoc = 0.0f;
         for (size_t i = 0; i < memory->event_count && i < 256; i++) {

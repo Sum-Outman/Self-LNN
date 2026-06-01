@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file semantic_network.c
  * @brief 语义网络系统实现
  * 
@@ -10,8 +10,8 @@
 #define SELFLNN_KNOWLEDGE_INTERNAL  /* Z-001修复: 访问KnowledgeGraph完整结构体(kg->nodes/kg->edges) */
 
 #include "selflnn/knowledge/semantic_network.h"
-#include "selflnn/knowledge/knowledge.h"          /* ZSFWS: KnowledgeBase/KnowledgeEntry */
-#include "selflnn/knowledge/knowledge_graph.h"    /* ZSFWS: KnowledgeGraph/GraphNode */
+#include "selflnn/knowledge/knowledge.h" /* KnowledgeBase/KnowledgeEntry */
+#include "selflnn/knowledge/knowledge_graph.h" /* KnowledgeGraph/GraphNode */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
@@ -1550,7 +1550,7 @@ int semantic_analogy_find(const SemanticNetwork* net, const char* concept_a,
             float structural_sim = 0.0f;
             if (r->target && r->target->embedding && net->relations[src_rel_idx]->target &&
                 net->relations[src_rel_idx]->target->embedding) {
-                /* ZSFEEE-FIX-015: 使用实际embedding_size替代硬编码64维，
+/* 使用实际embedding_size替代硬编码64维，
                  * 确保不同维度嵌入向量的余弦相似度计算正确 */
                 size_t emb_size = r->target->embedding_size;
                 if (emb_size == 0 || emb_size != net->relations[src_rel_idx]->target->embedding_size) {
@@ -1766,7 +1766,7 @@ SemanticNetwork* semantic_network_load(const char* filename) {
 }
 
 /* ============================================================================
- * ZSFWS-013修复: semantic_network_infer —— 语义网络推理
+ *修复: semantic_network_infer —— 语义网络推理
  * 头文件已声明但原.c缺失实现，导致knowledge_integration.c链接失败。
  * 基于扩散激活和关系传递机制实现多步推理。
  * Z-001修复: 更正API签名 —— rel->source_id → rel->source->id (SemanticRelation使用Concept*指针)
@@ -1835,7 +1835,7 @@ size_t semantic_network_infer(SemanticNetwork* network,
 }
 
 /* ============================================================================
- * ZSFWS-014修复: semantic_network_import_from_knowledge_base
+ *修复: semantic_network_import_from_knowledge_base
  * 从知识库导入概念和关系到语义网络
  * Z-001修复: 更正所有API签名
  *   - semantic_network_add_concept 需要8个参数,返回Concept*
@@ -1892,7 +1892,7 @@ int semantic_network_import_from_knowledge_base(SemanticNetwork* network,
 }
 
 /* ============================================================================
- * ZSFWS-015修复: semantic_network_import_from_knowledge_graph
+ *修复: semantic_network_import_from_knowledge_graph
  * 从知识图谱导入节点和边到语义网络
  * Z-001修复: 更正所有API签名
  *   - graph->nodes和graph->edges通过SELFLNN_KNOWLEDGE_INTERNAL访问完整结构
@@ -1963,7 +1963,7 @@ int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
     return imported;
 }
 
-/* ZSFUSA: 语义网络概念相似度计算 */
+/* 语义网络概念相似度计算 */
 float semantic_network_concept_similarity(SemanticNetwork* network,
                                           Concept* concept1, Concept* concept2,
                                           SimilarityMetric metric) {

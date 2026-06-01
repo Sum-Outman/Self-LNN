@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 训练可视化面板 - WebSocket实时推送集成
  * 将后端推送的训练数据实时映射到前端可视化图表和监控面板
  */
@@ -32,7 +32,7 @@ class TrainingPushManager {
         this.logFilter = 'all';
         this.initialized = false;
         this._pollTimer = null;
-        this.lastUpdateTime = 0;    /* ZSFNO2-F004: WebSocket数据时效性追踪 */
+        this.lastUpdateTime = 0; /* WebSocket数据时效性追踪 */
     }
 
     init() {
@@ -150,7 +150,7 @@ class TrainingPushManager {
         }).bind(this);
         window.SelfLnnWebSocket.on('multimodal_data', this._wsMultimodalDataHandler);
 
-        /* ZSFEEE-FIX-DEEP-013: 补全11个后端广播但前端未监听的WS事件类型 */
+/* 补全11个后端广播但前端未监听的WS事件类型 */
         this._wsSafetyAlertHandler = (function(data) {
             console.warn('[TrainingPush] 安全告警:', data);
             if (data && data.message && typeof window.showNotification === 'function') {
@@ -261,7 +261,7 @@ class TrainingPushManager {
     }
 
     _handleTrainingProgress(data) {
-        /* ZSFNO2-F004: 记录数据更新时间戳 */
+/* 记录数据更新时间戳 */
         this.lastUpdateTime = Date.now();
         /* FIX-F2-CRIT-6: 后端发送epoch/loss/progress/progress_pct,映射到前端字段 */
         if (data.epoch !== undefined) data.current_epoch = data.epoch;
@@ -358,7 +358,7 @@ class TrainingPushManager {
     }
 
     _handleTrainingMetrics(data) {
-        /* ZSFNO2-F004: 记录数据更新时间戳 */
+/* 记录数据更新时间戳 */
         this.lastUpdateTime = Date.now();
         if (data.gradient_mean !== undefined && window.visualizationManager) {
             window.visualizationManager.updateGradientData(

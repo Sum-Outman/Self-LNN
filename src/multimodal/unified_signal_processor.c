@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file unified_signal_processor.c
  * @brief 多模态统一信号处理器核心实现
  * 
@@ -555,7 +555,7 @@ void unified_signal_processor_reset(UnifiedSignalProcessor* processor) {
     }
     
     // 重置统计信息
-    /* ZSFWS-NEW-UNIFIED修复: 质量指标在重置时设为0而非假值0.5f。
+/* 质量指标在重置时设为0而非假值0.5f。
      * encoding_quality/cross_modal_alignment/temporal_consistency
      * 在每次unified_signal_processor_encode()处理时根据实测信号能量更新。 */
     processor->encoding_quality = 0.0f;
@@ -775,12 +775,12 @@ UnifiedSignalProcessor* unified_signal_processor_create(const UnifiedSignalProce
             if (processor->unified_projection_matrix && processor->unified_projection_bias) {
                 float xavier_limit = sqrtf(6.0f / (float)(total_dim + config->unified_dimension));
                 for (size_t i = 0; i < matrix_size; i++) {
-                    /* ZSFQQ-P2-006修复: 使用secure_random_float统一随机数生成，与其他模块Xavier初始化保持一致 */
+/* 使用secure_random_float统一随机数生成，与其他模块Xavier初始化保持一致 */
                     float r = secure_random_float();
                     processor->unified_projection_matrix[i] = (r * 2.0f - 1.0f) * xavier_limit;
                 }
                 memset(processor->unified_projection_bias, 0, config->unified_dimension * sizeof(float));
-                /* ZSFLYF-P1-003修复: 投影矩阵不再锁定。
+/* 投影矩阵不再锁定。
                  * 锁定为Xavier随机初始化意味着跨模态投影永远无法学习。
                  * 投影矩阵应参与训练，通过反向传播学习有意义的跨模态映射。 */
                 processor->projection_locked = 0;
@@ -838,7 +838,7 @@ UnifiedSignalProcessor* unified_signal_processor_create(const UnifiedSignalProce
     }
     
     processor->is_initialized = 1;
-    /* ZSFLYF-P1-010修复: 初始化质量评估应从实际编码质量计算，而非硬编码固定值。
+/* 初始化质量评估应从实际编码质量计算，而非硬编码固定值。
      * 初始状态下编码质量、跨模态对齐度、时序一致性均为未评估状态。 */
     processor->encoding_quality = 0.0f;
     processor->cross_modal_alignment = 0.0f;
@@ -908,7 +908,7 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
         return -1;
     }
     
-    /* ZSFWS-F009修复: 记录流水线阶段实测延迟 */
+/* 记录流水线阶段实测延迟 */
     clock_t t_encode_start = clock();
     clock_t t_stage_start = t_encode_start;
     
@@ -1141,7 +1141,7 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
     // 清理
     safe_free((void**)&unified_input);
     
-    /* ZSFWS-F009修复: 记录编码阶段实测延迟 */
+/* 记录编码阶段实测延迟 */
     {
         clock_t t_end = clock();
         double elapsed_ms = (double)(t_end - t_encode_start) * 1000.0 / CLOCKS_PER_SEC;
@@ -1242,7 +1242,7 @@ int unified_signal_processor_encode_to_lnn(UnifiedSignalProcessor* processor,
         return -1;
     }
 
-    /* ZSFLYF-P3-006修复: 返回LNN实际输出维度(unified_dimension)而非信号维度。
+/* 返回LNN实际输出维度(unified_dimension)而非信号维度。
      * signal_dimension是中间信号维度，调用者期望的是LNN输出维度。 */
     return (int)processor->config.unified_dimension;
 }
@@ -1284,7 +1284,7 @@ UnifiedSignalProcessorConfig unified_signal_processor_get_default_config(void) {
 
 /**
  * @brief 获取指定阶段的流水线统计信息
- * ZSFWS-F009修复: 使用实测延迟替代虚假维度估算值
+ *修复: 使用实测延迟替代虚假维度估算值
  */
 int unified_signal_processor_get_pipeline_stats(UnifiedSignalProcessor* processor,
                                                 PipelineStage stage,

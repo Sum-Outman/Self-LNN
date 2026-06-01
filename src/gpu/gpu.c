@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu.c
  * @brief GPU加速接口实现 - 核心调度层
  *
@@ -13,7 +13,7 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_memory_pool.h"
 #include "selflnn/gpu/auto_kernel_optimization.h"
-#include "selflnn/utils/logging.h"        /* ZSFUSA: log_debug/log_warn宏 */
+#include "selflnn/utils/logging.h" /* log_debug/log_warn宏 */
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
@@ -276,7 +276,7 @@ static pthread_mutex_t g_gpu_state_lock = PTHREAD_MUTEX_INITIALIZER;
 /* ============================================================================
  * CPU硬件检测静态辅助函数
  *
- * ZSFUSA-O02: CPU检测统一入口。
+ *: CPU检测统一入口。
  * 本文件中的cpu_hw_*系列函数是整个项目中CPU硬件检测的权威实现。
  * 其他模块（gpu_memory_pool.c、gpu_cpu.c）中存在的重复检测代码
  * 应在后续版本统一迁移至此，消除三重重复。
@@ -408,7 +408,7 @@ static unsigned int cpu_hw_detect_simd_x86(void) {
     if (ecx1 & (1U << 9))  flags |= CPU_SIMD_SSSE3;
     if (ecx1 & (1U << 19)) flags |= CPU_SIMD_SSE41;
     if (ecx1 & (1U << 20)) flags |= CPU_SIMD_SSE42;
-    if (ecx1 & (1U << 12)) flags |= CPU_SIMD_FMA;  /* ZSFEEE-FIX-014: FMA融合乘加 */
+    if (ecx1 & (1U << 12)) flags |= CPU_SIMD_FMA; /* FMA融合乘加 */
     if (ecx1 & (1U << 28)) {
         flags |= CPU_SIMD_AVX;
         unsigned int ebx7 = 0;
@@ -646,7 +646,7 @@ static int cpu_hw_supports_half(void) {
 }
 
 /* ============================================================================
- * ZSFEEE-FIX-014: 统一CPU硬件检测公开接口
+ *: 统一CPU硬件检测公开接口
  *
  * 此函数是项目中所有CPU硬件检测的唯一权威入口。
  * gpu_memory_pool.c 和 gpu_cpu.c 统一调用此接口获取CPU信息。
@@ -734,7 +734,7 @@ static int gpu_cpu_backend_get_device_count(void) {
 
 static int gpu_cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
     if (!info || device_index != 0) return -1;
-    /* ZSFEEE-FIX-014: 使用统一CPU硬件检测接口 */
+/* 使用统一CPU硬件检测接口 */
     return gpu_hardware_get_cpu_info(info);
 }
 
@@ -840,7 +840,7 @@ static int gpu_cpu_memory_copy_from_device_async(void* dst, GpuMemory* src, size
     return gpu_cpu_memory_copy_from_device(dst, src, size);
 }
 
-/* ZSFUSA-V01: CPU内核调度器前向声明 */
+/* CPU内核调度器前向声明 */
 static void cpu_kernel_dispatcher(void* user_data);
 
 static GpuKernel* gpu_cpu_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
@@ -860,9 +860,9 @@ static GpuKernel* gpu_cpu_kernel_create(GpuContext* context, const char* kernel_
     kern->arg_values = NULL;
     kern->arg_sizes = NULL;
     kern->work_dim = 1;
-    /* ZSFUSA-V01修复: 设置CPU调度器, 不再空执行 */
+/* 设置CPU调度器, 不再空执行 */
     kern->cpu_function = cpu_kernel_dispatcher;
-    /* ZSFEEE-FIX-DEEP-001: user_data不得指向自身, 否则safe_free会double-free堆损坏 */
+/* user_data不得指向自身, 否则safe_free会double-free堆损坏 */
     kern->user_data = NULL;
     kern->backend_data = NULL;
     return (GpuKernel*)kern;
@@ -880,7 +880,7 @@ static void gpu_cpu_kernel_free(GpuKernel* kernel) {
         safe_free((void**)&kern->arg_values);
     }
     if (kern->arg_sizes) safe_free((void**)&kern->arg_sizes);
-    /* ZSFEEE-FIX-DEEP-001: user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
+/* user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
     safe_free((void**)&kern);
 }
 
@@ -909,7 +909,7 @@ static int gpu_cpu_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t arg_s
     return 0;
 }
 
-/* ZSFUSA-V01: CPU内核通用执行调度表
+/* CPU内核通用执行调度表
  * 根据内核名称执行真实计算，不再空返回。
  * 支持常见神经网络算子：matmul、激活函数、归一化等 */
 typedef void (*cpu_compute_fn)(const float* a, const float* b, float* c,
@@ -1130,7 +1130,7 @@ static void cpu_kernel_dispatcher(void* user_data) {
     }
 }
 
-/* ZSFUSA-V01: CPU内核执行 - 通过cpu_function调度器执行真实计算 */
+/* CPU内核执行 - 通过cpu_function调度器执行真实计算 */
 static int gpu_cpu_kernel_execute(GpuKernel* kernel, size_t global_work_size, size_t local_work_size) {
     (void)global_work_size; (void)local_work_size;
     struct GpuKernel* kern = (struct GpuKernel*)kernel;
@@ -1330,7 +1330,7 @@ static void kernel_cache_destroy(struct GpuContext* ctx) {
             struct GpuKernel* kern = ctx->kernel_cache[i].kernel;
             if (kern->kernel_source) safe_free((void**)&kern->kernel_source);
             if (kern->kernel_name) safe_free((void**)&kern->kernel_name);
-            /* ZSFEEE-FIX-DEEP-001: user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
+/* user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
             if (kern->arg_values) {
                 for (int a = 0; a < kern->arg_count; a++) {
                     if (kern->arg_values[a]) safe_free((void**)&kern->arg_values[a]);
@@ -1389,7 +1389,7 @@ static int kernel_cache_evict_one_lru(struct GpuContext* ctx) {
     if (kern) {
         if (kern->kernel_source) safe_free((void**)&kern->kernel_source);
         if (kern->kernel_name) safe_free((void**)&kern->kernel_name);
-        /* ZSFEEE-FIX-DEEP-001: user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
+/* user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
         if (kern->arg_values) {
             for (int a = 0; a < kern->arg_count; a++) {
                 if (kern->arg_values[a]) safe_free((void**)&kern->arg_values[a]);
@@ -2176,7 +2176,7 @@ int gpu_device_reset(GpuContext* context) {
     return iface->device_reset(context);
 }
 
-/* ZSFEEE-FIX-DEEP-EXT-001: gpu_get_temperature 真实实现
+/* gpu_get_temperature 真实实现
  * 通过操作系统文件系统接口读取GPU/CPU温度（零外部库依赖）
  * 调用者(training_monitor.c:830)仅在SELFLNN_GPU_ENABLED宏下使用 */
 float gpu_get_temperature(GpuContext* context) {
@@ -2348,7 +2348,7 @@ float gpu_get_temperature(GpuContext* context) {
     return -1.0f;
 }
 
-/* ZSFEEE-FIX-DEEP-EXT-002: gpu_get_utilization 真实实现
+/* gpu_get_utilization 真实实现
  * 通过操作系统文件系统接口读取GPU利用率（零外部库依赖）
  * 调用者(training_monitor.c:857)仅在SELFLNN_GPU_ENABLED宏下使用 */
 float gpu_get_utilization(GpuContext* context) {
@@ -2513,7 +2513,7 @@ size_t gpu_suggest_work_group(GpuContext* context, size_t global_size,
         global_size, max_work_group_size, kernel_type);
 }
 
-/* ZSFX-P1: 自动kernel优化器数据库管理包装器 */
+/* 自动kernel优化器数据库管理包装器 */
 int gpu_kernel_optimizer_clear_cache(GpuContext* context) {
     if (!context) return -1;
     struct GpuContext* ctx = GPU_TO_INTERNAL(context);
@@ -2765,7 +2765,7 @@ void gpu_kernel_cache_clear(GpuContext* context) {
             struct GpuKernel* kern = ctx->kernel_cache[i].kernel;
             if (kern->kernel_source) safe_free((void**)&kern->kernel_source);
             if (kern->kernel_name) safe_free((void**)&kern->kernel_name);
-            /* ZSFEEE-FIX-DEEP-001: user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
+/* user_data不是独立分配的内存, 禁止safe_free, 防止double-free堆损坏 */
             if (kern->arg_values) {
                 for (int a = 0; a < kern->arg_count; a++) {
                     if (kern->arg_values[a]) safe_free((void**)&kern->arg_values[a]);
@@ -3253,7 +3253,6 @@ int gpu_train_compile_kernels(GpuContext* context, const GpuTrainConfig* config)
 int gpu_sgd_update(GpuContext* context, float* weights, const float* gradients,
                    size_t size, float learning_rate, float weight_decay) {
     if (!context || !weights || !gradients || size == 0) return -1;
-    /* ZSF999XQ-GPU-H1修复: 使用SIMD加速替代标量循环 */
     extern void simd_sgd_update_batch(float* w, const float* g, size_t n,
                                        float lr, float wd);
     simd_sgd_update_batch(weights, gradients, size, learning_rate, weight_decay);
@@ -3264,7 +3263,6 @@ int gpu_momentum_update(GpuContext* context, float* weights, const float* gradie
                          size_t size, float learning_rate, float momentum,
                          float* velocity, float weight_decay) {
     if (!context || !weights || !gradients || size == 0 || !velocity) return -1;
-    /* ZSF999XQ-GPU-H1修复: SIMD加速 */
     extern void simd_momentum_update_batch(float* w, const float* g, size_t n,
                                             float lr, float mom, float* vel,
                                             float wd);
@@ -3277,7 +3275,6 @@ int gpu_adam_update(GpuContext* context, float* weights, const float* gradients,
                     size_t size, float learning_rate, float beta1, float beta2,
                     float epsilon, int step, float* m, float* v, float weight_decay) {
     if (!context || !weights || !gradients || size == 0 || !m || !v) return -1;
-    /* ZSF999XQ-GPU-H1修复: SIMD加速替代标量循环 */
     extern void simd_adam_update_batch(float* w, const float* g, size_t n,
                                         float lr, float b1, float b2, float eps,
                                         int t, float* m_buf, float* v_buf,
@@ -3876,7 +3873,7 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
                 }
                 free(c_mean); free(c_var);
             }
-            break;  /* ZSFA-FIX-F-009: 防止Metal分支fall-through到Vulkan */
+            break; /* 防止Metal分支fall-through到Vulkan */
         case GPU_BACKEND_VULKAN:
             if (vulkan_batch_norm_backward != NULL) {
                 /* Vulkan接口差异：需要预先计算mean/var */
@@ -4260,7 +4257,7 @@ int gpu_is_cpu_backend(void) {
     return (g_active_backend == GPU_BACKEND_CPU && g_gpu_global_initialized) ? 1 : 0;
 }
 
-/* ZSFUSA: GPU可用性检测（全局快速查询） */
+/* GPU可用性检测（全局快速查询） */
 int gpu_is_available(void) {
     return (g_gpu_global_initialized && g_active_backend != GPU_BACKEND_CPU) ? 1 : 0;
 }

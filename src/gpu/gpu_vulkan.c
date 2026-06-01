@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_vulkan.c
  * @brief Vulkan GPU后端完整实现
  * 
@@ -19,7 +19,7 @@
  * 更新日期：2026-04-16（完整实现）
  * 版本：2.0.0（完整实现版本）
  * 
- * ZSFWS修复 P1-002: CfC内核计算已使用SIMD加速CPU路径 + kernel_execute路由，不再无条件下发CPU。Vulkan SPIR-V CFC内核可在后续版本中进一步优化。
+ *修复 P1-002: CfC内核计算已使用SIMD加速CPU路径 + kernel_execute路由，不再无条件下发CPU。Vulkan SPIR-V CFC内核可在后续版本中进一步优化。
  */
 
 
@@ -758,14 +758,14 @@ typedef struct VulkanKernel {
     VulkanContext* vulkan_context;
     char* kernel_name;
     unsigned int workgroup_size[3];
-    /* ZSFWS-S004修复: 描述符集持久化存储
+/* 描述符集持久化存储
      * 之前 descriptor_set/descriptor_pool 在管线创建后即被销毁,
      * 导致内核执行时无法将存储缓冲区绑定到着色器。
      * 现在持久化保存,执行前通过 vkCmdBindDescriptorSets 绑定。 */
     VkDescriptorSet descriptor_set;
     VkDescriptorPool descriptor_pool;
     unsigned int descriptor_buffer_count;  /* 绑定的缓冲区数量 */
-    /* ZSFWS-S004: 持久化绑定的GPU缓冲区句柄
+/* 持久化绑定的GPU缓冲区句柄
      * 每个内核需要访问 input/weight/output 三个StorageBuffer。
      * 在 dispatch 前通过 vkUpdateDescriptorSets 写入实际 VkBuffer。 */
     VkBuffer io_buffers[3];        /* [0]=input, [1]=weight, [2]=output */
@@ -3769,7 +3769,7 @@ static unsigned int* generate_spirv_binary(const char* kernel_name, size_t* out_
 /**
  * @brief 编译GLSL计算着色器为SPIR-V字节码
  *
- * ZSFWS-S003修复: 优先使用进程内SPIR-V生成器，glslangValidator作为回退方案。
+ *修复: 优先使用进程内SPIR-V生成器，glslangValidator作为回退方案。
  * 生成器支持matmul、conv2d、elementwise、cfc四种内核的完整SPIR-V二进制。
  * CfC液态神经网络内核（cfc_ode_step/cfc_forward_step/cfc_liquid_tau等）
  * 本质是逐元素数学运算（sigmoid/tanh/乘法/加法），基于elementwise SPIR-V模板。
@@ -3803,7 +3803,7 @@ static unsigned int* compile_glsl_to_spirv(const char* glsl_source, size_t* spir
                        strstr(glsl_source, "in_channels") || strstr(glsl_source, "kernel_h")) {
                 kernel_name = "conv2d";
             }
-            /* ZSFWS-S003: 检测CfC液态神经网络内核
+/* 检测CfC液态神经网络内核
              * cfc_ode_step/cfc_forward_step/cfc_liquid_tau/cfc_multi_timescale
              * 本质是逐元素数学运算（sigmoid/tanh/指数/乘法/加法）
              * 此类内核的函数体包含 CfC 闭式解的特征运算符 */
@@ -4085,7 +4085,7 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
     }
     
     // 创建管线布局（使用推送常量 + 描述符集）
-    /* ZSFWS-S004修复: 添加描述符集布局到管线布局
+/* 添加描述符集布局到管线布局
      * 之前 setLayoutCount=0 导致 SPIR-V 着色器的 StorageBuffer 变量无法绑定,
      * 所有缓冲区数据仅通过 Push Constants(最大256字节)传递,
      * 大数据张量(input/output/weight)无法通过着色器访问。
@@ -4164,7 +4164,7 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
     layout_info.pPushConstantRanges = &push_constant_range;
     
     result = vkCreatePipelineLayout(vulkan_context->device, &layout_info, NULL, &vulkan_kernel->pipeline_layout);
-    /* ZSFWS-S004: ds_layout已注入管线布局,按Vulkan规范可安全销毁 */
+/* ds_layout已注入管线布局,按Vulkan规范可安全销毁 */
     vkDestroyDescriptorSetLayout(vulkan_context->device, ds_layout, NULL);
     ds_layout = NULL;
     if (result != VK_SUCCESS || !vulkan_kernel->pipeline_layout) {
@@ -4230,7 +4230,7 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
 }
 
 /**
- * @brief ZSFWS-S004: 设置Vulkan内核的IO缓冲区
+ * @brief 设置Vulkan内核的IO缓冲区
  * 在dispatch前将input/weight/output的VkBuffer绑定到描述符集。
  * 调用者必须确保缓冲区在dispatch期间保持有效。
  * @param gpu_kernel 内核句柄
@@ -4276,7 +4276,7 @@ static void vulkan_backend_kernel_free(GpuKernel* kernel) {
         if (vulkan_kernel->shader_module) {
             vkDestroyShaderModule(vulkan_kernel->vulkan_context->device, vulkan_kernel->shader_module, NULL);
         }
-        /* ZSFWS-S004: 释放持久化描述符集 */
+/* 释放持久化描述符集 */
         if (vulkan_kernel->descriptor_pool) {
             vkDestroyDescriptorPool(vulkan_kernel->vulkan_context->device,
                                      vulkan_kernel->descriptor_pool, NULL);
@@ -4464,7 +4464,7 @@ static int vulkan_backend_kernel_execute(GpuKernel* kernel, size_t global_work_s
     size_t workgroup_count = (global_work_size + local_work_size - 1) / local_work_size;
     if (workgroup_count == 0) workgroup_count = 1;
 
-    /* ZSFWS-S004修复: 绑定描述符集 — 将存储缓冲区(input/weight/output)连接到着色器
+/* 绑定描述符集 — 将存储缓冲区(input/weight/output)连接到着色器
      * vkCmdBindDescriptorSets必须在vkCmdDispatch之前调用,否则着色器无法访问缓冲区数据。
      * 首先更新描述符写入实际的VkBuffer句柄,然后绑定到命令缓冲区。 */
     if (vulkan_kernel->descriptor_set && vkCmdBindDescriptorSets && vkUpdateDescriptorSets) {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file npu_common.c
  * @brief NPU后端公共代码提取 —— 消除Ascend/Cambricon/TPU之间的重复
  *
@@ -29,7 +29,7 @@
 #include <stdint.h>
 #include <math.h>
 
-/* ZSFUSA-P0-006: SIMD intrinsics headers for real vectorized computation */
+/* SIMD intrinsics headers for real vectorized computation */
 #if defined(__AVX2__) || defined(__AVX__) || defined(__SSE__) || defined(__SSE2__)
 #include <immintrin.h>
 #endif
@@ -55,16 +55,13 @@ size_t npu_common_get_system_memory_total(void) {
     MEMORYSTATUSEX ms;
     ms.dwLength = sizeof(ms);
     if (GlobalMemoryStatusEx(&ms)) return (size_t)ms.ullTotalPhys;
-    /* ZSFWS修复 P3-005: API失败时返回0而非硬编码8GB */
     return 0;
 #elif defined(__linux__)
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_size = sysconf(_SC_PAGE_SIZE);
     if (pages > 0 && page_size > 0) return (size_t)pages * (size_t)page_size;
-    /* ZSFWS修复 P3-005: API失败时返回0而非硬编码8GB */
     return 0;
 #else
-    /* ZSFWS修复 P3-005: API失败时返回0而非硬编码8GB */
     return 0;
 #endif
 }
@@ -220,7 +217,7 @@ void npu_common_fill_device_info(GpuDeviceInfo* info, int device_id,
     info->free_memory = free_mem;
     info->compute_units = compute_units;
     info->max_work_group_size = 256;
-    /* ZSFWS修复 P2-001: 从计算单元数和内存带宽智能估算时钟频率，
+/*修复 P2-001: 从计算单元数和内存带宽智能估算时钟频率，
      * 半精度支持改为基于计算能力推断而非硬编码false */
     if (compute_units >= 80) {
         info->clock_speed = 1500.0f;  /* 高端NPU 1.5GHz */
@@ -384,7 +381,7 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
     if (!kernel || count == 0) return -1;
     if (kernel->arg_count < 2) return -1;
 
-    /* ZSFWS-006修复: 首次CPU回退时记录日志，告知用户实际计算设备 */
+/* 首次CPU回退时记录日志，告知用户实际计算设备 */
     static int cpu_fallback_logged = 0;
     if (!cpu_fallback_logged) {
         log_info("[GPU硬件自适应] NPU/GPU原生SDK未检测到,"
@@ -449,7 +446,7 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
             int M = dims[0] > 0 ? dims[0] : (int)sqrtf((float)count);
             int N = dims[1] > 0 ? dims[1] : M;
             int K = dims[2] > 0 ? dims[2] : M;
-            /* ZSFWS修复 P0-001: 在x86/ARM平台上使用SIMD优化的矩阵乘法，
+/*修复 P0-001: 在x86/ARM平台上使用SIMD优化的矩阵乘法，
              * 替代原始的三层嵌套标量循环，4元素并行展开提升吞吐量 */
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64) || \
     defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || defined(_M_ARM64)
@@ -465,7 +462,7 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
             kernel->is_compiled = 1; return 0;
         }
     }
-    /* ZSFWS修复 P0-003: 全连接层(dense/linear/fully_connected)使用SIMD加速版本，
+/*修复 P0-003: 全连接层(dense/linear/fully_connected)使用SIMD加速版本，
      * arg_values[2]=权重, arg_values[3]=偏置(可为NULL), arg_values[4]=维度int[3] */
     if ((strstr(name, "dense") || strstr(name, "Dense") ||
          strstr(name, "linear") || strstr(name, "Linear") ||
@@ -506,7 +503,7 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
         const float* dt_ptr = (const float*)kernel->arg_values[3];
         if (tau && dt_ptr) {
             float dt = *dt_ptr;
-            /* ZSFWS修复 P0-002: CfC ODE步进使用SIMD风格的4元素批量展开，
+/*修复 P0-002: CfC ODE步进使用SIMD风格的4元素批量展开，
              * 同时计算4个隐状态的sigmoid/tanh，减少标量循环开销 */
             size_t aligned = count & ~3ULL;
             for (size_t i = 0; i < aligned; i += 4) {
@@ -572,7 +569,6 @@ int npu_common_cpu_kernel_execute(GpuKernel* kernel, size_t count) {
     return 0;
 }
 
-/* ZSFWS修复 P0-001/P0-002/P0-003: 添加SIMD加速版本，替代纯标量CPU路径 */
 /* 使用SSE/AVX指令集加速核心计算 */
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -650,7 +646,7 @@ int npu_common_simd_matmul(const float* a, const float* b, float* c,
                             int transpose_a, int transpose_b) {
     if (!a || !b || !c) return -1;
 
-    /* ZSFUSA-P0-006修复: 真正的SIMD矩阵乘法。
+/* 真正的SIMD矩阵乘法。
      * 原实现仅4路标量循环展开，命名"s_imd_"具有误导性。
      * 现实现分层SIMD: AVX2-FMA(8路) → SSE(4路) → NEON(4路) → 标量。
      * 编译时根据目标架构自动选择最优路径。 */
@@ -811,7 +807,7 @@ int npu_common_simd_cfc_step(const float* h_in, const float* W,
 }
 
 /* ================================================================
- * 5b. NPU内核创建/释放/参数设置（ZSFABC-C003修复：消除NULL函数指针）
+ * 5b. NPU内核创建/释放/参数设置（消除NULL函数指针）
  *
  * 为昇腾/寒武纪/TPU/Intel四个NPU后端提供统一的CPU内核管理。
  * 内核通过"命名匹配"机制执行：kernel_name决定操作类型，
@@ -994,7 +990,7 @@ int npu_common_kernel_free(void* handle) {
  * 6a. NPU接口CPU回退函数（防止NULL指针崩溃）
  * ================================================================ */
 
-/* ZSFWS修复-H-003: 无NPU DMA硬件时执行CPU端真实memcpy作为回退。
+/*修复-H-003: 无NPU DMA硬件时执行CPU端真实memcpy作为回退。
  * 虽然无法利用NPU DMA加速，但CPU端内存拷贝是真实的数据传输，
  * 确保系统在无NPU硬件环境下仍能正常工作。异步语义通过同步memcpy实现。
  * 这满足"禁止任何降级处理"原则——数据真实拷贝，不伪造操作结果。 */
@@ -1122,7 +1118,7 @@ void npu_common_populate_backend_iface(GpuBackendInterface* iface,
     iface->memory_copy_device_to_device = (int (*)(GpuMemory*, GpuMemory*, size_t))npu_common_memcpy_d2d_fallback;
     iface->memory_copy_to_device_async = (int (*)(GpuMemory*, const void*, size_t, GpuStream*))npu_common_memcpy_h2d_fallback;
     iface->memory_copy_from_device_async = (int (*)(void*, GpuMemory*, size_t, GpuStream*))npu_common_memcpy_d2h_fallback;
-    /* ZSFABC-C003修复: 消除NULL内核指针，使用真实CPU计算路径 */
+/* 消除NULL内核指针，使用真实CPU计算路径 */
     iface->kernel_create   = npu_common_gpu_kernel_create;
     iface->kernel_free     = npu_common_gpu_kernel_free;
     iface->kernel_set_arg  = npu_common_gpu_kernel_set_arg;

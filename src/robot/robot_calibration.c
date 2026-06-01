@@ -1,4 +1,4 @@
-#include "selflnn/robot/robot_calibration.h"
+﻿#include "selflnn/robot/robot_calibration.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/time_utils.h"
 #include "selflnn/core/errors.h"
@@ -340,7 +340,7 @@ int robot_calibration_generate_excitation(RobotCalibration* calib,
             if (calib->excitation.fourier_amplitudes[j] > 2.0f) calib->excitation.fourier_amplitudes[j] = 2.0f;
         }
 
-        /* ZSFABC-M007深度修复: 评估识别矩阵的条件数
+/*深度修复: 评估识别矩阵的条件数
          * 使用Jacobi特征值分解计算Happrox矩阵的最大/最小特征值比。
          * 不再使用最大/最小对角线比的简化近似。 */
         size_t n = (size_t)calib->num_joints;

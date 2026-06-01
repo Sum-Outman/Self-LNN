@@ -1,4 +1,4 @@
-#include "selflnn/backend/auth.h"
+﻿#include "selflnn/backend/auth.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 
@@ -216,7 +216,7 @@ static int string_to_key(const char* str, uint8_t* hash) {
     return 0;
 }
 
-/* ZSFWS-L004修复: 使用高精度时间函数替代 clock()
+/* 使用高精度时间函数替代 clock()
  * clock() 在某些平台分辨率仅为10ms，影响令牌桶精度。
  * Windows使用GetTickCount64（毫秒精度），POSIX使用clock_gettime */
 static uint64_t get_current_time_ms(void) {
@@ -497,7 +497,7 @@ static void xor_encrypt_decrypt(uint8_t* data, size_t len, const uint8_t* key, s
 }
 
 int auth_save_keys(AuthSystem* auth, const char* filepath) {
-    /* ZSFEEE-FIX-020: 使用salt+SHA-256多轮迭代的HKDF风格密钥派生替代简单XOR，
+/* 使用salt+SHA-256多轮迭代的HKDF风格密钥派生替代简单XOR，
      * 增强加密密钥安全性。原实现仅对filepath字符简单XOR，攻击者可轻易推测。 */
     if (!auth || !filepath) return -1;
     FILE* fp = fopen(filepath, "wb");
@@ -556,7 +556,7 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
     int is_v3 = 0;
     if (fread(header, 1, 16, fp) != 16) { fclose(fp); return -1; }
     
-    /* ZSFEEE-FIX-020: 检测加密格式版本 */
+/* 检测加密格式版本 */
     if (memcmp(header, "SELFLNN_AUTH_V3", 16) == 0) {
         is_encrypted = 1;
         is_v3 = 1;
@@ -591,7 +591,7 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
             return -1;
         }
         if (is_v3) {
-            /* ZSFEEE-FIX-020: V3格式使用salt+HKDF风格密钥派生解密 */
+/* V3格式使用salt+HKDF风格密钥派生解密 */
             size_t path_len = strlen(filepath);
             if (path_len > 200) path_len = 200;
             uint8_t kdf_buf[232];

@@ -1,4 +1,4 @@
-#ifndef SELFLNN_MATH_MATRIX_OPS_H
+﻿#ifndef SELFLNN_MATH_MATRIX_OPS_H
 #define SELFLNN_MATH_MATRIX_OPS_H
 
 #include "selflnn/core/common.h"
@@ -36,7 +36,7 @@ void matrix_init_zeros(float* mat, size_t rows, size_t cols);
 /* SIMD加速标记: 返回1表示支持SIMD加速 */
 int matrix_ops_has_simd(void);
 
-/* ZSFWS-S013修复: 补充在matrix_ops.c中实现但未在头文件中声明的5个核心函数 */
+/* 补充在matrix_ops.c中实现但未在头文件中声明的5个核心函数 */
 
 /* LU分解: 将A分解为LU，返回0成功 */
 int matrix_lu_decompose(float* A, int* pivot, size_t n);

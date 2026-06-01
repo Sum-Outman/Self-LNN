@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file reasoning_internal.c
  * @brief MSVC兼容的推理引擎真实实现（原名reasoning_internal.c）
  * 
@@ -93,7 +93,7 @@ struct ReasoningEngine {
     float* history_outputs;
     size_t history_capacity;
     size_t history_size;
-    /* ZSFZX-FIX-REASONING: 平台统一字段 — 与reasoning.c对齐 */
+/* 平台统一字段 — 与reasoning.c对齐 */
     struct ReasoningStats stats;
     size_t history_input_dim;
     size_t history_output_dim;
@@ -385,7 +385,7 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
     return conclusion_count;
 }
 
-/* ZSFABC-032: reasoning_infer 包装函数 — reasoning.c 中定义但在MSVC路径
+/* reasoning_infer 包装函数 — reasoning.c 中定义但在MSVC路径
    (reasoning_internal.c) 中缺失，导致链接错误。
    将 float* 前提转换为文本，委托给 reasoning_infer_with_knowledge，
    再将文本结论转回 float* 输出。 */
@@ -402,7 +402,7 @@ int reasoning_infer(ReasoningEngine* engine,
     const char* prem_strs[8];
     int n = (int)(num_premises < 8 ? num_premises : 8);
     for (int i = 0; i < n; i++) {
-        snprintf(prem_buf[i], sizeof(prem_buf[i]), "%.8g", premises[i]); /* ZSFWS修复-L-007: %.8g保留float全精度 */
+        snprintf(prem_buf[i], sizeof(prem_buf[i]), "%.8g", premises[i]);
         prem_strs[i] = prem_buf[i];
     }
 
@@ -792,7 +792,7 @@ KnowledgeVersionController* knowledge_version_load(const char* filepath, Knowled
     return kvc;
 }
 
-/* ZSF-009修复: MSVC平台真实因果推理引擎实现
+/*修复: MSVC平台真实因果推理引擎实现
  * 使用Pearson相关系数 + Fisher Z变换 + 条件独立性检验 实现PC算法核心逻辑。
  * 替代原来的固定值(0.6/0.7)虚假实现。算法步骤:
  *   1. 计算变量间Pearson相关系数矩阵
@@ -878,7 +878,6 @@ static float pc_partial_correlation_single(const float* data, size_t num_samples
     return pc;
 }
 
-/* ZSF-009修复: 真实因果推断实现 */
 float reasoning_causal_infer(ReasoningEngine* engine,
                             const float* cause, size_t cause_size,
                             const float* effect, size_t effect_size,
@@ -911,7 +910,6 @@ float reasoning_causal_infer(ReasoningEngine* engine,
     return corr;
 }
 
-/* ZSF-009修复: 真实因果结构发现实现 - 基于PC算法核心逻辑 */
 int reasoning_discover_causal_structure(ReasoningEngine* engine,
                                        const float* data, size_t num_samples, size_t num_variables,
                                        CausalEdge* discovered_edges, size_t max_edges) {
@@ -1032,7 +1030,6 @@ int reasoning_discover_causal_structure(ReasoningEngine* engine,
     return (int)edge_count;
 }
 
-/* ZSF-NEW-012修复: 知识同步 - 真实引擎状态同步 */
 int reasoning_sync_knowledge(ReasoningEngine* engine) {
     if (!engine) return -1;
 
@@ -1057,7 +1054,7 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
     return 0;
 }
 
-/* ZSFUSA: 贝叶斯网络创建 (MSVC编译路径) */
+/* 贝叶斯网络创建 (MSVC编译路径) */
 BayesianNetwork* bayesian_network_create(size_t max_nodes) {
     BayesianNetwork* bn = (BayesianNetwork*)calloc(1, sizeof(BayesianNetwork));
     if (!bn) return NULL;
@@ -1070,7 +1067,7 @@ BayesianNetwork* bayesian_network_create(size_t max_nodes) {
     return bn;
 }
 
-/* ZSFUSA: 贝叶斯网络释放 (MSVC编译路径) */
+/* 贝叶斯网络释放 (MSVC编译路径) */
 void bayesian_network_free(BayesianNetwork* bn) {
     if (!bn) return;
     if (bn->nodes) free(bn->nodes);

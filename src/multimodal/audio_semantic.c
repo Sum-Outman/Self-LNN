@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file audio_semantic.c
  * @brief 音频特征到语义理解的映射实现
  * 
@@ -861,7 +861,7 @@ AudioSemanticConfig audio_semantic_get_default_config(void) {
     cfg.use_prosodic = 1;
     cfg.mfcc_coefficients = 13;
     cfg.spectral_bands = 64;
-    cfg.enable_emotion_analysis = 0;  /* ZSFX-DEEP-R5-EMOTION: 需求明确禁止情感功能,默认禁用 */
+    cfg.enable_emotion_analysis = 0; /* 需求明确禁止情感功能,默认禁用 */
     cfg.enable_speaker_recognition = 0;
     cfg.enable_intent_recognition = 1;
     cfg.enable_keyword_extraction = 1;
@@ -2346,7 +2346,7 @@ heuristic_intent:
         }
     }
     
-    /* ZSFLYF-P1-005修复: 计算整体置信度。
+/* 计算整体置信度。
      * 从音频信号的实际特征分布计算熵，而非硬编码固定值。 */
     result->overall_confidence = 0.0f;
     if (result->mfcc_features && result->feature_dim > 0) {

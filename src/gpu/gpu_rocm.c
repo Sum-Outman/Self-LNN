@@ -14,7 +14,7 @@
 #include "selflnn/utils/platform.h"
 #include "gpu_internal.h"
 
-/* ZSFWS-L009: 内核缓存自旋锁——保护多线程并发编译时的竞态条件 */
+/* 内核缓存自旋锁——保护多线程并发编译时的竞态条件 */
 #ifdef _WIN32
 #include <windows.h>
 static volatile LONG rocm_cache_lock_val = 0;
@@ -306,7 +306,6 @@ static const char* ROCM_CFC_STEP_KERNEL =
 "    }\n"
 "}\n";
 
-/* ZSF999XQ-GPU-H3: 完整CfC ODE积分内核 - 将tau衰减和驱动项全部在GPU上计算 */
 static const char* ROCM_CFC_ODE_FULL_KERNEL =
 "extern \"C\" __global__ void cfc_ode_full(\n"
 "    float* h_out, const float* h_in, const float* tau, int dim, float dt) {\n"
@@ -375,7 +374,7 @@ static const char* get_embedded_hip_source(const char* kernel_name) {
         strstr(kernel_name, "conv_")) {
         return ROCM_CONV2D_KERNEL;
     }
-    /* CfC步骤匹配 — ZSF999XQ-GPU-H3: 添加cfc_ode_full内核映射 */
+    /* CfC步骤匹配 — 添加cfc_ode_full内核映射 */
     if (strstr(kernel_name, "cfc_step") || strncmp(kernel_name, "cfc_", 4) == 0) {
         if (strstr(kernel_name, "ode_full"))
             return ROCM_CFC_ODE_FULL_KERNEL;
@@ -861,7 +860,7 @@ static GpuKernel* rocm_backend_kernel_create(GpuContext* context, const char* ke
     snprintf(compile_cmd, sizeof(compile_cmd),
              "hipcc -x hip -target amdgcn-amd-amdhsa --offload-arch=gfx900,gfx906,gfx908,gfx90a,gfx1030,gfx1100 -o %s %s 2>/dev/null",
              hsaco_path, real_src_path);
-    /* ZSFWS-M-005: 路径注入防护 - 确保路径中不包含shell特殊字符 */
+/* 路径注入防护 - 确保路径中不包含shell特殊字符 */
     int compile_result;
     if (strchr(real_src_path, ';') || strchr(real_src_path, '&') ||
         strchr(real_src_path, '|') || strchr(real_src_path, '`') ||
@@ -977,7 +976,6 @@ static int rocm_backend_kernel_execute(GpuKernel* kernel, size_t global_work_siz
     unsigned int block_dim = (unsigned int)local_work_size;
     if (block_dim > (unsigned int)rocm_ctx->max_threads_per_block) block_dim = (unsigned int)rocm_ctx->max_threads_per_block;
     void* hip_func = kern->backend_data;
-    /* ZSFWS修复 P3-006: 移除无意义的NULL参数kernel启动尝试 */
     hipError_t err = hipModuleLaunchKernel(hip_func, grid_dim, 1, 1, block_dim, 1, 1, 0, stream, kern->arg_values, NULL);
     (void)err;
     if (err != hipSuccess) return -1;
@@ -1814,7 +1812,6 @@ int rocm_cfc_ode_step(GpuContext* context,
     rocm_backend_kernel_free(ck);
   }
   hipMemcpy(h_out, d_h_in, state_byte, hipMemcpyDeviceToHost);
-  /* ZSF999XQ-GPU-H3修复: ODE积分全部在GPU上完成，不再使用CPU for循环 */
   {
     GpuKernel* odek = rocm_backend_kernel_create(context, ROCM_CFC_ODE_FULL_KERNEL, "cfc_ode_full");
     if (!odek) goto cleanup;

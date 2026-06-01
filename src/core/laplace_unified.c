@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file laplace_unified.c
  * @brief 拉普拉斯变换统一入口实现
  *
@@ -65,7 +65,7 @@ int laplace_unified_system_init(const LaplaceAIConfig* cfg) {
     /* 初始化深度集成层（CfC稳定性、频率响应、系统辨识、分数阶记忆）
      * AI框架层和增强系统层已通过laplace.c/laplace_fft.c/laplace_features.c完整实现
      * 这些功能通过LaplaceAnalyzer统一接口直接调用，无需独立初始化函数 */
-    if (laplace_integration_init() != 0) {
+    if (laplace_integration_init != 0) {
         log_error("[拉普拉斯统一] 深度集成初始化失败");
         laplace_analyzer_free(analyzer);
         g_laplace_unified_analyzer = NULL;
@@ -101,14 +101,14 @@ void laplace_unified_system_shutdown(void) {
 int laplace_unified_health_check(char* report, size_t report_size) {
     if (!report || report_size == 0) return -1;
 
-    /* ZSFUSA-P3-003修复: 在全局分析器上运行诊断，而非创建临时分析器。
+/* 在全局分析器上运行诊断，而非创建临时分析器。
      * 原实现创建临时LaplaceAnalyzer验证"能否创建分析器"而非"分析器在
-     * 实时数据上的表现"。现在使用laplace_unified_get_analyzer()获取
+     * 实时数据上的表现"。现在使用laplace_unified_get_analyzer获取
      * 全局实例，进行实际的配置验证和状态诊断。 */
-    LaplaceAnalyzer* analyzer = laplace_unified_get_analyzer();
+    LaplaceAnalyzer* analyzer = laplace_unified_get_analyzer;
     if (!analyzer) {
         /* 全局分析器尚未初始化——在全局分析器上运行诊断前，先验证默认配置有效性 */
-        const LaplaceConfig* default_cfg = laplace_get_default_config();
+        const LaplaceConfig* default_cfg = laplace_get_default_config;
         if (!default_cfg || default_cfg->num_samples == 0 ||
             default_cfg->sample_rate <= 0.0f) {
             snprintf(report, report_size,
@@ -171,7 +171,7 @@ int laplace_unified_health_check(char* report, size_t report_size) {
         }
     }
 
-    /* 4. 极点稳定性诊断（ZSFUSA-P3补: 使用新增的极点和裕度API） */
+    /* 4. 极点稳定性诊断（补: 使用新增的极点和裕度API） */
     int total_poles = laplace_analyzer_count_poles(analyzer);
     int unstable = laplace_analyzer_count_unstable_poles(analyzer);
     float gain_margin = 0.0f, phase_margin = 0.0f;
@@ -207,7 +207,7 @@ int laplace_unified_health_check(char* report, size_t report_size) {
     return (issues > 0) ? -1 : 0;
 }
 
-/* ZSFUSA: 创建默认拉普拉斯分析器 */
+/* 创建默认拉普拉斯分析器 */
 void* lnn_laplace_create_default_analyzer(void) {
     LaplaceConfig config;
     memset(&config, 0, sizeof(config));
@@ -272,7 +272,7 @@ int laplace_unified_analyze(void* analyzer, LNN* lnn, StabilityAnalysis* result)
 }
 
 /* ============================================================================
- * ZSFUSA: 获取拉普拉斯频谱
+ *: 获取拉普拉斯频谱
  *
  * H-001修复: 使用缓存的真实传递函数系数计算频谱，
  * 而非硬编码的 1/(s+1)。如果从未分析过系统（缓存为空），

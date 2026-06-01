@@ -1,4 +1,4 @@
-#ifndef SELFLNN_LOSS_H
+﻿#ifndef SELFLNN_LOSS_H
 #define SELFLNN_LOSS_H
 
 #ifdef __cplusplus
@@ -11,7 +11,7 @@ extern "C" {
  */
 
 /**
- * @brief 模态类型枚举（ZSFWS-024：多模态输出适配）
+ * @brief 模态类型枚举（多模态输出适配）
  * 
  * 不同模态的输出具有不同的数值范围和分布特性，
  * 需要不同的损失函数类型来度量预测误差。
@@ -60,7 +60,7 @@ typedef struct {
 } LossConfig;
 
 /**
- * @brief 多模态损失段描述符（ZSFWS-024）
+ * @brief 多模态损失段描述符
  * 
  * 将统一输出张量划分为多个模态段，每段使用独立的损失函数。
  * 最终损失为各段损失的加权和。
@@ -122,10 +122,10 @@ float loss_compute(const float* predictions, const float* targets, int n, LossTy
  */
 void loss_gradient(const float* predictions, const float* targets, int n, float* gradients, LossType loss_type);
 
-/* ============ ZSFWS-024: 多模态损失函数 API ============ */
+/* ============ 多模态损失函数 API ============ */
 
 /**
- * @brief 计算多模态损失函数值（ZSFWS-024）
+ * @brief 计算多模态损失函数值
  * 
  * 将统一输出数组按模态段划分，每段使用最适合该模态的损失函数，
  * 最终返回加权总损失。有效解决了视觉[-1,1]、文本discrete、传感器varied ranges
@@ -153,7 +153,7 @@ float loss_compute_multimodal(const float* predictions, const float* targets,
                                int num_segments);
 
 /**
- * @brief 多模态损失自适应梯度平衡 (ZSFZX-FIX-R4-1)
+ * @brief 多模态损失自适应梯度平衡 
  *
  * 与loss_compute_multimodal功能相同，但use_adaptive=1时自动调整各模态段权重，
  * 使梯度范数均衡。消除手动调权的需求，防止模态崩塌。
@@ -170,7 +170,7 @@ float loss_compute_multimodal_adaptive(const float* predictions, const float* ta
                                         int use_adaptive);
 
 /**
- * @brief 计算多模态损失函数梯度（ZSFWS-024）
+ * @brief 计算多模态损失函数梯度
  * 
  * 对每个模态段独立计算梯度，然后拼接回统一的梯度数组。
  * 各段梯度在写入前被清零，确保跨模态段无梯度泄漏。
@@ -188,7 +188,7 @@ void loss_gradient_multimodal(const float* predictions, const float* targets,
                                int num_segments);
 
 /**
- * @brief 解析模态类型对应的默认损失函数（ZSFWS-024）
+ * @brief 解析模态类型对应的默认损失函数
  * 
  * 将ModalityType映射到最合适的LossType。
  * 

@@ -1,4 +1,4 @@
-#include "selflnn/utils/secure_random.h"
+﻿#include "selflnn/utils/secure_random.h"
 #include <string.h>
 
 #ifdef _WIN32
@@ -53,7 +53,7 @@ float secure_random_float(void)
 {
     uint32_t r = 0;
     secure_random_bytes((uint8_t*)&r, sizeof(r));
-    /* ZSFX-DEEP-R12-002: 使用double中间精度防止r=2^32-1时float上溢到1.0 */
+/* 使用double中间精度防止r=2^32-1时float上溢到1.0 */
     return (float)((double)r / 4294967296.0);
 }
 

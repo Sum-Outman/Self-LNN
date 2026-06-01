@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file simulator.c
  * @brief 仿真器接口实现
  * 
@@ -189,7 +189,6 @@ struct Simulator {
     float ambient_color[3];
     int lighting_active;
 
-    /* ZSF-NEW-001: 相机和显示状态 */
     float camera_position[3];    /**< 相机位置 */
     float camera_target[3];      /**< 相机目标点 */
     int grid_display_enabled;    /**< 网格显示开关 */
@@ -1734,7 +1733,6 @@ Simulator* simulator_create(const SimulatorConfig* config) {
     sim->ambient_color[0] = 0.2f;   sim->ambient_color[1] = 0.2f;   sim->ambient_color[2] = 0.2f;
     sim->lighting_active = 1;
 
-    /* ZSF-NEW-001: 初始化相机和显示状态 */
     sim->camera_position[0] = 0.0f; sim->camera_position[1] = 2.0f; sim->camera_position[2] = 5.0f;
     sim->camera_target[0] = 0.0f;   sim->camera_target[1] = 0.0f;   sim->camera_target[2] = 0.0f;
     sim->grid_display_enabled = 1;
@@ -2478,7 +2476,7 @@ int simulator_add_sensor(Simulator* simulator, int robot_id, const SensorConfig*
     sensor->noise_level = 0.01f;  // 默认噪声级别
     sensor->is_valid = 1;
 
-    /* ZSFWS-E003: 存储传感器空间位姿
+/* 存储传感器空间位姿
      * 之前 mount_position/mount_orientation 被(void)丢弃,
      * 传感器安装位置信息完全丢失,导致空间感知数据缺失坐标参考。
      * 现在真实存储到传感器数据结构中供下游空间融合使用。 */
@@ -3947,7 +3945,6 @@ static int simulator_set_friction(Simulator* simulator, int robot_id, int link_i
             simulator->internal.pipeline.contacts[i].friction_coeff = value;
         }
     }
-    /* ZSF-NEW-011: 使用link_id定位特定链接接触点设置摩擦系数 */
     if (link_id >= 0 && link_id < 128) {
         for (int i = 0; i < simulator->internal.pipeline.contact_count && i < 128; i++) {
             if (simulator->internal.pipeline.contacts[i].body_a == robot_id ||
@@ -3963,7 +3960,6 @@ static int simulator_set_friction(Simulator* simulator, int robot_id, int link_i
 int simulator_set_restitution(Simulator* simulator, int robot_id, int link_id, float value) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count) return -1;
     if (value < 0.0f || value > 1.0f) return -1;
-    /* ZSF-NEW-011: 使用link_id定位特定接触点设置弹性系数 */
     if (link_id >= 0 && link_id < 128) {
         for (int i = 0; i < simulator->internal.pipeline.contact_count && i < 128; i++) {
             if (simulator->internal.pipeline.contacts[i].body_a == robot_id ||
@@ -4833,7 +4829,7 @@ int simulator_auto_connect(Simulator* sim, int prefer_external) {
 }
 
 /* ============================================================================
- * ZSF-004验证: 8个函数已在P0链接修复中完整实现，所有函数均有真实内部实现
+ *验证: 8个函数已在P0链接修复中完整实现，所有函数均有真实内部实现
  * ============================================================================ */
 
 /**
@@ -4933,7 +4929,7 @@ int simulator_start_recording(Simulator* simulator, const char* filename) {
         log_error("[仿真器] simulator_start_recording: 参数无效");
         return -1;
     }
-    /* ZSFBUILD: recording_file是FILE*不是char[]，跳过文件名存储 */
+/* recording_file是FILE*不是char[]，跳过文件名存储 */
     simulator->is_recording = 1;
     log_info("[仿真器] 开始记录仿真数据到: %s", filename);
     return 0;
@@ -4969,7 +4965,7 @@ int simulator_export_scene(Simulator* simulator, const char* filename) {
 
 /**
  * @brief 获取Gazebo仿真器接口表
- * ZSFX-001修复: 所有14个NULL函数指针替换为安全占位函数，
+ *修复: 所有14个NULL函数指针替换为安全占位函数，
  * 任何时候调用都不会崩溃，而是安全返回错误码。
  */
 /* P2-001修复: 仿真器包装函数（原命名"占位函数"误导，实际为真实桥接实现） */
@@ -5184,7 +5180,6 @@ const SimulatorInterface* gazebo_get_simulator_interface(void) {
     return &g_gazebo_interface;
 }
 
-/* ZSF-NEW-001修复: 仿真器相机视角设置 - 真实存储相机参数 */
 int simulator_set_camera_view(void* sim, float x, float y, float z, float target_x, float target_y, float target_z) {
     Simulator* simulator = (Simulator*)sim;
     if (!simulator) return -1;
@@ -5201,7 +5196,6 @@ int simulator_set_camera_view(void* sim, float x, float y, float z, float target
     return 0;
 }
 
-/* ZSF-NEW-001修复: 仿真器网格显示切换 - 真实存储显示状态 */
 int simulator_toggle_grid_display(void* sim, int enable) {
     Simulator* simulator = (Simulator*)sim;
     if (!simulator) return -1;
@@ -5211,7 +5205,6 @@ int simulator_toggle_grid_display(void* sim, int enable) {
     return 0;
 }
 
-/* ZSF-NEW-001修复: 仿真器添加机器人 - 真实添加场景对象 */
 int simulator_add_robot(void* sim, const char* name) {
     Simulator* simulator = (Simulator*)sim;
     if (!simulator || !name) return -1;
@@ -5233,7 +5226,6 @@ int simulator_add_robot(void* sim, const char* name) {
     return simulator_add_scene_object(simulator, &obj);
 }
 
-/* ZSF-NEW-001修复: 仿真器清空场景 - 真实重置场景数据 */
 int simulator_clear_scene(void* sim) {
     Simulator* simulator = (Simulator*)sim;
     if (!simulator) return -1;
@@ -5258,7 +5250,6 @@ int simulator_clear_scene(void* sim) {
     return 0;
 }
 
-/* ZSF-NEW-001修复: 仿真器路径规划 - 真实2D A*网格路径规划 */
 int simulator_plan_path(void* sim, const float* start, const float* goal, float* waypoints, int max_wp) {
     Simulator* simulator = (Simulator*)sim;
     if (!simulator || !start || !goal || !waypoints || max_wp < 2) return 0;

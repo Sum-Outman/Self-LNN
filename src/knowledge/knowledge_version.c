@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file knowledge_version.c
  * @brief 知识版本管理系统完整实现
  */
@@ -27,7 +27,7 @@
 #include <unistd.h>
 #endif
 
-/* ZSFBUILD: SnapshotEntryRecord定义已移至knowledge_version.h */
+/* SnapshotEntryRecord定义已移至knowledge_version.h */
 
 /* 快照文件魔数 */
 #define KV_FILE_MAGIC 0x4B56534E
@@ -110,7 +110,7 @@ static int find_entry_by_id(const SnapshotEntryRecord* records, int count, int e
 }
 
 /* ============================================================================
- * ZSFWS-031: 语义相似度计算
+ *: 语义相似度计算
  *
  * 基于字符级三元组(token tri-gram) Jaccard相似度计算两个字符串的
  * 语义相似度。在纯C环境下实现，不依赖外部NLP库。
@@ -119,13 +119,13 @@ static int find_entry_by_id(const SnapshotEntryRecord* records, int count, int e
  * 策略：提取两个字符串的字符三元组(token tri-gram)集合，
  * 计算 Jaccard 相似度 = |intersection| / |union|。
  *
- * ZSFUSA-C13: 对中文字符串额外计算bigram(2-gram) Jaccard，
+ *: 对中文字符串额外计算bigram(2-gram) Jaccard，
  * 与trigram结果取最大值。中文字符通常2-3字构成词语，
  * bigram粒度更适合捕捉中文语义。
  * 对中文（UTF-8）和英文均适用。
  * ============================================================================ */
 
-/* ZSFUSA-C13: 中文bigram增强 - 中文字符通常2-3字组成词 */
+/* 中文bigram增强 - 中文字符通常2-3字组成词 */
 static int has_chinese(const char* str) {
     if (!str) return 0;
     while (*str) {
@@ -187,7 +187,7 @@ static float compute_semantic_similarity(const char* s1, const char* s2) {
     int union_count = t1_count + t2_count - intersection;
     float trigram_score = union_count > 0 ? (float)intersection / (float)union_count : 0.0f;
 
-    /* ZSFUSA-C13: 中文bigram增强 */
+/* 中文bigram增强 */
     if (has_chinese(s1) || has_chinese(s2)) {
         #define MAX_BIGRAMS 384
         char bigrams1[MAX_BIGRAMS][3];
@@ -229,7 +229,7 @@ static float compute_semantic_similarity(const char* s1, const char* s2) {
 }
 
 /* ============================================================================
- * ZSFWS-031: 实体级语义相似度综合评分
+ *: 实体级语义相似度综合评分
  *
  * 对一个知识实体（SPO三元组）与另一实体计算综合相似度，
  * 权重分布：Subject 30%, Predicate 30%, Object 40%
@@ -419,7 +419,7 @@ int kv_restore_snapshot(KnowledgeVersionManager* kvm, int snapshot_id, void* kno
 }
 
 /* ============================================================================
- * ZSFWS-031: 快照差异比较（实体级增/删/改检测）
+ *: 快照差异比较（实体级增/删/改检测）
  *
  * 本函数实现了完整的三层实体级别差异检测，而非简单全文对比：
  *
@@ -723,7 +723,7 @@ int kv_merge_branch(KnowledgeVersionManager* kvm, const char* source, const char
                 float src_confidence = src_entries[si].confidence;
                 float tgt_confidence = tgt_entries[sp_conflict].confidence;
 
-                /* ZSFWS-031: 冲突解决日志 */
+/* 冲突解决日志 */
                 log_info("[分支合并冲突] <%s, %s>: "
                          "源分支值='%s'(confidence=%.3f) vs 目标分支值='%s'(confidence=%.3f)",
                          src_entries[si].subject, src_entries[si].predicate,
@@ -1167,7 +1167,7 @@ int kv_update_current_entries(KnowledgeVersionManager* kvm,
 }
 
 /* ============================================================================
- * ZSFWS-031: 语义相似度合并策略
+ *: 语义相似度合并策略
  *
  * 对两个快照中的实体进行语义级合并，根据相似度决定合并策略：
  *   - 相似度 >= 0.80: 自动合并（高置信度实体替换低置信度）

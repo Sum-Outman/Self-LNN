@@ -1,5 +1,5 @@
-/**
- * ZSFEEE-FIX-006: 双目立体视觉 Web Worker
+﻿/**
+ *: 双目立体视觉 Web Worker
  * 在独立线程中执行Census变换、汉明距离计算、视差图计算
  * 通过postMessage与主线程通信，避免阻塞UI渲染
  */
@@ -7,7 +7,7 @@
 (function() {
     'use strict';
 
-    /* ZSFUSA-F08: BigInt兼容性检查，旧浏览器回退到32位汉明距离 */
+/* BigInt兼容性检查，旧浏览器回退到32位汉明距离 */
     var hasBigInt = (typeof BigInt !== 'undefined');
     if (!hasBigInt) {
         /* Worker内部使用console.warn输出兼容性警告 */

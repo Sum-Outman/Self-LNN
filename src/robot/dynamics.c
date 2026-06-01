@@ -1,4 +1,4 @@
-#include "selflnn/robot/dynamics.h"
+﻿#include "selflnn/robot/dynamics.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/math/vec3_ops.h"
@@ -469,7 +469,7 @@ static int dynamics_gjk_with_simplex(const float* shape_a, int num_a,
             direction[1] = ab[1] * vec3_dot(ab, ao) - ao[1] * vec3_dot(ab, ab);
             direction[2] = ab[2] * vec3_dot(ab, ao) - ao[2] * vec3_dot(ab, ab);
         } else if (simplex_count == 3) {
-            /* ZSFX-DEEP-R11-001: 完整Voronoi区域检查(与kinematics.c正确实现一致)
+/* 完整Voronoi区域检查(与kinematics.c正确实现一致)
              * 原作仅用三角形法向量搜索,缺少边区域检查导致假阴性和迭代超限 */
             float ab[3], ac[3], ao[3], abc[3];
             vec3_sub(simplex[1], simplex[0], ab);
@@ -963,7 +963,7 @@ int dynamics_rnea(const DynamicsModel* model,
                     dvec3_scale(wxz, qd[i], tmp1);
                     dvec3_add(&alpha[i * 3], tmp1, &alpha[i * 3]);
                 } else if (model->config.joint_types[i] == JOINT_TYPE_PRISMATIC) {
-                    /* ZSFX-DEEP-R10-001: 平动关节角速度/角加速度不受影响,
+/* 平动关节角速度/角加速度不受影响,
                      * 滑动加速度由循环末尾的专用后处理块累加 */
                 }
                 {
@@ -974,7 +974,7 @@ int dynamics_rnea(const DynamicsModel* model,
                     dvec3_cross(&alpha[parent * 3], p_vec, tmp2);
                     dvec3_add(tmp1, tmp2, &accel[i * 3]);
                 }
-                /* ZSFX-DEEP-R10-001: 平动关节滑动加速度后处理
+/* 平动关节滑动加速度后处理
                  * 基础旋转加速度已写入accel[i],现在累加z*qdd+2*ω×(z*qd) */
                 if (model->config.joint_types[i] == JOINT_TYPE_PRISMATIC) {
                     float q_dd_z[3], two_wxz[3], sliding[3];
@@ -1100,7 +1100,7 @@ int dynamics_mass_matrix(const DynamicsModel* model, const float* q, float* mass
         return -1;
     }
     memset(qd_zero, 0, (size_t)n * sizeof(float));
-    /* ZSFX-DEEP-R9-002: 临时清零重力计算纯质量矩阵M(q)
+/* 临时清零重力计算纯质量矩阵M(q)
      * RNEA(q,0,ej) = M(q)·ej + G(q), 必须排除G(q)才能得到M(q)的准确列 */
     float saved_gravity[3];
     memcpy(saved_gravity, model->config.gravity, sizeof(saved_gravity));

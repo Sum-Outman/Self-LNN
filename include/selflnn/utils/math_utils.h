@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file math_utils.h
  * @brief 数学工具库
  * 
@@ -31,7 +31,7 @@ typedef enum {
 
 /**
  * @brief 损失函数类型（引用 loss.h 主定义，此处仅为向后兼容）
- * ZSF999XQ-H-004: 此include造成utils→core反向依赖，违反分层架构。
+ *: 此include造成utils→core反向依赖，违反分层架构。
  * 需在后续重构中将LossType/OptimizerType提取到独立core_types.h。
  * 当前保留include以维持向后兼容性，下游文件通过selflnn.h统一包含。
  */
@@ -39,7 +39,7 @@ typedef enum {
 
 /**
  * @brief 优化器类型（引用 optimizer.h 主定义）
- * ZSF999XQ-H-004: 同上，反向依赖待重构。
+ *: 同上，反向依赖待重构。
  */
 #include "selflnn/core/optimizer.h"
 

@@ -1,4 +1,4 @@
-#include "selflnn/multimodal/stereo_3d_reconstruction.h"
+﻿#include "selflnn/multimodal/stereo_3d_reconstruction.h"
 #include "selflnn/multimodal/stereo_depth_enhance.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
@@ -418,7 +418,6 @@ int sr3d_validate_multiview_consistency(SR3DReconstructor* sr,
                                          float ncc_threshold) {
     if (!sr || !left || !right || !disparity || !points || point_count <= 0) return -1;
 
-    /* ZSFWS修复 P3-007: 未标定时使用默认值，明确标注状态 */
     float focal = sr->calibrated ? sr->calib.camera_matrix_left[0] : 525.0f;  /* 默认焦距（未标定估计值） */
     float baseline = sr->calibrated ? sr->calib.baseline_m : 0.12f;           /* 默认基线（未标定估计值） */
     int win_size = 4;
@@ -483,7 +482,6 @@ int sr3d_generate_point_cloud(SR3DReconstructor* sr, const float* left, const fl
     (void)right;
     if (!sr || !left || !disparity || !points || !count) return -1;
 
-    /* ZSFWS修复 P3-007: 未标定时使用默认值，明确标注状态 */
     float focal = sr->calibrated ? sr->calib.camera_matrix_left[0] : 525.0f;  /* 默认焦距（未标定估计值） */
     float baseline = sr->calibrated ? sr->calib.baseline_m : 0.12f;           /* 默认基线（未标定估计值） */
     float cx = (float)w / 2.0f, cy = (float)h / 2.0f;

@@ -23,7 +23,6 @@ extern "C" {
 #define SELFLNN_MAX_CONTROL_DIM 64
 #define SELFLNN_MAX_MODALITIES 9
 #define SELFLNN_UNIFIED_INPUT_DIM (SELFLNN_MAX_MODALITIES * SELFLNN_MAX_CONTROL_DIM)
-/* ZSF-ZNB修复S-002: 统一投影维度（所有模态投影到此维度后求和） */
 #define SELFLNN_UNIFIED_PROJECTION_DIM 256
 
 /**
@@ -75,25 +74,24 @@ typedef struct {
     /* M-003修复: 保存上一次输出用于时序对比 */
     float prev_output[SELFLNN_MAX_CONTROL_DIM];     /**< 上一次统一输出 */
     size_t prev_output_dim;                         /**< 上一次输出维度 */
-    /* ZSF-ZNB修复S-002: 每模态线性投影矩阵W_i + 偏置b_i
+/*修复S-002: 每模态线性投影矩阵W_i + 偏置b_i
      * W_i[modality] 将各模态原始维度映射到 SELFLNN_UNIFIED_PROJECTION_DIM
      * 统一输入 = sum_i (W_i · x_i + b_i) -- element-wise求和 */
     float* projection_matrices[SELFLNN_MAX_MODALITIES]; /**< 投影矩阵 [proj_dim × input_dim_i] */
     float* projection_biases[SELFLNN_MAX_MODALITIES];   /**< 投影偏置 [proj_dim] */
     size_t projection_input_sizes[SELFLNN_MAX_MODALITIES]; /**< 各投影输入维度 */
     int projections_initialized;                         /**< 投影矩阵是否已初始化 */
-    int projection_locked;                               /**< ZSFX-DEEP-R8-002: 1=锁定投影矩阵不参与训练 */
+    int projection_locked; /**< 1=锁定投影矩阵不参与训练 */
     /* 投影矩阵Nesterov动量优化器缓冲区 */
     float* projection_weight_v[SELFLNN_MAX_MODALITIES];  /**< 权重动量速度缓冲区 [proj_dim × input_dim_i] */
     float* projection_bias_v[SELFLNN_MAX_MODALITIES];    /**< 偏置动量速度缓冲区 [proj_dim] */
     float projection_momentum;                           /**< 动量系数，默认0.9 */
     int projection_train_step;                           /**< 投影矩阵训练步数计数器 */
-    /* ZSF-009: 在线学习支持 —— 存储上次前向传播数据 */
     float last_raw_signals[SELFLNN_MAX_MODALITIES][SELFLNN_MAX_CONTROL_DIM]; /**< 上次各模态原始信号 */
     size_t last_raw_sizes[SELFLNN_MAX_MODALITIES];      /**< 上次各模态信号维度 */
     float last_combined[SELFLNN_UNIFIED_PROJECTION_DIM];/**< 上次投影求和结果 */
     int last_active_count;                              /**< 上次活跃模态数量 */
-    int is_trained;                                     /**< ZSFWS-S006: 投影权重是否已完成训练 */
+    int is_trained; /**< 投影权重是否已完成训练 */
 } UnifiedInputState;
 
 /**
@@ -216,7 +214,7 @@ int multimodal_unified_input_diagnose_modalities(const UnifiedInputState* state,
                                                   int* active_count);
 
 /**
- * @brief ZSF-009/ZSFX-DEEP-R8: 统一输入在线训练步骤
+ * @brief 统一输入在线训练步骤
  *
  * 基于目标输出对投影矩阵进行在线学习更新。
  * 使用MSE损失 + SGD优化器，对每个活跃模态的投影矩阵W_i和偏置b_i进行梯度更新。

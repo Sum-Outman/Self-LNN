@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file product_design.h
  * @brief 产品设计能力接口 — 【基础功能实现】
  *
@@ -326,7 +326,7 @@ void rank_design_variants(DesignVariant* variants, size_t variant_count);
 void design_variant_destroy(DesignVariant* variant);
 
 /* ============================================================================
- * ZSF-002: 参考设计案例管理API
+ *: 参考设计案例管理API
  * ============================================================================ */
 
 /**

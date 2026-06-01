@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file depth_estimation.c
  * @brief 深度估计算法实现
  *
@@ -318,7 +318,6 @@ static void cfc_depth_ode_layer_init(CfcDepthOdeLayer* layer,
     float scale_gate = sqrtf(2.0f / (float)(input_dim + hidden_dim));
     float scale_ugate = sqrtf(2.0f / (float)(hidden_dim + hidden_dim));
 
-    /* ZSFWS修复 P3-008: 统一使用secure_random_float()替代LCG PRNG */
     for (int i = 0; i < input_dim * hidden_dim; i++) {
         float r = secure_random_float();
         layer->w_input[i] = (r * 2.0f - 1.0f) * scale_input;
@@ -1632,7 +1631,7 @@ int depth_estimate_save_model(const DepthEstimator* estimator, const char* filep
     return 0;
 }
 
-/* ZSFUSA: 获取默认深度估计配置 */
+/* 获取默认深度估计配置 */
 DepthEstimationConfig depth_estimation_get_default_config(void) {
     DepthEstimationConfig config;
     memset(&config, 0, sizeof(config));

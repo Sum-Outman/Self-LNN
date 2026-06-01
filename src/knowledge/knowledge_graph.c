@@ -6,10 +6,10 @@
  * 支持图遍历、路径查找、子图匹配、图分析等高级功能。
  */
 
-#define SELFLNN_KNOWLEDGE_INTERNAL  /* ZSFZS-F034: 与knowledge_graph.h保持一致 */
+#define SELFLNN_KNOWLEDGE_INTERNAL /* 与knowledge_graph.h保持一致 */
 #include "selflnn/knowledge/knowledge_graph.h"
 
-/* ZSFZX-FIX-R6-1: 知识图谱操作锁宏 — 原结构完全无锁, 多线程必然崩溃 */
+/* 知识图谱操作锁宏 — 原结构完全无锁, 多线程必然崩溃 */
 #define GRAPH_LOCK(g)   do { if ((g) && (g)->graph_lock) mutex_lock((g)->graph_lock); } while(0)
 #define GRAPH_UNLOCK(g) do { if ((g) && (g)->graph_lock) mutex_unlock((g)->graph_lock); } while(0)
 #include "selflnn/core/errors.h"
@@ -57,7 +57,7 @@ static uint32_t crc32_compute(const void* data, size_t length) {
  * 内部数据结构
  * =========================================================================== */
 
-/* ZSFZS-F034: KnowledgeGraph完整结构已移至knowledge_graph.h(#ifdef SELFLNN_KNOWLEDGE_INTERNAL) */
+/* KnowledgeGraph完整结构已移至knowledge_graph.h(#ifdef SELFLNN_KNOWLEDGE_INTERNAL) */
 
 /* ============================================================================
  * 内部辅助函数
@@ -80,7 +80,7 @@ static int expand_array(void*** array, size_t* capacity, size_t current_size, si
 }
 
 /**
- * @brief 计算节点相似度（ZSFEEE-FIX-026: 综合评分——嵌入相似度 + 编辑距离）
+ * @brief 计算节点相似度（综合评分——嵌入相似度 + 编辑距离）
  */
 static float node_similarity(const GraphNode* a, const GraphNode* b) {
     if (!a || !b) return 0.0f;
@@ -371,7 +371,7 @@ KnowledgeGraph* knowledge_graph_create(size_t max_nodes, size_t max_edges) {
     graph->dirty = 0;
     graph->auto_save_path = NULL;
 
-    /* ZSFZX-FIX-R6-1: 创建图操作互斥锁 */
+/* 创建图操作互斥锁 */
     graph->graph_lock = mutex_create();
     
     return graph;
@@ -414,7 +414,7 @@ void knowledge_graph_free(KnowledgeGraph* graph) {
     if (graph->nodes) safe_free((void**)&graph->nodes);
     if (graph->edges) safe_free((void**)&graph->edges);
 
-    /* ZSFZX-FIX-R6-1: 销毁图操作互斥锁 */
+/* 销毁图操作互斥锁 */
     if (graph->graph_lock) {
         mutex_destroy(graph->graph_lock);
         graph->graph_lock = NULL;
@@ -432,7 +432,7 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
         return NULL;
     }
 
-    GRAPH_LOCK(graph);  /* ZSFZX-FIX-R6-1 */
+    GRAPH_LOCK(graph);
     
     if (graph->max_nodes > 0 && graph->node_count >= graph->max_nodes) {
         selflnn_set_last_error(SELFLNN_ERROR_MEMORY_FULL, __func__, __FILE__, __LINE__,
@@ -500,7 +500,7 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
     graph->nodes[graph->node_count++] = node;
     graph->dirty = 1;
     
-    GRAPH_UNLOCK(graph);  /* ZSFZX-FIX-R6-1 */
+    GRAPH_UNLOCK(graph);
     return node;
 }
 
@@ -513,7 +513,7 @@ GraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, GraphEdgeType type,
         return NULL;
     }
 
-    GRAPH_LOCK(graph);  /* ZSFZX-FIX-R6-1 */
+    GRAPH_LOCK(graph);
     
     if (graph->max_edges > 0 && graph->edge_count >= graph->max_edges) {
         selflnn_set_last_error(SELFLNN_ERROR_MEMORY_FULL, __func__, __FILE__, __LINE__,

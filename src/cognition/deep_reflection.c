@@ -6,7 +6,7 @@
  * 多段落反思、知识综合、假设生成与冲突解决。
  *
  * ============================================================
- * 【模块职责 - ZSFWS-028 认知三模块边界】
+ * 【模块职责 - 认知三模块边界】
  * ============================================================
  * 本模块（深度反思）的核心职责：主动内省式认知一致性审查系统
  *
@@ -71,8 +71,8 @@ struct DeepReflectionEngine {
     int owns_conflict;
     int owns_epistemic;
     int owns_hypothesis;
-    int conflict_net_warmed;        /**< ZSFZS-F017: conflict_net是否已完成预热 */
-    int lnn_conflict_epochs;        /**< ZSFZS-F017: conflict_net预热迭代次数 */
+    int conflict_net_warmed; /**< conflict_net是否已完成预热 */
+    int lnn_conflict_epochs; /**< conflict_net预热迭代次数 */
     float* layer_embeddings;
     size_t layer_embed_count;
     float* knowledge_base;
@@ -298,7 +298,7 @@ static float dr_cross_contradiction_check(DeepReflectionEngine* engine,
         memcpy(con_input + edim, prev_embeddings + (size_t)p * edim, edim * sizeof(float));
         float con_out[1] = {0};
         if (engine->conflict_net) {
-            /* ZSFZS-F017修复: conflict_net未充分训练时，使用Xavier初始化后
+/* conflict_net未充分训练时，使用Xavier初始化后
              * 先执行一次无监督预热（基于余弦距离的自蒸馏），
              * 然后用预热后的网络检测矛盾。预热在首次调用时自动触发。 */
             if (!engine->conflict_net_warmed && engine->lnn_conflict_epochs < 3) {
@@ -870,8 +870,8 @@ int dr_reflect_multi_passage(DeepReflectionEngine* engine,
         if (engine->layer_embed_count > 0)
             lr->coherence_score /= (float)engine->layer_embed_count;
 
-        /* ZSFQQ-Q030: S-014 5维深度分析增强（多段落反射版本）
-         * 与 dr_reflect() 对齐，为多段落反射添加完整的5维分析 */
+/* S-014 5维深度分析增强（多段落反射版本）
+         * 与 dr_reflect 对齐，为多段落反射添加完整的5维分析 */
         float s014_belief_consistency = 0.0f;
         float s014_hypothesis_strength = 0.0f;
         float s014_contradiction_level = 0.0f;

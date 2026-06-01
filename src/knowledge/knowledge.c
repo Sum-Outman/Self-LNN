@@ -1,8 +1,8 @@
-/**
+﻿/**
  * @file knowledge.c
  * @brief 知识库系统实现
  *
- * ZSFWS-M014: 本文件含~8000行引导知识条目（L5696+），作为AGI系统的初始知识库。
+ *: 本文件含~8000行引导知识条目（L5696+），作为AGI系统的初始知识库。
  * 这些种子知识是人类世界观的基础锚点，非"假数据"或"合成数据"。
  * 理想情况下种子知识应从外部JSON/YAML加载以减小二进制体积，
  * 但当前架构要求纯C自包含编译，后续可通过knowledge_import_file()实现外部加载。
@@ -47,10 +47,10 @@
 static XorshiftPrng micro_prng;
 static int micro_prng_initialized = 0;
 
-/* ZSFUSA: json_escape_into前向声明 (定义在文件末尾) */
+/* json_escape_into前向声明 (定义在文件末尾) */
 static void json_escape_into(char* dst, size_t dst_size, const char* src);
 
-/* ZSFZS-F026: 知识库更新事件通知回调
+/* 知识库更新事件通知回调
  * 当 knowledge_base_add() 成功写入新知识后调用此回调，
  * 上层系统可注册回调以主动触发LNN知识嵌入重新编码、推理引擎缓存刷新等操作。
  * 写锁内调用，回调应轻量（设置标志位），禁止在回调内再次操作知识库。 */
@@ -747,7 +747,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
                (new_capacity - kb->size) * sizeof(InternalKnowledgeEntry));
     }
     
-    /* ZSFZX-FIX-DEDUP: 在分配新条目之前检查重复
+/* 在分配新条目之前检查重复
      * 原knowledge_base_add()无任何去重检查，导致8条调用路径可添加重复知识
      * 使用字符串相似度检测已有条目与新条目的重复度，高于阈值则跳过 */
     if (kb->size > 0 && entry->subject && entry->predicate && entry->object) {
@@ -778,7 +778,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
                 avg_sim /= (float)sim_count;
                 /* 平均相似度>0.85或单个高度匹配>0.95视为重复 */
                 if (avg_sim > 0.85f || sim_results[0].similarity > 0.95f) {
-                    /* ZSFZX-FIX-R4-3: 合并策略增强 - 来源优先级保留
+/* 合并策略增强 - 来源优先级保留
                      * SOURCE_USER(3) > SOURCE_LEARNING(2) > SOURCE_PRESET(8)
                      * 用户手动输入的条目不应被自动学习覆盖 */
                     InternalKnowledgeEntry* existing = &kb->entries[sim_results[0].index];
@@ -822,7 +822,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     kb->size++;
     kb->entry_count = kb->size;
 
-    /* ZSFWS-M024修复: 新知识点加入后清除搜索结果缓存
+/* 新知识点加入后清除搜索结果缓存
      * 缓存的查询结果可能因新知识加入而过期，立即失效避免返回过期数据 */
     if (kb->search_results_cache) {
         safe_free((void**)&kb->search_results_cache);
@@ -861,7 +861,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
         inverted_index_add_key(&kb->object_index, internal_entry->entry.object, internal_entry->id);
     }
 
-    /* ZSFZS-F026: 知识库更新事件通知
+/* 知识库更新事件通知
      * 在写锁内调用回调，通知上层系统有新知识写入。
      * 回调应极其轻量（仅设置标志位），不能操作知识库（避免死锁）。
      * 实际的知识嵌入重新编码由上层在AGI后台循环中异步处理。 */
@@ -895,7 +895,7 @@ int knowledge_base_remove(KnowledgeBase* kb, int entry_id) {
             memset(&kb->entries[kb->size - 1], 0, sizeof(InternalKnowledgeEntry));
             
             kb->size--;
-            /* ZSFWS-M024: 条目删除后清除搜索结果缓存 */
+/* 条目删除后清除搜索结果缓存 */
             if (kb->search_results_cache) {
                 safe_free((void**)&kb->search_results_cache);
                 kb->cache_size = 0;
@@ -928,7 +928,7 @@ int knowledge_is_expired(const void* entry) {
     return (meta->expires > 0 && (long)time(NULL) > meta->expires) ? 1 : 0;
 }
 
-/* ZSFBUILD: MSVC下与reasoning_internal.c中的knowledge_version_diff签名冲突，重命名 */
+/* MSVC下与reasoning_internal.c中的knowledge_version_diff签名冲突，重命名 */
 #ifdef _MSC_VER
 int knowledge_entry_diff(const void* entry_a, const void* entry_b, float* diff, int dim) {
 #else
@@ -1015,7 +1015,7 @@ int knowledge_base_query(KnowledgeBase* kb, const KnowledgeQuery* query,
     return (int)match_count;
 }
 
-/* ZSFWS-P2: 按来源过滤的知识查询 */
+/* 按来源过滤的知识查询 */
 int knowledge_base_query_by_source(KnowledgeBase* kb, const KnowledgeQuery* query,
                                    int source_filter,
                                    KnowledgeEntry* results, size_t max_results) {
@@ -3385,7 +3385,7 @@ InferenceResult* knowledge_query(KnowledgeBase* kb, const char* query_text,
             /* 将查询文本按空格拆分为单词，查找每个单词的嵌入 */
             char query_copy[1024];
             snprintf(query_copy, sizeof(query_copy), "%s", query_text);
-            /* ZSFZS-F009修复: 使用线程安全的strtok替代strtok */
+/* 使用线程安全的strtok替代strtok */
             char* saveptr = NULL;
             char* token = strtok_s(query_copy, " \t\n\r.,;:!?，。；：！？、", &saveptr);
             
@@ -5821,7 +5821,7 @@ int knowledge_has_lnn_integration(const KnowledgeBase* kb) {
     return cfc_embed_get_lnn_network(kb->cfc_embed) != NULL;
 }
 
-/* ZSFZS-F026: 注册知识库更新事件通知回调
+/* 注册知识库更新事件通知回调
  * 回调在 knowledge_base_add() 的写锁内调用，必须轻量（仅设置标志位），
  * 禁止在回调内再次操作知识库（会导致死锁）。
  * callback: 通知回调函数指针，传NULL可取消注册
@@ -5831,7 +5831,7 @@ void knowledge_base_set_update_callback(KnowledgeUpdateCallback callback, void* 
     g_kb_notify_user_data = user_data;
 }
 
-/* ZSFZS-F026: 触发CfC嵌入引擎全量重新训练
+/* 触发CfC嵌入引擎全量重新训练
  * 当知识库通过回调机制收到更新通知后，AGI后台循环调用此函数
  * 对新增的知识条目进行嵌入向量重新编码。
  * 使用外部LNN进行前向传播（如果已连接），提升嵌入质量。
@@ -5856,7 +5856,7 @@ int knowledge_base_retrain_embeddings(KnowledgeBase* kb, int epochs) {
 }
 
 /* ============================================================================
- * ZSFEEE-FIX-008: 种子知识已从硬编码迁移至 config/seed_knowledge.json
+ *: 种子知识已从硬编码迁移至 config/seed_knowledge.json
  * 
  * 原281条硬编码三元组种子知识（PresetKnowledgeEntry数组）已全部迁移至
  * config/seed_knowledge.json 配置文件。
@@ -5962,7 +5962,7 @@ int knowledge_base_load_from_file(KnowledgeBase* kb, const char* filepath) {
 }
 
 /* ================================================================
- * ZSFWS-P0-003: JSON种子知识导入/导出
+ *: JSON种子知识导入/导出
  * 替代8000行硬编码数据，支持外部JSON文件动态加载。
  * 使用项目内建json_parser.c纯C实现（零外部依赖）。
  * ================================================================ */
@@ -6152,7 +6152,7 @@ int knowledge_base_export_json(KnowledgeBase* kb, const char* filepath) {
     return exported;
 }
 
-/* ZSFWS-P0-003: 前向声明JSON转义辅助（与backend.c同理） */
+/* 前向声明JSON转义辅助（与backend.c同理） */
 static void json_escape_into(char* dst, size_t dst_size, const char* src) {
     size_t di = 0;
     if (!dst || dst_size == 0 || !src) {
@@ -6173,7 +6173,7 @@ static void json_escape_into(char* dst, size_t dst_size, const char* src) {
 }
 
 /* ============================================================================
- * ZSFEEE-FIX-008: 种子知识加载函数
+ *: 种子知识加载函数
  * 
  * 强制从 config/seed_knowledge.json 加载所有种子知识。
  * 不再使用编译时硬编码数据，也不再回退到 knowledge_preset.json。
@@ -6187,7 +6187,7 @@ static void json_escape_into(char* dst, size_t dst_size, const char* src) {
 int knowledge_base_populate_preset(KnowledgeBase* kb) {
     if (!kb) return -1;
 
-    /* ZSFEEE-FIX-008: 仅从 config/seed_knowledge.json 加载，无硬编码回退 */
+/* 仅从 config/seed_knowledge.json 加载，无硬编码回退 */
     int external_loaded = 0;
 
     /* 优先从可执行文件所在目录的 config/ 子目录加载（绝对路径） */
@@ -6225,13 +6225,13 @@ int knowledge_base_populate_preset(KnowledgeBase* kb) {
     }
 
     if (external_loaded > 0) {
-        /* ZSFEEE-FIX-008: 从config/seed_knowledge.json加载了N条种子知识 */
-        log_info("[知识库] ZSFEEE-FIX-008: 从config/seed_knowledge.json加载了%d条种子知识", external_loaded);
+/* 从config/seed_knowledge.json加载了N条种子知识 */
+        log_info("[知识库] 从config/seed_knowledge.json加载了%d条种子知识", external_loaded);
         return external_loaded;
     }
 
-    /* ZSFEEE-FIX-008: JSON文件加载失败，不添加任何硬编码知识，记录错误日志 */
-    log_error("[知识库] ZSFEEE-FIX-008: config/seed_knowledge.json 加载失败！种子知识库为空，请确保配置文件存在且格式正确");
+/* JSON文件加载失败，不添加任何硬编码知识，记录错误日志 */
+    log_error("[知识库] config/seed_knowledge.json 加载失败！种子知识库为空，请确保配置文件存在且格式正确");
     return -1;
 }
 #endif /* SELFLNN_SKIP_SEED_KNOWLEDGE */
@@ -6248,12 +6248,12 @@ KnowledgeBase* knowledge_base_create_with_preset(size_t max_entries) {
     if (!kb) return NULL;
     
 #ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
-    /* ZSFEEE-FIX-008: 默认模式：从config/seed_knowledge.json加载种子知识 */
+/* 默认模式：从config/seed_knowledge.json加载种子知识 */
     int preset_count = knowledge_base_populate_preset(kb);
     if (preset_count > 0) {
-        log_info("[知识库] ZSFEEE-FIX-008: 已加载 %d 条种子知识（来源: config/seed_knowledge.json，定义SELFLNN_SKIP_SEED_KNOWLEDGE可跳过）", preset_count);
+        log_info("[知识库] 已加载 %d 条种子知识（来源: config/seed_knowledge.json，定义SELFLNN_SKIP_SEED_KNOWLEDGE可跳过）", preset_count);
     } else {
-        log_warning("[知识库] ZSFEEE-FIX-008: 种子知识加载失败，知识库以空库启动（请检查config/seed_knowledge.json）");
+        log_warning("[知识库] 种子知识加载失败，知识库以空库启动（请检查config/seed_knowledge.json）");
     }
 #else
     /* 跳过种子知识：知识库从零开始，所有知识从真实数据源学习获得 */
@@ -6798,7 +6798,7 @@ int knowledge_self_improve(KnowledgeBase* kb) {
     return improved;
 }
 
-/* ZSFUSA: 获取知识库总事实数 */
+/* 获取知识库总事实数 */
 size_t knowledge_base_get_total_facts(KnowledgeBase* kb) {
     if (!kb) return 0;
     size_t count = 0;
@@ -6808,7 +6808,7 @@ size_t knowledge_base_get_total_facts(KnowledgeBase* kb) {
     return count;
 }
 
-/* ZSFEEE-FIX-DEEP-EXT-003: knowledge_base_get_fact_count wrapper
+/* knowledge_base_get_fact_count wrapper
  * backend.c:6594通过extern调用此函数名，但实际只有knowledge_base_get_total_facts存在
  * 此wrapper提供向后兼容，实际委托给knowledge_base_get_total_facts */
 int knowledge_base_get_fact_count(void* kb) {
@@ -6816,7 +6816,7 @@ int knowledge_base_get_fact_count(void* kb) {
     return (int)knowledge_base_get_total_facts((KnowledgeBase*)kb);
 }
 
-/* ZSFUSA: 知识库输出一致性检查（用于AGI后台验证） */
+/* 知识库输出一致性检查（用于AGI后台验证） */
 float knowledge_base_output_consistency(KnowledgeBase* kb, const float* output, size_t dim) {
     if (!kb || !output || dim == 0) return 0.0f;
     float variance = 0.0f;
@@ -6828,7 +6828,7 @@ float knowledge_base_output_consistency(KnowledgeBase* kb, const float* output, 
     return variance < 1.0f ? 1.0f - variance : 0.0f;
 }
 
-/* ZSFAAA-DEEP-002: 查找知识库中与给定向量的嵌入最相似的事实
+/* 查找知识库中与给定向量的嵌入最相似的事实
  * 算法: 遍历知识库所有条目，计算query_vec与每个SPO三元组嵌入的余弦相似度，
  * 返回相似度最高的匹配事实。用于LNN输出爆炸时的知识锚定修正。 */
 int knowledge_base_nearest_fact(KnowledgeBase* kb, const float* query_vec, size_t dim,

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file training_pipeline.h
  * @brief 完整训练流水线接口
  */
@@ -45,7 +45,7 @@ typedef struct {
     float gpu_utilization;
     float estimated_time_remaining;
     TrainingStage current_stage;   /**< 当前训练阶段 */
-    float convergence_rate;        /**< ZSFWS-008: 收敛速率（暴露给前端） */
+    float convergence_rate; /**< 收敛速率（暴露给前端） */
 } TrainingPipelineState;
 
 typedef struct {
@@ -54,13 +54,13 @@ typedef struct {
     size_t multimodal_epochs;
     size_t fine_tune_epochs;
     size_t local_epochs;
-    size_t speech_epochs;            /**< ZSFQQ-DEEP-002: 第6阶段语音训练轮数 */
+    size_t speech_epochs; /**< 第6阶段语音训练轮数 */
     float pretrain_lr;
     float deep_train_lr;
     float multimodal_lr;
     float fine_tune_lr;
     float local_lr;
-    float speech_lr;                 /**< ZSFQQ-DEEP-002: 第6阶段语音训练学习率 */
+    float speech_lr; /**< 第6阶段语音训练学习率 */
     float base_lr;                   /**< 基础学习率 */
     size_t batch_size;
     int use_gpu;
@@ -72,13 +72,13 @@ typedef struct {
     int use_early_stopping;
     int early_stopping_patience;
     float validation_split;
-    float convergence_threshold;     /**< ZSFWS-008: 绝对收敛阈值（损失低于此值立即停止管线） */
+    float convergence_threshold; /**< 绝对收敛阈值（损失低于此值立即停止管线） */
     int optimizer_type;              /**< 优化器类型 0=SGD 1=Momentum 2=AdaGrad 3=RMSProp 4=Adam 5=AdamW 6=AdaDelta 7=LAMB 8=LARS 9=Ranger 10=NovoGrad */
     int loss_function;               /**< 损失函数（LossType枚举值, loss.h）: 0=MSE 1=MAE 2=Huber 3=CategoricalCrossEntropy 4=BinaryCrossEntropy 5=KLD 6=Cosine 7=Contrastive 8=Focal 9=Dice 10=Triplet 11=Quantile */
-    /* ZSFEEE-FIX-DEEP-007: 分布式梯度同步配置 */
+/* 分布式梯度同步配置 */
     int use_distributed_training;    /**< 是否启用分布式训练 0=禁用 1=启用 */
     int distributed_sync_frequency;  /**< 分布式梯度同步频率（每N个批次同步一次，默认1） */
-    /* ZSFEEE-FIX-DEEP-008: 双阶段检查点保存配置 */
+/* 双阶段检查点保存配置 */
     int checkpoint_frequency;        /**< 检查点保存频率（每N个epoch保存一次，默认10，0=仅在阶段结束时保存） */
     char data_directory[512];
     char output_directory[512];

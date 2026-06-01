@@ -11,7 +11,7 @@
  * 6. IPOP重启策略（增加种群多样性）                                  ✅ 已实现
  * 7. 帕累托前沿多目标优化（精度×参数数×延迟）                       ✅ 已实现
  * 
- * ZSFWXJ-FIX002修复: 注释头部过时，DARTS和RL-NAS(ENAS)已完整深度实现，
+ *修复: 注释头部过时，DARTS和RL-NAS(ENAS)已完整深度实现，
  * 包括控制器LNN网络、策略梯度采样、双层优化、softmax离散化等全部功能。
  */
 
@@ -2587,7 +2587,6 @@ int cfc_enas_step(CfcENASSearch* searcher,
             searcher, hidden_state, cell_state);
         architecture->layer_widths[i] = enas_controller_sample_hidden_size(
             searcher, hidden_state, cell_state);
-        /* ZSFWS修复-M-014: 从搜索空间采样而非硬编码固定值 */
         architecture->kernel_sizes[i] = 1 + (int)(cfc_nas_rand_float() * 6.0f);  /* 1-7 */
         architecture->operations[i] = (int)(cfc_nas_rand_float() * 4.0f);        /* 0-4 */
         architecture->activations[i] = (int)(cfc_nas_rand_float() * 5.0f);       /* 0-5 */
@@ -2674,7 +2673,6 @@ int cfc_enas_sample_architectures(CfcENASSearch* searcher,
                 searcher, hidden_state, cell_state);
             architectures[i].layer_widths[j] = enas_controller_sample_hidden_size(
                 searcher, hidden_state, cell_state);
-            /* ZSFWS修复-M-014: 从搜索空间采样 */
             architectures[i].kernel_sizes[j] = 1 + (int)(cfc_nas_rand_float() * 6.0f);
             architectures[i].operations[j] = (int)(cfc_nas_rand_float() * 4.0f);
             architectures[i].activations[j] = (int)(cfc_nas_rand_float() * 5.0f);

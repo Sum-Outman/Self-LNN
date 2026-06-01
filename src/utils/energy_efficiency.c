@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file energy_efficiency.c
  * @brief 能效优化实现
  *
@@ -1007,7 +1007,7 @@ int auto_tune_power_mode(EnergyEfficiencyEngine* engine) {
     }
     /* 负载判断 */
     else if (cpu_usage >= 0.0) {
-        /* ZSFA-FIX-F-010: get_cpu_usage_real返回0.0~1.0，阈值需百分比比较 */
+/* get_cpu_usage_real返回0.0~1.0，阈值需百分比比较 */
         float cpu_pct = cpu_usage * 100.0f;
         if (cpu_pct > 75.0 && cpu_temp < temp_limit * 0.85) {
             /* 高负载+温度正常 → 高性能 */

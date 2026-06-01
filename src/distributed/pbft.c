@@ -1,4 +1,4 @@
-#include "selflnn/distributed/pbft.h"
+﻿#include "selflnn/distributed/pbft.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
@@ -9,7 +9,7 @@
 #include <math.h>
 
 #ifdef _MSC_VER
-#pragma warning(disable:4456)  /* ZSF-032修复: pbft_send_view_change已实现，移除4013 */
+#pragma warning(disable:4456)
 #endif
 
 #ifdef _WIN32
@@ -1034,7 +1034,7 @@ static int pbft_validate_view_change(const PbftViewChange* msg, uint32_t current
     return 1;
 }
 
-/* ZSF-032修复: pbft_send_view_change() 函数实现
+/*修复: pbft_send_view_change() 函数实现
  * 原代码调用此函数但未定义，编译警告(#pragma 4013)压制了链接错误。
  * 构建并广播ViewChange消息到所有活跃节点。 */
 static int pbft_send_view_change(PbftSystem* system, uint32_t new_view_number) {

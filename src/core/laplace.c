@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file laplace.c
  * @brief 拉普拉斯变换增强系统实现
  * 
@@ -14,7 +14,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
-#include "selflnn/utils/math_utils_internal.h"  /* ZSFUSA: CLAMP宏 */
+#include "selflnn/utils/math_utils_internal.h" /* CLAMP宏 */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -1335,7 +1335,7 @@ void laplace_analyzer_reset(LaplaceAnalyzer* analyzer) {
 }
 
 /* ================================================================
- * ZSFUSA-P3补: 极点分析和稳定性裕度查询函数
+ *补: 极点分析和稳定性裕度查询函数
  * 访问缓存的StabilityAnalysis为laplace_unified_health_check提供数据
  * ================================================================ */
 
@@ -1452,7 +1452,7 @@ static int compute_poles_improved_durand_kerner(const float* denominator, size_t
             Complex poly_val = complex_polyval(denominator, den_order, poles[i]);
             
             // 计算分母导数（多项式导数）
-            /* ZSFGGG-S2-004修复: 循环边界应为 j<=den_order 而非 j<den_order,
+/* 循环边界应为 j<=den_order 而非 j<den_order,
              * 否则遗漏最高阶项 N*a_N*s^(N-1) 导致牛顿法每次迭代计算错误导数 */
             Complex derivative = complex_create(0.0f, 0.0f);
             for (size_t j = 1; j <= den_order; j++) {
@@ -3567,7 +3567,7 @@ int laplace_extract_spectral_features(LaplaceAnalyzer* analyzer, float features[
 }
 
 /******************************************************************************
- * ZSFWS-H001: 数值拉普拉斯变换实现
+ *: 数值拉普拉斯变换实现
  * 补充此前缺失的核心功能：L{f(t)} = ∫_0^∞ f(t)·e^(-s·t) dt
  * 包含正向变换（数值积分）和逆向变换（Weeks/Talbot法）
  ******************************************************************************/

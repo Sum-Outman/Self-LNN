@@ -1,4 +1,4 @@
-#include "selflnn/backend/websocket_push.h"
+﻿#include "selflnn/backend/websocket_push.h"
 #include "selflnn/core/common.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-/* ZSFWS-L007: 当前WebSocket实现不支持per-message-deflate(RFC7692)压缩扩展。
+/* 当前WebSocket实现不支持per-message-deflate(RFC7692)压缩扩展。
  * 影响: 高负载场景下JSON推送占用额外带宽（未压缩时约3-5x膨胀）。
  * 后续方案: 实现纯C deflate核心或使用应用层msgpack替代JSON。
  * 当前缓解: 高频推送(如系统状态)仅包含最小字段集。 */
@@ -37,7 +37,7 @@ typedef SOCKET ws_socket_t;
 #include <sys/select.h>
 #include <pthread.h>
 
-/* ZSFEEE-FIX-021: Linux使用epoll，macOS/BSD使用kqueue替代select */
+/* Linux使用epoll，macOS/BSD使用kqueue替代select */
 #ifdef __linux__
 #include <sys/epoll.h>
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
@@ -75,7 +75,7 @@ struct WSPushServer {
     long last_tick;
     void* mutex;
     void* accept_thread;
-    /* ZSFEEE-FIX-021: epoll/kqueue文件描述符（Linux/macOS/BSD高性能I/O多路复用） */
+/* epoll/kqueue文件描述符（Linux/macOS/BSD高性能I/O多路复用） */
 #ifdef __linux__
     int epoll_fd;
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
@@ -354,13 +354,13 @@ static void* ws_push_accept_thread(void* arg)
     if (!srv) return 1;
 
 #ifdef __linux__
-    /* ZSFEEE-FIX-021: Linux epoll等待新连接 */
+/* Linux epoll等待新连接 */
     struct epoll_event events[1];
     while (srv->running) {
         int nfds = epoll_wait(srv->epoll_fd >= 0 ? srv->epoll_fd : 0, events, 1, 100);
         if (nfds <= 0) continue;
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-    /* ZSFEEE-FIX-021: macOS/BSD kqueue等待新连接 */
+/* macOS/BSD kqueue等待新连接 */
     struct kevent events[1];
     struct timespec ts = {0, 100000000}; /* 100ms */
     while (srv->running) {
@@ -426,7 +426,7 @@ WSPushServer* ws_push_server_create(int port)
         return NULL;
     }
     srv->last_tick = (long)time(NULL);
-    /* ZSFEEE-FIX-021: 初始化epoll/kqueue FD */
+/* 初始化epoll/kqueue FD */
 #ifdef __linux__
     srv->epoll_fd = -1;
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
@@ -445,7 +445,7 @@ int ws_push_server_start(WSPushServer* srv)
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 #else
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    /* ZSFX-DEEP-R7-002: Linux需要SO_REUSEPORT与HTTP服务器共享8080端口 */
+/* Linux需要SO_REUSEPORT与HTTP服务器共享8080端口 */
     setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
     struct sockaddr_in addr;
@@ -465,7 +465,7 @@ int ws_push_server_start(WSPushServer* srv)
     ws_set_nonblock(sock, 1);
     srv->listen_sock = sock;
 
-    /* ZSFEEE-FIX-021: 创建epoll/kqueue I/O多路复用FD */
+/* 创建epoll/kqueue I/O多路复用FD */
 #ifdef __linux__
     srv->epoll_fd = epoll_create1(0);
     if (srv->epoll_fd >= 0) {
@@ -521,7 +521,7 @@ void ws_push_server_stop(WSPushServer* srv)
         WS_CLOSE(srv->listen_sock);
         srv->listen_sock = WS_INVALID;
     }
-    /* ZSFEEE-FIX-021: 清理epoll/kqueue FD */
+/* 清理epoll/kqueue FD */
 #ifdef __linux__
     if (srv->epoll_fd >= 0) {
         close(srv->epoll_fd);
@@ -603,7 +603,7 @@ int ws_push_broadcast_json(WSPushServer* srv, const char* json_message)
     if (jlen <= 0 || jlen >= WS_MAX_MESSAGE_SIZE) return -1;
     int sent = 0;
 
-    /* ZSFAB-S6修复: 加互斥锁保护客户端列表，防止与poll线程竞态 */
+/* 加互斥锁保护客户端列表，防止与poll线程竞态 */
     ws_socket_t active_socks[WS_MAX_CLIENTS];
     int active_indices[WS_MAX_CLIENTS];
     int active_count = 0;
@@ -671,7 +671,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
     if (!srv || !srv->running) return -1;
 
 #if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-    /* ZSFEEE-FIX-021: Linux使用epoll，macOS/BSD使用kqueue替代select */
+/* Linux使用epoll，macOS/BSD使用kqueue替代select */
 #ifdef __linux__
     if (srv->epoll_fd >= 0) {
         struct epoll_event evs[WS_MAX_CLIENTS + 1];

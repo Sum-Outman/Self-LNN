@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file simulator.h
  * @brief 仿真器接口定义
  * 
@@ -141,7 +141,7 @@ typedef struct {
     int data_size;                /**< 数据大小 */
     float noise_level;            /**< 噪声级别 */
     int is_valid;                 /**< 数据是否有效 */
-    /* ZSFWS-E003: 传感器空间位姿 — 存储mount_position/mount_orientation */
+/* 传感器空间位姿 — 存储mount_position/mount_orientation */
     float position[3];            /**< 安装位置 (x,y,z) */
     float orientation[4];         /**< 安装姿态 (四元数 w,x,y,z) */
     int robot_id;                 /**< 所属机器人ID */
@@ -1089,7 +1089,7 @@ typedef struct {
  */
 const SimulatorInterface* gazebo_get_simulator_interface(void);
 
-/* ZSFUSA: 仿真器辅助操作接口 */
+/* 仿真器辅助操作接口 */
 int simulator_set_camera_view(void* sim, float x, float y, float z, float target_x, float target_y, float target_z);
 int simulator_toggle_grid_display(void* sim, int enable);
 int simulator_add_robot(void* sim, const char* name);

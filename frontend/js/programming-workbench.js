@@ -1,4 +1,4 @@
-(function() {
+﻿(function() {
     'use strict';
 
     var currentTab = 'editor';
@@ -29,7 +29,7 @@
         editorCode = el ? el.value : '';
     }
 
-    var _pwMaxOutputLines = 2000; /* ZSFABC-Fix: 输出行数上限，防止内存泄漏 */
+    var _pwMaxOutputLines = 2000; /* 输出行数上限，防止内存泄漏 */
     function appendOutput(text) {
         var el = document.getElementById('pw-output');
         if (el) {
@@ -271,7 +271,7 @@
         showStatus('已清空');
     };
 
-    /* ZSFABC-Fix: 处理DOMContentLoaded竞态条件 */
+/* 处理DOMContentLoaded竞态条件 */
     function _pwInit() {
         switchTab('editor');
         checkProgrammingStatus();
@@ -282,7 +282,7 @@
         _pwInit();
     }
 
-    /* ZSFABC-020修复: 重命名全局暴露避免与skills/knowledge的switchTab冲突 */
+/* 重命名全局暴露避免与skills/knowledge的switchTab冲突 */
     window.switchProgrammingTab = switchTab;
     window.switchTab = undefined;
     window.clearOutput = clearOutput;

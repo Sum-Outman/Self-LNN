@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 实时数据可视化系统
  * 提供性能指标、网络拓扑、训练过程等可视化功能
  */
@@ -1178,7 +1178,7 @@ class VisualizationManager {
     }
 
     /**
-     * 更新权重分布数据（ZSFABC-C002修复: main.js和training-push.js调用的统一入口）
+     * 更新权重分布数据（main.js和training-push.js调用的统一入口）
      * @param {Float32Array|number[]} weights - 权重数组
      * @param {number} [numBins] - 直方图分段数，默认20
      */
@@ -1188,7 +1188,7 @@ class VisualizationManager {
     }
 
     /**
-     * 更新激活统计数据（ZSFABC-C002修复: main.js和training-push.js调用的统一入口）
+     * 更新激活统计数据（main.js和training-push.js调用的统一入口）
      * @param {number[]} layers - 各层激活值数组
      * @param {number} mean - 平均值
      * @param {number} max - 最大值
@@ -1204,7 +1204,7 @@ class VisualizationManager {
             for (var j = 0; j < sz; j++) {
                 var layerIdx = Math.floor(i * layers.length / sz);
                 var val = layers[layerIdx] || 0;
-                row[j] = val;  /* ZSFABC-Fix: 移除人工正弦噪声，仅使用真实后端数据 */
+                row[j] = val; /* 移除人工正弦噪声，仅使用真实后端数据 */
             }
             data[i] = row;
         }
@@ -1260,7 +1260,7 @@ class VisualizationManager {
             const api = window.SelfLnnApi;
             if (!api) return;
 
-            /* ZSFWS-VZ2修复: 每个API调用独立catch，单点失败不丢失其他响应 */
+/* 每个API调用独立catch，单点失败不丢失其他响应 */
             const safeCall = (fn) => {
                 if (typeof fn !== 'function') return Promise.resolve(null);
                 return fn().catch(function(e) { console.warn('[可视化] API调用失败:', e); return null; });
@@ -1629,7 +1629,6 @@ class VisualizationManager {
         ctx.clearRect(0, 0, w, h);
 
         const data = this.stateActivationData || [];
-        /* ZSF999XQ-L-003修复: 检测全零数据，显示"等待后端数据"提示 */
         var hasRealData = false;
         for (var di = 0; di < data.length && !hasRealData; di++) {
             if (data[di]) {
@@ -2052,7 +2051,7 @@ class VisualizationManager {
      * @param {string} mode 'fire' | 'rainbow' | 'neon'
      */
     setSpectrumColorMode(mode) {
-        /* ZSFWS-VZ3修复: spectrumData未初始化时安全退出 */
+/* spectrumData未初始化时安全退出 */
         if (!this.spectrumData) return;
         if (['fire', 'rainbow', 'neon'].includes(mode)) {
             this.spectrumData.colorMode = mode;

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file dialogue_deep.c
  * @brief 对话系统深度增强实现
  *
@@ -1096,7 +1096,7 @@ struct DialogueGenerator {
 
     /* 内部状态 */
     int initialized;
-    int is_trained;  /* ZSFWS-M005: 输出投影权重是否已完成训练 */
+    int is_trained; /* 输出投影权重是否已完成训练 */
 };
 
 /* ============================================================================
@@ -1508,7 +1508,7 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config)
     }
 
     gen->initialized = 1;
-    /* ZSFLYF-P0-003修复: 删除虚假的"已训练"标记。
+/* 删除虚假的"已训练"标记。
      * Xavier随机初始化不代表已训练，未训练的随机权重不能产生有意义的回复。
      * 生成器创建后必须经过真实训练(前向传播+反向传播+多轮迭代)后才能标记为已训练。
      * 调用者在生成器未训练时应正确处理 -2 错误码并告知用户需要先训练模型。 */
@@ -1516,13 +1516,13 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config)
     return gen;
 }
 
-/* ZSFWS-M005: 标记对话生成器已训练（权重加载或训练完成后调用） */
+/* 标记对话生成器已训练（权重加载或训练完成后调用） */
 void dialogue_gen_mark_trained(DialogueGenerator* gen)
 {
     if (gen) gen->is_trained = 1;
 }
 
-/* ZSFWS-M005: 查询对话生成器训练状态 */
+/* 查询对话生成器训练状态 */
 int dialogue_gen_is_trained(const DialogueGenerator* gen)
 {
     return (gen && gen->is_trained) ? 1 : 0;
@@ -1551,7 +1551,7 @@ static int dialogue_gen_step(DialogueGenerator* gen,
 {
     if (!gen || !gen->initialized || !output_token_id) return -1;
 
-    /* ZSFWS-M005修复: 对话生成器训练状态检查
+/* 对话生成器训练状态检查
      * 未训练时输出投影权重为随机值，生成的token序列无意义。
      * 返回-2错误码通知调用者回退到模板匹配系统。 */
     if (!gen->is_trained) {
@@ -2831,7 +2831,7 @@ int dg_generate_response(DialogueGenerator* gen,
      * ============================================================ */
     if (confidence) {
         if (total_chars > 0) {
-            /* ZSFLYF-P1-005修复: 置信度从CfC状态向量的输出熵动态计算。 */
+/* 置信度从CfC状态向量的输出熵动态计算。 */
             *confidence = 0.0f;
             float* final_state = dg_get_current_state(gen);
             if (final_state && gen->config.hidden_size > 0) {

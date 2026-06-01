@@ -1,4 +1,4 @@
-#include "selflnn/core/cma_es.h"
+﻿#include "selflnn/core/cma_es.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/logging.h"
 #include <stdlib.h>
@@ -87,7 +87,7 @@ static void cmaes_jacobi_eigen(float* C, size_t n, float* diag, float* Q) {
     }
 }
 
-/* ZSFABC-P0-005修复: 矩阵平方根/逆平方根公式修正
+/* 矩阵平方根/逆平方根公式修正
  * 原理: 矩阵C的特征分解 C = Q * D * Q^T
  * sqrt(C) = Q * sqrt(D) * Q^T
  * inv_sqrt(C) = Q * inv_sqrt(D) * Q^T
@@ -386,7 +386,7 @@ int cmaes_update(CMAESState* state, const float* fitness_values) {
 
     if (hs > 0) {
         alpha_cov = 1.0f - c1 - cmu;
-        /* ZSFABC修复: 当演化路径长度hs>0时，delta_h不应被丢弃，
+/* 当演化路径长度hs>0时，delta_h不应被丢弃，
          * 需要在下一次合并到协方差更新中以补偿路径衰减 */
         float delta_h = (1.0f - hs) * c1 * (2.0f - c1);
         alpha_cov += delta_h; /* 将路径衰减补偿纳入协方差收缩因子 */
@@ -513,7 +513,7 @@ int cmaes_test_stop_conditions(CMAESState* state) {
         return 1;
     }
 
-    /* ZSFQQ-P0-001修复: 原条件 sigma*tol_x < tol_x 恒为真
+/* 原条件 sigma*tol_x < tol_x 恒为真
      * 正确条件: 步长×最大标准差 < tol_x，即检查搜索步长是否已收敛 */
     {
         size_t dim = state->dimension;
@@ -777,7 +777,7 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
 
         int result = cmaes_optimize(state, func, user_data);
         if (result != 0) {
-            /* ZSFABC修复: BIPOP中的CMA-ES优化失败处理 */
+/* BIPOP中的CMA-ES优化失败处理 */
             log_warning("[CMA-ES BIPOP] 子优化失败 (result=%d), 继续下次重启", result);
         }
 

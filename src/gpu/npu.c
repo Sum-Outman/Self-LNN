@@ -1,4 +1,4 @@
-#include "selflnn/gpu/gpu.h"
+﻿#include "selflnn/gpu/gpu.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/platform.h"
@@ -9,7 +9,6 @@
 #include <stdio.h>
 
 static NpuBackendInterface* g_active_npu_backend = NULL;
-/* ZSFWS修复-M-008: NPU异步推理互斥锁 */
 static MutexHandle g_npu_async_mutex = NULL;
 
 NpuBackendInterface* npu_get_backend_for_context(GpuContext* context) {
@@ -91,7 +90,6 @@ int gpu_npu_infer_async(NpuModel* model, const float** inputs, float** outputs,
         LOG_ERROR("gpu_npu_infer_async: 参数无效");
         return -1;
     }
-    /* ZSFWS修复-M-008: 互斥锁保护async_in_flight竞态 */
     if (!g_npu_async_mutex) {
         g_npu_async_mutex = mutex_create();
     }
@@ -114,7 +112,6 @@ int gpu_npu_infer_wait(NpuModel* model, int timeout_ms) {
         LOG_ERROR("gpu_npu_infer_wait: 参数无效");
         return -1;
     }
-    /* ZSFWS修复-M-008: 互斥锁保护async_in_flight */
     if (g_npu_async_mutex) mutex_lock(g_npu_async_mutex);
     int ret = model->backend->npu_infer_wait(model, timeout_ms);
     if (ret == 0) {

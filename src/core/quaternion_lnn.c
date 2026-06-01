@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file quaternion_lnn.c
  * @brief 四元数增强液态神经网络实现
  * 
@@ -17,7 +17,7 @@
 
 
 #include "selflnn/core/quaternion_lnn.h"
-#include "selflnn/core/quaternion_lnn_kernels.h"  /* ZSFDDD-P1-003: OpenCL内核字符串已提取至此头文件，
+#include "selflnn/core/quaternion_lnn_kernels.h"  /* OpenCL内核字符串已提取至此头文件，
                                                        待GPU OpenCL后端集成使用。当前仅预编译，暂未由
                                                        clCreateProgramWithSource等OpenCL API消费 */
 #include "selflnn/core/quaternion_optimizer.h"
@@ -1832,7 +1832,7 @@ static int quaternion_lnn_initialize(QuaternionLNN* network) {
 static void quaternion_lnn_compute_gradients(QuaternionLNN* network, 
                                             const float* target,
                                             QuaternionLNNResult* result) {
-    /* ZSFWXJ-FIX003修复: 使用真实target计算梯度，而非仅基于隐藏状态自变化率 */
+/* 使用真实target计算梯度，而非仅基于隐藏状态自变化率 */
     size_t hidden_quaternions = network->config.quaternion_hidden_size;
     size_t output_size = network->config.output_size;
     

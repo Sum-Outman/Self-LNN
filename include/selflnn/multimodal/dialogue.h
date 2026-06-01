@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file dialogue.h
  * @brief 对话系统接口
  * 
@@ -146,7 +146,7 @@ DialogueProcessor* dialogue_processor_create(const DialogueConfig* config);
 void dialogue_processor_free(DialogueProcessor* processor);
 
 /**
- * @brief ZSFQQ-P2-001: 获取对话处理器内部的生成器句柄
+ * @brief 获取对话处理器内部的生成器句柄
  * 用于在系统引导时标记生成器为已训练状态
  * @param processor 对话处理器句柄
  * @return DialogueGenerator* 生成器句柄，失败返回NULL
@@ -1072,13 +1072,13 @@ DialogueGenerator* dialogue_gen_create(const DialogueGenConfig* config);
 void dialogue_gen_free(DialogueGenerator* gen);
 
 /**
- * ZSFWS-M005: 标记对话生成器已训练
+ *: 标记对话生成器已训练
  * 权重加载或训练完成后调用，解除未训练保护
  */
 void dialogue_gen_mark_trained(DialogueGenerator* gen);
 
 /**
- * ZSFWS-M005: 查询对话生成器训练状态
+ *: 查询对话生成器训练状态
  * @return 1=已训练, 0=未训练或句柄无效
  */
 int dialogue_gen_is_trained(const DialogueGenerator* gen);

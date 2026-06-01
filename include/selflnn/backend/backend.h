@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file backend.h
  * @brief 后端API接口
  * 
@@ -359,14 +359,14 @@ typedef enum {
     API_GET_SAFETY_BOUNDS = 228,           /**< 获取安全边界配置 */
     API_POST_MEMORY_ADD = 229,             /**< 添加记忆条目 */
     API_GET_MEMORY_ENTRY = 230,            /**< 获取记忆条目 */
-    /* ZSFAB-S8: 记忆端点别名保留（避免编译错误，使用handler_table未占用的slot 280-283） */
+/* 记忆端点别名保留（避免编译错误，使用handler_table未占用的slot 280-283） */
     API_POST_MEMORY_EXPORT = 280,          /**< 导出记忆（向后兼容别名） */
     API_POST_MEMORY_CLEAR = 281,           /**< 清空记忆（向后兼容别名） */
     API_POST_MEMORY_SEARCH = 282,          /**< 搜索记忆（向后兼容别名） */
     API_POST_MEMORY_SLEEP_CONSOLIDATION = 283, /**< 睡眠记忆巩固（向后兼容别名） */
     API_POST_TASK_CREATE = 284,            /**< 创建AGI任务（向后兼容别名） */
 
-    /* ===== 系统管理端点（ZSFAB-S8: 对齐路由表231-245） ===== */
+    /* ===== 系统管理端点（对齐路由表231-245） ===== */
     API_POST_SYSTEM_RESTART = 231,         /**< 重启系统 /api/system/restart */
     API_GET_SYSTEM_LOGS = 232,             /**< 获取系统日志 /api/system/logs */
     API_GET_LNN_PARAMS = 233,              /**< 获取LNN参数 /api/lnn/params */
@@ -384,7 +384,7 @@ typedef enum {
     API_GET_AGI_DIAGNOSTIC_EXPORT = 245,   /**< 导出AGI诊断 /api/agi/diagnostic/export */
     API_GET_DIALOGUE_SEND = 246,           /**< GET对话发送转发 /api/dialogue/send (转发到POST) */
 
-    /* ===== 系统/模型/推理端点（ZSFAB-S8: 对齐路由表248-259） ===== */
+    /* ===== 系统/模型/推理端点（对齐路由表248-259） ===== */
     API_POST_SYSTEM_SHUTDOWN = 248,        /**< 关闭系统 /api/system/shutdown */
     API_POST_MODEL_START = 249,            /**< 启动模型 /api/model/start */
     API_POST_MODEL_STOP = 250,             /**< 停止模型 /api/model/stop */
@@ -441,7 +441,7 @@ typedef enum {
     /* ===== 产品设计 ===== */
     API_POST_PRODUCT_DESIGN = 270,         /**< 产品设计生成 */
     API_GET_PRODUCT_SPEC = 271,            /**< 获取产品规格 */
-    API_POST_TRAINING_SCHEDULE = 272,      /**< ZSF-010: 创建训练计划 /api/training/schedule */
+    API_POST_TRAINING_SCHEDULE = 272, /**< 创建训练计划 /api/training/schedule */
 
     /* ===== H-012: 串口数据接收独立端点 ===== */
     API_POST_SERIAL_RECEIVE = 274,           /**< 串口数据接收 /api/serial/receive */
@@ -449,13 +449,13 @@ typedef enum {
     /* ===== M-016: 双目空间感知 ===== */
     API_POST_STEREO_PERCEPTION = 275,        /**< 双目空间感知：视差/深度/点云计算 /api/stereo/perception */
 
-    /* ===== ZSFEEE-FIX-005: P0-#5修复 - 模型信息与演化状态端点 ===== */
+    /* ===== P0-#5修复 - 模型信息与演化状态端点 ===== */
     API_GET_MODEL_INFO = 276,                /**< 获取LNN模型详细信息 /api/model/info */
     API_GET_EVOLUTION_STATUS = 277,          /**< 获取自我演化系统状态 /api/evolution/status */
 
     API_POST_PRODUCT_SPEC = 330,           /**< POST产品规格生成 /api/product/spec */
 
-    /* ===== ZSFWS-B009: 前端-后端API端点对齐修复 ===== */
+    /* ===== 前端-后端API端点对齐修复 ===== */
     API_GET_PROGRAMMING_SAMPLE = 285,      /**< 获取编程示例代码 /api/programming/sample */
     API_GET_COMMAND_PREFIXES = 286,        /**< 获取命令前缀列表 /api/command/prefixes */
     API_GET_COGNITION_TOM = 287,           /**< 获取心智理论状态 /api/cognition/tom */
@@ -470,22 +470,22 @@ typedef enum {
     API_POST_MULTI_AGENT_MESSAGE = 294,     /**< 智能体消息发送 /api/multi-agent/message */
     API_POST_MULTI_AGENT_TASK = 295,        /**< 分配协作任务 /api/multi-agent/task */
 
-    /* ===== ZSFWS-B009扩展: 系统命令统一接口 ===== */
+    /* ===== 扩展: 系统命令统一接口 ===== */
     API_POST_SYSTEM_COMMAND = 296,           /**< 系统级命令发送 /api/system/command */
     API_POST_COMMAND_SEND = 297,             /**< 通用命令发送 /api/command/send */
 
-    /* ===== ZSFWS-INT-FIX: 系统状态/日志导出路由补全 ===== */
+    /* ===== 系统状态/日志导出路由补全 ===== */
     API_GET_SYSTEM_FULL_STATUS = 298,        /**< 获取系统完整状态 /api/system/status */
     API_GET_SYSTEM_LOGS_EXPORT = 299,        /**< 导出系统日志 /api/system/logs/export */
 
-    /* ===== ZSFWS-M-012: 前端可视化实时数据源 ===== */
+    /* ===== 前端可视化实时数据源 ===== */
     API_GET_AUDIO_SPECTRUM = 302,            /**< 获取音频频谱分析数据 /api/audio/spectrum */
     API_GET_LNN_ACTIVATION_HEATMAP = 303,    /**< 获取LNN神经元激活热力图数据 /api/lnn/activation/heatmap */
     API_GET_LNN_PREDICTION_SCATTER = 304,    /**< 获取LNN预测结果散点图数据 /api/lnn/prediction/scatter */
-    API_POST_TASK_PAUSE = 311,               /**< 暂停AGI任务 /api/task/pause（ZSFDDD-P0-001修复：原值305与仿真冲突） */
-    API_POST_TASK_CANCEL = 312,              /**< 取消AGI任务 /api/task/cancel（ZSFDDD-P0-001修复：原值306与仿真冲突） */
+    API_POST_TASK_PAUSE = 311,               /**< 暂停AGI任务 /api/task/pause（原值305与仿真冲突） */
+    API_POST_TASK_CANCEL = 312,              /**< 取消AGI任务 /api/task/cancel（原值306与仿真冲突） */
 
-    /* ===== ZSFQQ-P1-006: 学习一致性检查 ===== */
+    /* ===== 学习一致性检查 ===== */
     API_POST_LEARNING_CONSISTENCY = 350,     /**< 学习/知识一致性检查 /api/learning/consistency */
 
     /* ===== L-016修复: 哨兵值紧随最高枚举值350，自动计算为351 ===== */
@@ -549,7 +549,7 @@ typedef struct {
  *
  * 将 BackendConfig 中所有开关状态和配置项持久化到磁盘。
  * 保存路径依次使用以下优先级：
- *   1. backend_save_config() 的 path 参数（非NULL）
+ *   1. backend_save_config 的 path 参数（非NULL）
  *   2. SELFLNN_CONFIG_PATH 环境变量
  *   3. 默认值 SELFLNN_CONFIG_FILE
  *
@@ -693,7 +693,7 @@ struct WSPushServer;
  * @brief 设置WebSocket推送服务器（统一WebSocket架构）
  *
  * 将共享的WSPushServer注入到后端，使后端handler可以通过
- * ws_push_broadcast_json()统一推送所有实时消息。
+ * ws_push_broadcast_json统一推送所有实时消息。
  * 替换原有的backend.c内联WebSocket处理。
  *
  * @param server 后端服务器句柄

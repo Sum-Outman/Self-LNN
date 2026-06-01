@@ -1,4 +1,4 @@
-#include "selflnn/memory/memory.h"
+﻿#include "selflnn/memory/memory.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -7,7 +7,7 @@
 #define MEMORY_HASH_INDEX_THRESHOLD 100 /**< 超过此阈值启用哈希索引 */
 #define MEMORY_HASH_INDEX_BUCKETS 1024  /**< 哈希桶数量 */
 
-/* ZSFWS-M019: djb2哈希——将字符串key映射到32位无符号整数 */
+/* djb2哈希——将字符串key映射到32位无符号整数 */
 static uint32_t memory_hash_key(const char* key) {
     uint32_t h = 5381;
     if (!key) return 0;
@@ -81,7 +81,7 @@ struct MemorySystem {
     size_t ep_capacity;            /**< 情景记忆容量 */
     size_t se_capacity;            /**< 语义记忆容量 */
     float current_time;            /**< 当前时间（秒级浮点，内部逻辑时间，非真实挂钟时间）*/
-                                 /* ZSFWS-M029: memory使用自增浮点current_time，knowledge
+/* memory使用自增浮点current_time，knowledge
                                   * 使用time(NULL)秒级整型。跨系统时间序列关联需转换：
                                   * knowledge_timestamp = (long)(system->current_time + epoch_offset) */
     
@@ -91,7 +91,7 @@ struct MemorySystem {
     size_t cache_hits;             /**< 缓存命中次数 */
     size_t cache_misses;           /**< 缓存未命中次数 */
     
-    /* ZSFWS-M019: 哈希索引表——加速大规模记忆库检索
+/* 哈希索引表——加速大规模记忆库检索
      * 当任意记忆数组超过HASH_INDEX_THRESHOLD时自动构建
      * 使用djb2哈希将key映射到32位索引，O(1)查找替代O(N)线性扫描 */
     uint32_t* hash_index_keys;     /**< 哈希键数组（djb2哈希值） */
@@ -117,7 +117,7 @@ struct MemorySystem {
     
     // ---- P1: 线程安全锁 ----
     MutexHandle lock;              /**< 记忆系统内部锁 */
-    time_t last_decay_time;        /**< ZSFQQ-DEEP-005: 上次衰减时间(真实挂钟时间) */
+    time_t last_decay_time; /**< 上次衰减时间(真实挂钟时间) */
 };
 
 /**
@@ -149,7 +149,7 @@ static MemoryItem* memory_item_create(const char* key, const float* data,
         }
         memcpy(item->data, data, data_size * sizeof(float));
     } else {
-        /* ZSFFIX-P011: data_size==0时data置NULL，调用者需空指针检查
+/* data_size==0时data置NULL，调用者需空指针检查
          * memory_feature_similarity和所有数据访问点已有if(data && data_size>0)守卫 */
         item->data = NULL;
     }
@@ -201,7 +201,7 @@ MemorySystem* memory_create(const MemoryConfig* config) {
     
     // 复制配置
     memcpy(&system->config, config, sizeof(MemoryConfig));
-    system->last_decay_time = time(NULL); /* ZSFQQ-DEEP-005: 初始化衰减时间基线 */
+    system->last_decay_time = time(NULL); /* 初始化衰减时间基线 */
     
     // 设置容量
     system->st_capacity = config->max_short_term;
@@ -261,7 +261,7 @@ MemorySystem* memory_create(const MemoryConfig* config) {
  * @brief 释放记忆系统实例
  */
 
-/* ZSFQQ-DEEP-005: 基于真实时间流逝的记忆衰减更新
+/* 基于真实时间流逝的记忆衰减更新
  * 应被AGI后台循环周期性调用(如每60秒)以模拟Ebbinghaus遗忘曲线。
  * 原实现仅在memory_store时触发衰减，导致长期无写入时记忆不衰减。
  * @param system 记忆系统
@@ -343,7 +343,7 @@ void memory_free(MemorySystem* system) {
         MEMORY_UNLOCK(system);
         mutex_destroy(system->lock);
     }
-    /* ZSFWS-M019: 释放哈希索引资源 */
+/* 释放哈希索引资源 */
     safe_free((void**)&system->hash_index_keys);
     safe_free((void**)&system->hash_index_ptr);
     system->hash_index_size = 0;
@@ -481,7 +481,7 @@ static MemoryItem* memory_find_item(MemorySystem* system, const char* key,
     
     MemoryItem** array = *array_ptr;
 
-    /* ZSFWS-M019: 哈希索引加速查找（O(1)替代O(N)线性扫描）
+/* 哈希索引加速查找（O(1)替代O(N)线性扫描）
      * 当记忆条目超过阈值时使用djb2哈希表，大幅减少大记忆库的检索开销 */
     if (system->hash_index_active && system->hash_index_keys && system->hash_index_ptr &&
         count >= MEMORY_HASH_INDEX_THRESHOLD) {
@@ -525,7 +525,7 @@ static MemoryItem* memory_find_item(MemorySystem* system, const char* key,
     return NULL;
 }
 
-/* ZSFWS-M019: 重建哈希索引——新增/删除记忆后调用
+/* 重建哈希索引——新增/删除记忆后调用
  * 遍历指定类型的记忆数组，重建djb2哈希→数组索引映射
  * 线性探测解决哈希冲突，空槽标记为hash=0,ptr=-1 */
 static void memory_hash_index_rebuild(MemorySystem* system, MemoryType type) {
@@ -712,7 +712,7 @@ int memory_store(MemorySystem* system, const char* key, const float* data,
     // 更新时间
     system->current_time += 1.0f;
 
-    /* ZSFWS-M019: 记忆增/删后重建哈希索引 */
+/* 记忆增/删后重建哈希索引 */
     memory_hash_index_rebuild(system, type);
 
     MEMORY_UNLOCK(system);
@@ -2121,7 +2121,7 @@ int memory_compress(MemorySystem* system, const char* key, float target_ratio) {
     if (!proj) {
         proj = pca_generate_fallback(original_dim, compressed_dim);
     }
-    /* ZSFWS-NEW01: 锁泄漏修复——错误路径需释放锁，否则死锁整个记忆系统 */
+/* 锁泄漏修复——错误路径需释放锁，否则死锁整个记忆系统 */
     if (!proj) { MEMORY_UNLOCK(system); return -1; }
     
     float* reconst = (float*)safe_malloc(original_dim * compressed_dim * sizeof(float));
@@ -2162,7 +2162,7 @@ int memory_compress(MemorySystem* system, const char* key, float target_ratio) {
         }
         
         float mse = 0.0f;
-        /* ZSFWS-NEW03: 除零防护——original_dim为0时跳过MSE计算 */
+/* 除零防护——original_dim为0时跳过MSE计算 */
         if (original_dim == 0) { safe_free((void**)&reconstructed); reconstructed = NULL; }
         if (reconstructed) {
             for (size_t i = 0; i < original_dim; i++) {

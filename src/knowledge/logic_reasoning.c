@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file logic_reasoning.c
  * @brief 逻辑推理引擎实现
  * 
@@ -11,7 +11,7 @@
 #include "selflnn/knowledge/semantic_network.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
-#include "selflnn/utils/secure_random.h"  /* ZSFZS-F016: 安全随机数 */
+#include "selflnn/utils/secure_random.h" /* 安全随机数 */
 #include "selflnn/core/errors.h"
 
 #include <stdlib.h>
@@ -313,7 +313,7 @@ static InferenceRule* select_conflict_rule(LogicReasoningEngine* engine,
         }
         
         case CONFLICT_RESOLUTION_RANDOM: {
-            /* ZSFZS-F016修复: 使用secure_random替代确定性LCG伪随机数。
+/* 使用secure_random替代确定性LCG伪随机数。
              * LCG在多次调用下产生高度可预测序列，不适合需要真正随机性的冲突解决。
              * secure_random_float 使用系统熵源（/dev/urandom/BCryptGenRandom）生成密码学安全随机数。 */
             size_t index = (size_t)(secure_random_float() * (float)rule_count);
@@ -1437,7 +1437,7 @@ LogicInferenceResult* logic_reasoning_engine_forward_chain(LogicReasoningEngine*
             result->overall_confidence = 1.0f;
         }
     } else {
-        /* ZSFWS-NEW-LOGIC修复: 无匹配规则时置信度为0而非中性0.5f。
+/* 无匹配规则时置信度为0而非中性0.5f。
          * 0.5f中性置信度会误导下游决策系统。0表示"无可用的推理依据"。 */
         result->overall_confidence = 0.0f;
     }
@@ -2447,7 +2447,7 @@ static int psl_optimize_gradient_descent(PslState* state, float* variable_values
             if (!premise_truths) continue;
             
             for (size_t p = 0; p < formula->premise_count; p++) {
-                /* ZSFWS-B001修复: 变量索引无效时跳过该公式，不使用伪0.5f默认值 */
+/* 变量索引无效时跳过该公式，不使用伪0.5f默认值 */
                 size_t var_idx = (size_t)(unsigned long long)(void*)formula->premise_vars[p];
                 if (var_idx >= var_count) {
                     premise_truths[p] = -1.0f; /* 标记无效，将被跳过 */
@@ -2805,7 +2805,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(LogicReason
         if (!premise_truths) continue;
         
         for (size_t p = 0; p < formula->premise_count; p++) {
-            /* ZSFWS-B002修复: 使用0.0f而非伪值0.5f作为未匹配前提的默认值。
+/* 使用0.0f而非伪值0.5f作为未匹配前提的默认值。
              * 未匹配的前提应被视为"未知"（0真值贡献于Lukasiewicz合取）。 */
             premise_truths[p] = 0.0f;
             for (size_t i = 0; i < fact_count; i++) {
@@ -2817,7 +2817,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_uncertainty(LogicReason
             }
         }
         
-        /* ZSFWS-B002修复: 结论变量在已知事实中查找，未匹配时真值0.0f */
+/* 结论变量在已知事实中查找，未匹配时真值0.0f */
         float conclusion_truth = 0.0f;
         for (size_t i = 0; i < fact_count; i++) {
             if (formula->conclusion_var && facts[i] &&

@@ -1,4 +1,4 @@
-# 训练框架库
+﻿# 训练框架库
 add_library(selflnn_training
     training.c
     mixed_precision.c
@@ -13,23 +13,23 @@ add_library(selflnn_training
     training_enhanced.c
     data_loaders.c
     training_data_pipeline.c
-    # ZSFZS-F028: dataset_api.c已删除(20个重复定义+0有效代码,垃圾文件)
+    # dataset_api.c已删除(20个重复定义+0有效代码,垃圾文件)
 )
 
 target_include_directories(selflnn_training PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 
-# ZSFAAA-P1-007修复: 添加selflnn_memory链接
-# training.c直接引用memory_manager.h、调用memory_manager_retrieve()等函数
+# 添加selflnn_memory链接
+# training.c直接引用memory_manager.h、调用memory_manager_retrieve等函数
 # 原配置缺少此依赖，作为独立静态库时符号不完整
 target_link_libraries(selflnn_training PRIVATE selflnn_core selflnn_learning selflnn_utils selflnn_concurrency selflnn_memory)
 
 # MSVC下使用/Z7避免PDB锁定问题
 if(MSVC)
     target_compile_options(selflnn_training PRIVATE /Z7 /wd4098 /wd4267)
-    # ZSFBUILD: /wd4098(void函数返回-1预存bug) /wd4267(size_t→int转换)
-endif()
+    # /wd4098(void函数返回-1预存bug) /wd4267(size_t→int转换)
+endif
 
 # 安装规则
 install(TARGETS selflnn_training

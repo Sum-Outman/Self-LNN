@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu.h
  * @brief GPU加速接口 —— 统一计算后端抽象层
  *
@@ -230,7 +230,7 @@ const char* gpu_backend_validation_string(GpuBackend backend);
  *
  * 探测指定GPU后端在当前系统中是否可用。
  * 此函数只会尝试检测，不会实际初始化后端。
- * 如要初始化请调用 gpu_init()。
+ * 如要初始化请调用 gpu_init。
  *
  * @param backend 要探测的后端类型
  * @param info [out] 可用性信息输出缓冲区（可为NULL）
@@ -298,7 +298,7 @@ int gpu_auto_init(GpuBackend* backend_out);
  */
 int gpu_is_cpu_backend(void);
 
-/* ZSFUSA: GPU可用性快速检测 */
+/* GPU可用性快速检测 */
 int gpu_is_available(void);
 
 /**
@@ -325,7 +325,7 @@ int gpu_get_device_count(GpuBackend backend);
 int gpu_get_device_info(GpuBackend backend, int device_index, GpuDeviceInfo* info);
 
 /**
- * @brief 统一CPU硬件检测接口（ZSFEEE-FIX-014）
+ * @brief 统一CPU硬件检测接口
  *
  * 从真实硬件检测获取CPU的完整信息（品牌、架构、核心数、缓存、SIMD等）。
  * 此函数是项目中所有CPU硬件检测的唯一权威入口。
@@ -724,7 +724,7 @@ size_t gpu_suggest_work_group(GpuContext* context,
                               size_t max_work_group_size,
                               KernelType kernel_type);
 
-/* ZSFX-P1: 自动kernel优化器数据库管理API */
+/* 自动kernel优化器数据库管理API */
 
 /** @brief 清空自动kernel优化器的性能缓存 */
 int gpu_kernel_optimizer_clear_cache(GpuContext* context);
@@ -1815,7 +1815,7 @@ int gpu_npu_infer(NpuModel* model, const float** inputs, float** outputs,
  * @brief 异步执行NPU推理
  *
  * 在NPU设备上异步执行模型推理，不阻塞调用线程。
- * 通过gpu_npu_infer_wait()等待推理完成。
+ * 通过gpu_npu_infer_wait等待推理完成。
  *
  * @param model 模型句柄
  * @param inputs 输入数据数组指针（必须保持有效直到推理完成）

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN 日志系统实现
  * 
  * 提供简单的日志记录功能，支持控制台输出和基本日志级别。
@@ -789,7 +789,7 @@ static void check_auto_rotation(void) {
     fclose(g_log_state.log_file);
     g_log_state.log_file = NULL;
 
-    /* ZSFZX-FIX-LOGROT: 修复轮转旧文件清理Bug
+/* 修复轮转旧文件清理Bug
      * 原代码备份文件名使用时间戳格式(file.log.YYYYMMDD_HHMMSS)，
      * 但清理循环查找的是序号格式(file.log.N)，两者永远不匹配，旧文件永不清理。
      * 修复：改用序号轮转+移位，确保旧文件被正确清理。 */

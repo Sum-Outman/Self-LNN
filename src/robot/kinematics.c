@@ -1,4 +1,4 @@
-#include "selflnn/robot/kinematics.h"
+﻿#include "selflnn/robot/kinematics.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"   /* F-030: 显式包含四元数函数 */
 #include "selflnn/core/errors.h"
@@ -763,7 +763,7 @@ int forward_kinematics_stateful(const KinematicModel* model, const float* joint_
     state->prev_pos_x = ee_pos.x;
     state->prev_pos_y = ee_pos.y;
     state->prev_pos_z = ee_pos.z;
-    /* ZSFX-DEEP-R9-003: mat4_extract_quat输出格式为{x,y,z,w}, 修正索引映射 */
+/* mat4_extract_quat输出格式为{x,y,z,w}, 修正索引映射 */
     state->prev_quat_x = result->orientation[0];
     state->prev_quat_y = result->orientation[1];
     state->prev_quat_z = result->orientation[2];
@@ -938,7 +938,7 @@ int inverse_kinematics_ccd(const KinematicModel* model, const Vec3* target_pos,
     int ee_idx = model->end_effector_joint;
     if (ee_idx < 0) ee_idx = model->joint_count - 1;
     if (ee_idx < 0) return -1;
-    /* ZSFWS-NEW-IK修复: CCD主要优化位置误差。当target_orient提供时，
+/* CCD主要优化位置误差。当target_orient提供时，
      * 在末关节额外施加朝向误差修正（加权旋转对准），权重0.3防止过度修正。 */
     int use_orient = (target_orient != NULL);
     for (int iter = 0; iter < max_iter; iter++) {
@@ -1907,7 +1907,7 @@ static int urdf_build_model(KinematicModel* model, XmlUrdfLink* links, int link_
 
         DHParameter dh;
         memset(&dh, 0, sizeof(dh));
-        /* ZSFWS-L013修复: DH参数完整三轴映射
+/* DH参数完整三轴映射
          * 原实现仅取origin_xyz[2]作为dh.d，对非纯Z轴偏移关节不正确。
          * 完整URDF joint的xyz origin决定了父关节坐标系到当前关节坐标系的平移。
          * dh.d = 沿Z轴的偏移（如果关节轴是Z），
@@ -2638,7 +2638,7 @@ int ik_solve_dls(const KinematicModel* model, const Vec3* target_pos,
         memset(J, 0, sizeof(J));
         compute_jacobian(model, joint_angles, J, model->joint_count);
 
-        /* ZSFABC-M008深度修复: 计算完整Yoshikawa可操作性指标 ω = sqrt(det(J·J^T))
+/*深度修复: 计算完整Yoshikawa可操作性指标 ω = sqrt(det(J·J^T))
          * 不再使用简化的迹近似（trace(JJ^T)/N）。
          * 对于6×n雅可比矩阵，JJ^T是6×6矩阵，直接计算其行列式。 */
         float jj[6 * 6] = {0};

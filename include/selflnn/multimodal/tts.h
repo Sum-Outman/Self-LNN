@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file tts.h
  * @brief 语音合成（TTS）— 液态状态生成动态系统
  *
@@ -200,7 +200,7 @@ int tts_engine_reset(TTSEngine* engine);
 int tts_engine_set_speed(TTSEngine* engine, float speed);
 
 /**
- * @brief ZSFQQ-P2-001: 标记TTS引擎为已训练
+ * @brief 标记TTS引擎为已训练
  * 在系统加载检查点或完成引导训练后调用，使TTS可以正常合成语音
  * @param engine 引擎句柄
  */

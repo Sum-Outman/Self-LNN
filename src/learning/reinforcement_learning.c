@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file reinforcement_learning.c
  * @brief 强化学习算法实现
  *
@@ -28,7 +28,6 @@
 #endif
 #define RL_SQ(X) ((X)*(X))
 
-/* ZSFWS修复-L-014: 移除死变量 rl_seed，已改用 secure_random_float() */
 
 /* I-016修复：使用secure_random_float替代简单LCG伪随机 */
 static float rl_randf(void)
@@ -76,7 +75,7 @@ typedef enum {
     /* CfC-R2D2 循环网络 */
     RL_NETWORK_RECURRENT_Q = 16,
     RL_NETWORK_RECURRENT_Q_TARGET = 17,
-    /* ZSFABC: SAC目标Critic2网络 */
+/* SAC目标Critic2网络 */
     RL_NETWORK_CRITIC2_TARGET = 18,
     RL_NETWORK_COUNT = 19
 } RLNetworkType;
@@ -1163,7 +1162,7 @@ static float rl_ppo_get_action_probs(RLAgent* agent, const float* state, int sta
     LNN* actor = agent->networks[RL_NETWORK_ACTOR];
     if (!actor) return 0.0f;
 
-    /* ZSFWS-M020修复: 直接使用lnn_get_config获取output_size
+/* 直接使用lnn_get_config获取output_size
      * 原代码先调用lnn_get_parameter_count（返回全部参数数量，可能数千），
      * 后被output_size覆盖，但parameter_count可能极大导致不必要的大内存分配风险 */
     LNNConfig acfg;
@@ -1202,7 +1201,6 @@ static float rl_ppo_get_action_probs(RLAgent* agent, const float* state, int sta
     }
     else
     {
-        /* ZSF-041修复: 连续动作空间正确采样+对数概率计算 */
         int dim = output_size / 2;
         float total_log_prob = 0.0f;
         for (int i = 0; i < dim; i++)
@@ -1537,7 +1535,7 @@ static int rl_sac_init(RLAgent* agent)
     ret = rl_lnn_create_if(agent, RL_NETWORK_CRITIC2, &sc->critic_lnn_config);
     if (ret != 0) return -1;
 
-    /* ZSFABC修复: 创建SAC目标Critic网络用于TAU软更新 */
+/* 创建SAC目标Critic网络用于TAU软更新 */
     LNNConfig target_cfg;
     memset(&target_cfg, 0, sizeof(LNNConfig));
     target_cfg.input_size = sc->critic_lnn_config.input_size;
@@ -1633,7 +1631,6 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
     int state_act_dim = agent->config.state_dim + (agent->config.discrete_actions ?
                         agent->config.num_actions : agent->config.action_dim);
 
-    /* ZSF-ZNB修复M-016: 预分配缓冲区替代每样本malloc */
     float* sa_pair = (float*)safe_malloc((size_t)state_act_dim * sizeof(float));
     float* next_sa = (float*)safe_malloc((size_t)state_act_dim * sizeof(float));
 
@@ -1676,7 +1673,7 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
 
             float q_for_actor = RL_MIN(q1, q2);
             float actor_loss = agent->alpha * new_log_prob - q_for_actor;
-            /* ZSF-ZNB修复S-005: 标准SAC重参数化梯度更新
+/*修复S-005: 标准SAC重参数化梯度更新
              * 标准SAC演员梯度(J_actor = E[α·logπ(a|s) - Q(s,a)])通过重参数化计算:
              *   a = tanh(μ + σ·ε), ε~N(0,1)
              *   ∂J/∂μ_i = α·∂logπ/∂μ_i - ∂Q/∂a_i·∂a_i/∂μ_i
@@ -1747,7 +1744,7 @@ static int rl_sac_train(RLAgent* agent, int batch_size)
             agent->alpha = RL_CLAMP(agent->alpha, 0.001f, 10.0f);
         }
 
-        /* ZSFABC修复: SAC目标Critic网络TAU软更新 */
+/* SAC目标Critic网络TAU软更新 */
         {
             float tau = sc->tau;
             LNN* c1 = agent->networks[RL_NETWORK_CRITIC];

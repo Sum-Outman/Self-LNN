@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file multi_agent.h
  * @brief 多智能体协作框架
  * 
@@ -867,7 +867,7 @@ void ma_cfc_default_config(MACfcConfig* config, MACfcAlgorithm algorithm);
 const char* ma_cfc_algorithm_name(MACfcAlgorithm algorithm);
 
 /* ============================================================================
- * ZSFZS-F024: 多智能体系统启停控制
+ *: 多智能体系统启停控制
  * ============================================================================ */
 
 /**

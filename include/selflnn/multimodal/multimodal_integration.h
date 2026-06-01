@@ -1,4 +1,4 @@
-#ifndef SELFLNN_MULTIMODAL_INTEGRATION_H
+﻿#ifndef SELFLNN_MULTIMODAL_INTEGRATION_H
 #define SELFLNN_MULTIMODAL_INTEGRATION_H
 
 #ifdef __cplusplus
@@ -410,7 +410,7 @@ int mm_cfc_unified_fusion_train(
     float *loss_out);
 
 /**
- * ZSFWS-005修复: 多模态统一融合管道
+ *修复: 多模态统一融合管道
  *
  * 主路径使用方案C的CfC ODE跨模态融合（真正的统一连续动态系统），
  * 回退到共享LNN统一状态处理器。确保"所有模态→统一连续动态系统"。

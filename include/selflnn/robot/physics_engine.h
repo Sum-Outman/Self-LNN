@@ -1,4 +1,4 @@
-#ifndef SELFLNN_PHYSICS_ENGINE_H
+﻿#ifndef SELFLNN_PHYSICS_ENGINE_H
 #define SELFLNN_PHYSICS_ENGINE_H
 
 #include "selflnn/robot/kinematics.h"
@@ -38,7 +38,7 @@ typedef struct {
     float torque_acc[3];
     PEBodyProps props;
     int body_id;
-    float bounding_radius; /**< 刚体包围球半径（用于AABB广阶段碰撞检测和惯性张量计算）ZSFWS-F002 */
+    float bounding_radius; /**< 刚体包围球半径（用于AABB广阶段碰撞检测和惯性张量计算）*/
 } PEBody;
 
 typedef struct {

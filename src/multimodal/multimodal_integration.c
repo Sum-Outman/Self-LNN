@@ -105,7 +105,7 @@ MultimodalIntegrationProcessor* multimodal_integration_processor_create(
     }
     
     if (config->spatial_config.enable_point_cloud) {
-        processor->point_cloud_processor = point_cloud_processor_create();
+        processor->point_cloud_processor = point_cloud_processor_create;
     }
     
     if (config->spatial_config.enable_slam) {
@@ -334,7 +334,7 @@ int multimodal_integration_process_vision(
                 float sum_xy = 0.0f, sum_xz = 0.0f, sum_yz = 0.0f;
                 int point_count = 0;
                 
-                /* ZSFX-DEEP-R5-002修复: 使用默认相机内参(70°视场角) */
+/* 使用默认相机内参(70°视场角) */
                 float fx = width * 0.7f;
                 float fy = height * 0.7f;
                 float cx = width * 0.5f;
@@ -789,7 +789,7 @@ int multimodal_integration_process_unified(
         return -1;
     }
 
-    /* ZSFZX-FIX-R9-4: 空输入保护 — 所有传感器输入全空时提前返回
+/* 空输入保护 — 所有传感器输入全空时提前返回
      * 防止将NULL指针传入unified_signal_processor_encode导致崩溃 */
     if (!vi_in && !ai_in && !txt_in && !sen_in) {
         memset(unified_output, 0, sizeof(UnifiedOutput));
@@ -851,7 +851,7 @@ int multimodal_integration_process_to_lnn(
     if (!processor || !lnn_net || !lnn_output || max_output_size == 0) {
         return -1;
     }
-    /* ZSFWS-L022修复: 移除误导性(void)转换
+/* 移除误导性(void)转换
      * vis_in/aud_in/txt_in2/sen_in2在下方传递给unified_signal_processor_encode_to_lnn
      * (void)转换让人误以为这些参数被丢弃，实则被正常使用 */
     
@@ -1110,9 +1110,9 @@ static float _fusion_compute_mse(const float *fused, const float *target, int n)
 }
 
 /* ============================================================================
- * mm_cfc_unified_fusion_init: 方案C — CfC ODE跨模态统一融合（ZSFWS-003修复后启用）
+ * mm_cfc_unified_fusion_init: 方案C — CfC ODE跨模态统一融合（启用）
  *
- * ZSFWS-003: 需求明确规定"所有模态→统一输入到同一个连续动态系统"。
+ *: 需求明确规定"所有模态→统一输入到同一个连续动态系统"。
  * 方案C是该项目中唯一真正实现跨模态CfC ODE统一演化的路径：
  * 各模态线性投影到统一隐空间→拼接→CfC ODE连续时间演化。
  * 原被禁用，现恢复为主动融合路径。与共享LNN互为补充。
@@ -1972,24 +1972,24 @@ int mm_cfc_unified_fusion_train(
 }
 
 /* ============================================================================
- * _mm_fusion_via_shared_lnn: ZSFWS-003修复后降为辅助路径
+ * _mm_fusion_via_shared_lnn: 降为辅助路径
  * 当方案C的CfC ODE融合实例未初始化时，回退到共享LNN。
- * ZSFWS-006修复: 缓存UnifiedLNNState避免每次调用创建/释放。
+ *修复: 缓存UnifiedLNNState避免每次调用创建/释放。
  * ============================================================================ */
 static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* modality_dims,
                                       int num_modalities, float* unified_output, int output_dim) {
-    void* shared_lnn = selflnn_get_shared_lnn();
+    void* shared_lnn = selflnn_get_shared_lnn;
     if (!shared_lnn) return -1;
 
-    /* ZSFWS-006: 静态缓存UnifiedLNNState，避免每次调用malloc/free
-     * ZSFDDD-D2-007修复: 添加静态互斥锁保护缓存操作的线程安全 */
+/* 静态缓存UnifiedLNNState，避免每次调用malloc/free
+ *修复: 添加静态互斥锁保护缓存操作的线程安全 */
     static UnifiedLNNState* cached_ul_state = NULL;
     static size_t cached_output_dim = 0;
     static void* cached_shared_lnn = NULL;
     static int cache_lock_initialized = 0;
     static MutexHandle cache_mutex;
     if (!cache_lock_initialized) {
-        cache_mutex = mutex_create();
+        cache_mutex = mutex_create;
         cache_lock_initialized = 1;
     }
     mutex_lock(cache_mutex);
@@ -2031,7 +2031,7 @@ static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* mod
 }
 
 /* ============================================================================
- * multimodal_unified_pipeline: ZSFWS-003修复后方案C主路径 + 共享LNN回退
+ * multimodal_unified_pipeline: 方案C主路径 + 共享LNN回退
  * ============================================================================ */
 int multimodal_unified_pipeline(const float** modality_data, const int* modality_dims,
                                  int num_modalities, void* main_cfc,
@@ -2040,7 +2040,7 @@ int multimodal_unified_pipeline(const float** modality_data, const int* modality
     if (output_dim <= 0 || num_modalities <= 0) return -1;
     (void)main_cfc;
 
-    /* ZSFWS-003: 主路径——方案C CfC ODE跨模态统一融合
+/* 主路径——方案C CfC ODE跨模态统一融合
      * 各模态线性投影到统一隐空间→拼接→CfC ODE连续时间演化
      * 这是需求要求的"所有模态→统一连续动态系统"的正确实现 */
     int n_mod = (num_modalities < MM_FUSION_MAX_MODALITIES) ? num_modalities : MM_FUSION_MAX_MODALITIES;
@@ -2083,7 +2083,7 @@ int multimodal_unified_pipeline(const float** modality_data, const int* modality
         }
     }
 
-    /* ZSFWS-003: 回退路径——共享LNN统一状态处理器
+/* 回退路径——共享LNN统一状态处理器
      * 当方案C CfC ODE融合初始化失败时使用共享LNN作为备选 */
     int ret = _mm_fusion_via_shared_lnn(modality_data, modality_dims,
                                          num_modalities, unified_output, output_dim);

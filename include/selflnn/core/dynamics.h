@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file dynamics.h
  * @brief 动态系统接口
  * 
@@ -46,8 +46,8 @@ typedef struct {
     int enable_adaptive_step; /**< 是否启用自适应时间步长 */
     float min_step_size;      /**< 最小时间步长 */
     float max_step_size;      /**< 最大时间步长 */
-    float state_clamp;        /**< ZSFLNN-C-014修复: 状态限幅值，默认10.0f */
-    float velocity_clamp;     /**< ZSFLNN-C-014修复: 速度限幅值，默认5.0f */
+    float state_clamp; /**< 状态限幅值，默认10.0f */
+    float velocity_clamp; /**< 速度限幅值，默认5.0f */
 } DynamicsConfig;
 
 /**

@@ -2,7 +2,7 @@
  * @file quaternion_liquid_gate.c
  * @brief 四元数液态门控 —— 推理层（Reasoning Layer）
  *
- * ========== ZSFWS-032 模块职责边界 ==========
+ * ========== 模块职责边界 ==========
  * 本模块职责：LNN推理层级的四元数液态门控（批量序列粒度）
  *   - 四元数门控(σ) + 激活(tanh)双路前向传播 (quaternion_liquid_gate_forward)
  *   - 批量序列四元数门控 (quaternion_liquid_gate_forward_batch)
@@ -209,7 +209,7 @@ QuaternionLiquidGate* quaternion_liquid_gate_create(const QuaternionLiquidGateCo
         out_kernel[i] = (secure_random_float() * 2.0f - 1.0f) * o_scale;
     }
 
-    /* ZSFX-022: 独立分配输出权重存储（消除adam_m内存偏移hack） */
+/* 独立分配输出权重存储（消除adam_m内存偏移hack） */
     gate->out_weight_storage = (float*)safe_calloc(out_total_size, sizeof(float));
     if (!gate->out_weight_storage) {
         safe_free((void**)&out_kernel);
@@ -263,7 +263,7 @@ void quaternion_liquid_gate_destroy(QuaternionLiquidGate* gate) {
 }
 
 /* ========== 输出投影权重访问 ==========
- * ZSFX-022: out_weight_storage 独立分配，不再通过adam_m偏移访问
+ *: out_weight_storage 独立分配，不再通过adam_m偏移访问
  * out_weight_storage 布局: [out_size 输出核] [out_bias_size 输出偏置(可选)]
  */
 
@@ -321,7 +321,7 @@ int quaternion_liquid_gate_forward(QuaternionLiquidGate* gate,
         }
     }
 
-    /* 输出投影: 四元数 → 标量 (ZSFX-022: 使用独立out_weight_storage) */
+    /* 输出投影: 四元数 → 标量 (使用独立out_weight_storage) */
     const float* out_weight = gate->out_weight_storage;
     const float* out_bias = gate->config.use_bias ?
                             gate->out_weight_storage + quaternion_dim * 4 * input_dim : NULL;
@@ -362,7 +362,6 @@ int quaternion_liquid_gate_forward_batch(QuaternionLiquidGate* gate,
 
 /* ========== 训练（默认使用解析梯度 O(1)，数值梯度保留用于调试） ========== */
 
-/* ZSFWS修复 P2-004: 默认使用分析梯度（O(1) vs 数值梯度O(n)），显著提升训练效率 */
 float quaternion_liquid_gate_train_step(QuaternionLiquidGate* gate,
                                         const float* input,
                                         const float* target,
@@ -488,7 +487,7 @@ float quaternion_liquid_gate_train_step_numerical(QuaternionLiquidGate* gate,
         }
     }
 
-    /* 输出投影梯度 (ZSFX-022: 使用独立out_weight_storage和out_adam) */
+    /* 输出投影梯度 (使用独立out_weight_storage和out_adam) */
     size_t out_size = quaternion_dim * 4 * input_dim_c;
     grad_buf = (float*)safe_malloc(out_size * sizeof(float));
     float* out_weight = gate->out_weight_storage;
@@ -584,7 +583,7 @@ float quaternion_liquid_gate_train_step_analytic(QuaternionLiquidGate* gate,
         d_output[i] = 2.0f * (pred[i] - target[i]) / (float)n_elem;
     }
 
-    /* 输出投影反向：∂L/∂modulation[4*q+j] = Σ_i d_output[i*q+j] * output_weight[i] (ZSFX-022) */
+    /* 输出投影反向：∂L/∂modulation[4*q+j] = Σ_i d_output[i*q+j] * output_weight[i]  */
     const float* out_weight = gate->out_weight_storage;
     size_t mod_elem = batch * seq_len * quat_dim * 4;
     float* d_mod = (float*)safe_calloc(mod_elem, sizeof(float));
@@ -753,7 +752,7 @@ int quaternion_liquid_gate_save(const QuaternionLiquidGate* gate, const char* fi
         }
     }
 
-    /* 写入输出投影 (ZSFX-022: 使用独立out_weight_storage) */
+    /* 写入输出投影 (使用独立out_weight_storage) */
     const float* out_weight = gate->out_weight_storage;
     if (fwrite(out_weight, sizeof(float), out_size, fp) != out_size) {
         fclose(fp);
@@ -1234,7 +1233,7 @@ int quaternion_liquid_gate_load(QuaternionLiquidGate* gate, const char* filepath
         }
     }
 
-    /* 读取输出投影 (ZSFX-022: 使用独立out_weight_storage) */
+    /* 读取输出投影 (使用独立out_weight_storage) */
     float* out_weight = gate->out_weight_storage;
     if (fread(out_weight, sizeof(float), out_size, fp) != out_size) {
         fclose(fp);

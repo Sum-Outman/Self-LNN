@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file online_learning.h
  * @brief 在线学习系统接口
  * 
@@ -11,7 +11,7 @@
 
 #include <stddef.h>
 
-/* ZSFWS-013: 前向声明LNN类型，用于 online_learner_attach_lnn() */
+/* 前向声明LNN类型，用于 online_learner_attach_lnn() */
 typedef struct LNN LNN;
 
 #ifdef __cplusplus
@@ -302,7 +302,7 @@ int online_learner_save_state(OnlineLearner* learner, const char* filename);
 int online_learner_load_state(OnlineLearner* learner, const char* filename);
 
 /**
- * @brief ZSFWS-013: 将在线学习器附着到共享LNN实例
+ * @brief 将在线学习器附着到共享LNN实例
  *
  * 调用后学习器将直接读写LNN的权重矩阵，而非维护独立权重副本。
  * 学习器的梯度下降更新将直接作用于LNN参数，实现真正的在线学习。
@@ -315,7 +315,7 @@ int online_learner_load_state(OnlineLearner* learner, const char* filename);
 int online_learner_attach_lnn(OnlineLearner* learner, LNN* lnn);
 
 /**
- * @brief ZSFZS-001: 设置在线学习器的模仿学习启用状态
+ * @brief 设置在线学习器的模仿学习启用状态
  *
  * 由能力开关系统调用，控制模仿学习子系统的启停。
  *
@@ -326,7 +326,7 @@ int online_learner_attach_lnn(OnlineLearner* learner, LNN* lnn);
 int online_learner_set_imitation_enabled(OnlineLearner* learner, int enabled);
 
 /**
- * @brief ZSFZS-001: 设置在线学习器的探索率
+ * @brief 设置在线学习器的探索率
  *
  * 由能力开关系统调用，控制好奇心/探索驱动力。
  * 探索率影响epsilon-greedy策略和噪声注入强度。
@@ -338,7 +338,7 @@ int online_learner_set_imitation_enabled(OnlineLearner* learner, int enabled);
 int online_learner_set_exploration(OnlineLearner* learner, float rate);
 
 /**
- * @brief ZSFZS-001: 获取在线学习器的模仿学习启用状态
+ * @brief 获取在线学习器的模仿学习启用状态
  *
  * @param learner 在线学习器句柄
  * @return int 1=启用, 0=禁用, -1=错误
@@ -346,7 +346,7 @@ int online_learner_set_exploration(OnlineLearner* learner, float rate);
 int online_learner_get_imitation_enabled(OnlineLearner* learner);
 
 /**
- * @brief ZSFZS-001: 获取在线学习器的当前探索率
+ * @brief 获取在线学习器的当前探索率
  *
  * @param learner 在线学习器句柄
  * @param rate [输出] 当前探索率

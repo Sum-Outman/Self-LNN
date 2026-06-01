@@ -1,4 +1,4 @@
-
+﻿
 /**
  * SELF-LNN 纯Canvas图表工具
  * 100%自实现，不依赖任何第三方库
@@ -61,7 +61,7 @@ class SelfLnnChart {
         }
     }
 
-    /* ZSFWS-SC1修复: 安全计算数组的最小/最大值，避免超大数据集Math.min(...展开)栈溢出 */
+/* 安全计算数组的最小/最大值，避免超大数据集Math.min(...展开)栈溢出 */
     _computeMinMax(arr) {
         if (!arr || arr.length === 0) return { min: 0, max: 1 };
         let mn = Infinity, mx = -Infinity;
@@ -391,7 +391,7 @@ class SelfLnnChart {
             }
         }
         if (allValues.length === 0) return;
-        /* ZSFWS-SC2修复: 柱状图支持负值，yMin使用实际数据最小值而非硬编码0 */
+/* 柱状图支持负值，yMin使用实际数据最小值而非硬编码0 */
         var mm3 = this._computeMinMax(allValues);
         let yMin = mm3.min < 0 ? mm3.min * 1.15 : 0;
         let yMax = mm3.max * 1.15 || 1;
@@ -409,7 +409,7 @@ class SelfLnnChart {
 
             for (let i = 0; i < pts.length; i++) {
                 const x = area.x + i * (barWidth + gap) + gap / 2;
-                /* ZSFWS-SC2修复: 柱状图正确处理负值 - 从yMin而非0开始计算高度 */
+/* 柱状图正确处理负值 - 从yMin而非0开始计算高度 */
                 const valueRange = yMax - yMin || 1;
                 const barH = ((pts[i] - yMin) / valueRange) * area.h;
                 const y = area.y + area.h - barH;
@@ -518,7 +518,7 @@ class SelfLnnChart {
         if (!datasets || datasets.length === 0) return;
         const values = datasets[0].data || [];
         if (values.length === 0) return;
-        /* ZSFWS-SC3修复: 过滤非数字值防止reduce产生NaN */
+/* 过滤非数字值防止reduce产生NaN */
         const validValues = values.filter(function(v) { return typeof v === 'number' && !isNaN(v) && isFinite(v); });
         if (validValues.length === 0) return;
         const total = validValues.reduce(function(a, b) { return a + b; }, 0);

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file knowledge.h
  * @brief 知识库系统接口
  * 
@@ -153,7 +153,7 @@ int knowledge_base_populate_preset(KnowledgeBase* kb);
 int knowledge_base_load_from_file(KnowledgeBase* kb, const char* filepath);
 
 /**
- * @brief ZSFWS-P0-003: 从JSON种子知识文件加载知识条目
+ * @brief 从JSON种子知识文件加载知识条目
  * 格式: {"version":1, "entries":[{"s":"主体","p":"谓词","o":"客体","t":"FACT","c":"HIGH","w":1.0},...]}
  * 使用紧凑键名(s/p/o/t/c/w)减少文件体积。
  * @param kb 知识库句柄
@@ -163,7 +163,7 @@ int knowledge_base_load_from_file(KnowledgeBase* kb, const char* filepath);
 int knowledge_base_import_seed_json(KnowledgeBase* kb, const char* filepath);
 
 /**
- * @brief ZSFWS-P0-003: 导出知识库到JSON文件
+ * @brief 导出知识库到JSON文件
  * 格式与 knowledge_base_import_seed_json() 兼容，支持备份和迁移。
  * @param kb 知识库句柄
  * @param filepath 输出JSON文件路径
@@ -245,7 +245,7 @@ int knowledge_base_query_state_aware(KnowledgeBase* kb,
 /**
  * @brief 按来源过滤的知识查询（防止自主学习污染用户教学知识）
  *
- * ZSFWS-P2: 在查询时按KnowledgeSource过滤，
+ *: 在查询时按KnowledgeSource过滤，
  * source_filter=-1 表示不过滤（返回所有来源）。
  *
  * @param kb 知识库句柄
@@ -499,7 +499,7 @@ void knowledge_set_lnn_network(KnowledgeBase* kb, void* lnn_network);
 void* knowledge_get_lnn_network(const KnowledgeBase* kb);
 int knowledge_has_lnn_integration(const KnowledgeBase* kb);
 
-/* ZSFZS-F026: 知识库更新事件通知回调机制
+/* 知识库更新事件通知回调机制
   * 当 knowledge_base_add() 成功写入新知识后，通过此回调主动通知
   * 上层系统（如LNN重新进行知识嵌入编码、推理引擎刷新缓存等），
   * 替代原来main.c中定时轮询的被动方式，消除延迟。 */
@@ -818,11 +818,11 @@ void temporal_conflicts_free(TemporalConflict* conflicts, size_t count);
  */
 float knowledge_string_similarity(const char* str1, const char* str2);
 
-/* ZSFUSA: 知识库辅助函数 */
+/* 知识库辅助函数 */
 size_t knowledge_base_get_total_facts(KnowledgeBase* kb);
 float knowledge_base_output_consistency(KnowledgeBase* kb, const float* output, size_t dim);
 
-/* ZSFAAA-DEEP-002: 查找知识库中与给定向量的嵌入最相似的事实
+/* 查找知识库中与给定向量的嵌入最相似的事实
  * 当LNN输出爆炸或异常时，用于找到知识库中最近的锚定事实约束修正 */
 int knowledge_base_nearest_fact(KnowledgeBase* kb, const float* query_vec, size_t dim,
                                 char* subject_out, size_t subj_size,

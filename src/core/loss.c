@@ -1,4 +1,4 @@
-#include "selflnn/core/loss.h"
+﻿#include "selflnn/core/loss.h"
 #include "selflnn/utils/memory_utils.h"
 #include <math.h>
 #include <float.h>
@@ -166,7 +166,7 @@ float loss_compute_ex(const float* predictions, const float* targets, int n,
         }
         case LOSS_CONTRASTIVE:
         {
-            /* ZSFQQ-P0-004修复: 标准对比损失格式
+/* 标准对比损失格式
              * predictions = [x1a, x1b, x2a, x2b, ...] (样本对交替存储)
              * targets = [y1, y2, ...] (标签: 1=相似, 0=不相似)
              * n为predictions长度，targets长度为n/2 */
@@ -384,7 +384,7 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
         }
         case LOSS_CONTRASTIVE:
         {
-            /* ZSFFIX-P003: 对比损失梯度——与损失计算使用统一格式
+/* 对比损失梯度——与损失计算使用统一格式
              * predictions = [x1a, x1b, x2a, x2b, ...] (样本对交替存储)
              * targets = [y1, y2, ...] (标签: 1=相似, 0=不相似)
              * n为predictions长度，targets长度为n/2 */
@@ -526,7 +526,7 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
 }
 
 /* ================================================================
- * ZSFZX-FIX-R4-1: 多模态损失自适应梯度平衡 (GradNorm风格)
+ *: 多模态损失自适应梯度平衡 (GradNorm风格)
  *
  * 原loss_compute_multimodal使用固定用户指定权重求和，
  * 不同模态梯度量级可能相差数个数量级，导致模态崩塌。
@@ -649,7 +649,7 @@ void loss_gradient(const float* predictions, const float* targets, int n, float*
 }
 
 /* ==========================================================================
- * ZSFWS-024: 多模态损失函数实现
+ *: 多模态损失函数实现
  * 解决多模态输出多尺度差异（视觉[-1,1]、文本离散ID、传感器变范围）
  * ========================================================================== */
 

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file meta_learning.c
  * @brief 元学习系统完整算法实现
  * 
@@ -1399,7 +1399,7 @@ static float maml_outer_update(MetaLearner* learner, AdaptationContext* ctx,
     float* gradient_direction = ctx->task_gradients;
     
     if (learner->config.use_second_order && gradient_direction && param_count > 0) {
-        /* ZSF-ZNB修复H-008: 解析Hessian-向量积替代中心差分
+/*修复H-008: 解析Hessian-向量积替代中心差分
          * 
          * 标准MAML二阶更新:
          *   θ'_i = θ - α·∇_θ L_i(θ)          (内循环适应)
@@ -2122,7 +2122,7 @@ void meta_learning_default_config(MetaLearningConfig* config) {
     config->inner_learning_rate = 0.01f;
     config->fast_learning_rate = 0.01f;
     
-    config->use_second_order = 1;   /* ZSFABC修复: 默认使用真二阶MAML，一阶作为可选优化 */
+    config->use_second_order = 1; /* 默认使用真二阶MAML，一阶作为可选优化 */
     config->use_learned_lr = 0;
     config->use_batch_norm = 1;
     
@@ -2562,7 +2562,7 @@ float meta_learner_maml_step(MetaLearner* learner, const MetaTask* task) {
     // 从基础模型提取初始参数
     int extracted_count = extract_model_parameters(learner->meta_model, ctx.initial_parameters, learner->parameter_count);
     if (extracted_count <= 0) {
-        /* ZSFABC修复: 参数提取失败时返回错误，禁止使用随机回退 */
+/* 参数提取失败时返回错误，禁止使用随机回退 */
         safe_free((void**)&ctx.initial_parameters);
         safe_free((void**)&ctx.adapted_parameters);
         log_error("[MAML] 参数提取失败，无法执行元学习适应");
@@ -2718,7 +2718,7 @@ float meta_learner_reptile_step(MetaLearner* learner, const MetaTask* task) {
     // 从基础模型提取初始参数
     int extracted_count = extract_model_parameters(learner->meta_model, ctx.initial_parameters, learner->parameter_count);
     if (extracted_count <= 0) {
-        /* ZSFABC修复: 参数提取失败时返回错误，禁止使用随机回退 */
+/* 参数提取失败时返回错误，禁止使用随机回退 */
         safe_free((void**)&ctx.initial_parameters);
         safe_free((void**)&ctx.adapted_parameters);
         log_error("[Reptile] 参数提取失败，无法执行元学习适应");
@@ -2802,7 +2802,7 @@ float meta_learner_reptile_step(MetaLearner* learner, const MetaTask* task) {
 }
 
 /**
- * ZSFWS-H004修复: 实现真正的Relation Network步骤
+ *修复: 实现真正的Relation Network步骤
  * 
  * Relation Network公式:
  *   r_{i,j} = g_φ(C(f_θ(x_i), C(f_θ(x_j1)..f_θ(x_jk))))
@@ -2923,7 +2923,7 @@ float meta_learner_relation_step(MetaLearner* learner, const MetaTask* task) {
 }
 
 /**
- * ZSFWS-H004修复: 实现真正的Matching Network步骤
+ *修复: 实现真正的Matching Network步骤
  * 
  * Matching Network公式:
  *   a(x̂, x_i) = softmax(cosine(f_θ(x̂), g_θ(x_i)) / τ)

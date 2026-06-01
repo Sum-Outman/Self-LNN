@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file knowledge_version.h
  * @brief 知识版本管理系统接口
  */
@@ -10,7 +10,7 @@
 #include <stdint.h>
 #include <time.h>
 
-/* ZSFBUILD: SnapshotEntryRecord完整定义 (从knowledge_version.c移入，header函数声明需要完整类型) */
+/* SnapshotEntryRecord完整定义 (从knowledge_version.c移入，header函数声明需要完整类型) */
 typedef struct {
     int entry_id;
     char subject[256];
@@ -176,7 +176,7 @@ int kv_get_history(const KnowledgeVersionManager* kvm, const char* branch_name,
                    KnowledgeSnapshot* out, int max_count);
 
 /* ============================================================================
- * ZSFWS-031: 语义相似度合并策略
+ *: 语义相似度合并策略
  *
  * 对两个快照中的实体进行语义级合并，根据字符三元组Jaccard相似度决定策略：
  *   - 相似度 >= 0.80: 自动合并（取置信度高者）

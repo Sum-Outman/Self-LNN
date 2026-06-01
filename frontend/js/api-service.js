@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 后端API服务
  * 提供与SELF-LNN后端服务器的通信接口
  *
@@ -14,7 +14,7 @@ var SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
     host: 'localhost'
 };
 
-/* ZSFUSA-F01: 端点→子系统映射表（配置驱动，替代字符串匹配） */
+/* 端点→子系统映射表（配置驱动，替代字符串匹配） */
 var SUBSYSTEM_ENDPOINT_MAP = {
     '/status':        'system',
     '/lnn':           'lnn',
@@ -51,9 +51,9 @@ var SUBSYSTEM_ENDPOINT_MAP = {
 class ApiService {
     constructor() {
         this.baseURL = `http://${SELFLNN_CONFIG.host}:${SELFLNN_CONFIG.port}/api`;
-        this.connected = false;  /* F-003修复: 初始状态必须为未连接，由checkConnection()异步确认后更新 */
+        this.connected = false;  /* F-003修复: 初始状态必须为未连接，由checkConnection异步确认后更新 */
         this._connectionVerified = false;  /* 首次连接确认标记 */
-        this._coldStartUntil = Date.now() + 30000;  /* ZSFABC-FE-Fix: 冷启动期30秒，避免启动时误报熔断 */
+        this._coldStartUntil = Date.now()+ 30000; /* 冷启动期30秒，避免启动时误报熔断 */
         this.connectionCheckInterval = null;
         
         /* F-014修复: API密钥认证支持 */
@@ -69,7 +69,7 @@ class ApiService {
 
         /* 客户端熔断器：监控后端子系统健康状态，熔断时直接报错不做降级 */
         this.circuitBreakers = {
-            general:  { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 15, resetTimeoutMs: 5000 }, /* ZSFEEE-FIX-032: 阈值从50降低到15 */
+            general:  { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 15, resetTimeoutMs: 5000 }, /* 阈值从50降低到15 */
             reasoning: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 25, resetTimeoutMs: 15000 },
             learning: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
             knowledge: { state: 'CLOSED', failures: 0, lastFailureTime: 0, threshold: 5, resetTimeoutMs: 30000 },
@@ -125,7 +125,7 @@ class ApiService {
         /* 指数退避：baseDelay * 2^attempt + 随机抖动 */
         const exponentialDelay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
         /* 完整抖动（Full Jitter）：0 ~ exponentialDelay 之间的随机值 */
-        const jitteredDelay = Math.random() * exponentialDelay;
+        const jitteredDelay = Math.random()* exponentialDelay;
         return Math.min(jitteredDelay, maxDelay);
     }
 
@@ -176,7 +176,7 @@ class ApiService {
      * @param {string} subsystem - 子系统名称
      */
     recordCircuitBreakerFailure(subsystem) {
-        if (Date.now() < this._coldStartUntil) return;
+        if (Date.now()< this._coldStartUntil) return;
         const cb = this.circuitBreakers[subsystem];
         if (!cb) return;
 
@@ -211,7 +211,7 @@ class ApiService {
      */
     guessSubsystemFromEndpoint(endpoint) {
         if (!endpoint) return 'unknown';
-        /* ZSFUSA-F01: 配置驱动查找 */
+/* 配置驱动查找 */
         var path = endpoint.replace(/^https?:\/\/[^\/]+/, '');
         for (var prefix in SUBSYSTEM_ENDPOINT_MAP) {
             if (path.indexOf(prefix) === 0) {
@@ -371,13 +371,13 @@ class ApiService {
      */
     async request(endpoint, options = {}, retryCount = null) {
         /* 页面加载期间排队请求，就绪后逐次释放（间隔200ms防止洪流） */
-        /* ZSFABC-F003修复: 添加3秒超时机制，防止__PAGE_READY未置true导致无限等待 */
+/* 添加3秒超时机制，防止__PAGE_READY未置true导致无限等待 */
         if (window.__PAGE_READY !== true) {
             var self = this;
             var _checkStartTime = Date.now();
             var _CHECK_TIMEOUT_MS = 3000;
             return new Promise(function(resolve) {
-                /* ZSFZS-F056修复: 每次排空时重置间隔为初始值，防止累积延迟 */
+/* 每次排空时重置间隔为初始值，防止累积延迟 */
                 self._drainInterval = 0;
                 var check = function() {
                     if (window.__PAGE_READY === true) {
@@ -385,7 +385,7 @@ class ApiService {
                             resolve(self.request(endpoint, options, retryCount));
                         }, self._drainInterval);
                         self._drainInterval += 200;
-                    } else if (Date.now() - _checkStartTime >= _CHECK_TIMEOUT_MS) {
+                    } else if (Date.now()- _checkStartTime >= _CHECK_TIMEOUT_MS) {
                         console.warn('[ApiService] __PAGE_READY等待超时(%dms)，自动释放所有挂起请求，强制继续', _CHECK_TIMEOUT_MS);
                         window.__PAGE_READY = true;
                         setTimeout(function() {
@@ -496,13 +496,13 @@ class ApiService {
      */
     startConnectionMonitor(interval = 5000) {
         /* BUG-9修复：先停止已有监控防止重复，保存setTimeout定时器ID支持取消 */
-        this.stopConnectionMonitor();
-        this._connectionMonitorTimeout = setTimeout(async () => {
+        this.stopConnectionMonitor;
+        this._connectionMonitorTimeout = setTimeout(async  => {
             if (!this._connectionMonitorTimeout) return;
-            const status = await this.checkConnection();
+            const status = await this.checkConnection;
             this.notifyConnectionStatus(status);
-            this.connectionCheckInterval = setInterval(async () => {
-                const status = await this.checkConnection();
+            this.connectionCheckInterval = setInterval(async  => {
+                const status = await this.checkConnection;
                 this.notifyConnectionStatus(status);
             }, interval);
         }, 5000);
@@ -850,7 +850,7 @@ class ApiService {
     
     /**
      * 开始演化
-     * ZSFDDD-D2-010修复: 后端期望扁平字段(population_size/generations/mutation_rate)，非嵌套config对象
+ *修复: 后端期望扁平字段(population_size/generations/mutation_rate)，非嵌套config对象
      */
     async startEvolution(evolutionConfig) {
         try {
@@ -1054,7 +1054,7 @@ class ApiService {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
             const data = await response.json();
-            /* ZSFA-FIX-BUG-4: 规范化后端robot_status.old_interface格式为前端期望的robot.battery平铺格式 */
+/* 规范化后端robot_status.old_interface格式为前端期望的robot.battery平铺格式 */
             var rs = (data && data.robot_status) ? data.robot_status : data;
             var oi = (rs && rs.old_interface) ? rs.old_interface : {};
             var robot = {
@@ -1863,7 +1863,7 @@ class ApiService {
     }
 
     async getSecurityStatus() {
-        /* ZSFDDD-D2-003修复: 原调用/status通用端点改为/safety/status安全专用端点 */
+/* 原调用/status通用端点改为/safety/status安全专用端点 */
         try {
             const response = await this.request('/safety/status');
             if (!response.ok) {
@@ -1918,7 +1918,7 @@ class ApiService {
     }
 
     /**
-     * ZSF-002/ZSF-005修复: 设置安全边界配置
+ * 设置安全边界配置
      * 向 /api/safety/bounds 发送POST请求更新机器人安全边界参数
      *
      * @param {Object} bounds - 安全边界配置对象，包含以下可选字段：
@@ -1989,7 +1989,7 @@ class ApiService {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 /* FIX-1: mode→target, 添加store_knowledge匹配后端 */
-                body: JSON.stringify({ data: data || [], target: mode || 'auto', store_knowledge: 1 })
+                body: JSON.stringify({ data: data || '', target: mode || 'auto', store_knowledge: 1 })
             });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const dataJson = await response.json();
@@ -2029,7 +2029,7 @@ class ApiService {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 /* FIX-1: action→op, data→value, 添加priority/strength */
-                body: JSON.stringify({ op: action || 'read', key: key || 'latest', value: data || [], priority: 5, strength: 0.8 })
+                body: JSON.stringify({ op: action || 'read', key: key || 'latest', value: data || '', priority: 5, strength: 0.8 })
             });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const dataJson = await response.json();
@@ -2215,7 +2215,7 @@ class ApiService {
      */
     async recognizeAudio(audioBlob) {
         try {
-            const formData = new FormData();
+            const formData = new FormData;
             formData.append('audio', audioBlob, 'recording.wav');
             const response = await this.request('/audio/recognize', {
                 method: 'POST',
@@ -2241,7 +2241,7 @@ class ApiService {
                 body: JSON.stringify({ text: text, speed: speed || 1.0 })
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
-            const blob = await response.blob();
+            const blob = await response.blob;
             return { success: true, data: blob, url: URL.createObjectURL(blob) };
         } catch (error) {
             console.error('语音合成失败:', error);
@@ -2352,7 +2352,7 @@ class ApiService {
 
     /**
      * 添加仿真机器人到3D视图中
-     * ZSFDDD-D2-005修复: 原调/simulation/robot_control(不存在的路由)→改为/simulation/robot/add
+ *修复: 原调/simulation/robot_control(不存在的路由)→改为/simulation/robot/add
      * @param {object} params - { x, y, z, urdf, model_name }
      */
     async addSimulationRobot(params) {
@@ -2766,7 +2766,7 @@ class ApiService {
         options = options || {};
         const frameInterval = options.frameInterval || 200;
         const audioInterval = options.audioInterval || 100;
-        const streamId = 'stream_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
+        const streamId = 'stream_' + Date.now()+ '_' + Math.random().toString(36).substr(2, 8);
         const handle = {
             id: streamId,
             type: type,
@@ -2788,20 +2788,20 @@ class ApiService {
                     this.audioTimer = null;
                 }
                 if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-                    this.mediaRecorder.stop();
+                    this.mediaRecorder.stop;
                 }
             }
         };
         var self = this;
         if (type === 'video' || type === 'audiovideo') {
-            var videoTrack = stream.getVideoTracks()[0];
+            var videoTrack = stream.getVideoTracks[0];
             if (videoTrack) {
                 handle.canvas.width = options.width || 640;
                 handle.canvas.height = options.height || 480;
                 var ctx = handle.canvas.getContext('2d');
                 var tempVideo = document.createElement('video');
                 tempVideo.srcObject = new MediaStream([videoTrack]);
-                tempVideo.play();
+                tempVideo.play;
                 handle.videoTimer = setInterval(function() {
                     if (!handle.running) return;
                     try {
@@ -2817,7 +2817,7 @@ class ApiService {
             }
         }
         if (type === 'audio' || type === 'audiovideo') {
-            var audioTrack = stream.getAudioTracks()[0];
+            var audioTrack = stream.getAudioTracks[0];
             if (audioTrack) {
                 try {
                     var audioStream = new MediaStream([audioTrack]);
@@ -2848,7 +2848,7 @@ class ApiService {
      */
     stopMediaStream(handle) {
         if (handle && typeof handle.stop === 'function') {
-            handle.stop();
+            handle.stop;
             return { success: true };
         }
         return { success: false, error: '无效的控制句柄' };
@@ -2919,7 +2919,7 @@ class ApiService {
             audio.onended = function() {
                 URL.revokeObjectURL(url);
             };
-            audio.play().catch(function(err) {
+            audio.play.catch(function(err) {
                 console.error('音频播放失败:', err.message);
             });
             return { success: true, audioElement: audio };
@@ -2941,11 +2941,11 @@ class ApiService {
                 return { success: false, error: '浏览器不支持AudioContext' };
             }
             var AudioCtx = window.AudioContext || window.webkitAudioContext;
-            var ctx = new AudioCtx();
+            var ctx = new AudioCtx;
             duration = duration || 500;
             frequency = frequency || 440;
-            var oscillator = ctx.createOscillator();
-            var gainNode = ctx.createGain();
+            var oscillator = ctx.createOscillator;
+            var gainNode = ctx.createGain;
             oscillator.type = 'sine';
             oscillator.frequency.value = frequency;
             gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
@@ -2955,7 +2955,7 @@ class ApiService {
             oscillator.start(ctx.currentTime);
             oscillator.stop(ctx.currentTime + duration / 1000);
             oscillator.onended = function() {
-                ctx.close();
+                ctx.close;
             };
             return { success: true, message: '测试音调已播放' };
         } catch (error) {
@@ -3445,7 +3445,7 @@ class ApiService {
     async scanHardware(includeDevices) {
         try {
             var scanResp = await this.request('/hardware/scan', {method: 'POST'}, 1);
-            var scanData = scanResp.ok ? await scanResp.json() : {};
+            var scanData = scanResp.ok ? await scanResp.json : {};
             var result = { success: scanResp.ok, scan: scanData };
             if (includeDevices) {
                 try {
@@ -3477,7 +3477,7 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* ZSFABC-F003修复: 编程工作台示例代码API */
+/* 编程工作台示例代码API */
     async programmingSample() {
         try {
             var resp = await this.request('/programming/sample', {method: 'GET'});
@@ -3486,7 +3486,7 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* ZSFABC-F005修复: 从后端动态获取命令前缀列表 */
+/* 从后端动态获取命令前缀列表 */
     async getCommandPrefixes() {
         try {
             var resp = await this.request('/command/prefixes', {method: 'GET'});
@@ -3605,7 +3605,7 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* ZSFWS-R12: 多模态教学 — 前端调用的语义对应/multimodal/teach */
+/* 多模态教学 — 前端调用的语义对应/multimodal/teach */
     async multimodalTeach(params) {
         try {
             var resp = await this.request('/multimodal/teach', {
@@ -3617,7 +3617,7 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* ZSFWS-R12: 多模态测试 — 运行教学后的验证测试 */
+/* 多模态测试 — 运行教学后的验证测试 */
     async multimodalTest() {
         try {
             var resp = await this.request('/multimodal/teach/test', {
@@ -3658,7 +3658,6 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* ZSF-FE-004: 系统命令接口 - 向SELF-LNN后端发送系统级命令 */
     async systemCommand(command, params) {
         try {
             var resp = await this.request('/system/command', {
@@ -3670,7 +3669,6 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* ZSF-FE-005: 通用命令发送接口 - 支持设备/机器人/模块等多种目标 */
     async sendCommand(target, command, payload) {
         try {
             var body = { target: target, command: command };
@@ -3686,10 +3684,10 @@ class ApiService {
 
     // ==================== 语音控制 API ====================
 
-    /* ZSFABC-026修复: 使用统一request()替代裸fetch，获得认证/重试/熔断保护 */
+/* 使用统一request替代裸fetch，获得认证/重试/熔断保护 */
     async voiceRecognize(audioBlob, lang) {
         try {
-            var formData = new FormData();
+            var formData = new FormData;
             formData.append('audio', audioBlob);
             formData.append('lang', lang);
             var resp = await this.request('/voice/recognize', {method: 'POST', body: formData});
@@ -3705,7 +3703,7 @@ class ApiService {
                 body: JSON.stringify({text, lang})
             });
             var data = await resp.json();
-            return { success: resp.ok, data: data, blob: resp.ok ? await resp.blob() : null };
+            return { success: resp.ok, data: data, blob: resp.ok ? await resp.blob : null };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
@@ -3974,7 +3972,7 @@ class ApiService {
     }
 
     /* ==================== 密钥管理增强 API ==================== */
-    /* ZSFAAA-DEEP-010修复: 删除与第一组重复的getKeyList/keyCreate/keyDelete/keySet */
+/* 删除与第一组重复的getKeyList/keyCreate/keyDelete/keySet */
 
     /* 密钥更新（唯一功能，保留） */
     async keyUpdate(keyPrefix, updates) {
@@ -4010,7 +4008,7 @@ class ApiService {
     }
 
     /* P2-4: 设置API密钥 — 封装/key/set端点
-     * ZSFAAA-DEEP-010修复: 删除重复的keySet，保留setKey为唯一入口 */
+ *修复: 删除重复的keySet，保留setKey为唯一入口 */
     async setKey(apiKey) {
         try {
             var resp = await this.request('/key/set', {
@@ -4763,7 +4761,7 @@ class ApiService {
      * 获取认知系统状态（自我认知、元认知、深度反思）
      */
     async getCognitionState() {
-        return this.getCognitionStatus();
+        return this.getCognitionStatus;
     }
 
     /**
@@ -4929,7 +4927,7 @@ class ApiService {
     }
 
     /* ================================================================
-     * ZSFABC-B002修复: 补充10个前端缺失的API方法 + 恢复getCognitionHealth
+ *修复: 补充10个前端缺失的API方法 + 恢复getCognitionHealth
      * 以下方法在main.js中被安全校验调用（typeof === 'function'），
      * 但因api-service.js中缺失定义而静默失败。
      * ================================================================ */
@@ -4965,7 +4963,7 @@ class ApiService {
         }
     }
 
-    /* ZSFWS-R12: getKnowledgeBase — 前端fallback分支调用的知识库查询(语义等同/knowledge) */
+/* getKnowledgeBase — 前端fallback分支调用的知识库查询(语义等同/knowledge) */
     async getKnowledgeBase(params) {
         try {
             var queryStr = '';
@@ -5160,7 +5158,7 @@ class ApiService {
     }
 
     /**
-     * 获取训练状态（ZSFAB-BUG-2/5修复: 添加缺失的API方法）
+     * 获取训练状态（/5修复: 添加缺失的API方法）
      * 调用 GET /api/training/status
      */
     async getTrainingStatus() {
@@ -5197,7 +5195,7 @@ class ApiService {
     }
 
     /**
-     * 导入知识库数据（ZSFAB-BUG-4修复: 添加缺失的API方法）
+     * 导入知识库数据（添加缺失的API方法）
      * 调用 POST /api/knowledge/import
      * @param {string} fileContent - 文件内容
      * @param {string} fileName - 文件名
@@ -5218,7 +5216,7 @@ class ApiService {
         }
     }
 
-    /* ==================== ZSFWS-005修复: 补充缺失的API端点封装 ==================== */
+    /* ==================== 补充缺失的API端点封装 ==================== */
 
     /* --- 知识库高级操作 --- */
     async knowledgeStats() {
@@ -5404,7 +5402,7 @@ class ApiService {
         try { var r = await this.request('/teach/test_concept', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({concept:concept}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
-    /* ZSFAAA-DEEP-010修复: 删除3个重复/错误API KEY函数
+/* 删除3个重复/错误API KEY函数
      * apiKeyCreate 缺少api_key字段 | apiKeyList第三次重复 | apiKeyDelete发送key_id而非key_prefix */
     async devicesEmergencyStop() {
         try { var r = await this.request('/devices/emergency_stop', { method:'POST' }); var d = await r.json(); return { success: true, data: d }; }
@@ -5415,7 +5413,7 @@ class ApiService {
         catch(e) { return { success: false, error: e.message }; }
     }
 
-    /* ZSFEEE-FIX-DEEP-012: 补充前端缺失的关键API调用 */
+/* 补充前端缺失的关键API调用 */
     /**
      * 获取元认知系统状态
      * 对应后端 /api/metacognition/state (GET)
@@ -5427,7 +5425,7 @@ class ApiService {
             const data = await response.json();
             return { success: true, data: data };
         } catch (error) {
-            console.error('[ZSFEEE-FIX-DEEP-012] 获取元认知状态失败:', error);
+            console.error(' 获取元认知状态失败:', error);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -5447,7 +5445,7 @@ class ApiService {
             const data = await response.json();
             return { success: true, data: data };
         } catch (error) {
-            console.error('[ZSFEEE-FIX-DEEP-012] 训练管线启动失败:', error);
+            console.error(' 训练管线启动失败:', error);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -5463,7 +5461,7 @@ class ApiService {
             const data = await response.json();
             return { success: true, data: data };
         } catch (error) {
-            console.error('[ZSFEEE-FIX-DEEP-012] 获取检查点列表失败:', error);
+            console.error(' 获取检查点列表失败:', error);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -5483,7 +5481,7 @@ class ApiService {
             const data = await response.json();
             return { success: true, data: data };
         } catch (error) {
-            console.error('[ZSFEEE-FIX-DEEP-012] 加载检查点失败:', error);
+            console.error(' 加载检查点失败:', error);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -5534,7 +5532,7 @@ class WebSocketManager {
         }
         if (typeof navigator !== 'undefined' && navigator.onLine === false) {
             console.warn('设备处于离线状态，跳过WebSocket重连');
-            this._scheduleReconnect();
+            this._scheduleReconnect;
             return;
         }
         this.isManualDisconnect = false;
@@ -5546,7 +5544,7 @@ class WebSocketManager {
             this.ws.onmessage = (message) => this._onMessage(message);
         } catch (error) {
             console.error('WebSocket连接创建失败:', error);
-            this._scheduleReconnect();
+            this._scheduleReconnect;
         }
     }
 
@@ -5577,7 +5575,7 @@ class WebSocketManager {
         this.pendingMessages.push(data);
         this.pendingMessageTimestamps.push(timestamp);
         /* 清理超过30秒的过期待发送消息 */
-        this._cleanExpiredPending();
+        this._cleanExpiredPending;
         return false;
     }
 
@@ -5626,20 +5624,20 @@ class WebSocketManager {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        this._startHeartbeat();
-        this._flushPendingMessages();
+        this._startHeartbeat;
+        this._flushPendingMessages;
         this._notifyStatus({ connected: true });
     }
 
     /** WebSocket关闭事件 */
     _onClose(event) {
         this.isConnected = false;
-        this._stopHeartbeat();
-        this._clearPongTimer();
+        this._stopHeartbeat;
+        this._clearPongTimer;
         this._notifyStatus({ connected: false, code: event.code, reason: event.reason });
         /* 正常关闭(code 1000) 或 手动断开 不自动重连 */
         if (!this.isManualDisconnect && event.code !== 1000) {
-            this._scheduleReconnect();
+            this._scheduleReconnect;
         }
     }
 
@@ -5739,7 +5737,7 @@ class WebSocketManager {
                 this.pongReceived = false;
                 this.ws.send(JSON.stringify({ type: 'ping', timestamp: this.lastPingTimestamp }));
                 /* 设置Pong超时检测 */
-                this._clearPongTimer();
+                this._clearPongTimer;
                 this.pongTimer = setTimeout(() => {
                     if (!this.pongReceived) {
                         console.warn('Pong响应超时, 判定连接断开, 触发重连');
@@ -5750,7 +5748,7 @@ class WebSocketManager {
                         }
                         this.isConnected = false;
                         if (!this.isManualDisconnect) {
-                            this._scheduleReconnect();
+                            this._scheduleReconnect;
                         }
                     }
                 }, this.pongTimeout);
@@ -5764,7 +5762,7 @@ class WebSocketManager {
             clearInterval(this.heartbeatInterval);
             this.heartbeatInterval = null;
         }
-        this._clearPongTimer();
+        this._clearPongTimer;
     }
 
     /** 清理Pong超时定时器 */
@@ -5832,7 +5830,7 @@ class WebSocketManager {
 
         /* 指数退避 + 随机抖动 ±30% */
         const baseDelay = Math.min(this.reconnectDelay, effectiveMaxDelay);
-        const jitter = baseDelay * (0.7 + Math.random() * 0.6);
+        const jitter = baseDelay * (0.7 + Math.random()* 0.6);
         const delay = Math.round(jitter);
 
         /* 通知重连状态 */
@@ -5842,7 +5840,7 @@ class WebSocketManager {
             this.reconnectTimer = null;
             this.reconnectAttempts++;
             this.reconnectDelay = Math.min(this.reconnectDelay * 2, effectiveMaxDelay);
-            this.connect();
+            this.connect;
         }, delay);
     }
 
@@ -5896,13 +5894,13 @@ class WebSocketManager {
 }
 
 // 创建全局API服务实例（IIFE内暴露）
-window.SelfLnnApi = new ApiService();
+window.SelfLnnApi = new ApiService;
 /* WebSocket通过HTTP Upgrade共用HTTP端口 — 构造函数动态读取window.SELFLNN_CONFIG */
-window.SelfLnnWebSocket = new WebSocketManager();
+window.SelfLnnWebSocket = new WebSocketManager;
 
-})(); /* IIFE结束 */
+}); /* IIFE结束 */
 
-/* ZSFABC-001修复: WebSocket自动连接已启用（延迟连接, 确保服务器就绪） */
+/* WebSocket自动连接已启用（延迟连接, 确保服务器就绪） */
 
 /* 全局连接横幅管理器 — 所有页面共享 */
 (function() {
@@ -5917,7 +5915,7 @@ window.SelfLnnWebSocket = new WebSocketManager();
                 banner.style.cursor = 'pointer';
                 banner.onclick = function() {
                     if (window.SelfLnnWebSocket && !window.SelfLnnWebSocket.isConnected) {
-                        window.SelfLnnWebSocket.connect();
+                        window.SelfLnnWebSocket.connect;
                     }
                 };
                 if (document.body) document.body.appendChild(banner);
@@ -5926,7 +5924,7 @@ window.SelfLnnWebSocket = new WebSocketManager();
         return banner;
     }
     document.addEventListener('websocket-connection-status', function(e) {
-        var b = ensureBanner();
+        var b = ensureBanner;
         if (e.detail && e.detail.connected) {
             b.className = 'connection-banner js-ready connected';
             b.innerHTML = '<span class="connection-dot connected"></span> WebSocket已连接';
@@ -5935,9 +5933,9 @@ window.SelfLnnWebSocket = new WebSocketManager();
             b.innerHTML = '<span class="connection-dot disconnected"></span> 点击重连WebSocket';
         }
     });
-})();
+});
 
-/* ZSFABC-001修复: 注册对话流式消息全局分发（使用WebSocketManager.on接口） */
+/* 注册对话流式消息全局分发（使用WebSocketManager.on接口） */
 (function() {
     var ws = window.SelfLnnWebSocket;
     if (!ws) return;
@@ -5982,8 +5980,8 @@ window.SelfLnnWebSocket = new WebSocketManager();
         }
     });
 
-    /* ZSFABC-001修复: 延迟启动WebSocket连接（确保服务器先完成初始化） */
+/* 延迟启动WebSocket连接（确保服务器先完成初始化） */
     setTimeout(function() {
-        ws.connect();
+        ws.connect;
     }, 3000);
-})();
+});

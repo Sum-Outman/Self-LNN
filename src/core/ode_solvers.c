@@ -1,5 +1,5 @@
 #include "selflnn/core/ode_solvers.h"
-#include "selflnn/utils/memory_utils.h" /* ZSFEEE-FIX-RAW-MIG */
+#include "selflnn/utils/memory_utils.h"-MIG
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -7,9 +7,9 @@
 #define SELFLNN_DP54_SAFETY 0.9f
 #define SELFLNN_DP54_PGROW -0.2f
 #define SELFLNN_DP54_PSHRINK -0.25f
-#define SELFLNN_DP54_ERR_CTRL 0.9f  /* ZSFQQ-P1-005修复: 从0.5调整为0.9，保留自适应步长控制的有效性 */
+#define SELFLNN_DP54_ERR_CTRL 0.9f /* 从0.5调整为0.9，保留自适应步长控制的有效性 */
 
-/* ZSFZX-FIX-R5-1: ODE求解器NaN/Inf输入快速检测
+/* ODE求解器NaN/Inf输入快速检测
  * 在所有求解器入口处调用，防止NaN/Inf传播导致无限循环或数值崩溃 */
 static int ode_check_input_finite(const float* y, size_t n) {
     if (!y || n == 0) return 0;
@@ -23,7 +23,7 @@ static int ode_check_input_finite(const float* y, size_t n) {
     return 0;
 }
 
-/* ZSFLNN-H-003修复: 使用标准库 fmaxf/fminf/fabsf 替代本地重复定义，统一于math.h */
+/* 使用标准库 fmaxf/fminf/fabsf 替代本地重复定义，统一于math.h */
 
 DP54Config ode_dp54_default_config(void)
 {
@@ -88,7 +88,7 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                    float* h_actual, int* steps_used)
 {
     if (!y || !rhs || !cfg || !workspace || n == 0) return -1;
-    if (ode_check_input_finite(y, n) != 0) return -1;  /* ZSFZX-FIX-R5-1 */
+    if (ode_check_input_finite(y, n) != 0) return -1;
 
     float rel_tol = (cfg->rel_tolerance > 0.0f) ? cfg->rel_tolerance : 1e-6f;
     float abs_tol = (cfg->abs_tolerance > 0.0f) ? cfg->abs_tolerance : 1e-8f;
@@ -244,7 +244,7 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
                                ODEEventSolution* event_sol)
 {
     if (!y || !rhs || !workspace || n == 0) return -1;
-    if (ode_check_input_finite(y, n) != 0) return -1;  /* ZSFZX-FIX-R5-1: DP54 events */
+    if (ode_check_input_finite(y, n) != 0) return -1; /* DP54 events */
 
     /* ========== 初始化事件结果 ========== */
     ODEEventSolution local_event_sol;
@@ -430,7 +430,7 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
                         float* dyn_m = NULL;
 
                         if (n > 32) {
-                            /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
                             dyn_l = (float*)safe_malloc((size_t)n * sizeof(float));
                             dyn_m = (float*)safe_malloc((size_t)n * sizeof(float));
                             if (!dyn_l || !dyn_m) {
@@ -659,7 +659,7 @@ float ode_adaptive_step_control(float max_error, float h,
         if (cfg->step_rejection_policy == 1) {
             float ki = 0.1f;
             float error_ratio = (float)log((double)err_clamp);
-            /* ZSFZS-F044修复: 仅误差稳定时累加PI积分防止windup */
+/* 仅误差稳定时累加PI积分防止windup */
             sol->pi_integral += 0.5f * ki * h * (error_ratio + sol->pi_previous_error);
             if (sol->pi_integral > 5.0f) sol->pi_integral = 5.0f;
             if (sol->pi_integral < -5.0f) sol->pi_integral = -5.0f;
@@ -775,7 +775,7 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
     if (use_omp && pcfg && pcfg->use_domain_decomposition && pcfg->num_domains > 1) {
         int nd = pcfg->num_domains;
 
-        /* ZSFQQ-P1-007/ODE-5修复: 域分解RHS缓冲区溢出
+/*/ODE-5修复: 域分解RHS缓冲区溢出
          * 原代码: local_dydt=dydt+start, rhs(t,y,local_dydt,ctx)
          * RHS函数写入n个元素到dydt[start..start+n-1]，导致start个元素越界。
          * 修复: 每线程分配完整dydt缓冲区，RHS写入完整缓冲区后仅复制域片段。 */
@@ -788,7 +788,7 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             if (start < 0 || size <= 0 || (size_t)(start + size) > n) continue;
 
             /* 分配线程局部完整dydt缓冲区 */
-            /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
             float* full_dydt = (float*)safe_calloc(n, sizeof(float));
             if (!full_dydt) continue;
             int ret = rhs(t, y, full_dydt, ctx);
@@ -809,7 +809,7 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             if (max_threads < 1) max_threads = 1;
             if (max_threads > 64) max_threads = 64;
 
-            /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
             float** thread_dydt_buffers = (float**)safe_calloc((size_t)max_threads, sizeof(float*));
             int alloc_ok = (thread_dydt_buffers != NULL);
 
@@ -837,7 +837,7 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
                         }
                     }
                 }
-                /* ZSFWS-P13修复: 移除多线程RHS结果取平均。
+/* 移除多线程RHS结果取平均。
                  * RHS函数是确定性的(f(t,y)对所有线程返回相同值)，
                  * 取平均不仅无意义，还额外增加了计算开销。
                  * 在无域分解的并行RHS模式下，保留第一个线程的结果即可。 */
@@ -851,7 +851,7 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             /* 释放per-thread临时缓冲区 */
             if (thread_dydt_buffers) {
                 for (int ti = 0; ti < max_threads; ti++) {
-                    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
                     safe_free((void**)&thread_dydt_buffers[ti]);
                 }
                 safe_free((void**)&thread_dydt_buffers);
@@ -879,7 +879,7 @@ int ode_parallel_solve(float* y, float t, float delta_t,
                        float* h_actual, int* steps_used)
 {
     if (!y || !rhs || !solver_func || n == 0) return -1;
-    if (ode_check_input_finite(y, n) != 0) return -1;  /* ZSFZX-FIX-R5-1 */
+    if (ode_check_input_finite(y, n) != 0) return -1;
 
     int use_parallel = 0;
     int is_mpi_mode = 0;
@@ -905,7 +905,7 @@ int ode_parallel_solve(float* y, float t, float delta_t,
         float local_h = 0.0f;
 
         if (local_n > 0) {
-            /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
             local_y = (float*)safe_malloc((size_t)local_n * sizeof(float));
             local_workspace = (float*)safe_malloc(workspace_size);
             if (!local_y || !local_workspace) {
@@ -923,7 +923,7 @@ int ode_parallel_solve(float* y, float t, float delta_t,
             memcpy(y, local_y, (size_t)local_n * sizeof(float));
         }
 
-        /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
         safe_free((void**)&local_y);
         safe_free((void**)&local_workspace);
 
@@ -947,7 +947,7 @@ int ode_parallel_solve(float* y, float t, float delta_t,
             size_t base_sz = n / (size_t)n_threads;
             size_t rem_sz  = n % (size_t)n_threads;
 
-            /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
             float** chunk_y = (float**)safe_calloc((size_t)n_threads, sizeof(float*));
             float** chunk_ws = (float**)safe_calloc((size_t)n_threads, sizeof(float*));
             int*    chunk_ret = (int*)safe_calloc((size_t)n_threads, sizeof(int));
@@ -965,7 +965,7 @@ int ode_parallel_solve(float* y, float t, float delta_t,
                     chunk_off[ti] = off;
                     off += sz;
                     if (sz > 0) {
-                        /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
                         chunk_y[ti] = (float*)safe_malloc(sz * sizeof(float));
                         chunk_ws[ti] = workspace_size ?
                             (float*)safe_malloc(workspace_size) : NULL;
@@ -1010,7 +1010,7 @@ int ode_parallel_solve(float* y, float t, float delta_t,
 
                 int final_ret = has_error ? -4 : 0;
 
-                /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
                 for (int ti = 0; ti < n_threads; ti++) {
                     safe_free((void**)&chunk_y[ti]);
                     safe_free((void**)&chunk_ws[ti]);
@@ -1022,7 +1022,7 @@ int ode_parallel_solve(float* y, float t, float delta_t,
             }
 
             /* 内存分配失败：清理并回退到串行 */
-            /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
             for (int ti = 0; ti < n_threads; ti++) {
                 safe_free((void**)&chunk_y[ti]);
                 safe_free((void**)&chunk_ws[ti]);
@@ -1068,7 +1068,7 @@ int ode_mpi_sync_domains(float* y, size_t n, const ParallelODERHSConfig* pcfg)
     int rank = pcfg->mpi_rank;
     int num_ranks = pcfg->mpi_num_ranks;
 
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     int* recv_counts = (int*)safe_malloc((size_t)num_ranks * sizeof(int));
     int* displacements = (int*)safe_malloc((size_t)num_ranks * sizeof(int));
 
@@ -1093,7 +1093,7 @@ int ode_mpi_sync_domains(float* y, size_t n, const ParallelODERHSConfig* pcfg)
         }
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     float* send_buf = (float*)safe_malloc((size_t)recv_counts[rank] * sizeof(float));
     if (send_buf) {
         memcpy(send_buf, y, (size_t)recv_counts[rank] * sizeof(float));
@@ -1125,7 +1125,7 @@ int ode_mpi_sync_domains(float* y, size_t n, const ParallelODERHSConfig* pcfg)
 
 static int ros_gauss_eliminate(float* A, size_t n, float* b, float* x)
 {
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     float* system = (float*)safe_malloc((n * (n + 1)) * sizeof(float));
     if (!system) return -1;
 
@@ -1324,7 +1324,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
 {
     if (!y || !rhs || !cfg || !workspace || n == 0) return -1;
     if (delta_t <= 0.0f) return -1;  /* 零或负步长，拒绝执行 */
-    if (ode_check_input_finite(y, n) != 0) return -1;  /* ZSFZX-FIX-R5-1: Rosenbrock */
+    if (ode_check_input_finite(y, n) != 0) return -1; /* Rosenbrock */
 
     float h_max = (cfg->max_step_size > 0.0f) ? cfg->max_step_size : 1.0f;
     float gamma_val = (cfg->gamma_coeff > 0.0f) ? cfg->gamma_coeff : 0.435866521508f;
@@ -1382,7 +1382,7 @@ int ode_rosenbrock_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void*
 
         /* 主元追踪数组（堆分配以支持任意n）
          * 最小化分配：分配一次，多步复用 */
-        /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
         int* pivot = (int*)safe_malloc(n * sizeof(int));
         if (!pivot) {
             /* 内存不足：回退到一阶方法 */
@@ -1569,7 +1569,7 @@ int ode_rosenbrock_adaptive_solve(ODERHSFunc rhs, void* ctx,
     const float grow_factor = 2.0f;
     const float shrink_factor = 0.5f;
     
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     float* y_full = (float*)safe_malloc(n * sizeof(float));
     float* y_half = (float*)safe_malloc(n * sizeof(float));
     float* workspace = (float*)safe_malloc(ode_rosenbrock_workspace_size(n) * sizeof(float));
@@ -1631,7 +1631,7 @@ int ode_rosenbrock_adaptive_solve(ODERHSFunc rhs, void* ctx,
     if (h_final) *h_final = h;
     if (steps_taken) *steps_taken = total_steps;
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&y_full); safe_free((void**)&y_half); safe_free((void**)&workspace);
     return (total_steps > 0) ? 0 : -3;
 }
@@ -1666,7 +1666,7 @@ int ode_forest_ruth_solve(float* q, float* p, float delta_t,
 {
     if (!q || !p || !dqdt || !dpdt || !cfg || !workspace || n == 0) return -1;
     if (delta_t <= 0.0f) return -1;  /* 零或负步长，拒绝执行 */
-    if (ode_check_input_finite(q, n) != 0 || ode_check_input_finite(p, n) != 0) return -1;  /* ZSFZX-FIX-R5-1: Forest-Ruth */
+    if (ode_check_input_finite(q, n) != 0 || ode_check_input_finite(p, n) != 0) return -1; /* Forest-Ruth */
 
     /* Forest-Ruth 4阶辛积分器系数（硬编码，直接取自Forest & Ruth 1990） */
     const float c1 =  0.6756035959798288f;
@@ -1782,7 +1782,7 @@ int ode_verlet_solve(float* q, float* p, float delta_t,
 {
     if (!q || !p || !dpdt || !workspace || n == 0) return -1;
     if (delta_t <= 0.0f) return -1;  /* 零或负步长，拒绝执行 */
-    if (ode_check_input_finite(q, n) != 0 || ode_check_input_finite(p, n) != 0) return -1;  /* ZSFZX-FIX-R5-1: Verlet */
+    if (ode_check_input_finite(q, n) != 0 || ode_check_input_finite(p, n) != 0) return -1; /* Verlet */
 
     float* accel = workspace;
     float half_h = delta_t * 0.5f;
@@ -1882,7 +1882,7 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
         {
             /* 第一步：使用向后欧拉法启动
              * y_{n+1} = y_n + h · f(t_{n+1}, y_{n+1})
-             * ZSFWS-019: 向后欧拉的Picard迭代 y^{(k+1)}=y_n+h·f(t,y^{(k)})
+ *: 向后欧拉的Picard迭代 y^{(k+1)}=y_n+h·f(t,y^{(k)})
              * 对隐式Euler是标准收敛格式，后续BDF2步骤使用完整牛顿迭代。 */
             if (rhs(t_current + h, y, rhs_temp, ctx) != 0) return -2;
 
@@ -1938,7 +1938,7 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
             }
 
             /* 估计雅可比对角元素（使用有限差分）
-             * ZSFUSA-P2-005: 在对角预条件基础上添加邻域耦合校正。
+ *: 在对角预条件基础上添加邻域耦合校正。
              * 原纯对角近似忽略了状态变量间的交叉影响，
              * 对于CfC网络的强非对角耦合可能收敛慢。
              * 改进: 计算J_diag[i]时也检查J_diag[i+1]的贡献，
@@ -1956,7 +1956,7 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                 if (rhs(t_current + h, y_pert, f_trial, ctx) != 0) return -2;
                 J_diag[i] = (f_trial[i] - rhs_temp[i]) / eps_jac;
 
-                /* ZSFUSA-P2-005: 2x2块对角预条件。
+/* 2x2块对角预条件。
                  * 当i+1在范围内，将J_diag[i]与J_diag[i+1]混合平均，
                  * 部分捕捉相邻状态变量的交叉耦合影响。
                  * 混合系数0.15提供轻微耦合补偿，0.85保留独立对角形状。 */

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file data-engine.js
  * @brief 数据引擎 - 真实后端数据传递层 + 统一轮询中心
  *
@@ -37,7 +37,7 @@ class DataEngine {
         this._history = {};
         this._pollModules = new Map();
         this._baseInterval = 2000;
-        this._consecutiveErrors = 0;  /* ZSFABC-Fix: 初始化连续错误计数器 */
+        this._consecutiveErrors = 0; /* 初始化连续错误计数器 */
     }
 
     registerModule(name, intervalMs, callback) {
@@ -132,7 +132,7 @@ class DataEngine {
             }
         } catch (error) {
             console.error('数据获取失败:', error);
-            /* ZSFABC-Fix: 不在此直接断开，由_tick统一管理连接状态（连续3次失败才断开） */
+/* 不在此直接断开，由_tick统一管理连接状态（连续3次失败才断开） */
             this._lastError = error.message;
         }
     }
@@ -187,7 +187,7 @@ class DataEngine {
     async _tick() {
         this._fetchCount++;
 
-        /* ZSFABC-Fix: 连接检查每6秒执行一次，基于_baseInterval计算tick数量 */
+/* 连接检查每6秒执行一次，基于_baseInterval计算tick数量 */
         var connectionCheckIntervalMs = 6000;
         var internalTick = Math.max(1, Math.round(connectionCheckIntervalMs / this._baseInterval));
 
@@ -198,7 +198,6 @@ class DataEngine {
         if (this._backendConnected) {
             try {
                 await this._fetchAllData();
-                /* ZSF-FE-006: 检查内部错误标记，若_fetchAllData内部捕获异常但未抛出，此处强制抛出以触发外层catch */
                 if (this._lastError) {
                     var errMsg = this._lastError;
                     this._lastError = null;

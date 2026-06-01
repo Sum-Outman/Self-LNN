@@ -1,4 +1,4 @@
-#include "selflnn/multimodal/sensor.h"
+﻿#include "selflnn/multimodal/sensor.h"
 #include "selflnn/multimodal/sensor_preprocessor_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -10,7 +10,7 @@
 #include <math.h>
 #include <float.h>
 
-/* ZSFLNN-C-013修复: 移除4个extern声明，改用正规头文件引用 sensor_preprocessor_deep.h */
+/* 移除4个extern声明，改用正规头文件引用 sensor_preprocessor_deep.h */
 
 /* P1-7: 全局互斥锁 — 保护深度预处理器惰性初始化的竞态条件 */
 static MutexHandle g_deep_preprocessor_mutex = NULL;
@@ -692,7 +692,7 @@ static int mat_inv_gj(const float* a, float* inv, int n) {
 int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
     if (!ekf) return -1;
     int n = ekf->config.state_dim;
-    /* ZSFABC-F009: 改进EKF预测，使用非线性状态转移
+/* 改进EKF预测，使用非线性状态转移
      * 之前的线性近似: state[i] += state[i+1] * 0.1 * dt
      * 现在: 使用当前状态+控制输入+非线性动力学模拟
      * 状态结构: [位置0, 速度0, 位置1, 速度1, ...] */
@@ -706,12 +706,12 @@ int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
             accel = control[i] * 0.5f;
         }
         
-        /* ZSFABC-F009: 非线性二阶运动模型
+/* 非线性二阶运动模型
          * 位置: p_new = p + v*dt + 0.5*a*dt^2
          * 速度: v_new = v + a*dt (带轻微阻尼) */
         ekf->state[i] = pos + vel * dt + 0.5f * accel * dt * dt;
         if (i + 1 < n) {
-            /* ZSFAI-M02修复: 使用精确指数衰减替代一阶近似
+/* 使用精确指数衰减替代一阶近似
              * v_new = v * exp(-λ*dt) + a*dt
              * λ从阻尼因子0.995反算: λ = -ln(0.995)/dt ≈ 0.005/dt
              * 当dt≤0.01s时,λ≥0.5,指数衰减精确模拟Stokes粘性摩擦 */
@@ -722,7 +722,7 @@ int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
         }
     }
     
-    /* ZSFABC-S009深度修复: 过程噪声协方差传播 P = F*P*F' + Q*dt
+/*深度修复: 过程噪声协方差传播 P = F*P*F' + Q*dt
      * 使用恒定速度模型的状态转移雅可比，而非对角简化。
      * 状态结构: [pos0, vel0, pos1, vel1, ..., pos_k, vel_k]
      * F矩阵为块对角: 每个2x2块为 [[1, dt], [0, exp(-λ*dt)]]
@@ -844,7 +844,7 @@ struct UKFFilter {
     float* state; float* covariance;
     float* sigma_points; float* sigma_weights;
     float* workspace_mat; float* workspace_vec;
-    /* ZSFQQ-Q019: B矩阵(控制输入矩阵) - 系统辨识而非恒等映射 */
+/* B矩阵(控制输入矩阵) - 系统辨识而非恒等映射 */
     float* B_matrix;          /* n×m 控制输入矩阵, n=state_dim, m=control_dim */
     int control_dim;          /* 控制输入维度 */
     int B_identified;         /* B矩阵是否已完成系统辨识 */
@@ -892,12 +892,12 @@ void ukf_free(UKFFilter* ukf) {
     safe_free((void**)&ukf->state); safe_free((void**)&ukf->covariance);
     safe_free((void**)&ukf->sigma_points); safe_free((void**)&ukf->sigma_weights);
     safe_free((void**)&ukf->workspace_mat); safe_free((void**)&ukf->workspace_vec);
-    /* ZSFQQ-Q019: 释放B矩阵 */
+/* 释放B矩阵 */
     safe_free((void**)&ukf->B_matrix);
     safe_free((void**)&ukf);
 }
 
-/* ZSFQQ-Q019: B矩阵最小二乘系统辨识
+/* B矩阵最小二乘系统辨识
  * 从观测数据中估计控制输入矩阵B: dx = f(x)*dt + B*u*dt + noise
  * 给定N组观测对 (x_k, x_{k+1}, u_k, dt_k)，求解:
  *   (x_{k+1} - f(x_k)*dt) = B * (u_k * dt)
@@ -1259,7 +1259,7 @@ int particle_filter_predict(ParticleFilter* pf, const float* control, float dt) 
     if (!pf) return -1;
     int np = pf->current_particles, n = pf->config.state_dim;
     float noise = pf->config.process_noise_std;
-    /* ZSFWS-NEW-SENSOR修复: 将control输入加入粒子预测 */
+/* 将control输入加入粒子预测 */
     for (int p = 0; p < np; p++) {
         for (int d = 0; d < n; d++) {
             float ctrl = (control && d < n) ? control[d] * dt : 0.0f;
@@ -1375,7 +1375,7 @@ void info_filter_free(InfoFilter* inf) {
 int info_filter_predict(InfoFilter* inf, const float* control, float dt) {
     if (!inf) return -1;
     int n = inf->config.state_dim;
-    /* ZSFWS-NEW-SENSOR修复: 信息滤波器预测中加入控制输入，
+/* 信息滤波器预测中加入控制输入，
      * 状态预测: x_pred = f(x) + B * control * dt */
     for (int i = 0; i < n; i++) {
         if (control) inf->state[i] += control[i] * dt;
@@ -1415,7 +1415,7 @@ int info_filter_get_state(const InfoFilter* inf, float* state, float* informatio
     int n = inf->config.state_dim; memcpy(state, inf->state, (size_t)n * sizeof(float));
     if (information_matrix) memcpy(information_matrix, inf->information_matrix, (size_t)(n * n) * sizeof(float));
     if (covariance) {
-        /* ZSFABC修复: 使用Gauss-Jordan消元进行完整矩阵求逆，而非简化为对角线倒数 */
+/* 使用Gauss-Jordan消元进行完整矩阵求逆，而非简化为对角线倒数 */
         memset(covariance, 0, (size_t)(n * n) * sizeof(float));
         /* 复制信息矩阵到工作区 */
         float* work = (float*)safe_malloc((size_t)(n * n) * sizeof(float));

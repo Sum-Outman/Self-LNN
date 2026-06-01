@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file slam.c
  * @brief 同步定位与建图(SLAM)系统 —— 全局协调层
  * 
@@ -500,7 +500,7 @@ static float slam_compute_sampson_distance(const float* F, float x1, float y1,
 #define slam_realloc(ptr, size)    safe_realloc(ptr, size)
 #define slam_free(ptr)             safe_free((void**)&(ptr))
 
-/* ZSFUSA-P0-005修复: slam_norm_squared/slam_cross_product/slam_rodrigues_rotation
+/* slam_norm_squared/slam_cross_product/slam_rodrigues_rotation
  * 三个数学辅助函数已在slam_frontend.c中以外部链接完整实现，
  * 并在slam_internal.h中声明。此处移除slam.c中的static inline重复定义，
  * 消除因static inline(内部链接)与extern声明(外部链接)不一致导致的符号冲突。
@@ -10591,7 +10591,7 @@ void camera_input_free(CameraInput* camera)
     safe_free((void**)&camera);
 }
 
-/* ZSFUSA: SLAM系统内部重置 */
+/* SLAM系统内部重置 */
 void slam_system_reset_internal(SlamSystem* system) {
     if (!system) return;
     slam_system_reset(system, 1);

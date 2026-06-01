@@ -1,4 +1,4 @@
-#ifndef SELFLNN_UNIFIED_LNN_STATE_H
+﻿#ifndef SELFLNN_UNIFIED_LNN_STATE_H
 #define SELFLNN_UNIFIED_LNN_STATE_H
 
 #include "selflnn/core/common.h"
@@ -100,7 +100,6 @@ void unified_lnn_state_set_isolation_mode(UnifiedLNNState* state, int enable);
 int  unified_lnn_state_get_isolation_enabled(const UnifiedLNNState* state);
 int  unified_lnn_state_suggest_next_modality(UnifiedLNNState* state);  /* 模态轮换调度器 */
 
-/* ZSF-012: 多模态贡献度监控 —— 检测单模态过度主导（>70%），输出污染警告 */
 int  unified_lnn_state_modality_contribution_monitor(UnifiedLNNState* state,
                                                       float contributions[UNIFIED_LNN_MAX_MODALITIES]);
 

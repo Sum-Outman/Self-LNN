@@ -1,4 +1,4 @@
-# 神经架构搜索 & 帕累托多目标演化优化模块CMake配置
+﻿# 神经架构搜索 & 帕累托多目标演化优化模块CMake配置
 
 # 添加神经架构搜索与帕累托优化源文件
 set(NAS_SOURCES
@@ -22,7 +22,7 @@ set_target_properties(selflnn_evolution PROPERTIES
     SOVERSION 1
 )
 
-# ZSFLYF-KNOWN-1: P1-008修复完成 —— 循环依赖 selflnn_evolution ↔ selflnn_cognition 已打破。
+# P1-008修复完成 —— 循环依赖 selflnn_evolution ↔ selflnn_cognition 已打破。
 # selflnn_cognition以PRIVATE方式链接，仅evolution内部使用，不传播给依赖者。
 # cognition通过selflnn_evolution（非别名）直接引用evolution。
 # 长期方案：提取共享接口到独立公共库(selflnn_common_interface)。

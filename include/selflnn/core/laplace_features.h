@@ -1,4 +1,4 @@
-#ifndef SELFLNN_LAPLACE_FEATURES_H
+﻿#ifndef SELFLNN_LAPLACE_FEATURES_H
 #define SELFLNN_LAPLACE_FEATURES_H
 
 #include <stddef.h>
@@ -48,7 +48,7 @@ typedef struct {
     int data_dim;             /* 原始数据维度 */
     float sigma;              /* 热核宽度 */
     float* distance_matrix;   /* n x n 距离矩阵(用于近邻图构建) */
-    float* training_data;     /* ZSFQQ-P0-002: n x data_dim 原始训练数据(用于新样本投影) */
+    float* training_data; /* n x data_dim 原始训练数据(用于新样本投影) */
 } LaplacianEigenmap;
 
 int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, int embedding_dim, float sigma, LaplacianEigenmap* map);

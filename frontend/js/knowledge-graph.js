@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 知识图谱系统
  * 包含知识录入/检索/可视化/力导向图/WebGL 3D视图
  * 所有功能经同一CfC液态神经网络知识库处理
@@ -7,8 +7,8 @@
     'use strict';
 
     /* ==================== 模块级变量 ==================== */
-    var _kgCleanupList = []; /* ZSFABC: 事件监听器清理列表 */
-    var _kgIntervalIds = [];  /* ZSFABC: 定时器ID清理列表 */
+    var _kgCleanupList = []; /* 事件监听器清理列表 */
+    var _kgIntervalIds = []; /* 定时器ID清理列表 */
     var graphState = {
         nodes: [],
         edges: [],
@@ -45,7 +45,7 @@
     /* ==================== 标签页切换 ==================== */
 
     /**
-     * ZSFABC-020修复: 知识图谱独立标签页切换（避免与programming-workbench的switchTab冲突）
+ *修复: 知识图谱独立标签页切换（避免与programming-workbench的switchTab冲突）
      */
     function switchKnowledgeTab(name) {
         document.querySelectorAll('#knowledge .tab-btn').forEach(function(b) { b.classList.remove('active'); });
@@ -59,12 +59,12 @@
     /* ==================== WebSocket连接 ==================== */
 
     /**
-     * ZSFABC-F006修复: 知识图谱使用全局SelfLnnWebSocket，避免重复连接
+ *修复: 知识图谱使用全局SelfLnnWebSocket，避免重复连接
      */
     function connectKnowledgeWebSocket() {
         var ws = window.SelfLnnWebSocket;
         if (!ws) {
-            /* ZSFABC-F006: 最大重试30次(60秒)，超限停止递归 */
+/* 最大重试30次(60秒)，超限停止递归 */
             graphState._kgWsRetryCount = (graphState._kgWsRetryCount || 0) + 1;
             if (graphState._kgWsRetryCount > 30) {
                 console.error('[知识图谱WebSocket] 重试已达上限（30次），停止连接');
@@ -79,7 +79,7 @@
             fetchKnowledgeFromBackend();
             return;
         }
-        /* ZSFWS-KG4修复: 使用一次性标记防止事件监听器重复注册 */
+/* 使用一次性标记防止事件监听器重复注册 */
         if (!graphState._kgWsRegistered) {
             graphState._kgWsRegistered = true;
             ws.on('knowledge_update', function() { fetchKnowledgeFromBackend(); });
@@ -211,7 +211,7 @@
             return;
         }
 
-        /* ZSFABC: pending条目仅做本地UI预览，实际数据由后端API响应填充。
+/* pending条目仅做本地UI预览，实际数据由后端API响应填充。
          * confidence/weight置为-1表示"待后端确认"，UI层渲染为"--" */
         graphState.localSeq = graphState.localSeq || 0;
         graphState.localSeq++;
@@ -292,7 +292,7 @@
         var html = '';
         filtered.forEach(function(e) {
             html += '<div class="entry-item">';
-            /* ZSFZS-F053修复: onclick中的id值做JS转义，防止XSS攻击 */
+/* onclick中的id值做JS转义，防止XSS攻击 */
             var escapedId = String(e.id).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');
             html += '<button class="del-btn" onclick="deleteEntry(\'' + escapedId + '\')" title="删除">✕</button>';
             html += '<div class="triple">';
@@ -314,7 +314,7 @@
         return div.innerHTML;
     }
 
-    /* ZSFUSA-F03修复: 不再发起独立HTTP请求，使用fetchKnowledgeFromBackend已有缓存数据 */
+/* 不再发起独立HTTP请求，使用fetchKnowledgeFromBackend已有缓存数据 */
     function refreshStats() {
         var statEntries = document.getElementById('stat-entries');
         var statMemory = document.getElementById('stat-memory');
@@ -384,7 +384,7 @@
 
         /* 根据节点数量动态调整迭代次数 */
         var maxIterations = Math.min(Math.max(Math.floor(nodes.length * 1.5), 20), 200);
-        /* ZSFUSA-F13: 力布局节流，200节点时限制每帧计算量 */
+/* 力布局节流，200节点时限制每帧计算量 */
         var MAX_FORCE_OPS_PER_FRAME = 50000;
         var forceOps = nodes.length * nodes.length * maxIterations;
         if (forceOps > MAX_FORCE_OPS_PER_FRAME) {
@@ -629,7 +629,7 @@
     }
 
     function drawGraph() {
-        /* ZSFWS-KG2修复: 检查canvas是否已初始化 */
+/* 检查canvas是否已初始化 */
         if (!ctx || !canvas) return;
         var w = canvas.width, h = canvas.height;
         ctx.clearRect(0, 0, w, h);
@@ -739,7 +739,7 @@
     }
 
     function refreshGraph() {
-        /* ZSFABC-FE-Fix: 取消旧的动画循环防止泄漏 */
+/* 取消旧的动画循环防止泄漏 */
         if (graphState._rafId) { cancelAnimationFrame(graphState._rafId); graphState._rafId = null; }
         buildGraph();
         if (graphState.layout === 'force' || graphState.layout === 'radial') {
@@ -832,7 +832,6 @@
         gl3d.uMVP = gl.getUniformLocation(gl3d.program, 'uMVP');
         gl3d.uZoom = gl.getUniformLocation(gl3d.program, 'uZoom');
 
-        /* ZSF-FE-007: WebGL事件处理器使用命名函数并加入清理列表 */
         var _kgMouseDown = function(e) { drag3d.active = true; drag3d.lastX = e.clientX; drag3d.lastY = e.clientY; };
         var _kgMouseUp = function() { drag3d.active = false; };
         var _kgMouseMove = function(e) {
@@ -921,7 +920,7 @@
         });
 
         var pArr = new Float32Array(posBuf), cArr = new Float32Array(colorBuf), sArr = new Float32Array(sizeBuf);
-        /* ZSFWS-KG6修复: 缓冲复用，首次创建后仅更新数据，避免每帧createBuffer/deleteBuffer */
+/* 缓冲复用，首次创建后仅更新数据，避免每帧createBuffer/deleteBuffer */
         if (!gl3d._cachedPb) {
             gl3d._cachedPb = gl.createBuffer();
             gl3d._cachedCb = gl.createBuffer();
@@ -1006,7 +1005,7 @@
         /* 3秒后连接WebSocket */
         setTimeout(function() { connectKnowledgeWebSocket(); }, 3000);
 
-        /* ZSFAB-H07修复: 知识库轮询统一到DataEngine调度，回退到独立setInterval */
+/* 知识库轮询统一到DataEngine调度，回退到独立setInterval */
         if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
             g_dataEngine.registerModule('knowledge_graph_poll', 60000, fetchKnowledgeFromBackend);
         } else {
@@ -1022,7 +1021,7 @@
         }, 3000);
     });
 
-    /* ZSFABC修复: 知识图谱清理函数，移除所有事件监听器和定时器 */
+/* 知识图谱清理函数，移除所有事件监听器和定时器 */
     window.destroyKnowledgeGraph = function() {
         /* 清除所有setInterval */
         _kgIntervalIds.forEach(function(id) { clearInterval(id); });
@@ -1036,9 +1035,9 @@
         });
         _kgCleanupList = [];
         /* 停止WebGL 3D视图 */
-        /* ZSFWS-KG1修复: rafId→_rafId变量名一致，取消动画帧 */
+/* rafId→_rafId变量名一致，取消动画帧 */
         if (graphState._rafId) { cancelAnimationFrame(graphState._rafId); graphState._rafId = 0; }
-        /* ZSFWS-KG5修复: 清理WebGL 3D动画帧 */
+/* 清理WebGL 3D动画帧 */
         if (gl3d.animId) { cancelAnimationFrame(gl3d.animId); gl3d.animId = null; }
         gl3d.running = false;
         console.log('[知识图谱] 资源已清理');

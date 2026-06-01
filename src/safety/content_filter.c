@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file content_filter.c
  * @brief 内容安全过滤系统完整实现
  *
@@ -193,7 +193,7 @@ ContentFilter* content_filter_create(void) {
         r->enabled = 1;
         r->action_type = 3;
     }
-    /* ZSFZS-F018修复: 全部规则添加完成后，默认启用LNN语义过滤层。
+/* 全部规则添加完成后，默认启用LNN语义过滤层。
      * 语义层与关键词匹配层协同工作：语义层做深度理解，关键词层做精细分类。 */
     filter->enable_semantic = 1;
 
@@ -231,7 +231,7 @@ void content_filter_destroy(ContentFilter* filter) {
     safe_free((void**)&filter);
 }
 
-/* ZSFQQ-Q008: 绑定LNN语义分析层实现
+/* 绑定LNN语义分析层实现
  * L-021修复: 外部LNN绑定/解绑时，若内部CfC分类器存在则保持语义层可用 */
 int content_filter_set_lnn(ContentFilter* filter, void* lnn_instance) {
     if (!filter) return -1;
@@ -335,7 +335,7 @@ int content_filter_check(ContentFilter* filter, const char* content,
         float input_embed[CONTENT_FILTER_EMBED_DIM];
         memset(input_embed, 0, sizeof(input_embed));
         size_t text_len = strlen(content);
-        /* ZSFQQ-Q010: 使用bigram哈希编码替代简单字符编码，提升语义嵌入质量。
+/* 使用bigram哈希编码替代简单字符编码，提升语义嵌入质量。
          * bigram哈希捕获字符相邻关系，比单字符编码提供更丰富的文本特征。 */
         if (text_len < 2) {
             /* 极短文本：使用字符编码回退 */

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file hardware_resource_manager.c
  * @brief 硬件资源管理器 —— 摄像头/麦克风/扬声器智能分配
  *
@@ -24,7 +24,7 @@
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
 
-/* ZSFBUILD: MSVC编译为C模式下，COM GUID定义需显式提供 */
+/* MSVC编译为C模式下，COM GUID定义需显式提供 */
 const CLSID CLSID_MMDeviceEnumerator = {0xBCDE0395,0xE52F,0x467C,{0x8E,0x3D,0xC4,0x57,0x92,0x91,0x69,0x2E}};
 const IID IID_IMMDeviceEnumerator = {0xA95664D2,0x9614,0x4F35,{0xA7,0x46,0xDE,0x8D,0xB6,0x36,0x17,0xE6}};
 #else
@@ -366,7 +366,7 @@ float hrm_get_quality_score(const HardwareResourceManager* hrm) {
 }
 
 /* ============================================================================
- * ZSFX-003修复: 热插拔监控线程实现
+ *修复: 热插拔监控线程实现
  * 定期扫描硬件变化（基于hrm_scan_devices的硬件检测能力），
  * 检测设备增删并自动重新分配资源角色。
  * 

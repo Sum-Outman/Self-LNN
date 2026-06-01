@@ -2,7 +2,7 @@
  * @file multimodal_manager.h
  * @brief 多模态管理器接口（兼容适配层）
  *
- * ZSF-NEW-013修复: 5种额外模态(触觉/本体感/热感/雷达/电机)已从LNN输出后加权混合
+ *修复: 5种额外模态(触觉/本体感/热感/雷达/电机)已从LNN输出后加权混合
  * 改为LNN输入前投影注入，确保所有9种模态统一通过同一个CfC连续动态系统进行状态演化。
  * 新代码应使用 unified_lnn_state.h 作为首选多模态统一入口。
  * 严格遵循：所有模态→统一输入到同一个LNN连续动态系统。
@@ -54,7 +54,7 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
 void multimodal_manager_free(MultimodalManager* manager);
 
 /**
- * @brief 处理多模态输入（ZSF-NEW-013修复：全部9模态通过LNN前向传播）
+ * @brief 处理多模态输入（全部9模态通过LNN前向传播）
  *
  * 所有9种模态(视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机)
  * 在LNN前向传播之前统一投影注入lnn_input，经过同一个CfC ODE连续动态系统
@@ -194,7 +194,7 @@ int multimodal_manager_train_unified_signal_processor(MultimodalManager* manager
 int multimodal_manager_set_lnn(MultimodalManager* manager, LNN* lnn);
 
 /* ============================================================================
- * ZSF-007/ZSF-008: 音频/图像文件加载器桥接函数
+ * 音频/图像文件加载器桥接函数
  * 将 audio_loader.h 和 image_loader.h 的加载能力集成到多模态管理器。
  * 使这两个模块从"孤儿代码"成为系统的有效组成部分。
  * ============================================================================ */

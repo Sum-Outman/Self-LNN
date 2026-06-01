@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file evolutionary_algorithms.c
  * @brief 自我演化进化算法实现
  * 
@@ -27,7 +27,6 @@
 #include <math.h>
 #include <float.h>
 
-/* ZSF-ZNB修复L-003: 已使用math_utils中的rng_normal替代重复gaussian_random */
 
 /**
  * @brief 均匀随机数生成器（静态辅助函数）返回0-1之间的随机数
@@ -68,11 +67,11 @@ struct Population {
     float crossover_rate;           /**< 交叉率 */
     float elitism_rate;             /**< 精英保留率 */
     float selection_pressure;       /**< 选择压力 */
-    int tournament_size;            /**< ZSFZX-FIX-TOURNAMENT: 锦标赛大小(默认3) */
+    int tournament_size; /**< 锦标赛大小(默认3) */
     
     // 多样性度量
     float diversity_score;          /**< 多样性分数 */
-    float diversity_collapse_threshold; /**< ZSFZX-FIX-DIVERSITY: 多样性塌缩阈值 */
+    float diversity_collapse_threshold; /**< 多样性塌缩阈值 */
     float* centroid_genome;         /**< 种群中心基因组 */
     float* fitness_distribution;    /**< 适应度分布 */
     
@@ -622,10 +621,10 @@ Population* population_create(size_t population_size, size_t genome_size,
     pop->crossover_rate = 0.8f;
     pop->elitism_rate = 0.1f;
     pop->selection_pressure = 2.0f;
-    pop->tournament_size = 3;  /* ZSFZX-FIX-TOURNAMENT: 可配置锦标赛大小, 默认3 */
+    pop->tournament_size = 3; /* 可配置锦标赛大小, 默认3 */
     
     pop->diversity_score = 0.0f;
-    pop->diversity_collapse_threshold = 0.01f; /* ZSFZX-FIX-DIVERSITY: 低于此值触发恢复 */
+    pop->diversity_collapse_threshold = 0.01f; /* 低于此值触发恢复 */
     pop->centroid_genome = (float*)safe_calloc(genome_size, sizeof(float));
     pop->fitness_distribution = (float*)safe_calloc(population_size, sizeof(float));
     
@@ -868,7 +867,7 @@ int population_compute_diversity(Population* pop) {
     
     pop->diversity_score = total_distance / pop->population_size;
 
-    /* ZSFZX-FIX-DIVERSITY: 种群多样性塌缩保护
+/* 种群多样性塌缩保护
      * 检测多样性过低并自动注入随机个体来维持探索能力 */
     if (pop->diversity_collapse_threshold > 0.0f &&
         pop->diversity_score < pop->diversity_collapse_threshold &&
@@ -916,7 +915,7 @@ Individual* population_tournament_selection(Population* pop, int tournament_size
     
     // 随机选择tournament_size个个体，选择适应度最高的
     for (int i = 0; i < tournament_size; i++) {
-        /* ZSFZX-FIX-BOUNDARY: 浮点截断边界保护, 确保idx < population_size */
+/* 浮点截断边界保护, 确保idx < population_size */
         float ur = uniform_random();
         if (ur >= 1.0f) ur = 0.999999f; /* uniform_random应返回[0,1)但极罕见边界保护 */
         size_t idx = (size_t)(ur * (float)pop->population_size);

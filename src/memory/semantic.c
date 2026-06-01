@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file semantic.c
  * @brief 语义记忆系统实现
  * 
@@ -298,7 +298,7 @@ int semantic_memory_generalize(SemanticMemory* memory, const char* concept_id,
     float* eigen_vals = (float*)safe_calloc(matrix_dim, sizeof(float));
     
     if (cov_matrix && eigen_vecs && eigen_vals) {
-        /* ZSFWS修复-M-002: 正确构建协方差矩阵
+/*修复-M-002: 正确构建协方差矩阵
          * 将数据重塑为 (num_chunks × matrix_dim) 矩阵，
          * C[i][j] = Σ_chunk data[chunk*dim+i] * data[chunk*dim+j] / num_chunks */
         size_t num_chunks = data_size / matrix_dim;
@@ -317,7 +317,7 @@ int semantic_memory_generalize(SemanticMemory* memory, const char* concept_id,
             }
         }
         
-        /* ZSFWS-L018修复: 幂迭代初始向量添加随机扰动
+/* 幂迭代初始向量添加随机扰动
          * 原实现使用均匀向量1/sqrt(dim)作为初始猜测，可能导致收敛到非主特征向量。
          * 添加±1%随机扰动打破对称性，同时保持与协方差矩阵主方向的对齐。 */
         uint32_t perturb_seed = (uint32_t)((uintptr_t)cov_matrix * 2654435761U);
@@ -549,7 +549,6 @@ int semantic_memory_get_stats(const SemanticMemory* memory, size_t* total_concep
     }
     
     if (total_concepts) {
-        /* ZSF-039修复: 仅统计概念条目(不含关系条目)，而非直接使用total_items */
         size_t concept_count = 0;
         for (size_t i = 0; i < total_items; i++) {
             char key_buf[256];

@@ -1,8 +1,8 @@
-/**
+﻿/**
  * @file config_loader.h
  * @brief 系统配置文件加载与保存接口 (纯C, 零依赖)
  * 
- * ZSFGGG-B-003修复: 为config_loader.c提供公开API头文件声明
+ *修复: 为config_loader.c提供公开API头文件声明
  */
 #ifndef SELFLNN_CONFIG_LOADER_H
 #define SELFLNN_CONFIG_LOADER_H

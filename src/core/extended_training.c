@@ -9,8 +9,8 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
-#include "selflnn/training/distributed_training.h"  /* ZSFNO2-F002 + ZSFZX-FIX-P1-001: DistributedContext定义已内移至本头文件 */
-#include "selflnn/selflnn.h"                        /* ZSFNO2-F002: selflnn_get_distributed_context */
+#include "selflnn/training/distributed_training.h"
+#include "selflnn/selflnn.h" /* selflnn_get_distributed_context */
 
 #include <stdlib.h>
 #include <string.h>
@@ -86,7 +86,6 @@ static int _lnn_save_activation_checkpoint_internal(LNN* network, size_t layer_i
                                                      const float* activation_data,
                                                      size_t activation_size)
 {
-    /* ZSFWS修复-M-011: 存储layer_index用于恢复时正确匹配 */
     if (!network || !activation_data || activation_size == 0) {
         return SELFLNN_ERROR_INVALID_ARGUMENT;
     }
@@ -100,7 +99,7 @@ static int _lnn_save_activation_checkpoint_internal(LNN* network, size_t layer_i
         }
         float** new_ckpts = (float**)safe_malloc(new_cap * sizeof(float*));
         size_t* new_sizes = (size_t*)safe_malloc(new_cap * sizeof(size_t));
-        size_t* new_layers = (size_t*)safe_malloc(new_cap * sizeof(size_t)); /* ZSFWS-M-011 */
+        size_t* new_layers = (size_t*)safe_malloc(new_cap * sizeof(size_t));
         if (!new_ckpts || !new_sizes || !new_layers) {
             safe_free((void**)&new_ckpts);
             safe_free((void**)&new_sizes);
@@ -111,7 +110,7 @@ static int _lnn_save_activation_checkpoint_internal(LNN* network, size_t layer_i
                network->activation_checkpoint_capacity * sizeof(float*));
         memcpy(new_sizes, network->activation_checkpoint_sizes,
                network->activation_checkpoint_capacity * sizeof(size_t));
-        /* ZSFWS-M-011: 复制层索引数组 */
+/* 复制层索引数组 */
         if (network->activation_checkpoint_layers) {
             memcpy(new_layers, network->activation_checkpoint_layers,
                    network->activation_checkpoint_capacity * sizeof(size_t));
@@ -134,7 +133,7 @@ static int _lnn_save_activation_checkpoint_internal(LNN* network, size_t layer_i
     memcpy(network->activation_checkpoints[idx], activation_data,
            activation_size * sizeof(float));
     network->activation_checkpoint_sizes[idx] = activation_size;
-    network->activation_checkpoint_layers[idx] = layer_index; /* ZSFWS-M-011 */
+    network->activation_checkpoint_layers[idx] = layer_index;
     network->num_activation_checkpoints++;
     return SELFLNN_SUCCESS;
 }
@@ -581,7 +580,7 @@ SELFLNN_API int lnn_gradient_compress(const float* gradients, size_t num_gradien
     if (top_k < 1) top_k = 1;
     if (top_k > num_gradients) top_k = num_gradients;
     if (top_k > ctx->compressed_size) {
-        /* ZSFABC-P0-006修复: new_vals和new_idx应为float*和int32_t*而非float**和int32_t** */
+/* new_vals和new_idx应为float*和int32_t*而非float**和int32_t** */
         float* new_vals = (float*)safe_malloc(top_k * sizeof(float));
         int32_t* new_idx = (int32_t*)safe_malloc(top_k * sizeof(int32_t));
         if (!new_vals || !new_idx) {
@@ -849,7 +848,7 @@ static int _lnn_model_parallel_backward_internal(LNN* network, const float* targ
         return SELFLNN_ERROR_NETWORK_BACKWARD;
     }
 
-    /* ZSFNO2-F002修复：跨设备梯度同步（真实分布式AllReduce）
+/* 跨设备梯度同步（真实分布式AllReduce）
      * 优先使用distributed_training.c中的真实Ring/Tree AllReduce实现，
      * 仅在无分布式上下文时使用进程内模拟作为调试回退。 */
     if (comm_buffer && mp_config->num_devices > 1) {
@@ -929,7 +928,7 @@ SELFLNN_API int lnn_trillion_scale_train_step(LNN* network, const float* input,
         ET_LNN_UNLOCK(network);
         return ret;
     }
-    /* ZSF-ZNB修复H-003: 模型并行forward仅在非gradient_checkpointing时执行
+/*修复H-003: 模型并行forward仅在非gradient_checkpointing时执行
      * 避免常规forward和并行forward结果互相覆盖，浪费50%计算 */
     if (!network->enable_gradient_checkpointing && network->enable_model_parallel) {
         ModelParallelConfig mp_config;
@@ -1025,7 +1024,7 @@ SELFLNN_API size_t lnn_calculate_trillion_scale_params(const LNN* network)
         size_t layer_input = (l == 0) ? input_size : hidden_size;
         total += (layer_input * hidden_size) + hidden_size;
     }
-    return total; /* ZSF-ZNB修复M-004: 移除无理由的*2，内存估计在调用方处理 */
+    return total;
 }
 
 SELFLNN_API double lnn_estimate_trillion_scale_memory(const LNN* network,
@@ -1076,7 +1075,7 @@ SELFLNN_API int lnn_contrastive_loss(const float* anchor, const float* positive,
     }
     float pos_sim = pos_dot / temperature;
 
-    /* ZSFGGG-S2-007修复: max-subtract数值稳定化InfoNCE损失。
+/* max-subtract数值稳定化InfoNCE损失。
      * 收集所有相似度后减去最大值再exp，防止pos_sim过大导致exp(50)溢出为inf。
      * 标准InfoNCE: loss = -log(exp(s_pos)/sum_i exp(s_i)) = -s_pos + log(sum exp(s_i - max))
      * max-subtract不改变数学结果但保证数值稳定。 */
@@ -1151,7 +1150,6 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
 
     ET_LNN_LOCK(network);
 
-    /* ZSF-ZNB修复C-004: 创建临时优化器用于参数更新 */
     OptimizerConfig opt_cfg;
     memset(&opt_cfg, 0, sizeof(opt_cfg));
     opt_cfg.type = OPTIMIZER_ADAM;
@@ -1172,7 +1170,7 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
 
     int total_count = 0;
 
-    /* ZSFUSA-C18: 动态分配替代硬编码512维上限 */
+/* 动态分配替代硬编码512维上限 */
     float* anchor_emb = (float*)malloc(hidden_size * sizeof(float));
     float* pos_emb = (float*)malloc(hidden_size * sizeof(float));
     if (!anchor_emb || !pos_emb) {
@@ -1212,7 +1210,7 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
                 }
             }
 
-            /* ZSFUSA-C18: 动态分配替代硬编码512维上限，anchor_emb/pos_emb已在循环外分配 */
+/* 动态分配替代硬编码512维上限，anchor_emb/pos_emb已在循环外分配 */
             memset(anchor_emb, 0, hidden_size * sizeof(float));
             memset(pos_emb, 0, hidden_size * sizeof(float));
 
@@ -1248,7 +1246,6 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
                                 emb_dim, 0.1f, &loss_val);
             epoch_loss += loss_val;
 
-            /* ZSF-ZNB修复C-004: 添加反向传播更新网络参数 */
             float target_emb[512] = {0};
             for (size_t d = 0; d < emb_dim && d < 512; d++) {
                 target_emb[d] = anchor_emb[d] * 0.5f + pos_emb[d] * 0.5f;
@@ -1303,7 +1300,6 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
     ET_LNN_LOCK(teacher);
     if (!same_network) ET_LNN_LOCK(student);
 
-    /* ZSF-ZNB修复C-003: 创建临时优化器用于参数更新 */
     OptimizerConfig opt_cfg;
     memset(&opt_cfg, 0, sizeof(opt_cfg));
     opt_cfg.type = OPTIMIZER_ADAM;
@@ -1330,7 +1326,7 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
         for (size_t i = 0; i < num_samples && count < 50; i++, count++) {
             const float* sample = data + i * feature_dim;
 
-            /* ZSFUSA-C18: 动态分配替代硬编码256维上限 */
+/* 动态分配替代硬编码256维上限 */
             size_t out_dim = teacher->config.output_size;
             if (out_dim == 0) out_dim = 128;
             float* t_output = (float*)malloc(out_dim * sizeof(float));
@@ -1380,10 +1376,9 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
             float combined_loss = alpha * kl_div + (1.0f - alpha) * hard_loss;
             total_loss += combined_loss;
 
-            /* ZSF-ZNB修复C-003: 添加反向传播更新学生网络参数 */
             float loss_val = combined_loss;
             _lnn_backward_internal(student, t_output, &loss_val);
-            /* ZSFSSS-BUG002修复: 获取反向传播后的梯度，传入优化器以正确累积动量/Adam状态 */
+/* 获取反向传播后的梯度，传入优化器以正确累积动量/Adam状态 */
             float* grads = lnn_get_gradients(student);
             free(t_output);
             free(s_output);
@@ -1397,7 +1392,7 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
             if (current_params) {
                 memcpy(param_buffer, current_params, param_count * sizeof(float));
             }
-            /* ZSFSSS-BUG002修复: 传入真实梯度而非NULL，确保优化器动量/Adam状态正确累积 */
+/* 传入真实梯度而非NULL，确保优化器动量/Adam状态正确累积 */
             optimizer_step(opt, param_buffer, current_grads, param_count, 
                           (size_t)(ep + total_count));
             /* 将更新后的参数写回LNN */

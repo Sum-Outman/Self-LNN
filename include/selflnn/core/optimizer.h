@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file optimizer.h
  * @brief 优化器接口头文件
  * 
@@ -51,7 +51,7 @@ typedef struct {
 } OptimizerConfig;
 
 /**
- * @brief 多参数组结构体（ZSFWS-023修复：支持多组参数独立更新）
+ * @brief 多参数组结构体（支持多组参数独立更新）
  * 
  * 优化器通过此结构一次性更新多个参数组（如输入权重、门控权重、
  * 隐藏权重、时间常数、偏置等），每组可独立提供自己的参数和梯度指针。
@@ -98,7 +98,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                    size_t num_params, size_t step);
 
 /**
- * @brief 多参数组更新（ZSFWS-023修复：一次更新多组独立参数）
+ * @brief 多参数组更新（一次更新多组独立参数）
  * 
  * 该函数在一次调用中更新多个参数组，每组独立指定参数指针、梯度指针和大小。
  * 适用于CfC/LNN等具有多组参数（输入权重、门控权重、隐藏权重、时间常数、偏置等）

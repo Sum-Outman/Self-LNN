@@ -1,4 +1,4 @@
-/* ZSFUSA: 系统互斥锁实现 — ZSFLNN-H-016修复: 补齐 trylock/init/destroy */
+﻿/* 系统互斥锁实现 — 补齐 trylock/init/destroy */
 #include "selflnn/core/common.h"
 #include <stdlib.h>
 #ifdef _WIN32

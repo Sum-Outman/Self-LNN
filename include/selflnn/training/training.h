@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file training.h
  * @brief 训练模块 — 【基础功能实现】
  *
@@ -101,13 +101,13 @@ typedef struct {
     size_t validation_split;          /**< 验证集分割比例（百分比） */
     
     float target_accuracy;            /**< 目标准确率 */
-    float convergence_threshold;      /**< ZSFWS-003: 绝对收敛阈值（损失低于此值立即停止） */
-    float min_delta;                  /**< ZSFZS-F009: 早停最小改善阈值（改善幅度小于此值视为无改善） */
-    size_t convergence_rate_window;   /**< ZSFWS-004: 收敛速率计算窗口（epoch数） */
+    float convergence_threshold; /**< 绝对收敛阈值（损失低于此值立即停止） */
+    float min_delta; /**< 早停最小改善阈值（改善幅度小于此值视为无改善） */
+    size_t convergence_rate_window; /**< 收敛速率计算窗口（epoch数） */
     int enable_validation;            /**< 是否启用验证 */
-    int enable_mini_validation;       /**< ZSFWS-007: 是否启用阶段内微验证 */
-    size_t mini_validation_interval;  /**< ZSFWS-007: 微验证间隔（每N个batch验证一次，0=禁用） */
-    size_t mini_validation_samples;   /**< ZSFWS-007: 微验证采样数（从验证集中随机抽取） */
+    int enable_mini_validation; /**< 是否启用阶段内微验证 */
+    size_t mini_validation_interval; /**< 微验证间隔（每N个batch验证一次，0=禁用） */
+    size_t mini_validation_samples; /**< 微验证采样数（从验证集中随机抽取） */
     
     int shuffle_data;                 /**< 是否打乱数据 */
     int verbose;                      /**< 是否显示训练信息 */
@@ -187,12 +187,12 @@ typedef struct {
     int curriculum_warmup;                  /**< 课程学习预热轮数（默认3） */
     size_t num_samples;                     /**< 训练样本总数（课程学习需要） */
 
-    /* ZSFZS-F013: 学习率预热步数配置（集成到主训练循环） */
+/* 学习率预热步数配置（集成到主训练循环） */
     size_t warmup_steps;                   /**< 学习率预热步数（0=禁用，>0时在训练初期线性增加学习率） */
     float warmup_init_lr;                  /**< 预热起始学习率（通常为目标学习率的1/10~1/100） */
     int warmup_cosine_after;               /**< 预热完成后是否启用余弦退火（0=否, 1=是） */
 
-    /* ZSFZS-F025: 训练指标JSON日志导出间隔（epoch数，0=禁用，默认10） */
+/* 训练指标JSON日志导出间隔（epoch数，0=禁用，默认10） */
     size_t metrics_export_interval;        /**< JSON指标导出间隔（每N个epoch导出一次，0=禁用） */
 } TrainingConfig;
 
@@ -216,8 +216,8 @@ typedef struct {
     float gradient_norm;              /**< 梯度范数 */
     float weight_norm;                /**< 权重范数 */
     
-    float convergence_rate;           /**< ZSFWS-004: 收敛速率（最近N轮的损失平均下降率） */
-    float prev_val_loss;              /**< ZSFWS-004: 上一轮验证损失（用于计算收敛速率） */
+    float convergence_rate; /**< 收敛速率（最近N轮的损失平均下降率） */
+    float prev_val_loss; /**< 上一轮验证损失（用于计算收敛速率） */
     
     uint64_t training_time_ms;        /**< 训练时间（毫秒） */
     uint64_t start_time;              /**< 开始时间 */
@@ -644,7 +644,7 @@ void gradient_check_result_free(GradientCheckResult* result);
 /* ========================================================================
  * P2-001: 梯度流健康度监控（GradientFlowReport）
  * 监控各层梯度范数、检测梯度消失/爆炸、辅助训练诊断
- * 注意：GradientFlowReport ≠ GradientHealthReport（本文档尾部ZSFWS-P0-002定义）
+ * 注意：GradientFlowReport ≠ GradientHealthReport（本文档尾部定义）
  * ======================================================================== */
 
 /**
@@ -692,7 +692,7 @@ int early_stopping_check(float current_loss, float best_loss,
                          size_t patience, size_t* steps_without_improvement);
 
 /**
- * @brief 早停检查（增强版，ZSFZS-F010修复：增加min_delta参数）
+ * @brief 早停检查（增强版，增加min_delta参数）
  * @param current_loss 当前验证损失
  * @param best_loss 最佳历史验证损失
  * @param patience 早停耐心值
@@ -1402,18 +1402,18 @@ MemoryManager* trainer_get_memory_manager(Trainer* trainer);
  *
  * 直接从记忆系统中采样经验数据对LNN进行训练，形成
  * "经验积累→记忆存储→采样回放→LNN训练"的完整AGI学习闭环。
- * 每个批次从指定类型的记忆中随机采样，使用memory_sample_training_batch()
+ * 每个批次从指定类型的记忆中随机采样，使用memory_sample_training_batch
  * 获取输入/目标对（记忆项存储格式：[input_vector | target_vector]），
  * 然后执行完整的前向传播→损失计算→反向传播→参数更新循环。
  * 训练完成时会自动触发记忆巩固，将新学到的知识整合回记忆系统。
  * 
- * 此函数与trainer_train()的区别：
- * - trainer_train()：使用外部提供的输入/目标数组进行训练
- * - trainer_train_from_memory()：直接从内部记忆系统采样进行训练，
+ * 此函数与trainer_train的区别：
+ * - trainer_train：使用外部提供的输入/目标数组进行训练
+ * - trainer_train_from_memory：直接从内部记忆系统采样进行训练，
  *   适合持续学习/经验回放场景，无需外部数据源
  *
  * @param trainer 训练器句柄
- * @param mem_system 记忆系统句柄（通过memory_manager_get_system()获取）
+ * @param mem_system 记忆系统句柄（通过memory_manager_get_system获取）
  * @param memory_type 采样使用的记忆类型（MEMORY_TYPE_SHORT_TERM等）
  * @param batch_size 每个批次的采样大小
  * @param data_dim 数据特征维度（需与记忆项存储维度匹配）
@@ -2049,7 +2049,7 @@ int trainer_set_training_phase(Trainer* trainer, int phase);
 int trainer_get_training_phase(Trainer* trainer);
 
 /* ================================================================
- * ZSFWS-P0-002: 梯度健康度监测系统
+ *: 梯度健康度监测系统
  * 在每个训练epoch后收集梯度统计信息，检测梯度消失/爆炸/NaN率，
  * 防止训练静默进入无效状态（所有梯度被跳过但无告警）。
  * ================================================================ */

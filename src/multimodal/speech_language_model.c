@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file speech_language_model.c
  * @brief K-033: 纯C N-gram语言模型训练器
  *
@@ -144,7 +144,7 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
     if (!lm) { fclose(fp); return -1; }
 
     char line[LM_MAX_LINE];
-    /* ZSFWS-S2-001修复: words[1024][64]原本是64KB的栈分配，存在栈溢出风险。
+/* words[1024][64]原本是64KB的栈分配，存在栈溢出风险。
      * 改为动态分配（堆上），并添加分配失败检查。
      * 同时添加UTF-8安全截断保护：多字节字符不会被从中间截断。 */
     char (*words)[64] = (char(*)[64])safe_calloc(1024, 64);
@@ -166,7 +166,7 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
             if (!*p) break;
             char* w = words[wc];
             int len = 0;
-            /* ZSFWS修复: 增加UTF-8多字节字符截断保护。
+/* 增加UTF-8多字节字符截断保护。
              * 中文字符3字节，确保不会在中间字节处截断。 */
             while (*p && (isalnum((unsigned char)*p) || (*p & 0x80)) && len < 63) {
                 /* 检测UTF-8后续字节 (10xxxxxx)，确保完整字符边界 */
@@ -218,7 +218,7 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
     }
 
     fclose(out);
-    /* ZSFA-FIX-F007: safe_free(words)移至words最后一次访问之后，避免use-after-free/double-free */
+/* safe_free(words)移至words最后一次访问之后，避免use-after-free/double-free */
     safe_free((void**)&words);
     lm_free(lm);
 
@@ -273,7 +273,7 @@ int speech_language_model_build_from_text(const char* text, size_t text_len,
             char ngram_buf[512] = "";
             size_t buf_used = 0;
             for (int j = 0; j <= order; j++) {
-                /* ZSFWS-NEW04: 缓冲区溢出防护——order受n限制但n可>50 */
+/* 缓冲区溢出防护——order受n限制但n可>50 */
                 if (buf_used >= sizeof(ngram_buf) - 16) break;
                 if (j > 0 && buf_used + 1 < sizeof(ngram_buf)) {
                     ngram_buf[buf_used++] = ' ';
@@ -496,7 +496,7 @@ void speech_language_model_free(void* model) {
 }
 
 /**
- * @brief ZSFA-FIX-P0-003: 语言模型后处理纠错
+ * @brief 语言模型后处理纠错
  *
  * 使用N-gram语言模型对语音识别结果进行纠错。
  * 基于困惑度评分和上下文替换策略修正识别错误。

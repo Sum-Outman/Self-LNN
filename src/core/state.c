@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file state.c
  * @brief 网络状态管理实现
  * 
@@ -322,7 +322,7 @@ int network_state_set_config(NetworkState* state, const NetworkStateConfig* conf
  * 状态快照与回滚机制
  * ============================================================================ */
 
-/* ZSFUSA-C16: 全局快照数组。
+/* 全局快照数组。
  * 
  * 架构说明：
  *   快照存储采用全局数组设计，MAX_SNAPSHOTS_PER_INSTANCE=8 每个LNN实例最多保存8个快照。
@@ -354,7 +354,7 @@ typedef struct {
     char task_id[64];
 } StateSnapshot;
 
-/* ZSFUSA-C16: g_snapshots 是全局共享数组，所有LNN实例共用。
+/* g_snapshots 是全局共享数组，所有LNN实例共用。
  * 已通过 g_snapshot_mutex 保护所有读写操作。
  * g_snapshot_count 记录当前已使用的快照总数（跨所有实例）。 */
 static StateSnapshot g_snapshots[MAX_SNAPSHOTS];
@@ -366,7 +366,7 @@ int network_state_snapshot_save(NetworkState* state, const char* label, int inst
     if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
     mutex_lock(g_snapshot_mutex);
 
-    /* ZSFUSA-C16: 使用instance_id偏移隔离不同LNN实例的快照 */
+/* 使用instance_id偏移隔离不同LNN实例的快照 */
     int idx = g_snapshot_count;
     int slot = idx + (instance_id > 0 ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0);
 
@@ -434,7 +434,7 @@ int network_state_snapshot_restore(NetworkState* state, int snapshot_idx, int in
     if (!state || !state->current_state) return -1;
     if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
     mutex_lock(g_snapshot_mutex);
-    /* ZSFUSA-C16: 使用instance_id偏移隔离不同LNN实例的快照 */
+/* 使用instance_id偏移隔离不同LNN实例的快照 */
     int slot = snapshot_idx + (instance_id > 0 ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0);
     if (slot < 0 || slot >= g_snapshot_count) {
         mutex_unlock(g_snapshot_mutex);

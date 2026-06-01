@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file exploration_strategies.h
  * @brief 深度探索策略系统接口
  *
@@ -476,7 +476,7 @@ int explore_save(const ExploreState* state, ExploreStrategyType strategy_type,
 ExploreState* explore_load(ExploreStrategyType strategy_type, const char* filepath);
 
 /* ============================================================================
- * ZSFA-FIX-P0-007: UCB/Thompson/Boltzmann 动作选择接口
+ *: UCB/Thompson/Boltzmann 动作选择接口
  * ============================================================================ */
 
 /* --- UCB (Upper Confidence Bound) --- */

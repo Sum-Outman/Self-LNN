@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file laplace_unified.h
  * @brief 拉普拉斯变换统一入口 —— 聚合三个拉普拉斯子模块
  *
@@ -7,7 +7,7 @@
  * - laplace_fft.h — FFT频域卷积、传递函数分析、功率谱密度
  * - laplace_features.h — 拉普拉斯金字塔、图拉普拉斯、频谱特征映射
  *
- * ZSFZS-F030: laplace_integration.h已删除(纯转发空头文件,无自有内容)
+ *: laplace_integration.h已删除(纯转发空头文件,无自有内容)
  * 其功能(CfC稳定性/分数阶记忆/RLS/PID/门控)已由laplace.h和laplace_unified.h覆盖。 */
 
 #ifndef SELFLNN_LAPLACE_UNIFIED_H
@@ -15,10 +15,10 @@
 
 #include "selflnn/core/common.h"
 #include "selflnn/core/laplace.h"
-/* ZSFZS-F030: laplace_integration.h已删除(纯转发空头文件) */
+/* laplace_integration.h已删除(纯转发空头文件) */
 /* #include "selflnn/core/laplace_ai_framework.h" */ /* 已由上述模块完全覆盖 */
 /* #include "selflnn/core/laplace_enhanced.h" */     /* 已由上述模块完全覆盖 */
-/* #include "selflnn/core/laplace_integration.h" */  /* ZSFZS-F030: 已删除 */
+/* #include "selflnn/core/laplace_integration.h" */ /* 已删除 */
 
 /* M-001修复: LaplaceAIConfig完整结构体定义，与LaplaceConfig字段完全一致。
  * 消除不安全的强制类型转换 (const LaplaceConfig*)cfg。
@@ -64,10 +64,10 @@ void laplace_unified_system_shutdown(void);
 /* 获取拉普拉斯系统健康状态 */
 int laplace_unified_health_check(char* report, size_t report_size);
 
-/* ZSFUSA: 创建默认拉普拉斯分析器 */
+/* 创建默认拉普拉斯分析器 */
 void* lnn_laplace_create_default_analyzer(void);
 
-/* ZSFUSA: 获取拉普拉斯频谱 */
+/* 获取拉普拉斯频谱 */
 int laplace_unified_get_spectrum(void* analyzer, float* spectrum, size_t size);
 
 /* H-001修复: 统一分析入口 —— 分析LNN并缓存真实传递函数

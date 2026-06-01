@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file graph_reasoning.c
  * @brief 知识图谱推理引擎完整实现（A03.1.3）
  *
@@ -14,7 +14,7 @@
 #include "selflnn/knowledge/graph_storage.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
-#include "selflnn/utils/secure_random.h"   /* ZSFWS-L-012: 统一安全随机数 */
+#include "selflnn/utils/secure_random.h" /* 统一安全随机数 */
 /* CfC知识库集成——通过cfc_knowledge_embedding引擎进行语义嵌入与推理 */
 /* #include "selflnn/core/cfc_cell.h" —— 所有连续演化由主LNN统一管理 */
 #include <stdlib.h>
@@ -31,7 +31,7 @@
 #define GR_MAX_NEG_SAMPLES  100
 #define GR_ENERGY_NORMALIZE 10.0f
 
-/* ZSFWS-L-012: 已改用secure_random，移除旧LCG锁机制 */
+/* 已改用secure_random，移除旧LCG锁机制 */
 
 static float gr_rand_float(void) {
     return secure_random_float();
@@ -336,7 +336,7 @@ static int gr_load_from_property_graph(GraphReasoner* reasoner) {
         }
     }
 
-    /* ZSFWS-M013: 属性图的边数据通过RDF存储路径加载（gr_load_from_rdf_store）
+/* 属性图的边数据通过RDF存储路径加载（gr_load_from_rdf_store）
      * property_graph当前无公开边迭代API，边的关系注册由上层调用
      * graph_reasoner_train_from_triples提供，确保链路预测和规则挖掘正常工作 */
 
@@ -362,7 +362,7 @@ static int gr_load_from_adjacency_list(GraphReasoner* reasoner) {
             reasoner->entity_count++;
         }
 
-        /* ZSFWS-M013修复: 从邻接表出边加载关系
+/* 从邻接表出边加载关系
          * M-003修复: adjacency_list_get_out_neighbors需要int*缓冲区，
          * 不能将int**强转为int*传入。使用栈分配缓冲区替代。 */
         int out_neighbors_buf[64];

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file cfc_knowledge_embedding.c
  * @brief CfC知识图谱嵌入引擎完整实现
  *
@@ -11,7 +11,7 @@
 #include "selflnn/knowledge/cfc_knowledge_embedding.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/cfc_network.h"
-#include "selflnn/core/optimizer.h"           /* ZSFEEE-FIX-035: 统一优化器替代独立Adam */
+#include "selflnn/core/optimizer.h" /* 统一优化器替代独立Adam */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/secure_random.h"  /* P2-049: 安全随机数替代LCG */
@@ -503,7 +503,7 @@ int cfc_embed_train(CfCEmbedState* state, int epochs) {
                     float hinge = margin + pos_score - neg_score;
                     if (hinge > 0) batch_loss += hinge;
 
-                    /* ZSFEEE-FIX-035: 使用统一优化器optimizer_adamw_step替代独立Adam实现。
+/* 使用统一优化器optimizer_adamw_step替代独立Adam实现。
                      * 先计算各参数梯度，再通过optimizer_adamw_step集中进行AdamW更新。 */
                     float beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
                     float* h_emb = &state->entity_embeddings[h * dim];

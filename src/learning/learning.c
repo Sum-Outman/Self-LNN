@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file learning.c
  * @brief 学习与演化模块实现
  * 
@@ -336,7 +336,7 @@ LearningEngine* learning_engine_create(const LearningConfig* config) {
     engine->has_real_knowledge = 0;
 
     /* P0-010: 初始化时所有数据源标记为空白状态
-     * ZSFAI-C09修复: 尝试自动关联全局共享LNN
+ *修复: 尝试自动关联全局共享LNN
      * 避免因遗漏调用set_network导致学习引擎静默失败 */
     {
         extern void* g_global_lnn;

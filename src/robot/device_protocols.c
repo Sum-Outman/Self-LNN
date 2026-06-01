@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file device_protocols.c
  * @brief 设备协议扩展完整实现（Modbus/CAN/OPC-UA/EtherCAT/MQTT）
  * 
@@ -8,7 +8,7 @@
 #include "selflnn/robot/device_protocols.h"
 #include "selflnn/core/port_config.h"
 #include "selflnn/utils/memory_utils.h"
-#include "selflnn/utils/logging.h"        /* ZSFUSA: log_warn宏 */
+#include "selflnn/utils/logging.h" /* log_warn宏 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

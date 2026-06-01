@@ -1,4 +1,4 @@
-#include "selflnn/concurrency/rcu.h"
+﻿#include "selflnn/concurrency/rcu.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -54,7 +54,7 @@ typedef int atomic_int32;
  *   cpu_pause_hint()自旋（几十纳秒/次），理论上微秒级别完成。
  */
 
-/* ZSFX-DEEP-R3-002: TLS存储当前线程RCU线程ID
+/* TLS存储当前线程RCU线程ID
  * 解决rcu_read_lock(操作active_readers)与rcu_wait_for_quiescent_state
  * (检查thread_in_read_section)互不通信的致命缺陷。 */
 #ifdef _MSC_VER
@@ -110,7 +110,7 @@ struct RcuThread {
 
 static int rcu_allocate_thread_id(RcuDomain* domain) {
     if (!domain) return -1;
-    /* ZSFWS-S015修复: 使用CAS原子操作保护槽位分配，防止多线程并发获取同一thread_id。
+/* 使用CAS原子操作保护槽位分配，防止多线程并发获取同一thread_id。
      * thread_active为volatile int，不使用atomic_cas(该宏用InterlockedCompareExchangePointer处理指针)。
      * 改用InterlockedCompareExchange(Windows)/__sync_bool_compare_and_swap(Linux)处理整型CAS。 */
     for (int i = 0; i < MAX_RCU_THREADS; i++) {
@@ -220,7 +220,7 @@ static void rcu_process_epoch_callbacks(RcuDomain* domain, int slot) {
 #endif
 }
 
-/* ZSFWS-L012: 原rcu_wait_for_quiescent_state保留作为epoch超时后的回退方案。
+/* 原rcu_wait_for_quiescent_state保留作为epoch超时后的回退方案。
  * 正常情况下使用epoch-based rcu_wait_for_epoch（微秒级延迟）。 */
 static int rcu_wait_for_quiescent_state(RcuDomain* domain) {
     if (!domain) return -1;
@@ -234,7 +234,7 @@ static int rcu_wait_for_quiescent_state(RcuDomain* domain) {
                 break;
             }
         }
-        if (all_quiescent && domain->active_readers == 0) return 0;  /* ZSFX-DEEP-R3-002: 双重检查 */
+        if (all_quiescent && domain->active_readers == 0) return 0; /* 双重检查 */
         sleep_ms(1);
         retry++;
     }
@@ -345,7 +345,7 @@ RcuThread* rcu_thread_register(RcuDomain* domain) {
         return NULL;
     }
     thread->is_registered = 1;
-    /* ZSFX-DEEP-R3-002: 保存线程ID到TLS，使rcu_read_lock能访问 */
+/* 保存线程ID到TLS，使rcu_read_lock能访问 */
     g_tls_rcu_thread_id = thread->thread_id;
     atomic_thread_fence();
     return thread;
@@ -364,7 +364,7 @@ void rcu_read_lock(RcuDomain* domain) {
     if (!domain || !domain->is_initialized) return;
     atomic_thread_fence();
     /* L-010: Epoch-based RCU——进入读侧时记录当前全局epoch
-     * ZSFX-DEEP-R3-002: 同时维护active_readers和thread_in_read_section
+ *: 同时维护active_readers和thread_in_read_section
      * 确保写者能检测到该线程在读侧临界区中 */
     if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
         domain->thread_in_read_section[g_tls_rcu_thread_id] = 1;

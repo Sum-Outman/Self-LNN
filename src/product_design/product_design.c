@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file product_design.c
  * @brief 产品设计能力核心实现 —— 产品设计基础层
  * 
@@ -331,7 +331,7 @@ static char** extract_keywords(const char* text, size_t* count) {
     size_t keyword_capacity = 0;
     size_t keyword_size = 0;
     
-    /* ZSFZS-F037: strtok→strtok_s线程安全 */
+/* strtok→strtok_s线程安全 */
     char* saveptr = NULL;
     char* token = strtok_s(text_copy, " ,.!?;:\t\n\r", &saveptr);
     while (token) {
@@ -809,7 +809,6 @@ ProductDesignEngine* product_design_engine_create(void) {
         return NULL;
     }
     
-    /* ZSF-002: 初始化参考案例库 */
     engine->reference_case_capacity = 64;
     engine->reference_case_count = 0;
     engine->reference_cases = (ProductReferenceCase*)safe_calloc(
@@ -837,7 +836,6 @@ void product_design_engine_destroy(ProductDesignEngine* engine) {
     rule_engine_destroy(engine->rule_engine);
     evaluation_model_destroy(engine->evaluation_model);
     
-    /* ZSF-002: 释放参考案例库 */
     if (engine->reference_cases) {
         safe_free((void**)&engine->reference_cases);
     }
@@ -1938,10 +1936,10 @@ const double* topology_optimization_get_densities(TopologyOptimizationState* sta
     return state->densities;
 }
 
-/* ZSFWS-S011修复: 删除3个未声明且与公开API重复的孤立函数 */
+/* 删除3个未声明且与公开API重复的孤立函数 */
 
 /* ============================================================================
- * ZSF-002: 参考设计案例注入API
+ *: 参考设计案例注入API
  * 为产品设计增强引擎提供跨领域工业设计先验案例的注入接口。
  * 在引擎初始化后通过此API将种子案例批量注入引擎内部案例库，
  * 供设计优化、类比推理和设计空间探索时作为参考基线。
@@ -1950,7 +1948,7 @@ const double* topology_optimization_get_densities(TopologyOptimizationState* sta
 /**
  * @brief 向产品设计引擎注入参考设计案例
  *
- * ZSF-002修复: 实际将种子案例写入引擎内部的参考案例库，
+ *修复: 实际将种子案例写入引擎内部的参考案例库，
  * 替代原来仅打印日志的空实现。每个案例包含名称、类别、特征标签和约束摘要，
  * 后续设计优化时可作为类比推理的参考基线。
  *

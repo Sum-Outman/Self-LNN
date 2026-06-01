@@ -1,4 +1,4 @@
-#include "selflnn/core/cfc_enhanced.h"
+﻿#include "selflnn/core/cfc_enhanced.h"
 #include "selflnn/core/ode_solvers.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/math_utils.h"
@@ -14,7 +14,7 @@ static int g_runtime_config_set = 0;
 
 #define CFC_ENHANCED_VERBOSE(fmt, ...) do { if (config && config->verbose) { printf("[CfC增强] " fmt "\n", ##__VA_ARGS__); } } while(0)
 
-/* ZSFLNN-H-003修复: 使用标准库 fmaxf/fminf 替代本地重复定义 */
+/* 使用标准库 fmaxf/fminf 替代本地重复定义 */
 
 CfcEnhancedConfig cfc_enhanced_default_config(void)
 {
@@ -179,7 +179,7 @@ static void cfc_simd_sigmoid_batch(const float* x, float* y, size_t n) {
         __m128 result = _mm_div_ps(one, _mm_add_ps(one, exp_val));
         _mm_storeu_ps(y + i, result);
     }
-    /* ZSFZS-F029修复: 标量回退路径添加±10截断保护 */
+/* 标量回退路径添加±10截断保护 */
     for (; i < n; i++) {
         float clamped = x[i];
         if (clamped > 10.0f) clamped = 10.0f;
@@ -523,7 +523,7 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
         if (forward_original) safe_free((void**)&forward_original);
         if (forward_perturbed) safe_free((void**)&forward_perturbed);
 
-        /* ZSFBUILD: ode_workspace成员在CfCCell中不存在，cell内部分配的资源由cell_free管理 */
+/* ode_workspace成员在CfCCell中不存在，cell内部分配的资源由cell_free管理 */
     }
 
     if (stiffness_ratio > 1e6f) stiffness_ratio = 1e6f;

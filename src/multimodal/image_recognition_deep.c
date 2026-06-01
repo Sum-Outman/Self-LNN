@@ -1,4 +1,4 @@
-#include "selflnn/multimodal/image_recognition_deep.h"
+﻿#include "selflnn/multimodal/image_recognition_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/knowledge/knowledge.h"
@@ -100,7 +100,7 @@ static void _cfc_ode_step(const float* in, int in_dim,
                            const float* W_gh, const float* W_ah,
                            const float* b_g, const float* b_a,
                            float* h, int h_dim, float tau, float dt) {
-    /* ZSFQQ-P2-002修复: 动态分配替代硬编码栈数组256，防止hd>256时栈溢出 */
+/* 动态分配替代硬编码栈数组256，防止hd>256时栈溢出 */
     float* gate = (float*)safe_malloc((size_t)h_dim * sizeof(float) * 4);
     if (!gate) return;
     float* act  = gate + h_dim;
@@ -133,7 +133,7 @@ static void _cfc_ode_step_backward(const float* in, int in_dim,
                                     const float* h, const float* dL_dh_new,
                                     float* dL_dh, float* dL_din,
                                     int h_dim, float tau, float dt) {
-    /* ZSFQQ-P2-002修复: 动态分配替代硬编码栈数组256，防止hd>256时栈溢出 */
+/* 动态分配替代硬编码栈数组256，防止hd>256时栈溢出 */
     float* buf = (float*)safe_malloc((size_t)h_dim * sizeof(float) * 8);
     if (!buf) return;
     float* pre_gate = buf + h_dim * 0;

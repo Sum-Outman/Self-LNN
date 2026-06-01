@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file environment_sound.c
  * @brief K-034: 环境声音CfC液态分类器
  *
@@ -29,7 +29,7 @@
 #define ESC_HIDDEN_DIM 128
 #define ESC_CFC_TIMESTEPS 8
 
-/* ZSFZS-F020: 权重文件魔数 "ESSW" = 0x45535357 (Environment Sound System Weights) */
+/* 权重文件魔数 "ESSW" = 0x45535357 (Environment Sound System Weights) */
 #define ESC_WEIGHTS_MAGIC 0x45535357U
 #define ESC_WEIGHTS_VERSION 1U
 #define ESC_DEFAULT_WEIGHTS_PATH "env_sound_weights.bin"
@@ -49,7 +49,7 @@ typedef struct {
     float fc_b[ESC_MAX_CLASSES];
     int num_classes;
     int initialized;
-    int is_trained;    /* ZSFZS-F020: 标记是否已加载训练好的权重 */
+    int is_trained; /* 标记是否已加载训练好的权重 */
 } EnvironmentSoundClassifier;
 
 static EnvironmentSoundClassifier* g_esc = NULL;
@@ -97,10 +97,10 @@ void* environment_sound_classifier_create(int num_classes) {
     esc->num_classes = num_classes;
     esc->is_trained = 0;
 
-    /* ZSFZS-F020: 先构建梅尔滤波器组（滤波器不依赖训练数据） */
+/* 先构建梅尔滤波器组（滤波器不依赖训练数据） */
     esc_build_mel_filters(esc);
 
-    /* ZSFZS-F020: 优先尝试加载预训练权重，加载成功则跳过随机初始化 */
+/* 优先尝试加载预训练权重，加载成功则跳过随机初始化 */
     if (env_sound_load_weights(esc, ESC_DEFAULT_WEIGHTS_PATH) == 0) {
         esc->is_trained = 1;
     } else {
@@ -142,7 +142,7 @@ int environment_sound_classify(void* classifier,
     EnvironmentSoundClassifier* esc = (EnvironmentSoundClassifier*)classifier;
     if (!esc || !audio_samples || num_samples <= 0) return -1;
 
-    /* ZSFZS-F020: 未训练时返回低置信度结果，避免使用随机权重产生虚假预测 */
+/* 未训练时返回低置信度结果，避免使用随机权重产生虚假预测 */
     if (!esc->is_trained) {
         if (class_name && max_name_len > 0) {
             snprintf(class_name, max_name_len, "未训练");
@@ -255,7 +255,7 @@ int environment_sound_classify(void* classifier,
 }
 
 /* ======================================================================== */
-/* ZSFZS-F020: 环境声音权重保存与加载                                      */
+/* 环境声音权重保存与加载                                      */
 /* 权重文件格式：魔数0x45535357("ESSW") + 版本号(uint32_t) + 类别数(int)   */
 /* + mel_filters(ESC_FREQ_BINS*128) + cfc_w(ESC_HIDDEN_DIM*ESC_HIDDEN_DIM)  */
 /* + cfc_b(ESC_HIDDEN_DIM) + fc_w(ESC_MAX_CLASSES*ESC_HIDDEN_DIM)          */

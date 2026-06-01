@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file skill_library.c
  * @brief 技能库系统完整实现
  */
@@ -62,7 +62,7 @@ static void generate_embedding_impl(const SkillRecord* record, float* embedding,
     memset(embedding, 0, dim * sizeof(float));
     if (!record || dim <= 0) return;
 
-    /* ZSFX-DEEP-R5-001修复: 直接使用lnn_forward进行文本语义编码
+/* 直接使用lnn_forward进行文本语义编码
      * 替代缺失的selflnn_shared_lnn_encode_text函数。文本→bigram特征→LNN前向。 */
     {
         extern void* selflnn_get_shared_lnn(void);

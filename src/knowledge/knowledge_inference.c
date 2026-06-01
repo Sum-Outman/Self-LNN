@@ -14,7 +14,6 @@
 #include <math.h>
 #include <time.h>
 
-/* ZSFWS修复-H-007: TemporalReasoner全局静态互斥锁 */
 static MutexHandle g_temp_reasoner_mutex = NULL;
 
 struct KnowledgeInferenceEngine {
@@ -361,7 +360,7 @@ int ki_add_rule(KnowledgeInferenceEngine* kie, const KIRule* rule) {
  * 变量以 ? 或 $ 开头。
  * ============================================================================ */
 
-/* 去除字符串首尾空白 - ZSFWS修复-H-005: 原地修改字符串 */
+/* 去除字符串首尾空白 - -H-005: 原地修改字符串 */
 static void trim_whitespace(char* str) {
     if (!str || !*str) return;
     /* 定位首部第一个非空白字符 */
@@ -516,7 +515,7 @@ static int parse_rule_to_internal(const KIRule* rule, ParsedRule* parsed) {
     return 0;
 }
 
-/* ZSFLYF-P2-002修复: 已移除重复函数match_triple（死代码，从未被调用），
+/* 已移除重复函数match_triple（死代码，从未被调用），
  * 统一使用match_triple_pattern进行三元组模式匹配。 */
 
 /* ============================================================================
@@ -2081,7 +2080,7 @@ int ki_resolve_conflicts(KnowledgeInferenceEngine* kie, KIConflict* conflicts, i
 #define TEMPORAL_FINISHED_BY   12
 
 /* 艾伦区间代数传递闭包表: composition[r1][r2] → 可能的关系集合（-1终止）
- * ZSFWS修复-H-004: 补全后6行(After 到 FinishedBy) */
+ *修复-H-004: 补全后6行(After 到 FinishedBy) */
 static const int temporal_composition[13][13][8] = {
     /* 0:Before (r1早于r2) */
     {{0,-1},  {0,-1},  {0,-1},  {0,-1},  {0,4,-1},{0,4,-1},{0,-1},  {0,1,2,3,4,5,6,-1},{0,1,2,-1},{0,1,2,3,4,-1},{0,1,2,4,5,-1},{0,1,2,3,4,5,-1},{0,1,2,4,-1}},
@@ -2126,10 +2125,9 @@ typedef struct {
 
 static TemporalReasoner temp_reasoner = {{0}, 0, 0, {0}};
 
-/* ZSFWS修复-H-007: 获取/释放全局时序推理锁的辅助宏 */
 static void temporal_reasoner_lock(void) {
     if (!g_temp_reasoner_mutex) {
-        g_temp_reasoner_mutex = mutex_create();
+        g_temp_reasoner_mutex = mutex_create;
     }
     if (g_temp_reasoner_mutex) {
         mutex_lock(g_temp_reasoner_mutex);
@@ -2142,28 +2140,28 @@ static void temporal_reasoner_unlock(void) {
 }
 
 int temporal_add_constraint(int event_a, int event_b, int relation) {
-    temporal_reasoner_lock();
-    if (temp_reasoner.constraint_count >= 256) { temporal_reasoner_unlock(); return -1; }
+    temporal_reasoner_lock;
+    if (temp_reasoner.constraint_count >= 256) { temporal_reasoner_unlock; return -1; }
     TemporalConstraint* c = &temp_reasoner.constraints[temp_reasoner.constraint_count++];
     c->event_a = event_a; c->event_b = event_b; c->relation = relation;
     if (event_a >= temp_reasoner.event_count) temp_reasoner.event_count = event_a + 1;
     if (event_b >= temp_reasoner.event_count) temp_reasoner.event_count = event_b + 1;
-    temporal_reasoner_unlock();
+    temporal_reasoner_unlock;
     return 0;
 }
 
 int temporal_infer_relation(int event_a, int event_b, int inferred_relations[8]) {
-    temporal_reasoner_lock();
+    temporal_reasoner_lock;
     int n = temp_reasoner.event_count;
-    if (event_a >= n || event_b >= n) { temporal_reasoner_unlock(); return 0; }
-    if (event_a == event_b) { inferred_relations[0] = TEMPORAL_EQUALS; temporal_reasoner_unlock(); return 1; }
+    if (event_a >= n || event_b >= n) { temporal_reasoner_unlock; return 0; }
+    if (event_a == event_b) { inferred_relations[0] = TEMPORAL_EQUALS; temporal_reasoner_unlock; return 1; }
 
     /* S-028修复: 使用艾伦区间代数传递闭包表进行真实约束推理
      * 替代Floyd-Warshall布尔距离(所有边权重都为1)
      * 算法: 路径一致性传播+传递闭包表查询
      * 1. 构建初始关系矩阵rel[a][b]=已知关系集
      * 2. 迭代传播: rel[i][j] = rel[i][j] ∩ ∘(rel[i][k] ∪ rel[k][j])
-     * 3. 使用13x13传递闭包表temporal_composition[][][]进行关系组合 */
+     * 3. 使用13x13传递闭包表temporal_composition进行关系组合 */
     int rel[64][64];
     for (int i = 0; i < n; i++)
         for (int j = 0; j < n; j++)
@@ -2218,14 +2216,14 @@ int temporal_infer_relation(int event_a, int event_b, int inferred_relations[8])
             inferred_relations[count++] = r;
         }
     }
-    temporal_reasoner_unlock();
+    temporal_reasoner_unlock;
     return count;
 }
 
 int temporal_predict_next_event(float* features, int feature_dim, int* predicted_event, float* confidence) {
     if (!features || !predicted_event || !confidence) return -1;
-    temporal_reasoner_lock();
-    if (temp_reasoner.event_count == 0) { temporal_reasoner_unlock(); return -1; }
+    temporal_reasoner_lock;
+    if (temp_reasoner.event_count == 0) { temporal_reasoner_unlock; return -1; }
     /* BUG-011修复: 基于真实的时序特征和事件时间戳进行时序推理
      * 1. 使用事件时间戳计算间隔模式（周期性）
      * 2. 使用最近N个事件的特征趋势预测下一个事件
@@ -2278,7 +2276,7 @@ int temporal_predict_next_event(float* features, int feature_dim, int* predicted
     *predicted_event = (int)(weighted_pred + 0.5f);
     *confidence = weighted_conf * 0.5f + stability * 0.5f;
     *confidence = *confidence < 0.0f ? 0.0f : (*confidence > 1.0f ? 1.0f : *confidence);
-    temporal_reasoner_unlock();
+    temporal_reasoner_unlock;
     return 0;
 }
 

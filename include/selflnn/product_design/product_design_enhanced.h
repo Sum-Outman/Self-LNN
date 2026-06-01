@@ -1,4 +1,4 @@
-#ifndef SELFLNN_PRODUCT_DESIGN_ENHANCED_H
+﻿#ifndef SELFLNN_PRODUCT_DESIGN_ENHANCED_H
 #define SELFLNN_PRODUCT_DESIGN_ENHANCED_H
 
 /**
@@ -379,7 +379,7 @@ int pde_local_search(const ProductRequirement* requirement,
                       DesignEvaluation* final_evaluation);
 
 /* ============================================================================
- * ZSFWS-036: 工业设计种子案例库接口
+ *: 工业设计种子案例库接口
  * ============================================================================ */
 
 /**

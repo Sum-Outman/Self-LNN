@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file speech_language_model.h
  * @brief K-033: 纯C N-gram语言模型训练器接口
  */
@@ -22,7 +22,7 @@ int speech_language_model_vocab_size(void* model);
 void speech_language_model_free(void* model);
 
 /**
- * @brief ZSFA-FIX-P0-003: 语言模型后处理纠错
+ * @brief 语言模型后处理纠错
  * 使用N-gram语言模型对语音识别结果进行置信度评估和纠错处理。
  * @param model 语言模型实例
  * @param input_text 输入待纠错文本

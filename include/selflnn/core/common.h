@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN 核心通用定义
  * 
  * 包含所有核心模块共享的类型定义、常量、宏等。
@@ -437,7 +437,7 @@ SELFLNN_STATIC_ASSERT(CHAR_BIT == 8, "CHAR_BIT 必须为 8");
 #define SELFLNN_DEFAULT_GRAD_CLIP    5.0f    /* 默认梯度裁剪阈值 */
 #define SELFLNN_DEFAULT_LAYER_NORM_EPS 1e-5f /* 默认层归一化epsilon */
 
-/* ZSFUSA-P2-001修复: 系统互斥锁函数声明。
+/* 系统互斥锁函数声明。
  * system_mutex_lock/unlock由system_mutex.c实现，multi_agent.c调用。
  * 显式声明避免隐式函数调用导致的MSVC C4013警告和潜在的ABI问题。 */
 #ifdef __cplusplus

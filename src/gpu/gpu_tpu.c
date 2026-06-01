@@ -111,7 +111,7 @@ static void tpu_unload(void) {
 
 static int tpu_load_library(void) {
     if (g_tpu.loaded) return 1;
-    if (!tpu_detect_hardware()) {
+    if (!tpu_detect_hardware) {
         LOG_INFO("Google TPU硬件未检测到");
         return 0;
     }
@@ -134,7 +134,7 @@ static int tpu_load_library(void) {
 #undef LD_TP
     if (!g_tpu.tpuInitialize || !g_tpu.tpuGetDeviceCount) {
         LOG_WARN("libtpu缺少核心符号");
-        tpu_unload(); return 0;
+        tpu_unload; return 0;
     }
     g_tpu.loaded = 1;
     LOG_INFO("Google TPU库加载成功");
@@ -159,9 +159,9 @@ static int tpu_backend_init(void) {
     if (g_tpu_state.initialized) return 0;
     memset(&g_tpu_state, 0, sizeof(g_tpu_state));
 
-    if (tpu_load_library()) {
+    if (tpu_load_library) {
         if (g_tpu.tpuInitialize(0) == 0) {
-            int count = g_tpu.tpuGetDeviceCount();
+            int count = g_tpu.tpuGetDeviceCount;
             if (count > 0) {
                 g_tpu_state.device_count = count;
                 g_tpu_state.tpu_available = 1;
@@ -180,7 +180,7 @@ static int tpu_backend_init(void) {
                 return 0;
             }
         }
-        tpu_unload();
+        tpu_unload;
     }
     g_tpu_state.initialized = 1;
     LOG_ERROR("Google TPU硬件未检测到，TPU后端不可用");
@@ -193,8 +193,8 @@ static void tpu_backend_cleanup(void) {
         g_tpu.tpuDestroySession(g_tpu_state.tpu_session);
         g_tpu_state.tpu_session = NULL;
     }
-    if (g_tpu_state.tpu_available && g_tpu.tpuShutdown) g_tpu.tpuShutdown();
-    tpu_unload();
+    if (g_tpu_state.tpu_available && g_tpu.tpuShutdown) g_tpu.tpuShutdown;
+    tpu_unload;
     g_tpu_state.initialized = 0;
 }
 
@@ -227,7 +227,7 @@ static int tpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
 }
 
 static GpuContext* tpu_backend_context_create(int device_index) {
-    if (!g_tpu_state.initialized && tpu_backend_init() != 0) return NULL;
+    if (!g_tpu_state.initialized && tpu_backend_init != 0) return NULL;
     struct GpuContext* ctx = (struct GpuContext*)safe_calloc(1, sizeof(struct GpuContext));
     if (!ctx) return NULL;
     ctx->backend = GPU_BACKEND_TPU;
@@ -295,8 +295,8 @@ static int tpu_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMemory* s
 
 static GpuKernel* tpu_backend_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     if (!context) return NULL;
-    /* ZSFEEE-FIX-013: TPU硬件不可用时直接返回NULL，禁止创建无法使用的kernel对象。
-     * 原ZSFZS-F003允许创建CPU回退kernel违反了"禁止降级处理"原则。
+/* TPU硬件不可用时直接返回NULL，禁止创建无法使用的kernel对象。
+     * 原允许创建CPU回退kernel违反了"禁止降级处理"原则。
      * 调用方应通过gpu_query_backend检查TPU状态后再创建kernel。 */
     if (!g_tpu_state.tpu_available) {
         log_error("[TPU] TPU硬件不可用，拒绝创建Kernel: %s", kernel_name ? kernel_name : "unnamed");
@@ -408,7 +408,7 @@ static int tpu_backend_kernel_execute(GpuKernel* kernel, size_t gws, size_t lws)
         }
     }
     
-    /* ZSFDDD-P0-003修复: TPU不可用时直接返回错误，禁止内核执行层静默回退到CPU
+/* TPU不可用时直接返回错误，禁止内核执行层静默回退到CPU
      * 硬件自适应由上层gpu.c调度器统一管理，内核执行层必须严格反映硬件状态 */
     (void)kernel; (void)lws;
     size_t count = gws > 0 ? gws : 64;
@@ -455,21 +455,21 @@ static int tpu_backend_get_memory_info(GpuContext* context, size_t* total, size_
             return 0;
         }
     }
-    *total = tpu_get_system_memory_total();
-    *free = tpu_get_system_memory_free();
+    *total = tpu_get_system_memory_total;
+    *free = tpu_get_system_memory_free;
     return 0;
 }
 
 static int tpu_backend_device_reset(GpuContext* context) {
     if (!context) return -1;
     if (g_tpu_state.tpu_available) {
-        tpu_unload();
+        tpu_unload;
         memset(&g_tpu_state, 0, sizeof(g_tpu_state));
-        return tpu_backend_init();
+        return tpu_backend_init;
     }
     g_tpu_state.initialized = 0;
     memset(&g_tpu_state, 0, sizeof(g_tpu_state));
-    return tpu_backend_init();
+    return tpu_backend_init;
 }
 /* F-002: Google TPU嵌入XLA计算内核源码 */
 static const char* TPU_MATMUL_KERNEL =
@@ -506,9 +506,9 @@ static int tpu_backend_memory_copy_from_device_sync(void* dst, GpuMemory* src, s
 
 /* ==================== NPU接口 ==================== */
 
-static int tpu_npu_init(GpuContext* ctx) { (void)ctx; return tpu_backend_init(); }
-static void tpu_npu_cleanup(GpuContext* ctx) { (void)ctx; tpu_backend_cleanup(); }
-static int tpu_npu_get_device_count(GpuContext* ctx) { (void)ctx; return tpu_backend_get_device_count(); }
+static int tpu_npu_init(GpuContext* ctx) { (void)ctx; return tpu_backend_init; }
+static void tpu_npu_cleanup(GpuContext* ctx) { (void)ctx; tpu_backend_cleanup; }
+static int tpu_npu_get_device_count(GpuContext* ctx) { (void)ctx; return tpu_backend_get_device_count; }
 static const char* tpu_npu_get_backend_name(GpuContext* ctx) { (void)ctx; return "Google TPU"; }
 
 static NpuModel* tpu_npu_load_model(GpuContext* context, const char* model_path, const NpuInferenceConfig* config) {
@@ -785,7 +785,6 @@ const NpuBackendInterface* tpu_get_npu_interface(void) { return &g_tpu_npu_iface
  * 不依赖任何外部CPU SIMD后端函数，所有回退路径均为本地纯C实现
  * =================================================================== */
 
-/* ZSFWS修复 P0-003: 添加context验证+SIMD加速 */
 /* Z-R3修复: TPU后端计算函数。Google TPU需要libtpu运行时和XLA编译模型。
  * 当前诚实使用CPU SIMD计算；安装libtpu后可启用tpuExecute原生TPU推理路径。 */
 

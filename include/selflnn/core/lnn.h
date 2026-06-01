@@ -1,4 +1,4 @@
-#ifndef SELFLNN_LNN_H
+﻿#ifndef SELFLNN_LNN_H
 #define SELFLNN_LNN_H
 
 #include <stddef.h>
@@ -110,7 +110,7 @@ struct LNN {
     /* 中间激活值缓存（用于梯度检查点重计算） */
     float** activation_checkpoints;                   /**< 激活检查点数组 */
     size_t* activation_checkpoint_sizes;              /**< 各检查点大小 */
-    size_t* activation_checkpoint_layers;             /**< ZSFWS-M-011: 各检查点对应的层索引 */
+    size_t* activation_checkpoint_layers; /**< 各检查点对应的层索引 */
     size_t num_activation_checkpoints;                /**< 检查点数量 */
     size_t activation_checkpoint_capacity;            /**< 检查点容量 */
 
@@ -127,7 +127,7 @@ struct LNN {
 
     MutexHandle lock;                                 /**< 网络内部锁（线程安全） */
 
-    /* ZSFWS-P6修复: 四元数预处理状态缓冲区
+/* 四元数预处理状态缓冲区
      * 保存四元数处理前的hidden_state，供反向传播计算正确的梯度链 */
     float* quaternion_pre_buf;                        /**< 四元数处理前状态（反向传播用） */
 
@@ -167,7 +167,7 @@ void lnn_free(LNN* network);
  */
 int lnn_forward(LNN* network, const float* input, float* output);
 
-/* ZSFX-DEEP-R9-001: 公开LNN锁API - 外部模块跨操作原子性 */
+/* 公开LNN锁API - 外部模块跨操作原子性 */
 SELFLNN_API void lnn_lock(LNN* network);
 SELFLNN_API void lnn_unlock(LNN* network);
 
@@ -192,10 +192,10 @@ int lnn_forward_safe(LNN* network, const float* input, size_t input_size,
                      float* output, size_t output_size);
 
 /* ================================================================
- * ZSFWS-P1-008: 并发前向传播——每调用方独立的隐藏状态副本
+ *: 并发前向传播——每调用方独立的隐藏状态副本
  * 解决互斥锁瓶颈：多个模态（视觉/音频/文本/传感器等）可
  * 使用隔离的CfC状态进行前向传播，无需等待彼此释放LNN全局状态。
- * 权重读取使用排他互斥锁保护（ZSFDDD-D4-002修正：非RWLock），
+ * 权重读取使用排他互斥锁保护（修正：非RWLock），
  * 多调用方串行化执行，与训练写入互斥。
  * ================================================================ */
 
@@ -219,7 +219,7 @@ LNNForwardState* lnn_forward_state_create(LNN* network);
 void lnn_forward_state_free(LNNForwardState* state);
 
 /** @brief 使用隔离状态的前向传播（排他互斥锁保护权重读取，线程安全）
- *  ZSFDDD-D4-002: 修正文档——当前使用排他互斥锁（非RWLock），
+ *: 修正文档——当前使用排他互斥锁（非RWLock），
  *  多调用方使用各自的LNNForwardState实例时为串行化调用（互斥锁保证安全）。
  *  权重读取期间与训练（同样使用此互斥锁）互斥。
  *  训练期间调用此函数会阻塞等待训练完成释放锁。
@@ -263,9 +263,9 @@ int lnn_backward(LNN* network, const float* target, float* loss);
  *   optimizer_step(optimizer, params, grads, param_count, learning_rate)
  * 
  * 注意：
- *   - lnn_backward() 始终以 skip_cell_update=0 调用，每样本独立反向，无梯度累积
- *   - lnn_backward_accumulate() 以 skip_cell_update=1 调用，仅累积梯度不更新
- *   - lnn_backward_batch() 为完整的批量梯度下降实现，支持梯度裁剪和优化策略
+ *   - lnn_backward 始终以 skip_cell_update=0 调用，每样本独立反向，无梯度累积
+ *   - lnn_backward_accumulate 以 skip_cell_update=1 调用，仅累积梯度不更新
+ *   - lnn_backward_batch 为完整的批量梯度下降实现，支持梯度裁剪和优化策略
  * 
  * @{
  */
@@ -276,7 +276,7 @@ int lnn_backward(LNN* network, const float* target, float* loss);
  * 与 lnn_backward 的区别：
  *   - 跳过 cfc_backward 的 Step3（cell参数直接更新）
  *   - cell级梯度保留在各cell内部缓冲区中（用于随后批量统一下发）
- *   - 调用方须在批/epoch结束后调用 cfc_apply_cell_gradients()
+ *   - 调用方须在批/epoch结束后调用 cfc_apply_cell_gradients
  * 
  * @param network LNN网络句柄
  * @param target 目标输出 [output_size]
@@ -365,7 +365,6 @@ int lnn_load_from_file(LNN* lnn, const char* filepath);
  */
 SELFLNN_API int lnn_get_config(const LNN* network, LNNConfig* config);
 
-/* ZSF-001修复: 获取LNN内部隐藏状态和最近输出 */
 SELFLNN_API int lnn_get_state(const LNN* network, float* state_buffer, int buffer_dim);
 SELFLNN_API int lnn_get_output(const LNN* network, float* output_buffer, int buffer_dim);
 
@@ -373,7 +372,7 @@ SELFLNN_API int lnn_get_output(const LNN* network, float* output_buffer, int buf
  * @brief 获取LNN内部CfC网络句柄（高级用途：直接操作原始CfC反向传播）
  *
  * 仅用于需要精细控制梯度流的算法（如强化学习的actor-critic训练）。
- * 一般前向传播请使用 lnn_forward()。
+ * 一般前向传播请使用 lnn_forward。
  *
  * @param network 网络句柄
  * @return CfCNetwork* 内部CfC网络句柄，失败返回NULL
@@ -461,17 +460,17 @@ float* lnn_get_parameters(LNN* network);
  */
 float* lnn_get_gradients(LNN* network);
 
-/* ZSFUSA: 获取指定层的参数指针和参数数量 */
+/* 获取指定层的参数指针和参数数量 */
 float* lnn_get_layer_parameters(LNN* lnn, int layer_id);
 size_t lnn_get_layer_parameter_count(LNN* lnn, int layer_id);
 
-/* ZSFQQ-Q025: 通过公共API获取权重矩阵和偏置向量，替代直接访问内部字段 */
+/* 通过公共API获取权重矩阵和偏置向量，替代直接访问内部字段 */
 float* lnn_get_weight_matrix(LNN* network);
 float* lnn_get_bias_vector(LNN* network);
 size_t lnn_get_weight_count(LNN* network);
 size_t lnn_get_bias_count(LNN* network);
 
-/* ZSFQQ-Q025: 通过公共API设置权重和偏置 */
+/* 通过公共API设置权重和偏置 */
 int lnn_set_weights_and_biases(LNN* network, const float* weights, const float* biases);
 
 /**

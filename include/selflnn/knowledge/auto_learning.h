@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file auto_learning.h
  * @brief 自主学习知识库系统接口
  */
@@ -162,7 +162,7 @@ const AutoLearnEntry* auto_learning_get_entry(const AutoLearningSystem* system, 
 int auto_learning_export_to_knowledge_base(AutoLearningSystem* system, void* knowledge_base);
 
 /**
- * @brief 从已有知识库推理新知识 (ZSFGGG-A-005修复)
+ * @brief 从已有知识库推理新知识 
  * 基于已有三元组通过逻辑推理规则(传递性/对称性/逆关系)推导新三元组
  * @param system 自主学习系统
  * @param knowledge_base 知识库句柄
@@ -200,7 +200,7 @@ int auto_learning_incremental_update(AutoLearningSystem* system, const char* top
  * @return 成功返回0，失败返回-1
  */
 int auto_learning_fuse_knowledge(AutoLearningSystem* system, const char* topic,
-                                  int source_indices[], int count,
+                                  int source_indices, int count,
                                   AutoLearnFusionMode mode,
                                   AutoLearnFusionResult* result);
 

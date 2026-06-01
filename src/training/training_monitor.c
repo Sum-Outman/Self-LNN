@@ -1,4 +1,4 @@
-#include "selflnn/training/training_monitor.h"
+﻿#include "selflnn/training/training_monitor.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -106,7 +106,7 @@ int training_monitor_get_metric_history(const TrainingMonitor* tm,
         if (tm->histories[i].type == type) {
             MetricHistory* hist = (MetricHistory*)&tm->histories[i];
             int copy_count = hist->count < max_count ? hist->count : max_count;
-            /* ZSFEEE-FIX-LEAK-CHK: 边界检查，防止copy_count异常越界导致memcpy溢出 */
+/* 边界检查，防止copy_count异常越界导致memcpy溢出 */
             if (copy_count < 0 || copy_count > hist->count || copy_count > TM_MAX_HISTORY_PER_TYPE)
                 return -1;
             if (hist->count <= TM_MAX_HISTORY_PER_TYPE) {
@@ -237,13 +237,13 @@ int hp_search_add_param_categorical(HyperparameterSearch* search,
                                      const float* values, int num_values) {
     if (!search || !name || !values || search->param_count >= TM_MAX_PARAMS) return -1;
     HPParamConfig* p = &search->params[search->param_count];
-    /* ZSFEEE-FIX-LEAK-CHK: 边界检查，使用sizeof确保num_values不超过categories数组容量 */
+/* 边界检查，使用sizeof确保num_values不超过categories数组容量 */
     if (num_values <= 0 || num_values > (int)(sizeof(p->categories) / sizeof(p->categories[0]))) return -1;
     strncpy(p->name, name, TM_MAX_PARAM_NAME - 1);
     p->name[TM_MAX_PARAM_NAME - 1] = '\0';
     p->type = HP_TYPE_CATEGORICAL;
     p->num_categories = num_values;
-    /* ZSFEEE-FIX-LEAK-CHK: 边界检查已在上方完成，num_values不超过categories容量 */
+/* 边界检查已在上方完成，num_values不超过categories容量 */
     memcpy(p->categories, values, (size_t)num_values * sizeof(float));
     search->param_count++;
     return 0;
@@ -819,7 +819,7 @@ int training_monitor_get_gpu_metrics(TrainingMonitor* tm,
     if (!gpu_temp || !gpu_util || !gpu_mem_used_mb || !gpu_mem_total_mb)
         return -1;
 
-    /* ZSFLNN-C-010修复: GPU指标真实获取 — 通过GPU模块查询真实值而非恒返回0 */
+/* GPU指标真实获取 — 通过GPU模块查询真实值而非恒返回0 */
     *gpu_temp = 0.0f;
     *gpu_util = 0.0f;
     *gpu_mem_used_mb = 0.0f;
@@ -928,7 +928,7 @@ int training_monitor_estimate_eta(TrainingMonitor* tm,
     return 0;
 }
 
-/* ZSFEEE-FIX-DEEP-018: 将TrainingMonitor缓冲区中的最新指标格式化为JSON字符串，
+/* 将TrainingMonitor缓冲区中的最新指标格式化为JSON字符串，
  * 用于WebSocket推送时获取真实训练指标，替代main.c中手动构造的独立JSON */
 int training_monitor_get_latest_metrics_json(const TrainingMonitor* tm,
                                               char* out_buf, size_t buf_size) {

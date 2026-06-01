@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file auto_learning.c
  * @brief 自主学习知识库系统完整实现
  */
@@ -618,7 +618,7 @@ int auto_learning_learn_file(AutoLearningSystem* system, const char* filepath) {
             break;
         case KNOWLEDGE_SOURCE_CSV: {
             /* CSV处理：每行作为一个条目 */
-            /* ZSFZS-F009修复: 使用线程安全的strtok替代strtok */
+/* 使用线程安全的strtok替代strtok */
             char* saveptr = NULL;
             char* line = strtok_s(content, "\n", &saveptr);
             while (line) {
@@ -1037,7 +1037,7 @@ int auto_learning_export_to_knowledge_base(AutoLearningSystem* system, void* kno
 }
 
 /**
- * @brief ZSFGGG-A-005修复: 从已有知识库推理新知识
+ * @brief 从已有知识库推理新知识
  * 基于已有三元组通过逻辑推理规则(传递性/对称性/逆关系)推导新三元组，
  * 实现"向知识库进行学习"的能力闭环。
  * @param system 自主学习系统

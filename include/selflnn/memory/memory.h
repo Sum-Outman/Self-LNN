@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file memory.h
  * @brief 记忆系统接口
  * 
@@ -151,7 +151,7 @@ MemorySystem* memory_create(const MemoryConfig* config);
  */
 void memory_free(MemorySystem* system);
 
-/* ZSFQQ-DEEP-005: 基于真实时间流逝的记忆衰减更新 */
+/* 基于真实时间流逝的记忆衰减更新 */
 int memory_periodic_decay_update(MemorySystem* system);
 
 /**

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file json_parser.c
  * @brief 纯C RFC 8259 JSON解析器实现
  *
@@ -112,7 +112,7 @@ static char* json_parse_string_core(JsonParser* p) {
     size_t len = 0;
 
     while (p->pos < p->len) {
-        /* ZSFZX-FIX-R7-1: JSON字符串长度限制 — 防止恶意超长字符串耗尽内存 */
+/* JSON字符串长度限制 — 防止恶意超长字符串耗尽内存 */
         if (len >= JSON_MAX_STRING_LEN) {
             parser_error(p, "字符串超过最大长度限制");
             safe_free((void**)&buf);
@@ -293,14 +293,14 @@ static JsonValue* json_parse_number(JsonParser* p) {
     JsonValue* v = json_value_create(JSON_NUMBER);
     if (!v) { safe_free((void**)&num_str); return NULL; }
     v->data.number_val = atof(num_str);
-    /* ZSFZX-FIX-R7-2: 拒绝NaN/Inf数字 — RFC 8259不允许, 且污染下游计算 */
+/* 拒绝NaN/Inf数字 — RFC 8259不允许, 且污染下游计算 */
     if (isnan(v->data.number_val) || isinf(v->data.number_val)) {
         parser_error(p, "JSON不允许NaN或Infinity数字值");
         safe_free((void**)&num_str);
         json_value_free(v);
         return NULL;
     }
-    /* ZSFZX-FIX-R7-2: 严格数字格式验证 — 拒绝前导零和空数字 */
+/* 严格数字格式验证 — 拒绝前导零和空数字 */
     {
         size_t si = 0;
         if (num_str[si] == '-') si++;
@@ -452,7 +452,7 @@ static void json_to_string_core(const JsonValue* v, char* buf, size_t* pos, size
         case JSON_STRING:
             APPEND_CHAR('"');
             if (v->data.string_val) {
-                /* ZSFX-DEEP-R12-003: 添加JSON字符串转义输出
+/* 添加JSON字符串转义输出
                  * 原作直接拼接string_val无转义→含\"或\n会生成非法JSON */
                 const char* s = v->data.string_val;
                 while (*s) {

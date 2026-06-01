@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file voice_motion_control.h
  * @brief 实时语音指令运动控制系统接口
  */
@@ -70,7 +70,7 @@ int voice_motion_set_safety(VoiceMotionControl* vmc, int require_confirmation);
 /* 多语言词典加载 */
 int voice_motion_load_dict(VoiceMotionControl* vmc, const char* dict_path);
 
-/* ZSFLYF-P1-002: LNN集成接口和动态词典管理 */
+/* LNN集成接口和动态词典管理 */
 struct LNN;
 int voice_motion_set_lnn(VoiceMotionControl* vmc, struct LNN* lnn);
 int voice_motion_add_command(VoiceMotionControl* vmc, const char* keyword,

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file voice_motion_control.c
  * @brief 实时语音指令运动控制完整实现
  */
@@ -425,7 +425,7 @@ int voice_motion_load_dict(VoiceMotionControl* vmc, const char* dict_path) {
     return (vmc->dict_count > 0) ? 0 : -1;
 }
 
-/* ZSFLYF-P1-002修复: 移除static声明，使外部可调用设置LNN和动态管理命令词典 */
+/* 移除static声明，使外部可调用设置LNN和动态管理命令词典 */
 int voice_motion_set_lnn(VoiceMotionControl* vmc, LNN* lnn) {
     if (!vmc) return -1;
     vmc->shared_lnn = lnn;

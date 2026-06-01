@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 语音采集共享工具
  * 统一管理 MediaRecorder 生命周期、音频采集、Blob组装
  * 消除 voice-command.js / dialogue-enhanced.js / voice-control.html 中的三重重复实现
@@ -28,7 +28,7 @@ class VoiceCaptureUtil {
         if (this._recording) return { success: false, error: '录音已在进行中' };
         try {
             if (!stream) throw new Error('未提供麦克风流');
-            /* ZSFWS-VC-BC修复: BrowserCompat类存在性检查，优先使用全局实例 */
+/* BrowserCompat类存在性检查，优先使用全局实例 */
         var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
         /* BUG-1修复：返回与调用方期望一致的 {success, error} 对象，而非裸布尔值 */
         if (!compat) return { success: false, error: 'BrowserCompat未加载，无法创建录音器' };
@@ -37,7 +37,7 @@ class VoiceCaptureUtil {
             this._stream = stream;
             this._recorder = new MediaRecorder(stream, {
                 mimeType: mimeType || 'audio/webm',
-                audioBitsPerSecond: 128000  /* ZSFABC-Fix: 修复采样率与比特率混淆，16kbps→128kbps */
+                audioBitsPerSecond: 128000 /* 修复采样率与比特率混淆，16kbps→128kbps */
             });
             this._recorder.ondataavailable = function(e) {
                 if (e.data.size > 0) this._chunks.push(e.data);
@@ -98,7 +98,7 @@ class VoiceCaptureUtil {
             if (this.onError) this.onError('未采集到音频数据');
             return;
         }
-        /* ZSFABC-Fix: BrowserCompat异常保护，防止未定义类导致崩溃 */
+/* BrowserCompat异常保护，防止未定义类导致崩溃 */
         var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
         var mimeType = compat ? compat.getSupportedMediaRecorderMimeType() : 'audio/webm';
         var blob = new Blob(this._chunks, { type: mimeType || 'audio/webm' });

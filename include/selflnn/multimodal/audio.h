@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file audio.h
  * @brief 音频处理模块接口
  *
@@ -282,7 +282,7 @@ int audio_capture_stop(AudioCaptureContext* ctx);
  */
 void audio_capture_free(AudioCaptureContext* ctx);
 
-/* ZSFUSA: 获取音频频谱 */
+/* 获取音频频谱 */
 int audio_capture_get_spectrum(void* capture, float* spectrum, size_t* size);
 
 #ifdef __cplusplus

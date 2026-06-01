@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file distributed_internal.h
  * @brief 分布式训练内部协议和结构定义
  *
@@ -113,7 +113,7 @@ typedef struct {
  * 节点连接状态
  * --------------------------------------------------------------------------- */
 
-/* ZSFZX-FIX-P1-001: NodeConnection/AsyncAllreduceRequest/DistributedContext
+/* NodeConnection/AsyncAllreduceRequest/DistributedContext
  * 完整结构定义已移至 include/selflnn/training/distributed_training.h
  * （受 SELFLNN_IMPLEMENTATION 保护，消除跨模块相对路径引用）。
  * 本头文件仅保留协议级消息类型/消息头定义。 */

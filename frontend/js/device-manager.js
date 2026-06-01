@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 设备管理器
  * 管理麦克风、扬声器、摄像头的添加/删除/开启/关闭
  * 全部使用真实浏览器API，无虚拟实现
@@ -42,7 +42,7 @@ class DeviceManager {
     async init() {
         if (this.initialized) return;
         try {
-            /* ZSFWS-DM1修复: BrowserCompat类存在性检查，回退到window.g_browserCompat */
+/* BrowserCompat类存在性检查，回退到window.g_browserCompat */
             var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
             if (!compat) { console.error('[DeviceManager] BrowserCompat未加载'); return; }
             var devices = await compat.enumerateMediaDevices();
@@ -75,7 +75,7 @@ class DeviceManager {
 
     _onDeviceChange() {
         var self = this;
-        /* ZSFZS-F054修复: BrowserCompat回退路径添加类型检查 */
+/* BrowserCompat回退路径添加类型检查 */
         var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
         if (!compat) { console.warn('[DeviceManager] BrowserCompat未加载，跳过设备枚举'); return; }
         compat.enumerateMediaDevices().then(function(devices) {
@@ -348,7 +348,7 @@ class DeviceManager {
         }
     }
 
-    /* ZSFABC-F004修复: 桥接方法 - voice-command.js需要的独立静音/取消静音API */
+/* 桥接方法 - voice-command.js需要的独立静音/取消静音API */
     muteSpeaker(id) {
         this.setSpeakerMuted(id, true);
         const speaker = this.speakers.find(s => s.id === id);
@@ -767,7 +767,7 @@ class DeviceManager {
            替代原始灰度值匹配，对光照变化和相机增益差异具有鲁棒性 */
         let censusLeft  = new Array(w * h);
         let censusRight = new Array(w * h);
-        /* ZSFUSA-F08: BigInt兼容性检查，旧浏览器回退到32位汉明距离 */
+/* BigInt兼容性检查，旧浏览器回退到32位汉明距离 */
         var hasBigInt = (typeof BigInt !== 'undefined');
         if (!hasBigInt) {
             console.warn('[SELF-LNN] BigInt不可用，立体匹配精度降低');
@@ -814,7 +814,7 @@ class DeviceManager {
                 while (diff > BigInt(0)) { count++; diff &= (diff - BigInt(1)); }
                 return count;
             } else {
-                /* ZSFUSA-F08: 32位回退路径 - 逐字节异或+查表汉明距离 */
+/* 32位回退路径 - 逐字节异或+查表汉明距离 */
                 let diff = (a ^ b) >>> 0;
                 let count = 0;
                 while (diff) { count++; diff &= (diff - 1); }
@@ -972,7 +972,7 @@ class DeviceManager {
         this.stereoVision.focalLength = Math.max(100, Math.min(2000, focalLength));
     }
 
-    /* ZSFX-033修复: 设备添加面板HTML生成函数
+/* 设备添加面板HTML生成函数
      * 返回串行、扬声器、摄像头的完整配置UI界面HTML字符串 */
     deviceAddPanel() {
         var self = this;
@@ -1103,7 +1103,7 @@ class DeviceManager {
         return html;
     }
 
-    /* ZSFX-033: 在页面中显示设备添加面板的便捷方法 */
+/* 在页面中显示设备添加面板的便捷方法 */
     deviceAddPanel_show(containerId) {
         var container;
         if (containerId) {
@@ -1133,7 +1133,7 @@ class DeviceManager {
         container.innerHTML = this.deviceAddPanel();
     }
 
-    /* ZSFX-033修复: 真实Web API扫描音频设备（麦克风 + 扬声器）
+/* 真实Web API扫描音频设备（麦克风 + 扬声器）
      * 使用 navigator.mediaDevices.enumerateDevices() 获取设备列表
      * 同时请求音频权限以便获得设备标签名称 */
     async scanAudioDevices() {
@@ -1208,7 +1208,7 @@ class DeviceManager {
         }
     }
 
-    /* ZSFX-033修复: 真实Web API扫描视频设备（摄像头）
+/* 真实Web API扫描视频设备（摄像头）
      * 使用 navigator.mediaDevices.enumerateDevices() 获取视频设备列表
      * 同时请求视频权限以便获得设备标签名称 */
     async scanVideoDevices() {

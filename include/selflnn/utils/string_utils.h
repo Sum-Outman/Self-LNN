@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file string_utils.h
  * @brief 字符串工具接口
  * 
@@ -449,7 +449,7 @@ void string_reverse(char* str);
  */
 unsigned int string_hash(const char* str, unsigned int seed);
 
-/* ZSFUSA: 安全字符串复制 */
+/* 安全字符串复制 */
 #ifndef safe_strdup
 #define safe_strdup(s) ((s) ? _strdup(s) : NULL)
 #endif

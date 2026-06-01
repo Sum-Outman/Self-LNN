@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file graph_query.c
  * @brief 知识图谱查询引擎实现
  *
@@ -88,7 +88,7 @@ typedef struct {
     int ascending;
 } SortByVarContext;
 
-/* ZSFBUILD: TLS变量必须在MSVC C89模式下声明在使用前 */
+/* TLS变量必须在MSVC C89模式下声明在使用前 */
 /* S-021修复: 全局变量改为TLS，每个线程独立持有排序上下文，避免多实例并行排序时互相干扰 */
 #ifdef _WIN32
 static __declspec(thread) int g_query_sort_var_index = -1;
@@ -101,7 +101,6 @@ static __thread int g_query_sort_ascending = 1;
 static int binding_compare_by_var(const void* a, const void* b) {
     const QueryResultRow* ra = (const QueryResultRow*)a;
     const QueryResultRow* rb = (const QueryResultRow*)b;
-    /* ZSF-019修复: 按指定变量(或回退confidence)排序 */
     float va, vb;
     if (g_query_sort_var_index >= 0 && (size_t)g_query_sort_var_index < QUERY_MAX_VARS) {
         va = (float)ra->variables[g_query_sort_var_index].node_id;
@@ -638,7 +637,7 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
             }
         }
     } else {
-        /* ZSFWS-L-016: 无约束全扫描硬限制改为可配置并添加日志警告 */
+/* 无约束全扫描硬限制改为可配置并添加日志警告 */
         size_t scan_limit = total < 10000 ? total : 10000;
         if (total > 10000) {
             log_warning("[图查询] 无索引全扫描限制为%zu条(总数%zu)，建议添加索引", scan_limit, total);
@@ -875,7 +874,7 @@ SubgraphMatchSet* graph_query_find_star_pattern(AdjacencyList* al,
                                                 size_t neighbor_count,
                                                 int max_distance,
                                                 const QueryOptions* options) {
-    /* ZSFWS-NEW-GQR修复: 使用max_distance参数限制子图匹配搜索半径 */
+/* 使用max_distance参数限制子图匹配搜索半径 */
     if (!al || !center_label) return NULL;
     QueryOptions opt = options ? *options : query_options_default();
     int effective_max_dist = (max_distance > 0 && max_distance <= 1024) ? max_distance : 1024;
@@ -1083,7 +1082,7 @@ static int pg_check_node_match(PropertyGraph* pg, int node_id,
     return 1;
 }
 
-/* ZSFWS-L999: VF2递归深度保护 —— 防止超大模式图导致栈溢出
+/* VF2递归深度保护 —— 防止超大模式图导致栈溢出
  * VF2是深度优先递归搜索，递归深度=模式图节点数。
  * 默认上限2000层(C栈约16KB/层≈32MB)，超出此范围建议使用迭代BFS或Ullmann算法。
  * 实际上业务模式图极少超过100节点，此处仅作为安全兜底。 */
@@ -1279,7 +1278,7 @@ SubgraphMatchSet* graph_query_find_similar_subgraph(PropertyGraph* pg,
                                                     int max_distance,
                                                     float similarity_threshold,
                                                     const QueryOptions* options) {
-    /* ZSFWS-A003修复: 使用max_distance限制子图相似搜索的范围 */
+/* 使用max_distance限制子图相似搜索的范围 */
     if (!pg || example_node_id < 0) return NULL;
     QueryOptions opt = options ? *options : query_options_default();
     int effective_max_dist = (max_distance > 0) ? max_distance : 1024;
@@ -1365,7 +1364,7 @@ QueryResultSet* graph_query_by_property(PropertyGraph* pg,
                                         const char* edge_label,
                                         int max_hops,
                                         const QueryOptions* options) {
-    /* ZSFWS-A003修复: 使用edge_label和max_hops参数过滤查询结果 */
+/* 使用edge_label和max_hops参数过滤查询结果 */
     if (!pg || !constraints || constraint_count == 0) return NULL;
     QueryOptions opt = options ? *options : query_options_default();
     int use_edge_filter = (edge_label != NULL && edge_label[0] != '\0');

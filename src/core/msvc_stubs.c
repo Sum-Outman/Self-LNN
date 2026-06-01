@@ -1,8 +1,8 @@
-/**
+﻿/**
  * @file msvc_stubs.c
- * @brief MSVC构建兼容桩 —— ZSFZS-P0-001修复：删除与真实实现冲突的桩函数
+ * @brief MSVC构建兼容桩 —— 删除与真实实现冲突的桩函数
  *
- * 以下模块现已全平台编译（ZSFZS-F022修复），本文件不再提供桩：
+ * 以下模块现已全平台编译，本文件不再提供桩：
  *   - ros_gazebo_bridge.c — robot/CMakeLists.txt全平台编译
  *   - hardware_detector.c — robot/CMakeLists.txt全平台编译
  *   - reasoning_internal.c — reasoning/CMakeLists.txt MSVC专用
@@ -29,7 +29,7 @@
 
 /* ============================
  * PyBullet桥接桩 (PyBullet需Python环境，MSVC平台不可用)
- * ZSF999XQ-M-005修复: 当PYBULLET_BRIDGE_AVAILABLE未定义时，
+ *修复: 当PYBULLET_BRIDGE_AVAILABLE未定义时，
  * 不提供静默返回-1的桩函数。直接让链接器报告符号缺失，
  * 迫使构建系统明确处理缺失依赖，而非静默降级。
  * ============================ */

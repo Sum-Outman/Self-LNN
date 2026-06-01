@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file self_cognition.h
  * @brief 自我认知系统接口
  * 
@@ -522,7 +522,7 @@ typedef struct {
     float confidence;                     /**< 修正置信度 (0-1) */
     time_t correction_time;               /**< 修正时间 */
     int correction_id;                    /**< 修正ID（唯一标识） */
-    float weight_change_l2;               /**< ZSFEEE-FIX-CORRECTION-REAL: 权重实际L2变更量 */
+    float weight_change_l2; /**< 权重实际L2变更量 */
 } SelfCorrectionResult;
 
 /**
@@ -1391,7 +1391,7 @@ void self_cognition_system_disable(SelfCognitionSystem* system);
 int self_cognition_system_is_enabled(const SelfCognitionSystem* system);
 
 /* ============================================================================
- * ZSFWS-027: LNN训练就绪检查
+ *: LNN训练就绪检查
  *
  * 检查全局共享LNN是否已完成训练（如加载了检查点或经过至少一轮训练）。
  * 未训练的LNN（随机权重）会导致自我认知的评估/反思/修正产生无意义的

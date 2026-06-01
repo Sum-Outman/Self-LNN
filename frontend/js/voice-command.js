@@ -1,10 +1,10 @@
-/**
+﻿/**
  * SELF-LNN AGI 语音指令控制系统
  * 使用 MediaRecorder API 录制语音，通过后端语音识别解析指令
  * 支持运动控制、设备控制、系统控制、计算机控制
  */
 
-/* ZSFX-DEEP-R4-001: 语音指令中文功能名→后端英文字段名映射
+/* 语音指令中文功能名→后端英文字段名映射
  * 修复语音命令"启用自我学习能力"将中文"自我学习能力"直接发送给后端的Bug */
 var VOICE_FEATURE_MAP = {
     '自我学习能力': 'self_learning',
@@ -262,7 +262,7 @@ class VoiceCommandSystem {
  * 指令解析引擎（语音和文字共享）
  */
 
-/* ZSFUSA-F04: 指令路由常量表（数据驱动，新增指令只需添加条目）
+/* 指令路由常量表（数据驱动，新增指令只需添加条目）
  * 以 parsed.params 为输入参数源，支持机器人/系统/设备三类API路由。
  * 优先级：VOICE_COMMAND_ROUTES(数据驱动) > handlerMap(回退) */
 var VOICE_COMMAND_ROUTES = {
@@ -319,7 +319,7 @@ var VOICE_COMMAND_ROUTES = {
     'speakerMuteToggle':     { type: 'device', device: 'speaker', action: 'mute_toggle' }
 };
 
-/* ZSFUSA-F04: 数据驱动路由分发函数
+/* 数据驱动路由分发函数
  * 从 VOICE_COMMAND_ROUTES 表读取配置，动态调用对应的API方法 */
 function voiceCommandDataDrivenRoute(routeDef, parsed) {
     var params = parsed.params || {};
@@ -469,7 +469,7 @@ class CommandEngine {
                 }
             }
         }
-        /* ZSFUSA-F12修复: command为null时应标记failure */
+/* command为null时应标记failure */
         return {
             success: false,
             command: null,
@@ -513,7 +513,7 @@ class CommandEngine {
         return { allowed: true, reason: '' };
     }
 
-    /* ZSFUSA-F04: 指令路由常量表（数据驱动，新增指令只需添加条目）
+/* 指令路由常量表（数据驱动，新增指令只需添加条目）
      * 以 parsed.params 为输入参数源，支持机器人/系统/设备三类API路由。
      * 优先级：VOICE_COMMAND_ROUTES(数据驱动) > handlerMap(回退) */
     async _routeCommand(parsed) {
@@ -558,7 +558,6 @@ class CommandEngine {
             'stop_training': async () => window.SelfLnnApi.stopTrainingJob ? await window.SelfLnnApi.stopTrainingJob() : null,
             'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : null,
             'start_evolution': async () => {
-                /* ZSF-005修复: 统一使用 toggleAgiFeature 控制进化开关，与stop_evolution保持一致 */
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
                     return await window.SelfLnnApi.toggleAgiFeature('self_evolution', true);
                 }
@@ -571,7 +570,6 @@ class CommandEngine {
                 return null;
             },
             'save_model': async () => {
-                /* ZSF-006修复: save_model应保存模型配置而非系统备份 */
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.saveModelConfig === 'function') {
                     return await window.SelfLnnApi.saveModelConfig({ action: 'voice_command_save' });
                 }
@@ -613,7 +611,7 @@ class CommandEngine {
         document.dispatchEvent(new CustomEvent('device-command', {
             detail: { deviceType: deviceType, action: action, params: params }
         }));
-        /* ZSFWS-S009修复: 使用全局单例g_deviceManager（main.js创建），
+/* 使用全局单例g_deviceManager（main.js创建），
          * 而非创建重复的DeviceManager实例，避免设备列表不同步 */
         var dm = window.g_deviceManager || window.SelfLnnDeviceManager;
         if (!dm) {

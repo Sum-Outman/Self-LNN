@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file deep_correction.h
  * @brief 深度反思驱动的自我修正系统接口
  *
@@ -169,7 +169,7 @@ int dc_get_patterns(const DCCorrectionSystem* dcs, DCPatternRecord* out, int max
 int dc_extract_rule(DCCorrectionSystem* dcs, int error_id);
 int dc_get_rules(const DCCorrectionSystem* dcs, DCCorrectionRule* out, int max_count);
 
-/* ZSFX-021: 动态新错误模式检测 — 修正失败时自动生成候选规则 */
+/* 动态新错误模式检测 — 修正失败时自动生成候选规则 */
 int dc_detect_new_error_pattern(DCCorrectionSystem* dcs, int error_id, int failed_rule_id);
 
 /* 高级诊断统计 */

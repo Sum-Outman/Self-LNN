@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file quaternion_conv.c
  * @brief 四元数卷积层实现
  *
@@ -32,7 +32,7 @@
 
 /**
  * @brief Hamilton梯度：输入梯度
-/* ZSFX-DEEP-R8-001: 修复输入梯度公式。
+/* 修复输入梯度公式。
  * 前向: r = input ⊗ weight (Hamilton积, input在左, weight在右)
  * 正确梯度: ∂L/∂input = M_R(weight)^T · grad_r
  * M_R(b)^T = [  b0   b1   b2   b3 ]
@@ -196,7 +196,7 @@ int quaternion_conv1d_forward(QuaternionConv1D* layer,
 
                 for (size_t ii = 0; ii < ic; ii++) {
                     for (size_t k = 0; k < ks; k++) {
-                        /* ZSFX-DEEP-R10-002: 修正padding处理
+/* 修正padding处理
                          * 原作: seq_start = ol*stride, 仅检查pos>=seq_len上界, padding完全未实现
                          * 修正: 考虑padding左偏移, 同时检查下界和上界 */
                         int pos = (int)(ol * stride) - (int)(cfg->padding);

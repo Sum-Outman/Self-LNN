@@ -1,4 +1,4 @@
-#include "selflnn/training/model_parallel.h"
+﻿#include "selflnn/training/model_parallel.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/gpu/gpu.h"
@@ -37,16 +37,16 @@
 #define MP_RING_CONNECT_DELAY_MS   200   /* 重试间隔（毫秒） */
 #define MP_RING_LISTEN_BACKLOG     4     /* listen队列长度 */
 
-/* ZSF999XQ-GPU-C7修复: 模型并行GPU加速上下文（延迟初始化）
+/*修复: 模型并行GPU加速上下文（延迟初始化）
  * 在关键计算路径（矩阵乘法）中尝试使用GPU加速。
  * GPU不可用时回退到已有CPU三重循环路径。 */
 static GpuContext* g_mp_gpu_ctx = NULL;
 static int g_mp_gpu_available = -1; /* -1未检测, 0不可用, 1可用 */
-static MutexHandle g_mp_gpu_lock;   /* ZSFDDD-D6-004a: GPU上下文初始化互斥锁 */
+static MutexHandle g_mp_gpu_lock; /* GPU上下文初始化互斥锁 */
 static int g_mp_gpu_lock_inited = 0;
 
 static GpuContext* mp_get_gpu_context(void) {
-    /* ZSFDDD-D6-004a修复: 添加互斥锁防止多线程双重创建GPU上下文 */
+/* 添加互斥锁防止多线程双重创建GPU上下文 */
     if (!g_mp_gpu_lock_inited) {
         g_mp_gpu_lock = mutex_create();
         g_mp_gpu_lock_inited = 1;
@@ -84,7 +84,7 @@ static GpuContext* mp_get_gpu_context(void) {
 static void mp_matmul(const float* A, const float* B, float* C,
                        int M, int N, int K)
 {
-    /* ZSF999XQ-GPU-C7修复: GPU加速矩阵乘法路径
+/*修复: GPU加速矩阵乘法路径
      * C = A * B，GPU可用时使用gpu_matmul_train加速。
      * GPU不可用时回退到已有CPU三重循环路径。 */
     {
@@ -136,7 +136,7 @@ static void mp_unregister_reduce_data(int device_id) {
 static void mp_matmul_add(const float* A, const float* B, const float* C_in,
                            float* C_out, int M, int N, int K)
 {
-    /* ZSF999XQ-GPU-C7修复: GPU加速矩阵乘法加累加路径
+/*修复: GPU加速矩阵乘法加累加路径
      * C_out = C_in + A * B，GPU可用时使用gpu_matmul_train加速。
      * 需要先将C_in复制到C_out，再使用beta=1.0调用GPU矩阵乘法。
      * GPU不可用时回退到已有CPU三重循环路径。 */
@@ -244,7 +244,7 @@ int mp_tensor_parallel_backward(MPTensorPartition* tp, const float* grad_output,
     if (tp->strategy == MP_TENSOR_COLUMN_PARALLEL || tp->strategy == MP_TENSOR_ATTENTION_QKV_PARALLEL) {
         int N = tp->local_cols;
         int K = tp->global_rows;
-        /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
         float* temp = (float*)safe_malloc((size_t)M * K * sizeof(float));
         if (!temp) return MP_ERROR_ALLOC_FAILED;
 
@@ -270,7 +270,7 @@ int mp_tensor_parallel_backward(MPTensorPartition* tp, const float* grad_output,
             }
         }
 
-        /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
         safe_free((void**)&temp);
     } else {
         int N = tp->local_cols;
@@ -290,7 +290,7 @@ int mp_tensor_parallel_backward(MPTensorPartition* tp, const float* grad_output,
             float* full_grad_weight = NULL;
             int full_rows = tp->global_rows;
             int full_cols = tp->global_cols;
-            /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
             full_grad_weight = (float*)safe_malloc((size_t)full_rows * full_cols * sizeof(float));
             if (!full_grad_weight) return MP_ERROR_ALLOC_FAILED;
 
@@ -309,7 +309,7 @@ int mp_tensor_parallel_backward(MPTensorPartition* tp, const float* grad_output,
             }
 
             mp_matmul(grad_output, full_grad_weight, grad_input, M, full_rows, N);
-            /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
             safe_free((void**)&full_grad_weight);
         }
     }
@@ -349,7 +349,7 @@ int mp_tensor_allreduce(MPTensorPartition* tp, float* data, int count)
         return MP_ERROR_NONE;
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     float* reduce_buffer = (float*)safe_malloc((size_t)reduce_size * sizeof(float));
     if (!reduce_buffer) return MP_ERROR_ALLOC_FAILED;
 
@@ -369,7 +369,7 @@ int mp_tensor_allreduce(MPTensorPartition* tp, float* data, int count)
         data[i] = reduce_buffer[i] * inv_count;
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&reduce_buffer);
     return MP_ERROR_NONE;
 }
@@ -389,7 +389,7 @@ int mp_tensor_allgather(MPTensorPartition* tp, float* data, int count)
     if (count < local_size) return MP_ERROR_SIZE_MISMATCH;
 
     int num_devices = tp->num_devices;
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     int* offsets = (int*)safe_malloc((size_t)num_devices * sizeof(int));
     int* sizes = (int*)safe_malloc((size_t)num_devices * sizeof(int));
     if (!offsets || !sizes) { safe_free((void**)&offsets); safe_free((void**)&sizes); return MP_ERROR_ALLOC_FAILED; }
@@ -416,7 +416,7 @@ int mp_tensor_allgather(MPTensorPartition* tp, float* data, int count)
         }
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     float* full_buffer = (float*)safe_malloc((size_t)full_rows * full_cols * sizeof(float));
     if (!full_buffer) { safe_free((void**)&offsets); safe_free((void**)&sizes); return MP_ERROR_ALLOC_FAILED; }
     memset(full_buffer, 0, (size_t)full_rows * full_cols * sizeof(float));
@@ -438,7 +438,7 @@ int mp_tensor_allgather(MPTensorPartition* tp, float* data, int count)
         memcpy(data, full_buffer, (size_t)full_rows * full_cols * sizeof(float));
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&full_buffer);
     safe_free((void**)&offsets);
     safe_free((void**)&sizes);
@@ -460,7 +460,7 @@ int mp_tensor_reduce_scatter(MPTensorPartition* tp, float* data, int count)
     if (count < local_size) return MP_ERROR_SIZE_MISMATCH;
 
     int num_devices = tp->num_devices;
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     int* offsets = (int*)safe_malloc((size_t)num_devices * sizeof(int));
     int* sizes = (int*)safe_malloc((size_t)num_devices * sizeof(int));
     if (!offsets || !sizes) { safe_free((void**)&offsets); safe_free((void**)&sizes); return MP_ERROR_ALLOC_FAILED; }
@@ -487,7 +487,7 @@ int mp_tensor_reduce_scatter(MPTensorPartition* tp, float* data, int count)
         }
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
     float* sum_buffer = (float*)safe_calloc((size_t)full_rows * full_cols, sizeof(float));
     if (!sum_buffer) { safe_free((void**)&offsets); safe_free((void**)&sizes); return MP_ERROR_ALLOC_FAILED; }
 
@@ -505,7 +505,7 @@ int mp_tensor_reduce_scatter(MPTensorPartition* tp, float* data, int count)
         data[i] = sum_buffer[my_offset + i] * inv;
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&sum_buffer);
     safe_free((void**)&offsets);
     safe_free((void**)&sizes);
@@ -529,7 +529,7 @@ int mp_pipeline_create(MPPipelineStage* ps, int num_stages, int stage_id,
     ps->input_buffer = NULL;
     ps->output_buffer = NULL;
 
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     ps->forward_ranks = (int*)safe_malloc((size_t)num_stages * sizeof(int));
     ps->backward_ranks = (int*)safe_malloc((size_t)num_stages * sizeof(int));
     if (!ps->forward_ranks || !ps->backward_ranks) {
@@ -549,7 +549,7 @@ int mp_pipeline_create(MPPipelineStage* ps, int num_stages, int stage_id,
 void mp_pipeline_destroy(MPPipelineStage* ps)
 {
     if (!ps) return;
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&ps->forward_ranks);
     safe_free((void**)&ps->backward_ranks);
     if (ps->input_buffer) {
@@ -583,7 +583,7 @@ static int mp_pipeline_forward_1f1b(MPPipelineStage* ps, const float* input,
     float* mb_buffers = NULL;
     int buf_size = mb_size * mp_pipeline_get_micro_batch(ps, 0, NULL, NULL);
     if (buf_size > 0) {
-        /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
         mb_buffers = (float*)safe_malloc((size_t)buf_size * sizeof(float));
     }
 
@@ -592,7 +592,7 @@ static int mp_pipeline_forward_1f1b(MPPipelineStage* ps, const float* input,
         int ret = stage_fn(ps->stage_id, input + offset,
                            mb_buffers ? mb_buffers : output + offset,
                            mb_size, ctx);
-        if (ret != 0) { safe_free((void**)&mb_buffers) /* ZSFEEE-FIX-RAW-MIG */; return ret; }
+        if (ret != 0) { safe_free((void**)&mb_buffers) /* */; return ret; }
     }
 
     for (int m = 0; m < steady; m++) {
@@ -601,13 +601,13 @@ static int mp_pipeline_forward_1f1b(MPPipelineStage* ps, const float* input,
         int ret = stage_fn(ps->stage_id, input + warm_offset,
                            mb_buffers ? mb_buffers : output + warm_offset,
                            mb_size, ctx);
-        if (ret != 0) { safe_free((void**)&mb_buffers) /* ZSFEEE-FIX-RAW-MIG */; return ret; }
+        if (ret != 0) { safe_free((void**)&mb_buffers) /* */; return ret; }
 
         if (m < warmup) {
             ret = stage_fn(ps->stage_id, input + steady_offset,
                            mb_buffers ? mb_buffers : output + steady_offset,
                            mb_size, ctx);
-            if (ret != 0) { safe_free((void**)&mb_buffers) /* ZSFEEE-FIX-RAW-MIG */; return ret; }
+            if (ret != 0) { safe_free((void**)&mb_buffers) /* */; return ret; }
         }
     }
 
@@ -616,10 +616,10 @@ static int mp_pipeline_forward_1f1b(MPPipelineStage* ps, const float* input,
         int ret = stage_fn(ps->stage_id, input + offset,
                            mb_buffers ? mb_buffers : output + offset,
                            mb_size, ctx);
-        if (ret != 0) { safe_free((void**)&mb_buffers) /* ZSFEEE-FIX-RAW-MIG */; return ret; }
+        if (ret != 0) { safe_free((void**)&mb_buffers) /* */; return ret; }
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&mb_buffers);
     return MP_ERROR_NONE;
 }
@@ -828,7 +828,7 @@ int mp_zero_create(MPZeroOptimizer* zo, MPZeroStage stage, int param_count,
     int rem = param_count % shard_count;
     zo->gradient_count = shard_size + (shard_id < rem ? 1 : 0);
 
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     zo->param_owner_map = (int*)safe_malloc((size_t)param_count * sizeof(int));
     if (!zo->param_owner_map) return MP_ERROR_ALLOC_FAILED;
 
@@ -843,7 +843,7 @@ int mp_zero_create(MPZeroOptimizer* zo, MPZeroStage stage, int param_count,
     int opt_state_count = 0;
     if (stage >= MP_ZERO_STAGE_1) {
         opt_state_count = zo->gradient_count * optimizer_states_per_param;
-        /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
         zo->optimizer_state_shard = (float*)safe_calloc((size_t)opt_state_count, sizeof(float));
         if (!zo->optimizer_state_shard) {
             safe_free((void**)&zo->param_owner_map);
@@ -852,7 +852,7 @@ int mp_zero_create(MPZeroOptimizer* zo, MPZeroStage stage, int param_count,
     }
 
     if (stage >= MP_ZERO_STAGE_2) {
-        /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
         zo->gradient_shard = (float*)safe_calloc((size_t)zo->gradient_count, sizeof(float));
         if (!zo->gradient_shard) {
             safe_free((void**)&zo->optimizer_state_shard);
@@ -862,7 +862,7 @@ int mp_zero_create(MPZeroOptimizer* zo, MPZeroStage stage, int param_count,
     }
 
     if (stage >= MP_ZERO_STAGE_3) {
-        /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
         zo->param_shard = (float*)safe_calloc((size_t)zo->gradient_count, sizeof(float));
         if (!zo->param_shard) {
             safe_free((void**)&zo->optimizer_state_shard);
@@ -878,7 +878,7 @@ int mp_zero_create(MPZeroOptimizer* zo, MPZeroStage stage, int param_count,
 void mp_zero_destroy(MPZeroOptimizer* zo)
 {
     if (!zo) return;
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&zo->param_owner_map);
     if (zo->optimizer_state_shard) {
         safe_free((void**)&zo->optimizer_state_shard);
@@ -1161,7 +1161,7 @@ static int mp_3d_compute_chunks(int group_size, int count, int** out_sizes,
 {
     int chunk_size = count / group_size;
     int rem = count % group_size;
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     int* sizes = (int*)safe_malloc((size_t)group_size * sizeof(int));
     int* offsets = (int*)safe_malloc((size_t)group_size * sizeof(int));
     if (!sizes || !offsets) {
@@ -1505,7 +1505,7 @@ int mp_3d_allreduce(MP3DContext* ctx, float* data, int count,
     memcpy(ctx->reduce_buffer_in, data, needed);
 
     /* 临时缓冲区用于接收来自邻居的数据 */
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     float* recv_buf = (float*)safe_malloc((size_t)count * sizeof(float));
     if (!recv_buf) {
         safe_free((void**)&chunk_sizes);
@@ -1527,7 +1527,7 @@ int mp_3d_allreduce(MP3DContext* ctx, float* data, int count,
         /* 发送本节点的累计数据chunk到下一个rank */
         if (mp_ring_send_floats(send_sock,
             ctx->reduce_buffer_in + send_start, send_size) != 0) {
-            /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
             safe_free((void**)&recv_buf);
             safe_free((void**)&chunk_sizes);
             safe_free((void**)&chunk_offsets);
@@ -1589,7 +1589,7 @@ int mp_3d_allreduce(MP3DContext* ctx, float* data, int count,
         data[i] = ctx->reduce_buffer_in[i] * inv;
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&recv_buf);
     safe_free((void**)&chunk_sizes);
     safe_free((void**)&chunk_offsets);
@@ -1615,7 +1615,7 @@ int mp_3d_allgather(MP3DContext* ctx, float* data, int count,
     if (!ctx->comm_ready) {
         ret = mp_3d_allgather_local(ctx, data, count, group_size,
                                      group_rank, chunk_sizes, chunk_offsets);
-        /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
         safe_free((void**)&chunk_sizes);
         safe_free((void**)&chunk_offsets);
         return ret;
@@ -1678,7 +1678,7 @@ int mp_3d_allgather(MP3DContext* ctx, float* data, int count,
     /* buffer现在包含所有rank的完整数据，拷贝回data */
     memcpy(data, ctx->reduce_buffer_in, needed);
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&chunk_sizes);
     safe_free((void**)&chunk_offsets);
     return MP_ERROR_NONE;
@@ -1736,7 +1736,7 @@ int mp_3d_reduce_scatter(MP3DContext* ctx, float* data, int count,
     memcpy(ctx->reduce_buffer_in, data, needed);
 
     /* 临时缓冲区用于接收来自邻居的数据 */
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     float* recv_buf = (float*)safe_malloc((size_t)count * sizeof(float));
     if (!recv_buf) {
         safe_free((void**)&chunk_sizes);
@@ -1786,7 +1786,7 @@ int mp_3d_reduce_scatter(MP3DContext* ctx, float* data, int count,
         data[i] = ctx->reduce_buffer_in[my_start + i] * inv;
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&recv_buf);
     safe_free((void**)&chunk_sizes);
     safe_free((void**)&chunk_offsets);

@@ -1,4 +1,4 @@
-#ifndef SELFLNN_ROBOT_CONTROL_ADVANCED_H
+﻿#ifndef SELFLNN_ROBOT_CONTROL_ADVANCED_H
 #define SELFLNN_ROBOT_CONTROL_ADVANCED_H
 
 #include <stddef.h>
@@ -120,7 +120,7 @@ typedef struct {
     float desired_damping[6];
     float estimated_disturbance[6];
     /* K-修复: 自适应控制和导纳控制状态字段 */
-    /* ZSFABC-M009修复: 扩展为完整6×6矩阵 Kx[36] + Kr[36] = 72, 替代对角简化 */
+/* 扩展为完整6×6矩阵 Kx[36] + Kr[36] = 72, 替代对角简化 */
     float adaptive_gains[72];         /**< MRAC完整自适应增益 [36 Kx矩阵 + 36 Kr矩阵] */
     float prev_error[6];              /**< 上一帧位置误差 */
     float admittance_velocity[6];     /**< 导纳控制虚拟速度 */

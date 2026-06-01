@@ -1,4 +1,4 @@
-#ifndef SELFLNN_IMAGE_RECOGNITION_DEEP_H
+﻿#ifndef SELFLNN_IMAGE_RECOGNITION_DEEP_H
 #define SELFLNN_IMAGE_RECOGNITION_DEEP_H
 
 #include <stddef.h>
@@ -82,7 +82,7 @@ int ird_fine_save(const IRDFineClassifier* classifier, const char* path);
 int ird_fine_load(IRDFineClassifier* classifier, const char* path);
 
 /**
- * @brief ZSFQQ-P2-001: 标记细粒度分类器为已训练
+ * @brief 标记细粒度分类器为已训练
  * 在系统加载检查点或完成引导训练后调用
  * @param classifier 分类器句柄
  */

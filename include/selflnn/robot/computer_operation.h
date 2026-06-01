@@ -1,4 +1,4 @@
-#ifndef SELFLNN_COMPUTER_OPERATION_H
+﻿#ifndef SELFLNN_COMPUTER_OPERATION_H
 #define SELFLNN_COMPUTER_OPERATION_H
 
 #include "selflnn/core/tensor.h"
@@ -15,7 +15,7 @@ extern "C" {
 #define CO_LABEL_LEN 128
 #define CO_MAX_OCR_RESULTS 128
 #define CO_OCR_TEXT_LEN 256
-/* ZSFX-011: OCR字符集定义 — 从36类(0-9,A-Z)扩展到全ASCII可打印 */
+/* OCR字符集定义 — 从36类(0-9,A-Z)扩展到全ASCII可打印 */
 #define CO_OCR_NUM_CLASSES 96          /* 95个可打印ASCII(32-126) + 1个未知类(索引0) */
 #define CO_OCR_CONFIDENCE_THRESHOLD 0.4f  /* 字符识别置信度阈值 */
 extern const char CO_OCR_CHARSET[CO_OCR_NUM_CLASSES];  /* OCR识别字符集映射表 */
@@ -249,7 +249,7 @@ int co_get_system_status(COSystem* system, char* status_out, size_t status_size)
 
 int co_learn_from_demo(COSystem* system, const float* screen_sequence, const COAction* action_sequence, size_t num_frames, size_t width, size_t height, const char* task_label);
 
-/* ZSFUSA: 设置计算机系统音量 */
+/* 设置计算机系统音量 */
 int co_system_set_volume(void* system, float volume);
 
 #ifdef __cplusplus

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file dynamics.c
  * @brief 传感器预处理动态系统（非独立AI系统）
  * 
@@ -53,7 +53,7 @@ struct DynamicsSystem {
     float* prev_state;          /**< 前一状态向量（BDF-2所需） */
     float* workspace;           /**< 预分配ODE求解器工作区（最大11*state_size） */
     float* ode_input_buf;       /**< P1-021修复：预分配ODE RHS输入缓冲区，避免每步堆分配 */
-    float* external_input;      /**< ZSFWS-P5修复：真实外部输入（传感器/控制信号），NULL=无外部力 */
+    float* external_input; /**< 真实外部输入（传感器/控制信号），NULL=无外部力 */
     int bdf2_initialized;       /**< BDF-2初始化标记（需要两步历史） */
     int is_initialized;         /**< 是否已初始化 */
     float time;                 /**< 当前时间 */
@@ -61,8 +61,8 @@ struct DynamicsSystem {
     float avg_velocity;         /**< 平均速度 */
     float max_velocity;         /**< 最大速度 */
     float stability;            /**< 稳定性指标 */
-    float state_clamp;          /**< ZSFLNN-C-014修复: 状态限幅值（从config读取） */
-    float velocity_clamp;       /**< ZSFLNN-C-014修复: 速度限幅值（从config读取） */
+    float state_clamp; /**< 状态限幅值（从config读取） */
+    float velocity_clamp; /**< 速度限幅值（从config读取） */
 };
 
 /**
@@ -103,7 +103,7 @@ DynamicsSystem* dynamics_create(const DynamicsConfig* config) {
         system->config.max_step_size = 0.1f;  // 默认最大步长
     }
 
-    /* ZSFLNN-C-014修复: 从config读取钳位值，未提供时使用默认值 */
+/* 从config读取钳位值，未提供时使用默认值 */
     system->state_clamp = (config->state_clamp > 0.0f) ? config->state_clamp : 10.0f;
     system->velocity_clamp = (config->velocity_clamp > 0.0f) ? config->velocity_clamp : 5.0f;
     
@@ -194,7 +194,7 @@ int dynamics_update(DynamicsSystem* system, const float* input,
         return -1;
     }
 
-    /* ZSFZX-FIX-R5-1: 传感器输入状态NaN/Inf检测 */
+/* 传感器输入状态NaN/Inf检测 */
     {
         size_t check_n = system->config.state_size < 1000 ? system->config.state_size : 1000;
         for (size_t i = 0; i < check_n; i++) {
@@ -314,7 +314,7 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 float h_actual; int steps;
                 ode_bdf2_solve(y, system->time, dt, dynamics_ode_rhs, system,
                               2 * state_size, &bdf_cfg, bdf_ws, &h_actual, &steps);
-                /* ZSFABC修复: 使用实际步长和步数进行自适应调整 */
+/* 使用实际步长和步数进行自适应调整 */
                 int max_steps = (bdf_cfg.newton_tol > 0.0f) ? (int)(1.0f / bdf_cfg.newton_tol) : 100;
                 if (steps > max_steps) {
                     log_debug("[BDF2] 步数过多 steps=%d, h_actual=%.6f", steps, h_actual);
@@ -362,7 +362,7 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 ode_dp54_solve(y, system->time, dt, dynamics_ode_rhs, system,
                               2 * state_size, &dp_cfg, ws, &h_actual, &steps);
                 actual_dt = h_actual;
-                /* ZSFABC修复: DP54步数过多时记录警告 */
+/* DP54步数过多时记录警告 */
                 if (steps > 1000) {
                     log_debug("[DP54] 步数过多 steps=%d, h_actual=%.6f, dt=%.6f", steps, h_actual, dt);
                 }
@@ -373,7 +373,7 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 }
             }
             safe_free((void**)&y); safe_free((void**)&ws);
-            /* ZSFWS-P12: 当ode_solvers内存分配失败时回退到内置DP54。
+/* 当ode_solvers内存分配失败时回退到内置DP54。
              * 内置求解器直接操作state+velocity数组(零额外内存分配)，
              * 作为OOM极致条件下的保底方案。正常情况走ode_solvers委托。 */
             if (!y || !ws) actual_dt = dynamics_internal_solve_dp54(system, input, dt);
@@ -397,7 +397,7 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 float h_actual; int steps;
                 ode_rosenbrock_solve(y, system->time, dt, dynamics_ode_rhs, system,
                                     2 * state_size, &rb_cfg, ws, &h_actual, &steps);
-                /* ZSFABC修复: Rosenbrock步数监控 */
+/* Rosenbrock步数监控 */
                 if (steps >= rb_cfg.max_iterations) {
                     log_debug("[Rosenbrock] 达到最大迭代 steps=%d, h_actual=%.6f", steps, h_actual);
                 }
@@ -409,7 +409,7 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 }
             }
             safe_free((void**)&y); safe_free((void**)&ws);
-            /* ZSFWS-P12: OOM回退到内置Rosenbrock求解器。
+/* OOM回退到内置Rosenbrock求解器。
              * 正常路径委托ode_solvers.c的Rosenbrock实现。 */
             if (!y || !ws) dynamics_internal_solve_rosenbrock(system, input, dt);
             break;
@@ -442,7 +442,7 @@ int dynamics_update(DynamicsSystem* system, const float* input,
             break;
     }
     
-    /* ZSFLNN-C-014修复: 使用config中的可配置钳位值替代硬编码 ±10.0f/±5.0f */
+/* 使用config中的可配置钳位值替代硬编码 ±10.0f/±5.0f */
     float sc = system->state_clamp;
     float vc = system->velocity_clamp;
     for (size_t i = 0; i < state_size; i++) {
@@ -572,7 +572,7 @@ static void compute_derivatives(const DynamicsSystem* system,
 static int dynamics_ode_rhs(float t, const float* y, float* dydt, void* ctx) {
     DynamicsSystem* s = (DynamicsSystem*)ctx;
     size_t n = s->config.state_size;
-    /* ZSFWS-P5修复: 移除虚构的velocity*damping输入。
+/* 移除虚构的velocity*damping输入。
      * 优先使用真实外部输入（传感器/控制信号），
      * 无外部输入时使用零向量，代表系统仅受内部动力驱动。
      * 之前velocity*damping=虚构力，不具备物理意义，
@@ -1853,7 +1853,7 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
      *   - 未来改进方向：将本函数与 CfC 反向传播整合，使用伴随法
      *     (adjoint method) 同时传播状态伴随和参数梯度，消除 J^T≈J 近似。
      *
-     * ZSFUSA-P2-007: 实现路线图
+ *: 实现路线图
      * 1. 短路线(当前): 使用JVP有限差分近似，精度受限于非线性耦合强度
      * 2. 中路线: 实现cfc_cell_backward_jacobian()计算精确∂f/∂x，
      *    替换当前J^T@a的有限差分计算，复杂度O(n²)但精度完整
@@ -1897,11 +1897,10 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
     }
 
     const float epsilon = 1e-5f;
-    /* ZSF-ZNB修复M-003: 使用config中的实际参数替代硬编码 */
     float k = (system && system->config.time_scale > 0.0f) ? system->config.time_scale : 1.0f;
     float c = (system && system->config.damping > 0.0f) ? system->config.damping : 0.1f;
 
-    /* ZSF-ZNB修复C-002: 创建零输入缓冲区替代NULL
+/*修复C-002: 创建零输入缓冲区替代NULL
      * compute_derivatives要求所有参数非NULL，NULL会导致函数立即返回
      * 而无法计算JVP。使用零向量作为无外力输入。 */
     float* zero_input = (float*)safe_calloc(state_dim, sizeof(float));
@@ -1937,7 +1936,7 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
         const float scale = 1.0f / (2.0f * epsilon + 1e-12f);
 
         for (size_t d = 0; d < state_dim; d++) {
-            /* ZSFWS-P7修复: J@a_q的有限差分近似 - 实际使用而非丢弃。
+/* J@a_q的有限差分近似 - 实际使用而非丢弃。
              * 之前此JVP被计算后完全未使用，伴随传播使用硬编码的线性弹簧模型。
              * 现在混合使用：JVP提供非线性修正，线性模型提供稳定基线。
              * J^T@a: 对于非线性系统，需要额外计算 J^T@a_v。
@@ -1960,7 +1959,7 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
                 jvp_transpose_v = (dstate_plus[d] - dstate_minus[d]) * scale * adj_norm;
             }
 
-            /* ZSFWS-P7修复: 伴随系统传播 - 使用计算出的JVP而非硬编码k/c。
+/* 伴随系统传播 - 使用计算出的JVP而非硬编码k/c。
              * 线性基线: da_q/dt = -a_v, da_v/dt = -JVP_q
              * 混合: 非线性度越高，JVP权重越大 */
             float nl_weight = CLAMP(system->config.nonlinearity, 0.0f, 1.0f);
@@ -1995,7 +1994,7 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
     safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);
     safe_free((void**)&dvel_plus); safe_free((void**)&dvel_minus);
     safe_free((void**)&adjoint_q); safe_free((void**)&adjoint_v);
-    safe_free((void**)&zero_input); /* ZSF-ZNB修复C-002: 释放零输入缓冲区 */
+    safe_free((void**)&zero_input);
     return 0;
 }
 

@@ -2,7 +2,7 @@
  * @file multimodal_manager.c
  * @brief 多模态管理器实现
  *
- * ZSF-NEW-013修复: 消除5种模态后混合绕过LNN的架构缺陷。
+ *修复: 消除5种模态后混合绕过LNN的架构缺陷。
  * 所有9种模态(视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机)
  * 现在统一在lnn_forward之前注入lnn_input，经过同一个CfC连续动态系统。
  * 严格遵循：不需要分开编码、不需要多模型融合、不需要跨模态注意力。
@@ -13,8 +13,8 @@
 #include "selflnn/selflnn.h"               /* P0-002: selflnn_get_unified_signal_processor */
 #include "selflnn/multimodal/multimodal_unified_input.h"
 #include "selflnn/multimodal/haptic_learning.h" /* H-018集成: 触觉CfC处理+纹理分析 */
-#include "selflnn/multimodal/audio_loader.h"     /* ZSF-007: 音频文件加载器集成 */
-#include "selflnn/multimodal/image_loader.h"     /* ZSF-008: 图像文件加载器集成 */
+#include "selflnn/multimodal/audio_loader.h"
+#include "selflnn/multimodal/image_loader.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
@@ -40,7 +40,7 @@ struct MultimodalManager {
     UnifiedSignalProcessor* unified_signal_processor; /**< P0-002: 引用全局统一信号处理器 */
     int unified_signal_processor_owned;   /**< 是否拥有信号处理器（1=自建需释放，0=外部引用） */
     LNN* lnn_instance;                    /**< 关联的LNN实例（不拥有，不释放） */
-    float modality_weights[9];            /**< ZSF-NEW-013: 各模态权重9种（视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机）用于LNN输入前投影加权，所有模态通过lnn_forward进入统一CfC ODE */
+    float modality_weights[9];            /**< 各模态权重9种（视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机）用于LNN输入前投影加权，所有模态通过lnn_forward进入统一CfC ODE */
     HapticCfcProcessor* haptic_cfc_proc;  /**< H-018: CfC触觉信号处理器 */
     HapticTextureAnalyzer* haptic_texture_analyzer; /**< H-018: 触觉纹理分析器 */
     /* M-009修复: 5种额外模态的Xavier投影矩阵，替代取模循环映射
@@ -193,7 +193,7 @@ int multimodal_manager_process(MultimodalManager* manager,
         return -1;
     }
     unified_output->signal_dimension = max_features;
-    /* ZSFWS-001修复: 时序特征计算必须在encode之后执行
+/* 时序特征计算必须在encode之后执行
      * 原代码在encode前读取unified_signal导致temporal_features永远为0，
      * 因为unified_signal在encode调用后才被填充真实数据。 */
     unified_output->temporal_features = NULL;
@@ -210,7 +210,7 @@ int multimodal_manager_process(MultimodalManager* manager,
                                        vision_input, audio_input, text_input, sensor_input,
                                        unified_output);
 
-    /* ZSFWS-001修复: 时序特征计算移到这里——unified_signal已在encode中填充完毕 */
+/* 时序特征计算移到这里——unified_signal已在encode中填充完毕 */
     {
         static float prev_frame_features[256] = {0};
         static int has_prev_frame = 0;
@@ -380,7 +380,7 @@ int multimodal_manager_process(MultimodalManager* manager,
 
     size_t copy_count = lnn_copy;
 
-    /* ZSF-NEW-013: 后混合路径已移除。
+/*: 后混合路径已移除。
      * 所有9种模态(视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机)
      * 现在统一通过 lnn_input → lnn_forward → lnn_output 路径，
      * 进入同一个CfC连续动态系统进行状态演化。 */
@@ -416,7 +416,7 @@ int multimodal_manager_set_weight(MultimodalManager* manager,
 }
 
 /* ============================================================================
- * ZSF-007/ZSF-008: 音频/图像文件加载器集成桥接函数
+ * 音频/图像文件加载器集成桥接函数
  * audio_loader.h 和 image_loader.h 此前为孤儿头文件（有实现但0处引用）。
  * 通过此桥接函数将文件加载能力集成到多模态管理器，使其成为系统的有效组成部分。
  * ============================================================================ */

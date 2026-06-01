@@ -15,7 +15,7 @@
 #include "selflnn/programming/self_programming.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
-#include "selflnn/utils/secure_random.h"  /* ZSFZS-F032: 安全随机数 */
+#include "selflnn/utils/secure_random.h" /* 安全随机数 */
 #include "selflnn/core/errors.h"
 
 #include <stdlib.h>
@@ -30,7 +30,7 @@
 #define CI_MAX_TOKENS    256
 #define CI_MAX_STACK     128
 #define CI_MAX_FUNC_NAME 32
-#define CI_MAX_ARRAY     64   /* ZSFAAA-DEEP-021: 数组最大容量 */
+#define CI_MAX_ARRAY     64 /* 数组最大容量 */
 #define CI_MAX_FUNC_ARGS 16   /* M-026: 函数最大参数数量 */
 #define CI_MEM_POOL_SIZE (1024 * 1024)  /* M-026: 内存池1MB */
 #define CI_MAX_MEM_BLOCKS 256  /* M-026: 最大内存块数量 */
@@ -40,7 +40,7 @@ typedef enum {
     CI_VAR_FLOAT = 0,
     CI_VAR_INT = 1,
     CI_VAR_STRING = 2,
-    CI_VAR_ARRAY = 3   /* ZSFAAA-DEEP-021: 数组类型 */
+    CI_VAR_ARRAY = 3 /* 数组类型 */
 } CiVarType;
 
 /* 变量存储 */
@@ -50,7 +50,7 @@ typedef struct {
     float fval;
     int ival;
     char sval[256];
-    /* ZSFAAA-DEEP-021: 数组支持 */
+/* 数组支持 */
     float array_vals[CI_MAX_ARRAY];
     int array_size;
     /* P0-003修复: 地址追踪 — 每个变量在&操作时分配唯一地址 */
@@ -95,7 +95,6 @@ typedef enum {
     CI_TOK_EQ = 11,
     CI_TOK_LT = 12,
     CI_TOK_GT = 13,
-    /* ZSFAAA-DEEP-021新增: 指针/数组/复合赋值支持 */
     CI_TOK_LBRACKET = 14,
     CI_TOK_RBRACKET = 15,
     CI_TOK_AMPERSAND = 16,
@@ -103,7 +102,6 @@ typedef enum {
     CI_TOK_MINUS_ASSIGN = 18,
     CI_TOK_STAR_ASSIGN = 19,
     CI_TOK_SLASH_ASSIGN = 20,
-    /* ZSFAAA-DEEP-025新增: 指针/结构体 */
     CI_TOK_DOT = 21,
     CI_TOK_ARROW = 22
 } CiTokenType;
@@ -415,10 +413,10 @@ static int _ci_tokenize(CiInterpreter* ci) {
                 break;
             case '(': ci->tokens[ci->token_count++].type = CI_TOK_LPAREN; ci->pos++; break;
             case ')': ci->tokens[ci->token_count++].type = CI_TOK_RPAREN; ci->pos++; break;
-            case '[': ci->tokens[ci->token_count++].type = CI_TOK_LBRACKET; ci->pos++; break;  /* ZSFAAA-DEEP-021 */
-            case ']': ci->tokens[ci->token_count++].type = CI_TOK_RBRACKET; ci->pos++; break;  /* ZSFAAA-DEEP-021 */
-            case '&': ci->tokens[ci->token_count++].type = CI_TOK_AMPERSAND; ci->pos++; break;  /* ZSFAAA-DEEP-021 */
-            case '.': ci->tokens[ci->token_count++].type = CI_TOK_DOT; ci->pos++; break;  /* ZSFAAA-DEEP-025 */
+            case '[': ci->tokens[ci->token_count++].type = CI_TOK_LBRACKET; ci->pos++; break;
+            case ']': ci->tokens[ci->token_count++].type = CI_TOK_RBRACKET; ci->pos++; break;
+            case '&': ci->tokens[ci->token_count++].type = CI_TOK_AMPERSAND; ci->pos++; break;
+            case '.': ci->tokens[ci->token_count++].type = CI_TOK_DOT; ci->pos++; break;
             case '=':
                 if (ci->source[ci->pos + 1] == '=') {
                     ci->tokens[ci->token_count++].type = CI_TOK_EQ;
@@ -474,7 +472,7 @@ static float _ci_get_var_value(CiInterpreter* ci, const char* name) {
     return (float)v->ival;
 }
 
-/* ZSFAAA-DEEP-021: 获取数组元素值 */
+/* 获取数组元素值 */
 static float _ci_get_array_elem(CiInterpreter* ci, const char* name, int idx) {
     CiVariable* v = _ci_find_var(ci, name);
     if (!v || v->type != CI_VAR_ARRAY) return 0.0f;
@@ -482,7 +480,7 @@ static float _ci_get_array_elem(CiInterpreter* ci, const char* name, int idx) {
     return v->array_vals[idx];
 }
 
-/* ZSFAAA-DEEP-021: 设置数组元素值 */
+/* 设置数组元素值 */
 static void _ci_set_array_elem(CiInterpreter* ci, const char* name, int idx, float val) {
     CiVariable* v = _ci_find_var(ci, name);
     if (!v) {
@@ -521,7 +519,7 @@ static float _ci_primary(CiInterpreter* ci) {
         _ci_next(ci);
         return tok->num_val;
     }
-    /* ZSFAAA-DEEP-021: &取地址操作符 */
+/* &取地址操作符 */
     if (tok->type == CI_TOK_AMPERSAND) {
         _ci_next(ci);
         /* P0-003修复: 真实地址追踪 — 为每个变量分配唯一模拟地址
@@ -552,7 +550,7 @@ static float _ci_primary(CiInterpreter* ci) {
     if (tok->type == CI_TOK_IDENT) {
         const char* name = tok->ident;
         _ci_next(ci);
-        /* ZSFAAA-DEEP-021: 数组下标访问 arr[idx] */
+/* 数组下标访问 arr[idx] */
         if (_ci_current(ci)->type == CI_TOK_LBRACKET) {
             _ci_next(ci); /* 跳过[ */
             float idx_val = _ci_expr(ci);
@@ -657,14 +655,14 @@ static float _ci_primary(CiInterpreter* ci) {
                 if (strcmp(name, g_ci_builtins[i].name) == 0)
                     return g_ci_builtins[i].func(arg);
             }
-            /* ZSFAAA-DEEP-021: print内置函数 */
+/* print内置函数 */
             if (strcmp(name, "print") == 0) {
                 printf("[解释器输出] %g\n", (double)arg);
                 return arg;
             }
             return 0.0f;
         }
-        /* ZSFAAA-DEEP-025: 结构体成员访问 var.field 或 ptr->field */
+/* 结构体成员访问 var.field 或 ptr->field */
         if (_ci_current(ci)->type == CI_TOK_DOT ||
             _ci_current(ci)->type == CI_TOK_ARROW) {
             int is_arrow = (_ci_current(ci)->type == CI_TOK_ARROW);
@@ -711,7 +709,7 @@ static float _ci_primary(CiInterpreter* ci) {
             _ci_next(ci);
         return val;
     }
-    /* ZSFAAA-DEEP-025: *ptr指针解引用 */
+/* *ptr指针解引用 */
     if (tok->type == CI_TOK_STAR) {
         _ci_next(ci);
         float val = _ci_primary(ci);
@@ -799,7 +797,7 @@ static float _ci_exec_statement(CiInterpreter* ci) {
         name[63] = '\0';
         _ci_next(ci);
 
-        /* ZSFAAA-DEEP-021: 数组下标赋值 arr[idx] = expr */
+/* 数组下标赋值 arr[idx] = expr */
         if (_ci_current(ci)->type == CI_TOK_LBRACKET) {
             _ci_next(ci);
             float idx_val = _ci_expr(ci);
@@ -899,7 +897,7 @@ static float _ci_if_statement(CiInterpreter* ci) {
     if (truth > 0.5f) {
         result = _ci_parse_block(ci);
     } else {
-        /* ZSFLYF-P2-009修复: 健壮else检测。
+/* 健壮else检测。
          * 跳过条件表达式后的可能多余分号、空白和注释，
          * 确保能正确识别各种格式的else分句。
          * 例如: if(x){} else{}  或  if(x){}; else{}  都能正确匹配 */
@@ -947,7 +945,7 @@ static float _ci_for_loop(CiInterpreter* ci) {
     return result;
 }
 
-/* ZSFABC: while循环实现 */
+/* while循环实现 */
 static float _ci_while_loop(CiInterpreter* ci) {
     if (!_ci_expect(ci, '(')) return 0.0f;
     /* 保存条件表达式位置用于循环重新求值 */
@@ -1038,7 +1036,7 @@ const char* self_programming_interpreter_capability(void) {
 }
 
 /**
- * @brief ZSFA-FIX-P0-004: C解释器可用性检查（包装接口）
+ * @brief C解释器可用性检查（包装接口）
  *
  * 直接复用 self_programming_interpreter_available() 的实现。
  * 内置解释器始终可用。
@@ -1050,7 +1048,7 @@ int c_interpreter_available(void) {
 }
 
 /**
- * @brief ZSFA-FIX-P0-004: C解释器代码执行（包装接口）
+ * @brief C解释器代码执行（包装接口）
  *
  * 对 self_programming_interpret_expr() 的瘦包装。
  * 当外部C编译器不可用时，自我编程模块使用此函数执行代码。
@@ -1082,7 +1080,7 @@ int c_interpreter_execute(const char* code, char* result_buffer, size_t result_s
 }
 
 /**
- * @brief ZSFA-FIX-P0-004: C解释器表达式求值（包装接口）
+ * @brief C解释器表达式求值（包装接口）
  *
  * 对 self_programming_interpret_expr() 的直接包装。
  *

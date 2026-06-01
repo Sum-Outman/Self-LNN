@@ -1,4 +1,4 @@
-# AGI高级认知系统CMake配置
+﻿# AGI高级认知系统CMake配置
 
 set(AGI_SOURCES
     agi.c
@@ -32,7 +32,7 @@ target_link_libraries(selflnn_agi PRIVATE
     selflnn_multimodal
 )
 
-# ZSFLYF-KNOWN-3修复: 添加agi头文件独立install规则
+# 添加agi头文件独立install规则
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/agi/
     DESTINATION include/selflnn/agi
     FILES_MATCHING PATTERN "*.h")

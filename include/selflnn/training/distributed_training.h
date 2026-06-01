@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file distributed_training.h
  * @brief 分布式训练模块
  *
@@ -284,7 +284,7 @@ SELFLNN_API int distributed_start_discovery_listener(DistributedContext* ctx);
 SELFLNN_API int distributed_stop_discovery_listener(DistributedContext* ctx);
 
 /* ---------------------------------------------------------------------------
- * ZSFZX-FIX-P1-001: 完整内部结构定义（仅SELFLNN_IMPLEMENTATION可见）
+ *: 完整内部结构定义（仅SELFLNN_IMPLEMENTATION可见）
  * 将原先在src/training/distributed_internal.h中的DistributedContext完整定义
  * 移至此处，消除core/extended_training.c的跨模块相对路径引用。
  * 外部API使用者仅能通过不透明指针访问，内部实现模块可获得完整结构体。

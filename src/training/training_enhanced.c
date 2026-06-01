@@ -1,4 +1,4 @@
-#define SELFLNN_IMPLEMENTATION
+﻿#define SELFLNN_IMPLEMENTATION
 #include "selflnn/training/training_enhanced.h"
 #include "selflnn/core/cfc_network.h"
 #include "selflnn/core/lnn.h"
@@ -97,7 +97,7 @@ static void registry_free(Trainer* trainer)
 static int lnn_get_weight_and_bias(LNN* network, float** weights, size_t* num_weights,
                                     float** biases, size_t* num_biases)
 {
-    /* ZSFQQ-Q025: 使用公共API替代直接访问cfc_network内部字段 */
+/* 使用公共API替代直接访问cfc_network内部字段 */
     if (!network) return -1;
     *weights = lnn_get_weight_matrix(network);
     *num_weights = lnn_get_weight_count(network);
@@ -109,7 +109,7 @@ static int lnn_get_weight_and_bias(LNN* network, float** weights, size_t* num_we
 
 static int lnn_set_weight_and_bias(LNN* network, const float* weights, const float* biases)
 {
-    /* ZSFQQ-Q025: 使用公共API替代直接访问cfc_network内部字段 */
+/* 使用公共API替代直接访问cfc_network内部字段 */
     return lnn_set_weights_and_biases(network, weights, biases);
 }
 

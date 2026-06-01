@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file motor.c
  * @brief 电机控制预处理器实现 — PID/阻抗/力位混合控制、轨迹插值
  *
@@ -77,7 +77,7 @@ int motor_pid_init(MotorController* mc, int joint_id,
     pid->integral_limit = 10.0f;
     pid->output_limit = 100.0f;
     pid->deadband = 0.001f;
-    /* ZSFZX-FIX-MOTOR: 安全限位默认值（保守设置，需根据实际关节参数配置） */
+/* 安全限位默认值（保守设置，需根据实际关节参数配置） */
     pid->pos_min = -3.14159f;    /* -π rad */
     pid->pos_max = 3.14159f;     /* +π rad */
     pid->vel_limit = 10.0f;      /* 10 rad/s */
@@ -112,12 +112,12 @@ int motor_pid_update(MotorController* mc, int joint_id,
     if (*output > pid->output_limit) *output = pid->output_limit;
     if (*output < -pid->output_limit) *output = -pid->output_limit;
 
-    /* ZSFZX-FIX-MOTOR: 急停检测 — 激活时立即输出零 */
+/* 急停检测 — 激活时立即输出零 */
     if (pid->estop_active) {
         *output = 0.0f;
         pid->integral = 0.0f;
     }
-    /* ZSFZX-FIX-MOTOR: 力矩安全限幅 — 独立于通用output_limit */
+/* 力矩安全限幅 — 独立于通用output_limit */
     if (pid->torque_limit > 0.0f) {
         if (*output > pid->torque_limit) *output = pid->torque_limit;
         if (*output < -pid->torque_limit) *output = -pid->torque_limit;
@@ -126,7 +126,7 @@ int motor_pid_update(MotorController* mc, int joint_id,
     return 0;
 }
 
-/* ZSFZX-FIX-R8-2: 紧急停止 — 设置所有关节PID的estop_active=1
+/* 紧急停止 — 设置所有关节PID的estop_active=1
  * 下一次motor_pid_update调用时输出将被清零 */
 int motor_controller_estop(MotorController* mc) {
     if (!mc) return -1;

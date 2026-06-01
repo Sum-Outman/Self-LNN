@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file hardware_detector.c
  * @brief 硬件检测器实现 —— 统一硬件检测入口
  *
@@ -12,7 +12,7 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/core/lnn.h"
 
-/* ZSFZS-F022修复: selflnn_get_lnn外部声明 */
+/* selflnn_get_lnn外部声明 */
 extern void* selflnn_get_lnn(void);
 
 #include <stdlib.h>
@@ -62,7 +62,7 @@ static float hd_softplus(float x) {
     return (float)(log1pf(expf(x)));
 }
 
-/* ZSFZS-F022修复: 大小写不敏感的strstr，跨平台实现 */
+/* 大小写不敏感的strstr，跨平台实现 */
 static char hd_char_lower(char c) {
     return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
 }
@@ -574,7 +574,7 @@ int hd_detect_network_adapters(HDDeviceInfo* infos, size_t max_count, size_t* co
             FILE* fp = popen("ifconfig -l 2>/dev/null || echo ''", "r");
             if (fp) {
                 if (fgets(buf, sizeof(buf), fp)) {
-                    /* ZSFZS-F039: strtok→strtok_s线程安全 */
+/* strtok→strtok_s线程安全 */
                     char* saveptr = NULL;
                     char* token = strtok_s(buf, " \n\r\t", &saveptr);
                     while (token != NULL && net_count < max_count) {

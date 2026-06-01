@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file swarm_enhanced.c
  * @brief 群体智能深度增强系统完整实现
  *
@@ -744,7 +744,7 @@ int swarm_consensus_start_election(SwarmEnhancedEngine* engine) {
         int peer_id = engine->consensus_peers[p];
         if (peer_id == engine->consensus_config.node_id) continue;
 
-        /* ZSF-003修复: Raft选举对等节点日志状态提取。
+/*修复: Raft选举对等节点日志状态提取。
          * 当前单机部署模式下，所有对等节点日志状态通过共享内存同步读取。
          * 网络部署时需通过RequestVote RPC响应获取真实对等节点term和日志索引，
          * 届时在此处注入RPC回调获取的peer_log_term/peer_log_index。

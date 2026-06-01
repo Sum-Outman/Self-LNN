@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file swarm_control.h
  * @brief 多机器人集群控制接口
  *
@@ -58,7 +58,7 @@ typedef struct {
     int is_active;
     float battery_level;
     float task_progress;
-    uint32_t udp_seq_counter; /**< ZSFWS-M011: UDP报文递增序号，区分新旧数据包 */
+    uint32_t udp_seq_counter; /**< UDP报文递增序号，区分新旧数据包 */
 } SwarmRobotState;
 
 typedef struct {

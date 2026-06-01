@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file auto_kernel_optimization.h
  * @brief 自动内核优化系统接口
  *
@@ -315,7 +315,7 @@ int auto_kernel_optimizer_measure_real(GpuContext* context,
                                         int warmup_iters, int bench_iters,
                                         double* out_time_ms);
 
-/* ZSFX-P1修复: 设置GPU在线上下文（先前遗漏声明） */
+/* 设置GPU在线上下文（先前遗漏声明） */
 int auto_kernel_optimizer_set_context(AutoKernelOptimizer* optimizer, GpuContext* context);
 
 #ifdef __cplusplus

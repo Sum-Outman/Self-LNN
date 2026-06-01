@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 文字指令控制系统
  * 在对话中输入文字指令，直接控制机器人和设备
  * 支持自然语言解析和结构化命令
@@ -11,7 +11,6 @@ class TextCommandSystem {
         this.onCommandResult = null;
         this.commandPrefix = '';
         /* M-034修复：默认前缀列表可从后端动态更新 */
-        /* ZSFWS修复 P3-003: 已通过M-034动态获取替代，保留静态列表作为离线回退 */
         this._dynamicPrefixes = null;
         this._staticPrefixes = ['控制', '机器人', '电脑', '计算机', '打开', '关闭', '开始', '停止', '系统'];
     }
@@ -51,7 +50,7 @@ class TextCommandSystem {
         const parsed = this.commandEngine.parseCommand(trimmed);
         if (parsed.command) {
             parsed.isCommand = true;
-            /* ZSFWS-010修复: 添加await确保错误能正确传递到上层 */
+/* 添加await确保错误能正确传递到上层 */
             this.commandEngine.executeCommand(parsed).then(result => {
                 if (this.onCommandResult) {
                     this.onCommandResult(parsed, result);

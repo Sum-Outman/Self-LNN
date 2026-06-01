@@ -1,4 +1,4 @@
-#include "selflnn/robot/robot_control_advanced.h"
+﻿#include "selflnn/robot/robot_control_advanced.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/time_utils.h"
 #include "selflnn/core/errors.h"
@@ -996,7 +996,7 @@ int advanced_control_step(AdvancedControlState* state,
                 }
 
                 /* ---- 步骤5: 自适应增益更新 ---- */
-                /* ZSFABC-M009修复: 完整6×6矩阵MRAC自适应律
+/* 完整6×6矩阵MRAC自适应律
                  * 不再使用对角线简化。
                  * 完整MRAC法则: dK/dt = -Γ * s * φ^T
                  * K = [Kx(6×6) | Kr(6×6)] 共72个标量

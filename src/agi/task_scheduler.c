@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file task_scheduler.c
  * @brief K-038: 抢占式优先级任务调度器
  *
@@ -20,7 +20,7 @@
 #include <string.h>
 #include <time.h>
 
-/* ZSFAB P2-008修复: 跨平台互斥锁保护任务调度器并发访问 */
+/* P2-008修复: 跨平台互斥锁保护任务调度器并发访问 */
 #ifdef _WIN32
 #include <windows.h>
 #define TS_MUTEX_TYPE CRITICAL_SECTION
@@ -98,7 +98,7 @@ struct TaskScheduler {
     int (*thread_pool_submit)(void* pool, void (*fn)(void*), void* arg);
     int use_thread_pool;
 
-    /* ZSFAB P2-008: 并发访问保护锁 */
+/* P2-008: 并发访问保护锁 */
     TS_MUTEX_TYPE lock;
 };
 

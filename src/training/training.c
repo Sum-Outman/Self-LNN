@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file training.c
  * @brief 训练模块实现
  * 
@@ -19,7 +19,7 @@
 #include "distributed_internal.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"
-#include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
+#include "selflnn/core/laplace_unified.h" /* 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/string_utils.h"
@@ -34,7 +34,7 @@
 #include "selflnn/core/cfc_cell.h"    /* 完整 CfCCell 结构体（梯度健康度报告） */
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/core/evolutionary_algorithms.h"
-#include "selflnn/core/loss.h"             /* ZSFX-P0: 统一损失函数接口 */
+#include "selflnn/core/loss.h" /* 统一损失函数接口 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -44,7 +44,7 @@
 #include <signal.h>
 #include <ctype.h>
 
-/* ZSFUSA-V09修复: 移除popen/curl依赖，改用纯C socket HTTP实现 */
+/* 移除popen/curl依赖，改用纯C socket HTTP实现 */
 /* 平台socket头文件已通过 selflnn/utils/platform.h 包含 */
 
 /* 纯C HTTP GET 内部辅助函数前向声明 */
@@ -401,11 +401,11 @@ static int ckpt_is_version_supported(uint32_t version) {
 int trainer_load_dataset_from_url(Trainer* trainer, const char* url, const char* format) {
     if (!trainer || !url) return -1;
 
-    /* ZSFUSA-V09修复: 使用纯C socket HTTP下载，不再调用外部curl */
+/* 使用纯C socket HTTP下载，不再调用外部curl */
 
     size_t resp_size = 0;
     char* response = _training_http_get(url, &resp_size);
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free (HTTP响应由safe_malloc分配) */
+/* raw free → safe_free (HTTP响应由safe_malloc分配) */
     if (!response || resp_size == 0) {
         safe_free((void**)&response);
         log_error("[HTTP数据集] 下载失败: %s", url);
@@ -460,7 +460,7 @@ int trainer_load_dataset_from_url(Trainer* trainer, const char* url, const char*
             if (is_header && line_num == 0) {
                 /* 首行检查是否为列名：如果所有token都无法解析为float则为列名行 */
                 int all_text = 1;
-                /* ZSFZS-F038: strtok→strtok_s线程安全 */
+/* strtok→strtok_s线程安全 */
                 char* saveptr = NULL;
                 char* token = strtok_s(line, ",\t;", &saveptr);
                 while (token) {
@@ -510,7 +510,7 @@ int trainer_load_dataset_from_url(Trainer* trainer, const char* url, const char*
         }
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&response);
     log_info("[HTTP数据集] 从%s加载%d样本 (格式=%s)", url, samples, format);
     return samples;
@@ -518,7 +518,7 @@ int trainer_load_dataset_from_url(Trainer* trainer, const char* url, const char*
 
 /**
  * @brief K-039: 通过GraphQL查询获取训练数据
- * ZSFUSA-V09修复: 使用纯C socket HTTP POST，不再调用外部curl
+ *修复: 使用纯C socket HTTP POST，不再调用外部curl
  */
 int trainer_load_dataset_graphql(Trainer* trainer, const char* endpoint,
                                   const char* query) {
@@ -536,7 +536,7 @@ int trainer_load_dataset_graphql(Trainer* trainer, const char* endpoint,
     safe_free((void**)&json_body);
 
     if (!response || resp_size == 0) {
-        /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
         safe_free((void**)&response);
         log_error("[GraphQL] HTTP请求失败: %s", endpoint);
         return -1;
@@ -546,7 +546,7 @@ int trainer_load_dataset_graphql(Trainer* trainer, const char* endpoint,
     const char* p = response;
     while ((p = strstr(p, "\"node\"")) != NULL) { edges++; p++; }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&response);
     log_info("[GraphQL] 从%s获取%d条边数据", endpoint, edges);
     return edges;
@@ -555,7 +555,7 @@ int trainer_load_dataset_graphql(Trainer* trainer, const char* endpoint,
 /**
  * @brief 训练器实现
  */
-/* P15: 课程学习调度器类型定义 (ZSFBUILD: 完整定义提前，避免C2037错误) */
+/* P15: 课程学习调度器类型定义 (完整定义提前，避免C2037错误) */
 #define CURRICULUM_MAX_STAGES 16
 
 typedef struct CurriculumScheduler {
@@ -572,7 +572,7 @@ typedef struct CurriculumScheduler {
     int* active_sample_mask;
 } CurriculumScheduler;
 
-/* ZSFBUILD: 函数前向声明 (定义在文件后方，此处仅声明避免MSVC C4013警告) */
+/* 函数前向声明 (定义在文件后方，此处仅声明避免MSVC C4013警告) */
 CurriculumScheduler* curriculum_scheduler_create(size_t num_samples, int num_stages,
                                                    int warmup_epochs, int epochs_per_stage);
 void curriculum_scheduler_free(CurriculumScheduler* cs);
@@ -586,7 +586,7 @@ typedef struct Trainer {
     MixedPrecisionContext* mixed_precision_context; /**< 混合精度训练上下文 */
     OptimizerState optimizer;      /**< 优化器状态 */
     LearningRateScheduler* scheduler; /**< 学习率调度器 */
-    void* warmup_scheduler;        /**< ZSFZS-F013: 学习率预热调度器（NULL=未启用） */
+    void* warmup_scheduler; /**< 学习率预热调度器（NULL=未启用） */
     void* enhanced_trainer;        /**< T-001: 增强训练上下文（EMA权重/学习率调度） */
     TrainingState state;           /**< 训练状态 */
     TrainingHistory history;       /**< 训练历史 */
@@ -723,12 +723,12 @@ typedef struct Trainer {
     // ---- F-08 分布式训练增强字段 ----
     
     // 异步梯度同步
-    _Atomic int async_sync_in_progress;       /**< ZSFAAA-P1-006: volatile→_Atomic，异步同步是否正在进行 */
+    _Atomic int async_sync_in_progress; /**< volatile→_Atomic，异步同步是否正在进行 */
     float* async_sync_buffer;                 /**< 异步同步缓冲区（存储当前梯度快照） */
     size_t async_sync_buffer_size;            /**< 异步同步缓冲区大小 */
     void* async_sync_thread_handle;           /**< 异步同步线程句柄 */
-    _Atomic int async_sync_requested;         /**< ZSFAAA-P1-006: volatile→_Atomic，是否已请求异步同步 */
-    _Atomic int async_sync_completed;         /**< ZSFAAA-P1-006: volatile→_Atomic，异步同步是否已完成 */
+    _Atomic int async_sync_requested; /**< volatile→_Atomic，是否已请求异步同步 */
+    _Atomic int async_sync_completed; /**< volatile→_Atomic，异步同步是否已完成 */
     int async_sync_enabled;                   /**< 是否启用异步梯度同步 */
     
     // 树形拓扑 (Binary Tree AllReduce)
@@ -754,13 +754,13 @@ typedef struct Trainer {
     int grad_accum_initialized;               /**< 梯度累积是否已初始化 */
     
     // 节点心跳检测
-    _Atomic int heartbeat_alive;              /**< ZSFAAA-P1-006: volatile→_Atomic，心跳线程是否存活 */
-    _Atomic int heartbeat_should_exit;        /**< ZSFAAA-P1-006: volatile→_Atomic，心跳线程是否应退出 */
+    _Atomic int heartbeat_alive; /**< volatile→_Atomic，心跳线程是否存活 */
+    _Atomic int heartbeat_should_exit; /**< volatile→_Atomic，心跳线程是否应退出 */
     void* heartbeat_thread_handle;            /**< 心跳线程句柄 */
     double* heartbeat_last_seen;              /**< 各节点最后心跳时间戳数组 */
     int heartbeat_timeout_ms;                 /**< 心跳超时时间（毫秒） */
     int heartbeat_interval_ms;                /**< 心跳间隔时间（毫秒） */
-    _Atomic int* heartbeat_node_alive;        /**< ZSFAAA-P1-006: volatile→_Atomic，各节点是否存活数组 */
+    _Atomic int* heartbeat_node_alive; /**< volatile→_Atomic，各节点是否存活数组 */
     int heartbeat_num_nodes;                  /**< 心跳监控节点数 */
     int heartbeat_enabled;                    /**< 是否启用心跳检测 */
     int* heartbeat_failed_nodes;              /**< 已失败节点ID数组 */
@@ -785,7 +785,7 @@ typedef struct Trainer {
     // ---- 需求20.4a: 紧急检查点（崩溃恢复） ----
     char* emergency_checkpoint_path;          /**< 紧急检查点文件路径 */
     int emergency_checkpoint_enabled;         /**< 是否启用紧急检查点 */
-    _Atomic int emergency_save_requested;     /**< ZSFAAA-P1-006: volatile→_Atomic，紧急保存请求标志（信号处理中设置） */
+    _Atomic int emergency_save_requested; /**< volatile→_Atomic，紧急保存请求标志（信号处理中设置） */
     char* crash_checkpoint_dir;               /**< 崩溃检查点目录 */
     
     // ---- 需求20.4b: 检查点保留策略 ----
@@ -797,7 +797,7 @@ typedef struct Trainer {
     int background_checkpoint_enabled;        /**< 是否启用后台定时保存 */
     int background_checkpoint_interval;       /**< 后台保存间隔（秒） */
     void* background_checkpoint_thread;       /**< 后台保存线程句柄 */
-    _Atomic int background_checkpoint_exit;   /**< ZSFAAA-P1-006: volatile→_Atomic，后台保存线程退出标志 */
+    _Atomic int background_checkpoint_exit; /**< volatile→_Atomic，后台保存线程退出标志 */
     
     // ---- P1-6 分布式训练容错和恢复增强 ----
     int elastic_enabled;                      /**< 是否启用弹性训练（动态加减节点） */
@@ -823,8 +823,8 @@ typedef struct Trainer {
     MutexHandle lock;                         /**< 训练器内部锁（保护所有可变字段） */
     
     // 训练控制标志
-    _Atomic int is_paused;                    /**< ZSFAAA-P1-006: volatile→_Atomic，暂停标志（1=已暂停，暂停时训练循环等待） */
-    _Atomic int is_stopped;                   /**< ZSFAAA-P1-006: volatile→_Atomic，停止标志（1=已停止，停止后训练循环退出） */
+    _Atomic int is_paused; /**< volatile→_Atomic，暂停标志（1=已暂停，暂停时训练循环等待） */
+    _Atomic int is_stopped; /**< volatile→_Atomic，停止标志（1=已停止，停止后训练循环退出） */
     
     // ---- P3.6 演化算法集成 ----
     Population* evolution_population;          /**< 演化种群（管理基因组个体） */
@@ -832,7 +832,7 @@ typedef struct Trainer {
     size_t evolution_genome_size;             /**< 演化基因组大小（=参数量） */
     int evolution_initialized;                /**< 演化是否已初始化 */
 
-    /* ZSFZS-F025: 训练指标JSON日志导出 */
+/* 训练指标JSON日志导出 */
     FILE* metrics_export_file;               /**< JSON指标导出文件句柄（NULL=未初始化/已关闭） */
 
     /* P1-002修复: ReduceLROnPlateau状态从static迁移到Trainer结构体
@@ -841,11 +841,11 @@ typedef struct Trainer {
     float  lr_best_val_loss;                 /**< LR Plateau最佳验证损失（每Trainer实例独立） */
     float  lr_current_factor;                /**< LR Plateau当前衰减因子（每Trainer实例独立） */
 
-    /* ZSFWS-P0-002: 梯度健康度监测 */
+/* 梯度健康度监测 */
     GradientHealthReport grad_health;        /**< 最近梯度健康度报告 */
     int grad_health_valid;                   /**< 健康度报告是否有效 */
 
-    /* ZSFAAA-P0-006修复: 微验证上次损失从函数内静态变量迁移到Trainer结构体
+/* 微验证上次损失从函数内静态变量迁移到Trainer结构体
      * 原为static float导致多Trainer实例并行运行时状态串扰(数据竞争)，
      * 分布式训练/多实验场景下早停误判、验证评估偏差 */
     float last_mini_val_loss;                /**< 微验证上次损失（每Trainer实例独立） */
@@ -1012,7 +1012,7 @@ static void gradient_topk_decompress(float* output, size_t num_params,
                                      const int* indices, const float* values,
                                      size_t compressed_size);
 
-/* ZSFZX-FIX-R10-2: 多类分类Precision/Recall/F1计算(macro-average) */
+/* 多类分类Precision/Recall/F1计算(macro-average) */
 static void training_compute_classification_metrics(
     const float* predictions, const float* targets,
     size_t batch_size, size_t num_classes,
@@ -1059,7 +1059,7 @@ static void training_compute_classification_metrics(
  * 在此情况下返回 -1 明确报错，而非返回 0 假装成功。
  * ============================================================================ */
 
-/* ZSF-NEW-006修复: Ring AllReduce完成 - 真实梯度规约
+/*修复: Ring AllReduce完成 - 真实梯度规约
  * 单节点时执行自规约(确保梯度有效性)；多节点时委托到分布式训练模块 */
 static int ring_allreduce_complete(float* gradients, size_t num_parameters,
                                     int node_id, int total_nodes)
@@ -1128,12 +1128,12 @@ TrainingConfig training_config_default(void) {
     config.epochs = 100;
     config.patience = 10;
     config.validation_split = 20;  // 20%
-    config.convergence_threshold = 5e-5f;   /* ZSFX-DEEP-001-R1: 从1e-4优化为5e-5，平衡收敛速度与训练充分性 */
-    config.min_delta = 1e-8f;              /* ZSFZS-F009: 默认最小改善阈值 */
-    config.convergence_rate_window = 5;    /* ZSFWS-004: 收敛速率窗口5 epoch */
-    config.enable_mini_validation = 0;     /* ZSFWS-007: 默认禁用微验证 */
-    config.mini_validation_interval = 20;  /* ZSFWS-007: 每20个batch微验证 */
-    config.mini_validation_samples = 128;  /* ZSFWS-007: 128个采样点 */
+    config.convergence_threshold = 5e-5f; /* 从1e-4优化为5e-5，平衡收敛速度与训练充分性 */
+    config.min_delta = 1e-8f; /* 默认最小改善阈值 */
+    config.convergence_rate_window = 5; /* 收敛速率窗口5 epoch */
+    config.enable_mini_validation = 0; /* 默认禁用微验证 */
+    config.mini_validation_interval = 20; /* 每20个batch微验证 */
+    config.mini_validation_samples = 128; /* 128个采样点 */
     
     config.shuffle_data = 1;
     config.verbose = 1;
@@ -1186,12 +1186,12 @@ TrainingConfig training_config_default(void) {
     config.memory_context_strength = 0.3f;          /**< 默认记忆上下文影响强度 */
     config.memory_consolidation_interval = 5;       /**< 默认每5个epoch巩固一次 */
     
-    /* ZSFZS-F013: 学习率预热默认配置 */
+/* 学习率预热默认配置 */
     config.warmup_steps = 500;              /**< 默认500步预热，稳定训练初期 */
     config.warmup_init_lr = 0.0f;           /**< 0表示自动计算为目标LR的1/100 */
     config.warmup_cosine_after = 1;         /**< 默认预热后启用余弦退火调度 */
 
-    /* ZSFZS-F025: 训练指标JSON日志导出默认配置 */
+/* 训练指标JSON日志导出默认配置 */
     config.metrics_export_interval = 10;     /**< 默认每10个epoch导出一次JSON指标 */
 
     return config;
@@ -1424,7 +1424,7 @@ static void trainer_cleanup_gpu_resources(Trainer* trainer) {
     trainer->gpu_backend = GPU_BACKEND_CPU;
     
     /* P15修复: 初始化课程学习调度器（配置启用时创建，否则NULL） */
-    /* ZSFBUILD: config→trainer->config (trainer_cleanup_gpu_resources无config参数) */
+/* config→trainer->config (trainer_cleanup_gpu_resources无config参数) */
     trainer->curriculum_scheduler = NULL;
     if (trainer->config.use_curriculum) {
         trainer->curriculum_scheduler = curriculum_scheduler_create(
@@ -2182,7 +2182,7 @@ static void ring_allreduce_task(void* arg) {
                 /* 超时: 标记barrier失败，恢复计数器继续 */
                 *task->barrier_generation = expected_gen + 1;
                 *task->barrier_counter = 0;
-                return; /* ZSFBUILD: barrier超时 - void函数不能返回值 */
+                return; /* barrier超时 - void函数不能返回值 */
             }
         }
 
@@ -2524,7 +2524,7 @@ static int trainer_compress_gradients(Trainer* trainer, float* gradients, size_t
 }
 
 /* ================================================================
- * ZSFWS-P0-002: 梯度健康度监测系统实现
+ *: 梯度健康度监测系统实现
  * 在每个训练epoch后收集梯度统计信息，检测梯度消失/爆炸/NaN率。
  * 防止训练静默进入无效状态（所有梯度被跳过但无告警）。
  * ================================================================ */
@@ -3875,7 +3875,7 @@ static int distributed_leader_election(Trainer* trainer, const int* failed_nodes
 
     int N = trainer->distributed_num_nodes;
 
-    /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
     int* is_failed = (int*)safe_calloc((size_t)N, sizeof(int));
     if (!is_failed) {
         return -1;
@@ -3897,7 +3897,7 @@ static int distributed_leader_election(Trainer* trainer, const int* failed_nodes
         }
     }
 
-    /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
     safe_free((void**)&is_failed);
 
     if (new_leader_id < 0) {
@@ -4043,7 +4043,7 @@ static int distributed_elastic_rebalance_workload(Trainer* trainer) {
         if (chunk_size == 0) chunk_size = 1;
 
         int alive_count = 0;
-        /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
         int* alive_ids = (int*)safe_calloc((size_t)N, sizeof(int));
         if (!alive_ids) return -1;
 
@@ -4058,7 +4058,7 @@ static int distributed_elastic_rebalance_workload(Trainer* trainer) {
             return -1;
         }
 
-        /* ZSFEEE-FIX-RAW-MIG: raw calloc → safe_calloc */
+/* raw calloc → safe_calloc */
         float* new_buffer = (float*)safe_calloc(total_size, sizeof(float));
         if (!new_buffer) {
             safe_free((void**)&alive_ids);
@@ -4076,7 +4076,7 @@ static int distributed_elastic_rebalance_workload(Trainer* trainer) {
         }
 
         memcpy(trainer->failure_recovery_buffer, new_buffer, total_size * sizeof(float));
-        /* ZSFEEE-FIX-RAW-MIG: raw free → safe_free */
+/* raw free → safe_free */
         safe_free((void**)&new_buffer);
         safe_free((void**)&alive_ids);
     }
@@ -4244,7 +4244,7 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
     // 复制配置
     trainer->config = *config;
     trainer->network = network;
-    trainer->metrics_export_file = NULL;  /* ZSFZS-F025: 初始化为NULL，训练时按需创建 */
+    trainer->metrics_export_file = NULL; /* 初始化为NULL，训练时按需创建 */
     trainer->lr_patience_counter = 0;     /* P1-002修复: 初始化LR Plateau计数器 */
     trainer->lr_best_val_loss = FLT_MAX;  /* P1-002修复: 初始化最佳验证损失 */
     trainer->lr_current_factor = 1.0f;    /* P1-002修复: 初始化LR衰减因子 */
@@ -4283,7 +4283,7 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
     size_t total_steps = config->epochs * (1000 / config->batch_size + 1);
     trainer->scheduler = scheduler_create_internal(&scheduler_config, total_steps);
     
-    /* ZSFZS-F013: 初始化学习率预热调度器为未启用状态 */
+/* 初始化学习率预热调度器为未启用状态 */
     trainer->warmup_scheduler = NULL;
     
     // 初始化训练状态
@@ -4879,7 +4879,7 @@ void trainer_free(Trainer* trainer) {
         return;
     }
 
-    /* ZSFZS-F025: 关闭JSON指标导出文件（防止资源泄漏） */
+/* 关闭JSON指标导出文件（防止资源泄漏） */
     if (trainer->metrics_export_file) {
         fclose(trainer->metrics_export_file);
         trainer->metrics_export_file = NULL;
@@ -4893,7 +4893,7 @@ void trainer_free(Trainer* trainer) {
         scheduler_free_internal(trainer->scheduler);
     }
     
-    /* ZSFZS-F013: 释放学习率预热调度器 */
+/* 释放学习率预热调度器 */
     if (trainer->warmup_scheduler) {
         lr_warmup_scheduler_free(trainer->warmup_scheduler);
         trainer->warmup_scheduler = NULL;
@@ -5236,7 +5236,7 @@ static int trainer_evolution_step(Trainer* trainer, size_t epoch,
 }
 
 /* ============================================================================
- * ZSFZS-F025: 训练指标JSON日志导出
+ *: 训练指标JSON日志导出
  * 将训练指标序列化为JSON格式并写入文件（JSON Lines格式，每行一个JSON对象）
  * 纯C标准库实现，不依赖任何第三方库
  * 格式: {"epoch":N,"train_loss":F,"val_loss":F,"accuracy":F,"lr":F,"convergence_rate":F,"grad_norm":F,"timestamp":"ISO8601"}
@@ -5304,7 +5304,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
     }
     TRAINER_LOCK(trainer);
 
-    /* ZSFZX-FIX-NORMALIZE: 训练前数据归一化检查
+/* 训练前数据归一化检查
      * 原数据加载器(data_loaders.c)不做归一化, 归一化在training_data_pipeline.c中。
      * 若调用者直接调用trainer_train而未经过管线预处理, 数据可能未归一化。
      * 此处检测输入数据范围, 若超出合理范围则发出警告。 */
@@ -5328,13 +5328,13 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
         if (inp_max - inp_min > 1000.0f || tgt_max - tgt_min > 1000.0f ||
             inp_max > 100.0f || tgt_max > 100.0f ||
             inp_min < -100.0f || tgt_min < -100.0f) {
-            log_warning("[训练] ZSFZX-NORMALIZE: 输入数据范围[%.1f, %.1f]目标[%.1f, %.1f]跨度过大, "
+            log_warning("[训练] 输入数据范围[%.1f, %.1f]目标[%.1f, %.1f]跨度过大, "
                        "建议通过training_data_pipeline进行归一化预处理",
                        inp_min, inp_max, tgt_min, tgt_max);
         }
     }
 
-    /* ZSFZX-FIX-SHUFFLE: 在切分训练/验证集之前全局随机打乱数据
+/* 在切分训练/验证集之前全局随机打乱数据
      * 原代码直接从末尾按比例切分验证集，若数据有排序规律会导致分布偏差。
      * Fisher-Yates洗牌确保训练集和验证集的独立同分布(IID)。 */
     if (num_samples > 1 && trainer->config.validation_split > 0) {
@@ -5376,7 +5376,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
         train_samples = num_samples - validation_samples;
     }
     
-    /* ZSFZS-F014修复: 数据格式假设验证
+/* 数据格式假设验证
        假定数据按{全部输入}|{全部输出}格式排列: [in_0..in_N-1 | out_0..out_N-1]
        即 inputs 和 targets 各自连续存储，验证集从尾部按比例切分。
        如果数据按 {in_i, out_i} 交替排列，需要在调用前重新组织数据。 */
@@ -5385,7 +5385,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
     const float* val_inputs = (validation_samples > 0) ? (inputs + train_samples * input_dim) : NULL;
     const float* val_targets = (validation_samples > 0) ? (targets + train_samples * output_dim) : NULL;
 
-    /* ZSFZS-F014: 验证数据覆盖范围，确保指针不会越界 */
+/* 验证数据覆盖范围，确保指针不会越界 */
     if (validation_samples > 0) {
         size_t val_data_offset_input = train_samples * input_dim;
         size_t val_data_offset_target = train_samples * output_dim;
@@ -5426,16 +5426,16 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
         printf("trainer_train: 初始化训练状态，总批次=%zu\n", trainer->state.total_batches);
     }
 
-    /* ZSFZS-F025: 初始化JSON指标导出文件
+/* 初始化JSON指标导出文件
        训练开始时创建新文件（覆盖旧文件），训练过程中追加写入 */
     if (trainer->config.metrics_export_interval > 0) {
         trainer->metrics_export_file = fopen("training_metrics.jsonl", "w");
         if (!trainer->metrics_export_file) {
             if (trainer->config.verbose) {
-                log_warning("ZSFZS-F025: 无法创建训练指标导出文件 training_metrics.jsonl\n");
+                log_warning("无法创建训练指标导出文件 training_metrics.jsonl\n");
             }
         } else if (trainer->config.verbose) {
-            log_info("ZSFZS-F025: 训练指标JSON日志导出已启用，间隔=%zu epoch，文件=training_metrics.jsonl\n",
+            log_info("训练指标JSON日志导出已启用，间隔=%zu epoch，文件=training_metrics.jsonl\n",
                      trainer->config.metrics_export_interval);
         }
     } else {
@@ -5464,7 +5464,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
         }
     }
     
-    /* ZSFZS-F013: 创建学习率预热调度器（如果配置了warmup_steps > 0） */
+/* 创建学习率预热调度器（如果配置了warmup_steps > 0） */
     if (trainer->config.warmup_steps > 0) {
         size_t total_training_steps = trainer->state.total_batches * trainer->config.epochs;
         float init_lr = trainer->config.warmup_init_lr;
@@ -5481,7 +5481,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
         };
         trainer->warmup_scheduler = lr_warmup_scheduler_create(&warmup_cfg);
         if (trainer->config.verbose && trainer->warmup_scheduler) {
-            printf("[ZSFZS-F013] 学习率预热已启用: 预热步数=%zu, 初始LR=%.6e, 峰值LR=%.6e, 余弦退火=%d\n",
+            printf(" 学习率预热已启用: 预热步数=%zu, 初始LR=%.6e, 峰值LR=%.6e, 余弦退火=%d\n",
                    trainer->config.warmup_steps, init_lr,
                    trainer->config.learning_rate, trainer->config.warmup_cosine_after);
         }
@@ -5568,7 +5568,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                 }
             }
             
-            /* ZSFWS-DROP: 应用Dropout——同步训练器配置到CfC网络层
+/* 应用Dropout——同步训练器配置到CfC网络层
              * CfC网络内部在cfc_forward中已实现完整的Dropout机制
              * （随机掩码+反缩放），此处同步配置确保训练模式正确启用 */
             if (trainer->config.regularization == REGULARIZATION_DROPOUT &&
@@ -5584,7 +5584,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                 }
             }
             
-            /* ZSFWS-REG: 应用高级正则化（CutMix/MixUp/跨模态混合/DropPath）
+/* 应用高级正则化（CutMix/MixUp/跨模态混合/DropPath）
              * 增强数据在aug_inputs/aug_targets中，前向和损失计算使用增强后的数据 */
             float* aug_inputs = NULL;
             float* aug_targets = NULL;
@@ -5607,7 +5607,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                     safe_free((void**)&aug_targets);
                 }
             }
-            /* ZSFWS-REG: 增强数据接管并释放原始缓冲区防止内存泄漏 */
+/* 增强数据接管并释放原始缓冲区防止内存泄漏 */
             actual_inputs = use_augmented ? aug_inputs : batch_inputs;
             actual_targets = use_augmented ? aug_targets : batch_targets;
             
@@ -5723,7 +5723,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             
             perf_timer_stop(&trainer->forward_time);
             
-            /* ZSFX-P0: 统一损失计算路径。
+/* 统一损失计算路径。
              * 使用 loss_compute_ex 替代原有的3种内联损失函数，
              * 完整支持MSE/MAE/Huber/CrossEntropy/Focal/Dice/Triplet等11种损失。 */
             float loss = loss_compute_ex(trainer->batch_outputs, batch_targets,
@@ -5773,7 +5773,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             float* loss_gradients = trainer->batch_outputs;
             size_t num_outputs = batch_size * output_dim;
             
-            /* ZSFX-P0: 统一损失函数路径。
+/* 统一损失函数路径。
              * 使用 loss_gradient_ex 替代原有的3种内联损失梯度函数，
              * 完整支持MSE/MAE/Huber/CrossEntropy/Focal/Dice/Triplet等11种损失。
              * config=NULL使用硬编码默认值（Huber delta=1.0, Focal gamma=2.0等） */
@@ -5840,7 +5840,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                             trainer->config.gradient_clip_norm);
             }
 
-            /* ZSFZX-FIX-P1-006: 梯度收敛健康监测
+/* 梯度收敛健康监测
              * 每100步检测梯度统计，预防梯度消失/爆炸和过拟合 */
             {
                 static int grad_monitor_counter = 0;
@@ -5859,21 +5859,21 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
 
                     /* 梯度消失告警 */
                     if (grad_mean < 1e-7f) {
-                        log_warning("[训练监控] ZSFZX-P1-006: 梯度消失(mean=%.2e)，建议降低L2正则化或增加学习率", grad_mean);
+                        log_warning("[训练监控] 梯度消失(mean=%.2e)，建议降低L2正则化或增加学习率", grad_mean);
                     }
                     /* 梯度爆炸告警 */
                     if (grad_max > 100.0f) {
-                        log_warning("[训练监控] ZSFZX-P1-006: 梯度爆炸(max=%.2f, mean=%.2e)，梯度裁剪已触发",
+                        log_warning("[训练监控] 梯度爆炸(max=%.2f, mean=%.2e)，梯度裁剪已触发",
                                    grad_max, grad_mean);
                     }
                     /* 过拟合预警：训练损失连续下降但梯度噪声增大 */
                     if (trainer->best_loss < 0.01f && grad_std > grad_mean * 10.0f) {
-                        log_info("[训练监控] ZSFZX-P1-006: 可能过拟合(低损失+高梯度噪声)，建议早停或增加正则化");
+                        log_info("[训练监控] 可能过拟合(低损失+高梯度噪声)，建议早停或增加正则化");
                     }
                 }
             }
 
-            /* ZSFZX-FIX-R4-4: 梯度NaN/Inf保护 — 在梯度裁剪前检测异常值
+/* 梯度NaN/Inf保护 — 在梯度裁剪前检测异常值
              * 若当前批次梯度包含NaN/Inf，跳过本轮参数更新，
              * 保留上一轮有效权重，防止单批次坏数据污染整个模型 */
             {
@@ -5887,7 +5887,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                     }
                 }
                 if (has_nan_inf) {
-                    log_warning("[训练] ZSFZX-R4-4: 梯度包含NaN/Inf, 跳过本轮参数更新(保留上一轮权重)");
+                    log_warning("[训练] 梯度包含NaN/Inf, 跳过本轮参数更新(保留上一轮权重)");
                     /* 清零梯度并跳过本轮优化器步骤 */
                     memset(trainer->gradients, 0,
                            trainer->gradients_size * sizeof(float));
@@ -5952,7 +5952,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             // 获取当前参数
             float* parameters = lnn_get_parameters(trainer->network);
             if (parameters) {
-                /* ZSFZS-F001修复: 移除外部的weight_decay()调用，防止双重衰减
+/* 移除外部的weight_decay()调用，防止双重衰减
                    各优化器内部已包含解耦权重衰减(Decoupled Weight Decay)，
                    同时在此处继续使用时会对已包含衰减的优化器造成二次衰减。
                    L1正则化移至梯度计算阶段处理，不在此处操作参数。 */
@@ -6090,7 +6090,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                         }
                         
                         // 频域自适应学习率（基于拉普拉斯频域分析的梯度频谱自适应）
-                        /* ZSFWS-F3修复: 实现频域自适应学习率。
+/* 实现频域自适应学习率。
                          * 基于梯度范数变化趋势和拉普拉斯稳定性评分动态调整学习率。
                          * 高频梯度(爆炸) -> 缩小LR, 低频梯度(消失) -> 放大LR。
                          * 稳定性评分越高，基础LR越稳定；评分越低，LR越保守。 */
@@ -6393,7 +6393,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                 }
 
                 // 优化器更新（使用原始梯度或滤波后的梯度）
-skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处跳过优化器 */
+skip_optimizer_and_continue: /* NaN/Inf检测时跳转到此处跳过优化器 */
                 if (trainer->gpu_initialized) {
                     // GPU加速路径
                     if (trainer_gpu_update_parameters(trainer, parameters,
@@ -6449,7 +6449,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
                  * 
                  * 全局步数使用optimizer->t（已在optimizer_update中自增）。 */
                 if (trainer->network && trainer->network->cfc_network) {
-                    /* ZSFAAA-DEEP-008: 微调冻结——若freeze_base_layers启用，
+/* 微调冻结——若freeze_base_layers启用，
                      * 在Adam更新前将底层cell梯度清零，保留预训练权重不变。 */
                     if (trainer->config.freeze_base_layers) {
                         CfCNetwork* cfc = trainer->network->cfc_network;
@@ -6545,7 +6545,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
             batch_num++;
             trainer->state.samples_processed += batch_size;
             
-            /* ZSFWS-007: 阶段内微验证 —— 每N个batch执行一次快速验证，
+/* 阶段内微验证 —— 每N个batch执行一次快速验证，
              * 比epoch级验证更早发现过拟合趋势。使用验证集的随机子集。 */
             if (trainer->config.enable_mini_validation &&
                 trainer->config.mini_validation_interval > 0 &&
@@ -6556,14 +6556,14 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
                 /* 从验证集中随机采样mini_validation_samples个样本 */
                 size_t mini_samples = trainer->config.mini_validation_samples;
                 if (mini_samples > validation_samples) mini_samples = validation_samples;
-                /* ZSFZS-F017: 使用浮点映射替代取模运算，消除均匀性偏差，避免size_t→int截断 */
+/* 使用浮点映射替代取模运算，消除均匀性偏差，避免size_t→int截断 */
                 size_t range_size = validation_samples - mini_samples + 1;
                 size_t start_idx = (size_t)(secure_random_float() * (float)range_size);
                 trainer_validate(trainer, val_inputs + start_idx * input_dim,
                                 val_targets + start_idx * output_dim,
                                 mini_samples, &mini_val_loss, &mini_val_acc);
                 /* 微验证过拟合检测：验证损失连续上升则记录警告
-                 * ZSFAAA-P0-006修复: 从函数内static变量迁移到Trainer结构体实例字段，
+ *修复: 从函数内static变量迁移到Trainer结构体实例字段，
                  * 消除多Trainer并行时的数据竞争风险 */
                 if (trainer->last_mini_val_loss > 0.0f && mini_val_loss > trainer->last_mini_val_loss * 1.2f) {
                     if (trainer->config.verbose) {
@@ -6606,7 +6606,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
                                        validation_samples, input_dim, output_dim);
             }
         } else {
-            /* ZSFZS-F006修复: 无验证集时使用训练损失的EMA替代验证损失
+/* 无验证集时使用训练损失的EMA替代验证损失
                确保早停(early stopping)和收敛速率计算仍然正常工作 */
             if (trainer->state.prev_val_loss > 0.0f) {
                 float alpha = 0.1f;
@@ -6646,7 +6646,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
             save_model_checkpoint(trainer, periodic_name);
         }
         
-        /* ZSFWS-004: 计算收敛速率（最近N轮的平均损失下降率） */
+/* 计算收敛速率（最近N轮的平均损失下降率） */
         {
             float prev_loss = trainer->state.prev_val_loss;
             if (prev_loss > 0.0f && val_loss > 0.0f) {
@@ -6660,7 +6660,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
             trainer->state.prev_val_loss = val_loss;
         }
 
-        /* ZSFZS-F008修复: 早停检查（含绝对收敛阈值和最小改善阈值） */
+/* 早停检查（含绝对收敛阈值和最小改善阈值） */
         /* T-001修复: 增强训练epoch回调 —— 启用ReduceLROnPlateau和日志输出
          * R6-①修复: trainer_enhanced_on_epoch_end签名是(Trainer*), 传入1个参数即可 */
         if (trainer->enhanced_trainer) {
@@ -6670,7 +6670,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
             trainer_enhanced_on_epoch_end(trainer);
         }
 
-        /* ZSFZS-F020: 梯度范数收敛检测
+/* 梯度范数收敛检测
          * 当梯度范数极小（<1e-6）时，模型参数几乎不再更新，视为收敛
          * 这是对绝对损失阈值和收敛速率的补充收敛条件 */
         if (!should_stop && trainer->state.gradient_norm > 0.0f &&
@@ -6784,7 +6784,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
                         trainer->lr_current_factor = trainer->config.lr_min_factor;
                     }
                     
-                    /* ZSFZS-F012: 修复学习率调度器与自适应LR竞争问题
+/* 修复学习率调度器与自适应LR竞争问题
                      * 修改scheduler的base_lr而非直接修改trainer->state.learning_rate,
                      * 避免下个batch的scheduler_get_internal()基于旧base_lr覆盖自适应LR调整 */
                     trainer->scheduler->base_learning_rate *= trainer->config.lr_factor;
@@ -6814,7 +6814,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
             trainer->history.size++;
         }
 
-        /* ZSFZS-F025: 定期导出训练指标到JSON文件
+/* 定期导出训练指标到JSON文件
            每N个epoch自动将当前指标写入JSON Lines文件供外部工具监控 */
         if (trainer->metrics_export_file && trainer->config.metrics_export_interval > 0 &&
             (epoch % trainer->config.metrics_export_interval == 0)) {
@@ -6888,7 +6888,7 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
     // 计算总训练时间
     trainer->state.training_time_ms = (perf_timestamp_ns() / 1000000) - trainer->state.start_time;
     
-    /* ZSFZS-F013: 释放学习率预热调度器 */
+/* 释放学习率预热调度器 */
     if (trainer->warmup_scheduler) {
         lr_warmup_scheduler_free(trainer->warmup_scheduler);
         trainer->warmup_scheduler = NULL;
@@ -6897,12 +6897,12 @@ skip_optimizer_and_continue:  /* ZSFZX-FIX-R4-4: NaN/Inf检测时跳转到此处
     // 释放数据加载器
     data_loader_free_internal(loader);
 
-    /* ZSFZS-F025: 关闭JSON指标导出文件，确保所有缓冲数据写入磁盘 */
+/* 关闭JSON指标导出文件，确保所有缓冲数据写入磁盘 */
     if (trainer->metrics_export_file) {
         fclose(trainer->metrics_export_file);
         trainer->metrics_export_file = NULL;
         if (trainer->config.verbose) {
-            log_info("ZSFZS-F025: 训练指标JSON日志导出文件已关闭\n");
+            log_info("训练指标JSON日志导出文件已关闭\n");
         }
     }
 
@@ -7054,7 +7054,7 @@ int trainer_validate(Trainer* trainer, const float* inputs, const float* targets
                 // 计算R²分数
                 if (sst > 1e-10f) {
                     batch_accuracy = 1.0f - (sse / sst);
-                    /* ZSFZX-FIX-R10-5: R²允许负值保留诊断信息(模型比均值差时R²<0)
+/* R²允许负值保留诊断信息(模型比均值差时R²<0)
                      * 仅上限钳制为1.0, 下限不裁剪: -3.0比0.0更有诊断价值 */
                     if (batch_accuracy > 1.0f) batch_accuracy = 1.0f;
                 } else {
@@ -7343,7 +7343,7 @@ static void optimizer_free(OptimizerState* optimizer) {
 }
 
 /**
- * @brief ZSFWS-M002: 获取优化器内部状态（检查点序列化用）
+ * @brief 获取优化器内部状态（检查点序列化用）
  * 
  * 将优化器的核心运行时状态打包为紧凑浮点数组，
  * 供检查点保存/加载时序列化使用，避免直接访问 OptimizerState 私有字段。
@@ -7362,7 +7362,7 @@ static int optimizer_get_internal_state(const OptimizerState* optimizer, float s
 }
 
 /**
- * @brief ZSFWS-M002: 设置优化器内部状态（检查点加载恢复用）
+ * @brief 设置优化器内部状态（检查点加载恢复用）
  * 
  * 从检查点读取的紧凑浮点数组恢复优化器核心运行时状态。
  * 仅在动量缓冲区已分配的前提下恢复元参数。
@@ -8203,7 +8203,7 @@ void gradient_flow_report_print(const GradientFlowReport* report) {
 }
 
 /**
- * @brief 早停检查（ZSFZS-F007修复：添加min_delta最小改善阈值）
+ * @brief 早停检查（添加min_delta最小改善阈值）
  * @param current_loss 当前验证损失
  * @param best_loss 最佳历史验证损失
  * @param patience 早停耐心值
@@ -8219,14 +8219,14 @@ int early_stopping_check_ex(float current_loss, float best_loss,
         return 0;
     }
     
-    /* ZSFWS-003: 绝对收敛阈值检测 —— 损失低于阈值时立即停止，无需等待patience */
+/* 绝对收敛阈值检测 —— 损失低于阈值时立即停止，无需等待patience */
     if (convergence_threshold > 0.0f && current_loss < convergence_threshold) {
         printf("  ✅ 绝对收敛阈值触发: 当前损失 %.6e < 收敛阈值 %.6e\n",
                current_loss, convergence_threshold);
         return 1;
     }
     
-    /* ZSFZS-F007: min_delta 最小改善检测 —— 微小改善不计入改善 */
+/* min_delta 最小改善检测 —— 微小改善不计入改善 */
     float improvement = best_loss - current_loss;
     if (min_delta > 0.0f && improvement < min_delta && improvement >= 0.0f) {
         /* 有改善但幅度太小，不计入改善，继续计数 */
@@ -8463,7 +8463,7 @@ int save_model_checkpoint(const Trainer* trainer, const char* filename) {
         uint32_t opt_count = (trainer->optimizer.m_buffer && trainer->network) ? 1 : 0;
         float opt_m_v[4] = {0}; /* [beta1, beta2, epsilon, total_steps] */
         if (opt_count > 0) {
-            /* ZSFWS-M002: 使用正式API封装优化器状态，替代直接访问OptimizerState字段 */
+/* 使用正式API封装优化器状态，替代直接访问OptimizerState字段 */
             optimizer_get_internal_state(&trainer->optimizer, opt_m_v);
             crc = ckpt_crc32c(crc, &opt_state_flag, sizeof(uint32_t));
             fwrite(&opt_state_flag, sizeof(uint32_t), 1, file);
@@ -8660,7 +8660,7 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
                 if (fread(opt_m_v, sizeof(opt_m_v), 1, file) == 1) {
                     crc = ckpt_crc32c(crc, opt_m_v, sizeof(opt_m_v));
                     if (trainer->optimizer.m_buffer) {
-                        /* ZSFWS-M002: 使用正式API恢复优化器状态 */
+/* 使用正式API恢复优化器状态 */
                         optimizer_set_internal_state(&trainer->optimizer, opt_m_v);
                         if (trainer->config.verbose) {
                             printf("优化器状态恢复: beta1=%.4f beta2=%.4f eps=%.6f steps=%d\n",
@@ -8704,7 +8704,7 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
         return -1;
     }
 
-    /* ZSFZX-FIX-R8-5: 检查点维度交叉验证 — 分布式路径有此检查但标准路径缺少
+/* 检查点维度交叉验证 — 分布式路径有此检查但标准路径缺少
      * 验证saved_config与当前模型维度一致，防止加载不兼容的检查点 */
     if (saved_config.input_size > 0 && saved_config.output_size > 0) {
         LNNConfig lnn_cfg;
@@ -8843,7 +8843,7 @@ int trainer_configure_fine_tuning(Trainer* trainer, int freeze_base, float fine_
     /* 设置微调学习率（通常比预训练小10倍） */
     trainer->config.learning_rate = fine_tune_lr;
 
-    /* ZSFAAA-DEEP-008修复: 实现真实的基础层冻结逻辑
+/* 实现真实的基础层冻结逻辑
      * freeze_base_layers标志位会被训练循环中gradient_update步骤读取，
      * 当此标志为1时，跳过对前N层CfC cell权重的梯度应用（保留预训练参数不变）。
      * 不在此处清零权重——那会破坏预训练参数。 */
@@ -9334,7 +9334,7 @@ void training_config_print(const TrainingConfig* config) {
     printf("  轮数：%zu\n", config->epochs);
     printf("  正则化强度：%.4f\n", config->regularization_lambda);
     printf("  Dropout率：%.2f\n", config->dropout_rate);
-    /* ZSFZS-F013: 显示学习率预热配置 */
+/* 显示学习率预热配置 */
     if (config->warmup_steps > 0) {
         printf("  预热步数：%zu（初始LR=%.6e → 峰值LR=%.6e，余弦退火=%s）\n",
                config->warmup_steps,
@@ -13593,7 +13593,7 @@ int trainer_train_from_memory(Trainer* trainer, MemorySystem* mem_system,
                 }
                 if (sst > 1e-10f) {
                     batch_accuracy = 1.0f - (sse / sst);
-                    /* ZSFZX-FIX-R10-5: R²允许负值 - 同验证路径 */
+/* R²允许负值 - 同验证路径 */
                     if (batch_accuracy > 1.0f) batch_accuracy = 1.0f;
                     if (batch_accuracy > 1.0f) batch_accuracy = 1.0f;
                 }
@@ -13650,7 +13650,7 @@ int trainer_train_from_memory(Trainer* trainer, MemorySystem* mem_system,
         total_samples += actual_batch_size;
 
         size_t global_step = trainer->state.total_iterations;
-        /* ZSFZS-F013: 在线学习也集成预热调度器 */
+/* 在线学习也集成预热调度器 */
         if (trainer->warmup_scheduler && global_step < trainer->config.warmup_steps) {
             trainer->state.learning_rate = lr_warmup_scheduler_get(
                 trainer->warmup_scheduler, global_step);
@@ -15649,7 +15649,7 @@ int trainer_should_skip_layer(int current_layer, int total_layers,
  * Windows无原生__bf16类型，使用软件实现精确的bfloat16截断:
  * - 使用真实IEEE 754半精度格式: 1位符号+8位指数+7位尾数
  * - 往返: float32→bf16→float32（精度损失严格符合bfloat16规范）
- * - ZSFDDD-P2-001: 这不是模拟，是带真实截断的软件bfloat16实现
+ * - 这不是模拟，是带真实截断的软件bfloat16实现
  * ============================================================================ */
 
 typedef uint16_t bf16_t;
@@ -16459,7 +16459,7 @@ int trainer_load_incremental_checkpoint(Trainer* trainer, const char* filepath) 
 }
 
 /* ============================================================================
- * ZSFUSA-V09: 纯C HTTP客户端实现 (替代popen/curl外部调用)
+ *: 纯C HTTP客户端实现 (替代popen/curl外部调用)
  * ============================================================================ */
 
 /* 解析HTTP URL为host/port/path */
@@ -16509,7 +16509,7 @@ static char* _training_http_get(const char* url, size_t* out_size) {
     if (socket_send(sock, request, (size_t)req_len) != (int)req_len) { socket_close(sock); return NULL; }
 
     size_t resp_cap = 65536;
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     char* response = (char*)safe_malloc(resp_cap);
     if (!response) { socket_close(sock); return NULL; }
     size_t total = 0; char buf[4096]; int n;
@@ -16529,7 +16529,7 @@ static char* _training_http_get(const char* url, size_t* out_size) {
     char* body = strstr(response, "\r\n\r\n");
     if (body) {
         body += 4; size_t body_len = total - (size_t)(body - response);
-        /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
         char* result = (char*)safe_malloc(body_len + 1);
         if (result) { memcpy(result, body, body_len); result[body_len] = '\0'; *out_size = body_len; safe_free((void**)&response); return result; }
     }
@@ -16559,7 +16559,7 @@ static char* _training_http_post(const char* url, const char* body_data, size_t 
     if (body_data && body_len > 0 && socket_send(sock, body_data, body_len) != (int)body_len) { socket_close(sock); return NULL; }
 
     size_t resp_cap = 65536;
-    /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
     char* response = (char*)safe_malloc(resp_cap);
     if (!response) { socket_close(sock); return NULL; }
     size_t total = 0; char buf[4096]; int n;
@@ -16579,7 +16579,7 @@ static char* _training_http_post(const char* url, const char* body_data, size_t 
     char* resp_body = strstr(response, "\r\n\r\n");
     if (resp_body) {
         resp_body += 4; size_t blen = total - (size_t)(resp_body - response);
-        /* ZSFEEE-FIX-RAW-MIG: raw malloc → safe_malloc */
+/* raw malloc → safe_malloc */
         char* result = (char*)safe_malloc(blen + 1);
         if (result) { memcpy(result, resp_body, blen); result[blen] = '\0'; *out_size = blen; safe_free((void**)&response); return result; }
     }

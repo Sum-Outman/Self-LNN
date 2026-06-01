@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="css/style.css">
     <link rel="stylesheet" href="css/api-docs.css">
     <link rel="stylesheet" href="css/knowledge-graph.css">
-    <!-- ZSF-007修复: 移除Font Awesome外部CDN依赖，使用自包含Unicode图标 -->
+    <!-- 移除Font Awesome外部CDN依赖，使用自包含Unicode图标 -->
     <style>
         .fas, .far, .fab { font-style: normal; display: inline-block; margin-right: 2px; }
         .fa-video:before { content: "📹"; }
@@ -23,7 +23,7 @@
     <script src="js/selflnn-chart.js?v=1"></script>
     <script>
         window.__PAGE_READY = false;
-        /* ZSFABC-001修复: _wsManager桥接到全局SelfLnnWebSocket，避免重复连接 */
+        /* _wsManager桥接到全局SelfLnnWebSocket，避免重复连接 */
         window._wsManager = {
             init: function() {
                 var self = this;
@@ -55,12 +55,12 @@
         /* 全局节流：延迟所有API请求直到服务器就绪，防止并发洪流压垮后端 */
         window._apiReady = false;
         window._apiQueue = [];
-        window._safeApi = function(fn) { if (window._apiReady) return fn(); window._apiQueue.push(fn); };
-        setTimeout(function() { window._apiReady = true; window._apiQueue.forEach(function(f){ try{f()}catch(e){} }); window._apiQueue = []; }, 2000);
+        window._safeApi = function(fn) { if (window._apiReady) return fn; window._apiQueue.push(fn); };
+        setTimeout(function() { window._apiReady = true; window._apiQueue.forEach(function(f){ try{f();}catch(e){} }); window._apiQueue = []; }, 2000);
         /* 所有度量初始显示"未连接"，后端连接后由data-engine更新为真实数据 */
         /* 数据源策略: 不使用任何硬编码演示数据。data-engine是唯一数据源。 */
         /* data-source="backend" 属性标记由真实后端提供的指标 */
-        /* ZSFABC通知系统垫片: 内联脚本在main.js加载前可用，后续由SelfLnnNotify覆盖 */
+        /* 通知系统垫片: 内联脚本在main.js加载前可用，后续由SelfLnnNotify覆盖 */
         window._alertPolyfill = window._alertPolyfill || false;
         window.showNotification = function(msg, type) {
             if (window.SelfLnnNotify && typeof window.SelfLnnNotify.show === 'function') {
@@ -493,7 +493,7 @@
                                 <!-- 心智理论（Theory of Mind）状态可视化 -->
                                 <div class="cognition-tom">
                                     <div class="cognition-subtitle">心智理论状态（多智能体信念/欲望/意图）</div>
-                                    <!-- ZSFWS-M002: ToM智能体卡片模板（JS动态填充）
+                                    <!-- ToM智能体卡片模板（JS动态填充）
                                      所有agent名称/状态/信念/欲望/意图值均由 data-engine.js
                                      通过API /api/cognition/tom 实时获取并填充。
                                      HTML仅提供DOM骨架，初始值均为0%/"未知"表示未连接状态。 -->
@@ -3237,7 +3237,7 @@
                                         <span id="voice-output-status" class="voice-status-text">空闲</span>
                                     </div>
                                     <div class="dialogue-input-row">
-                                        <textarea class="dialogue-input" id="dialogue-input" placeholder="输入消息或文字指令..." rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDialogueMessage();}"></textarea>
+                                        <textarea class="dialogue-input" id="dialogue-input" placeholder="输入消息或文字指令..." rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault;sendDialogueMessage;}"></textarea>
                                         <button class="btn btn-primary dialogue-send-btn" onclick="sendDialogueMessage()">发送</button>
                                     </div>
                                 </div>
@@ -3944,19 +3944,19 @@ response = requests.get(
                 </div>
             </div>
     <script>
-        /* ZSFABC: 设备管理初始化 —— 函数定义已迁移至 main.js */
-        /* ZSFBUG1修复: devicePollTimer声明提升到脚本块顶层作用域，使beforeunload回调可访问 */
+        /* 设备管理初始化 —— 函数定义已迁移至 main.js */
+        /* devicePollTimer声明提升到脚本块顶层作用域，使beforeunload回调可访问 */
         var devicePollTimer = null;
         document.addEventListener('DOMContentLoaded', function() {
             if (typeof refreshDevices === 'function') refreshDevices();
             if (typeof scanHardware === 'function') scanHardware();
-            /* ZSF-FE-M025: 设备轮询迁移到DataEngine统一管理，保留fallback */
+            /* 设备轮询迁移到DataEngine统一管理，保留fallback */
             if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
                 g_dataEngine.registerModule('device_poll', 5000, function() {
                     if (typeof refreshDevices === 'function') refreshDevices();
                 });
             } else {
-                devicePollTimer = setInterval(function(){ if(typeof refreshDevices==='function')refreshDevices(); }, 5000);
+                devicePollTimer = setInterval(function() { if(typeof refreshDevices==='function')refreshDevices(); }, 5000);
             }
         });
         window.addEventListener('beforeunload', function() {
@@ -4065,7 +4065,7 @@ response = requests.get(
             </div>
             <div id="pw-status" class="pw-status-bar"></div>
     </div>
-<!-- ZSF-ZNB修复S-001: 删除内联假数据脚本，恢复programming-workbench.js真实实现 -->
+<!-- S-001: 删除内联假数据脚本，恢复programming-workbench.js真实实现 -->
 <!-- page-specific script loaded via main.js -->
 
             </section>
@@ -4201,7 +4201,7 @@ response = requests.get(
                 <div class="card">
                     <div class="card-header"><h3>GPU配置</h3></div>
                     <div class="card-content">
-                        <select id="gpu-selector" class="form-input" onchange="refreshGpuList()">
+                        <select id="gpu-selector" class="form-input" onchange="refreshGpuList">
                             <option value="auto">自动检测</option>
                         </select>
                     </div>
@@ -4308,7 +4308,7 @@ response = requests.get(
         async function pollSafety() {
             try {
                 /* 使用已验证的 getSecurityStatus API */
-                var data = await window.SelfLnnApi.getSecurityStatus();
+                var data = await window.SelfLnnApi.getSecurityStatus;
                 if (!data || !data.success) return;
                 updateSafetyUI(data.data || data);
             } catch(e) { console.warn('安全状态轮询失败:', e.message); }
@@ -4376,9 +4376,9 @@ response = requests.get(
             } catch(e) { console.warn('资源轮询失败:', e.message); }
         }
 
-        /* ZSFABC-012修复: emergencyStop 已由 main.js 统一管理 */
+        /* emergencyStop 已由 main.js 统一管理 */
 
-        /* ZSFAB-H06修复: 移除重复定义 softStop/resetSafety，统一由 main.js 管理 */
+        /* 移除重复定义 softStop/resetSafety，统一由 main.js 管理 */
         /* 物理安全边界——必须从后端获取真实数据，不使用默认值 */
         async function fetchSafetyBounds() {
             try {
@@ -4409,10 +4409,10 @@ response = requests.get(
             window._e('safety-joint-range', function(e) { e.textContent = '±' + bounds.jointRange.toFixed(0) + '°'; });
         }
 
-        /* ZSFABC-025修复: safety区独立checkConnection→checkSafetyConnection */
+        /* safety区独立checkConnection→checkSafetyConnection */
         async function checkSafetyConnection() {
             try {
-                var status = await window.SelfLnnApi.checkConnection();
+                var status = await window.SelfLnnApi.checkConnection;
                 var badge = document.getElementById('safety-conn-status');
                 if (!badge) return;
                 badge.style.display = 'inline-block';
@@ -4435,7 +4435,7 @@ response = requests.get(
             }
         }
 
-        /* ZSFZS-F050修复: 统一setInterval清理机制 */
+        /* 统一setInterval清理机制 */
         var _safetyTimers = [];
         function _addSafetyTimer(fn, ms) {
             var id = setInterval(fn, ms);
@@ -4447,12 +4447,12 @@ response = requests.get(
             _safetyTimers = [];
         });
 
-        /* ZSFBUG2修复: 移除pollTimer/resTimer重复声明，统一使用L4193处的声明 var pollTimer = null, resTimer = null; */
+        /* 移除pollTimer/resTimer重复声明，统一使用L4193处的声明 var pollTimer = null, resTimer = null; */
         window.addEventListener('DOMContentLoaded', function() {
-            checkSafetyConnection();
-            pollSafety();
-            pollResources();
-            fetchSafetyBounds();
+            checkSafetyConnection;
+            pollSafety;
+            pollResources;
+            fetchSafetyBounds;
             pollTimer = _addSafetyTimer(pollSafety, 3000);
             resTimer = _addSafetyTimer(pollResources, 5000);
             _addSafetyTimer(checkSafetyConnection, 30000);
@@ -4490,7 +4490,7 @@ response = requests.get(
                 </div>
             </div>
     <script>
-        /* ZSFABC修复: 所有函数统一定义于main.js，HTML内联版本已移除
+        /* 所有函数统一定义于main.js，HTML内联版本已移除
          * toggleVoice → main.js:L7726, sendTextCommand → main.js:L7752
          * setFilter → main.js:L7655, selectSkill → main.js:L7682
          * testSkill → main.js:L7694, testNetwork → main.js:L2181 */
@@ -4499,15 +4499,15 @@ response = requests.get(
         async function toggleVoice() {
             /* 如果对话页面已初始化语音输入，委托给它（统一处理） */
             if (typeof toggleVoiceInput === 'function' && window.g_dialogueEnhanced && window.g_deviceManager) {
-                toggleVoiceInput();
+                toggleVoiceInput;
                 return;
             }
             var btn = document.getElementById('voice-btn');
             if (_voiceCapture && _voiceCapture.isRecording) {
-                _voiceCapture.stop();
+                _voiceCapture.stop;
                 return;
             }
-            if (_voiceCapture) { _voiceCapture.destroy(); _voiceCapture = null; }
+            if (_voiceCapture) { _voiceCapture.destroy; _voiceCapture = null; }
             if (typeof VoiceCaptureUtil === 'undefined' || !VoiceCaptureUtil.quickCapture) {
                 showNotification('语音采集模块未加载，请刷新页面', 'warning');
                 return;
@@ -4544,7 +4544,7 @@ response = requests.get(
             } catch(e) {
                 console.warn('[语音] toggleVoice异常:', e.message);
                 showNotification('语音采集失败: ' + (e.message || '未知错误'), 'danger');
-                if (_voiceCapture) { _voiceCapture.destroy(); _voiceCapture = null; }
+                if (_voiceCapture) { _voiceCapture.destroy; _voiceCapture = null; }
             }
         }
         /* P2-006修复: 统一使用main.js中的TextCommandSystem处理文本指令 */
@@ -4563,7 +4563,7 @@ response = requests.get(
             } else {
                 /* 回退到直接API调用 */
                 try {
-                    /* ZSFAB-S9修复: 使用SelfLnnApi替代直接fetch，获得认证/重试/熔断保护 */
+                    /* 使用SelfLnnApi替代直接fetch，获得认证/重试/熔断保护 */
                     var resp = await window.SelfLnnApi.request('/robot/command', { 
                         method:'POST', 
                         body: JSON.stringify({command: cmd}) 
@@ -4576,7 +4576,7 @@ response = requests.get(
                 }
             }
         }
-    /* ZSFABC-024/ZSF-013: 系统日志桥接 - 将console输出同步到页面日志面板 */
+    /* /系统日志桥接 - 将console输出同步到页面日志面板 */
     window._sysLog = function(level, msg) {
         var panel = document.getElementById('sys-log-panel');
         if (!panel) return;
@@ -4587,25 +4587,25 @@ response = requests.get(
         entry.style.color = color;
         entry.textContent = '[' + time + '] ' + msg;
         panel.insertBefore(entry, panel.firstChild);
-        /* ZSF-013: 使用可配置的最大条目限制，防止内存无限增长 */
+        /* 使用可配置的最大条目限制，防止内存无限增长 */
         var maxEntries = (typeof _sysLogMaxEntries !== 'undefined') ? _sysLogMaxEntries : 100;
         while (panel.children.length > maxEntries) {
             panel.removeChild(panel.lastChild);
         }
     };
-    /* ZSF-005/ZSF-013修复: 生产环境日志劫持优化
+    /* /生产环境日志劫持优化
      * 保留日志面板但限制缓冲区大小为1000条，避免内存无限增长。
      * 通过SELFLNN_DEBUG标志控制是否启用全局console劫持 */
     var _sysLogMaxEntries = 1000;
-    (function(){
+    (function() {
         /* 仅在调试模式下劫持全局console */
         var _debugMode = (typeof SELFLNN_DEBUG !== 'undefined' && SELFLNN_DEBUG);
         if (!_debugMode) return;
         var _log=console.log,_warn=console.warn,_err=console.error;
-        console.log=function(){ _log.apply(console,arguments); try{window._sysLog('log',Array.prototype.join.call(arguments,' '))}catch(e){} };
-        console.warn=function(){ _warn.apply(console,arguments); try{window._sysLog('warn',Array.prototype.join.call(arguments,' '))}catch(e){} };
-        console.error=function(){ _err.apply(console,arguments); try{window._sysLog('error',Array.prototype.join.call(arguments,' '))}catch(e){} };
-    })();
+        console.log=function() { _log.apply(console,arguments); try{window._sysLog('log',Array.prototype.join.call(arguments,' '))}catch(e){} };
+        console.warn=function() { _warn.apply(console,arguments); try{window._sysLog('warn',Array.prototype.join.call(arguments,' '))}catch(e){} };
+        console.error=function() { _err.apply(console,arguments); try{window._sysLog('error',Array.prototype.join.call(arguments,' '))}catch(e){} };
+    });
     </script>
 
             </section>
@@ -4695,7 +4695,7 @@ response = requests.get(
 
         /* API端点数据从后端动态加载，避免硬编码虚假数据 */
         var apiData = [];
-        /* ZSFAB-M02修复: 移除重复var声明 */
+        /* 移除重复var声明 */
 
         function render() {
             var container = document.getElementById('api-list');
@@ -4752,16 +4752,16 @@ response = requests.get(
             navBar.innerHTML = navHtml;
         }
 
-        /* ZSFAB-M02修复: 删除重复var声明，在此处统一显式声明 */
+        /* 删除重复var声明，在此处统一显式声明 */
         var apiDataLoaded = false;
-        /* ZSFAB-M02修复: apiDataLoaded由统一初始化管理 */
+        /* apiDataLoaded由统一初始化管理 */
         (function loadFromBackend() {
-            window.SelfLnnApi.getApiDocs().then(function(result) {
+            window.SelfLnnApi.getApiDocs.then(function(result) {
                 if (!result.success) throw new Error('后端不可用');
                 var data = result.data;
                 // 支持categories格式和flat endpoints格式
-                var endpointsList = data.endpoints || (data.api_docs && data.api_docs.endpoints) || [];
-                var categories = data.categories || (data.api_docs && data.api_docs.categories) || [];
+                var endpointsList = data.endpoints || (data.api_docs && data.api_docs.endpoints) || []
+                var categories = data.categories || (data.api_docs && data.api_docs.categories) || []
                 if (endpointsList.length > 0 || categories.length > 0) {
                     var dynamicData = [];
                     if (categories.length > 0) {
@@ -4819,13 +4819,13 @@ response = requests.get(
                         updateSummaryCard(dynamicData);
                     }
                 }
-                render();
+            render();
             }).catch(function() {
-                render();
+            render();
             });
-        })();
+        });
 
-        /* ZSFAB-H05修复: summary计数改为动态计算，不从硬编码读取 */
+        /* summary计数改为动态计算，不从硬编码读取 */
         function updateSummaryCard(dataArr) {
             var total = 0;
             var cats = {}; /* 按类别统计 */
@@ -4842,7 +4842,7 @@ response = requests.get(
             });
             var el = document.getElementById('total-endpoints');
             if (el) el.textContent = total;
-            /* ZSFAB-H05修复: 分类卡片动态计数 */
+            /* 分类卡片动态计数 */
             var setCount = function(id, v) { var el2 = document.getElementById(id); if (el2) el2.textContent = v; };
             setCount('api-count-system', cats.system || '—');
             setCount('api-count-robot', cats.robot || '—');
@@ -4870,7 +4870,7 @@ response = requests.get(
             }
         }
 
-        render();
+            render();
         
         (function fetchFeatures() {
             var grid = document.getElementById('feature-grid');
@@ -4952,7 +4952,7 @@ response = requests.get(
                 } else if (knowledge && knowledge.knowledge) {
                     statusEl.textContent = '已连接 (知识库模式)';
                     statusEl.style.color = '#00c8ff';
-                    var caps = knowledge.knowledge.capabilities || [];
+                    var caps = knowledge.knowledge.capabilities || []
                     var html = caps.map(function(c) {
                         return '<div class="feature-card"><div class="fc-name">' + c + '</div><div class="fc-desc">知识库能力</div><span class="fc-badge on">可用</span></div>';
                     }).join('');
@@ -4971,7 +4971,7 @@ response = requests.get(
                 statusEl.style.color = '#ff4444';
                 grid.innerHTML = '<div class="feature-loading">无法连接到后端服务，请确保SELF-LNN服务器已启动 (端口 ' + PORT + ')</div>';
             });
-        })();
+        });
     </script>
     </section>
             <!-- ====== training-center (从 training-center.html 合并) ====== -->
@@ -5079,7 +5079,7 @@ response = requests.get(
 
         <div class="skills-container">
             <div class="skill-list">
-                <input type="text" class="search-box" id="skill-search" placeholder="搜索技能..." oninput="filterSkills()">
+                <input type="text" class="search-box" id="skill-search" placeholder="搜索技能..." oninput="filterSkills">
                 <div class="filter-bar">
                     <select id="skill-filter-select" style="display:none;" onchange="renderSkillList(this.value)"><option value="all">全部</option></select>
                     <button class="filter-btn active" onclick="setFilter('all', this)">全部</button>
@@ -5098,7 +5098,7 @@ response = requests.get(
         </div>
 
     <script>
-        /* ZSFZS-F027修复: 统一使用skillsData变量，与main.js loadSkills()一致 */
+        /* 统一使用skillsData变量，与main.js loadSkills一致 */
         var currentFilter = 'all';
         var skillsData = [];
         var selectedSkillId = null;
@@ -5107,7 +5107,7 @@ response = requests.get(
             try {
                 var data = await window.SelfLnnApi.request('/skills', {method: 'GET'});
                 if (data) {
-                    skillsData = data.skills || [];
+                    skillsData = data.skills || []
                 } else {
                     skillsData = [];
                 }
@@ -5273,7 +5273,7 @@ response = requests.get(
             }
         }
 
-        /* ZSFABC-025修复: skills区独立checkConnection→checkSkillsConnection */
+        /* skills区独立checkConnection→checkSkillsConnection */
         async function checkSkillsConnection() {
             try {
                 var data = await window.SelfLnnApi.request('/status', {method: 'GET'});
@@ -5287,11 +5287,11 @@ response = requests.get(
                 badge.style.color = '#fff';
             }
         }
-        checkSkillsConnection();
+        checkSkillsConnection;
 
         window.addEventListener('DOMContentLoaded', function() {
-            checkSkillsConnection();
-            loadSkills();
+            checkSkillsConnection;
+            loadSkills;
             setInterval(checkSkillsConnection, 30000);
         });
     </script>
@@ -5380,7 +5380,7 @@ response = requests.get(
             <div class="tab-content" id="tab-graph">
                 <div class="form-group">
                     <label>图布局算法</label>
-                    <select id="graph-layout" onchange="changeLayout()">
+                    <select id="graph-layout" onchange="changeLayout">
                         <option value="force">力导向布局</option>
                         <option value="radial">径向布局</option>
                         <option value="hierarchical">层次布局</option>
@@ -5388,15 +5388,15 @@ response = requests.get(
                 </div>
                 <div class="form-group">
                     <label>节点大小</label>
-                    <input type="range" id="node-size" min="3" max="15" value="7" oninput="updateGraphStyle()">
+                    <input type="range" id="node-size" min="3" max="15" value="7" oninput="updateGraphStyle">
                 </div>
                 <div class="form-group">
                     <label>边粗细</label>
-                    <input type="range" id="edge-width" min="0.5" max="4" value="1.5" step="0.1" oninput="updateGraphStyle()">
+                    <input type="range" id="edge-width" min="0.5" max="4" value="1.5" step="0.1" oninput="updateGraphStyle">
                 </div>
                 <div class="form-group">
                     <label>显示标签</label>
-                    <select id="show-labels" onchange="updateGraphStyle()">
+                    <select id="show-labels" onchange="updateGraphStyle">
                         <option value="all">全部显示</option>
                         <option value="important">仅重要节点</option>
                         <option value="none">不显示</option>
@@ -5499,7 +5499,7 @@ response = requests.get(
                         <button onclick="toggleCameraPreview()" class="btn btn-sm btn-primary" style="width:100%;margin-top:8px">启动摄像头</button>
                     </div>
                 </div>
-                <!-- ZSFABC-019: 双目空间感知预览 -->
+                <!-- 双目空间感知预览 -->
                 <div class="card">
                     <div class="card-header"><h3>👁️ 双目空间感知</h3></div>
                     <div class="card-content" style="text-align:center">
@@ -5554,12 +5554,12 @@ response = requests.get(
             </div>
         </div>
     <script>
-        /* ZSFAB-H06修复: 移除重复定义 startMultimodalLearn，统一由 main.js 管理 */
+        /* 移除重复定义 startMultimodalLearn，统一由 main.js 管理 */
         var multimodalPollTimer = null;
 
         async function pollMultimodal() {
             try {
-                var data = await window.SelfLnnApi.multimodalStatus();
+                var data = await window.SelfLnnApi.multimodalStatus;
                 document.getElementById('contrast-loss').textContent = data.contrast_loss != null ? data.contrast_loss.toFixed(4) : '-';
                 document.getElementById('align-loss').textContent = data.align_loss != null ? data.align_loss.toFixed(4) : '-';
                 document.getElementById('cross-accuracy').textContent = data.cross_accuracy != null ? (data.cross_accuracy*100).toFixed(1)+'%' : '-';
@@ -5570,7 +5570,7 @@ response = requests.get(
 
         async function loadStatus() {
             try {
-                var data = await window.SelfLnnApi.multimodalStatus();
+                var data = await window.SelfLnnApi.multimodalStatus;
                 document.getElementById('vis-status').textContent = data.vision_ready ? '就绪' : '未就绪';
                 document.getElementById('mm-audio-status').textContent = data.audio_ready ? '就绪' : '未就绪';
                 document.getElementById('mm-text-status').textContent = data.text_ready ? '就绪' : '未就绪';
@@ -5589,7 +5589,7 @@ response = requests.get(
         var g_cameraStream = null, g_cameraActive = false;
 
         async function toggleCameraPreview() {
-            if (g_cameraActive) { stopCameraPreview(); return; }
+            if (g_cameraActive) { stopCameraPreview; return; }
             try {
                 var stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
                 g_cameraStream = stream;
@@ -5607,7 +5607,7 @@ response = requests.get(
 
         function stopCameraPreview() {
             g_cameraActive = false;
-            if (g_cameraStream) { g_cameraStream.getTracks().forEach(function(t) { t.stop(); }); g_cameraStream = null; }
+            if (g_cameraStream) { g_cameraStream.getTracks.forEach(function(t) { t.stop; }); g_cameraStream = null; }
             var video = document.getElementById('camera-preview');
             var fallback = document.getElementById('camera-preview-fallback');
             video.srcObject = null;
@@ -5623,13 +5623,13 @@ response = requests.get(
 
         function initAudioWaveform(stream) {
             if (!stream) return;
-            g_audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            g_analyser = g_audioCtx.createAnalyser();
+            g_audioCtx = new (window.AudioContext || window.webkitAudioContext);
+            g_analyser = g_audioCtx.createAnalyser;
             g_analyser.fftSize = 256;
             var source = g_audioCtx.createMediaStreamSource(stream);
             source.connect(g_analyser);
             document.getElementById('waveform-status').textContent = '波形显示中';
-            drawWaveform();
+            drawWaveform;
         }
 
         function drawWaveform() {
@@ -5645,7 +5645,7 @@ response = requests.get(
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
                 ctx.lineWidth = 2;
                 ctx.strokeStyle = '#00ff88';
-                ctx.beginPath();
+                ctx.beginPath;
                 var sliceW = canvas.width / bufferLen;
                 var x = 0;
                 for (var i = 0; i < bufferLen; i++) {
@@ -5654,18 +5654,18 @@ response = requests.get(
                     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
                     x += sliceW;
                 }
-                ctx.stroke();
+                ctx.stroke;
             }
-            frame();
+            frame;
         }
 
-        /* ZSFAB-H06修复: 移除重复定义 toggleMultimodalVoiceInput，统一由 main.js 管理 */
+        /* 移除重复定义 toggleMultimodalVoiceInput，统一由 main.js 管理 */
         /* 原录音UI逻辑合并至 main.js，此处仅保留 isRecording 变量 */
         var isRecording = false;
 
         function stopVoiceInput() {
             if (window._mmLearnCapturer) {
-                window._mmLearnCapturer.stop();
+                window._mmLearnCapturer.stop;
                 window._mmLearnCapturer = null;
             }
             isRecording = false;
@@ -5674,7 +5674,7 @@ response = requests.get(
             btn.style.background = '';
         }
 
-        /* ZSFABC-019修复: 重命名避免与teach section中startTeaching/testTeaching冲突 */
+        /* 重命名避免与teach section中startTeaching/testTeaching冲突 */
         async function startMultimodalLearnTeaching() {
             var name = document.getElementById('teach-object-name').value;
             if (!name) { showNotification('请输入物体名称', 'warning'); return; }
@@ -5693,7 +5693,7 @@ response = requests.get(
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
 
-        /* ZSFABC-019修复: 重命名避免与teach section中testTeaching冲突 */
+        /* 重命名避免与teach section中testTeaching冲突 */
         async function testMultimodalLearnTeaching() {
             var name = document.getElementById('teach-object-name').value;
             if (!name) { showNotification('请先教学一个物体', 'warning'); return; }
@@ -5710,7 +5710,7 @@ response = requests.get(
 
         window.addEventListener('beforeunload', function() {
             if (multimodalPollTimer) clearInterval(multimodalPollTimer);
-            stopVoiceInput();
+            stopVoiceInput;
         });
     </script>
 
@@ -5758,7 +5758,7 @@ response = requests.get(
                 </div>
             </div>
     <script>
-        /* ZSFAB-H06修复: 移除重复定义 startTeaching/testTeaching，统一由 main.js 管理 */
+        /* 移除重复定义 startTeaching/testTeaching，统一由 main.js 管理 */
         /* 保留 recordDemo 等非重复内联函数 */
         function recordDemo() {
             var label = document.getElementById('demo-label').value;
@@ -5766,7 +5766,7 @@ response = requests.get(
             if (!label) { showNotification('请输入演示标签', 'warning'); return; }
             window.SelfLnnApi.request('/robot/command', { method:'POST', body:JSON.stringify({command:'record_demo',params:{label:label,actions:actions}}) }, 1)
                 .then(function(r){ return r.json(); })
-                .then(function(d){ showNotification(d.success?'演示已记录':'记录失败', d.success?'success':'danger'); }).catch(function(){ showNotification('连接失败', 'danger'); });
+                .then(function(d){ showNotification(d.success?'演示已记录':'记录失败', d.success?'success':'danger'); }).catch(function() { showNotification('连接失败', 'danger'); });
         }
     </script>
 
@@ -5898,7 +5898,7 @@ response = requests.get(
         var PERM_NAMES = {1:' 只读', 2:' 读写', 3:' 管理员'};
 
         async function generateApiKey() {
-            var name = document.getElementById('key-name').value.trim();
+            var name = document.getElementById('key-name').value.trim;
             var permission = parseInt(document.getElementById('key-permission').value);
             var expiry = parseInt(document.getElementById('key-expiry').value);
             if (!name) { showNotification('请填写密钥名称', 'warning'); return; }
@@ -5914,14 +5914,14 @@ response = requests.get(
                     var display = document.getElementById('new-key-display');
                     display.style.display = 'block';
                     document.getElementById('generated-key').value = data.key;
-                    loadKeys();
+                    loadKeys;
                 } else {
                     showNotification('生成失败: ' + (data.error || '未知错误'), 'danger');
                 }
             } catch(e) { showNotification('连接失败: ' + e.message, 'danger'); }
         }
 
-        /* ZSFQQ-Q017: 使用现代navigator.clipboard API替代废弃的execCommand */
+        /* 使用现代navigator.clipboard API替代废弃的execCommand */
         function copyKey() {
             var input = document.getElementById('generated-key');
             if (!input || !input.value) return;
@@ -5929,12 +5929,12 @@ response = requests.get(
                 navigator.clipboard.writeText(input.value).then(function() {
                     showNotification('密钥已复制到剪贴板', 'info');
                 }).catch(function() {
-                    input.select();
+                    input.select;
                     document.execCommand('copy');
                     showNotification('密钥已复制到剪贴板（回退模式）', 'info');
                 });
             } else {
-                input.select();
+                input.select;
                 document.execCommand('copy');
                 showNotification('密钥已复制到剪贴板', 'info');
             }
@@ -5952,10 +5952,10 @@ response = requests.get(
                     return;
                 }
                 tbody.innerHTML = keys.map(function(k) {
-                    var created = k.created_at ? new Date(k.created_at*1000).toLocaleString() : '-';
-                    var expires = k.expires_at ? new Date(k.expires_at*1000).toLocaleString() : '永不过期';
-                    var lastUsed = k.last_used_at ? new Date(k.last_used_at*1000).toLocaleString() : '从未使用';
-                    var now = Date.now()/1000;
+                    var created = k.created_at ? new Date(k.created_at*1000).toLocaleString : '-';
+                    var expires = k.expires_at ? new Date(k.expires_at*1000).toLocaleString : '永不过期';
+                    var lastUsed = k.last_used_at ? new Date(k.last_used_at*1000).toLocaleString : '从未使用';
+                    var now = Date.now/1000;
                     var expired = k.expires_at > 0 && now > k.expires_at;
                     return '<tr>' +
                         '<td>' + (k.name||'未命名') + '</td>' +
@@ -5981,7 +5981,7 @@ response = requests.get(
         async function loadStats() {
             try {
                 /* 使用 getKeyStatus 获取全局统计 */
-                var data = await window.SelfLnnApi.getKeyStatus();
+                var data = await window.SelfLnnApi.getKeyStatus;
                 var s = (data && data.success) ? (data.data || data) : {};
                 var tk = s.current_keys != null ? s.current_keys : (s.total_keys != null ? s.total_keys : '-');
                 document.getElementById('stat-total-keys').textContent = tk;
@@ -5993,10 +5993,10 @@ response = requests.get(
 
         async function loadRateLimit() {
             try {
-                /* ZSFAAA-DEEP-020修复: 修正字段访问路径
+                /* 修正字段访问路径
                  * 原代码访问r.min_remaining但后端返回r.rate_limit.min_remaining
                  * 导致所有UI元素永远显示默认值 */
-                var data = await window.SelfLnnApi.getRateLimitStatus();
+                var data = await window.SelfLnnApi.getRateLimitStatus;
                 var r = (data && data.success && data.data && data.data.rate_limit)
                       ? data.data.rate_limit : {};
                 document.getElementById('rate-tokens').textContent =
@@ -6027,7 +6027,7 @@ response = requests.get(
                     body: JSON.stringify({key_prefix: prefix, enable: enable})
                 });
                 var data = await resp.json();
-                if (data.success) loadKeys();
+                if (data.success) loadKeys;
                 else showNotification('操作失败: ' + (data.error||''), 'danger');
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
@@ -6040,14 +6040,14 @@ response = requests.get(
                     body: JSON.stringify({key_prefix: prefix})
                 });
                 var data = await resp.json();
-                if (data.success) loadKeys();
+                if (data.success) loadKeys;
                 else showNotification('删除失败: ' + (data.error||''), 'danger');
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
 
         document.addEventListener('DOMContentLoaded', function() {
-            loadKeys();
-            loadStats();
+            loadKeys;
+            loadStats;
             setTimeout(loadRateLimit, 15000);
             setInterval(loadRateLimit, 30000);
         });
@@ -6090,7 +6090,7 @@ response = requests.get(
         async function loadLogs() {
             try {
                 /* 使用系统状态API和API统计接口获取使用日志 */
-                var resp = await window.SelfLnnApi.getServerStats();
+                var resp = await window.SelfLnnApi.getServerStats;
                 var data = resp.success ? resp.data : null;
                 var stats = (data && data.system) ? data.system : {};
                 document.getElementById('today-total').textContent = (stats.requests && stats.requests.total) ? stats.requests.total : '-';
@@ -6101,9 +6101,9 @@ response = requests.get(
                 /* 尝试获取详细API使用日志 */
                 var logs = [];
                 try {
-                    var logResp = await window.SelfLnnApi.getApiStats();
+                    var logResp = await window.SelfLnnApi.getApiStats;
                     if (logResp.success && logResp.data) {
-                        logs = logResp.data.logs || logResp.data.requests || [];
+                        logs = logResp.data.logs || logResp.data.requests || []
                     }
                 } catch(e) { /* 日志接口不可用时降级为系统统计 */ }
                 
@@ -6125,7 +6125,7 @@ response = requests.get(
             } catch(e) { console.warn('使用日志加载失败:', e.message); }
         }
         document.addEventListener('DOMContentLoaded', function() {
-            loadLogs();
+            loadLogs;
             setInterval(loadLogs, 30000);
         });
     </script>
@@ -6241,7 +6241,7 @@ response = requests.get(
         var g_audioCapturing = false;
         var g_cameraCapturing = false;
 
-        /* ZSFABC-018修复: 重命名避免与device-control中scanHardware冲突 */
+        /* 重命名避免与device-control中scanHardware冲突 */
         async function scanHardwareFull() {
             var el = document.getElementById('hw-result');
             el.textContent = '扫描中...';
@@ -6253,7 +6253,7 @@ response = requests.get(
         async function scanGpuDiagnostic() {
             var el = document.getElementById('hw-result');
             el.textContent = 'GPU诊断中...';
-            var d = await HardwareScanUtil.gpuDiagnostic();
+            var d = await HardwareScanUtil.gpuDiagnostic;
             if (d.success) {
                 document.getElementById('gpu-current').textContent = d.backend;
                 document.getElementById('gpu-devices').textContent = d.devices;
@@ -6265,8 +6265,8 @@ response = requests.get(
         /* H005-修复: 手动注册浏览器自动枚举不到的设备 */
         async function registerManualDevice() {
             var type = document.getElementById('manual-device-type').value;
-            var name = document.getElementById('manual-device-name').value.trim();
-            var devId = document.getElementById('manual-device-id').value.trim();
+            var name = document.getElementById('manual-device-name').value.trim;
+            var devId = document.getElementById('manual-device-id').value.trim;
             if (!name) { showNotification('请输入设备名称', 'warning'); return; }
             if (!devId) { showNotification('请输入设备ID/路径', 'warning'); return; }
             try {
@@ -6418,30 +6418,30 @@ response = requests.get(
         }
 
         /* ===== 页面初始化 ===== */
-        document.addEventListener('DOMContentLoaded', function(){
+        document.addEventListener('DOMContentLoaded', function() {
             /* 浏览器媒体设备检测 */
             if (navigator.mediaDevices) {
-                navigator.mediaDevices.enumerateDevices().then(function(devs){
+                navigator.mediaDevices.enumerateDevices.then(function(devs){
                     devs.forEach(function(d){
                         if (d.kind === 'videoinput') document.getElementById('cam-status').textContent = '浏览器已检测';
                         if (d.kind === 'audioinput') document.getElementById('hw-mic-status').textContent = '浏览器已检测';
                         if (d.kind === 'audiooutput') document.getElementById('spk-status').textContent = '浏览器已检测';
                     });
-                }).catch(function(){});
+                }).catch(function() {});
             }
             /* 自动检测后端状态 */
             setTimeout(function() {
-                scanGpuDiagnostic();
-                enumerateAudioDevices();
-                enumerateCameraDevices();
-                listDatasets();
+                scanGpuDiagnostic;
+                enumerateAudioDevices;
+                enumerateCameraDevices;
+                listDatasets;
             }, 500);
         });
     </script>
 
         </section>
 
-        <!-- ZSF-ZNB前端修复: 系统运行日志面板从hardware-setup内移出，作为独立板块 -->
+        <!-- 前端修复: 系统运行日志面板从hardware-setup内移出，作为独立板块 -->
         <section id="sys-log-panel-section" class="card full-width" style="margin-bottom:20px">
             <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
                 <h3>📋 系统运行日志</h3>
@@ -6496,7 +6496,7 @@ response = requests.get(
     <script>
         // 更新当前时间
         function updateTime() {
-            const now = new Date();
+            const now = new Date;
             const timeString = now.toLocaleString('zh-CN', {
                 year: 'numeric',
                 month: '2-digit',
@@ -6511,7 +6511,7 @@ response = requests.get(
         // 导航切换
         document.querySelectorAll('.nav a').forEach(link => {
             link.addEventListener('click', function(e) {
-                e.preventDefault();
+                e.preventDefault;
                 
                 // 更新活动状态
                 document.querySelectorAll('.nav a').forEach(l => l.classList.remove('active'));
@@ -6530,9 +6530,9 @@ response = requests.get(
         // API服务实例（复用全局SelfLnnApi）
         var apiService = window.SelfLnnApi;
         
-        /* ZSFAB-M03修复: loadModel/backupSystem 已由 main.js 统一管理，移除内联重复定义 */
+        /* loadModel/backupSystem 已由 main.js 统一管理，移除内联重复定义 */
         
-        /* ZSFABC-012修复: emergencyStop 已由 main.js 统一管理 */
+        /* emergencyStop 已由 main.js 统一管理 */
         
         /* ===== API数据归一化——将后端嵌套格式转为dashboard期望的扁平格式 ===== */
         function _normMemory(d) {
@@ -6565,12 +6565,12 @@ response = requests.get(
             return d;
         }
         
-        /* ZSFAB-S1修复: 删除内联refreshDashboard重复定义，统一使用main.js版本 */
-        /* main.js:refreshDashboard()从DataEngine读取数据，内联版本绕过DataEngine导致不一致 */
+        /* 删除内联refreshDashboard重复定义，统一使用main.js版本 */
+        /* main.js:refreshDashboard从DataEngine读取数据，内联版本绕过DataEngine导致不一致 */
         
 
         
-        /* ZSFQQ-Q013: testInference/testNetwork 已在 main.js 中全局定义，此处不再重复 */
+        /* testInference/testNetwork 已在 main.js 中全局定义，此处不再重复 */
         
         // 状态更新辅助函数
         function updateNetworkStatus(connected) {
@@ -6693,7 +6693,7 @@ response = requests.get(
         // UI辅助函数
         function showLoading(message) {
             // 实现加载状态显示
-            const loadingEl = document.getElementById('loading-overlay') || createLoadingOverlay();
+            const loadingEl = document.getElementById('loading-overlay') || createLoadingOverlay;
             loadingEl.querySelector('.loading-message').textContent = message;
             loadingEl.style.display = 'flex';
         }
@@ -6716,7 +6716,7 @@ response = requests.get(
             const icons = { success: '\u2705', error: '\u274C', info: '\u2139\uFE0F', warning: '\u26A0\uFE0F' };
             const toast = document.createElement('div');
             toast.className = 'toast ' + type;
-            toast.innerHTML = '<span class="toast-icon">' + (icons[type] || '') + '</span><span class="toast-message">' + message + '</span><button class="toast-close" onclick="var el=this.parentElement;el.classList.add(\'toast-fade-out\');setTimeout(function(){if(el&&el.parentNode)el.parentNode.removeChild(el);},300)">&times;</button>';
+            toast.innerHTML = '<span class="toast-icon">' + (icons[type] || '') + '</span><span class="toast-message">' + message + '</span><button class="toast-close" onclick="var el=this.parentElement;el.classList.add(\'toast-fade-out\');setTimeout(function() {if(el&&el.parentNode)el.parentNode.removeChild(el);},300)">&times;</button>';
             container.appendChild(toast);
             setTimeout(function() {
                 toast.classList.add('toast-fade-out');
@@ -6917,10 +6917,10 @@ response = requests.get(
                     ctx2.lineWidth = 1;
                     for (var gi = 0; gi <= 4; gi++) {
                         var gy = pad.top + plotH * (1 - gi / 4);
-                        ctx2.beginPath();
+                        ctx2.beginPath;
                         ctx2.moveTo(pad.left, gy);
                         ctx2.lineTo(cw - pad.right, gy);
-                        ctx2.stroke();
+                        ctx2.stroke;
                         ctx2.fillStyle = 'rgba(255,255,255,0.2)';
                         ctx2.font = '9px sans-serif';
                         ctx2.textAlign = 'right';
@@ -6930,28 +6930,28 @@ response = requests.get(
                     /* 修正前（红色折线） */
                     ctx2.strokeStyle = '#ff6b6b';
                     ctx2.lineWidth = 1.5;
-                    ctx2.beginPath();
+                    ctx2.beginPath;
                     for (var hi = 0; hi < n; hi++) {
                         var x = pad.left + plotW * hi / (n - 1);
                         var y = pad.top + plotH * (1 - (history[hi].before || 0) / maxVal);
                         if (hi === 0) ctx2.moveTo(x, y); else ctx2.lineTo(x, y);
                     }
-                    ctx2.stroke();
+                    ctx2.stroke;
 
                     /* 修正后（蓝色折线） */
                     ctx2.strokeStyle = '#4a9eff';
                     ctx2.lineWidth = 1.5;
-                    ctx2.beginPath();
+                    ctx2.beginPath;
                     for (var hi = 0; hi < n; hi++) {
                         var x = pad.left + plotW * hi / (n - 1);
                         var y = pad.top + plotH * (1 - (history[hi].after || 0) / maxVal);
                         if (hi === 0) ctx2.moveTo(x, y); else ctx2.lineTo(x, y);
                     }
-                    ctx2.stroke();
+                    ctx2.stroke;
 
                     /* 改善幅度（绿色填充区域） */
                     ctx2.fillStyle = 'rgba(0, 255, 136, 0.08)';
-                    ctx2.beginPath();
+                    ctx2.beginPath;
                     for (var hi = 0; hi < n; hi++) {
                         var x = pad.left + plotW * hi / (n - 1);
                         var yBefore = pad.top + plotH * (1 - (history[hi].before || 0) / maxVal);
@@ -6967,10 +6967,10 @@ response = requests.get(
                         if (hi === n - 1) {
                             ctx2.lineTo(x, pad.top + plotH);
                             ctx2.lineTo(pad.left, pad.top + plotH);
-                            ctx2.closePath();
+                            ctx2.closePath;
                         }
                     }
-                    ctx2.fill();
+                    ctx2.fill;
 
                     /* X轴标签 */
                     ctx2.fillStyle = 'rgba(255,255,255,0.3)';
@@ -7060,47 +7060,47 @@ response = requests.get(
         // 初始化
         document.addEventListener('DOMContentLoaded', function() {
             // 创建连接状态指示器（顶部横幅）
-            createConnectionBanner();
+            createConnectionBanner;
             
             // 创建重连提示元素
-            createReconnectToast();
+            createReconnectToast;
             
             // 检查连接状态
-            apiService.checkConnection().then(status => {
+            apiService.checkConnection.then(status => {
                 if (status.connected) {
                     console.log('后端服务器连接成功:', status.message);
                     updateConnectionStatus(true);
-                    clearConnectionTimeout();
+                    clearConnectionTimeout;
                 } else {
                     console.warn('后端服务器连接失败:', status.message);
                     updateConnectionStatus(false);
-                    startConnectionTimeout();
+                    startConnectionTimeout;
                 }
             });
             
             // 启动连接监控
-            apiService.startConnectionMonitor();
+            apiService.startConnectionMonitor;
             
             // 监听连接状态变化
             document.addEventListener('backend-connection-status', (event) => {
                 updateConnectionStatus(event.detail.connected, event.detail.message);
                 if (event.detail.connected) {
-                    clearConnectionTimeout();
-                    hideReconnectToast();
+                    clearConnectionTimeout;
+                    hideReconnectToast;
                 } else {
-                    startConnectionTimeout();
+                    startConnectionTimeout;
                 }
             });
             
             // 更新时间
-            updateTime();
+            updateTime;
             setInterval(updateTime, 1000);
             
             // 初始化状态指示器
-            initStatusIndicators();
+            initStatusIndicators;
             
             // 初始数据加载
-            refreshDashboard();
+            refreshDashboard;
         });
         
         // ---- 状态变量 ----
@@ -7114,7 +7114,7 @@ response = requests.get(
         /* 页面加载后，为所有显示"未连接"的状态元素标记初始状态 */
         function initStatusIndicators() {
             document.querySelectorAll('.status-text, .metric-value, .status-badge, [data-status-init]').forEach(function(el) {
-                const txt = el.textContent ? el.textContent.trim() : '';
+                const txt = el.textContent ? el.textContent.trim : '';
                 if ((txt === '未连接' || txt === '离线') && !el.dataset.statusInit) {
                     el.dataset.statusInit = '未连接';
                 }
@@ -7152,7 +7152,7 @@ response = requests.get(
                 banner.className = 'connection-banner disconnected';
                 indicator.className = 'connection-dot disconnected';
                 const elapsed = disconnectStartTime ? 
-                    Math.floor((Date.now() - disconnectStartTime) / 1000) : 0;
+                    Math.floor((Date.now - disconnectStartTime) / 1000) : 0;
                 text.textContent = '系统离线' + (message ? ' — ' + message : '') + 
                     (elapsed > 0 ? '（已离线 ' + elapsed + ' 秒）' : '');
                 banner.style.display = 'flex';
@@ -7220,13 +7220,13 @@ response = requests.get(
             
             // 手动重连按钮
             document.getElementById('connection-retry-btn').addEventListener('click', function(e) {
-                e.stopPropagation();
-                manualReconnect();
+                e.stopPropagation;
+                manualReconnect;
             });
             
             // 关闭按钮 - 断开时不能关闭，连接时可关闭
             document.getElementById('connection-close-btn').addEventListener('click', function(e) {
-                e.stopPropagation();
+                e.stopPropagation;
                 const banner2 = document.getElementById('connection-banner');
                 if (banner2.classList.contains('connected')) {
                     banner2.style.display = 'none';
@@ -7236,7 +7236,7 @@ response = requests.get(
             // 点击横幅也触发重连
             banner.addEventListener('click', function() {
                 if (this.classList.contains('disconnected')) {
-                    manualReconnect();
+                    manualReconnect;
                 }
             });
             
@@ -7303,21 +7303,21 @@ response = requests.get(
             document.body.appendChild(toast);
             
             document.getElementById('reconnect-now-btn').addEventListener('click', function() {
-                manualReconnect();
+                manualReconnect;
             });
             
             document.getElementById('reconnect-cancel-btn').addEventListener('click', function() {
-                hideReconnectToast();
+                hideReconnectToast;
             });
         }
         
         function startConnectionTimeout() {
             if (!disconnectStartTime) {
-                disconnectStartTime = Date.now();
+                disconnectStartTime = Date.now;
             }
             if (!connectionTimeoutTimer) {
                 connectionTimeoutTimer = setInterval(function() {
-                    const elapsed = Math.floor((Date.now() - disconnectStartTime) / 1000);
+                    const elapsed = Math.floor((Date.now - disconnectStartTime) / 1000);
                     updateConnectionStatus(false, '正在尝试重连...');
                     
                     // 更新已离线时间
@@ -7386,7 +7386,7 @@ response = requests.get(
                 `;
                 document.body.appendChild(o);
                 return o;
-            })();
+            });
             overlay.style.display = 'block';
         }
         
@@ -7415,11 +7415,11 @@ response = requests.get(
             updateStatusIndicators(false);
             
             try {
-                const status = await apiService.checkConnection();
+                const status = await apiService.checkConnection;
                 if (status.connected) {
                     updateConnectionStatus(true);
-                    clearConnectionTimeout();
-                    hideReconnectToast();
+                    clearConnectionTimeout;
+                    hideReconnectToast;
                     if (btn) {
                         btn.disabled = false;
                         btn.textContent = '立即重连';
@@ -7440,7 +7440,7 @@ response = requests.get(
                 }
                 // 自动重试
                 if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                    setTimeout(() => manualReconnect(), 15000);
+                    setTimeout(() => manualReconnect, 15000);
                 }
             }
         }
@@ -7461,7 +7461,7 @@ response = requests.get(
             const fmtPct = function(v) { return (v != null) ? (parseFloat(v) * 100).toFixed(1) + '%' : '--'; };
             const fmtNum = function(v) { return (v != null) ? parseFloat(v).toFixed(2) : '--'; };
             const fmtInt = function(v) { return (v != null) ? Math.round(parseFloat(v)) : '--'; };
-            /* ZSFZS-F051修复: setWidth期望百分比(0-100)，setText直接使用百分比字符串。
+            /* setWidth期望百分比(0-100)，setText直接使用百分比字符串。
              * API返回0-1范围的浮点数(cpu_usage=0.45表示45%)，setWidth需*100转换。 */
             const fmtSetWidth = function(v) { return (v != null) ? Math.min(100, Math.max(0, parseFloat(v) * 100)) : 0; };
 
@@ -7478,7 +7478,7 @@ response = requests.get(
             // 系统状态认知
             if (data.system_status) {
                 const s = data.system_status;
-                /* ZSFZS-F051修复: setWidth用fmtSetWidth(0-100范围)，setText用fmtPct自动*100 */
+                /* setWidth用fmtSetWidth(0-100范围)，setText用fmtPct自动*100 */
                 setWidth('cog-cpu-fill', fmtSetWidth(s.cpu_usage));
                 setText('cog-cpu', fmtPct(s.cpu_usage));
                 setWidth('cog-memory-fill', fmtSetWidth(s.memory_usage));
@@ -7573,7 +7573,7 @@ response = requests.get(
 
         async function fetchCognitionStatus() {
             try {
-                const result = await apiService.getCognitionStatus();
+                const result = await apiService.getCognitionStatus;
                 return result && result.success ? result.data : null;
             } catch (err) {
                 console.warn('获取认知状态异常:', err.message);
@@ -7582,7 +7582,7 @@ response = requests.get(
         }
 
         async function tickCognition() {
-            const data = await fetchCognitionStatus();
+            const data = await fetchCognitionStatus;
             updateCognitionStatus(data);
         }
 
@@ -7605,8 +7605,8 @@ response = requests.get(
 
         document.addEventListener('DOMContentLoaded', function() {
             setTimeout(function() {
-                initCognitionRadar();
-                tickCognition();
+                initCognitionRadar;
+                tickCognition;
                 if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
                     g_dataEngine.registerModule('cognition_radar', 5000, tickCognition);
                 } else {
@@ -7618,4 +7618,3 @@ response = requests.get(
     <script>window.__PAGE_READY = true;</script>
 </body>
 </html>
-

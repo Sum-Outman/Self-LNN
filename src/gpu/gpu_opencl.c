@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_opencl.c
  * @brief OpenCL GPU后端实现
  * 
@@ -1328,7 +1328,7 @@ static size_t atomic_add_size_t(volatile size_t* ptr, size_t value) {
     // GCC/Clang: 使用__sync_fetch_and_add内置函数
     return __sync_fetch_and_add(ptr, value) + value;
 #else
-    /* ZSFA-FIX-F014: 修复原子加fallback，必须执行实际的加法操作 */
+/* 修复原子加fallback，必须执行实际的加法操作 */
     size_t original = *ptr;
     *ptr = original + value;
     return original;
@@ -3354,7 +3354,7 @@ static int opencl_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
                 }
                 
                 if (workgroup_product > 1) {
-                    /* ZSFUSA: clGetCommandQueueInfo需要运行时OpenCL支持 */
+/* clGetCommandQueueInfo需要运行时OpenCL支持 */
 #ifdef SELFLNN_HAS_OPENCL_RUNTIME
                     cl_device_id device = NULL;
                     cl_int dev_result = clGetCommandQueueInfo(opencl_kernel->command_queue,

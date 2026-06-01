@@ -1,4 +1,4 @@
-(function() {
+﻿(function() {
     'use strict';
     var trainingPollInterval = null;
     var trainingHistoryData = [];
@@ -8,7 +8,7 @@
     var datasetIndex = [];
     var convergenceHistory = [];
 
-    /* ZSFUSA-F07: 训练模式映射常量，与后端 TrainingMode 枚举保持同步 */
+/* 训练模式映射常量，与后端 TrainingMode 枚举保持同步 */
     var TRAINING_MODE_MAP = {
         1: 'imitation',
         2: 'rl',
@@ -62,7 +62,7 @@
                 if (lossEl) {
                     var lossVal = data.current_loss;
                     var accInfo = (data.accuracy !== undefined && data.accuracy !== null) ? (' | 准确率:' + (data.accuracy * 100).toFixed(1) + '%') : '';
-                    /* ZSFWS-002: 显示收敛速率 */
+/* 显示收敛速率 */
                     var convInfo = (data.convergence_rate !== undefined && data.convergence_rate !== null) ? (' | 收敛速率:' + (data.convergence_rate * 100).toFixed(2) + '%/epoch') : '';
                     var timeInfo = data.estimated_time ? (' | 预计:' + data.estimated_time) : '';
                     lossEl.textContent = (typeof lossVal === 'number' ? lossVal.toFixed(4) : String(lossVal || '--')) + accInfo + convInfo + timeInfo;
@@ -72,7 +72,7 @@
                 var progressText = document.getElementById('train-progress-text');
                 if (progressText) progressText.textContent = data.progress ? data.progress.toFixed(1) + '%' : '--';
 
-                /* ZSFWS-002: 记录训练历史数据 */
+/* 记录训练历史数据 */
                 if (data.current_epoch !== undefined && data.current_loss !== undefined) {
                     trainingHistoryData.push({
                         epoch: data.current_epoch,
@@ -90,15 +90,15 @@
         } catch(e) { console.warn('训练轮询失败:', e.message); }
     }
 
-    /* ZSFWS-002: 训练历史图表渲染 
-     * ZSF-009修复: 优先使用training-push的WebSocket实时数据源，
+/* 训练历史图表渲染 
+ *修复: 优先使用training-push的WebSocket实时数据源，
      * 避免HTTP轮询和WebSocket推送维护两份独立训练数据导致显示不一致。 */
     function renderTrainingChart() {
         var canvas = document.getElementById('train-history-chart');
         if (!canvas) return;
 
-        /* ZSF-009: 优先使用WebSocket推送的实时数据缓冲
-         * ZSFNO2-F004: 添加时效性验证，过期数据回退HTTP轮询 */
+/*: 优先使用WebSocket推送的实时数据缓冲
+ *: 添加时效性验证，过期数据回退HTTP轮询 */
         var lossData = trainingHistoryData;
         var pushAvailable = window.trainingPushManager && 
                             window.trainingPushManager.dataBuffers &&
@@ -178,7 +178,7 @@
         ctx.fillText('Epoch ' + (lossData.length - 1), w - margin.right - 30, h - 3);
     }
 
-    /* ZSFWS-002: 超参数搜索 */
+/* 超参数搜索 */
     async function startHyperparameterSearch() {
         try {
             var gridSize = parseInt((document.getElementById('hyper-grid-size') || {}).value || '10', 10);
@@ -211,7 +211,7 @@
     }
     window.pollHyperparameterSearch = pollHyperparameterSearch;
 
-    /* ZSFWS-002: GPU资源选择 */
+/* GPU资源选择 */
     async function refreshGpuList() {
         try {
             var data = await window.SelfLnnApi.getGpuStatus();
@@ -236,7 +236,7 @@
         container.innerHTML = html;
     }
 
-    /* ZSFDDD-D5修复: request()返回原始Response，必须先.json()解析 */
+/* request()返回原始Response，必须先.json()解析 */
     async function loadCheckpointList() {
         try {
             var resp = await window.SelfLnnApi.request('/checkpoint/list');
@@ -291,7 +291,7 @@
         } catch(e) { window.showNotification('操作失败: ' + e.message, 'danger'); }
     };
 
-    /* ZSFWS-002: 数据集管理 */
+/* 数据集管理 */
     async function loadDatasetList() {
         try {
             var data = await window.SelfLnnApi.datasetList();
@@ -346,7 +346,7 @@
         window.showNotification('训练历史已导出', 'success');
     };
 
-    /* ZSFWS-002: 训练配置重置 */
+/* 训练配置重置 */
     window.resetTrainingConfig = function() {
         var defaults = { lr: '0.001', batch: '64', epochs: '100', dataset: '/data/training' };
         var lrEl = document.getElementById('train-lr');

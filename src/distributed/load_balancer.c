@@ -1,4 +1,4 @@
-#include "selflnn/distributed/load_balancer.h"
+﻿#include "selflnn/distributed/load_balancer.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
@@ -184,7 +184,7 @@ int lb_update_node_metrics(LbBalancer* balancer, uint32_t node_id,
         net_bw_ratio = metrics->network_bandwidth_mbps / (node->capability.network_bandwidth_gbps * 1000.0);
         if (net_bw_ratio > 1.0) net_bw_ratio = 1.0;
     }
-    /* ZSFWS-L020修复: IO利用率使用队列深度+网络带宽加权估算
+/* IO利用率使用队列深度+网络带宽加权估算
      * 原实现用temperature_celsius/100作为IO指标（无物理意义）
      * 改用: queue_depth/32归一化 + network_bandwidth_mbps利用率加权
      * LbNodeMetrics有: queue_depth(uint32) + network_bandwidth_mbps(double) */

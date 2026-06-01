@@ -37,7 +37,7 @@ static int handle_api_post_task_cancel(void* server, const char* json, char* buf
 #include "selflnn/multimodal/multimodal_manager.h"
 #include "selflnn/multimodal/multimodal.h"
 #include "selflnn/multimodal/dialogue.h"
-#include "selflnn/multimodal/speech_recognition.h"  /* ZSFBUILD: SpeechRecognitionResult */
+#include "selflnn/multimodal/speech_recognition.h" /* SpeechRecognitionResult */
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/cognition/self_cognition.h"
@@ -67,7 +67,7 @@ static int handle_api_post_task_cancel(void* server, const char* json, char* buf
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/quaternion_lnn.h"
-#include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
+#include "selflnn/core/laplace_unified.h" /* 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/string_utils.h"
@@ -79,7 +79,7 @@ static int handle_api_post_task_cancel(void* server, const char* json, char* buf
 #include "selflnn/programming/self_programming.h"
 #include "selflnn/training/training.h"
 #include "selflnn/training/training_pipeline.h"
-#include "selflnn/training/data_loaders.h"  /* ZSFX-DEEP-R14-001: TrainingDataset/DatasetStats类型 */
+#include "selflnn/training/data_loaders.h" /* TrainingDataset/DatasetStats类型 */
 #include "selflnn/multimodal/tts.h"
 #include "selflnn/multimodal/stereo_depth_enhance.h"
 #include "selflnn/knowledge/skill_library.h"
@@ -99,7 +99,7 @@ static int handle_api_post_task_cancel(void* server, const char* json, char* buf
 #include "selflnn/multimodal/audio.h"
 #include "selflnn/multimodal/camera_capture.h"
 #include "selflnn/multimodal/vad.h"
-#include "selflnn/robot/computer_operation.h"  /* ZSFZS-F032: COSystem类型需要 */
+#include "selflnn/robot/computer_operation.h" /* COSystem类型需要 */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -265,7 +265,7 @@ static const struct {
     {"/api/knowledge", "GET/POST", "知识库查询/添加", "dialogue"},
     {"/api/learning/from-dialogue", "POST", "从对话中学习", "dialogue"},
     {"/api/learning/from-manual", "POST", "从说明书/教学文本学习", "dialogue"},
-    {"/api/learning/consistency", "POST", "知识一致性检查", "knowledge"},  /* ZSFQQ-P1-006 */
+    {"/api/learning/consistency", "POST", "知识一致性检查", "knowledge"},
     {"/api/agi/features", "GET", "获取AGI功能状态", "agi"},
     {"/api/agi/feature/toggle", "POST", "切换AGI功能", "agi"},
     {"/api/agi/features/toggle", "POST", "切换AGI功能（复数别名）", "agi"},
@@ -355,7 +355,7 @@ static const struct {
     {"/api/safety/status", "GET", "获取安全监控状态", "safety"},
     {"/api/safety/events", "GET", "获取安全事件列表", "safety"},
     {"/api/safety/bounds", "GET", "获取安全边界配置", "safety"},
-    {"/api/safety/bounds", "POST", "更新安全边界配置(ZSFZX-FIX-R5-2)", "safety"},
+    {"/api/safety/bounds", "POST", "更新安全边界配置", "safety"},
     {"/api/safety/emergency_stop", "POST", "紧急停止", "safety"},
     {"/api/safety/soft_stop", "POST", "软停止", "safety"},
     {"/api/safety/reset", "POST", "重置安全状态", "safety"},
@@ -425,7 +425,7 @@ static const struct {
     {"/api/training/history", "GET", "获取训练历史", "training"},
     {"/api/training/export", "POST", "导出训练结果", "training"},
     {"/api/training/log/clear", "POST", "清除训练日志", "training"},
-    {"/api/training/schedule", "POST", "创建训练计划", "training"},  /* ZSF-010 */
+    {"/api/training/schedule", "POST", "创建训练计划", "training"},
     {"/api/voice/history", "GET", "获取语音交互历史", "voice"},
     {"/api/voice/recognize", "POST", "语音识别", "voice"},
     {"/api/voice/synthesize", "POST", "语音合成", "voice"},
@@ -459,7 +459,7 @@ static const struct {
     {"/api/lnn/parameters/reset", "POST", "重置LNN网络参数", "lnn"},
     {"/api/lnn/calibrate", "POST", "校准LNN网络", "lnn"},
     {"/api/lnn/config/export", "GET", "导出LNN配置", "lnn"},
-    /* ZSFWS-M-012: 前端可视化实时数据源端点 */
+/* 前端可视化实时数据源端点 */
     {"/api/audio/spectrum", "GET", "获取音频频谱分析数据", "audio"},
     {"/api/lnn/activation/heatmap", "GET", "获取LNN神经元激活热力图数据", "lnn"},
     {"/api/lnn/prediction/scatter", "GET", "获取LNN预测结果散点图数据", "lnn"},
@@ -471,7 +471,7 @@ static const struct {
     {"/api/agi/tasks", "GET", "获取AGI活动任务列表", "agi"},
     {"/api/agi/diagnostic", "POST", "执行AGI系统诊断", "agi"},
     {"/api/agi/diagnostic/export", "POST", "导出AGI系统诊断报告", "agi"},
-    /* ZSFWS-B009: 前端-后端API端点对齐 - 新增端点 */
+/* 前端-后端API端点对齐 - 新增端点 */
     {"/api/programming/sample", "GET", "获取编程示例代码", "programming"},
     {"/api/command/prefixes", "GET", "获取AGI命令前缀列表", "system"},
     {"/api/cognition/health", "GET", "认知系统健康检查", "agi"},
@@ -479,7 +479,7 @@ static const struct {
     {"/api/task/queue", "GET", "获取AGI任务队列状态", "agi"},
     {"/api/task/assign", "POST", "提交AGI任务分配", "agi"},
     {"/api/system/shutdown", "POST", "关闭AGI系统", "system"},
-    /* ZSFZS-F035: 补充注册已有处理器但未在端点数组中声明的API */
+/* 补充注册已有处理器但未在端点数组中声明的API */
     {"/api/training/resume", "POST", "恢复训练任务", "training"},
     {"/api/knowledge/import", "POST", "导入知识库条目", "knowledge"},
     {"/api/knowledge/delete", "POST", "删除知识库条目", "knowledge"},
@@ -511,7 +511,6 @@ static const struct {
     {"/api/checkpoint/load", "POST", "加载模型检查点", "training"},
     {"/api/serial/receive", "GET", "串口数据接收", "device"},
     {"/api/simulation/reconstruct3d", "POST", "3D重建请求", "simulation"},
-    /* ZSFWS-B009补注册: 14个已有处理器但未在端点数组声明的API路由 */
     {"/api/reasoning/pause", "POST", "暂停推理", "reasoning"},
     {"/api/reasoning/config/save", "POST", "保存推理配置", "reasoning"},
     {"/api/reasoning/test", "GET", "推理测试", "reasoning"},
@@ -528,7 +527,7 @@ static const struct {
     {"/api/video/quality", "POST", "设置视频质量", "multimodal"},
     {"/api/system/logs", "GET", "获取系统日志", "system"},
     {"/api/capability/diagnose", "POST", "能力开关诊断", "agi"},
-    /* ZSFZS-PRODUCT: 产品设计端点注册 */
+/* 产品设计端点注册 */
     {"/api/product/spec", "POST", "产品规格生成", "product"},
     {"/api/product/status", "GET", "产品设计引擎状态", "product"},
 };
@@ -646,7 +645,7 @@ static char* get_detailed_system_status(const BackendServer* server);
  * @return int 成功返回0，失败返回-1
  */
 static int parse_json_string(const char* json, const char* key, char* value, size_t max_length) {
-    /* ZSFABC-F008: 添加详细错误诊断信息 */
+/* 添加详细错误诊断信息 */
     if (!json || !key || !value || max_length == 0) {
         log_debug("[JSON解析] 参数无效: json=%p key=%p value=%p max_len=%zu",
                  (const void*)json, (const void*)key, (void*)value, max_length);
@@ -942,7 +941,7 @@ static void rate_limit_bucket_init(RateLimitBucket* bucket, const char* ip, floa
     bucket->tokens = max_tokens;
     bucket->max_tokens = max_tokens;
     bucket->refill_rate = refill_rate;
-    bucket->last_refill_time = platform_get_time_ms();
+    bucket->last_refill_time = platform_get_time_ms;
     bucket->first_request_time = bucket->last_refill_time;
 }
 
@@ -950,7 +949,7 @@ static void rate_limit_bucket_init(RateLimitBucket* bucket, const char* ip, floa
  * @brief 补充令牌（基于时间差）
  */
 static void rate_limit_bucket_refill(RateLimitBucket* bucket) {
-    uint64_t now = platform_get_time_ms();
+    uint64_t now = platform_get_time_ms;
     uint64_t elapsed = now - bucket->last_refill_time;
     if (elapsed > 0) {
         float tokens_to_add = (float)elapsed / 1000.0f * bucket->refill_rate;
@@ -1158,7 +1157,7 @@ static void circuit_breaker_init(CircuitBreaker* cb, const char* name) {
 static void circuit_breaker_record_success(CircuitBreaker* cb) {
     if (!cb || !cb->enabled) return;
     cb->total_requests++;
-    cb->last_success_ms = platform_get_time_ms();
+    cb->last_success_ms = platform_get_time_ms;
     
     if (cb->state == CB_STATE_HALF_OPEN) {
         /* 半开状态下成功，回到CLOSED状态 */
@@ -1180,7 +1179,7 @@ static void circuit_breaker_record_failure(CircuitBreaker* cb) {
     if (!cb || !cb->enabled) return;
     cb->total_requests++;
     cb->total_failures++;
-    cb->last_failure_ms = platform_get_time_ms();
+    cb->last_failure_ms = platform_get_time_ms;
     cb->consecutive_failures++;
     
     if (cb->state == CB_STATE_CLOSED) {
@@ -1204,7 +1203,7 @@ static void circuit_breaker_record_failure(CircuitBreaker* cb) {
 static int circuit_breaker_is_available(CircuitBreaker* cb) {
     if (!cb || !cb->enabled) return 1;
     
-    uint64_t now_ms = platform_get_time_ms();
+    uint64_t now_ms = platform_get_time_ms;
     
     switch (cb->state) {
         case CB_STATE_CLOSED:
@@ -1277,7 +1276,7 @@ static int request_type_to_cb_subsystem(ApiRequestType type) {
         /* ===== 学习子系统 ===== */
         case API_GET_LEARNING:
         case API_POST_LEARNING_DIALOGUE:
-        case API_POST_LEARNING_CONSISTENCY:  /* ZSFQQ-P1-006 */
+        case API_POST_LEARNING_CONSISTENCY:
         case API_POST_IMITATION_DEMONSTRATION:
         case API_POST_IMITATION_TRAIN:
         case API_POST_IMITATION_PREDICT:
@@ -1485,7 +1484,7 @@ struct BackendServer {
     int audio_capture_active;                        /**< 音频采集是否运行中 */
     int camera_capture_active;                       /**< 摄像头采集是否运行中 */
 
-    /* 摄像头采集参数（ZSFWS-INT-FIX: 此前缺失导致编译错误） */
+    /* 摄像头采集参数（此前缺失导致编译错误） */
     int camera_index;                        /**< 当前摄像头设备索引（0-16） */
     int camera_width;                        /**< 摄像头采集宽度（默认640） */
     int camera_height;                       /**< 摄像头采集高度（默认480） */
@@ -1503,7 +1502,7 @@ struct BackendServer {
     ApiKeyEntry api_keys[32];               /**< 多API密钥存储（最多32个） */
     int api_key_count;                      /**< 当前API密钥数 */
     
-    /* ZSFABC-009: 当前请求路径，供handler提取URL参数(如 /api/knowledge/entry/123) */
+/* 当前请求路径，供handler提取URL参数(如 /api/knowledge/entry/123) */
     char request_path[512];
     
     /* API调用统计 */
@@ -1543,7 +1542,7 @@ struct BackendServer {
     int pending_restart;                     /**< 待重启标志（1=需要重启） */
     
     time_t start_time;                      /**< 服务器启动时间 */
-    ThreadPool* thread_pool;               /**< ZSFABC: 线程池，实现高并发 */
+    ThreadPool* thread_pool; /**< 线程池，实现高并发 */
     HyperparameterSearch* hyperparameter_search; /**< 超参数搜索实例 */
     int hp_search_running;                  /**< 超参数搜索是否运行中 */
     float hp_search_best_loss;              /**< 超参数搜索最佳损失 */
@@ -1717,7 +1716,7 @@ static int handle_api_post_simulation_view_reset(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     (void)request_type;
-    /* ZSFWS-E006: 解析请求中的视角参数，与真实仿真器交互 */
+/* 解析请求中的视角参数，与真实仿真器交互 */
     float cam_x = 0.0f, cam_y = 0.0f, cam_z = 5.0f;
     float tgt_x = 0.0f, tgt_y = 0.0f, tgt_z = 0.0f;
     if (request_data && request_length > 0) {
@@ -1923,7 +1922,7 @@ static void ip_access_list_init(IpAccessList* list, const char (*entries)[16][64
  * @brief 清理过期限流桶
  */
 static void rate_limit_cleanup_buckets(RateLimitBucket* buckets, int* bucket_count) {
-    uint64_t now = platform_get_time_ms();
+    uint64_t now = platform_get_time_ms;
     int new_count = 0;
     for (int i = 0; i < *bucket_count; i++) {
         uint64_t idle = now - buckets[i].last_refill_time;
@@ -2145,13 +2144,13 @@ static int ws_send_text_frame(SocketHandle sock, const char* data, size_t len) {
     return 0;
 }
 
-/* ZSFABC: WebSocket推送上下文，用于独立线程 */
+/* WebSocket推送上下文，用于独立线程 */
 typedef struct {
     BackendServer* server;
     SocketHandle client_socket;
 } WebSocketContext;
 
-/* ZSFYGY-F004: 非阻塞socket接收函数 */
+/* 非阻塞socket接收函数 */
 static int socket_recv_nonblock(SocketHandle sock, char* buf, int max_len) {
     if (sock < 0 || !buf || max_len <= 0) return -1;
 #ifdef _WIN32
@@ -2175,18 +2174,18 @@ static int socket_recv_nonblock(SocketHandle sock, char* buf, int max_len) {
 #endif
 }
 
-/* ZSFYGY-F004: 检查socket是否发生了致命错误 */
+/* 检查socket是否发生了致命错误 */
 static int socket_is_fatal_error(SocketHandle sock) {
     (void)sock;
 #ifdef _WIN32
-    int err = WSAGetLastError();
+    int err = WSAGetLastError;
     return (err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAENOTCONN || err == WSAENETRESET);
 #else
     return (errno == ECONNRESET || errno == ECONNABORTED || errno == EPIPE || errno == ENOTCONN);
 #endif
 }
 
-/* ZSFYGY-F004: 从WebSocket帧中提取文本载荷 */
+/* 从WebSocket帧中提取文本载荷 */
 static const char* ws_extract_text_payload(const char* raw_frame, size_t frame_len) {
     if (!raw_frame || frame_len < 2) return NULL;
     const unsigned char* buf = (const unsigned char*)raw_frame;
@@ -2213,7 +2212,7 @@ static const char* ws_extract_text_payload(const char* raw_frame, size_t frame_l
     }
     if (frame_len < offset + payload_len) return NULL;
     if (payload_len > 65536) return NULL;
-    /* ZSFZX-FIX-R7-4: 线程安全 — 原static缓冲区多线程并发时会数据竞态
+/* 线程安全 — 原static缓冲区多线程并发时会数据竞态
      * 使用线程局部存储(TLS)确保每个线程有独立的帧缓冲区 */
 #ifdef _MSC_VER
     static __declspec(thread) char payload_buf[65536];
@@ -2306,7 +2305,7 @@ static void* system_status_push_thread(void* arg) {
 }
 
 /* ============================================================================
- * ZSFABC-B005: 线程池请求任务上下文与异步工作函数
+ *: 线程池请求任务上下文与异步工作函数
  * 将HTTP请求打包派发到线程池工作线程处理，实现真正高并发。
  * thread_model=1时启用，主线程仅做accept和分发。
  * ============================================================================ */
@@ -2351,7 +2350,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/system/settings") == 0)           return API_POST_SYSTEM_SETTINGS;
     if (strcmp(p, "/api/system/change_password") == 0)    return API_POST_SYSTEM_CHANGE_PASSWORD;
     if (strcmp(p, "/api/system/command") == 0)            return API_POST_SYSTEM_COMMAND;
-    if (strcmp(p, "/api/system/emergency_stop") == 0)     return API_POST_SAFETY_EMERGENCY_STOP; /* ZSFQQ-DEEP-001: 系统级紧急停止路由 */
+    if (strcmp(p, "/api/system/emergency_stop") == 0)     return API_POST_SAFETY_EMERGENCY_STOP; /* 系统级紧急停止路由 */
     if (strcmp(p, "/api/command/send") == 0)              return API_POST_COMMAND_SEND;
 
     /* === 多模态 === */
@@ -2365,14 +2364,14 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/multimodal/config") == 0)         return API_POST_MULTIMODAL_CONFIG;
     if (strcmp(p, "/api/multimodal/test") == 0)           return API_POST_MULTIMODAL_TEST;
     if (strcmp(p, "/api/multimodal/config/reset") == 0)   return API_POST_MULTIMODAL_CONFIG_RESET;
-    if (strcmp(p, "/api/multimodal/stop") == 0)            return API_POST_MULTIMODAL_STOP;            /* ZSF-NEW-004 */
+    if (strcmp(p, "/api/multimodal/stop") == 0)            return API_POST_MULTIMODAL_STOP;
     if (strcmp(p, "/api/multimodal/process") == 0)         return API_POST_MULTIMODAL_PROCESS;         /* P1-003: 从旧路由链迁移 */
     if (strcmp(p, "/api/multimodal/reset") == 0)           return API_POST_MULTIMODAL_RESET;           /* P1-003: 从旧路由链迁移 */
     if (strcmp(p, "/api/audio/recognize") == 0)           return API_POST_AUDIO_RECOGNIZE;
     if (strcmp(p, "/api/voice/recognize") == 0)           return API_POST_VOICE_RECOGNIZE;
     if (strcmp(p, "/api/tts/synthesize") == 0)            return API_POST_TTS_SYNTHESIZE;
     if (strcmp(p, "/api/voice/synthesize") == 0)          return API_POST_VOICE_SYNTHESIZE;
-    if (strcmp(p, "/api/voice/history") == 0)              return API_GET_VOICE_HISTORY;              /* ZSF-NEW-004 */
+    if (strcmp(p, "/api/voice/history") == 0)              return API_GET_VOICE_HISTORY;
     if (strcmp(p, "/api/camera/devices") == 0)            return API_GET_CAMERA_DEVICES;
     if (strcmp(p, "/api/camera/switch") == 0)             return API_POST_CAMERA_SWITCH;
     if (strcmp(p, "/api/audio/devices") == 0)             return API_GET_AUDIO_DEVICES;
@@ -2384,7 +2383,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/dialogue/history") == 0)          return API_GET_DIALOGUE_HISTORY;
     if (strcmp(p, "/api/dialogue/clear") == 0)            return API_POST_DIALOGUE_CLEAR;
     if (strcmp(p, "/api/dialogue/multimodal") == 0)       return API_POST_DIALOGUE_MULTIMODAL;
-    if (strcmp(p, "/api/dialogue/send") == 0)            return API_POST_DIALOGUE_SEND;  /* ZSFX-DEEP-R7-003: 旧路由有此端点,统一路由缺失 */
+    if (strcmp(p, "/api/dialogue/send") == 0)            return API_POST_DIALOGUE_SEND; /* 旧路由有此端点,统一路由缺失 */
 
     /* === 知识库 === */
     if (strcmp(p, "/api/knowledge") == 0)
@@ -2395,7 +2394,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
         return (method && strcmp(method, "DELETE") == 0) ? API_POST_KNOWLEDGE_DELETE : API_GET_KNOWLEDGE_ENTRY;
     if (strcmp(p, "/api/knowledge/stats") == 0)           return API_GET_KNOWLEDGE_STATS;
     if (strcmp(p, "/api/knowledge/export") == 0)          return API_POST_KNOWLEDGE_EXPORT;
-    /* ZSFAB-v2修复: knowledge/import路由到POST_KNOWLEDGE(21)，而非与memory/export共用的slot 226 */
+/* knowledge/import路由到POST_KNOWLEDGE(21)，而非与memory/export共用的slot 226 */
     if (strcmp(p, "/api/knowledge/import") == 0)          return API_POST_KNOWLEDGE; /* slot 21: handle_api_post_knowledge */
     if (strcmp(p, "/api/knowledge/delete") == 0)          return API_POST_KNOWLEDGE_DELETE;
     if (strcmp(p, "/api/knowledge/save") == 0)            return API_POST_KNOWLEDGE;
@@ -2405,7 +2404,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 记忆 === */
     if (strcmp(p, "/api/memory") == 0)                    return API_GET_MEMORY;
     if (strcmp(p, "/api/memory/add") == 0)                return API_POST_MEMORY_ADD;
-    /* ZSFEEE-FIX-DEEP-004: P0修复 - 根据method区分GET/DELETE，防止路由method不匹配。
+/* P0修复 - 根据method区分GET/DELETE，防止路由method不匹配。
      * DELETE与GET共用一个处理器（handle_api_get_memory_entry内部处理），后续可扩展独立DELETE处理器 */
     if (strcmp(p, "/api/memory/entry") == 0)              return API_GET_MEMORY_ENTRY;
     if (strncmp(p, "/api/memory/entry/", 19) == 0)        return API_GET_MEMORY_ENTRY;
@@ -2421,12 +2420,12 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/training/pause") == 0)            return API_POST_TRAINING_PAUSE;
     if (strcmp(p, "/api/training/resume") == 0)           return API_POST_TRAINING_RESUME;
     if (strcmp(p, "/api/training/stop") == 0)             return API_POST_TRAINING_STOP;
-    if (strcmp(p, "/api/training/from-scratch") == 0)     return API_POST_TRAINING_FROM_SCRATCH; /* ZSF-NEW-004 */
-    if (strcmp(p, "/api/training/history") == 0)          return API_GET_TRAINING_HISTORY;       /* ZSF-NEW-004 */
+    if (strcmp(p, "/api/training/from-scratch") == 0)     return API_POST_TRAINING_FROM_SCRATCH;
+    if (strcmp(p, "/api/training/history") == 0)          return API_GET_TRAINING_HISTORY;
     if (strcmp(p, "/api/training/export") == 0)           return API_POST_TRAINING_EXPORT;
     if (strcmp(p, "/api/training/logs/clear") == 0)       return API_POST_TRAINING_LOG_CLEAR;
     if (strcmp(p, "/api/training/log/clear") == 0)        return API_POST_TRAINING_LOG_CLEAR; /* Z3-003: 别名兼容 */
-    if (strcmp(p, "/api/training/schedule") == 0)        return API_POST_TRAINING_SCHEDULE; /* ZSF-010 */
+    if (strcmp(p, "/api/training/schedule") == 0)        return API_POST_TRAINING_SCHEDULE;
     if (strcmp(p, "/api/training/pretrain") == 0)         return API_POST_TRAINING_PRETRAIN;
     if (strcmp(p, "/api/training/fine_tune") == 0)        return API_POST_TRAINING_FINE_TUNE;
     if (strcmp(p, "/api/training/fine-tune") == 0)        return API_POST_TRAINING_FINE_TUNE;  /* Z3-003: 别名兼容 */
@@ -2510,16 +2509,16 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/devices/register") == 0)          return API_POST_DEVICES_REGISTER_V1;
     if (strcmp(p, "/api/devices/unregister") == 0)        return API_POST_DEVICES_UNREGISTER_V1;
     if (strcmp(p, "/api/devices/discover") == 0)          return API_POST_DEVICES_DISCOVER;
-    if (strcmp(p, "/api/devices/mode") == 0)               return API_POST_DEVICES_MODE;              /* ZSF-NEW-004 */
-    if (strcmp(p, "/api/devices/emergency_stop") == 0)     return API_POST_DEVICES_EMERGENCY_STOP;    /* ZSF-NEW-004 */
+    if (strcmp(p, "/api/devices/mode") == 0)               return API_POST_DEVICES_MODE;
+    if (strcmp(p, "/api/devices/emergency_stop") == 0)     return API_POST_DEVICES_EMERGENCY_STOP;
     if (strcmp(p, "/api/device/command") == 0)            return API_POST_DEVICE_COMMAND_V1;
     if (strcmp(p, "/api/device/control") == 0)            return API_POST_DEVICE_CONTROL;
     if (strcmp(p, "/api/hardware/scan") == 0)             return API_POST_HARDWARE_SCAN;
     if (strcmp(p, "/api/hardware/info") == 0)             return API_GET_HARDWARE_INFO;
-    if (strcmp(p, "/api/hardware/config") == 0)            return API_POST_HARDWARE_CONFIG;           /* ZSF-NEW-004 */
-    if (strcmp(p, "/api/hardware/resources/allocate") == 0) return API_POST_HARDWARE_RESOURCES_ALLOCATE; /* ZSF-NEW-004 */
+    if (strcmp(p, "/api/hardware/config") == 0)            return API_POST_HARDWARE_CONFIG;
+    if (strcmp(p, "/api/hardware/resources/allocate") == 0) return API_POST_HARDWARE_RESOURCES_ALLOCATE;
     if (strcmp(p, "/api/hardware/resources") == 0)        return API_GET_HARDWARE_RESOURCES;
-    /* ZSFLYF-NEW-10修复: 补全线程池路由表中完全缺失的/serial端点 */
+/* 补全线程池路由表中完全缺失的/serial端点 */
     if (strcmp(p, "/api/serial/list") == 0)               return API_GET_SERIAL_LIST;
     if (strcmp(p, "/api/serial/open") == 0)               return API_POST_SERIAL_OPEN;
     if (strcmp(p, "/api/serial/close") == 0)              return API_POST_SERIAL_CLOSE;
@@ -2529,7 +2528,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 文件 === */
     if (strcmp(p, "/api/files/read") == 0)                return API_POST_FILES_READ;
     if (strcmp(p, "/api/files/write") == 0)               return API_POST_FILES_WRITE;
-    /* ZSFLYF-NEW-10修复: 补全线程池路由表中缺失的/files端点 */
+/* 补全线程池路由表中缺失的/files端点 */
     if (strcmp(p, "/api/files/delete") == 0)              return API_POST_FILES_DELETE;
     if (strcmp(p, "/api/files/list") == 0)                return API_GET_FILES_LIST;
 
@@ -2590,7 +2589,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 安全 === */
     if (strcmp(p, "/api/safety/status") == 0)             return API_GET_SAFETY_STATUS;
     if (strcmp(p, "/api/safety/emergency_stop") == 0)     return API_POST_SAFETY_EMERGENCY_STOP;
-    /* ZSFLYF-NEW-10修复: 补全线程池路由表中缺失的/safety端点 */
+/* 补全线程池路由表中缺失的/safety端点 */
     if (strcmp(p, "/api/safety/soft_stop") == 0)          return API_POST_SAFETY_SOFT_STOP;
     if (strcmp(p, "/api/safety/reset") == 0)              return API_POST_SAFETY_RESET;
     if (strcmp(p, "/api/safety/events") == 0)             return API_GET_SAFETY_EVENTS;
@@ -2598,7 +2597,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 演化 === */
     if (strcmp(p, "/api/evolution") == 0)                 return API_POST_EVOLUTION;
     if (strcmp(p, "/api/evolution/pareto") == 0)          return API_POST_EVOLUTION_PARETO;
-    /* ZSFEEE-FIX-005: P0-#5修复 - 添加演化状态查询端点 */
+/* P0-#5修复 - 添加演化状态查询端点 */
     if (strcmp(p, "/api/evolution/status") == 0)          return API_GET_EVOLUTION_STATUS;
 
     /* === 自动学习 === */
@@ -2610,7 +2609,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/learning") == 0)                  return API_GET_LEARNING;
     if (strcmp(p, "/api/learning/from-dialogue") == 0)    return API_POST_LEARNING_DIALOGUE;
     if (strcmp(p, "/api/learning/from-manual") == 0)      return API_POST_LEARNING_FROM_MANUAL;
-    if (strcmp(p, "/api/learning/consistency") == 0)      return API_POST_LEARNING_CONSISTENCY;  /* ZSFQQ-P1-006 */
+    if (strcmp(p, "/api/learning/consistency") == 0)      return API_POST_LEARNING_CONSISTENCY;
 
     /* === 推理 === */
     if (strcmp(p, "/api/reasoning") == 0)                 return API_GET_REASONING;
@@ -2630,17 +2629,17 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/model/stop") == 0)                return API_POST_MODEL_STOP;
     if (strcmp(p, "/api/model/unload") == 0)              return API_POST_MODEL_UNLOAD;
     if (strcmp(p, "/api/model/config/save") == 0)         return API_POST_MODEL_CONFIG_SAVE;
-    /* ZSFEEE-FIX-005: P0-#5修复 - 添加模型信息查询端点 */
+/* P0-#5修复 - 添加模型信息查询端点 */
     if (strcmp(p, "/api/model/info") == 0)                return API_GET_MODEL_INFO;
-    if (strcmp(p, "/api/checkpoint/list") == 0)            return API_POST_MODEL_LOAD;                /* ZSF-NEW-004: 检查点列表路由 */
-    if (strcmp(p, "/api/checkpoint/load") == 0)            return API_POST_MODEL_LOAD;                /* ZSF-NEW-004: 检查点加载路由 */
+    if (strcmp(p, "/api/checkpoint/list") == 0)            return API_POST_MODEL_LOAD;
+    if (strcmp(p, "/api/checkpoint/load") == 0)            return API_POST_MODEL_LOAD;
 
     /* === 技能库 === */
     if (strcmp(p, "/api/skills") == 0)                    return API_GET_SKILLS;
-    if (strcmp(p, "/api/skills/search") == 0)              return API_POST_SKILLS_SEARCH;              /* ZSF-NEW-004 */
-    if (strcmp(p, "/api/skills/execute") == 0)             return API_POST_SKILLS_EXECUTE;             /* ZSF-NEW-004 */
-    if (strcmp(p, "/api/skills/compose") == 0)             return API_POST_SKILLS_COMPOSE;             /* ZSF-NEW-004 */
-    if (strcmp(p, "/api/skills/stats") == 0)               return API_GET_SKILLS_STATS;                /* ZSF-NEW-004 */
+    if (strcmp(p, "/api/skills/search") == 0)              return API_POST_SKILLS_SEARCH;
+    if (strcmp(p, "/api/skills/execute") == 0)             return API_POST_SKILLS_EXECUTE;
+    if (strcmp(p, "/api/skills/compose") == 0)             return API_POST_SKILLS_COMPOSE;
+    if (strcmp(p, "/api/skills/stats") == 0)               return API_GET_SKILLS_STATS;
 
     /* === 决策日志 === */
     if (strcmp(p, "/api/decision/log") == 0)              return API_GET_DECISION_LOG;
@@ -2669,7 +2668,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/data-collection/status") == 0)    return API_GET_SENSOR_PIPELINE_STATUS;
 
     /* === API密钥管理 === */
-    /* ZSFAAA-DEEP-023修复: 线程池路由补全全部11条Key端点
+/* 线程池路由补全全部11条Key端点
      * 此前仅有/auth/set_key一条路由，导致线程池模式下所有Key管理返回404 */
     if (strcmp(p, "/api/key/set") == 0)                  return API_POST_KEY_SET;
     if (strcmp(p, "/api/key/status") == 0)               return API_GET_KEY_STATUS;
@@ -2717,14 +2716,14 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === P0-002: 设备状态/认证状态 === */
     if (strcmp(p, "/api/device/status") == 0)             return API_POST_DEVICE_STATUS;
     if (strcmp(p, "/api/auth/status") == 0)               return API_GET_AUTH_STATUS;
-    /* ZSFWS-INT-FIX: 补全统一路由缺失的7个路径
+/* 补全统一路由缺失的7个路径
      * 此前这些路径在 handler table 中已注册但在路由表中缺失,
      * 导致线程池模式下前端调用返回404 */
     if (strcmp(p, "/api/audio/capture/start") == 0)       return API_POST_AUDIO_CAPTURE_START;
     if (strcmp(p, "/api/audio/capture/stop") == 0)        return API_POST_AUDIO_CAPTURE_STOP;
     if (strcmp(p, "/api/camera/capture/start") == 0)      return API_POST_CAMERA_CAPTURE_START;
     if (strcmp(p, "/api/camera/capture/stop") == 0)       return API_POST_CAMERA_CAPTURE_STOP;
-    /* ZSFEEE-FIX-DEEP-004: P0修复 - 根据method区分GET/POST，防止路由method不匹配。
+/* P0修复 - 根据method区分GET/POST，防止路由method不匹配。
      * POST也路由到API_GET_SAFETY_BOUNDS（处理器内部根据请求体自动区分读写操作） */
     if (strcmp(p, "/api/safety/bounds") == 0)             return API_GET_SAFETY_BOUNDS;
     if (strcmp(p, "/api/system/status") == 0)             return API_GET_SYSTEM_FULL_STATUS;
@@ -2773,7 +2772,7 @@ static void worker_process_api_request(void* arg) {
                 char* value_start = current + 15;
                 while (value_start < line_end && (*value_start == ' ' || *value_start == ':')) value_start++;
                 if (value_start < line_end) { 
-                    /* ZSFX-DEEP-R13-002: 使用strtoull替代atoi防止负数溢出和无效输入 */
+/* 使用strtoull替代atoi防止负数溢出和无效输入 */
                     char* end_ptr = NULL;
                     unsigned long long cl = strtoull(value_start, &end_ptr, 10);
                     if (end_ptr > value_start && cl <= 10485760ULL) {
@@ -2836,10 +2835,10 @@ static void worker_process_api_request(void* arg) {
     /* API路由匹配（精简版，仅匹配主要路由） */
     {
         ApiResponse* response = NULL;
-        const char* cors_origin = backend_cors_get_origin();
+        const char* cors_origin = backend_cors_get_origin;
         char* handler_path = path;
         
-        /* ZSFABC: 直接写入路径和认证头部(worker线程中本地上下文已足够) */
+/* 直接写入路径和认证头部(worker线程中本地上下文已足够) */
         strncpy(server->request_path, path, sizeof(server->request_path) - 1);
         server->request_path[sizeof(server->request_path) - 1] = '\0';
         if (ctx->auth_header[0]) {
@@ -2855,10 +2854,10 @@ static void worker_process_api_request(void* arg) {
         
         if (!response) {
             /* 未匹配路由或处理失败：404 */
-            char nf[512];  /* ZSFZX-FIX-R9-3: 增大以容纳JSON错误响应 */
+            char nf[512]; /* 增大以容纳JSON错误响应 */
             int nfl = snprintf(nf, sizeof(nf),
                 "HTTP/1.1 404 Not Found\r\n"
-                "Content-Type: application/json\r\n"  /* ZSFZX-FIX-R9-3: text/plain → JSON */
+                "Content-Type: application/json\r\n" /* text/plain → JSON */
                 "Content-Length: %zu\r\n"
                 "Connection: close\r\n"
                 "Access-Control-Allow-Origin: %s\r\n"
@@ -2884,17 +2883,17 @@ static void worker_process_api_request(void* arg) {
                 if (fb) { snprintf(fb, 128, "{\"error\":\"empty_response\"}"); if (response->data) safe_free((void**)&response->data); response->data = fb; response->content_type = "application/json"; response->status_code = 500; }
             }
             if (response->data) response->data_length = strlen(response->data);
-            char header[768];  /* ZSFZX-FIX-R9-2: 增大以容纳安全响应头 */
+            char header[768]; /* 增大以容纳安全响应头 */
             int hlen = snprintf(header, sizeof(header),
                 "HTTP/1.1 %d %s\r\n"
                 "Content-Type: %s\r\n"
                 "Content-Length: %zu\r\n"
                 "Connection: close\r\n"
                 "Access-Control-Allow-Origin: %s\r\n"
-                "X-Content-Type-Options: nosniff\r\n"     /* ZSFZX-FIX-R9-2 */
-                "X-Frame-Options: DENY\r\n"               /* ZSFZX-FIX-R9-2 */
-                "X-XSS-Protection: 1; mode=block\r\n"     /* ZSFZX-FIX-R9-2 */
-                "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'\r\n"  /* ZSFZX-FIX-R9-2 */
+                "X-Content-Type-Options: nosniff\r\n"
+                "X-Frame-Options: DENY\r\n"
+                "X-XSS-Protection: 1; mode=block\r\n"
+                "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'\r\n"
                 "Server: SELF-LNN-AGI/1.0\r\n\r\n",
                 response->status_code, http_reason_phrase(response->status_code),
                 response->content_type, response->data_length, cors_origin);
@@ -2966,7 +2965,7 @@ static void* server_thread_func(void* param) {
             log_info("[后端] 系统已执行软重启");
         }
         
-        // 基于select()的非阻塞接受，避免阻塞导致连接队列溢出
+        // 基于select的非阻塞接受，避免阻塞导致连接队列溢出
         {
             fd_set readfds;
             struct timeval tv;
@@ -2990,18 +2989,18 @@ static void* server_thread_func(void* param) {
 #ifdef _WIN32
         DWORD recv_timeout = 2000;
         socket_setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
-        /* ZSFZX-FIX-R6-3: 设置发送超时 — 防止向慢客户端写响应时无限阻塞 */
+/* 设置发送超时 — 防止向慢客户端写响应时无限阻塞 */
         DWORD send_timeout = 5000;
         socket_setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
 #else
         struct timeval recv_timeout = {2, 0};
         socket_setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
-        /* ZSFZX-FIX-R6-3: 设置发送超时 */
+/* 设置发送超时 */
         struct timeval send_timeout = {5, 0};
         socket_setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
 #endif
         
-        // select()检查socket可读，再recv（1秒超时等待完整HTTP请求）
+        // select检查socket可读，再recv（1秒超时等待完整HTTP请求）
         {
             fd_set rfds;
             struct timeval tv;
@@ -3066,7 +3065,7 @@ static void* server_thread_func(void* param) {
                 }
             }
             
-            /* ZSFABC: CORS预检OPTIONS请求处理 */
+/* CORS预检OPTIONS请求处理 */
             if (method && strcmp(method, "OPTIONS") == 0) {
                 const char* cors_preflight = "HTTP/1.1 204 No Content\r\n"
                     "Access-Control-Allow-Origin: *\r\n"
@@ -3105,7 +3104,7 @@ static void* server_thread_func(void* param) {
                 if (strlen(path) != strnlen(path, 1024)) {
                     path_safe = 0;
                 }
-                /* ZSFX-DEEP-R13-001: 拒绝URL编码路径防止%2e%2e%2f绕过..检查 */
+/* 拒绝URL编码路径防止%2e%2e%2f绕过..检查 */
                 if (strchr(path, '%') != NULL) {
                     path_safe = 0;
                 }
@@ -3206,14 +3205,14 @@ static void* server_thread_func(void* param) {
                                     char* fdata = (char*)safe_malloc((size_t)fsize + 256);
                                     if (fdata) {
                                         size_t read_len = fread(fdata, 1, (size_t)fsize, fp);
-                                        /* ZSFAB-S5修复: 检查fread返回值 */
+/* 检查fread返回值 */
                                         if (read_len == 0 || (long)read_len != fsize) {
                                             log_warning("[静态服务] 文件读取不完整: %s (读取%zu/期望%ld)", full_path, read_len, fsize);
                                         }
                                         fdata[read_len] = '\0';
                                         fclose(fp); fp = NULL;
 
-                                        /* ZSFAB-C01修复: 为index.html注入实际运行端口号 */
+/* 为index.html注入实际运行端口号 */
                                         if (strcmp(ext, ".html") == 0 && strstr(full_path, "index.html")) {
                                             char* port_marker = strstr(fdata, "\"port\": 8080");
                                             if (port_marker) {
@@ -3267,7 +3266,7 @@ static void* server_thread_func(void* param) {
                     }
                 }
 
-                /* ===== ZSFABC-B005: 线程池并发派发 =====
+                /* ===== 线程池并发派发 =====
                  * thread_model=1 且线程池可用时，将API请求提交到线程池异步处理。
                  * 主线程仅做accept和分发，不阻塞等待请求处理完成。
                  * thread_model=0 或线程池不可用时回退到同步处理。 */
@@ -3285,7 +3284,7 @@ static void* server_thread_func(void* param) {
                         tp_ctx->path[sizeof(tp_ctx->path) - 1] = '\0';
                         tp_ctx->bytes_received = bytes_received;
                         memcpy(tp_ctx->buffer, buffer, (size_t)bytes_received);
-                        /* ZSFWS-L005修复: 主线程预解析Content-Length传入worker上下文
+/* 主线程预解析Content-Length传入worker上下文
                          * 避免worker中重复遍历header解析(worker复用以提高效率) */
                         {
                             size_t pre_cl = 0;
@@ -3349,7 +3348,7 @@ static void* server_thread_func(void* param) {
                                 value_start++;
                             }
                             if (value_start < line_end) {
-                                /* ZSFX-DEEP-R13-002: strtoull替代atoi */
+/* strtoull替代atoi */
                                 char* end_ptr = NULL;
                                 unsigned long long cl = strtoull(value_start, &end_ptr, 10);
                                 if (end_ptr > value_start && cl <= 10485760ULL) {
@@ -3469,7 +3468,7 @@ static void* server_thread_func(void* param) {
                     request_type = API_POST_EVOLUTION;
                 } else if (strcmp(path, "/api/evolution/pareto") == 0) {
                     request_type = API_POST_EVOLUTION_PARETO;
-                /* ZSFEEE-FIX-005: P0-#5修复 - 旧路由链添加演化状态查询 */
+/* P0-#5修复 - 旧路由链添加演化状态查询 */
                 } else if (strcmp(path, "/api/evolution/status") == 0) {
                     request_type = API_GET_EVOLUTION_STATUS;
                 } else if (strcmp(path, "/api/reset") == 0) {
@@ -3510,7 +3509,7 @@ static void* server_thread_func(void* param) {
                     request_type = API_POST_BACKUP;
                 } else if (strcmp(path, "/api/model/load") == 0) {
                     request_type = API_POST_MODEL_LOAD;
-                /* ZSFEEE-FIX-005: P0-#5修复 - 旧路由链添加模型信息查询 */
+/* P0-#5修复 - 旧路由链添加模型信息查询 */
                 } else if (strcmp(path, "/api/model/info") == 0) {
                     request_type = API_GET_MODEL_INFO;
                 } else if (strcmp(path, "/api/dialogue/history") == 0) {
@@ -3642,7 +3641,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/learning/from-dialogue") == 0) {
                     request_type = API_POST_LEARNING_DIALOGUE;
                 } else if (strcmp(path, "/api/learning/consistency") == 0) {
-                    request_type = API_POST_LEARNING_CONSISTENCY;  /* ZSFQQ-P1-006 */
+                    request_type = API_POST_LEARNING_CONSISTENCY;
                 } else if (strcmp(path, "/api/docs") == 0) {
                     request_type = API_GET_API_DOCS;
                 } else if (strcmp(path, "/api/key/docs") == 0) {
@@ -3704,7 +3703,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/safety/status") == 0) {
                     request_type = API_GET_SAFETY_STATUS;
                 } else if (strcmp(path, "/api/safety/bounds") == 0) {
-                    /* ZSFEEE-FIX-DEEP-004: P0修复 - GET/POST均由同一处理器处理（内部分辨读写） */
+/* P0修复 - GET/POST均由同一处理器处理（内部分辨读写） */
                     request_type = API_GET_SAFETY_BOUNDS;
                 } else if (strcmp(path, "/api/safety/events") == 0) {
                     request_type = API_GET_SAFETY_EVENTS;
@@ -3733,7 +3732,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/training/stop") == 0) {
                     request_type = API_POST_TRAINING_STOP;
                 } else if (strcmp(path, "/api/training/schedule") == 0) {
-                    request_type = API_POST_TRAINING_SCHEDULE; /* ZSF-010 */
+                    request_type = API_POST_TRAINING_SCHEDULE;
                 } else if (strcmp(path, "/api/training/history") == 0) {
                     request_type = API_GET_TRAINING_HISTORY;
                 } else if (strcmp(path, "/api/hardware/scan") == 0) {
@@ -3874,7 +3873,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/product/design") == 0) {
                     request_type = (ApiRequestType)270;
                 } else if (strcmp(path, "/api/product/spec") == 0) {
-                    /* ZSFZS-PRODUCT: POST路由到槽位330，GET路由到槽位271 */
+/* POST路由到槽位330，GET路由到槽位271 */
                     request_type = (method && strcmp(method, "POST") == 0)
                         ? (ApiRequestType)API_POST_PRODUCT_SPEC
                         : (ApiRequestType)API_GET_PRODUCT_SPEC;
@@ -3892,9 +3891,9 @@ static void* server_thread_func(void* param) {
                     request_type = API_POST_PROGRAMMING_EXECUTE;
                 } else if (strcmp(path, "/api/programming/status") == 0) {
                     request_type = API_GET_PROGRAMMING_STATUS;
-                /* ZSFWS-M001: 旧路由表(弃用标记) —— 请勿在此添加新路由
+/* 旧路由表(弃用标记) —— 请勿在此添加新路由
                  * 以下使用数字魔数(220-247)，与枚举API_*_EXT定义对应。
-                 * 新端点应使用 backend_route_path_to_type() 统一路由函数。
+                 * 新端点应使用 backend_route_path_to_type 统一路由函数。
                  * 旧路由保留向后兼容，计划v2.0迁移至统一路由。 */
                 /* 新增路由（第12轮补充）：将25个新端点映射到分发表220-247 */
                 /* 精确匹配优先，避免strstr产生歧义 */
@@ -3903,7 +3902,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/knowledge/delete") == 0) {
                     request_type = 224;
                 } else if (strncmp(path, "/api/knowledge/entry", 20) == 0) {
-                    /* ZSFABC-009修复: 使用前缀匹配支持动态路径如 /api/knowledge/entry/123 */
+/* 使用前缀匹配支持动态路径如 /api/knowledge/entry/123 */
                     /* API-4修复: DELETE方法路由到删除处理器(224)，GET方法路由到查询处理器(221) */
                     request_type = (method && strcmp(method, "DELETE") == 0) ? 224 : 221;
                 } else if (strcmp(path, "/api/knowledge/stats") == 0) {
@@ -3911,22 +3910,22 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/knowledge/export") == 0) {
                     request_type = 223;
                 } else if (strcmp(path, "/api/knowledge/save") == 0) {
-                    /* ZSFAB-v2: knowledge/save → POST_KNOWLEDGE */
+/* knowledge/save → POST_KNOWLEDGE */
                     request_type = API_POST_KNOWLEDGE;
                 } else if (strcmp(path, "/api/knowledge/load") == 0) {
-                    /* ZSFAB-v2: knowledge/load → GET_KNOWLEDGE */
+/* knowledge/load → GET_KNOWLEDGE */
                     request_type = API_GET_KNOWLEDGE;
                 } else if (strcmp(path, "/api/knowledge/search") == 0) {
-                    /* ZSFAB-v2: knowledge/search → POST_KNOWLEDGE */
+/* knowledge/search → POST_KNOWLEDGE */
                     request_type = API_POST_KNOWLEDGE;
                 } else if (strcmp(path, "/api/knowledge/import") == 0) {
-                    /* ZSFAB-v2: knowledge/import → POST_KNOWLEDGE */
+/* knowledge/import → POST_KNOWLEDGE */
                     request_type = API_POST_KNOWLEDGE;
                 } else if (strcmp(path, "/api/memory/add") == 0) {
                     request_type = 229;
                 } else if (strncmp(path, "/api/memory/entry", 17) == 0) {
-                    /* ZSFABC-009修复: 使用前缀匹配支持动态路径如 /api/memory/entry/456 */
-                    /* ZSFEEE-FIX-DEEP-004: P0修复 - 根据method区分GET/DELETE（DELETE暂路由到同处理器，待扩展） */
+/* 使用前缀匹配支持动态路径如 /api/memory/entry/456 */
+/* P0修复 - 根据method区分GET/DELETE（DELETE暂路由到同处理器，待扩展） */
                     request_type = API_GET_MEMORY_ENTRY;
                 } else if (strcmp(path, "/api/memory/export") == 0) {
                     request_type = 280;
@@ -3935,14 +3934,14 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/memory/search") == 0) {
                     request_type = 98;
                 } else if (strcmp(path, "/api/memory/sleep_consolidation") == 0) {
-                    request_type = 283;  /* ZSFX-DEEP-R7-001: 修正为283(API_POST_MEMORY_SLEEP_CONSOLIDATION),原作229与/api/memory/add冲突 */
+                    request_type = 283; /* 修正为283(API_POST_MEMORY_SLEEP_CONSOLIDATION),原作229与/api/memory/add冲突 */
                 } else if (strcmp(path, "/api/system/status") == 0) {
-                    /* ZSFEEE-FIX-005: P0-#5修复 - 原映射230(API_GET_MEMORY_ENTRY)错误,
+/* P0-#5修复 - 原映射230(API_GET_MEMORY_ENTRY)错误,
                      * 现修正为298(API_GET_SYSTEM_FULL_STATUS)以返回系统完整状态 */
                     request_type = API_GET_SYSTEM_FULL_STATUS;
                 } else if (strcmp(path, "/api/system/emergency_stop") == 0 ||
                            strcmp(path, "/api/emergency_stop") == 0) {
-                    /* ZSFABC-010修复: 添加系统级紧急停止路由 */
+/* 添加系统级紧急停止路由 */
                     request_type = API_POST_ROBOT_EMERGENCY_STOP;
                 } else if (strcmp(path, "/api/system/restart") == 0) {
                     request_type = 231;
@@ -4017,7 +4016,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/devices/status") == 0) {
                     /* C-3修复: 使用正确的枚举常量API_POST_DEVICES_STATUS=59，替代错误魔术数字266 */
                     request_type = API_POST_DEVICES_STATUS;
-                /* ZSFWS-B009: 前端-后端API端点对齐修复 - 旧路由链新增路由 */
+/* 前端-后端API端点对齐修复 - 旧路由链新增路由 */
                 } else if (strcmp(path, "/api/programming/sample") == 0) {
                     request_type = API_GET_PROGRAMMING_SAMPLE;
                 } else if (strcmp(path, "/api/command/prefixes") == 0) {
@@ -4027,7 +4026,7 @@ static void* server_thread_func(void* param) {
                 } else if (strcmp(path, "/api/cognition/tom") == 0) {
                     request_type = API_GET_COGNITION_TOM;
                 } else if (strcmp(path, "/api/task/create") == 0) {
-                    /* ZSFAB-S10: task/create → POST_TASK_CREATE */
+/* task/create → POST_TASK_CREATE */
                     request_type = API_POST_TASK_CREATE;
                 } else if (strcmp(path, "/api/task/queue") == 0) {
                     request_type = API_GET_TASK_QUEUE;
@@ -4046,7 +4045,7 @@ static void* server_thread_func(void* param) {
                 
                 /* 未匹配到任何路由，返回404 */
                 if (request_type == API_NOT_FOUND) {
-                    const char* cors_origin = backend_cors_get_origin();
+                    const char* cors_origin = backend_cors_get_origin;
                     char not_found_response[1024];
                     int nf_len = snprintf(not_found_response, sizeof(not_found_response),
                         "HTTP/1.1 404 Not Found\r\n"
@@ -4066,9 +4065,9 @@ static void* server_thread_func(void* param) {
                     continue;
                 }
                 
-                // ZSFABC: 全周期SEH保护（handler + send + close）
+// 全周期SEH保护（handler + send + close）
                 ApiResponse* response = NULL;
-                /* ZSFABC-009: 设置当前请求路径，供handler提取URL参数 */
+/* 设置当前请求路径，供handler提取URL参数 */
                 if (path) {
                     strncpy(server->request_path, path, sizeof(server->request_path) - 1);
                     server->request_path[sizeof(server->request_path) - 1] = '\0';
@@ -4094,18 +4093,18 @@ static void* server_thread_func(void* param) {
                         }
                     }
                     if (response->data) response->data_length = strlen(response->data);
-                    const char* cors_origin = backend_cors_get_origin();
-                    char header[768];  /* ZSFZX-FIX-R9-2: 增大以容纳安全响应头 */
+                    const char* cors_origin = backend_cors_get_origin;
+                    char header[768]; /* 增大以容纳安全响应头 */
                     int hlen = snprintf(header, sizeof(header),
                         "HTTP/1.1 %d %s\r\n"
                         "Content-Type: %s\r\n"
                         "Content-Length: %zu\r\n"
                         "Connection: close\r\n"
                         "Access-Control-Allow-Origin: %s\r\n"
-                        "X-Content-Type-Options: nosniff\r\n"     /* ZSFZX-FIX-R9-2 */
-                        "X-Frame-Options: DENY\r\n"               /* ZSFZX-FIX-R9-2 */
-                        "X-XSS-Protection: 1; mode=block\r\n"     /* ZSFZX-FIX-R9-2 */
-                        "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'\r\n"  /* ZSFZX-FIX-R9-2 */
+                        "X-Content-Type-Options: nosniff\r\n"
+                        "X-Frame-Options: DENY\r\n"
+                        "X-XSS-Protection: 1; mode=block\r\n"
+                        "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'\r\n"
                         "Server: SELF-LNN-AGI/1.0\r\n"
                         "\r\n",
                         response->status_code, http_reason_phrase(response->status_code),
@@ -4136,7 +4135,7 @@ static void* server_thread_func(void* param) {
                     safe_free((void**)&request_body_copy);
                     const char* crash_safe = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n{\"status\":\"error\",\"error_code\":\"INTERNAL_CRASH\",\"message\":\"内部处理崩溃，请检查系统日志\"}";
                     socket_send(client_socket, crash_safe, (int)strlen(crash_safe));
-                    /* ZSFLYF-NEW-7修复: SEH异常路径必须关闭socket防止句柄泄漏 */
+/* SEH异常路径必须关闭socket防止句柄泄漏 */
                     socket_close(client_socket);
 #ifdef _WIN32
                     InterlockedDecrement(&server->connection_count);
@@ -4422,7 +4421,7 @@ int backend_load_config(BackendConfig* config, const char* path) {
     }
     size_t read_size = fread(content, 1, (size_t)fsize, fp);
     fclose(fp);
-    /* ZSFAB-S5修复: 检查配置文件读取完整性 */
+/* 检查配置文件读取完整性 */
     if (read_size == 0 || (long)read_size != fsize) {
         log_warning("backend_load_config: 配置文件读取不完整 (读取%zu/期望%ld)", read_size, fsize);
     }
@@ -4601,7 +4600,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     if (server->config.max_connections_per_ip <= 0) {
         server->config.max_connections_per_ip = 16;       /* 每IP默认16连接 */
     }
-    /* ZSFZS-F007修复: 线程模型默认启用线程池，实现真正高并发。
+/* 线程模型默认启用线程池，实现真正高并发。
      * thread_model=1时API请求通过线程池异步并发处理，
      * 主线程仅做accept和分发，不阻塞等待请求处理完成。 */
     if (server->config.thread_model == 0 && server->config.thread_pool_size == 0) {
@@ -4619,7 +4618,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     server->total_requests = 0;
     server->error_count = 0;
     server->start_time = time(NULL);
-    server->thread_pool = NULL;  /* ZSFABC: 线程池延迟创建 */
+    server->thread_pool = NULL; /* 线程池延迟创建 */
     server->evolution_generation = 0;  /* P0-003修复: 显式初始化进化代数 */
     
     // 网络库初始化现在由platform.c中的socket_create函数处理
@@ -4887,11 +4886,11 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     
     // 创建液态神经网络实例（始终使用全局共享LNN，严格遵守单一模型原则）
     /* 单一模型原则：强制使用全局共享LNN，禁止创建独立LNN实例 */
-    server->lnn_instance = (LNN*)selflnn_get_lnn();
+    server->lnn_instance = (LNN*)selflnn_get_lnn;
     server->lnn_owns = 0;
     if (!server->lnn_instance) {
         log_error("[后端] 全局共享LNN未初始化，无法启动后端服务。"
-                  "请确保在启动后端之前调用 selflnn_init()。");
+                  "请确保在启动后端之前调用 selflnn_init。");
         /* 不创建独立LNN回退 —— 违反单一模型原则 */
         safe_free((void**)&server);
         return NULL;
@@ -4941,7 +4940,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     if (config->api_key[0] != '\0' && strlen(config->api_key) > 0) {
         strncpy(server->api_key, config->api_key, sizeof(server->api_key) - 1);
         server->api_key[sizeof(server->api_key) - 1] = '\0';
-        server->api_key_enabled = 0;  /* ZSFABC: dev mode - auth disabled, key management still works */
+        server->api_key_enabled = 0; /* dev mode - auth disabled, key management still works */
         // 同步到多密钥系统
         strncpy(server->api_keys[0].key_value, config->api_key, sizeof(server->api_keys[0].key_value) - 1);
         strncpy(server->api_keys[0].name, "默认管理密钥", sizeof(server->api_keys[0].name) - 1);
@@ -5096,7 +5095,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     // 创建并连接拉普拉斯分析器到LNN（实现频域梯度优化和稳定性分析）
     // 拉普拉斯深度集成：在训练时对误差信号进行频域滤波，提升训练稳定性和收敛速度
     if (server->lnn_instance) {
-        void* laplace_analyzer = lnn_laplace_create_default_analyzer();
+        void* laplace_analyzer = lnn_laplace_create_default_analyzer;
         if (laplace_analyzer) {
             lnn_set_laplace_analyzer(server->lnn_instance, laplace_analyzer, 0.15f);
         }
@@ -5135,7 +5134,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     }
     
     // 初始化安全监控系统
-    server->safety_monitor = safety_monitor_create();
+    server->safety_monitor = safety_monitor_create;
     if (!server->safety_monitor) {
         selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
                               "创建安全监控失败");
@@ -5158,10 +5157,10 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     }
 
     if (server->emergency_stop_sys) {
-        /* ZSFGGG-S2-003修复: 注册紧急停止回调链路
+/* 注册紧急停止回调链路
          * 原emergency_stop_register_*函数已定义但从未调用，导致紧急停止执行时
          * 因回调缺失返回-1错误(emergency_stop.c:299-304)。现在注册核心回调链。 */
-        void* ts = selflnn_get_task_scheduler();
+        void* ts = (void*)server->task_scheduler;
         if (ts) {
             emergency_stop_register_task_scheduler(server->emergency_stop_sys,
                 ts, NULL, NULL, NULL);
@@ -5174,11 +5173,11 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     }
 
     // 初始化内容安全过滤器
-    server->content_filter = content_filter_create();
+    server->content_filter = content_filter_create;
     
-    /* ZSFQQ-Q008: 绑定LNN语义分析层到content_filter，启用语义级内容过滤 */
+/* 绑定LNN语义分析层到content_filter，启用语义级内容过滤 */
     if (server->content_filter) {
-        void* shared_lnn = selflnn_get_shared_lnn();
+        void* shared_lnn = selflnn_get_shared_lnn;
         if (shared_lnn) {
             content_filter_set_lnn(server->content_filter, shared_lnn);
             log_info("[后端] content_filter已绑定LNN语义分析层");
@@ -5191,7 +5190,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
         selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
                               "创建自主学习系统失败");
     } else {
-        /* ZSFYGY-F007修复: 设置默认知识库扫描目录，不存在则自动创建 */
+/* 设置默认知识库扫描目录，不存在则自动创建 */
         {
             #ifdef _WIN32
             _mkdir("knowledge_base");
@@ -5208,7 +5207,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     server->audio_capture_active = 0;
     server->camera_capture_ctx = NULL;
     server->camera_capture_active = 0;
-    /* ZSFWS-INT-FIX: 摄像头参数初始化 */
+/* 摄像头参数初始化 */
     server->camera_index = 0;
     server->camera_width = 640;
     server->camera_height = 480;
@@ -5218,7 +5217,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     /* 初始化数据集管理 */
     server->active_dataset = NULL;
 
-    /* ZSFYGY-F002修复: 子系统初始化完成后的可用性验证报告 */
+/* 子系统初始化完成后的可用性验证报告 */
     {
         int ok_count = 0, fail_count = 0;
         /* 验证各子系统并在需要时尝试延迟初始化 */
@@ -5295,7 +5294,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
             fail_count++;
         }
         log_info("[后端] 子系统验证完成: %d个就绪, %d个不可用", ok_count, fail_count);
-        /* ZSFABC-P0-011修复: LNN不可用时硬拒绝启动，禁止任何降级处理 */
+/* LNN不可用时硬拒绝启动，禁止任何降级处理 */
         if (!server->lnn_instance) {
             log_error("[后端] 关键依赖缺失(LNN未初始化)，后端服务拒绝启动");
             safe_free((void**)&server);
@@ -5323,14 +5322,14 @@ int backend_server_start(BackendServer* server) {
     // 设置socket选项（SO_REUSEADDR允许地址重用）
     int opt = 1;
     socket_setsockopt(server->server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    /* ZSFX-DEEP-R7-002: Linux下需要SO_REUSEPORT允许多个socket绑定同一端口
+/* Linux下需要SO_REUSEPORT允许多个socket绑定同一端口
      * SO_REUSEADDR在Linux只允许TIME_WAIT端口重用,不支持多活跃socket共享 */
 #ifndef _WIN32
     setsockopt(server->server_socket, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
     
     // 绑定地址和端口（使用跨平台抽象）
-    // ZSFDDD-D6-003b修复: SELFLNN_CHECK在socket_create之后会泄漏socket，改为手动检查+清理
+// SELFLNN_CHECK在socket_create之后会泄漏socket，改为手动检查+清理
     if (!(server->config.port >= 0 && server->config.port <= 65535)) {
         socket_close(server->server_socket);
         selflnn_set_last_error(SELFLNN_ERROR_NETWORK_CONFIG, __func__, __FILE__, __LINE__,
@@ -5354,7 +5353,7 @@ int backend_server_start(BackendServer* server) {
         return SELFLNN_ERROR_NETWORK_CONFIG;
     }
     
-    /* ZSFABC: 根据配置创建线程池实现高并发 */
+/* 根据配置创建线程池实现高并发 */
     if (server->config.thread_model == 1 || server->config.thread_pool_size > 1) {
         ThreadPoolConfig tp_cfg;
         memset(&tp_cfg, 0, sizeof(tp_cfg));
@@ -5402,7 +5401,7 @@ int backend_server_stop(BackendServer* server) {
     
     server->is_running = 0;
     
-    /* ZSFABC: 暂停线程池 */
+/* 暂停线程池 */
     if (server->thread_pool) {
         thread_pool_pause(server->thread_pool);
     }
@@ -5580,7 +5579,7 @@ void backend_server_free(BackendServer* server) {
         dataset_free(server->active_dataset);
     }
 
-    /* ZSFABC: 释放线程池 */
+/* 释放线程池 */
     if (server->thread_pool) {
         thread_pool_free(server->thread_pool);
         server->thread_pool = NULL;
@@ -5886,7 +5885,7 @@ static char* get_detailed_system_status(const BackendServer* server) {
     size_t gpu_memory_mb = 0;
     float gpu_usage = 0.0f;
     {
-        GpuBackend backend = gpu_auto_select();
+        GpuBackend backend = gpu_auto_select;
         if (backend != GPU_BACKEND_CPU) {
             gpu_available = 1;
             gpu_count = gpu_get_device_count(backend);
@@ -6292,7 +6291,7 @@ static char* get_detailed_learning_status(const BackendServer* server) {
         return string_duplicate("{\"error\":\"memory allocation failed\"}");
     }
 
-    void* learner_raw = selflnn_get_online_learner();
+    void* learner_raw = selflnn_get_online_learner;
     if (!learner_raw) {
         snprintf(json, 1024,
             "{"
@@ -6445,7 +6444,7 @@ static int handle_api_get_reasoning(BackendServer* server,
     return 0;
 }
 
-/* ZSFZS-P2-004: 独立的推理测试处理函数。
+/* 独立的推理测试处理函数。
  * /api/reasoning/test 之前复用 handle_api_get_reasoning，
  * 现在拥有独立的测试逻辑，执行推理能力验证和诊断。 */
 static int handle_api_get_reasoning_test(BackendServer* server,
@@ -6592,7 +6591,7 @@ static int handle_api_get_learning(BackendServer* server,
     }
     return 0;
 }
-/* ZSFQQ-P1-006: 学习/知识一致性检查处理器 */
+/* 学习/知识一致性检查处理器 */
 static int handle_api_post_learning_consistency(BackendServer* server,
                                                   ApiRequestType request_type,
                                                   const char* request_data,
@@ -6600,8 +6599,8 @@ static int handle_api_post_learning_consistency(BackendServer* server,
                                                   ApiResponse* response) {
     (void)server; (void)request_type; (void)request_data; (void)request_length;
     /* 调用知识自检模块获取一致性信息 */
-    void* kg_ptr = selflnn_get_knowledge_graph();
-    void* kb_ptr = selflnn_get_knowledge_base();
+    void* kg_ptr = selflnn_get_knowledge_graph;
+    void* kb_ptr = selflnn_get_knowledge_base;
     char buf[1024];
     int conflicts = 0, circular = 0, total_facts = 0;
     float consistency_score = 0.0f;
@@ -6743,7 +6742,7 @@ static int handle_api_post_vision(BackendServer* server,
             break;
     }
     
-    /* ZSFAB-S02修复: 数据验证通过后，构建真实数据结构并调用模态处理函数 */
+/* 数据验证通过后，构建真实数据结构并调用模态处理函数 */
     /* 所有模态处理函数返回提取的特征数量（int），失败返回0或-1 */
     int features_extracted = 0;
     float output_features[256] = {0};
@@ -6802,7 +6801,7 @@ static int handle_api_post_vision(BackendServer* server,
             }
         }
 
-        /* ZSFAB-v1修复: multimodal_process_*返回提取的特征数(非0/-1错误码) */
+/* multimodal_process_*返回提取的特征数(非0/-1错误码) */
         if (proc_ret > 0) {
             features_extracted = 1;
             output_dim = proc_ret;
@@ -7199,9 +7198,9 @@ static int handle_api_post_training(BackendServer* server,
     }
 
     /* 执行训练 */
-    uint64_t start_time_ms = platform_get_time_ms();
+    uint64_t start_time_ms = platform_get_time_ms;
     int train_result = trainer_train(server->trainer, inputs, targets, num_samples, NULL, NULL);
-    uint64_t end_time_ms = platform_get_time_ms();
+    uint64_t end_time_ms = platform_get_time_ms;
     uint64_t duration_ms = end_time_ms - start_time_ms;
 
     /* 获取训练历史 */
@@ -7564,7 +7563,7 @@ static int handle_api_post_robot_command(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
-        return 0;  /* ZSFDDD-D2修复: 添加缺失的return，防止响应被后续代码覆盖 */
+        return 0; /* 添加缺失的return，防止响应被后续代码覆盖 */
     }
     if (!request_data || request_length == 0) {
         json_data = (char*)safe_malloc(256);
@@ -7575,7 +7574,7 @@ static int handle_api_post_robot_command(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 400;
         }
-        return 0;  /* ZSFDDD-D2修复: 添加缺失的return */
+        return 0; /* 添加缺失的return */
     }
     int robot_id = 0;
     int cmd_mode = 0;
@@ -8486,7 +8485,7 @@ static int handle_api_post_model_load(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    /* ZSFABC-P0-001修复: 移除死代码return 0; 使模型加载逻辑真正执行 */
+/* 移除死代码return 0; 使模型加载逻辑真正执行 */
     char model_path[512] = {0};
     int parse_result = -1;
             
@@ -8593,7 +8592,7 @@ static int handle_api_get_dialogue_history(BackendServer* server,
     /* 无活跃对话上下文或无历史 */
     char* json_data = (char*)safe_malloc(256);
     if (json_data) {
-        snprintf(json_data, 256, "{\"dialogue_history\":{\"history\":[],\"count\":0,\"status\":\"no_active_session\"}}");
+        snprintf(json_data, 256, "{\"dialogue_history\":{\"history\":,\"count\":0,\"status\":\"no_active_session\"}}");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -8902,7 +8901,7 @@ static int handle_api_get_knowledge(BackendServer* server,
         int real_concept_relations = 0, real_relations_pct = 0;
         int real_consistency = 0, real_conflicts = 0, real_circular_deps = 0;
         if (server->knowledge_base) {
-            void* kg_ptr = selflnn_get_knowledge_graph();
+            void* kg_ptr = selflnn_get_knowledge_graph;
             KSSelfCheckReport* report = ksc_run_self_check(
                 server->knowledge_base, (KnowledgeGraph*)kg_ptr, NULL, NULL);
             if (report) {
@@ -9306,7 +9305,7 @@ static int handle_api_post_tts_synthesize(BackendServer* server,
     tts_engine_set_pitch(server->tts_engine, pitch);
     tts_engine_set_volume(server->tts_engine, volume);
             
-    /* ZSFABC: SEH保护 + 引擎完整性预检 双层保护TTS合成 */
+/* SEH保护 + 引擎完整性预检 双层保护TTS合成 */
     TTSAudio* audio = NULL;
     {
         if (!tts_engine_is_healthy(server->tts_engine)) {
@@ -9530,7 +9529,7 @@ static int handle_api_post_dialogue_multimodal(BackendServer* server,
         }
     }
 
-    /* ZSFAB-H03修复: 从真实音频数据提取特征，不使用伪造常量 */
+/* 从真实音频数据提取特征，不使用伪造常量 */
     float audio_features[96];
     int audio_feature_count = 0;
     if (strlen(audio_flag) > 5) {
@@ -9715,7 +9714,7 @@ static int handle_api_post_dialogue_multimodal(BackendServer* server,
                         audio_feature_count > 0 ? "true" : "false");
                 safe_free((void**)&json_escaped);
             } else {
-                /* ZSFX-DEEP-R6-002: JSON注入防护——对LLM生成的响应文本进行转义 */
+/* JSON注入防护——对LLM生成的响应文本进行转义 */
                 char* esc_response = json_escape_str(response_text);
                 snprintf(json_data, resp_len * 2 + 1024,
                         "{\"dialogue\":{\"status\":\"success\",\"response\":\"%s\"}}",
@@ -9766,7 +9765,7 @@ static int agi_task_register(BackendServer* server, const char* type,
     strncpy(task->status, "running", sizeof(task->status) - 1);
     task->progress = 0.0f;
     task->confidence = 0.0f;
-    task->created_ms = platform_get_time_ms();
+    task->created_ms = platform_get_time_ms;
     task->updated_ms = task->created_ms;
     if (server->agi_task_count < AGI_TASK_MAX) server->agi_task_count++;
     return task->task_id;
@@ -9783,7 +9782,7 @@ static int agi_task_update(BackendServer* server, int task_id,
             if (progress >= 0.0f) task->progress = progress;
             if (confidence >= 0.0f) task->confidence = confidence;
             if (result) strncpy(task->result, result, sizeof(task->result) - 1);
-            task->updated_ms = platform_get_time_ms();
+            task->updated_ms = platform_get_time_ms;
             return 0;
         }
     }
@@ -9805,7 +9804,7 @@ static AgiTaskEntry* agi_task_find_by_id(BackendServer* server, int task_id) {
  */
 static void agi_task_cleanup(BackendServer* server) {
     if (!server) return;
-    uint64_t now_ms = platform_get_time_ms();
+    uint64_t now_ms = platform_get_time_ms;
     for (int i = 0; i < AGI_TASK_MAX; i++) {
         AgiTaskEntry* t = &server->agi_tasks[i];
         if (t->task_id > 0 && (strcmp(t->status, "completed") == 0 ||
@@ -9856,7 +9855,7 @@ static int handle_api_post_agi_execute(BackendServer* server,
     int task_id = agi_task_register(server,
         strlen(task_type) > 0 ? task_type : "general", task_desc);
     if (task_id <= 0) {
-        task_id = (int)((uint64_t)clock() % 100000);
+        task_id = (int)((uint64_t)clock % 100000);
     }
     
     char result_desc[4096] = {0};
@@ -10031,7 +10030,6 @@ static int handle_api_post_agi_execute(BackendServer* server,
             for (int i = 0; i < slen; i++) {
                 state_vec[i] = (float)task_desc[i] / 255.0f;
             }
-            /* ZSF-023: 跳过内核调用, 学习由AGI后台循环异步完成 */
             
             /* 知识整合：将学习到的模式存入知识库 */
             if (server->knowledge_base) {
@@ -10216,7 +10214,7 @@ static int handle_api_post_agi_execute(BackendServer* server,
             int sdlen = (int)(strlen(task_desc) < 200 ? strlen(task_desc) : 200);
             for (int i = 0; i < sdlen; i++) store_data[i] = (float)task_desc[i] / 255.0f;
             
-            /* ZSFAB-S7修复: 检查memory_manager_store返回值 */
+/* 检查memory_manager_store返回值 */
             int store_ret = memory_manager_store(server->memory_manager,
                 mem_query, store_data, 256, 5, 0.5f);
             
@@ -10550,7 +10548,6 @@ static int handle_api_post_agi_execute(BackendServer* server,
             
     /* 步骤6: 存储经验到学习引擎 */
     if (server->learning_engine && server->lnn_instance) {
-        /* ZSF-023: 跳过内核调用, 经验存储由AGI后台循环完成 */
     }
             
     /* 步骤7: 内存系统存储（任务-结果关联） */
@@ -10567,7 +10564,7 @@ static int handle_api_post_agi_execute(BackendServer* server,
         mem_data[201] = has_knowledge ? 1.0f : 0.0f;
         mem_data[202] = has_reasoning ? 1.0f : 0.0f;
                 
-        /* ZSFAB-S7修复: 检查memory_manager_store返回值 */
+/* 检查memory_manager_store返回值 */
         int store_ret = memory_manager_store(server->memory_manager,
             mem_key, mem_data, 256,
             (int)(confidence * 10.0f + 1.0f),
@@ -11327,7 +11324,7 @@ static int handle_api_post_computer_execute(BackendServer* server,
         int safe_cmd = 1;
         const char* danger_patterns[] = {
             "rm -rf /", "dd if=", "mkfs.", "format ",
-            ":(){ :|:& };:", "chmod 777 /", "> /dev/sda",
+            ":{ :|:& };:", "chmod 777 /", "> /dev/sda",
             "shutdown", "reboot", "halt",
             "DEL /F /S /Q C:", "del /f /s /q C:",
             NULL
@@ -11448,7 +11445,7 @@ static int handle_api_post_robot_coordinate(BackendServer* server,
         response->data = string_duplicate("{\"success\":false,\"error\":\"缺少请求数据\"}");
         response->data_length = strlen(response->data);
         response->status_code = 400;
-        return 0;   /* ZSFABC-P0-017修复: 错误情况必须return避免继续执行 */
+        return 0; /* 错误情况必须return避免继续执行 */
     }
     char coord_x[32] = {0}, coord_y[32] = {0}, coord_z[32] = {0};
     char robot_id_str[16] = {0};
@@ -11610,18 +11607,18 @@ static int handle_api_post_files_read(BackendServer* server,
         response->data = string_duplicate("{\"success\":false,\"error\":\"缺少请求数据\"}");
         response->data_length = strlen(response->data);
         response->status_code = 400;
-        return 0;   /* ZSFABC-P0-017修复: 错误情况必须return避免继续执行 */
+        return 0; /* 错误情况必须return避免继续执行 */
     }
     char file_path[1024] = {0};
     parse_json_string(request_data, "path", file_path, sizeof(file_path));
-    /* ZSFABC-P0-004修复: 路径遍历防护 —— 禁止访问系统关键目录 */
+/* 路径遍历防护 —— 禁止访问系统关键目录 */
     if (strlen(file_path) == 0) {
         response->data = string_duplicate("{\"success\":false,\"error\":\"路径不能为空\"}");
         response->data_length = strlen(response->data);
         response->status_code = 400;
         return 0;
     }
-    /* ZSFZX-FIX-R7-3: 扩展路径遍历黑名单 — 防止读取/写入系统敏感路径 */
+/* 扩展路径遍历黑名单 — 防止读取/写入系统敏感路径 */
     if (strstr(file_path, "..") != NULL ||
         strncmp(file_path, "/etc", 4) == 0 ||
         strncmp(file_path, "/proc", 5) == 0 ||
@@ -11649,7 +11646,7 @@ static int handle_api_post_files_read(BackendServer* server,
             file_content = (char*)safe_malloc((size_t)file_size + 1);
             if (file_content) {
                 size_t read_size = fread(file_content, 1, (size_t)file_size, fp);
-                /* ZSFAB-S5修复: 检查fread返回值，部分读取时记录警告 */
+/* 检查fread返回值，部分读取时记录警告 */
                 if (read_size == 0 || (long)read_size != file_size) {
                     log_warning("[文件API] 读取不完整: %s (读取%zu/期望%ld)", file_path, read_size, file_size);
                 }
@@ -11658,7 +11655,7 @@ static int handle_api_post_files_read(BackendServer* server,
             fclose(fp);
         }
     }
-    /* ZSFABC-P0-003修复: JSON注入防护 —— 转义内容中的特殊字符 */
+/* JSON注入防护 —— 转义内容中的特殊字符 */
     json_data = (char*)safe_malloc(file_size * 2 + 1024);
     if (json_data) {
         char escaped_path[2048] = {0};
@@ -11711,13 +11708,12 @@ static int handle_api_post_files_write(BackendServer* server,
         response->data = string_duplicate("{\"success\":false,\"error\":\"缺少请求数据\"}");
         response->data_length = strlen(response->data);
         response->status_code = 400;
-        return 0;   /* ZSFABC-P0-017修复: 错误情况必须return避免继续执行 */
+        return 0; /* 错误情况必须return避免继续执行 */
     }
     char write_path[1024] = {0};
     char write_content[4096] = {0};
     parse_json_string(request_data, "path", write_path, sizeof(write_path));
     parse_json_string(request_data, "content", write_content, sizeof(write_content));
-    /* ZSFABC-P0-004修复 + ZSFZX-FIX-R7-3: 路径遍历防护 —— 禁止写入系统关键路径 */
     if (strlen(write_path) == 0) {
         response->data = string_duplicate("{\"success\":false,\"error\":\"路径不能为空\"}");
         response->data_length = strlen(response->data);
@@ -11889,7 +11885,7 @@ static DeviceProtocolManager* g_device_manager = NULL;
 
 static void ensure_device_manager(void) {
     if (!g_device_manager) {
-        g_device_manager = device_protocol_create();
+        g_device_manager = device_protocol_create;
     }
 }
 
@@ -11914,7 +11910,7 @@ static int handle_api_post_devices_register(BackendServer* server,
     }
 
     /* V-009修复: 使用真实设备协议管理器注册设备 */
-    ensure_device_manager();
+    ensure_device_manager;
     if (!g_device_manager) {
         response->data = string_duplicate("{\"success\":false,\"error\":\"设备管理器初始化失败\"}");
         response->data_length = strlen(response->data);
@@ -13116,7 +13112,7 @@ static int handle_api_post_serial_open(BackendServer* server,
                     "{\"success\":true,\"port\":\"%s\",\"baudrate\":%d,\"status\":\"opened\",\"handle_stored\":%s}",
                     serial_port, baudrate, store_ret == 0 ? "true" : "false");
             } else {
-                DWORD err = GetLastError();
+                DWORD err = GetLastError;
                 snprintf(json_data, 512,
                     "{\"success\":false,\"port\":\"%s\",\"baudrate\":%d,\"status\":\"error\",\"message\":\"串口硬件不可用 - 请连接真实串口设备（错误码: %lu）\"}",
                     serial_port, baudrate, (unsigned long)err);
@@ -13428,7 +13424,6 @@ static int handle_api_post_agi_self_correction(BackendServer* server,
             
     /* 第3层：学习引擎纠错与回滚 */
     if (server->learning_engine && strlen(correction_context) > 0) {
-        /* ZSF-023: 跳过内核调用, 学习引擎重置由AGI后台循环完成 */
         corrections_applied++;
         log_pos += snprintf(correction_log + log_pos, sizeof(correction_log) - log_pos,
             "[第3层]学习引擎状态重置完成;");
@@ -13509,7 +13504,7 @@ static int handle_api_post_key_set(BackendServer* server,
         /* 更新单密钥兼容字段 */
         strncpy(server->api_key, new_key, sizeof(server->api_key) - 1);
         server->api_key[sizeof(server->api_key) - 1] = '\0';
-        /* ZSFAAA-DEEP-006修复: 设置有效密钥后启用认证，
+/* 设置有效密钥后启用认证，
          * 原始终设为0导致前端永远显示"认证已禁用" */
         server->api_key_enabled = 1;
 
@@ -13586,7 +13581,7 @@ static int handle_api_post_learning_dialogue(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 400;
         }
-        /* ZSFWS-D001修复: 设置错误响应后立即返回，防止后续空指针解引用 */
+/* 设置错误响应后立即返回，防止后续空指针解引用 */
         return 0;
     }
     char dialogue_text[4096] = {0};
@@ -13613,7 +13608,6 @@ static int handle_api_post_learning_dialogue(BackendServer* server,
         int elen = (int)(strlen(expected_response) < 100 ? strlen(expected_response) : 100);
         for (int i = 0; i < dlen; i++) state[i] = (float)dialogue_text[i] / 255.0f;
         for (int i = 0; i < elen; i++) action[i] = (float)expected_response[i] / 255.0f;
-        /* ZSF-023: 跳过内核调用, 对话学习由AGI后台循环完成 */
         learn_result = 0;
     }
     json_data = (char*)safe_malloc(512);
@@ -13723,7 +13717,7 @@ static int handle_api_get_api_key_docs(BackendServer* server,
     if (json_data) {
         char* p = json_data;
         char* end = json_data + buf_size;
-        /* ZSFWXJ-FIX004修复: 动态端口替代硬编码8080 */
+/* 动态端口替代硬编码8080 */
         int dynamic_port = server->config.port > 0 ? server->config.port : SELFLNN_DEFAULT_PORT;
                 
         int n = snprintf(p, end - p,
@@ -13831,7 +13825,7 @@ static int handle_api_post_training_from_scratch(BackendServer* server,
     int train_started = 0;
     char train_msg[256] = {0};
             
-    /* ZSFABC-015修复: 根据训练模式差异化配置参数和策略 */
+/* 根据训练模式差异化配置参数和策略 */
     if (server->trainer && server->lnn_instance) {
         TrainingConfig train_cfg;
         memset(&train_cfg, 0, sizeof(TrainingConfig));
@@ -14403,7 +14397,6 @@ static int handle_api_post_learning_from_manual(BackendServer* server,
         for (size_t i = 0; i < 64; i++) {
             action_vec[i] = (float)(knowledge_added > 0 ? 1 : 0) * 0.9f;
         }
-        /* ZSF-023: 跳过内核调用, 手动学习由AGI后台循环完成 */
     }
             
     json_data = (char*)safe_malloc(1024);
@@ -14545,7 +14538,7 @@ static int handle_api_post_key_create(BackendServer* server,
                 server->api_key_count++;
                 if (idx == 0) {
                     strncpy(server->api_key, key_out, sizeof(server->api_key) - 1);
-                    server->api_key_enabled = 0; /* ZSFABC: auth disabled */
+                    server->api_key_enabled = 0; /* auth disabled */
                 }
             }
 
@@ -14595,7 +14588,7 @@ static int handle_api_post_key_create(BackendServer* server,
             server->api_key_count++;
             if (idx == 0) {
                 strncpy(server->api_key, new_key, sizeof(server->api_key) - 1);
-                server->api_key_enabled = 0; /* ZSFABC: auth disabled */
+                server->api_key_enabled = 0; /* auth disabled */
             }
             const char* perm_names[] = {"只读", "读写", "管理员"};
             json_data = (char*)safe_malloc(512);
@@ -14906,7 +14899,7 @@ static int handle_api_post_laplace_spectrum(BackendServer* server,
     (void)request_length;
 
     /* 使用真实拉普拉斯分析器计算频谱 */
-    LaplaceAnalyzer* analyzer = laplace_unified_get_analyzer();
+    LaplaceAnalyzer* analyzer = laplace_unified_get_analyzer;
 
     if (!analyzer) {
         json_data = (char*)safe_malloc(256);
@@ -15126,7 +15119,7 @@ static int handle_api_post_training_start(BackendServer* server,
     }
     if (net_config.input_size == 0) net_config.input_size = 64;
     if (net_config.output_size == 0) net_config.output_size = 10;
-    /* ZSFABC-FIX: 训练在后端线程直接执行 — 使用学习引擎经验数据 */
+/* 训练在后端线程直接执行 — 使用学习引擎经验数据 */
     if (batch_size <= 0) batch_size = 32;
     size_t samples = (size_t)(batch_size * 4);
     if (samples < 32) samples = 32;
@@ -15220,9 +15213,9 @@ static int handle_api_post_training_start(BackendServer* server,
         }
         trainer_set_current_training_phase(server->trainer, phase);
     }
-    uint64_t start_ms = platform_get_time_ms();
+    uint64_t start_ms = platform_get_time_ms;
     int train_result = trainer_train(server->trainer, inputs, targets, samples, NULL, NULL);
-    uint64_t end_ms = platform_get_time_ms();
+    uint64_t end_ms = platform_get_time_ms;
     float final_loss = 0.0f, final_accuracy = 0.0f;
     TrainingHistory* hist = trainer_get_history(server->trainer);
     if (hist && hist->size > 0) {
@@ -15534,7 +15527,7 @@ static int handle_api_post_hardware_config(BackendServer* server,
     }
     json_data = (char*)safe_malloc(256);
     if (json_data) {
-        /* ZSFGGG-R3-005修复: 真实调用GPU后端设置，不再返回虚假成功 */
+/* 真实调用GPU后端设置，不再返回虚假成功 */
         int set_ok = 0;
         if (server->gpu_backend) {
             set_ok = gpu_set_backend_by_name(server->gpu_backend, backend_name, device_id) == 0 ? 1 : 0;
@@ -15556,7 +15549,7 @@ static int handle_api_get_hardware_resources(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
-    HardwareResourceManager* hrm = hrm_create();
+    HardwareResourceManager* hrm = hrm_create;
     int scanned = 0;
     if (hrm) {
         hrm_scan_devices(hrm);
@@ -15594,7 +15587,7 @@ static int handle_api_post_hardware_resources_allocate(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
-    HardwareResourceManager* hrm = hrm_create();
+    HardwareResourceManager* hrm = hrm_create;
     if (!hrm) {
         json_data = (char*)safe_malloc(128);
         if (json_data) {
@@ -15645,7 +15638,7 @@ static int handle_api_post_simulation_start(BackendServer* server,
     if (strcmp(engine, "pybullet") == 0) {
         /* 尝试连接PyBullet仿真器 */
         extern int pybullet_is_available(void);
-        if (pybullet_is_available()) {
+        if (pybullet_is_available) {
             PyBulletConfig pb_config;
             memset(&pb_config, 0, sizeof(pb_config));
             pb_config.time_step = dt;
@@ -15661,7 +15654,7 @@ static int handle_api_post_simulation_start(BackendServer* server,
          * R9-C修复: extern签名修正 — gazebo_connect返回GazeboBridge*而非int，
          * 调用时传递GazeboConfig参数而非void */
         extern int gazebo_is_available(void);
-        if (gazebo_is_available()) {
+        if (gazebo_is_available) {
             extern GazeboBridge* gazebo_connect(const GazeboConfig* config);
             GazeboConfig gz_cfg;
             memset(&gz_cfg, 0, sizeof(gz_cfg));
@@ -15937,7 +15930,7 @@ static int handle_api_post_simulation_plan_path(BackendServer* server,
                     "\"message\":\"路径规划失败: 从(%.2f,%.2f,%.2f)到(%.2f,%.2f,%.2f)未找到可行路径。"
                     "请检查起点和终点是否在可行区域内，或降低障碍物密度重试。"
                     "这是一个真实的系统状态消息，非虚拟数据。\""
-                    ",\"waypoints\":[]}",
+                    ",\"waypoints\":}",
                     start_pos[0], start_pos[1], start_pos[2],
                     end_pos[0], end_pos[1], end_pos[2]);
         }
@@ -15982,7 +15975,7 @@ static int handle_api_post_simulation_robot_ctrl(BackendServer* server,
     char cmd[64] = "stop";
     if (request_data && request_length > 0) {
         parse_json_string(request_data, "robot_id", robot_id_str, sizeof(robot_id_str));
-        /* ZSFGGG-S2-002修复: 同时解析"command"和"action"字段，解决前端发送"action"
+/* 同时解析"command"和"action"字段，解决前端发送"action"
          * 但后端仅读取"command"的字段名不匹配问题 */
         if (parse_json_string(request_data, "command", cmd, sizeof(cmd)) <= 0) {
             parse_json_string(request_data, "action", cmd, sizeof(cmd));
@@ -16002,7 +15995,7 @@ static int handle_api_post_simulation_robot_ctrl(BackendServer* server,
         } else if (strcmp(cmd, "step") == 0) {
             sim_result = simulator_step(server->internal_simulator, 1);
         } else if (strcmp(cmd, "remove_robot") == 0 || strcmp(cmd, "remove") == 0) {
-            /* ZSFGGG-S2-002修复: 添加remove_robot命令支持，
+/* 添加remove_robot命令支持，
              * 与前端removeSimulationRobot API匹配 */
             sim_result = simulator_remove_robot(server->internal_simulator, robot_id);
         } else {
@@ -16136,7 +16129,7 @@ static int handle_api_get_voice_history(BackendServer* server,
     json_data = (char*)safe_malloc(256);
     if (json_data) {
         snprintf(json_data, 256,
-                "{\"history\":[],\"total\":0,\"message\":\"语音命令历史为空，等待真实语音命令录入\"}");
+                "{\"history\":,\"total\":0,\"message\":\"语音命令历史为空，等待真实语音命令录入\"}");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -16150,7 +16143,7 @@ static int handle_api_post_voice_recognize(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     /* P21修复: 真实调用语音识别引擎而非返回硬编码假数据 */
-    void* sr = selflnn_get_speech_recognizer();
+    void* sr = selflnn_get_speech_recognizer;
     if (!sr) {
         json_data = (char*)safe_malloc(256);
         if (json_data) {
@@ -16206,7 +16199,7 @@ static int handle_api_post_voice_synthesize(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
 
-    /* ZSFABC-B001修复: 同步TTS修复 —— 连接到真实TTS引擎 */
+/* 同步TTS修复 —— 连接到真实TTS引擎 */
     if (!server->multimodal_manager) {
         json_data = (char*)safe_malloc(256);
         if (json_data) {
@@ -16377,7 +16370,7 @@ static int handle_api_post_skills_execute(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    /* ZSFDDD-D2-001修复: 从空壳占位改为真实技能执行 */
+/* 从空壳占位改为真实技能执行 */
     char* json_data = NULL;
     (void)request_type;
     char skill_name[128] = {0};
@@ -16595,7 +16588,7 @@ static int handle_api_post_skills_compose(BackendServer* server,
         strncpy(comp_buf, components, sizeof(comp_buf) - 1);
         comp_buf[sizeof(comp_buf) - 1] = '\0';
         char* saveptr = NULL;
-        /* ZSFZS-F036: strtok→strtok_s线程安全 */
+/* strtok→strtok_s线程安全 */
         char* token = strtok_s(comp_buf, ",", &saveptr);
         while (token && count < SKILL_MAX_PREREQ) {
             while (*token == ' ') token++;
@@ -16661,7 +16654,7 @@ static int handle_api_get_safety_status(BackendServer* server,
         response->data_length = strlen(json_data);
         response->status_code = 200;
     }
-    /* ZSFQQ-Q005: 安全等级达到警告及以上时通过WebSocket实时推送安全告警 */
+/* 安全等级达到警告及以上时通过WebSocket实时推送安全告警 */
     if (server->ws_push_server && level >= SAFETY_LEVEL_WARNING) {
         char alert_json[512];
         snprintf(alert_json, sizeof(alert_json),
@@ -16686,7 +16679,7 @@ static int handle_api_get_safety_bounds(BackendServer* server,
         return 0;
     }
 
-    /* ZSF-002修复: 检测请求数据是否包含POST更新内容
+/*修复: 检测请求数据是否包含POST更新内容
      * 如果request_data包含JSON body则作为POST设置请求处理
      * 否则作为GET读取请求返回当前边界配置 */
     int is_post_update = 0;
@@ -16730,7 +16723,7 @@ static int handle_api_get_safety_bounds(BackendServer* server,
         /* GET请求：返回当前安全边界配置 */
         char* json_data = (char*)safe_malloc(1024);
         if (json_data) {
-            /* ZSFQQ-Q007修复: 从safety_monitor的真实物理边界读取，而非使用硬编码默认值 */
+/* 从safety_monitor的真实物理边界读取，而非使用硬编码默认值 */
             float max_vel, max_accel, max_torque;
             float safety_zone, collision_dist, joint_range;
             int joint_count;
@@ -16792,22 +16785,22 @@ static int handle_api_post_safety_emergency_stop(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
-    /* ZSFQQ-Q009: 紧急停止激活安全模块全面联动 */
+/* 紧急停止激活安全模块全面联动 */
     if (server->safety_monitor) safety_emergency_stop(server->safety_monitor);
-    /* ZSFQQ-Q009: 同步触发内容过滤器紧急拦截模式 */
+/* 同步触发内容过滤器紧急拦截模式 */
     if (server->content_filter) {
         ContentFilterResult cf_result;
         memset(&cf_result, 0, sizeof(cf_result));
         content_filter_check(server->content_filter, "EMERGENCY_STOP_ACTIVATED", 24, &cf_result);
         log_warning("[安全] 紧急停止已触发内容过滤器协同锁定");
     }
-    /* ZSFQQ-Q009: 记录紧急停止审计日志 */
+/* 记录紧急停止审计日志 */
     if (server->audit_logger) {
         audit_log_operation(server->audit_logger, AUDIT_OP_CUSTOM,
             "紧急停止", "SELF-LNN安全系统", "通过API激活紧急停止",
             NULL, NULL, NULL, 1, 0.0f, NULL);
     }
-    /* ZSFQQ-Q005: WebSocket实时推送安全告警 */
+/* WebSocket实时推送安全告警 */
     if (server->ws_push_server) {
         char alert_json[512];
         snprintf(alert_json, sizeof(alert_json),
@@ -16831,7 +16824,7 @@ static int handle_api_post_safety_soft_stop(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     if (server->safety_monitor) safety_soft_stop(server->safety_monitor);
-    /* ZSFQQ-Q005: WebSocket实时推送软停止安全告警 */
+/* WebSocket实时推送软停止安全告警 */
     if (server->ws_push_server) {
         char alert_json[512];
         snprintf(alert_json, sizeof(alert_json),
@@ -17201,7 +17194,7 @@ static int handle_api_get_system_export_diagnostic(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
-    /* ZSFGGG-R3-006修复: 真实导出系统诊断数据，使用selflnn_get_status获取实时状态 */
+/* 真实导出系统诊断数据，使用selflnn_get_status获取实时状态 */
     SystemStatus st;
     memset(&st, 0, sizeof(st));
     int has_status = (selflnn_get_status(&st) == 0);
@@ -17369,7 +17362,7 @@ static int handle_api_post_robot_config_reset(BackendServer* server,
     }
     return 0;
 }
-/* ZSFZS-F039: 保存机器人配置到文件 */
+/* 保存机器人配置到文件 */
 static int handle_api_post_robot_config_save(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -17413,7 +17406,7 @@ static int handle_api_post_robot_analyze_screen(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     int elements_found = 0;
-    char elements_json[512] = "[]";
+    char elements_json[512] = "";
     if (server->internal_simulator) {
         SimulatorStatus sim_status;
         memset(&sim_status, 0, sizeof(SimulatorStatus));
@@ -17430,7 +17423,7 @@ static int handle_api_post_robot_analyze_screen(BackendServer* server,
     if (json_data) {
         snprintf(json_data, 768,
             "{\"robot\":{\"action\":\"analyze_screen\",\"elements\":%s,\"count\":%d,\"status\":\"%s\"}}",
-            elements_found > 0 ? elements_json : "[]", elements_found,
+            elements_found > 0 ? elements_json : "", elements_found,
             server->internal_simulator ? "ok" : "no_simulator");
         response->data = json_data;
         response->data_length = strlen(json_data);
@@ -17535,7 +17528,7 @@ static int handle_api_post_robot_learn_from_demo(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     int learned = 0;
-    /* ZSFGGG-R3-002修复: 真实触发模仿学习，不再仅检查句柄存在性 */
+/* 真实触发模仿学习，不再仅检查句柄存在性 */
     if (server->imitation_learner) {
         char demo_name[128] = "";
         if (request_data && request_length > 0) {
@@ -17721,7 +17714,7 @@ static int handle_api_post_training_log_clear(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     int cleared = 0;
-    /* ZSFGGG-R3-001修复: 真实清除训练日志，不再返回虚假成功 */
+/* 真实清除训练日志，不再返回虚假成功 */
     if (server->trainer) {
         trainer_clear_logs(server->trainer);
         cleared = 1;
@@ -17738,7 +17731,6 @@ static int handle_api_post_training_log_clear(BackendServer* server,
     }
     return 0;
 }
-/* ZSF-010: 训练计划创建端点处理器 */
 static int handle_api_post_training_schedule(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -17808,7 +17800,7 @@ static int handle_api_post_teach_look_and_learn(BackendServer* server,
     }
     json_data = (char*)safe_malloc(512);
     if (json_data) {
-        /* ZSFX-DEEP-R6-002: JSON注入防护——对用户输入的name进行转义 */
+/* JSON注入防护——对用户输入的name进行转义 */
         char* esc_name = json_escape_str(name);
         snprintf(json_data, 512,
             "{\"teach\":{\"action\":\"look_and_learn\",\"name\":\"%s\",\"category\":%d,\"learned\":%s,\"status\":\"ok\"}}",
@@ -17980,7 +17972,7 @@ static int handle_api_get_teach_get_concepts(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     int total = 0;
-    char concepts_json[4096] = "[]";
+    char concepts_json[4096] = "";
     if (server->knowledge_base) {
         KnowledgeEntry* results_buf = (KnowledgeEntry*)safe_calloc(64, sizeof(KnowledgeEntry));
         if (results_buf) {
@@ -18024,8 +18016,8 @@ static int handle_api_post_teach_clear_all_concepts(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     int removed = 0;
-    /* ZSFGGG-R3-003修复: 真实清除知识库，不再返回虚假成功 */
-    void* kb = selflnn_get_knowledge_base();
+/* 真实清除知识库，不再返回虚假成功 */
+    void* kb = selflnn_get_knowledge_base;
     if (kb) {
         knowledge_base_clear((KnowledgeBase*)kb);
         removed = 1;
@@ -18053,9 +18045,9 @@ static int handle_api_post_teach_clear_concept(BackendServer* server,
     if (request_data && request_length > 0) {
         parse_json_string(request_data, "name", name, sizeof(name));
     }
-    /* ZSFGGG-R3-004修复: 真实删除知识概念 */
+/* 真实删除知识概念 */
     if (name[0]) {
-        void* kb = selflnn_get_knowledge_base();
+        void* kb = selflnn_get_knowledge_base;
         if (kb) {
             removed = knowledge_base_remove_by_key((KnowledgeBase*)kb, name) == 0 ? 1 : 0;
         }
@@ -18073,7 +18065,7 @@ static int handle_api_post_teach_clear_concept(BackendServer* server,
     return 0;
 }
 
-/* ZSFWS-INT-FIX: 摄像头切换处理器 — 此前路由错误映射到视频捕获处理器 */
+/* 摄像头切换处理器 — 此前路由错误映射到视频捕获处理器 */
 static int handle_api_post_camera_switch(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -18117,7 +18109,7 @@ static int handle_api_post_camera_switch(BackendServer* server,
     return 0;
 }
 
-/* ZSFWS-INT-FIX: 视频质量设置处理器 — 此前路由错误映射到视频捕获处理器 */
+/* 视频质量设置处理器 — 此前路由错误映射到视频捕获处理器 */
 static int handle_api_post_video_quality(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -18462,7 +18454,7 @@ static int handle_api_post_gpu_benchmark(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     (void)server; (void)request_type;
-    GpuBackend backend = gpu_get_current_backend();
+    GpuBackend backend = gpu_get_current_backend;
     int device_index = 0;
     char bench_backend_name[64] = "";
 
@@ -18608,7 +18600,7 @@ static int handle_api_get_dataset_list(BackendServer* server,
             dataset_get_epoch(server->active_dataset));
     } else {
         snprintf(json_data, 4096,
-            "{\"success\":true,\"count\":0,\"datasets\":[],"
+            "{\"success\":true,\"count\":0,\"datasets\":,"
             "\"formats_supported\":[\"SELF-LNN DAT\",\"CSV\",\"NPY\",\"WAV\",\"PNG\",\"JPEG\"],"
             "\"note\":\"使用 /api/dataset/create 创建新数据集\"}");
     }
@@ -18796,7 +18788,7 @@ static int handle_api_post_agi_think(BackendServer* server,
     }
     q_len = strlen(query);
 
-    /* ZSFABC-006修复: 连接真实的推理/认知引擎进行实际分析 */
+/* 连接真实的推理/认知引擎进行实际分析 */
     char reasoning_output[512] = "思考引擎正在分析中...";
     int reasoning_active = 0;
     
@@ -18805,7 +18797,7 @@ static int handle_api_post_agi_think(BackendServer* server,
         for (size_t k = 0; k < q_len && k < 64; k++) {
             query_vec[k] = (float)(unsigned char)query[k] / 255.0f;
         }
-        /* ZSFABC-006修复: reasoning_forward不存在，改用真实函数 reasoning_infer */
+/* reasoning_forward不存在，改用真实函数 reasoning_infer */
         int r_result = reasoning_infer((ReasoningEngine*)server->reasoning_engine,
                                        query_vec, (size_t)(q_len < 64 ? q_len : 64),
                                        reasoning_result, 128,
@@ -18818,7 +18810,7 @@ static int handle_api_post_agi_think(BackendServer* server,
         }
     }
 
-    /* ZSFX-P0: 因果推理API——SCM因果模型驱动的深度推理 */
+/* 因果推理API——SCM因果模型驱动的深度推理 */
     if (!reasoning_active && server->reasoning_engine && query[0]) {
         ReasoningEngine* engine = (ReasoningEngine*)server->reasoning_engine;
         float cause_vec[64] = {0};
@@ -18859,7 +18851,7 @@ static int handle_api_post_agi_think(BackendServer* server,
         reasoning_active = 1;
     }
 
-    /* ZSFAB-H10修复: 当推理和认知都不可用时，返回真实的错误状态 */
+/* 当推理和认知都不可用时，返回真实的错误状态 */
     if (!reasoning_active && query[0]) {
         snprintf(reasoning_output, sizeof(reasoning_output),
                 "推理引擎和认知系统均未就绪，无法处理查询: \"%.128s\"", query);
@@ -18909,7 +18901,6 @@ static int handle_api_post_agi_decide(BackendServer* server,
     }
 
     if (made_decision != 0) {
-        /* ZSFWS修复 P1-004: 认知系统不可用时返回明确错误，不生成虚假决策数据 */
         snprintf(json_data, 2048,
             "{"
             "\"status\":\"error\","
@@ -19014,10 +19005,10 @@ static int handle_api_post_agi_learn(BackendServer* server,
         return 0;
     }
 
-    /* ZSFABC-005修复: 实现真实的学习触发 —— 调用在线学习器更新 */
+/* 实现真实的学习触发 —— 调用在线学习器更新 */
     float loss = 0.0f;
     int learn_ok = 0;
-    void* learner = selflnn_get_online_learner();
+    void* learner = selflnn_get_online_learner;
     if (learner && data_dim > 0 && target_dim > 0) {
         int result = online_learner_update((OnlineLearner*)learner,
                                            learn_data, data_dim,
@@ -19029,7 +19020,7 @@ static int handle_api_post_agi_learn(BackendServer* server,
     if (store_knowledge && server->knowledge_base) {
         char entry_key[128];
         snprintf(entry_key, sizeof(entry_key), "learned_%ld", (long)time(NULL));
-        /* ZSFABC-005修复: knowledge_base_store不存在 */
+/* knowledge_base_store不存在 */
         KnowledgeEntry entry;
         memset(&entry, 0, sizeof(entry));
         entry.subject = entry_key;
@@ -19092,8 +19083,8 @@ static int handle_api_post_agi_evolve(BackendServer* server,
     float diversity = 0.0f;
     int final_gen = 0;
 
-    /* ZSFABC-004修复: 实现真实的演化触发 —— 调用evolution_step并通过后台循环完成 */
-    void* evo = selflnn_get_evolution_engine();
+/* 实现真实的演化触发 —— 调用evolution_step并通过后台循环完成 */
+    void* evo = selflnn_get_evolution_engine;
     (void)evolve_result;
     
     if (evo && capability_is_enabled(CAP_SELF_EVOLUTION)) {
@@ -19266,7 +19257,7 @@ static int handle_api_post_agi_memory(BackendServer* server,
         "}",
         op_description, mem_result, memory_key,
         retrieved_strength, retrieved_type,
-        data_printed, data_hex[0] ? data_hex : "[]",
+        data_printed, data_hex[0] ? data_hex : "",
         (long)time(NULL));
 
     response->data = json_data;
@@ -19310,7 +19301,7 @@ static int handle_api_post_agi_plan(BackendServer* server,
         plan_mem[1] = (float)use_long_term;
         plan_mem[2] = (float)has_cognition;
         plan_mem[3] = (float)has_learning;
-        /* ZSFAB-S7修复: 检查存储返回值 */
+/* 检查存储返回值 */
         int sr = memory_manager_store(server->memory_manager, "agi_plan_latest",
             plan_mem, 4, 3, 0.6f);
         if (sr != 0) log_warning("[AGI规划] 记忆存储失败");
@@ -19337,7 +19328,7 @@ static int handle_api_post_agi_plan(BackendServer* server,
         "自我改进与演化"
     };
 
-    /* ZSFAB-H01修复: 优先使用推理引擎生成真实规划，模板仅为回退 */
+/* 优先使用推理引擎生成真实规划，模板仅为回退 */
     int num_templates = (int)(sizeof(step_templates) / sizeof(step_templates[0]));
     int planning_from_reasoning = 0;
     if (server->reasoning_engine) {
@@ -19437,7 +19428,7 @@ static int handle_default(BackendServer* server,
 
 /**
  * @brief 处理系统配置更新请求 - 接收{key, value} JSON
- * ZSFABC-007修复: 实现真实配置持久化
+ *修复: 实现真实配置持久化
  */
 static int handle_api_post_system_config_update(BackendServer* server,
                                    ApiRequestType request_type,
@@ -19516,7 +19507,7 @@ static int handle_api_post_system_config_update(BackendServer* server,
 
 /**
  * @brief 处理系统设置保存请求 - 接收完整settings JSON对象
- * ZSFABC-007修复: 实现真实的设置持久化
+ *修复: 实现真实的设置持久化
  */
 static int handle_api_post_system_settings(BackendServer* server,
                                    ApiRequestType request_type,
@@ -19575,7 +19566,7 @@ static int handle_api_post_system_settings(BackendServer* server,
 
 /**
  * @brief 处理系统密码修改请求 - 接收{old_password, new_password} JSON
- * ZSFABC-007修复: 实现真实的密码验证和更改
+ *修复: 实现真实的密码验证和更改
  */
 static int handle_api_post_system_change_password(BackendServer* server,
                                    ApiRequestType request_type,
@@ -19894,7 +19885,7 @@ static int handle_api_post_programming_compile(BackendServer* server,
     return 0;
 }
 
-/* ZSFZS-F023: 添加能力开关检查 */
+/* 添加能力开关检查 */
 static int handle_api_post_programming_execute(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -19962,7 +19953,7 @@ static int handle_api_post_programming_execute(BackendServer* server,
     return 0;
 }
 
-/* ZSFZS-F023: 添加能力开关检查 */
+/* 添加能力开关检查 */
 static int handle_api_get_programming_status(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -20028,7 +20019,7 @@ static int handle_api_get_knowledge_entry(BackendServer* server,
     if (data && len > 0) {
         parse_json_int(data, "entry_id", &entry_id);
     }
-    /* ZSFABC-009: 从URL路径中提取entry_id，
+/* 从URL路径中提取entry_id，
      * 例如 /api/knowledge/entry/123 → entry_id = 123 */
     if (entry_id < 0 && server->request_path[0]) {
         const char* prefix = "/api/knowledge/entry/";
@@ -20087,7 +20078,7 @@ static int handle_api_get_knowledge_stats_api(BackendServer* server,
     if (j) {
         size_t total = 0, mem = 0;
         if (server->knowledge_base) knowledge_base_get_stats(server->knowledge_base, &total, &mem);
-        /* ZSFAB-H04修复: 从知识库查询领域分类用于前端动态展示 */
+/* 从知识库查询领域分类用于前端动态展示 */
         int domain_count = 0;
         char domains_json[2048] = {0};
         int dpos = 0;
@@ -20296,7 +20287,7 @@ static int handle_api_post_knowledge_search(BackendServer* server,
     if (!server->knowledge_base || query[0] == '\0') {
         char* j = (char*)safe_malloc(384);
         if (j) {
-            snprintf(j, 384, "{\"success\":false,\"search\":{\"error\":\"%s\",\"results\":[]}}",
+            snprintf(j, 384, "{\"success\":false,\"search\":{\"error\":\"%s\",\"results\":}}",
                 !server->knowledge_base ? "知识库不可用" : "查询为空");
             resp->data = j; resp->data_length = strlen(j);
             resp->status_code = !server->knowledge_base ? 503 : 400;
@@ -20315,7 +20306,7 @@ static int handle_api_post_knowledge_search(BackendServer* server,
         safe_free((void**)&tfidf_results); safe_free((void**)&tfidf_scores);
         char* j = (char*)safe_malloc(256);
         if (j) {
-            snprintf(j, 256, "{\"success\":false,\"search\":{\"error\":\"内存不足\",\"results\":[]}}");
+            snprintf(j, 256, "{\"success\":false,\"search\":{\"error\":\"内存不足\",\"results\":}}");
             resp->data = j; resp->data_length = strlen(j); resp->status_code = 500;
         }
         return 0;
@@ -20343,7 +20334,7 @@ static int handle_api_post_knowledge_search(BackendServer* server,
         safe_free((void**)&tfidf_results); safe_free((void**)&tfidf_scores);
         char* errj = (char*)safe_malloc(256);
         if (errj) {
-            snprintf(errj, 256, "{\"success\":false,\"search\":{\"error\":\"内存不足\",\"results\":[]}}");
+            snprintf(errj, 256, "{\"success\":false,\"search\":{\"error\":\"内存不足\",\"results\":}}");
             resp->data = errj; resp->data_length = strlen(errj); resp->status_code = 500;
         }
         return 0;
@@ -20445,7 +20436,7 @@ static int handle_api_post_knowledge_import(BackendServer* server,
         else failed = 1;
         /* 同时尝试导入到知识图谱 */
         {
-            void* kg_ptr = selflnn_get_knowledge_graph();
+            void* kg_ptr = selflnn_get_knowledge_graph;
             if (kg_ptr) {
                 extern int knowledge_graph_import_from_knowledge_base(void* graph, void* kb);
                 knowledge_graph_import_from_knowledge_base(kg_ptr, server->knowledge_base);
@@ -20595,7 +20586,7 @@ static int handle_api_post_knowledge_import(BackendServer* server,
 
     /* 导入后同步到知识图谱 */
     if (imported > 0) {
-        void* kg_ptr = selflnn_get_knowledge_graph();
+        void* kg_ptr = selflnn_get_knowledge_graph;
         if (kg_ptr) {
             extern int knowledge_graph_import_from_knowledge_base(void* graph, void* kb);
             knowledge_graph_import_from_knowledge_base(kg_ptr, server->knowledge_base);
@@ -20675,7 +20666,7 @@ static int handle_api_get_memory_entry(BackendServer* server,
     if (data && len > 0) {
         parse_json_string(data, "key", key, sizeof(key));
     }
-    /* ZSFABC-009: 从URL路径中提取entry key，
+/* 从URL路径中提取entry key，
      * 例如 /api/memory/entry/MyKey → key = "MyKey" */
     if (key[0] == '\0' && server->request_path[0]) {
         const char* prefix = "/api/memory/entry/";
@@ -20969,7 +20960,7 @@ static int handle_api_post_lnn_parameters_reset(BackendServer* server,
 static int handle_api_post_lnn_calibrate(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
-    /* ZSFX-DEEP-R3-001修复: 移除导致死代码的提前return 0;
+/* 移除导致死代码的提前return 0;
      * 现在实际执行LNN校准测试：前向传播+NaN检测。 */
     char* j = (char*)safe_malloc(512);
     if (j) {
@@ -21065,7 +21056,7 @@ static int handle_api_post_dialogue_send(BackendServer* server,
                 msg[k] = '\0'; break;
             }
         }
-        /* ZSFDDD-D2-004修复: 解析temperature/max_length/top_k/memory参数 */
+/* 解析temperature/max_length/top_k/memory参数 */
         parse_json_float(data, "temperature", &temperature);
         parse_json_int(data, "max_length", &max_length);
         parse_json_int(data, "top_k", &top_k);
@@ -21167,7 +21158,7 @@ static int handle_api_post_dialogue_send(BackendServer* server,
                 }
             }
 
-            /* ZSFZX-FIX-R9-1: 对话输出安全过滤 — 原仅检查输入, 生成响应后无过滤
+/* 对话输出安全过滤 — 原仅检查输入, 生成响应后无过滤
              * 补充对生成内容的检查, 与多模态对话路径保持一致 */
             if (server->content_filter && response_text[0]) {
                 ContentFilterResult filter_result;
@@ -21200,7 +21191,7 @@ static int handle_api_post_dialogue_send(BackendServer* server,
         }
     }
 
-    /* ZSFAB-H02修复: LNN回退路径——生成有意义的状态感知回复，而非模板填充 */
+/* LNN回退路径——生成有意义的状态感知回复，而非模板填充 */
     if (server->lnn_instance) {
         float input_vec[256];
         memset(input_vec, 0, sizeof(input_vec));
@@ -22075,7 +22066,7 @@ static int handle_api_get_auth_status(BackendServer* server,
 
 /* ===== P0-002: 产品设计 (槽位270) ===== */
 /* ===== APP10: 产品设计引擎状态 (槽位270) ===== */
-/* ZSFZS-F023: 添加能力开关检查 */
+/* 添加能力开关检查 */
 static int handle_api_post_product_design(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
@@ -22088,7 +22079,7 @@ static int handle_api_post_product_design(BackendServer* server,
         }
         return 0;
     }
-    void* pde = selflnn_get_product_design_engine();
+    void* pde = selflnn_get_product_design_engine;
     int engine_ready = (pde != NULL) ? 1 : 0;
     int has_cog = (server->cognition_system != NULL);
     int has_meta = (server->metacognition_system != NULL);
@@ -22123,7 +22114,7 @@ static int handle_api_post_product_design(BackendServer* server,
 static int handle_api_get_product_spec(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt;
-    void* pde = selflnn_get_product_design_engine();
+    void* pde = selflnn_get_product_design_engine;
     char* j = NULL;
     if (!pde) {
         j = (char*)safe_malloc(256);
@@ -22215,7 +22206,7 @@ static int handle_api_get_product_spec(BackendServer* server,
             feat_json,
             spec->estimated_cost, spec->development_time,
             spec->complexity_score, spec->feasibility_score,
-            eval ? "\"strengths\":[],\"weaknesses\":[]," : "",
+            eval ? "\"strengths\":,\"weaknesses\":," : "",
             eval ? eval->feasibility : 0.0, eval ? eval->cost_effectiveness : 0.0,
             eval ? eval->innovation_level : 0.0, eval ? eval->market_potential : 0.0,
             recs_json);
@@ -22227,7 +22218,7 @@ static int handle_api_get_product_spec(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFZS-PRODUCT: POST /api/product/spec - 产品规格生成 (槽位330) ===== */
+/* ===== POST /api/product/spec - 产品规格生成 (槽位330) ===== */
 static int handle_api_post_product_spec(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt;
@@ -22240,7 +22231,7 @@ static int handle_api_post_product_spec(BackendServer* server,
         }
         return 0;
     }
-    void* pde = selflnn_get_product_design_engine();
+    void* pde = selflnn_get_product_design_engine;
     if (!pde) {
         j = (char*)safe_malloc(256);
         if (j) snprintf(j, 256, "{\"error\":\"产品设计引擎未初始化\",\"code\":503}");
@@ -22323,7 +22314,7 @@ static int handle_api_post_product_spec(BackendServer* server,
             feat_json,
             spec->estimated_cost, spec->development_time,
             spec->complexity_score, spec->feasibility_score,
-            eval ? "\"strengths\":[],\"weaknesses\":[]," : "",
+            eval ? "\"strengths\":,\"weaknesses\":," : "",
             eval ? eval->feasibility : 0.0, eval ? eval->cost_effectiveness : 0.0,
             eval ? eval->innovation_level : 0.0, eval ? eval->market_potential : 0.0,
             recs_json);
@@ -22335,7 +22326,7 @@ static int handle_api_post_product_spec(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFZS-F023: GET /api/product/status - 产品设计引擎状态 (槽位300) ===== */
+/* ===== GET /api/product/status - 产品设计引擎状态 (槽位300) ===== */
 static int handle_api_get_product_status(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
@@ -22348,7 +22339,7 @@ static int handle_api_get_product_status(BackendServer* server,
         }
         return 0;
     }
-    void* pde = selflnn_get_product_design_engine();
+    void* pde = selflnn_get_product_design_engine;
     int engine_ready = (pde != NULL) ? 1 : 0;
     int has_cog = (server->cognition_system != NULL);
     int has_meta = (server->metacognition_system != NULL);
@@ -22380,7 +22371,7 @@ static int handle_api_get_product_status(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFZS-F023: GET /api/usage-logs - 使用日志查询 (槽位301) ===== */
+/* ===== GET /api/usage-logs - 使用日志查询 (槽位301) ===== */
 static int handle_api_get_usage_logs(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
@@ -22394,7 +22385,7 @@ static int handle_api_get_usage_logs(BackendServer* server,
     if (total_logs <= 0) {
         j = (char*)safe_malloc(128);
         if (j) {
-            snprintf(j, 128, "{\"usage_logs\":{\"total\":0,\"entries\":[]}}");
+            snprintf(j, 128, "{\"usage_logs\":{\"total\":0,\"entries\":}}");
             resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
         }
         return 0;
@@ -22425,7 +22416,7 @@ static int handle_api_get_usage_logs(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFZS-F023: GET /api/system/logs - 系统日志查询 (槽位232) ===== */
+/* ===== GET /api/system/logs - 系统日志查询 (槽位232) ===== */
 static int handle_api_get_system_logs(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
@@ -22810,7 +22801,7 @@ static int handle_api_post_stereo_perception(BackendServer* server,
             fx, fy, cx, cy, baseline,
             depth_min, depth_max, depth_mean, depth_valid,
             disparity_valid, max_disparity,
-            cloud_json ? cloud_json : "[]",
+            cloud_json ? cloud_json : "",
             point_count, cloud_sample,
             disp_b64 ? disp_b64 : "",
             depth_b64 ? depth_b64 : "");
@@ -22848,7 +22839,7 @@ static int handle_api_not_implemented(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFEEE-FIX-005: P0-#5修复 - 模型信息处理器（槽位276） ===== */
+/* ===== P0-#5修复 - 模型信息处理器（槽位276） ===== */
 static int handle_api_get_model_info(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
@@ -22880,7 +22871,7 @@ static int handle_api_get_model_info(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFEEE-FIX-005: P0-#5修复 - 演化状态处理器（槽位277） ===== */
+/* ===== P0-#5修复 - 演化状态处理器（槽位277） ===== */
 static int handle_api_get_evolution_status(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
@@ -22902,7 +22893,7 @@ static int handle_api_get_evolution_status(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFEEE-FIX-005: P0-#5修复 - 保留槽位278处理器 ===== */
+/* ===== P0-#5修复 - 保留槽位278处理器 ===== */
 static int handle_api_slot_reserved_278(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)server; (void)rt; (void)data; (void)len;
@@ -22915,7 +22906,7 @@ static int handle_api_slot_reserved_278(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFEEE-FIX-005: P0-#5修复 - 保留槽位279处理器 ===== */
+/* ===== P0-#5修复 - 保留槽位279处理器 ===== */
 static int handle_api_slot_reserved_279(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)server; (void)rt; (void)data; (void)len;
@@ -22928,7 +22919,7 @@ static int handle_api_slot_reserved_279(BackendServer* server,
     return 0;
 }
 
-/* ===== ZSFEEE-FIX-005: P0-#5修复 - 保留槽位247处理器 ===== */
+/* ===== P0-#5修复 - 保留槽位247处理器 ===== */
 static int handle_api_slot_reserved_247(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)server; (void)rt; (void)data; (void)len;
@@ -23190,13 +23181,13 @@ static int handle_api_post_agi_diagnostic_export(BackendServer* server,
             trainer_available ? "true" : "false",
             has_quaternion ? "true" : "false",
             agi_tasks_active,
-            cap_json[0] != '\0' ? cap_json : "[]");
+            cap_json[0] != '\0' ? cap_json : "");
         resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
     }
     return 0;
 }
 
-/* ZSFAB-S10修复: 实现API_POST_TASK_CREATE真实处理器，替代not_implemented */
+/* 实现API_POST_TASK_CREATE真实处理器，替代not_implemented */
 static int handle_api_post_task_create(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt;
@@ -23241,7 +23232,7 @@ static int handle_api_post_task_create(BackendServer* server,
             }
             snprintf(entry->status, sizeof(entry->status), "pending");
             snprintf(entry->type, sizeof(entry->type), "%s", task_type);
-            entry->created_ms = platform_get_time_ms();
+            entry->created_ms = platform_get_time_ms;
             entry->updated_ms = entry->created_ms;
             entry->progress = 0.0f;
             server->agi_task_count++;
@@ -23397,7 +23388,7 @@ static int handle_api_post_decision_log(BackendServer* s,
         size_t data_len = strlen(description);
         for (size_t i = 0; i < data_len && i < 16; i++) log_data[i] = (float)(unsigned char)description[i];
         size_t ds = data_len > 16 ? 16 : (data_len > 0 ? data_len : 1);
-        /* ZSFAB-S7修复: 检查存储返回值 */
+/* 检查存储返回值 */
         int store_r = memory_manager_store(s->memory_manager, log_key, log_data, ds, 1, confidence > 0 ? confidence : 0.5f);
         if (store_r != 0) {
             log_warning("[决策日志] 记忆存储失败");
@@ -23615,14 +23606,14 @@ static int handle_api_get_capability_diagnose(BackendServer* s,
     (void)rt; (void)d; (void)l; (void)s; (void)s;
     char cap_json[4096] = "";
     int cap_len = capability_diagnose_all(cap_json, sizeof(cap_json));
-    int cap_health = capability_health_check();
+    int cap_health = capability_health_check;
 
     char* json_data = (char*)safe_malloc(6144);
     if (json_data) {
         snprintf(json_data, 6144,
             "{\"success\":true,\"capability\":{\"health\":%d,\"total\":12,"
             "\"diagnose\":%s}}",
-            cap_health, (cap_len > 0) ? cap_json : "[]");
+            cap_health, (cap_len > 0) ? cap_json : "");
         r->data = json_data;
         r->data_length = strlen(json_data);
         r->status_code = 200;
@@ -23861,10 +23852,10 @@ typedef int (*RequestHandler)(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response);
 
-/* ZSFAB-S8修复: 使用编译时枚举哨兵值 API_REQUEST_COUNT，自动匹配枚举最大值+1 */
+/* 使用编译时枚举哨兵值 API_REQUEST_COUNT，自动匹配枚举最大值+1 */
 #define API_HANDLER_COUNT API_REQUEST_COUNT
 
-/* ========== ZSFWS-B009: 前端-后端API端点对齐修复 - 5个新处理器 ========== */
+/* ========== 前端-后端API端点对齐修复 - 5个新处理器 ========== */
 
 /* 编程示例代码处理器 - GET /api/programming/sample */
 static int handle_api_get_programming_sample(BackendServer* s,
@@ -23880,7 +23871,7 @@ static int handle_api_get_programming_sample(BackendServer* s,
         "    return h + dh * dt;\n"
         "}\n\n"
         "int main(void) {\n"
-        "    SELF_LNN_CONFIG cfg = selflnn_default_config();\n"
+        "    SELF_LNN_CONFIG cfg = selflnn_default_config;\n"
         "    cfg.input_dim = 256;\n"
         "    cfg.hidden_dim = 512;\n"
         "    cfg.output_dim = 128;\n"
@@ -23965,7 +23956,7 @@ static int handle_api_get_task_queue(BackendServer* s,
             "{\"success\":true,\"queue\":{"
             "\"pending\":0,\"active\":0,\"completed\":0,\"failed\":0,"
             "\"maxConcurrent\":16,\"scheduling\":\"fifo\","
-            "\"tasks\":[],"
+            "\"tasks\":,"
             "\"message\":\"任务队列已就绪，当前无待处理任务。通过POST /api/task/assign提交新任务。\"}}");
         r->data = j; r->data_length = strlen(j); r->status_code = 200;
     }
@@ -24023,7 +24014,7 @@ static int handle_api_post_task_assign(BackendServer* s,
 static int handle_api_get_multi_agent_status(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt; (void)d; (void)l;
-    void* ma_sys = selflnn_get_multi_agent_system();
+    void* ma_sys = selflnn_get_multi_agent_system;
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24051,7 +24042,7 @@ static int handle_api_get_multi_agent_status(BackendServer* s,
 static int handle_api_post_multi_agent_negotiate(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt;
-    void* ma_sys = selflnn_get_multi_agent_system();
+    void* ma_sys = selflnn_get_multi_agent_system;
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24090,7 +24081,7 @@ static int handle_api_post_multi_agent_negotiate(BackendServer* s,
 static int handle_api_post_multi_agent_coalition(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt; (void)d; (void)l;
-    void* ma_sys = selflnn_get_multi_agent_system();
+    void* ma_sys = selflnn_get_multi_agent_system;
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24125,7 +24116,7 @@ static int handle_api_post_multi_agent_consensus(BackendServer* s,
 static int handle_api_post_multi_agent_message(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt;
-    void* ma_sys = selflnn_get_multi_agent_system();
+    void* ma_sys = selflnn_get_multi_agent_system;
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24157,7 +24148,7 @@ static int handle_api_post_multi_agent_message(BackendServer* s,
 static int handle_api_post_multi_agent_task(BackendServer* s,
         ApiRequestType rt, const char* d, size_t l, ApiResponse* r) {
     (void)s; (void)rt;
-    void* ma_sys = selflnn_get_multi_agent_system();
+    void* ma_sys = selflnn_get_multi_agent_system;
     if (!ma_sys) {
         r->data = string_duplicate("{\"success\":false,\"error\":\"多智能体系统未初始化\"}");
         r->data_length = strlen(r->data); r->status_code = 503;
@@ -24264,7 +24255,7 @@ static int handle_api_post_command_send(BackendServer* s,
 
 /* ========== Handler分发表初始化 ========== */
 static void init_handler_table(RequestHandler* table) {
-    /* ZSFZX-FIX-P0-002: 先填充所有槽位为通用未实现处理器，消除竞态窗口
+/* 先填充所有槽位为通用未实现处理器，消除竞态窗口
      * 后续真实处理器注册会覆盖对应槽位。确保任何时刻table[i]均非NULL。 */
     {
         int zi;
@@ -24448,7 +24439,7 @@ static void init_handler_table(RequestHandler* table) {
     table[167] = handle_api_post_multimodal_reset;
     table[168] = handle_api_post_multimodal_stop;
     table[169] = handle_api_post_robot_config_reset;
-    table[327] = handle_api_post_robot_config_save;  /* ZSFZS-F039: 保存机器人配置 */
+    table[327] = handle_api_post_robot_config_save; /* 保存机器人配置 */
     table[170] = handle_api_post_robot_analyze_screen;
     table[171] = handle_api_post_robot_execute_action;
     table[172] = handle_api_post_robot_execute_task;
@@ -24511,11 +24502,11 @@ static void init_handler_table(RequestHandler* table) {
     table[227] = handle_api_get_knowledge_version;   /* API_GET_KNOWLEDGE_VERSION */
     table[228] = handle_api_get_safety_bounds;
     table[229] = handle_api_post_memory_add;
-    /* ZSFWS-INT-FIX: table[230]原被错误映射到handle_api_get_system_full_status，
+/* table[230]原被错误映射到handle_api_get_system_full_status，
      * 导致API_GET_MEMORY_ENTRY路由失效，现恢复为记忆条目处理器 */
     table[230] = handle_api_get_memory_entry;
     table[231] = handle_api_post_system_restart;
-    /* ZSFZS-F023修复: table[232]从导出处理器改为系统日志处理器(API_GET_SYSTEM_LOGS=232) */
+/* table[232]从导出处理器改为系统日志处理器(API_GET_SYSTEM_LOGS=232) */
     table[232] = handle_api_get_system_logs;
     table[233] = handle_api_post_lnn_params;
     table[234] = handle_api_post_lnn_parameters_reset;
@@ -24532,7 +24523,7 @@ static void init_handler_table(RequestHandler* table) {
     table[244] = handle_api_post_agi_diagnostic;
     table[245] = handle_api_post_agi_diagnostic_export;
     table[246] = handle_api_get_dialogue_send;
-    /* ZSFEEE-FIX-005: P0-#5修复 - 槽位247原为handle_api_not_implemented，现注册真实处理器 */
+/* P0-#5修复 - 槽位247原为handle_api_not_implemented，现注册真实处理器 */
     table[247] = handle_api_slot_reserved_247;
     /* ====== 第13轮补充 ====== */
     table[248] = handle_api_post_system_shutdown;
@@ -24562,26 +24553,25 @@ static void init_handler_table(RequestHandler* table) {
     table[270] = handle_api_post_product_design;
     table[271] = handle_api_get_product_spec;
 
-    /* ZSFAB-S8修复: 槽位272-279补充注册（未知端点统一返回"未实现"） */
-    table[272] = handle_api_post_training_schedule; /* ZSF-010: 训练计划创建 */
-    table[273] = handle_api_get_reasoning_test;   /* ZSFZS-P2-004: 推理测试 */
+/* 槽位272-279补充注册（未知端点统一返回"未实现"） */
+    table[272] = handle_api_post_training_schedule;
+    table[273] = handle_api_get_reasoning_test; /* 推理测试 */
     table[274] = handle_api_post_serial_receive;  /* H-012: 串口数据接收独立处理器 */
     table[275] = handle_api_post_stereo_perception; /* M-016: 双目空间感知 */
-    /* ZSFEEE-FIX-005: P0-#5修复 - 原4个槽位为handle_api_not_implemented，现注册真实处理器 */
+/* P0-#5修复 - 原4个槽位为handle_api_not_implemented，现注册真实处理器 */
     table[276] = handle_api_get_model_info;          /* API_GET_MODEL_INFO: 模型详细信息 */
     table[277] = handle_api_get_evolution_status;    /* API_GET_EVOLUTION_STATUS: 演化系统状态 */
     table[278] = handle_api_slot_reserved_278;       /* 保留扩展槽位 */
     table[279] = handle_api_slot_reserved_279;       /* 保留扩展槽位 */
 
-    /* ZSFAB-S8修复: 统一路由的向后兼容别名槽位(280-284) */
+/* 统一路由的向后兼容别名槽位(280-284) */
     table[280] = handle_api_get_memory_export;
     table[281] = handle_api_post_memory_clear;
     table[282] = handle_api_post_memory_search;
     table[283] = handle_api_post_memory_sleep_consolidation;
-    /* ZSFAB-v3+v10修复: table[284]指向真实task_create处理器 */
     table[284] = handle_api_post_task_create;
 
-    /* ===== ZSFWS-B009: 前端-后端API端点对齐修复 ===== */
+    /* ===== 前端-后端API端点对齐修复 ===== */
     table[285] = handle_api_get_programming_sample;
     table[286] = handle_api_get_command_prefixes;
     table[287] = handle_api_get_cognition_tom;
@@ -24600,36 +24590,36 @@ static void init_handler_table(RequestHandler* table) {
     table[296] = handle_api_post_system_command;
     table[297] = handle_api_post_command_send;
 
-    /* ZSFWS-INT-FIX: 系统完整状态与日志导出 — 此前这两个路由因枚举缺失导致编译错误 */
+/* 系统完整状态与日志导出 — 此前这两个路由因枚举缺失导致编译错误 */
     table[298] = handle_api_get_system_full_status;
     table[299] = handle_api_get_system_logs_export;
 
-    /* ZSFWS-INT-FIX: 摄像头切换+视频质量 (枚举325-326) */
+/* 摄像头切换+视频质量 (枚举325-326) */
     table[325] = handle_api_post_camera_switch;
     table[326] = handle_api_post_video_quality;
 
-    /* ZSFZS-F023: 新增产品设计状态和使用日志端点 */
+/* 新增产品设计状态和使用日志端点 */
     table[300] = handle_api_get_product_status;
     table[301] = handle_api_get_usage_logs;
 
-    /* ZSFZX-FIX-P0-002: P0-002修复后批量NULL填充不再需要，
+/* P0-002修复后批量NULL填充不再需要，
      * init_handler_table开头已将所有槽位初始化为handle_api_not_implemented，
      * 此处真实处理器会覆盖已注册槽位(仿真端点305-309等已在前面注册) */
 
-    /* ZSFFIX-P005: 槽位225-226已在L24259-L24260正确分配独立处理器
+/* 槽位225-226已在L24259-L24260正确分配独立处理器
      * (handle_api_post_knowledge_search / handle_api_post_knowledge_import)
-     * ZSFFIX-P005-R1: 槽位227已在init_handler_table中直接设置为handle_api_get_knowledge_version */
-    /* ZSFWS-M-012: 前端可视化实时数据源处理器 */
+ *: 槽位227已在init_handler_table中直接设置为handle_api_get_knowledge_version */
+/* 前端可视化实时数据源处理器 */
     table[302] = handle_api_get_audio_spectrum;
     table[303] = handle_api_get_lnn_activation_heatmap;
     table[304] = handle_api_get_lnn_prediction_scatter;
-    table[311] = handle_api_post_task_pause;   /* ZSFDDD-P0-001修复：从305移到311，避免覆盖仿真端点 */
-    table[312] = handle_api_post_task_cancel;  /* ZSFDDD-P0-001修复：从306移到312，避免覆盖仿真端点 */
+    table[311] = handle_api_post_task_pause; /* 从305移到311，避免覆盖仿真端点 */
+    table[312] = handle_api_post_task_cancel; /* 从306移到312，避免覆盖仿真端点 */
 
-    /* ZSFZS-PRODUCT: POST产品规格生成 */
+/* POST产品规格生成 */
     table[330] = handle_api_post_product_spec;
 
-    /* ZSFQQ-P1-006: 学习/知识一致性检查 */
+/* 学习/知识一致性检查 */
     table[350] = handle_api_post_learning_consistency;
 }
 /**
@@ -24701,7 +24691,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
         /* ========== 请求限流检查（Token Bucket算法） ========== */
         if (server->config.enable_rate_limiting && server->config.rate_limit_per_minute > 0) {
             /* 定期清理过期桶 */
-            uint64_t now_ms = platform_get_time_ms();
+            uint64_t now_ms = platform_get_time_ms;
             if (now_ms - server->rate_limit_last_cleanup > RATE_LIMIT_CLEANUP_INTERVAL) {
                 rate_limit_cleanup_buckets(server->rate_limit_buckets, &server->rate_limit_bucket_count);
                 server->rate_limit_last_cleanup = now_ms;
@@ -24830,7 +24820,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
     
         /* 更新API调用统计（每分钟滚动的请求计数） */
         {
-            uint64_t now_ms = platform_get_time_ms();
+            uint64_t now_ms = platform_get_time_ms;
             if (now_ms - server->last_minute_tick >= 60000) {
                 server->last_minute_tick = now_ms;
                 server->hourly_log_index = (server->hourly_log_index + 1) % 60;
@@ -24881,7 +24871,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
     if (!table_initialized) {
         init_handler_table(handler_table);
         table_initialized = 1;
-        /* ZSFZX-FIX-P0-002: 验证所有槽位均非NULL（init_handler_table已用fill初始化）
+/* 验证所有槽位均非NULL（init_handler_table已用fill初始化）
          * 剩余NULL仅可能出现在的未被覆盖的槽位（理论上应为0） */
         int null_count = 0;
         for (int i = 0; i < API_HANDLER_COUNT; i++) {
@@ -24897,7 +24887,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
         }
     }
 
-    /* ========== ZSFABC: 子系统有效性预检 ========== */
+    /* ========== 子系统有效性预检 ========== */
     /* 如果handler依赖的server子系统为NULL，直接返回安全响应而避免SEH崩溃 */
     /* request_type与所需子系统的映射在init_handler_table中定义 */
     /* 通用安全拦截: POST类型且有handler注册则通过SEH+预检保护 */
@@ -24918,7 +24908,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
         handler = handler_table[request_type];
     }
 
-    /* ========== ZSFABC: 子系统预检 ========== */
+    /* ========== 子系统预检 ========== */
     /* 在调用handler之前验证必需的server子系统是否存在 */
     /* 如果子系统为NULL，返回安全响应避免SEH崩溃 */
     if (handler) {
@@ -25002,7 +24992,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
             snprintf(skip_reason, sizeof(skip_reason), "voice_history");
         }
         
-        /* ZSFABC-003修复: 移除所有stub拦截逻辑，每个端点直接调用真实处理器。
+/* 移除所有stub拦截逻辑，每个端点直接调用真实处理器。
          * 无硬件的端点应在处理器内部检测并返回明确状态，而非在此统一拦截。
          * 遵循"禁止任何降级处理"原则。 */
         
@@ -25073,7 +25063,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
         }
 #endif
     } else {
-        /* ZSFAB-H08修复: 激活通用未实现端点处理器，返回501状态码 */
+/* 激活通用未实现端点处理器，返回501状态码 */
         handle_api_not_implemented(server, request_type, request_data, request_length, response);
     }
 
@@ -25169,7 +25159,7 @@ char* backend_server_get_health(const BackendServer* server) {
     size_t gpu_memory_mb = 0;
     char gpu_info_str[256] = {0};
 
-    gpu_backend = gpu_auto_select();
+    gpu_backend = gpu_auto_select;
     if (gpu_backend != GPU_BACKEND_CPU) {
         gpu_device_count = gpu_get_device_count(gpu_backend);
         if (gpu_device_count > 0) {
@@ -25337,7 +25327,7 @@ static RateLimitBucket* rate_limit_find_or_create(const char* client_ip) {
     }
     RateLimitBucket* b = &rate_limit_buckets[rate_limit_bucket_count++];
     memset(b, 0, sizeof(RateLimitBucket));
-    /* ZSFAB-S4修复: 使用snprintf确保null终止 */
+/* 使用snprintf确保null终止 */
     snprintf(b->client_ip, sizeof(b->client_ip), "%s", client_ip);
     b->tokens = 100.0f;
     b->max_tokens = 100.0f;
@@ -25548,14 +25538,14 @@ int gpu_apple_ane_available(void) {
 #define NPU_DLOPEN(path)  LoadLibraryA(path)
 #define NPU_DLSYM(handle, name) GetProcAddress((HMODULE)(handle), name)
 #define NPU_DLCLOSE(handle) FreeLibrary((HMODULE)(handle))
-#define NPU_DLERROR()  "DLL加载失败"
+#define NPU_DLERROR  "DLL加载失败"
 typedef HMODULE npu_dl_handle;
 #else
 #include <dlfcn.h>
 #define NPU_DLOPEN(path)  dlopen(path, RTLD_LAZY)
 #define NPU_DLSYM(handle, name) dlsym(handle, name)
 #define NPU_DLCLOSE(handle) dlclose(handle)
-#define NPU_DLERROR()  dlerror()
+#define NPU_DLERROR  dlerror
 typedef void* npu_dl_handle;
 #endif
 
@@ -25579,7 +25569,6 @@ static int gpu_cambricon_infer(const float* input, float* output, int dim) {
     }
     if (cnrt_available != 1 || !cnrt_lib) return -1;
 
-    /* ZSF999XQ-H-001修复: 通过dlsym动态加载寒武纪MLU真实推理内核 */
     typedef int (*cnrtInvokeKernel_t)(void* kernel, void* input, void* output, int dim);
     typedef void* (*cnrtCreateKernel_t)(const char* name);
     static cnrtInvokeKernel_t cnrtInvokeKernel_ptr = NULL;
@@ -25625,7 +25614,6 @@ static int gpu_ascend_infer(const float* input, float* output, int dim) {
     }
     if (acl_available != 1 || !acl_lib) return -1;
 
-    /* ZSF999XQ-H-001修复: 通过dlsym动态加载昇腾Ascend真实推理内核 */
     typedef int (*aclopExecute_t)(const char* op_type, int num_inputs, void** input_desc, void* input_buf,
                                   int num_outputs, void** output_desc, void* output_buf);
     typedef void* (*aclopCreateDesc_t)(int dtype, int num_dims, int64_t* dims);
@@ -25648,8 +25636,8 @@ static int gpu_ascend_infer(const float* input, float* output, int dim) {
     void* out_desc = aclopCreateTensorDesc_ptr(0, 2, output_dims);
     if (!in_desc || !out_desc) return -1;
 
-    void* input_descs[] = {in_desc};
-    void* output_descs[] = {out_desc};
+    void* input_descs = {in_desc};
+    void* output_descs = {out_desc};
     int ret = aclopExecute_ptr("Dense", 1, input_descs, (void*)input, 1, output_descs, output);
     log_info("[昇腾Ascend] 真实推理执行完成, dim=%d, ret=%d", dim, ret);
     return ret;
@@ -25677,7 +25665,6 @@ static int gpu_npu_tpu_infer(const float* input, float* output, int dim) {
     }
     if (tpu_available != 1 || !tpu_lib) return -1;
 
-    /* ZSF999XQ-H-001修复: 通过dlsym动态加载TPU真实推理内核 */
     typedef int (*tpuExecute_t)(const float* input, float* output, int dim, void* ctx);
     typedef void* (*tpuCreateContext_t)(void);
     static tpuExecute_t tpuExecute_ptr = NULL;
@@ -25692,7 +25679,7 @@ static int gpu_npu_tpu_infer(const float* input, float* output, int dim) {
         }
     }
 
-    void* ctx = tpuCreateContext_ptr();
+    void* ctx = tpuCreateContext_ptr;
     if (!ctx) return -1;
 
     int ret = tpuExecute_ptr(input, output, dim, ctx);
@@ -25700,7 +25687,6 @@ static int gpu_npu_tpu_infer(const float* input, float* output, int dim) {
     return ret;
 }
 
-/* ZSF-NEW-010修复: NPU调度 - 真实CPU回退计算 */
 int gpu_npu_dispatch(int npu_type, const float* input, float* output, int dim) {
     if (!input || !output || dim <= 0) return -1;
 
@@ -25759,7 +25745,7 @@ int req_log_count = 0;
 int backend_log_request(const char* ip, const char* path, int status, size_t req_sz, size_t resp_sz, int latency_ms) {
     if (!ip || !path || req_log_count >= 1024) return -1;
     RequestLog* l = &req_logs[req_log_count++];
-    /* ZSFAB-S4修复: 使用snprintf确保null终止 */
+/* 使用snprintf确保null终止 */
     snprintf(l->ip, sizeof(l->ip), "%s", ip);
     snprintf(l->path, sizeof(l->path), "%s", path);
     l->status = status; l->req_size = req_sz; l->resp_size = resp_sz;
@@ -25797,25 +25783,25 @@ static int backend_route_count = 0;
 static MutexHandle g_route_mutex = NULL;
 static int g_route_mutex_inited = 0;
 
-#define ROUTE_LOCK_INIT() do { \
+#define ROUTE_LOCK_INIT do { \
     if (!g_route_mutex_inited) { \
-        g_route_mutex = mutex_create(); \
+        g_route_mutex = mutex_create; \
         g_route_mutex_inited = 1; \
     } \
 } while(0)
 
-#define ROUTE_LOCK()   do { if (g_route_mutex) mutex_lock(g_route_mutex); } while(0)
-#define ROUTE_UNLOCK() do { if (g_route_mutex) mutex_unlock(g_route_mutex); } while(0)
+#define ROUTE_LOCK   do { if (g_route_mutex) mutex_lock(g_route_mutex); } while(0)
+#define ROUTE_UNLOCK do { if (g_route_mutex) mutex_unlock(g_route_mutex); } while(0)
 
 static int backend_register_route(const char* path, const char* method,
                             int (*handler)(void*, void*)) {
     if (!path || !handler) return -1;
     
-    ROUTE_LOCK_INIT();
-    ROUTE_LOCK();
+    ROUTE_LOCK_INIT;
+    ROUTE_LOCK;
     
     if (backend_route_count >= 64) {
-        ROUTE_UNLOCK();
+        ROUTE_UNLOCK;
         return -1;
     }
     
@@ -25825,7 +25811,7 @@ static int backend_register_route(const char* path, const char* method,
     r->handler = handler;
     r->is_registered = 1;
     
-    ROUTE_UNLOCK();
+    ROUTE_UNLOCK;
     return 0;
 }
 
@@ -25833,19 +25819,19 @@ static int backend_route_dispatch(const char* path, const char* method,
                             void* request, void* response) {
     if (!path || !request || !response) return -1;
 
-    ROUTE_LOCK_INIT();
-    ROUTE_LOCK();
+    ROUTE_LOCK_INIT;
+    ROUTE_LOCK;
     
     for (int i = 0; i < backend_route_count; i++) {
         if (strcmp(backend_routes[i].path, path) == 0 &&
             (method == NULL || strcmp(backend_routes[i].method, method) == 0)) {
             int result = backend_routes[i].handler(request, response);
-            ROUTE_UNLOCK();
+            ROUTE_UNLOCK;
             return result;
         }
     }
     
-    ROUTE_UNLOCK();
+    ROUTE_UNLOCK;
     return -1; /* 404: 未找到路由 */
 }
 
@@ -25989,7 +25975,7 @@ static int dfl_write_static_symbol(DflBitWriter* bw, uint16_t sym,
 static void dfl_encode_length(int length, int* out_code, int* out_extra, int* out_extra_bits) {
     static const int len_ranges[] = {3,4,5,6,7,8,9,10, 11,13,15,17, 19,23,27,31,
                                       35,43,51,59, 67,83,99,115, 131,163,195,227, 258};
-    static const int len_extra[]  = {0,0,0,0,0,0,0,0, 1,1,1,1, 2,2,2,2,
+    static const int len_extra[] = {0,0,0,0,0,0,0,0, 1,1,1,1, 2,2,2,2,
                                       3,3,3,3, 4,4,4,4, 5,5,5,5, 0};
     int code = 0;
     while (code < 28 && length > len_ranges[code + 1]) code++;
@@ -26004,7 +25990,7 @@ static void dfl_encode_distance(int distance, int* out_code, int* out_extra, int
     static const int dist_ranges[] = {1,2,3,4, 5,7, 9,13, 17,25, 33,49, 65,97,
                                        129,193, 257,385, 513,769, 1025,1537,
                                        2049,3073, 4097,6145, 8193,12289, 16385,24577};
-    static const int dist_extra[]  = {0,0,0,0, 1,1, 2,2, 3,3, 4,4, 5,5,
+    static const int dist_extra[] = {0,0,0,0, 1,1, 2,2, 3,3, 4,4, 5,5,
                                        6,6, 7,7, 8,8, 9,9, 10,10, 11,11, 12,12, 13,13};
     int code = 0;
     while (code < 29 && distance > dist_ranges[code + 1]) code++;
@@ -26254,22 +26240,22 @@ static int api_perm_count = 0;
 #ifdef _WIN32
 static CRITICAL_SECTION g_api_perm_lock;
 static int g_api_perm_lock_init = 0;
-#define API_PERM_LOCK() do { if (!g_api_perm_lock_init) { InitializeCriticalSection(&g_api_perm_lock); g_api_perm_lock_init = 1; } EnterCriticalSection(&g_api_perm_lock); } while(0)
-#define API_PERM_UNLOCK() LeaveCriticalSection(&g_api_perm_lock)
+#define API_PERM_LOCK do { if (!g_api_perm_lock_init) { InitializeCriticalSection(&g_api_perm_lock); g_api_perm_lock_init = 1; } EnterCriticalSection(&g_api_perm_lock); } while(0)
+#define API_PERM_UNLOCK LeaveCriticalSection(&g_api_perm_lock)
 #else
 static pthread_mutex_t g_api_perm_lock = PTHREAD_MUTEX_INITIALIZER;
-#define API_PERM_LOCK() pthread_mutex_lock(&g_api_perm_lock)
-#define API_PERM_UNLOCK() pthread_mutex_unlock(&g_api_perm_lock)
+#define API_PERM_LOCK pthread_mutex_lock(&g_api_perm_lock)
+#define API_PERM_UNLOCK pthread_mutex_unlock(&g_api_perm_lock)
 #endif
 
 int api_permission_register(const char* api_key, const char* role,
                              int categories, int resources, int operations,
                              int rate_limit) {
     if (!api_key) return -1;
-    API_PERM_LOCK();
-    if (api_perm_count >= 128) { API_PERM_UNLOCK(); return -1; }
+    API_PERM_LOCK;
+    if (api_perm_count >= 128) { API_PERM_UNLOCK; return -1; }
     ApiPermission* p = &api_permissions[api_perm_count++];
-    /* ZSFAB-S4修复: strncpy不保证null终止，显式设置 */
+/* strncpy不保证null终止，显式设置 */
     snprintf(p->api_key, sizeof(p->api_key), "%s", api_key);
     snprintf(p->role_name, sizeof(p->role_name), "%s", role ? role : "default");
     p->categories = categories & PERM_CAT_ALL;
@@ -26277,13 +26263,13 @@ int api_permission_register(const char* api_key, const char* role,
     p->operations = operations & PERM_OP_ALL;
     p->rate_limit_per_min = rate_limit > 0 ? rate_limit : 60;
     p->is_active = 1;
-    API_PERM_UNLOCK();
+    API_PERM_UNLOCK;
     return 0;
 }
 
 int api_permission_check(const char* api_key, int category, int resource, int operation) {
     if (!api_key) return 0;
-    API_PERM_LOCK();
+    API_PERM_LOCK;
     int result = 0;
     for (int i = 0; i < api_perm_count; i++) {
         ApiPermission* p = &api_permissions[i];
@@ -26293,26 +26279,26 @@ int api_permission_check(const char* api_key, int category, int resource, int op
         if (!(p->operations & operation)) break;
         result = 1; break;
     }
-    API_PERM_UNLOCK();
+    API_PERM_UNLOCK;
     return result;
 }
 
 int api_permission_revoke(const char* api_key) {
-    /* ZSFLYF-NEW-9修复: 添加锁保护，防止与api_permission_register并发读写竞争 */
-    API_PERM_LOCK();
+/* 添加锁保护，防止与api_permission_register并发读写竞争 */
+    API_PERM_LOCK;
     for (int i = 0; i < api_perm_count; i++) {
         if (strcmp(api_permissions[i].api_key, api_key) == 0) {
             api_permissions[i].is_active = 0;
-            API_PERM_UNLOCK();
+            API_PERM_UNLOCK;
             return 0;
         }
     }
-    API_PERM_UNLOCK();
+    API_PERM_UNLOCK;
     return -1;
 }
 
 /* ================================================================
- * ZSFWS-M-012: 前端可视化实时数据源处理器
+ *: 前端可视化实时数据源处理器
  * 以下3个函数从真实系统状态获取数据，不使用任何虚假/占位数据。
  * ================================================================ */
 
@@ -26329,14 +26315,14 @@ static int handle_api_get_audio_spectrum(BackendServer* server,
     int fft_size = 64;
     int has_data = 0;
 
-    void* laplace = selflnn_get_laplace_unified();
+    void* laplace = selflnn_get_laplace_unified;
     if (laplace) {
         fft_size = 128;
         laplace_unified_get_spectrum(laplace, spectrum_data, (size_t)fft_size);
         has_data = 1;
     }
 
-    void* audio_cap = selflnn_get_audio_capture();
+    void* audio_cap = selflnn_get_audio_capture;
     if (audio_cap && !has_data) {
         audio_capture_get_spectrum(audio_cap, spectrum_data, &fft_size);
         if (fft_size > 0) has_data = 1;
@@ -26353,7 +26339,7 @@ static int handle_api_get_audio_spectrum(BackendServer* server,
             "],\"fft_size\":%d,\"real_data\":true}", fft_size);
     } else {
         snprintf(json_data, 8192,
-            "{\"spectrum\":[],\"fft_size\":0,\"error\":\"音频频谱数据源未就绪\",\"real_data\":true}");
+            "{\"spectrum\":,\"fft_size\":0,\"error\":\"音频频谱数据源未就绪\",\"real_data\":true}");
     }
     (void)server; (void)request_type; (void)request_data; (void)request_length;
     response->data = json_data; response->data_length = strlen(json_data);
@@ -26411,7 +26397,7 @@ static int handle_api_get_lnn_activation_heatmap(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    void* lnn = selflnn_get_shared_lnn();
+    void* lnn = selflnn_get_shared_lnn;
     char* json_data = (char*)safe_malloc(8192);
     if (!json_data) return -1;
     if (lnn) {
@@ -26441,7 +26427,7 @@ static int handle_api_get_lnn_prediction_scatter(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    void* lnn = selflnn_get_shared_lnn();
+    void* lnn = selflnn_get_shared_lnn;
     char* json_data = (char*)safe_malloc(8192);
     if (!json_data) return -1;
     if (lnn) {

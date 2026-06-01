@@ -1,4 +1,4 @@
-# 液态神经网络核心库
+﻿# 液态神经网络核心库
 add_library(selflnn_core
     lnn.c
     cfc_network.c
@@ -36,10 +36,10 @@ add_library(selflnn_core
     laplace_unified.c
 )
 
-# ZSFBUILD: MSVC桩文件 - 为非MSVC平台的子系统(Gazebo/PyBullet/HW检测/Laplace/GPU)提供最小实现
+# MSVC桩文件 - 为非MSVC平台的子系统(Gazebo/PyBullet/HW检测/Laplace/GPU)提供最小实现
 if(MSVC)
     target_sources(selflnn_core PRIVATE msvc_stubs.c)
-endif()
+endif
 
 target_compile_definitions(selflnn_core PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 
@@ -48,7 +48,7 @@ target_include_directories(selflnn_core PUBLIC
 )
 
 # quaternion_lnn.c、selflnn.c需要GPU函数，所以始终链接GPU桩库并传播给所有使用者
-# ZSFABC-C001修复: 移除matrix_ops.c双重编译，改为链接selflnn_math库
+# 移除matrix_ops.c双重编译，改为链接selflnn_math库
 target_link_libraries(selflnn_core PUBLIC selflnn_gpu selflnn_math utils)
 target_link_libraries(selflnn_core PRIVATE selflnn_multimodal)
 

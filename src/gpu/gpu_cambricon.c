@@ -1,4 +1,4 @@
-#include "selflnn/gpu/gpu.h"
+﻿#include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_hardware_detect.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
@@ -363,7 +363,7 @@ static int cambricon_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMem
 
 static GpuKernel* cambricon_backend_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     if (!context) return NULL;
-    /* ZSFZS-F003修复: 无CNRT时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
+/* 无CNRT时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
      * 不再直接返回NULL，确保调用方在无硬件环境也能正常创建kernels进行计算。 */
     if (!g_cb_state.cnrt_available) {
         log_warning("[Cambricon] CNRT不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
@@ -414,7 +414,7 @@ static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_wor
 
     /* ================================================================
      * 寒武纪MLU设备端执行路径（CNRT运行时）
-     * ZSFWS-M-006: NPU加速需寒武纪MLU硬件+CNToolkit+CNRT驱动。
+ *: NPU加速需寒武纪MLU硬件+CNToolkit+CNRT驱动。
      * 无MLU硬件时设备内存分配+CPU SIMD计算是诚实的硬件自适应。
      * 预编译离线模型通过cambricon_npu_load_model走真实MLU推理路径。
      * 6. CNRT不可用时回退到CPU计算（npu_common_cpu_kernel_execute）
@@ -514,7 +514,7 @@ static int cambricon_backend_kernel_execute(GpuKernel* kernel, size_t global_wor
     }
 
 cnrt_fallback:
-    /* ZSFDDD-P0-003修复: CNRT不可用时直接返回错误，禁止内核执行层静默回退到CPU
+/* CNRT不可用时直接返回错误，禁止内核执行层静默回退到CPU
      * 硬件自适应由上层gpu.c调度器统一管理，内核执行层必须严格反映硬件状态
      * 用户应安装寒武纪CNRT SDK以获得MLU加速 */
     (void)kernel; (void)count;
@@ -584,7 +584,7 @@ static const char* CAMBRICON_ADD_BIAS_KERNEL =
 "    int i=taskIdX; if(i>=N)return; d[i]=(half)((float)d[i]+(float)b[i%C]);\n"
 "}\n";
 
-/* ZSFAAA-DEEP-024: 新增2个BANG C内核 */
+/* 新增2个BANG C内核 */
 static const char* CAMBRICON_VECTOR_ADD_KERNEL =
 "__mlu_func__ void vector_add(const half* a, const half* b, half* c, int N) {\n"
 "    int i=taskIdX; if(i>=N)return;\n"
@@ -597,7 +597,6 @@ static const char* CAMBRICON_SAXPY_KERNEL =
 "    y[i]=(half)(alpha*(float)x[i]+(float)y[i]);\n"
 "}\n";
 
-/* ZSFAAA-DEEP-024[增强]: 升级matmul为tile分块优化版本 */
 static const char* CAMBRICON_MATMUL_TILED_KERNEL =
 "__mlu_entry__ void matmul_tiled(half* A, half* B, half* C, int M, int N, int K) {\n"
 "    __bang_shared__ half tileA[16][16], tileB[16][16];\n"
@@ -613,7 +612,7 @@ static const char* CAMBRICON_MATMUL_TILED_KERNEL =
 "    for(int i=0;i<16;i++) for(int j=0;j<16;j++) if(row+i<M&&col+j<N) C[(row+i)*N+col+j]=(half)sum[i][j];\n"
 "}\n";
 
-/* ZSFAAA-DEEP-024: 更新查找函数，新增vector_add/saxpy/fma/tiled分支 */
+/* 更新查找函数，新增vector_add/saxpy/fma/tiled分支 */
 static const char* cambricon_get_builtin_kernel(const char* name) {
     if(!name)return NULL;
     if(strstr(name,"matmul_tiled")||strstr(name,"MatMulTiled"))return CAMBRICON_MATMUL_TILED_KERNEL;

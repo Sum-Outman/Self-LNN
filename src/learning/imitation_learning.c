@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file imitation_learning.c
  * @brief 模仿学习算法实现
  * 
@@ -12,7 +12,7 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
-#include "selflnn/learning/reinforcement_learning.h" /* ZSFUSA: RL_CLAMP宏 */
+#include "selflnn/learning/reinforcement_learning.h" /* RL_CLAMP宏 */
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/gpu/gpu.h"
@@ -24,7 +24,7 @@
 #include <float.h>
 #include <time.h>
 
-/* ZSFBUILD: RL_MIN宏来自reinforcement_learning.c，需在此文件也定义 */
+/* RL_MIN宏来自reinforcement_learning.c，需在此文件也定义 */
 #define RL_MIN(X,Y) (((X)<(Y))?(X):(Y))
 
 /**
@@ -879,7 +879,6 @@ static ImitationLearningResult* train_dagger(ImitationLearner* learner) {
         result->learned_policy = best_policy;
         result->final_loss = best_loss;
         
-        // ZSFWS修复-L-013: 使用真实动作序列匹配度计算准确率
         float accuracy = 0.0f;
         if (best_loss < FLT_MAX) {
             // 准确率 = exp(-clip(best_loss, 0, 10))，loss↘则准确率↗
@@ -1695,7 +1694,7 @@ static ImitationLearningResult* train_gail(ImitationLearner* learner) {
         }
 
         // 4.3 训练策略（生成器，G步骤）
-        // ZSFABC修复: GAIL策略更新使用判别器奖励的对抗性训练
+// GAIL策略更新使用判别器奖励的对抗性训练
         // 标准GAIL: 策略通过最大化判别器对生成样本的评分来学习
         // 即 max_G E[D(s, G(s))] → 使用策略梯度优化
         size_t batch_size_g = (total_expert_samples < 64) ? total_expert_samples : 64;
@@ -1724,7 +1723,6 @@ static ImitationLearningResult* train_gail(ImitationLearner* learner) {
                                max_action_dim * sizeof(float));
                         float d_score = 0.0f;
                         if (lnn_forward(discriminator, da_input, &d_score) == 0) {
-                            /* ZSF-ZNB修复S-006: 标准GAIL r = log D(s,a) */
                             float prob = 1.0f / (1.0f + expf(-d_score));
                             float reward = logf(prob + 1e-8f);
                             total_g_loss -= reward;
@@ -1736,7 +1734,7 @@ static ImitationLearningResult* train_gail(ImitationLearner* learner) {
             if (total_expert_samples > 0) {
                 total_g_loss /= (float)total_expert_samples;
             }
-            /* ZSF-ZNB修复S-006: 标准GAIL(Ho&Ermon)生成器步
+/*修复S-006: 标准GAIL(Ho&Ermon)生成器步
              * 标准GAIL使用TRPO/PPO更新策略，奖励 = log D(s,a)
              * D(s,a) = sigmoid(f(s,a)) 输出[0,1]
              * 奖励: r(s,a) = log D(s,a) = -log(1 + e^{-f(s,a)}) = -softplus(-f)

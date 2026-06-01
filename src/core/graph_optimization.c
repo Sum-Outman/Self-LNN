@@ -476,7 +476,7 @@ int graph_default_fusion_rules(FusionRule* rules, int max_rules) {
         },
         // 批量归一化融合
         {
-            .pattern = (OperatorType[]){OP_TYPE_BATCH_NORM},
+            .pattern = (OperatorType){OP_TYPE_BATCH_NORM},
             .pattern_length = 1,
             .fused_op = OP_TYPE_CUSTOM,
             .fusion_mode = FUSION_KERNEL,
@@ -1556,7 +1556,7 @@ int graph_loop_invariant_code_motion(ComputationGraph* graph) {
         GraphNode* node = gi->sorted_nodes[i];
         if (!node || node->eliminated || node->fused) continue;
 
-        /* 检测循环节点 (ZSFAB P0-002修复: 解禁循环检测与不变性分析) */
+        /* 检测循环节点 (P0-002修复: 解禁循环检测与不变性分析) */
         int is_loop = (node->op_type >= OP_TYPE_ACTIVATION &&
                        node->op_type <= OP_TYPE_LIQUID_GATE);
         if (!is_loop) continue;
@@ -2665,7 +2665,7 @@ int graph_auto_tune_kernel(GraphNode* node, int* best_tile_size,
         if ((int64_t)tile > total_elements) break;
 
         /* 执行多次迭代取均值（使用CPU时钟计数） */
-        clock_t start = clock();
+        clock_t start = clock;
         int num_tiles = (int)((total_elements + tile - 1) / tile);
         float sum = 0.0f;
         float* node_data = (float*)node->user_data;
@@ -2679,7 +2679,7 @@ int graph_auto_tune_kernel(GraphNode* node, int* best_tile_size,
                 }
             }
         }
-        clock_t end = clock();
+        clock_t end = clock;
         float elapsed = (float)(end - start) * 1e6f / (float)CLOCKS_PER_SEC / AUTO_TUNE_WARMUP;
 
         if (elapsed < best_time) {

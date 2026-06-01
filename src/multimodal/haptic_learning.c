@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file haptic_learning.c
  * @brief 触觉/力觉感官学习系统完整实现
  *
@@ -182,7 +182,7 @@ int hl_learn_force_profile(HapticLearner* hl, const float* force_trajectory, int
         if (label) snprintf(hl->grasps[found].object_type, sizeof(hl->grasps[found].object_type), "%s", label);
     }
     if (found >= 0) {
-        /* ZSFWS-S002修复: 使用真实 attempt_count/success_count 比率替代合成数学公式
+/* 使用真实 attempt_count/success_count 比率替代合成数学公式
          * 原公式 0.5+0.3*(1-1/n) 为虚假收敛估计，与 hl_learn_grasp 的真实比率不一致 */
         hl->grasps[found].attempt_count++;
         hl->grasps[found].success_count++;
@@ -361,7 +361,7 @@ int hl_list_grasps(const HapticLearner* hl, const char* object_type, GraspConfig
 int hl_fuse_vision_haptic(HapticLearner* hl, const float* visual, int vdim,
     const float* haptic, int hdim, float* fused, int fdim) {
     if (!hl || !visual || !haptic || !fused) return -1;
-    /* ZSF-ZNB修复H-009: 使用CfC-LNN进行视触统一融合
+/*修复H-009: 使用CfC-LNN进行视触统一融合
      * 替代简单的0.5x+0.5y加权平均。
      * 将视觉和触觉特征拼接后注入LnN获得统一多模态表示 */
     if (hl->lnn_instance) {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file memory_utils.h
  * @brief 内存工具库
  * 
@@ -10,7 +10,7 @@
 
 #include <stddef.h>
 
-/* ZSFUSA: 清理释放宏 — 安全释放单字段 */
+/* 清理释放宏 — 安全释放单字段 */
 #define DEEP_COPY_CLEANUP_FREE(ptr) do { \
     if (ptr) { free(ptr); (ptr) = NULL; } \
 } while(0)
@@ -259,7 +259,7 @@ int memory_lock(void* ptr, size_t size);
  */
 int memory_unlock(void* ptr, size_t size);
 
-/* ZSFUSA: 深拷贝宏定义 (用于知识库和决策引擎) */
+/* 深拷贝宏定义 (用于知识库和决策引擎) */
 #define DEEP_COPY_STRING(dest, src) do { \
     if (dest) { free(dest); dest = NULL; } \
     if (src) { dest = (char*)malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
@@ -280,7 +280,7 @@ int memory_unlock(void* ptr, size_t size);
     if (src) { dest = (char*)malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
 } while(0)
 
-/* ZSFUSA: float数组深拷贝 */
+/* float数组深拷贝 */
 #define DEEP_COPY_FLOAT_ARRAY(dest, dest_count, src, src_count) do { \
     if (dest) { free(dest); dest = NULL; (dest_count) = 0; } \
     if (src && (src_count) > 0) { \

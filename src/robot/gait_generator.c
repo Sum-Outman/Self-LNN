@@ -1,4 +1,4 @@
-#include "selflnn/robot/gait_generator.h"
+﻿#include "selflnn/robot/gait_generator.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/core/errors.h"
@@ -502,7 +502,7 @@ GaitGenerator* gait_generator_create(const GaitConfig* config, const KinematicMo
     float dt = 1.0f / gen->config.step_frequency / 10.0f;
     gait_lipm_compute_preview_gains(gen->lipm.omega, dt,
                                      GAIT_LIPM_PREVIEW_HORIZON, gen->lipm_gain_x);
-    /* ZSFLYF-P1-008修复: Y方向（侧向）预览控制增益也需计算。
+/* Y方向（侧向）预览控制增益也需计算。
      * 之前只计算lipm_gain_x导致侧向预览控制完全失效。 */
     gait_lipm_compute_preview_gains(gen->lipm.omega, dt,
                                      GAIT_LIPM_PREVIEW_HORIZON, gen->lipm_gain_y);

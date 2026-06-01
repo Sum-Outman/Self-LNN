@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file content_filter.h
  * @brief 内容安全过滤系统接口（输出护栏/Guardrails）
  *
@@ -93,7 +93,7 @@ int content_filter_reset_stats(ContentFilter* filter);
  */
 int content_filter_load_rules_from_file(ContentFilter* filter, const char* filepath);
 
-/* ZSFQQ-Q008: 绑定LNN语义分析层，启用基于LNN的语义内容过滤 */
+/* 绑定LNN语义分析层，启用基于LNN的语义内容过滤 */
 int content_filter_set_lnn(ContentFilter* filter, void* lnn_instance);
 
 #ifdef __cplusplus

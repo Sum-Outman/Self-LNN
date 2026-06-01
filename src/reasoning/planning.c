@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file planning.c
  * @brief 规划系统核心实现 —— 全局规划层
  *
@@ -18,14 +18,14 @@
  */
 
 #include "selflnn/reasoning/planning.h"
-#include "selflnn/reasoning/planning_enhanced.h" /* ZSFA-FIX-P0-005: 增强规划集成 */
+#include "selflnn/reasoning/planning_enhanced.h" /* 增强规划集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/core/lnn.h"           /* F-017: LNN状态转移 */
 #include "selflnn/selflnn.h"           /* F-017: selflnn_get_lnn */
-#include "selflnn/reasoning/hierarchical_planning.h" /* ZSFX-019: 分层规划真实API */
+#include "selflnn/reasoning/hierarchical_planning.h" /* 分层规划真实API */
 
 #include <stdlib.h>
 #include <string.h>
@@ -58,7 +58,7 @@
 #define TC_MAX_CONSTRAINTS 256
 #define TC_MAX_STEPS 128
 
-/* ZSFEEE-FIX-023: 移除自定义LCG PRNG(plan_rng_next/plan_rng_uniform)，
+/* 移除自定义LCG PRNG(plan_rng_next/plan_rng_uniform)，
  * 替换为密码学安全的secure_random_float()。
  * 原LCG确定性伪随机存在可预测性和分布偏差问题。 */
 
@@ -167,7 +167,7 @@ static int gp_subroutine_evolve(PlanningSystem* system, float* gp_weights, size_
 static float planning_evolution_evaluate_fitness(PlanningSystem* system, const float* genome) {
     if (!system || !genome) return -1e10f;
 
-    /* ZSFX-020修复: 多目标适应度评估
+/* 多目标适应度评估
      * 目标1: 任务性能 —— 基于可行性历史的真实任务表现权重
      * 目标2: 种群多样性 —— 与种群均值的距离，鼓励多样性
      * 目标3: 探索新颖性 —— 与当前启发式权重的距离，鼓励探索而非趋同
@@ -2052,7 +2052,7 @@ int planning_generate(PlanningSystem* system,
             break;
         }
         case PLANNING_HIERARCHICAL: {
-            /* ZSFX-019修复: 调用hierarchical_planning.c的真实HTN/POP/HRL算法
+/* 调用hierarchical_planning.c的真实HTN/POP/HRL算法
              * 条件编译桥接：优先使用真实分层规划API，
              * 当API不可用或调用失败时回退到本地分层近似实现。 */
             #define HP_MAX_LEVELS 3
@@ -3352,7 +3352,7 @@ static int cholesky_decompose(float* cov, float* L, size_t n) {
 }
 
 /* ================================================================
- * ZSFUSA-C11: 蒙特卡洛树搜索 (MCTS)
+ *: 蒙特卡洛树搜索 (MCTS)
  * 基于上置信界算法(UCB1)的搜索树，适用于大规模状态空间中的决策规划
  * 与现有CMA-ES演化策略互补：MCTS适合离散决策，CMA-ES适合连续参数优化
  * ================================================================ */
@@ -3434,7 +3434,7 @@ int planning_mcts_search(PlanningSystem* planner, const float* initial_state,
 }
 
 /* ================================================================
- * ZSFUSA-C11: A* 搜索路径规划
+ *: A* 搜索路径规划
  * 基于网格地图的A*最短路径搜索，使用欧几里得距离作为启发式函数
  * 适用于2D/3D空间中的路径规划问题
  * ================================================================ */
@@ -3516,7 +3516,7 @@ int planning_astar_search(PlanningSystem* planner, int start_id, int goal_id,
 }
 
 /* ================================================================
- * ZSFUSA-C11: Dijkstra最短路径搜索
+ *: Dijkstra最短路径搜索
  * 单源最短路径算法，支持加权图的路径搜索
  * 与A*互补：Dijkstra适用于无启发式的精确最短路径，A*适用于有启发式的加速搜索
  * ================================================================ */

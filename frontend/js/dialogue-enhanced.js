@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 增强对话系统
  * 支持语音输入/输出、多模态对话（视觉+语音+文字）、摄像头画面发送
  * 集成TTS语音播报和语音识别录制
@@ -130,7 +130,7 @@ class DialogueEnhanced {
 
     async _ttsSynthesize(text) {
         try {
-            /* ZSFZS-F055修复: SelfLnnApi空检查 */
+/* SelfLnnApi空检查 */
             var api = window.SelfLnnApi;
             if (!api) throw new Error('API服务未加载');
             var response = await api.request('/tts/synthesize', {
@@ -409,15 +409,15 @@ class DialogueEnhanced {
         this.wsUrl = wsUrl;
         this.wsReconnectAttempts = 0;
         this.wsMaxReconnect = 5;
-        /* ZSFWS-M025修复: 使用addEventListener避免覆盖其他模块的close处理器 */
+/* 使用addEventListener避免覆盖其他模块的close处理器 */
         var self = this;
         if (gws.ws) {
             var wsElement = gws.ws;
-            /* ZSFWS-M026修复: 将onCloseHandler存储在实例上，确保removeEventListener能匹配到同一个函数引用 */
+/* 将onCloseHandler存储在实例上，确保removeEventListener能匹配到同一个函数引用 */
             if (this._wsCloseHandler) {
                 try { wsElement.removeEventListener('close', this._wsCloseHandler); } catch(e) {}
             }
-            /* ZSFUSA-F02修复: WebSocket断开时自动重连（之前仅计数未重连） */
+/* WebSocket断开时自动重连（之前仅计数未重连） */
             this._wsCloseHandler = function(evt) {
                 self.wsReconnectAttempts++;
                 if (self.wsReconnectAttempts > self.wsMaxReconnect) {

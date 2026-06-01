@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file exploration_strategies.c
  * @brief 深度探索策略系统完整实现
  *
@@ -11,7 +11,7 @@
 #include "selflnn/learning/exploration_strategies.h"
 #include "selflnn/selflnn.h"
 #include "selflnn/core/errors.h"
-#include "selflnn/core/optimizer.h"            /* ZSFEEE-FIX-035: 统一优化器替代独立SGD */
+#include "selflnn/core/optimizer.h" /* 统一优化器替代独立SGD */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -131,7 +131,7 @@ struct ExploreState {
 
     /* 通用 */
     float learning_rate;
-    Optimizer* optimizer;             /**< ZSFEEE-FIX-035: 统一优化器实例 */
+    Optimizer* optimizer; /**< 统一优化器实例 */
     int is_initialized;
 };
 
@@ -232,7 +232,7 @@ ExploreState* explore_icm_create(const ICMConfig* config) {
     state->icm_embed_s_next = (float*)safe_calloc(emb_dim, sizeof(float));
     state->icm_pred_s_next = (float*)safe_calloc(emb_dim, sizeof(float));
 
-    /* ZSFEEE-FIX-035: 创建统一SGD优化器（ICM使用fc_backward中的SGD更新） */
+/* 创建统一SGD优化器（ICM使用fc_backward中的SGD更新） */
     {
         OptimizerConfig opt_cfg = {0};
         opt_cfg.type = OPTIMIZER_SGD;
@@ -435,7 +435,7 @@ ExploreState* explore_rnd_create(const RNDConfig* config) {
     state->count_table_size = 1024;
     state->count_dim = config->state_dim;
 
-    /* ZSFEEE-FIX-035: 创建统一SGD优化器（RND使用统一optimizer_step） */
+/* 创建统一SGD优化器（RND使用统一optimizer_step） */
     {
         OptimizerConfig opt_cfg = {0};
         opt_cfg.type = OPTIMIZER_SGD;
@@ -505,7 +505,7 @@ float explore_rnd_train_batch(ExploreState* state,
         rnd_network_forward(state->rnd_predictor, obs, hidden_buf, pred_out);
         rnd_network_forward(state->rnd_target, obs, hidden_buf, target_out);
 
-        /* ZSFEEE-FIX-035: 使用统一优化器替代手动SGD权重更新。
+/* 使用统一优化器替代手动SGD权重更新。
          * 先计算所有梯度到临时数组，再通过optimizer_step统一更新。 */
         float* grad_out = (float*)safe_calloc(emb_dim, sizeof(float));
         if (grad_out) {
@@ -759,7 +759,6 @@ int explore_go_explore_from_cell(ExploreState* state,
             a[i] = ou_state[i];
         }
 
-        /* ZSFWS修复 P1-001: 使用真实CfC状态演化替代线性简化模型 */
         if (t + 1 < steps) {
             float* s_next = trajectory_states + (t + 1) * state_dim;
             /* 尝试使用LNN的CfC动力学进行状态转移 */
@@ -1019,7 +1018,7 @@ void explore_destroy(ExploreState* state) {
 
     safe_free((void**)&state->count_table);
 
-    /* ZSFEEE-FIX-035: 释放统一优化器 */
+/* 释放统一优化器 */
     if (state->optimizer) optimizer_free(state->optimizer);
 
     safe_free((void**)&state);

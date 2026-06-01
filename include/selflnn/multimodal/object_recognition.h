@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file object_recognition.h
  * @brief 增强物体识别与场景理解接口
  */
@@ -74,7 +74,7 @@ int or_classify_object(ObjectRecognizer* or_obj, const float* features, int dim,
 /* 属性识别 */
 int or_recognize_attributes(ObjectRecognizer* or_obj, const float* image, int w, int h, int ch, const DetectedObject* obj, ObjectAttributes* attrs);
 int or_detect_color(ObjectRecognizer* or_obj, const float* image, int w, int h, int ch, const DetectedObject* obj, float* color_rgb);
-/* ZSFDDD-D7-005: RGB值→中文颜色名称映射（12种基准颜色+置信度） */
+/* RGB值→中文颜色名称映射（12种基准颜色+置信度） */
 int or_get_color_name(const float* color_rgb, char* name_buf, size_t buf_size, float* confidence);
 int or_estimate_size(ObjectRecognizer* or_obj, const DetectedObject* obj, float* width_m, float* height_m);
 
@@ -88,7 +88,7 @@ int or_train_classifier(ObjectRecognizer* or_obj, const float* features, const i
 int or_save_model(const ObjectRecognizer* or_obj, const char* filepath);
 int or_load_model(ObjectRecognizer* or_obj, const char* filepath);
 
-/* ZSFEEE-FIX-041: CfC深度学习训练接口 —— 独立CfC管道训练，不影响HOG模板 */
+/* CfC深度学习训练接口 —— 独立CfC管道训练，不影响HOG模板 */
 int or_train_cfc(ObjectRecognizer* or_obj, const float* features, const int* labels, int samples, int dim, int categories, int epochs, float lr);
 int object_cfc_train(ObjectRecognizer* or_obj, const float* features, const int* labels, int samples, int dim, int categories, int epochs, float lr);
 

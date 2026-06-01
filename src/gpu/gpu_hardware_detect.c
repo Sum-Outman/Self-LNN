@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_hardware_detect.c
  * @brief GPU硬件真实检测实现
  *
@@ -413,7 +413,6 @@ static int detect_gpu_macos(GpuHardwareInfo* info, int max_devices, int* num_fou
             gpu->memory_mb = (size_t)(memsize / (1024 * 1024));
             gpu->has_unified_memory = 1;
         } else {
-            /* ZSFWS修复 P3-004: sysctl失败时设为0表示未知，不硬编码假容量 */
             gpu->memory_mb = 0;
         }
     }

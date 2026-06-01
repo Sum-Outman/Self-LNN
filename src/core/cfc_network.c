@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file cfc_network.c
  * @brief CfC网络实现（对应头文件 cfc_network.h）
  * 
@@ -110,10 +110,10 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     network->layer_outputs = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     network->layer_gradients = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     network->activation_buffer = (float*)safe_calloc(max_layer_size, sizeof(float));
-    /* ZSFZS-F018修复: 逐层分配dropout掩码，避免多层共享单一掩码导致反向传播使用错误掩码 */
+/* 逐层分配dropout掩码，避免多层共享单一掩码导致反向传播使用错误掩码 */
     network->dropout_mask = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     
-    /* ZSFWS-MLW: 多层权重独立存储——每层分配独立权重矩阵
+/* 多层权重独立存储——每层分配独立权重矩阵
      * 单层: param = [input*hidden w]  [hidden b]  [W_out] [b_out]
      * 多层: param = [layer0: input*hidden] [layer1..N-1: each hidden*hidden] [N*hidden b] [W_out] [b_out]
      * 梯度块使用相同布局 */
@@ -188,7 +188,7 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         for (size_t i = 0; i < output_size_cfg; i++) {
             network->b_out_params[i] = 0.0f;
         }
-        /* ZSFWS-M001: 分配 W_out/b_out Adam动量缓冲区并清零 */
+/* 分配 W_out/b_out Adam动量缓冲区并清零 */
         network->W_out_m = (float*)safe_calloc(output_size_cfg * hidden_size_cfg, sizeof(float));
         network->W_out_v = (float*)safe_calloc(output_size_cfg * hidden_size_cfg, sizeof(float));
         network->b_out_m = (float*)safe_calloc(output_size_cfg, sizeof(float));
@@ -229,7 +229,7 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         }
     }
     
-    /* ZSFZS-F018修复: 初始化所有层的Dropout掩码为1（不丢弃） */
+/* 初始化所有层的Dropout掩码为1（不丢弃） */
     for (size_t i = 0; i < total_layers * max_layer_size; i++) {
         network->dropout_mask[i] = 1.0f;
     }
@@ -313,14 +313,14 @@ void cfc_free(CfCNetwork* network) {
     network->bias_gradients = NULL;
     network->W_out_gradients = NULL;
     network->b_out_gradients = NULL;
-    /* ZSFWS-M001: 释放 W_out Adam动量缓冲区 */
+/* 释放 W_out Adam动量缓冲区 */
     safe_free((void**)&network->W_out_m);
     safe_free((void**)&network->W_out_v);
     safe_free((void**)&network->b_out_m);
     safe_free((void**)&network->b_out_v);
     network->out_adam_step = 0;
 
-    /* ZSFWS-MLW: 释放每层偏移追踪数组 */
+/* 释放每层偏移追踪数组 */
     safe_free((void**)&network->per_layer_w_offset);
     safe_free((void**)&network->per_layer_b_offset);
     safe_free((void**)&network->per_layer_w_size);
@@ -358,7 +358,7 @@ int cfc_forward(CfCNetwork* network, const float* input,
     
     // 第一层：输入到隐藏
     if (num_layers == 1) {
-        /* ZSFWS-P14修复: 单层网络跳过额外线性变换，直接传递原始输入。
+/* 单层网络跳过额外线性变换，直接传递原始输入。
          * 之前先做Wx+b再传给CfC cell，而CfC cell内部已做W_ax*x+W_gx*x。
          * 这导致输入经过双重线性变换——第一层权重和CfC内部权重相互干扰。
          * 修复: 将原始输入直接传递给CfC cell，由其内部矩阵处理。 */
@@ -394,7 +394,7 @@ int cfc_forward(CfCNetwork* network, const float* input,
             memcpy(layer_output, network->ln_temp_buffer, hidden_size * sizeof(float));
         }
         
-        /* ZSFZS-F018修复: 使用逐层独立dropout掩码，每层掩码写入对应偏移位置 */
+/* 使用逐层独立dropout掩码，每层掩码写入对应偏移位置 */
         if (config->dropout_rate > 0.0f && config->dropout_rate < 1.0f && config->enable_training) {
             float* layer_mask = network->dropout_mask + (size_t)layer * max_layer_size;
             for (size_t i = 0; i < hidden_size; i++) {
@@ -785,7 +785,7 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
             return SELFLNN_ERROR_INITIALIZATION_FAILED;
         }
 
-        /* ZSFZS-F018修复: 使用前一层(layer-1)的dropout掩码，而非当前层掩码
+/* 使用前一层(layer-1)的dropout掩码，而非当前层掩码
          * 原因: prev_gradient = dL/d(前一层输出_经dropout后)，需要乘以前一层的掩码
          * 才能正确得到 dL/d(前一层输出_dropout前)，从而正确传递梯度穿过前一层的dropout */
         if (config->dropout_rate > 0.0f && layer > 0) {
@@ -796,7 +796,7 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         }
     }
 
-    /* ZSFX-P0: 步骤3 — 单样本路径梯度累积而非直接SGD更新
+/* 步骤3 — 单样本路径梯度累积而非直接SGD更新
      * skip_cell_update=1时跳过所有参数更新（批量模式，调用方负责统一下发）。
      * skip_cell_update=0时采用梯度累积模式（+=）而非直接SGD（-=lr*grad），
      * 确保与外部优化器（Adam/AdamW等）的单元格更新路径一致。 */
@@ -805,7 +805,7 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
      * 原SGD路径（参数 -= lr*grad）缺少动量/偏差校正/自适应步长，
      * 导致单样本训练与批量训练的优化动态不一致，严重损害收敛稳定性。 */
     cfc_apply_cell_gradients_adam(network, learning_rate, 0.9f, 0.999f, 1e-8f, 1);
-    /* ZSFWS-M001: W_out/b_out Adam动量缓冲区已添加，全部参数统一使用Adam更新。
+/* W_out/b_out Adam动量缓冲区已添加，全部参数统一使用Adam更新。
      * cfc_apply_out_proj_gradients 内部已改为完整Adam(β1=0.9, β2=0.999)自适应学习率。
      * W_out优化路径现已与cell级参数完全统一，消除双轨运行导致的收敛分裂问题。 */
     cfc_apply_out_proj_gradients(network, learning_rate);
@@ -819,7 +819,7 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
     /* FIX-007/011: 步骤4 — 累积网络级输入预处理参数的梯度。
      * 使用 += 而非 = 确保批量训练时多个样本的梯度正确累加。
      * 调用方需在每批次开始前将 weight_gradients/bias_gradients 清零。
-     * ZSFWS-MLW: 使用层0的梯度偏移，支持多层独立权重。 */
+ *: 使用层0的梯度偏移，支持多层独立权重。 */
     if (saved_input) {
         size_t layer0_w_size = network->per_layer_w_size[0];
         float* grad_l0_w = network->weight_gradients + network->per_layer_w_offset[0];
@@ -952,7 +952,7 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
             return SELFLNN_ERROR_INITIALIZATION_FAILED;
         }
         
-        /* ZSFZS-F018修复: 使用前一层(layer-1)的dropout掩码，与cfc_backward_ex一致 */
+/* 使用前一层(layer-1)的dropout掩码，与cfc_backward_ex一致 */
         if (config->dropout_rate > 0.0f && layer > 0) {
             float* prev_mask = network->dropout_mask + (size_t)(layer - 1) * max_layer_size;
             for (size_t i = 0; i < hidden_size; i++) {
@@ -973,7 +973,7 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
          * 旧代码用 gradient[i]*input[j] 重新计算→这是简单线性层梯度，完全
          * 忽略了CfC内部的sigmoid/tanh/exp(-Δt/τ)导数链，导致外部梯度错误。
          * 批量训练时使用+=累积（FIX-010），调用方已在批次前清零。
-         * ZSFWS-MLW: 使用per_layer偏移写入正确位置。 */
+ *: 使用per_layer偏移写入正确位置。 */
         total_weight_size = hidden_size * config->input_size;
         float* grad_l0_w = weight_gradients + network->per_layer_w_offset[0];
         float* grad_l0_b = bias_gradients + network->per_layer_b_offset[0];
@@ -985,13 +985,13 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
             for (size_t i = 0; i < hidden_size; i++) {
                 grad_l0_b[i] += cell0->bias_grad[i];
             }
-            /* ZSFNO2-F001: 防御性清零cell内部梯度缓冲区，防止梯度污染 */
+/* 防御性清零cell内部梯度缓冲区，防止梯度污染 */
             memset(cell0->weight_grad, 0, total_weight_size * sizeof(float));
             memset(cell0->bias_grad, 0, hidden_size * sizeof(float));
         }
     } else {
         // 多层网络完整梯度计算
-        /* ZSFWS-MLW: 每层cell梯度写入独立的param_block偏移位置
+/* 每层cell梯度写入独立的param_block偏移位置
          * 不再使用共享的 hidden*hidden 矩阵，每层拥有独立的权重空间
          * Layer 0: hidden_size × input_size → per_layer_w_offset[0]
          * Layer 1..N-2: hidden_size × hidden_size → per_layer_w_offset[layer]
@@ -1018,7 +1018,7 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
                     layer_grad_b[i] += cell->bias_grad[i];
                 }
             }
-            /* ZSFNO2-F001: 防御性清零cell内部梯度缓冲区，防止梯度污染 */
+/* 防御性清零cell内部梯度缓冲区，防止梯度污染 */
             if (cell->weight_grad) memset(cell->weight_grad, 0, cell_weight_size * sizeof(float));
             if (cell->bias_grad) memset(cell->bias_grad, 0, config->hidden_size * sizeof(float));
         }
@@ -1084,14 +1084,14 @@ int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate) {
                 if (isfinite(g)) cell->input_gate_weights[k] -= learning_rate * g;
             }
         }
-        /* W_fx: 遗忘门权重 (ZSFWS-023修复: 补充遗漏) */
+        /* W_fx: 遗忘门权重 (补充遗漏) */
         if (cell->forget_gate_weight_grad && cell->forget_gate_weights) {
             for (k = 0; k < cell_w_count; k++) {
                 float g = cell->forget_gate_weight_grad[k];
                 if (isfinite(g)) cell->forget_gate_weights[k] -= learning_rate * g;
             }
         }
-        /* W_ox: 输出门权重 (ZSFWS-023修复: 补充遗漏) */
+        /* W_ox: 输出门权重 (补充遗漏) */
         if (cell->output_gate_weight_grad && cell->output_gate_weights) {
             for (k = 0; k < cell_w_count; k++) {
                 float g = cell->output_gate_weight_grad[k];
@@ -1156,7 +1156,7 @@ int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate) {
 /**
  * @brief 应用输出投影矩阵(W_out+b_out)梯度 —— Adam自适应学习率更新
  * 
- * ZSFWS-M001修复: 原SGD更新路径与cell级Adam更新双轨运行,收敛动态不一致。
+ *修复: 原SGD更新路径与cell级Adam更新双轨运行,收敛动态不一致。
  * 改为使用完整的 Adam(β1=0.9, β2=0.999) 自适应学习率,
  * 独立维护 W_out/b_out 的一阶动量(m)和二阶速度(v)缓冲区,
  * 消除优化路径分裂问题,统一全部参数使用Adam更新。
@@ -1203,7 +1203,7 @@ int cfc_apply_out_proj_gradients(CfCNetwork* network, float learning_rate) {
 /**
  * @brief 将共享参数块同步到各层CfC单元的活跃权重
  * 
- * ZSFWS-MLW: FIX-017 全面重写。原代码在多层时所有层复制相同权重矩阵，
+ *: FIX-017 全面重写。原代码在多层时所有层复制相同权重矩阵，
  * 导致多层网络的参数空间退化为单层。新代码使用per_layer偏移正确分配
  * 每层的独立权重和偏置。
  * 
@@ -1270,7 +1270,7 @@ int cfc_save(const CfCNetwork* network, FILE* file) {
     }
     
     // 保存权重和偏置
-    /* ZSFWS-MLW: 使用实际分配的多层参数总数进行序列化 */
+/* 使用实际分配的多层参数总数进行序列化 */
     size_t weight_size = network->total_weight_params;
     size_t bias_size = network->total_bias_params;
     if (!network->per_layer_w_offset || weight_size == 0) {
@@ -1317,7 +1317,7 @@ int cfc_save(const CfCNetwork* network, FILE* file) {
         }
     }
 
-    /* ZSFX-DEEP-R6-001: 保存层归一化可学习参数(gamma/beta)
+/* 保存层归一化可学习参数(gamma/beta)
      * 此前cfc_save完全遗漏了layer_norm参数，导致加载后归一化回退到初始值 */
     if (network->layer_norms && network->config.use_layer_norm) {
         uint32_t ln_marker = 0x4C4E4F52;  /* "LNOR" */
@@ -1386,7 +1386,7 @@ int cfc_load(CfCNetwork* network, FILE* file) {
     }
     
     // 读取权重和偏置
-    /* ZSFWS-MLW: 使用实际分配的多层参数总数进行反序列化 */
+/* 使用实际分配的多层参数总数进行反序列化 */
     size_t weight_size = network->total_weight_params;
     size_t bias_size = network->total_bias_params;
     if (!network->per_layer_w_offset || weight_size == 0) {
@@ -1436,7 +1436,7 @@ int cfc_load(CfCNetwork* network, FILE* file) {
         }
     }
 
-    /* ZSFX-DEEP-R6-001: 加载层归一化可学习参数(gamma/beta) - 向后兼容 */
+/* 加载层归一化可学习参数(gamma/beta) - 向后兼容 */
     if (network->layer_norms && network->config.use_layer_norm) {
         uint32_t ln_marker = 0;
         long ln_pos = ftell(file);
@@ -1588,7 +1588,7 @@ int cfc_get_weight_matrix(CfCNetwork* network, float** weight_matrix, size_t* we
     SELFLNN_CHECK(network->is_initialized, SELFLNN_ERROR_NOT_INITIALIZED,
                  "CfC网络未初始化");
     
-    /* ZSFWS-MLW: 返回实际分配的多层权重总数，而非旧单层大小 */
+/* 返回实际分配的多层权重总数，而非旧单层大小 */
     *weight_matrix = network->weight_matrix;
     if (network->per_layer_w_offset && network->total_weight_params > 0) {
         *weight_count = network->total_weight_params;
@@ -1614,7 +1614,7 @@ int cfc_get_bias_vector(CfCNetwork* network, float** bias_vector, size_t* bias_c
     SELFLNN_CHECK(network->is_initialized, SELFLNN_ERROR_NOT_INITIALIZED,
                  "CfC网络未初始化");
     
-    /* ZSFWS-MLW: 返回实际分配的多层偏置总数 */
+/* 返回实际分配的多层偏置总数 */
     *bias_vector = network->bias_vector;
     if (network->per_layer_b_offset && network->total_bias_params > 0) {
         *bias_count = network->total_bias_params;
@@ -1790,7 +1790,7 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
     size_t n = net->config.hidden_size;
     const float* input = rhsc->input;
 
-    /* ZSFABC-P0-015修复: 权重矩阵索引映射修正
+/* 权重矩阵索引映射修正
      * weight_matrix仅[input_size*hidden_size]，原代码用i*input_size*3+j越界访问
      * 正确应使用: input_gate_weights + hidden_to_input_gate_weights + gate_biases[3*i]
      *             weight_matrix + hidden_to_activation_weights + bias_vector */
@@ -1916,7 +1916,7 @@ int cfc_detect_stiffness(CfCNetwork* network, const float* input,
     cfc_free_rhs_context(rhsc);
     /* 刚度比 = max|Re(λ)| / min|Re(λ)|，用幂迭代估算最大特征值 */
     float lambda_max = power_iteration_max_eigenvalue(J, n, 100, 1e-6f);
-    /* ZSFWS-P9修复: 使用逆幂迭代估算最小特征值，替代不准确的对角近似。
+/* 使用逆幂迭代估算最小特征值，替代不准确的对角近似。
      * 对角近似对非对角占优矩阵偏差极大（可能低估超过10倍）。
      * 逆幂迭代: 求解 (J - shift*I)·x = v, 迭代收敛到最接近shift的特征值。
      * shift=0 时收敛到 |λ| 最小的特征值。 */
@@ -2076,12 +2076,12 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
         if (cfc_detect_stiffness(network, input, hidden_state, &sr) == 0) {
             stats->stiffness_ratio = sr;
             if (sr > 100.0f) {
-                current_solver = ODE_SOLVER_ROSENBROCK; /* ZSFWS-011: 使用枚举常量替代魔法数字5 */
+                current_solver = ODE_SOLVER_ROSENBROCK; /* 使用枚举常量替代魔法数字5 */
                 cfc_set_solver_type(network, current_solver);
                 using_stiff_solver = 1;
                 stats->solver_switches++;
             } else if (sr > 10.0f) {
-                current_solver = ODE_SOLVER_DP54; /* ZSFWS-011: 使用枚举常量替代魔法数字4 */
+                current_solver = ODE_SOLVER_DP54; /* 使用枚举常量替代魔法数字4 */
                 cfc_set_solver_type(network, current_solver);
             }
         }
@@ -2150,7 +2150,7 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
         stats->total_steps++;
         stats->final_t = t;
 
-        /* ZSFWS-P4修复: 周期性刚度重检测。
+/* 周期性刚度重检测。
          * 长时间演化中系统状态可能进入/离开刚性区域，
          * 需要动态切换求解器类型而非仅初始检测一次。 */
         if (config->enable_stiffness_detect &&
@@ -2179,7 +2179,7 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
         }
     }
 
-    /* ZSFWS-P4修复: 演化结束后恢复原始求解器类型，
+/* 演化结束后恢复原始求解器类型，
      * 避免刚度检测的临时切换影响后续非演化调用。 */
     if (current_solver != original_solver) {
         cfc_set_solver_type(network, original_solver);
@@ -2190,7 +2190,7 @@ static int cfc_continuous_evolve_impl(CfCNetwork* network, const float* input,
     if (stats->min_dt_used < 1e-12f) stats->min_dt_used = h;
     stats->used_stiff_solver = using_stiff_solver;
 
-    /* ZSFZS-F012修复: 使用专门的truncated标志位替代rejected_steps负数编码。
+/* 使用专门的truncated标志位替代rejected_steps负数编码。
      * 语义分离：rejected_steps只表示被自适应步长拒绝的步数，
      * truncated专门标记是否因达到最大步数上限而未完成演化。 */
     if (stats->total_steps >= config->max_steps)

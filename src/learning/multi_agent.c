@@ -135,7 +135,7 @@ struct MultiAgentSystem {
     int synchronization_counter;
     float synchronization_error;
     void* cfc_private_data;
-    int enabled;            /* ZSFZS-F024: 多智能体系统启停控制标志 */
+    int enabled; /* 多智能体系统启停控制标志 */
 };
 
 /* 静态函数原型声明 */
@@ -1399,7 +1399,7 @@ MultiAgentSystem* multi_agent_system_create(const MultiAgentConfig* config) {
         }
     }
     
-    system->enabled = 1;  /* ZSFZS-F024: 默认启用多智能体系统 */
+    system->enabled = 1; /* 默认启用多智能体系统 */
     
     return system;
 }
@@ -1468,7 +1468,7 @@ void multi_agent_system_destroy(MultiAgentSystem* system) {
 }
 
 /* ============================================================================
- * ZSFZS-F024: 多智能体系统启停控制
+ *: 多智能体系统启停控制
  * ============================================================================ */
 
 /**
@@ -4105,7 +4105,6 @@ int ma_cfc_train_step(MultiAgentSystem* system, const float* states,
     }
 }
 
-/* ZSF-NEW-003修复: 多智能体系统评估性能 - 基于真实系统状态计算指标 */
 int multi_agent_evaluate_performance(MultiAgentSystem* system, float* metrics, int max_metrics) {
     if (!system || !metrics || max_metrics <= 0) return -1;
 
@@ -4170,7 +4169,6 @@ int multi_agent_evaluate_performance(MultiAgentSystem* system, float* metrics, i
     return count;
 }
 
-/* ZSF-NEW-003修复: 多智能体执行任务 - 真实分配、调度和初始化 */
 int multi_agent_execute_task(MultiAgentSystem* system, CollaborativeTask* task) {
     if (!system || !task) return -1;
     if (!system->enabled) return -1;
@@ -4228,7 +4226,6 @@ int multi_agent_execute_task(MultiAgentSystem* system, CollaborativeTask* task) 
     return 0;
 }
 
-/* ZSF-NEW-003修复: 多智能体发送消息 - 真实消息缓冲和传递 */
 int multi_agent_send_message(MultiAgentSystem* system, const AgentMessage* message) {
     if (!system || !message) return -1;
     if (!system->enabled) return -1;
@@ -4265,7 +4262,6 @@ int multi_agent_send_message(MultiAgentSystem* system, const AgentMessage* messa
     return 0;
 }
 
-/* ZSF-NEW-003修复: 多智能体形成联盟 - 基于能力和任务需求匹配 */
 int multi_agent_form_coalition(MultiAgentSystem* system, const CollaborativeTask* task,
                                 int* coalition_ids, int max_ids) {
     if (!system || !coalition_ids || max_ids <= 0) return 0;
@@ -4332,7 +4328,6 @@ int multi_agent_form_coalition(MultiAgentSystem* system, const CollaborativeTask
     return count;
 }
 
-/* ZSF-NEW-003修复: 多智能体达成共识 - 真实共识迭代算法 */
 int multi_agent_reach_consensus(MultiAgentSystem* system, const int* agent_ids,
                                 int agent_count, const void* proposal, void* result) {
     if (!system || !agent_ids || agent_count <= 0 || !proposal || !result) return -1;
@@ -4425,7 +4420,7 @@ int multi_agent_reach_consensus(MultiAgentSystem* system, const int* agent_ids,
 }
 
 /* ============================================================================
- * ZSFZS-F025: 缺失的多智能体接口实现
+ *: 缺失的多智能体接口实现
  * 以下函数在 multi_agent.h 中声明但之前未实现，现提供完整的真实实现。
  * ============================================================================ */
 

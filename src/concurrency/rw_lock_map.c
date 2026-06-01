@@ -1,4 +1,4 @@
-#include "selflnn/concurrency/rw_lock_map.h"
+﻿#include "selflnn/concurrency/rw_lock_map.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -203,7 +203,7 @@ int rw_lock_map_insert(RwLockMap* map, const char* key, void* value) {
         return -1;
     }
 
-    /* ZSFX-DEEP-002修复: 使用safe_malloc替代strdup，确保与safe_free API匹配 */
+/* 使用safe_malloc替代strdup，确保与safe_free API匹配 */
     size_t key_len = strlen(key) + 1;
     new_entry->key = (char*)safe_malloc(key_len);
     if (new_entry->key) {
@@ -287,7 +287,7 @@ void* rw_lock_map_get(RwLockMap* map, const char* key) {
     if (!map || !key || !map->is_initialized) return NULL;
     size_t idx = rw_map_hash_string(key, map->capacity);
     rw_map_lock_t* lock = &map->bucket_locks[idx];
-    rw_map_spin_lock(lock);   /* ZSFX-DEEP-003: 读操作必须持有桶锁，防止与insert/remove产生数据竞争 */
+    rw_map_spin_lock(lock); /* 读操作必须持有桶锁，防止与insert/remove产生数据竞争 */
     RwLockMapEntry* entry = map->buckets[idx];
     map->lookup_count++;
     void* value = NULL;
@@ -306,7 +306,7 @@ void* rw_lock_map_get_int_key(RwLockMap* map, int64_t key) {
     if (!map || !map->is_initialized) return NULL;
     size_t idx = rw_map_hash_int(key, map->capacity);
     rw_map_lock_t* lock = &map->bucket_locks[idx];
-    rw_map_spin_lock(lock);   /* ZSFX-DEEP-003: 读操作必须持有桶锁 */
+    rw_map_spin_lock(lock); /* 读操作必须持有桶锁 */
     RwLockMapEntry* entry = map->buckets[idx];
     map->lookup_count++;
     void* value = NULL;

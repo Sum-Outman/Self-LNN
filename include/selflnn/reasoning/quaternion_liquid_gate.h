@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file quaternion_liquid_gate.h
  * @brief 四元数液态门控接口
  *
@@ -53,7 +53,7 @@ typedef struct {
     float* adam_v;                           /**< 二阶动量 */
     size_t adam_step;                        /**< 优化步数 */
 
-    /* ZSFX-022: 输出投影权重独立存储（消除内存hack） */
+/* 输出投影权重独立存储（消除内存hack） */
     float* out_weight_storage;               /**< 输出投影核+偏置，独立分配，独立释放 */
     float* out_adam_m;                       /**< 输出投影Adam一阶动量，独立分配 */
     float* out_adam_v;                       /**< 输出投影Adam二阶动量，独立分配 */

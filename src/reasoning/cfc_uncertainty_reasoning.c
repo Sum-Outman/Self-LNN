@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file cfc_uncertainty_reasoning.c
  * @brief CfC不确定性推理引擎完整实现
  *
@@ -167,7 +167,6 @@ float cfc_uncertain_compute_membership(FuzzyMembershipType mf_type,
             return 1.0f / (1.0f + powf(fabsf((x - c) / a), 2.0f * b));
         }
         case FUZZY_MF_LIQUID_CFC:
-            /* ZSFWS修复-L-009: 使用三个参数的液态CFC隶属函数，实现ODE动力学驱动的隶属度计算 */
             {
                 float w = params[0] > CFC_UNCERTAIN_EPSILON ? params[0] : CFC_UNCERTAIN_EPSILON;
                 float b = params[1];

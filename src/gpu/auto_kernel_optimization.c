@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file auto_kernel_optimization.c
  * @brief 自动内核优化系统实现
  *
@@ -1382,7 +1382,7 @@ int auto_kernel_optimizer_suggest_vector_width(AutoKernelOptimizer* optimizer,
 int auto_kernel_optimizer_suggest_unroll_factor(AutoKernelOptimizer* optimizer,
                                                int loop_iterations,
                                                int operations_per_iter) {
-    /* ZSFZS-F020修复: 使用优化器历史数据库信息辅助决策展开因子。
+/* 使用优化器历史数据库信息辅助决策展开因子。
      * 结合循环迭代数和每迭代操作数，参考数据库中最优配置。 */
     if (loop_iterations <= 0 || operations_per_iter <= 0) return 1;
 

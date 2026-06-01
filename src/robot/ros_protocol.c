@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file ros_protocol.c
  * @brief ROS协议序列化/反序列化、TCP传输层、DDS RTPS协议完整实现
  *
@@ -1057,7 +1057,7 @@ const char* ros_topic_type_to_string(int type_id) {
     }
 }
 
-/* ZSFLYF-P2-014修复: 标准MD5哈希实现
+/* 标准MD5哈希实现
  * 替换原自定义哈希算法，使用符合RFC 1321的标准MD5计算。
  * 确保与真实ROS节点的消息类型MD5校验完全兼容。 */
 static void ros_msg_hash_compute(const char* data, size_t len, char* output, size_t output_size) {
@@ -1820,7 +1820,7 @@ static int dds_send_discovery(DDSContext* ctx) {
 }
 
 /* 处理收到的DDS发现数据包 */
-/* ZSFZS-F019: 新增 from_addr 参数，用于获取远程参与者真实IP地址 */
+/* 新增 from_addr 参数，用于获取远程参与者真实IP地址 */
 static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, size_t data_size,
                                           const struct sockaddr_in* from_addr) {
     if (data_size < 20) return;
@@ -1851,7 +1851,7 @@ static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, s
     /* 解析子消息 */
     uint32_t remote_user_traffic_port = 0;
     uint32_t remote_discovery_port = 0;
-    uint32_t remote_ip_addr = 0;            /* ZSFZS-F019: 从SPDP解析的远程IP */
+    uint32_t remote_ip_addr = 0; /* 从SPDP解析的远程IP */
     char remote_node_name[128] = {0};
 
     while ((size_t)(ptr - data) + 4 <= data_size) {
@@ -1889,7 +1889,7 @@ static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, s
                         if (param_len >= 12) {
                             read_u32_le(&ptr); /* kind */
                             remote_user_traffic_port = read_u32_le(&ptr);
-                            /* ZSFZS-F019: 提取远程IP地址（little-endian -> 网络字节序） */
+/* 提取远程IP地址（little-endian -> 网络字节序） */
                             remote_ip_addr = read_u32_le(&ptr);
                             ptr += (size_t)(param_len - 12);
                         } else if (param_len >= 8) {
@@ -1947,7 +1947,7 @@ static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, s
                 dp->user_traffic_port = remote_user_traffic_port;
                 dp->discovery_port = remote_discovery_port;
 
-                /* ZSFZS-F019: 确定远程参与者真实IP地址 */
+/* 确定远程参与者真实IP地址 */
                 /* 优先使用SPDP中宣告的远程IP，若为无效/回环则用recvfrom源地址回退 */
                 {
                     uint8_t first_octet = (uint8_t)(remote_ip_addr >> 24);
@@ -1978,7 +1978,7 @@ static void dds_process_discovery_packet(DDSContext* ctx, const uint8_t* data, s
                     (int64_t)time(NULL) * 1000;
                 ctx->remote_participants[participant_idx].participant.is_alive = 1;
 
-                /* ZSFZS-F019: 更新远程IP（防止地址变更） */
+/* 更新远程IP（防止地址变更） */
                 {
                     DDSDomainParticipant* dp = &ctx->remote_participants[participant_idx].participant;
                     uint8_t first_octet = (uint8_t)(remote_ip_addr >> 24);
@@ -2021,7 +2021,7 @@ int dds_discovery_step(DDSContext* ctx) {
                                   sizeof(recv_buf), 0,
                                   (struct sockaddr*)&from_addr, &from_len);
         if (recvd > 0) {
-            /* ZSFZS-F019: 传入实际源地址用于确定远程IP */
+/* 传入实际源地址用于确定远程IP */
             dds_process_discovery_packet(ctx, recv_buf, (size_t)recvd, &from_addr);
         }
 
@@ -2187,7 +2187,7 @@ int dds_write_data(DDSContext* ctx, const char* topic_name,
         memset(&dest, 0, sizeof(dest));
         dest.sin_family = AF_INET;
         dest.sin_port = htons((unsigned short)dp->user_traffic_port);
-        /* ZSFZS-F019: 使用SPDP发现阶段获得的远程IP地址替代硬编码127.0.0.x */
+/* 使用SPDP发现阶段获得的远程IP地址替代硬编码127.0.0.x */
         if (dp->remote_ip != 0) {
             dest.sin_addr.s_addr = dp->remote_ip;
         } else {
@@ -2370,7 +2370,7 @@ int dds_deserialize_rtps_data(const uint8_t* buffer, size_t buffer_size,
     memcpy(submsg->writer_id.prefix, ptr, DDS_GUID_PREFIX_LEN);
     ptr += DDS_GUID_PREFIX_LEN;
 
-    /* ZSFLYF-P2-015修复: 增强RTPS子消息解析。
+/* 增强RTPS子消息解析。
      * 不再简单线性扫描0x15标记，而是按RTPS规范逐个解析子消息头，
      * 正确处理INFO_TS(0x09)、INFO_SRC(0x0c)、INFO_DST(0x0e)、
      * HEARTBEAT(0x07)、ACKNACK(0x06)、GAP(0x08)、DATA(0x15)等标准子消息。

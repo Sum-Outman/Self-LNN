@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file safety_monitor.h
  * @brief AGI安全监控系统接口
  */
@@ -147,7 +147,7 @@ SafetyMonitor* safety_monitor_create(void);
  */
 void safety_monitor_free(SafetyMonitor* monitor);
 
-/* ========== ZSFQQ-DEEP-003: 主动熔断器(Circuit Breaker) ========== */
+/* ========== 主动熔断器(Circuit Breaker) ========== */
 int safety_circuit_breaker_report_failure(SafetyMonitor* monitor, int subsystem_id);
 int safety_circuit_breaker_report_success(SafetyMonitor* monitor, int subsystem_id);
 int safety_circuit_breaker_check_allowed(SafetyMonitor* monitor, int subsystem_id);

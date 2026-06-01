@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file pybullet_bridge.c
  * @brief SELF-LNN 与 PyBullet 的桥接实现
  *
@@ -195,7 +195,7 @@ static int pybullet_ping_process(PyBulletConnection* conn, int timeout_ms) {
         if (fgets(buf, sizeof(buf), conn->process_stdout)) {
             if (strstr(buf, "\"pong\"") || strstr(buf, "\"status\":\"ok\"")) return 1;
         }
-        /* ZSFLYF-P1-007修复: popen模式下使用管道EOF检测而非waitpid。
+/* popen模式下使用管道EOF检测而非waitpid。
          * popen返回FILE*不提供process_handle，Linux下process_handle为NULL导致waitpid无效。
          * 改用feof检测管道关闭来判断进程退出。 */
         if (conn->process_stdout) {

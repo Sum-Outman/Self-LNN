@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file swarm_intelligence.c
  * @brief 群体智能系统实现
  * 
@@ -242,7 +242,7 @@ static int swarm_check_convergence(Swarm* swarm);
 static void swarm_update_global_best(Swarm* swarm);
 static void swarm_generate_initial_positions(Swarm* swarm, float* positions);
 
-/* ZSFBUILD: 前向声明避免C2371重定义错误(swarm_result_free中调用swarm_state_free) */
+/* 前向声明避免C2371重定义错误(swarm_result_free中调用swarm_state_free) */
 void swarm_state_free(SwarmState* state);
 
 /* PSO算法函数 */
@@ -1614,7 +1614,7 @@ void swarm_state_free(SwarmState* state) {
     if (state == NULL) {
         return;
     }
-    /* ZSFBUILD: MSSwarmState实际字段只有best_position指针需要释放 */
+/* MSSwarmState实际字段只有best_position指针需要释放 */
     if (state->best_position != NULL) {
         safe_free((void**)&state->best_position);
     }

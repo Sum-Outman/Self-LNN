@@ -1,22 +1,22 @@
-/**
+﻿/**
  * @file evolution_engine.c
  * @brief 增强自我演化进化引擎完整实现
  */
 
-#define SELFLNN_CORE_INTERNAL  /* ZSFBUILD: 需要访问CfCCell内部结构体成员 */
-#define SELFLNN_IMPLEMENTATION /* ZSFBUILD: 需要访问CfCNetwork内部结构体成员 */
+#define SELFLNN_CORE_INTERNAL /* 需要访问CfCCell内部结构体成员 */
+#define SELFLNN_IMPLEMENTATION /* 需要访问CfCNetwork内部结构体成员 */
 
 #include "selflnn/evolution/evolution_engine.h"
 #include "selflnn/core/lnn.h"
-#include "selflnn/core/cfc.h"             /* ZSFWS-012: CfC Cell权重写入 */
-#include "selflnn/core/cfc_cell.h"        /* ZSFWS-012: CfCCell结构体 */
+#include "selflnn/core/cfc.h" /* CfC Cell权重写入 */
+#include "selflnn/core/cfc_cell.h" /* CfCCell结构体 */
 #include "selflnn/core/laplace.h"
 #include "selflnn/core/cma_es.h"          /* F-010/F-019: CMA-ES集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/platform.h"
-#include "selflnn/utils/secure_random.h"  /* ZSFQQ-Q031: 统一随机数生成 */
-#include "selflnn/concurrency/thread_pool.h"  /* ZSFQQ-Q032: 岛模型并行演化 */
+#include "selflnn/utils/secure_random.h" /* 统一随机数生成 */
+#include "selflnn/concurrency/thread_pool.h" /* 岛模型并行演化 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -64,23 +64,23 @@ static float cmaes_fitness_bridge(const float* x, size_t dim, void* user_data) {
     EvolutionEngine* engine = (EvolutionEngine*)user_data;
     if (!engine) return FLT_MAX; /* 引擎为空→最高代价 */
     if (!engine->fitness_func) {
-        /* ZSFABC修复: 适应度函数未注册时记录错误，返回最高代价防止CMA-ES错误收敛 */
+/* 适应度函数未注册时记录错误，返回最高代价防止CMA-ES错误收敛 */
         log_warning("[演化引擎] 适应度函数未注册，CMA-ES优化将使用最高代价");
         return FLT_MAX;
     }
     return engine->fitness_func(x, dim, engine->user_data);
 }
 
-/* ZSFQQ-Q031: 使用secure_random替代xorshift，统一随机数生成
+/* 使用secure_random替代xorshift，统一随机数生成
  * 保留rng参数兼容调用者，内部转发到secure_random */
 
 static float rand_float(unsigned int* state) {
-    (void)state;  /* ZSFQQ-Q031: rng参数不再使用，统一到secure_random */
+    (void)state; /* rng参数不再使用，统一到secure_random */
     return secure_random_float();
 }
 
 static float rand_gaussian(unsigned int* state, float mean, float stddev) {
-    (void)state;  /* ZSFQQ-Q031: rng参数不再使用，统一到secure_random */
+    (void)state; /* rng参数不再使用，统一到secure_random */
     float u1 = secure_random_float();
     float u2 = secure_random_float();
     if (u1 < 1e-10f) u1 = 1e-10f;
@@ -1017,7 +1017,7 @@ int evolution_step(EvolutionEngine* engine) {
     engine->stats.end_time = time(NULL);
     engine->stats.elapsed_seconds = difftime(engine->stats.end_time, engine->stats.start_time);
 
-    /* ZSFQQ-DEEP-004修复: 岛模型真正并行演化
+/* 岛模型真正并行演化
      * 原代码创建ThreadPool后仍在主线程串行循环处理，线程池未实际使用。
      * 修复: 为每个岛提交独立任务到线程池，实现真正的岛间并行演化。 */
     if (engine->island_count > 1 && engine->islands) {
@@ -1154,14 +1154,14 @@ static int evolution_island_migrate(EvolutionEngine* engine) {
     return 0;
 }
 
-/* ZSFQQ-DEEP-004: 岛模型并行演化任务数据 */
+/* 岛模型并行演化任务数据 */
 typedef struct {
     EvolutionPopulation* island;
     EvolutionEngine* engine;
     int island_index;
 } IslandTaskData;
 
-/* ZSFQQ-DEEP-004: 线程池任务：独立演化单个岛 */
+/* 线程池任务：独立演化单个岛 */
 static void evolve_island_task(void* arg) {
     IslandTaskData* data = (IslandTaskData*)arg;
     if (!data || !data->island || !data->engine) return;
@@ -1285,7 +1285,6 @@ int evolution_inject_elite(EvolutionEngine* engine, const float* chromosome, siz
         }
     }
 
-    /* ZSF-034修复: memcpy参数括号修正，先比较大小再乘sizeof */
     memcpy(engine->population.individuals[worst_idx].chromosome, chromosome,
            (chrom_size < size ? chrom_size : size) * sizeof(float));
     evaluate_individual(engine, &engine->population.individuals[worst_idx]);
@@ -1409,17 +1408,17 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
     orig_norm = sqrt(orig_norm);
     new_norm = sqrt(new_norm);
 
-    /* ZSFWS-012: 写入前记录日志 */
+/* 写入前记录日志 */
     log_info("[演化验证] 开始写入LNN权重: 染色体大小=%zu, LNN参数数=%zu, 适应度=%.6f",
              best->chromosome_size, total_params, best->fitness);
 
-    /* ZSFX-DEEP-R6-003: 获取LNN写锁，防止与HTTP推理/在线学习/训练管线产生竞态 */
+/* 获取LNN写锁，防止与HTTP推理/在线学习/训练管线产生竞态 */
     mutex_lock(&lnn->lock);
 
-    /* ZSFWS-012 Step1: 写入规范参数块（weight_matrix + bias_vector连续块） */
+/* Step1: 写入规范参数块（weight_matrix + bias_vector连续块） */
     memcpy(params, best->chromosome, copy_count * sizeof(float));
 
-    /* ZSFWS-012 Step2: 深度写入每层CfC Cell的独立参数 */
+/* Step2: 深度写入每层CfC Cell的独立参数 */
     CfCNetwork* cfc_net = lnn_get_cfc_network(lnn);
     if (cfc_net && cfc_net->layers) {
         size_t chrom_offset = copy_count;
@@ -1529,7 +1528,7 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
                  num_layers, cell_params_written, chrom_offset, best->chromosome_size);
     }
 
-    /* ZSFX-DEEP-R6-003: 释放LNN写锁 */
+/* 释放LNN写锁 */
     mutex_unlock(&lnn->lock);
 
     /* K-013: 记录权重变更日志 */
@@ -1539,7 +1538,7 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
              copy_count, total_params, l2_diff, orig_norm, new_norm,
              rel_change, best->fitness, engine->population.generation);
 
-    /* ZSFWS-012: 写入后校验 —— 随机抽查5个规范参数位置确认写入成功 */
+/* 写入后校验 —— 随机抽查5个规范参数位置确认写入成功 */
     int mismatches = 0;
     for (int chk = 0; chk < 5 && copy_count > 0; chk++) {
         size_t idx = (size_t)((unsigned int)(chk * 2654435761ULL) % copy_count);
@@ -1553,7 +1552,7 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
         log_info("[演化验证] 随机抽查5处全部写入一致，权重变更确认无误");
     }
 
-    /* ZSFWS-012: 写入后校验 Cell级参数 */
+/* 写入后校验 Cell级参数 */
     if (cfc_net && cfc_net->layers && cfc_net->config.num_layers > 0) {
         CfCCell* cell0 = cfc_net->layers[0];
         if (cell0 && cell0->input_gate_weights && cell0->config.hidden_size > 0) {

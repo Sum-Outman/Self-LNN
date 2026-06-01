@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file ros_node.c
  * @brief 真实ROS节点实现 —— 基于rosbridge WebSocket协议的ROS节点通信
  *
@@ -30,7 +30,7 @@ struct RosNode {
     struct {
         char topic[ROS_MAX_TOPIC_NAME];
         char type[ROS_MAX_TYPE_NAME];
-        char md5sum[64];      /* ZSFX-FIX: ROS消息MD5校验和 */
+        char md5sum[64]; /* ROS消息MD5校验和 */
         int active;
     } publishers[ROS_NODE_MAX_PUBLISHERS];
     int num_publishers;
@@ -55,7 +55,7 @@ struct RosNode {
     int num_services;
 
     char master_uri[512];
-    char bridge_host_buf[256];  /* ZSFAB-MS: ros_bridge_create需要持久化指针，使用结构体成员而非栈变量 */
+    char bridge_host_buf[256]; /* ros_bridge_create需要持久化指针，使用结构体成员而非栈变量 */
     char last_error[256];
 };
 
@@ -269,7 +269,7 @@ int ros_node_publish(RosNode* node, const char* topic,
     if (!node || !topic || !msg || msg_size == 0) return -1;
 
     if (node->bridge && node->connected) {
-        /* ZSFWXJ-FIX006修复: 构建符合rosbridge协议的JSON,
+/* 构建符合rosbridge协议的JSON,
          * msg字段内容直接按字节数组构建，不再嵌套额外"op"层 */
         char json_buf[8192];
         size_t json_len = 0;

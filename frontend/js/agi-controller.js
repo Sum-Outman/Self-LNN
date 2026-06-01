@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 控制器
  * 通过AGI对话控制计算机和设备
  * 提供系统命令执行、文件操作、进程管理、机器设备控制接口
@@ -327,7 +327,7 @@ class AGIController {
         }
     }
 
-    /* ZSFAI-M08: API端点前缀剥离统一由api-service.js处理。
+/* API端点前缀剥离统一由api-service.js处理。
      * _apiPost/_apiGet 直接传递端点给 SelfLnnApi.request()，
      * api-service.js.request() 负责自动剥离 /api/ 前缀并拼接 baseURL。
      * 此处不再重复剥离，避免冗余逻辑。 */

@@ -1,9 +1,9 @@
-{
+﻿{
   "format_version": "1.0.0",
   "version": 3,
   "created": "2025-06-01T00:00:00Z",
   "updated": "2026-06-01T00:00:00Z",
-  "description": "SELF-LNN 种子知识库 - 基础常识知识预置（ZSFEEE-FIX-008: 从knowledge.c硬编码迁移至JSON配置文件，共281条三元组）",
+  "description": "SELF-LNN 种子知识库 - 基础常识知识预置（从knowledge.c硬编码迁移至JSON配置文件，共281条三元组）",
   "source": "SEED",
   "entries": [
     {"s":"1","p":"是","o":"自然数","t":"FACT","c":"HIGH","w":1.0},

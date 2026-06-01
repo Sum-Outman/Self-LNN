@@ -1,4 +1,4 @@
-#include "selflnn/robot/physics_engine.h"
+﻿#include "selflnn/robot/physics_engine.h"
 #include <string.h>
 #include "selflnn/utils/math_utils.h"
 #include <math.h>
@@ -111,7 +111,7 @@ static void pe_solve_joint_fixed(PEJoint* j, PEBody* ba, PEBody* bb, float dt);
 static void pe_solve_joint_spring(PEJoint* j, PEBody* ba, PEBody* bb, float dt);
 
 static void pe_body_aabb(const PEBody* body, float* min_out, float* max_out) {
-    /* ZSFWS-F002修复: 使用刚体自身的bounding_radius而非硬编码0.5m */
+/* 使用刚体自身的bounding_radius而非硬编码0.5m */
     float radius = body->bounding_radius > 0.0f ? body->bounding_radius : 0.5f;
     for (int i = 0; i < 3; i++) {
         min_out[i] = body->pos[i] - radius;
@@ -277,7 +277,7 @@ int pe_body_add(PEWorld* world, const float* pos, const float* quat, float mass,
         b->props.inv_inertia[2] = 0.0f;
     } else {
         b->props.inv_mass = 1.0f / (mass + PE_EPS);
-        /* ZSFWS-F002修复: 使用刚体bounding_radius计算惯性张量，替代硬编码0.5m球体 */
+/* 使用刚体bounding_radius计算惯性张量，替代硬编码0.5m球体 */
         float radius = b->bounding_radius > 0.0f ? b->bounding_radius : 0.5f;
         float ixx = 0.4f * mass * radius * radius;
         b->props.inertia[0] = ixx;
@@ -385,7 +385,7 @@ int pe_joint_get_angle(const PEWorld* world, int joint_id, float* angle) {
 }
 
 void pe_collision_aabb(const PEBody* body, float* aabb_min, float* aabb_max) {
-    /* ZSFWS-F002修复: 使用刚体自身的bounding_radius替代硬编码0.5f */
+/* 使用刚体自身的bounding_radius替代硬编码0.5f */
     float extent = body->bounding_radius > 0.0f ? body->bounding_radius : 0.5f;
     aabb_min[0] = body->pos[0] - extent;
     aabb_min[1] = body->pos[1] - extent;
@@ -734,7 +734,7 @@ static int pe_gjk_penetration(const PEBody* body_a, const PEBody* body_b, float*
     dir[0] = 1.0f; dir[1] = 0.0f; dir[2] = 0.0f;
     int max_iter = 50;
 
-    /* ZSFWS-F002修复: 从刚体读取实际碰撞几何半径，回退0.5f */
+/* 从刚体读取实际碰撞几何半径，回退0.5f */
     float radius_a = body_a->bounding_radius > 0.0f ? body_a->bounding_radius : 0.5f;
     float radius_b = body_b->bounding_radius > 0.0f ? body_b->bounding_radius : 0.5f;
     for (int iter = 0; iter < max_iter; iter++) {
@@ -807,9 +807,9 @@ static int pe_gjk_penetration(const PEBody* body_a, const PEBody* body_b, float*
         if (sep_len > PE_EPS) { pe_vec3_scale(sep, 1.0f/sep_len, normal); }
         else { normal[1] = 1.0f; }
     }
-    /* ZSFWS-F001修复: 穿透深度使用pe_vec3_dist（欧氏距离）而非pe_vec3_dist_sq（距离平方）。
+/* 穿透深度使用pe_vec3_dist（欧氏距离）而非pe_vec3_dist_sq（距离平方）。
      * 原代码将线性距离与距离平方混用，导致穿透深度量纲错误。
-     * ZSFWS-F002修复: 使用两个刚体各自的实际碰撞几何半径之和 */
+ *修复: 使用两个刚体各自的实际碰撞几何半径之和 */
     if (penetration) *penetration = (radius_a + radius_b) - pe_vec3_dist(body_a->pos, body_b->pos);
     if (penetration && *penetration < 0) *penetration = 0.0f;
     if (point) {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN 主系统实现
  * 
  * K-003: 角色定义 —— selflnn.c 是整个系统的【系统级入口层】
@@ -19,7 +19,7 @@
 /* C-003修复：定义SELFLNN_IMPLEMENTATION以访问内部结构体（LNN内部字段等）
  * 系统级入口需要直接访问LNN内部结构以满足子系统管理和模块注册需求。 */
 #define SELFLNN_IMPLEMENTATION
-#define SELFLNN_CORE_INTERNAL   /* ZSFZS-F034: 访问CfCCell完整结构体(cell->use_adaptive_tau等) */
+#define SELFLNN_CORE_INTERNAL /* 访问CfCCell完整结构体(cell->use_adaptive_tau等) */
 
 #include "selflnn/selflnn.h"
 #include "selflnn/core/common.h"
@@ -46,7 +46,7 @@
 #include "selflnn/cognition/self_cognition.h"
 #include "selflnn/cognition/metacognition.h"
 #include "selflnn/robot/hardware_detector.h"
-#include "selflnn/robot/robot.h"              /* ZSFEEE-FIX-DEEP-006: 机器人模块注册 */
+#include "selflnn/robot/robot.h" /* 机器人模块注册 */
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/multimodal/dialogue.h"
@@ -57,7 +57,7 @@
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/agi/capability_switch.h"
 #include "selflnn/learning/multi_agent.h"  /* H-015集成: 多智能体协作框架 */
-/* ZSFWS-M-001: 10个模块统一集成到selflnn生命周期管理 */
+/* 10个模块统一集成到selflnn生命周期管理 */
 #include "selflnn/evolution/neural_architecture_search.h"
 #include "selflnn/core/laplace_unified.h"
 #include "selflnn/multimodal/audio.h"                       /* 音频采集(提供audio_capture_*函数声明) */
@@ -66,10 +66,10 @@
 #include "selflnn/safety/audit_logger.h"
 #include "selflnn/safety/content_filter.h"
 #include "selflnn/safety/security_monitor_deep.h"
-/* ZSFQQ-ORP-002: 集成教学闭环和多模态教学系统 */
+/* 集成教学闭环和多模态教学系统 */
 #include "selflnn/multimodal/teaching_loop.h"
 #include "selflnn/multimodal/multimodal_teaching.h"
-#include "selflnn/multimodal/dialogue_memory.h"  /* ZSFZS-F037: 对话记忆系统集成 */
+#include "selflnn/multimodal/dialogue_memory.h" /* 对话记忆系统集成 */
 #include "selflnn/distributed/load_balancer.h"
 #include "selflnn/training/training_pipeline.h"
 #include <string.h>
@@ -81,7 +81,7 @@
 #endif
 
 /* ================================================================
- * ZSFBUILD: SYSTEM_LOCK/SYSTEM_UNLOCK宏必须定义在首次使用(line 184)之前
+ *: SYSTEM_LOCK/SYSTEM_UNLOCK宏必须定义在首次使用(line 184)之前
  * 原定义在line 249-283，MSVC预处理器自上而下扫描，导致line 184处宏未展开
  * 变成未定义函数调用 → 链接器报错LNK2019
  * ================================================================ */
@@ -183,7 +183,7 @@ typedef enum {
     MODULE_ID_AUTO_LEARNING = 21,
     MODULE_ID_KNOWLEDGE_INFERENCE = 22,
     MODULE_ID_MULTI_AGENT = 23,  /* H-015: 多智能体协作框架 */
-    MODULE_ID_DATA_PIPELINE = 24, /* ZSFA-FIX-P0-001: 数据采集管线独立模块ID */
+    MODULE_ID_DATA_PIPELINE = 24, /* 数据采集管线独立模块ID */
     MODULE_COUNT
 } ModuleId;
 
@@ -236,8 +236,8 @@ static struct {
     void* data_pipeline;
     void* speech_recognizer;
     void* multi_agent_system;   /* H-015: 多智能体协作系统 */
-    void* robot_instance;       /* ZSFEEE-FIX-DEEP-006: 机器人模块实例（MODULE_ID_ROBOT=20） */
-    /* ZSFWS-M-001: 新增10个模块统一生命周期管理 */
+    void* robot_instance; /* 机器人模块实例（MODULE_ID_ROBOT=20） */
+/* 新增10个模块统一生命周期管理 */
     void* nas_system;               /* 神经架构搜索系统 */
     void* laplace_unified;          /* 拉普拉斯增强系统 */
     void* audio_capture;            /* 音频采集管道 */
@@ -248,11 +248,11 @@ static struct {
     void* load_balancer;            /* 负载均衡器 */
     void* training_pipeline;        /* 训练管线 */
     void* security_monitor_deep;    /* 深度安全监控 */
-    void* teaching_loop_system;     /* ZSFQQ-ORP-002: 教学闭环系统 */
-    void* multimodal_teaching;      /* ZSFQQ-ORP-002: 多模态教学系统 */
-    void* dialogue_memory_manager;  /* ZSFZS-F037: 对话记忆管理器 */
-    int dcpipeline_immediate_check_requested;   /* ZSFWS-038: 事件驱动即时自检标志 */
-    int knowledge_refresh_needed;               /* ZSFZS-F026: 知识库更新后触发LNN嵌入重编码标志 */
+    void* teaching_loop_system; /* 教学闭环系统 */
+    void* multimodal_teaching; /* 多模态教学系统 */
+    void* dialogue_memory_manager; /* 对话记忆管理器 */
+    int dcpipeline_immediate_check_requested; /* 事件驱动即时自检标志 */
+    int knowledge_refresh_needed; /* 知识库更新后触发LNN嵌入重编码标志 */
     int last_error;
 } g_system_state = {0};
 
@@ -424,7 +424,7 @@ int selflnn_init(const SystemConfig* config)
     g_system_state.is_initialized = 1;
     g_system_state.last_error = SELFLNN_SUCCESS;
     SYSTEM_UNLOCK();
-    /* ZSFWS修复: S4-002 锁释放后的模块注册是安全的。
+/* S4-002 锁释放后的模块注册是安全的。
      * g_modules[]在selflnn_init()过程中是单线程独占的——
      * is_initialized尚未设为1，其他线程无法通过selflnn_get_*访问。
      * register_module只是设置g_modules[]的标志位和指针，不涉及动态内存分配。 */
@@ -453,7 +453,7 @@ int selflnn_init(const SystemConfig* config)
     if (g_system_state.auto_learning) selflnn_register_module(MODULE_ID_AUTO_LEARNING, g_system_state.auto_learning, 1);
     if (g_system_state.knowledge_inference) selflnn_register_module(MODULE_ID_KNOWLEDGE_INFERENCE, g_system_state.knowledge_inference, 1);
     
-    /* ZSFEEE-FIX-DEEP-006: 注册机器人模块（MODULE_ID_ROBOT=20）
+/* 注册机器人模块（MODULE_ID_ROBOT=20）
      * 如果机器人实例为NULL（子系统不可用/未实现），注册为空指针标记"未实现"。
      * is_critical=1 确保模块计入MODULE_COUNT，消除计数不匹配问题。 */
     selflnn_register_module(MODULE_ID_ROBOT, g_system_state.robot_instance, 1);
@@ -535,7 +535,7 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     channels = g_system_state.config.multimodal_channels;
     
     /* 统计已初始化的子系统数量，用于计算初始置信度
-     * ZSFWS-S4修复: 使用编译时计算的子系统期望总数而非硬编码分母20。
+ *修复: 使用编译时计算的子系统期望总数而非硬编码分母20。
      * 当新增或删除子系统统计行时，init_max由编译器自动确定。 */
 #if defined(__COUNTER__)
     (void)0; /* 利用下一行开始的前计数确保c0为第一个下标 */
@@ -1105,7 +1105,7 @@ const char* selflnn_get_error_message(int error_code)
     return lookup_error_message(error_code);
 }
 
-/* ZSFWS-027/S4-001/S4-002修复: 并发安全模型说明
+/*/S4-001/S4-002修复: 并发安全模型说明
  * 
  * 系统锁(SYSTEM_LOCK/SYSTEM_UNLOCK)保护的是初始化/销毁的互斥，
  * 确保init和shutdown不会并发执行。子系统访问器函数（下面的getter们）
@@ -1205,7 +1205,7 @@ void* selflnn_get_data_pipeline(void) {
     return g_system_state.data_pipeline;
 }
 
-/* ZSFWS-038: 事件驱动即时自检 —— 当检测到硬件变化时由调用方触发 */
+/* 事件驱动即时自检 —— 当检测到硬件变化时由调用方触发 */
 void dcpipeline_request_immediate_check(void) {
     g_system_state.dcpipeline_immediate_check_requested = 1;
 }
@@ -1240,7 +1240,7 @@ void* selflnn_get_multisystem_control(void) {
     return g_system_state.multisystem_controller;
 }
 
-/* ZSFWS-H-001: 自我编程引擎和分布式上下文访问器 - 消除main.c重复创建 */
+/* 自我编程引擎和分布式上下文访问器 - 消除main.c重复创建 */
 void* selflnn_get_self_programming_engine(void) {
     return g_system_state.programming_engine;
 }
@@ -1249,7 +1249,7 @@ void* selflnn_get_distributed_context(void) {
     return g_system_state.distributed_training;
 }
 
-/* ZSFWS-M-001: 10个新增模块访问器 */
+/* 10个新增模块访问器 */
 void* selflnn_get_nas_system(void) { return g_system_state.nas_system; }
 void* selflnn_get_laplace_unified(void) { return g_system_state.laplace_unified; }
 void* selflnn_get_audio_capture(void) { return g_system_state.audio_capture; }
@@ -1259,23 +1259,23 @@ void* selflnn_get_audit_logger(void) { return g_system_state.audit_logger; }
 void* selflnn_get_content_filter(void) { return g_system_state.content_filter; }
 void* selflnn_get_load_balancer(void) { return g_system_state.load_balancer; }
 void* selflnn_get_training_pipeline(void) { return g_system_state.training_pipeline; }
-/* ZSFUSA-P0-004修复: 训练管线注册接口。
+/* 训练管线注册接口。
  * main.c中创建的TrainingPipeline需要通过此接口注册到全局状态，
  * 确保其他模块(如AGI认知循环)通过selflnn_get_training_pipeline()能正确获取。
  * 该接口与自检函数的原子性由caller保证(单线程初始化阶段调用)。 */
 void selflnn_set_training_pipeline(void* pipeline) {
     g_system_state.training_pipeline = pipeline;
 }
-/* ZSFUSA-P1-004修复: 获取LNN配置的状态维度，替代硬编码128。
+/* 获取LNN配置的状态维度，替代硬编码128。
  * 从selflnn的内部配置中读取实际维度，确保内存分配与LNN匹配。 */
 size_t selflnn_get_config_state_dimension(void) {
     return (size_t)g_system_state.config.state_dimension;
 }
-/* ZSFUSA-P3-001修复: 设置拉普拉斯频域指标。
+/* 设置拉普拉斯频域指标。
  * 包装network_state_set_laplace_metrics，将频域分析结果
  * (主导频率、频谱带宽、最大幅度)写入全局网络状态。
  * 这些指标供后续拉普拉斯-CfC实时调制使用。
- * ZSFUSA-V2修复: 使用selflnn_get_shared_lnn()获取LNN实例，
+ *修复: 使用selflnn_get_shared_lnn()获取LNN实例，
  * 通过LNN→state访问NetworkState，替代不存在的extern g_network_state。 */
 void selflnn_set_laplace_metrics(const float* metrics, int count) {
     if (!metrics || count < 3) return;
@@ -1288,20 +1288,20 @@ void selflnn_set_laplace_metrics(const float* metrics, int count) {
         metrics[0] * 20.0f,/* recommended_cutoff: 主导频率的20倍作为截止 */
         metrics[1]);       /* frequency_bandwidth: 频谱带宽 */
 }
-void* selflnn_get_security_monitor_deep(void) { return g_system_state.security_monitor_deep; }  /* ZSFX-DEEP-004: 深度安全监控公共访问器 */
+void* selflnn_get_security_monitor_deep(void) { return g_system_state.security_monitor_deep; } /* 深度安全监控公共访问器 */
 
-/* ZSFQQ-ORP-002: 教学闭环系统公共访问器 */
+/* 教学闭环系统公共访问器 */
 void* selflnn_get_teaching_loop(void) { return g_system_state.teaching_loop_system; }
 
-/* ZSFZS-F037: 对话记忆管理器公共访问器 */
+/* 对话记忆管理器公共访问器 */
 void* selflnn_get_dialogue_memory(void) { return g_system_state.dialogue_memory_manager; }
 
-/* ZSFQQ-ORP-002: 多模态教学系统公共访问器 */
+/* 多模态教学系统公共访问器 */
 void* selflnn_get_multimodal_teaching(void) { return g_system_state.multimodal_teaching; }
-void* selflnn_get_knowledge_graph(void) { return g_system_state.knowledge_graph; }            /* ZSFX-DEEP-005: 知识图谱公共访问器 */
-void* selflnn_get_gpu_context(void) { return g_system_state.gpu_context; }                    /* ZSFX-DEEP-005: GPU上下文公共访问器 */
+void* selflnn_get_knowledge_graph(void) { return g_system_state.knowledge_graph; } /* 知识图谱公共访问器 */
+void* selflnn_get_gpu_context(void) { return g_system_state.gpu_context; } /* GPU上下文公共访问器 */
 
-/* ZSF-001修复: AGI后台任务所需的状态访问器函数
+/*修复: AGI后台任务所需的状态访问器函数
  * 这些函数为真实实现，提供LNN状态读取和知识库访问。
  * MSVC平台使用reasoning_internal.c作为推理引擎实现。 */
 
@@ -1309,7 +1309,7 @@ void* selflnn_get_knowledge_base(void) {
     return g_system_state.knowledge_base;
 }
 
-/* ZSFZS-F026: 知识库更新事件 → LNN刷新触发机制
+/* 知识库更新事件 → LNN刷新触发机制
  * 由知识库回调调用，设置标志位通知AGI后台循环进行知识嵌入重编码。
  * 不在此函数中直接执行LNN重新嵌入，避免在写锁内进行耗时的LNN计算。
  * 实际的知识嵌入更新由 selflnn_check_and_reset_knowledge_refresh() 在
@@ -1332,7 +1332,7 @@ void* selflnn_get_reasoning_engine(void) {
 }
 
 /* ============================================================================
- * ZSFWS-026: 知识推理→LNN连接通道
+ *: 知识推理→LNN连接通道
  *
  * 数据流向：
  *   知识库(KnowledgeBase) → 知识推理引擎(KnowledgeInferenceEngine)
@@ -1535,7 +1535,7 @@ static int initialize_subsystems(const SystemConfig* config)
     
     log_info("初始化子系统...");
     
-    /* ZSFUSA-A03: 1. 初始化内存管理器（关键子系统——记忆存储核心） */
+/* 1. 初始化内存管理器（关键子系统——记忆存储核心） */
     MemoryManagerConfig memory_config = {
         .short_term_capacity = 1000,
         .long_term_capacity = 10000,
@@ -1551,7 +1551,7 @@ static int initialize_subsystems(const SystemConfig* config)
         goto cleanup;
     }
     
-    /* ZSFUSA-A03: 2. 初始化知识图谱（关键子系统——结构化知识基础） */
+/* 2. 初始化知识图谱（关键子系统——结构化知识基础） */
     g_system_state.knowledge_graph = knowledge_graph_create(1000, 5000);
     if (!g_system_state.knowledge_graph) {
         log_error("[SELF-LNN] 关键子系统初始化失败：知识图谱创建失败，正在回滚...");
@@ -1559,7 +1559,7 @@ static int initialize_subsystems(const SystemConfig* config)
         goto cleanup;
     }
     
-    /* ZSF-NEW-007修复: 知识库初始化（关键子系统）
+/*修复: 知识库初始化（关键子系统）
      * 使用 knowledge_base_create_with_preset() 自动加载:
      *   - 281条内置种子知识（物理常数/数学规则/逻辑公理/常识等）
      *   - config/seed_knowledge.json 外部知识文件
@@ -1571,7 +1571,6 @@ static int initialize_subsystems(const SystemConfig* config)
         goto cleanup;
     }
     
-    /* ZSF-NEW-007: 补充24条基础常识种子（作为保底，与预设281条去重） */
 #ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
     {
         long now = (long)time(NULL);
@@ -1616,7 +1615,7 @@ static int initialize_subsystems(const SystemConfig* config)
     log_info("知识库种子数据已跳过（SELFLNN_SKIP_SEED_KNOWLEDGE已定义），知识库从零开始学习");
 #endif
     
-    /* ZSFUSA-A03: 3. 初始化推理引擎（关键子系统——逻辑推理核心） */
+/* 3. 初始化推理引擎（关键子系统——逻辑推理核心） */
     ReasoningConfig reasoning_config = {
         .default_mode = REASONING_DEDUCTIVE,
         .max_iterations = 100,
@@ -1655,7 +1654,7 @@ static int initialize_subsystems(const SystemConfig* config)
             (KnowledgeBase*)g_system_state.knowledge_base);
     }
     
-    /* ZSFWS-026: 初始化知识推理增强引擎
+/* 初始化知识推理增强引擎
      * 知识推理引擎(KnowledgeInferenceEngine)负责图推理、归纳推理、贝叶斯追踪、
      * 冲突消解等高级推理任务。推理结果通过selflnn_consume_knowledge_inference()
      * 映射为LNN状态扰动，形成完整的"知识推理→LNN→决策"数据通道。 */
@@ -1670,7 +1669,7 @@ static int initialize_subsystems(const SystemConfig* config)
         log_info("知识推理增强引擎初始化成功（已绑定知识库）");
     }
     
-    /* ZSFUSA-A03: 4. 初始化统一信号处理器（关键子系统——多模态信号统一入口） */
+/* 4. 初始化统一信号处理器（关键子系统——多模态信号统一入口） */
     /* Z5-001: multimodal_channels配置传播 —— 覆盖默认多模态通道数 */
     UnifiedSignalProcessorConfig processor_config = unified_signal_processor_get_default_config();
     if (config->multimodal_channels > 0) {
@@ -1749,7 +1748,7 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
     
-    /* ZSFUSA-A03: 5. 初始化液态神经网络（LNN核心模型）
+/* 5. 初始化液态神经网络（LNN核心模型）
      * LNN是整个AGI的唯一神经网络模型，所有模态共享同一连续动态系统。
      * 此为最关键的子系统，失败则AGI完全无法运行，必须回滚清退。 */
     if (config->state_dimension > 0) {
@@ -1900,7 +1899,6 @@ static int initialize_subsystems(const SystemConfig* config)
     g_system_state.product_design_engine = product_design_engine_create();
     if (g_system_state.product_design_engine) {
         log_info("产品设计引擎初始化成功");
-        /* ZSF-NEW-008: 加载55个工业设计种子案例 */
         int seeds_loaded = product_design_load_seed_cases(
             (ProductDesignEngine*)g_system_state.product_design_engine);
         if (seeds_loaded > 0) {
@@ -1954,7 +1952,7 @@ static int initialize_subsystems(const SystemConfig* config)
                                          g_system_state.lnn_instance);
             }
             
-            /* ZSFZS-F037: 集成对话记忆管理器到对话系统 */
+/* 集成对话记忆管理器到对话系统 */
             g_system_state.dialogue_memory_manager = dialogue_memory_create();
             if (g_system_state.dialogue_memory_manager) {
                 log_info("对话记忆管理器初始化成功（上下文字段/主题检测/引用解析/会话管理）");
@@ -1966,7 +1964,7 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
     
-    /* ZSFWS-H-002: 在selflnn中创建语音识别器，消除main.c独立创建 */
+/* 在selflnn中创建语音识别器，消除main.c独立创建 */
     {
         g_system_state.speech_recognizer = speech_recognizer_create(NULL);  /* R15-001: 传递默认配置 */
         if (g_system_state.speech_recognizer) {
@@ -2160,7 +2158,7 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
 
-    /* ZSFEEE-FIX-DEEP-006: 初始化机器人控制模块（MODULE_ID_ROBOT=20）
+/* 初始化机器人控制模块（MODULE_ID_ROBOT=20）
      * 机器人子系统负责多机器人控制、运动规划、机械臂操作等硬件交互。
      * 如果robot_create失败或机器人子系统不可用，实例指针保留为NULL标记"未实现"，
      * 确保MODULE_COUNT与实际模块计数一致（后续注册时检查非NULL才注册）。 */
@@ -2208,7 +2206,7 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
 
-    /* ZSFWS-M-001: 统一初始化10个此前在main.c中分散管理的模块 */
+/* 统一初始化10个此前在main.c中分散管理的模块 */
     /* NAS神经架构搜索 */
     {
         NASConfig nas_cfg;
@@ -2301,7 +2299,7 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
 
-    /* ZSFQQ-ORP-002: 教学闭环系统集成 */
+/* 教学闭环系统集成 */
     {
         g_system_state.teaching_loop_system = (void*)teaching_loop_create();
         if (g_system_state.teaching_loop_system) {
@@ -2311,7 +2309,7 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
 
-    /* ZSFQQ-ORP-002: 多模态教学系统集成 */
+/* 多模态教学系统集成 */
     {
         TeachFusionConfig tfc;
         memset(&tfc, 0, sizeof(tfc));
@@ -2454,7 +2452,7 @@ static void shutdown_subsystems(void)
         dialogue_processor_free((DialogueProcessor*)g_system_state.dialogue_processor);
         g_system_state.dialogue_processor = NULL;
     }
-    /* ZSFEEE-FIX-DEEP-005: P0修复 - 销毁对话记忆管理器，防止内存泄漏。
+/* P0修复 - 销毁对话记忆管理器，防止内存泄漏。
      * 对话记忆管理器在初始化时由dialogue_memory_create()创建(L1951)，
      * 此前shutdown中遗漏释放，导致内存泄漏。 */
     if (g_system_state.dialogue_memory_manager) {
@@ -2492,7 +2490,7 @@ static void shutdown_subsystems(void)
         g_system_state.multi_agent_system = NULL;
     }
 
-    /* ZSFEEE-FIX-DEEP-006: 销毁机器人控制模块（MODULE_ID_ROBOT=20）
+/* 销毁机器人控制模块（MODULE_ID_ROBOT=20）
      * 如果机器人实例为NULL（未实现/不可用），跳过销毁。 */
     if (g_system_state.robot_instance) {
         robot_free((Robot*)g_system_state.robot_instance);
@@ -2517,7 +2515,7 @@ static void shutdown_subsystems(void)
         g_system_state.speech_recognizer = NULL;
     }
 
-    /* ZSFWS-M-001: 销毁10个新增模块 */
+/* 销毁10个新增模块 */
     if (g_system_state.nas_system) { nas_system_free((NASSystem*)g_system_state.nas_system); g_system_state.nas_system = NULL; }
     if (g_system_state.laplace_unified) { laplace_analyzer_free((LaplaceAnalyzer*)g_system_state.laplace_unified); g_system_state.laplace_unified = NULL; }
     if (g_system_state.audio_capture) { audio_capture_free(g_system_state.audio_capture); g_system_state.audio_capture = NULL; }
@@ -4063,7 +4061,7 @@ SELFLNN_API int selflnn_checkpoints_auto_load(void)
     return 0;
 }
 
-/* ZSFQQ-P2-001: 引导多模态模块训练状态
+/* 引导多模态模块训练状态
  * 在检查点加载或引导训练完成后调用，标记所有已初始化的模态模块为"已训练"。
  * 解决所有模块默认 is_trained=0 导致首次启动无法产生有意义输出的问题。
  * 调用时机：main.c 中，selflnn_checkpoints_auto_load() 或引导训练完成后。 */
@@ -4105,7 +4103,7 @@ SELFLNN_API void selflnn_bootstrap_trained_modules(void) {
     printf("  引导训练状态：已激活 %d 个多模态模块（语音识别/语音合成/对话生成/信号处理）\n", count);
 }
 
-/* ZSFX-DEEP-R5-003: 自包含检查点保存接口
+/* 自包含检查点保存接口
  * 将当前共享LNN完整序列化到指定文件路径 */
 SELFLNN_API int selflnn_save_checkpoint(const char* filepath) {
     if (!g_system_state.is_initialized || !filepath) return -1;
@@ -4135,7 +4133,7 @@ SELFLNN_API void selflnn_module_init(void)
     g_system_state.config.power_mode = POWER_MODE_BALANCED;
     g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
     g_system_state.config.model_path = NULL;
-    /* ZSFBUILD: selflnn_module_init(void)无config参数，使用默认均衡模式 */
+/* selflnn_module_init(void)无config参数，使用默认均衡模式 */
     g_system_state.config.power_mode = POWER_MODE_BALANCED;
     log_info("功率模式已配置: %d", g_system_state.config.power_mode);
     g_system_state.start_time = get_current_time();

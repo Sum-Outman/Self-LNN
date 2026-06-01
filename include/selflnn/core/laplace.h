@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file laplace.h
  * @brief 拉普拉斯变换增强系统
  * 
@@ -189,7 +189,7 @@ int laplace_analyzer_set_config(LaplaceAnalyzer* analyzer, const LaplaceConfig* 
 void laplace_analyzer_reset(LaplaceAnalyzer* analyzer);
 
 /* ================================================================
- * ZSFUSA-P3补: 极点分析和稳定性裕度查询API
+ *补: 极点分析和稳定性裕度查询API
  * 这些函数访问缓存的StabilityAnalysis结果(last_analysis)，
  * 为laplace_unified_health_check提供真实诊断数据。
  * ================================================================ */
@@ -563,10 +563,10 @@ int laplace_design_pid(const float* numerator, const float* denominator,
 int laplace_check_stability_fast(const float* denominator, size_t den_order,
                                   int* is_stable, float* stability_margin);
 
-/* ZSFUSA: 创建默认拉普拉斯分析器 */
+/* 创建默认拉普拉斯分析器 */
 void* lnn_laplace_create_default_analyzer(void);
 
-/* ZSFUSA: 获取拉普拉斯频谱 */
+/* 获取拉普拉斯频谱 */
 int laplace_unified_get_spectrum(void* analyzer, float* spectrum, size_t size);
 
 /* H-001修复: 获取缓存的传递函数系数（只读访问）

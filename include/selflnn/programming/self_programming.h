@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file self_programming.h
  * @brief 自我编程能力接口
  * 
@@ -265,7 +265,7 @@ CompilationResult verify_code_compilation(SelfProgrammingEngine* engine,
  * 
  * 当 verify_code_compilation 返回失败时，此函数将错误信息注入引擎的
  * 错误历史记录，使后续代码生成能避开已知的编译错误模式。
- * ZSFUSA-P2-003修复: 闭合编译→生成反馈循环。
+ *修复: 闭合编译→生成反馈循环。
  * 
  * @param engine 引擎句柄
  * @param source_code 编译失败的源代码
@@ -412,7 +412,7 @@ typedef struct {
 } CodeSpecification;
 
 /**
- * @brief 生成C语言代码（ZSFBUILD修复：移到CodeSpecification定义之后）
+ * @brief 生成C语言代码（移到CodeSpecification定义之后）
  * 
  * 从代码规格说明生成完整的C语言函数实现。
  * 

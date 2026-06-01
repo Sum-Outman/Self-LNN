@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file mixed_precision.h
  * @brief 混合精度训练支持（FP16/FP32）
  * 
@@ -156,7 +156,7 @@ typedef struct {
     int has_int4_tensor_cores;         /**< INT4 Tensor Cores支持（NVIDIA cc>=8.0） */
     int max_fp16_flops_per_second;     /**< FP16峰值TFLOPS（0表示未知） */
     float memory_bandwidth_gbps;       /**< 内存带宽GB/s（0表示未知） */
-    int memory_bandwidth_estimated;   /* ZSFWS-P2-003: 标注带宽是否为启发式估算 */
+    int memory_bandwidth_estimated; /* 标注带宽是否为启发式估算 */
     GpuBackend gpu_backend;            /**< 当前GPU后端类型 */
     char device_name[128];             /**< 设备名称 */
     char backend_version[64];          /**< 后端版本信息 */
@@ -477,7 +477,7 @@ int mixed_precision_precision_aware_train_step(Trainer* trainer,
                                                 PrecisionMonitorMode monitor);
 
 /* ============================================================================
- * ZSF-ZNB修复S-009: 自动混合精度(AMP)动态损失缩放器API
+ *修复S-009: 自动混合精度(AMP)动态损失缩放器API
  * ============================================================================ */
 
 float mixed_precision_amp_get_loss_scale(void);

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file robot.c
  * @brief 机器人控制实现
  * 
@@ -16,7 +16,7 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/secure_random.h"
-#include "selflnn/utils/logging.h"        /* ZSFUSA: log_warn宏 */
+#include "selflnn/utils/logging.h" /* log_warn宏 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -1174,7 +1174,7 @@ int robot_execute_trajectory(Robot* robot, const float* waypoints,
     const float jerk_limit = 10.0f;      // 加加速度限制 (m/s³)
     const float acceleration_limit = 2.0f; // 加速度限制 (m/s²)
 
-    /* ZSFWS-R002修复: 真实使用调用者传入的速度参数进行轨迹速度规划
+/* 真实使用调用者传入的速度参数进行轨迹速度规划
      * 原代码用 (void)velocities/(void)num_velocities 丢弃传入速度，
      * 使用硬编码默认速度限制,导致外部指令速度参数完全无效。
      * 修复: 传入速度数组有效时,动态计算有效速度限制替代硬编码常量。 */
@@ -2128,7 +2128,7 @@ static void robot_sim_update_state(Robot* robot, float dt) {
     }
     
 #ifdef SELFLNN_STRICT_REAL_DATA
-    /* ZSFNO2-F003: 严格真实数据模式下，仿真物理状态更新仅允许PyBullet/Gazebo桥接，
+/* 严格真实数据模式下，仿真物理状态更新仅允许PyBullet/Gazebo桥接，
      * 禁止使用内建简单仿真。 */
     SELFLNN_WARN("严格真实数据模式：禁止内建简单物理仿真，请使用PyBullet/Gazebo桥接");
     return;
@@ -2343,7 +2343,7 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
     }
     
 #ifdef SELFLNN_STRICT_REAL_DATA
-    /* ZSFNO2-F003: 严格真实数据模式下，仿真传感器数据生成仅允许sensor_simulation.c
+/* 严格真实数据模式下，仿真传感器数据生成仅允许sensor_simulation.c
      * 和PyBullet/Gazebo桥接生成，禁止使用内建简单仿真。 */
     SELFLNN_WARN("严格真实数据模式：禁止内建简单传感器仿真，请使用sensor_simulation或桥接");
     return -3;
@@ -2382,7 +2382,7 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
             break;
             
         case SENSOR_TYPE_IMU:
-            /* P0-003修复 + ZSFZX-FIX-P1-008: IMU传感器数据获取
+            /* P0-003修复 + IMU传感器数据获取
              * 仿真模式下无真实IMU数据，严格拒绝返回虚拟数据。
              * 使用hardware_interface的imu_read_raw获取真实IMU数据 */
             if (robot->config.use_real_hardware && robot->hardware && size >= 9) {
@@ -2390,7 +2390,7 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
                 memset(&imu_raw, 0, sizeof(ImuRawData));
                 int ret = hardware_interface_imu_read_raw(robot->hardware, &imu_raw);
                 if (ret == 0) {
-                    /* ZSFZX-FIX-P1-008: 成功读取真实IMU数据，填充输出缓冲区 */
+/* 成功读取真实IMU数据，填充输出缓冲区 */
                     float* out = (float*)data;
                     out[0] = (float)imu_raw.accelerometer[0]; out[1] = (float)imu_raw.accelerometer[1]; out[2] = (float)imu_raw.accelerometer[2];
                     out[3] = (float)imu_raw.gyroscope[0];  out[4] = (float)imu_raw.gyroscope[1];  out[5] = (float)imu_raw.gyroscope[2];
@@ -3687,7 +3687,7 @@ int robot_health_monitor_get_maintenance_summary(RobotHealthMonitor* monitor,
 
 /* ============================
  * PyBullet仿真引擎集成实现（M16）
- * ZSFWS-修复: PBConfig→PyBulletConfig, pb_init/pb_connect→pybullet_connect
+ *修复: PBConfig→PyBulletConfig, pb_init/pb_connect→pybullet_connect
  * pybullet_bridge.h 已将初始化+连接合为单一调用。
  * ============================ */
 
@@ -4341,7 +4341,7 @@ int robot_update_reconnect_state_impl(int connection_ok) {
 }
 
 int robot_get_reconnect_delay_ms(Robot* robot) {
-    /* ZSFAAA-DEEP-007修复: 添加参数校验 + 说明全局重连状态设计
+/* 添加参数校验 + 说明全局重连状态设计
      * 当前实现使用进程级全局recon_state，因为重连策略是进程级别的
      * （同一进程内所有Robot实例共享网络连接状态）。
      * 未来若需支持独立重连策略，需在Robot结构体中添加reconnect_delay字段。 */
@@ -4359,7 +4359,7 @@ int robot_ekf_fuse_sensors(const float* imu_accel, const float* imu_gyro,
                             float* state_covariance) {
     if (!imu_accel || !joint_positions || !fused_state) return -1;
 
-    /* ZSFWS-F005修复: 实现真实的扩展卡尔曼滤波器(EKF)传感器融合，
+/* 实现真实的扩展卡尔曼滤波器(EKF)传感器融合，
      * 替代之前的简单加权平均虚假实现。
      * 状态向量(18维): [姿态角3, 位置3, 速度3, 关节位置6, 关节速度3]
      * 观测向量: imu_accel(3) + joint_positions(6) + joint_velocities(6) + force_torque(6) */

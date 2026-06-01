@@ -1,4 +1,4 @@
-#include "selflnn/core/unified_lnn_state.h"
+﻿#include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
@@ -60,7 +60,7 @@ struct UnifiedLNNState {
     int is_initialized;
     size_t step_count;
     float average_activation;
-    /* ZSFWS-P3: 模态切换追踪——防止跨模态隐藏状态污染 */
+/* 模态切换追踪——防止跨模态隐藏状态污染 */
     int    last_active_modality_bits;     /* 上一帧活跃模态位掩码 */
     #define MODALITY_CHANGE_THRESHOLD 0.5f  /* 模态集合变化超过50%触发重置 */
 
@@ -86,7 +86,7 @@ struct UnifiedLNNState {
     int    modality_isolation_enabled;     /* 是否启用模态隔离 */
     float  gate_regularization_strength;   /* L1正则强度（默认0.001） */
 
-    /* ZSFSSS-TRA001: 梯度冲突监控——追踪梯度方向一致性
+/* 梯度冲突监控——追踪梯度方向一致性
      * 用于检测多模态训练中的梯度振荡和方向冲突 */
     float*  prev_gradient_buffer;          /* 上一批次的输出投影梯度 [output_dim * state_dim] */
     size_t  prev_gradient_size;            /* 缓冲区大小 */
@@ -94,7 +94,7 @@ struct UnifiedLNNState {
     int     gradient_oscillation_count;    /* 连续振荡计数 */
 };
 
-/* ZSFSSS-TRA001: 梯度冲突监控阈值 */
+/* 梯度冲突监控阈值 */
 #define GRADIENT_OSCILLATION_THRESHOLD 3
 #define GRADIENT_COSINE_WINDOW 0.7f       /* 余弦相似度低于此值视为方向冲突 */
 
@@ -392,7 +392,7 @@ UnifiedLNNState* unified_lnn_state_create(const UnifiedLNNStateConfig* config) {
     state->gate_regularization_strength = 0.001f;
     init_cross_modal_gates(state);
 
-    /* ZSFSSS-TRA001: 初始化梯度冲突监控 */
+/* 初始化梯度冲突监控 */
     state->prev_gradient_buffer = NULL;
     state->prev_gradient_size = 0;
     state->gradient_cosine_similarity = 1.0f;
@@ -416,7 +416,7 @@ void unified_lnn_state_free(UnifiedLNNState* state) {
     safe_free((void**)&state->output_bias);
     safe_free((void**)&state->combined_input_buffer);
     safe_free((void**)&state->hidden_state_buffer);
-    /* ZSFSSS-TRA001: 释放梯度冲突监控缓冲区 */
+/* 释放梯度冲突监控缓冲区 */
     safe_free((void**)&state->prev_gradient_buffer);
     state->prev_gradient_size = 0;
     MUTEX_DESTROY(&state->state_lock);
@@ -524,7 +524,7 @@ int unified_lnn_state_step(UnifiedLNNState* state,
         }
     }
 
-    /* ZSFWS-P3: 模态切换检测——防止跨模态隐藏状态污染
+/* 模态切换检测——防止跨模态隐藏状态污染
      * 当活跃模态集合变化超过50%时，重置隐藏状态以避免
      * 前一模态的残留状态污染新模态的推理结果。
      * 例如：从纯视觉(只看图像)切换到纯音频(只听声音)时，
@@ -618,7 +618,7 @@ int unified_lnn_state_reset(UnifiedLNNState* state) {
     }
     state->step_count = 0;
     state->average_activation = 0.0f;
-    /* ZSFSSS-TRA001: 重置梯度冲突监控状态 */
+/* 重置梯度冲突监控状态 */
     if (state->prev_gradient_buffer) {
         memset(state->prev_gradient_buffer, 0, state->prev_gradient_size * sizeof(float));
     }
@@ -690,7 +690,7 @@ int unified_lnn_state_train_step(UnifiedLNNState* state,
     }
     if (loss_out) *loss_out = loss;
 
-    /* P0-010 + ZSFWS-FIX: 使用MSE梯度(dL_MSE/dout=2*err/N)替代RMSE梯度
+    /* P0-010 + 使用MSE梯度(dL_MSE/dout=2*err/N)替代RMSE梯度
      * 原RMSE梯度公式  dL_RMSE/dout = err / (loss*N) 在 loss→0 时
      * 分母趋零导致梯度爆炸，是训练收敛后NaN崩溃的根本原因。
      * MSE梯度无除以loss，全程数值稳定。loss报告值仍为RMSE供监控。 */
@@ -711,7 +711,7 @@ int unified_lnn_state_train_step(UnifiedLNNState* state,
             dL_dout[i] = 2.0f * (temp_output[i] - target_output[i]) * inv_n;
         }
 
-        /* ZSFSSS-TRA001: 梯度方向冲突检测与自适应调和
+/* 梯度方向冲突检测与自适应调和
          * 计算当前输出投影梯度与上轮梯度的余弦相似度，
          * 若连续多轮梯度方向剧烈变化（余弦相似度 < 0.7），
          * 说明多模态梯度方向存在冲突，自动降低学习率以减少振荡。 */
@@ -796,12 +796,12 @@ int unified_lnn_state_train_step(UnifiedLNNState* state,
             }
 
             /* 步骤4: dL_dh已计算完成。不再调用lnn_backward传播误差到CfC内部。
-             * ZSFWS-FATAL5: 在线学习仅负责输出投影(W_out/b_out)和门控矩阵(G)的更新。
+ *: 在线学习仅负责输出投影(W_out/b_out)和门控矩阵(G)的更新。
              * CfC内部权重(W_cfc, τ, gate_weights等)的更新由批次训练管道的Adam统一负责。
              * 分离职责: 在线学习=输出层微调, 批次训练=全参数优化。 */
 
             /* 架构优化: 门控矩阵L1正则梯度更新（移入dL_dh作用域内）
-             * ZSFWS-FIX: 原代码在free(dL_dh)后访问dL_dh → use-after-free。 */
+ *: 原代码在free(dL_dh)后访问dL_dh → use-after-free。 */
             if (state->modality_isolation_enabled) {
                 float lr_gate = lr * 0.1f;
                 float gate_lambda = state->gate_regularization_strength;
@@ -1038,7 +1038,7 @@ int unified_lnn_state_suggest_next_modality(UnifiedLNNState* state) {
     return (int)(state->step_count % UNIFIED_LNN_MAX_MODALITIES);
 }
 
-/* ZSF-012: 多模态贡献度监控
+/*: 多模态贡献度监控
  * 计算各模态对LNN融合状态的贡献比例，用于检测某一模态是否
  * 过度主导（可能造成数据污染）或某模态信号过弱（可能被淹没）。
  * 在模态隔离模式下，检查各模态私有区能量占融合区的比例。
@@ -1078,7 +1078,7 @@ int unified_lnn_state_modality_contribution_monitor(UnifiedLNNState* state,
         for (int m = 0; m < UNIFIED_LNN_MAX_MODALITIES; m++) {
             contributions[m] /= total_energy;
         }
-        /* ZSFSSS-ARC003修复: 检测模态污染——单一模态贡献超过70%时自动启用量化干预 */
+/* 检测模态污染——单一模态贡献超过70%时自动启用量化干预 */
         if (max_contribution / total_energy > 0.70f && state->step_count > 0) {
             static int pollution_warn_count = 0;
             static int last_pollution_modality = -1;
@@ -1094,7 +1094,7 @@ int unified_lnn_state_modality_contribution_monitor(UnifiedLNNState* state,
             }
             pollution_warn_count++;
 
-            /* ZSFSSS-ARC003修复: 自动权重重平衡
+/* 自动权重重平衡
              * 当某模态持续主导超过3步时，自动衰减其门控权重并提升弱势模态 */
             if (max_modality >= 0 && max_modality < UNIFIED_LNN_MAX_MODALITIES) {
                 if (max_modality == last_pollution_modality) {

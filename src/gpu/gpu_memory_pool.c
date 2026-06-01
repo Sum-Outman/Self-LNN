@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_memory_pool.c
  * @brief GPU内存池管理系统实现
  * 
@@ -38,7 +38,7 @@ extern const GpuBackendInterface* cuda_get_backend_interface(void);
 extern const GpuBackendInterface* opencl_get_backend_interface(void);
 extern const GpuBackendInterface* vulkan_get_backend_interface(void);
 extern const GpuBackendInterface* metal_get_backend_interface(void);
-/* ZSFZX-FIX-GPU-POOL: 补全缺失后端extern声明 */
+/* 补全缺失后端extern声明 */
 extern const GpuBackendInterface* rocm_get_backend_interface(void);
 extern const GpuBackendInterface* ascend_get_backend_interface(void);
 extern const GpuBackendInterface* cambricon_get_backend_interface(void);
@@ -94,7 +94,7 @@ struct GpuMemoryPool {
 };
 
 /* ============================================================================
- * ZSFEEE-FIX-014: CPU硬件检测已统一到gpu.c的gpu_hardware_get_cpu_info()。
+ *: CPU硬件检测已统一到gpu.c的gpu_hardware_get_cpu_info()。
  * 所有本地cpu_detect_*函数已删除。使用统一公开接口获取CPU信息。
  * =========================================================================== */
 
@@ -124,14 +124,14 @@ static int cpu_backend_get_device_count(void) {
 }
 
 /**
- * @brief CPU后端获取设备信息函数（ZSFEEE-FIX-014: 使用统一CPU硬件检测接口）
+ * @brief CPU后端获取设备信息函数（使用统一CPU硬件检测接口）
  */
 static int cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
     if (!info || device_index != 0) {
         return -1;
     }
 
-    /* ZSFEEE-FIX-014: 调用gpu.c的统一CPU检测接口 */
+/* 调用gpu.c的统一CPU检测接口 */
     if (gpu_hardware_get_cpu_info(info) != 0) {
         return -1;
     }
@@ -162,7 +162,7 @@ static int cpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
 }
 
 /**
- * @brief CPU后端上下文创建（ZSFEEE-FIX-014: 使用统一CPU硬件检测接口）
+ * @brief CPU后端上下文创建（使用统一CPU硬件检测接口）
  */
 static GpuContext* cpu_pool_context_create(int device_index) {
     GpuContext* ctx = (GpuContext*)safe_calloc(1, sizeof(GpuContext));
@@ -172,7 +172,7 @@ static GpuContext* cpu_pool_context_create(int device_index) {
     ctx->device_index = device_index >= 0 ? device_index : 0;
     ctx->is_initialized = 1;
 
-    /* ZSFEEE-FIX-014: 使用统一CPU硬件检测获取设备名称和内存信息 */
+/* 使用统一CPU硬件检测获取设备名称和内存信息 */
     {
         GpuDeviceInfo cpu_info;
         if (gpu_hardware_get_cpu_info(&cpu_info) == 0) {
@@ -655,7 +655,7 @@ static const GpuBackendInterface* get_backend_from_context(GpuContext* context) 
             // 获取Metal后端接口（如果可用）
             return metal_get_backend_interface();
 
-        /* ZSFZX-FIX-GPU-POOL: 补全4个缺失后端的内存池支持
+/* 补全4个缺失后端的内存池支持
          * 原switch中ROCm/Ascend/Cambricon/TPU落入default返回NULL */
         case GPU_BACKEND_ROCM:
             return rocm_get_backend_interface();
@@ -1311,7 +1311,7 @@ void* gpu_memory_pool_alloc(GpuMemoryPool* pool, size_t size, size_t alignment) 
         
         // 如果需要，清零内存
         if (pool->config.zero_memory_on_alloc) {
-            /* ZSFZS-F008修复: 使用memset执行真实内存清零，而非注释掉的虚拟操作 */
+/* 使用memset执行真实内存清零，而非注释掉的虚拟操作 */
             if (used_block->address) {
                 memset(used_block->address, 0, aligned_size);
             }
@@ -1396,7 +1396,7 @@ int gpu_memory_pool_free(GpuMemoryPool* pool, void* ptr) {
     
     // 如果需要，清零内存
     if (pool->config.zero_memory_on_free) {
-        /* ZSFZS-F008修复: 使用memset执行真实内存清零 */
+/* 使用memset执行真实内存清零 */
         if (block->address) {
             memset(block->address, 0, block->size);
         }
@@ -1478,7 +1478,7 @@ void* gpu_memory_pool_realloc(GpuMemoryPool* pool, void* ptr, size_t new_size) {
         return NULL;
     }
     
-    /* ZSFZS-F008修复: 使用memcpy执行真实内存复制 */
+/* 使用memcpy执行真实内存复制 */
     if (ptr && new_ptr) {
         memcpy(new_ptr, ptr, block->size);
     }

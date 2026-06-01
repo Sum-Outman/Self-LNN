@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file swarm_intelligence.h
  * @brief 群体智能优化器 — 【基础功能实现】
  *
@@ -13,7 +13,7 @@
  *   基础版 (swarm_intelligence.h) → 群体智能核心算法 + 基础拓扑
  *   增强版 (swarm_enhanced.h)     → 自适应群体 + 分布式共识 + CfC液态通信 + 自愈
  *
- * ZSFWS-修复: 原 multisystem/swarm_intelligence.c 已合并至 robot/swarm_control.c。
+ *修复: 原 multisystem/swarm_intelligence.c 已合并至 robot/swarm_control.c。
  * 本头文件提供 multisystem_control 模块所需的 Swarm/SwarmConfig/MSSwarmState 等
  * 类型定义。实现由 robot/swarm_control.c 中的桥接函数提供。
  *

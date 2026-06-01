@@ -1,4 +1,4 @@
-#include "selflnn/core/graph_optimization_ext.h"
+﻿#include "selflnn/core/graph_optimization_ext.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -944,7 +944,7 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
         }
 
         float product = 1.0f;
-        FgFactorNode* f = NULL;  /* ZSFX-FIX: 提升作用域，供下方M-003消元使用 */
+        FgFactorNode* f = NULL; /* 提升作用域，供下方M-003消元使用 */
         for (int fi = 0; fi < fg->variables[vi].n_factors; fi++) {
             int fid = fg->variables[vi].factor_ids[fi];
             int fj = -1;

@@ -2,7 +2,7 @@
  * @file quaternion_cfc.c
  * @brief 四元数CfC单元 —— 核心层（Core Layer）
  * 
- * ========== ZSFWS-032 模块职责边界 ==========
+ * ========== 模块职责边界 ==========
  * 本模块职责：CfC Cell层级的四元数动力学（单细胞粒度）
  *   - 四元数CfC单细胞状态演化 (quaternion_cfc_closed_form_update)
  *   - Hamilton乘积驱动的ODE右端项 (quaternion_cfc_rhs)
@@ -41,7 +41,6 @@
 #include <string.h>
 #include <math.h>
 
-/* ZSF-ZNB修复L-003: 已使用math_utils中的rng_normal替代重复gaussian_random */
 
 /**
  * @brief 均匀随机数生成器（静态辅助函数）
@@ -77,7 +76,7 @@ struct QuaternionCfcCell {
     float max_dt;                    /**< 最大步长 */
     int use_cfc_closed_form;         /**< 是否使用闭式解 */
     float current_input_drive[4];    /**< RHS回调用：当前输入驱动信号 */
-    /* ZSFUSA-P2-004修复: RHS回调并发保护互斥锁。
+/* RHS回调并发保护互斥锁。
      * current_input_drive[4]在quaternion_cfc_rhs中写入，高并发多求解器场景下
      * 可能被多个ODE求解器实例同时修改，导致竞态条件。
      * 此互斥锁在rhs回调入口加锁、出口解锁，确保每次只有一个线程访问。 */
@@ -122,8 +121,8 @@ QuaternionCfcCell* quaternion_cfc_cell_create(const QuaternionCfcConfig* config)
     cell->min_dt = config->min_dt;
     cell->max_dt = config->max_dt;
     cell->use_cfc_closed_form = config->use_cfc_closed_form;
-    /* ZSFUSA-P2-004: 初始化RHS回调互斥锁，保护current_input_drive并发访问 */
-    cell->rhs_mutex = mutex_create();
+/* 初始化RHS回调互斥锁，保护current_input_drive并发访问 */
+    cell->rhs_mutex = mutex_create;
     
     cell->last_input.w = 0.0f; cell->last_input.x = 0.0f; cell->last_input.y = 0.0f; cell->last_input.z = 0.0f;
     cell->integrated_error.w = 0.0f; cell->integrated_error.x = 0.0f; cell->integrated_error.y = 0.0f; cell->integrated_error.z = 0.0f;
@@ -143,7 +142,7 @@ void quaternion_cfc_cell_destroy(QuaternionCfcCell* cell) {
         return;
     }
     
-    /* ZSFUSA-P2-004: 销毁RHS互斥锁 */
+/* 销毁RHS互斥锁 */
     if (cell->rhs_mutex) {
         mutex_destroy(cell->rhs_mutex);
         cell->rhs_mutex = NULL;
@@ -154,7 +153,7 @@ void quaternion_cfc_cell_destroy(QuaternionCfcCell* cell) {
 /**
  * @brief 使用CfC闭式解更新四元数状态
  * 
- * ZSFZS-F004修复: 在S^3流形上进行真正的四元数CfC演化。
+ *修复: 在S^3流形上进行真正的四元数CfC演化。
  * 
  * 演化公式（四元数群S^3上的闭式解）:
  *   q_next = normalize( q * exp(-dt/τ_mean) + (1 - exp(-dt/τ_mean)) * drive )
@@ -162,7 +161,7 @@ void quaternion_cfc_cell_destroy(QuaternionCfcCell* cell) {
  * 其中:
  * - q * exp(-dt/τ_mean) 是四元数标量乘法（向0衰减）
  * - drive是目标四元数旋转方向
- * - normalize() 将结果投影回S^3单位四元数流形
+ * - normalize 将结果投影回S^3单位四元数流形
  * 
  * 这确保演化始终在四元数群S^3上进行，保留旋转空间的几何结构。
  * 使用各分量时间常数的调和平均值作为统一时间常数，保证四元数
@@ -238,7 +237,7 @@ int quaternion_cfc_cell_update(QuaternionCfcCell* cell, const Quaternion* input,
         cell->state.x += rng_normal(0.0f, cell->noise_std) * dt;
         cell->state.y += rng_normal(0.0f, cell->noise_std) * dt;
         cell->state.z += rng_normal(0.0f, cell->noise_std) * dt;
-        /* ZSFWS-010修复: 噪声注入后重新归一化四元数到S^3流形
+/* 噪声注入后重新归一化四元数到S^3流形
          * 噪声直接加到分量会破坏单位范数性质，导致后续四元数乘法不正确 */
         float norm = sqrtf(cell->state.w * cell->state.w + cell->state.x * cell->state.x +
                           cell->state.y * cell->state.y + cell->state.z * cell->state.z);
@@ -460,7 +459,7 @@ int quaternion_cfc_cell_reset(QuaternionCfcCell* cell) {
 /**
  * @brief 四元数CfC ODE右端项（RHS）回调函数
  *
- * ZSFWS-H006修复：使用真正的四元数Hamilton乘积耦合动力学
+ *修复：使用真正的四元数Hamilton乘积耦合动力学
  * dq/dt = 0.5 * q ⊗ (0, Ω) - q/τ
  * 其中 Ω = tanh(input_drive) 是经非线性激活的角速度向量（3D旋转空间）
  * Hamilton乘积 q ⊗ Ω 提供四元数分量间的自然交叉耦合，保留旋转不变性
@@ -474,7 +473,7 @@ int quaternion_cfc_rhs(float t, const float* q, float* dqdt, void* ctx) {
 
     QuaternionCfcCell* cell = (QuaternionCfcCell*)ctx;
 
-    /* ZSFUSA-P2-004: 保护current_input_drive的读访问。
+/* 保护current_input_drive的读访问。
      * 当多线程并发调用同一cell的ODE求解器时，current_input_drive可能被
      * 另一线程的quaternion_cfc_cell_update同时写入。互斥锁确保原子读写。 */
     if (cell->rhs_mutex) mutex_lock(cell->rhs_mutex);
@@ -484,7 +483,7 @@ int quaternion_cfc_rhs(float t, const float* q, float* dqdt, void* ctx) {
     float inv_tau_y = 1.0f / fmaxf(cell->time_constant.y, 1e-6f);
     float inv_tau_z = 1.0f / fmaxf(cell->time_constant.z, 1e-6f);
 
-    /* ZSFWS-H006: 将输入驱动投影为角速度（非线性激活保持有界性） */
+/* 将输入驱动投影为角速度（非线性激活保持有界性） */
     float omega_x = tanhf(cell->current_input_drive[1]);
     float omega_y = tanhf(cell->current_input_drive[2]);
     float omega_z = tanhf(cell->current_input_drive[3]);
@@ -618,7 +617,7 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
             break;
         }
         case 4: {
-            /* ZSFWS-C003修复: 原3阶段伪Forest-Ruth错误。
+/* 原3阶段伪Forest-Ruth错误。
              * 真正Forest-Ruth 4阶7阶段辛积分需要q/p分离，不适合四元数R⁴空间。
              * 改用BDF2自适应步长，已在ode_solvers.c中正确实现（ode_bdf2_solve）。
              * BDF2对刚性ODE（含CfC动力学）数值稳定且精度良好。 */
@@ -652,7 +651,7 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
             break;
         }
         case 6: {
-            /* ZSFWS-C003修复: P2-011已正确指出Verlet不适合四元数。
+/* P2-011已正确指出Verlet不适合四元数。
              * 原回退仍使用了错误的3阶段伪Forest-Ruth。
              * 改用BDF2自适应步长（与case 4一致），数值稳定且精度良好。 */
             size_t n = (size_t)n_quat * 4;
@@ -665,8 +664,7 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
             ret = ode_bdf2_solve(state, 0.0f, h, quaternion_cfc_rhs, qcfc_cell,
                                  n, &bdf_cfg, workspace, &h_actual, &steps);
             safe_free((void**)&workspace);
-            break;
-        }
+            if (ret != 0) { break; }
         case 7: {
             /* BDF2自适应步长 */
             size_t n = (size_t)n_quat * 4;

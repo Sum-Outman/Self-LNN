@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file robot.h
  * @brief 机器人控制接口
  * 
@@ -995,13 +995,13 @@ int robot_get_hardware_result(const Robot* robot, HDDetectionResult* result);
  */
 int robot_get_hardware_by_type(const Robot* robot, int type, HDDeviceInfo* out, size_t max_count, size_t* count);
 
-/* ZSFWXJ-FIX011修复: 力顺应控制器(FCC)签名与robot.c实现同步 */
+/* 力顺应控制器(FCC)签名与robot.c实现同步 */
 int fcc_init(float stiffness, float damping, float force_limit);
 int fcc_compute_command(const float* measured_force, const float* current_pos, const float* current_vel, const float* desired_force, float* output_command, float dt);
 int fcc_set_desired_trajectory(const float* position, const float* velocity, const float* force);
 int fcc_enable_force_axis(int axis_bitmask);
 
-/* ZSFWXJ-FIX011修复: NMPCConfig前向定义 — 从robot.c移至header供签名引用 */
+/* NMPCConfig前向定义 — 从robot.c移至header供签名引用 */
 #define NMPC_MAX_HORIZON 20
 typedef struct {
     float Q_diag[6];

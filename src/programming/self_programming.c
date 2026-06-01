@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file self_programming.c
  * @brief 自我编程能力实现
  * 
@@ -13,7 +13,7 @@
 
 #include "selflnn/programming/self_programming.h"
 #include "selflnn/programming/programming_enhanced.h"  /* H-017集成 */
-#include "selflnn/programming/c_interpreter.h"          /* ZSFA-FIX-P0-004: C解释器集成 */
+#include "selflnn/programming/c_interpreter.h" /* C解释器集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/core/errors.h"
@@ -68,7 +68,7 @@ struct SelfProgrammingEngine {
     void* code_generator;        /**< 代码生成器状态 */
     void* analyzer_state;        /**< 分析器状态 */
     void* penh_engine;           /**< H-017: 编程增强引擎（重构/性能/安全分析） */
-    /* ZSFUSA-P2-003: 编译错误反馈环形缓冲区 */
+/* 编译错误反馈环形缓冲区 */
     char compile_error_history[16][128];  /**< 最近16条编译错误信息 */
     uint32_t compile_error_signatures[16]; /**< 错误特征码(前4字节) */
     int    compile_error_count;            /**< 环形缓冲区索引 */
@@ -1582,7 +1582,7 @@ static char* ast_to_source(const ASTNode* node, int indent_level) {
     return buffer;
 }
 
-/* ZSFABC: 添加独立的C代码生成API */
+/* 添加独立的C代码生成API */
 char* self_programming_generate_c(SelfProgrammingEngine* engine,
                                   const CodeSpecification* spec) {
     if (!engine || !spec) return NULL;
@@ -2040,7 +2040,7 @@ int apply_code_optimizations(SelfProgrammingEngine* engine,
         int is_high_priority = (suggestions->priority[i] == 1);
         int is_medium_priority = (suggestions->priority[i] == 2);
 
-        /* ZSFGGG-R3-007修复: 记录应用前计数用于检测实际变换 */
+/* 记录应用前计数用于检测实际变换 */
         int pre_check_count = applied_count;
 
         if (is_high_priority || is_medium_priority) {
@@ -2080,7 +2080,7 @@ int apply_code_optimizations(SelfProgrammingEngine* engine,
             }
 
             if (SUGGESTION_CONTAINS(i, "可维护性")) {
-                /* ZSFGGG-R3-007修复: 使用返回值计数而非无条件+1 */
+/* 使用返回值计数而非无条件+1 */
                 int cf_count = constant_folding(engine, ast);
                 int dce_count = dead_code_elimination(engine, ast);
                 int licm_ct = loop_invariant_hoisting(engine, ast);
@@ -2092,7 +2092,7 @@ int apply_code_optimizations(SelfProgrammingEngine* engine,
                 }
             }
 
-            /* ZSFGGG-R3-007修复: 仅当此建议类型有实际变换时标记已应用 */
+/* 仅当此建议类型有实际变换时标记已应用 */
             if (applied_count > pre_check_count) {
                 applied_count++; /* 标记该建议被处理 */
             }
@@ -2441,7 +2441,7 @@ CompilationResult verify_code_compilation(SelfProgrammingEngine* engine,
     return result;
 }
 
-/* ZSFUSA-P2-003修复: 编译错误反馈函数。
+/* 编译错误反馈函数。
  * 将编译失败的错误信息注入引擎的错误历史缓冲区，
  * 使后续代码生成(`synthesize_code`)能参考错误模式，
  * 避免重复生成语法错误相同的代码。
@@ -2485,7 +2485,7 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
     if (!engine || !code) return -1;
     (void)input;
 
-    /* ZSFA-FIX-P0-004: C解释器集成 — 当代码包含#include时优先使用内置解释器 */
+/* C解释器集成 — 当代码包含#include时优先使用内置解释器 */
     if (code && strstr(code, "#include") && c_interpreter_available()) {
         float expr_result = 0.0f;
         char error_msg[256] = {0};
@@ -4017,7 +4017,7 @@ int loop_invariant_hoisting(SelfProgrammingEngine* engine, ASTNode* ast) {
     return changes;
 }
 
-/* ZSF-008: 结构简化 - 减少深层嵌套结构
+/*: 结构简化 - 减少深层嵌套结构
  * 将嵌套超过3层的条件块提取为独立函数调用样式标记 */
 static int structure_simplification(SelfProgrammingEngine* engine, ASTNode* ast) {
     (void)engine;
@@ -4051,7 +4051,7 @@ static int structure_simplification(SelfProgrammingEngine* engine, ASTNode* ast)
     return changes;
 }
 
-/* ZSF-008: 识别大函数体并标记为可提取的独立函数
+/*: 识别大函数体并标记为可提取的独立函数
  * 遍历AST中的函数定义，对超过50行的大函数标记内部逻辑块 */
 static int function_extraction(SelfProgrammingEngine* engine, ASTNode* ast) {
     (void)engine;

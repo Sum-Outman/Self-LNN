@@ -259,7 +259,7 @@ void decision_engine_destroy(DecisionEngine* engine) {
 }
 
 /**
- * @brief 清空所有决策备选方案（ZSFEEE-FIX-DEEP-006）
+ * @brief 清空所有决策备选方案
  */
 void decision_engine_clear_alternatives(DecisionEngine* engine) {
     if (!engine) return;
@@ -806,7 +806,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
             strategy_profile[i] = (int)i;
         }
         
-        /* ZSFQQ-P0-005修复: 迭代最佳响应中对手策略索引修正
+/* 迭代最佳响应中对手策略索引修正
          * 对于多智能体博弈, 智能体i的对手策略是所有其他智能体策略的聚合
          * 简化处理: 对于2人博弈, 对手是另一个智能体; 对于n>2, 取其他智能体的多数策略 */
         int converged = 0;
@@ -1052,7 +1052,7 @@ float decision_engine_compute_utility(UtilityFunctionType utility_type,
             float a = (params && params_size >= 1) ? params[0] : 1.0f;
             float b = (params && params_size >= 2) ? params[1] : 1.0f;
             float c = (params && params_size >= 3) ? params[2] : 1.0f;
-            /* ZSFA-FIX-F005: 修复off-by-one，params[4]→params[3]，索引从0开始第4个参数应为索引3 */
+/* 修复off-by-one，params[4]→params[3]，索引从0开始第4个参数应为索引3 */
             float d = (params && params_size >= 4) ? params[3] : 0.0f;
             return a * logf(b * value + c) + d;
         }
@@ -1252,7 +1252,7 @@ static float compute_overall_utility(const DecisionEngine* engine,
         return 0.0f;
     }
     
-    /* ZSF-033修复: objective_values已通过compute_single_utility(L543)进行了
+/*修复: objective_values已通过compute_single_utility(L543)进行了
      * 非线性效用变换，此处仅做加权求和，不再重复调用compute_single_utility。
      * 原代码在此处再次调用导致效用函数被应用两次（双重变换）。 */
     float total_utility = 0.0f;

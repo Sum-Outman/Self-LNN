@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN AGI 硬件扫描共享工具
  * 统一调用后端扫描API，返回规范化数据结构
  * 消除 device-control.html / hardware-setup.html / index.html 中的重复硬件扫描逻辑
@@ -131,7 +131,7 @@ var HardwareScanUtil = {
             result.diagnosticLines.push('后端扫描失败: ' + e.message);
         }
 
-        /* ZSFABC-025修复: 额外调用设备列表API获取后端管理的所有硬件(串口/ROS节点/GPU等) */
+/* 额外调用设备列表API获取后端管理的所有硬件(串口/ROS节点/GPU等) */
         try {
             if (window.SelfLnnApi && typeof window.SelfLnnApi.request === 'function') {
                 var devResp = await window.SelfLnnApi.request('/devices/list', { method: 'GET' });

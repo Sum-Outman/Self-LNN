@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file audit_logger.c
  * @brief A09.3 审计日志系统完整实现
  *
@@ -46,7 +46,7 @@ struct AuditLogger {
     int compliance_rule_count;
     int compliance_rule_capacity;
 
-    /* ZSFX-FIX: M-004合规检查统一日志缓冲区（环形缓冲区） */
+/* M-004合规检查统一日志缓冲区（环形缓冲区） */
     AuditUnifiedLogRecord* logs;
     int log_count;
     int max_logs;
@@ -183,7 +183,7 @@ AuditLogger* audit_logger_create(void) {
         return NULL;
     }
 
-    /* ZSFX-FIX: 统一日志缓冲区（M-004合规检查用） */
+/* 统一日志缓冲区（M-004合规检查用） */
     logger->max_logs = 1000;
     logger->logs = (AuditUnifiedLogRecord*)
         safe_calloc((size_t)logger->max_logs, sizeof(AuditUnifiedLogRecord));

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file swarm_control.c
  * @brief 多机器人集群控制实现
  *
@@ -293,7 +293,7 @@ int swarm_add_robot(SwarmController* controller, int robot_id, const RobotConfig
     return 0;
 }
 
-/* ZSFWS修复: swarm_* 兼容性桥接函数已移至 src/multisystem/swarm_intelligence.c
+/* swarm_* 兼容性桥接函数已移至 src/multisystem/swarm_intelligence.c
  * 该文件提供完整的PSO群体智能实现，消除循环依赖。
  * swarm_control.c 专注机器人群体控制（蜂拥、编队、一致性协议）。 */
 
@@ -1674,7 +1674,7 @@ int swarm_udp_send_state(SwarmController* controller, int robot_index) {
     pkt.version = SWARM_UDP_SYNC_VERSION;
     pkt.msg_type = 0; /* state_sync */
     pkt.robot_id = (uint16_t)rs->robot_id;
-    /* ZSFWS-M011修复: 使用递增序号替代指针值。
+/* 使用递增序号替代指针值。
      * 指针值在每次程序运行时相同，无法区分新旧数据包。
      * 每个robot_state维护独立的seq_counter，跨报文递增。 */
     pkt.seq_num = rs->udp_seq_counter++;

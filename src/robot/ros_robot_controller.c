@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file ros_robot_controller.c
  * @brief 真实ROS机器人控制器实现 —— 基于rosbridge WebSocket协议的多机器人控制
  *
@@ -107,7 +107,7 @@ RosRobotControllerConfig ros_robot_controller_config_default(void) {
     return cfg;
 }
 
-/* ZSFWXJ-FIX009: 真实JSON解析回调前向声明 */
+/* 真实JSON解析回调前向声明 */
 static void rrc_joint_states_cb(const void* msg, size_t msg_size, void* user_data);
 static void rrc_odom_cb(const void* msg, size_t msg_size, void* user_data);
 
@@ -204,7 +204,7 @@ int ros_robot_controller_connect_robot(RosRobotController* controller, int robot
     RobotEntry* robot = &controller->robots[robot_id];
     robot->conn_state = ROS_ROBOT_CONNECTION_STATE_CONNECTING;
 
-    /* ZSFWXJ-FIX009修复: 使用真实JSON解析回调替代NULL */
+/* 使用真实JSON解析回调替代NULL */
     /* 连接ROS节点 */
     if (robot->ros_node) {
         if (ros_node_connect_to_master(robot->ros_node, NULL) == 0) {
@@ -741,7 +741,7 @@ int ros_robot_controller_get_error_code(RosRobotController* controller) {
     return controller ? controller->error_code : -1;
 }
 
-/* ZSFWXJ-FIX009: 真实JSON解析回调 — 基于RobotEntry结构体直接访问 */
+/* 真实JSON解析回调 — 基于RobotEntry结构体直接访问 */
 
 static void rrc_joint_states_cb(const void* msg, size_t msg_size, void* user_data) {
     RobotEntry* robot = (RobotEntry*)user_data;
@@ -803,7 +803,7 @@ static void rrc_odom_cb(const void* msg, size_t msg_size, void* user_data) {
 
     const char* json = (const char*)msg;
 
-    /* ZSFZS-F011: 修复JSON解析偏移bug
+/* 修复JSON解析偏移bug
      * rrc_find_float每次都从字符串开头搜索，而Odometry消息中
      * position/orientation/linear/angular都有相同的"x":"y":"z":子字段，
      * 导致不同区域读取到同一个值。修复：先用strstr定位到各区域，

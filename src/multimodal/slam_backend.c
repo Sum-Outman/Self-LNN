@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file slam_backend.c
  * @brief SLAM后端模块：局部/全局束调整优化
  *
@@ -605,7 +605,7 @@ int slam_solve_gauss_newton(OptimizationProblem* problem, int max_iterations) {
                 }
                 if (i == j) {
                     if (sum <= 1e-12f) {
-                        /* ZSFABC修复: Levenberg-Marquardt阻尼
+/* Levenberg-Marquardt阻尼
                          * 当Hessian不正定时，自适应增加对角阻尼：
                          * lambda初值1e-4，发散时乘以10，收敛时除以10 */
                         static float lambda_lm = 1e-4f;

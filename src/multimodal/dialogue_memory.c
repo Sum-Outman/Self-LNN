@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file dialogue_memory.c
  * @brief 对话记忆增强系统完整实现
  */
@@ -101,7 +101,7 @@ int dm_detect_topics(DialogueMemoryManager* dmm) {
     int start = dmm->session.turn_count > 10 ? dmm->session.turn_count - 10 : 0;
     int keyword_hits[10] = {0};
 
-    /* ZSFAB P2-004修复: 关键词+嵌入相似度双层话题检测 */
+/* P2-004修复: 关键词+嵌入相似度双层话题检测 */
     /* 第一层：关键词匹配 */
     for (int i = start; i < dmm->session.turn_count; i++) {
         for (int k = 0; k < keyword_count; k++) {

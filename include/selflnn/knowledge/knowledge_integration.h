@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file knowledge_integration.h
  * @brief 知识库集成接口
  * 
@@ -15,7 +15,7 @@
 #include "selflnn/knowledge/logic_reasoning.h"
 #include <stddef.h>
 
-/* ZSFBUILD: ReasoningEngine前向声明 (避免引入reasoning.h导致BayesianNetwork冲突) */
+/* ReasoningEngine前向声明 (避免引入reasoning.h导致BayesianNetwork冲突) */
 typedef struct ReasoningEngine ReasoningEngine;
 
 #ifdef __cplusplus

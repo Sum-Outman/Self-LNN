@@ -1,9 +1,9 @@
-/**
+﻿/**
  * @file training_data_pipeline.c
  * @brief 多模态训练数据管线 - 桥接多模态CfC/LNN权重到训练器
  *
  * K-035: 已验证实现完整性。解决P3关键缺陷：所有多模态NN权重初始化后从未训练。
- * ZSFWS-001 / H-005修复: 完全移除合成数据生成器路径（data_generator_create等），
+ * / H-005修复: 完全移除合成数据生成器路径（data_generator_create等），
  * 所有训练数据必须来自data_collection_pipeline提供的真实硬件/传感器数据，
  * 无真实数据时返回错误并跳过训练步骤。
  * 通过 trainer_create + trainer_train 真实执行训练循环。
@@ -58,7 +58,7 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
     }
 
     /*
-     * ZSFWS-001修复 / H-005修复: 完全禁用合成训练数据生成。
+ *修复 / H-005修复: 完全禁用合成训练数据生成。
      * 所有训练数据必须来自真实数据采集管线或真实文件。
      * 移除 data_generator_create / DATA_GENERATOR_CONFIG_DEFAULT 合成数据路径。
      * 无真实数据时直接返回错误，禁止使用任何合成/虚假数据。
@@ -140,7 +140,7 @@ int training_pipeline_pretrain_all_vision(LNN* vision_net, LNN* deep_vision_net,
                                            LNN* liquid_vision_net, LNN* image_recog_net) {
     int ok = 0, fail = 0;
 
-    /* ZSFZS-F019修复: 从LNN配置动态读取维度，替代硬编码值。
+/* 从LNN配置动态读取维度，替代硬编码值。
      * 使用 lnn_get_input_size/lnn_get_output_size 获取实际配置的维度。
      * 如果网络未配置则使用合理默认值。 */
 
@@ -181,7 +181,7 @@ int training_pipeline_pretrain_all_audio(LNN* speech_net, LNN* audio_semantic_ne
                                           LNN* vad_net) {
     int ok = 0, fail = 0;
 
-    /* ZSFZS-F019: 动态读取LNN维度 */
+/* 动态读取LNN维度 */
     if (speech_net) {
         size_t in_dim = lnn_get_input_size(speech_net);
         size_t out_dim = lnn_get_output_size(speech_net);
@@ -212,7 +212,7 @@ int training_pipeline_pretrain_all_sensors(LNN* sensor_fusion_net, LNN* slam_net
                                             LNN* depth_net, LNN* ocr_net) {
     int ok = 0, fail = 0;
 
-    /* ZSFZS-F019: 动态读取LNN维度 */
+/* 动态读取LNN维度 */
     if (sensor_fusion_net) {
         size_t in_dim = lnn_get_input_size(sensor_fusion_net);
         size_t out_dim = lnn_get_output_size(sensor_fusion_net);
@@ -495,7 +495,7 @@ int training_pipeline_pretrain_all_modules(void* system_context) {
      * 备份共享LNN权重，训练后提取独立训练结果，然后将共享LNN恢复基线。
      * 最终使用加权平均策略将所有子系统训练增量合并回共享LNN。
      *
-     * ZSFABC-002修复: 权重隔离训练机制 */
+ *修复: 权重隔离训练机制 */
     if (!system_context) {
         log_warning("[训练管线] system_context为NULL，无法执行预训练");
         return -1;
@@ -683,7 +683,7 @@ int training_pipeline_train_unified_processor(
 }
 
 /**
- * @brief ZSFA-FIX-P0-002: 训练数据预处理 — 数据归一化和验证
+ * @brief 训练数据预处理 — 数据归一化和验证
  *
  * 对训练数据缓冲区进行Z-Score归一化处理，并检测异常值。
  * 在训练循环开始前调用，确保输入数据质量。

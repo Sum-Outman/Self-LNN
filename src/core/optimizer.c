@@ -1,4 +1,4 @@
-#include "selflnn/core/optimizer.h"
+﻿#include "selflnn/core/optimizer.h"
 #include "selflnn/utils/memory_utils.h"
 #include <string.h>
 #include <math.h>
@@ -158,7 +158,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
     /* R2-P9修复: 逐元素NaN/Inf梯度过滤，替代全步丢弃
      * 原实现发现单个NaN梯度就丢弃整步更新，导致偶发NaN时所有参数停止学习。
      * 修正：将NaN/Inf梯度清零，正常参数继续更新。
-     * ZSFUSA-C10: gradients改为非const以支持原地过滤 */
+ *: gradients改为非const以支持原地过滤 */
     {
         float max_abs_g = 0.0f;
         for (size_t k = 0; k < num_params; k++) {
@@ -246,7 +246,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
             float wd = optimizer->config.weight_decay;
             for (i = 0; i < num_params; i++)
             {
-                /* ZSFZS-F002: 添加解耦权重衰减，与其他优化器一致 */
+/* 添加解耦权重衰减，与其他优化器一致 */
                 parameters[i] *= (1.0f - lr * wd);
                 optimizer->cache_buffer[i] = decay_rate * optimizer->cache_buffer[i] +
                                              (1.0f - decay_rate) * gradients[i] * gradients[i];
@@ -266,7 +266,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
 
             for (i = 0; i < num_params; i++)
             {
-                /* ZSFZS-F003: 添加解耦权重衰减，与其他优化器一致 */
+/* 添加解耦权重衰减，与其他优化器一致 */
                 parameters[i] *= (1.0f - lr * wd);
                 optimizer->momentum_buffer[i] = b1 * optimizer->momentum_buffer[i] +
                                                 (1.0f - b1) * gradients[i];
@@ -310,7 +310,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
             float wd = optimizer->config.weight_decay;
             for (i = 0; i < num_params; i++)
             {
-                /* ZSFZS-F004: 添加解耦权重衰减，与其他优化器一致 */
+/* 添加解耦权重衰减，与其他优化器一致 */
                 parameters[i] *= (1.0f - lr * wd);
                 optimizer->velocity_buffer[i] = rho * optimizer->velocity_buffer[i] +
                                                 (1.0f - rho) * gradients[i] * gradients[i];
@@ -337,7 +337,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
             *optimizer->beta1_power *= b1;
             *optimizer->beta2_power *= b2;
 
-            /* ZSFWS-OPT-FIX: LAMB优化器状态破坏修复。
+/* LAMB优化器状态破坏修复。
              * velocity_buffer存储的是梯度平方的指数移动平均(v_t = β2*v_{t-1} + (1-β2)*g²)，
              * 第一遍循环中计算完v_hat后不能覆写velocity_buffer，否则下一次step时
              * EMA输入错误。改为分配临时update_buffer存储中间结果。 */
@@ -478,7 +478,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
             float wd = optimizer->config.weight_decay;
             *optimizer->beta1_power *= b1;
 
-            /* ZSFZS-F005: 添加解耦权重衰减，与其他优化器一致 */
+/* 添加解耦权重衰减，与其他优化器一致 */
             for (i = 0; i < num_params; i++) {
                 parameters[i] *= (1.0f - lr * wd);
             }
@@ -512,7 +512,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
     return 0;
 }
 
-/* ZSFWS-023: 多参数组更新——一次更新多组独立参数（权重/偏置/门控/时间常数等） */
+/* 多参数组更新——一次更新多组独立参数（权重/偏置/门控/时间常数等） */
 int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* groups,
                                   int num_groups, size_t step)
 {
@@ -700,8 +700,8 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
             float inv_b1 = 1.0f / (1.0f - *optimizer->beta1_power);
             float inv_b2 = 1.0f / (1.0f - *optimizer->beta2_power);
 
-            /* ZSFWS-OPT-FIX: 多组LAMB状态保护。分配临时update缓冲区 */
-            /* ZSFBUILD: total_params已在函数开头计算，此处复用不重新声明 */
+/* 多组LAMB状态保护。分配临时update缓冲区 */
+/* total_params已在函数开头计算，此处复用不重新声明 */
             float* update_tmp = (float*)safe_malloc(total_params * sizeof(float));
             if (!update_tmp) { optimizer->last_error = -1; return -1; }
 
@@ -938,7 +938,7 @@ int optimizer_adamw_step(float* params, float* grads, float* m, float* v, size_t
     if (!params || !grads || !m || !v) return -1;
     float b1_corr = 1.0f - powf(beta1, (float)step);
     float b2_corr = 1.0f - powf(beta2, (float)step);
-    /* ZSFGGG-S2-006修复: 添加逐元素NaN/Inf保护，
+/* 添加逐元素NaN/Inf保护，
      * 防止单次NaN污染动量缓冲区m和v导致永久训练损坏 */
     for (size_t i = 0; i < n; i++) {
         float g = grads[i];

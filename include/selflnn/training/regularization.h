@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file regularization.h
  * @brief 高级正则化系统接口
  * 
@@ -329,7 +329,7 @@ int advanced_regularizer_apply_switchable_norm(AdvancedRegularizer* regularizer,
                                                size_t batch_size, size_t height, size_t width, size_t channels,
                                                int norm_type, int training);
 
-/* ZSFLNN-C-012修复: 集成正则化 (ADV_REG_ENSEMBLE) */
+/* 集成正则化 (ADV_REG_ENSEMBLE) */
 /**
  * @brief 应用集成正则化
  *

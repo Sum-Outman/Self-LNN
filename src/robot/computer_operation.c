@@ -1,8 +1,8 @@
-#define SELFLNN_IMPLEMENTATION 1
+﻿#define SELFLNN_IMPLEMENTATION 1
 #include "selflnn/robot/computer_operation.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/selflnn.h"
-#include "selflnn/utils/logging.h"        /* ZSFUSA: log_warn宏 */
+#include "selflnn/utils/logging.h" /* log_warn宏 */
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -10,7 +10,7 @@
 #include <time.h>
 #include <stdint.h>
 
-/* ZSFX-011: OCR全ASCII可打印字符集映射表
+/* OCR全ASCII可打印字符集映射表
  * 索引0: 未知/未识别(映射到'?')
  * 索引1-95: ASCII可打印字符(0x20-0x7E，共95个)
  * 比原来的36类(0-9,A-Z)扩展到95个可打印ASCII字符。
@@ -120,7 +120,7 @@ static int co_wayland_keypress(int key_code, int press) {
     return (rc == 0) ? 0 : -1;
 }
 
-/* ZSFLYF-P3-005修复: Wayland文本输入增加Shell元字符转义，
+/* Wayland文本输入增加Shell元字符转义，
  * 防止特殊字符被误解析为Shell命令。 */
 static int co_wayland_type_text(const char* text, size_t len) {
     if (!text || len == 0 || len > 1023) return -1;
@@ -295,7 +295,7 @@ static int global_lnn_projected_forward(COSystem* system,
     size_t lnn_input = lnn_get_input_size(lnn);
     size_t lnn_output = lnn_get_output_size(lnn);
     
-    /* 分配投影缓冲区（ZSFWS修复: 使用safe_malloc/safe_free统一内存管理API） */
+    /* 分配投影缓冲区（使用safe_malloc/safe_free统一内存管理API） */
     float* proj_input = (float*)safe_malloc(lnn_input * sizeof(float));
     float* proj_output = (float*)safe_malloc(lnn_output * sizeof(float));
     if (!proj_input || !proj_output) {
@@ -331,7 +331,7 @@ static int global_lnn_projected_forward(COSystem* system,
     /* 全局LNN前向传播 */
     int ret = lnn_forward(lnn, proj_input, proj_output);
     if (ret != 0) {
-        /* ZSFLYF-P2-012修复: safe_malloc配对safe_free，避免内存管理不一致 */
+/* safe_malloc配对safe_free，避免内存管理不一致 */
         safe_free((void**)&proj_input); safe_free((void**)&proj_output);
         return ret;
     }
@@ -361,7 +361,7 @@ static int global_lnn_projected_forward(COSystem* system,
         }
     }
     
-    /* ZSFLYF-P2-012修复: safe_malloc必须配对safe_free，不可混用free() */
+/* safe_malloc必须配对safe_free，不可混用free() */
     safe_free((void**)&proj_input);
     safe_free((void**)&proj_output);
     return 0;
@@ -2085,7 +2085,7 @@ int co_ocr_recognize(COSystem* system, const float* screen_data, size_t width, s
                 if (ocr_out[ci2] > best_char_conf) { best_char_conf = ocr_out[ci2]; best_char = ci2; }
             }
 
-            /* ZSFX-011: 使用CO_OCR_CHARSET查表解码，替代硬编码'0'+/'A'映射 */
+/* 使用CO_OCR_CHARSET查表解码，替代硬编码'0'+/'A'映射 */
             if (best_char_conf > CO_OCR_CONFIDENCE_THRESHOLD && best_char > 0 && best_char < CO_OCR_NUM_CLASSES) {
                 ocr->text[ci] = CO_OCR_CHARSET[best_char];
                 ocr->confidence += best_char_conf;
@@ -3182,7 +3182,7 @@ int co_learn_from_demo(COSystem* system, const float* screen_sequence, const COA
     return 0;
 }
 
-/* ZSFUSA: 设置计算机系统音量 */
+/* 设置计算机系统音量 */
 int co_system_set_volume(void* co_sys, float volume) {
     COSystem* ctx = (COSystem*)co_sys;
     if (!ctx) return -1;

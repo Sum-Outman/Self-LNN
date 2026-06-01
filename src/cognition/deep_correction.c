@@ -5,7 +5,7 @@
  * 增强版：贝叶斯根因诊断 + 自适应修正强度 + 多阶段验证流水线 + 模式自动学习
  *
  * ============================================================
- * 【模块职责 - ZSFWS-028 认知三模块边界】
+ * 【模块职责 - 认知三模块边界】
  * ============================================================
  * 本模块（深度修正）的核心职责：错误触发的被动式修复系统
  *
@@ -35,7 +35,7 @@
  *     建议：correction的根因分析结果可传递给reflection作为高级认知的输入
  * ============================================================
  */
-/* ZSFZS-F034: 必须在include之前定义,确保cfc_network.h完整结构可见 */
+/* 必须在include之前定义,确保cfc_network.h完整结构可见 */
 #define SELFLNN_IMPLEMENTATION
 
 #include "selflnn/cognition/deep_correction.h"
@@ -132,7 +132,7 @@ static void dc_update_cause_prior(DCErrorType type, const char* cause_name, int 
     }
 }
 
-/* ZSF-042修复: 贝叶斯预设条件概率填充。
+/*修复: 贝叶斯预设条件概率填充。
  * 根节点(num_parents=0)使用先验概率prior_prob作为基础概率。
  * cond_probs[0]=P(cause|parent_absent), cond_probs[1]=P(cause|parent_present) */
 static const struct {
@@ -202,7 +202,7 @@ DCCorrectionSystem* dc_correction_create(void) {
     dcs->verification_pipeline[2] = DC_VERIFY_EXECUTION;
     dcs->verification_pipeline[3] = DC_VERIFY_EFFECT;
 
-    /* S-015+M-013+ZSFX-021修复: 预置修正规则（含动态权重学习）
+    /* S-015+M-013+预置修正规则（含动态权重学习）
      * - 初始success_rate基于规则类型预设的先验成功率
      * - usage_count追踪使用次数，成功数越多权重越高
      * - 当规则成功应用N次后自动提升weight
@@ -321,7 +321,7 @@ int dc_bayesian_diagnose(DCCorrectionSystem* dcs, int error_id, DCDiagnosisResul
     }
     if (!target_error) return -1;
 
-    /* ZSFEEE-FIX-002: 拉普拉斯频域分析 → 错误特征频谱诊断
+/* 拉普拉斯频域分析 → 错误特征频谱诊断
      * 在贝叶斯诊断前对错误特征向量进行拉普拉斯频域分析，
      * 频谱稳定性高 → 错误偏向系统性（先验概率应偏向已知模式）；
      * 频谱稳定性低 → 错误偏向随机性（先验概率应更均等分布）。 */
@@ -380,7 +380,7 @@ int dc_bayesian_diagnose(DCCorrectionSystem* dcs, int error_id, DCDiagnosisResul
         prior *= (1.0f + target_error->severity * 0.3f);
         if (prior > 0.99f) prior = 0.99f;
 
-        /* ZSFEEE-FIX-002: 拉普拉斯频域稳定性调整先验概率
+/* 拉普拉斯频域稳定性调整先验概率
          * 高稳定性 → 错误偏向系统性，增强先验置信度
          * 低稳定性 → 错误偏向随机性，降低先验向均等分布靠拢 */
         {
@@ -662,7 +662,7 @@ float dc_adaptive_strength(DCCorrectionSystem* dcs, int hypothesis_id) {
  * 四阶段流水线：语法验证 → 逻辑验证 → 执行验证 → 效果验证
  * 每个阶段输出 0.0~1.0 的分数和通过/失败状态
  */
-int dc_validate_multi_stage(DCCorrectionSystem* dcs, int hypothesis_id, DCVerificationStage stages[], int stage_count, float* scores, int* stage_results) {
+int dc_validate_multi_stage(DCCorrectionSystem* dcs, int hypothesis_id, DCVerificationStage* stages, int stage_count, float* scores, int* stage_results) {
     if (!dcs || !scores || !stage_results) return -1;
 
     /* 查找假设 */
@@ -1236,7 +1236,7 @@ int dc_extract_rule(DCCorrectionSystem* dcs, int error_id) {
 }
 
 /*
- * ZSFX-021: detect_new_error_pattern — 修正失败时动态生成新候选规则
+ *: detect_new_error_pattern — 修正失败时动态生成新候选规则
  *
  * 当已有规则匹配失败（dc_apply_correction返回-1）或规则success_rate持续下降时调用。
  * 使用以下策略生成新规则：
@@ -1433,7 +1433,7 @@ int dc_get_rules(const DCCorrectionSystem* dcs, DCCorrectionRule* out, int max_c
 }
 
 /* ================================================================
- * ZSFZS-F027: 修正结果到LNN权重的实际应用通道
+ *: 修正结果到LNN权重的实际应用通道
  *
  * 将自我修正系统的文本修正建议转化为LNN输出投影层的SGD微调。
  * 解决修正假设仅停留在文本层面、不产生实际模型效果的问题。
@@ -1458,7 +1458,7 @@ static int dc_apply_correction_to_lnn(const DCCorrectionHypothesis* hyp) {
     }
 
     /* 获取全局共享LNN实例 */
-    void* raw_ptr = selflnn_get_shared_lnn();
+    void* raw_ptr = selflnn_get_shared_lnn;
     if (!raw_ptr) return -3;
     LNN* lnn = (LNN*)raw_ptr;
 
@@ -1575,7 +1575,7 @@ static int dc_apply_correction_to_lnn(const DCCorrectionHypothesis* hyp) {
  *   Step2: dc_diagnose → 分析根因（贝叶斯+规则融合）
  *   Step3: dc_generate → 生成修正方案
  *   Step4: dc_apply → 应用修正（标记已解决）
- *   ZSFZS-F027: Step4.5 → dc_apply_correction_to_lnn() 
+ *: Step4.5 → dc_apply_correction_to_lnn 
  *               将高置信度修正转为LNN输出投影层权重微调
  *   Step5: dc_verify → 验证修正效果
  * ================================================================ */
@@ -1612,7 +1612,7 @@ int dc_run_full_correction_pipeline(DCCorrectionSystem* dcs,
     int applied = dc_apply_correction(dcs, hyps[0].hypothesis_id);
     if (applied != 0) return -1;
 
-    /* ZSFZS-F027: 将高置信度修正转化为LNN输出投影层权重微调
+/* 将高置信度修正转化为LNN输出投影层权重微调
      * 仅当置信度>0.7时执行，使用极小学习率(0.001*confidence)防止破坏已知权重 */
     dc_apply_correction_to_lnn(&hyps[0]);
 

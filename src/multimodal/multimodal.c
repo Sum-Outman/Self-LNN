@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file multimodal.c
  * @brief 多模态处理器核心实现 —— 单一LNN液态神经网络驱动
  *
@@ -8,7 +8,7 @@
 
 #include "selflnn/multimodal/multimodal.h"
 #include "selflnn/multimodal/image_recognition_deep.h"
-#include "selflnn/multimodal/multimodal_integration.h" /* ZSFWS-005: 统一融合管道 */
+#include "selflnn/multimodal/multimodal_integration.h" /* 统一融合管道 */
 #include "selflnn/multimodal/multimodal_unified_input.h" /* SELFLNN_MAX_MODALITIES */
 #include "selflnn/multimodal/liquid_vision.h"            /* H-010: CfC液态视觉管道 */
 #include "selflnn/core/unified_lnn_state.h"
@@ -517,7 +517,7 @@ int multimodal_process_audio(MultimodalProcessor* processor, const AudioData* au
         }
     }
 
-    /* ZSFABC-F004修复: 完整MFCC实现，含梅尔滤波器组+DCT
+/* 完整MFCC实现，含梅尔滤波器组+DCT
      * 替代之前的分段log能量近似 */
     if (feature_idx < max_features && num_samples >= 512) {
         int mfcc_coeffs = 12;
@@ -530,7 +530,7 @@ int multimodal_process_audio(MultimodalProcessor* processor, const AudioData* au
         float power_spectrum[256];
         int num_bins = fft_n / 2;
         
-        /* ZSFABC修复: 完整DFT功率谱估计（直接傅里叶变换，非简化版本） */
+/* 完整DFT功率谱估计（直接傅里叶变换，非简化版本） */
         for (int k = 0; k < num_bins && k < 256; k++) {
             float real = 0.0f, imag = 0.0f;
             for (int n = 0; n < fft_n; n++) {
@@ -864,7 +864,7 @@ int multimodal_process_sensor(MultimodalProcessor* processor, const MultimodalSe
 }
 
 /**
- * ZSFWS-005修复: 融合多模态特征 —— 真CfC ODE跨模态统一演化
+ *修复: 融合多模态特征 —— 真CfC ODE跨模态统一演化
  *
  * 需求要求"所有模态→统一输入到同一个连续动态系统→统一状态演化→统一输出"。
  * 原实现为独立4步Euler+简单拼接，完全无法实现跨模态交互。
@@ -882,7 +882,7 @@ int multimodal_fuse_features(MultimodalProcessor* processor,
                  "融合特征缓冲区大小无效: %zu", max_fused_features);
     SELFLNN_CHECK_INITIALIZED(processor, "多模态处理器未初始化");
 
-    /* ZSFWS-005: 收集活跃模态数据，调用统一CfC ODE融合管道 */
+/* 收集活跃模态数据，调用统一CfC ODE融合管道 */
     const float* modality_data[SELFLNN_MAX_MODALITIES] = {NULL};
     int modality_dims[SELFLNN_MAX_MODALITIES] = {0};
     int active_count = 0;

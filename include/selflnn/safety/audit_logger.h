@@ -1,4 +1,4 @@
-#ifndef SELFLNN_AUDIT_LOGGER_H
+﻿#ifndef SELFLNN_AUDIT_LOGGER_H
 #define SELFLNN_AUDIT_LOGGER_H
 
 #include <stddef.h>
@@ -177,7 +177,7 @@ typedef enum {
     AUDIT_COMPLIANCE_CUSTOM
 } AuditComplianceType;
 
-/* ZSFX-FIX: 审计数据类别（M-004合规检查按数据源区分） */
+/* 审计数据类别（M-004合规检查按数据源区分） */
 typedef enum {
     AUDIT_DATA_ACCESS_LOG = 0,      /**< 访问日志 */
     AUDIT_DATA_CONFIG_CHANGE = 1,   /**< 配置变更 */
@@ -185,7 +185,7 @@ typedef enum {
     AUDIT_DATA_ERROR_LOG = 3        /**< 错误日志 */
 } AuditDataCategory;
 
-/* ZSFX-FIX: 审计统一日志事件类型 */
+/* 审计统一日志事件类型 */
 typedef enum {
     AUDIT_EVENT_ACCESS_VIOLATION = 0, /**< 访问违规 */
     AUDIT_EVENT_CONFIG_MODIFY = 1,    /**< 配置修改 */
@@ -194,19 +194,19 @@ typedef enum {
     AUDIT_EVENT_SYSTEM_ERROR = 3      /**< 系统严重错误（同ERROR_OCCURRENCE） */
 } AuditUnifiedEventType;
 
-/* ZSFX-FIX: 审计记录授权状态 */
+/* 审计记录授权状态 */
 typedef enum {
     AUDIT_STATUS_OK = 0,              /**< 正常/已授权 */
     AUDIT_STATUS_AUTHORIZED = 0,      /**< 已授权（同OK） */
     AUDIT_STATUS_UNAUTHORIZED = 1     /**< 未授权 */
 } AuditAuthorizationStatus;
 
-/* ZSFX-FIX: 统一审计日志记录（供M-004合规检查使用） */
+/* 统一审计日志记录（供M-004合规检查使用） */
 typedef struct {
     long id;
     time_t timestamp;
     AuditUnifiedEventType event_type;
-    AuditDataCategory data_type;       /**< ZSFX-FIX: 所属数据类别 */
+    AuditDataCategory data_type; /**< 所属数据类别 */
     AuditAuthorizationStatus status;
     char source[128];
     char detail[256];
@@ -216,7 +216,7 @@ typedef struct {
 typedef struct {
     int rule_id;
     AuditComplianceType type;
-    AuditDataCategory data_type;     /**< ZSFX-FIX: 关联的数据类别 */
+    AuditDataCategory data_type; /**< 关联的数据类别 */
     char rule_name[64];
     char description[256];
     char requirement[512];

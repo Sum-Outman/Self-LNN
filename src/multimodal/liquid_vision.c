@@ -285,7 +285,7 @@ static int _extract_patches(const float* image, int width, int height, int chann
     return patch_idx;
 }
 
-/* Xavier均匀初始化 - ZSFWS修复 P2-010: 统一使用secure_random_float()替代乘法PRNG */
+/* Xavier均匀初始化 -  P2-010: 统一使用secure_random_float替代乘法PRNG */
 static void _xavier_init(float* data, int rows, int cols, unsigned int* seed) {
     float scale = sqrtf(6.0f / (float)(rows + cols));
     (void)seed;  /* seed参数保留兼容，secure_random_float内部自行管理熵源 */
@@ -1435,7 +1435,7 @@ static MutexHandle g_registry_singleton_lock = NULL;
 
 static void _registry_lock_init(void) {
     if (!g_registry_singleton_lock) {
-        g_registry_singleton_lock = mutex_create();
+        g_registry_singleton_lock = mutex_create;
     }
 }
 
@@ -1447,7 +1447,7 @@ VisionClassRegistry* vision_class_registry_create(void) {
     reg->entries = (VisionClassEntry*)safe_calloc((size_t)reg->capacity, sizeof(VisionClassEntry));
     if (!reg->entries) { safe_free((void**)&reg); return NULL; }
 
-    reg->lock = mutex_create();
+    reg->lock = mutex_create;
     if (!reg->lock) {
         safe_free((void**)&reg->entries); safe_free((void**)&reg);
         return NULL;
@@ -1478,11 +1478,11 @@ void vision_class_registry_free(VisionClassRegistry* registry) {
 }
 
 VisionClassRegistry* vision_class_registry_get_global(void) {
-    _registry_lock_init();
+    _registry_lock_init;
     if (g_registry_singleton_lock) mutex_lock(g_registry_singleton_lock);
 
     if (!g_global_class_registry) {
-        g_global_class_registry = vision_class_registry_create();
+        g_global_class_registry = vision_class_registry_create;
     }
 
     VisionClassRegistry* result = g_global_class_registry;
@@ -1574,7 +1574,7 @@ int vision_class_add_samples(VisionClassRegistry* registry, int class_id, int co
 }
 
 const char* vision_get_class_name_zh(int class_id) {
-    VisionClassRegistry* reg = vision_class_registry_get_global();
+    VisionClassRegistry* reg = vision_class_registry_get_global;
     if (!reg) return "未知";
 
     VisionClassEntry entry;
@@ -1585,7 +1585,7 @@ const char* vision_get_class_name_zh(int class_id) {
 }
 
 const char* vision_get_class_name_en(int class_id) {
-    VisionClassRegistry* reg = vision_class_registry_get_global();
+    VisionClassRegistry* reg = vision_class_registry_get_global;
     if (!reg) return "unknown";
 
     VisionClassEntry entry;
@@ -2204,7 +2204,7 @@ struct CfcOdeLayer {
     int hidden_state_initialized;
     size_t forward_count;
     float total_forward_time_ms;
-    /* ZSFQQ-Q018: Adam优化器状态 - 完整ODE伴随法反向传播 */
+/* Adam优化器状态 - 完整ODE伴随法反向传播 */
     float* m_w_input;      float* v_w_input;
     float* m_w_hidden;     float* v_w_hidden;
     float* m_b_hidden;     float* v_b_hidden;
@@ -2331,7 +2331,7 @@ CfcOdeLayer* cfc_ode_layer_create(const CfcOdeLayerConfig* config) {
         layer->tau_bias = 0.0f;
     }
 
-    /* ZSFQQ-Q018: 初始化Adam优化器状态 */
+/* 初始化Adam优化器状态 */
     {
         size_t wc_in_hid = (size_t)input_dim * (size_t)hidden_dim;
         size_t wc_hid_hid = (size_t)hidden_dim * (size_t)hidden_dim;
@@ -2375,7 +2375,7 @@ void cfc_ode_layer_free(CfcOdeLayer* layer) {
     safe_free((void**)&layer->tau_weights);
     safe_free((void**)&layer->state_buffer);
     safe_free((void**)&layer->hidden_state_persistent);
-    /* ZSFQQ-Q018: 释放Adam优化器状态 */
+/* 释放Adam优化器状态 */
     safe_free((void**)&layer->m_w_input);
     safe_free((void**)&layer->v_w_input);
     safe_free((void**)&layer->m_w_hidden);
@@ -2397,7 +2397,7 @@ void cfc_ode_layer_free(CfcOdeLayer* layer) {
 
 int cfc_ode_layer_forward(CfcOdeLayer* layer, const float* input, float* output) {
     if (!layer || !layer->is_initialized || !input || !output) return -1;
-    uint64_t start = perf_timestamp_ns();
+    uint64_t start = perf_timestamp_ns;
 
     const int input_dim = layer->config.input_dim;
     const int hidden_dim = layer->config.hidden_dim;
@@ -2480,7 +2480,7 @@ int cfc_ode_layer_forward(CfcOdeLayer* layer, const float* input, float* output)
     /* 保存持久状态 */
     memcpy(layer->hidden_state_persistent, output, (size_t)hidden_dim * sizeof(float));
 
-    uint64_t end = perf_timestamp_ns();
+    uint64_t end = perf_timestamp_ns;
     layer->total_forward_time_ms += (float)(end - start) / 1000000.0f;
     layer->forward_count++;
 
@@ -2525,7 +2525,7 @@ int cfc_ode_layers_forward(CfcOdeLayer** layers, int num_layers,
     return 0;
 }
 
-/* ZSFQQ-Q018: 完整CfC ODE伴随法反向传播 + Adam优化器
+/* 完整CfC ODE伴随法反向传播 + Adam优化器
  * 替代原来的"简化反向传播：基于输出梯度直接更新权重"。
  * 
  * CfC ODE方程重述（用于梯度推导）：
@@ -2581,7 +2581,7 @@ int cfc_ode_layer_backward(CfcOdeLayer* layer,
     const float* h_prev = layer->hidden_state_persistent;
     if (!layer->hidden_state_initialized) return -1;
 
-    /* ZSFQQ-Q018: 重新计算前向中间值（ODE伴随法需要中间激活） */
+/* 重新计算前向中间值（ODE伴随法需要中间激活） */
     float* linear = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
     float* gate_logit = (float*)safe_malloc((size_t)hidden_dim * sizeof(float));
     if (!linear || !gate_logit) {
@@ -2938,7 +2938,7 @@ int cfc_vision_extract_features(CfcVisionProcessor* processor,
     if (width != processor->config.image_width || height != processor->config.image_height ||
         channels != processor->config.image_channels) return -1;
 
-    uint64_t start_time = perf_timestamp_ns();
+    uint64_t start_time = perf_timestamp_ns;
     const int patch_size = processor->config.patch_size;
     const int img_channels = processor->config.image_channels;
     const int proj_dim = processor->proj_hidden_dim;
@@ -2984,7 +2984,7 @@ int cfc_vision_extract_features(CfcVisionProcessor* processor,
 
     memcpy(features, processor->pooled_feature, (size_t)proj_dim * sizeof(float));
 
-    uint64_t end_time = perf_timestamp_ns();
+    uint64_t end_time = perf_timestamp_ns;
     processor->total_processing_time_ms += (float)(end_time - start_time) / 1000000.0f;
     processor->total_images_processed++;
     return proj_dim;
@@ -3204,7 +3204,7 @@ int cfc_vision_save_processor(CfcVisionProcessor* processor, const char* filenam
     FILE* fp = fopen(filename, "wb");
     if (!fp) return -1;
 
-    const char magic[] = "CFCVISION";
+    const char magic = "CFCVISION";
     if (fwrite(magic, 1, 8, fp) != 8) { fclose(fp); return -1; }
     if (fwrite(&processor->config, sizeof(CfcVisionConfig), 1, fp) != 1) { fclose(fp); return -1; }
 
@@ -3397,8 +3397,8 @@ int cfc_vision_train_network(CfcVisionProcessor* processor,
             idx = indices[s];
             const float* sample_img = training_images + (size_t)idx * processor->config.image_width * processor->config.image_height * processor->config.image_channels;
 
-            /* ZSFWS-011修复: 逐层前向传播，保存每层输入供反向传播使用。
-             * 原代码调用cfc_vision_extract_features()做全层前向，但丢失了中间激活，
+/* 逐层前向传播，保存每层输入供反向传播使用。
+             * 原代码调用cfc_vision_extract_features做全层前向，但丢失了中间激活，
              * 导致反向传播传入NULL input，训练完全无效。 */
             /* 步骤1: 使用第一个patch做层级别前向传播，保存每层输入 */
             int patch_size = processor->config.patch_size;
@@ -3434,7 +3434,7 @@ int cfc_vision_train_network(CfcVisionProcessor* processor,
                 for (d = 0; d < proj_dim; d++) single_patch_feat[d] = tanhf(single_patch_feat[d]);
             }
 
-            /* 逐层前向传播，保存每层输入到 layer_inputs[] */
+            /* 逐层前向传播，保存每层输入到 layer_inputs */
             {
                 float* current = single_patch_feat;
                 int current_dim = proj_dim;
@@ -3462,7 +3462,7 @@ int cfc_vision_train_network(CfcVisionProcessor* processor,
             }
             epoch_loss += sample_loss / (float)feat_dim;
 
-            /* 步骤3: 逐层反向传播，使用保存的 layer_inputs[] */
+            /* 步骤3: 逐层反向传播，使用保存的 layer_inputs */
             for (l = num_layers - 1; l >= 0; l--) {
                 if (!processor->ode_layers[l]) continue;
                 int ret = cfc_ode_layer_backward(processor->ode_layers[l], loss_grad,
@@ -3725,7 +3725,7 @@ struct LiquidVisionProcessor {
 
     int cnn_weights_initialized;  /* CNN权重是否已He初始化 */
     int cnn_weights_loaded;       /* CNN权重是否已从文件加载 */
-    int is_trained;               /* ZSFWS-S005: 模型是否已完成训练（默认0，加载权重后置1） */
+    int is_trained; /* 模型是否已完成训练（默认0，加载权重后置1） */
 };
 
 LiquidVisionProcessor* liquid_vision_processor_create(const LiquidVisionConfig* config) {
@@ -3865,7 +3865,7 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
     if (!processor || !data || !features || max_features == 0) return -1;
     if (width <= 0 || height <= 0 || channels <= 0) return -1;
 
-    /* ZSFWS-S005修复: 未训练保护的液态视觉管线
+/* 未训练保护的液态视觉管线
      * 检查模型是否已完成训练（权重从文件加载或通过直接训练获得）
      * 未训练状态下使用随机权重会产生随机输出，对自主学习和决策造成严重误导 */
     int is_ready = processor->is_trained ||
@@ -3891,7 +3891,7 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
         }
     }
 
-    /* ZSFWS-S005修复: 兼容路径同样需要训练状态保护 */
+/* 兼容路径同样需要训练状态保护 */
     if (processor->config.enable_cfc && is_ready) {
         if (!processor->cfc_compat_processor) {
             CfcVisionConfig cv_cfg = cfc_vision_get_default_config();
@@ -3908,7 +3908,7 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
         }
     }
 
-    /* ZSFWS-S005: CfC路径不可用时（未训练），进入传统CV特征提取
+/* CfC路径不可用时（未训练），进入传统CV特征提取
      * 仅在CfC未就绪时使用，返回特征维度而非空数据 */
     if (!is_ready) {
         return _vision_extract_traditional_cv(data, width, height, channels,
@@ -4251,7 +4251,7 @@ int lv_save_weights(const LiquidVisionProcessor* processor, const char* filepath
     const int KK = LV_CNN_KERNEL * LV_CNN_KERNEL;
 
     /* 写入魔数标识 */
-    const char magic[] = "LVCNNv01";
+    const char magic = "LVCNNv01";
     if (fwrite(magic, 1, 8, fp) != 8) { fclose(fp); return -1; }
 
     /* 写入架构常量（便于加载时校验） */
@@ -4386,7 +4386,7 @@ int lv_load_weights(LiquidVisionProcessor* processor, const char* filepath) {
 
     fclose(fp);
     processor->cnn_weights_loaded = 1;
-    processor->is_trained = 1; /* ZSFWS-S005: 权重加载成功后标记为已训练 */
+    processor->is_trained = 1; /* 权重加载成功后标记为已训练 */
     return 0;
 }
 

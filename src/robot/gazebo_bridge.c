@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gazebo_bridge.c
  * @brief SELF-LNN 与 Gazebo 的桥接实现 — F-003修复: 使用真实gz CLI命令
  *
@@ -26,7 +26,7 @@ struct GazeboBridge {
     GazeboConnectionState state;
     FILE* process_in;
     FILE* process_out;
-    /* ZSFLYF-P2-016修复: popen模式下process_handle不可用(Win32 HANDLE/POSIX pid_t)，
+/* popen模式下process_handle不可用(Win32 HANDLE/POSIX pid_t)，
      * 改用pclose等待+WIFEXITED/WEXITSTATUS检测进程退出状态。
      * 健康检查通过feof/ferror检测管道断开，关闭时通过pclose获取退出码。 */
     void* process_handle;

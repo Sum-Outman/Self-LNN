@@ -1,4 +1,4 @@
-#ifndef SELFLNN_DATA_LOADERS_H
+﻿#ifndef SELFLNN_DATA_LOADERS_H
 #define SELFLNN_DATA_LOADERS_H
 
 #include <stddef.h>
@@ -37,11 +37,11 @@ typedef struct TrainingDataset {
     size_t epoch;                  /**< 当前epoch */
     int is_loaded;                 /**< 是否已加载 */
     int is_shuffled;               /**< 是否已打乱 */
-    int is_training_data;          /**< ZSFZS-F029: 训练/验证模式标记(1=训练,0=验证),增强函数据此跳过验证集 */
+    int is_training_data; /**< 训练/验证模式标记(1=训练,0=验证),增强函数据此跳过验证集 */
     char file_path[512];
 } TrainingDataset;
 
-/* ZSFX-DEEP-R14-001: DatasetStats类型移到头文件供backend.c等多模块使用 */
+/* DatasetStats类型移到头文件供backend.c等多模块使用 */
 typedef struct {
     size_t num_samples;
     size_t input_dim;

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file ros_gazebo_bridge.c
  * @brief 真实ROS Gazebo桥接实现 —— 通过rosbridge WebSocket协议与Gazebo通信
  *
@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <time.h>
 
-/* ZSFZS-F022修复: 网络相关头文件 */
+/* 网络相关头文件 */
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -85,7 +85,7 @@ struct RosGazeboBridge {
         char model_name[64];
     } cached_model_state;
 
-    /* ZSFX-003修复: 激光扫描缓存 —— 从Gazebo /scan话题获取真实激光数据 */
+/* 激光扫描缓存 —— 从Gazebo /scan话题获取真实激光数据 */
     struct {
         float ranges[360];
         float angle_min;
@@ -98,7 +98,7 @@ struct RosGazeboBridge {
         double timestamp;
     } cached_laserscan;
 
-    /* ZSFX-003修复: IMU缓存 —— 从Gazebo /imu话题获取真实姿态数据 */
+/* IMU缓存 —— 从Gazebo /imu话题获取真实姿态数据 */
     struct {
         float orientation[4];
         float angular_velocity[3];
@@ -107,7 +107,7 @@ struct RosGazeboBridge {
         double timestamp;
     } cached_imu;
 
-    /* ZSFQQ-Q020修复: 相机图像缓存 —— 从Gazebo /camera/image_raw话题获取真实图像数据 */
+/* 相机图像缓存 —— 从Gazebo /camera/image_raw话题获取真实图像数据 */
     const void* cached_image_data;
     size_t cached_image_length;
 
@@ -117,7 +117,7 @@ struct RosGazeboBridge {
     int error_code;
 };
 
-/* ZSFLYF-P1-009修复: 增强JSON解析器，支持按层级定位字段。
+/* 增强JSON解析器，支持按层级定位字段。
  * 原实现使用简单strstr查找键名，在Gazebo嵌套JSON中
  * position.x和orientation.x会混淆。现在先定位父级对象再在范围内搜索。 */
 
@@ -179,7 +179,7 @@ static void gazebo_model_states_callback(const void* msg, size_t msg_size, void*
 
     const char* json = (const char*)msg;
     const char* pos_end = NULL;
-    /* ZSFLYF-P1-009修复: 使用分级JSON解析，在"position"区块内搜索x/y/z */
+/* 使用分级JSON解析，在"position"区块内搜索x/y/z */
     json_extract_float_in_section(json, "\"position\"", "\"x\"",
         &bridge->cached_model_state.position[0], &pos_end);
     json_extract_float_in_section(json, "\"position\"", "\"y\"",
@@ -219,7 +219,7 @@ static void gazebo_link_states_callback(const void* msg, size_t msg_size, void* 
     if (!bridge || !msg || msg_size == 0) return;
 
     const char* json = (const char*)msg;
-    /* ZSFLYF-P1-009修复: 使用分级JSON解析 */
+/* 使用分级JSON解析 */
     json_extract_float_in_section(json, "\"position\"", "\"x\"",
         &bridge->cached_odom.position[0], NULL);
     json_extract_float_in_section(json, "\"position\"", "\"y\"",
@@ -405,8 +405,8 @@ int ros_gazebo_bridge_connect(RosGazeboBridge* bridge) {
         return -1;
     }
 
-    /* ZSFWXJ-FIX007修复: 使用真实JSON解析回调替代NULL，Gazebo数据现在会填充缓存 */
-    /* ZSFZS-F022修复: 显式类型转换以兼容MSVC调用约定 */
+/* 使用真实JSON解析回调替代NULL，Gazebo数据现在会填充缓存 */
+/* 显式类型转换以兼容MSVC调用约定 */
     ros_node_subscribe(bridge->ros_node, bridge->model_states_topic,
                       "gazebo_msgs/ModelStates",
                       (RosMessageCallback)gazebo_model_states_callback, bridge);
@@ -811,7 +811,7 @@ int ros_gazebo_bridge_get_link_info(RosGazeboBridge* bridge, int robot_id,
         memcpy(info->pose_orientation, bridge->cached_model_state.orientation, 4 * sizeof(float));
         memcpy(info->velocity_linear, bridge->cached_model_state.linear_vel, 3 * sizeof(float));
         memcpy(info->velocity_angular, bridge->cached_model_state.angular_vel, 3 * sizeof(float));
-        /* ZSFBUILD: robot_id不在RosGazeboLinkInfo中，跳过 */
+/* robot_id不在RosGazeboLinkInfo中，跳过 */
         if (link_name) {
             size_t name_len = strlen(link_name);
             if (name_len < sizeof(info->name)) {
@@ -923,7 +923,7 @@ int ros_gazebo_bridge_publish_odometry(RosGazeboBridge* bridge, int robot_id) {
     if (!bridge || !bridge->connected) return -1;
     if (!bridge->ros_node) return -1;
 
-    /* ZSFX-003修复: 当Gazebo已连接且有真实里程计缓存数据时，发布真实里程计 */
+/* 当Gazebo已连接且有真实里程计缓存数据时，发布真实里程计 */
     ros_node_spin_once(bridge->ros_node);
 
     if (!bridge->cached_odom.has_data) {
@@ -964,7 +964,7 @@ int ros_gazebo_bridge_publish_joint_states(RosGazeboBridge* bridge, int robot_id
     if (!bridge || !bridge->connected) return -1;
     if (!bridge->ros_node) return -1;
 
-    /* ZSFX-003修复: 当Gazebo已连接且有真实关节状态缓存数据时，发布真实关节状态 */
+/* 当Gazebo已连接且有真实关节状态缓存数据时，发布真实关节状态 */
     ros_node_spin_once(bridge->ros_node);
 
     if (!bridge->cached_joint_state.has_data) {
@@ -1010,7 +1010,7 @@ int ros_gazebo_bridge_publish_laserscan(RosGazeboBridge* bridge, int sensor_id) 
     if (!bridge || !bridge->connected) return -1;
     if (!bridge->ros_node) return -1;
 
-    /* ZSFX-003修复: 当Gazebo已连接且有真实激光扫描缓存数据时，发布真实激光扫描 */
+/* 当Gazebo已连接且有真实激光扫描缓存数据时，发布真实激光扫描 */
     ros_node_spin_once(bridge->ros_node);
 
     if (!bridge->cached_laserscan.has_data) {
@@ -1046,7 +1046,7 @@ int ros_gazebo_bridge_publish_imu(RosGazeboBridge* bridge, int sensor_id) {
     if (!bridge || !bridge->connected) return -1;
     if (!bridge->ros_node) return -1;
 
-    /* ZSFX-003修复: 当Gazebo已连接且有真实IMU缓存数据时，发布真实IMU数据 */
+/* 当Gazebo已连接且有真实IMU缓存数据时，发布真实IMU数据 */
     ros_node_spin_once(bridge->ros_node);
 
     if (!bridge->cached_imu.has_data) {
@@ -1081,7 +1081,7 @@ int ros_gazebo_bridge_publish_camera(RosGazeboBridge* bridge, int sensor_id) {
     if (!bridge || !bridge->connected) return -1;
     if (!bridge->ros_node) return -1;
 
-    /* ZSFQQ-Q020修复: 优先使用Gazebo真实相机数据，无数据时返回错误而非生成合成数据 */
+/* 优先使用Gazebo真实相机数据，无数据时返回错误而非生成合成数据 */
     if (bridge->cached_image_data && bridge->cached_image_length > 0) {
         /* 使用Gazebo订阅的真实相机数据 */
         int result = ros_node_publish(bridge->ros_node, "/camera/image_raw",

@@ -1,8 +1,8 @@
-/**
+﻿/**
  * @file imitation_deep.c
  * @brief 模仿学习深度增强完整实现
  *
- * ZSFWS-M004: 角色说明 —— 本文件提供独立公开BC训练器(im_behavioral_clone_train)
+ *: 角色说明 —— 本文件提供独立公开BC训练器(im_behavioral_clone_train)
  * 及深度增强的IRL/DAgger/BC+算法实现，可通过imitation_learning.h间接调用。
  * 与imitation_learning.c(163KB GAIL/IRL/DAgger主实现)形成互补关系：
  * imitation_deep.c负责增强算法实现，imitation_learning.c负责标准框架+公开API暴露。
@@ -12,7 +12,7 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
-#include "selflnn/learning/reinforcement_learning.h" /* ZSFUSA: RL_CLAMP宏 */
+#include "selflnn/learning/reinforcement_learning.h" /* RL_CLAMP宏 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -23,7 +23,7 @@ struct ImitationDeepLearner {
     ImDemonstration current_demo;
     LNN* irl_network;
     LNN* bc_network;
-    LNN* policy_network;        /* ZSF-ZNB修复H-005: IRL策略优化网络 */
+    LNN* policy_network;
     float* observation_buffer;
     int obs_pos;
     int obs_capacity;
@@ -44,7 +44,7 @@ void imitation_deep_free(ImitationDeepLearner* idl) {
     if (!idl) return;
     if (idl->irl_network) lnn_free(idl->irl_network);
     if (idl->bc_network) lnn_free(idl->bc_network);
-    if (idl->policy_network) lnn_free(idl->policy_network); /* ZSF-ZNB修复H-005 */
+    if (idl->policy_network) lnn_free(idl->policy_network);
     safe_free((void**)&idl->observation_buffer);
     if (idl->current_demo.trajectory.waypoints) safe_free((void**)&idl->current_demo.trajectory.waypoints);
     if (idl->current_demo.trajectory.encoded_trajectory) safe_free((void**)&idl->current_demo.trajectory.encoded_trajectory);
@@ -73,7 +73,7 @@ int im_load_demonstration(ImitationDeepLearner* idl, const float* joint_data, in
             kf->joint_velocities[j] = (src_frame > 0) ?
                 joint_data[src_frame * joints + j] - joint_data[(src_frame - 1) * joints + j] : 0.0f;
         }
-        /* ZSFLYF-P2-008修复: 末端执行器位置计算。
+/* 末端执行器位置计算。
          * 优先使用正向运动学精确计算，无运动学模型时使用腕部关节近似。
          * 腕部最后3个关节在典型6-DOF机械臂中对应roll/pitch/yaw腕部，
          * 可作为末端执行器位置的合理近似。 */
@@ -82,7 +82,7 @@ int im_load_demonstration(ImitationDeepLearner* idl, const float* joint_data, in
             kf->end_effector[0] = joint_data[src_frame * joints + joints - 3];
             kf->end_effector[1] = joint_data[src_frame * joints + joints - 2];
             kf->end_effector[2] = joint_data[src_frame * joints + joints - 1];
-            /* ZSFNO1-P2-010: 当KinematicModel可用时，使用forward_kinematics_full()计算精确末端位姿。
+/* 当KinematicModel可用时，使用forward_kinematics_full()计算精确末端位姿。
              * 需要在DemoRecording中添加KinematicModel*字段，通过URDF/D-H参数构建模型。
              * 当前腕部关节近似在6-DOF机械臂演示学习中精度可接受，训练后可增强。 */
         }
@@ -370,7 +370,7 @@ int im_irl_infer_reward(ImitationDeepLearner* idl, const ImDemonstration* demo, 
                 float loss = 0.0f;
                 lnn_backward(idl->irl_network, lnn_target, &loss);
 
-                /* ZSFQQ-Q026: 使用Adam优化器替代原始SGD。
+/* 使用Adam优化器替代原始SGD。
                  * lnn_backward已计算梯度累积，此处通过Adam更新参数。
                  * 简单的 params[p] -= lr * grads[p] 忽略了动量和自适应学习率。 */
                 float* params = lnn_get_parameters(idl->irl_network);
@@ -536,7 +536,7 @@ int im_irl_train(ImitationDeepLearner* idl, ImDemonstration* demos, int demo_cou
     return 0;
 }
 
-/* ZSF-ZNB修复H-005: IRL完成后执行策略优化
+/*修复H-005: IRL完成后执行策略优化
  * 在学习到的奖励函数上训练一个策略网络。
  * 使用REINFORCE风格策略梯度：
  *   1. 用当前策略采样动作
@@ -676,7 +676,6 @@ int im_process_observation(ImitationDeepLearner* idl, const float* joint_positio
                 for (int i = 0; i < action_dim && i < IM_MAX_JOINTS; i++)
                     action_output[i] = lnn_output[i];
             } else {
-                /* ZSFWS修复 P2-009: LNN前向失败时使用零阶保持，不做线性缩放推断 */
                 for (int i = 0; i < action_dim && i < copy; i++)
                     action_output[i] = joint_positions[i];
             }
@@ -684,7 +683,6 @@ int im_process_observation(ImitationDeepLearner* idl, const float* joint_positio
         }
         safe_free((void**)&lnn_input);
     } else {
-        /* ZSFWS修复 P2-009: 未训练时使用零阶保持（保持当前位置），不做线性推断 */
         for (int i = 0; i < action_dim && i < copy; i++)
             action_output[i] = joint_positions[i];
     }

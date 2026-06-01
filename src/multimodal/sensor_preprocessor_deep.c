@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file sensor_preprocessor_deep.c
  * @brief 传感器预处理深度实现：EKF/UKF/ESKF/粒子滤波/信息滤波
  *
@@ -1716,7 +1716,7 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
     eskf_cfg.nom_state_dim = (int)(state_dim > 16 ? state_dim : 16);
     eskf_cfg.error_state_dim = 15;
     eskf_cfg.obs_dim = (int)obs_dim;
-    /* ZSFWS-M007修复: use_cfc_transition 默认值改为0
+/* use_cfc_transition 默认值改为0
      * 标准IMU运动学(陀螺仪+加速度计积分)本身具备确定性姿态估计能力
      * CfC ODE叠加随机权重(未训练时)只会引入微小噪声扰动，长期运行产生漂移
      * 仅在CfC权重已完成训练后才启用此增强路径 */
@@ -1734,7 +1734,7 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
     pf_cfg.process_noise_std = 0.01f;
     pf_cfg.observation_noise_std = 0.1f;
     pf_cfg.resampling_threshold = 0.5f;
-    pf_cfg.use_cfc_motion_model = 0; /* ZSFWS-M007: 默认禁用随机CfC运动模型 */
+    pf_cfg.use_cfc_motion_model = 0; /* 默认禁用随机CfC运动模型 */
     pf_cfg.cfc_hidden_size = (int)state_dim;
     sdp->pf = deep_particle_filter_create(&pf_cfg);
     if (!sdp->pf) { sensor_deep_preprocessor_free(sdp); return NULL; }
@@ -1746,7 +1746,7 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
     inf_cfg.obs_dim = (int)obs_dim;
     inf_cfg.process_info_std = 0.1f;
     inf_cfg.observation_info_std = 0.01f;
-    inf_cfg.use_cfc_transition = 0; /* ZSFWS-M007: 默认禁用随机CfC转移 */
+    inf_cfg.use_cfc_transition = 0; /* 默认禁用随机CfC转移 */
     inf_cfg.cfc_hidden_size = (int)state_dim;
     sdp->inf = deep_info_filter_create(&inf_cfg);
     if (!sdp->inf) { sensor_deep_preprocessor_free(sdp); return NULL; }

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_cuda.c
  * @brief NVIDIA CUDA GPU后端完整实现
  * 
@@ -7,7 +7,7 @@
  * 根据项目要求"禁止任何降级处理"，本实现不包含任何CPU模拟回退。
  * 需要NVIDIA CUDA工具包和兼容的NVIDIA GPU硬件。
  *
- * ZSFWS-L010: 基础内核算子(relu/sigmoid/tanh/conv2d/pool2d等)的PTX/GLSL/MSL/HIP源
+ *: 基础内核算子(relu/sigmoid/tanh/conv2d/pool2d等)的PTX/GLSL/MSL/HIP源
  * 码在5个GPU后端文件(cuda/opencl/vulkan/metal/rocm)中各自定义为字符串常量。
  * 这些内核算子对于所有后端是语义等价的(仅语法差异)，后续可通过统一的DSL→后端
  * 代码生成器消除重复。当前各后端独立维护保证编译时自包含无外部依赖。
@@ -67,7 +67,7 @@
 #define CLOSE_LIBRARY(handle) dlclose(handle)
 #endif
 
-/* ZSFABC-028: MSVC C模式 __typeof__ 兼容 — __typeof__为GNU扩展，
+/* MSVC C模式 __typeof__ 兼容 — __typeof__为GNU扩展，
    在MSVC中不可用。此处将cast目标设为void*，运行时GetProcAddress/dlsym
    返回的函数指针可直接赋值，MSVC允许此转换。 */
 #ifdef _MSC_VER
@@ -202,7 +202,7 @@ static const char* CUDA_SIGMOID_KERNEL =
  * GPU ODE内核
  * ============================================================================ */
 
-/* ZSFABC-011修复: GPU cfc_ode_step增加输入加权求和 */
+/* GPU cfc_ode_step增加输入加权求和 */
 static const char* CUDA_CFC_ODE_KERNEL = 
 "extern \"C\" __global__ void cfc_ode_step(const float* input, const float* h_in, \n"
 "    const float* W_ax, const float* W_ah, const float* W_gx, const float* W_gh, \n"
@@ -235,7 +235,7 @@ static const char* CUDA_CFC_ODE_KERNEL =
 "    h_out[idx] = new_h;\n"
 "}\n"
 "\n"
-/* ZSFABC-005修复: GPU RK4内核增加完整CfC门控驱动项
+/* GPU RK4内核增加完整CfC门控驱动项
    RHS: dh/dt = (-h + σ(Wx+Wh+b)⊙tanh(Wx+Wh+b)) / τ */
 "extern \"C\" __global__ void cfc_ode_rk4_kernel(\n"
 "    const float* h_in, const float* input,\n"
@@ -1631,7 +1631,7 @@ static float (*cudaEventElapsedTime)(float*, cudaEvent_t, cudaEvent_t) = NULL;
 static cudaError_t (*cudaLaunchKernel)(const void*, dim3, dim3, void**, size_t, cudaStream_t) = NULL;
 static cudaError_t (*cudaMemGetInfo)(size_t*, size_t*) = NULL;
 
-/* ZSFABC-029: CUDA版本检测函数指针 */
+/* CUDA版本检测函数指针 */
 static int (*cudaRuntimeGetVersion)(int*) = NULL;
 
 // CUDA驱动程序API函数指针定义
@@ -2060,7 +2060,7 @@ static int g_cuda_device_count = 0;
  */
 static cudaDevicePropCompat* g_cuda_device_props = NULL;
 
-/* ZSFABC-029: 聚合CUDA状态/函数指针结构体 — 为gpu_detect_cuda_version等函数提供统一接口 */
+/* 聚合CUDA状态/函数指针结构体 — 为gpu_detect_cuda_version等函数提供统一接口 */
 typedef struct {
     int cuda_available;
 } CudaStateAgg;
@@ -2289,7 +2289,7 @@ static int load_cuda_library(void) {
     cudaStreamQuery = (__typeof__(cudaStreamQuery))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaStreamQuery");
     cudaLaunchKernel = (__typeof__(cudaLaunchKernel))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaLaunchKernel");
     cudaMemGetInfo = (__typeof__(cudaMemGetInfo))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaMemGetInfo");
-    /* ZSFABC-029: 加载运行时版本查询函数 */
+/* 加载运行时版本查询函数 */
     cudaRuntimeGetVersion = (__typeof__(cudaRuntimeGetVersion))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaRuntimeGetVersion");
     
     // 尝试加载CUDA驱动程序库（用于PTX加载）
@@ -2354,7 +2354,7 @@ static int load_cuda_library(void) {
         LOAD_CU_DRIVER_FUNC(cuStreamSynchronize);
         LOAD_CU_DRIVER_FUNC(cuMemGetInfo);
         LOAD_CU_DRIVER_FUNC(cuGetErrorString);
-        /* ZSFABC-029: 加载驱动版本查询函数 */
+/* 加载驱动版本查询函数 */
         LOAD_CU_DRIVER_FUNC(cuDriverGetVersion);
         
         // 初始化CUDA驱动程序
@@ -2371,7 +2371,7 @@ static int load_cuda_library(void) {
     
     g_cuda_available = 1;
 
-    /* ZSFABC-029: 填充聚合状态/函数指针结构体 */
+/* 填充聚合状态/函数指针结构体 */
     g_cuda_state.cuda_available = g_cuda_available;
     g_cuda_cl.cudaRuntimeGetVersion = cudaRuntimeGetVersion;
     g_cuda_cl.cudaGetDeviceProperties = cudaGetDeviceProperties;
@@ -2812,7 +2812,7 @@ static int cuda_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
         return -1;
     }
     
-    /* ZSFA-FIX-F008: 使用动态分配替代局部变量地址赋值，避免悬空指针 */
+/* 使用动态分配替代局部变量地址赋值，避免悬空指针 */
     if (!g_cuda_device_props) {
         g_cuda_device_props = (cudaDevicePropCompat*)safe_calloc(
             g_cuda_device_count, sizeof(cudaDevicePropCompat));

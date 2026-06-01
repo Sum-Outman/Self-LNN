@@ -33,7 +33,7 @@
 #pragma warning(disable:4100 4189 4244 4267 4701 4033 4715)
 #endif
 
-/* ZSFLNN-C-014修复: 液时域/自适应率默认值 — 可配置常量替代硬编码魔法数字 */
+/* 液时域/自适应率默认值 — 可配置常量替代硬编码魔法数字 */
 #define CFC_DEFAULT_LIQUID_TAU_MIN      0.01f
 #define CFC_DEFAULT_LIQUID_TAU_MAX      2.0f
 #define CFC_DEFAULT_LIQUID_INIT_SCALE   0.01f
@@ -202,7 +202,7 @@ typedef struct {
     float* symplectic_dpdt;       /**< 辛积分器动量导数 [hidden_size] */
     int symplectic_initialized;
     int symplectic_current_steps;   /**< 辛积分器动量是否已初始化 */
-    /* ZSFWS-008修复: 保存前向传播的output_gate用于CTBP反向传播 */
+/* 保存前向传播的output_gate用于CTBP反向传播 */
     float* saved_output_gate;      /**< 保存前向传播的output_gate [hidden_size] */
 } CfCState;
 
@@ -447,7 +447,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         return NULL;
     }
     
-    /* ZSFWS-004修复: 零初始化整个结构体
+/* 零初始化整个结构体
      * 原代码缺少memset，导致gated_data/hierarchical_data/liquid_memory_data
      * 等指针字段包含未初始化堆内存的垃圾值。
      * free函数和延迟初始化setter依赖这些指针为NULL进行检测，
@@ -482,7 +482,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         cell->config.delta_t_explicitly_set = 1;  // P2-042修复: 调用者显式设置了非零delta_t
     }
     
-    /* ZSFUSA-P1-002关键修复: 拉普拉斯调制默认启用。
+/*关键修复: 拉普拉斯调制默认启用。
      * use_laplace_modulation=1 使cfc_closed_form_solution中的
      * tau调制路径生效，laplace_stability_alpha=0.3控制最大阻尼强度。
      * laplace_stability_score在lnn.c前向传播时动态更新(默认0.5=无调制)。 */
@@ -513,7 +513,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->state->workspace = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->state->saved_state = (float*)safe_calloc(hidden_size, sizeof(float));
     
-    /* ZSFWS-008修复: 分配保存前向output_gate的缓冲区 */
+/* 分配保存前向output_gate的缓冲区 */
     cell->state->saved_output_gate = (float*)safe_calloc(hidden_size, sizeof(float));
     
     // 分配权重和偏置
@@ -611,7 +611,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->config.symplectic_config.num_substeps = 1;
 
     /* 四元数CfC初始化（P2.4）
-     * ZSFWS-021修复: 消除goto跳转，改用if-else结构。
+ *修复: 消除goto跳转，改用if-else结构。
      * 策略：先将所有四元数指针预置为NULL，仅当维度满足4的倍数条件时才分配实际内存。
      * 这样维度不符合条件时指针已为NULL，无需goto跳过置NULL的else分支。 */
     cell->use_quaternion = config->use_quaternion;
@@ -699,7 +699,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         !cell->computed_liquid_tau || !cell->liquid_tau_workspace ||
         /* Z3-001: 伴随法缓冲区NULL检查 */
         !cell->adjoint_state || !cell->adjoint_workspace ||
-        /* ZSFWS-008: output_gate保存缓冲区 */
+/* output_gate保存缓冲区 */
         !cell->state->saved_output_gate ||
         /* Z3-001: 前向传播tau缓冲区 */
         !cell->forward_tau_used) {
@@ -722,7 +722,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     
     // 初始化状态
     cell->state->time = 0.0f;
-    cell->state->adaptation_rate = CFC_DEFAULT_ADAPTATION_RATE;  /* ZSFLNN-C-014: 可配置默认自适应率 */
+    cell->state->adaptation_rate = CFC_DEFAULT_ADAPTATION_RATE; /* 可配置默认自适应率 */
     
     // 初始化液态神经网络增强特性
     cell->use_gating = 1;  // 默认启用门控
@@ -829,7 +829,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
             cell->slow_time_constants[i] = base_tau * cell->slow_tau_ratio;
             if (cell->fast_time_constants[i] < 0.001f) cell->fast_time_constants[i] = 0.001f;
             if (cell->slow_time_constants[i] > 100.0f) cell->slow_time_constants[i] = 100.0f;
-            /* ZSFWS-022修复: 多时间尺度状态初始化策略
+/* 多时间尺度状态初始化策略
              * fast_state: 零初始化 —— 快速通道无历史记忆，直接响应瞬时输入。
              *             演化中由快速时间常数 fast_tau ≈ 0.001~0.01 驱动，更新迅速。
              *
@@ -855,7 +855,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->use_neural_ode_adjoint = 0;
     cell->adjoint_record_trajectory = 1;
     cell->adjoint_max_trajectory_points = 10000;
-    cell->adjoint_gradient_clip_norm = 5.0f;  /* ZSFZS-F016: 伴随法梯度裁剪默认值，与训练主循环一致 */
+    cell->adjoint_gradient_clip_norm = 5.0f; /* 伴随法梯度裁剪默认值，与训练主循环一致 */
     cell->adjoint_use_augmented_state = 0;
     cell->adjoint_interpolation_method = 1;
     cell->adjoint_state = (float*)safe_calloc(hidden_size, sizeof(float));
@@ -945,7 +945,7 @@ void cfc_cell_free(CfCCell* cell) {
         safe_free((void**)&cell->state->input_buffer);
         safe_free((void**)&cell->state->workspace);
         safe_free((void**)&cell->state->saved_state);
-        safe_free((void**)&cell->state->saved_output_gate); /* ZSFWS-008 */
+        safe_free((void**)&cell->state->saved_output_gate);
         // 释放RK45自适应求解器缓冲区
         safe_free((void**)&cell->state->rk45_k1);
         safe_free((void**)&cell->state->rk45_k2);
@@ -1115,7 +1115,7 @@ void cfc_cell_free(CfCCell* cell) {
         cell->cell_layer_norm = NULL;
     }
 
-    /* ZSFBUILD: cell_momentum_buffer/velocity_buffer不在CfCCell中，已在外部管理 */
+/* cell_momentum_buffer/velocity_buffer不在CfCCell中，已在外部管理 */
 
     // 释放单元结构
     safe_free((void**)&cell);
@@ -1186,7 +1186,7 @@ static void cfc_cell_compute_rhs(CfCCell* cell, const float* input,
         } else {
             output_gate = 1.0f / (1.0f + expf(-output_gate_sum));
         }
-        /* ZSFWS-008修复: 保存真实output_gate供CTBP反向传播使用 */
+/* 保存真实output_gate供CTBP反向传播使用 */
         if (cell->state->saved_output_gate) {
             cell->state->saved_output_gate[i] = output_gate;
         }
@@ -1428,7 +1428,7 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
 
-        /* ZSFUSA-P1-002修复: 拉普拉斯频域tau调制。
+/* 拉普拉斯频域tau调制。
          * 当laplace_stability_score低时(系统不稳定)，增大tau以增强阻尼：
          *   tau_mod = tau * (1 + alpha * (1 - stability_score))
          * 稳定性≈0.0 → tau_mod = tau*(1+alpha) → 更强阻尼 → 更稳定
@@ -1627,7 +1627,7 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
     /* 当配置了有效的自适应容差参数时，优先使用自适应步长求解器 */
     if (cfg.rel_tolerance > 1e-12f && cfg.abs_tolerance > 1e-12f &&
         cfg.min_step_size > 0.0f && cfg.max_step_size > cfg.min_step_size) {
-        /* ZSFEEE-FIX-LEAK-CHK: 统一使用safe_malloc替代raw malloc，防止资源泄漏 */
+/* 统一使用safe_malloc替代raw malloc，防止资源泄漏 */
         float* y_state = (float*)safe_malloc(n * sizeof(float));
         if (!y_state) return -1;
         memcpy(y_state, prev_state, n * sizeof(float));
@@ -1649,7 +1649,7 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
             memcpy(output, y_state, n * sizeof(float));
             cell->state->rosenbrock_current_steps = steps_taken;
         }
-        /* ZSFEEE-FIX-LEAK-CHK: safe_free替代裸free，统一内存管理范式 */
+/* safe_free替代裸free，统一内存管理范式 */
         safe_free((void**)&y_state);
         return ret;
     }
@@ -1723,7 +1723,7 @@ static int cfc_cell_symplectic_step(CfCCell* cell, const float* input,
 {
     size_t n = cell->config.hidden_size;
 
-    /* ZSFA-FIX-F004: 使用input_size而非hidden_size(n)作为memcpy大小，避免内存越界 */
+/* 使用input_size而非hidden_size(n)作为memcpy大小，避免内存越界 */
     if (cell->state->input_buffer && input)
         memcpy(cell->state->input_buffer, input, cell->config.input_size * sizeof(float));
 
@@ -1786,7 +1786,7 @@ static int cfc_cell_rk45_adaptive(CfCCell* cell, const float* input,
     float t_target = asol->t_current + delta_t;
     float remaining = delta_t;
 
-    /* ZSFEEE-FIX-LEAK-CHK: 统一使用safe_malloc，所有错误路径均有清理保证 */
+/* 统一使用safe_malloc，所有错误路径均有清理保证 */
     float* state_buf = (float*)safe_malloc(n * sizeof(float));
     if (!state_buf) return -1;
     memcpy(state_buf, prev_state, n * sizeof(float));
@@ -1830,7 +1830,7 @@ static int cfc_cell_rk45_adaptive(CfCCell* cell, const float* input,
 
     memcpy(output, state_buf, n * sizeof(float));
     memcpy(cell->state->state, state_buf, n * sizeof(float));
-    /* ZSFEEE-FIX-LEAK-CHK: safe_free释放，防止野指针 */
+/* safe_free释放，防止野指针 */
     safe_free((void**)&state_buf);
     return 0;
 }
@@ -1861,7 +1861,7 @@ static int cfc_cell_dp54_adaptive(CfCCell* cell, const float* input,
     float t_target = asol->t_current + delta_t;
     float remaining = delta_t;
 
-    /* ZSFEEE-FIX-LEAK-CHK: 统一使用safe_malloc，DP54自适应步进错误路径正确清理 */
+/* 统一使用safe_malloc，DP54自适应步进错误路径正确清理 */
     float* state_buf = (float*)safe_malloc(n * sizeof(float));
     if (!state_buf) return -1;
     memcpy(state_buf, prev_state, n * sizeof(float));
@@ -1873,7 +1873,7 @@ static int cfc_cell_dp54_adaptive(CfCCell* cell, const float* input,
 
         int ret = cfc_cell_dp54_step(cell, input, state_buf, sign * h_step, output);
         if (ret != 0) {
-            /* ZSFEEE-FIX-LEAK-CHK: 中间错误路径释放，防止泄漏 */
+/* 中间错误路径释放，防止泄漏 */
             safe_free((void**)&state_buf);
             return ret;
         }
@@ -1908,7 +1908,7 @@ static int cfc_cell_dp54_adaptive(CfCCell* cell, const float* input,
 
     memcpy(output, state_buf, n * sizeof(float));
     memcpy(cell->state->state, state_buf, n * sizeof(float));
-    /* ZSFEEE-FIX-LEAK-CHK: safe_free防止野指针 */
+/* safe_free防止野指针 */
     safe_free((void**)&state_buf);
     return 0;
 }
@@ -1946,7 +1946,7 @@ static int cfc_cell_rosenbrock_parallel(CfCCell* cell, const float* input,
 
     int need_free = 0;
     if (nd > 64) {
-        /* ZSFEEE-FIX-LEAK-CHK: 统一使用safe_malloc分配域分解数组 */
+/* 统一使用safe_malloc分配域分解数组 */
         sizes = (int*)safe_malloc((size_t)nd * 2 * sizeof(int));
         if (!sizes) return -1;
         offsets = sizes + nd;
@@ -1999,7 +1999,7 @@ static int cfc_cell_rosenbrock_parallel(CfCCell* cell, const float* input,
     memcpy(cell->state->state, prev_state, n * sizeof(float));
     int ret = cfc_cell_rosenbrock_step(cell, input, prev_state, delta_t, output);
 
-    /* ZSFEEE-FIX-LEAK-CHK: safe_free释放域分解数组，防止内存泄漏 */
+/* safe_free释放域分解数组，防止内存泄漏 */
     if (need_free) safe_free((void**)&sizes);
     return ret;
 }
@@ -2025,7 +2025,7 @@ static int cfc_cell_forward_quaternion(CfCCell* cell, const float* input, float*
     size_t num_input_quats = input_size / 4;
     float dt = cell->config.delta_t;
 
-    /* ZSFZS-F011修复: 使用memcpy安全转换替代裸指针强制类型转换，
+/* 使用memcpy安全转换替代裸指针强制类型转换，
      * 避免违反C严格别名规则。Quaternion与float[4]内存布局一致，
      * 通过memcpy避免未定义行为。 */
     Quaternion input_quats_buf[128];
@@ -2078,7 +2078,7 @@ static int cfc_cell_forward_quaternion(CfCCell* cell, const float* input, float*
     /* 输出：将四元数数组展平为float数组 */
     for (size_t i = 0; i < num_hidden_quats; i++) {
         size_t off = i * 4;
-        /* ZSFZS-F011: 同时写入hidden_state和内部activation */
+/* 同时写入hidden_state和内部activation */
         hidden_state[off]     = output_quats[i].w;
         hidden_state[off + 1] = output_quats[i].x;
         hidden_state[off + 2] = output_quats[i].y;
@@ -2088,10 +2088,10 @@ static int cfc_cell_forward_quaternion(CfCCell* cell, const float* input, float*
 
     /* 更新内部状态 */
     memcpy(cell->state->state, cell->state->activation, hidden_size * sizeof(float));
-    /* ZSFWS-P8修复: 使用实际的delta_t而非硬编码1.0f */
+/* 使用实际的delta_t而非硬编码1.0f */
     cell->state->time += cell->config.delta_t;
 
-    /* ZSFZS-F011修复: 四元数路径记录forward_tau_used保证反向传播一致性 */
+/* 四元数路径记录forward_tau_used保证反向传播一致性 */
     if (cell->forward_tau_used && num_hidden_quats > 0) {
         cell->forward_tau_used[0] = tau[0];  /* 记录首个四元数的时间常数 */
     }
@@ -2327,7 +2327,7 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
                 if (isnan(new_h) || isinf(new_h)) new_h = cell->state->state[i];
                 cell->state->activation[i] = new_h;
             }
-            return -1;  /* ZSFA-FIX-F-003: int返回类型，不可裸return */
+            return -1; /* int返回类型，不可裸return */
         }
         /* 第1步: k1 = f(t, y) * dt */
         cfc_cell_compute_rhs(cell, cell->state->input_buffer,
@@ -2388,7 +2388,7 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
     // 更新内部状态（使用原始激活值，保持CfC动力学完整性）
     memcpy(cell->state->state, cell->state->activation, hidden_size * sizeof(float));
     
-    // ZSFWS-P8修复: 使用实际的delta_t而非硬编码1.0f，保证state->time反映物理时间
+// 使用实际的delta_t而非硬编码1.0f，保证state->time反映物理时间
     cell->state->time += cell->config.delta_t;
     
     // 更新统计信息
@@ -2730,13 +2730,13 @@ static int cfc_cell_backward_quaternion(CfCCell* cell, const float* gradient,
 }
 
 /* ========================================================================
- * ZSFWS-P2修复: 数值求解器反向传播 —— 有限差分梯度近似
+ *修复: 数值求解器反向传播 —— 有限差分梯度近似
  * 当使用RK4/RK45/DP54/Rosenbrock等数值求解器时，前向轨迹与闭式解不同，
  * 梯度必须通过数值方法计算而非复用闭式解的解析导数。
  * 采用"离散化-然后-优化"策略：重新执行数值求解器并用有限差分近似雅可比。
  * ======================================================================== */
 static int cfc_cell_backward_numerical(CfCCell* cell, const float* gradient, float* input_gradient) {
-    /* ZSFUSA-O04: 有限差分数值反向传播。
+/* 有限差分数值反向传播。
      * 注意：此路径精度低(O(ε))、计算量大(O(n²)次前向)。
      * 强烈建议使用分析导数路径(cfc_cell_backward闭式解)。
      * 本路径仅在解析梯度不可用时的极端回退场景使用。 */
@@ -2822,7 +2822,7 @@ static int cfc_cell_backward_numerical(CfCCell* cell, const float* gradient, flo
 }
 
 /* ========================================================================
- * ZSFWS-P3修复: 多时间尺度反向传播
+ *修复: 多时间尺度反向传播
  * 前向传播时快慢通道独立计算后混合: h = α·h_fast + (1-α)·h_slow
  * 反向传播时将梯度按混合权重分解到快慢通道各自计算。
  * ======================================================================== */
@@ -2952,7 +2952,7 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         return cfc_cell_backward_adjoint(cell, gradient, input_gradient);
     }
 
-    /* ZSFQQ-P2-003修复: 默认使用解析梯度路径（O(n*m)），数值梯度仅作为显式opt-in。
+/* 默认使用解析梯度路径（O(n*m)），数值梯度仅作为显式opt-in。
      * 解析梯度基于闭式解链式法则，对数值求解器也提供良好的梯度近似。
      * 数值梯度O(n²*m)仅在使用者明确启用NUMERICAL_GRADIENT编译选项时使用。 */
     int solver = cell->config.ode_solver_type;
@@ -3125,7 +3125,7 @@ int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradien
         float dL_doutput_gate = dL_dh_output * tanh_new;
         float dL_dnew_internal = dL_dh_output * output_gate * tanh_deriv_new;
         
-        /* ZSFZS-F031: effective_dL_dh_new已移除,删除残余(void)引用 */
+/* effective_dL_dh_new已移除,删除残余(void)引用 */
         
         /* ====== 从internal_state梯度反推forget_gate/input_gate梯度 ======
          * new_internal = h_old * exp(-f*dt/tau) + (driver/f) * (1-exp(-f*dt/tau))
@@ -3446,7 +3446,7 @@ int cfc_cell_backward_bptt(CfCCell* cell, const float* loss_gradients,
                 safe_free((void**)&temporal_grad);
                 return ret;
             }
-            /* ZSFZS-F030修复: BPTT梯度裁剪，防止长序列梯度爆炸 */
+/* BPTT梯度裁剪，防止长序列梯度爆炸 */
             float norm_sq = 0.0f;
             for (size_t i = 0; i < hidden_size; i++)
                 norm_sq += temporal_grad[i] * temporal_grad[i];
@@ -3925,7 +3925,7 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
                 else if (tanh_h < -1.0f) tanh_h = -1.0f;
                 float tanh_deriv = 1.0f - tanh_h * tanh_h;
                 if (tanh_deriv < 1e-8f) tanh_deriv = 1e-8f;
-                /* ZSFWS-008修复: 使用前向传播保存的真实output_gate替代保守近似
+/* 使用前向传播保存的真实output_gate替代保守近似
                  * 原: og_approx=0.5+0.5*tanh(h) 导致梯度系统性偏差 */
                 float og_val = 0.5f; /* 最低保守回退 */
                 if (cell->state->saved_output_gate) {
@@ -4107,7 +4107,7 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
                 float safe_dt = fmaxf(delta_t, 1e-8f);
                 float dtau_coeff = safe_dt / fmaxf(tau * tau, 1e-12f);
                 float stable_c = fminf(dtau_coeff, 1e6f) * exp_term;
-                /* ZSFZS-F031: h_old→h_next[i], h_next是数组指针需下标 */
+/* h_old→h_next[i], h_next是数组指针需下标 */
                 cell->time_constant_grad[i] += dL_dlambda * stable_c * (forget_gate * h_next[i] + driver);
             }
         }
@@ -4938,13 +4938,13 @@ int cfc_cell_enable_neural_ode_adjoint(CfCCell* cell, const NeuralODEConfig* con
         cell->adjoint_max_trajectory_points = config->max_trajectory_points > 0 ?
             config->max_trajectory_points : 10000;
         cell->adjoint_gradient_clip_norm = config->gradient_clip_norm > 0.0f ?
-            config->gradient_clip_norm : 5.0f;  /* ZSFZS-F016: 伴随法梯度裁剪默认值，与训练主循环一致 */
+            config->gradient_clip_norm : 5.0f; /* 伴随法梯度裁剪默认值，与训练主循环一致 */
         cell->adjoint_use_augmented_state = config->use_augmented_state ? 1 : 0;
         cell->adjoint_interpolation_method = config->interpolation_method;
     } else {
         cell->adjoint_record_trajectory = 1;
         cell->adjoint_max_trajectory_points = 10000;
-        cell->adjoint_gradient_clip_norm = 5.0f;  /* ZSFZS-F016: 伴随法梯度裁剪默认值，与训练主循环一致 */
+        cell->adjoint_gradient_clip_norm = 5.0f; /* 伴随法梯度裁剪默认值，与训练主循环一致 */
         cell->adjoint_use_augmented_state = 0;
         cell->adjoint_interpolation_method = 1;
     }
@@ -5254,7 +5254,7 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
                 float safe_dt = fmaxf(delta_t, 1e-8f);
                 float dtau_coeff = safe_dt / fmaxf(tau * tau, 1e-12f);
                 float stable_c = fminf(dtau_coeff, 1e6f) * exp_term;
-                /* ZSFZS-F031: h_old→h_next[i], 修复伴随法复制粘贴bug */
+/* h_old→h_next[i], 修复伴随法复制粘贴bug */
                 cell->time_constant_grad[i] += dL_dlambda * stable_c * (forget_gate * h_next[i] + driver);
             }
         }
@@ -5380,7 +5380,7 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
                 float safe_dt = fmaxf(delta_t, 1e-8f);
                 float dtau_coeff = safe_dt / fmaxf(tau * tau, 1e-12f);
                 float stable_c = fminf(dtau_coeff, 1e6f) * exp_term;
-                /* ZSFZS-F031: h_old→h_next[i], 修复伴随法直接法复制粘贴bug */
+/* h_old→h_next[i], 修复伴随法直接法复制粘贴bug */
                 cell->time_constant_grad[i] += dL_dlambda * stable_c * (forget_gate * h_next[i] + driver);
             }
         }
@@ -5424,7 +5424,7 @@ static int gated_cfc_cross_gate_update(GatedCfCData* gd, const float* gate_input
             cross_sum += gd->cross_gate_weights[i * hidden_size + j] * gd->workspace[j];
         }
         float total = gate_input[i] + cross_sum + activation[i];
-        /* ZSFZS-F033修复: 门控CfC交叉门控sigmoid添加截断保护 */
+/* 门控CfC交叉门控sigmoid添加截断保护 */
         float total_clamped = total;
         if (total_clamped > 10.0f) total_clamped = 10.0f;
         else if (total_clamped < -10.0f) total_clamped = -10.0f;

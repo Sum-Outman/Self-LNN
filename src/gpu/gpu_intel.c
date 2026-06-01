@@ -1,4 +1,4 @@
-#include "selflnn/gpu/gpu.h"
+﻿#include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_hardware_detect.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
@@ -775,7 +775,7 @@ static int intel_backend_memory_copy_device_to_device(GpuMemory* dst, GpuMemory*
 }
 
 /* M-021修复: 异步拷贝的线程模拟参数结构体。
-/* ZSF999XQ-M-001修复: Intel GPU异步拷贝仅支持Level Zero硬件路径。
+/*修复: Intel GPU异步拷贝仅支持Level Zero硬件路径。
  * 移除线程模拟异步的IntelAsyncCopyParams结构体和intel_async_copy_thread函数。
  * Level Zero不可用时返回错误，禁止降级处理。 */
 static int intel_backend_memory_copy_to_device_async(GpuMemory* dst, const void* src, size_t size, GpuStream* stream) {
@@ -801,14 +801,14 @@ static int intel_backend_memory_copy_to_device_async(GpuMemory* dst, const void*
             }
             return 0;
         }
-        /* ZSF999XQ-M-001修复: Level Zero异步提交失败时不再使用线程模拟。
+/*修复: Level Zero异步提交失败时不再使用线程模拟。
          * 违反"禁止任何降级处理"原则。直接返回不可用错误。
          * 调用方应通过gpu_query_backend检查Intel GPU状态后再调用此函数。 */
         log_warn("[Intel GPU] Level Zero异步拷贝不可用，拒绝线程模拟降级");
         return -1;
     }
 
-    /* ZSF999XQ-M-001修复: 移除线程模拟异步路径。
+/*修复: 移除线程模拟异步路径。
      * Intel GPU异步操作仅支持Level Zero硬件路径。
      * 无Level Zero时此函数不可调用，调用方应先检查设备能力。 */
     log_warn("[Intel GPU] 无Level Zero支持，异步拷贝不可用");
@@ -839,12 +839,10 @@ static int intel_backend_memory_copy_from_device_async(void* dst, GpuMemory* src
             }
             return 0;
         }
-        /* ZSF999XQ-M-001修复: Level Zero异步提交失败时不再使用线程模拟。 */
         log_warn("[Intel GPU] Level Zero异步拷贝(从设备)不可用，拒绝降级");
         return -1;
     }
 
-    /* ZSF999XQ-M-001修复: 移除线程模拟异步路径。 */
     log_warn("[Intel GPU] 无Level Zero支持，异步拷贝(从设备)不可用");
     return -1;
 }
@@ -969,7 +967,7 @@ static int intel_backend_kernel_execute(GpuKernel* kernel, size_t global_work_si
         LOG_WARN("Intel GPU Level Zero内核启动失败，回退到CPU直算（硬件自适应）");
     }
 
-    /* ZSFDDD-P0-003修复: Intel GPU Level Zero不可用时直接返回错误，禁止内核执行层静默回退到CPU
+/* Intel GPU Level Zero不可用时直接返回错误，禁止内核执行层静默回退到CPU
      * 硬件自适应由上层gpu.c调度器统一管理，内核执行层必须严格反映硬件状态 */
     (void)kernel; (void)local_work_size;
     size_t count = global_work_size > 0 ? global_work_size : 64;
@@ -1005,7 +1003,7 @@ static void intel_backend_stream_free(GpuStream* stream) {
 static int intel_backend_stream_synchronize(GpuStream* stream) {
     if (!stream) return -1;
 
-    /* ZSFEEE-FIX-012: 移除忙等待死代码，Level Zero可用时调用zeCommandQueueSynchronize
+/* 移除忙等待死代码，Level Zero可用时调用zeCommandQueueSynchronize
      * 直接等待GPU硬件完成，同步后直接设置is_completed为1。
      * 原忙等待while(!stream->is_completed)在非Level Zero路径下是死循环
      * （无任何线程设置is_completed），在Level Zero路径下是冗余（硬件同步已阻塞等待完毕）。 */
@@ -1073,7 +1071,6 @@ static const char* intel_get_builtin_kernel(const char* name) {
     return NULL;
 }
 
-/* ZSFWS修复-L-003: 添加真实错误状态跟踪 */
 static const char* intel_last_error = "OK";
 
 static void intel_set_error(const char* err) {

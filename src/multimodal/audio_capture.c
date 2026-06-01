@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file audio_capture.c
  * @brief 真实音频硬件采集模块
  *
@@ -1221,7 +1221,7 @@ void audio_capture_free(AudioCaptureContext* ctx) {
     safe_free((void**)&ctx);
 }
 
-/* ZSFUSA: 获取音频频谱 */
+/* 获取音频频谱 */
 int audio_capture_get_spectrum(void* capture, float* spectrum, size_t* size) {
     if (!capture || !spectrum || !size) return -1;
     AudioCaptureContext* ctx = (AudioCaptureContext*)capture;

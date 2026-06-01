@@ -7,24 +7,24 @@
  * 统一使用同一个 CfC 连续动态系统。
  *
  * 深度增强功能（DST信念追踪、策略学习、多轮推理、CfC生成）
- * 由 dialogue_deep.c 提供，本文件通过 dialogue_register_deep_modules()
+ * 由 dialogue_deep.c 提供，本文件通过 dialogue_register_deep_modules
  * 在初始化时自动连接深度模块。
  */
 
-/* ZSFWS-FIX: 必须定义这两个宏才能获取CfCNetwork和CfCCell完整结构体定义
+/* 必须定义这两个宏才能获取CfCNetwork和CfCCell完整结构体定义
  * cfc_network.h: struct CfCNetwork 由 SELFLNN_IMPLEMENTATION 保护
  * cfc_cell.h:    struct CfCCell    由 SELFLNN_CORE_INTERNAL 保护
- * 新增的ZSFWS-P1-004代码需要访问cfc->layers、cell->config等内部成员 */
+ * 新增的代码需要访问cfc->layers、cell->config等内部成员 */
 #define SELFLNN_IMPLEMENTATION
 #define SELFLNN_CORE_INTERNAL
 
 #include "selflnn/multimodal/dialogue.h"
 #include "selflnn/multimodal/text.h"
 #include "selflnn/core/cfc_cell.h"
-#include "selflnn/core/cfc_network.h"  /* ZSFWS-P1-004: lnn_get_cfc_network */
-#include "selflnn/core/lnn.h"          /* ZSFWS-P1-004: lnn_get_cfc_network访问 */
-#include "selflnn/selflnn.h"           /* ZSFWS-P1-004: selflnn_get_shared_lnn */
-#include "selflnn/knowledge/knowledge.h" /* ZSFZS-P2-002: 知识库检索回退 */
+#include "selflnn/core/cfc_network.h" /* lnn_get_cfc_network */
+#include "selflnn/core/lnn.h" /* lnn_get_cfc_network访问 */
+#include "selflnn/selflnn.h" /* selflnn_get_shared_lnn */
+#include "selflnn/knowledge/knowledge.h" /* 知识库检索回退 */
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
@@ -38,7 +38,7 @@
 #include <time.h>
 #include <ctype.h>
 
-/* ZSFUSA-P0-007: dialogue_deep_train_policy来自dialogue_deep.c，
+/* dialogue_deep_train_policy来自dialogue_deep.c，
  * 提供基于TD学习的策略网络训练。此处extern声明使其在dialogue.c中可见，
  * 每次对话回复生成后自动调用进行增量策略优化。 */
 extern int dialogue_deep_train_policy(DialogueProcessor* dp,
@@ -54,7 +54,7 @@ extern int dialogue_deep_train_policy(DialogueProcessor* dp,
 #endif
 
 /* ================================================================
- * ZSFA-FIX-F-001: CfC对话权重存储 — 替代每次调用随机生成
+ *: CfC对话权重存储 — 替代每次调用随机生成
  * 对话系统的CfC门控/激活权重必须是确定性可复用参数，
  * 使用Xavier初始化一次后存储，后续调用复用同一权重。
  * 训练后权重将通过反向传播更新（当前为未训练状态的初始值）。
@@ -73,7 +73,7 @@ typedef struct {
 
 static DialogueCfCWeights g_dialogue_cfc_weights = {0};
 
-/* ZSFLYF-P0-002: 全局对话处理器引用，用于LNN驱动的意图分析 */
+/* 全局对话处理器引用，用于LNN驱动的意图分析 */
 static DialogueProcessor* g_dialogue_processor_global = NULL;
 
 DialogueProcessor* dialogue_get_global_processor(void) {
@@ -187,7 +187,7 @@ DialogueProcessor* dialogue_processor_create(const DialogueConfig* config)
     dp->text_processor = text_processor_create(&text_cfg);
     dp->is_initialized = 1;
 
-    /* ZSFLYF-P0-002: 注册全局处理器引用，使意图分析可访问LNN */
+/* 注册全局处理器引用，使意图分析可访问LNN */
     g_dialogue_processor_global = dp;
 
     return dp;
@@ -224,7 +224,7 @@ void dialogue_processor_free(DialogueProcessor* processor)
     safe_free((void**)&processor);
 }
 
-/* ZSFQQ-P2-001: 获取对话生成器句柄 */
+/* 获取对话生成器句柄 */
 void* dialogue_get_generator(DialogueProcessor* processor) {
     if (!processor) return NULL;
     return processor->generator;
@@ -284,15 +284,15 @@ int dialogue_evolve_state(DialogueProcessor* processor,
         float* h = processor->dialogue_state_buffer;
         size_t in_dim = feature_count;
 
-        /* ZSFA-FIX-F-001: 使用存储的确定性Xavier初始化权重替代随机生成
-         * ZSFWS-P1-004修复: 当共享LNN可用时，优先从LNN同步权重；
+/* 使用存储的确定性Xavier初始化权重替代随机生成
+ *修复: 当共享LNN可用时，优先从LNN同步权重；
          * 对话系统的独立CfC权重备份仅在LNN未训练时作为冷启动后备 */
         dialogue_cfc_weights_init(&g_dialogue_cfc_weights, hs, in_dim);
         DialogueCfCWeights* w = &g_dialogue_cfc_weights;
 
-        /* ZSFWS-P1-004: 尝试从共享LNN同步权重 */
+/* 尝试从共享LNN同步权重 */
         {
-            void* shared_lnn = selflnn_get_shared_lnn();
+            void* shared_lnn = selflnn_get_shared_lnn;
             if (shared_lnn) {
                 CfCNetwork* cfc = lnn_get_cfc_network(shared_lnn);
                 if (cfc && cfc->layers && cfc->layers[0]) {
@@ -753,7 +753,7 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
     if (!features) return NULL;
 
     if (user_input && input_length > 0) {
-        /* ZSFLYF-P1-004修复: 文本→特征向量优先使用LNN嵌入编码。
+/* 文本→特征向量优先使用LNN嵌入编码。
          * 通过嵌入表将每个字符映射到其语义向量，而非简单字节归一化。
          * 字节归一化仅作为LNN不可用时的回退路径。 */
         size_t flen = (input_length < processor->dialogue_buffer_size)
@@ -826,7 +826,7 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
     /* 对话生成器未训练时：仅使用知识库检索作为真实回退路径 */
     if (gen_len <= 0) {
         if (user_input && input_length > 0) {
-            void* kb_raw = selflnn_get_knowledge_base();
+            void* kb_raw = selflnn_get_knowledge_base;
             if (kb_raw) {
                 KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
                 InferenceResult* kb_result = knowledge_query(kb, user_input, 3, 0.1f);
@@ -856,7 +856,7 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
 
     response->text = output;
     response->length = (size_t)gen_len;
-    /* ZSFLYF-P1-005修复: 置信度从LNN状态向量的输出熵动态计算，不使用硬编码假值。 */
+/* 置信度从LNN状态向量的输出熵动态计算，不使用硬编码假值。 */
     response->confidence = 0.0f;
     if (processor->dialogue_state_buffer && processor->dialogue_buffer_size > 0) {
         float entropy = 0.0f;
@@ -893,7 +893,7 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
         response->updated_context = context;
     }
 
-    /* ZSFUSA-P0-007修复: 集成对话深度策略训练。
+/* 集成对话深度策略训练。
      * 每次成功生成回复后，用当前状态→下一状态转换训练TD-learning策略网络。
      * dialogue_deep_train_policy基于TD误差更新策略权重，使对话策略随使用逐步优化。
      * 仅在生成器已训练且深度模块已初始化时执行，不作为虚拟回退使用。 */
@@ -1176,10 +1176,10 @@ int dialogue_analyze_intent(const char* text, size_t text_length,
     *intent = INTENT_UNKNOWN;
     *confidence = 0.5f;
 
-    /* ZSFLYF-P0-002修复: 基于LNN的意图分类为优先路径。
+/* 基于LNN的意图分类为优先路径。
      * 当全局对话处理器和LNN实例可用时，通过LNN嵌入编码+分类器进行意图识别。
      * 仅当LNN不可用时回退到关键词匹配（作为初始化阶段的辅助手段）。 */
-    DialogueProcessor* global_processor = dialogue_get_global_processor();
+    DialogueProcessor* global_processor = dialogue_get_global_processor;
     if (global_processor && global_processor->lnn_instance) {
         /* LNN驱动意图分类: 将文本tokenize后经CfC ODE编码，取输出向量做意图分类 */
         if (global_processor->dialogue_state_buffer && global_processor->gen_projection_lnn) {

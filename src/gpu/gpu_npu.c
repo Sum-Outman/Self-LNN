@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_npu.c
  * @brief NPU 硬件检测与驱动扫描工具
  *
@@ -154,7 +154,7 @@ static int detect_cambricon_hardware(void) {
         NULL
     };
     for (int i = 0; neuware_dirs[i]; i++) {
-        if (npu_dir_exists(neuware_dirs[i])) return 1;  /* ZSFA-FIX-F-016: neuw→neu typo */
+        if (npu_dir_exists(neuware_dirs[i])) return 1; /* neuw→neu typo */
     }
     DIR* dev_dir = opendir("/dev");
     if (dev_dir) {

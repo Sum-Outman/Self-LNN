@@ -1,6 +1,6 @@
-/* SELF-LNN AGI 管理系统 - 样式表 */
+﻿/* SELF-LNN AGI 管理系统 - 样式表 */
 
-/* ===== ZSFWS-FEWEB: z-index 层级变量系统 =====
+/* ===== z-index 层级变量系统 =====
  * 统一管理全站层级，消除冲突：
  * L100 = 内容层, L200 = 下拉/覆盖层, L300 = 固定顶栏, 
  * L400 = 模态/对话框, L500 = 通知/Toast, L600 = 全屏加载/确认
@@ -250,7 +250,7 @@ body {
     color: #aaaaaa;
 }
 
-/* 主要内容区域 ZSFABC-008修复: 减小顶部内边距减少空白 */
+/* 主要内容区域 减小顶部内边距减少空白 */
 .main-content {
     flex: 1;
     padding: 0.25rem 1.5rem 2rem 1.5rem;
@@ -271,7 +271,7 @@ body {
     to { opacity: 1; }
 }
 
-/* ZSFABC-008修复: 减小section-header间距减少顶部空白 */
+/* 减小section-header间距减少顶部空白 */
 .section-header {
     margin-bottom: 1rem;
 }
@@ -7816,7 +7816,7 @@ body {
     .cog-goal-metrics { grid-template-columns:repeat(2,1fr); }
     .tom-agent-container { grid-template-columns:1fr; }
 }
-/* ZSFAB-S3: 技能板块样式 */
+/* 技能板块样式 */
 .skills-container{display:flex;gap:1rem;height:calc(100vh - 300px);min-height:500px}
 .skill-list{width:280px;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;padding:.5rem;border:1px solid rgba(255,255,255,.06)}
 .skill-detail{flex:1;overflow-y:auto;background:rgba(0,0,0,.2);border-radius:8px;padding:1rem;border:1px solid rgba(255,255,255,.06)}
@@ -7841,7 +7841,7 @@ body {
 .step-item .step-desc{color:#ccc}
 .skill-detail-actions{display:flex;gap:.6rem;margin-top:1rem;padding-top:.8rem;border-top:1px solid rgba(255,255,255,.06)}
 
-/* ===== ZSFWS-FIX: 安全面板缺失CSS类 + LNN监控面板 ===== */
+/* ===== 安全面板缺失CSS类 + LNN监控面板 ===== */
 .safety-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-top:12px}
 .safety-card{background:rgba(0,200,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:14px}
 .score-bar{flex:1;height:8px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden;margin:4px 0}

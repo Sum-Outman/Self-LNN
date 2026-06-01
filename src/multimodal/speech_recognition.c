@@ -9,7 +9,7 @@
  */
 
 #include "selflnn/multimodal/speech_recognition.h"
-#include "selflnn/multimodal/speech_language_model.h" /* ZSFA-FIX-P0-003: LM后处理纠错 */
+#include "selflnn/multimodal/speech_language_model.h" /* LM后处理纠错 */
 #ifdef _MSC_VER
 #pragma warning(disable:4702 4715)  /* 训练函数预存警告:不可达代码+返回值路径 */
 #endif
@@ -78,14 +78,14 @@ struct SpeechRecognizer {
     float* output_projection_bias;     /* [vocab_size] */
     int output_projection_initialized;
 
-    /* ZSFABC-F007: 输入投影权重（特征→隐藏状态）改为实例成员
+/* 输入投影权重（特征→隐藏状态）改为实例成员
      * 之前为static变量，多实例并发时共享同一组权重导致干扰 */
     float* input_projection_weight;    /* [hidden_size x feature_dim] */
     int input_projection_initialized;
 
     /* 梅尔滤波器组系数（预计算） */
     float* mel_filterbank;             /* [num_mel_bins x fft_size/2+1] */
-    int mel_filterbank_initialized;    /* ZSFABC: 梅尔滤波器组初始化标志 */
+    int mel_filterbank_initialized; /* 梅尔滤波器组初始化标志 */
     float* hamming_window;             /* [frame_length] */
 
     /* 词汇表 */
@@ -129,7 +129,7 @@ struct SpeechRecognizer {
     float* adam_v_proj_b;
     int adam_step;
 
-    /* ZSFWS-F008: 模型训练完成标志 */
+/* 模型训练完成标志 */
     int is_model_trained;
 };
 
@@ -411,8 +411,8 @@ static int compute_output_logits(SpeechRecognizer* sr,
         /* LNN不可用或维度不匹配 → 返回错误码让上层处理，不执行线性投影回退 */
     }
 
-    /* ZSFNO1-P0-001修复: 移除引用未定义变量mfcc_features/mfcc_dim的MFCC回退代码。
-     * 原ZSFLYF-P2-010尝试添加MFCC能量分类作为兜底，但忘记传递MFCC特征参数。
+/* 移除引用未定义变量mfcc_features/mfcc_dim的MFCC回退代码。
+     * 原尝试添加MFCC能量分类作为兜底，但忘记传递MFCC特征参数。
      * 当前clean修复：LNN不可用时直接返回-1，调用方已有完善的错误处理逻辑。
      * 纯液态神经系统严格依赖LNN进行输出投影，不允许非LNN的简化回退路径。 */
     memset(logits, 0, (size_t)vocab_size * sizeof(float));
@@ -1775,7 +1775,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
     }
     memset(result, 0, sizeof(SpeechRecognitionResult));
 
-    /* ZSFWS-F008修复: 检查模型是否已训练
+/* 检查模型是否已训练
      * ZS-031增强: 双重防护 —— 不仅检查识别器自身训练状态,
      * 还验证shared_lnn是否已完成训练 (权重方差>阈值)。
      * 防止共享LNN已连接但未经训练的随机权重进入推理管道。 */
@@ -1816,7 +1816,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
         if (init_output_projection(recognizer) != 0) return -1;
     }
 
-    clock_t start_time = clock();
+    clock_t start_time = clock;
 
     /* 步骤2：提取梅尔特征 */
     int max_feats = recognizer->feature_buffer_capacity * recognizer->config.feature_dimension;
@@ -1842,7 +1842,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
     float dt = tau * 0.5f;
     float alpha_val = 1.0f - expf(-dt / tau);
 
-    /* ZSFABC-F007: 输入投影权重改为实例成员，每个识别器独立分配
+/* 输入投影权重改为实例成员，每个识别器独立分配
      * He初始化（Kaiming）：输入投影→非线性门控系统，使用sqrt(2/fan_in)缩放 */
     if (!recognizer->input_projection_initialized) {
         recognizer->input_projection_weight = (float*)safe_malloc(hs * (size_t)feature_dim * sizeof(float));
@@ -1891,7 +1891,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
              * 调用方必须先绑定共享LNN再进行语音识别 */
             fprintf(stderr, "[语音识别错误] 共享LNN未连接，拒绝使用简化路径进行语音识别\n");
             safe_free((void**)&all_logits);
-            return -1;  /* ZSFA-CFIX: int返回类型，非void* */
+            return -1; /* int返回类型，非void* */
         }
 
         float* logits = all_logits + (size_t)t * vocab_size;
@@ -1899,7 +1899,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
                                    logits, vocab_size) != 0) {
             fprintf(stderr, "[语音识别错误] LNN投影不可用于步%d，无法继续识别\n", t);
             safe_free((void**)&all_logits);
-            return -1;  /* ZSFA-CFIX: int返回类型 */
+            return -1; /* int返回类型 */
         }
     }
 
@@ -1967,7 +1967,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
                 result->token_confidences[i] = best_prob;
                 result->token_boundaries[i] = best_frame >= 0 ? best_frame : i * num_timesteps / out_len;
             } else {
-                /* ZSFWS-B003修复: 无效token置信度标记为0.0f而非伪值0.5f。
+/* 无效token置信度标记为0.0f而非伪值0.5f。
                  * 0.0f表示"不可信"，在avg_confidence计算中被明确排除。 */
                 result->token_confidences[i] = 0.0f;
                 result->token_boundaries[i] = i * num_timesteps / out_len;
@@ -2094,7 +2094,7 @@ void speech_recognizer_reset(SpeechRecognizer* recognizer) {
     recognizer->decoded_token_count = 0;
 }
 
-/* ZSFQQ-P2-001: 公开的标记训练函数 —— 检查点加载后调用 */
+/* 公开的标记训练函数 —— 检查点加载后调用 */
 void speech_recognizer_mark_trained(SpeechRecognizer* recognizer) {
     if (recognizer) {
         recognizer->is_model_trained = 1;
@@ -2302,7 +2302,7 @@ static int sr_char_to_class(const char* text, int pos, int text_len, int vocab_s
         bytes[i] = (unsigned char)text[pos + i];
     }
 
-    if (!sr_char_ht_initialized) sr_init_char_hash_table();
+    if (!sr_char_ht_initialized) sr_init_char_hash_table;
 
     uint32_t hash = sr_fnv1a_hash(bytes, (size_t)char_len);
     int bucket = (int)(hash % SR_CHAR_HASH_SIZE);
@@ -2341,7 +2341,7 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                              float* out_loss) {
     if (!recognizer || !training_audio || !training_transcripts) return -1;
     if (num_samples <= 0) return -1;
-    /* ZSFWS-NEW-BATCH修复: 使用batch_size参数，默认为全量 */
+/* 使用batch_size参数，默认为全量 */
     int effective_batch = (batch_size > 0 && batch_size <= num_samples) ? batch_size : num_samples;
 
     /* 初始化状态缓冲区和投影层（训练需要） */
@@ -2382,9 +2382,9 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
                    recognizer->config.hidden_size * sizeof(float));
             /* P0-014: 训练时同步重置自包含CfC单元内部状态 */
 
-            /* ZSFWS-M023修复: 使用音频数据实际长度计算帧数
+/* 使用音频数据实际长度计算帧数
              * 原实现用 transcript_len * 100 估算，存在不精确问题。
-             * 改用 training_audio_lengths[] 提供真实音频采样数，同时保留转录长度作为回退。 */
+             * 改用 training_audio_lengths 提供真实音频采样数，同时保留转录长度作为回退。 */
             int audio_sample_count = training_audio_lengths ? training_audio_lengths[s] : 0;
             if (audio_sample_count <= 0) {
                 /* 回退：假设16kHz采样率，100ms/字符的估计 */
@@ -2540,7 +2540,7 @@ int speech_recognizer_train(SpeechRecognizer* recognizer,
         if (out_loss) *out_loss = total_loss / (float)(num_samples > 0 ? num_samples : 1);
     }
 
-    /* ZSFWS-F008修复: 标记模型训练完成 */
+/* 标记模型训练完成 */
     recognizer->is_model_trained = 1;
     log_info("[语音识别] 模型训练完成，权重已优化，可以进行识别。");
 

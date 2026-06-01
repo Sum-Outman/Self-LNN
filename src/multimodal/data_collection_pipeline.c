@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file data_collection_pipeline.c
  * @brief 多模态真实数据采集流水线实现
  *
@@ -255,7 +255,7 @@ static int probe_serial_device(const char* port_pattern) {
 }
 
 /*
- * ZSFX-025: probe_hid_device — HID报告描述符解析，按传感器类型精准探测
+ *: probe_hid_device — HID报告描述符解析，按传感器类型精准探测
  *
  * 使用 Windows Raw Input API 的 RID_DEVICE_INFO_HID 结构体获取：
  *   - usUsagePage: HID用途页（0x01=通用桌面, 0x20=传感器, 0x05=游戏等）
@@ -535,7 +535,7 @@ static int probe_sensor(DataSourceSlot* slot) {
 
     switch (slot->type) {
     case DC_SOURCE_IMU:
-        /* ZSFX-025: IMU通过HID精确探测（UsagePage=0x20, Usage=0x73/0x76） */
+/* IMU通过HID精确探测（UsagePage=0x20, Usage=0x73/0x76） */
         detected = probe_hid_device_sensor_type(DC_SOURCE_IMU);
         break;
     case DC_SOURCE_TEMPERATURE:
@@ -1039,7 +1039,7 @@ int dcpipeline_has_real_data(DataCollectionPipeline* pipeline) {
     return has_data;
 }
 
-/* Z5-005: 内部数据快照采集（ZSFBUILD修复：提供真实实现） */
+/* Z5-005: 内部数据快照采集（提供真实实现） */
 static int dcpipeline_collect_internal(DataCollectionPipeline* pipeline,
                                         CollectionSnapshot* snapshot) {
     if (!pipeline || !snapshot) return -1;

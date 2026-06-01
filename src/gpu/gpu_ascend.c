@@ -142,11 +142,11 @@ typedef int (*AclrtSetOpWaitTimeoutFn)(uint32_t);
  * aclopExecuteV2 真实签名（AscendCL文档）:
  *   aclError aclopExecuteV2(const char *opType,
  *       int numInputs,
- *       const aclTensorDesc *const inputDesc[],
- *       const aclDataBuffer *const inputs[],
+ *       const aclTensorDesc *const inputDesc,
+ *       const aclDataBuffer *const inputs,
  *       int numOutputs,
- *       const aclTensorDesc *const outputDesc[],
- *       aclDataBuffer *const outputs[],
+ *       const aclTensorDesc *const outputDesc,
+ *       aclDataBuffer *const outputs,
  *       aclopAttr *attr,
  *       aclrtStream stream);
  *
@@ -228,7 +228,7 @@ static void ascend_cl_unload(void) {
 static int ascend_load_library(void) {
     if (g_ascend_cl.loaded) return 1;
 
-    if (!ascend_detect_hardware()) {
+    if (!ascend_detect_hardware) {
         LOG_INFO("昇腾(Ascend)硬件未检测到");
         return 0;
     }
@@ -286,7 +286,7 @@ static int ascend_load_library(void) {
     if (!g_ascend_cl.aclInit || !g_ascend_cl.aclrtSetDevice ||
         !g_ascend_cl.aclrtGetDeviceCount) {
         LOG_WARN("昇腾AscendCL库缺少核心符号，卸载");
-        ascend_cl_unload();
+        ascend_cl_unload;
         return 0;
     }
     g_ascend_cl.loaded = 1;
@@ -346,7 +346,7 @@ static int ascend_backend_init(void) {
 
     memset(&g_ascend_state, 0, sizeof(g_ascend_state));
 
-    if (ascend_load_library() && g_ascend_cl.aclInit) {
+    if (ascend_load_library && g_ascend_cl.aclInit) {
         int ret = g_ascend_cl.aclInit(NULL);
         if (ret == 0) {
             uint32_t count = 0;
@@ -378,9 +378,9 @@ static int ascend_backend_init(void) {
                 LOG_INFO("昇腾NPU后端初始化成功: %d设备", g_ascend_state.device_count);
                 return 0;
             }
-            g_ascend_cl.aclFinalize();
+            g_ascend_cl.aclFinalize;
         }
-        ascend_cl_unload();
+        ascend_cl_unload;
     }
 
     g_ascend_state.ascendcl_available = 0;
@@ -404,9 +404,9 @@ static void ascend_backend_cleanup(void) {
             }
         }
         if (g_ascend_cl.aclFinalize) {
-            g_ascend_cl.aclFinalize();
+            g_ascend_cl.aclFinalize;
         }
-        ascend_cl_unload();
+        ascend_cl_unload;
     }
     g_ascend_state.om_loaded = 0;
     g_ascend_state.om_model_desc = NULL;
@@ -420,7 +420,7 @@ static int ascend_backend_get_device_count(void) {
 
 static int ascend_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
     if (!info) return -1;
-    if (!g_ascend_state.initialized && ascend_backend_init() != 0) return -1;
+    if (!g_ascend_state.initialized && ascend_backend_init != 0) return -1;
 
     memset(info, 0, sizeof(*info));
     info->type = GPU_DEVICE_TYPE_DISCRETE;
@@ -445,7 +445,7 @@ static int ascend_backend_get_device_info(int device_index, GpuDeviceInfo* info)
 }
 
 static GpuContext* ascend_backend_context_create(int device_index) {
-    if (!g_ascend_state.initialized && ascend_backend_init() != 0) {
+    if (!g_ascend_state.initialized && ascend_backend_init != 0) {
         ascend_set_error("昇腾后端未初始化");
         return NULL;
     }
@@ -581,7 +581,7 @@ static GpuKernel* ascend_backend_kernel_create(GpuContext* context,
                                                 const char* kernel_name) {
     /* 昇腾NPU：创建可执行kernel描述符 */
     if (!context) return NULL;
-    /* ZSFZS-F003修复: 无AscendCL时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
+/* 无AscendCL时仍创建kernel对象，执行时通过npu_common_cpu_kernel_execute回退到CPU计算。
      * 不再直接返回NULL，确保调用方在无硬件环境也能正常创建kernels进行计算。 */
     if (!g_ascend_state.ascendcl_available) {
         log_warning("[Ascend] AscendCL不可用，创建CPU回退Kernel: %s", kernel_name ? kernel_name : "unnamed");
@@ -888,7 +888,7 @@ static int ascend_backend_kernel_execute(GpuKernel* kernel,
     }
 
 ascend_fallback:
-    /* ZSFDDD-P0-003修复: AscendCL不可用时直接返回错误，禁止内核执行层静默回退到CPU
+/* AscendCL不可用时直接返回错误，禁止内核执行层静默回退到CPU
      * 硬件自适应由上层gpu.c调度器统一管理，内核执行层必须严格反映硬件状态 */
     (void)kernel; (void)count;
     log_warning("昇腾NPU AscendCL不可用，拒绝内核执行（请安装CANN SDK，count=%zu）", count);
@@ -1039,17 +1039,17 @@ typedef struct {
 
 static int ascend_npu_init(GpuContext* context) {
     (void)context;
-    return ascend_backend_init();
+    return ascend_backend_init;
 }
 
 static void ascend_npu_cleanup(GpuContext* context) {
     (void)context;
-    ascend_backend_cleanup();
+    ascend_backend_cleanup;
 }
 
 static int ascend_npu_get_device_count(GpuContext* context) {
     (void)context;
-    return ascend_backend_get_device_count();
+    return ascend_backend_get_device_count;
 }
 
 static const char* ascend_npu_get_backend_name(GpuContext* context) {
@@ -1063,7 +1063,7 @@ static NpuModel* ascend_npu_load_model(GpuContext* context,
                                         const NpuInferenceConfig* config) {
     if (!context || !model_path) return NULL;
 
-    if (!g_ascend_state.initialized && ascend_backend_init() != 0) return NULL;
+    if (!g_ascend_state.initialized && ascend_backend_init != 0) return NULL;
 
     if (!g_ascend_state.ascendcl_available || !g_ascend_cl.aclmdlLoadFromFile)
         return NULL;
@@ -1079,7 +1079,7 @@ static NpuModel* ascend_npu_load_model(GpuContext* context,
     if (!model) return NULL;
 
     model->context = context;
-    model->backend = (NpuBackendInterface*)ascend_get_npu_interface();
+    model->backend = (NpuBackendInterface*)ascend_get_npu_interface;
     snprintf(model->model_path, sizeof(model->model_path), "%s", model_path);
     const char* slash = strrchr(model_path, '/');
     const char* backslash = strrchr(model_path, '\\');
@@ -1261,7 +1261,7 @@ const NpuBackendInterface* ascend_get_npu_interface(void) {
  * 昇腾NPU独立计算内核（预编译算子替代方案）
  * 当有预编译OM离线模型时，使用aclmdlExecute执行真实NPU推理
  * 当无预编译模型时，尝试在线编译AscendCL算子执行真实NPU计算
- * ZSF999XQ-M-002修复: 移除"当AscendCL不可用时使用CPU SIMD计算"降级路径。
+ *修复: 移除"当AscendCL不可用时使用CPU SIMD计算"降级路径。
  * AscendCL不可用时返回错误，禁止任何形式的降级处理。
  * =================================================================== */
 
@@ -1465,9 +1465,9 @@ int ascend_forward_dense(GpuContext* context, const float* input,
         return -1;
     }
 
-    /* ZSFEEE-FIX-011: AscendCL不可用时的fallback策略与kernel_execute保持一致
+/* AscendCL不可用时的fallback策略与kernel_execute保持一致
      * —— 拒绝执行，返回-1，禁止任何形式CPU降级。
-     * kernel_execute同样在AscendCL不可用时返回-1（见ZSFDDD-P0-003修复）。 */
+     * kernel_execute同样在AscendCL不可用时返回-1（见）。 */
     (void)act_type; (void)alpha;
     LOG_ERROR("昇腾NPU AscendCL不可用，无法执行前向全连接计算（batch=%zu）", batch_size);
     return -1;

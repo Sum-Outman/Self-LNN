@@ -2,7 +2,7 @@
  * @file laplace_features.c
  * @brief 拉普拉斯特征提取 —— 空间/结构特征层（Spatial/Structural Feature Layer）
  *
- * ========== ZSFWS-033 模块职责边界 ==========
+ * ========== 模块职责边界 ==========
  * 本模块职责：基于拉普拉斯算子的空间/结构特征提取与降维
  *   - 多尺度高斯金字塔构建 (laplace_build_gaussian_pyramid)
  *   - 拉普拉斯金字塔构建与重构 (laplace_build_laplacian_pyramid / reconstruct)
@@ -567,7 +567,7 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
         free(adjacency); laplace_graph_laplacian_free(&gl); return -1;
     }
 
-    /* ZSFQQ-P0-002修复: 保存原始训练数据用于新样本投影 */
+/* 保存原始训练数据用于新样本投影 */
     map->training_data = (float*)calloc((size_t)num_points * data_dim, sizeof(float));
     if (!map->training_data) {
         free(adjacency); laplace_graph_laplacian_free(&gl); return -1;
@@ -577,7 +577,7 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
     for (int i = 0; i < num_points; i++)
         for (int j = 1; j <= embedding_dim; j++) {
             int ev_idx = num_points - j;
-            /* ZSFQQ-P2-004修复: 跳过零特征值(连通分量常向量), 从第二个最小非零特征值开始 */
+/* 跳过零特征值(连通分量常向量), 从第二个最小非零特征值开始 */
             if (ev_idx >= 2) {
                 map->embedding[i * embedding_dim + (j - 1)] = gl.eigenvectors[i * num_points + ev_idx];
                 map->eigenvalues[j - 1] = gl.eigenvalues[ev_idx];
@@ -599,7 +599,7 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
 
 int laplace_eigenmap_transform(const LaplacianEigenmap* map, const float* new_point, float* embedding) {
     if (!map || !new_point || !embedding || !map->training_data) return -1;
-    /* ZSFQQ-P0-002修复: 使用保存的原始训练数据training_data而非距离矩阵 */
+/* 使用保存的原始训练数据training_data而非距离矩阵 */
     int n = map->num_points, d = map->data_dim, em = map->embedding_dim;
     if (n < 1 || d < 1 || em < 1) return -1;
 
@@ -633,7 +633,7 @@ void laplace_eigenmap_free(LaplacianEigenmap* map) {
     free(map->embedding);
     free(map->eigenvalues);
     free(map->distance_matrix);
-    free(map->training_data); /* ZSFQQ-P0-002: 释放训练数据 */
+    free(map->training_data); /* 释放训练数据 */
     memset(map, 0, sizeof(LaplacianEigenmap));
 }
 

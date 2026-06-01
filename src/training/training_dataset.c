@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file training_dataset.c
  * @brief 训练数据集管理系统
  *
@@ -14,7 +14,7 @@
 #include "selflnn/training/data_loaders.h"
 #include "selflnn/training/training_dataset.h"  /* OR-001: 数据集模块独立头文件 */
 #include "selflnn/core/errors.h"
-#include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
+#include "selflnn/core/laplace_unified.h" /* 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
@@ -28,7 +28,7 @@
 #include <time.h>
 
 /* ================================================================
- * ZSFUSA-C14: Cooley-Tukey基-2 FFT/IFFT (O(N log N)替代朴素DFT O(N²))
+ *: Cooley-Tukey基-2 FFT/IFFT (O(N log N)替代朴素DFT O(N²))
  * ================================================================ */
 
 /* 位逆序重排：将数组元素按位逆序重新排列 */
@@ -186,7 +186,7 @@ TrainingDataset* dataset_create(const char* name, size_t num_samples,
 
     ds->is_loaded = 1;
     ds->is_shuffled = 0;
-    ds->is_training_data = 1;  /* ZSFZS-F029: 默认训练模式，增强函数将正常执行 */
+    ds->is_training_data = 1; /* 默认训练模式，增强函数将正常执行 */
     ds->current_index = 0;
     ds->epoch = 0;
 
@@ -708,7 +708,7 @@ int augment_cutmix(TrainingDataset* ds, float alpha) {
  */
 int augment_feature_dropout(TrainingDataset* ds, float drop_prob) {
     if (!ds || !ds->is_loaded) return -1;
-    if (!ds->is_training_data) return 0;  /* ZSFZS-F029: 验证模式跳过增强，保护原始数据 */
+    if (!ds->is_training_data) return 0; /* 验证模式跳过增强，保护原始数据 */
     if (drop_prob <= 0.0f) drop_prob = 0.1f;
     if (drop_prob > 0.9f) drop_prob = 0.9f;
 
@@ -785,7 +785,7 @@ int augment_spectral(TrainingDataset* ds, float freq_mask_param, float time_mask
             safe_free((void**)&freq_imag);
             break;
         }
-        /* ZSFUSA-C14: Cooley-Tukey FFT O(N log N)替代朴素DFT O(N²) */
+/* Cooley-Tukey FFT O(N log N)替代朴素DFT O(N²) */
         memcpy(freq_real, real, fft_size * sizeof(float));
         memcpy(freq_imag, imag, fft_size * sizeof(float));
         cooley_tukey_fft(freq_real, freq_imag, (int)fft_size);
@@ -825,7 +825,7 @@ int augment_spectral(TrainingDataset* ds, float freq_mask_param, float time_mask
             }
         }
 
-        /* 5. ZSFUSA-C14: Cooley-Tukey IFFT O(N log N)替代朴素IDFT O(N²) */
+        /* 5. Cooley-Tukey IFFT O(N log N)替代朴素IDFT O(N²) */
         cooley_tukey_ifft(freq_real, freq_imag, (int)fft_size);
         memcpy(real, freq_real, fft_size * sizeof(float));
 
@@ -969,7 +969,7 @@ int dataset_augment_cutmix(TrainingDataset* ds, float alpha) {
 }
 
 int dataset_augment_dropout(TrainingDataset* ds, float drop_prob) {
-    /* ZSFZS-F028: 委托给 augment_feature_dropout 统一实现，消除重复实现 */
+/* 委托给 augment_feature_dropout 统一实现，消除重复实现 */
     return augment_feature_dropout(ds, drop_prob);
 }
 
@@ -1022,7 +1022,7 @@ int dataset_augment_spectral(TrainingDataset* ds, float freq_mask_param, float t
  *   - 编译所有辅助函数和常量
  *   - 函数入口由 SELFLNN_ALLOW_BOOTSTRAP_DATA 控制
  * ============================================================================ */
-/* ZSFUSA-O01: 合成数据已永久移除，仅保留真实数据路径 */
+/* 合成数据已永久移除，仅保留真实数据路径 */
 int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
     (void)out_ds;
     (void)num_samples;
@@ -1031,7 +1031,7 @@ int dataset_bootstrap_multimodal(TrainingDataset** out_ds, size_t num_samples) {
 }
 
 /* ================================================================
- * ZSF-013: dataset_api.h 头文件适配包装函数
+ *: dataset_api.h 头文件适配包装函数
  *
  * dataset_api.h 中声明的函数名与 training_dataset.c 中的
  * 实现函数名不一致。以下包装函数确保头文件声明与实现正确映射。
@@ -1068,7 +1068,7 @@ int dataset_set_weights(TrainingDataset* ds, const float* weights, size_t n) {
     return 0;
 }
 
-/* ZSFZS-F029: 设置训练/验证模式 */
+/* 设置训练/验证模式 */
 int dataset_set_training_mode(TrainingDataset* ds, int is_training) {
     if (!ds || !ds->is_loaded) return -1;
     ds->is_training_data = is_training ? 1 : 0;
@@ -1148,7 +1148,7 @@ int dataset_split(TrainingDataset* ds,
     (*out_val)->header.num_samples   = (uint32_t)val_count;
     (*out_test)->header.num_samples  = (uint32_t)test_count;
 
-    /* ZSFZS-F029: 训练集开启训练模式, 验证集和测试集关闭训练模式(增强函数将跳过) */
+/* 训练集开启训练模式, 验证集和测试集关闭训练模式(增强函数将跳过) */
     (*out_train)->is_training_data = 1;
     (*out_val)->is_training_data   = 0;
     (*out_test)->is_training_data  = 0;

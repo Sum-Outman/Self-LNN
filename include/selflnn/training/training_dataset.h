@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file training_dataset.h
  * @brief 训练数据集管理系统
  *
@@ -39,7 +39,7 @@ extern "C" {
  *          output_mean[256], output_std[256], total_memory_mb
  */
 
-/* ZSFLNN-C-004修复: DatasetSplit已被新的7参数dataset_split替代，移除此未使用的结构体 */
+/* DatasetSplit已被新的7参数dataset_split替代，移除此未使用的结构体 */
 
 /* 数据集生命周期管理 */
 TrainingDataset* dataset_create(size_t num_samples, size_t feature_dim);
@@ -75,12 +75,12 @@ int dataset_augment_dropout(TrainingDataset* ds, float drop_prob);
 int dataset_augment_spectral(TrainingDataset* ds, float freq_mask_param, float time_mask_param);
 
 /* 多模态处理 */
-/* ZSFUSA: MultimodalSample前向声明(完整定义在training_dataset.c中) */
+/* MultimodalSample前向声明(完整定义在training_dataset.c中) */
 typedef struct MultimodalSample MultimodalSample;
 int multimodal_concat_sample(const MultimodalSample* sample, float* unified_input, size_t unified_dim);
 int dataset_multimodal_concat(const MultimodalSample* sample, float* unified, size_t dim);
 
-/* ZSFLNN-C-004修复: 数据集分割 — 7参数版本与.c实现一致
+/* 数据集分割 — 7参数版本与.c实现一致
  * 将数据集按比例分割为训练集、验证集、测试集三个独立数据集
  * @param ds 源数据集
  * @param train_ratio 训练集比例 (如0.7)

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file online_learning.c
  * @brief 在线学习系统实现
  * 
@@ -13,7 +13,7 @@
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
-/* ZSFWS-H002: 在线学习器使用LNN/CfC替代线性模型 */
+/* 在线学习器使用LNN/CfC替代线性模型 */
 #include "selflnn/core/lnn.h"
 #include "selflnn/selflnn.h"
 
@@ -24,7 +24,7 @@
 #include <time.h>
 #include <float.h>
 
-/* ZSFBUILD: RL_MAX宏来自reinforcement_learning.c，需在此文件也定义 */
+/* RL_MAX宏来自reinforcement_learning.c，需在此文件也定义 */
 #define RL_MAX(X,Y) (((X)>(Y))?(X):(Y))
 
 /**
@@ -106,7 +106,6 @@ typedef struct {
     float Q;                           /**< 过程噪声协方差 */
     size_t state_size;                 /**< 状态维度 */
     int is_initialized;                /**< 是否已初始化 */
-    /* ZSF-ZNB修复H-007: 添加速度估计所需的字段 */
     float* last_measurement;           /**< 上次测量值 [state_size] */
     time_t last_measurement_time;      /**< 上次测量时间戳 */
     int last_measurement_available;    /**< 上次测量是否可用 */
@@ -162,12 +161,12 @@ struct OnlineLearner {
     int ewc_initialized;            /**< EWC是否已初始化 */
     float ewc_total_fisher;         /**< Fisher信息总和 */
 
-    /* ZSFWS-013: LNN附着支持 —— 在线学习器直接操作LNN权重矩阵 */
+/* LNN附着支持 —— 在线学习器直接操作LNN权重矩阵 */
     LNN* attached_lnn;              /**< 附着的共享LNN实例 */
     int lnn_attached;               /**< 是否已附着LNN（1=附着, 0=独立权重） */
     int weights_owned;              /**< 权重内存是否由学习器自己管理 */
 
-    /* ZSFZS-001: 能力开关控制字段 */
+/* 能力开关控制字段 */
     int imitation_enabled;          /**< 模仿学习是否启用（能力开关控制） */
     float exploration_rate;         /**< 探索率（好奇心/探索能力控制，0.0=无探索, 1.0=最大探索） */
 };
@@ -410,7 +409,7 @@ OnlineLearner* online_learner_create(const OnlineLearningConfig* config,
 void online_learner_free(OnlineLearner* learner) {
     if (!learner) return;
     
-    /* ZSFWS-013: 仅释放学习器自己拥有的权重内存，不释放LNN共享的权重 */
+/* 仅释放学习器自己拥有的权重内存，不释放LNN共享的权重 */
     if (learner->weights_owned && learner->weights) {
         safe_free((void**)&learner->weights);
     } else {
@@ -439,7 +438,7 @@ void online_learner_free(OnlineLearner* learner) {
         free_kalman_filter(&learner->kalman_state);
     }
     
-    /* ZSFWS-013: 清除LNN引用（不释放LNN本身，它由selflnn系统管理） */
+/* 清除LNN引用（不释放LNN本身，它由selflnn系统管理） */
     learner->attached_lnn = NULL;
     learner->lnn_attached = 0;
     
@@ -447,7 +446,7 @@ void online_learner_free(OnlineLearner* learner) {
 }
 
 /**
- * @brief ZSFWS-013: 将在线学习器附着到共享LNN实例
+ * @brief 将在线学习器附着到共享LNN实例
  *
  * 调用后学习器将直接读写LNN的权重矩阵（而非维护独立副本）。
  * 梯度下降更新直接作用于LNN参数，实现真正的液态神经网络在线学习。
@@ -616,7 +615,7 @@ int online_learner_update(OnlineLearner* learner,
     }
     memset(gradient, 0, learner->weights_size * sizeof(float));
     
-    /* ZSFWS-013/M-006修复: 使用LNN CfC动力学替代简单线性模型
+/*/M-006修复: 使用LNN CfC动力学替代简单线性模型
      * 当LNN已附着时：使用 lnn_forward 预测 + lnn_backward_accumulate 累积梯度（不立即更新）
      * 后续由学习器的SGD/Kalman/Adaptive算法直接对LNN参数应用更新
      * 当LNN未附着时：直接返回错误码(-1)，不回退到线性模型，
@@ -658,7 +657,7 @@ int online_learner_update(OnlineLearner* learner,
     float error = prediction - target_val;
     float current_loss = 0.5f * error * error;
 
-    /* ZSFWS-013/M-006修复: LNN附着模式下的梯度累积策略
+/*/M-006修复: LNN附着模式下的梯度累积策略
      * 使用 lnn_backward_accumulate 将梯度累积到LNN的内部梯度缓冲区，
      * 然后从LNN梯度缓冲区读取梯度到本地gradient数组，
      * 最后由学习器的 SGD/Kalman/Adaptive 算法通过 learner->weights
@@ -722,7 +721,7 @@ int online_learner_update(OnlineLearner* learner,
     }
     
     // 根据算法类型更新权重
-    /* ZSFX-DEEP-R9-001: 保护LNN权重写入操作 */
+/* 保护LNN权重写入操作 */
     lnn_lock(learner->attached_lnn);
     switch (learner->config.algorithm_type) {
         case ONLINE_LEARNING_SGD: {
@@ -999,7 +998,7 @@ int online_learner_reset(OnlineLearner* learner, int keep_weights) {
     
     // 重置权重（如果不保留）
     if (!keep_weights && learner->weights) {
-        /* ZSFWS-013: LNN附着模式下不重置LNN权重（防止破坏预训练模型）
+/* LNN附着模式下不重置LNN权重（防止破坏预训练模型）
          * 仅重置学习器自己的统计信息，LNN权重保持不变 */
         if (learner->lnn_attached) {
             log_info("[在线学习] LNN附着模式：重置学习器统计信息，保留LNN权重不变");
@@ -1596,7 +1595,7 @@ int online_learner_load_state(OnlineLearner* learner, const char* filename) {
 }
 
 /* ============================================================================
- * ZSFZS-001: 能力开关控制函数实现
+ *: 能力开关控制函数实现
  * ============================================================================ */
 
 /**
@@ -2258,7 +2257,6 @@ static int initialize_kalman_filter(KalmanFilterState* state, size_t state_size,
         return -1;
     }
     
-    /* ZSF-ZNB修复H-007: 分配速度估计所需的字段 */
     state->last_measurement = (float*)safe_calloc(state_size, sizeof(float));
     if (!state->last_measurement) {
         safe_free((void**)&state->z);
@@ -2304,7 +2302,7 @@ static int update_kalman_filter(KalmanFilterState* state, const float* measureme
         for (size_t i = 0; i < n; i++) {
             state->x[i] = measurement[i];
             state_estimate[i] = measurement[i];
-            state->last_measurement[i] = measurement[i]; /* ZSF-ZNB修复H-007 */
+            state->last_measurement[i] = measurement[i];
         }
         state->is_initialized = 1;
         state->last_measurement_available = 1;
@@ -2313,7 +2311,6 @@ static int update_kalman_filter(KalmanFilterState* state, const float* measureme
     }
     
     {
-        /* ZSF-ZNB修复H-007: 修正dt计算——time()返回秒，差值就是秒 */
         float dt = (float)(time(NULL) - state->last_measurement_time);
         if (dt <= 0.0f) dt = 0.01f;
 
@@ -2373,7 +2370,7 @@ static void free_kalman_filter(KalmanFilterState* state) {
     safe_free((void**)&state->K);
     safe_free((void**)&state->x);
     safe_free((void**)&state->z);
-    safe_free((void**)&state->last_measurement); /* ZSF-ZNB修复H-007 */
+    safe_free((void**)&state->last_measurement);
     state->last_measurement_available = 0;
     state->last_measurement_time = 0;
     state->state_size = 0;
@@ -2606,7 +2603,7 @@ int online_learner_compute_ewc_fisher(OnlineLearner* learner,
         if (!learner->ewc_fisher_diag) return -1;
     }
 
-    /* ZSFWS-013修复: EWC Fisher优先使用附着的LNN，而非全局查找
+/* EWC Fisher优先使用附着的LNN，而非全局查找
      * 通过共享LNN的CfC动力学进行前向传播计算预测
      * 与 update() 保持一致 */
     float predicted[64] = {0};

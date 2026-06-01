@@ -1,4 +1,4 @@
-#include "selflnn/safety/security_monitor_deep.h"
+﻿#include "selflnn/safety/security_monitor_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include <stdlib.h>
@@ -937,7 +937,7 @@ int sec_report_resource_event(SafetyMonitor* safety_monitor,
  * A09.1.3 输入安全监控深度实现
  * ============================================================================ */
 
-/* ZSFLYF-P3-004修复: 替换简单LCG为xorshift128+随机数生成器。
+/* 替换简单LCG为xorshift128+随机数生成器。
  * xorshift在统计质量和速度上均优于LCG，更适合对抗样本检测中的随机扰动。 */
 static uint32_t sec_rng_next(SecInputMonitor* monitor) {
     uint64_t x = (uint64_t)monitor->rng_state;

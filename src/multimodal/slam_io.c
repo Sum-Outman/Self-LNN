@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file slam_io.c
  * @brief SLAM输入输出模块
  *
@@ -447,7 +447,7 @@ int slam_camera_input_read_frame(CameraInput* cam, float* image_data) {
 }
 
 /* ================================================================
- * ZSFZX-FIX-SLAM-DATASET: TUM RGB-D数据集离线回放加载器
+ *: TUM RGB-D数据集离线回放加载器
  *
  * 实现完整的SLAM离线数据集解析，使系统可在无硬件时通过
  * 真实记录的传感器数据验证SLAM算法。

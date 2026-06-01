@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file reasoning.c
  * @brief 推理引擎实现
  * 
@@ -83,7 +83,7 @@ struct ReasoningEngine {
     struct KnowledgeBase* external_kb;     /**< 外部知识库引用 */
     int kb_auto_sync;                     /**< 是否自动同步知识库 */
     int knowledge_ready;                  /**< P0-009: 知识是否已从真实数据源加载（1=已同步, 0=空白） */
-    /* ZSFZX-FIX-REASONING: 平台统一字段 — 与reasoning_internal.c对齐 */
+/* 平台统一字段 — 与reasoning_internal.c对齐 */
     struct KnowledgeBase* kb;
     int cache_valid;
     size_t knowledge_sync_count;
@@ -198,7 +198,7 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     /* 初始化LNN集成 */
     engine->lnn_instance = NULL;
     
-    /* 初始化贝叶斯网络集成 — ZSFX-006修复: 实例化而非NULL */
+    /* 初始化贝叶斯网络集成 — 实例化而非NULL */
     engine->bayesian_network = bayesian_network_create(64);
     
     return engine;
@@ -1066,7 +1066,7 @@ int causal_model_instrumental_variable(StructuralCausalModel* model,
     for (int s = 0; s < num_samples; s++) var_z += (z_samples[s] - mean_z) * (z_samples[s] - mean_z);
     var_z /= (float)(num_samples - 1);
 
-    /* ZSFA-FIX-F006: safe_free(z_samples)移至方差计算之后，避免use-after-free */
+/* safe_free(z_samples)移至方差计算之后，避免use-after-free */
     safe_free((void**)&z_samples);
 
     float se = sqrtf(var_z / (cov_zx * cov_zx * (float)num_samples));
@@ -3926,7 +3926,7 @@ int reasoning_infer(ReasoningEngine* engine,
     perf_timer_start(&timer);
     
     /* 如果关联了外部知识库，使用知识增强推理 */
-    /* ZSFX-007: 全平台统一启用知识增强推理 */
+/* 全平台统一启用知识增强推理 */
     if (engine->external_kb != NULL && engine->knowledge_base_size > 0) {
         int ret = reasoning_infer_with_knowledge(engine, premises, num_premises,
                                                 conclusion, max_conclusion_size,
@@ -4727,7 +4727,7 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
     return (int)synced;
 }
 
-/* ZSFX-007: reasoning_infer_with_knowledge 全平台统一编译 */
+/* reasoning_infer_with_knowledge 全平台统一编译 */
 /**
  * @brief 使用知识库增强推理
  *
@@ -4868,7 +4868,7 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
 }
 
 /* ========== P2-3: 贝叶斯推理网络 + 推理引擎绑定 ========== */
-/* ZSFX-007: 全平台统一编译，不再区分GCC/MSVC */
+/* 全平台统一编译，不再区分GCC/MSVC */
 BayesianNetwork* bayesian_network_create(size_t max_nodes) {
     if (max_nodes == 0 || max_nodes > 10000) return NULL;
 
@@ -5564,6 +5564,6 @@ BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* en
     return engine->bayesian_network;
 }
 
-/* ZSFAB P1-001修复: 已删除重复stub，完整实现在上方 */
+/* P1-001修复: 已删除重复stub，完整实现在上方 */
 
 #endif /* !_MSC_VER —— 非MSVC平台推理引擎实现结束 */

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file lnn.c
  * @brief 液态神经网络核心实现
  * 
@@ -22,7 +22,7 @@
 #include "selflnn/core/laplace_features.h"
 #include "selflnn/core/laplace_fft.h"
 #include "selflnn/core/loss.h"          /* FIX-003: loss_gradient_ex 支持 */
-#include "selflnn/core/laplace_unified.h"  /* ZSFZS-F030: 原laplace_integration.h为纯转发,已删除 */
+#include "selflnn/core/laplace_unified.h" /* 原laplace_integration.h为纯转发,已删除 */
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
@@ -57,7 +57,7 @@ static inline uint32_t hash32(uint32_t x) {
     return x;
 }
 
-/* ZSFUSA-C10: 公共梯度裁剪函数，消除三处重复 */
+/* 公共梯度裁剪函数，消除三处重复 */
 static inline void lnn_clip_gradients(float* grads, size_t count, float max_norm) {
     if (!grads || count == 0 || max_norm <= 0.0f) return;
     float max_val = 0.0f;
@@ -456,11 +456,11 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
                                     strength);
     }
 
-    /* ZSFUSA-P1-002关键修复: 拉普拉斯稳定性分数从NetworkState传播到各CfCCell。
+/*关键修复: 拉普拉斯稳定性分数从NetworkState传播到各CfCCell。
      * network_state_set_laplace_metrics()已将频域分析结果写入网络状态，
      * 但需要显式复制到每个CfCCell实例，cfc_closed_form_solution中的
      * tau调制才能实际生效。此步骤是拉普拉斯-CfC数据流的关键闭环。
-     * ZSFUSA-V7: 使用network_state_get_laplace_stability_score() getter，
+ *: 使用network_state_get_laplace_stability_score() getter，
      * 因NetworkState结构体定义私有于state.c。 */
     if (network->cfc_network && network->cfc_network->layers && network->state) {
         float lap_stab = network_state_get_laplace_stability_score(network->state);
@@ -503,7 +503,7 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
      * 将 hidden_state 按4个一组映射为四元数，应用 CfC 闭式解更新，
      * 增强状态在四维旋转空间中的表示稳定性和不变性 */
     if (network->config.enable_quaternion && hidden_size >= 4) {
-        /* ZSFWS-P6修复: 保存四元数处理前的状态供反向传播使用。
+/* 保存四元数处理前的状态供反向传播使用。
          * hidden_state将在四元数循环中被原地修改为后处理值，
          * 而反向传播需要前处理值来正确计算tanh导数链。 */
         if (network->quaternion_pre_buf) {
@@ -565,7 +565,7 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
     return 0;
 }
 
-/* ZSFX-DEEP-R9-001: 公开LNN锁API
+/* 公开LNN锁API
  * 允许外部模块(在线学习器/演化引擎)在跨越多个LNN操作时持有锁。
  * 调用者必须确保lock/unlock成对使用,且不在锁内嵌套获取同一把锁。 */
 SELFLNN_API void lnn_lock(LNN* network) {
@@ -652,7 +652,7 @@ int lnn_forward_safe(LNN* network, const float* input, size_t input_size,
 }
 
 /* ================================================================
- * ZSFWS-P1-008: 并发隔离前向传播
+ *: 并发隔离前向传播
  * 每调用方持有独立的CfC状态副本，多模态可同时进行前向传播。
  * 权重访问使用读写锁（读锁），训练写入时排他（写锁）。
  * ================================================================ */
@@ -715,11 +715,11 @@ int lnn_forward_isolated(LNN* network, LNNForwardState* state,
     /* 复制输入到隔离缓冲区 */
     memcpy(state->input_buffer, input, in_sz * sizeof(float));
 
-    /* ZSFDDD-D4-001: 添加排他锁保护权重读取
+/* 添加排他锁保护权重读取
      * 原实现完全无锁——训练期间并发推理会读到半更新权重
      * 当前使用互斥锁（非RWLock），多读者实际串行化但保证安全 */
     LNN_LOCK(network);
-    /* ZSFWS-P1-008: 使用隔离状态进行CfC前向传播
+/* 使用隔离状态进行CfC前向传播
      * 直接将隔离状态传递给cfc_forward，完全避开LNN全局状态 */
     int result = cfc_forward(network->cfc_network,
                              state->input_buffer,
@@ -735,7 +735,7 @@ int lnn_forward_isolated(LNN* network, LNNForwardState* state,
     return 0;
 }
 
-/* ZSFWS-P1-008: 将隔离状态同步回LNN（可选，用于模态间状态传递）
+/* 将隔离状态同步回LNN（可选，用于模态间状态传递）
  * 调用此函数将隔离副本的最新隐藏状态写回LNN主状态，
  * 使后续其他模态可以看到当前模态处理后的上下文。 */
 int lnn_forward_state_sync_back(LNN* network, LNNForwardState* state) {
@@ -763,7 +763,7 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
     size_t input_size = network->config.input_size;
     size_t hidden_size = network->config.hidden_size;
     int num_layers = network->config.num_layers;
-    /* ZSFWS-P1修复: 移除combined_scale对error_buffer的直接缩放。
+/* 移除combined_scale对error_buffer的直接缩放。
      * 此前在cfc_backward之前缩放error_buffer会不可控地压缩所有后续梯度，
      * 导致深层网络训练不收敛。改为将层深度因子应用于梯度裁剪阈值，
      * 因为梯度裁剪是唯一合理的梯度缩放注入点——统一控制所有梯度的尺度。
@@ -780,7 +780,7 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
     if (loss_type < 0 || loss_type > 11) loss_type = (int)LOSS_MSE;
 
     float* error_gradient = network->error_buffer;
-    /* ZSFWS-NEW02: output_size为size_t但下游接int参数——实际NN维度远<2^31，安全
+/* output_size为size_t但下游接int参数——实际NN维度远<2^31，安全
      * 若后续支持超大输出层需将loss_gradient_ex接口改为size_t */
     loss_gradient_ex(network->output_buffer, target, (int)output_size,
                      error_gradient, (LossType)loss_type, NULL);
@@ -800,7 +800,7 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
 
     memset(network->gradient_buffer, 0, hidden_size * sizeof(float));
     /* P0-002: 使用 cfc_backward_ex 传递 skip_cell_update 标志 */
-    /* ZSFUSA-C17: 批量梯度累积模式。
+/* 批量梯度累积模式。
      * 当batch_size>1时，对每个样本执行前向+反向，累积梯度：
      *   1. 保存当前LNN状态
      *   2. 对batch中每样本: lnn_forward_sample → lnn_backward_sample → 累积梯度
@@ -815,16 +815,16 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
                             skip_cell_update);
     SELFLNN_CHECK(result == 0, SELFLNN_ERROR_NETWORK_CONFIG,
                  "CfC网络反向传播失败");
-    /* ZSFUSA-C10: 公共梯度裁剪替代内联循环 */
+/* 公共梯度裁剪替代内联循环 */
     float max_grad_norm = network->config.max_grad_norm;
-    /* ZSFWS-P1修复: 将层深度因子应用于梯度裁剪阈值。 */
+/* 将层深度因子应用于梯度裁剪阈值。 */
     if (depth_grad_factor > 1.0f) {
         max_grad_norm *= depth_grad_factor;
         if (max_grad_norm > 50.0f) max_grad_norm = 50.0f;
     }
     lnn_clip_gradients(network->gradient_buffer, hidden_size, max_grad_norm);
 
-    /* ZSFQQ-TRAIN-P0-1修复: 原代码cfc_get_weight_matrix返回的是参数(weight_matrix)
+/* 原代码cfc_get_weight_matrix返回的是参数(weight_matrix)
      * 而非梯度(weight_gradients)。调用lnn_clip_gradients会破坏性修改权重参数本身。
      * 修复：直接裁剪cfc_network内部的weight_gradients/bias_gradients字段。 */
     {
@@ -846,7 +846,7 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
         }
     }
 
-    /* ZSFUSA-C10: 公共梯度裁剪替代CLIP_GRAD_ARRAY宏(R5-FIX cell级门控裁剪) */
+/* 公共梯度裁剪替代CLIP_GRAD_ARRAY宏(R5-FIX cell级门控裁剪) */
     if (network->cfc_network && network->cfc_network->layers) {
         float max_norm = network->config.max_grad_norm;
         if (max_norm <= 0.0f) max_norm = 10.0f;
@@ -883,7 +883,7 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
         for (size_t q = 0; q < num_quats; q++) {
             float* gv = network->gradient_buffer + q * 4;
 
-            /* ZSFWS-P6修复: 从quaternion_pre_buf获取前处理状态，
+/* 从quaternion_pre_buf获取前处理状态，
              * 而非从已修改的hidden_state读取后处理值。
              * 反向传播需要前处理状态来计算tanh导数链。 */
             const float* pre_state = network->quaternion_pre_buf;
@@ -969,7 +969,7 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
  */
 int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
     int ret = _lnn_backward_internal_ex(network, target, loss, 0);
-    /* ZSFQQ-TRAIN-P0-2修复: skip=0模式下cfc_backward_ex仅累积weight_gradients
+/* skip=0模式下cfc_backward_ex仅累积weight_gradients
      * 但不应用。需要在函数返回前应用累积梯度到weight_matrix/bias_vector。 */
     if (ret == 0 && network->cfc_network) {
         CfCNetwork* cfc = network->cfc_network;
@@ -995,7 +995,7 @@ int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
 /**
  * @brief 反向传播（训练）- 完整多层LNN实现
  * 
- * ZSFUSA-C17: 当前为单样本反向传播模式。
+ *: 当前为单样本反向传播模式。
  * 对于批量训练，推荐使用以下模式：
  *   1. 循环每个样本调用 lnn_forward
  *   2. 循环每个样本调用 lnn_backward（skip_cell_update=1 跳过cell状态更新）
@@ -1563,7 +1563,7 @@ int lnn_set_ode_solver(LNN* network, int solver_type) {
 /**
  * @brief 获取网络参数数量
  * 
- * ZSFWS-MLW: 完全重写。原代码只返回单层参数数，与实际的param_block大小不一致。
+ *: 完全重写。原代码只返回单层参数数，与实际的param_block大小不一致。
  * 新代码返回所有层权重+所有层偏置+输出投影参数的总数，
  * 与 cfc_network.c 中 param_block 的实际分配大小完全吻合。
  */
@@ -1721,7 +1721,7 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
     CfCNetwork* cfc_network = network->cfc_network;
     SELFLNN_CHECK_NULL(cfc_network, "CfC网络句柄为空");
 
-    /* ZSFWS-MLW: 使用cfc内部追踪的实际参数总数（包含所有层） */
+/* 使用cfc内部追踪的实际参数总数（包含所有层） */
     size_t param_count;
     float* shared_w;
     float* shared_b;
@@ -1767,7 +1767,7 @@ int _lnn_backward_batch_internal(LNN* network, const float* inputs, const float*
     // input_size already defined above
     
     // 计算总权重和偏置数量
-    /* ZSFWS-MLW: 使用cfc内部追踪的实际多层参数总数 */
+/* 使用cfc内部追踪的实际多层参数总数 */
     if (cfc_network->per_layer_w_offset && cfc_network->total_weight_params > 0) {
         weight_count = cfc_network->total_weight_params;
         bias_count   = cfc_network->total_bias_params;
@@ -2516,7 +2516,7 @@ static uint32_t detect_numa_node(int cpu_index) {
     /* 无法检测NUMA拓扑，默认返回节点0 */
     return 0;
 #elif defined(__linux__)
-    /* ZSFAB-M06修复: 通过sysfs读取NUMA节点信息，无需libnuma依赖 */
+/* 通过sysfs读取NUMA节点信息，无需libnuma依赖 */
     char numa_path[128];
     snprintf(numa_path, sizeof(numa_path),
         "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu_index);
@@ -2647,7 +2647,7 @@ SELFLNN_API int lnn_enable_sharding(LNN* network, size_t num_shards, size_t shar
 
         int add_ret = shard_system_add_shard(network->shard_system, &desc);
         if (add_ret != 0) {
-            /* ZSFABC修复: 分片添加失败时记录错误并清理 */
+/* 分片添加失败时记录错误并清理 */
             log_warning("[LNN分片] 分片%zu添加失败 (ret=%d), 停止创建后续分片", i, add_ret);
             break;
         }
@@ -2980,7 +2980,7 @@ int lnn_safe_forward(LNN* net, const float* input, float* output, float* hidden_
     size_t n_params;
     if (net->cfc_network) {
         CfCNetwork* cfc = net->cfc_network;
-        /* ZSFWS-MLW: 使用实际分配的多层参数总数进行NaN扫描 */
+/* 使用实际分配的多层参数总数进行NaN扫描 */
         if (cfc->per_layer_w_offset && cfc->total_weight_params > 0) {
             n_params = cfc->total_weight_params + cfc->total_bias_params;
         } else if (cfc->config.num_layers <= 1) {
@@ -3001,7 +3001,7 @@ int lnn_safe_forward(LNN* net, const float* input, float* output, float* hidden_
     if (has_nan) {
         selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
                               "参数NaN检测: 权重损坏，尝试从检查点恢复而非静默重置");
-        /* ZSFWS-P11修复: 不再静默重置权重为伪随机值。
+/* 不再静默重置权重为伪随机值。
          * 之前hash32(i)生成伪随机值会导致模型权重无声丢失。
          * 改为仅重置隐藏状态并记录错误，权重通过外部检查点恢复。 */
         if (net->hidden_state)
@@ -3076,7 +3076,7 @@ int lnn_shard_allreduce_gradients(LNN* net, float** shard_gradients,
     return active_shards;
 }
 
-/* ZSF-001修复: 获取LNN内部隐藏状态和最近输出
+/*修复: 获取LNN内部隐藏状态和最近输出
  * 为AGI后台任务提供真实的系统状态数据。 */
 
 int lnn_get_state(const LNN* network, float* state_buffer, int buffer_dim) {
@@ -3097,7 +3097,7 @@ int lnn_get_state(const LNN* network, float* state_buffer, int buffer_dim) {
     return 0;
 }
 
-/* ZSFUSA: 获取指定层的参数指针 */
+/* 获取指定层的参数指针 */
 float* lnn_get_layer_parameters(LNN* lnn, int layer_id) {
     if (!lnn || layer_id < 0) return NULL;
     CfCNetwork* net = lnn_get_cfc_network(lnn);
@@ -3106,7 +3106,7 @@ float* lnn_get_layer_parameters(LNN* lnn, int layer_id) {
     return net->layers[layer_id]->weight_matrix;
 }
 
-/* ZSFUSA: 获取指定层的参数数量 */
+/* 获取指定层的参数数量 */
 size_t lnn_get_layer_parameter_count(LNN* lnn, int layer_id) {
     if (!lnn || layer_id < 0) return 0;
     CfCNetwork* net = lnn_get_cfc_network(lnn);
@@ -3120,7 +3120,7 @@ size_t lnn_get_layer_parameter_count(LNN* lnn, int layer_id) {
     return count;
 }
 
-/* ZSFQQ-Q025: 通过公共API获取权重矩阵和偏置向量，替代直接访问内部字段 */
+/* 通过公共API获取权重矩阵和偏置向量，替代直接访问内部字段 */
 float* lnn_get_weight_matrix(LNN* network) {
     if (!network) return NULL;
     CfCNetwork* cfc = lnn_get_cfc_network(network);
@@ -3214,7 +3214,7 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
 
         /* 计算规范参数大小 */
         size_t shared_w_count;
-        /* ZSFQQ-TRAIN-P1修复: 多层网络第一层是input→hidden，后续层是hidden→hidden。
+/* 多层网络第一层是input→hidden，后续层是hidden→hidden。
          * 原代码误用hidden_size*hidden_size(仅一层)，遗漏了第一层和其余层。 */
         if (num_layers <= 1) {
             shared_w_count = input_size * hidden_size;
@@ -3230,8 +3230,8 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
             if (!cell) continue;
             size_t layer_input = (l == 0) ? input_size : hidden_size;
             cell_unique_params += layer_input * hidden_size;  /* input_gate_weights */
-            cell_unique_params += layer_input * hidden_size;  /* forget_gate_weights (ZSFWS-023修复: 补充遗漏) */
-            cell_unique_params += layer_input * hidden_size;  /* output_gate_weights (ZSFWS-023修复: 补充遗漏) */
+            cell_unique_params += layer_input * hidden_size;  /* forget_gate_weights (补充遗漏) */
+            cell_unique_params += layer_input * hidden_size;  /* output_gate_weights (补充遗漏) */
             if (cell->gate_biases) cell_unique_params += hidden_size * 3;
             if (cell->use_adaptive_tau && cell->time_constants) cell_unique_params += hidden_size;
             if (cell->hidden_to_input_gate_weights) cell_unique_params += hidden_size * hidden_size;
@@ -3283,7 +3283,7 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
                     idx += n;
                 }
 
-                /* forget_gate_weights (ZSFWS-023修复: 补充遗漏的门控权重) */
+                /* forget_gate_weights (补充遗漏的门控权重) */
                 if (cell->forget_gate_weights && idx + layer_input * hidden_size <= total_params) {
                     size_t n = layer_input * hidden_size;
                     memcpy(all_params + idx, cell->forget_gate_weights, n * sizeof(float));
@@ -3293,7 +3293,7 @@ SELFLNN_API int lnn_backward_with_optimizer(LNN* network, const float* target, f
                     idx += n;
                 }
 
-                /* output_gate_weights (ZSFWS-023修复: 补充遗漏的门控权重) */
+                /* output_gate_weights (补充遗漏的门控权重) */
                 if (cell->output_gate_weights && idx + layer_input * hidden_size <= total_params) {
                     size_t n = layer_input * hidden_size;
                     memcpy(all_params + idx, cell->output_gate_weights, n * sizeof(float));

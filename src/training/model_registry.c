@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file model_registry.c
  * @brief 模型版本注册管理系统完整实现
  */
@@ -123,7 +123,7 @@ int mr_set_stable_version(ModelRegistry* mr, int model_id, int version_id) {
 int mr_rollback(ModelRegistry* mr, int model_id, int version_id) {
     ModelEntry* e = find_model(mr, model_id);
     if (!e) return -1;
-    /* ZSFLNN-C-011修复: 真正的回滚实现 — 验证目标版本存在、加载权重文件、更新部署状态 */
+/* 真正的回滚实现 — 验证目标版本存在、加载权重文件、更新部署状态 */
     int found = 0;
     char target_path[MR_MAX_PATH] = {0};
     for (int i = 0; i < e->version_count; i++) {

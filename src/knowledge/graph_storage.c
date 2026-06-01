@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file graph_storage.c
  * @brief 知识图谱存储引擎实现
  *
@@ -747,7 +747,7 @@ int property_graph_save(PropertyGraph* pg, const char* filename) {
     fwrite(&magic, sizeof(magic), 1, fp);
     fwrite(&version, sizeof(version), 1, fp);
 
-    /* ZSFWS-M025修复: 保存实际存在的节点数（遍历capacity跳过空洞）
+/* 保存实际存在的节点数（遍历capacity跳过空洞）
      * 防止节点ID不连续时丢失高ID节点 */
     uint32_t actual_count = 0;
     for (size_t i = 0; i < pg->node_capacity; i++) {
@@ -1275,7 +1275,7 @@ static int spo_compare(const void* a, const void* b) {
     return ea->object_id - eb->object_id;
 }
 
-/* ZSFABC-P0-008修复: OSP索引必须按(object,subject,predicate)排序，不可复用spo_compare */
+/* OSP索引必须按(object,subject,predicate)排序，不可复用spo_compare */
 static int osp_compare(const void* a, const void* b) {
     const OSPEntry* ea = (const OSPEntry*)a;
     const OSPEntry* eb = (const OSPEntry*)b;
@@ -1429,7 +1429,7 @@ int rdf_triple_store_query(RDFTripleStore* store, int subject_id,
                 if (store->spo_index[i].subject_id != subject_id ||
                     store->spo_index[i].predicate_id != predicate_id ||
                     store->spo_index[i].object_id != object_id) break;
-                /* ZSFWS-L-017: 索引命中后全表回查——性能优化空间：
+/* 索引命中后全表回查——性能优化空间：
                  * 可在SPOEntry中直接存储triple索引避免O(n)全扫描 */
                 for (size_t t = 0; t < store->triple_count; t++) {
                     if (store->triples[t].subject_id == subject_id &&
@@ -1774,7 +1774,7 @@ int rdf_triple_store_import_ntriples(RDFTripleStore* store,
         int s_literal = 0, o_literal = 0;
         char* token;
 
-        /* ZSFZS-F040: strtok→strtok_s线程安全 */
+/* strtok→strtok_s线程安全 */
         char* saveptr = NULL;
         token = strtok_s(p, " \t", &saveptr);
         if (!token) continue;
@@ -2018,7 +2018,7 @@ RDFTripleStore* rdf_triple_store_load(const char* filename) {
         store->pos_index[store->pos_count].subject_id = t.subject_id;
         store->pos_count++;
     }
-    /* ZSFLYF-P3-002修复: 加载时排序改为O(n log n) qsort即可，
+/* 加载时排序改为O(n log n) qsort即可，
      * 因为RDF文件加载是偶发性操作。运行时增量插入已使用二分查找。 */
     qsort(store->spo_index, store->spo_count, sizeof(SPOEntry), spo_compare);
     qsort(store->osp_index, store->osp_count, sizeof(OSPEntry), osp_compare);

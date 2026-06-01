@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_metal.c
  * @brief Apple Metal GPU后端实现
  * 
@@ -425,7 +425,7 @@ static int load_metal_library(void) {
 #endif
 }
 
-/* ZSF999XQ-GPU-H4: Metal CfC ODE步进实现
+/*: Metal CfC ODE步进实现
  * 在Apple GPU上完成完整的CfC ODE积分计算
  * 使用Metal Shading Language内核执行Wh+b线性变换 + tanh + tau衰减 */
 #ifdef __APPLE__
@@ -788,7 +788,7 @@ static void metal_backend_context_free(GpuContext* context) {
     
     MetalContextInternal* ctx = (MetalContextInternal*)context;
     
-    /* ZSFFIX-P010: 释放Metal对象引用计数 */
+/* 释放Metal对象引用计数 */
     if (ctx->command_queue) {
         objc_msgSend((id)ctx->command_queue, sel_registerName("release"));
         ctx->command_queue = NULL;
@@ -2480,7 +2480,7 @@ static int metal_backend_kernel_execute(GpuKernel* kernel, size_t global_work_si
     void* compute_encoder = mtlCommandBufferComputeCommandEncoder(command_buffer);
     if (!compute_encoder) {
         set_metal_error_string("创建Metal计算命令编码器失败");
-        /* ZSFWS-L-002: Metal命令缓冲区释放 */
+/* Metal命令缓冲区释放 */
         return -1;
     }
     
@@ -2564,7 +2564,7 @@ static int metal_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
     void* compute_encoder = mtlCommandBufferComputeCommandEncoder(command_buffer);
     if (!compute_encoder) {
         set_metal_error_string("创建Metal计算命令编码器失败");
-        // ZSFWS-L-002: Metal命令缓冲区释放（第二个kernel函数）
+// Metal命令缓冲区释放（第二个kernel函数）
         return -1;
     }
     
@@ -2804,7 +2804,7 @@ static int metal_backend_get_memory_info(GpuContext* context, size_t* total_memo
 /**
  * @brief 重置Metal设备
  * 
- * ZSFNO1-P1-004修复: 实现完整的Metal设备重置逻辑。
+ *修复: 实现完整的Metal设备重置逻辑。
  * 通过创建并提交空命令缓冲区然后等待完成来刷新GPU管线，
  * 确保所有待处理的计算操作已完成且资源状态一致。
  * 这防止了多次训练周期之间的GPU内存泄漏和状态污染。

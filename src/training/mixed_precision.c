@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file mixed_precision.c
  * @brief 混合精度训练支持（FP16/FP32）实现
  * 
@@ -16,8 +16,8 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/graph_optimization.h"
 #include "selflnn/gpu/gpu.h"
-#include "selflnn/utils/logging.h"         /* ZSFUSA: log_debug/log_info/LOG_INFO宏 */
-/* ZSFUSA: LOG_INFO在npu_internal.h中定义，此处直接补定义 */
+#include "selflnn/utils/logging.h" /* log_debug/log_info/LOG_INFO宏 */
+/* LOG_INFO在npu_internal.h中定义，此处直接补定义 */
 #ifndef LOG_INFO
 #define LOG_INFO(...) log_info(__VA_ARGS__)
 #endif
@@ -52,7 +52,6 @@
 #include <emmintrin.h>
 #endif
 
-/* ZSF999XQ-GPU-C6修复: 混合精度GPU加速上下文（延迟初始化） */
 static GpuContext* g_mp_gpu_ctx = NULL;
 static int g_mp_gpu_available = -1; /* -1未检测, 0不可用, 1可用 */
 
@@ -180,7 +179,7 @@ static void fp16_to_fp32_batch_f16c(const fp16_t* src, float* dst, size_t count)
 #endif
 }
 
-/* ZSFUSA-V02: SSE2批量FP32→FP16转换加速 */
+/* SSE2批量FP32→FP16转换加速 */
 #ifdef __SSE2__
 static void fp32_to_fp16_batch_sse2(const float* src, uint16_t* dst, size_t count) {
     size_t i = 0;
@@ -215,7 +214,7 @@ static void fp32_to_fp16_batch_sse2(const float* src, uint16_t* dst, size_t coun
     }
 }
 #else
-/* ZSFUSA-V02: 无SSE2时标量回退（内联实现避免前向引用问题） */
+/* 无SSE2时标量回退（内联实现避免前向引用问题） */
 static void fp32_to_fp16_batch_sse2(const float* src, uint16_t* dst, size_t count) {
     for (size_t i = 0; i < count; i++) {
         uint32_t bits = *(const uint32_t*)(src + i);
@@ -558,7 +557,7 @@ static int convert_fp32_to_fp16(const float* src, fp16_t* dst, size_t count) {
     if (cpu_has_f16c()) {
         fp32_to_fp16_batch_f16c(src, dst, count);
     } else {
-        /* ZSFUSA-V02: F16C不可用时使用SSE2批量转换（三级回退: SSE2→标量） */
+/* F16C不可用时使用SSE2批量转换（三级回退: SSE2→标量） */
         fp32_to_fp16_batch_sse2(src, dst, count);
     }
     return 0;
@@ -751,7 +750,7 @@ int mixed_precision_bf16_native_layer_forward(const float* fp32_input,
 }
 
 int mixed_precision_bf16_hardware_support(void) {
-    /* ZSFLNN-M-009修复: 添加静态缓存避免每次调用都重新检测硬件 */
+/* 添加静态缓存避免每次调用都重新检测硬件 */
     static int cached_result = -1;
     static int cache_initialized = 0;
     if (cache_initialized) return cached_result;
@@ -1542,7 +1541,6 @@ HardwareFP16Support mixed_precision_detect_hardware_support(void) {
                             }
                         }
 
-                        /* ZSFWS修复 P2-003: 使用GPU SDK获取真实带宽，失败时标注为启发式估算 */
                         if (dev_info.total_memory > 0) {
                             if (dev_info.total_memory >= 40ULL * 1024 * 1024 * 1024) {
                                 result.memory_bandwidth_gbps = 2000.0f; /* HBM推测 */
@@ -1948,7 +1946,6 @@ int mixed_precision_forward(MixedPrecisionContext* context,
             return -1;
         }
         
-        /* ZSF999XQ-GPU-C6修复: GPU加速路径（未启用混合精度时） */
         {
             GpuContext* gpu_ctx = mp_get_gpu_context();
             if (gpu_ctx) {
@@ -1996,7 +1993,7 @@ int mixed_precision_forward(MixedPrecisionContext* context,
     const size_t hidden_size = network_config.hidden_size;
     const size_t output_size = network_config.output_size;
     
-    /* ZSF999XQ-GPU-C6修复: GPU加速前向传播路径
+/*修复: GPU加速前向传播路径
      * 尝试使用GPU进行FP16精度下的前向计算。
      * GPU不可用时回退到已有CPU路径（训练管线的可选加速）。 */
     {
@@ -2091,7 +2088,7 @@ int mixed_precision_backward(MixedPrecisionContext* context,
             return -1;
         }
         
-        /* ZSF999XQ-GPU-C6修复: GPU加速反向传播路径（未启用混合精度时）
+/*修复: GPU加速反向传播路径（未启用混合精度时）
          * GPU可用时使用GPU矩阵乘法加速梯度计算 */
         {
             GpuContext* gpu_ctx = mp_get_gpu_context();
@@ -2188,7 +2185,7 @@ int mixed_precision_backward(MixedPrecisionContext* context,
         grad_size = network_config.hidden_size;
     }
     
-    /* ZSF999XQ-GPU-C6修复: GPU加速反向传播路径
+/*修复: GPU加速反向传播路径
      * 在启用混合精度且FP16反向传播时，GPU可用于梯度缩放和矩阵运算加速。
      * GPU不可用时回退到已有CPU路径（训练管线的可选加速）。 */
     {
@@ -2329,7 +2326,7 @@ int mixed_precision_update_weights(MixedPrecisionContext* context,
         mixed_precision_update_scaling(context, NULL, 0);
     }
     
-    /* ZSF999XQ-GPU-C6修复: GPU加速权重更新路径
+/*修复: GPU加速权重更新路径
      * GPU可用时使用gpu_sgd_update进行向量化权重更新。
      * GPU不可用时回退到已有CPU逐元素更新路径（训练管线的可选加速）。 */
     {
@@ -3601,7 +3598,7 @@ int mixed_precision_sync_master_weights(MixedPrecisionContext* context) {
 }
 
 /* ============================================================================
- * ZSF-ZNB修复S-009: 自动混合精度(AMP)动态损失缩放器
+ *修复S-009: 自动混合精度(AMP)动态损失缩放器
  * 
  * 标准AMP训练循环:
  *   1. 前向传播FP16: loss = forward_fp16(input)

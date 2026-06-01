@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file long_term.c
  * @brief 长期记忆系统实现 — F-007修复：添加Ebbinghaus遗忘曲线、Hebbian巩固、间隔重复等真实算法
  * 
@@ -90,7 +90,7 @@ static float ltm_hebbian_strengthen(float current_strength, int access_count, in
     return result > 1.0f ? 1.0f : result;
 }
 
-/* ZSFWS-L015修复: SM-2回忆质量映射改进
+/* SM-2回忆质量映射改进
  * 原实现: q = (int)(strength*5+0.5) 直接截断
  * 改进: 使用非线性映射更加符合SM-2评分分布
  * strength ≈ 0.0-0.2 → q=0(完全遗忘), 0.2-0.4→q=1, 0.4-0.6→q=2

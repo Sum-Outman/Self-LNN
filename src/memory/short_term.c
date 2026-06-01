@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file short_term.c
  * @brief 短期记忆系统实现 — F-006修复：添加LRU驱逐、时间衰减、容量管理等真实算法
  * 
@@ -67,7 +67,7 @@ static int stm_find_record(ShortTermMemory* memory, const char* key) {
 }
 
 /* F-006: LRU驱逐 — 选择最久未访问且最弱的条目
- * ZSFWS修复-M-004: 综合评分 = 时间衰减 × (1-强度)，使用评分而非独立比较 */
+ *修复-M-004: 综合评分 = 时间衰减 × (1-强度)，使用评分而非独立比较 */
 static int stm_select_lru_victim(ShortTermMemory* memory) {
     int victim = -1;
     float best_score = -1.0f;
@@ -181,7 +181,7 @@ int short_term_memory_store(ShortTermMemory* memory, const char* key,
         }
     }
     
-    /* ZSFWS-L017修复: 干扰效应动态调整（原硬编码0.98）
+/* 干扰效应动态调整（原硬编码0.98）
      * 干扰强度与存储容量成反比：容量越小干扰越大（资源竞争） */
     float capacity_ratio = memory->record_capacity > 0
         ? (float)memory->record_count / (float)memory->record_capacity : 0.0f;
