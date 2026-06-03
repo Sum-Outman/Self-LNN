@@ -1014,6 +1014,18 @@ int self_cognition_neutral_assessment(SelfCognitionSystem* system,
  */
 int self_cognition_set_lnn_instance(SelfCognitionSystem* system, LNN* lnn);
 
+/**
+ * @brief P0-001: 设置架构控制器实例（用于运行时架构修正）
+ * 
+ * 将全局架构控制器引用注入到自我认知系统，
+ * 使得架构修正（SELF_CORRECTION_ARCHITECTURE）能够
+ * 通过 arch_controller_submit_change 真正执行网络结构变更。
+ * 
+ * @param system 自我认知系统句柄
+ * @param arch_controller 架构控制器实例
+ */
+void self_cognition_set_arch_controller(SelfCognitionSystem* system, void* arch_controller);
+
 /* ===================== 认知记忆系统 API（P1-03修复） ===================== */
 
 typedef struct {

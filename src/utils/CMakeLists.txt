@@ -1,4 +1,4 @@
-﻿# 实用工具库
+# 实用工具库
 # xml_parser.c和xml_parser.h已删除（孤儿文件，无外部调用者，~400行死代码）
 # kinematics.c已内置轻量级URDF/XML解析器，无需额外XML工具
 add_library(utils
@@ -25,7 +25,7 @@ if(WIN32)
     target_link_libraries(utils PUBLIC ws2_32 version)
     # 全局/FImath.h已覆盖，此处为冗余（保留作为文档参考）
     set_source_files_properties(math_utils.c PROPERTIES COMPILE_FLAGS "/FImath.h")
-endif
+endif()
 
 # 为兼容性添加别名
 add_library(selflnn_utils ALIAS utils)

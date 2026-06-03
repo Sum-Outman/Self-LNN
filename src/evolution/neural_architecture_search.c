@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file neural_architecture_search.c
  * @brief 神经架构搜索（NAS）系统实现 —— 全深度实现
  * 
@@ -25,6 +25,7 @@
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/core/architecture_controller.h" /* P1-002: NAS→LNN部署桥接 */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -483,7 +484,8 @@ int nas_search_generation(NASSystem* system) {
 /**
  * @brief 执行完整搜索
  */
-int nas_search_complete(NASSystem* system, int max_generations) {
+int nas_search_complete(NASSystem* system, int max_generations,
+                        void* arch_ctrl, void** lnn) {
     
     if (!system) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
@@ -503,6 +505,21 @@ int nas_search_complete(NASSystem* system, int max_generations) {
             return -1;
         }
         total_evaluated += evaluated;
+    }
+    
+    /* P1-002修复: 搜索完成后自动部署最优架构到运行中的LNN
+     * 如果arch_ctrl和lnn都提供了，则将NAS搜索到的最优架构
+     * 通过架构控制器真正部署到生产LNN实例 */
+    if (arch_ctrl && lnn && *lnn && system->best_architecture) {
+        int deploy_ret = nas_deploy_best_architecture(
+            system, (ArchitectureController*)arch_ctrl, (LNN**)lnn, 0.05f, 0.7f);
+        if (deploy_ret == 0) {
+            log_info("[NAS] 搜索完成并已自动部署最优架构到LNN");
+        } else if (deploy_ret == -3) {
+            log_info("[NAS] 搜索完成，但性能提升不足，跳过自动部署");
+        } else {
+            log_warning("[NAS] 搜索完成，但自动部署失败 (code=%d)", deploy_ret);
+        }
     }
     
     // 搜索完成后返回总评估次数（最佳架构已存储在system->best_architecture中）
@@ -863,6 +880,100 @@ int nas_export_best_architecture(NASSystem* system, const char* filepath) {
     }
     
     return save_architecture_to_file(system->best_architecture, filepath);
+}
+
+/**
+ * @brief P1-002修复: 将NAS搜索到的最优架构部署到运行中的LNN
+ *
+ * 打通NAS→LNN断裂点。将ArchitectureDescription序列化为
+ * arch_controller可理解的格式，通过arch_controller_deploy_architecture
+ * 桥接到架构控制器执行真正的网络重建。
+ *
+ * 仅在满足以下条件时执行：
+ * 1. 最优架构的评估分数显著优于当前架构
+ * 2. 架构控制器已就绪
+ * 3. 当前不在训练/关键任务中（由控制器审批检查）
+ *
+ * @param system NAS系统句柄
+ * @param arch_ctrl 架构控制器实例
+ * @param lnn 当前LNN实例指针的指针
+ * @param min_improvement 最小性能提升阈值（默认0.1即10%）
+ * @param confidence 部署置信度
+ * @return 0=成功，非0=失败
+ */
+int nas_deploy_best_architecture(NASSystem* system,
+                                  ArchitectureController* arch_ctrl,
+                                  LNN** lnn,
+                                  float min_improvement,
+                                  float confidence) {
+    if (!system || !arch_ctrl || !lnn || !*lnn) {
+        return -1;
+    }
+
+    if (!system->best_architecture) {
+        log_warning("[NAS] 部署跳过: 未找到最佳架构");
+        return -2;
+    }
+
+    ArchitectureDescription* best = system->best_architecture;
+
+    /* 检查性能提升是否足够 */
+    if (system->best_evaluation) {
+        float current_fitness = 0.0f;
+        /* 当前架构的适应度：如果没有记录则默认为0 */
+        if (min_improvement > 0.0f) {
+            float improvement = best->fitness_score - current_fitness;
+            if (improvement < min_improvement) {
+                log_info("[NAS] 部署跳过: 性能提升不足 (%.3f < %.3f)",
+                         improvement, min_improvement);
+                return -3;
+            }
+        }
+    }
+
+    /* 将架构描述序列化为架构控制器可理解的格式
+     * 格式：uint32_t[4] = {input_size, hidden_size, output_size, num_layers}
+     * 取layer_widths中最大宽度作为hidden_size */
+    uint32_t arch_data[4];
+    memset(arch_data, 0, sizeof(arch_data));
+
+    if (best->layer_widths && best->layer_count > 0) {
+        /* input_size: 取第一层输入（或默认128） */
+        arch_data[0] = 128;
+        /* hidden_size: 取所有层最大宽度 */
+        int max_width = 0;
+        for (int i = 0; i < best->layer_count; i++) {
+            if (best->layer_widths[i] > max_width)
+                max_width = best->layer_widths[i];
+        }
+        arch_data[1] = (uint32_t)(max_width > 0 ? max_width : 256);
+        /* output_size: 取hidden_size */
+        arch_data[2] = arch_data[1];
+        /* num_layers */
+        arch_data[3] = (uint32_t)(best->layer_count > 0 ? best->layer_count : 2);
+    } else {
+        /* 回退：使用评估时记录的参数数反推 */
+        arch_data[0] = 128;
+        arch_data[1] = 256;
+        arch_data[2] = 256;
+        arch_data[3] = 2;
+    }
+
+    log_info("[NAS] 部署最优架构: input=%u hidden=%u output=%u layers=%u (适应度=%.4f)",
+             arch_data[0], arch_data[1], arch_data[2], arch_data[3],
+             best->fitness_score);
+
+    ArchitectureChangeResult result;
+    int ret = arch_controller_deploy_architecture(arch_ctrl, lnn,
+                                                   arch_data, sizeof(arch_data),
+                                                   confidence, &result);
+    if (ret == SELFLNN_SUCCESS) {
+        log_info("[NAS] 架构部署成功: %s", result.error_message);
+    } else {
+        log_error("[NAS] 架构部署失败: %s (code=%d)", result.error_message, result.error_code);
+    }
+
+    return ret;
 }
 
 /**

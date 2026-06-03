@@ -54,6 +54,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **学习能力** | 在线学习、强化学习（PPO/SAC）、模仿学习（BC/DAgger/IRL）、元学习（MAML/Reptile） |
 | **训练系统** | 6 阶段训练流水线、混合精度训练、分布式训练、模型版本管理 |
 | **演化系统** | CMA-ES 演化策略、帕累托优化、NAS 神经架构搜索 |
+| **动态架构** | 运行时网络结构自我调整：扩展/收缩隐藏层、增删层、知识迁移、安全审批、原子交换 |
 | **记忆系统** | 5 层记忆体系（短期、长期、情景、语义、工作记忆）、Ebbinghaus 遗忘曲线、Hebbian 巩固 |
 | **知识库** | 知识图谱、三元组存储、多跳推理、本体工程、语义网络 |
 | **机器人控制** | DH 运动学、A*/RRT* 路径规划、ROS/ROS2 集成、PyBullet/Gazebo 仿真、多机器人协调 |
@@ -74,6 +75,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **Learning Abilities** | Online learning, reinforcement learning (PPO/SAC), imitation learning (BC/DAgger/IRL), meta-learning (MAML/Reptile) |
 | **Training System** | 6-stage training pipeline, mixed precision training, distributed training, model version management |
 | **Evolution System** | CMA-ES evolution strategy, Pareto optimization, NAS neural architecture search |
+| **Dynamic Architecture** | Runtime network structure self-adjustment: expand/shrink hidden layers, add/remove layers, knowledge transfer, safety approval, atomic swap |
 | **Memory System** | 5-layer memory hierarchy (short-term, long-term, episodic, semantic, working memory), Ebbinghaus forgetting curve, Hebbian consolidation |
 | **Knowledge Base** | Knowledge graph, triple store, multi-hop reasoning, ontology engineering, semantic network |
 | **Robot Control** | DH kinematics, A*/RRT* path planning, ROS/ROS2 integration, PyBullet/Gazebo simulation, multi-robot coordination |
@@ -145,7 +147,11 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 │  │  ├─────────┼─────────┼─────────┼─────────┼─────────┼─────────┤     │  │
 │  │  │机器人   │GPU加速  │安全系统 │演化引擎 │AGI核心  │分布式   │     │  │
 │  │  │ Robot   │GPU Accel│ Safety  │Evolution│AGI Core │Distrib. │     │  │
-│  │  └─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘     │  │
+│  │  ├─────────┴─────────┴─────────┴─────────┴─────────┴─────────┤     │  │
+│  │  │ 动态架构控制器 / Dynamic Architecture Controller          │     │  │
+│  │  │ 扩展·收缩·增层·删层·知识迁移·安全审批·原子交换             │     │  │
+│  │  │ Expand·Shrink·Add/Remove Layers·KnowledgeTransfer·Atomic  │     │  │
+│  │  └────────────────────────────────────────────────────────────┘     │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -156,7 +162,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 1. **前端交互层**：单页面应用（SPA，1个index.html）+ 19个JS模块（18个主模块 + 1个Worker）组成，提供完整的Web控制台界面
 2. **后端服务层**：提供HTTP REST API和WebSocket通信，处理路由、认证、安全等功能
 3. **统一多模态输入层**：将9种模态数据通过固定Xavier投影矩阵注入单一CfC动态系统
-4. **核心引擎层**：包含唯一的共享LNN实例，所有子系统共享该模型进行处理
+4. **核心引擎层**：包含唯一的共享LNN实例，所有子系统共享该模型进行处理；动态架构控制器运行于底层，根据性能反馈自动调整网络拓扑（扩展/收缩/增删层/知识迁移/安全审批）
 
 ### 渐进分层架构 / Progressive Layering Architecture
 
@@ -183,7 +189,7 @@ The system is divided into four architectural layers:
 1. **Frontend Interaction Layer**: Single Page Application (SPA, 1 index.html) with 19 JS modules (18 main modules + 1 Worker), providing a complete Web console interface
 2. **Backend Service Layer**: Provides HTTP REST API and WebSocket communication, handling routing, authentication, security, and other functions
 3. **Unified Multimodal Input Layer**: Injects 9 modalities of data into a single CfC dynamic system after linear projection and summation
-4. **Core Engine Layer**: Contains the only shared LNN instance, with all subsystems sharing this model for processing
+4. **Core Engine Layer**: Contains the only shared LNN instance, with all subsystems sharing this model for processing; the Dynamic Architecture Controller runs at the bottom level, automatically adjusting network topology based on performance feedback (expand/shrink/add-remove layers/knowledge transfer/safety approval)
 
 ---
 
@@ -528,6 +534,32 @@ For embedded platform deployment, please refer to `docs/Embedded_Deployment_Guid
 - **Pareto Optimization**: Multi-objective optimization, non-dominated sorting
 - **NAS Neural Architecture Search**: Automatic network topology design, IPOP restart
 - **Multiple Mutation/Crossover Strategies**: 5 selection strategies, 4 crossover strategies, 5 mutation strategies
+
+### 动态架构控制器 / Dynamic Architecture Controller
+
+#### 中文
+- **运行时网络结构变更**：训练中自动检测网络容量不足或冗余，动态调整隐藏层维度和层数
+- **6 种架构变更类型**：扩展隐藏层、收缩隐藏层、增加网络层、删除网络层、完全重建、NAS 架构部署
+- **知识迁移**：网络重建时通过左上角 Xavier 策略保留旧网络权重，确保已有知识不丢失
+- **安全审批**：置信度阈值检查 + 频率限制（3次/小时）+ 维度合法性校验
+- **原子交换**：新旧 LNN 指针交换，推理不中断
+- **闭环触发**：
+  - **自我认知闭环**：`self_cognition` 检测到容量不足 → `arch_controller_submit_change()` → 重建 + 知识迁移
+  - **NAS 闭环**：`nas_search_complete()` 搜索完成 → `nas_deploy_best_architecture()` → 自动部署最优架构
+  - **演化闭环**：`evolution_run()` 每10代 → `evolution_engine_structural_mutate()` → 概率性结构变异
+- **审计日志**：128 条环形历史记录，记录每次变更的请求、结果和时间戳
+
+#### English
+- **Runtime Network Structure Change**: Automatically detects insufficient or redundant network capacity during training, dynamically adjusts hidden layer dimensions and layer count
+- **6 Architecture Change Types**: Expand hidden, Shrink hidden, Add layer, Remove layer, Full reshape, NAS architecture deployment
+- **Knowledge Transfer**: Preserves old network weights via top-left Xavier strategy during network rebuild, ensuring existing knowledge is not lost
+- **Safety Approval**: Confidence threshold check + frequency limit (3/hour) + dimension validity check
+- **Atomic Swap**: Old→new LNN pointer swap, no inference interruption
+- **Closed-Loop Triggers**:
+  - **Self-Cognition Loop**: `self_cognition` detects capacity shortage → `arch_controller_submit_change()` → rebuild + knowledge transfer
+  - **NAS Loop**: `nas_search_complete()` finishes search → `nas_deploy_best_architecture()` → auto-deploy optimal architecture
+  - **Evolution Loop**: `evolution_run()` every 10 generations → `evolution_engine_structural_mutate()` → probabilistic structural mutation
+- **Audit Log**: 128-entry circular history, recording request/result/timestamp for each change
 
 ### 记忆系统 / Memory System
 

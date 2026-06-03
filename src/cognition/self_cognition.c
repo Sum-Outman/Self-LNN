@@ -55,6 +55,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/cognition/deep_correction.h"  /* M-019: 深度修正引擎路由 */
+#include "selflnn/core/architecture_controller.h" /* P0-001: 架构变更请求类型 */
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/core/optimizer.h" /* 权重修正需要优化器 */
 #include "selflnn/cognition/metacognition.h"
@@ -113,6 +114,7 @@ struct SelfCognitionSystem {
     int is_monitoring;                     /**< 是否正在监控 */
     int update_count;                      /**< 更新计数 */
     LNN* lnn_instance;                     /**< 液态神经网络实例（用于深度自我认知） */
+    void* arch_controller;                  /**< P0-001: 架构控制器实例（用于运行时架构修正） */
     
     /* 性能跟踪 */
     float* performance_history;            /**< 性能历史记录 */
@@ -1434,6 +1436,21 @@ int self_cognition_set_lnn_instance(SelfCognitionSystem* system, LNN* lnn) {
     }
     
     return 0;
+}
+
+/**
+ * @brief P0-001: 设置架构控制器实例
+ *
+ * 将全局架构控制器引用注入到自我认知系统，
+ * 使得架构修正（SELF_CORRECTION_ARCHITECTURE）能够
+ * 通过 arch_controller_submit_change 真正执行网络结构变更。
+ */
+void self_cognition_set_arch_controller(SelfCognitionSystem* system, void* arch_controller) {
+    if (!system) return;
+    system->arch_controller = arch_controller;
+    if (arch_controller) {
+        log_info("[自我认知] 架构控制器已连接，运行时架构修正确认可用");
+    }
 }
 
 /**
@@ -3969,30 +3986,59 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
         }
             
         case SELF_CORRECTION_ARCHITECTURE: {
-            /* 架构修正：真实调整隐藏层维度、连接模式优化 */
-            if (system->lnn_instance) {
+            /* P0-003修复: 架构修正 —— 通过架构控制器真正执行网络结构变更
+             * 原代码只修改局部变量后丢弃，现改为提交结构化的架构变更请求 */
+            if (system->lnn_instance && system->arch_controller) {
                 LNNConfig current_config;
                 memset(&current_config, 0, sizeof(LNNConfig));
                 if (lnn_get_config(system->lnn_instance, &current_config) == 0) {
                     size_t old_hidden = current_config.hidden_size;
+                    ArchitectureChangeRequest req = arch_controller_default_request();
+                    snprintf(req.source_module, sizeof(req.source_module), "SelfCognition");
+                    req.confidence = correction->correction_strength;
+                    req.expected_improvement = correction->expected_improvement * 0.35f;
+
                     if (correction->correction_strength > 0.5f && old_hidden < 2048) {
-                        current_config.hidden_size = (size_t)(old_hidden * 1.25f);
-                        if (current_config.hidden_size < old_hidden + 32) 
-                            current_config.hidden_size = old_hidden + 32;
+                        size_t new_hidden = (size_t)(old_hidden * 1.25f);
+                        if (new_hidden < old_hidden + 32) new_hidden = old_hidden + 32;
+                        req.type = ARCH_CHANGE_EXPAND_HIDDEN;
+                        req.target_hidden_size = new_hidden;
+                        snprintf(req.reason, sizeof(req.reason),
+                                "自我认知检测到网络容量不足 (当前hidden=%zu, 建议=%zu)",
+                                old_hidden, new_hidden);
                     } else if (correction->correction_strength <= 0.5f && old_hidden > 32) {
-                        current_config.hidden_size = (size_t)(old_hidden * 0.9f);
+                        size_t new_hidden = (size_t)(old_hidden * 0.9f);
+                        req.type = ARCH_CHANGE_SHRINK_HIDDEN;
+                        req.target_hidden_size = new_hidden;
+                        snprintf(req.reason, sizeof(req.reason),
+                                "自我认知检测到网络冗余 (当前hidden=%zu, 建议=%zu)",
+                                old_hidden, new_hidden);
                     }
-                    current_config.num_layers = (correction->correction_strength > 0.6f) ? 2 : 1;
-                    log_info("[自我修正] 架构修正：隐藏层维度 %zu→%zu, 层数→%d, 强度=%.2f",
-                        old_hidden, current_config.hidden_size, current_config.num_layers,
-                        correction->correction_strength);
+                    req.target_num_layers = (correction->correction_strength > 0.6f) ? 2 : 1;
+
+                    /* 提交给架构控制器执行 */
+                    ArchitectureChangeResult arch_result;
+                    int ret = arch_controller_submit_change(
+                        (ArchitectureController*)system->arch_controller,
+                        (LNN**)&system->lnn_instance,
+                        &req, &arch_result);
+                    if (ret == SELFLNN_SUCCESS) {
+                        log_info("[自我修正] 架构修正成功: %s", arch_result.error_message);
+                        correction_applied = 1;
+                    } else {
+                        log_warning("[自我修正] 架构修正提交失败: %s (code=%d)",
+                                   arch_result.error_message, arch_result.error_code);
+                        correction_applied = 0;
+                    }
                 }
+            } else {
+                log_warning("[自我修正] 架构修正跳过: LNN或架构控制器未就绪");
+                correction_applied = 0;
             }
             snprintf(correction->description + strlen(correction->description),
                 sizeof(correction->description) - strlen(correction->description) - 1,
                 " [架构调整: 强度%.2f]", correction->correction_strength);
             improvement_factor = 0.35f;
-            correction_applied = 1;
             break;
         }
             

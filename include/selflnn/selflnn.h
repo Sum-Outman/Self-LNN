@@ -49,6 +49,7 @@
 #include "selflnn/core/tensor.h"
 #include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/system_scheduler.h"
+#include "selflnn/core/architecture_controller.h" /* P0-001: 动态架构控制器 */
 
 /* 补充认知模块头文件 */
 #include "selflnn/cognition/self_cognition.h"

@@ -1,4 +1,4 @@
-﻿# GPU计算抽象层
+# GPU计算抽象层
 
 # 头文件目录
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)
@@ -26,14 +26,14 @@ if(ENABLE_GPU)
         gpu_benchmark.c
         gpu_cpu.c
     )
-else
+else()
     # GPU禁用时使用CPU计算后端（完整SSE/AVX SIMD实现）
     # 添加gpu.c以提供统一的CPU硬件检测接口gpu_hardware_get_cpu_info
     set(GPU_SOURCES
         gpu.c
         gpu_cpu.c
     )
-endif
+endif()
 
 # 创建库
 add_library(selflnn_gpu ${GPU_SOURCES})

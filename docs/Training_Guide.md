@@ -148,5 +148,37 @@ The system supports model saving, loading, checkpoint saving and recovery functi
 
 ---
 
-> **文档更新 / Updated**: 2026-05-14
+## 动态架构训练 / Dynamic Architecture Training
+
+### 中文
+SELF-LNN 支持在训练过程中动态调整网络结构，无需重启训练：
+
+| 功能 | 说明 |
+|------|------|
+| **自动扩容** | 自我认知系统检测到网络容量不足时，自动提交架构变更请求，扩展隐藏层维度（+25%） |
+| **自动剪枝** | 检测到冗余神经元时，自动收缩隐藏层，减少计算开销 |
+| **NAS 部署** | NAS 搜索完成后，最优架构自动部署到运行中的 LNN（通过 `nas_deploy_best_architecture`） |
+| **演化结构变异** | 演化引擎每 10 代触发一次概率性结构变异（扩展/收缩/增删层） |
+| **知识迁移** | 网络重建时通过左上角 Xavier 策略保留旧网络权重，避免从零训练 |
+| **安全审批** | 所有架构变更需通过置信度阈值（0.6）+ 频率限制（3次/小时）+ 维度校验 |
+| **原子交换** | 新旧 LNN 指针原子替换，推理不中断 |
+| **变更可开关** | 通过 `ArchitectureControllerConfig` 的 `enable_auto_approval` 控制是否自动执行架构变更 |
+
+### English
+SELF-LNN supports dynamically adjusting network structure during training without restart:
+
+| Feature | Description |
+|---------|-------------|
+| **Auto-Expand** | Self-cognition system detects insufficient capacity, submits architecture change request to expand hidden layer (+25%) |
+| **Auto-Prune** | Detects redundant neurons, automatically shrinks hidden layer to reduce computation |
+| **NAS Deployment** | After NAS search completes, optimal architecture is auto-deployed to running LNN via `nas_deploy_best_architecture` |
+| **Evolution Structural Mutation** | Evolution engine triggers probabilistic structural mutation every 10 generations (expand/shrink/add-remove layers) |
+| **Knowledge Transfer** | Preserves old network weights via top-left Xavier strategy during rebuild, avoiding training from scratch |
+| **Safety Approval** | All changes require confidence threshold (0.6) + frequency limit (3/hour) + dimension validation |
+| **Atomic Swap** | Old→new LNN pointer atomic replacement, no inference interruption |
+| **Toggleable** | Control via `ArchitectureControllerConfig.enable_auto_approval` whether to auto-execute architecture changes |
+
+---
+
+> **文档更新 / Updated**: 2026-06-03
 > **相关文档 / Related Docs**: [架构图](./Architecture_Diagram.md) | [用户手册](./USER_GUIDE.md) | [开发指南](./DEVELOPMENT_GUIDE_ZH.md)

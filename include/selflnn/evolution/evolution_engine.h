@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 #include <time.h>
+#include "selflnn/core/architecture_controller.h" /* P2-001: StructuralMutationConfig类型 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -256,6 +257,14 @@ int evolution_reset(EvolutionEngine* engine);
 int evolution_engine_set_target_lnn(EvolutionEngine* engine, void* lnn);
 
 /**
+ * @brief P2-001: 设置架构控制器引用（用于结构变异）
+ * @param engine 演化引擎句柄
+ * @param arch_ctrl 架构控制器实例
+ * @return 成功返回0，失败返回-1
+ */
+int evolution_engine_set_arch_controller(EvolutionEngine* engine, void* arch_ctrl);
+
+/**
  * @brief 将当前最优个体的染色体写入LNN权重
  * 调用此函数前必须先调用 evolution_engine_set_target_lnn() 设置目标LNN
  * @param engine 演化引擎句柄
@@ -269,6 +278,23 @@ int evolution_engine_disable(EvolutionEngine* engine);
 int evolution_engine_is_enabled(const EvolutionEngine* engine);
 int evolution_evaluate_environment(EvolutionEngine* engine, const float* environment_state,
                                     size_t state_dim, float* fitness_out);
+
+/**
+ * @brief P2-001: 执行结构变异并应用最佳个体
+ *
+ * 通过架构控制器真正改变网络拓扑结构（增加/删除神经元和层）。
+ * 每次变异后染色体大小和LNN结构都会相应调整。
+ *
+ * @param engine 演化引擎句柄
+ * @param arch_ctrl 架构控制器实例
+ * @param mut_config 结构变异配置
+ * @param generation 当前代数
+ * @return 0=成功，-1=失败
+ */
+int evolution_engine_structural_mutate(EvolutionEngine* engine,
+                                        void* arch_ctrl,
+                                        const StructuralMutationConfig* mut_config,
+                                        int generation);
 
 #ifdef __cplusplus
 }

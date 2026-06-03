@@ -1,4 +1,4 @@
-﻿# AGI高级认知系统CMake配置
+# AGI高级认知系统CMake配置
 
 set(AGI_SOURCES
     agi.c

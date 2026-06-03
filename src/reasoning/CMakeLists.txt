@@ -1,4 +1,4 @@
-﻿# 推理与计划引擎库
+# 推理与计划引擎库
 message(STATUS "构建推理库")
 
 # MSVC使用reasoning_internal.c (reasoning.c的函数签名与MSVC C模式存在兼容性问题)
@@ -12,20 +12,20 @@ if(MSVC)
         cfc_uncertainty_reasoning.c hierarchical_planning.c
         math_physics_reasoning.c quaternion_liquid_gate.c
     )
-else
+else()
     set(REASONING_SOURCES
         reasoning.c planning.c long_term_planning.c causal_reasoning.c
         laplace_operator.c planning_enhanced.c
         cfc_uncertainty_reasoning.c hierarchical_planning.c
         math_physics_reasoning.c quaternion_liquid_gate.c
     )
-endif
+endif()
 
 add_library(selflnn_reasoning ${REASONING_SOURCES})
 
 if(MSVC)
     target_compile_options(selflnn_reasoning PRIVATE /bigobj /wd4013 /wd4146 /wd4028 /wd4029 /wd4267 /wd4090 /wd4133 /wd4047)
-endif
+endif()
 
 target_include_directories(selflnn_reasoning PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include

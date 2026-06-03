@@ -227,7 +227,8 @@ int nas_search_generation(NASSystem* system);
  * @param max_generations 最大代数（0表示使用配置中的值）
  * @return int 成功返回找到的最佳架构索引，失败返回-1
  */
-int nas_search_complete(NASSystem* system, int max_generations);
+int nas_search_complete(NASSystem* system, int max_generations,
+                        void* arch_ctrl, void** lnn);
 
 /**
  * @brief 生成随机架构
@@ -330,6 +331,25 @@ int nas_load_state(NASSystem* system, const char* filepath);
  * @return int 成功返回0，失败返回-1
  */
 int nas_export_best_architecture(NASSystem* system, const char* filepath);
+
+/**
+ * @brief P1-002修复: 将NAS搜索到的最优架构部署到运行中的LNN
+ *
+ * 打通NAS→LNN断裂点。将搜索到的最优架构通过架构控制器
+ * 真正部署到生产LNN实例中，实现知识迁移和原子交换。
+ *
+ * @param system NAS系统句柄
+ * @param arch_ctrl 架构控制器实例
+ * @param lnn 当前LNN实例指针的指针（部署成功后被替换为新架构）
+ * @param min_improvement 最小性能提升阈值（推荐0.1=10%）
+ * @param confidence 部署置信度（0-1）
+ * @return SELFLNN_SUCCESS(0)=成功，非0=失败
+ */
+int nas_deploy_best_architecture(NASSystem* system,
+                                  void* arch_ctrl,
+                                  void** lnn,
+                                  float min_improvement,
+                                  float confidence);
 
 /**
  * @brief 获取架构统计信息

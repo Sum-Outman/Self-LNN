@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file evolution_engine.c
  * @brief 增强自我演化进化引擎完整实现
  */
@@ -11,6 +11,7 @@
 #include "selflnn/core/cfc.h" /* CfC Cell权重写入 */
 #include "selflnn/core/cfc_cell.h" /* CfCCell结构体 */
 #include "selflnn/core/laplace.h"
+#include "selflnn/core/architecture_controller.h" /* P2-001: 结构变异接口 */
 #include "selflnn/core/cma_es.h"          /* F-010/F-019: CMA-ES集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
@@ -57,6 +58,11 @@ struct EvolutionEngine {
     /* F-010/F-019: CMA-ES状态（当config.algorithm设为CMA_ES时使用） */
     CMAESState* cmaes_state;
     int using_cmaes;
+    
+    /* P2-001: 架构控制器引用（用于结构变异） */
+    void* arch_controller;
+    int arch_controller_connected;
+    int generation_counter;      /**< 当前代数（用于周期性结构变异） */
 };
 
 /* F-019: CMA-ES适应度桥接函数 */
@@ -1211,6 +1217,28 @@ int evolution_run(EvolutionEngine* engine, int max_generations) {
     for (int gen = 0; gen < max_generations; gen++) {
         int result = evolution_step(engine);
         if (result != 0) return result;
+        
+        engine->generation_counter++;
+        
+        /* P2-001修复: 每10代执行一次结构变异（概率性触发） */
+        if (engine->arch_controller_connected && 
+            engine->arch_controller &&
+            engine->target_lnn &&
+            engine->generation_counter % 10 == 0) {
+            StructuralMutationConfig sm_config;
+            memset(&sm_config, 0, sizeof(sm_config));
+            sm_config.mut_type = STRUCT_MUTATE_EXPAND_RATIO;
+            sm_config.mutation_ratio = 0.1f;       /* 10% 扩展 */
+            sm_config.mutation_probability = 0.3f;  /* 30% 概率执行 */
+            sm_config.min_hidden_size = 32;
+            sm_config.max_hidden_size = 4096;
+            sm_config.min_layers = 1;
+            sm_config.max_layers = 8;
+            
+            evolution_engine_structural_mutate(
+                engine, engine->arch_controller,
+                &sm_config, engine->generation_counter);
+        }
     }
 
     return 0;
@@ -1375,6 +1403,19 @@ int evolution_engine_set_target_lnn(EvolutionEngine* engine, void* lnn) {
     if (!engine || !lnn) return -1;
     engine->target_lnn = lnn;
     engine->lnn_connected = 1;
+    return 0;
+}
+
+/**
+ * @brief P2-001: 设置架构控制器引用（用于结构变异）
+ */
+int evolution_engine_set_arch_controller(EvolutionEngine* engine, void* arch_ctrl) {
+    if (!engine) return -1;
+    engine->arch_controller = arch_ctrl;
+    engine->arch_controller_connected = (arch_ctrl != NULL) ? 1 : 0;
+    if (arch_ctrl) {
+        log_info("[演化引擎] 架构控制器已连接，结构变异功能可用");
+    }
     return 0;
 }
 
@@ -1608,4 +1649,108 @@ int evolution_evaluate_environment(EvolutionEngine* engine, const float* environ
         if (eval > *fitness_out) *fitness_out = eval;
     }
     return 0;
+}
+
+/* ============================================================================
+ * P2-001修复: 演化引擎结构变异 —— 通过架构控制器执行真正的架构级变异
+ *
+ * 修复前：演化引擎仅能变异固定维度染色体上的浮点数值（参数值优化）
+ * 修复后：支持增加/删除神经元、增加/删除层、按比例扩展/收缩隐藏层
+ *
+ * 结构变异在演化循环中周期性触发（例如每10代一次），
+ * 每次变异后染色体大小和LNN结构都会相应调整。
+ * ============================================================================ */
+
+/**
+ * @brief 执行结构变异并应用最佳个体
+ *
+ * 完整流程：
+ * 1. 执行结构化变异（通过架构控制器改变网络拓扑）
+ * 2. 重新评估所有个体适应度（适应新的网络结构）
+ * 3. 将最佳个体的参数值写入新LNN
+ *
+ * @param engine 演化引擎句柄
+ * @param arch_ctrl 架构控制器句柄
+ * @param mut_config 结构变异配置
+ * @param generation 当前代数
+ * @return 0=成功，-1=失败
+ */
+int evolution_engine_structural_mutate(EvolutionEngine* engine,
+                                        void* arch_ctrl,
+                                        const StructuralMutationConfig* mut_config,
+                                        int generation) {
+    if (!engine || !arch_ctrl || !mut_config) return -1;
+    if (!engine->initialized || !engine->target_lnn) {
+        log_warning("[演化引擎] 结构变异跳过: 引擎未就绪或LNN未连接");
+        return -1;
+    }
+
+    /* 概率性执行（根据mutation_probability） */
+    float roll = (float)(rand() % 10000) / 10000.0f;
+    if (roll > mut_config->mutation_probability) {
+        return 0; /* 本轮不执行结构变异 */
+    }
+
+    log_info("[演化引擎] 第%d代执行结构变异 (类型=%d, 概率=%.2f)",
+             generation, mut_config->mut_type, mut_config->mutation_probability);
+
+    /* 通过架构控制器执行结构变异 */
+    ArchitectureChangeResult result;
+    int ret = arch_controller_structural_mutate(
+        (ArchitectureController*)arch_ctrl,
+        (LNN**)&engine->target_lnn,
+        mut_config, &result);
+
+    if (ret == SELFLNN_SUCCESS) {
+        log_info("[演化引擎] 结构变异成功: %s", result.error_message);
+
+        /* 更新染色体大小以匹配新的LNN结构 */
+        if (engine->target_lnn) {
+            size_t new_param_count = 0;
+            arch_controller_get_architecture_stats(
+                (const LNN*)engine->target_lnn,
+                NULL, &new_param_count, NULL, NULL);
+
+            if (new_param_count > 0 && new_param_count != engine->config.chromosome_size) {
+                log_info("[演化引擎] 更新染色体大小: %zu → %zu",
+                         engine->config.chromosome_size, new_param_count);
+
+                /* 重新分配种群染色体 */
+                for (size_t i = 0; i < engine->population.size; i++) {
+                    float* old = engine->population.individuals[i].chromosome;
+                    float* new_chrom = (float*)safe_calloc(new_param_count, sizeof(float));
+                    if (new_chrom) {
+                        size_t copy_n = (engine->config.chromosome_size < new_param_count)
+                                       ? engine->config.chromosome_size : new_param_count;
+                        memcpy(new_chrom, old, copy_n * sizeof(float));
+                        /* 新增部分随机初始化 */
+                        for (size_t j = copy_n; j < new_param_count; j++) {
+                            new_chrom[j] = ((float)(rand() % 20000) / 10000.0f - 1.0f) * 0.01f;
+                        }
+                        safe_free((void**)&old);
+                        engine->population.individuals[i].chromosome = new_chrom;
+                        engine->population.individuals[i].chromosome_size = new_param_count;
+                    }
+                }
+                engine->config.chromosome_size = new_param_count;
+            }
+        }
+
+        /* 重新评估所有个体 */
+        for (size_t i = 0; i < engine->population.size; i++) {
+            if (engine->fitness_func) {
+                engine->population.individuals[i].fitness = engine->fitness_func(
+                    engine->population.individuals[i].chromosome,
+                    engine->config.chromosome_size, engine->user_data);
+            }
+        }
+
+        /* 应用最佳个体到新LNN */
+        evolution_engine_apply_best_to_lnn(engine);
+
+        return 0;
+    } else {
+        log_warning("[演化引擎] 结构变异失败: %s", result.error_message);
+        return -1;
+    }
 }

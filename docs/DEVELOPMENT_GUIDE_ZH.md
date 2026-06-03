@@ -43,7 +43,7 @@ self-Z/
 │   ├── performance_analysis.bat      # 性能分析
 │   └── ...
 ├── include/selflnn/           # 公共头文件
-│   ├── core/                  # 核心模块（CfC单元、ODE求解器等）
+│   ├── core/                  # 核心模块（CfC单元、ODE求解器、动态架构控制器等）
 │   ├── multimodal/            # 多模态处理
 │   ├── cognition/             # 自我认知
 │   ├── reasoning/             # 推理引擎
@@ -65,6 +65,7 @@ self-Z/
 ├── src/                       # 源代码（与include结构对应）
 │   ├── main.c                 # AGI主入口
 │   ├── core/cfc_cell.c        # CfC单元核心实现（4377行）
+│   ├── core/architecture_controller.c  # 动态架构控制器（993行）
 │   ├── backend/backend.c      # HTTP服务器（678KB）
 │   ├── gpu/gpu.c              # GPU调度层
 │   └── ...
@@ -100,6 +101,7 @@ self-Z/
 ├── src/                       # Source code (mirrors include structure)
 │   ├── main.c                 # AGI entry point
 │   ├── core/cfc_cell.c        # CfC cell core (4377 lines)
+│   ├── core/architecture_controller.c  # Dynamic Architecture Controller (993 lines)
 │   ├── backend/backend.c      # HTTP server (678KB)
 │   ├── gpu/gpu.c              # GPU dispatch layer
 │   └── ... (19 module dirs)
@@ -113,7 +115,7 @@ self-Z/
 
 | 模块 / Module | 路径 / Path | 功能 / Function |
 |--------------|------------|----------------|
-| core | `src/core/` | CfC单元、ODE求解器（10种）、拉普拉斯分析、LNN核心 |
+| core | `src/core/` | CfC单元、ODE求解器（10种）、拉普拉斯分析、LNN核心、动态架构控制器 |
 | multimodal | `src/multimodal/` | 视觉/音频/文本/传感器多模态融合 |
 | cognition | `src/cognition/` | 自我认知、深度反思、元认知 |
 | reasoning | `src/reasoning/` | 因果推理、规划、数学物理推理 |

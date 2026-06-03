@@ -442,8 +442,82 @@ tasklist | findstr selflnn  # Windows
 2. **API认证 (API Auth):** 通过Web控制台生成API密钥 Use web console to generate API keys
 3. **数据安全 (Data Security):** 定期备份 `config/` 和模型文件 Regularly backup config and model files
 
+## 7. 动态架构控制器 / Dynamic Architecture Controller
+
+### 中文
+动态架构控制器允许系统在运行时自动调整网络结构，无需手动干预：
+
+**配置示例 / Configuration Example:**
+```c
+#include "selflnn/core/architecture_controller.h"
+
+ArchitectureControllerConfig cfg = arch_controller_default_config();
+cfg.min_confidence_threshold = 0.6f;   // 最低置信度
+cfg.max_changes_per_hour = 3;           // 每小时最大变更次数
+cfg.enable_auto_approval = 1;           // 启用自动审批
+cfg.enable_knowledge_transfer = 1;      // 启用知识迁移
+ArchitectureController* ctrl = arch_controller_create(&cfg);
+```
+
+**手动提交架构变更 / Manual Architecture Change:**
+```c
+ArchitectureChangeRequest req = arch_controller_default_request();
+req.type = ARCH_CHANGE_EXPAND_HIDDEN;
+req.target_hidden_size = 512;           // 扩展到512个神经元
+req.confidence = 0.8f;                  // 置信度
+snprintf(req.source_module, sizeof(req.source_module), "UserCommand");
+
+ArchitectureChangeResult result;
+arch_controller_submit_change(ctrl, &lnn, &req, &result);
+// 变更成功后，result.new_neuron_count 和 result.new_param_count 反映新架构
+```
+
+**查询当前架构 / Query Current Architecture:**
+```c
+size_t neurons, params, hidden;
+int layers;
+arch_controller_get_architecture_stats(lnn, &neurons, &params, &hidden, &layers);
+printf("神经元: %zu, 参数: %zu, 隐藏层: %zux%d层\n", neurons, params, hidden, layers);
+```
+
+### English
+The Dynamic Architecture Controller allows the system to automatically adjust network structure at runtime without manual intervention.
+
+**Configuration Example:**
+```c
+#include "selflnn/core/architecture_controller.h"
+
+ArchitectureControllerConfig cfg = arch_controller_default_config();
+cfg.min_confidence_threshold = 0.6f;   // Minimum confidence
+cfg.max_changes_per_hour = 3;           // Max changes per hour
+cfg.enable_auto_approval = 1;           // Enable auto-approval
+cfg.enable_knowledge_transfer = 1;      // Enable knowledge transfer
+ArchitectureController* ctrl = arch_controller_create(&cfg);
+```
+
+**Manual Architecture Change:**
+```c
+ArchitectureChangeRequest req = arch_controller_default_request();
+req.type = ARCH_CHANGE_EXPAND_HIDDEN;
+req.target_hidden_size = 512;           // Expand to 512 neurons
+req.confidence = 0.8f;                  // Confidence
+snprintf(req.source_module, sizeof(req.source_module), "UserCommand");
+
+ArchitectureChangeResult result;
+arch_controller_submit_change(ctrl, &lnn, &req, &result);
+// After success, result.new_neuron_count and result.new_param_count reflect new architecture
+```
+
+**Query Current Architecture:**
+```c
+size_t neurons, params, hidden;
+int layers;
+arch_controller_get_architecture_stats(lnn, &neurons, &params, &hidden, &layers);
+printf("Neurons: %zu, Params: %zu, Hidden: %zux%d layers\n", neurons, params, hidden, layers);
+```
+
 ---
 
-> **更新 (Updated):** 2026-05-14
-> **版本 (Version):** SELF-LNN v1.4.0
+> **更新 (Updated):** 2026-06-03
+> **版本 (Version):** SELF-LNN v1.5.0
 > **相关文档 (Related Docs):** [架构图](./Architecture_Diagram.md) | [AGI机器人指南](./AGI_Robot_Guide.md) | [开发指南](./DEVELOPMENT_GUIDE_ZH.md)

@@ -354,4 +354,60 @@ Default port: `http://localhost:8080` (configurable via `--port`)
 
 ---
 
-*文档版本 / Doc Version: 2026-05-04 | 基于 backend.c 真实端点注册表 / Based on backend.c endpoint registry*
+## 动态架构控制器 API / Dynamic Architecture Controller API
+
+### 架构统计查询 / Architecture Stats Query
+
+**GET** `/api/lnn/architecture/status`
+
+返回当前 LNN 的神经元数量、参数数量和隐藏层配置。
+
+Returns current LNN neuron count, parameter count, and hidden layer configuration.
+
+**响应 / Response:**
+```json
+{
+  "neuron_count": 768,
+  "param_count": 953472,
+  "hidden_size": 256,
+  "num_layers": 2,
+  "input_size": 128,
+  "output_size": 128
+}
+```
+
+**错误码 / Error Codes:**
+| 码 / Code | 含义 / Meaning |
+|-----------|---------------|
+| 200 | 成功 / Success |
+| 404 | LNN 未初始化 / LNN not initialized |
+
+---
+
+### 架构变更历史 / Architecture Change History
+
+**GET** `/api/lnn/architecture/history`
+
+返回最近的架构变更历史记录（最多 128 条）。
+
+Returns recent architecture change history (up to 128 entries).
+
+**响应 / Response:**
+```json
+{
+  "total_changes": 3,
+  "entries": [
+    {
+      "timestamp": "2026-06-03 12:00:00",
+      "type": "EXPAND_HIDDEN",
+      "old_neurons": 768,
+      "new_neurons": 1280,
+      "reason": "Self-cognition detected capacity shortage"
+    }
+  ]
+}
+```
+
+---
+
+*文档版本 / Doc Version: 2026-06-03 | 基于 backend.c 真实端点注册表 / Based on backend.c endpoint registry*

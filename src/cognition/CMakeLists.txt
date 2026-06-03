@@ -1,4 +1,4 @@
-﻿# 自我认知模块CMake配置
+# 自我认知模块CMake配置
 
 # 添加自我认知源文件
 set(SELF_COGNITION_SOURCES
@@ -20,7 +20,7 @@ add_library(selflnn_cognition STATIC ${SELF_COGNITION_SOURCES})
 
 if(MSVC)
     target_compile_options(selflnn_cognition PRIVATE /FImath.h)
-endif
+endif()
 
 # 设置目标属性
 set_target_properties(selflnn_cognition PROPERTIES

@@ -2435,9 +2435,17 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
                 cell->state->adapted_params[i] = 2.0f;
             }
             
-            // 可选：将adapted_params应用于时间常数
-            // cell->time_constants[i] *= cell->state->adapted_params[i];
-            // 但注意：这可能会与时间常数的梯度更新冲突
+            // P1-001修复: 将adapted_params应用于前向传播时间常数
+            // 使用分离的运行时缩放因子 forward_tau_used，不在训练时修改底层可训练参数 time_constants
+            // 这避免了与梯度更新的冲突，同时让自适应参数在推理中生效
+            if (cell->forward_tau_used) {
+                cell->forward_tau_used[i] = cell->time_constants[i] * cell->state->adapted_params[i];
+                // 钳制到有效范围 [tau_min, tau_max]
+                if (cell->forward_tau_used[i] < cell->min_time_constant)
+                    cell->forward_tau_used[i] = cell->min_time_constant;
+                if (cell->forward_tau_used[i] > cell->max_time_constant)
+                    cell->forward_tau_used[i] = cell->max_time_constant;
+            }
         }
     }
     

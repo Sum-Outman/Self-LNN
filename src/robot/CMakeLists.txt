@@ -1,4 +1,4 @@
-﻿# MSVC编译兼容性问题已解决（函数名统一、缺失头文件补全）
+# MSVC编译兼容性问题已解决（函数名统一、缺失头文件补全）
 # ros_gazebo_bridge.c和hardware_detector.c现在所有平台均可编译
 set(ROBOT_EXTRA_SOURCES
     ros_gazebo_bridge.c
@@ -51,7 +51,7 @@ if(MSVC)
     target_link_libraries(selflnn_robot PRIVATE mf mfplat mfreadwrite mfuuid strmiids ole32 uuid mmdevapi propsys)
 elseif(MINGW)
     target_link_libraries(selflnn_robot PRIVATE mf mfplat mfreadwrite ole32 strmiids uuid mmdevapi propsys)
-endif
+endif()
 
 # 安装规则
 install(TARGETS selflnn_robot

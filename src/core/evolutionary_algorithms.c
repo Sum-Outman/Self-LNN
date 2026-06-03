@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file evolutionary_algorithms.c
  * @brief 自我演化进化算法实现
  * 
@@ -1163,7 +1163,7 @@ int population_nas_search(Population* pop, int max_generations) {
     }
     
     int generations = (max_generations > 0) ? max_generations : 100;
-    int result = nas_search_complete(pop->nas_system, generations);
+    int result = nas_search_complete(pop->nas_system, generations, NULL, NULL);
     
     if (result >= 0) {
         log_info("NAS搜索完成: 代数=%d, 最佳适应度=%f\n",

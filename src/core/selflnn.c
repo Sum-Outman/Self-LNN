@@ -72,6 +72,7 @@
 #include "selflnn/multimodal/dialogue_memory.h" /* 对话记忆系统集成 */
 #include "selflnn/distributed/load_balancer.h"
 #include "selflnn/distributed/pbft.h"
+#include "selflnn/core/architecture_controller.h" /* P0-001: 动态架构控制器 */
 #include "selflnn/concurrency/rw_lock_map.h"
 #include "selflnn/training/training_pipeline.h"
 #include <string.h>
@@ -255,6 +256,7 @@ static struct {
     void* dialogue_memory_manager; /* 对话记忆管理器 */
     void* rw_lock_map_system;    /* F-009修复: 读写锁映射 (替代粗粒度全局锁) */
     void* pbft_system;           /* F-006修复: PBFT拜占庭容错共识系统 */
+    void* arch_controller;       /* P0-001: 动态架构控制器（运行时安全地修改LNN结构） */
     int dcpipeline_immediate_check_requested; /* 事件驱动即时自检标志 */
     int knowledge_refresh_needed; /* 知识库更新后触发LNN嵌入重编码标志 */
     int last_error;
@@ -1794,6 +1796,24 @@ static int initialize_subsystems(const SystemConfig* config)
             } else {
                 log_info("无GPU上下文，LNN将使用CPU计算");
             }
+            /* P0-001: 创建架构控制器 —— 运行时安全地修改LNN网络结构 */
+            {
+                ArchitectureControllerConfig ac_config = arch_controller_default_config();
+                g_system_state.arch_controller = (void*)arch_controller_create(&ac_config);
+                if (g_system_state.arch_controller) {
+                    log_info("动态架构控制器初始化成功 (支持运行时扩展/收缩/增删层)");
+                    /* 注入到自我认知系统，打通架构修正闭环 */
+                    if (g_system_state.self_cognition_system) {
+                        self_cognition_set_arch_controller(
+                            (SelfCognitionSystem*)g_system_state.self_cognition_system,
+                            g_system_state.arch_controller);
+                        log_info("架构控制器已连接到自我认知系统");
+                    }
+                } else {
+                    log_error("动态架构控制器创建失败，架构动态调整功能不可用");
+                }
+            }
+
             /* Z5-002: model_path配置生效 —— 使用模型路径自动加载检查点 */
             if (config->model_path && config->model_path[0] != '\0') {
                 LNN* lnn = (LNN*)g_system_state.lnn_instance;
@@ -2050,6 +2070,13 @@ static int initialize_subsystems(const SystemConfig* config)
                     (EvolutionEngine*)g_system_state.evolution_engine,
                     g_system_state.lnn_instance);
                 log_info("自我演化引擎已绑定全局LNN");
+                /* P2-001: 连接架构控制器到演化引擎（支持结构变异） */
+                if (g_system_state.arch_controller) {
+                    evolution_engine_set_arch_controller(
+                        (EvolutionEngine*)g_system_state.evolution_engine,
+                        g_system_state.arch_controller);
+                    log_info("架构控制器已连接到演化引擎（支持结构变异）");
+                }
             }
         } else {
             log_warning("自我演化引擎创建失败，跳过");
@@ -2476,6 +2503,13 @@ static void shutdown_subsystems(void)
     if (g_system_state.self_cognition_system) {
         self_cognition_free((SelfCognitionSystem*)g_system_state.self_cognition_system);
         g_system_state.self_cognition_system = NULL;
+    }
+    
+    // 6.5. P0-001: 销毁架构控制器（在LNN之前销毁，因为架构变更依赖LNN）
+    if (g_system_state.arch_controller) {
+        arch_controller_free((ArchitectureController*)g_system_state.arch_controller);
+        g_system_state.arch_controller = NULL;
+        log_info("动态架构控制器已销毁");
     }
     
     // 7. 销毁LNN液态神经网络

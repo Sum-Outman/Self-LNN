@@ -1,4 +1,4 @@
-﻿# 液态神经网络核心库
+# 液态神经网络核心库
 add_library(selflnn_core
     lnn.c
     cfc_network.c
@@ -34,12 +34,13 @@ add_library(selflnn_core
     cfc_enhanced.c
     unified_lnn_state.c
     laplace_unified.c
+    architecture_controller.c
 )
 
 # MSVC桩文件 - 为非MSVC平台的子系统(Gazebo/PyBullet/HW检测/Laplace/GPU)提供最小实现
 if(MSVC)
     target_sources(selflnn_core PRIVATE msvc_stubs.c)
-endif
+endif()
 
 target_compile_definitions(selflnn_core PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 

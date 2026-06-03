@@ -1,4 +1,4 @@
-﻿# 后端服务库
+# 后端服务库
 add_library(selflnn_backend
     backend.c
     auth.c
@@ -14,7 +14,7 @@ target_link_libraries(selflnn_backend PRIVATE selflnn_core selflnn_multimodal se
 # suppress MSVC warnings-turned-errors (C4715=missing return path, C4456=var shadowing)
 if(MSVC)
     set_source_files_properties(backend.c PROPERTIES COMPILE_FLAGS "/wd4715 /wd4456")
-endif
+endif()
 
 # 安装规则
 install(TARGETS selflnn_backend
