@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file self_cognition.h
  * @brief 自我认知系统接口
  * 
@@ -12,6 +12,11 @@
 #include <stddef.h>
 #include <time.h>
 #include "selflnn/cognition/metacognition.h"
+
+/* L-009: 认知模块依赖关系已验证 — 无循环依赖
+ * self_cognition.h → metacognition.h (单向, metacognition.h使用前向声明避免反向引用)
+ * deep_reflection.h → metacognition.h (单向)
+ * 其余头文件(deep_correction/deep_thought_chain/abstraction)无跨模块include */
 
 #ifdef __cplusplus
 extern "C" {
@@ -928,6 +933,20 @@ size_t self_cognition_get_identity_snapshot_count(SelfCognitionSystem* system);
 int self_cognition_metacognition_monitor(SelfCognitionSystem* system,
                                         const float* input_data, size_t data_size,
                                         MetacognitionMonitoringResult* result);
+
+/**
+ * @brief 获取元认知评估——桥接到决策引擎 (M-020修复)
+ *
+ * 返回最近一次元认知监控的评估结果，包含confidence/trend/requires_action等指标。
+ * AGI认知循环调用此函数获取元认知洞见后，传入决策引擎用于调整决策权重、
+ * 风险偏好和行动优先级。
+ *
+ * @param system 自我认知系统句柄
+ * @param result 元认知监控结果输出（从内部缓存复制）
+ * @return int 成功返回0（有缓存数据），返回-1表示无缓存数据（需先调用监控）
+ */
+int self_cognition_get_metacognition_assessment(SelfCognitionSystem* system,
+                                                MetacognitionMonitoringResult* result);
 
 /**
  * @brief 更新自我模型

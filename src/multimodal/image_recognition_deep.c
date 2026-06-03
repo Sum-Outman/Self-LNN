@@ -1,4 +1,4 @@
-﻿#include "selflnn/multimodal/image_recognition_deep.h"
+#include "selflnn/multimodal/image_recognition_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/knowledge/knowledge.h"
@@ -24,9 +24,9 @@ static float _tanh_f(float x) {
 }
 
 /* K-011修复：使用加密安全随机数替代rand() */
-/* Xavier初始化：适用于tanh/sigmoid激活函数层
+/* Kaiming初始化：适用于tanh/sigmoid激活函数层
  * 公式：std = sqrt(2.0 / (fan_in + fan_out)) */
-static void _xavier_init(float* w, int fan_in, int fan_out) {
+static void _kaiming_init(float* w, int fan_in, int fan_out) {
     float scale = sqrtf(2.0f / (float)(fan_in + fan_out));
     for (int i = 0; i < fan_in * fan_out; i++) {
         float u1 = secure_random_float();
@@ -262,21 +262,21 @@ IRDFineClassifier* ird_fine_create(const IRDFineConfig* config) {
     if (!c) return NULL;
     memcpy(&c->cfg, config, sizeof(IRDFineConfig));
     int hd = config->feature_dim, id = config->input_dim;
-    _xavier_init(c->W_gx_p, id, hd); _xavier_init(c->W_ax_p, id, hd);
-    _xavier_init(c->W_gh_p, hd, hd); _xavier_init(c->W_ah_p, hd, hd);
+    _kaiming_init(c->W_gx_p, id, hd); _kaiming_init(c->W_ax_p, id, hd);
+    _kaiming_init(c->W_gh_p, hd, hd); _kaiming_init(c->W_ah_p, hd, hd);
     memset(c->b_g_p, 0, hd * sizeof(float)); memset(c->b_a_p, 0, hd * sizeof(float));
-    _xavier_init(c->W_gx_part, hd, hd); _xavier_init(c->W_ax_part, hd, hd);
-    _xavier_init(c->W_gh_part, hd, hd); _xavier_init(c->W_ah_part, hd, hd);
+    _kaiming_init(c->W_gx_part, hd, hd); _kaiming_init(c->W_ax_part, hd, hd);
+    _kaiming_init(c->W_gh_part, hd, hd); _kaiming_init(c->W_ah_part, hd, hd);
     memset(c->b_g_part, 0, hd * sizeof(float)); memset(c->b_a_part, 0, hd * sizeof(float));
-    _xavier_init(c->W_fine, hd, config->num_fine_categories);
+    _kaiming_init(c->W_fine, hd, config->num_fine_categories);
     memset(c->b_fine, 0, config->num_fine_categories * sizeof(float));
-    _xavier_init(c->W_coarse, hd, config->num_coarse_categories);
+    _kaiming_init(c->W_coarse, hd, config->num_coarse_categories);
     memset(c->b_coarse, 0, config->num_coarse_categories * sizeof(float));
-    _xavier_init(c->bilin_W, hd, hd); _xavier_init(c->bilin_proj, 2, hd);
-    _xavier_init(c->pW_gx, PCFC_MAX_CH, PCFC_HD);
-    _xavier_init(c->pW_ax, PCFC_MAX_CH, PCFC_HD);
-    _xavier_init(c->pW_gh, PCFC_HD, PCFC_HD);
-    _xavier_init(c->pW_ah, PCFC_HD, PCFC_HD);
+    _kaiming_init(c->bilin_W, hd, hd); _kaiming_init(c->bilin_proj, 2, hd);
+    _kaiming_init(c->pW_gx, PCFC_MAX_CH, PCFC_HD);
+    _kaiming_init(c->pW_ax, PCFC_MAX_CH, PCFC_HD);
+    _kaiming_init(c->pW_gh, PCFC_HD, PCFC_HD);
+    _kaiming_init(c->pW_ah, PCFC_HD, PCFC_HD);
     memset(c->pb_g, 0, PCFC_HD * sizeof(float));
     memset(c->pb_a, 0, PCFC_HD * sizeof(float));
     c->training_completed = 0;
@@ -745,13 +745,13 @@ IRDOpenSetRecognizer* ird_open_set_create(const IRDOpenSetConfig* config) {
     rec->nndr_threshold = config->nndr_threshold;
     rec->weibull_thresh = 0.5f;
     int hd = config->feature_dim, id = config->input_dim;
-    _xavier_init(rec->W_gx, id, hd); _xavier_init(rec->W_ax, id, hd);
+    _kaiming_init(rec->W_gx, id, hd); _kaiming_init(rec->W_ax, id, hd);
     memset(rec->b_g, 0, hd * sizeof(float)); memset(rec->b_a, 0, hd * sizeof(float));
     memset(rec->hidden, 0, hd * sizeof(float));
-    _xavier_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
-    _xavier_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
-    _xavier_init(rec->pW_gh, PCFC_HD, PCFC_HD);
-    _xavier_init(rec->pW_ah, PCFC_HD, PCFC_HD);
+    _kaiming_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
+    _kaiming_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
+    _kaiming_init(rec->pW_gh, PCFC_HD, PCFC_HD);
+    _kaiming_init(rec->pW_ah, PCFC_HD, PCFC_HD);
     memset(rec->pb_g, 0, PCFC_HD * sizeof(float));
     memset(rec->pb_a, 0, PCFC_HD * sizeof(float));
     rec->num_known_classes = 0; rec->total_samples = 0;
@@ -1126,16 +1126,16 @@ IRDFewShotRecognizer* ird_few_shot_create(const IRDFewShotConfig* config) {
     if (!rec) return NULL;
     memcpy(&rec->cfg, config, sizeof(IRDFewShotConfig));
     int hd = config->embedding_dim, id = config->input_dim;
-    _xavier_init(rec->W_embed, id, hd);
+    _kaiming_init(rec->W_embed, id, hd);
     memset(rec->b_embed, 0, hd * sizeof(float));
-    _xavier_init(rec->W_gx, id, hd); _xavier_init(rec->W_ax, id, hd);
-    _xavier_init(rec->W_gh, hd, hd); _xavier_init(rec->W_ah, hd, hd);
+    _kaiming_init(rec->W_gx, id, hd); _kaiming_init(rec->W_ax, id, hd);
+    _kaiming_init(rec->W_gh, hd, hd); _kaiming_init(rec->W_ah, hd, hd);
     memset(rec->b_g, 0, hd * sizeof(float)); memset(rec->b_a, 0, hd * sizeof(float));
     rec->tau = config->cfc_time_constant; rec->dt = config->cfc_delta_t;
-    _xavier_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
-    _xavier_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
-    _xavier_init(rec->pW_gh, PCFC_HD, PCFC_HD);
-    _xavier_init(rec->pW_ah, PCFC_HD, PCFC_HD);
+    _kaiming_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
+    _kaiming_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
+    _kaiming_init(rec->pW_gh, PCFC_HD, PCFC_HD);
+    _kaiming_init(rec->pW_ah, PCFC_HD, PCFC_HD);
     memset(rec->pb_g, 0, PCFC_HD * sizeof(float));
     memset(rec->pb_a, 0, PCFC_HD * sizeof(float));
     rec->num_support = 0; rec->num_classes = 0; rec->initialized = 0;
@@ -1456,21 +1456,21 @@ IRDZeroShotRecognizer* ird_zero_shot_create(const IRDZeroShotConfig* config) {
     if (!rec) return NULL;
     memcpy(&rec->cfg, config, sizeof(IRDZeroShotConfig));
     int hd = config->feature_dim, sd = config->semantic_dim, ad = config->attribute_dim;
-    _xavier_init(rec->W_vis_sem, hd, sd);
+    _kaiming_init(rec->W_vis_sem, hd, sd);
     memset(rec->b_vis_sem, 0, sd * sizeof(float));
-    _xavier_init(rec->W_attr_pred, hd, ad);
+    _kaiming_init(rec->W_attr_pred, hd, ad);
     memset(rec->b_attr_pred, 0, ad * sizeof(float));
-    _xavier_init(rec->W_gx, config->input_dim, hd);
-    _xavier_init(rec->W_ax, config->input_dim, hd);
-    _xavier_init(rec->W_gh, hd, hd);
-    _xavier_init(rec->W_ah, hd, hd);
+    _kaiming_init(rec->W_gx, config->input_dim, hd);
+    _kaiming_init(rec->W_ax, config->input_dim, hd);
+    _kaiming_init(rec->W_gh, hd, hd);
+    _kaiming_init(rec->W_ah, hd, hd);
     memset(rec->b_g, 0, hd * sizeof(float));
     memset(rec->b_a, 0, hd * sizeof(float));
     memset(rec->hidden, 0, hd * sizeof(float));
-    _xavier_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
-    _xavier_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
-    _xavier_init(rec->pW_gh, PCFC_HD, PCFC_HD);
-    _xavier_init(rec->pW_ah, PCFC_HD, PCFC_HD);
+    _kaiming_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
+    _kaiming_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
+    _kaiming_init(rec->pW_gh, PCFC_HD, PCFC_HD);
+    _kaiming_init(rec->pW_ah, PCFC_HD, PCFC_HD);
     memset(rec->pb_g, 0, PCFC_HD * sizeof(float));
     memset(rec->pb_a, 0, PCFC_HD * sizeof(float));
     rec->margin = config->margin;

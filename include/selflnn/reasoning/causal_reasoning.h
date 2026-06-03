@@ -367,6 +367,37 @@ float causal_reasoning_estimate_rdd(CausalReasoningEngine* engine,
                                     int running_idx, int treatment_idx, int outcome_idx,
                                     float cutoff, int is_fuzzy, float bandwidth);
 
+/* ================================================================
+ * M-022修复: 因果推理→规划系统桥接接口
+ * ================================================================ */
+
+/**
+ * @brief 因果推理→规划系统桥接约束结构
+ */
+typedef struct {
+    int source_node_id;          /**< 原因节点ID */
+    int target_node_id;          /**< 结果节点ID */
+    float causal_strength;       /**< 因果强度（归一化 0-1） */
+    float constraint_weight;     /**< 规划约束权重（0.1-1.0） */
+    char constraint_name[64];    /**< 约束名称（含节点名） */
+} CausalPlanningConstraint;
+
+/**
+ * @brief M-022: 因果推理→规划系统桥接
+ *
+ * 从因果推理引擎的因果图中提取前N个最显著的因果边，
+ * 作为规划约束传递给规划系统。规划器在生成计划时考虑
+ * 已知的因果关系，使得规划更符合因果逻辑。
+ *
+ * @param engine 因果推理引擎句柄（因果图必须已构建）
+ * @param constraints 输出的规划约束结构数组
+ * @param max_constraints 最大约束数量（建议8-16）
+ * @return int 成功返回提取的约束数量，失败返回-1
+ */
+int causal_to_planning_bridge(CausalReasoningEngine* engine,
+                              CausalPlanningConstraint* constraints,
+                              size_t max_constraints);
+
 #ifdef __cplusplus
 }
 #endif

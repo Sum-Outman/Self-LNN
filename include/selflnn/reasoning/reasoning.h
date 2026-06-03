@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file reasoning.h
  * @brief 推理引擎接口
  * 
@@ -842,6 +842,9 @@ int reasoning_save_history(const ReasoningEngine* engine, const char* filepath);
 int reasoning_load_history(ReasoningEngine* engine, const char* filepath);
 int reasoning_set_autosave(ReasoningEngine* engine, const char* filepath);
 int reasoning_autosave_history(ReasoningEngine* engine);
+
+/* M-022修复: 因果推理→规划系统桥接 → 获取因果推理引擎 */
+SELFLNN_API void* reasoning_engine_get_causal_engine(ReasoningEngine* engine);
 
 #ifdef __cplusplus
 }

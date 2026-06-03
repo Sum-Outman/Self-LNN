@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file learning.c
  * @brief 学习与演化模块实现
  * 
@@ -143,6 +143,8 @@ struct LearningEngine {
     int has_real_knowledge;                             /**< P0-010: 知识库是否已从真实数据源加载 */
     /* H-016集成: 深度模仿学习系统 */
     ImitationDeepLearner* imitation_deep;              /**< 深度模仿学习器 */
+    /* DEADCODE-FIX: manual_learning集成 */
+    void* manual_learning_system;                      /**< 手动学习系统实例 */
 };
 
 /**
@@ -192,6 +194,13 @@ LearningEngine* learning_engine_create(const LearningConfig* config) {
     engine->current_generation = 0;
     engine->best_fitness = -1e30f;  // 替代-INFINITY以避免编译警告
     engine->enabled = 1;
+
+    /* DEADCODE-FIX: manual_learning集成 - 创建手动学习系统 */
+    {
+        MLConfig ml_cfg = ML_CONFIG_DEFAULT;
+        ml_cfg.learning_rate = config->learning_rate;
+        engine->manual_learning_system = ml_system_create(ml_cfg);
+    }
     
     // 根据学习类型分配内存
     switch (config->learning_type) {
@@ -423,6 +432,12 @@ void learning_engine_free(LearningEngine* engine) {
     if (engine->imitation_deep) {
         imitation_deep_free(engine->imitation_deep);
         engine->imitation_deep = NULL;
+    }
+
+    /* DEADCODE-FIX: manual_learning集成 - 销毁手动学习系统 */
+    if (engine->manual_learning_system) {
+        ml_system_destroy((MLSystem*)engine->manual_learning_system);
+        engine->manual_learning_system = NULL;
     }
 
     safe_free((void**)&engine);
@@ -4004,4 +4019,125 @@ void learning_engine_disable(LearningEngine* engine) {
 
 int learning_engine_is_enabled(const LearningEngine* engine) {
     return (engine && engine->enabled) ? 1 : 0;
+}
+
+/* ============================================================================
+ * DEADCODE-FIX: manual_learning集成 - 桥接函数
+ * 
+ * manual_learning.c中有23个函数、约1377行代码，虽然learning.c包含
+ * 了manual_learning.h头文件，但从未通过LearningEngine调用。
+ * 以下桥接函数将manual_learning功能暴露给backend，使其可以通过
+ * learning模块访问手动学习功能。
+ * ============================================================================ */
+
+int learning_manual_ingest_document(LearningEngine* engine,
+                                     const char* title,
+                                     const char* content,
+                                     size_t content_len,
+                                     MLDocType doc_type) {
+    if (!engine || !engine->manual_learning_system || !title || !content) return -1;
+    return ml_ingest_document((MLSystem*)engine->manual_learning_system,
+                               title, content, content_len, doc_type);
+}
+
+int learning_manual_extract_knowledge(LearningEngine* engine,
+                                       size_t doc_id,
+                                       float* knowledge_embedding,
+                                       size_t embed_dim) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_extract_knowledge((MLSystem*)engine->manual_learning_system,
+                                 doc_id, knowledge_embedding, embed_dim);
+}
+
+int learning_manual_generate_instructions(LearningEngine* engine,
+                                           size_t doc_id,
+                                           const char* task_query,
+                                           float* instructions_out,
+                                           size_t max_steps,
+                                           size_t* num_steps_out) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_generate_instructions((MLSystem*)engine->manual_learning_system,
+                                     doc_id, task_query,
+                                     instructions_out, max_steps, num_steps_out);
+}
+
+int learning_manual_query_document(LearningEngine* engine,
+                                    const char* query,
+                                    size_t* doc_id_out,
+                                    float* relevance_scores) {
+    if (!engine || !engine->manual_learning_system || !query) return -1;
+    return ml_query_document((MLSystem*)engine->manual_learning_system,
+                              query, doc_id_out, relevance_scores);
+}
+
+int learning_manual_learn_from_documents(
+    LearningEngine* engine,
+    int (*progress_callback)(float progress, const char* status, void* user_data),
+    void* user_data) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_learn_from_documents((MLSystem*)engine->manual_learning_system,
+                                    progress_callback, user_data);
+}
+
+int learning_manual_get_document_count(LearningEngine* engine) {
+    if (!engine || !engine->manual_learning_system) return 0;
+    return ml_get_document_count((MLSystem*)engine->manual_learning_system);
+}
+
+int learning_manual_get_document(LearningEngine* engine,
+                                  size_t doc_id,
+                                  MLDocument* doc_out) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_get_document((MLSystem*)engine->manual_learning_system,
+                            doc_id, doc_out);
+}
+
+int learning_manual_clear_documents(LearningEngine* engine) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_clear_documents((MLSystem*)engine->manual_learning_system);
+}
+
+int learning_manual_generate_summary(LearningEngine* engine,
+                                      size_t doc_id,
+                                      char* summary_out,
+                                      size_t max_len) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_generate_summary((MLSystem*)engine->manual_learning_system,
+                                doc_id, summary_out, max_len);
+}
+
+int learning_manual_synthesize_knowledge(LearningEngine* engine,
+                                          size_t* doc_ids,
+                                          size_t num_docs,
+                                          float* synthesis_out,
+                                          size_t embed_dim) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_synthesize_knowledge((MLSystem*)engine->manual_learning_system,
+                                    doc_ids, num_docs, synthesis_out, embed_dim);
+}
+
+int learning_manual_get_learning_progress(LearningEngine* engine,
+                                           float* progress_out,
+                                           char* status_out,
+                                           size_t status_len) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_get_learning_progress((MLSystem*)engine->manual_learning_system,
+                                     progress_out, status_out, status_len);
+}
+
+int learning_manual_export_knowledge_graph(LearningEngine* engine,
+                                            char* graph_out,
+                                            size_t max_len) {
+    if (!engine || !engine->manual_learning_system) return -1;
+    return ml_export_knowledge_graph((MLSystem*)engine->manual_learning_system,
+                                      graph_out, max_len);
+}
+
+int learning_manual_search_documents(LearningEngine* engine,
+                                      const char* keyword,
+                                      size_t* doc_ids,
+                                      size_t* num_results) {
+    if (!engine || !engine->manual_learning_system || !keyword) return -1;
+    return ml_search_documents((MLSystem*)engine->manual_learning_system,
+                                keyword, doc_ids, num_results);
 }

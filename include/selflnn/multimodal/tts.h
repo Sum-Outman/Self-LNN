@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file tts.h
  * @brief 语音合成（TTS）— 液态状态生成动态系统
  *
@@ -125,6 +125,7 @@ typedef struct {
     float* samples;                      /**< PCM音频样本（范围[-1.0, 1.0]） */
     int num_samples;                     /**< 样本数 */
     int sample_rate;                     /**< 采样率 */
+    float confidence;                    /**< S-007修复: 合成置信度（0.0~1.0），未训练时为0.3 */
 } TTSAudio;
 
 /**

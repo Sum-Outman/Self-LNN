@@ -11,6 +11,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/logging.h"       /* M-017: 溢出块跟踪日志 */
 #include "selflnn/core/laplace.h"
 
 #include <stdlib.h>
@@ -414,6 +415,12 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
             allocator->overflow_blocks[idx].size = size;
             allocator->overflow_count++;
             allocator->overflow_used += size;
+        } else {
+            /* M-017修复: 溢出块数量已达上限，无法继续跟踪，可能导致内存泄漏 */
+            log_warning("伙伴分配器溢出块数量已达到上限(%d)，无法跟踪此块(%zu字节)。"
+                        "请增大BUDDY_POOL_SIZE或BUDDY_MAX_OVERFLOW_BLOCKS。",
+                        BUDDY_MAX_OVERFLOW_BLOCKS, size);
+            /* 即使不跟踪，仍分配内存给调用者，buddy_free通过malloc释放 */
         }
         allocator->total_allocations++;
         mutex_unlock(allocator->lock);
@@ -443,6 +450,12 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
             allocator->overflow_blocks[idx].size = size;
             allocator->overflow_count++;
             allocator->overflow_used += size;
+        } else {
+            /* M-017修复: 溢出块数量已达上限，无法继续跟踪，可能导致内存泄漏 */
+            log_warning("伙伴分配器溢出块数量已达到上限(%d)，无法跟踪此块(%zu字节)。"
+                        "请增大BUDDY_POOL_SIZE或BUDDY_MAX_OVERFLOW_BLOCKS。",
+                        BUDDY_MAX_OVERFLOW_BLOCKS, size);
+            /* 即使不跟踪，仍分配内存给调用者，buddy_free通过malloc释放 */
         }
         allocator->total_allocations++;
         mutex_unlock(allocator->lock);
@@ -473,6 +486,12 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
                     allocator->overflow_blocks[oidx].size = size;
                     allocator->overflow_count++;
                     allocator->overflow_used += size;
+                } else {
+                    /* M-017修复: 溢出块数量已达上限，无法继续跟踪，可能导致内存泄漏 */
+                    log_warning("伙伴分配器溢出块数量已达到上限(%d)，无法跟踪此块(%zu字节)。"
+                                "请增大BUDDY_POOL_SIZE或BUDDY_MAX_OVERFLOW_BLOCKS。",
+                                BUDDY_MAX_OVERFLOW_BLOCKS, size);
+                    /* 即使不跟踪，仍分配内存给调用者，buddy_free通过malloc释放 */
                 }
                 allocator->total_allocations++;
                 mutex_unlock(allocator->lock);
@@ -557,6 +576,19 @@ static int buddy_free(CpuBuddyAllocator* allocator, void* ptr)
             }
             allocator->overflow_blocks[i] = allocator->overflow_blocks[allocator->overflow_count - 1];
             allocator->overflow_count--;
+            mutex_unlock(allocator->lock);
+            return 0;
+        }
+    }
+
+    /* M-017修复: 指针不在溢出跟踪列表中，但可能是不在跟踪列表的溢出块
+     * （溢出计数已达上限时分配但仍通过free释放）。
+     * 检查指针是否在伙伴池范围之外，若是则直接free。 */
+    if (allocator->pool_base && allocator->pool_size > 0) {
+        uint8_t* pool_start = (uint8_t*)allocator->pool_base;
+        uint8_t* pool_end = pool_start + allocator->pool_size;
+        if ((uint8_t*)ptr < pool_start || (uint8_t*)ptr >= pool_end) {
+            free(ptr);
             mutex_unlock(allocator->lock);
             return 0;
         }

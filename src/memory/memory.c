@@ -1,4 +1,4 @@
-﻿#include "selflnn/memory/memory.h"
+#include "selflnn/memory/memory.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -80,10 +80,7 @@ struct MemorySystem {
     size_t lt_capacity;            /**< 长期记忆容量 */
     size_t ep_capacity;            /**< 情景记忆容量 */
     size_t se_capacity;            /**< 语义记忆容量 */
-    float current_time;            /**< 当前时间（秒级浮点，内部逻辑时间，非真实挂钟时间）*/
-/* memory使用自增浮点current_time，knowledge
-                                  * 使用time(NULL)秒级整型。跨系统时间序列关联需转换：
-                                  * knowledge_timestamp = (long)(system->current_time + epoch_offset) */
+    float current_time;            /**< 当前时间（秒级浮点，与last_decay_time使用相同的time(NULL)真实挂钟时间实现一致性，M-016修复）*/
     
     /* 最近访问缓存（加速频繁访问的记忆检索） */
     MemoryItem* recent_cache[10];  /**< 最近访问记忆缓存 */
@@ -706,8 +703,15 @@ int memory_store(MemorySystem* system, const char* key, const float* data,
             break;
     }
     
-    // 应用记忆衰减（时间前进了1.0单位）
-    memory_apply_decay(system, 1.0f);
+    /* L-021: 使用真实挂钟时间差替代硬编码1.0f，与last_decay_time一致 */
+    {
+        time_t real_now = time(NULL);
+        float real_elapsed = (float)(real_now - system->last_decay_time);
+        if (real_elapsed > 0.0f) {
+            memory_apply_decay(system, real_elapsed);
+            system->last_decay_time = real_now;
+        }
+    }
     
     // 更新时间
     system->current_time += 1.0f;
@@ -814,7 +818,15 @@ int memory_store_ex(MemorySystem* system, const char* key, const float* data,
         case MEMORY_TYPE_SEMANTIC:   system->se_count++; break;
     }
 
-    memory_apply_decay(system, 1.0f);
+    /* L-021: 使用真实挂钟时间差替代硬编码1.0f，与last_decay_time一致 */
+    {
+        time_t real_now = time(NULL);
+        float real_elapsed = (float)(real_now - system->last_decay_time);
+        if (real_elapsed > 0.0f) {
+            memory_apply_decay(system, real_elapsed);
+            system->last_decay_time = real_now;
+        }
+    }
     system->current_time += 1.0f;
     memory_hash_index_rebuild(system, type);
 
@@ -954,7 +966,15 @@ int memory_update(MemorySystem* system, const char* key, const float* data,
         MEMORY_LOCK(system);
     }
     
-    memory_apply_decay(system, 0.1f);
+    /* L-021: 使用真实挂钟时间差替代硬编码0.1f，与last_decay_time一致 */
+    {
+        time_t real_now = time(NULL);
+        float real_elapsed = (float)(real_now - system->last_decay_time);
+        if (real_elapsed > 0.0f) {
+            memory_apply_decay(system, real_elapsed);
+            system->last_decay_time = real_now;
+        }
+    }
     system->current_time += 0.1f;
     
     MEMORY_UNLOCK(system);

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file data-engine.js
  * @brief 数据引擎 - 真实后端数据传递层 + 统一轮询中心
  *
@@ -107,7 +107,9 @@ class DataEngine {
             var result = await this._fetchWithTimeout(window.SelfLnnApi.getSystemStatus(), 'system');
             if (result && result.success && result.data) {
                 var data = result.data;
-                this._updateFromApi('system', data);
+                /* S-020修复: 后端/status返回{"system":{...}}，应提取data.system传入
+                 * 否则this.data.system会变成{system:{...}}的嵌套结构，UI层无法直接读取字段 */
+                this._updateFromApi('system', data.system || data);
                 if (data.system && data.system.modules) {
                     var mods = data.system.modules;
                     this._updateFromApi('lnn', mods.lnn || {});

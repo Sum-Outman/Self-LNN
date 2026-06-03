@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN AGI 后端API服务
  * 提供与SELF-LNN后端服务器的通信接口
  *
@@ -1802,10 +1802,12 @@ class ApiService {
 
     /**
      * 查询知识库
+     * API路径标准化 (M-039): /api/knowledge
+     * 注: 后端知识库主查询端点为 /api/knowledge (非 /api/knowledge/query)
      */
     async queryKnowledge(query) {
         try {
-            const response = await this.request('/knowledge' + (query ? '?q=' + encodeURIComponent(query) : ''));
+            const response = await this.request('/api/knowledge' + (query ? '?q=' + encodeURIComponent(query) : ''));
             if (!response.ok) {
                 throw new Error('HTTP错误: ' + response.status);
             }
@@ -2062,10 +2064,11 @@ class ApiService {
 
     /**
      * 发送对话消息
+     * API路径标准化 (M-037): /api/dialogue/send - 后端已注册此别名路由
      */
     async sendDialogueMessage(message, config) {
         try {
-            const response = await this.request('/dialogue', {
+            const response = await this.request('/api/dialogue/send', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -2098,10 +2101,11 @@ class ApiService {
 
     /**
      * 获取对话历史
+     * API路径标准化 (M-038): /api/dialogue/history
      */
     async getDialogueHistory() {
         try {
-            const response = await this.request('/dialogue/history');
+            const response = await this.request('/api/dialogue/history');
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
@@ -2122,10 +2126,11 @@ class ApiService {
 
     /**
      * 清空对话历史
+     * API路径标准化 (M-038): /api/dialogue/clear
      */
     async clearDialogueHistory() {
         try {
-            const response = await this.request('/dialogue/clear', {
+            const response = await this.request('/api/dialogue/clear', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -2271,7 +2276,8 @@ class ApiService {
             if (options.audio && options.audio.length > 0) {
                 payload.audio = options.audio;
             }
-            const response = await this.request('/dialogue/multimodal', {
+            /* API路径标准化 (M-038): /api/dialogue/multimodal */
+            const response = await this.request('/api/dialogue/multimodal', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -2567,10 +2573,11 @@ class ApiService {
 
     /**
      * 列出所有可用设备
+     * API路径标准化 (M-040): /api/devices/list
      */
     async listDevices() {
         try {
-            const response = await this.request('/devices/list', { method: 'GET' });
+            const response = await this.request('/api/devices/list', { method: 'GET' });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
             return { success: true, data: data };
@@ -3704,9 +3711,10 @@ class ApiService {
 
     // ==================== 设备控制 API ====================
 
+    /* API路径标准化 (M-040): /api/devices/list */
     async devicesList() {
         try {
-            var resp = await this.request('/devices/list', {method: 'GET'});
+            var resp = await this.request('/api/devices/list', {method: 'GET'});
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -5146,11 +5154,11 @@ class ApiService {
 
     /**
      * 获取训练状态（/5修复: 添加缺失的API方法）
-     * 调用 GET /api/training/status
+     * API路径标准化 (M-039): GET /api/training/status
      */
     async getTrainingStatus() {
         try {
-            const response = await this.request('/training/status');
+            const response = await this.request('/api/training/status');
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
             return { success: true, data: data };
@@ -5162,12 +5170,12 @@ class ApiService {
 
     /**
      * 恢复/继续AGI任务
-     * 调用 POST /api/task/resume
+     * API路径标准化: POST /api/task/resume
      * @param {string|number} taskId - 任务ID
      */
     async resumeTask(taskId) {
         try {
-            const response = await this.request('/task/resume', {
+            const response = await this.request('/api/task/resume', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ task_id: taskId })
@@ -5183,13 +5191,13 @@ class ApiService {
 
     /**
      * 导入知识库数据（添加缺失的API方法）
-     * 调用 POST /api/knowledge/import
+     * API路径标准化 (M-039): POST /api/knowledge/import
      * @param {string} fileContent - 文件内容
      * @param {string} fileName - 文件名
      */
     async importKnowledge(fileContent, fileName) {
         try {
-            const response = await this.request('/knowledge/import', {
+            const response = await this.request('/api/knowledge/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content: fileContent, file_name: fileName || 'import.json' })
@@ -5392,10 +5400,11 @@ class ApiService {
     /**
      * 获取元认知系统状态
      * 对应后端 /api/metacognition/state (GET)
+     * API路径标准化: /api/metacognition/state
      */
     async getMetacognitionState() {
         try {
-            const response = await this.request('/metacognition/state', { method: 'GET' });
+            const response = await this.request('/api/metacognition/state', { method: 'GET' });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
             return { success: true, data: data };
@@ -5408,10 +5417,11 @@ class ApiService {
     /**
      * 启动训练管线
      * 对应后端 /api/training/pipeline (POST)
+     * API路径标准化: /api/training/pipeline
      */
     async postTrainingPipeline(config) {
         try {
-            const response = await this.request('/training/pipeline', {
+            const response = await this.request('/api/training/pipeline', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(config || {})
@@ -5428,10 +5438,11 @@ class ApiService {
     /**
      * 获取检查点列表
      * 对应后端 /api/checkpoint/list (GET)
+     * API路径标准化: /api/checkpoint/list
      */
     async getCheckpointList() {
         try {
-            const response = await this.request('/checkpoint/list', { method: 'GET' });
+            const response = await this.request('/api/checkpoint/list', { method: 'GET' });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
             return { success: true, data: data };
@@ -5444,10 +5455,11 @@ class ApiService {
     /**
      * 加载检查点
      * 对应后端 /api/checkpoint/load (POST)
+     * API路径标准化: /api/checkpoint/load
      */
     async postCheckpointLoad(checkpointId) {
         try {
-            const response = await this.request('/checkpoint/load', {
+            const response = await this.request('/api/checkpoint/load', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ checkpoint_id: checkpointId || '' })

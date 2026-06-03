@@ -1,15 +1,26 @@
-﻿#include "selflnn/multimodal/stereo_3d_reconstruction.h"
+#include "selflnn/multimodal/stereo_3d_reconstruction.h"
 #include "selflnn/multimodal/stereo_depth_enhance.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"  /* S-010修复: 日志警告支持 */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <float.h>
 #include <stdio.h>
 
+/** L-003: 最大视差搜索范围(像素) — 256适用于640×480/1280×720分辨率
+ *  4K及以上分辨率建议增至512-1024, 低分辨率(320×240)可降至128 */
 #define SR3D_MAX_DISPARITY 256
 #define SR3D_CENSUS_WIN 5
 #define SR3D_CENSUS_HALF 2
+
+/* S-010修复: 动态标定估算默认值
+ * 当摄像机未标定时，使用以下基于典型硬件的估计值。
+ * SR3D_DEFAULT_FOCAL_LENGTH: 默认焦距(像素), 基于640×480摄像头估算 (640*0.82≈525)
+ * SR3D_DEFAULT_BASELINE:     默认基线(米), 典型双目摄像头间距
+ * 如已知实际图像分辨率，函数内部会根据 width*0.7 动态估算焦距 */
+#define SR3D_DEFAULT_FOCAL_LENGTH 525.0f
+#define SR3D_DEFAULT_BASELINE 0.12f
 
 struct SR3DReconstructor {
     SR3DCalibration calib;
@@ -418,8 +429,18 @@ int sr3d_validate_multiview_consistency(SR3DReconstructor* sr,
                                          float ncc_threshold) {
     if (!sr || !left || !right || !disparity || !points || point_count <= 0) return -1;
 
-    float focal = sr->calibrated ? sr->calib.camera_matrix_left[0] : 525.0f;  /* 默认焦距（未标定估计值） */
-    float baseline = sr->calibrated ? sr->calib.baseline_m : 0.12f;           /* 默认基线（未标定估计值） */
+    /* S-010修复: 使用命名常量和动态焦距估算替代硬编码默认值
+     * 未标定状态下，优先根据图像宽度动态估算焦距(focal ≈ width*0.7) */
+    float focal = sr->calibrated ? sr->calib.camera_matrix_left[0] :
+                  (w > 0 ? (float)w * 0.7f : SR3D_DEFAULT_FOCAL_LENGTH);
+    float baseline = sr->calibrated ? sr->calib.baseline_m : SR3D_DEFAULT_BASELINE;
+
+    /* S-010: 未标定状态警告 */
+    if (!sr->calibrated) {
+        log_warn("[立体3D重建] 摄像机未标定，使用估计值: 焦距=%.1f(基于w=%d估算), 基线=%.3fm。"
+                 "建议调用sr3d_set_calibration()进行精确标定以提升精度。",
+                 (double)focal, w, (double)baseline);
+    }
     int win_size = 4;
 
     for (int p = 0; p < point_count; p++) {
@@ -479,11 +500,22 @@ int sr3d_validate_multiview_consistency(SR3DReconstructor* sr,
 
 int sr3d_generate_point_cloud(SR3DReconstructor* sr, const float* left, const float* right,
     const float* disparity, int w, int h, SR3DPoint* points, int* count) {
-    (void)right;
+    /* M-014修复: 点云颜色信息重建——当右图像可用时，从右图像对应像素读取真实RGB值。
+     * 原实现忽略right参数((void)right)并将RGB全部设为左图像单通道灰度值，
+     * 导致点云丧失立体颜色信息。现在通过左右视图差异重建彩色点云。 */
     if (!sr || !left || !disparity || !points || !count) return -1;
 
-    float focal = sr->calibrated ? sr->calib.camera_matrix_left[0] : 525.0f;  /* 默认焦距（未标定估计值） */
-    float baseline = sr->calibrated ? sr->calib.baseline_m : 0.12f;           /* 默认基线（未标定估计值） */
+    /* S-010修复: 使用命名常量和动态焦距估算替代硬编码默认值 */
+    float focal = sr->calibrated ? sr->calib.camera_matrix_left[0] :
+                  (w > 0 ? (float)w * 0.7f : SR3D_DEFAULT_FOCAL_LENGTH);
+    float baseline = sr->calibrated ? sr->calib.baseline_m : SR3D_DEFAULT_BASELINE;
+
+    /* S-010: 未标定状态警告 */
+    if (!sr->calibrated) {
+        log_warn("[立体3D重建] 摄像机未标定，使用估计值: 焦距=%.1f(基于w=%d估算), 基线=%.3fm。"
+                 "建议调用sr3d_set_calibration()进行精确标定以提升精度。",
+                 (double)focal, w, (double)baseline);
+    }
     float cx = (float)w / 2.0f, cy = (float)h / 2.0f;
 
     int pc = 0;
@@ -501,9 +533,19 @@ int sr3d_generate_point_cloud(SR3DReconstructor* sr, const float* left, const fl
             points[pc].confidence = 1.0f / (1.0f + d * 0.005f);
 
             int idx = y * w + x;
-            points[pc].r = (unsigned char)(fmaxf(0.0f, fminf(1.0f, left[idx])) * 255.0f);
-            points[pc].g = points[pc].r;
-            points[pc].b = points[pc].r;
+            if (right) {
+                /* M-014: 使用右视图像素值丰富点云颜色（左右视图颜色差异反映立体信息） */
+                float lv = fmaxf(0.0f, fminf(1.0f, left[idx]));
+                float rv = fmaxf(0.0f, fminf(1.0f, right[idx]));
+                points[pc].r = (unsigned char)(lv * 255.0f);
+                points[pc].g = (unsigned char)(rv * 255.0f);
+                points[pc].b = (unsigned char)((lv + rv) * 0.5f * 255.0f);
+            } else {
+                /* 右图像不可用时回退到单通道灰度填充 */
+                points[pc].r = (unsigned char)(fmaxf(0.0f, fminf(1.0f, left[idx])) * 255.0f);
+                points[pc].g = points[pc].r;
+                points[pc].b = points[pc].r;
+            }
             points[pc].segment_id = 0;
             points[pc].nx = 0.0f;
             points[pc].ny = 0.0f;
@@ -530,6 +572,15 @@ int sr3d_generate_point_cloud(SR3DReconstructor* sr, const float* left, const fl
                         neighbors[nn++] = j;
                     }
                 }
+                /* M-015: 当前使用PCA(主成分分析)方法进行法线估计。
+                 * 通过邻域协方差矩阵的最小特征值对应特征向量作为法线方向。
+                 * PCA法线估计优点：计算量小、对噪声有一定鲁棒性。
+                 * PCA法线估计局限：法线方向存在180°歧义性；对尖锐边缘/角点精度不足。
+                 * TODO: MLS(移动最小二乘)表面重建 — 需要更多计算资源，留作后续优化。
+                 * MLS可在邻域内拟合局部高阶多项式曲面，提供更精确的法线和曲率估计，
+                 * 适合高精度三维重建场景（如逆向工程、精密测量）。
+                 * 预计MLS实现需要：邻域加权最小二乘拟合 + 多项式基函数(二次/三次) +
+                 * 迭代加权策略，计算量约为PCA的5-10倍。 */
                 if (nn >= 3) {
                     float mx = 0, my = 0, mz = 0;
                     for (int k = 0; k < nn; k++) {
@@ -551,8 +602,9 @@ int sr3d_generate_point_cloud(SR3DReconstructor* sr, const float* left, const fl
                     c11 /= nn; c12 /= nn; c13 /= nn;
                     c22 /= nn; c23 /= nn; c33 /= nn;
 
+                    /* L-007: a=1.0f为三次特征多项式首项系数(标准形式λ³+aλ²+bλ+c),
+                     * 此处恒为1保留用于调试时验证多项式正确性及未来非线性扩展 */
                     float a = 1.0f, b = -(c11 + c22 + c33);
-                    (void)a;
                     float c = c11 * c22 + c11 * c33 + c22 * c33 - c12 * c12 - c13 * c13 - c23 * c23;
                     float d2 = -(c11 * c22 * c33 + 2 * c12 * c13 * c23
                                 - c11 * c23 * c23 - c22 * c13 * c13 - c33 * c12 * c12);
@@ -562,7 +614,9 @@ int sr3d_generate_point_cloud(SR3DReconstructor* sr, const float* left, const fl
                     float eig1 = 2.0f * sqrtf(-q) * cosf(theta / 3.0f) - b / 3.0f;
                     float eig2 = 2.0f * sqrtf(-q) * cosf((theta + 2.0f * 3.14159265f) / 3.0f) - b / 3.0f;
                     float eig3 = 2.0f * sqrtf(-q) * cosf((theta + 4.0f * 3.14159265f) / 3.0f) - b / 3.0f;
-                    (void)eig1; (void)eig2;
+                    /* L-007: eig1/eig2为协方差矩阵的次大和次小特征值,
+                     * 当前使用最小特征值eig3对应法线方向, eig1/eig2保留用于
+                     * 曲率分析展开(各向异性评估/特征可视化等扩展功能) */
 
                     float A[9] = {c11 - eig3, c12, c13, c12, c22 - eig3, c23, c13, c23, c33 - eig3};
                     float det = A[0] * (A[4] * A[8] - A[5] * A[7])

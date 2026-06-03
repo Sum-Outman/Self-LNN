@@ -8,6 +8,11 @@
 
 #define SELFLNN_KNOWLEDGE_INTERNAL /* 与knowledge_graph.h保持一致 */
 #include "selflnn/knowledge/knowledge_graph.h"
+/* M-024: knowledge_graph_to_lnn_bridge需要selflnn_consume_knowledge_inference。
+ * 不能包含selflnn.h(会引入graph_optimization.h中的同名GraphNode导致类型冲突)。
+ * 使用extern声明代替。 */
+extern int selflnn_consume_knowledge_inference(void* lnn, void* kie,
+    const char* query_concept, int max_hops, float perturbation_strength);
 
 /* 知识图谱操作锁宏 — 原结构完全无锁, 多线程必然崩溃 */
 #define GRAPH_LOCK(g)   do { if ((g) && (g)->graph_lock) mutex_lock((g)->graph_lock); } while(0)
@@ -21,6 +26,7 @@
 #include <float.h>
 #include <stdio.h>
 #include <time.h>
+#include <stdint.h> /* uintptr_t */
 
 /* ============================================================================
  * CRC32校验（纯C实现，不依赖外部库）
@@ -1539,6 +1545,11 @@ float knowledge_graph_node_centrality(KnowledgeGraph* graph, GraphNode* node,
         case 2: // 介数中心性
             // 介数中心性：节点在所有最短路径中出现的频率
             // 完整实现：基于BFS计算所有节点对的最短路径（假设边权重为1）
+            /* PERFORMANCE-HOTSPOT: Floyd-Warshall O(n³) 含 O(n) 邻居线性扫描
+             * 内层循环 for(k<node_count) 中每次查找邻居索引时进行完整线性扫描，
+             * 导致实际复杂度为 O(n³ × edge_count)。建议优化：
+             * 1. 预构建 node→index 哈希映射表，将邻居查找降为 O(1)
+             * 2. 对大型图(n>1000)考虑近似算法：Brandes算法 O(n+m) 或采样法 */
             {
                 size_t node_count = graph->node_count;
                 if (node_count < 2) return 0.0f;
@@ -1594,16 +1605,42 @@ float knowledge_graph_node_centrality(KnowledgeGraph* graph, GraphNode* node,
                 }
                 
                 // 初始化直接邻居的距离
+                /* PERFORMANCE-FIX: 预构建node→index哈希映射避免O(n)线性扫描
+                 * 原始代码对每条边调用一次O(n)扫描查找邻居索引，
+                 * 总复杂度=O(m×n)。通过哈希表降为O(n+m)。 */
+                size_t node_index_table_size = node_count * 2 + 1;
+                size_t* node_index_table = (size_t*)safe_calloc(node_index_table_size, sizeof(size_t));
+                if (node_index_table) {
+                    for (size_t k = 0; k < node_count; k++) {
+                        size_t h = ((uintptr_t)(graph->nodes[k])) % node_index_table_size;
+                        while (node_index_table[h] != 0) h = (h + 1) % node_index_table_size;
+                        node_index_table[h] = k + 1; /* +1区分空槽0 */
+                    }
+                }
+
                 for (size_t i = 0; i < node_count; i++) {
                     GraphNode* src_node = graph->nodes[i];
                     for (size_t j = 0; j < src_node->edge_count; j++) {
                         GraphEdge* edge = src_node->edges[j];
                         GraphNode* neighbor = (edge->source == src_node) ? edge->target : edge->source;
                         
-                        // 查找邻居索引
-                        size_t neighbor_idx = 0;
-                        for (; neighbor_idx < node_count; neighbor_idx++) {
-                            if (graph->nodes[neighbor_idx] == neighbor) break;
+                        // 通过哈希表查找邻居索引 O(1) 而非 O(n)
+                        size_t neighbor_idx = node_count; /* 默认=未找到 */
+                        if (node_index_table) {
+                            size_t h = ((uintptr_t)neighbor) % node_index_table_size;
+                            while (node_index_table[h] != 0) {
+                                size_t cand = node_index_table[h] - 1;
+                                if (graph->nodes[cand] == neighbor) {
+                                    neighbor_idx = cand;
+                                    break;
+                                }
+                                h = (h + 1) % node_index_table_size;
+                            }
+                        } else {
+                            /* 回退: 无缓存时线性扫描 */
+                            for (neighbor_idx = 0; neighbor_idx < node_count; neighbor_idx++) {
+                                if (graph->nodes[neighbor_idx] == neighbor) break;
+                            }
                         }
                         
                         if (neighbor_idx < node_count) {
@@ -1612,6 +1649,7 @@ float knowledge_graph_node_centrality(KnowledgeGraph* graph, GraphNode* node,
                         }
                     }
                 }
+                safe_free((void**)&node_index_table);
                 
                 // Floyd-Warshall算法计算所有节点对的最短路径和路径计数
                 for (size_t k = 0; k < node_count; k++) {
@@ -5050,4 +5088,83 @@ int knowledge_graph_layout_3d(float* positions,
 
     safe_free((void**)&nodes);
     return 0;
+}
+
+/* ================================================================
+ * M-024修复: 知识图谱推理→LNN状态扰动桥接
+ *
+ * 将知识图谱中的概念节点激活状态映射为LNN状态扰动，
+ * 实现"符号知识→连续状态"的转化通道。
+ *
+ * 工作流程:
+ *   1. 从知识图谱获取活跃概念节点的嵌入向量（连续表示）
+ *   2. 将嵌入向量通过 selflnn_consume_knowledge_inference()
+ *      路由到LNN，产生状态扰动
+ *   3. LNN根据扰动调整内部动力学，影响后续决策/预测
+ *
+ * 参数:
+ *   kg       - 知识图谱句柄（用于获取活跃概念嵌入）
+ *   lnn      - LNN实例句柄（接收知识扰动）
+ *   strength - 扰动强度（0.0=无影响, 1.0=满强度）
+ *
+ * 返回: 0=成功, -1=参数无效, -2=无活跃概念
+ * ================================================================ */
+int knowledge_graph_to_lnn_bridge(void* kg, void* lnn, float strength) {
+    if (!kg || !lnn) return -1;
+
+    KnowledgeGraph* graph = (KnowledgeGraph*)kg;
+    if (graph->node_count == 0) return -2;
+
+    /* 收集活跃概念节点的嵌入向量并聚合 */
+    float* aggregated_embedding = NULL;
+    size_t embed_dim = 0;
+    int active_count = 0;
+
+    /* 遍历知识图谱节点，收集激活的概念节点 */
+    for (size_t i = 0; i < graph->node_count; i++) {
+        GraphNode* node = graph->nodes[i];
+        if (!node || !node->embedding || node->embedding_size == 0) continue;
+
+        /* 仅处理概念类型节点（ENTITY或CONCEPT） */
+        if (node->type != NODE_TYPE_ENTITY && node->type != NODE_TYPE_CONCEPT)
+            continue;
+
+        /* 节点置信度需超过阈值 */
+        if (node->confidence < 0.1f) continue;
+
+        /* 首次匹配时设置嵌入维度 */
+        if (embed_dim == 0 && node->embedding_size > 0) {
+            embed_dim = node->embedding_size;
+            aggregated_embedding = (float*)safe_calloc(embed_dim, sizeof(float));
+            if (!aggregated_embedding) return -1;
+        }
+
+        /* 加权聚合（激活度×嵌入向量） */
+        if (node->embedding_size == embed_dim) {
+            for (size_t j = 0; j < embed_dim; j++) {
+                aggregated_embedding[j] += node->confidence * node->embedding[j] * strength;
+            }
+            active_count++;
+        }
+    }
+
+    if (active_count == 0 || !aggregated_embedding) {
+        safe_free((void**)&aggregated_embedding);
+        return -2;
+    }
+
+    /* 使用固定概念名 */
+    const char* concept_name = "knowledge_graph";
+
+    /* 通过 selflnn_consume_knowledge_inference 路由到LNN产生状态扰动 */
+    int result = selflnn_consume_knowledge_inference(
+        lnn,
+        (void*)aggregated_embedding,  /* KIE输入：聚合的知识嵌入 */
+        concept_name,                  /* 查询概念 */
+        3,                            /* max_hops: 3跳推理 */
+        strength                       /* 扰动强度 */
+    );
+
+    safe_free((void**)&aggregated_embedding);
+    return (result >= 0) ? 0 : -1;
 }

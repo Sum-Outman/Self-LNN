@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file exploration_strategies.c
  * @brief 深度探索策略系统完整实现
  *
@@ -54,6 +54,12 @@ static float explore_randn(float std) {
     if (u1 < EXPLORE_EPSILON) u1 = EXPLORE_EPSILON;
     return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2) * std;
 }
+
+/* DEADCODE-FIX: 高级探索策略条件编译
+ * ICM / RND / Go-Explore / NoisyNet / count-based / uncertainty / hybrid
+ * 共26个函数约900行——目前仅UCB的3个函数被robot_agent.c使用，
+ * 其余均未集成。通过宏控制编译，默认启用。 */
+#ifndef SELFLNN_SKIP_ADVANCED_EXPLORATION
 
 /* ============================================================================
  * 通用结构
@@ -1071,6 +1077,8 @@ ExploreState* explore_load(ExploreStrategyType strategy_type, const char* filepa
     return state;
 }
 
+#endif /* SELFLNN_SKIP_ADVANCED_EXPLORATION */
+
 /* ============================================================================
  * D-013: UCB1 (Upper Confidence Bound) 完整实现
  * 公式: a_t = argmax [ Q(a) + c * sqrt(ln(t) / N(a)) ]
@@ -1182,6 +1190,9 @@ int exploration_ucb_is_converged(void* state) {
     if (!s) return 0;
     return s->converged;
 }
+
+/* DEADCODE-FIX: Boltzmann / Thompson 探索策略同样受条件编译控制 */
+#ifndef SELFLNN_SKIP_ADVANCED_EXPLORATION
 
 /* ============================================================================
  * D-013: Boltzmann（Softmax）探索 - 温度退火完整实现
@@ -1525,6 +1536,8 @@ void exploration_thompson_get_posterior(void* state, int action, float* alpha_ou
     if (beta_out) *beta_out = s->beta_param[action];
 }
 
+#endif /* SELFLNN_SKIP_ADVANCED_EXPLORATION */
+
 /* ============================================================================
  * D-013: 探索策略统一管理API
  * ============================================================================ */
@@ -1536,10 +1549,13 @@ typedef enum {
     EXPLORE_ALGO_THOMPSON = 2
 } ExploreAlgoType;
 
-/* 获取UCB收敛状态 */
+/* 获取UCB收敛状态（始终编译——UCB被实际使用） */
 int exploration_ucb_converged(void* state) {
     return exploration_ucb_is_converged(state);
 }
+
+/* DEADCODE-FIX: Boltzmann/Thompson尾部包装函数也受条件编译控制 */
+#ifndef SELFLNN_SKIP_ADVANCED_EXPLORATION
 
 /* Boltzmann温度设置（运行时动态调整） */
 void exploration_boltzmann_set_temperature(void* state, float T) {
@@ -1563,3 +1579,5 @@ int exploration_thompson_is_converged(void* state) {
     if (!s) return 0;
     return s->converged;
 }
+
+#endif /* SELFLNN_SKIP_ADVANCED_EXPLORATION */

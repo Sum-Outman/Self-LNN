@@ -1,4 +1,8 @@
 # 自我学习系统库
+# DEADCODE-FIX: 高级探索策略默认启用。
+# 如需跳过ICM/RND/Go-Explore/NoisyNet/Boltzmann/Thompson等未集成策略的编译，
+# 添加编译定义: -DSELFLNN_SKIP_ADVANCED_EXPLORATION
+# 仅UCB策略保持编译（被robot_agent.c实际使用）。
 add_library(selflnn_learning
     learning.c
     meta_learning.c

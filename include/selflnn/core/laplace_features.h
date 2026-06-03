@@ -1,4 +1,4 @@
-﻿#ifndef SELFLNN_LAPLACE_FEATURES_H
+#ifndef SELFLNN_LAPLACE_FEATURES_H
 #define SELFLNN_LAPLACE_FEATURES_H
 
 #include <stddef.h>
@@ -103,6 +103,23 @@ typedef struct {
 int laplace_lle(const float* data, int num_points, int data_dim, int embedding_dim, int n_neighbors, float reg, float* embedding);
 int laplace_manifold_learn(const float* data, int num_points, int data_dim, int embedding_dim, int method, int n_neighbors, LaplaceManifold* result);
 void laplace_manifold_free(LaplaceManifold* result);
+
+/* ========== S-005: 拉普拉斯特征与LNN训练管道桥接 ========== */
+
+/* S-005修复: 拉普拉斯特征与LNN训练管道桥接函数
+ * 将拉普拉斯特征映射(Laplacian Eigenmap)的降维结果作为
+ * LNN训练的辅助特征,提升训练收敛速度和泛化能力。
+ * 当无训练数据时返回0表示跳过此增强。
+ * @param lnn_instance LNN实例指针（当前版本未使用，预留扩展接口）
+ * @param data 输入数据矩阵 [rows × cols]
+ * @param rows 数据行数（样本数）
+ * @param cols 数据列数（原始特征维度）
+ * @param target_dim 目标降维维度
+ * @param enhanced_features 输出增强特征矩阵 [rows × target_dim]
+ * @return 0=成功(包括跳过), 负值=失败 */
+int laplace_features_train_bridge(void* lnn_instance, const float* data,
+                                   int rows, int cols, int target_dim,
+                                   float* enhanced_features);
 
 #ifdef __cplusplus
 }

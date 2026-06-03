@@ -1,14 +1,47 @@
 {
   "version": "1.5.0",
-  "state_dimension": 256,
-  "multimodal_channels": 9,
-  "memory_capacity": 100000,
-  "max_concurrent_tasks": 8,
+  "state_dimension": 128,
+  "multimodal_channels": 64,
+  "memory_capacity": 10000,
+  "max_concurrent_tasks": 100,
   "power_mode": "balanced",
   "gpu_backend": "auto",
   "http_port": 8080,
-  "websocket_port": 8080,
+  "websocket_port": 8081,
   "distributed_port": 8765,
   "model_path": "",
-  "_comment": "扁平化JSON结构，与config_loader.c的加载/保存格式一致。原嵌套格式的额外配置暂不在此文件加载。"
+  "training": {
+    "epochs": 100,
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "validation_split": 0.1,
+    "early_stopping_patience": 10,
+    "mixed_precision": "auto",
+    "distributed_enabled": false
+  },
+  "safety": {
+    "content_filter_enabled": true,
+    "audit_logging_enabled": true,
+    "emergency_stop_enabled": true,
+    "behavior_constraints_strictness": 1.0,
+    "max_violations_per_hour": 10,
+    "circuit_breaker_threshold": 5,
+    "circuit_breaker_cooldown_sec": 300
+  },
+  "evolution": {
+    "population_size": 100,
+    "mutation_rate": 0.1,
+    "crossover_rate": 0.8,
+    "elite_count": 5,
+    "generations": 50,
+    "island_count": 1,
+    "migration_interval": 10
+  },
+  "laplace": {
+    "freq_bands": 32,
+    "stability_threshold": 0.85,
+    "spectral_efficiency_target": 0.7,
+    "update_interval_sec": 1800
+  },
+  "_comment": "训练/安全/进化/拉普拉斯配置段已补全。所有值已与代码默认值对齐。"
 }

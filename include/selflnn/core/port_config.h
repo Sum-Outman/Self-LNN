@@ -4,6 +4,27 @@
  *
  * 集中管理系统所有服务端口，确保端口统一管理。
  * 所有模块必须引用此文件获取端口配置，禁止各模块独立定义端口号。
+ *
+ * ==================================================================
+ * 端口分配表（所有端口定义见下方宏）
+ * ==================================================================
+ * | 宏名称                       | 端口号 | 用途/使用者                    |
+ * |-----------------------------|--------|-------------------------------|
+ * | SELFLNN_HTTP_PORT           | 8080   | HTTP API服务、前端通信         |
+ * | SELFLNN_WEBSOCKET_PORT      | 8081   | WebSocket实时推送服务          |
+ * | SELFLNN_GAZEBO_PORT         | 11345  | Gazebo仿真器TCP通信            |
+ * | SELFLNN_PYBULLET_PORT       | 6667   | PyBullet仿真器端口             |
+ * | SELFLNN_DISTRIBUTED_PORT    | 8765   | 分布式训练节点间通信            |
+ * | SELFLNN_SIMULATOR_PORT      | 5555   | 内部仿真器监听端口             |
+ * | SELFLNN_SENSOR_STREAM_PORT  | 5556   | 传感器实时数据流推送            |
+ * | SELFLNN_RPC_PORT            | 18760  | 多系统RPC控制/负载均衡共用      |
+ * | SELFLNN_DISCOVERY_PORT      | 18761  | 多系统节点自动发现服务          |
+ * | SELFLNN_ROS_MASTER_PORT     | 11311  | ROS Master服务发现             |
+ * | SELFLNN_ROS_XMLRPC_PORT     | 11312  | ROS节点XML-RPC通信            |
+ * | SELFLNN_ROS_DATA_PORT       | 11313  | ROS TCPROS数据传输            |
+ * | SELFLNN_GAZEBO_ROS_PORT     | 11345  | Gazebo ROS接口（与Gazebo共用） |
+ * | SELFLNN_LOCALHOST           | -      | 默认本机地址 "127.0.0.1"      |
+ * ==================================================================
  */
 
 #ifndef SELFLNN_PORT_CONFIG_H
@@ -18,6 +39,7 @@ extern "C" {
  *
  * 系统所有网络端口集中定义。
  * 修改端口时只需修改此文件，所有模块自动生效。
+ * 端口号与config/system_config.json保持一致。
  *
  * @{
  */
@@ -26,7 +48,7 @@ extern "C" {
  * @brief HTTP API服务端口
  *
  * 后端HTTP API服务器端口，用于前端与SELF-LNN系统通信。
- * 对应README中确定的后端服务端口。
+ * 对应config/system_config.json中http_port字段。
  */
 #define SELFLNN_HTTP_PORT           8080
 
@@ -49,12 +71,11 @@ extern "C" {
 /**
  * @brief WebSocket服务端口
  *
- * WebSocket实时数据推送端口。
- * 用于前端实时接收系统状态更新。
- * 使用HTTP升级（HTTP Upgrade）机制，与HTTP服务共用同一端口8080。
- * 禁止使用独立端口，遵循README确定端口配置原则。
+ * WebSocket实时数据推送端口，用于前端实时接收系统状态更新。
+ * 对应config/system_config.json中websocket_port字段。
+ * 独立端口，不与HTTP端口(8080)共用。
  */
-#define SELFLNN_WEBSOCKET_PORT      8080
+#define SELFLNN_WEBSOCKET_PORT      8081
 
 /**
  * @brief 分布式训练通信端口

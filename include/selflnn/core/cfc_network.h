@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file cfc_network.h
  * @brief CfC（闭合形式连续时间）液态神经网络接口
  * 
@@ -361,6 +361,7 @@ struct CfCNetwork {
     float* activation_buffer;
     float* dropout_mask;
     int is_initialized;
+    int is_trained;               /**< F-002修复: 训练状态标志，0=未训练,1=已训练 */
     float current_avg_activation;
     float current_max_activation;
     float current_gradient_norm;

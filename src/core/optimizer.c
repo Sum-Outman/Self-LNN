@@ -1,4 +1,4 @@
-﻿#include "selflnn/core/optimizer.h"
+#include "selflnn/core/optimizer.h"
 #include "selflnn/utils/memory_utils.h"
 #include <string.h>
 #include <math.h>
@@ -158,23 +158,34 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
     /* R2-P9修复: 逐元素NaN/Inf梯度过滤，替代全步丢弃
      * 原实现发现单个NaN梯度就丢弃整步更新，导致偶发NaN时所有参数停止学习。
      * 修正：将NaN/Inf梯度清零，正常参数继续更新。
- *: gradients改为非const以支持原地过滤 */
+     * S-002修复: 梯度裁剪从max_abs改为标准L2范数裁剪。
+     *   max_abs裁剪对大模型参数（例如1M+参数）会过度裁剪——单个大梯度
+     *   值会触发全量缩放，而L2范数衡量梯度的"整体大小"，更符合标准做法。
+     * gradients改为non-const以支持原地过滤 */
     {
-        float max_abs_g = 0.0f;
+        float grad_l2 = 0.0f;
+        size_t nan_count = 0;
         for (size_t k = 0; k < num_params; k++) {
             float g = gradients[k];
             if (!isfinite(g)) {
                 gradients[k] = 0.0f;
+                nan_count++;
             } else {
-                float abs_g = fabsf(g);
-                if (abs_g > max_abs_g) max_abs_g = abs_g;
+                grad_l2 += g * g;
             }
         }
-        if (max_abs_g > OPTIMIZER_DEFAULT_GRAD_CLIP_NORM) {
-            float clip_ratio = OPTIMIZER_DEFAULT_GRAD_CLIP_NORM / max_abs_g;
+        if (nan_count > 0) {
+            log_warning("[梯度裁剪] 过滤了%zu个NaN/Inf梯度值(占总数%.2f%%)",
+                       nan_count, (float)nan_count * 100.0f / (float)num_params);
+        }
+        float grad_norm = sqrtf(grad_l2);
+        if (grad_norm > OPTIMIZER_DEFAULT_GRAD_CLIP_NORM) {
+            float clip_ratio = OPTIMIZER_DEFAULT_GRAD_CLIP_NORM / grad_norm;
             for (size_t k = 0; k < num_params; k++) {
                 gradients[k] *= clip_ratio;
             }
+            log_debug("[梯度裁剪] L2范数=%.2f > 阈值=%.2f, 裁剪比=%.4f",
+                     grad_norm, OPTIMIZER_DEFAULT_GRAD_CLIP_NORM, clip_ratio);
         }
     }
     

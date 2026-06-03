@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN 主头文件
  * 
  * 包含所有SELF-LNN模块的公共API接口。
@@ -149,6 +149,8 @@
 
 // 应用能力
 #include "selflnn/programming/self_programming.h"
+#include "selflnn/programming/programming_enhanced.h"  /* M-027修复 */
+#include "selflnn/programming/c_interpreter.h"         /* M-027修复 */
 #include "selflnn/product_design/product_design.h"
 #include "selflnn/product_design/product_design_enhanced.h"
 #include "selflnn/multisystem/multisystem_control.h"
@@ -157,6 +159,7 @@
 #include "selflnn/robot/dynamics.h"
 #include "selflnn/robot/swarm_coordination.h"
 #include "selflnn/robot/physics_engine.h"
+#include "selflnn/robot/robot.h"
 
 // 基础设施
 #include "selflnn/gpu/gpu.h"
@@ -233,6 +236,7 @@ typedef struct {
     int http_port;
     int websocket_port;
     int distributed_port;
+    int mixed_precision_mode;  /* M-035: 混合精度模式 (0=关闭, 1=auto, 2=FP16, 3=BF16) */
 } SystemConfig;
 
 typedef struct {
@@ -352,6 +356,7 @@ SELFLNN_API void* selflnn_get_metacognition(void); /* 元认知系统 */
 SELFLNN_API void* selflnn_get_knowledge_graph(void); /* 知识图谱 */
 SELFLNN_API void* selflnn_get_gpu_context(void); /* GPU上下文 */
 SELFLNN_API void* selflnn_get_dialogue_processor(void);
+SELFLNN_API void* selflnn_get_dialogue_memory(void);    /* 对话记忆管理器（F-007修复） */
 SELFLNN_API void* selflnn_get_planning_system(void);
 
 /* ---- 4b. 学习与演化模块 ---- */
@@ -362,6 +367,7 @@ SELFLNN_API void* selflnn_get_auto_learning(void);
 
 /* ---- 4c. 推理与知识模块 ---- */
 SELFLNN_API void* selflnn_get_reasoning_engine(void);
+SELFLNN_API void* selflnn_get_causal_reasoning_engine(void); /* M-022: 因果推理→规划桥接 */
 SELFLNN_API void* selflnn_get_memory_manager(void);
 SELFLNN_API void* selflnn_get_knowledge_base(void);
 SELFLNN_API void* selflnn_get_knowledge_inference(void);
@@ -385,6 +391,8 @@ SELFLNN_API void* selflnn_get_computer_operation(void); /* 计算机操作 */
 SELFLNN_API void* selflnn_get_audit_logger(void); /* 审计日志 */
 SELFLNN_API void* selflnn_get_content_filter(void); /* 内容过滤 */
 SELFLNN_API void* selflnn_get_load_balancer(void); /* 负载均衡 */
+SELFLNN_API void* selflnn_get_rw_lock_map(void); /* 读写锁映射(F-009) */
+SELFLNN_API void* selflnn_get_pbft_system(void); /* PBFT共识(F-006) */
 SELFLNN_API void* selflnn_get_training_pipeline(void); /* 训练管线 */
 SELFLNN_API void  selflnn_set_training_pipeline(void* pipeline); /* 训练管线注册 */
 SELFLNN_API size_t selflnn_get_config_state_dimension(void); /* 获取状态维度 */

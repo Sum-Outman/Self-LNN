@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file pybullet_bridge.c
  * @brief SELF-LNN 与 PyBullet 的桥接实现
  *
@@ -280,6 +280,25 @@ int pybullet_load_urdf(int connection_id, const char* urdf_path,
         base_orientation[2], base_orientation[3],
         use_fixed_base);
     fflush(conn->process_stdin);
+
+    /* F-010修复: 从Python子进程响应中解析robot_id。
+     * 原代码直接返回conn->robot_id(始终为0)，导致所有URDF加载
+     * 操作返回错误的机器人ID。现在读取JSON响应{"robot_id":N}
+     * 并回填到conn中。 */
+    {
+        char resp_buf[128];
+        if (conn->process_stdout && fgets(resp_buf, (int)sizeof(resp_buf), conn->process_stdout)) {
+            int parsed_id = -1;
+            int num_joints = 0;
+            /* 尝试解析 {"robot_id":N, "num_joints":M} 格式 */
+            if (sscanf(resp_buf, "{\"robot_id\":%d,\"num_joints\":%d}", &parsed_id, &num_joints) >= 1) {
+                conn->robot_id = parsed_id;
+                if (num_joints > 0) conn->num_joints = num_joints;
+            } else if (sscanf(resp_buf, "{\"id\":%d}", &parsed_id) >= 1) {
+                conn->robot_id = parsed_id;
+            }
+        }
+    }
     
     return conn->robot_id;
 }

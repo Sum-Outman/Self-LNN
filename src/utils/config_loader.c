@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file config_loader.c
  * @brief K-030: 系统配置文件加载与保存 (纯C, 零依赖)
  */
@@ -134,6 +134,33 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     v = json_get(root, "distributed_port");
     if (v && v->type == JSON_NUMBER) config->distributed_port = (int)v->data.number_val;
     if (config->distributed_port <= 0 || config->distributed_port > 65535) config->distributed_port = 8765;
+
+    /* M-035修复: 从嵌套 training 节点读取混合精度配置
+     * system_config.json: training.mixed_precision = "auto"/"fp16"/"bf16"/"off"
+     * 映射到 SystemConfig.mixed_precision_mode: 0=关闭, 1=auto, 2=FP16, 3=BF16 */
+    {
+        const JsonValue* training_v = json_get(root, "training");
+        if (training_v && training_v->type == JSON_OBJECT) {
+            const char* mp_str = json_get_string(training_v, "mixed_precision");
+            if (mp_str) {
+                if (strcmp(mp_str, "auto") == 0)
+                    config->mixed_precision_mode = 1;
+                else if (strcmp(mp_str, "fp16") == 0 || strcmp(mp_str, "FP16") == 0)
+                    config->mixed_precision_mode = 2;
+                else if (strcmp(mp_str, "bf16") == 0 || strcmp(mp_str, "BF16") == 0)
+                    config->mixed_precision_mode = 3;
+                else if (strcmp(mp_str, "off") == 0 || strcmp(mp_str, "false") == 0)
+                    config->mixed_precision_mode = 0;
+                else
+                    config->mixed_precision_mode = 1; /* 未知值默认auto */
+                log_info("[M-035] JSON配置混合精度: %s → 模式=%d", mp_str, config->mixed_precision_mode);
+            } else {
+                config->mixed_precision_mode = 0;
+            }
+        } else {
+            config->mixed_precision_mode = 0;
+        }
+    }
 
     json_free(root);
     safe_free((void**)&json_str);

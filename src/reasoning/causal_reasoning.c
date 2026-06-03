@@ -5022,3 +5022,89 @@ float causal_reasoning_estimate_rdd(CausalReasoningEngine* engine,
     safe_free((void**)&treatment);
     return tau_Fuzzy;
 }
+
+/* ================================================================
+ * M-022修复: 因果推理→规划系统桥接
+ * 将因果图中关键因果边作为规划约束传递给规划系统，
+ * 使规划器在生成计划时考虑已知的因果关系。
+ * ================================================================ */
+
+/**
+ * @brief 因果推理→规划桥接约束结构
+ */
+typedef struct {
+    int source_node_id;      /**< 原因节点ID */
+    int target_node_id;      /**< 结果节点ID */
+    float causal_strength;   /**< 因果强度（归一化） */
+    float constraint_weight; /**< 规划约束权重 */
+    char constraint_name[64]; /**< 约束名称（含节点名） */
+} CausalPlanningConstraint;
+
+/**
+ * @brief M-022: 因果推理→规划系统桥接函数
+ *
+ * 从因果推理引擎的因果图中提取前N个最显著的因果边，
+ * 作为规划约束传递给规划系统。
+ *
+ * @param engine 因果推理引擎（因果图必须已构建）
+ * @param constraints 输出的规划约束结构数组
+ * @param max_constraints 最大约束数量（建议8-16）
+ * @return int 成功返回提取的约束数量，失败返回-1
+ */
+int causal_to_planning_bridge(CausalReasoningEngine* engine,
+                              CausalPlanningConstraint* constraints,
+                              size_t max_constraints) {
+    if (!engine || !constraints || max_constraints == 0) return -1;
+    if (!engine->is_graph_built) return -1;
+
+    size_t constraint_count = 0;
+    size_t num_vars = engine->graph.num_variables;
+
+    /* 遍历因果图的邻接矩阵，收集所有有效因果边 */
+    for (size_t i = 0; i < num_vars && constraint_count < max_constraints; i++) {
+        for (size_t j = 0; j < num_vars && constraint_count < max_constraints; j++) {
+            if (i == j) continue;
+
+            /* 读取因果边(i→j)的邻接强度 */
+            float strength = 0.0f;
+            if (engine->graph.adjacency_matrix &&
+                engine->graph.adjacency_matrix[i] &&
+                engine->graph.adjacency_matrix[i][j] > 0.01f) {
+                strength = engine->graph.adjacency_matrix[i][j];
+            }
+
+            /* 读取偏相关矩阵作为补充信息 */
+            float partial_corr = 0.0f;
+            if (engine->graph.partial_correlation &&
+                engine->graph.partial_correlation[i] &&
+                engine->graph.partial_correlation[i][j] > 0.0f) {
+                partial_corr = engine->graph.partial_correlation[i][j];
+            }
+
+            /* 综合因果强度 = 邻接强度 * 0.7 + 偏相关 * 0.3 */
+            float causal_strength = strength * 0.7f + partial_corr * 0.3f;
+            if (causal_strength < 0.05f) continue;
+
+            /* 填充约束结构 */
+            CausalPlanningConstraint* c = &constraints[constraint_count];
+            c->source_node_id = (int)i;
+            c->target_node_id = (int)j;
+            c->causal_strength = causal_strength;
+            /* 约束权重与因果强度成正比，但限制在[0.1, 1.0]范围内 */
+            c->constraint_weight = (causal_strength > 1.0f) ? 1.0f :
+                                   (causal_strength < 0.1f) ? 0.1f : causal_strength;
+
+            /* 生成约束名称 */
+            const char* src_name = (engine->graph.variable_names && engine->graph.variable_names[i])
+                ? engine->graph.variable_names[i] : "?";
+            const char* tgt_name = (engine->graph.variable_names && engine->graph.variable_names[j])
+                ? engine->graph.variable_names[j] : "?";
+            snprintf(c->constraint_name, sizeof(c->constraint_name),
+                     "因果约束: %s→%s (s=%.2f)", src_name, tgt_name, causal_strength);
+
+            constraint_count++;
+        }
+    }
+
+    return (int)constraint_count;
+}

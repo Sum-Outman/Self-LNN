@@ -228,7 +228,7 @@ static void ascend_cl_unload(void) {
 static int ascend_load_library(void) {
     if (g_ascend_cl.loaded) return 1;
 
-    if (!ascend_detect_hardware) {
+    if (!ascend_detect_hardware()) {
         LOG_INFO("昇腾(Ascend)硬件未检测到");
         return 0;
     }
@@ -286,7 +286,7 @@ static int ascend_load_library(void) {
     if (!g_ascend_cl.aclInit || !g_ascend_cl.aclrtSetDevice ||
         !g_ascend_cl.aclrtGetDeviceCount) {
         LOG_WARN("昇腾AscendCL库缺少核心符号，卸载");
-        ascend_cl_unload;
+        ascend_cl_unload();
         return 0;
     }
     g_ascend_cl.loaded = 1;
@@ -346,7 +346,7 @@ static int ascend_backend_init(void) {
 
     memset(&g_ascend_state, 0, sizeof(g_ascend_state));
 
-    if (ascend_load_library && g_ascend_cl.aclInit) {
+    if (ascend_load_library() && g_ascend_cl.aclInit) {
         int ret = g_ascend_cl.aclInit(NULL);
         if (ret == 0) {
             uint32_t count = 0;
@@ -378,9 +378,9 @@ static int ascend_backend_init(void) {
                 LOG_INFO("昇腾NPU后端初始化成功: %d设备", g_ascend_state.device_count);
                 return 0;
             }
-            g_ascend_cl.aclFinalize;
+            g_ascend_cl.aclFinalize();
         }
-        ascend_cl_unload;
+        ascend_cl_unload();
     }
 
     g_ascend_state.ascendcl_available = 0;
@@ -1039,12 +1039,12 @@ typedef struct {
 
 static int ascend_npu_init(GpuContext* context) {
     (void)context;
-    return ascend_backend_init;
+    return ascend_backend_init();
 }
 
 static void ascend_npu_cleanup(GpuContext* context) {
     (void)context;
-    ascend_backend_cleanup;
+    ascend_backend_cleanup();
 }
 
 static int ascend_npu_get_device_count(GpuContext* context) {

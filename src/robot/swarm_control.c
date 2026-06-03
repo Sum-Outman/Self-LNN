@@ -1,9 +1,14 @@
-﻿/**
+/**
  * @file swarm_control.c
  * @brief 多机器人集群控制实现
  *
  * 实现蜂拥算法、编队控制、一致性协议和任务分配。
  * 纯C实现，浮点运算，无第三方库依赖。
+ * 
+ * ORPHAN修复: swarm_control为独立模块，通过robot API间接调用。
+ * RobotConfig中没有num_robots字段，因此不在robot_init中自动创建SwarmController实例。
+ * 使用者需在系统配置启用多机器人模式时，手动调用swarm_controller_create()创建集群控制器，
+ * 并通过robot_sync_control()等robot API将多机器人实例交由集群协同管理。
  */
 
 #include "selflnn/robot/swarm_control.h"

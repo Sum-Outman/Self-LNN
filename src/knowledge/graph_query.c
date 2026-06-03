@@ -218,6 +218,13 @@ QueryResultSet* query_result_set_join(const QueryResultSet* rs1,
     QueryResultSet* result = query_result_set_create(nc, names);
     if (!result) return NULL;
 
+    /* PERFORMANCE-HOTSPOT: O(R1×R2) 笛卡尔积JOIN
+     * 当前实现对rs1和rs2进行双重嵌套循环，复杂度为 O(|R1|×|R2|×V)
+     * (V=共享变量数)。当两个结果集较大时性能急剧下降。
+     * 建议优化为哈希JOIN（O(R1+R2)）：
+     *   1. 以共享变量为键，将较小的结果集构建为哈希表
+     *   2. 遍历较大结果集，在哈希表中查找匹配行
+     *   3. 时间复杂度 O(R1+R2)，空间复杂度 O(min(R1,R2)) */
     for (size_t i = 0; i < rs1->row_count; i++) {
         for (size_t j = 0; j < rs2->row_count; j++) {
             int compatible = 1;

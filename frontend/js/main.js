@@ -5808,6 +5808,19 @@ async function sendDialogueMessage() {
     const message = input.value.trim();
     if (!message) return;
 
+    /* S-021修复: 以"/"开头的指令先路由到文本命令处理器，
+     * 不经过对话通道，避免前端短路与后端对话API误调用 */
+    if (message.startsWith('/') && g_textCommandSystem) {
+        var cmdResult = g_textCommandSystem.processText(message);
+        if (cmdResult && cmdResult.isCommand) {
+            addDialogueMessage('system', '[指令已执行] ' + message);
+            input.value = '';
+            input.disabled = false;
+            input.focus();
+            return;
+        }
+    }
+
     const messagesContainer = document.getElementById('dialogue-messages');
 /* messagesContainer为null时安全退出 */
     if (!messagesContainer) return;
@@ -5842,15 +5855,34 @@ async function sendDialogueMessage() {
     if (sendMicCheckbox && sendMicCheckbox.checked && g_deviceManager) {
         var mic = g_deviceManager.microphones.find(function(m) { return m.active; });
         if (mic && mic.active) {
-/* g_voiceCaptureUtil→window.VoiceCaptureUtil，消除未定义变量 */
-            /* 使用VoiceCaptureUtil实时采集音频并设置lastAudioBlob */
+/* S-022修复: quickCapture返回{capturer,stream}对象，非音频数据。
+             * 原代码将VoiceCaptureUtil对象引用误存为lastAudioBlob，
+             * multimodalAudio仅设为标记字符串'mic_audio'，未传递真实base64数据。
+             * 现改为直接使用MediaRecorder采集500ms音频片段并转base64。 */
             try {
-                var captureResult = await window.VoiceCaptureUtil.quickCapture();
-/* quickCapture返回{success,capturer,stream}对象，提取capturer */
-                if (captureResult && captureResult.success && captureResult.capturer) {
-                    mic.lastAudioBlob = captureResult.capturer;
-                    multimodalAudio = 'mic_audio';
-                }
+                var micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                var audioChunks = [];
+                var mediaRecorder = new MediaRecorder(micStream);
+                mediaRecorder.ondataavailable = function(e) {
+                    if (e.data.size > 0) audioChunks.push(e.data);
+                };
+                var audioBlob = await new Promise(function(resolve) {
+                    mediaRecorder.onstop = function() {
+                        micStream.getTracks().forEach(function(t) { t.stop(); });
+                        resolve(new Blob(audioChunks, { type: 'audio/webm' }));
+                    };
+                    mediaRecorder.start();
+                    setTimeout(function() {
+                        if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+                    }, 500);
+                });
+                var reader = new FileReader();
+                multimodalAudio = await new Promise(function(resolve, reject) {
+                    reader.onload = function() { resolve(reader.result); };
+                    reader.onerror = function() { reject(new Error('base64转换失败')); };
+                    reader.readAsDataURL(audioBlob);
+                });
+                mic.lastAudioBlob = multimodalAudio;
             } catch(e) {
                 console.warn('音频采集失败:', e);
             }

@@ -34,7 +34,8 @@ extern float rng_uniform(float min, float max);
 
 /** @brief 默认词汇表大小（含空白token）
  *  中文语音识别需要更大词汇表：常用汉字~3500 + 词汇~20000 + 标点/英文
- *  扩大至50000以确保中文语音识别的基本覆盖 */
+ *  扩大至50000以确保中文语音识别的基本覆盖
+ *  L-005: 50000适用于中等规模词汇表(日常对话/指令控制), 大型应用(多领域/专业术语)建议100000+ */
 #define SR_DEFAULT_VOCAB_SIZE 50000
 
 /** @brief 空白token ID */
@@ -1775,6 +1776,8 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
     }
     memset(result, 0, sizeof(SpeechRecognitionResult));
 
+    int is_untrained_mode = 0; /* S-008修复: 未训练模式标志 */
+
 /* 检查模型是否已训练
      * ZS-031增强: 双重防护 —— 不仅检查识别器自身训练状态,
      * 还验证shared_lnn是否已完成训练 (权重方差>阈值)。
@@ -1797,14 +1800,13 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
             }
         }
         if (!recognizer->is_model_trained && !lnn_trained) {
-            /* P1-009修复: 未训练状态下明确拒绝推理，不使用确定性回退
-             * 确定性回退（共振峰+MFCC匹配）精度有限且无法处理复杂语音
-             * 必须完成训练后才能使用语音识别功能 */
-            fprintf(stderr, "[语音识别错误] 语音识别模块未训练，拒绝推理！请先训练模型后重试。\n");
-            snprintf(result->text, sizeof(result->text), "[语音识别模块未训练，请先完成训练后重试]");
-            result->text[sizeof(result->text) - 1] = '\0';
-            result->confidence = 0.0f;
-            return -3;
+            /* S-008修复: 未训练时允许LNN推理路径运行（使用当前随机投影权重）
+             * 液态状态演化的时序建模能力即使未训练也能捕获部分语音结构。
+             * 降低置信度并添加"[未训练模式]"标记以警示用户。 */
+            fprintf(stderr, "[语音识别警告] 语音识别模块未训练，将以未训练模式运行。"
+                    "建议先训练模型以获得最佳识别精度。\n");
+            is_untrained_mode = 1;
+            /* 继续执行推理，但标记为未训练模式 */
         }
     } /* ZS-031: 结束LNN训练状态验证作用域 */
 
@@ -1926,7 +1928,8 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
         use_beam = 1;
     } else {
         /* 波束搜索失败，回退到贪心解码——贪心解码为确定性算法无需动态内存 */
-        log_debug("[语音识别] 波束搜索失败(可能内存不足)，回退到贪心解码");
+        /* M-018修复: 贪心解码置信度折减0.85(波束搜索精度更高) */
+        log_warning("[语音识别] 波束搜索失败,回退贪心解码(置信度折扣=0.85)");
         greedy_decode(all_logits, num_timesteps, vocab_size,
                       recognizer->decoded_tokens, &out_len,
                       recognizer->decoded_token_capacity);
@@ -2001,6 +2004,11 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
         }
 
         result->confidence = (out_len > 0) ? _compute_avg_confidence(result->token_confidences, out_len) : 0.0f;
+        /* M-018修复: 贪心回退时应用0.85置信度折扣 */
+        if (!use_beam && result->confidence > 0.0f) {
+            result->confidence *= 0.85f;
+            if (result->confidence < 0.05f) result->confidence = 0.05f;
+        }
     } else {
         result->text = (char*)safe_malloc(2 * sizeof(char));
         if (result->text) {
@@ -2009,6 +2017,24 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
         result->num_tokens = 0;
         result->num_characters = 0;
         result->confidence = 0.0f;
+    }
+
+    /* S-008修复: 未训练模式下追加标记并降低置信度 */
+    if (is_untrained_mode) {
+        result->confidence *= 0.4f; /* 未训练置信度折减 */
+        if (result->confidence < 0.05f) result->confidence = 0.05f;
+        /* 在识别文本前追加"[未训练模式]"标记 */
+        if (result->text) {
+            size_t orig_len = strlen(result->text);
+            if (orig_len > 0) {
+                char* new_text = (char*)safe_malloc(orig_len + 32);
+                if (new_text) {
+                    snprintf(new_text, orig_len + 32, "[未训练模式]%s", result->text);
+                    safe_free((void**)&result->text);
+                    result->text = new_text;
+                }
+            }
+        }
     }
 
     result->processing_time_ms = (float)(clock() - start_time) * 1000.0f / (float)CLOCKS_PER_SEC;

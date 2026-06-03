@@ -1,4 +1,4 @@
-﻿#include "selflnn/multimodal/sensor.h"
+#include "selflnn/multimodal/sensor.h"
 #include "selflnn/multimodal/sensor_preprocessor_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -24,6 +24,12 @@ static MutexHandle deep_preprocessor_get_mutex(void) {
 }
 
 /* ============ 传感器处理器基础实现 ============ */
+
+/* L-002: 传感器校准补偿通道数 — 默认3通道(三轴加速度/三轴陀螺仪通用)
+ * 多通道传感器(如9轴IMU)应增大此值并通过编译宏 SENSOR_MAX_CAL_CHANNELS 覆盖 */
+#ifndef SENSOR_MAX_CAL_CHANNELS
+#define SENSOR_MAX_CAL_CHANNELS 3
+#endif
 
 /* B-016: 环形缓冲区四种状态检测宏 */
 #define RINGBUF_EMPTY(p)    ((p)->buffer_count == 0)
@@ -204,7 +210,7 @@ int sensor_process_data(SensorProcessor* processor,
         } else processor->outlier_consecutive_count = 0;
 
         /* 校准补偿 */
-        int cal_idx = (int)(i % 3);
+        int cal_idx = (int)(i % SENSOR_MAX_CAL_CHANNELS);  /* L-002: 使用可配置通道数替代硬编码3 */
         v = (v - processor->calibration_offset[cal_idx]) * processor->calibration_scale[cal_idx];
 
         /* B-016: EMA去噪 — 使用线程安全的环形缓冲区peek获取前值 */
@@ -320,9 +326,9 @@ int sensor_extract_stat_features(SensorProcessor* processor,
  * @param output_dim 输出缓冲区大小
  * @return 0成功，-1失败
  */
-int sensor_deep_process(const float* raw_data, size_t num_values,
-                        const float* gyro, const float* acc,
-                        float dt, float* output, size_t output_dim) {
+static int sensor_deep_process(const float* raw_data, size_t num_values,
+                              const float* gyro, const float* acc,
+                              float dt, float* output, size_t output_dim) {
     if (!raw_data || !output || num_values == 0 || output_dim == 0) return -1;
 
     static SensorDeepPreprocessor* sdp = NULL;
@@ -368,9 +374,9 @@ int sensor_deep_process(const float* raw_data, size_t num_values,
  * @param quality_scores 输出质量评分 [4]
  * @return 0成功，-1失败
  */
-int sensor_deep_quality(const float** modality_data,
-                        const size_t* modality_dims,
-                        float* quality_scores) {
+static int sensor_deep_quality(const float** modality_data,
+                              const size_t* modality_dims,
+                              float* quality_scores) {
     static SensorDeepPreprocessor* q_sdp = NULL;
     static int q_initialized = 0;
 
@@ -904,12 +910,12 @@ void ukf_free(UKFFilter* ukf) {
  *   等价于 Y = B * U, 其中 Y_i = (x_{k+1} - x_k - f(x_k)*dt)[i]
  * 最小二乘解: B = Y * U^T * (U*U^T)^{-1}
  */
-int ukf_identify_B_matrix(UKFFilter* ukf,
-                          const float** state_pairs,    /* [N][2*n] 状态对 (x_k, x_{k+1}) */
-                          const float** control_inputs, /* [N][m] 控制输入 */
-                          const float* dt_values,       /* [N] 时间步长 */
-                          int num_pairs,
-                          int control_dim) {
+static int ukf_identify_B_matrix(UKFFilter* ukf,
+                                const float** state_pairs,    /* [N][2*n] 状态对 (x_k, x_{k+1}) */
+                                const float** control_inputs, /* [N][m] 控制输入 */
+                                const float* dt_values,       /* [N] 时间步长 */
+                                int num_pairs,
+                                int control_dim) {
     if (!ukf || !state_pairs || !control_inputs || !dt_values) return -1;
     if (num_pairs < 2 || control_dim <= 0) return -1;
 
@@ -1473,8 +1479,8 @@ void info_filter_reset(InfoFilter* inf, const float* init_state, const float* in
  * 气体/味觉传感器处理
  * ================================================================ */
 
-int sensor_process_gas(const float* raw_readings, size_t num_channels,
-                        float* features, size_t max_features) {
+static int sensor_process_gas(const float* raw_readings, size_t num_channels,
+                              float* features, size_t max_features) {
     if (!raw_readings || !features || num_channels == 0 || max_features == 0) return -1;
 
     size_t idx = 0;
@@ -1512,9 +1518,9 @@ int sensor_process_gas(const float* raw_readings, size_t num_channels,
     return (int)idx;
 }
 
-int sensor_process_taste(float ph_value, float conductivity_us_cm,
-                          float* ion_conc, size_t num_ions,
-                          float* features, size_t max_features) {
+static int sensor_process_taste(float ph_value, float conductivity_us_cm,
+                                float* ion_conc, size_t num_ions,
+                                float* features, size_t max_features) {
     if (!features || max_features == 0) return -1;
 
     size_t idx = 0;
@@ -1538,9 +1544,9 @@ int sensor_process_taste(float ph_value, float conductivity_us_cm,
  * 3D形状特征提取（从点云或深度图）
  * ================================================================ */
 
-int sensor_extract_3d_shape_features(const float* point_cloud, size_t num_points,
-                                      int has_normals,
-                                      float* shape_features, size_t max_features) {
+static int sensor_extract_3d_shape_features(const float* point_cloud, size_t num_points,
+                                            int has_normals,
+                                            float* shape_features, size_t max_features) {
     if (!point_cloud || !shape_features || num_points < 3 || max_features == 0) return -1;
 
     size_t idx = 0;

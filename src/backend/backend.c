@@ -476,6 +476,7 @@ static const struct {
     {"/api/command/prefixes", "GET", "获取AGI命令前缀列表", "system"},
     {"/api/cognition/health", "GET", "认知系统健康检查", "agi"},
     {"/api/cognition/tom", "GET", "获取心智理论(ToM)数据", "agi"},
+    {"/api/cognition/status", "GET", "获取AGI认知状态", "agi"},
     {"/api/task/queue", "GET", "获取AGI任务队列状态", "agi"},
     {"/api/task/assign", "POST", "提交AGI任务分配", "agi"},
     {"/api/system/shutdown", "POST", "关闭AGI系统", "system"},
@@ -1320,6 +1321,7 @@ static int request_type_to_cb_subsystem(ApiRequestType type) {
         case API_POST_MULTIMODAL_CONFIG:
         case API_POST_MULTIMODAL_PROCESS:
         case API_POST_MULTIMODAL_RESET:
+        case API_POST_MULTIMODAL_CONFIG_RESET:
         case API_POST_MULTIMODAL_STOP:
         case API_POST_TEACH_LOOK_AND_LEARN:
         case API_POST_TEACH_SAY_AND_ASSOCIATE:
@@ -2649,6 +2651,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/cognition/state") == 0)           return API_GET_AGI_COGNITION_STATE;
     if (strcmp(p, "/api/cognition/health") == 0)          return API_GET_AGI_COGNITION_STATE;
     if (strcmp(p, "/api/cognition/tom") == 0)             return API_GET_COGNITION_TOM;
+    if (strcmp(p, "/api/cognition/status") == 0)         return API_GET_AGI_COGNITION_STATE;
 
     /* === 教学系统 === */
     if (strcmp(p, "/api/teach/look_and_learn") == 0)      return API_POST_TEACH_LOOK_AND_LEARN;
@@ -3799,6 +3802,8 @@ static void* server_thread_func(void* param) {
                     request_type = API_POST_MULTIMODAL_PROCESS;
                 } else if (strcmp(path, "/api/multimodal/reset") == 0) {
                     request_type = API_POST_MULTIMODAL_RESET;
+                } else if (strcmp(path, "/api/multimodal/config/reset") == 0) {
+                    request_type = API_POST_MULTIMODAL_CONFIG_RESET;
                 } else if (strcmp(path, "/api/multimodal/stop") == 0) {
                     request_type = API_POST_MULTIMODAL_STOP;
                 } else if (strcmp(path, "/api/robot/config/reset") == 0) {
@@ -4025,6 +4030,8 @@ static void* server_thread_func(void* param) {
                     request_type = API_GET_AGI_COGNITION_STATE;
                 } else if (strcmp(path, "/api/cognition/tom") == 0) {
                     request_type = API_GET_COGNITION_TOM;
+                } else if (strcmp(path, "/api/cognition/status") == 0) {
+                    request_type = API_GET_AGI_COGNITION_STATE;
                 } else if (strcmp(path, "/api/task/create") == 0) {
 /* task/create → POST_TASK_CREATE */
                     request_type = API_POST_TASK_CREATE;

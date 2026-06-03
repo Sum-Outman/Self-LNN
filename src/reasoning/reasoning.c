@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file reasoning.c
  * @brief 推理引擎实现
  * 
@@ -5562,6 +5562,12 @@ int reasoning_engine_set_bayesian_network(ReasoningEngine* engine, BayesianNetwo
 BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* engine) {
     if (!engine) return NULL;
     return engine->bayesian_network;
+}
+
+/* M-022修复: 获取因果推理引擎用于规划桥接 */
+void* reasoning_engine_get_causal_engine(ReasoningEngine* engine) {
+    if (!engine) return NULL;
+    return (void*)engine->causal_engine;
 }
 
 /* P1-001修复: 已删除重复stub，完整实现在上方 */

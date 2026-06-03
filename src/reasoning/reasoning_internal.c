@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file reasoning_internal.c
  * @brief MSVC兼容的推理引擎真实实现（原名reasoning_internal.c）
  * 
@@ -1073,6 +1073,12 @@ void bayesian_network_free(BayesianNetwork* bn) {
     if (bn->nodes) free(bn->nodes);
     if (bn->edges) free(bn->edges);
     free(bn);
+}
+
+/* M-022修复: 获取因果推理引擎用于规划桥接（MSVC编译路径） */
+void* reasoning_engine_get_causal_engine(ReasoningEngine* engine) {
+    if (!engine) return NULL;
+    return (void*)engine->causal_engine;
 }
 
 #endif /* _MSC_VER —— MSVC平台推理引擎实现结束 */

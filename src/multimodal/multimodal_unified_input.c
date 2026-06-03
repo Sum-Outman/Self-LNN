@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file multimodal_unified_input.c
  * @brief 多模态统一输入实现
  *
@@ -164,7 +164,9 @@ static int unified_input_dynamic_process(
     }
 
     if (!state->projections_initialized) {
-        /* Xavier初始化每个模态的投影矩阵和偏置 */
+        /* S-009修复: 投影矩阵初始化，支持两种模式
+         * proj_mode=0: 随机Xavier初始化（训练模式，需要随机性探索）
+         * proj_mode=1: 对角初始化（未训练safe模式，确保基本信号通过） */
         for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
             if (!state->projection_matrices[m]) {
                 size_t mod_size = SELFLNN_MAX_CONTROL_DIM;
@@ -174,14 +176,32 @@ static int unified_input_dynamic_process(
                 state->projection_weight_v[m] = (float*)safe_calloc(total_elems, sizeof(float));
                 state->projection_bias_v[m] = (float*)safe_calloc(SELFLNN_UNIFIED_PROJECTION_DIM, sizeof(float));
                 if (state->projection_matrices[m]) {
-                    float xavier_std = sqrtf(2.0f / (float)(SELFLNN_UNIFIED_PROJECTION_DIM + mod_size));
-                    for (size_t i = 0; i < total_elems; i++) {
-                        float u1 = secure_random_float();
-                        float u2 = secure_random_float();
-                        if (u1 < 1e-8f) u1 = 1e-8f;
-                        state->projection_matrices[m][i] = xavier_std * 
-                            sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+                    if (state->proj_mode == 0) {
+                        /* 模式0: 随机Xavier初始化（训练模式） */
+                        float xavier_std = sqrtf(2.0f / (float)(SELFLNN_UNIFIED_PROJECTION_DIM + mod_size));
+                        for (size_t i = 0; i < total_elems; i++) {
+                            float u1 = secure_random_float();
+                            float u2 = secure_random_float();
+                            if (u1 < 1e-8f) u1 = 1e-8f;
+                            state->projection_matrices[m][i] = xavier_std * 
+                                sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+                        }
+                    } else {
+                        /* 模式1: 对角初始化（未训练safe模式）
+                         * 将W_i设为缩放的对角初始化(scale=0.1)，b_i设为零
+                         * 确保未训练状态下基本信号通过，避免全随机噪声输出
+                         * 映射规则: W[j][k] = 0.1 if k == j%input_dim else 0 */
+                        float diag_scale = 0.1f;
+                        for (size_t j = 0; j < SELFLNN_UNIFIED_PROJECTION_DIM; j++) {
+                            size_t mapped_k = (size_t)(j % (unsigned int)mod_size);
+                            /* 仅对角元素设非零值，保证输入信号的每个维度都有通道映射 */
+                            state->projection_matrices[m][j * mod_size + mapped_k] = diag_scale;
+                        }
                     }
+                }
+                /* S-009: 偏置在两种模式下均初始化为零 */
+                if (state->projection_biases[m]) {
+                    memset(state->projection_biases[m], 0, SELFLNN_UNIFIED_PROJECTION_DIM * sizeof(float));
                 }
                 state->projection_input_sizes[m] = mod_size;
             }
@@ -402,6 +422,8 @@ int multimodal_unified_input_init(UnifiedInputState* state, const UnifiedInputCo
     state->historical_process_quality = 0.5f;
 
     state->projections_initialized = 0;
+    /* S-009修复: 默认使用对角初始化（未训练safe模式），避免首次使用时随机投影产生噪声输出 */
+    state->proj_mode = 1;
 
     /* 动量优化器初始化 */
     state->projection_momentum = 0.9f;
@@ -723,6 +745,22 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
     if (!state || !target_output || target_size == 0) return -1;
     if (state->last_active_count <= 0) return -1;
     if (!state->projections_initialized) return -1;
+
+    /* S-009修复: 训练步骤被调用时自动切换到Xavier模式
+     * 如果proj_mode=1（对角safe模式），需要释放旧的对角矩阵，
+     * 重新用Xavier初始化投影矩阵以支持训练所需的随机探索 */
+    if (state->proj_mode == 1) {
+        for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+            if (state->projection_matrices[m]) {
+                safe_free((void**)&state->projection_matrices[m]);
+                safe_free((void**)&state->projection_biases[m]);
+                safe_free((void**)&state->projection_weight_v[m]);
+                safe_free((void**)&state->projection_bias_v[m]);
+            }
+        }
+        state->projections_initialized = 0;
+        state->proj_mode = 0; /* 切换到Xavier训练模式，下次process时自动重新初始化 */
+    }
 
 /* 投影矩阵锁定状态下跳过SGD训练更新，
      * 但仍计算前向监控损失值并通过loss参数返回，

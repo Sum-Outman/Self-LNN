@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file ros2_node.c
  * @brief ROS2节点系统 —— rosbridge WebSocket桥接 + TCP内部回退模式
  *
@@ -9,9 +9,9 @@
  * - 通过RFC 6455 WebSocket连接到rosbridge_server
  * - 使用rosbridge JSON协议（v2.0）进行topic的advertise/subscribe/publish
  * - 可与真实ROS2生态（rclcpp/rclpy）和其他ROS2工具完全互操作
- * - 标准rosbridge默认端口9090，本系统默认使用SELFLNN_WEBSOCKET_PORT(8080)
+ * - 标准rosbridge默认端口9090，本系统默认使用SELFLNN_WEBSOCKET_PORT(8081)
  * - 零外部依赖：WebSocket帧编解码和JSON构造全部在纯C中实现
- * - rosbridge WebSocket与系统HTTP服务共用8080端口
+ * - rosbridge WebSocket使用系统独立WebSocket端口
  *
  * 【回退模式】内部TCP直连（同进程内节点间通信）：
  * - 当rosbridge连接不可用时自动回退

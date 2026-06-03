@@ -21,7 +21,7 @@
 #include "selflnn/training/distributed_training.h" /* 分布式梯度同步 */
 
 extern void* selflnn_get_speech_recognizer(void);
-extern void* selflnn_get_distributed_context(void); /* 获取分布式上下文 */
+/* selflnn_get_distributed_context 已在 selflnn.h 中声明（M-031修复，不再使用extern绕过） */
 
 #include "selflnn/core/optimizer.h"
 #include "selflnn/utils/memory_utils.h"
@@ -1415,8 +1415,7 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
         opt_cfg.learning_rate = pipeline->network->config.learning_rate;
         opt_cfg.beta1 = 0.9f;
         opt_cfg.beta2 = 0.999f;
-        opt_cfg.epsilon = (pipeline->config.optimizer_epsilon > 0.0f)
-                          ? pipeline->config.optimizer_epsilon : 1e-8f;
+        opt_cfg.epsilon = 1e-8f;
         pipeline->optimizer = optimizer_create(&opt_cfg);
         pipeline->optimizer_step = 0;
     }

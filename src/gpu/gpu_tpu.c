@@ -134,7 +134,7 @@ static int tpu_load_library(void) {
 #undef LD_TP
     if (!g_tpu.tpuInitialize || !g_tpu.tpuGetDeviceCount) {
         LOG_WARN("libtpu缺少核心符号");
-        tpu_unload; return 0;
+        tpu_unload(); return 0;
     }
     g_tpu.loaded = 1;
     LOG_INFO("Google TPU库加载成功");
@@ -159,9 +159,9 @@ static int tpu_backend_init(void) {
     if (g_tpu_state.initialized) return 0;
     memset(&g_tpu_state, 0, sizeof(g_tpu_state));
 
-    if (tpu_load_library) {
+    if (tpu_load_library()) {
         if (g_tpu.tpuInitialize(0) == 0) {
-            int count = g_tpu.tpuGetDeviceCount;
+            int count = g_tpu.tpuGetDeviceCount();
             if (count > 0) {
                 g_tpu_state.device_count = count;
                 g_tpu_state.tpu_available = 1;
@@ -180,7 +180,7 @@ static int tpu_backend_init(void) {
                 return 0;
             }
         }
-        tpu_unload;
+        tpu_unload();
     }
     g_tpu_state.initialized = 1;
     LOG_ERROR("Google TPU硬件未检测到，TPU后端不可用");
@@ -193,8 +193,8 @@ static void tpu_backend_cleanup(void) {
         g_tpu.tpuDestroySession(g_tpu_state.tpu_session);
         g_tpu_state.tpu_session = NULL;
     }
-    if (g_tpu_state.tpu_available && g_tpu.tpuShutdown) g_tpu.tpuShutdown;
-    tpu_unload;
+    if (g_tpu_state.tpu_available && g_tpu.tpuShutdown) g_tpu.tpuShutdown();
+    tpu_unload();
     g_tpu_state.initialized = 0;
 }
 
@@ -463,13 +463,13 @@ static int tpu_backend_get_memory_info(GpuContext* context, size_t* total, size_
 static int tpu_backend_device_reset(GpuContext* context) {
     if (!context) return -1;
     if (g_tpu_state.tpu_available) {
-        tpu_unload;
+        tpu_unload();
         memset(&g_tpu_state, 0, sizeof(g_tpu_state));
-        return tpu_backend_init;
+        return tpu_backend_init();
     }
     g_tpu_state.initialized = 0;
     memset(&g_tpu_state, 0, sizeof(g_tpu_state));
-    return tpu_backend_init;
+    return tpu_backend_init();
 }
 /* F-002: Google TPU嵌入XLA计算内核源码 */
 static const char* TPU_MATMUL_KERNEL =
@@ -506,8 +506,8 @@ static int tpu_backend_memory_copy_from_device_sync(void* dst, GpuMemory* src, s
 
 /* ==================== NPU接口 ==================== */
 
-static int tpu_npu_init(GpuContext* ctx) { (void)ctx; return tpu_backend_init; }
-static void tpu_npu_cleanup(GpuContext* ctx) { (void)ctx; tpu_backend_cleanup; }
+static int tpu_npu_init(GpuContext* ctx) { (void)ctx; return tpu_backend_init(); }
+static void tpu_npu_cleanup(GpuContext* ctx) { (void)ctx; tpu_backend_cleanup(); }
 static int tpu_npu_get_device_count(GpuContext* ctx) { (void)ctx; return tpu_backend_get_device_count; }
 static const char* tpu_npu_get_backend_name(GpuContext* ctx) { (void)ctx; return "Google TPU"; }
 

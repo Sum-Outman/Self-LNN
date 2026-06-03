@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file planning.c
  * @brief 规划系统核心实现 —— 全局规划层
  *
@@ -19,6 +19,7 @@
 
 #include "selflnn/reasoning/planning.h"
 #include "selflnn/reasoning/planning_enhanced.h" /* 增强规划集成 */
+#include "selflnn/reasoning/causal_reasoning.h"  /* M-022: 因果推理→规划桥接 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -1785,6 +1786,24 @@ int planning_generate(PlanningSystem* system,
                      float* plan, size_t max_plan_size) {
     if (!system || !goal || !plan || max_plan_size == 0) return -1;
     if (goal_size > MAX_STATE_DIMENSION || state_size > MAX_STATE_DIMENSION) return -1;
+
+    /* M-022修复: 因果推理→规划桥接
+     * 从因果推理引擎获取因果约束，用于引导规划方向
+     * 约束作为软约束参与规划评估，提高规划因果一致性 */
+    #define M022_MAX_CAUSAL_CONSTRAINTS 16
+    CausalPlanningConstraint causal_constraints[M022_MAX_CAUSAL_CONSTRAINTS];
+    int num_causal_constraints = 0;
+
+    CausalReasoningEngine* causal_engine = 
+        (CausalReasoningEngine*)selflnn_get_causal_reasoning_engine();
+    if (causal_engine) {
+        num_causal_constraints = causal_to_planning_bridge(
+            causal_engine, causal_constraints, M022_MAX_CAUSAL_CONSTRAINTS);
+        if (num_causal_constraints > 0) {
+            log_info("M-022: 因果推理→规划桥接已提取%d条因果约束",
+                     num_causal_constraints);
+        }
+    }
 
     size_t steps = 0;
     size_t max_steps = (size_t)system->config.max_plan_length;

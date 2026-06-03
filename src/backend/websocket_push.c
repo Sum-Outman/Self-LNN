@@ -1,4 +1,4 @@
-﻿#include "selflnn/backend/websocket_push.h"
+#include "selflnn/backend/websocket_push.h"
 #include "selflnn/core/common.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
@@ -445,7 +445,7 @@ int ws_push_server_start(WSPushServer* srv)
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 #else
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-/* Linux需要SO_REUSEPORT与HTTP服务器共享8080端口 */
+/* Linux需要SO_REUSEPORT支持独立端口监听 */
     setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
     struct sockaddr_in addr;

@@ -1,4 +1,4 @@
-﻿#include "selflnn/concurrency/rcu.h"
+#include "selflnn/concurrency/rcu.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -179,8 +179,14 @@ static int rcu_wait_for_epoch(RcuDomain* domain, long old_epoch) {
         }
         if (all_done) return 0;
         rcu_cpu_pause();
-        /* 每1000次自旋检查一次active_readers作为额外确认 */
+        /* L-010: 超过1000次自旋后yield，避免CPU长时间空转 */
         if (spin > 0 && (spin & 1023) == 0) {
+#ifdef _WIN32
+            Sleep(0);  /* Windows: 立即让出时间片给其他线程 */
+#else
+            sched_yield();  /* Linux: 让出CPU调度 */
+#endif
+            /* 同时检查active_readers作为双重确认 */
             if (domain->active_readers == 0) return 0;
         }
     }

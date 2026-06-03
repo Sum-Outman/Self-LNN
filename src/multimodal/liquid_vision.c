@@ -285,13 +285,29 @@ static int _extract_patches(const float* image, int width, int height, int chann
     return patch_idx;
 }
 
-/* Xavier均匀初始化 -  P2-010: 统一使用secure_random_float替代乘法PRNG */
-static void _xavier_init(float* data, int rows, int cols, unsigned int* seed) {
-    float scale = sqrtf(6.0f / (float)(rows + cols));
+/* S-011修复: Xavier初始化 — 支持可选正态/均匀分布
+ * M-012修复: 默认使用正态分布(Box-Muller)进行Xavier初始化
+ * use_normal=1: 使用标准正态分布 N(0, σ²)（推荐，σ=√(2/(fan_in+fan_out))）
+ * use_normal=0: 使用均匀分布 U[-a,a]（a=√(6/(fan_in+fan_out))，向后兼容）
+ * P2-010: 统一使用secure_random_float替代乘法PRNG */
+static void _xavier_init(float* data, int rows, int cols, unsigned int* seed, int use_normal) {
     (void)seed;  /* seed参数保留兼容，secure_random_float内部自行管理熵源 */
-    for (int i = 0; i < rows * cols; i++) {
-        float r = secure_random_float();
-        data[i] = (r * 2.0f - 1.0f) * scale;
+    if (use_normal) {
+        /* 正态分布 Xavier: std = sqrt(2.0 / (fan_in + fan_out)) */
+        float stddev = sqrtf(2.0f / (float)(rows + cols));
+        for (int i = 0; i < rows * cols; i++) {
+            float u1 = secure_random_float();
+            float u2 = secure_random_float();
+            float z = sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.28318530718f * u2);
+            data[i] = z * stddev;
+        }
+    } else {
+        /* 均匀分布 Xavier: range = [-scale, scale], scale = sqrt(6 / (fan_in + fan_out)) */
+        float scale = sqrtf(6.0f / (float)(rows + cols));
+        for (int i = 0; i < rows * cols; i++) {
+            float r = secure_random_float();
+            data[i] = (r * 2.0f - 1.0f) * scale;
+        }
     }
 }
 
@@ -386,10 +402,11 @@ LiquidPatchEncoder* liquid_patch_encoder_create(const LiquidPatchEncoderConfig* 
     }
 
     enc->seed = 42;
-    _xavier_init(enc->patch_w_gate, D, input_dim, &enc->seed);
-    _xavier_init(enc->patch_w_act, D, input_dim, &enc->seed);
-    _xavier_init(enc->patch_h_to_gate, D, D, &enc->seed);
-    _xavier_init(enc->patch_h_to_act, D, D, &enc->seed);
+    /* S-011修复: use_normal=1 使用正态分布Xavier初始化 */
+    _xavier_init(enc->patch_w_gate, D, input_dim, &enc->seed, 1);
+    _xavier_init(enc->patch_w_act, D, input_dim, &enc->seed, 1);
+    _xavier_init(enc->patch_h_to_gate, D, D, &enc->seed, 1);
+    _xavier_init(enc->patch_h_to_act, D, D, &enc->seed, 1);
     _const_init(enc->patch_gate_bias, D, 0.0f);
     _const_init(enc->patch_act_bias, D, 0.0f);
     _const_init(enc->time_constants, D, config->time_constant);
@@ -630,10 +647,11 @@ LiquidVisualCfCEvolver* liquid_visual_cfc_evolver_create(const LiquidVisualCfCEv
 
     ev->seed = 123;
     for (int c = 0; c < NC; c++) {
-        _xavier_init(ev->w_gate + (size_t)c * D * D, D, D, &ev->seed);
-        _xavier_init(ev->w_act + (size_t)c * D * D, D, D, &ev->seed);
-        _xavier_init(ev->h_to_gate + (size_t)c * D * D, D, D, &ev->seed);
-        _xavier_init(ev->h_to_act + (size_t)c * D * D, D, D, &ev->seed);
+        /* S-011修复: use_normal=1 使用正态分布Xavier初始化 */
+        _xavier_init(ev->w_gate + (size_t)c * D * D, D, D, &ev->seed, 1);
+        _xavier_init(ev->w_act + (size_t)c * D * D, D, D, &ev->seed, 1);
+        _xavier_init(ev->h_to_gate + (size_t)c * D * D, D, D, &ev->seed, 1);
+        _xavier_init(ev->h_to_act + (size_t)c * D * D, D, D, &ev->seed, 1);
     }
     _const_init(ev->gate_bias, NC * D, 0.0f);
     _const_init(ev->act_bias, NC * D, 0.0f);
@@ -790,10 +808,11 @@ LiquidSpatialProcessor* liquid_spatial_processor_create(const LiquidSpatialProce
     }
 
     sp->seed = 789;
-    _xavier_init(sp->feat_to_hidden_w_gate, HD, FD, &sp->seed);
-    _xavier_init(sp->feat_to_hidden_w_act, HD, FD, &sp->seed);
-    _xavier_init(sp->hidden_to_hidden_w_gate, HD, HD, &sp->seed);
-    _xavier_init(sp->hidden_to_hidden_w_act, HD, HD, &sp->seed);
+    /* S-011修复: use_normal=1 使用正态分布Xavier初始化 */
+    _xavier_init(sp->feat_to_hidden_w_gate, HD, FD, &sp->seed, 1);
+    _xavier_init(sp->feat_to_hidden_w_act, HD, FD, &sp->seed, 1);
+    _xavier_init(sp->hidden_to_hidden_w_gate, HD, HD, &sp->seed, 1);
+    _xavier_init(sp->hidden_to_hidden_w_act, HD, HD, &sp->seed, 1);
     _const_init(sp->gate_bias, HD, 0.0f);
     _const_init(sp->act_bias, HD, 0.0f);
     _const_init(sp->time_constants, HD, config->time_constant);
@@ -3518,6 +3537,12 @@ int cfc_vision_train_network(CfcVisionProcessor* processor,
 /* ---- CNN基础操作函数 ---- */
 
 /*
+ * S-011修复: CNN权重分配和He初始化的前向声明
+ * 定义在后面，此处声明使liquid_vision_process_image的延迟初始化可提前调用
+ */
+static int _cnn_allocate_and_init_weights(LiquidVisionProcessor* p);
+
+/*
  * He初始化（Kaiming Normal） ---- 专为ReLU激活设计
  * std = sqrt(2 / fan_in)
  */
@@ -3864,6 +3889,17 @@ int liquid_vision_process_image(LiquidVisionProcessor* processor,
                         float* features, size_t max_features) {
     if (!processor || !data || !features || max_features == 0) return -1;
     if (width <= 0 || height <= 0 || channels <= 0) return -1;
+
+    /* S-011修复: CNN权重延迟初始化
+     * CNN权重在首次图像处理时延迟分配并He正态初始化。
+     * 不再依赖权重文件加载，确保未训练状态下也有合理的初始权重。
+     * _cnn_allocate_and_init_weights内部检查cnn_weights_initialized标志防止重复初始化 */
+    if (!processor->cnn_weights_initialized) {
+        int cnn_ret = _cnn_allocate_and_init_weights(processor);
+        if (cnn_ret != 0) {
+            log_warn("[液态视觉] CNN权重延迟初始化失败(code=%d)，退回到传统CV特征提取", cnn_ret);
+        }
+    }
 
 /* 未训练保护的液态视觉管线
      * 检查模型是否已完成训练（权重从文件加载或通过直接训练获得）

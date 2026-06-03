@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gazebo_bridge.c
  * @brief SELF-LNN 与 Gazebo 的桥接实现 — F-003修复: 使用真实gz CLI命令
  *
@@ -38,6 +38,15 @@ struct GazeboBridge {
 
 int gazebo_is_available(void) {
 #ifdef _WIN32
+    /* S-024修复: Windows下Gazebo不可原生运行。
+     * Gazebo依赖Linux内核特性，Windows原生不支持。
+     * 用户需要通过以下方式运行Gazebo：
+     *   1. WSL2 (Windows Subsystem for Linux 2) + Ubuntu
+     *   2. Docker Desktop + gz-sim镜像 (如 gazebo:gz-sim9)
+     * 当Gazebo不可用时，系统自动回退到内部仿真器(simulator.c)。
+     * 本函数返回0表示Gazebo不可用，调用方应从gazebo_connect的
+     * 返回值判断具体原因（NULL=参数错误, state=GAZEBO_DISCONNECTED+返回非NULL=平台不可用）。
+     */
     return 0;
 #else
     int result = system("which gz >/dev/null 2>&1");
@@ -90,20 +99,33 @@ GazeboBridge* gazebo_connect(const GazeboConfig* config) {
     
     int paused = config->start_paused ? 1 : 0;
     char cmd[2048];
+
+#ifdef _WIN32
+    /* S-024修复: Windows原生不支持Gazebo。
+     * Gazebo依赖Linux特有内核特性（如/dev/shm、命名空间等），
+     * Windows下无法直接运行gz CLI命令。
+     * 替代方案：
+     *   1. WSL2 (Ubuntu): 在WSL2内运行Gazebo，通过Gazebo Transport网络连接
+     *   2. Docker: docker run -it gazebo:gz-sim9-harmonic
+     * 当前直接返回GAZEBO_UNAVAILABLE状态，回退到内部仿真器。
+     * 返回-2错误码区分子-1（参数错误）：桥接对象非NULL但state为ERROR，
+     * 调用方可区分"参数无效(返回NULL)"与"平台不可用(返回对象但state=ERROR)"。 */
+    log_info("Gazebo桥接: Windows平台不支持原生Gazebo，请使用WSL2或Docker运行。"
+             "回退到内部仿真器(simulator.c)。\n");
+    bridge->state = GAZEBO_ERROR;
+    bridge->process_in = NULL;
+    bridge->process_out = NULL;
+    return bridge;
+#else
     snprintf(cmd, sizeof(cmd),
         "gz sim %s %s %s --iterations 0 2>&1",
         world,
         paused ? "--paused" : "",
         config->use_gui ? "" : "-s");
     
-#ifdef _WIN32
-    FILE* pipe = _popen(cmd, "r");
-#else
     FILE* pipe = popen(cmd, "r");
-#endif
-    
     if (!pipe) {
-        log_info("Gazebo桥接: Gazebo不可用，将使用内部仿真器\n");
+        log_info("Gazebo桥接: Gazebo子进程启动失败，回退到内部仿真器\n");
         bridge->state = GAZEBO_DISCONNECTED;
         bridge->process_in = NULL;
         bridge->process_out = NULL;
@@ -113,6 +135,8 @@ GazeboBridge* gazebo_connect(const GazeboConfig* config) {
     bridge->process_in = pipe;
     bridge->process_out = pipe;
     bridge->state = GAZEBO_CONNECTED;
+#endif
+
     bridge->sim_time_sec = 0.0;
     bridge->step_size = config->max_step_size > 0.0f ? config->max_step_size : 0.016f;
     

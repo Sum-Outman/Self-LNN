@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file safety_monitor.c
  * @brief AGI安全监控系统完整实现
  */
@@ -222,7 +222,7 @@ int safety_circuit_breaker_report_success(SafetyMonitor* monitor, int subsystem_
             monitor->cb_consecutive_failures = 0;
             monitor->cb_half_open_requests = 0;
             monitor->cb_half_open_successes = 0;
-            log_info("[熔断器] 子系统%d半开探测全部成功, 恢复正常运行", subsystem_id);
+            log_debug("[熔断器] 子系统%d半开探测全部成功, 恢复正常运行", subsystem_id);
         }
     } else if (monitor->cb_state == 0) {
         monitor->cb_consecutive_failures = 0; /* 成功时重置失败计数 */
@@ -244,7 +244,7 @@ int safety_circuit_breaker_check_allowed(SafetyMonitor* monitor, int subsystem_i
             monitor->cb_state = 1;
             monitor->cb_half_open_requests = 0;
             monitor->cb_half_open_successes = 0;
-            log_info("[熔断器] 冷却期结束, 子系统%d进入半开探测状态", subsystem_id);
+            log_debug("[熔断器] 冷却期结束, 子系统%d进入半开探测状态", subsystem_id);
             allowed = 1;
         } else {
             allowed = 0;
@@ -273,7 +273,7 @@ void safety_circuit_breaker_reset(SafetyMonitor* monitor) {
     monitor->cb_half_open_requests = 0;
     monitor->cb_half_open_successes = 0;
     monitor->cb_opened_at = 0;
-    log_info("[熔断器] 手动重置, 所有子系统恢复正常");
+    log_warn("[熔断器] 手动重置, 所有子系统恢复正常");
     SAFETY_UNLOCK(monitor);
 }
 
@@ -300,7 +300,7 @@ int safety_circuit_breaker_close(SafetyMonitor* monitor) {
     monitor->cb_half_open_requests = 0;
     monitor->cb_half_open_successes = 0;
     monitor->cb_opened_at = 0;
-    log_info("[熔断器] 安全恢复, 强制关闭熔断器, 所有子系统恢复正常");
+    log_warn("[熔断器] 安全恢复, 强制关闭熔断器, 所有子系统恢复正常");
     SAFETY_UNLOCK(monitor);
     return monitor->cb_state;
 }
@@ -904,7 +904,7 @@ int safety_set_privacy_filter(SafetyMonitor* monitor, int filter_level, int data
     SAFETY_UNLOCK(monitor);
 
     const char* level_names[] = {"关闭", "仅日志记录", "数据脱敏", "完全隔离"};
-    log_info("[隐私安全] 过滤级别: %s, 数据类型掩码: 0x%02X (图像=%d 音频=%d 文本=%d 传感器=%d)",
+    log_debug("[隐私安全] 过滤级别: %s, 数据类型掩码: 0x%02X (图像=%d 音频=%d 文本=%d 传感器=%d)",
              level_names[filter_level], data_types,
              (data_types & 1) ? 1 : 0, (data_types & 2) ? 1 : 0,
              (data_types & 4) ? 1 : 0, (data_types & 8) ? 1 : 0);
@@ -926,7 +926,7 @@ int safety_add_behavioral_constraint(SafetyMonitor* monitor,
     monitor->behavioral_constraints[idx].enabled = 1;
     SAFETY_UNLOCK(monitor);
 
-    log_info("[行为约束] 添加规则: %s (条件=\"%s\", 动作=%d)",
+    log_debug("[行为约束] 添加规则: %s (条件=\"%s\", 动作=%d)",
              constraint_name, condition, action_on_violation);
     return 0;
 }

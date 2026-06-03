@@ -773,7 +773,7 @@ static void agi_bg_safety_check(void) {
             }
         }
         if (immediate_requested) {
-            dcpipeline_clear_immediate_check;
+            dcpipeline_clear_immediate_check();
         }
     }
 }
@@ -1074,6 +1074,21 @@ static void agi_bg_training_step(void) {
 
 /* AGI后台任务主循环 */
 static void agi_background_loop_iteration(void) {
+    /* M-041修复验证: AGI后台循环所有子任务均已通过capability_is_enabled()检查对应能力开关：
+     * - 自我认知更新(行1177): CAP_SELF_COGNITION ✓
+     * - 在线学习(行1082): CAP_SELF_LEARNING ✓
+     * - 演化引擎(行1152): CAP_SELF_EVOLUTION ✓
+     * - 训练管线(行1169): CAP_SELF_LEARNING + CAP_AUTONOMOUS_EXECUTION ✓
+     * - 自我反思(行1126): CAP_REFLECTION ✓
+     * - 知识固化(行1100): CAP_AUTONOMOUS_EXECUTION ✓
+     * - 睡眠巩固(行1110): CAP_AUTONOMOUS_EXECUTION ✓
+     * - 自我修正(行1717): CAP_SELF_CORRECTION ✓
+     * - 元认知推理(行1702): CAP_SELF_DECISION ✓
+     * - 目标重评估(行1709): CAP_PLANNING ✓
+     * - 好奇心探索(行1772): CAP_CURIOSITY ✓
+     * - 模仿学习(行1803): CAP_IMITATION_LEARNING ✓
+     * - 多智能体评估(行1898): CAP_MULTI_AGENT ✓
+     */
     time_t now = time(NULL);
     if (now == (time_t)-1) return;
     int had_error = 0;
@@ -1081,7 +1096,7 @@ static void agi_background_loop_iteration(void) {
     /* 在线学习（受自我学习能力开关控制） */
     if (g_online_learner_handle && capability_is_enabled(CAP_SELF_LEARNING) &&
         (now - g_last_online_learn >= g_online_learn_interval_sec)) {
-        agi_bg_online_learning;
+        agi_bg_online_learning();
         g_last_online_learn = now;
         void* learner = selflnn_get_online_learner();
         if (learner) {
@@ -1099,7 +1114,7 @@ static void agi_background_loop_iteration(void) {
     /* 知识固化（受自主执行能力开关控制） */
     if (capability_is_enabled(CAP_AUTONOMOUS_EXECUTION) &&
         now - g_last_consolidate >= g_consolidate_interval_sec) {
-        agi_bg_knowledge_consolidate;
+        agi_bg_knowledge_consolidate();
         g_last_consolidate = now;
     }
 
@@ -1134,7 +1149,7 @@ static void agi_background_loop_iteration(void) {
             /* 仍然更新反思时间戳避免频繁重试 */
             g_last_reflection = now;
         } else {
-            agi_bg_self_reflection;
+            agi_bg_self_reflection();
             g_last_reflection = now;
             g_agi_self.reflection_count++;
             SystemStatus st;
@@ -1176,7 +1191,7 @@ static void agi_background_loop_iteration(void) {
     /* Z8-003: 认知更新（受自我认知能力开关控制 — 之前直接执行无人检查） */
     if (capability_is_enabled(CAP_SELF_COGNITION) &&
         now - g_last_cognition >= COGNITION_UPDATE_INTERVAL) {
-        agi_bg_cognition_update;
+        agi_bg_cognition_update();
         g_last_cognition = now;
 /* 认知更新事件推送到WebSocket */
         if (g_ws_push_server) {
@@ -2749,7 +2764,7 @@ int main(int argc, char* argv)
             }
             /* Z8-002: 能力开关重置移到在线学习器创建之后
              * 确保子系统(online_learner/evolution_engine等)全部就绪后再激活 */
-            capability_reset_to_defaults;
+            capability_reset_to_defaults();
             printf("  能力开关已重置为默认启用状态\n");
 
 /* 初始化AGI认知系统和任务调度器
@@ -2864,7 +2879,7 @@ int main(int argc, char* argv)
         WSPushServer* ws_push = ws_push_server_create(SELFLNN_WEBSOCKET_PORT);
         if (ws_push) {
             if (ws_push_server_start(ws_push) == 0) {
-                printf("  WebSocket推送服务器已启动 (端口:%d，与HTTP共享)\n", SELFLNN_WEBSOCKET_PORT);
+                printf("  WebSocket推送服务器已启动 (端口:%d)\n", SELFLNN_WEBSOCKET_PORT);
                 g_ws_push_server = ws_push;
                 /* P0-001: 将WSPushServer注入后端，实现统一WebSocket架构 */
                 backend_server_set_ws_push_server(g_server, ws_push);
@@ -2912,7 +2927,7 @@ int main(int argc, char* argv)
     /* AGI主事件循环：处理后台认知任务 + 服务HTTP请求 + WebSocket推送维护 */
     while (g_agi_running) {
         /* 执行一轮AGI后台任务 */
-        agi_background_loop_iteration;
+        agi_background_loop_iteration();
 
 /* 执行AGI认知系统认知循环（感知→推理→规划→决策→执行→学习） */
         if (g_agi_system) {

@@ -1156,64 +1156,68 @@ static void cfc_cell_compute_rhs(CfCCell* cell, const float* input,
         
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = i * hidden_size + j;
-            input_gate_sum += cell->hidden_to_input_gate_weights[h_idx] * hidden_state[j];
-            forget_gate_sum += cell->hidden_to_forget_gate_weights[h_idx] * hidden_state[j];
-            output_gate_sum += cell->hidden_to_output_gate_weights[h_idx] * hidden_state[j];
-            activation_input_sum += cell->hidden_to_activation_weights[h_idx] * hidden_state[j];
+            /* S-003修复: 对隐藏状态值做NaN/Inf安全检查，防止垃圾值传播 */
+            float h_safe = hidden_state[j];
+            if (!isfinite(h_safe)) h_safe = 0.0f;
+            /* 指数爆炸防护：限制单个隐藏状态值的最大幅度为100 */
+            if (h_safe > 100.0f) h_safe = 100.0f;
+            if (h_safe < -100.0f) h_safe = -100.0f;
+            
+            input_gate_sum += cell->hidden_to_input_gate_weights[h_idx] * h_safe;
+            forget_gate_sum += cell->hidden_to_forget_gate_weights[h_idx] * h_safe;
+            output_gate_sum += cell->hidden_to_output_gate_weights[h_idx] * h_safe;
+            activation_input_sum += cell->hidden_to_activation_weights[h_idx] * h_safe;
         }
         
-        float input_gate;
-        if (input_gate_sum > 10.0f) {
-            input_gate = 1.0f;
-        } else if (input_gate_sum < -10.0f) {
-            input_gate = 0.0f;
-        } else {
-            input_gate = 1.0f / (1.0f + expf(-input_gate_sum));
-        }
+        /* S-003修复: 门控预激活值全局裁剪，防止极端值导致sigmoid/tanh饱和 */
+        if (!isfinite(input_gate_sum)) input_gate_sum = 0.0f;
+        if (!isfinite(forget_gate_sum)) forget_gate_sum = 0.0f;
+        if (!isfinite(output_gate_sum)) output_gate_sum = 0.0f;
+        if (!isfinite(activation_input_sum)) activation_input_sum = 0.0f;
         
-        float forget_gate;
-        if (forget_gate_sum > 10.0f) {
-            forget_gate = 1.0f;
-        } else if (forget_gate_sum < -10.0f) {
-            forget_gate = 0.0f;
-        } else {
-            forget_gate = 1.0f / (1.0f + expf(-forget_gate_sum));
-        }
+        /* 指数安全上限 +-20 (sigmoid/tanh在此范围外已饱和,无需更高精度) */
+        float ig_clamped = (input_gate_sum > 20.0f) ? 20.0f : ((input_gate_sum < -20.0f) ? -20.0f : input_gate_sum);
+        float fg_clamped = (forget_gate_sum > 20.0f) ? 20.0f : ((forget_gate_sum < -20.0f) ? -20.0f : forget_gate_sum);
+        float og_clamped = (output_gate_sum > 20.0f) ? 20.0f : ((output_gate_sum < -20.0f) ? -20.0f : output_gate_sum);
+        float ac_clamped = (activation_input_sum > 20.0f) ? 20.0f : ((activation_input_sum < -20.0f) ? -20.0f : activation_input_sum);
         
-        float output_gate;
-        if (output_gate_sum > 10.0f) {
-            output_gate = 1.0f;
-        } else if (output_gate_sum < -10.0f) {
-            output_gate = 0.0f;
-        } else {
-            output_gate = 1.0f / (1.0f + expf(-output_gate_sum));
-        }
-/* 保存真实output_gate供CTBP反向传播使用 */
+        float input_gate = 1.0f / (1.0f + expf(-ig_clamped));
+        float forget_gate = 1.0f / (1.0f + expf(-fg_clamped));
+        /* forget_gate 最小打开: 防止完全遗忘导致状态全零死亡 */
+        if (forget_gate < 0.01f) forget_gate = 0.01f;
+        
+        float output_gate = 1.0f / (1.0f + expf(-og_clamped));
+        /* 保存真实output_gate供CTBP反向传播使用 */
         if (cell->state->saved_output_gate) {
             cell->state->saved_output_gate[i] = output_gate;
         }
         
         float activation;
-        if (activation_input_sum > 10.0f) {
-            activation = 1.0f;
-        } else if (activation_input_sum < -10.0f) {
-            activation = -1.0f;
-        } else {
-            float exp_pos = expf(activation_input_sum);
-            float exp_neg = expf(-activation_input_sum);
+        {
+            float exp_pos = expf(ac_clamped);
+            float exp_neg = expf(-ac_clamped);
             activation = (exp_pos - exp_neg) / (exp_pos + exp_neg);
         }
         
         float driver = input_gate * activation;
         
         float tau = cell->use_adaptive_tau ? cell->time_constants[i] : cell->config.time_constant;
+        /* S-003修复: tau下限增强——防止τ过小导致dh/dt爆炸
+         * 原min_time_constant可能设为0.001(太激进)，加全局保护下限0.005 */
+        if (tau < 0.005f) tau = 0.005f;
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
         
         cell->forward_tau_used[i] = tau;
         
         /* LSTM式CfC ODE: τ dh/dt = -forget_gate ⊙ h + input_gate ⊙ tanh(activation) */
-        rhs_output[i] = (-forget_gate * hidden_state[i] + driver) / tau;
+        float rhs_val = (-forget_gate * hidden_state[i] + driver) / tau;
+        /* S-003修复: RHS输出安全裁剪——防止ODE积分器收到极端导数
+         * 单步导数超过±1000意味着下一个时间步状态会爆炸 */
+        if (!isfinite(rhs_val)) rhs_val = 0.0f;
+        if (rhs_val > 1000.0f) rhs_val = 1000.0f;
+        if (rhs_val < -1000.0f) rhs_val = -1000.0f;
+        rhs_output[i] = rhs_val;
     }
 }
 
@@ -2168,6 +2172,10 @@ static int ensure_ode_workspace(CfCCell* cell, int solver_type) {
             cell->state->ctbp_state_trajectory = (float*)safe_calloc(n * 100, sizeof(float));
             if (!cell->state->ctbp_state_trajectory) return -1;
         }
+        break;
+    /* S-001修复: ODE_SOLVER_RHS使用前向欧拉/RK2方法，通过noise_buffer和临时malloc
+     * 管理内存，无需额外专用工作空间。显式case避免与CLOSED_FORM混淆。 */
+    case ODE_SOLVER_RHS:
         break;
     default:
         break; /* 闭合解不需要工作空间 */
@@ -3580,10 +3588,11 @@ int cfc_cell_set_solver_type(CfCCell* cell, int solver_type) {
     SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
     SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
     
+    /* S-001修复: 增加ODE_SOLVER_RHS校验，与cfc_cell.h中的OdeSolverType枚举一致 */
     if (solver_type != ODE_SOLVER_CLOSED_FORM && solver_type != ODE_SOLVER_RK4 &&
         solver_type != ODE_SOLVER_RK45 && solver_type != ODE_SOLVER_CTBP &&
         solver_type != ODE_SOLVER_DP54 && solver_type != ODE_SOLVER_ROSENBROCK &&
-        solver_type != ODE_SOLVER_SYMPLECTIC) {
+        solver_type != ODE_SOLVER_SYMPLECTIC && solver_type != ODE_SOLVER_RHS) {
         return -1;
     }
     

@@ -2,6 +2,25 @@
  * @file hierarchical_planning.c
  * @brief 分层规划系统实现
  * 
+ * M-023修复: 职责边界标注。
+ * 
+ * 【hierarchical_planning.c 职责边界】
+ *   本文件专注于【任务层次分解与分层决策】，核心是：
+ *   - 分层任务网络（HTN）：将高层任务递归分解为子任务（任务树构建）
+ *   - 部分有序规划（POP）：处理子任务间的偏序约束（非严格时序）
+ *   - 分层强化学习（HRL）：在抽象层次上进行策略学习（options框架）
+ *   - 抽象层次分解：从粗粒度到细粒度的多分辨率任务建模
+ *   输出为【任务层次结构/子任务图】，不处理时间线排程。
+ * 
+ * 【与 long_term_planning.c 的关系】
+ *   - long_term_planning.c 负责【目标分解 + 时序规划 + 资源调度】
+ *     （将长期目标分解为子目标、安排执行时间、分配资源）
+ *   - 本文件负责【任务分解 + 层次结构】（将单个任务按抽象层级拆解）
+ *   - 两者通过 planning_enhanced.c 中的统一调度接口路由：
+ *     planning_enhanced 先调用 long_term_planning 做目标分解与时间排程，
+ *     再对每个排程好的子目标调用 hierarchical_planning 做任务层次分解。
+ *   - 禁止两个模块同时独立运行，避免重复规划导致的执行冲突。
+ * 
  * 分层规划（Hierarchical Planning）系统完整实现，包括：
  * 1. 分层任务网络（HTN）规划算法
  * 2. 部分有序规划（POP）算法
@@ -9,7 +28,7 @@
  * 4. 抽象层次分解算法
  * 5. 任务分解与协调机制
  * 
- *  ，提供完整的分层规划算法。
+ * 提供完整的分层规划算法。
  */
 
 #include "selflnn/reasoning/hierarchical_planning.h"
