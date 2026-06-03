@@ -3112,13 +3112,14 @@ RLAgent* rl_agent_create(const RLConfig* config)
         memset(&icm_cfg, 0, sizeof(icm_cfg));
         icm_cfg.state_dim = config->state_dim;
         icm_cfg.action_dim = config->action_dim;
-        icm_cfg.forward_hidden = 64;
-        icm_cfg.inverse_hidden = 64;
-        icm_cfg.eta = 0.1f;
-        icm_cfg.beta = 0.2f;
-        icm_cfg.lambda = 0.1f;
+        icm_cfg.hidden_dim = 64;
+        icm_cfg.embedding_dim = 32;
+        icm_cfg.forward_loss_weight = 0.8f;
+        icm_cfg.inverse_loss_weight = 0.2f;
         icm_cfg.learning_rate = 0.001f;
-        icm_cfg.batch_size = 64;
+        icm_cfg.cfc_tau = 1.0f;
+        icm_cfg.cfc_dt = 0.1f;
+        icm_cfg.cfc_steps = 5;
         agent->icm_state = explore_icm_create(&icm_cfg);
     }
     if (config->explore_config.strategy == RL_EXPLORE_RND) {
@@ -3126,17 +3127,23 @@ RLAgent* rl_agent_create(const RLConfig* config)
         memset(&rnd_cfg, 0, sizeof(rnd_cfg));
         rnd_cfg.state_dim = config->state_dim;
         rnd_cfg.hidden_dim = 64;
-        rnd_cfg.output_dim = 32;
+        rnd_cfg.embedding_dim = 32;
+        rnd_cfg.num_predictors = 4;
         rnd_cfg.learning_rate = 0.001f;
-        rnd_cfg.batch_size = 64;
+        rnd_cfg.cfc_tau = 1.0f;
+        rnd_cfg.cfc_dt = 0.1f;
+        rnd_cfg.cfc_steps = 5;
         agent->rnd_state = explore_rnd_create(&rnd_cfg);
     }
     if (config->explore_config.strategy == RL_EXPLORE_GO_EXPLORE) {
         GoExploreConfig ge_cfg;
         memset(&ge_cfg, 0, sizeof(ge_cfg));
         ge_cfg.state_dim = config->state_dim;
-        ge_cfg.max_cells = 100;
-        ge_cfg.cell_score_threshold = 0.1f;
+        ge_cfg.action_dim = config->action_dim;
+        ge_cfg.archive_cell_capacity = 100;
+        ge_cfg.cell_threshold = 0.1f;
+        ge_cfg.max_episode_steps = 1000;
+        ge_cfg.selection_strategy = 0;
         agent->go_explore_state = explore_go_create(&ge_cfg);
     }
 

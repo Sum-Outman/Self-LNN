@@ -13,8 +13,11 @@
  */
 
 #include "selflnn/core/evolutionary_algorithms.h"
-#include "selflnn/core/lnn.h"
+/* ZSFJJJ-FIX: SELFLNN_IMPLEMENTATION 必须在 cfc.h 之前定义,
+ * 因为 cfc.h 内部已 #include cfc_network.h, 后设宏会被 include guard 阻止 */
+#define SELFLNN_IMPLEMENTATION
 #include "selflnn/core/cfc.h"
+#include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"

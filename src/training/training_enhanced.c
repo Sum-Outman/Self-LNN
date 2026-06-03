@@ -621,9 +621,15 @@ int distillation_trainer_step(DistillationTrainer* trainer,
 
     CfCNetwork* cfc = student->cfc_network;
     if (cfc) {
-        /* ZSF-070标注：蒸馏路径使用cfc_backward直接更新权重（SGD模式）。
-         * 对于需要Adam/AdamW优化的场景，应改为：先累积梯度→调用optimizer_update。 */
-        cfc_backward(cfc, error_buffer, student->gradient_buffer, trainer->learning_rate);
+        /* ZSFKKK-修复(MED-01): 蒸馏路径改为Adam自适应优化。
+         * 步骤1: cfc_backward_ex(skip_cell_update=1) 仅累积梯度，不更新权重。
+         * 步骤2: cfc_apply_cell_gradients_adam 使用Adam自适应学习率更新参数。
+         * 步骤3: cfc_apply_out_proj_gradients 更新输出投影层参数。
+         * 相比原SGD模式，Adam具有动量+自适应学习率，蒸馏训练收敛更快更稳定。 */
+        cfc_backward_ex(cfc, error_buffer, student->gradient_buffer, trainer->learning_rate, 1);
+        cfc_apply_cell_gradients_adam(cfc, trainer->learning_rate,
+                                       0.9f, 0.999f, 1e-8f, trainer->current_step + 1);
+        cfc_apply_out_proj_gradients(cfc, trainer->learning_rate);
     }
 
     safe_free((void**)&teacher_soft);

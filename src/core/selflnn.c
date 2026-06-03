@@ -465,7 +465,7 @@ int selflnn_init(const SystemConfig* config)
     if (g_system_state.knowledge_inference) selflnn_register_module(MODULE_ID_KNOWLEDGE_INFERENCE, g_system_state.knowledge_inference, 1);
     
 /* 注册机器人模块（MODULE_ID_ROBOT=20）
-     * 如果机器人实例为NULL（子系统不可用/未实现），注册为空指针标记"未实现"。
+     * 如果机器人实例为NULL（硬件模块未连接），注册为空指针标记。
      * is_critical=1 确保模块计入MODULE_COUNT，消除计数不匹配问题。 */
     selflnn_register_module(MODULE_ID_ROBOT, g_system_state.robot_instance, 1);
     
@@ -2599,7 +2599,7 @@ static void shutdown_subsystems(void)
     }
 
 /* 销毁机器人控制模块（MODULE_ID_ROBOT=20）
-     * 如果机器人实例为NULL（未实现/不可用），跳过销毁。 */
+     * 如果机器人实例为NULL（硬件模块未连接），跳过销毁。 */
     if (g_system_state.robot_instance) {
         robot_free((Robot*)g_system_state.robot_instance);
         g_system_state.robot_instance = NULL;

@@ -61,7 +61,15 @@ static inline Quaternion quat_mul(const Quaternion a, const Quaternion b) {
     return q;
 }
 
-static inline Quaternion quat_conjugate(const Quaternion q) {
+/* ZSFJJJ-FIX: 四元数函数名称避免与 math_utils.h 冲突。
+ * math_utils.h 定义了同名但签名不同的函数:
+ *   void quat_normalize(float q[4])        ← 操作 float[4] 数组
+ *   void quat_conjugate(const float q[4], float out[4])  ← 操作 float[4] 数组
+ * quaternion_enhanced.h 使用 Quaternion 结构体值传递:
+ *   Quaternion q4_normalize(const Quaternion q)
+ *   Quaternion q4_conjugate(const Quaternion q)
+ * 两个 static inline 同名函数在C11中违反ODR，导致类型解析失败。 */
+static inline Quaternion q4_conjugate(const Quaternion q) {
     Quaternion r = {q.w, -q.x, -q.y, -q.z};
     return r;
 }
@@ -70,7 +78,7 @@ static inline float quat_norm(const Quaternion q) {
     return sqrtf(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
 }
 
-static inline Quaternion quat_normalize(const Quaternion q) {
+static inline Quaternion q4_normalize(const Quaternion q) {
     float n = quat_norm(q);
     if (n < 1e-10f) return quat_identity();
     Quaternion r = {q.w / n, q.x / n, q.y / n, q.z / n};
@@ -78,8 +86,8 @@ static inline Quaternion quat_normalize(const Quaternion q) {
 }
 
 static inline Quaternion quat_slerp(Quaternion a, Quaternion b, float t) {
-    a = quat_normalize(a);
-    b = quat_normalize(b);
+    a = q4_normalize(a);
+    b = q4_normalize(b);
     float dot = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
     if (dot < 0.0f) {
         dot = -dot;
@@ -91,7 +99,7 @@ static inline Quaternion quat_slerp(Quaternion a, Quaternion b, float t) {
         r.x = a.x + t * (b.x - a.x);
         r.y = a.y + t * (b.y - a.y);
         r.z = a.z + t * (b.z - a.z);
-        return quat_normalize(r);
+        return q4_normalize(r);
     }
     float theta = acosf(dot);
     float sin_theta = sinf(theta);
@@ -102,7 +110,7 @@ static inline Quaternion quat_slerp(Quaternion a, Quaternion b, float t) {
     r.x = wa * a.x + wb * b.x;
     r.y = wa * a.y + wb * b.y;
     r.z = wa * a.z + wb * b.z;
-    return quat_normalize(r);
+    return q4_normalize(r);
 }
 
 static inline void quat_to_matrix(const Quaternion q, float* matrix) {
@@ -131,7 +139,7 @@ static inline void quat_to_matrix(const Quaternion q, float* matrix) {
 
 static inline void quat_rotate_vector(const Quaternion q, const float* v, float* out) {
     Quaternion qv = {0.0f, v[0], v[1], v[2]};
-    Quaternion qc = quat_conjugate(q);
+    Quaternion qc = q4_conjugate(q);
     Quaternion result = quat_mul(quat_mul(q, qv), qc);
     out[0] = result.x;
     out[1] = result.y;
@@ -205,7 +213,7 @@ static inline Quaternion quat_exp(const Quaternion q) {
 }
 
 static inline float quat_distance(const Quaternion a, const Quaternion b) {
-    Quaternion diff = quat_mul(a, quat_conjugate(b));
+    Quaternion diff = quat_mul(a, q4_conjugate(b));
     float angle = 2.0f * acosf(fminf(fabsf(diff.w), 1.0f));
     return angle;
 }

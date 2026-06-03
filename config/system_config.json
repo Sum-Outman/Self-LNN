@@ -1,6 +1,6 @@
 {
   "version": "1.5.0",
-  "state_dimension": 128,
+  "state_dimension": 256,
   "multimodal_channels": 64,
   "memory_capacity": 10000,
   "max_concurrent_tasks": 100,

@@ -941,7 +941,8 @@ int arch_controller_structural_mutate(ArchitectureController* controller,
         return SELFLNN_ERROR_INVALID_ARGUMENT;
     }
 
-    req.confidence = 0.65f; /* 演化引擎的结构变异默认较高置信度 */
+    req.confidence = (controller->config.min_confidence_threshold < 0.6f) 
+        ? 0.65f : controller->config.min_confidence_threshold + 0.05f; /* 结构变异默认置信度略高于最低阈值 */
     log_info("[架构控制器] 结构变异: %s", req.reason);
     return arch_controller_submit_change(controller, lnn, &req, result);
 }

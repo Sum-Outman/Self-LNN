@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file cfc_cell.h
  * @brief 封闭形式连续时间单元（CfC Cell）
  * 
@@ -280,6 +280,7 @@ struct CfCCell {
      * cfc_closed_form_solution据此动态调整有效时间常数。
      * use_laplace_modulation和laplace_stability_alpha来自CfCCellConfig。 */
     float laplace_stability_score;
+    void* liquid_scaling_mutex;      /**< 液时域缩放递归防护互斥锁（多线程安全） */
 };
 #endif
 

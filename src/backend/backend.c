@@ -444,10 +444,13 @@ static const struct {
     {"/api/dataset/augment", "POST", "对数据集进行增强", "dataset"},
     {"/api/knowledge/add", "POST", "添加知识条目", "knowledge"},
     {"/api/knowledge/entry/{id}", "GET", "查询知识条目", "knowledge"},
+    {"/api/knowledge/entry/{id}", "DELETE", "删除知识条目", "knowledge"},
     {"/api/knowledge/stats", "GET", "知识库统计信息", "knowledge"},
     {"/api/knowledge/export", "GET", "导出知识库", "knowledge"},
     {"/api/memory/add", "POST", "添加记忆条目", "memory"},
     {"/api/memory/entry/{id}", "GET", "查询记忆条目", "memory"},
+    {"/api/memory/entry/{id}", "DELETE", "删除记忆条目", "memory"},
+    {"/api/memory/entry/{id}", "PUT", "更新记忆条目", "memory"},
     {"/api/memory/export", "GET", "导出记忆数据", "memory"},
     {"/api/memory/clear", "POST", "清除记忆数据", "memory"},
     {"/api/memory/search", "POST", "搜索记忆条目", "memory"},
@@ -2411,10 +2414,17 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 记忆 === */
     if (strcmp(p, "/api/memory") == 0)                    return API_GET_MEMORY;
     if (strcmp(p, "/api/memory/add") == 0)                return API_POST_MEMORY_ADD;
-/* P0修复 - 根据method区分GET/DELETE，防止路由method不匹配。
-     * DELETE与GET共用一个处理器（handle_api_get_memory_entry内部处理），后续可扩展独立DELETE处理器 */
-    if (strcmp(p, "/api/memory/entry") == 0)              return API_GET_MEMORY_ENTRY;
-    if (strncmp(p, "/api/memory/entry/", 19) == 0)        return API_GET_MEMORY_ENTRY;
+/* P0修复 - 根据method区分GET/DELETE/PUT，防止路由method不匹配。 */
+    if (strcmp(p, "/api/memory/entry") == 0) {
+        if (method && strcmp(method, "DELETE") == 0) return API_DELETE_MEMORY_ENTRY;
+        if (method && strcmp(method, "PUT") == 0) return API_PUT_MEMORY_ENTRY;
+        return API_GET_MEMORY_ENTRY;
+    }
+    if (strncmp(p, "/api/memory/entry/", 19) == 0) {
+        if (method && strcmp(method, "DELETE") == 0) return API_DELETE_MEMORY_ENTRY;
+        if (method && strcmp(method, "PUT") == 0) return API_PUT_MEMORY_ENTRY;
+        return API_GET_MEMORY_ENTRY;
+    }
     if (strcmp(p, "/api/memory/export") == 0)             return API_POST_MEMORY_EXPORT;
     if (strcmp(p, "/api/memory/clear") == 0)              return API_POST_MEMORY_CLEAR;
     if (strcmp(p, "/api/memory/search") == 0)             return API_POST_MEMORY_SEARCH;
@@ -20775,6 +20785,137 @@ static int handle_api_get_memory_entry(BackendServer* server,
     return 0;
 }
 
+/* ZSFKKK-修复(HIGH-04): 删除记忆条目 DELETE /api/memory/entry/{key} */
+static int handle_api_delete_memory_entry(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt; (void)data; (void)len;
+    if (!server->memory_manager) {
+        char* j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"success\":false,\"memory_delete\":{\"error\":\"记忆管理器不可用\"}}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
+        }
+        return 0;
+    }
+    char key[256] = {0};
+    /* 从URL路径中提取entry key /api/memory/entry/XXX */
+    if (server->request_path[0]) {
+        const char* prefix = "/api/memory/entry/";
+        const char* pos = strstr(server->request_path, prefix);
+        if (pos) {
+            pos += strlen(prefix);
+            if (*pos) {
+                const char* end = pos;
+                while (*end && *end != '/' && *end != '?' && *end != ' ') end++;
+                size_t klen = (size_t)(end - pos);
+                if (klen > 0 && klen < sizeof(key)) {
+                    memcpy(key, pos, klen);
+                    key[klen] = '\0';
+                }
+            }
+        }
+    }
+    if (key[0] == '\0') {
+        char* j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"success\":false,\"memory_delete\":{\"error\":\"请提供key参数指定要删除的记忆条目\"}}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 400;
+        }
+        return 0;
+    }
+    int result = memory_manager_forget(server->memory_manager, key);
+    char* j = (char*)safe_malloc(384);
+    if (j) {
+        if (result == 0) {
+            snprintf(j, 384, "{\"success\":true,\"memory_delete\":{\"key\":\"%s\",\"status\":\"已删除\"}}", key);
+            resp->status_code = 200;
+        } else {
+            snprintf(j, 384, "{\"success\":false,\"memory_delete\":{\"key\":\"%s\",\"error\":\"删除失败，记忆条目不存在\"}}", key);
+            resp->status_code = 404;
+        }
+        resp->data = j; resp->data_length = strlen(j);
+    }
+    return 0;
+}
+
+/* ZSFKKK-修复(HIGH-04): 更新记忆条目 PUT /api/memory/entry/{key} */
+static int handle_api_put_memory_entry(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt;
+    if (!server->memory_manager) {
+        char* j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"success\":false,\"memory_update\":{\"error\":\"记忆管理器不可用\"}}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
+        }
+        return 0;
+    }
+    char key[256] = {0};
+    /* 从URL路径中提取entry key /api/memory/entry/XXX */
+    if (server->request_path[0]) {
+        const char* prefix = "/api/memory/entry/";
+        const char* pos = strstr(server->request_path, prefix);
+        if (pos) {
+            pos += strlen(prefix);
+            if (*pos) {
+                const char* end = pos;
+                while (*end && *end != '/' && *end != '?' && *end != ' ') end++;
+                size_t klen = (size_t)(end - pos);
+                if (klen > 0 && klen < sizeof(key)) {
+                    memcpy(key, pos, klen);
+                    key[klen] = '\0';
+                }
+            }
+        }
+    }
+    if (key[0] == '\0') {
+        char* j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"success\":false,\"memory_update\":{\"error\":\"请提供key参数指定要更新的记忆条目\"}}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 400;
+        }
+        return 0;
+    }
+    /* 解析请求体中的更新数据 */
+    float update_data[256] = {0};
+    int data_size = 0;
+    if (data && len > 0) {
+        /* 尝试解析value字段作为浮点数数组 */
+        const char* val_start = strstr(data, "\"value\"");
+        if (val_start) {
+            val_start = strchr(val_start, '[');
+            if (val_start) {
+                val_start++;
+                const char* val_end = strchr(val_start, ']');
+                if (val_end && data_size < 256) {
+                    const char* p = val_start;
+                    while (p < val_end && data_size < 256) {
+                        while (*p == ' ' || *p == ',') p++;
+                        if (p >= val_end) break;
+                        char* np;
+                        update_data[data_size++] = (float)strtod(p, &np);
+                        p = np;
+                    }
+                }
+            }
+        }
+    }
+    int result = memory_manager_update(server->memory_manager, key, update_data, 
+                                       data_size > 0 ? data_size : 256, 0.1f);
+    char* j = (char*)safe_malloc(384);
+    if (j) {
+        if (result == 0) {
+            snprintf(j, 384, "{\"success\":true,\"memory_update\":{\"key\":\"%s\",\"data_size\":%d,\"status\":\"已更新\"}}", key, data_size > 0 ? data_size : 256);
+            resp->status_code = 200;
+        } else {
+            snprintf(j, 384, "{\"success\":false,\"memory_update\":{\"key\":\"%s\",\"error\":\"更新失败，记忆条目不存在\"}}", key);
+            resp->status_code = 404;
+        }
+        resp->data = j; resp->data_length = strlen(j);
+    }
+    return 0;
+}
+
 static int handle_api_get_memory_export(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)len;
@@ -24674,6 +24815,10 @@ static void init_handler_table(RequestHandler* table) {
 
 /* 学习/知识一致性检查 */
     table[350] = handle_api_post_learning_consistency;
+
+/* ZSFKKK-修复(HIGH-04): 记忆条目DELETE和PUT */
+    table[351] = handle_api_delete_memory_entry;
+    table[352] = handle_api_put_memory_entry;
 }
 /**
  * @brief 处理API请求（主分发器）

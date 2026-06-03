@@ -37,7 +37,7 @@ extern "C" {
  * 变更可组合：例如 EXPAND_HIDDEN + ADD_LAYER 可同时执行。
  */
 typedef enum {
-    ARCH_CHANGE_NONE = 0,              /**< 无变更（占位） */
+    ARCH_CHANGE_NONE = 0,              /**< 无变更（默认值/无操作） */
     ARCH_CHANGE_EXPAND_HIDDEN,         /**< 扩展隐藏层宽度（增加神经元） */
     ARCH_CHANGE_SHRINK_HIDDEN,         /**< 收缩隐藏层宽度（移除低激活神经元） */
     ARCH_CHANGE_ADD_LAYER,             /**< 增加网络层（在末尾追加新层） */

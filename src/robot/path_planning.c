@@ -14,10 +14,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h> /* ZSFJJJ-FIX: CLOCKS_PER_SEC 需要 time.h */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
+
+/* ZSFJJJ-FIX: slam_map_update_fn 回调类型定义。
+ * 该类型在头文件中缺失，导致编译错误 */
+typedef int (*slam_map_update_fn)(PlanGridMap* map, void* ctx);
 
 #define PLAN_MIN(a,b) (((a)<(b))?(a):(b))
 #define PLAN_MAX(a,b) (((a)>(b))?(a):(b))

@@ -493,6 +493,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         cell->config.laplace_stability_alpha = 0.3f;
     }
     cell->laplace_stability_score = 0.5f;  /* 中性起始值 */
+    cell->liquid_scaling_mutex = system_mutex_create(); /* 液时域缩放递归防护互斥锁 */
     
     // 分配状态
     cell->state = (CfCState*)safe_malloc(sizeof(CfCState));
@@ -1119,6 +1120,12 @@ void cfc_cell_free(CfCCell* cell) {
 
 /* cell_momentum_buffer/velocity_buffer不在CfCCell中，已在外部管理 */
 
+    // 释放液时域缩放互斥锁
+    if (cell->liquid_scaling_mutex) {
+        system_mutex_destroy(cell->liquid_scaling_mutex);
+        cell->liquid_scaling_mutex = NULL;
+    }
+
     // 释放单元结构
     safe_free((void**)&cell);
 }
@@ -1486,8 +1493,11 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         
         output[i] = output_gate * tanh_new;
         
-        /* 自适应时间常数（训练模式下由梯度驱动） */
-        if (cell->use_adaptive_tau) {
+        /* 自适应时间常数（仅当液时域缩放关闭时生效）。
+         * 当use_liquid_scaling=1时，compute_liquid_time_constants已接管τ计算，
+         * 且cfc_forward_liquid在调用cfc_forward前会覆盖time_constants，
+         * 此处的启发式更新仅用于非液时域模式下的自适应τ调整。 */
+        if (cell->use_adaptive_tau && !cell->use_liquid_scaling) {
             float activation_magnitude = fabsf(new_state);
             float beta = 2.0f;
             float target_tau = cell->min_time_constant + 
@@ -1616,7 +1626,9 @@ static int cfc_cell_dp54_step(CfCCell* cell, const float* input,
         cell->state->dp54_current_steps = steps;
     }
 
-    if (need_free) { safe_free((void**)&y_state); safe_free((void**)&workspace); }
+    /* 始终从堆释放（不再使用栈数组，避免conditionally-free复杂性） */
+    safe_free((void**)&y_state);
+    safe_free((void**)&workspace);
     return ret;
 }
 
@@ -1660,25 +1672,15 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
         return ret;
     }
 
-    /* 回退到固定步长Rosenbrock（传统模式） */
+    /* 回退到固定步长Rosenbrock（传统模式）。
+     * ZSFKKK-修复(LOW-04): 原使用栈数组float y[1024]+ws[8192]共约36KB栈空间，
+     * 对嵌入式平台或深度递归场景存在栈溢出风险。改为始终使用堆分配。 */
     size_t ws_size = ode_rosenbrock_workspace_size(n);
-    float y[sizeof(float) * 1024];
-    float ws[sizeof(float) * 8192];
-    float* y_state = y;
-    float* workspace = ws;
-    int need_free = 0;
-
-    if (n > 1024 || ws_size > 8192)
-    {
-        /* Z9-001: 统一使用safe_malloc替代malloc，避免与safe_free混用导致堆损坏 */
-        y_state = (float*)safe_malloc(n * sizeof(float));
-        workspace = (float*)safe_malloc(ws_size * sizeof(float));
-        if (!y_state || !workspace)
-        {
-            safe_free((void**)&y_state); safe_free((void**)&workspace);
-            return -1;
-        }
-        need_free = 1;
+    float* y_state = (float*)safe_malloc(n * sizeof(float));
+    float* workspace = (float*)safe_malloc(ws_size * sizeof(float));
+    if (!y_state || !workspace) {
+        safe_free((void**)&y_state); safe_free((void**)&workspace);
+        return -1;
     }
 
     memcpy(y_state, prev_state, n * sizeof(float));
@@ -4788,14 +4790,21 @@ int cfc_cell_forward_liquid(CfCCell* cell, const float* input, float* hidden_sta
     }
 
     // 步骤3: 使用更新后的时间常数执行标准前向传播
-    // ZSFJJJ-FIX: 修复无限递归Bug。
-    // cfc_cell_forward()第2239行检测use_liquid_scaling后会重新路由到本函数，
+    // 多线程安全：使用互斥锁保护标志位翻转，防止并发调用时竞态条件。
+    // cfc_cell_forward检测use_liquid_scaling后会重新路由到本函数，
     // 形成cfc_cell_forward_liquid → cfc_cell_forward → cfc_cell_forward_liquid的无限递归。
-    // 修复: 临时清除use_liquid_scaling标志，确保cfc_cell_forward直接进入ODE求解路径。
-    int saved_liquid_scaling = cell->use_liquid_scaling;
+    // 修复：临时清除use_liquid_scaling标志，确保cfc_cell_forward直接进入ODE求解路径。
+    int saved_liquid_scaling;
+    if (cell->liquid_scaling_mutex) {
+        system_mutex_lock(cell->liquid_scaling_mutex);
+    }
+    saved_liquid_scaling = cell->use_liquid_scaling;
     cell->use_liquid_scaling = 0;
     ret = cfc_cell_forward(cell, input, hidden_state);
     cell->use_liquid_scaling = saved_liquid_scaling;
+    if (cell->liquid_scaling_mutex) {
+        system_mutex_unlock(cell->liquid_scaling_mutex);
+    }
 
     // 步骤4: 如果需要，输出计算出的时间常数
     if (computed_tau) {

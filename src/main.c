@@ -59,6 +59,7 @@
 #include "selflnn/learning/multi_agent.h"                /* H-015: 多智能体协作 */
 #include "selflnn/robot/gazebo_bridge.h" /* Gazebo仿真桥接 */
 #include "selflnn/core/architecture_controller.h" /* ZSFJJJ-FIX: 动态架构控制器 */
+#include "selflnn/utils/json_parser.h" /* ZSFKKK: 正规JSON解析替代手写解析器 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1730,7 +1731,8 @@ static void agi_background_loop_iteration(void) {
      * 输出当前LNN架构统计，便于监控架构演化状态。
      * 此前arch_controller从未被主循环调用，仅通过self_cognition
      * 和evolution_engine的被动回调工作。主动审计确保变更记录可见。 */
-    if (g_arch_controller && ws_broadcast_counter % 60 == 0) {
+    if (g_arch_controller && g_ws_push_server &&
+        ((int)(now - g_start_time) % 600 == 0)) {
         void* lnn_stat = selflnn_get_shared_lnn();
         if (lnn_stat) {
             size_t neuron_count = 0, param_count = 0, hs = 0;
@@ -1739,8 +1741,6 @@ static void agi_background_loop_iteration(void) {
                 &neuron_count, &param_count, &hs, &num_layers) == 0) {
                 log_debug("[架构控制器] 神经元=%zu, 参数=%zu, 隐藏维度=%zu, 层数=%d",
                          neuron_count, param_count, hs, num_layers);
-            }
-            if (g_ws_push_server) {
                 char arch_buf[512];
                 snprintf(arch_buf, sizeof(arch_buf),
                     "{\"type\":\"architecture_status\",\"timestamp\":%lld,"
@@ -2369,7 +2369,9 @@ int main(int argc, char* argv)
 #endif
     printf("\n");
 
-/* 从 system_config.json 读取核心参数覆盖硬编码默认值 */
+/* ZSFKKK-修复(MED-07): 使用json_parser.c正规解析替代手写JSON解析器。
+ * 原手写解析器无嵌套对象/数组支持、无反斜杠转义处理、键名严格匹配，
+ * 配置文件格式变化时可能静默失败。json_parser.c是项目内置的完整递归下降解析器。 */
     {
         int sysjson_state_dim = 0, sysjson_mm_channels = 0;
         int sysjson_mem_cap = 0, sysjson_max_tasks = 0;
@@ -2386,68 +2388,42 @@ int main(int argc, char* argv)
                 if (syscontent) {
                     size_t rdsz = fread(syscontent, 1, (size_t)fsize, sysfp);
                     syscontent[rdsz] = '\0';
-                    /* 简单JSON键值解析：在 { "key": value, ... } 中查找目标键 */
-                    const char* sp = syscontent;
-                    while (*sp) {
-                        /* 跳过空白和非引号字符 */
-                        while (*sp && *sp != '"') sp++;
-                        if (!*sp) break;
-                        sp++; /* 跳过开引号 */
-                        /* 读取键名 */
-                        char keyname[64];
-                        int ki = 0;
-                        while (*sp && *sp != '"' && ki < 63) keyname[ki++] = *sp++;
-                        keyname[ki] = '\0';
-                        if (*sp == '"') sp++;
-                        /* 跳过 : */
-                        while (*sp && *sp != ':') sp++;
-                        if (*sp == ':') sp++;
-                        /* 跳过空白 */
-                        while (*sp == ' ' || *sp == '\t' || *sp == '\n' || *sp == '\r') sp++;
-                        /* 读值 */
-                        if (*sp == '"') {
-                            /* 字符串值 */
-                            sp++;
-                            int vi = 0;
-                            char valbuf[512];
-                            while (*sp && *sp != '"' && vi < 511) valbuf[vi++] = *sp++;
-                            valbuf[vi] = '\0';
-                            if (*sp == '"') sp++;
-                            if (strcmp(keyname, "model_path") == 0)
-                                strncpy(sysjson_model_path, valbuf, sizeof(sysjson_model_path) - 1);
-                            if (strcmp(keyname, "power_mode") == 0) {
-                                if (strcmp(valbuf, "power_saving") == 0 || strcmp(valbuf, "low") == 0)
-                                sysjson_power_mode = POWER_MODE_POWER_SAVING;
-                            else if (strcmp(valbuf, "high") == 0 || strcmp(valbuf, "performance") == 0)
-                                sysjson_power_mode = POWER_MODE_PERFORMANCE;
-                                else
-                                    sysjson_power_mode = POWER_MODE_BALANCED;
-                            }
-                            if (strcmp(keyname, "gpu_backend") == 0) {
-                                if (strcmp(valbuf, "cuda") == 0) sysjson_gpu_backend = GPU_BACKEND_CUDA;
-                                else if (strcmp(valbuf, "rocm") == 0) sysjson_gpu_backend = GPU_BACKEND_ROCM;
-                                else if (strcmp(valbuf, "opencl") == 0) sysjson_gpu_backend = GPU_BACKEND_OPENCL;
-                                else if (strcmp(valbuf, "vulkan") == 0) sysjson_gpu_backend = GPU_BACKEND_VULKAN;
-                                else if (strcmp(valbuf, "metal") == 0) sysjson_gpu_backend = GPU_BACKEND_METAL;
-                                else if (strcmp(valbuf, "cpu") == 0) sysjson_gpu_backend = GPU_BACKEND_CPU;
-                                else if (strcmp(valbuf, "auto") == 0) sysjson_gpu_backend = GPU_BACKEND_CPU;
-                                else sysjson_gpu_backend = GPU_BACKEND_CPU;
-                            }
-                        } else if (*sp >= '0' && *sp <= '9') {
-                            /* 数字值 */
-                            int ival = 0;
-                            while (*sp >= '0' && *sp <= '9') {
-                                ival = ival * 10 + (*sp - '0');
-                                sp++;
-                            }
-                            if (strcmp(keyname, "state_dimension") == 0) sysjson_state_dim = ival;
-                            if (strcmp(keyname, "multimodal_channels") == 0) sysjson_mm_channels = ival;
-                            if (strcmp(keyname, "memory_capacity") == 0) sysjson_mem_cap = ival;
-                            if (strcmp(keyname, "max_concurrent_tasks") == 0) sysjson_max_tasks = ival;
-                        } else {
-                            /* 跳过布尔值(true/false)或其他 */
-                            while (*sp && *sp != ',' && *sp != '}') sp++;
+                    /* 使用项目内置的完整JSON解析器 */
+                    JsonValue* root = json_parse(syscontent);
+                    if (root) {
+                        const char* model_path_str = json_get_string(root, "model_path");
+                        if (model_path_str && model_path_str[0]) {
+                            strncpy(sysjson_model_path, model_path_str, sizeof(sysjson_model_path) - 1);
                         }
+                        sysjson_state_dim = (int)json_get_number(root, "state_dimension");
+                        sysjson_mm_channels = (int)json_get_number(root, "multimodal_channels");
+                        sysjson_mem_cap = (int)json_get_number(root, "memory_capacity");
+                        sysjson_max_tasks = (int)json_get_number(root, "max_concurrent_tasks");
+                        /* power_mode: 字符串解析 */
+                        const char* pm_str = json_get_string(root, "power_mode");
+                        if (pm_str) {
+                            if (strcmp(pm_str, "power_saving") == 0 || strcmp(pm_str, "low") == 0)
+                                sysjson_power_mode = POWER_MODE_POWER_SAVING;
+                            else if (strcmp(pm_str, "high") == 0 || strcmp(pm_str, "performance") == 0)
+                                sysjson_power_mode = POWER_MODE_PERFORMANCE;
+                            else
+                                sysjson_power_mode = POWER_MODE_BALANCED;
+                        }
+                        /* gpu_backend: 字符串解析 */
+                        const char* gb_str = json_get_string(root, "gpu_backend");
+                        if (gb_str) {
+                            if (strcmp(gb_str, "cuda") == 0) sysjson_gpu_backend = GPU_BACKEND_CUDA;
+                            else if (strcmp(gb_str, "rocm") == 0) sysjson_gpu_backend = GPU_BACKEND_ROCM;
+                            else if (strcmp(gb_str, "opencl") == 0) sysjson_gpu_backend = GPU_BACKEND_OPENCL;
+                            else if (strcmp(gb_str, "vulkan") == 0) sysjson_gpu_backend = GPU_BACKEND_VULKAN;
+                            else if (strcmp(gb_str, "metal") == 0) sysjson_gpu_backend = GPU_BACKEND_METAL;
+                            else if (strcmp(gb_str, "cpu") == 0) sysjson_gpu_backend = GPU_BACKEND_CPU;
+                            else if (strcmp(gb_str, "auto") == 0) sysjson_gpu_backend = GPU_BACKEND_CPU;
+                            else sysjson_gpu_backend = GPU_BACKEND_CPU;
+                        }
+                        json_free(root);
+                    } else {
+                        fprintf(stderr, "警告: system_config.json JSON解析失败，使用默认参数\n");
                     }
                     safe_free((void**)&syscontent);
                     printf("[D8] 从 config/system_config.json 读取到参数:\n");
@@ -2876,7 +2852,7 @@ int main(int argc, char* argv)
                 }
 
                 /* 创建任务调度器（4级优先级、线程池集成） */
-                g_task_scheduler = task_scheduler_create;
+                g_task_scheduler = task_scheduler_create();
                 if (g_task_scheduler) {
                     printf("  任务调度器初始化成功（4级优先级队列）\n");
                 } else {
@@ -2924,7 +2900,7 @@ int main(int argc, char* argv)
         return 1;
     }
 
-    /* 启动WebSocket推送服务器（与HTTP共用8080端口，通过SO_REUSEADDR共享） */
+    /* 启动WebSocket推送服务器（独立端口8081） */
     {
         WSPushServer* ws_push = ws_push_server_create(SELFLNN_WEBSOCKET_PORT);
         if (ws_push) {

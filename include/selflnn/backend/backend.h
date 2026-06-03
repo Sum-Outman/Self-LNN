@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file backend.h
  * @brief 后端API接口
  * 
@@ -488,7 +488,11 @@ typedef enum {
     /* ===== 学习一致性检查 ===== */
     API_POST_LEARNING_CONSISTENCY = 350,     /**< 学习/知识一致性检查 /api/learning/consistency */
 
-    /* ===== L-016修复: 哨兵值紧随最高枚举值350，自动计算为351 ===== */
+    /* ===== 记忆条目DELETE/PUT (ZSFKKK-修复: HIGH-04) ===== */
+    API_DELETE_MEMORY_ENTRY = 351,           /**< 删除记忆条目 DELETE /api/memory/entry/{key} */
+    API_PUT_MEMORY_ENTRY = 352,              /**< 更新记忆条目 PUT /api/memory/entry/{key} */
+
+    /* ===== L-016修复: 哨兵值紧随最高枚举值 ===== */
     API_REQUEST_COUNT                        /**< 自动计算枚举最大值+1，反映API处理程序分发表大小 */
 } ApiRequestType;
 
