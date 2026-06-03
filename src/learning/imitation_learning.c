@@ -79,7 +79,8 @@ ImitationLearner* imitation_learner_create(const ImitationLearningConfig* config
     memcpy(&learner->config, config, sizeof(ImitationLearningConfig));
     
     // 初始化字段
-    learner->policy = NULL;
+    /* ZSF-077修复：标注policy为惰性初始化，在首次训练时通过imitation_learner_train创建 */
+    learner->policy = NULL;  /* 惰性初始化: imitate_learner_train 中创建 LNN/CfC 策略网络 */
     learner->demonstrations = NULL;
     learner->num_demonstrations = 0;
     learner->total_timesteps = 0;

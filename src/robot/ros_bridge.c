@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file ros_bridge.c
  * @brief SELF-LNN 与 ROS/ROS2 的桥接实现
  *
@@ -539,9 +539,10 @@ int ros_bridge_spin_once(RosBridge* bridge, int timeout_ms) {
 #endif
         if (n <= 0) break;
         
-        /* 解析WebSocket帧 */
+        /* ZSF-052修复：解析WebSocket帧，添加MASK位处理 */
         if ((unsigned char)buf[0] == 0x82) { /* FIN + Binary */
             if (n < 2) continue;
+            int is_masked = ((unsigned char)buf[1] & 0x80) != 0;
             size_t payload_offset = 2;
             size_t payload_len = (unsigned char)buf[1] & 0x7F;
             if (payload_len == 126) {
@@ -554,10 +555,24 @@ int ros_bridge_spin_once(RosBridge* bridge, int timeout_ms) {
                 for (int i = 0; i < 8; i++) payload_len = (payload_len << 8) | (unsigned char)buf[2 + i];
                 payload_offset = 10;
             }
+            /* ZSF-052修复：处理WebSocket MASK位 */
+            unsigned char mask_key[4] = {0, 0, 0, 0};
+            if (is_masked) {
+                if ((size_t)n < payload_offset + 4 + payload_len) continue;
+                for (int i = 0; i < 4; i++) mask_key[i] = (unsigned char)buf[payload_offset + i];
+                payload_offset += 4;
+            }
             if ((size_t)n < payload_offset + payload_len) continue;
             char* json_data = buf + payload_offset;
             size_t data_len = payload_len;
             
+            /* ZSF-052修复：如果帧被MASK，需要解掩码 */
+            if (is_masked) {
+                for (size_t i = 0; i < data_len; i++) {
+                    json_data[i] = (char)((unsigned char)json_data[i] ^ mask_key[i % 4]);
+                }
+            }
+
             /* 解析JSON中的topic和msg字段，匹配订阅回调 */
             char topic[256] = {0};
             for (size_t i = 0; i + 7 < data_len; i++) {

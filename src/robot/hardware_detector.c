@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file hardware_detector.c
  * @brief 硬件检测器实现 —— 统一硬件检测入口
  *
@@ -1146,6 +1146,8 @@ int hd_get_system_info(char* system_name, size_t max_len, char* os_version, size
 }
 
 int hd_benchmark_device(const HDDeviceInfo* device, HDBenchmarkType bench_type, HDBenchmarkResult* out) {
+    /* ZSF-078说明：基准测试使用纯CPU浮点运算。
+     * GPU设备通过gpu_get_device_info()获取真实性能评分，此函数为CPU补充测试。 */
     if (!device || !out) return -1;
     memset(out, 0, sizeof(HDBenchmarkResult));
     out->bench_type = bench_type;

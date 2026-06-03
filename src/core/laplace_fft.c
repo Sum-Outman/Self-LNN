@@ -26,7 +26,9 @@
 #endif
 
 static size_t fft_next_power_of_two(size_t n) {
+    /* ZSF-065修复：n=0时返回1（最小有效FFT大小） */
     size_t p = 1;
+    if (n == 0) return 1;
     while (p < n) p <<= 1;
     return p;
 }

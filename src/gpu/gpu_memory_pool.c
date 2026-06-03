@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu_memory_pool.c
  * @brief GPU内存池管理系统实现
  * 
@@ -2208,10 +2208,9 @@ static void* buddy_system_alloc(GpuMemoryPool* pool, size_t size, size_t alignme
         pool->stats.allocation_count++;
     }
     
-    // 如果需要，清零内存
+    // ZSF-031修复：恢复内存清零功能
     if (pool->config.zero_memory_on_alloc) {
-        // 通过GPU后端清零内存
-        // gpu_backend_memory_set(block->address, 0, block->size);
+        memset(block->address, 0, block->size);
     }
     
     return block->address;
@@ -2342,10 +2341,9 @@ static int buddy_system_free(GpuMemoryPool* pool, void* ptr) {
         pool->stats.free_count++;
     }
     
-    // 如果需要，清零内存
+    // ZSF-031修复：恢复释放时内存清零
     if (pool->config.zero_memory_on_free) {
-        // 通过GPU后端清零内存
-        // gpu_backend_memory_set(block->address, 0, block->size);
+        memset(block->address, 0, block->size);
     }
     
     return 0;

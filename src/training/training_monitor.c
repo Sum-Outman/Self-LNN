@@ -7,6 +7,14 @@
 #include <math.h>
 #include <time.h>
 
+/* ZSF-017修复：Windows平台需要windows.h用于GetSystemTimes API */
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 /* ============================================================================
  * 训练指标追踪实现
  * ============================================================================ */
@@ -814,17 +822,55 @@ int training_monitor_log_histogram(TrainingMonitor* monitor,
  * ============================================================================ */
 
 static float training_monitor_get_cpu_utilization_percent(const TrainingMonitor* tm) {
+    /* ZSF-017修复：使用真实OS API获取CPU利用率替代忙等待假实现 */
     if (!tm) return 0.0f;
-    if (tm->epochs_recorded <= 0 || tm->avg_epoch_seconds <= 0.0f) return 0.0f;
-    clock_t start = clock();
-    volatile float sum = 0.0f;
-    for (volatile int i = 0; i < 1000000; i++) sum += (float)i * 0.0001f;
-    clock_t end = clock();
-    float cpu_time_ms = (float)(end - start) * 1000.0f / (float)CLOCKS_PER_SEC;
-    float busy_ratio = (cpu_time_ms > 0.0f) ? (100.0f * cpu_time_ms / (cpu_time_ms + 1.0f)) : 0.0f;
-    float norm_ratio = (busy_ratio > 100.0f) ? 100.0f : busy_ratio;
-    (void)sum;
-    return norm_ratio;
+#ifdef _WIN32
+    FILETIME idle_time = {0}, kernel_time = {0}, user_time = {0};
+    if (GetSystemTimes(&idle_time, &kernel_time, &user_time)) {
+        static ULARGE_INTEGER last_idle = {{0}}, last_kernel = {{0}}, last_user = {{0}};
+        ULARGE_INTEGER idle, kernel, user;
+        idle.LowPart = idle_time.dwLowDateTime; idle.HighPart = idle_time.dwHighDateTime;
+        kernel.LowPart = kernel_time.dwLowDateTime; kernel.HighPart = kernel_time.dwHighDateTime;
+        user.LowPart = user_time.dwLowDateTime; user.HighPart = user_time.dwHighDateTime;
+        if (last_idle.QuadPart > 0) {
+            ULONGLONG idle_delta = idle.QuadPart - last_idle.QuadPart;
+            ULONGLONG total_delta = (kernel.QuadPart + user.QuadPart) - (last_kernel.QuadPart + last_user.QuadPart);
+            if (total_delta > 0) {
+                float cpu = 100.0f * (1.0f - (float)idle_delta / (float)total_delta);
+                last_idle = idle; last_kernel = kernel; last_user = user;
+                return cpu;
+            }
+        }
+        last_idle = idle; last_kernel = kernel; last_user = user;
+    }
+    return 0.0f;
+#else
+    FILE* fp = fopen("/proc/stat", "r");
+    if (fp) {
+        char line[256];
+        unsigned long long user_val, nice_val, system_val, idle_val, iowait_val, irq, softirq;
+        if (fgets(line, sizeof(line), fp) &&
+            sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu",
+                   &user_val, &nice_val, &system_val, &idle_val, &iowait_val, &irq, &softirq) >= 4) {
+            static unsigned long long prev_idle = 0, prev_total = 0;
+            unsigned long long total = user_val + nice_val + system_val + idle_val + iowait_val + irq + softirq;
+            unsigned long long idle_sum = idle_val + iowait_val;
+            if (prev_total > 0) {
+                unsigned long long total_d = total - prev_total;
+                unsigned long long idle_d = idle_sum - prev_idle;
+                if (total_d > 0) {
+                    float cpu = 100.0f * (1.0f - (float)idle_d / (float)total_d);
+                    prev_idle = idle_sum; prev_total = total;
+                    fclose(fp);
+                    return cpu;
+                }
+            }
+            prev_idle = idle_sum; prev_total = total;
+        }
+        fclose(fp);
+    }
+    return 0.0f;
+#endif
 }
 
 int training_monitor_get_gpu_metrics(TrainingMonitor* tm,

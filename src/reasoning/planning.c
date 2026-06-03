@@ -61,10 +61,8 @@
 
 /* 移除自定义LCG PRNG(plan_rng_next/plan_rng_uniform)，
  * 替换为密码学安全的secure_random_float()。
- * 原LCG确定性伪随机存在可预测性和分布偏差问题。 */
-
-/* 全局RNG状态（planning_system_create中初始化） */
-static uint64_t plan_rng_state = 0;
+ * 原LCG确定性伪随机存在可预测性和分布偏差问题。
+ * ZSF-071修复：移除已冗余的plan_rng_state全局变量 */
 
 static float plan_rng_uniform(float min, float max) {
     return min + (max - min) * secure_random_float();
@@ -1729,7 +1727,7 @@ PlanningSystem* planning_system_create(const PlanningConfig* config) {
     system->pareto_front_size = 0;
     system->pareto_front_indices = NULL;
     system->pareto_objectives = NULL;
-    plan_rng_state = (uint64_t)secure_random_int(UINT32_MAX) ^ ((uint64_t)time(NULL) << 32);
+    /* ZSF-071修复：移除plan_rng_state，使用secure_random初始化 */
 
     planning_temporal_constraint_network_create(system);
 

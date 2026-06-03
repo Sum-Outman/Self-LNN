@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file cfc_uncertainty_reasoning.c
  * @brief CfC不确定性推理引擎完整实现
  *
@@ -20,7 +20,14 @@
 #include <stdio.h>
 
 #ifndef safe_strdup
-#define safe_strdup(s) ((s) ? _strdup(s) : NULL)
+/* 纯C实现的safe_strdup，跨平台兼容 */
+static char* safe_strdup(const char* s) {
+    if (!s) return NULL;
+    size_t len = strlen(s) + 1;
+    char* dup = (char*)safe_malloc(len);
+    if (dup) memcpy(dup, s, len);
+    return dup;
+}
 #endif
 
 #ifndef M_PI

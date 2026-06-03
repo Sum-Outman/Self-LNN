@@ -1809,7 +1809,9 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
         if (layer_size == 0) break;
 
         const float* layer_y = y + offset;
+        /* ZSF-009修复：NULL检查避免未启用自适应时间常数时解引用空指针 */
         const float* tau = cell->time_constants;
+        const float default_tau_value = cell->config.time_constant > 0.001f ? cell->config.time_constant : 0.1f;
         size_t input_size = cell->config.input_size;
 
         for (size_t i = 0; i < layer_size; i++) {
@@ -1837,8 +1839,8 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
             }
             float act = tanhf(act_sum);
 
-            /* CfC RHS: dh/dt = (-forget_gate·h + input_gate·act) / τ */
-            float rh_tau = tau[i] > 0.001f ? tau[i] : 0.001f;
+            /* CfC RHS: dh/dt = (-forget_gate·h + input_gate·act) / τ - ZSF-009修复：NULL安全 */
+            float rh_tau = (tau) ? ((tau[i] > 0.001f) ? tau[i] : 0.001f) : default_tau_value;
             dydt[offset + i] = (-forget_gate * layer_y[i] + input_gate * act) / rh_tau;
         }
         offset += layer_size;

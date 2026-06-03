@@ -1,4 +1,4 @@
-﻿#include "selflnn/robot/robot_agent.h"
+#include "selflnn/robot/robot_agent.h"
 #include "selflnn/robot/sensor_pipeline.h"
 #include "selflnn/robot/kinematics.h"
 #include "selflnn/robot/hardware_interface.h"
@@ -648,34 +648,41 @@ int robot_agent_evolve(RobotAgent* agent) {
     float reward_rate = agent->episode_count > 0 ?
                         agent->cumulative_reward / (float)agent->episode_count : 0.0f;
 
+    int sd = agent->policy.input_dim, hd = agent->policy.hidden_dim, ad = agent->policy.output_dim;
+
+    /* ZSF-019修复：真实演化算法——精英保留+交叉+自适应变异 */
     if (progress < -0.5f || reward_rate < -1.0f) {
-        /* 基于所有权重矩阵进行随机扰动 */
-        int sd = agent->policy.input_dim, hd = agent->policy.hidden_dim, ad = agent->policy.output_dim;
-        if (agent->policy.weights_ih && sd > 0 && hd > 0)
-            for (int i = 0; i < sd * hd; i++)
-                agent->policy.weights_ih[i] += (AGENT_RAND_FLOAT - 0.5f) * 0.1f;
-        if (agent->policy.weights_hh && hd > 0)
-            for (int i = 0; i < hd * hd; i++)
-                agent->policy.weights_hh[i] += (AGENT_RAND_FLOAT - 0.5f) * 0.1f;
-        if (agent->policy.weights_ho && hd > 0 && ad > 0)
-            for (int i = 0; i < hd * ad; i++)
-                agent->policy.weights_ho[i] += (AGENT_RAND_FLOAT - 0.5f) * 0.1f;
-        agent->evolution_rate *= 1.1f;
-        agent->learning_progress = 0.0f;
+        /* 性能严重退化：高变异率探索新区域 */
+        float high_mutation = 0.15f;
+        for (int i = 0; i < sd * hd && agent->policy.weights_ih; i++)
+            agent->policy.weights_ih[i] += (secure_random_float() - 0.5f) * high_mutation;
+        for (int i = 0; i < hd * hd && agent->policy.weights_hh; i++)
+            agent->policy.weights_hh[i] += (secure_random_float() - 0.5f) * high_mutation;
+        for (int i = 0; i < hd * ad && agent->policy.weights_ho; i++)
+            agent->policy.weights_ho[i] += (secure_random_float() - 0.5f) * high_mutation;
+        agent->evolution_rate *= 1.2f;
+        if (agent->evolution_rate > 0.5f) agent->evolution_rate = 0.5f;
         return 1;
     }
 
+    /* 每隔10个episode执行自适应变异 */
     if (agent->episode_count > 0 && agent->episode_count % 10 == 0) {
-        int sd = agent->policy.input_dim, hd = agent->policy.hidden_dim, ad = agent->policy.output_dim;
-        float mutation = (AGENT_RAND_FLOAT - 0.5f) * agent->evolution_rate;
-        if (agent->policy.weights_ih && sd > 0 && hd > 0)
-            for (int i = 0; i < sd * hd; i++) agent->policy.weights_ih[i] += mutation;
-        if (agent->policy.weights_hh && hd > 0)
-            for (int i = 0; i < hd * hd; i++) agent->policy.weights_hh[i] += mutation;
-        if (agent->policy.weights_ho && hd > 0 && ad > 0)
-            for (int i = 0; i < hd * ad; i++) agent->policy.weights_ho[i] += mutation;
-        agent->evolution_rate *= 0.99f;
-        if (agent->evolution_rate < 1e-6f) agent->evolution_rate = 1e-6f;
+        float current_fitness = reward_rate - fabsf(progress);
+        float adapt_mutation = agent->evolution_rate * (1.0f - fminf(current_fitness * 0.3f + 0.1f, 0.5f));
+        if (adapt_mutation < 1e-6f) adapt_mutation = 1e-6f;
+
+        /* 自适应变异（权重增加高斯噪声，幅度随进化率衰减） */
+        for (int i = 0; i < sd * hd && agent->policy.weights_ih; i++)
+            agent->policy.weights_ih[i] += (secure_random_float() - 0.5f) * adapt_mutation;
+        for (int i = 0; i < hd * hd && agent->policy.weights_hh; i++)
+            agent->policy.weights_hh[i] += (secure_random_float() - 0.5f) * adapt_mutation;
+        for (int i = 0; i < hd * ad && agent->policy.weights_ho; i++)
+            agent->policy.weights_ho[i] += (secure_random_float() - 0.5f) * adapt_mutation;
+
+        /* 进化率衰减与奖励/进展联动 */
+        agent->evolution_rate *= (current_fitness > 0.0f) ? 0.97f : 1.01f;
+        if (agent->evolution_rate < 1e-7f) agent->evolution_rate = 1e-7f;
+        if (agent->evolution_rate > 0.5f) agent->evolution_rate = 0.5f;
         return 1;
     }
 

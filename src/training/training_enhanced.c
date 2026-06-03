@@ -1,4 +1,4 @@
-﻿#define SELFLNN_IMPLEMENTATION
+#define SELFLNN_IMPLEMENTATION
 #include "selflnn/training/training_enhanced.h"
 #include "selflnn/core/cfc_network.h"
 #include "selflnn/core/lnn.h"
@@ -621,6 +621,8 @@ int distillation_trainer_step(DistillationTrainer* trainer,
 
     CfCNetwork* cfc = student->cfc_network;
     if (cfc) {
+        /* ZSF-070标注：蒸馏路径使用cfc_backward直接更新权重（SGD模式）。
+         * 对于需要Adam/AdamW优化的场景，应改为：先累积梯度→调用optimizer_update。 */
         cfc_backward(cfc, error_buffer, student->gradient_buffer, trainer->learning_rate);
     }
 

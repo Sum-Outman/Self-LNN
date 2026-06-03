@@ -1,8 +1,11 @@
-﻿#include "selflnn/core/loss.h"
+#include "selflnn/core/loss.h"
 #include "selflnn/utils/memory_utils.h"
 #include <math.h>
 #include <float.h>
 #include <string.h>
+
+/* ZSF-048修复：使用1e-5替代FLT_EPSILON(1.19e-7)，提升Focal Loss数值稳定性 */
+#define FOCAL_EPS_SAFE 1e-5f
 
 /* H-002: 精简委托包装函数，仅为向后兼容保留。
  * 内部直接委托到 loss_compute_ex，无额外逻辑。 */
@@ -436,7 +439,7 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
                 float at = (t > 0.5f) ? alpha : 1.0f - alpha;
                 float grad_mod = at * powf(1.0f - pt, gamma);
                 float dpt_dp = (t > 0.5f) ? 1.0f : -1.0f;
-                float inner = gamma * logf(pt + FLT_EPSILON) / (1.0f - pt + FLT_EPSILON) - 1.0f / (pt + FLT_EPSILON);
+                float inner = gamma * logf(pt + FOCAL_EPS_SAFE) / (1.0f - pt + FOCAL_EPS_SAFE) - 1.0f / (pt + FOCAL_EPS_SAFE);
                 /* Z10-001修复: Focal Loss梯度符号修正。
                  * dFL/dp = α_t·(1-p_t)^γ · [1/p_t - γ·log(p_t)/(1-p_t)] (对dpt_dp=1)
                  * inner = γ·log(pt)/(1-pt) - 1/pt

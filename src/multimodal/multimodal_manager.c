@@ -210,25 +210,30 @@ int multimodal_manager_process(MultimodalManager* manager,
                                        vision_input, audio_input, text_input, sensor_input,
                                        unified_output);
 
-/* 时序特征计算移到这里——unified_signal已在encode中填充完毕 */
+/* ZSF-028修复：使用mutex保护的static变量替代无保护的static变量 */
     {
-        static float prev_frame_features[256] = {0};
-        static int has_prev_frame = 0;
+        static float s_prev_frame_features[256] = {0};
+        static int s_has_prev_frame = 0;
+        static MutexHandle s_frame_mutex = NULL;
+        if (!s_frame_mutex) s_frame_mutex = mutex_create();
+        mutex_lock(s_frame_mutex);
+        
         size_t tdim = (max_features < 256) ? max_features : 256;
         unified_output->temporal_features = (float*)safe_malloc(tdim * sizeof(float));
-        if (unified_output->temporal_features && has_prev_frame) {
+        if (unified_output->temporal_features && s_has_prev_frame) {
             unified_output->temporal_dimension = tdim;
             for (size_t d = 0; d < tdim; d++) {
-                unified_output->temporal_features[d] = unified_output->unified_signal[d] - prev_frame_features[d];
+                unified_output->temporal_features[d] = unified_output->unified_signal[d] - s_prev_frame_features[d];
             }
         } else if (unified_output->temporal_features) {
             unified_output->temporal_dimension = tdim;
             memset(unified_output->temporal_features, 0, tdim * sizeof(float));
         }
         for (size_t d = 0; d < tdim; d++) {
-            prev_frame_features[d] = unified_output->unified_signal[d];
+            s_prev_frame_features[d] = unified_output->unified_signal[d];
         }
-        has_prev_frame = 1;
+        s_has_prev_frame = 1;
+        mutex_unlock(s_frame_mutex);
     }
 
     if (result != 0) {
@@ -578,6 +583,9 @@ void multimodal_manager_reset(MultimodalManager* manager) {
     if (manager->unified_signal_processor) {
         unified_signal_processor_reset(manager->unified_signal_processor);
     }
+
+    /* ZSF-074修复：重置后需要重新进行投影矩阵惰性初始化 */
+    manager->extra_proj_initialized = 0;
 }
 
 /**

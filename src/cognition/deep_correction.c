@@ -97,21 +97,31 @@ struct DCCorrectionSystem {
     int total_count;
 } g_learned_causes[DC_MAX_LEARN_CAUSES];
 static int g_learned_causes_count = 0;
+/* ZSF-042修复：添加互斥锁保护g_learned_causes并发访问 */
+static MutexHandle g_causes_mutex = NULL;
 
 static float dc_get_cause_prior(DCErrorType type, const char* cause_name, float preset_prior) {
+    if (!g_causes_mutex) g_causes_mutex = mutex_create();
+    mutex_lock(g_causes_mutex);
     for (int i = 0; i < g_learned_causes_count; i++) {
         if (g_learned_causes[i].error_type == type &&
             strcmp(g_learned_causes[i].cause_name, cause_name) == 0) {
             if (g_learned_causes[i].total_count >= 3) {
-                return g_learned_causes[i].learned_prior * 0.7f + preset_prior * 0.3f;
+                float result = g_learned_causes[i].learned_prior * 0.7f + preset_prior * 0.3f;
+                mutex_unlock(g_causes_mutex);
+                return result;
             }
+            mutex_unlock(g_causes_mutex);
             return preset_prior;
         }
     }
+    mutex_unlock(g_causes_mutex);
     return preset_prior;
 }
 
 static void dc_update_cause_prior(DCErrorType type, const char* cause_name, int was_successful) {
+    if (!g_causes_mutex) g_causes_mutex = mutex_create();
+    mutex_lock(g_causes_mutex);
     for (int i = 0; i < g_learned_causes_count; i++) {
         if (g_learned_causes[i].error_type == type &&
             strcmp(g_learned_causes[i].cause_name, cause_name) == 0) {
@@ -119,6 +129,7 @@ static void dc_update_cause_prior(DCErrorType type, const char* cause_name, int 
             if (was_successful) g_learned_causes[i].success_count++;
             g_learned_causes[i].learned_prior =
                 (float)g_learned_causes[i].success_count / (float)g_learned_causes[i].total_count;
+            mutex_unlock(g_causes_mutex);
             return;
         }
     }
@@ -130,6 +141,7 @@ static void dc_update_cause_prior(DCErrorType type, const char* cause_name, int 
         g_learned_causes[g_learned_causes_count].learned_prior = was_successful ? 1.0f : 0.0f;
         g_learned_causes_count++;
     }
+    mutex_unlock(g_causes_mutex);
 }
 
 /*修复: 贝叶斯预设条件概率填充。

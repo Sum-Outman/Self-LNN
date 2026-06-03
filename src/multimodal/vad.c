@@ -230,14 +230,16 @@ int vad_compute_features(const float* audio_frame, int frame_samples,
             float* power_spectrum = (float*)safe_calloc(num_bins, sizeof(float));
             if (power_spectrum) {
                 float total_power = 0.0f;
+                /* ZSF-045修复：使用fft_real()替代O(n²)DFT计算功率谱 */
+                /* 保存输入副本用于fft_real（该函数需独立输入/输出数组） */
+                float* fft_input = (float*)safe_malloc(fft_n * sizeof(float));
+                if (fft_input) {
+                    memcpy(fft_input, freq2_r, fft_n * sizeof(float));
+                    fft_real(fft_input, fft_n, freq2_r, freq2_i);
+                    safe_free((void**)&fft_input);
+                }
                 for (int k = 0; k < num_bins; k++) {
-                    float real = 0.0f, imag = 0.0f;
-                    for (int n = 0; n < fft_n; n++) {
-                        float angle = 2.0f * 3.14159265358979323846f * k * n / fft_n;
-                        real += freq2_r[n] * cosf(angle);
-                        imag -= freq2_r[n] * sinf(angle);
-                    }
-                    float power = (real * real + imag * imag) / (fft_n * fft_n);
+                    float power = (freq2_r[k] * freq2_r[k] + freq2_i[k] * freq2_i[k]) / (fft_n * fft_n);
                     power_spectrum[k] = power;
                     total_power += power;
                 }

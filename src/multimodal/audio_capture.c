@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file audio_capture.c
  * @brief 真实音频硬件采集模块
  *
@@ -1057,8 +1057,13 @@ struct AudioCaptureContext {
     int is_capturing;
     void* backend_ctx;
 
-    float* fft_spectrum;
-    size_t fft_size;
+    /* ZSF-027修复：添加FFT频谱缓存和最近音频缓冲区 */
+    float* fft_spectrum;       /* 缓存的FFT功率谱 */
+    size_t fft_size;           /* FFT大小 */
+    float* recent_audio;       /* 最近采集的音频样本 */
+    size_t recent_audio_len;   /* recent_audio中的样本数 */
+    size_t recent_audio_cap;   /* recent_audio的容量 */
+    int fft_needs_update;      /* 标记频谱需要更新 */
 };
 typedef struct AudioCaptureContext AudioCaptureContext;
 
@@ -1118,6 +1123,10 @@ AudioCaptureContext* audio_capture_create(const char* device_id,
 
     ctx->fft_spectrum = NULL;
     ctx->fft_size = 0;
+    ctx->recent_audio = NULL;
+    ctx->recent_audio_len = 0;
+    ctx->recent_audio_cap = 0;
+    ctx->fft_needs_update = 1;
 
 #ifdef _WIN32
     ctx->backend_ctx = wasapi_capture_create(device_id, sample_rate, channels, bits_per_sample);
@@ -1144,20 +1153,44 @@ AudioCaptureContext* audio_capture_create(const char* device_id,
 /**
  * @brief 开始音频采集
  */
+/* ZSF-027修复：回调包装结构体（必须在包装函数之前定义） */
+typedef struct {
+    AudioCaptureContext* capture_ctx;
+    void (*original_callback)(const float* samples, size_t num_samples, void* user_data);
+    void* original_user_data;
+} CallbackWrapper;
+
+static void _audio_spectrum_callback(const float* samples, size_t num_samples, void* user_data) {
+    /* ZSF-027修复：音频回调包装器——先更新频谱再调用原始回调 */
+    CallbackWrapper* w = (CallbackWrapper*)user_data;
+    audio_capture_update_spectrum(w->capture_ctx, samples, num_samples);
+    if (w->original_callback) {
+        w->original_callback(samples, num_samples, w->original_user_data);
+    }
+}
+
 int audio_capture_start(AudioCaptureContext* ctx,
                          void (*callback)(const float* samples, size_t num_samples, void* user_data),
                          void* user_data) {
     if (!ctx || !callback) return -1;
 
+    /* 创建回调包装器，自动在音频到达时更新FFT频谱 */
+    CallbackWrapper* wrapper = (CallbackWrapper*)safe_malloc(sizeof(CallbackWrapper));
+    if (!wrapper) return -1;
+    wrapper->capture_ctx = ctx;
+    wrapper->original_callback = callback;
+    wrapper->original_user_data = user_data;
+
+    /* 使用包装器函数替代原始回调，wrapper作为user_data */
 #ifdef _WIN32
     if (ctx->platform == 0 && ctx->backend_ctx) {
-        int ret = wasapi_capture_start(ctx->backend_ctx, callback, user_data);
+        int ret = wasapi_capture_start(ctx->backend_ctx, _audio_spectrum_callback, (void*)wrapper);
         if (ret == 0) ctx->is_capturing = 1;
         return ret;
     }
 #elif defined(__linux__)
     if (ctx->platform == 1 && ctx->backend_ctx) {
-        int ret = alsa_capture_start(ctx->backend_ctx, callback, user_data);
+        int ret = alsa_capture_start(ctx->backend_ctx, _audio_spectrum_callback, (void*)wrapper);
         if (ret == 0) ctx->is_capturing = 1;
         return ret;
     }
@@ -1217,15 +1250,68 @@ void audio_capture_free(AudioCaptureContext* ctx) {
     }
 #endif
 
+    safe_free((void**)&ctx->recent_audio);
     safe_free((void**)&ctx->fft_spectrum);
     safe_free((void**)&ctx);
 }
 
-/* 获取音频频谱 */
+/* ZSF-027修复：音频频谱更新——在音频数据到达时调用，实时计算FFT功率谱 */
+int audio_capture_update_spectrum(AudioCaptureContext* ctx, const float* samples, size_t num_samples) {
+    if (!ctx || !samples || num_samples == 0) return -1;
+
+    /* 存储最近音频用于后续频谱查询 */
+    if (ctx->recent_audio_cap < num_samples) {
+        safe_free((void**)&ctx->recent_audio);
+        ctx->recent_audio = (float*)safe_malloc(num_samples * sizeof(float));
+        if (!ctx->recent_audio) return -1;
+        ctx->recent_audio_cap = num_samples;
+    }
+    memcpy(ctx->recent_audio, samples, num_samples * sizeof(float));
+    ctx->recent_audio_len = num_samples;
+
+    /* 计算FFT功率谱 */
+    int fft_n = 1;
+    while (fft_n < (int)num_samples) fft_n <<= 1;
+    if (fft_n > 4096) fft_n = 4096;
+
+    if (!ctx->fft_spectrum || ctx->fft_size != (size_t)fft_n) {
+        safe_free((void**)&ctx->fft_spectrum);
+        ctx->fft_spectrum = (float*)safe_malloc((size_t)(fft_n / 2 + 1) * sizeof(float));
+        if (!ctx->fft_spectrum) { ctx->fft_size = 0; return -1; }
+        ctx->fft_size = (size_t)(fft_n / 2 + 1);
+    }
+
+    /* 填充FFT输入并应用汉宁窗 */
+    float* fft_in = (float*)safe_calloc(fft_n, sizeof(float));
+    float* fft_out_i = (float*)safe_calloc(fft_n, sizeof(float));
+    if (!fft_in || !fft_out_i) {
+        safe_free((void**)&fft_in); safe_free((void**)&fft_out_i); return -1;
+    }
+    for (int i = 0; i < (int)num_samples && i < fft_n; i++) {
+        float window = 0.5f * (1.0f - cosf(2.0f * 3.14159265f * i / ((int)num_samples - 1)));
+        fft_in[i] = samples[i] * window;
+    }
+    fft_real(fft_in, fft_n, fft_in, fft_out_i);
+    for (int k = 0; k < fft_n / 2 + 1; k++) {
+        ctx->fft_spectrum[k] = (fft_in[k] * fft_in[k] + fft_out_i[k] * fft_out_i[k]) / (float)(fft_n * fft_n);
+    }
+    safe_free((void**)&fft_in);
+    safe_free((void**)&fft_out_i);
+    ctx->fft_needs_update = 0;
+    return 0;
+}
+
+/* 获取音频频谱 - ZSF-027修复：从预计算的FFT缓存中返回真实频谱 */
 int audio_capture_get_spectrum(void* capture, float* spectrum, size_t* size) {
     if (!capture || !spectrum || !size) return -1;
     AudioCaptureContext* ctx = (AudioCaptureContext*)capture;
     size_t out_size = *size;
+
+    /* 如果频谱需要更新且有最近音频数据，先更新频谱 */
+    if (ctx->fft_needs_update && ctx->recent_audio && ctx->recent_audio_len > 0) {
+        audio_capture_update_spectrum(ctx, ctx->recent_audio, ctx->recent_audio_len);
+    }
+
     if (ctx->fft_spectrum && ctx->fft_size > 0) {
         size_t copy_n = out_size < ctx->fft_size ? out_size : ctx->fft_size;
         memcpy(spectrum, ctx->fft_spectrum, copy_n * sizeof(float));

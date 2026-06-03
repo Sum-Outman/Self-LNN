@@ -145,8 +145,9 @@ class DialogueEnhanced {
             if (!response.ok) throw new Error('HTTP ' + response.status);
             return await response.blob();
         } catch (err) {
-            console.warn('后端TTS不可用，使用浏览器语音合成:', err.message);
-            return null;
+            /* ZSF-038修复：禁止降级到浏览器语音合成，返回明确错误 */
+            console.error('后端TTS合成失败，拒绝降级到浏览器:', err.message);
+            throw new Error('TTS合成失败: ' + err.message + '（根据系统规范，禁止降级处理）');
         }
     }
 

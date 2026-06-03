@@ -50,21 +50,21 @@ int pareto_front_extract(Population* pop, NSGA2IndividualData* obj_data,
     size_t pop_size = population_get_size(pop);
     if (pop_size == 0) return -1;
 
-    int* pareto_indices = (int*)malloc((size_t)pop_size * sizeof(int));
+    int* pareto_indices = (int*)safe_malloc((size_t)pop_size * sizeof(int));
     if (!pareto_indices) return -1;
 
     front_count = population_extract_pareto_front(pop, obj_data, pareto_indices);
     if (front_count <= 0) {
-        free(pareto_indices);
+        safe_free((void**)&pareto_indices);
         return -1;
     }
 
     int pareto_count = front_count;
 
     int alloc_size = pareto_count < 256 ? 256 : pareto_count;
-    front->entries = (ParetoFrontEntry*)calloc((size_t)alloc_size, sizeof(ParetoFrontEntry));
+    front->entries = (ParetoFrontEntry*)safe_calloc((size_t)alloc_size, sizeof(ParetoFrontEntry));
     if (!front->entries) {
-        free(pareto_indices);
+        safe_free((void**)&pareto_indices);
         return -1;
     }
     front->alloc_count = alloc_size;
@@ -91,7 +91,7 @@ int pareto_front_extract(Population* pop, NSGA2IndividualData* obj_data,
         }
     }
 
-    free(pareto_indices);
+    safe_free((void**)&pareto_indices);
     front->entry_count = pareto_count;
 
     for (int i = 0; i < num_objectives; i++) {
@@ -135,7 +135,7 @@ int pareto_front_compute_hypervolume(ParetoFront* front, const float* reference_
     int n = front->entry_count;
     int m = front->num_objectives;
 
-    int* indices = (int*)malloc((size_t)n * sizeof(int));
+    int* indices = (int*)safe_malloc((size_t)n * sizeof(int));
     if (!indices) return -1;
     for (int i = 0; i < n; i++) indices[i] = i;
 
@@ -169,7 +169,7 @@ int pareto_front_compute_hypervolume(ParetoFront* front, const float* reference_
         prev_obj0 = e->objectives[0];
     }
 
-    free(indices);
+    safe_free((void**)&indices);
     front->hypervolume = (float)hv;
     return 0;
 }
@@ -905,7 +905,7 @@ int pareto_moead_evolve(Population* pop, MultiObjectiveFunction obj_func,
     front->alloc_count = 0;
     front->num_objectives = m;
 
-    int* front_indices = (int*)malloc((size_t)num_weights * sizeof(int));
+    int* front_indices = (int*)safe_malloc((size_t)num_weights * sizeof(int));
     int front_count = 0;
 
     for (int i = 0; i < num_weights; i++) {
@@ -931,7 +931,7 @@ int pareto_moead_evolve(Population* pop, MultiObjectiveFunction obj_func,
     }
 
     int alloc_size = front_count < 256 ? 256 : front_count;
-    front->entries = (ParetoFrontEntry*)calloc((size_t)alloc_size, sizeof(ParetoFrontEntry));
+    front->entries = (ParetoFrontEntry*)safe_calloc((size_t)alloc_size, sizeof(ParetoFrontEntry));
     front->alloc_count = alloc_size;
 
     for (int i = 0; i < front_count; i++) {
@@ -949,7 +949,7 @@ int pareto_moead_evolve(Population* pop, MultiObjectiveFunction obj_func,
         }
     }
 
-    free(front_indices);
+    safe_free((void**)&front_indices);
     front->entry_count = front_count;
 
     for (int j = 0; j < m; j++) {
@@ -997,7 +997,7 @@ void pareto_front_destroy(ParetoFront* front) {
         }
     }
     if (front->entries) {
-        free(front->entries);
+        safe_free((void**)&front->entries);
         front->entries = NULL;
     }
     front->entry_count = 0;

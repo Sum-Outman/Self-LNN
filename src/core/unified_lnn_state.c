@@ -1,4 +1,4 @@
-﻿#include "selflnn/core/unified_lnn_state.h"
+#include "selflnn/core/unified_lnn_state.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
@@ -877,9 +877,10 @@ int unified_lnn_state_save(const UnifiedLNNState* state, const char* filepath) {
     FILE* f = fopen(filepath, "wb");
     if (!f) return -1;
 
-    /* 架构优化: ULNNSTATE2 包含门控矩阵 */
+    /* ZSF-064修复：写入10字节（"ULNNSTATE2"字符串长度），避免读取越界 */
     const char* header = "ULNNSTATE2";
-    fwrite(header, 1, 11, f);
+    size_t header_len = strlen(header);  /* = 10 */
+    fwrite(header, 1, header_len, f);
     fwrite(&state->config, sizeof(UnifiedLNNStateConfig), 1, f);
     fwrite(&state->step_count, sizeof(size_t), 1, f);
 
@@ -908,14 +909,16 @@ UnifiedLNNState* unified_lnn_state_load(const char* filepath) {
     FILE* f = fopen(filepath, "rb");
     if (!f) return NULL;
 
+    /* ZSF-064修复：读取10字节与保存一致 */
     char header[12] = {0};
-    if (fread(header, 1, 11, f) != 11) {
+    size_t header_len = 10;  /* "ULNNSTATE2"长度 */
+    if (fread(header, 1, header_len, f) != header_len) {
         fclose(f);
         return NULL;
     }
 
-    int is_v2 = (strncmp(header, "ULNNSTATE2", 11) == 0);
-    if (strncmp(header, "ULNNSTATE1", 11) != 0 && !is_v2) {
+    int is_v2 = (strncmp(header, "ULNNSTATE2", header_len) == 0);
+    if (strncmp(header, "ULNNSTATE1", header_len) != 0 && !is_v2) {
         fclose(f);
         return NULL;
     }
@@ -1080,9 +1083,11 @@ int unified_lnn_state_modality_contribution_monitor(UnifiedLNNState* state,
         }
 /* 检测模态污染——单一模态贡献超过70%时自动启用量化干预 */
         if (max_contribution / total_energy > 0.70f && state->step_count > 0) {
+            /* ZSF-011修复：pollution_warn_count保留static防止日志泛滥；
+             * consecutive_pollution_count改为_Thread_local避免多实例串扰 */
             static int pollution_warn_count = 0;
-            static int last_pollution_modality = -1;
-            static int consecutive_pollution_count = 0;
+            static _Thread_local int consecutive_pollution_count_tls = 0;
+            static _Thread_local int last_pollution_modality_tls = -1;
             const char* modality_names[] = {
                 "视觉", "音频", "文本", "传感器", "触觉", "本体感", "热感", "雷达", "电机"
             };
@@ -1097,9 +1102,9 @@ int unified_lnn_state_modality_contribution_monitor(UnifiedLNNState* state,
 /* 自动权重重平衡
              * 当某模态持续主导超过3步时，自动衰减其门控权重并提升弱势模态 */
             if (max_modality >= 0 && max_modality < UNIFIED_LNN_MAX_MODALITIES) {
-                if (max_modality == last_pollution_modality) {
-                    consecutive_pollution_count++;
-                    if (consecutive_pollution_count >= 3 && state->modality_isolation_enabled) {
+                if (max_modality == last_pollution_modality_tls) {
+                    consecutive_pollution_count_tls++;
+                    if (consecutive_pollution_count_tls >= 3 && state->modality_isolation_enabled) {
                         /* 衰减主导模态的跨模态门控权重 */
                         float attenuation = 0.85f;
                         for (int t = 0; t < UNIFIED_LNN_MAX_MODALITIES; t++) {
@@ -1110,7 +1115,7 @@ int unified_lnn_state_modality_contribution_monitor(UnifiedLNNState* state,
                         /* 放大弱势模态的自连接和融合门控 */
                         for (int m = 0; m < UNIFIED_LNN_MAX_MODALITIES; m++) {
                             if (m != max_modality && contributions[m] < 0.05f) {
-                                float boost = 1.0f + 0.1f * (float)consecutive_pollution_count;
+                                float boost = 1.0f + 0.1f * (float)consecutive_pollution_count_tls;
                                 if (boost > 1.5f) boost = 1.5f;
                                 state->cross_modal_gates[m][m] *= boost;
                                 state->cross_modal_gates[m][UNIFIED_LNN_MAX_MODALITIES] *= boost;
@@ -1132,9 +1137,9 @@ int unified_lnn_state_modality_contribution_monitor(UnifiedLNNState* state,
                         }
                     }
                 } else {
-                    consecutive_pollution_count = 1;
+                    consecutive_pollution_count_tls = 1;
                 }
-                last_pollution_modality = max_modality;
+                last_pollution_modality_tls = max_modality;
             }
         }
     }

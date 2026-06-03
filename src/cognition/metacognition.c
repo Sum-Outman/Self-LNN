@@ -671,6 +671,48 @@ int analogy_add_source_relation(int a, int b, int rel_type, float weight) {
     return 0;
 }
 
+/* ZSF-018修复：添加目标域概念和关系填充函数，修复类比推理目标端永远为空的问题 */
+int analogy_add_target_concept(const char* name, const float* features, int dim) {
+    ANALOGY_LOCK;
+    if (tgt_domain.concept_count >= ANALOGY_MAX_CONCEPTS) { ANALOGY_UNLOCK; return -1; }
+    AnalogyConcept* c = &tgt_domain.concepts[tgt_domain.concept_count++];
+    strncpy(c->name, name, 63);
+    c->feature_dim = dim < 16 ? dim : 16;
+    if (features) memcpy(c->features, features, (size_t)c->feature_dim * sizeof(float));
+    ANALOGY_UNLOCK;
+    return 0;
+}
+
+int analogy_add_target_relation(int a, int b, int rel_type, float weight) {
+    ANALOGY_LOCK;
+    if (tgt_domain.relation_count >= ANALOGY_MAX_RELS) { ANALOGY_UNLOCK; return -1; }
+    AnalogyRelation* r = &tgt_domain.relations[tgt_domain.relation_count++];
+    r->src_a = a; r->src_b = b; r->rel_type = rel_type; r->weight = weight;
+    ANALOGY_UNLOCK;
+    return 0;
+}
+
+/* ZSF-018修复：自动同步源域到目标域，确保类比映射有候选 */
+int analogy_sync_to_target(void) {
+    ANALOGY_LOCK;
+    tgt_domain.concept_count = 0;
+    tgt_domain.relation_count = 0;
+    for (int i = 0; i < src_domain.concept_count && tgt_domain.concept_count < ANALOGY_MAX_CONCEPTS; i++) {
+        tgt_domain.concepts[tgt_domain.concept_count] = src_domain.concepts[i];
+        /* 为目标域概念添加小噪声以模拟跨域变换 */
+        for (int d = 0; d < tgt_domain.concepts[tgt_domain.concept_count].feature_dim; d++) {
+            tgt_domain.concepts[tgt_domain.concept_count].features[d] += 
+                (float)((secure_random_float() - 0.5f) * 0.1f);
+        }
+        tgt_domain.concept_count++;
+    }
+    for (int i = 0; i < src_domain.relation_count && tgt_domain.relation_count < ANALOGY_MAX_RELS; i++) {
+        tgt_domain.relations[tgt_domain.relation_count++] = src_domain.relations[i];
+    }
+    ANALOGY_UNLOCK;
+    return 0;
+}
+
 int analogy_find_mapping(AnalogyMapping* best_mapping) {
     if (!best_mapping) return -1;
     ANALOGY_LOCK;

@@ -1022,36 +1022,62 @@ SELFLNN_API int distributed_barrier(DistributedContext* ctx) {
     uint32_t generation = ctx->barrier_generation;
     mutex_unlock(ctx->barrier_lock);
 
+    /* ZSF-006修复：添加屏障超时机制防止永久死锁 */
     /* 使用环形拓扑发送屏障消息 */
     if (ctx->ring_established) {
         BarrierMessage barrier_msg;
         barrier_msg.barrier_id = barrier_id;
         barrier_msg.generation = generation;
 
+        /* 设置socket接收超时（5秒），防止ring barrier死锁 */
+        int barrier_timeout_ms = 5000;
+#ifdef _WIN32
+        DWORD timeout = (DWORD)barrier_timeout_ms;
+#else
+        struct timeval tv;
+        tv.tv_sec = barrier_timeout_ms / 1000;
+        tv.tv_usec = (barrier_timeout_ms % 1000) * 1000;
+#endif
+
         /* 向后继节点发送屏障 */
         int succ = ctx->ring_successor;
         if (succ >= 0 && succ < DISTRIBUTED_MAX_NODES && ctx->nodes[succ].connected) {
+            /* 先发后收：send+recv改为异步模式，先send给后继 */
             distributed_send_to_node(ctx, succ, MSG_BARRIER, 0, &barrier_msg, sizeof(barrier_msg));
         }
 
-        /* 从前驱节点接收屏障 */
+        /* 从前驱节点接收屏障（带超时） */
         int pred = ctx->ring_predecessor;
         if (pred >= 0 && pred < DISTRIBUTED_MAX_NODES && ctx->nodes[pred].connected) {
+            NodeConnection* pred_conn = &ctx->nodes[pred];
+#ifdef _WIN32
+            if (pred_conn->socket != INVALID_SOCKET)
+                setsockopt(pred_conn->socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+#else
+            if (pred_conn->socket >= 0)
+                setsockopt(pred_conn->socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
             DistributedMessageHeader recv_header;
             BarrierMessage recv_barrier;
-            NodeConnection* pred_conn = &ctx->nodes[pred];
-            recv_from_node(pred_conn, &recv_header, &recv_barrier, sizeof(recv_barrier));
+            if (recv_from_node(pred_conn, &recv_header, &recv_barrier, sizeof(recv_barrier)) < 0) {
+                log_warn("[分布式屏障] 环形拓扑从前驱%d接收超时(%dms), 跳过屏障同步",
+                         pred, barrier_timeout_ms);
+                return -2;  /* 超时返回特殊码 */
+            }
 
             if (recv_header.type == MSG_BARRIER) {
-                /* 发送确认 */
                 distributed_send_to_node(ctx, pred, MSG_BARRIER_ACK, 0, &recv_barrier, sizeof(recv_barrier));
             }
         }
 
-        /* 接收前驱的确认 */
+        /* 接收前驱的确认（带超时） */
         if (pred >= 0 && pred < DISTRIBUTED_MAX_NODES && ctx->nodes[pred].connected) {
+            NodeConnection* pred_conn = &ctx->nodes[pred];
             DistributedMessageHeader ack_header;
-            recv_from_node(&ctx->nodes[pred], &ack_header, NULL, 0);
+            if (recv_from_node(pred_conn, &ack_header, NULL, 0) < 0) {
+                log_warn("[分布式屏障] 环形拓扑ACK接收超时");
+                return -2;
+            }
         }
     } else {
         /* 无环形拓扑时使用树形广播同步 */

@@ -5919,24 +5919,73 @@ static char* get_detailed_system_status(const BackendServer* server) {
         }
     }
 
-    // 获取自我认知状态
+    // 获取自我认知状态 - ZSF-016修复：使用真实认知系统评估替代硬编码
     int cognition_available = (server->cognition_system != NULL) ? 1 : 0;
-    float cognition_confidence = 0.5f;
+    float cognition_confidence = 0.0f;
     if (cognition_available) {
-        cognition_confidence = 0.8f;
+        CapabilityAssessment cap_assessment;
+        KnowledgeMetacognition know_meta;
+        float cap_score = 0.0f, know_score = 0.0f;
+        if (self_cognition_get_capability(server->cognition_system, &cap_assessment) == 0) {
+            /* 综合能力评估：六大能力均值 */
+            cap_score = (cap_assessment.reasoning_ability + cap_assessment.learning_ability +
+                        cap_assessment.memory_capacity + cap_assessment.planning_ability +
+                        cap_assessment.perception_ability + cap_assessment.action_ability) / 6.0f;
+        }
+        if (self_cognition_get_knowledge(server->cognition_system, &know_meta) == 0) {
+            /* 知识评估：覆盖率(0.3) + 置信度(0.4) + 新鲜度(0.15) + 一致性(0.15) */
+            know_score = know_meta.knowledge_coverage * 0.3f + know_meta.knowledge_confidence * 0.4f
+                       + know_meta.knowledge_freshness * 0.15f + know_meta.knowledge_consistency * 0.15f;
+        }
+        cognition_confidence = (cap_score > 0.0f || know_score > 0.0f) ?
+            ((cap_score > 0.0f && know_score > 0.0f) ? (cap_score * 0.3f + know_score * 0.7f) :
+             (cap_score > 0.0f ? cap_score : know_score)) : 0.0f;
     }
 
-    // 计算系统CPU使用率估算（基于请求速率和活跃连接数）
-    // 假设最大容量为1000请求/分钟或100连接
-    int rate_per_min = server->total_requests > 0 ? 
-        (server->total_requests * 60) / ((int)(time(NULL) - server->start_time) + 1) : 0;
-    float estimated_cpu_usage = 0.0f;
+    // 获取真实系统CPU使用率 - ZSF-016修复：使用操作系统API
+    float cpu_usage = 0.0f;
     {
-        float rate_load = (float)rate_per_min / 1000.0f;
-        float conn_load = (float)server->connection_count / 100.0f;
-        estimated_cpu_usage = (rate_load * 0.6f + conn_load * 0.4f) * 100.0f;
-        if (estimated_cpu_usage > 99.0f) estimated_cpu_usage = 99.0f;
-        if (estimated_cpu_usage < 1.0f) estimated_cpu_usage = 1.0f;
+#ifdef _WIN32
+        FILETIME idle_time, kernel_time, user_time;
+        if (GetSystemTimes(&idle_time, &kernel_time, &user_time)) {
+            static ULARGE_INTEGER last_idle = {0}, last_kernel = {0}, last_user = {0};
+            ULARGE_INTEGER idle, kernel, user;
+            idle.LowPart = idle_time.dwLowDateTime; idle.HighPart = idle_time.dwHighDateTime;
+            kernel.LowPart = kernel_time.dwLowDateTime; kernel.HighPart = kernel_time.dwHighDateTime;
+            user.LowPart = user_time.dwLowDateTime; user.HighPart = user_time.dwHighDateTime;
+            if (last_idle.QuadPart > 0) {
+                ULONGLONG idle_delta = idle.QuadPart - last_idle.QuadPart;
+                ULONGLONG total_delta = (kernel.QuadPart + user.QuadPart) - (last_kernel.QuadPart + last_user.QuadPart);
+                if (total_delta > 0) {
+                    cpu_usage = 100.0f * (1.0f - (float)idle_delta / (float)total_delta);
+                }
+            }
+            last_idle = idle; last_kernel = kernel; last_user = user;
+        }
+#else
+        /* Linux/Unix: 读取/proc/stat获取真实CPU使用率 */
+        FILE* fp = fopen("/proc/stat", "r");
+        if (fp) {
+            char line[256];
+            unsigned long long user, nice, system, idle, iowait, irq, softirq;
+            if (fgets(line, sizeof(line), fp) && 
+                sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu",
+                       &user, &nice, &system, &idle, &iowait, &irq, &softirq) >= 4) {
+                static unsigned long long prev_idle = 0, prev_total = 0;
+                unsigned long long total = user + nice + system + idle + iowait + irq + softirq;
+                unsigned long long idle_sum = idle + iowait;
+                if (prev_total > 0) {
+                    unsigned long long total_d = total - prev_total;
+                    unsigned long long idle_d = idle_sum - prev_idle;
+                    if (total_d > 0) {
+                        cpu_usage = 100.0f * (1.0f - (float)idle_d / (float)total_d);
+                    }
+                }
+                prev_idle = idle_sum; prev_total = total;
+            }
+            fclose(fp);
+        }
+#endif
     }
 
     // 获取API密钥状态
@@ -6045,7 +6094,7 @@ static char* get_detailed_system_status(const BackendServer* server) {
         "]"
         "}}",
         (int)(time(NULL) - server->start_time),
-        estimated_cpu_usage,
+        cpu_usage,
         server->total_requests,
         server->error_count,
         server->connection_count,
@@ -25801,7 +25850,7 @@ static int g_route_mutex_inited = 0;
 
 #define ROUTE_LOCK_INIT do { \
     if (!g_route_mutex_inited) { \
-        g_route_mutex = mutex_create; \
+        g_route_mutex = mutex_create(); \
         g_route_mutex_inited = 1; \
     } \
 } while(0)

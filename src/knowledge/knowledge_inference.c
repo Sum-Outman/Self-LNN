@@ -304,12 +304,20 @@ int ki_transitive_infer(KnowledgeInferenceEngine* kie, const KIFact* facts, int 
             }
         }
 
+        /* ZSF-047优化：统计直接边数量，少于2条边时不可能存在传递关系 */
+        int direct_edges = 0;
+        for (int i = 0; i < n * n; i++) {
+            if (R[i]) direct_edges++;
+        }
+
         /* 3.2 保存原始边矩阵（用于区分直接边和传递边） */
         unsigned char* R_orig = (unsigned char*)safe_malloc(mat_bytes);
         if (R_orig) memcpy(R_orig, R, mat_bytes);
 
-        /* 3.3 调用Warshall全传递闭包算法计算所有间接关系 */
-        warshall_closure(R, edge_conf, n);
+        /* 3.3 ZSF-047优化：仅当存在≥2条直接边时才计算传递闭包 */
+        if (direct_edges >= 2 && n <= 128) {
+            warshall_closure(R, edge_conf, n);
+        } /* 否则无传递关系可推导 */
 
         /* 3.4 提取新增的传递边（不在原始直接边中）作为推理结果 */
         for (int i = 0; i < n && sc < KI_MAX_CHAIN; i++) {
@@ -2127,7 +2135,7 @@ static TemporalReasoner temp_reasoner = {{0}, 0, 0, {0}};
 
 static void temporal_reasoner_lock(void) {
     if (!g_temp_reasoner_mutex) {
-        g_temp_reasoner_mutex = mutex_create;
+        g_temp_reasoner_mutex = mutex_create();
     }
     if (g_temp_reasoner_mutex) {
         mutex_lock(g_temp_reasoner_mutex);

@@ -81,6 +81,11 @@ typedef struct SwarmController
     int udp_port_base;
     int udp_initialized;
     char network_buffer[8192];
+
+    /* ZSF-023修复：死锁检测状态从static移至实例结构体，支持多SwarmController */
+    float deadlock_prev_positions[SWARM_FORMATION_MAX][3];
+    int deadlock_stall_counter[SWARM_FORMATION_MAX];
+    int deadlock_check_initialized;
 } SwarmController;
 
 static void swarm_lock(SwarmController* controller)
@@ -795,16 +800,15 @@ int swarm_update_consensus(SwarmController* controller, float* shared_state, int
     {
         if (!state->robots[i].is_active) continue;
         int nc = state->neighbor_counts[i];
+        float* robot_state = state->robots[i].position;  /* 各机器人状态 */
         for (int j = 0; j < nc; j++)
         {
             int nidx = swarm_find_robot_index(controller, state->neighbors[i][j].robot_id);
             if (nidx < 0 || !state->robots[nidx].is_active) continue;
             total_neighbors++;
-            if (i == 0)
-            {
-                for (int d = 0; d < state_dim; d++)
-                    consensus_avg[d] += shared_state[d];
-            }
+            /* ZSF-022修复：移除i==0条件，对所有邻居对加权平均 */
+            for (int d = 0; d < state_dim && d < 3; d++)
+                consensus_avg[d] += state->robots[nidx].position[d];
         }
     }
 
@@ -940,15 +944,12 @@ int swarm_deadlock_detect_and_resolve(SwarmController* controller) {
     if (!controller || !controller->is_initialized) return 0;
     swarm_lock(controller);
 
-    static float prev_positions[SWARM_FORMATION_MAX][3] = {{0}};
-    static int stall_counter[SWARM_FORMATION_MAX] = {0};
-    static int check_initialized = 0;
-
-    if (!check_initialized) {
+    /* ZSF-023修复：使用实例存储替代static变量，支持多SwarmController实例 */
+    if (!controller->deadlock_check_initialized) {
         for (int i = 0; i < controller->state.robot_count && i < SWARM_FORMATION_MAX; i++) {
-            memcpy(prev_positions[i], controller->state.robots[i].position, 3 * sizeof(float));
+            memcpy(controller->deadlock_prev_positions[i], controller->state.robots[i].position, 3 * sizeof(float));
         }
-        check_initialized = 1;
+        controller->deadlock_check_initialized = 1;
         swarm_unlock(controller);
         return 0;
     }
@@ -957,19 +958,19 @@ int swarm_deadlock_detect_and_resolve(SwarmController* controller) {
     float deadlock_threshold = 0.001f;
 
     for (int i = 0; i < controller->state.robot_count && i < SWARM_FORMATION_MAX; i++) {
-        float dx = controller->state.robots[i].position[0] - prev_positions[i][0];
-        float dy = controller->state.robots[i].position[1] - prev_positions[i][1];
+        float dx = controller->state.robots[i].position[0] - controller->deadlock_prev_positions[i][0];
+        float dy = controller->state.robots[i].position[1] - controller->deadlock_prev_positions[i][1];
         float dist = sqrtf(dx*dx + dy*dy);
 
         if (dist < deadlock_threshold && controller->state.robots[i].velocity[0] != 0.0f) {
-            stall_counter[i]++;
+            controller->deadlock_stall_counter[i]++;
         } else {
-            stall_counter[i] = 0;
+            controller->deadlock_stall_counter[i] = 0;
         }
 
-        if (stall_counter[i] > 50) {
+        if (controller->deadlock_stall_counter[i] > 50) {
             deadlock_count++;
-            stall_counter[i] = 0;
+            controller->deadlock_stall_counter[i] = 0;
             /* 解除死锁：给停滞机器人的目标位置添加小随机偏移 */
             controller->state.target_positions[i][0] += 
                 sinf((float)(controller->state.step_count + i * 137)) * 0.5f;
@@ -977,7 +978,7 @@ int swarm_deadlock_detect_and_resolve(SwarmController* controller) {
                 cosf((float)(controller->state.step_count + i * 251)) * 0.5f;
         }
 
-        memcpy(prev_positions[i], controller->state.robots[i].position, 3 * sizeof(float));
+        memcpy(controller->deadlock_prev_positions[i], controller->state.robots[i].position, 3 * sizeof(float));
     }
 
     swarm_unlock(controller);

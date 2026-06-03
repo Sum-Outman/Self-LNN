@@ -277,7 +277,56 @@ static int rank_selection(const EvolutionPopulation* pop, unsigned int* rng) {
     return selected;
 }
 
-/* 锦标赛选择 */
+/* ZSF-032修复：真实Boltzmann选择（softmax概率分布，温度控制探索/利用平衡） */
+static int boltzmann_selection(const EvolutionPopulation* pop, float temperature, unsigned int* rng) {
+    if (!pop || pop->size == 0) return -1;
+    
+    /* 温度保护：过低→纯贪婪，过高→均匀随机 */
+    if (temperature < 1e-6f) {
+        /* 温度极低：直接返回最优个体 */
+        int best = 0;
+        float best_fit = pop->individuals[0].fitness;
+        for (size_t i = 1; i < pop->size; i++) {
+            if (pop->individuals[i].fitness > best_fit) {
+                best_fit = pop->individuals[i].fitness;
+                best = (int)i;
+            }
+        }
+        return best;
+    }
+    
+    /* 计算每个个体的Boltzmann概率: exp(f_i / T) / Σ exp(f_j / T) */
+    /* 使用数值稳定技巧：减去最大适应度避免溢出 */
+    float max_fit = pop->individuals[0].fitness;
+    for (size_t i = 1; i < pop->size; i++) {
+        if (pop->individuals[i].fitness > max_fit) max_fit = pop->individuals[i].fitness;
+    }
+    
+    double sum_exp = 0.0;
+    double probs[256]; /* 最大种群256 */
+    size_t n = pop->size;
+    if (n > 256) n = 256;
+    
+    for (size_t i = 0; i < n; i++) {
+        double scaled = (double)(pop->individuals[i].fitness - max_fit) / (double)temperature;
+        probs[i] = exp(scaled);
+        sum_exp += probs[i];
+    }
+    
+    if (sum_exp < 1e-15) {
+        return (int)(rand_float(rng) * (float)n);
+    }
+    
+    /* 轮盘赌选择 */
+    double roll = (double)rand_float(rng) * sum_exp;
+    double cumulative = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        cumulative += probs[i];
+        if (roll <= cumulative) return (int)i;
+    }
+    return (int)(n - 1);
+}
+
 static int tournament_selection(const EvolutionPopulation* pop, float ratio, unsigned int* rng) {
     int tournament_size = (int)(pop->size * ratio);
     if (tournament_size < 2) tournament_size = 2;
@@ -333,7 +382,8 @@ static int select_parent(const EvolutionEngine* engine, const EvolutionPopulatio
         case EVO_SELECTION_ELITE:
             return 0; /* 精英在更新阶段处理 */
         case EVO_SELECTION_BOLTZMANN:
-            return tournament_selection(pop, 0.3f, (unsigned int*)&engine->rng_state);
+            /* ZSF-032修复：真实Boltzmann选择替代退化到锦标赛，温度默认为1.0 */
+            return boltzmann_selection(pop, 1.0f, (unsigned int*)&engine->rng_state);
         default:
             return (int)(rand_float((unsigned int*)&engine->rng_state) * pop->size);
     }
@@ -1160,14 +1210,8 @@ static int evolution_island_migrate(EvolutionEngine* engine) {
     return 0;
 }
 
-/* 岛模型并行演化任务数据 */
-typedef struct {
-    EvolutionPopulation* island;
-    EvolutionEngine* engine;
-    int island_index;
-} IslandTaskData;
+/* 岛模型并行演化任务数据 - 定义在evolution_step之前，evolve_island_task复用 */
 
-/* 线程池任务：独立演化单个岛 */
 static void evolve_island_task(void* arg) {
     IslandTaskData* data = (IslandTaskData*)arg;
     if (!data || !data->island || !data->engine) return;
@@ -1686,7 +1730,8 @@ int evolution_engine_structural_mutate(EvolutionEngine* engine,
     }
 
     /* 概率性执行（根据mutation_probability） */
-    float roll = (float)(rand() % 10000) / 10000.0f;
+    /* ZSF-068修复：使用secure_random替代rand() */
+    float roll = secure_random_float();
     if (roll > mut_config->mutation_probability) {
         return 0; /* 本轮不执行结构变异 */
     }

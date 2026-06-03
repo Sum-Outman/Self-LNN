@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file dynamics.c
  * @brief 传感器预处理动态系统（非独立AI系统）
  * 
@@ -568,6 +568,9 @@ static void compute_derivatives(const DynamicsSystem* system,
 /* ========================================================================
  * ODE RHS适配器：将分离的state+velocity数组映射为ode_solvers.c的ODERHSFunc
  * y[0..n-1]=state, y[n..2n-1]=velocity, dydt[0..n-1]=dq/dt, dydt[n..2n-1]=dv/dt
+ * ZSF-063说明：旋转轴映射使用矩阵重排作为简化实现。
+ * 严格绕任意轴旋转应使用Rodrigues公式: R = I + sin(θ)K + (1-cos(θ))K²。
+ * 当前简化适用于轴对齐关节，对非正交轴关节需升级。
  * ======================================================================== */
 static int dynamics_ode_rhs(float t, const float* y, float* dydt, void* ctx) {
     DynamicsSystem* s = (DynamicsSystem*)ctx;
@@ -1802,7 +1805,7 @@ int dynamics_differentiable_forward(DynamicsSystem* system,
         } else {
             memset(composite_input, 0, control_dim * sizeof(float));
         }
-        for (size_t d = 0; d < state_dim && d < state_dim; d++) {
+        for (size_t d = 0; d < state_dim; d++) {
             composite_input[control_dim + d] = system->state[d];
         }
 

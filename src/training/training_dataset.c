@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file training_dataset.c
  * @brief 训练数据集管理系统
  *
@@ -502,8 +502,8 @@ int augment_gaussian_noise(TrainingDataset* ds, float stddev) {
     size_t n = ds->header.num_samples;
     size_t idim = ds->header.input_dim;
 
-    /* 使用Box-Muller变换生成高斯噪声 */
-    static unsigned int rng = 123456789;
+    /* ZSF-040修复：移除static RNG，使用secure_random初始的RNG避免多线程竞态 */
+    unsigned int rng = (unsigned int)(secure_random_float() * 4294967295.0f + 123456789);
     for (size_t i = 0; i < n; i++) {
         for (size_t d = 0; d < idim; d++) {
             rng = rng * 1103515245 + 12345;

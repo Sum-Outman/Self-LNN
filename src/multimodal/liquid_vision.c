@@ -1454,7 +1454,7 @@ static MutexHandle g_registry_singleton_lock = NULL;
 
 static void _registry_lock_init(void) {
     if (!g_registry_singleton_lock) {
-        g_registry_singleton_lock = mutex_create;
+        g_registry_singleton_lock = mutex_create();
     }
 }
 
@@ -1466,7 +1466,7 @@ VisionClassRegistry* vision_class_registry_create(void) {
     reg->entries = (VisionClassEntry*)safe_calloc((size_t)reg->capacity, sizeof(VisionClassEntry));
     if (!reg->entries) { safe_free((void**)&reg); return NULL; }
 
-    reg->lock = mutex_create;
+    reg->lock = mutex_create();
     if (!reg->lock) {
         safe_free((void**)&reg->entries); safe_free((void**)&reg);
         return NULL;

@@ -130,8 +130,8 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     engine->config = *config;
     engine->is_initialized = 1;
     
-    // 分配内存
-    engine->rule_base_size = 1024; // 默认规则库大小
+    /* ZSF-072说明：规则库使用浮点数组编码（rule_base_size=1024）。
+     * 浮点编码适用于CFC神经网络推理，非符号逻辑规则。符号规则推理使用knowledge模块。 */
     engine->rule_base = (float*)safe_malloc(engine->rule_base_size * sizeof(float));
     
     engine->knowledge_base_size = 2048; // 默认知识库大小

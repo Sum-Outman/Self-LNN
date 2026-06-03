@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file audio.h
  * @brief 音频处理模块接口
  *
@@ -284,6 +284,9 @@ void audio_capture_free(AudioCaptureContext* ctx);
 
 /* 获取音频频谱 */
 int audio_capture_get_spectrum(void* capture, float* spectrum, size_t* size);
+
+/* ZSF-027修复：音频频谱实时更新——在音频数据到达时调用，计算FFT功率谱 */
+int audio_capture_update_spectrum(AudioCaptureContext* ctx, const float* samples, size_t num_samples);
 
 #ifdef __cplusplus
 }

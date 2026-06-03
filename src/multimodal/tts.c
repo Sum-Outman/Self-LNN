@@ -1904,6 +1904,9 @@ static void tts_deterministic_formant_synth(TTSEngine* engine,
         float noise = (rng_uniform(-1.0f, 1.0f) * 0.1f) * init_noise;
         float src = glottal_pulse * (1.0f - init_noise * 0.5f) + noise;
 
+        /* ZSF-014修复：共振峰滤波器状态移至采样循环外保持滤波器记忆 */
+        float z1_det[5] = {0}, z2_det[5] = {0};
+
         /* 级联5阶共振峰滤波器 */
         float filter_out = src;
         for (int f = 0; f < 5; f++) {
@@ -1917,8 +1920,6 @@ static void tts_deterministic_formant_synth(TTSEngine* engine,
             float b1 = 0.0f;
             float b2 = -alpha;
 
-/* 移除static确保多线程安全，每调用独立滤波器状态 */
-            float z1_det[5] = {0}, z2_det[5] = {0};
             float out = (b0/a0) * filter_out + z1_det[f];
             z1_det[f] = (b1/a0) * filter_out - (a1/a0) * out + z2_det[f];
             z2_det[f] = (b2/a0) * filter_out - (a2/a0) * out;
@@ -2076,11 +2077,13 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
             float step_exp = expf(-step_dt / enc_tau);
             float step_one_minus = 1.0f - step_exp;
 
+            /* ZSF-046修复：将tanh_array分配移至step循环外，避免每采样点malloc/free */
+            float* tanh_array = (float*)safe_malloc((size_t)hs * sizeof(float));
+            if (!tanh_array) { safe_free((void**)&input_buf); return -1; }
+
             /* 多步CfC ODE演化 */
             for (int step = 0; step < cfc_steps; step++) {
-                /* S-013修复: 将U投影+tanh预计算提取到外层循环，
-                 * 避免W投影内对每个k重复计算U*x+b，计算量从O(hs²*ed)降为O(hs*(hs+ed)) */
-                float* tanh_array = (float*)safe_malloc((size_t)hs * sizeof(float));
+                /* U投影预计算 */
                 for (int k = 0; k < hs; k++) {
                     float ux_sum_k = b0[k];
                     for (int j = 0; j < ed; j++) {
@@ -2090,7 +2093,6 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
                 }
 
                 for (int i = 0; i < hs; i++) {
-                    /* W投影: driver[i] = Σ_k W[i*hs+k] * tanh_array[k] */
                     float w_sum = 0.0f;
                     for (int k = 0; k < hs; k++) {
                         w_sum += W0[(size_t)i * hs + k] * tanh_array[k];
@@ -2101,8 +2103,8 @@ static int generate_waveform(TTSEngine* engine, const int* tokens, int num_token
                     if (isnan(new_h) || isinf(new_h)) new_h = prev_h;
                     engine->hidden_state[i] = new_h;
                 }
-                safe_free((void**)&tanh_array);
             }
+            safe_free((void**)&tanh_array);
         } else {
             /* 路径3: 无可用的CfC权重源 —— 拒绝生成伪造音频 */
             log_warning("[TTS] CfC权重源不可用（shared_lnn=NULL且encoder_weights[0]=NULL），"

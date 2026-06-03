@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file depth_estimation.c
  * @brief 深度估计算法实现
  *
@@ -6187,6 +6187,7 @@ static void cnn_depth_network_init(CnnDepthNetwork* net) {
     }
 
     net->is_initialized = 1;
+    /* ZSF-029标注：CNN权重已完成He/Xavier初始化，weights_loaded=0表示需训练后才能生成有效深度 */
     net->weights_loaded = 0;
 }
 

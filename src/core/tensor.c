@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file tensor.c
  * @brief 张量核心实现
  * 
@@ -920,8 +920,8 @@ Tensor* tensor_slice(const Tensor* tensor, const int* start, const int* end, con
             src_offset += (size_t)(s + src_idx[d]) * src_strides[d] / elem_size;
         }
 
-        /* 拷贝单个元素 */
-        memcpy(dst_data + (size_t)dst_idx[0] * elem_size + (i - 0) * elem_size,  /* 简化:直接按线性索引 */
+        /* 拷贝单个元素 - ZSF-004修复：使用线性偏移而非多维索引 */
+        memcpy(dst_data + i * elem_size,
                src_data + src_offset * elem_size, elem_size);
 
         /* 推进dst_idx和src_idx（从最后一维开始进位） */

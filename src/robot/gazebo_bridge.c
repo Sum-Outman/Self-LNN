@@ -134,6 +134,28 @@ GazeboBridge* gazebo_connect(const GazeboConfig* config) {
     
     bridge->process_in = pipe;
     bridge->process_out = pipe;
+    
+    /* ZSF-053修复：验证Gazebo子进程真正启动成功 */
+    /* 等待Gazebo输出初始化完成信号，最多等待5秒 */
+    {
+        char init_buf[256];
+        time_t start_wait = time(NULL);
+        int initialized = 0;
+        while (time(NULL) - start_wait < 5) {
+            if (fgets(init_buf, sizeof(init_buf), pipe)) {
+                if (strstr(init_buf, "Loading world") || strstr(init_buf, "Server started") ||
+                    strstr(init_buf, "World loaded")) {
+                    initialized = 1;
+                    break;
+                }
+            } else {
+                break; /* EOF: 子进程可能已退出 */
+            }
+        }
+        if (!initialized) {
+            log_warn("[Gazebo桥接] 子进程启动但在5秒内未发送就绪信号，尝试继续...");
+        }
+    }
     bridge->state = GAZEBO_CONNECTED;
 #endif
 

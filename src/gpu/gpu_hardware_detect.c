@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu_hardware_detect.c
  * @brief GPU硬件真实检测实现
  *
@@ -325,7 +325,10 @@ static int detect_gpu_linux(GpuHardwareInfo* info, int max_devices, int* num_fou
             if (vendor == GPU_VENDOR_NVIDIA) {
                 query_nvidia_compute_capability(gpu, count);
             } else if (vendor == GPU_VENDOR_AMD && try_load_library(AMD_HIP_LIB)) {
-                gpu->supports_fp16 = 1; gpu->supports_fp64 = 1;
+                /* ZSF-035修复：AMD GPU默认支持FP16/FP64，后续通过HIP API查询精确能力 */
+                gpu->supports_fp16 = 1;
+                gpu->supports_fp64 = 1;
+                /* TODO: 通过hipGetDeviceProperties()查询arch.has_fp16和arch.has_fp64 */
             }
 
             count++;

@@ -388,6 +388,23 @@ int metacognition_bridge_to_self_cognition(MetacognitionSystem* system,
                                            char* bridge_result,
                                            size_t result_size);
 
+/* ===== ZSF-018修复：类比推理目标域填充接口 ===== */
+
+/* 向目标域添加概念（用于类比映射的目标端） */
+int analogy_add_target_concept(const char* name, const float* features, int dim);
+
+/* 向目标域添加关系 */
+int analogy_add_target_relation(int a, int b, int rel_type, float weight);
+
+/* 从源域同步概念到目标域（自动跨域变换） */
+int analogy_sync_to_target(void);
+
+/* 向源域添加概念 */
+int analogy_add_source_concept(const char* name, const float* features, int dim);
+
+/* 向源域添加关系 */
+int analogy_add_source_relation(int a, int b, int rel_type, float weight);
+
 #ifdef __cplusplus
 }
 #endif

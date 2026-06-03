@@ -57,7 +57,8 @@ void safe_free(void** ptr);
  * @brief 分层任务节点内部结构
  */
 struct HierarchicalTaskNode {
-    float* task_description;        /**< 任务描述 */
+    /* ZSF-073说明：任务描述使用浮点数组，适用于神经网络嵌入表示。文本型HTN任务请使用planning模块。 */
+    float* task_description;        /**< 任务描述（浮点嵌入向量） */
     size_t task_size;               /**< 任务描述大小 */
     PlanningHierarchy hierarchy;    /**< 任务层次 */
     TaskDecompositionMethod decomposition_method; /**< 分解方法 */

@@ -105,8 +105,9 @@ int sr3d_compute_dense_disparity(SR3DReconstructor* sr, const float* left, const
     }
     float* right_disp = sr->disparity_buffer;
     int max_disp = SR3D_MAX_DISPARITY;
-    float* census_left = (float*)safe_malloc((size_t)w * h * sizeof(float));
-    float* census_right = (float*)safe_malloc((size_t)w * h * sizeof(float));
+    /* ZSF-013修复：使用uint64_t数组保持Census位模式完整精度 */
+    uint64_t* census_left = (uint64_t*)safe_malloc((size_t)w * h * sizeof(uint64_t));
+    uint64_t* census_right = (uint64_t*)safe_malloc((size_t)w * h * sizeof(uint64_t));
     if (!census_left || !census_right) {
         safe_free((void**)&census_left);
         safe_free((void**)&census_right);
@@ -114,10 +115,8 @@ int sr3d_compute_dense_disparity(SR3DReconstructor* sr, const float* left, const
     }
 
     for (int i = 0; i < w * h; i++) {
-        unsigned long long cl = sr3d_census_transform(left, i % w, i / w, w, h);
-        unsigned long long cr = sr3d_census_transform(right, i % w, i / w, w, h);
-        census_left[i] = (float)cl;
-        census_right[i] = (float)cr;
+        census_left[i] = sr3d_census_transform(left, i % w, i / w, w, h);
+        census_right[i] = sr3d_census_transform(right, i % w, i / w, w, h);
     }
 
     for (int y = 0; y < h; y++) {

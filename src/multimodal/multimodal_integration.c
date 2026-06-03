@@ -1990,7 +1990,7 @@ static int _mm_fusion_via_shared_lnn(const float** modality_data, const int* mod
     static int cache_lock_initialized = 0;
     static MutexHandle cache_mutex;
     if (!cache_lock_initialized) {
-        cache_mutex = mutex_create;
+        cache_mutex = mutex_create();
         cache_lock_initialized = 1;
     }
     mutex_lock(cache_mutex);

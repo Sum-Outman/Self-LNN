@@ -271,7 +271,17 @@ int laplace_build_laplacian_pyramid(const float* input, int width, int height, i
 
 int laplace_reconstruct_from_pyramid(const LaplacianPyramid* pyramid, float* output, int width, int height) {
     if (!pyramid || !output || pyramid->num_levels < 1) return -1;
-    (void)width; (void)height;
+
+    /* ZSF-066修复：验证输出尺寸与金字塔顶层匹配 */
+    if (pyramid->num_levels > 0) {
+        int top_w = pyramid->widths[pyramid->num_levels - 1];
+        int top_h = pyramid->heights[pyramid->num_levels - 1];
+        if (width <= 0 || height <= 0 || width != top_w || height != top_h) {
+            /* 使用顶层尺寸作为输出尺寸 */
+            width = top_w;
+            height = top_h;
+        }
+    }
 
     int n = pyramid->num_levels;
     int channels = pyramid->channels;

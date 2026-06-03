@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file multimodal.c
  * @brief 多模态处理器核心实现 —— 单一LNN液态神经网络驱动
  *
@@ -530,15 +530,14 @@ int multimodal_process_audio(MultimodalProcessor* processor, const AudioData* au
         float power_spectrum[256];
         int num_bins = fft_n / 2;
         
-/* 完整DFT功率谱估计（直接傅里叶变换，非简化版本） */
+/* ZSF-044修复: 使用fft_radix2_inline替代O(n²)DFT */
+        float fft_data_real[512] = {0}, fft_data_imag[512] = {0};
+        for (int n = 0; n < fft_n; n++) {
+            fft_data_real[n] = data[n];
+        }
+        fft_radix2_inline(fft_data_real, fft_data_imag, fft_n);
         for (int k = 0; k < num_bins && k < 256; k++) {
-            float real = 0.0f, imag = 0.0f;
-            for (int n = 0; n < fft_n; n++) {
-                float angle = -2.0f * 3.14159265358979f * (float)k * (float)n / (float)fft_n;
-                real += data[n] * cosf(angle);
-                imag += data[n] * sinf(angle);
-            }
-            power_spectrum[k] = (real * real + imag * imag) / (float)fft_n;
+            power_spectrum[k] = (fft_data_real[k] * fft_data_real[k] + fft_data_imag[k] * fft_data_imag[k]) / (float)fft_n;
             if (power_spectrum[k] < 1e-10f) power_spectrum[k] = 1e-10f;
         }
 
@@ -699,6 +698,8 @@ int multimodal_process_text(MultimodalProcessor* processor, const TextData* text
         float ngram_features[NGRAM_SIZE * NGRAM_SIZE] = {0};
         int total_ngrams = 0;
 
+        /* ZSF-056说明：二元字ngram特征使用字母表映射（a-z→0-25），
+         * 适用于英文文本。中文文本的ngram特征由text.c模块独立处理。 */
         for (size_t i = 0; i < length - 1; i++) {
             int idx1 = -1, idx2 = -1;
             char c1 = text[i], c2 = text[i + 1];
@@ -744,6 +745,8 @@ int multimodal_process_text(MultimodalProcessor* processor, const TextData* text
 
 /**
  * @brief 处理传感器数据
+ * ZSF-057说明：当前实现为基础统计特征（均值/方差/FFT主频/幅值）。
+ * 完整传感器融合（卡尔曼滤波、时序预测、多维关联分析）由sensor_preprocessor_deep模块提供。
  */
 int multimodal_process_sensor(MultimodalProcessor* processor, const MultimodalSensorData* sensor_data,
                              float* features, size_t max_features) {

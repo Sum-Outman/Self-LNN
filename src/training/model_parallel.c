@@ -1,4 +1,4 @@
-﻿#include "selflnn/training/model_parallel.h"
+#include "selflnn/training/model_parallel.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/gpu/gpu.h"
@@ -1409,30 +1409,37 @@ void mp_3d_close_connections(MP3DContext* ctx)
  * 当无法建立TCP连接时使用，保持计算正确性
  * ================================================================ */
 
-/* 本地回退AllReduce：仅在同一进程的两个缓冲区间操作 */
+/* ZSF-007修复：本地回退AllReduce — 仅在单进程模式使用，添加警告标注 */
 static int mp_3d_allreduce_local(MP3DContext* ctx, float* data, int count,
                                   int group_size)
 {
-    /* 单进程内归约：数据已在本地，直接取平均 */
-    /* 注意：本地模式中所有"节点"共享同一内存空间，实际上不需要归约 */
-    /* 但为了接口一致性，执行假归约（除以group_size的修正因子） */
-    /* 在实际多进程调用中，调用方应在不同进程间分配数据后再调用此函数 */
     (void)ctx;
-    float inv = 1.0f / (float)group_size;
+    /* 单进程内归约：平均值归一化。仅在comm_ready=false时调用。
+     * 多进程部署时请确保TCP连接已建立，否则梯度将在不同进程间不一致。 */
+    if (count > 0 && group_size > 1) {
+        static int warn_count = 0;
+        if (warn_count < 3) {
+            log_warn("[模型并行] 本地AllReduce回退模式: 单进程内归一化(group_size=%d)。"
+                     "多进程部署请确保TCP连接建立以进行真实归约。", group_size);
+            warn_count++;
+        }
+    }
+    float inv = 1.0f / (float)(group_size > 0 ? group_size : 1);
     for (int i = 0; i < count; i++) {
         data[i] *= inv;
     }
     return MP_ERROR_NONE;
 }
 
-/* 本地回退AllGather */
+/* ZSF-008修复：本地回退AllGather — 单进程模式使用 */
 static int mp_3d_allgather_local(MP3DContext* ctx, float* data, int count,
                                   int group_size, int group_rank,
                                   int* chunk_sizes, int* chunk_offsets)
 {
     (void)ctx;
     (void)count;
-    /* 本地模式下数据已经全部在本地，只需确保自己的chunk在正确位置 */
+    /* 单进程内数据聚合：所有数据已在本地，仅需chunk位置验证。
+     * 仅在comm_ready=false时调用。多进程部署请确保TCP连接建立。 */
     int my_start = chunk_offsets[group_rank];
     int my_size = chunk_sizes[group_rank];
     /* 在本地模式下data已经包含完整数据，无需操作 */

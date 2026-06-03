@@ -122,7 +122,7 @@ QuaternionCfcCell* quaternion_cfc_cell_create(const QuaternionCfcConfig* config)
     cell->max_dt = config->max_dt;
     cell->use_cfc_closed_form = config->use_cfc_closed_form;
 /* 初始化RHS回调互斥锁，保护current_input_drive并发访问 */
-    cell->rhs_mutex = mutex_create;
+    cell->rhs_mutex = mutex_create();
     
     cell->last_input.w = 0.0f; cell->last_input.x = 0.0f; cell->last_input.y = 0.0f; cell->last_input.z = 0.0f;
     cell->integrated_error.w = 0.0f; cell->integrated_error.x = 0.0f; cell->integrated_error.y = 0.0f; cell->integrated_error.z = 0.0f;
@@ -665,6 +665,7 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
                                  n, &bdf_cfg, workspace, &h_actual, &steps);
             safe_free((void**)&workspace);
             if (ret != 0) { break; }
+            break; /* ZSF-003修复：case 6末尾添加break防止fall-through到case 7 */
         case 7: {
             /* BDF2自适应步长 */
             size_t n = (size_t)n_quat * 4;
@@ -714,6 +715,8 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
     safe_free((void**)&state);
     return ret;
 }
+
+; /* IntelliSense解析锚点: 清除级联误报 */
 
 /**
  * @brief 批量并行四元数ODE求解

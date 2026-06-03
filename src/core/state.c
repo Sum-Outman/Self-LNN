@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file state.c
  * @brief 网络状态管理实现
  * 
@@ -366,18 +366,25 @@ int network_state_snapshot_save(NetworkState* state, const char* label, int inst
     if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
     mutex_lock(g_snapshot_mutex);
 
-/* 使用instance_id偏移隔离不同LNN实例的快照 */
+/* ZSF-010修复：使用instance_id偏移隔离不同LNN实例的快照 */
     int idx = g_snapshot_count;
-    int slot = idx + (instance_id > 0 ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0);
+    int instance_base = (instance_id > 0) ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0;
+    int slot = idx + instance_base;
 
     if (slot >= MAX_SNAPSHOTS) {
-        /* 实例快照区已满，移除最旧快照 */
-        safe_free((void**)&g_snapshots[0].state_data);
-        for (int i = 0; i < MAX_SNAPSHOTS - 1; i++) {
-            g_snapshots[i] = g_snapshots[i + 1];
+        /* ZSF-010修复：仅移除当前实例id范围内的最旧快照，避免跨实例串扰 */
+        int instance_start = instance_base;
+        int instance_snapshots = (instance_id > 0) ? 
+            (g_snapshot_count - instance_base) : g_snapshot_count;
+        if (instance_snapshots > 0) {
+            safe_free((void**)&g_snapshots[instance_start].state_data);
+            for (int i = instance_start; i < instance_start + instance_snapshots - 1 && i + 1 < MAX_SNAPSHOTS; i++) {
+                g_snapshots[i] = g_snapshots[i + 1];
+            }
         }
-        g_snapshot_count = MAX_SNAPSHOTS - 1;
-        slot = MAX_SNAPSHOTS - 1;
+        g_snapshot_count = (instance_base + instance_snapshots > 0) ? 
+            instance_base + instance_snapshots - 1 : 0;
+        slot = (instance_base + instance_snapshots > 1) ? instance_base + instance_snapshots - 1 : 0;
         idx = g_snapshot_count;
     }
 

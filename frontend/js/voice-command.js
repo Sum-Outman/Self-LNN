@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN AGI 语音指令控制系统
  * 使用 MediaRecorder API 录制语音，通过后端语音识别解析指令
  * 支持运动控制、设备控制、系统控制、计算机控制
@@ -486,10 +486,45 @@ class CommandEngine {
             return { success: false, error: '未识别到有效指令' };
         }
         if (this.safetyEnabled) {
-            const safetyCheck = this._safetyCheck(parsed);
+            var safetyCheck = this._safetyCheck(parsed);
             if (!safetyCheck.allowed) {
-                this._addHistory(parsed, false, safetyCheck.reason);
-                return { success: false, error: safetyCheck.reason };
+                /* ZSF-036修复：高危操作需要用户确认，不再静默拒绝 */
+                if (safetyCheck.pending_confirm) {
+                    var that = this;
+                    try {
+                        await new Promise(function(resolve, reject) {
+                            that._pendingConfirm = {
+                                command: parsed.command,
+                                reason: safetyCheck.reason,
+                                timestamp: Date.now(),
+                                resolve: resolve,
+                                reject: reject,
+                                processed: false,
+                                timeoutHandle: setTimeout(function() {
+                                    if (that._pendingConfirm) {
+                                        that._pendingConfirm.processed = true;
+                                        reject(new Error('高危操作确认超时'));
+                                    }
+                                }, safetyCheck.timeout_ms || 15000)
+                            };
+                            /* 触发待确认事件供UI层响应 */
+                            document.dispatchEvent(new CustomEvent('safety-confirm-required', {
+                                detail: {
+                                    command: parsed.command,
+                                    reason: safetyCheck.reason
+                                }
+                            }));
+                        });
+                        /* 用户确认后继续执行 */
+                        console.log('[安全] 高危操作已确认，继续执行:', parsed.command);
+                    } catch (err) {
+                        this._addHistory(parsed, false, '高危操作被拒绝或超时: ' + err.message);
+                        return { success: false, error: '高危操作被拒绝或超时' };
+                    }
+                } else {
+                    this._addHistory(parsed, false, safetyCheck.reason);
+                    return { success: false, error: safetyCheck.reason };
+                }
             }
         }
         try {
@@ -508,9 +543,48 @@ class CommandEngine {
     _safetyCheck(parsed) {
         var dangerousHandlers = ['computerShutdown', 'computerRestart', 'robotEmergencyStop'];
         if (dangerousHandlers.indexOf(parsed.command) >= 0) {
-            return { allowed: false, reason: '高危操作，需用户确认' };
+            /* ZSF-036修复：不再静默拒绝，返回待确认状态触发用户确认对话框 */
+            return { 
+                allowed: false, 
+                pending_confirm: true, 
+                command: parsed.command,
+                reason: '高危操作，需要用户确认: ' + parsed.command + ' - ' + 
+                       (parsed.params && parsed.params.text ? parsed.params.text : ''),
+                timeout_ms: 15000
+            };
         }
         return { allowed: true, reason: '' };
+    }
+
+    /**
+     * 确认待处理的高危操作
+     * @param {boolean} confirm - 用户是否确认
+     */
+    confirmPending(confirm) {
+        if (!this._pendingConfirm) return;
+        if (confirm && this._pendingConfirm.command) {
+            console.log('[安全] 高危操作已确认:', this._pendingConfirm.command);
+            this._pendingConfirm.approved = true;
+            this._pendingConfirm.resolve();
+        } else {
+            this._pendingConfirm.rejected = true;
+            this._pendingConfirm.reject();
+        }
+        clearTimeout(this._pendingConfirm.timeoutHandle);
+        this._pendingConfirm = null;
+    }
+
+    /**
+     * 获取当前待确认操作信息
+     * @returns {object|null}
+     */
+    getPendingConfirm() {
+        if (!this._pendingConfirm || this._pendingConfirm.processed) return null;
+        return {
+            command: this._pendingConfirm.command,
+            reason: this._pendingConfirm.reason,
+            timestamp: this._pendingConfirm.timestamp
+        };
     }
 
 /* 指令路由常量表（数据驱动，新增指令只需添加条目）
@@ -555,7 +629,12 @@ class CommandEngine {
             'volume_down': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','volume_down',{value:params.value}) : null,
             'mute_toggle': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','mute_toggle',{}) : null,
             'start_training': async () => window.SelfLnnApi.startTraining ? await window.SelfLnnApi.startTraining(params) : null,
-            'stop_training': async () => window.SelfLnnApi.stopTrainingJob ? await window.SelfLnnApi.stopTrainingJob() : null,
+            /* ZSF-088修复：统一API命名，stopTraining替代stopTrainingJob */
+            'stop_training': async () => {
+                if (window.SelfLnnApi.stopTraining) return await window.SelfLnnApi.stopTraining();
+                if (window.SelfLnnApi.stopTrainingJob) return await window.SelfLnnApi.stopTrainingJob();
+                return null;
+            },
             'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : null,
             'start_evolution': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {

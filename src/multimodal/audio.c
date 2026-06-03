@@ -1026,6 +1026,12 @@ int audio_resample(const float* input, int input_len, int input_sr, int output_s
 
 #if defined(_WIN32) || defined(_WIN64)
 /* ==================== Windows WASAPI 捕获 ==================== */
+/*
+ * ZSF-025: 此处的WASAPI实现与audio_capture.c中的实现功能重复。
+ * audio_capture.c为规范实现，本文件中的保留仅用于向后兼容。
+ * 新代码请使用 audio_capture.h 中的 audio_capture_* 系列API。
+ * TODO: 下一主版本移除本段代码，统一迁移到audio_capture.c。
+ */
 
 struct AudioCaptureContext {
     IMMDeviceEnumerator* enumerator;
