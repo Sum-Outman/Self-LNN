@@ -165,7 +165,7 @@ static int ws_server_send_frame(int fd, const char* data, size_t len) {
 
 typedef struct {
     int sensor_id;
-    SensorType sensor_type;
+    RobotSensorType sensor_type;
     SensorSource source;
     SensorPipelinePriority priority;
     int enabled;
@@ -205,7 +205,7 @@ typedef struct {
 
 typedef struct {
     int sensor_id;
-    SensorType sensor_type;
+    RobotSensorType sensor_type;
     SensorPipelineCallback callback;
     void* user_data;
     int active;
@@ -398,7 +398,7 @@ static int ring_buffer_get_latest(const SensorRingBuffer* rb, int sensor_id,
     return -1;
 }
 
-static int ring_buffer_get_latest_by_type(const SensorRingBuffer* rb, SensorType type,
+static int ring_buffer_get_latest_by_type(const SensorRingBuffer* rb, RobotSensorType type,
                                            SensorPipelineEntry* entry)
 {
     if (!rb || rb->count == 0) return -1;
@@ -815,7 +815,7 @@ int sensor_pipeline_is_running(SensorPipeline* pipeline)
 }
 
 int sensor_pipeline_register_sensor(SensorPipeline* pipeline, int sensor_id,
-                                     SensorType sensor_type, SensorSource source,
+                                     RobotSensorType sensor_type, SensorSource source,
                                      SensorPipelinePriority priority,
                                      const char* sensor_name, double sample_rate_hz)
 {
@@ -851,14 +851,14 @@ int sensor_pipeline_register_sensor(SensorPipeline* pipeline, int sensor_id,
     const char* type_topic = "";
     switch (sensor_type)
     {
-        case SENSOR_TYPE_LIDAR: type_topic = "/sensor/lidar"; break;
-        case SENSOR_TYPE_CAMERA: type_topic = "/sensor/camera"; break;
-        case SENSOR_TYPE_IMU: type_topic = "/sensor/imu"; break;
-        case SENSOR_TYPE_GNSS: type_topic = "/sensor/gnss"; break;
-        case SENSOR_TYPE_FORCE_TORQUE: type_topic = "/sensor/force_torque"; break;
-        case SENSOR_TYPE_TEMPERATURE: type_topic = "/sensor/temperature"; break;
-        case SENSOR_TYPE_PRESSURE: type_topic = "/sensor/pressure"; break;
-        case SENSOR_TYPE_PROXIMITY: type_topic = "/sensor/proximity"; break;
+        case ROBOT_SENSOR_TYPE_LIDAR: type_topic = "/sensor/lidar"; break;
+        case ROBOT_SENSOR_TYPE_CAMERA: type_topic = "/sensor/camera"; break;
+        case ROBOT_SENSOR_TYPE_IMU: type_topic = "/sensor/imu"; break;
+        case ROBOT_SENSOR_TYPE_GNSS: type_topic = "/sensor/gnss"; break;
+        case ROBOT_SENSOR_TYPE_FORCE_TORQUE: type_topic = "/sensor/force_torque"; break;
+        case ROBOT_SENSOR_TYPE_TEMPERATURE: type_topic = "/sensor/temperature"; break;
+        case ROBOT_SENSOR_TYPE_PRESSURE: type_topic = "/sensor/pressure"; break;
+        case ROBOT_SENSOR_TYPE_PROXIMITY: type_topic = "/sensor/proximity"; break;
         default: type_topic = "/sensor/unknown"; break;
     }
     snprintf(si->topic_name, sizeof(si->topic_name), "%s/%d%s", type_topic, sensor_id,
@@ -999,7 +999,7 @@ int sensor_pipeline_push_data(SensorPipeline* pipeline, const SensorPipelineEntr
     return SENSOR_PIPELINE_OK;
 }
 
-int sensor_pipeline_push_raw(SensorPipeline* pipeline, int sensor_id, SensorType sensor_type,
+int sensor_pipeline_push_raw(SensorPipeline* pipeline, int sensor_id, RobotSensorType sensor_type,
                               const uint8_t* data, size_t data_size, double timestamp,
                               float confidence)
 {
@@ -1026,7 +1026,7 @@ int sensor_pipeline_push_image(SensorPipeline* pipeline, int sensor_id,
     SensorPipelineEntry entry;
     memset(&entry, 0, sizeof(entry));
     entry.sensor_id = sensor_id;
-    entry.sensor_type = SENSOR_TYPE_CAMERA;
+    entry.sensor_type = ROBOT_SENSOR_TYPE_CAMERA;
     entry.source = SENSOR_SOURCE_HARDWARE;
     entry.timestamp = timestamp;
     entry.data = (uint8_t*)image_data;
@@ -1067,7 +1067,7 @@ int sensor_pipeline_push_lidar(SensorPipeline* pipeline, int sensor_id,
     SensorPipelineEntry entry;
     memset(&entry, 0, sizeof(entry));
     entry.sensor_id = sensor_id;
-    entry.sensor_type = SENSOR_TYPE_LIDAR;
+    entry.sensor_type = ROBOT_SENSOR_TYPE_LIDAR;
     entry.source = SENSOR_SOURCE_HARDWARE;
     entry.timestamp = timestamp;
     entry.data = buffer;
@@ -1097,7 +1097,7 @@ int sensor_pipeline_push_imu(SensorPipeline* pipeline, int sensor_id,
     SensorPipelineEntry entry;
     memset(&entry, 0, sizeof(entry));
     entry.sensor_id = sensor_id;
-    entry.sensor_type = SENSOR_TYPE_IMU;
+    entry.sensor_type = ROBOT_SENSOR_TYPE_IMU;
     entry.source = SENSOR_SOURCE_HARDWARE;
     entry.timestamp = timestamp;
     entry.data = (uint8_t*)data;
@@ -1117,7 +1117,7 @@ int sensor_pipeline_push_gnss(SensorPipeline* pipeline, int sensor_id,
     SensorPipelineEntry entry;
     memset(&entry, 0, sizeof(entry));
     entry.sensor_id = sensor_id;
-    entry.sensor_type = SENSOR_TYPE_GNSS;
+    entry.sensor_type = ROBOT_SENSOR_TYPE_GNSS;
     entry.source = SENSOR_SOURCE_HARDWARE;
     entry.timestamp = timestamp;
     entry.data = (uint8_t*)gnss_data;
@@ -1140,7 +1140,7 @@ int sensor_pipeline_push_force_torque(SensorPipeline* pipeline, int sensor_id,
     SensorPipelineEntry entry;
     memset(&entry, 0, sizeof(entry));
     entry.sensor_id = sensor_id;
-    entry.sensor_type = SENSOR_TYPE_FORCE_TORQUE;
+    entry.sensor_type = ROBOT_SENSOR_TYPE_FORCE_TORQUE;
     entry.source = SENSOR_SOURCE_HARDWARE;
     entry.timestamp = timestamp;
     entry.data = (uint8_t*)ft_data;
@@ -1157,7 +1157,7 @@ int sensor_pipeline_get_latest(SensorPipeline* pipeline, int sensor_id,
     return ring_buffer_get_latest(&pipeline->ring_buffer, sensor_id, entry);
 }
 
-int sensor_pipeline_get_latest_by_type(SensorPipeline* pipeline, SensorType sensor_type,
+int sensor_pipeline_get_latest_by_type(SensorPipeline* pipeline, RobotSensorType sensor_type,
                                         SensorPipelineEntry* entry)
 {
     if (!pipeline || !entry) return SENSOR_PIPELINE_ERROR_INVALID;
@@ -1171,7 +1171,7 @@ int sensor_pipeline_get_history(SensorPipeline* pipeline, int sensor_id,
     return ring_buffer_get_history(&pipeline->ring_buffer, sensor_id, entries, count, max_entries);
 }
 
-int sensor_pipeline_get_history_by_type(SensorPipeline* pipeline, SensorType sensor_type,
+int sensor_pipeline_get_history_by_type(SensorPipeline* pipeline, RobotSensorType sensor_type,
                                          SensorPipelineEntry* entries, int* count,
                                          int max_entries)
 {
@@ -1233,14 +1233,14 @@ int sensor_pipeline_subscribe(SensorPipeline* pipeline, int sensor_id,
 
     SubscriberEntry* sub = &pipeline->subscribers[pipeline->subscriber_count++];
     sub->sensor_id = sensor_id;
-    sub->sensor_type = (SensorType)(-1);
+    sub->sensor_type = (RobotSensorType)(-1);
     sub->callback = callback;
     sub->user_data = user_data;
     sub->active = 1;
     return SENSOR_PIPELINE_OK;
 }
 
-int sensor_pipeline_subscribe_by_type(SensorPipeline* pipeline, SensorType sensor_type,
+int sensor_pipeline_subscribe_by_type(SensorPipeline* pipeline, RobotSensorType sensor_type,
                                        SensorPipelineCallback callback, void* user_data)
 {
     if (!pipeline || !callback) return SENSOR_PIPELINE_ERROR_INVALID;
@@ -1524,7 +1524,7 @@ int sensor_pipeline_import_from_file(SensorPipeline* pipeline, const char* filen
         if (fread(&ts, sizeof(ts), 1, fp) != 1) break;
         if (fread(&conf, sizeof(conf), 1, fp) != 1) break;
 
-        SensorType type = (SensorType)type_u32;
+        RobotSensorType type = (RobotSensorType)type_u32;
         size_t dsize = (size_t)size_u32;
         uint8_t* data = NULL;
         if (dsize > 0)

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu_vulkan.c
  * @brief Vulkan GPU后端完整实现
  * 
@@ -1876,7 +1876,7 @@ static GpuMemory* vulkan_backend_memory_alloc(GpuContext* gpu_context, size_t si
     
     VkDeviceMemory device_memory = 0;
     result = vkAllocateMemory(vulkan_context->device, &alloc_info, NULL, &device_memory);
-    if (result != VK_SUCCESS || device_memory == VK_NULL_HANDLE) {
+    if (result != VK_SUCCESS || device_memory == 0) {
         snprintf(g_vulkan_error_string, sizeof(g_vulkan_error_string),
                 "Vulkan设备内存分配失败: %u", result);
         vkDestroyBuffer(vulkan_context->device, buffer, NULL);
@@ -2226,9 +2226,9 @@ static int vulkan_stream_ensure_staging(VulkanStream* vulkan_stream, size_t requ
         vkDestroyBuffer(vulkan_context->device, vulkan_stream->staging_buffer, NULL);
         vulkan_stream->staging_buffer = VK_NULL_HANDLE;
     }
-    if (vulkan_stream->staging_memory != VK_NULL_HANDLE) {
+    if (vulkan_stream->staging_memory != 0) {
         vkFreeMemory(vulkan_context->device, vulkan_stream->staging_memory, NULL);
-        vulkan_stream->staging_memory = VK_NULL_HANDLE;
+        vulkan_stream->staging_memory = 0;
     }
     vulkan_stream->staging_capacity = 0;
     
@@ -2286,7 +2286,7 @@ static int vulkan_stream_ensure_staging(VulkanStream* vulkan_stream, size_t requ
     if (result != VK_SUCCESS) {
         vkDestroyBuffer(vulkan_context->device, vulkan_stream->staging_buffer, NULL);
         vulkan_stream->staging_buffer = VK_NULL_HANDLE;
-        vulkan_stream->staging_memory = VK_NULL_HANDLE;
+        vulkan_stream->staging_memory = 0;
         return -1;
     }
     
@@ -2296,7 +2296,7 @@ static int vulkan_stream_ensure_staging(VulkanStream* vulkan_stream, size_t requ
         vkDestroyBuffer(vulkan_context->device, vulkan_stream->staging_buffer, NULL);
         vkFreeMemory(vulkan_context->device, vulkan_stream->staging_memory, NULL);
         vulkan_stream->staging_buffer = VK_NULL_HANDLE;
-        vulkan_stream->staging_memory = VK_NULL_HANDLE;
+        vulkan_stream->staging_memory = 0;
         return -1;
     }
     
@@ -4832,9 +4832,9 @@ static void vulkan_backend_stream_free(GpuStream* stream) {
             vkDestroyBuffer(vulkan_context->device, vulkan_stream->staging_buffer, NULL);
             vulkan_stream->staging_buffer = VK_NULL_HANDLE;
         }
-        if (vulkan_stream->staging_memory != VK_NULL_HANDLE) {
+        if (vulkan_stream->staging_memory != 0) {
             vkFreeMemory(vulkan_context->device, vulkan_stream->staging_memory, NULL);
-            vulkan_stream->staging_memory = VK_NULL_HANDLE;
+            vulkan_stream->staging_memory = 0;
         }
         vulkan_stream->staging_capacity = 0;
         
@@ -4905,7 +4905,7 @@ static int vulkan_backend_stream_synchronize(GpuStream* stream) {
     
     // 处理待处理的读取回传操作
     if (vulkan_stream->has_pending_readback && vulkan_stream->readback_dst != NULL && 
-        vulkan_stream->readback_size > 0 && vulkan_stream->staging_memory != VK_NULL_HANDLE) {
+        vulkan_stream->readback_size > 0 && vulkan_stream->staging_memory != 0) {
         
         void* mapped_ptr = NULL;
         unsigned int map_result = vkMapMemory(vulkan_context->device, vulkan_stream->staging_memory, 

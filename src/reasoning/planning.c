@@ -456,7 +456,7 @@ static void cmaes_initialize(PlanningSystem* system) {
 static float plan_rng_normal(float mean, float stddev);
 static int cholesky_decompose(float* cov, float* L, size_t n);
 
-static int cmaes_sample_population(PlanningSystem* system) {
+static int plan_cmaes_sample(PlanningSystem* system) {
     if (!system || !system->cmaes_initialized) return -1;
     size_t dim = system->cmaes_dimension;
     size_t pop = system->evolution_population_size;
@@ -2810,7 +2810,7 @@ int planning_evolve_architecture(PlanningSystem* system, size_t num_generations,
     }
 
     /* 使用CMA-ES采样进行第一代 */
-    cmaes_sample_population(system);
+    plan_cmaes_sample(system);
 
     for (size_t gen = 0; gen < num_generations; gen++) {
         int ret = planning_evolve_architecture_generation(system);

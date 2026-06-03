@@ -916,7 +916,7 @@ static int try_load_multimedia(const char* filepath,
     return 0;
 }
 
-static int scan_data_directory(const char* dirpath, char files[MAX_FILEPATH], int max_files) {
+static int scan_data_directory(const char* dirpath, char files[][MAX_FILEPATH], int max_files) {
     if (!dirpath || dirpath[0] == '\0') return 0;
     int count = 0;
     char pattern[MAX_FILEPATH];
@@ -1364,7 +1364,7 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
     /* P0-012修复: 检测GPU可用性，GPU不可用时自动使用CPU后端
      * 支持CPU计算和CPU训练是核心需求，绝不以GPU缺失为由拒绝训练 */
     {
-        GpuBackend detected = gpu_auto_select;
+        GpuBackend detected = gpu_auto_select();
         if (detected == GPU_BACKEND_CPU || detected < 0) {
             log_warning("[训练管线] ⚠ GPU后端不可用 — 已回退到CPU后端。训练速度将受CPU单核/多核性能限制，如需加速请安装GPU驱动并重新初始化。");
             log_info("[训练管线] 未检测到GPU硬件，自动使用CPU后端 (支持纯CPU训练)");

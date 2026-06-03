@@ -99,6 +99,7 @@ GazeboBridge* gazebo_connect(const GazeboConfig* config) {
     
     int paused = config->start_paused ? 1 : 0;
     char cmd[2048];
+    (void)cmd;
 
 #ifdef _WIN32
     /* S-024修复: Windows原生不支持Gazebo。
@@ -157,13 +158,13 @@ GazeboBridge* gazebo_connect(const GazeboConfig* config) {
         }
     }
     bridge->state = GAZEBO_CONNECTED;
-#endif
 
     bridge->sim_time_sec = 0.0;
     bridge->step_size = config->max_step_size > 0.0f ? config->max_step_size : 0.016f;
     
     log_info("Gazebo桥接: 已连接到 Gazebo (世界: %s)\n", bridge->world_name);
     return bridge;
+#endif
 }
 
 void gazebo_disconnect(GazeboBridge* bridge) {

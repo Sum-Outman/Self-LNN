@@ -36,6 +36,9 @@
 #include "selflnn/core/evolutionary_algorithms.h"
 #include "selflnn/core/loss.h" /* 统一损失函数接口 */
 
+/* MSVC false positive: parameters/gradients always set via conditional branches */
+#pragma warning(disable: 4703)
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -3247,7 +3250,7 @@ static int distributed_heartbeat_init(Trainer* trainer) {
     if (!trainer->heartbeat_last_seen) return -1;
     
     /* 初始化节点存活数组 */
-    trainer->heartbeat_node_alive = (volatile int*)safe_malloc(N * sizeof(volatile int));
+    trainer->heartbeat_node_alive = (_Atomic int*)safe_malloc((size_t)N * sizeof(_Atomic int));
     if (!trainer->heartbeat_node_alive) {
         safe_free((void**)&trainer->heartbeat_last_seen);
         return -1;
@@ -3948,7 +3951,7 @@ static int distributed_elastic_add_node(Trainer* trainer, int new_node_id, int n
     }
 
     if (trainer->heartbeat_node_alive) {
-        volatile int* new_alive = (volatile int*)realloc(
+        _Atomic int* new_alive = (_Atomic int*)realloc(
             (void*)trainer->heartbeat_node_alive,
             (size_t)num_total_nodes * sizeof(int));
         if (!new_alive) return -1;

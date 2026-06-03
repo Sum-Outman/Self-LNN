@@ -1,4 +1,4 @@
-﻿#include "selflnn/memory/working_memory.h"
+#include "selflnn/memory/working_memory.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 #include <string.h>
@@ -10,7 +10,7 @@
 #endif
 
 struct WorkingMemory {
-    WorkingMemorySlot slots[WM_MAX_SLOTS];
+    WMCfcSlot slots[WM_MAX_SLOTS];
     size_t slot_count;
     WorkingMemoryConfig config;
     float global_time;
@@ -136,7 +136,7 @@ static int find_inactive_slot(WorkingMemory* wm) {
     return -1;
 }
 
-static float compute_eviction_score(const WorkingMemorySlot* slot,
+static float compute_eviction_score(const WMCfcSlot* slot,
                                      const WorkingMemoryConfig* config) {
     if (!slot->is_active) return -1.0f;
 
@@ -188,7 +188,7 @@ static int select_eviction_target(WorkingMemory* wm) {
     return target;
 }
 
-static void clear_slot(WorkingMemorySlot* slot) {
+static void clear_slot(WMCfcSlot* slot) {
     safe_free((void**)&slot->data);
     memset(slot->key, 0, WM_KEY_MAX);
     slot->data_size = 0;
@@ -272,7 +272,7 @@ int working_memory_update(WorkingMemory* wm, const char* key,
     int slot_idx = find_slot(wm, key);
 
     if (slot_idx >= 0) {
-        WorkingMemorySlot* slot = &wm->slots[slot_idx];
+        WMCfcSlot* slot = &wm->slots[slot_idx];
 
         if (slot->data_size != data_size) {
             float* new_data = (float*)realloc(slot->data, data_size * sizeof(float));
@@ -313,7 +313,7 @@ int working_memory_update(WorkingMemory* wm, const char* key,
         clear_slot(&wm->slots[new_idx]);
     }
 
-    WorkingMemorySlot* slot = &wm->slots[new_idx];
+    WMCfcSlot* slot = &wm->slots[new_idx];
     strncpy(slot->key, key, WM_KEY_MAX - 1);
     slot->key[WM_KEY_MAX - 1] = '\0';
 
@@ -353,7 +353,7 @@ int working_memory_retrieve(WorkingMemory* wm, const char* key,
     int slot_idx = find_slot(wm, key);
     if (slot_idx < 0) return -1;
 
-    WorkingMemorySlot* slot = &wm->slots[slot_idx];
+    WMCfcSlot* slot = &wm->slots[slot_idx];
     if (data_size < slot->data_size) return -1;
 
     memcpy(data, slot->data, slot->data_size * sizeof(float));
@@ -378,7 +378,7 @@ int working_memory_focus_on(WorkingMemory* wm, const char* key,
     int slot_idx = find_slot(wm, key);
     if (slot_idx < 0) return -1;
 
-    WorkingMemorySlot* slot = &wm->slots[slot_idx];
+    WMCfcSlot* slot = &wm->slots[slot_idx];
 
     if (wm->config.enable_cfc_gating && gate_signal && signal_dim > 0) {
         slot->cfc_gate_value = cfc_gate_scalar(
@@ -496,7 +496,7 @@ int working_memory_decay_all(WorkingMemory* wm, float dt) {
     for (size_t i = 0; i < wm->slot_count; i++) {
         if (!wm->slots[i].is_active) continue;
 
-        WorkingMemorySlot* slot = &wm->slots[i];
+        WMCfcSlot* slot = &wm->slots[i];
 
         slot->age += dt;
 
@@ -547,7 +547,7 @@ int working_memory_rehearse(WorkingMemory* wm, const char* key) {
     int slot_idx = find_slot(wm, key);
     if (slot_idx < 0) return -1;
 
-    WorkingMemorySlot* slot = &wm->slots[slot_idx];
+    WMCfcSlot* slot = &wm->slots[slot_idx];
 
     slot->rehearsal_count += wm->config.rehearsal_boost;
 
@@ -566,7 +566,7 @@ int working_memory_rehearse(WorkingMemory* wm, const char* key) {
 }
 
 int working_memory_get_slots(const WorkingMemory* wm,
-                            WorkingMemorySlot* slots, size_t max_count,
+                            WMCfcSlot* slots, size_t max_count,
                             size_t* actual_count) {
     if (!wm || !wm->initialized) return -1;
     if (!slots || max_count == 0) return -1;
@@ -575,8 +575,8 @@ int working_memory_get_slots(const WorkingMemory* wm,
     for (size_t i = 0; i < wm->slot_count && written < max_count; i++) {
         if (!wm->slots[i].is_active) continue;
 
-        WorkingMemorySlot* dst = &slots[written];
-        const WorkingMemorySlot* src = &wm->slots[i];
+        WMCfcSlot* dst = &slots[written];
+        const WMCfcSlot* src = &wm->slots[i];
 
         strncpy(dst->key, src->key, WM_KEY_MAX - 1);
         dst->key[WM_KEY_MAX - 1] = '\0';

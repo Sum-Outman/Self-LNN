@@ -319,12 +319,12 @@ static float _ci_builtin_memcpy(CiInterpreter* ci, const float* args, int arg_co
 
 /* M-026: 扩展内置函数注册表 */
 static const CiBuiltinMulti g_ci_builtins_multi[] = {
-    {"printf",  _ci_builtin_printf,  0},
-    {"malloc",  _ci_builtin_malloc,  0},
-    {"free",    _ci_builtin_free,    0},
-    {"strcpy",  _ci_builtin_strcpy,  0},
-    {"memset",  _ci_builtin_memset,  0},
-    {"memcpy",  _ci_builtin_memcpy,  0},
+    {"printf",  (CiBuiltinMultiFunc)_ci_builtin_printf,  0},
+    {"malloc",  (CiBuiltinMultiFunc)_ci_builtin_malloc,  0},
+    {"free",    (CiBuiltinMultiFunc)_ci_builtin_free,    0},
+    {"strcpy",  (CiBuiltinMultiFunc)_ci_builtin_strcpy,  0},
+    {"memset",  (CiBuiltinMultiFunc)_ci_builtin_memset,  0},
+    {"memcpy",  (CiBuiltinMultiFunc)_ci_builtin_memcpy,  0},
     {"",        NULL,                1}
 };
 
@@ -647,7 +647,7 @@ static float _ci_primary(CiInterpreter* ci) {
                 float result = 0.0f;
                 for (int k = 0; !g_ci_builtins_multi[k].is_sentinel; k++) {
                     if (strcmp(name, g_ci_builtins_multi[k].name) == 0) {
-                        result = g_ci_builtins_multi[k].func(ci, args, arg_count);
+                        result = g_ci_builtins_multi[k].func((struct CiInterpreter_s*)ci, args, arg_count);
                         break;
                     }
                 }

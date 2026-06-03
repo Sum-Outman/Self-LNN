@@ -2879,10 +2879,10 @@ static void worker_process_api_request(void* arg) {
             char nf[512]; /* 增大以容纳JSON错误响应 */
             int nfl = snprintf(nf, sizeof(nf),
                 "HTTP/1.1 404 Not Found\r\n"
-                "Content-Type: application/json\r\n" /* text/plain → JSON */
-                "Content-Length: %zu\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: 99\r\n"
                 "Connection: close\r\n"
-                "Access-Control-Allow-Origin: %s\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "X-Content-Type-Options: nosniff\r\n"
                 "Server: SELF-LNN-AGI/1.0\r\n\r\n"
                 "{\"error\":\"not_found\",\"status\":404,\"message\":\"路由不存在\"}");
@@ -4777,8 +4777,8 @@ BackendServer* backend_server_create(const BackendConfig* config) {
         
         // 添加默认传感器
         if (server->robot_instance) {
-            SensorConfig lidar_config = {
-                .type = SENSOR_TYPE_LIDAR,
+            RobotSensorConfig lidar_config = {
+                .type = ROBOT_SENSOR_TYPE_LIDAR,
                 .name = "激光雷达",
                 .sensor_id = 0,
                 .update_rate = 10.0f,
@@ -4792,8 +4792,8 @@ BackendServer* backend_server_create(const BackendConfig* config) {
             
             robot_add_sensor(server->robot_instance, &lidar_config);
             
-            SensorConfig imu_config = {
-                .type = SENSOR_TYPE_IMU,
+            RobotSensorConfig imu_config = {
+                .type = ROBOT_SENSOR_TYPE_IMU,
                 .name = "惯性测量单元",
                 .sensor_id = 1,
                 .update_rate = 100.0f,
@@ -5911,7 +5911,7 @@ static char* get_detailed_system_status(const BackendServer* server) {
     size_t gpu_memory_mb = 0;
     float gpu_usage = 0.0f;
     {
-        GpuBackend backend = gpu_auto_select;
+        GpuBackend backend = gpu_auto_select();
         if (backend != GPU_BACKEND_CPU) {
             gpu_available = 1;
             gpu_count = gpu_get_device_count(backend);
@@ -11985,7 +11985,7 @@ static int handle_api_post_devices_register(BackendServer* server,
     }
 
     /* V-009修复: 使用真实设备协议管理器注册设备 */
-    ensure_device_manager;
+    ensure_device_manager();
     if (!g_device_manager) {
         response->data = string_duplicate("{\"success\":false,\"error\":\"设备管理器初始化失败\"}");
         response->data_length = strlen(response->data);
@@ -18694,7 +18694,7 @@ static int handle_api_post_dataset_create(BackendServer* server,
     if (output_dim <= 0) output_dim = 10;
 
     /* 使用真实TrainingDataset API创建数据集 */
-    TrainingDataset* ds = dataset_create(ds_name, (size_t)num_samples, (size_t)input_dim, (size_t)output_dim);
+    TrainingDataset* ds = dataset_create((size_t)num_samples, (size_t)input_dim);
     if (!ds) {
         snprintf(json_data, 1024, "{\"success\":false,\"error\":\"数据集内存分配失败\"}");
     } else {
@@ -25357,7 +25357,7 @@ char* backend_server_get_health(const BackendServer* server) {
     size_t gpu_memory_mb = 0;
     char gpu_info_str[256] = {0};
 
-    gpu_backend = gpu_auto_select;
+    gpu_backend = gpu_auto_select();
     if (gpu_backend != GPU_BACKEND_CPU) {
         gpu_device_count = gpu_get_device_count(gpu_backend);
         if (gpu_device_count > 0) {
@@ -25796,13 +25796,13 @@ static int gpu_ascend_infer(const float* input, float* output, int dim) {
     static int acl_available = -1;
     static npu_dl_handle acl_lib = NULL;
     if (acl_available == -1) {
-        acl_lib = NPU_DLOPEN(
+        const char* acl_dll = 
 #ifdef _WIN32
-            "ascendcl.dll"
+            "ascendcl.dll";
 #else
-            "libascendcl.so"
+            "libascendcl.so";
 #endif
-        );
+        acl_lib = NPU_DLOPEN(acl_dll);
         acl_available = (acl_lib != NULL) ? 1 : 0;
         if (!acl_lib) {
             log_info("[昇腾Ascend] ACL运行时不可用，回退到CPU计算");
@@ -25847,13 +25847,13 @@ static int gpu_npu_tpu_infer(const float* input, float* output, int dim) {
     static int tpu_available = -1;
     static npu_dl_handle tpu_lib = NULL;
     if (tpu_available == -1) {
-        tpu_lib = NPU_DLOPEN(
+        const char* tpu_dll = 
 #ifdef _WIN32
-            "libtpu.dll"
+            "libtpu.dll";
 #else
-            "libtpu.so"
+            "libtpu.so";
 #endif
-        );
+        tpu_lib = NPU_DLOPEN(tpu_dll);
         tpu_available = (tpu_lib != NULL) ? 1 : 0;
         if (!tpu_lib) {
             log_info("[TPU] TPU运行时不可用，回退到CPU计算");

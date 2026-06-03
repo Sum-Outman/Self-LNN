@@ -264,6 +264,8 @@ MemorySystem* memory_create(const MemoryConfig* config) {
  * @param system 记忆系统
  * @return 衰减的记忆条目数，-1=失败
  */
+static void memory_apply_decay(MemorySystem* system, float time_delta);
+
 int memory_periodic_decay_update(MemorySystem* system) {
     if (!system || system->config.decay_rate <= 0.0f) return 0;
     time_t now = time(NULL);

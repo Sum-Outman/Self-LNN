@@ -1,4 +1,4 @@
-﻿#include "selflnn/safety/security_monitor_deep.h"
+#include "selflnn/safety/security_monitor_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
 #include <stdlib.h>
@@ -941,11 +941,11 @@ int sec_report_resource_event(SafetyMonitor* safety_monitor,
  * xorshift在统计质量和速度上均优于LCG，更适合对抗样本检测中的随机扰动。 */
 static uint32_t sec_rng_next(SecInputMonitor* monitor) {
     uint64_t x = (uint64_t)monitor->rng_state;
-    uint64_t y = (uint64_t)(monitor->rng_state >> 32);
+    uint64_t y = (uint64_t)monitor->rng_state >> 32;
     if (y == 0) y = 0x9E3779B97F4A7C15ULL;
     x ^= x << 23;
     uint64_t s = (x ^ y ^ (x >> 17)) * 0x2545F4914F6CDD1DULL;
-    monitor->rng_state = (uint32_t)(s & 0xFFFFFFFFU) | ((uint32_t)((s >> 32) & 0xFFFFFFFFU) << 32);
+    monitor->rng_state = (uint32_t)(s & 0xFFFFFFFFU);
     return (uint32_t)(s & 0xFFFFFFFFU);
 }
 

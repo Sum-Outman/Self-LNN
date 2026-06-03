@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file logic_reasoning.c
  * @brief 逻辑推理引擎实现
  * 
@@ -775,7 +775,7 @@ int logic_reasoning_engine_load_rules_from_graph(LogicReasoningEngine* engine, K
     int loaded_rules = 0;
     
     // 获取所有节点进行完整遍历
-    GraphNode** all_nodes = (GraphNode**)safe_malloc(node_count * sizeof(GraphNode*));
+    KnowledgeGraphNode** all_nodes = (KnowledgeGraphNode**)safe_malloc(node_count * sizeof(KnowledgeGraphNode*));
     if (!all_nodes) {
         return 0;  // 内存分配失败
     }
@@ -788,7 +788,7 @@ int logic_reasoning_engine_load_rules_from_graph(LogicReasoningEngine* engine, K
     
     // 遍历所有节点，查找规则节点
     for (size_t i = 0; i < actual_node_count; i++) {
-        GraphNode* node = all_nodes[i];
+        KnowledgeGraphNode* node = all_nodes[i];
         if (!node || !node->label) continue;
         
         // 识别规则节点：标签包含"Rule"或"规则"
@@ -810,10 +810,10 @@ int logic_reasoning_engine_load_rules_from_graph(LogicReasoningEngine* engine, K
         
         // 遍历节点的所有边，识别前提边和结论边
         for (size_t j = 0; j < node->edge_count; j++) {
-            GraphEdge* edge = node->edges[j];
+            KnowledgeGraphEdge* edge = node->edges[j];
             if (!edge || !edge->label) continue;
             
-            GraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
+            KnowledgeGraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
             if (!neighbor || !neighbor->label) continue;
             
             // 检查边标签，识别前提或结论
@@ -877,7 +877,7 @@ int logic_reasoning_engine_load_rules_from_graph(LogicReasoningEngine* engine, K
             
             // 计算相关边的平均置信度
             for (size_t j = 0; j < node->edge_count; j++) {
-                GraphEdge* edge = node->edges[j];
+                KnowledgeGraphEdge* edge = node->edges[j];
                 if (edge && edge->confidence > 0.0f) {
                     edge_confidence_sum += edge->confidence;
                     relevant_edge_count++;
@@ -1212,7 +1212,7 @@ int logic_reasoning_engine_load_rules_from_semantic_network(LogicReasoningEngine
     
     // 第二步：遍历所有概念，为每个实体概念创建身份规则
     for (size_t i = 0; i < concept_count; i++) {
-        Concept* concept = semantic_network_get_concept_by_index(network, i);
+        SemanticConcept* concept = semantic_network_get_concept_by_index(network, i);
         if (!concept || !concept->name) continue;
         
         InferenceRule rule;
@@ -1836,8 +1836,8 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_kb(LogicReasoningEngine
 
 LogicInferenceResult* logic_reasoning_engine_reason_with_graph(LogicReasoningEngine* engine,
                                                    KnowledgeGraph* graph,
-                                                   GraphNode* start_node,
-                                                   GraphNode* end_node,
+                                                   KnowledgeGraphNode* start_node,
+                                                   KnowledgeGraphNode* end_node,
                                                    size_t max_paths) {
     if (!engine || !graph || !start_node || !end_node || max_paths == 0) return NULL;
     
@@ -1848,7 +1848,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_graph(LogicReasoningEng
     if (!result) return NULL;
     
     // 查找路径
-    GraphPath** paths = (GraphPath**)safe_calloc(max_paths, sizeof(GraphPath*));
+    KnowledgeGraphPath** paths = (KnowledgeGraphPath**)safe_calloc(max_paths, sizeof(KnowledgeGraphPath*));
     if (!paths) {
         safe_free((void**)&result);
         return NULL;
@@ -1872,13 +1872,13 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_graph(LogicReasoningEng
     size_t fact_capacity = 0;
     
     for (size_t i = 0; i < found_paths; i++) {
-        GraphPath* path = paths[i];
+        KnowledgeGraphPath* path = paths[i];
         if (!path) continue;
         
         // 为路径中的每个边创建一个事实
         size_t edge_count = (path->edges && path->length > 0) ? (path->length - 1) : 0;
         for (size_t j = 0; j < edge_count; j++) {
-            GraphEdge* edge = path->edges[j];
+            KnowledgeGraphEdge* edge = path->edges[j];
             if (!edge || !edge->source || !edge->target) continue;
             
             const char* relation_str = edge->label ? edge->label : "关系";
@@ -1947,7 +1947,7 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_graph(LogicReasoningEng
 
 LogicInferenceResult* logic_reasoning_engine_reason_with_semantic_network(LogicReasoningEngine* engine,
                                                               SemanticNetwork* network,
-                                                              Concept* concept,
+                                                              SemanticConcept* concept,
                                                               int relation_type,
                                                               int max_depth) {
     (void)max_depth;

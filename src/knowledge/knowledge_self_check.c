@@ -523,9 +523,9 @@ int ksc_check_logical_contradictions(KnowledgeBase* kb,
             KnowledgeEntry* e = &all_entries[i];
             if (!e->subject || !e->object) continue;
             /* 使用 find_nodes_by_label 获取节点列表，取第一个匹配 */
-            GraphNode* subj_nodes[2];
+            KnowledgeGraphNode* subj_nodes[2];
             int subj_count = (int)knowledge_graph_find_nodes_by_label(kg, e->subject, subj_nodes, 2);
-            GraphNode* obj_nodes[2];
+            KnowledgeGraphNode* obj_nodes[2];
             int obj_count = (int)knowledge_graph_find_nodes_by_label(kg, e->object, obj_nodes, 2);
             if (subj_count > 0 && obj_count > 0) {
                 int subj_id = subj_nodes[0]->id;
@@ -570,14 +570,14 @@ int ksc_check_circular_dependencies(KnowledgeGraph* kg, KSSelfCheckConfig* confi
     size_t node_count = knowledge_graph_get_all_nodes(kg, NULL, 0);
     if (node_count == 0) return -1;
 
-    GraphNode** nodes = (GraphNode**)safe_calloc(node_count, sizeof(GraphNode*));
+    KnowledgeGraphNode** nodes = (KnowledgeGraphNode**)safe_calloc(node_count, sizeof(KnowledgeGraphNode*));
     if (!nodes) return -1;
     knowledge_graph_get_all_nodes(kg, nodes, node_count);
 
     size_t edge_count = knowledge_graph_get_all_edges(kg, NULL, 0);
-    GraphEdge** edges = NULL;
+    KnowledgeGraphEdge** edges = NULL;
     if (edge_count > 0) {
-        edges = (GraphEdge**)safe_calloc(edge_count, sizeof(GraphEdge*));
+        edges = (KnowledgeGraphEdge**)safe_calloc(edge_count, sizeof(KnowledgeGraphEdge*));
         if (edges) {
             knowledge_graph_get_all_edges(kg, edges, edge_count);
         }

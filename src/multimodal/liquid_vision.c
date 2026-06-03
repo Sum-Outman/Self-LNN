@@ -1497,11 +1497,11 @@ void vision_class_registry_free(VisionClassRegistry* registry) {
 }
 
 VisionClassRegistry* vision_class_registry_get_global(void) {
-    _registry_lock_init;
+    _registry_lock_init();
     if (g_registry_singleton_lock) mutex_lock(g_registry_singleton_lock);
 
     if (!g_global_class_registry) {
-        g_global_class_registry = vision_class_registry_create;
+        g_global_class_registry = vision_class_registry_create();
     }
 
     VisionClassRegistry* result = g_global_class_registry;
@@ -1593,7 +1593,7 @@ int vision_class_add_samples(VisionClassRegistry* registry, int class_id, int co
 }
 
 const char* vision_get_class_name_zh(int class_id) {
-    VisionClassRegistry* reg = vision_class_registry_get_global;
+    VisionClassRegistry* reg = vision_class_registry_get_global();
     if (!reg) return "未知";
 
     VisionClassEntry entry;
@@ -1604,7 +1604,7 @@ const char* vision_get_class_name_zh(int class_id) {
 }
 
 const char* vision_get_class_name_en(int class_id) {
-    VisionClassRegistry* reg = vision_class_registry_get_global;
+    VisionClassRegistry* reg = vision_class_registry_get_global();
     if (!reg) return "unknown";
 
     VisionClassEntry entry;
@@ -2416,7 +2416,7 @@ void cfc_ode_layer_free(CfcOdeLayer* layer) {
 
 int cfc_ode_layer_forward(CfcOdeLayer* layer, const float* input, float* output) {
     if (!layer || !layer->is_initialized || !input || !output) return -1;
-    uint64_t start = perf_timestamp_ns;
+    uint64_t start = perf_timestamp_ns();
 
     const int input_dim = layer->config.input_dim;
     const int hidden_dim = layer->config.hidden_dim;
@@ -2499,7 +2499,7 @@ int cfc_ode_layer_forward(CfcOdeLayer* layer, const float* input, float* output)
     /* 保存持久状态 */
     memcpy(layer->hidden_state_persistent, output, (size_t)hidden_dim * sizeof(float));
 
-    uint64_t end = perf_timestamp_ns;
+    uint64_t end = perf_timestamp_ns();
     layer->total_forward_time_ms += (float)(end - start) / 1000000.0f;
     layer->forward_count++;
 
@@ -2957,7 +2957,7 @@ int cfc_vision_extract_features(CfcVisionProcessor* processor,
     if (width != processor->config.image_width || height != processor->config.image_height ||
         channels != processor->config.image_channels) return -1;
 
-    uint64_t start_time = perf_timestamp_ns;
+    uint64_t start_time = perf_timestamp_ns();
     const int patch_size = processor->config.patch_size;
     const int img_channels = processor->config.image_channels;
     const int proj_dim = processor->proj_hidden_dim;
@@ -3003,7 +3003,7 @@ int cfc_vision_extract_features(CfcVisionProcessor* processor,
 
     memcpy(features, processor->pooled_feature, (size_t)proj_dim * sizeof(float));
 
-    uint64_t end_time = perf_timestamp_ns;
+    uint64_t end_time = perf_timestamp_ns();
     processor->total_processing_time_ms += (float)(end_time - start_time) / 1000000.0f;
     processor->total_images_processed++;
     return proj_dim;
@@ -3223,7 +3223,7 @@ int cfc_vision_save_processor(CfcVisionProcessor* processor, const char* filenam
     FILE* fp = fopen(filename, "wb");
     if (!fp) return -1;
 
-    const char magic = "CFCVISION";
+    const char magic[] = "CFCVISION";
     if (fwrite(magic, 1, 8, fp) != 8) { fclose(fp); return -1; }
     if (fwrite(&processor->config, sizeof(CfcVisionConfig), 1, fp) != 1) { fclose(fp); return -1; }
 
@@ -4287,7 +4287,7 @@ int lv_save_weights(const LiquidVisionProcessor* processor, const char* filepath
     const int KK = LV_CNN_KERNEL * LV_CNN_KERNEL;
 
     /* 写入魔数标识 */
-    const char magic = "LVCNNv01";
+    const char magic[] = "LVCNNv01";
     if (fwrite(magic, 1, 8, fp) != 8) { fclose(fp); return -1; }
 
     /* 写入架构常量（便于加载时校验） */

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file robot.h
  * @brief 机器人控制接口
  * 
@@ -41,18 +41,18 @@ typedef enum {
 } SimEngine;
 
 /**
- * @brief 传感器类型枚举
+ * @brief 机器人传感器类型枚举（前缀Robot避免与multimodal/sensor.h冲突）
  */
 typedef enum {
-    SENSOR_TYPE_LIDAR = 0,      /**< 激光雷达 */
-    SENSOR_TYPE_CAMERA = 1,     /**< 摄像头 */
-    SENSOR_TYPE_IMU = 2,        /**< 惯性测量单元 */
-    SENSOR_TYPE_GNSS = 3,       /**< 卫星导航 */
-    SENSOR_TYPE_FORCE_TORQUE = 4, /**< 力扭矩传感器 */
-    SENSOR_TYPE_TEMPERATURE = 5, /**< 温度传感器 */
-    SENSOR_TYPE_PRESSURE = 6,    /**< 压力传感器 */
-    SENSOR_TYPE_PROXIMITY = 7    /**< 接近传感器 */
-} SensorType;
+    ROBOT_SENSOR_TYPE_LIDAR = 0,      /**< 激光雷达 */
+    ROBOT_SENSOR_TYPE_CAMERA = 1,     /**< 摄像头 */
+    ROBOT_SENSOR_TYPE_IMU = 2,        /**< 惯性测量单元 */
+    ROBOT_SENSOR_TYPE_GNSS = 3,       /**< 卫星导航 */
+    ROBOT_SENSOR_TYPE_FORCE_TORQUE = 4, /**< 力扭矩传感器 */
+    ROBOT_SENSOR_TYPE_TEMPERATURE = 5, /**< 温度传感器 */
+    ROBOT_SENSOR_TYPE_PRESSURE = 6,    /**< 压力传感器 */
+    ROBOT_SENSOR_TYPE_PROXIMITY = 7    /**< 接近传感器 */
+} RobotSensorType;
 
 /**
  * @brief 运动模式枚举
@@ -122,7 +122,7 @@ typedef struct {
  * @brief 传感器配置结构体
  */
 typedef struct {
-    SensorType type;            /**< 传感器类型 */
+    RobotSensorType type;       /**< 传感器类型 */
     char name[32];              /**< 传感器名称 */
     int sensor_id;              /**< 传感器ID */
     float update_rate;          /**< 更新频率 (Hz) */
@@ -130,7 +130,7 @@ typedef struct {
     float range_max;            /**< 最大测量范围 */
     float resolution;           /**< 分辨率 */
     float accuracy;             /**< 精度 */
-} SensorConfig;
+} RobotSensorConfig;
 
 /**
  * @brief 机器人状态结构体
@@ -157,7 +157,7 @@ typedef struct {
  * @brief 传感器数据结构体
  */
 typedef struct {
-    SensorType type;            /**< 传感器类型 */
+    RobotSensorType type;       /**< 传感器类型 */
     int sensor_id;              /**< 传感器ID */
     float timestamp;            /**< 时间戳 (秒) */
     float* data;                /**< 传感器数据 */
@@ -295,7 +295,7 @@ void robot_free(Robot* robot);
  * @param config 传感器配置
  * @return int 成功返回传感器ID，失败返回-1
  */
-int robot_add_sensor(Robot* robot, const SensorConfig* config);
+int robot_add_sensor(Robot* robot, const RobotSensorConfig* config);
 
 /**
  * @brief 移除机器人上的传感器
@@ -1038,11 +1038,11 @@ int robot_ekf_fuse_sensors(const float* imu_accel, const float* imu_gyro, const 
 #define TASK_ALLOCATION_MAX_ROBOTS 64
 
 typedef enum {
-    TASK_PRIORITY_LOW = 0,
-    TASK_PRIORITY_NORMAL = 1,
-    TASK_PRIORITY_HIGH = 2,
-    TASK_PRIORITY_CRITICAL = 3
-} TaskPriority;
+    ROBOT_TASK_PRIORITY_LOW = 0,
+    ROBOT_TASK_PRIORITY_NORMAL = 1,
+    ROBOT_TASK_PRIORITY_HIGH = 2,
+    ROBOT_TASK_PRIORITY_CRITICAL = 3
+} RobotTaskPriority;
 
 typedef enum {
     TASK_ALLOCATION_STATUS_PENDING = 0,
@@ -1058,7 +1058,7 @@ typedef struct {
     char task_type[64];
     float position[3];
     float orientation[4];
-    TaskPriority priority;
+    RobotTaskPriority priority;
     float deadline;
     float estimated_duration;
     float required_capabilities[8];

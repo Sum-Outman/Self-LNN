@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file simulator.c
  * @brief 仿真器接口实现
  * 
@@ -2443,7 +2443,7 @@ int simulator_apply_robot_command(Simulator* simulator, int robot_id, const Robo
 /**
  * @brief 在仿真器中添加传感器
  */
-int simulator_add_sensor(Simulator* simulator, int robot_id, const SensorConfig* sensor_config, 
+int simulator_add_sensor(Simulator* simulator, int robot_id, const RobotSensorConfig* sensor_config, 
                          const float* mount_position, const float* mount_orientation) {
     if (!simulator || !sensor_config) {
         return -1;
@@ -2646,7 +2646,7 @@ int simulator_get_sensor_data(Simulator* simulator, int sensor_id, SimulatorSens
         int data_size = 0;
 
         switch (sensor->sensor_type) {
-        case SENSOR_TYPE_LIDAR: {
+        case ROBOT_SENSOR_TYPE_LIDAR: {
             SensorSimLidarPoint points[SENSOR_SIM_MAX_LIDAR_POINTS];
             int np = sensor_sim_lidar_scan(sctx, mount_pos, mount_quat, pipe,
                                           points, SENSOR_SIM_MAX_LIDAR_POINTS);
@@ -2662,7 +2662,7 @@ int simulator_get_sensor_data(Simulator* simulator, int sensor_id, SimulatorSens
             sensor->is_valid = (np > 0) ? 1 : 0;
             break;
         }
-        case SENSOR_TYPE_IMU: {
+        case ROBOT_SENSOR_TYPE_IMU: {
             SensorSimImuFrame imu_frame;
             float zero_accel[3] = { 0, 0, 0 };
             float zero_angvel[3] = { 0, 0, 0 };
@@ -2696,7 +2696,7 @@ int simulator_get_sensor_data(Simulator* simulator, int sensor_id, SimulatorSens
             }
             break;
         }
-        case SENSOR_TYPE_CAMERA: {
+        case ROBOT_SENSOR_TYPE_CAMERA: {
             // 仿真深度相机（降采样至低分辨率以维持性能）
             int old_w = sctx->depth_config.width;
             int old_h = sctx->depth_config.height;
@@ -4324,7 +4324,7 @@ int simulator_enable_sensor_streaming(Simulator* simulator, int enable) {
     if (enable && !ext->sensor_streaming_registered) {
         for (int i = 0; i < simulator->sensor_count; i++) {
             int sid = simulator->sensors[i].sensor_id;
-            SensorType st = simulator->sensors[i].sensor_type;
+            RobotSensorType st = simulator->sensors[i].sensor_type;
             sensor_pipeline_register_sensor(ext->sensor_pipeline, sid, st,
                                             SENSOR_SOURCE_SIMULATOR,
                                             SENSOR_PIPELINE_PRIORITY_HIGH,
@@ -4605,7 +4605,7 @@ void simulator_update_training(Simulator* simulator, float dt) {
             SimulatorRobotState* r = &simulator->robots[i];
             memset(&entry, 0, sizeof(entry));
             entry.sensor_id = 1000 + r->robot_id;
-            entry.sensor_type = SENSOR_TYPE_IMU;
+            entry.sensor_type = ROBOT_SENSOR_TYPE_IMU;
             entry.timestamp = (double)simulator->status.simulation_time;
             entry.data_size = sizeof(SimulatorRobotState);
             entry.data = (uint8_t*)r;

@@ -488,9 +488,9 @@ static int slam_parse_tum_association(const char* dir, int64_t** rgb_timestamps,
         char rgb_f[256], depth_f[256];
         if (sscanf(line, "%lf %255s %lf %255s", &rgb_ts, rgb_f, &depth_ts, depth_f) == 4) {
             (*rgb_timestamps)[count] = (int64_t)(rgb_ts * 1e9);
-            (*rgb_filenames)[count] = safe_strdup(rgb_f);
+            (*rgb_filenames)[count] = (char*)(intptr_t)safe_strdup(rgb_f);
             (*depth_timestamps)[count] = (int64_t)(depth_ts * 1e9);
-            (*depth_filenames)[count] = safe_strdup(depth_f);
+            (*depth_filenames)[count] = (char*)(intptr_t)safe_strdup(depth_f);
             count++;
         }
     }

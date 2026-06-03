@@ -1,4 +1,4 @@
-﻿#include "selflnn/robot/dynamics.h"
+#include "selflnn/robot/dynamics.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/math/vec3_ops.h"
@@ -18,7 +18,7 @@
 #define DYNAMICS_ABS(x) ((x) >= 0 ? (x) : -(x))
 
 struct DynamicsModel {
-    DynamicsConfig config;
+    RobotDynamicsConfig config;
 };
 
 static void mat3_identity(float* m)
@@ -210,9 +210,9 @@ static void build_rotation_axis_angle(const float axis[3], float angle, float* m
     quat_to_mat3(&q, m);
 }
 
-DynamicsConfig dynamics_config_default(void)
+RobotDynamicsConfig dynamics_config_default(void)
 {
-    DynamicsConfig cfg;
+    RobotDynamicsConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.num_joints = 0;
     cfg.num_links = 0;
@@ -238,7 +238,7 @@ DynamicsConfig dynamics_config_default(void)
     return cfg;
 }
 
-DynamicsModel* dynamics_model_create(const KinematicModel* kin_model, const DynamicsConfig* config)
+DynamicsModel* dynamics_model_create(const KinematicModel* kin_model, const RobotDynamicsConfig* config)
 {
     DynamicsModel* model;
     int i;
@@ -1596,14 +1596,14 @@ int dynamics_get_state(const DynamicsModel* model, DynamicsState* state)
     return 0;
 }
 
-int dynamics_get_config(const DynamicsModel* model, DynamicsConfig* config)
+int dynamics_get_config(const DynamicsModel* model, RobotDynamicsConfig* config)
 {
     if (!model || !config) return -1;
     *config = model->config;
     return 0;
 }
 
-int dynamics_set_config(DynamicsModel* model, const DynamicsConfig* config)
+int dynamics_set_config(DynamicsModel* model, const RobotDynamicsConfig* config)
 {
     if (!model || !config) return -1;
     model->config = *config;

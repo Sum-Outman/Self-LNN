@@ -40,7 +40,7 @@ typedef struct {
     float rehearsal_count;
     float last_gate_input[WM_CFC_GATE_DIM];
     int is_active;
-} WorkingMemorySlot;
+} WMCfcSlot;
 
 typedef struct WorkingMemory WorkingMemory;
 
@@ -78,7 +78,7 @@ int working_memory_evict_by_key(WorkingMemory* wm, const char* key);
 int working_memory_rehearse(WorkingMemory* wm, const char* key);
 
 int working_memory_get_slots(const WorkingMemory* wm,
-                            WorkingMemorySlot* slots, size_t max_count,
+                            WMCfcSlot* slots, size_t max_count,
                             size_t* actual_count);
 
 int working_memory_get_config(const WorkingMemory* wm, WorkingMemoryConfig* config);

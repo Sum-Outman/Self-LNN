@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file self_programming.c
  * @brief 自我编程能力实现
  * 
@@ -2081,13 +2081,13 @@ int apply_code_optimizations(SelfProgrammingEngine* engine,
 
             if (SUGGESTION_CONTAINS(i, "可维护性")) {
 /* 使用返回值计数而非无条件+1 */
-                int cf_count = constant_folding(engine, ast);
-                int dce_count = dead_code_elimination(engine, ast);
-                int licm_ct = loop_invariant_hoisting(engine, ast);
-                int fe_ct = function_extraction(engine, ast);
+                int cf_count2 = constant_folding(engine, ast);
+                int dce_count2 = dead_code_elimination(engine, ast);
+                int licm_ct2 = loop_invariant_hoisting(engine, ast);
+                int fe_ct2 = function_extraction(engine, ast);
                 int ss_ct = structure_simplification(engine, ast);
-                applied_count += cf_count + dce_count + licm_ct + fe_ct + ss_ct;
-                if (cf_count + dce_count + licm_ct + fe_ct + ss_ct == 0) {
+                applied_count += cf_count2 + dce_count2 + licm_ct2 + fe_ct2 + ss_ct;
+                if (cf_count2 + dce_count2 + licm_ct2 + fe_ct2 + ss_ct == 0) {
                     applied_count++; /* 至少标记该建议被处理 */
                 }
             }

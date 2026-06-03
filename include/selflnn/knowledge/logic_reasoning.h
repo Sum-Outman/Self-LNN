@@ -237,8 +237,8 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_kb(LogicReasoningEngine
  */
 LogicInferenceResult* logic_reasoning_engine_reason_with_graph(LogicReasoningEngine* engine,
                                                    KnowledgeGraph* graph,
-                                                   GraphNode* start_node,
-                                                   GraphNode* end_node,
+                                                   KnowledgeGraphNode* start_node,
+                                                   KnowledgeGraphNode* end_node,
                                                    size_t max_paths);
 
 /**
@@ -246,14 +246,14 @@ LogicInferenceResult* logic_reasoning_engine_reason_with_graph(LogicReasoningEng
  * 
  * @param engine 逻辑推理引擎句柄
  * @param network 语义网络句柄
- * @param concept 起始概念
+ * @param SemanticConcept 起始概念
  * @param relation_type 关系类型
  * @param max_depth 最大深度
  * @return InferenceResult* 推理结果，调用者负责释放，失败返回NULL
  */
 LogicInferenceResult* logic_reasoning_engine_reason_with_semantic_network(LogicReasoningEngine* engine,
                                                               SemanticNetwork* network,
-                                                              Concept* concept,
+                                                              SemanticConcept* concept,
                                                               int relation_type,
                                                               int max_depth);
 

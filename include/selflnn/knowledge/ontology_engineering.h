@@ -94,11 +94,11 @@ typedef struct {
  * @brief 本体变更操作类型
  */
 typedef enum {
-    OP_ADD = 0,                     /* 添加 */
-    OP_MODIFY = 1,                  /* 修改 */
-    OP_DELETE = 2,                  /* 删除 */
-    OP_MERGE = 3,                   /* 合并 */
-    OP_SPLIT = 4                    /* 分裂 */
+    ONT_CHANGE_ADD = 0,             /* 添加 */
+    ONT_CHANGE_MODIFY = 1,          /* 修改 */
+    ONT_CHANGE_DELETE = 2,          /* 删除 */
+    ONT_CHANGE_MERGE = 3,           /* 合并 */
+    ONT_CHANGE_SPLIT = 4            /* 分裂 */
 } OntChangeOp;
 
 /**

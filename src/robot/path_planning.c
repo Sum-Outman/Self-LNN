@@ -48,6 +48,8 @@ typedef int (*slam_map_update_fn)(PlanGridMap* map, void* ctx);
  * 
  * 该启发式满足可接受性（不低估真实代价）。
  */
+static void plan_slam_ensure_map_fresh(PlanConfig* config);
+
 static float plan_dubins_heuristic(float x1, float y1, float gx, float gy, float goal_yaw, float min_radius) {
     float euclidean = PLAN_DIST(x1, y1, gx, gy);
     if (min_radius <= 0.0f) return euclidean;
@@ -197,7 +199,7 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
     const PlanGridMap* map = (const PlanGridMap*)config->user_data;
     if (!map || !map->cells) return -1;
 
-    plan_slam_ensure_fresh((PlanConfig*)config);
+    plan_slam_ensure_map_fresh((PlanConfig*)config);
 
     memset(result, 0, sizeof(PlanResult));
 
@@ -452,7 +454,7 @@ int plan_dwa(const PlanConfig* config, const float* current_state, PlanResult* r
     if (!config || !result || !current_state) return -1;
     const PlanGridMap* map = (const PlanGridMap*)config->user_data;
 
-    plan_slam_ensure_fresh((PlanConfig*)config);
+    plan_slam_ensure_map_fresh((PlanConfig*)config);
 
     memset(result, 0, sizeof(PlanResult));
 
@@ -535,7 +537,7 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
     if (!config || !result) return -1;
     const PlanGridMap* map = (const PlanGridMap*)config->user_data;
 
-    plan_slam_ensure_fresh((PlanConfig*)config);
+    plan_slam_ensure_map_fresh((PlanConfig*)config);
 
     memset(result, 0, sizeof(PlanResult));
 
@@ -1030,7 +1032,7 @@ int plan_rrt_star(const PlanConfig* config, PlanResult* result)
     if (!config || !result) return -1;
     if (max_nodes > PLAN_RRT_STAR_MAX_NODES) max_nodes = PLAN_RRT_STAR_MAX_NODES;
 
-    plan_slam_ensure_fresh((PlanConfig*)config);
+    plan_slam_ensure_map_fresh((PlanConfig*)config);
     nodes[0].x = config->start.x;
     nodes[0].y = config->start.y;
     nodes[0].parent = -1;
@@ -1379,7 +1381,7 @@ int plan_dstar_lite(const PlanConfig* config, PlanResult* result)
     float res;
     int start_id, goal_id;
 
-    plan_slam_ensure_fresh((PlanConfig*)config);
+    plan_slam_ensure_map_fresh((PlanConfig*)config);
     int i;
     if (!config || !result) return -1;
     if (!config->user_data) return -1;
@@ -1717,7 +1719,7 @@ int plan_refresh_map_from_slam(PlanConfig* config) {
     return result;
 }
 
-void plan_slam_ensure_fresh(PlanConfig* config) {
+static void plan_slam_ensure_map_fresh(PlanConfig* config) {
     if (!config || !g_slam_map_callback) return;
     uint64_t now_ms = (uint64_t)((float)clock() / (float)CLOCKS_PER_SEC * 1000.0f);
     if (now_ms - g_last_slam_update_ms > 500) {

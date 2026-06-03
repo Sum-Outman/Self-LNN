@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file knowledge_graph.h
  * @brief 知识图谱系统接口
  * 
@@ -25,7 +25,7 @@ typedef enum {
     NODE_TYPE_ENTITY = 1,       /**< 实体节点 */
     NODE_TYPE_PROPERTY = 2,     /**< 属性节点 */
     NODE_TYPE_LITERAL = 3       /**< 字面量节点 */
-} GraphNodeType;
+} KnowledgeGraphNodeType;
 
 /**
  * @brief 图边类型
@@ -36,39 +36,39 @@ typedef enum {
     EDGE_TYPE_INSTANCE = 2,     /**< 实例边 */
     EDGE_TYPE_PROPERTY = 3,     /**< 属性边 */
     EDGE_TYPE_SIMILARITY = 4    /**< 相似性边 */
-} GraphEdgeType;
+} KnowledgeGraphEdgeType;
 
 /**
  * @brief 图节点结构
  */
-typedef struct GraphNode {
-    int id;                     /**< 节点ID */
-    GraphNodeType type;         /**< 节点类型 */
-    char* label;                /**< 节点标签 */
-    float* embedding;           /**< 节点嵌入向量（可选） */
-    size_t embedding_size;      /**< 嵌入向量大小 */
-    float confidence;           /**< 节点置信度 */
-    void* user_data;            /**< 用户数据指针 */
+typedef struct KGraphNode {
+    int id;                     /* 节点ID */
+    KnowledgeGraphNodeType type;         /* 节点类型 */
+    char* label;                /* 节点标签 */
+    float* embedding;           /* 节点嵌入向量（可选） */
+    size_t embedding_size;      /* 嵌入向量大小 */
+    float confidence;           /* 节点置信度 */
+    void* user_data;            /* 用户数据指针 */
     
-    struct GraphEdge** edges;   /**< 边列表 */
-    size_t edge_count;          /**< 边数量 */
-    size_t edge_capacity;       /**< 边列表容量 */
-} GraphNode;
+    struct KGraphEdge** edges;  /* 边列表 */
+    size_t edge_count;          /* 边数量 */
+    size_t edge_capacity;       /* 边列表容量 */
+} KnowledgeGraphNode;
 
 /**
  * @brief 图边结构
  */
-typedef struct GraphEdge {
-    int id;                     /**< 边ID */
-    GraphEdgeType type;         /**< 边类型 */
-    GraphNode* source;          /**< 源节点 */
-    GraphNode* target;          /**< 目标节点 */
-    char* label;                /**< 边标签 */
-    float weight;               /**< 边权重 */
-    float confidence;           /**< 边置信度 */
-    int is_active;              /**< 边是否激活 */
-    void* user_data;            /**< 用户数据指针 */
-} GraphEdge;
+typedef struct KGraphEdge {
+    int id;                     /* 边ID */
+    KnowledgeGraphEdgeType type;         /* 边类型 */
+    KnowledgeGraphNode* source; /* 源节点 */
+    KnowledgeGraphNode* target; /* 目标节点 */
+    char* label;                /* 边标签 */
+    float weight;               /* 边权重 */
+    float confidence;           /* 边置信度 */
+    int is_active;              /* 边是否激活 */
+    void* user_data;            /* 用户数据指针 */
+} KnowledgeGraphEdge;
 
 /**
  * @brief 知识图谱句柄
@@ -78,10 +78,10 @@ typedef struct KnowledgeGraph KnowledgeGraph;
 #ifdef SELFLNN_KNOWLEDGE_INTERNAL
 /* 知识图谱完整结构（仅内部模块可见，与CfCNetwork/CfCCell模式一致） */
 struct KnowledgeGraph {
-    struct GraphNode** nodes;
+    struct KGraphNode** nodes;
     size_t node_count;
     size_t node_capacity;
-    struct GraphEdge** edges;
+    struct KGraphEdge** edges;
     size_t edge_count;
     size_t edge_capacity;
     int next_node_id;
@@ -122,26 +122,26 @@ typedef struct {
  * @brief 路径结构
  */
 typedef struct {
-    GraphNode** nodes;          /**< 路径节点数组 */
-    GraphEdge** edges;          /**< 路径边数组 */
+    KnowledgeGraphNode** nodes;  /**< 路径节点数组 */
+    KnowledgeGraphEdge** edges;  /**< 路径边数组 */
     size_t length;              /**< 路径长度（节点数） */
     float total_weight;         /**< 路径总权重 */
     float confidence;           /**< 路径置信度 */
-} GraphPath;
+} KnowledgeGraphPath;
 
 /**
  * @brief 释放图路径
  * 
  * @param path 路径指针
  */
-void knowledge_graph_free_path(GraphPath* path);
+void knowledge_graph_free_path(KnowledgeGraphPath* path);
 
 /**
  * @brief 子图匹配结果
  */
 typedef struct {
-    GraphNode** matched_nodes;  /**< 匹配的节点数组 */
-    GraphEdge** matched_edges;  /**< 匹配的边数组 */
+    KnowledgeGraphNode** matched_nodes;  /**< 匹配的节点数组 */
+    KnowledgeGraphEdge** matched_edges;  /**< 匹配的边数组 */
     size_t node_count;          /**< 匹配节点数 */
     size_t edge_count;          /**< 匹配边数 */
     float similarity;           /**< 相似度得分 */
@@ -157,7 +157,7 @@ typedef struct {
     int directed;               /**< 是否定向搜索（1=有向，0=无向） */
     int include_cycles;         /**< 是否允许环 */
     size_t max_results;         /**< 最大结果数 */
-} GraphQueryOptions;
+} KnowledgeGraphQueryOptions;
 
 /**
  * @brief 创建知识图谱
@@ -184,9 +184,9 @@ SELFLNN_API void knowledge_graph_free(KnowledgeGraph* graph);
  * @param embedding 节点嵌入向量（可选）
  * @param embedding_size 嵌入向量大小
  * @param confidence 节点置信度
- * @return GraphNode* 创建的节点指针，失败返回NULL
+ * @return KnowledgeGraphNode* 创建的节点指针，失败返回NULL
  */
-GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
+KnowledgeGraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, KnowledgeGraphNodeType type,
                                    const char* label, const float* embedding,
                                    size_t embedding_size, float confidence);
 
@@ -200,10 +200,10 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
  * @param label 边标签
  * @param weight 边权重
  * @param confidence 边置信度
- * @return GraphEdge* 创建的边指针，失败返回NULL
+ * @return KnowledgeGraphEdge* 创建的边指针，失败返回NULL
  */
-GraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, GraphEdgeType type,
-                                   GraphNode* source, GraphNode* target,
+KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGraphEdgeType type,
+                                   KnowledgeGraphNode* source, KnowledgeGraphNode* target,
                                    const char* label, float weight, float confidence);
 
 /**
@@ -211,9 +211,9 @@ GraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, GraphEdgeType type,
  * 
  * @param graph 知识图谱句柄
  * @param node_id 节点ID
- * @return GraphNode* 节点指针，未找到返回NULL
+ * @return KnowledgeGraphNode* 节点指针，未找到返回NULL
  */
-GraphNode* knowledge_graph_find_node_by_id(KnowledgeGraph* graph, int node_id);
+KnowledgeGraphNode* knowledge_graph_find_node_by_id(KnowledgeGraph* graph, int node_id);
 
 /**
  * @brief 根据标签查找节点
@@ -225,16 +225,16 @@ GraphNode* knowledge_graph_find_node_by_id(KnowledgeGraph* graph, int node_id);
  * @return size_t 返回匹配的节点数
  */
 size_t knowledge_graph_find_nodes_by_label(KnowledgeGraph* graph, const char* label,
-                                          GraphNode** results, size_t max_results);
+                                          KnowledgeGraphNode** results, size_t max_results);
 
 /**
  * @brief 根据ID查找边
  * 
  * @param graph 知识图谱句柄
  * @param edge_id 边ID
- * @return GraphEdge* 边指针，未找到返回NULL
+ * @return KnowledgeGraphEdge* 边指针，未找到返回NULL
  */
-GraphEdge* knowledge_graph_find_edge_by_id(KnowledgeGraph* graph, int edge_id);
+KnowledgeGraphEdge* knowledge_graph_find_edge_by_id(KnowledgeGraph* graph, int edge_id);
 
 /**
  * @brief 查找两个节点之间的所有路径
@@ -246,8 +246,8 @@ GraphEdge* knowledge_graph_find_edge_by_id(KnowledgeGraph* graph, int edge_id);
  * @param max_paths 最大路径数
  * @return size_t 返回找到的路径数
  */
-size_t knowledge_graph_find_paths(KnowledgeGraph* graph, GraphNode* start_node,
-                                 GraphNode* end_node, GraphPath** paths,
+size_t knowledge_graph_find_paths(KnowledgeGraph* graph, KnowledgeGraphNode* start_node,
+                                 KnowledgeGraphNode* end_node, KnowledgeGraphPath** paths,
                                  size_t max_paths);
 
 /**
@@ -260,9 +260,9 @@ size_t knowledge_graph_find_paths(KnowledgeGraph* graph, GraphNode* start_node,
  * @param options 遍历选项
  * @return int 成功返回0，失败返回-1
  */
-int knowledge_graph_dfs(KnowledgeGraph* graph, GraphNode* start_node,
-                       int (*callback)(GraphNode*, void*), void* user_data,
-                       const GraphQueryOptions* options);
+int knowledge_graph_dfs(KnowledgeGraph* graph, KnowledgeGraphNode* start_node,
+                       int (*callback)(KnowledgeGraphNode*, void*), void* user_data,
+                       const KnowledgeGraphQueryOptions* options);
 
 /**
  * @brief 广度优先遍历
@@ -274,9 +274,9 @@ int knowledge_graph_dfs(KnowledgeGraph* graph, GraphNode* start_node,
  * @param options 遍历选项
  * @return int 成功返回0，失败返回-1
  */
-int knowledge_graph_bfs(KnowledgeGraph* graph, GraphNode* start_node,
-                       int (*callback)(GraphNode*, void*), void* user_data,
-                       const GraphQueryOptions* options);
+int knowledge_graph_bfs(KnowledgeGraph* graph, KnowledgeGraphNode* start_node,
+                       int (*callback)(KnowledgeGraphNode*, void*), void* user_data,
+                       const KnowledgeGraphQueryOptions* options);
 
 /**
  * @brief 查找最短路径（Dijkstra算法）
@@ -287,9 +287,9 @@ int knowledge_graph_bfs(KnowledgeGraph* graph, GraphNode* start_node,
  * @param options 查询选项
  * @return GraphPath* 最短路径，失败返回NULL
  */
-GraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
-                                        GraphNode* start_node, GraphNode* end_node,
-                                        const GraphQueryOptions* options);
+KnowledgeGraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
+                                        KnowledgeGraphNode* start_node, KnowledgeGraphNode* end_node,
+                                        const KnowledgeGraphQueryOptions* options);
 
 /**
  * @brief 查找所有路径
@@ -301,9 +301,9 @@ GraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
  * @param max_paths 最大路径数
  * @return GraphPath** 路径数组，调用者负责释放，失败返回NULL
  */
-GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
-                                          GraphNode* start_node, GraphNode* end_node,
-                                          const GraphQueryOptions* options,
+KnowledgeGraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
+                                          KnowledgeGraphNode* start_node, KnowledgeGraphNode* end_node,
+                                          const KnowledgeGraphQueryOptions* options,
                                           size_t max_paths);
 
 /**
@@ -316,7 +316,7 @@ GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
  */
 SubgraphMatch* knowledge_graph_subgraph_match(KnowledgeGraph* graph,
                                              KnowledgeGraph* pattern,
-                                             const GraphQueryOptions* options);
+                                             const KnowledgeGraphQueryOptions* options);
 
 /**
  * @brief 计算节点中心性
@@ -326,7 +326,7 @@ SubgraphMatch* knowledge_graph_subgraph_match(KnowledgeGraph* graph,
  * @param centrality_type 中心性类型（0=度中心性，1=接近中心性，2=介数中心性）
  * @return float 中心性值
  */
-float knowledge_graph_node_centrality(KnowledgeGraph* graph, GraphNode* node,
+float knowledge_graph_node_centrality(KnowledgeGraph* graph, KnowledgeGraphNode* node,
                                      int centrality_type);
 
 /* ================================================================
@@ -523,7 +523,7 @@ KnowledgeGraph* knowledge_graph_load(const char* filename);
  * 
  * @param path 路径指针
  */
-void graph_path_free(GraphPath* path);
+void graph_path_free(KnowledgeGraphPath* path);
 
 /**
  * @brief 释放子图匹配结果内存
@@ -540,7 +540,7 @@ void subgraph_match_free(SubgraphMatch* match);
  * @param max_results 最大结果数
  * @return size_t 返回节点数量，如果results不为NULL，则填充节点指针
  */
-size_t knowledge_graph_get_all_nodes(KnowledgeGraph* graph, GraphNode** results, size_t max_results);
+size_t knowledge_graph_get_all_nodes(KnowledgeGraph* graph, KnowledgeGraphNode** results, size_t max_results);
 
 /**
  * @brief 获取所有边
@@ -550,7 +550,7 @@ size_t knowledge_graph_get_all_nodes(KnowledgeGraph* graph, GraphNode** results,
  * @param max_results 最大结果数
  * @return size_t 返回边数量，如果results不为NULL，则填充边指针
  */
-size_t knowledge_graph_get_all_edges(KnowledgeGraph* graph, GraphEdge** results, size_t max_results);
+size_t knowledge_graph_get_all_edges(KnowledgeGraph* graph, KnowledgeGraphEdge** results, size_t max_results);
 
 /**
  * @brief 传递闭包推理 - 查找通过指定关系类型链可达的所有节点
@@ -566,8 +566,8 @@ size_t knowledge_graph_get_all_edges(KnowledgeGraph* graph, GraphEdge** results,
  * @return size_t 返回可达节点数（不包括起始节点）
  */
 SELFLNN_API size_t knowledge_graph_transitive_closure(KnowledgeGraph* graph,
-    GraphNode* start_node, GraphEdgeType relation_type,
-    GraphNode** results, size_t max_results);
+    KnowledgeGraphNode* start_node, KnowledgeGraphEdgeType relation_type,
+    KnowledgeGraphNode** results, size_t max_results);
 
 /**
  * @brief 多跳关系查询 - 查找经过N跳指定关系类型可达的节点
@@ -586,9 +586,9 @@ SELFLNN_API size_t knowledge_graph_transitive_closure(KnowledgeGraph* graph,
  * @return size_t 返回匹配节点数
  */
 SELFLNN_API size_t knowledge_graph_multi_hop_query(KnowledgeGraph* graph,
-    GraphNode* start_node, const GraphEdgeType* relation_types, size_t num_types,
+    KnowledgeGraphNode* start_node, const KnowledgeGraphEdgeType* relation_types, size_t num_types,
     size_t min_hops, size_t max_hops,
-    GraphNode** results, size_t max_results);
+    KnowledgeGraphNode** results, size_t max_results);
 
 /**
  * @brief 关系路径模式查询 - 查找匹配指定关系类型序列的路径
@@ -605,8 +605,8 @@ SELFLNN_API size_t knowledge_graph_multi_hop_query(KnowledgeGraph* graph,
  * @return size_t 返回匹配路径数
  */
 SELFLNN_API size_t knowledge_graph_relation_path_query(KnowledgeGraph* graph,
-    GraphNode* start_node, const GraphEdgeType* pattern, size_t pattern_length,
-    GraphPath** paths, size_t max_paths);
+    KnowledgeGraphNode* start_node, const KnowledgeGraphEdgeType* pattern, size_t pattern_length,
+    KnowledgeGraphPath** paths, size_t max_paths);
 
 /* ============================================================================
  * SPARQL 查询解析器
@@ -640,7 +640,7 @@ typedef struct {
 typedef struct {
     char var_names[SELFLNN_SPARQL_MAX_VARS][64];  /**< 变量名列表 */
     size_t var_count;                              /**< 变量数量 */
-    GraphNode* bindings[SELFLNN_SPARQL_MAX_VARS][256]; /**< 绑定结果 [var][row] */
+    KnowledgeGraphNode* bindings[SELFLNN_SPARQL_MAX_VARS][256]; /**< 绑定结果 [var][row] */
     size_t row_count;                              /**< 结果行数 */
     float confidences[256];                        /**< 各结果置信度 */
 } SparqlQueryResult;
@@ -738,8 +738,8 @@ int knowledge_graph_export_visual_json(KnowledgeGraph* graph,
  * @param buffer_size 缓冲区大小
  * @return int 成功返回写入字符数，失败返回-1
  */
-int knowledge_graph_subgraph_export_json(GraphNode** nodes, size_t node_count,
-                                         GraphEdge** edges, size_t edge_count,
+int knowledge_graph_subgraph_export_json(KnowledgeGraphNode** nodes, size_t node_count,
+                                         KnowledgeGraphEdge** edges, size_t edge_count,
                                          char* json_buffer, size_t buffer_size);
 
 /* ================================================================

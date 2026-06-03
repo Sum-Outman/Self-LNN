@@ -948,7 +948,7 @@ int ontology_evolution_apply_change(OntologyEvolution* evo,
     Ontology* ont = evo->ontology;
 
     switch (entry->operation) {
-        case OP_ADD: {
+        case ONT_CHANGE_ADD: {
             if (entry->element_type == ONT_CLASS) {
                 if (!ontology_add_class(ont, entry->element_name, entry->description))
                     return -1;
@@ -965,7 +965,7 @@ int ontology_evolution_apply_change(OntologyEvolution* evo,
             }
             break;
         }
-        case OP_MODIFY: {
+        case ONT_CHANGE_MODIFY: {
             OntElement* elem = ontology_find_element(ont, entry->element_name);
             if (!elem) return -1;
             if (entry->new_value) {
@@ -974,14 +974,14 @@ int ontology_evolution_apply_change(OntologyEvolution* evo,
             }
             break;
         }
-        case OP_DELETE: {
+        case ONT_CHANGE_DELETE: {
             /* 标记删除：将置信度设为0 */
             OntElement* elem = ontology_find_element(ont, entry->element_name);
             if (!elem) return -1;
             elem->confidence = 0.0f;
             break;
         }
-        case OP_MERGE: {
+        case ONT_CHANGE_MERGE: {
             /* 合并两个元素 */
             OntElement* target = ontology_find_element(ont, entry->element_name);
             OntElement* source = entry->new_value ?
@@ -995,7 +995,7 @@ int ontology_evolution_apply_change(OntologyEvolution* evo,
             source->confidence = 0.0f;
             break;
         }
-        case OP_SPLIT: {
+        case ONT_CHANGE_SPLIT: {
             /* 分裂操作：创建新元素并复制部分关系 */
             OntElement* original = ontology_find_element(ont, entry->element_name);
             if (!original) return -1;
@@ -1054,7 +1054,7 @@ int ontology_evolution_impact_analysis(OntologyEvolution* evo,
     Ontology* ont = evo->ontology;
 
     /* 查找受影响的元素 */
-    if (entry->operation == OP_DELETE || entry->operation == OP_MODIFY) {
+    if (entry->operation == ONT_CHANGE_DELETE || entry->operation == ONT_CHANGE_MODIFY) {
         /* 查找引用该元素的其他元素 */
         for (int i = 0; i < ont->class_count && affected_count < max_affected; i++) {
             OntElement* cls = ont->classes[i];
@@ -1287,7 +1287,7 @@ int ontology_evolution_diff(OntologyEvolution* evo, int version1, int version2,
         }
 
         if (has_line1 && has_line2 && strcmp(line1, line2) != 0 && diff_count < max_diffs) {
-            out_diffs[diff_count].operation = OP_MODIFY;
+            out_diffs[diff_count].operation = ONT_CHANGE_MODIFY;
             out_diffs[diff_count].element_type = ONT_CLASS;
             out_diffs[diff_count].element_name = dup_str(line1);
             out_diffs[diff_count].old_value = dup_str(line1);
@@ -1295,13 +1295,13 @@ int ontology_evolution_diff(OntologyEvolution* evo, int version1, int version2,
             out_diffs[diff_count].description = NULL;
             diff_count++;
         } else if (has_line1 && !has_line2 && diff_count < max_diffs) {
-            out_diffs[diff_count].operation = OP_DELETE;
+            out_diffs[diff_count].operation = ONT_CHANGE_DELETE;
             out_diffs[diff_count].element_type = ONT_CLASS;
             out_diffs[diff_count].element_name = dup_str(line1);
             out_diffs[diff_count].description = NULL;
             diff_count++;
         } else if (!has_line1 && has_line2 && diff_count < max_diffs) {
-            out_diffs[diff_count].operation = OP_ADD;
+            out_diffs[diff_count].operation = ONT_CHANGE_ADD;
             out_diffs[diff_count].element_type = ONT_CLASS;
             out_diffs[diff_count].element_name = dup_str(line2);
             out_diffs[diff_count].description = NULL;

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file simulator.h
  * @brief 仿真器接口定义
  * 
@@ -135,7 +135,7 @@ typedef struct {
 typedef struct {
     int sensor_id;                /**< 传感器ID */
     char sensor_name[64];         /**< 传感器名称 */
-    SensorType sensor_type;       /**< 传感器类型 */
+    RobotSensorType sensor_type;  /**< 传感器类型 */
     float timestamp;              /**< 时间戳（秒） */
     float data[64];               /**< 传感器数据 */
     int data_size;                /**< 数据大小 */
@@ -451,7 +451,7 @@ int simulator_apply_robot_command(Simulator* simulator, int robot_id, const Robo
  * @param mount_orientation 安装姿态
  * @return int 传感器ID，失败返回-1
  */
-int simulator_add_sensor(Simulator* simulator, int robot_id, const SensorConfig* sensor_config, 
+int simulator_add_sensor(Simulator* simulator, int robot_id, const RobotSensorConfig* sensor_config, 
                          const float* mount_position, const float* mount_orientation);
 
 /**
@@ -1034,7 +1034,7 @@ typedef struct {
     int (*set_joint_velocities)(Simulator*, int, const float*, int); /**< 设置关节速度 */
     int (*set_joint_torques)(Simulator*, int, const float*, int); /**< 设置关节力矩 */
     int (*apply_robot_command)(Simulator*, int, const RobotCommand*); /**< 应用控制命令 */
-    int (*add_sensor)(Simulator*, int, const SensorConfig*, const float*, const float*); /**< 添加传感器 */
+    int (*add_sensor)(Simulator*, int, const RobotSensorConfig*, const float*, const float*); /**< 添加传感器 */
     int (*remove_sensor)(Simulator*, int);           /**< 移除传感器 */
     int (*get_sensor_data)(Simulator*, int, SimulatorSensorData*); /**< 获取传感器数据 */
     int (*get_all_sensor_data)(Simulator*, int, SimulatorSensorData*, int); /**< 获取全部传感器数据 */

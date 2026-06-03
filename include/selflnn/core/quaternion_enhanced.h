@@ -25,11 +25,13 @@ typedef struct {
 } Quaternion;
 #endif
 
-/* 对偶四元数 */
+#ifndef SELFLNN_DUAL_QUATERNION_DEFINED
+#define SELFLNN_DUAL_QUATERNION_DEFINED
 typedef struct {
     Quaternion real;     /* 实部（旋转） */
     Quaternion dual;     /* 对偶部（平移） */
 } DualQuaternion;
+#endif
 
 /* 四元数插值类型 */
 typedef enum {
@@ -45,7 +47,7 @@ static inline Quaternion quat_identity(void) {
     return q;
 }
 
-static inline Quaternion quat_from_axis_angle(float ax, float ay, float az, float angle) {
+static inline Quaternion q4_from_axis_angle(float ax, float ay, float az, float angle) {
     float half = angle * 0.5f;
     float s = sinf(half);
     Quaternion q = {cosf(half), ax * s, ay * s, az * s};
@@ -113,7 +115,7 @@ static inline Quaternion quat_slerp(Quaternion a, Quaternion b, float t) {
     return q4_normalize(r);
 }
 
-static inline void quat_to_matrix(const Quaternion q, float* matrix) {
+static inline void q4_to_matrix(const Quaternion q, float* matrix) {
     float w = q.w, x = q.x, y = q.y, z = q.z;
     float x2 = x * x, y2 = y * y, z2 = z * z;
     float xy = x * y, xz = x * z, yz = y * z;

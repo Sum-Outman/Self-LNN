@@ -283,10 +283,9 @@ IRDFineClassifier* ird_fine_create(const IRDFineConfig* config) {
     return c;
 }
 
-int ird_fine_mark_trained(IRDFineClassifier* c) {
-    if (!c) return -1;
+void ird_fine_mark_trained(IRDFineClassifier* c) {
+    if (!c) return;
     c->training_completed = 1;
-    return 0;
 }
 
 int ird_fine_is_trained(const IRDFineClassifier* c) {

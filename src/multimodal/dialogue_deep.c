@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file dialogue_deep.c
  * @brief 对话系统深度增强实现
  *
@@ -2833,7 +2833,7 @@ int dg_generate_response(DialogueGenerator* gen,
         if (total_chars > 0) {
 /* 置信度从CfC状态向量的输出熵动态计算。 */
             *confidence = 0.0f;
-            float* final_state = dg_get_current_state(gen);
+            float* final_state = (float*)(intptr_t)dg_get_current_state(gen);
             if (final_state && gen->config.hidden_size > 0) {
                 float entropy = 0.0f;
                 for (size_t i = 0; i < gen->config.hidden_size; i++) {

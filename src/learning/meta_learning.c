@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file meta_learning.c
  * @brief 元学习系统完整算法实现
  * 
@@ -268,9 +268,9 @@ static int extract_model_parameters(NeuralNetwork* model, float* parameters, siz
             /* 提取门控参数（cross_gate + forget_gate + output_gate） */
             float gate_values[256] = {0};
             float gate_modulation[256] = {0};
-            int gate_size = 256;
-            if (cfc_cell_get_gated_stats(cell, gate_values, gate_modulation, &gate_size) == 0 && gate_size > 0) {
-                size_t gs = (size_t)gate_size;
+            float gate_size_f = 256.0f;
+            if (cfc_cell_get_gated_stats(cell, gate_values, gate_modulation, &gate_size_f) == 0 && gate_size_f > 0) {
+                size_t gs = (size_t)gate_size_f;
                 size_t copy_size = gs < (max_params - offset) ? gs : (max_params - offset);
                 if (copy_size > 0) {
                     memcpy(parameters + offset, gate_values, copy_size * sizeof(float));
@@ -346,9 +346,9 @@ static int apply_model_parameters(NeuralNetwork* model, const float* parameters,
             /* 应用门控参数 */
             float gate_values[256] = {0};
             float gate_modulation[256] = {0};
-            int gate_size = 256;
-            if (cfc_cell_get_gated_stats(cell, gate_values, gate_modulation, &gate_size) == 0 && gate_size > 0) {
-                size_t gs = (size_t)gate_size;
+            float gate_size_f = 256.0f;
+            if (cfc_cell_get_gated_stats(cell, gate_values, gate_modulation, &gate_size_f) == 0 && gate_size_f > 0) {
+                size_t gs = (size_t)gate_size_f;
                 /* 门控参数从params恢复：当前简化恢复gate_values边界值
                  * 完整的gate参数恢复需通过cfc_cell_set_config或新API */
                 if (offset + gs <= param_count) {
@@ -429,9 +429,9 @@ static size_t get_model_parameter_count(NeuralNetwork* model) {
             /* 门控参数（gate_values + gate_modulation） */
             float gate_values[256] = {0};
             float gate_modulation[256] = {0};
-            int gate_size = 256;
-            if (cfc_cell_get_gated_stats(cell, gate_values, gate_modulation, &gate_size) == 0 && gate_size > 0) {
-                total_params += (size_t)gate_size * 2;  /* gates + modulation */
+            float gate_size_f2 = 256.0f;
+            if (cfc_cell_get_gated_stats(cell, gate_values, gate_modulation, &gate_size_f2) == 0 && gate_size_f2 > 0) {
+                total_params += (size_t)gate_size_f2 * 2;  /* gates + modulation */
             }
         }
     }

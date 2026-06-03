@@ -104,7 +104,7 @@ static const int ekf_meas_map[PROPRIOCEPTION_EKF_DIM] = {
 };
 
 struct ProprioceptionProcessor {
-    JointState last_joints;
+    ProprioceptiveJointState last_joints;
     IMUState last_imu;
     ForceTorqueState last_ft;
     float filtered_state[PROPRIOCEPTION_FEATURE_DIM];
@@ -144,10 +144,10 @@ void proprioception_free(ProprioceptionProcessor* pp) {
 
 int proprioception_decode_joints(ProprioceptionProcessor* pp,
     const float* raw_encoder_values, int num_encoders,
-    JointState* out_joints) {
+    ProprioceptiveJointState* out_joints) {
     if (!pp || !raw_encoder_values || !out_joints || num_encoders <= 0)
         return -1;
-    memset(out_joints, 0, sizeof(JointState));
+    memset(out_joints, 0, sizeof(ProprioceptiveJointState));
     int n = (num_encoders > PROPRIOCEPTION_MAX_JOINTS) ? PROPRIOCEPTION_MAX_JOINTS : num_encoders;
     out_joints->num_joints = n;
     /* 编码器原始值解码：scale = 编码器分辨率 → 弧度
@@ -368,7 +368,7 @@ int proprioception_fuse_force_torque(ProprioceptionProcessor* pp,
 }
 
 int proprioception_compute_feature_vector(ProprioceptionProcessor* pp,
-    const JointState* joints, const IMUState* imu,
+    const ProprioceptiveJointState* joints, const IMUState* imu,
     const ForceTorqueState* ft, float* feature_vector, size_t feature_dim) {
     if (!pp || !joints || !imu || !ft || !feature_vector ||
         feature_dim < PROPRIOCEPTION_FEATURE_DIM)

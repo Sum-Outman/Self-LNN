@@ -5030,17 +5030,6 @@ float causal_reasoning_estimate_rdd(CausalReasoningEngine* engine,
  * ================================================================ */
 
 /**
- * @brief 因果推理→规划桥接约束结构
- */
-typedef struct {
-    int source_node_id;      /**< 原因节点ID */
-    int target_node_id;      /**< 结果节点ID */
-    float causal_strength;   /**< 因果强度（归一化） */
-    float constraint_weight; /**< 规划约束权重 */
-    char constraint_name[64]; /**< 约束名称（含节点名） */
-} CausalPlanningConstraint;
-
-/**
  * @brief M-022: 因果推理→规划系统桥接函数
  *
  * 从因果推理引擎的因果图中提取前N个最显著的因果边，

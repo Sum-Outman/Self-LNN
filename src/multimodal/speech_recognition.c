@@ -1818,7 +1818,7 @@ int speech_recognizer_recognize(SpeechRecognizer* recognizer,
         if (init_output_projection(recognizer) != 0) return -1;
     }
 
-    clock_t start_time = clock;
+    clock_t start_time = clock();
 
     /* 步骤2：提取梅尔特征 */
     int max_feats = recognizer->feature_buffer_capacity * recognizer->config.feature_dimension;
@@ -2328,7 +2328,7 @@ static int sr_char_to_class(const char* text, int pos, int text_len, int vocab_s
         bytes[i] = (unsigned char)text[pos + i];
     }
 
-    if (!sr_char_ht_initialized) sr_init_char_hash_table;
+    if (!sr_char_ht_initialized) sr_init_char_hash_table();
 
     uint32_t hash = sr_fnv1a_hash(bytes, (size_t)char_len);
     int bucket = (int)(hash % SR_CHAR_HASH_SIZE);

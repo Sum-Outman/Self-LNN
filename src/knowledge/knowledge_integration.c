@@ -979,7 +979,7 @@ size_t knowledge_integration_unified_query(KnowledgeIntegrationSystem* system,
     for (size_t i = 0; i < system->graph_count && total_found < max_results; i++) {
         // 分配临时节点数组（动态分配）
         const size_t max_nodes_per_graph = 100;
-        GraphNode** nodes = (GraphNode**)safe_malloc(max_nodes_per_graph * sizeof(GraphNode*));
+        KnowledgeGraphNode** nodes = (KnowledgeGraphNode**)safe_malloc(max_nodes_per_graph * sizeof(KnowledgeGraphNode*));
         if (!nodes) continue;  // 内存分配失败，跳过此图谱
         
         size_t found_nodes = knowledge_graph_find_nodes_by_label(
@@ -990,7 +990,7 @@ size_t knowledge_integration_unified_query(KnowledgeIntegrationSystem* system,
         );
         
         for (size_t j = 0; j < found_nodes && total_found < max_results; j++) {
-            GraphNode* node = nodes[j];
+            KnowledgeGraphNode* node = nodes[j];
             if (!node || !node->label) continue;
             
             // 创建知识条目
@@ -999,7 +999,7 @@ size_t knowledge_integration_unified_query(KnowledgeIntegrationSystem* system,
             
             entry->subject = string_duplicate_nullable(node->label);
             entry->predicate = string_duplicate_nullable("is_graph_node");
-            entry->object = string_duplicate_nullable("concept");
+            entry->object = string_duplicate_nullable("SemanticConcept");
             entry->type = KNOWLEDGE_CONCEPT;
             entry->confidence = node->confidence;
             entry->source = SOURCE_INFERENCE;
@@ -1022,18 +1022,18 @@ size_t knowledge_integration_unified_query(KnowledgeIntegrationSystem* system,
         if (!network) continue;
         
         // 在语义网络中按名称查找概念
-        Concept* concept = semantic_network_find_concept_by_name(network, query);
-        if (concept && total_found < max_results) {
+        SemanticConcept* SemanticConcept = semantic_network_find_concept_by_name(network, query);
+        if (SemanticConcept && total_found < max_results) {
             KnowledgeEntry* entry = &results[total_found];
             memset(entry, 0, sizeof(KnowledgeEntry));
             
-            entry->subject = string_duplicate_nullable(concept->name ? concept->name : "未知");
+            entry->subject = string_duplicate_nullable(SemanticConcept->name ? SemanticConcept->name : "未知");
             entry->predicate = string_duplicate_nullable("is_concept");
             entry->object = string_duplicate_nullable("semantic_network");
             entry->type = KNOWLEDGE_CONCEPT;
-            entry->confidence = concept->confidence;
+            entry->confidence = SemanticConcept->confidence;
             entry->source = SOURCE_SEMANTIC_NETWORK;
-            entry->weight = concept->confidence;
+            entry->weight = SemanticConcept->confidence;
             entry->timestamp = (long)time(NULL);
             
             total_found++;
@@ -1069,7 +1069,7 @@ size_t knowledge_integration_cooperative_reasoning(KnowledgeIntegrationSystem* s
         if (!network) continue;
         
         /* 将前提字符串映射到当前语义网络中的概念 */
-        Concept** concept_premises = (Concept**)safe_malloc(premise_count * sizeof(Concept*));
+        SemanticConcept** concept_premises = (SemanticConcept**)safe_malloc(premise_count * sizeof(SemanticConcept*));
         if (!concept_premises) continue;
         
         size_t valid_premises = 0;
@@ -1077,12 +1077,12 @@ size_t knowledge_integration_cooperative_reasoning(KnowledgeIntegrationSystem* s
             const char* premise_name = premises[i];
             if (!premise_name) continue;
             
-            Concept* found = semantic_network_find_concept_by_name(network, premise_name);
+            SemanticConcept* found = semantic_network_find_concept_by_name(network, premise_name);
             if (found) {
                 concept_premises[valid_premises++] = found;
             } else {
                 /* 当前网络中未找到，创建临时概念供推理使用 */
-                Concept* temp_concept = semantic_network_add_concept(
+                SemanticConcept* temp_concept = semantic_network_add_concept(
                     network, CONCEPT_TYPE_ENTITY, premise_name, NULL, NULL, 0, 0.5f, 0.5f);
                 if (temp_concept) {
                     concept_premises[valid_premises++] = temp_concept;
@@ -1092,7 +1092,7 @@ size_t knowledge_integration_cooperative_reasoning(KnowledgeIntegrationSystem* s
         
         if (valid_premises > 0) {
             /* 在当前网络中执行语义推理 */
-            Concept** network_results = (Concept**)safe_malloc(max_results * sizeof(Concept*));
+            SemanticConcept** network_results = (SemanticConcept**)safe_malloc(max_results * sizeof(SemanticConcept*));
             if (network_results) {
                 size_t net_inf_count = semantic_network_infer(
                     network, concept_premises, valid_premises,
@@ -1101,13 +1101,13 @@ size_t knowledge_integration_cooperative_reasoning(KnowledgeIntegrationSystem* s
                 
                 /* 跨网络去重：将本网络推理结果与已有结果比对后加入 */
                 for (size_t i = 0; i < net_inf_count && result_count < max_results; i++) {
-                    Concept* concept = network_results[i];
-                    if (!concept || !concept->name) continue;
+                    SemanticConcept* SemanticConcept = network_results[i];
+                    if (!SemanticConcept || !SemanticConcept->name) continue;
                     
                     /* 跨网络名称去重检查 */
                     int already_seen = 0;
                     for (size_t s = 0; s < seen_count; s++) {
-                        if (seen_names[s] && strcmp(seen_names[s], concept->name) == 0) {
+                        if (seen_names[s] && strcmp(seen_names[s], SemanticConcept->name) == 0) {
                             already_seen = 1;
                             break;
                         }
@@ -1116,13 +1116,13 @@ size_t knowledge_integration_cooperative_reasoning(KnowledgeIntegrationSystem* s
                     
                     /* 记录已见概念名（生命周期为函数作用域内安全） */
                     if (seen_count < MAX_INFERRED_CONCEPTS) {
-                        seen_names[seen_count++] = concept->name;
+                        seen_names[seen_count++] = SemanticConcept->name;
                     }
                     
                     /* 转换为知识条目 */
                     KnowledgeEntry* entry = &results[result_count];
                     memset(entry, 0, sizeof(KnowledgeEntry));
-                    entry->subject = string_duplicate_nullable(concept->name);
+                    entry->subject = string_duplicate_nullable(SemanticConcept->name);
                     entry->predicate = string_duplicate_nullable("inferred_from");
                     entry->object = string_duplicate_nullable("cooperative_reasoning");
                     entry->type = KNOWLEDGE_FACT;

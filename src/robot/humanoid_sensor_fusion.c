@@ -912,7 +912,7 @@ int humanoid_sensor_fusion_update_with_sensor_pipeline(HumanoidSensorFusion* fus
         for (int i = 0; i < fusion->state.imu_count && i < HUMAN_SENSOR_FUSION_MAX_IMUS; i++)
         {
             SensorPipelineEntry entry;
-            if (sensor_pipeline_get_latest_by_type(pipeline, SENSOR_TYPE_IMU, &entry) == 0)
+            if (sensor_pipeline_get_latest_by_type(pipeline, ROBOT_SENSOR_TYPE_IMU, &entry) == 0)
             {
                 if (entry.data_size >= 6 * sizeof(float))
                 {

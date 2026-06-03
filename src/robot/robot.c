@@ -35,7 +35,7 @@
  * @brief 传感器结构体
  */
 typedef struct {
-    SensorConfig config;        /**< 传感器配置 */
+    RobotSensorConfig config;   /**< 传感器配置 */
     float* data_buffer;         /**< 数据缓冲区 */
     size_t buffer_size;         /**< 缓冲区大小 */
     size_t data_count;          /**< 数据计数 */
@@ -164,10 +164,10 @@ struct RobotController {
 
 /* ==================== 静态函数声明 ==================== */
 static void robot_sim_update_state(Robot* robot, float dt);
-static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type, float* buffer, size_t buffer_size);
+static int robot_sim_generate_sensor_data(Robot* robot, RobotSensorType sensor_type, float* buffer, size_t buffer_size);
 static void robot_sim_apply_command(Robot* robot, const RobotCommand* command);
 static int robot_read_sensor_from_hardware(Robot* robot, int sensor_id, SensorData* sensor_data);
-static int robot_generate_physical_sensor_data(Robot* robot, SensorType sensor_type, float* buffer, size_t buffer_size);
+static int robot_generate_physical_sensor_data(Robot* robot, RobotSensorType sensor_type, float* buffer, size_t buffer_size);
 /* H-014修复: 控制模式分发静态函数 */
 static int robot_forward_ros_command(Robot* robot, const RobotCommand* command);
 static int robot_execute_simulation_command(Robot* robot, const RobotCommand* command);
@@ -380,7 +380,7 @@ void robot_free(Robot* robot) {
 /**
  * @brief 添加传感器到机器人
  */
-int robot_add_sensor(Robot* robot, const SensorConfig* config) {
+int robot_add_sensor(Robot* robot, const RobotSensorConfig* config) {
     // 参数检查
     SELFLNN_CHECK_NULL(robot, "机器人句柄为空");
     SELFLNN_CHECK_NULL(config, "传感器配置为空");
@@ -408,7 +408,7 @@ int robot_add_sensor(Robot* robot, const SensorConfig* config) {
     
     // 创建新传感器实例
     SensorInstance* sensor = &robot->sensors[robot->sensor_count];
-    memcpy(&sensor->config, config, sizeof(SensorConfig));
+    memcpy(&sensor->config, config, sizeof(RobotSensorConfig));
     
     // 设置传感器ID
     sensor->config.sensor_id = robot->next_sensor_id++;
@@ -416,13 +416,13 @@ int robot_add_sensor(Robot* robot, const SensorConfig* config) {
     // 分配数据缓冲区
     size_t buffer_size = 1024; // 默认缓冲区大小
     switch (config->type) {
-        case SENSOR_TYPE_LIDAR:
+        case ROBOT_SENSOR_TYPE_LIDAR:
             buffer_size = 360; // 360度激光雷达
             break;
-        case SENSOR_TYPE_CAMERA:
+        case ROBOT_SENSOR_TYPE_CAMERA:
             buffer_size = 640 * 480 * 3; // VGA彩色图像
             break;
-        case SENSOR_TYPE_IMU:
+        case ROBOT_SENSOR_TYPE_IMU:
             buffer_size = 9; // 加速度、角速度、磁力计
             break;
         default:
@@ -1096,7 +1096,7 @@ int robot_control_gripper(Robot* robot, float position, float force) {
             
             // 查找力扭矩传感器
             for (size_t i = 0; i < robot->sensor_count; i++) {
-                if (robot->sensors[i].config.type == SENSOR_TYPE_FORCE_TORQUE && 
+                if (robot->sensors[i].config.type == ROBOT_SENSOR_TYPE_FORCE_TORQUE && 
                     robot->sensors[i].is_connected && 
                     robot->sensors[i].data_buffer != NULL) {
                     
@@ -2132,7 +2132,8 @@ static void robot_sim_update_state(Robot* robot, float dt) {
      * 禁止使用内建简单仿真。 */
     SELFLNN_WARN("严格真实数据模式：禁止内建简单物理仿真，请使用PyBullet/Gazebo桥接");
     return;
-#endif
+#else
+    /* 非严格模式下的内建物理仿真 */
     
     // 更新仿真时间
     float current_time = robot->status.timestamp;
@@ -2325,6 +2326,7 @@ static void robot_sim_update_state(Robot* robot, float dt) {
     
     // 更新最后更新时间
     robot->sim_last_update_time = current_time;
+#endif
 }
 
 /**
@@ -2336,7 +2338,7 @@ static void robot_sim_update_state(Robot* robot, float dt) {
  * @param size 缓冲区大小
  * @return int 实际生成的数据大小
  */
-static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type, 
+static int robot_sim_generate_sensor_data(Robot* robot, RobotSensorType sensor_type, 
                                          float* data, size_t size) {
     if (!robot || !data || size == 0) {
         return 0;
@@ -2352,7 +2354,7 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
     robot->sim_data_warning = 1;
     
     switch (sensor_type) {
-        case SENSOR_TYPE_LIDAR:
+        case ROBOT_SENSOR_TYPE_LIDAR:
             // 激光雷达仿真：基于环境的距离测量
             if (size >= 360) {
                 for (int i = 0; i < 360; i++) {
@@ -2381,7 +2383,7 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
             }
             break;
             
-        case SENSOR_TYPE_IMU:
+        case ROBOT_SENSOR_TYPE_IMU:
             /* P0-003修复 + IMU传感器数据获取
              * 仿真模式下无真实IMU数据，严格拒绝返回虚拟数据。
              * 使用hardware_interface的imu_read_raw获取真实IMU数据 */
@@ -2403,7 +2405,7 @@ static int robot_sim_generate_sensor_data(Robot* robot, SensorType sensor_type,
             /* 仿真模式或无硬件：返回0，不生成任何虚拟数据 */
             return 0;
             
-        case SENSOR_TYPE_CAMERA:
+        case ROBOT_SENSOR_TYPE_CAMERA:
             /* P0-002修复: 摄像头传感器严格使用真实硬件数据。
              * 仿真模式下无真实摄像头数据，严禁生成虚拟棋盘格/合成图像。
              * 虚拟图像进入学习管道将严重污染AGI模型。 */
@@ -2680,7 +2682,7 @@ static int robot_read_sensor_from_hardware(Robot* robot, int sensor_id, SensorDa
  * @param buffer_size 缓冲区大小
  * @return int 实际生成的数据大小
  */
-static int robot_generate_physical_sensor_data(Robot* robot, SensorType sensor_type, 
+static int robot_generate_physical_sensor_data(Robot* robot, RobotSensorType sensor_type, 
                                                float* buffer, size_t buffer_size) {
     // 参数检查
     if (!robot || !buffer || buffer_size == 0) {

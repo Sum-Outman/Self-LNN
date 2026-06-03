@@ -969,3 +969,58 @@ void logging_set_module_mask(unsigned int module_mask)
     LOG_UNLOCK();
     log_info("[日志] 模块过滤器掩码: 0x%08X", module_mask);
 }
+
+/* ========================================================================
+ * 兼容性桥接函数: 为未包含 logging.h 的模块提供 log_* 符号
+ * 这些文件因历史原因或模块独立编译, 未能加载宏定义, 编译器将其隐式声明为函数
+ * ======================================================================== */
+
+/* 取消宏定义以避免与函数实现冲突 */
+#undef log_debug
+#undef log_info
+#undef log_warning
+#undef log_error
+#undef log_warn
+
+/* va_list 版本的 logging_log，用于兼容性桥接 */
+static void logging_log_v(LogLevel level, const char* file, int line,
+                          const char* function, const char* format, va_list args) {
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), format, args);
+    logging_log(level, file, line, function, "%s", buf);
+}
+
+void log_debug(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    logging_log_v(LOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, format, args);
+    va_end(args);
+}
+
+void log_info(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    logging_log_v(LOG_LEVEL_INFO, __FILE__, __LINE__, __func__, format, args);
+    va_end(args);
+}
+
+void log_warning(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    logging_log_v(LOG_LEVEL_WARNING, __FILE__, __LINE__, __func__, format, args);
+    va_end(args);
+}
+
+void log_error(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    logging_log_v(LOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, format, args);
+    va_end(args);
+}
+
+void log_warn(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    logging_log_v(LOG_LEVEL_WARNING, __FILE__, __LINE__, __func__, format, args);
+    va_end(args);
+}

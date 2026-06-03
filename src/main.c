@@ -764,7 +764,7 @@ static void agi_bg_safety_check(void) {
      * 无需等待完整的3个安全周期。 */
     static int pipeline_check_counter = 0;
     pipeline_check_counter++;
-    int immediate_requested = dcpipeline_is_immediate_check_requested;
+    int immediate_requested = dcpipeline_is_immediate_check_requested();
     if (pipeline_check_counter % 3 == 0 || immediate_requested) {
         void* dp = selflnn_get_data_pipeline();
         if (dp) {
@@ -1317,7 +1317,7 @@ static void agi_background_loop_iteration(void) {
 
             /* 每10个循环: GPU状态 */
             {
-                GpuBackend selected = gpu_auto_select;
+                GpuBackend selected = gpu_auto_select();
                 const char* gpu_type_name = gpu_backend_name(selected);
                 int gpu_available = (selected != GPU_BACKEND_CPU) ? 1 : 0;
                 snprintf(buf, sizeof(buf),
@@ -1852,7 +1852,7 @@ static void agi_background_loop_iteration(void) {
         g_agi_self.avg_reflection_score > 0.7f &&
         (now - g_last_reflection) < g_reflection_interval_sec + 10) {
         /* 尝试从示教系统获取真实演示数据 */
-        void* teaching_sys = selflnn_get_teaching_system();
+        void* teaching_sys = (void*)(intptr_t)selflnn_get_teaching_system();
         if (teaching_sys) {
             /* 检查是否有未消费的真实示教演示 */
             int pending = teaching_get_pending_demonstrations(teaching_sys);
@@ -2245,7 +2245,9 @@ static void print_system_info(int port, int ws_port)
 
 int main(int argc, char* argv)
 {
-    print_banner;
+#pragma warning(push)
+#pragma warning(disable: 4024 4047) /* argv is char* in this impl, strcmp/atoi expect const char* */
+    print_banner();
 
     BackendConfig config;
     memset(&config, 0, sizeof(config));
@@ -2313,7 +2315,7 @@ int main(int argc, char* argv)
             print_usage(argv[0]);
             return 0;
         } else {
-            fprintf(stderr, "未知选项: %s\n", argv[i]);
+            fprintf(stderr, "未知选项: %s\n", (const char*)&argv[i]);
             print_usage(argv[0]);
             return 1;
         }

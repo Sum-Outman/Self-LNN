@@ -1200,7 +1200,7 @@ int dialogue_analyze_intent(const char* text, size_t text_length,
 /* 基于LNN的意图分类为优先路径。
      * 当全局对话处理器和LNN实例可用时，通过LNN嵌入编码+分类器进行意图识别。
      * 仅当LNN不可用时回退到关键词匹配（作为初始化阶段的辅助手段）。 */
-    DialogueProcessor* global_processor = dialogue_get_global_processor;
+    DialogueProcessor* global_processor = dialogue_get_global_processor();
     if (global_processor && global_processor->lnn_instance) {
         /* LNN驱动意图分类: 将文本tokenize后经CfC ODE编码，取输出向量做意图分类 */
         if (global_processor->dialogue_state_buffer && global_processor->gen_projection_lnn) {
@@ -1368,7 +1368,7 @@ void* dialogue_memory_create(size_t capacity)
     return (void*)mem;
 }
 
-void dialogue_memory_free(void* memory_handle)
+static void dialogue_memory_free(void* memory_handle)
 {
     if (!memory_handle) return;
     dialogue_context_free((DialogueContext*)memory_handle);

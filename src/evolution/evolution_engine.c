@@ -1084,6 +1084,7 @@ int evolution_step(EvolutionEngine* engine) {
         ThreadPool* tp = thread_pool_create(&tp_cfg);
         if (tp) {
             /* 为每个岛提交独立的演化任务到线程池 */
+             void evolve_island_task(void* arg);
             for (int i = 0; i < engine->island_count; i++) {
                 EvolutionPopulation* isl = &engine->islands[i];
                 /* 复制岛数据到堆上，供线程池任务使用(线程安全) */

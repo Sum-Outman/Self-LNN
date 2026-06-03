@@ -55,7 +55,7 @@ typedef enum {
 
 typedef struct {
     int sensor_id;
-    SensorType sensor_type;
+    RobotSensorType sensor_type;
     SensorSource source;
     SensorPipelinePriority priority;
     double timestamp;
@@ -90,7 +90,7 @@ typedef struct {
 
 typedef struct {
     int sensor_id;
-    SensorType sensor_type;
+    RobotSensorType sensor_type;
     uint32_t min_sequence;
     uint32_t max_sequence;
     double min_timestamp;
@@ -140,7 +140,7 @@ int sensor_pipeline_reset(SensorPipeline* pipeline);
 int sensor_pipeline_is_running(SensorPipeline* pipeline);
 
 int sensor_pipeline_register_sensor(SensorPipeline* pipeline, int sensor_id,
-                                     SensorType sensor_type, SensorSource source,
+                                     RobotSensorType sensor_type, SensorSource source,
                                      SensorPipelinePriority priority,
                                      const char* sensor_name, double sample_rate_hz);
 int sensor_pipeline_unregister_sensor(SensorPipeline* pipeline, int sensor_id);
@@ -151,7 +151,7 @@ int sensor_pipeline_get_registered_sensors(SensorPipeline* pipeline, int* sensor
 int sensor_pipeline_get_sensor_count(SensorPipeline* pipeline);
 
 int sensor_pipeline_push_data(SensorPipeline* pipeline, const SensorPipelineEntry* entry);
-int sensor_pipeline_push_raw(SensorPipeline* pipeline, int sensor_id, SensorType sensor_type,
+int sensor_pipeline_push_raw(SensorPipeline* pipeline, int sensor_id, RobotSensorType sensor_type,
                               const uint8_t* data, size_t data_size, double timestamp,
                               float confidence);
 
@@ -178,11 +178,11 @@ int sensor_pipeline_push_force_torque(SensorPipeline* pipeline, int sensor_id,
 
 int sensor_pipeline_get_latest(SensorPipeline* pipeline, int sensor_id,
                                 SensorPipelineEntry* entry);
-int sensor_pipeline_get_latest_by_type(SensorPipeline* pipeline, SensorType sensor_type,
+int sensor_pipeline_get_latest_by_type(SensorPipeline* pipeline, RobotSensorType sensor_type,
                                         SensorPipelineEntry* entry);
 int sensor_pipeline_get_history(SensorPipeline* pipeline, int sensor_id,
                                  SensorPipelineEntry* entries, int* count, int max_entries);
-int sensor_pipeline_get_history_by_type(SensorPipeline* pipeline, SensorType sensor_type,
+int sensor_pipeline_get_history_by_type(SensorPipeline* pipeline, RobotSensorType sensor_type,
                                          SensorPipelineEntry* entries, int* count,
                                          int max_entries);
 
@@ -191,7 +191,7 @@ int sensor_pipeline_get_filtered(SensorPipeline* pipeline, const SensorPipelineF
 
 int sensor_pipeline_subscribe(SensorPipeline* pipeline, int sensor_id,
                                SensorPipelineCallback callback, void* user_data);
-int sensor_pipeline_subscribe_by_type(SensorPipeline* pipeline, SensorType sensor_type,
+int sensor_pipeline_subscribe_by_type(SensorPipeline* pipeline, RobotSensorType sensor_type,
                                        SensorPipelineCallback callback, void* user_data);
 int sensor_pipeline_unsubscribe(SensorPipeline* pipeline, int sensor_id,
                                  SensorPipelineCallback callback);

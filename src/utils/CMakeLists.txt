@@ -14,6 +14,7 @@ add_library(utils
     xorshift_prng.c
     time_utils.c
     config_loader.c
+    compat_link_stubs.c
 )
 
 target_include_directories(utils PUBLIC

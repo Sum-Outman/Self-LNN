@@ -26,8 +26,9 @@ int sensor_deep_preprocess_frame(SensorDeepPreprocessor* sdp,
 
 /* 预处理质量评估 */
 int sensor_deep_quality_assess(SensorDeepPreprocessor* sdp,
-                                float* quality_score, float* innovation_norm,
-                                float* consistency_ratio);
+                                const float** modality_data,
+                                const size_t* modality_dims,
+                                float* quality_scores);
 
 #ifdef __cplusplus
 }

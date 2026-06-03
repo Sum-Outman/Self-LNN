@@ -549,8 +549,10 @@ static float gamma_random(float shape, unsigned int* rng) {
     float d = shape - 1.0f / 3.0f;
     float c = 1.0f / sqrtf(9.0f * d);
     float z2 = 0.0f;
-    for (int attempt = 0; attempt < 100; attempt++) {
-        float x, v;
+    /* Outer loop removed: inner for(;;) always returns, making iteration unreachable.
+     * Kept as scope block for local variable x,v visibility. */
+    {
+        float x = 0.0f, v;
         for (;;) {
             float z;
             do {
@@ -567,7 +569,6 @@ static float gamma_random(float shape, unsigned int* rng) {
             return d * v;
         }
     }
-    return shape;
 }
 
 /**

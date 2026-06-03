@@ -1488,7 +1488,7 @@ typedef struct {
     long* node_latency_us;
 } DistributedContext;
 
-void* distributed_init(const DistributedConfig* cfg) {
+static void* distributed_init(const DistributedConfig* cfg) {
     if (!cfg) {
         log_error("[分布式] 分布式训练初始化失败: 配置为空");
         return NULL;
@@ -1549,7 +1549,7 @@ void* distributed_init(const DistributedConfig* cfg) {
     return ctx;
 }
 
-void distributed_cleanup(void* ctx_ptr) {
+static void distributed_cleanup(void* ctx_ptr) {
     if (!ctx_ptr) return;
 
     DistributedContext* ctx = (DistributedContext*)ctx_ptr;

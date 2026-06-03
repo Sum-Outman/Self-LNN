@@ -1736,8 +1736,8 @@ SensorDeepPreprocessor* sensor_deep_preprocessor_create(size_t state_dim, size_t
     memset(&pf_cfg, 0, sizeof(ParticleFilterConfig));
     pf_cfg.state_dim = (int)state_dim;
     pf_cfg.obs_dim = (int)obs_dim;
-    pf_cfg.num_particles = (state_dim > 64) ? (state_dim * 12) : 
-                           (state_dim > 16) ? (state_dim * 8) : 500;
+    pf_cfg.num_particles = (int)((state_dim > 64) ? (state_dim * 12) : 
+                           (state_dim > 16) ? (state_dim * 8) : 500);
     pf_cfg.process_noise_std = 0.01f;
     pf_cfg.observation_noise_std = 0.1f;
     pf_cfg.resampling_threshold = 0.5f;
@@ -1861,7 +1861,7 @@ int sensor_deep_preprocess_frame(SensorDeepPreprocessor* sdp,
             if (avg_drift > sdp->drift_threshold) {
                 if (sdp->eskf) {
                     float zeros[64] = {0};
-                    eskf_reset(sdp->eskf, zeros, NULL);
+                    eskf_reset(sdp->eskf, zeros);
                 }
                 if (sdp->pf) {
                     float pf_init[64] = {0};

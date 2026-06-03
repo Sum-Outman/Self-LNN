@@ -11,7 +11,11 @@
  * 两者完全一致，保证不同编译单元的一致性。
  */
 
-#define SELFLNN_CORE_INTERNAL 1
+/* SELFLNN_CORE_INTERNAL intentionally NOT defined here.
+ * This allows #ifndef SELFLNN_CORE_INTERNAL below to include
+ * both the local struct CfCCell definition AND all function implementations.
+ * The header cfc_cell.h provides opaque typedef when flag is not defined.
+ */
 
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/cfc_enhanced.h"
@@ -320,6 +324,9 @@ struct CfCCell {
     float* quaternion_workspace;              /**< 四元数工作空间 [hidden_size] */
     /* P1-001: 层归一化模块 */
     LayerNorm* cell_layer_norm;              /**< 层归一化实例（对隐藏状态进行逐样本归一化） */
+    /* 拉普拉斯稳定性分析 + 多线程安全 */
+    float laplace_stability_score;            /**< 拉普拉斯分析器稳定性评分 [0,1] */
+    void* liquid_scaling_mutex;              /**< 液时域缩放递归防护互斥锁（多线程安全） */
 };
 
 /* ============ 门控CfC变体内部数据结构 ============ */
@@ -1696,7 +1703,10 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
         cell->state->rosenbrock_current_steps = steps;
     }
 
-    if (need_free) { safe_free((void**)&y_state); safe_free((void**)&workspace); }
+    /* Buffers always heap-allocated in this path, always free */
+    {
+        safe_free((void**)&y_state); safe_free((void**)&workspace);
+    }
     return ret;
 }
 

@@ -45,7 +45,7 @@ typedef struct {
     int enable_joint_friction;
     int enable_joint_damping;
     float max_joint_torques[DYNAMICS_MAX_JOINTS];
-} DynamicsConfig;
+} RobotDynamicsConfig;
 
 typedef struct {
     float position[3];
@@ -77,9 +77,9 @@ typedef struct {
 
 typedef struct DynamicsModel DynamicsModel;
 
-DynamicsConfig dynamics_config_default(void);
+RobotDynamicsConfig dynamics_config_default(void);
 
-DynamicsModel* dynamics_model_create(const KinematicModel* kin_model, const DynamicsConfig* config);
+DynamicsModel* dynamics_model_create(const KinematicModel* kin_model, const RobotDynamicsConfig* config);
 void dynamics_model_destroy(DynamicsModel* model);
 
 int dynamics_rnea(const DynamicsModel* model,
@@ -130,8 +130,8 @@ int dynamics_step(DynamicsModel* model,
 
 int dynamics_get_state(const DynamicsModel* model, DynamicsState* state);
 
-int dynamics_get_config(const DynamicsModel* model, DynamicsConfig* config);
-int dynamics_set_config(DynamicsModel* model, const DynamicsConfig* config);
+int dynamics_get_config(const DynamicsModel* model, RobotDynamicsConfig* config);
+int dynamics_set_config(DynamicsModel* model, const RobotDynamicsConfig* config);
 
 int dynamics_solve_linear_system(int n, const float* A, const float* b, float* x);
 

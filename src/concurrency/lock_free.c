@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file lock_free.c
  * @brief 无锁数据结构实现
  * 
@@ -335,7 +335,6 @@ static int is_hazard_protected(void* ptr) {
 
 void safe_free(void** ptr);
 static int compare_and_swap_pointer(void** ptr, void* expected, void* desired);
-static void deferred_free_scan(struct DeferredNode** list, volatile LONG* count);
 
 typedef struct DeferredNode {
     void* ptr;
@@ -344,6 +343,10 @@ typedef struct DeferredNode {
     int is_pool_node;    /**< M-029: 标记该节点来自池，释放时仅清理DeferredNode本身 */
 #endif
 } DeferredNode;
+
+/* 前向声明：在DeferredNode定义之后，首次使用之前 */
+static void deferred_free_scan(DeferredNode** list, volatile LONG* count);
+static void busy_wait_spin(int iterations);
 
 static void deferred_free_add(DeferredNode** list, volatile LONG* count, void* ptr) {
     DeferredNode* node = NULL;
@@ -1329,7 +1332,7 @@ static inline void thread_yield_hint(void) {
 /**
  * @brief 忙等待延迟（平台无关抽象）
  */
-static inline void busy_wait_spin(int iterations) {
+static void busy_wait_spin(int iterations) {
     for (int i = 0; i < iterations; i++) {
         cpu_pause_hint();
     }

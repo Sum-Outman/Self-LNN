@@ -1993,7 +1993,7 @@ static int initialize_subsystems(const SystemConfig* config)
             }
             
 /* 集成对话记忆管理器到对话系统 */
-            g_system_state.dialogue_memory_manager = dialogue_memory_create();
+            g_system_state.dialogue_memory_manager = dlg_memory_create();
             if (g_system_state.dialogue_memory_manager) {
                 log_info("对话记忆管理器初始化成功（上下文字段/主题检测/引用解析/会话管理）");
             } else {

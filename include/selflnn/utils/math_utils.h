@@ -97,10 +97,13 @@ typedef struct {
  * 形式：q = q_r + ε * q_d，其中 ε^2 = 0
  * 实部q_r表示旋转，对偶部q_d = (1/2) * t * q_r 表示平移t
  */
+#ifndef SELFLNN_DUAL_QUATERNION_DEFINED
+#define SELFLNN_DUAL_QUATERNION_DEFINED
 typedef struct {
     Quaternion real;           /**< 实部四元数（旋转） */
     Quaternion dual;           /**< 对偶部四元数（平移相关） */
 } DualQuaternion;
+#endif
 
 /**
  * @brief 随机数生成器配置

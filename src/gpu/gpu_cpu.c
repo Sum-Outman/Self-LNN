@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu_cpu.c
  * @brief CPU计算后端实现（当ENABLE_GPU=OFF时编译）
  * 
@@ -110,6 +110,7 @@ static int g_cpu_simd_cached = 0;
  * @brief 运行时检测CPU对AVX指令集的支持（从统一接口缓存读取）
  * @return 1支持AVX，0不支持
  */
+static void simd_lazy_init(void);
 static inline int cpu_supports_avx(void) {
     if (!g_cpu_simd_cached) simd_lazy_init();
     return (g_cached_cpu_simd_flags & CPU_SIMD_AVX) ? 1 : 0;

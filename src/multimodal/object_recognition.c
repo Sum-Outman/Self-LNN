@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file object_recognition.c
  * @brief 增强物体识别与场景理解完整实现
  * 使用真实特征提取算法（HOG + 归一化互相关模板匹配）
@@ -906,7 +906,7 @@ static const struct {
 
 int or_get_color_name(const float* color_rgb, char* name_buf, size_t buf_size, float* confidence) {
     if (!color_rgb || !name_buf || buf_size < 4) return -1;
-    float min_dist = INFINITY;
+    float min_dist = 3.402823466e+38F;  /* FLT_MAX */
     int best_idx = 0;
     for (int i = 0; g_color_reference[i].name; i++) {
         float dr = color_rgb[0] - g_color_reference[i].r;

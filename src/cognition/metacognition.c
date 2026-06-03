@@ -628,7 +628,7 @@ typedef struct {
     int mapping[ANALOGY_MAX_CONCEPTS];
     float score;
     int num_mapped;
-} AnalogyMapping;
+} LocalAnalogyMapping;
 
 static AnalogyDomain src_domain = {{{0}}, 0, {{0}}, 0};
 static AnalogyDomain tgt_domain = {{{0}}, 0, {{0}}, 0};
@@ -642,7 +642,7 @@ static void analogy_lock_init_func(void) {
         g_analogy_lock_init = 1;
     }
 }
-#define ANALOGY_LOCK do { analogy_lock_init_func; EnterCriticalSection(&g_analogy_lock); } while(0)
+#define ANALOGY_LOCK do { analogy_lock_init_func(); EnterCriticalSection(&g_analogy_lock); } while(0)
 #define ANALOGY_UNLOCK LeaveCriticalSection(&g_analogy_lock)
 #else
 #include <pthread.h>
@@ -713,11 +713,11 @@ int analogy_sync_to_target(void) {
     return 0;
 }
 
-int analogy_find_mapping(AnalogyMapping* best_mapping) {
+int analogy_find_mapping(LocalAnalogyMapping* best_mapping) {
     if (!best_mapping) return -1;
     ANALOGY_LOCK;
     if (src_domain.concept_count == 0) { ANALOGY_UNLOCK; return -1; }
-    memset(best_mapping, 0, sizeof(AnalogyMapping));
+    memset(best_mapping, 0, sizeof(LocalAnalogyMapping));
 
     for (int s = 0; s < src_domain.concept_count; s++) {
         int best_tgt = -1;
@@ -754,7 +754,7 @@ int analogy_find_mapping(AnalogyMapping* best_mapping) {
 int analogy_transfer_knowledge(int src_concept, const float* src_knowledge,
                                 float* target_knowledge, int dim) {
     if (!src_knowledge || !target_knowledge || dim <= 0 || dim > 64) return -1;
-    AnalogyMapping mapping;
+    LocalAnalogyMapping mapping;
     if (analogy_find_mapping(&mapping) != 0 || mapping.num_mapped == 0) return -1;
     ANALOGY_LOCK;
     if (src_concept < 0 || src_concept >= src_domain.concept_count) { ANALOGY_UNLOCK; return -1; }

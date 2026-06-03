@@ -88,7 +88,7 @@ static int expand_array(void*** array, size_t* capacity, size_t current_size, si
 /**
  * @brief 计算节点相似度（综合评分——嵌入相似度 + 编辑距离）
  */
-static float node_similarity(const GraphNode* a, const GraphNode* b) {
+static float node_similarity(const KnowledgeGraphNode* a, const KnowledgeGraphNode* b) {
     if (!a || !b) return 0.0f;
 
     float label_sim = 0.0f;
@@ -150,7 +150,7 @@ static float node_similarity(const GraphNode* a, const GraphNode* b) {
  */
 typedef struct HashEntry {
     char* key;              /**< 字符串键 */
-    GraphNode* value;       /**< 节点值 */
+    KnowledgeGraphNode* value;       /**< 节点值 */
     int occupied;           /**< 是否被占用 */
 } HashEntry;
 
@@ -212,7 +212,7 @@ static void hash_table_free(HashEntry* table, size_t capacity) {
  * @return int 0=成功, -1=表满, -2=负载因子>0.7需扩容, 正数=更新已有键
  */
 static int hash_table_insert(HashEntry* table, size_t capacity, const char* key,
-                              GraphNode* value, size_t* occupied_count) {
+                              KnowledgeGraphNode* value, size_t* occupied_count) {
     if (!table || !key || capacity == 0) return -1;
 
     /* P2-046: 负载因子检查 — 超过0.7需要扩容 */
@@ -253,9 +253,9 @@ static int hash_table_insert(HashEntry* table, size_t capacity, const char* key,
  * @param table 哈希表指针
  * @param capacity 哈希表容量
  * @param key 键
- * @return GraphNode* 找到的节点，未找到返回NULL
+ * @return KnowledgeGraphNode* 找到的节点，未找到返回NULL
  */
-static GraphNode* hash_table_lookup(HashEntry* table, size_t capacity, const char* key) {
+static KnowledgeGraphNode* hash_table_lookup(HashEntry* table, size_t capacity, const char* key) {
     if (!table || !key || capacity == 0) return NULL;
     
     unsigned long hash = hash_string(key) % capacity;
@@ -320,7 +320,7 @@ static int hash_table_rehash(HashEntry** table_ptr, size_t* capacity_ptr, size_t
  * @return int 成功返回0，失败返回-1
  */
 static int hash_table_insert_or_rehash(HashEntry** table_ptr, size_t* capacity_ptr,
-                                        const char* key, GraphNode* value) {
+                                        const char* key, KnowledgeGraphNode* value) {
     if (!table_ptr || !*table_ptr || !capacity_ptr || !key) return -1;
 
     /* P2-046: 维护已占用计数，用于负载因子检查 */
@@ -380,7 +380,7 @@ KnowledgeGraph* knowledge_graph_create(size_t max_nodes, size_t max_edges) {
     graph->auto_save_path = NULL;
 
 /* 创建图操作互斥锁 */
-    graph->graph_lock = mutex_create();
+    graph->graph_lock = (void*)(intptr_t)mutex_create();
     
     return graph;
 }
@@ -400,7 +400,7 @@ void knowledge_graph_free(KnowledgeGraph* graph) {
     
     // 释放所有节点
     for (size_t i = 0; i < graph->node_count; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (node) {
             if (node->label) safe_free((void**)&node->label);
             if (node->embedding) safe_free((void**)&node->embedding);
@@ -411,7 +411,7 @@ void knowledge_graph_free(KnowledgeGraph* graph) {
     
     // 释放所有边
     for (size_t i = 0; i < graph->edge_count; i++) {
-        GraphEdge* edge = graph->edges[i];
+        KnowledgeGraphEdge* edge = graph->edges[i];
         if (edge) {
             if (edge->label) safe_free((void**)&edge->label);
             safe_free((void**)&edge);
@@ -431,7 +431,7 @@ void knowledge_graph_free(KnowledgeGraph* graph) {
     safe_free((void**)&graph);
 }
 
-GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
+KnowledgeGraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, KnowledgeGraphNodeType type,
                                    const char* label, const float* embedding,
                                    size_t embedding_size, float confidence) {
     if (!graph) {
@@ -450,14 +450,14 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
     
     // 扩展节点数组（如果需要）
     if (graph->node_count >= graph->node_capacity) {
-        if (expand_array((void***)&graph->nodes, &graph->node_capacity, graph->node_count, sizeof(GraphNode*)) != 0) {
+        if (expand_array((void***)&graph->nodes, &graph->node_capacity, graph->node_count, sizeof(KnowledgeGraphNode*)) != 0) {
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加节点：扩展节点数组失败");
             GRAPH_UNLOCK(graph); return NULL;
         }
     }
     
-    GraphNode* node = (GraphNode*)safe_malloc(sizeof(GraphNode));
+    KnowledgeGraphNode* node = (KnowledgeGraphNode*)safe_malloc(sizeof(KnowledgeGraphNode));
     if (!node) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "添加节点：节点内存分配失败");
@@ -512,8 +512,8 @@ GraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, GraphNodeType type,
     return node;
 }
 
-GraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, GraphEdgeType type,
-                                   GraphNode* source, GraphNode* target,
+KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGraphEdgeType type,
+                                   KnowledgeGraphNode* source, KnowledgeGraphNode* target,
                                    const char* label, float weight, float confidence) {
     if (!graph || !source || !target) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
@@ -531,14 +531,14 @@ GraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, GraphEdgeType type,
     
     // 扩展边数组（如果需要）
     if (graph->edge_count >= graph->edge_capacity) {
-        if (expand_array((void***)&graph->edges, &graph->edge_capacity, graph->edge_count, sizeof(GraphEdge*)) != 0) {
+        if (expand_array((void***)&graph->edges, &graph->edge_capacity, graph->edge_count, sizeof(KnowledgeGraphEdge*)) != 0) {
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加边：扩展边数组失败");
             return NULL;
         }
     }
     
-    GraphEdge* edge = (GraphEdge*)safe_malloc(sizeof(GraphEdge));
+    KnowledgeGraphEdge* edge = (KnowledgeGraphEdge*)safe_malloc(sizeof(KnowledgeGraphEdge));
     if (!edge) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "添加边：边内存分配失败");
@@ -568,7 +568,7 @@ GraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, GraphEdgeType type,
     
     // 添加到源节点的边列表
     if (source->edge_count >= source->edge_capacity) {
-        if (expand_array((void***)&source->edges, &source->edge_capacity, source->edge_count, sizeof(GraphEdge*)) != 0) {
+        if (expand_array((void***)&source->edges, &source->edge_capacity, source->edge_count, sizeof(KnowledgeGraphEdge*)) != 0) {
             if (edge->label) safe_free((void**)&edge->label);
             safe_free((void**)&edge);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
@@ -585,7 +585,7 @@ GraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, GraphEdgeType type,
     return edge;
 }
 
-GraphNode* knowledge_graph_find_node_by_id(KnowledgeGraph* graph, int node_id) {
+KnowledgeGraphNode* knowledge_graph_find_node_by_id(KnowledgeGraph* graph, int node_id) {
     if (!graph) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "根据ID查找节点：知识图谱为空");
@@ -604,7 +604,7 @@ GraphNode* knowledge_graph_find_node_by_id(KnowledgeGraph* graph, int node_id) {
 }
 
 size_t knowledge_graph_find_nodes_by_label(KnowledgeGraph* graph, const char* label,
-                                          GraphNode** results, size_t max_results) {
+                                          KnowledgeGraphNode** results, size_t max_results) {
     if (!graph || !label) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "根据标签查找节点：参数无效");
@@ -614,7 +614,7 @@ size_t knowledge_graph_find_nodes_by_label(KnowledgeGraph* graph, const char* la
     size_t count = 0;
     
     for (size_t i = 0; i < graph->node_count && count < max_results; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (node && node->label && strcmp(node->label, label) == 0) {
             if (results) results[count] = node;
             count++;
@@ -624,7 +624,7 @@ size_t knowledge_graph_find_nodes_by_label(KnowledgeGraph* graph, const char* la
     return count;
 }
 
-GraphEdge* knowledge_graph_find_edge_by_id(KnowledgeGraph* graph, int edge_id) {
+KnowledgeGraphEdge* knowledge_graph_find_edge_by_id(KnowledgeGraph* graph, int edge_id) {
     if (!graph) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "根据ID查找边：知识图谱为空");
@@ -649,9 +649,9 @@ GraphEdge* knowledge_graph_find_edge_by_id(KnowledgeGraph* graph, int edge_id) {
 /**
  * @brief 递归DFS辅助函数
  */
-static int dfs_recursive(GraphNode* node, int* visited, size_t node_count,
-                        GraphNode** all_nodes, int (*visit_callback)(GraphNode*, void*), 
-                        void* user_data, const GraphQueryOptions* options) {
+static int dfs_recursive(KnowledgeGraphNode* node, int* visited, size_t node_count,
+                        KnowledgeGraphNode** all_nodes, int (*visit_callback)(KnowledgeGraphNode*, void*), 
+                        void* user_data, const KnowledgeGraphQueryOptions* options) {
     (void)options; // 未使用参数，避免警告
     
     // 查找当前节点索引
@@ -675,8 +675,8 @@ static int dfs_recursive(GraphNode* node, int* visited, size_t node_count,
     
     // 递归访问所有邻居节点
     for (size_t i = 0; i < node->edge_count; i++) {
-        GraphEdge* edge = node->edges[i];
-        GraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
+        KnowledgeGraphEdge* edge = node->edges[i];
+        KnowledgeGraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
         
         // 递归访问邻居
         result = dfs_recursive(neighbor, visited, node_count, all_nodes, 
@@ -689,9 +689,9 @@ static int dfs_recursive(GraphNode* node, int* visited, size_t node_count,
     return 0;
 }
 
-int knowledge_graph_dfs(KnowledgeGraph* graph, GraphNode* start_node,
-                       int (*visit_callback)(GraphNode*, void*), void* user_data,
-                       const GraphQueryOptions* options) {
+int knowledge_graph_dfs(KnowledgeGraph* graph, KnowledgeGraphNode* start_node,
+                       int (*visit_callback)(KnowledgeGraphNode*, void*), void* user_data,
+                       const KnowledgeGraphQueryOptions* options) {
     (void)user_data; // 未使用参数，避免警告
     (void)options; // 未使用参数，避免警告
     if (!graph || !start_node || !visit_callback) {
@@ -728,9 +728,9 @@ int knowledge_graph_dfs(KnowledgeGraph* graph, GraphNode* start_node,
     return result;
 }
 
-int knowledge_graph_bfs(KnowledgeGraph* graph, GraphNode* start_node,
-                       int (*visit_callback)(GraphNode*, void*), void* user_data,
-                       const GraphQueryOptions* options) {
+int knowledge_graph_bfs(KnowledgeGraph* graph, KnowledgeGraphNode* start_node,
+                       int (*visit_callback)(KnowledgeGraphNode*, void*), void* user_data,
+                       const KnowledgeGraphQueryOptions* options) {
     (void)user_data; // 未使用参数，避免警告
     (void)options; // 未使用参数，避免警告
     if (!graph || !start_node || !visit_callback) {
@@ -761,7 +761,7 @@ int knowledge_graph_bfs(KnowledgeGraph* graph, GraphNode* start_node,
     }
     
     // 创建队列（使用循环数组）
-    GraphNode** queue = (GraphNode**)safe_malloc(graph->node_count * sizeof(GraphNode*));
+    KnowledgeGraphNode** queue = (KnowledgeGraphNode**)safe_malloc(graph->node_count * sizeof(KnowledgeGraphNode*));
     if (!queue) {
         safe_free((void**)&visited);
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
@@ -776,7 +776,7 @@ int knowledge_graph_bfs(KnowledgeGraph* graph, GraphNode* start_node,
     visited[start_idx] = 1;
     
     while (front < rear) {
-        GraphNode* current = queue[front++];
+        KnowledgeGraphNode* current = queue[front++];
         
         // 调用访问回调
         int result = visit_callback(current, user_data);
@@ -788,8 +788,8 @@ int knowledge_graph_bfs(KnowledgeGraph* graph, GraphNode* start_node,
         
         // 将所有未访问的邻居加入队列
         for (size_t i = 0; i < current->edge_count; i++) {
-            GraphEdge* edge = current->edges[i];
-            GraphNode* neighbor = (edge->source == current) ? edge->target : edge->source;
+            KnowledgeGraphEdge* edge = current->edges[i];
+            KnowledgeGraphNode* neighbor = (edge->source == current) ? edge->target : edge->source;
             
             // 查找邻居节点索引
             size_t neighbor_idx = 0;
@@ -822,9 +822,9 @@ int knowledge_graph_bfs(KnowledgeGraph* graph, GraphNode* start_node,
  * 路径查找算法
  * =========================================================================== */
 
-GraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
-                                        GraphNode* start_node, GraphNode* end_node,
-                                        const GraphQueryOptions* options) {
+KnowledgeGraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
+                                        KnowledgeGraphNode* start_node, KnowledgeGraphNode* end_node,
+                                        const KnowledgeGraphQueryOptions* options) {
     (void)options; // 未使用参数，避免警告
     if (!graph || !start_node || !end_node) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
@@ -888,10 +888,10 @@ GraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
         visited[min_idx] = 1;
         
         // 更新邻居节点的距离
-        GraphNode* current = graph->nodes[min_idx];
+        KnowledgeGraphNode* current = graph->nodes[min_idx];
         for (size_t j = 0; j < current->edge_count; j++) {
-            GraphEdge* edge = current->edges[j];
-            GraphNode* neighbor = (edge->source == current) ? edge->target : edge->source;
+            KnowledgeGraphEdge* edge = current->edges[j];
+            KnowledgeGraphNode* neighbor = (edge->source == current) ? edge->target : edge->source;
             
             // 查找邻居节点索引
             size_t neighbor_idx = 0;
@@ -927,7 +927,7 @@ GraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
     }
     
     // 分配路径结构
-    GraphPath* path = (GraphPath*)safe_malloc(sizeof(GraphPath));
+    KnowledgeGraphPath* path = (KnowledgeGraphPath*)safe_malloc(sizeof(KnowledgeGraphPath));
     if (!path) {
         safe_free((void**)&dist);
         safe_free((void**)&prev);
@@ -937,8 +937,8 @@ GraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
         return NULL;
     }
     
-    path->nodes = (GraphNode**)safe_malloc(path_length * sizeof(GraphNode*));
-    path->edges = (GraphEdge**)safe_malloc((path_length - 1) * sizeof(GraphEdge*));
+    path->nodes = (KnowledgeGraphNode**)safe_malloc(path_length * sizeof(KnowledgeGraphNode*));
+    path->edges = (KnowledgeGraphEdge**)safe_malloc((path_length - 1) * sizeof(KnowledgeGraphEdge*));
     
     if (!path->nodes || !path->edges) {
         safe_free((void**)&path->nodes);
@@ -961,13 +961,13 @@ GraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
     
     // 填充边
     for (int i = 0; i < path_length - 1; i++) {
-        GraphNode* from = path->nodes[i];
-        GraphNode* to = path->nodes[i + 1];
+        KnowledgeGraphNode* from = path->nodes[i];
+        KnowledgeGraphNode* to = path->nodes[i + 1];
         
         // 查找连接两个节点的边
-        GraphEdge* found_edge = NULL;
+        KnowledgeGraphEdge* found_edge = NULL;
         for (size_t j = 0; j < from->edge_count; j++) {
-            GraphEdge* edge = from->edges[j];
+            KnowledgeGraphEdge* edge = from->edges[j];
             if ((edge->source == from && edge->target == to) ||
                 (edge->source == to && edge->target == from)) {
                 found_edge = edge;
@@ -988,9 +988,9 @@ GraphPath* knowledge_graph_shortest_path(KnowledgeGraph* graph,
     return path;
 }
 
-GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
-                                          GraphNode* start_node, GraphNode* end_node,
-                                          const GraphQueryOptions* options,
+KnowledgeGraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
+                                          KnowledgeGraphNode* start_node, KnowledgeGraphNode* end_node,
+                                          const KnowledgeGraphQueryOptions* options,
                                           size_t max_paths) {
     (void)options; // 未使用参数，避免警告
     if (!graph || !start_node || !end_node) {
@@ -1004,7 +1004,7 @@ GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
     size_t node_count = graph->node_count;
     
     // 分配路径结果数组
-    GraphPath** result_paths = (GraphPath**)safe_calloc(max_paths, sizeof(GraphPath*));
+    KnowledgeGraphPath** result_paths = (KnowledgeGraphPath**)safe_calloc(max_paths, sizeof(KnowledgeGraphPath*));
     if (!result_paths) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "查找所有路径：结果数组分配失败");
@@ -1021,8 +1021,8 @@ GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
     // 递归DFS查找路径
     size_t found_paths = 0;
     int* visited = (int*)safe_calloc(node_count, sizeof(int));
-    GraphNode** current_path = (GraphNode**)safe_malloc(node_count * sizeof(GraphNode*));
-    GraphEdge** current_edges = (GraphEdge**)safe_malloc((node_count - 1) * sizeof(GraphEdge*));
+    KnowledgeGraphNode** current_path = (KnowledgeGraphNode**)safe_malloc(node_count * sizeof(KnowledgeGraphNode*));
+    KnowledgeGraphEdge** current_edges = (KnowledgeGraphEdge**)safe_malloc((node_count - 1) * sizeof(KnowledgeGraphEdge*));
     
     if (!visited || !current_path || !current_edges) {
         safe_free((void**)&result_paths);
@@ -1062,17 +1062,17 @@ GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
         size_t current_idx = stack[stack_top];
         size_t depth = depth_stack[stack_top];
         
-        GraphNode* current_node = graph->nodes[current_idx];
+        KnowledgeGraphNode* current_node = graph->nodes[current_idx];
         current_path[depth] = current_node;
         
         // 如果找到目标节点且不是起始节点
         if (current_idx == end_idx && depth > 0) {
             // 创建路径
-            GraphPath* path = (GraphPath*)safe_malloc(sizeof(GraphPath));
+            KnowledgeGraphPath* path = (KnowledgeGraphPath*)safe_malloc(sizeof(KnowledgeGraphPath));
             if (!path) continue;
             
-            path->nodes = (GraphNode**)safe_malloc((depth + 1) * sizeof(GraphNode*));
-            path->edges = (GraphEdge**)safe_malloc(depth * sizeof(GraphEdge*));
+            path->nodes = (KnowledgeGraphNode**)safe_malloc((depth + 1) * sizeof(KnowledgeGraphNode*));
+            path->edges = (KnowledgeGraphEdge**)safe_malloc(depth * sizeof(KnowledgeGraphEdge*));
             
             if (!path->nodes || !path->edges) {
                 if (path->nodes) safe_free((void**)&path->nodes);
@@ -1089,13 +1089,13 @@ GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
             // 复制边
             float total_weight = 0.0f;
             for (size_t i = 0; i < depth; i++) {
-                GraphNode* from = current_path[i];
-                GraphNode* to = current_path[i + 1];
+                KnowledgeGraphNode* from = current_path[i];
+                KnowledgeGraphNode* to = current_path[i + 1];
                 
                 // 查找连接两个节点的边
-                GraphEdge* found_edge = NULL;
+                KnowledgeGraphEdge* found_edge = NULL;
                 for (size_t j = 0; j < from->edge_count; j++) {
-                    GraphEdge* edge = from->edges[j];
+                    KnowledgeGraphEdge* edge = from->edges[j];
                     if ((edge->source == from && edge->target == to) ||
                         (edge->source == to && edge->target == from)) {
                         found_edge = edge;
@@ -1120,8 +1120,8 @@ GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
         
         // 遍历邻居（逆序入栈，保持DFS顺序）
         for (size_t i = 0; i < current_node->edge_count; i++) {
-            GraphEdge* edge = current_node->edges[i];
-            GraphNode* neighbor = (edge->source == current_node) ? edge->target : edge->source;
+            KnowledgeGraphEdge* edge = current_node->edges[i];
+            KnowledgeGraphNode* neighbor = (edge->source == current_node) ? edge->target : edge->source;
             
             // 查找邻居索引
             size_t neighbor_idx = 0;
@@ -1158,8 +1158,8 @@ GraphPath** knowledge_graph_find_all_paths(KnowledgeGraph* graph,
 
 // 子图匹配回溯算法的辅助结构
 typedef struct {
-    GraphNode* pattern_node;    // 模式图节点
-    GraphNode* target_node;     // 目标图节点
+    KnowledgeGraphNode* pattern_node;    // 模式图节点
+    KnowledgeGraphNode* target_node;     // 目标图节点
     int matched;                // 是否已匹配
 } NodeMapping;
 
@@ -1176,14 +1176,14 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
         
         // 检查模式图中的边是否在目标图中也存在
         for (size_t i = 0; i < pattern->edge_count; i++) {
-            GraphEdge* pattern_edge = pattern->edges[i];
+            KnowledgeGraphEdge* pattern_edge = pattern->edges[i];
             
             // 查找模式边两端节点在映射中的对应节点
-            GraphNode* pattern_source = pattern_edge->source;
-            GraphNode* pattern_target = pattern_edge->target;
+            KnowledgeGraphNode* pattern_source = pattern_edge->source;
+            KnowledgeGraphNode* pattern_target = pattern_edge->target;
             
-            GraphNode* target_source = NULL;
-            GraphNode* target_target = NULL;
+            KnowledgeGraphNode* target_source = NULL;
+            KnowledgeGraphNode* target_target = NULL;
             
             // 查找映射
             for (size_t j = 0; j < pattern->node_count; j++) {
@@ -1199,7 +1199,7 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
                 // 检查目标图中是否存在对应的边
                 int edge_found = 0;
                 for (size_t j = 0; j < target_source->edge_count; j++) {
-                    GraphEdge* target_edge = target_source->edges[j];
+                    KnowledgeGraphEdge* target_edge = target_source->edges[j];
                     if ((target_edge->source == target_source && target_edge->target == target_target) ||
                         (target_edge->source == target_target && target_edge->target == target_source)) {
                         // 边匹配成功
@@ -1242,8 +1242,8 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
         result->node_count = pattern->node_count;
         result->edge_count = matched_edges;
         
-        result->matched_nodes = (GraphNode**)safe_malloc(pattern->node_count * sizeof(GraphNode*));
-        result->matched_edges = (GraphEdge**)safe_malloc(matched_edges * sizeof(GraphEdge*));
+        result->matched_nodes = (KnowledgeGraphNode**)safe_malloc(pattern->node_count * sizeof(KnowledgeGraphNode*));
+        result->matched_edges = (KnowledgeGraphEdge**)safe_malloc(matched_edges * sizeof(KnowledgeGraphEdge*));
         
         if (!result->matched_nodes || !result->matched_edges) {
             safe_free((void**)&result->matched_nodes);
@@ -1259,12 +1259,12 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
         // 复制边映射（需要重新遍历以获取边指针）
         size_t edge_idx = 0;
         for (size_t i = 0; i < pattern->edge_count; i++) {
-            GraphEdge* pattern_edge = pattern->edges[i];
-            GraphNode* pattern_source = pattern_edge->source;
-            GraphNode* pattern_target = pattern_edge->target;
+            KnowledgeGraphEdge* pattern_edge = pattern->edges[i];
+            KnowledgeGraphNode* pattern_source = pattern_edge->source;
+            KnowledgeGraphNode* pattern_target = pattern_edge->target;
             
-            GraphNode* target_source = NULL;
-            GraphNode* target_target = NULL;
+            KnowledgeGraphNode* target_source = NULL;
+            KnowledgeGraphNode* target_target = NULL;
             
             for (size_t j = 0; j < pattern->node_count; j++) {
                 if (mapping[j].pattern_node == pattern_source) target_source = mapping[j].target_node;
@@ -1273,7 +1273,7 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
             
             if (target_source && target_target) {
                 for (size_t j = 0; j < target_source->edge_count; j++) {
-                    GraphEdge* target_edge = target_source->edges[j];
+                    KnowledgeGraphEdge* target_edge = target_source->edges[j];
                     if ((target_edge->source == target_source && target_edge->target == target_target) ||
                         (target_edge->source == target_target && target_edge->target == target_source)) {
                         result->matched_edges[edge_idx++] = target_edge;
@@ -1298,11 +1298,11 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
         return 0; // 所有节点都已匹配，但深度未达到（不应该发生）
     }
     
-    GraphNode* pattern_node = pattern->nodes[pattern_node_idx];
+    KnowledgeGraphNode* pattern_node = pattern->nodes[pattern_node_idx];
     
     // 尝试将模式节点映射到目标图的每个节点
     for (size_t target_node_idx = 0; target_node_idx < graph->node_count; target_node_idx++) {
-        GraphNode* target_node = graph->nodes[target_node_idx];
+        KnowledgeGraphNode* target_node = graph->nodes[target_node_idx];
         
         // 检查节点兼容性（类型匹配）
         if (pattern_node->type != target_node->type) {
@@ -1329,7 +1329,7 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
                 // 检查模式图中pattern_node和mapping[i].pattern_node之间是否有边
                 int pattern_has_edge = 0;
                 for (size_t j = 0; j < pattern_node->edge_count; j++) {
-                    GraphEdge* edge = pattern_node->edges[j];
+                    KnowledgeGraphEdge* edge = pattern_node->edges[j];
                     if ((edge->source == pattern_node && edge->target == mapping[i].pattern_node) ||
                         (edge->source == mapping[i].pattern_node && edge->target == pattern_node)) {
                         pattern_has_edge = 1;
@@ -1341,7 +1341,7 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
                 if (pattern_has_edge) {
                     int target_has_edge = 0;
                     for (size_t j = 0; j < target_node->edge_count; j++) {
-                        GraphEdge* edge = target_node->edges[j];
+                        KnowledgeGraphEdge* edge = target_node->edges[j];
                         if ((edge->source == target_node && edge->target == mapping[i].target_node) ||
                             (edge->source == mapping[i].target_node && edge->target == target_node)) {
                             target_has_edge = 1;
@@ -1380,7 +1380,7 @@ static int subgraph_match_backtrack(KnowledgeGraph* graph, KnowledgeGraph* patte
 
 SubgraphMatch* knowledge_graph_subgraph_match(KnowledgeGraph* graph,
                                              KnowledgeGraph* pattern,
-                                             const GraphQueryOptions* options) {
+                                             const KnowledgeGraphQueryOptions* options) {
     (void)options; // 未使用参数，避免警告
     if (!graph || !pattern) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
@@ -1448,7 +1448,7 @@ SubgraphMatch* knowledge_graph_subgraph_match(KnowledgeGraph* graph,
  * 图分析
  * =========================================================================== */
 
-float knowledge_graph_node_centrality(KnowledgeGraph* graph, GraphNode* node,
+float knowledge_graph_node_centrality(KnowledgeGraph* graph, KnowledgeGraphNode* node,
                                      int centrality_type) {
     if (!graph || !node) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
@@ -1502,11 +1502,11 @@ float knowledge_graph_node_centrality(KnowledgeGraph* graph, GraphNode* node,
                 
                 while (front < rear) {
                     size_t current = queue[front++];
-                    GraphNode* current_node = graph->nodes[current];
+                    KnowledgeGraphNode* current_node = graph->nodes[current];
                     
                     for (size_t i = 0; i < current_node->edge_count; i++) {
-                        GraphEdge* edge = current_node->edges[i];
-                        GraphNode* neighbor = (edge->source == current_node) ? edge->target : edge->source;
+                        KnowledgeGraphEdge* edge = current_node->edges[i];
+                        KnowledgeGraphNode* neighbor = (edge->source == current_node) ? edge->target : edge->source;
                         
                         // 查找邻居索引
                         size_t neighbor_idx = 0;
@@ -1621,10 +1621,10 @@ float knowledge_graph_node_centrality(KnowledgeGraph* graph, GraphNode* node,
                 }
 
                 for (size_t i = 0; i < node_count; i++) {
-                    GraphNode* src_node = graph->nodes[i];
+                    KnowledgeGraphNode* src_node = graph->nodes[i];
                     for (size_t j = 0; j < src_node->edge_count; j++) {
-                        GraphEdge* edge = src_node->edges[j];
-                        GraphNode* neighbor = (edge->source == src_node) ? edge->target : edge->source;
+                        KnowledgeGraphEdge* edge = src_node->edges[j];
+                        KnowledgeGraphNode* neighbor = (edge->source == src_node) ? edge->target : edge->source;
                         
                         // 通过哈希表查找邻居索引 O(1) 而非 O(n)
                         size_t neighbor_idx = node_count; /* 默认=未找到 */
@@ -1782,7 +1782,7 @@ float knowledge_graph_clustering_coefficient(KnowledgeGraph* graph) {
     
     // 为每个节点计算局部聚类系数
     for (size_t i = 0; i < node_count; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         size_t degree = node->edge_count;
         
         // 如果度小于2，局部聚类系数为0（无法形成三角形）
@@ -1795,17 +1795,17 @@ float knowledge_graph_clustering_coefficient(KnowledgeGraph* graph) {
         
         // 遍历所有邻居对
         for (size_t j = 0; j < degree; j++) {
-            GraphEdge* edge1 = node->edges[j];
-            GraphNode* neighbor1 = (edge1->source == node) ? edge1->target : edge1->source;
+            KnowledgeGraphEdge* edge1 = node->edges[j];
+            KnowledgeGraphNode* neighbor1 = (edge1->source == node) ? edge1->target : edge1->source;
             
             for (size_t k = j + 1; k < degree; k++) {
-                GraphEdge* edge2 = node->edges[k];
-                GraphNode* neighbor2 = (edge2->source == node) ? edge2->target : edge2->source;
+                KnowledgeGraphEdge* edge2 = node->edges[k];
+                KnowledgeGraphNode* neighbor2 = (edge2->source == node) ? edge2->target : edge2->source;
                 
                 // 检查neighbor1和neighbor2之间是否有边
                 int edge_found = 0;
                 for (size_t l = 0; l < neighbor1->edge_count; l++) {
-                    GraphEdge* edge = neighbor1->edges[l];
+                    KnowledgeGraphEdge* edge = neighbor1->edges[l];
                     if ((edge->source == neighbor1 && edge->target == neighbor2) ||
                         (edge->source == neighbor2 && edge->target == neighbor1)) {
                         edge_found = 1;
@@ -1864,10 +1864,10 @@ float knowledge_graph_clustering_coefficient(KnowledgeGraph* graph) {
 static void compute_out_degrees(KnowledgeGraph* graph, size_t* out_degree) {
     memset(out_degree, 0, graph->node_count * sizeof(size_t));
     for (size_t i = 0; i < graph->node_count; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (!node) continue;
         for (size_t j = 0; j < node->edge_count; j++) {
-            GraphEdge* edge = node->edges[j];
+            KnowledgeGraphEdge* edge = node->edges[j];
             if (edge && edge->source == node) {
                 out_degree[i]++;
             }
@@ -1900,14 +1900,14 @@ static int build_inbound_adjacency(KnowledgeGraph* graph,
 
     /* 第一遍：计算每个节点的入度 */
     for (size_t i = 0; i < n; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (!node) continue;
         for (size_t j = 0; j < node->edge_count; j++) {
-            GraphEdge* edge = node->edges[j];
+            KnowledgeGraphEdge* edge = node->edges[j];
             if (!edge) continue;
             if (edge->source == node) {
                 /* 有向边 i -> target */
-                GraphNode* target = edge->target;
+                KnowledgeGraphNode* target = edge->target;
                 /* 查找目标节点索引 */
                 for (size_t k = 0; k < n; k++) {
                     if (graph->nodes[k] == target) {
@@ -1945,13 +1945,13 @@ static int build_inbound_adjacency(KnowledgeGraph* graph,
     }
 
     for (size_t i = 0; i < n; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (!node) continue;
         for (size_t j = 0; j < node->edge_count; j++) {
-            GraphEdge* edge = node->edges[j];
+            KnowledgeGraphEdge* edge = node->edges[j];
             if (!edge) continue;
             if (edge->source == node) {
-                GraphNode* target = edge->target;
+                KnowledgeGraphNode* target = edge->target;
                 for (size_t k = 0; k < n; k++) {
                     if (graph->nodes[k] == target) {
                         in_adj[k][fill_pos[k]++] = i;
@@ -1993,7 +1993,7 @@ static int build_undirected_adjacency(KnowledgeGraph* graph,
 
     /* 第一遍：计算邻居数（去重） */
     for (size_t i = 0; i < n; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (!node) continue;
         /* 使用临时集合去重邻居 */
         int* seen = (int*)safe_calloc(n, sizeof(int));
@@ -2003,9 +2003,9 @@ static int build_undirected_adjacency(KnowledgeGraph* graph,
             return -1;
         }
         for (size_t j = 0; j < node->edge_count; j++) {
-            GraphEdge* edge = node->edges[j];
+            KnowledgeGraphEdge* edge = node->edges[j];
             if (!edge) continue;
-            GraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
+            KnowledgeGraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
             for (size_t k = 0; k < n; k++) {
                 if (graph->nodes[k] == neighbor) {
                     if (!seen[k]) {
@@ -2042,7 +2042,7 @@ static int build_undirected_adjacency(KnowledgeGraph* graph,
     }
 
     for (size_t i = 0; i < n; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (!node) continue;
         int* seen = (int*)safe_calloc(n, sizeof(int));
         if (!seen) {
@@ -2053,9 +2053,9 @@ static int build_undirected_adjacency(KnowledgeGraph* graph,
             return -1;
         }
         for (size_t j = 0; j < node->edge_count; j++) {
-            GraphEdge* edge = node->edges[j];
+            KnowledgeGraphEdge* edge = node->edges[j];
             if (!edge) continue;
-            GraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
+            KnowledgeGraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
             for (size_t k = 0; k < n; k++) {
                 if (graph->nodes[k] == neighbor) {
                     if (!seen[k]) {
@@ -2813,18 +2813,18 @@ int knowledge_graph_compute_stats(KnowledgeGraph* graph, KnowledgeGraphStats* st
 
     /* 内存使用量 */
     size_t memory = sizeof(KnowledgeGraph);
-    memory += graph->node_capacity * sizeof(GraphNode*);
-    memory += graph->edge_capacity * sizeof(GraphEdge*);
+    memory += graph->node_capacity * sizeof(KnowledgeGraphNode*);
+    memory += graph->edge_capacity * sizeof(KnowledgeGraphEdge*);
     for (size_t i = 0; i < n; i++) {
-        GraphNode* node = graph->nodes[i];
-        memory += sizeof(GraphNode);
+        KnowledgeGraphNode* node = graph->nodes[i];
+        memory += sizeof(KnowledgeGraphNode);
         if (node->label) memory += strlen(node->label) + 1;
         if (node->embedding) memory += node->embedding_size * sizeof(float);
-        memory += node->edge_capacity * sizeof(GraphEdge*);
+        memory += node->edge_capacity * sizeof(KnowledgeGraphEdge*);
     }
     for (size_t i = 0; i < e; i++) {
-        GraphEdge* edge = graph->edges[i];
-        memory += sizeof(GraphEdge);
+        KnowledgeGraphEdge* edge = graph->edges[i];
+        memory += sizeof(KnowledgeGraphEdge);
         if (edge->label) memory += strlen(edge->label) + 1;
     }
     stats->memory_usage = memory;
@@ -2999,7 +2999,7 @@ int knowledge_graph_import_from_knowledge_base(KnowledgeGraph* graph,
     
     /* 首先，将图中现有节点添加到哈希表（使用自动扩容版本） */
     for (size_t j = 0; j < graph->node_count; j++) {
-        GraphNode* node = graph->nodes[j];
+        KnowledgeGraphNode* node = graph->nodes[j];
         if (node && node->label) {
             hash_table_insert_or_rehash(&hash_table, &hash_capacity, node->label, node);
         }
@@ -3017,7 +3017,7 @@ int knowledge_graph_import_from_knowledge_base(KnowledgeGraph* graph,
         }
         
         // 查找或创建主体节点
-        GraphNode* subject_node = hash_table_lookup(hash_table, hash_capacity, entry->subject);
+        KnowledgeGraphNode* subject_node = hash_table_lookup(hash_table, hash_capacity, entry->subject);
         
         // 如果不存在，创建新节点
         if (!subject_node) {
@@ -3030,7 +3030,7 @@ int knowledge_graph_import_from_knowledge_base(KnowledgeGraph* graph,
         }
         
         // 查找或创建客体节点
-        GraphNode* object_node = hash_table_lookup(hash_table, hash_capacity, entry->object);
+        KnowledgeGraphNode* object_node = hash_table_lookup(hash_table, hash_capacity, entry->object);
         
         // 如果不存在，创建新节点
         if (!object_node) {
@@ -3043,7 +3043,7 @@ int knowledge_graph_import_from_knowledge_base(KnowledgeGraph* graph,
         }
         
         // 创建边（关系）
-        GraphEdge* edge = knowledge_graph_add_edge(graph, EDGE_TYPE_RELATION, subject_node, object_node, 
+        KnowledgeGraphEdge* edge = knowledge_graph_add_edge(graph, EDGE_TYPE_RELATION, subject_node, object_node, 
                                                   entry->predicate, entry->weight, 0.5f);
         if (!edge) {
             continue; // 创建失败，跳过此条目
@@ -3087,7 +3087,7 @@ int knowledge_graph_export_to_knowledge_base(KnowledgeGraph* graph,
     
     // 遍历所有边（每条边对应一个知识条目）
     for (size_t i = 0; i < graph->edge_count; i++) {
-        GraphEdge* edge = graph->edges[i];
+        KnowledgeGraphEdge* edge = graph->edges[i];
         
         if (!edge->source || !edge->target || !edge->label) {
             continue; // 跳过无效边
@@ -3246,7 +3246,7 @@ int knowledge_graph_save(KnowledgeGraph* graph, const char* filename) {
     
     // 写入每个节点
     for (size_t i = 0; i < graph->node_count; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         
         uint64_t node_id = i;
         if (fwrite(&node_id, sizeof(node_id), 1, file) != 1) {
@@ -3314,7 +3314,7 @@ int knowledge_graph_save(KnowledgeGraph* graph, const char* filename) {
     }
     
     for (size_t i = 0; i < graph->edge_count; i++) {
-        GraphEdge* edge = graph->edges[i];
+        KnowledgeGraphEdge* edge = graph->edges[i];
         
         uint64_t source_idx = UINT64_MAX;
         uint64_t target_idx = UINT64_MAX;
@@ -3589,7 +3589,7 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
     // 预分配节点空间（由 knowledge_graph_add_node 内部处理）
     
     // 读取每个节点
-    GraphNode** loaded_nodes = (GraphNode**)safe_malloc(node_count * sizeof(GraphNode*));
+    KnowledgeGraphNode** loaded_nodes = (KnowledgeGraphNode**)safe_malloc(node_count * sizeof(KnowledgeGraphNode*));
     if (!loaded_nodes && node_count > 0) {
         knowledge_graph_free(graph);
         fclose(file);
@@ -3699,7 +3699,7 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
         }
         
         // 创建节点
-        GraphNode* node = knowledge_graph_add_node(graph, (GraphNodeType)node_type, label, NULL, 0, 0.5f);
+        KnowledgeGraphNode* node = knowledge_graph_add_node(graph, (KnowledgeGraphNodeType)node_type, label, NULL, 0, 0.5f);
         if (!node) {
             if (embedding) safe_free((void**)&embedding);
             if (label) safe_free((void**)&label);
@@ -3828,11 +3828,11 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
         }
         
         // 获取源节点和目标节点
-        GraphNode* source_node = loaded_nodes[source_idx];
-        GraphNode* target_node = loaded_nodes[target_idx];
+        KnowledgeGraphNode* source_node = loaded_nodes[source_idx];
+        KnowledgeGraphNode* target_node = loaded_nodes[target_idx];
         
         // 创建边
-        GraphEdge* edge = knowledge_graph_add_edge(graph, EDGE_TYPE_RELATION, source_node, target_node, label, weight, 0.5f);
+        KnowledgeGraphEdge* edge = knowledge_graph_add_edge(graph, EDGE_TYPE_RELATION, source_node, target_node, label, weight, 0.5f);
         if (!edge) {
             if (label) safe_free((void**)&label);
             knowledge_graph_free(graph);
@@ -3885,15 +3885,15 @@ int knowledge_graph_get_stats(KnowledgeGraph* graph,
         total_memory += sizeof(KnowledgeGraph);
         
         // 节点数组内存
-        total_memory += graph->node_capacity * sizeof(GraphNode*);
+        total_memory += graph->node_capacity * sizeof(KnowledgeGraphNode*);
         
         // 边数组内存
-        total_memory += graph->edge_capacity * sizeof(GraphEdge*);
+        total_memory += graph->edge_capacity * sizeof(KnowledgeGraphEdge*);
         
         // 每个节点的内存
         for (size_t i = 0; i < graph->node_count; i++) {
-            GraphNode* node = graph->nodes[i];
-            total_memory += sizeof(GraphNode);
+            KnowledgeGraphNode* node = graph->nodes[i];
+            total_memory += sizeof(KnowledgeGraphNode);
             
             if (node->label) {
                 total_memory += strlen(node->label) + 1;
@@ -3904,13 +3904,13 @@ int knowledge_graph_get_stats(KnowledgeGraph* graph,
             }
             
             // 边指针数组
-            total_memory += node->edge_capacity * sizeof(GraphEdge*);
+            total_memory += node->edge_capacity * sizeof(KnowledgeGraphEdge*);
         }
         
         // 每条边的内存
         for (size_t i = 0; i < graph->edge_count; i++) {
-            GraphEdge* edge = graph->edges[i];
-            total_memory += sizeof(GraphEdge);
+            KnowledgeGraphEdge* edge = graph->edges[i];
+            total_memory += sizeof(KnowledgeGraphEdge);
             
             if (edge->label) {
                 total_memory += strlen(edge->label) + 1;
@@ -3927,7 +3927,7 @@ int knowledge_graph_get_stats(KnowledgeGraph* graph,
  * 批量操作
  * =========================================================================== */
 
-size_t knowledge_graph_get_all_nodes(KnowledgeGraph* graph, GraphNode** results, size_t max_results) {
+size_t knowledge_graph_get_all_nodes(KnowledgeGraph* graph, KnowledgeGraphNode** results, size_t max_results) {
     if (!graph) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "获取所有节点：知识图谱为空");
@@ -3947,7 +3947,7 @@ size_t knowledge_graph_get_all_nodes(KnowledgeGraph* graph, GraphNode** results,
     return count;
 }
 
-size_t knowledge_graph_get_all_edges(KnowledgeGraph* graph, GraphEdge** results, size_t max_results) {
+size_t knowledge_graph_get_all_edges(KnowledgeGraph* graph, KnowledgeGraphEdge** results, size_t max_results) {
     if (!graph) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "获取所有边：知识图谱为空");
@@ -3972,8 +3972,8 @@ size_t knowledge_graph_get_all_edges(KnowledgeGraph* graph, GraphEdge** results,
  * =========================================================================== */
 
 size_t knowledge_graph_transitive_closure(KnowledgeGraph* graph,
-    GraphNode* start_node, GraphEdgeType relation_type,
-    GraphNode** results, size_t max_results) {
+    KnowledgeGraphNode* start_node, KnowledgeGraphEdgeType relation_type,
+    KnowledgeGraphNode** results, size_t max_results) {
     if (!graph || !start_node || !results || max_results == 0) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "传递闭包：参数无效");
@@ -3982,7 +3982,7 @@ size_t knowledge_graph_transitive_closure(KnowledgeGraph* graph,
     
     // 真正的传递闭包实现：BFS遍历，仅跟踪指定关系类型的边
     // 使用队列进行BFS
-    GraphNode** queue = (GraphNode**)safe_malloc((graph->node_count + 1) * sizeof(GraphNode*));
+    KnowledgeGraphNode** queue = (KnowledgeGraphNode**)safe_malloc((graph->node_count + 1) * sizeof(KnowledgeGraphNode*));
     if (!queue) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "传递闭包：内存分配失败");
@@ -4016,7 +4016,7 @@ size_t knowledge_graph_transitive_closure(KnowledgeGraph* graph,
     
     // 填充映射：节点ID -> 节点索引
     for (size_t i = 0; i < graph->node_count; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (node && node->id >= 0 && node->id <= graph->next_node_id) {
             node_index_by_id[node->id] = (int)i;
         }
@@ -4041,11 +4041,11 @@ size_t knowledge_graph_transitive_closure(KnowledgeGraph* graph,
     size_t result_count = 0;
     
     while (queue_front < queue_rear && result_count < max_results) {
-        GraphNode* current = queue[queue_front++];
+        KnowledgeGraphNode* current = queue[queue_front++];
         
         // 遍历当前节点的所有出边
         for (size_t i = 0; i < current->edge_count; i++) {
-            GraphEdge* edge = current->edges[i];
+            KnowledgeGraphEdge* edge = current->edges[i];
             
             // 检查边类型是否匹配
             if (edge->type != relation_type) {
@@ -4057,7 +4057,7 @@ size_t knowledge_graph_transitive_closure(KnowledgeGraph* graph,
                 continue;
             }
             
-            GraphNode* neighbor = edge->target;
+            KnowledgeGraphNode* neighbor = edge->target;
             
             // 如果邻居节点未访问过
             int neighbor_index = (neighbor->id >= 0 && neighbor->id <= graph->next_node_id) ? 
@@ -4089,9 +4089,9 @@ size_t knowledge_graph_transitive_closure(KnowledgeGraph* graph,
 }
 
 size_t knowledge_graph_multi_hop_query(KnowledgeGraph* graph,
-    GraphNode* start_node, const GraphEdgeType* relation_types, size_t num_types,
+    KnowledgeGraphNode* start_node, const KnowledgeGraphEdgeType* relation_types, size_t num_types,
     size_t min_hops, size_t max_hops,
-    GraphNode** results, size_t max_results) {
+    KnowledgeGraphNode** results, size_t max_results) {
     if (!graph || !start_node || !relation_types || num_types == 0 || !results || max_results == 0) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "多跳查询：参数无效");
@@ -4101,7 +4101,7 @@ size_t knowledge_graph_multi_hop_query(KnowledgeGraph* graph,
     // 真正的多跳查询实现：BFS遍历，跟踪跳数，仅允许指定关系类型的边
     // 使用队列进行BFS，同时存储节点和跳数
     typedef struct {
-        GraphNode* node;
+        KnowledgeGraphNode* node;
         size_t hops;
     } QueueItem;
     
@@ -4142,7 +4142,7 @@ size_t knowledge_graph_multi_hop_query(KnowledgeGraph* graph,
     size_t result_count = 0;
     
     while (queue_front < queue_rear && result_count < max_results) {
-        GraphNode* current = queue[queue_front].node;
+        KnowledgeGraphNode* current = queue[queue_front].node;
         size_t current_hops = queue[queue_front].hops;
         queue_front++;
         
@@ -4168,7 +4168,7 @@ size_t knowledge_graph_multi_hop_query(KnowledgeGraph* graph,
         
         // 遍历当前节点的所有出边
         for (size_t i = 0; i < current->edge_count; i++) {
-            GraphEdge* edge = current->edges[i];
+            KnowledgeGraphEdge* edge = current->edges[i];
             
             // 检查边类型是否在允许的类型列表中
             IS_ALLOWED_TYPE(edge->type);
@@ -4178,7 +4178,7 @@ size_t knowledge_graph_multi_hop_query(KnowledgeGraph* graph,
                 continue;
             }
             
-            GraphNode* neighbor = edge->target;
+            KnowledgeGraphNode* neighbor = edge->target;
             
             // 如果邻居节点未访问过（允许重新访问节点，但限制跳数）
             if (neighbor->id >= 0 && neighbor->id <= (int)graph->node_count) {
@@ -4199,8 +4199,8 @@ size_t knowledge_graph_multi_hop_query(KnowledgeGraph* graph,
 }
 
 size_t knowledge_graph_relation_path_query(KnowledgeGraph* graph,
-    GraphNode* start_node, const GraphEdgeType* pattern, size_t pattern_length,
-    GraphPath** paths, size_t max_paths) {
+    KnowledgeGraphNode* start_node, const KnowledgeGraphEdgeType* pattern, size_t pattern_length,
+    KnowledgeGraphPath** paths, size_t max_paths) {
     if (!graph || !start_node || !pattern || pattern_length == 0 || !paths || max_paths == 0) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "关系路径查询：参数无效");
@@ -4212,7 +4212,7 @@ size_t knowledge_graph_relation_path_query(KnowledgeGraph* graph,
     
     // 栈项结构
     typedef struct {
-        GraphNode* node;
+        KnowledgeGraphNode* node;
         size_t pattern_index;
         size_t edge_index;
         size_t depth;
@@ -4220,8 +4220,8 @@ size_t knowledge_graph_relation_path_query(KnowledgeGraph* graph,
     
     // 分配栈
     StackItem* stack = (StackItem*)safe_malloc((pattern_length + 1) * sizeof(StackItem));
-    GraphNode** node_stack = (GraphNode**)safe_malloc((pattern_length + 1) * sizeof(GraphNode*));
-    GraphEdge** edge_stack = (GraphEdge**)safe_malloc(pattern_length * sizeof(GraphEdge*));
+    KnowledgeGraphNode** node_stack = (KnowledgeGraphNode**)safe_malloc((pattern_length + 1) * sizeof(KnowledgeGraphNode*));
+    KnowledgeGraphEdge** edge_stack = (KnowledgeGraphEdge**)safe_malloc(pattern_length * sizeof(KnowledgeGraphEdge*));
     
     if (!stack || !node_stack || !edge_stack) {
         if (stack) safe_free((void**)&stack);
@@ -4248,15 +4248,15 @@ size_t knowledge_graph_relation_path_query(KnowledgeGraph* graph,
         // 如果模式匹配完成，创建路径
         if (current->pattern_index >= pattern_length) {
             // 创建新路径
-            GraphPath* new_path = (GraphPath*)safe_malloc(sizeof(GraphPath));
+            KnowledgeGraphPath* new_path = (KnowledgeGraphPath*)safe_malloc(sizeof(KnowledgeGraphPath));
             if (!new_path) {
                 // 内存不足，停止搜索
                 break;
             }
             
             new_path->length = current->depth + 1;
-            new_path->nodes = (GraphNode**)safe_malloc((current->depth + 1) * sizeof(GraphNode*));
-            new_path->edges = (GraphEdge**)safe_malloc(current->depth * sizeof(GraphEdge*));
+            new_path->nodes = (KnowledgeGraphNode**)safe_malloc((current->depth + 1) * sizeof(KnowledgeGraphNode*));
+            new_path->edges = (KnowledgeGraphEdge**)safe_malloc(current->depth * sizeof(KnowledgeGraphEdge*));
             new_path->total_weight = 0.0f;
             new_path->confidence = 1.0f;
             
@@ -4288,11 +4288,11 @@ size_t knowledge_graph_relation_path_query(KnowledgeGraph* graph,
         }
         
         // 获取当前需要匹配的关系类型
-        GraphEdgeType expected_type = pattern[current->pattern_index];
+        KnowledgeGraphEdgeType expected_type = pattern[current->pattern_index];
         
         // 遍历当前节点的出边
         if (current->edge_index < current->node->edge_count) {
-            GraphEdge* edge = current->node->edges[current->edge_index];
+            KnowledgeGraphEdge* edge = current->node->edges[current->edge_index];
             current->edge_index++;
             
             // 检查边类型是否匹配期望类型
@@ -4305,7 +4305,7 @@ size_t knowledge_graph_relation_path_query(KnowledgeGraph* graph,
                 continue;
             }
             
-            GraphNode* next_node = edge->target;
+            KnowledgeGraphNode* next_node = edge->target;
             
             // 检查是否形成环（简单检查：不在当前路径中）
             int cycle_detected = 0;
@@ -4529,11 +4529,11 @@ int knowledge_graph_parse_sparql(const char* query_str,
  */
 static size_t find_matching_edges(KnowledgeGraph* graph,
                                    const SparqlTriplePattern* pattern,
-                                   GraphEdge** results, size_t max_results)
+                                   KnowledgeGraphEdge** results, size_t max_results)
 {
     size_t count = 0;
     for (size_t i = 0; i < graph->edge_count && count < max_results; i++) {
-        GraphEdge* e = graph->edges[i];
+        KnowledgeGraphEdge* e = graph->edges[i];
         if (!e || !e->is_active) continue;
 
         /* 检查主语匹配 */
@@ -4589,7 +4589,7 @@ int knowledge_graph_execute_sparql(KnowledgeGraph* graph,
     }
 
     /* 为每个模式查找匹配边 */
-    GraphEdge* matches[SELFLNN_SPARQL_MAX_PATTERNS][256];
+    KnowledgeGraphEdge* matches[SELFLNN_SPARQL_MAX_PATTERNS][256];
     size_t match_counts[SELFLNN_SPARQL_MAX_PATTERNS];
 
     for (size_t p = 0; p < pattern_count; p++) {
@@ -4612,10 +4612,10 @@ int knowledge_graph_execute_sparql(KnowledgeGraph* graph,
     while (row_count < 256) {
         /* 检查当前组合的兼容性 */
         for (size_t v = 0; v < var_count; v++) {
-            GraphNode* val = NULL;
+            KnowledgeGraphNode* val = NULL;
             for (size_t p = 0; p < pattern_count && val == NULL; p++) {
                 if (match_counts[p] == 0) continue;
-                GraphEdge* e = matches[p][indices[p]];
+                KnowledgeGraphEdge* e = matches[p][indices[p]];
                 if (!e) continue;
 
                 if (patterns[p].subject_is_var &&
@@ -4717,7 +4717,7 @@ SparqlQueryResult* knowledge_graph_sparql_query(KnowledgeGraph* graph,
 /**
  * @brief 获取节点类型名称
  */
-static const char* graph_node_type_name(GraphNodeType type) {
+static const char* graph_node_type_name(KnowledgeGraphNodeType type) {
     switch (type) {
         case NODE_TYPE_CONCEPT:  return "概念";
         case NODE_TYPE_ENTITY:   return "实体";
@@ -4730,7 +4730,7 @@ static const char* graph_node_type_name(GraphNodeType type) {
 /**
  * @brief 获取边类型名称
  */
-static const char* graph_edge_type_name(GraphEdgeType type) {
+static const char* graph_edge_type_name(KnowledgeGraphEdgeType type) {
     switch (type) {
         case EDGE_TYPE_RELATION:   return "关系";
         case EDGE_TYPE_SUBCLASS:   return "子类";
@@ -4772,8 +4772,8 @@ int knowledge_graph_export_visual_json(KnowledgeGraph* graph,
 
     size_t pos = 0;
     /* 获取所有节点和边 */
-    GraphNode* all_nodes[4096];
-    GraphEdge* all_edges[16384];
+    KnowledgeGraphNode* all_nodes[4096];
+    KnowledgeGraphEdge* all_edges[16384];
     size_t node_count = knowledge_graph_get_all_nodes(graph, all_nodes, 4096);
     size_t edge_count = knowledge_graph_get_all_edges(graph, all_edges, 16384);
 
@@ -4786,7 +4786,7 @@ int knowledge_graph_export_visual_json(KnowledgeGraph* graph,
     /* 写入节点数组 */
     int first_node = 1;
     for (size_t i = 0; i < node_count; i++) {
-        GraphNode* n = all_nodes[i];
+        KnowledgeGraphNode* n = all_nodes[i];
         if (!n) continue;
 
         char escaped_label[512];
@@ -4832,7 +4832,7 @@ int knowledge_graph_export_visual_json(KnowledgeGraph* graph,
     /* 写入边数组 */
     int first_edge = 1;
     for (size_t i = 0; i < edge_count; i++) {
-        GraphEdge* e = all_edges[i];
+        KnowledgeGraphEdge* e = all_edges[i];
         if (!e || !e->is_active || !e->source || !e->target) continue;
 
         /* 找到源和目标节点的索引 */
@@ -4871,8 +4871,8 @@ int knowledge_graph_export_visual_json(KnowledgeGraph* graph,
 /**
  * @brief 导出子图结果为可视化JSON
  */
-int knowledge_graph_subgraph_export_json(GraphNode** nodes, size_t node_count,
-                                         GraphEdge** edges, size_t edge_count,
+int knowledge_graph_subgraph_export_json(KnowledgeGraphNode** nodes, size_t node_count,
+                                         KnowledgeGraphEdge** edges, size_t edge_count,
                                          char* json_buffer, size_t buffer_size)
 {
     if (!nodes || node_count == 0 || !json_buffer || buffer_size == 0) return -1;
@@ -4884,7 +4884,7 @@ int knowledge_graph_subgraph_export_json(GraphNode** nodes, size_t node_count,
     pos += (size_t)written;
 
     for (size_t i = 0; i < node_count; i++) {
-        GraphNode* n = nodes[i];
+        KnowledgeGraphNode* n = nodes[i];
         if (!n) continue;
 
         char escaped_label[512];
@@ -4908,7 +4908,7 @@ int knowledge_graph_subgraph_export_json(GraphNode** nodes, size_t node_count,
     pos += (size_t)written;
 
     for (size_t i = 0; i < edge_count; i++) {
-        GraphEdge* e = edges[i];
+        KnowledgeGraphEdge* e = edges[i];
         if (!e || !e->is_active || !e->source || !e->target) continue;
 
         int src_idx = -1, tgt_idx = -1;
@@ -4946,7 +4946,7 @@ int knowledge_graph_subgraph_export_json(GraphNode** nodes, size_t node_count,
  * 工具函数
  * ============================================================================ */
 
-void knowledge_graph_free_path(GraphPath* path) {
+void knowledge_graph_free_path(KnowledgeGraphPath* path) {
     if (!path) return;
     
     if (path->nodes) safe_free((void**)&path->nodes);
@@ -5124,7 +5124,7 @@ int knowledge_graph_to_lnn_bridge(void* kg, void* lnn, float strength) {
 
     /* 遍历知识图谱节点，收集激活的概念节点 */
     for (size_t i = 0; i < graph->node_count; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (!node || !node->embedding || node->embedding_size == 0) continue;
 
         /* 仅处理概念类型节点（ENTITY或CONCEPT） */

@@ -92,11 +92,11 @@ typedef struct {
     int edge_count;
     int visited;
     int depth;
-} GraphNode;
+} KnowledgeGraphNode;
 
-static int concept_from_kb(KnowledgeInferenceEngine* kie, const char* concept_name, GraphNode* node) {
+static int concept_from_kb(KnowledgeInferenceEngine* kie, const char* concept_name, KnowledgeGraphNode* node) {
     if (!kie || !concept_name || !node) return -1;
-    memset(node, 0, sizeof(GraphNode));
+    memset(node, 0, sizeof(KnowledgeGraphNode));
     string_copy_safe(node->concept_name, concept_name, sizeof(node->concept_name));
     KnowledgeBase* kb = (KnowledgeBase*)kie->knowledge_base;
     if (!kb) return 0;
@@ -1349,7 +1349,7 @@ static int dfs_visit(KnowledgeInferenceEngine* kie, const char* concept, int dep
     fnv_visited_add(visited, h);
     /* B-021修复: GraphNode超过4KB，不再在栈上拷贝。
      * 直接查询知识库边表，避免大结构体拷贝 */
-    GraphNode* node_ptr = (GraphNode*)safe_calloc(1, sizeof(GraphNode));
+    KnowledgeGraphNode* node_ptr = (KnowledgeGraphNode*)safe_calloc(1, sizeof(KnowledgeGraphNode));
     if (!node_ptr) {
         fnv_visited_remove(visited, h);
         return -1;
@@ -1389,17 +1389,17 @@ int ki_graph_bfs(KnowledgeInferenceEngine* kie, const char* start_concept, int m
     KIFact* related, int* related_count) {
     if (!kie || !start_concept || !related || !related_count) return -1;
     *related_count = 0;
-    GraphNode* queue = (GraphNode*)safe_malloc(KI_MAX_GRAPH_NODES * sizeof(GraphNode));
+    KnowledgeGraphNode* queue = (KnowledgeGraphNode*)safe_malloc(KI_MAX_GRAPH_NODES * sizeof(KnowledgeGraphNode));
     if (!queue) return -1;
-    memset(queue, 0, KI_MAX_GRAPH_NODES * sizeof(GraphNode));
+    memset(queue, 0, KI_MAX_GRAPH_NODES * sizeof(KnowledgeGraphNode));
     int head = 0, tail = 0;
-    GraphNode start_node;
+    KnowledgeGraphNode start_node;
     concept_from_kb(kie, start_concept, &start_node);
     start_node.visited = 1;
     start_node.depth = 0;
     if (tail < KI_MAX_GRAPH_NODES) queue[tail++] = start_node;
     while (head < tail && *related_count < KI_MAX_RELATED_FACTS) {
-        GraphNode current = queue[head++];
+        KnowledgeGraphNode current = queue[head++];
         if (current.depth >= max_depth) continue;
         for (int i = 0; i < current.edge_count && *related_count < KI_MAX_RELATED_FACTS; i++) {
             fact_copy(&related[*related_count], &current.edges[i].fact);
@@ -1413,7 +1413,7 @@ int ki_graph_bfs(KnowledgeInferenceEngine* kie, const char* start_concept, int m
                     }
                 }
                 if (!already_queued && tail < KI_MAX_GRAPH_NODES) {
-                    GraphNode next;
+                    KnowledgeGraphNode next;
                     concept_from_kb(kie, current.edges[i].object, &next);
                     next.visited = 1;
                     next.depth = current.depth + 1;
@@ -1452,7 +1452,7 @@ static int dfs_find_paths(KnowledgeInferenceEngine* kie, const char* current, co
         (*path_count)++;
         return 0;
     }
-    GraphNode node;
+    KnowledgeGraphNode node;
     concept_from_kb(kie, current, &node);
     for (int i = 0; i < node.edge_count; i++) {
         if (strlen(node.edges[i].object) == 0) continue;
@@ -2148,21 +2148,21 @@ static void temporal_reasoner_unlock(void) {
 }
 
 int temporal_add_constraint(int event_a, int event_b, int relation) {
-    temporal_reasoner_lock;
-    if (temp_reasoner.constraint_count >= 256) { temporal_reasoner_unlock; return -1; }
+    temporal_reasoner_lock();
+    if (temp_reasoner.constraint_count >= 256) { temporal_reasoner_unlock(); return -1; }
     TemporalConstraint* c = &temp_reasoner.constraints[temp_reasoner.constraint_count++];
     c->event_a = event_a; c->event_b = event_b; c->relation = relation;
     if (event_a >= temp_reasoner.event_count) temp_reasoner.event_count = event_a + 1;
     if (event_b >= temp_reasoner.event_count) temp_reasoner.event_count = event_b + 1;
-    temporal_reasoner_unlock;
+    temporal_reasoner_unlock();
     return 0;
 }
 
 int temporal_infer_relation(int event_a, int event_b, int inferred_relations[8]) {
-    temporal_reasoner_lock;
+    temporal_reasoner_lock();
     int n = temp_reasoner.event_count;
-    if (event_a >= n || event_b >= n) { temporal_reasoner_unlock; return 0; }
-    if (event_a == event_b) { inferred_relations[0] = TEMPORAL_EQUALS; temporal_reasoner_unlock; return 1; }
+    if (event_a >= n || event_b >= n) { temporal_reasoner_unlock(); return 0; }
+    if (event_a == event_b) { inferred_relations[0] = TEMPORAL_EQUALS; temporal_reasoner_unlock(); return 1; }
 
     /* S-028修复: 使用艾伦区间代数传递闭包表进行真实约束推理
      * 替代Floyd-Warshall布尔距离(所有边权重都为1)
@@ -2224,14 +2224,14 @@ int temporal_infer_relation(int event_a, int event_b, int inferred_relations[8])
             inferred_relations[count++] = r;
         }
     }
-    temporal_reasoner_unlock;
+    temporal_reasoner_unlock();
     return count;
 }
 
 int temporal_predict_next_event(float* features, int feature_dim, int* predicted_event, float* confidence) {
     if (!features || !predicted_event || !confidence) return -1;
-    temporal_reasoner_lock;
-    if (temp_reasoner.event_count == 0) { temporal_reasoner_unlock; return -1; }
+    temporal_reasoner_lock();
+    if (temp_reasoner.event_count == 0) { temporal_reasoner_unlock(); return -1; }
     /* BUG-011修复: 基于真实的时序特征和事件时间戳进行时序推理
      * 1. 使用事件时间戳计算间隔模式（周期性）
      * 2. 使用最近N个事件的特征趋势预测下一个事件
@@ -2284,7 +2284,7 @@ int temporal_predict_next_event(float* features, int feature_dim, int* predicted
     *predicted_event = (int)(weighted_pred + 0.5f);
     *confidence = weighted_conf * 0.5f + stability * 0.5f;
     *confidence = *confidence < 0.0f ? 0.0f : (*confidence > 1.0f ? 1.0f : *confidence);
-    temporal_reasoner_unlock;
+    temporal_reasoner_unlock();
     return 0;
 }
 

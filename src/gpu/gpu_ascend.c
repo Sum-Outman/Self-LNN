@@ -406,7 +406,7 @@ static void ascend_backend_cleanup(void) {
         if (g_ascend_cl.aclFinalize) {
             g_ascend_cl.aclFinalize;
         }
-        ascend_cl_unload;
+        ascend_cl_unload();
     }
     g_ascend_state.om_loaded = 0;
     g_ascend_state.om_model_desc = NULL;
@@ -1049,7 +1049,7 @@ static void ascend_npu_cleanup(GpuContext* context) {
 
 static int ascend_npu_get_device_count(GpuContext* context) {
     (void)context;
-    return ascend_backend_get_device_count;
+    return ascend_backend_get_device_count();
 }
 
 static const char* ascend_npu_get_backend_name(GpuContext* context) {

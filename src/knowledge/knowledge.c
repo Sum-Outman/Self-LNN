@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file knowledge.c
  * @brief 知识库系统实现
  *
@@ -5994,7 +5994,7 @@ static void json_unescape_inplace(char* str) {
 static KnowledgeType parse_knowledge_type(const char* type_str) {
     if (!type_str) return KNOWLEDGE_FACT;
     if (strcmp(type_str, "FACT") == 0) return KNOWLEDGE_FACT;
-    if (strcmp(type_str, "CONCEPT") == 0) return KNOWLEDGE_CONCEPT;
+    if (strcmp(type_str, "Concept") == 0) return KNOWLEDGE_CONCEPT;
     if (strcmp(type_str, "RULE") == 0) return KNOWLEDGE_RULE;
     if (strcmp(type_str, "OBSERVATION") == 0) return KNOWLEDGE_OBSERVATION;
     return KNOWLEDGE_FACT;
@@ -6118,7 +6118,7 @@ int knowledge_base_export_json(KnowledgeBase* kb, const char* filepath) {
         const char* type_str = "FACT";
         switch (ike->entry.type) {
             case KNOWLEDGE_FACT: type_str = "FACT"; break;
-            case KNOWLEDGE_CONCEPT: type_str = "CONCEPT"; break;
+            case KNOWLEDGE_CONCEPT: type_str = "Concept"; break;
             case KNOWLEDGE_RULE: type_str = "RULE"; break;
             case KNOWLEDGE_OBSERVATION: type_str = "OBSERVATION"; break;
             default: type_str = "FACT"; break;
@@ -6854,7 +6854,7 @@ int knowledge_base_nearest_fact(KnowledgeBase* kb, const float* query_vec, size_
 
     /* 遍历知识库所有事实条目，计算嵌入相似度 */
     for (size_t entry_idx = 0; entry_idx < kb->size; entry_idx++) {
-        const KnowledgeEntry* entry = &kb->entries[entry_idx];
+        const KnowledgeEntry* entry = (const KnowledgeEntry*)&kb->entries[entry_idx];
 
         /* 使用SPO三元组的嵌入向量进行相似度计算
          * 如果有CfC嵌入则表示在嵌入空间中有向量表示，使用嵌入；
@@ -6919,7 +6919,7 @@ int knowledge_base_nearest_fact(KnowledgeBase* kb, const float* query_vec, size_
     }
 
     /* 将最佳匹配事实的内容复制到输出缓冲区 */
-    const KnowledgeEntry* best = &kb->entries[best_idx];
+    const KnowledgeEntry* best = (const KnowledgeEntry*)&kb->entries[best_idx];
     if (best->subject) {
         strncpy(subject_out, best->subject, subj_size - 1);
         subject_out[subj_size - 1] = '\0';

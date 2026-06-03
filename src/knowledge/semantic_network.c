@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file semantic_network.c
  * @brief 语义网络系统实现
  * 
@@ -11,7 +11,7 @@
 
 #include "selflnn/knowledge/semantic_network.h"
 #include "selflnn/knowledge/knowledge.h" /* KnowledgeBase/KnowledgeEntry */
-#include "selflnn/knowledge/knowledge_graph.h" /* KnowledgeGraph/GraphNode */
+#include "selflnn/knowledge/knowledge_graph.h" /* KnowledgeGraph/KnowledgeGraphNode */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
@@ -24,26 +24,21 @@
 #include <math.h>
 #include <float.h>
 
-/* Z-001修复: KnowledgeBase完整结构体声明(与knowledge.c中定义保持一致,仅在knowledge模块内部可见) */
+/* Z-001修复: InternalKnowledgeEntry本地定义(仅用于sizeof,与knowledge.c保持一致) */
 typedef struct {
     int id;
     KnowledgeEntry entry;
     int ref_count;
 } InternalKnowledgeEntry;
 
-struct KnowledgeBase {
-    InternalKnowledgeEntry* entries;
-    size_t capacity;
-    size_t size;
-    size_t max_entries;
-    int next_id;
-};
+/* KnowledgeBase 结构体定义已在 knowledge.h 中,此处不再重复 */
+
 
 /**
  * @brief 语义网络内部结构
  */
 struct SemanticNetwork {
-    Concept** concepts;              /**< 概念数组 */
+    SemanticConcept** concepts;              /**< 概念数组 */
     size_t concept_count;            /**< 概念数量 */
     size_t concept_capacity;         /**< 概念数组容量 */
     size_t max_concepts;             /**< 最大概念数（0表示无限制） */
@@ -59,7 +54,7 @@ struct SemanticNetwork {
     /* 索引结构 */
     struct {
         char** names;                /**< 概念名称数组 */
-        Concept** concepts;          /**< 概念指针数组 */
+        SemanticConcept** concepts;          /**< 概念指针数组 */
         size_t size;                 /**< 索引大小 */
         size_t capacity;             /**< 索引容量 */
     } name_index;                    /**< 名称索引 */
@@ -76,10 +71,10 @@ struct SemanticNetwork {
 /**
  * @brief 查找概念在概念数组中的索引
  * @param network 语义网络
- * @param concept 概念指针
+ * @param SemanticConcept 概念指针
  * @return 概念索引，如果未找到返回(size_t)-1
  */
-static size_t semantic_network_find_concept_index(SemanticNetwork* network, Concept* concept) {
+static size_t semantic_network_find_concept_index(SemanticNetwork* network, SemanticConcept* concept) {
     if (!network || !concept) return (size_t)-1;
     
     for (size_t i = 0; i < network->concept_count; i++) {
@@ -133,13 +128,13 @@ static float* duplicate_float_array(const float* src, size_t size) {
  * @param concept2 概念2
  * @return float 路径距离（跳数），无法计算时返回-1
  */
-static float bfs_distance_to_ancestor(SemanticNetwork* network, Concept* start, Concept* target) {
+static float bfs_distance_to_ancestor(SemanticNetwork* network, SemanticConcept* start, SemanticConcept* target) {
     if (!network || !start || !target) return -1.0f;
     if (start == target) return 0.0f;
     
     // 分配队列和访问标记
     size_t max_concepts = network->concept_count;
-    Concept** queue = (Concept**)safe_malloc(max_concepts * sizeof(Concept*));
+    SemanticConcept** queue = (SemanticConcept**)safe_malloc(max_concepts * sizeof(SemanticConcept*));
     float* distances = (float*)safe_malloc(max_concepts * sizeof(float));
     int* visited = (int*)safe_calloc(max_concepts, sizeof(int));
     if (!queue || !distances || !visited) {
@@ -167,7 +162,7 @@ static float bfs_distance_to_ancestor(SemanticNetwork* network, Concept* start, 
     float result_distance = -1.0f;
     
     while (front < rear) {
-        Concept* current = queue[front];
+        SemanticConcept* current = queue[front];
         float current_dist = distances[front];
         front++;
         
@@ -183,7 +178,7 @@ static float bfs_distance_to_ancestor(SemanticNetwork* network, Concept* start, 
             if (rel->type != RELATION_IS_A) continue;
             
             // 查找当前概念的父类（target是父类，source是子类）
-            Concept* parent = NULL;
+            SemanticConcept* parent = NULL;
             if (rel->source == current) {
                 parent = rel->target;
             } else if (rel->target == current) {
@@ -230,7 +225,7 @@ SemanticNetwork* semantic_network_create(size_t max_concepts, size_t max_relatio
     network->next_concept_id = 1;
     network->next_relation_id = 1;
 
-    network->concepts = (Concept**)safe_calloc(network->concept_capacity, sizeof(Concept*));
+    network->concepts = (SemanticConcept**)safe_calloc(network->concept_capacity, sizeof(SemanticConcept*));
     network->relations = (SemanticRelation**)safe_calloc(network->relation_capacity, sizeof(SemanticRelation*));
 
     if (!network->concepts || !network->relations) {
@@ -260,7 +255,7 @@ void semantic_network_free(SemanticNetwork* network) {
     SEMANTIC_LOCK(network);
 
     for (size_t i = 0; i < network->concept_count; i++) {
-        Concept* c = network->concepts[i];
+        SemanticConcept* c = network->concepts[i];
         if (c) {
             safe_free((void**)&c->name);
             safe_free((void**)&c->description);
@@ -295,7 +290,7 @@ void semantic_network_free(SemanticNetwork* network) {
 /**
  * @brief 添加概念到语义网络（内部无锁版本，调用者需持有锁）
  */
-static Concept* _semantic_network_add_concept_internal(SemanticNetwork* network, ConceptType type,
+static SemanticConcept* _semantic_network_add_concept_internal(SemanticNetwork* network, ConceptType type,
                                                        const char* name, const char* description,
                                                        const float* embedding, size_t embedding_size,
                                                        float specificity, float typicality) {
@@ -306,11 +301,11 @@ static Concept* _semantic_network_add_concept_internal(SemanticNetwork* network,
     }
 
     if (expand_array((void**)&network->concepts, &network->concept_capacity,
-                     network->concept_count, sizeof(Concept*)) != 0) {
+                     network->concept_count, sizeof(SemanticConcept*)) != 0) {
         return NULL;
     }
 
-    Concept* concept = (Concept*)safe_calloc(1, sizeof(Concept));
+    SemanticConcept* concept = (SemanticConcept*)safe_calloc(1, sizeof(SemanticConcept));
     if (!concept) {
         return NULL;
     }
@@ -339,7 +334,7 @@ static Concept* _semantic_network_add_concept_internal(SemanticNetwork* network,
     if (network->name_index.size >= network->name_index.capacity) {
         size_t new_cap = network->name_index.capacity == 0 ? 16 : network->name_index.capacity * 2;
         char** new_names = (char**)safe_realloc(network->name_index.names, new_cap * sizeof(char*));
-        Concept** new_concepts = (Concept**)safe_realloc(network->name_index.concepts, new_cap * sizeof(Concept*));
+        SemanticConcept** new_concepts = (SemanticConcept**)safe_realloc(network->name_index.concepts, new_cap * sizeof(SemanticConcept*));
         if (new_names && new_concepts) {
             network->name_index.names = new_names;
             network->name_index.concepts = new_concepts;
@@ -358,14 +353,14 @@ static Concept* _semantic_network_add_concept_internal(SemanticNetwork* network,
 /**
  * @brief 添加概念到语义网络
  */
-Concept* semantic_network_add_concept(SemanticNetwork* network, ConceptType type,
+SemanticConcept* semantic_network_add_concept(SemanticNetwork* network, ConceptType type,
                                      const char* name, const char* description,
                                      const float* embedding, size_t embedding_size,
                                      float specificity, float typicality) {
     if (!network || !name) return NULL;
 
     SEMANTIC_LOCK(network);
-    Concept* result = _semantic_network_add_concept_internal(network, type, name, description,
+    SemanticConcept* result = _semantic_network_add_concept_internal(network, type, name, description,
                                                               embedding, embedding_size,
                                                               specificity, typicality);
     SEMANTIC_UNLOCK(network);
@@ -377,7 +372,7 @@ Concept* semantic_network_add_concept(SemanticNetwork* network, ConceptType type
  */
 static SemanticRelation* _semantic_network_add_relation_internal(SemanticNetwork* network,
                                                                  SemanticRelationType type,
-                                                                 Concept* source, Concept* target,
+                                                                 SemanticConcept* source, SemanticConcept* target,
                                                                  const char* label,
                                                                  float strength, float confidence) {
     if (!network || !source || !target) return NULL;
@@ -415,7 +410,7 @@ static SemanticRelation* _semantic_network_add_relation_internal(SemanticNetwork
  */
 SemanticRelation* semantic_network_add_relation(SemanticNetwork* network,
                                                SemanticRelationType type,
-                                               Concept* source, Concept* target,
+                                               SemanticConcept* source, SemanticConcept* target,
                                                const char* label,
                                                float strength, float confidence) {
     if (!network || !source || !target) return NULL;
@@ -430,7 +425,7 @@ SemanticRelation* semantic_network_add_relation(SemanticNetwork* network,
 /**
  * @brief 根据名称查找概念（内部无锁版本，调用者需持有锁）
  */
-static Concept* _semantic_network_find_concept_by_name_internal(SemanticNetwork* network, const char* name) {
+static SemanticConcept* _semantic_network_find_concept_by_name_internal(SemanticNetwork* network, const char* name) {
     if (!network || !name) return NULL;
 
     for (size_t i = 0; i < network->name_index.size; i++) {
@@ -453,11 +448,11 @@ static Concept* _semantic_network_find_concept_by_name_internal(SemanticNetwork*
 /**
  * @brief 根据名称查找概念
  */
-Concept* semantic_network_find_concept_by_name(SemanticNetwork* network, const char* name) {
+SemanticConcept* semantic_network_find_concept_by_name(SemanticNetwork* network, const char* name) {
     if (!network || !name) return NULL;
 
     SEMANTIC_LOCK(network);
-    Concept* result = _semantic_network_find_concept_by_name_internal(network, name);
+    SemanticConcept* result = _semantic_network_find_concept_by_name_internal(network, name);
     SEMANTIC_UNLOCK(network);
     return result;
 }
@@ -509,7 +504,7 @@ SELFLNN_API size_t semantic_network_prune(SemanticNetwork* network,
     /* 第二步：标记并移除低置信度概念 */
     size_t valid_concept_count = 0;
     for (size_t i = 0; i < network->concept_count; i++) {
-        Concept* concept = network->concepts[i];
+        SemanticConcept* concept = network->concepts[i];
         if (concept->confidence >= min_concept_confidence) {
             // 保留概念
             network->concepts[valid_concept_count] = concept;
@@ -540,13 +535,13 @@ SELFLNN_API size_t semantic_network_prune(SemanticNetwork* network,
     
     // 重新构建索引
     for (size_t i = 0; i < network->concept_count; i++) {
-        Concept* concept = network->concepts[i];
+        SemanticConcept* concept = network->concepts[i];
         if (concept->name) {
             // 扩展索引数组
             if (network->name_index.size >= network->name_index.capacity) {
                 size_t new_capacity = network->name_index.capacity == 0 ? 16 : network->name_index.capacity * 2;
                 char** new_names = (char**)safe_realloc(network->name_index.names, new_capacity * sizeof(char*));
-                Concept** new_concepts = (Concept**)safe_realloc(network->name_index.concepts, new_capacity * sizeof(Concept*));
+                SemanticConcept** new_concepts = (SemanticConcept**)safe_realloc(network->name_index.concepts, new_capacity * sizeof(SemanticConcept*));
                 if (!new_names || !new_concepts) {
                     safe_free((void**)&new_names);
                     safe_free((void**)&new_concepts);
@@ -627,12 +622,12 @@ SELFLNN_API size_t semantic_network_cluster_concepts(SemanticNetwork* network,
         for (size_t i = 0; i < n; i++) {
             if (clusters[i] != (int)i) continue; // 只考虑聚类代表
             
-            Concept* concept_i = network->concepts[i];
+            SemanticConcept* concept_i = network->concepts[i];
             
             for (size_t j = i + 1; j < n; j++) {
                 if (clusters[j] != (int)j) continue; // 只考虑聚类代表
                 
-                Concept* concept_j = network->concepts[j];
+                SemanticConcept* concept_j = network->concepts[j];
                 
                 // 计算概念相似度（使用余弦相似度）
                 float similarity = semantic_network_concept_similarity(network, concept_i, concept_j, SIMILARITY_COSINE);
@@ -813,8 +808,8 @@ SELFLNN_API size_t semantic_network_infer_relations(SemanticNetwork* network,
                     
                     if (!already_exists && total_inferred < max_inferences) {
                         // 创建新关系
-                        Concept* source_concept = network->concepts[i];
-                        Concept* target_concept = network->concepts[j];
+                        SemanticConcept* source_concept = network->concepts[i];
+                        SemanticConcept* target_concept = network->concepts[j];
                         
                         // 计算新关系的置信度（基于路径长度）
                         float confidence = 0.7f; // 默认置信度
@@ -874,12 +869,12 @@ SELFLNN_API size_t semantic_network_merge(SemanticNetwork* dest,
     
     /* 第一步：合并概念 */
     for (size_t i = 0; i < src->concept_count; i++) {
-        Concept* src_concept = src->concepts[i];
-        Concept* dest_concept = _semantic_network_find_concept_by_name_internal(dest, src_concept->name);
+        SemanticConcept* src_concept = src->concepts[i];
+        SemanticConcept* dest_concept = _semantic_network_find_concept_by_name_internal(dest, src_concept->name);
         
         if (!dest_concept) {
             // 目标网络中不存在同名概念，直接添加
-            Concept* new_concept = _semantic_network_add_concept_internal(
+            SemanticConcept* new_concept = _semantic_network_add_concept_internal(
                 dest, src_concept->type, src_concept->name, src_concept->description,
                 src_concept->embedding, src_concept->embedding_size,
                 src_concept->specificity, src_concept->typicality);
@@ -935,8 +930,8 @@ SELFLNN_API size_t semantic_network_merge(SemanticNetwork* dest,
         SemanticRelation* src_rel = src->relations[i];
         
         // 在目标网络中查找对应的源概念和目标概念
-        Concept* dest_source = _semantic_network_find_concept_by_name_internal(dest, src_rel->source->name);
-        Concept* dest_target = _semantic_network_find_concept_by_name_internal(dest, src_rel->target->name);
+        SemanticConcept* dest_source = _semantic_network_find_concept_by_name_internal(dest, src_rel->source->name);
+        SemanticConcept* dest_target = _semantic_network_find_concept_by_name_internal(dest, src_rel->target->name);
         
         if (!dest_source || !dest_target) {
             // 源概念或目标概念在目标网络中不存在，跳过
@@ -1002,13 +997,13 @@ SELFLNN_API size_t semantic_network_merge(SemanticNetwork* dest,
     
     // 重新构建索引
     for (size_t i = 0; i < dest->concept_count; i++) {
-        Concept* concept = dest->concepts[i];
+        SemanticConcept* concept = dest->concepts[i];
         if (concept->name) {
             // 扩展索引数组
             if (dest->name_index.size >= dest->name_index.capacity) {
                 size_t new_capacity = dest->name_index.capacity == 0 ? 16 : dest->name_index.capacity * 2;
                 char** new_names = (char**)safe_realloc(dest->name_index.names, new_capacity * sizeof(char*));
-                Concept** new_concepts = (Concept**)safe_realloc(dest->name_index.concepts, new_capacity * sizeof(Concept*));
+                SemanticConcept** new_concepts = (SemanticConcept**)safe_realloc(dest->name_index.concepts, new_capacity * sizeof(SemanticConcept*));
                 if (!new_names || !new_concepts) {
                     safe_free((void**)&new_names);
                     safe_free((void**)&new_concepts);
@@ -1066,7 +1061,7 @@ SELFLNN_API int semantic_network_compute_concept_importance(SemanticNetwork* net
             
             for (size_t i = 0; i < n; i++) {
                 float degree = 0.0f;
-                Concept* concept = network->concepts[i];
+                SemanticConcept* concept = network->concepts[i];
                 
                 // 计算与概念相关的关系数
                 for (size_t r = 0; r < network->relation_count; r++) {
@@ -1192,7 +1187,7 @@ SELFLNN_API int semantic_network_compute_concept_importance(SemanticNetwork* net
  * @brief 扩散激活 - 通过语义网络传播激活能量
  */
 SELFLNN_API size_t semantic_network_spreading_activation(SemanticNetwork* network,
-    Concept** seeds, const float* seed_activations, size_t seed_count,
+    SemanticConcept** seeds, const float* seed_activations, size_t seed_count,
     float decay_factor, float threshold, size_t max_iterations,
     ActivationEntry* results, size_t max_results) {
     
@@ -1239,7 +1234,7 @@ SELFLNN_API size_t semantic_network_spreading_activation(SemanticNetwork* networ
     
     // 初始化种子激活
     for (size_t i = 0; i < seed_count; i++) {
-        Concept* seed = seeds[i];
+        SemanticConcept* seed = seeds[i];
         size_t seed_idx = semantic_network_find_concept_index(network, seed);
         if (seed_idx != (size_t)-1) {
             activations[seed_idx] = seed_activations[i];
@@ -1259,12 +1254,12 @@ SELFLNN_API size_t semantic_network_spreading_activation(SemanticNetwork* networ
             float current_activation = activations[i];
             if (current_activation <= threshold) continue;
             
-            Concept* concept = network->concepts[i];
+            SemanticConcept* concept = network->concepts[i];
             
             // 查找与当前概念相关的关系
             for (size_t r = 0; r < network->relation_count; r++) {
                 SemanticRelation* rel = network->relations[r];
-                Concept* neighbor = NULL;
+                SemanticConcept* neighbor = NULL;
                 
                 if (rel->source == concept) {
                     neighbor = rel->target;
@@ -1302,7 +1297,7 @@ SELFLNN_API size_t semantic_network_spreading_activation(SemanticNetwork* networ
     
     // 首先添加种子概念
     for (size_t i = 0; i < seed_count && result_count < max_results; i++) {
-        Concept* seed = seeds[i];
+        SemanticConcept* seed = seeds[i];
         size_t seed_idx = semantic_network_find_concept_index(network, seed);
         if (seed_idx != (size_t)-1) {
             results[result_count].concept = seed;
@@ -1354,7 +1349,7 @@ SELFLNN_API size_t semantic_network_spreading_activation(SemanticNetwork* networ
  * @brief 概念学习 - 基于共现模式学习新关系
  */
 SELFLNN_API size_t semantic_network_learn_from_patterns(SemanticNetwork* network,
-    Concept** pattern_pairs, size_t pair_count, float learning_rate) {
+    SemanticConcept** pattern_pairs, size_t pair_count, float learning_rate) {
     
     if (!network || !pattern_pairs) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
@@ -1379,8 +1374,8 @@ SELFLNN_API size_t semantic_network_learn_from_patterns(SemanticNetwork* network
     // 统计概念对共现次数
     size_t max_pairs = pair_count * 2; // 考虑双向关系
     typedef struct {
-        Concept* concept1;
-        Concept* concept2;
+        SemanticConcept* concept1;
+        SemanticConcept* concept2;
         size_t count;
     } CooccurrencePair;
     
@@ -1396,8 +1391,8 @@ SELFLNN_API size_t semantic_network_learn_from_patterns(SemanticNetwork* network
     
     // 统计共现频率
     for (size_t i = 0; i < pair_count; i++) {
-        Concept* concept1 = pattern_pairs[i * 2];
-        Concept* concept2 = pattern_pairs[i * 2 + 1];
+        SemanticConcept* concept1 = pattern_pairs[i * 2];
+        SemanticConcept* concept2 = pattern_pairs[i * 2 + 1];
         
         if (!concept1 || !concept2) continue;
         
@@ -1422,8 +1417,8 @@ SELFLNN_API size_t semantic_network_learn_from_patterns(SemanticNetwork* network
     
     // 根据共现频率学习关系
     for (size_t i = 0; i < unique_pair_count; i++) {
-        Concept* concept1 = cooccurrences[i].concept1;
-        Concept* concept2 = cooccurrences[i].concept2;
+        SemanticConcept* concept1 = cooccurrences[i].concept1;
+        SemanticConcept* concept2 = cooccurrences[i].concept2;
         size_t count = cooccurrences[i].count;
         
         // 计算关系强度增量（基于共现频率）
@@ -1486,10 +1481,10 @@ SELFLNN_API size_t semantic_network_get_concept_count(SemanticNetwork* network) 
     return count;
 }
 
-SELFLNN_API Concept* semantic_network_get_concept_by_index(SemanticNetwork* network, size_t index) {
+SELFLNN_API SemanticConcept* semantic_network_get_concept_by_index(SemanticNetwork* network, size_t index) {
     if (!network) return NULL;
     SEMANTIC_LOCK(network);
-    Concept* result = (index < network->concept_count) ? network->concepts[index] : NULL;
+    SemanticConcept* result = (index < network->concept_count) ? network->concepts[index] : NULL;
     SEMANTIC_UNLOCK(network);
     return result;
 }
@@ -1591,7 +1586,7 @@ int semantic_graph_to_cfc_sequence(const SemanticNetwork* net, int* walk_ids,
         float best_w = 0.0f;
         for (int i = 0; i < (int)net->relation_count && i < 128; i++) {
             SemanticRelation* r = net->relations[i];
-            Concept* cur = (current < (int)net->concept_count) ? net->concepts[current] : NULL;
+            SemanticConcept* cur = (current < (int)net->concept_count) ? net->concepts[current] : NULL;
             if (r && r->source && cur && r->source->name && cur->name &&
                 strcmp(r->source->name, cur->name) == 0 && !visited[i % 64]) {
                 if (r->strength > best_w) { best_w = r->strength; best_next = i; }
@@ -1608,7 +1603,7 @@ int semantic_graph_to_cfc_sequence(const SemanticNetwork* net, int* walk_ids,
         SemanticRelation* nr = net->relations[best_next];
         if (nr && nr->target && nr->target->name) {
             for (int c = 0; c < (int)net->concept_count && c < 64; c++) {
-                Concept* ct = net->concepts[c];
+                SemanticConcept* ct = net->concepts[c];
                 if (ct && ct->name && nr->target->name && strcmp(ct->name, nr->target->name) == 0)
                     current = c;
             }
@@ -1638,7 +1633,7 @@ int semantic_network_save(SemanticNetwork* network, const char* filename) {
     fwrite(&network->next_relation_id, sizeof(int), 1, file);
     
     for (size_t i = 0; i < network->concept_count; i++) {
-        Concept* c = network->concepts[i];
+        SemanticConcept* c = network->concepts[i];
         if (!c) { int null_flag = 0; fwrite(&null_flag, sizeof(int), 1, file); continue; }
         int has = 1; fwrite(&has, sizeof(int), 1, file);
         fwrite(&c->id, sizeof(int), 1, file);
@@ -1701,7 +1696,7 @@ SemanticNetwork* semantic_network_load(const char* filename) {
     SemanticNetwork* net = semantic_network_create(concept_count + 16, relation_count + 16);
     if (!net) { fclose(file); return NULL; }
     
-    Concept** loaded_concepts = (Concept**)safe_calloc(concept_count + 1, sizeof(Concept*));
+    SemanticConcept** loaded_concepts = (SemanticConcept**)safe_calloc(concept_count + 1, sizeof(SemanticConcept*));
     
     for (size_t i = 0; i < concept_count; i++) {
         int has; fread(&has, sizeof(int), 1, file);
@@ -1724,7 +1719,7 @@ SemanticNetwork* semantic_network_load(const char* filename) {
         fread(&typ, sizeof(float), 1, file);
         fread(&conf, sizeof(float), 1, file);
         fread(&inst, sizeof(int), 1, file);
-        Concept* c = semantic_network_add_concept(net, (ConceptType)type, name_buf,
+        SemanticConcept* c = semantic_network_add_concept(net, (ConceptType)type, name_buf,
                                                    desc_len > 0 ? desc_buf : NULL,
                                                    emb, emb_sz, spec, typ);
         if (c) {
@@ -1747,8 +1742,8 @@ SemanticNetwork* semantic_network_load(const char* filename) {
         if (label_len > 0 && label_len < 256) fread(label_buf, 1, (size_t)label_len, file);
         float str, conf;
         fread(&str, sizeof(float), 1, file); fread(&conf, sizeof(float), 1, file);
-        Concept* src = (src_id >= 0 && (size_t)src_id < concept_count) ? loaded_concepts[src_id] : NULL;
-        Concept* tgt = (tgt_id >= 0 && (size_t)tgt_id < concept_count) ? loaded_concepts[tgt_id] : NULL;
+        SemanticConcept* src = (src_id >= 0 && (size_t)src_id < concept_count) ? loaded_concepts[src_id] : NULL;
+        SemanticConcept* tgt = (tgt_id >= 0 && (size_t)tgt_id < concept_count) ? loaded_concepts[tgt_id] : NULL;
         if (src && tgt) {
             semantic_network_add_relation(net, (SemanticRelationType)type,
                                           src, tgt,
@@ -1772,9 +1767,9 @@ SemanticNetwork* semantic_network_load(const char* filename) {
  * Z-001修复: 更正API签名 —— rel->source_id → rel->source->id (SemanticRelation使用Concept*指针)
  * ============================================================================ */
 size_t semantic_network_infer(SemanticNetwork* network,
-                             Concept** premises, size_t premise_count,
+                             SemanticConcept** premises, size_t premise_count,
                              size_t max_inferences,
-                             Concept** results, size_t max_results) {
+                             SemanticConcept** results, size_t max_results) {
     if (!network || !premises || !results || max_results == 0) return 0;
     if (premise_count == 0) return 0;
 
@@ -1785,14 +1780,14 @@ size_t semantic_network_infer(SemanticNetwork* network,
     if (!visited) { SEMANTIC_UNLOCK(network); return 0; }
 
     for (size_t p = 0; p < premise_count && result_count < max_results; p++) {
-        Concept* premise = premises[p];
+        SemanticConcept* premise = premises[p];
         if (!premise) continue;
 
         for (size_t r = 0; r < network->relation_count && result_count < max_results; r++) {
             SemanticRelation* rel = network->relations[r];
             if (!rel || !rel->source || !rel->target) continue;
 
-            Concept* target_concept = NULL;
+            SemanticConcept* target_concept = NULL;
             if (rel->source == premise && rel->target != premise) {
                 target_concept = rel->target;
             } else if (rel->target == premise && rel->source != premise) {
@@ -1867,14 +1862,14 @@ int semantic_network_import_from_knowledge_base(SemanticNetwork* network,
         else if (entry->type == KNOWLEDGE_RULE)    ctype = CONCEPT_TYPE_EVENT;
         else if (entry->type == KNOWLEDGE_RELATION) ctype = CONCEPT_TYPE_RELATION;
 
-        Concept* concept = semantic_network_add_concept(network, ctype,
+        SemanticConcept* concept = semantic_network_add_concept(network, ctype,
             entry->subject, entry->object ? entry->object : "",
             entry->embedding, entry->embedding_size,
             0.5f, 0.5f);
         if (!concept) continue;
 
         if (entry->type == KNOWLEDGE_RELATION && entry->object && entry->object[0] != '\0') {
-            Concept* other = semantic_network_find_concept_by_name(network, entry->object);
+            SemanticConcept* other = semantic_network_find_concept_by_name(network, entry->object);
             if (other && other != concept) {
                 SemanticRelation* rel = semantic_network_add_relation(network,
                     RELATION_SYNONYM, concept, other,
@@ -1896,7 +1891,7 @@ int semantic_network_import_from_knowledge_base(SemanticNetwork* network,
  * 从知识图谱导入节点和边到语义网络
  * Z-001修复: 更正所有API签名
  *   - graph->nodes和graph->edges通过SELFLNN_KNOWLEDGE_INTERNAL访问完整结构
- *   - edge->source → edge->source (GraphNode*指针), 移除不存在的edge->source_id
+ *   - edge->source → edge->source (KnowledgeGraphNode*指针), 移除不存在的edge->source_id
  *   - semantic_network_add_concept 需要8个参数,返回Concept*
  *   - semantic_network_add_relation 需要Concept*源和目标指针
  * ============================================================================ */
@@ -1908,18 +1903,18 @@ int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
     SEMANTIC_LOCK(network);
     int imported = 0;
 
-    Concept** concept_map = (Concept**)safe_calloc(graph->node_count, sizeof(Concept*));
+    SemanticConcept** concept_map = (SemanticConcept**)safe_calloc(graph->node_count, sizeof(SemanticConcept*));
     if (!concept_map) { SEMANTIC_UNLOCK(network); return -1; }
 
     for (size_t i = 0; i < graph->node_count && i < 100000; i++) {
-        GraphNode* node = graph->nodes[i];
+        KnowledgeGraphNode* node = graph->nodes[i];
         if (!node || !node->label || node->label[0] == '\0') continue;
 
         ConceptType ctype = CONCEPT_TYPE_ENTITY;
         if (node->type == NODE_TYPE_CONCEPT)  ctype = CONCEPT_TYPE_CLASS;
         else if (node->type == NODE_TYPE_PROPERTY) ctype = CONCEPT_TYPE_PROPERTY;
 
-        Concept* concept = semantic_network_add_concept(network, ctype,
+        SemanticConcept* concept = semantic_network_add_concept(network, ctype,
             node->label, "",
             node->embedding, node->embedding_size,
             0.5f, node->confidence > 0.0f ? node->confidence : 0.5f);
@@ -1930,7 +1925,7 @@ int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
     }
 
     for (size_t i = 0; i < graph->edge_count && i < 100000; i++) {
-        GraphEdge* edge = graph->edges[i];
+        KnowledgeGraphEdge* edge = graph->edges[i];
         if (!edge || !edge->source || !edge->target) continue;
 
         size_t src_idx = (size_t)-1, tgt_idx = (size_t)-1;
@@ -1941,8 +1936,8 @@ int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
         if (src_idx == (size_t)-1 || tgt_idx == (size_t)-1) continue;
         if (src_idx >= graph->node_count || tgt_idx >= graph->node_count) continue;
 
-        Concept* src_concept = concept_map[src_idx];
-        Concept* tgt_concept = concept_map[tgt_idx];
+        SemanticConcept* src_concept = concept_map[src_idx];
+        SemanticConcept* tgt_concept = concept_map[tgt_idx];
         if (!src_concept || !tgt_concept) continue;
 
         SemanticRelationType rel_type = RELATION_RELATED_TO;
@@ -1965,7 +1960,7 @@ int semantic_network_import_from_knowledge_graph(SemanticNetwork* network,
 
 /* 语义网络概念相似度计算 */
 float semantic_network_concept_similarity(SemanticNetwork* network,
-                                          Concept* concept1, Concept* concept2,
+                                          SemanticConcept* concept1, SemanticConcept* concept2,
                                           SimilarityMetric metric) {
     /* 空指针检查 */
     if (!network || !concept1 || !concept2) {

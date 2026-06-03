@@ -55,27 +55,27 @@ typedef enum {
  * @brief 意图类别枚举
  */
 typedef enum {
-    INTENT_UNKNOWN = 0,       /**< 未知意图 */
-    INTENT_QUESTION = 1,      /**< 提问 */
-    INTENT_COMMAND = 2,       /**< 命令 */
-    INTENT_STATEMENT = 3,     /**< 陈述 */
-    INTENT_GREETING = 4,      /**< 问候 */
-    INTENT_FAREWELL = 5,      /**< 告别 */
-    INTENT_REQUEST = 6,       /**< 请求 */
-    INTENT_COMPLAINT = 7,     /**< 投诉 */
-    INTENT_COMPLIMENT = 8,    /**< 赞美 */
-    INTENT_CONFIRMATION = 9,  /**< 确认 */
-    INTENT_DENIAL = 10,       /**< 否认 */
-    INTENT_HELP = 11,         /**< 求助 */
-    INTENT_INFORMATION = 12,  /**< 信息查询 */
-    INTENT_THANKS = 13,        /**< 感谢 */
-    INTENT_APOLOGY = 14,       /**< 道歉 */
-    INTENT_EXPRESSION = 15,    /**< 表达 */
-    INTENT_DESCRIPTION = 16,   /**< 描述 */
-    INTENT_NARRATION = 17,     /**< 叙述 */
-    INTENT_EXPLANATION = 18,   /**< 解释 */
-    INTENT_ARGUMENT = 19,      /**< 论证 */
-    INTENT_OTHER = 20          /**< 其他 */
+    AUDIO_INTENT_UNKNOWN = 0,       /**< 未知意图 */
+    AUDIO_INTENT_QUESTION = 1,      /**< 提问 */
+    AUDIO_INTENT_COMMAND = 2,       /**< 命令 */
+    AUDIO_INTENT_STATEMENT = 3,     /**< 陈述 */
+    AUDIO_INTENT_GREETING = 4,      /**< 问候 */
+    AUDIO_INTENT_FAREWELL = 5,      /**< 告别 */
+    AUDIO_INTENT_REQUEST = 6,       /**< 请求 */
+    AUDIO_INTENT_COMPLAINT = 7,     /**< 投诉 */
+    AUDIO_INTENT_COMPLIMENT = 8,    /**< 赞美 */
+    AUDIO_INTENT_CONFIRMATION = 9,  /**< 确认 */
+    AUDIO_INTENT_DENIAL = 10,       /**< 否认 */
+    AUDIO_INTENT_HELP = 11,         /**< 求助 */
+    AUDIO_INTENT_INFORMATION = 12,  /**< 信息查询 */
+    AUDIO_INTENT_THANKS = 13,        /**< 感谢 */
+    AUDIO_INTENT_APOLOGY = 14,       /**< 道歉 */
+    AUDIO_INTENT_EXPRESSION = 15,    /**< 表达 */
+    AUDIO_INTENT_DESCRIPTION = 16,   /**< 描述 */
+    AUDIO_INTENT_NARRATION = 17,     /**< 叙述 */
+    AUDIO_INTENT_EXPLANATION = 18,   /**< 解释 */
+    AUDIO_INTENT_ARGUMENT = 19,      /**< 论证 */
+    AUDIO_INTENT_OTHER = 20          /**< 其他 */
 } IntentCategory;
 
 /**
@@ -158,7 +158,7 @@ typedef struct {
     float relevance;          /**< 相关性得分 (0-1) */
     float salience;           /**< 显著性得分 (0-1) */
     int frequency;            /**< 频率（在当前话语中） */
-    Concept* concept;         /**< 关联的语义网络概念（可选） */
+    SemanticConcept* concept; /**< 关联的语义网络概念（可选） */
 } Keyword;
 
 /**
@@ -189,7 +189,7 @@ typedef struct {
     int max_slots;            /**< 最大语义槽数 */
     
     /* 语义网络关联 */
-    Concept** related_concepts; /**< 相关概念数组 */
+    SemanticConcept** related_concepts; /**< 相关概念数组 */
     int num_related_concepts; /**< 相关概念数量 */
     
     /* 轨迹和地图数据（用于空间语义理解） */

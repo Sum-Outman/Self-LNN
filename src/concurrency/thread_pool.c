@@ -12,6 +12,8 @@
  */
 
 #include "selflnn/concurrency/thread_pool.h"
+/* MSVC: EnterCriticalSection const qualifier mismatch on CRITICAL_SECTION */
+#pragma warning(disable: 4090)
 #include "selflnn/concurrency/lock_free.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"

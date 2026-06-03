@@ -56,6 +56,18 @@
 #define SLAM_DEFAULT_FOCAL_LENGTH 525.0f  /* 默认焦距（像素） */
 #define SLAM_DEFAULT_PRINCIPAL_POINT 320.0f /* 默认主点（像素） */
 
+#ifdef SLAM_VOCABULARY_SIZE
+#undef SLAM_VOCABULARY_SIZE
+#endif
+#ifdef SLAM_VOCABULARY_DEPTH
+#undef SLAM_VOCABULARY_DEPTH
+#endif
+#ifdef SLAM_VOCABULARY_BRANCHING
+#undef SLAM_VOCABULARY_BRANCHING
+#endif
+#ifdef SLAM_VOCABULARY_MAX_TRAIN
+#undef SLAM_VOCABULARY_MAX_TRAIN
+#endif
 /* MUL-06: 闭环检测深度增强新增常量 — P2-004扩展词汇表规模 */
 #define SLAM_VOCABULARY_SIZE 4000         /* 扩展词汇表大小（原1000→4000，提升闭环识别精度） */
 #define SLAM_VOCABULARY_DEPTH 8           /* 扩展词汇树深度（原6→8，更细粒度特征聚类） */

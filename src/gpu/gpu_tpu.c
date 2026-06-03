@@ -455,8 +455,8 @@ static int tpu_backend_get_memory_info(GpuContext* context, size_t* total, size_
             return 0;
         }
     }
-    *total = tpu_get_system_memory_total;
-    *free = tpu_get_system_memory_free;
+    *total = tpu_get_system_memory_total();
+    *free = tpu_get_system_memory_free();
     return 0;
 }
 
@@ -508,7 +508,7 @@ static int tpu_backend_memory_copy_from_device_sync(void* dst, GpuMemory* src, s
 
 static int tpu_npu_init(GpuContext* ctx) { (void)ctx; return tpu_backend_init(); }
 static void tpu_npu_cleanup(GpuContext* ctx) { (void)ctx; tpu_backend_cleanup(); }
-static int tpu_npu_get_device_count(GpuContext* ctx) { (void)ctx; return tpu_backend_get_device_count; }
+static int tpu_npu_get_device_count(GpuContext* ctx) { (void)ctx; return tpu_backend_get_device_count(); }
 static const char* tpu_npu_get_backend_name(GpuContext* ctx) { (void)ctx; return "Google TPU"; }
 
 static NpuModel* tpu_npu_load_model(GpuContext* context, const char* model_path, const NpuInferenceConfig* config) {

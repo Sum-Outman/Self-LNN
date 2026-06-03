@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file dialogue_memory.c
  * @brief 对话记忆增强系统完整实现
  */
@@ -19,7 +19,7 @@ struct DialogueMemoryManager {
     int session_count;
 };
 
-DialogueMemoryManager* dialogue_memory_create(void) {
+DialogueMemoryManager* dlg_memory_create(void) {
     DialogueMemoryManager* dmm = (DialogueMemoryManager*)safe_calloc(1, sizeof(DialogueMemoryManager));
     if (!dmm) return NULL;
 

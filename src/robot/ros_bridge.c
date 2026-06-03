@@ -177,7 +177,7 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
 /* 使用安全字符串复制而非直接赋值字符串常量，
      * 避免后续safe_free释放字符串常量导致崩溃。 */
     if (!bridge->config.bridge_host || !bridge->config.bridge_host[0]) {
-        bridge->config.bridge_host = safe_strdup("localhost");
+        bridge->config.bridge_host = (char*)(intptr_t)safe_strdup("localhost");
         if (!bridge->config.bridge_host) return NULL;
     }
     

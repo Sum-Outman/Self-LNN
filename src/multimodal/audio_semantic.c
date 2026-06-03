@@ -427,7 +427,7 @@ static int audio_semantic_link_concepts(AudioSemanticProcessor* processor,
                                        const Keyword* keywords,
                                        int num_keywords,
                                        const char* text,
-                                       Concept*** concepts_out,
+                                       SemanticConcept*** concepts_out,
                                        int* num_concepts_out);
 static float audio_semantic_calculate_coherence(const AudioSemanticResult* result);
 static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* result,
@@ -1403,7 +1403,7 @@ int audio_semantic_process_features(AudioSemanticProcessor* processor,
     if (processor->config.enable_semantic_linking && 
         processor->semantic_network &&
         result->num_keywords > 0) {
-        Concept** concepts = NULL;
+        SemanticConcept** concepts = NULL;
         int num_concepts = 0;
         
         int link_result = audio_semantic_link_concepts(processor,
@@ -2014,7 +2014,7 @@ heuristic_intent:
                 strstr(text, "为什么") != NULL ||
                 strstr(text, "吗") != NULL ||
                 strstr(text, "呢") != NULL) {
-                result->intent.category = INTENT_QUESTION;
+                result->intent.category = AUDIO_INTENT_QUESTION;
                 result->intent.intent_name = audio_semanticstring_duplicate("提问");
                 result->intent.intent_description = audio_semanticstring_duplicate("用户正在提出问题");
                 result->intent.confidence = 0.7f;
@@ -2023,7 +2023,7 @@ heuristic_intent:
                        strstr(text, "想要") != NULL ||
                        strstr(text, "需要") != NULL ||
                        strstr(text, "希望") != NULL) {
-                result->intent.category = INTENT_REQUEST;
+                result->intent.category = AUDIO_INTENT_REQUEST;
                 result->intent.intent_name = audio_semanticstring_duplicate("请求");
                 result->intent.intent_description = audio_semanticstring_duplicate("用户正在提出请求");
                 result->intent.confidence = 0.6f;
@@ -2032,33 +2032,33 @@ heuristic_intent:
                        strstr(text, "早上好") != NULL ||
                        strstr(text, "晚上好") != NULL ||
                        strstr(text, "嗨") != NULL) {
-                result->intent.category = INTENT_GREETING;
+                result->intent.category = AUDIO_INTENT_GREETING;
                 result->intent.intent_name = audio_semanticstring_duplicate("问候");
                 result->intent.intent_description = audio_semanticstring_duplicate("用户正在打招呼");
                 result->intent.confidence = 0.9f;
             } else if (strstr(text, "再见") != NULL ||
                        strstr(text, "拜拜") != NULL ||
                        strstr(text, "晚安") != NULL) {
-                result->intent.category = INTENT_FAREWELL;
+                result->intent.category = AUDIO_INTENT_FAREWELL;
                 result->intent.intent_name = audio_semanticstring_duplicate("告别");
                 result->intent.intent_description = audio_semanticstring_duplicate("用户正在告别");
                 result->intent.confidence = 0.8f;
             } else if (strstr(text, "谢谢") != NULL ||
                        strstr(text, "感谢") != NULL ||
                        strstr(text, "多谢") != NULL) {
-                result->intent.category = INTENT_THANKS;
+                result->intent.category = AUDIO_INTENT_THANKS;
                 result->intent.intent_name = audio_semanticstring_duplicate("感谢");
                 result->intent.intent_description = audio_semanticstring_duplicate("用户正在表达感谢");
                 result->intent.confidence = 0.85f;
             } else if (strstr(text, "对不起") != NULL ||
                        strstr(text, "抱歉") != NULL ||
                        strstr(text, "不好意思") != NULL) {
-                result->intent.category = INTENT_APOLOGY;
+                result->intent.category = AUDIO_INTENT_APOLOGY;
                 result->intent.intent_name = audio_semanticstring_duplicate("道歉");
                 result->intent.intent_description = audio_semanticstring_duplicate("用户正在道歉");
                 result->intent.confidence = 0.8f;
             } else {
-                result->intent.category = INTENT_STATEMENT;
+                result->intent.category = AUDIO_INTENT_STATEMENT;
                 result->intent.intent_name = audio_semanticstring_duplicate("陈述");
                 result->intent.intent_description = audio_semanticstring_duplicate("用户正在陈述事实或观点");
                 result->intent.confidence = 0.5f;
@@ -2333,7 +2333,7 @@ heuristic_intent:
         /* 尝试在语义网络中查找概念 */
         for (int i = 0; i < result->num_keywords && 
                         i < result->num_related_concepts; i++) {
-            Concept* concept = semantic_network_find_concept_by_name(
+            SemanticConcept* concept = semantic_network_find_concept_by_name(
                 processor->semantic_network, result->keywords[i].keyword);
             if (concept) {
                 result->related_concepts[result->num_related_concepts] = concept;
@@ -3344,7 +3344,7 @@ int audio_semantic_result_init(AudioSemanticResult* result,
     
     /* 分配相关概念数组 */
     if (max_concepts > 0) {
-        result->related_concepts = (Concept**)audio_semantic_calloc(max_concepts, sizeof(Concept*));
+        result->related_concepts = (SemanticConcept**)audio_semantic_calloc(max_concepts, sizeof(SemanticConcept*));
         if (!result->related_concepts) {
             if (result->keywords) audio_semantic_free(result->keywords);
             if (result->slots) audio_semantic_free(result->slots);
@@ -4776,55 +4776,55 @@ static int audio_semantic_recognize_intent_with_features(AudioSemanticProcessor*
     /* 根据意图类别设置意图名称和描述 */
     /* 这些值应该来自训练好的模型或预定义的映射表 */
     switch (intent_out->category) {
-        case INTENT_COMMAND:
+        case AUDIO_INTENT_COMMAND:
             intent_out->intent_name = audio_semanticstring_duplicate("命令");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在发出指令");
             break;
-        case INTENT_QUESTION:
+        case AUDIO_INTENT_QUESTION:
             intent_out->intent_name = audio_semanticstring_duplicate("提问");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在提出问题");
             break;
-        case INTENT_STATEMENT:
+        case AUDIO_INTENT_STATEMENT:
             intent_out->intent_name = audio_semanticstring_duplicate("陈述");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在陈述事实");
             break;
-        case INTENT_COMPLAINT:
+        case AUDIO_INTENT_COMPLAINT:
             intent_out->intent_name = audio_semanticstring_duplicate("投诉");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在表达不满");
             break;
-        case INTENT_GREETING:
+        case AUDIO_INTENT_GREETING:
             intent_out->intent_name = audio_semanticstring_duplicate("问候");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在问候");
             break;
-        case INTENT_FAREWELL:
+        case AUDIO_INTENT_FAREWELL:
             intent_out->intent_name = audio_semanticstring_duplicate("告别");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在告别");
             break;
-        case INTENT_REQUEST:
+        case AUDIO_INTENT_REQUEST:
             intent_out->intent_name = audio_semanticstring_duplicate("请求");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在提出请求");
             break;
-        case INTENT_CONFIRMATION:
+        case AUDIO_INTENT_CONFIRMATION:
             intent_out->intent_name = audio_semanticstring_duplicate("确认");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在确认信息");
             break;
-        case INTENT_DENIAL:
+        case AUDIO_INTENT_DENIAL:
             intent_out->intent_name = audio_semanticstring_duplicate("否认");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在否认或拒绝");
             break;
-        case INTENT_THANKS:
+        case AUDIO_INTENT_THANKS:
             intent_out->intent_name = audio_semanticstring_duplicate("感谢");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在表达感谢");
             break;
-        case INTENT_APOLOGY:
+        case AUDIO_INTENT_APOLOGY:
             intent_out->intent_name = audio_semanticstring_duplicate("道歉");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在道歉");
             break;
-        case INTENT_EXPRESSION:
+        case AUDIO_INTENT_EXPRESSION:
             intent_out->intent_name = audio_semanticstring_duplicate("表达");
             intent_out->intent_description = audio_semanticstring_duplicate("用户正在表达情感或观点");
             break;
-        case INTENT_OTHER:
+        case AUDIO_INTENT_OTHER:
         default:
             intent_out->intent_name = audio_semanticstring_duplicate("其他");
             intent_out->intent_description = audio_semanticstring_duplicate("用户意图未识别");
@@ -4962,25 +4962,25 @@ static int audio_semantic_recognize_intent_simplified(AudioSemanticProcessor* pr
     
     // 计算所有意图类别的得分
     float scores[21] = {0};
-    scores[INTENT_COMMAND] = command_score;
-    scores[INTENT_QUESTION] = question_score;
-    scores[INTENT_STATEMENT] = statement_score;
-    scores[INTENT_COMPLAINT] = complaint_score;
-    scores[INTENT_GREETING] = greeting_score;
-    scores[INTENT_FAREWELL] = farewell_score;
-    scores[INTENT_REQUEST] = request_score;
-    scores[INTENT_CONFIRMATION] = confirmation_score;
+    scores[AUDIO_INTENT_COMMAND] = command_score;
+    scores[AUDIO_INTENT_QUESTION] = question_score;
+    scores[AUDIO_INTENT_STATEMENT] = statement_score;
+    scores[AUDIO_INTENT_COMPLAINT] = complaint_score;
+    scores[AUDIO_INTENT_GREETING] = greeting_score;
+    scores[AUDIO_INTENT_FAREWELL] = farewell_score;
+    scores[AUDIO_INTENT_REQUEST] = request_score;
+    scores[AUDIO_INTENT_CONFIRMATION] = confirmation_score;
     
     // 其他意图类别的基础分
-    scores[INTENT_EXPRESSION] = 0.1f;
-    scores[INTENT_DESCRIPTION] = 0.1f;
-    scores[INTENT_NARRATION] = 0.1f;
-    scores[INTENT_EXPLANATION] = 0.1f;
-    scores[INTENT_ARGUMENT] = 0.1f;
+    scores[AUDIO_INTENT_EXPRESSION] = 0.1f;
+    scores[AUDIO_INTENT_DESCRIPTION] = 0.1f;
+    scores[AUDIO_INTENT_NARRATION] = 0.1f;
+    scores[AUDIO_INTENT_EXPLANATION] = 0.1f;
+    scores[AUDIO_INTENT_ARGUMENT] = 0.1f;
     
     // 选择得分最高的意图
-    int max_category = INTENT_STATEMENT;
-    float max_score = scores[INTENT_STATEMENT];
+    int max_category = AUDIO_INTENT_STATEMENT;
+    float max_score = scores[AUDIO_INTENT_STATEMENT];
     
     for (int i = 0; i < 21; i++) {
         if (scores[i] > max_score) {
@@ -5485,7 +5485,7 @@ static int audio_semantic_link_concepts(AudioSemanticProcessor* processor,
                                        const Keyword* keywords,
                                        int num_keywords,
                                        const char* text,
-                                       Concept*** concepts_out,
+                                       SemanticConcept*** concepts_out,
                                        int* num_concepts_out) {
     if (!processor || !concepts_out || !num_concepts_out) {
         return -1;
@@ -5500,7 +5500,7 @@ static int audio_semantic_link_concepts(AudioSemanticProcessor* processor,
     
     /* 分配概念数组 */
     int max_concepts = processor->config.max_related_concepts;
-    Concept** concepts = (Concept**)audio_semantic_calloc(max_concepts, sizeof(Concept*));
+    SemanticConcept** concepts = (SemanticConcept**)audio_semantic_calloc(max_concepts, sizeof(SemanticConcept*));
     if (!concepts) {
         return -1;
     }
@@ -5510,7 +5510,7 @@ static int audio_semantic_link_concepts(AudioSemanticProcessor* processor,
     /* 根据关键词查找相关概念 */
     for (int i = 0; i < num_keywords && concept_count < max_concepts; i++) {
         if (keywords[i].keyword) {
-            Concept* concept = semantic_network_find_concept_by_name(
+            SemanticConcept* concept = semantic_network_find_concept_by_name(
                 processor->semantic_network, keywords[i].keyword);
             if (concept) {
                 concepts[concept_count] = concept;
@@ -5541,7 +5541,7 @@ static int audio_semantic_link_concepts(AudioSemanticProcessor* processor,
                 
                 // 如果不是关键词且长度合理，尝试查找概念
                 if (!is_keyword && strlen(token) > 1 && strlen(token) < 20) {
-                    Concept* concept = semantic_network_find_concept_by_name(
+                    SemanticConcept* concept = semantic_network_find_concept_by_name(
                         processor->semantic_network, token);
                     if (concept) {
                         concepts[concept_count] = concept;
@@ -5565,7 +5565,7 @@ static int audio_semantic_link_concepts(AudioSemanticProcessor* processor,
             };
             
             for (int i = 0; extended_concepts[i] && concept_count < max_concepts; i++) {
-                Concept* concept = semantic_network_find_concept_by_name(
+                SemanticConcept* concept = semantic_network_find_concept_by_name(
                     processor->semantic_network, extended_concepts[i]);
                 if (concept) {
                     concepts[concept_count] = concept;
@@ -5599,20 +5599,20 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
     
     // 定义情感-意图一致性规则
     const int emotion_intent_pairs[][2] = {
-        {EMOTION_HAPPY, INTENT_COMPLIMENT},      // 高兴 -> 赞美
-        {EMOTION_HAPPY, INTENT_GREETING},        // 高兴 -> 问候
-        {EMOTION_HAPPY, INTENT_EXPRESSION},      // 高兴 -> 表达
-        {EMOTION_SAD, INTENT_COMPLAINT},         // 悲伤 -> 投诉
-        {EMOTION_SAD, INTENT_EXPRESSION},        // 悲伤 -> 表达
-        {EMOTION_ANGRY, INTENT_COMPLAINT},       // 愤怒 -> 投诉
-        {EMOTION_ANGRY, INTENT_ARGUMENT},        // 愤怒 -> 论证
-        {EMOTION_FEAR, INTENT_QUESTION},         // 恐惧 -> 提问
-        {EMOTION_FEAR, INTENT_REQUEST},          // 恐惧 -> 请求
-        {EMOTION_SURPRISE, INTENT_EXPRESSION},   // 惊讶 -> 表达
-        {EMOTION_SURPRISE, INTENT_QUESTION},     // 惊讶 -> 提问
-        {EMOTION_NEUTRAL, INTENT_STATEMENT},     // 中性 -> 陈述
-        {EMOTION_NEUTRAL, INTENT_DESCRIPTION},   // 中性 -> 描述
-        {EMOTION_NEUTRAL, INTENT_EXPLANATION},   // 中性 -> 解释
+        {EMOTION_HAPPY, AUDIO_INTENT_COMPLIMENT},      // 高兴 -> 赞美
+        {EMOTION_HAPPY, AUDIO_INTENT_GREETING},        // 高兴 -> 问候
+        {EMOTION_HAPPY, AUDIO_INTENT_EXPRESSION},      // 高兴 -> 表达
+        {EMOTION_SAD, AUDIO_INTENT_COMPLAINT},         // 悲伤 -> 投诉
+        {EMOTION_SAD, AUDIO_INTENT_EXPRESSION},        // 悲伤 -> 表达
+        {EMOTION_ANGRY, AUDIO_INTENT_COMPLAINT},       // 愤怒 -> 投诉
+        {EMOTION_ANGRY, AUDIO_INTENT_ARGUMENT},        // 愤怒 -> 论证
+        {EMOTION_FEAR, AUDIO_INTENT_QUESTION},         // 恐惧 -> 提问
+        {EMOTION_FEAR, AUDIO_INTENT_REQUEST},          // 恐惧 -> 请求
+        {EMOTION_SURPRISE, AUDIO_INTENT_EXPRESSION},   // 惊讶 -> 表达
+        {EMOTION_SURPRISE, AUDIO_INTENT_QUESTION},     // 惊讶 -> 提问
+        {EMOTION_NEUTRAL, AUDIO_INTENT_STATEMENT},     // 中性 -> 陈述
+        {EMOTION_NEUTRAL, AUDIO_INTENT_DESCRIPTION},   // 中性 -> 描述
+        {EMOTION_NEUTRAL, AUDIO_INTENT_EXPLANATION},   // 中性 -> 解释
     };
     
     size_t num_pairs = sizeof(emotion_intent_pairs) / sizeof(emotion_intent_pairs[0]);
@@ -5631,18 +5631,18 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
         // 检查情感强度与意图的匹配度
         if (result->emotion.intensity > 0.7f) {
             // 高情感强度通常与表达性意图匹配
-            if (result->intent.category == INTENT_EXPRESSION ||
-                result->intent.category == INTENT_COMPLIMENT ||
-                result->intent.category == INTENT_COMPLAINT) {
+            if (result->intent.category == AUDIO_INTENT_EXPRESSION ||
+                result->intent.category == AUDIO_INTENT_COMPLIMENT ||
+                result->intent.category == AUDIO_INTENT_COMPLAINT) {
                 emotion_intent_score = 0.7f;
             } else {
                 emotion_intent_score = 0.3f; // 不匹配
             }
         } else if (result->emotion.intensity < 0.3f) {
             // 低情感强度通常与信息性意图匹配
-            if (result->intent.category == INTENT_STATEMENT ||
-                result->intent.category == INTENT_DESCRIPTION ||
-                result->intent.category == INTENT_EXPLANATION) {
+            if (result->intent.category == AUDIO_INTENT_STATEMENT ||
+                result->intent.category == AUDIO_INTENT_DESCRIPTION ||
+                result->intent.category == AUDIO_INTENT_EXPLANATION) {
                 emotion_intent_score = 0.7f;
             } else {
                 emotion_intent_score = 0.3f;
@@ -5753,7 +5753,7 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
             
             // 检查关键词是否与意图匹配（基于语义特征）
             switch (result->intent.category) {
-                case INTENT_QUESTION:
+                case AUDIO_INTENT_QUESTION:
                     // 问题通常包含疑问词或实体词（询问具体事物）
                     if (is_question_word || (is_entity_word && keyword_length >= 3)) {
                         relevant_keywords++;
@@ -5763,8 +5763,8 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
                     }
                     break;
                     
-                case INTENT_COMMAND:
-                case INTENT_REQUEST:
+                case AUDIO_INTENT_COMMAND:
+                case AUDIO_INTENT_REQUEST:
                     // 命令和请求通常包含动作词或功能词
                     if (is_action_word || is_functional_word) {
                         relevant_keywords++;
@@ -5774,8 +5774,8 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
                     }
                     break;
                     
-                case INTENT_DESCRIPTION:
-                case INTENT_EXPLANATION:
+                case AUDIO_INTENT_DESCRIPTION:
+                case AUDIO_INTENT_EXPLANATION:
                     // 描述和解释通常包含描述性词或实体词
                     if (is_descriptive_word || is_entity_word) {
                         relevant_keywords++;
@@ -5785,14 +5785,14 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
                     }
                     break;
                     
-                case INTENT_STATEMENT:
+                case AUDIO_INTENT_STATEMENT:
                     // 陈述通常包含实体词或描述性词
                     if (is_entity_word || is_descriptive_word) {
                         relevant_keywords++;
                     }
                     break;
                     
-                case INTENT_EXPRESSION:
+                case AUDIO_INTENT_EXPRESSION:
                     // 表达通常包含功能词或描述性词
                     if (is_functional_word || is_descriptive_word) {
                         relevant_keywords++;
@@ -6036,11 +6036,11 @@ static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* 
     intent_transition_score *= (0.5f + intent_confidence_avg * 0.5f);
     
     // 特殊意图转换规则
-    if (prev_result->intent.category == INTENT_GREETING && result->intent.category == INTENT_FAREWELL) {
+    if (prev_result->intent.category == AUDIO_INTENT_GREETING && result->intent.category == AUDIO_INTENT_FAREWELL) {
         intent_transition_score = 0.1f; // 问候后立即告别不合理
     }
     
-    if (prev_result->intent.category == INTENT_FAREWELL && result->intent.category != INTENT_GREETING) {
+    if (prev_result->intent.category == AUDIO_INTENT_FAREWELL && result->intent.category != AUDIO_INTENT_GREETING) {
         intent_transition_score *= 0.7f; // 告别后通常应该是问候或结束
     }
     

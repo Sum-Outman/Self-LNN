@@ -259,6 +259,8 @@ static int internal_physics_rhs(float t, const float* y, float* dydt, void* ctx)
  * @param max_steps 最大步数
  * @return 模拟器指针，失败返回NULL
  */
+static void ipenv_free(InternalPhysicsEnv* ipenv);
+
 static InternalPhysicsEnv* internal_physics_env_init(int half_dim, int action_dim,
                                                       float dt, int max_steps) {
     if (half_dim <= 0 || action_dim <= 0 || half_dim > 128 || action_dim > 64)
@@ -280,7 +282,7 @@ static InternalPhysicsEnv* internal_physics_env_init(int half_dim, int action_di
     ipenv->pending_action = (float*)safe_calloc((size_t)ipenv->action_dim, sizeof(float));
 
     if (!ipenv->state || !ipenv->init_state || !ipenv->pending_action) {
-        internal_physics_env_free(ipenv);
+        ipenv_free(ipenv);
         return NULL;
     }
 
@@ -294,7 +296,7 @@ static InternalPhysicsEnv* internal_physics_env_init(int half_dim, int action_di
     ipenv->workspace_size = ode_dp54_workspace_size((size_t)ipenv->state_dim);
     ipenv->workspace = (float*)safe_malloc(ipenv->workspace_size);
     if (!ipenv->workspace) {
-        internal_physics_env_free(ipenv);
+        ipenv_free(ipenv);
         return NULL;
     }
 
@@ -311,7 +313,7 @@ static InternalPhysicsEnv* internal_physics_env_init(int half_dim, int action_di
 /**
  * @brief 释放内部物理模拟器资源
  */
-static void internal_physics_env_free(InternalPhysicsEnv* ipenv) {
+static void ipenv_free(InternalPhysicsEnv* ipenv) {
     if (!ipenv) return;
     safe_free((void**)&ipenv->state);
     safe_free((void**)&ipenv->init_state);
@@ -474,7 +476,7 @@ static RLPhysicsEnv* rl_physics_env_create(int connection_id, int robot_id,
 static void rl_physics_env_free(RLPhysicsEnv* env) {
     if (!env) return;
     if (env->internal_env) {
-        internal_physics_env_free(env->internal_env);
+        ipenv_free(env->internal_env);
         env->internal_env = NULL;
     }
     safe_free((void**)&env);

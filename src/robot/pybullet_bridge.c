@@ -53,6 +53,8 @@ static int g_pybullet_initialized = 0;
 /* P3-L017: 使用原子初始化标志避免竞态条件——init_once为幂等操作 */
 static volatile int g_pybullet_array_ready = 0;
 
+static void pbul_register_robot_joints(PyBulletConnection* conn, int robot_id, int num_joints);
+
 static void pybullet_init_once(void) {
     if (g_pybullet_initialized) return;
     /* 双重检查锁定模式：用volatile标志保护连接数组的并发访问 */
@@ -306,7 +308,7 @@ int pybullet_load_urdf(int connection_id, const char* urdf_path,
                 if (num_joints > 0) {
                     conn->num_joints = num_joints;
                     /* 注册机器人关节信息，支持多机器人 */
-                    pybullet_register_robot_joints(conn, parsed_id, num_joints);
+                    pbul_register_robot_joints(conn, parsed_id, num_joints);
                 }
             } else if (sscanf(resp_buf, "{\"id\":%d}", &parsed_id) >= 1) {
                 conn->robot_id = parsed_id;
@@ -342,7 +344,7 @@ int pybullet_get_num_joints(int connection_id, int robot_id) {
 }
 
 /* 注册或更新连接内机器人的关节信息 */
-static void pybullet_register_robot_joints(PyBulletConnection* conn, int robot_id, int num_joints) {
+static void pbul_register_robot_joints(PyBulletConnection* conn, int robot_id, int num_joints) {
     if (!conn || robot_id < 0) return;
     for (int i = 0; i < conn->robot_count; i++) {
         if (conn->robots[i].robot_id == robot_id) {

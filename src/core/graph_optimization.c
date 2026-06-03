@@ -440,11 +440,17 @@ int graph_default_fusion_rules(FusionRule* rules, int max_rules) {
         return 0;
     }
     
-    // 常用融合规则
+    // 常用融合规则 - 使用静态数组避免C99复合字面量
+    static OperatorType pattern_conv_bn[] = {OP_TYPE_CONV, OP_TYPE_BATCH_NORM};
+    static OperatorType pattern_conv_relu[] = {OP_TYPE_CONV, OP_TYPE_RELU};
+    static OperatorType pattern_mm_add[] = {OP_TYPE_MATMUL, OP_TYPE_ADD};
+    static OperatorType pattern_ewise[] = {OP_TYPE_ADD, OP_TYPE_MUL, OP_TYPE_RELU};
+    static OperatorType pattern_bn[] = {OP_TYPE_BATCH_NORM};
+    
     FusionRule default_rules[] = {
         // 卷积 + 批量归一化融合
         {
-            .pattern = (OperatorType[]){OP_TYPE_CONV, OP_TYPE_BATCH_NORM},
+            .pattern = pattern_conv_bn,
             .pattern_length = 2,
             .fused_op = OP_TYPE_CONV,
             .fusion_mode = FUSION_VERTICAL,
@@ -452,7 +458,7 @@ int graph_default_fusion_rules(FusionRule* rules, int max_rules) {
         },
         // 卷积 + ReLU融合
         {
-            .pattern = (OperatorType[]){OP_TYPE_CONV, OP_TYPE_RELU},
+            .pattern = pattern_conv_relu,
             .pattern_length = 2,
             .fused_op = OP_TYPE_CONV,
             .fusion_mode = FUSION_VERTICAL,
@@ -460,7 +466,7 @@ int graph_default_fusion_rules(FusionRule* rules, int max_rules) {
         },
         // 矩阵乘法 + 加法融合
         {
-            .pattern = (OperatorType[]){OP_TYPE_MATMUL, OP_TYPE_ADD},
+            .pattern = pattern_mm_add,
             .pattern_length = 2,
             .fused_op = OP_TYPE_MATMUL,
             .fusion_mode = FUSION_VERTICAL,
@@ -468,7 +474,7 @@ int graph_default_fusion_rules(FusionRule* rules, int max_rules) {
         },
         // 逐元素操作链融合
         {
-            .pattern = (OperatorType[]){OP_TYPE_ADD, OP_TYPE_MUL, OP_TYPE_RELU},
+            .pattern = pattern_ewise,
             .pattern_length = 3,
             .fused_op = OP_TYPE_CUSTOM,
             .fusion_mode = FUSION_ELEMENTWISE,
@@ -476,7 +482,7 @@ int graph_default_fusion_rules(FusionRule* rules, int max_rules) {
         },
         // 批量归一化融合
         {
-            .pattern = (OperatorType){OP_TYPE_BATCH_NORM},
+            .pattern = pattern_bn,
             .pattern_length = 1,
             .fused_op = OP_TYPE_CUSTOM,
             .fusion_mode = FUSION_KERNEL,
@@ -2665,7 +2671,7 @@ int graph_auto_tune_kernel(GraphNode* node, int* best_tile_size,
         if ((int64_t)tile > total_elements) break;
 
         /* 执行多次迭代取均值（使用CPU时钟计数） */
-        clock_t start = clock;
+        clock_t start = clock();
         int num_tiles = (int)((total_elements + tile - 1) / tile);
         float sum = 0.0f;
         float* node_data = (float*)node->user_data;
@@ -2679,7 +2685,7 @@ int graph_auto_tune_kernel(GraphNode* node, int* best_tile_size,
                 }
             }
         }
-        clock_t end = clock;
+        clock_t end = clock();
         float elapsed = (float)(end - start) * 1e6f / (float)CLOCKS_PER_SEC / AUTO_TUNE_WARMUP;
 
         if (elapsed < best_time) {

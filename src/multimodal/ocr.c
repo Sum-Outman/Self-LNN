@@ -464,7 +464,7 @@ OcrProcessor* ocr_processor_create(const OcrConfig* config) {
     processor->text_detection_features = (float*)safe_malloc(processor->text_feature_dim * sizeof(float));
     
     // 创建CNN字符分类器（He初始化权重，未加载预训练模型时使用模板匹配回退）
-    processor->cnn_classifier = ocr_cnn_create;
+    processor->cnn_classifier = ocr_cnn_create();
     if (processor->cnn_classifier) {
         ocr_cnn_init_weights(processor->cnn_classifier);
     }
@@ -532,7 +532,7 @@ int ocr_recognize(OcrProcessor* processor,
     }
     
     memset(result, 0, sizeof(OcrResult));
-    clock_t ocr_start = clock;
+    clock_t ocr_start = clock();
     
     // 1. 图像预处理
     float* processed_data = NULL;

@@ -1272,6 +1272,8 @@ static int tts_decoder_autoregressive_forward(TTSEngine* engine,
  * @param out_wave_samples 实际输出波形样本数（输出参数）
  * @return 0成功，-1失败或回退
  */
+static void tts_griffin_lim(const float* log_mag_spec, float* waveform_out, int fft_size);
+
 static int tts_neural_vocoder_forward(TTSEngine* engine,
                                        const float* mel_spec,
                                        int mel_frames,

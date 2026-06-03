@@ -67,7 +67,7 @@ typedef struct {
     float confidence;               /**< 概念置信度（0-1） */
     int instance_count;             /**< 实例数量 */
     void* user_data;                /**< 用户数据指针 */
-} Concept;
+} SemanticConcept;
 
 /**
  * @brief 语义关系结构
@@ -75,13 +75,14 @@ typedef struct {
 typedef struct {
     int id;                         /**< 关系ID */
     SemanticRelationType type;      /**< 关系类型 */
-    Concept* source;                /**< 源概念 */
-    Concept* target;                /**< 目标概念 */
+    SemanticConcept* source;        /**< 源概念 */
+    SemanticConcept* target;        /**< 目标概念 */
     char* label;                    /**< 关系标签 */
     float strength;                 /**< 关系强度（0-1） */
     float confidence;               /**< 关系置信度（0-1） */
     void* user_data;                /**< 用户数据指针 */
 } SemanticRelation;
+/* Concept已重命名为SemanticConcept，以下使用SemanticConcept统一引用 */
 
 /**
  * @brief 语义网络句柄
@@ -148,9 +149,9 @@ void semantic_network_free(SemanticNetwork* network);
  * @param embedding_size 嵌入向量大小
  * @param specificity 概念特异性
  * @param typicality 概念典型性
- * @return Concept* 创建的概念指针，失败返回NULL
+ * @return SemanticConcept* 创建的概念指针，失败返回NULL
  */
-Concept* semantic_network_add_concept(SemanticNetwork* network, ConceptType type,
+SemanticConcept* semantic_network_add_concept(SemanticNetwork* network, ConceptType type,
                                      const char* name, const char* description,
                                      const float* embedding, size_t embedding_size,
                                      float specificity, float typicality);
@@ -169,7 +170,7 @@ Concept* semantic_network_add_concept(SemanticNetwork* network, ConceptType type
  */
 SemanticRelation* semantic_network_add_relation(SemanticNetwork* network,
                                                SemanticRelationType type,
-                                               Concept* source, Concept* target,
+                                               SemanticConcept* source, SemanticConcept* target,
                                                const char* label,
                                                float strength, float confidence);
 
@@ -178,30 +179,30 @@ SemanticRelation* semantic_network_add_relation(SemanticNetwork* network,
  * 
  * @param network 语义网络句柄
  * @param name 概念名称
- * @return Concept* 概念指针，未找到返回NULL
+ * @return SemanticConcept* 概念指针，未找到返回NULL
  */
-Concept* semantic_network_find_concept_by_name(SemanticNetwork* network, const char* name);
+SemanticConcept* semantic_network_find_concept_by_name(SemanticNetwork* network, const char* name);
 
 /**
  * @brief 根据ID查找概念
  * 
  * @param network 语义网络句柄
  * @param concept_id 概念ID
- * @return Concept* 概念指针，未找到返回NULL
+ * @return SemanticConcept* 概念指针，未找到返回NULL
  */
-Concept* semantic_network_find_concept_by_id(SemanticNetwork* network, int concept_id);
+SemanticConcept* semantic_network_find_concept_by_id(SemanticNetwork* network, int concept_id);
 
 /**
  * @brief 查找概念的所有直接关系
  * 
  * @param network 语义网络句柄
- * @param concept 概念
+ * @param SemanticConcept 概念
  * @param relation_type 关系类型过滤（-1表示不过滤）
  * @param results 结果输出缓冲区
  * @param max_results 最大结果数
  * @return size_t 返回匹配的关系数
  */
-size_t semantic_network_find_relations(SemanticNetwork* network, Concept* concept,
+size_t semantic_network_find_relations(SemanticNetwork* network, SemanticConcept* concept,
                                       int relation_type,
                                       SemanticRelation** results, size_t max_results);
 
@@ -215,50 +216,50 @@ size_t semantic_network_find_relations(SemanticNetwork* network, Concept* concep
  * @return float 相似度得分（0-1），失败返回-1
  */
 float semantic_network_concept_similarity(SemanticNetwork* network,
-                                         Concept* concept1, Concept* concept2,
+                                         SemanticConcept* concept1, SemanticConcept* concept2,
                                          SimilarityMetric metric);
 
 /**
  * @brief 查找概念的所有父类（is-a关系）
  * 
  * @param network 语义网络句柄
- * @param concept 概念
+ * @param SemanticConcept 概念
  * @param options 查询选项
  * @param results 结果输出缓冲区
  * @param max_results 最大结果数
  * @return size_t 返回匹配的父类数
  */
-size_t semantic_network_find_parents(SemanticNetwork* network, Concept* concept,
+size_t semantic_network_find_parents(SemanticNetwork* network, SemanticConcept* concept,
                                     const HierarchyQueryOptions* options,
-                                    Concept** results, size_t max_results);
+                                    SemanticConcept** results, size_t max_results);
 
 /**
  * @brief 查找概念的所有子类（is-a关系）
  * 
  * @param network 语义网络句柄
- * @param concept 概念
+ * @param SemanticConcept 概念
  * @param options 查询选项
  * @param results 结果输出缓冲区
  * @param max_results 最大结果数
  * @return size_t 返回匹配的子类数
  */
-size_t semantic_network_find_children(SemanticNetwork* network, Concept* concept,
+size_t semantic_network_find_children(SemanticNetwork* network, SemanticConcept* concept,
                                      const HierarchyQueryOptions* options,
-                                     Concept** results, size_t max_results);
+                                     SemanticConcept** results, size_t max_results);
 
 /**
  * @brief 查找概念的所有实例（instance-of关系）
  * 
  * @param network 语义网络句柄
- * @param concept 概念
+ * @param SemanticConcept 概念
  * @param options 查询选项
  * @param results 结果输出缓冲区
  * @param max_results 最大结果数
  * @return size_t 返回匹配的实例数
  */
-size_t semantic_network_find_instances(SemanticNetwork* network, Concept* concept,
+size_t semantic_network_find_instances(SemanticNetwork* network, SemanticConcept* concept,
                                       const HierarchyQueryOptions* options,
-                                      Concept** results, size_t max_results);
+                                      SemanticConcept** results, size_t max_results);
 
 /**
  * @brief 查找概念的最近公共祖先（LCA）
@@ -266,30 +267,30 @@ size_t semantic_network_find_instances(SemanticNetwork* network, Concept* concep
  * @param network 语义网络句柄
  * @param concept1 概念1
  * @param concept2 概念2
- * @return Concept* 最近公共祖先概念，失败返回NULL
+ * @return SemanticConcept* 最近公共祖先概念，失败返回NULL
  */
-Concept* semantic_network_find_lowest_common_ancestor(SemanticNetwork* network,
-                                                     Concept* concept1,
-                                                     Concept* concept2);
+SemanticConcept* semantic_network_find_lowest_common_ancestor(SemanticNetwork* network,
+                                                     SemanticConcept* concept1,
+                                                     SemanticConcept* concept2);
 
 /**
  * @brief 计算概念的层次深度
  * 
  * @param network 语义网络句柄
- * @param concept 概念
+ * @param SemanticConcept 概念
  * @return int 层次深度，失败返回-1
  */
-int semantic_network_concept_depth(SemanticNetwork* network, Concept* concept);
+int semantic_network_concept_depth(SemanticNetwork* network, SemanticConcept* concept);
 
 /**
  * @brief 计算概念的信息内容（基于层次结构）
  * 
  * @param network 语义网络句柄
- * @param concept 概念
+ * @param SemanticConcept 概念
  * @return float 信息内容值
  */
 float semantic_network_concept_information_content(SemanticNetwork* network,
-                                                  Concept* concept);
+                                                  SemanticConcept* concept);
 
 /**
  * @brief 执行语义推理
@@ -303,9 +304,9 @@ float semantic_network_concept_information_content(SemanticNetwork* network,
  * @return size_t 返回推理出的概念数
  */
 size_t semantic_network_infer(SemanticNetwork* network,
-                             Concept** premises, size_t premise_count,
+                             SemanticConcept** premises, size_t premise_count,
                              size_t max_inferences,
-                             Concept** results, size_t max_results);
+                             SemanticConcept** results, size_t max_results);
 
 /**
  * @brief 获取语义网络统计信息
@@ -362,13 +363,13 @@ SemanticNetwork* semantic_network_load(const char* filename);
  * @return char* 层次结构字符串，调用者负责释放
  */
 char* semantic_network_visualize_hierarchy(SemanticNetwork* network,
-                                          Concept* root_concept, int max_depth);
+                                          SemanticConcept* root_concept, int max_depth);
 
 /**
  * @brief 扩散激活结果条目
  */
 typedef struct {
-    Concept* concept;               /**< 被激活的概念 */
+    SemanticConcept* concept;       /**< 被激活的概念 */
     float activation;               /**< 激活值 */
 } ActivationEntry;
 
@@ -390,7 +391,7 @@ typedef struct {
  * @return size_t 返回激活的概念数（包括种子）
  */
 SELFLNN_API size_t semantic_network_spreading_activation(SemanticNetwork* network,
-    Concept** seeds, const float* seed_activations, size_t seed_count,
+    SemanticConcept** seeds, const float* seed_activations, size_t seed_count,
     float decay_factor, float threshold, size_t max_iterations,
     ActivationEntry* results, size_t max_results);
 
@@ -474,7 +475,7 @@ SELFLNN_API int semantic_network_compute_concept_importance(SemanticNetwork* net
  * @return size_t 返回创建或增强的关系数
  */
 SELFLNN_API size_t semantic_network_learn_from_patterns(SemanticNetwork* network,
-    Concept** pattern_pairs, size_t pair_count, float learning_rate);
+    SemanticConcept** pattern_pairs, size_t pair_count, float learning_rate);
 
 /**
  * @brief 获取语义网络中的概念数量
@@ -489,9 +490,9 @@ SELFLNN_API size_t semantic_network_get_concept_count(SemanticNetwork* network);
  *
  * @param network 语义网络句柄
  * @param index 概念索引（0到concept_count-1）
- * @return Concept* 概念指针，索引无效返回NULL
+ * @return SemanticConcept* 概念指针，索引无效返回NULL
  */
-SELFLNN_API Concept* semantic_network_get_concept_by_index(SemanticNetwork* network, size_t index);
+SELFLNN_API SemanticConcept* semantic_network_get_concept_by_index(SemanticNetwork* network, size_t index);
 
 /**
  * @brief 获取语义网络中的关系数量
