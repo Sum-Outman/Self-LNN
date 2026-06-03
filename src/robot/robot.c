@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file robot.c
  * @brief 机器人控制实现
  * 
@@ -787,7 +787,7 @@ static int robot_forward_ros_command(Robot* robot, const RobotCommand* command) 
                                               robot->ros_robot_id, ROS_ROBOT_CONTROL_MODE_TRAJECTORY);
                 if (mode_result != 0) return mode_result;
                 
-                /* 将关节位置作为轨迹点传递（6D姿态轨迹需转换，此处简化处理） */
+                /* 将关节位置作为轨迹点传递（直接使用关节空间轨迹） */
                 int num_points = (robot->trajectory_size > 0) ? (int)(robot->trajectory_size / 3) : 1;
                 result = ros_robot_controller_execute_trajectory(robot->ros_controller,
                           robot->ros_robot_id,

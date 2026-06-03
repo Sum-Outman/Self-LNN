@@ -2362,6 +2362,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/sensor") == 0)                    return API_POST_SENSOR;
     if (strcmp(p, "/api/multimodal/status") == 0)         return API_GET_MULTIMODAL_STATUS;
     if (strcmp(p, "/api/multimodal/teach") == 0)          return API_POST_MULTIMODAL_TEACH;
+    if (strcmp(p, "/api/multimodal/teach/test") == 0)     return API_POST_MULTIMODAL_TEACH_TEST;
     if (strcmp(p, "/api/multimodal/learn") == 0)          return API_POST_MULTIMODAL_LEARN;
     if (strcmp(p, "/api/multimodal/config") == 0)         return API_POST_MULTIMODAL_CONFIG;
     if (strcmp(p, "/api/multimodal/test") == 0)           return API_POST_MULTIMODAL_TEST;
@@ -2370,6 +2371,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/multimodal/process") == 0)         return API_POST_MULTIMODAL_PROCESS;         /* P1-003: 从旧路由链迁移 */
     if (strcmp(p, "/api/multimodal/reset") == 0)           return API_POST_MULTIMODAL_RESET;           /* P1-003: 从旧路由链迁移 */
     if (strcmp(p, "/api/audio/recognize") == 0)           return API_POST_AUDIO_RECOGNIZE;
+    if (strcmp(p, "/api/audio/stream") == 0)              return API_POST_AUDIO_STREAM;
+    if (strcmp(p, "/api/audio/command") == 0)             return API_POST_AUDIO_COMMAND;
     if (strcmp(p, "/api/voice/recognize") == 0)           return API_POST_VOICE_RECOGNIZE;
     if (strcmp(p, "/api/tts/synthesize") == 0)            return API_POST_TTS_SYNTHESIZE;
     if (strcmp(p, "/api/voice/synthesize") == 0)          return API_POST_VOICE_SYNTHESIZE;
@@ -2378,6 +2381,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/camera/switch") == 0)             return API_POST_CAMERA_SWITCH;
     if (strcmp(p, "/api/audio/devices") == 0)             return API_GET_AUDIO_DEVICES;
     if (strcmp(p, "/api/audio/spectrum") == 0)            return API_GET_AUDIO_SPECTRUM;
+    if (strcmp(p, "/api/video/stream") == 0)              return API_POST_VIDEO_STREAM;
+    if (strcmp(p, "/api/video/capture") == 0)             return API_POST_VIDEO_CAPTURE;
     if (strcmp(p, "/api/video/quality") == 0)             return API_POST_VIDEO_QUALITY;
 
     /* === 对话 === */
@@ -2464,6 +2469,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/robot/config/save") == 0)         return API_POST_ROBOT_PARAMETERS;
     if (strcmp(p, "/api/robot/connect") == 0)             return API_POST_ROBOT_CONNECT;
     if (strcmp(p, "/api/robot/disconnect") == 0)          return API_POST_ROBOT_DISCONNECT;
+    if (strcmp(p, "/api/robot/firmware") == 0)            return API_POST_ROBOT_FIRMWARE;
     if (strcmp(p, "/api/robot/trajectory") == 0)          return API_POST_ROBOT_TRAJECTORY;
     if (strcmp(p, "/api/robot/training") == 0)            return API_POST_ROBOT_TRAINING;
     if (strcmp(p, "/api/robot/coordinate") == 0)          return API_POST_ROBOT_COORDINATE;
@@ -2662,6 +2668,9 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/teach/test_concept") == 0)        return API_POST_TEACH_TEST_CONCEPT;
     if (strcmp(p, "/api/teach/clear_concept") == 0)       return API_POST_TEACH_CLEAR_CONCEPT;
     if (strcmp(p, "/api/teach/clear_all_concepts") == 0)  return API_POST_TEACH_CLEAR_ALL_CONCEPTS;
+
+    /* === 双目空间感知 === */
+    if (strcmp(p, "/api/stereo/perception") == 0)          return API_POST_STEREO_PERCEPTION;
 
     /* === 传感器管线 === */
     if (strcmp(p, "/api/sensor/pipeline/status") == 0 ||

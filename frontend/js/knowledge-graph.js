@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN AGI 知识图谱系统
  * 包含知识录入/检索/可视化/力导向图/WebGL 3D视图
  * 所有功能经同一CfC液态神经网络知识库处理
@@ -1043,8 +1043,6 @@
         console.log('[知识图谱] 资源已清理');
     };
 
-    /* 捕获resize监听器引用用于清理 */
-    var _resizeCanvas = resizeCanvas;
-    var _resize3D = resize3D;
+    /* ZSFIII-P2-001修复: 移除未使用的_resizeCanvas/_resize3D局部变量，resize监听器通过window.removeEventListener直接引用闭包内函数名 */
 
 })();

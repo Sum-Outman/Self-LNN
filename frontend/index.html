@@ -1,4 +1,4 @@
-﻿﻿<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -5899,7 +5899,8 @@ response = requests.get(
         var PERM_NAMES = {1:' 只读', 2:' 读写', 3:' 管理员'};
 
         async function generateApiKey() {
-            var name = document.getElementById('key-name').value.trim;
+            /* ZSFIII-P0-002修复: value.trim缺少()导致name为函数对象 */
+            var name = document.getElementById('key-name').value.trim();
             var permission = parseInt(document.getElementById('key-permission').value);
             var expiry = parseInt(document.getElementById('key-expiry').value);
             if (!name) { showNotification('请填写密钥名称', 'warning'); return; }
@@ -5915,7 +5916,8 @@ response = requests.get(
                     var display = document.getElementById('new-key-display');
                     display.style.display = 'block';
                     document.getElementById('generated-key').value = data.key;
-                    loadKeys;
+                    /* ZSFIII-P0-002修复: 缺少()的函数调用 */
+                    loadKeys();
                 } else {
                     showNotification('生成失败: ' + (data.error || '未知错误'), 'danger');
                 }
@@ -5930,12 +5932,14 @@ response = requests.get(
                 navigator.clipboard.writeText(input.value).then(function() {
                     showNotification('密钥已复制到剪贴板', 'info');
                 }).catch(function() {
-                    input.select;
+                    /* ZSFIII-P0-002修复: input.select缺少() */
+                    input.select();
                     document.execCommand('copy');
                     showNotification('密钥已复制到剪贴板（回退模式）', 'info');
                 });
             } else {
-                input.select;
+                /* ZSFIII-P0-002修复: input.select缺少() */
+                input.select();
                 document.execCommand('copy');
                 showNotification('密钥已复制到剪贴板', 'info');
             }
@@ -5953,10 +5957,11 @@ response = requests.get(
                     return;
                 }
                 tbody.innerHTML = keys.map(function(k) {
-                    var created = k.created_at ? new Date(k.created_at*1000).toLocaleString : '-';
-                    var expires = k.expires_at ? new Date(k.expires_at*1000).toLocaleString : '永不过期';
-                    var lastUsed = k.last_used_at ? new Date(k.last_used_at*1000).toLocaleString : '从未使用';
-                    var now = Date.now/1000;
+                    /* ZSFIII-P0-002修复: toLocaleString缺少()、Date.now缺少() */
+                    var created = k.created_at ? new Date(k.created_at*1000).toLocaleString() : '-';
+                    var expires = k.expires_at ? new Date(k.expires_at*1000).toLocaleString() : '永不过期';
+                    var lastUsed = k.last_used_at ? new Date(k.last_used_at*1000).toLocaleString() : '从未使用';
+                    var now = Date.now()/1000;
                     var expired = k.expires_at > 0 && now > k.expires_at;
                     return '<tr>' +
                         '<td>' + (k.name||'未命名') + '</td>' +
@@ -5981,8 +5986,8 @@ response = requests.get(
 
         async function loadStats() {
             try {
-                /* 使用 getKeyStatus 获取全局统计 */
-                var data = await window.SelfLnnApi.getKeyStatus;
+                /* ZSFIII-P0-002修复: 使用getKeyStatus()获取全局统计，添加()调用 */
+                var data = await window.SelfLnnApi.getKeyStatus();
                 var s = (data && data.success) ? (data.data || data) : {};
                 var tk = s.current_keys != null ? s.current_keys : (s.total_keys != null ? s.total_keys : '-');
                 document.getElementById('stat-total-keys').textContent = tk;
@@ -5997,7 +6002,8 @@ response = requests.get(
                 /* 修正字段访问路径
                  * 原代码访问r.min_remaining但后端返回r.rate_limit.min_remaining
                  * 导致所有UI元素永远显示默认值 */
-                var data = await window.SelfLnnApi.getRateLimitStatus;
+                /* ZSFIII-P0-002修复: getRateLimitStatus缺少()调用 */
+                var data = await window.SelfLnnApi.getRateLimitStatus();
                 var r = (data && data.success && data.data && data.data.rate_limit)
                       ? data.data.rate_limit : {};
                 document.getElementById('rate-tokens').textContent =
@@ -6028,7 +6034,8 @@ response = requests.get(
                     body: JSON.stringify({key_prefix: prefix, enable: enable})
                 });
                 var data = await resp.json();
-                if (data.success) loadKeys;
+                /* ZSFIII-P0-002修复: loadKeys缺少()调用 */
+                if (data.success) loadKeys();
                 else showNotification('操作失败: ' + (data.error||''), 'danger');
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
@@ -6041,14 +6048,16 @@ response = requests.get(
                     body: JSON.stringify({key_prefix: prefix})
                 });
                 var data = await resp.json();
-                if (data.success) loadKeys;
+                /* ZSFIII-P0-002修复: loadKeys缺少()调用 */
+                if (data.success) loadKeys();
                 else showNotification('删除失败: ' + (data.error||''), 'danger');
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
 
+        /* ZSFIII-P0-002修复: loadKeys、loadStats缺少()调用 */
         document.addEventListener('DOMContentLoaded', function() {
-            loadKeys;
-            loadStats;
+            loadKeys();
+            loadStats();
             setTimeout(loadRateLimit, 15000);
             setInterval(loadRateLimit, 30000);
         });
@@ -6126,7 +6135,8 @@ response = requests.get(
             } catch(e) { console.warn('使用日志加载失败:', e.message); }
         }
         document.addEventListener('DOMContentLoaded', function() {
-            loadLogs;
+            /* ZSFIII-P0-002修复: loadLogs缺少()调用 */
+            loadLogs();
             setInterval(loadLogs, 30000);
         });
     </script>
@@ -7058,50 +7068,50 @@ response = requests.get(
             console.log('更新紧急停止后状态:', data);
         }
         
-        // 初始化
+        // ZSFIII-P0-002修复: 初始化-所有函数调用添加()
         document.addEventListener('DOMContentLoaded', function() {
             // 创建连接状态指示器（顶部横幅）
-            createConnectionBanner;
+            createConnectionBanner();
             
             // 创建重连提示元素
-            createReconnectToast;
+            createReconnectToast();
             
             // 检查连接状态
-            apiService.checkConnection.then(status => {
+            apiService.checkConnection().then(status => {
                 if (status.connected) {
                     console.log('后端服务器连接成功:', status.message);
                     updateConnectionStatus(true);
-                    clearConnectionTimeout;
+                    clearConnectionTimeout();
                 } else {
                     console.warn('后端服务器连接失败:', status.message);
                     updateConnectionStatus(false);
-                    startConnectionTimeout;
+                    startConnectionTimeout();
                 }
             });
             
             // 启动连接监控
-            apiService.startConnectionMonitor;
+            apiService.startConnectionMonitor();
             
             // 监听连接状态变化
             document.addEventListener('backend-connection-status', (event) => {
                 updateConnectionStatus(event.detail.connected, event.detail.message);
                 if (event.detail.connected) {
-                    clearConnectionTimeout;
+                    clearConnectionTimeout();
                     hideReconnectToast;
                 } else {
-                    startConnectionTimeout;
+                    startConnectionTimeout();
                 }
             });
             
             // 更新时间
-            updateTime;
+            updateTime();
             setInterval(updateTime, 1000);
             
             // 初始化状态指示器
-            initStatusIndicators;
+            initStatusIndicators();
             
             // 初始数据加载
-            refreshDashboard;
+            refreshDashboard();
         });
         
         // ---- 状态变量 ----

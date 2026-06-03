@@ -6447,7 +6447,8 @@ function triggerVisionInput() {
         return;
     }
     var input = document.getElementById('dialogue-input');
-    var imageData = g_dialogueEnhanced.getLastCameraFrame ? g_dialogueEnhanced.getLastCameraFrame() : null;
+    /* ZSFIII-P1-002修复: DialogueEnhanced类不存在getLastCameraFrame方法，改为使用lastCapturedImage属性获取真实摄像头帧 */
+    var imageData = g_dialogueEnhanced ? g_dialogueEnhanced.lastCapturedImage : null;
     if (!imageData) {
         showNotification('请先启用摄像头并获取画面', 'warning');
         return;

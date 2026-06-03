@@ -105,7 +105,8 @@ MultimodalIntegrationProcessor* multimodal_integration_processor_create(
     }
     
     if (config->spatial_config.enable_point_cloud) {
-        processor->point_cloud_processor = point_cloud_processor_create;
+        /* ZSFIII-P0-001修复: 原代码将函数指针赋值给结构体字段，需添加()调用。point_cloud_processor_create()为无参函数，内部使用默认配置。 */
+        processor->point_cloud_processor = point_cloud_processor_create();
     }
     
     if (config->spatial_config.enable_slam) {

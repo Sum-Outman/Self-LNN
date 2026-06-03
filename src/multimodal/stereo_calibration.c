@@ -671,10 +671,11 @@ int camera_calibrate_stereo(CameraCalibrator* calibrator,
         valid_pairs++;
     }
 
+    /* ZSFIII-P1-001修复: return -0在IEEE754下等于0，导致调用方无法检测立体标定失败 */
     if (valid_pairs < 3) {
         free(saved_obj_points);
         free(saved_left_points);
-        return -0;
+        return -1;
     }
 
     float inv_count = 1.0f / valid_pairs;

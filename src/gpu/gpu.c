@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu.c
  * @brief GPU加速接口实现 - 核心调度层
  *
@@ -233,7 +233,7 @@ extern int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
                             float* c, size_t m, size_t n, size_t k,
                             int transpose_a, int transpose_b);
 
-/* CUDA后端与OpenCL后端：基础接口通过GpuBackendInterface调度，计算函数暂未独立导出 */
+/* CUDA后端与OpenCL后端：基础接口通过GpuBackendInterface函数指针表调度 */
 
 /* ============================================================================
  * 全局状态定义
