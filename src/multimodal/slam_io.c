@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file slam_io.c
  * @brief SLAM输入输出模块
  *
@@ -577,15 +577,93 @@ int slam_load_dataset_tum(const char* directory, int* num_frames, int* width, in
     return (*num_frames > 0) ? 0 : -1;
 }
 
+/* ---- SVD-Based 3x3矩阵SVD（用于Umeyama对齐） ---- */
+static int svd_3x3(const float A[9], float U[9], float S[3], float V[9]) {
+    /* 计算 A^T * A（对称3x3矩阵） */
+    float AtA[9];
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) {
+            float sum = 0;
+            for (int k = 0; k < 3; k++) {
+                sum += A[k * 3 + r] * A[k * 3 + c];
+            }
+            AtA[r * 3 + c] = sum;
+        }
+    }
+    /* 雅可比特征值分解（对称矩阵） */
+    float Vt[9] = {1,0,0, 0,1,0, 0,0,1};
+    float eigen[3] = {AtA[0], AtA[4], AtA[8]};
+    for (int iter = 0; iter < 20; iter++) {
+        float max_off = 0; int p = 0, q = 1;
+        for (int i = 0; i < 2; i++) {
+            for (int j = i+1; j < 3; j++) {
+                if (fabsf(AtA[i*3+j]) > max_off) {
+                    max_off = fabsf(AtA[i*3+j]); p = i; q = j;
+                }
+            }
+        }
+        if (max_off < 1e-8f) break;
+        float theta = (AtA[q*3+q] - AtA[p*3+p]) / (2.0f * AtA[p*3+q]);
+        float t = theta >= 0 ? 1.0f / (theta + sqrtf(1 + theta*theta))
+                               : -1.0f / (-theta + sqrtf(1 + theta*theta));
+        float c = 1.0f / sqrtf(1 + t*t), s = c * t;
+        /* 旋转AtA */
+        for (int k = 0; k < 3; k++) {
+            float apk = AtA[p*3+k], aqk = AtA[q*3+k];
+            AtA[p*3+k] = c * apk - s * aqk;
+            AtA[q*3+k] = s * apk + c * aqk;
+        }
+        for (int k = 0; k < 3; k++) {
+            float akp = AtA[k*3+p], akq = AtA[k*3+q];
+            AtA[k*3+p] = c * akp - s * akq;
+            AtA[k*3+q] = s * akp + c * akq;
+        }
+        /* 旋转V^T */
+        for (int k = 0; k < 3; k++) {
+            float vkp = Vt[k*3+p], vkq = Vt[k*3+q];
+            Vt[k*3+p] = c * vkp - s * vkq;
+            Vt[k*3+q] = s * vkp + c * vkq;
+        }
+    }
+    /* 提取特征值 */
+    for (int i = 0; i < 3; i++) {
+        S[i] = AtA[i*3+i] > 0 ? sqrtf(AtA[i*3+i]) : 0;
+    }
+    /* V = V^T 的转置 */
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++)
+            V[r*3+c] = Vt[c*3+r];
+    /* U = A * V * S^{-1} */
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) {
+            float sum = 0;
+            for (int k = 0; k < 3; k++)
+                sum += A[r*3+k] * V[k*3+c];
+            U[r*3+c] = S[c] > 1e-10f ? sum / S[c] : 0;
+        }
+    }
+    /* 确保U的正交性 */
+    for (int c = 0; c < 3; c++) {
+        float norm = 0;
+        for (int r = 0; r < 3; r++) norm += U[r*3+c] * U[r*3+c];
+        norm = sqrtf(norm);
+        if (norm > 1e-10f) {
+            for (int r = 0; r < 3; r++) U[r*3+c] /= norm;
+        }
+    }
+    return 0;
+}
+
 /* ---- ATE: 绝对轨迹误差 (Absolute Trajectory Error) ---- */
+/* 完整Umeyama算法：旋转 + 缩放 + 平移对齐 */
 int slam_evaluate_ate(const SlamPose* estimated, int est_count,
                        const SlamPose* ground_truth, int gt_count,
                        float* rmse_out, float* mean_out, float* max_out) {
     if (!estimated || !ground_truth || est_count <= 0 || gt_count <= 0) return -1;
-    /* 使用Umeyama算法进行轨迹对齐(简化版: 仅平移对齐) */
     int eval_count = est_count < gt_count ? est_count : gt_count;
     if (eval_count <= 0) return -1;
-    /* 计算质心 */
+
+    /* 步骤1: 计算两组轨迹的质心 */
     float est_cx = 0, est_cy = 0, est_cz = 0;
     float gt_cx = 0, gt_cy = 0, gt_cz = 0;
     for (int i = 0; i < eval_count; i++) {
@@ -598,12 +676,83 @@ int slam_evaluate_ate(const SlamPose* estimated, int est_count,
     }
     est_cx /= (float)eval_count; est_cy /= (float)eval_count; est_cz /= (float)eval_count;
     gt_cx /= (float)eval_count; gt_cy /= (float)eval_count; gt_cz /= (float)eval_count;
-    /* 计算对齐后误差 */
-    float sum_sq = 0, sum_abs = 0, max_err = 0;
+
+    /* 步骤2: 计算互相关矩阵 H = Σ (est_i - est_centroid)(gt_i - gt_centroid)^T */
+    float H[9] = {0};
     for (int i = 0; i < eval_count; i++) {
-        float dx = (estimated[i].position[0] - est_cx) - (ground_truth[i].position[0] - gt_cx);
-        float dy = (estimated[i].position[1] - est_cy) - (ground_truth[i].position[1] - gt_cy);
-        float dz = (estimated[i].position[2] - est_cz) - (ground_truth[i].position[2] - gt_cz);
+        float ex = estimated[i].position[0] - est_cx;
+        float ey = estimated[i].position[1] - est_cy;
+        float ez = estimated[i].position[2] - est_cz;
+        float gx = ground_truth[i].position[0] - gt_cx;
+        float gy = ground_truth[i].position[1] - gt_cy;
+        float gz = ground_truth[i].position[2] - gt_cz;
+        H[0] += ex * gx; H[1] += ex * gy; H[2] += ex * gz;
+        H[3] += ey * gx; H[4] += ey * gy; H[5] += ey * gz;
+        H[6] += ez * gx; H[7] += ez * gy; H[8] += ez * gz;
+    }
+
+    /* 步骤3: SVD分解 H = U * S * V^T */
+    float U[9], S[3], V[9];
+    svd_3x3(H, U, S, V);
+
+    /* 步骤4: 计算旋转矩阵 R = V * U^T，处理反射情况 */
+    float det = 1;
+    for (int i = 0; i < 3; i++) det *= U[i] * V[i] + U[3+i]*V[3+i] + U[6+i]*V[6+i];
+    /* 简化的行列式计算 */
+    det = (U[0]*U[4]*U[8] + U[1]*U[5]*U[6] + U[2]*U[3]*U[7])
+        - (U[2]*U[4]*U[6] + U[1]*U[3]*U[8] + U[0]*U[5]*U[7]);
+    float det_v = (V[0]*V[4]*V[8] + V[1]*V[5]*V[6] + V[2]*V[3]*V[7])
+                - (V[2]*V[4]*V[6] + V[1]*V[3]*V[8] + V[0]*V[5]*V[7]);
+    float det_uv = det * det_v;
+    
+    /* 反射校正矩阵 D */
+    float D[9] = {1,0,0, 0,1,0, 0,0,1};
+    if (det_uv < 0) D[8] = -1; /* 如果det(R) < 0，翻转最后一行 */
+
+    /* R = U * D * V^T */
+    float R[9] = {0};
+    float UD[9];
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++)
+            UD[r*3+c] = U[r*3+0]*D[0*3+c] + U[r*3+1]*D[1*3+c] + U[r*3+2]*D[2*3+c];
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++)
+            for (int k = 0; k < 3; k++)
+                R[r*3+c] += UD[r*3+k] * V[c*3+k];  /* V^T: V[c*3+k] */
+
+    /* 步骤5: 计算缩放因子 */
+    float scale_num = 0, scale_den = 0;
+    for (int i = 0; i < eval_count; i++) {
+        float ex = estimated[i].position[0] - est_cx;
+        float ey = estimated[i].position[1] - est_cy;
+        float ez = estimated[i].position[2] - est_cz;
+        float gx = ground_truth[i].position[0] - gt_cx;
+        float gy = ground_truth[i].position[1] - gt_cy;
+        float gz = ground_truth[i].position[2] - gt_cz;
+        scale_den += ex*ex + ey*ey + ez*ez;
+        /* 应用旋转后的估计值 */
+        float rx = R[0]*ex + R[1]*ey + R[2]*ez;
+        float ry = R[3]*ex + R[4]*ey + R[5]*ez;
+        float rz = R[6]*ex + R[7]*ey + R[8]*ez;
+        scale_num += rx*gx + ry*gy + rz*gz;
+    }
+    float scale = (scale_den > 1e-10f) ? scale_num / scale_den : 1.0f;
+
+    /* 步骤6: 计算对齐后误差（应用完整的相似变换） */
+    float sum_sq = 0, sum_abs = 0, max_err = 0;
+    float t[3];
+    t[0] = gt_cx - scale * (R[0]*est_cx + R[1]*est_cy + R[2]*est_cz);
+    t[1] = gt_cy - scale * (R[3]*est_cx + R[4]*est_cy + R[5]*est_cz);
+    t[2] = gt_cz - scale * (R[6]*est_cx + R[7]*est_cy + R[8]*est_cz);
+
+    for (int i = 0; i < eval_count; i++) {
+        /* 变换估计位置 */
+        float tx = scale * (R[0]*estimated[i].position[0] + R[1]*estimated[i].position[1] + R[2]*estimated[i].position[2]) + t[0];
+        float ty = scale * (R[3]*estimated[i].position[0] + R[4]*estimated[i].position[1] + R[5]*estimated[i].position[2]) + t[1];
+        float tz = scale * (R[6]*estimated[i].position[0] + R[7]*estimated[i].position[1] + R[8]*estimated[i].position[2]) + t[2];
+        float dx = tx - ground_truth[i].position[0];
+        float dy = ty - ground_truth[i].position[1];
+        float dz = tz - ground_truth[i].position[2];
         float err = sqrtf(dx*dx + dy*dy + dz*dz);
         sum_sq += err * err;
         sum_abs += err;

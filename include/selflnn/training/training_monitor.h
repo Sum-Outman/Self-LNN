@@ -1,4 +1,4 @@
-﻿#ifndef SELFLNN_TRAINING_MONITOR_H
+#ifndef SELFLNN_TRAINING_MONITOR_H
 #define SELFLNN_TRAINING_MONITOR_H
 
 #include <stddef.h>
@@ -24,6 +24,10 @@ typedef enum {
     TM_RECALL,
     TM_F1,
     TM_PERPLEXITY,
+    TM_GRADIENT_NORM,       /**< 梯度L2范数（检测梯度爆炸） */
+    TM_GRADIENT_STD,        /**< 梯度标准差（检测梯度消失） */
+    TM_WEIGHT_NORM,         /**< 权重L2范数（检测权重爆炸） */
+    TM_ACTIVATION_MEAN,     /**< 平均激活值（检测死神经元） */
     TM_CUSTOM
 } MetricType;
 
@@ -75,6 +79,17 @@ float training_monitor_get_best_value(const TrainingMonitor* tm,
 float training_monitor_get_latest_value(const TrainingMonitor* tm,
                                          MetricType type);
 int training_monitor_reset(TrainingMonitor* tm);
+
+/* 梯度/权重/激活统计监控 —— 训练诊断三剑客 */
+int training_monitor_log_gradient_stats(TrainingMonitor* tm,
+                                         const float* grads, size_t num_params,
+                                         int epoch, int step);
+int training_monitor_log_weight_norm(TrainingMonitor* tm,
+                                      const float* weights, size_t num_params,
+                                      int epoch, int step);
+int training_monitor_log_activation_stats(TrainingMonitor* tm,
+                                           const float* activations, size_t num_neurons,
+                                           int epoch, int step);
 
 /* 将TrainingMonitor缓冲区中的最新指标格式化为JSON字符串 */
 int training_monitor_get_latest_metrics_json(const TrainingMonitor* tm,

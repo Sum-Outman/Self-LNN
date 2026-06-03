@@ -10,6 +10,7 @@
 #include "selflnn/knowledge/api_training.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/training/training.h"
+#include "selflnn/training/training_monitor.h"  /* 梯度统计监控 */
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/json_parser.h"
@@ -213,6 +214,14 @@ struct TrainingSession {
     /* 时间统计 */
     clock_t start_time;              /**< 开始时间 */
     clock_t end_time;                /**< 结束时间 */
+
+    /* 异步暂停/恢复控制 */
+    volatile int pause_requested;    /**< 暂停请求标志（1=请求暂停） */
+    volatile int stop_requested;     /**< 停止请求标志（1=请求停止） */
+    int saved_batch_index;           /**< 暂停时的批次索引（用于恢复） */
+
+    /* 训练监控 */
+    TrainingMonitor* grad_monitor;   /**< 梯度统计监控器（外部注入） */
 };
 
 /* 辅助函数 */
@@ -406,7 +415,7 @@ int training_session_start(TrainingSession* session,
     /* 记录开始时间 */
     session->start_time = clock();
 
-    /* 实际启动训练：使用训练器在训练数据上执行真实的训练循环 */
+    /* 实际启动训练：分步执行，支持暂停/恢复/停止 */
     if (session->trainer && session->training_data) {
         float* inputs = NULL;
         float* targets = NULL;
@@ -428,28 +437,113 @@ int training_session_start(TrainingSession* session,
                            session->config.output_size * sizeof(float));
                 }
 
-                int train_result = trainer_train(session->trainer, inputs, targets,
-                                                  num_samples, NULL, NULL);
+                /* 分步训练：按批次执行，每批次后检查暂停/停止请求 */
+                size_t batch_size = session->config.batch_size > 0 ? 
+                    (size_t)session->config.batch_size : 32;
+                size_t total_batches = (num_samples + batch_size - 1) / batch_size;
+                size_t start_batch = (size_t)session->saved_batch_index;
+                int training_completed = 0;
 
-                if (train_result == 0) {
+                for (size_t batch = start_batch; batch < total_batches; batch++) {
+                    /* 检查停止请求 */
+                    if (session->stop_requested) {
+                        session->stop_requested = 0;
+                        session->saved_batch_index = 0;
+                        update_training_status(session, TRAINING_STATUS_IDLE, "训练已停止");
+                        goto cleanup_training;
+                    }
+
+                    /* 检查暂停请求 */
+                    if (session->pause_requested) {
+                        session->saved_batch_index = (int)batch;
+                        session->status = TRAINING_STATUS_PAUSED;
+                        session->progress_percentage = (float)batch / (float)total_batches * 100.0f / 
+                            (float)session->config.epochs;
+                        update_training_status(session, TRAINING_STATUS_PAUSED, 
+                            "训练已暂停（异步分批模式）");
+
+                        /* 等待恢复或停止 */
+                        while (session->pause_requested && !session->stop_requested) {
+                            time_sleep_ms(100);  /* 100ms轮询 */
+                        }
+                        if (session->stop_requested) {
+                            session->stop_requested = 0;
+                            session->saved_batch_index = 0;
+                            update_training_status(session, TRAINING_STATUS_IDLE, "训练已停止");
+                            goto cleanup_training;
+                        }
+                        /* 已恢复，更新状态 */
+                        session->status = TRAINING_STATUS_RUNNING;
+                    }
+
+                    /* 计算当前批次的数据范围 */
+                    size_t batch_start = batch * batch_size;
+                    size_t batch_count = (batch_start + batch_size <= num_samples) ? 
+                        batch_size : (num_samples - batch_start);
+                    
+                    float* batch_inputs = inputs + batch_start * session->config.input_size;
+                    float* batch_targets = targets + batch_start * session->config.output_size;
+
+                    /* 执行单个批次的训练 */
+                    int train_result = trainer_train(session->trainer, batch_inputs, 
+                        batch_targets, batch_count, NULL, NULL);
+                    
+                    if (train_result != 0) {
+                        update_training_status(session, TRAINING_STATUS_FAILED, 
+                            "批次训练失败");
+                        goto cleanup_training;
+                    }
+
+                    /* 更新进度 */
                     TrainingState* state = trainer_get_state(session->trainer);
                     if (state) {
                         session->current_loss = state->current_loss;
                         session->current_accuracy = state->current_accuracy;
                     }
-                    session->progress_percentage = 1.0f;
-                    update_training_status(session, TRAINING_STATUS_COMPLETED, "训练完成");
-                } else {
-                    update_training_status(session, TRAINING_STATUS_FAILED, "训练执行失败");
+                    session->current_iteration = (int)(batch + 1);
+                    session->progress_percentage = (float)(batch + 1) / (float)total_batches * 
+                        100.0f / (float)session->config.epochs;
+
+                    /* 梯度统计监控：每50步记录一次梯度分布，检测训练健康度 */
+                    if (batch % 50 == 0 && session->grad_monitor && session->trainer) {
+                        float* trainer_grads = trainer_get_gradients(session->trainer);
+                        size_t grad_count = trainer_get_gradient_count(session->trainer);
+                        if (trainer_grads && grad_count > 0) {
+                            training_monitor_log_gradient_stats(
+                                session->grad_monitor,
+                                trainer_grads, grad_count,
+                                session->current_iteration,
+                                (int)batch
+                            );
+                        }
+                    }
+
+                    /* 每10个批次发送一次进度回调 */
+                    if (session->callback && (batch % 10 == 0)) {
+                        TrainingStateInfo progress_state;
+                        memset(&progress_state, 0, sizeof(progress_state));
+                        progress_state.status = TRAINING_STATUS_RUNNING;
+                        progress_state.current_iteration = session->current_iteration;
+                        progress_state.current_accuracy = session->current_accuracy;
+                        progress_state.current_loss = session->current_loss;
+                        progress_state.progress_percentage = session->progress_percentage;
+                        session->callback(&progress_state, session->callback_user_data);
+                    }
                 }
 
-                safe_free((void**)&inputs);
-                safe_free((void**)&targets);
-                return train_result;
+                training_completed = 1;
+                session->saved_batch_index = 0;
+                session->progress_percentage = 100.0f;
+                update_training_status(session, TRAINING_STATUS_COMPLETED, "训练完成");
+
+cleanup_training:
+                (void)training_completed; /* 标记使用 */
             }
 
             safe_free((void**)&inputs);
             safe_free((void**)&targets);
+            return (session->status == TRAINING_STATUS_COMPLETED) ? 0 : 
+                   (session->status == TRAINING_STATUS_FAILED) ? -1 : 0;
         }
     }
     
@@ -465,8 +559,8 @@ int training_session_pause(TrainingSession* session) {
         return -1;
     }
     
-    /* 更新状态 */
-    update_training_status(session, TRAINING_STATUS_PAUSED, "训练暂停");
+    /* 设置暂停标志，训练循环将在当前批次完成后暂停 */
+    session->pause_requested = 1;
     
     return 0;
 }
@@ -480,8 +574,8 @@ int training_session_resume(TrainingSession* session) {
         return -1;
     }
     
-    /* 更新状态 */
-    update_training_status(session, TRAINING_STATUS_RUNNING, "训练恢复");
+    /* 清除暂停标志，训练循环将从暂停的批次恢复 */
+    session->pause_requested = 0;
     
     return 0;
 }
@@ -492,12 +586,15 @@ int training_session_stop(TrainingSession* session) {
     }
     
     if (session->status != TRAINING_STATUS_RUNNING &&
-        session->status != TRAINING_STATUS_PAUSED) {
+        session->status != TRAINING_STATUS_PAUSED &&
+        session->status != TRAINING_STATUS_IDLE) {
         return -1;
     }
     
-    /* 更新状态 */
-    update_training_status(session, TRAINING_STATUS_IDLE, "训练停止");
+    /* 设置停止标志，训练循环将立即退出 */
+    session->stop_requested = 1;
+    /* 如果正在暂停中等待，清除暂停标志以退出等待循环 */
+    session->pause_requested = 0;
     
     /* 记录结束时间 */
     session->end_time = clock();

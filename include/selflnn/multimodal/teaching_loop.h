@@ -82,6 +82,9 @@ typedef struct TeachingLoopSystem TeachingLoopSystem;
 TeachingLoopSystem* teaching_loop_create(void);
 void teaching_loop_free(TeachingLoopSystem* tls);
 
+/* LNN绑定：可为教学闭环绑定外部液态神经网络 */
+int teaching_loop_bind_lnn(TeachingLoopSystem* tls, void* external_lnn);
+
 /* 概念管理 */
 int tl_add_concept(TeachingLoopSystem* tls, TeachingSession* session, const TeachingConcept* concept);
 int tl_link_concepts(TeachingLoopSystem* tls, TeachingSession* session, int parent_id, int child_id);

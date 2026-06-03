@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file knowledge_integration.c
  * @brief 知识库集成实现
  * 
@@ -45,11 +45,22 @@ typedef struct {
 } RegisteredNetwork;
 
 /**
+ * @brief 引擎类型标识（用于安全类型转换）
+ */
+typedef enum {
+    ENGINE_TYPE_GENERIC_REASONING = 0,  /**< 通用推理引擎(core/reasoning) */
+    ENGINE_TYPE_LOGIC_REASONING = 1,    /**< 逻辑推理引擎(knowledge/logic_reasoning) */
+    ENGINE_TYPE_CAUSAL_REASONING = 2,   /**< 因果推理引擎 */
+    ENGINE_TYPE_MATH_PHYSICS = 3        /**< 数学物理推理引擎 */
+} EngineType;
+
+/**
  * @brief 注册的推理引擎项
  */
 typedef struct {
     char* name;                     /**< 推理引擎名称 */
-    ReasoningEngine* engine;        /**< 推理引擎句柄 */
+    ReasoningEngine* engine;        /**< 推理引擎句柄(通用) */
+    EngineType engine_type;         /**< 引擎类型（用于安全转换） */
 } RegisteredEngine;
 
 /**
@@ -742,6 +753,30 @@ int knowledge_integration_register_reasoning_engine(KnowledgeIntegrationSystem* 
     if (!reg->name) return -1;
     
     reg->engine = engine;
+    reg->engine_type = ENGINE_TYPE_GENERIC_REASONING;  /* 默认为通用类型，调用方可后续修改 */
+    system->engine_count++;
+    
+    return 0;
+}
+
+/* 注册逻辑推理引擎（安全类型标记） */
+int knowledge_integration_register_logic_reasoning_engine(KnowledgeIntegrationSystem* system,
+                                                          void* logic_engine, const char* name) {
+    if (!system || !logic_engine || !name) return -1;
+    
+    // 扩展数组
+    if (expand_array((void**)&system->engines, &system->engine_capacity,
+                    system->engine_count, sizeof(RegisteredEngine)) != 0) {
+        return -1;
+    }
+    
+    // 注册
+    RegisteredEngine* reg = &system->engines[system->engine_count];
+    reg->name = string_duplicate_nullable(name);
+    if (!reg->name) return -1;
+    
+    reg->engine = (ReasoningEngine*)logic_engine;
+    reg->engine_type = ENGINE_TYPE_LOGIC_REASONING;  /* 标记为逻辑推理引擎类型 */
     system->engine_count++;
     
     return 0;
@@ -791,13 +826,21 @@ int knowledge_integration_sync_all(KnowledgeIntegrationSystem* system) {
         }
     }
     
-    // 同步所有知识库到所有推理引擎（规则加载）
+    // 同步所有知识库到所有推理引擎（规则加载）- 安全类型检查
     for (size_t i = 0; i < system->kb_count; i++) {
         for (size_t j = 0; j < system->engine_count; j++) {
-            int result = logic_reasoning_engine_load_rules_from_kb(
-                (LogicReasoningEngine*)system->engines[j].engine,
-                system->kbs[i].kb
-            );
+            int result = -1;
+            RegisteredEngine* reg = &system->engines[j];
+            /* 根据引擎类型安全调用相应的规则加载函数 */
+            if (reg->engine_type == ENGINE_TYPE_LOGIC_REASONING) {
+                result = logic_reasoning_engine_load_rules_from_kb(
+                    (LogicReasoningEngine*)reg->engine,
+                    system->kbs[i].kb
+                );
+            } else {
+                /* 其他类型的引擎跳过规则加载（通用引擎不支持此操作） */
+                continue;
+            }
             if (result < 0) {
                 selflnn_set_last_error(SELFLNN_ERROR_GENERIC, __func__, __FILE__, __LINE__,
                                       "同步知识库到推理引擎：规则加载失败 (kb=%zu, engine=%zu)", 

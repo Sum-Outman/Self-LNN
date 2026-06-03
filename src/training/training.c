@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file training.c
  * @brief 训练模块实现
  * 
@@ -5105,6 +5105,17 @@ void trainer_free(Trainer* trainer) {
     
     // 释放训练器
     safe_free((void**)&trainer);
+}
+
+/* 训练器梯度访问器 —— 供外部模块（api_training/training_monitor）获取梯度统计 */
+float* trainer_get_gradients(Trainer* trainer) {
+    if (!trainer) return NULL;
+    return trainer->gradients;
+}
+
+size_t trainer_get_gradient_count(Trainer* trainer) {
+    if (!trainer) return 0;
+    return trainer->gradients_size;
 }
 
 /** P3.6 演化适应度数据 */

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file knowledge_integration.h
  * @brief 知识库集成接口
  * 
@@ -95,6 +95,21 @@ int knowledge_integration_register_semantic_network(KnowledgeIntegrationSystem* 
  */
 int knowledge_integration_register_reasoning_engine(KnowledgeIntegrationSystem* system,
                                                    ReasoningEngine* engine, const char* name);
+
+/**
+ * @brief 注册逻辑推理引擎到集成系统（安全类型标记）
+ * 
+ * 与 register_reasoning_engine 不同，此函数使用 void* 参数接受 LogicReasoningEngine，
+ * 并在内部标记 engine_type = ENGINE_TYPE_LOGIC_REASONING，
+ * 确保 sync_all 中规则加载时类型安全。
+ * 
+ * @param system 集成系统句柄
+ * @param logic_engine 逻辑推理引擎句柄（LogicReasoningEngine*）
+ * @param name 引擎名称
+ * @return int 成功返回0，失败返回-1
+ */
+int knowledge_integration_register_logic_reasoning_engine(KnowledgeIntegrationSystem* system,
+                                                          void* logic_engine, const char* name);
 
 /**
  * @brief 同步所有注册系统

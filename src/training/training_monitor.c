@@ -105,6 +105,131 @@ int training_monitor_log_custom(TrainingMonitor* tm, const char* name,
     return 0;
 }
 
+/* 计算并记录梯度统计信息（梯度范数和标准差）
+ * 用于训练过程中实时监测梯度爆炸/消失
+ * @param tm 训练监控器
+ * @param grads 梯度数组
+ * @param num_params 参数数量
+ * @param epoch 当前epoch
+ * @param step 当前步数
+ * @return 成功返回0
+ */
+int training_monitor_log_gradient_stats(TrainingMonitor* tm,
+                                         const float* grads, size_t num_params,
+                                         int epoch, int step) {
+    if (!tm || !grads || num_params == 0) return -1;
+    
+    double sum_sq = 0.0, sum = 0.0;
+    int nan_count = 0, inf_count = 0, zero_count = 0;
+    
+    for (size_t i = 0; i < num_params; i++) {
+        float g = grads[i];
+        if (isnan(g)) { nan_count++; continue; }
+        if (isinf(g)) { inf_count++; continue; }
+        if (fabsf(g) < 1e-12f) { zero_count++; }
+        sum_sq += (double)g * (double)g;
+        sum += (double)g;
+    }
+    
+    size_t valid_count = num_params - nan_count - inf_count;
+    if (valid_count == 0) return -1;
+    
+    double mean = sum / (double)valid_count;
+    double variance = sum_sq / (double)valid_count - mean * mean;
+    if (variance < 0.0) variance = 0.0;
+    
+    float grad_norm = (float)sqrt(sum_sq);
+    float grad_std = (float)sqrt(variance);
+    float dead_ratio = (float)zero_count / (float)num_params;
+    
+    /* 记录梯度范数 */
+    training_monitor_log_metric(tm, TM_GRADIENT_NORM, epoch, step, grad_norm);
+    /* 记录梯度标准差 */
+    training_monitor_log_metric(tm, TM_GRADIENT_STD, epoch, step, grad_std);
+    /* 记录零梯度比例（死神经元指标） */
+    training_monitor_log_custom(tm, "dead_neuron_ratio", epoch, step, dead_ratio);
+    
+    /* 梯度爆炸警告 */
+    if (grad_norm > 100.0f) {
+        fprintf(stderr, "[训练监控] ⚠ 梯度爆炸检测：grad_norm=%.2f, NaN=%d, Inf=%d (epoch=%d, step=%d)\n",
+                grad_norm, nan_count, inf_count, epoch, step);
+    }
+    
+    /* 梯度消失警告 */
+    if (grad_norm < 1e-6f && valid_count > 100) {
+        fprintf(stderr, "[训练监控] ⚠ 梯度消失检测：grad_norm=%.8f, 零梯度比例=%.1f%% (epoch=%d, step=%d)\n",
+                grad_norm, dead_ratio * 100.0f, epoch, step);
+    }
+    
+    return 0;
+}
+
+/* 计算并记录权重L2范数
+ * 用于训练过程中检测权重爆炸
+ */
+int training_monitor_log_weight_norm(TrainingMonitor* tm,
+                                      const float* weights, size_t num_params,
+                                      int epoch, int step) {
+    if (!tm || !weights || num_params == 0) return -1;
+    
+    double sum_sq = 0.0;
+    float max_abs = 0.0f;
+    
+    for (size_t i = 0; i < num_params; i++) {
+        float w = weights[i];
+        if (!isfinite(w)) continue;
+        sum_sq += (double)w * (double)w;
+        float aw = fabsf(w);
+        if (aw > max_abs) max_abs = aw;
+    }
+    
+    float weight_norm = (float)sqrt(sum_sq);
+    training_monitor_log_metric(tm, TM_WEIGHT_NORM, epoch, step, weight_norm);
+    training_monitor_log_custom(tm, "weight_max_abs", epoch, step, max_abs);
+    
+    /* 权重爆炸警告 */
+    if (weight_norm > 1000.0f || max_abs > 50.0f) {
+        fprintf(stderr, "[训练监控] ⚠ 权重爆炸检测：||W||=%.2f, max|W|=%.2f (epoch=%d, step=%d)\n",
+                weight_norm, max_abs, epoch, step);
+    }
+    
+    return 0;
+}
+
+/* 计算并记录激活值统计（平均激活值）
+ * 用于检测死神经元（激活值恒为0或恒为1）
+ */
+int training_monitor_log_activation_stats(TrainingMonitor* tm,
+                                           const float* activations, size_t num_neurons,
+                                           int epoch, int step) {
+    if (!tm || !activations || num_neurons == 0) return -1;
+    
+    double sum = 0.0;
+    int near_zero = 0, near_one = 0;
+    
+    for (size_t i = 0; i < num_neurons; i++) {
+        float a = activations[i];
+        if (!isfinite(a)) continue;
+        sum += (double)a;
+        if (a < 0.01f) near_zero++;
+        if (a > 0.99f) near_one++;
+    }
+    
+    float mean_act = (float)(sum / (double)num_neurons);
+    float dead_saturated_ratio = (float)(near_zero + near_one) / (float)num_neurons;
+    
+    training_monitor_log_metric(tm, TM_ACTIVATION_MEAN, epoch, step, mean_act);
+    training_monitor_log_custom(tm, "dead_saturated_ratio", epoch, step, dead_saturated_ratio);
+    
+    /* 大量死亡/饱和神经元警告 */
+    if (dead_saturated_ratio > 0.5f) {
+        fprintf(stderr, "[训练监控] ⚠ 神经元死亡/饱和检测：%.1f%% 神经元接近0或1 (epoch=%d, step=%d)\n",
+                dead_saturated_ratio * 100.0f, epoch, step);
+    }
+    
+    return 0;
+}
+
 int training_monitor_get_metric_history(const TrainingMonitor* tm,
                                          MetricType type,
                                          MetricRecord* out_buffer,

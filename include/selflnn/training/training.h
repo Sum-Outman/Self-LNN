@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file training.h
  * @brief 训练模块 — 【基础功能实现】
  *
@@ -306,6 +306,22 @@ void trainer_free(Trainer* trainer);
  * @return int 成功返回0，失败返回-1
  */
 int training_cleanup_checkpoint_temp(const char* checkpoint_path);
+
+/**
+ * @brief 获取训练器内部梯度缓冲区（用于梯度统计监控）
+ * 
+ * @param trainer 训练器
+ * @return float* 梯度缓冲区指针，失败返回NULL
+ */
+float* trainer_get_gradients(Trainer* trainer);
+
+/**
+ * @brief 获取训练器梯度缓冲区大小
+ * 
+ * @param trainer 训练器
+ * @return size_t 梯度元素数量，失败返回0
+ */
+size_t trainer_get_gradient_count(Trainer* trainer);
 
 /**
  * @brief 训练神经网络

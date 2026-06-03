@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file ros_gazebo_bridge.c
  * @brief 真实ROS Gazebo桥接实现 —— 通过rosbridge WebSocket协议与Gazebo通信
  *
@@ -720,13 +720,12 @@ int ros_gazebo_bridge_set_joint_position(RosGazeboBridge* bridge, int robot_id,
         char pub_json[512];
         snprintf(pub_json, sizeof(pub_json),
                  "{\"op\":\"publish\",\"topic\":\"/gazebo/set_joint_position\","
-                 "\"msg\":{\"joint_name\":\"%s\",\"position\":%.6f}}",
-                 joint_name, position);
+                 "\"msg\":{\"joint_name\":\"%s\",\"position\":%.6f,\"robot_id\":%d}}",
+                 joint_name, position, robot_id);
 
         ros_node_publish(bridge->ros_node, "/gazebo/set_joint_position",
                         pub_json, strlen(pub_json));
     }
-    (void)robot_id;
     return 0;
 }
 
@@ -738,13 +737,12 @@ int ros_gazebo_bridge_set_joint_velocity(RosGazeboBridge* bridge, int robot_id,
         char pub_json[512];
         snprintf(pub_json, sizeof(pub_json),
                  "{\"op\":\"publish\",\"topic\":\"/gazebo/set_joint_velocity\","
-                 "\"msg\":{\"joint_name\":\"%s\",\"velocity\":%.6f}}",
-                 joint_name, velocity);
+                 "\"msg\":{\"joint_name\":\"%s\",\"velocity\":%.6f,\"robot_id\":%d}}",
+                 joint_name, velocity, robot_id);
 
         ros_node_publish(bridge->ros_node, "/gazebo/set_joint_velocity",
                         pub_json, strlen(pub_json));
     }
-    (void)robot_id;
     return 0;
 }
 
@@ -756,13 +754,12 @@ int ros_gazebo_bridge_set_joint_torque(RosGazeboBridge* bridge, int robot_id,
         char pub_json[512];
         snprintf(pub_json, sizeof(pub_json),
                  "{\"op\":\"publish\",\"topic\":\"/gazebo/set_joint_torque\","
-                 "\"msg\":{\"joint_name\":\"%s\",\"effort\":%.6f}}",
-                 joint_name, torque);
+                 "\"msg\":{\"joint_name\":\"%s\",\"effort\":%.6f,\"robot_id\":%d}}",
+                 joint_name, torque, robot_id);
 
         ros_node_publish(bridge->ros_node, "/gazebo/set_joint_torque",
                         pub_json, strlen(pub_json));
     }
-    (void)robot_id;
     return 0;
 }
 

@@ -11,17 +11,58 @@
 #include <time.h>
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/learning/imitation_deep.h"  /* H-016集成: 深度模仿学习 */
+#include "selflnn/core/lnn.h"                  /* LNN演化集成 */
+#include "selflnn/core/cfc_cell.h"             /* CfC细胞 */
 
+/* 前向声明 */
 struct TeachingLoopSystem {
     int session_counter;
+    LNN* lnn;                   /**< 关联的液态神经网络（教学时动态演化） */
+    int lnn_owned;              /**< 是否由本系统创建（1=需要释放） */
 };
 
 TeachingLoopSystem* teaching_loop_create(void) {
     TeachingLoopSystem* tls = (TeachingLoopSystem*)safe_calloc(1, sizeof(TeachingLoopSystem));
+    if (!tls) return NULL;
+
+    /* 创建教学专用的轻量级LNN网络（64-128-64架构） */
+    LNNConfig net_cfg;
+    memset(&net_cfg, 0, sizeof(LNNConfig));
+    net_cfg.input_size = TL_MAX_FEATURES;    /* 接受多模态特征 */
+    net_cfg.hidden_size = 128;                /* 隐藏层128个CfC神经元 */
+    net_cfg.output_size = 64;                 /* 输出嵌入向量 */
+    net_cfg.learning_rate = 0.001f;
+    net_cfg.time_constant = 0.05f;            /* 快速时间常数，适合在线学习 */
+    net_cfg.enable_training = 1;
+    net_cfg.enable_adaptation = 1;
+
+    tls->lnn = lnn_create(&net_cfg);
+    if (tls->lnn) {
+        tls->lnn_owned = 1;  /* 自身创建，负责释放 */
+    }
+
     return tls;
 }
 
-void teaching_loop_free(TeachingLoopSystem* tls) { safe_free((void**)&tls); }
+void teaching_loop_free(TeachingLoopSystem* tls) {
+    if (!tls) return;
+    if (tls->lnn_owned && tls->lnn) {
+        lnn_free(tls->lnn);
+    }
+    safe_free((void**)&tls);
+}
+
+/* 绑定外部LNN网络（外部管理生命周期） */
+int teaching_loop_bind_lnn(TeachingLoopSystem* tls, LNN* external_lnn) {
+    if (!tls || !external_lnn) return -1;
+    /* 释放自身创建的LNN */
+    if (tls->lnn_owned && tls->lnn) {
+        lnn_free(tls->lnn);
+    }
+    tls->lnn = external_lnn;
+    tls->lnn_owned = 0;
+    return 0;
+}
 
 int tl_add_concept(TeachingLoopSystem* tls, TeachingSession* session, const TeachingConcept* concept) {
     if (!tls || !session || !concept || session->concept_count >= TL_MAX_CONCEPTS) return -1;
@@ -78,7 +119,73 @@ int tl_teach_object(TeachingLoopSystem* tls, TeachingSession* session, const cha
 int tl_cross_modal_associate(TeachingLoopSystem* tls, TeachingSession* session, int concept_id) {
     if (!tls || !session || concept_id < 1 || concept_id > session->concept_count) return -1;
     TeachingConcept* c = &session->concepts[concept_id - 1];
-    c->mastery_level += 0.15f;
+
+    /* 使用LNN进行跨模态特征融合与演化
+     * 将概念的多模态特征输入LNN，通过CfC ODE连续动态演化
+     * 增强跨模态关联权重 */
+    if (tls->lnn) {
+        /* 构建多模态融合输入向量 */
+        float fused_input[TL_MAX_FEATURES];
+        memset(fused_input, 0, sizeof(fused_input));
+
+        int total_dim = c->visual_dim + c->audio_dim + c->haptic_dim + c->sensor_dim;
+        if (total_dim > TL_MAX_FEATURES) total_dim = TL_MAX_FEATURES;
+
+        /* 拼合多模态特征（视觉→音频→触觉→传感器） */
+        int offset = 0;
+        if (c->visual_dim > 0 && offset + c->visual_dim <= TL_MAX_FEATURES) {
+            memcpy(fused_input + offset, c->visual_features, 
+                   c->visual_dim * sizeof(float));
+            offset += c->visual_dim;
+        }
+        if (c->audio_dim > 0 && offset + c->audio_dim <= TL_MAX_FEATURES) {
+            memcpy(fused_input + offset, c->audio_features,
+                   c->audio_dim * sizeof(float));
+            offset += c->audio_dim;
+        }
+        if (c->haptic_dim > 0 && offset + c->haptic_dim <= TL_MAX_FEATURES) {
+            memcpy(fused_input + offset, c->haptic_features,
+                   c->haptic_dim * sizeof(float));
+            offset += c->haptic_dim;
+        }
+        if (c->sensor_dim > 0 && offset + c->sensor_dim <= TL_MAX_FEATURES) {
+            memcpy(fused_input + offset, c->sensor_features,
+                   c->sensor_dim * sizeof(float));
+        }
+
+        /* 执行LNN前向传播：通过CfC ODE动态系统融合跨模态特征 */
+        float lnn_output[64];
+        memset(lnn_output, 0, sizeof(lnn_output));
+        int result = lnn_forward(tls->lnn, fused_input, lnn_output);
+        
+        if (result == 0) {
+            /* LNN成功融合，计算输出激活强度 */
+            float activation_sum = 0.0f;
+            for (int i = 0; i < 64; i++) {
+                activation_sum += fabsf(lnn_output[i]);
+            }
+            float lnn_activation = activation_sum / 64.0f;
+
+            /* LNN激活度贡献到掌握度（0-1映射） */
+            float lnn_gain = tanhf(lnn_activation) * 0.3f;
+            c->mastery_level += 0.10f + lnn_gain;
+            
+            /* 根据LNN输出更新概念特征（在线学习） */
+            if (c->visual_dim > 0) {
+                for (int i = 0; i < c->visual_dim && i < 64; i++) {
+                    c->visual_features[i] = 0.9f * c->visual_features[i] 
+                        + 0.1f * lnn_output[i];
+                }
+            }
+        } else {
+            /* LNN不可用时使用基础增益 */
+            c->mastery_level += 0.10f;
+        }
+    } else {
+        /* 无LNN时使用基础增益（向后兼容） */
+        c->mastery_level += 0.10f;
+    }
+
     if (c->mastery_level > 1.0f) c->mastery_level = 1.0f;
     return 0;
 }

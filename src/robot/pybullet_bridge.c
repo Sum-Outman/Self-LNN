@@ -25,6 +25,14 @@
 
 /* 最大连接数 */
 #define PYBULLET_MAX_CONNECTIONS 4
+/* 每个连接中最大机器人数量 */
+#define PYBULLET_MAX_ROBOTS_PER_CONN 8
+
+/* 连接内机器人关节信息 */
+typedef struct {
+    int robot_id;      /**< 机器人ID */
+    int num_joints;    /**< 该机器人的关节数(0=未加载) */
+} PyBulletRobotInfo;
 
 /* 内部连接结构 */
 typedef struct {
@@ -34,8 +42,10 @@ typedef struct {
     FILE* process_stdin;
     FILE* process_stdout;
     void* process_handle;
-    int robot_id;
-    int num_joints;
+    int robot_id;                           /**< 当前活动机器人ID */
+    int num_joints;                         /**< 当前机器人关节数(兼容旧接口) */
+    PyBulletRobotInfo robots[PYBULLET_MAX_ROBOTS_PER_CONN]; /**< 连接内机器人信息 */
+    int robot_count;                        /**< 已加载机器人数量 */
 } PyBulletConnection;
 
 static PyBulletConnection g_pybullet_connections[PYBULLET_MAX_CONNECTIONS];
@@ -293,7 +303,11 @@ int pybullet_load_urdf(int connection_id, const char* urdf_path,
             /* 尝试解析 {"robot_id":N, "num_joints":M} 格式 */
             if (sscanf(resp_buf, "{\"robot_id\":%d,\"num_joints\":%d}", &parsed_id, &num_joints) >= 1) {
                 conn->robot_id = parsed_id;
-                if (num_joints > 0) conn->num_joints = num_joints;
+                if (num_joints > 0) {
+                    conn->num_joints = num_joints;
+                    /* 注册机器人关节信息，支持多机器人 */
+                    pybullet_register_robot_joints(conn, parsed_id, num_joints);
+                }
             } else if (sscanf(resp_buf, "{\"id\":%d}", &parsed_id) >= 1) {
                 conn->robot_id = parsed_id;
             }
@@ -314,9 +328,36 @@ int pybullet_step_simulation(int connection_id) {
 }
 
 int pybullet_get_num_joints(int connection_id, int robot_id) {
-    (void)robot_id;
     if (connection_id < 1 || connection_id > PYBULLET_MAX_CONNECTIONS) return -1;
-    return g_pybullet_connections[connection_id - 1].num_joints;
+    PyBulletConnection* conn = &g_pybullet_connections[connection_id - 1];
+
+    /* 按robot_id查找对应机器人的关节数 */
+    for (int i = 0; i < conn->robot_count; i++) {
+        if (conn->robots[i].robot_id == robot_id) {
+            return conn->robots[i].num_joints;
+        }
+    }
+    /* 未找到指定机器人，回退到当前活动机器人的关节数 */
+    return conn->num_joints;
+}
+
+/* 注册或更新连接内机器人的关节信息 */
+static void pybullet_register_robot_joints(PyBulletConnection* conn, int robot_id, int num_joints) {
+    if (!conn || robot_id < 0) return;
+    for (int i = 0; i < conn->robot_count; i++) {
+        if (conn->robots[i].robot_id == robot_id) {
+            conn->robots[i].num_joints = num_joints;
+            return;
+        }
+    }
+    if (conn->robot_count < PYBULLET_MAX_ROBOTS_PER_CONN) {
+        conn->robots[conn->robot_count].robot_id = robot_id;
+        conn->robots[conn->robot_count].num_joints = num_joints;
+        conn->robot_count++;
+    }
+    /* 同时更新兼容旧接口的字段 */
+    conn->num_joints = num_joints;
+    conn->robot_id = robot_id;
 }
 
 int pybullet_get_joint_state(int connection_id, int robot_id,
